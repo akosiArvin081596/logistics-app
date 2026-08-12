@@ -6,14 +6,26 @@
   <div v-else>
     <div v-if="driverInfo" class="card">
       <div class="kit-header">
-        <label class="kit-avatar-wrap" :class="{ 'kit-avatar-uploading': uploading }" :title="canUpload ? 'Click to change profile picture' : ''">
+        <!-- v-bind="dropzoneProps" goes on the WRAPPER, never on the inner
+             input: the wrapper always preventDefault()s, so a drop that lands
+             on the avatar can never fall through to the document and navigate
+             the SPA away to render the file. -->
+        <label
+          class="kit-avatar-wrap"
+          :class="{ 'kit-avatar-uploading': uploading, 'kit-avatar-drop': dragActive }"
+          :title="avatarTitle"
+          v-bind="dropzoneProps"
+        >
           <img v-if="profilePictureUrl" :src="profilePictureUrl" class="kit-avatar-img" alt="Profile picture" />
           <div v-else class="kit-avatar"><AvatarPlaceholder /></div>
           <div v-if="canUpload" class="kit-avatar-overlay">
             <svg v-if="!uploading" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
             <div v-else class="kit-spinner"></div>
           </div>
-          <input v-if="canUpload" type="file" accept="image/*" class="kit-avatar-input" @change="onPicChange" />
+          <!-- The label still opens the picker natively because the input is a
+               descendant — no @click="openPicker", which would open it twice.
+               inputProps carries type/accept and the shared change handler. -->
+          <input v-if="canUpload" v-bind="inputProps" class="kit-avatar-input" />
         </label>
         <div>
           <div class="kit-name">{{ displayName }}</div>
@@ -147,10 +159,12 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useDriverStore } from '../../stores/driver'
 import { useToast } from '../../composables/useToast'
+import { useFileDrop } from '../../composables/useFileDrop'
+import { AVATAR_MAX_EDGE, compressImage, isDecodedImage } from '../../lib/imageUtils'
 import { fmtTimestamp } from '../../utils/datetime'
 import AvatarPlaceholder from '../shared/AvatarPlaceholder.vue'
 
@@ -208,8 +222,56 @@ const signedContracts = computed(() =>
 
 const uploading = ref(false)
 
-async function onPicChange(event) {
-  const file = event.target.files?.[0]
+// Drag-and-drop + the only real type/size gate on this surface: `accept` on the
+// input filters the OS dialog and NOTHING else, so a dropped file is checked
+// here or nowhere.
+const {
+  dropzoneProps,
+  inputProps,
+  dragActive,
+  supportsDrag,
+  error: dropError,
+  notice: dropNotice,
+} = useFileDrop({
+  accept: 'image/*',
+  maxSizeMb: 10,
+  // This one label IS the avatar in both states, so "no drag affordance when
+  // the driver can't upload" is expressed as `disabled` rather than by dropping
+  // the handlers: dragActive stays false (no highlight promising something that
+  // won't happen) while the wrapper still swallows the drop.
+  disabled: computed(() => !props.canUpload),
+  busy: uploading,
+  onFiles: (files) => onPicFiles(files),
+})
+
+// The avatar has no other feedback surface, so a refused file (wrong type,
+// oversize, a dropped folder) has to speak or it reads as a dead control.
+//
+// ⚠️ flush:'sync' is load-bearing. handleFiles clears the message and re-sets it
+// in the same tick, so with the default 'pre' flush the batched watcher compares
+// the SAME string to itself, sees no change, and stays silent — meaning dropping
+// the same oversize file twice toasts once. The toast auto-hides after 3s, so
+// the second attempt would look like nothing happened at all.
+watch(
+  [dropError, dropNotice],
+  ([err, note]) => {
+    if (err) toast.show?.(err, 'error')
+    else if (note) toast.show?.(note)
+  },
+  { flush: 'sync' },
+)
+
+const avatarTitle = computed(() => {
+  if (!props.canUpload) return ''
+  return supportsDrag.value
+    ? 'Click, or drop an image here, to change your profile picture'
+    : 'Tap to change your profile picture'
+})
+
+// Takes File[] from useFileDrop (picker and drop both land here already
+// validated), not a DOM change event.
+async function onPicFiles(files) {
+  const file = files?.[0]
   if (!file) return
   if (!props.driverId) {
     toast.show?.('Cannot upload — driver record not linked', 'error')
@@ -217,7 +279,15 @@ async function onPicChange(event) {
   }
   uploading.value = true
   try {
-    const base64 = await resizeImageToBase64(file, 512)
+    const base64 = await compressImage(file, AVATAR_MAX_EDGE, { background: '#ffffff', quality: 0.9 })
+    // compressImage hands back the RAW bytes when it can't decode the file, so
+    // this is what keeps the payload the JPEG data URL this endpoint has always
+    // been sent — and tells the driver to retake the photo instead of silently
+    // storing something unreadable.
+    if (!isDecodedImage(base64)) {
+      toast.show?.("That image couldn't be read — try another photo", 'error')
+      return
+    }
     await api.post(`/api/drivers-directory/${props.driverId}/profile-picture`, {
       fileData: base64,
       fileName: file.name,
@@ -228,32 +298,9 @@ async function onPicChange(event) {
     toast.show?.('Upload failed', 'error')
   } finally {
     uploading.value = false
-    event.target.value = ''
+    // No `event.target.value = ''` here any more — useFileDrop clears the input
+    // BEFORE handling, so re-picking the same file after a failure still fires.
   }
-}
-
-// Resize an image file to a max dimension and return a JPEG data URL
-function resizeImageToBase64(file, maxDim) {
-  return new Promise((resolve, reject) => {
-    const img = new Image()
-    img.onload = () => {
-      let { width, height } = img
-      if (width > maxDim || height > maxDim) {
-        if (width > height) { height = Math.round(height * maxDim / width); width = maxDim }
-        else { width = Math.round(width * maxDim / height); height = maxDim }
-      }
-      const canvas = document.createElement('canvas')
-      canvas.width = width
-      canvas.height = height
-      const ctx = canvas.getContext('2d')
-      ctx.fillStyle = '#ffffff'
-      ctx.fillRect(0, 0, width, height)
-      ctx.drawImage(img, 0, 0, width, height)
-      resolve(canvas.toDataURL('image/jpeg', 0.9))
-    }
-    img.onerror = reject
-    img.src = URL.createObjectURL(file)
-  })
 }
 
 function findCol(headers, regex) {
@@ -297,12 +344,26 @@ function isUrl(val) {
   border-radius: 50%;
   overflow: hidden;
   isolation: isolate;
+  transition: box-shadow 0.15s;
 }
 .kit-avatar-wrap:not(.kit-avatar-uploading) .kit-avatar-overlay {
   opacity: 0;
 }
 .kit-avatar-wrap:hover .kit-avatar-overlay {
   opacity: 1;
+}
+/* Drag feedback. :hover is unreliable mid-drag, so the highlight has to be
+   driven by dragActive. The ring is a box-shadow on the wrapper itself, which
+   its own overflow:hidden does not clip. Must stay AFTER the :not() rule above
+   — same specificity, so source order is what decides. */
+.kit-avatar-wrap.kit-avatar-drop {
+  box-shadow: 0 0 0 3px var(--accent, #10b981);
+}
+.kit-avatar-wrap.kit-avatar-drop .kit-avatar-overlay {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .kit-avatar-wrap { transition: none; }
 }
 .kit-avatar {
   width: 56px;

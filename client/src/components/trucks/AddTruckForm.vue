@@ -80,8 +80,22 @@
 
     <div class="form-group">
       <label class="form-label">Truck Photo (optional)</label>
-      <input type="file" accept="image/*" class="form-input" @change="onPhoto" style="padding:0.3rem;" />
-      <img v-if="form.photo" :src="form.photo" style="max-height:80px;border-radius:6px;margin-top:0.4rem;" />
+      <!-- Was a bare <input type="file"> with no label or chrome of its own, so
+           the dashed-box component is a clean swap rather than a re-skin.
+           The extension tokens are not decoration: drag-and-drop bypasses the
+           `accept` attribute entirely, and a blank-MIME iPhone HEIC is the
+           commonest photo anyone drops here. -->
+      <FileDropZone
+        compact
+        accept="image/*,.heic,.heif"
+        :max-size-mb="10"
+        :busy="photoBusy"
+        label="Drop a truck photo"
+        busy-label="Reading photo…"
+        busy-hint="Resizing it before upload"
+        @files="onPhoto"
+      />
+      <img v-if="form.photo" :src="form.photo" alt="Truck photo preview" style="max-height:80px;border-radius:6px;margin-top:0.4rem;" />
     </div>
 
     <details style="margin-bottom:0.75rem;" open>
@@ -173,6 +187,8 @@
 
 <script setup>
 import { reactive, ref, computed, watch } from 'vue'
+import FileDropZone from '../shared/FileDropZone.vue'
+import { compressImage, DEFAULT_MAX_EDGE } from '../../lib/imageUtils'
 
 const truckMakes = [
   'Freightliner', 'Kenworth', 'Peterbilt', 'Volvo', 'International',
@@ -243,15 +259,31 @@ const form = reactive({
 const modelOptions = computed(() => truckModels[form.make] || [])
 watch(() => form.make, () => { form.model = '' })
 
-function onPhoto(e) {
-  const file = e.target.files[0]
-  if (!file) return
-  const reader = new FileReader()
-  reader.onload = ev => { form.photo = ev.target.result }
-  reader.readAsDataURL(file)
-}
-
 const errorMsg = ref('')
+const photoBusy = ref(false)
+
+// Receives File[] from FileDropZone — a drop and a click both land here.
+//
+// compressImage replaces a raw FileReader, and that is a payload fix rather
+// than a style one: the old path base64'd a 12 MP phone photo at FULL SIZE into
+// form.photo and POSTed it, ~8 MB of JSON for a thumbnail that renders at 80px.
+// It also decodes iPhone HEIC (lazy heic2any), which the old reader stored as
+// bytes no browser here could display.
+async function onPhoto(files) {
+  const file = files[0]
+  if (!file) return
+  errorMsg.value = ''
+  photoBusy.value = true
+  try {
+    const dataUrl = await compressImage(file, DEFAULT_MAX_EDGE)
+    // compressImage resolves to '' only when the file could not be read at all.
+    // Keep whatever photo was already attached rather than silently clearing it.
+    if (dataUrl) form.photo = dataUrl
+    else errorMsg.value = "Couldn't read that photo — try a different file."
+  } finally {
+    photoBusy.value = false
+  }
+}
 
 function handleSubmit() {
   errorMsg.value = ''

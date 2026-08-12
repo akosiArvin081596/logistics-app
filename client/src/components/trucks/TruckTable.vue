@@ -288,8 +288,22 @@
 
           <div class="edit-field">
             <label>Truck Photo</label>
-            <input type="file" accept="image/*" @change="onEditPhoto" style="font-size:0.8rem;" />
-            <img v-if="editForm.photo" :src="editForm.photo" style="max-height:80px;border-radius:6px;margin-top:0.4rem;" />
+            <!-- Same treatment as AddTruckForm: a bare <input type="file"> with
+                 no chrome of its own, so the dashed box is a clean swap. The
+                 extension tokens matter because a drop bypasses `accept`
+                 entirely, so this validation is the only type gate. -->
+            <FileDropZone
+              compact
+              accept="image/*,.heic,.heif"
+              :max-size-mb="10"
+              :busy="editPhotoBusy"
+              label="Drop a truck photo"
+              busy-label="Reading photo…"
+              busy-hint="Resizing it before upload"
+              @files="onEditPhoto"
+            />
+            <div v-if="editPhotoError" class="field-hint" style="color:var(--danger);">{{ editPhotoError }}</div>
+            <img v-if="editForm.photo" :src="editForm.photo" alt="Truck photo preview" style="max-height:80px;border-radius:6px;margin-top:0.4rem;" />
           </div>
 
           <details style="margin-bottom:0.75rem;" open>
@@ -456,8 +470,10 @@
 import { ref, reactive, computed } from 'vue'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
+import FileDropZone from '../shared/FileDropZone.vue'
 import LegalDocumentPortal from '../investor/LegalDocumentPortal.vue'
 import { useApi } from '../../composables/useApi'
+import { compressImage, DEFAULT_MAX_EDGE } from '../../lib/imageUtils'
 import { fmtOdometer } from '../../lib/fuelReview'
 import { fmtTimestamp } from '../../utils/datetime'
 
@@ -624,15 +640,35 @@ function openEdit(truck) {
   // '' when unset — an empty date input is what keeps the created_at fallback.
   editForm.inServiceDate = inServiceDate(truck)
   editForm.retiredAt = retiredAt(truck)
+  // The modal is v-if'd, so a photo message from the last truck edited would
+  // otherwise reappear against a different truck. Same for a busy flag left set
+  // by a compress that was still running when the modal was dismissed.
+  editPhotoError.value = ''
+  editPhotoBusy.value = false
   showEdit.value = true
 }
 
-function onEditPhoto(e) {
-  const file = e.target.files[0]
+const editPhotoBusy = ref(false)
+const editPhotoError = ref('')
+
+// Receives File[] from FileDropZone — a drop and a click both land here.
+// compressImage replaces a raw FileReader for the same reason as AddTruckForm:
+// the old path POSTed a full-size 12 MP photo as base64 for an 80px thumbnail,
+// and could not decode an iPhone HEIC at all.
+async function onEditPhoto(files) {
+  const file = files[0]
   if (!file) return
-  const reader = new FileReader()
-  reader.onload = ev => { editForm.photo = ev.target.result }
-  reader.readAsDataURL(file)
+  editPhotoError.value = ''
+  editPhotoBusy.value = true
+  try {
+    const dataUrl = await compressImage(file, DEFAULT_MAX_EDGE)
+    // '' means the file was unreadable — keep the truck's existing photo rather
+    // than silently blanking it on the next save.
+    if (dataUrl) editForm.photo = dataUrl
+    else editPhotoError.value = "Couldn't read that photo — try a different file."
+  } finally {
+    editPhotoBusy.value = false
+  }
 }
 
 function handleSaveEdit() {

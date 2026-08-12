@@ -1,7 +1,14 @@
 <template>
-  <div class="card doc-upload">
+  <!-- The WHOLE card is the drop target. v-bind="dropzoneProps" adds only the
+       four drag listeners — no attributes, no classes, no extra elements — so
+       the admin dashboard (ActiveLoadsTab / CompletedLoadsTab mount this inside
+       their load modal) is laid out exactly as before.
+
+       ⚠️ The four file inputs below are deliberately NOT bound to useFileDrop's
+       inputProps. See UPLOAD_ACCEPT in the script for why. -->
+  <div class="card doc-upload" :class="{ 'doc-upload-over': dragActive }" v-bind="dropzoneProps">
     <div class="doc-header">{{ headerText }}</div>
-    <p class="doc-hint">{{ hintText }}</p>
+    <p class="doc-hint">{{ dragActive ? 'Drop the files here to attach them' : hintText }}</p>
 
     <!-- Document type selector -->
     <select
@@ -125,6 +132,7 @@ import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { useToast } from '../../composables/useToast'
 import { useDocumentScan } from '../../composables/useDocumentScan'
 import { useUpload } from '../../composables/useUpload'
+import { useFileDrop } from '../../composables/useFileDrop'
 import { compressImage, isDecodedImage, readFileAsDataURL, SCAN_MAX_EDGE } from '../../lib/imageUtils'
 
 const props = defineProps({
@@ -154,6 +162,36 @@ const fileInput = ref(null)
 const addInput = ref(null)
 const files = ref([]) // { data: base64, name: string, type: string, isImage: boolean }
 
+// ⚠️ Kept in sync BY HAND with the accept attribute on the "+ add page" and
+// "Upload File" inputs in the template. All four file inputs stay LITERAL
+// markup on purpose: useFileDrop's inputProps omits `capture` only when it is
+// blank, and rendering a BLANK capture attribute on the Take Photo / Scan
+// inputs makes a phone open the FILE BROWSER instead of the camera — which is
+// how every driver photographs a POD. Nothing is worth risking that, so the
+// drop target is the card and the inputs are left alone.
+const UPLOAD_ACCEPT = 'image/*,.pdf,.doc,.docx,.xls,.xlsx,.csv,.txt'
+
+// ONE composable instance for the whole card. A drop routes to handleFiles —
+// the normal upload path — and NEVER to handleScanFile, which is the separate
+// ScanKit pipeline behind the camera.
+const { dropzoneProps, dragActive, supportsDrag, error: dropError, clearMessages: clearDropError } = useFileDrop({
+  multiple: true,
+  accept: UPLOAD_ACCEPT,
+  onFiles: handleFiles,
+})
+
+// Refusals reuse this component's existing toast channel, the same way an
+// undecodable page already reports itself.
+// ⚠️ Watched on the `error` REF, not through onReject. A dropped FOLDER is
+// caught before validation runs and so is never reported through onReject — it
+// only ever lands on this ref. Surfacing rejections alone would leave the
+// commonest mis-drop of all completely silent.
+watch(dropError, (msg) => {
+  if (!msg) return
+  toast.show(msg, 'error')
+  clearDropError()
+})
+
 // --- Scan state (ScanKit.io server-side; replaced the old jscanify/OpenCV). ---
 const scanInput = ref(null)
 const scanning = ref(false)   // true while a captured photo is being enhanced
@@ -176,19 +214,35 @@ const headerText = computed(() => {
 })
 
 const hintText = computed(() => {
-  if (selectedType.value === 'Receipt') return `Take photos of the receipt for Load ${props.loadId}`
-  return `Take photos or upload files for Load ${props.loadId}`
+  const base = selectedType.value === 'Receipt'
+    ? `Take photos of the receipt for Load ${props.loadId}`
+    : `Take photos or upload files for Load ${props.loadId}`
+  // Copy only, and desktop only — supportsDrag is false on touch, where "drag"
+  // is an instruction nobody can follow. It gates no handler.
+  return supportsDrag.value ? `${base} — or drag files onto this card` : base
 })
 
-async function handleFile(event) {
-  // The file inputs allow multi-select, so a driver can attach several pages or
-  // photos in one pick instead of one at a time. Process each in turn (images
-  // are compressed; other files read as-is) and append to the page list.
+// DOM wrapper for the three <input type="file"> @change bindings. Kept so the
+// inputs themselves need no edit at all.
+// ⚠️ The input is cleared BEFORE handling, not after. Without that, re-picking
+// the same file after a refusal fires no change event at all, so the driver's
+// obvious recovery — take it again, pick it again — silently does nothing.
+function handleFile(event) {
   const selected = Array.from(event.target.files || [])
-  if (!selected.length) return
+  event.target.value = ''
+  return handleFiles(selected)
+}
+
+async function handleFiles(selected) {
+  // Both entry points are multi-file — the inputs allow multi-select so a driver
+  // can attach several pages in one pick, and a drop can carry a handful at
+  // once. Process each in turn (images are compressed; other files read as-is)
+  // and append to the page list.
+  const list = Array.from(selected || [])
+  if (!list.length) return
 
   const refused = []
-  for (const file of selected) {
+  for (const file of list) {
     if (file.type.startsWith('image/')) {
       const data = await compressImage(file)
       // compressImage falls back to the RAW bytes when it cannot decode a file,
@@ -213,7 +267,6 @@ async function handleFile(event) {
       files.value.push({ data, name: file.name, type: file.type, isImage: false })
     }
   }
-  event.target.value = ''
 
   // Named, so the driver knows WHICH page is missing from the grid — the others
   // stayed attached and the upload is still worth sending.
@@ -404,7 +457,25 @@ async function handleUpload() {
 </script>
 
 <style scoped>
-.doc-upload { margin-top: 1rem; }
+.doc-upload {
+  margin-top: 1rem;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+/* Drag highlight. Deliberately a colour change only — recolouring the existing
+   1px border and tinting the fill costs no layout, so the card cannot jump
+   under the pointer mid-drag. An outline was rejected because .card sets
+   overflow:hidden and this component is mounted inside the dashboard's load
+   modal, where an outline can be clipped by an ancestor. Never seen on a phone:
+   dragActive can only become true from real drag events. */
+.doc-upload-over {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .doc-upload { transition: none; }
+}
 
 .doc-header {
   font-weight: 600;

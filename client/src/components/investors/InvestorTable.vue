@@ -89,18 +89,40 @@
         <div style="background:#fff;border-radius:14px;max-width:680px;width:90%;max-height:90vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 25px 50px rgba(0,0,0,0.2)">
           <div style="display:flex;justify-content:space-between;align-items:center;padding:1rem 1.5rem;border-bottom:1px solid #e8edf2">
             <div style="display:flex;align-items:center;gap:1rem;flex:1;min-width:0">
-              <label class="inv-avatar-wrap" :class="{ 'inv-avatar-uploading': picUploading }" title="Click to change profile picture">
+              <!-- v-bind="dropzoneProps" goes on the WRAPPER, never on the
+                   inner input: the wrapper always preventDefault()s, so a drop
+                   that lands on the avatar can never fall through to the
+                   document and navigate the SPA away to render the file. -->
+              <label
+                class="inv-avatar-wrap"
+                :class="{ 'inv-avatar-uploading': picUploading, 'inv-avatar-drop': dragActive }"
+                :title="avatarTitle"
+                v-bind="dropzoneProps"
+              >
                 <img v-if="detail.profilePictureUrl" :src="detail.profilePictureUrl" class="inv-avatar-img" alt="Profile picture" />
                 <div v-else class="inv-avatar-initials"><AvatarPlaceholder /></div>
                 <div class="inv-avatar-overlay">
                   <svg v-if="!picUploading" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
                   <div v-else class="inv-spinner"></div>
                 </div>
-                <input type="file" accept="image/*" class="inv-avatar-input" @change="onPicChange" />
+                <!-- The label already opens the picker natively (the input is a
+                     descendant) — no @click="openPicker", which opens it twice. -->
+                <input v-bind="inputProps" class="inv-avatar-input" />
               </label>
               <div style="flex:1;min-width:0">
                 <div style="font-size:1.1rem;font-weight:700;color:#0f172a">{{ detail.application?.legal_name || 'Investor' }}</div>
                 <div style="font-size:13px;color:#94a3b8">{{ detail.application?.entity_type }} | {{ detail.application?.email }}</div>
+                <!-- This modal has no toast, so a refused or failed upload has
+                     nowhere else to go. One slot: error wins over notice. -->
+                <p
+                  v-if="picError || picNotice"
+                  class="pic-msg"
+                  :class="picError ? 'pic-msg-error' : 'pic-msg-note'"
+                  :role="picError ? 'alert' : 'status'"
+                >
+                  <span>{{ picError || picNotice }}</span>
+                  <button type="button" class="pic-msg-dismiss" @click="clearMessages">Dismiss</button>
+                </p>
               </div>
             </div>
             <button style="font-size:1.5rem;background:none;border:none;cursor:pointer;color:#94a3b8;line-height:1" @click="showDetail = false">&times;</button>
@@ -201,8 +223,10 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, computed } from 'vue'
 import { useApi } from '../../composables/useApi'
+import { useFileDrop } from '../../composables/useFileDrop'
+import { AVATAR_MAX_EDGE, compressImage, isDecodedImage } from '../../lib/imageUtils'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import AvatarPlaceholder from '../shared/AvatarPlaceholder.vue'
@@ -228,6 +252,9 @@ const picUploading = ref(false)
 
 async function viewDetail(inv) {
   selectedInvestorId.value = inv.id
+  // The modal is reused for every investor, so a message left over from the
+  // last one would otherwise reappear against the next.
+  clearMessages()
   detail.profilePictureUrl = inv.profilePictureUrl || ''
   detail.fullName = inv.fullName || ''
   if (!inv.applicationId) {
@@ -255,12 +282,45 @@ async function viewDetail(inv) {
   finally { detailLoading.value = false }
 }
 
-async function onPicChange(event) {
-  const file = event.target.files?.[0]
+// Drag-and-drop + the only real type/size gate on this surface: `accept` on the
+// input filters the OS dialog and NOTHING else, so a dropped file is checked
+// here or nowhere.
+const {
+  dropzoneProps,
+  inputProps,
+  dragActive,
+  supportsDrag,
+  error: picError,
+  notice: picNotice,
+  clearMessages,
+} = useFileDrop({
+  accept: 'image/*',
+  maxSizeMb: 10,
+  busy: picUploading,
+  onFiles: (files) => onPicFiles(files),
+})
+
+const avatarTitle = computed(() =>
+  supportsDrag.value
+    ? 'Click, or drop an image here, to change the profile picture'
+    : 'Tap to change the profile picture',
+)
+
+// Takes File[] from useFileDrop (picker and drop both land here already
+// validated), not a DOM change event.
+async function onPicFiles(files) {
+  const file = files?.[0]
   if (!file || !selectedInvestorId.value) return
   picUploading.value = true
   try {
-    const base64 = await resizeImageToBase64(file, 512)
+    const base64 = await compressImage(file, AVATAR_MAX_EDGE, { background: '#ffffff', quality: 0.9 })
+    // compressImage hands back the RAW bytes when it can't decode the file, so
+    // this is what keeps the payload the JPEG data URL this endpoint has always
+    // been sent.
+    if (!isDecodedImage(base64)) {
+      picError.value = "That image couldn't be read — try a different file."
+      return
+    }
     const res = await api.post(`/api/investors/${selectedInvestorId.value}/profile-picture`, {
       fileData: base64,
       fileName: file.name,
@@ -268,34 +328,16 @@ async function onPicChange(event) {
     detail.profilePictureUrl = res.url
     emit('picture-updated')
   } catch (err) {
-    /* silent */
+    // Was a silent fail. This modal has no toast, so the message goes to the
+    // shared slot beside the avatar rather than nowhere. useApi already produces
+    // human copy (413, 403, timeout), so keep it — but lead with "Upload failed"
+    // so the slot it shares with validation errors is unambiguous.
+    picError.value = err?.message ? `Upload failed — ${err.message}` : 'Upload failed — try again.'
   } finally {
     picUploading.value = false
-    event.target.value = ''
+    // No `event.target.value = ''` here any more — useFileDrop clears the input
+    // BEFORE handling, so re-picking the same file after a failure still fires.
   }
-}
-
-function resizeImageToBase64(file, maxDim) {
-  return new Promise((resolve, reject) => {
-    const img = new Image()
-    img.onload = () => {
-      let { width, height } = img
-      if (width > maxDim || height > maxDim) {
-        if (width > height) { height = Math.round(height * maxDim / width); width = maxDim }
-        else { width = Math.round(width * maxDim / height); height = maxDim }
-      }
-      const canvas = document.createElement('canvas')
-      canvas.width = width
-      canvas.height = height
-      const ctx = canvas.getContext('2d')
-      ctx.fillStyle = '#ffffff'
-      ctx.fillRect(0, 0, width, height)
-      ctx.drawImage(img, 0, 0, width, height)
-      resolve(canvas.toDataURL('image/jpeg', 0.9))
-    }
-    img.onerror = reject
-    img.src = URL.createObjectURL(file)
-  })
 }
 
 function openPdf(url) { window.open(url, '_blank') }
@@ -337,10 +379,47 @@ function handleConfirmDelete() {
   cursor: pointer;
   border-radius: 50%;
   overflow: hidden;
+  transition: box-shadow 0.15s;
 }
 .inv-avatar-wrap .inv-avatar-overlay { opacity: 0; }
 .inv-avatar-wrap:hover .inv-avatar-overlay,
-.inv-avatar-wrap.inv-avatar-uploading .inv-avatar-overlay { opacity: 1; }
+.inv-avatar-wrap.inv-avatar-uploading .inv-avatar-overlay,
+.inv-avatar-wrap.inv-avatar-drop .inv-avatar-overlay { opacity: 1; }
+/* :hover is unreliable mid-drag, so dragActive drives the highlight. The ring is
+   a box-shadow on the wrapper itself, which its own overflow:hidden doesn't clip. */
+.inv-avatar-wrap.inv-avatar-drop {
+  box-shadow: 0 0 0 3px var(--accent, #0ea5e9);
+}
+@media (prefers-reduced-motion: reduce) {
+  .inv-avatar-wrap { transition: none; }
+}
+
+/* Upload feedback for a modal with no toast. Sits under the investor name,
+   beside the avatar. */
+.pic-msg {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0.35rem 0 0;
+  padding: 0.4rem 0.55rem;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  border-radius: 6px;
+}
+.pic-msg-error { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; }
+.pic-msg-note { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; }
+.pic-msg-dismiss {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 700;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
 .inv-avatar-img {
   width: 56px;
   height: 56px;

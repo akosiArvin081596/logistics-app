@@ -4,15 +4,31 @@
     <div class="hero-header">
       <div class="hero-top">
         <div class="hero-identity">
-          <label v-if="canEditPicture" class="hero-avatar-wrap" :class="{ 'hero-avatar-uploading': picUploading }" title="Click to change profile picture">
+          <!-- v-bind="dropzoneProps" goes on the WRAPPER, never on the inner
+               input: the wrapper always preventDefault()s, so a drop that lands
+               on the avatar can never fall through to the document and navigate
+               the SPA away to render the file. -->
+          <label
+            v-if="canEditPicture"
+            class="hero-avatar-wrap"
+            :class="{ 'hero-avatar-uploading': picUploading, 'hero-avatar-drop': dragActive }"
+            :title="avatarTitle"
+            v-bind="dropzoneProps"
+          >
             <img v-if="investorPicture" :src="investorPicture" class="hero-avatar-img" alt="Profile picture" />
             <div v-else class="hero-avatar-initials"><AvatarPlaceholder /></div>
             <div class="hero-avatar-overlay">
               <svg v-if="!picUploading" xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
               <div v-else class="hero-spinner"></div>
             </div>
-            <input type="file" accept="image/*" class="hero-avatar-input" @change="onPicChange" />
+            <!-- The label already opens the picker natively (the input is a
+                 descendant) — no @click="openPicker", which opens it twice. -->
+            <input v-bind="inputProps" class="hero-avatar-input" />
           </label>
+          <!-- Read-only branch: deliberately NO drag handlers and no drop
+               highlight. Someone who can't change this picture must not be
+               offered a target that does nothing (admins previewing an
+               investor portal land here, as does an investor with no record). -->
           <div v-else-if="investorPicture" class="hero-avatar-wrap hero-avatar-readonly">
             <img :src="investorPicture" class="hero-avatar-img" alt="Profile picture" />
           </div>
@@ -103,12 +119,14 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useInvestorStore } from '../stores/investor'
 import { useAuthStore } from '../stores/auth'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
+import { useFileDrop } from '../composables/useFileDrop'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
+import { AVATAR_MAX_EDGE, compressImage, isDecodedImage } from '../lib/imageUtils'
 import EarningsSection from '../components/investor/EarningsSection.vue'
 import ProductionSection from '../components/investor/ProductionSection.vue'
 import TrendSection from '../components/investor/TrendSection.vue'
@@ -145,12 +163,62 @@ const investorPicture = computed(() => investorRecord.value?.profilePictureUrl |
 // In preview mode the admin is read-only — never let the avatar overlay show.
 const canEditPicture = computed(() => !store.isPreview && authStore.user?.role === 'Investor' && !!investorRecord.value?.id)
 
-async function onPicChange(event) {
-  const file = event.target.files?.[0]
+// Drag-and-drop + the only real type/size gate on this surface: `accept` on the
+// input filters the OS dialog and NOTHING else, so a dropped file is checked
+// here or nowhere. Only the editable branch of the hero avatar binds these —
+// the read-only replica never becomes a drop target.
+const {
+  dropzoneProps,
+  inputProps,
+  dragActive,
+  supportsDrag,
+  error: dropError,
+  notice: dropNotice,
+} = useFileDrop({
+  accept: 'image/*',
+  maxSizeMb: 10,
+  busy: picUploading,
+  onFiles: (files) => onPicFiles(files),
+})
+
+// A refused file (wrong type, oversize, a dropped folder) has to say so — the
+// avatar has no other feedback and a silent no-op reads as a broken control.
+//
+// ⚠️ flush:'sync' is load-bearing. handleFiles clears the message and re-sets it
+// in the same tick, so with the default 'pre' flush the batched watcher compares
+// the SAME string to itself, sees no change, and stays silent — meaning dropping
+// the same oversize file twice toasts once. The toast auto-hides after 3s, so
+// the second attempt would look like nothing happened at all.
+watch(
+  [dropError, dropNotice],
+  ([err, note]) => {
+    if (err) toast(err, 'error')
+    else if (note) toast(note)
+  },
+  { flush: 'sync' },
+)
+
+const avatarTitle = computed(() =>
+  supportsDrag.value
+    ? 'Click, or drop an image here, to change your profile picture'
+    : 'Tap to change your profile picture',
+)
+
+// Takes File[] from useFileDrop (picker and drop both land here already
+// validated), not a DOM change event.
+async function onPicFiles(files) {
+  const file = files?.[0]
   if (!file || !investorRecord.value?.id) return
   picUploading.value = true
   try {
-    const base64 = await resizeImageToBase64(file, 512)
+    const base64 = await compressImage(file, AVATAR_MAX_EDGE, { background: '#ffffff', quality: 0.9 })
+    // compressImage hands back the RAW bytes when it can't decode the file, so
+    // this is what keeps the payload the JPEG data URL this endpoint has always
+    // been sent.
+    if (!isDecodedImage(base64)) {
+      toast("That image couldn't be read — try a different file", 'error')
+      return
+    }
     await api.post(`/api/investors/${investorRecord.value.id}/profile-picture`, {
       fileData: base64,
       fileName: file.name,
@@ -161,31 +229,9 @@ async function onPicChange(event) {
     toast('Upload failed', 'error')
   } finally {
     picUploading.value = false
-    event.target.value = ''
+    // No `event.target.value = ''` here any more — useFileDrop clears the input
+    // BEFORE handling, so re-picking the same file after a failure still fires.
   }
-}
-
-function resizeImageToBase64(file, maxDim) {
-  return new Promise((resolve, reject) => {
-    const img = new Image()
-    img.onload = () => {
-      let { width, height } = img
-      if (width > maxDim || height > maxDim) {
-        if (width > height) { height = Math.round(height * maxDim / width); width = maxDim }
-        else { width = Math.round(width * maxDim / height); height = maxDim }
-      }
-      const canvas = document.createElement('canvas')
-      canvas.width = width
-      canvas.height = height
-      const ctx = canvas.getContext('2d')
-      ctx.fillStyle = '#ffffff'
-      ctx.fillRect(0, 0, width, height)
-      ctx.drawImage(img, 0, 0, width, height)
-      resolve(canvas.toDataURL('image/jpeg', 0.9))
-    }
-    img.onerror = reject
-    img.src = URL.createObjectURL(file)
-  })
 }
 
 function titleCase(s) {
@@ -309,13 +355,25 @@ onMounted(() => {
   border-radius: 50%;
   overflow: hidden;
   border: 2px solid rgba(255, 255, 255, 0.2);
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
 .hero-avatar-wrap.hero-avatar-readonly {
   cursor: default;
 }
 .hero-avatar-wrap .hero-avatar-overlay { opacity: 0; }
 .hero-avatar-wrap:hover:not(.hero-avatar-readonly) .hero-avatar-overlay,
-.hero-avatar-wrap.hero-avatar-uploading .hero-avatar-overlay { opacity: 1; }
+.hero-avatar-wrap.hero-avatar-uploading .hero-avatar-overlay,
+.hero-avatar-wrap.hero-avatar-drop .hero-avatar-overlay { opacity: 1; }
+/* :hover is unreliable mid-drag, so dragActive drives the highlight. White
+   rather than --accent: this sits on the dark hero gradient. Only ever applied
+   to the editable branch — the read-only avatar has no drag handlers at all. */
+.hero-avatar-wrap.hero-avatar-drop {
+  border-color: #fff;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.55);
+}
+@media (prefers-reduced-motion: reduce) {
+  .hero-avatar-wrap { transition: none; }
+}
 .hero-avatar-img {
   width: 100%;
   height: 100%;

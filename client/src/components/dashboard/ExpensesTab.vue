@@ -71,20 +71,29 @@
           <input v-model="addForm.description" type="text" placeholder="Description (e.g., Tire repair paid via phone)" class="add-input" style="flex:1" />
         </div>
         <div class="add-expense-row add-expense-photo-row">
-          <label class="add-photo-label">
-            Receipt (photo or PDF)
-            <!-- No capture attr (unlike the driver form): admins/dispatchers
-                 pick files — a PDF toll invoice or a saved photo. Mobile still
-                 offers the camera through the chooser. -->
-            <input
-              ref="fileInputRef"
-              type="file"
-              accept="image/*,.heic,.heif,application/pdf"
-              class="add-photo-input"
-              :disabled="addLoading || photoProcessing"
-              @change="handleFileInput"
-            />
-          </label>
+          <!-- No capture attr (unlike the driver form): admins/dispatchers pick
+               files — a PDF toll invoice or a saved photo. Mobile still offers
+               the camera through the chooser.
+               `multiple` is deliberately absent: this form logs ONE expense, so
+               a second file is refused by the zone with a message rather than
+               silently ignored the way a bare <input> would.
+               The 15 MB cap mirrors MAX_PDF_FILE_BYTES / the server create cap —
+               and now catches an oversize PHOTO too, which the old PDF-only
+               check never did. -->
+          <FileDropZone
+            class="add-photo-drop"
+            compact
+            accept="image/*,.heic,.heif,application/pdf,.pdf"
+            :max-size-mb="15"
+            :busy="photoProcessing"
+            :disabled="addLoading"
+            label="Drop a receipt here"
+            hint="or click to browse — photo or PDF"
+            drop-label="Drop to read this receipt"
+            busy-label="Reading receipt…"
+            busy-hint="Scanning and filling the form"
+            @files="handleFileInput"
+          />
           <span v-if="photoProcessing" class="add-photo-hint">Processing file…</span>
           <span v-else-if="photoIsPdf" class="receipt-pdf-chip add-pdf-chip" :title="pdfName">PDF · {{ pdfName || 'receipt.pdf' }}</span>
           <img
@@ -1442,11 +1451,12 @@ import { useAuthStore } from '../../stores/auth'
 import { useViewport } from '../../composables/useViewport'
 import { useSocketRefresh } from '../../composables/useSocketRefresh'
 import ZoomableImage from '../shared/ZoomableImage.vue'
+import FileDropZone from '../shared/FileDropZone.vue'
 import ExpenseAnalyticsPanel from './expenses/ExpenseAnalyticsPanel.vue'
 import BulkReceiptScan from './expenses/BulkReceiptScan.vue'
 import GallonsRecoveryPanel from './expenses/GallonsRecoveryPanel.vue'
 import { US_STATES } from '../../utils/usStates'
-import { compressImage } from '../../lib/imageUtils'
+import { compressImage, readFileAsDataURL } from '../../lib/imageUtils'
 import { fmtTimestamp, fmtYmd, houstonToday, parseYmdLocal } from '../../utils/datetime'
 import {
   fmtOdometer, odometerSource, isSuspectOdometer, asList,
@@ -1818,7 +1828,6 @@ const canAddExpense = computed(() => auth.isSuperAdmin || auth.user?.role === 'D
 // books the receipt into the wrong period entirely. Mirrors ExpenseForm.vue.
 const addForm = reactive({ driver: '', type: 'Fuel', amount: '', date: houstonToday(), loadId: '', description: '', city: '', state: '', gallons: '', odometer: '' })
 const addLoading = ref(false)
-const fileInputRef = ref(null)
 // photoBase64 holds the receipt as a data URI — image/jpeg from the canvas
 // pipeline, or application/pdf straight from FileReader (admin/dispatcher
 // PDF support, 2026-06-11 owner meeting). The server branches on the MIME.
@@ -1917,28 +1926,25 @@ function isPdfFile(file) {
   return file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '')
 }
 
-function readFileAsDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(reader.result)
-    reader.onerror = () => reject(reader.error || new Error('File read failed'))
-    reader.readAsDataURL(file)
-  })
-}
-
 // PDFs skip the IMAGE pipeline (canvas downscale + ScanKit enhance — neither can
 // rasterize a document) but they DO get read: Gemini takes the PDF bytes on the
 // same OCR endpoint a photo uses, so a PDF toll invoice auto-fills the form just
 // like a photographed receipt.
 async function handlePdfInput(blob) {
+  // Belt and braces: FileDropZone already refuses anything over 15 MB with a
+  // message of its own, so this only fires for a non-zone caller. Kept because
+  // it is the cap the SERVER enforces, and a silent 413 later is worse.
   if (blob.size > MAX_PDF_FILE_BYTES) {
-    if (fileInputRef.value) fileInputRef.value.value = ''
     toast('PDF is too large — 15 MB max', 'error')
     return
   }
   photoProcessing.value = true
   try {
-    const dataUrl = await readFileAsDataUrl(blob)
+    const dataUrl = await readFileAsDataURL(blob)
+    // ⚠️ The shared helper RESOLVES to '' on an unreadable file where the local
+    // copy used to REJECT. Without this line a failed read fell straight through
+    // to runAddFormOcr's own no-op and the admin got no error at all.
+    if (!dataUrl) throw new Error('unreadable')
     // Normalize the prefix so the server's application/pdf branch always
     // matches even when the browser left the MIME blank.
     photoBase64.value = String(dataUrl).replace(/^data:[^;]*;base64,/, 'data:application/pdf;base64,')
@@ -1947,15 +1953,17 @@ async function handlePdfInput(blob) {
   } catch {
     photoBase64.value = ''
     pdfName.value = ''
-    if (fileInputRef.value) fileInputRef.value.value = ''
     toast("Couldn't read the PDF — try a different file", 'error')
   } finally {
     photoProcessing.value = false
   }
 }
 
-async function handleFileInput(event) {
-  const blob = event.target.files && event.target.files[0]
+// Receives an already TYPE- and SIZE-validated File[] from FileDropZone (drop or
+// picker alike). `multiple` is off, so the zone hands over at most one file and
+// refuses the rest with its own message — this form logs one expense.
+async function handleFileInput(files) {
+  const blob = files && files[0]
   if (!blob) return
   // New file selected → drop any OCR state from a prior receipt before branching,
   // so swapping one receipt for another can't carry stale details or the
@@ -1983,7 +1991,6 @@ async function handleFileInput(event) {
     // Bulk grid's ocrable gate.
     if (!/^data:image\/(jpeg|jpg|png|webp);base64,/i.test(photoBase64.value)) {
       photoBase64.value = ''
-      if (fileInputRef.value) fileInputRef.value.value = ''
       toast("Couldn't read this photo — convert HEIC to JPEG and try again", 'error')
       return
     }
@@ -1994,7 +2001,6 @@ async function handleFileInput(event) {
     await runAddFormOcr()
   } catch {
     photoBase64.value = ''
-    if (fileInputRef.value) fileInputRef.value.value = ''
     toast("Couldn't process the photo — try a different image", 'error')
   } finally {
     photoProcessing.value = false
@@ -2088,7 +2094,8 @@ async function onBulkSaved() {
 function clearPhoto() {
   photoBase64.value = ''
   pdfName.value = ''
-  if (fileInputRef.value) fileInputRef.value.value = ''
+  // No input to reset — FileDropZone clears its own input on every pick, which
+  // is what makes re-picking the same file after an error fire @change again.
   ocrApplied.value = false
   ocrConfidence.value = ''
   ocrDetails.value = []
@@ -4533,12 +4540,10 @@ tr:hover td { background: var(--surface-hover); }
 }
 .add-btn:hover { opacity: 0.9; }
 .add-btn:disabled { opacity: 0.5; cursor: default; }
-.add-photo-label {
-  display: inline-flex; align-items: center; gap: 0.5rem;
-  font-size: 0.8rem; color: var(--text-dim);
-}
-.add-photo-input { font-size: 0.78rem; }
-.add-photo-input:disabled { opacity: 0.5; cursor: default; }
+/* The receipt drop zone shares the photo row with the preview/chip, the Remove
+   button and the OCR chip, so it must not eat the whole line — it grows to fill
+   the space left over and stops at a sane width. */
+.add-photo-drop { flex: 1 1 240px; min-width: 200px; max-width: 360px; }
 .add-photo-preview { width: 64px; height: 48px; }
 .add-photo-hint { font-size: 0.75rem; color: var(--text-dim); }
 .add-photo-clear {
@@ -4644,6 +4649,9 @@ tr:hover td { background: var(--surface-hover); }
   }
   .add-expense-row .add-input,
   .add-expense-row .add-btn { max-width: none !important; width: 100%; flex: 1 1 auto; }
+  /* The row is a stretched column here, so the desktop width cap would leave the
+     drop zone stranded at 360px against full-width inputs. */
+  .add-photo-drop { max-width: none; min-width: 0; }
 
   /* Filter strip wraps instead of forcing a horizontal scroll */
   .filter-row { flex-wrap: wrap; gap: 0.5rem; }
