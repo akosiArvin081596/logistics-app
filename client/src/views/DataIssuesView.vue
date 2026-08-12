@@ -98,9 +98,19 @@
           </div>
 
           <p class="read-only-note">
-            <strong>Nothing here can be fixed from this page.</strong> There is no void, merge or delete
-            behind this check &mdash; it only reports. Open the receipt in Expenses to decide what to do
-            with it.
+            <strong>This page only reports.</strong> There is no void, merge or delete behind this
+            check &mdash; open a receipt in Expenses to act on it. What is possible there depends on
+            the month, and the chip on each group says which:
+          </p>
+          <ul class="remedy-key">
+            <li><span class="remedy-chip remedy-open">open month</span> Reject the copy in Expenses. Nothing else needed.</li>
+            <li><span class="remedy-chip remedy-correctable">closed &middot; unpaid</span> Month is finalized but the payout has not been sent, so no money has moved. Reopen the month, reject the copy, close it again.</li>
+            <li><span class="remedy-chip remedy-settled">closed &middot; paid</span> The payout already went out. Correcting this means a payout adjustment &mdash; a decision, not a cleanup.</li>
+          </ul>
+          <p class="read-only-note read-only-sign">
+            A duplicate <em>expense</em> lowers net profit, so it <strong>underpays</strong> the
+            investor. Every correction here pays them more &mdash; none of them asks anyone for
+            money back.
           </p>
 
           <div v-for="g in dupGroups" :key="g.key" class="dup-group" :class="{ 'dup-closed': g.allClosed }">
@@ -114,11 +124,12 @@
               </span>
               <span :class="['conf', 'conf-' + g.confidence]">{{ g.confidence }}</span>
               <span class="dup-excess mono" :title="'Excess booked by this group'">+{{ money(g.excessAmount) }}</span>
+              <!-- The remedy, not just the lock. "closed" alone made a
+                   locked-but-unpaid month look as final as a paid one. -->
               <span
-                v-if="g.allClosed"
-                class="closed-chip"
-                :title="`Every receipt in this group sits in a month that month-end close has finalized.`"
-              >all closed</span>
+                :class="['remedy-chip', 'remedy-' + g.remedy]"
+                :title="remedyTitle(g)"
+              >{{ remedyLabel(g) }}</span>
             </div>
             <div v-if="g.reasons.length" class="dup-reasons">{{ g.reasons.join(' · ') }}</div>
             <table class="data-table dup-table">
@@ -559,6 +570,31 @@ const firstError = computed(() => {
 
 // --- Derived views over each payload ---------------------------------------
 const dupGroups = computed(() => duplicateGroups(st.value.duplicates.data))
+
+// The chip on each duplicate group states the REMEDY, not just the lock.
+// "closed" alone made a month that is merely finalized look as immovable as one
+// whose payout has already been sent — and those are the two ends of this
+// queue's whole decision. See duplicateRemedy() in lib/dataIssues.js.
+const REMEDY_LABEL = {
+  open: 'open month',
+  correctable: 'closed · unpaid',
+  settled: 'closed · paid',
+  unknown: 'closed · unknown',
+}
+function remedyLabel(g) {
+  return REMEDY_LABEL[g.remedy] || REMEDY_LABEL.unknown
+}
+function remedyTitle(g) {
+  const month = g.period || 'This month'
+  if (g.remedy === 'open') return `${month} is still open — reject the duplicate copy in Expenses.`
+  if (g.remedy === 'correctable') {
+    return `${month} is finalized, but its payout has not been sent — no money has moved. Reopen the month, reject the copy, then close it again.`
+  }
+  if (g.remedy === 'settled') {
+    return `${month} is finalized AND its payout has already gone out. Correcting this means a payout adjustment, which is a decision rather than a cleanup.`
+  }
+  return `${month} is finalized and its settlement state could not be read. Treat it as settled until that is checked.`
+}
 const dupSummary = computed(() => duplicateSummary(st.value.duplicates.data))
 const dupCounts = computed(() => duplicateRowCounts(dupGroups.value))
 
@@ -1128,6 +1164,37 @@ onMounted(loadAll)
   letter-spacing: 0.03em; color: #64748b; background: #f1f5f9;
   border-radius: 0.25rem; padding: 0.1rem 0.3rem; cursor: help;
 }
+
+/* Remedy chips. Three colours because there are three genuinely different
+   answers — and the middle one used to be invisible, rendered identically to
+   "settled" even though nothing had been paid and the money was recoverable. */
+.remedy-chip {
+  display: inline-block; margin-left: 0.35rem;
+  font-size: 0.62rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border-radius: 0.25rem; padding: 0.1rem 0.35rem; cursor: help;
+  white-space: nowrap;
+}
+.remedy-open { color: #166534; background: #dcfce7; }
+.remedy-correctable { color: #92400e; background: #fef3c7; }
+.remedy-settled { color: #64748b; background: #f1f5f9; }
+.remedy-unknown { color: #b91c1c; background: #fee2e2; }
+
+.remedy-key {
+  list-style: none;
+  margin: 0 0 0.75rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+.remedy-key li { display: flex; align-items: baseline; gap: 0.45rem; }
+.remedy-key .remedy-chip { margin-left: 0; flex-shrink: 0; cursor: default; }
+
+.read-only-sign { border-left-color: #fbbf24; }
 
 /* Tables — same vocabulary as PayoutsView so admin pages read alike. */
 .data-table {
