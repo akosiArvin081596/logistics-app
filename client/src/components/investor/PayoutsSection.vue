@@ -142,6 +142,11 @@
             <th class="num">Adjustment</th>
             <th class="num">Adjusted total</th>
             <th>Due date</th>
+            <!-- The client's literal ask: "it needs to show the months of what
+                 was paid WHEN it was paid". `paidAt` was already on the wire and
+                 rendered in exactly one place repo-wide — an admin dialog — so
+                 the investor's own statement never said when the money moved. -->
+            <th>Paid date</th>
             <th>Status</th>
             <th v-if="isSuperAdmin"></th>
           </tr>
@@ -197,6 +202,15 @@
               <strong :class="{ 'amt-negative': effective(p) < 0 }">{{ fmt(effective(p)) }}</strong>
             </td>
             <td class="mono-sm">{{ settleable(p) ? fmtDate(p.dueDate) : '—' }}</td>
+            <!-- MIXED INPUT, and it matters: dueDate above is a bare
+                 'YYYY-MM-DD' while paidAt is a real ISO instant (new
+                 Date().toISOString() at the moment the payout was marked paid).
+                 fmtDate is fmtYmd, which branches on the shape — so this goes
+                 down the timestamp branch and renders in Houston, and the due
+                 date beside it is still printed verbatim rather than rolling
+                 back a day in a US timezone. Em-dash, never a blank cell: an
+                 unpaid row has no date and must not look like a missing value. -->
+            <td class="mono-sm">{{ p.paidAt ? fmtDate(p.paidAt) : '—' }}</td>
             <td class="status-cell">
               <span v-if="settleable(p)" :class="['status-pill', statusClass(p.status)]">{{ p.status }}</span>
               <span v-else class="status-pill st-none">nothing due</span>
@@ -667,7 +681,12 @@ const currentOpen = ref(false)
 const isSuperAdmin = auth.isSuperAdmin
 // Column count for the past-months table, so an expanded breakdown row can
 // colspan the full width. Mirrors the trailing admin action column's v-if.
-const colCount = isSuperAdmin ? 7 : 6
+//
+// ⚠️ THIS MOVES WITH THE HEADER ROW. Period, Amount, Adjustment, Adjusted total,
+// Due date, Paid date, Status (+ the admin action cell) = 8/7. Adding a column
+// and forgetting this leaves the expanded breakdown row short, which does not
+// error — it silently renders a ragged table.
+const colCount = isSuperAdmin ? 8 : 7
 
 const STATUS_CLASS = { owed: 'st-owed', processing: 'st-processing', paid: 'st-paid' }
 function statusClass(s) {
@@ -1174,7 +1193,7 @@ onMounted(loadPayouts)
 .inv-adj { font-size: 0.7rem; color: #b45309; margin-top: 0.1rem; font-family: inherit; }
 .inv-adj-amt { color: #b45309; }
 .amt-negative { color: #b91c1c; }
-/* Seven columns don't fit a phone — scroll the table, never the page. Dates and
+/* Eight columns don't fit a phone — scroll the table, never the page. Dates and
    period labels get nowrap so they don't shred into three lines under pressure. */
 .table-wrap { overflow-x: auto; }
 .data-table .num { text-align: right; white-space: nowrap; }
