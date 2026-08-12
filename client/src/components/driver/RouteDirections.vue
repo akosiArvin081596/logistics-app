@@ -10,7 +10,9 @@
           :key="i"
           class="dir-step"
         >
-          <div class="dir-step-icon" :title="step.maneuver">{{ iconFor(step.maneuver) }}</div>
+          <!-- Decorative: the instruction text below already carries the
+               maneuver, so a screen reader announcing "↰" adds nothing. -->
+          <div class="dir-step-icon" :title="step.maneuver" aria-hidden="true">{{ iconFor(step.maneuver) }}</div>
           <div class="dir-step-body">
             <div class="dir-step-text">{{ step.instruction || `Continue` }}</div>
             <div class="dir-step-meta">{{ formatMiles(step.distanceMeters) }} mi · {{ formatMinutes(step.durationSec) }}</div>
@@ -27,9 +29,16 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <polygon points="3 11 22 2 13 21 11 13 3 11" />
           </svg>
-          Navigate in Maps
+          Open in Google Maps
         </a>
-        <div class="dir-handoff-hint">Opens your phone's Google Maps for voice-guided driving</div>
+        <!-- This used to read "Opens your phone's Google Maps for voice-guided
+             driving", which was accurate when in-app navigation had no voice.
+             It does now — spoken callouts, live rerouting and a wake lock all
+             live behind the "Navigate" button on the route map above — so that
+             copy was pointing drivers away from the feature. Kept as a genuine
+             fallback: a driver who prefers Google Maps should still get there
+             in one tap. -->
+        <div class="dir-handoff-hint">Prefer Google Maps? This hands the destination over. Otherwise tap <strong>Navigate</strong> on the map above for in-app voice guidance.</div>
       </div>
     </template>
   </div>
@@ -37,6 +46,7 @@
 
 <script setup>
 import { computed } from 'vue'
+import { stripHtml } from '../../utils/voiceLadder'
 
 const props = defineProps({
   steps: { type: Array, default: () => [] },
@@ -46,10 +56,15 @@ const props = defineProps({
 // Strip HTML tags that Google's instructions sometimes include (e.g. <b>Main St</b>).
 // We deliberately do NOT render the HTML — drivers don't need bold, and dropping
 // it avoids any XSS surface from a third-party API.
+//
+// Shared with the voice ladder rather than re-implemented here, so the sentence
+// a driver READS in this list and the one they HEAR from Drive Mode are derived
+// from the same normalization. They diverged before: this copy left runs of
+// whitespace intact where the spoken path collapsed them.
 const cleanedSteps = computed(() => {
   return (props.steps || []).map(s => ({
     ...s,
-    instruction: (s.instruction || '').replace(/<[^>]*>/g, '').trim(),
+    instruction: stripHtml(s.instruction),
   }))
 })
 

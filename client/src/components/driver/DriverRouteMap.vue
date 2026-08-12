@@ -4,15 +4,15 @@
       <div class="map-empty">No route coordinates available</div>
     </template>
     <template v-else>
-      <div class="map-info" v-if="hasCoords && (distanceMiles != null || etaMinutes != null || driverDistanceInfo)">
-        <span v-if="distanceMiles != null" class="info-item">{{ distanceMiles }} mi</span>
-        <span v-if="etaMinutes != null" class="info-item">{{ etaFormatted }} ETA</span>
+      <div class="map-info" v-if="hasCoords && (remainingDistanceMiles != null || remainingEtaMinutes != null || driverDistanceInfo)">
+        <span v-if="remainingDistanceMiles != null" class="info-item">{{ remainingDistanceMiles }} mi</span>
+        <span v-if="remainingEtaMinutes != null" class="info-item">{{ etaFormatted }} ETA</span>
         <span v-if="driverDistanceInfo" :class="['info-item', driverDistanceInfo.mi > 500 ? 'info-danger' : 'info-warn']">{{ driverDistanceInfo.mi }} mi {{ driverDistanceInfo.label }}</span>
         <!-- Drive Mode is a DRIVER affordance (turn-by-turn for the truck) and
              it needs `steps`, which the public payload deliberately omits — so
              on the customer tracker the button would open an empty fullscreen
              overlay. Hidden there rather than shipped broken. -->
-        <button v-if="!publicMode" class="navmode-btn" @click="expanded = true" title="Navigation Mode">
+        <button v-if="!publicMode" class="navmode-btn" @click="openNavMode" title="Navigation Mode">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <polygon points="3 11 22 2 13 21 11 13 3 11" />
           </svg>
@@ -34,6 +34,9 @@
         :active-route="activeRoute"
         :driver-position="props.driverPosition"
         :destination="navigationDestination"
+        :route-version="routeVersion"
+        :rerouting="rerouting"
+        :off-route="offRoute"
         @close="closeNavMode"
       />
     </template>
@@ -44,6 +47,18 @@
 import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useGoogleMaps, createDotPin } from '../../composables/useGoogleMaps'
+import { useDriverPosition } from '../../composables/useDriverPosition'
+import { useVoiceGuidance } from '../../composables/useVoiceGuidance'
+import {
+  buildRouteIndex,
+  buildStepOffsets,
+  nearestPointOnPath,
+  matchToRoute,
+  stepIndexForOffset,
+  remainingMeters as routeRemainingMeters,
+  remainingSeconds as routeRemainingSeconds,
+  createDeviationDetector,
+} from '../../utils/routeProgress'
 import DriveModeOverlay from './DriveModeOverlay.vue'
 
 const props = defineProps({
@@ -73,23 +88,67 @@ const emit = defineEmits(['route-data', 'update:selectedAltIdx'])
 
 const api = useApi()
 const { load: loadGoogleMaps, createMap } = useGoogleMaps()
+const driverPos = useDriverPosition()
+const voice = useVoiceGuidance()
 const mapContainer = ref(null)
 const expanded = ref(false)
 const routePoints = ref([])
-const distanceMiles = ref(null)
-const etaMinutes = ref(null)
+// Bumped whenever new geometry is installed. Drive Mode keys its voice ladder on
+// this, so a reroute re-arms every callout on the new route (and only then).
+const routeVersion = ref(0)
+const rerouting = ref(false)
+const offRoute = ref(false)
+
+// Deviation-triggered rerouting.
+//
+// Client ask (Deshorn): "It should reroute depending on the current location
+// that the driver is similar to if you [take] another turn on your regular GPS."
+//
+// WHAT THIS REPLACES, AND WHY THE OLD RULE WAS BACKWARDS. The previous gate was
+// `moved > 0.06 mi AND >= 60 s since the last fetch` — purely a clock and an
+// odometer, with no reference to the route at all. So it re-fetched a route for
+// a driver who was following it perfectly (every 60 s, for the whole load) and
+// it did NOT re-fetch for a driver who had missed an exit and was heading the
+// wrong way at 60 mph, because that driver satisfied exactly the same two
+// conditions and got exactly the same treatment. It was also the cost driver: at
+// a 60 s cadence that authorised ~600 billed Google Routes calls per driver per
+// day. Deviation-triggered is ~20, and it fires when it means something.
+//
+// The three guards are not optional (see utils/routeProgress.js):
+//   - N consecutive confirmations, so GPS noise cannot trigger a reroute
+//   - a movement requirement, so a truck PARKED off-route cannot spam one
+//   - a cooldown and a hard per-trip cap, so a genuinely bad route cannot bill
+//     unboundedly while the driver works out what to do
+//
+// Declared here, above onRouteGeometryChanged(), which reads it — a `const` in
+// a temporal dead zone would throw rather than misbehave, but only on whichever
+// future call path happens to run first.
+const deviation = createDeviationDetector()
+// Where along the route we matched last time, so the match stays forward-biased
+// across fixes instead of snapping to whichever leg of a cloverleaf is nearer.
+//
+// A ref rather than a plain `let` because the header's distance + ETA are now
+// DERIVED from it (see the live-figures block below routeIndex) and must
+// re-render on every fix.
+const matchOffset = ref(null)
+let lastMatchAt = 0
+// Whole-route figures exactly as the server sent them, for the geometry
+// currently installed in routePoints. These are the 100% baseline the live
+// header counts down FROM — see remainingDistanceMiles / remainingEtaMinutes.
+const routeDistanceMiles = ref(null)
+const routeEtaMinutes = ref(null)
+// Turn-by-turn steps for that same geometry. Held beside routePoints and
+// assigned at the same three sites, deliberately NOT read off `activeRoute`:
+// that computed keys on the parent-owned selectedAltIdx, which lags by a tick
+// whenever a refetch re-points the selection at the recommended alternative, and
+// step offsets measured against the wrong polyline are worse than none.
+const routeSteps = ref([])
 // Full rich-route payload from the server. Populated on every fetchRoute()
 // call. Stays empty when the lean (single-route) path is in use.
 const allRoutes = ref([])      // array of { route, distanceMiles, etaMinutes, fuelLiters, tollPriceUsd, trafficSegments, steps }
 const recommendedIdx = ref(0)
 const alternatives = computed(() => allRoutes.value || [])
 const activeRoute = computed(() => allRoutes.value[props.selectedAltIdx] || null)
-const etaFormatted = computed(() => {
-  if (etaMinutes.value == null) return null
-  const m = Math.round(etaMinutes.value)
-  if (m < 60) return `${m}m`
-  return `${Math.floor(m / 60)}h ${m % 60}m`
-})
 
 function onSelectAlt(i) {
   emit('update:selectedAltIdx', i)
@@ -486,16 +545,39 @@ function applyPresetRoute(force = false) {
   allRoutes.value = []
   recommendedIdx.value = 0
   routePoints.value = pts.length >= 2 ? pts : []
-  distanceMiles.value = preset?.distanceMiles ?? null
-  etaMinutes.value = preset?.etaMinutes ?? null
+  // The public payload carries no steps, by design. The header therefore falls
+  // back to these whole-haul figures — the customer tracker never matches a
+  // position to the route (see the driverPosition watcher), so there is nothing
+  // to count down against and nothing to invent.
+  routeSteps.value = []
+  routeDistanceMiles.value = preset?.distanceMiles ?? null
+  routeEtaMinutes.value = preset?.etaMinutes ?? null
   if (map) renderMarkers()
+}
+
+// Called whenever routePoints is replaced. Keeps three things that must never
+// disagree in lockstep: the match offset (measured against the old polyline),
+// the deviation counter (the driver is on the new route by definition), and the
+// route version Drive Mode's voice ladder keys on.
+//
+// ⚠️ The reroute BUDGET is deliberately not cleared here. A reroute installs new
+// geometry, so clearing the budget on geometry change would make the per-trip
+// cap self-resetting — i.e. no cap at all. It resets when the leg does (see the
+// loadStatus watcher).
+function onRouteGeometryChanged() {
+  matchOffset.value = null
+  lastMatchAt = 0
+  deviation.reset()
+  offRoute.value = false
+  routeVersion.value++
 }
 
 async function fetchRoute(doFit = false) {
   const mySeq = ++fetchSeq
   routePoints.value = []
-  distanceMiles.value = null
-  etaMinutes.value = null
+  routeSteps.value = []
+  routeDistanceMiles.value = null
+  routeEtaMinutes.value = null
   if (!destLatLng.value) return
 
   // Force: the three refs above were just cleared, so the signature guard must
@@ -510,8 +592,9 @@ async function fetchRoute(doFit = false) {
   // and the load was pre-pickup, which produced no usable route — drivers
   // saw markers but no polyline and the smart guidance UI never populated.
   const pickedUp = /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
+  const fromDriver = !!driverLatLng.value
   let from, to
-  if (driverLatLng.value) {
+  if (fromDriver) {
     from = driverLatLng.value
     to = pickedUp ? destLatLng.value : (originLatLng.value || destLatLng.value)
   } else {
@@ -519,6 +602,15 @@ async function fetchRoute(doFit = false) {
     to = destLatLng.value
   }
   if (!from || !to) return
+  // Answers "has this leg been routed from the truck's own position yet?", which
+  // is the only question the removed 60 s / 0.06 mi gate's `lastRoutePos` was
+  // still being asked — it stored a coordinate purely so that gate had something
+  // to measure distance travelled against, and nothing measures that any more.
+  // Set here rather than at the watcher's call site so the mount-time fetch
+  // counts too (that used to fire a duplicate on the first ELD fix), and set
+  // ONLY on the driver-origin branch so a truck whose ELD comes online after
+  // mount still upgrades its planned origin→destination haul to a live one.
+  if (fromDriver) routedFromDriverPosition = true
 
   try {
     const url = (f, t) => `/api/route?fromLat=${f.lat}&fromLng=${f.lng}&toLat=${t.lat}&toLng=${t.lng}&alternatives=true`
@@ -550,8 +642,14 @@ async function fetchRoute(doFit = false) {
 
     const active = allRoutes.value[idx] || allRoutes.value[0]
     if (active && active.route && active.route.length >= 2) routePoints.value = active.route
-    distanceMiles.value = active?.distanceMiles ?? null
-    etaMinutes.value = active?.etaMinutes ?? null
+    routeSteps.value = Array.isArray(active?.steps) ? active.steps : []
+    routeDistanceMiles.value = active?.distanceMiles ?? null
+    routeEtaMinutes.value = active?.etaMinutes ?? null
+
+    // New geometry installed: the old along-route offset is meaningless against
+    // it, the driver is on-route by construction, and Drive Mode's voice ladder
+    // must re-arm for the new turns.
+    onRouteGeometryChanged()
 
     emit('route-data', {
       routes: allRoutes.value,
@@ -561,14 +659,56 @@ async function fetchRoute(doFit = false) {
 
     // Full re-render needed: the active route's polyline path changed AND
     // the alternative overlays + traffic segments need to be redrawn. The
-    // animation reset is acceptable here because route swaps are rare
-    // (60s + 0.06 mi gate, or manual driver selection).
+    // animation reset is acceptable here because new geometry is rare: once at
+    // the start of a leg, once per status change, once per confirmed deviation
+    // (capped per trip), or a manual alternative pick. It is emphatically NOT
+    // once per GPS fix — the header's distance + ETA count down off the matched
+    // offset instead, with no refetch. See remainingDistanceMiles below.
     renderMarkers()
   } catch { /* silent */ }
 }
 
-let lastRoutePos = null
-let lastRouteTime = 0
+// Set by fetchRoute() when it routes from the driver pin; cleared when the leg
+// changes. Replaces `lastRoutePos` (a coordinate nothing measured any more) and
+// `lastRouteTime` (write-only since the 60 s gate was removed — assigned in three
+// places and read in none).
+let routedFromDriverPosition = false
+
+// ── Recovery when we hold NO route at all ────────────────────────────────────
+//
+// ⚠️ THIS IS NOT A REROUTE AND NOT A POLL. It restores self-healing that this
+// batch removed by accident: the old 60 s gate re-fired regardless of whether the
+// previous attempt had succeeded, so a request that 500'd, 401'd or came back
+// with zero routes healed within a minute. Deviation gating never retries — to
+// the detector a truck sitting perfectly on a route it never received looks
+// exactly like a truck that is on route — so one failed fetch left the driver
+// with markers, no polyline and an empty header for the rest of the leg.
+//
+// "We never got a route" and "the truck has left the route" are different
+// conditions and are answered in different places: this one keys on the ABSENCE
+// of geometry, the other on measured deviation, and neither path can trigger the
+// other.
+//
+// Capped hard, and biased low on purpose. A stale map until the next status
+// change costs one leg's convenience; an uncapped retry is a billed route call
+// per ELD fix for as long as an outage lasts, which is precisely the spend the
+// deviation gating was built to eliminate. Worst case per leg is 3 attempts here
+// plus the one direct fetch a mount or a status change fires — and note a failed
+// attempt costs TWO calls, because fetchRoute falls back to the origin→drop-off
+// form when the truck-origin form comes back empty.
+const MAX_LEG_ROUTE_ATTEMPTS = 3
+// Paced in FIXES, not milliseconds, so no clock re-enters this file. Attempt 1 is
+// immediate; the gaps then give a transient failure roughly 30 s and 90 s of ELD
+// cadence to clear before we stop asking.
+const ROUTE_ATTEMPT_BACKOFF_FIXES = [0, 1, 3]
+let legRouteAttempts = 0
+let fixesSinceRouteAttempt = 0
+
+function resetLegRouteAttempts() {
+  legRouteAttempts = 0
+  fixesSinceRouteAttempt = 0
+}
+
 let prevDriverPos = null
 // Tracks when the previous driverPosition update arrived so the next tween
 // can stretch over the actual inter-update gap. Without this, the tween
@@ -578,49 +718,147 @@ let lastPosUpdateAt = 0
 const POS_TWEEN_MIN_MS = 1000
 const POS_TWEEN_MAX_MS = 60000
 
-// Smooth marker tween via requestAnimationFrame. The pin slides across a
-// *static* map; the polyline first-point follows the pin frame-by-frame
-// so the route stays glued to it without a visible gap during the tween.
-// We do NOT call mapObj.panTo() — running it in parallel with the
-// per-frame setPath causes the polyline to visually disappear (Google
-// batches overlay rendering during camera animations). mapObj kept in the
-// signature for call-site compatibility; pin-click still re-centers.
-// Snap a raw GPS coord onto the route polyline if close enough. Returns
-// the projected lat/lng when the truck is within ~80 m of the line;
-// otherwise returns the raw coord so genuinely off-route trucks still
-// show their real position. Eliminates the visual gap caused by GPS
-// landing on a parallel road (tollway vs frontage) when the route uses
-// the other one.
-function snapToRoute(lat, lng) {
-  const points = routePoints.value
-  if (!points || points.length < 2) return { lat, lng }
-  let minDistSq = Infinity
-  let bestLat = null
-  let bestLng = null
-  for (let i = 0; i < points.length - 1; i++) {
-    const a = points[i]
-    const b = points[i + 1]
-    const ax = a.longitude, ay = a.latitude
-    const bx = b.longitude, by = b.latitude
-    const px = lng, py = lat
-    const dx = bx - ax, dy = by - ay
-    const lenSq = dx * dx + dy * dy
-    if (lenSq === 0) continue
-    let t = ((px - ax) * dx + (py - ay) * dy) / lenSq
-    t = Math.max(0, Math.min(1, t))
-    const projX = ax + t * dx
-    const projY = ay + t * dy
-    const distSq = (projX - px) ** 2 + (projY - py) ** 2
-    if (distSq < minDistSq) {
-      minDistSq = distSq
-      bestLat = projY
-      bestLng = projX
-    }
+// Snap a raw GPS coord onto the route polyline if close enough. Returns the
+// projected lat/lng when the truck is within SNAP_RADIUS_M of the line;
+// otherwise returns the raw coord so genuinely off-route trucks still show
+// their real position. Eliminates the visual gap caused by GPS landing on a
+// parallel road (tollway vs frontage) when the route uses the other one.
+//
+// (The paragraph that used to sit here describing animateDriverMarker's tween
+// has been moved down to that function, where it belongs — it had drifted above
+// this one and read as if it described the snapping.)
+//
+// ⚠️ THE OLD THRESHOLD WAS ANISOTROPIC AND THAT WAS A REAL BUG. This function
+// compared `(projX - px)² + (projY - py)²` in RAW DEGREES against 5.2e-7, then
+// described it in the comment as "~80 m". A degree of latitude and a degree of
+// longitude are not the same distance anywhere but the equator: at 40°N the
+// same constant is ~80 m north-south and ~104 m east-west, and the gap widens
+// with latitude. So a truck on a frontage road was snapped onto the tollway in
+// one direction of travel and not the other. `nearestPointOnPath` projects into
+// local metres with cos(lat) scaling, so one threshold now means one distance.
+const SNAP_RADIUS_M = 80
+
+const routeIndex = computed(() => {
+  const pts = routePoints.value
+  if (!Array.isArray(pts) || pts.length < 2) return null
+  return buildRouteIndex(pts)
+})
+
+// ── LIVE REMAINING DISTANCE + ETA ────────────────────────────────────────────
+//
+// Both header figures are REMAINING figures, and they only ever counted down as
+// a SIDE EFFECT: fetchRoute() re-ran on the old `moved 0.06 mi AND 60 s elapsed`
+// gate with the truck's live position as the origin, so every response was a
+// fresh truck→destination route and both numbers shrank with it. Deviation-
+// triggered rerouting removed that refetch — correctly; it was ~600 billed Google
+// Routes calls per driver per day, and it fired for the driver who was ON the
+// route while ignoring the one who was not — but it was also the only thing
+// moving these two numbers. A driver who follows the route perfectly fetched once
+// at leg start and never again, so the header froze: nine hours into a ten-hour
+// leg it read "347 mi · 5h 30m ETA" beside a live "40 mi to Drop-off".
+//
+// They are now derived from the matched along-route offset — the same scalar
+// DriveModeOverlay's footer runs on (utils/routeProgress.js). That is a genuine
+// per-fix countdown at ZERO network cost, i.e. strictly better than the 60 s gate
+// managed, since that only refreshed twice a minute and billed for each one.
+//
+// The offset is null until the first fix is matched (and forever on the public
+// tracker, which never matches — see the driverPosition watcher), which is why
+// every fallback below is the whole-route figure rather than a guess.
+
+// Start offset of each step, so remaining TIME can be pro-rated inside the
+// current step instead of stepping down a whole instruction at a time. Rebuilt
+// only when the geometry changes, and the server sends `steps[].startIdx`, so
+// buildStepOffsets takes its O(1) source and never re-matches per step.
+const stepOffsets = computed(() => {
+  const idx = routeIndex.value
+  if (!idx || !routeSteps.value.length) return []
+  return buildStepOffsets(routeSteps.value, idx)
+})
+
+const currentStepIdx = computed(() => {
+  if (!routeSteps.value.length || stepOffsets.value.length < 2) return 0
+  if (!Number.isFinite(matchOffset.value)) return 0
+  return stepIndexForOffset(stepOffsets.value, matchOffset.value, routeSteps.value.length)
+})
+
+// Fraction of the route still to drive, by distance.
+const remainingDistanceFraction = computed(() => {
+  const idx = routeIndex.value
+  if (!idx || !(idx.totalMeters > 0) || !Number.isFinite(matchOffset.value)) return null
+  const rem = routeRemainingMeters(idx, matchOffset.value)
+  if (!Number.isFinite(rem)) return null
+  return Math.min(1, Math.max(0, rem / idx.totalMeters))
+})
+
+// ⚠️ TWO TIME BASES, AND SUMMING THE WRONG ONE SILENTLY DELETES THE TRAFFIC.
+// The route-level etaMinutes is Google's `duration` under TRAFFIC_AWARE_OPTIMAL —
+// it carries the congestion delay. Per-step `durationSec` is `staticDuration`,
+// which does not. So the steps are never summed into an absolute ETA; they are
+// used ONLY to decide what fraction of the drive is left, and that fraction
+// scales the traffic-aware total. Falls back to the distance fraction for a route
+// with no steps (the lean and preset payloads both omit them).
+//
+// Why not distance alone, which would be simpler: the last 3 miles into a
+// receiver can be 12 minutes of surface streets on a 20-mile leg. Scaling by
+// distance there shows 2 minutes, at the moment the number matters most.
+const remainingTimeFraction = computed(() => {
+  const steps = routeSteps.value
+  const offsets = stepOffsets.value
+  if (!steps.length || offsets.length < 2 || !Number.isFinite(matchOffset.value)) {
+    return remainingDistanceFraction.value
   }
-  if (minDistSq > 5.2e-7) return { lat, lng }
-  return { lat: bestLat, lng: bestLng }
+  let totalSec = 0
+  for (const s of steps) totalSec += s.durationSec || 0
+  if (!(totalSec > 0)) return remainingDistanceFraction.value
+  const rem = routeRemainingSeconds(steps, offsets, currentStepIdx.value, matchOffset.value)
+  if (!Number.isFinite(rem)) return remainingDistanceFraction.value
+  return Math.min(1, Math.max(0, rem / totalSec))
+})
+
+// Scaled off the server's own mileage rather than rendering the index's
+// cumulative metres directly: the polyline is downsampled, so its length runs a
+// little short of the real road distance, and showing it raw would step the
+// figure sideways (347 → 345.2) the instant the first match landed. Rounded to
+// one decimal, which is the precision the server sends.
+const remainingDistanceMiles = computed(() => {
+  const base = routeDistanceMiles.value
+  if (base == null) return null
+  const f = remainingDistanceFraction.value
+  if (f == null) return base
+  return Math.round(base * f * 10) / 10
+})
+
+const remainingEtaMinutes = computed(() => {
+  const base = routeEtaMinutes.value
+  if (base == null) return null
+  const f = remainingTimeFraction.value
+  if (f == null) return base
+  return base * f
+})
+
+const etaFormatted = computed(() => {
+  if (remainingEtaMinutes.value == null) return null
+  const m = Math.round(remainingEtaMinutes.value)
+  if (m < 60) return `${m}m`
+  return `${Math.floor(m / 60)}h ${m % 60}m`
+})
+
+function snapToRoute(lat, lng) {
+  const idx = routeIndex.value
+  if (!idx) return { lat, lng }
+  const hit = nearestPointOnPath(idx, { lat, lng })
+  if (!hit || hit.distanceMeters > SNAP_RADIUS_M) return { lat, lng }
+  return { lat: hit.lat, lng: hit.lng }
 }
 
+// Smooth marker tween via requestAnimationFrame. The pin slides across a
+// *static* map; the polyline first-point follows the pin frame-by-frame so the
+// route stays glued to it without a visible gap during the tween. We do NOT
+// call mapObj.panTo() — running it in parallel with the per-frame setPath
+// causes the polyline to visually disappear (Google batches overlay rendering
+// during camera animations). mapObj kept in the signature for call-site
+// compatibility; pin-click still re-centers.
 function animateDriverMarker(marker, mapObj, lineObj, from, to, duration = 1000) {
   if (!marker || !from || !to) return
   // No-op when the polled position matches what we last drew (within ~1 m).
@@ -665,16 +903,74 @@ watch(() => props.driverPosition, (pos) => {
   lastPosUpdateAt = nowMs
   if (driverMarker && map) animateDriverMarker(driverMarker, map, routeLine, from, to, tweenMs)
   prevDriverPos = to
-  if (!lastRoutePos) { lastRoutePos = pos; lastRouteTime = Date.now(); fetchRoute(true); return }
-  const dist = haversineMi({ lat: pos.latitude, lng: pos.longitude }, { lat: lastRoutePos.latitude, lng: lastRoutePos.longitude })
-  if (dist > 0.06 && Date.now() - lastRouteTime >= 60000) { lastRoutePos = pos; lastRouteTime = Date.now(); fetchRoute() }
+
+  // ⚠️ publicMode fetches NOTHING, ever. GET /api/route accepts arbitrary caller
+  // coordinates, which makes it a free Google Routes oracle — that is exactly
+  // why it is role-gated, and why the customer tracker is served a pre-computed
+  // `presetRoute` instead. Never let a deviation, a status change or a reroute
+  // reach fetchRoute() on this path.
+  if (props.publicMode) return
+
+  // Two reasons to go and get geometry, and only one of them is a retry:
+  //
+  //   (a) this leg has never been routed from the truck's own pin. Fires at most
+  //       once per leg (fetchRoute sets the flag the moment it commits) and is
+  //       what upgrades a no-ELD truck's planned origin→drop-off haul to a live
+  //       one the moment its ELD starts reporting;
+  //   (b) we hold no geometry at all, i.e. the attempt above failed. See
+  //       MAX_LEG_ROUTE_ATTEMPTS for why this exists and why it is capped.
+  //
+  // Both return early: with no route there is nothing to match a fix against,
+  // and in case (a) the geometry is about to be replaced anyway. So the deviation
+  // detector is never fed a match taken from a route we are in the middle of
+  // discarding, and this path can never stand in for it.
+  if (!routedFromDriverPosition || !routeIndex.value) {
+    fixesSinceRouteAttempt++
+    const waitFixes = ROUTE_ATTEMPT_BACKOFF_FIXES[legRouteAttempts] ?? 0
+    if (legRouteAttempts < MAX_LEG_ROUTE_ATTEMPTS && fixesSinceRouteAttempt > waitFixes) {
+      legRouteAttempts++
+      fixesSinceRouteAttempt = 0
+      fetchRoute(true)
+    }
+    return
+  }
+
+  const idx = routeIndex.value
+  const match = matchToRoute(idx, to, {
+    previousOffsetMeters: matchOffset.value,
+    elapsedMs: lastMatchAt ? nowMs - lastMatchAt : null,
+  })
+  lastMatchAt = nowMs
+  if (!match) return
+  // Feeds two things: the next match's forward bias, and the header's live
+  // remaining distance + ETA. This assignment is what replaced the refetch.
+  matchOffset.value = match.offsetMeters
+
+  const verdict = deviation.update({
+    point: to,
+    distanceFromRouteMeters: match.distanceMeters,
+    timestamp: nowMs,
+  })
+  offRoute.value = verdict.offRoute
+  if (!verdict.shouldReroute) return
+
+  rerouting.value = true
+  Promise.resolve(fetchRoute()).finally(() => { rerouting.value = false })
 }, { deep: true })
 
 // Re-fetch route when load status changes (e.g., geofence triggers "At Shipper" → driver becomes Point A)
 watch(loadStatus, (newStatus, oldStatus) => {
   if (newStatus !== oldStatus && map && destLatLng.value) {
-    lastRoutePos = null
-    lastRouteTime = 0
+    // New leg: whatever is installed was routed for the old one. fetchRoute()
+    // below sets this straight back to true when a live position exists, so the
+    // next fix does not fire a second call for the same leg — and the recovery
+    // budget resets with the leg, so a leg that failed to route cannot borrow
+    // the next one's attempts (nor spend them before it has needed any).
+    routedFromDriverPosition = false
+    resetLegRouteAttempts()
+    // A status change means a new LEG (truck→pickup becomes truck→drop-off), so
+    // this is the one place the per-trip reroute budget legitimately resets.
+    deviation.reset({ clearBudget: true })
     fetchRoute(true)
   }
 })
@@ -699,15 +995,49 @@ watch(() => props.selectedAltIdx, (idx) => {
   const active = allRoutes.value[idx]
   if (!active || !active.route) return
   routePoints.value = active.route
-  distanceMiles.value = active.distanceMiles ?? null
-  etaMinutes.value = active.etaMinutes ?? null
+  routeSteps.value = Array.isArray(active.steps) ? active.steps : []
+  routeDistanceMiles.value = active.distanceMiles ?? null
+  routeEtaMinutes.value = active.etaMinutes ?? null
+  onRouteGeometryChanged()
   if (map) renderMarkers()
 })
 
+// ⚠️ THIS TAP IS THE ONLY USER GESTURE DRIVE MODE GETS, AND TWO BROWSER APIS
+// REQUIRE ONE. Both calls must happen synchronously inside the click handler:
+//
+//   1. speechSynthesis. iOS Safari (and therefore every browser on iPhone)
+//      accepts `speak()` from a timer but silently never plays it, until one
+//      utterance has been started from inside a real gesture. No error, no
+//      rejection — just permanent silence. Unlock here or voice guidance does
+//      not exist on iPhone, which is most of the fleet.
+//   2. geolocation. Phone GPS is the only source fresh enough to steer by (ELD
+//      fixes are ~30 s apart), and prompting from a gesture is what makes the
+//      permission dialog appear reliably rather than being auto-dismissed.
+//
+// ⚠️ The phone fix is for the NAVIGATION DISPLAY ONLY. It is never POSTed —
+// `POST /api/location` is a 410 Gone stub and ELD stays the sole source for
+// tracking, driver pay and geofencing. See useDriverPosition.js.
+function openNavMode() {
+  voice.unlock()
+  // ⚠️ ONLY on the driver's own map. This component is also rendered by
+  // JobBoardTab / ActiveLoadsTab / CompletedLoadsTab with `dispatch-mode`, where
+  // the Navigate button is visible but the person tapping it is a dispatcher at
+  // a desk, not the driver in the truck. Prompting them for location would ask
+  // the wrong human for the wrong thing and put a desk in Houston on the map as
+  // if it were the truck. Dispatch keeps the ELD feed it already has.
+  if (!props.dispatchMode) driverPos.startPhoneGps()
+  expanded.value = true
+}
+
 // Drive Mode owns its own map instance, route polyline, traffic overlays, and
 // fullscreen lifecycle (see DriveModeOverlay.vue). closeNavMode just toggles
-// the prop — DriveModeOverlay's watch(open) tears down its map + exits the
-// browser fullscreen, and emits 'close' if the user hits ESC/back instead.
+// the prop — DriveModeOverlay's watch(open) tears down its map and exits the
+// browser fullscreen.
+//
+// Phone GPS is deliberately LEFT RUNNING: the inline route map, the ETA strip
+// and the fuel panel all read the same position, and a driver who steps out of
+// Drive Mode for ten seconds to check a document should not drop back to a 30 s
+// ELD fix. DriverView stops the watcher when the driver app unmounts.
 function closeNavMode() {
   expanded.value = false
 }
