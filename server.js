@@ -1902,6 +1902,86 @@ const routemateUpsertVehicleMinimalStmt = db.prepare(`
 		last_synced_at = CURRENT_TIMESTAMP
 `);
 
+// IDs that Routemate's per-vehicle endpoint has rejected with a 4xx, i.e. "this
+// is not one of our vehicles". routemate_vehicles is a SHARED mirror: the Linxup
+// webhook path writes its own device IDs (numeric, e.g. 18000505841) into the
+// same table, and Routemate answers those with 400 "The given id must not be
+// null". Without this set every sync would re-probe every foreign ID forever.
+// Process-lifetime only, deliberately: a restart re-checks, which is the cheap
+// way to pick up an ID that has since become real without persisting a tombstone.
+const routemateNonInventoryIds = new Set();
+
+// Fill in the vehicle detail (VIN, make, model, year, ...) that the broken
+// /assets/vehicles list endpoint cannot give us, by asking for each vehicle
+// individually — see the getVehicle() note in lib/routemate-client.js.
+//
+// Why this exists: routemate_vehicles.vin is written by exactly one statement
+// (routemateUpsertVehicleStmt), fed by exactly one source (the list endpoint),
+// which 500s. The catch below then falls back to the MINIMAL upsert, which
+// writes IDs only. Net effect before this function: every mirror row had
+// vin='', so the /trucks "Auto-match by VIN" could never match ANY truck and
+// always returned "No Routemate vehicle matches VIN X" — a message asserting a
+// mismatch when the real state was "we hold no VIN at all".
+//
+// Best-effort by construction: it never throws, and a per-vehicle failure only
+// costs that vehicle its detail. Only rows still missing a VIN are fetched, so
+// this is a no-op once the mirror is populated (and instantly self-healing for
+// any newly-discovered device).
+async function routemateHydrateVehicleDetails(creds, { limit = 100 } = {}) {
+	const out = { hydrated: 0, skipped: 0, failed: 0 };
+	let candidates = [];
+	try {
+		candidates = db.prepare(`
+			SELECT routemate_vehicle_id
+			FROM routemate_vehicles
+			WHERE COALESCE(vin, '') = ''
+			ORDER BY last_synced_at DESC
+			LIMIT ?
+		`).all(limit);
+	} catch (err) {
+		console.error("[routemate] hydrate candidate query failed:", err.message);
+		return out;
+	}
+
+	for (const row of candidates) {
+		const id = row.routemate_vehicle_id;
+		if (!id || routemateNonInventoryIds.has(id)) { out.skipped += 1; continue; }
+		try {
+			const v = await routemate.getVehicle(creds, id);
+			if (!v || !v.routemate_vehicle_id) { out.failed += 1; continue; }
+			routemateUpsertVehicleStmt.run({
+				routemate_vehicle_id: v.routemate_vehicle_id,
+				vehicle_id: v.vehicle_id,
+				vin: v.vin,
+				make: v.make,
+				model: v.model,
+				year: v.year,
+				fuel_type: v.fuel_type,
+				license_num: v.license_num,
+				eld_id: v.eld_id,
+				gps_ids: JSON.stringify(v.gps_ids || []),
+				state: v.state,
+				active: v.active ? 1 : 0,
+				raw_json: JSON.stringify(v.raw || {}),
+			});
+			out.hydrated += 1;
+		} catch (err) {
+			// 4xx means Routemate does not recognize this ID — almost always a
+			// Linxup device sharing the mirror. Remember it and stop asking.
+			if (err && err.status >= 400 && err.status < 500) {
+				routemateNonInventoryIds.add(id);
+				out.skipped += 1;
+			} else {
+				out.failed += 1;
+			}
+		}
+	}
+	if (out.hydrated > 0) {
+		console.log(`[routemate] hydrated ${out.hydrated} vehicle record(s) individually (skipped ${out.skipped}, failed ${out.failed})`);
+	}
+	return out;
+}
+
 async function routemateSyncVehicles() {
 	if (!ROUTEMATE_ENABLED || !ROUTEMATE_API_KEY) return { skipped: true, reason: "disabled" };
 	const creds = routemateCreds();
@@ -1936,10 +2016,14 @@ async function routemateSyncVehicles() {
 			if (batch.length < 200) break;
 			page += 1;
 		}
+		// Even a healthy list response can omit detail for a device the telemetry
+		// sweep discovered but the inventory page hasn't caught up on. Only
+		// empty-VIN rows are fetched, so this is a no-op in the normal case.
+		const hydration = await routemateHydrateVehicleDetails(creds);
 		routemateHealth.lastSync.vehicles = new Date().toISOString();
 		routemateHealth.lastError = null;
 		clearRoutemateLogState("vehicles");
-		return { synced: total };
+		return { synced: total, hydrated: hydration.hydrated };
 	} catch (err) {
 		routemateHealth.lastError = { at: new Date().toISOString(), source: "vehicles", message: err.message, status: err.status || null };
 		routemateHealth.errorsLast24h += 1;
@@ -1972,6 +2056,21 @@ async function routemateSyncVehicles() {
 			}
 		} catch (fallbackErr) {
 			console.error("[routemate] vehicle-fallback also failed:", fallbackErr.message);
+		}
+
+		// The minimal fallback above writes IDs only — no VIN — which is exactly
+		// why "Auto-match by VIN" was dead. Routemate's PER-VEHICLE endpoint is
+		// unaffected by the list bug, so now that we know the IDs, ask for each
+		// record individually and fill in the detail the list should have given
+		// us. This is the branch that actually runs in production today.
+		try {
+			const hydration = await routemateHydrateVehicleDetails(creds);
+			if (hydration.hydrated > 0) {
+				err.hydratedIndividually = hydration.hydrated;
+				err.hydrationSkipped = hydration.skipped;
+			}
+		} catch (hydrateErr) {
+			console.error("[routemate] per-vehicle hydration failed:", hydrateErr.message);
 		}
 		throw err;
 	}
@@ -27040,7 +27139,7 @@ app.post("/api/admin/routemate/sync-now", requireRole("Super Admin"), async (req
 		// Trigger one telemetry pull so the operator sees fresh data immediately.
 		routemateSyncTelemetry().catch(() => {});
 		logAudit(req, 'routemate_sync', 'vehicles', '', `Synced ${result.synced} Routemate vehicles`);
-		res.json({ success: true, vehiclesSynced: result.synced });
+		res.json({ success: true, vehiclesSynced: result.synced, vehiclesHydrated: result.hydrated || 0 });
 	} catch (err) {
 		console.error("Routemate sync-now error:", err.message);
 		// Pull telemetry anyway — that endpoint isn't affected by the
@@ -27048,15 +27147,23 @@ app.post("/api/admin/routemate/sync-now", requireRole("Super Admin"), async (req
 		routemateSyncTelemetry().catch(() => {});
 		const upstream500 = err.status === 500;
 		const fellBackToTelemetry = Number.isFinite(err.fallbackSynced);
+		const hydrated = Number.isFinite(err.hydratedIndividually) ? err.hydratedIndividually : 0;
 		res.status(err.status === 401 || err.status === 403 ? err.status : 502).json({
 			error: err.message || "Routemate sync failed",
 			code: err.code || "ROUTEMATE_SYNC_FAILED",
 			upstreamStatus: err.status || null,
-			// Helpful breadcrumb for support — explains *what* Routemate broke.
+			// Helpful breadcrumb for support — explains *what* Routemate broke,
+			// and, when the per-vehicle fallback covered it, that the mirror is
+			// actually populated despite this non-2xx. Without that second half
+			// an operator reads "sync failed" and assumes VIN auto-match is
+			// still dead when it has just been repaired.
 			hint: upstream500
-				? "Routemate's /api/v0/assets/vehicles endpoint is returning HTTP 500. Telemetry (live GPS) is unaffected. Contact Routemate support — this is upstream."
+				? (hydrated > 0
+					? `Routemate's /api/v0/assets/vehicles list endpoint is returning HTTP 500 (upstream bug). Worked around it: ${hydrated} vehicle record(s) fetched individually, so VIN/make/model are up to date and VIN auto-match works. Telemetry (live GPS) is unaffected.`
+					: "Routemate's /api/v0/assets/vehicles endpoint is returning HTTP 500. Telemetry (live GPS) is unaffected. Contact Routemate support — this is upstream.")
 				: undefined,
 			fallbackSynced: fellBackToTelemetry ? err.fallbackSynced : undefined,
+			vehiclesHydrated: hydrated || undefined,
 		});
 	}
 });
@@ -27317,8 +27424,49 @@ app.get("/api/routemate/vehicles", requireRole("Super Admin", "Dispatcher"), (re
 	}
 });
 
+// Trailing digits of a LogisX unit number, which is how the fleet names a truck
+// after the Routemate `vehicleId` on its device: "LogisX-#33" -> "33",
+// "Logisx-#91" -> "91", "LogisX-#2372" -> "2372". Every link that exists in
+// production satisfies this, which is the evidence the convention is real.
+//
+// ⚠️ This is a SUGGESTION key, never an auto-link key. The ELD link is a
+// driver-pay input (it is the map historical loads resolve through to get their
+// travel days) and re-pointing it is guarded by truckEditLockBlockers — so a
+// heuristic that binds without a human confirming is the wrong trade. VIN is the
+// only key strong enough to link on its own. See the auto branch below.
+function unitNumberToken(unit) {
+	const m = String(unit || "").match(/(\d+)\s*$/);
+	return m ? m[1] : "";
+}
+
+// The unlinked Routemate vehicle whose `vehicle_id` matches a truck's unit
+// number, if exactly one does. Returns null on no match OR on ambiguity —
+// two candidates means the convention has broken down for this fleet and
+// guessing between them is worse than offering nothing.
+function suggestRoutemateVehicleForTruck(truck) {
+	const token = unitNumberToken(truck && truck.unit_number);
+	if (!token) return null;
+	const matches = db.prepare(`
+		SELECT rv.routemate_vehicle_id, rv.vehicle_id, rv.vin, rv.make, rv.model, rv.year
+		FROM routemate_vehicles rv
+		WHERE TRIM(rv.vehicle_id) = ?
+		  AND rv.routemate_vehicle_id NOT IN (
+			SELECT routemate_vehicle_id FROM trucks WHERE COALESCE(routemate_vehicle_id, '') <> ''
+		  )
+		LIMIT 2
+	`).all(token);
+	if (matches.length !== 1) return null;
+	return { ...matches[0], reason: "unit-number", matchedOn: token };
+}
+
 // GET /api/routemate/vehicles/unlinked — Routemate vehicles not yet linked
 // to any LogisX truck. Used to populate the link modal in TrucksView.
+//
+// Optional ?truckId=N adds a `suggested` device for that truck (see
+// suggestRoutemateVehicleForTruck). Purely additive — the `vehicles` array is
+// unchanged and callers that omit truckId see the exact same body as before.
+// The rule lives here rather than in the client so it cannot drift from the
+// auto-match branch of POST /link-routemate, which consults the same helper.
 app.get("/api/routemate/vehicles/unlinked", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const rows = db.prepare(`
@@ -27330,7 +27478,17 @@ app.get("/api/routemate/vehicles/unlinked", requireRole("Super Admin", "Dispatch
 			)
 			ORDER BY rv.vin, rv.routemate_vehicle_id
 		`).all();
-		res.json({ vehicles: rows });
+
+		const body = { vehicles: rows };
+		const truckId = parseInt(req.query.truckId, 10);
+		if (truckId) {
+			const truck = db.prepare("SELECT id, unit_number, vin FROM trucks WHERE id = ?").get(truckId);
+			if (truck) {
+				const suggested = suggestRoutemateVehicleForTruck(truck);
+				if (suggested) body.suggested = suggested;
+			}
+		}
+		res.json(body);
 	} catch (err) {
 		console.error("routemate unlinked-vehicles error:", err.message);
 		res.status(500).json({ error: err.message });
@@ -27354,11 +27512,47 @@ app.post("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), (req
 		const auto = req.body && req.body.auto === true;
 
 		if (auto) {
-			if (!truck.vin) return res.status(400).json({ error: "Truck has no VIN to auto-match" });
+			if (!String(truck.vin || "").trim()) {
+				return res.status(400).json({ error: "Truck has no VIN to auto-match", code: "TRUCK_NO_VIN" });
+			}
+			// TRIM both sides, and refuse to match an EMPTY stored VIN. The
+			// non-empty guard is not defensive tidying: routemate_vehicles.vin
+			// defaults to '' and is '' for every row whenever the inventory
+			// hydration hasn't run, so without it a truck whose VIN is
+			// whitespace would silently bind to an arbitrary blank-VIN device.
 			const match = db.prepare(
-				"SELECT routemate_vehicle_id FROM routemate_vehicles WHERE UPPER(vin) = UPPER(?) LIMIT 1"
-			).get(truck.vin.trim());
-			if (!match) return res.status(404).json({ error: `No Routemate vehicle matches VIN ${truck.vin}` });
+				"SELECT routemate_vehicle_id FROM routemate_vehicles WHERE UPPER(TRIM(vin)) = UPPER(TRIM(?)) AND TRIM(vin) <> '' LIMIT 1"
+			).get(truck.vin);
+
+			if (!match) {
+				// Two very different failures used to share one message. Saying
+				// "no vehicle matches VIN X" when we hold NO VIN for ANY device
+				// asserts a mismatch that was never tested — it sent at least one
+				// operator hunting for a data-entry error in a VIN that was in
+				// fact correct. Name the real state instead.
+				const vinStats = db.prepare(
+					"SELECT COUNT(*) AS total, SUM(CASE WHEN TRIM(COALESCE(vin,'')) <> '' THEN 1 ELSE 0 END) AS withVin, MAX(last_synced_at) AS lastSync FROM routemate_vehicles"
+				).get();
+				const suggestion = suggestRoutemateVehicleForTruck(truck);
+				if (!vinStats || !vinStats.withVin) {
+					return res.status(404).json({
+						code: "RM_NO_VIN_DATA",
+						error: `Routemate inventory holds no VIN for any of the ${vinStats ? vinStats.total : 0} mirrored device(s)`
+							+ `${vinStats && vinStats.lastSync ? ` (last sync ${vinStats.lastSync})` : ""}`
+							+ `, so VIN auto-match cannot run — this is not a mismatch with ${truck.vin}.`
+							+ ` Run Sync from Admin Tools to pull vehicle detail, then try again.`,
+						truckVin: truck.vin,
+						mirroredVehicles: vinStats ? vinStats.total : 0,
+						suggestion: suggestion || undefined,
+					});
+				}
+				return res.status(404).json({
+					code: "RM_VIN_NO_MATCH",
+					error: `No Routemate vehicle matches VIN ${truck.vin}`,
+					truckVin: truck.vin,
+					suggestion: suggestion || undefined,
+				});
+			}
 			target = match.routemate_vehicle_id;
 		}
 

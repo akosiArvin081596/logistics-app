@@ -147,9 +147,20 @@
           <div v-if="linkTruck && linkTruck.VIN" style="margin-bottom:0.75rem;">
             <button
               class="btn btn-primary"
-              :disabled="linkBusy"
+              :disabled="linkBusy || noVinData"
+              :title="noVinData
+                ? 'Routemate has not sent a VIN for any device yet \u2014 run Sync in Admin Tools first. Pick the device below instead.'
+                : `Match this truck to the Routemate device with VIN ${linkTruck.VIN}`"
               @click="handleAutoLink"
             >Auto-match by VIN ({{ linkTruck.VIN }})</button>
+            <!-- Auto-match failure renders HERE, beside the button that caused
+                 it, so the picker below survives. It used to share a slot with
+                 the list and wiped it out. -->
+            <div v-if="autoError" class="rm-auto-error">{{ autoError }}</div>
+            <div v-else-if="noVinData" class="rm-auto-note">
+              Routemate hasn't reported a VIN for any device yet, so auto-match can't run.
+              Pick the device below, or run Sync in Admin Tools first.
+            </div>
           </div>
 
           <div v-if="linkLoading" class="rm-pick-empty">Loading Routemate vehicles...</div>
@@ -161,7 +172,10 @@
             <div
               v-for="rv in unlinkedVehicles"
               :key="rv.routemate_vehicle_id"
-              :class="['rm-pick-item', { selected: pickedRoutemateId === rv.routemate_vehicle_id }]"
+              :class="['rm-pick-item', {
+                selected: pickedRoutemateId === rv.routemate_vehicle_id,
+                suggested: suggestedId === rv.routemate_vehicle_id,
+              }]"
               @click="pickedRoutemateId = rv.routemate_vehicle_id"
             >
               <div class="rm-pick-line1">
@@ -171,6 +185,9 @@
               <div class="rm-pick-line2">
                 {{ [rv.year, rv.make, rv.model].filter(Boolean).join(' ') || '\u2014' }}
                 <span v-if="rv.eld_id" class="rm-pick-eld">ELD {{ rv.eld_id }}</span>
+              </div>
+              <div v-if="suggestedId === rv.routemate_vehicle_id" class="rm-pick-suggest">
+                Likely match for {{ linkTruck?.UnitNumber || 'this truck' }} &mdash; confirm with Link Selected
               </div>
             </div>
           </div>
@@ -703,17 +720,45 @@ const unlinkedVehicles = ref([])
 const pickedRoutemateId = ref('')
 const linkBusy = ref(false)
 const linkLoading = ref(false)
+// Two error slots, deliberately separate. `linkError` means "the vehicle list
+// itself is unavailable", so the picker genuinely has nothing to show.
+// `autoError` means "auto-match failed" — the list is still perfectly good and
+// must stay on screen. They were one ref, and because the picker renders in a
+// v-else-if chain after the error, a failed auto-match REPLACED the whole list
+// with the error text and left the admin with no way to link manually until
+// they closed and reopened the modal.
 const linkError = ref('')
+const autoError = ref('')
+const suggestedId = ref('')
+
+// True when the mirror carries no VIN for any offered device — in that state
+// "Auto-match by VIN" cannot succeed for any truck, so say so up front rather
+// than letting the admin discover it by clicking.
+const noVinData = computed(() =>
+  unlinkedVehicles.value.length > 0 && !unlinkedVehicles.value.some(v => (v.vin || '').trim())
+)
 
 async function openLinkModal(truck) {
   linkTruck.value = truck
   pickedRoutemateId.value = ''
+  suggestedId.value = ''
   linkError.value = ''
+  autoError.value = ''
   showLinkRm.value = true
   linkLoading.value = true
   try {
-    const r = await api.get('/api/routemate/vehicles/unlinked')
+    // ?truckId lets the server suggest the likely device by unit number
+    // (Routemate's vehicleId "91" ↔ our "Logisx-#91"). The rule lives server-side
+    // so it cannot drift from the auto-match branch that uses the same helper.
+    const r = await api.get(`/api/routemate/vehicles/unlinked?truckId=${encodeURIComponent(truck.id)}`)
     unlinkedVehicles.value = r.vehicles || []
+    if (r.suggested?.routemate_vehicle_id) {
+      suggestedId.value = r.suggested.routemate_vehicle_id
+      // Pre-select, never auto-submit: the admin still confirms with
+      // "Link Selected". The ELD link is a driver-pay input, so a unit-number
+      // guess is not strong enough to bind on its own.
+      pickedRoutemateId.value = r.suggested.routemate_vehicle_id
+    }
   } catch (err) {
     linkError.value = err?.message || 'Failed to load Routemate vehicles.'
   } finally {
@@ -727,13 +772,16 @@ function closeLinkModal() {
   linkTruck.value = null
   unlinkedVehicles.value = []
   pickedRoutemateId.value = ''
+  suggestedId.value = ''
   linkError.value = ''
+  autoError.value = ''
 }
 
 async function handleLink() {
   if (!linkTruck.value || !pickedRoutemateId.value) return
   linkBusy.value = true
   linkError.value = ''
+  autoError.value = ''
   try {
     await api.post(`/api/trucks/${linkTruck.value.id}/link-routemate`, {
       routemateVehicleId: pickedRoutemateId.value,
@@ -753,13 +801,23 @@ async function handleLink() {
 async function handleAutoLink() {
   if (!linkTruck.value || !linkTruck.value.VIN) return
   linkBusy.value = true
-  linkError.value = ''
+  // Note: autoError only — clearing linkError here would wrongly imply the
+  // vehicle list had recovered.
+  autoError.value = ''
   try {
     await api.post(`/api/trucks/${linkTruck.value.id}/link-routemate`, { auto: true })
     showLinkRm.value = false
     emit('linkage-changed', { id: linkTruck.value.id })
   } catch (err) {
-    linkError.value = err?.message || 'No Routemate vehicle matches this VIN.'
+    autoError.value = err?.message || 'No Routemate vehicle matches this VIN.'
+    // The server offers a fallback candidate matched on unit number. Surface it
+    // as a pre-selection so a failed auto-match is a one-click recovery rather
+    // than a dead end.
+    const suggested = err?.data?.suggestion?.routemate_vehicle_id
+    if (suggested) {
+      suggestedId.value = suggested
+      pickedRoutemateId.value = suggested
+    }
   } finally {
     linkBusy.value = false
   }
@@ -962,5 +1020,22 @@ async function handleUnlink(truck) {
   padding: 0.6rem 0.75rem; font-size: 0.78rem;
   background: #fef2f2; color: #991b1b;
   border: 1px solid #fecaca; border-radius: 6px; margin-bottom: 0.75rem;
+}
+/* Auto-match feedback sits under its own button, not in the picker's slot, so
+   the device list stays on screen when auto-match fails. */
+.rm-auto-error {
+  margin-top: 0.5rem; padding: 0.55rem 0.7rem; font-size: 0.75rem; line-height: 1.4;
+  background: #fef2f2; color: #991b1b;
+  border: 1px solid #fecaca; border-radius: 6px;
+}
+.rm-auto-note {
+  margin-top: 0.5rem; padding: 0.55rem 0.7rem; font-size: 0.75rem; line-height: 1.4;
+  background: #fffbeb; color: #92400e;
+  border: 1px solid #fde68a; border-radius: 6px;
+}
+.rm-pick-item.suggested { background: #f0fdf4; }
+.rm-pick-item.suggested.selected { background: #eff6ff; }
+.rm-pick-suggest {
+  margin-top: 0.3rem; font-size: 0.68rem; font-weight: 600; color: #15803d;
 }
 </style>
