@@ -56,23 +56,42 @@
         <div class="composer-toolbar">
           <label class="attach-btn" title="Attach file">
             &#128206;
-            <input :ref="setInputEl" v-bind="inputProps" style="display:none" />
+            <!-- :disabled AFTER v-bind so it wins the merge. A file picked while
+                 the previous one is still being read would resolve out of order
+                 and silently attach the wrong file; useFileDrop's `busy` option
+                 closes the same door on the drop path. -->
+            <input :ref="setInputEl" v-bind="inputProps" :disabled="!!preparing" style="display:none" />
           </label>
           <select v-if="trucks.length" v-model="selectedAsset" class="asset-select" title="Share asset">
             <option value="">&#128666; Share Truck</option>
             <option v-for="t in trucks" :key="t.id" :value="t.UnitNumber || t.unit_number">{{ t.UnitNumber || t.unit_number }}</option>
           </select>
-          <span v-if="attachFile" class="attach-preview">{{ attachFile.name }} <button class="attach-clear" @click="clearAttach">&times;</button></span>
-          <button class="send-btn" style="margin-left:auto;" :disabled="(!draft.trim() && !attachFile && !selectedAsset) || sending" @click="send">
+          <!-- One slot for both states. `preparing` is only non-empty while a
+               phone photo is being converted, which is seconds rather than
+               milliseconds — without a visible state the paperclip looks like it
+               did nothing. -->
+          <span v-if="preparing" class="attach-preview">Preparing &ldquo;{{ preparing }}&rdquo;&hellip;</span>
+          <span v-else-if="attachment" class="attach-preview">{{ attachment.displayName }} <button class="attach-clear" @click="clearAttach">&times;</button></span>
+          <button class="send-btn" style="margin-left:auto;" :disabled="(!draft.trim() && !attachment && !selectedAsset) || sending || !!preparing" @click="send">
             {{ sending ? '...' : 'Send' }}
           </button>
         </div>
         <!-- The only message slot on this surface — this component has no toast.
-             Copy comes straight from the shared validator and stays plain: an
-             investor reads it, so it never names an admin action or an internal
-             route. -->
-        <p v-if="attachError" class="composer-error" role="alert">
-          <span>{{ attachError }}</span>
+             Copy comes straight from the shared validator and the shared
+             attachment module, and stays plain: an investor reads it, so it
+             never names an admin action or an internal route.
+
+             It carries the composable's `notice` too, because the busy gate
+             REFUSES a drop that lands while a file is still being read — and a
+             refusal nothing renders is a drop that silently did nothing. Styled
+             down and announced politely: waiting is not an error. -->
+        <p
+          v-if="attachError || attachNotice"
+          class="composer-error"
+          :class="{ 'is-notice': !attachError }"
+          :role="attachError ? 'alert' : 'status'"
+        >
+          <span>{{ attachError || attachNotice }}</span>
           <button type="button" class="attach-clear" aria-label="Dismiss" @click="clearMessages">&times;</button>
         </p>
       </div>
@@ -88,7 +107,12 @@ import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useSocket } from '../../composables/useSocket'
 import { useFileDrop } from '../../composables/useFileDrop'
-import { readFileAsDataURL } from '../../lib/imageUtils'
+import {
+  CHAT_ATTACH_ACCEPT,
+  CHAT_ATTACH_MAX_MB,
+  prepareChatAttachment,
+  uploadChatAttachment,
+} from '../../lib/chatAttachment'
 import { useAuthStore } from '../../stores/auth'
 import { useInvestorStore } from '../../stores/investor'
 
@@ -109,9 +133,15 @@ const messages = ref([])
 const draft = ref('')
 const sending = ref(false)
 const chatBody = ref(null)
-const attachFile = ref(null)
 const selectedAsset = ref('')
-const attachBase64 = ref('')
+// One object for the whole attachment — { displayName, fileName, mediaType,
+// dataUrl, uploaded }. Holding the upload result ON the attachment is what makes
+// a retry after a failed send reuse the file already on the server instead of
+// uploading a second copy of it.
+const attachment = ref(null)
+// File name while it is being read/converted, '' otherwise. Doubles as the
+// composer's busy flag.
+const preparing = ref('')
 
 // Receives an already-validated File[] from BOTH paths — the paperclip picker
 // and a drop anywhere on the composer. `multiple` is off, so at most one file
@@ -119,40 +149,51 @@ const attachBase64 = ref('')
 async function onAttach(files) {
   const file = files[0]
   if (!file) return
-  const dataUrl = await readFileAsDataURL(file)
-  // readFileAsDataURL resolves '' on an unreadable/corrupt file rather than
-  // rejecting. Showing the name with no bytes behind it would let send() run
-  // and silently post a message with no attachment, so refuse it here.
-  if (!dataUrl) {
-    attachFile.value = null
-    attachBase64.value = ''
-    attachError.value = `Couldn’t read “${file.name}”. Try attaching it again.`
-    return
+  preparing.value = file.name
+  try {
+    // Converts an iPhone photo (HEIC) to JPEG and renames it to match, refuses
+    // anything it cannot open, and never returns bytes the server will bounce.
+    const result = await prepareChatAttachment(file)
+    if (!result.ok) {
+      // Deliberately does NOT clear a previously attached file — a refused new
+      // pick is no reason to destroy the good one already in the composer.
+      attachError.value = result.error
+      return
+    }
+    attachment.value = result.attachment
+  } finally {
+    preparing.value = ''
+    // The busy notice can only mean "you dropped while the last file was still
+    // being read" — once that is over it is stale, and a stale "still working"
+    // beside a finished attachment reads as a stuck upload.
+    attachNotice.value = ''
   }
-  attachFile.value = file
-  attachBase64.value = dataUrl
 }
 
-// `.pdf` sits beside `application/pdf` on purpose: Windows hands us PDFs with
-// file.type === '', and a MIME-only rule would refuse them on a drop even
-// though the picker (and the server) accept them. 10 MB matches the 13.5M
-// base64 ceiling on POST /api/chat/attachment.
+// `accept` and the 10 MB cap are the shared chat contract (lib/chatAttachment.js)
+// so this composer and the dashboard one cannot drift. `.pdf` sits beside
+// `application/pdf`, and `.heic,.heif` beside `image/*`, for the same reason:
+// Windows hands us PDFs with file.type === '' and every non-Safari browser does
+// the same for iPhone photos, so a MIME-only rule refuses the two formats this
+// app receives most. 10 MB matches the 13.5M base64 ceiling on
+// POST /api/chat/attachment.
 const {
   dropzoneProps,
   inputProps,
   setInputEl,
   dragActive,
   error: attachError,
+  notice: attachNotice,
   clearMessages,
 } = useFileDrop({
-  accept: 'image/*,application/pdf,.pdf',
-  maxSizeMb: 10,
+  accept: CHAT_ATTACH_ACCEPT,
+  maxSizeMb: CHAT_ATTACH_MAX_MB,
+  busy: preparing,
   onFiles: onAttach,
 })
 
 function clearAttach() {
-  attachFile.value = null
-  attachBase64.value = ''
+  attachment.value = null
 }
 
 // In preview mode "me" is the target investor whose portal we're replicating,
@@ -201,7 +242,12 @@ async function load() {
 async function send() {
   const text = draft.value.trim()
   const assetRef = selectedAsset.value || ''
-  if ((!text && !attachFile.value && !assetRef) || sending.value) return
+  const pending = attachment.value
+  if ((!text && !pending && !assetRef) || sending.value) return
+  // Enter-to-send bypasses the button's :disabled entirely, so this gate has to
+  // live here too — otherwise the message goes out without the file the user
+  // just picked.
+  if (preparing.value) return
   sending.value = true
   const optimistic = {
     id: Date.now(),
@@ -216,23 +262,21 @@ async function send() {
   }
   messages.value.push(optimistic)
   draft.value = ''
-  const savedFile = attachFile.value
-  const savedBase64 = attachBase64.value
-  attachFile.value = null
-  attachBase64.value = ''
+  // ⚠️ The attachment is deliberately NOT cleared here. It used to be, so a
+  // failed send removed the optimistic bubble AND took the file with it — the
+  // user had to find and pick it again, with nothing on screen saying so.
   await nextTick()
   scrollBottom()
   try {
     let attachmentUrl = ''
     let attachmentType = ''
-    if (savedFile && savedBase64) {
-      const uploadRes = await api.post('/api/chat/attachment', {
-        fileName: savedFile.name,
-        fileData: savedBase64,
-        mimeType: savedFile.type,
-      })
-      attachmentUrl = uploadRes.fileUrl || ''
-      attachmentType = uploadRes.attachmentType || (savedFile.type.startsWith('image/') ? 'image' : 'file')
+    if (pending) {
+      // Memoized on `pending`: if this already succeeded on a previous attempt
+      // the file is not sent again, so retrying a failed message cannot leave a
+      // second unused copy behind.
+      const uploaded = await uploadChatAttachment(pending, (url, body) => api.post(url, body))
+      attachmentUrl = uploaded.url
+      attachmentType = uploaded.type
       optimistic.attachment_url = attachmentUrl
       optimistic.attachment_type = attachmentType
     }
@@ -245,8 +289,15 @@ async function send() {
       assetRef,
     })
     selectedAsset.value = ''
+    // Only clear what actually went out — the composer stays live during the
+    // request, so the user may already have attached the next file.
+    if (attachment.value === pending) attachment.value = null
   } catch {
     messages.value = messages.value.filter(m => m.id !== optimistic.id)
+    // Put the message back in the box with its attachment. Removing the bubble
+    // without restoring the text is the same loss in a different field — and
+    // only if they haven't started typing the next one.
+    if (!draft.value.trim()) draft.value = text
   } finally {
     sending.value = false
   }
@@ -369,6 +420,14 @@ onUnmounted(() => {
   color: #b91c1c; font-size: 0.72rem; line-height: 1.4;
 }
 .composer-error .attach-clear { color: #b91c1c; }
+/* Same slot, but the busy notice is not a failure — dress it as information or
+   every "wait a moment" reads as "your file was rejected". */
+.composer-error.is-notice {
+  background: var(--bg);
+  border-color: var(--border);
+  color: var(--text-dim);
+}
+.composer-error.is-notice .attach-clear { color: var(--text-dim); }
 .composer-main { flex: 1; display: flex; flex-direction: column; gap: 0.35rem; }
 .chat-input {
   width: 100%; padding: 0.6rem 0.75rem; border: 1px solid var(--border);

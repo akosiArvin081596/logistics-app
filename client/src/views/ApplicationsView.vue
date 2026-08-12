@@ -261,12 +261,21 @@
       </DialogContent>
     </Dialog>
 
+    <!-- `v-if`, NOT just the `:show` prop. Only the overlay inside this
+         component is bound to `show`, so mounting it unconditionally kept one
+         instance alive for the whole session: the file picked for one driver was
+         still held when it reopened for the next, and Upload filed that document
+         against the new driver's user id. Unmounting re-runs every state
+         initializer, including ones added after today. The component also resets
+         itself on `show` — see the watch there — so neither fix alone is load
+         bearing. -->
     <DrugTestUpload
+      v-if="showDrugTest"
       :show="showDrugTest"
       :user-id="drugTestApp?.onboarding_user_id || 0"
       :driver-name="drugTestApp?.full_name || ''"
-      @close="showDrugTest = false"
-      @uploaded="showDrugTest = false; load()"
+      @close="closeDrugTest"
+      @uploaded="onDrugTestUploaded"
     />
   </div>
 </template>
@@ -296,6 +305,26 @@ const drugTestApp = ref(null)
 function openDrugTest(app) {
   drugTestApp.value = app
   showDrugTest.value = true
+}
+
+// Clear the row as well as the flag: with the `v-if` above, leaving it set keeps
+// an applicant's record (name, user id) bound to a modal nobody has open, and it
+// is the value every "which driver is this for?" check reads.
+function closeDrugTest() {
+  showDrugTest.value = false
+  drugTestApp.value = null
+}
+
+// A slow upload can finish after the admin has closed it and opened the NEXT
+// driver. Refresh the list either way — the record really was created — but only
+// close the modal when the result that finished is the one on screen. Closing
+// unconditionally (what `@uploaded="showDrugTest = false; load()"` did) snaps
+// shut a half-filled form for a different person while a success toast is
+// showing, which reads as confirmation for them.
+function onDrugTestUploaded(info) {
+  const current = drugTestApp.value?.onboarding_user_id || 0
+  if (!info?.userId || info.userId === current) closeDrugTest()
+  load()
 }
 const showDetail = ref(false)
 const selectedApp = ref(null)

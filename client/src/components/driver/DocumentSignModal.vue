@@ -24,15 +24,15 @@
             </div>
 
             <label class="sign-checkbox">
-              <input type="checkbox" v-model="agreed" />
+              <input type="checkbox" v-model="state.agreed" />
               <span>{{ SIGNING_CONSENT_TEXT }}</span>
             </label>
 
             <div class="sign-field">
               <label class="sign-field-label">Full Name</label>
               <input
-                v-model="signatureText" type="text" class="sign-input"
-                placeholder="Type your full name" :disabled="!agreed"
+                v-model="state.signatureText" type="text" class="sign-input"
+                placeholder="Type your full name" :disabled="!state.agreed"
               />
             </div>
 
@@ -40,37 +40,37 @@
             <div v-if="isContractorAgreement" class="payment-section">
               <div class="payment-title">Payment Method (Exhibit A)</div>
               <div class="payment-radios">
-                <label class="payment-radio"><input type="radio" v-model="paymentMethod" value="check" :disabled="!agreed" /> Check</label>
-                <label class="payment-radio"><input type="radio" v-model="paymentMethod" value="ach" :disabled="!agreed" /> Direct Deposit (ACH)</label>
+                <label class="payment-radio"><input type="radio" v-model="state.paymentMethod" value="check" :disabled="!state.agreed" /> Check</label>
+                <label class="payment-radio"><input type="radio" v-model="state.paymentMethod" value="ach" :disabled="!state.agreed" /> Direct Deposit (ACH)</label>
               </div>
-              <div v-if="paymentMethod === 'check'" class="sign-field">
+              <div v-if="state.paymentMethod === 'check'" class="sign-field">
                 <label class="sign-field-label">Name on Account</label>
-                <input v-model="checkName" class="pay-input" placeholder="Name on Account" :disabled="!agreed" />
+                <input v-model="state.checkName" class="pay-input" placeholder="Name on Account" :disabled="!state.agreed" />
               </div>
-              <template v-if="paymentMethod === 'ach'">
-                <div class="sign-field"><label class="sign-field-label">Bank Name</label><input v-model="bankName" class="pay-input" placeholder="Name of Bank" :disabled="!agreed" /></div>
+              <template v-if="state.paymentMethod === 'ach'">
+                <div class="sign-field"><label class="sign-field-label">Bank Name</label><input v-model="state.bankName" class="pay-input" placeholder="Name of Bank" :disabled="!state.agreed" /></div>
                 <div class="sign-field">
                   <label class="sign-field-label">Bank Address</label>
                   <input
                     ref="bankAddressInput"
-                    v-model="bankAddress"
+                    v-model="state.bankAddress"
                     class="pay-input"
                     placeholder="Start typing your bank's address..."
-                    :disabled="!agreed"
+                    :disabled="!state.agreed"
                     autocomplete="off"
                   />
                   <div class="sign-field-hint">Pick from the dropdown to ensure the exact branch address is on file — wrong addresses can delay ACH deposits.</div>
                 </div>
-                <div class="sign-field"><label class="sign-field-label">Bank Phone</label><input v-model="bankPhone" class="pay-input" placeholder="Bank Phone #" :disabled="!agreed" /></div>
+                <div class="sign-field"><label class="sign-field-label">Bank Phone</label><input v-model="state.bankPhone" class="pay-input" placeholder="Bank Phone #" :disabled="!state.agreed" /></div>
                 <div class="pay-row">
-                  <div class="sign-field"><label class="sign-field-label">Routing #</label><input v-model="bankRouting" class="pay-input" placeholder="Routing #" :disabled="!agreed" /></div>
-                  <div class="sign-field"><label class="sign-field-label">Account #</label><input v-model="bankAccount" class="pay-input" placeholder="Account #" :disabled="!agreed" /></div>
+                  <div class="sign-field"><label class="sign-field-label">Routing #</label><input v-model="state.bankRouting" class="pay-input" placeholder="Routing #" :disabled="!state.agreed" /></div>
+                  <div class="sign-field"><label class="sign-field-label">Account #</label><input v-model="state.bankAccount" class="pay-input" placeholder="Account #" :disabled="!state.agreed" /></div>
                 </div>
                 <div class="pay-row">
-                  <div class="sign-field"><label class="sign-field-label">Name on Account</label><input v-model="bankAcctName" class="pay-input" placeholder="Name(s) on Account" :disabled="!agreed" /></div>
+                  <div class="sign-field"><label class="sign-field-label">Name on Account</label><input v-model="state.bankAcctName" class="pay-input" placeholder="Name(s) on Account" :disabled="!state.agreed" /></div>
                   <div class="sign-field">
                     <label class="sign-field-label">Account Type</label>
-                    <select v-model="accountType" class="pay-input" :disabled="!agreed">
+                    <select v-model="state.accountType" class="pay-input" :disabled="!state.agreed">
                       <option value="">Select...</option>
                       <option value="Checking">Checking</option>
                       <option value="Savings">Savings</option>
@@ -83,15 +83,28 @@
             <div class="sign-field">
               <label class="sign-field-label">
                 Draw your signature
-                <button v-if="hasDrawn" class="canvas-clear" @click="clearCanvas">Clear</button>
+                <button v-if="state.hasDrawn" class="canvas-clear" @click="clearCanvas">Clear</button>
               </label>
-              <div class="canvas-wrapper" :class="{ disabled: !agreed }">
-                <canvas ref="canvasRef" class="sig-canvas" @pointerdown="startDraw" @pointermove="draw" @pointerup="endDraw" @pointerleave="endDraw"></canvas>
+              <div class="canvas-wrapper" :class="{ disabled: !state.agreed }">
+                <!-- `pointercancel` is NOT optional here, and `pointerleave` does not
+                     cover it: startDraw() calls setPointerCapture, and a captured
+                     pointer cannot leave the element, so once a stroke has begun
+                     pointerleave never fires. The browser cancels a gesture on its
+                     own (a touch reinterpreted as a scroll, a system gesture, an
+                     incoming call), and that path emits pointercancel and nothing
+                     else — so without this binding the stroke never ends and
+                     `isDrawing` stays true. Same terminator on both, exactly as
+                     ZoomableImage.vue / PdfZoomViewer.vue bind theirs. -->
+                <canvas
+                  ref="canvasRef" class="sig-canvas"
+                  @pointerdown="startDraw" @pointermove="draw"
+                  @pointerup="endDraw" @pointerleave="endDraw" @pointercancel="endDraw"
+                ></canvas>
               </div>
             </div>
 
             <button class="sign-btn" :disabled="!canSign" @click="handleSign">
-              {{ signing ? 'Signing...' : 'Sign Document' }}
+              {{ state.signing ? 'Signing...' : 'Sign Document' }}
             </button>
           </div>
 
@@ -129,86 +142,114 @@ const driverStore = useDriverStore()
 const { show: toast } = useToast()
 const { attachAutocomplete } = useGoogleMaps()
 
-const agreed = ref(false)
-const signatureText = ref('')
-const signing = ref(false)
+// Template refs only — DOM handles, not signer state. They stay outside
+// blankState() because <script setup> binds `ref="canvasRef"` by matching the
+// variable NAME, and because the v-if below repopulates them on every open.
 const canvasRef = ref(null)
-const isDrawing = ref(false)
-const hasDrawn = ref(false)
-
-// Payment info (contractor_agreement only)
-const paymentMethod = ref('')
-const checkName = ref('')
-const bankName = ref('')
-const bankAddress = ref('')
-const bankPhone = ref('')
-const bankRouting = ref('')
-const bankAccount = ref('')
-const bankAcctName = ref('')
-const accountType = ref('')
 const bankAddressInput = ref(null)
-let bankAutocompleteAttached = false
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ONE object holds every piece of state a signer puts into this modal, and
+// resetting it is ONE assignment. Same shape as DrugTestUpload.vue, for the same
+// reason: the root element below is `v-if`'d but the COMPONENT is mounted
+// unconditionally by DriverView, so the instance never unmounts and whatever is
+// left here is armed the next time it opens — potentially for a different
+// person, on a legal document.
+//
+// The hand-written reset this replaces listed fifteen fields and omitted
+// `isDrawing`, which is the entire gate `draw()` checks. A stroke the browser
+// cancelled (see the pointercancel note in the template) left it true forever,
+// so on the NEXT open the first pointer move across the canvas drew a stroke
+// with no pointerdown — an unintended mark flattened into a signed PDF and
+// stored as a legal record. A field added to blankState() is cleared for free;
+// a field added to a list of assignments is the next field somebody forgets.
+// ─────────────────────────────────────────────────────────────────────────────
+function blankState() {
+  return {
+    agreed: false,              // consent checkbox; transmitted, not just enforced
+    signatureText: props.driverName || '',
+    signing: false,             // in-flight POST
+    isDrawing: false,           // ⚠️ the gate draw() checks — must reset with the rest
+    hasDrawn: false,            // arms the Sign button and the Clear link
+    pdfUrlOverride: '',         // set after signing to show the signed PDF
+    // Payment info (contractor_agreement only) — bank routing and account
+    // numbers. Released on close, not merely overwritten on the next open.
+    paymentMethod: '',
+    checkName: '',
+    bankName: '',
+    bankAddress: '',
+    bankPhone: '',
+    bankRouting: '',
+    bankAccount: '',
+    bankAcctName: '',
+    accountType: '',
+    autocompleteAttached: false, // one Places listener per open, not per keystroke
+  }
+}
+
+const state = ref(blankState())
 
 const isContractorAgreement = computed(() => props.doc?.doc_key === 'contractor_agreement')
 
-const pdfUrlOverride = ref('')
-
 const pdfUrl = computed(() => {
-  if (pdfUrlOverride.value) return pdfUrlOverride.value
+  if (state.value.pdfUrlOverride) return state.value.pdfUrlOverride
   if (!props.doc) return ''
   if (props.doc.signed && props.doc.signed_pdf_url) return props.doc.signed_pdf_url
   return `/api/onboarding/documents/${props.doc.doc_key}/pdf`
 })
 
 const canSign = computed(() => {
-  if (!agreed.value || !signatureText.value.trim() || !hasDrawn.value || signing.value) return false
+  const s = state.value
+  if (!s.agreed || !s.signatureText.trim() || !s.hasDrawn || s.signing) return false
   if (isContractorAgreement.value) {
-    if (!paymentMethod.value) return false
-    if (paymentMethod.value === 'check' && !checkName.value.trim()) return false
-    if (paymentMethod.value === 'ach' && (!bankName.value.trim() || !bankRouting.value.trim() || !bankAccount.value.trim() || !accountType.value)) return false
+    if (!s.paymentMethod) return false
+    if (s.paymentMethod === 'check' && !s.checkName.trim()) return false
+    if (s.paymentMethod === 'ach' && (!s.bankName.trim() || !s.bankRouting.trim() || !s.bankAccount.trim() || !s.accountType)) return false
   }
   return true
 })
 
+// Reset on BOTH edges of `show`. Opening inherits nothing (that is what stops
+// the stray mark); closing releases what was typed, so a driver's bank routing
+// and account numbers are not sitting in memory behind a modal nobody has open.
+//
+// `immediate` is load-bearing the day anyone adds `v-if="showSignModal"` to the
+// call site in DriverView (belt and braces against this component being mounted
+// forever, and a sensible thing to want). That mounts the component with `show`
+// ALREADY true, so a non-immediate watcher never fires at all and initCanvas()
+// never runs — measured: canvas.width stays 0 and the context keeps its default
+// stroke, i.e. toDataURL() hands the server a blank signature for a document the
+// signer watched themselves sign. It is a no-op today: on mount `show` is false,
+// so the callback rebuilds the (already blank) state and returns.
 watch(() => props.show, async (v) => {
-  if (v) {
-    agreed.value = false
-    signatureText.value = props.driverName || ''
-    signing.value = false
-    hasDrawn.value = false
-    pdfUrlOverride.value = ''
-    paymentMethod.value = ''
-    checkName.value = ''
-    bankName.value = ''
-    bankAddress.value = ''
-    bankPhone.value = ''
-    bankRouting.value = ''
-    bankAccount.value = ''
-    bankAcctName.value = ''
-    accountType.value = ''
-    bankAutocompleteAttached = false
-    await nextTick()
-    initCanvas()
-  }
-})
+  state.value = blankState()
+  if (!v) return
+  await nextTick()
+  initCanvas()
+}, { immediate: true })
 
 // Attach Google Places Autocomplete to the bank address field the moment the ACH form
 // is rendered. Only attaches once per modal open to avoid duplicate listeners.
 // Wrong bank addresses can cause ACH deposits to bounce or delay — this forces the
 // driver to pick a real, verified address instead of typing one freely.
-watch([() => paymentMethod.value, bankAddressInput], async ([method, el]) => {
-  if (method === 'ach' && el && !bankAutocompleteAttached) {
-    bankAutocompleteAttached = true
+watch([() => state.value.paymentMethod, bankAddressInput], async ([method, el]) => {
+  const s = state.value
+  if (method === 'ach' && el && !s.autocompleteAttached) {
+    s.autocompleteAttached = true
     try {
+      // Writes to the captured `s`, not to `state.value`: if the modal is closed
+      // and reopened while Places is still loading, a late pick lands on the
+      // orphaned object instead of typing a stranger's bank address into the
+      // form now on screen.
       await attachAutocomplete(el, ({ formatted }) => {
-        bankAddress.value = formatted
+        s.bankAddress = formatted
       }, {
         types: ['address'],
         componentRestrictions: { country: 'us' },
       })
     } catch (err) {
       // Silently skip if Maps API unavailable — free-text entry still works
-      bankAutocompleteAttached = false
+      s.autocompleteAttached = false
     }
   }
 })
@@ -234,8 +275,8 @@ function getPos(e) {
 }
 
 function startDraw(e) {
-  if (!agreed.value) return
-  isDrawing.value = true
+  if (!state.value.agreed) return
+  state.value.isDrawing = true
   const ctx = canvasRef.value.getContext('2d')
   const pos = getPos(e)
   ctx.beginPath()
@@ -244,49 +285,56 @@ function startDraw(e) {
 }
 
 function draw(e) {
-  if (!isDrawing.value) return
+  if (!state.value.isDrawing) return
   const ctx = canvasRef.value.getContext('2d')
   const pos = getPos(e)
   ctx.lineTo(pos.x, pos.y)
   ctx.stroke()
-  hasDrawn.value = true
+  state.value.hasDrawn = true
 }
 
-function endDraw() { isDrawing.value = false }
-function clearCanvas() { hasDrawn.value = false; initCanvas() }
+// The one terminator, bound to pointerup, pointerleave AND pointercancel.
+function endDraw() { state.value.isDrawing = false }
+function clearCanvas() { state.value.hasDrawn = false; initCanvas() }
 
 async function handleSign() {
   if (!canSign.value) return
-  signing.value = true
+  // Pin the state object and the document this click belongs to, before the
+  // first await. If the modal is closed (or moved to another document) while
+  // the POST is in flight, every write below lands on the orphaned object and
+  // the completion cannot touch — or mislabel — whatever is on screen by then.
+  const s = state.value
+  const docKey = props.doc.doc_key
+  s.signing = true
   try {
     const signatureImage = canvasRef.value?.toDataURL('image/png') || null
     const payInfo = isContractorAgreement.value ? {
-      paymentMethod: paymentMethod.value,
-      checkName: checkName.value,
-      bankName: bankName.value,
-      bankAddress: bankAddress.value,
-      bankPhone: bankPhone.value,
-      bankRouting: bankRouting.value,
-      bankAccount: bankAccount.value,
-      bankAcctName: bankAcctName.value,
-      accountType: accountType.value,
+      paymentMethod: s.paymentMethod,
+      checkName: s.checkName,
+      bankName: s.bankName,
+      bankAddress: s.bankAddress,
+      bankPhone: s.bankPhone,
+      bankRouting: s.bankRouting,
+      bankAccount: s.bankAccount,
+      bankAcctName: s.bankAcctName,
+      accountType: s.accountType,
     } : undefined
     // The checkbox is now TRANSMITTED, not just enforced locally. `canSign`
     // already requires `agreed`, so this cannot send false — but it is built
     // from the same ref rather than hardcoded `true`, so the assertion stays
     // tied to what the signer actually did.
-    await driverStore.signDocument(props.doc.doc_key, signatureText.value.trim(), signatureImage, payInfo, buildConsent(agreed.value))
+    await driverStore.signDocument(docKey, s.signatureText.trim(), signatureImage, payInfo, buildConsent(s.agreed))
     toast('Document signed successfully', 'success')
-    emit('signed', props.doc.doc_key)
+    emit('signed', docKey)
     // Refresh PDF panel to show the signed version (don't close modal)
-    const signedDoc = driverStore.onboarding?.documents?.find(d => d.doc_key === props.doc.doc_key)
+    const signedDoc = driverStore.onboarding?.documents?.find(d => d.doc_key === docKey)
     if (signedDoc?.signed_pdf_url) {
-      pdfUrlOverride.value = signedDoc.signed_pdf_url + '?t=' + Date.now()
+      s.pdfUrlOverride = signedDoc.signed_pdf_url + '?t=' + Date.now()
     }
   } catch (err) {
     toast(err.message || 'Failed to sign document', 'error')
   } finally {
-    signing.value = false
+    s.signing = false
   }
 }
 
