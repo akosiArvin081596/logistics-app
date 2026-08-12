@@ -17,6 +17,13 @@
 // particular are an OBSERVATION next to a CONFIGURATION — a human changes the
 // configured capacity, in Trucks → Edit.
 
+// The ONE import in this file, and the '.js' on it, are both deliberate: the
+// month formatter is shared with lib/payoutPeriod.js (two copies of it under one
+// name in one directory is what this change undoes), and bare Node — the
+// scripts/test-*.js locks — resolves only the explicit specifier. Imported
+// rather than re-exported straight through because this file calls it itself.
+import { monthLabel } from './monthLabel.js';
+
 /** '', null, undefined and non-numeric text all collapse to null — never 0. */
 export function toNum(v) {
   if (v === null || v === undefined || v === '') return null;
@@ -185,20 +192,17 @@ export function lockState(raw) {
 /**
  * "May 2026" from a "YYYY-MM-DD" or "YYYY-MM" key, for the closed badge's title.
  *
- * String slicing only — never `new Date(ymd)`, which parses a bare date as UTC
- * and lands a Houston evening on the previous month at the boundary. This is
- * presentation of a date the row already carries, NOT a derivation of lock
- * state; the boolean above is the only thing that decides closed-ness.
+ * Re-exported, not re-implemented: this file's copy WAS the reference version of
+ * the contract (tolerant input, '' when it cannot read the key), so it now names
+ * lib/monthLabel.js as the one definition and keeps the export so every existing
+ * importer — including lib/dataIssues.js and lib/gallonsRecovery.js, which take
+ * it from here — is untouched. Behaviour is unchanged, save that a key with
+ * stray whitespace now labels instead of blanking.
+ *
+ * This is presentation of a date the row already carries, NOT a derivation of
+ * lock state; lockState() above is the only thing that decides closed-ness.
  */
-const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
-  'July', 'August', 'September', 'October', 'November', 'December'];
-export function monthLabel(ymd) {
-  const s = String(ymd || '');
-  const m = /^(\d{4})-(\d{2})/.exec(s);
-  if (!m) return '';
-  const idx = Number(m[2]) - 1;
-  return idx >= 0 && idx < 12 ? `${MONTHS[idx]} ${m[1]}` : '';
-}
+export { monthLabel };
 
 /**
  * Split a queue into what someone can act on and what is closed.
