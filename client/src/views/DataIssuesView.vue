@@ -64,6 +64,36 @@
           @retry="loadDuplicates"
         />
 
+        <!-- ⚠️ OUTSIDE the `dupGroups.length` guard, deliberately. Voiding the
+             last copy is the SUCCESS case and it empties this queue, so a receipt
+             rendered inside the group list would vanish exactly when it is the
+             only evidence anything happened. It also survives a re-read that
+             fails: the write still landed, and that has to be said. -->
+        <div
+          v-if="voidOutcome"
+          class="void-outcome"
+          :class="{ 'void-outcome-warn': !voidOutcome.complete }"
+          role="status"
+        >
+          <div class="void-outcome-text">{{ voidOutcomeText }}</div>
+          <div class="void-outcome-note">
+            <template v-if="voidOutcome.lockUnreadable">
+              The server could not confirm any month was open, so it withheld everything it wasn't
+              sure about. That is a fault to retry, not a refusal.
+            </template>
+            <template v-else-if="voidOutcome.withheld">
+              The response says how many rows were withheld and never which &mdash; and a receipt's
+              month can differ from the month it is booked to, so that cannot be worked out here. The
+              list was re-read from the database rather than guessed at.
+            </template>
+            <template v-else>
+              Re-read from the database, so the list below is what actually stands now. A rejected
+              receipt is not deleted &mdash; set its status back in Expenses to restore it.
+            </template>
+          </div>
+          <button type="button" class="action-btn act-retry" @click="voidOutcome = null">Dismiss</button>
+        </div>
+
         <template v-if="answered('duplicates') && dupGroups.length">
           <!-- The split is the headline, never one summed number: a group can
                hold one receipt in an open month and one in a month that has
@@ -98,22 +128,34 @@
           </div>
 
           <p class="read-only-note">
-            <strong>This page only reports.</strong> There is no void, merge or delete behind this
-            check &mdash; open a receipt in Expenses to act on it. What is possible there depends on
-            the month, and the chip on each group says which:
+            <strong>A copy can be voided here, in an open month.</strong> Voiding means
+            <em>rejecting</em> the receipt &mdash; the same thing that word means in Expenses, not a
+            delete. A rejected row leaves the P&amp;L and the investor portal and stops matching as a
+            duplicate, while keeping its id, its receipt image and its history, so setting the status
+            back restores it. Nothing is picked for you: the group is a truck, a day and an amount,
+            so neither row is marked as the original and <strong>one copy always stays</strong>.
+            What is on offer depends on the month, and the chip on each group says which:
           </p>
           <ul class="remedy-key">
-            <li><span class="remedy-chip remedy-open">open month</span> Reject the copy in Expenses. Nothing else needed.</li>
-            <li><span class="remedy-chip remedy-correctable">closed &middot; unpaid</span> Month is finalized but the payout has not been sent, so no money has moved. Reopen the month, reject the copy, close it again.</li>
-            <li><span class="remedy-chip remedy-settled">closed &middot; paid</span> The payout already went out. Correcting this means a payout adjustment &mdash; a decision, not a cleanup.</li>
+            <li><span class="remedy-chip remedy-open">open month</span> Tick the copy and reject it here.</li>
+            <li><span class="remedy-chip remedy-correctable">closed &middot; unpaid</span> Month is finalized but the payout has not been sent, so no money has moved and this is still recoverable. It needs the month reopened first, which is a settlement decision &mdash; do it in Payouts, not from a cleanup screen.</li>
+            <li><span class="remedy-chip remedy-settled">closed &middot; paid</span> The payout already went out, so voiding the copy now would not change what was sent. The correction is a payout adjustment &mdash; a decision, not a cleanup.</li>
+            <li><span class="remedy-chip remedy-unknown">closed &middot; unknown</span> The settlement state could not be read, so it is treated as already settled until someone checks the payout for that month.</li>
           </ul>
           <p class="read-only-note read-only-sign">
             A duplicate <em>expense</em> lowers net profit, so it <strong>underpays</strong> the
             investor. Every correction here pays them more &mdash; none of them asks anyone for
-            money back.
+            money back. That is also why one copy has to survive: reject <em>every</em> copy and a
+            purchase that really happened disappears, which overpays instead.
           </p>
 
-          <div v-for="g in dupGroups" :key="g.key" class="dup-group" :class="{ 'dup-closed': g.allClosed }">
+          <!-- `gi` is used ONLY to mint the aria-describedby id below, never as
+               the :key. The group key is `t:<unit>|<date>|<cents>` — or
+               `d:<driver>|…` for a truckless receipt, which carries SPACES. An
+               id containing a space is parsed as two IDREFs by
+               aria-describedby, so the description would silently resolve to
+               nothing on exactly the rows that have no truck stamped. -->
+          <div v-for="(g, gi) in dupGroups" :key="g.key" class="dup-group" :class="{ 'dup-closed': g.allClosed }">
             <div class="dup-head">
               <span class="dup-amount mono">{{ money(g.amount) }}</span>
               <span class="dup-times">&times;{{ g.rows.length }}</span>
@@ -135,6 +177,10 @@
             <table class="data-table dup-table">
               <thead>
                 <tr>
+                  <!-- The column exists only where a choice exists. A disabled
+                       checkbox on every settled group would advertise a control
+                       that can never do anything. -->
+                  <th v-if="canVoid(g)" scope="col" class="pick-head">Void</th>
                   <th scope="col">Expense</th>
                   <th scope="col">Date</th>
                   <th scope="col">Type</th>
@@ -145,7 +191,37 @@
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="r in g.rows" :key="r.id" :class="{ 'row-locked': r.locked === true }">
+                <tr
+                  v-for="r in g.rows"
+                  :key="r.id"
+                  :class="{ 'row-locked': r.locked === true, 'row-picked': isPicked(g, r) }"
+                >
+                  <td v-if="canVoid(g)" class="pick-cell">
+                    <input
+                      v-if="rowVoidable(r)"
+                      type="checkbox"
+                      class="pick-box"
+                      :checked="isPicked(g, r)"
+                      :disabled="voiding"
+                      :aria-label="`Void expense #${r.id} — ${r.vendor || 'no vendor'}, ${money(r.amount)} on ${fmtDate(r.localDay)}`"
+                      @change="togglePick(g, r)"
+                    />
+                    <!-- The dash is decoration; the sentence beside it is the
+                         actual content of this cell. `title` alone would not
+                         do — it is unreliably announced, and "no checkbox" is
+                         exactly the thing that needs explaining rather than
+                         being left as an empty cell. -->
+                    <template v-else>
+                      <span
+                        class="dim tiny"
+                        :title="`${r.periodLabel || 'This month'} is finalized, so this copy can't be voided — the server would withhold it. It still counts as the copy that stays on the books.`"
+                        aria-hidden="true"
+                      >&mdash;</span>
+                      <span class="sr-only">
+                        Cannot be voided &mdash; {{ r.periodLabel || 'this month' }} is finalized.
+                      </span>
+                    </template>
+                  </td>
                   <td class="mono">#{{ r.id }}</td>
                   <td>
                     {{ fmtDate(r.localDay) }}
@@ -172,6 +248,29 @@
                 </tr>
               </tbody>
             </table>
+
+            <!-- Either the action or the reason there isn't one. Never neither:
+                 a group with no button and no sentence is the dead end this
+                 page was rebuilt to stop being. -->
+            <div v-if="canVoid(g)" class="void-bar">
+              <span class="void-count">
+                <template v-if="picked(g).length">
+                  {{ picked(g).length }} of {{ g.rows.length }} selected &middot;
+                  <span class="mono">{{ money(pickedTotal(g)) }}</span>
+                </template>
+                <template v-else>Tick the copy to void &mdash; nothing is selected.</template>
+              </span>
+              <span v-if="pickBlocked(g)" :id="`void-why-${gi}`" class="void-why">{{ pickBlocked(g) }}</span>
+              <button
+                type="button"
+                class="action-btn act-void"
+                :disabled="!!pickBlocked(g) || voiding"
+                :aria-describedby="pickBlocked(g) ? `void-why-${gi}` : undefined"
+                :title="pickBlocked(g) || 'Reject the selected copies — reversible, and one copy stays'"
+                @click="askVoid(g)"
+              >{{ voiding && pendingVoid?.group.key === g.key ? 'Working…' : 'Void selected' }}</button>
+            </div>
+            <p v-else class="void-blocked">{{ voidBlocked(g) }}</p>
           </div>
         </template>
       </section>
@@ -493,20 +592,120 @@
         </div>
       </section>
     </template>
+
+    <!-- Mounted at the page root, outside the section it acts on. The void
+         re-reads the queue on completion and the acted-on group usually stops
+         existing, so a confirm nested inside that list would be torn down
+         underneath itself.
+
+         ⚠️ ConfirmModal puts Cancel FIRST in the DOM and gives it initial focus
+         on purpose — that ordering is what makes a reflexive Enter safe on a
+         money row. Do not reorder these, and do not move focus to the confirm. -->
+    <ConfirmModal
+      :open="!!pendingVoid"
+      title="Void these copies?"
+      :message="voidMessage"
+      confirm-text="Void receipts"
+      cancel-text="Keep them"
+      :danger="true"
+      :confirm-disabled="!voidAck || voiding"
+      @confirm="runVoid"
+      @cancel="closeVoid"
+    >
+      <!-- ⚠️ AN ACKNOWLEDGEMENT *AND* AN OPTIONAL REASON. Both halves are
+           deliberate, and the copy under them is the part that has to stay
+           truthful.
+
+           This slot used to say "there is no separate note", which was CORRECT
+           when it was written: PUT /api/expenses/bulk-status accepted no reason
+           and wrote no audit row, so a reason box would have implied a record
+           that did not exist. The endpoint now writes one audit_trail row per
+           call and appends the reason to it, so the same sentence became an
+           UNDERSTATEMENT — the mirror of the problem it was guarding against, on
+           the one page whose whole purpose is that a check never claims more, or
+           less, than it did. Check expenseStatusReason() in server.js before
+           editing this copy again; it is what decides whether it is true.
+
+           The reason is OPTIONAL because the server's is — see VOID_REASON_MAX
+           in lib/dataIssues.js for why a client-only requirement would be an
+           unenforced rule rather than a contract. The acknowledgement is
+           unchanged and is still what gates the confirm button, so nothing here
+           is a weaker gate than before. -->
+      <!-- ⚠️ THE NOTE MOVED OUT OF THE LABEL, and that is a consequence of
+           lengthening it. A <label> wrapping its own explanation makes the whole
+           paragraph the checkbox's accessible NAME, so a screen reader announces
+           three sentences of provenance where the operator needs one claim. It is
+           an aria-describedby sibling now: the name is the claim, the record is
+           the description. The label still wraps the checkbox, so the claim
+           itself remains a click target. -->
+      <label class="void-ack">
+        <input
+          v-model="voidAck"
+          type="checkbox"
+          :disabled="voiding"
+          :aria-describedby="voidAckNoteId"
+        />
+        <span>I have checked these are copies of one purchase.</span>
+      </label>
+      <p :id="voidAckNoteId" class="void-ack-note">
+        Recorded twice: on the receipt itself, as its status changing to Rejected and visible in
+        Expenses, and as one audit-trail entry naming the expense ids, the account that sent it and
+        the time. That entry is a server-side record &mdash; there is no screen for it here.
+      </p>
+
+      <!-- Optional, and labelled as such rather than left to be discovered by
+           clicking Confirm. The ids and the group already say WHAT was voided;
+           this is only for the part a person knows and the row cannot show.
+
+           ⚠️ `for`/`aria-describedby` rather than a WRAPPING label, unlike the
+           acknowledgement above. A wrapper folds every descendant into the
+           field's accessible name, which here would be the label, the whole
+           storage sentence AND the live character count — a name that changes on
+           every keystroke. Split, the name stays "Why this copy optional" and the
+           sentence is a stable description. The counter is decorative: maxlength
+           enforces the cap, so it is aria-hidden rather than announced. -->
+      <div class="void-reason">
+        <label class="void-reason-head" :for="voidReasonId">
+          Why this copy <span class="void-reason-opt">optional</span>
+          <span v-if="voidReasonText" class="void-reason-count" aria-hidden="true">
+            {{ voidReasonText.length }} / {{ VOID_REASON_MAX }}
+          </span>
+        </label>
+        <textarea
+          :id="voidReasonId"
+          v-model="voidReason"
+          class="void-reason-input"
+          rows="2"
+          :maxlength="VOID_REASON_MAX"
+          :disabled="voiding"
+          :aria-describedby="voidReasonNoteId"
+          placeholder="e.g. driver submitted the same receipt twice"
+        ></textarea>
+        <p :id="voidReasonNoteId" class="void-reason-note">
+          Kept on that audit entry, for the receipts that are actually rejected. Leave it blank and
+          the entry still records the ids, the account and the time.
+        </p>
+      </div>
+      <p v-if="voidError" class="void-error" role="alert">{{ voidError }}</p>
+    </ConfirmModal>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, h } from 'vue'
+import { ref, computed, onMounted, h, useId } from 'vue'
 import { useRouter } from 'vue-router'
 import { fmtYmd, fmtTimestamp } from '../utils/datetime'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
+import ConfirmModal from '../components/shared/ConfirmModal.vue'
 import {
-  ISSUE_QUEUES, RATECON_COST_NOTE,
+  ISSUE_QUEUES, RATECON_COST_NOTE, VOID_STATUS,
   emptyQueueState, queueAnswered, queueErrorText,
   queueEstablished, queueInconclusiveText,
   duplicateGroups, duplicateSummary, duplicateRowCounts,
+  rowVoidable, voidableRows, voidBlockedReason, voidSelectionCheck,
+  voidConfirmMessage, summarizeVoidResult, voidResultText,
+  VOID_REASON_MAX, normalizeVoidReason, voidRequestBody,
   rateconReport, onboardingFailures, regenerateBlockedReason,
   linxupReport, verifyTrucks, countVerifyChecks,
   tankDecisionCandidate, tankDecisionFallback,
@@ -735,9 +934,10 @@ function verdictLabel(t) {
 
 // --- Actions ----------------------------------------------------------------
 
-// Duplicate receipts have NO write path — no void, no merge, no delete — so the
-// only action a row earns is going to look at it. Precedent: openReceiptRow()
-// in ExpensesTab, which likewise navigates rather than mutating.
+// Every duplicate row still earns "go and look at it", void path or not — a
+// closed month has no other action, and even an open one is often a question
+// ("is this really the same purchase?") that the receipt image answers.
+// Precedent: openReceiptRow() in ExpensesTab, which likewise navigates.
 //
 // `?expense=<id>` is consumed by ExpensesView/ExpensesTab (PR #265): it pages to
 // the row, opens it through that same openReceiptRow(), and clears the param.
@@ -748,6 +948,173 @@ function verdictLabel(t) {
 function openExpense(row) {
   if (row?.id == null) return
   router.push({ path: '/expenses', query: { expense: String(row.id) } })
+}
+
+// --- Voiding a duplicate copy ------------------------------------------------
+//
+// The write this whole page used to lack. The client asked to "delete the copies
+// of receipts"; the mechanism is REJECT, not delete — see the note on
+// normalizeDuplicateGroup() for why that one status flip is enough to clear both
+// the investor portal and this queue.
+//
+// Selection is per group and starts EMPTY. There is no "select all", and that is
+// not an omission: a group is a truck, a day and an amount, none of which marks
+// one row as the original, so the page has no basis on which to pre-tick
+// anything. Choosing is the operator's job and the table shows vendor, gallons,
+// amount, date and expense id so it can be done.
+const picks = ref({})
+const pendingVoid = ref(null)
+const voidAck = ref(false)
+const voidReason = ref('')
+const voiding = ref(false)
+const voidError = ref('')
+const voidOutcome = ref(null)
+
+// What the server will actually store, not the raw textarea. The normalizer is
+// the client-side mirror of expenseStatusReason(), so the counter beside the
+// field is the stored length rather than the typed one — a page that reports on
+// its own writes should not be out by a newline.
+const voidReasonText = computed(() => normalizeVoidReason(voidReason.value))
+
+// Per-instance ids, for the same reason ConfirmModal mints its own: the dialog
+// teleports to <body>, so a hardcoded id would sit in the global document
+// alongside anything else that ever reuses the name, and `for`/aria-describedby
+// would then point at whichever the browser found first.
+const uid = useId()
+const voidAckNoteId = `void-ack-note-${uid}`
+const voidReasonId = `void-reason-${uid}`
+const voidReasonNoteId = `void-reason-note-${uid}`
+
+// The gates live in lib/dataIssues.js so they are testable without a browser and
+// so the group rule and the row rule can never drift apart. `canVoid` is
+// deliberately "has at least one voidable row" rather than "remedy is open": a
+// group could in principle be open and hold nothing selectable, and offering an
+// empty checkbox column there would be the same dead control as offering one on
+// a settled month.
+const canVoid = (g) => voidableRows(g).length > 0
+const voidBlocked = (g) => voidBlockedReason(g)
+
+// The groups this page CANNOT settle, split by why. Drives the decision card
+// below: with a void path in place, "which copies should go" stopped being an
+// open question for an open month, and the only thing still needing an owner is
+// the money sitting in months that are already closed.
+const dupBlocked = computed(() => {
+  const groups = dupGroups.value.filter((g) => !canVoid(g))
+  const by = (remedy) => groups.filter((g) => g.remedy === remedy)
+  return {
+    groups,
+    correctable: by('correctable'),
+    settled: by('settled'),
+    unknown: by('unknown'),
+    excess: groups.reduce((s, g) => s + (g.excessAmount ?? 0), 0),
+    correctableExcess: by('correctable').reduce((s, g) => s + (g.excessAmount ?? 0), 0),
+  }
+})
+const picked = (g) => picks.value[g.key] || []
+const isPicked = (g, r) => picked(g).includes(r.id)
+const pickedRows = (g) => voidSelectionCheck(g, picked(g)).rows
+const pickedTotal = (g) => pickedRows(g).reduce((s, r) => s + (r.amount ?? 0), 0)
+// '' when the selection is sendable; otherwise the sentence saying why not —
+// nothing ticked, or a selection that would leave no copy behind.
+const pickBlocked = (g) => voidSelectionCheck(g, picked(g)).reason
+
+function togglePick(g, r) {
+  if (voiding.value) return
+  const cur = picked(g)
+  const next = cur.includes(r.id) ? cur.filter((id) => id !== r.id) : [...cur, r.id]
+  picks.value = { ...picks.value, [g.key]: next }
+}
+
+function askVoid(g) {
+  const check = voidSelectionCheck(g, picked(g))
+  // The button is already disabled in this state; this is the second gate, so a
+  // keyboard or programmatic path cannot open a confirm the rules refuse.
+  if (!check.ok) { toast(check.reason, 'warning'); return }
+  voidError.value = ''
+  voidAck.value = false
+  // Cleared per opening, like the acknowledgement: a note typed for one group
+  // must never carry over onto the next one's audit row.
+  voidReason.value = ''
+  pendingVoid.value = { group: g, rows: check.rows }
+}
+
+function closeVoid() {
+  // Refused mid-write on purpose. The request is already in flight and cannot be
+  // recalled, so closing here would hide the only surface holding its error and
+  // leave the operator unsure whether a money row moved.
+  if (voiding.value) return
+  pendingVoid.value = null
+  voidAck.value = false
+  voidReason.value = ''
+  voidError.value = ''
+}
+
+const voidMessage = computed(() =>
+  pendingVoid.value
+    ? voidConfirmMessage(pendingVoid.value.group, pendingVoid.value.rows, money)
+    : '')
+const voidOutcomeText = computed(() => voidResultText(voidOutcome.value))
+
+async function runVoid() {
+  const pending = pendingVoid.value
+  if (!pending || voiding.value || !voidAck.value) return
+
+  // Re-checked at the moment of the write, not just at the moment of the click:
+  // the invariant that matters — one copy survives — has to hold when the
+  // request actually goes out, and re-running the same function is cheaper than
+  // reasoning about whether anything could have moved in between.
+  //
+  // ⚠️ It re-checks `pending.rows`, NOT the live selection. Those are the ids
+  // the dialog spelled out, and they are the only ones the operator agreed to;
+  // reading `picks` here would let the set drift between the confirmation and
+  // the write, so the receipt that got voided need not be the one that was named.
+  const check = voidSelectionCheck(pending.group, pending.rows.map((r) => r.id))
+  if (!check.ok) { voidError.value = check.reason; return }
+  const ids = check.rows.map((r) => r.id)
+
+  voiding.value = true
+  voidError.value = ''
+  let resp = null
+  try {
+    // ⚠️ THE IDS ARE FROZEN AND THE REASON IS READ LIVE, and that asymmetry is
+    // the point. `pending.rows` is what the dialog SPELLED OUT and the operator
+    // agreed to, so re-reading the selection there would let the set drift. The
+    // reason is AUTHORED inside that same dialog and only exists at this moment,
+    // so it has to come from the field. It rides in `reason`; `ids` and `status`
+    // are untouched, so a server that ignores the key behaves exactly as before.
+    resp = await api.put('/api/expenses/bulk-status', voidRequestBody(ids, voidReason.value))
+  } catch (err) {
+    // Left in place rather than toasted away. A 403, a timeout or a 400 is the
+    // whole explanation for why nothing happened, and the confirm is where the
+    // operator is looking — same reasoning as the delete confirm in
+    // ActiveLoadsTab, which used to swallow its 409 and read as a hung click.
+    // The typed reason is deliberately NOT cleared here — the dialog stays open
+    // and a retry should not cost the operator the sentence they just wrote.
+    voidError.value = err?.message || 'Could not void those receipts.'
+    voiding.value = false
+    return
+  }
+
+  const summary = summarizeVoidResult(resp, ids.length)
+
+  // ⚠️ RE-READ, NEVER PATCH. The response carries how many rows were withheld
+  // and never which, and the gap is not closable from here: expenses.posted_period
+  // books a receipt whose own month is closed into the current open one, so a row
+  // dated 2026-05 can be perfectly editable while its date says otherwise.
+  // Matching dates against `finalizedPeriods` gets exactly that row backwards.
+  // Server-told only — the same rule lockState() enforces one level down.
+  await loadDuplicates()
+
+  voiding.value = false
+  pendingVoid.value = null
+  voidAck.value = false
+  voidReason.value = ''
+  // Keep the selection only where retrying is the actual fix. A row withheld by a
+  // genuinely finalized month will be withheld again, so holding it ticked only
+  // invites a second click that does nothing.
+  if (!summary.retryable) picks.value = { ...picks.value, [pending.group.key]: [] }
+  voidOutcome.value = summary
+  toast(voidResultText(summary), summary.complete ? 'success' : 'warning')
 }
 
 const regenBlocked = (f) => regenerateBlockedReason(f)
@@ -895,34 +1262,62 @@ const decisions = computed(() => {
       + 'the MPG the driver is shown.',
   })
 
-  // 4. Which duplicates to void — links back to the section above.
-  const dupSum = dupSummary.value
-  if (answered('duplicates') && dupSum && dupSum.groupCount > 0) {
+  // 4. The duplicates this page cannot settle.
+  //
+  // ⚠️ THE OLD QUESTION HERE WAS "which of the duplicate receipts should be
+  // voided?", and it is answered — an open month's copies are voided in the
+  // section above, by whoever is looking at them. Leaving it standing would ask
+  // the owner to decide something the page now does. What genuinely still needs
+  // a decision is the money in months that are already closed: one bucket is
+  // recoverable but needs a month reopened, the other needs a payout adjustment,
+  // and neither is a cleanup click. So the card renders ONLY when such a group
+  // exists, and disappears once the queue holds nothing but open months.
+  const blocked = dupBlocked.value
+  if (answered('duplicates') && blocked.groups.length > 0) {
+    const n = (list, word) => `${list.length} ${word}${list.length === 1 ? '' : 's'}`
+    const evidence = [
+      {
+        label: 'Stuck in closed months',
+        value: money(blocked.excess),
+        note: `excess across ${n(blocked.groups, 'group')} — none of it voidable from this page`,
+      },
+    ]
+    if (blocked.correctable.length) {
+      evidence.push({
+        label: 'Recoverable — payout not sent',
+        value: `${money(blocked.correctableExcess)} · ${n(blocked.correctable, 'group')}`,
+        note: 'the month is finalized but no money has moved, so reopening it costs nothing but the reopen',
+      })
+    }
+    if (blocked.settled.length) {
+      evidence.push({
+        label: 'Already paid out',
+        value: n(blocked.settled, 'group'),
+        note: 'cannot be un-sent — a payout adjustment, not a correction',
+        warn: true,
+      })
+    }
+    if (blocked.unknown.length) {
+      evidence.push({
+        label: 'Settlement unreadable',
+        value: n(blocked.unknown, 'group'),
+        note: 'treated as settled until the payout for that month is checked',
+        warn: true,
+      })
+    }
     out.push({
       id: 'duplicates',
-      question: 'Which of the duplicate receipts should be voided?',
-      evidence: [
-        { label: 'Booked twice', value: money(dupSum.excessAmount), note: 'excess across every group' },
-        {
-          label: 'Receipts',
-          value: `${dupCounts.value.actionable} open · ${dupCounts.value.closed} closed`,
-          note: dupCounts.value.closed
-            ? 'the closed ones sit in finalized months and cannot be edited'
-            : '',
-          warn: dupCounts.value.closed > 0,
-        },
-        {
-          label: 'Strongest evidence',
-          value: `${dupSum.byConfidence.high} high-confidence group${dupSum.byConfidence.high === 1 ? '' : 's'}`,
-        },
-      ],
+      question: 'What should happen to the duplicates in months that are already closed?',
+      evidence,
       impact:
-        'Every duplicate inflates fuel spend and cost-per-mile, and flows into the investor payout for that '
-        + 'month. The ones in closed months cannot be corrected in place at all — they need a settlement '
-        + 'adjustment instead.',
+        'Each of these was booked twice, which depresses net profit for that month and therefore UNDERPAYS '
+        + 'the investor — so correcting one pays them more and asks nobody for money back. The recoverable '
+        + 'ones only need the month reopened; the paid ones need an adjustment on a settlement that has '
+        + 'already gone out.',
       unblocks:
-        'A decision on each group lets the open ones be corrected in Expenses and the closed ones be booked '
-        + 'as prior-period adjustments, so fuel cost-per-mile stops reading high.',
+        'A decision per bucket: reopen those months in Payouts and the copies become voidable here like any '
+        + 'other open month, or book the paid ones as adjustments. Either way fuel cost-per-mile stops '
+        + 'reading high for those months.',
       jumpTo: 'duplicates',
     })
   }
@@ -1196,6 +1591,147 @@ onMounted(loadAll)
 
 .read-only-sign { border-left-color: #fbbf24; }
 
+/* --- Voiding a copy ------------------------------------------------------ */
+
+/* Narrow, and first, so the choice reads as part of the row rather than an
+   afterthought bolted to the end next to "Open in Expenses". */
+.pick-head { width: 3.2rem; }
+.pick-cell { text-align: center; }
+.pick-box {
+  width: 1rem; height: 1rem;
+  cursor: pointer;
+  accent-color: #b91c1c;
+}
+.pick-box:disabled { cursor: not-allowed; opacity: 0.5; }
+/* A ticked row is about to leave the books — worth seeing at a glance from the
+   confirm dialog's summary back to the table underneath it. */
+.row-picked td { background: #fef2f2; }
+
+.void-bar {
+  display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
+  margin-top: 0.6rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--bg);
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+.void-count { font-weight: 600; }
+/* Why the button is disabled, stated rather than left to be inferred from a
+   greyed control. Sits before the button so a screen reader meets the reason on
+   the way to it, and is wired up as its aria-describedby. */
+.void-why { color: #92400e; }
+.void-bar .action-btn { margin-left: auto; }
+
+/* The counterpart for a group that offers nothing: the reason, in place. A
+   group with neither a button nor a sentence is the dead end this page exists
+   to stop being. */
+.void-blocked {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  line-height: 1.5;
+  margin: 0.6rem 0 0;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--bg);
+}
+
+/* Outcome of a void. Green only when everything landed — a partial write
+   reported as a complete one is the exact failure this notice exists for. */
+.void-outcome {
+  display: flex; flex-direction: column; gap: 0.35rem;
+  align-items: flex-start;
+  font-size: 0.8rem;
+  color: #166534;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  padding: 0.7rem 0.85rem;
+  margin-bottom: 1rem;
+}
+.void-outcome-warn {
+  color: #92400e;
+  background: #fffbeb;
+  border-color: #fde68a;
+}
+.void-outcome-text { font-weight: 700; }
+.void-outcome-note { line-height: 1.5; opacity: 0.9; }
+
+/* Confirm-dialog slot. The acknowledgement is the intent gate, so it has to be
+   comfortably clickable and unmistakably not pre-ticked. */
+.void-ack {
+  display: flex; align-items: flex-start; gap: 0.5rem;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  cursor: pointer;
+}
+.void-ack input { margin-top: 0.15rem; flex: none; width: 0.95rem; height: 0.95rem; accent-color: #b91c1c; }
+/* A sibling of the label rather than a child (see the markup note), so the
+   indent that used to come from nesting is restated here: checkbox width plus
+   the flex gap, keeping the note aligned under the claim it explains. */
+.void-ack-note {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  line-height: 1.45;
+  margin: 0.2rem 0 0;
+  padding-left: calc(0.95rem + 0.5rem);
+}
+
+/* The optional note. Quieter than the acknowledgement above it — that one is the
+   gate, this one is a courtesy to whoever reads the audit row later. */
+.void-reason { margin-top: 0.85rem; }
+.void-reason-head {
+  display: flex; align-items: baseline; gap: 0.4rem;
+  font-size: 0.8rem; font-weight: 600;
+  cursor: pointer;
+}
+/* Said in the label, not left to be discovered by pressing Confirm. */
+.void-reason-opt {
+  font-size: 0.62rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--text-dim);
+  background: var(--bg); border-radius: 0.25rem; padding: 0.1rem 0.3rem;
+}
+.void-reason-input {
+  display: block;
+  width: 100%;
+  margin-top: 0.3rem;
+  font: inherit;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  /* Free text, not a layout element: growing it sideways would push the dialog
+     wider than the summary it sits under. */
+  resize: vertical;
+  min-height: 2.4rem;
+}
+.void-reason-input:focus-visible { outline: 2px solid #b91c1c; outline-offset: 1px; }
+.void-reason-input:disabled { opacity: 0.6; cursor: not-allowed; }
+.void-reason-note {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  line-height: 1.4;
+  margin: 0.25rem 0 0;
+}
+/* Pushed to the far end of the label row. Decorative (aria-hidden) — maxlength
+   is what actually enforces the cap. */
+.void-reason-count {
+  margin-left: auto;
+  font-size: 0.68rem; font-weight: 600;
+  color: var(--text-dim);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.void-error {
+  margin: 0.75rem 0 0;
+  font-size: 0.78rem;
+  color: #b91c1c;
+  background: #fef2f2;
+  border-radius: 6px;
+  padding: 0.45rem 0.6rem;
+}
+
 /* Tables — same vocabulary as PayoutsView so admin pages read alike. */
 .data-table {
   width: 100%;
@@ -1245,6 +1781,11 @@ onMounted(loadAll)
 .act-regen:hover:not(:disabled) { background: #ddd6fe; }
 .act-retry { background: #fef3c7; color: #92400e; }
 .act-retry:hover:not(:disabled) { background: #fde68a; }
+/* The only destructive control on this page, and the only red one. Everything
+   else here is amber (work to do) or indigo (go and look) — a void writes to a
+   finance row, so it should not look like navigation. */
+.act-void { background: #fee2e2; color: #991b1b; }
+.act-void:hover:not(:disabled) { background: #fecaca; }
 
 .status-pill {
   display: inline-block;
@@ -1306,5 +1847,11 @@ onMounted(loadAll)
   .dup-excess { margin-left: 0; }
   .ev-label { min-width: 0; }
   .issue-bar button { justify-content: center; flex: 1 1 100%; }
+  /* The void button wraps to its own line here anyway — make it a full-width
+     tap target rather than a small one floated to the right edge. */
+  .void-bar .action-btn { margin-left: 0; width: 100%; padding: 0.5rem; }
+  .pick-head { width: 2.2rem; }
+  /* Bigger hit area on touch: the checkbox is the whole decision. */
+  .pick-box { width: 1.15rem; height: 1.15rem; }
 }
 </style>

@@ -5,8 +5,9 @@
       <p class="bulk-sub">
         Pick a driver, drop in a stack of receipts, and each one is scanned into an
         editable row. Review the reads, fix anything off, then save them all as
-        expenses. Photos <em>and</em> PDFs are auto-read (PDFs up to 6&nbsp;MB).
-        iPhone (HEIC) photos supported.
+        expenses. Photos <em>and</em> PDFs are auto-read up to {{ MAX_OCR_LABEL }} —
+        anything bigger is still attached to the expense, you just type its fields
+        in yourself. iPhone (HEIC) photos supported.
       </p>
     </div>
 
@@ -77,12 +78,20 @@
          the reason a drop won't land is visible DURING the drag (no-drop cursor
          + the label saying why) instead of after the files are already released.
          The toast in onFilesSelected stays as the fallback for the picker path
-         and for assistive tech. -->
+         and for assistive tech.
+
+         `max-size-mb` is the WIDER of the two server attach caps, because the
+         zone has one number and the server has two (20 MB photo / 15 MB PDF).
+         Everything past 20 MB is refused here, with the zone's own persistent
+         inline message; the 15–20 MB PDF band is refused by the per-type check
+         in onFilesSelected, which is the only place the file's type is known.
+         Both limits are stated in the hint below so neither number is a
+         surprise. -->
     <FileDropZone
       accept="image/*,.heic,.heif,application/pdf,.pdf"
       multiple
       :max-files="remainingSlots"
-      :max-size-mb="25"
+      :max-size-mb="MAX_IMAGE_ATTACH_MB"
       :compact="rows.length > 0"
       :disabled="atCapacity || processing || saving || !defaultDriver"
       :busy="processing"
@@ -365,6 +374,20 @@ import { useToast } from '../../../composables/useToast'
 import { useViewport } from '../../../composables/useViewport'
 import { useDocumentScan } from '../../../composables/useDocumentScan'
 import { compressImage, readFileAsDataURL } from '../../../lib/imageUtils'
+// The same formatter ExpensesTab's duplicate dialog uses (its `fmtDate` is a
+// one-line alias for this). See describeExistingExpense below — the two must
+// render the matched row's date identically or they read as two different rows.
+import { fmtYmd } from '../../../utils/datetime'
+// "2026-06" -> "June 2026"; '' when it cannot read the key. Shared with the
+// driver's ExpenseForm, which shows the same note for the same server response.
+//
+// ⚠️ The local copy this replaces built the label with `new Date(y, m - 1, 1)`,
+// which SILENTLY ROLLS OVER: '2026-13' rendered "January 2027" and '2026-00'
+// rendered "December 2025". Not a blank and not a raw key — a real-looking month,
+// off by a year, in the one sentence that tells someone which month their $400
+// receipt landed in. The shared formatter returns '' for both, and the guard at
+// the saveOne() call site turns that into silence, not a half-written sentence.
+import { monthLabel } from '../../../lib/monthLabel'
 import FileDropZone from '../../shared/FileDropZone.vue'
 
 const props = defineProps({
@@ -379,15 +402,42 @@ const { isMobile } = useViewport()
 const { scanDocument } = useDocumentScan()
 
 const MAX_BATCH = 25
-// PDFs now go to OCR like photos, so this cap is the SCANNER's limit — not a
-// limit on what can be attached.
-// The OCR endpoint 413s on a photoData string over 8,500,000 chars, so anything
-// larger is measured AFTER encoding and simply doesn't get scanned. It is still
-// attached to the expense (expense-create accepts far more — the body limit is
-// 50 MB), because losing the receipt is worse than losing the auto-fill.
-// 6 MiB of source encodes to ~8.39M chars, hence the user-facing label.
+
+// ── Two DIFFERENT size ceilings, and collapsing them into one is a bug ───────
+// This surface once shipped a flat 25 MB refusal, which conflated them and got
+// both halves wrong: it refused a 22 MB photo the server would have stored, and
+// it accepted a 7 MB PDF only to skip its scan — the same outcome as a 24 MB
+// one, reached by a different rule.
+//
+// ATTACH — what POST /api/expenses will actually STORE. Over these it answers
+//   413 and the whole insert fails, so the expense does not save AT ALL and the
+//   receipt is lost with it. That is the only thing that justifies refusing a
+//   file at the door, and it is why the numbers are the server's own:
+//     saveReceiptToDisk    MAX_IMAGE_RECEIPT_BYTES = 20 MB decoded
+//     savePdfReceiptToDisk MAX_PDF_RECEIPT_BYTES   = 15 MB decoded
+//   (Not the 50 MB express body limit — that is the ceiling on the whole JSON
+//   envelope, not on what the receipt writers accept.)
+//
+// OCR — what POST /api/expenses/ocr will READ: a photoData string of at most
+//   8,500,000 chars, i.e. ~6 MiB of source once base64 inflates it by 4/3. Over
+//   this the SCAN IS SKIPPED and the receipt still rides along with the expense,
+//   because losing the receipt is worse than losing the auto-fill. Measured
+//   after encoding, since that is what the endpoint measures.
+//   POST /api/documents/scan (the ScanKit enhance pass) caps at the same number,
+//   so one test covers both and neither doomed request is sent.
+//
+// ⚠️ file.size is the right thing to compare against the ATTACH caps even though
+// they are stated on the DECODED payload: a PDF is base64'd verbatim, and the
+// one image path that skips compressImage's downscale is the raw HEIC fallback,
+// which is likewise attached byte-for-byte. Every other image shrinks on the way
+// in, so this is an upper bound and never refuses something that would fit.
+const MAX_IMAGE_ATTACH_MB = 20
+const MAX_PDF_ATTACH_MB = 15
 const MAX_OCR_PAYLOAD_CHARS = 8_500_000
-const MAX_PDF_LABEL = '6 MB'
+// 6 MiB of source encodes to ~8.39M chars, hence the user-facing label. Applies
+// to photos and PDFs alike — the endpoint measures the encoded string, not the
+// file type (the old name said PDF and was used for both).
+const MAX_OCR_LABEL = '6 MB'
 const OCR_CONCURRENCY = 3 // parallel Gemini reads — modest so the limiter/credits last
 const IMG_MAX_EDGE = 1024
 // Renderable in an <img> AND accepted by the OCR endpoint.
@@ -454,15 +504,6 @@ function gallonsMissing(row) {
   return row.type === 'Fuel' && scanFinished(row) && !(parseFloat(row.gallons) > 0)
 }
 
-// "2026-06" -> "June 2026", for telling the filer where a redirected receipt
-// actually landed.
-function monthName(period) {
-  const m = /^(\d{4})-(\d{2})$/.exec(String(period || ''))
-  if (!m) return period || ''
-  return new Date(Number(m[1]), Number(m[2]) - 1, 1)
-    .toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
-}
-
 // ── Row save-state machine ─────────────────────────────────────────────────
 // saveStatus: null (pending) → 'saving' → one of
 //   'saved' | 'error' | 'timeout' | 'duplicate' | 'maybe-duplicate'
@@ -522,7 +563,9 @@ const dropHint = computed(() => {
   if (!defaultDriver.value) return 'Choose the driver above, then drop the receipts in.'
   if (atCapacity.value) return 'Save or clear this batch before adding more.'
   const slots = remainingSlots.value
-  return `or click to browse — photos and PDFs · room for ${slots} more`
+  // Both attach limits, because they differ by type and the zone's own refusal
+  // message can only ever quote one of them.
+  return `or click to browse — photos to ${MAX_IMAGE_ATTACH_MB} MB, PDFs to ${MAX_PDF_ATTACH_MB} MB · room for ${slots} more`
 })
 const progressPct = computed(() => (progress.total ? Math.round((progress.done / progress.total) * 100) : 0))
 // Savable = everything not already saved and not parked awaiting a manual
@@ -558,6 +601,7 @@ const pendingDraftWhen = computed(() => {
 function isPdfFile(file) {
   return file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '')
 }
+
 // Delegates to the shared reader but keeps this surface's LOUD failure. The
 // shared readFileAsDataURL resolves to '' on an unreadable file (every other
 // caller treats empty as "couldn't read it"); here a silent '' would enter the
@@ -717,7 +761,7 @@ async function ocrRow(row) {
       row.ocrReason = 'too_large'
       // photoData is already attached by the time we call OCR, so the receipt is
       // safe — only the auto-fill was lost. Say that, don't imply a re-upload.
-      row.saveError = `Too big to auto-read (${MAX_PDF_LABEL} max) — attached, enter the fields manually.`
+      row.saveError = `Too big to auto-read (${MAX_OCR_LABEL} max) — attached, enter the fields manually.`
       return
     }
     row.ocrStatus = s === 503 ? 'ocr_off' : (s === 429 || s === 0) ? 'limited' : 'failed'
@@ -741,7 +785,7 @@ async function processRow(row) {
       if (row.photoData.length > MAX_OCR_PAYLOAD_CHARS) {
         row.ocrStatus = 'failed'
         row.ocrReason = 'too_large'
-        row.saveError = `Too big to auto-read (${MAX_PDF_LABEL} max) — attached, enter the fields manually.`
+        row.saveError = `Too big to auto-read (${MAX_OCR_LABEL} max) — attached, enter the fields manually.`
         return
       }
       // No compressImage and no ScanKit pass — neither can rasterize a PDF.
@@ -767,6 +811,20 @@ async function processRow(row) {
     // Anything the OCR endpoint can't take (e.g. an unconverted HEIC) stops here
     // and is flagged for the toast rather than burning a doomed request.
     if (!OCRABLE_RE.test(img)) { row.ocrStatus = 'failed'; row.ocrReason = 'unsupported'; return }
+    // Same ATTACH-FIRST rule the PDF branch above states, now applied to images
+    // too — it was PDF-only, so an oversize image was uploaded to /expenses/ocr
+    // in full just to be told 413 (ocrRow handles that and lands in the same
+    // place, at the cost of shipping ~8 MB twice: once to ScanKit, once to
+    // Gemini). Almost unreachable for a normal photo, because compressImage
+    // downscales to IMG_MAX_EDGE first; the live case is the raw HEIC fallback,
+    // which is attached byte-for-byte. Checked BEFORE the enhance pass because
+    // POST /api/documents/scan caps at the same number and would refuse it too.
+    if (row.photoData.length > MAX_OCR_PAYLOAD_CHARS) {
+      row.ocrStatus = 'failed'
+      row.ocrReason = 'too_large'
+      row.saveError = `Too big to auto-read (${MAX_OCR_LABEL} max) — attached, enter the fields manually.`
+      return
+    }
     // Enhance first (images only), then OCR the cleaned-up copy — and keep it as
     // the stored receipt, so what the admin reviews is what Gemini read.
     if (isImage) {
@@ -782,10 +840,11 @@ async function processRow(row) {
   }
 }
 
-// Receives an already TYPE- and SIZE-validated File[] from FileDropZone (drop or
-// picker — the same path either way; the zone clears its own input so re-picking
-// the same file still fires). Everything below is batch POLICY the dropzone must
-// not know about: identical-bytes dedupe and the MAX_BATCH cap.
+// Receives a TYPE-validated File[] from FileDropZone (drop or picker — the same
+// path either way; the zone clears its own input so re-picking the same file
+// still fires), already trimmed to the zone's single 20 MB ceiling. Everything
+// below is batch POLICY the dropzone must not know about: the PER-TYPE size
+// rule, identical-bytes dedupe, and the MAX_BATCH cap.
 async function onFilesSelected(picked) {
   if (!picked.length) return
   if (!defaultDriver.value) {
@@ -794,13 +853,40 @@ async function onFilesSelected(picked) {
     toast('Pick a default driver first', 'error')
     return
   }
+  // Per-TYPE size refusal — the one rule the dropzone cannot express, because its
+  // single maxSizeMb cannot be 20 MB for a photo and 15 MB for a PDF at once.
+  // In practice this catches the 15–20 MB PDF band; anything larger never gets
+  // here. Refusing is right ONLY because these are the caps at which the server's
+  // create 413s, which takes the whole expense down with the receipt — a file
+  // that is merely too big to SCAN is still added, unscanned (see processRow).
+  const sized = []
+  const oversize = []
+  for (const f of picked) {
+    const limitMb = isPdfFile(f) ? MAX_PDF_ATTACH_MB : MAX_IMAGE_ATTACH_MB
+    if (f.size > limitMb * 1024 * 1024) oversize.push({ file: f, limitMb })
+    else sized.push(f)
+  }
+  if (oversize.length) {
+    // Names the first and counts the rest, the same shape summarizeRejections
+    // uses — N sentences in a 3-second toast is an unreadable wall.
+    const { file, limitMb } = oversize[0]
+    const mb = (file.size / 1024 / 1024).toFixed(1)
+    const kind = isPdfFile(file) ? 'PDFs' : 'photos'
+    const others = oversize.length - 1
+    toast(
+      `"${file.name}" is ${mb} MB — ${kind} are limited to ${limitMb} MB` +
+        (others ? ` (${others} other file${others === 1 ? '' : 's'} also refused)` : ''),
+      'error',
+    )
+  }
+  if (!sized.length) return
   // Client-side dedup: skip any file whose exact bytes are already in the grid
   // (hash of the raw file). Saves a wasted OCR call + a doomed save; the server
   // still independently rejects a duplicate payload with 409.
   const seen = new Set(rows.value.map(r => r.fileHash).filter(Boolean))
   const accepted = []
   let dupSkipped = 0
-  for (const f of picked) {
+  for (const f of sized) {
     const h = await hashFile(f)
     if (h && seen.has(h)) { dupSkipped++; continue }
     if (h) seen.add(h)
@@ -856,7 +942,7 @@ function summarizeScan(batch) {
   if (unsupported) parts.push(`${unsupported} couldn't be read — convert HEIC to JPEG`)
   // "attached" is the load-bearing word: the receipt IS saved with the expense,
   // only the auto-fill was skipped. Without it this reads as "the file was lost".
-  if (tooLarge) parts.push(`${tooLarge} too big to auto-read (${MAX_PDF_LABEL} max) — attached, enter manually`)
+  if (tooLarge) parts.push(`${tooLarge} too big to auto-read (${MAX_OCR_LABEL} max) — attached, enter manually`)
   if (otherFailed) parts.push(`${otherFailed} couldn't be read`)
   if (ocrOff) parts.push(`${ocrOff} not scanned — scanning unavailable, enter manually`)
   if (limited) parts.push(`${limited} rate-limited — retry`)
@@ -1000,6 +1086,39 @@ async function discardDraft() {
   await clearDraft()
 }
 
+// One sentence describing the expense the server matched a POSSIBLE_DUPLICATE
+// against, worded to match the Log Expense form's confirm dialog in ExpensesTab —
+// the same warning must not read as two different problems on two screens. It is
+// what the row's tooltip and the mobile card's error line both show, so it has to
+// carry the three facts an admin checks against the paper: merchant, date, amount.
+//
+// Falls back to the server's own sentence when the row detail is absent (a server
+// predating the `existing` block sends only `existingId` and a message). Absent
+// is not empty — inventing "no merchant recorded" from a missing object would
+// describe a row nobody looked at.
+//
+// ⚠️ Names the EXISTING row's merchant, never this row's. The whole reason the
+// server widened this check is that the two sides often disagree about the
+// merchant, so printing ours over theirs describes a row that does not exist.
+//
+// ⚠️ The DATE goes through fmtYmd, the same formatter ExpensesTab's dialog uses.
+// It used to print `e.date` raw while the other screen printed "June 3, 2026" —
+// a difference an admin comparing the two against one piece of paper reads as
+// two different rows, which is the exact confusion this wording exists to avoid.
+// `|| e.date` mirrors that dialog's fallback chain verbatim so the two cannot
+// diverge on an unreadable date either.
+function describeExistingExpense(err) {
+  const e = err?.data?.existing
+  if (!e) return err?.message || 'This may already be logged'
+  const n = Number(e.amount)
+  const amount = Number.isFinite(n)
+    ? `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    : `$${e.amount}`
+  const who = e.driver ? `, ${e.driver}` : ''
+  const when = fmtYmd(e.date) || e.date || '—'
+  return `May already be logged — expense #${e.id} (${e.vendor || 'no merchant recorded'}, ${when}, ${amount}${who}). Save anyway only if it is a separate purchase.`
+}
+
 async function saveOne(row) {
   row.saveStatus = 'saving'
   row.saveError = ''
@@ -1022,11 +1141,23 @@ async function saveOne(row) {
       // when it's down or out of credits), so hashing the payload alone would let
       // the same receipt back in under a new hash and double-book the P&L.
       sourceHash: row.fileHash || '',
-      // Opt in to the same-merchant/day/amount check: this grid can show the
-      // warning and offer "Save anyway", so a 409 here is always survivable.
-      checkDuplicate: true,
-      // Set only by the conscious "Save anyway" on a POSSIBLE_DUPLICATE row, so a
+      // A `checkDuplicate: true` used to sit here, described as opting in to the
+      // same-merchant/day/amount check. It was never a switch in either direction
+      // and it is gone. The server runs that check UNCONDITIONALLY
+      // (`wantsDuplicateCheck = req.body?.allowDuplicate !== true`) and
+      // accepts-then-ignores the flag, deliberately, so that a second silent
+      // opt-out door cannot exist — locked by scripts/test-duplicate-guard.js.
+      //
+      // The stale comment was worse than useless in both directions: a reader who
+      // deleted the key would think they had disarmed a money guard, and a reader
+      // who kept it would think this grid was opted in while other surfaces were
+      // not. What this surface actually owes is 409 SURVIVAL — the per-row
+      // 'maybe-duplicate' state and its "Save anyway" below.
+      //
+      // Set only by that conscious "Save anyway" on a POSSIBLE_DUPLICATE row, so a
       // same-merchant/day/amount match is confirmed by a person, never by a resend.
+      // This is the one key the server honours, and it is what writes the
+      // expense_duplicate_override audit row that dismisses the group.
       allowDuplicate: row.allowDuplicate === true,
       receiptDetails: row.receiptDetails || [],
       loadId: '',
@@ -1040,8 +1171,18 @@ async function saveOne(row) {
     // month instead. Nothing is lost and nothing needs correcting — but the row
     // has to say so, or a $400 fuel receipt silently lands in a different month
     // than the person filing it expects.
+    //
+    // Fails closed, exactly like ExpenseForm.notePostedPeriod: an unreadable
+    // posted period says nothing at all, and an unreadable NATURAL period drops
+    // only that clause rather than opening the sentence with a blank.
     if (res?.periodClosed && res?.postedPeriod) {
-      row.postedNote = `${monthName(res.naturalPeriod)} is closed — booked to ${monthName(res.postedPeriod)}`
+      const posted = monthLabel(res.postedPeriod)
+      const natural = monthLabel(res.naturalPeriod)
+      if (posted) {
+        row.postedNote = natural
+          ? `${natural} is closed — booked to ${posted}`
+          : `Its own month is closed — booked to ${posted}`
+      }
     }
   } catch (err) {
     // 409 DUPLICATE_RECEIPT = the server already has this exact receipt. Park it
@@ -1051,12 +1192,18 @@ async function saveOne(row) {
       const existing = err?.data?.existingId
       row.saveError = existing ? `Already logged as expense #${existing}` : 'This receipt was already logged'
     } else if (err?.status === 409 && err?.code === 'POSSIBLE_DUPLICATE') {
-      // Same merchant + day + amount as an existing expense. Strong, but a driver
+      // Same driver + day + amount as an existing expense. Strong, but a driver
       // CAN buy twice at one stop — so this is a question, not a verdict. Park it
       // in its own state offering "Save anyway"; never auto-retried.
+      // ⚠️ Distinct from 'duplicate' above and must stay so: that one is an
+      // exact-bytes match with nothing to decide, this one is a judgement call.
+      // The server blocking the content check by default raises how often this
+      // fires — it does not change what either state means.
       row.saveStatus = 'maybe-duplicate'
-      row.saveError = err?.message || 'This may already be logged'
-      row.duplicateOf = err?.data?.existingId || null
+      row.saveError = describeExistingExpense(err)
+      // `existing.id` is the same row `existingId` names; read both so a server
+      // sending only the older field still links the match.
+      row.duplicateOf = err?.data?.existing?.id ?? err?.data?.existingId ?? null
     } else if (!(err?.status > 0)) {
       // NO HTTP RESPONSE CAME BACK — the request was aborted (useApi's timeout
       // converts that to status 0) OR fetch itself rejected, which it does for a
