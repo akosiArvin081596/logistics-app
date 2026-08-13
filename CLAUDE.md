@@ -143,9 +143,32 @@ including the drift audit that motivated it, in **`scripts/README-env-refresh.md
   `--telemetry-all`.
 - **Sanitization is asserted, not assumed**: sessions cleared, every password re-hashed to the
   harness default (`Password123!`, so `test-suite.js` runs with no extra step), emails rewritten
-  to RFC-2606 `.invalid` (can never resolve), bank/tax/identity fields and signatures redacted,
+  to RFC-2606 `.invalid` (can never resolve), bank/tax/identity fields, signatures and **signing
+  evidence** (`signed_ip`, `signed_ip_source`, `signed_user_agent`, `consent_text`) redacted,
   investor onboarding `access_token`s regenerated, `driver_locations` emptied. The run fails if a
   routable address, a session, or a bank account number survives.
+- **⚠️ That last sentence was ASPIRATIONAL until 2026-08-13 — every step above is column-aware.**
+  An address typed into a notes field, embedded in a JSON blob, or recorded in an audit line
+  walked straight through, and the run went on to print `clean: no routable address … survives`
+  **four lines below the WARNING lines naming it**. Measured on the production-shaped local DB:
+  **21 routable third-party addresses survived a run that reported success** —
+  `job_applications.reference_info` (6 of 8 rows: applicants' *references and previous employers*,
+  third parties who never consented to anything; ⚠️ the address sits under the key `relationship`,
+  not `email`), `audit_trail.details` (8 of 1455), `load_invoice_drafts.recipient` (7 of 7).
+  Stage **`3h`** now sweeps **every text column of every table** — deliberately *not* a list of
+  those three, which would fix the columns populated the day someone looked and leave the
+  mechanism intact — substituting each routable address **in place** with `<10 hex>@invalid`
+  (HMAC, per-**run** salt: one address → one token within a database so the invoice-draft row and
+  its audit row still agree, unlinkable between refreshes) and each `###-##-####` with
+  `000-00-0000`. Never blanking and never a JSON round-trip: `audit_trail.details` is parsed
+  structurally and `reference_info` is JSON the applications screen renders. The hex-only token
+  and the bounded email regex are both load-bearing — a `[`, a quote, whitespace, or a loose
+  `\S+@\S+\.\S+` would forge or destroy the `[PERIOD_…]` marker the purge exemption and
+  `parsePeriodRefusalDetail` depend on. A free-text hit is now a **hard leak, not an advisory**,
+  so a survivor means the scrubber failed rather than "we found content we never promised to
+  clean"; `--strict-scan` is consequently a no-op for the two kinds scanned. **Phones are
+  deliberately excluded** — nothing has ever scanned for them, and a useful phone pattern also
+  matches 9-digit load ids. Full runbook in `scripts/README-env-refresh.md`.
 - **Not copied:** `uploads/` (receipts/PODs/rate-cons are on disk — they 404 in a refreshed
   environment, and the tree is unredacted PII) and the Google Sheets themselves.
 
@@ -394,7 +417,7 @@ A review flagged that SSN/EIN and bank routing/account numbers sit in plaintext 
 - **Sent email** — the investor-application admin notification embedded the tax id and routing number and attached the signed W-9, to a Gmail mailbox outside this system. Unrecoverable once sent.
 - **`GET /api/db/query/:table`** — `SELECT *` on any table, no column filter, so every SSN was readable as JSON without downloading the 313 MB file.
 
-**The key-location argument is the other half.** `.env` is `600 root`, `app.db` is `644 root`, the app runs as **root**, and the box has no KMS/TPM/vault. A key in `.env` would defend a DB copy that leaves *without* the `.env` (backup, `/api/db/download`, stolen image) and a non-root local reader — real, but narrow. It would do **nothing** about the threat actually named in the finding: `super_admin` is a **shared login**, and the app decrypts for whoever is authenticated. Encryption is the wrong tool for "which person read this"; masking plus an audit row is the right one. Checked and cleared: git history is clean (the tracked `app.db` was a 16 KB stub, 1 user row, no PII tables), and `scripts/refresh-env.js` already redacts all nine columns and *asserts* it — staging holds 0 populated values.
+**The key-location argument is the other half.** `.env` is `600 root`, `app.db` is `644 root`, the app runs as **root**, and the box has no KMS/TPM/vault. A key in `.env` would defend a DB copy that leaves *without* the `.env` (backup, `/api/db/download`, stolen image) and a non-root local reader — real, but narrow. It would do **nothing** about the threat actually named in the finding: `super_admin` is a **shared login**, and the app decrypts for whoever is authenticated. Encryption is the wrong tool for "which person read this"; masking plus an audit row is the right one. Checked and cleared: git history is clean (the tracked `app.db` was a 16 KB stub, 1 user row, no PII tables), and `scripts/refresh-env.js` redacts every column named above and *asserts* every one of them — staging holds 0 populated values. (The assertion list was a strict **subset** of the scrub list until 2026-08-13: `dob`, `signature`, `signature_image`, `consent_text`, `signed_ip_source` and every column replaced with a *placeholder* rather than emptied (`REDACTED_LITERAL` — including four personal **home address** columns) were scrubbed but never checked. None is email- or SSN-shaped, so the free-text sweep could not cover for them either: a `setCols()` that silently stopped matching would have shipped real addresses with every check green.) **⚠️ Do not read that as "the nine columns are covered", which is how this line read until 2026-08-13.** The nine-column framing *is* the column-aware assumption: a scrub that names its columns only ever covers what it was told about, and 21 routable third-party addresses shipped past it in free text (`job_applications.reference_info`, `audit_trail.details`, `load_invoice_drafts.recipient`) under a run that printed "clean". The sanitizer now also sweeps every text column of every table (stage 3h) and treats a free-text address or SSN as a hard refusal — see the environment-refresh section above.
 
 **What shipped instead** (`lib/pii-mask.js` — pure, no network/DB; fixed-width masks so length is never republished; idempotent so the client components that mask again cannot eat the last four):
 - **⚠️ The IDOR was the real finding.** `/uploads` is mounted `requireAuth` **only**, and signed-PDF filenames are `${docKey}-${userId}-signed.pdf` — a five-key vocabulary crossed with a small sequential id. **Any authenticated Driver could read any other person's W-9.** The existing `confidential` flag (set on `w9` + `contractor_agreement`) was only ever a *listing* filter, which is not an access control when the URL it hides is guessable. Both signed-doc directories now resolve `signed_pdf_url` back to its row and require Super Admin, the owner, or (non-confidential only) a Dispatcher. **Authority is the DB, not the filename** — that also fails closed on the **54 of 88 files that are orphans** with no row, which breaks nothing because every UI link is built from a row. Refusal is **404, never 403**: a 403 confirms the document exists. Unconditional — *not* governed by `PII_MASK_ENABLED`.
