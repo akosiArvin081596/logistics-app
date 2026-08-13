@@ -96,7 +96,7 @@
               v-for="m in chartMonths"
               :key="m.month"
               class="month-bar-col month-clickable"
-              :title="`${monthLabel(m.month)} — Revenue ${fmt(m.revenue)} · Net ${fmt(m.netProfit)} — click for details`"
+              :title="`${monthKeyLabel(m.month)} — Revenue ${fmt(m.revenue)} · Net ${fmt(m.netProfit)} — click for details`"
               @click="openMonth(m.month)"
             >
               <div class="month-bar-track">
@@ -106,7 +106,10 @@
                   :style="{ height: barHeight(m.revenue) }"
                 ></div>
               </div>
-              <div class="month-bar-label">{{ shortMonth(m.month) }}</div>
+              <!-- '?' rather than a silent gap: an unlabeled bar under a real
+                   revenue figure looks like a rendering glitch, and the title
+                   above still names the period. -->
+              <div class="month-bar-label">{{ shortMonth(m.month) || '?' }}</div>
             </div>
           </div>
           <!-- Month-by-month table (newest first); each row opens the drill-down -->
@@ -126,11 +129,11 @@
                 :key="m.month"
                 class="row-click"
                 :class="{ 'row-current': m.isCurrentMonth }"
-                :title="`Open ${monthLabel(m.month)} breakdown`"
+                :title="`Open ${monthKeyLabel(m.month)} breakdown`"
                 @click="openMonth(m.month)"
               >
                 <td class="mono">
-                  {{ monthLabel(m.month) }}
+                  {{ monthKeyLabel(m.month) }}
                   <span v-if="m.isCurrentMonth" class="mtd-badge">MTD</span>
                 </td>
                 <td class="num pos">{{ fmt(m.revenue) }}</td>
@@ -303,6 +306,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useFinancialsStore } from '../stores/financials'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
 import { formatCurrency as fmt } from '../utils/format'
+import { monthLabel as fullMonthLabel } from '../lib/monthLabel'
 import MonthDetailModal from '../components/financials/MonthDetailModal.vue'
 
 const store = useFinancialsStore()
@@ -399,13 +403,33 @@ function barHeight(rev) {
   // Floor at 2% so a non-zero month is always a visible sliver.
   return Math.max(2, ((rev || 0) / maxMonthRevenue.value) * 100) + '%'
 }
-function monthLabel(mk) {
-  const [y, m] = String(mk).split('-').map(Number)
-  return new Date(y, (m || 1) - 1, 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
-}
+// Both of these ABBREVIATE lib/monthLabel.js rather than re-deriving a month
+// from a key. That module owns which keys are readable and what the twelve
+// months are called; these only shorten its answer for a 12-bar chart axis and a
+// narrow `mono` table column, where "September 2026" would not fit.
+//
+// ⚠️ They used to be `new Date(y, (m || 1) - 1, 1).toLocaleDateString(...)`,
+// which SILENTLY ROLLS OVER: '2026-13' rendered "Jan 2027" and '2026-00'
+// rendered "Dec 2025" — a plausible month, off by a year, in a P&L table. The
+// delegation is what removes that; do not reintroduce a Date here.
+//
+// Short form is the first three letters of the shared name, which is exactly
+// what `toLocaleDateString('en-US', { month: 'short' })` produces for all
+// twelve, so nothing on screen moves for a readable key. '' propagates.
 function shortMonth(mk) {
-  const [y, m] = String(mk).split('-').map(Number)
-  return new Date(y, (m || 1) - 1, 1).toLocaleDateString('en-US', { month: 'short' })
+  return fullMonthLabel(mk).slice(0, 3)
+}
+function monthLabel(mk) {
+  const full = fullMonthLabel(mk)
+  return full ? `${full.slice(0, 3)} ${full.slice(full.indexOf(' ') + 1)}` : ''
+}
+// For the three places that need a NON-EMPTY token: the table cell that IS the
+// row's identity, and the two tooltips built around it. '' would leave a
+// nameless row sitting next to real revenue and net-profit figures, and a
+// tooltip reading "Open  breakdown". The raw key names the period that is
+// actually on screen without dressing it up as a month we parsed.
+function monthKeyLabel(mk) {
+  return monthLabel(mk) || String(mk ?? '') || 'Unknown month'
 }
 
 onMounted(() => store.load())

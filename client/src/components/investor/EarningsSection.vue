@@ -9,7 +9,7 @@
         <button class="nav-btn" :disabled="selectedIdx <= 0" title="Previous month" aria-label="Previous month" @click="selectedIdx--">&#9664;</button>
         <select v-model="selectedIdx" class="month-select" title="Pick a month to view its earnings breakdown">
           <option v-for="(m, i) in months" :key="m.month" :value="i">
-            {{ monthLabel(m.month) }}{{ m.isCurrentMonth ? ' (current)' : '' }}
+            {{ monthLabel(m.month) || m.month }}{{ m.isCurrentMonth ? ' (current)' : '' }}
           </option>
         </select>
         <button class="nav-btn" :disabled="selectedIdx >= months.length - 1" title="Next month" aria-label="Next month" @click="selectedIdx++">&#9654;</button>
@@ -26,7 +26,7 @@
         style="margin-bottom:1.25rem;"
         role="button"
         tabindex="0"
-        :aria-label="`Open breakdown of your earnings for ${monthLabel(selected.month)}`"
+        :aria-label="`Open breakdown of your earnings for ${selectedMonthLabel}`"
         @click="openDetail('earnings')"
         @keyup.enter="openDetail('earnings')"
         @keyup.space.prevent="openDetail('earnings')"
@@ -131,7 +131,7 @@
         </div>
       </div>
 
-      <div v-if="selected.isCurrentMonth" class="month-note">* {{ monthLabel(selected.month) }} &mdash; Month in progress</div>
+      <div v-if="selected.isCurrentMonth" class="month-note">* {{ selectedMonthLabel }} &mdash; Month in progress</div>
 
       <!-- All-Time Summary -->
       <div class="alltime">
@@ -203,7 +203,7 @@
         <template v-if="detailType === 'earnings' && selected">
           <div class="modal-breakdown">
             <div class="modal-explain">
-              Here is exactly how your earnings for <strong>{{ monthLabel(selected.month) }}</strong> are calculated, step by step.
+              Here is exactly how your earnings for <strong>{{ selectedMonthLabel }}</strong> are calculated, step by step.
             </div>
 
             <div class="step-label">Step 1: Start with Revenue</div>
@@ -261,7 +261,7 @@
         <template v-if="detailType === 'revenue' && selected">
           <div class="modal-breakdown">
             <div class="modal-explain">
-              This is the total payment earned from all loads your trucks completed in <strong>{{ monthLabel(selected.month) }}</strong>.
+              This is the total payment earned from all loads your trucks completed in <strong>{{ selectedMonthLabel }}</strong>.
             </div>
             <div class="modal-explain-sm">
               Each time one of your trucks delivers a load, the shipper/broker pays a rate for that trip. This figure is the sum of all those payments for the selected month.
@@ -287,7 +287,7 @@
             </div>
 
             <template v-if="selected.driverDetails && Object.keys(selected.driverDetails).length">
-              <div class="step-label">Driver Breakdown — {{ monthLabel(selected.month) }}</div>
+              <div class="step-label">Driver Breakdown — {{ selectedMonthLabel }}</div>
               <div v-for="(d, name) in selected.driverDetails" :key="name" class="driver-block">
                 <div class="modal-row">
                   <span>{{ d.displayDriverName || titleCase(name) }}<span v-if="d.payType === 'percentage'" class="modal-tag">{{ d.payPercentage }}%</span></span>
@@ -320,7 +320,7 @@
                   class="exclude-confirm"
                 >
                   <div class="exclude-confirm-sub">
-                    Credit a day to <strong>{{ pendingAdd.driverDisplay }}</strong> in {{ monthLabel(selected.month) }} — affects this portal, the company P&amp;L, and any unbilled invoice that includes the date.
+                    Credit a day to <strong>{{ pendingAdd.driverDisplay }}</strong> in {{ selectedMonthLabel }} — affects this portal, the company P&amp;L, and any unbilled invoice that includes the date.
                   </div>
                   <input
                     v-model="addDate"
@@ -420,12 +420,12 @@
               </div>
             </template>
             <div v-else class="modal-explain-sm" style="font-style:italic;">
-              No driver activity recorded in {{ monthLabel(selected.month) }}.
+              No driver activity recorded in {{ selectedMonthLabel }}.
             </div>
 
             <div class="modal-divider"></div>
             <div class="modal-row bold result">
-              <span>Total Driver Pay ({{ monthLabel(selected.month) }})</span>
+              <span>Total Driver Pay ({{ selectedMonthLabel }})</span>
               <span class="val danger">{{ fmt(selected.driverPay) }}</span>
             </div>
           </div>
@@ -438,14 +438,14 @@
           <div class="modal-breakdown">
             <template v-if="selected.fixedCostsDeferred">
               <div class="modal-explain">
-                Your {{ fcb.truckCount > 1 ? 'trucks were' : 'truck was' }} inactive in {{ monthLabel(selected.month) }} — no loads, no driver activity, no trip expenses. We deferred the fixed costs for this month so an idle month doesn't appear as a loss.
+                Your {{ fcb.truckCount > 1 ? 'trucks were' : 'truck was' }} inactive in {{ selectedMonthLabel }} — no loads, no driver activity, no trip expenses. We deferred the fixed costs for this month so an idle month doesn't appear as a loss.
               </div>
               <div class="modal-explain-sm">
                 Once your truck is dispatched even one load in a month, the full monthly fixed costs apply normally.
               </div>
               <div class="modal-divider"></div>
               <div class="modal-row bold result">
-                <span>Total Fixed Costs ({{ monthLabel(selected.month) }})</span>
+                <span>Total Fixed Costs ({{ selectedMonthLabel }})</span>
                 <span class="val">{{ fmt(0) }}</span>
               </div>
             </template>
@@ -575,7 +575,7 @@
             <div class="step-label">Monthly Revenue History</div>
             <div class="modal-monthly-list" v-if="months.length">
               <div class="modal-row" v-for="m in months" :key="m.month">
-                <span>{{ monthLabel(m.month) }}{{ m.isCurrentMonth ? ' *' : '' }}</span>
+                <span>{{ monthLabel(m.month) || m.month }}{{ m.isCurrentMonth ? ' *' : '' }}</span>
                 <span class="val accent">{{ fmt(m.revenue) }}</span>
               </div>
             </div>
@@ -684,7 +684,7 @@
             <div class="step-label" style="margin-top:1rem;">Month-by-Month History</div>
             <div class="modal-monthly-list" v-if="months.length">
               <div class="modal-row" v-for="m in months" :key="m.month">
-                <span>{{ monthLabel(m.month) }}{{ m.isCurrentMonth ? ' *' : '' }}</span>
+                <span>{{ monthLabel(m.month) || m.month }}{{ m.isCurrentMonth ? ' *' : '' }}</span>
                 <span class="val" :class="m.investorEarnings >= 0 ? 'accent' : 'danger'">{{ fmt(m.investorEarnings) }}</span>
               </div>
             </div>
@@ -698,6 +698,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { formatCurrency as fmt } from '../../utils/format'
+import { monthLabel } from '../../lib/monthLabel'
 import MetricInfoDialog from './MetricInfoDialog.vue'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
@@ -723,12 +724,16 @@ watch(months, (v) => {
 
 const selected = computed(() => months.value[selectedIdx.value] || null)
 
-const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
-function monthLabel(mk) {
-  if (!mk) return ''
-  const [y, m] = mk.split('-')
-  return `${MONTH_NAMES[parseInt(m) - 1] || m} ${y}`
-}
+// The selected month, named ONCE. A dozen sentences below read "… in
+// {{ selectedMonthLabel }} …", and `monthLabel` answers '' for a key it cannot
+// read — correct for the formatter, but a sentence with a hole in it here
+// ("Total Driver Pay ()"). The raw key is the honest fallback in that case: it
+// keeps every sentence complete and names the period that IS on screen, and it
+// is visibly a key rather than a month we claimed to understand.
+const selectedMonthLabel = computed(() => {
+  const mk = selected.value?.month
+  return monthLabel(mk) || mk || ''
+})
 
 // --- Detail modal ---
 const detailType = ref('')
@@ -901,7 +906,7 @@ async function submitAdd() {
   if (!target || addBusy.value || !addDate.value) return
   // Guardrail: date input min/max only enforces in browsers that support it.
   if (addDate.value < monthBounds.value.min || addDate.value > monthBounds.value.max) {
-    toast(`Date must be within ${monthLabel(selected.value.month)}`, 'error')
+    toast(`Date must be within ${selectedMonthLabel.value}`, 'error')
     return
   }
   addBusy.value = true
@@ -949,7 +954,7 @@ const modalSubtitle = computed(() => {
   const cfg = MODAL_CONFIG.value[detailType.value]
   if (!cfg) return ''
   const isMonthly = !detailType.value.startsWith('all') && selected.value
-  return isMonthly ? `${monthLabel(selected.value.month)} — ${cfg.subtitle}` : cfg.subtitle
+  return isMonthly ? `${selectedMonthLabel.value} — ${cfg.subtitle}` : cfg.subtitle
 })
 </script>
 

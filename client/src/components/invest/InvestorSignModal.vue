@@ -33,7 +33,7 @@
               <input
                 v-model="state.signatureText" type="text" class="sign-input"
                 placeholder="Type your full name" :disabled="!state.agreed"
-                @focus="state.nameDropOpen = true"
+                @focus="openNameDrop"
                 @blur="closeNameDropSoon"
               />
               <div v-if="state.nameDropOpen && state.agreed && filteredNames.length" class="name-dropdown">
@@ -169,7 +169,23 @@ watch(() => props.show, async (v) => {
 // The delay is unchanged: it lets a mousedown on an option land before the list
 // closes. `s` is captured so a timer that fires after a close writes to the
 // orphaned state object rather than the form now on screen.
+//
+// ⚠️ OPENING MUST CANCEL A PENDING CLOSE. `@focus` was the inline expression
+// `state.nameDropOpen = true`, which set the flag and left the timer running, so
+// blurring and clicking straight back into the field inside the 200 ms window let
+// that timer shut the list while the field was focused. The captured `s` does NOT
+// cover this case and was never meant to: it protects across a modal open/close,
+// where the watch on `props.show` swaps in a fresh blankState() — but within one
+// signing session `s` IS the object on screen, so the stale timer closes the live
+// list. The flag and the timer are two halves of one piece of state; every handler
+// touching one touches the other, which is why opening is a named function too.
+// Same fix, same reasoning, as the three dropdowns in InvestorApplyView.
 let nameDropTimer = null
+function openNameDrop() {
+  clearTimeout(nameDropTimer)
+  nameDropTimer = null
+  state.value.nameDropOpen = true
+}
 function closeNameDropSoon() {
   const s = state.value
   clearTimeout(nameDropTimer)

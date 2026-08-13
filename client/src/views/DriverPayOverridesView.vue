@@ -132,7 +132,9 @@
           >&#9664;</button>
           <select v-model.number="selectedMonthIdx" class="month-select" :title="`${months.length} months of activity`">
             <option v-for="(m, i) in months" :key="m.month" :value="i">
-              {{ monthLabel(m.month) }}{{ m.isCurrentMonth ? ' (current)' : '' }}{{ isLockedMonth(m.month) ? ' — closed' : '' }}
+              <!-- `|| m.month` so a key this cannot read still names an option
+                   rather than leaving a blank, unpickable row in the select. -->
+              {{ monthLabel(m.month) || m.month }}{{ m.isCurrentMonth ? ' (current)' : '' }}{{ isLockedMonth(m.month) ? ' — closed' : '' }}
             </option>
           </select>
           <button
@@ -158,7 +160,7 @@
         <div class="banner-eq">=</div>
         <div class="banner-stat total">
           <span class="banner-val">{{ fmt(monthDetail.totalPay) }}</span>
-          <span class="banner-lbl">{{ monthLabel(selected.month) }} pay</span>
+          <span class="banner-lbl">{{ selectedMonthLabel }} pay</span>
         </div>
         <div class="banner-spacer"></div>
         <span v-if="monthDetail.source === 'eld'" class="src-tag eld">ELD-verified</span>
@@ -177,12 +179,26 @@
         The month-close status could not be read, so overrides are blocked until that is fixed. This is a database fault, not the close window.
       </p>
       <p v-else-if="selectedMonthClosed" class="period-note" role="status">
-        {{ monthLabel(selected.month) }} is closed — its statement has already been published against these figures, so pay overrides are refused.
+        {{ selectedMonthLabel }} is closed — its statement has already been published against these figures, so pay overrides are refused.
         Reopen the period first if it genuinely needs restating.
       </p>
 
       <!-- Calendar grid -->
       <div class="card calendar-card">
+        <!-- An unusable period key draws NO grid. A calendar is believable on
+             sight — the weekday columns line up and the day numbers count from
+             1 — so a grid built from a key we could not read would look
+             correct while offering days that do not exist, and clicking one
+             writes a pay override. An empty state with the reason is the
+             honest answer; the legend goes with it, since it explains a grid
+             that is not there. -->
+        <p v-if="selectedMonthUnusable" class="period-note unknown" role="status">
+          &ldquo;{{ selected.month || '(blank)' }}&rdquo; is not a real month, so no calendar can be drawn for it.
+          Overrides are recorded against a specific day, and a grid built from an unreadable period would
+          offer days that do not exist &mdash; so none is shown. Pick another month from the list above.
+          Nothing has been changed.
+        </p>
+        <template v-else>
         <div class="cal-legend">
           <span class="legend-item"><span class="swatch active"></span> Active (ELD)</span>
           <span class="legend-item"><span class="swatch estimated"></span> Estimated</span>
@@ -217,6 +233,7 @@
             </div>
           </div>
         </div>
+        </template>
 
         <!-- Inline action panel for selected cell -->
         <div v-if="activeCell" class="cell-panel" :class="`for-${activeCell.state}`">
@@ -331,6 +348,7 @@ import { useInvestorStore } from '../stores/investor'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { formatCurrency as fmt } from '../utils/format'
+import { monthLabel } from '../lib/monthLabel'
 
 const api = useApi()
 const { show: toast } = useToast()
@@ -452,12 +470,63 @@ const monthDetail = computed(() => {
   return (selected.value.driverDetails || {})[selectedDriverKey.value] || null
 })
 
+// ---------------------------------------------------------------------------
+// The period key, validated ONCE, before any calendar arithmetic touches it.
+// ---------------------------------------------------------------------------
+//
+// ⚠️ WHY THIS EXISTS, AND WHY IT IS NOT A FORMATTING CONCERN. Below, `firstDow`
+// and `daysInMonth` come from `new Date(y, m - 1, 1)` / `new Date(y, m, 0)`,
+// which SILENTLY ROLL OVER — m=13 is January of the next year, m=0 is December
+// of the previous one. The old guard was `if (!y || !m) return []`, which passes
+// 13 and 99 happily. The cell dates on the other hand are assembled by hand from
+// the ORIGINAL y/m (`${y}-${pad(m)}-${pad(d)}`), so the two halves disagreed: a
+// key of '2026-13' drew January 2027's weekday alignment and length while
+// emitting cells dated `2026-13-01`… — days that do not exist.
+//
+// That is not cosmetic. `cell.date` is what `doExclude()` / `doAdd()` POST to
+// /api/admin/excluded-days, so it lands in the driver-pay override table and
+// changes what a month PAYS. A wrong month NAME is a display bug; a wrong DATE
+// on a money row is not.
+//
+// Validity is delegated to lib/monthLabel.js rather than re-tested here: it is
+// already the gate this file uses to decide whether a key can be NAMED, so a key
+// it refuses is exactly a key nothing else on this screen will print either, and
+// the two cannot drift into disagreeing. Tolerant on input in the same way — a
+// 'YYYY-MM-DD' names its own month — hence the slice.
+const selectedMonthParts = computed(() => {
+  const mk = selected.value?.month
+  if (!monthLabel(mk)) return null // unreadable, or a month that does not exist
+  const [y, m] = String(mk).trim().slice(0, 7).split('-').map(Number)
+  return { y, m } // m is now guaranteed 1..12, so neither Date call can roll over
+})
+
+// "There IS a month selected and its key is unusable" — distinct from "nothing
+// selected yet", which renders the same empty grid for an entirely benign reason.
+const selectedMonthUnusable = computed(() => !!selected.value && !selectedMonthParts.value)
+
+// ⚠️ THE WRITE BOUNDARY. Everything above stops a bad cell being BUILT; this
+// stops a bad date being SENT, checked where it is used rather than inferred
+// from a computed two hundred lines away. It asserts the day is a real calendar
+// day — right shape, month 1..12, and a day number that month actually has — so
+// both `2026-13-01` and `2026-02-30` are refused. It deliberately does NOT
+// require the date to sit in the month currently on screen: changing months with
+// the action panel open is legitimate and unchanged.
+function postableDate(date) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(typeof date === 'string' ? date : '')
+  if (!m) return ''
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])]
+  if (mo < 1 || mo > 12 || d < 1) return ''
+  if (d > new Date(y, mo, 0).getDate()) return '' // safe: mo is already 1..12
+  return date
+}
+
 // Build the calendar matrix for the selected month + driver
 // Cell shape: { day, date, state, loadIds, overrideRow } or null (filler)
 const calendar = computed(() => {
   if (!selected.value || !selectedDriverKey.value) return []
-  const [y, m] = selected.value.month.split('-').map(Number)
-  if (!y || !m) return []
+  const parts = selectedMonthParts.value
+  if (!parts) return [] // unusable key — the template says so instead of drawing a wrong grid
+  const { y, m } = parts
   const firstDow = new Date(y, m - 1, 1).getDay() // 0=Sun
   const daysInMonth = new Date(y, m, 0).getDate()
 
@@ -524,15 +593,22 @@ function closeCell() {
 
 async function doExclude() {
   if (!activeCell.value || actionBusy.value) return
+  // See postableDate(): this row changes what a month pays, so the date is
+  // re-checked at the boundary that writes it, not trusted from the grid.
+  const date = postableDate(activeCell.value.date)
+  if (!date) {
+    toast('That day is not a real date, so nothing was changed. Reload and try again.', 'error')
+    return
+  }
   actionBusy.value = true
   try {
     await api.post('/api/admin/excluded-days', {
       driverName: selectedDriverKey.value,
-      date: activeCell.value.date,
+      date,
       reason: actionReason.value || '',
       action: 'remove',
     })
-    toast(`Excluded ${formatDayLabel(activeCell.value.date)}`)
+    toast(`Excluded ${formatDayLabel(date)}`)
     activeCell.value = null
     await refreshAfterChange()
   } catch (err) {
@@ -544,15 +620,21 @@ async function doExclude() {
 
 async function doAdd() {
   if (!activeCell.value || actionBusy.value) return
+  // Same boundary check as doExclude() — this one CREDITS a paid day.
+  const date = postableDate(activeCell.value.date)
+  if (!date) {
+    toast('That day is not a real date, so nothing was changed. Reload and try again.', 'error')
+    return
+  }
   actionBusy.value = true
   try {
     await api.post('/api/admin/excluded-days', {
       driverName: selectedDriverKey.value,
-      date: activeCell.value.date,
+      date,
       reason: actionReason.value || '',
       action: 'add',
     })
-    toast(`Added ${formatDayLabel(activeCell.value.date)}`)
+    toast(`Added ${formatDayLabel(date)}`)
     activeCell.value = null
     await refreshAfterChange()
   } catch (err) {
@@ -628,12 +710,15 @@ onMounted(() => {
 onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
 // --- Helpers ---
-const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
-function monthLabel(mk) {
-  if (!mk) return ''
-  const [y, m] = mk.split('-')
-  return `${MONTH_NAMES[parseInt(m) - 1] || m} ${y}`
-}
+// The selected month, named once. `monthLabel` answers '' for a key it cannot
+// read; the two sentences that use this ("{X} pay", "{X} is closed — its
+// statement has already been published…") would then be missing their subject,
+// and the second one is a refusal notice, which has to say WHAT is closed. The
+// raw key names the period on screen without dressing it up as a parsed month.
+const selectedMonthLabel = computed(() => {
+  const mk = selected.value?.month
+  return monthLabel(mk) || mk || ''
+})
 function formatDayLabel(ymd) {
   if (!ymd) return ''
   const [y, m, d] = ymd.split('-').map(Number)

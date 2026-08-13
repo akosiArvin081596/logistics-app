@@ -247,7 +247,7 @@
                       v-model="vehicles[activeVehicleTab].titleState"
                       placeholder="Type to search state..."
                       autocomplete="off"
-                      @focus="stateDropOpen = true"
+                      @focus="openStateDrop"
                       @blur="closeStateDropSoon"
                     />
                     <div v-if="stateDropOpen && filteredStates.length" class="state-dropdown">
@@ -322,7 +322,7 @@
               <input
                 v-model="banking.bank_name" placeholder="Start typing bank name..."
                 autocomplete="off" data-wizard-target="bank-name" required
-                @focus="bankDropOpen = true"
+                @focus="openBankDrop"
                 @blur="closeBankDropSoon"
               />
               <div v-if="bankDropOpen && filteredBanks.length" class="bank-dropdown">
@@ -341,7 +341,7 @@
               <input
                 v-model="banking.account_name" placeholder="As it appears on the account"
                 autocomplete="off"
-                @focus="acctNameDropOpen = true"
+                @focus="openAcctNameDrop"
                 @blur="closeAcctNameDropSoon"
               />
               <div v-if="acctNameDropOpen && acctNameOptions.length" class="acct-name-dropdown">
@@ -668,26 +668,45 @@ const filteredStates = computed(() => {
 // `clearTimeout` first only collapses repeated BLURS onto a single pending
 // close, so the delay is measured from the most recent blur.
 //
-// ⚠️ It does NOT make a refocus safe, and deliberately so — this is a pure
-// relocation of the old expression, not a behaviour change. `@focus` sets the
-// flag true without touching the timer, so blurring and clicking back into the
-// same field inside 200 ms still lets the in-flight timer shut the list while
-// the field is focused. Pre-existing (and shared with InvestorSignModal); it
-// was simply unobservable here while every blur threw before scheduling
-// anything. Clearing the timer in the focus handler would fix it — as a
-// separate, deliberate change.
+// ⚠️ OPENING MUST CANCEL A PENDING CLOSE — the second half of the same bug, now
+// fixed. `@focus` used to be the inline expression `stateDropOpen = true`, which
+// set the flag without touching the timer, so blurring and clicking straight back
+// into the SAME field inside the 200 ms window left the in-flight timer alive:
+// it fired against a field that was focused again and shut the list under the
+// applicant, who then has to click away and back to get it open. Unobservable
+// until now only because every blur threw before it could schedule anything.
+// The flag and the timer are two halves of one piece of state, so every handler
+// that touches one touches the other — which is why opening is a named function
+// too, not an inline assignment. (InvestorSignModal carried the same inline
+// pattern and was fixed the same way in this batch — see the note above
+// `openNameDrop()` there, which points back here.)
 // ─────────────────────────────────────────────────────────────────────────────
 let stateDropTimer = null
 let bankDropTimer = null
 let acctNameDropTimer = null
 
+function openStateDrop() {
+  clearTimeout(stateDropTimer)
+  stateDropTimer = null
+  stateDropOpen.value = true
+}
 function closeStateDropSoon() {
   clearTimeout(stateDropTimer)
   stateDropTimer = setTimeout(() => { stateDropOpen.value = false }, 200)
 }
+function openBankDrop() {
+  clearTimeout(bankDropTimer)
+  bankDropTimer = null
+  bankDropOpen.value = true
+}
 function closeBankDropSoon() {
   clearTimeout(bankDropTimer)
   bankDropTimer = setTimeout(() => { bankDropOpen.value = false }, 200)
+}
+function openAcctNameDrop() {
+  clearTimeout(acctNameDropTimer)
+  acctNameDropTimer = null
+  acctNameDropOpen.value = true
 }
 function closeAcctNameDropSoon() {
   clearTimeout(acctNameDropTimer)
