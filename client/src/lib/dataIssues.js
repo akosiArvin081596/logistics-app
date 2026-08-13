@@ -10,10 +10,11 @@
 // WHY A SECOND FILE AT ALL. fuelReview's REVIEW_QUEUES is bound to ONE payload
 // (`isQueueAvailable(fuel, key)` reads `fuel[q.field]`), and its
 // `reviewClearPhrases(fuel)` composes reassurance from that single object.
-// These five queues come from five different endpoints with five different
-// failure modes, so folding them into that registry would make one payload
-// answer for calls it never made — and would change what ExpensesTab says about
-// fuel. Same pattern, own registry.
+// These SIX queues come from six different endpoints with six different failure
+// modes, so folding them into that registry would make one payload answer for
+// calls it never made — and would change what ExpensesTab says about fuel. Same
+// pattern, own registry. (The number is ISSUE_QUEUES.length; this sentence has
+// already been wrong once, left at five when the month-end queue was added.)
 //
 // Nothing here decides anything on the fleet's behalf. Every queue is an
 // OBSERVATION; the two that have a write path (regenerate a signed document)
@@ -80,6 +81,21 @@ export const ISSUE_QUEUES = [
     clear: 'every instrumented truck backtests cleanly',
     blurb: "Each truck's range formula, backtested against its own fill history.",
   },
+  {
+    // ⚠️ NOT "refused writes", and not "frozen invoices" either. This queue has
+    // TWO halves that answer different questions — what a closed month REFUSED
+    // (which only exists if somebody happened to try) and what a closed month is
+    // HOLDING right now (which is true whether or not anyone has bumped into it)
+    // — and naming only one sends people looking for the other in the wrong
+    // place. Same reasoning as the linxup label above.
+    //
+    // The order of this array is the order of the queue bar, and the sections in
+    // DataIssuesView follow it — so a new queue goes on the end of both.
+    key: 'periodlock',
+    label: 'Blocked by month-end close',
+    clear: 'nothing is held by a closed month',
+    blurb: 'Writes a closed month refused, and the invoices it is still holding — un-adjustable, and some of them un-payable.',
+  },
 ]
 
 /**
@@ -141,17 +157,65 @@ export function queueAnswered(st) {
  * ran — which is precisely the failure mode reviewClearPhrases() was written to
  * avoid, and it would be worse here because nothing else is watching.
  *
+ * ⚠️ AND THE MONTH-END QUEUE IS A THIRD OF THE SAME KIND, with two distinct ways
+ * of returning a well-formed zero that means nothing:
+ *   - `period_locks` unreadable. Every write guard in the app fails CLOSED on
+ *     that table, so the app is at that moment refusing invoice adjustments,
+ *     truck edits, expense status flips and driver renames it cannot confirm are
+ *     safe — while this endpoint, which fails closed the same way, deliberately
+ *     lists no invoice (one root cause is not twenty-nine findings). "Nothing
+ *     stuck" would be the exact inverse of the truth.
+ *   - No month has ever been finalized. Then nothing CAN be frozen by one and no
+ *     lock refusal can have fired, so an empty queue is trivially true and says
+ *     nothing about whether month-end close works. This is the ships-dormant
+ *     default: `PERIOD_FINALIZE_ENABLED` off and `period_locks` empty.
+ *   - `audit_trail` unreadable. The current-state half still computes, but the
+ *     history half is unknown, and "no write was ever refused" is not something
+ *     to assert from a table that could not be read.
+ *
  * The three SQLite-backed queues are pure queries over tables that always
  * exist, so answering and establishing coincide for them.
  */
 export function queueEstablished(key, ctx) {
   if (key === 'fuelverify') return Boolean(ctx?.sweepHasRun)
   if (key === 'linxup') return Boolean(ctx?.linxupMeaningful)
+  if (key === 'periodlock') return Boolean(ctx?.periodLockMeaningful)
   return true
 }
 
-/** Why a queue answered but established nothing — shown instead of "clear". */
+/**
+ * Did the payload behind `key` actually ARRIVE?
+ *
+ * ⚠️ THIS IS THE ABSENT-VS-EMPTY RULE ONE LEVEL UP FROM WHERE THE REST OF THE FILE
+ * ENFORCES IT, and all three establishment-gated queues had the same hole. Their
+ * context flags are built with `Boolean(payload?.x)`, so a payload that never
+ * arrived produces the SAME `false` a payload that arrived saying "off" produces —
+ * and queueInconclusiveText() then printed a confident sentence about a server
+ * state it had not been told. After a 403 or a network failure the month-end queue
+ * read "automatic month-close is switched off and no month has ever been
+ * finalized, so nothing can be held by one" against a database with FIFTEEN months
+ * locked; fuel read "the fuel-event sweep has never run"; Linxup read "the webhook
+ * has no token configured". None of the three is something a failed call can know.
+ *
+ * ⚠️ ABSENT MEANS NO. A ctx with no `answered` map has not told us the call
+ * landed, and a check that cannot tell must not speak — the same direction
+ * periodLockReport() fails in when it returns null for an absent payload. The one
+ * production caller (establishCtx in DataIssuesView) supplies the map for every
+ * registered queue, so this costs nothing there and refuses only hand-built
+ * contexts that never established anything in the first place.
+ */
+export function queueCtxAnswered(ctx, key) {
+  return Boolean(ctx && ctx.answered && ctx.answered[key] === true)
+}
+
+/**
+ * Why a queue answered but established nothing — shown instead of "clear".
+ *
+ * '' when the payload never arrived, which is what puts the caller back on its
+ * "couldn't load" wording. See queueCtxAnswered().
+ */
 export function queueInconclusiveText(key, ctx) {
+  if (!queueCtxAnswered(ctx, key)) return ''
   if (key === 'fuelverify' && !ctx?.sweepHasRun) {
     return 'the fuel-event sweep has never run, so there is no fill history to check against'
   }
@@ -159,6 +223,44 @@ export function queueInconclusiveText(key, ctx) {
     return ctx?.linxupHasToken
       ? 'no Linxup message has arrived since this server started'
       : 'the Linxup webhook has no token configured, so nothing is being counted'
+  }
+  if (key === 'periodlock' && !ctx?.periodLockMeaningful) return periodLockInconclusiveText(ctx)
+  return ''
+}
+
+/**
+ * Why the month-end queue established nothing, ordered LOUDEST FIRST.
+ *
+ * An unreadable lock table leads because it is a fault rather than a
+ * configuration: it is the only one of these that means the running app is
+ * currently refusing writes, so it must not be reported behind "no month has
+ * been finalized yet". Kept separate from queueInconclusiveText() so the section
+ * can render the same sentence in its own context strip without going through
+ * the shared status box — see the note on the periodlock section in
+ * DataIssuesView.
+ *
+ * ⚠️ AND IT MUST MAKE THE SAME ANSWERED CHECK, because it is called DIRECTLY by
+ * that strip as well as through queueInconclusiveText(). Gating only the shared
+ * entry point would leave the section rendering the sentence the shared path just
+ * learned not to say. `locksReadable`/`auditReadable` are tested for `=== false`
+ * precisely so a null cannot be read as a fault — but that same null then falls
+ * through to the `!lockedCount` rung, which asserts both the close-flag state and
+ * that no month was ever finalized. Neither is knowable from a call that failed.
+ */
+export function periodLockInconclusiveText(ctx) {
+  if (!ctx) return ''
+  if (!queueCtxAnswered(ctx, 'periodlock')) return ''
+  if (ctx.periodLockMeaningful) return ''
+  if (ctx.locksReadable === false) {
+    return "the month-end lock table can't be read, so every write guard in the app is refusing what it can't confirm is safe"
+  }
+  if (ctx.auditReadable === false) {
+    return "the audit trail can't be read, so refused writes can't be listed"
+  }
+  if (!ctx.lockedCount) {
+    return ctx.closeEnabled
+      ? 'no month has been finalized yet, so nothing can be held by one'
+      : 'automatic month-close is switched off and no month has ever been finalized, so nothing can be held by one'
   }
   return ''
 }
@@ -935,4 +1037,267 @@ export function tankDecisionFallback(rows) {
   const configured = list.filter((r) => r.tankSource === 'truck')
   const pool = configured.length ? configured : list
   return pool.slice().sort((a, b) => spread(b) - spread(a))[0] || null
+}
+
+// ---------------------------------------------------------------------------
+// 6. Month-end close  (GET /api/admin/period-lock-issues)
+// ---------------------------------------------------------------------------
+//
+// Client ask, verbatim: "everything that is concerning the lock month or date it
+// should go to that page where we show all the concerns."
+//
+// TWO HALVES, and the queue is wrong without either. HISTORY is what a closed
+// month REFUSED — it only exists if somebody happened to try, and until the
+// refusal-audit work most of those guards returned a 409 and wrote nothing at
+// all. CURRENT STATE is what a closed month is HOLDING right now, which is true
+// whether or not anyone has bumped into it yet.
+//
+// ⚠️ EXPENSES REDIRECTED VIA `posted_period` ARE DELIBERATELY ABSENT. Owner's
+// call: the redirect is the system working as designed, both admin surfaces
+// already say so at the moment it happens, and with every month through 2026-07
+// locked it fires on essentially every backdated receipt. Listing them would
+// bury the rows that do need someone — the exact failure that taught everyone to
+// ignore the rate-con reconciler's daily mail.
+
+/**
+ * ⚠️ THE HISTORY'S HONEST LIMIT, stated on the page rather than implied.
+ *
+ * A period refusal is never purged — purgeOldAuditRefusals() deletes only rows on
+ * its action allowlist AND without the `[PERIOD_` marker, and nothing else prunes
+ * audit_trail — so this list genuinely reaches back as far as its oldest row.
+ * What it CANNOT show is a write refused before this server started recording
+ * refusals, because those wrote nothing anywhere. An empty history therefore
+ * means "nothing has been refused since the recording started", never "nothing
+ * has ever been refused", and the difference is the whole reason this note is
+ * rendered instead of assumed.
+ */
+export const PERIOD_HISTORY_NOTE =
+  'Refused writes are never purged, so this reaches back as far as the oldest row shown — but a write '
+  + 'refused before this server began recording refusals left no record anywhere.'
+
+/**
+ * A recorded refusal.
+ *
+ * ⚠️ `account`, NEVER `who`. `super_admin` is a SHARED login used by several
+ * people, so this names a login and a session and can never name a person. The
+ * field is called what it holds, and the page must keep saying "account".
+ *
+ * `periods` is server-parsed and already filtered to well-formed month keys;
+ * `unnamedPeriods` is the flag for a row that mentioned months it could not name
+ * ("(unrecognized date)", or a list the audit formatter truncated). Rendering
+ * either as a month would send someone to reopen a period that does not exist.
+ */
+export function normalizePeriodRefusal(raw) {
+  const periods = asList(raw?.periods).map((p) => String(p)).filter(Boolean)
+  return {
+    id: raw?.id ?? null,
+    at: String(raw?.at ?? '').trim(),
+    account: String(raw?.account ?? '').trim(),
+    role: String(raw?.role ?? '').trim(),
+    action: String(raw?.action ?? '').trim(),
+    entity: String(raw?.entity ?? '').trim(),
+    entityId: String(raw?.entityId ?? '').trim(),
+    code: String(raw?.code ?? '').trim(),
+    periods,
+    periodLabels: periods.map((p) => monthLabel(p) || p),
+    unnamedPeriods: raw?.unnamedPeriods === true,
+    attempted: String(raw?.attempted ?? '').trim(),
+    note: String(raw?.note ?? '').trim(),
+    // ⚠️ toNum, so an absent count stays null rather than becoming 0. A row that
+    // says "+0 more suppressed" is a claim the server never made.
+    suppressed: toNum(raw?.suppressed),
+    details: String(raw?.details ?? ''),
+  }
+}
+
+/**
+ * What a cause code means, in the reader's terms.
+ *
+ * ⚠️ AN UNRECOGNISED CODE RETURNS '', and the row then renders its raw `details`
+ * instead. This is the queue whose entire premise is that a guard added later
+ * shows up here without a code change — inventing a sentence for a code this
+ * file has never seen would be the one place that premise turns into a lie.
+ */
+export function refusalCauseText(code) {
+  const c = String(code ?? '').trim()
+  if (c === 'PERIOD_FINALIZED') return 'the month this would have changed is already closed'
+  if (c === 'PERIOD_LOCK_UNREADABLE') {
+    return "the server couldn't read the month-end lock table, so it withheld the write rather than risk restating a closed month"
+  }
+  if (c === 'PERIOD_UNRESOLVED') {
+    return "the row carries a date the server can't resolve to a month, so no month it would restate could be confirmed open"
+  }
+  if (c === 'PERIOD_NOT_FINALIZED') {
+    return "the month is over but still inside its grace window, so it isn't settleable yet"
+  }
+  return ''
+}
+
+/**
+ * An invoice a closed month is holding.
+ *
+ * ⚠️ `neverPayable` IS THE FIGURE THIS QUEUE EXISTS FOR. Only the `paid`
+ * transition carries a month-end guard — submit, approve and processing do not —
+ * so a Draft in a finalized month walks all the way to Approved and then stops
+ * for good. Unlike an un-adjustable invoice, which needs nothing unless somebody
+ * wants to change it, this one is waiting on a payment that cannot arrive, and
+ * there is no in-app remedy short of reopening the month.
+ *
+ * `adjustable` is server-told and always false here by construction: a row only
+ * reaches this list because invoiceMonthLockBlockers() refused it.
+ */
+export function normalizeFrozenInvoice(raw) {
+  const periods = asList(raw?.periods).map((p) => String(p)).filter(Boolean)
+  return {
+    id: raw?.id ?? null,
+    invoiceNumber: String(raw?.invoiceNumber ?? '').trim(),
+    driver: String(raw?.driver ?? '').trim(),
+    weekStart: String(raw?.weekStart ?? '').trim(),
+    weekEnd: String(raw?.weekEnd ?? '').trim(),
+    status: String(raw?.status ?? '').trim(),
+    isManual: raw?.isManual === true,
+    amount: toNum(raw?.amount),
+    paidAt: String(raw?.paidAt ?? '').trim(),
+    cause: String(raw?.cause ?? '').trim(),
+    periods,
+    periodLabels: periods.map((p) => monthLabel(p) || p),
+    adjustable: raw?.adjustable === true,
+    neverPayable: raw?.neverPayable === true,
+    // ⚠️ NOT `!neverPayable`. Server-told, and it is a THIRD state: the server
+    // tests an explicit terminal list (Paid / Rejected), so an unrecognised status
+    // is neither stuck-before-paid nor settled. Deriving it by negation here would
+    // silently promote an unknown status to "finished, nothing waiting on it" —
+    // the one direction that stops a row being reported at all.
+    settled: raw?.settled === true,
+    detail: String(raw?.detail ?? '').trim(),
+    remedy: String(raw?.remedy ?? '').trim(),
+  }
+}
+
+/**
+ * What is actually stuck about this invoice, and what it would take to unstick
+ * it. Same job as voidBlockedReason(): the page must never state a problem
+ * without naming the remedy that applies to it.
+ *
+ * ⚠️ THE UNRESOLVED-DATE BRANCH IS A DEAD END AND SAYS SO. No route in this app
+ * can edit `week_start` / `week_end` — the only two writers are the INSERTs — so
+ * "reopen the month" is not merely unhelpful there, it names no month at all.
+ *
+ * ⚠️ BUT STATUS STILL DECIDES, ON BOTH BRANCHES. That arm used to return before
+ * any status check, so a PAID invoice with an unparseable week date was told it
+ * "has to be regenerated" — telling someone to redo a settlement that has already
+ * been sent, while the queue's own headline count (server-side `noRemedy`) had
+ * stopped counting it as work. `settled` is server-told and is a third state, not
+ * `!neverPayable`: an unrecognised status keeps the dead-end sentence AND its
+ * place in the count, so the row and the headline agree in that case too. Zero
+ * rows reach this arm today (0 of 25 frozen) — shape for the day one does.
+ */
+export function frozenInvoiceImpact(inv) {
+  if (!inv) return ''
+  if (inv.cause === 'PERIOD_UNRESOLVED') {
+    return inv.settled
+      ? "Can't be adjusted, and its billing dates can't be resolved to a month — but it is already "
+        + `${inv.status || 'settled'}, so nothing is waiting on it.`
+      : "Neither adjustable nor payable, and no route in the app can edit an invoice's billing dates — "
+        + 'this one has to be regenerated.'
+  }
+  const months = inv.periodLabels.length ? periodList(inv.periods) : ''
+  const where = months ? `${months} would have to be reopened first` : 'the month would have to be reopened first'
+  if (inv.neverPayable) {
+    return `Can't be adjusted, and can never be marked Paid — it is ${inv.status || 'unpaid'}, and ${where}.`
+  }
+  return `Can't be adjusted. It is already ${inv.status || 'settled'}, so nothing is waiting on it.`
+}
+
+/**
+ * The whole payload, or null.
+ *
+ * ⚠️ null FOR AN ABSENT PAYLOAD, and it is the same rule the queue states run on
+ * one level up. A synthesised zero here would flow straight into
+ * periodIssueCounts() and out to the bar as a confident "0", from a call that
+ * never answered. The caller only ever reaches this with an `ok` state, and this
+ * is the guard for the day that stops being true.
+ *
+ * Everything reported is SERVER-TOLD. In particular `meaningful` is derived only
+ * from facts the server stated about its own tables — never from the shape of the
+ * lists, because "both lists are empty" is precisely the input that cannot tell
+ * a healthy month-end from one that never ran.
+ */
+export function periodLockReport(payload) {
+  if (!payload) return null
+  const s = payload.invoiceSummary || {}
+  const locksReadable = payload.locksReadable !== false
+  const auditReadable = payload.auditReadable !== false
+  const lockedPeriods = asList(payload.lockedPeriods).map((p) => String(p)).filter(Boolean)
+  const lockedCount = toNum(payload.lockedCount) ?? lockedPeriods.length
+  const refusalCount = toNum(payload.refusalCount) ?? 0
+  const refusals = asList(payload.refusals).map(normalizePeriodRefusal)
+  const invoices = asList(payload.invoices).map(normalizeFrozenInvoice)
+  const invoiceCount = toNum(payload.invoiceCount) ?? invoices.length
+  return {
+    closeEnabled: Boolean(payload.closeEnabled),
+    locksReadable,
+    auditReadable,
+    lockedPeriods,
+    lockedCount,
+    currentPeriod: String(payload.currentPeriod ?? '').trim(),
+    auditRows: toNum(payload.auditRows) ?? 0,
+
+    refusals,
+    // ⚠️ 0 RATHER THAN null WHEN `auditReadable` IS FALSE, and that is the
+    // server's shape, not a coercion introduced here: it initialises the counter
+    // before the try, so a failed read reports zero refusals. Left as 0 because
+    // periodIssueCounts() adds it, and a null there turns the queue's headline
+    // into NaN — but it means NO SURFACE MAY PRINT THIS NUMBER WITHOUT CHECKING
+    // `auditReadable` FIRST. The rollup card in DataIssuesView renders "—" and
+    // says the table couldn't be read; anything new here must do the same.
+    refusalCount,
+    // Server-told, never `refusalCount > refusals.length` — the two agree today
+    // and the server is the only side that has seen the full set.
+    refusalTruncated: payload.refusalTruncated === true,
+    refusalShown: toNum(payload.refusalShown) ?? refusals.length,
+    refusalOldest: payload.refusalOldest || null,
+    refusalNewest: payload.refusalNewest || null,
+
+    invoices,
+    invoiceCount,
+    invoiceTruncated: payload.invoiceTruncated === true,
+    invoiceShown: toNum(payload.invoiceShown) ?? invoices.length,
+    liveInvoices: toNum(payload.liveInvoices) ?? 0,
+    summary: {
+      live: toNum(s.live) ?? 0,
+      frozen: toNum(s.frozen) ?? 0,
+      neverPayable: toNum(s.neverPayable) ?? 0,
+      unresolvedDates: toNum(s.unresolvedDates) ?? 0,
+      // ⚠️ SERVER-TOLD, NEVER `neverPayable + unresolvedDates`. The two overlap —
+      // a Draft carrying an unparseable week date is both — so adding them here
+      // would double-count that row in the headline the queue leads with.
+      noRemedy: toNum(s.noRemedy) ?? 0,
+      frozenAmount: toNum(s.frozenAmount) ?? 0,
+      neverPayableAmount: toNum(s.neverPayableAmount) ?? 0,
+    },
+
+    // The establishment contract, as one boolean. See queueEstablished().
+    meaningful: locksReadable && auditReadable && lockedCount > 0,
+  }
+}
+
+/**
+ * The bar's split — "N to fix · M closed".
+ *
+ * `actionable` leads because the count exists to answer "how much work is
+ * there", and only a row with NO in-app remedy is work: an invoice that can
+ * never be marked Paid, or one whose billing dates cannot be resolved at all. A
+ * refused write already didn't happen and an un-adjustable-but-settled invoice
+ * needs nothing, so both sit under `closed` — which is the literal truth for
+ * every row in this queue, all of which are about a closed month.
+ *
+ * Both figures come from the server's full-set counts, never from the rendered
+ * lists, so a truncated table can never understate the headline.
+ */
+export function periodIssueCounts(report) {
+  if (!report) return { total: 0, actionable: 0, closed: 0 }
+  const total = report.invoiceCount + report.refusalCount
+  const actionable = Math.min(report.summary.noRemedy, total)
+  return { total, actionable, closed: Math.max(0, total - actionable) }
 }
