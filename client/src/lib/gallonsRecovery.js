@@ -24,7 +24,13 @@
 // first time the periods reopen — so every verdict the server can emit is named
 // here, including the three only the POST can produce.
 
-import { toNum, asList, monthLabel } from './fuelReview';
+// The extension is explicit so this module can be imported by bare Node (a
+// scripts/test-*.js lock) as well as by Vite. Vite resolves both forms; Node ESM
+// resolves only this one and fails with ERR_MODULE_NOT_FOUND before a single
+// assertion runs. Same fix, same reasoning, as lib/dataIssues.js — this sibling
+// was simply missed. `monthLabel` is fuelReview's re-export of lib/monthLabel.js,
+// the one definition of that formatter.
+import { toNum, asList, monthLabel } from './fuelReview.js';
 
 /**
  * Is the key actually present on the wire?

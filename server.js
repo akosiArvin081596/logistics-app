@@ -131,6 +131,26 @@ function notifyChange(domain) {
 	}
 }
 app.set("trust proxy", 1); // Behind nginx — use real client IP for rate limiting
+// ⚠️ ADDING AN EXTENSION HERE IS A SECURITY DECISION, NOT A CONVENIENCE ONE.
+// Three mechanisms key off this set and they only combine safely by accident of
+// what is currently in it:
+//   (a) verifyInlineServedBytes() has a magic-byte branch for PDFs and images
+//       ONLY. It returns null — i.e. NO CHECK AT ALL — for .doc/.docx/.xls/.xlsx/
+//       .csv/.txt, and the extension it switches on comes from the CLIENT-SUPPLIED
+//       fileName. So today `{"fileName":"x.txt","fileData":"data:text/html;..."}`
+//       genuinely writes arbitrary bytes into uploads/.
+//   (b) That is harmless right now for exactly one reason: the /uploads mount
+//       forces `Content-Disposition: attachment` for every extension outside
+//       INLINE_SAFE_UPLOAD_EXTS (the image+PDF set) and sets X-Content-Type-Options:
+//       nosniff unconditionally. All six unchecked extensions DOWNLOAD; none renders.
+//   (c) This set contains no .svg, .html, .htm, .xml or .xhtml — the extensions a
+//       browser executes as script on our own origin.
+//
+// So: adding any markup-ish extension is a STORED XSS bug unless it is
+// simultaneously given a magic-byte branch in verifyInlineServedBytes AND kept
+// out of INLINE_SAFE_UPLOAD_EXTS. `.svg` is the one people ask for and is the one
+// that must never be added — it is XML that executes script and no magic-byte
+// signature distinguishes a safe one from a hostile one.
 const ALLOWED_FILE_EXTS = new Set([".pdf",".jpg",".jpeg",".png",".gif",".webp",".doc",".docx",".xls",".xlsx",".csv",".txt"]);
 function validateFileExt(fileName) { return ALLOWED_FILE_EXTS.has(path.extname(fileName || "").toLowerCase()); }
 // Verify image magic bytes — the data URI Content-Type alone is client-controlled
@@ -423,7 +443,130 @@ try { db.exec("CREATE INDEX IF NOT EXISTS idx_expenses_loc_state ON expenses(loc
 // the P&L. '' = legacy rows / no-photo expenses (never dedup-matched — the
 // lookup at POST /api/expenses requires a non-empty hash). Additive + reversible.
 try { db.exec("ALTER TABLE expenses ADD COLUMN receipt_hash TEXT DEFAULT ''"); } catch {}
+// Kept, and deliberately NOT replaced by the UNIQUE migration below. On a fresh
+// install it is what puts an index on the column before the migration upgrades
+// it; on an existing one it is a no-op (IF NOT EXISTS matches on NAME). Its real
+// job is the failure path: if the migration ever SKIPS on a collision pre-flight
+// or throws, the lookup at POST /api/expenses still has an index to use.
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_expenses_receipt_hash ON expenses(receipt_hash)"); } catch {}
+
+// ---------------------------------------------------------------------------
+// MIGRATION: idx_expenses_receipt_hash → UNIQUE, PARTIAL
+//
+// Client ask (Deshorn): "make sure that the receipt doesn't have any duplicate."
+// POST /api/expenses already SELECTs on receipt_hash and 409s on a hit — but a
+// SELECT-then-INSERT is check-then-act, and the bulk receipt uploader saves three
+// rows CONCURRENTLY. Two copies of one receipt in one batch can both pass the
+// SELECT before either INSERT lands, and both are booked. The only thing that
+// actually makes "one receipt, one expense" true is a constraint in the table.
+//
+//  1. PARTIAL — scoped to `receipt_hash <> ''`, and this is load-bearing, not
+//     tidiness. '' is the value for every legacy row and every expense filed
+//     with no photo (3 live rows today, and every future receipt-less expense).
+//     A plain UNIQUE index makes those collide WITH EACH OTHER: the first
+//     no-photo expense would take the '' slot and every subsequent one would be
+//     refused. SQLite treats NULLs as distinct so a NULL row would be exempt
+//     anyway, but nothing writes NULL here — `receiptHash` is initialised to ""
+//     and only ever reassigned to a hex digest — so '' is the case to exclude.
+//
+//  2. UNIQUE — the constraint the 409 is only pretending to be.
+//
+// ⚠️ THE MIGRATION SHAPE IS COPIED FROM idx_invoices_driver_week (below) FOR THE
+// REASONS ITS HEADER GIVES, and all three of its rules apply verbatim here:
+//
+//   (a) COLLISION PRE-FLIGHT FIRST. A duplicate hash already in the table makes
+//       the CREATE throw. Detect it, abort LOUDLY, and leave the existing index
+//       untouched — never "resolve" it. Which of two rows sharing a receipt is
+//       the real expense is a business question, and both rows are money already
+//       booked into a P&L and possibly into a settled payout.
+//       Scoped to `receipt_hash <> ''`, exactly the index's own predicate.
+//       Verified read-only on production 2026-08-12: 169 rows, 166 hashed,
+//       ZERO collisions — so this applies cleanly today.
+//   (b) CREATE THE REPLACEMENT UNDER A TEMPORARY NAME FIRST, verify, and only
+//       then drop the old one and re-create under the canonical name. SQLite
+//       cannot rename an index, so create-then-drop is the ONLY ordering under
+//       which the column is never left unconstrained. The temp is dropped last,
+//       and on any failure is deliberately LEFT IN PLACE — a duplicate
+//       constraint is harmless, an absent one is the bug.
+//   (c) THE REBUILD PREDICATE MUST TEST BOTH PROPERTIES. Testing only /WHERE/ is
+//       false-forever the moment the index is partial-but-not-unique; testing
+//       only /UNIQUE/ is false-forever the moment it is unique-but-not-partial.
+//       Either single test can strand the migration in a half-done shape that it
+//       then refuses to look at again.
+// ---------------------------------------------------------------------------
+const RECEIPT_HASH_IDX = "idx_expenses_receipt_hash";
+const RECEIPT_HASH_IDX_TMP = "idx_expenses_receipt_hash_migrating";
+const RECEIPT_HASH_IDX_COLS = `expenses(receipt_hash) WHERE receipt_hash <> ''`;
+// ⚠️ IDENTIFIER INTERPOLATED INTO SQL — same rule, and same justification, as
+// invoiceWeekIndexSql() below: `name` is never caller-, request- or
+// database-supplied. The only two arguments this function is ever given are the
+// two hardcoded module constants declared immediately above, and it runs once at
+// boot, before any listener exists. A bound parameter cannot carry an INDEX NAME
+// in the sibling CREATE/DROP statements, so the constants have to be
+// interpolated there regardless; matching that here keeps one spelling of the
+// name. If this ever needs a dynamic name, whitelist it against those two
+// constants first.
+function receiptHashIndexSql(name) {
+	return `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = '${name}'`;
+}
+function receiptHashIndexIsCurrent(name) {
+	const row = db.prepare(receiptHashIndexSql(name)).get();
+	const sql = row && row.sql ? row.sql : "";
+	// (c) BOTH properties, or the predicate is false-forever on one shape.
+	return /\bUNIQUE\b/i.test(sql) && /\bWHERE\b/i.test(sql);
+}
+try {
+	if (!receiptHashIndexIsCurrent(RECEIPT_HASH_IDX)) {
+		// (a) Pre-flight. Exactly the rows the index would cover.
+		const clashes = db.prepare(`
+			SELECT receipt_hash, COUNT(*) AS n, GROUP_CONCAT(id) AS ids
+			FROM expenses
+			WHERE receipt_hash <> ''
+			GROUP BY receipt_hash
+			HAVING n > 1
+		`).all();
+		if (clashes.length) {
+			const named = clashes
+				.map((c) => `${String(c.receipt_hash).slice(0, 12)}… → expenses ${c.ids} (${c.n} rows)`)
+				.join("; ");
+			console.error(
+				`expenses receipt_hash unique-index migration SKIPPED — ${clashes.length} duplicate receipt hash${clashes.length === 1 ? "" : "es"} ` +
+				`already stored: ${named}. The existing non-unique ${RECEIPT_HASH_IDX} is intact and unchanged, so lookups still work ` +
+				`and POST /api/expenses still returns its 409. Correct or remove the duplicate expense rows, then restart. ` +
+				`Do NOT resolve these automatically — both rows are money already booked into a P&L.`
+			);
+		} else {
+			// (b) Temp first. IF NOT EXISTS so a run interrupted midway resumes
+			// cleanly rather than throwing on a leftover temp index.
+			db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ${RECEIPT_HASH_IDX_TMP} ON ${RECEIPT_HASH_IDX_COLS}`);
+			if (!receiptHashIndexIsCurrent(RECEIPT_HASH_IDX_TMP)) {
+				throw new Error(`${RECEIPT_HASH_IDX_TMP} did not materialise — refusing to drop ${RECEIPT_HASH_IDX}`);
+			}
+			// From here the column is covered by the temp index no matter what.
+			db.exec(`DROP INDEX IF EXISTS ${RECEIPT_HASH_IDX}`);
+			db.exec(`CREATE UNIQUE INDEX ${RECEIPT_HASH_IDX} ON ${RECEIPT_HASH_IDX_COLS}`);
+			if (!receiptHashIndexIsCurrent(RECEIPT_HASH_IDX)) {
+				throw new Error(`${RECEIPT_HASH_IDX} did not materialise — leaving ${RECEIPT_HASH_IDX_TMP} in place`);
+			}
+			db.exec(`DROP INDEX IF EXISTS ${RECEIPT_HASH_IDX_TMP}`);
+			console.log(`Migrated ${RECEIPT_HASH_IDX}: now UNIQUE over receipt_hash <> '' (one receipt, one expense)`);
+		}
+	} else {
+		// (d) SWEEP THE TEMP INDEX ON THE ALREADY-CURRENT PATH. Every step above is
+		// resumable EXCEPT the last one: if that final DROP is what fails (or the
+		// process dies just before it), the canonical index is already current, so
+		// the next boot takes THIS branch, skips the whole block, and the temp
+		// survives forever, costing a second write on every expense insert. Safe
+		// only because receiptHashIndexIsCurrent() has just confirmed the canonical
+		// index is holding the constraint on its own — which is exactly why the
+		// failure path above still leaves it alone.
+		db.exec(`DROP INDEX IF EXISTS ${RECEIPT_HASH_IDX_TMP}`);
+	}
+} catch (err) {
+	// The temp index is intentionally NOT cleaned up here: if we failed after
+	// creating it, it is the only thing still enforcing uniqueness.
+	console.error("expenses receipt_hash unique-index migration failed:", err.message);
+}
 // Dynamic OCR-extracted receipt fields as a JSON label/value list — populated by
 // runReceiptOcr's `details` + POST /api/expenses/:id/extract-details. '' = none/legacy.
 try { db.exec("ALTER TABLE expenses ADD COLUMN receipt_details TEXT DEFAULT ''"); } catch {}
@@ -779,9 +922,40 @@ const refusalAuditWindows = new Map();
 // on different loads in different months within the window would collapse into
 // one row naming one of them. "Someone repeatedly tried to restate a settled
 // month" is exactly the signal the refusal audit exists to keep.
+//
+// ⚠️ EVERY MEMBER MUST BE NAMED `PERIOD_…`, and that is a hard coupling, not a
+// stylistic one. purgeOldAuditRefusals() exempts a row from deletion by matching
+// `[PERIOD_` in its DETAILS, while this set exempts it from coalescing by CODE —
+// two mechanisms keyed on two different things, documented as a pair and, until
+// assertUncoalescedRefusalContract() below, enforced by nothing. A member named
+// otherwise would be written in full and then silently purged at 90 days, which
+// is the worse half of both behaviours. Asserted at boot.
 const UNCOALESCED_REFUSAL_CODES = new Set([
 	"PERIOD_FINALIZED", "PERIOD_LOCK_UNREADABLE", "PERIOD_UNRESOLVED",
+	// The settlement guard on POST /api/investor/payouts/:id/status: the month is
+	// over but still inside its grace window, so a forward move to processing/paid
+	// is refused. Listed here for the same reason as its neighbours and for one
+	// sharper one — that route is "Mark Paid", the only verb in the app asserting
+	// money actually moved. Its refusals need a locked-or-pending month AND a
+	// Super Admin session, so they cannot flood; and `super_admin` is a SHARED
+	// login, so with this code absent a second operator refused on a different
+	// payout within the same minute would have written nothing at all.
+	"PERIOD_NOT_FINALIZED",
 ]);
+
+// The contract above, checked rather than trusted. Never throws: an audit-config
+// drift must not take dispatch down, and the log line is addressed to whoever
+// adds the next code.
+function assertUncoalescedRefusalContract() {
+	const stray = [...UNCOALESCED_REFUSAL_CODES].filter((c) => !String(c).startsWith("PERIOD_"));
+	if (stray.length) {
+		console.error(
+			`[audit] UNCOALESCED_REFUSAL_CODES contains ${stray.join(", ")}, which purgeOldAuditRefusals() ` +
+			`will NOT exempt — its filter matches '[PERIOD_' in details. Rename the code, or widen the purge filter to match.`
+		);
+	}
+}
+assertUncoalescedRefusalContract();
 
 function logAuditRefusal(req, action, entity, entityId, details, code) {
 	try {
@@ -13311,6 +13485,311 @@ function duplicateReceiptGroups() {
 	};
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// DUPLICATE-RECEIPT ALERTING
+//
+// Client ask (Deshorn), verbatim: "make sure that the receipt doesn't have any
+// duplicate and if it has duplicate just let it automatically send me a ping."
+// POST /api/expenses answers the first half at WRITE time. This answers the
+// second: the pairs that got in BEFORE the guard existed, the ones a conscious
+// override let through and then nobody revisited, and the ones an admin created
+// by editing a row after the fact. All five production duplicates ($1,115.35)
+// were found by hand — the queue at GET /api/expenses/duplicates exists but is
+// pull-only, so it reports to whoever happens to open it.
+//
+// Alerts ONCE per group, never repeated, same shape and same reasoning as
+// ratecon_extract_alerts and fuel_event_alerts: a finding repeated every six
+// hours is a finding everybody learns to scroll past. This repo's own
+// cautionary tale is the 13 ignored "needs a manual check" rate-con emails.
+//
+// The UPSERT is fuel_event_alerts' — `ON CONFLICT DO UPDATE ... resolved_at =
+// NULL` — so a group that was settled (one copy voided, or the pair dismissed
+// via allowDuplicate) and then RECURS re-opens and pings again. That case is
+// real: voiding one of three copies drops the group below two members and
+// resolves it, and logging a fourth copy brings it straight back.
+// ═══════════════════════════════════════════════════════════════════════════
+db.exec(`
+	CREATE TABLE IF NOT EXISTS expense_duplicate_alerts (
+		group_key TEXT PRIMARY KEY,
+		truck_unit TEXT DEFAULT '',
+		driver TEXT DEFAULT '',
+		local_day TEXT DEFAULT '',
+		amount REAL DEFAULT 0,
+		excess_amount REAL DEFAULT 0,
+		confidence TEXT DEFAULT '',
+		row_ids TEXT DEFAULT '',
+		first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+		alerted_at DATETIME,
+		resolved_at DATETIME
+	)
+`);
+
+// DEFAULTS ON, deliberately breaking the ships-dormant convention — same call as
+// PII_MASK_ENABLED and RATECON_EXTRACT_ALERT_ENABLED, and for the same reason:
+// this is a kill switch, not an enable switch. A defect detector that ships off
+// is a defect detector that stays off, and the failure it exists to break is
+// silence. It sends mail and writes a dispatch notification; it writes nothing
+// to a finance row, so there is no money-touching reason to ship it dormant.
+const EXPENSE_DUPLICATE_ALERT_ENABLED =
+	!/^(false|0|no|off)$/i.test(String(process.env.EXPENSE_DUPLICATE_ALERT_ENABLED ?? "").trim());
+// Ceiling on alerts per rolling 24 h, INDEPENDENT of the once-per-group dedupe.
+// The dedupe is the primary control, but its key is built from stored column
+// values (`truck_unit` / `driver`, both free text that reaches the database from
+// a form), so this is the one that still holds if that key is ever wrong or a
+// key space we failed to anticipate turns up. sendEmail is SHARED with driver
+// onboarding, investor outreach and the weekly invoice batch, so exhausting
+// Gmail's daily quota here would take ALL outbound app mail down — i.e. the
+// abuse would silence exactly the channels this feature needs. 25/day is far
+// above any real defect rate (production holds 5 groups in total) and far below
+// Gmail's send quota.
+const EXPENSE_DUPLICATE_ALERT_MAX_PER_DAY =
+	Math.max(1, parseInt(process.env.EXPENSE_DUPLICATE_ALERT_MAX_PER_DAY ?? "25", 10) || 25);
+// Every 6 h, matching the fuel-events sweep. The input only changes when someone
+// files an expense, so this is not latency-sensitive: the WRITE-time 409 is what
+// catches a duplicate in the moment, and this catches what got around it.
+const EXPENSE_DUPLICATE_SWEEP_MS =
+	Math.max(15, parseInt(process.env.EXPENSE_DUPLICATE_SWEEP_MINUTES ?? "360", 10) || 360) * 60 * 1000;
+
+// Fire-and-forget. NEVER throws and never rejects — its caller is a timer, and
+// the sweep must survive one unmailable group to reach the rest.
+async function alertDuplicateReceipts(group) {
+	if (!EXPENSE_DUPLICATE_ALERT_ENABLED) return { alerted: false, reason: "disabled" };
+	try {
+		const raw = String(group && group.key != null ? group.key : "").trim();
+		// ⚠️ THE DEDUPE KEY MUST BE VALIDATED, NOT MERELY TRIMMED. duplicateKey()
+		// builds it as `t:<truck_unit>|<date>|<cents>` (or `d:<driver>|…`), and both
+		// the truck unit and the driver name are free text that reaches the database
+		// through a form. An unvalidated key is therefore chosen, in part, by
+		// whoever types a truck unit: newlines forge pm2 log lines and mail headers,
+		// and an unbounded one bloats a PRIMARY KEY. Anything that does not match
+		// the shape duplicateKey() actually emits collapses into a shared per-UTC-day
+		// bucket, exactly like the rate-con alerter's `unidentified:` — so a
+		// malformed key can cost at most one ping a day instead of one per sweep.
+		const key = /^[td]:[^|\r\n]{1,80}\|\d{4}-\d{2}-\d{2}\|\d{1,12}$/.test(raw)
+			? raw
+			: `unkeyed:${new Date().toISOString().slice(0, 10)}`;
+
+		const seen = db.prepare("SELECT group_key, alerted_at, resolved_at FROM expense_duplicate_alerts WHERE group_key = ?").get(key);
+		// ⚠️ `&& !seen.resolved_at` is the half that makes the fuel_event_alerts
+		// upsert below mean anything. A bare `alerted_at` short-circuit — which is
+		// what fuel_event_alerts does, because a refuel is a point event that cannot
+		// recur — would silence a group FOREVER after its first ping, including
+		// after it was settled and a fresh copy brought it back. Here the row is a
+		// standing condition, so "already told you" is only true while it is still
+		// the same unresolved condition.
+		if (seen && seen.alerted_at && !seen.resolved_at) return { alerted: false, reason: "already_alerted", key };
+
+		const alertedToday = db.prepare(
+			"SELECT COUNT(*) AS c FROM expense_duplicate_alerts WHERE alerted_at > datetime('now', '-1 day')",
+		).get().c;
+		if (alertedToday >= EXPENSE_DUPLICATE_ALERT_MAX_PER_DAY) {
+			console.warn(`[expense-duplicates] daily alert cap (${EXPENSE_DUPLICATE_ALERT_MAX_PER_DAY}) reached — group ${key} logged, not mailed`);
+			return { alerted: false, reason: "daily_cap", key };
+		}
+
+		const rows = Array.isArray(group.rows) ? group.rows : [];
+		const ids = rows.map((r) => r.id).filter((n) => Number.isFinite(n));
+		// Record the sighting NOW but leave alerted_at NULL — see the stamp below.
+		// first_seen is preserved across a re-open so "how long has this been
+		// double-booked" survives a settle-and-recur cycle.
+		db.prepare(`
+			INSERT INTO expense_duplicate_alerts
+				(group_key, truck_unit, driver, local_day, amount, excess_amount, confidence, row_ids, first_seen, alerted_at, resolved_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT first_seen FROM expense_duplicate_alerts WHERE group_key = ?), CURRENT_TIMESTAMP), NULL, NULL)
+			ON CONFLICT(group_key) DO UPDATE SET
+				truck_unit = excluded.truck_unit, driver = excluded.driver, local_day = excluded.local_day,
+				amount = excluded.amount, excess_amount = excluded.excess_amount,
+				confidence = excluded.confidence, row_ids = excluded.row_ids,
+				resolved_at = NULL
+		`).run(
+			key, String(group.truckUnit || ""), String(group.driver || ""), String(group.localDay || group.date || ""),
+			Number(group.amount) || 0, Number(group.excessAmount) || 0, String(group.confidence || ""),
+			ids.join(","), key,
+		);
+
+		// One-line sanitize for the subject and the console line, for the same
+		// reason the rate-con alerter does it: the truck unit and driver name are
+		// stored free text and reach here verbatim. nodemailer does strip CR/LF from
+		// a Subject, but relying on a dependency for that is not a control we own.
+		const oneLine = (v) => String(v == null ? "" : v).replace(/[\r\n]+/g, " ").slice(0, 60);
+		const who = oneLine(group.truckUnit || group.driver || "unattributed");
+		const day = oneLine(group.localDay || group.date || "");
+		const money = (n) => `$${(Number(n) || 0).toFixed(2)}`;
+		const rowsHtml = rows.map((r) =>
+			`<tr>` +
+			`<td style="padding:6px 10px;border:1px solid #ddd;">#${escHtml(String(r.id))}</td>` +
+			`<td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(oneLine(r.vendor) || "(no merchant recorded)")}</td>` +
+			`<td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(oneLine(r.type))}</td>` +
+			`<td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(money(r.amount))}</td>` +
+			`<td style="padding:6px 10px;border:1px solid #ddd;">${r.gallons ? escHtml(String(r.gallons)) + " gal" : "—"}</td>` +
+			`<td style="padding:6px 10px;border:1px solid #ddd;">${r.periodLocked ? "month closed" : "open"}</td>` +
+			`</tr>`).join("");
+		const html =
+			`<p><b>${escHtml(String(rows.length))} expenses look like the same receipt entered more than once.</b></p>` +
+			`<p>${escHtml(who)} · ${escHtml(day)} · ${escHtml(money(group.amount))} each — ` +
+			`<b>${escHtml(money(group.excessAmount))}</b> of that is booked twice. Confidence: ${escHtml(String(group.confidence || "unknown"))}.</p>` +
+			`<p>Why they matched: ${escHtml((group.reasons || []).join("; ") || "same truck, day and amount")}.</p>` +
+			`<table style="border-collapse:collapse;font-family:system-ui,sans-serif;font-size:13px;">` +
+			`<tr><th style="padding:6px 10px;border:1px solid #ddd;">Expense</th>` +
+			`<th style="padding:6px 10px;border:1px solid #ddd;">Merchant</th>` +
+			`<th style="padding:6px 10px;border:1px solid #ddd;">Type</th>` +
+			`<th style="padding:6px 10px;border:1px solid #ddd;">Amount</th>` +
+			`<th style="padding:6px 10px;border:1px solid #ddd;">Volume</th>` +
+			`<th style="padding:6px 10px;border:1px solid #ddd;">Settlement</th></tr>` +
+			rowsHtml + `</table>` +
+			`<p style="margin-top:14px;">If one is a mistake, reject it under Expenses — the P&amp;L and the investor payout deduction both drop it. ` +
+			`If they are genuinely separate purchases, nothing needs doing; logging one of them again with "Save anyway" records the decision ` +
+			`and closes this group for good.</p>` +
+			(group.period ? `<p>Booked to <b>${escHtml(periodLabel(group.period))}</b>` +
+				`${group.settlement && group.settlement !== "none" && group.settlement !== "unknown"
+					? ` — that month's payout is already <b>${escHtml(String(group.settlement))}</b>, so a correction has to be booked as a payout adjustment rather than by editing the month.`
+					: "."}</p>` : "") +
+			`<p style="color:#888;font-size:12px;">Reported once per group. Reported again only if it is settled and then recurs.</p>`;
+
+		let emailed = false;
+		try {
+			emailed = (await sendEmail(
+				process.env.GMAIL_USER,
+				`⚠️ Duplicate receipt — ${who} ${day}, ${money(group.excessAmount)} booked twice`,
+				html,
+			)) === true;
+		} catch (e) { console.error("[expense-duplicates] alert email failed:", e.message); }
+
+		let notified = false;
+		try {
+			const title = `Duplicate receipt — ${who} ${day} (${money(group.excessAmount)} booked twice)`;
+			const body = `${rows.length} expenses (${ids.map((i) => "#" + i).join(", ")}) at ${money(group.amount)} each · ${group.confidence || "unknown"} confidence`;
+			insertDispatchNotification.run(
+				"duplicate-receipts",
+				title,
+				body,
+				JSON.stringify({ groupKey: key, expenseIds: ids, excessAmount: group.excessAmount, confidence: group.confidence, period: group.period || "" }),
+			);
+			io.to("dispatch").emit("dispatch-notification", {
+				type: "duplicate-receipts",
+				title,
+				body,
+				metadata: { groupKey: key, expenseIds: ids, excessAmount: group.excessAmount, confidence: group.confidence, period: group.period || "" },
+			});
+			notified = true;
+		} catch (e) { console.error("[expense-duplicates] notification failed:", e.message); }
+
+		// ⚠️ STAMP ONLY ON CONFIRMED DELIVERY. Stamping before the send — the
+		// obvious shape — makes the once-per-group guard suppress the group forever
+		// on a transient Gmail 4xx or an unconfigured mailbox. The alert that never
+		// went out would then look, in this table, exactly like one that did.
+		// Leaving alerted_at NULL costs a repeat on the next sweep and buys a retry;
+		// the row is recorded above either way, so first_seen is never lost.
+		// The in-app dispatch notification counts as delivery in its own right — it
+		// is the channel that still works with no GMAIL_* configured at all.
+		const delivered = emailed || notified;
+		if (delivered) {
+			db.prepare("UPDATE expense_duplicate_alerts SET alerted_at = ? WHERE group_key = ? AND alerted_at IS NULL")
+				.run(new Date().toISOString(), key);
+		}
+		console.log(
+			"[expense-duplicates] %s — %s %s: %s expenses, %s booked twice (%s)",
+			delivered ? "ALERT" : "ALERT UNDELIVERED (will retry next sweep)",
+			who, day, rows.length, money(group.excessAmount), group.confidence || "unknown",
+		);
+		return { alerted: delivered, emailed, notified, key };
+	} catch (e) {
+		console.error("[expense-duplicates] alert failed:", e && e.message);
+		return { alerted: false, reason: "error" };
+	}
+}
+
+let expenseDuplicateSweepRunning = false;
+const expenseDuplicateHealth = { lastRun: null, lastError: null, lastGroups: 0, lastAlerted: 0, lastResolved: 0 };
+
+// The sweep. Read-only against `expenses` — it never edits, voids or merges a
+// row. Deciding which of two copies is the real purchase is a business call, and
+// this feature's whole job is to put that call in front of a human.
+async function sweepDuplicateReceipts() {
+	const d = duplicateReceiptGroups();
+	const groups = d.groups || [];
+	const total = (d.summary && d.summary.groupCount) || groups.length;
+
+	// Resolve any previously-alerted group that has since gone away — one copy
+	// rejected (EXPENSE_PNL_FILTER drops it, so the group falls below two
+	// members) or the pair consciously kept (`expense_duplicate_override`, which
+	// duplicateReceiptGroups suppresses on). Both are legitimate closures, and
+	// both must clear the row or a recurrence could never re-open it.
+	//
+	// ⚠️ SKIPPED WHEN THE LIST IS TRUNCATED. duplicateReceiptGroups() caps its
+	// list at FUEL_DUPLICATE_MAX_GROUPS while counting the full set in `summary`,
+	// so past that cap "absent from the list" and "no longer a duplicate" stop
+	// being the same statement, and resolving on it would silently close the
+	// smallest groups every sweep and re-open them the next. Failing to resolve
+	// costs a stale open row; resolving wrongly costs a ping that never comes.
+	let resolved = 0;
+	const truncated = total > groups.length;
+	if (!truncated) {
+		const live = new Set(groups.map((g) => g.key));
+		for (const row of db.prepare("SELECT group_key FROM expense_duplicate_alerts WHERE resolved_at IS NULL").all()) {
+			if (!live.has(row.group_key)) {
+				db.prepare("UPDATE expense_duplicate_alerts SET resolved_at = CURRENT_TIMESTAMP WHERE group_key = ?").run(row.group_key);
+				resolved++;
+			}
+		}
+	} else {
+		console.warn(`[expense-duplicates] ${total} groups exceeds the ${FUEL_DUPLICATE_MAX_GROUPS}-group list cap — resolution pass skipped this run`);
+	}
+
+	let alerted = 0;
+	for (const g of groups) {
+		const r = await alertDuplicateReceipts(g);
+		if (r && r.alerted) alerted++;
+		// A cap hit applies to every remaining group too — stop rather than spend
+		// the rest of the sweep re-reading the same COUNT.
+		if (r && r.reason === "daily_cap") break;
+	}
+
+	expenseDuplicateHealth.lastGroups = total;
+	expenseDuplicateHealth.lastAlerted = alerted;
+	expenseDuplicateHealth.lastResolved = resolved;
+	return { groups: total, alerted, resolved, truncated };
+}
+
+async function maybeSweepDuplicateReceipts() {
+	if (!EXPENSE_DUPLICATE_ALERT_ENABLED || expenseDuplicateSweepRunning) return;
+	expenseDuplicateSweepRunning = true;
+	try {
+		const r = await sweepDuplicateReceipts();
+		expenseDuplicateHealth.lastRun = new Date().toISOString();
+		expenseDuplicateHealth.lastError = null;
+		if (r.groups || r.resolved) {
+			console.log(`[expense-duplicates] ${r.groups} duplicate group(s); ${r.alerted} newly alerted, ${r.resolved} resolved`);
+		}
+	} catch (e) {
+		expenseDuplicateHealth.lastError = e.message;
+		console.error("[expense-duplicates] sweep failed:", e.message);
+	} finally {
+		expenseDuplicateSweepRunning = false;
+	}
+}
+
+if (EXPENSE_DUPLICATE_ALERT_ENABLED) {
+	// ⚠️ THE REJECTION HANDLER LOGS. It is deliberately NOT `.catch(() => {})` —
+	// copied from periodCloseTick rather than from the fuel-events interval three
+	// screens up, whose empty handler is, by its own neighbouring comment, how a
+	// throwing sweep stayed invisible through two QA ticks. maybeSweepDuplicateReceipts()
+	// owns its own try/catch/finally and should never reject, so anything arriving
+	// here is a defect in that guard itself — which is exactly why it must be noisy.
+	const expenseDuplicateTick = () => {
+		maybeSweepDuplicateReceipts().catch((e) => {
+			console.error("[expense-duplicates] sweep threw outside its own guard:", (e && e.message) || e);
+		});
+	};
+	setInterval(expenseDuplicateTick, EXPENSE_DUPLICATE_SWEEP_MS);
+	// Boot run is DELAYED, not immediate: better-sqlite3 is synchronous, so this
+	// scan blocks the event loop, and the documented deploy flow pm2-restarts this
+	// process during business hours. Four minutes puts it clear of the boot burst
+	// (and of the fuel-events baseline seed at three).
+	setTimeout(expenseDuplicateTick, 4 * 60 * 1000);
+	console.log(`[expense-duplicates] enabled — sweeping every ${Math.round(EXPENSE_DUPLICATE_SWEEP_MS / 60000)} min; max ${EXPENSE_DUPLICATE_ALERT_MAX_PER_DAY} alert(s)/day`);
+}
+
 // Read-only reconciliation snapshot straight off the persisted table — no
 // detection, no matching, no writes. Cheap enough for a dashboard poll.
 //
@@ -25378,6 +25857,152 @@ function computeDriverQueues(jobTrackingRows, headers) {
 	return byDriver;
 }
 
+// GET /api/driver/position  (alias: /api/driver/me/position)
+// The requesting driver's OWN live truck position.
+//
+// ⚠️ THIS FIXES A LIVE BUG, AND THE BUG IS AN AUTHORIZATION ONE WEARING A 403.
+// DriverView polls `/api/locations/latest` for its own pin, but that route is
+// requireRole("Super Admin", "Dispatcher") — so from a Driver session it has
+// always returned 403, swallowed by the caller's empty catch. A real driver's
+// position poll has never once worked, silently, and the map has been rendering
+// its no-pin fallback for every driver since phone GPS was retired.
+//
+// ⚠️ DO NOT "FIX" IT BY ADDING "Driver" TO THAT ROUTE'S ROLE LIST. It returns
+// EVERY driver's live position, ETA, active loads and truck assignment and lets
+// the CLIENT filter to one — so widening the role hands each driver the whole
+// fleet's real-time locations and load book. The scoping has to happen on the
+// server, which means a separate route.
+//
+// Shape follows the /me precedent set by GET /api/driver/me/truck-photo and the
+// Driver branch of GET /api/fuel/range, and for the same three reasons:
+//   - the driver is resolved from the SESSION, never from a parameter;
+//   - query params are IGNORED rather than 403'd, so there is no spoofable
+//     surface at all — nothing to probe means nothing to enumerate;
+//   - `routemate_vehicle_id` is OMITTED from the response. It is inert while no
+//     parameter accepts it, but publishing the ELD id to every driver hands out
+//     exactly the enumeration key the scoping depends on, so a later refactor
+//     that relaxed a lookup would find the fleet's ids already in the wild.
+//     `unit` stays — it is the placard on the truck they are sitting in, and
+//     /api/driver/:driverName already returns it.
+//
+// ⚠️ THIS MUST STAY ABOVE `app.get("/api/driver/:driverName")`, AND THAT IS THE
+// ONLY REASON IT SITS HERE RATHER THAN BESIDE ITS SIBLING /me ROUTES. Express
+// matches in REGISTRATION ORDER, and `:driverName` matches a single segment — so
+// registered after it, `/api/driver/position` is unreachable: the request lands
+// in the driver-lookup handler with driverName = "position". That failure is
+// quiet in the worst way, because it does NOT 404 (the shape a client would
+// notice and fall back from) — it returns a 200-ish driver payload for a driver
+// who does not exist. `/api/driver/me/position` is immune by construction (two
+// segments, which is why truck-photo is spelled `/api/driver/me/truck-photo`),
+// but the bare form is not, so ORDER is what makes it work.
+//
+// BOTH PATHS are registered deliberately. `/api/driver/position` is the name the
+// client composable already calls; `/api/driver/me/position` is the spelling
+// consistent with every other self-scoped driver route here. One handler, so
+// they cannot drift.
+app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver", "Super Admin"), (req, res) => {
+	try {
+		const user = req.session.user;
+		const driverName = (user.driverName || user.driver_name || "").trim();
+		// A Super Admin using the driver app (/driver permits the role) usually has
+		// no linked driver name, and a Driver whose account is not linked to a
+		// carrier row is an admin-side gap. Both degrade to the same honest empty
+		// answer rather than an error: the map renders its no-pin state, which is
+		// also what it does for a truck with no ELD. A 404 here would surface a
+		// linkage gap as a broken driver screen.
+		if (!driverName) return res.json({ ok: true, position: null, reason: "no_driver_name" });
+
+		// The widened resolver the fuel endpoints use: active truck_assignments
+		// row first, falling back to trucks.assigned_driver, matching on
+		// normalizeDriverName() rather than SQL TRIM(LOWER()). Reusing it keeps this
+		// route from becoming a fourth spelling of "which truck is this driver in".
+		const truck = resolveTruckForDriverName(driverName);
+		const vehicleId = (truck && truck.routemate_vehicle_id) || "";
+		if (!vehicleId) {
+			return res.json({
+				ok: true, position: null,
+				unit: (truck && truck.unit) || "",
+				reason: truck ? "truck_not_eld_linked" : "no_truck_assigned",
+			});
+		}
+
+		// Two rows: the latest clean fix, and the one before it as a heading
+		// fallback. idx_rm_tel_clean covers (routemate_vehicle_id, dropped_reason,
+		// id DESC) exactly, so this is two index reads.
+		const rows = db.prepare(
+			`SELECT latitude, longitude, speed, bearing, fuel_pct, location_date_ms
+			   FROM routemate_telemetry
+			  WHERE routemate_vehicle_id = ? AND dropped_reason = ''
+			  ORDER BY id DESC LIMIT 2`
+		).all(vehicleId);
+		const rm = rows[0] || null;
+		const prev = rows[1] || null;
+
+		// Same 14-day visibility window dispatch gets, deliberately: an ELD pings
+		// only while the truck is powered, so a 5-minute freshness gate threw away
+		// the position of every parked truck and hid it entirely (owner report,
+		// 2026-07-27). RECENCY is published as lastPingAge and left to the UI to
+		// render as Online/Dormant/Offline — visibility and freshness are different
+		// questions. Making this window narrower than dispatch's would put the
+		// driver and the dispatcher looking at contradicting maps.
+		const STALE_SHOW_MS = 14 * 24 * 60 * 60 * 1000;
+		// A linked truck whose ELD has lost GPS reports NULL/0 coordinates. Letting
+		// that through pins the truck at the equator, which is worse than no pin.
+		const hasFix = rm
+			&& Number.isFinite(rm.latitude) && Number.isFinite(rm.longitude)
+			&& (rm.latitude !== 0 || rm.longitude !== 0)
+			&& Number.isFinite(rm.location_date_ms)
+			&& Date.now() - rm.location_date_ms < STALE_SHOW_MS;
+		if (!hasFix) {
+			return res.json({ ok: true, position: null, unit: (truck && truck.unit) || "", reason: "no_recent_fix" });
+		}
+
+		// Heading: the device's own bearing (numeric degrees or a compass string),
+		// else the rhumb-line bearing from the previous clean fix. Same two-step,
+		// and the same helper, as /api/locations/latest — a driver's camera should
+		// point where the dispatcher's arrow points.
+		let heading = parseRoutemateBearing(rm.bearing);
+		if (heading == null && prev
+			&& Number.isFinite(prev.latitude) && Number.isFinite(prev.longitude)
+			&& (prev.latitude !== rm.latitude || prev.longitude !== rm.longitude)) {
+			heading = geolib.getRhumbLineBearing(
+				{ latitude: prev.latitude, longitude: prev.longitude },
+				{ latitude: rm.latitude, longitude: rm.longitude },
+			);
+		}
+
+		const speedMps = Number.isFinite(rm.speed) ? rm.speed : 0;
+		const lastPingAge = Date.now() - rm.location_date_ms;
+		res.json({
+			ok: true,
+			unit: (truck && truck.unit) || "",
+			position: {
+				latitude: rm.latitude,
+				longitude: rm.longitude,
+				// `speed` stays METRES PER SECOND, the column's unit and the unit
+				// /api/locations/latest publishes — the Linxup receiver converts
+				// mph->m/s on the way in and MOVEMENT_MOVING_MPS compares against it.
+				// speedMph is a convenience for the overlay's pill so the conversion
+				// is not re-derived (and mis-derived) per component.
+				speed: speedMps,
+				speedMph: Math.round((speedMps * 2.23694) * 10) / 10,
+				heading: heading == null ? null : heading,
+				timestamp: new Date(rm.location_date_ms).toISOString(),
+				lastPingAge,
+				source: "routemate",
+				fuelPct: Number.isFinite(rm.fuel_pct) ? rm.fuel_pct : null,
+				// Same three-state classifier the tracking panel uses, computed here
+				// so the driver and the dispatcher cannot disagree about whether the
+				// truck is moving.
+				movement: classifyMovement({ lastPingAge, speed: speedMps }),
+			},
+		});
+	} catch (err) {
+		console.error("driver position error:", err.message);
+		res.status(500).json({ ok: false, error: "Failed to read position" });
+	}
+});
+
 // GET /api/driver/:driverName — All data for one driver (single batchGet)
 app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 	try {
@@ -28409,17 +29034,33 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		// had already inflated the investor payout deduction.)
 		//
 		// Same merchant + same day + same amount is strong but NOT proof: a driver
-		// can genuinely fuel twice at one stop. So this WARNS rather than blocks —
+		// can genuinely fuel twice at one stop. So the 409 is a STOP, not a verdict —
 		// distinct code, and `allowDuplicate: true` lets the caller consciously
 		// override, mirroring the conscious per-row Retry used for save timeouts.
 		//
-		// OPT-IN, not role-gated. Whether a 409 is survivable is a property of the
-		// SURFACE, not the caller's role: only a form that can offer "save anyway"
-		// may ask for this check. `ExpensesTab` and `BulkReceiptScan` send
-		// checkDuplicate:true; the driver app does not — and a Super Admin can use
-		// the driver app (router: /driver allows Super Admin), where ExpenseForm
-		// clears the photo and every field the moment it submits. A 409 there would
-		// strand the user AND destroy the receipt, with no way to re-file it.
+		// ⚠️ ON BY DEFAULT SINCE 2026-08-12, AND THE PARAGRAPH THAT USED TO SIT HERE
+		// ARGUED THE OPPOSITE — read this before re-reading it as opt-in. The check
+		// was gated on the caller sending `checkDuplicate: true`, on the reasoning
+		// that whether a 409 is survivable is a property of the SURFACE: only a form
+		// that can offer "save anyway" may ask for it, and the driver app's
+		// ExpenseForm cleared the photo and every field the moment it submitted, so
+		// a 409 there would strand the user AND destroy the receipt with no way to
+		// re-file it. That reasoning was sound and its PRECONDITION has now been met
+		// — ExpenseForm retains its photo across a failed submit — so the gate is
+		// gone. Only `ExpensesTab` and `BulkReceiptScan` ever sent the flag, which
+		// meant every other writer (the driver app, and any script) could book a
+		// known duplicate with no check at all. The client ask is "make sure that
+		// the receipt doesn't have any duplicate"; a check nobody has to ask for is
+		// not that.
+		//
+		// ⚠️ THERE IS EXACTLY ONE OVERRIDE, AND IT IS AUDITED. `allowDuplicate: true`
+		// writes an `expense_duplicate_override` audit row, which is also what
+		// CLOSES the pair in duplicateReceiptGroups() and stops the sweep below
+		// re-pinging it. `checkDuplicate` is deliberately NOT honoured as an opt-OUT:
+		// a second, silent door around the guard is how the first version of this
+		// came to be unenforced everywhere, and an override that leaves no trace
+		// cannot dismiss anything. The key is still accepted and ignored, so the two
+		// existing clients keep working unchanged.
 		//
 		// Scoped to the SAME driver: the incident is one driver's receipt entered
 		// twice, so this keeps every real case while dropping the largest
@@ -28439,10 +29080,10 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		// differ, or whose gallons both exist and differ, is exonerated in JS rather
 		// than never being looked at.
 		//
-		// Still a WARNING and still opt-in: this widens what gets flagged, never
-		// what gets blocked, and `allowDuplicate: true` overrides it exactly as
-		// before. Nothing here edits or voids the existing row.
-		const wantsDuplicateCheck = req.body?.checkDuplicate === true && req.body?.allowDuplicate !== true;
+		// Nothing here edits or voids the existing row — the 409 refuses the NEW
+		// write and names the row it collided with; deciding which of the two is
+		// real stays a human's job.
+		const wantsDuplicateCheck = req.body?.allowDuplicate !== true;
 		const incomingRow = { vendor_normalized: vendorNormalized, gallons: parseFloat(gallons) || 0 };
 		const findContentDuplicate = () => {
 			// Same driver, same day, same amount — the candidate set, still SCOPED TO
@@ -28509,6 +29150,15 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		// A genuine JPEG/PNG/WebP is unaffected either way; the only requests
 		// that newly get a 400 are ones carrying bytes we would refuse to store.
 		let photoUrlOrPath = "";
+		// ⚠️ ONLY SET WHEN THIS REQUEST ACTUALLY WROTE THE BYTES, and that
+		// distinction is load-bearing for the UNIQUE-constraint cleanup below.
+		// saveReceiptToDisk() has a pass-through branch — `if
+		// (!photoData.startsWith("data:")) return { url: photoData }` for legacy
+		// rows — so photoUrlOrPath can be a CLIENT-SUPPLIED path naming a file that
+		// belongs to a DIFFERENT expense. Deleting that on a failed insert would
+		// destroy another row's receipt, which is strictly worse than the orphan the
+		// cleanup exists to avoid. Only a data-URI request creates a new file.
+		let wroteReceiptFile = "";
 		if (typeof photoData === "string" && /^data:application\/pdf;base64,/i.test(photoData)) {
 			const role = req.session.user.role;
 			if (role !== "Super Admin" && role !== "Dispatcher") {
@@ -28517,10 +29167,12 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 			const savedPdf = savePdfReceiptToDisk(photoData);
 			if (savedPdf.error) return res.status(savedPdf.status || 400).json({ error: savedPdf.error });
 			photoUrlOrPath = savedPdf.url;
+			wroteReceiptFile = savedPdf.url;
 		} else {
 			const savedImg = saveReceiptToDisk(photoData);
 			if (savedImg.error) return res.status(savedImg.status || 400).json({ error: savedImg.error });
 			photoUrlOrPath = savedImg.url;
+			if (typeof photoData === "string" && photoData.startsWith("data:")) wroteReceiptFile = savedImg.url;
 		}
 		// Best-effort geo enrichment — a failure here must NEVER fail the insert.
 		// (a) City+State known (OCR/admin) → forward geocode (cached, null-safe).
@@ -28592,14 +29244,64 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		const lockUnreadable = !periodLocksReadable();
 		const postedPeriod = naturalPeriod && naturalPeriod !== openPeriod && periodWriteLocked(naturalPeriod) ? openPeriod : "";
 
-		const result = db
-			.prepare(
-				`INSERT INTO expenses (timestamp, driver, load_id, type, amount, description, date, photo_data, gallons, odometer, owner_id, truck_unit, location_city, location_state, vendor, vendor_normalized, location_lat, location_lng, location_source, receipt_hash, receipt_details, posted_period)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			)
-			.run(timestamp, driver, safeLoadId, type, parsedAmount, safeDescription, date, photoUrlOrPath,
-				parseFloat(gallons) || 0, parseFloat(odometer) || 0, expOwnerId, expTruckUnit, enrichCity, enrichState,
-				safeVendor, vendorNormalized, locLat, locLng, locSource, receiptHash, safeReceiptDetails, postedPeriod);
+		// ⚠️ THE CONSTRAINT IS THE GUARD; THE SELECT ABOVE IS ONLY THE NICE MESSAGE.
+		// idx_expenses_receipt_hash is UNIQUE over receipt_hash <> '' (see the
+		// migration beside the column), so the byte-identical-receipt case is
+		// decided here rather than in the check-then-act window the bulk uploader's
+		// 3-wide concurrency opens. Without this catch the loser of that race gets a
+		// generic 500 — "Failed to log expense" — which the client retries, so the
+		// one outcome the index exists to produce would read as a transient fault.
+		// Translated to the SAME 409/DUPLICATE_RECEIPT the pre-check emits, so both
+		// paths are indistinguishable to the caller.
+		let result;
+		try {
+			result = db
+				.prepare(
+					`INSERT INTO expenses (timestamp, driver, load_id, type, amount, description, date, photo_data, gallons, odometer, owner_id, truck_unit, location_city, location_state, vendor, vendor_normalized, location_lat, location_lng, location_source, receipt_hash, receipt_details, posted_period)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				)
+				.run(timestamp, driver, safeLoadId, type, parsedAmount, safeDescription, date, photoUrlOrPath,
+					parseFloat(gallons) || 0, parseFloat(odometer) || 0, expOwnerId, expTruckUnit, enrichCity, enrichState,
+					safeVendor, vendorNormalized, locLat, locLng, locSource, receiptHash, safeReceiptDetails, postedPeriod);
+		} catch (insErr) {
+			// Narrow on better-sqlite3's `code`, never on the message text, and
+			// narrow on the INDEX NAME too: this table carries other constraints, and
+			// reporting an unrelated violation as "duplicate receipt" would send
+			// whoever reads it looking for a second copy that does not exist.
+			const isDupReceipt = insErr && insErr.code === "SQLITE_CONSTRAINT_UNIQUE"
+				&& String(insErr.message || "").includes("expenses.receipt_hash");
+			if (!isDupReceipt) throw insErr;
+			// Name the winner if we can. Best-effort: the row is certainly there, but
+			// a failed re-read must not turn a clean 409 into a 500.
+			let winnerId = null;
+			try {
+				const w = db.prepare("SELECT id FROM expenses WHERE receipt_hash = ? LIMIT 1").get(receiptHash);
+				winnerId = w ? w.id : null;
+			} catch { /* best effort */ }
+			// The receipt file was written to disk above and the row that would have
+			// owned it does not exist, so it is an orphan — remove it rather than
+			// leave the uploads tree growing a copy per lost race.
+			//
+			// ⚠️ KEYED ON wroteReceiptFile, NEVER ON photoUrlOrPath. The two differ
+			// exactly when the client passed an existing path instead of a data URI
+			// (saveReceiptToDisk's legacy pass-through), in which case that path names
+			// ANOTHER expense's receipt and unlinking it destroys a live row's
+			// evidence. Reachable in practice: a caller can send no data URI at all
+			// and still reach this 409 by supplying a `sourceHash` that collides.
+			try {
+				if (wroteReceiptFile && wroteReceiptFile.startsWith("/uploads/expense-receipts/")) {
+					const orphan = path.join(__dirname, wroteReceiptFile.replace(/^\//, ""));
+					if (orphan.startsWith(path.join(__dirname, "uploads", "expense-receipts"))) fs.unlinkSync(orphan);
+				}
+			} catch { /* best effort */ }
+			return res.status(409).json({
+				error: winnerId
+					? `This receipt was already logged (expense #${winnerId})`
+					: "This receipt was already logged",
+				code: "DUPLICATE_RECEIPT",
+				...(winnerId ? { existingId: winnerId } : {}),
+			});
+		}
 
 		// Tell the caller when a receipt was redirected, so the UI can say
 		// "March is closed — booked to August" rather than silently moving money
@@ -30546,8 +31248,38 @@ app.delete("/api/legal-documents/:id", requireRole("Super Admin", "Investor"), (
 	}
 });
 
+// This route was requireAuth ONLY and had no limiter, which is the combination
+// that matters: it is reachable by EVERY role including a Driver, and it WRITES
+// A FILE TO DISK on every call — up to 10 MB, under a `chat_${Date.now()}_${5
+// random chars}` name that nothing ever prunes. Unbounded, that is a disk-fill
+// available to the lowest-privilege account in the system, on the same volume as
+// app.db and the nightly backups. There is no quota, no retention job, and no
+// alert on free space; the VPS finding out is `SQLITE_FULL` on a settlement write.
+//
+// Capped at 40 attachments per 15 min for Super Admin / Dispatcher and 20 for
+// everyone else — deliberately tighter than routeLimiter above, because the cost
+// here is PERMANENT (bytes that stay on the disk) rather than per-request. 20 is
+// still far above real chat use: it is one attachment every 45 seconds, sustained.
+//
+// Per-user keyed, and requireAuth mounted BEFORE it for the same reason
+// routeLimiter sits behind requireRole — an unauthenticated caller must not be
+// able to spend somebody else's bucket on 401s.
+const chatAttachmentLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: (req) => {
+		const role = req.session?.user?.role;
+		return role === "Super Admin" || role === "Dispatcher" ? 40 : 20;
+	},
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many attachments. Try again in a few minutes." },
+	standardHeaders: true,
+});
+
 // POST /api/chat/attachment — Upload file for chat message
-app.post("/api/chat/attachment", requireAuth, async (req, res) => {
+app.post("/api/chat/attachment", requireAuth, chatAttachmentLimiter, async (req, res) => {
 	try {
 		const { fileData, fileName, mimeType } = req.body;
 		if (!fileData || !fileName) return res.status(400).json({ error: "fileData and fileName required" });
@@ -30573,6 +31305,118 @@ app.post("/api/chat/attachment", requireAuth, async (req, res) => {
 		res.status(500).json({ error: err.message });
 	}
 });
+
+// ── Orphaned chat-attachment sweep ─────────────────────────────────────────
+// Uploading and SENDING are two steps: POST /api/chat/attachment writes the file
+// and hands back a URL, and only a subsequent POST /api/messages records it on a
+// row. Abandon the compose box, reload the tab, or navigate away in between, and
+// the file stays on disk with no row and no reference, forever. Nothing has ever
+// reaped them.
+//
+// ⚠️ THIS DELETES FILES THAT ARE NOT BACKED UP, WHICH IS WHY IT SHIPS DORMANT.
+// `uploads/` is explicitly NOT copied by the nightly backup or the environment
+// refresh (see scripts/README-env-refresh.md), so unlike almost everything else
+// in this file a wrong delete here is PERMANENT — there is no snapshot to
+// restore a driver's POD photo or a broker's attachment from. That inverts the
+// usual "a cleanup job is harmless" reasoning, so CHAT_ORPHAN_SWEEP_ENABLED
+// defaults OFF and the sweep runs in REPORT-ONLY mode until someone opts in.
+// Report-only is not a token gesture: it prints exactly what it would remove and
+// how much it would reclaim, so the decision is made on real numbers.
+//
+// Four independent conditions, ALL required before a byte is removed:
+//   1. The file is in uploads/chat/ and its name has the `chat_` prefix that the
+//      one writer above produces. The sweep only ever reaps what it knows made.
+//   2. Its basename appears in NO messages.attachment_url. Matched on BASENAME,
+//      not the whole string, so a stored value that differs by a leading slash
+//      or an absolute origin still counts as a reference.
+//   3. It is older than CHAT_ORPHAN_MIN_AGE_HOURS (168h = 7 days). This is what
+//      makes the race safe: a file uploaded seconds ago whose message row has not
+//      been inserted yet is indistinguishable from an orphan, and a user can sit
+//      in a compose box for a long time. An age floor costs disk and removes the
+//      entire class of "deleted it while they were still typing".
+//
+//      ⚠️ THE FLOOR IS A WEEK, NOT A DAY, AND THAT IS NOT CAUTION FOR ITS OWN
+//      SAKE. client/src/lib/chatAttachment.js MEMOIZES a successful upload on the
+//      attachment object and reuses that URL forever, which is deliberate — it is
+//      what stops a failed send from re-uploading and orphaning a second copy.
+//      The consequence is that an attachment kept on screen after a failed send
+//      (also deliberate — losing the user's file is worse) still points at a real
+//      URL days later. Under a 24h floor: upload succeeds, the send fails, the
+//      tab is left open overnight, the sweep reaps the file, the user hits Send
+//      again, and the memo writes a message row pointing at bytes that no longer
+//      exist. uploads/ is NOT in the nightly backup, so that is unrecoverable.
+//      A week outlives any realistic compose session; the reclaim is a disk
+//      optimisation and buying a week of certainty with it costs nothing.
+//      The durable fix is for the client to verify the memo (treat a 404 on the
+//      stored URL as "not uploaded" and re-upload) — until that lands, this floor
+//      is the mitigation, and the flag should stay off without one of the two.
+//   4. lstat().isFile() — never stat(). Same rule as purgeOrphanedDbExports():
+//      a symlink planted in the tree must not be followed into something else.
+//
+// FAILS CLOSED. If the reference set cannot be read for ANY reason — an old
+// database with no attachment_url column, a locked table, anything — the sweep
+// removes NOTHING and says so. Deleting user evidence because a SELECT failed is
+// the one outcome worse than never cleaning up at all.
+const CHAT_ORPHAN_SWEEP_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.CHAT_ORPHAN_SWEEP_ENABLED ?? "").trim());
+const CHAT_ORPHAN_MIN_AGE_MS =
+	Math.max(1, parseInt(process.env.CHAT_ORPHAN_MIN_AGE_HOURS ?? "168", 10) || 168) * 60 * 60 * 1000;
+
+function sweepOrphanedChatAttachments({ apply = false } = {}) {
+	const chatDir = path.join(__dirname, "uploads", "chat");
+	let removed = 0, orphans = 0, bytes = 0;
+	try {
+		if (!fs.existsSync(chatDir)) return { removed, orphans, bytes };
+
+		// (2) The reference set, read FIRST and fail-closed. Basenames only.
+		let referenced;
+		try {
+			referenced = new Set(
+				db.prepare("SELECT attachment_url FROM messages WHERE COALESCE(attachment_url, '') <> ''").all()
+					.map((r) => path.posix.basename(String(r.attachment_url).split("?")[0].replace(/\\/g, "/")))
+					.filter(Boolean),
+			);
+		} catch (e) {
+			console.warn(`[chat-cleanup] messages.attachment_url unreadable (${e.message}) — removing nothing this run.`);
+			return { removed, orphans, bytes, referenceUnreadable: true };
+		}
+
+		const now = Date.now();
+		for (const name of fs.readdirSync(chatDir)) {
+			if (!name.startsWith("chat_")) continue;          // (1)
+			if (referenced.has(name)) continue;               // (2)
+			const p = path.join(chatDir, name);
+			try {
+				const st = fs.lstatSync(p);                     // (4)
+				if (!st.isFile()) continue;
+				if (now - st.mtimeMs < CHAT_ORPHAN_MIN_AGE_MS) continue; // (3)
+				orphans++;
+				bytes += st.size;
+				if (apply) { fs.unlinkSync(p); removed++; }
+			} catch { /* vanished under us, or not ours to touch */ }
+		}
+
+		const mb = (bytes / (1024 * 1024)).toFixed(1);
+		if (apply && removed > 0) {
+			console.log(`[chat-cleanup] removed ${removed} orphaned chat attachment(s), ${mb} MB reclaimed`);
+		} else if (!apply && orphans > 0) {
+			console.log(
+				`[chat-cleanup] REPORT ONLY — ${orphans} orphaned chat attachment(s) older than ` +
+				`${Math.round(CHAT_ORPHAN_MIN_AGE_MS / 3600000)}h, ${mb} MB. ` +
+				`Set CHAT_ORPHAN_SWEEP_ENABLED=true to reclaim. Note uploads/ is NOT in the nightly backup.`,
+			);
+		}
+	} catch (err) {
+		console.error("[chat-cleanup] sweep failed:", err.message);
+	}
+	return { removed, orphans, bytes };
+}
+
+// Delayed at boot (the readdir is synchronous and the documented deploy flow
+// pm2-restarts during business hours), then daily. Unlike purgeOrphanedDbExports
+// this producer is a LIVE process, so a boot-only sweep would let orphans
+// accumulate for however long the process stays up — weeks, on this box.
+setTimeout(() => sweepOrphanedChatAttachments({ apply: CHAT_ORPHAN_SWEEP_ENABLED }), 5 * 60 * 1000);
+setInterval(() => sweepOrphanedChatAttachments({ apply: CHAT_ORPHAN_SWEEP_ENABLED }), 24 * 60 * 60 * 1000);
 
 // GET /api/investor/onboarding-documents — Investor's signed onboarding docs (Master Agreement, Vehicle Lease, W-9)
 app.get("/api/investor/onboarding-documents", requireRole("Super Admin", "Investor"), (req, res) => {
@@ -30845,7 +31689,21 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 				key = wr.weekStart; start = wr.weekStart; end = wr.weekEnd; label = `${wr.weekStart} to ${wr.weekEnd}`;
 			} else {
 				key = dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0");
-				start = key + "-01"; end = ""; label = key;
+				start = key + "-01"; end = "";
+				// `label` is the DISPLAY string and `key` is the identity — they were
+				// the same value here, so the investor's period dropdown read
+				// "2026-08" directly under a card headed "August 2026". periodLabel()
+				// is the one formatter every other month-facing surface already uses
+				// (the payout ledger, the statement, the period-lock 409s), so this
+				// makes the report agree with them rather than inventing a third form.
+				//
+				// Display-only and therefore safe: nothing sorts or parses on `label`.
+				// Ordering is on `key` (below), the client's selection is on `key`, and
+				// the only other consumers are the CSV "Period" column and the PDF
+				// heading — both of which read better for it. WEEKLY deliberately
+				// keeps its "start to end" range form: a week has no month name, and
+				// periodLabel() would return the raw string unchanged anyway.
+				label = periodLabel(key);
 			}
 			if (!periodsMap.has(key)) periodsMap.set(key, { key, label, start, end, loadCount: 0, completedCount: 0, inTransitCount: 0, grossRevenue: 0, loads: [] });
 			const bucket = periodsMap.get(key);
@@ -33037,8 +33895,39 @@ const ROUTE_CACHE_MAX = 500;            // hard cap on entry COUNT
 // ~2GB heap (crash always landed in JSON.stringify of a route response or the
 // shutdown snapshot). We now also cap total cached bytes; in-heap is ~3-6x the
 // figure below, so ~96MB of estimated payload ≈ ~300-500MB heap.
+// ⚠️ BUDGET IMPLICATION OF ROUTE_NAV_POINTS_MAX (below). A rich `alternatives`
+// entry now carries up to 3 routes x 4000 points instead of 3 x 1500, so a
+// worst-case nav entry is ~2.7x fatter: estimateRouteBytes() puts it at ~480 KB
+// against ~180 KB, i.e. ~1.9 MB in-heap against ~700 KB. The BUDGET IS UNCHANGED
+// and still holds — it is a byte cap, not an entry cap, so it simply evicts
+// sooner: ~200 concurrent nav lanes fit here instead of ~530, and the count cap
+// (ROUTE_CACHE_MAX, 500) stops being the binding constraint for nav entries. The
+// persisted snapshot (ROUTE_SNAPSHOT_MAX_BYTES, 8 MB) likewise holds FEWER
+// entries across a restart — ~17 nav lanes instead of ~45 — which costs a cold
+// Google call on the lanes that fall off, never correctness. Both are the right
+// trade: lean single-route callers (the admin tracking map, the public customer
+// tracker) are untouched at 1500 and are the overwhelming majority of entries.
 const ROUTE_CACHE_MAX_BYTES = 96 * 1024 * 1024;
 const ROUTE_POINTS_MAX = 1500;          // cap decoded polyline points per route
+// ⚠️ NAV-GRADE GEOMETRY, AND 1500 IS NOT ENOUGH FOR IT. ROUTE_POINTS_MAX is a
+// MAP budget: at ~540 m between points on a 500-mile route it is visually
+// identical at any zoom a human looks at, which is all it was ever asked to be.
+// It is not enough to decide whether a truck is ON the road, and that is what
+// the `alternatives` payload is used for.
+//
+// Chord error on a downsampled polyline is ~L²/8R. A 500 m chord across a 300 m
+// radius interchange curve puts the stored line ~104 m from the real road — and
+// 104 m is LARGER than any off-route threshold worth having (a usable one is
+// 50-80 m; below ~40 m ordinary GPS scatter trips it). So a truck driving the
+// route perfectly reads as off-route at every curve, and deviation detection
+// reroutes continuously. Raising the budget to 4000 puts the same curve at
+// ~200 m spacing and ~17 m of chord error — comfortably inside the threshold,
+// with the error now dominated by GPS accuracy rather than by our own geometry.
+//
+// APPLIED ONLY ON THE `alternatives` PATH. The lean single-route response feeds
+// map rendering, where 1500 is already indistinguishable and 4000 would be 2.7x
+// the bytes for nothing. Two budgets because there are genuinely two questions.
+const ROUTE_NAV_POINTS_MAX = 4000;      // cap decoded polyline points per NAV route
 const ROUTE_STEP_POINTS_MAX = 60;       // cap per-step sub-polyline points
 const ROUTE_SNAPSHOT_MAX_BYTES = 8 * 1024 * 1024; // cap persisted snapshot size
 let routeCacheBytes = 0;                // running estimate of cached result bytes
@@ -33124,10 +34013,16 @@ function parseRichRoute(googleRoute) {
 		? decodePolyline(googleRoute.polyline.encodedPolyline)
 		: [];
 	if (pointsRaw.length < 2) return null;
-	const points = downsamplePoints(pointsRaw, ROUTE_POINTS_MAX);
+	// ROUTE_NAV_POINTS_MAX, not ROUTE_POINTS_MAX: parseRichRoute is only ever
+	// reached from the `alternatives` branch of getRoute(), which is the driver's
+	// navigation payload. See the constant for why a map budget is not a
+	// navigation budget.
+	const points = downsamplePoints(pointsRaw, ROUTE_NAV_POINTS_MAX);
 	// speedReadingIntervals index into the *full* polyline; rescale those indices
 	// to the downsampled `points` array so the client's congestion overlay
 	// (DriverRouteMap / DriveModeOverlay) still lines up after downsampling.
+	// `steps[].startIdx` below is rescaled through the same factor, for the same
+	// reason — both are positions in `points`, so both must survive downsampling.
 	const ptScale = (points.length !== pointsRaw.length && pointsRaw.length > 1)
 		? (points.length - 1) / (pointsRaw.length - 1)
 		: 1;
@@ -33161,13 +34056,48 @@ function parseRichRoute(googleRoute) {
 	}
 	let steps = null;
 	if (Array.isArray(leg.steps) && leg.steps.length) {
-		steps = leg.steps.map(s => ({
-			instruction: s.navigationInstruction?.instructions || "",
-			maneuver: s.navigationInstruction?.maneuver || "",
-			distanceMeters: s.distanceMeters || 0,
-			durationSec: parseInt((s.staticDuration || "0s").replace("s", ""), 10),
-			polyline: s.polyline?.encodedPolyline ? downsamplePoints(decodePolyline(s.polyline.encodedPolyline), ROUTE_STEP_POINTS_MAX) : null,
-		}));
+		// `startIdx` — where in `points` this step BEGINS. Without it a client
+		// holding "you are at polyline index 812" cannot say which instruction is
+		// current, so turn-by-turn has to re-derive the answer by scanning every
+		// step's sub-polyline for the nearest vertex on every GPS tick. That scan
+		// is also wrong at any point where the route crosses or doubles back on
+		// itself, because nearest-vertex has no notion of progress along the route.
+		//
+		// Google's Routes API does not hand us a point index (we do not request
+		// startLocation, and it would be a coordinate rather than an index anyway),
+		// but the step polylines CONCATENATE to the route polyline sharing one
+		// vertex at each seam — so step i begins at sum over j<i of (len_j - 1).
+		//
+		// ⚠️ COUNTED ON THE RAW DECODED STEP POLYLINE, BEFORE DOWNSAMPLING. The
+		// output polyline is capped at ROUTE_STEP_POINTS_MAX (60), so accumulating
+		// the downsampled lengths would under-count every step longer than 60
+		// points and drift the offset further wrong with each one — silently, and
+		// worst on exactly the long highway steps where it matters least to notice.
+		let cumRaw = 0;
+		let offsetKnown = true;
+		steps = leg.steps.map(s => {
+			const raw = s.polyline?.encodedPolyline ? decodePolyline(s.polyline.encodedPolyline) : null;
+			// ⚠️ A STEP WITH NO POLYLINE BREAKS THE CHAIN, AND THE HONEST ANSWER IS
+			// null. The field mask requests every step polyline so this should not
+			// happen, but if one is ever missing we cannot know how many points it
+			// spanned — and carrying on would report every LATER step at an offset
+			// short by that step's length, which is a confidently wrong instruction
+			// rather than an absent one. Once broken it stays broken for the rest of
+			// the leg; a client must treat null as "scan for it yourself".
+			const startIdx = offsetKnown
+				? Math.min(Math.round(cumRaw * ptScale), Math.max(points.length - 1, 0))
+				: null;
+			if (raw && raw.length > 0) cumRaw += raw.length - 1;
+			else offsetKnown = false;
+			return {
+				instruction: s.navigationInstruction?.instructions || "",
+				maneuver: s.navigationInstruction?.maneuver || "",
+				distanceMeters: s.distanceMeters || 0,
+				durationSec: parseInt((s.staticDuration || "0s").replace("s", ""), 10),
+				startIdx,
+				polyline: raw ? downsamplePoints(raw, ROUTE_STEP_POINTS_MAX) : null,
+			};
+		});
 	}
 
 	return {
@@ -33545,13 +34475,51 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 	}
 });
 
+// This endpoint had NO limiter at all, which made it the cheapest billed Google
+// call in the app to abuse: an authenticated caller supplies BOTH coordinate
+// pairs, so routeCacheKey() — rounded to 3 decimals, ~111 m — is trivially
+// missed by walking a coordinate, and every miss is a Routes call (the
+// `alternatives` form on the TRAFFIC_AWARE_OPTIMAL + FUEL_CONSUMPTION + TOLLS +
+// TRAFFIC_ON_POLYLINE tier, i.e. the expensive one). It is also the only Maps
+// surface a Driver can drive with arbitrary coordinates.
+//
+// Modelled on fuelPlanLimiter, and per-USER for its reason rather than per-IP:
+// IP keying is backwards here, since a dispatch office behind one NAT would
+// share a single bucket while every driver on cellular gets a fresh one whenever
+// the carrier rotates their address — throttling the cheap callers and not the
+// expensive ones.
+//
+// 180 / 60 are set against real client behaviour, not guessed: TrackingMap
+// refetches behind a 100 m + 60 s gate across two legs, so one continuously open
+// map cannot exceed ~30 calls in a 15-minute window. Dispatch gets six such maps
+// of headroom; a driver, running one load, gets two.
+//
+// ⚠️ MOUNTED AFTER requireRole, NOT BEFORE. Same ordering as fuelEventsLimiter
+// and fuelGallonsLimiter: with the limiter first, an unauthenticated caller
+// spends the whole bucket on 403s and locks out the legitimate user behind that
+// key. It also lets the role-aware `max` read req.session.user, which only
+// exists once requireRole has run.
+const routeLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: (req) => {
+		const role = req.session?.user?.role;
+		return role === "Super Admin" || role === "Dispatcher" ? 180 : 60;
+	},
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many route requests. Try again later." },
+	standardHeaders: true,
+});
+
 // GET /api/route — Lightweight rerouting: get driving route between two points.
 // ?alternatives=true requests up to 3 alternatives with traffic-aware ETAs,
 // per-route fuel + toll estimates, traffic congestion segments, and turn-by-turn
 // steps. Used by the driver's smart route guidance UI. Existing callers
 // (admin tracking map, public customer tracker) omit the flag and receive the
 // lean single-route payload unchanged.
-app.get("/api/route", requireRole("Super Admin", "Dispatcher", "Driver"), async (req, res) => {
+app.get("/api/route", requireRole("Super Admin", "Dispatcher", "Driver"), routeLimiter, async (req, res) => {
 	res.set('Cache-Control', 'private, max-age=300');
 	try {
 		const { fromLat, fromLng, toLat, toLng } = req.query;
@@ -35722,7 +36690,22 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 		// closed today. This is the number to disclose beside a $0 accrual —
 		// it is the same deficit amountInProgress is showing as a negative.
 		lossDeferred: curCarry.deferred,
-		phase: "accruing",
+		// ⚠️ COMPUTED, NOT HARDCODED — /api/payouts and /api/periods were answering
+		// differently about the SAME month. This was the literal string "accruing"
+		// while GET /api/periods reports periodPhase(), which returns "" whenever
+		// PERIOD_FINALIZE_ENABLED is off (and whenever period_locks cannot be read).
+		// So with the flag off the payouts screen asserted a close lifecycle that
+		// the close calendar simultaneously denied, and "" is not a cosmetic
+		// difference: it is this codebase's documented signal for "no month will
+		// ever close here, fall back to `status` alone", which is exactly what a
+		// dormant deployment must render.
+		//
+		// periodPhase() is the one that knows about the flag, so it wins. In
+		// production (flag ON, lock table readable) it returns "accruing" for the
+		// current month by its own final line — `p >= currentMonthKeyCT()` — so the
+		// live payload is UNCHANGED and only the flag-off/unreadable cases move,
+		// which are the cases that were disagreeing.
+		phase: periodPhase(currentMonthKey),
 		// When this month will close, so the accrual card can say "closes Sep 7"
 		// rather than the vaguer "not yet payable until the period closes".
 		graceEndsAt: graceEndsAt(currentMonthKey, graceDays),
@@ -37625,6 +38608,63 @@ app.post("/api/investor/payouts/:id/status", requireRole("Super Admin"), refuseC
 			// misleading in the second case — the date will pass and nothing will
 			// change.
 			const lockUnreadable = !periodLocksReadable();
+			// ⚠️ THE REFUSAL IS AUDITED. This is the settle route — "Mark Paid" is the
+			// only verb in the app that asserts money actually moved — and until now
+			// the ONLY logAudit on it was on the success path, so a blocked settlement
+			// left no trace whatsoever. audit_trail could therefore not distinguish
+			// "nobody tried to settle June early" from "someone tried repeatedly and
+			// the close window refused them", which is precisely the signal a refusal
+			// row exists to keep. Same gap, same fix as PUT /api/expenses/bulk-status
+			// and its single-row twin.
+			//
+			// THE CAUSE CODE IS NOT THE WIRE CODE, DELIBERATELY. The response says
+			// PERIOD_NOT_FINALIZED in both branches (an existing client shape; not
+			// changed here), but the two causes are different things with different
+			// remedies — one is a normal window that clears on a date, the other is a
+			// database fault that never will. Auditing both as one code would hide
+			// PERIOD_LOCK_UNREADABLE from the cross-route search for it, which is how
+			// a broken period_locks gets noticed at all; every other guard in this file
+			// records that condition under that name. The wire code is not lost — the
+			// period and the transition below identify the request.
+			//
+			// logAuditRefusal, not logAudit: BOTH codes are in
+			// UNCOALESCED_REFUSAL_CODES (asserted at boot — PERIOD_NOT_FINALIZED was
+			// added there with this change and was NOT previously a member). Without
+			// that membership two operators refused inside the same 60s window would
+			// collapse to one row naming one of them: the coalesce key is the ACCOUNT,
+			// and `super_admin` is a shared login, so "a different person" is the same
+			// key. On a settlement route that is the exact bug being closed.
+			//
+			// ⚠️ NOT added to PURGEABLE_REFUSAL_ACTIONS. It satisfies that list's
+			// invariant — the 409 returns before any write, so this is a wholesale
+			// refusal — but it must not be purged, and the purge's own comment makes
+			// the argument better than this one could: settlement disputes surface on a
+			// quarterly or annual cadence, i.e. reliably after 90 days. "Who kept
+			// trying to mark this month paid, and when" is a question asked long after
+			// the fact or not at all. Adding it would also be a no-op today (every row
+			// carries a `[PERIOD_` code, which the purge's detail filter exempts) that
+			// reads as a decision these rows are disposable. They are the opposite.
+			//
+			// The amount is recorded because on this route the money IS the change.
+			// `super_admin` is a shared login: this identifies the account and session,
+			// never an individual.
+			const refusalCode = lockUnreadable ? "PERIOD_LOCK_UNREADABLE" : "PERIOD_NOT_FINALIZED";
+			// The route reads `reason` only on the reopen path, and a reopen is exempt
+			// from this guard — so the local `reason` is "" here by construction and a
+			// note sent with a forward move would be discarded. It is captured anyway:
+			// stated intent is MORE useful on a refusal than on a success, and on a
+			// blocked "Mark Paid" it is the record of what someone believed they were
+			// settling. Same 500-char cap as the reopen path, plus the newline collapse
+			// expenseStatusReason() applies — an audit detail is a single line.
+			const blockedNote = (req.body?.reason || "").toString().replace(/[\r\n\t]+/g, " ").trim().slice(0, 500);
+			logAuditRefusal(
+				req, "investor_payout_status_blocked", "investor_payout", id,
+				`${payout.status} -> ${status} WITHHELD (owner ${payout.owner_id} ${payout.period},` +
+				` $${(Number(payout.amount || 0) + Number(payout.adjustment || 0)).toFixed(2)})` +
+				` [${refusalCode}] period=${payout.period || "unknown"} — nothing was written` +
+				(blockedNote ? ` — reason: ${blockedNote}` : ""),
+				refusalCode
+			);
 			return res.status(409).json({
 				error: lockUnreadable
 					? `${periodLabel(payout.period)} cannot be confirmed closed — the period lock table could not be read, so this settlement is blocked until it can be. This is a database fault, not the close window; waiting will not clear it.`
@@ -37753,6 +38793,99 @@ app.put("/api/investor/payouts/:id/adjust", requireRole("Super Admin"), refuseCr
 			// the old copy named a date the admin could wait for, which is a false
 			// statement about a month whose lock state is simply unknown.
 			const lockUnreadable = !periodLocksReadable();
+			// ⚠️ THE REFUSAL IS AUDITED, AND IT WAS THE LAST OUTCOME OF THIS ROUTE
+			// THAT WAS NOT. This is the one verb in the app that restates a SETTLED
+			// month directly — a signed correction of up to ±$10,000 applied to a
+			// payout that may already be marked paid — and the only logAudit on it was
+			// on the success path. A blocked correction therefore left no trace at
+			// all, so audit_trail could not tell "nobody tried to claw back May" from
+			// "someone tried repeatedly and the close window refused them", which is
+			// the entire signal a refusal row exists to keep. Same gap and same fix as
+			// its two siblings: POST /api/investor/payouts/:id/status (the settle
+			// route, which shares this exact guard) and PUT /api/expenses/:id/status.
+			//
+			// THE CAUSE CODE IS NOT THE WIRE CODE, DELIBERATELY — the same call the
+			// settle route makes. The response says PERIOD_NOT_FINALIZED in both
+			// branches (an existing client shape, not changed here), but the two
+			// causes are different things with different remedies: one is a normal
+			// window that clears on a date, the other is a database fault that never
+			// will. Auditing both under one code would hide PERIOD_LOCK_UNREADABLE
+			// from the cross-route search for it, which is how a broken period_locks
+			// gets noticed at all — every other guard in this file records that
+			// condition under that name. The wire code is not lost; the period and the
+			// transition below identify the request.
+			//
+			// logAuditRefusal, not logAudit: both codes are already in
+			// UNCOALESCED_REFUSAL_CODES (asserted at boot by
+			// assertUncoalescedRefusalContract, which also keeps the `PERIOD_…`
+			// naming that exempts these rows from purgeOldAuditRefusals' detail
+			// filter), so this is byte-identical to logAudit today while stating the
+			// intent — and a future non-period refusal audited on this action inherits
+			// the coalescing window without anyone having to remember. If either code
+			// were dropped from that set, a second operator refused inside the same
+			// 60s window would write NOTHING and this bug would be back: the coalesce
+			// key is the ACCOUNT, and `super_admin` is a SHARED login, so "a different
+			// person" does not produce a different key.
+			//
+			// ⚠️ NOT added to PURGEABLE_REFUSAL_ACTIONS, and of the three siblings
+			// this is the one with the least excuse for being there. It satisfies that
+			// list's stated invariant — the 409 returns before the UPDATE, so this is
+			// a wholesale refusal — but the purge's own comment makes the argument
+			// better than this one could: settlement disputes surface on a quarterly
+			// or annual cadence, i.e. reliably AFTER 90 days, so purging by action
+			// would delete the evidence exactly when it is first wanted while the
+			// corresponding successful corrections are kept forever. It also cannot
+			// flood — Super Admin only, behind refuseCrossOrigin, and it needs a
+			// past-but-unlocked month to fire at all. Adding it would purge nothing
+			// today anyway (every row here carries a `[PERIOD_` code, which the detail
+			// filter exempts) while reading as a decision that these rows are
+			// disposable. They are the opposite.
+			//
+			// ⚠️ THE AMOUNT RECORDED IS THE ATTEMPT, NOT A FIGURE THAT WOULD HAVE BEEN
+			// WRITTEN. This guard runs BEFORE the finite check, the ±$10,000 cap and
+			// the never-invert rule, so the request may have been invalid on its own
+			// terms and this row must not be read as "this correction would otherwise
+			// have landed". It is parsed with the SAME Number() expression the
+			// validator below uses, so the audit can never disagree with the route
+			// about what the caller sent — note that null/""/[] are 0 to both, and an
+			// absent or unparseable value is recorded as such rather than silently
+			// becoming $0.00.
+			//
+			// entity/entity_id are the payout id, matching the success line below.
+			// `super_admin` is a shared login, so this identifies the account and
+			// session, never an individual.
+			const refusalCode = lockUnreadable ? "PERIOD_LOCK_UNREADABLE" : "PERIOD_NOT_FINALIZED";
+			// Explicit sign on both sides: a claw-back and a credit are opposite
+			// events and `-` alone is easy to lose in a line of prose.
+			const signedUsd = (n) => `${n < 0 ? "-" : "+"}$${Math.abs(n).toFixed(2)}`;
+			const rawAdjustment = req.body?.adjustment;
+			const attempted = Number(rawAdjustment);
+			// The echo is bounded by TYPE, not by slicing the result of String():
+			// a string is worth quoting back because the typo is the useful part,
+			// while an array from a 50 MB body would build a huge string only to
+			// throw all but 24 characters of it away.
+			const attemptedText = Number.isFinite(attempted)
+				? signedUsd(attempted)
+				: `unparseable (${rawAdjustment === undefined ? "absent"
+					: typeof rawAdjustment === "string" ? JSON.stringify(rawAdjustment.slice(0, 24))
+					: typeof rawAdjustment})`;
+			// The route's own note field — `adjustmentNote` is the only one its client
+			// sends, and it is what the success line records. Captured because stated
+			// intent is MORE useful on a refusal than on a success: it is the record
+			// of what someone believed they were correcting on a month the server
+			// would not let them touch. Same 500-char cap as the success path, plus
+			// the newline collapse every audit detail gets — this table is read one
+			// line per row and exported.
+			const blockedNote = (req.body?.adjustmentNote || "").toString().replace(/[\r\n\t]+/g, " ").trim().slice(0, 500);
+			const currentAdjustment = Number(payout.adjustment || 0);
+			logAuditRefusal(
+				req, "investor_payout_adjust_blocked", "investor_payout", id,
+				`adjustment ${signedUsd(currentAdjustment)} -> ${attemptedText} WITHHELD (owner ${payout.owner_id} ${payout.period},` +
+				` payout ${payout.status || "unknown"} $${(Number(payout.amount || 0) + currentAdjustment).toFixed(2)})` +
+				` [${refusalCode}] period=${payout.period || "unknown"} — nothing was written` +
+				(blockedNote ? ` — reason: ${blockedNote}` : ""),
+				refusalCode
+			);
 			return res.status(409).json({
 				error: lockUnreadable
 					? `${periodLabel(payout.period)} cannot be confirmed finalized — the period lock table could not be read, so adjustments are blocked until it can be. Log the receipt as normal; this is a database fault, not the close window.`
@@ -37871,32 +39004,116 @@ app.get("/api/periods", requireRole("Super Admin"), (req, res) => {
 		// resolves the unqualified name outward to investor_payouts.status, turning
 		// the subquery into a correlated reference that is never 'locked'. It then
 		// returns EMPTY, `NOT IN ()` matches everything, and all 14 locked months
-		// land in the `open` bucket. They win the de-dupe below too, because `open`
-		// is spread first — so every finalized month rendered as never finalized,
-		// with a blank finalizedAt, on the one page an admin opens mid-outage.
+		// land in the `open` bucket — so every finalized month rendered as never
+		// finalized, on the one page an admin opens mid-outage.
 		// Qualified, the same break throws and the route 500s: still bad, but bad in
 		// a way that says so instead of fabricating a close calendar. On a healthy
 		// database this is byte-identical.
+		//
+		// (This comment used to add "and they win the de-dupe because `open` is
+		// spread first". That is no longer the mechanism — the merge below is
+		// order-independent, so a lock row's provenance survives however the two
+		// lists are ordered. The qualification above is still the real fix here;
+		// the merge only stops a SECOND way of losing the same data.)
 		const open = db.prepare(
 			"SELECT DISTINCT period FROM investor_payouts WHERE period NOT IN (SELECT period FROM period_locks WHERE period_locks.status = 'locked') ORDER BY period DESC"
 		).all().map((r) => r.period);
+
+		// ⚠️ A REOPENED PERIOD APPEARS IN BOTH LISTS, AND THE NAIVE DE-DUPE THREW
+		// AWAY THE HALF THAT CARRIES THE PROVENANCE. `reopen` sets
+		// period_locks.status = 'reopened' (deliberately — keeping the row is what
+		// stops the per-minute sweep re-locking what an admin just opened), so the
+		// row is NOT 'locked' and therefore is NOT excluded from `open`; it is also
+		// in `locks`, which has no status filter. The old code spread `open` first
+		// and kept the FIRST occurrence, so the winner was always the `open` entry —
+		// which hardcodes finalizedAt/finalizedBy to "" and has no reopen fields at
+		// all. Net effect: the reason that POST /api/periods/:period/reopen REQUIRES
+		// was invisible on the only endpoint that reports the close calendar, for
+		// every period that has a payout row, which is every period ever locked.
+		// (reopen does not clear finalized_at either, so "closed on X, reopened on Y
+		// by Z because R" is a complete history the screen simply never received.)
+		//
+		// MERGED, NOT PICKED, and deliberately ORDER-INDEPENDENT. Swapping the two
+		// spreads would also fix today's symptom, but it leaves the same trap armed:
+		// the correctness of the payload would still rest on which array happens to
+		// be listed first, and the `open` branch would still be carrying blanks that
+		// overwrite real values. So the `open` branch now contributes ONLY the
+		// computed fields it actually knows (period/label/phase/graceEndsAt — both
+		// branches compute those identically from the period key), the `locks` branch
+		// contributes the stored provenance, and the defaults are applied once at the
+		// end. Neither list can blank the other's data whatever order they arrive in.
+		const byPeriod = new Map();
+		const mergePeriod = (entry) => {
+			const prev = byPeriod.get(entry.period);
+			byPeriod.set(entry.period, prev ? { ...prev, ...entry } : entry);
+		};
+		const computedFields = (p) => ({
+			period: p, periodLabel: periodLabel(p), phase: periodPhase(p),
+			graceEndsAt: graceEndsAt(p, graceDays),
+		});
+
+		for (const p of open) mergePeriod(computedFields(p));
+		for (const l of locks) {
+			mergePeriod({
+				...computedFields(l.period),
+				finalizedAt: l.finalized_at, finalizedBy: l.finalized_by,
+				reopenedAt: l.reopened_at, reopenedBy: l.reopened_by, reopenReason: l.reopen_reason,
+			});
+		}
+
+		// ⚠️ THE MONTH IN PROGRESS IS A BACKSTOP, because NEITHER source above is
+		// guaranteed to contain it and in the ordinary case neither does. `open` reads
+		// investor_payouts, and reconcileInvestorPayouts() only mints a row for a
+		// COMPLETED PAST month; `locks` holds only months that have already closed,
+		// which the current one by definition has not. A month with neither row was
+		// therefore dropped from the array entirely — measured on production, 2026-08
+		// was simply absent. `currentPeriod` was still reported top-level, but with no
+		// matching entry there was no phase and no graceEndsAt, i.e. no answer to the
+		// one question this endpoint exists to answer: WHEN DOES THE OPEN MONTH CLOSE?
+		// The calendar panel's headline is "nothing to do — months close themselves"
+		// plus that date, so it was making an unbacked claim about the only month
+		// anybody is actually looking at.
+		//
+		// ⚠️ GUARDED ON ABSENCE, AND PLACED LAST, so it CANNOT CONTRIBUTE A FIELD TO AN
+		// ENTRY EITHER SOURCE ALREADY PRODUCED. That is what makes it compose with the
+		// merge above rather than lean on it. Merging unconditionally would be
+		// harmless under today's de-dupe — computedFields() carries no provenance and
+		// both branches derive those four fields identically from the period key — but
+		// it would be harmless only BECAUSE the de-dupe merges. Under the keep-first
+		// de-dupe this route actually shipped with, an unconditional seed placed first
+		// would win outright and blank exactly the finalizedAt/reopenedAt/reopenReason
+		// that the merge fix was written to stop losing, re-creating that bug through a
+		// new door. `!byPeriod.has(cur)` means the seed only ever runs when there is
+		// nothing to lose, so it stays correct under any de-dupe scheme. Verified on a
+		// period that is simultaneously current, reopened and payout-bearing: the row
+		// keeps its full "closed on X, reopened on Y by Z because R" history.
+		//
+		// ⚠️ phase comes from periodPhase(), NEVER a hardcoded 'accruing'. That
+		// function returns "" when PERIOD_FINALIZE_ENABLED is off — nothing will ever
+		// close, so naming a phase promises a settlement that is not coming — and the
+		// calendar renders "" as "automatic month-close is switched off on this server"
+		// and withholds the Close now button the server would answer with 503. It also
+		// still reports 'finalized' for a current month closed early, which is why this
+		// cannot be a literal.
+		//
+		// The deliberate 500 on a malformed period_locks is untouched: both queries
+		// above run first and throw there, and every throw in this handler lands in the
+		// catch. This adds no new success path — it only fills a hole in one.
+		if (cur && !byPeriod.has(cur)) mergePeriod(computedFields(cur));
 
 		res.json({
 			enabled: PERIOD_FINALIZE_ENABLED,
 			graceDays,
 			currentPeriod: cur,
-			periods: [
-				...open.map((p) => ({
-					period: p, periodLabel: periodLabel(p), phase: periodPhase(p),
-					graceEndsAt: graceEndsAt(p, graceDays), finalizedAt: "", finalizedBy: "",
-				})),
-				...locks.map((l) => ({
-					period: l.period, periodLabel: periodLabel(l.period), phase: periodPhase(l.period),
-					graceEndsAt: graceEndsAt(l.period, graceDays),
-					finalizedAt: l.finalized_at, finalizedBy: l.finalized_by,
-					reopenedAt: l.reopened_at || "", reopenedBy: l.reopened_by || "", reopenReason: l.reopen_reason || "",
-				})),
-			].filter((v, i, a) => a.findIndex((x) => x.period === v.period) === i)
+			// Every key is present on every row, so the client never has to tell
+			// "absent" from "empty" — an un-finalized period reports "" exactly as it
+			// always did, and a NULL column normalizes to the same "".
+			periods: [...byPeriod.values()]
+				.map((e) => ({
+					...e,
+					finalizedAt: e.finalizedAt || "", finalizedBy: e.finalizedBy || "",
+					reopenedAt: e.reopenedAt || "", reopenedBy: e.reopenedBy || "", reopenReason: e.reopenReason || "",
+				}))
 				.sort((a, b) => (a.period < b.period ? 1 : -1)),
 			// Work the period lock REFUSED, surfaced where an admin is already
 			// deciding whether to reopen a month. The boot backfill will not write
@@ -39623,6 +40840,32 @@ app.get("/api/expenses/receipts-download", requireRole("Super Admin"), (req, res
 	}
 });
 
+// Optional free-text note on an approve/reject, recorded on the audit row.
+//
+// WHY IT IS OPTIONAL AND WHY IT LIVES IN ONE PLACE. Rejecting an expense removes
+// money from the P&L and therefore from an investor's payout for that month, and
+// the Data Issues page voids DUPLICATE receipts through the bulk route — so
+// "which copy did we keep, and why" is the question asked afterwards, and until
+// now nothing recorded even that a flip happened. It is OPTIONAL because the
+// existing clients do not send it and a required field would break them; a
+// missing reason simply produces the same audit line as before, never a fake one.
+//
+// ⚠️ THE CLIENT'S VOID CONFIRM CURRENTLY TELLS THE USER THERE IS NO NOTE
+// ("recorded only as the receipt's own status changing to Rejected … there is no
+// separate note"). That copy was CORRECT when written and is now understating
+// what the server can do — but it must not be changed to promise a reason until
+// the client actually collects one, because a page whose whole purpose is that a
+// check never claims more than it did cannot afford to claim a stored note it
+// never sent. Server-side capability first; client copy follows.
+//
+// Collapsed to one line and bounded: audit details are read by humans and
+// exported, and this is free text from a form.
+const EXPENSE_STATUS_REASON_MAX = 300;
+function expenseStatusReason(body) {
+	const raw = body && typeof body.reason === "string" ? body.reason : "";
+	return raw.replace(/[\r\n\t]+/g, " ").trim().slice(0, EXPENSE_STATUS_REASON_MAX);
+}
+
 // PUT /api/expenses/:id/status — Approve or reject an expense
 app.put("/api/expenses/:id/status", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
@@ -39631,7 +40874,9 @@ app.put("/api/expenses/:id/status", requireRole("Super Admin", "Dispatcher"), (r
 		if (!["Approved", "Rejected", "Pending"].includes(status)) {
 			return res.status(400).json({ error: "Status must be Approved, Rejected, or Pending" });
 		}
-		const expense = db.prepare("SELECT id, date, created_at, posted_period FROM expenses WHERE id = ?").get(id);
+		// `status` is selected for the audit line below (the from-value); the other
+		// three feed expensePostedPeriod(), which fails closed without them.
+		const expense = db.prepare("SELECT id, date, status, created_at, posted_period FROM expenses WHERE id = ?").get(id);
 		if (!expense) return res.status(404).json({ error: "Expense not found" });
 
 		// Status is not cosmetic: EXPENSE_PNL_FILTER drops 'Rejected' from every
@@ -39651,6 +40896,46 @@ app.put("/api/expenses/:id/status", requireRole("Super Admin", "Dispatcher"), (r
 		const expPeriod = expensePostedPeriod(expense);
 		if (periodWriteLocked(expPeriod)) {
 			const unreadable = !periodLocksReadable();
+			// ⚠️ THE REFUSAL IS AUDITED, AND UNTIL NOW IT WAS THE ONLY OUTCOME OF THIS
+			// ROUTE THAT WAS NOT. The success path below records the flip; this branch
+			// returned a 409 and wrote nothing, so audit_trail could not tell "nobody
+			// tried to void that receipt" from "someone tried and the server refused".
+			// That distinction is the whole reason a refusal row exists, and it is the
+			// one asked for afterwards: this is the route the docs point people at for
+			// voiding a single receipt, and a Rejected receipt leaves the P&L
+			// (EXPENSE_PNL_FILTER) and therefore an investor's payout for that month.
+			// Same gap and same fix as PUT /api/expenses/bulk-status, its batch twin.
+			//
+			// logAuditRefusal, not logAudit: both codes are in
+			// UNCOALESCED_REFUSAL_CODES (asserted at boot), so this is byte-identical
+			// to logAudit today while stating the intent — and a future non-period
+			// refusal audited on this route inherits the coalescing window without
+			// anyone having to remember. If either code were ever dropped from that
+			// set, a second operator refused within 60s would write nothing and this
+			// bug would be back: the coalesce key is the ACCOUNT, and `super_admin` is
+			// a shared login, so "a different person" does not produce a different key.
+			//
+			// ⚠️ NOT added to PURGEABLE_REFUSAL_ACTIONS. It would qualify on that
+			// list's stated invariant — this returns before any database write — but
+			// adding it would purge exactly nothing (every row it writes carries a
+			// `[PERIOD_` code, which the purge's own detail filter exempts) while
+			// implying these rows are disposable. It also cannot flood: it needs a
+			// finalized month or a broken lock table on a Super Admin / Dispatcher
+			// route. Revisit only if a cheap, on-demand refusal is ever audited under
+			// this same action.
+			//
+			// entity_id is the expense id, matching the success line below. The reason
+			// is carried because stated intent is MORE useful on a refusal than on a
+			// success — it is the record of what someone was trying to do to a settled
+			// month. `super_admin` is a shared login, so this identifies the account
+			// and session, never an individual.
+			const refusalCode = unreadable ? "PERIOD_LOCK_UNREADABLE" : "PERIOD_FINALIZED";
+			const blockedReason = expenseStatusReason(req.body);
+			logAuditRefusal(req, "update_expense_status_blocked", "expense", id,
+				`status ${expense.status || "Pending"} -> ${status} WITHHELD (${expense.date || "no date"})` +
+				` [${refusalCode}] period=${expPeriod || "unknown"} — nothing was written` +
+				(blockedReason ? ` — reason: ${blockedReason}` : ""),
+				refusalCode);
 			return res.status(409).json({
 				// Two causes, two sentences, two remedies — "reopen the period" is
 				// useless advice when the period_locks table itself is the problem.
@@ -39662,7 +40947,20 @@ app.put("/api/expenses/:id/status", requireRole("Super Admin", "Dispatcher"), (r
 			});
 		}
 
+		const prevStatus = expense.status || "Pending";
 		db.prepare("UPDATE expenses SET status = ? WHERE id = ?").run(status, id);
+		// ⚠️ THIS IS A MONEY WRITE AND IT USED TO LEAVE NO TRACE. Rejecting an
+		// expense removes it from every P&L (EXPENSE_PNL_FILTER) and therefore from
+		// the investor payout deduction for that month — the same class of change as
+		// PATCH /api/expenses/:id/vendor, which has always audited. It is also the
+		// remedy this feature tells people to use on a duplicate ping, so "who voided
+		// which copy, and when" is exactly the question that gets asked afterwards.
+		// `super_admin` is a shared login, so the row identifies a session, not a
+		// person — still strictly more than the nothing that was recorded before.
+		const reason = expenseStatusReason(req.body);
+		logAudit(req, "update_expense_status", "expense", id,
+			`status ${prevStatus} -> ${status} (${expense.date || "no date"}, period ${expPeriod || "unknown"})` +
+			(reason ? ` — reason: ${reason}` : ""));
 		notifyChange("expenses");
 		res.json({ success: true });
 	} catch (err) {
@@ -39772,19 +41070,33 @@ app.put("/api/expenses/bulk-status", requireRole("Super Admin", "Dispatcher"), (
 		// report what wasn't, and name the periods — a silent skip on a bulk
 		// approve reads as "all done" when it wasn't.
 		//
-		// Readability is probed ONCE for the batch — the answer cannot change
-		// mid-loop, and on a broken table a per-row probe re-compiles a failing
-		// statement for every id. Same fail-closed rule as the single-row route:
-		// with the lock table unreadable, no row is confirmed open, so none is
-		// flipped.
+		// ⚠️ ONE PREDICATE, NOT TWO SPELLINGS OF ONE. This loop used to hand-inline
+		// `!lockReadable || isLocked(p)`, which is the definition of
+		// periodWriteLocked() written out longhand — the same behaviour as the
+		// single-row route above, expressed differently, so the two could silently
+		// drift the next time either rule moved. They now call the same function,
+		// which is also the one carrying the argument for why a write guard reads
+		// "cannot tell" as "assume closed" while isLocked() must not.
+		//
+		// `lockReadable` is still probed ONCE for the batch, but only to DESCRIBE
+		// the outcome (the response must not call a month "finalized" when the table
+		// could not be read). It no longer participates in the decision, so there is
+		// no second copy of the rule to keep in step. Probing once also matters on a
+		// broken table, where a per-row probe re-compiles a failing statement per id.
 		const lockReadable = periodLocksReadable();
 		const lockedRows = [];
 		const existingIds = [];
 		for (const e of existing) {
 			const p = expensePostedPeriod(e);
-			if (!lockReadable || isLocked(p)) lockedRows.push({ id: e.id, period: p });
+			if (periodWriteLocked(p)) lockedRows.push({ id: e.id, period: p });
 			else existingIds.push(e.id);
 		}
+
+		// Both hoisted above the branch below, because both are now needed on the
+		// refusal path as well as the success one. `expenseStatusReason` is pure, so
+		// the success audit line is unchanged by the move.
+		const reason = expenseStatusReason(req.body);
+		const lockedPeriods = [...new Set(lockedRows.map((r) => r.period))].sort();
 
 		let changed = 0;
 		if (existingIds.length) {
@@ -39792,10 +41104,93 @@ app.put("/api/expenses/bulk-status", requireRole("Super Admin", "Dispatcher"), (
 			changed = db
 				.prepare(`UPDATE expenses SET status = ? WHERE id IN (${updatePh})`)
 				.run(status, ...existingIds).changes;
+			// ⚠️ THIS IS THE ROUTE THAT MATTERS MOST, not the single-row one. The Data
+			// Issues page voids DUPLICATE receipts through THIS endpoint — so the
+			// operation "an admin rejects a duplicate, removing money from the P&L and
+			// changing an investor's payout" was, until this line, writing no audit
+			// trail whatsoever. Same reasoning as PATCH /api/expenses/:id/vendor,
+			// which has always audited a strictly smaller change.
+			//
+			// ONE row for the batch rather than N — BULK_STATUS_MAX_IDS is 200, and
+			// 200 audit rows per click would bury the signal audit_trail exists to
+			// preserve (the whole table is ~1,300 rows over four months). The id list
+			// is included in full, so "who voided expense #X" is still greppable by
+			// id; entity_id carries the count because no single id owns the row.
+			//
+			// `changed` and `existingIds` are BOTH reported because they can differ:
+			// a row already carrying the target status is updated to the same value
+			// and SQLite still counts it, but a row that vanished between the SELECT
+			// and the UPDATE does not — so the id list is what was attempted and
+			// `changed` is what the database confirmed.
+			logAudit(req, "bulk_update_expense_status", "expense", String(changed),
+				`status -> ${status} on ${changed} of ${existingIds.length} expense(s): ${existingIds.join(",")}` +
+				(reason ? ` — reason: ${reason}` : ""));
 			notifyChange("expenses");
 		}
 
-		const lockedPeriods = [...new Set(lockedRows.map((r) => r.period))].sort();
+		// ⚠️ THE WITHHELD ROWS GET THEIR OWN AUDIT LINE, AND THE WHOLESALE CASE IS WHY.
+		// The success audit above sits inside `if (existingIds.length)`, so a request
+		// in which the server withheld EVERY row recorded nothing at all — not the
+		// attempt, not the refusal, not the reason. That is not an exotic state: the
+		// Data Issues void path sends ids whose `locked` flag is a snapshot from the
+		// last fuel-analytics read, so a month closing between that read and the click
+		// is an ordinary race. It also left audit_trail unable to distinguish "nobody
+		// tried" from "someone tried and was refused wholesale", which is the one
+		// distinction a refusal row exists to preserve.
+		//
+		// A PARTIAL withhold gets one too, deliberately. Today a request that updates
+		// 3 of 5 audits only the 3, so the batch reads afterwards as a clean success
+		// and the two refused ids — the ones that tried to restate a settled month,
+		// i.e. the highest-value rows in this table per UNCOALESCED_REFUSAL_CODES —
+		// leave no trace at all. The two outcomes are recorded as two rows rather than
+		// folded into one because this file's naming split is load-bearing: a refusal
+		// is always a DISTINCT action from its success (`cancel_blocked` vs
+		// `cancel_load`), and both the purge and the coalescer key on the action. It
+		// also keeps entity_id honest — the success row's count is what was written,
+		// this row's is what was withheld; one merged row could only lie about one of
+		// them. Cost is one extra row per REQUEST, not per id, and only when something
+		// was actually withheld.
+		//
+		// logAuditRefusal, not logAudit: both codes below are in
+		// UNCOALESCED_REFUSAL_CODES, so this is byte-identical to logAudit today, but
+		// it states the intent and a future non-period refusal on this route inherits
+		// the coalescing window without anyone having to remember.
+		//
+		// ⚠️ NOT added to PURGEABLE_REFUSAL_ACTIONS, and it must not be. That list's
+		// stated invariant is that its entries are "written only on a path that
+		// returns before any sheet or database write" — on a partial withhold this row
+		// is written on a path that DID write, so it fails the invariant by
+		// construction. Adding it would also buy nothing: every row this action writes
+		// carries a `[PERIOD_` code, which the purge's own detail filter already
+		// exempts. And it cannot flood — it needs a locked month (or a broken lock
+		// table) on a Super Admin / Dispatcher route.
+		//
+		// entity_id carries the COUNT and details the id list, matching the success
+		// line above — no single id owns the row. `super_admin` is a shared login, so
+		// this identifies the account and session, never an individual.
+		if (lockedRows.length) {
+			// PERIOD_LOCK_UNREADABLE normally implies a wholesale refusal (an
+			// unreadable table makes periodWriteLocked() true for every row), but the
+			// probe is separate from the per-row check, so the count is reported as
+			// measured rather than assumed.
+			const refusalCode = lockReadable ? "PERIOD_FINALIZED" : "PERIOD_LOCK_UNREADABLE";
+			const blockedIds = lockedRows.map((r) => r.id);
+			// The periods are recorded on BOTH codes, unlike the response, which empties
+			// `finalizedPeriods` when the table is unreadable. Those are different jobs:
+			// the response must not CLAIM a month-end that was never confirmed, while
+			// the audit's job is to reconstruct what was attempted, and "which months
+			// the withheld rows fell in" is part of that. The code sits beside them, so
+			// `periods=` is never read as an assertion that they are closed.
+			logAuditRefusal(req, "bulk_update_expense_status_blocked", "expense", String(blockedIds.length),
+				`status -> ${status} WITHHELD on ${blockedIds.length} of ${existing.length} expense(s): ${blockedIds.join(",")}` +
+				` [${refusalCode}]${lockedPeriods.length ? ` periods=${lockedPeriods.join(",")}` : ""}` +
+				(existingIds.length
+					? ` — partial: ${changed} other row(s) updated`
+					: " — nothing was written") +
+				(reason ? ` — reason: ${reason}` : ""),
+				refusalCode);
+		}
+
 		res.json({
 			success: true,
 			updated: changed,

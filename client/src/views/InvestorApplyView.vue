@@ -248,7 +248,7 @@
                       placeholder="Type to search state..."
                       autocomplete="off"
                       @focus="stateDropOpen = true"
-                      @blur="window.setTimeout(() => stateDropOpen = false, 200)"
+                      @blur="closeStateDropSoon"
                     />
                     <div v-if="stateDropOpen && filteredStates.length" class="state-dropdown">
                       <div
@@ -323,7 +323,7 @@
                 v-model="banking.bank_name" placeholder="Start typing bank name..."
                 autocomplete="off" data-wizard-target="bank-name" required
                 @focus="bankDropOpen = true"
-                @blur="window.setTimeout(() => bankDropOpen = false, 200)"
+                @blur="closeBankDropSoon"
               />
               <div v-if="bankDropOpen && filteredBanks.length" class="bank-dropdown">
                 <div
@@ -342,7 +342,7 @@
                 v-model="banking.account_name" placeholder="As it appears on the account"
                 autocomplete="off"
                 @focus="acctNameDropOpen = true"
-                @blur="window.setTimeout(() => acctNameDropOpen = false, 200)"
+                @blur="closeAcctNameDropSoon"
               />
               <div v-if="acctNameDropOpen && acctNameOptions.length" class="acct-name-dropdown">
                 <div
@@ -511,7 +511,7 @@
 </template>
 
 <script setup>
-import { ref, computed, reactive, onMounted, watch } from 'vue'
+import { ref, computed, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { createFormDraft } from '../lib/formDraft'
@@ -644,6 +644,65 @@ const filteredStates = computed(() => {
   const q = (vehicles.value[activeVehicleTab.value]?.titleState || '').toLowerCase()
   if (!q) return usStates
   return usStates.filter(s => s.toLowerCase().includes(q))
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Deferred close for the three type-ahead dropdowns (Title State, Bank Name,
+// Name on Account).
+//
+// ⚠️ All three ran as inline template expressions, `window.setTimeout(...)`, and
+// all three THREW on every blur. `window` is not one of the globals Vue allows
+// in a template expression, so the compiler emits `_ctx.window` — which is
+// undefined, because a <script setup> component exposes no setup bindings on the
+// render proxy and nothing registers a `window` global property. Every blur of
+// these fields raised `TypeError: Cannot read properties of undefined (reading
+// 'setTimeout')` and the dropdown never closed. This is the PUBLIC investor
+// application form, so it fired for every applicant, on all three fields.
+// Declaring `const window = globalThis.window` in setup would also compile, but
+// it hides the reason and invites the next inline copy — a module-scope function
+// is the fix, and the bare global is simply in scope here, matching the other
+// ~26 timers in client/src.
+//
+// The 200 ms delay is unchanged and is load-bearing: blur fires before the
+// mousedown on an option lands, so closing immediately would discard the click.
+// `clearTimeout` first only collapses repeated BLURS onto a single pending
+// close, so the delay is measured from the most recent blur.
+//
+// ⚠️ It does NOT make a refocus safe, and deliberately so — this is a pure
+// relocation of the old expression, not a behaviour change. `@focus` sets the
+// flag true without touching the timer, so blurring and clicking back into the
+// same field inside 200 ms still lets the in-flight timer shut the list while
+// the field is focused. Pre-existing (and shared with InvestorSignModal); it
+// was simply unobservable here while every blur threw before scheduling
+// anything. Clearing the timer in the focus handler would fix it — as a
+// separate, deliberate change.
+// ─────────────────────────────────────────────────────────────────────────────
+let stateDropTimer = null
+let bankDropTimer = null
+let acctNameDropTimer = null
+
+function closeStateDropSoon() {
+  clearTimeout(stateDropTimer)
+  stateDropTimer = setTimeout(() => { stateDropOpen.value = false }, 200)
+}
+function closeBankDropSoon() {
+  clearTimeout(bankDropTimer)
+  bankDropTimer = setTimeout(() => { bankDropOpen.value = false }, 200)
+}
+function closeAcctNameDropSoon() {
+  clearTimeout(acctNameDropTimer)
+  acctNameDropTimer = setTimeout(() => { acctNameDropOpen.value = false }, 200)
+}
+
+// Blurring a field and immediately navigating away (the submit handler sends the
+// applicant to logisx.com) leaves a timer holding this component's refs. Writing
+// to a ref after unmount is harmless in Vue 3 — it just renders nothing — but
+// now that each timer has a handle, releasing them is one line and keeps the
+// component from outliving itself.
+onBeforeUnmount(() => {
+  clearTimeout(stateDropTimer)
+  clearTimeout(bankDropTimer)
+  clearTimeout(acctNameDropTimer)
 })
 
 // Reset model when make changes (but not when switching tabs)

@@ -78,6 +78,203 @@
         </table>
       </section>
 
+      <!-- 2b. Month-close calendar.
+           The client asked "is there anything specific I have to do to close out
+           the previous one within the 7 day window?" — the answer is NO, and no
+           screen said so, which is why he had to ask. The console only ever
+           rendered payout rows, so the close lifecycle had to be inferred from
+           them. This panel states it. -->
+      <section class="section calendar-section">
+        <div class="section-title">
+          <div class="section-icon" style="background: var(--blue-dim); color: var(--blue);">&#128197;</div>
+          Month-Close Calendar
+          <span class="section-sub">Which months are open, which are closed, and who closed them</span>
+        </div>
+
+        <!-- The headline answer, stated before any table. -->
+        <div :class="['close-answer', closeMode]">
+          <template v-if="closeMode === 'auto'">
+            <div class="ca-title">Nothing to do &mdash; months close themselves.</div>
+            <p class="ca-body">
+              <template v-if="graceDays > 0">
+                A month stays open for <strong>{{ graceDays }} more {{ graceDays === 1 ? 'day' : 'days' }}</strong>
+                after it ends so late receipts still count. It then closes on its own, automatically, at the
+                start of the following day.
+              </template>
+              <template v-else>
+                A month closes on its own, automatically, as soon as it ends &mdash; there is no extra window
+                for late receipts.
+              </template>
+              You do not have to click anything.
+              <template v-if="autoClosedCount">
+                {{ autoClosedCount }} of the {{ closedCount }} closed
+                {{ closedCount === 1 ? 'month' : 'months' }} below
+                {{ autoClosedCount === 1 ? 'was' : 'were' }} closed this way.
+              </template>
+            </p>
+            <p class="ca-body dim">
+              <strong>Close now</strong> is only for when every receipt for a month is already in and you
+              would rather not wait out the window. <strong>Reopen Month</strong> puts a closed month back
+              in the "late receipts still count" state for every investor.
+            </p>
+          </template>
+
+          <template v-else-if="closeMode === 'manual'">
+            <div class="ca-title">Automatic month-close is switched off on this server.</div>
+            <p class="ca-body">
+              Months will <strong>not</strong> close on their own here, so no month has a scheduled close
+              date and every figure keeps moving as receipts arrive. Payouts also can't be settled against
+              a frozen number until a month is closed. Ask an administrator to enable period close
+              (<span class="mono-inline">PERIOD_FINALIZE_ENABLED</span>) to restore the automatic
+              {{ graceDays > 0 ? graceDays + '-day' : 'month-end' }} close.
+            </p>
+          </template>
+
+          <template v-else>
+            <div class="ca-title">Close schedule unavailable.</div>
+            <p class="ca-body">
+              The calendar couldn't be read, so this page can't confirm whether months are closing
+              automatically. Everything below is reconstructed from the payout data already loaded.
+            </p>
+          </template>
+        </div>
+
+        <!-- Placeholder only while there is genuinely nothing to show. On a
+             refresh the previous rows stay put rather than flashing to "Loading". -->
+        <div v-if="periodsLoading && !calendarRows.length" class="empty-msg">Loading close calendar…</div>
+        <template v-else>
+          <!-- ⚠️ INDEPENDENT FAILURE. GET /api/periods deliberately 500s when
+               period_locks is malformed rather than fabricating a calendar, while
+               /api/payouts degrades with a flag instead. So a failure here must
+               not blank the page: it degrades to a calendar rebuilt from the
+               payout rows already in hand — exactly the data the per-investor
+               period buttons used to run on — so Close now / Reopen Month keep
+               working. What is genuinely lost is named, not glossed over. -->
+          <div v-if="periodsFailed" class="calendar-warn">
+            <strong>Couldn't load the close calendar.</strong>
+            {{ periodsErrorMsg || 'Something went wrong.' }}
+            <template v-if="calendarRows.length">
+              Showing what the payout data knows instead &mdash; who closed each month, the length of the
+              window, and any month with no payout row are all missing from this view.
+            </template>
+            <button type="button" class="calendar-retry" @click="loadPeriods">Retry</button>
+          </div>
+
+          <div v-if="!calendarRows.length && !periodsFailed" class="empty-msg">
+            No settlement months yet.
+          </div>
+
+          <!-- Scroll wrapper, not a stacked card list: this table is read as a
+               calendar (which month is where in the lifecycle), and that reading
+               depends on the rows staying aligned in one column of dates. -->
+          <div v-else-if="calendarRows.length" class="calendar-scroll">
+            <table class="data-table calendar-table">
+              <thead>
+                <tr>
+                  <th>Month</th>
+                  <th>Status</th>
+                  <th>Receipts accepted through</th>
+                  <th>Closed</th>
+                  <th class="action-head"></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="r in calendarRows" :key="r.period">
+                  <td class="mono">
+                    {{ r.periodLabel }}
+                    <span v-if="r.period && r.period === currentPeriod" class="cur-flag">current</span>
+                  </td>
+                  <td>
+                    <span :class="['status-pill', phaseMeta(r).cls]" :title="phaseMeta(r).hint">{{ phaseMeta(r).label }}</span>
+                    <!-- A month walked back open reads identically to one that was
+                         never closed, so mark it. -->
+                    <span v-if="r.reopenedAt" class="reopened-flag" :title="periodReopenTitle(r)">reopened</span>
+                  </td>
+                  <!-- ⚠️ graceEndsAt is the LAST day the books are open, INCLUSIVE —
+                       "closes Aug 7" would be read as closing a day early and costs a
+                       receipt. Both dates are spelled out. -->
+                  <td class="dim">
+                    <template v-if="r.phase === 'finalized'">&mdash;</template>
+                    <template v-else-if="r.graceEndsAt">
+                      <span class="grace-day">{{ fmtDate(r.graceEndsAt) }}</span>
+                      <span v-if="closesOn(r.graceEndsAt)" class="grace-sub">
+                        all day &middot; locks {{ closesOn(r.graceEndsAt) }}
+                      </span>
+                    </template>
+                    <template v-else>&mdash;</template>
+                  </td>
+                  <td class="dim">
+                    <template v-if="r.phase === 'finalized' && r.finalizedAt">
+                      <span class="closed-on" :title="fmtTimestamp(r.finalizedAt)">{{ fmtDate(r.finalizedAt) }}</span>
+                      <span v-if="finalizedByLabel(r)" class="closed-by">{{ finalizedByLabel(r) }}</span>
+                    </template>
+                    <template v-else-if="r.phase === 'finalized'">
+                      <span class="closed-by">closed</span>
+                    </template>
+                    <template v-else>&mdash;</template>
+                  </td>
+                  <td class="action-cell">
+                    <!-- Both verbs are FLEET-WIDE — one carrier, one month-end — so
+                         this calendar is their single home. `finalizeTarget` /
+                         `periodReopenTarget` only ever read period / periodLabel /
+                         graceEndsAt, all of which a /api/periods row carries, so the
+                         existing modals and save handlers take these rows unchanged.
+
+                         Gating on `phase` alone is deliberate and sufficient:
+                         periodPhase() returns 'pending' ONLY when period close is
+                         enabled, so a pending row can never offer a click the server
+                         would answer with 503 FEATURE_DISABLED. -->
+                    <button
+                      v-if="r.phase === 'pending'"
+                      type="button"
+                      class="action-btn act-finalize"
+                      :disabled="periodSaving"
+                      title="Close this month now — every receipt is in. Freezes every investor's figure and publishes their statements."
+                      @click="openFinalize(r)"
+                    >Close now</button>
+                    <button
+                      v-else-if="r.phase === 'finalized'"
+                      type="button"
+                      class="action-btn act-reopen-period"
+                      :disabled="periodSaving"
+                      title="Reopen this month for everyone so late receipts count again"
+                      @click="openPeriodReopen(r)"
+                    >Reopen Month</button>
+                    <span v-else class="await-note">{{ noActionNote(r) }}</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Legacy receipts the period lock REFUSED to attribute. Had no home
+               anywhere in the UI until now, so the condition could accumulate
+               silently — which is the one thing a health counter must not do. -->
+          <div v-if="backfillBlocked" class="calendar-warn backfill-warn">
+            <div v-if="backfill.skippedLockedPeriod">
+              <strong>{{ backfill.skippedLockedPeriod }} legacy
+              {{ backfill.skippedLockedPeriod === 1 ? 'receipt is' : 'receipts are' }} unattributed.</strong>
+              Their month was already closed, so the attribution pass refused to write into it rather than
+              restating a settled figure. Until that is resolved they count against no investor.
+              <template v-if="backfill.skippedPeriods && backfill.skippedPeriods.length">
+                Affected:
+                <span class="bf-periods">{{ backfill.skippedPeriods.join(', ') }}</span>.
+              </template>
+              <span class="bf-how">
+                To take them in, reopen the listed {{ backfill.skippedPeriods && backfill.skippedPeriods.length === 1 ? 'month' : 'months' }} above
+                &mdash; the attribution runs at server start, so it completes on the next restart.
+              </span>
+            </div>
+            <div v-if="backfill.error" class="bf-error">
+              Attribution pass reported an error: {{ backfill.error }}
+            </div>
+            <div v-if="backfill.ranAt" class="bf-meta">
+              Last run {{ fmtTimestamp(backfill.ranAt) }} &middot; {{ backfill.applied || 0 }} receipt(s) attributed.
+            </div>
+          </div>
+        </template>
+      </section>
+
       <!-- 3. Per-investor settlement -->
       <div v-if="!investors.length" class="empty">No investors with payouts yet.</div>
       <section
@@ -176,9 +373,12 @@
                 <span v-if="p.reopenedAt" class="reopened-flag" :title="reopenTitle(p)">reopened</span>
                 <!-- Month is over but the books are still open for straggler
                      receipts. The figure is still moving, so nothing can be
-                     settled yet — say why, and say until when. -->
+                     settled yet — say why, and say until when.
+                     ⚠️ "open through X", not "closes X": graceEndsAt is the last
+                     day the books are open, INCLUSIVE, and the lock fires the
+                     following morning. The old wording read a day early. -->
                 <div v-if="p.phase === 'pending'" class="phase-note">
-                  in final settlement &middot; closes {{ fmtDate(p.graceEndsAt) }}
+                  in final settlement &middot; open through {{ fmtDate(p.graceEndsAt) }}
                 </div>
               </td>
               <td class="action-cell">
@@ -186,16 +386,17 @@
                      point of the window: marking paid on day 1 and then hand-
                      adjusting when a receipt lands on day 4 is the treadmill it
                      exists to end. Server enforces the same rule (409
-                     PERIOD_NOT_FINALIZED) — this only avoids offering the click. -->
+                     PERIOD_NOT_FINALIZED) — this only avoids offering the click.
+
+                     "Close now" USED TO RENDER HERE and was deliberately removed.
+                     Closing is FLEET-WIDE (one carrier, one month-end), so it
+                     appeared once per investor holding a row in that month with
+                     every copy doing the identical thing — which reads as if it
+                     were scoped to the investor whose table it sits in. Its single
+                     home is the Month-Close Calendar above, which additionally
+                     covers months that have no payout row at all. -->
                 <template v-if="p.phase === 'pending'">
-                  <span class="await-note">Receipts open until {{ fmtDate(p.graceEndsAt) }}</span>
-                  <button
-                    type="button"
-                    class="action-btn act-finalize"
-                    :disabled="busyId === p.id"
-                    title="Close this month now — every receipt is in. Freezes the figure and publishes the statement."
-                    @click="openFinalize(p)"
-                  >Close now</button>
+                  <span class="await-note">Nothing to do &mdash; settles when the month closes</span>
                 </template>
                 <template v-else>
                   <button
@@ -240,17 +441,12 @@
                     title="Add or edit a settlement adjustment (e.g. receipts that arrived after this month closed)"
                     @click="openAdjust(inv, p)"
                   >{{ p.adjustment ? 'Edit Adj.' : 'Adjust' }}</button>
-                  <!-- Reopening the whole month, distinct from reopening one
-                       payout row: this puts the books back in a state where late
-                       receipts count again, for every investor. -->
-                  <button
-                    v-if="p.phase === 'finalized'"
-                    type="button"
-                    class="action-btn act-reopen-period"
-                    :disabled="busyId === p.id"
-                    title="Reopen this month for everyone so late receipts count again"
-                    @click="openPeriodReopen(p)"
-                  >Reopen Month</button>
+                  <!-- "Reopen Month" USED TO RENDER HERE and was removed with
+                       "Close now", for the same reason: it reopens the month for
+                       EVERY investor, so offering it from inside one investor's
+                       row misrepresented its blast radius. It lives in the
+                       Month-Close Calendar above. The per-payout "Reopen" button
+                       beside it is a different act and stays. -->
                 </template>
               </td>
             </tr>
@@ -477,7 +673,7 @@ import { formatCurrency as fmt } from '../utils/format'
 import { useApi } from '../composables/useApi'
 import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
-import { fmtYmd, fmtTimestamp } from '../utils/datetime'
+import { fmtYmd, fmtTimestamp, parseYmdLocal } from '../utils/datetime'
 
 const api = useApi()
 // Pulled in for parity with the other admin pages; auth gating is enforced by
@@ -581,13 +777,171 @@ async function loadPayouts() {
   loading.value = false
 }
 
+// ---------------------------------------------------------------------------
+// Month-close calendar — GET /api/periods.
+//
+// The client asked "is there anything specific I have to do to close out the
+// previous one within the 7 day window?" The answer is no: a per-minute sweep
+// locks the month on its own once the grace window elapses, and production shows
+// every closed period stamped by `system`. Nothing in the app said so, because
+// this console only ever rendered payout rows and the close lifecycle had to be
+// inferred from them.
+//
+// This endpoint is the ONLY source for four things /api/payouts cannot answer:
+// WHO closed a month (`system` vs a username), how long the grace window is,
+// whether automatic close is switched on at all, and months that carry no payout
+// row — which the per-investor tables structurally cannot show.
+//
+// ⚠️ IT FAILS DIFFERENTLY FROM /api/payouts, ON PURPOSE. It 500s when
+// period_locks is malformed rather than fabricating a close calendar, while
+// /api/payouts degrades with a flag. So this panel owns its own loading/error
+// state and never touches the page-level `loadFailed` — a broken calendar must
+// not blank the settlement console.
+// ---------------------------------------------------------------------------
+const periods = ref([])
+const graceDays = ref(0)
+const closeEnabled = ref(false)
+const currentPeriod = ref('')
+const backfill = ref(null)
+const periodsLoading = ref(true)
+const periodsFailed = ref(false)
+const periodsErrorMsg = ref('')
+
+async function loadPeriods() {
+  periodsLoading.value = true
+  try {
+    const data = await api.get('/api/periods')
+    periods.value = Array.isArray(data.periods) ? data.periods : []
+    graceDays.value = Number.isFinite(Number(data.graceDays)) ? Number(data.graceDays) : 0
+    closeEnabled.value = !!data.enabled
+    currentPeriod.value = data.currentPeriod || ''
+    backfill.value = data.legacyExpenseBackfill || null
+    periodsFailed.value = false
+    periodsErrorMsg.value = ''
+  } catch (err) {
+    // Drop the authoritative data — a stale calendar shown as current is worse
+    // than a named gap — and let calendarRows fall through to the reconstruction.
+    periods.value = []
+    backfill.value = null
+    periodsFailed.value = true
+    periodsErrorMsg.value = err.message || ''
+  }
+  periodsLoading.value = false
+}
+
+// Reduced calendar rebuilt from the payout rows already loaded, used only when
+// /api/periods is unavailable. This is exactly the data the per-investor "Close
+// now" / "Reopen Month" buttons ran on before they were consolidated here, so
+// removing them costs no capability in the degraded state: period / periodLabel
+// / graceEndsAt are all the modals and save handlers ever read.
+//
+// What it genuinely cannot reconstruct — and what the warning banner therefore
+// names out loud — is finalizedBy, graceDays, the enabled flag, and any month
+// with no payout row.
+const fallbackPeriods = computed(() => {
+  const seen = new Map()
+  const put = (p) => {
+    if (!p || !p.period || seen.has(p.period)) return
+    seen.set(p.period, {
+      period: p.period,
+      periodLabel: p.periodLabel || p.period,
+      phase: p.phase || '',
+      graceEndsAt: p.graceEndsAt || '',
+      finalizedAt: '',
+      finalizedBy: '',
+    })
+  }
+  for (const inv of investors.value) {
+    put(inv.currentMonth)
+    for (const p of inv.payouts || []) put(p)
+  }
+  return [...seen.values()].sort((a, b) => (a.period < b.period ? 1 : -1))
+})
+
+const calendarRows = computed(() => (periodsFailed.value ? fallbackPeriods.value : periods.value))
+const closeMode = computed(() => (periodsFailed.value ? 'unknown' : closeEnabled.value ? 'auto' : 'manual'))
+const closedCount = computed(() => calendarRows.value.filter((r) => r.phase === 'finalized').length)
+// `system` is the sweep's actor, so this is literally "how many closed with
+// nobody clicking" — the evidence behind the headline claim.
+const autoClosedCount = computed(
+  () => calendarRows.value.filter((r) => r.phase === 'finalized' && r.finalizedBy === 'system').length
+)
+const backfillBlocked = computed(() => {
+  const b = backfill.value
+  return !!b && (Number(b.skippedLockedPeriod) > 0 || !!b.error)
+})
+
+const PHASE_META = {
+  accruing: { cls: 'st-progress', label: 'accruing', hint: 'Still running. Revenue and receipts are still landing in this month.' },
+  pending: { cls: 'st-owed', label: 'open for receipts', hint: 'The month has ended, but the books are still open for late receipts. It closes on its own when the window runs out.' },
+  finalized: { cls: 'st-paid', label: 'closed', hint: 'Figures are frozen and statements are published. Receipts dated in this month now post to the current open month instead.' },
+}
+// '' arrives when the server can't put the month in the lifecycle — in practice
+// because period close is switched off (a malformed period_locks 500s the route
+// instead). Say "open" and explain, rather than inventing a phase.
+function phaseMeta(r) {
+  return PHASE_META[r && r.phase] || {
+    cls: 'st-owed',
+    label: 'open',
+    hint: 'No scheduled close — automatic month-close is not running on this server.',
+  }
+}
+
+function finalizedByLabel(r) {
+  const who = (r && r.finalizedBy) || ''
+  if (!who) return ''
+  return who === 'system' ? 'automatically' : `by ${who}`
+}
+
+function noActionNote(r) {
+  if (r && r.phase === 'accruing') return 'Still running'
+  return ''
+}
+
+function periodReopenTitle(r) {
+  const who = r.reopenedBy ? ` by ${r.reopenedBy}` : ''
+  const when = r.reopenedAt ? ` on ${fmtDate(r.reopenedAt)}` : ''
+  return `Month reopened${who}${when}${r.reopenReason ? ` — ${r.reopenReason}` : ''}`
+}
+
+// ⚠️ graceEndsAt is the LAST day the books are open, INCLUSIVE — '2026-08-07'
+// means all of Aug 7, with the lock firing at the start of Aug 8. Rendering the
+// grace date itself as "closes on" is off by one in the direction that loses a
+// receipt someone was told they still had time to file, so the UI prints both
+// dates and this derives the second.
+//
+// parseYmdLocal builds a LOCAL-midnight Date deliberately: new Date('YYYY-MM-DD')
+// is UTC midnight and renders as the previous day anywhere behind UTC, which is
+// the exact bug utils/datetime exists to prevent.
+function dayAfter(ymd) {
+  const d = parseYmdLocal(ymd)
+  if (!d) return ''
+  d.setDate(d.getDate() + 1)
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+function closesOn(graceEndsAt) {
+  const next = dayAfter(graceEndsAt)
+  return next ? fmtDate(next) : ''
+}
+
+// Both surfaces after every mutation, so the calendar and the payout tables can
+// never tell different stories about the same month. SEQUENTIAL, not parallel:
+// GET /api/payouts runs the reconcile that can mint a payout row for a newly
+// rolled-over month, and /api/periods derives its open months from those rows —
+// racing them would let the calendar miss a period that had just appeared.
+async function refreshAll() {
+  await loadPayouts()
+  await loadPeriods()
+}
+
 async function advance(payout, status) {
   if (busyId.value) return
   busyId.value = payout.id
   try {
     await api.post(`/api/investor/payouts/${payout.id}/status`, { status })
     toast(status === 'paid' ? 'Payout marked paid' : 'Payout marked processing')
-    await loadPayouts()
+    await refreshAll()
   } catch (err) {
     toast(err.message || 'Failed to update payout', 'error')
   } finally {
@@ -662,7 +1016,7 @@ async function savePeriodFinalize() {
     const r = await api.post(`/api/periods/${t.period}/finalize`)
     toast(`${t.periodLabel} closed — ${r.stamped} payout(s) frozen, statements published`)
     finalizeTarget.value = null
-    await loadPayouts()
+    await refreshAll()
   } catch (err) {
     toast(err.message || 'Failed to close the month', 'error')
   } finally {
@@ -682,7 +1036,7 @@ async function savePeriodReopen() {
     toast(r.note || `${t.periodLabel} reopened`, r.divertedReceipts ? 'warning' : 'success')
     periodReopenTarget.value = null
     periodReopenReason.value = ''
-    await loadPayouts()
+    await refreshAll()
   } catch (err) {
     toast(err.message || 'Failed to reopen the month', 'error')
   } finally {
@@ -712,7 +1066,7 @@ async function saveReopen() {
     })
     toast(`Payout reopened as ${reopenStatus.value}`)
     reopenTarget.value = null
-    await loadPayouts()
+    await refreshAll()
   } catch (err) {
     toast(err.message || 'Failed to reopen payout', 'error')
   } finally {
@@ -795,7 +1149,7 @@ async function saveAdjust() {
     })
     toast('Adjustment saved')
     adjustTarget.value = null
-    await loadPayouts()
+    await refreshAll()
   } catch (err) {
     toast(err.message || 'Failed to save adjustment', 'error')
   } finally {
@@ -803,7 +1157,7 @@ async function saveAdjust() {
   }
 }
 
-onMounted(loadPayouts)
+onMounted(refreshAll)
 </script>
 
 <style scoped>
@@ -1058,6 +1412,93 @@ onMounted(loadPayouts)
   color: var(--text-dim, #64748b);
   margin-right: 0.4rem;
   white-space: nowrap;
+}
+
+/* --- Month-close calendar -------------------------------------------------
+   The headline answer reads as a statement, not a widget: it is the whole
+   reason the section exists ("do I need to do anything?" → "no"). */
+.close-answer {
+  border-radius: 10px;
+  padding: 0.8rem 1rem;
+  margin-bottom: 1rem;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+}
+.close-answer.auto { background: #f0fdf4; border-color: #bbf7d0; border-left-color: #16a34a; }
+.close-answer.manual { background: #fffbeb; border-color: #fde68a; border-left-color: #d97706; }
+.close-answer.unknown { background: var(--bg); border-left-color: var(--text-dim, #64748b); }
+.ca-title { font-size: 0.9rem; font-weight: 700; margin-bottom: 0.3rem; }
+.close-answer.auto .ca-title { color: #166534; }
+.close-answer.manual .ca-title { color: #92400e; }
+.ca-body {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--text, #1f2937);
+}
+.ca-body + .ca-body { margin-top: 0.4rem; }
+.ca-body.dim { color: var(--text-dim, #64748b); }
+.mono-inline {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.92em;
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 4px;
+  padding: 0 0.25rem;
+}
+
+.calendar-warn {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: #92400e;
+  margin-bottom: 0.75rem;
+}
+.calendar-retry {
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 700;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin-left: 0.35rem;
+  color: #92400e;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.backfill-warn { margin-top: 0.75rem; margin-bottom: 0; }
+.bf-periods { font-family: 'JetBrains Mono', monospace; font-weight: 600; }
+.bf-how { display: block; margin-top: 0.3rem; }
+.bf-error { margin-top: 0.4rem; font-weight: 600; }
+.bf-meta { margin-top: 0.4rem; font-size: 0.72rem; opacity: 0.8; }
+
+/* Five columns of dates on a phone: scroll rather than wrap, so the months stay
+   in one readable column. */
+.calendar-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.calendar-table { min-width: 620px; }
+.calendar-table .status-pill[title],
+.calendar-table .reopened-flag[title] { cursor: help; }
+.calendar-table .grace-day { display: block; color: var(--text, #1f2937); }
+.calendar-table .grace-sub,
+.calendar-table .closed-by {
+  display: block;
+  font-size: 0.68rem;
+  color: var(--text-dim, #64748b);
+  margin-top: 0.1rem;
+}
+.calendar-table .closed-on { display: block; color: var(--text, #1f2937); }
+.cur-flag {
+  margin-left: 0.4rem;
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #1e40af;
+  background: #dbeafe;
+  border-radius: 0.25rem;
+  padding: 0.1rem 0.3rem;
 }
 
 .reopened-flag {

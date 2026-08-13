@@ -1350,11 +1350,22 @@ async function toggleLoad(al, loc) {
 }
 
 // Track the position/time of the last route fetch so we can refetch as the
-// truck progresses — matches DriverRouteMap.vue's 100m + 60s gate. Without
-// this, /tracking only refetched on off-route, so its routePoints stayed
-// stale relative to /track (which already refetches on movement). The stale
-// route caused the trim-at-driver projection to land on outdated road
-// segments, making /tracking's polyline diverge from /track's.
+// truck progresses. Without this, /tracking only refetched on off-route, so its
+// routePoints stayed stale relative to /track (which already refetches on
+// movement). The stale route caused the trim-at-driver projection to land on
+// outdated road segments, making /tracking's polyline diverge from /track's.
+//
+// ⚠️ This USED to say "matches DriverRouteMap.vue's 100m + 60s gate". It no
+// longer does: DriverRouteMap now reroutes on DEVIATION (3 consecutive
+// confirmations + 40 m movement + a 45 s cooldown + a hard cap per trip), not on
+// a timer, because a route polyline downsampled to ~540 m spacing reads as
+// ~104 m off the real road mid-curve and a timed refetch cannot tell the two
+// apart. This is now the ONLY caller of the time-based pattern.
+//
+// Deliberately left as a timer HERE: this is the dispatcher's fleet map, where
+// a periodic refresh of a polyline is exactly the right behaviour and there is
+// no driver to misroute. If this map ever grows per-truck navigation, move it
+// onto client/src/utils/routeProgress.js rather than re-deriving the rule.
 let lastRouteRefetchPos = null
 let lastRouteRefetchTime = 0
 

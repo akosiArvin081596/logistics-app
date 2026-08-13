@@ -24,22 +24,22 @@
             </div>
 
             <label class="sign-checkbox">
-              <input type="checkbox" v-model="agreed" />
+              <input type="checkbox" v-model="state.agreed" />
               <span>{{ SIGNING_CONSENT_TEXT }}</span>
             </label>
 
             <div class="sign-field name-field">
               <label class="sign-field-label">Full Name</label>
               <input
-                v-model="signatureText" type="text" class="sign-input"
-                placeholder="Type your full name" :disabled="!agreed"
-                @focus="nameDropOpen = true"
-                @blur="window.setTimeout(() => nameDropOpen = false, 200)"
+                v-model="state.signatureText" type="text" class="sign-input"
+                placeholder="Type your full name" :disabled="!state.agreed"
+                @focus="state.nameDropOpen = true"
+                @blur="closeNameDropSoon"
               />
-              <div v-if="nameDropOpen && agreed && filteredNames.length" class="name-dropdown">
+              <div v-if="state.nameDropOpen && state.agreed && filteredNames.length" class="name-dropdown">
                 <div
                   v-for="name in filteredNames" :key="name" class="name-option"
-                  @mousedown.prevent="signatureText = name; nameDropOpen = false"
+                  @mousedown.prevent="pickName(name)"
                 >{{ name }}</div>
               </div>
             </div>
@@ -47,14 +47,27 @@
             <div class="sign-field">
               <label class="sign-field-label">
                 Draw your signature
-                <button v-if="hasDrawn" class="canvas-clear" @click="clearCanvas">Clear</button>
+                <button v-if="state.hasDrawn" class="canvas-clear" @click="clearCanvas">Clear</button>
               </label>
-              <div class="canvas-wrapper" :class="{ disabled: !agreed }">
-                <canvas ref="canvasRef" class="sig-canvas" @pointerdown="startDraw" @pointermove="draw" @pointerup="endDraw" @pointerleave="endDraw"></canvas>
+              <div class="canvas-wrapper" :class="{ disabled: !state.agreed }">
+                <!-- `pointercancel` is NOT optional here, and `pointerleave` does not
+                     cover it: startDraw() calls setPointerCapture, and a captured
+                     pointer cannot leave the element, so once a stroke has begun
+                     pointerleave never fires. The browser cancels a gesture on its
+                     own (a touch reinterpreted as a scroll, a system gesture, an
+                     incoming call), and that path emits pointercancel and nothing
+                     else — so without this binding the stroke never ends and
+                     `isDrawing` stays true. Same terminator on both, exactly as
+                     ZoomableImage.vue / PdfZoomViewer.vue bind theirs. -->
+                <canvas
+                  ref="canvasRef" class="sig-canvas"
+                  @pointerdown="startDraw" @pointermove="draw"
+                  @pointerup="endDraw" @pointerleave="endDraw" @pointercancel="endDraw"
+                ></canvas>
               </div>
             </div>
 
-            <button class="sign-btn" :disabled="!agreed || !signatureText.trim() || !hasDrawn" @click="handleSign">
+            <button class="sign-btn" :disabled="!state.agreed || !state.signatureText.trim() || !state.hasDrawn" @click="handleSign">
               Sign Document
             </button>
           </div>
@@ -84,29 +97,89 @@ const props = defineProps({
 })
 const emit = defineEmits(['close', 'signed'])
 
-const agreed = ref(false)
-const signatureText = ref('')
+// Template ref only — a DOM handle, not signer state. It stays outside
+// blankState() because <script setup> binds `ref="canvasRef"` by matching the
+// variable NAME, and because the v-if below repopulates it on every open.
 const canvasRef = ref(null)
-const isDrawing = ref(false)
-const hasDrawn = ref(false)
-const nameDropOpen = ref(false)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ONE object holds every piece of state an investor puts into this modal, and
+// resetting it is ONE assignment. Same shape as DrugTestUpload.vue and the
+// driver's DocumentSignModal.vue, for the same reason: the root element below is
+// `v-if`'d but the COMPONENT is mounted unconditionally by InvestorApplyView, so
+// the instance never unmounts and whatever is left here is armed the next time
+// it opens — on the next legal document, and potentially for a different signer.
+//
+// The hand-written reset this replaces listed three fields and omitted
+// `isDrawing`, which is the entire gate `draw()` checks. A stroke the browser
+// cancelled (see the pointercancel note in the template) left it true forever,
+// so on the NEXT open the first pointer move across the canvas drew a stroke
+// with no pointerdown — an unintended mark flattened into a signed PDF and
+// stored as a legal record. It also omitted `nameDropOpen`. A field added to
+// blankState() is cleared for free; a field added to a list of assignments is
+// the next field somebody forgets.
+// ─────────────────────────────────────────────────────────────────────────────
+function blankState() {
+  return {
+    agreed: false,        // consent checkbox; transmitted, not just enforced
+    signatureText: '',
+    isDrawing: false,     // ⚠️ the gate draw() checks — must reset with the rest
+    hasDrawn: false,      // arms the Sign button and the Clear link
+    nameDropOpen: false,  // the suggested-names dropdown
+  }
+}
+
+const state = ref(blankState())
 
 const filteredNames = computed(() => {
-  const q = signatureText.value.toLowerCase()
+  const q = state.value.signatureText.toLowerCase()
   const names = props.suggestedNames.filter(n => n)
   if (!q) return names
   return names.filter(n => n.toLowerCase().includes(q))
 })
 
+// Reset on BOTH edges of `show`. Opening inherits nothing (that is what stops
+// the stray mark); closing releases the typed name rather than leaving one
+// investor's details behind a modal nobody has open.
+//
+// `immediate` is load-bearing the day anyone adds `v-if="showSignModal"` to the
+// call site in InvestorApplyView (belt and braces against this component being
+// mounted forever, and a sensible thing to want). That mounts the component with
+// `show` ALREADY true, so a non-immediate watcher never fires at all and
+// initCanvas() never runs — measured: canvas.width stays 0 and the context keeps
+// its default stroke, i.e. toDataURL() hands the server a blank signature for a
+// document the signer watched themselves sign. It is a no-op today: on mount
+// `show` is false, so the callback rebuilds the (already blank) state and returns.
 watch(() => props.show, async (v) => {
-  if (v) {
-    agreed.value = false
-    signatureText.value = ''
-    hasDrawn.value = false
-    await nextTick()
-    initCanvas()
-  }
-})
+  state.value = blankState()
+  if (!v) return
+  await nextTick()
+  initCanvas()
+}, { immediate: true })
+
+// ⚠️ This ran as an inline template expression, `window.setTimeout(...)`, and
+// it THREW on every blur. `window` is not one of the globals Vue allows in a
+// template expression, so the compiler emits `_ctx.window` — which resolves to
+// undefined, because a <script setup> component exposes no setup bindings on
+// that proxy and nothing here registers a `window` global property. Every blur
+// of this field raised `TypeError: Cannot read properties of undefined
+// (reading 'setTimeout')` and the dropdown never closed, which is also how a
+// stale `nameDropOpen` came to be visible in the first place. In a module the
+// bare global is simply in scope, matching the other 26 timers in client/src.
+// The delay is unchanged: it lets a mousedown on an option land before the list
+// closes. `s` is captured so a timer that fires after a close writes to the
+// orphaned state object rather than the form now on screen.
+let nameDropTimer = null
+function closeNameDropSoon() {
+  const s = state.value
+  clearTimeout(nameDropTimer)
+  nameDropTimer = setTimeout(() => { s.nameDropOpen = false }, 200)
+}
+
+function pickName(name) {
+  state.value.signatureText = name
+  state.value.nameDropOpen = false
+}
 
 function initCanvas() {
   const canvas = canvasRef.value
@@ -129,8 +202,8 @@ function getPos(e) {
 }
 
 function startDraw(e) {
-  if (!agreed.value) return
-  isDrawing.value = true
+  if (!state.value.agreed) return
+  state.value.isDrawing = true
   const ctx = canvasRef.value.getContext('2d')
   const pos = getPos(e)
   ctx.beginPath()
@@ -139,27 +212,28 @@ function startDraw(e) {
 }
 
 function draw(e) {
-  if (!isDrawing.value) return
+  if (!state.value.isDrawing) return
   const ctx = canvasRef.value.getContext('2d')
   const pos = getPos(e)
   ctx.lineTo(pos.x, pos.y)
   ctx.stroke()
-  hasDrawn.value = true
+  state.value.hasDrawn = true
 }
 
-function endDraw() { isDrawing.value = false }
-function clearCanvas() { hasDrawn.value = false; initCanvas() }
+// The one terminator, bound to pointerup, pointerleave AND pointercancel.
+function endDraw() { state.value.isDrawing = false }
+function clearCanvas() { state.value.hasDrawn = false; initCanvas() }
 
 function handleSign() {
   const signatureImage = canvasRef.value?.toDataURL('image/png') || null
   emit('signed', {
     docKey: props.doc.doc_key,
-    text: signatureText.value.trim(),
+    text: state.value.signatureText.trim(),
     image: signatureImage,
     // Carried per document, not once for the whole application: the investor
     // ticks this box separately for the master agreement, the lease and the
     // W-9, and one blanket flag would assert three agreements from one act.
-    consent: buildConsent(agreed.value),
+    consent: buildConsent(state.value.agreed),
   })
 }
 </script>

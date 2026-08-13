@@ -19,7 +19,12 @@
 // OBSERVATION; the two that have a write path (regenerate a signed document)
 // name it explicitly, and the rest are read-only by construction.
 
-import { toNum, asList, lockState, monthLabel, queueCounts } from './fuelReview'
+// The extension is explicit so this module can be imported by bare Node (the
+// verification scripts) as well as by Vite. Vite resolves both forms; Node ESM
+// resolves only this one, and an extensionless specifier fails with
+// ERR_MODULE_NOT_FOUND before a single assertion runs. fuelReview.js itself
+// imports nothing, so the fix stops here rather than cascading.
+import { toNum, asList, lockState, monthLabel, queueCounts } from './fuelReview.js'
 
 export { toNum, asList, lockState, monthLabel, queueCounts }
 
@@ -180,9 +185,22 @@ export function queueErrorText(st) {
 /**
  * A candidate double-booking.
  *
- * ⚠️ READ-ONLY BY CONSTRUCTION. duplicateReceiptGroups() has no write path —
- * no void, no merge, no delete — so this normalizer deliberately exposes no
- * mutation affordance. The only action a row earns is "go look at the expense".
+ * ⚠️ THERE IS A VOID PATH NOW, AND IT REUSES THE EXISTING MECHANISM RATHER THAN
+ * INVENTING ONE. A copy is voided by REJECTING it —
+ * `PUT /api/expenses/bulk-status` with `status: 'Rejected'` — because that is
+ * already what "this receipt is not spend" means everywhere else in the app:
+ * `EXPENSE_PNL_FILTER` drops a Rejected row from every P&L, and the duplicate
+ * detector itself runs under that same filter. So one reject removes the copy
+ * from the investor portal AND from future duplicate matching, with no second
+ * concept to keep in sync. Nothing is deleted: the row keeps its id, its
+ * receipt image and its history, and setting the status back restores it.
+ *
+ * ⚠️ THE GROUP HAS NO CANONICAL ORIGINAL, which is why this normalizer still
+ * exposes no "the copy". Truck+day+amount is the whole key; neither row is
+ * marked as the first, and `id` order is insertion order, not truth. A human
+ * picks. The two rules that follow from that are in voidableRows() and
+ * voidSelectionCheck(): nothing is selected by default, and one copy always has
+ * to survive.
  *
  * ⚠️ THE LOCK IS PER ROW, NOT PER GROUP. A truck-day-amount group can hold one
  * receipt in an open month and one in a finalized month, and three of the five
@@ -326,6 +344,315 @@ export function duplicateSummary(payload) {
 export function duplicateRowCounts(groups) {
   const all = asList(groups).flatMap((g) => asList(g.rows))
   return queueCounts(all)
+}
+
+// ---------------------------------------------------------------------------
+// 1a. Voiding a copy  (PUT /api/expenses/bulk-status, status 'Rejected')
+// ---------------------------------------------------------------------------
+
+/**
+ * The status that voids a receipt. Not a delete, and deliberately the same word
+ * the Expenses screen uses — one vocabulary for "this is not spend".
+ */
+export const VOID_STATUS = 'Rejected'
+
+/**
+ * May this ROW be offered for voiding?
+ *
+ * ⚠️ `locked === true` IS THE ONLY REFUSAL, and it is a refusal about the
+ * BUTTON, not about the server. bulk-status does not 409 on a finalized row —
+ * it withholds it, counts it into `skippedFinalized`, and returns 200. So
+ * offering a checkbox here would not produce an error a reader could act on; it
+ * would produce a click that silently did nothing, which is the same dead end
+ * as a button that always fails, only quieter.
+ *
+ * `locked === null` ("this server didn't say") stays selectable, exactly as
+ * lockState() specifies: that is how this queue behaved before locks existed,
+ * and it is the server's job to withhold the row if it turns out to be closed.
+ * Treating "didn't say" as locked would disable the whole feature the moment it
+ * met an older server.
+ */
+export function rowVoidable(row) {
+  return Boolean(row) && row.locked !== true
+}
+
+/**
+ * The rows in a group a human may actually choose from.
+ *
+ * ⚠️ TWO GATES, CHECKED INDEPENDENTLY THOUGH THEY AGREE TODAY. The group gate
+ * (`remedy === 'open'`) and the row gate (`locked !== true`) are currently
+ * equivalent by construction — duplicateRemedy() returns anything other than
+ * 'open' only when `counts.actionable === 0`, i.e. when every row is already
+ * locked, so a settled group has no unlocked rows to offer anyway. The group
+ * gate is kept explicit precisely because that equivalence is an accident of
+ * how duplicateRemedy() is written: the day it stops keying on `allClosed`, a
+ * paid month must not silently acquire a set of checkboxes.
+ */
+export function voidableRows(group) {
+  if (!group || group.remedy !== 'open') return []
+  return asList(group.rows).filter(rowVoidable)
+}
+
+/**
+ * Why this group offers no void, in the reader's terms. '' when it does.
+ *
+ * Same shape and same job as regenerateBlockedReason(): the page must never
+ * render a control whose only possible outcome is nothing happening. Each
+ * branch names the remedy that DOES apply, because "you can't do it here" on
+ * its own is what made this page read as a dead end in the first place.
+ *
+ * ⚠️ 'correctable' IS A REFUSAL, NOT AN OVERSIGHT. That month is finalized with
+ * its payout still owed, so the money is genuinely recoverable — but recovering
+ * it means reopening a closed month, which restates a period and belongs on the
+ * Payouts console with its required reason and its audit row. Offering it from
+ * a data-hygiene page would let a cleanup click reopen a settlement.
+ */
+export function voidBlockedReason(group) {
+  if (!group) return 'Nothing to void.'
+  const month = group.period || 'This month'
+  if (group.remedy === 'open') {
+    // The empty branch is unreachable against today's server — 'open' means at
+    // least one row is unlocked — and it is kept because this function is what
+    // guarantees the page never shows a group with neither a control nor a
+    // reason. That invariant should not depend on two definitions agreeing.
+    return voidableRows(group).length ? '' : 'No copy in this group is in an open month.'
+  }
+  if (group.remedy === 'correctable') {
+    return `${month} is finalized, but its payout has not been sent — no money has moved, so this is still recoverable. `
+      + 'Reopen the month in Payouts first; voiding a receipt is not something to do from here while the period is closed.'
+  }
+  if (group.remedy === 'settled') {
+    return `${month} is finalized and its payout has already gone out. Voiding the copy now would not change what was sent — `
+      + 'the correction is a payout adjustment, which is a decision rather than a cleanup.'
+  }
+  return `${month} is finalized and its settlement state could not be read, so it is treated as already settled. `
+    + 'Check the payout for that month before doing anything here.'
+}
+
+/**
+ * Is this selection safe to send, and if not, why?
+ *
+ * ⚠️ ONE COPY ALWAYS SURVIVES, AND THIS IS THE RULE THAT COSTS MONEY IF IT
+ * GOES. Read the sign carefully: a duplicate EXPENSE depresses net profit and
+ * therefore UNDERPAYS the investor, so voiding the extra copy pays them more.
+ * Voiding EVERY copy overshoots — it removes a purchase that really happened,
+ * which overstates profit and OVERPAYS. That is the one direction in this whole
+ * queue that takes money from someone, and it is two clicks away from the
+ * correct action. It also deletes the gallons behind the fuel figures.
+ *
+ * "What survives" is exactly "rows not selected": the detector runs under
+ * EXPENSE_PNL_FILTER, so every row in a group is a live, non-rejected expense —
+ * including a locked one, which cannot be selected but is still on the books
+ * and still counts as the surviving copy.
+ *
+ * If the whole purchase really is bogus, that is a different action on a
+ * different screen (reject it in Expenses), and this says so rather than
+ * quietly clamping the selection.
+ */
+export function voidSelectionCheck(group, selectedIds) {
+  const eligible = voidableRows(group)
+  const wanted = new Set(asList(selectedIds).map((v) => String(v)))
+  const rows = eligible.filter((r) => wanted.has(String(r.id)))
+  const total = asList(group?.rows).length
+  const keeps = total - rows.length
+
+  if (!rows.length) {
+    return { ok: false, rows, keeps, reason: 'Pick which copy to reject — nothing is selected.' }
+  }
+  if (keeps < 1) {
+    return {
+      ok: false,
+      rows,
+      keeps,
+      reason: 'That would reject every copy, which removes a purchase that really happened. '
+        + 'Leave one on the books. If the whole receipt is bogus, reject it in Expenses instead.',
+    }
+  }
+  return { ok: true, rows, keeps, reason: '' }
+}
+
+/** "#141, #142" — the ids, spelled out, for a confirmation that must be exact. */
+export function voidIdList(rows) {
+  return asList(rows).map((r) => `#${r.id}`).join(', ')
+}
+
+/** Ids, plural noun and total for the confirmation's opening line. */
+function voidHeadline(group, rows, m) {
+  const n = rows.length
+  const total = rows.reduce((s, r) => s + (r.amount ?? 0), 0)
+  return `Rejecting ${voidIdList(rows)} — ${n} receipt${n === 1 ? '' : 's'} `
+    + `on ${group?.truckUnit || group?.driver || 'this truck'}, ${m(total)} in total:`
+}
+
+/**
+ * The confirmation text. Names every id and every amount, on purpose.
+ *
+ * A confirm that says "reject 2 receipts?" is not a confirmation of anything —
+ * the operator has already stopped reading the table by the time they reach it,
+ * and this is a live financial row. So the dialog restates what is about to be
+ * voided (id, date, vendor, amount, each on its own line), what survives, and
+ * how to undo it. ConfirmModal renders `white-space: pre-line`, so the newlines
+ * here are real; the cancel-load confirm composes its load/route/payment summary
+ * the same way and for the same reason.
+ *
+ * The ids appear TWICE — once in the opening line and once per detail row — so
+ * that someone who reads only the first sentence still sees which receipts they
+ * are about to void. Redundancy is cheap; voiding the wrong row is not.
+ */
+export function voidConfirmMessage(group, rows, fmtMoney) {
+  const list = asList(rows)
+  const m = typeof fmtMoney === 'function' ? fmtMoney : (v) => `$${Number(v ?? 0).toFixed(2)}`
+  const keeps = asList(group?.rows).length - list.length
+  const lines = list.map((r) => {
+    const bits = [`#${r.id}`, r.localDay || '', r.vendor || '', m(r.amount)].filter(Boolean)
+    return `  · ${bits.join('  ·  ')}`
+  })
+  return [
+    voidHeadline(group, list, m),
+    lines.join('\n'),
+    `${keeps} cop${keeps === 1 ? 'y' : 'ies'} stays on the books, so the purchase itself is still counted.`,
+    'A rejected receipt leaves the P&L and the investor portal and stops matching as a duplicate. '
+      + 'Nothing is deleted — the row and its receipt image stay, and setting the status back restores it.',
+  ].join('\n\n')
+}
+
+/**
+ * The optional note that rides along with the void.
+ *
+ * ⚠️ THIS PAGE'S COPY USED TO SAY THERE WAS NO SUCH RECORD, AND IT WAS RIGHT AT
+ * THE TIME. `PUT /api/expenses/bulk-status` accepted no reason and wrote no
+ * audit row, so the confirm collected an acknowledgement instead — a field
+ * implying a stored note that did not exist is exactly the overclaim this page
+ * exists to avoid. The endpoint now does both: it writes ONE `audit_trail` row
+ * per call (`bulk_update_expense_status`, carrying the account, the time, the
+ * target status and the full id list) and appends `— reason: <text>` to it when
+ * a reason is sent. So the honesty problem inverted, and the copy had to move.
+ *
+ * ⚠️ OPTIONAL, MIRRORING THE SERVER. `expenseStatusReason()` reads `body.reason`
+ * if it is a string and the route works identically without it — there is no
+ * 400 to mirror, unlike `POST /api/dispatch/cancel`'s CANCEL_REASON_REQUIRED,
+ * which is what makes the cancel-load confirm's required field a real contract
+ * rather than a local rule. A client-side-only requirement here would be
+ * unenforced: ExpensesTab's bulk approve/reject and any curl reach the same
+ * endpoint and still write reasonless rows, so a reader of `audit_trail` could
+ * not tell "no reason given" from "sent by a caller that never asks". The
+ * acknowledgement remains the gate on intent; this only records the part a
+ * human can add that the ids cannot.
+ */
+export const VOID_REASON_MAX = 300
+
+/**
+ * Client-side mirror of the server's `expenseStatusReason()` — collapse the
+ * characters that would break a one-line audit detail, trim, cap.
+ *
+ * The trailing trim is NOT in the server's version and is deliberate: it makes
+ * the output a FIXED POINT of the server transform, so what a character counter
+ * shows is byte-for-byte what gets stored. Without it a cut landing just after a
+ * space would send 300 characters and store 299, and the page would be
+ * misreporting its own write by one — small, but this is the page that promises
+ * it never claims more than happened.
+ */
+export function normalizeVoidReason(raw) {
+  return String(raw ?? '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .trim()
+    .slice(0, VOID_REASON_MAX)
+    .trim()
+}
+
+/**
+ * The exact PUT body.
+ *
+ * ⚠️ `reason` IS OMITTED WHEN BLANK, never sent as `''`. The server's normalizer
+ * treats both the same today, but an absent key and an empty string are
+ * different claims — the first says nothing was written, the second says an
+ * empty note was. Same absent-vs-empty rule the queues run on, applied to the
+ * request side.
+ *
+ * `ids` and `status` are untouched, so an older server that ignores the extra
+ * key gets byte-identical behaviour to before.
+ */
+export function voidRequestBody(ids, reason) {
+  const body = { ids: asList(ids), status: VOID_STATUS }
+  const note = normalizeVoidReason(reason)
+  if (note) body.reason = note
+  return body
+}
+
+/**
+ * What the server actually did. SERVER-TOLD ONLY.
+ *
+ * ⚠️ THE RESPONSE SAYS HOW MANY ROWS WERE WITHHELD, NEVER WHICH, and the gap
+ * cannot be closed from here. Matching each row's date against
+ * `finalizedPeriods` is the obvious inference and it is WRONG:
+ * `expenses.posted_period` books a receipt whose own month is closed into the
+ * current open one, so a row dated 2026-05 can be perfectly editable while its
+ * date says otherwise — a live example sits in this data. That is why the
+ * caller re-reads the queue instead of patching rows optimistically, and why
+ * this function reports counts rather than marking rows.
+ *
+ * ⚠️ AN ABSENT `updated` IS NOT `updated: 0`. A server predating that field
+ * answered 200 only when it had written everything, so absent falls back to the
+ * number attempted — the same absent-vs-empty rule the queues use. Reading it
+ * as zero would report a completely successful void as a total failure.
+ *
+ * `periods` is whatever the server named and is deliberately empty when
+ * `periodLockUnreadable` is set: in that case those months are UNKNOWN, not
+ * closed, and printing them as finalized would report a month-end that never
+ * happened.
+ */
+export function summarizeVoidResult(resp, attempted) {
+  const n = toNum(attempted) ?? 0
+  const reported = toNum(resp?.updated)
+  const updated = reported === null ? n : reported
+  const withheld = toNum(resp?.skippedFinalized) ?? 0
+  const missing = toNum(resp?.skipped) ?? 0
+  const lockUnreadable = resp?.periodLockUnreadable === true
+  const periods = lockUnreadable ? [] : asList(resp?.finalizedPeriods).map((p) => String(p)).filter(Boolean)
+  return {
+    attempted: n,
+    updated,
+    withheld,
+    missing,
+    lockUnreadable,
+    periods: [...new Set(periods)].sort(),
+    complete: updated >= n && withheld === 0 && missing === 0,
+    // A withheld row will be withheld again for the same reason, so retrying is
+    // only the fix when the lock table itself could not be read.
+    retryable: lockUnreadable,
+  }
+}
+
+/** "May 2026", "May 2026 and June 2026", "April 2026, May 2026 and June 2026". */
+export function periodList(periods) {
+  const names = asList(periods).map((p) => monthLabel(p) || p).filter(Boolean)
+  if (names.length <= 1) return names[0] || ''
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+}
+
+/**
+ * The outcome sentence. Never "done" unless everything landed.
+ *
+ * The failure this guards is the one ExpensesTab's bulk approve shipped with:
+ * a partial write reported as a complete one. Here the stakes are the same in
+ * reverse — an operator who believes a copy was voided stops looking for it.
+ */
+export function voidResultText(res) {
+  if (!res) return ''
+  const n = res.updated
+  const rejected = `${n} receipt${n === 1 ? '' : 's'} rejected`
+  if (res.complete) return `${rejected}.`
+  const tail = []
+  if (res.withheld) {
+    tail.push(res.lockUnreadable
+      ? `${res.withheld} could not be touched — the period lock table could not be read, so no month could be confirmed open`
+      : `${res.withheld} withheld — ${periodList(res.periods) || 'that month'} ${res.periods.length === 1 ? 'is' : 'are'} finalized`)
+  }
+  if (res.missing) tail.push(`${res.missing} no longer exist${res.missing === 1 ? 's' : ''}`)
+  if (!tail.length && res.updated < res.attempted) {
+    tail.push(`${res.attempted - res.updated} unchanged, and the server did not say why`)
+  }
+  return `${rejected}. ${tail.join('; ')}.`
 }
 
 // ---------------------------------------------------------------------------

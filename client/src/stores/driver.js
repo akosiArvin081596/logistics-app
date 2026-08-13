@@ -398,7 +398,32 @@ export const useDriverStore = defineStore('driver', {
     },
 
     async submitExpense(data) {
-      await api.post('/api/expenses', data)
+      const res = await api.post('/api/expenses', {
+        ...data,
+        // ⚠️ THERE IS NO OPT-IN KEY TO SEND, AND DELIBERATELY NO OPT-OUT ONE.
+        // The server runs the same-driver/day/amount content check
+        // UNCONDITIONALLY — `wantsDuplicateCheck = req.body?.allowDuplicate !== true`
+        // — and accepts-then-ignores `checkDuplicate`, so that a second, silent
+        // door around the guard cannot reappear (locked by
+        // scripts/test-duplicate-guard.js, "no silent opt-out door").
+        //
+        // A `checkDuplicate: true` used to sit here, and its comment said to take
+        // it back out if this surface ever stopped surviving a 409. That
+        // instruction was actively harmful: removing the key changes nothing, so
+        // following it would leave an engineer believing they had disarmed the
+        // check while drivers kept hitting an unhandled 409.
+        //
+        // What this surface owes is 409 SURVIVAL, not a flag: ExpenseForm keeps
+        // the photo and every typed field on POSSIBLE_DUPLICATE and asks. If that
+        // ever regresses, the fix is in the FORM — there is nothing to turn off
+        // here.
+        //
+        // The conscious override, set ONLY by the driver answering "these are two
+        // separate purchases". Normalised to a strict boolean because the server
+        // tests `=== true`, so a stray truthy value must never read as consent.
+        // It is the one override, and it is audited (`expense_duplicate_override`).
+        allowDuplicate: data?.allowDuplicate === true,
+      })
       // The expense is saved at this point. A failing refresh must NOT surface
       // as a failing submit: the form now keeps the driver's entry on error and
       // invites a retry, and POST /api/expenses is not idempotent — so letting
@@ -409,6 +434,14 @@ export const useDriverStore = defineStore('driver', {
       } catch {
         // Deliberately swallowed — see above.
       }
+      // Returned, not discarded: the response is the ONLY place the server says
+      // it booked the money to a different month than the receipt's own date
+      // (postedPeriod / naturalPeriod / periodClosed). Every month through
+      // 2026-07 is locked, so that redirect is the common case, and the driver
+      // app was the one surface that never mentioned it.
+      // ⚠️ Captured BEFORE loadData() deliberately — the refresh is best-effort
+      // and swallows its own errors, so it must not be able to lose the receipt.
+      return res
     },
 
     async markNotificationsRead(ids) {

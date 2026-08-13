@@ -13,8 +13,14 @@
       <span class="route-text">{{ route }}</span>
     </div>
 
-    <!-- TEMP — phone-GPS banner for the test load. Goes away with the rest
-         of the temp block in DriverView when testing wraps. -->
+    <!-- Phone-GPS outcome. Shown ONLY on the load whose Navigate button was
+         actually tapped — DriverView folds that match into `phoneGpsModeActive`,
+         because the status behind it is a module singleton and would otherwise
+         follow the driver onto every load for the rest of the session.
+         ⚠️ INFORMATIONAL, NEVER AN ERROR. Phone GPS only sharpens the moving map
+         and the voice directions; ELD telemetry remains the sole source for
+         tracking, driver pay and geofencing. A driver who declines it has broken
+         nothing, so neither the wording nor the colour may imply otherwise. -->
     <div v-if="phoneGpsModeActive && phoneGpsStatus !== 'active'" class="phone-gps-banner" :class="bannerClass">
       <div class="phone-gps-text">
         <strong>{{ bannerTitle }}</strong>
@@ -265,8 +271,10 @@ const props = defineProps({
   // shows the reason — same behaviour as the standalone Expenses tab. Falls
   // back to the `expense-submit` emit when not supplied.
   expenseSubmitHandler: { type: Function, default: null },
-  // TEMP — phone-GPS-for-test-load wiring. Removed alongside the temp block
-  // in DriverView when CEO testing is done.
+  // Phone-GPS banner wiring. `phoneGpsModeActive` is NOT merely "is a status
+  // set" — DriverView also requires that the status belongs to THIS load, i.e.
+  // that Navigate was tapped here. Passing a bare status test from a future
+  // caller resurrects a session-long banner on every load.
   phoneGpsModeActive: { type: Boolean, default: false },
   phoneGpsStatus: { type: String, default: '' },
 })
@@ -301,27 +309,37 @@ const fuelBadge = computed(() => {
   return null
 })
 
-// TEMP — banner text/styling for the phone-GPS-for-test-load flow.
+// Banner text + styling.
+//
+// ⚠️ THE COPY IS DELIBERATELY UN-ALARMING, AND THAT IS THE POINT OF IT. This
+// used to read "GPS permission denied — Re-enable location in Chrome site
+// settings", in red, which described a broken app. It is not: phone GPS was
+// demoted to a display-and-voice nicety when phone position reporting was
+// retired, so a driver who declines it still has a live truck pin, a tracked
+// load, correct pay and working geofences — everything except turn-by-turn on
+// this handset. Every message therefore says what is still working before it
+// says what is not, and no state renders red.
 const bannerTitle = computed(() => {
   switch (props.phoneGpsStatus) {
-    case 'requesting': return 'Requesting GPS permission…'
-    case 'denied': return 'GPS permission denied'
-    case 'error': return 'GPS error'
-    case 'unavailable': return 'GPS unavailable'
-    default: return 'This load uses phone GPS'
+    case 'requesting': return 'Waiting for location permission…'
+    case 'denied': return 'Phone location is off'
+    case 'error': return 'No phone location right now'
+    case 'unavailable': return 'This browser has no location access'
+    default: return 'Turn on phone location for navigation'
   }
 })
 const bannerMessage = computed(() => {
   switch (props.phoneGpsStatus) {
-    case 'requesting': return 'Allow location access in the browser prompt.'
-    case 'denied': return 'Re-enable location in Chrome site settings, then tap Try Again.'
-    case 'error': return 'Couldn’t get a fix. Check that location services are on.'
-    case 'unavailable': return 'This browser does not expose geolocation.'
-    default: return 'Tap Enable GPS to show your live truck pin and turn-by-turn guidance.'
+    case 'requesting': return 'Allow location to get turn-by-turn guidance on this phone. Your truck is tracked either way.'
+    case 'denied': return 'Turn-by-turn guidance uses it. Your truck is still tracked by its ELD, so dispatch sees you and your pay is unaffected. To use it, re-enable location in your browser settings and tap Try Again.'
+    case 'error': return 'Turn-by-turn guidance is paused for now. The map still follows your truck’s ELD position.'
+    case 'unavailable': return 'Turn-by-turn guidance isn’t available in this browser. The map still follows your truck’s ELD position.'
+    default: return 'It sharpens the moving map and the spoken directions. Your truck’s position still comes from the ELD.'
   }
 })
 const bannerClass = computed(() => {
-  if (props.phoneGpsStatus === 'denied' || props.phoneGpsStatus === 'error' || props.phoneGpsStatus === 'unavailable') return 'phone-gps-banner-error'
+  // No red state. See the note above — the loudest this gets is "worth a tap".
+  if (props.phoneGpsStatus === 'denied' || props.phoneGpsStatus === 'error' || props.phoneGpsStatus === 'unavailable') return 'phone-gps-banner-notice'
   if (props.phoneGpsStatus === 'requesting') return 'phone-gps-banner-pending'
   return 'phone-gps-banner-info'
 })
@@ -637,7 +655,10 @@ const dropoffFields = computed(() => {
 .expense-history { margin-top: 0.75rem; }
 .expense-history-label { font-size: 0.72rem; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--border, #e5e7eb); }
 
-/* TEMP — phone-GPS banner. Removed with the rest of the test-load wiring. */
+/* Phone-GPS banner. Informational only — see the note beside bannerTitle.
+   There is deliberately NO red variant: this banner reports an optional
+   navigation convenience, and red here reads as "your load isn't being
+   tracked", which is never true. */
 .phone-gps-banner {
   display: flex;
   align-items: center;
@@ -675,10 +696,12 @@ const dropoffFields = computed(() => {
   color: #854d0e;
   border: 1px solid #fde68a;
 }
-.phone-gps-banner-error {
-  background: #fef2f2;
-  color: #991b1b;
-  border: 1px solid #fecaca;
+/* Replaced the old red `-error` variant. Slate, not red: nothing is failing —
+   the driver simply hasn't granted an optional permission. */
+.phone-gps-banner-notice {
+  background: #f8fafc;
+  color: #334155;
+  border: 1px solid #cbd5e1;
 }
-.phone-gps-banner-error .phone-gps-btn { background: #dc2626; color: #fff; }
+.phone-gps-banner-notice .phone-gps-btn { background: #475569; color: #fff; }
 </style>

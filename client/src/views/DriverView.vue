@@ -387,6 +387,7 @@ import { useDriverStore } from '../stores/driver'
 import { useSocket } from '../composables/useSocket'
 import { useToast } from '../composables/useToast'
 import { useApi } from '../composables/useApi'
+import { useDriverPosition } from '../composables/useDriverPosition'
 
 import DriverHeader from '../components/driver/DriverHeader.vue'
 import BottomNav from '../components/driver/BottomNav.vue'
@@ -468,38 +469,47 @@ const retryingInitialLoad = ref(false)
 let socketSetupDone = false
 let isMounted = false
 
-// Driver's own live position, sourced from the Routemate ELD telemetry feed
-// (/api/locations/latest). Phone-GPS was retired 2026-05-13, so this is now
-// the only thing that puts a truck pin on the driver's Load Route Map. Stays
-// null when the truck has no linked ELD or the ELD is offline — the map
-// component handles that case by rendering the route without a pin.
-const driverPosition = ref(null)
-let positionPollTimer = null
-const POSITION_POLL_INTERVAL_MS = 30000
-
-async function fetchDriverPosition() {
-  if (!driverName.value) return
-  // Phone GPS owns driverPosition while the temp test-load watcher is armed
-  // (see TEMP block below). Without this guard the 30 s ELD poll returns null
-  // for the unlinked truck and wipes out the phone fix between updates.
-  if (phoneGpsWatcherId !== null) return
-  try {
-    const data = await api.get('/api/locations/latest')
-    const dn = driverName.value.toLowerCase()
-    const l = (data?.locations || []).find(
-      (x) => (x.driver || '').toLowerCase() === dn && x.latitude != null,
-    )
-    driverPosition.value = l
-      ? {
-          latitude: l.latitude,
-          longitude: l.longitude,
-          source: l.source || '',
-          lastPingAge: l.lastPingAge != null ? l.lastPingAge : null,
-        }
-      : null
-  } catch {
-    // Silent — the map falls back to a no-pin state on its own.
-  }
+// ─── Driver's own live position ───────────────────────────────────────────────
+// Owned by useDriverPosition(), which resolves phone GPS vs ELD telemetry by
+// FRESHNESS on a ticking clock rather than by a latch. See that file's header
+// for the whole story; the short version is that the previous guard here —
+// `if (phoneGpsWatcherId !== null) return`, repeated in the socket handler —
+// was binary on whether a watcher had ever been INSTALLED. A driver locking
+// their phone freezes the page: watchPosition stops delivering, the watcher id
+// stays non-null, and so both the 30 s poll and the live socket fan-out were
+// discarded forever while the truck pin sat frozen on the last phone fix. The
+// map looked healthy the entire time.
+//
+// ⚠️ PHONE GPS IS FOR NAVIGATION DISPLAY ONLY AND IS NEVER POSTED. Nothing here
+// writes a position anywhere. `POST /api/location` is a 410 Gone stub and ELD
+// telemetry remains the sole source for load tracking, driver-pay travel days
+// and geofence auto-status. This is not the retired reporting pipeline coming
+// back — do not turn it into one.
+const driverPos = useDriverPosition()
+const driverPosition = driverPos.position
+// LoadDetail's GPS banner. Narrowed to the statuses that component renders
+// sentences for; a phone fix that has merely gone stale maps to '' because the
+// ELD has silently taken over and Drive Mode says so itself.
+const phoneGpsStatus = driverPos.bannerStatus
+// ⚠️ THE STATUS ALONE IS NOT ENOUGH TO RENDER A BANNER, and this is the second
+// half of that gate. `bannerStatus` is a module SINGLETON now — the per-load ref
+// (and the watch(detailLoad) that reset it) went with the TEMP block — so on the
+// status test alone one declined permission prompt sat on top of EVERY load for
+// the rest of the session, in red, while the ELD supplied the truck pin
+// perfectly well and nothing whatsoever was wrong. Phone GPS is asked for per
+// load, by a Navigate tap; its outcome belongs to the load that asked.
+const phoneGpsLoadId = driverPos.phoneGpsLoadId
+const phoneGpsModeActive = computed(() => {
+  if (!['requesting', 'denied', 'error', 'unavailable'].includes(phoneGpsStatus.value)) return false
+  const scope = String(phoneGpsLoadId.value || '')
+  // An empty scope means nobody has tapped Navigate — never a banner.
+  return !!scope && scope === String(detailLoadId.value || '')
+})
+function enablePhoneGps() {
+  // Reached from LoadDetail's "Try Again" button — a real user gesture, which
+  // is what Safari requires before it will re-prompt for location. Re-stamps the
+  // scope onto the load currently open, which is the one being asked about.
+  driverPos.startPhoneGps()
 }
 
 
@@ -596,78 +606,19 @@ watch(detailLoadRaw, async (load) => {
   }
 }, { immediate: true })
 
-// ────────────────────────────────────────────────────────────────────────────
-// TEMP — Phone GPS fallback, scoped to one specific test load. Re-introduces
-// the path retired on 2026-05-13 (Routemate ELD became the sole position
-// source) so the CEO can validate the smart route guidance UI on a load
-// whose truck isn't ELD-linked yet. DELETE THIS BLOCK once testing is done.
-// No server round-trip — purely populates driverPosition locally for the map.
-const PHONE_GPS_TEST_LOAD_IDS = new Set(['LD-MP4W4LP1'])
-let phoneGpsWatcherId = null
-const phoneGpsModeActive = ref(false)
-const phoneGpsStatus = ref('')  // '' | 'requesting' | 'active' | 'denied' | 'error' | 'unavailable'
-function extractLoadId(load) {
-  if (!load) return ''
-  for (const k of Object.keys(load)) {
-    if (/load.?id|job.?id/i.test(k)) return (load[k] || '').toString().trim()
-  }
-  return ''
-}
-function stopPhoneGpsWatch() {
-  if (phoneGpsWatcherId !== null && navigator?.geolocation) {
-    navigator.geolocation.clearWatch(phoneGpsWatcherId)
-  }
-  phoneGpsWatcherId = null
-}
-function enablePhoneGps() {
-  if (!navigator?.geolocation) {
-    phoneGpsStatus.value = 'unavailable'
-    return
-  }
-  stopPhoneGpsWatch()
-  phoneGpsStatus.value = 'requesting'
-  phoneGpsWatcherId = navigator.geolocation.watchPosition(
-    (pos) => {
-      phoneGpsStatus.value = 'active'
-      driverPosition.value = {
-        latitude: pos.coords.latitude,
-        longitude: pos.coords.longitude,
-        // m/s and degrees-from-north; either may be null when stationary.
-        // DriveModeOverlay handles null gracefully (shows "--" for speed,
-        // holds last heading for camera rotation).
-        speed: Number.isFinite(pos.coords.speed) ? pos.coords.speed : null,
-        heading: Number.isFinite(pos.coords.heading) ? pos.coords.heading : null,
-        source: 'phone-test',
-        lastPingAge: 0,
-      }
-    },
-    (err) => {
-      // err.code: 1=PERMISSION_DENIED, 2=POSITION_UNAVAILABLE, 3=TIMEOUT
-      phoneGpsStatus.value = err && err.code === 1 ? 'denied' : 'error'
-      stopPhoneGpsWatch()
-    },
-    { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 },
-  )
-}
-watch(
-  () => detailLoad.value,
-  (load) => {
-    stopPhoneGpsWatch()
-    phoneGpsStatus.value = ''
-    phoneGpsModeActive.value = false
-    if (!load) return
-    if (!PHONE_GPS_TEST_LOAD_IDS.has(extractLoadId(load))) return
-    phoneGpsModeActive.value = true
-    // Auto-attempt: if the browser already has permission (granted earlier
-    // in the session), watchPosition succeeds immediately and the banner
-    // hides. If it fails (incognito strict mode or prior denial), the
-    // banner stays visible with a button that re-arms inside a guaranteed
-    // user-gesture click.
-    enablePhoneGps()
-  },
-)
-onUnmounted(() => { stopPhoneGpsWatch() })
-// ────────────────────────────────────────────────────────────────────────────
+// The TEMP phone-GPS block that used to sit here — a watcher hardcoded to load
+// `LD-MP4W4LP1`, whose own comment read "DELETE THIS BLOCK once testing is
+// done" — is gone. Precise position is no longer a per-load allowlist: any
+// driver gets it by tapping Navigate, which is also the user gesture iOS needs
+// for both geolocation and speech. See useDriverPosition.js / DriverRouteMap's
+// openNavMode().
+
+// The load whose detail page is open, named exactly as getLoadId() names it
+// everywhere else in this view. ONE derivation on purpose: this string is
+// compared against the one useDriverPosition stamps when Navigate is tapped
+// (start() below hands it this same getter), so two spellings of "which load"
+// would silently never match and the banner would never appear at all.
+const detailLoadId = computed(() => (detailLoad.value ? getLoadId(detailLoad.value) : ''))
 
 const driverMapHeaders = computed(() => {
   const h = [...(driverStore.headers.jobTracking || [])]
@@ -999,8 +950,15 @@ async function handleExpenseSubmit(data) {
   // renders the server's own reason beside the retry button — same contract as
   // handleSendMessage above. Swallowing it here is what produced "Failed to
   // submit expense" with no cause on a form that had already wiped itself.
-  await driverStore.submitExpense(data)
+  // ⚠️ RETURN the store's response, don't just await it. ExpenseForm reads
+  // `res.periodClosed` / `res.postedPeriod` to tell a driver that a receipt
+  // dated in a finalized month was booked to the current open month instead.
+  // This function is the single choke point for both driver surfaces
+  // (LoadDetail just forwards the prop), so swallowing the value here makes
+  // that note unreachable — and it fails closed, so it looks like nothing.
+  const res = await driverStore.submitExpense(data)
   toast.show('Expense submitted')
+  return res
 }
 
 // Socket.IO for real-time notifications
@@ -1113,20 +1071,16 @@ function onGeofenceTrigger(payload) {
 // poll remains as a safety net for the initial load and socket-reconnect.
 function onLocationUpdate(payload) {
   if (!isMounted) return
-  // Phone GPS owns driverPosition while the temp test-load watcher is armed.
-  // Ignore Routemate fan-outs in that window so the phone fix isn't displaced
-  // by stale or off-truck telemetry.
-  if (phoneGpsWatcherId !== null) return
   if (!payload || payload.latitude == null || payload.longitude == null) return
   const me = (driverName.value || '').toLowerCase()
   const who = (payload.driver || '').toLowerCase()
   if (!me || who !== me) return
-  driverPosition.value = {
-    latitude: payload.latitude,
-    longitude: payload.longitude,
-    source: payload.source || 'routemate',
-    lastPingAge: 0,
-  }
+  // Always store the ELD fix. It is the composable that decides whether it wins
+  // — a live phone fix outranks it for 15 s, after which this takes over
+  // automatically. The old `if (phoneGpsWatcherId !== null) return` DISCARDED
+  // the fan-out outright, so a frozen watcher meant the truck pin never moved
+  // again for the rest of the session.
+  driverPos.applyEldFix(payload)
 }
 
 function onNewMessage(msg) {
@@ -1233,20 +1187,29 @@ onMounted(async () => {
   if (currentTab.value === 'status') currentTab.value = 'loads'
   if (driverStore.currentTab === 'status') driverStore.currentTab = 'loads'
   await attemptInitialLoad()
-  // Begin polling the driver's own ELD position. First call is fire-and-forget
-  // so the initial load isn't delayed by a Routemate query failure.
-  fetchDriverPosition()
-  positionPollTimer = setInterval(fetchDriverPosition, POSITION_POLL_INTERVAL_MS)
+  // Begin polling the driver's own ELD position. Fire-and-forget so the initial
+  // load isn't delayed by a Routemate query failure. `activeLoadId` is how a
+  // Navigate tap — raised from DriverRouteMap, which knows nothing about the
+  // detail page — gets scoped to the load it was tapped on.
+  driverPos.start({
+    driverName: () => driverName.value,
+    activeLoadId: () => detailLoadId.value,
+  })
   // Reconcile a stale loads list when the app returns to the foreground.
   document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
 onUnmounted(() => {
   isMounted = false
-  if (positionPollTimer) {
-    clearInterval(positionPollTimer)
-    positionPollTimer = null
-  }
+  // A burst of socket activity can leave a 250 ms refetch pending, and
+  // unmounting does not cancel a timer — so it would fire loadData() against a
+  // torn-down view. `isMounted` guards the socket handlers that SCHEDULE it, not
+  // the timer already scheduled, so the timer itself has to be cleared.
+  if (refetchTimer) { clearTimeout(refetchTimer); refetchTimer = null }
+  // Stops the ELD poll, the freshness clock AND the phone watcher — leaving the
+  // geolocation watcher running after the driver app unmounts would keep the
+  // GPS radio (and the battery drain) alive for the rest of the session.
+  driverPos.stop()
   socket.off('new-message', onNewMessage)
   socket.off('load-assigned', onLoadAssigned)
   socket.off('load-cancelled', onLoadCancelled)

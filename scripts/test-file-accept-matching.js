@@ -52,7 +52,17 @@ function f(name, type, size = 1024) {
 const A_RATECON = "application/pdf,.pdf";
 const A_RECEIPT = "image/*,.heic,.heif,application/pdf,.pdf";
 const A_RECEIPT_TODAY = "image/*,.heic,.heif,application/pdf"; // BulkReceiptScan as shipped — no .pdf
-const A_CHAT = "image/*,.pdf";
+// Kept in sync with CHAT_ATTACH_ACCEPT in client/src/lib/chatAttachment.js.
+// It admits .heic/.heif on purpose: the composers CONVERT a HEIC to JPEG (and
+// rename it to .jpg, because ALLOWED_FILE_EXTS has no .heic and the server
+// checks magic bytes against the extension) rather than refusing it. An earlier
+// revision of this file asserted the opposite — that a blank-MIME HEIC was
+// refused here — which was true when chat could not handle HEIC at all.
+const A_CHAT = "image/*,application/pdf,.pdf,.heic,.heif";
+// The pre-conversion chat surface, retained ONLY to keep proving that a bare
+// `image/*,.pdf` really does refuse a blank-MIME HEIC. That is the behaviour
+// the conversion path exists to replace, so it has to stay demonstrable.
+const A_CHAT_LEGACY = "image/*,.pdf";
 const A_DRUGTEST = ".pdf,.jpg,.jpeg,.png";
 const A_IMAGE = "image/*";
 const A_NONE = ""; // LegalDocumentPortal — server is the authority
@@ -80,7 +90,8 @@ const A_NONE = ""; // LegalDocumentPortal — server is the authority
 	// ── 4. BLANK MIME — iPhone HEIC on every non-Safari browser ──────────────
 	check("blank-MIME heic vs receipt", matchesAccept(f("IMG_0421.HEIC", ""), A_RECEIPT), true);
 	check("safari heic by MIME vs receipt", matchesAccept(f("IMG_0421.heic", "image/heic"), A_RECEIPT), true);
-	check("blank-MIME heic vs chat REFUSED", matchesAccept(f("IMG_0421.HEIC", ""), A_CHAT), false);
+	check("blank-MIME heic vs chat ACCEPTED (converted)", matchesAccept(f("IMG_0421.HEIC", ""), A_CHAT), true);
+	check("blank-MIME heic vs LEGACY chat REFUSED", matchesAccept(f("IMG_0421.HEIC", ""), A_CHAT_LEGACY), false);
 
 	// ── 5. Extension tokens are case-insensitive both ways ───────────────────
 	check("uppercase name vs lowercase token", matchesAccept(f("RESULT.PDF", ""), A_DRUGTEST), true);
@@ -94,7 +105,8 @@ const A_NONE = ""; // LegalDocumentPortal — server is the authority
 	check("describe empty is blank", describeAccept(A_NONE), "");
 	check("describe dedupes pdf", describeAccept(A_RATECON), "PDF");
 	check("describe image group", describeAccept(A_IMAGE), "images");
-	check("describe two", describeAccept(A_CHAT), "images or PDF");
+	check("describe two", describeAccept(A_CHAT_LEGACY), "images or PDF");
+	check("describe chat dedupes pdf, keeps heic/heif", describeAccept(A_CHAT), "images, PDF, HEIC or HEIF");
 	check("describe drug test", describeAccept(A_DRUGTEST), "PDF, JPG, JPEG or PNG");
 
 	// ── 8. Size cap ──────────────────────────────────────────────────────────

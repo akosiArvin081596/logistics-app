@@ -178,12 +178,70 @@
           <span class="filter-count">{{ allExpenses.length }} expenses</span>
         </div>
 
+        <!-- WHAT SELECT-ALL WILL ACTUALLY TAKE, stated next to the controls that
+             decide it.
+             Select-all covers every row matching these filters — 169 of them
+             with nothing set — while the table renders one page of 25. The
+             checkbox cannot show that gap and the page cannot either, so the
+             scope is spelled out here, and the filters that narrow it are named
+             rather than left to be inferred from seven separate dropdowns.
+             That legibility is the precondition for offering "select all
+             matching" at all: a gesture over rows you cannot see is only safe if
+             you can read what defines them. -->
+        <div class="filter-scope">
+          <span class="filter-scope-text">{{ filterScopeText }}</span>
+          <!-- Only when there is genuinely more than one page to be surprised by. -->
+          <span v-if="allExpenses.length > pageSize" class="filter-scope-hint">
+            Select-all takes all {{ allExpenses.length }}, not just the {{ pageSize }} on this page.
+          </span>
+          <button
+            v-if="activeFilterSummary"
+            type="button"
+            class="filter-scope-clear"
+            @click="clearAllFilters"
+          >Clear filters</button>
+        </div>
+
         <!-- Bulk actions bar — appears once anything is selected. Approve is
-             the owner's explicit ask; Reject rides the same endpoint. -->
+             the owner's explicit ask; Reject rides the same endpoint.
+             ⚠️ Both buttons call requestBulkStatus, NEVER bulkSetStatus
+             directly: that helper is where the two money guards live (a
+             rejected receipt is never approved in bulk, and unsettling an
+             approved one is confirmed first). Wiring a third bulk button
+             straight to bulkSetStatus would bypass both. -->
         <div v-if="selectedIds.size > 0" class="bulk-bar">
-          <span class="bulk-count">{{ selectedIds.size }} selected</span>
-          <button class="bulk-btn bulk-approve" :disabled="bulkLoading" @click="bulkSetStatus('Approved')">{{ bulkLoading ? 'Working…' : 'Approve selected' }}</button>
-          <button class="bulk-btn bulk-reject" :disabled="bulkLoading" @click="bulkSetStatus('Rejected')">Reject selected</button>
+          <span class="bulk-count">
+            {{ selectedIds.size }} selected
+            <!-- Composition, only when the selection spans more than one status.
+                 The guards below decide what happens; this says what is in hand
+                 before either of them has to. -->
+            <span v-if="selectionBreakdown" class="bulk-breakdown">· {{ selectionBreakdown }}</span>
+          </span>
+          <button
+            class="bulk-btn bulk-approve"
+            :disabled="bulkLoading || approveIds.length === 0"
+            :title="approveTitle"
+            @click="requestBulkStatus('Approved')"
+          >{{ bulkLoading ? 'Working…' : 'Approve selected' }}</button>
+          <button class="bulk-btn bulk-reject" :disabled="bulkLoading" @click="requestBulkStatus('Rejected')">Reject selected</button>
+          <!-- The withheld rows, named BEFORE the click and independently of the
+               confirm — the confirm is a modal a fast operator dismisses, this
+               sits under their cursor for as long as the selection does.
+               ⚠️ VISIBLE text, not only the button's title: when nothing in the
+               selection is approvable the button is disabled, and a disabled
+               button is neither focusable nor reliably tooltipped, so a title
+               would be the one explanation nobody could reach. -->
+          <span v-if="approveWithheldNote" class="bulk-withheld">{{ approveWithheldNote }}</span>
+          <!-- The only select-all a phone can reach: the mobile view is a card
+               list with no header row, so without this the widened select-all
+               would be desktop-only. -->
+          <button
+            v-if="!allFilteredSelected && filteredIds.length"
+            class="bulk-clear bulk-selectall"
+            :disabled="bulkLoading"
+            :title="selectAllLabel"
+            @click="toggleSelectAllFiltered"
+          >Select all {{ filteredIds.length }} matching</button>
           <button class="bulk-clear" :disabled="bulkLoading" @click="clearSelection">Clear</button>
         </div>
 
@@ -290,18 +348,26 @@
           <thead>
             <tr>
               <th class="select-cell">
-                <!-- Select-all targets the Pending rows in the current
-                     filtered view \u2014 the "approve everything I'm looking at"
-                     flow. Any row can still be ticked individually. -->
+                <!-- Select-all takes EVERY row matching the current filters, not
+                     just the Pending ones \u2014 rejecting a batch of already-approved
+                     duplicates is the case this exists for, and Pending-only
+                     could not gather them. Narrow it with the filters above.
+                     \u26a0\ufe0f It is NOT "the rows in view": the table renders one page
+                     (25 by default) and this ticks all of them, which is why the
+                     label says "matching the current filters" and names those
+                     filters, and why the scope line above the table states the
+                     same thing in prose. Do not shorten either back to "in
+                     view" \u2014 that wording was honest about the COUNT and wrong
+                     about the SCOPE, which is the worse half to get wrong. -->
                 <input
                   type="checkbox"
                   class="select-checkbox"
-                  :checked="allVisiblePendingSelected"
-                  :indeterminate="selectedIds.size > 0 && !allVisiblePendingSelected"
-                  :disabled="visiblePendingIds.length === 0 && selectedIds.size === 0"
-                  title="Select all pending in view"
-                  aria-label="Select all pending expenses in view"
-                  @change="toggleSelectAllPending"
+                  :checked="allFilteredSelected"
+                  :indeterminate="selectedIds.size > 0 && !allFilteredSelected"
+                  :disabled="filteredIds.length === 0 && selectedIds.size === 0"
+                  :title="selectAllLabel"
+                  :aria-label="selectAllLabel"
+                  @change="toggleSelectAllFiltered"
                 />
               </th>
               <!-- "Date" alone was read as the upload date, which is what led to
@@ -1437,6 +1503,51 @@
         </div>
       </template>
     </div>
+
+    <!-- Possible-duplicate confirm for the Log Expense form.
+         Replaces a window.confirm, which could print only the server's sentence
+         and nothing else: the entire point of asking is that the admin can judge
+         whether this is a genuine second purchase, and that judgement needs the
+         MATCHING receipt's merchant, date and amount on screen. A confirm() also
+         freezes the page, so the list behind it — the one place the existing
+         expense could have been checked — was unreachable while the question was
+         open.
+         Cancel stays first in the DOM and keeps initial focus (see ConfirmModal's
+         own comments; never reorder those two). That is right here as well as for
+         a delete: the safe answer to "is this a separate purchase?" is no, and
+         `danger` is on the confirm because saying yes overrides a money guard. -->
+    <ConfirmModal
+      :open="!!duplicatePrompt"
+      title="This may already be logged"
+      :message="duplicateMessage"
+      confirm-text="Log it anyway"
+      cancel-text="Don't log it"
+      :danger="true"
+      @confirm="settleDuplicatePrompt(true)"
+      @cancel="settleDuplicatePrompt(false)"
+    />
+
+    <!-- Bulk Approve / Reject confirm.
+         Opens ONLY when the action would take a receipt out of a settled state
+         (see requestBulkStatus) — the everyday gestures, approving a queue of
+         pending receipts or rejecting one, stay a single click. A confirm that
+         fired on every bulk action would be clicked through on the one that
+         mattered.
+         Cancel stays first in the DOM with initial focus, per ConfirmModal's own
+         comments; never reorder those. `danger` is on the confirm because both
+         branches move money: one changes what the P&L counts as spend, the other
+         changes an investor's payout for the month. -->
+    <ConfirmModal
+      :open="!!pendingBulk"
+      :title="bulkConfirmTitle"
+      :message="bulkConfirmMessage"
+      :confirm-text="bulkConfirmText"
+      cancel-text="Cancel"
+      :danger="true"
+      :confirm-disabled="bulkLoading"
+      @confirm="runPendingBulk"
+      @cancel="pendingBulk = null"
+    />
   </div>
 </template>
 
@@ -1452,6 +1563,7 @@ import { useViewport } from '../../composables/useViewport'
 import { useSocketRefresh } from '../../composables/useSocketRefresh'
 import ZoomableImage from '../shared/ZoomableImage.vue'
 import FileDropZone from '../shared/FileDropZone.vue'
+import ConfirmModal from '../shared/ConfirmModal.vue'
 import ExpenseAnalyticsPanel from './expenses/ExpenseAnalyticsPanel.vue'
 import BulkReceiptScan from './expenses/BulkReceiptScan.vue'
 import GallonsRecoveryPanel from './expenses/GallonsRecoveryPanel.vue'
@@ -1465,6 +1577,14 @@ import {
   odometerConflicts,
   tankCalibration, countCalibrationChecks, calibrationVerdict, anyBimodal,
 } from '../../lib/fuelReview'
+// ⚠️ IMPORTED, not re-typed as a local 'Rejected'.
+// This is the one string the Data Issues queue writes to VOID a duplicate
+// receipt, and the one string this screen's bulk Approve must never overwrite.
+// The two features are on different routes and were built a batch apart, which
+// is exactly how they came to disagree; a shared constant is what stops the next
+// disagreement being silent. If VOID_STATUS ever changes, the guard below moves
+// with it. (Pure ESM const — the rest of that module tree-shakes away.)
+import { VOID_STATUS } from '../../lib/dataIssues'
 
 // Deep link into one receipt: /expenses?expense=<id>, currently emitted by the
 // Data Issues duplicate-receipt queue. The VIEW owns the query param and this
@@ -1714,6 +1834,46 @@ watch(allQ, () => {
   allQTimer = setTimeout(loadAll, 300)
 })
 
+// ---- What this list is scoped to, in words ---------------------------------
+//
+// Select-all takes every row matching these filters, and the table shows one
+// page of them, so the filters are no longer just a convenience — they are the
+// definition of what a bulk action will hit. Seven controls each holding "All"
+// communicate that badly: reading them means checking seven dropdowns and a
+// search box and correctly concluding that nothing is set. One sentence naming
+// only what IS set is legible at a glance and, more importantly, is legible in
+// the select-all's accessible name, where a row of dropdowns cannot go.
+//
+// Mirrors buildAllExpensesQuery() field for field, deliberately: that function
+// decides which rows exist, this one describes the same decision to a human, so
+// a filter added there must be added here or the sentence quietly under-reports
+// the scope. fmtYmd (not the local fmtDate, which is a thin wrapper defined
+// further down) because the date inputs hold bare 'YYYY-MM-DD'.
+const activeFilterParts = computed(() => {
+  const parts = []
+  const q = allQ.value.trim()
+  if (q) parts.push(`search “${q}”`)
+  if (allFilter.driver) parts.push(`driver ${allFilter.driver}`)
+  if (allFilter.truck) parts.push(`truck ${allFilter.truck}`)
+  if (allFilter.type) parts.push(`type ${allFilter.type}`)
+  if (allFilter.status) parts.push(`status ${allFilter.status}`)
+  if (allFilter.state) parts.push(`state ${allFilter.state}`)
+  if (allFilter.from && allFilter.to) parts.push(`dated ${fmtYmd(allFilter.from)} – ${fmtYmd(allFilter.to)}`)
+  else if (allFilter.from) parts.push(`dated from ${fmtYmd(allFilter.from)}`)
+  else if (allFilter.to) parts.push(`dated up to ${fmtYmd(allFilter.to)}`)
+  return parts
+})
+const activeFilterSummary = computed(() => activeFilterParts.value.join(' · '))
+const filterScopeText = computed(() => {
+  const n = allExpenses.value.length
+  const noun = `${n} expense${n === 1 ? '' : 's'}`
+  return activeFilterSummary.value
+    ? `${noun} match these filters: ${activeFilterSummary.value}.`
+    : `${noun} — no filters set, so this is every expense.`
+})
+// (selectAllLabel lives with the selection state further down, beside the ids it
+// counts.)
+
 // Analytics sub-tab panel (v-if mounted) — exposes reload() for the
 // expenses:changed socket handler below.
 const analyticsPanel = ref(null)
@@ -1819,6 +1979,11 @@ async function extractReceiptDetails() {
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onModalKeydown)
   clearTimeout(allQTimer)
+  // Settle any open duplicate question as "no". Unmounting with an awaiter still
+  // parked would leave submitExpense suspended forever — harmless to the DOM,
+  // but its `finally` never runs, so nothing is logged and nothing is reported.
+  // "No" is the only safe default: the alternative books money nobody confirmed.
+  settleDuplicatePrompt(false)
 })
 
 // Add Expense form (Super Admin / Dispatcher only)
@@ -2102,6 +2267,76 @@ function clearPhoto() {
   preOcrSnapshot.value = null
 }
 
+// ── Possible-duplicate confirm ─────────────────────────────────────────────
+// The server flags a same-driver/day/amount receipt as a POSSIBLE duplicate. It
+// is a warning, not a verdict — a driver can genuinely fuel twice at one stop —
+// so the admin is asked rather than blocked.
+//
+// ⚠️ window.confirm is SYNCHRONOUS and a component dialog is not, which is the
+// only reason this promise bridge exists: it lets submitExpense keep reading
+// top-to-bottom instead of splitting into a callback. It is settled on EVERY
+// exit path — confirm, cancel, and unmount — because an awaiter that never
+// settles leaves `addLoading` true forever, i.e. the Log Expense form is dead
+// until the page is reloaded. Only ever one question is in flight (the form is
+// disabled while `addLoading`), so a single resolver is sufficient.
+const duplicatePrompt = ref(null)
+let duplicateDecision = null
+
+function askAboutDuplicate(err) {
+  return new Promise((resolve) => {
+    duplicatePrompt.value = {
+      existing: err?.data?.existing || null,
+      // A server predating the `existing` block sends only `existingId` + a
+      // sentence. Absent is not empty: fall back to its wording rather than
+      // rendering a dialog that names nothing.
+      fallback: err?.message || 'An expense that looks like this one is already on file.',
+    }
+    duplicateDecision = resolve
+  })
+}
+
+function settleDuplicatePrompt(answer) {
+  duplicatePrompt.value = null
+  const resolve = duplicateDecision
+  duplicateDecision = null
+  if (resolve) resolve(answer)
+}
+
+// What the admin is being asked to compare against. Composed here rather than
+// echoing the server's sentence so the facts are laid out one per line — the
+// dialog's `message` is rendered with `white-space: pre-line` and is the
+// element aria-describedby points at, so this is also what a screen reader
+// announces. Same shape as ActiveLoadsTab's cancel summary.
+const duplicateMessage = computed(() => {
+  const p = duplicatePrompt.value
+  if (!p) return ''
+  const e = p.existing
+  if (!e) return p.fallback
+  const lines = [
+    'A receipt with the same driver, date and amount is already on file:',
+    '',
+    `Expense #${e.id}`,
+    `Merchant: ${e.vendor || 'none recorded'}`,
+    `Date: ${fmtDate(e.date) || e.date || '—'}`,
+    `Amount: ${fmtDollars(e.amount)}`,
+  ]
+  // Named only when the server sent one — the check is already scoped to a
+  // single driver, so an absent value means "not recorded", never "anyone".
+  if (e.driver) lines.push(`Driver: ${e.driver}`)
+  lines.push('', 'Log this one anyway only if it is a separate purchase.')
+  return lines.join('\n')
+})
+
+// Money for prose (the confirm above), matching how amounts render in the list.
+// Falls back to the raw value rather than printing "$NaN" if the server ever
+// sends something unparseable.
+function fmtDollars(v) {
+  const n = Number(v)
+  return Number.isFinite(n)
+    ? `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    : `$${v}`
+}
+
 async function submitExpense() {
   if (!addForm.driver || !addForm.type || !addForm.amount || !addForm.date) {
     toast('Fill in Driver, Type, Amount, and Date', 'error'); return
@@ -2127,19 +2362,40 @@ async function submitExpense() {
       gallons: parseFloat(addForm.gallons) || 0,
       odometer: parseFloat(addForm.odometer) || 0,
       receiptDetails: ocrDetails.value,
-      // Opt in to the same-driver/merchant/day/amount check — this form can
-      // confirm and resend, so a 409 here is always survivable.
-      checkDuplicate: true,
+      // ⚠️ THERE IS NO OPT-IN KEY TO SEND, AND DELIBERATELY NO OPT-OUT ONE.
+      // A `checkDuplicate: true` used to sit here, described as opting in to the
+      // same-driver/day/amount check. It was neither an opt-in nor a switch of
+      // any kind: the server runs that check UNCONDITIONALLY
+      // (`wantsDuplicateCheck = req.body?.allowDuplicate !== true`) and
+      // accepts-then-ignores `checkDuplicate`, specifically so a second, silent
+      // door around the guard cannot reappear — locked by
+      // scripts/test-duplicate-guard.js ("no silent opt-out door"). So the key
+      // did nothing while reading like the thing that turned the check on, which
+      // is the worse failure: the next reader to delete it would have believed
+      // they had disarmed a money guard, and the reader who kept it would have
+      // believed this surface was opted in and others were not.
+      // What this form owes is 409 SURVIVAL, not a flag — see the catch below.
+      // Same removal, and same reasoning, as stores/driver.js.
     }
     let res
     try {
       res = await api.post('/api/expenses', payload)
     } catch (err) {
-      // The server flags same-merchant/day/amount as a POSSIBLE duplicate. It is
+      // The server flags same-driver/day/amount as a POSSIBLE duplicate. It is
       // a warning, not a verdict — a driver can genuinely fuel twice at one stop —
       // so confirm and resend rather than leaving the admin stuck with an error.
+      // The dialog names the matching receipt (see duplicateMessage); the resend
+      // is the ONLY thing that ever sets allowDuplicate on this form, so an
+      // override is always a person's answer to this question and never a retry.
+      //
+      // ⚠️ This block IS the obligation the payload comment above refers to, and
+      // `allowDuplicate` is the one duplicate-related key the server actually
+      // honours — it writes an `expense_duplicate_override` audit row, which is
+      // also what closes the pair in the Data Issues duplicate queue. If this
+      // surface ever stops surviving a 409, the repair is HERE, in the handler;
+      // there has never been anything to turn off in the payload.
       if (err?.status === 409 && err?.code === 'POSSIBLE_DUPLICATE') {
-        const ok = window.confirm(`${err.message}\n\nLog it anyway?`)
+        const ok = await askAboutDuplicate(err)
         if (!ok) { toast('Not logged — treated as a duplicate', 'info'); return }
         res = await api.post('/api/expenses', { ...payload, allowDuplicate: true })
       } else {
@@ -2240,27 +2496,225 @@ async function setStatus(id, status) {
 const BULK_CHUNK = 200 // server caps ids per request \u2014 chunk larger selections
 const selectedIds = ref(new Set())
 const bulkLoading = ref(false)
-const visiblePendingIds = computed(() =>
-  allExpenses.value.filter(e => (e.status || 'Pending') === 'Pending').map(e => e.id)
+// EVERY row matching the current filters, whatever its status.
+//
+// \u26a0\ufe0f NOT "the rows in view", which is what this was called and is what the
+// checkbox's label used to claim. usePagination renders 25 rows; this ticks all
+// 169. The count was always honest and the SCOPE was not, which is the more
+// dangerous half to get wrong \u2014 an operator who believes they selected a page
+// and actually selected the table will read the confirmation as a smaller
+// number than it is. The name, the label and the scope line above the table now
+// all say "matching the current filters"; keep them saying the same thing.
+//
+// \u26a0\ufe0f This was Pending-only, and that narrowing quietly made select-all useless
+// for the job it is now most needed for. 163 of the 169 live expenses are
+// Approved, so the header checkbox gathered 6 rows and none of the duplicate
+// receipts an admin is trying to reject \u2014 while per-row ticking had always been
+// unrestricted, so the checkbox was the ONLY thing enforcing the rule. That is
+// the worst arrangement: a restriction that stops the bulk gesture and not the
+// individual one.
+//
+// The pending-only flow is not lost, it just moved to where scope already lives:
+// the Status filter above. Set Status to Pending and select-all means exactly
+// what it used to.
+//
+// \u26a0\ufe0f WHAT THE WIDENING DID NOT COVER, and used to be argued here as if it did.
+// The old note said "nothing about which rows the SERVER will accept changes
+// here" \u2014 true, and beside the point: the server accepts Rejected \u2192 Approved
+// perfectly happily, so widening the gesture put voided duplicate receipts
+// inside the reach of an unguarded Approve, and rejecting a receipt is how the
+// Data Issues queue VOIDS a duplicate. Server acceptance was never the property
+// that made select-all safe. The two guards below are: approveIds refuses the
+// resurrect outright, and requestBulkStatus confirms anything that would unsettle
+// a settled row. bulkSetStatus still reconciles against what it committed, which
+// is a separate promise about reporting, not about permission.
+const filteredIds = computed(() => allExpenses.value.map(e => e.id))
+const allFilteredSelected = computed(() =>
+  filteredIds.value.length > 0 &&
+  filteredIds.value.every(id => selectedIds.value.has(id))
 )
-const allVisiblePendingSelected = computed(() =>
-  visiblePendingIds.value.length > 0 &&
-  visiblePendingIds.value.every(id => selectedIds.value.has(id))
-)
+// The select-all's whole label, shared by the header checkbox (title AND
+// aria-label, which must agree) and by the bulk bar's mobile equivalent. Names
+// the filters, because they are what defines the set \u2014 see activeFilterSummary.
+const selectAllLabel = computed(() => {
+  const n = filteredIds.value.length
+  const noun = `${n} expense${n === 1 ? '' : 's'}`
+  return activeFilterSummary.value
+    ? `Select all ${noun} matching the current filters: ${activeFilterSummary.value}`
+    : `Select all ${noun} \u2014 every expense, no filters set`
+})
 function toggleSelect(id) {
   const next = new Set(selectedIds.value)
   if (next.has(id)) next.delete(id)
   else next.add(id)
   selectedIds.value = next
 }
-// Header checkbox targets Pending rows in the current filtered view (the
-// "approve everything I'm looking at" flow). Unchecking clears the whole
-// selection \u2014 including manually-ticked non-pending rows \u2014 so the bulk bar
-// never lingers with hidden selections.
-function toggleSelectAllPending() {
-  selectedIds.value = allVisiblePendingSelected.value
+// Header checkbox (and the bulk bar's "Select all", which is how a phone reaches
+// this \u2014 the mobile card list has no header row). Unchecking clears the whole
+// selection so the bulk bar never lingers with hidden selections.
+function toggleSelectAllFiltered() {
+  selectedIds.value = allFilteredSelected.value
     ? new Set()
-    : new Set(visiblePendingIds.value)
+    : new Set(filteredIds.value)
+}
+
+// What the selection is actually made of, by status.
+//
+// \u26a0\ufe0f Reads each row's OWN status, which the client legitimately holds and
+// renders in every row. This is a statement about what the operator has
+// selected \u2014 it is not, and must not become, a client-side derivation of what
+// the SERVER will accept: that would be the month-lock guess bulkSetStatus
+// refuses to make, and for the same reason (posted_period). The distinction
+// matters because the guards below act on this map: they enforce THIS SCREEN's
+// rule about which transitions it offers, not a prediction of the server's.
+//
+// Anything selected but no longer in the list (a socket refresh mid-gesture) is
+// left out rather than guessed at; pruneSelection drops those ids on the next
+// refetch, and until it does they stay in the batch, unclassified and unfiltered
+// \u2014 the guards only ever withhold a row they can positively identify.
+const selectedStatusCounts = computed(() => {
+  const counts = new Map()
+  if (selectedIds.value.size === 0) return counts
+  for (const e of allExpenses.value) {
+    if (!selectedIds.value.has(e.id)) continue
+    const s = e.status || 'Pending'
+    counts.set(s, (counts.get(s) || 0) + 1)
+  }
+  return counts
+})
+
+// e.g. "6 pending \u00b7 160 approved". One status = the headline count already says
+// it, so nothing is rendered.
+const selectionBreakdown = computed(() => {
+  const counts = selectedStatusCounts.value
+  if (counts.size <= 1) return ''
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([status, n]) => `${n} ${status.toLowerCase()}`)
+    .join(' \u00b7 ')
+})
+
+// ---- The two money guards on the bulk bar ----------------------------------
+//
+// \u26a0\ufe0f GUARD 1 \u2014 BULK APPROVE NEVER TOUCHES A REJECTED ROW.
+// Rejecting a receipt is how the Data Issues queue voids a duplicate: the copy
+// stays on the books but EXPENSE_PNL_FILTER drops it from every P&L, which is
+// the whole mechanism that takes the duplicate back out of the investor payout.
+// Approving it puts it straight back. With select-all widened to every row
+// matching the filters, "All Expenses, no filter, header checkbox, Approve
+// selected" was one gesture from un-voiding every duplicate anyone had ever
+// cleared \u2014 and nothing about the request would have looked wrong afterwards.
+//
+// So the ids are withheld here rather than confirmed away: a confirm is a
+// speed bump, and the operator making this exact gesture is clearing a backlog
+// at speed. Nothing is lost \u2014 this screen has never offered a one-click
+// Rejected \u2192 Approved anywhere else either. A settled row's only row-level
+// action is Undo, which routes it back through Pending, and that same route is
+// still open one row at a time. What is refused is doing it to 163 rows at once
+// by accident.
+//
+// Withheld, NOT silent: the bulk bar names the count beside the button for as
+// long as the selection lasts, and guard 2 below states it again in the confirm
+// at the moment of the click. bulkSetStatus's own report then describes exactly
+// the batch that was sent, which is what makes its arithmetic true.
+const selectedVoidedIds = computed(() => {
+  if (selectedIds.value.size === 0) return []
+  return allExpenses.value
+    .filter(e => selectedIds.value.has(e.id) && (e.status || 'Pending') === VOID_STATUS)
+    .map(e => e.id)
+})
+const approveIds = computed(() => {
+  if (selectedVoidedIds.value.length === 0) return [...selectedIds.value]
+  const voided = new Set(selectedVoidedIds.value)
+  return [...selectedIds.value].filter(id => !voided.has(id))
+})
+// The short form, on screen for as long as the selection lasts.
+const approveWithheldNote = computed(() => {
+  const withheld = selectedVoidedIds.value.length
+  if (withheld === 0) return ''
+  return approveIds.value.length === 0
+    ? `Nothing to approve \u2014 all ${withheld} selected ${withheld === 1 ? 'is' : 'are'} rejected`
+    : `Approve skips ${withheld} rejected`
+})
+// The long form, on the button itself. Only reachable while the button is
+// enabled, which is why the short form above is not optional.
+const approveTitle = computed(() => {
+  const withheld = selectedVoidedIds.value.length
+  if (withheld === 0) return ''
+  if (approveIds.value.length === 0) {
+    return 'Every selected receipt is rejected. Rejecting is how a duplicate is voided, so this screen will not approve one in bulk \u2014 use Undo on the row to send it back to Pending first.'
+  }
+  return `Approves ${approveIds.value.length}. The ${withheld} rejected receipt${withheld === 1 ? '' : 's'} in this selection ${withheld === 1 ? 'is' : 'are'} left as ${withheld === 1 ? 'it is' : 'they are'} \u2014 approving a voided duplicate would put it back into the payout.`
+})
+
+// \u26a0\ufe0f GUARD 2 \u2014 CONFIRM ANYTHING THAT UNSETTLES A SETTLED ROW.
+// Guard 1 covers the direction that resurrects a void. This covers the mirror,
+// which the same widening created and which is the larger number: select-all
+// then "Reject selected" flips 163 approved receipts out of the P&L in one
+// click, raising every affected month's investor payout by the whole expense
+// base. Rejecting a queue of Pending receipts \u2014 the historical gesture \u2014 is
+// still one click, because nothing settled moves.
+//
+// The rule is one sentence: a bulk action is confirmed when it would move a
+// receipt OUT of a settled status. Approve can only ever hit Pending rows (a
+// no-op on the already-Approved ones) once guard 1 has removed the Rejected
+// ones, so the everyday approve stays unconfirmed; Reject is confirmed exactly
+// when Approved rows are in the selection.
+//
+// The ids are SNAPSHOT at request time, so the confirm describes the batch it
+// will actually send even if the list refreshes under the modal.
+const pendingBulk = ref(null)
+function requestBulkStatus(status) {
+  if (bulkLoading.value) return
+  const ids = status === 'Approved' ? approveIds.value : [...selectedIds.value]
+  if (ids.length === 0) return
+  const withheld = status === 'Approved' ? selectedVoidedIds.value.length : 0
+  const unsettled = status === 'Approved' ? 0 : (selectedStatusCounts.value.get('Approved') || 0)
+  if (withheld === 0 && unsettled === 0) {
+    bulkSetStatus(status, ids)
+    return
+  }
+  pendingBulk.value = { status, ids: [...ids], withheld, unsettled }
+}
+const bulkConfirmTitle = computed(() => {
+  const p = pendingBulk.value
+  if (!p) return ''
+  const n = p.ids.length
+  return p.status === 'Approved'
+    ? `Approve ${n} receipt${n === 1 ? '' : 's'}?`
+    : `Reject ${n} receipt${n === 1 ? '' : 's'}?`
+})
+const bulkConfirmText = computed(() => {
+  const p = pendingBulk.value
+  if (!p) return 'Confirm'
+  return `${p.status === 'Approved' ? 'Approve' : 'Reject'} ${p.ids.length}`
+})
+// Says what will happen, then what will not, then the money consequence. The
+// finalized-month sentence is a caveat, never a count: which rows a closed month
+// withholds is the server's answer and arrives with the result.
+const bulkConfirmMessage = computed(() => {
+  const p = pendingBulk.value
+  if (!p) return ''
+  const lines = []
+  if (p.status === 'Approved') {
+    lines.push(`${p.ids.length} receipt${p.ids.length === 1 ? '' : 's'} will be approved.`)
+    lines.push(
+      `${p.withheld} rejected receipt${p.withheld === 1 ? '' : 's'} in this selection ${p.withheld === 1 ? 'is' : 'are'} NOT included. Rejecting is how a duplicate receipt is voided, and approving it would put it back into the investor payout. To bring one back deliberately, use Undo on its own row.`
+    )
+  } else {
+    lines.push(`${p.ids.length} receipt${p.ids.length === 1 ? '' : 's'} will be rejected.`)
+    lines.push(
+      `${p.unsettled} of them ${p.unsettled === 1 ? 'is' : 'are'} currently approved. A rejected receipt stops counting as spend, so this removes ${p.unsettled === 1 ? 'it' : 'them'} from the P&L and raises the investor payout for ${p.unsettled === 1 ? 'its' : 'their'} month${p.unsettled === 1 ? '' : 's'}.`
+    )
+  }
+  lines.push('Receipts in a month that month-end close has finalized are withheld by the server and will stay as they are.')
+  return lines.join('\n\n')
+})
+async function runPendingBulk() {
+  const p = pendingBulk.value
+  if (!p) return
+  pendingBulk.value = null
+  await bulkSetStatus(p.status, p.ids)
 }
 function clearSelection() {
   selectedIds.value = new Set()
@@ -2305,8 +2759,14 @@ const bulkOutcome = ref(null)
 // otherwise \u2014 a live example sits in this data. Guessing gets that row exactly
 // backwards. lockState() in lib/fuelReview.js refuses the same derivation for
 // the same reason: server-told only.
-async function bulkSetStatus(status) {
-  const ids = [...selectedIds.value]
+//
+// `ids` is a parameter so the guards above can hand it a batch NARROWER than the
+// selection (Approve withholds voided duplicates). Default = the whole
+// selection, i.e. every existing caller behaves exactly as before, and every
+// count below then describes the batch actually sent rather than the one
+// selected — which is what keeps `sent`, `updated` and the shortfall arithmetic
+// true. Call it through requestBulkStatus, not directly: the guards are there.
+async function bulkSetStatus(status, ids = [...selectedIds.value]) {
   if (ids.length === 0 || bulkLoading.value) return
   bulkLoading.value = true
   bulkOutcome.value = null
@@ -3008,21 +3468,31 @@ function applyExpenseFocus(raw) {
   emit('focus-consumed')
 }
 
-// The one repair the notice can offer. Only rendered for 'filtered', where the
-// row is known to exist.
-async function clearFiltersAndRetryFocus() {
-  const target = focusNotice.value?.id
-  if (target == null) return
+// Reset every filter and reload.
+//
+// Reached two ways, and both need the same care: the scope line's own "Clear
+// filters" button (the escape hatch that makes a named scope actionable rather
+// than merely legible), and the deep-link notice below.
+async function clearAllFilters() {
   allFilter.driver = ''; allFilter.type = ''; allFilter.status = ''
   allFilter.truck = ''; allFilter.state = ''; allFilter.from = ''; allFilter.to = ''
   allQ.value = ''
   // Clearing the search box arms its 300ms debounce, and that deferred loadAll()
   // would land AFTER the reload below and call goTo(1) — yanking the list off the
-  // page we are about to select. nextTick lets the watcher set its timer so there
-  // is something to cancel; the reload we do here is the one that counts.
+  // page a caller may be about to select. nextTick lets the watcher set its timer
+  // so there is something to cancel; the reload we do here is the one that counts.
   await nextTick()
   clearTimeout(allQTimer)
   await loadAll()
+}
+
+// The one repair the notice can offer. Only rendered for 'filtered', where the
+// row is known to exist. The id is captured BEFORE the reset: loadAll() clears
+// focusNotice, which is where it was being read from.
+async function clearFiltersAndRetryFocus() {
+  const target = focusNotice.value?.id
+  if (target == null) return
+  await clearAllFilters()
   focusExpenseById(target)
 }
 
@@ -3895,6 +4365,26 @@ tr:hover td { background: var(--surface-hover); }
   margin-left: auto; font-size: 0.72rem; color: var(--text-dim);
   font-family: 'JetBrains Mono', monospace;
 }
+/* Scope line. Sits between the filters and the table because it is a statement
+   about BOTH — what the filters produced, and what a select-all over the table
+   would therefore take. Quiet by default (it is usually "no filters set") and
+   never a warning colour: nothing here is wrong, it is orientation. */
+.filter-scope {
+  display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.73rem; line-height: 1.5; color: var(--text-dim);
+}
+.filter-scope-text { color: var(--text); }
+.filter-scope-hint { color: var(--text-dim); }
+.filter-scope-clear {
+  margin-left: auto; padding: 0.2rem 0.55rem;
+  font-size: 0.7rem; font-weight: 600; font-family: inherit;
+  background: transparent; border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text-dim); cursor: pointer;
+}
+.filter-scope-clear:hover { color: var(--text); }
+.filter-scope-clear:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .mono-sm { font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; }
 .dim { color: var(--text-dim); }
 .desc-cell { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -3981,6 +4471,17 @@ tr:hover td { background: var(--surface-hover); }
   font-size: 0.76rem; font-weight: 700; color: var(--accent);
   font-family: 'JetBrains Mono', monospace;
 }
+/* Dimmer than the count it hangs off: the number is the headline, the split is
+   the qualifier. Same weight would read as two competing figures. */
+.bulk-breakdown { font-weight: 500; color: var(--text-dim); }
+/* What Approve will NOT do, beside the button that will not do it. Amber, the
+   panel's existing "read this, it is not an error" colour — the withheld rows
+   are the guard working, not a failure. */
+.bulk-withheld {
+  padding: 0.15rem 0.5rem; border-radius: 10px;
+  font-size: 0.68rem; font-weight: 600;
+  background: var(--amber-dim); color: var(--amber);
+}
 .bulk-btn {
   padding: 0.35rem 0.8rem; font-size: 0.74rem; font-weight: 600;
   border: none; border-radius: 6px; cursor: pointer; font-family: inherit;
@@ -3995,6 +4496,10 @@ tr:hover td { background: var(--surface-hover); }
   color: var(--text-dim); cursor: pointer; font-family: inherit;
 }
 .bulk-clear:hover:not(:disabled) { color: var(--text); }
+/* Sits immediately beside Clear and must not read as the same control — the
+   accent border marks it as the additive half of the pair. */
+.bulk-selectall { color: var(--accent); border-color: var(--accent); }
+.bulk-selectall:hover:not(:disabled) { color: var(--accent); opacity: 0.85; }
 .bulk-btn:disabled, .bulk-clear:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* Bulk result. Deliberately the SAME amber surface as .vol-summary, the panel's

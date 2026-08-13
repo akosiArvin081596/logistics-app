@@ -3,11 +3,12 @@
     <div v-if="open" ref="overlayEl" class="drive-overlay">
       <!-- Top banner: current maneuver + street name + "Then" sub-pill -->
       <div class="drive-banner" v-if="currentStep">
-        <div class="drive-banner-main">
+        <div class="drive-banner-main" :class="{ 'drive-banner-unsure': !matchReliable }">
           <span class="drive-banner-icon" v-html="iconFor(currentStep.maneuver)"></span>
           <div class="drive-banner-text">
-            <div v-if="distanceToManeuver" class="drive-banner-distance">
-              In {{ formatDistance(distanceToManeuver) }}
+            <div v-if="!matchReliable" class="drive-banner-distance">Off the route — instruction may not apply</div>
+            <div v-else-if="maneuverMeters != null" class="drive-banner-distance">
+              In {{ formatDistance(maneuverMeters) }}
             </div>
             <div class="drive-banner-street">{{ currentStreetName }}</div>
           </div>
@@ -17,14 +18,58 @@
           <span class="drive-then-icon" v-html="iconFor(nextStep.maneuver)"></span>
         </div>
       </div>
+      <div v-else-if="destinationLabel" class="drive-banner">
+        <div class="drive-banner-main">
+          <span class="drive-banner-icon">📍</span>
+          <div class="drive-banner-text">
+            <div class="drive-banner-distance">Navigating to</div>
+            <div class="drive-banner-street">{{ destinationLabel }}</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Status strip: rerouting / off-route / voice-paused. Stacked under the
+           banner so none of them ever covers the maneuver instruction. -->
+      <div class="drive-status-strip">
+        <div v-if="rerouting" class="drive-chip drive-chip-active">Rerouting…</div>
+        <div v-else-if="offRoute" class="drive-chip drive-chip-warn">Off route</div>
+        <div v-if="voiceNotice" class="drive-chip drive-chip-muted">🔇 {{ voiceNotice }}</div>
+      </div>
 
       <!-- Map -->
       <div ref="mapEl" class="drive-map"></div>
 
-      <!-- Top-right compass: tap to north-up briefly -->
-      <button class="drive-compass" @click="recenterNorth" title="Recenter">
-        <span class="drive-compass-needle" :style="{ transform: `rotate(${-mapHeading}deg)` }">▲</span>
-      </button>
+      <!-- Top-right controls -->
+      <div class="drive-controls">
+        <button
+          class="drive-ctl"
+          :class="{ 'drive-ctl-off': followMode }"
+          @click="toggleFollow"
+          :title="followMode ? 'Overview (north up)' : 'Re-center on the truck'"
+          :aria-label="followMode ? 'Switch to north-up overview' : 'Re-center on the truck'"
+        >
+          <span v-if="followMode" class="drive-compass-needle" :style="{ transform: `rotate(${-mapHeading}deg)` }">▲</span>
+          <span v-else>◎</span>
+        </button>
+        <button
+          class="drive-ctl"
+          @click="toggleVoice"
+          :title="voice.muted.value ? 'Unmute voice guidance' : 'Mute voice guidance'"
+          :aria-label="voice.muted.value ? 'Unmute voice guidance' : 'Mute voice guidance'"
+          :aria-pressed="voice.muted.value ? 'true' : 'false'"
+        >
+          <span>{{ voice.muted.value ? '🔇' : '🔊' }}</span>
+        </button>
+        <button
+          v-if="!isFullscreen"
+          class="drive-ctl"
+          @click="requestPanelFullscreen"
+          title="Full screen"
+          aria-label="Full screen"
+        >
+          <span>⛶</span>
+        </button>
+      </div>
 
       <!-- Bottom-left speed pill -->
       <div class="drive-speed">
@@ -36,11 +81,13 @@
       <div class="drive-footer">
         <button class="drive-close" @click="$emit('close')" title="Exit Navigation Mode">✕</button>
         <div class="drive-progress">
-          <div class="drive-progress-time">{{ formatRemainingTime(remainingSec) }}</div>
+          <div v-if="arrived" class="drive-progress-time">Arrived</div>
+          <div v-else class="drive-progress-time">{{ formatRemainingTime(remainingSec) }}</div>
           <div class="drive-progress-meta">
             <span>{{ formatDistance(remainingMeters) }}</span>
-            <span v-if="arrivalClock"> · {{ arrivalClock }}</span>
+            <span v-if="arrivalClock && !arrived"> · {{ arrivalClock }}</span>
           </div>
+          <div v-if="destinationLabel" class="drive-progress-dest">{{ destinationLabel }}</div>
         </div>
         <!-- Spacer matches the close button width to keep the time perfectly centered -->
         <div class="drive-footer-spacer"></div>
@@ -51,29 +98,60 @@
 
 <script setup>
 import { ref, computed, watch, onBeforeUnmount, nextTick } from 'vue'
-import { useGoogleMaps, createTruckArrow } from '../../composables/useGoogleMaps'
+import { useDocumentVisibility } from '@vueuse/core'
+import { useGoogleMaps, createTruckArrow, createDotPin } from '../../composables/useGoogleMaps'
+import { useVoiceGuidance } from '../../composables/useVoiceGuidance'
+import { useScreenWakeLock } from '../../composables/useScreenWakeLock'
+import {
+  buildRouteIndex,
+  buildStepOffsets,
+  matchToRoute,
+  stepIndexForOffset,
+  distanceToManeuver as routeDistanceToManeuver,
+  remainingMeters as routeRemainingMeters,
+  remainingSeconds as routeRemainingSeconds,
+  haversineMeters,
+} from '../../utils/routeProgress'
+import { createVoiceLadder, extractStreetName, SUPPRESS_REASONS } from '../../utils/voiceLadder'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
   activeRoute: { type: Object, default: null },  // { route, distanceMiles, etaMinutes, steps, trafficSegments }
   driverPosition: { type: Object, default: null },
   destination: { type: Object, default: null },  // { lat, lng, address }
+  // Bumped by the parent every time new route geometry is installed. This is
+  // what re-arms the voice ladder after a reroute — keyed on a counter rather
+  // than object identity because the parent rebuilds the payload on every poll.
+  routeVersion: { type: Number, default: 0 },
+  rerouting: { type: Boolean, default: false },
+  offRoute: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['close'])
 
 const { load: loadGoogleMaps, createMap } = useGoogleMaps()
+const voice = useVoiceGuidance()
+const wakeLock = useScreenWakeLock()
+const visibility = useDocumentVisibility()
+const ladder = createVoiceLadder()
 
 const overlayEl = ref(null)
 const mapEl = ref(null)
-const currentStepIdx = ref(0)
 const mapHeading = ref(0)
-const followMode = ref(true)  // false briefly when user taps compass; auto-resumes on next fix
+const followMode = ref(true)
+const isFullscreen = ref(false)
+
+// Where the driver is ALONG the route, in metres. Everything the banner and the
+// footer show is derived from this one scalar — see utils/routeProgress.js.
+const matchOffset = ref(null)
+const matchDistanceFromRoute = ref(null)
+let lastMatchAt = 0
 
 let map = null
 let routeCasing = null  // wider white outline underneath routeLine for contrast against the map
 let routeLine = null
 let driverMarker = null
+let destMarker = null
 let trafficOverlays = []
 let lastHeading = 0  // remember last good heading so we can keep rotating when GPS heading goes null at a stop
 
@@ -105,28 +183,9 @@ function iconFor(maneuver) {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-function haversineMeters(a, b) {
-  if (!a || !b) return Infinity
-  const R = 6371000
-  const toRad = d => d * Math.PI / 180
-  const dLat = toRad(b.lat - a.lat)
-  const dLng = toRad(b.lng - a.lng)
-  const aa = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2
-  return R * 2 * Math.atan2(Math.sqrt(aa), Math.sqrt(1 - aa))
-}
-function stripHtml(s) {
-  return (s || '').replace(/<[^>]*>/g, '').trim()
-}
-function extractStreetName(instruction) {
-  const clean = stripHtml(instruction)
-  // "Turn right onto Mabini St" → "Mabini St"
-  // "Continue on Agusan-Misamis Oriental Rd" → "Agusan-Misamis Oriental Rd"
-  const onto = clean.match(/\bonto\s+(.+?)(?:\s+toward\b|\s+for\b|$)/i)
-  if (onto) return onto[1].trim()
-  const on = clean.match(/\bon\s+(.+?)(?:\s+toward\b|\s+for\b|$)/i)
-  if (on) return on[1].trim()
-  return clean
-}
+// haversineMeters + extractStreetName now come from utils/ — the street name the
+// driver READS here and the one they HEAR from the voice ladder must be the same
+// string, so there is exactly one implementation.
 function formatDistance(meters) {
   if (!Number.isFinite(meters)) return '—'
   if (meters >= 1000) return `${(meters / 1000).toFixed(meters >= 10000 ? 0 : 1)} km`
@@ -148,6 +207,34 @@ const driverLatLng = computed(() => {
   return { lat, lng }
 })
 const steps = computed(() => props.activeRoute?.steps || [])
+
+// The route polyline, indexed by cumulative distance. Rebuilt only when the
+// geometry itself changes — a 4,000-point route is not something to re-walk on
+// every GPS fix.
+const routeIndex = computed(() => {
+  const pts = props.activeRoute?.route
+  if (!Array.isArray(pts) || pts.length < 2) return null
+  return buildRouteIndex(pts)
+})
+
+// Start offset of every step, plus a terminal entry, so stepOffsets[i + 1] is
+// exactly where step i's maneuver happens.
+const stepOffsets = computed(() => {
+  if (!steps.value.length || !routeIndex.value) return []
+  return buildStepOffsets(steps.value, routeIndex.value)
+})
+
+// ⚠️ DERIVED, NOT INCREMENTED. The old tracker held a currentStepIdx ref and
+// bumped it by one whenever the driver came within 25 m of the step's end — a
+// window an ELD feed samples roughly never (30 s ≈ 700 m at highway speed), and
+// which cannot recover from a missed sample at all. This recomputes the answer
+// from the matched along-route offset on every fix, so a phone lock, a tunnel or
+// a 40-minute gap resyncs on the next fix instead of stranding the pointer.
+const currentStepIdx = computed(() => {
+  if (!steps.value.length) return 0
+  if (!Number.isFinite(matchOffset.value) || stepOffsets.value.length < 2) return 0
+  return stepIndexForOffset(stepOffsets.value, matchOffset.value, steps.value.length)
+})
 const currentStep = computed(() => steps.value[currentStepIdx.value] || null)
 const nextStep = computed(() => steps.value[currentStepIdx.value + 1] || null)
 const currentStreetName = computed(() => {
@@ -155,42 +242,54 @@ const currentStreetName = computed(() => {
   return extractStreetName(currentStep.value.instruction)
 })
 
-// Distance from driver to the end of the current step (i.e. the next maneuver).
-// When the driver is heading toward a turn, this drives the "In 200m turn right"
-// label in the banner. Falls back to the step's full distanceMeters if we don't
-// have a fresh GPS fix yet.
-const distanceToManeuver = computed(() => {
+// Distance to the next maneuver, measured ALONG THE ROUTE. The old version took
+// a straight line to the step's last polyline point, which under-reads by a long
+// way on any curve, switchback or interchange — precisely where a driver most
+// needs "in 400 m" to be true. Falls back to the step's own length until the
+// first fix lands.
+const maneuverMeters = computed(() => {
   if (!currentStep.value) return null
-  if (!driverLatLng.value || !currentStep.value.polyline?.length) return currentStep.value.distanceMeters
-  const last = currentStep.value.polyline[currentStep.value.polyline.length - 1]
-  return haversineMeters(driverLatLng.value, { lat: last.latitude, lng: last.longitude })
+  const d = routeDistanceToManeuver(stepOffsets.value, currentStepIdx.value, matchOffset.value)
+  return d != null ? d : currentStep.value.distanceMeters ?? null
 })
 
 const remainingMeters = computed(() => {
+  if (routeIndex.value && Number.isFinite(matchOffset.value)) {
+    return routeRemainingMeters(routeIndex.value, matchOffset.value)
+  }
+  if (routeIndex.value) return routeIndex.value.totalMeters
   if (!steps.value.length) return null
-  let total = 0
-  for (let i = currentStepIdx.value; i < steps.value.length; i++) {
-    total += steps.value[i].distanceMeters || 0
-  }
-  // Subtract the part of the current step that's already behind the driver,
-  // so the bar isn't stuck at the full step distance for the whole leg.
-  if (driverLatLng.value && currentStep.value?.polyline?.length) {
-    const last = currentStep.value.polyline[currentStep.value.polyline.length - 1]
-    const remainOfCurrent = haversineMeters(driverLatLng.value, { lat: last.latitude, lng: last.longitude })
-    const stepTotal = currentStep.value.distanceMeters || 0
-    if (remainOfCurrent < stepTotal) {
-      total -= (stepTotal - remainOfCurrent)
-    }
-  }
-  return Math.max(0, total)
+  return steps.value.reduce((sum, s) => sum + (s.distanceMeters || 0), 0)
 })
 const remainingSec = computed(() => {
   if (!steps.value.length) return null
-  let total = 0
-  for (let i = currentStepIdx.value; i < steps.value.length; i++) {
-    total += steps.value[i].durationSec || 0
-  }
-  return total
+  return routeRemainingSeconds(steps.value, stepOffsets.value, currentStepIdx.value, matchOffset.value)
+})
+
+// How far the last fix was from the route line. Beyond this the derived step
+// index is a guess: the driver is on some other road, so "turn right in 200 m"
+// names a turn that is not in front of them. The parent's `offRoute` flag needs
+// three confirmations before it fires (correctly — it authorises a billed
+// reroute); this is the instantaneous read, and all it does is stop the banner
+// asserting an instruction it cannot stand behind.
+const MATCH_TRUST_RADIUS_M = 150
+const matchReliable = computed(
+  () => !Number.isFinite(matchDistanceFromRoute.value) || matchDistanceFromRoute.value <= MATCH_TRUST_RADIUS_M,
+)
+
+const destinationLabel = computed(() => {
+  const d = props.destination
+  if (!d) return ''
+  const addr = (d.address || '').toString().trim()
+  if (addr) return addr
+  if (Number.isFinite(d.lat) && Number.isFinite(d.lng)) return `${d.lat.toFixed(4)}, ${d.lng.toFixed(4)}`
+  return ''
+})
+const arrived = computed(() => {
+  const d = props.destination
+  if (!d || !driverLatLng.value) return false
+  if (!Number.isFinite(d.lat) || !Number.isFinite(d.lng)) return false
+  return haversineMeters(driverLatLng.value, { lat: d.lat, lng: d.lng }) < 80
 })
 const arrivalClock = computed(() => {
   if (!Number.isFinite(remainingSec.value)) return null
@@ -207,15 +306,72 @@ const speedKmh = computed(() => {
   return Math.round(s * 3.6)
 })
 
-// ─── Step advancement ─────────────────────────────────────────────────────────
-function advanceStepIfNeeded() {
-  if (!driverLatLng.value || !steps.value.length) return
-  if (currentStepIdx.value >= steps.value.length - 1) return
-  const cur = steps.value[currentStepIdx.value]
-  if (!cur?.polyline?.length) return
-  const endPt = cur.polyline[cur.polyline.length - 1]
-  const dist = haversineMeters(driverLatLng.value, { lat: endPt.latitude, lng: endPt.longitude })
-  if (dist < 25) currentStepIdx.value++
+// ─── Route resync ─────────────────────────────────────────────────────────────
+// Re-derives the along-route offset from scratch on every fix. Forward-biased,
+// so a route that crosses itself (any cloverleaf, any downtown loop) cannot snap
+// navigation backwards onto the leg the truck drove an hour ago — see
+// utils/routeProgress.js for why that is the hard part.
+function resyncToRoute() {
+  const idx = routeIndex.value
+  const pos = driverLatLng.value
+  if (!idx || !pos) return
+  const now = Date.now()
+  const m = matchToRoute(idx, pos, {
+    previousOffsetMeters: matchOffset.value,
+    // Sizes the forward search corridor: a long gap between fixes legitimately
+    // means a long jump forward, and must not read as "off route".
+    elapsedMs: lastMatchAt ? now - lastMatchAt : null,
+  })
+  lastMatchAt = now
+  if (!m) return
+  matchOffset.value = m.offsetMeters
+  matchDistanceFromRoute.value = m.distanceMeters
+}
+
+// ─── Voice guidance ───────────────────────────────────────────────────────────
+// Why a callout might not be spoken, in words a driver can act on. Rendered as a
+// chip in the HUD: silent navigation that looks broken is worse than a
+// deliberate, explained silence. Plain user-mute is excluded — the speaker
+// button already says that.
+const voiceNotice = computed(() => {
+  if (!voice.supported) return SUPPRESS_REASONS.unsupported
+  if (voice.muted.value) return null
+  if (!voice.ready.value) return SUPPRESS_REASONS.locked
+  if (visibility.value === 'hidden') return null
+  if (props.driverPosition && props.driverPosition.source !== 'phone') return SUPPRESS_REASONS.eld
+  return null
+})
+
+function runVoiceLadder() {
+  if (!props.open) return
+  const step = currentStep.value
+  const d = maneuverMeters.value
+  if (!step || !Number.isFinite(d)) return
+  const res = ladder.evaluate({
+    routeVersion: props.routeVersion || 0,
+    stepIdx: currentStepIdx.value,
+    step,
+    stepDistanceMeters: step.distanceMeters,
+    distanceMeters: d,
+    muted: voice.muted.value,
+    hidden: visibility.value === 'hidden',
+    // ⚠️ An ELD fix is up to 30 s old — ~870 m at 65 mph. A callout computed
+    // from it would place the turn hundreds of metres from where it is, so the
+    // ladder suppresses and the chip above explains why.
+    positionSource: props.driverPosition?.source === 'phone' ? 'phone' : 'eld',
+    voiceReady: voice.ready.value,
+    supported: voice.supported,
+  })
+  if (!res || res.suppressed) return
+  voice.speak(res.text)
+}
+
+function toggleVoice() {
+  // The tap is a user gesture, so it doubles as the iOS unlock for a driver
+  // whose Navigate tap somehow missed it (a browser that blocked the first
+  // utterance, a session where Drive Mode was opened before this shipped).
+  if (!voice.ready.value) voice.unlock()
+  voice.toggleMute()
 }
 
 // ─── Map lifecycle ────────────────────────────────────────────────────────────
@@ -245,8 +401,26 @@ async function initMap() {
   })
   drawRoute()
   drawDriverMarker()
+  drawDestinationMarker()
   // Initial centering + heading; subsequent updates come from the watcher.
   syncCameraToDriver(true)
+}
+
+// The `destination` prop was declared and never referenced. It is the one thing
+// on screen that answers "where am I actually going" when a route has no steps
+// (an ELD-less truck, a lean payload), so it now drives a pin, the footer line
+// and the arrival state.
+function drawDestinationMarker() {
+  if (!map) return
+  if (destMarker) { destMarker.map = null; destMarker = null }
+  const d = props.destination
+  if (!d || !Number.isFinite(d.lat) || !Number.isFinite(d.lng)) return
+  destMarker = new google.maps.marker.AdvancedMarkerElement({
+    position: { lat: d.lat, lng: d.lng },
+    map,
+    content: createDotPin('#dc2626', 14),
+    title: d.address || 'Destination',
+  })
 }
 
 function drawRoute() {
@@ -323,13 +497,18 @@ function drawDriverMarker() {
   })
 }
 
-function syncCameraToDriver(forceCenter = false) {
+function syncCameraToDriver(resetView = false) {
   if (!map || !driverLatLng.value) return
-  // Center on driver unless the user briefly paused follow mode.
-  if (followMode.value || forceCenter) {
+  if (followMode.value) {
     map.setCenter(driverLatLng.value)
-    map.setZoom(18)
-    map.setTilt(60)
+    // ⚠️ Zoom and tilt are set ONLY on entry and on an explicit re-center.
+    // Re-applying them on every fix stomped the driver's own pinch-zoom once a
+    // minute — you could not look one junction ahead without the map yanking
+    // itself back to 18/60 the moment the next ELD ping landed.
+    if (resetView) {
+      map.setZoom(18)
+      map.setTilt(60)
+    }
     const h = props.driverPosition?.heading
     if (Number.isFinite(h)) {
       lastHeading = h
@@ -345,15 +524,21 @@ function syncCameraToDriver(forceCenter = false) {
   if (driverMarker) driverMarker.position = driverLatLng.value
 }
 
-function recenterNorth() {
+// Explicit toggle rather than a "north-up until the next fix" flash. With ELD
+// fixes 30 s apart the old behaviour was neither: the overview lasted an
+// arbitrary fraction of a minute and then vanished on its own.
+function toggleFollow() {
   if (!map) return
-  // Toggle: if we're following, switch to a brief north-up overview. Next
-  // GPS fix flips us back into follow (per the watch handler).
-  followMode.value = false
-  map.setHeading(0)
-  map.setTilt(0)
-  map.setZoom(15)
-  mapHeading.value = 0
+  if (followMode.value) {
+    followMode.value = false
+    map.setHeading(0)
+    map.setTilt(0)
+    map.setZoom(14)
+    mapHeading.value = 0
+  } else {
+    followMode.value = true
+    syncCameraToDriver(true)
+  }
 }
 
 // ─── Fullscreen API (mirrors DriverRouteMap pattern) ──────────────────────────
@@ -377,9 +562,15 @@ function exitDocumentFullscreen() {
   if (!exit) return
   try { exit.call(document) } catch { /* silent */ }
 }
+// ⚠️ EXITING FULLSCREEN IS NOT A REQUEST TO STOP NAVIGATING. This handler used
+// to `emit('close')` on any fullscreen exit, so ESC, the Android Back gesture, a
+// system swipe, or the OS dropping fullscreen for an incoming call all killed
+// turn-by-turn mid-drive — and the driver's only route back was to find the load
+// again and re-tap Navigate. The overlay is `position: fixed; inset: 0`, so it
+// still covers the screen without fullscreen; we just track the state and offer
+// a button to go back in. The ✕ is the only thing that closes Drive Mode.
 function onFullscreenChange() {
-  const fsEl = document.fullscreenElement || document.webkitFullscreenElement
-  if (!fsEl && props.open) emit('close')
+  isFullscreen.value = !!(document.fullscreenElement || document.webkitFullscreenElement)
 }
 
 // ─── Watchers & lifecycle ─────────────────────────────────────────────────────
@@ -387,37 +578,56 @@ function tearDown() {
   if (routeCasing) { routeCasing.setMap(null); routeCasing = null }
   if (routeLine) { routeLine.setMap(null); routeLine = null }
   if (driverMarker) { driverMarker.map = null; driverMarker = null }
+  if (destMarker) { destMarker.map = null; destMarker = null }
   for (const o of trafficOverlays) { o.setMap(null) }
   trafficOverlays = []
   map = null
 }
 
+function resetProgress() {
+  matchOffset.value = null
+  matchDistanceFromRoute.value = null
+  lastMatchAt = 0
+}
+
 watch(() => props.open, async (val) => {
   if (val) {
-    currentStepIdx.value = 0
+    resetProgress()
+    ladder.reset()
     followMode.value = true
     await nextTick()
     await initMap()
+    resyncToRoute()
     requestPanelFullscreen()
+    // Keep the screen alive for the whole drive. Nothing in this app used the
+    // Wake Lock API before, so the phone slept ~30 s after the driver mounted it.
+    wakeLock.request()
   } else {
     exitDocumentFullscreen()
+    wakeLock.release()
+    voice.cancel()
     tearDown()
   }
 })
 
 watch(() => props.driverPosition, () => {
   if (!props.open) return
-  followMode.value = true
+  resyncToRoute()
   syncCameraToDriver()
-  advanceStepIfNeeded()
+  runVoiceLadder()
 }, { deep: true })
 
 watch(() => props.activeRoute, () => {
-  if (!props.open || !map) return
-  // Active alternative changed (rare while in Drive Mode, but possible) —
-  // rebuild the polyline and reset step pointer.
-  currentStepIdx.value = 0
-  drawRoute()
+  if (!props.open) return
+  // New geometry — either the driver picked a different alternative or a
+  // deviation triggered a reroute. The offset is measured against the OLD
+  // polyline, so it is meaningless now: drop it and re-match on the new one.
+  resetProgress()
+  if (map) {
+    drawRoute()
+    drawDestinationMarker()
+  }
+  resyncToRoute()
 })
 
 document.addEventListener('fullscreenchange', onFullscreenChange)
@@ -427,6 +637,8 @@ onBeforeUnmount(() => {
   document.removeEventListener('fullscreenchange', onFullscreenChange)
   document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
   exitDocumentFullscreen()
+  wakeLock.release()
+  voice.cancel()
   tearDown()
 })
 </script>
@@ -476,6 +688,9 @@ onBeforeUnmount(() => {
   box-shadow: 0 6px 18px rgba(0,0,0,0.35);
   pointer-events: auto;
 }
+/* Off-route: the maneuver is still shown (it is the last thing we knew) but the
+   banner stops looking authoritative about it. */
+.drive-banner-unsure { background: #92400e; }
 .drive-banner-icon {
   font-size: 1.9rem;
   line-height: 1;
@@ -520,12 +735,44 @@ onBeforeUnmount(() => {
 }
 .drive-then-icon { font-size: 1.05rem; line-height: 1; }
 
-/* Compass */
-.drive-compass {
+/* Status chips (rerouting / off route / voice paused) */
+.drive-status-strip {
   position: absolute;
-  top: calc(max(env(safe-area-inset-top, 0), 0.75rem) + 7rem);
+  top: calc(max(env(safe-area-inset-top, 0), 0.75rem) + 5.4rem);
+  left: 0.75rem;
+  right: 4.5rem; /* clear of the control column */
+  z-index: 11;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  pointer-events: none;
+}
+.drive-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.3rem 0.65rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.2;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+}
+.drive-chip-active { background: #1d4ed8; color: #fff; }
+.drive-chip-warn { background: #b45309; color: #fff; }
+.drive-chip-muted { background: rgba(17,24,39,0.85); color: #e5e7eb; }
+
+/* Control column (re-center / voice / fullscreen) */
+.drive-controls {
+  position: absolute;
+  top: calc(max(env(safe-area-inset-top, 0), 0.75rem) + 8.4rem);
   right: 0.85rem;
-  z-index: 10;
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.drive-ctl {
   width: 44px;
   height: 44px;
   border-radius: 50%;
@@ -536,10 +783,13 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  color: #dc2626;
-  font-size: 1.3rem;
+  color: #1f2937;
+  font-size: 1.2rem;
   line-height: 1;
+  padding: 0;
 }
+.drive-ctl:active { background: #e5e7eb; }
+.drive-ctl-off { color: #dc2626; font-size: 1.3rem; }
 .drive-compass-needle {
   display: inline-block;
   transform-origin: 50% 50%;
@@ -622,5 +872,13 @@ onBeforeUnmount(() => {
   font-size: 0.85rem;
   color: #4b5563;
   margin-top: 0.1rem;
+}
+.drive-progress-dest {
+  font-size: 0.72rem;
+  color: #6b7280;
+  margin-top: 0.15rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>
