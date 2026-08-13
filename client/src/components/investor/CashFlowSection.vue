@@ -137,7 +137,11 @@
             <div class="step-label">Month-by-Month History</div>
             <div class="modal-monthly-list">
               <div v-for="m in monthlyEarnings" :key="m.month" class="modal-row">
-                <span>{{ monthLabel(m.month) }}{{ m.isCurrentMonth ? ' *' : '' }}</span>
+                <!-- `|| m.month` because this is a LIST row, not a sentence: a row
+                     whose label is blank still shows a dollar figure, so it would
+                     read as money attached to nothing. Echoing the raw key next to
+                     eleven real month names is visibly not a month. -->
+                <span>{{ monthLabel(m.month) || m.month }}{{ m.isCurrentMonth ? ' *' : '' }}</span>
                 <span class="val" :class="(m.investorEarnings || 0) >= 0 ? 'accent' : 'danger'">{{ fmt(m.investorEarnings) }}</span>
               </div>
             </div>
@@ -250,6 +254,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { formatCurrency as fmt } from '../../utils/format'
+import { monthLabel } from '../../lib/monthLabel'
 import MetricInfoDialog from './MetricInfoDialog.vue'
 
 const props = defineProps({
@@ -299,13 +304,6 @@ const breakEvenDate = computed(() => {
   d.setMonth(d.getMonth() + monthsRemaining)
   return d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
 })
-
-const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
-function monthLabel(mk) {
-  if (!mk) return ''
-  const [y, m] = mk.split('-')
-  return `${MONTH_NAMES[parseInt(m) - 1] || m} ${y}`
-}
 
 // --- Detail modal ---
 const detailType = ref('')

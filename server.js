@@ -1016,6 +1016,38 @@ function logAuditRefusal(req, action, entity, entityId, details, code) {
 //     A campaign slower than 90 days is, again, exactly the one worth catching.
 //   • every `*_failed` action — those record a write that already started.
 //   • every success action — the entire rest of the table.
+//   • ⚠️ EVERY PERIOD-GUARD REFUSAL ACTION, and this was decided per action, not
+//     as a batch. `update_driver_pay_blocked`, `delete_driver_blocked`,
+//     `update_user_blocked`, `delete_user_blocked`, `create_truck_blocked`,
+//     `update_truck_blocked`, `delete_truck_blocked`, `driver_rename_blocked`,
+//     `delete_sheet_rows_blocked`, `delete_load_blocked`,
+//     `add_driver_day_blocked`, `exclude_driver_day_blocked`,
+//     `restore_driver_day_blocked`, `restore_added_driver_day_blocked`,
+//     `delete_sheet_row_blocked`, `routemate_link_blocked`,
+//     `routemate_unlink_blocked`, `maintenance_fund_blocked`,
+//     `create_compliance_fee_blocked`, `pay_compliance_fee_blocked`,
+//     `adjust_invoice_blocked`, `pay_invoice_blocked` and the
+//     catch-all `period_refusal_blocked` are all absent, deliberately, for the
+//     three reasons the four settlement refusals fixed before them were:
+//       (i) THEY CANNOT FLOOD. Every one needs a locked month (or an unreadable
+//           lock table) AND a material write, on a Super Admin — or at widest
+//           Dispatcher — route. That is the opposite of `status_update_blocked`,
+//           which also carries cheap ROW_LOAD_MISMATCH noise a Driver can
+//           produce 60x a minute, and which is why that one IS on this list.
+//      (ii) THE RETENTION WINDOW IS SHORTER THAN THE QUESTION. Settlement
+//           disputes surface on a quarterly or annual cadence — reliably after
+//           90 days — so purging by action would delete the evidence exactly
+//           when it is first wanted, while the corresponding successful writes
+//           are kept forever.
+//     (iii) ADDING THEM WOULD PURGE NOTHING TODAY ANYWAY (every row they write
+//           carries a `[PERIOD_` code, which the detail filter below exempts)
+//           while reading as a decision that these rows are disposable. They are
+//           the opposite: on a SHARED `super_admin` login they are the only
+//           record of who kept trying to restate a settled month.
+//     Revisit only if a cheap, on-demand refusal is ever audited under one of
+//     these same actions. `scripts/test-refusal-audit-coverage.js` pins their
+//     absence, the mirror of the required-present pin in
+//     `scripts/test-driver-status-row-binding.js`.
 const PURGEABLE_REFUSAL_ACTIONS = [
 	"dispatch_blocked",
 	"reassign_blocked",
@@ -1027,6 +1059,41 @@ const PURGEABLE_REFUSAL_ACTIONS = [
 	"update_sheet_row_blocked",
 ];
 const REFUSAL_AUDIT_RETENTION_DAYS = 90;
+
+// ⚠️ THE PURGE EXEMPTION IS A LITERAL LIVING IN CALLER-INFLUENCED TEXT, SO IT HAS
+// TO BE A RESERVED SEQUENCE. purgeOldAuditRefusals() below spares any row whose
+// `details` contain `[PERIOD_`, and several PURGEABLE actions build their details
+// by interpolating values that arrived on the request:
+//   • `create_sheet_row_blocked` / `update_sheet_row_blocked` — buildSheetUpdateAudit()
+//     emits `changed[].from` / `.to`, which are RAW SHEET CELL VALUES off the body.
+//     They are capped by capAuditField() and were never scanned, and JSON.stringify
+//     escapes quotes and newlines but not `[` or `_`.
+//   • `dispatch_blocked` / `reassign_blocked` / `driver_respond_blocked` — the two
+//     refusal helpers interpolate `what`, built from `driver` / `newDriver`, which
+//     fall back to the caller's raw string.
+// So one `PUT /api/data/:rowIndex` with a cell reading `[PERIOD_` — or one
+// dispatch with that driver name — writes an audit row that can never be deleted.
+// Neither /api/data route is rate-limited, a ROW_LOAD_MISMATCH is a 409 on demand,
+// and none of these codes coalesce, so it is one permanent multi-KB row per
+// request against the one table in this app with no other retention job.
+//
+// ⚠️ THE SCRUB BELONGS ON THE CALLER TEXT AND NEVER ON THE FINISHED DETAIL. Every
+// writer appends the REAL marker as a literal `[` followed by a module-constant
+// code — sheetAuditWithCode(), periodRefusalDetail(), and the two refusal helpers
+// all put that bracket in the template, OUTSIDE the capping call — so scrubbing
+// here provably cannot reach it. Scrubbing the assembled string instead would
+// delete the exemption from exactly the rows it exists to keep, which is the same
+// defect one layer down.
+//
+// The bracket becomes a paren rather than being deleted: an audited sheet cell is
+// evidence and must stay legible, while `(PERIOD_` cannot match the filter.
+// ⚠️ CASE-FOLDED, and that is not belt-and-braces — SQLite's LIKE is
+// case-INSENSITIVE for ASCII by default, so `[period_` is spared just as readily
+// as `[PERIOD_` (measured). A case-sensitive scrub would leave the hole open under
+// one keystroke's difference.
+function scrubPurgeMarker(s) {
+	return String(s).replace(/\[(?=period)/gi, "(");
+}
 
 // Purge refusal rows older than the retention window. Mirrors
 // purgeOldDriverLocations() below: run once at boot to seed, then weekly.
@@ -5259,11 +5326,22 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		const dirChanged = directoryChangedColumns(current, nextRow);
 		if (Object.keys(dirChanged).length) {
 			const lock = directoryEditLockBlockers(current, dirChanged);
-			if (lock.unreadable) return periodLockUnreadableResponse(res, "Editing a driver's record");
+			// The refusal is audited under `update_driver_pay_blocked`, the distinct
+			// twin of the `update_driver_pay` line this route writes on success — so
+			// one query over `driver` finds both the rate changes that landed and the
+			// ones the month-end refused. The columns and their attempted values are
+			// recorded because on this route the pay structure IS the change: `pay_type`
+			// alone decides whether a day rate is used at all.
+			const dirAudit = {
+				action: "update_driver_pay_blocked", entity: "driver", entityId: String(id),
+				subject: `${current.driver_name || `driver #${id}`}: ` +
+					Object.keys(dirChanged).map((c) => `${c} ${JSON.stringify(current[c] ?? "")} -> ${JSON.stringify(nextRow[c])}`).join(", "),
+			};
+			if (lock.unreadable) return periodLockUnreadableResponse(req, res, "Editing a driver's record", dirAudit);
 			if (lock.blockers.length) {
-				return periodBlockedResponse(res,
+				return periodBlockedResponse(req, res,
 					`Cannot edit ${current.driver_name || `driver #${id}`}`,
-					lock.blockers, DIRECTORY_LOCK_REMEDY);
+					lock.blockers, DIRECTORY_LOCK_REMEDY, dirAudit);
 			}
 		}
 
@@ -5375,11 +5453,22 @@ app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), (req, res) 
 		if (!dirRow) return res.status(404).json({ error: "Driver not found" });
 		{
 			const lock = directoryDeleteLockBlockers(dirRow);
-			if (lock.unreadable) return periodLockUnreadableResponse(res, "Deleting a driver's record");
+			// This route once left no trace in EITHER direction — a delete that
+			// silently reprices a percentage driver as a day-rate one across every
+			// closed month, and a refusal of the same. The refusal half landed first;
+			// the success half is now below. The pay terms are recorded on BOTH,
+			// because deleting the row is the one case where nothing is left to read
+			// them off afterwards.
+			const dirDelAudit = {
+				action: "delete_driver_blocked", entity: "driver", entityId: String(id),
+				subject: `delete ${dirRow.driver_name || `driver #${id}`}` +
+					` (pay_type ${dirRow.pay_type || "fixed"}, pay_daily ${dirRow.pay_daily || 0}, pay_percentage ${dirRow.pay_percentage || 0})`,
+			};
+			if (lock.unreadable) return periodLockUnreadableResponse(req, res, "Deleting a driver's record", dirDelAudit);
 			if (lock.blockers.length) {
-				return periodBlockedResponse(res,
+				return periodBlockedResponse(req, res,
 					`Cannot delete ${dirRow.driver_name || `driver #${id}`}`,
-					lock.blockers, DIRECTORY_LOCK_REMEDY);
+					lock.blockers, DIRECTORY_LOCK_REMEDY, dirDelAudit);
 			}
 		}
 
@@ -5402,6 +5491,23 @@ app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), (req, res) 
 		}
 		db.prepare("DELETE FROM legal_documents WHERE driver_id = ?").run(id);
 		db.prepare("DELETE FROM drivers_directory WHERE id = ?").run(id);
+
+		// ⚠️ THE MONEY LINE, AND IT IS THE WHOLE RECORD THAT THIS ROW EVER EXISTED.
+		// getDriverPayStructures() reads drivers_directory; with the row gone the
+		// money math falls back to `{ payType: "fixed", payPercentage: 0 }` and
+		// resolveDailyRate()'s $250, so a percentage driver is silently repriced as a
+		// day-rate one in every month that is still open — and the terms are
+		// UNRECOVERABLE, because unlike a rename or a pay edit there is no surviving
+		// row to read them off. So the pay terms are written into the detail verbatim
+		// rather than referenced: this line is the only place they will still be
+		// legible tomorrow. Entity/action mirror the refusal twin
+		// (`delete_driver_blocked`) and the sibling success `update_driver_pay`.
+		logAudit(req, "delete_driver", "driver", String(id),
+			`Deleted ${dirRow.driver_name || `driver #${id}`} from the carrier directory ` +
+			`(pay_type ${dirRow.pay_type || "fixed"}, pay_daily ${dirRow.pay_daily || 0}, ` +
+			`pay_percentage ${dirRow.pay_percentage || 0}, status ${dirRow.status || "unset"})` +
+			(orphanedDocs.length ? ` — cascaded ${orphanedDocs.length} shared document${orphanedDocs.length === 1 ? "" : "s"}` : ""));
+
 		notifyChange("drivers");
 		res.json({ success: true, cascadedDocs: orphanedDocs.length });
 	} catch (err) {
@@ -15463,6 +15569,40 @@ app.put("/api/invoices/:id/approve", requireRole("Super Admin"), async (req, res
 		if (!transitionOk) {
 			return res.status(400).json({ error: `Cannot ${action} an invoice with status "${currentStatus}"` });
 		}
+
+		// ⚠️ ONLY THE `paid` BRANCH IS GUARDED, and that is a decision, not an
+		// oversight. approve / reject / processing move an invoice through review;
+		// `paid` is the one transition asserting money left the bank, and it is the
+		// one that stamps `paid_at` — the column invoiceRowPeriodLocked() reads, so
+		// this verb can CREATE the frozen state after the fact and make the row
+		// permanently un-renameable and un-cascadable with nothing on the record
+		// saying the month was already closed when it happened. submit / revert /
+		// delete / restore are left alone for the same reason: workflow state, not
+		// money, and each already has its own state-machine check.
+		if (action === "paid") {
+			const invoicePaidAudit = {
+				action: "pay_invoice_blocked", entity: "invoice", entityId: String(invoice.id),
+				subject: `mark ${invoice.invoice_number || `invoice #${invoice.id}`} PAID` +
+					` (${invoice.driver || "no driver"}, ${invoice.week_start || "?"} — ${invoice.week_end || "?"},` +
+					` $${Number(invoice.total_earnings || 0).toFixed(2)}` +
+					`${Number(invoice.adjustment || 0) ? ` ${Number(invoice.adjustment) < 0 ? "-" : "+"} $${Math.abs(Number(invoice.adjustment)).toFixed(2)} adjustment` : ""},` +
+					` status ${currentStatus} -> Paid)`,
+				// No `note`: this action carries no free-text field. `rejectionNote` is
+				// the only one on the route and it belongs to `reject`, so quoting it
+				// here would attribute a reason for rejecting to an attempt to PAY.
+			};
+			const lock = invoiceMonthLockBlockers(invoice);
+			if (lock.unreadable) return periodLockUnreadableResponse(req, res, "Marking an invoice paid", invoicePaidAudit);
+			if (lock.blockers.length) {
+				// `lock.remedy` is set only on the unresolved-date branch, where the
+				// month-end remedy would name no period and point at a route that cannot
+				// edit a week date.
+				return periodBlockedResponse(req, res,
+					`Cannot mark ${invoice.invoice_number || `invoice #${invoice.id}`} paid`,
+					lock.blockers, lock.remedy || INVOICE_LOCK_REMEDY, invoicePaidAudit);
+			}
+		}
+
 		const now = new Date().toISOString();
 		const adminName = req.session.user.username;
 		let newStatus = "";
@@ -15512,16 +15652,73 @@ app.put("/api/invoices/:id/approve", requireRole("Super Admin"), async (req, res
 
 // PUT /api/invoices/:id/adjust — Super Admin adds a +/- adjustment line
 // (e.g. one-off bonus, advance recoupment, missed deduction). Allowed on ANY
-// status — including Approved/Processing/Paid — per the owner's 2026-06-11
+// STATUS — including Approved/Processing/Paid — per the owner's 2026-06-11
 // request ("re-edit even if it's already paid"); post-approval edits are
 // flagged in the audit trail, and PUT /:id/revert can additionally send the
-// invoice back through review. The computed total_earnings stays untouched;
+// invoice back through review.
+//
+// ⚠️ BUT NOT IN ANY MONTH — read the guard below before re-deriving its polarity.
+// "Any status" is about the STATUS ladder only. A month-end lock is a separate
+// axis and it does refuse: invoiceMonthLockBlockers() blocks an adjustment whose
+// billing span touches a FINALIZED month. The two rules are not in tension —
+// status freezes nothing here, the month-end does — and stating only the first
+// is how a reader concludes the route is unguarded and "restores" a capability
+// that was never removed. The paid-in-an-OPEN-month case the owner asked for is
+// exactly what the guard's dropped `paid_at` rung preserves.
+//
+// The computed total_earnings stays untouched;
 // the rendered PDF Total Due becomes total_earnings + adjustment. Single-row,
 // last-write-wins (passing adjustment: 0 clears it).
-app.put("/api/invoices/:id/adjust", requireRole("Super Admin"), async (req, res) => {
+//
+// ⚠️ refuseCrossOrigin was added here to match its payouts sibling
+// (PUT /api/investor/payouts/:id/adjust), which has carried it since the money
+// tier shipped. This route restates a settled figure by up to ±$10,000 and its
+// only legitimate browser caller is the SPA this server serves, so demanding
+// same-origin costs nothing. The session cookie is SameSite=Lax today, which
+// already withholds it from every cross-site PUT — this is the guard for the day
+// SESSION_COOKIE_SAMESITE is set back to `none` for a cross-origin driver client,
+// which is precisely when the cookie stops covering for it.
+app.put("/api/invoices/:id/adjust", requireRole("Super Admin"), refuseCrossOrigin, async (req, res) => {
 	try {
 		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id, 10));
 		if (!invoice || invoice.deleted_at) return res.status(404).json({ error: "Invoice not found" });
+
+		// ⚠️ MONTH-END GUARD, and note it is NOT the row predicate. See
+		// invoiceMonthLockBlockers() for why `paid_at` is deliberately not a rung:
+		// the owner asked on 2026-06-11 to "re-edit even if it's already paid", so a
+		// paid invoice in an OPEN month must stay adjustable. Only a FINALIZED month
+		// is refused.
+		//
+		// Placed before the ±$10,000 validation, matching the payouts sibling — so
+		// ⚠️ THE AMOUNT RECORDED BELOW IS THE ATTEMPT, NOT A FIGURE THAT WOULD
+		// OTHERWISE HAVE LANDED. Parsed with the same Number() expression the
+		// validator uses, so the row can never disagree with the route about what the
+		// caller sent.
+		{
+			const rawAttempt = req.body && req.body.adjustment;
+			const attempted = Number(rawAttempt);
+			const attemptedText = Number.isFinite(attempted)
+				? `${attempted < 0 ? "-" : "+"}$${Math.abs(attempted).toFixed(2)}`
+				: `unparseable (${rawAttempt === undefined ? "absent" : typeof rawAttempt})`;
+			const invoiceAdjustAudit = {
+				action: "adjust_invoice_blocked", entity: "invoice", entityId: String(invoice.id),
+				subject: `adjust ${invoice.invoice_number || `invoice #${invoice.id}`}` +
+					` (${invoice.driver || "no driver"}, ${invoice.week_start || "?"} — ${invoice.week_end || "?"},` +
+					` status ${invoice.status || "unknown"}, adjustment ${Number(invoice.adjustment || 0).toFixed(2)} -> ${attemptedText})`,
+				// The route's own note field, and the same one the success line records.
+				note: auditReasonNote(req.body, "adjustmentNote"),
+			};
+			const lock = invoiceMonthLockBlockers(invoice);
+			if (lock.unreadable) return periodLockUnreadableResponse(req, res, "Adjusting an invoice", invoiceAdjustAudit);
+			if (lock.blockers.length) {
+				// See the twin on the paid branch: an unresolved-date refusal carries its
+				// own remedy, because "reopen the affected period" names none.
+				return periodBlockedResponse(req, res,
+					`Cannot adjust ${invoice.invoice_number || `invoice #${invoice.id}`}`,
+					lock.blockers, lock.remedy || INVOICE_LOCK_REMEDY, invoiceAdjustAudit);
+			}
+		}
+
 		// Edits after approval are legitimate (mistaken approve, late deduction)
 		// but get an explicit audit marker below.
 		const postApproval = invoice.status !== "Draft" && invoice.status !== "Submitted";
@@ -15586,6 +15783,25 @@ app.put("/api/invoices/:id/adjust", requireRole("Super Admin"), async (req, res)
 // per-transition fields of the undone states — the prior approver/payer and
 // timestamps are preserved in the audit trail entry. Draft/Submitted invoices
 // are already editable and can't be reverted.
+//
+// ⚠️ PERIOD-GUARDED ON THE `paid_at` LEG, AND THAT IS THE SAME LINE THE approve
+// ROUTE DRAWS — read the two together. approve's `paid` branch is guarded because
+// it CREATES the payment stamp in a month that may be closed; this route ERASES
+// the same stamp, on the same column, in the same months. Guarding only the
+// creating direction is a guard you can walk around by reverting and re-marking,
+// and the erase is the worse half: `paid_at` is what invoiceRowPeriodLocked()
+// reads, what the user-route cascade reports as INVOICE_ALREADY_PAID, and what a
+// statement for a settled month was printed against. Clearing it in a FINALIZED
+// month restates that month's record of whether money moved, with nothing on the
+// record saying the month was already closed when it happened.
+//
+// ⚠️ SCOPED TO A REVERT THAT ACTUALLY ERASES A STAMP, not to every revert, and the
+// criterion is the COLUMN rather than the status. An Approved / Processing /
+// Rejected invoice already carries `paid_at = ''`, so this route's `paid_at = ''`
+// is a no-op on it and the revert is pure workflow state — which is exactly what
+// approve / reject / processing are, and exactly why submit / delete / restore are
+// left alone. Guarding those as well would strand invoices in closed months over a
+// write that changes no money column.
 app.put("/api/invoices/:id/revert", requireRole("Super Admin"), (req, res) => {
 	try {
 		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id, 10));
@@ -15594,6 +15810,35 @@ app.put("/api/invoices/:id/revert", requireRole("Super Admin"), (req, res) => {
 		if (!revertible.includes(invoice.status)) {
 			return res.status(400).json({ error: `Cannot revert an invoice with status "${invoice.status}" — it is already editable.` });
 		}
+
+		// After the state-machine check and before the UPDATE. A Draft invoice in a
+		// closed month gets the clearer "already editable" 400 rather than a month-end
+		// 409 about a write it was never going to make — the ordering approve uses,
+		// and no write has happened on either path.
+		if (String(invoice.paid_at || "").trim()) {
+			const invoiceRevertAudit = {
+				action: "revert_invoice_blocked", entity: "invoice", entityId: String(invoice.id),
+				subject: `revert ${invoice.invoice_number || `invoice #${invoice.id}`} to Submitted` +
+					` (${invoice.driver || "no driver"}, ${invoice.week_start || "?"} — ${invoice.week_end || "?"},` +
+					` status ${invoice.status || "unknown"}, clearing paid_at ${JSON.stringify(auditText(invoice.paid_at, 40))}` +
+					`${invoice.paid_by ? ` set by ${auditText(invoice.paid_by, 60)}` : ""})`,
+				// This route's own free-text field, and the same one its success line
+				// records. On a refusal it is the record of why someone believed a
+				// settled payment needed undoing.
+				note: auditReasonNote(req.body, "reason"),
+			};
+			const lock = invoiceMonthLockBlockers(invoice);
+			if (lock.unreadable) return periodLockUnreadableResponse(req, res, "Reverting a paid invoice", invoiceRevertAudit);
+			if (lock.blockers.length) {
+				// `lock.remedy` is set only on the unresolved-date branch, where the
+				// month-end remedy would name no period and point at a route that cannot
+				// edit a week date. Same fallback as its two siblings.
+				return periodBlockedResponse(req, res,
+					`Cannot revert ${invoice.invoice_number || `invoice #${invoice.id}`}`,
+					lock.blockers, lock.remedy || INVOICE_LOCK_REMEDY, invoiceRevertAudit);
+			}
+		}
+
 		const reason = ((req.body && req.body.reason) || "").toString().trim().slice(0, 500);
 		const priorState = [
 			invoice.approved_by ? `approved by ${invoice.approved_by} at ${invoice.approved_at}` : "",
@@ -16657,6 +16902,48 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		// ⚠️ ALL GUARDS BEFORE THE FIRST WRITE. No transactions in this app, so a
 		// refusal discovered halfway through the cascade is not a refusal.
 
+		// ⚠️ THE REFUSAL IS AUDITED, and on this route that is not a formality: a
+		// driver rename cascades over DRIVER_RENAME_TARGETS into invoices, expenses
+		// and the sheet, a `driverName: ""` blanks the join key every settlement
+		// query uses, and a role change de-lists settled payouts. Until now the only
+		// logAudit here was on the success path, so every one of those attempts —
+		// refused — left nothing behind. `update_user_blocked` is the distinct twin
+		// of this route's `update_user` line, and both carry entity `user`.
+		//
+		// BOTH the attempted driver name and the attempted role are recorded because
+		// either can be the cause, and a blank name is itself the payload (it is the
+		// shape that defeated the DELETE guard). A password change is never echoed —
+		// only that one was requested, matching the success line's `password reset`.
+		//
+		// ⚠️ DECLARED ABOVE GUARD (a), NOT BESIDE GUARD (c), AND THAT PLACEMENT IS THE
+		// FIX. It used to sit below both availability guards, so the two refusals that
+		// return first — LAST_SUPER_ADMIN and DRIVER_NAME_TAKEN — wrote nothing at all,
+		// which is precisely the silence the rest of this batch exists to remove. They
+		// are not lesser causes than a locked month: DRIVER_NAME_TAKEN refuses an
+		// IRREVERSIBLE merge of two people's expenses, invoices and documents (after it
+		// there is nothing left to tell the rows apart), and LAST_SUPER_ADMIN refuses
+		// the one edit that can leave the system with nobody able to manage it — a
+		// terminal state with no scripted recovery. On a SHARED `super_admin` login,
+		// "someone kept trying this" is the only signal there will ever be. One
+		// descriptor, hoisted, covers every refusal on the route.
+		const userEditAudit = {
+			action: "update_user_blocked", entity: "user", entityId: String(id),
+			subject: `update ${user.username || `user ${id}`}: ` +
+				`driver_name ${JSON.stringify(user.driver_name || "")} -> ` +
+				`${driverName === undefined ? "(unchanged)" : JSON.stringify(auditText(driverName, 120))}` +
+				// ⚠️ `(unchanged)`, MIRRORING THE driver_name HALF ONE LINE ABOVE, and it
+				// was not doing so. `nextRole` is null whenever the role column will not
+				// be written — `if (nextRole)` is the only gate on `updates.push("role = ?")`
+				// — and auditText(null) is "", so a request that never mentioned `role`
+				// recorded `role "Driver" -> ""`, which reads as an attempt to BLANK the
+				// role of the account being renamed. Measured against this data: a plain
+				// `PUT /api/users/26 {"driverName":"…"}` wrote exactly that. It is an
+				// over-claim in the one table this batch exists to make trustworthy, and
+				// it is now rendered on the Data Issues page as "what was attempted".
+				`, role ${JSON.stringify(user.role || "")} -> ${nextRole === null ? "(unchanged)" : JSON.stringify(auditText(nextRole, 60))}` +
+				(req.body && req.body.password ? ", password reset requested" : ""),
+		};
+
 		// (a) Demoting the last Super Admin locks everyone out of the system, and
 		// it is the same hole as deleting them — DELETE /api/users/:id refuses that
 		// (below), so without this the refusal is one PUT away from irrelevant:
@@ -16674,6 +16961,12 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		if (nextRole && nextRole !== user.role && user.role === "Super Admin") {
 			const others = db.prepare("SELECT COUNT(*) AS cnt FROM users WHERE role = 'Super Admin' AND id <> ?").get(id).cnt;
 			if (others === 0) {
+				// Not a period cause, so it COALESCES (LAST_SUPER_ADMIN is absent from
+				// UNCOALESCED_REFUSAL_CODES) — which is right for a refusal a scripted
+				// client can repeat. `update_user_blocked` is off PURGEABLE_REFUSAL_ACTIONS,
+				// so the row is kept forever regardless of the marker.
+				recordPeriodRefusal({ req, ...userEditAudit, tail: "nothing was written — this is the only Super Admin account" },
+					"LAST_SUPER_ADMIN", []);
 				return res.status(409).json({
 					error: `Cannot change the role of ${user.username}: this is the only Super Admin account. Promote another user to Super Admin first, or the system will be left with nobody who can manage users.`,
 					code: "LAST_SUPER_ADMIN",
@@ -16693,6 +16986,12 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 				"SELECT id, username FROM users WHERE id <> ? AND TRIM(LOWER(driver_name)) = ?"
 			).get(id, String(driverName).trim().toLowerCase());
 			if (clash) {
+				// The account it would have merged INTO is named in the row: after the
+				// merge nothing distinguishes the two sets of finance rows, so the only
+				// record of which two identities were involved is this line.
+				recordPeriodRefusal({ req, ...userEditAudit,
+					tail: `nothing was written — that driver name already belongs to ${auditText(clash.username, 120)} (user ${clash.id})` },
+					"DRIVER_NAME_TAKEN", []);
 				return res.status(409).json({
 					error: `Cannot set the driver name to "${String(driverName).trim()}": it already belongs to ${clash.username} (user ${clash.id}). Two accounts sharing a driver name merge their expenses and documents irreversibly.`,
 					code: "DRIVER_NAME_TAKEN",
@@ -16703,6 +17002,7 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		// (c) The month-end lock on this route's cascade.
 		const lock = userUpdateLockBlockers(user, { driverName, role: nextRole });
 		if (lock.unreadable) {
+			recordPeriodRefusal({ req, ...userEditAudit }, "PERIOD_LOCK_UNREADABLE", []);
 			return res.status(409).json({
 				error: "The period lock table could not be read, so no month can be confirmed open. This change is held until that is fixed.",
 				code: "PERIOD_LOCK_UNREADABLE",
@@ -16761,6 +17061,18 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 				remedy.push("A money-bearing table could not be read, so it cannot be confirmed free of finalized-month rows. Fix the database error and retry — this is held rather than guessed.");
 			}
 
+			// ⚠️ THE AUDITED CODE IS `code`, THE ONE THE ROUTE ACTUALLY SELECTED — not
+			// a hardcoded PERIOD_FINALIZED. This route's blockers are not all period
+			// blockers: INVOICE_ALREADY_PAID, DRIVER_NAME_IN_USE, INVOICE_WEEK_COLLISION
+			// and TARGET_UNREADABLE are separate causes with separate remedies, and
+			// recording them all as one would make the row agree with the response's
+			// `code` field only by accident. The non-period causes are also the ones
+			// that SHOULD coalesce, which logAuditRefusal does for exactly the codes
+			// absent from UNCOALESCED_REFUSAL_CODES. `periods` is passed as measured,
+			// and sits beside the code, so it is never read as a claim that those
+			// months are closed when the cause was something else.
+			recordPeriodRefusal({ req, ...userEditAudit, tail: `nothing was written — ${lock.blockers.length} blocker(s): ${lock.blockers.map((b) => b.code).join(",")}` },
+				code, periods);
 			return res.status(409).json({
 				error: `Cannot update ${who}: ${lock.blockers.map((b) => b.detail).join("; ")}. ${cause} ${remedy.join(" ")}`.replace(/\s+/g, " ").trim(),
 				code,
@@ -17667,6 +17979,24 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	// receipts out of a closed month.
 	const name = (user.driver_name || user.username || "").trim().toLowerCase();
 
+	// Mirrors the `delete_user` success line's entity/entity_id. The cascade NAME
+	// is recorded beside the username because it — not the account id — is what
+	// every finance table is keyed on, and it is `driver_name || username`, so on
+	// an account whose driver name was blanked the two differ and only this row
+	// would say which one the cascade was about to match.
+	//
+	// ⚠️ DECLARED ABOVE THE AVAILABILITY GUARDS, NOT BESIDE THE PERIOD ONE. It used
+	// to sit below both, so CANNOT_DELETE_SELF and LAST_SUPER_ADMIN — the two
+	// refusals that return FIRST — wrote nothing. Both are exactly the attempt worth
+	// keeping: the state they prevent is terminal (no Super Admin left, no scripted
+	// recovery, see the note below), and on a SHARED `super_admin` login a repeated
+	// attempt is otherwise invisible. One descriptor, hoisted, covers every refusal
+	// on the route — the same shape PUT /api/users/:id now uses.
+	const userDelAudit = {
+		action: "delete_user_blocked", entity: "user", entityId: String(id),
+		subject: `delete ${user.username || `user ${id}`} (role ${user.role || "unknown"}, cascade name ${JSON.stringify(auditText(name, 120))})`,
+	};
+
 	// ============================================================
 	// AVAILABILITY GUARDS — checked first, because they are unconditional
 	// ============================================================
@@ -17708,6 +18038,12 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	const isSelf = Number(actor.id) === id ||
 		(!!actor.username && !!user.username && String(actor.username).trim().toLowerCase() === String(user.username).trim().toLowerCase());
 	if (isSelf) {
+		// Coalesces (not a PERIOD_* code) and is kept forever
+		// (`delete_user_blocked` is off PURGEABLE_REFUSAL_ACTIONS). Worth a row on its
+		// own merits: it is the record of an administrator reaching for the one action
+		// that would have destroyed their own session mid-request.
+		recordPeriodRefusal({ req, ...userDelAudit, tail: "nothing was written — an account cannot delete itself" },
+			"CANNOT_DELETE_SELF", []);
 		return res.status(409).json({
 			error: "You cannot delete your own account. Ask another Super Admin to do it, so the system is never left without an administrator by a single click.",
 			code: "CANNOT_DELETE_SELF",
@@ -17720,6 +18056,11 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	if (user.role === "Super Admin") {
 		const others = db.prepare("SELECT COUNT(*) AS cnt FROM users WHERE role = 'Super Admin' AND id <> ?").get(id).cnt;
 		if (others === 0) {
+			// The twin of PUT /api/users/:id's LAST_SUPER_ADMIN row, under this route's
+			// own action — so one query over `audit_trail` returns every attempt to
+			// remove the last administrator, by either door.
+			recordPeriodRefusal({ req, ...userDelAudit, tail: "nothing was written — this is the only Super Admin account" },
+				"LAST_SUPER_ADMIN", []);
 			return res.status(409).json({
 				error: `Cannot delete ${user.username}: this is the only Super Admin account. Promote another user to Super Admin first — with none, nobody can create users, manage the fleet, or recover access.`,
 				code: "LAST_SUPER_ADMIN",
@@ -17732,6 +18073,7 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	// expenses are already gone by then.
 	const lock = userDeleteLockBlockers(user, name);
 	if (lock.unreadable) {
+		recordPeriodRefusal({ req, ...userDelAudit }, "PERIOD_LOCK_UNREADABLE", []);
 		return res.status(409).json({
 			error: "The period lock table could not be read, so no month can be confirmed open. User deletion is held until that is fixed.",
 			code: "PERIOD_LOCK_UNREADABLE",
@@ -17800,6 +18142,12 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 			remedy.push("Or leave the account in place — a closed month's figures are attributed to it.");
 		}
 
+		// Audited under the code the route SELECTED, for the reason PUT
+		// /api/users/:id spells out: INVOICE_ALREADY_PAID and PERIOD_FINALIZED are
+		// different refusals with different remedies, and the row has to agree with
+		// the `code` the caller was given.
+		recordPeriodRefusal({ req, ...userDelAudit, tail: `nothing was written — ${lock.blockers.length} blocker(s): ${lock.blockers.map((b) => b.code).join(",")}` },
+			code, periods);
 		return res.status(409).json({
 			error: `Cannot delete ${who}: ${lock.blockers.map((b) => b.detail).join("; ")}. ${cause} ${remedy.join(" ")}`.replace(/\s+/g, " ").trim(),
 			code,
@@ -18519,11 +18867,305 @@ function driverPayLockedMonths(driverName, locked) {
 	return locked.filter((p) => p >= earliest).sort();
 }
 
+// ============================================================================
+// PERIOD REFUSAL AUDITING — the shared half
+// ============================================================================
+// ⚠️ THE RESPONSE HELPER AUDITS, NOT THE CALL SITE, AND THAT IS THE WHOLE POINT.
+// Ten period-guarded routes refuse through periodBlockedResponse() /
+// periodLockUnreadableResponse() and three more through sendPeriodRefusal().
+// None of the three took a `req`, so none of them COULD write a row — every one
+// of those refusals was invisible in the one place anyone looks afterwards, on
+// routes whose entire job is stopping a settled month being restated. And
+// `super_admin` is a SHARED login, so "who kept trying" was not merely
+// imprecise, it was absent.
+//
+// Auditing at the thirteen call sites instead was the obvious fix and is the
+// wrong one: the defect is precisely that this stopped being systematic, and the
+// four routes fixed by hand in the previous batch are already four different
+// spellings of one idea. sendDispatchRefusal() is the existing precedent — a
+// helper that records the refusal and THEN delegates the response — so a route
+// cannot refuse through one of these and stay silent. `req` moves to the front
+// of all three signatures for the same reason: a helper that can audit only if
+// someone remembers to hand it an optional actor is a helper that will one day
+// not be handed one.
+
+// ⚠️ THE ONE LEGITIMATE REASON TO PASS NO DESCRIPTOR: the caller has ALREADY
+// written the row (sendDispatchRefusal, and the status-override route's local
+// auditBlocked). Spelled as a VALUE rather than as an omitted argument so a
+// deliberate skip and a forgotten one cannot look alike — an omitted argument is
+// the exact failure this change closes, so it is the one shape that must stay
+// loud. A Symbol, not a string, so no caller-derived value can ever collide with
+// it and silence a real refusal.
+const AUDITED_UPSTREAM = Symbol("period refusal already recorded by the caller");
+
+// One line of an audit detail, from a value of unknown type and unknown length.
+//
+// ⚠️ PRIMITIVES ONLY. `String(x)` on a deeply-nested array recurses through
+// Array.prototype.toString and throws RangeError on a body like [[[[…]]]] —
+// inside the refusal path, which would turn a 409 into a 500 and lose both the
+// refusal AND its audit row. Same rule sendLoadBindRefusal() states, applied
+// here because these descriptors interpolate caller-supplied driver names,
+// reasons and load ids against a 50 MB body limit.
+//
+// Newlines and tabs collapse to spaces because audit_trail is read one line per
+// row and exported as such: a reason containing "\n" would otherwise split one
+// refusal across what looks like several records.
+function auditText(v, max) {
+	const s = (typeof v === "string" || typeof v === "number" || typeof v === "boolean")
+		? String(v)
+		: (v == null ? "" : `[${Array.isArray(v) ? "array" : typeof v}]`);
+	// The purge-marker reservation — see scrubPurgeMarker(). This helper caps the
+	// SUBJECT and the caller's `reason`/`note` on every period refusal, and
+	// periodRefusalDetail() appends the real `[${code}]` outside it, so scrubbing
+	// the caller's half can never cost a row its exemption.
+	return scrubPurgeMarker(s).replace(/[\r\n\t]+/g, " ").trim().slice(0, max);
+}
+
+// A caller-supplied note (`reason`, `adjustmentNote`, …) capped and collapsed
+// exactly as expenseStatusReason() does it, so every refusal in the file quotes
+// intent the same way. Stated intent is MORE useful on a refusal than on a
+// success — it is the record of what someone believed they were changing about a
+// month the server would not let them touch.
+function auditReasonNote(body, field) {
+	return auditText(body && body[field || "reason"], 500);
+}
+
+// The detail string every period refusal writes.
+//
+// ⚠️ THE `[CODE]` MARKER IS LOAD-BEARING, NOT DECORATION. purgeOldAuditRefusals()
+// exempts a row from its 90-day delete by matching the literal `[PERIOD_` in
+// DETAILS — not by action — so a period refusal whose detail omits the bracketed
+// code is silently destroyed at 90 days, which is reliably BEFORE a settlement
+// dispute surfaces. Any future change to this format keeps `[${code}]`.
+function periodRefusalDetail(subject, code, periods, note, tail) {
+	const named = [...new Set((periods || []).filter(Boolean).map(String))];
+	return `${auditText(subject, 300) || "change"} WITHHELD [${code}]` +
+		(named.length ? ` periods=${auditText(named.join(","), 200)}` : "") +
+		` — ${auditText(tail, 200) || "nothing was written"}` +
+		(note ? ` — reason: ${auditText(note, 500)}` : "");
+}
+
+// The READER for the detail format above — GET /api/admin/period-lock-issues
+// turns a stored refusal row back into "what was attempted, by which account, in
+// which month, and why it was withheld".
+//
+// ⚠️ IT LIVES BESIDE ITS WRITER ON PURPOSE, the same reason expensePostedPeriod()
+// sits next to EXPENSE_PERIOD_EXPR: if one changes the other has to, and a parser
+// twenty thousand lines away stops matching in silence.
+//
+// ⚠️ IT KEYS ON THE `[PERIOD_` MARKER, NEVER ON A LIST OF ACTION NAMES. There are
+// ~36 `*_blocked` actions and only some are period refusals — `db_export_blocked`
+// is a cross-site refusal on the database export, `dispatch_blocked` and
+// `cancel_blocked` each carry half a dozen non-period causes. The marker is
+// already the load-bearing invariant on this table: purgeOldAuditRefusals()
+// exempts a row from its 90-day delete by matching it, scrubPurgeMarker() stops
+// caller text forging it, and scripts/test-purge-detail-marker.js pins the pair.
+// Keying on it means a guard added later appears in the queue with no code change
+// here, and one that breaks the convention fails an existing test rather than
+// going quiet.
+//
+// ⚠️ AND THERE IS NO SINGLE TEMPLATE TO PARSE. Five call sites write these:
+// periodRefusalDetail() above (`<subject> WITHHELD [CODE] periods=…`), the two
+// dispatch refusal helpers (`Blocked <what> [CODE] periods=… — {json}`), the
+// status-override arrow, and the bulk expense-status route, which builds its own
+// by hand. What they share is the marker and a `periods=` fragment IMMEDIATELY
+// after it, so those are the only things read structurally; the raw `details`
+// string is returned verbatim alongside and remains the authoritative record.
+function parsePeriodRefusalDetail(raw) {
+	const raw0 = String(raw || "");
+
+	// logAuditRefusal() carries a suppressed-burst tally onto the next row rather
+	// than dropping it, so a single row can stand for several. It APPENDS that
+	// sentence, so it is terminal — and taking it off first is what stops it being
+	// read twice.
+	//
+	// ⚠️ ANCHORED TO THE END AND SPELLED IN FULL, for the reason the `periods=`
+	// list is anchored to the marker: an unanchored scan of the whole string reads
+	// caller text. Measured before this changed — a refusal whose `reason` ended
+	// `"… [+9 more identical refusal(s) suppressed in the previous 60s]"` parsed to
+	// `suppressed: 9` and the page rendered "+9 identical refusals folded into this
+	// row" about a single attempt. Same family as the month-list injection above,
+	// lower stakes (it overstates how often someone tried, it cannot move a month
+	// or a figure) but on the same row, which IS the record of who tried what.
+	// ⚠️ RESIDUAL, DELIBERATE: a note whose final characters reproduce this exact
+	// sentence, window seconds and all, still forges it. Closing that completely
+	// means neutralising `[+` in auditText(), i.e. mutating audited sheet-cell
+	// evidence ("[+1 555…" -> "(+1 555…") to defend one cosmetic column. Not worth
+	// it — unlike `[period`, this literal changes no retention and no money.
+	//
+	// ⚠️ AND STRIPPING IT IS ALSO A CORRECTNESS FIX, not only a defence. `note` is
+	// read from the LAST " — reason: ", which is BEFORE this suffix, so a genuine
+	// tally used to be swallowed into the note and rendered as part of the stated
+	// reason. Unreachable today (every PERIOD_* code is in
+	// UNCOALESCED_REFUSAL_CODES, so these rows never coalesce) and read anyway, for
+	// the reason spelled out on `suppressed` below.
+	const burst = /\s*\[\+(\d+) more identical refusal\(s\) suppressed in the previous \d+s\]$/.exec(raw0);
+	const details = burst ? raw0.slice(0, burst.index) : raw0;
+
+	const m = /\[(PERIOD_[A-Z0-9_]+)\]/.exec(details);
+	const code = m ? m[1] : "";
+
+	// ⚠️ EVERYTHING STRUCTURAL IS READ FROM AFTER THE MARKER, never from the whole
+	// string. The text before it interpolates caller-supplied driver names, load
+	// ids and sheet cells, so a driver literally named `periods=2026-01` would
+	// otherwise hand this parser a month list of their choosing.
+	const tail = m ? details.slice(m.index + m[0].length) : "";
+
+	// ⚠️ THE SELECT THAT FOUND THIS ROW FOLDS CASE AND THIS REGEX DOES NOT,
+	// DELIBERATELY, so the two disagree on exactly one input: a row whose only
+	// marker is a lower-case `[period_…]`. SQLite's LIKE is case-insensitive for
+	// ASCII, so such a row IS listed by the endpoint — but the code regex must NOT
+	// fold, because `exec` takes the FIRST match and the subject is caller text:
+	// folding would let a planted `[period_x]` become the anchor and hand this
+	// parser a tail, and therefore a month list, of the caller's choosing. Nothing
+	// can mint one today (scrubPurgeMarker() folds case), and this is what that
+	// invariant costs if it ever slips — `code` reads '' and the row renders its
+	// stored `details` instead of a sentence. The ONLY thing taken from the folded
+	// match is where the caller's text ENDS, so `attempted` below stays bounded at
+	// the same place the SELECT matched rather than becoming the whole row.
+	const bound = m || /\[period_/i.exec(details);
+
+	// ⚠️ ONLY A WELL-FORMED MONTH KEY IS KEPT, and anything else sets `unnamed`.
+	// namedLockedPeriods() deliberately emits "(unrecognized date)" where a row's
+	// month could not be resolved, and auditText() caps the joined list at 200
+	// characters, which can cut a key in half. Both have to read as "there were
+	// months this row could not name" and never as a month — a page that renders
+	// "2026-0" as a period sends an admin to reopen something that does not exist.
+	const MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
+	const periods = [];
+	let unnamedPeriods = false;
+	// ⚠️ ANCHORED TO THE MARKER, NOT SEARCHED FOR IN THE TAIL, and the difference is
+	// the whole defence. Reading from after the marker only closes the text BEFORE
+	// it — periodRefusalDetail() puts caller-supplied text AFTER it too (`tail`, and
+	// `— reason: <note>` from req.body), and it OMITS the `periods=` fragment
+	// entirely when no month is named, which is EVERY PERIOD_LOCK_UNREADABLE refusal
+	// (periodLockUnreadableResponse passes []) and every PERIOD_UNRESOLVED one. So an
+	// unanchored indexOf finds the caller's string first, and
+	//   periodRefusalDetail('adjust INV-2','PERIOD_UNRESOLVED',[],
+	//                       'periods=2099-01,2098-02','nothing was written')
+	// parsed to periods ["2099-01","2098-02"] — rendered in the Month(s) column as
+	// "January 2099, February 2098", with no caveat, from a note the refused writer
+	// supplied. Six routes reach that shape (invoice adjust/revert, fix-driver-name,
+	// remove-rows, both driver-day overrides). They are all Super Admin, but
+	// `super_admin` is a SHARED login and this queue IS the record of who tried
+	// what, so "the writer can dictate their own row" is exactly the property that
+	// must not hold. All four writers emit `[CODE] periods=` adjacently, so
+	// requiring adjacency costs nothing; a future writer that separates them loses
+	// the list (renders "—") rather than accepting one from the caller.
+	const list = /^[ \t]*periods=/.exec(tail);
+	if (list) {
+		const after = tail.slice(list[0].length);
+		const stop = after.indexOf(" — ");
+		for (const t of (stop < 0 ? after : after.slice(0, stop)).split(",")) {
+			const s = t.trim();
+			if (!s) continue;
+			if (MONTH.test(s) && !periods.includes(s)) periods.push(s);
+			else if (!MONTH.test(s)) unnamedPeriods = true;
+		}
+	}
+
+	// The caller's stated intent, which is more useful on a refusal than on a
+	// success — it is the record of what someone believed they were changing about
+	// a month the server would not let them touch. Taken from the LAST occurrence
+	// and only from after the marker, for the reason above.
+	const noteAt = tail.lastIndexOf(" — reason: ");
+	const note = noteAt < 0 ? "" : tail.slice(noteAt + " — reason: ".length).trim();
+
+	// `burst` is taken off the top of this function — see the ⚠️ there.
+	//
+	// ⚠️ UNREACHABLE TODAY, AND READ ANYWAY. The coalesce key is
+	// (user, action, CODE) and every `PERIOD_*` code is in
+	// UNCOALESCED_REFUSAL_CODES, so a period refusal is always written in full and
+	// can never inherit another row's tally. That is a convention, not a
+	// structural fact — the moment a period-family code is added without being
+	// listed there, its rows start carrying this suffix, and a parser that ignored
+	// it would render "one refusal" over a burst of them. Cheaper to read now than
+	// to notice later.
+	//
+	// What was attempted, in prose. Both leading verbs are stripped so the two
+	// template families read alike; the bulk route's `status -> X WITHHELD on 3 of
+	// 5 …` keeps its middle because that middle is the useful part.
+	//
+	// `bound`, not `m`: on a row carrying only a forged lower-case marker there is
+	// no code to read, but there IS a place the caller's text ends, and promoting
+	// the entire stored string into this column instead is how a forgery gets a
+	// bigger stage than a real refusal. See the ⚠️ on `bound` above.
+	const attempted = (bound ? details.slice(0, bound.index) : details)
+		.trim().replace(/^Blocked\s+/i, "").replace(/\s+WITHHELD$/i, "").trim();
+
+	return { code, periods, unnamedPeriods, attempted, note, suppressed: burst ? parseInt(burst[1], 10) : null };
+}
+
+// Write the refusal row for a descriptor, or deliberately don't.
+//
+// ⚠️ A MISSING DESCRIPTOR STILL WRITES A ROW. The tempting shape is "no
+// descriptor → no audit", and it reproduces the bug: a route added later that
+// forgets the argument goes back to refusing in silence, and nothing says so.
+// Instead it records under a generic action and names the gap on stderr, so the
+// worst case is a row that is under-specified rather than a refusal that never
+// happened. AUDITED_UPSTREAM is the only way to write nothing, and it is
+// explicit.
+//
+// ⚠️ AND THE ACTOR SURVIVES THAT PATH. The three helpers merge their positional
+// `req` in unconditionally rather than only when a descriptor was supplied — an
+// earlier draft did the latter, and the fallback row then recorded `system` as
+// the username. On a SHARED `super_admin` login the account is the single most
+// valuable field this table holds, so the degraded row must not be the one that
+// drops it: losing the action name costs a grep, losing the actor costs the
+// whole reason the row exists. The "descriptor forgotten" signal is therefore
+// the absent `action`, NOT an absent `req`.
+//
+// logAuditRefusal, not logAudit: every PERIOD_* code is in
+// UNCOALESCED_REFUSAL_CODES, so this is byte-identical to logAudit for them
+// today — but these helpers also carry non-period causes from the routes that
+// compute their own code, and those SHOULD coalesce. Naming the coalescer here
+// means a future cheap refusal routed through them inherits the window without
+// anyone having to remember.
+function recordPeriodRefusal(audit, code, periods, subjectFallback) {
+	try {
+		if (audit === AUDITED_UPSTREAM) return;
+		// Keyed on the ABSENT ACTION, not an absent `req` — see the ⚠️ above: the
+		// helpers always merge `req` in, so it is present even on this path and
+		// testing it would make the warning unreachable.
+		if (!audit || !audit.action) {
+			console.error(
+				`[audit] period refusal ${code} reached a response helper with no audit descriptor — ` +
+				`recording it under the generic action instead. Pass {action, entity, entityId, subject} at the call site.`
+			);
+		}
+		const a = audit || {};
+		logAuditRefusal(
+			a.req || {},
+			a.action || "period_refusal_blocked",
+			a.entity || "unknown",
+			auditText(a.entityId, 100),
+			periodRefusalDetail(a.subject || subjectFallback, code, periods, a.note, a.tail),
+			code
+		);
+	} catch (err) {
+		// A refusal must still be DELIVERED if its audit row cannot be written.
+		// logAudit already swallows its own errors; this covers the formatting.
+		console.error("Period refusal audit failed:", err.message);
+	}
+}
+
 // One 409 body for all three routes in this area, shaped like the user-delete
 // guard's so a client can branch on `code` alone.
-function periodBlockedResponse(res, what, blockers, remedy) {
+//
+// ⚠️ THE AUDITED CAUSE CODE IS NOT ALWAYS THE WIRE CODE, DELIBERATELY. The
+// response says PERIOD_FINALIZED unconditionally (an existing client shape, not
+// changed here), but a blocker set that names NO month and carries an unresolved
+// date is a different thing with a different remedy — a data problem on a row,
+// not a month-end. Auditing both as PERIOD_FINALIZED would hide it from the
+// cross-route search for PERIOD_UNRESOLVED, and would send whoever reads the row
+// to reopen a period that is open. FINALIZED outranks UNRESOLVED when both are
+// present, the same ranking dispatchWriteBlocker() and statusOverrideBlocker()
+// already use: "this would restate June" is the answer an operator can act on.
+function periodBlockedResponse(req, res, what, blockers, remedy, audit) {
 	const periods = [...new Set(blockers.flatMap((b) => b.periods))].filter(Boolean).sort();
 	const unresolved = blockers.some((b) => b.periods.some((p) => !p));
+	const code = periods.length ? "PERIOD_FINALIZED" : (unresolved ? "PERIOD_UNRESOLVED" : "PERIOD_FINALIZED");
+	recordPeriodRefusal(audit === AUDITED_UPSTREAM ? audit : { req, ...(audit || {}) }, code, periods, what);
 	return res.status(409).json({
 		error: `${what}: ${blockers.map((b) => b.detail).join("; ")}. ` +
 			(periods.length ? `${periods.map(periodLabel).join(", ")} ${periods.length === 1 ? "is" : "are"} finalized. ` : "") +
@@ -18536,7 +19178,11 @@ function periodBlockedResponse(res, what, blockers, remedy) {
 	});
 }
 
-function periodLockUnreadableResponse(res, what) {
+function periodLockUnreadableResponse(req, res, what, audit) {
+	recordPeriodRefusal(
+		audit === AUDITED_UPSTREAM ? audit : { req, ...(audit || {}) },
+		"PERIOD_LOCK_UNREADABLE", [], what
+	);
 	return res.status(409).json({
 		error: `The period lock table could not be read, so no month can be confirmed open. ${what} is held until that is fixed.`,
 		code: "PERIOD_LOCK_UNREADABLE",
@@ -19544,12 +20190,22 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 			hvut_annual: 0, irp_annual: 0,
 			routemate_vehicle_id: "",
 		});
-		if (createLock.unreadable) return periodLockUnreadableResponse(res, "Adding a truck");
+		// entity/entity_id mirror the `create_truck` success line — except that there
+		// is no row id yet, so the unit number is the only address the attempt has.
+		// The in-service date is recorded because it is the field that decides which
+		// months a new truck retroactively bills, i.e. the reason this guard exists.
+		const createAudit = {
+			action: "create_truck_blocked", entity: "truck", entityId: unitNumber.trim(),
+			subject: `add truck ${unitNumber.trim()} (in service ${inServiceCreate || "unset"},` +
+				` status ${validStatus}, driver ${finalAssignedDriver || "none"}, day rate ${driverPayParsed.value})`,
+		};
+		if (createLock.unreadable) return periodLockUnreadableResponse(req, res, "Adding a truck", createAudit);
 		if (createLock.blockers.length) {
-			return periodBlockedResponse(res,
+			return periodBlockedResponse(req, res,
 				`Cannot add ${unitNumber.trim()}`,
 				createLock.blockers,
-				"Add the truck with an in-service date in the current month, and assign its driver once the affected periods are open — or reopen them first (POST /api/periods/:period/reopen records a reason).");
+				"Add the truck with an in-service date in the current month, and assign its driver once the affected periods are open — or reopen them first (POST /api/periods/:period/reopen records a reason).",
+				createAudit);
 		}
 
 		const result = db.prepare(
@@ -19682,17 +20338,29 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			changed.retired_at = retiredParsed;
 		}
 		const lock = truckEditLockBlockers(truck, changed);
-		if (lock.unreadable) return periodLockUnreadableResponse(res, "Editing a truck");
+		// ⚠️ THE ATTEMPTED VALUES ARE THE RECORD HERE. This route's success path
+		// writes one audit line PER FIELD (update_truck_status, _in_service_date,
+		// _retired_at, _owner); a refusal has no such split because the whole edit is
+		// refused as one, so the single row has to name every field that moved and
+		// what it would have become. `changed` already holds exactly that — column
+		// name → value to be written — and nothing else in the body reaches money.
+		const truckEditAudit = {
+			action: "update_truck_blocked", entity: "truck", entityId: String(id),
+			subject: `${truck.unit_number || `truck #${id}`}: ` +
+				Object.keys(changed).map((c) => `${c} ${JSON.stringify(truck[c] ?? "")} -> ${JSON.stringify(changed[c])}`).join(", "),
+		};
+		if (lock.unreadable) return periodLockUnreadableResponse(req, res, "Editing a truck", truckEditAudit);
 		if (lock.blockers.length) {
 			// Refuse the WHOLE edit rather than writing the safe fields and dropping
 			// the rest: one row, one UPDATE, and a partial save that the form reports
 			// as successful is how a number nobody chose ends up in the database. The
 			// message names each offending field so the operator can revert exactly
 			// those and save the remainder — that is where the decomposition belongs.
-			return periodBlockedResponse(res,
+			return periodBlockedResponse(req, res,
 				`Cannot apply this change to ${truck.unit_number || `truck #${id}`}`,
 				lock.blockers,
-				`Reopen the affected period${lock.blockers.some((b) => b.periods.filter(Boolean).length > 1) ? "s" : ""} first — POST /api/periods/:period/reopen records a reason — or revert the field${lock.blockers.length === 1 ? "" : "s"} named above (${lock.blockers.map((b) => b.field).join(", ")}) and save the rest of the edit, which is not blocked.`);
+				`Reopen the affected period${lock.blockers.some((b) => b.periods.filter(Boolean).length > 1) ? "s" : ""} first — POST /api/periods/:period/reopen records a reason — or revert the field${lock.blockers.length === 1 ? "" : "s"} named above (${lock.blockers.map((b) => b.field).join(", ")}) and save the rest of the edit, which is not blocked.`,
+				truckEditAudit);
 		}
 
 		const updates = [];
@@ -19924,7 +20592,16 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	if (!truck) return res.status(404).json({ error: "Truck not found" });
 
 	const lock = truckDeleteLockBlockers(truck);
-	if (lock.unreadable) return periodLockUnreadableResponse(res, "Deleting a truck");
+	// Mirrors the `delete_truck` success line's entity/entity_id. The in-service
+	// and retired dates are recorded because together they are the interval whose
+	// fixed costs the delete would strip out of every closed month.
+	const truckDelAudit = {
+		action: "delete_truck_blocked", entity: "truck", entityId: String(id),
+		subject: `delete ${truck.unit_number || `truck #${id}`}` +
+			` (status ${truck.status || "unknown"}, in service ${truck.in_service_date || "unset"},` +
+			` retired ${truck.retired_at || "not retired"}, owner ${truck.owner_id || 0})`,
+	};
+	if (lock.unreadable) return periodLockUnreadableResponse(req, res, "Deleting a truck", truckDelAudit);
 	if (lock.blockers.length) {
 		// ⚠️ The remedy deliberately does NOT say "set it Inactive instead". That is
 		// the obvious advice and it is wrong: the fixed-cost queries select
@@ -19940,10 +20617,11 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 		// mirror column — a retired-from month fed through truckChargeFromMonth's
 		// companion at the four fixed-cost gates — after which retiring a truck
 		// becomes an open-month edit and this refusal stops being a dead end.
-		return periodBlockedResponse(res,
+		return periodBlockedResponse(req, res,
 			`Cannot delete ${truck.unit_number || `truck #${id}`}`,
 			lock.blockers,
-			"Leave the truck in place — a closed month's figures are attributed to it, and marking it Inactive would strip those same months instead. If it genuinely has to go, reopen the affected periods first (POST /api/periods/:period/reopen records a reason).");
+			"Leave the truck in place — a closed month's figures are attributed to it, and marking it Inactive would strip those same months instead. If it genuinely has to go, reopen the affected periods first (POST /api/periods/:period/reopen records a reason).",
+			truckDelAudit);
 	}
 
 	// ⚠️ SEPARATE BUG, found end-to-end while testing the guard above, and it is
@@ -20306,6 +20984,171 @@ function invoiceRowPeriodLocked(r) {
 	if (!MONTH.test(start) && !MONTH.test(end)) return true; // cannot tell -> assume closed
 	if (!periodLocksReadable()) return true;
 	return (MONTH.test(start) && isLocked(start)) || (MONTH.test(end) && isLocked(end));
+}
+
+// The remedy sentence every invoice write guard ends on, kept in one place so the
+// two routes cannot drift into telling an admin two different things.
+const INVOICE_LOCK_REMEDY =
+	"Reopen the affected period first — POST /api/periods/:period/reopen records a reason.";
+
+// Ceiling on the months one invoice may claim to bill. A weekly invoice spans 1
+// or 2; the widest legitimate manual invoice anyone has described is a catch-up
+// covering a few months. Ten years is generous enough that no real row reaches it
+// and small enough that enumerating the span is free.
+const INVOICE_MAX_SPAN_MONTHS = 120;
+
+// ============================================================================
+// THE INVOICE WRITE GUARD — a MONTH-ONLY twin of invoiceRowPeriodLocked()
+// ============================================================================
+// ⚠️ NO INVOICE WRITE ROUTE HAD A PERIOD GUARD AT ALL. invoiceRowPeriodLocked()
+// above has existed since the rename cascade shipped and is called by exactly two
+// READERS — the user-delete cascade and planDriverRenameSqlite() — so the table it
+// protects was guarded against being renamed into and not against being *edited*.
+// PUT /api/invoices/:id/adjust books a signed correction of up to ±$10,000 onto
+// any invoice in any month, and the `paid` branch of PUT /api/invoices/:id/approve
+// stamps paid_at, i.e. it can CREATE the frozen state after the fact.
+//
+// ⚠️ THE `paid_at` RUNG IS DELIBERATELY DROPPED, AND THAT IS THE WHOLE REASON THIS
+// IS A SECOND FUNCTION RATHER THAN A SECOND CALLER. Reusing the predicate verbatim
+// would have been one line and would have silently removed a capability the owner
+// asked for BY NAME on 2026-06-11 — "re-edit even if it's already paid" — which is
+// the entire premise of the adjust route (see its own header comment). A paid
+// invoice in an OPEN month stays editable; what becomes impossible is restating a
+// FINALIZED one. That is the same line PUT /api/investor/payouts/:id/adjust draws
+// when it says a finalized-but-unpaid row is still adjustable: the freeze belongs
+// to the month-end, not to the payment.
+//
+// ⚠️ POLARITY IS REFUSE-WHEN-FINALIZED, THE OPPOSITE OF THE PAYOUTS SIBLING, and
+// getting it backwards blocks every legitimate edit while permitting every
+// illegitimate one. PUT /api/investor/payouts/:id/adjust inverts because
+// investor_payouts.amount is RECOMPUTED live while its period is open, so a manual
+// delta layered on an open month is counted twice and drifts again on the next
+// reconcile — there, "still open" is the hazard. An invoice carries a frozen
+// render_data snapshot and is never reconciled, so that hazard does not exist here
+// and the only hazard left is the ordinary one: restating a settled month.
+//
+// ⚠️ EVERY MONTH IN THE SPAN IS TESTED, NOT JUST THE TWO ENDPOINTS, and the
+// difference is not academic. A Sat–Fri billing week straddles at most one
+// boundary — production carries 3 such invoices out of 27, all of them Paid — and
+// for those, the endpoints ARE the span. But `is_manual = 1` invoices come off
+// the manual route, which validates only `DATE_RE` and `periodEnd >= periodStart`
+// and writes those dates straight into these columns. So a manual invoice for
+// 2025-04-01 — 2026-08-31 has BOTH endpoints in open months while every finalized
+// month in this database sits in the middle: an endpoints-only test waves it
+// through, and ±$10,000 lands on fifteen closed months at once. Walking the span
+// costs one indexed lookup per month.
+//
+// Locking ANY month in the span freezes the row, because that month's settlement
+// figures were computed with this driver's pay in them.
+//
+// Returns the {unreadable, blockers} shape truckEditLockBlockers() returns, so it
+// drops straight into periodLockUnreadableResponse() / periodBlockedResponse()
+// and inherits their refusal auditing rather than growing a fourteenth spelling.
+function invoiceMonthLockBlockers(inv) {
+	// ⚠️ RANGE-CHECKED, NOT MERELY SHAPE-CHECKED, and this is the same trap
+	// truckChargeUntilMonth() documents. A bare `\d{4}-\d{2}` accepts "2026-13",
+	// which no real month equals and no lock row can ever carry — so a week date of
+	// "2026-13-01" would RESOLVE, find no lock, and be waved through as an open
+	// month. That is a fail-OPEN on precisely the malformed row the unresolved rung
+	// below exists to withhold. Caught by scripts/test-invoice-period-guard.js.
+	// (invoiceRowPeriodLocked() keeps the looser shape test: it is a READER, so the
+	// same input only makes it under-report a rename's blockers.)
+	const MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
+	// Fail CLOSED on an unreadable period_locks, for the reason periodWriteLocked()
+	// states: isLocked() swallows every error and answers "not locked", so a broken
+	// table would turn this guard off silently rather than loudly.
+	if (!periodLocksReadable()) return { unreadable: true, blockers: [] };
+
+	const label = inv && inv.invoice_number ? inv.invoice_number : `invoice #${(inv && inv.id) || "?"}`;
+	const resolved = [];
+	const unreadableDates = [];
+	for (const col of ["week_start", "week_end"]) {
+		const raw = String((inv && inv[col]) || "").trim();
+		const month = raw.slice(0, 7);
+		if (MONTH.test(month)) resolved.push({ col, raw, month });
+		else unreadableDates.push({ col, raw });
+	}
+
+	// ⚠️ STRICTER THAN invoiceRowPeriodLocked(), ON PURPOSE. That predicate refuses
+	// only when NEITHER end parses; this one refuses when EITHER does not. The
+	// difference is the straddling week: reading week_start as 2026-08 tells you
+	// nothing about a week_end you cannot read, and the unreadable half is exactly
+	// as likely to be the locked month as the readable one. The reader can afford
+	// the looser rung because it only ever widens a rename's blocker list; a WRITE
+	// guard cannot — "a guard that waves through what it cannot read is not a
+	// guard". Costs nothing today: 0 of 27 production invoices carry an
+	// unparseable week date.
+	// ⚠️ THE UNRESOLVED BRANCH CARRIES ITS OWN REMEDY, because the month-end one is
+	// a dead end here: it says "reopen the affected period", names no period (the
+	// wire `periods` is empty), and no route in this app can edit `week_start` /
+	// `week_end` anyway — the only two writers are the INSERTs. Sending an admin to
+	// reopen a month that was never closed, to fix a date they cannot reach, is
+	// worse than saying so.
+	const DATE_REMEDY = "Correct this invoice's billing dates — it carries a value the server cannot resolve to a month, " +
+		"so no month it would restate can be confirmed open. Regenerate the invoice if the dates cannot be corrected in place.";
+	if (unreadableDates.length) {
+		return {
+			unreadable: false,
+			remedy: DATE_REMEDY,
+			blockers: [{
+				table: "invoices", rows: 1, invoiceId: (inv && inv.id) || null,
+				// [""] is what makes periodBlockedResponse() audit this as
+				// PERIOD_UNRESOLVED rather than PERIOD_FINALIZED — a date problem on one
+				// row, whose remedy is to correct the date, NOT to reopen a month that
+				// was never closed.
+				periods: [""],
+				detail: `${label} carries ${unreadableDates.map((u) => `${u.col} "${auditText(u.raw, 40) || "(empty)"}"`).join(" and ")}` +
+					`, which the server cannot resolve to a month, so the month${unreadableDates.length === 1 ? "" : "s"} this invoice would restate cannot be confirmed open`,
+			}],
+		};
+	}
+
+	// The billing span, in month keys. Sorted rather than assumed: the weekly
+	// generator always writes start <= end, but the manual route only asserts that
+	// on the DAY strings it is given, and a future writer need not.
+	const [lo, hi] = [resolved[0].month, resolved[1].month].sort();
+	const span = [];
+	{
+		let p = lo;
+		// ⚠️ THE CAP REFUSES, IT DOES NOT TRUNCATE. Silently examining the first 120
+		// months of a longer span is the endpoints bug again, one order of magnitude
+		// out: it would report "no locked month" having looked at a prefix. An
+		// invoice claiming to bill more than ten years is malformed on its face, and
+		// the honest answer is the same one an unreadable date gets.
+		for (let guard = 0; guard <= INVOICE_MAX_SPAN_MONTHS; guard++) {
+			span.push(p);
+			if (p === hi) break;
+			let y = parseInt(p.slice(0, 4), 10);
+			let m = parseInt(p.slice(5, 7), 10) + 1;
+			if (m > 12) { m = 1; y += 1; }
+			p = `${y}-${String(m).padStart(2, "0")}`;
+		}
+		if (span[span.length - 1] !== hi) {
+			return {
+				unreadable: false,
+				remedy: DATE_REMEDY,
+				blockers: [{
+					table: "invoices", rows: 1, invoiceId: (inv && inv.id) || null,
+					periods: [""],
+					detail: `${label} claims to bill ${resolved[0].raw} — ${resolved[1].raw}, more than ` +
+						`${INVOICE_MAX_SPAN_MONTHS} months, so the months it would restate cannot be enumerated`,
+				}],
+			};
+		}
+	}
+
+	const locked = span.filter(isLocked).sort();
+	if (!locked.length) return { unreadable: false, blockers: [] };
+	return {
+		unreadable: false,
+		blockers: [{
+			table: "invoices", rows: 1, invoiceId: (inv && inv.id) || null,
+			periods: locked,
+			detail: `${label} bills ${resolved[0].raw} — ${resolved[1].raw}` +
+				`${span.length > 2 ? ` (${span.length} months)` : ""}, which covers ` +
+				`${locked.map(periodLabel).join(", ")}`,
+		}],
+	};
 }
 
 // Which locked months to NAME for a set of blocked rows. Only a month that
@@ -20825,6 +21668,29 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 			});
 		}
 		if (verdict.decision === "block") {
+			// ⚠️ AUDITED, AND ONLY ON THE REAL CALL — the `dryRun` branch returns
+			// above, so a dry run cannot mint a refusal row. That matters here more
+			// than anywhere else in this file: the dry run is the documented way to
+			// inspect a rename, so auditing it would fill the trail with rehearsals
+			// and bury the one attempt that was actually made.
+			//
+			// The audited code is `verdict.code`, which is not always a period code:
+			// INVOICE_WEEK_COLLISION and TARGET_UNREADABLE are hard blocks that
+			// outrank even the acknowledgement escape hatch, and recording them as
+			// PERIOD_FINALIZED would misdescribe a refusal no reopen can clear. Both
+			// names are recorded because a rename is only interpretable as a pair,
+			// and `isMerge` is called out separately — "fix a typo" and "combine two
+			// people's pay history" are different decisions that look identical at the
+			// call site. `super_admin` is a shared login: this identifies the account.
+			recordPeriodRefusal({
+				req, action: "driver_rename_blocked", entity: "driver", entityId: oldTrim,
+				subject: `rename ${JSON.stringify(auditText(oldTrim, 120))} -> ${JSON.stringify(auditText(newTrim, 120))}` +
+					`${isMerge ? " (MERGE — two names fold into one)" : ""}` +
+					`, ${blockers.length} blocked target(s)`,
+				note: auditReasonNote(req.body),
+				tail: `nothing was written — ${verdict.rationale ? "verdict: block" : "block"}`,
+			}, verdict.code || "PERIOD_FINALIZED",
+				[...new Set(blockers.flatMap((b) => b.periods || []))].filter(Boolean).sort());
 			return res.status(409).json({
 				error: verdict.code === "PERIOD_LOCK_UNREADABLE"
 					? "Cannot verify which accounting periods are closed — refusing the rename."
@@ -21238,9 +22104,39 @@ async function isPeriodGuardedGid(sheets, sheetId) {
 // One capped field for an audit payload. Hoisted out of buildSheetDeleteAudit so
 // the update audit below caps identically — two truncation implementations on the
 // same table is how one of them quietly stops parsing.
+// ⚠️ THE SCRUB RUNS BEFORE THE SLICE, and it is the purge-marker reservation —
+// see scrubPurgeMarker(). `changed[].from` / `.to` are raw sheet cells off the
+// request body on two PURGEABLE actions, so an unscrubbed cell reading `[PERIOD_`
+// makes its audit row immortal. It is length-preserving (one character for one),
+// so the truncation budget below is unchanged either way.
 function capAuditField(v, n) {
-	const s = String(v == null ? "" : v);
+	const s = scrubPurgeMarker(v == null ? "" : v);
 	return s.length > n ? s.slice(0, n) + "…[truncated]" : s;
+}
+
+// ⚠️ THE BRACKETED CODE GOES OUTSIDE THE JSON, AND THIS IS A LIVE RETENTION FIX
+// RATHER THAN A TIDY-UP. `create_sheet_row_blocked` and `update_sheet_row_blocked`
+// are both on PURGEABLE_REFUSAL_ACTIONS, and purgeOldAuditRefusals() spares a row
+// ONLY when its details match the literal `[PERIOD_`. These two build their
+// details with buildSheetUpdateAudit(), which emits pure JSON — `"code":
+// "PERIOD_FINALIZED"`, with a quote and a colon where the filter wants a bracket.
+// So it never matched, and every period refusal on the sheet-write routes was
+// being DELETED at 90 days: reliably before a settlement dispute surfaces, and on
+// exactly the routes that rewrite Job Tracking, where the money lives. Their
+// non-period siblings (DUPLICATE_LOAD, SHEET_CHANGED, ROW_READ_FAILED) are the
+// cheap, on-demand refusals the purge was built for and keep aging out, which is
+// why the marker is written for every code rather than only the period ones —
+// one rule, and the filter decides.
+//
+// ⚠️ THE RESULT IS NO LONGER PARSEABLE AS A WHOLE. That is deliberate and it is
+// safe: nothing in server.js, client/ or scripts/ parses audit_trail.details, the
+// column is read as prose, and the JSON object is still intact as the leading
+// token for anyone who wants it. Appending inside the object instead would put
+// the marker back under buildSheetUpdateAudit's truncation budget, where a wide
+// row could push it off the end and silently re-arm the purge — the marker must
+// not be something a large payload can lose.
+function sheetAuditWithCode(details, code) {
+	return code ? `${details} [${capAuditField(code, 60)}]` : details;
 }
 
 // The audit `details` payload, built so that TRUNCATION CANNOT COST THE ROW
@@ -22113,10 +23009,38 @@ app.post("/api/admin/remove-rows", requireRole("Super Admin"), async (req, res) 
 			deletable.push({ rowIndex, snapshot: sheetRowSnapshot(headers, row) });
 		}
 
+		// ⚠️ WITHHELD ROWS GET THEIR OWN AUDIT LINE, WHOLESALE OR PARTIAL — the same
+		// shape and the same reasoning as PUT /api/expenses/bulk-status. The
+		// wholesale case (below) returns 409 before `auditDetails` even exists, so it
+		// recorded nothing at all. The PARTIAL case is worse: it returns 200, audits
+		// only the rows that were deleted, and the batch reads afterwards as a clean
+		// success while the rows that tried to delete out of a settled month — the
+		// highest-value rows this table can hold — leave no trace. One extra row per
+		// REQUEST, not per index, and only when something was actually withheld.
+		//
+		// A distinct action from `delete_sheet_rows`, per this file's naming split,
+		// so the purge and the coalescer can tell a refusal from a write. entity and
+		// entity_id mirror the success line (`sheet_row`, the tab name); the row
+		// indices and their codes go in the detail, so no single index owns the row.
+		const auditWithheld = (partial) => {
+			if (!skipped.length) return;
+			const codes = [...new Set(skipped.map((s) => s.code))];
+			const refusalCode = codes.includes("PERIOD_FINALIZED") ? "PERIOD_FINALIZED" : codes[0];
+			recordPeriodRefusal({
+				req, action: "delete_sheet_rows_blocked", entity: "sheet_row", entityId: String(sheet),
+				subject: `delete ${skipped.length} of ${indices.length} row(s) from ${sheet}: ${skipped.map((s) => s.rowIndex).join(",")}`,
+				note: reason,
+				tail: partial
+					? `partial: ${deletable.length} other row(s) proceeded`
+					: "nothing was written",
+			}, refusalCode, [...new Set(skipped.flatMap((s) => s.periods || []))].filter(Boolean).sort());
+		};
+
 		if (!deletable.length) {
 			// Everything was withheld. A 200 with `deleted: 0` reads as success on a
 			// route whose entire job is deleting, so this is a 409 naming the cause.
 			const periods = [...new Set(skipped.flatMap((s) => s.periods))].sort();
+			auditWithheld(false);
 			return res.status(409).json({
 				error: skipped[0].reason,
 				code: skipped[0].code,
@@ -22189,6 +23113,11 @@ app.post("/api/admin/remove-rows", requireRole("Super Admin"), async (req, res) 
 		}
 
 		logAudit(req, "delete_sheet_rows", "sheet_row", String(sheet), auditDetails("deleted"));
+		// The partial withhold, recorded as its own row AFTER the delete landed —
+		// two events, two rows, exactly as the bulk expense route does it. Ordering
+		// matters only in that `tail` claims the other rows proceeded, which is not
+		// true until the batchUpdate above has returned.
+		auditWithheld(true);
 		// The 60s Job Tracking cache would otherwise keep serving the deleted rows.
 		if (guarded) jtCacheInvalidate();
 
@@ -22755,11 +23684,19 @@ app.post("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res)
 			const appendChanges = changedGuardedCells(hdrs, [], values);
 			const appendBlocker = sheetRowUpdateBlocker(true, hdrs, [], values, appendChanges);
 			if (appendBlocker) {
-				logAudit(req, "create_sheet_row_blocked", "sheet_row", `${sheetName}!new`, buildSheetUpdateAudit({
+				// logAuditRefusal, not logAudit, and the code is passed so the coalescer
+				// can see it. Byte-identical today for the PERIOD_* causes (all three are
+				// in UNCOALESCED_REFUSAL_CODES, so they are still written one row per
+				// attempt with their own row address) — the change is that a future
+				// non-period refusal on this action inherits the 60s window instead of
+				// being able to flood the table. sheetAuditWithCode() puts the bracketed
+				// code outside the JSON so purgeOldAuditRefusals() can actually see it;
+				// without it this action's period refusals were deleted at 90 days.
+				logAuditRefusal(req, "create_sheet_row_blocked", "sheet_row", `${sheetName}!new`, sheetAuditWithCode(buildSheetUpdateAudit({
 					outcome: "blocked", sheet: sheetName, rowIndex: null,
 					changed: appendChanges.map((c) => ({ column: c.column, index: c.index, from: "", to: c.to, why: c.why })),
 					guardedChanged: appendChanges, code: appendBlocker.code, periods: appendBlocker.periods,
-				}));
+				}), appendBlocker.code), appendBlocker.code);
 				return res.status(409).json({
 					error: appendBlocker.error.replace("This row's figures are counted in", "This new row's figures would be counted in"),
 					code: appendBlocker.code,
@@ -23038,14 +23975,14 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 						// Fail CLOSED: an unread Load ID column means the collision cannot
 						// be ruled out, and this is the one check standing between a
 						// retyped id and a silently shadowed locked-month load.
-						logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("blocked", { code: "LOAD_ID_CHECK_FAILED", error: err.message }));
+						logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: "LOAD_ID_CHECK_FAILED", error: err.message }), "LOAD_ID_CHECK_FAILED"));
 						return res.status(409).json({
 							error: "This edit changes the Load ID, and the existing load ids could not be read to check for a collision. Try again.",
 							code: "LOAD_ID_CHECK_FAILED",
 						});
 					}
 					if (collision) {
-						logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("blocked", { code: "DUPLICATE_LOAD" }));
+						logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: "DUPLICATE_LOAD" }), "DUPLICATE_LOAD"));
 						return res.status(409).json({
 							error: `Load ID '${lidChange.to}' already exists on row ${collision}. Two rows sharing a load id are collapsed to one everywhere the app totals revenue, so this would silently drop that row's figures — including out of a finalized month. Use a unique load id.`,
 							code: "DUPLICATE_LOAD",
@@ -23061,7 +23998,14 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 			// Record the attempt. `super_admin` is a shared login, so a refusal that
 			// left no trace would make a repeated attempt to rewrite a closed month
 			// invisible in the one place anyone looks afterwards.
-			logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("blocked", { code: blocker.code, periods: blocker.periods }));
+			// logAuditRefusal, not logAudit — see the create twin in POST /api/data. Every
+			// code sheetRowUpdateBlocker() can answer here is a PERIOD_* one and all three
+			// are in UNCOALESCED_REFUSAL_CODES, so this is byte-identical today: still one
+			// row per attempt, still carrying its own sheet address and month list. What it
+			// buys is that the action now declares its coalescing rule in one place, and
+			// the sibling refusals on this same action (DUPLICATE_LOAD, SHEET_CHANGED) —
+			// which ARE reachable on demand — are the ones a future reader will reach for.
+			logAuditRefusal(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: blocker.code, periods: blocker.periods }), blocker.code), blocker.code);
 			return res.status(409).json({
 				error: blocker.error,
 				code: blocker.code,
@@ -23090,7 +24034,7 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 				});
 				fresh = ((re.data.values || [[]])[0]) || [];
 			} catch (err) {
-				logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("blocked", { code: "ROW_READ_FAILED", error: err.message }));
+				logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: "ROW_READ_FAILED", error: err.message }), "ROW_READ_FAILED"));
 				return res.status(409).json({
 					error: "The row could not be re-read immediately before writing, so it cannot be confirmed to be the row that was checked. Try again.",
 					code: "ROW_READ_FAILED",
@@ -23102,7 +24046,7 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 				return true;
 			};
 			if (!same(fresh, before)) {
-				logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("blocked", { code: "SHEET_CHANGED" }));
+				logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: "SHEET_CHANGED" }), "SHEET_CHANGED"));
 				return res.status(409).json({
 					error: `Row ${rowIndex} changed while this edit was being checked — another write, or a deleted row shifting the sheet up, means this index no longer points at the row that was validated. Re-open the row and try again.`,
 					code: "SHEET_CHANGED",
@@ -23355,12 +24299,18 @@ function sendDispatchRefusal(req, res, blocked, action, loadId, what) {
 	logAuditRefusal(
 		req, action, "load",
 		(typeof loadId === "string" || typeof loadId === "number") ? String(loadId).slice(0, 100) : "",
-		`Blocked ${String(what == null ? "" : what).slice(0, 200)} [${blocked.code}]${periods.length ? ` periods=${periods.join(",")}` : ""} — ${JSON.stringify({ code: blocked.code, periods })}`,
+		// scrubPurgeMarker: `what` interpolates the caller's raw driver name, and a
+		// `[PERIOD_` in it would exempt this row from purgeOldAuditRefusals() forever.
+		// The real marker is the `[${blocked.code}]` immediately after it, which is a
+		// literal bracket around a module constant and is not scrubbed.
+		`Blocked ${scrubPurgeMarker(what == null ? "" : what).slice(0, 200)} [${blocked.code}]${periods.length ? ` periods=${periods.join(",")}` : ""} — ${JSON.stringify({ code: blocked.code, periods })}`,
 		blocked.code
 	);
-	if (blocked.code === "PERIOD_LOCK_UNREADABLE") return sendPeriodRefusal(res, "unreadable");
-	if (blocked.code === "PERIOD_UNRESOLVED") return sendPeriodRefusal(res, "unresolved", null, what);
-	return sendPeriodRefusal(res, "finalized", periods, what);
+	// AUDITED_UPSTREAM: the logAuditRefusal above IS this refusal's row. Passing a
+	// descriptor here would write a second one for the same event.
+	if (blocked.code === "PERIOD_LOCK_UNREADABLE") return sendPeriodRefusal(req, res, "unreadable", null, null, AUDITED_UPSTREAM);
+	if (blocked.code === "PERIOD_UNRESOLVED") return sendPeriodRefusal(req, res, "unresolved", null, what, AUDITED_UPSTREAM);
+	return sendPeriodRefusal(req, res, "finalized", periods, what, AUDITED_UPSTREAM);
 }
 
 // Read Job Tracking's header row, EVERY data row, and the caller's target row
@@ -23648,7 +24598,10 @@ function sendLoadBindRefusal(req, res, refusal, action, loadId, what) {
 	// time), on routes one of which a Driver can call 60x a minute.
 	logAuditRefusal(
 		req, action, "load", auditId,
-		`Blocked ${String(what == null ? "" : what).slice(0, 200)} [${refusal.code}]${detail}`,
+		// scrubPurgeMarker, same reasoning as sendDispatchRefusal() — and sharper
+		// here, because a ROW_LOAD_MISMATCH is a 409 on demand on two routes with no
+		// rate limiter, so this is the cheapest way to mint a permanent row.
+		`Blocked ${scrubPurgeMarker(what == null ? "" : what).slice(0, 200)} [${refusal.code}]${detail}`,
 		refusal.code
 	);
 	const body = { error: refusal.error, code: refusal.code };
@@ -24176,7 +25129,24 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) =>
 // Shared 409 for the two guards below. Kept in one place so a load delete and a
 // driver-day override refuse in the same shape (`code` + `periods`), which is
 // what lets one client-side handler render both.
-function sendPeriodRefusal(res, kind, periods, extra) {
+// ⚠️ AUDITS BEFORE IT ANSWERS, like its two siblings above. `req` is first for
+// the same reason: three of this helper's callers (the load delete and both
+// driver-day override verbs) had no audit row of any kind on their refusal path,
+// so an attempt to drop a load out of a settled month — or to put a $150 active
+// day back into one — left nothing behind at all. The callers that DO record
+// their own (sendDispatchRefusal, the status-override route) pass
+// AUDITED_UPSTREAM so this cannot double-write.
+//
+// `kind` maps 1:1 onto the audited cause code, so the row and the response can
+// never disagree about why the write was refused.
+function sendPeriodRefusal(req, res, kind, periods, extra, audit) {
+	const code = kind === "unreadable" ? "PERIOD_LOCK_UNREADABLE"
+		: kind === "unresolved" ? "PERIOD_UNRESOLVED"
+		: "PERIOD_FINALIZED";
+	recordPeriodRefusal(
+		audit === AUDITED_UPSTREAM ? audit : { req, ...(audit || {}) },
+		code, periods || [], extra
+	);
 	if (kind === "unreadable") {
 		return res.status(409).json({
 			error: "The period lock table could not be read, so no month can be confirmed open. This change is held until that is fixed. It is a database fault, not the close window — waiting will not clear it.",
@@ -24229,7 +25199,19 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 		// Fail CLOSED before anything else: isLocked() swallows every error and
 		// answers "not locked", so an unreadable period_locks would leave the guard
 		// present, silent and open.
-		if (!periodLocksReadable()) return sendPeriodRefusal(res, "unreadable");
+		// ⚠️ THE MOST DESTRUCTIVE LOAD ACTION IN THE APP, and until now only its
+		// SUCCESS was recorded. `delete_load` has been audited since it removes a
+		// load from every KPI; a refused delete wrote nothing, so audit_trail could
+		// not tell "nobody tried to drop that load out of May" from "someone tried
+		// repeatedly and the close window refused them". entity/entity_id mirror the
+		// `delete_load` success line — the load id, which is what the delete is
+		// keyed on. The raw id is used rather than the lowercased `lid` so the row
+		// records what the caller actually sent.
+		const loadDelAudit = {
+			action: "delete_load_blocked", entity: "load", entityId: rawId,
+			subject: `soft-delete load ${rawId}`,
+		};
+		if (!periodLocksReadable()) return sendPeriodRefusal(req, res, "unreadable", null, null, loadDelAudit);
 
 		// ONE sheet read serves both the guard and the audit row index. It used to
 		// be wrapped in a bare `catch {}` so a Sheets hiccup merely cost the row
@@ -24240,7 +25222,7 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 			jobTracking = await getJobTrackingCached();
 		} catch (e) {
 			console.error("Load delete blocked — Job Tracking unreadable:", e.message);
-			return sendPeriodRefusal(res, "unresolved", null, `Load ${rawId}`);
+			return sendPeriodRefusal(req, res, "unresolved", null, `Load ${rawId}`, loadDelAudit);
 		}
 
 		const cols = jobTrackingMonthCols(jobTracking.headers);
@@ -24263,7 +25245,7 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 			// closed month. Refuse rather than guess — the same asymmetry as
 			// everywhere else: refusing costs a reopen, permitting costs a restated
 			// settlement nobody can see happen.
-			if (!allResolved) return sendPeriodRefusal(res, "unresolved", null, `Load ${rawId}`);
+			if (!allResolved) return sendPeriodRefusal(req, res, "unresolved", null, `Load ${rawId}`, loadDelAudit);
 			const locked = lockedAmong([...periods]);
 			if (locked.length) {
 				// SPANNING AN OPEN AND A CLOSED MONTH → refuse, never partially allow.
@@ -24275,7 +25257,7 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 				// the cost of the three surfaces disagreeing about the same load. And
 				// per the month-mapping note above, spanning can ONLY happen when the
 				// assigned date is unparseable, which the check above already refused.
-				return sendPeriodRefusal(res, "finalized", locked, `Deleting load ${rawId}`);
+				return sendPeriodRefusal(req, res, "finalized", locked, `Deleting load ${rawId}`, loadDelAudit);
 			}
 		}
 		// matches.length === 0 is deliberately allowed, and it is not a fail-open:
@@ -24372,11 +25354,21 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 // a load one status change away from counting would otherwise be one status
 // change away from silently restating a closed month.
 function excludedDayPeriods({ driver, date, action, jobTracking }) {
-	// ⚠️ `own` is deliberately NOT run through LOCKABLE_MONTH_KEY. `date` is
-	// route-validated /^\d{4}-\d{2}-\d{2}$/ before the gate is called, so this is
-	// always a matchable key already — and filtering it would DROP it from the
-	// array, which is a permit. The producers below need the test because they
-	// build their keys from arbitrary sheet cells; this one does not.
+	// ⚠️ `own` is deliberately NOT run through LOCKABLE_MONTH_KEY, because
+	// filtering it would DROP it from the array, which is a PERMIT. The producers
+	// below need the test because they build their keys from arbitrary sheet cells;
+	// this one must refuse instead of filter.
+	//
+	// ⚠️ AND `own` IS NOT SELF-EVIDENTLY MATCHABLE — an earlier revision of this
+	// comment asserted that it always is ("route-validated /^\d{4}-\d{2}-\d{2}$/,
+	// so this is always a matchable key already"), and that was FALSE for months
+	// 13-99: `2026-13-01` satisfies that regex, slices to `2026-13`, and no lock row
+	// can ever equal it — so the month would resolve, match nothing, and be waved
+	// through as open. It is now excludedDayGate() that makes the claim true, by
+	// refusing an unresolvable date outright before it reaches here. Both callers go
+	// through that gate, so the invariant holds for the sheet-supplied `remove` path
+	// and the stored-date DELETE path alike. Do not restore the "the route already
+	// checked" reasoning: the route checks the SHAPE, and the shape is not the month.
 	const own = String(date || "").slice(0, 7);
 	if (action === "add" || !jobTracking) return [own];
 	const cols = jobTrackingMonthCols(jobTracking.headers);
@@ -24396,6 +25388,27 @@ function excludedDayPeriods({ driver, date, action, jobTracking }) {
 // Fails closed on an unreadable lock table and on an unreadable sheet, for the
 // same reason as the load delete — the months are exactly what cannot be guessed.
 async function excludedDayGate({ driver, date, action }) {
+	// ⚠️ FAIL CLOSED ON A DATE THAT NAMES NO REAL MONTH, and REFUSE rather than
+	// filter. `2026-13-01` passes a bare shape test, slices to `2026-13`, and no
+	// period_locks row can ever carry that key — so without this the gate resolves
+	// a month, finds no lock, and PERMITS the write. Same trap
+	// invoiceMonthLockBlockers() range-checks against, and the same reason its
+	// unresolved rung exists.
+	//
+	// ⚠️ IT LIVES HERE, NOT IN excludedDayPeriods(), and not as a filter. Removing
+	// the month from the array is the fail-OPEN that PR #249 reverted: a reader that
+	// admits less than period_locks can hold silently discards a genuinely locked
+	// month and turns a refusal into a permit. Refusing the whole request cannot do
+	// that.
+	//
+	// Both entry points are covered on purpose. POST validates the caller's date and
+	// 400s first, so it never arrives here malformed; DELETE passes a STORED
+	// `excluded_date` it did not validate, which is the row that would otherwise
+	// carry a pre-validation typo straight past the guard.
+	const dateStr = String(date || "");
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || !Number.isFinite(Date.parse(`${dateStr}T00:00:00Z`))) {
+		return { refuse: "unresolved", periods: [] };
+	}
 	if (!periodLocksReadable()) return { refuse: "unreadable", periods: [] };
 	let jobTracking = null;
 	// An 'add' is bucketed by its own date and needs no sheet, so it is not made
@@ -24434,13 +25447,36 @@ app.post("/api/admin/excluded-days", requireRole("Super Admin"), async (req, res
 		const action = actionRaw === "add" ? "add" : "remove";
 		const driver = normalizeDriverName(driverNameRaw);
 		if (!driver) return res.status(400).json({ error: "Missing driverName" });
-		if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: "Invalid date — must be YYYY-MM-DD" });
+		// ⚠️ A CALENDAR CHECK, NOT ONLY A SHAPE ONE. The shape test alone accepts
+		// `2026-13-01`, which excludedDayPeriods() slices to `2026-13` — a key no lock
+		// row can ever equal — so the month resolved, matched nothing, and the write
+		// was PERMITTED into what may well be a closed period. Same `Date.parse`
+		// round-trip POST /api/expenses uses on the same kind of value, so the two
+		// routes agree about what a date is. excludedDayGate() repeats it as the
+		// fail-closed backstop for the stored-date DELETE path; this one is here so a
+		// caller's typo is a legible 400 rather than a 409 about a month.
+		if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(`${date}T00:00:00Z`))) {
+			return res.status(400).json({ error: "Invalid date — must be a real calendar date in YYYY-MM-DD form" });
+		}
 
 		// Guard BEFORE the insert. There are no transactions here, so a refusal
 		// discovered after the write is not a refusal.
 		const gate = await excludedDayGate({ driver, date, action });
-		if (gate.refuse) return sendPeriodRefusal(res, gate.refuse, gate.periods,
-			`${action === "add" ? "Crediting" : "Excluding"} ${date} for ${driverNameRaw || driver}`);
+		// entity/entity_id mirror the `add_driver_day` / `exclude_driver_day` success
+		// lines exactly — `driver_active_day` keyed `${driver}:${date}` — so one query
+		// returns both the overrides that landed on a day and the ones refused. The
+		// action name follows the `remove` default, matching this route's own naming.
+		// The caller's `reason` is carried because on an override it is the entire
+		// justification for moving a day of pay, and on a refusal it is the record of
+		// what someone believed they were correcting in a settled month.
+		if (gate.refuse) return sendPeriodRefusal(req, res, gate.refuse, gate.periods,
+			`${action === "add" ? "Crediting" : "Excluding"} ${date} for ${driverNameRaw || driver}`,
+			{
+				action: action === "add" ? "add_driver_day_blocked" : "exclude_driver_day_blocked",
+				entity: "driver_active_day", entityId: `${driver}:${date}`,
+				subject: `${action === "add" ? "credit" : "exclude"} ${date} for ${driverNameRaw || driver}`,
+				note: reason,
+			});
 
 		const excludedBy = req.session.user.username || req.session.user.full_name || "";
 		const result = db.prepare(
@@ -24483,8 +25519,21 @@ app.delete("/api/admin/excluded-days/:id", requireRole("Super Admin"), async (re
 			date: (row.excluded_date || "").trim(),
 			action: row.action,
 		});
-		if (gate.refuse) return sendPeriodRefusal(res, gate.refuse, gate.periods,
-			`Restoring ${row.excluded_date} for ${row.driver_name}`);
+		// ⚠️ THE DIRECTION THAT BITES IN PRACTICE — both override rows on production
+		// target a month that is locked AND already PAID, so restoring either puts a
+		// $150 active day back into a settled month. Mirrors the
+		// `restore_driver_day` / `restore_added_driver_day` success lines. The stored
+		// reason is carried: it is the justification for the override being undone,
+		// and after a successful delete the row is gone, so on a refusal this is the
+		// only place it survives.
+		if (gate.refuse) return sendPeriodRefusal(req, res, gate.refuse, gate.periods,
+			`Restoring ${row.excluded_date} for ${row.driver_name}`,
+			{
+				action: row.action === "add" ? "restore_added_driver_day_blocked" : "restore_driver_day_blocked",
+				entity: "driver_active_day", entityId: `${row.driver_name}:${row.excluded_date}`,
+				subject: `restore ${row.excluded_date} for ${row.driver_name} (undo '${row.action}' override #${id})`,
+				note: row.reason,
+			});
 
 		db.prepare("DELETE FROM excluded_driver_days WHERE id = ?").run(id);
 		const auditAction = row.action === "add" ? "restore_added_driver_day" : "restore_driver_day";
@@ -24837,6 +25886,19 @@ app.delete("/api/data/:rowIndex", requireRole("Super Admin"), async (req, res) =
 		const guarded = await isPeriodGuardedGid(sheets, sheetId);
 		const blocker = sheetRowDeleteBlocker(guarded, headers, row);
 		if (blocker) {
+			// The single-row twin of POST /api/admin/remove-rows, and it had the same
+			// gap: `delete_sheet_row` and `delete_sheet_row_failed` were both audited
+			// while the refusal wrote nothing. `blocker.code` is passed through rather
+			// than assumed — sheetRowDeleteBlocker() answers PERIOD_FINALIZED or
+			// PERIOD_UNRESOLVED, and which one it was is the difference between "reopen
+			// the month" and "fix the date on the row". entity/entity_id mirror the
+			// success line's `${sheetName}!${rowIndex}` address.
+			recordPeriodRefusal({
+				req, action: "delete_sheet_row_blocked", entity: "sheet_row",
+				entityId: `${sheetName}!${rowIndex}`,
+				subject: `delete row ${rowIndex} of ${sheetName}`,
+				note: reason,
+			}, blocker.code, blocker.periods || []);
 			return res.status(409).json({ error: blocker.error, code: blocker.code, periods: blocker.periods });
 		}
 
@@ -25900,7 +26962,42 @@ function computeDriverQueues(jobTrackingRows, headers) {
 // client composable already calls; `/api/driver/me/position` is the spelling
 // consistent with every other self-scoped driver route here. One handler, so
 // they cannot drift.
-app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver", "Super Admin"), (req, res) => {
+// ⚠️ DEFINED HERE, NOT REUSED FROM fuelPlanLimiter, AND THAT IS FORCED. That
+// limiter is a `const` declared ~9,000 lines below; route registration runs at
+// module-eval time, so naming it here is a TDZ ReferenceError at boot — the exact
+// failure the note beside refuseCrossOrigin documents. Its SHAPE is copied
+// instead: same 15-minute window, same role-aware `max`, same per-user
+// keyGenerator.
+//
+// ⚠️ KEYED PER USER, NEVER PER IP, and here that is not a nicety. A carrier's
+// drivers sitting in one yard behind one NAT would otherwise share a single
+// bucket while a driver on cellular gets a fresh one — throttling the group that
+// is behaving and not the one that is not. Same reasoning poiLimiter states.
+//
+// The caps are arithmetic, not taste: useDriverPosition polls this every
+// ELD_POLL_MS = 30 s, i.e. 30 requests per window PER OPEN TAB. 120 is four
+// concurrent tabs/devices for one driver — comfortably above any real usage, and
+// still a hard stop on a scripted client. Super Admin is looser because the role
+// reaches this route only by opening the driver app itself, usually while also
+// holding a dashboard open. This is a BACKSTOP: the request is two indexed
+// SQLite reads and costs no third-party call, so nothing here needs a tight cap.
+const driverPositionLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: (req) => (req.session?.user?.role === "Super Admin" ? 240 : 120),
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many position requests. Try again later." },
+	standardHeaders: true,
+});
+
+// ⚠️ requireRole BEFORE the limiter, matching the order stated beside
+// crossSiteGuard and used by fuelEventsLimiter / fuelGallonsLimiter: a request we
+// are going to refuse anyway must not first consume the budget of the session it
+// is not authenticated as. Reversed, an unauthenticated caller could spend a real
+// driver's window on 403s.
+app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver", "Super Admin"), driverPositionLimiter, (req, res) => {
 	try {
 		const user = req.session.user;
 		const driverName = (user.driverName || user.driver_name || "").trim();
@@ -27119,9 +28216,20 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 		// Record every refusal. `super_admin` is a shared login, so a refusal that
 		// left no trace would make a repeated attempt to rewrite a closed month
 		// invisible in the one place anyone looks afterwards.
-		const auditBlocked = (code, periods, statusLabel) => logAudit(
+		//
+		// logAuditRefusal, not logAudit, and the code is now passed. Two things
+		// follow. (1) Every PERIOD_* cause is in UNCOALESCED_REFUSAL_CODES, so those
+		// rows are byte-identical to before — a settlement refusal is still written
+		// in full, one per attempt, with its own load id. (2) The non-period cause
+		// this arrow also carries, CANCEL_NOT_AN_OVERRIDE, is reachable on demand by
+		// any Dispatcher retyping "Cancelled", so it coalesces to one row per minute
+		// per account — the trace the comment above asks for, without the flood.
+		// `super_admin` is a shared login, so the coalesce key is the ACCOUNT and the
+		// row identifies a session, never an individual.
+		const auditBlocked = (code, periods, statusLabel) => logAuditRefusal(
 			req, "status_override_blocked", "load", loadId,
-			`Blocked override to "${statusLabel}" [${code}]${(periods || []).length ? ` periods=${periods.join(",")}` : ""} — ${JSON.stringify({ code, periods: periods || [] })}`
+			`Blocked override to "${statusLabel}" [${code}]${(periods || []).length ? ` periods=${periods.join(",")}` : ""} — ${JSON.stringify({ code, periods: periods || [] })}`,
+			code
 		);
 
 		// Canonicalize against the allowlist. See STATUS_OVERRIDE_ALLOWED above for
@@ -27152,7 +28260,8 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 		// guard present, silent and open.
 		if (!periodLocksReadable()) {
 			auditBlocked("PERIOD_LOCK_UNREADABLE", [], canonicalStatus);
-			return sendPeriodRefusal(res, "unreadable");
+			// AUDITED_UPSTREAM: auditBlocked() above wrote this refusal's row.
+			return sendPeriodRefusal(req, res, "unreadable", null, null, AUDITED_UPSTREAM);
 		}
 
 		// RUNG 2 — a failed sheet read REFUSES. It used to fall through to a generic
@@ -27169,7 +28278,7 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 		} catch (e) {
 			console.error("Status override blocked — Job Tracking unreadable:", e.message);
 			auditBlocked("PERIOD_UNRESOLVED", [], canonicalStatus);
-			return sendPeriodRefusal(res, "unresolved", null, `Load ${loadId}`);
+			return sendPeriodRefusal(req, res, "unresolved", null, `Load ${loadId}`, AUDITED_UPSTREAM);
 		}
 		const allRows = sheetRes.data.values || [];
 		const headers = allRows[0] || [];
@@ -27235,10 +28344,12 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 		const blocker = statusOverrideBlocker(headers, matches.map((m) => asObject(m.row)), edits);
 		if (blocker) {
 			auditBlocked(blocker.code, blocker.periods, canonicalStatus);
-			if (blocker.code === "PERIOD_LOCK_UNREADABLE") return sendPeriodRefusal(res, "unreadable");
-			if (blocker.code === "PERIOD_UNRESOLVED") return sendPeriodRefusal(res, "unresolved", null, `Load ${loadId}`);
+			// AUDITED_UPSTREAM on all three: auditBlocked() one line above wrote the
+			// row, and it did so for the AMBIGUOUS_LOAD branch below too.
+			if (blocker.code === "PERIOD_LOCK_UNREADABLE") return sendPeriodRefusal(req, res, "unreadable", null, null, AUDITED_UPSTREAM);
+			if (blocker.code === "PERIOD_UNRESOLVED") return sendPeriodRefusal(req, res, "unresolved", null, `Load ${loadId}`, AUDITED_UPSTREAM);
 			if (blocker.code === "PERIOD_FINALIZED") {
-				return sendPeriodRefusal(res, "finalized", blocker.periods, `Changing the status of load ${loadId}`);
+				return sendPeriodRefusal(req, res, "finalized", blocker.periods, `Changing the status of load ${loadId}`, AUDITED_UPSTREAM);
 			}
 			return res.status(409).json({
 				error: `Load ${loadId} appears on ${matches.length} rows of Job Tracking (${matches.map((m) => m.rowIndex).join(", ")}), so the server cannot tell which one this override means. Give the duplicate rows distinct load ids — or remove the stale one — and try again.`,
@@ -28250,12 +29361,22 @@ app.post("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), (req
 		// unit number is refused for. See check (5b).
 		if (String(truck.routemate_vehicle_id || "").trim() !== String(target).trim()) {
 			const lock = truckEditLockBlockers(truck, { routemate_vehicle_id: target });
-			if (lock.unreadable) return periodLockUnreadableResponse(res, "Linking an ELD device");
+			// Mirrors the `routemate_link` success line. BOTH device ids are recorded:
+			// the link is the map historical loads resolve through to get their travel
+			// days, so which device it was moved FROM is as much of the story as which
+			// it was moved to.
+			const linkAudit = {
+				action: "routemate_link_blocked", entity: "truck", entityId: String(truckId),
+				subject: `re-point ELD on ${truck.unit_number || `truck #${truckId}`}:` +
+					` ${truck.routemate_vehicle_id || "none"} -> ${target}`,
+			};
+			if (lock.unreadable) return periodLockUnreadableResponse(req, res, "Linking an ELD device", linkAudit);
 			if (lock.blockers.length) {
-				return periodBlockedResponse(res,
+				return periodBlockedResponse(req, res,
 					`Cannot re-point the ELD device on ${truck.unit_number || `truck #${truckId}`}`,
 					lock.blockers,
-					"Reopen the affected periods first — POST /api/periods/:period/reopen records a reason.");
+					"Reopen the affected periods first — POST /api/periods/:period/reopen records a reason.",
+					linkAudit);
 			}
 		}
 
@@ -28286,12 +29407,20 @@ app.delete("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), (r
 		// call, driver pay up across every closed month. See check (5b).
 		if (prev) {
 			const lock = truckEditLockBlockers(truck, { routemate_vehicle_id: "" });
-			if (lock.unreadable) return periodLockUnreadableResponse(res, "Unlinking an ELD device");
+			// Mirrors the `routemate_unlink` success line, and records the device id
+			// being detached — after a successful unlink the column is empty, so on a
+			// refusal this is the only place the intended target survives.
+			const unlinkAudit = {
+				action: "routemate_unlink_blocked", entity: "truck", entityId: String(truckId),
+				subject: `unlink ELD from ${truck.unit_number || `truck #${truckId}`} (was ${prev})`,
+			};
+			if (lock.unreadable) return periodLockUnreadableResponse(req, res, "Unlinking an ELD device", unlinkAudit);
 			if (lock.blockers.length) {
-				return periodBlockedResponse(res,
+				return periodBlockedResponse(req, res,
 					`Cannot unlink the ELD device on ${truck.unit_number || `truck #${truckId}`}`,
 					lock.blockers,
-					"Reopen the affected periods first — POST /api/periods/:period/reopen records a reason.");
+					"Reopen the affected periods first — POST /api/periods/:period/reopen records a reason.",
+					unlinkAudit);
 			}
 		}
 		db.prepare("UPDATE trucks SET routemate_vehicle_id = '' WHERE id = ?").run(truckId);
@@ -29004,20 +30133,133 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		// re-enter under a different payload hash and double-book the P&L (and the
 		// investor payout deduction). Both hashes are checked so a receipt logged
 		// before this change is still recognized.
+		//
+		// ⚠️ ACCEPTED ONLY ALONGSIDE A PAYLOAD. The value is never checked against the
+		// bytes received — it cannot be, that is the point of it — so before this
+		// line any authenticated non-Investor could POST an expense carrying a
+		// `sourceHash` and NOTHING ELSE and permanently burn that hash:
+		// idx_expenses_receipt_hash is UNIQUE, so the receipt's real filer then gets a
+		// hard 409 DUPLICATE_RECEIPT with no race to rescue them and no way to file
+		// the expense at all. Guessing a sha256 is not an attack; pre-registering
+		// hashes read off receipts you have SEEN is, and so is the accidental
+		// version — any script that resends a hash without its payload.
+		//
+		// Ignoring `sourceHash` outright is NOT the fix and would re-open the
+		// double-booking above. Requiring the payload is: bulk upload always sends
+		// `photoData` beside it (BulkReceiptScan.saveOne), which is the ONLY caller
+		// that sends `sourceHash` at all, so no real workflow loses anything.
+		//
+		// ⚠️ THIS RAISES THE COST OF THE BURN; IT DOES NOT ABOLISH IT, and the residual
+		// is SMALLER THAN AN EARLIER DRAFT OF THIS COMMENT CLAIMED — corrected here
+		// because the next reader will price the risk off these numbers.
+		//
+		//   • THE PAYLOAD FLOOR IS 12 BYTES, NOT ~70. The only gate on this path is
+		//     sniffImageFormat() inside saveReceiptToDisk(): a magic prefix plus its
+		//     >=12-byte floor, so `FF D8 FF` and nine bytes of padding is an accepted
+		//     "image". verifyInlineServedBytes() and validateFileExt() are NOT on this
+		//     path — they guard the /uploads mount and the document upload route.
+		//     The PDF branch (savePdfReceiptToDisk) is 5 bytes: `%PDF-`.
+		//   • "ATTRIBUTABLE" HOLDS ONLY FOR `role === "Driver"`. `expenses` carries no
+		//     actor column — the INSERT below writes `driver`, not a user id — and
+		//     resolveDriverActor() pins the name to the session for that role ONLY;
+		//     for a Dispatcher or Super Admin it returns the request's own string
+		//     verbatim. So on those two roles the row names whichever driver the
+		//     caller typed, and the audit link back to the account is the session log,
+		//     not this table.
+		//
+		// What genuinely changes is that the attempt is no longer free or invisible: it
+		// must create a real, validated expense row under a driver name, with a receipt
+		// file written to disk, subject to the amount/date rules and the duplicate
+		// checks — i.e. it leaves an artefact, where a payload-less pre-registration
+		// left none. The structural fix is a SEPARATE `source_hash` column, leaving
+		// `receipt_hash` as the server-computed payload hash that no caller can choose;
+		// that is a migration on a UNIQUE index and is deliberately not attempted here.
+		//
+		// ⚠️ AND IT COSTS ONE THING, STATED RATHER THAN GLOSSED: a bulk row whose FILE
+		// COULD NOT BE READ AT ALL keeps `photoData: ''` (BulkReceiptScan's three
+		// failure paths) and is still savable, since saveAll validates only
+		// driver/amount/date. Such a row used to be byte-deduped on the client's hash
+		// and now is not — it stores `receipt_hash = ''`, which the PARTIAL unique
+		// index does not constrain. It is not undefended: the content check below
+		// (same driver + day + amount) is what actually catches the re-upload of a
+		// receipt that has no readable bytes, and that check is unconditional. The
+		// client no longer sends a hash it is not backing with bytes, so this path is
+		// honest on the wire rather than silently discarded here.
+		//
+		// `receiptHash` is the predicate rather than a fresh re-test of `photoData`
+		// because it is non-empty EXACTLY when a `data:` payload with a non-empty
+		// body arrived and was hashed. A second test would be a second definition of
+		// "a payload came with this request", and those drift.
 		const rawSourceHash = (req.body && req.body.sourceHash) || "";
-		const sourceHash = /^[a-f0-9]{64}$/i.test(String(rawSourceHash).trim())
+		const sourceHash = receiptHash && /^[a-f0-9]{64}$/i.test(String(rawSourceHash).trim())
 			? String(rawSourceHash).trim().toLowerCase()
 			: "";
 		const hashCandidates = [...new Set([sourceHash, receiptHash].filter(Boolean))];
 		if (hashCandidates.length) {
+			// ⚠️ SCOPED TO THE FILING DRIVER, exactly as the POSSIBLE_DUPLICATE check
+			// below already is. Unscoped, this SELECT was a queryable oracle over every
+			// receipt in the fleet: any authenticated caller could probe an arbitrary
+			// hash and be told whether it is booked AND the expense id that holds it —
+			// a cross-driver read, on a route whose own answer is otherwise scoped.
+			//
+			// ⚠️ THIS NARROWS THE MESSAGE, NEVER THE ENFORCEMENT — and the pair of
+			// queries below is what makes that true UNCONDITIONALLY, rather than only
+			// on a database where a boot-time migration happened to succeed.
+			//
+			// The first draft leaned entirely on the index: "a cross-driver collision
+			// falls through to the INSERT and the UNIQUE constraint refuses it". That
+			// holds only while idx_expenses_receipt_hash IS unique, and the migration
+			// beside the column has a documented SKIP path — its collision pre-flight
+			// finds duplicate hashes, logs SKIPPED, and deliberately leaves the OLD
+			// NON-UNIQUE index in place (correctly: which of two rows sharing a receipt
+			// is the real expense is a business question, and both are money already
+			// booked). A refreshed or staging database seeded from an older snapshot is
+			// exactly the shape that skips. On such a database the scoped SELECT
+			// answers "no", the INSERT is unconstrained, and the receipt is
+			// DOUBLE-BOOKED into the P&L and the investor payout deduction — which is
+			// the precise defect the index exists to prevent, reintroduced by a change
+			// that was only ever meant to stop an information leak.
+			//
+			// So the REFUSAL is decided fleet-wide and the MESSAGE is decided per
+			// driver. Two queries, not one with an extra column, because the second
+			// must be incapable of leaking: it selects the literal 1 and no id, so
+			// there is nothing for a later edit to accidentally put on the wire.
 			const dup = db
-				.prepare(`SELECT id FROM expenses WHERE receipt_hash IN (${hashCandidates.map(() => "?").join(",")}) LIMIT 1`)
-				.get(...hashCandidates);
+				.prepare(
+					`SELECT id FROM expenses
+					  WHERE receipt_hash IN (${hashCandidates.map(() => "?").join(",")})
+					    AND LOWER(TRIM(COALESCE(driver, ''))) = LOWER(TRIM(?))
+					  LIMIT 1`,
+				)
+				.get(...hashCandidates, driver || "");
 			if (dup) {
 				return res.status(409).json({
 					error: `This receipt was already logged (expense #${dup.id})`,
 					code: "DUPLICATE_RECEIPT",
 					existingId: dup.id,
+				});
+			}
+			// The enforcement half. Byte-identical response to the constraint path's
+			// unnamed 409 below, so the caller cannot tell which door refused it — and
+			// so an admin filing on behalf of a driver still sees "already logged"
+			// rather than a duplicate row appearing in the P&L.
+			//
+			// ⚠️ NO `id` IN THE SELECT LIST. That is the whole discipline: the oracle
+			// this scoping removed was "tell me WHICH expense holds this hash", and a
+			// boolean cannot answer it. It does still confirm that SOME row holds the
+			// hash — unavoidable, because refusing the write IS that disclosure, and it
+			// is the same single bit the UNIQUE index has always disclosed by refusing.
+			const taken = db
+				.prepare(
+					`SELECT 1 FROM expenses
+					  WHERE receipt_hash IN (${hashCandidates.map(() => "?").join(",")})
+					  LIMIT 1`,
+				)
+				.get(...hashCandidates);
+			if (taken) {
+				return res.status(409).json({
+					error: "This receipt was already logged",
+					code: "DUPLICATE_RECEIPT",
 				});
 			}
 		}
@@ -29273,9 +30515,23 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 			if (!isDupReceipt) throw insErr;
 			// Name the winner if we can. Best-effort: the row is certainly there, but
 			// a failed re-read must not turn a clean 409 into a 500.
+			//
+			// ⚠️ SCOPED TO THE FILING DRIVER, THE SAME WAY THE PRE-CHECK ABOVE IS, or
+			// the oracle simply moves house. The UNIQUE index is fleet-wide, so a
+			// cross-driver collision reaches HERE rather than the pre-check — and an
+			// unscoped re-read would hand back another driver's expense id on exactly
+			// the request the pre-check just refused to answer. The 409 is unchanged
+			// either way (the receipt is still refused, and the index is what refuses
+			// it); only the id is withheld, and the caller who cannot see the row is
+			// the caller who has no business seeing it.
 			let winnerId = null;
 			try {
-				const w = db.prepare("SELECT id FROM expenses WHERE receipt_hash = ? LIMIT 1").get(receiptHash);
+				const w = db.prepare(
+					`SELECT id FROM expenses
+					  WHERE receipt_hash = ?
+					    AND LOWER(TRIM(COALESCE(driver, ''))) = LOWER(TRIM(?))
+					  LIMIT 1`,
+				).get(receiptHash, driver || "");
 				winnerId = w ? w.id : null;
 			} catch { /* best effort */ }
 			// The receipt file was written to disk above and the row that would have
@@ -29286,8 +30542,14 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 			// exactly when the client passed an existing path instead of a data URI
 			// (saveReceiptToDisk's legacy pass-through), in which case that path names
 			// ANOTHER expense's receipt and unlinking it destroys a live row's
-			// evidence. Reachable in practice: a caller can send no data URI at all
-			// and still reach this 409 by supplying a `sourceHash` that collides.
+			// evidence. ⚠️ The example that used to sit here — "a caller can send no
+			// data URI at all and still reach this 409 by supplying a `sourceHash`
+			// that collides" — is NO LONGER REACHABLE: `sourceHash` is now honoured
+			// only alongside a payload, so a request with no data URI carries an empty
+			// receipt_hash, which the PARTIAL unique index (`WHERE receipt_hash <> ''`)
+			// does not constrain at all. The rule stands on its own merits regardless,
+			// and must: it is the difference between deleting our own orphan and
+			// deleting a live expense's receipt.
 			try {
 				if (wroteReceiptFile && wroteReceiptFile.startsWith("/uploads/expense-receipts/")) {
 					const orphan = path.join(__dirname, wroteReceiptFile.replace(/^\//, ""));
@@ -33732,7 +34994,7 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 					}
 				}
 				if (collision) {
-					logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("blocked", { code: "DUPLICATE_LOAD" }));
+					logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: "DUPLICATE_LOAD" }), "DUPLICATE_LOAD"));
 					return res.status(409).json({
 						error: `Load ID '${lidChange.to}' already exists on row ${collision}. Two rows sharing a load id are collapsed to one everywhere the app totals revenue, so this would silently drop that row's figures — including out of a finalized month. Use a unique load id.`,
 						code: "DUPLICATE_LOAD",
@@ -33747,7 +35009,14 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 			// Record the attempt. `super_admin` is a shared login, so a refusal that
 			// left no trace would make a repeated attempt to rewrite a closed month
 			// invisible in the one place anyone looks afterwards.
-			logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("blocked", { code: blocker.code, periods: blocker.periods }));
+			// logAuditRefusal, not logAudit — see the create twin in POST /api/data. Every
+			// code sheetRowUpdateBlocker() can answer here is a PERIOD_* one and all three
+			// are in UNCOALESCED_REFUSAL_CODES, so this is byte-identical today: still one
+			// row per attempt, still carrying its own sheet address and month list. What it
+			// buys is that the action now declares its coalescing rule in one place, and
+			// the sibling refusals on this same action (DUPLICATE_LOAD, SHEET_CHANGED) —
+			// which ARE reachable on demand — are the ones a future reader will reach for.
+			logAuditRefusal(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: blocker.code, periods: blocker.periods }), blocker.code), blocker.code);
 			return res.status(409).json({
 				error: blocker.error,
 				code: blocker.code,
@@ -33773,7 +35042,7 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 				});
 				fresh = ((re.data.values || [[]])[0]) || [];
 			} catch (err) {
-				logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("blocked", { code: "ROW_READ_FAILED", error: err.message }));
+				logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: "ROW_READ_FAILED", error: err.message }), "ROW_READ_FAILED"));
 				return res.status(409).json({
 					error: "The row could not be re-read immediately before writing, so it cannot be confirmed to be the row that was checked. Try again.",
 					code: "ROW_READ_FAILED",
@@ -33785,7 +35054,7 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 				return true;
 			};
 			if (!same(fresh, before)) {
-				logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("blocked", { code: "SHEET_CHANGED" }));
+				logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: "SHEET_CHANGED" }), "SHEET_CHANGED"));
 				return res.status(409).json({
 					error: `Row ${rowIndex} changed while this edit was being checked — another write, or a deleted row shifting the sheet up, means load '${loadId}' no longer resolves to the row that was validated. Re-read the load and try again.`,
 					code: "SHEET_CHANGED",
@@ -39061,6 +40330,63 @@ app.get("/api/periods", requireRole("Super Admin"), (req, res) => {
 			});
 		}
 
+		// ⚠️ A PAST MONTH WITH NEITHER A PAYOUT ROW NOR A LOCK WAS SIMPLY MISSING —
+		// A HOLE IN THE MIDDLE OF THE CALENDAR, not merely a truncated end. Both
+		// sources above are evidence-driven: `open` reads investor_payouts, which
+		// reconcileInvestorPayouts() only writes for a completed past month IN WHICH
+		// AN INVESTOR HAD EARNINGS, and `locks` holds only months that have already
+		// closed — which, with PERIOD_FINALIZE_ENABLED off, is never any of them. So
+		// a month in which the fleet earned nothing, or any month at all on a server
+		// that has never enabled the close, rendered as though it did not exist. The
+		// current-month backstop below fixed the same class of bug at the near end;
+		// this fixes it in the middle, and the two are the same argument: this
+		// endpoint is the CLOSE CALENDAR, and a calendar with a month missing is read
+		// as "that month needs nothing" rather than "that month is unknown to me".
+		//
+		// ⚠️ THE RANGE IS ANCHORED ON THE EARLIEST MONTH ANYTHING ELSE ALREADY KNOWS
+		// ABOUT, never on a date walked back from today. There is no defensible
+		// horizon for the latter — any constant is either short enough to hide a real
+		// month or long enough to invent hundreds of months that predate the carrier
+		// — whereas the earliest payout-or-lock row is the first month the ledger
+		// itself claims to describe. A month BEFORE that anchor stays absent,
+		// deliberately: nothing in this database asserts it was ever a settlement
+		// period.
+		//
+		// ⚠️ COMPOSES WITH BOTH FIXES BELOW/ABOVE RATHER THAN LEANING ON EITHER.
+		// Guarded on `!byPeriod.has(p)` exactly like the current-month seed, so it can
+		// never contribute a field to an entry `locks` already produced and cannot
+		// blank a reopen provenance whatever order the sources arrive in; and it stops
+		// STRICTLY BELOW `cur`, so the current-month backstop keeps sole ownership of
+		// the open month and neither line becomes the other's dead code.
+		//
+		// String month arithmetic, never a Date round-trip — same rule
+		// truckChargeFromMonth() states, for the same reason (a bare or UTC-midnight
+		// value reads back one month early in Houston). The iteration cap is a
+		// termination guarantee, not a policy: the anchor is validated below, so the
+		// loop is already finite, and 600 is 50 years of months.
+		//
+		// ⚠️ THE ANCHOR IS RANGE-CHECKED, not merely shape-checked, and that is what
+		// bounds the RESPONSE rather than just the loop. `/^\d{4}-\d{2}$/` accepts
+		// "0001-01", which would anchor the walk two millennia back and emit the full
+		// 600 entries — bounded, but nonsense on the one screen an admin opens to see
+		// the close calendar. isPlausibleLockPeriod() is the same predicate
+		// POST /api/periods/:period/finalize validates against, so the calendar cannot
+		// contain a month the close routes would refuse to act on. Not reachable
+		// today (both sources are server-computed) — closed by construction rather
+		// than by luck.
+		const MONTH_KEY = /^\d{4}-\d{2}$/;
+		const known = [...byPeriod.keys()].filter(isPlausibleLockPeriod).sort();
+		if (known.length && MONTH_KEY.test(cur || "")) {
+			let p = known[0];
+			for (let guard = 0; p < cur && guard < 600; guard++) {
+				if (!byPeriod.has(p)) mergePeriod(computedFields(p));
+				let y = parseInt(p.slice(0, 4), 10);
+				let m = parseInt(p.slice(5, 7), 10) + 1;
+				if (m > 12) { m = 1; y += 1; }
+				p = `${y}-${String(m).padStart(2, "0")}`;
+			}
+		}
+
 		// ⚠️ THE MONTH IN PROGRESS IS A BACKSTOP, because NEITHER source above is
 		// guaranteed to contain it and in the ordinary case neither does. `open` reads
 		// investor_payouts, and reconcileInvestorPayouts() only mints a row for a
@@ -39261,6 +40587,338 @@ app.post("/api/periods/:period/reopen", requireRole("Super Admin"), refuseCrossO
 	} catch (err) {
 		console.error("POST /api/periods/:period/reopen error:", err.message);
 		res.status(500).json({ error: "Failed to reopen period" });
+	}
+});
+
+// ============================================================
+// GET /api/admin/period-lock-issues — the month-end close queue
+// ============================================================
+// The sixth detector behind /admin/data-issues. Client ask, verbatim:
+// "everything that is concerning the lock month or date it should go to that page
+// where we show all the concerns."
+//
+// TWO HALVES, and each answers a question the other cannot.
+//
+//   HISTORY — writes that were REFUSED because a month was closed. Until the
+//   refusal-audit work this batch carries, most of those guards returned a 409
+//   and wrote nothing at all, so there was no record that anyone had tried. Now
+//   every one lands in audit_trail carrying a `[PERIOD_…]` code, and that marker
+//   — not a list of action names — is what this reads. See
+//   parsePeriodRefusalDetail() for why.
+//
+//   CURRENT STATE — what is FROZEN right now. A refusal only exists if somebody
+//   happened to try; an invoice sitting in a finalized month is stuck whether or
+//   not anyone has bumped into it yet. Six of the twenty-nine live invoices on
+//   this data can never be marked Paid without reopening a month, and nothing in
+//   the app was saying so.
+//
+// ⚠️ EXPENSES REDIRECTED VIA `posted_period` ARE DELIBERATELY NOT LISTED. Owner's
+// call: that redirect is the system working as designed, both admin surfaces
+// already say so at the moment it happens, and with every month through 2026-07
+// locked it fires on essentially every backdated receipt. Listing them would bury
+// the rows above under routine traffic — the failure mode that taught everyone to
+// ignore the rate-con reconciler's daily mail.
+//
+// Structurally read-only: SELECTs only, no UPDATE, no render, no audit row of its
+// own. No cross-site guard, for the same reason GET /api/admin/onboarding-doc-failures
+// has none — cost, not the verb, is what decides, and there is no billed API call
+// and no side effect here for a forged navigation to spend.
+//
+// ⚠️ BUT IT IS NOT "A FEW DOZEN INDEXED LOOKUPS", WHICH IS WHAT THIS COMMENT USED
+// TO CLAIM AND WAS THE WHOLE JUSTIFICATION FOR CARRYING NO LIMITER. Only the
+// invoice half is indexed (a 29-row table, then one primary-key probe of
+// period_locks per month of span). The HISTORY half is three FULL passes over
+// audit_trail on every call, measured with EXPLAIN QUERY PLAN on a copy of
+// production:
+//   SELECT COUNT(*) FROM audit_trail                  -> SCAN … COVERING INDEX
+//   the MARKED aggregate (MIN/MAX + COUNT)            -> SCAN audit_trail
+//   the MARKED list (ORDER BY timestamp DESC LIMIT n) -> SCAN … USING INDEX
+// A leading-wildcard LIKE is non-sargable, so no index on `details` would help
+// even if one existed, and the COUNT(*) is unfiltered by construction (it is the
+// "is the table empty?" signal that makes "no refusals" readable). All three
+// together measured ~1.0 ms at 1,444 rows — but the cost is LINEAR in a table
+// that grows without bound, because every `[PERIOD_` row is exempt from
+// purgeOldAuditRefusals() forever and audit_trail has no other prune. And
+// better-sqlite3 is synchronous: this is event-loop time, charged to the driver
+// app, the dashboard and the Linxup webhook, not just to the caller.
+//
+// So the no-limiter conclusion does not follow from the corrected premise.
+// periodIssueLimiter below is the backstop — sized for a page, not for a script.
+//
+// Cap on EACH list. Both counts beside them are computed over the full set, so a
+// truncated list never lets a reader count rendered rows and disbelieve the
+// headline.
+const PERIOD_ISSUE_MAX_ROWS = 200;
+
+// Sibling of fuelEventsLimiter, and it earns its mount for that limiter's stated
+// reason — "each call re-scans <table> synchronously" — rather than for a billed
+// third-party call. Looser than fuelEventsLimiter (20) because the unit of work is
+// three ~1 ms table scans rather than a telemetry sweep, and because a Super Admin
+// bouncing between /admin/data-issues and a fix legitimately reloads this several
+// times a minute: 60 in 15 minutes is one page-load every 15 seconds, sustained.
+//
+// ⚠️ PER-USER, NOT PER-IP, the reasoning poiLimiter states: the whole office
+// behind one NAT would otherwise share one bucket, throttling the ordinary
+// callers. Falls back to the IP for a request with no session, which requireRole
+// has already refused by then.
+//
+// ⚠️ MOUNTED AFTER requireRole, same ordering as fuelEventsLimiter and
+// fuelGallonsLimiter: with the limiter first an unauthenticated caller spends the
+// whole bucket on 403s and locks out the legitimate user behind that key.
+const periodIssueLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 60,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many month-end lock checks. Try again in a few minutes." },
+	standardHeaders: true,
+});
+
+app.get("/api/admin/period-lock-issues", requireRole("Super Admin"), periodIssueLimiter, (req, res) => {
+	try {
+		// ------------------------------------------------------------------
+		// Context — what this queue is and is NOT entitled to call "all clear"
+		// ------------------------------------------------------------------
+		// ⚠️ AN EMPTY RESULT HERE IS AMBIGUOUS IN EXACTLY THE WAY GET /api/fuel/verify's
+		// zero is, so the client needs the context to tell the two apart. With
+		// period_locks unreadable nothing can be judged at all; with no month ever
+		// locked nothing CAN be frozen, so "no concerns" is trivially true and says
+		// nothing about whether month-end close is working. Both are reported as
+		// facts and lib/dataIssues.js decides what may be claimed from them.
+		let locksReadable = periodLocksReadable();
+		let lockedPeriods = [];
+		if (locksReadable) {
+			try {
+				lockedPeriods = db.prepare("SELECT period FROM period_locks WHERE status = 'locked' ORDER BY period")
+					.all().map((r) => String(r.period));
+			} catch (err) {
+				// The probe passed and the real read did not. Report the stricter of the
+				// two answers: a guard is failing closed somewhere and this cannot say where.
+				locksReadable = false;
+				console.error("period-lock-issues: period_locks unreadable:", err.message);
+			}
+		}
+
+		// ------------------------------------------------------------------
+		// HISTORY — refusals, keyed on the marker
+		// ------------------------------------------------------------------
+		let auditReadable = true;
+		let auditRows = 0;
+		let refusalCount = 0, refusalOldest = null, refusalNewest = null;
+		let refusalRows = [];
+		try {
+			auditRows = db.prepare("SELECT COUNT(*) AS n FROM audit_trail").get().n || 0;
+			// ⚠️ THE IDENTICAL PREDICATE purgeOldAuditRefusals() USES, character for
+			// character including the ESCAPE clause. That is what makes the queue and
+			// the retention job agree by construction: every row the purge spares is a
+			// row this can show, and a row it would delete is one this never claims to
+			// have. (SQLite's LIKE is case-insensitive for ASCII, so `[period_` matches
+			// here as well — which is precisely why scrubPurgeMarker() folds case when
+			// it neutralises caller-supplied text.)
+			const MARKED = "details LIKE '%[PERIOD\\_%' ESCAPE '\\'";
+			const agg = db.prepare(
+				`SELECT COUNT(*) AS n, MIN(timestamp) AS oldest, MAX(timestamp) AS newest FROM audit_trail WHERE ${MARKED}`
+			).get();
+			refusalCount = agg.n || 0;
+			refusalOldest = agg.oldest || null;
+			refusalNewest = agg.newest || null;
+			refusalRows = db.prepare(
+				`SELECT id, timestamp, username, role, action, entity, entity_id, details
+				   FROM audit_trail WHERE ${MARKED}
+				  ORDER BY timestamp DESC, id DESC LIMIT ?`
+			).all(PERIOD_ISSUE_MAX_ROWS).map((r) => {
+				const p = parsePeriodRefusalDetail(r.details);
+				return {
+					id: r.id,
+					at: r.timestamp,
+					// ⚠️ "account", NEVER "who". `super_admin` is a SHARED login used by
+					// several people, so this column identifies a login and a session and
+					// can never identify a person. The field is named for what it holds.
+					account: r.username || "",
+					role: r.role || "",
+					action: r.action || "",
+					entity: r.entity || "",
+					entityId: String(r.entity_id || ""),
+					code: p.code,
+					periods: p.periods,
+					periodLabels: p.periods.map(periodLabel),
+					unnamedPeriods: p.unnamedPeriods,
+					attempted: p.attempted,
+					note: p.note,
+					suppressed: p.suppressed,
+					// The stored row, unedited. Everything above is a convenience read off
+					// it; this is the record itself, and it is what a dispute is answered
+					// from.
+					details: String(r.details || ""),
+				};
+			});
+		} catch (err) {
+			auditReadable = false;
+			console.error("period-lock-issues: audit_trail unreadable:", err.message);
+		}
+
+		// ------------------------------------------------------------------
+		// CURRENT STATE — invoices frozen right now
+		// ------------------------------------------------------------------
+		// ⚠️ `COALESCE(deleted_at,'') = ''`, WHICH IS NOT THE LIST ENDPOINT'S FILTER.
+		// GET /api/invoices uses a bare `deleted_at = ''`, which drops a NULL. The
+		// question here is "which invoices would the adjust / pay routes refuse", and
+		// those routes fetch the row and test `if (invoice.deleted_at)` — truthy, so a
+		// NULL is LIVE to them. Copying the list endpoint would under-report exactly
+		// the rows whose guard still fires.
+		const invoiceRows = db.prepare(
+			`SELECT id, invoice_number, driver, week_start, week_end, status,
+			        COALESCE(total_earnings, 0) AS total_earnings, COALESCE(adjustment, 0) AS adjustment,
+			        COALESCE(paid_at, '') AS paid_at, COALESCE(is_manual, 0) AS is_manual
+			   FROM invoices WHERE COALESCE(deleted_at, '') = ''`
+		).all();
+
+		const frozen = [];
+		let neverPayable = 0, unresolvedDates = 0;
+		let frozenAmount = 0, neverPayableAmount = 0;
+
+		// ⚠️ WITH period_locks UNREADABLE, EVERY LIVE INVOICE IS FROZEN AND NONE OF
+		// THEM IS LISTED. invoiceMonthLockBlockers() fails closed on that table, so
+		// enumerating would print all twenty-nine rows as though each had its own
+		// month-end problem, when there is one root cause and it is not a month at
+		// all. `locksReadable:false` plus `liveInvoices` is the honest shape; the page
+		// renders that as a fault to fix rather than a queue to work through, and
+		// queueEstablished() refuses to call any of it clear.
+		if (locksReadable) {
+			for (const inv of invoiceRows) {
+				// The GUARD ITSELF, never a re-derived predicate. This queue exists to say
+				// what those two routes will refuse, so asking anything else would let the
+				// page and the server disagree — and the span walk, the range check and
+				// the unresolved-date rung are the parts most easily got wrong twice.
+				const lock = invoiceMonthLockBlockers(inv);
+				if (lock.unreadable || !lock.blockers.length) continue;
+
+				const periods = [...new Set(lock.blockers.flatMap((b) => b.periods))].filter(Boolean).sort();
+				const unresolved = lock.blockers.some((b) => b.periods.some((p) => !p));
+				// Same ranking periodBlockedResponse() applies: a named month outranks an
+				// unresolved date, because "this would restate June" is the answer an
+				// operator can act on.
+				const cause = periods.length ? "PERIOD_FINALIZED" : (unresolved ? "PERIOD_UNRESOLVED" : "PERIOD_FINALIZED");
+
+				// ⚠️ CAN THIS INVOICE EVER REACH PAID? approve / submit / processing carry
+				// NO month-end guard — only the `paid` transition does — so a Draft in a
+				// finalized month walks all the way to Approved and then stops for good.
+				// Paid and Rejected are terminal and are waiting on nothing. This is the
+				// number an admin most needs, because unlike an un-adjustable invoice it
+				// has no in-app remedy at all short of reopening the month.
+				const stuckBeforePaid = ["Draft", "Submitted", "Approved", "Processing"].includes(String(inv.status || ""));
+				// ⚠️ AN EXPLICIT TERMINAL LIST, NOT `!stuckBeforePaid`, so an
+				// UNRECOGNISED status is neither. The two lists answer different
+				// questions and an unknown value has to fall on the cautious side of
+				// each: it is not "waiting to be paid" (so it is not neverPayable), and
+				// it is not "finished, nothing waiting on it" either — so it stays in
+				// noRemedy below rather than being quietly dropped from the headline by
+				// a negation. Today the column only ever holds these six values.
+				const settled = /^(paid|rejected)$/i.test(String(inv.status || ""));
+				const amount = Number(inv.total_earnings || 0) + Number(inv.adjustment || 0);
+
+				frozenAmount += amount;
+				if (cause === "PERIOD_UNRESOLVED") unresolvedDates++;
+				if (stuckBeforePaid) { neverPayable++; neverPayableAmount += amount; }
+
+				frozen.push({
+					id: inv.id,
+					invoiceNumber: inv.invoice_number || "",
+					driver: inv.driver || "",
+					weekStart: inv.week_start || "",
+					weekEnd: inv.week_end || "",
+					status: inv.status || "",
+					isManual: !!inv.is_manual,
+					amount: Math.round(amount * 100) / 100,
+					paidAt: inv.paid_at || "",
+					cause,
+					periods,
+					periodLabels: periods.map(periodLabel),
+					// Both write guards are already refused, so these are constants rather
+					// than predictions — `adjust` has no rung this row could pass.
+					adjustable: false,
+					neverPayable: stuckBeforePaid,
+					// Server-told, so the client's sentence and the headline count below
+					// cannot drift into contradicting each other on one screen.
+					settled,
+					detail: lock.blockers.map((b) => b.detail).join("; "),
+					// The unresolved-date branch carries its own remedy, because the
+					// month-end one names no period and points at a route that cannot edit a
+					// week date. Same fallback the three invoice routes use.
+					remedy: lock.remedy || INVOICE_LOCK_REMEDY,
+				});
+			}
+		}
+
+		// Worst first: a row with no in-app remedy leads, then the newest weeks.
+		frozen.sort((a, b) =>
+			(b.neverPayable ? 1 : 0) - (a.neverPayable ? 1 : 0)
+			|| String(b.weekStart).localeCompare(String(a.weekStart))
+			|| b.id - a.id);
+
+		res.json({
+			// --- context -------------------------------------------------
+			closeEnabled: PERIOD_FINALIZE_ENABLED,
+			locksReadable,
+			lockedPeriods,
+			lockedCount: lockedPeriods.length,
+			currentPeriod: currentMonthKeyCT(),
+			auditReadable,
+			// Total rows in audit_trail, so "no refusals" can be told apart from "the
+			// table is empty" without a second call.
+			auditRows,
+
+			// --- history -------------------------------------------------
+			refusals: refusalRows,
+			// ⚠️ COUNTED OVER THE FULL MATCH, NOT OVER THE RENDERED LIST, so a reader
+			// can never count rows and disbelieve the headline. Same rule the duplicate
+			// summary follows with FUEL_DUPLICATE_MAX_GROUPS / `truncated` / `shown`.
+			refusalCount,
+			refusalShown: refusalRows.length,
+			refusalTruncated: refusalCount > refusalRows.length,
+			// Both computed over the FULL match too — the oldest row is what says how
+			// far back this history actually reaches, which a truncated list cannot.
+			refusalOldest,
+			refusalNewest,
+
+			// --- current state -------------------------------------------
+			invoices: frozen.slice(0, PERIOD_ISSUE_MAX_ROWS),
+			invoiceCount: frozen.length,
+			invoiceShown: Math.min(frozen.length, PERIOD_ISSUE_MAX_ROWS),
+			invoiceTruncated: frozen.length > PERIOD_ISSUE_MAX_ROWS,
+			liveInvoices: invoiceRows.length,
+			invoiceSummary: {
+				live: invoiceRows.length,
+				frozen: frozen.length,
+				neverPayable,
+				unresolvedDates,
+				// ⚠️ COMPUTED HERE, NOT AS `neverPayable + unresolvedDates` ON THE CLIENT.
+				// The two overlap — a Draft carrying an unparseable week date is both —
+				// and adding them would count that row twice in the headline the whole
+				// queue leads with. Counted over the FULL set for the same reason the
+				// other totals are.
+				//
+				// ⚠️ THE UNRESOLVED ARM CONSULTS STATUS, because `noRemedy` feeds the
+				// bar's `actionable` — "how much work is there" — and a Paid invoice
+				// with an unparseable week date is not work: nobody is waiting on it,
+				// exactly like the un-adjustable-but-settled rows this queue already
+				// files under `closed`. Bare `|| cause === PERIOD_UNRESOLVED` counted it,
+				// while frozenInvoiceImpact() told the reader it "has to be regenerated"
+				// — one screen, two answers. `!settled`, NOT `neverPayable`: an
+				// unrecognised status keeps its place in the count AND keeps the dead-end
+				// sentence, so the two agree in that case too. Zero such rows exist today
+				// (measured on a copy: 25 frozen, 0 unresolved) — this is the shape for
+				// the day one appears, like the COALESCE decision on the SELECT above.
+				noRemedy: frozen.filter((f) => f.neverPayable || (f.cause === "PERIOD_UNRESOLVED" && !f.settled)).length,
+				frozenAmount: Math.round(frozenAmount * 100) / 100,
+				neverPayableAmount: Math.round(neverPayableAmount * 100) / 100,
+			},
+		});
+	} catch (err) {
+		console.error("GET /api/admin/period-lock-issues error:", err.message);
+		res.status(500).json({ error: "Failed to load month-end lock issues" });
 	}
 });
 
@@ -40470,12 +42128,23 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			// mapping to "this month's invoices" — the UI footnotes it. Rejected
 			// invoices never count. `adjustment` carries admin deductions (−) /
 			// bonuses (+), so invoiced = total_earnings + adjustment.
+			//
+			// ⚠️ `deleted_at = ''` IS NOT OPTIONAL, and its absence was a live money
+			// bug. DELETE /api/invoices/:id is a SOFT delete — the row keeps its
+			// `total_earnings` and `adjustment` and simply disappears from every list
+			// — so without this predicate a deleted invoice still contributed to this
+			// drill-down's `invoiced` and `adjustments` totals, and to the per-driver
+			// rows built from them. Every other reader of this table filters it
+			// (`GET /api/invoices`, buildPaymentReport(), the rename cascade's counts,
+			// the restore clash probe, the weekly duplicate guard); this one did not,
+			// so the Financials month detail was the single surface where a deleted
+			// invoice still showed as billed.
 			const monthStartStr = `${monthParam}-01`;
 			const monthEndStr = `${monthParam}-${pad2(daysInMonth)}`;
 			const invByDriver = {};
 			db.prepare(
 				`SELECT driver, COALESCE(total_earnings,0) AS earned, COALESCE(adjustment,0) AS adj
-				 FROM invoices WHERE status != 'Rejected' AND week_start <= ? AND week_end >= ?`
+				 FROM invoices WHERE status != 'Rejected' AND deleted_at = '' AND week_start <= ? AND week_end >= ?`
 			).all(monthEndStr, monthStartStr).forEach((r) => {
 				const k = normalizeDriverName(r.driver);
 				if (!k) return;
@@ -40860,10 +42529,20 @@ app.get("/api/expenses/receipts-download", requireRole("Super Admin"), (req, res
 //
 // Collapsed to one line and bounded: audit details are read by humans and
 // exported, and this is free text from a form.
+//
+// ⚠️ scrubPurgeMarker() FOR THE SAME REASON auditText() RUNS IT, and this was the
+// one caller-text capper in the file that did not. Harmless as it stands — the
+// bulk route appends this AFTER its real `[CODE]`, so a forged marker inside it
+// can neither remove that row's purge exemption nor win parsePeriodRefusalDetail's
+// first-match — but "harmless because of where the caller happens to splice it"
+// is a property of the two call sites, not of this function, and the next caller
+// inherits the gap rather than the guarantee. One call makes the invariant
+// uniform: no caller text anywhere reaches audit_trail.details carrying `[PERIOD`.
+// Byte-identical on every real reason; only a string containing that literal moves.
 const EXPENSE_STATUS_REASON_MAX = 300;
 function expenseStatusReason(body) {
 	const raw = body && typeof body.reason === "string" ? body.reason : "";
-	return raw.replace(/[\r\n\t]+/g, " ").trim().slice(0, EXPENSE_STATUS_REASON_MAX);
+	return scrubPurgeMarker(raw).replace(/[\r\n\t]+/g, " ").trim().slice(0, EXPENSE_STATUS_REASON_MAX);
 }
 
 // PUT /api/expenses/:id/status — Approve or reject an expense
@@ -41766,21 +43445,50 @@ app.post("/api/maintenance-fund", requireRole("Super Admin", "Dispatcher"), (req
 			return res.status(400).json({ error: "date must be YYYY-MM-DD" });
 		}
 		if (type === "service") {
-			if (!periodLocksReadable()) return periodLockUnreadableResponse(res, "Logging a maintenance service payment");
+			// ⚠️ A CREATE VERB, so there is no row id to name and no prior value to
+			// compare against — the attempted row IS the record, and without it the
+			// refusal cannot be reconstructed at all. entity is `maintenance_fund`,
+			// the table the write targets, and entity_id carries the truck because a
+			// service payment is only ever read per-truck. (Its success twin,
+			// `create_maintenance_fund_entry`, is written below and CAN name the id.)
+			const maintAudit = {
+				action: "maintenance_fund_blocked", entity: "maintenance_fund",
+				entityId: String(truck || "").trim() || "(no truck)",
+				subject: `log $${parseFloat(amount)} service payment dated ${String(date).trim()}` +
+					` on ${String(truck || "").trim() || "no truck"}`,
+				note: auditText(description, 500),
+			};
+			if (!periodLocksReadable()) return periodLockUnreadableResponse(req, res, "Logging a maintenance service payment", maintAudit);
 			const period = String(date).trim().slice(0, 7);
 			if (isLocked(period)) {
-				return periodBlockedResponse(res, "Cannot log this maintenance service payment",
+				return periodBlockedResponse(req, res, "Cannot log this maintenance service payment",
 					[{
 						table: "maintenance_fund", rows: 1, periods: [period],
 						detail: `a $${parseFloat(amount)} service payment dated ${String(date).trim()} would be deducted from ${periodLabel(period)}, which is finalized`,
 					}],
-					"Date it inside the current open month, or reopen the affected period first — POST /api/periods/:period/reopen records a reason.");
+					"Date it inside the current open month, or reopen the affected period first — POST /api/periods/:period/reopen records a reason.",
+					maintAudit);
 			}
 		}
 
 		const result = db.prepare(
 			`INSERT INTO maintenance_fund (type, amount, description, truck, date) VALUES (?, ?, ?, ?, ?)`
 		).run(type, parseFloat(amount), description || "", truck || "", date);
+
+		// ⚠️ BOTH TYPES ARE AUDITED, not just the guarded one. Only `service` reaches
+		// the P&L (every query filters `type = 'service'`), which is why only
+		// `service` is period-guarded — but a `contribution` still moves money into
+		// the maintenance reserve, and a row that no query sums is exactly the row
+		// nobody would notice was wrong. `date` is recorded because it, not the
+		// insert time, is the month a service payment is deducted from. Dispatchers
+		// can reach this route, so `super_admin` is not the only account here.
+		// (`create_maintenance_fund_entry`, paired with the refusal action
+		// `maintenance_fund_blocked` that was named before this line existed.)
+		logAudit(req, "create_maintenance_fund_entry", "maintenance_fund", String(result.lastInsertRowid),
+			`${type === "service" ? "Service payment" : "Contribution"} $${parseFloat(amount)} dated ${String(date).trim()}` +
+			` on ${String(truck || "").trim() || "no truck"}` +
+			`${type === "service" ? " (deducted from that month's P&L)" : " (reserve movement, not a P&L deduction)"}` +
+			`${description ? ` — ${auditText(description, 300)}` : ""}`);
 
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {
@@ -41841,17 +43549,30 @@ app.post("/api/compliance/fees", requireRole("Super Admin", "Dispatcher"), (req,
 		// Only a Paid row is summed, so a Pending fee books nothing wherever it is
 		// dated and is left alone — the same asymmetry the PUT relies on.
 		if (feeStatus === "Paid") {
-			if (!periodLocksReadable()) return periodLockUnreadableResponse(res, "Recording a paid compliance fee");
+			// Another create verb with no id yet: the attempted row is the whole
+			// record. Both dates are carried because compliancePostedPeriod() heads
+			// its COALESCE with paid_date and falls back to due_date, so which month
+			// this would have hit is only reconstructible from the pair. (Its success
+			// twin, `create_compliance_fee`, is written below.)
+			const feeAudit = {
+				action: "create_compliance_fee_blocked", entity: "compliance_fee",
+				entityId: String(truck || "").trim() || "(no truck)",
+				subject: `record $${parseFloat(amount)} ${String(type || "fee").trim()} as Paid` +
+					` on ${String(truck || "").trim() || "no truck"} (paid ${paid || "unset"}, due ${due})`,
+				note: auditText(description, 500),
+			};
+			if (!periodLocksReadable()) return periodLockUnreadableResponse(req, res, "Recording a paid compliance fee", feeAudit);
 			const period = compliancePostedPeriod({ paid_date: paid, due_date: due, created_at: "" });
 			if (!period || isLocked(period)) {
-				return periodBlockedResponse(res, "Cannot record this compliance fee as paid",
+				return periodBlockedResponse(req, res, "Cannot record this compliance fee as paid",
 					[{
 						table: "compliance_fees", rows: 1, periods: [period || ""],
 						detail: period
 							? `$${parseFloat(amount)} would be deducted from ${periodLabel(period)}, which is finalized`
 							: "the dates on this fee do not resolve to a month, so the month it would be deducted from cannot be confirmed open",
 					}],
-					"Use a paid date inside the current open month, record it as Pending for now, or reopen the affected period first — POST /api/periods/:period/reopen records a reason.");
+					"Use a paid date inside the current open month, record it as Pending for now, or reopen the affected period first — POST /api/periods/:period/reopen records a reason.",
+					feeAudit);
 			}
 		}
 
@@ -41860,6 +43581,20 @@ app.post("/api/compliance/fees", requireRole("Super Admin", "Dispatcher"), (req,
 			 VALUES (?, ?, ?, ?, ?, ?, ?)`
 		).run(type, parseFloat(amount), description || "", truck || "",
 			due, paid, feeStatus);
+
+		// The create verb's success line, and the twin of `update_compliance_fee` on
+		// the PUT — which has recorded which month a fee lands in since that route
+		// was guarded, while a fee created ALREADY PAID (one POST, `status:"Paid"`
+		// plus a paid date) made the identical deduction with no trace at all. Both
+		// dates and the status are recorded for the reason the refusal states: paid_date
+		// heads compliancePostedPeriod()'s COALESCE and falls back to due_date, so the
+		// month deducted is only reconstructible from the pair.
+		logAudit(req, "create_compliance_fee", "compliance_fee", String(result.lastInsertRowid),
+			`${String(type || "Fee").trim()}${String(truck || "").trim() ? ` on ${String(truck).trim()}` : ""} ` +
+			`$${parseFloat(amount)} created ${feeStatus}` +
+			` (due ${due}, paid ${paid || "unset"})` +
+			`${feeStatus === "Paid" ? ` — deducted from ${periodLabel(compliancePostedPeriod({ paid_date: paid, due_date: due, created_at: "" }))}` : " — not yet deducted"}` +
+			`${description ? ` — ${auditText(description, 300)}` : ""}`);
 
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {
@@ -41916,7 +43651,16 @@ app.put("/api/compliance/fees/:id", requireRole("Super Admin", "Dispatcher"), (r
 		// Fail CLOSED on an unreadable period_locks, matching every other write
 		// guard: isLocked() answers "not locked" on any error, so a broken table
 		// would turn this off silently.
-		if (!periodLocksReadable()) return periodLockUnreadableResponse(res, "Marking a compliance fee paid");
+		// Mirrors the `update_compliance_fee` success line's entity/entity_id. The
+		// attempted paid date is the payload: paid_date heads compliancePostedPeriod's
+		// COALESCE, so it alone decides which month the deduction lands in — which is
+		// the entire subject of this guard.
+		const feePayAudit = {
+			action: "pay_compliance_fee_blocked", entity: "compliance_fee", entityId: String(id),
+			subject: `mark ${fee.type || "fee"}${fee.truck ? ` on ${fee.truck}` : ""} paid` +
+				` ($${fee.amount}, paid_date ${fee.paid_date || "unset"} -> ${paidDate}, status ${fee.status || "unknown"} -> Paid)`,
+		};
+		if (!periodLocksReadable()) return periodLockUnreadableResponse(req, res, "Marking a compliance fee paid", feePayAudit);
 
 		// Does this fee reach a month's total at all? The investor branch INNER
 		// JOINs `t.status = 'Active'`; the fleet branch is `LOWER(truck) NOT IN
@@ -41941,7 +43685,7 @@ app.put("/api/compliance/fees/:id", requireRole("Super Admin", "Dispatcher"), (r
 			else if (before && isLocked(before)) blocked.push({ when: "current", period: before });
 			if (after && isLocked(after) && after !== before) blocked.push({ when: "new", period: after });
 			if (blocked.length) {
-				return periodBlockedResponse(res,
+				return periodBlockedResponse(req, res,
 					`Cannot mark ${fee.type || "this fee"}${fee.truck ? ` on ${fee.truck}` : ""} paid`,
 					[{
 						table: "compliance_fees", rows: 1, feeId: id, amount: fee.amount,
@@ -41950,7 +43694,8 @@ app.put("/api/compliance/fees/:id", requireRole("Super Admin", "Dispatcher"), (r
 							? (b.period ? `$${fee.amount} is currently deducted from ${periodLabel(b.period)}, which is finalized` : `this fee carries a date the server cannot resolve to a month, so it is currently deducted from none`)
 							: `paying it on ${paidDate} would deduct $${fee.amount} from ${periodLabel(b.period)}, which is finalized`).join("; "),
 					}],
-					`Use a paid date inside the current open month, or reopen the affected period first — POST /api/periods/:period/reopen records a reason.`);
+					`Use a paid date inside the current open month, or reopen the affected period first — POST /api/periods/:period/reopen records a reason.`,
+					feePayAudit);
 			}
 		}
 

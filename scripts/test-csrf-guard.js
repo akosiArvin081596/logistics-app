@@ -273,12 +273,25 @@ eq("refuseCrossSite is on exactly the cost/exposure GETs", mountedOn("refuseCros
 // The export moved off refuseCrossOrigin onto refuseCrossOriginStrict, so this
 // pin reads 6 + 1 rather than 7. That is not a route losing protection: strict
 // IS the money tier plus two more clauses. Both halves are asserted.
+// PUT /api/invoices/:id/adjust joined the list when the invoice period guard
+// landed. It is the settlement write its payouts namesake already was — a signed
+// correction of up to ±$10,000 onto a driver's weekly pay document — and the two
+// routes were deliberately built as mirrors, so the guard asymmetry between them
+// was an accident of which one shipped first, not a decision. Its only legitimate
+// browser caller is the SPA this server serves, so same-origin costs nothing.
+//
+// ⚠️ PUT /api/invoices/:id/approve is NOT here, and that is a KNOWN GAP rather
+// than a judgement that it is safe: its `paid` action is the one invoice verb
+// asserting money left the bank, so on the money-tier reasoning it belongs. It
+// was left out to keep the guard change to the route the period work was scoped
+// to. If it is added, add it here in the same commit.
 eq("refuseCrossOrigin is on exactly the settlement writes and the reconcile pair",
 	mountedOn("refuseCrossOrigin").join(" "),
 	["/api/periods/:period/finalize", "/api/periods/:period/reopen",
 	 "/api/investor/payouts/:id/status", "/api/investor/payouts/:id/adjust",
+	 "/api/invoices/:id/adjust",
 	 "/api/admin/ratecon-reconcile", "/api/admin/ratecon-reconcile/run"].sort().join(" "));
-eq("refuseCrossOrigin mount count agrees with that list", mountCount("refuseCrossOrigin"), 6);
+eq("refuseCrossOrigin mount count agrees with that list", mountCount("refuseCrossOrigin"), 7);
 eq("refuseCrossOriginStrict is on exactly the full-database export",
 	mountedOn("refuseCrossOriginStrict").join(" "), "/api/db/download");
 eq("...and on nothing else", mountCount("refuseCrossOriginStrict"), 1);

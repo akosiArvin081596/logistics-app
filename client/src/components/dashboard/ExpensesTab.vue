@@ -1570,6 +1570,12 @@ import GallonsRecoveryPanel from './expenses/GallonsRecoveryPanel.vue'
 import { US_STATES } from '../../utils/usStates'
 import { compressImage, readFileAsDataURL } from '../../lib/imageUtils'
 import { fmtTimestamp, fmtYmd, houstonToday, parseYmdLocal } from '../../utils/datetime'
+// ⚠️ Replaces this file's own `monthLabel`, which was `new Date(y, m - 1, 1)`
+// and SILENTLY ROLLED OVER: a period of '2026-13' told the filer their receipt
+// was booked to "January 2027" and '2026-00' to "December 2025" — a plausible
+// month, off by a year, in the one message that says where their money landed.
+// The shared module is string arithmetic and answers '' instead.
+import { monthLabel } from '../../lib/monthLabel'
 import {
   fmtOdometer, odometerSource, isSuspectOdometer, asList,
   isReviewAvailable, isQueueAvailable, reviewClearPhrases, queueCounts,
@@ -1816,14 +1822,6 @@ const addDateSuspect = computed(() => {
     ? 'This is over 4 months old — check the date.'
     : `This is dated ${m[1]} — check the year before saving.`
 })
-// "2026-06" -> "June 2026", for telling the filer which month a receipt was
-// booked to when its own month is already closed.
-function monthLabel(period) {
-  const m = /^(\d{4})-(\d{2})$/.exec(String(period || ''))
-  if (!m) return period || ''
-  return new Date(Number(m[1]), Number(m[2]) - 1, 1)
-    .toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
-}
 const allFilter = reactive({ driver: '', type: '', status: '', truck: '', state: '', from: '', to: '' })
 // Text search across vendor/description/city — debounced 300ms so we don't
 // refetch per keystroke.
@@ -2404,8 +2402,23 @@ async function submitExpense() {
     }
     // Its own month is already closed, so it books to the current open month
     // instead. Say so — the expense is filed, just not where the date implies.
+    //
+    // ⚠️ Both halves are guarded because `monthLabel` answers '' for a key it
+    // cannot read, and this sentence is BUILT out of two month names — an
+    // unguarded blank yields "Expense logged —  is closed, so it was booked to
+    // ", which reads like a bug and, worse, drops the one fact the filer needs:
+    // that the receipt did NOT land in the month its date implies. Each branch
+    // below is a complete, true sentence with whatever it actually knows.
     if (res?.periodClosed && res?.postedPeriod) {
-      toast(`Expense logged — ${monthLabel(res.naturalPeriod)} is closed, so it was booked to ${monthLabel(res.postedPeriod)}`, 'warning')
+      const natural = monthLabel(res.naturalPeriod)
+      const posted = monthLabel(res.postedPeriod)
+      if (natural && posted) {
+        toast(`Expense logged — ${natural} is closed, so it was booked to ${posted}`, 'warning')
+      } else if (posted) {
+        toast(`Expense logged — its own month is closed, so it was booked to ${posted}`, 'warning')
+      } else {
+        toast('Expense logged — its own month is closed, so it was booked to the current open month', 'warning')
+      }
     } else {
       toast('Expense logged')
     }
@@ -2851,9 +2864,14 @@ async function bulkSetStatus(status, ids = [...selectedIds.value]) {
 }
 
 // "April 2026" / "April 2026 and May 2026" / "April 2026, May 2026 and June 2026".
-// Reuses this file's own monthLabel — the same formatter that tells a filer
-// which month a receipt was booked to — so a month reads identically wherever
-// this panel names one.
+// Uses the shared lib/monthLabel — the same formatter that tells a filer which
+// month a receipt was booked to — so a month reads identically wherever this
+// panel names one.
+//
+// `|| p` is deliberate and already correct against the shared contract: these
+// months are listed as the reason a bulk action was refused, so a period must
+// name itself even when unreadable. `.filter(Boolean)` then drops only a period
+// that was empty to begin with.
 function periodList(periods) {
   const names = periods.map(p => monthLabel(p) || p).filter(Boolean)
   if (names.length <= 1) return names[0] || ''

@@ -284,6 +284,7 @@
 import { computed, watch, onBeforeUnmount } from 'vue'
 import { useFinancialsStore } from '../../stores/financials'
 import { formatCurrency as fmt } from '../../utils/format'
+import { monthLabel } from '../../lib/monthLabel'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -294,19 +295,27 @@ const emit = defineEmits(['close'])
 const store = useFinancialsStore()
 const detail = computed(() => store.monthDetail)
 
-function monthName(mk) {
-  if (!mk) return ''
-  const [y, m] = String(mk).split('-').map(Number)
-  return new Date(y, (m || 1) - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
-}
-const monthTitle = computed(() => monthName(props.month))
-const prevMonthTitle = computed(() => monthName(detail.value?.prevMonth?.month))
-const prevShort = computed(() => {
-  const mk = detail.value?.prevMonth?.month
-  if (!mk) return 'prev month'
-  const [y, m] = String(mk).split('-').map(Number)
-  return new Date(y, (m || 1) - 1, 1).toLocaleDateString('en-US', { month: 'short' })
-})
+// ⚠️ The local `monthName` these replace was `new Date(y, (m || 1) - 1, 1)`,
+// which SILENTLY ROLLS OVER: '2026-13' titled this dialog "January 2027" and
+// '2026-00' titled it "December 2025" — a plausible month, off by a year, on a
+// P&L drill-down. lib/monthLabel.js is string arithmetic and cannot do that; it
+// answers '' instead, so each of the three sites below states its own fallback.
+
+// The dialog's heading and its aria-label. Never blank: an untitled dialog is
+// both unreadable to a screen reader and undebuggable, so an unreadable key is
+// shown as itself rather than hidden.
+const monthTitle = computed(() => monthLabel(props.month) || props.month || 'Month detail')
+
+// Read inside sentences — "vs {X}: revenue …", "No activity recorded in {X} —
+// deltas are vs zero", "revenue is up 12% vs {X}." A blank leaves a hole in all
+// four, and the raw key would read as a month; "the prior month" is true
+// regardless of whether the key parsed, which is what these sentences claim.
+const prevMonthTitle = computed(() => monthLabel(detail.value?.prevMonth?.month) || 'the prior month')
+
+// Abbreviated for the mini-KPI captions ("-$120 vs Jul"). First three letters of
+// the shared name is exactly what toLocaleDateString('en-US', {month:'short'})
+// gave for all twelve, so nothing moves on screen for a readable key.
+const prevShort = computed(() => monthLabel(detail.value?.prevMonth?.month).slice(0, 3) || 'prev month')
 
 // The "am I winning, scaling, losing, or stagnant?" signal.
 // Losing: net < 0. Scaling: profitable + revenue up >= 5% MoM.

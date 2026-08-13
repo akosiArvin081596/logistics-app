@@ -375,10 +375,25 @@ check("driver/respond checks load ownership before binding",
 // with NO rate limiter — and audit_trail has no retention job. Both refusal
 // helpers must cap, not just the new one: one capping and the other not reads as
 // a decision that the other case is safe.
+// ⚠️ AND `what` IS ALSO SCRUBBED, which is a SECOND property of the same
+// expression, pinned separately so losing either one fails. purgeOldAuditRefusals()
+// spares any row whose details contain `[PERIOD_`, and `what` carries the caller's
+// raw driver name straight into those details — so without scrubPurgeMarker() a
+// dispatch under the name `[PERIOD_` mints a PERMANENT audit row, on demand, on
+// routes with no rate limiter. The cap bounds how big each row is; the scrub is
+// what stops it being immortal. The real marker is the `[${code}]` appended after
+// this expression, which is a literal bracket around a module constant and must
+// stay unscrubbed.
 for (const fn of ["sendLoadBindRefusal", "sendDispatchRefusal"]) {
 	const body = extract(fn);
 	check(`${fn} caps the audited action string`,
-		/String\(what == null \? "" : what\)\.slice\(0, 200\)/.test(body), true);
+		/scrubPurgeMarker\(what == null \? "" : what\)\.slice\(0, 200\)/.test(body), true);
+	check(`${fn} scrubs the purge marker out of the audited action string`,
+		/scrubPurgeMarker\(what\b/.test(body), true);
+	// PAIRED — the bracketed cause code must still be written, or the row loses the
+	// exemption the scrub exists to protect.
+	check(`${fn} still writes the bracketed cause code itself`,
+		/\[\$\{(refusal|blocked)\.code\}\]/.test(body), true);
 	check(`${fn} caps the audited load id`, /\.slice\(0, 100\)/.test(body), true);
 	check(`${fn} stringifies the id only when it is a primitive`,
 		/typeof loadId === "string" \|\| typeof loadId === "number"/.test(body), true);

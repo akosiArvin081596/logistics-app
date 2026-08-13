@@ -541,12 +541,26 @@ check("refusal extraction picked up the 409 and its code selection", [
 
 	// The refusal, verbatim. `periodLabel` is the REAL one — it is what turned the
 	// leaked sentinel into a printed month, so stubbing it would hide the defect.
+	//
+	// `req` / `userDelAudit` / `recordPeriodRefusal` are injected because the block
+	// now AUDITS before it answers. They are stubs rather than the real thing on
+	// purpose: what this section tests is the 409 body, and the audit call is
+	// captured only so the assertions below can prove it happens at all. A refusal
+	// on this route cascades into expenses and invoices, and `super_admin` is a
+	// shared login, so "was the attempt recorded" is part of the guard, not an
+	// aside — before it was, a repeated attempt to delete a user out of a settled
+	// month left nothing behind.
+	let audited = [];
 	const refuse = (lock, src) => {
 		let captured = null;
+		audited = [];
 		const res = { status: () => ({ json: (b) => { captured = b; return b; } }) };
-		new Function("lock", "user", "id", "res", "periodLabel",
+		new Function("lock", "user", "id", "res", "periodLabel", "req", "userDelAudit", "recordPeriodRefusal",
 			`${extract("periodLabel")}\n${src || REFUSAL}`
-		)(lock, { driver_name: "shorn king", username: "sking" }, 7, res, null);
+		)(lock, { driver_name: "shorn king", username: "sking" }, 7, res, null,
+			{ session: { user: { id: 1, username: "super_admin" } } },
+			{ action: "delete_user_blocked", entity: "user", entityId: "7" },
+			(a, code, periods) => audited.push({ a, code, periods }));
 		return captured;
 	};
 
@@ -586,6 +600,16 @@ check("refusal extraction picked up the 409 and its code selection", [
 			/detached from their investor/.test(body.error), false);
 		check("409/paid-only: it never tells the admin to reopen a period",
 			/reopen/i.test(body.error), false);
+		// ⚠️ THE REFUSAL IS RECORDED, AND UNDER THE CODE THE ROUTE SELECTED. A row
+		// audited as PERIOD_FINALIZED for a block that came from a paid invoice is
+		// the audit-trail version of the mislabel every check above exists to catch:
+		// it would send whoever reads it to reopen a period that is open. Exactly
+		// one row per refusal — a second would double-count the attempt.
+		check("409/paid-only: the refusal is audited", audited.length, 1);
+		check("409/paid-only: ...under the code the caller was given",
+			audited[0] && audited[0].code, body.code);
+		check("409/paid-only: ...and names no month it cannot name",
+			audited[0] && audited[0].periods, []);
 		db.close();
 	}
 

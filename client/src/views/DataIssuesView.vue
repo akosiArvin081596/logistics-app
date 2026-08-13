@@ -557,6 +557,236 @@
         </template>
       </section>
 
+      <!-- ================= 6. Blocked by month-end close ================= -->
+      <!-- Client ask, verbatim: "everything that is concerning the lock month or
+           date it should go to that page where we show all the concerns."
+
+           TWO halves, and the queue is wrong without either. HISTORY is what a
+           closed month REFUSED — which exists only if somebody happened to try.
+           CURRENT STATE is what a closed month is HOLDING right now, which is
+           true whether or not anyone has bumped into it yet.
+
+           ⚠️ Expenses redirected by `posted_period` are deliberately NOT here.
+           That redirect is the system working as designed, both admin surfaces
+           already say so at the moment it happens, and with every month through
+           2026-07 locked it fires on essentially every backdated receipt —
+           listing them would bury the rows that do need someone. -->
+      <section v-if="visible('periodlock')" class="section">
+        <div class="section-title">
+          <div class="section-icon icon-amber">&#128274;</div>
+          Blocked by month-end close
+          <span class="section-sub">{{ Q.periodlock.blurb }}</span>
+        </div>
+
+        <!-- `inconclusive` only when there is nothing to show — see the note on
+             periodInconclusive. The strip below says the same thing regardless. -->
+        <QueueStatus
+          :state="st.periodlock"
+          :clear="Q.periodlock.clear"
+          :empty="periodEmpty"
+          :established="established('periodlock')"
+          :inconclusive="periodInconclusive"
+          @retry="loadPeriodLock"
+        />
+
+        <template v-if="answered('periodlock') && periodLock">
+          <!-- ⚠️ THE LOUDEST CASE FIRST, AND IT IS NOT A QUEUE. With period_locks
+               unreadable every write guard in the app fails CLOSED, so the app is
+               at that moment refusing invoice adjustments, truck edits, expense
+               status flips and driver renames it cannot confirm are safe. The
+               server deliberately lists no invoice in that state — one root cause
+               is not twenty-nine findings — so this replaces the tables rather
+               than sitting above them. -->
+          <div v-if="!periodLock.locksReadable" class="err-inline">
+            <strong>The month-end lock table can't be read.</strong>
+            Every write guard in the app is failing closed while that is true, so all
+            {{ periodLock.liveInvoices }} live invoice<template v-if="periodLock.liveInvoices !== 1">s</template>
+            &mdash; and truck edits, expense status changes and driver renames &mdash; are being refused
+            because no month can be confirmed open. Nothing below is a list of individual problems;
+            fix <span class="mono">period_locks</span> first.
+          </div>
+
+          <template v-else>
+            <div class="rollup">
+              <div class="rollup-card">
+                <span class="rollup-label">Invoices frozen</span>
+                <span class="rollup-value">
+                  <span class="split-fix">{{ periodLock.summary.frozen }}</span>
+                  <span class="split-sep">&middot;</span>
+                  <span class="split-closed">of {{ periodLock.summary.live }} live</span>
+                </span>
+                <span class="rollup-note">
+                  un-adjustable while their month is closed &mdash; {{ money(periodLock.summary.frozenAmount) }}
+                </span>
+              </div>
+              <!-- The figure an admin most needs. An un-adjustable invoice needs
+                   nothing unless somebody wants to change it; one that can never
+                   be marked Paid is waiting on a payment that cannot arrive, and
+                   has no in-app remedy at all. -->
+              <div class="rollup-card">
+                <span class="rollup-label">Can never be paid</span>
+                <span class="rollup-value mono">{{ periodLock.summary.neverPayable }}</span>
+                <span class="rollup-note">
+                  {{ money(periodLock.summary.neverPayableAmount) }} &mdash; only the
+                  <em>paid</em> step is guarded, so these reach Approved and stop
+                </span>
+              </div>
+              <!-- ⚠️ NO NUMBER FROM A TABLE THAT COULD NOT BE READ. The server
+                   initialises refusalCount to 0 BEFORE its try, so with
+                   auditReadable:false this card would read "0 · none recorded"
+                   — a positive claim sourced from a failed read, and the number
+                   is what people take away even though the scan-meta line two
+                   elements down contradicts it. Same treatment the invoice half
+                   gets from the !locksReadable branch above: when the source
+                   couldn't be read, say that instead of printing a total. -->
+              <div class="rollup-card">
+                <span class="rollup-label">Writes refused</span>
+                <span class="rollup-value mono">
+                  <template v-if="periodLock.auditReadable">{{ periodLock.refusalCount }}</template>
+                  <template v-else>&mdash;</template>
+                </span>
+                <span class="rollup-note">
+                  <template v-if="!periodLock.auditReadable">the audit trail couldn't be read, so no count can be given</template>
+                  <template v-else-if="periodLock.refusalOldest">since {{ fmtWhen(periodLock.refusalOldest) }}</template>
+                  <template v-else>none recorded</template>
+                </span>
+              </div>
+              <div class="rollup-card">
+                <span class="rollup-label">Months closed</span>
+                <span class="rollup-value mono">{{ periodLock.lockedCount }}</span>
+                <span class="rollup-note">
+                  <template v-if="periodLock.lockedCount">
+                    {{ periodLock.lockedPeriods[0] }} &mdash; {{ periodLock.lockedPeriods[periodLock.lockedPeriods.length - 1] }}
+                  </template>
+                  <template v-else>none</template>
+                  &middot; auto-close {{ periodLock.closeEnabled ? 'on' : 'off' }}
+                </span>
+              </div>
+            </div>
+
+            <!-- The same sentence QueueStatus would show, rendered here whether or
+                 not the tables are empty. A queue that established nothing must
+                 say so even when it happens to be holding rows. -->
+            <p v-if="!periodLock.meaningful" class="read-only-note">
+              <strong>This check hasn't established anything.</strong>
+              Whatever is or isn't listed below, {{ periodLockInconclusive }}.
+            </p>
+
+            <!-- ---------- CURRENT STATE ---------- -->
+            <template v-if="periodLock.invoices.length">
+              <!-- ⚠️ The count comes from the server's FULL set while the list is
+                   capped, so a truncated table says so rather than letting a
+                   reader count rows and disbelieve the headline. -->
+              <div class="scan-meta">
+                <template v-if="periodLock.invoiceTruncated">
+                  Frozen now &mdash; showing the first {{ periodLock.invoiceShown }} of {{ periodLock.invoiceCount }}.
+                </template>
+                <template v-else>Frozen now &mdash; all {{ periodLock.invoiceCount }}.</template>
+                An invoice is frozen when any month in its billing week is finalized; a Sat&ndash;Fri
+                week can straddle two.
+              </div>
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Invoice</th>
+                    <th scope="col">Driver</th>
+                    <th scope="col">Billing week</th>
+                    <th scope="col" class="num">Amount</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">What's stuck</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="inv in periodLock.invoices" :key="inv.id" :class="{ 'row-locked': !inv.neverPayable }">
+                    <td>
+                      <div class="strong mono">{{ inv.invoiceNumber || ('#' + inv.id) }}</div>
+                      <div v-if="inv.isManual" class="dim tiny">manual</div>
+                    </td>
+                    <td>{{ inv.driver || '—' }}</td>
+                    <td class="mono tiny">
+                      {{ inv.weekStart || '—' }} &ndash; {{ inv.weekEnd || '—' }}
+                      <div v-if="inv.periodLabels.length" class="dim tiny">
+                        closes: {{ inv.periodLabels.join(', ') }}
+                      </div>
+                    </td>
+                    <td class="num mono">{{ money(inv.amount) }}</td>
+                    <td>
+                      <span :class="['status-pill', inv.neverPayable ? 'st-owed' : 'st-processing']">{{ inv.status || '—' }}</span>
+                    </td>
+                    <td>
+                      <div>{{ invoiceImpact(inv) }}</div>
+                      <div v-if="inv.remedy" class="dim tiny">{{ inv.remedy }}</div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </template>
+
+            <!-- ---------- HISTORY ---------- -->
+            <div class="scan-meta">
+              Refused writes &mdash;
+              <template v-if="!periodLock.auditReadable">the audit trail couldn't be read, so none can be listed.</template>
+              <template v-else-if="!periodLock.refusalCount">
+                nothing has been refused by a closed month.
+                <template v-if="!periodLock.auditRows">The audit trail is empty on this server.</template>
+              </template>
+              <template v-else-if="periodLock.refusalTruncated">
+                showing the {{ periodLock.refusalShown }} newest of {{ periodLock.refusalCount }}.
+              </template>
+              <template v-else>all {{ periodLock.refusalCount }}, newest first.</template>
+              {{ historyNote }}
+            </div>
+
+            <table v-if="periodLock.refusals.length" class="data-table compact">
+              <thead>
+                <tr>
+                  <th scope="col">When</th>
+                  <th scope="col">Attempted</th>
+                  <!-- ⚠️ "Account", never "Who". `super_admin` is a SHARED login
+                       used by several people, so this column identifies a login
+                       and a session and can never identify a person. -->
+                  <th scope="col">Account</th>
+                  <th scope="col">Month(s)</th>
+                  <th scope="col">Why it was refused</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="r in periodLock.refusals" :key="r.id">
+                  <td class="mono tiny">{{ fmtWhen(r.at) }}</td>
+                  <td class="subject-cell">
+                    <div>{{ r.attempted || r.action }}</div>
+                    <div class="dim tiny mono">{{ r.action }}<template v-if="r.entityId"> &middot; {{ r.entity }} {{ r.entityId }}</template></div>
+                    <div v-if="r.note" class="dim tiny">stated reason: {{ r.note }}</div>
+                    <div v-if="r.suppressed" class="dim tiny">+{{ r.suppressed }} identical refusal<template v-if="r.suppressed !== 1">s</template> folded into this row</div>
+                  </td>
+                  <td>
+                    {{ r.account || '—' }}
+                    <div v-if="r.role" class="dim tiny">{{ r.role }}</div>
+                  </td>
+                  <td class="mono tiny">
+                    <template v-if="r.periodLabels.length">{{ r.periodLabels.join(', ') }}</template>
+                    <template v-else>&mdash;</template>
+                    <!-- ⚠️ Never rendered as a month. namedLockedPeriods() emits
+                         "(unrecognized date)" where a row's month could not be
+                         resolved, and the audit formatter can truncate the list
+                         mid-key; either printed as a period would send someone to
+                         reopen something that does not exist. -->
+                    <div v-if="r.unnamedPeriods" class="dim tiny">plus month(s) this row couldn't name</div>
+                  </td>
+                  <td>
+                    <span class="mono tiny">{{ r.code || '—' }}</span>
+                    <!-- '' for a code this build has never seen — the raw stored
+                         detail is shown instead of an invented sentence. -->
+                    <div v-if="refusalCause(r)" class="dim tiny">{{ refusalCause(r) }}</div>
+                    <div v-else class="dim tiny">{{ r.details }}</div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </template>
+        </template>
+      </section>
+
       <!-- ================= Needs a decision ================= -->
       <section v-if="!focus" class="section decisions">
         <div class="section-title">
@@ -709,6 +939,8 @@ import {
   rateconReport, onboardingFailures, regenerateBlockedReason,
   linxupReport, verifyTrucks, countVerifyChecks,
   tankDecisionCandidate, tankDecisionFallback,
+  periodLockReport, periodIssueCounts, periodLockInconclusiveText,
+  refusalCauseText, frozenInvoiceImpact, PERIOD_HISTORY_NOTE,
 } from '../lib/dataIssues'
 
 const api = useApi()
@@ -723,8 +955,10 @@ const loading = ref(true)
 const focus = ref('')
 const busy = ref('')
 
-// Per-queue state. Five endpoints, five independent failure modes: one 403 must
-// never silence the other four, and must never be rendered as "all clear".
+// Per-queue state. SIX endpoints, six independent failure modes: one 403 must
+// never silence the other five, and must never be rendered as "all clear". (The
+// arithmetic is ISSUE_QUEUES.length; it was left at five/four when the month-end
+// queue was added, which is why it is spelled out rather than hardcoded below.)
 const st = ref(Object.fromEntries(ISSUE_QUEUES.map((q) => [q.key, emptyQueueState(q)])))
 
 const AUTO_KEYS = ISSUE_QUEUES.filter((q) => !q.manual).map((q) => q.key)
@@ -746,6 +980,19 @@ const loadDuplicates = () => fetchQueue('duplicates', '/api/expenses/fuel-analyt
 const loadOnboarding = () => fetchQueue('onboarding', '/api/admin/onboarding-doc-failures')
 const loadLinxup = () => fetchQueue('linxup', '/api/eld/linxup/health')
 const loadVerify = () => fetchQueue('fuelverify', '/api/fuel/verify')
+// Structurally read-only and local — no network, no write — so it loads on mount
+// like the other four rather than carrying the rate-con queue's `manual` flag.
+//
+// ⚠️ "A HANDFUL OF INDEXED LOOKUPS" WAS WRONG AND IS NOT WHY IT LOADS ON MOUNT.
+// The invoice half is indexed; the history half is THREE FULL PASSES over
+// audit_trail per call (a leading-wildcard LIKE is non-sargable, plus an
+// unfiltered COUNT(*)), on a table that grows without bound because every
+// `[PERIOD_` row is purge-exempt forever. Measured ~1.0 ms at 1,444 rows, but it
+// is linear and better-sqlite3 is synchronous, so it blocks the event loop for
+// every other request. The server carries a limiter for that reason now; what
+// makes this safe to load on mount is that it is one call per page visit, not
+// that it is free. See the note above the endpoint in server.js.
+const loadPeriodLock = () => fetchQueue('periodlock', '/api/admin/period-lock-issues')
 
 // `dryRun=true` is an inert no-op server-side (the GET never alerts since the
 // GET/POST split) and is sent only so the request matches the existing runbook.
@@ -756,7 +1003,7 @@ const loadRatecon = () =>
 
 async function loadAll() {
   loading.value = true
-  await Promise.all([loadDuplicates(), loadOnboarding(), loadLinxup(), loadVerify()])
+  await Promise.all([loadDuplicates(), loadOnboarding(), loadLinxup(), loadVerify(), loadPeriodLock()])
   loading.value = false
 }
 
@@ -803,6 +1050,10 @@ const linxup = computed(() => linxupReport(st.value.linxup.data))
 const verifyPayload = computed(() => st.value.fuelverify.data)
 const verifyRows = computed(() => verifyTrucks(verifyPayload.value))
 
+// null until the call answers — never a synthesised zero. See periodLockReport().
+const periodLock = computed(() => periodLockReport(st.value.periodlock.data))
+const periodCounts = computed(() => periodIssueCounts(periodLock.value))
+
 // --- The queue bar ----------------------------------------------------------
 // A toggle appears only for a queue that ANSWERED and holds something. A queue
 // that failed gets a separate, quieter line — putting it in the bar with a
@@ -821,6 +1072,9 @@ const queueCounts = computed(() => ({
   ratecon: ratecon.value
     ? { actionable: ratecon.value.missing.length, closed: 0, total: ratecon.value.missing.length }
     : { actionable: 0, closed: 0, total: 0 },
+  // Split, not summed: everything in this queue concerns a closed month, but only
+  // the rows with no in-app remedy are work. See periodIssueCounts().
+  periodlock: periodCounts.value,
 }))
 
 const queueToggles = computed(() =>
@@ -840,13 +1094,31 @@ const queueToggles = computed(() =>
     }),
 )
 
-// The context two of the checks need before their zero means anything. See
+// The context three of the checks need before their zero means anything. See
 // queueEstablished(): a 200 carrying a well-formed 0 is not a clean result when
 // the detector behind it was never switched on.
 const establishCtx = computed(() => ({
+  // ⚠️ WHETHER THE CALL LANDED AT ALL, AND IT IS NOT REDUNDANT WITH THE FLAGS
+  // BELOW. Every one of those is `Boolean(payload?.x)`, which collapses "the
+  // server told us this is off" and "we never heard from the server" into the
+  // same false — and each queue's inconclusive sentence then states a server
+  // fact nobody was told. Supplied for EVERY registered queue rather than the
+  // three that gate on it, so a queue added later inherits the check instead of
+  // silently opting out of it. See queueCtxAnswered().
+  answered: Object.fromEntries(ISSUE_QUEUES.map((q) => [q.key, answered(q.key)])),
   sweepHasRun: Boolean(verifyPayload.value?.sweepHasRun),
   linxupMeaningful: Boolean(linxup.value?.meaningful),
   linxupHasToken: Boolean(linxup.value?.hasToken),
+  // ⚠️ ALL FOUR ARE SERVER-TOLD FACTS ABOUT ITS OWN TABLES, never inferred from
+  // the lists being empty — "both lists are empty" is precisely the input that
+  // cannot tell a healthy month-end from one that never ran. `meaningful` is
+  // false while the payload is null, so a queue that has not answered can never
+  // be established either.
+  periodLockMeaningful: Boolean(periodLock.value?.meaningful),
+  locksReadable: periodLock.value ? periodLock.value.locksReadable : null,
+  auditReadable: periodLock.value ? periodLock.value.auditReadable : null,
+  lockedCount: periodLock.value?.lockedCount ?? 0,
+  closeEnabled: Boolean(periodLock.value?.closeEnabled),
 }))
 const established = (k) => answered(k) && queueEstablished(k, establishCtx.value)
 
@@ -873,13 +1145,43 @@ const unavailableText = computed(() => {
   const n = unestablished.value.length
   return n ? `${n} check${n === 1 ? '' : 's'} couldn't tell us` : ''
 })
+// ⚠️ AN EMPTY `why` NOW MEANS "THE PAYLOAD NEVER ARRIVED", AND THAT FALLBACK IS
+// REACHABLE AGAIN. It used to be dead code: the three gated queues built their
+// context with `Boolean(payload?.x)`, so a failed call produced the same false as
+// a detector that is genuinely off and they always had a confident sentence to
+// hand back. The queue that could not be asked now says so, and says which kind
+// of "could not" — a 403 will never come good on a retry, a timeout might.
 const unavailableTitle = computed(() =>
   unestablished.value
     .map((q) => {
       const why = queueInconclusiveText(q.key, establishCtx.value)
-      return why ? `${q.label} — ${why}` : `${q.label} — couldn't load`
+      if (why) return `${q.label} — ${why}`
+      // Idle is not failure: the rate-con queue is deliberately load-on-demand
+      // (it opens IMAP against the production mailbox), so "couldn't load" would
+      // report a fault where nobody has pressed the button yet.
+      if (st.value[q.key]?.status === 'idle') return `${q.label} — not run yet`
+      const err = queueErrorText(st.value[q.key])
+      return err ? `${q.label} — ${err}` : `${q.label} — couldn't load`
     })
     .join('\n'))
+
+// --- Month-end close --------------------------------------------------------
+const periodEmpty = computed(() => periodCounts.value.total === 0)
+
+// ⚠️ PASSED TO QueueStatus ONLY WHEN THERE IS NOTHING TO SHOW. That box renders
+// "Nothing established — …" above whatever the section draws, and this queue can
+// legitimately hold rows while establishing nothing: an invoice with an
+// unresolvable week date is refused by the fail-closed rung whether or not a
+// single month has ever been locked. Printing "Nothing established" over four
+// rows would contradict the rows. The section's own context strip below carries
+// the same sentence unconditionally, which is the documented pattern for a
+// section with a fuller explanation of its own — Linxup and Fuel do the same.
+const periodLockInconclusive = computed(() => periodLockInconclusiveText(establishCtx.value))
+const periodInconclusive = computed(() => (periodEmpty.value ? periodLockInconclusive.value : ''))
+
+const refusalCause = (r) => refusalCauseText(r.code)
+const invoiceImpact = (inv) => frozenInvoiceImpact(inv)
+const historyNote = PERIOD_HISTORY_NOTE
 
 function toggleFocus(k) { focus.value = focus.value === k ? '' : k }
 function visible(k) { return !focus.value || focus.value === k }
