@@ -17,10 +17,21 @@
         <option v-for="t in docTypes" :key="t" :value="t">{{ t }}</option>
       </select>
       <input v-model="uploadForm.notes" class="doc-input" type="text" placeholder="Notes (optional)" />
-      <label class="upload-btn">
-        {{ uploadForm.file ? uploadForm.file.name : 'Choose File' }}
-        <input type="file" style="display:none" @change="onFileChange" />
-      </label>
+      <!-- accept="" is DELIBERATE and must stay empty. This surface has never
+           had an accept attribute and the server (validateFileExt, server.js:134)
+           is its authority — every doc type in the list above, plus scans and
+           spreadsheets, arrives here. matchesAccept() returns true for an empty
+           accept precisely so migrating to a dropzone cannot silently invent a
+           rule this surface never had. -->
+      <FileDropZone
+        class="doc-dropzone"
+        compact
+        accept=""
+        :max-size-mb="10"
+        :disabled="uploading"
+        :label="uploadForm.file ? uploadForm.file.name : 'Drop a document here'"
+        @files="onFileChange"
+      />
       <label v-if="canShareWithDriver" class="visible-toggle" title="Let the currently-assigned driver see this doc in their Driver Kit (view-only)">
         <input type="checkbox" v-model="uploadForm.visibleToDriver" />
         <span>Visible to assigned driver</span>
@@ -92,6 +103,8 @@
 import { ref, reactive, onMounted, computed } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useAuthStore } from '../../stores/auth'
+import FileDropZone from '../shared/FileDropZone.vue'
+import { readFileAsDataURL } from '../../lib/imageUtils'
 // uploaded_at / signed_at are real INSTANTS, not date-only values, so they
 // convert to the viewer's zone and carry a time — the client asked every upload
 // table to show date AND time. Replaces a local date-only fmtDate that also read
@@ -190,13 +203,25 @@ async function load() {
   }
 }
 
-function onFileChange(e) {
-  const file = e.target.files[0]
+// Receives an already-validated File[] from BOTH paths — the zone's click-to-
+// browse and a drop on it. One file at a time (`multiple` is off on the zone).
+async function onFileChange(files) {
+  const file = files[0]
   if (!file) return
+  errorMsg.value = ''
+  const dataUrl = await readFileAsDataURL(file)
+  // Commit the file only once its bytes are in hand. `upload()` gates on
+  // `uploadForm.file` alone, so setting it before the read finishes leaves a
+  // window where Upload is enabled and would POST an empty fileData.
+  // readFileAsDataURL resolves '' on an unreadable file rather than rejecting.
+  if (!dataUrl) {
+    uploadForm.file = null
+    uploadForm.fileBase64 = ''
+    errorMsg.value = `Couldn't read "${file.name}". Try choosing it again.`
+    return
+  }
   uploadForm.file = file
-  const reader = new FileReader()
-  reader.onload = ev => { uploadForm.fileBase64 = ev.target.result }
-  reader.readAsDataURL(file)
+  uploadForm.fileBase64 = dataUrl
 }
 
 async function upload() {
@@ -290,13 +315,10 @@ onMounted(() => {
 }
 .doc-select { min-width: 160px; }
 .doc-input { flex: 1; min-width: 120px; }
-.upload-btn {
-  padding: 0.4rem 0.85rem; border: 1px solid var(--border); border-radius: 6px;
-  background: var(--surface); color: var(--text-dim); font-size: 0.78rem;
-  cursor: pointer; white-space: nowrap; font-family: inherit;
-  transition: all 0.15s;
-}
-.upload-btn:hover { border-color: var(--accent); color: var(--accent); }
+/* Replaces the old .upload-btn label. min-width:0 lets a long filename shrink
+   the zone instead of forcing the whole wrapping row wider than its modal. */
+.doc-dropzone { flex: 1 1 240px; min-width: 0; }
+.doc-dropzone :deep(.fdz-title) { overflow-wrap: anywhere; }
 .btn-upload {
   padding: 0.4rem 1rem; background: var(--accent); color: #fff;
   border: none; border-radius: 6px; font-family: inherit; font-size: 0.8rem;

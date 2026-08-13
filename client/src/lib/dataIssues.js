@@ -225,7 +225,38 @@ export function normalizeDuplicateGroup(raw) {
     // Every copy sits in a closed month: still worth showing (the money was
     // still booked twice) but there is nothing to do about it this month.
     allClosed: rows.length > 0 && counts.actionable === 0,
+    // The settlement month and how far it has settled, straight from the server.
+    period: String(raw?.period ?? '').trim(),
+    settlement: String(raw?.settlement ?? '').trim().toLowerCase(),
+    remedy: duplicateRemedy(rows.length > 0 && counts.actionable === 0, raw?.settlement),
   }
+}
+
+/**
+ * What can actually be DONE about a duplicate group — the question this queue
+ * exists to answer and could not, because "closed" was the only thing it knew.
+ *
+ * ⚠️ CLOSED IS NOT ONE STATE, AND CONFLATING THE TWO IS WHY THIS PAGE READ AS A
+ * DEAD END. A finalized month whose payout is still `owed` has moved NO MONEY:
+ * the fix is an ordinary reopen → void → re-finalize, with nothing to recover
+ * from anyone. A month already `paid` cannot be un-sent and is a genuine
+ * adjustment conversation. Measured on production 2026-08-12, $700 of the
+ * $1,115 of known duplicates was in the first bucket and only $415 in the
+ * second — so treating them alike wrote off most of the recoverable money.
+ *
+ * Note the SIGN while reading this: a duplicate EXPENSE depresses net profit, so
+ * it UNDERPAYS the investor. Every correction here pays them more. There is no
+ * clawback in any of these branches.
+ *
+ * Unknown settlement is deliberately reported as unknown rather than assumed
+ * safe — the server fails closed to 'unknown' when it cannot read the payouts.
+ */
+export function duplicateRemedy(allClosed, settlement) {
+  if (!allClosed) return 'open'
+  const s = String(settlement ?? '').trim().toLowerCase()
+  if (s === 'owed' || s === 'none') return 'correctable'
+  if (s === 'paid' || s === 'processing') return 'settled'
+  return 'unknown'
 }
 
 export function duplicateGroups(payload) {

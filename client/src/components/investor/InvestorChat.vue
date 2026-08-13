@@ -36,7 +36,15 @@
     </div>
 
     <!-- Composer (hidden in preview mode — admins shouldn't message themselves as the investor) -->
-    <div v-if="!isPreview" class="chat-composer">
+    <!-- The drop target is the whole composer, never the paperclip: a 24px icon
+         is not something anyone can hit with a dragged file. -->
+    <div
+      v-if="!isPreview"
+      class="chat-composer"
+      :class="{ 'is-drop-active': dragActive }"
+      v-bind="dropzoneProps"
+    >
+      <span v-if="dragActive" class="composer-drop-hint" aria-hidden="true">Drop to attach</span>
       <div class="composer-main">
         <textarea
           v-model="draft"
@@ -48,7 +56,7 @@
         <div class="composer-toolbar">
           <label class="attach-btn" title="Attach file">
             &#128206;
-            <input type="file" style="display:none" accept="image/*,application/pdf" @change="onAttach" />
+            <input :ref="setInputEl" v-bind="inputProps" style="display:none" />
           </label>
           <select v-if="trucks.length" v-model="selectedAsset" class="asset-select" title="Share asset">
             <option value="">&#128666; Share Truck</option>
@@ -59,6 +67,14 @@
             {{ sending ? '...' : 'Send' }}
           </button>
         </div>
+        <!-- The only message slot on this surface — this component has no toast.
+             Copy comes straight from the shared validator and stays plain: an
+             investor reads it, so it never names an admin action or an internal
+             route. -->
+        <p v-if="attachError" class="composer-error" role="alert">
+          <span>{{ attachError }}</span>
+          <button type="button" class="attach-clear" aria-label="Dismiss" @click="clearMessages">&times;</button>
+        </p>
       </div>
     </div>
     <div v-else class="chat-readonly-hint">
@@ -71,6 +87,8 @@
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useSocket } from '../../composables/useSocket'
+import { useFileDrop } from '../../composables/useFileDrop'
+import { readFileAsDataURL } from '../../lib/imageUtils'
 import { useAuthStore } from '../../stores/auth'
 import { useInvestorStore } from '../../stores/investor'
 
@@ -95,15 +113,42 @@ const attachFile = ref(null)
 const selectedAsset = ref('')
 const attachBase64 = ref('')
 
-function onAttach(e) {
-  const file = e.target.files[0]
+// Receives an already-validated File[] from BOTH paths — the paperclip picker
+// and a drop anywhere on the composer. `multiple` is off, so at most one file
+// ever arrives; a second is refused by name in `attachError`.
+async function onAttach(files) {
+  const file = files[0]
   if (!file) return
+  const dataUrl = await readFileAsDataURL(file)
+  // readFileAsDataURL resolves '' on an unreadable/corrupt file rather than
+  // rejecting. Showing the name with no bytes behind it would let send() run
+  // and silently post a message with no attachment, so refuse it here.
+  if (!dataUrl) {
+    attachFile.value = null
+    attachBase64.value = ''
+    attachError.value = `Couldn’t read “${file.name}”. Try attaching it again.`
+    return
+  }
   attachFile.value = file
-  const reader = new FileReader()
-  reader.onload = ev => { attachBase64.value = ev.target.result }
-  reader.readAsDataURL(file)
-  e.target.value = ''
+  attachBase64.value = dataUrl
 }
+
+// `.pdf` sits beside `application/pdf` on purpose: Windows hands us PDFs with
+// file.type === '', and a MIME-only rule would refuse them on a drop even
+// though the picker (and the server) accept them. 10 MB matches the 13.5M
+// base64 ceiling on POST /api/chat/attachment.
+const {
+  dropzoneProps,
+  inputProps,
+  setInputEl,
+  dragActive,
+  error: attachError,
+  clearMessages,
+} = useFileDrop({
+  accept: 'image/*,application/pdf,.pdf',
+  maxSizeMb: 10,
+  onFiles: onAttach,
+})
 
 function clearAttach() {
   attachFile.value = null
@@ -294,9 +339,36 @@ onUnmounted(() => {
 .bubble-time { font-size: 0.65rem; opacity: 0.6; white-space: nowrap; }
 .bubble-text { line-height: 1.45; word-break: break-word; }
 
+/* The composer is the drop target. position:relative only contains the hint. */
 .chat-composer {
   display: flex; gap: 0.5rem; align-items: flex-end;
+  position: relative;
+  border-radius: 8px;
 }
+.chat-composer.is-drop-active { background: var(--accent-dim); }
+
+/* pointer-events:none is load-bearing, not polish. The hint appears UNDER the
+   cursor mid-drag; if it could be an event target it would fire its own
+   dragenter with no matching dragleave on the composer and desync the depth
+   counter, leaving the highlight stuck on. Absolute so it can't reflow the
+   composer — and move the drop target — at the moment of the drop. */
+.composer-drop-hint {
+  position: absolute; inset: 0; z-index: 1;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;
+  border: 1.5px dashed var(--accent); border-radius: 8px;
+  background: var(--accent-dim); color: var(--accent);
+  font-size: 0.8rem; font-weight: 700; letter-spacing: 0.02em;
+}
+
+.composer-error {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 0.5rem; margin: 0;
+  padding: 0.35rem 0.6rem; border-radius: 6px;
+  background: #fef2f2; border: 1px solid #fecaca;
+  color: #b91c1c; font-size: 0.72rem; line-height: 1.4;
+}
+.composer-error .attach-clear { color: #b91c1c; }
 .composer-main { flex: 1; display: flex; flex-direction: column; gap: 0.35rem; }
 .chat-input {
   width: 100%; padding: 0.6rem 0.75rem; border: 1px solid var(--border);

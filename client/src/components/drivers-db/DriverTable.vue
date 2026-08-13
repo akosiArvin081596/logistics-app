@@ -58,17 +58,40 @@
       <div v-if="viewDrv" class="confirm-overlay" @click.self="closeView">
         <div class="confirm-box" style="max-width:640px;max-height:85vh;overflow-y:auto;">
           <div class="view-header">
-            <label class="view-avatar-wrap" :class="{ 'view-avatar-uploading': picUploading }" title="Click to change profile picture">
+            <!-- v-bind="dropzoneProps" goes on the WRAPPER, never on the inner
+                 input: the wrapper always preventDefault()s, so a drop that
+                 lands on the avatar can never fall through to the document and
+                 navigate the SPA away to render the file. -->
+            <label
+              class="view-avatar-wrap"
+              :class="{ 'view-avatar-uploading': picUploading, 'view-avatar-drop': dragActive }"
+              :title="avatarTitle"
+              v-bind="dropzoneProps"
+            >
               <img v-if="viewDrv.ProfilePictureUrl" :src="viewDrv.ProfilePictureUrl" class="view-avatar-img" alt="Profile picture" />
               <div v-else class="view-avatar-initials"><AvatarPlaceholder /></div>
               <div class="view-avatar-overlay">
                 <svg v-if="!picUploading" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
                 <div v-else class="view-spinner"></div>
               </div>
-              <input type="file" accept="image/*" class="view-avatar-input" @change="onPicChange" />
+              <!-- The label already opens the picker natively (the input is a
+                   descendant) — no @click="openPicker", which opens it twice. -->
+              <input v-bind="inputProps" class="view-avatar-input" />
             </label>
             <h3 style="margin:0;">{{ viewDrv[h.driver] }}</h3>
           </div>
+          <!-- This modal has no toast, so without this a refused or failed
+               upload is invisible — the silent fail this component used to
+               carry. One slot: error wins over notice when both are set. -->
+          <p
+            v-if="picError || picNotice"
+            class="pic-msg"
+            :class="picError ? 'pic-msg-error' : 'pic-msg-note'"
+            :role="picError ? 'alert' : 'status'"
+          >
+            <span>{{ picError || picNotice }}</span>
+            <button type="button" class="pic-msg-dismiss" @click="clearMessages">Dismiss</button>
+          </p>
           <div class="view-grid">
             <div v-for="col in viewHeaders" :key="col" class="view-row">
               <span class="view-label">{{ col }}</span>
@@ -305,6 +328,8 @@
 <script setup>
 import { ref, reactive, computed, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
+import { useFileDrop } from '../../composables/useFileDrop'
+import { AVATAR_MAX_EDGE, compressImage, isDecodedImage } from '../../lib/imageUtils'
 import { fmtTimestamp } from '../../utils/datetime'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
@@ -354,13 +379,46 @@ const showEdit = ref(false)
 const editRowIndex = ref(null)
 const picUploading = ref(false)
 
-async function onPicChange(event) {
-  const file = event.target.files?.[0]
+// Drag-and-drop + the only real type/size gate on this surface: `accept` on the
+// input filters the OS dialog and NOTHING else, so a dropped file is checked
+// here or nowhere.
+const {
+  dropzoneProps,
+  inputProps,
+  dragActive,
+  supportsDrag,
+  error: picError,
+  notice: picNotice,
+  clearMessages,
+} = useFileDrop({
+  accept: 'image/*',
+  maxSizeMb: 10,
+  busy: picUploading,
+  onFiles: (files) => onPicFiles(files),
+})
+
+const avatarTitle = computed(() =>
+  supportsDrag.value
+    ? 'Click, or drop an image here, to change the profile picture'
+    : 'Tap to change the profile picture',
+)
+
+// Takes File[] from useFileDrop (picker and drop both land here already
+// validated), not a DOM change event.
+async function onPicFiles(files) {
+  const file = files?.[0]
   if (!file) return
   if (!viewDrv.value?._rowIndex) return
   picUploading.value = true
   try {
-    const base64 = await resizeImageToBase64(file, 512)
+    const base64 = await compressImage(file, AVATAR_MAX_EDGE, { background: '#ffffff', quality: 0.9 })
+    // compressImage hands back the RAW bytes when it can't decode the file, so
+    // this is what keeps the payload the JPEG data URL this endpoint has always
+    // been sent.
+    if (!isDecodedImage(base64)) {
+      picError.value = "That image couldn't be read — try a different file."
+      return
+    }
     const res = await api.post(`/api/drivers-directory/${viewDrv.value._rowIndex}/profile-picture`, {
       fileData: base64,
       fileName: file.name,
@@ -369,34 +427,16 @@ async function onPicChange(event) {
     viewDrv.value.ProfilePictureUrl = res.url
     emit('picture-updated')
   } catch (err) {
-    // silent fail (toast not available here)
+    // Was a silent fail. This modal still has no toast, so the message goes to
+    // the shared slot under the avatar rather than nowhere. useApi already
+    // produces human copy (413, 403, timeout), so keep it — but lead with
+    // "Upload failed" so the slot it shares with validation errors is unambiguous.
+    picError.value = err?.message ? `Upload failed — ${err.message}` : 'Upload failed — try again.'
   } finally {
     picUploading.value = false
-    event.target.value = ''
+    // No `event.target.value = ''` here any more — useFileDrop clears the input
+    // BEFORE handling, so re-picking the same file after a failure still fires.
   }
-}
-
-function resizeImageToBase64(file, maxDim) {
-  return new Promise((resolve, reject) => {
-    const img = new Image()
-    img.onload = () => {
-      let { width, height } = img
-      if (width > maxDim || height > maxDim) {
-        if (width > height) { height = Math.round(height * maxDim / width); width = maxDim }
-        else { width = Math.round(width * maxDim / height); height = maxDim }
-      }
-      const canvas = document.createElement('canvas')
-      canvas.width = width
-      canvas.height = height
-      const ctx = canvas.getContext('2d')
-      ctx.fillStyle = '#ffffff'
-      ctx.fillRect(0, 0, width, height)
-      ctx.drawImage(img, 0, 0, width, height)
-      resolve(canvas.toDataURL('image/jpeg', 0.9))
-    }
-    img.onerror = reject
-    img.src = URL.createObjectURL(file)
-  })
 }
 
 // Stays correct whether the server sent a masked value or (with
@@ -442,6 +482,9 @@ watch(viewDrv, async (d) => {
   showSsn.value = false
   ssnFull.value = ''
   ssnRevealError.value = ''
+  // The modal is reused for every row, so a message left over from the last
+  // driver would otherwise reappear against the next one.
+  clearMessages()
   if (!d || !d._rowIndex) return
   docsLoading.value = true
   try {
@@ -709,10 +752,47 @@ function handleConfirmDelete() {
   cursor: pointer;
   border-radius: 50%;
   overflow: hidden;
+  transition: box-shadow 0.15s;
 }
 .view-avatar-wrap .view-avatar-overlay { opacity: 0; }
 .view-avatar-wrap:hover .view-avatar-overlay,
-.view-avatar-wrap.view-avatar-uploading .view-avatar-overlay { opacity: 1; }
+.view-avatar-wrap.view-avatar-uploading .view-avatar-overlay,
+.view-avatar-wrap.view-avatar-drop .view-avatar-overlay { opacity: 1; }
+/* :hover is unreliable mid-drag, so dragActive drives the highlight. The ring is
+   a box-shadow on the wrapper itself, which its own overflow:hidden doesn't clip. */
+.view-avatar-wrap.view-avatar-drop {
+  box-shadow: 0 0 0 3px var(--accent, #0ea5e9);
+}
+@media (prefers-reduced-motion: reduce) {
+  .view-avatar-wrap { transition: none; }
+}
+
+/* Upload feedback for a modal with no toast. Small on purpose — it sits under
+   the avatar row and above the detail grid. */
+.pic-msg {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: -0.5rem 0 0.85rem;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  border-radius: 6px;
+}
+.pic-msg-error { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; }
+.pic-msg-note { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; }
+.pic-msg-dismiss {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 700;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
 .view-avatar-img {
   width: 64px;
   height: 64px;

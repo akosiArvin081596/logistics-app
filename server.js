@@ -13203,6 +13203,45 @@ function volumelessFuelReceipts() {
 // three receipt queues live, but the defect is not fuel-specific.
 const FUEL_DUPLICATE_MAX_GROUPS = 200; // list cap only; the summary counts them all
 
+// Settlement state of a MONTH, published beside `periodLocked` so the duplicate
+// queue can answer "can I act on this?" instead of only "is it closed?".
+//
+// ⚠️ `periodLocked` ALONE IS THE WRONG QUESTION, and reading it as the whole
+// answer is what made this queue look like a dead end. A locked month whose
+// payout is still `owed` has moved NO MONEY — correcting it is an ordinary
+// reopen → void → re-finalize, with nothing to claw back. A `paid` month cannot
+// be un-sent and is a genuine adjustment conversation. Those two are a world
+// apart and both used to render identically as "closed".
+//
+// Measured on production data 2026-08-12: of the five real duplicates, $700 sits
+// in 2026-07 (locked, OWED, unpaid — cleanly correctable) and only $415 in
+// months already paid. Note also the sign: a duplicate EXPENSE depresses net
+// profit, so it UNDERPAYS the investor — every correction here pays them more,
+// which is why "leave it alone to avoid a clawback" was never the trade it
+// looked like.
+//
+// Returns the MOST-SETTLED status across every investor for the month, because
+// the binding constraint is the strictest one: if any owner has been paid, the
+// month is settled for correction purposes. Fails closed to 'unknown' so an
+// unreadable table never reads as "safe to edit".
+const PAYOUT_SETTLEMENT_RANK = { owed: 0, processing: 1, paid: 2 };
+function periodSettlementState(period) {
+	const key = String(period || "").slice(0, 7);
+	if (!/^\d{4}-\d{2}$/.test(key)) return "unknown";
+	try {
+		const rows = db.prepare("SELECT status FROM investor_payouts WHERE period = ?").all(key);
+		if (!rows.length) return "none"; // no payout row yet — nothing settled against it
+		let best = "owed";
+		for (const r of rows) {
+			const s = String(r.status || "").toLowerCase();
+			if ((PAYOUT_SETTLEMENT_RANK[s] ?? -1) > (PAYOUT_SETTLEMENT_RANK[best] ?? -1)) best = s;
+		}
+		return best;
+	} catch {
+		return "unknown";
+	}
+}
+
 function duplicateReceiptGroups() {
 	// EXPENSE_PNL_FILTER: a rejected receipt is not spend, so it cannot be spend
 	// booked twice. posted_period + created_at are selected for
@@ -13231,7 +13270,13 @@ function duplicateReceiptGroups() {
 
 	const groups = receiptDuplicates.findDuplicateGroups(rows, { suppressedIds });
 	return {
-		groups: groups.slice(0, FUEL_DUPLICATE_MAX_GROUPS).map((g) => ({
+		groups: groups.slice(0, FUEL_DUPLICATE_MAX_GROUPS).map((g) => {
+			// Every row in a group shares one calendar day by construction (the key
+			// is truck|date|cents), so the settlement month is the same for all of
+			// them — resolve it once off the first row via the same helper the money
+			// math uses, never by slicing `date` here.
+			const period = expensePostedPeriod(g.rows[0] || {});
+			return {
 			key: g.key,
 			truckUnit: g.truckUnit,
 			driver: g.driver,
@@ -13240,6 +13285,11 @@ function duplicateReceiptGroups() {
 			excessAmount: g.excessAmount,
 			confidence: g.confidence,
 			reasons: g.reasons,
+			// The settlement month and how far it has settled. Published together
+			// because "locked" and "paid" are different questions with different
+			// remedies — see periodSettlementState() above.
+			period,
+			settlement: periodSettlementState(period),
 			// Server-resolved per row, never derived client-side from a month list:
 			// three of the five real duplicates sit in months that are already closed,
 			// so "which of these can I actually act on" is the first question anyone
@@ -13253,7 +13303,8 @@ function duplicateReceiptGroups() {
 				vendor: r.vendor || "",
 				periodLocked: expenseRowPeriodLocked(r),
 			})),
-		})),
+			};
+		}),
 		// Computed over the FULL set while the list above is capped, so read the
 		// counts here and never from groups.length.
 		summary: receiptDuplicates.summarizeDuplicates(groups),

@@ -15,8 +15,18 @@
           </select>
         </div>
         <div class="form-group">
-          <label>Upload Document (PDF)</label>
-          <input type="file" accept=".pdf,.jpg,.jpeg,.png" @change="handleFile" class="form-input" />
+          <label>Upload Document</label>
+          <!-- Extension-only accept, unchanged from the input it replaces: it is
+               what the server names the file from, and .webp stays out because
+               it was never in. On a drop the attribute is decorative, so this
+               list is now enforced by the shared validator instead. -->
+          <FileDropZone
+            accept=".pdf,.jpg,.jpeg,.png"
+            :max-size-mb="10"
+            :disabled="uploading"
+            :label="fileName || 'Drop the drug test result'"
+            @files="handleFile"
+          />
         </div>
         <button
           class="submit-btn"
@@ -34,6 +44,8 @@
 import { ref } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
+import FileDropZone from '../shared/FileDropZone.vue'
+import { readFileAsDataURL } from '../../lib/imageUtils'
 
 const props = defineProps({
   show: { type: Boolean, default: false },
@@ -49,15 +61,23 @@ const fileData = ref('')
 const fileName = ref('')
 const uploading = ref(false)
 
-function handleFile(e) {
-  const file = e.target.files[0]
+// Receives an already-validated File[] from BOTH paths — the zone's click-to-
+// browse and a drop on it. One file at a time (`multiple` is off on the zone).
+async function handleFile(files) {
+  const file = files[0]
   if (!file) return
-  fileName.value = file.name
-  const reader = new FileReader()
-  reader.onload = () => {
-    fileData.value = reader.result.split(',')[1] // base64 without prefix
+  const dataUrl = await readFileAsDataURL(file)
+  // readFileAsDataURL resolves '' on an unreadable file rather than rejecting.
+  // Naming the file without its bytes would let Upload run and file a drug test
+  // result with no document attached, so neither is set unless both are good.
+  if (!dataUrl) {
+    fileName.value = ''
+    fileData.value = ''
+    toast(`Couldn't read "${file.name}". Try choosing it again.`, 'error')
+    return
   }
-  reader.readAsDataURL(file)
+  fileName.value = file.name
+  fileData.value = String(dataUrl).split(',')[1] // base64 without prefix
 }
 
 async function handleSubmit() {

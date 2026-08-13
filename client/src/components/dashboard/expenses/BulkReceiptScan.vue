@@ -28,7 +28,8 @@
       </div>
     </div>
 
-    <!-- Controls: default driver + file picker -->
+    <!-- Controls: default driver + batch actions. The way receipts get IN is the
+         drop zone below, not a button in here. -->
     <div class="bulk-controls">
       <div class="bulk-control">
         <label class="bulk-label">Default driver</label>
@@ -47,19 +48,6 @@
         @click="applyDefaultToAll"
       >Apply to all rows</button>
 
-      <label class="bulk-add" :class="{ disabled: atCapacity || processing || saving }">
-        <input
-          ref="fileInputRef"
-          type="file"
-          accept="image/*,.heic,.heif,application/pdf"
-          multiple
-          class="bulk-file-input"
-          :disabled="atCapacity || processing || saving"
-          @change="onFilesSelected"
-        />
-        + Add receipts
-      </label>
-
       <button
         v-if="rows.length"
         type="button"
@@ -68,9 +56,10 @@
         @click="clearAll"
       >Clear all</button>
 
-      <!-- Sits beside the Add control, where it's read at the moment of choosing
-           files: a multi-page PDF is ONE document to the scanner, so several
-           receipts bundled into one file become a single expense. -->
+      <!-- Last line of the controls block, so it sits directly above the drop
+           zone and is read at the moment of choosing files: a multi-page PDF is
+           ONE document to the scanner, so several receipts bundled into one file
+           become a single expense. -->
       <p class="bulk-pdf-note">
         <strong>One receipt per file.</strong> A multi-page PDF is read as a single
         expense &mdash; split bundled receipts before uploading.
@@ -79,17 +68,38 @@
       <span class="bulk-count">{{ rows.length }} / {{ MAX_BATCH }}</span>
     </div>
 
+    <!-- The ONE way receipts get in: drop a stack here, or click to browse.
+         Deliberately a single instance that switches between the tall empty-state
+         banner and a slim strip above the grid — two instances would be two
+         pieces of drag state, and a second box nobody asked for.
+
+         `!defaultDriver` is part of :disabled rather than a post-hoc toast, so
+         the reason a drop won't land is visible DURING the drag (no-drop cursor
+         + the label saying why) instead of after the files are already released.
+         The toast in onFilesSelected stays as the fallback for the picker path
+         and for assistive tech. -->
+    <FileDropZone
+      accept="image/*,.heic,.heif,application/pdf,.pdf"
+      multiple
+      :max-files="remainingSlots"
+      :max-size-mb="25"
+      :compact="rows.length > 0"
+      :disabled="atCapacity || processing || saving || !defaultDriver"
+      :busy="processing"
+      :label="dropLabel"
+      :hint="dropHint"
+      drop-label="Drop to scan these receipts"
+      busy-label="Scanning receipts…"
+      busy-hint="Adding more is paused until this batch finishes."
+      @files="onFilesSelected"
+    />
+
     <!-- Scan progress -->
     <div v-if="processing" class="bulk-progress">
       <div class="bulk-progress-bar">
         <div class="bulk-progress-fill" :style="{ width: progressPct + '%' }"></div>
       </div>
       <span class="bulk-progress-label">Scanning {{ progress.done }} / {{ progress.total }}…</span>
-    </div>
-
-    <!-- Empty state -->
-    <div v-if="!rows.length && !processing" class="bulk-empty">
-      No receipts added yet. Choose a default driver and click <strong>+ Add receipts</strong>.
     </div>
 
     <!-- Review grid (desktop) -->
@@ -354,7 +364,8 @@ import { useApi } from '../../../composables/useApi'
 import { useToast } from '../../../composables/useToast'
 import { useViewport } from '../../../composables/useViewport'
 import { useDocumentScan } from '../../../composables/useDocumentScan'
-import { compressImage } from '../../../lib/imageUtils'
+import { compressImage, readFileAsDataURL } from '../../../lib/imageUtils'
+import FileDropZone from '../../shared/FileDropZone.vue'
 
 const props = defineProps({
   drivers: { type: Array, default: () => [] },
@@ -486,7 +497,6 @@ const rows = ref([])
 const processing = ref(false)
 const saving = ref(false)
 const progress = reactive({ done: 0, total: 0 })
-const fileInputRef = ref(null)
 const previewImg = ref(null)
 const pendingDraft = ref(null)      // fetched server draft awaiting resume/discard
 const expanded = reactive(new Set()) // mobile: keys of expanded cards
@@ -495,6 +505,25 @@ let draftTimer = null
 let hydrating = false // true while loading a draft, so the load doesn't re-save
 
 const atCapacity = computed(() => rows.value.length >= MAX_BATCH)
+// Remaining capacity, handed to the dropzone as `maxFiles` so an over-drop is
+// trimmed to what actually fits and the refusal names the right number.
+// ⚠️ validateFiles reads 0 as "no limit", which is only safe because the zone is
+// :disabled at capacity and onFilesSelected still carries its own `remaining <= 0`
+// guard — two independent backstops, neither of which may be removed alone.
+const remainingSlots = computed(() => Math.max(0, MAX_BATCH - rows.value.length))
+// The zone's copy has to answer "why can't I drop?" while the pointer is still
+// over it — a toast fired after the drop is too late to be an instruction.
+const dropLabel = computed(() => {
+  if (!defaultDriver.value) return 'Pick a default driver first'
+  if (atCapacity.value) return `Batch full — ${MAX_BATCH} receipts`
+  return rows.value.length ? 'Drop more receipts here' : 'Drop a stack of receipts here'
+})
+const dropHint = computed(() => {
+  if (!defaultDriver.value) return 'Choose the driver above, then drop the receipts in.'
+  if (atCapacity.value) return 'Save or clear this batch before adding more.'
+  const slots = remainingSlots.value
+  return `or click to browse — photos and PDFs · room for ${slots} more`
+})
 const progressPct = computed(() => (progress.total ? Math.round((progress.done / progress.total) * 100) : 0))
 // Savable = everything not already saved and not parked awaiting a manual
 // decision (timeouts, possible duplicates) and not a confirmed duplicate. This
@@ -529,13 +558,15 @@ const pendingDraftWhen = computed(() => {
 function isPdfFile(file) {
   return file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '')
 }
-function readFileAsDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(reader.result)
-    reader.onerror = () => reject(new Error('read failed'))
-    reader.readAsDataURL(file)
-  })
+// Delegates to the shared reader but keeps this surface's LOUD failure. The
+// shared readFileAsDataURL resolves to '' on an unreadable file (every other
+// caller treats empty as "couldn't read it"); here a silent '' would enter the
+// review grid as a row with no receipt bytes and get saved, so the empty result
+// is turned back into a throw. Same contract as before, one FileReader.
+async function readFileAsDataUrl(file) {
+  const dataUrl = await readFileAsDataURL(file)
+  if (!dataUrl) throw new Error('read failed')
+  return dataUrl
 }
 
 // sha256 of the raw file bytes → used only for in-batch client-side dedup (skip
@@ -751,11 +782,15 @@ async function processRow(row) {
   }
 }
 
-async function onFilesSelected(event) {
-  const picked = Array.from(event.target.files || [])
-  if (fileInputRef.value) fileInputRef.value.value = '' // allow re-picking same files
+// Receives an already TYPE- and SIZE-validated File[] from FileDropZone (drop or
+// picker — the same path either way; the zone clears its own input so re-picking
+// the same file still fires). Everything below is batch POLICY the dropzone must
+// not know about: identical-bytes dedupe and the MAX_BATCH cap.
+async function onFilesSelected(picked) {
   if (!picked.length) return
   if (!defaultDriver.value) {
+    // Unreachable from the zone (it is :disabled without a driver) — kept as the
+    // spoken/assistive fallback and for any future caller.
     toast('Pick a default driver first', 'error')
     return
   }
@@ -1240,15 +1275,6 @@ onUnmounted(() => {
   min-width: 200px;
 }
 
-.bulk-add {
-  padding: 0.5rem 0.85rem; background: var(--accent); color: #fff; font-weight: 600;
-  font-size: 0.82rem; border-radius: 8px; cursor: pointer; user-select: none;
-  display: inline-flex; align-items: center; position: relative; overflow: hidden;
-}
-.bulk-add.disabled { opacity: 0.5; cursor: not-allowed; }
-.bulk-file-input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
-.bulk-add.disabled .bulk-file-input { cursor: not-allowed; }
-
 .bulk-btn-ghost {
   padding: 0.45rem 0.7rem; background: transparent; color: var(--text-dim);
   border: 1px solid var(--border); border-radius: 8px; cursor: pointer;
@@ -1263,11 +1289,6 @@ onUnmounted(() => {
 .bulk-progress-bar { flex: 1; height: 6px; background: var(--surface); border-radius: 3px; overflow: hidden; }
 .bulk-progress-fill { height: 100%; background: var(--accent); transition: width 0.2s ease; }
 .bulk-progress-label { font-size: 0.76rem; color: var(--text-dim); white-space: nowrap; }
-
-.bulk-empty {
-  padding: 1.5rem; text-align: center; font-size: 0.85rem; color: var(--text-dim);
-  background: var(--surface); border: 1px dashed var(--border); border-radius: var(--radius);
-}
 
 .bulk-grid-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); }
 .bulk-grid { width: 100%; border-collapse: collapse; font-size: 0.82rem; min-width: 900px; }
@@ -1387,8 +1408,9 @@ onUnmounted(() => {
 .bulk-card-actions { display: flex; align-items: center; justify-content: flex-end; gap: 0.5rem; margin-top: 0.6rem; }
 
 .bulk-savebar { display: flex; align-items: center; gap: 0.75rem; justify-content: flex-end; flex-wrap: wrap; }
-/* Sits beside the Add control. flex-basis:100% pushes it onto its own line so it
-   reads as guidance rather than another toolbar control. */
+/* flex-basis:100% pushes it onto its own line — the last line of the controls
+   block, directly above the drop zone — so it reads as guidance rather than as
+   another toolbar control. */
 .bulk-pdf-note {
   flex-basis: 100%;
   margin: 0.15rem 0 0;

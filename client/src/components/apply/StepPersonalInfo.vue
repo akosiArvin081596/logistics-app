@@ -55,13 +55,28 @@
     <!-- CDL + Medical Card Uploads -->
     <div class="upload-section">
       <label class="field-label">CDL &amp; Medical Card Uploads <span class="req">*</span></label>
-      <p class="upload-hint">Upload clear photos or PDFs of your CDL (front and back) and medical card</p>
+      <p class="upload-hint">
+        Upload clear photos or PDFs of your CDL (front and back) and medical card<span v-if="supportsDrag"> &mdash; drag a file onto a card, or click to browse</span>
+      </p>
       <p class="upload-tip">Tip: for the clearest result, use a photo at least 800&times;500 pixels. Smaller images still work but may look blurry in the printed PDF.</p>
+      <!-- Each card is its OWN useFileDrop instance. The chrome (thumbnail, PDF
+           icon, low-res warning) is untouched — only the drag handlers and the
+           click target changed. -->
       <div class="upload-grid">
-        <div class="upload-card" @click="$refs.cdlFrontInput.click()">
-          <input ref="cdlFrontInput" type="file" accept="image/*,.pdf" hidden @change="handleFile($event, 'cdl_front')" />
+        <div
+          class="upload-card"
+          :class="{ 'is-over': cdlFrontOver }"
+          role="button"
+          tabindex="0"
+          aria-label="CDL Front — upload a photo or PDF"
+          v-bind="cdlFrontZone"
+          @click="openCdlFront"
+          @keydown.enter.prevent="openCdlFront"
+          @keydown.space.prevent="openCdlFront"
+        >
+          <input :ref="setCdlFrontInput" v-bind="cdlFrontInputProps" hidden />
           <template v-if="form.cdl_front">
-            <img v-if="!fileTypes.cdl_front" :src="form.cdl_front" class="upload-preview" />
+            <img v-if="!fileTypes.cdl_front" :src="form.cdl_front" class="upload-preview" alt="CDL front preview" />
             <div v-else class="pdf-preview"><div class="pdf-icon">&#128196;</div><div class="upload-label">PDF uploaded</div></div>
           </template>
           <template v-else>
@@ -70,10 +85,20 @@
             <div class="upload-formats">Image or PDF</div>
           </template>
         </div>
-        <div class="upload-card" @click="$refs.cdlBackInput.click()">
-          <input ref="cdlBackInput" type="file" accept="image/*,.pdf" hidden @change="handleFile($event, 'cdl_back')" />
+        <div
+          class="upload-card"
+          :class="{ 'is-over': cdlBackOver }"
+          role="button"
+          tabindex="0"
+          aria-label="CDL Back — upload a photo or PDF"
+          v-bind="cdlBackZone"
+          @click="openCdlBack"
+          @keydown.enter.prevent="openCdlBack"
+          @keydown.space.prevent="openCdlBack"
+        >
+          <input :ref="setCdlBackInput" v-bind="cdlBackInputProps" hidden />
           <template v-if="form.cdl_back">
-            <img v-if="!fileTypes.cdl_back" :src="form.cdl_back" class="upload-preview" />
+            <img v-if="!fileTypes.cdl_back" :src="form.cdl_back" class="upload-preview" alt="CDL back preview" />
             <div v-else class="pdf-preview"><div class="pdf-icon">&#128196;</div><div class="upload-label">PDF uploaded</div></div>
           </template>
           <template v-else>
@@ -82,10 +107,20 @@
             <div class="upload-formats">Image or PDF</div>
           </template>
         </div>
-        <div class="upload-card" @click="$refs.medicalInput.click()">
-          <input ref="medicalInput" type="file" accept="image/*,.pdf" hidden @change="handleFile($event, 'medical_card')" />
+        <div
+          class="upload-card"
+          :class="{ 'is-over': medicalOver }"
+          role="button"
+          tabindex="0"
+          aria-label="Medical Card — upload a photo or PDF"
+          v-bind="medicalZone"
+          @click="openMedical"
+          @keydown.enter.prevent="openMedical"
+          @keydown.space.prevent="openMedical"
+        >
+          <input :ref="setMedicalInput" v-bind="medicalInputProps" hidden />
           <template v-if="form.medical_card">
-            <img v-if="!fileTypes.medical_card" :src="form.medical_card" class="upload-preview" />
+            <img v-if="!fileTypes.medical_card" :src="form.medical_card" class="upload-preview" alt="Medical card preview" />
             <div v-else class="pdf-preview"><div class="pdf-icon">&#128196;</div><div class="upload-label">PDF uploaded</div></div>
           </template>
           <template v-else>
@@ -95,7 +130,7 @@
           </template>
         </div>
       </div>
-      <template v-for="(msg, field) in lowResWarnings" :key="field">
+      <template v-for="(msg, field) in uploadMessages" :key="field">
         <div v-if="msg" class="upload-warning">
           <span class="warning-dot">&#9888;</span> {{ uploadLabel(field) }}: {{ msg }}
         </div>
@@ -112,7 +147,9 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
+import { useFileDrop } from '../../composables/useFileDrop'
+import { compressImage, isDecodedImage, readFileAsDataURL } from '../../lib/imageUtils'
 
 const props = defineProps({ form: { type: Object, required: true } })
 const emit = defineEmits(['open-map'])
@@ -122,7 +159,7 @@ const addressInput = ref(null)
 const geolocating = ref(false)
 const fileTypes = reactive({ cdl_front: false, cdl_back: false, medical_card: false })
 // Inline, non-blocking warnings for low-resolution uploads.
-// Populated by handleFile() and rendered under the upload grid.
+// Populated by handleFiles() and rendered under the upload grid via uploadMessages.
 const lowResWarnings = reactive({ cdl_front: '', cdl_back: '', medical_card: '' })
 const UPLOAD_LABELS = { cdl_front: 'CDL Front', cdl_back: 'CDL Back', medical_card: 'Medical Card' }
 function uploadLabel(field) { return UPLOAD_LABELS[field] || field }
@@ -174,15 +211,101 @@ const MIN_H = 500
 // (we still keep the native aspect ratio — no stretching).
 const MAX_DIMENSION = 2400
 
-function handleFile(event, field) {
-  const file = event.target.files[0]
+// ⚠️ THIS LIST IS THE ONLY TYPE GATE ON A DROPPED FILE. The `accept` attribute
+// filters the OS file dialog and nothing else; a drag-and-drop never goes near
+// it. The two extension tokens carry the blank-MIME cases this form actually
+// receives — an iPhone HEIC (every non-Safari browser leaves file.type empty)
+// and a Windows PDF — which a MIME-only rule would refuse outright.
+const UPLOAD_ACCEPT = 'image/*,.heic,.heif,.pdf'
+// All three files ride in ONE application payload against a 50 MB server body
+// limit. Images are downscaled before they are stored, but a PDF is kept raw
+// and base64 inflates it ~1.37x, so the cap is really a PDF cap: 10 MB clears
+// every phone photo and scanned licence we see and still leaves the worst case
+// (three 10 MB PDFs) inside the limit.
+const UPLOAD_MAX_MB = 10
+
+// ───────────────────────────────────────────────────────────────────────────
+// THREE separate instances, one per card — deliberately not one shared one.
+// Each card needs its OWN `dragActive`, or dragging a file over CDL Front
+// highlights all three. Three instances also means three retains of the
+// refcounted stray-drop guard in useFileDrop and still exactly ONE window
+// listener pair; that guard is what stops a drop that misses a card by ten
+// pixels from navigating the browser to the file and taking a half-filled job
+// application with it. This form has no draft persistence, so that loss is
+// total — do NOT add window-level drag listeners here.
+function uploadDrop(field) {
+  return useFileDrop({
+    accept: UPLOAD_ACCEPT,
+    maxSizeMb: UPLOAD_MAX_MB,
+    onFiles: (files) => handleFiles(files, field),
+  })
+}
+
+const {
+  dropzoneProps: cdlFrontZone,
+  inputProps: cdlFrontInputProps,
+  setInputEl: setCdlFrontInput,
+  openPicker: openCdlFront,
+  dragActive: cdlFrontOver,
+  error: cdlFrontError,
+  supportsDrag,
+} = uploadDrop('cdl_front')
+
+const {
+  dropzoneProps: cdlBackZone,
+  inputProps: cdlBackInputProps,
+  setInputEl: setCdlBackInput,
+  openPicker: openCdlBack,
+  dragActive: cdlBackOver,
+  error: cdlBackError,
+} = uploadDrop('cdl_back')
+
+const {
+  dropzoneProps: medicalZone,
+  inputProps: medicalInputProps,
+  setInputEl: setMedicalInput,
+  openPicker: openMedical,
+  dragActive: medicalOver,
+  error: medicalError,
+} = uploadDrop('medical_card')
+
+// One message slot per field, reusing the warning row that already exists.
+// A type/size rejection outranks a low-res hint because the rejection means
+// nothing was attached at all. Both are cleared by the next file on that field:
+// useFileDrop clears its own error at the top of every batch, handleFiles
+// clears the low-res hint.
+const uploadMessages = computed(() => ({
+  cdl_front: cdlFrontError.value || lowResWarnings.cdl_front,
+  cdl_back: cdlBackError.value || lowResWarnings.cdl_back,
+  medical_card: medicalError.value || lowResWarnings.medical_card,
+}))
+
+// A PDF from Windows routinely arrives with file.type === '', and since a drop
+// bypasses `accept` entirely a MIME-only test would call it an image and feed
+// it to <img :src>, i.e. a permanently broken thumbnail on a required field.
+function isPdf(file) {
+  return file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '')
+}
+
+// Receives File[] from its card's useFileDrop instance — a drop and a click
+// both land here. useFileDrop already clears the <input> value before calling
+// us, so re-picking the same file after an error still fires (that is why the
+// old `event.target.value = ''` in the error path below is gone rather than
+// lost).
+function handleFiles(files, field) {
+  const file = files[0]
   if (!file) return
-  fileTypes[field] = file.type === 'application/pdf'
+  fileTypes[field] = isPdf(file)
   lowResWarnings[field] = '' // clear any previous warning
-  if (file.type === 'application/pdf') {
-    const reader = new FileReader()
-    reader.onload = (e) => { props.form[field] = e.target.result }
-    reader.readAsDataURL(file)
+  if (fileTypes[field]) {
+    // A PDF is stored as-is — there is nothing to downscale and nothing to
+    // measure a resolution against. readFileAsDataURL resolves to '' rather than
+    // rejecting, so guard: assigning '' would leave a required field looking
+    // filled on a form the applicant cannot get back to.
+    readFileAsDataURL(file).then((dataUrl) => {
+      if (dataUrl) props.form[field] = dataUrl
+      else lowResWarnings[field] = 'Could not read that file. Please try a different file.'
+    })
     return
   }
   const img = new Image()
@@ -207,9 +330,23 @@ function handleFile(event, field) {
     canvas.getContext('2d').drawImage(img, 0, 0, width, height)
     props.form[field] = canvas.toDataURL('image/jpeg', 0.92)
   }
-  img.onerror = () => {
+  img.onerror = async () => {
+    // Chrome/Firefox/Edge/Android cannot decode HEIC in an <img>, and an iPhone
+    // photo is the single commonest thing a driver hands this form — so the
+    // file the accept list above now welcomes would otherwise dead-end right
+    // here on "could not read that image". compressImage's HEIC branch (lazy
+    // heic2any, downloaded only when a HEIC actually needs it) is the one path
+    // that turns it into a JPEG this form can preview and submit.
+    // Resolution is unmeasurable on this path, so the low-res hint is skipped
+    // rather than guessed — it was always a hint, never a gate.
+    const dataUrl = await compressImage(file, MAX_DIMENSION, { quality: 0.92 })
+    // compressImage falls back to the RAW bytes for anything it cannot decode,
+    // so only a genuinely decoded image may be shown as a preview.
+    if (isDecodedImage(dataUrl)) {
+      props.form[field] = dataUrl
+      return
+    }
     lowResWarnings[field] = 'Could not read that image. Please try a different file.'
-    event.target.value = ''
   }
   img.src = URL.createObjectURL(file)
 }
@@ -289,6 +426,17 @@ function initAutocomplete() {
   overflow: hidden;
 }
 .upload-card:hover { border-color: hsl(199, 89%, 48%); background: #f0f9ff; }
+.upload-card:focus-visible {
+  outline: 2px solid hsl(199, 89%, 48%);
+  outline-offset: 2px;
+}
+/* Same "dashed becomes solid" treatment FileDropZone uses for a live drag, so
+   the two surfaces read identically to anyone who has used either. */
+.upload-card.is-over {
+  border-color: hsl(199, 89%, 48%);
+  border-style: solid;
+  background: #f0f9ff;
+}
 .upload-placeholder { font-size: 1.75rem; margin-bottom: 0.35rem; }
 .upload-label { font-size: 0.75rem; font-weight: 600; color: #6b7280; }
 .upload-formats { font-size: 0.65rem; color: #9ca3af; margin-top: 0.15rem; }

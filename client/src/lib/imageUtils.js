@@ -8,6 +8,10 @@ export const DEFAULT_MAX_EDGE = 1200
 // enough detail to detect the document edges. Also the size of the raw photo we
 // re-attach when scanning is unavailable (the 402/503 fallback in the scanner).
 export const SCAN_MAX_EDGE = 1280
+// Max edge (px) for profile pictures — driver, investor and drivers-directory
+// avatars. Matches the 512 the four hand-rolled resizeImageToBase64 copies used
+// before they were absorbed here.
+export const AVATAR_MAX_EDGE = 512
 
 // True for an iPhone HEIC/HEIF still — by MIME (Safari sets it) or by extension
 // (Chrome/Firefox/Edge/Android often leave file.type blank for HEIC).
@@ -21,7 +25,15 @@ export function isHeic(file) {
 // RGBA and OOM-killed the tab on low-RAM phones (fix from commit 59fcd80).
 // Throws on any decode failure (including the 0-dimension case some browsers
 // resolve to instead of rejecting) so compressImage can route into its fallback.
-async function bitmapToJpegDataUrl(src, maxEdge = DEFAULT_MAX_EDGE) {
+//
+// `background` matters more than it looks: the output is always JPEG, which has
+// no alpha channel, so a transparent PNG composites against whatever the canvas
+// starts as — transparent black. Every avatar path used to hand-roll its own
+// resize purely to fillRect('#ffffff') first, and absorbing those copies without
+// this option would silently turn every transparent-PNG profile picture into a
+// black square. Left unset for photos/receipts, which are opaque anyway.
+async function bitmapToJpegDataUrl(src, maxEdge = DEFAULT_MAX_EDGE, opts = {}) {
+  const { background = '', quality = 0.8 } = opts
   const MAX = maxEdge
   const probe = await createImageBitmap(src)
   let w = probe.width
@@ -42,9 +54,14 @@ async function bitmapToJpegDataUrl(src, maxEdge = DEFAULT_MAX_EDGE) {
   const canvas = document.createElement('canvas')
   canvas.width = w
   canvas.height = h
-  canvas.getContext('2d').drawImage(bitmap, 0, 0)
+  const ctx = canvas.getContext('2d')
+  if (background) {
+    ctx.fillStyle = background
+    ctx.fillRect(0, 0, w, h)
+  }
+  ctx.drawImage(bitmap, 0, 0)
   bitmap.close()
-  const dataUrl = canvas.toDataURL('image/jpeg', 0.8)
+  const dataUrl = canvas.toDataURL('image/jpeg', quality)
   canvas.width = 0
   canvas.height = 0
   return dataUrl
@@ -62,15 +79,17 @@ async function bitmapToJpegDataUrl(src, maxEdge = DEFAULT_MAX_EDGE) {
 // actually needs converting; every JPEG/PNG upload and all of Safari never pay
 // for it. Any other undecodable file (or a failed conversion) falls back to the
 // raw bytes so the receipt/upload is never lost.
-export async function compressImage(file, maxEdge = DEFAULT_MAX_EDGE) {
+// `opts.background` (e.g. '#ffffff') flattens transparency — required for
+// avatars, see bitmapToJpegDataUrl. `opts.quality` defaults to 0.8.
+export async function compressImage(file, maxEdge = DEFAULT_MAX_EDGE, opts = {}) {
   try {
-    return await bitmapToJpegDataUrl(file, maxEdge)
+    return await bitmapToJpegDataUrl(file, maxEdge, opts)
   } catch {
     if (isHeic(file)) {
       try {
         const { default: heic2any } = await import('heic2any')
         const out = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.9 })
-        return await bitmapToJpegDataUrl(Array.isArray(out) ? out[0] : out, maxEdge)
+        return await bitmapToJpegDataUrl(Array.isArray(out) ? out[0] : out, maxEdge, opts)
       } catch {
         // Conversion failed — fall through to the raw fallback below.
       }

@@ -66,10 +66,26 @@
         <span>{{ attachFileName }}</span>
         <button class="msg-attach-remove" @click="clearAttachment">&times;</button>
       </div>
-      <div v-if="store.selectedDriver" class="msg-chat-input">
+      <!-- ONE message slot for every refusal the attach path can produce (wrong
+           type, over 10 MB, a second file, a dropped folder). Inline rather than
+           a toast: the composer is where the mistake was made, and a toast that
+           re-fires with identical text is easy to miss on a repeat. -->
+      <div v-if="attachError" class="msg-attach-error" role="alert">
+        <span>{{ attachError }}</span>
+        <button class="msg-attach-remove" aria-label="Dismiss" @click="clearMessages">&times;</button>
+      </div>
+      <!-- The drop target is the whole composer ROW, never the paperclip — a
+           24px icon is not something anyone can hit with a dragged file. -->
+      <div
+        v-if="store.selectedDriver"
+        class="msg-chat-input"
+        :class="{ 'is-drop-active': dragActive }"
+        v-bind="dropzoneProps"
+      >
+        <span v-if="dragActive" class="msg-drop-hint" aria-hidden="true">Drop to attach</span>
         <label class="msg-attach-btn" title="Attach file">
           &#128206;
-          <input type="file" accept="image/*,.pdf" style="display:none" @change="onAttachFile" />
+          <input :ref="setInputEl" v-bind="inputProps" style="display:none" />
         </label>
         <input
           v-model="messageInput"
@@ -91,6 +107,8 @@ import { useMessagesStore } from '../../stores/messages'
 import { useApi } from '../../composables/useApi'
 import { useDashboardStore } from '../../stores/dashboard'
 import { useToast } from '../../composables/useToast'
+import { useFileDrop } from '../../composables/useFileDrop'
+import { readFileAsDataURL } from '../../lib/imageUtils'
 import ChatBubble from './ChatBubble.vue'
 import EmptyState from '../shared/EmptyState.vue'
 
@@ -109,17 +127,41 @@ const attachFileName = ref('')
 const attachData = ref('')
 const attachType = ref('')
 
-function onAttachFile(e) {
-  const file = e.target.files[0]
+// Receives an already-validated File[] from BOTH paths — the paperclip picker
+// and a drop anywhere on the composer row. `multiple` is off, so at most one
+// file ever arrives; a second is refused by name in `attachError`.
+async function onAttachFile(files) {
+  const file = files[0]
   if (!file) return
-  if (file.size > 10 * 1024 * 1024) { toast('File too large (max 10MB)', 'error'); return }
+  const dataUrl = await readFileAsDataURL(file)
+  // readFileAsDataURL resolves '' on an unreadable/corrupt file rather than
+  // rejecting, so an empty result is the failure signal — never a valid attach.
+  if (!dataUrl) {
+    attachError.value = `Couldn't read "${file.name}". Try attaching it again.`
+    return
+  }
   attachFileName.value = file.name
   attachType.value = file.type.startsWith('image/') ? 'image' : file.type === 'application/pdf' ? 'pdf' : 'other'
-  const reader = new FileReader()
-  reader.onload = ev => { attachData.value = ev.target.result; attachPreview.value = true }
-  reader.readAsDataURL(file)
-  e.target.value = ''
+  attachData.value = dataUrl
+  attachPreview.value = true
 }
+
+// `accept` is unchanged from the markup it replaces, but it now MEANS something
+// on a drop as well: the attribute alone only filters the OS dialog, so without
+// this a dropped .docx would reach POST /api/chat/attachment. 10 MB matches that
+// route's 13.5M base64 ceiling (server.js:30503).
+const {
+  dropzoneProps,
+  inputProps,
+  setInputEl,
+  dragActive,
+  error: attachError,
+  clearMessages,
+} = useFileDrop({
+  accept: 'image/*,.pdf',
+  maxSizeMb: 10,
+  onFiles: onAttachFile,
+})
 
 function clearAttachment() { attachPreview.value = null; attachData.value = ''; attachFileName.value = ''; attachType.value = '' }
 
@@ -288,5 +330,56 @@ watch(() => store.currentMessages.length, scrollToBottom)
   color: var(--text-dim);
   text-align: center;
   border-top: 1px solid var(--border);
+}
+
+/* The composer row is the drop target (dropzoneProps are bound to it in the
+   template). MessagesView.vue owns the row's base look via :deep(); these rules
+   only add the drag state, and each carries an extra class so it outranks that
+   deep selector regardless of stylesheet order.
+
+   position:relative exists solely to contain the hint below — MessagesView sets
+   no position on this row, so nothing is being overridden. */
+.msg-chat-input {
+  position: relative;
+}
+.msg-chat-input.is-drop-active {
+  background: var(--accent-dim);
+}
+
+/* pointer-events:none is load-bearing, not polish. The hint appears UNDER the
+   cursor mid-drag; if it could be an event target it would fire its own
+   dragenter without a matching dragleave on the row and desync the composable's
+   depth counter, leaving the highlight stuck on. Absolute positioning keeps it
+   from reflowing the row (and moving the drop target) at the same moment. */
+.msg-drop-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  border: 1.5px dashed var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.msg-attach-error {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4rem 1rem;
+  background: #fef2f2;
+  border-top: 1px solid #fecaca;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: #b91c1c;
+}
+.msg-attach-error .msg-attach-remove {
+  color: #b91c1c;
 }
 </style>

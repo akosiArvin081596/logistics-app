@@ -94,7 +94,22 @@
         format-trigger="onChange"
       />
 
-      <van-field label="Receipt Photo">
+      <!-- The whole "Receipt Photo" row is a drop target for desktop — drivers
+           do open the portal on a laptop. v-bind adds only drag listeners (they
+           fall through onto van-field's root cell), so the row's DOM and Vant's
+           own cell hairline are unchanged; a wrapper <div> would have made this
+           cell :last-child and silently dropped that border.
+
+           ⚠️ The Vant uploader below is untouched ON PURPOSE. Camera capture,
+           the file result type, the single-file count, the thumbnail and the
+           delete cross are all its behaviours, and rejectPhoto() re-reveals the
+           camera button by emptying fileList. Drop is a second way in, no
+           more — it never replaces the widget. -->
+      <van-field
+        label="Receipt Photo"
+        :class="{ 'receipt-drop-over': dragActive }"
+        v-bind="receiptDropProps"
+      >
         <template #input>
           <van-uploader
             v-model="fileList"
@@ -151,10 +166,11 @@
 
 <script setup>
 import { houstonToday } from '../../utils/datetime'
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, watch } from 'vue'
 import { Form as VanForm, Field as VanField, CellGroup as VanCellGroup, Button as VanButton, Uploader as VanUploader, Picker as VanPicker, Popup as VanPopup } from 'vant'
 import { useToast } from '../../composables/useToast'
 import { useDocumentScan } from '../../composables/useDocumentScan'
+import { useFileDrop } from '../../composables/useFileDrop'
 import { compressImage, isDecodedImage } from '../../lib/imageUtils'
 
 const props = defineProps({
@@ -182,6 +198,49 @@ const photoError = ref(false)
 // Why the last submit failed, in the server's words. Never cleared by a
 // refetch or a re-render — only by the next attempt or a new photo.
 const submitError = ref('')
+
+// Drop straight onto the Receipt Photo row. One file, matching :max-count="1";
+// the HEIC/HEIF extensions are there because every non-Safari browser leaves
+// file.type blank for an iPhone photo, so MIME alone would refuse the format
+// this form receives most (compressImage converts it downstream).
+// A refusal is a toast, not the photoError block: that block's copy is "tap the
+// camera and take it again", which is the wrong instruction for "you dropped a
+// PDF", and nothing was attached so there is no state to unwind.
+const { dropzoneProps, dragActive, error: dropError, clearMessages: clearDropError } = useFileDrop({
+  accept: 'image/*,.heic,.heif',
+  maxSizeMb: 20,
+  // handlePhoto's argument is Vant's after-read wrapper. Hand it that exact
+  // shape rather than widening the signature — Vant is its other caller.
+  onFiles: (files) => handlePhoto({ file: files[0] }),
+})
+
+// ⚠️ Watched on the `error` REF, not through onReject: a dropped FOLDER is
+// caught before validation runs and never reaches onReject, so rejections alone
+// would leave the commonest mis-drop silent.
+watch(dropError, (msg) => {
+  if (!msg) return
+  toast.show(msg, 'error')
+  clearDropError()
+})
+
+// ⚠️ Vant's uploader paints its own bare <input type="file"> across the "+"
+// tile, and a drop that lands ON that input is handled natively — that is what
+// produces the thumbnail and fires after-read. preventDefault()ing it from an
+// ancestor would cancel the input's default action and silently swallow a drop
+// that visibly landed on it (the same trap useFileDrop's window guard calls
+// out), so the input keeps first refusal and this only covers the rest of the
+// row. The highlight still clears either way: the window-level drop listener
+// resets every zone's drag depth.
+const receiptDropProps = computed(() => {
+  const base = dropzoneProps.value
+  return {
+    ...base,
+    onDrop: (e) => {
+      if (e.target?.closest?.('input[type="file"]')) return
+      base.onDrop(e)
+    },
+  }
+})
 
 const form = reactive({
   type: 'Fuel',
@@ -513,6 +572,15 @@ function failureText(err) {
 .no-loads-msg .empty-icon {
   font-size: 2rem;
   margin-bottom: 0.5rem;
+}
+
+/* Drag highlight on the Receipt Photo row. Inset ring + tint only, so the cell
+   never changes size under the pointer mid-drag. Invisible on a phone by
+   construction — dragActive can only be set by real drag events, which touch
+   does not produce. */
+.receipt-drop-over {
+  background: var(--accent-dim, rgba(56, 189, 248, 0.1));
+  box-shadow: inset 0 0 0 1.5px var(--accent, #38bdf8);
 }
 
 .ocr-status {
