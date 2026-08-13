@@ -613,9 +613,26 @@ async function readFileAsDataUrl(file) {
   return dataUrl
 }
 
-// sha256 of the raw file bytes → used only for in-batch client-side dedup (skip
-// re-adding the identical file). The server independently hashes the payload it
-// receives and 409s a duplicate insert; these are two layers, not one hash.
+// sha256 of the raw file bytes. Two jobs, and the second one is the load-bearing
+// one: in-batch client-side dedup (skip re-adding the identical file), and it is
+// sent to the server as `sourceHash` on save (see saveOne).
+//
+// ⚠️ THE COMMENT HERE USED TO SAY "the server independently hashes the payload it
+// receives", i.e. that these were two independent layers. THEY ARE NOT. The server
+// does compute a hash of the payload — and then DISCARDS it whenever a valid
+// `sourceHash` is present, storing ours instead, precisely because the payload it
+// receives is no longer byte-stable (ScanKit silently falls back to the raw image
+// when it is down or out of credits, so the same receipt would otherwise re-enter
+// under a new payload hash and double-book the P&L). For a bulk row this value IS
+// the stored `receipt_hash`, so a wrong or missing hash here is a real dedup gap,
+// not a redundant one.
+//
+// ⚠️ The server accepts `sourceHash` ONLY when a `data:` payload accompanies it —
+// otherwise the value alone could pre-register, and permanently burn, a hash the
+// real filer needs (idx_expenses_receipt_hash is UNIQUE). saveOne always sends
+// `photoData` beside it, so that gate is invisible here; do not send one without
+// the other and expect the hash to stick.
+//
 // Fails open ('' → not deduped) where SubtleCrypto is unavailable (e.g. non-HTTPS).
 async function hashFile(file) {
   try {
@@ -1140,7 +1157,18 @@ async function saveOne(row) {
       // (images now go through ScanKit, which silently falls back to the raw image
       // when it's down or out of credits), so hashing the payload alone would let
       // the same receipt back in under a new hash and double-book the P&L.
-      sourceHash: row.fileHash || '',
+      //
+      // ⚠️ SENT ONLY WITH THE BYTES IT DESCRIBES. The server accepts `sourceHash`
+      // only alongside a `data:` payload — a hash with nothing behind it can burn a
+      // receipt hash the real filer needs, because the receipt_hash index is UNIQUE
+      // — and it silently drops one that arrives alone. The three processRow failure
+      // paths (unreadable PDF, unreadable image, the bare catch) leave photoData ''
+      // while fileHash is already set, and such a row is still savable: saveAll
+      // validates driver/amount/date only. Sending the hash anyway would have the
+      // server discard it invisibly; withholding it says on the wire that this row
+      // has no bytes to dedupe by. Those rows are still covered by the server's
+      // content check (same driver + day + amount), which is unconditional.
+      sourceHash: row.photoData ? (row.fileHash || '') : '',
       // A `checkDuplicate: true` used to sit here, described as opting in to the
       // same-merchant/day/amount check. It was never a switch in either direction
       // and it is gone. The server runs that check UNCONDITIONALLY
