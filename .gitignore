@@ -21,6 +21,14 @@ app.db.bak*
 app.db.docgen*
 app.db.production*
 app.db.prod-capture*
+# The database the PREVIOUS one is renamed to every time scripts/refresh-local.sh
+# runs — see refresh-env.js, "previous database moved to app.db.pre-refresh-<ts>".
+# It was NOT matched by any rule above (`app.db.bak*` does not cover it), so it
+# sat in `git status` as plain untracked: one `git add -A` would have committed a
+# ~300 MB database. Every refresh mints another, and the refresh is the documented
+# way to get production-shaped data locally — so this is a routine artifact, not
+# an exotic one. Found 2026-08-13 while shipping the refusal-audit batch.
+app.db.pre-refresh*
 logisxdb.db
 # Temp copies written by GET /api/db/download. These are FULL database dumps —
 # every SSN, routing and account number — and the name does not start with
