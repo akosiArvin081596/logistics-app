@@ -290,7 +290,7 @@
                 :title="`Live position from the driver's phone${selectedDriverPosition.lastPingAge != null ? ' — ' + formatPingAge(selectedDriverPosition.lastPingAge) + ' ago' : ''}`"
               >Phone</span>
             </div>
-            <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="selectedDriverPosition" dispatch-mode />
+            <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="selectedDriverPosition" dispatch-mode show-arrival />
           </div>
         </div>
       </DialogContent>

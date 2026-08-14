@@ -19,6 +19,14 @@
           <span>Navigate</span>
         </button>
       </div>
+      <!-- Absolute arrival, on its own line rather than as a fourth chip:
+           .map-info is a flex row with no wrap, and a date long enough to carry
+           the weekday and the zone label pushes the Navigate button off the
+           edge at phone width. -->
+      <div v-if="showArrival && arrivalClock" class="map-arrival">
+        <span class="map-arrival-label">{{ arrivalLabel }}</span>
+        <span class="map-arrival-value">{{ arrivalClock }}</span>
+      </div>
       <div v-if="!hasCoords" class="map-label">Your Current Location</div>
       <div v-else-if="!driverLatLng && !dispatchMode" class="map-eld-hint">
         Showing route only — truck position unavailable (ELD offline)
@@ -59,6 +67,8 @@ import {
   remainingSeconds as routeRemainingSeconds,
   createDeviationDetector,
 } from '../../utils/routeProgress'
+import { formatMinutes } from '../../lib/duration'
+import { fmtArrivalClock } from '../../utils/datetime'
 import DriveModeOverlay from './DriveModeOverlay.vue'
 
 const props = defineProps({
@@ -82,6 +92,28 @@ const props = defineProps({
   // RouteAlternatives card list it renders inline stays in sync with the
   // map. v-model-friendly: emit('update:selectedAltIdx', i).
   selectedAltIdx: { type: Number, default: 0 },
+  // Show the absolute arrival clock ("Estimated arrival at drop-off · Fri,
+  // Aug 15, 3:45 PM CDT") under the chip row. OPT-IN, because only the caller
+  // knows whether an arrival prediction means anything: JobBoardTab renders
+  // unassigned loads
+  // (no truck is en route, so the figure is "if you dispatched right now") and
+  // CompletedLoadsTab renders delivered ones (which have a real delivery time
+  // already). Predicting an arrival on either would be wrong, not merely noisy.
+  showArrival: { type: Boolean, default: false },
+  // An arrival instant supplied by the caller — epoch ms, or a string carrying a
+  // zone. WINS over the locally derived clock whenever it is non-null.
+  //
+  // ⚠️ THIS IS WHAT KEEPS THE PUBLIC TRACKER HONEST, and it is not optional
+  // there. In publicMode the driverPosition watcher returns before it can set
+  // matchOffset (see the guard beside fetchRoute), so matchOffset is null
+  // forever, every fraction below falls back to 1, and remainingEtaMinutes is
+  // therefore the WHOLE origin→destination duration rather than the remaining
+  // leg. The tracker's own "Estimated arrival" card meanwhile comes from the
+  // server, which routes lastPing→destination. Deriving a clock locally there
+  // would print an arrival hours later than the card directly above it — two
+  // contradicting times on one customer-facing page. TrackLoadView passes the
+  // server's eta.expectedAt, so the two agree by construction.
+  arrivalAt: { type: [String, Number], default: null },
 })
 
 const emit = defineEmits(['route-data', 'update:selectedAltIdx'])
@@ -222,7 +254,29 @@ const statusCol = computed(() => (props.headers || []).find(h => /^(job[\s_-]*)?
 const loadStatus = computed(() => !props.load || !statusCol.value ? '' : (props.load[statusCol.value] || '').trim().toLowerCase())
 const isDelivered = computed(() => /^(delivered|completed|pod received)$/i.test(loadStatus.value))
 const hasCoords = computed(() => destLatLng.value != null && (!isDelivered.value || props.dispatchMode))
-const isPrePickup = computed(() => /^(dispatched|assigned|new|pending)$/i.test(loadStatus.value))
+
+// Has the freight been collected? Decides which end of the haul this map is
+// about: the route, the terminal marker, the origin marker, the auto-zoom, the
+// Navigate handoff and the ETA all key off it. Was five hand-copied regex
+// literals until 2026-08-14 — five chances for one of them to be widened and
+// the others not, which shows up as a map drawn to one end and an ETA to the
+// other.
+const PICKED_UP_RE = /^(at shipper|loading|in transit|at receiver|unloading)$/i
+const pickedUp = computed(() => PICKED_UP_RE.test(loadStatus.value))
+
+// Which leg is on screen. Mirrors fetchRoute's own target selection — including
+// its fallback, where a not-yet-collected load with no origin coordinate is
+// routed to the drop-off — so the distance chip, the arrival label and the
+// polyline can never describe different ends of the haul.
+//
+// ⚠️ This replaced an `isPrePickup` predicate spelled
+// /^(dispatched|assigned|new|pending)$/, which did NOT match "Heading to
+// Shipper" — a live status here (it is one of the geofence's own At-Shipper
+// predecessors). A truck running to the shipper therefore had its haversine
+// measured to the RECEIVER and labelled "to Drop-off", beside an ETA to the
+// shipper. Deriving this from `pickedUp` fixes that by construction: the two
+// predicates were never complements, which is exactly how they disagreed.
+const routeLegIsToPickup = computed(() => !pickedUp.value && !!originLatLng.value)
 
 function haversineMi(a, b) {
   const R = 3959
@@ -235,8 +289,12 @@ function haversineMi(a, b) {
 
 const driverDistanceInfo = computed(() => {
   if (!driverLatLng.value) return null
-  if (isPrePickup.value && originLatLng.value) return { mi: haversineMi(driverLatLng.value, originLatLng.value), label: 'to Pickup' }
-  if (!isPrePickup.value && !isDelivered.value && destLatLng.value) return { mi: haversineMi(driverLatLng.value, destLatLng.value), label: 'to Drop-off' }
+  // Delivered first: `pickedUp` is false for a delivered load (it is not one of
+  // the in-progress statuses), so without this the chip would offer a distance
+  // "to Pickup" for freight that has already been dropped off.
+  if (isDelivered.value) return null
+  if (routeLegIsToPickup.value) return { mi: haversineMi(driverLatLng.value, originLatLng.value), label: 'to Pickup' }
+  if (destLatLng.value) return { mi: haversineMi(driverLatLng.value, destLatLng.value), label: 'to Drop-off' }
   return null
 })
 
@@ -254,13 +312,12 @@ const driverName = computed(() => props.load && driverColName.value ? props.load
 // the route fetch logic: pre-pickup the driver is heading to the shipper, so
 // the handoff opens that; post-pickup it's the receiver.
 const navigationDestination = computed(() => {
-  const pickedUp = /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
-  const target = pickedUp ? destLatLng.value : (originLatLng.value || destLatLng.value)
+  const target = pickedUp.value ? destLatLng.value : (originLatLng.value || destLatLng.value)
   if (!target) return null
   return {
     lat: target.lat,
     lng: target.lng,
-    address: pickedUp ? destAddr.value : originAddr.value,
+    address: pickedUp.value ? destAddr.value : originAddr.value,
   }
 })
 
@@ -369,8 +426,7 @@ function buildRoutePath(driverOverride = null) {
   // `origin` as the terminal below would draw the entire lane followed by a
   // straight line back to its start. Draw the untrimmed lane instead; the
   // truck pin still shows where it is.
-  const onHaul = !props.publicMode
-    || /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
+  const onHaul = !props.publicMode || pickedUp.value
   const dp = onHaul ? (driverOverride || driverLatLng.value) : null
   if (!dp) {
     const path = points.map(p => ({ lat: p.latitude, lng: p.longitude }))
@@ -412,8 +468,7 @@ function buildRoutePath(driverOverride = null) {
   // Append the leg's terminal coord so the polyline ends exactly at the
   // pickup/dropoff marker (Google snaps route waypoints to roads, which can
   // leave a small gap to the marker pin).
-  const pickedUp = /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
-  const terminal = pickedUp ? destLatLng.value : originLatLng.value
+  const terminal = pickedUp.value ? destLatLng.value : originLatLng.value
   if (terminal && hasCoords.value) path.push(terminal)
   return path
 }
@@ -425,9 +480,8 @@ function renderMarkers() {
   // Alternatives first so they render BELOW the active route.
   altPolylines = renderAlternatives(map, props.selectedAltIdx)
 
-  const pickedUp = /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
   // After pickup, hide origin marker — driver is now Point A
-  if (originLatLng.value && hasCoords.value && !pickedUp) {
+  if (originLatLng.value && hasCoords.value && !pickedUp.value) {
     originMarker = new google.maps.marker.AdvancedMarkerElement({ position: originLatLng.value, map, content: createDotPin('#16a34a', 14), title: 'Pickup' })
   }
   if (destLatLng.value && hasCoords.value) {
@@ -489,8 +543,7 @@ function fitBounds() {
   // focus the map on the driver pin at a close zoom so customers and
   // dispatchers immediately see what the truck is doing instead of an
   // origin→destination wide view where the truck is a dot in the middle.
-  const pickedUp = /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
-  if (pickedUp && driverLatLng.value) {
+  if (pickedUp.value && driverLatLng.value) {
     map.setCenter(driverLatLng.value)
     map.setZoom(15)
     return
@@ -591,12 +644,11 @@ async function fetchRoute(doFit = false) {
   // The original logic fell back to `origin → origin` when ELD was offline
   // and the load was pre-pickup, which produced no usable route — drivers
   // saw markers but no polyline and the smart guidance UI never populated.
-  const pickedUp = /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
   const fromDriver = !!driverLatLng.value
   let from, to
   if (fromDriver) {
     from = driverLatLng.value
-    to = pickedUp ? destLatLng.value : (originLatLng.value || destLatLng.value)
+    to = pickedUp.value ? destLatLng.value : (originLatLng.value || destLatLng.value)
   } else {
     from = originLatLng.value
     to = destLatLng.value
@@ -837,12 +889,58 @@ const remainingEtaMinutes = computed(() => {
   return base * f
 })
 
-const etaFormatted = computed(() => {
-  if (remainingEtaMinutes.value == null) return null
-  const m = Math.round(remainingEtaMinutes.value)
-  if (m < 60) return `${m}m`
-  return `${Math.floor(m / 60)}h ${m % 60}m`
+// lib/duration.js was written as a copy of the body that used to live here (its
+// header says so). Same output; one implementation.
+const etaFormatted = computed(() => formatMinutes(remainingEtaMinutes.value))
+
+// ── ABSOLUTE ARRIVAL CLOCK ───────────────────────────────────────────────────
+//
+// "5h 0m ETA" answers how long, not when, and a dispatcher relaying an arrival
+// to a broker needs the second one — especially past midnight, where the answer
+// is a different DAY. Client ask, 2026-08-14.
+//
+// ⚠️ STAMPED WHEN THE FIGURE CHANGES, NEVER RECOMPUTED PER RENDER. The obvious
+// spelling — a computed returning Date.now() + remainingEtaMinutes — is wrong,
+// because remainingEtaMinutes does NOT tick with the clock: it only moves when a
+// new fix is matched to the route. So every re-render pushes the arrival further
+// out, and the number a dispatcher is watching slides later forever while the
+// truck sits still. In the dispatch modal it never moves at all —
+// ActiveLoadsTab fetches the driver position once inside openDetail() and has
+// no socket listener and no poll — so the drift there would be pure and
+// unbounded. Same stamp-at-arrival shape as TrackingMap's _etaEpochMs, and the
+// same reason.
+//
+// Consequence worth knowing: with no fresh fix the clock HOLDS rather than
+// sliding, so a stale ELD eventually shows an arrival in the past. That is the
+// honest failure — it reads as "this estimate is old", where sliding forever
+// reads as "the truck is still 5 hours out" no matter how long it has been
+// parked. The source chip beside the map already carries the ping age.
+const etaEpochMs = ref(null)
+watch(remainingEtaMinutes, (m) => {
+  etaEpochMs.value = m == null ? null : Date.now() + m * 60000
+}, { immediate: true })
+
+const arrivalClock = computed(() => {
+  // A caller-supplied instant is authoritative — see the arrivalAt prop.
+  if (props.arrivalAt != null) return fmtArrivalClock(props.arrivalAt, { weekday: true })
+  return fmtArrivalClock(etaEpochMs.value, { weekday: true })
 })
+
+// ⚠️ THE LABEL MUST NAME WHICH END OF THE HAUL, because this map's ETA is not
+// always the delivery. Pre-pickup the route is drawn truck→SHIPPER, so a bare
+// "Estimated arrival" on a Dispatched load reads as the delivery time and is
+// off by the entire length of the lane. Caught in review: load 561876790
+// (Dispatched) rendered "1.1 mi to Pickup" beside a 7-minute ETA — correct, and
+// unmistakably not a delivery.
+//
+// Shares routeLegIsToPickup with the distance chip so the two lines of the
+// header can never name different ends of the haul. The one override: whenever
+// the caller supplies arrivalAt it is destination-relative by construction (the
+// tracker's server figure routes lastPing→destination), so it wins here.
+const arrivalLabel = computed(() =>
+  props.arrivalAt == null && routeLegIsToPickup.value
+    ? 'Estimated arrival at pickup'
+    : 'Estimated arrival at drop-off')
 
 function snapToRoute(lat, lng) {
   const idx = routeIndex.value
@@ -1098,6 +1196,9 @@ onMounted(() => {
 .info-warn { color: #b45309; background: #fef3c7; }
 .info-danger { color: #dc2626; background: #fee2e2; }
 .map-empty { text-align: center; color: var(--text-dim); font-size: 0.8rem; padding: 1rem 0; }
+.map-arrival { font-size: 0.78rem; margin-bottom: 0.5rem; line-height: 1.35; }
+.map-arrival-label { color: var(--text-dim); font-weight: 500; margin-right: 0.35rem; }
+.map-arrival-value { color: var(--text); font-weight: 600; }
 .map-label { font-size: 0.78rem; font-weight: 600; color: var(--text-dim); margin-bottom: 0.4rem; }
 .map-eld-hint { font-size: 0.75rem; color: var(--text-dim); margin-bottom: 0.4rem; padding: 0.3rem 0.5rem; background: #fef3c7; color: #92400e; border-radius: 6px; font-weight: 500; }
 .gps-waiting { display: flex; align-items: center; justify-content: center; background: var(--bg, #f5f6fa); border: 1px solid var(--border, #e5e7eb); }

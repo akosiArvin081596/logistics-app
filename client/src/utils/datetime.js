@@ -358,3 +358,49 @@ export function fmtTimestamp(v, { fallback = '—' } = {}) {
     hour: 'numeric', minute: '2-digit', hour12: true, timeZoneName: 'short',
   }).format(dt)
 }
+
+/**
+ * fmtArrivalClock — when a truck is projected to reach the receiver.
+ *   1755203100000        -> "Aug 14, 3:45 PM CDT"
+ *   "2026-08-15T20:45:00Z" -> "Aug 15, 3:45 PM CDT"
+ *   with { weekday: true }  -> "Fri, Aug 15, 3:45 PM CDT"
+ *
+ * Deliberately NOT fmtTimestamp: an ETA is a near-future instant, so the year is
+ * noise, and this one also takes an epoch (the arrival clocks derive one from
+ * etaMinutes rather than receiving a string).
+ *
+ * The weekday is opt-in because a multi-day haul's "Aug 16, 6:00 AM" is read off
+ * a screen and relayed by phone — the day name is what stops it being heard as
+ * today. The default omits it so the two pre-existing arrival clocks
+ * (DriverGlanceMetrics, TrackingMap's info window) keep their exact output.
+ *
+ * Houston rule, and it is load-bearing on this value above all others: the
+ * arrival time is the one number a dispatcher says out loud to a broker or a
+ * customer. An unlabelled "3:45 PM" rendered in the viewer's zone is how a
+ * Manila session quotes a Houston customer a time 13 hours off.
+ *
+ * ⚠️ Instants only — an epoch, or a string carrying a zone. A bare wall clock
+ * returns `fallback` rather than being parsed in the viewer's zone; there is no
+ * fmtSheetMoment escape hatch here, because nothing that means "arrival" is
+ * sourced from a sheet cell, and inventing an instant from one would put a
+ * viewer-dependent time on a customer-facing page.
+ */
+export function fmtArrivalClock(v, { weekday = false, fallback = null } = {}) {
+  if (v == null) return fallback
+  let dt
+  if (typeof v === 'number') {
+    if (!Number.isFinite(v)) return fallback
+    dt = new Date(v)
+  } else {
+    const s = String(v).trim()
+    if (!s || !isZoned(s)) return fallback
+    dt = new Date(s)
+  }
+  if (isNaN(dt.getTime())) return fallback
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: HOUSTON,
+    ...(weekday ? { weekday: 'short' } : {}),
+    month: 'short', day: 'numeric',
+    hour: 'numeric', minute: '2-digit', hour12: true, timeZoneName: 'short',
+  }).format(dt)
+}

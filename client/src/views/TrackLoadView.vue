@@ -125,6 +125,19 @@
         </div>
 
         <!-- Live map -->
+        <!--
+          ⚠️ arrival-at is REQUIRED here, not a convenience. The map's own ETA
+          figure is the whole origin→destination duration on this page (in
+          publicMode the component never matches a fix to the route, so it can
+          never count down), while the "Estimated arrival" card above is the
+          server's lastPing→destination figure. Letting the map derive its own
+          clock would print an arrival hours later than the card, on the page we
+          hand to customers. Passing eta.expectedAt makes the two the same value.
+
+          show-arrival keys off `eta` because the server omits it for delivered
+          loads and when there is no ping — exactly the cases where a fallback
+          would have invented an arrival for a truck that already got there.
+        -->
         <div v-if="mapLoad" class="track-card track-map-card">
           <div class="track-map-title">Route &amp; current location</div>
           <DriverRouteMap
@@ -134,6 +147,8 @@
             :preset-route="presetRoute"
             :public-mode="true"
             :dispatch-mode="!data.lastPing"
+            :show-arrival="!!data.eta"
+            :arrival-at="data.eta?.expectedAt"
           />
           <div v-if="!data.lastPing" class="track-map-hint">
             GPS not available. We'll refresh automatically when the driver reports in.
