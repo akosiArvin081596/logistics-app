@@ -52,13 +52,55 @@
   2,450 = 17,138 against 14,781 − 661 = 14,120). See the identity note in
   lib/payoutPeriod.js.
 
-  The lifetime totals are still on screen, explicitly labelled "All months", so
-  scoping the card to one period lost nothing.
-
   The ledger source is unchanged: investorStore's payouts slice, from GET
   /api/investor/payouts — the exact same source the Payouts section renders, so
   the two can never disagree. Honors Super-Admin "view as investor" through the
   :preview-user-id prop (threaded as ?as_user_id=).
+
+  ---------------------------------------------------------------------------
+  THE CARD IS NOW CLOSED-MONTHS ONLY (client, 2026-08-14)
+  ---------------------------------------------------------------------------
+  Client, verbatim: "why even put that there and then projected payout. We don't
+  need this section technically speaking because we already have a projected
+  payout on the top… how did you jump from 9100 to 9700. These things are boogie
+  traps brother please remove them."
+
+  Two removals, and the reasoning for each is different:
+
+    • THE OPEN MONTH is not rendered at all. The same in-progress figure was on
+      screen three times — EarningsSection's headline ("-$995 · 50% of net
+      profit · * August 2026 — Month in progress"), this card, and
+      PayoutsSection's own projection card. This one was the middle copy and the
+      only one that restated it as a THREE-ROW SUM (earned / shortfall carried /
+      projected $0), which is the arithmetic the client was being asked to
+      defend and could not. The other two stay; one projection on a page is a
+      fact, three are an invitation to reconcile them.
+
+    • THE "All months" LIFETIME LINE is gone. It sat one line under a per-month
+      figure — "$9,107" for July directly above "Still owed $9,707" — so the two
+      read as one number changing. They are not: $9,707 is July's $9,107 plus a
+      SEPARATE January 2026 row of $600, minted 2026-08-12 23:17:53 by the
+      driver-reassignment scoping bug (see getInvestorDriverMonthWindows in
+      CLAUDE.md) and frozen by the finalize sweep in the same second. The line
+      was accurate and unreadable, which on a money screen is the same as wrong.
+
+  ⚠️ The `settlement === null` case goes with it, and that is deliberate rather
+  than incidental. Null means weekly mode or no selection, and the card's null
+  branch WAS the lifetime view — same $9,707, promoted to the headline. Leaving
+  it would have made the removal cosmetic: one tab click republishes the figure.
+  The weekly note below ("reconciled monthly — switch to Monthly") already tells
+  a weekly reader why there is no share to show.
+
+  Totals did not disappear from the portal — PayoutsSection carries TOTAL OWED /
+  PROCESSING / PAID directly above the Past Months table that itemises them, so
+  a reader who wants the running total lands next to its explanation instead of
+  meeting it unannounced under one month's figure.
+
+  lib/payoutPeriod.js is deliberately UNTOUCHED. payoutHeadline's 'open' branch
+  and settlementTerms' open-month rows are now unreachable from this component
+  but stay exported and asserted by scripts/test-payout-card-period.mjs — the
+  removal is a rendering decision, and keeping the pure layer whole is what lets
+  that 465-line lock stay green and unedited as the proof of it.
 -->
 <template>
   <div class="lr-section">
@@ -103,44 +145,38 @@
       </div>
       <span class="lr-owed-context">Net investor share across every month</span>
     </div>
-    <!-- While the ledger is still loading, hold the label and dash the amount
-         rather than flashing a $0 owed or a different heading. -->
-    <div class="lr-owed" :class="cardTone" v-else>
+    <!-- CLOSED MONTHS ONLY — `showSettlementCard` keeps the open month and the
+         lifetime view off the page entirely, and holds the card back until the
+         ledger resolves rather than rendering a placeholder for a month it
+         cannot yet classify. See the header note. A month with no ledger row
+         still renders: "No settlement record for this month" is an answer about
+         a closed month, which is this card's job. -->
+    <div class="lr-owed" :class="cardTone" v-else-if="showSettlementCard">
       <div class="lr-owed-row">
         <span class="lr-owed-label">
           {{ headline }}
           <span class="lr-owed-scope">{{ scopeLabel }}</span>
         </span>
-        <span class="lr-owed-value">{{ ledgerLoading ? '—' : headlineValue }}</span>
+        <span class="lr-owed-value">{{ headlineValue }}</span>
       </div>
 
-      <template v-if="!ledgerLoading">
-        <!-- The status and, for a settled month, WHEN — the client's literal ask
-             ("show the months of what was paid when it was paid"). -->
-        <span class="lr-owed-context" v-if="stateNote">{{ stateNote }}</span>
+      <!-- The status and, for a settled month, WHEN — the client's literal ask
+           ("show the months of what was paid when it was paid"). -->
+      <span class="lr-owed-context" v-if="stateNote">{{ stateNote }}</span>
 
-        <!-- Every term of the sum, so the arithmetic closes on screen. A term
-             that is genuinely zero is omitted because zero does not participate;
-             nothing non-zero is ever hidden. -->
-        <dl class="lr-terms" v-if="terms.length">
-          <div v-for="t in terms" :key="t.key" class="lr-term" :class="`lr-term-${t.kind}`">
-            <dt class="lr-term-label">{{ t.label }}</dt>
-            <dd class="lr-term-value">{{ termMoney(t) }}</dd>
-          </div>
-        </dl>
+      <!-- Every term of the sum, so the arithmetic closes on screen. A term
+           that is genuinely zero is omitted because zero does not participate;
+           nothing non-zero is ever hidden. -->
+      <dl class="lr-terms" v-if="terms.length">
+        <div v-for="t in terms" :key="t.key" class="lr-term" :class="`lr-term-${t.kind}`">
+          <dt class="lr-term-label">{{ t.label }}</dt>
+          <dd class="lr-term-value">{{ termMoney(t) }}</dd>
+        </div>
+      </dl>
 
-        <!-- Sign-aware prose. Never green for a loss: this portal's green means
-             money received, and a shortfall is not an amount the investor owes. -->
-        <span
-          class="lr-owed-accruing"
-          :class="{ 'lr-accruing-loss': noteIsLoss }"
-          v-if="noteText"
-        >{{ noteText }}</span>
-
-        <!-- Lifetime totals stay visible and are labelled as such, so narrowing
-             the card to one month took nothing away. -->
-        <span class="lr-lifetime">{{ lifetimeLine }}</span>
-      </template>
+      <!-- Settlement drift only, now that the loss prose has gone with the open
+           month. Never green: this is an explanation, not money received. -->
+      <span class="lr-owed-accruing" v-if="noteText">{{ noteText }}</span>
     </div>
 
     <div v-if="loading" class="lr-msg">Loading load reports…</div>
@@ -242,31 +278,21 @@ const selectedIdx = ref(0)
 const loading = ref(false)
 const error = ref(false)
 
-// Lifetime net earned across every month — the only banner figure that comes
-// from /api/investor. Everything else is the payout ledger, so "owed" here means
-// exactly what the Payouts section means by it.
+// Lifetime net earned across every month. The ONLY lifetime figure this section
+// still reads: the `ledgerFailed` fallback renders it as "Earned to date", which
+// is an earnings number and not a payable, so it never had the "is this owed to
+// me?" ambiguity the removed "All months" line did.
 const earnedToDate = computed(() => props.production?.investorNetToDate || 0)
 const ledgerLoading = computed(() => investorStore.payoutsLoading)
 const ledgerFailed = computed(() => investorStore.payoutsFailed)
-const owedNow = computed(() => investorStore.payoutTotals.totalOwed || 0)
-const processingNow = computed(() => investorStore.payoutTotals.totalProcessing || 0)
-const paidToDate = computed(() => investorStore.payoutTotals.totalPaid || 0)
-// Manual settlement adjustments and any still-unabsorbed carried loss sit
-// BETWEEN earnings and what gets paid, so the card names them explicitly.
-// Without them the components silently stop summing to Earned — the exact
-// "these numbers don't add up" complaint this card exists to answer:
-//   paid + processing + owed + accruing == earned + adjustments + carriedLoss
-const adjustments = computed(() => investorStore.payoutTotals.totalAdjustments || 0)
-const carriedLoss = computed(() => investorStore.payoutTotals.carriedLossOutstanding || 0)
-const accruing = computed(() => investorStore.accruingThisMonth)
-const accruingLabel = computed(() => investorStore.currentMonth?.periodLabel || 'This month')
 
 const sel = computed(() => periods.value[selectedIdx.value] || null)
 
 // ---- The month join --------------------------------------------------------
 // null in weekly mode (a week start is not a month key) and before a period is
-// selected; the card then shows the LIFETIME view. Never a partial or guessed
-// month — see lib/payoutPeriod.js for why each of the three bases exists.
+// selected. Null used to render the LIFETIME view; it now renders nothing — see
+// the header note. Never a partial or guessed month — see lib/payoutPeriod.js
+// for why each of the three bases exists.
 const settlement = computed(() => selectPeriodSettlement({
   periodType: period.value,
   periodKey: sel.value?.key,
@@ -275,47 +301,47 @@ const settlement = computed(() => selectPeriodSettlement({
 }))
 const terms = computed(() => settlementTerms(settlement.value))
 
-// ⚠️ While the ledger is in flight `payouts` is empty, so the selector correctly
-// reports "no record" — but rendering that heading is asserting a FACT about the
-// month during a network round trip, and it flashed "No settlement for this
-// month" on every page load. The amount is already dashed; the heading has to be
-// equally non-committal, which means naming the card rather than its verdict.
-const headline = computed(() => {
-  if (ledgerLoading.value) return 'Payment summary'
-  return settlement.value ? payoutHeadline(settlement.value) : 'Still owed to you'
+// Closed months only. Three exclusions, each for its own reason:
+//
+//   • ledgerLoading — we cannot classify the month yet, and the default
+//     selection is the newest one, i.e. the OPEN month. Rendering a placeholder
+//     card there would show it and then take it away on every page load. The
+//     card now waits instead of flashing; this also retires the "hold the label,
+//     dash the amount" dance the loading branches used to do.
+//   • !s — weekly mode or no selection. That was the lifetime view.
+//   • basis 'open' — the in-progress month, on screen twice already.
+//
+// 'none' deliberately still renders: "no settlement record" is a statement about
+// a month that has closed, which is exactly what this card is for.
+const showSettlementCard = computed(() => {
+  if (ledgerLoading.value) return false
+  const s = settlement.value
+  return !!s && s.basis !== 'open'
 })
-const scopeLabel = computed(() => (settlement.value ? settlement.value.periodLabel : 'all months'))
+
+const headline = computed(() => (settlement.value ? payoutHeadline(settlement.value) : ''))
+const scopeLabel = computed(() => settlement.value?.periodLabel || '')
 
 // '—', never '$0': a month with no ledger row has no settled figure, and a zero
 // there would assert that nothing is owed for it.
 const headlineValue = computed(() => {
   const s = settlement.value
-  if (!s) return fmtMoney(owedNow.value)
-  if (s.basis === 'open') return fmtMoney(s.projectedPayout)
-  if (s.payout == null) return '—'
+  if (!s || s.payout == null) return '—'
   return fmtMoney(s.payout)
 })
 
-// Green is this portal's "money received / receivable" tone. A projection and an
-// absent record are neither, so they render neutral.
-const cardTone = computed(() => {
-  const s = settlement.value
-  if (!s) return 'tone-money'
-  return s.basis === 'settled' ? 'tone-money' : 'tone-neutral'
-})
+// Green is this portal's "money received / receivable" tone. An absent record is
+// not, so it renders neutral.
+const cardTone = computed(() =>
+  settlement.value?.basis === 'settled' ? 'tone-money' : 'tone-neutral')
 
 // The status line — and, for a settled month, the DATE. This is the client's
 // literal ask; the Past Months table in PayoutsSection now carries a Paid date
 // column for the same reason.
 const stateNote = computed(() => {
   const s = settlement.value
-  if (!s) return 'Across every settled month. Pick a month above to see it on its own.'
+  if (!s) return ''
   if (s.basis === 'none') return 'No settlement record for this month.'
-  if (s.basis === 'open') {
-    return s.graceEndsAt
-      ? `In progress — not payable until the month closes, with receipts accepted through ${fmtDate(s.graceEndsAt)}.`
-      : 'In progress — not payable until the month closes.'
-  }
   if (s.status === 'paid') {
     return s.paidAt ? `Paid on ${fmtDate(s.paidAt)}.` : 'Paid.'
   }
@@ -335,42 +361,15 @@ const stateNote = computed(() => {
   return s.status === 'processing' ? `Payment in progress${due}.` : `Awaiting payment${due}.`
 })
 
-// Extra prose, only where a figure would otherwise be inexplicable.
+// Extra prose, only where a figure would otherwise be inexplicable. Just the one
+// case now that the open month is gone: a settled month whose current records no
+// longer match what it was settled at, where the two figures on screen genuinely
+// do disagree and saying nothing would look like an error.
 const noteText = computed(() => {
   const s = settlement.value
-  if (!s) {
-    // Lifetime view: the open month is a real term of the lifetime sum, so name
-    // it and its month rather than letting it vanish.
-    const v = accruing.value
-    if (!v) return ''
-    return v > 0
-      ? `${accruingLabel.value} accruing: ${fmtMoney(v)} — not payable until the month closes`
-      : `${accruingLabel.value} so far: ${fmtMoney(v)} — the month is running at a loss, not an amount you owe`
-  }
-  if (s.basis === 'open' && s.earned < 0) {
-    return 'The month is running at a loss — a shortfall carries into a later payout, it is not an amount you owe.'
-  }
-  if (s.basis === 'settled' && s.drift) {
-    return 'Your payout is the amount this month was settled at. The earnings line reflects current records, which have changed since it closed.'
-  }
-  return ''
-})
-const noteIsLoss = computed(() => {
-  const s = settlement.value
-  if (!s) return accruing.value < 0
-  return s.basis === 'open' && s.earned < 0
-})
-
-// One line, always present, always labelled "All months" — so a per-month card
-// never reads as if it were the whole relationship.
-const lifetimeLine = computed(() => {
-  const bits = [`Earned ${fmtMoney(earnedToDate.value)}`]
-  if (adjustments.value) bits.push(`Adjustments ${signedMoney(adjustments.value)}`)
-  bits.push(`Paid out ${fmtMoney(paidToDate.value)}`)
-  if (processingNow.value) bits.push(`Processing ${fmtMoney(processingNow.value)}`)
-  bits.push(`Still owed ${fmtMoney(owedNow.value)}`)
-  if (carriedLoss.value) bits.push(`${fmtMoney(carriedLoss.value)} loss carried forward`)
-  return `All months — ${bits.join(' · ')}`
+  return s?.basis === 'settled' && s.drift
+    ? 'Your payout is the amount this month was settled at. The earnings line reflects current records, which have changed since it closed.'
+    : ''
 })
 
 // Gross Revenue counts delivered loads only, so the Loads tile must too.
@@ -558,15 +557,14 @@ fetchReport()
 .lr-tab.active { background: #fff; color: #0f172a; box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
 
 .lr-owed { display: flex; flex-direction: column; gap: 0.15rem; margin: 0.5rem 0 0.6rem; padding: 0.7rem 0.9rem; border-radius: 10px; background: #f0fdf4; border: 1px solid #bbf7d0; }
-/* Green is reserved for money received or receivable. A projection of an open
-   month and a month with no ledger row are neither, so they render neutral —
-   the same rule the Net Result tile follows. */
+/* Green is reserved for money received or receivable. A month with no ledger row
+   is neither, so it renders neutral — the same rule the Net Result tile
+   follows. */
 .lr-owed.tone-neutral { background: #f8fafc; border-color: #e2e8f0; }
 .lr-owed.tone-neutral .lr-owed-label { color: #334155; }
 .lr-owed.tone-neutral .lr-owed-value { color: #0f172a; }
 .lr-owed.tone-neutral .lr-owed-context,
-.lr-owed.tone-neutral .lr-owed-accruing,
-.lr-owed.tone-neutral .lr-lifetime { color: #64748b; }
+.lr-owed.tone-neutral .lr-owed-accruing { color: #64748b; }
 .lr-owed.tone-neutral .lr-term-label { color: #475569; }
 .lr-owed-row { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
 .lr-owed-label { font-size: 0.82rem; font-weight: 600; color: #166534; }
@@ -577,9 +575,6 @@ fetchReport()
 .lr-owed-value { font-size: 1.35rem; font-weight: 800; color: #15803d; }
 .lr-owed-context { font-size: 0.74rem; font-weight: 500; color: #4d7c5a; }
 .lr-owed-accruing { font-size: 0.74rem; font-weight: 500; color: #4d7c5a; font-style: italic; }
-/* Same rule as the Net Result tile: the green is reserved for money received. */
-.lr-owed-accruing.lr-accruing-loss { color: #b91c1c; }
-.lr-lifetime { font-size: 0.72rem; font-weight: 500; color: #4d7c5a; margin-top: 0.3rem; }
 
 /* The terms of the sum. Rendered as a list so the figures line up in a column
    and can be added by eye — the whole point of showing them. */
