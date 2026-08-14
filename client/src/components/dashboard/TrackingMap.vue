@@ -209,6 +209,7 @@ import { useApi } from '../../composables/useApi'
 import { useSocket } from '../../composables/useSocket'
 import { useGoogleMaps, createDotPin, createTruckArrow, createFuelPricePin } from '../../composables/useGoogleMaps'
 import { formatMinutes, formatClockMs } from '../../lib/duration'
+import { fmtArrivalClock } from '../../utils/datetime'
 import {
   stopPrice,
   priceText,
@@ -1104,14 +1105,12 @@ function buildDriverPopupContent(loc) {
   // → injection-safe.
   if (loc.etaMinutes != null && Number.isFinite(Number(loc.etaMinutes))) {
     const epoch = loc._etaEpochMs || (Date.now() + Number(loc.etaMinutes) * 60000)
-    // Houston rule: the arrival clock is pinned to America/Chicago and carries
-    // its zone label. An ETA is the one number a dispatcher relays verbally —
-    // an unlabelled "3:40 PM" rendered in the viewer's zone is how a Manila
+    // Houston rule (America/Chicago + a visible zone label) lives in
+    // fmtArrivalClock, shared with the glance panel above and the route map's
+    // arrival line. An ETA is the one number a dispatcher relays verbally — an
+    // unlabelled "3:40 PM" rendered in the viewer's zone is how a Manila
     // session quotes a Houston customer a time 13 hours off.
-    const clock = new Date(epoch).toLocaleString('en-US', {
-      month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
-      timeZone: 'America/Chicago', timeZoneName: 'short',
-    })
+    const clock = fmtArrivalClock(epoch)
     const dur = formatMinutes(Number(loc.etaMinutes))
     const late = loc.etaStatus === 'delayed'
     html += `<div style="color:${late ? '#b91c1c' : '#15803d'};font-size:0.8rem;font-weight:600">ETA ${clock}${dur ? ' &middot; ' + dur : ''}${late ? ' (delayed)' : ''}</div>`

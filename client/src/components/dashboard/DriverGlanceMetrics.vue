@@ -34,6 +34,7 @@
 <script setup>
 import { computed } from 'vue'
 import { formatMinutes } from '../../lib/duration'
+import { fmtArrivalClock } from '../../utils/datetime'
 
 const props = defineProps({
   speed: { type: Number, default: null },          // m/s from /api/locations/latest
@@ -58,16 +59,12 @@ const fuelLow = computed(() => fuel.value != null && fuel.value <= 25)
 
 // Absolute arrival time — "Jul 25, 3:40 PM CDT". Prefer the epoch stamped when
 // the data arrived (stable) over recomputing from etaMinutes each render.
-// Houston rule: pinned to America/Chicago with the zone label, never the
-// viewer's zone. The label is load-bearing here — this string is read aloud to
-// brokers and customers, and `.glance-eta` wraps, so it always has room.
-const etaClock = computed(() => {
-  if (props.etaEpochMs == null || !Number.isFinite(props.etaEpochMs)) return null
-  return new Date(props.etaEpochMs).toLocaleString('en-US', {
-    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
-    timeZone: 'America/Chicago', timeZoneName: 'short',
-  })
-})
+// Houston rule (pinned to America/Chicago, zone label always shown) lives in
+// fmtArrivalClock, shared with the tracking map's info window and the route
+// map's arrival line so the three cannot drift apart. The label is load-bearing
+// here — this string is read aloud to brokers and customers, and `.glance-eta`
+// wraps, so it always has room.
+const etaClock = computed(() => fmtArrivalClock(props.etaEpochMs))
 
 // Live countdown. Counts down off the stamped epoch when present; otherwise the
 // raw etaMinutes snapshot.

@@ -60,6 +60,7 @@
           :load="load"
           :headers="headers"
           :driver-position="driverPosition"
+          show-arrival
           :selected-alt-idx="selectedAltIdx"
           @update:selected-alt-idx="selectedAltIdx = $event"
           @route-data="onRouteData"
