@@ -57,7 +57,15 @@
  *      totals. The generated SQL is executed, not inspected, so a builder that emits
  *      syntactically valid nonsense fails here.
  *
+ *   §11 THE SEVENTH SITE. GET /api/investor/report hand-rolled the pre-fix predicate
+ *      ~500 lines from the other six and kept it for a further round — $40,761.24 vs a
+ *      correctly-scoped $19,553.93 on one production investor, in a document they
+ *      download and keep. Neither §1 (a caller COUNT, which six correct sites satisfy)
+ *      nor §8 (structural over that handler's FIXED costs) could see it. §11 extracts
+ *      that handler's expenses block and both inspects AND runs it.
+ *
  *   §6 MUTANTS. Each deliberately reintroduces one half of the bug and must be caught.
+ *      §7, §10 and §11 carry their own in-section mutants for the same reason.
  *
  * Run: node scripts/test-investor-expense-scoping.js
  */
@@ -111,6 +119,10 @@ const FNS = [
 	"intersectMonthWindow",
 	"getInvestorDriverMonthWindows",
 	"investorExpenseScopeSql",
+	// §11's mutant rebuilds the pre-fix predicate, and it must do so from the SHIPPED
+	// getInvestorDriverSet — a hand-written stand-in would only prove that a set of
+	// names this test invented leaks, not that the one the handler actually built did.
+	"getInvestorDriverSet",
 ];
 
 // `db` is injected so getInvestorDriverMonthWindows runs against a real fixture
@@ -163,29 +175,42 @@ const CARRIER_HISTORY = [
 	{ carrier_name: "Johnny Rocks Spirits", driver_name: "Marcus Webb", started_at: "2026-06-01T12:00:00.000Z", ended_at: "" },
 ];
 // Real production monthly totals, collapsed to one row per (driver, month).
+//
+// `type` exists for §11: GET /api/investor/report is the one caller that GROUPs BY it
+// (Fuel / Maintenance / Other are its printed P&L lines), so the fixture has to be able
+// to express a mis-bucketed as well as a mis-scoped total. Nothing else reads it, so
+// §0/§5 are byte-identical with or without the column.
 const EXPENSES = [
-	{ driver: "Howard Reddie", owner_id: OWNER, truck_unit: "LogisX-#33",   date: "2026-05-20", amount: 5296.00 },
-	{ driver: "Howard Reddie", owner_id: OWNER, truck_unit: "LogisX-#33",   date: "2026-06-20", amount: 6345.79 },
-	{ driver: "Howard Reddie", owner_id: OWNER, truck_unit: "LogisX-#33",   date: "2026-07-20", amount: 6739.44 },
-	{ driver: "Howard Reddie", owner_id: OWNER, truck_unit: "LogisX-#33",   date: "2026-08-06", amount: 1140.17 },
-	{ driver: "Shorn King",    owner_id: 0,     truck_unit: "LogisX-#2372", date: "2026-05-20", amount: 4469.83 },
-	{ driver: "Shorn King",    owner_id: 0,     truck_unit: "LogisX-#2372", date: "2026-06-20", amount: 7366.68 },
-	{ driver: "Shorn King",    owner_id: 0,     truck_unit: "LogisX-#2372", date: "2026-07-20", amount: 4641.85 },
-	{ driver: "Shorn King",    owner_id: 0,     truck_unit: "LogisX-#2372", date: "2026-08-04", amount: 1118.00 },
+	{ driver: "Howard Reddie", owner_id: OWNER, truck_unit: "LogisX-#33",   date: "2026-05-20", amount: 5296.00, type: "Fuel" },
+	{ driver: "Howard Reddie", owner_id: OWNER, truck_unit: "LogisX-#33",   date: "2026-06-20", amount: 6345.79, type: "Fuel" },
+	{ driver: "Howard Reddie", owner_id: OWNER, truck_unit: "LogisX-#33",   date: "2026-07-20", amount: 6739.44, type: "Fuel" },
+	{ driver: "Howard Reddie", owner_id: OWNER, truck_unit: "LogisX-#33",   date: "2026-08-06", amount: 1140.17, type: "Maintenance" },
+	{ driver: "Shorn King",    owner_id: 0,     truck_unit: "LogisX-#2372", date: "2026-05-20", amount: 4469.83, type: "Fuel" },
+	{ driver: "Shorn King",    owner_id: 0,     truck_unit: "LogisX-#2372", date: "2026-06-20", amount: 7366.68, type: "Fuel" },
+	{ driver: "Shorn King",    owner_id: 0,     truck_unit: "LogisX-#2372", date: "2026-07-20", amount: 4641.85, type: "Fuel" },
+	{ driver: "Shorn King",    owner_id: 0,     truck_unit: "LogisX-#2372", date: "2026-08-04", amount: 1118.00, type: "Fuel" },
 	// Post-move: stamped to the investor at insert, so it needs no fallback at all.
-	{ driver: "Shorn King",    owner_id: OWNER, truck_unit: "Logisx-#91",   date: "2026-09-10", amount: 900.00 },
+	{ driver: "Shorn King",    owner_id: OWNER, truck_unit: "Logisx-#91",   date: "2026-09-10", amount: 900.00, type: "Fuel" },
 
 	// --- UNATTRIBUTED legacy rows (truck_unit = ''), the only kind the driver
 	// fallback may admit. These are what the leg exists for: rows written before
 	// truck_unit/owner_id were stamped, sitting in a finalized month the boot
 	// backfill deliberately refuses to touch.
 	// Howard, inside his window -> ADMITTED.
-	{ driver: "Howard Reddie", owner_id: 0, truck_unit: "", date: "2026-06-10", amount: 200.00 },
+	{ driver: "Howard Reddie", owner_id: 0, truck_unit: "", date: "2026-06-10", amount: 200.00, type: "Toll" },
 	// Shorn, BEFORE he was ever this investor's -> REFUSED. Deleting the month
 	// window would silently pull this into a closed month.
-	{ driver: "Shorn King",    owner_id: 0, truck_unit: "", date: "2026-07-15", amount: 300.00 },
+	{ driver: "Shorn King",    owner_id: 0, truck_unit: "", date: "2026-07-15", amount: 300.00, type: "Toll" },
 	// Shorn, after the move -> ADMITTED.
-	{ driver: "Shorn King",    owner_id: 0, truck_unit: "", date: "2026-09-20", amount: 150.00 },
+	{ driver: "Shorn King",    owner_id: 0, truck_unit: "", date: "2026-09-20", amount: 150.00, type: "Toll" },
+
+	// SYNTHETIC, for §11 only: a driver who is in NO leg of getInvestorDriverSet(OWNER)
+	// and stamped to nobody. Without her the pre-fix hand-rolled shape and the Super
+	// Admin "no scope at all" branch produce the SAME number on this fixture (every
+	// other row's driver is in the set), so a mutant restoring the hand-rolled shape
+	// would be indistinguishable from the correct Super Admin path. She is invisible to
+	// §0/§5: owner_id 0 with a non-empty truck_unit is admitted by neither.
+	{ driver: "Priya Raman",   owner_id: 0, truck_unit: "LogisX-#302", date: "2026-06-15", amount: 500.00, type: "Fuel" },
 ];
 
 function makeDb() {
@@ -200,7 +225,7 @@ function makeDb() {
 		CREATE TABLE carrier_driver_history (id INTEGER PRIMARY KEY AUTOINCREMENT, carrier_name TEXT,
 			driver_name TEXT, started_at TEXT, ended_at TEXT DEFAULT '');
 		CREATE TABLE expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT, owner_id INTEGER DEFAULT 0,
-			truck_unit TEXT DEFAULT '', date TEXT, amount REAL, status TEXT DEFAULT '',
+			truck_unit TEXT DEFAULT '', date TEXT, amount REAL, type TEXT DEFAULT '', status TEXT DEFAULT '',
 			posted_period TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 	`);
 	db.prepare("INSERT INTO users (id, company_name) VALUES (?, ?)").run(OWNER, "Johnny Rocks Spirits");
@@ -210,7 +235,7 @@ function makeDb() {
 	ASSIGNMENTS.forEach(r => a.run(r));
 	const c = db.prepare("INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at, ended_at) VALUES (@carrier_name,@driver_name,@started_at,@ended_at)");
 	CARRIER_HISTORY.forEach(r => c.run(r));
-	const e = db.prepare("INSERT INTO expenses (driver, owner_id, truck_unit, date, amount) VALUES (@driver,@owner_id,@truck_unit,@date,@amount)");
+	const e = db.prepare("INSERT INTO expenses (driver, owner_id, truck_unit, date, amount, type) VALUES (@driver,@owner_id,@truck_unit,@date,@amount,@type)");
 	EXPENSES.forEach(r => e.run(r));
 	return db;
 }
@@ -258,9 +283,16 @@ const S = loadShipped(db);
 	const commentLine = SRC.split("\n").find(l => expenseDriverLeg.test(l));
 	ok(/^\s*\/\//.test(commentLine || ""), "§1 the surviving occurrence is a comment, not live SQL");
 
-	const callers = (SRC.match(/investorExpenseScopeSql\(/g) || []).length;
-	// 1 definition + 6 call sites.
-	ok(callers === 7, `§1 investorExpenseScopeSql should have 1 definition + 6 callers; found ${callers}`);
+	// Counted on a COMMENT-STRIPPED copy, because the ⚠️ above the builder and the one
+	// inside the report handler both name it in prose to explain why the seventh caller
+	// was missed — and a raw count cannot tell an explanation from a call.
+	const CODE = SRC.split("\n").filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
+	const callers = (CODE.match(/investorExpenseScopeSql\(/g) || []).length;
+	// 1 definition + 7 call sites. The seventh is GET /api/investor/report, which kept
+	// the hand-rolled shape for a further round after the other six were fixed — see §11,
+	// which pins that handler specifically. This COUNT alone would have been satisfied by
+	// six correct sites plus one wrong one, because a wrong site does not call the builder.
+	ok(callers === 8, `§1 investorExpenseScopeSql should have 1 definition + 7 callers; found ${callers}`);
 
 	for (const marker of [
 		"FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} GROUP BY m",
@@ -551,6 +583,161 @@ function monthlyTripExp(ownerId, lib = S) {
 		"§8 the split comes from the SHARED resolver, so the report and the portal cannot disagree");
 }
 
+// --------------------------------------------------------------------- §11
+// GET /api/investor/report's EXPENSES QUERY GOES THROUGH THE SHARED BUILDER.
+//
+// ⚠️ WHY THIS IS ITS OWN SECTION AND §1 AND §8 BOTH MISSED IT.
+// §1 counts callers of investorExpenseScopeSql — a count six correct sites satisfy
+// while a seventh, wrong one sits silently beside them, because a hand-rolled query
+// does not call the builder it is failing to use. §8 is structural over
+// truckMonthlyFixed()'s FIXED costs in the same handler and never looks at trip
+// expenses at all. So the report kept ` AND LOWER(driver) IN (<the live driver set>)`
+// — getInvestorDriverSet(), present tense, no clock, no owner_id leg — for a full
+// round after the portal was fixed, and the two surfaces disagreed:
+//
+//     owner 5, all-time, measured on production   BEFORE $40,761.24
+//                                                  AFTER $19,553.93
+//              Shorn King, 93 rows, owner_id 0, truck_unit 'LogisX-#2372'
+//                                                  DELTA $21,207.31
+//
+// It failed OPEN twice over: `investorDriverSet.size > 0` meant an investor whose set
+// came back EMPTY was shown the WHOLE FLEET's expenses, and the driver leg had no
+// owner_id leg to fall back to.
+//
+// Proved two ways, and both are needed. (a) STRUCTURAL, so a future hand-rolled
+// eighth site in this handler fails even if it happens to compute the right number on
+// this fixture. (b) BEHAVIOURAL, by EXTRACTING THE SHIPPED BLOCK AND RUNNING IT — a
+// text assertion cannot tell `scope.sql` wired to the right owner id from `scope.sql`
+// wired to the wrong one.
+let sectionMutants = 0;
+{
+	const start = SRC.indexOf('app.get("/api/investor/report"');
+	ok(start > 0, "§11 the report handler is findable");
+	const endIdx = SRC.indexOf("\napp.", start + 10);
+	const handler = SRC.slice(start, endIdx > start ? endIdx : SRC.length);
+
+	// The `{ ... }` block that owns the itemized trip-expense query, located from the
+	// query itself and brace-matched — never by line number, which every edit moves.
+	function expenseBlockOf(h) {
+		const anchor = h.indexOf("const expRows = db.prepare(");
+		if (anchor < 0) throw new Error("§11 could not find the report's itemized expenses query");
+		const open = h.lastIndexOf("\n\t\t{\n", anchor);
+		if (open < 0) throw new Error("§11 could not find the block that owns it");
+		let depth = 0;
+		for (let j = open + 3; j < h.length; j++) {
+			if (h[j] === "{") depth++;
+			else if (h[j] === "}") { depth--; if (depth === 0) return h.slice(open + 3, j + 1); }
+		}
+		throw new Error("§11 unbalanced braces around the expenses block");
+	}
+	const block = expenseBlockOf(handler);
+
+	// --- (a) STRUCTURAL. Run as a function so the mutant below is judged by the
+	// IDENTICAL checks rather than a second, looser copy of them.
+	function findings(h, b) {
+		const code = (s) => s.split("\n").filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
+		const hCode = code(h), bCode = code(b);
+		return [
+			[(hCode.match(/FROM expenses/g) || []).length === 1,
+				"§11 the handler has exactly ONE `FROM expenses` query — a second one is a second place to get the scope wrong"],
+			[/investorExpenseScopeSql\(\s*reportOwnerId\s*,\s*getInvestorDriverMonthWindows\(\s*reportOwnerId\s*\)\s*,\s*EXPENSE_PERIOD_EXPR\s*\)/.test(bCode),
+				"§11 it scopes via investorExpenseScopeSql(reportOwnerId, getInvestorDriverMonthWindows(reportOwnerId), EXPENSE_PERIOD_EXPR)"],
+			[!/LOWER\(driver\)\s*IN/.test(bCode),
+				"§11 no hand-rolled `LOWER(driver) IN (...)` survives in the expenses block"],
+			[!/getInvestorDriverSet|investorDriverSet/.test(bCode),
+				"§11 the expenses block does not touch the present-tense driver SET at all"],
+			[/WHERE \$\{scopeSql\}\$\{dateWhere\}/.test(bCode),
+				"§11 the WHERE is the builder's fragment plus the caller's date range, in that order"],
+			[/reportOwnerId !== null/.test(bCode),
+				"§11 the owner id is tested `!== null`, not for truthiness — a falsy 0 must not silently become Super Admin scope"],
+			[!/label:/.test(bCode),
+				"§11 the block prints no P&L line, so it cannot shift §8's plLines.length - 3 page break"],
+			// The settlement-vs-operational split. The BUILDER gets EXPENSE_PERIOD_EXPR
+			// (which month does this row settle in); the report's own caller-supplied
+			// range keeps plain `date` (which purchases fall between these two days).
+			[/dateWhere \+= ' AND date >= \?'/.test(hCode) && /dateWhere \+= ' AND date <= \?'/.test(hCode),
+				"§11 dateWhere still reads plain `date` — the report's range is an OPERATIONAL question and must not move to the settlement basis"],
+			[!/dateWhere \+= [^\n]*EXPENSE_PERIOD_EXPR/.test(hCode),
+				"§11 ...and specifically was not 'helpfully' switched to EXPENSE_PERIOD_EXPR"],
+			// Surgical: the revenue and driver-pay legs still use the driver set, so a
+			// blanket deletion of getInvestorDriverSet from this handler fails here.
+			[/getInvestorDriverSet\(user\.id/.test(hCode) && /investorDriverSet\.has\(/.test(hCode),
+				"§11 the REVENUE leg still uses getInvestorDriverSet — the fix is scoped to expenses, not a blanket removal"],
+		];
+	}
+	for (const [pass_, label] of findings(handler, block)) ok(pass_, label);
+
+	// --- (b) BEHAVIOURAL. Execute the shipped block against the fixture database.
+	// Everything it closes over is injected, so what runs is the code that ships.
+	function runBlock(b, ownerId, lib) {
+		const fn = new Function("db", "S", "reportOwnerId", `
+			const { investorExpenseScopeSql, getInvestorDriverMonthWindows, getInvestorDriverSet,
+			        EXPENSE_PNL_FILTER, EXPENSE_PERIOD_EXPR } = S;
+			const dateWhere = ''; const dateParams = [];
+			let fuelExpenses = 0, maintenanceExpenses = 0, otherExpenses = 0, totalExpenses = 0;
+			${b}
+			const r = (n) => Math.round(n * 100) / 100;
+			return { fuel: r(fuelExpenses), maint: r(maintenanceExpenses), other: r(otherExpenses), total: r(totalExpenses) };`);
+		return fn(db, lib, ownerId);
+	}
+
+	// Guarded, because this leg is the one that cannot run at all against a handler
+	// still on the pre-fix shape — that block closes over `investorDriverSet`, which
+	// this runner deliberately does NOT inject. A bare throw would exit the process
+	// before §9/§10 ran, so the inability to run is recorded as the failure it is.
+	try {
+		const got = runBlock(block, OWNER, S);
+		// Howard's four stamped rows + Shorn's one POST-move stamped row + the two
+		// unattributed rows inside their drivers' windows. Nothing else.
+		eq(got.fuel, 19281.23, "§11 Fuel = Howard's stamped fuel + Shorn's post-move row only");
+		eq(got.maint, 1140.17, "§11 Maintenance = Howard's August row");
+		eq(got.other, 350.00, "§11 Other = the two admissible unattributed rows (200 + 150), NOT Shorn's pre-move 300");
+		eq(got.total, 20771.40, "§11 Total Expenses on the downloadable P&L");
+
+		// Super Admin: reportOwnerId is null, so no scope at all — every row, including
+		// Priya Raman's, who is in no investor's driver set.
+		const sa = runBlock(block, null, S);
+		eq(sa.total, 39167.76, "§11 Super Admin (reportOwnerId null) still aggregates the whole fleet, unchanged");
+		ok(sa.total > got.total, "§11 ...and the investor sees strictly less than the Super Admin");
+
+		// An investor with no trucks degenerates to `owner_id = ?` alone and sums nothing —
+		// where the pre-fix shape's empty-driver-set branch published the entire fleet.
+		const orphan = runBlock(block, 999, S);
+		eq(orphan.total, 0, "§11 an investor with no trucks sees $0, not the fleet (the old `size > 0` fail-open)");
+
+		// --- MUTANT: restore the hand-rolled `LOWER(driver) IN (...)` shape, built from the
+		// SHIPPED getInvestorDriverSet, and require BOTH legs to catch it.
+		const mutantBlock = block.replace(
+			/if \(reportOwnerId !== null\) \{[\s\S]*?\n\t\t\t\}/,
+			[
+				"const investorDriverSet = reportOwnerId !== null ? getInvestorDriverSet(reportOwnerId) : null;",
+				"\t\t\tif (investorDriverSet && investorDriverSet.size > 0) {",
+				"\t\t\t\tconst driverList = [...investorDriverSet];",
+				"\t\t\t\tconst ph = driverList.map(() => '?').join(',');",
+				"\t\t\t\tscopeSql = `1=1 AND LOWER(driver) IN (${ph})`;",
+				"\t\t\t\tscopeParams.push(...driverList);",
+				"\t\t\t}",
+			].join("\n"));
+		ok(mutantBlock !== block, "§11 the mutant surgery actually applied (a no-op mutant proves nothing)");
+		sectionMutants++;
+
+		const mutantHandler = handler.replace(block, mutantBlock);
+		ok(findings(mutantHandler, mutantBlock).some(([p]) => !p),
+			"§11 MUTANT not caught by the structural checks: the hand-rolled driver-set shape is restored");
+
+		const bad = runBlock(mutantBlock, OWNER, S);
+		// $17,896.36 of Shorn King's costs, on trucks this investor has never owned,
+		// land in his downloadable P&L. This is the production defect, to scale.
+		eq(bad.total, 38667.76, "§11 MUTANT reproduces the contaminated total the report was printing");
+		eq(Math.round((bad.total - got.total) * 100) / 100, 17896.36,
+			"§11 MUTANT: the delta is exactly Shorn King's rows, none of which are this investor's");
+		ok(bad.total !== sa.total,
+			"§11 MUTANT is distinguishable from the Super Admin branch (Priya Raman is in no driver set)");
+	} catch (e) {
+		failures.push(`§11 the report's expenses block would not run in isolation — it still closes over handler state the shared builder does not need: ${e.message}`);
+	}
+}
+
 // ---------------------------------------------------------------------- §9
 // resolveInvestorSplitPct — a configured 0 must stay 0.
 {
@@ -746,4 +933,4 @@ if (failures.length) {
 	console.error(`\n${pass} passed, ${failures.length} failed\n`);
 	process.exit(1);
 }
-console.log(`✓ ${pass} assertions passed (${MUTANTS.length} mutants caught)`);
+console.log(`✓ ${pass} assertions passed (${MUTANTS.length} library mutants + ${sectionMutants} report-handler mutant caught)`);

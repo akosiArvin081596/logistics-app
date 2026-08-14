@@ -129,6 +129,32 @@
           <span class="breakdown-value" :style="{ color: selected.investorEarnings >= 0 ? 'var(--accent)' : 'var(--danger)' }">{{ fmt(selected.investorEarnings) }}</span>
           <span class="breakdown-formula">= netProfit × {{ investorSplitPct }}%</span>
         </div>
+
+        <!-- THE CARRY TAIL. Renders only for a month that absorbs an earlier
+             loss or defers its own; every ordinary month is byte-identical to
+             before. Without these rows this waterfall stops at "Your Share"
+             while the statement PDF subtracts the carry from the same month —
+             three surfaces publishing three different "your share". -->
+        <template v-if="carryTerms.length">
+          <div class="breakdown-divider"></div>
+          <div
+            v-for="row in carryTerms"
+            :key="row.key"
+            class="breakdown-row"
+            :class="{ deduct: row.kind === 'deduct', carry: row.kind === 'carry', total: row.kind === 'total' }"
+          >
+            <span class="breakdown-label">{{ row.kind === 'deduct' ? '- ' : '' }}{{ row.label }}</span>
+            <!-- A carried-forward shortfall is an add-back that brings the month
+                 to zero payable — neither a gain nor a cost — so it is signed
+                 with an explicit "+" and left the body colour rather than being
+                 painted green like revenue or red like a deduction. -->
+            <span
+              class="breakdown-value"
+              :style="row.kind === 'total' ? { color: row.value > 0 ? 'var(--accent)' : 'var(--text-dim)' } : null"
+            >{{ row.kind === 'carry' ? '+' : '' }}{{ fmt(row.value) }}</span>
+            <span class="breakdown-formula">{{ row.caption }}</span>
+          </div>
+        </template>
       </div>
 
       <div v-if="selected.isCurrentMonth" class="month-note">* {{ selectedMonthLabel }} &mdash; Month in progress</div>
@@ -252,6 +278,26 @@
               <span class="val" :class="selected.investorEarnings >= 0 ? 'accent' : 'danger'">{{ fmt(selected.investorEarnings) }}</span>
             </div>
             <div class="modal-math">{{ fmt(selected.netProfit) }} × {{ investorSplitPct }}% = {{ fmt(selected.investorEarnings) }}</div>
+
+            <!-- Step 5 exists only for a month with a carry. This dialog is where
+                 an investor goes to check the arithmetic, so it has to end on the
+                 same figure the waterfall and the statement PDF end on — the
+                 explanations below are the PDF's own sentences, verbatim. -->
+            <template v-if="carryTerms.length">
+              <div class="step-label">Step 5: Apply the loss carry-forward</div>
+              <div class="modal-explain-sm" v-if="carriedInAmount > 0">{{ CARRY_EXPLAIN.appliedToEarlierLoss }}</div>
+              <div class="modal-explain-sm" v-if="deferredAmount > 0">{{ CARRY_EXPLAIN.carriedForward }}</div>
+              <div
+                v-for="row in carryTerms"
+                :key="row.key"
+                class="modal-row"
+                :class="row.kind === 'total' ? 'bold result' : (row.kind === 'deduct' ? 'deduct' : '')"
+              >
+                <span>{{ row.kind === 'deduct' ? '- ' : '' }}{{ row.label }}</span>
+                <span class="val" :class="row.kind === 'deduct' ? 'danger' : ''">{{ row.kind === 'carry' ? '+' : '' }}{{ fmt(row.value) }}</span>
+              </div>
+              <div class="modal-math">{{ carryMath }}</div>
+            </template>
           </div>
         </template>
 
@@ -703,6 +749,7 @@
 import { ref, computed, watch } from 'vue'
 import { formatCurrency as fmt } from '../../utils/format'
 import { monthLabel } from '../../lib/monthLabel'
+import { earningsCarryTerms, CARRY_EXPLAIN } from '../../lib/payoutPeriod'
 import MetricInfoDialog from './MetricInfoDialog.vue'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
@@ -750,6 +797,36 @@ const selected = computed(() => months.value[selectedIdx.value] || null)
 const selectedMonthLabel = computed(() => {
   const mk = selected.value?.month
   return monthLabel(mk) || mk || ''
+})
+
+// The carry-forward tail of the waterfall — see earningsCarryTerms() for the
+// arithmetic, the wording split between an open and a closed month, and why the
+// labels live in the shared module rather than in this template.
+//
+// Empty for a month with no carry AND for a server that has not shipped
+// lossCarriedIn / lossDeferred / payable yet, so the rows simply do not render
+// rather than appearing as zeroes.
+const carryTerms = computed(() => earningsCarryTerms(selected.value, { isOpen: !!selected.value?.isCurrentMonth }))
+
+// Read back OFF the emitted rows rather than off the payload, so the dialog's
+// prose and its arithmetic can never describe a row the waterfall did not draw.
+// `?? 0`, never `|| 0`: this whole family of bugs is falsy-zero bugs, and an
+// absent row must be distinguishable from a zero one even though the emitter
+// happens never to produce a zero row today.
+const carryRow = (key) => carryTerms.value.find((r) => r.key === key) || null
+const carriedInAmount = computed(() => Math.abs(carryRow('lossCarriedIn')?.value ?? 0))
+const deferredAmount = computed(() => carryRow('lossDeferred')?.value ?? 0)
+
+// The dialog's closing sum, built only from figures that are on screen above it.
+// Returns '' rather than a partial equation if the total row is somehow absent —
+// an incomplete sum beside real money is worse than no sum.
+const carryMath = computed(() => {
+  const total = carryRow('payable')
+  if (!total) return ''
+  let s = fmt(selected.value?.investorEarnings)
+  if (carriedInAmount.value > 0) s += ` - ${fmt(carriedInAmount.value)}`
+  if (deferredAmount.value > 0) s += ` + ${fmt(deferredAmount.value)}`
+  return `${s} = ${fmt(total.value)}`
 })
 
 // --- Detail modal ---
@@ -1079,6 +1156,10 @@ const modalSubtitle = computed(() => {
 }
 .breakdown-row.deduct .breakdown-label { color: var(--text-dim); }
 .breakdown-row.deduct .breakdown-value { color: var(--danger); }
+/* Carried-forward shortfall: deliberately NOT accent (it is not income) and NOT
+   danger (it is not a cost this month) — it is the add-back that lands the month
+   at zero payable, so it reads in the body colour like a neutral term. */
+.breakdown-row.carry .breakdown-label { color: var(--text-dim); }
 .breakdown-row.total { font-weight: 700; }
 .breakdown-row.total .breakdown-label { font-weight: 700; }
 .breakdown-row.split .breakdown-label { color: var(--text-dim); font-size: 0.75rem; }

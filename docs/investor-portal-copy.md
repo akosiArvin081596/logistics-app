@@ -53,6 +53,38 @@ The first money on the page, and the card you told me already carries the in-pro
 
 > ⚠️ The seven `=` formula lines are the highest-risk copy on the page. They are literal formulas next to real money — an investor who disagrees with a number will quote these back. They are accurate today.
 
+### NEW — the loss carry-forward rows (only on a month that carries one)
+
+**Why these are here.** You screenshotted the statement PDF's "Earlier loss applied" line and said *"What is this earlier loss apply a shortfall from earlier month… I got to know these things cause I have to explain these things."* The reason it read as a surprise is that the Earnings screen **never mentioned it** — it stopped at `Your Share` — while the statement PDF subtracted it from the same month. Two surfaces, two different "your share" for one month. These rows close that gap.
+
+This is not hypothetical: **August 2026 is genuinely −$995** for one investor, so September's statement will subtract it for real.
+
+Nothing below renders on an ordinary month. A month with no carry looks exactly as it does today.
+
+| Flag | Exact text | Where / when |
+|---|---|---|
+| 🔴 | `- Applied to an earlier month's loss` | Row under Your Share — a month **paying down** an earlier loss |
+| 🔴 | `an earlier month's shortfall, covered by this month` | Caption under that row |
+| 🟡 | `Shortfall that would carry forward` | Row under Your Share — the **current** month running at a loss |
+| 🟡 | `carries into a later payout if the month closes short` | Caption under that row |
+| 🔴 | `Loss carried to later months` | Same row once the month has **closed** — a fact, not a projection |
+| 🔴 | `carried against later months, not billed to you` | Caption under that row |
+| 🔴 | `Payable` | The total under the carry rows, on a closed month |
+| 🟡 | `Projected payout` | The same total on the current month |
+| 🔴 | `= your share − earlier loss applied` | Caption under the total — a month paying one down |
+| 🔴 | `= your share + loss carried forward` | Caption under the total — a month deferring one |
+| 🔴 | `= your share − earlier loss applied + loss carried forward` | Caption under the total — a month doing both |
+
+> ⚠️ **One decision to make.** The same mechanism is now named **three different ways** across three surfaces, because they were written at different times:
+>
+> | Surface | How it names the deduction |
+> |---|---|
+> | Statement PDF (the document the investor keeps) | `− Earlier loss applied` |
+> | Earnings screen + Payouts card | `Applied to an earlier month's loss` |
+> | Payouts table, inline note | `…applied to an earlier loss` |
+>
+> They mean exactly the same thing, and all three are accurate. But you are the one who has to explain them, so **pick one wording and we will make all three match.** Same question for the other half: `Loss carried forward` (PDF) vs `Loss carried to later months` (screens).
+
 ### Inside the explainer dialogs (only when clicked)
 
 | Flag | Exact text | Where |
@@ -70,6 +102,9 @@ The first money on the page, and the card you told me already carries the in-pro
 | 🔴 | `This is the total revenue your fleet has generated since your first load. It represents every dollar earned from completed deliveries across all months.` | All-time Revenue |
 | 🔴 | `This is the total cost of operating your fleet since day one. Expenses fall into three categories:` | All-time Expenses |
 | 🔴 | `This is the total profit your fleet has generated after all operating costs. It represents the bottom line across your entire investment period.` | All-time Net Profit |
+| ⚪ | `Step 5: Apply the loss carry-forward` | **NEW** — step heading, only on a month with a carry |
+| 🔴 | `A shortfall from an earlier month absorbed by this one.` | **NEW** — a month paying an earlier loss down. **Verbatim from the statement PDF** (§12) rather than a new paraphrase |
+| 🔴 | `This month ran at a loss, so nothing is payable. The shortfall is carried against later months rather than billed back to you.` | **NEW** — a month running at a loss. Also verbatim from the PDF |
 
 ### Admin-only day adjustments (visible to an investor as a **reason string** in the audit log)
 
@@ -239,8 +274,10 @@ This one **leaves the app** — it is a document the investor keeps.
 
 | Flag | Exact text |
 |---|---|
-| 🔴 | `A shortfall from an earlier month absorbed by this one.` |
-| 🔴 | `This month ran at a loss, so nothing is payable. The shortfall is carried against later months rather than billed back to you.` |
+| 🔴 | `− Earlier loss applied` — **the row label you screenshotted.** It was never listed here; only its caption below was, which is why the line you asked about was not in the inventory |
+| 🔴 | `A shortfall from an earlier month absorbed by this one.` — the caption under that label |
+| 🔴 | `Loss carried forward` — the row label on a loss month |
+| 🔴 | `This month ran at a loss, so nothing is payable. The shortfall is carried against later months rather than billed back to you.` — the caption under **that** label. **Now also shown on the Earnings screen** (§2, Step 5 of the explainer dialog), word for word, so the screen and the document you hand over say the same thing |
 | 🔴 | `This period predates the current earnings window, so its itemized composition is no longer available to re-derive. The amount shown is the settled figure recorded on the payout ledger.` |
 | 🔴 | `Your trip expenses are deducted before the split, so the share above is already net of them.` |
 | ⚪ | `Every figure in the summary, itemized. Each section totals the rows listed below it.` |
@@ -261,8 +298,9 @@ All three strings are set in the server environment, so you can retune them with
 
 ---
 
-## The three I'd raise first
+## The ones I'd raise first
 
+0. **§2 / §12, the loss carry-forward** — the line you actually asked about. Two things to settle: (a) **one wording**, since the same deduction is currently called three different things across the PDF, the Earnings screen and the Payouts table; and (b) whether `Payable` / `Projected payout` is the right name for the figure that lands under it. Everything else in this file can wait — this one is live in August.
 1. **§4 Section 179** — two paragraphs of tax explanation. Does the portal want to be saying this?
 2. **§5 and §8, "the Job Tracking sheet … soft-deleted … load-exclusion filter"** — internal vocabulary in front of an investor, in two places.
 3. **§10 "…and may differ"** — the portal telling an investor two of its own totals disagree.
