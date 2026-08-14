@@ -218,6 +218,18 @@ const ORIG = {
 	// The case variant, alone in its own row so its token is unambiguous.
 	caseRow: `outreach thread opened by ${FREE.agentUpper} on 2026-04-02`,
 
+	// ⚠️ AN EMBEDDED NUL, AND IT IS NOT AN EXOTIC INPUT. SQLite's LIKE and GLOB
+	// stop at a NUL; JavaScript does not. So before 2026-08-13 this row was
+	// invisible to the scrub's SQL prefilter and fully visible to the grader —
+	// the scrubber could never reach it, the grader refused every time, and no
+	// flag or re-run fixed it. A permanently wedged refresh, fail-closed but
+	// unfixable, which the file's own reasoning says ends in someone bypassing
+	// the check. Reachable with no session: POST /api/public/apply binds free
+	// text raw and JSON "\u0000" decodes to a real NUL.
+	// If this fixture ever stops being scrubbed, the prefilter's third clause
+	// (the blob-length-vs-text-length test) has been removed.
+	nulRow: `applicant note${String.fromCharCode(0)}then ${FREE.prevEmp} and ssn ${FAKE.ssnB}`,
+
 	// ⚠️ THE ADDRESS IS UNDER `relationship`, NOT `email`, because that is where
 	// it sits in the real production rows. A scrub that scanned KEYS rather than
 	// VALUES would pass a fixture that used `"email"` and miss all six real ones.
@@ -414,6 +426,11 @@ function seedDatabase(dbPath) {
 	aud.run(3, "update_sheet_row_blocked", ORIG.jsonRow, "2026-08-02");
 	aud.run(4, "note", ORIG.ssnRow, "2026-08-03");
 	aud.run(5, "note", ORIG.caseRow, "2026-08-04");
+	// ⚠️ The NUL row. Its payload sits AFTER an embedded NUL, so SQLite's LIKE
+	// and GLOB cannot see it while JavaScript can. Until the prefilter grew its
+	// blob-length clause this row was unreachable by the scrub and fully visible
+	// to the grader: a refusal on every run that no re-run could clear.
+	aud.run(6, "note", ORIG.nulRow, "2026-08-05");
 
 	// The third column measured in production. A table nothing else in this
 	// script knows about, which is the point: stage 3h is a sweep, not a list.
@@ -1356,6 +1373,16 @@ function extractFn(src, name) {
 			`{ address: "REDACTED", city: "", state: "", zip: "" }`,
 			`{ address: "REDACTED" }`,
 			/driver home (city|state|ZIP)\(s\) survived in drivers_directory\./);
+		// ⚠️ M10 proves the NUL fixture is load-bearing rather than merely
+		// present. Removing the prefilter's blob-length clause makes SQLite's
+		// LIKE/GLOB stop at the embedded NUL, so the scrub can no longer SEE that
+		// row — while the JS grader still can. The result is the deadlock this
+		// clause exists to prevent: a refusal naming a value the scrubber is
+		// structurally unable to reach, identical on every re-run.
+		scrubMutant("M10", "the prefilter's embedded-NUL clause is dropped",
+			` OR length(CAST("${"$"}{c}" AS BLOB)) <> length("${"$"}{c}")`,
+			``,
+			/audit_trail\.details: \d+ value\(s\) matching/);
 	}
 
 	// =======================================================================

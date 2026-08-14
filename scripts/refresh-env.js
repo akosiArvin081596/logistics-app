@@ -752,7 +752,31 @@ async function main() {
 				// eliminated by the index-free scan SQLite does anyway, rather
 				// than being pulled into JS a column at a time. GLOB is
 				// case-sensitive and has no LIKE-style escaping to get wrong.
-				const where = `"${c}" LIKE '%@%' OR "${c}" GLOB '*[0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9][0-9]*'`;
+				// ⚠️ The third clause is not an optimisation — it closes the ONE
+			// divergence between what this scrub selects and what the grader
+			// reads, and without it a single crafted row wedges the pipeline
+			// permanently.
+			//
+			// SQLite's LIKE and GLOB stop at an embedded NUL; JavaScript does not.
+			// So "safe\0victim@acme.com" is invisible to both patterns above
+			// (measured: LIKE '%@%' does not select it) while collectLeaks() sees
+			// the address and refuses. Fail-closed — no PII ships — but the
+			// scrubber can never reach that row, so EVERY subsequent refresh fails
+			// identically and no flag or re-run fixes it. That is the same
+            // unfixable-refusal deadlock the REDACTED_SSN sentinel exists to
+			// prevent, arriving through a different door, and the file's own
+			// reasoning says where it ends: "a routine refusal gets bypassed with
+			// a flag and then permanently".
+			//
+			// Reachable with no session: POST /api/public/apply binds free text
+			// raw, and JSON "\u0000" decodes to a real NUL.
+			//
+			// length() on TEXT stops at the first NUL; on a BLOB it counts every
+			// byte. Non-ASCII also makes the two differ — a false positive that
+			// costs one extra fetched row and nothing else, which is the right
+			// direction for a filter feeding a scrubber.
+			const where = `"${c}" LIKE '%@%' OR "${c}" GLOB '*[0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9][0-9]*'`
+				+ ` OR length(CAST("${c}" AS BLOB)) <> length("${c}")`;
 				let rows;
 				try { rows = db.prepare(`SELECT rowid AS rid, "${c}" AS v FROM "${t}" WHERE ${where}`).all(); }
 				catch { continue; }   // no rowid (WITHOUT ROWID table), or unreadable — the post-scrub assertion still grades it
