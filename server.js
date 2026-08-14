@@ -1599,6 +1599,252 @@ function getInvestorDriverSet(userId, carrierDBData, driverColName, carrierColNa
 	return set;
 }
 
+// The 'YYYY-MM' key a truck_assignments / carrier_driver_history stamp falls in.
+//
+// ⚠️ THOSE COLUMNS HOLD ISO **UTC INSTANTS** ('2026-08-01T02:30:00.000Z'), which is
+// the opposite of in_service_date/retired_at. A bare .slice(0,7) reads '2026-08' for
+// a moment that is 2026-07-31 21:30 in Houston, so an assignment made in the evening
+// on the last day of a month lands one month FORWARD — and that month is a money
+// boundary. They therefore go through houstonDay(), the same clock every other
+// settlement figure uses. Bare 'YYYY-MM-DD' input is sliced as a string and never
+// parsed, because new Date('2026-08-01') is UTC midnight = the previous day in
+// Houston — the exact inversion documented above truckChargeFromMonth().
+//
+// "" on unparseable input, which every caller below reads as "this bound contributes
+// nothing" and then falls back to the truck's own billing window. Never as
+// "unbounded" — see the ⚠️ on intersectMonthWindow().
+function assignmentMonthKey(ts) {
+	const s = String(ts || "").trim();
+	if (!s) return "";
+	if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s.slice(0, 7);
+	const d = new Date(s);
+	if (isNaN(d)) return "";
+	return houstonDay(d).slice(0, 7);
+}
+
+// Intersect two ['YYYY-MM' | "", 'YYYY-MM' | ""] month intervals.
+//
+// ⚠️ "" MEANS UNBOUNDED ON BOTH ENDS, exactly as it does in truckChargedInMonth():
+// "" as `from` is "since forever", "" as `until` is "still current". Reading either
+// the other way waves through precisely the case with the most exposure — the same
+// inversion corrected in PR #205 and again in PR #216. Written as max()/min() over
+// the NON-EMPTY operands so "" can only ever defer to the other bound and can never
+// silently win an intersection. An empty result (from > until) is returned as null,
+// i.e. the driver was never this investor's in any month — not as "every month".
+function intersectMonthWindow(a, b) {
+	const from = !a.from ? b.from : (!b.from ? a.from : (a.from > b.from ? a.from : b.from));
+	const until = !a.until ? b.until : (!b.until ? a.until : (a.until < b.until ? a.until : b.until));
+	if (from && until && from > until) return null;
+	return { from, until };
+}
+
+// The MONTH WINDOWS during which each driver's costs belong to this investor.
+//
+// getInvestorDriverSet() above answers "who is on my trucks RIGHT NOW". It has no
+// month dimension at all, which is correct for a listing and wrong for money. This
+// is its time-aware companion, and the two are deliberately kept side by side: the
+// set decides WHO, this decides WHEN.
+//
+// ⚠️ WHY IT EXISTS. Trip expenses were scoped `owner_id = ? OR LOWER(driver) IN
+// (<the live set>)`. That OR leg has no clock, so the moment a driver was reassigned
+// onto an investor's truck, EVERY receipt he had ever filed — on a different truck,
+// stamped owner_id = 0 at insert — became a deduction in that investor's already
+// finalized months. Measured on production 2026-08-13, moving one driver on
+// 2026-08-12 restated three closed months at once: 2026-05 −$2,235, 2026-06 −$3,683,
+// 2026-07 −$2,321 of investor share (the portal showed $6,786 against a frozen
+// ledger figure of $9,107). It was ONE-SIDED — revenue and driver pay scope off the
+// sheet's Owner ID column and truckChargedInMonth(), so nothing was added back. Only
+// costs moved, and only downward.
+//
+// Every window is the INTERSECTION of two real intervals, because both bind:
+//   • when the driver was on the truck — truck_assignments.start_date .. end_date
+//   • when the truck was this investor's cost at all — truckChargeFromMonth() ..
+//     truckChargeUntilMonth(), the SAME predicate the fixed-cost math uses, not a
+//     second copy of it. A driver sitting in a truck that is not yet in service is
+//     not yet an expense (that is exactly Logisx-#91: in service 2026-08-04, driver
+//     attached 2026-08-12).
+//
+// Legs, unioned — deliberately a SUBSET of getInvestorDriverSet's four:
+//   A. truck_assignments × this investor's trucks (the real pairing history).
+//   B. trucks.assigned_driver with NO assignment row at all — the truck's own
+//      billing window. Mirrors leg 1/1b of the set: the assignment table is the
+//      source of truth for current pairings but has only existed since 2026-04-17,
+//      so a truck whose history predates it must not silently lose its driver.
+//   C. carrier_driver_history, bounded by its OWN started_at/ended_at — columns that
+//      have always been written and that the set's leg 3 simply ignores. This is
+//      what keeps a carrier-level pairing covered without making it unbounded.
+//
+// ⚠️ The set's leg 2 (a live drivers_directory carrier match) is DELIBERATELY absent.
+// It is a present-tense assertion with no clock of any kind, so honouring it here
+// would re-create the bug this function exists to close. Nothing is lost in practice:
+// leg C records the same pairing WITH dates (verified on production — every
+// directory-matched driver has a carrier_driver_history row covering them), and a
+// driver reachable by no other leg has no defensible month window, which is the
+// honest answer rather than "all of them".
+//
+// Returns Map<driverLower, Array<{from, until}>>. A driver with no window is absent
+// from the map, and callers must then fall back to owner_id alone for that driver.
+function getInvestorDriverMonthWindows(userId) {
+	const windows = new Map();
+	const add = (driver, win) => {
+		const d = String(driver || "").trim().toLowerCase();
+		if (!d || !win) return;
+		if (!windows.has(d)) windows.set(d, []);
+		windows.get(d).push(win);
+	};
+	// Every window becomes an OR clause with up to two bound comparisons, so the
+	// SQL grows with the length of the assignment history — which only ever grows,
+	// and grows fastest for the trucks that change hands most. Production already
+	// carries one driver with five windows, four of them identical, and another
+	// whose short first stint is wholly inside his current open one. Neither adds
+	// a row; both add predicate. A ⊆ B is dropped, with "" read as unbounded on
+	// both ends exactly as everywhere else here — so a bounded window is never
+	// mistaken for a superset of an unbounded one.
+	const dedupeWindows = (list) => {
+		const contains = (b, a) =>
+			(!b.from || (a.from && a.from >= b.from)) &&
+			(!b.until || (a.until && a.until <= b.until));
+		const out = [];
+		for (const w of list) {
+			if (out.some(o => contains(o, w))) continue;
+			// Drop anything already collected that this one subsumes.
+			for (let i = out.length - 1; i >= 0; i--) if (contains(w, out[i])) out.splice(i, 1);
+			out.push(w);
+		}
+		return out;
+	};
+
+	// truckChargeFromMonth/UntilMonth need these columns; created_at is the
+	// documented fallback when in_service_date was never set, which is still every
+	// truck but one, so omitting it would make the lower bound silently unbounded.
+	const ownedTrucks = db.prepare(
+		"SELECT id, assigned_driver, created_at, in_service_date, retired_at FROM trucks WHERE owner_id = ?"
+	).all(userId);
+	if (!ownedTrucks.length) return windows;
+
+	const truckWindow = (t) => ({ from: truckChargeFromMonth(t), until: truckChargeUntilMonth(t) });
+	const assignmentsByTruck = new Map();
+	const placeholders = ownedTrucks.map(() => "?").join(",");
+	db.prepare(
+		`SELECT truck_id, driver_name, start_date, end_date FROM truck_assignments WHERE truck_id IN (${placeholders}) AND driver_name != ''`
+	).all(...ownedTrucks.map(t => t.id)).forEach(r => {
+		if (!assignmentsByTruck.has(r.truck_id)) assignmentsByTruck.set(r.truck_id, []);
+		assignmentsByTruck.get(r.truck_id).push(r);
+	});
+
+	for (const t of ownedTrucks) {
+		const tw = truckWindow(t);
+		const rows = assignmentsByTruck.get(t.id) || [];
+		// Leg A.
+		for (const r of rows) {
+			// An unparseable stamp contributes "" and the truck window governs — a
+			// bounded, defensible answer. Never unbounded: this leg may only ever
+			// narrow what owner_id already decided.
+			add(r.driver_name, intersectMonthWindow(
+				{ from: assignmentMonthKey(r.start_date), until: assignmentMonthKey(r.end_date) },
+				tw,
+			));
+		}
+		// Leg B — only when the assignment table knows nothing about this truck.
+		if (!rows.length) add(t.assigned_driver, tw);
+	}
+
+	// Leg C — and it is a LAST RESORT, not a peer of A and B.
+	//
+	// ⚠️ IF IT RUNS FOR A DRIVER WHO ALREADY HAS A TRUCK-DERIVED WINDOW, IT SILENTLY
+	// DEFEATS LEG A. carrier_driver_history is a carrier-level pairing with no truck
+	// in it, so it can start months before the driver's truck entered service — and
+	// because dedupeWindows drops a window CONTAINED in another, the correct narrow
+	// truck-bounded window is then discarded in favour of the wider carrier one,
+	// handing the driver exactly the over-long reach this function exists to remove.
+	// (Verified with a fixture: a driver in the carrier history from 2026-06 whose
+	// only truck enters service 2026-10 comes back as 2026-06 without this rule.)
+	//
+	// Clamping leg C to the FLEET's billing life does NOT fix that and was tried
+	// first: the fleet is the UNION of every owned truck, so one long-serving truck
+	// makes the clamp vacuous for every other driver.
+	//
+	// So: when legs A/B answered, they are the answer — a known truck pairing is
+	// strictly better evidence than a carrier-name one, and adding C can only widen
+	// it. C contributes only for a driver with no truck link at all, which is the
+	// gap it was there to cover.
+	const truckDerived = new Set(windows.keys());
+	const usr = db.prepare("SELECT company_name FROM users WHERE id = ?").get(userId);
+	const carrierName = usr ? (usr.company_name || "").trim() : "";
+	if (carrierName) {
+		db.prepare(
+			"SELECT driver_name, started_at, ended_at FROM carrier_driver_history WHERE LOWER(carrier_name) = ? AND driver_name != ''"
+		).all(carrierName.toLowerCase()).forEach(h => {
+			if (truckDerived.has(String(h.driver_name || "").trim().toLowerCase())) return;
+			add(h.driver_name, { from: assignmentMonthKey(h.started_at), until: assignmentMonthKey(h.ended_at) });
+		});
+	}
+
+	for (const [d, list] of windows) windows.set(d, dedupeWindows(list));
+	return windows;
+}
+
+// Build the WHERE fragment that scopes `expenses` to one investor, with the month
+// dimension the driver leg never had.
+//
+// ONE definition, six callers (/api/investor's monthly + category + all-time sums,
+// computeInvestorMonthlyEarnings' monthly sum + drill-down items, /api/investor/expenses,
+// /api/investor/tax-csv). That is the DRIVER_RENAME_TARGETS lesson applied here: the
+// previous shape was the same SQL string hand-copied six times, so a fix to one is a
+// fix to none. Add a leg here and every investor expense surface gets it.
+//
+// `owner_id = ?` stays the primary and stays UNBOUNDED — it is stamped at insert
+// from the driver's truck (see expOwnerId at the POST /api/expenses INSERT) and
+// backfilled date-aware for legacy rows, so it is already the historically correct
+// attribution and must not be second-guessed by a window.
+//
+// The driver leg is the FALLBACK for rows that stamp could not classify, and it now
+// carries TWO bounds, because either alone leaks:
+//
+//   • `COALESCE(truck_unit,'') = ''` — it may only ever admit an UNATTRIBUTED row.
+//     ⚠️ THIS IS THE ONE THAT DISAMBIGUATES owner_id = 0, and without it the month
+//     window is not enough. `owner_id = 0` means either "no truck resolved at insert"
+//     OR "resolved to a truck owned by the fleet" — expOwnerId is
+//     `driverTruck ? driverTruck.owner_id : 0`, so both collapse to the same value.
+//     `truck_unit` is what separates them: a row naming a truck was attributed and
+//     its owner_id is authoritative; a blank one never was. Concretely, a driver who
+//     moves trucks MID-MONTH shares that month with both owners, so a month-only
+//     bound re-admits the receipts he filed on the old truck days before the move
+//     (measured: Shorn King's 2026-08-04 receipts, $1,118, on the fleet truck he did
+//     not leave until 2026-08-12).
+//   • the month window — an unattributed row is only this investor's in the months
+//     the driver was actually theirs.
+//
+// Together these make the leg strictly narrowing: it can only ever admit a row NO
+// owner is stamped on, never move one from another owner's ledger. A driver with no
+// window contributes no clause at all rather than an unbounded one.
+//
+// periodExpr must be the caller's own month expression (EXPENSE_PERIOD_EXPR at every
+// current call site) so the window is compared against the SETTLEMENT month — the
+// same clock the row is bucketed into. Comparing against plain `date` here would put
+// a prior-period adjustment in one month for the sum and another for the filter.
+function investorExpenseScopeSql(ownerId, driverWindows, periodExpr) {
+	const clauses = ["owner_id = ?"];
+	const params = [ownerId];
+	for (const [driver, wins] of driverWindows) {
+		for (const w of wins) {
+			const bounds = [];
+			if (w.from) { bounds.push(`${periodExpr} >= ?`); }
+			if (w.until) { bounds.push(`${periodExpr} <= ?`); }
+			// An entirely unbounded window would be the old bug wearing a new name.
+			// It can only arise from a truck with no in_service_date AND no
+			// created_at, paired with an assignment carrying no parseable dates —
+			// unreachable for a real row, but the guard is the point.
+			if (!bounds.length) continue;
+			clauses.push(`(COALESCE(truck_unit,'') = '' AND LOWER(driver) = ? AND ${bounds.join(" AND ")})`);
+			params.push(driver);
+			if (w.from) params.push(w.from);
+			if (w.until) params.push(w.until);
+		}
+	}
+	return { sql: `(${clauses.join(" OR ")})`, params };
+}
+
 // Resolve "Super Admin previewing an investor's portal" via ?as_user_id=.
 // When the session user is a Super Admin AND as_user_id points at a real
 // Investor user, we return the target's id/username so downstream endpoints
@@ -32793,10 +33039,14 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (
 			const expClause = isSuperAdmin
 				? db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER}`).get().t
 				: (() => {
-					const drivers = [...getInvestorDriverSet(user.id, cdb.data, cDriverCol, cCarrierCol)];
-					if (!drivers.length) return 0;
-					const ph = drivers.map(() => "?").join(",");
-					return db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${ph})) AND ${EXPENSE_PNL_FILTER}`).get(user.id, ...drivers).t;
+					// Shared scope, so a tax document can never report a different
+					// expense total than the portal it was generated from. Note this
+					// also drops the old `if (!drivers.length) return 0` early exit,
+					// which zeroed expenses outright for an investor whose drivers
+					// were all resolved by owner_id alone — a $0 cost line on a TAX
+					// form, in the direction that overstates income.
+					const scope = investorExpenseScopeSql(user.id, getInvestorDriverMonthWindows(user.id), EXPENSE_PERIOD_EXPR);
+					return db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER}`).get(...scope.params).t;
 				})();
 			netRevenueToDate = Math.round(totalRevenue - expClause);
 		} catch (sheetsErr) {
@@ -37484,14 +37734,18 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 		}
 	}
 
-	// Monthly trip expenses (P&L filter, owner_id OR driver-set), grouped by month.
+	// Monthly trip expenses (P&L filter, owner_id OR month-bounded driver leg),
+	// grouped by month. investorExpenseScopeSql is shared with GET /api/investor —
+	// this function and that handler are documented as producing the identical
+	// array, and the payouts ledger reads one while the portal reads the other, so
+	// a second copy of this predicate is how they come to disagree.
 	const monthlyTripExp = {};
+	const investorExpenseWindows = investorOwnerId ? getInvestorDriverMonthWindows(investorOwnerId) : null;
 	if (investorOwnerId) {
-		const driverList = investorDriverSet ? [...investorDriverSet] : [];
-		const driverPh = driverList.length ? driverList.map(() => '?').join(',') : "'__none__'";
+		const scope = investorExpenseScopeSql(investorOwnerId, investorExpenseWindows, EXPENSE_PERIOD_EXPR);
 		db.prepare(
-			`SELECT ${EXPENSE_PERIOD_EXPR} AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER} GROUP BY m`
-		).all(investorOwnerId, ...driverList).forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
+			`SELECT ${EXPENSE_PERIOD_EXPR} AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} GROUP BY m`
+		).all(...scope.params).forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
 	} else if (isSuperAdmin) {
 		db.prepare(`SELECT ${EXPENSE_PERIOD_EXPR} AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m`)
 			.all().forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
@@ -37507,9 +37761,8 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 		const expCols = "COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at)) AS date, type, description, amount, driver, truck_unit AS truck, location_city AS city, location_state AS state, posted_period AS postedPeriod";
 		const monthExpr = EXPENSE_PERIOD_EXPR;
 		if (investorOwnerId) {
-			const driverList = investorDriverSet ? [...investorDriverSet] : [];
-			const driverPh = driverList.length ? driverList.map(() => '?').join(',') : "'__none__'";
-			detail.tripExpenseItems = db.prepare(`SELECT ${expCols} FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER} AND ${monthExpr} = ? ORDER BY 1`).all(investorOwnerId, ...driverList, detailForMonth);
+			const scope = investorExpenseScopeSql(investorOwnerId, investorExpenseWindows, monthExpr);
+			detail.tripExpenseItems = db.prepare(`SELECT ${expCols} FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} AND ${monthExpr} = ? ORDER BY 1`).all(...scope.params, detailForMonth);
 		} else if (isSuperAdmin) {
 			detail.tripExpenseItems = db.prepare(`SELECT ${expCols} FROM expenses WHERE ${EXPENSE_PNL_FILTER} AND ${monthExpr} = ? ORDER BY 1`).all(detailForMonth);
 		}
@@ -38101,8 +38354,14 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// Get investor's driver names (current + historical) for data filtering
 		let investorDriverSet = null; // null = no filter (Super Admin)
 		const investorOwnerId = !isSuperAdmin ? user.id : null;
+		// ...and the MONTHS each of those drivers was actually this investor's, which
+		// is what the expense queries below scope on. The set alone is "right now"
+		// and restates closed months every time a driver moves trucks — see the
+		// ⚠️ on getInvestorDriverMonthWindows().
+		let investorExpenseWindows = null;
 		if (!isSuperAdmin) {
 			investorDriverSet = getInvestorDriverSet(user.id, carrierDB.data, carrierDriverCol, carrierCarrierCol);
+			investorExpenseWindows = getInvestorDriverMonthWindows(user.id);
 		}
 
 		// Load per-investor config with fallback to global defaults (owner_id=0)
@@ -38447,9 +38706,13 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// filter silently dropped those (Johnny had 11 ≈ $2,028), making
 		// netRevenueToDate under-count expenses vs the payout ledger. Now they match.
 		if (investorOwnerId) {
-			const driverList = [...investorDriverSet];
-			const driverPh = driverList.length ? driverList.map(() => '?').join(',') : "'__none__'";
-			const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER}`).get(investorOwnerId, ...driverList);
+			// The all-time sum takes the same month-bounded scope as the monthly
+			// rollup — the window filter applies per row via EXPENSE_PERIOD_EXPR, so
+			// "all time" means "every month that was mine", not "every month".
+			// Leaving this one unbounded would make the headline totals disagree with
+			// the sum of the months that explain them.
+			const scope = investorExpenseScopeSql(investorOwnerId, investorExpenseWindows, EXPENSE_PERIOD_EXPR);
+			const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER}`).get(...scope.params);
 			totalExpenses += expSum.total;
 		} else if (isSuperAdmin) {
 			const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE ${EXPENSE_PNL_FILTER}`).get();
@@ -38655,15 +38918,18 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			const monthlyTripExp = {};
 			const tripExpByCategory = {};  // { "YYYY-MM": { fuel: X, maintenance: X, ... } }
 			if (investorOwnerId) {
-				const driverList = [...investorDriverSet];
-				const driverPh = driverList.length ? driverList.map(() => '?').join(',') : "'__none__'";
+				// ONE scope object for both queries — the category breakdown is what
+				// the Trip Expenses drill-down renders, so it must select exactly the
+				// rows the headline summed or the modal explains a different number
+				// than the row it opened from.
+				const scope = investorExpenseScopeSql(investorOwnerId, investorExpenseWindows, EXPENSE_PERIOD_EXPR);
 				const rows = db.prepare(
-					`SELECT ${EXPENSE_PERIOD_EXPR} AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER} GROUP BY m`
-				).all(investorOwnerId, ...driverList);
+					`SELECT ${EXPENSE_PERIOD_EXPR} AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} GROUP BY m`
+				).all(...scope.params);
 				rows.forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
 				const catRows = db.prepare(
-					`SELECT ${EXPENSE_PERIOD_EXPR} AS m, LOWER(type) AS cat, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER} GROUP BY m, LOWER(type)`
-				).all(investorOwnerId, ...driverList);
+					`SELECT ${EXPENSE_PERIOD_EXPR} AS m, LOWER(type) AS cat, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} GROUP BY m, LOWER(type)`
+				).all(...scope.params);
 				catRows.forEach(r => { if (r.m) { if (!tripExpByCategory[r.m]) tripExpByCategory[r.m] = {}; tripExpByCategory[r.m][r.cat] = r.t; } });
 			} else if (isSuperAdmin) {
 				const rows = db.prepare(`SELECT ${EXPENSE_PERIOD_EXPR} AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m`).all();
@@ -38715,6 +38981,38 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				}
 				return Math.round(total * 100) / 100;
 			}
+			// The same loop, split into the parts the drill-down prints.
+			//
+			// ⚠️ THE MODAL USED TO RENDER production.fixedCostBreakdown AGAINST THIS
+			// MONTH'S TOTAL, AND THE TWO ARE NOT THE SAME QUESTION. That object is a
+			// present-tense FLEET RATE built from every owned truck with no
+			// in_service_date gate, so July 2026 printed
+			// "$3,310 + $100 + $2,410 + $233 + $97 = $3,043/mo" — a left side of
+			// $6,150 against a right side of $3,043, on an investor's money screen.
+			// The $3,107 excess was one truck that did not enter service until August.
+			// Deriving the parts from the SAME gated loop as the total makes them sum
+			// by construction rather than by coincidence, at every month in history.
+			function getMonthlyFixedCostParts(monthKey) {
+				const parts = { insurance: 0, eld: 0, truckPayment: 0, irp: 0, hvut: 0, truckCount: 0 };
+				for (const t of fixedTrucks) {
+					if (!truckChargedInMonth(t, monthKey)) continue;
+					const f = truckMonthlyFixed(t);
+					parts.insurance += f.insurance;
+					parts.eld += f.eld;
+					parts.truckPayment += f.truckPayment;
+					parts.irp += f.irp;
+					parts.hvut += f.hvut;
+					parts.truckCount++;
+				}
+				// Cents, matching getMonthlyFixedCosts — NOT whole dollars. Rounding
+				// the parts to dollars is exactly how an itemization stops adding up
+				// to its own headline (the $3,043 vs $3,043.33 case truckMonthlyFixed
+				// was introduced to close).
+				for (const k of ["insurance", "eld", "truckPayment", "irp", "hvut"]) {
+					parts[k] = Math.round(parts[k] * 100) / 100;
+				}
+				return parts;
+			}
 
 			// 4. Build the array for every month from earliest to current
 			const startMonth = earliestDate
@@ -38746,6 +39044,14 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					driverPay: Math.round(driverPay),
 					driverDetails: monthlyDriverDetails[mk] || {},
 					fixedCosts,
+					// The MONEY is zeroed alongside `fixedCosts` in a deferred month —
+					// the drill-down must never itemize costs the row above it says
+					// were not charged — but `truckCount` stays truthful, because it
+					// is a count of trucks and not a cost, and the deferred copy reads
+					// "your N trucks were inactive" off it.
+					fixedCostComposition: isZeroActivity
+						? { ...getMonthlyFixedCostParts(mk), insurance: 0, eld: 0, truckPayment: 0, irp: 0, hvut: 0 }
+						: getMonthlyFixedCostParts(mk),
 					fixedCostsDeferred: isZeroActivity && rawFixedCosts > 0,
 					tripExpenses: Math.round(tripExpenses),
 					tripExpCategories: tripExpByCategory[mk] || {},
@@ -39253,7 +39559,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 // GET /api/investor/expenses — Line-item expenses scoped to the calling
 // investor's trucks. Investors only see expenses where owner_id matches
 // their user.id OR the expense's driver is in their carrier's driver set
-// (legacy fallback for rows logged before owner_id was stamped).
+// (legacy fallback for rows logged before owner_id was stamped) — and that
+// fallback is bounded to the months the driver was actually theirs, so
+// reassigning a driver can no longer republish his whole history here.
 // Super Admin path returns all rows for impersonation / QA, mirroring
 // the pattern in /api/investor itself.
 app.get("/api/investor/expenses", requireRole("Super Admin", "Investor"), async (req, res) => {
@@ -39275,20 +39583,11 @@ app.get("/api/investor/expenses", requireRole("Super Admin", "Investor"), async 
 		const params = [];
 
 		if (!isSuperAdmin) {
-			// Build the same driver set the dashboard aggregator uses so totals reconcile.
-			const carrierDB = getCarrierDBFromSQLite();
-			const carrierDriverCol = findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
-			const carrierCarrierCol = findCol(carrierDB.headers, /carrier/i);
-			const driverSet = getInvestorDriverSet(user.id, carrierDB.data, carrierDriverCol, carrierCarrierCol);
-			const driverList = [...driverSet];
-			if (driverList.length) {
-				const driverPh = driverList.map(() => '?').join(',');
-				conditions.push(`(owner_id = ? OR LOWER(driver) IN (${driverPh}))`);
-				params.push(user.id, ...driverList);
-			} else {
-				conditions.push("owner_id = ?");
-				params.push(user.id);
-			}
+			// Same scope the dashboard aggregator uses, so this line-item list and the
+			// Trip Expenses headline reconcile. Shared builder, not a fourth hand-copy.
+			const scope = investorExpenseScopeSql(user.id, getInvestorDriverMonthWindows(user.id), EXPENSE_PERIOD_EXPR);
+			conditions.push(scope.sql);
+			params.push(...scope.params);
 		}
 
 		if (truck) { conditions.push("LOWER(truck_unit) = ?"); params.push(String(truck).toLowerCase()); }

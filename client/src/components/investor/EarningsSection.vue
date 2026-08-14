@@ -438,7 +438,7 @@
           <div class="modal-breakdown">
             <template v-if="selected.fixedCostsDeferred">
               <div class="modal-explain">
-                Your {{ fcb.truckCount > 1 ? 'trucks were' : 'truck was' }} inactive in {{ selectedMonthLabel }} — no loads, no driver activity, no trip expenses. We deferred the fixed costs for this month so an idle month doesn't appear as a loss.
+                Your {{ fixedParts.truckCount > 1 ? 'trucks were' : 'truck was' }} inactive in {{ selectedMonthLabel }} — no loads, no driver activity, no trip expenses. We deferred the fixed costs for this month so an idle month doesn't appear as a loss.
               </div>
               <div class="modal-explain-sm">
                 Once your truck is dispatched even one load in a month, the full monthly fixed costs apply normally.
@@ -451,33 +451,33 @@
             </template>
             <template v-else>
               <div class="modal-explain">
-                These are the recurring monthly costs to keep your {{ fcb.truckCount > 1 ? fcb.truckCount + ' trucks' : 'truck' }} legally compliant and road-ready. They are charged every month regardless of how many loads are completed.
+                These are the recurring monthly costs to keep your {{ fixedParts.truckCount > 1 ? fixedParts.truckCount + ' trucks' : 'truck' }} legally compliant and road-ready. They are charged every month regardless of how many loads are completed.
               </div>
 
-              <div class="step-label">Cost Breakdown (Monthly Total)</div>
+              <div class="step-label">Cost Breakdown ({{ selectedMonthLabel }})</div>
               <div class="modal-row">
                 <span>Insurance</span>
-                <span class="val danger">{{ fmt(fcb.insurance) }}</span>
+                <span class="val danger">{{ fmt(fixedParts.insurance) }}</span>
               </div>
               <div class="modal-hint">Commercial liability insurance required to operate.</div>
               <div class="modal-row">
                 <span>ELD Device</span>
-                <span class="val danger">{{ fmt(fcb.eld) }}</span>
+                <span class="val danger">{{ fmt(fixedParts.eld) }}</span>
               </div>
               <div class="modal-hint">Electronic Logging Device &mdash; federally required to track driver hours.</div>
               <div class="modal-row">
                 <span>Truck Payment</span>
-                <span class="val danger">{{ fmt(fcb.truckPayment) }}</span>
+                <span class="val danger">{{ fmt(fixedParts.truckPayment) }}</span>
               </div>
               <div class="modal-hint">Monthly truck loan / lease payment.</div>
               <div class="modal-row">
                 <span>IRP Registration</span>
-                <span class="val danger">{{ fmt(fcb.irp) }}</span>
+                <span class="val danger">{{ fmt(fixedParts.irp) }}</span>
               </div>
               <div class="modal-hint">International Registration Plan &mdash; annual fee divided by 12 months.</div>
               <div class="modal-row">
                 <span>HVUT Road Tax</span>
-                <span class="val danger">{{ fmt(fcb.hvut) }}</span>
+                <span class="val danger">{{ fmt(fixedParts.hvut) }}</span>
               </div>
               <div class="modal-hint">Heavy Vehicle Use Tax (Form 2290) &mdash; annual fee divided by 12 months.</div>
 
@@ -486,7 +486,7 @@
                 <span>Total Fixed Costs</span>
                 <span class="val danger">{{ fmt(selected.fixedCosts) }}</span>
               </div>
-              <div class="modal-math">{{ fmt(fcb.insurance) }} + {{ fmt(fcb.eld) }} + {{ fmt(fcb.truckPayment) }} + {{ fmt(fcb.irp) }} + {{ fmt(fcb.hvut) }} = {{ fmt(selected.fixedCosts) }}/mo</div>
+              <div class="modal-math">{{ fmt(fixedParts.insurance) }} + {{ fmt(fixedParts.eld) }} + {{ fmt(fixedParts.truckPayment) }} + {{ fmt(fixedParts.irp) }} + {{ fmt(fixedParts.hvut) }} = {{ fmt(selected.fixedCosts) }}/mo</div>
             </template>
           </div>
         </template>
@@ -738,6 +738,18 @@ const selectedMonthLabel = computed(() => {
 // --- Detail modal ---
 const detailType = ref('')
 const fcb = computed(() => props.production?.fixedCostBreakdown || { insurance: 0, eld: 0, truckPayment: 0, irp: 0, hvut: 0, maintReserve: 0, truckCount: 1 })
+
+// The Fixed Costs drill-down explains ONE month, so it must itemize that month —
+// not `fcb`, which is a present-tense fleet rate covering every owned truck with no
+// in-service gate. Rendering `fcb` beside `selected.fixedCosts` printed
+// "$3,310 + $100 + $2,410 + $233 + $97 = $3,043/mo" for July 2026, where the excess
+// was a truck that did not enter service until August. The server now derives
+// `fixedCostComposition` from the same month-gated loop that produces `fixedCosts`,
+// so the parts sum to the total by construction.
+//
+// Falls back to `fcb` only for a payload predating that field, so an un-refreshed
+// client still renders something rather than five zeroes.
+const fixedParts = computed(() => selected.value?.fixedCostComposition || fcb.value)
 
 function openDetail(type) {
   detailType.value = type
