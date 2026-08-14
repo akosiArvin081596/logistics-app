@@ -1787,11 +1787,20 @@ function getInvestorDriverMonthWindows(userId) {
 // Build the WHERE fragment that scopes `expenses` to one investor, with the month
 // dimension the driver leg never had.
 //
-// ONE definition, six callers (/api/investor's monthly + category + all-time sums,
+// ONE definition, SEVEN callers (/api/investor's monthly + category + all-time sums,
 // computeInvestorMonthlyEarnings' monthly sum + drill-down items, /api/investor/expenses,
-// /api/investor/tax-csv). That is the DRIVER_RENAME_TARGETS lesson applied here: the
-// previous shape was the same SQL string hand-copied six times, so a fix to one is a
-// fix to none. Add a leg here and every investor expense surface gets it.
+// /api/investor/tax-csv, and GET /api/investor/report's itemized P&L). That is the
+// DRIVER_RENAME_TARGETS lesson applied here: the previous shape was the same SQL string
+// hand-copied at every site, so a fix to one is a fix to none. Add a leg here and every
+// investor expense surface gets it.
+//
+// ⚠️ THE SEVENTH WAS ADDED LATE, AND ITS ABSENCE IS THE PROOF THAT COUNTING MATTERS.
+// GET /api/investor/report was fixed ~500 lines away from the other six and kept the
+// pre-fix ` AND LOWER(driver) IN (<live set>)` for a further round — so the portal and
+// the downloadable P&L disagreed by $21,207.31 on one production investor while every
+// screen the fix was measured on read correctly. §11 of
+// scripts/test-investor-expense-scoping.js pins the report specifically, because §1's
+// caller COUNT is satisfied by six correct sites plus one wrong one being invisible.
 //
 // `owner_id = ?` stays the primary and stays UNBOUNDED — it is stamped at insert
 // from the driver's truck (see expOwnerId at the POST /api/expenses INSERT) and
@@ -34279,22 +34288,52 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		if (filterEnd) { dateWhere += ' AND date <= ?'; dateParams.push(filterEnd.toISOString().slice(0, 10)); }
 
 		// Itemized trip expenses by type — runs for both Super Admin and Investor.
-		// Investor: filter by their assigned driver list. Super Admin: no driver
-		// filter (aggregate everything). Previously this block was gated on
+		// Investor: scoped by the SHARED builder. Super Admin: no scope at all
+		// (aggregate everything). Previously this block was gated on
 		// investorDriverSet being populated, which silently zeroed all expense
 		// lines on Super Admin reports.
+		//
+		// ⚠️ THIS WAS THE SEVENTH SITE, AND IT WAS STILL ON THE PRE-FIX SHAPE.
+		// It hand-rolled ` AND LOWER(driver) IN (<the live driver set>)` — the exact
+		// predicate investorExpenseScopeSql() exists to replace — so it carried the
+		// whole 2026-08-13 bug on its own: getInvestorDriverSet() is present-tense,
+		// has no clock and no owner_id leg, so the moment a driver was reassigned
+		// onto an investor's truck his ENTIRE expense history (filed on someone
+		// else's truck, stamped owner_id = 0 at insert) landed in this investor's
+		// downloadable P&L. Measured on production for owner 5: $40,761.24 against a
+		// correctly-scoped $19,553.93 — $21,207.31 of another owner's costs, in a
+		// document the investor keeps. The six other callers were fixed; this one is
+		// ~500 lines away from them and was missed, which is precisely the
+		// DRIVER_RENAME_TARGETS lesson the shared builder was written for.
+		//
+		// It also failed OPEN in a second way: `investorDriverSet.size > 0` meant an
+		// investor whose driver set came back EMPTY got no filter whatsoever and was
+		// shown the entire fleet's expenses. Scoping on the owner id instead can only
+		// ever narrow — the worst case is `owner_id = ?` alone.
+		//
+		// ⚠️ EXPENSE_PERIOD_EXPR goes to the BUILDER; `dateWhere` stays on plain
+		// `date`. That is the settlement-vs-operational split: the driver windows
+		// bound the month a row SETTLES in (posted_period wins), while the report's
+		// own caller-supplied range is a question about the world — which purchases
+		// fall between these two dates — and has always read the true purchase date.
+		// Mixing the two bases would put a prior-period adjustment in one month for
+		// the filter and another for the sum.
 		{
-			let whereClause = '';
-			const whereParams = [];
-			if (investorDriverSet && investorDriverSet.size > 0) {
-				const driverList = [...investorDriverSet];
-				const ph = driverList.map(() => '?').join(',');
-				whereClause = ` AND LOWER(driver) IN (${ph})`;
-				whereParams.push(...driverList);
+			// reportOwnerId is null for a real Super Admin and the previewed
+			// investor's users.id under ?as_user_id= — the handler's own single
+			// notion of "whose report is this", reused rather than re-derived.
+			// Tested `!== null`, never truthiness: this repo has already been bitten
+			// by a falsy-0 read of a configured value (resolveInvestorSplitPct).
+			let scopeSql = '1=1';
+			const scopeParams = [];
+			if (reportOwnerId !== null) {
+				const scope = investorExpenseScopeSql(reportOwnerId, getInvestorDriverMonthWindows(reportOwnerId), EXPENSE_PERIOD_EXPR);
+				scopeSql = scope.sql;
+				scopeParams.push(...scope.params);
 			}
 			const expRows = db.prepare(
-				`SELECT LOWER(type) AS t, COALESCE(SUM(amount),0) AS total FROM expenses WHERE 1=1${whereClause}${dateWhere} AND ${EXPENSE_PNL_FILTER} GROUP BY LOWER(type)`
-			).all(...whereParams, ...dateParams);
+				`SELECT LOWER(type) AS t, COALESCE(SUM(amount),0) AS total FROM expenses WHERE ${scopeSql}${dateWhere} AND ${EXPENSE_PNL_FILTER} GROUP BY LOWER(type)`
+			).all(...scopeParams, ...dateParams);
 			// Categorization per 2026-04-13 client feedback:
 			// - Fuel → Fuel Expenses
 			// - Repair / Maintenance / Tire / Oil → Maintenance & Repairs
@@ -38618,6 +38657,51 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 	return { monthlyEarnings, currentMonthKey, detail };
 }
 
+// ---- Loss carry-forward — ONE definition, every reader ---------------------
+// A month where costs outran revenue (e.g. driver pay $12,250 on $10,310 of
+// revenue) yields NEGATIVE investorEarnings. Storing that verbatim produced a
+// "-$970 owed" payout row with a due date and a "mark paid" action — a debt
+// the investor cannot settle and nonsense to show on a statement.
+//
+// Instead the loss carries forward as a deficit and is absorbed by later
+// profitable months, which is where it belongs economically. Payable is never
+// negative, and the lifetime total is unchanged: a month's shortfall reduces
+// what later months pay out rather than inverting a single row.
+//
+// Walks oldest → newest (monthlyEarnings is ordered that way), so the result is
+// deterministic and every caller that runs it is idempotent.
+//
+// ⚠️ This lived inline inside reconcileInvestorPayouts, which made the SETTLEMENT
+// the only surface that knew about the carry — GET /api/investor published the
+// full monthly share while the payouts ledger and the statement PDF published the
+// post-carry figure, for the same month, and an investor comparing the two screens
+// saw two different numbers. It is a module-scope helper so the second reader
+// SHARES the walk instead of copying it; a second copy of this rule is how the
+// next drift starts (same lesson as DRIVER_RENAME_TARGETS / investorExpenseScopeSql).
+//
+// Pure: no DB, no network, no mutation of the input. Returns
+// { "YYYY-MM": { raw, payable, carriedIn, deferred } } for EVERY month passed in,
+// so a caller may index it without a presence check.
+function computeLossCarryForward(monthlyEarnings) {
+	const carryByPeriod = {};
+	let deficit = 0;
+	for (const m of monthlyEarnings || []) {
+		const raw = Math.round(m.investorEarnings);
+		let payable, carriedIn = 0, deferred = 0;
+		if (raw < 0) {
+			deferred = -raw;      // this month's loss joins the running deficit
+			deficit += deferred;
+			payable = 0;
+		} else {
+			carriedIn = Math.min(deficit, raw); // earlier losses eat into this month
+			payable = raw - carriedIn;
+			deficit -= carriedIn;
+		}
+		carryByPeriod[m.month] = { raw, payable, carriedIn, deferred };
+	}
+	return carryByPeriod;
+}
+
 // Enumerate every investor that can be settled, as { ownerId, name }. An
 // investor is settled by users.id, so we list `investors` rows whose user_id
 // links to a real user with role 'Investor' (same join /api/investors-style
@@ -38696,36 +38780,12 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 	const splitPct = Math.round(resolveInvestorSplitPct(config));
 
 	// ---- Loss carry-forward -------------------------------------------------
-	// A month where costs outran revenue (e.g. driver pay $12,250 on $10,310 of
-	// revenue) yields NEGATIVE investorEarnings. Storing that verbatim produced a
-	// "-$970 owed" payout row with a due date and a "mark paid" action — a debt
-	// the investor cannot settle and nonsense to show on a statement.
-	//
-	// Instead the loss carries forward as a deficit and is absorbed by later
-	// profitable months, which is where it belongs economically. Payable is never
-	// negative, and the lifetime total is unchanged: a month's shortfall reduces
-	// what later months pay out rather than inverting a single row.
-	//
-	// Walks oldest → newest (monthlyEarnings is ordered that way), so the result
-	// is deterministic and the reconcile stays idempotent.
-	const carryByPeriod = {};
-	{
-		let deficit = 0;
-		for (const m of monthlyEarnings) {
-			const raw = Math.round(m.investorEarnings);
-			let payable, carriedIn = 0, deferred = 0;
-			if (raw < 0) {
-				deferred = -raw;      // this month's loss joins the running deficit
-				deficit += deferred;
-				payable = 0;
-			} else {
-				carriedIn = Math.min(deficit, raw); // earlier losses eat into this month
-				payable = raw - carriedIn;
-				deficit -= carriedIn;
-			}
-			carryByPeriod[m.month] = { raw, payable, carriedIn, deferred };
-		}
-	}
+	// computeLossCarryForward() (module scope, beside computeInvestorMonthlyEarnings)
+	// is the single definition of this rule — GET /api/investor runs the SAME walk
+	// over its own monthlyEarnings so the Earnings screen and this ledger cannot
+	// publish different figures for one month. Pure and deterministic, so the
+	// reconcile stays idempotent.
+	const carryByPeriod = computeLossCarryForward(monthlyEarnings);
 
 	// Reconcile completed PAST months into investor_payouts (idempotent).
 	const findRow = db.prepare("SELECT * FROM investor_payouts WHERE owner_id = ? AND period = ?");
@@ -39807,6 +39867,34 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				});
 				cursor.setMonth(cursor.getMonth() + 1);
 			}
+
+			// ---- Loss carry-forward, published per month ----------------------
+			// The SAME walk the settlement ledger runs (computeLossCarryForward —
+			// one definition, two readers), not a second copy of the rule.
+			//
+			// ⚠️ Without this the two screens disagreed about one month. This array
+			// published `investorEarnings` — the FULL share of net profit — while
+			// GET /api/investor/payouts and the statement PDF published the
+			// post-carry figure, so a profitable month that had absorbed an earlier
+			// loss read one number in the Earnings waterfall and a smaller one on
+			// the payout row beside it, with nothing on screen to explain the gap.
+			// Live case: owner 5's 2026-08 runs at −$995, which September will
+			// legitimately absorb.
+			//
+			// `payable` is what the month settles at (raw − carriedIn, and 0 for a
+			// losing month) — the same quantity `amount` freezes to at close and
+			// `payableIfClosedNow` projects for the open month.
+			//
+			// Purely ADDITIVE: every existing key is untouched, so no current
+			// consumer changes shape.
+			const carryByPeriod = computeLossCarryForward(monthlyEarnings);
+			for (const m of monthlyEarnings) {
+				const c = carryByPeriod[m.month];
+				m.lossCarriedIn = c.carriedIn;   // earlier losses absorbed by this month
+				m.lossDeferred = c.deferred;     // this month's own loss pushed forward
+				m.payable = c.payable;           // what this month actually settles at
+			}
+
 			// Reconcile aggregate totalExpenses with the per-month deferral
 			// applied above. The truck-fixed-costs accrual earlier in this
 			// handler charges every month from truck.created_at; subtract the
@@ -40679,8 +40767,22 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 			adjustedAt: row.adjusted_at || "",
 			adjustedAfterPaid,
 			breakdown: frozenBreakdown || p.breakdown,
-			lossCarriedIn: p.lossCarriedIn,
-			lossDeferred: p.lossDeferred,
+			// ⚠️ THESE MUST TRACK `breakdown` ABOVE, OR THE PAGE DOES NOT FOOT.
+			// They used to be unconditionally LIVE, so a finalized month printed a
+			// frozen top half with a re-derived subtraction beneath it — the June
+			// statement whose "− Earlier loss applied −$1,563.00" matched nothing
+			// else on the page. finalizePeriods now snapshots both terms INSIDE
+			// finalized_breakdown, so a row closed since that change prints one
+			// self-consistent set of numbers.
+			//
+			// ⚠️ `??`, NEVER `||`. Zero is the COMMON value here — most months carry
+			// nothing in — and `||` would send every one of them back to the live
+			// recompute, i.e. re-create the exact bug for the majority of statements.
+			// Only a genuinely absent key (every row finalized before this shipped)
+			// falls through to live, which is byte-identical to the old behaviour and
+			// is what keeps 2026-01…2026-07 printable.
+			lossCarriedIn: frozenBreakdown?.lossCarriedIn ?? p.lossCarriedIn,
+			lossDeferred: frozenBreakdown?.lossDeferred ?? p.lossDeferred,
 			// adjustmentApplied is the delta that ACTUALLY landed, so
 			// amount + it === effectiveAmount always holds on the printed page.
 			adjustment: p.adjustmentApplied,
@@ -42057,7 +42159,26 @@ async function finalizePeriods(periods, actor) {
 		for (const period of list) {
 			const p = payouts.find((x) => x.period === period);
 			if (!p) continue;
-			const breakdown = JSON.stringify(p.breakdown || null);
+			// ⚠️ THE CARRY-FORWARD TERMS ARE PART OF THE SNAPSHOT, and leaving them
+			// out is what made a finalized statement print arithmetic that did not
+			// foot. The PDF composed a FROZEN top half (`finalized_breakdown`) with a
+			// LIVE `lossCarriedIn` recomputed months later — and the carry chain moves
+			// whenever any earlier month's recompute moves, so a June statement showed
+			// clean frozen figures (Net Profit $17,580.88 → share $8,790.00) with a
+			// live "− Earlier loss applied −$1,563.00" line under it that no longer
+			// corresponded to anything on the page. Freeze both halves together or the
+			// document is internally inconsistent by construction.
+			//
+			// Only ever attached to a real breakdown object: when the month has aged
+			// out of the live earnings window `p.breakdown` is null, and the statement
+			// deliberately prints "composition no longer available to re-derive"
+			// rather than a waterfall of blanks. A bare {lossCarriedIn, lossDeferred}
+			// would defeat that null check and render an all-zero waterfall.
+			const breakdown = JSON.stringify(
+				p.breakdown
+					? { ...p.breakdown, lossCarriedIn: p.lossCarriedIn, lossDeferred: p.lossDeferred }
+					: null
+			);
 			const live = p.recomputedAmount != null ? p.recomputedAmount : p.amount;
 			const n = stampOwed.run(live, nowIso, live, breakdown, ownerId, period).changes
 				+ stampSettled.run(nowIso, breakdown, ownerId, period).changes;

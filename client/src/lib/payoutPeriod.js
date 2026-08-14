@@ -355,6 +355,70 @@ export function selectPeriodSettlement({ periodType, periodKey, payouts, current
 }
 
 /**
+ * THE CARRY-FORWARD VOCABULARY, IN ONE PLACE.
+ *
+ * ⚠️ WHY THESE ARE CONSTANTS AND NOT INLINE STRINGS. The same concept — a month
+ * absorbing an earlier month's shortfall, or pushing its own forward — is printed
+ * by three independent surfaces: the statement PDF (lib/payout-statement.js), the
+ * Payouts card (settlementTerms below), and the Earnings waterfall
+ * (EarningsSection.vue, via earningsCarryTerms). They were written at different
+ * times and drifted into three wordings for one mechanism, and the client's
+ * complaint is precisely that he cannot explain a line he has not seen before:
+ * "What is this earlier loss apply a shortfall from earlier month… I got to know
+ * these things cause I have to explain these things."
+ *
+ * Every NEW surface must import from here rather than write a fourth phrasing.
+ * The PDF is a server module and is deliberately not changed by the client build;
+ * reconciling its wording with these is a copy decision logged for sign-off in
+ * docs/investor-portal-copy.md, not something to "tidy up" unilaterally.
+ *
+ * OPEN vs SETTLED is a real distinction, not a synonym. A month still running can
+ * still erase its own deficit, so its shortfall is stated conditionally
+ * ("would carry forward"); a closed month's is a fact ("carried to later months").
+ * Same reason `payable` becomes `projectedPayout` on an open month.
+ */
+export const CARRY_LABELS = {
+  appliedToEarlierLoss: 'Applied to an earlier month’s loss',
+  wouldCarryForward: 'Shortfall that would carry forward',
+  carriedToLaterMonths: 'Loss carried to later months',
+  payable: 'Payable',
+  projectedPayout: 'Projected payout',
+}
+
+/**
+ * The supporting captions for the two carry rows. Kept beside the labels for the
+ * same reason: a caption sits under real money on an investor's screen, so it is
+ * copy for sign-off, not decoration.
+ *
+ * ⚠️ NEITHER MAY STATE A FIGURE. The house rule on this component (see
+ * driverPayFormula in EarningsSection.vue) is that a number printed in an
+ * annotation is read as fact, so an unknown is dropped rather than defaulted.
+ * These are deliberately figure-free, which also makes them true at any amount.
+ */
+export const CARRY_CAPTIONS = {
+  appliedToEarlierLoss: 'an earlier month’s shortfall, covered by this month',
+  wouldCarryForward: 'carries into a later payout if the month closes short',
+  carriedToLaterMonths: 'carried against later months, not billed to you',
+}
+
+/**
+ * The full-sentence explanations, for the drill-down dialogs that have room for
+ * one — as opposed to the terse CARRY_CAPTIONS that sit under a table row.
+ *
+ * ⚠️ BOTH ARE VERBATIM FROM `lib/payout-statement.js` (the `<div class="cap">`
+ * text beside "Earlier loss applied" and "Loss carried forward"). That is the
+ * point: the PDF is the document the investor keeps, so the screen that explains
+ * the arithmetic should say the same words rather than a fourth paraphrase. They
+ * are duplicated rather than imported because that file is a server module with
+ * no client build path — **change the two together, or the surfaces drift again.**
+ * Both strings are already logged for sign-off in docs/investor-portal-copy.md §12.
+ */
+export const CARRY_EXPLAIN = {
+  appliedToEarlierLoss: 'A shortfall from an earlier month absorbed by this one.',
+  carriedForward: 'This month ran at a loss, so nothing is payable. The shortfall is carried against later months rather than billed back to you.',
+}
+
+/**
  * The display rows for the card, in reading order, each one a term of the sum.
  *
  * EVERY participating term is emitted. A term that is genuinely zero is omitted
@@ -372,24 +436,115 @@ export function settlementTerms(s) {
 
   if (s.basis === 'open') {
     push('earned', 'Earned so far this month', s.earned, 'earn')
-    if (s.lossCarriedIn) push('lossCarriedIn', 'Applied to an earlier month’s loss', -s.lossCarriedIn, 'carry')
-    if (s.lossDeferred) push('lossDeferred', 'Shortfall that would carry forward', s.lossDeferred, 'carry')
+    if (s.lossCarriedIn) push('lossCarriedIn', CARRY_LABELS.appliedToEarlierLoss, -s.lossCarriedIn, 'carry')
+    if (s.lossDeferred) push('lossDeferred', CARRY_LABELS.wouldCarryForward, s.lossDeferred, 'carry')
     // Deliberately shorter than payoutHeadline()'s wording: the card's own
     // heading already says "Projected if the month closed today" a few pixels
     // above, and repeating a caveat verbatim reads as two different claims.
-    push('projected', 'Projected payout', s.projectedPayout, 'total')
+    push('projected', CARRY_LABELS.projectedPayout, s.projectedPayout, 'total')
     return rows
   }
 
   push('earned', 'This month’s earnings', s.earned, 'earn')
-  if (s.lossCarriedIn) push('lossCarriedIn', 'Applied to an earlier month’s loss', -s.lossCarriedIn, 'carry')
-  if (s.lossDeferred) push('lossDeferred', 'Loss carried to later months', s.lossDeferred, 'carry')
+  if (s.lossCarriedIn) push('lossCarriedIn', CARRY_LABELS.appliedToEarlierLoss, -s.lossCarriedIn, 'carry')
+  if (s.lossDeferred) push('lossDeferred', CARRY_LABELS.carriedToLaterMonths, s.lossDeferred, 'carry')
   if (s.drift) push('drift', 'Records changed after this month closed', s.drift, 'drift')
   if (s.adjustments) {
     push('settled', 'Amount this month settled at', s.settledAmount, 'subtotal')
     push('adjustment', 'Manual adjustment', s.adjustments, 'adjust')
   }
   push('payout', payoutHeadline(s), s.payout, 'total')
+  return rows
+}
+
+/**
+ * THE EARNINGS WATERFALL'S CARRY TAIL — the rows that go after "Your Share".
+ *
+ * WHY THIS EXISTS. `EarningsSection.vue`'s waterfall ended at
+ * `Your Share = netProfit × pct` and said nothing about the carry, while the
+ * statement PDF subtracted it and the Payouts card explained it. Three surfaces,
+ * three different "your share" for the same month. Not hypothetical: investor 5's
+ * 2026-08 is genuinely −$995 with `lossDeferred: 995`, so September's statement
+ * subtracts it for real while the Earnings screen would show the full share.
+ *
+ * Input is one `production.monthlyEarnings[]` row from `GET /api/investor`, which
+ * carries `lossCarriedIn` / `lossDeferred` / `payable`.
+ *
+ * ⚠️ RETURNS [] AGAINST A SERVER THAT HAS NOT SHIPPED THOSE FIELDS. `whole()`
+ * folds undefined/null/NaN to 0 (never `||`, so a legitimate 0 survives), and a
+ * month with no carry emits nothing — so the waterfall is byte-identical to
+ * today's on every ordinary month and on every pre-contract payload. This is the
+ * ONLY safe default: inventing a carry row is strictly worse than omitting one.
+ *
+ * ⚠️ THE `payable` ROW IS EMITTED FOR THE DEFERRED CASE TOO, not just carried-in.
+ * The identity `share − carriedIn + deferred = payable` holds in all three
+ * combinations (−995 + 995 = 0 for a loss month), so printing the total is what
+ * makes the tail add up by hand. Ending at a bare "Loss carried forward +$995"
+ * leaves the reader to infer the $0 — and inferring money is how this whole
+ * class of complaint starts.
+ *
+ * `isOpen` picks conditional wording over settled wording; see CARRY_LABELS.
+ *
+ * kind: 'deduct' | 'carry' | 'total' — mapped to the waterfall's own row classes
+ * by the component, so this module carries no styling.
+ */
+export function earningsCarryTerms(month, opts = {}) {
+  if (!month) return []
+  const carriedIn = whole(month.lossCarriedIn)
+  const deferred = whole(month.lossDeferred)
+  if (carriedIn <= 0 && deferred <= 0) return []
+
+  const isOpen = opts.isOpen != null ? !!opts.isOpen : !!month.isCurrentMonth
+  const share = whole(month.investorEarnings)
+
+  // typeof + isFinite, NOT truthiness: 0 is the single likeliest correct value of
+  // `payable` (every loss month), so a falsy test would treat the main case as
+  // absent and silently fall through to the derivation. Same guard, same reason,
+  // as projectedPayable in PayoutsSection.vue.
+  //
+  // Math.max(0, …) is belt-and-braces against a server regression, not distrust:
+  // the carry-forward model's invariant is that a loss DEFERS rather than
+  // inverting, so a negative payable would put the "-$2,450 owed" bug back on
+  // screen under a label that now reads "Payable". If this clamp ever fires the
+  // server broke its own contract, and the visible rows will stop summing — which
+  // is the correct way for that to surface.
+  const serverPayable = month.payable
+  const payable = typeof serverPayable === 'number' && Number.isFinite(serverPayable)
+    ? Math.max(0, whole(serverPayable))
+    : Math.max(0, share - carriedIn + deferred)
+
+  const rows = []
+  // Derived from the rows actually rendered, so the caption can never describe a
+  // subtraction the reader cannot see above it.
+  const formulaParts = ['your share']
+
+  if (carriedIn > 0) {
+    formulaParts.push('− earlier loss applied')
+    rows.push({
+      key: 'lossCarriedIn',
+      label: CARRY_LABELS.appliedToEarlierLoss,
+      caption: CARRY_CAPTIONS.appliedToEarlierLoss,
+      value: -carriedIn,
+      kind: 'deduct',
+    })
+  }
+  if (deferred > 0) {
+    formulaParts.push('+ loss carried forward')
+    rows.push({
+      key: 'lossDeferred',
+      label: isOpen ? CARRY_LABELS.wouldCarryForward : CARRY_LABELS.carriedToLaterMonths,
+      caption: isOpen ? CARRY_CAPTIONS.wouldCarryForward : CARRY_CAPTIONS.carriedToLaterMonths,
+      value: deferred,
+      kind: 'carry',
+    })
+  }
+  rows.push({
+    key: 'payable',
+    label: isOpen ? CARRY_LABELS.projectedPayout : CARRY_LABELS.payable,
+    caption: `= ${formulaParts.join(' ')}`,
+    value: payable,
+    kind: 'total',
+  })
   return rows
 }
 
