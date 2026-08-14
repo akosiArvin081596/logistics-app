@@ -490,6 +490,67 @@ function monthlyTripExp(ownerId, lib = S) {
 		"§7 ...against a headline of $3,043 — the equation the client was shown");
 }
 
+// ---------------------------------------------------------------------- §8
+// GET /api/investor/report BUCKETS EVERY PART OF truckMonthlyFixed().
+//
+// ⚠️ THE FAILURE THIS GUARDS IS A CATEGORY BEING ABSENT, NOT MISCOMPUTED, and no
+// value-based test finds that — the report added up perfectly, to the wrong total.
+// `insurance_monthly` appeared NOWHERE in the handler: a grep across all ~430 of
+// its lines returned zero hits, so every downloadable P&L understated Total
+// Expenses by the full insurance accrual ($6,460/month fleet-wide, $17,430 already
+// absent across the three investors) while /api/investor and the payouts ledger
+// both billed it. The investor-facing report was the flattering one.
+//
+// So the assertion is STRUCTURAL and derived from truckMonthlyFixed's own return
+// shape rather than from a hardcoded list: every key it produces except `total`
+// must be read by the report's per-truck loop. Add a sixth fixed cost to that
+// helper and this fails until the report decides which bucket it belongs in —
+// which is the decision that was skipped the first time.
+{
+	const helper = extract("truckMonthlyFixed");
+	const returned = helper.match(/return \{([^}]*)\}/)[1]
+		.split(",").map(s => s.trim().split(":")[0].trim())
+		.filter(k => k && k !== "total");
+	ok(returned.length >= 5, `§8 truckMonthlyFixed returns >=5 parts; found ${returned.length}`);
+
+	// The report handler, bounded by its own route registration.
+	const start = SRC.indexOf('app.get("/api/investor/report"');
+	ok(start > 0, "§8 the report handler is findable");
+	const end = SRC.indexOf('\napp.', start + 10);
+	const handler = SRC.slice(start, end > start ? end : SRC.length);
+
+	ok(/const f = truckMonthlyFixed\(t\);/.test(handler),
+		"§8 the report uses the SHARED per-truck math, not a hand-rolled copy that can drift");
+	for (const key of returned) {
+		ok(handler.includes(`f.${key}`), `§8 the report buckets truckMonthlyFixed().${key} — a part it never reads is a category silently missing from Total Expenses`);
+	}
+	// And each bucket must actually reach the total.
+	for (const bucket of ["complianceExpenses", "truckPaymentExpenses", "insuranceExpenses"]) {
+		ok(new RegExp(`totalExpenses = .*\\b${bucket}\\b`).test(handler),
+			`§8 ${bucket} is summed into totalExpenses`);
+	}
+	ok(handler.includes('{ label: "  Insurance", value: `(${fmt(insuranceExpenses)})`'),
+		"§8 Insurance is a printed P&L line, not just an accumulator");
+
+	// The page-break rule keys on plLines.length - 3 to keep the last three bold
+	// rows together. Adding a row shifts every absolute index, so pin that the
+	// separator still lands on Total Expenses rather than mid-table.
+	const labels = [...handler.matchAll(/\{ label: [`"]([^`"]*)[`"]/g)].map(m => m[1].trim());
+	const pl = labels.slice(labels.indexOf("Gross Revenue"));
+	eq(pl[pl.length - 3], "Total Expenses", "§8 the page-break separator still lands on Total Expenses after the new row");
+
+	// The split must come from investor_config, not a hardcoded 0.5 — the report's
+	// whole job is to agree with the portal, which reads investor_split_pct.
+	// Negative assertions run against a COMMENT-STRIPPED copy: the comments here
+	// deliberately quote the old hardcoded forms to explain them, and a raw text
+	// search cannot tell an explanation from a survivor.
+	const code = handler.split("\n").filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
+	ok(!/netCashFlow \* 0\.5/.test(code), "§8 no hardcoded 0.5 split");
+	ok(!/\(50%\)/.test(code), "§8 no hardcoded (50%) label");
+	ok(/parseFloat\(config\.investor_split_pct\) \|\| 50/.test(code),
+		"§8 the split is read from investor_config with the SAME fallback the portal uses");
+}
+
 // ---------------------------------------------------------------------- §6
 // MUTANTS. Each reintroduces one half of the bug; each must be caught.
 const MUTANTS = [
