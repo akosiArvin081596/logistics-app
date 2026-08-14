@@ -33557,7 +33557,7 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		}
 
 		let totalExpenses = 0;
-		let fuelExpenses = 0, maintenanceExpenses = 0, complianceExpenses = 0, truckPaymentExpenses = 0, otherExpenses = 0;
+		let fuelExpenses = 0, maintenanceExpenses = 0, complianceExpenses = 0, truckPaymentExpenses = 0, insuranceExpenses = 0, otherExpenses = 0;
 		// Parameterized date filters (avoid string interpolation in SQL)
 		let dateWhere = '';
 		const dateParams = [];
@@ -33613,6 +33613,20 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		// HVUT, IRP added up and divided by 12 months which is part of the
 		// fixed expenses. On run report period it needs to show this month
 		// per month."
+		//
+		// ⚠️ INSURANCE IS ITS OWN LINE, AND IT WAS MISSING FROM THIS REPORT
+		// ENTIRELY UNTIL 2026-08-14 — not mis-bucketed, absent. A grep for
+		// `insurance` across this whole handler returned zero hits, so the
+		// statement's Total Expenses understated by the full insurance accrual:
+		// $1,630 + $1,630 + $1,520 + $1,680 = $6,460/month fleet-wide, against
+		// which /api/investor and the payouts ledger both bill it. An investor
+		// comparing the downloadable P&L to their portal saw two different
+		// numbers, and the report was the flattering one.
+		//
+		// It does NOT go in Compliance: the client defined that bucket as
+		// exactly ELD + HVUT + IRP, and quietly widening a category they named
+		// is how the next reconciliation argument starts. It gets the same
+		// treatment truck_payment_monthly already got — its own P&L row.
 		{
 			// Skip inactive trucks for projected fixed-cost accrual.
 			// Asset Security section above still shows them (the investor
@@ -33620,17 +33634,21 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 			for (const t of ownedTrucks2) {
 				if (t.status !== "Active") continue;
 				const months = truckMonthsInPeriod(t);
-				const monthlyFixed = (t.eld_monthly || 0)
-					+ ((t.hvut_annual || 0) / 12)
-					+ ((t.irp_annual || 0) / 12);
-				const truckFixed = monthlyFixed * months;
+				// Shared per-truck math, so this statement and the portal can no
+				// longer disagree about what a truck costs per month. The five
+				// parts are then bucketed into the client's named categories.
+				const f = truckMonthlyFixed(t);
+				const truckFixed = (f.eld + f.hvut + f.irp) * months;
 				complianceExpenses += truckFixed;
 				totalExpenses += truckFixed;
 				// Truck loan/lease payment — a fixed monthly cost, shown as its own
 				// P&L line (not lumped into Compliance). Split out of the ELD fee.
-				const truckPay = (t.truck_payment_monthly || 0) * months;
+				const truckPay = f.truckPayment * months;
 				truckPaymentExpenses += truckPay;
 				totalExpenses += truckPay;
+				const truckIns = f.insurance * months;
+				insuranceExpenses += truckIns;
+				totalExpenses += truckIns;
 			}
 			const compFees = (investorDriverSet
 				? db.prepare(`SELECT COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck)=LOWER(t.unit_number) WHERE t.owner_id=? AND t.status='Active' AND cf.status='Paid'`).get(user.id)
@@ -33647,12 +33665,22 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		maintenanceExpenses = Math.round(maintenanceExpenses);
 		complianceExpenses = Math.round(complianceExpenses);
 		truckPaymentExpenses = Math.round(truckPaymentExpenses);
+		insuranceExpenses = Math.round(insuranceExpenses);
 		otherExpenses = Math.round(otherExpenses);
-		totalExpenses = fuelExpenses + maintenanceExpenses + complianceExpenses + truckPaymentExpenses + otherExpenses;
+		totalExpenses = fuelExpenses + maintenanceExpenses + complianceExpenses + truckPaymentExpenses + insuranceExpenses + otherExpenses;
 
 		const netRevenueToDate = Math.round(totalRevenue - totalExpenses);
 		const netCashFlow = totalRevenue - totalExpenses;
-		const ownerEarnings = netCashFlow * 0.5;
+		// ⚠️ Was a hardcoded 0.5 with a hardcoded "(50%)" label, in two places, on
+		// a statement whose whole job is to agree with the portal. `config` above
+		// already merges the per-investor investor_config over the global row, and
+		// /api/investor reads investor_split_pct from exactly that — so a
+		// non-50 investor got a report that silently paid them at 50 and said so.
+		// A no-op at today's config (every investor is 50), which is precisely why
+		// it would have gone unnoticed until the first investor on a different split.
+		// `|| 50` matches the portal's own fallback rather than inventing a second.
+		const splitPctLabel = parseFloat(config.investor_split_pct) || 50;
+		const ownerEarnings = netCashFlow * (splitPctLabel / 100);
 
 		// Monthly revenue from Job Tracking
 		const monthlyRevenue2 = {};
@@ -33734,7 +33762,7 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 
 		// ── Cash Flow
 		sectionHeader("Cash Flow & Projections");
-		kpiRow("Net Cash Flow", fmt(netCashFlow), "Owner Earnings (50%)", fmt(ownerEarnings));
+		kpiRow("Net Cash Flow", fmt(netCashFlow), `Owner Earnings (${splitPctLabel}%)`, fmt(ownerEarnings));
 		kpiRow("Total Expenses", fmt(totalExpenses), "Net Revenue To Date", fmt(netRevenueToDate));
 		const totalInv = totalPurchasePrice + totalStartupExpenses;
 		const recPct = totalInv > 0 ? Math.min(100, (netRevenueToDate / totalInv * 100)).toFixed(1) : "0";
@@ -33758,12 +33786,13 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 			{ label: "Gross Revenue", value: fmt(totalRevenue), indent: false, bold: true },
 			{ label: "  Fuel Expenses", value: `(${fmt(fuelExpenses)})`, indent: true, bold: false },
 			{ label: "  Maintenance & Repairs", value: `(${fmt(maintenanceExpenses)})`, indent: true, bold: false },
+			{ label: "  Insurance", value: `(${fmt(insuranceExpenses)})`, indent: true, bold: false },
 			{ label: "  Compliance / Regulatory", value: `(${fmt(complianceExpenses)})`, indent: true, bold: false },
 			{ label: "  Truck Payment", value: `(${fmt(truckPaymentExpenses)})`, indent: true, bold: false },
 			{ label: "  Other Expenses", value: `(${fmt(otherExpenses)})`, indent: true, bold: false },
 			{ label: "Total Expenses", value: `(${fmt(totalExpenses)})`, indent: false, bold: false },
 			{ label: "Net Profit", value: fmt(netCashFlow), indent: false, bold: true },
-			{ label: "Investor Payout (50%)", value: fmt(ownerEarnings), indent: false, bold: true },
+			{ label: `Investor Payout (${splitPctLabel}%)`, value: fmt(ownerEarnings), indent: false, bold: true },
 		];
 		const plLineHeight = 18;
 		const plX = 50, plW = doc.page.width - 100;
