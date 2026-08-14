@@ -85,8 +85,99 @@ const PASSWORD = "Password123!";
 const MAIL_DOMAIN = "invalid";
 // NANP 555-0100..555-0199 is the reserved fictional range.
 const PLACEHOLDER_PHONE = "555-0100";
+// The SSA has never issued an area number of 000, so this is structurally not a
+// real SSN — the same doctrine as .invalid and 555-0100: replace with the
+// impossible value OF THE SAME SHAPE, so anything rendering the field still
+// renders something field-shaped.
+// ⚠️ It is SSN-shaped by design, which means the assertion sweep below matches
+// it too. The sweep therefore skips this exact sentinel, exactly as it skips
+// reserved email domains. Without that skip the scrubber writes a value its own
+// grader then calls a leak, and any database containing one free-text SSN
+// refuses forever with no way to fix it. That is not hypothetical: it is what
+// this constant was extracted to fix, caught by a synthetic fixture because the
+// production snapshot happens to contain zero free-text SSNs.
+const REDACTED_SSN = "000-00-0000";
 
 const DEFAULT_TELEMETRY_DAYS = 45;
+
+// ---------------------------------------------------------------------------
+// SHARED PII PREDICATES — used by BOTH the free-text scrub (stage 3h) and the
+// assertion sweep at the bottom of this file. One definition on purpose: a
+// scrubber and the check that grades it must never be able to disagree about
+// what counts as a leak. Two copies is how you get a run that scrubs one shape
+// and asserts another, and reports "clean".
+// ---------------------------------------------------------------------------
+
+// ###-##-#### only. NEVER a bare 9-digit run: load ids in this system are
+// exactly that shape (562620213, 563593554), so a 9-digit rule would flag the
+// Job Tracking mirror on every single run and teach everyone to ignore it.
+const SSN_SHAPE = /\b\d{3}-\d{2}-\d{4}\b/;
+const SSN_SHAPE_G = new RegExp(SSN_SHAPE.source, "g");
+
+// ⚠️ BOUNDED ON PURPOSE. This pattern is run as a REPLACE over
+// audit_trail.details, which carries structure the application parses: the
+// `[PERIOD_…]` code, the `periods=` list that must sit immediately after the
+// closing bracket (server.js parsePeriodRefusalDetail), the `[PERIOD_`
+// substring that exempts a row from the 90-day refusal purge, and — for the
+// sheet-audit writers — a whole JSON body. Both character classes below exclude
+// `[`, `]`, whitespace and `—`, so a match can span none of it.
+//
+// The two ways a looser pattern breaks this are DIFFERENT, both measured
+// (scripts/test-sanitize-before-transfer.js pins each as its own mutant):
+//
+//   [^,]  — matches spaces and brackets, so on a prose refusal it runs from
+//           "for agent@…" straight through "[PERIOD_FINALIZED] periods=2026-04".
+//           One substitution destroys the code, the month list and the purge
+//           exemption together: 112 chars collapse to 25. Same class of bug as
+//           cityStateZip()'s [^,] swallowing a whole street.
+//
+//   \S+   — does NOT reach the marker (every writer puts a space before the
+//           "[", and \S never crosses it), so the tempting summary "it would
+//           swallow agent@x.com [PERIOD_FINALIZED] whole" is simply false. What
+//           it really eats is any WHITESPACE-FREE structure: the JSON audit body
+//           and reference_info are each swallowed entire — quotes, braces and
+//           all — and replaced by a single token. Measured: 128 chars to 24, the
+//           marker intact beside a destroyed record.
+//
+// (client/src/components/dashboard/InvoiceDraftPreviewModal.vue contains the
+// loose \S+ form. It is fine there — it never writes to a database.)
+const ROUTABLE_EMAIL = new RegExp(String.raw`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]*[A-Za-z0-9]\.[A-Za-z]{2,}`);
+const ROUTABLE_EMAIL_G = new RegExp(ROUTABLE_EMAIL.source, "g");
+
+// Names that can never resolve, so an address using one is already neutral.
+// RFC 2606 reserves .test/.example/.invalid and example.com|net|org; RFC 6761
+// adds .localhost. Skipping them keeps the sanitizer from churning its own
+// output (that is what makes stage 3h idempotent), and from rewriting the
+// deliberately-fake addresses in test fixtures and documentation.
+const RESERVED_TLD = /\.(invalid|test|example|localhost)$/i;
+const RESERVED_SLD = /(^|\.)example\.(com|net|org)$/i;
+
+// The single answer to "could this address reach a real human?".
+//
+// ⚠️⚠️ ONLY EVER CALL THIS ON A SINGLE ROUTABLE_EMAIL MATCH — never on a whole
+// column value. It takes everything after the LAST "@" and anchors the reserved
+// tests with "$", so on a value holding two addresses it judges only the last
+// one: isRoutableAddress("victim@acme.com and noreply@example.com") is FALSE.
+// That is the exact whole-value fail-open removed from the detector below on
+// 2026-08-13 — the shape survives in here, held off only by both call sites
+// passing one match at a time. Because the predicate is SHARED, a refactor to
+// isRoutableAddress(row.value) would break the scrubber and its grader in the
+// same stroke, so nothing would report the leak.
+//
+// ⚠️ It also returns TRUE for the sanitizer's own "<hex>@invalid" token, because
+// RESERVED_TLD requires a leading dot and MAIL_DOMAIN is the bare word
+// "invalid". Idempotence therefore rests on ROUTABLE_EMAIL refusing a DOTLESS
+// domain, not on this function — unlike the SSN side, which carries an explicit
+// `s !== REDACTED_SSN` skip. Widening ROUTABLE_EMAIL to accept dotless or
+// intranet domains would make stage 3h re-pseudonymize its own output on every
+// pass AND make the grader refuse that output: an unfixable refresh, on every
+// database. If you ever widen it, add the sentinel skip here first.
+function isRoutableAddress(addr) {
+	const at = String(addr).lastIndexOf("@");
+	if (at < 0) return false;
+	const domain = String(addr).slice(at + 1);
+	return !RESERVED_TLD.test(domain) && !RESERVED_SLD.test(domain);
+}
 
 // ---------------------------------------------------------------------------
 // args
@@ -525,8 +616,35 @@ async function main() {
 	});
 	secrets += setCols("investors", { ein_ssn: "", address: "REDACTED" });
 	secrets += setCols("investor_applications", { ein_ssn: "", address: "REDACTED" });
-	secrets += setCols("job_applications", { ssn: "", dob: "", drivers_license: "", address: "REDACTED", signature: "" });
-	secrets += setCols("drivers_directory", { address: "REDACTED" });
+	// ⚠️ THE DOCUMENT COLUMNS ARE THE POINT OF THIS LINE, NOT AN EXTRA.
+	// `cdl_front`, `cdl_back` and `medical_card` are base64 PHOTOGRAPHS of the
+	// applicant's driving licence and DOT medical card — carrying the licence
+	// number, the date of birth, the home address, the face and the signature,
+	// i.e. every single value the four columns beside them are being emptied of.
+	// Redacting `ssn`/`dob`/`drivers_license` while shipping the picture of them
+	// is not redaction. CLAUDE.md records this EXACT finding against the API
+	// ("Masking the NUMBER while shipping the DOCUMENT is not masking" — GET
+	// /api/applications/:id used to mask ssn + drivers_license and still return
+	// all three photos); that was fixed there on 2026-08-08 and the sanitizer was
+	// never brought into line. Measured 2026-08-13: 8 of 8 rows populated, up to
+	// 2.76 MB each, ~30 MB total, shipping under a "clean" line.
+	//
+	// ⚠️ And they are STRUCTURALLY INVISIBLE to stage 3h — base64 contains no "@"
+	// and no ###-##-####, so neither the SQL prefilter nor the scan's regex ever
+	// looks at them. Nothing but this explicit list can reach them.
+	//
+	// city / state / zip: the surviving half of a home address whose `address`
+	// column is redacted on the very same row. Full name + city + ZIP is a
+	// re-identifying tuple, and leaving it makes a row LOOK scrubbed. Emptied
+	// rather than placeholdered because nothing computes from them — the only
+	// readers concatenate them for display beside that already-"REDACTED"
+	// address (server.js:11534, :14958).
+	secrets += setCols("job_applications", {
+		ssn: "", dob: "", drivers_license: "", address: "REDACTED", signature: "",
+		cdl_front: "", cdl_back: "", medical_card: "",
+		city: "", state: "", zip: "",
+	});
+	secrets += setCols("drivers_directory", { address: "REDACTED", city: "", state: "", zip: "" });
 	summary.push(`bank / tax / identity fields: ${secrets} row-update(s) redacted`);
 
 	// 3f. Signatures are a legal artefact and, as base64 images, also most of
@@ -558,6 +676,129 @@ async function main() {
 		if (rows.length) summary.push(`investor_applications: ${rows.length} access token(s) regenerated`);
 	}
 
+	// 3h. FREE TEXT. Everything above is COLUMN-AWARE: it names a table and a
+	//     column and rewrites that one cell. So an address typed into a notes
+	//     field, embedded in a JSON blob, or recorded in an audit line walked
+	//     straight through — and the assertion block below classified it as an
+	//     *advisory* while the run went on to print "clean" four lines later.
+	//
+	//     Measured on the 2026-08-13 production snapshot: 21 routable
+	//     third-party addresses survived a run that reported success —
+	//     job_applications.reference_info (6: references and previous employers
+	//     of applicants, third parties who never consented to anything),
+	//     audit_trail.details (8), load_invoice_drafts.recipient (7).
+	//
+	//     ⚠️ THIS PASS IS DELIBERATELY NOT A COLUMN LIST. Enumerating those
+	//     three would fix the three columns that happened to be populated on
+	//     the day someone looked, and leave the mechanism — a scrub that only
+	//     covers what it was told about — exactly as it was. It sweeps every
+	//     text column of every table instead, which is the only shape that also
+	//     covers the column somebody adds next month.
+	let freeTextRows = 0;
+	let freeTextValues = 0;
+	{
+		// Per-RUN salt, held only in memory and never written anywhere.
+		//   - not UNSALTED: a bare hash of an address is a confirmation oracle
+		//     over a guessable space, which is why an unsalted email digest is
+		//     still personal data.
+		//   - not PER-ROW: server.js writes one address into BOTH
+		//     load_invoice_drafts.recipient and the audit_trail row describing
+		//     the same draft. A per-run salt keeps those two agreeing inside a
+		//     given database (so anything that groups by recipient still
+		//     works), while two different refreshes stay unlinkable.
+		const salt = crypto.randomBytes(16);
+		const seen = new Map();
+		const pseudonym = (addr) => {
+			const key = addr.toLowerCase();
+			let tok = seen.get(key);
+			if (!tok) {
+				// ⚠️ [0-9a-f] and "@invalid" ONLY. The token is substituted into
+				// audit_trail.details, so it must contain no "[" (which would
+				// forge or break the [PERIOD_ purge exemption), no '"' or "\"
+				// (which would break the JSON detail bodies), and no whitespace
+				// (which would break the `] periods=` adjacency the parser
+				// requires). Hex satisfies all three by construction.
+				tok = crypto.createHmac("sha256", salt).update(key).digest("hex").slice(0, 10) + `@${MAIL_DOMAIN}`;
+				seen.set(key, tok);
+			}
+			return tok;
+		};
+
+		// ⚠️ Substring REPLACE, never JSON.parse/stringify and never a blank.
+		//   - blanking destroys the value: audit_trail.details is parsed
+		//     structurally by the app, and reference_info is JSON the
+		//     applications screen renders.
+		//   - a JSON round-trip reorders keys, re-escapes strings, and would
+		//     move the " [PERIOD_…]" suffix that deliberately sits OUTSIDE the
+		//     JSON body.
+		// Length changes are safe: audit fields were truncated at write time
+		// and nothing re-measures them afterwards.
+		const scrubValue = (v) => {
+			let out = v.replace(ROUTABLE_EMAIL_G, (m) => (isRoutableAddress(m) ? pseudonym(m) : m));
+			out = out.replace(SSN_SHAPE_G, REDACTED_SSN);
+			return out;
+		};
+
+		const tables = db
+			.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+			.all().map((r) => r.name);
+		for (const t of tables) {
+			let info = [];
+			try { info = db.prepare(`PRAGMA table_info("${t}")`).all(); } catch { continue; }
+			const textCols = info.filter((c) => !/^(INT|REAL|NUM|BLOB)/i.test(String(c.type || ""))).map((c) => c.name);
+			if (!textCols.length) continue;
+			for (const c of textCols) {
+				// Prefiltered in SQL so the 966k-row telemetry table is
+				// eliminated by the index-free scan SQLite does anyway, rather
+				// than being pulled into JS a column at a time. GLOB is
+				// case-sensitive and has no LIKE-style escaping to get wrong.
+				// ⚠️ The third clause is not an optimisation — it closes the ONE
+			// divergence between what this scrub selects and what the grader
+			// reads, and without it a single crafted row wedges the pipeline
+			// permanently.
+			//
+			// SQLite's LIKE and GLOB stop at an embedded NUL; JavaScript does not.
+			// So "safe\0victim@acme.com" is invisible to both patterns above
+			// (measured: LIKE '%@%' does not select it) while collectLeaks() sees
+			// the address and refuses. Fail-closed — no PII ships — but the
+			// scrubber can never reach that row, so EVERY subsequent refresh fails
+			// identically and no flag or re-run fixes it. That is the same
+            // unfixable-refusal deadlock the REDACTED_SSN sentinel exists to
+			// prevent, arriving through a different door, and the file's own
+			// reasoning says where it ends: "a routine refusal gets bypassed with
+			// a flag and then permanently".
+			//
+			// Reachable with no session: POST /api/public/apply binds free text
+			// raw, and JSON "\u0000" decodes to a real NUL.
+			//
+			// length() on TEXT stops at the first NUL; on a BLOB it counts every
+			// byte. Non-ASCII also makes the two differ — a false positive that
+			// costs one extra fetched row and nothing else, which is the right
+			// direction for a filter feeding a scrubber.
+			const where = `"${c}" LIKE '%@%' OR "${c}" GLOB '*[0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9][0-9]*'`
+				+ ` OR length(CAST("${c}" AS BLOB)) <> length("${c}")`;
+				let rows;
+				try { rows = db.prepare(`SELECT rowid AS rid, "${c}" AS v FROM "${t}" WHERE ${where}`).all(); }
+				catch { continue; }   // no rowid (WITHOUT ROWID table), or unreadable — the post-scrub assertion still grades it
+				if (!rows.length) continue;
+				let upd;
+				try { upd = db.prepare(`UPDATE "${t}" SET "${c}" = ? WHERE rowid = ?`); } catch { continue; }
+				for (const r of rows) {
+					if (typeof r.v !== "string") continue;
+					const next = scrubValue(r.v);
+					if (next === r.v) continue;
+					// Fail LOUD but keep going: a column that cannot be written
+					// is caught by collectLeaks() below, which refuses the whole
+					// run. Silently swallowing it is the failure mode this stage
+					// exists to remove.
+					try { upd.run(next, r.rid); freeTextRows++; } catch (e) { warn(`${t}.${c}: ${e.message}`); }
+				}
+			}
+		}
+		freeTextValues = seen.size;
+	}
+	summary.push(`free text: ${freeTextRows} value(s) rewritten across ${freeTextValues} distinct address(es)`);
+
 	// DELIBERATELY NOT SCRUBBED, and why:
 	//   geocode_cache.address, load_coordinates.pickup_address/dropoff_address —
 	//     shipper/receiver facility addresses, i.e. business locations, not
@@ -567,8 +808,16 @@ async function main() {
 	//   trucks.license_plate, trailers.license_plate, routemate_vehicles.license_num —
 	//     company asset identifiers, and the ELD linkage keys off adjacent
 	//     columns. No personal exposure.
-	//   messages / notifications bodies — operational content, and the chat
-	//     surfaces are worth exercising with realistic volume.
+	//   messages / notifications BODIES — operational content, and the chat
+	//     surfaces are worth exercising with realistic volume. Note the scope:
+	//     the body text is kept in full, and stage 3h neutralizes only an email
+	//     address or SSN appearing INSIDE it. Realistic volume was always the
+	//     point; a routable address was never part of it.
+	//   PHONE NUMBERS in free text — deliberately out of stage 3h's reach. The
+	//     assertion sweep has never scanned for them, so there is no signal
+	//     saying any exist, and a phone pattern loose enough to be useful also
+	//     matches 9-digit load ids and dollar amounts. Neutralizing a load id
+	//     inside an audit line would be a worse bug than the one being fixed.
 
 	// -- 4. reclaim + verify -------------------------------------------------
 	log("vacuuming…");
@@ -655,22 +904,33 @@ async function main() {
 // to the scrub list, and the whole value of these checks is that they fail
 // when the scrub silently stops covering something.
 //
-// TIERED, and the tiering is load-bearing.
-//   leaks      — a named column that the sanitizer redacts is still populated.
-//                Precise, so it is a hard refusal.
-//   advisories — the free-text sweep. It reads columns nobody redacts
-//                (message bodies, audit notes), where a broker's address is
-//                ordinary content rather than a leak. Failing on those would
-//                make the refusal routine, and a routine refusal gets bypassed
-//                with a flag and then permanently. --strict-scan promotes them
-//                for callers who know their data has none.
+// TIERED, and the tiering INVERTED on 2026-08-13. Read this before restoring
+// the old behaviour.
+//   leaks      — a hard refusal. Two kinds: a named column the sanitizer
+//                redacts is still populated, AND (since stage 3h) any routable
+//                address or SSN shape anywhere in free text.
+//   advisories — a finding the sanitizer does not claim to own. Nothing
+//                populates this tier today; it survives for the next scan kind
+//                added (phone numbers are the obvious candidate) so that adding
+//                one does not have to also invent a way to report it.
+//
+// ⚠️ WHY THE FREE-TEXT SWEEP IS NO LONGER ADVISORY. The original reasoning was
+// sound for its time: the sweep reads columns nobody redacts, so a broker's
+// address in a message body was ordinary content rather than a leak, and a
+// refusal that fires on ordinary content gets bypassed with a flag and then
+// permanently. But that argument rests entirely on nothing scrubbing free text.
+// Stage 3h scrubs it. A survivor therefore no longer means "we found content we
+// never promised to clean" — it means the scrubber ran and did not work, which
+// is precisely the thing a hard refusal is for.
+//
+// The cost of leaving it advisory was measured: 21 routable third-party
+// addresses shipped in a run that printed "clean: no routable address ...
+// survives" four lines below the warnings naming them.
 // ===========================================================================
 
-// ###-##-#### only. NEVER a bare 9-digit run: load ids in this system are
-// exactly that shape (562620213, 563593554), so a 9-digit rule would flag the
-// Job Tracking mirror on every single run and teach everyone to ignore it.
-const SSN_SHAPE = /\b\d{3}-\d{2}-\d{4}\b/;
-const ROUTABLE_EMAIL = new RegExp(String.raw`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]*[A-Za-z0-9]\.[A-Za-z]{2,}`);
+// SSN_SHAPE / ROUTABLE_EMAIL / isRoutableAddress live at the top of this file,
+// beside MAIL_DOMAIN, because stage 3h scrubs with the same predicates this
+// block grades with. See the comment there before changing either.
 
 // Columns the scrub above is responsible for. Kept adjacent to it deliberately:
 // if a column is added there and not here, the assertion stops covering it, and
@@ -694,6 +954,76 @@ const REDACTED_EMPTY = [
 	["onboarding_documents", "signed_user_agent", "signer user agent"],
 	["investor_onboarding_documents", "signed_ip", "signer IP address"],
 	["investor_onboarding_documents", "signed_user_agent", "signer user agent"],
+	// Added 2026-08-13. Stage 3e/3f has always emptied these; nothing asserted
+	// it. The comment above states the invariant — "if a column is added there
+	// and not here, the assertion stops covering it" — and the list had drifted
+	// into violating it, which is the same silent-regression shape stage 3h was
+	// written to close. The free-text sweep cannot cover for the omission
+	// either: a date of birth and a signature blob are neither email- nor
+	// SSN-shaped, so a 3e that quietly stopped matching would have shipped them
+	// with every check still green.
+	["job_applications", "dob", "applicant date of birth"],
+	["job_applications", "signature", "applicant signature"],
+	// ⚠️ The three document columns. Asserted for a reason the others do not
+	// need: they are invisible to BOTH the free-text sweep (base64 has no "@"
+	// and no ###-##-####) and to any human spot-check, because a 2 MB base64
+	// blob is not something anyone eyeballs. If setCols ever stops matching
+	// here, this list is the ONLY thing left that will notice.
+	["job_applications", "cdl_front", "driving licence photograph (front)"],
+	["job_applications", "cdl_back", "driving licence photograph (back)"],
+	["job_applications", "medical_card", "DOT medical card photograph"],
+	// Home locality — the other half of an address the scrub already redacts.
+	["job_applications", "city", "applicant home city"],
+	["job_applications", "state", "applicant home state"],
+	["job_applications", "zip", "applicant home ZIP"],
+	["drivers_directory", "city", "driver home city"],
+	["drivers_directory", "state", "driver home state"],
+	["drivers_directory", "zip", "driver home ZIP"],
+	["onboarding_documents", "signed_ip_source", "signer IP provenance"],
+	["onboarding_documents", "consent_text", "signer consent text"],
+	["investor_onboarding_documents", "signed_ip_source", "signer IP provenance"],
+	["investor_onboarding_documents", "consent_text", "signer consent text"],
+	["investor_onboarding_documents", "signature_image", "signature image"],
+];
+
+// The other half of stage 3e/3f: columns replaced with a PLACEHOLDER rather
+// than emptied. They need their own shape — "empty" is the wrong test, because
+// the sanitizer deliberately writes a value. A row leaks when the column is
+// neither empty (it started that way) nor the placeholder (the scrub ran).
+//
+// ⚠️ These carry HOME ADDRESSES and bank account names. None of them is email-
+// or SSN-shaped, so the free-text sweep is blind to them: if setCols() ever
+// stopped matching here — a renamed column, a table rebuilt with a new schema —
+// every check in this file would pass and real personal addresses would ship.
+const REDACTED_LITERAL = [
+	["investors", "address", "REDACTED", "investor personal address"],
+	["investor_applications", "address", "REDACTED", "investor-applicant personal address"],
+	["job_applications", "address", "REDACTED", "applicant personal address"],
+	["drivers_directory", "address", "REDACTED", "driver personal address"],
+	["investor_payment_info", "account_name", "REDACTED", "investor bank account name"],
+	["investor_payment_info", "bank_name", "REDACTED BANK", "investor bank name"],
+	["driver_payment_info", "bank_acct_name", "REDACTED", "driver bank account name"],
+	["driver_payment_info", "bank_name", "REDACTED BANK", "driver bank name"],
+	["driver_payment_info", "bank_address", "REDACTED", "driver bank address"],
+	["driver_payment_info", "check_name", "REDACTED", "driver cheque payee name"],
+	["driver_payment_info", "bank_phone", PLACEHOLDER_PHONE, "driver bank phone"],
+	["onboarding_documents", "signature_text", "REDACTED", "typed signature"],
+	["investor_onboarding_documents", "signature_text", "REDACTED", "typed signature"],
+	// ⚠️ Stage 3d's PHONE half, which had no assertion at all until 2026-08-13.
+	// Its email half has been covered by REDIRECTED_EMAIL since the beginning,
+	// so the loop LOOKED asserted. It is not covered by the free-text sweep
+	// either, and deliberately never will be: a phone pattern loose enough to be
+	// useful also matches this system's 9-digit load ids. So these seven columns
+	// of personal mobile numbers had exactly zero verification behind them, and
+	// stage 3d skips silently on `if (!present.has(col)) continue` — one renamed
+	// column (`cell` -> `cell_phone`) and real numbers ship under a green run.
+	["drivers_directory", "phone", PLACEHOLDER_PHONE, "driver phone"],
+	["drivers_directory", "cell", PLACEHOLDER_PHONE, "driver mobile"],
+	["investors", "phone", PLACEHOLDER_PHONE, "investor phone"],
+	["investor_applications", "phone", PLACEHOLDER_PHONE, "investor-applicant phone"],
+	["job_applications", "phone", PLACEHOLDER_PHONE, "applicant phone"],
+	["job_applications", "cell", PLACEHOLDER_PHONE, "applicant mobile"],
+	["sheet_job_tracking", "phone_number", PLACEHOLDER_PHONE, "sheet contact phone"],
 ];
 const REDIRECTED_EMAIL = [
 	["users", "email"], ["drivers_directory", "email"], ["investors", "email"],
@@ -721,6 +1051,11 @@ function collectLeaks(dbPath, { scan = true } = {}) {
 			const n = count(`SELECT COUNT(*) c FROM "${t}" WHERE COALESCE("${c}",'') <> ''`);
 			if (n) leaks.push(`${n} ${label}(s) survived in ${t}.${c}`);
 		}
+		for (const [t, c, placeholder, label] of REDACTED_LITERAL) {
+			if (!has_(t, c)) continue;
+			const n = count(`SELECT COUNT(*) c FROM "${t}" WHERE COALESCE("${c}",'') <> '' AND "${c}" <> '${placeholder.replace(/'/g, "''")}'`);
+			if (n) leaks.push(`${n} ${label}(s) survived un-replaced in ${t}.${c}`);
+		}
 		for (const [t, c] of REDIRECTED_EMAIL) {
 			if (!has_(t, c)) continue;
 			const n = count(`SELECT COUNT(*) c FROM "${t}" WHERE COALESCE("${c}",'') <> '' AND "${c}" NOT LIKE '%@${MAIL_DOMAIN}'`);
@@ -736,7 +1071,6 @@ function collectLeaks(dbPath, { scan = true } = {}) {
 			// and located, never printed — a leak report that quotes the leak is
 			// the same disclosure in a log file.
 			const tables = check.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map((r) => r.name);
-			const redactedCols = new Set(REDACTED_EMPTY.map(([t, c]) => `${t}.${c}`));
 			for (const t of tables) {
 				let info = [];
 				try { info = check.prepare(`PRAGMA table_info("${t}")`).all(); } catch { continue; }
@@ -749,8 +1083,30 @@ function collectLeaks(dbPath, { scan = true } = {}) {
 					for (const c of textCols) {
 						const v = row[c];
 						if (typeof v !== "string" || v.length < 5) continue;
-						const ssn = SSN_SHAPE.test(v);
-						const mail = ROUTABLE_EMAIL.test(v) && !v.includes(`@${MAIL_DOMAIN}`);
+						// Cheap native short-circuits before either regex. Both checks
+						// below scan the WHOLE value and allocate (they must — see the
+						// per-match notes), and this sweep runs over every text column
+						// of a ~960k-row telemetry table, so the overwhelmingly common
+						// "no @ anywhere, no - anywhere" value must never reach a regex.
+						const mightBeMail = v.includes("@");
+						const mightBeSsn = v.includes("-");
+						if (!mightBeMail && !mightBeSsn) continue;
+						// Per-match, and skipping the redaction sentinel — the exact
+						// mirror of the email test below, and required for the same
+						// reason: stage 3h's own output is SSN-shaped, so a
+						// whole-value test would grade the scrubber's success as a
+						// failure. A value can hold both the sentinel and a real
+						// survivor, so `some()` and not `every()`/`includes()`.
+						const ssn = mightBeSsn && (v.match(SSN_SHAPE_G) || []).some((s) => s !== REDACTED_SSN);
+						// ⚠️ Judge EVERY match individually, never the whole value.
+						// This used to be `ROUTABLE_EMAIL.test(v) && !v.includes("@invalid")`,
+						// which fails OPEN in exactly the case that now matters most:
+						// after stage 3h a value routinely contains a scrubbed
+						// <hex>@invalid token, so a single routable address sitting
+						// beside one would have been waved through by the whole-value
+						// includes() test. Post-scrub survivors are the entire reason
+						// this sweep exists.
+						const mail = mightBeMail && (v.match(ROUTABLE_EMAIL_G) || []).some(isRoutableAddress);
 						if (!ssn && !mail) continue;
 						const k = `${c}|${ssn ? "ssn" : ""}${mail ? "email" : ""}`;
 						hits.set(k, (hits.get(k) || 0) + 1);
@@ -758,10 +1114,23 @@ function collectLeaks(dbPath, { scan = true } = {}) {
 				}
 				for (const [k, n] of hits) {
 					const [c, kind] = k.split("|");
-					const msg = `${t}.${c}: ${n} value(s) matching ${kind === "ssn" ? "an SSN shape (###-##-####)" : "a routable email address"}`;
-					// A hit inside a column the scrub owns is never advisory.
-					if (STRICT_SCAN || redactedCols.has(`${t}.${c}`)) leaks.push(msg);
-					else advisories.push(`free-text scan — ${msg}`);
+					// A value can carry BOTH shapes, which keys as "ssnemail". The
+					// old ternary tested `kind === "ssn"` and so reported those as
+					// email-only, sending whoever reads the refusal looking for the
+					// wrong thing in a 2 MB column.
+					const shapes = [kind.includes("ssn") && "an SSN shape (###-##-####)", kind.includes("email") && "a routable email address"]
+						.filter(Boolean).join(" and ");
+					const msg = `${t}.${c}: ${n} value(s) matching ${shapes}`;
+					// Unconditional. This was
+					//   if (STRICT_SCAN || redactedCols.has(...)) leaks.push(msg)
+					//   else advisories.push(...)
+					// which is what let 21 addresses ship under a "clean" line.
+					// Stage 3h owns this text now, so a survivor means the scrubber
+					// failed — always a refusal, never a note. --strict-scan is
+					// consequently a no-op for the two kinds scanned today; it is
+					// kept because it costs nothing and the next kind added (phones)
+					// will want the graduated tier back.
+					leaks.push(msg);
 				}
 			}
 		}
@@ -799,7 +1168,19 @@ async function runVerify() {
 	if (result.leaks.length) {
 		refuse(`${verifyPath} is NOT sanitized.`, ...result.leaks);
 	}
-	log(`clean: no routable address, bank number, tax id or session survives${STRICT_SCAN ? " (strict scan)" : ""}.`);
+	// ⚠️ NEVER claim more than was verified. The previous version printed this
+	// line unconditionally once `leaks` was empty — including on runs whose own
+	// WARNING lines, four lines above, named routable addresses it had just
+	// found. A summary that contradicts the warnings above it does not merely
+	// fail to inform: it actively teaches the reader that the warnings are
+	// noise, which is why the gap survived as long as it did. The scan is now
+	// leak-tier, so an advisory can only mean "a kind this sanitizer does not
+	// claim to clean" — and that gets said, rather than papered over.
+	if (result.advisories.length) {
+		log(`no leak found — but ${result.advisories.length} advisory finding(s) above are in a category this sanitizer does not scrub. Review them.`);
+	} else {
+		log(`clean: no routable address, bank number, tax id or session survives${STRICT_SCAN ? " (strict scan)" : ""}.`);
+	}
 	log("integrity_check ok");
 }
 

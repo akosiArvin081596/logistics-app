@@ -85,7 +85,10 @@ Points worth keeping:
 
 Proof, offline and reproducible: `node scripts/test-sanitize-before-transfer.js` seeds a
 scratch database with invented SSNs/EINs/routing numbers, runs the real script in the real
-modes, and greps the emitted artifact for every planted value. 30 assertions.
+modes, and greps the emitted artifact for every planted value. It prints its own total on
+the last line (`N assertions · M failed`) and exits non-zero on any failure — **read the
+count from the run, not from here.** A number written into this file goes stale the next
+time a check is added, and a stale one reads as "the suite shrank".
 
 ---
 
@@ -213,13 +216,50 @@ because it produces a file everyone believes is clean):
 | `sessions` | deleted | A session row caches the user record, so a survivor authenticates against the **old** hash — clearing them is what makes the re-hash below take effect. Forces re-login. |
 | `users.password_hash` | all replaced with `Password123!` | bcrypt is not reversible, but these *are* production's live credentials. A copy on a laptop is a copy of production authentication. Uses the same password as `prepare-test-fixtures.js` and `test-suite.js`, so the harness runs with no extra step. |
 | `demo_viewer` | deleted | Super Admin role, password published in a public repo, gated only by a method check. Removed from production 2026-08-04; a copy is the same hole. |
-| Email — `users`, `drivers_directory`, `investors`, `investor_applications`, `investor_outreach_log`, `job_applications` | rewritten to `<id-or-username>@invalid` | `.invalid` is RFC 2606 reserved and **can never resolve**, so even a misconfigured mailer cannot deliver. Per-row rather than a single constant, so accounts stay distinguishable. |
+| Email — `users`, `drivers_directory`, `investors`, `investor_applications`, `investor_outreach_log`, `job_applications`, `sheet_job_tracking` | rewritten to `<id-or-username>@invalid` | `.invalid` is RFC 2606 reserved and **can never resolve**, so even a misconfigured mailer cannot deliver. Per-row rather than a single constant, so accounts stay distinguishable. |
 | Phone / cell | `555-0100` | NANP reserved fictional range. |
 | Bank routing + account numbers, account/check names (`investor_payment_info`, `driver_payment_info`) | emptied / `REDACTED` | Nothing computes from them; they are only displayed or printed. No test value, unlimited downside. |
 | `ein_ssn`, `ssn`, `dob`, `drivers_license`, personal `address` | emptied / `REDACTED` | Same. |
 | `signature_text`, `signature_image` | `REDACTED` / emptied | A legal artefact, and as base64 the bulk of the onboarding tables. |
+| Signing evidence — `signed_ip`, `signed_ip_source`, `signed_user_agent`, `consent_text` (both onboarding-document tables) | emptied | Personal data *about the signer*: an IP address and a browser fingerprint, plus free text off the wire. `evidence_version` and `artifact_sha256` are deliberately **kept** — the version is what marks a row as captured under the evidence regime, and a digest of a file this script never copies discloses nothing. |
 | `investor_applications.access_token` | regenerated | These are **live bearer credentials** for the public onboarding flow. Regenerating means a leaked copy cannot be replayed against production, and a production link cannot be replayed against staging. |
 | `driver_locations` | emptied | Retired 2026-05-13; no endpoint reads or writes it. Pure historical position PII. |
+| **Free text — every text column of every table** (stage `3h`) | routable addresses → `<10 hex>@invalid`, `###-##-####` → `000-00-0000`, substituted **in place** | Everything above names a table and a column, so an address typed into a notes field, embedded in a JSON blob, or recorded in an audit line walked straight through. Measured on the 2026-08-13 production-shaped database: **21 routable third-party addresses survived a run that reported success** — `job_applications.reference_info` (6 of 8 rows: applicants' references and previous employers, third parties who never consented to anything — ⚠️ the address is stored under the key `relationship`, not `email`), `audit_trail.details` (8 of 1455), `load_invoice_drafts.recipient` (7 of 7, broker AP addresses). |
+
+### Stage 3h — the free-text sweep, and what constrains it
+
+Read the stage-3h comment in `scripts/refresh-env.js` for the detail. The guarantees and the
+traps:
+
+⚠️ **It is deliberately NOT a list of those three columns.** Enumerating them fixes the columns
+that happened to be populated on the day someone looked and leaves the mechanism — a scrub that
+only covers what it was told about — exactly as it was. It sweeps every text column of every
+table (SQL-prefiltered, so the ~900k-row telemetry table costs nothing), which is the only shape
+that also covers the column somebody adds next month.
+
+⚠️ **Substitution in place — never a blank, never a JSON round-trip.** `audit_trail.details` is
+parsed structurally by the app and `reference_info` is JSON the applications screen renders, so
+blanking destroys the value and a round-trip reorders keys, re-escapes strings and moves the
+` [PERIOD_…]` suffix that deliberately sits *outside* the JSON body. Everything around the
+address is left byte-identical.
+
+⚠️ **The token charset is a requirement, not a preference.** `<10 hex>@invalid` contains no `[`
+(which would forge or break the `[PERIOD_` purge exemption), no `"` or `\` (which would break the
+JSON detail bodies) and no whitespace (which would break the `] periods=` adjacency
+`parsePeriodRefusalDetail` requires). The email regex is bounded for the same reason — a loose
+`\S+@\S+\.\S+` spans brackets and would swallow `agent@x.com [PERIOD_FINALIZED]` whole.
+
+**The salt is per-RUN: not per-row, and not absent.** The token is
+`HMAC-SHA256(per-run salt, lowercased address)`. Per-run keeps one address mapping to one token
+across every column of a given database — `load_invoice_drafts.recipient` and the `audit_trail`
+row describing the same draft still agree, so anything that groups by recipient still works —
+while two different refreshes stay unlinkable. Unsalted would be a confirmation oracle over a
+guessable space, which is why a bare email digest is still personal data.
+
+**Addresses on reserved names are left alone** — `.invalid` / `.test` / `.example` /
+`.localhost` (RFC 2606, RFC 6761) and `example.com|net|org`. They already cannot resolve, and
+skipping them is what makes the stage **idempotent**: it never churns its own output, and it does
+not rewrite the deliberately-fake addresses in fixtures and documentation.
 
 **Deliberately not scrubbed:**
 
@@ -230,6 +270,13 @@ because it produces a file everyone believes is clean):
 - `trucks.license_plate`, `trailers.license_plate`, `routemate_vehicles.license_num` — company
   asset identifiers; the ELD linkage keys off adjacent columns.
 - `messages` / `notifications` bodies — operational content, worth exercising at realistic volume.
+  **Note the scope, which narrowed on 2026-08-13:** the body text is still kept in full, and stage
+  3h neutralizes only an email address or SSN shape appearing *inside* it. Realistic volume was
+  always the point; a routable address was never part of it.
+- **Phone numbers in free text** — out of stage 3h's reach on purpose. The assertion sweep has
+  never scanned for them, so there is no signal that any exist, and a phone pattern loose enough
+  to be useful also matches this system's 9-digit load ids (`562620213`) and dollar amounts.
+  Neutralizing a load id inside an audit line would be a worse bug than the one being fixed.
 
 ### The assertions, and why they are tiered
 
@@ -239,19 +286,99 @@ Written once on purpose: a second copy is a second thing to forget when a column
 scrub list, and the entire value of these checks is that they fail when the scrub silently
 stops covering something.
 
-**Hard failures** — a named column the sanitizer owns is still populated. Precise, so a hit
-is always a refusal: `investor_payment_info.routing_number` / `.account_number`,
-`driver_payment_info.bank_routing` / `.bank_account`, `investors.ein_ssn`,
-`investor_applications.ein_ssn`, `job_applications.ssn` / `.drivers_license`; a non-`@invalid`
-address in any of the seven redirected email columns; any surviving `sessions` or
-`driver_locations` row.
+**The tiering was INVERTED on 2026-08-13.** Read the rest of this section before restoring the
+old behaviour.
 
-**Advisories** — a free-text sweep over every text column for SSN-shaped strings and routable
-addresses. It reads columns nobody scrubs (`messages.body`, `audit_trail.details`), where a
-broker's address is ordinary operational content rather than a leak. Failing on those would
-make refusal routine on real data, and a routine refusal gets flagged away within a week.
-`--strict-scan` promotes them for callers who know their data has none. A hit inside a column
-the scrub *does* own is never advisory.
+**Hard failures**, two kinds, both an unconditional refusal:
+
+1. **A named column the sanitizer owns did not get scrubbed.** Three lists in
+   `refresh-env.js`, and the lists themselves are the specification — do not re-enumerate them
+   here, that is how this section drifted before:
+   - `REDACTED_EMPTY` — columns the scrub **empties** (bank routing/account, `ein_ssn`, `ssn`,
+     `drivers_license`, `dob`, `signature`, `signature_image`, and the signing evidence
+     `signed_ip` / `signed_ip_source` / `signed_user_agent` / `consent_text` on both
+     onboarding-document tables). A leak is any non-empty value.
+   - `REDACTED_LITERAL` — columns the scrub **replaces with a placeholder** rather than emptying,
+     so "empty" is the wrong test: the four personal **home address** columns, the bank
+     account/cheque/bank names and bank address/phone, and `signature_text`. A leak is a value
+     that is neither empty nor the placeholder.
+   - `REDIRECTED_EMAIL` — the seven columns rewritten to `@invalid`. A leak is any address that
+     is not.
+
+   Plus any surviving `sessions` or `driver_locations` row.
+
+   ⚠️ **`REDACTED_LITERAL` and seven of `REDACTED_EMPTY`'s entries were added on 2026-08-13,
+   because the assertion list had drifted into being a strict SUBSET of the scrub list** — the
+   exact failure the paragraph above says these checks exist to prevent. Home addresses, dates of
+   birth and signature blobs were scrubbed but never verified, and **the free-text sweep cannot
+   cover for that omission**: none of them is email- or SSN-shaped, so a `setCols()` that quietly
+   stopped matching (a renamed column, a rebuilt table) would have shipped real personal addresses
+   with every check in the file still green.
+2. **Any routable address or SSN shape anywhere in free text** — the sweep over every text column
+   of every table. Advisory until 2026-08-13; a refusal since.
+
+⚠️ **Why (2) stopped being an advisory.** The old rationale was sound *for its time*: the sweep
+read columns nobody scrubbed, so a broker's address in a message body was ordinary operational
+content rather than a leak, and a refusal that fires on ordinary content gets flagged away within
+a week. But that argument rested entirely on **nothing scrubbing free text**. Stage 3h scrubs it.
+A survivor therefore no longer means "we found content we never promised to clean" — it means the
+scrubber ran and did not work, which is precisely what a hard refusal is for. The cost of the old
+tier was measured: 21 routable third-party addresses shipped in a run that printed
+`clean: no routable address … survives` four lines below the WARNING lines naming them.
+
+**Advisories** — **nothing populates this tier today.** It survives so that the next scan kind
+added (phone numbers are the obvious candidate) does not also have to invent a way to report
+itself. `--strict-scan` is consequently a **no-op for the two kinds scanned today**; it is kept
+because it costs nothing and a graduated tier will be wanted again.
+
+⚠️ **What stops the `clean:` line contradicting its own warnings is the TIER INVERSION, not the
+conditional beside it.** The line is now guarded by `advisories.length`, but nothing populates
+that tier today, so the guard is currently unreachable — it exists for the next scan kind, and
+crediting it would be crediting an inert mechanism. The real fix is that a free-text hit is a
+**leak**, which stops the run outright. The distinction matters: someone who removed the tier
+inversion and kept the conditional would restore the original bug while believing they were
+covered. (A summary that contradicts its own warnings does not merely fail to inform — it teaches
+the reader that the warnings are noise, which is how this gap survived as long as it did.)
+
+⚠️ **The detector judges every match individually, never the whole value.** It used to be
+`ROUTABLE_EMAIL.test(v) && !v.includes("@invalid")`. After stage 3h a value routinely *contains*
+a scrubbed `<hex>@invalid` token, so a routable address sitting beside one would have been waved
+through — a fail-open in exactly the case that now matters most, since post-scrub survivors are
+the entire reason this sweep exists. Every match is now graded by the shared
+`isRoutableAddress()`, the same predicate stage 3h scrubs with: a scrubber and the check that
+grades it must never be able to disagree about what counts as a leak.
+
+⚠️ **Keep the assertion lists a SUPERSET of what the scrub touches.** They were a strict subset
+until 2026-08-13 — see the `REDACTED_LITERAL` note above. When you add a column to stage 3d/3e/3f,
+add it to `REDACTED_EMPTY` (if the scrub empties it) or `REDACTED_LITERAL` (if the scrub writes a
+placeholder) in the same edit. A scrub step with no assertion behind it fails silently, and the
+free-text sweep is not a safety net for it: that sweep only sees email- and SSN-shaped values.
+
+### ⚠️ Stage 3h is NOT a catch-all — it neutralizes exactly two shapes
+
+A routable email address and `###-##-####`. That is the whole of it. Reading "every text column
+of every table" as "free-text PII is handled now" is the mistake that let the following ship, and
+each was found *after* stage 3h was written and believed complete:
+
+- **Base64 documents.** `job_applications.cdl_front` / `cdl_back` / `medical_card` are
+  photographs of the applicant's driving licence and DOT medical card, up to 2.76 MB each —
+  carrying the licence number, date of birth, home address, face and signature, i.e. every value
+  the columns beside them are emptied of. **Measured 2026-08-13: 8 of 8 rows, ~30 MB, shipping
+  under a `clean:` line.** Base64 contains no `@` and no `###-##-####`, so the SQL prefilter never
+  selects those rows and the scan short-circuits before either regex — stage 3h is *structurally*
+  blind. CLAUDE.md records the identical finding against the API (*"Masking the NUMBER while
+  shipping the DOCUMENT is not masking"*), fixed there 2026-08-08; the sanitizer was not brought
+  into line until now.
+- **Home locality.** `city` / `state` / `zip` on `job_applications` and `drivers_directory`,
+  beside an `address` the scrub had already set to `REDACTED` — which makes the row *look*
+  scrubbed. Full name plus city plus ZIP re-identifies a person.
+- **Phone numbers.** Stage 3d has always written `555-0100` into seven columns, and until
+  2026-08-13 **nothing asserted it** — its email half was covered by `REDIRECTED_EMAIL`, so the
+  loop looked verified. The sweep will never cover them either (see the deliberate exclusion
+  above), so `REDACTED_LITERAL` is the only check.
+
+The rule this yields: **if a column can hold personal data in a shape that is not an email
+address or an SSN, it needs an explicit list entry.** Assume stage 3h will not save you.
 
 ⚠️ **The sweep matches `###-##-####` only, never a bare 9-digit run.** Load ids in this system
 are exactly nine digits (`562620213`, `563593554`), so a 9-digit rule would flag the Job
@@ -356,10 +483,22 @@ instead, naming the command.
 
 ## Verified
 
-Run end-to-end on 2026-08-08 against the `app.db.20260808_020003.gz` snapshot: 298.8 MB →
-**144.6 MB**, `integrity_check ok`, 12 users re-hashed, 10 emails redirected, 46 contact fields
-neutralized, 28 bank/tax redactions, 34 signatures cleared, 3 access tokens regenerated, 6
-sessions cleared. Booted on port 3011 against the LOCAL sheet: server up, 11 tabs cached, 279
-load coordinates populated, login succeeded with the reset password, `/api/dashboard` returned
-live KPIs, `/api/fuel/verify` backtested all 3 instrumented trucks, and `/api/periods` showed
-the real close calendar (July pending, June finalized).
+**2026-08-13 — stage 3h, the real sanitizer against a copy of the production-shaped local
+database.** **21 of 21 values rewritten across 11 distinct addresses**; `--verify --strict-scan`
+on the resulting artifact reports clean; **129/129** structural assertions passed — the text
+surrounding each address is byte-identical, every `reference_info` still parses as JSON, one
+address maps to one token across every table it appears in, and zero routable addresses survive
+anywhere. Runtime ~67 s over 963,211 telemetry rows.
+
+**2026-08-08 — end-to-end, against the `app.db.20260808_020003.gz` snapshot.** 298.8 MB →
+**144.6 MB**, `integrity_check ok`, 12 users re-hashed, 6 sessions cleared. Booted on port 3011
+against the LOCAL sheet: server up, 11 tabs cached, 279 load coordinates populated, login
+succeeded with the reset password, `/api/dashboard` returned live KPIs, `/api/fuel/verify`
+backtested all 3 instrumented trucks, and `/api/periods` showed the real close calendar (July
+pending, June finalized).
+
+⚠️ That run's **per-category redaction counts are superseded** and were deliberately dropped from
+the line above (they read 10 emails redirected, 46 contact fields, 28 bank/tax, 34 signatures, 3
+access tokens). Both the signing-evidence columns and stage 3h landed after it, so a current run
+redacts strictly more and no count from 2026-08-08 reconciles against one taken today. The boot
+half still stands.
