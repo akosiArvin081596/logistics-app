@@ -703,10 +703,25 @@ async function draftInvoice() {
     // The preview does the same heavy work as approve (Sheets + Drive + Gemini +
     // Puppeteer), so give it the same 60s budget as the approve POST.
     const r = await api.post(`/api/loads/${encodeURIComponent(loadIdValue.value)}/draft-invoice?dryRun=1`, {}, { timeout: 60000 })
+    // `needsTotal: true` — no rate on the rate-con AND nothing in the sheet's
+    // Payment column, so the server could derive no invoice total. It answers 200
+    // with total:"", totalSource:"unknown" and an EMPTY invoicePdfBase64 (it never
+    // renders a $0.00 PDF), and the review modal collects the figure by hand.
+    //
+    // This used to 422 INVOICE_TOTAL_UNKNOWN *before* the dryRun returned, so the
+    // modal never opened — in exactly the situation the editable review exists
+    // for, since typing the total in is the only remaining way to invoice a
+    // delivered load whose month is closed. Open it unchanged; the response is a
+    // normal preview that happens to be missing one field.
     previewData.value = r
     previewOpen.value = true
   } catch (e) {
-    draftResult.value = { ok: false, msg: (e && e.message) || 'Failed to prepare the invoice preview.' }
+    // A server still on the pre-relaxation build answers 422 here. Say what to do
+    // instead of echoing "Invoice total unknown", which reads as a dead end.
+    const msg = e && e.code === 'INVOICE_TOTAL_UNKNOWN'
+      ? 'No invoice total could be derived — this load has no rate on its rate-con and no Payment in Job Tracking. Add the Payment on the load (Active Loads → Edit), then try again.'
+      : (e && e.message) || 'Failed to prepare the invoice preview.'
+    draftResult.value = { ok: false, msg }
   } finally {
     drafting.value = false
   }

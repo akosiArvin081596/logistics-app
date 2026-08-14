@@ -7,7 +7,7 @@
       <DialogHeader class="idp-header">
         <DialogTitle>Review invoice draft</DialogTitle>
         <DialogDescription>
-          Nothing is sent yet — verify the recipient and attachments, then
+          Nothing is sent yet — <strong>edit anything that's wrong</strong> and the preview re-renders, then
           <strong>Approve &amp; Create Draft</strong> saves a Gmail draft for you to review and send.
         </DialogDescription>
       </DialogHeader>
@@ -31,11 +31,54 @@
           </div>
           <div class="idp-stage">
             <div v-if="activeRateconLabel" class="idp-ratecon-label" :title="activeRateconLabel">{{ activeRateconLabel }}</div>
+            <!-- Reuses the rate-con caption pill rather than inventing a second
+                 floating-status style: same slot, same non-interactive treatment,
+                 and the two can never collide (that caption only renders on a
+                 rate-con tab, this only on the invoice). -->
+            <div v-else-if="activeTab === 'invoice' && (previewing || previewPending)" class="idp-ratecon-label">
+              {{ previewing ? 'Updating preview…' : 'Edits not rendered yet' }}
+            </div>
+            <!-- ⚠️ Keyed on activeTab ONLY — deliberately NOT on the src, so a
+                 re-rendered invoice swaps the document in place instead of
+                 remounting. Both were measured under production conditions and
+                 both are correct; in-place wins on the thing the user sees:
+                 sampling every 100 ms across an edit, in-place never leaves the
+                 pane empty (0/40 samples) while a remount blanks it for ~200 ms
+                 before the spinner resolves.
+                 ⚠️ The correctness of BOTH depends on app.config.errorHandler
+                 (src/main.js) existing. vue-pdf-embed's teardown throws
+                 "destroy is not a function" on every document swap; Vue routes a
+                 lifecycle error to that handler and carries on, but with NO handler
+                 installed the throw aborts the rest of the patch and leaves sibling
+                 subtrees stale — the footer keeps a disabled Approve button and a
+                 stale reason while the component's own state says otherwise, i.e.
+                 the reviewer silently stops updating. Verified by removing the
+                 handler and reproducing exactly that. If that handler is ever
+                 narrowed, re-test this pane. -->
             <PdfZoomViewer v-if="stageSrc" :key="activeTab" :src="stageSrc" />
+            <!-- The invoice tab now has a genuine empty state: a load with no
+                 derivable total arrives with invoicePdfBase64:"" (the server
+                 renders no $0.00 PDF), so there is nothing to show until the
+                 dispatcher supplies the missing figures. -->
+            <div v-else-if="activeTab === 'invoice'" class="idp-pod-fallback">
+              <template v-if="previewing">
+                <p>Rendering the invoice preview…</p>
+              </template>
+              <template v-else-if="!formValid">
+                <p>No invoice preview yet — fill in the highlighted fields on the right and it will render here.</p>
+                <p v-if="firstFieldError" class="idp-hint idp-hint-warn">{{ firstFieldError }}</p>
+              </template>
+              <template v-else-if="previewError">
+                <p>{{ previewError }}</p>
+              </template>
+              <template v-else>
+                <p>No invoice preview yet.</p>
+              </template>
+            </div>
             <div v-else-if="activeTab === 'email'" class="idp-email">
               <div class="idp-email-head">
                 <div><span class="idp-email-k">To</span> {{ recipient || pv.to || '—' }}</div>
-                <div><span class="idp-email-k">Subject</span> {{ pv.subject || '—' }}</div>
+                <div><span class="idp-email-k">Subject</span> {{ previewSubject || '—' }}</div>
               </div>
               <!-- Trusted server-rendered HTML (buildInvoiceEmailHtml esc()'s all dynamic fields). -->
               <div class="idp-email-body" v-html="emailHtml"></div>
@@ -52,8 +95,13 @@
           </div>
         </div>
 
-        <!-- Right: recipient + resolved routing -->
+        <!-- Right: the eight editable invoice fields, risk-descending.
+             Every one of these prints on the PDF the broker receives; before
+             this form only the recipient could be corrected, so a misread order
+             number or a stale sheet rate had no path except "fix the source and
+             re-run" — which for a delivered load in a closed month is no path. -->
         <div class="idp-meta">
+          <!-- 1. Recipient email — position, badge and copy deliberately unchanged. -->
           <div class="idp-field">
             <label class="idp-label" for="idp-recipient">
               Recipient email
@@ -66,12 +114,13 @@
               inputmode="email"
               autocomplete="off"
               class="idp-input"
-              :class="{ 'is-invalid': recipient && !recipientValid }"
+              :class="{ 'is-invalid': !!(recipient && fieldErrors.recipient), 'is-edited': isEdited }"
+              :aria-invalid="!!fieldErrors.recipient"
               :disabled="approving"
               placeholder="name@broker.com"
+              @input="onFieldInput"
             />
-            <p v-if="!recipient.trim()" class="idp-hint idp-hint-warn">A recipient is required before approving.</p>
-            <p v-else-if="!recipientValid" class="idp-hint idp-hint-warn">That doesn't look like a valid email.</p>
+            <p v-if="fieldErrors.recipient" class="idp-hint idp-hint-warn">{{ fieldErrors.recipient }}</p>
             <p v-else-if="isEdited" class="idp-hint">Edited — the draft will be addressed to this address.</p>
           </div>
 
@@ -85,44 +134,292 @@
             it to the load first if this one does.
           </div>
 
-          <dl class="idp-facts">
-            <div class="idp-fact idp-fact-wide">
-              <dt>Subject</dt>
-              <dd>{{ pv.subject || '—' }}</dd>
+          <!-- Trailer is a SAFETY check, not a presentation field, so it is not
+               editable here — but approve is refused with a 409 when it mismatches,
+               and Gemini is nondeterministic enough that a clean preview can still
+               be followed by a refusal. Say so before anyone edits eight fields. -->
+          <!-- ⚠️ The inline values are NOT <strong>: `.idp-warn strong` is
+               display:block (it exists to make the leading sentence a title), so a
+               <strong> mid-sentence puts every trailer number on its own line and
+               strands the punctuation. .idp-mono reads better for an identifier
+               anyway. -->
+          <div v-if="trailerMismatch" class="idp-warn" role="status">
+            <strong>Trailer numbers disagree.</strong>
+            Job Tracking says <span class="idp-mono">{{ trailerMismatch.sheet || '—' }}</span>, the rate-con
+            says <span class="idp-mono">{{ trailerMismatch.ratecon || '—' }}</span>. Approving will be
+            refused until they agree — fix the trailer on the load. Nothing below can override it.
+          </div>
+
+          <!-- 2. Bill-To name. Deliberately NOT mirrored from Broker: the two
+               legitimately diverge (the Invoice-To block is labelled from the
+               recipient's domain), and a silent mirror would overwrite a
+               deliberate Bill-To the instant someone fixed a typo in Broker.
+               Hence an explicit one-click copy instead. -->
+          <div class="idp-field">
+            <label class="idp-label" for="idp-billto">
+              Invoice to (name)
+              <span v-if="edited.billToName" class="idp-badge idp-badge-blue">edited</span>
+              <button
+                v-if="canCopyBrokerToBillTo"
+                type="button"
+                class="idp-badge idp-badge-blue"
+                :disabled="approving"
+                title="Copy the broker name into this field"
+                @click="copyBrokerToBillTo"
+              >use broker name</button>
+            </label>
+            <input
+              id="idp-billto"
+              v-model="form.billToName"
+              type="text"
+              autocomplete="off"
+              maxlength="80"
+              class="idp-input"
+              :class="{ 'is-edited': edited.billToName }"
+              :disabled="approving"
+              placeholder="Acme Freight"
+              @input="onFieldInput"
+            />
+            <p v-if="!form.billToName.trim()" class="idp-hint idp-hint-warn">
+              Blank — the invoice prints no name above the “Invoice To” address.
+            </p>
+          </div>
+
+          <!-- 3. Broker name. -->
+          <div class="idp-field">
+            <label class="idp-label" for="idp-broker">
+              Broker name
+              <span v-if="edited.brokerName" class="idp-badge idp-badge-blue">edited</span>
+            </label>
+            <input
+              id="idp-broker"
+              v-model="form.brokerName"
+              type="text"
+              autocomplete="off"
+              maxlength="80"
+              class="idp-input"
+              :class="{ 'is-edited': edited.brokerName }"
+              :disabled="approving"
+              placeholder="C.H. Robinson"
+              @input="onFieldInput"
+            />
+            <!-- Which inbox the draft is addressed to, and which cover letter it
+                 uses, both derive from the broker EMAIL, not this string. Editing
+                 a display name must never flip the email template. -->
+            <p class="idp-hint">
+              Printed with the order number as the invoice's reference line. Display name only —
+              it does not change which inbox the draft is addressed to.
+            </p>
+          </div>
+
+          <!-- 4. Total — the highest-risk field on the form. -->
+          <div class="idp-field">
+            <label class="idp-label" for="idp-total">
+              Total
+              <span class="idp-badge" :class="totalBadge.cls">{{ totalBadge.text }}</span>
+            </label>
+            <input
+              id="idp-total"
+              v-model="form.total"
+              type="text"
+              inputmode="decimal"
+              autocomplete="off"
+              class="idp-input"
+              :class="{ 'is-invalid': !!(form.total && fieldErrors.total), 'is-edited': edited.total }"
+              :aria-invalid="!!fieldErrors.total"
+              :disabled="approving"
+              placeholder="3000.00"
+              @input="onFieldInput"
+            />
+            <p v-if="fieldErrors.total" class="idp-hint idp-hint-warn">{{ fieldErrors.total }}</p>
+            <p v-else-if="pv.needsTotal && !edited.total" class="idp-hint idp-hint-warn">
+              No total could be derived from the rate-con or Job Tracking. Type the amount from the
+              rate confirmation — this is the one field that has to come from you.
+            </p>
+            <!-- Owner decision: a corrected total is INVOICE-ONLY. Surfaced here
+                 as well as at the confirm, because this is where it's decided. -->
+            <p v-else-if="edited.total" class="idp-hint idp-hint-warn">
+              Invoice only — Job Tracking's Payment column is <strong>not</strong> changed, so revenue,
+              driver pay, investor payouts and the P&amp;L all keep reading the original figure.
+            </p>
+          </div>
+
+          <!-- 5. Invoice # + invoice date. -->
+          <div class="idp-row2">
+            <div class="idp-field">
+              <label class="idp-label" for="idp-invoiceid">
+                Invoice #
+                <span v-if="edited.invoiceId" class="idp-badge idp-badge-blue">edited</span>
+                <span v-if="invoiceIdDiverges" class="idp-badge idp-badge-amber">not the minted # ⚠</span>
+              </label>
+              <input
+                id="idp-invoiceid"
+                v-model="form.invoiceId"
+                type="text"
+                autocomplete="off"
+                maxlength="40"
+                class="idp-input idp-mono"
+                :class="{ 'is-invalid': !!(form.invoiceId && fieldErrors.invoiceId), 'is-edited': edited.invoiceId }"
+                :aria-invalid="!!fieldErrors.invoiceId"
+                :disabled="approving"
+                @input="onFieldInput"
+              />
+              <p v-if="fieldErrors.invoiceId" class="idp-hint idp-hint-warn">{{ fieldErrors.invoiceId }}</p>
+              <!-- The sequence is consumed on every real approve regardless, so a
+                   custom number leaves the minted one burned and unused. -->
+              <p v-else-if="invoiceIdDiverges" class="idp-hint idp-hint-warn">
+                The next number in sequence is <strong>{{ peekedInvoiceId }}</strong>. It is still
+                consumed when you approve, so this invoice will not be in sequence.
+              </p>
+              <p v-for="w in invoiceIdWarnings" :key="w" class="idp-hint idp-hint-warn">{{ w }}</p>
             </div>
-            <div class="idp-fact">
-              <dt>Total</dt>
-              <dd>
-                {{ pv.total || '—' }}
-                <span v-if="pv.totalSource" class="idp-muted">· from {{ pv.totalSource }}</span>
-              </dd>
+            <div class="idp-field">
+              <label class="idp-label" for="idp-invoicedate">
+                Invoice date
+                <span v-if="edited.invoiceDate" class="idp-badge idp-badge-blue">edited</span>
+              </label>
+              <!-- Bound to the server's *Iso field and sent back as YYYY-MM-DD.
+                   Never reformat a date here: the server's formatDate() loses a
+                   day on any ISO input, so a client-side "tidy-up" ships every
+                   invoice dated one day early. -->
+              <input
+                id="idp-invoicedate"
+                v-model="form.invoiceDate"
+                type="date"
+                class="idp-input"
+                :class="{ 'is-invalid': !!fieldErrors.invoiceDate, 'is-edited': edited.invoiceDate }"
+                :aria-invalid="!!fieldErrors.invoiceDate"
+                :disabled="approving"
+                @change="onDateCommit"
+                @blur="onDateCommit"
+              />
+              <p v-if="fieldErrors.invoiceDate" class="idp-hint idp-hint-warn">{{ fieldErrors.invoiceDate }}</p>
             </div>
-            <div class="idp-fact">
-              <dt>Broker</dt>
-              <dd>{{ pv.brokerName || '—' }}</dd>
+          </div>
+
+          <!-- 6. Order # + PO #. -->
+          <div class="idp-row2">
+            <div class="idp-field">
+              <label class="idp-label" for="idp-order">
+                Order #
+                <span v-if="edited.orderNumber" class="idp-badge idp-badge-blue">edited</span>
+              </label>
+              <input
+                id="idp-order"
+                v-model="form.orderNumber"
+                type="text"
+                autocomplete="off"
+                maxlength="40"
+                class="idp-input idp-mono"
+                :class="{ 'is-invalid': !!(form.orderNumber && fieldErrors.orderNumber), 'is-edited': edited.orderNumber }"
+                :aria-invalid="!!fieldErrors.orderNumber"
+                :disabled="approving"
+                @input="onFieldInput"
+              />
+              <p v-if="fieldErrors.orderNumber" class="idp-hint idp-hint-warn">{{ fieldErrors.orderNumber }}</p>
             </div>
-            <div class="idp-fact">
-              <dt>Invoice #</dt>
-              <dd class="idp-mono">{{ pv.invoiceId || '—' }}</dd>
+            <div class="idp-field">
+              <label class="idp-label" for="idp-po">
+                PO #
+                <span v-if="edited.poNumber" class="idp-badge idp-badge-blue">edited</span>
+              </label>
+              <input
+                id="idp-po"
+                v-model="form.poNumber"
+                type="text"
+                autocomplete="off"
+                maxlength="40"
+                class="idp-input idp-mono"
+                :class="{ 'is-invalid': !!(form.poNumber && fieldErrors.poNumber), 'is-edited': edited.poNumber }"
+                :aria-invalid="!!fieldErrors.poNumber"
+                :disabled="approving"
+                placeholder="optional"
+                @input="onFieldInput"
+              />
+              <p v-if="fieldErrors.poNumber" class="idp-hint idp-hint-warn">{{ fieldErrors.poNumber }}</p>
             </div>
-            <div class="idp-fact">
-              <dt>Order #</dt>
-              <dd class="idp-mono">{{ pv.orderNumber || '—' }}</dd>
-            </div>
-          </dl>
+          </div>
+
+          <!-- 7. Delivery date — optional, and the template already renders a blank. -->
+          <div class="idp-field">
+            <label class="idp-label" for="idp-delivery">
+              Delivery date
+              <span v-if="edited.deliveryDate" class="idp-badge idp-badge-blue">edited</span>
+            </label>
+            <input
+              id="idp-delivery"
+              v-model="form.deliveryDate"
+              type="date"
+              class="idp-input"
+              :class="{ 'is-invalid': !!fieldErrors.deliveryDate, 'is-edited': edited.deliveryDate }"
+              :aria-invalid="!!fieldErrors.deliveryDate"
+              :disabled="approving"
+              @change="onDateCommit"
+              @blur="onDateCommit"
+            />
+            <p v-if="fieldErrors.deliveryDate" class="idp-hint idp-hint-warn">{{ fieldErrors.deliveryDate }}</p>
+            <p v-else-if="!form.deliveryDate" class="idp-hint">Optional — left blank the invoice prints no delivery date.</p>
+          </div>
+
+          <!-- 8. Subject — read-only and taken verbatim from the server response,
+               never re-derived here. The point of showing it is that the subject
+               you reviewed is provably the subject that gets sent; a client-side
+               reconstruction would be a second implementation free to disagree. -->
+          <div class="idp-field">
+            <label class="idp-label" for="idp-subject">
+              Subject
+              <span v-if="subjectStale" class="idp-badge idp-badge-amber">updating…</span>
+            </label>
+            <input
+              id="idp-subject"
+              class="idp-input"
+              type="text"
+              readonly
+              tabindex="-1"
+              :value="previewSubject"
+              :title="previewSubject"
+            />
+            <p class="idp-hint">Built by the server from the fields above — not editable.</p>
+          </div>
+
+          <div v-if="previewError" class="idp-warn" role="status">
+            <strong>The preview didn't refresh.</strong>
+            {{ previewError }} The fields above are still what will be sent — approving re-renders
+            everything server-side, so it is safe, but you won't have seen this version.
+          </div>
+
+          <div v-if="previewWarnings.length" class="idp-warn" role="status">
+            <strong>Check before approving.</strong>
+            <span v-for="w in previewWarnings" :key="w" style="display:block;">{{ w }}</span>
+          </div>
+
+          <div class="idp-reset-row">
+            <button
+              type="button"
+              class="idp-btn idp-btn-ghost"
+              :disabled="approving || !anyEdited"
+              title="Put every field back to the value the server extracted"
+              @click="resetToExtracted"
+            >Reset to extracted values</button>
+          </div>
 
           <div v-if="approveError" class="idp-error" role="alert">{{ approveError }}</div>
         </div>
       </div>
 
       <div class="idp-footer">
-        <span class="idp-foot-note">Saves a Gmail draft — it is never auto-sent.</span>
+        <!-- The note doubles as the disabled-button explanation. A primary action
+             that is greyed out with no stated reason reads as a broken app, and
+             "you have edits nobody has rendered yet" is not guessable. -->
+        <span class="idp-foot-note" :class="{ 'idp-hint-warn': !!approveBlockedReason }">
+          {{ approveBlockedReason || 'Saves a Gmail draft — it is never auto-sent.' }}
+        </span>
         <div class="idp-foot-actions">
           <button type="button" class="idp-btn idp-btn-ghost" :disabled="approving" @click="onOpenChange(false)">Cancel</button>
           <button
             type="button"
             class="idp-btn idp-btn-primary"
-            :disabled="approving || !recipientValid"
+            :disabled="approving || !canApprove"
             @click="approve"
           >
             <span v-if="approving" class="idp-spinner" aria-hidden="true"></span>
@@ -135,7 +432,7 @@
 </template>
 
 <script setup>
-import { computed, ref, watch, onBeforeUnmount } from 'vue'
+import { computed, reactive, ref, watch, onBeforeUnmount } from 'vue'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import { useApi } from '../../composables/useApi'
 import PdfZoomViewer from '../shared/PdfZoomViewer.vue'
@@ -158,8 +455,50 @@ const api = useApi()
 
 // Invoice gen + IMAP draft can be slow; match RateConReviewModal's create timeout.
 const APPROVE_TIMEOUT_MS = 60000
+// The preview route does no Sheets / Gemini / Drive work — only buildInvoiceHtml
+// + renderHtmlToPdf — but Puppeteer runs `waitUntil: networkidle0` against a
+// template that still links a remote Google Font, so a blocked-egress render
+// waits out its own 30s timeout. 45s leaves room for that without letting a
+// wedged render hold the "approve is disabled" state open indefinitely.
+const PREVIEW_TIMEOUT_MS = 45000
+// Long enough that typing "3,000.00" is one render, not six.
+const PREVIEW_DEBOUNCE_MS = 600
 
 const pv = computed(() => props.preview || {})
+
+// --- Validation ---------------------------------------------------------------
+// These mirror the server's parseInvoiceOverrides rules. They are a courtesy, not
+// the guard — the server re-validates everything — but they are what stops a
+// doomed body costing a Chromium render, and what lets a field say WHY it's wrong.
+const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,39}$/
+const REF_RE = /^[A-Za-z0-9][A-Za-z0-9 ._/#-]{0,39}$/
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+// A FORMAT gate, deliberately ahead of any parse: the server's parseMoney is a
+// mangler rather than a validator (it strips everything outside [0-9.-], so
+// "12abc34" becomes 1234 and sails through a `> 0` check). Same shape here so the
+// client and the server agree about what a money string is.
+const MONEY_RE = /^\$?\s*(\d{1,3}(,\d{3})*|\d+)(\.\d{1,2})?$/
+// 0.01, not "> 0": formatMoney(0.001) prints "$0.00" — a positive number that
+// renders as zero, which would walk straight past the never-draft-a-$0.00 rule.
+const TOTAL_MIN = 0.01
+const TOTAL_MAX = 1000000
+
+const str = (v) => (v == null ? '' : String(v))
+// An <input type="date"> silently discards anything that isn't YYYY-MM-DD, so a
+// malformed server date would display blank while the model still held it — and
+// then get sent. Normalise to "" instead, which is a value the server accepts and
+// the template renders as absent, rather than shipping an unparseable string that
+// buildInvoiceHtml would print verbatim onto the broker's invoice.
+const isoDate = (v) => (ISO_DATE_RE.test(str(v)) ? str(v) : '')
+function moneyValue(s) {
+  const t = str(s).replace(/[$,\s]/g, '')
+  if (!t) return null
+  const n = Number(t)
+  return Number.isFinite(n) ? Math.round(n * 100) / 100 : NaN
+}
+function fmtMoney(n) {
+  return Number.isFinite(n) ? n.toLocaleString('en-US', { style: 'currency', currency: 'USD' }) : ''
+}
 
 // --- Recipient + source badge -----------------------------------------------
 const recipient = ref('')
@@ -176,6 +515,158 @@ const badge = computed(() => {
   return { text: 'manual', cls: 'idp-badge-blue' }
 })
 
+// --- The editable invoice fields --------------------------------------------
+// One reactive object for the eight overridable fields, plus a frozen snapshot of
+// what the server extracted. The snapshot is what "edited" and "Reset" compare
+// against — not props.preview, which must stay the untouched server response.
+const EMPTY_FORM = () => ({
+  billToName: '', brokerName: '', total: '',
+  invoiceId: '', invoiceDate: '', orderNumber: '', poNumber: '', deliveryDate: '',
+})
+const form = reactive(EMPTY_FORM())
+const seeded = ref(EMPTY_FORM())
+// The number the server would mint next. Captured at open and NOT refreshed from
+// each preview response: re-reading it per render would make the amber "not the
+// minted #" badge blink on and off as other dispatchers approve their own drafts.
+const peekedInvoiceId = ref('')
+// Bison-ness as the dryRun derived it FROM THE SHEET's broker email. Pinned, never
+// re-derived here, and preview-only — see the note in buildOverrideBody().
+const pinnedIsBison = ref(null)
+// Raw Number, kept for the edited-total confirm. The formatted `pv.total` string
+// is display only — reparsing our own formatting is how a factor-of-1000 error
+// reaches an invoice.
+const seededTotalAmount = computed(() => {
+  const n = Number(pv.value.totalAmount)
+  return Number.isFinite(n) ? n : null
+})
+
+function seedForm() {
+  const p = pv.value
+  const t = Number(p.totalAmount)
+  const next = {
+    billToName: str(p.billToName),
+    brokerName: str(p.brokerName),
+    // From the RAW totalAmount, never the formatted `pv.total`.
+    total: Number.isFinite(t) && t > 0 ? t.toFixed(2) : '',
+    invoiceId: str(p.invoiceId || p.peekedInvoiceId),
+    // The *Iso fields exist so <input type="date"> binds directly: no client
+    // reparsing, and therefore no way to reintroduce the ISO off-by-one day.
+    invoiceDate: isoDate(p.invoiceDateIso),
+    orderNumber: str(p.orderNumber),
+    poNumber: str(p.poNumber),
+    deliveryDate: isoDate(p.deliveryDateIso),
+  }
+  Object.assign(form, next)
+  seeded.value = { ...next }
+  recipient.value = originalTo.value
+  peekedInvoiceId.value = str(p.peekedInvoiceId)
+  // Strict boolean only. Anything else stays null so the field is omitted and the
+  // server falls back to deriving it — see buildOverrideBody().
+  pinnedIsBison.value = typeof p.isBison === 'boolean' ? p.isBison : null
+}
+
+const edited = computed(() => {
+  const s = seeded.value
+  return {
+    billToName: form.billToName.trim() !== str(s.billToName).trim(),
+    brokerName: form.brokerName.trim() !== str(s.brokerName).trim(),
+    // Compared by VALUE, so "3000.00" and "3,000.00" are not an edit.
+    total: moneyValue(form.total) !== moneyValue(s.total),
+    invoiceId: form.invoiceId.trim() !== str(s.invoiceId).trim(),
+    invoiceDate: form.invoiceDate !== str(s.invoiceDate),
+    orderNumber: form.orderNumber.trim() !== str(s.orderNumber).trim(),
+    poNumber: form.poNumber.trim() !== str(s.poNumber).trim(),
+    deliveryDate: form.deliveryDate !== str(s.deliveryDate),
+  }
+})
+const anyEdited = computed(() => isEdited.value || Object.values(edited.value).some(Boolean))
+
+const fieldErrors = computed(() => {
+  const e = {}
+  if (!recipient.value.trim()) e.recipient = 'A recipient is required before approving.'
+  else if (!recipientValid.value) e.recipient = "That doesn't look like a valid email."
+
+  const id = form.invoiceId.trim()
+  if (!id) e.invoiceId = 'An invoice number is required.'
+  else if (!ID_RE.test(id)) e.invoiceId = 'Letters, numbers and . _ / - only, 40 characters max.'
+
+  if (!ISO_DATE_RE.test(form.invoiceDate)) e.invoiceDate = 'Pick an invoice date.'
+
+  const ord = form.orderNumber.trim()
+  // Not merely required for the printed line: it also names the invoice
+  // attachment, so an empty one produces a file literally called ".pdf".
+  if (!ord) e.orderNumber = 'An order number is required — it names the invoice attachment.'
+  else if (!REF_RE.test(ord)) e.orderNumber = 'Letters, numbers, spaces and . _ / # - only, 40 max.'
+
+  const po = form.poNumber.trim()
+  if (po && !REF_RE.test(po)) e.poNumber = 'Letters, numbers, spaces and . _ / # - only, 40 max.'
+
+  if (form.deliveryDate && !ISO_DATE_RE.test(form.deliveryDate)) {
+    e.deliveryDate = 'Enter a valid delivery date, or clear it.'
+  }
+
+  const t = form.total.trim()
+  if (!t) e.total = 'An amount is required — an invoice is never drafted at $0.00.'
+  else if (!MONEY_RE.test(t)) e.total = 'Enter a plain amount, e.g. 3000.00 or 3,000.00.'
+  else {
+    const n = moneyValue(t)
+    if (!(n >= TOTAL_MIN && n <= TOTAL_MAX)) e.total = 'Must be between $0.01 and $1,000,000.00.'
+  }
+  return e
+})
+const formValid = computed(() => Object.keys(fieldErrors.value).length === 0)
+// Reported in the order the fields appear, so "the first thing wrong" is the
+// first thing you'd reach scrolling down.
+const FIELD_ORDER = ['recipient', 'billToName', 'brokerName', 'total', 'invoiceId', 'invoiceDate', 'orderNumber', 'poNumber', 'deliveryDate']
+const firstFieldError = computed(() => {
+  for (const k of FIELD_ORDER) if (fieldErrors.value[k]) return fieldErrors.value[k]
+  return ''
+})
+
+const TOTAL_SOURCE_LABEL = {
+  ratecon: 'from the rate-con',
+  sheet: "from Job Tracking's Payment column",
+  manual: 'entered manually',
+}
+const totalBadge = computed(() => {
+  if (edited.value.total) return { text: 'manual', cls: 'idp-badge-blue' }
+  const src = pv.value.totalSource
+  if (src === 'ratecon') return { text: 'from rate-con ✓', cls: 'idp-badge-green' }
+  if (src === 'sheet') return { text: 'from Job Tracking', cls: 'idp-badge-blue' }
+  return { text: 'not found — enter the amount ⚠', cls: 'idp-badge-amber' }
+})
+
+const invoiceIdDiverges = computed(
+  () => !!peekedInvoiceId.value && form.invoiceId.trim() !== peekedInvoiceId.value,
+)
+// The invoice-number collision comes back in the free-text warnings[] array, and
+// it is the one warning that belongs beside a specific field. Matched loosely on
+// purpose — and every warning is ALSO rendered in the block below, so one this
+// pattern doesn't recognise is surfaced rather than swallowed.
+const INVOICE_COLLISION_RE = /invoice/i
+const INVOICE_COLLISION_HINT_RE = /already|exist|duplicat|collision|in use|reuse|taken/i
+const invoiceIdWarnings = computed(() =>
+  previewWarnings.value.filter(
+    (w) => INVOICE_COLLISION_RE.test(str(w)) && INVOICE_COLLISION_HINT_RE.test(str(w)),
+  ),
+)
+
+// Trailer is echoed by the dryRun so the mismatch can be shown BEFORE eight
+// fields are edited — the 409 fires on approve, and Gemini being nondeterministic
+// means a clean preview is no guarantee.
+const trailerMismatch = computed(() => {
+  const tc = pv.value.trailerCheck
+  return tc && tc.ok === false ? tc : null
+})
+
+const canCopyBrokerToBillTo = computed(
+  () => !!form.brokerName.trim() && form.brokerName.trim() !== form.billToName.trim(),
+)
+function copyBrokerToBillTo() {
+  form.billToName = form.brokerName.trim()
+  schedulePreview()
+}
+
 // --- Attachment tabs + PDF blob URLs ----------------------------------------
 const activeTab = ref('invoice')
 // All rate-con files for this load. A load often has more than one (the original
@@ -187,10 +678,15 @@ const ratecons = computed(() => {
   if (list.length) return list
   return pv.value.rateconPdfBase64 ? [{ base64: pv.value.rateconPdfBase64, label: 'Rate-con', source: '' }] : []
 })
-const hasEmail = computed(() => !!pv.value.emailHtml)
-// The exact Gmail draft body from the dryRun response. Trusted server HTML —
-// buildInvoiceEmailHtml esc()'s every dynamic field — so it's rendered via v-html.
-const emailHtml = computed(() => pv.value.emailHtml || '')
+// Falls back to the dryRun's copy so the tab can never disappear mid-session
+// (a preview that returned no emailHtml would otherwise remove a tab under the
+// cursor); previewEmailHtml wins as soon as one render has landed.
+const hasEmail = computed(() => !!(previewEmailHtml.value || pv.value.emailHtml))
+// The exact Gmail draft body. Trusted server HTML — buildInvoiceEmailHtml esc()'s
+// every dynamic field — so it's rendered via v-html. It MUST come from the latest
+// preview: it is built from the invoice fields, so once those are editable a
+// dryRun-only copy silently shows a cover note that will not be the one sent.
+const emailHtml = computed(() => previewEmailHtml.value || pv.value.emailHtml || '')
 const tabs = computed(() => {
   const t = [{ key: 'invoice', label: 'Invoice' }]
   // One tab per rate-con file; numbered only when there's more than one.
@@ -221,7 +717,8 @@ const stageSrc = computed(() => {
 // base64 to bytes and wrap in a Blob. Mirrors DocumentUpload.vue's PDF preview.
 const invoiceUrl = ref('')
 const rateconUrls = ref([]) // parallel to ratecons.value
-let invoiceBlobUrl = null
+let invoiceBlobUrl = null   // the URL currently bound to the viewer
+let invoiceBlobPrev = null  // the one before it, kept alive exactly one generation
 let rateconBlobUrls = []
 
 function b64ToBlobUrl(b64) {
@@ -236,8 +733,31 @@ function b64ToBlobUrl(b64) {
   }
 }
 
+// Swap in a freshly rendered invoice. Two hazards, and they pull in opposite
+// directions: assigning a new URL without revoking the old one leaks ~50-200 KB
+// per render, but revoking SYNCHRONOUSLY can kill a fetch that is still running —
+// PdfZoomViewer watches props.src and re-fetches, so a revoked URL lands it on
+// .pz-status-fail, whose "Open PDF" link then points at the dead URL too. So hold
+// ONE generation: revoke the older one, demote current -> prev, install next.
+// Bounded at 2 live object URLs however many renders happen.
+//
+// This deliberately does NOT go through buildBlobs(), which revokes the rate-con
+// blobs as well and would re-decode every rate-con PDF on every keystroke.
+function setInvoicePdf(b64) {
+  const next = b64ToBlobUrl(b64)
+  if (invoiceBlobPrev) URL.revokeObjectURL(invoiceBlobPrev)
+  invoiceBlobPrev = invoiceBlobUrl
+  invoiceBlobUrl = next
+  invoiceUrl.value = next || ''
+}
+
 function revokeBlobs() {
+  // Cancel first. A response landing after this point would mint a fresh object
+  // URL into a world where nothing is left to revoke it, and re-point the viewer
+  // at a document the dispatcher has already closed.
+  cancelPreview()
   if (invoiceBlobUrl) { URL.revokeObjectURL(invoiceBlobUrl); invoiceBlobUrl = null }
+  if (invoiceBlobPrev) { URL.revokeObjectURL(invoiceBlobPrev); invoiceBlobPrev = null }
   rateconBlobUrls.forEach((u) => { if (u) URL.revokeObjectURL(u) })
   rateconBlobUrls = []
   invoiceUrl.value = ''
@@ -246,10 +766,163 @@ function revokeBlobs() {
 
 function buildBlobs() {
   revokeBlobs()
-  invoiceBlobUrl = b64ToBlobUrl(pv.value.invoicePdfBase64)
-  invoiceUrl.value = invoiceBlobUrl || ''
+  setInvoicePdf(pv.value.invoicePdfBase64)
   rateconBlobUrls = ratecons.value.map((rc) => b64ToBlobUrl(rc.base64))
   rateconUrls.value = rateconBlobUrls.slice()
+}
+
+// --- Live preview render ------------------------------------------------------
+// POST /api/loads/:loadId/invoice-preview re-renders the PDF, subject and cover
+// note from whatever is currently in the form. It touches no Sheets, no Gemini,
+// no Drive and writes nothing — which is why it can be fired on a debounce at all.
+const previewing = ref(false)     // a render is in flight
+const previewPending = ref(false) // edits exist that no render has covered yet
+const previewError = ref('')
+const previewWarnings = ref([])
+const previewSubject = ref('')
+const previewEmailHtml = ref('')
+let previewSeq = 0
+let previewTimer = null
+let previewAbort = null
+
+// Tabs whose content IS the preview output. Auto-rendering only while one of them
+// is on screen keeps a Chromium render off the POD / rate-con tabs, where nobody
+// would see it — and it is the mitigation for PdfZoomViewer's src watcher calling
+// reset(): the zoom and pan you set are only thrown away on the tab where you can
+// actually see what changed. A render deferred this way stays `previewPending`,
+// which blocks approve and says so, and is flushed by the watcher below.
+const PREVIEW_TABS = new Set(['invoice', 'email'])
+const previewTabActive = computed(() => PREVIEW_TABS.has(activeTab.value))
+const subjectStale = computed(() => previewing.value || previewPending.value)
+
+function cancelPreview() {
+  if (previewTimer) { clearTimeout(previewTimer); previewTimer = null }
+  previewPending.value = false
+  // Bump the sequence as well as aborting: an abort races, and a response already
+  // decoded on the wire must still be recognised as superseded.
+  previewSeq++
+  if (previewAbort) { previewAbort.abort(); previewAbort = null }
+  previewing.value = false
+}
+
+function schedulePreview({ immediate = false } = {}) {
+  if (previewTimer) { clearTimeout(previewTimer); previewTimer = null }
+  if (!props.open) return
+  // Never spend a render on a body the server will refuse.
+  if (!formValid.value) { previewPending.value = false; return }
+  previewPending.value = true
+  if (immediate) { runPreview(); return }
+  previewTimer = setTimeout(runPreview, PREVIEW_DEBOUNCE_MS)
+}
+
+async function runPreview() {
+  if (previewTimer) { clearTimeout(previewTimer); previewTimer = null }
+  if (!props.open || !formValid.value) { previewPending.value = false; return }
+  if (!previewTabActive.value) return // stays pending; flushed on tab activation
+  previewPending.value = false
+
+  // BOTH stale guards, deliberately. previewSeq drops a slow response a newer
+  // request has already superseded; the AbortController additionally cancels the
+  // older render server-side, where INVOICE_PREVIEW_MAX_INFLIGHT is 2 — leaving
+  // two abandoned Chromium pages running would starve the render being waited on.
+  if (previewAbort) previewAbort.abort()
+  const ctrl = new AbortController()
+  previewAbort = ctrl
+  const seq = ++previewSeq
+  previewing.value = true
+  try {
+    const r = await api.post(
+      `/api/loads/${encodeURIComponent(props.loadId)}/invoice-preview`,
+      buildOverrideBody({ forPreview: true }),
+      { timeout: PREVIEW_TIMEOUT_MS, signal: ctrl.signal },
+    )
+    if (seq !== previewSeq) return
+    previewError.value = ''
+    previewSubject.value = str(r.subject)
+    previewEmailHtml.value = str(r.emailHtml)
+    previewWarnings.value = Array.isArray(r.warnings) ? r.warnings.filter(Boolean).map(str) : []
+    // Adopt the peeked number only if we never had one (an older cached dryRun).
+    // Refreshing it per render would make the divergence badge flicker.
+    if (!peekedInvoiceId.value && r.peekedInvoiceId) peekedInvoiceId.value = str(r.peekedInvoiceId)
+    setInvoicePdf(r.invoicePdfBase64)
+  } catch (e) {
+    if (seq !== previewSeq) return
+    // useApi maps a caller abort to code 'ABORT', distinct from its own 'TIMEOUT'.
+    // We aborted this one on purpose; a newer render is already running.
+    if (e && e.code === 'ABORT') return
+    previewError.value = (e && e.message) || 'Could not render the preview.'
+  } finally {
+    // Only the newest request owns the flag — an older one settling later must
+    // not clear the spinner for the render still running.
+    if (previewAbort === ctrl) { previewAbort = null; previewing.value = false }
+  }
+}
+
+function onFieldInput() { schedulePreview() }
+// Dates commit in one gesture rather than character by character, so debouncing
+// them just adds lag; `blur` covers a keyboard-typed date that never fires change.
+function onDateCommit() { schedulePreview({ immediate: true }) }
+
+function resetToExtracted() {
+  seedForm()
+  previewError.value = ''
+  schedulePreview({ immediate: true })
+}
+
+// Flush a render that was held back while a non-preview tab was showing.
+watch(previewTabActive, (active) => { if (active && previewPending.value) runPreview() })
+
+// --- Request body -------------------------------------------------------------
+// ONE builder for both the preview and the approve, mirroring the server's single
+// parseInvoiceOverrides: two copies of "what gets sent" is how the thing you
+// previewed stops being the thing you sent.
+//
+// Omitted vs empty is a real distinction on the server — an absent key means
+// "derive it", "" means "the dispatcher cleared it". If the dryRun never carried
+// a key, this modal has nothing to show for it, so its blank input is OUR
+// ignorance and not the dispatcher's decision: omit it and let the server derive,
+// unless the dispatcher actually typed something.
+function has(key) { return Object.prototype.hasOwnProperty.call(pv.value, key) }
+function buildOverrideBody({ forPreview = false } = {}) {
+  const body = {
+    // Always sent: each is required, validated above, and visible on the form.
+    invoiceId: form.invoiceId.trim(),
+    invoiceDate: form.invoiceDate,        // YYYY-MM-DD, exactly as the input emits it
+    orderNumber: form.orderNumber.trim(),
+    total: form.total.trim(),             // raw; the server owns money parsing
+    // Pinned for the same reason it always was: approve re-runs the whole
+    // extraction, so sending the reviewed address is what stops a nondeterministic
+    // re-resolve redirecting the draft somewhere the dispatcher never saw.
+    recipientEmail: recipient.value.trim(),
+  }
+  if (has('billToName') || edited.value.billToName) body.billToName = form.billToName.trim()
+  if (has('brokerName') || edited.value.brokerName) body.brokerName = form.brokerName.trim()
+  if (has('poNumber') || edited.value.poNumber) body.poNumber = form.poNumber.trim()
+  if (has('deliveryDateIso') || edited.value.deliveryDate) body.deliveryDate = form.deliveryDate
+  // A 9th, non-UI pinned field: moveNumber has no input but IS printed in the
+  // Bison cover letter, so passing it through is what keeps the emailed body the
+  // one that was reviewed. Same reasoning as the recipient.
+  if (has('moveNumber')) body.moveNumber = str(pv.value.moveNumber)
+
+  // ⚠️ PREVIEW ONLY — and the asymmetry between the two bodies is the point, not
+  // an oversight, so it is the one thing this shared builder branches on.
+  //
+  // APPROVE derives isBison from the SHEET's broker email. That choice selects the
+  // AP inbox, i.e. it decides where money gets invoiced, so it must not be
+  // answerable by the client; the server refuses to read it from the body there,
+  // and sending it anyway would imply otherwise to the next reader.
+  //
+  // PREVIEW reads no sheet at all. Left to itself it would infer Bison-ness from
+  // the RECIPIENT — which this modal just made editable. Re-route a Bison load to
+  // another address and you would preview the generic cover letter but send the
+  // Bison one (and the reverse), which is exactly the "what I reviewed is not what
+  // was sent" failure the Email tab exists to prevent. So pin the value the dryRun
+  // already derived from the sheet.
+  //
+  // Strict boolean: the server ignores anything that is not true/false and falls
+  // back to deriving, so a "false" STRING would silently flip it back on.
+  if (forPreview && typeof pinnedIsBison.value === 'boolean') body.isBison = pinnedIsBison.value
+  return body
 }
 
 // Approve state — declared BEFORE the immediate watch below (which reads
@@ -258,15 +931,40 @@ function buildBlobs() {
 const approving = ref(false)
 const approveError = ref('')
 
-// Rebuild on open / new preview; revoke on close so a stale blob is never held.
+// Never approve a value nobody has seen rendered. A FAILED preview is deliberately
+// not a block, though: a render outage would otherwise make the whole feature
+// unusable, and the failure is surfaced loudly beside the fields instead.
+const canApprove = computed(() => formValid.value && !previewing.value && !previewPending.value)
+const approveBlockedReason = computed(() => {
+  if (approving.value || canApprove.value) return ''
+  if (firstFieldError.value) return firstFieldError.value
+  if (previewing.value) return 'Rendering your changes — approve once the preview updates.'
+  if (previewPending.value) {
+    return previewTabActive.value
+      ? 'Rendering your changes — approve once the preview updates.'
+      : 'Open the Invoice tab to render your edits — the draft is only built from values you have seen.'
+  }
+  return ''
+})
+
+// Seed on the CLOSED -> OPEN transition only. The old watcher also fired on any
+// new `props.preview` identity: nothing re-fetches while the modal is open today,
+// but the moment something does, that shape silently wipes the dispatcher's edits.
 watch(
-  () => [props.open, props.preview],
-  ([isOpen]) => {
-    if (isOpen && props.preview) {
+  () => props.open,
+  (isOpen, wasOpen) => {
+    if (isOpen && !wasOpen && props.preview) {
       buildBlobs()
-      recipient.value = originalTo.value
+      seedForm()
       activeTab.value = 'invoice'
       approveError.value = ''
+      previewError.value = ''
+      previewWarnings.value = []
+      // The dryRun response IS a render of the extracted values, so its subject
+      // and cover note are correct until the first edit — seed from them rather
+      // than blanking and firing a render nobody asked for.
+      previewSubject.value = str(pv.value.subject)
+      previewEmailHtml.value = str(pv.value.emailHtml)
     } else if (!isOpen) {
       revokeBlobs()
     }
@@ -286,21 +984,48 @@ function onOpenChange(value) {
 const DUPLICATE_APPROVE_MSG =
   'A draft already exists for this load. Approving creates ANOTHER Gmail draft with a new invoice number (the old draft is NOT removed). Continue?'
 
+// Owner decision #2, surfaced at the moment of commitment: a corrected total is
+// INVOICE-ONLY. It names the divergence and states that the sheet does not move —
+// and it deliberately never quotes a figure this component was not given. When no
+// total could be derived there IS no original, so saying "the sheet says $X" would
+// be an invention on the one screen where a number is read as fact.
+function totalChangeConfirm() {
+  const billed = fmtMoney(moneyValue(form.total))
+  const orig = seededTotalAmount.value != null && seededTotalAmount.value > 0
+    ? fmtMoney(seededTotalAmount.value)
+    : ''
+  if (!orig) {
+    return `This invoice will bill ${billed}.\n\n`
+      + 'No total could be derived for this load, so that figure comes from you. '
+      + "Job Tracking's Payment column will NOT be changed by it — revenue, driver pay, "
+      + 'investor payouts and the P&L all keep reading the sheet.\n\nContinue?'
+  }
+  const src = TOTAL_SOURCE_LABEL[pv.value.totalSource]
+  return `This invoice will bill ${billed}.\n\n`
+    + `The figure on this load${src ? ` (${src})` : ''} is ${orig}, and it will NOT be changed. `
+    + "Job Tracking's Payment column, revenue, driver pay, investor payouts and the P&L "
+    + `all keep reading ${orig}.\n\nContinue?`
+}
+
 async function approve() {
-  if (approving.value || !recipientValid.value) return
+  if (approving.value || !canApprove.value) return
   // Re-approving an already-drafted load mints a SECOND draft + invoice number
   // (the first is not removed), so require an explicit confirm first.
   if (props.alreadyDrafted && !window.confirm(DUPLICATE_APPROVE_MSG)) return
+  // Second confirm, and only for the total: it is the one edit that makes the
+  // invoice disagree with the books on purpose.
+  if (edited.value.total && !window.confirm(totalChangeConfirm())) return
   approving.value = true
   approveError.value = ''
   try {
-    // Always pin the reviewed recipient. The approve call re-runs the whole
-    // extraction pipeline (fresh Gemini), so sending the exact address the
-    // dispatcher reviewed guarantees the draft goes where they saw — a
-    // nondeterministic re-resolve can't redirect it. The backend classifies it
-    // "manual" only when it differs from its own re-resolved value, so an
-    // unchanged send still preserves the ratecon/default source badge.
-    const body = { recipientEmail: recipient.value.trim() }
+    // The SAME body the preview rendered — one builder, so what was reviewed is
+    // what is sent. The recipient is pinned for the reason it always was: approve
+    // re-runs the whole extraction pipeline (fresh Gemini), so sending the exact
+    // address the dispatcher reviewed stops a nondeterministic re-resolve
+    // redirecting the draft. The backend still classifies it "manual" only when it
+    // differs from its own re-resolved value, so an unchanged send preserves the
+    // ratecon/default source badge.
+    const body = buildOverrideBody()
     const r = await api.post(
       `/api/loads/${encodeURIComponent(props.loadId)}/draft-invoice`,
       body,
@@ -309,7 +1034,10 @@ async function approve() {
     emit('approved', { invoiceId: r.invoiceId, recipient: recipient.value.trim() || originalTo.value })
     emit('update:open', false)
   } catch (e) {
-    approveError.value = (e && e.message) || 'Failed to create the draft.'
+    // Always true and worth saying: the modal stays open and every field keeps its
+    // value, so a trailer 409 or a validation refusal is a correction, not a redo.
+    const msg = (e && e.message) || 'Failed to create the draft.'
+    approveError.value = `${msg} Nothing was sent — your edits are still here.`
   } finally {
     approving.value = false
   }
@@ -503,34 +1231,37 @@ async function approve() {
   border-radius: 8px;
 }
 .idp-input:focus { outline: none; border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.12); }
-.idp-input:disabled { background: #f9fafb; color: #6b7085; }
+/* [readonly] shares the disabled treatment: the Subject field is server-owned, and
+   it should read as "not yours to change" exactly like a disabled input does. */
+.idp-input:disabled,
+.idp-input[readonly] { background: #f9fafb; color: #6b7085; }
+/* ORDER IS LOAD-BEARING: .is-edited and .is-invalid have equal specificity, so the
+   later rule wins. Invalid must outrank edited — a field that is both is a field
+   you have to fix. */
+.idp-input.is-edited { border-color: #93c5fd; background: #f8fbff; }
 .idp-input.is-invalid { border-color: #dc2626; background: #fffafa; }
 .idp-hint { font-size: 0.72rem; color: #64748b; margin: 0; }
 .idp-hint-warn { color: #b45309; }
 
-.idp-facts {
-  margin: 0;
+/* Two-up pairs — [Invoice # | Invoice date] and [Order # | PO #]. They are read
+   together, so they sit together. min-width:0 stops a date input's intrinsic
+   minimum width from overflowing the 380px column. */
+.idp-row2 {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 0.75rem 1rem;
+  gap: 0.75rem;
 }
-.idp-fact { display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }
-.idp-fact-wide { grid-column: span 2; }
-.idp-fact dt {
-  font-size: 0.66rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: #94a3b8;
-}
-.idp-fact dd {
-  margin: 0;
-  font-size: 0.88rem;
-  color: #1a1d27;
-  word-break: break-word;
-}
+.idp-row2 > * { min-width: 0; }
+
+.idp-reset-row { display: flex; justify-content: flex-end; }
+
+/* A badge that is also a control ("use broker name"). Element-qualified, so every
+   plain <span> badge is untouched. */
+button.idp-badge { font-family: inherit; cursor: pointer; }
+button.idp-badge:hover:not(:disabled) { filter: brightness(0.96); }
+button.idp-badge:disabled { opacity: 0.6; cursor: not-allowed; }
+
 .idp-mono { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.82rem; }
-.idp-muted { color: #94a3b8; font-size: 0.78rem; font-weight: 500; }
 
 .idp-error {
   padding: 0.6rem 0.8rem;
@@ -616,8 +1347,9 @@ async function approve() {
   .idp-meta { overflow-y: visible; }
 }
 @media (max-width: 560px) {
-  .idp-facts { grid-template-columns: 1fr; }
-  .idp-fact-wide { grid-column: span 1; }
+  /* Two inputs side by side stop being readable well before this; a date input in
+     particular has a large intrinsic minimum. */
+  .idp-row2 { grid-template-columns: 1fr; }
   .idp-foot-actions { width: 100%; }
   .idp-foot-actions .idp-btn { flex: 1; justify-content: center; }
 }
