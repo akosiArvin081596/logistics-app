@@ -137,6 +137,17 @@ const FAKE = {
 	mailD: "outreach.target@example-list.test",
 	mailE: "broker.desk@example-broker.test",
 	phone: "512-555-0143",
+	// Home locality. Deliberately NOT email- or SSN-shaped: these exist to prove
+	// the free-text sweep is not a safety net for the column lists.
+	city: "Grangerville",
+	state: "TX",
+	zip: "77302",
+	// Base64 "photographs". The payload is a recognisable needle inside a
+	// data: URI so MUST_NOT_SURVIVE can grep the emitted gzip for it — a real
+	// JPEG would compress differently and prove nothing about the bytes.
+	cdlFront: "data:image/jpeg;base64,Q0RMRlJPTlRQSVhFTFNfTVVTVF9OT1RfU1VSVklWRQ==",
+	cdlBack: "data:image/jpeg;base64,Q0RMQkFDS1BJWEVMU19NVVNUX05PVF9TVVJWSVZF",
+	medCard: "data:image/jpeg;base64,TUVEQ0FSRFBJWEVMU19NVVNUX05PVF9TVVJWSVZF",
 };
 
 // ---------------------------------------------------------------------------
@@ -226,6 +237,12 @@ const MUST_NOT_SURVIVE = [
 	// Signing evidence — personal data about the SIGNER, and invisible to the
 	// free-text sweep because none of it is email- or SSN-shaped.
 	"203.0.113.77", "AppleWebKit/605.1.15", "I, Sam Driver, agree to the terms",
+	// ⚠️ The 2026-08-13 HIGH finding: licence and medical-card PHOTOGRAPHS, and
+	// the home locality left behind beside an already-"REDACTED" address. All of
+	// it invisible to stage 3h, so the column list is the only thing that reaches
+	// it and MUST_NOT_SURVIVE is the only thing that proves the list still works.
+	FAKE.cdlFront, FAKE.cdlBack, FAKE.medCard,
+	FAKE.city, FAKE.zip,
 ];
 
 // The two evidence columns refresh-env.js deliberately KEEPS. Asserted so that
@@ -287,11 +304,11 @@ function seedDatabase(dbPath) {
 	db.exec(`
 		CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, email TEXT, password_hash TEXT, must_change_password INTEGER DEFAULT 0, role TEXT, driver_name TEXT, full_name TEXT);
 		CREATE TABLE sessions (sid TEXT PRIMARY KEY, sess TEXT, expire INTEGER);
-		CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY, driver_name TEXT, email TEXT, phone TEXT, cell TEXT, address TEXT);
+		CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY, driver_name TEXT, email TEXT, phone TEXT, cell TEXT, address TEXT, city TEXT, state TEXT, zip TEXT);
 		CREATE TABLE investors (id INTEGER PRIMARY KEY, name TEXT, email TEXT, phone TEXT, ein_ssn TEXT, address TEXT, application_id INTEGER DEFAULT 0);
 		CREATE TABLE investor_applications (id INTEGER PRIMARY KEY, email TEXT, phone TEXT, ein_ssn TEXT, address TEXT, access_token TEXT, status TEXT);
 		CREATE TABLE investor_outreach_log (id INTEGER PRIMARY KEY, email TEXT, sent_at TEXT);
-		CREATE TABLE job_applications (id INTEGER PRIMARY KEY, email TEXT, phone TEXT, cell TEXT, ssn TEXT, dob TEXT, drivers_license TEXT, address TEXT, signature TEXT, reference_info TEXT, deleted_at TEXT);
+		CREATE TABLE job_applications (id INTEGER PRIMARY KEY, full_name TEXT, email TEXT, phone TEXT, cell TEXT, ssn TEXT, dob TEXT, drivers_license TEXT, address TEXT, city TEXT, state TEXT, zip TEXT, signature TEXT, reference_info TEXT, cdl_front TEXT, cdl_back TEXT, medical_card TEXT, deleted_at TEXT);
 		CREATE TABLE sheet_job_tracking (id INTEGER PRIMARY KEY, load_id TEXT, email TEXT, phone_number TEXT);
 		CREATE TABLE investor_payment_info (id INTEGER PRIMARY KEY, investor_id INTEGER, routing_number TEXT, account_number TEXT, account_name TEXT, bank_name TEXT);
 		CREATE TABLE driver_payment_info (id INTEGER PRIMARY KEY, driver TEXT, bank_routing TEXT, bank_account TEXT, bank_acct_name TEXT, bank_name TEXT, bank_address TEXT, bank_phone TEXT, check_name TEXT);
@@ -314,8 +331,8 @@ function seedDatabase(dbPath) {
 	db.prepare("INSERT INTO sessions VALUES (?,?,?)").run("sid-live-1", '{"user":{"id":1,"role":"Super Admin"}}', 99999999);
 	db.prepare("INSERT INTO sessions VALUES (?,?,?)").run("sid-live-2", '{"user":{"id":3,"role":"Driver"}}', 99999999);
 
-	db.prepare("INSERT INTO drivers_directory (id,driver_name,email,phone,cell,address) VALUES (?,?,?,?,?,?)")
-		.run(1, "Sam Driver", FAKE.mailA, FAKE.phone, FAKE.phone, "12 Real Street, Houston TX 77002");
+	db.prepare("INSERT INTO drivers_directory (id,driver_name,email,phone,cell,address,city,state,zip) VALUES (?,?,?,?,?,?,?,?,?)")
+		.run(1, "Sam Driver", FAKE.mailA, FAKE.phone, FAKE.phone, "12 Real Street, Houston TX 77002", FAKE.city, FAKE.state, FAKE.zip);
 	db.prepare("INSERT INTO investors (id,name,email,phone,ein_ssn,address) VALUES (?,?,?,?,?,?)")
 		.run(1, "Example Fund LLC", FAKE.mailB, FAKE.phone, FAKE.einA, "900 Money Ave, Austin TX 78701");
 	db.prepare("INSERT INTO investor_applications (id,email,phone,ein_ssn,address,access_token,status) VALUES (?,?,?,?,?,?,?)")
@@ -326,8 +343,20 @@ function seedDatabase(dbPath) {
 	// with has_(table, column), so an unpopulated column reports the same green
 	// line as a clean one — this row is the difference between covering
 	// job_applications.reference_info and merely appearing to.
-	db.prepare("INSERT INTO job_applications (id,email,phone,cell,ssn,dob,drivers_license,address,signature,reference_info) VALUES (?,?,?,?,?,?,?,?,?,?)")
-		.run(1, FAKE.mailC, FAKE.phone, FAKE.phone, FAKE.ssnA, "1985-03-04", FAKE.licence, "5 Applicant Way", "data:image/png;base64,AAAA", ORIG.refInfo);
+	// ⚠️ cdl_front / cdl_back / medical_card are the sharpest fixtures in this
+	// file. They are base64 PHOTOGRAPHS of a driving licence and a DOT medical
+	// card — carrying the licence number, DOB, home address, face and signature,
+	// i.e. everything the columns beside them are emptied of. Production shipped
+	// 8 rows of them (~30 MB) through a run that printed "clean" until
+	// 2026-08-13, because base64 contains no "@" and no ###-##-####, so stage 3h
+	// is STRUCTURALLY blind to them: only the explicit column list can reach
+	// them, and only REDACTED_EMPTY can notice if it stops.
+	// city/state/zip likewise — full name + city + ZIP re-identifies a person,
+	// and `address` being "REDACTED" on the same row makes it LOOK scrubbed.
+	db.prepare("INSERT INTO job_applications (id,full_name,email,phone,cell,ssn,dob,drivers_license,address,city,state,zip,signature,reference_info,cdl_front,cdl_back,medical_card) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+		.run(1, "Chris Applicant", FAKE.mailC, FAKE.phone, FAKE.phone, FAKE.ssnA, "1985-03-04", FAKE.licence,
+			"5 Applicant Way", FAKE.city, FAKE.state, FAKE.zip, "data:image/png;base64,AAAA", ORIG.refInfo,
+			FAKE.cdlFront, FAKE.cdlBack, FAKE.medCard);
 	db.prepare("INSERT INTO job_applications (id,email,ssn,drivers_license,address) VALUES (?,?,?,?,?)")
 		.run(2, FAKE.mailC, FAKE.ssnB, FAKE.licence, "6 Applicant Way");
 
@@ -1309,9 +1338,24 @@ function extractFn(src, name) {
 		// mask it (routine for DOT eligibility review), so this refresh is the only
 		// thing between a real date of birth and a developer's laptop.
 		scrubMutant("M7", "the job_applications.dob scrub is dropped (REDACTED_EMPTY)",
-			`{ ssn: "", dob: "", drivers_license: ""`,
-			`{ ssn: "", drivers_license: ""`,
+			`ssn: "", dob: "", drivers_license: ""`,
+			`ssn: "", drivers_license: ""`,
 			/applicant date of birth\(s\) survived in job_applications\.dob/);
+		// ⚠️ M8 is the 2026-08-13 HIGH finding, and the only mutant here whose
+		// target the free-text sweep CANNOT see. A base64 photograph contains no
+		// "@" and no ###-##-####, so if this column list stops covering
+		// cdl_front, stage 3h does not compensate and no other check in this file
+		// fires — REDACTED_EMPTY is the whole defence. ~30 MB of licence imagery
+		// shipped under a "clean" line before this existed.
+		scrubMutant("M8", "the job_applications.cdl_front scrub is dropped (the licence photo)",
+			`cdl_front: "", cdl_back: ""`,
+			`cdl_back: ""`,
+			/driving licence photograph \(front\)\(s\) survived in job_applications\.cdl_front/);
+		// The locality half of the same finding.
+		scrubMutant("M9", "the drivers_directory locality scrub is dropped",
+			`{ address: "REDACTED", city: "", state: "", zip: "" }`,
+			`{ address: "REDACTED" }`,
+			/driver home (city|state|ZIP)\(s\) survived in drivers_directory\./);
 	}
 
 	// =======================================================================

@@ -153,6 +153,25 @@ const RESERVED_TLD = /\.(invalid|test|example|localhost)$/i;
 const RESERVED_SLD = /(^|\.)example\.(com|net|org)$/i;
 
 // The single answer to "could this address reach a real human?".
+//
+// ⚠️⚠️ ONLY EVER CALL THIS ON A SINGLE ROUTABLE_EMAIL MATCH — never on a whole
+// column value. It takes everything after the LAST "@" and anchors the reserved
+// tests with "$", so on a value holding two addresses it judges only the last
+// one: isRoutableAddress("victim@acme.com and noreply@example.com") is FALSE.
+// That is the exact whole-value fail-open removed from the detector below on
+// 2026-08-13 — the shape survives in here, held off only by both call sites
+// passing one match at a time. Because the predicate is SHARED, a refactor to
+// isRoutableAddress(row.value) would break the scrubber and its grader in the
+// same stroke, so nothing would report the leak.
+//
+// ⚠️ It also returns TRUE for the sanitizer's own "<hex>@invalid" token, because
+// RESERVED_TLD requires a leading dot and MAIL_DOMAIN is the bare word
+// "invalid". Idempotence therefore rests on ROUTABLE_EMAIL refusing a DOTLESS
+// domain, not on this function — unlike the SSN side, which carries an explicit
+// `s !== REDACTED_SSN` skip. Widening ROUTABLE_EMAIL to accept dotless or
+// intranet domains would make stage 3h re-pseudonymize its own output on every
+// pass AND make the grader refuse that output: an unfixable refresh, on every
+// database. If you ever widen it, add the sentinel skip here first.
 function isRoutableAddress(addr) {
 	const at = String(addr).lastIndexOf("@");
 	if (at < 0) return false;
@@ -597,8 +616,35 @@ async function main() {
 	});
 	secrets += setCols("investors", { ein_ssn: "", address: "REDACTED" });
 	secrets += setCols("investor_applications", { ein_ssn: "", address: "REDACTED" });
-	secrets += setCols("job_applications", { ssn: "", dob: "", drivers_license: "", address: "REDACTED", signature: "" });
-	secrets += setCols("drivers_directory", { address: "REDACTED" });
+	// ⚠️ THE DOCUMENT COLUMNS ARE THE POINT OF THIS LINE, NOT AN EXTRA.
+	// `cdl_front`, `cdl_back` and `medical_card` are base64 PHOTOGRAPHS of the
+	// applicant's driving licence and DOT medical card — carrying the licence
+	// number, the date of birth, the home address, the face and the signature,
+	// i.e. every single value the four columns beside them are being emptied of.
+	// Redacting `ssn`/`dob`/`drivers_license` while shipping the picture of them
+	// is not redaction. CLAUDE.md records this EXACT finding against the API
+	// ("Masking the NUMBER while shipping the DOCUMENT is not masking" — GET
+	// /api/applications/:id used to mask ssn + drivers_license and still return
+	// all three photos); that was fixed there on 2026-08-08 and the sanitizer was
+	// never brought into line. Measured 2026-08-13: 8 of 8 rows populated, up to
+	// 2.76 MB each, ~30 MB total, shipping under a "clean" line.
+	//
+	// ⚠️ And they are STRUCTURALLY INVISIBLE to stage 3h — base64 contains no "@"
+	// and no ###-##-####, so neither the SQL prefilter nor the scan's regex ever
+	// looks at them. Nothing but this explicit list can reach them.
+	//
+	// city / state / zip: the surviving half of a home address whose `address`
+	// column is redacted on the very same row. Full name + city + ZIP is a
+	// re-identifying tuple, and leaving it makes a row LOOK scrubbed. Emptied
+	// rather than placeholdered because nothing computes from them — the only
+	// readers concatenate them for display beside that already-"REDACTED"
+	// address (server.js:11534, :14958).
+	secrets += setCols("job_applications", {
+		ssn: "", dob: "", drivers_license: "", address: "REDACTED", signature: "",
+		cdl_front: "", cdl_back: "", medical_card: "",
+		city: "", state: "", zip: "",
+	});
+	secrets += setCols("drivers_directory", { address: "REDACTED", city: "", state: "", zip: "" });
 	summary.push(`bank / tax / identity fields: ${secrets} row-update(s) redacted`);
 
 	// 3f. Signatures are a legal artefact and, as base64 images, also most of
@@ -894,6 +940,21 @@ const REDACTED_EMPTY = [
 	// with every check still green.
 	["job_applications", "dob", "applicant date of birth"],
 	["job_applications", "signature", "applicant signature"],
+	// ⚠️ The three document columns. Asserted for a reason the others do not
+	// need: they are invisible to BOTH the free-text sweep (base64 has no "@"
+	// and no ###-##-####) and to any human spot-check, because a 2 MB base64
+	// blob is not something anyone eyeballs. If setCols ever stops matching
+	// here, this list is the ONLY thing left that will notice.
+	["job_applications", "cdl_front", "driving licence photograph (front)"],
+	["job_applications", "cdl_back", "driving licence photograph (back)"],
+	["job_applications", "medical_card", "DOT medical card photograph"],
+	// Home locality — the other half of an address the scrub already redacts.
+	["job_applications", "city", "applicant home city"],
+	["job_applications", "state", "applicant home state"],
+	["job_applications", "zip", "applicant home ZIP"],
+	["drivers_directory", "city", "driver home city"],
+	["drivers_directory", "state", "driver home state"],
+	["drivers_directory", "zip", "driver home ZIP"],
 	["onboarding_documents", "signed_ip_source", "signer IP provenance"],
 	["onboarding_documents", "consent_text", "signer consent text"],
 	["investor_onboarding_documents", "signed_ip_source", "signer IP provenance"],
@@ -924,6 +985,21 @@ const REDACTED_LITERAL = [
 	["driver_payment_info", "bank_phone", PLACEHOLDER_PHONE, "driver bank phone"],
 	["onboarding_documents", "signature_text", "REDACTED", "typed signature"],
 	["investor_onboarding_documents", "signature_text", "REDACTED", "typed signature"],
+	// ⚠️ Stage 3d's PHONE half, which had no assertion at all until 2026-08-13.
+	// Its email half has been covered by REDIRECTED_EMAIL since the beginning,
+	// so the loop LOOKED asserted. It is not covered by the free-text sweep
+	// either, and deliberately never will be: a phone pattern loose enough to be
+	// useful also matches this system's 9-digit load ids. So these seven columns
+	// of personal mobile numbers had exactly zero verification behind them, and
+	// stage 3d skips silently on `if (!present.has(col)) continue` — one renamed
+	// column (`cell` -> `cell_phone`) and real numbers ship under a green run.
+	["drivers_directory", "phone", PLACEHOLDER_PHONE, "driver phone"],
+	["drivers_directory", "cell", PLACEHOLDER_PHONE, "driver mobile"],
+	["investors", "phone", PLACEHOLDER_PHONE, "investor phone"],
+	["investor_applications", "phone", PLACEHOLDER_PHONE, "investor-applicant phone"],
+	["job_applications", "phone", PLACEHOLDER_PHONE, "applicant phone"],
+	["job_applications", "cell", PLACEHOLDER_PHONE, "applicant mobile"],
+	["sheet_job_tracking", "phone_number", PLACEHOLDER_PHONE, "sheet contact phone"],
 ];
 const REDIRECTED_EMAIL = [
 	["users", "email"], ["drivers_directory", "email"], ["investors", "email"],
@@ -1014,7 +1090,13 @@ function collectLeaks(dbPath, { scan = true } = {}) {
 				}
 				for (const [k, n] of hits) {
 					const [c, kind] = k.split("|");
-					const msg = `${t}.${c}: ${n} value(s) matching ${kind === "ssn" ? "an SSN shape (###-##-####)" : "a routable email address"}`;
+					// A value can carry BOTH shapes, which keys as "ssnemail". The
+					// old ternary tested `kind === "ssn"` and so reported those as
+					// email-only, sending whoever reads the refusal looking for the
+					// wrong thing in a 2 MB column.
+					const shapes = [kind.includes("ssn") && "an SSN shape (###-##-####)", kind.includes("email") && "a routable email address"]
+						.filter(Boolean).join(" and ");
+					const msg = `${t}.${c}: ${n} value(s) matching ${shapes}`;
 					// Unconditional. This was
 					//   if (STRICT_SCAN || redactedCols.has(...)) leaks.push(msg)
 					//   else advisories.push(...)

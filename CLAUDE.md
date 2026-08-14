@@ -169,6 +169,21 @@ including the drift audit that motivated it, in **`scripts/README-env-refresh.md
   clean"; `--strict-scan` is consequently a no-op for the two kinds scanned. **Phones are
   deliberately excluded** — nothing has ever scanned for them, and a useful phone pattern also
   matches 9-digit load ids. Full runbook in `scripts/README-env-refresh.md`.
+- **⚠️ Stage 3h neutralizes exactly TWO SHAPES — a routable email and `###-##-####` — and reading
+  "every text column of every table" as "free-text PII is handled" is itself a trap.** A security
+  pass over the finished stage found three things it is *structurally* blind to, each still
+  shipping under a `clean:` line: **base64 documents** — `job_applications.cdl_front` /
+  `cdl_back` / `medical_card`, photographs of the driving licence and DOT medical card carrying
+  the licence number, DOB, home address, face and signature, **8 of 8 rows, ~30 MB** (base64 holds
+  no `@` and no `###-##-####`, so neither the SQL prefilter nor the scan ever looks at them — this
+  is the same *"masking the NUMBER while shipping the DOCUMENT is not masking"* finding fixed for
+  the API on 2026-08-08, which the sanitizer never inherited); **home locality** — `city`/`state`/
+  `zip` on `job_applications` and `drivers_directory`, sitting beside an `address` already set to
+  `REDACTED`, which makes the row *look* scrubbed while full name + city + ZIP re-identifies the
+  person; and **the seven phone columns** stage 3d has always written, which had no assertion at
+  all because the same loop's email half was covered by `REDIRECTED_EMAIL`. All are now redacted
+  and asserted. **The rule: if a column can hold personal data in any shape that is not an email
+  or an SSN, it needs an explicit list entry — assume stage 3h will not save you.**
 - **Not copied:** `uploads/` (receipts/PODs/rate-cons are on disk — they 404 in a refreshed
   environment, and the tree is unredacted PII) and the Google Sheets themselves.
 

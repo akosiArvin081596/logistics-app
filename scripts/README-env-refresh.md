@@ -331,10 +331,14 @@ added (phone numbers are the obvious candidate) does not also have to invent a w
 itself. `--strict-scan` is consequently a **no-op for the two kinds scanned today**; it is kept
 because it costs nothing and a graduated tier will be wanted again.
 
-⚠️ **The `clean:` line is now conditional on there being no advisories**, so it can never again
-contradict the warnings printed above it. It used to print unconditionally once the leak list was
-empty. A summary that contradicts its own warnings does not merely fail to inform — it teaches
-the reader that the warnings are noise, which is how this gap survived as long as it did.
+⚠️ **What stops the `clean:` line contradicting its own warnings is the TIER INVERSION, not the
+conditional beside it.** The line is now guarded by `advisories.length`, but nothing populates
+that tier today, so the guard is currently unreachable — it exists for the next scan kind, and
+crediting it would be crediting an inert mechanism. The real fix is that a free-text hit is a
+**leak**, which stops the run outright. The distinction matters: someone who removed the tier
+inversion and kept the conditional would restore the original bug while believing they were
+covered. (A summary that contradicts its own warnings does not merely fail to inform — it teaches
+the reader that the warnings are noise, which is how this gap survived as long as it did.)
 
 ⚠️ **The detector judges every match individually, never the whole value.** It used to be
 `ROUTABLE_EMAIL.test(v) && !v.includes("@invalid")`. After stage 3h a value routinely *contains*
@@ -345,10 +349,36 @@ the entire reason this sweep exists. Every match is now graded by the shared
 grades it must never be able to disagree about what counts as a leak.
 
 ⚠️ **Keep the assertion lists a SUPERSET of what the scrub touches.** They were a strict subset
-until 2026-08-13 — see the `REDACTED_LITERAL` note above. When you add a column to stage 3e/3f,
+until 2026-08-13 — see the `REDACTED_LITERAL` note above. When you add a column to stage 3d/3e/3f,
 add it to `REDACTED_EMPTY` (if the scrub empties it) or `REDACTED_LITERAL` (if the scrub writes a
 placeholder) in the same edit. A scrub step with no assertion behind it fails silently, and the
 free-text sweep is not a safety net for it: that sweep only sees email- and SSN-shaped values.
+
+### ⚠️ Stage 3h is NOT a catch-all — it neutralizes exactly two shapes
+
+A routable email address and `###-##-####`. That is the whole of it. Reading "every text column
+of every table" as "free-text PII is handled now" is the mistake that let the following ship, and
+each was found *after* stage 3h was written and believed complete:
+
+- **Base64 documents.** `job_applications.cdl_front` / `cdl_back` / `medical_card` are
+  photographs of the applicant's driving licence and DOT medical card, up to 2.76 MB each —
+  carrying the licence number, date of birth, home address, face and signature, i.e. every value
+  the columns beside them are emptied of. **Measured 2026-08-13: 8 of 8 rows, ~30 MB, shipping
+  under a `clean:` line.** Base64 contains no `@` and no `###-##-####`, so the SQL prefilter never
+  selects those rows and the scan short-circuits before either regex — stage 3h is *structurally*
+  blind. CLAUDE.md records the identical finding against the API (*"Masking the NUMBER while
+  shipping the DOCUMENT is not masking"*), fixed there 2026-08-08; the sanitizer was not brought
+  into line until now.
+- **Home locality.** `city` / `state` / `zip` on `job_applications` and `drivers_directory`,
+  beside an `address` the scrub had already set to `REDACTED` — which makes the row *look*
+  scrubbed. Full name plus city plus ZIP re-identifies a person.
+- **Phone numbers.** Stage 3d has always written `555-0100` into seven columns, and until
+  2026-08-13 **nothing asserted it** — its email half was covered by `REDIRECTED_EMAIL`, so the
+  loop looked verified. The sweep will never cover them either (see the deliberate exclusion
+  above), so `REDACTED_LITERAL` is the only check.
+
+The rule this yields: **if a column can hold personal data in a shape that is not an email
+address or an SSN, it needs an explicit list entry.** Assume stage 3h will not save you.
 
 ⚠️ **The sweep matches `###-##-####` only, never a bare 9-digit run.** Load ids in this system
 are exactly nine digits (`562620213`, `563593554`), so a 9-digit rule would flag the Job
