@@ -297,7 +297,11 @@
                   {{ d.payPercentage }}% × max(0, {{ fmt(d.monthRevenue || 0) }} revenue − {{ fmt(d.monthDeductible || 0) }} deductibles) = {{ fmt(d.totalPay) }}
                 </div>
                 <div class="modal-hint" v-else>
-                  {{ d.activeDays }} unique calendar day{{ d.activeDays !== 1 ? 's' : '' }} worked × ${{ d.dailyRate || 250 }}/day
+                  <!-- `|| 250` here printed a rate the server never sent, in the one
+                       place an investor goes to check the arithmetic. Show the rate
+                       only when there is one; otherwise the day count and the total
+                       still reconcile without asserting a number. -->
+                  {{ d.activeDays }} unique calendar day{{ d.activeDays !== 1 ? 's' : '' }} worked<template v-if="d.dailyRate > 0"> × ${{ d.dailyRate }}/day</template>
                   <span v-if="d.source === 'eld'" class="modal-src eld">ELD-verified</span>
                   <span v-else-if="d.source === 'mixed'" class="modal-src mixed">partly ELD-verified</span>
                   <span v-else class="modal-src est">estimated</span>
@@ -716,10 +720,23 @@ const { show: toast } = useToast()
 const months = computed(() => props.production?.monthlyEarnings || [])
 const selectedIdx = ref(0)
 
-// Default to current month (last item) when data loads; clamp if months shrinks
+// Default to the current month (last item) on first load; clamp on later refetches.
+//
+// ⚠️ THIS WAS ONE EXPRESSION DOING TWO JOBS, AND INDEX 0 PAID FOR IT.
+// `Math.min(idx, v.length - 1) || v.length - 1` used falsiness to mean "not
+// initialised yet" — but a legitimately clamped 0 is also falsy, so an investor
+// viewing their EARLIEST month was silently thrown to the current one by any
+// refetch (the `@changed="loadData"` the exclude-day / add-day actions emit).
+// The first month was unreachable across a refresh. An explicit flag separates
+// "first load" from "the user picked index 0".
+let monthIdxInitialised = false
 watch(months, (v) => {
-  if (v.length) selectedIdx.value = Math.min(selectedIdx.value, v.length - 1) || v.length - 1
-  else selectedIdx.value = 0
+  if (!v.length) { selectedIdx.value = 0; monthIdxInitialised = false; return }
+  // Also re-arms on a preview switch: the store nulls `data` first, so `months`
+  // empties and the next payload lands on its own current month rather than
+  // inheriting the previous investor's position.
+  if (!monthIdxInitialised) { selectedIdx.value = v.length - 1; monthIdxInitialised = true; return }
+  selectedIdx.value = Math.min(selectedIdx.value, v.length - 1)
 }, { immediate: true })
 
 const selected = computed(() => months.value[selectedIdx.value] || null)
@@ -784,23 +801,35 @@ const allTimeEarnings = computed(() => Math.round(allTimeNet.value * (investorSp
 
 // Render the right formula label for the selected month's Driver Pay row.
 // Server returns payType / payPercentage per driver in driverDetails — branch
-// on those so percentage drivers (e.g. Rodney @ 30%) don't get mislabeled as
-// "$250 × active days".
+// on those so percentage drivers (e.g. Rodney @ 30%) don't get mislabeled as a
+// daily rate.
+//
+// ⚠️ NEVER SUBSTITUTE A NUMBER THIS COMPONENT DOES NOT HAVE. This annotation sits
+// beside real money, so a rate stated here is read as fact. Every branch below
+// used to invent one: the empty state asserted a flat "$250" — wrong by $100/day
+// for an investor whose truck is set to $150 — and the multi-rate branch printed
+// the literal string "$rate", which reads as an unsubstituted template variable
+// rather than a deliberate placeholder. Unknown now falls through to prose that
+// is true at any rate. The authoritative per-driver numbers are one click away in
+// the drill-down, which lists each driver's own rate.
 const driverPayFormula = computed(() => {
   const details = selected.value && selected.value.driverDetails
-  if (!details || !Object.keys(details).length) return '= $250 × calendar days worked this month'
+  if (!details || !Object.keys(details).length) return '= daily rate × calendar days worked this month'
   const drivers = Object.values(details)
   const allFixed = drivers.every(d => d.payType !== 'percentage')
   const allPct = drivers.every(d => d.payType === 'percentage')
   if (allFixed) {
-    const rates = [...new Set(drivers.map(d => d.dailyRate || 250))]
-    const rateStr = rates.length === 1 ? `$${rates[0]}` : '$rate'
-    return `= ${rateStr} × calendar days worked this month`
+    // Only rates the server actually resolved. A missing or zero rate is DROPPED,
+    // not defaulted — falling through to prose is honest, printing someone else's
+    // rate is not.
+    const rates = [...new Set(drivers.map(d => Number(d.dailyRate)).filter(r => Number.isFinite(r) && r > 0))]
+    if (rates.length === 1) return `= $${rates[0]} × calendar days worked this month`
+    return '= each driver’s daily rate × calendar days worked this month'
   }
   if (allPct) {
-    const pcts = [...new Set(drivers.map(d => d.payPercentage || 0))]
-    const pctStr = pcts.length === 1 ? `${pcts[0]}%` : 'driver %'
-    return `= ${pctStr} × (revenue − deductible trip expenses)`
+    const pcts = [...new Set(drivers.map(d => Number(d.payPercentage)).filter(p => Number.isFinite(p) && p > 0))]
+    if (pcts.length === 1) return `= ${pcts[0]}% × (revenue − deductible trip expenses)`
+    return '= each driver’s percentage × (revenue − deductible trip expenses)'
   }
   return '= per-driver pay structure (see detail)'
 })

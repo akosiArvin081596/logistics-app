@@ -1845,6 +1845,30 @@ function investorExpenseScopeSql(ownerId, driverWindows, periodExpr) {
 	return { sql: `(${clauses.join(" OR ")})`, params };
 }
 
+// The investor's share of net profit, as a PERCENT (0..100).
+//
+// ⚠️ `parseFloat(x) || 50` — the shape at all seven read sites until 2026-08-14 —
+// turns a deliberately configured **0** into **50**, because 0 is falsy. That is
+// the one direction that moves money: a carrier who set an investor to 0% would
+// have paid them half of net profit instead, on every screen AND in the payout
+// ledger, with every figure agreeing perfectly — so nothing would look wrong.
+// A missing or unparseable value still falls back to 50 (the seeded default);
+// only an explicit finite number is honoured.
+//
+// Clamped to 0..100 because the value comes from a free-text config row: a
+// fat-fingered `500` would otherwise pay five times net profit, and a negative
+// would invert the split and bill the investor.
+//
+// ONE definition, seven callers, for the same reason investorExpenseScopeSql is:
+// the previous shape was one expression hand-copied across the portal, the
+// statement, the ledger reconcile and the PDF report, so a fix to one is a fix to
+// none. Takes the MERGED config object (per-investor rows over globals).
+function resolveInvestorSplitPct(config) {
+	const raw = parseFloat(config && config.investor_split_pct);
+	if (!Number.isFinite(raw)) return 50;
+	return Math.min(100, Math.max(0, raw));
+}
+
 // Resolve "Super Admin previewing an investor's portal" via ?as_user_id=.
 // When the session user is a Super Admin AND as_user_id points at a real
 // Investor user, we return the target's id/username so downstream endpoints
@@ -33133,7 +33157,7 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 		const cfg = {};
 		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all().forEach((r) => (cfg[r.key] = r.value));
 		if (!isSuperAdmin) db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?").all(user.id).forEach((r) => (cfg[r.key] = r.value));
-		const investorSplit = (parseFloat(cfg.investor_split_pct) || 50) / 100;
+		const investorSplit = resolveInvestorSplitPct(cfg) / 100;
 
 		const driverCol = findCol(headers, /^driver$/i);
 		const ownerIdCol = findCol(headers, /^owner.?id$/i);
@@ -33679,7 +33703,7 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		// A no-op at today's config (every investor is 50), which is precisely why
 		// it would have gone unnoticed until the first investor on a different split.
 		// `|| 50` matches the portal's own fallback rather than inventing a second.
-		const splitPctLabel = parseFloat(config.investor_split_pct) || 50;
+		const splitPctLabel = resolveInvestorSplitPct(config);
 		const ownerEarnings = netCashFlow * (splitPctLabel / 100);
 
 		// Monthly revenue from Job Tracking
@@ -37517,7 +37541,7 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 	const jobTracking = await getJobTrackingCached();
 	const data = excludeDroppedLoads(jobTracking.data, jobTracking.headers);
 	const headers = jobTracking.headers;
-	const investorSplit = (parseFloat(config && config.investor_split_pct) || 50) / 100;
+	const investorSplit = resolveInvestorSplitPct(config) / 100;
 
 	// Local date helpers — identical to the ones inside GET /api/investor.
 	//
@@ -37979,7 +38003,7 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 	// `amount`/carry-forward/totals below.
 	const earningsByPeriod = {};
 	monthlyEarnings.forEach((m) => { earningsByPeriod[m.month] = m; });
-	const splitPct = Math.round((parseFloat(config.investor_split_pct) || 50));
+	const splitPct = Math.round(resolveInvestorSplitPct(config));
 
 	// ---- Loss carry-forward -------------------------------------------------
 	// A month where costs outran revenue (e.g. driver pay $12,250 on $10,310 of
@@ -38857,7 +38881,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// already merged into `config` above). This is the SAME split the
 			// settlement layer (/api/investor/payouts) applies, so a payout's
 			// amount equals the investorEarnings shown here.
-			const monthlySplit = (parseFloat(config.investor_split_pct) || 50) / 100;
+			const monthlySplit = resolveInvestorSplitPct(config) / 100;
 
 			// 1. Monthly driver pay — bucketed by each load's ASSIGNED month,
 			// not by the physical day the driver was active. This keeps revenue
@@ -39488,7 +39512,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// canceled / soft-deleted rows stripped by excludeDroppedLoads() upstream.
 		const myPendingRe = /^(dispatched|assigned|heading to shipper)$/i;
 		const myActiveRe = /^(in transit|picked up|at shipper|at receiver|loading|unloading)$/i;
-		const investorSplit = (parseFloat(config.investor_split_pct) || 50) / 100;
+		const investorSplit = resolveInvestorSplitPct(config) / 100;
 		const myLoadsOriginCol = pickAddressColumn(jobTracking.headers, /origin|pickup|shipper/i);
 		const myLoadsDestCol = pickAddressColumn(jobTracking.headers, /dest|drop|receiver|delivery/i);
 		function shapeMyLoad(r) {
@@ -39526,7 +39550,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				avgMonthlyInvestorEarnings,
 				trailing3MonthInvestor: Math.round(trailing3MonthInvestor),
 				monthsOfOperation,
-				investorSplitPct: parseFloat(config.investor_split_pct) || 50,
+				investorSplitPct: resolveInvestorSplitPct(config),
 				totalJobs,
 				completedJobs: completedJobCount,
 				totalExpenses: Math.round(totalExpenses),

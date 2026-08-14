@@ -547,8 +547,121 @@ function monthlyTripExp(ownerId, lib = S) {
 	const code = handler.split("\n").filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
 	ok(!/netCashFlow \* 0\.5/.test(code), "§8 no hardcoded 0.5 split");
 	ok(!/\(50%\)/.test(code), "§8 no hardcoded (50%) label");
-	ok(/parseFloat\(config\.investor_split_pct\) \|\| 50/.test(code),
-		"§8 the split is read from investor_config with the SAME fallback the portal uses");
+	ok(/resolveInvestorSplitPct\(config\)/.test(code),
+		"§8 the split comes from the SHARED resolver, so the report and the portal cannot disagree");
+}
+
+// ---------------------------------------------------------------------- §9
+// resolveInvestorSplitPct — a configured 0 must stay 0.
+{
+	const R = new Function(`${extract("resolveInvestorSplitPct")}return resolveInvestorSplitPct;`)();
+
+	// THE BUG: `parseFloat(x) || 50` reads a deliberate 0 as 50, because 0 is
+	// falsy. That is the direction that moves money — an investor set to 0% would
+	// have been paid half of net profit on every screen AND in the payout ledger,
+	// every figure agreeing, so nothing would look wrong.
+	eq(R({ investor_split_pct: "0" }), 0, "§9 a configured 0 stays 0, not 50");
+	eq(R({ investor_split_pct: 0 }), 0, "§9 ...as a number too");
+
+	// Missing / unparseable still falls back to the seeded default.
+	eq(R({}), 50, "§9 absent -> 50 (the seeded default)");
+	eq(R({ investor_split_pct: "" }), 50, "§9 empty string -> 50");
+	eq(R({ investor_split_pct: "abc" }), 50, "§9 unparseable -> 50");
+	eq(R(null), 50, "§9 no config object at all -> 50");
+	eq(R(undefined), 50, "§9 undefined -> 50");
+
+	// Ordinary values pass through, including fractional splits.
+	eq(R({ investor_split_pct: "50" }), 50, "§9 50 passes through");
+	eq(R({ investor_split_pct: "62.5" }), 62.5, "§9 a fractional split is preserved");
+
+	// Clamped, because the value comes from a free-text config row.
+	eq(R({ investor_split_pct: "500" }), 100, "§9 500 clamps to 100 — never pay 5x net profit");
+	eq(R({ investor_split_pct: "-10" }), 0, "§9 negative clamps to 0 — never invert the split and bill the investor");
+
+	// One definition, and every reader goes through it.
+	const raw = (SRC.match(/parseFloat\([^)]*investor_split_pct/g) || []).length;
+	ok(raw === 1, `§9 exactly one raw parseFloat of investor_split_pct should survive (inside the helper); found ${raw}`);
+	ok(!/investor_split_pct\)\s*\|\|\s*50/.test(SRC), "§9 no `|| 50` falsy fallback survives anywhere");
+	const callers = (SRC.match(/resolveInvestorSplitPct\(/g) || []).length;
+	ok(callers >= 8, `§9 1 definition + >=7 callers; found ${callers}`);
+}
+
+// --------------------------------------------------------------------- §10
+// EarningsSection.vue — the month picker, and the numbers it must not invent.
+{
+	const SFC = fs.readFileSync(
+		path.join(__dirname, "..", "client", "src", "components", "investor", "EarningsSection.vue"), "utf8");
+
+	// --- the month watcher, extracted and RUN, not just grepped.
+	const open = "watch(months, (v) => {";
+	const i = SFC.indexOf(open);
+	ok(i > 0, "§10 the months watcher is findable");
+	const j = SFC.indexOf("}, { immediate: true })", i);
+	const body = SFC.slice(i + open.length, j);
+	// The body closes over `selectedIdx` (a ref) and `monthIdxInitialised` (a let).
+	// Both are injected so the SHIPPED body is what runs. The body uses early
+	// `return`s, so it goes in an IIFE (which they exit) with the flag written back
+	// in a `finally` — a plain trailing assignment is skipped by every early return,
+	// which silently pins the flag to false and makes every case look like a first
+	// load. That is a harness bug that reads exactly like a passing fix.
+	const step = new Function("selectedIdx", "ctx",
+		`let monthIdxInitialised = ctx.init; const v = ctx.v;
+		 try { (function () {\n${body}\n})(); } finally { ctx.init = monthIdxInitialised; }`);
+	const run = (sequence) => {
+		const idx = { value: 0 }, ctx = { init: false };
+		for (const s of sequence) {
+			if (Array.isArray(s)) { ctx.v = s; step(idx, ctx); }
+			else idx.value = s;               // the user picking a month
+		}
+		return idx.value;
+	};
+	const m = (n) => Array.from({ length: n }, (_, k) => ({ month: k }));
+
+	eq(run([m(5)]), 4, "§10 first load lands on the CURRENT month (last item)");
+	eq(run([m(5), 2, m(5)]), 2, "§10 a refetch keeps the month the user is on");
+	// THE BUG: `Math.min(idx, len-1) || len-1` used falsiness as 'not initialised',
+	// so a legitimately clamped 0 fell through to the current month and the
+	// EARLIEST month was unreachable across any refetch.
+	eq(run([m(5), 0, m(5)]), 0, "§10 index 0 SURVIVES a refetch — the earliest month is reachable");
+	eq(run([m(5), 4, m(3)]), 2, "§10 shrinking months clamps to the new last");
+	eq(run([m(5), 3, [], m(6)]), 5, "§10 emptying re-arms, so a preview switch lands on its own current month");
+	eq(run([[]]), 0, "§10 no months -> 0");
+
+	// And the harness genuinely discriminates: the RETIRED body, run through the
+	// same driver, must fail the two cases above. Without this the section could be
+	// passing because the extraction silently returned something inert.
+	{
+		const oldBody = `
+			if (v.length) selectedIdx.value = Math.min(selectedIdx.value, v.length - 1) || v.length - 1
+			else selectedIdx.value = 0`;
+		const oldStep = new Function("selectedIdx", "ctx",
+			`let monthIdxInitialised = ctx.init; const v = ctx.v;
+			 try { (function () {\n${oldBody}\n})(); } finally { ctx.init = monthIdxInitialised; }`);
+		const oldRun = (sequence) => {
+			const idx = { value: 0 }, ctx = { init: false };
+			for (const s of sequence) {
+				if (Array.isArray(s)) { ctx.v = s; oldStep(idx, ctx); } else idx.value = s;
+			}
+			return idx.value;
+		};
+		eq(oldRun([m(5)]), 4, "§10 (control) the old body also landed on the current month on first load");
+		eq(oldRun([m(5), 0, m(5)]), 4, "§10 (control) ...but threw index 0 to the current month — the bug, reproduced");
+		ok(oldRun([m(5), 2, m(5)]) === 2, "§10 (control) a non-zero index was unaffected, which is why this hid for so long");
+	}
+
+	// --- no fabricated rates. This annotation sits beside real money.
+	ok(!/dailyRate \|\| 250/.test(SFC), "§10 no `dailyRate || 250` — never print a rate the server did not send");
+	ok(!/'= \$250 ×/.test(SFC), "§10 no hardcoded $250 empty-state label");
+	ok(!/'\$rate'/.test(SFC), "§10 no literal '$rate' placeholder leaking to the page");
+	ok(!/'driver %'/.test(SFC), "§10 no literal 'driver %' placeholder leaking to the page");
+	ok(SFC.includes("filter(r => Number.isFinite(r) && r > 0)"),
+		"§10 unknown daily rates are DROPPED, not defaulted");
+	ok(SFC.includes("= daily rate × calendar days worked this month"),
+		"§10 the empty state says 'daily rate', which is true at any rate");
+	// The split is read from the server's resolved value with a NULLISH default, so
+	// a genuine 0 survives the wire the same way it now survives the config read.
+	ok(/production\?\.investorSplitPct \?\? 50/.test(SFC),
+		"§10 the client uses ?? (nullish), not || — a server-sent 0% must not become 50%");
 }
 
 // ---------------------------------------------------------------------- §6
