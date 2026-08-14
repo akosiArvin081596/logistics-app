@@ -7,7 +7,11 @@
 
     <EmptyState v-if="users.length === 0">No users yet.</EmptyState>
 
-    <table v-else class="user-table">
+    <!-- .table-wrapper (shared.css) is overflow-x:auto. Without it this table
+         is CLIPPED on phones, not scrollable, because .admin-page sets
+         overflow-x:hidden — and "Last Sign-In" makes it a 9-column table. -->
+    <div v-else class="table-wrapper">
+    <table class="user-table">
       <thead>
         <tr>
           <th>User</th>
@@ -17,6 +21,7 @@
           <th>Details</th>
           <th>Email</th>
           <th>Created</th>
+          <th>Last Sign-In</th>
           <th></th>
         </tr>
       </thead>
@@ -43,6 +48,9 @@
           <td class="created-at">
             {{ formatDate(user.CreatedAt) }}
           </td>
+          <td :class="['created-at', { 'never-signed-in': !user.LastLoginAt }]" :title="lastLoginTitle(user.LastLoginAt)">
+            {{ formatLastLogin(user.LastLoginAt) }}
+          </td>
           <td style="text-align: right;">
             <div class="action-btns">
               <button class="btn-edit" @click="openEdit(user)">Edit</button>
@@ -52,6 +60,7 @@
         </tr>
       </tbody>
     </table>
+    </div>
 
     <!-- Edit Modal -->
     <Teleport to="body">
@@ -116,6 +125,10 @@
 import { ref, reactive } from 'vue'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
+// Shared Houston-zoned instant formatter — already pins output to
+// America/Chicago with a zone label and guards against bare wall-clock input,
+// so this column does not hand-roll a fourth copy of that option bag.
+import { fmtTimestamp } from '@/utils/datetime'
 
 defineProps({
   users: { type: Array, default: () => [] },
@@ -201,6 +214,40 @@ function formatDate(dateStr) {
     month: 'short', day: 'numeric', year: 'numeric',
     timeZone: 'America/Chicago', timeZoneName: 'short',
   })
+}
+
+// "Last Sign-In". Hybrid on purpose, matching AdminToolsView's formatRmTs and
+// DriverPayOverridesView's formatTs: relative while the answer is "recently",
+// absolute once "11d ago" stops being easier to read than the date. The house
+// default on admin screens is absolute (see the note in NotificationsView), so
+// the relative window is kept short.
+//
+// The question this column answers is "is this account still in use?", so an
+// empty value is a real answer, not missing data — it renders "Never" rather
+// than the em dash the other columns use for a blank field.
+//
+// ⚠️ Computed at render, so an "8m ago" left open on screen goes stale. That is
+// fine here: the page refetches on the users:changed socket event, and no
+// decision rests on the minute. Do NOT add a ticking `now` ref for this.
+function formatLastLogin(v) {
+  if (!v) return 'Never'
+  const t = new Date(v).getTime()
+  if (!Number.isFinite(t)) return 'Never'
+
+  const mins = Math.floor((Date.now() - t) / 60000)
+  if (mins < 0) return fmtTimestamp(v)   // clock skew — don't print "-3m ago"
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  const days = Math.floor(hrs / 24)
+  if (days < 7) return `${days}d ago`
+  return fmtTimestamp(v)
+}
+
+// The exact instant is always one hover away, even while the cell shows "3h ago".
+function lastLoginTitle(v) {
+  return v ? fmtTimestamp(v) : 'Has not signed in since sign-in tracking was added'
 }
 
 function confirmDelete(user) {
@@ -359,6 +406,14 @@ function handleConfirmDelete() {
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.72rem;
   color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/* "Never" is a real answer (this account has not signed in), not missing data —
+   but it should read as quieter than a genuine timestamp, not louder. */
+.never-signed-in {
+  font-style: italic;
+  opacity: 0.65;
 }
 
 .btn-remove {

@@ -842,6 +842,62 @@ try { db.exec("ALTER TABLE users ADD COLUMN rating REAL DEFAULT 0"); } catch {}
 // every other route until the driver rotates the temp password.
 try { db.exec("ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0"); } catch {}
 
+// Migration: record the last successful sign-in, so the Users screen can show
+// which accounts are still in use. Nothing in this app has ever recorded one —
+// the login route wrote nothing at all, audit_trail has no login action, and
+// `sessions` rows are swept hourly — so there is NO history to backfill and
+// every row starts at '' ("never signed in since this shipped"). That is the
+// expected day-one state, not a defect.
+//
+// ⚠️ TEXT holding an explicit ISO-8601 **Z** string, never a bare
+// CURRENT_TIMESTAMP. SQLite serialises that zone-less ("2026-08-14 12:26:41"),
+// which the browser parses as LOCAL time and renders hours out — the trap
+// documented at the top of client/src/utils/datetime.js. Storing the zone here
+// is also why GET /api/users needs no strftime() wrapper on this column.
+try { db.exec("ALTER TABLE users ADD COLUMN last_login_at TEXT DEFAULT ''"); } catch {}
+
+// One-time seed from the sessions still live at deploy time.
+//
+// This is EXACT, not an estimate. The session config sets no `rolling: true`
+// (see the express-session block below), so `sessions.expire` is stamped once
+// at session creation as login + cookie.maxAge and touch() only ever rewrites
+// that same absolute value — it does not slide with activity. So
+// `expire - originalMaxAge` IS the login instant.
+//
+// Read each session's OWN cookie.originalMaxAge out of the sess JSON rather
+// than hardcoding 24h, so this can never drift from the cookie config. Fills
+// only rows still at '' — a re-run (every boot) can never overwrite a real
+// stamp, and a user with no live session is simply left at "Never".
+//
+// ⚠️ `sessions` is created by the express-session store, which is constructed
+// FAR below this line — so on a fresh install the table does not exist yet and
+// there is nothing to seed. Check for it rather than letting the SELECT throw,
+// which would print a scary "no such table" on every first boot.
+try {
+	const hasSessions = db
+		.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'")
+		.get();
+	if (hasSessions) {
+		const seedStmt = db.prepare("UPDATE users SET last_login_at = ? WHERE id = ? AND COALESCE(last_login_at,'') = ''");
+		const newest = new Map(); // userId -> login epoch ms
+		for (const row of db.prepare("SELECT sess FROM sessions").all()) {
+			let parsed;
+			try { parsed = JSON.parse(row.sess); } catch { continue; }
+			const uid = Number(parsed?.user?.id);
+			const expires = Date.parse(parsed?.cookie?.expires || "");
+			const maxAge = Number(parsed?.cookie?.originalMaxAge);
+			if (!uid || !Number.isFinite(expires) || !Number.isFinite(maxAge) || maxAge <= 0) continue;
+			// One user can hold several sessions — keep the most recent login.
+			const loginMs = expires - maxAge;
+			if (!(newest.get(uid) >= loginMs)) newest.set(uid, loginMs);
+		}
+		for (const [uid, loginMs] of newest) seedStmt.run(new Date(loginMs).toISOString(), uid);
+		if (newest.size) console.log(`✓ last_login_at seeded from ${newest.size} live session(s)`);
+	}
+} catch (e) {
+	console.error("last_login_at seed skipped:", e.message);
+}
+
 // Per-load driver ratings (1-5 stars, one rating per load)
 db.exec(`
 	CREATE TABLE IF NOT EXISTS load_ratings (
@@ -16505,6 +16561,10 @@ app.post("/api/auth/setup", setupLimiter, async (req, res) => {
 		logAudit({ session: { user: userSnapshot } }, "setup_super_admin", "user", newId,
 			`First-time setup created Super Admin "${username}"`);
 
+		// Setup signs the new Super Admin straight in, so it IS a first sign-in —
+		// stamp it here or the only account on a fresh install reads "Never".
+		stampLastLogin(newId);
+
 		// Rotate the session ID before attaching the new identity, mirroring
 		// POST /api/auth/change-password. `saveUninitialized: false` already means
 		// an unknown cookie gets a fresh ID, so plain fixation does not stick — but
@@ -16548,6 +16608,13 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 		if (!valid) {
 			return res.status(401).json({ error: "Invalid credentials" });
 		}
+
+		// This route is the ONLY sign-in path in the app — there are exactly two
+		// bcrypt.compare call sites (here and change-password's current-password
+		// check), so this one stamp covers every role: admin, dispatcher, driver,
+		// investor. Placed AFTER the password check so a failed attempt never
+		// looks like a sign-in. Never throws — see stampLastLogin().
+		stampLastLogin(user.id);
 
 		req.session.user = {
 			id: user.id,
@@ -16781,6 +16848,7 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 	const users = db
 		.prepare(`SELECT u.id, u.username, u.role, u.driver_name, u.email, u.full_name, u.company_name, u.rating,
 			strftime('%Y-%m-%dT%H:%M:%SZ', u.created_at) AS created_at,
+			u.last_login_at,
 			do2.status AS onboarding_status
 			FROM users u
 			LEFT JOIN driver_onboarding do2 ON do2.user_id = u.id`)
@@ -16794,6 +16862,12 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 			FullName: u.full_name,
 			CompanyName: u.company_name,
 			CreatedAt: u.created_at,
+			// No strftime() wrapper, unlike created_at directly above — this column
+			// is WRITTEN as an explicit ISO-8601 Z string (see the migration), so
+			// wrapping it would be a second conversion of an already-zoned value.
+			// '' means the account has not signed in since the column shipped; the
+			// UI renders null as "Never".
+			LastLoginAt: u.last_login_at || null,
 			Rating: u.rating || 0,
 			OnboardingStatus: u.onboarding_status || null,
 		}));
@@ -16888,6 +16962,25 @@ function purgeUserSessions(userId, exceptSid) {
 	} catch (err) {
 		console.error("session purge failed:", err.message);
 		return 0;
+	}
+}
+
+// Stamp users.last_login_at. One definition, called from the two routes that
+// genuinely establish a session for the first time — POST /api/auth/login and
+// POST /api/auth/setup. Deliberately NOT called from change-password's
+// req.session.regenerate: that user was already signed in, so treating a
+// password rotation as a fresh sign-in would overstate the column.
+//
+// ⚠️ THE try/catch IS LOAD-BEARING, not defensive habit. This is bookkeeping
+// for one display column on one admin screen, and it sits inside the login
+// route — an unhandled write error here would 500 /api/auth/login and lock
+// EVERY user out of the entire app. A missing stamp is cosmetic; a failed
+// login is not. Never let this throw into its caller.
+function stampLastLogin(userId) {
+	try {
+		db.prepare("UPDATE users SET last_login_at = ? WHERE id = ?").run(new Date().toISOString(), userId);
+	} catch (err) {
+		console.error("last_login_at stamp failed:", err.message);
 	}
 }
 
