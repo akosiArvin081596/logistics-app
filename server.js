@@ -38176,10 +38176,34 @@ const geocodeLimiter = rateLimit({
 app.get("/api/geocode", geocodeLimiter, async (req, res) => {
 	// ⚠️ Parsed as NUMBERS, not passed through. These were interpolated raw into the
 	// outbound Google URL, so a value carrying `&` could append arbitrary query
-	// parameters to a request made with our server key. Number.isFinite also rejects
-	// the empty string, NaN and Infinity, which the old truthiness test let through.
-	const lat = Number(req.query.lat);
-	const lng = Number(req.query.lng);
+	// parameters to a request made with our server key.
+	//
+	// ⚠️⚠️ THE EMPTINESS TEST IS EXPLICIT AND MUST STAY THAT WAY — `Number.isFinite`
+	// CANNOT DO IT. **`Number("") === 0`**, and so does `Number("   ")`, `Number("\t")`
+	// and `Number(null)`: the empty string coerces to ZERO, not NaN, so isFinite
+	// ACCEPTS it. An earlier revision of this comment claimed the opposite ("rejects
+	// the empty string") and the code behaved accordingly — `?lat=&lng=-99.5` silently
+	// became lat 0 and returned the Plus Code for a point in the Atlantic, turning a
+	// malformed request that the previous `if (!lat)` truthiness test had rejected for
+	// free into a BILLED Geocoding call on a deliberately public route.
+	// Emptiness must therefore be its own check on the RAW TEXT, ahead of the finite
+	// one — never delegated to the coercion. isFinite is still doing real work beside
+	// it: it rejects `NaN` ("abc"), `Infinity` and `-Infinity`, none of which the old
+	// truthiness test caught. ⚠️ An ABSENT param was always fine (`Number(undefined)`
+	// is NaN), so a "missing lat/lng -> 400" test passes either way; the bug needed the
+	// parameter PRESENT AND EMPTY, which is how it survived review.
+	// ⚠️ Test with `?lat=0&lng=0` before touching this. Zero is a LEGITIMATE coordinate
+	// (Null Island is a real request), so the guard must reject the empty STRING while
+	// admitting the number 0 — which is exactly why it tests the raw text, not the
+	// parsed value. The old truthiness test passed `"0"` for the same reason: a
+	// non-empty string is truthy regardless of what it coerces to.
+	const latRaw = String(req.query.lat ?? "").trim();
+	const lngRaw = String(req.query.lng ?? "").trim();
+	if (!latRaw || !lngRaw) {
+		return res.status(400).json({ error: "lat and lng required" });
+	}
+	const lat = Number(latRaw);
+	const lng = Number(lngRaw);
 	if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
 		return res.status(400).json({ error: "lat and lng required" });
 	}
