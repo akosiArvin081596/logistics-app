@@ -31777,6 +31777,30 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 			if (String(v).length > 1000) {
 				return res.status(400).json({ error: `Field "${fieldName}" is too long (1000 characters max).` });
 			}
+			// ⚠️ THE TWO ADDRESS FIELDS ARE BOUNDED TIGHTER THAN THE GENERIC 1000 ABOVE,
+			// and that gap was a real disagreement. These are the only fields that flow
+			// into an address PARSER (buildJobTrackingRow -> the sheet's Pickup/Drop-off
+			// Address columns, geocodeAddress -> geocode_cache, and load_coordinates), and
+			// both parsers slice to ADDRESS_MAX_CHARS while anchoring "City, ST ZIP" at the
+			// END of the string. So a 501-1000 char address passed this gate, was written
+			// out in full, and then rendered BLANK on every read — stores clean, reads
+			// empty. Exactly the 512-vs-500 class settled in #298, in a second place.
+			// The generic 1000 deliberately stays for every other field: `Details` carries
+			// the commodity line and legitimately runs long, so lowering it wholesale
+			// would refuse real rate-cons.
+			// REJECT, not clamp: `fields` is hand-edited in the review modal so the caller
+			// can fix it, and this block runs BEFORE the Job Tracking append, so refusing
+			// costs no work — unlike the step-8 load_coordinates write, which clamps
+			// precisely because the row already exists by then. Unreachable in normal use;
+			// runRateConGemini caps its own fields at 500 before the dispatcher sees them.
+			if ((fieldName === "Pickup Address" || fieldName === "Drop-off Address")
+				&& boundAddressForStorage(v).tooLong) {
+				return res.status(400).json({
+					error: `Field "${fieldName}" is too long (${ADDRESS_MAX_CHARS} characters max for an address).`,
+					code: "ADDRESS_TOO_LONG",
+					maxChars: ADDRESS_MAX_CHARS,
+				});
+			}
 		}
 
 		// Claim this Load ID for the duration of the write so a double-submit
@@ -36412,7 +36436,27 @@ function decodePolyline(encoded) {
 // Forward geocode address → lat/lng with SQLite cache
 async function geocodeAddress(address) {
 	if (!address || address.trim().length < 5) return null;
-	const key = address.trim().toLowerCase();
+	const trimmed = address.trim();
+	// ⚠️ The symmetric upper bound to the `< 5` refusal above, and the ONLY gate on
+	// geocode_cache.address. This function holds BOTH of that table's INSERTs and the
+	// column is `TEXT NOT NULL UNIQUE` in a table that only ever grows, so an oversized
+	// key bloats an index that is read on the geofence hot path. It also bounds the
+	// outbound Google URL, which interpolates the address into a query string.
+	// One gate, eight callers: three already pass a value bounded at the
+	// load_coordinates write, but from-ratecon, /api/geocode/bulk and the boot
+	// backfill all read straight from the sheet or a request body. Bounding here
+	// covers every caller instead of adding a fifth copy of the same number.
+	// ⚠️ REFUSE, do not clamp. A truncated address still geocodes, and Google answers
+	// with the coordinates of a DIFFERENT place — which this app then stores in
+	// load_coordinates, drives geofence status changes from, and shows a customer on
+	// the public tracker. A missing coordinate is a recoverable gap; a confidently
+	// wrong one is not. Nothing real is near the bound (longest production address:
+	// 79 chars), so this can only fire on garbage or a crafted caller.
+	if (trimmed.length > ADDRESS_MAX_CHARS) {
+		console.warn(`geocodeAddress: refusing a ${trimmed.length}-char address (max ${ADDRESS_MAX_CHARS})`);
+		return null;
+	}
+	const key = trimmed.toLowerCase();
 	// Check cache
 	const cached = db.prepare("SELECT lat, lng FROM geocode_cache WHERE address = ?").get(key);
 	if (cached) return cached.lat ? { lat: cached.lat, lng: cached.lng } : null;
@@ -38057,10 +38101,88 @@ app.get("/api/config/maintenance", (req, res) => {
 	});
 });
 
+// ⚠️ BOTH /api/geocode AND /api/geocode/search ARE PUBLIC BY NECESSITY, AND MUST STAY
+// THAT WAY. They spend real money per call on the SERVER key — reverse geocoding is
+// the billed Google Geocoding API (~$5/1k), the search route is Places (New)
+// searchText (~$32/1k) — so the instinct is to bolt requireAuth on. That was tried
+// and it is WRONG: it breaks address entry on the two public lead-generation forms.
+//
+// ⚠️⚠️ A COMPONENT'S DIRECTORY IS NOT ITS AUDIENCE. `LocationPickerModal.vue` lives
+// under `components/data-manager/`, which reads like an admin screen, but it is a
+// reusable component imported by FOUR views — and two of them are public:
+//     views/ApplyView.vue           -> /apply    PUBLIC   (driver application)
+//     views/InvestorApplyView.vue   -> /invest   PUBLIC   (investor application)
+//     views/NewJobView.vue          -> Super Admin
+//     components/data-manager/AddRowModal.vue -> admin
+// It calls BOTH halves (searchAddress + reverseGeocode). Worse, two call sites skip
+// the composable entirely, so auditing importers of `useGeocode` cannot see them:
+//     components/apply/StepPersonalInfo.vue:186   fetch('/api/geocode?lat=…')  /apply
+//     views/InvestorApplyView.vue:931             fetch('/api/geocode?lat=…')  /invest
+// This is the same bucket as GET /api/config/maps-key. And the breakage would be
+// SILENT: every call site swallows a non-2xx (`if (!res.ok) return null` / `[]`), so
+// a 401 makes the search box return nothing forever, map clicks produce no address
+// and "use my current location" does nothing, with no error shown anywhere.
+//
+// So the control is the limiter, not the gate. ONE limiter across BOTH routes,
+// deliberately — they are the two halves of the same address box and share a caller,
+// so separate buckets would just hand a scripted client twice the budget by
+// alternating endpoints. Named for the feature (`geocodeLimiter`) because it guards
+// the reverse route too.
+//
+// THREE TIERS. Authenticated callers are keyed per USER (a dispatch office behind one
+// NAT must not share one bucket); anonymous callers are keyed per IP, since that is
+// the only identity available.
+//   • Super Admin / Dispatcher 120 — ~8/min sustained, covering a bulk job-entry
+//     session (two debounced address boxes, results cached client-side per query).
+//   • Other authenticated roles 20 — headroom over a real usage of zero, so a
+//     compromised Driver/Investor session is bounded.
+//   • Anonymous 300 — MEASURED, not guessed, against the public forms. One modal
+//     session costs ~17 calls: 1 reverse on open (geolocate), ~5-10 searches while
+//     typing one address through a 500 ms debounce, 1 reverse per map click while
+//     fine-tuning the pin, 1 for "go to my location"; a thorough applicant who
+//     reopens the modal reaches ~35, and StepPersonalInfo's autofill adds 1.
+//     300 therefore leaves room for ~8 full applications from a single IP per
+//     window, which matters because mobile carriers put many applicants behind one
+//     CGNAT address. Deliberately loose: too tight is a SILENTLY broken application
+//     form (see the swallowed-error note above), too loose only costs money.
+//
+// ⚠️ BE HONEST ABOUT WHAT THIS BUYS. A per-IP bucket bounds ONE scraper; it does
+// nothing against a distributed one, which can rotate addresses and pay no cap at
+// all. That is the same trade publicFormLimiter and trackPublicLimiter already make
+// and it is the best available without breaking /apply and /invest. The real spend
+// ceiling for this key is the API allowlist plus per-API quota caps and a budget
+// alert in the Google Cloud console — see the "Maps key split" note. Do not read
+// this limiter as closing the exposure.
+const geocodeLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	// The authenticated test is `u.id`, the SAME predicate keyGenerator uses, so the
+	// tier and the bucket can never disagree (a session with no role would otherwise
+	// be billed the anonymous cap against a per-user key).
+	max: (req) => {
+		const u = req.session?.user;
+		if (!u || !u.id) return 300;
+		return (u.role === "Super Admin" || u.role === "Dispatcher") ? 120 : 20;
+	},
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many geocoding requests. Try again later." },
+	standardHeaders: true,
+});
+
 // GET /api/geocode — reverse geocode via Google Geocoding API
-app.get("/api/geocode", async (req, res) => {
-	const { lat, lng } = req.query;
-	if (!lat || !lng) return res.status(400).json({ error: "lat and lng required" });
+// ⚠️ NO requireAuth — /apply and /invest call this before a session exists. See above.
+app.get("/api/geocode", geocodeLimiter, async (req, res) => {
+	// ⚠️ Parsed as NUMBERS, not passed through. These were interpolated raw into the
+	// outbound Google URL, so a value carrying `&` could append arbitrary query
+	// parameters to a request made with our server key. Number.isFinite also rejects
+	// the empty string, NaN and Infinity, which the old truthiness test let through.
+	const lat = Number(req.query.lat);
+	const lng = Number(req.query.lng);
+	if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+		return res.status(400).json({ error: "lat and lng required" });
+	}
 	try {
 		const resp = await fetch(
 			`https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_MAPS_API_KEY}`
@@ -38089,9 +38211,16 @@ app.get("/api/geocode", async (req, res) => {
 });
 
 // GET /api/geocode/search — Forward geocode via Google Places API (New)
-app.get("/api/geocode/search", async (req, res) => {
-	const { q } = req.query;
-	if (!q || q.trim().length < 3) return res.json({ results: [] });
+// ⚠️ NO requireAuth — LocationPickerModal's search box runs on /apply and /invest
+// before a session exists. See the note on geocodeLimiter above.
+app.get("/api/geocode/search", geocodeLimiter, async (req, res) => {
+	const q = String(req.query.q ?? "").trim();
+	// Bounded with the shared ADDRESS_MAX_CHARS rather than a fresh number: `q` is
+	// interpolated into the outbound Places request, the same unbounded-string-into-a-
+	// query-string shape closed in geocodeAddress(). Symmetric with the `< 3` floor
+	// already here, and it degrades to the route's own empty-result contract rather
+	// than erroring — nothing is stored, so there is no truncation to be lossy about.
+	if (q.length < 3 || q.length > ADDRESS_MAX_CHARS) return res.json({ results: [] });
 	try {
 		const resp = await fetch("https://places.googleapis.com/v1/places:searchText", {
 			method: "POST",
@@ -38100,7 +38229,7 @@ app.get("/api/geocode/search", async (req, res) => {
 				"X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
 				"X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.location",
 			},
-			body: JSON.stringify({ textQuery: q.trim() }),
+			body: JSON.stringify({ textQuery: q }),   // already trimmed + bounded above
 		});
 		if (!resp.ok) return res.json({ results: [] });
 		const data = await resp.json();
@@ -40940,21 +41069,90 @@ app.get("/api/investor/payouts/:period/detail", requireRole("Super Admin", "Inve
 // ---------------------------------------------------------------------------
 // Payout statement PDF cache — render once, then serve the file.
 //
-// ⚠️⚠️ BUMP STATEMENT_TEMPLATE_VERSION WHENEVER THE DOCUMENT ITSELF CHANGES.
-// The cache key is a hash of the ROW plus this constant, and nothing else. So a
-// template edit that leaves the row untouched — which is every template edit —
-// produces the SAME key, and every investor with a cached statement keeps being
-// served the OLD document indefinitely. There is no mtime check, no content
-// hash of the template, and no way to notice from the outside: the fix looks
-// deployed and the PDF says otherwise.
+// THE TEMPLATE HASHES ITSELF. Nothing to remember, nothing to forget.
 //
-// "The template" is larger than one file:
+// This used to be a hand-maintained integer, with a comment shouting "bump it
+// whenever the document changes". Nothing enforced that — no content hash, no
+// mtime check, no test — and it bit within the hour: the "Figures as of" line
+// was added to lib/payout-statement.js, the fingerprint did not move, and the
+// cache served the OLD PDF until the directory was cleared by hand. It was
+// caught only because someone happened to be watching a scratch server. In
+// production nobody is watching, and the failure is silent in the worst
+// direction: the fix looks deployed and every investor keeps the old document
+// forever.
+//
+// So the bytes of the template decide. STATEMENT_TEMPLATE_FILES is the closure
+// of everything that can change the printed page:
 //   • lib/payout-statement.js — buildPayoutStatementHtml, the layout itself.
 //   • lib/broker-invoice.js — payout-statement.js reuses its formatMoney /
 //     formatDate / SELLER, so a change to the seller block or to how money is
 //     formatted changes the printed page WITHOUT touching payout-statement.js.
-//   • lib/pdf-browser.js — renderHtmlToPdf's page/margin options.
-// A change in ANY of them is a template change. Bump this.
+//     This is the edge a future engineer would never suspect, which is exactly
+//     why it must be enforced rather than documented.
+//   • lib/pdf-browser.js — renderHtmlToPdf's page format, margins,
+//     preferCSSPageSize, the fonts.ready wait, and the Chromium launch args
+//     (--font-render-hinting, and the darwin --disable-gpu branch). Every one
+//     of those changes the rendered bytes, so rendering counts as template.
+//
+// ⚠️ WHAT THIS HASH CANNOT SEE, which is what STATEMENT_TEMPLATE_VERSION is
+// still for: anything outside these three files. A Puppeteer/Chromium upgrade
+// re-rasterizes glyphs with no diff in lib/; a Google Fonts change upstream
+// arrives with no diff anywhere; a bad batch needs a forced re-render for
+// operational reasons. Hashing package-lock.json was considered and REJECTED —
+// it churns on every unrelated dependency bump (busting every statement for
+// nothing) and, per the deploy notes, npm 10.8.2 leaves it permanently modified
+// on the VPS, so it is not even stable across machines.
+const STATEMENT_TEMPLATE_FILES = [
+	"./lib/payout-statement.js",
+	"./lib/broker-invoice.js",
+	"./lib/pdf-browser.js",
+];
+
+// Computed ONCE, here, at module load — never per request. require.resolve so a
+// moved file is a loud MODULE_NOT_FOUND rather than a silently-skipped input,
+// and the specifier list is sorted so the value is deterministic across
+// machines. Each file contributes its specifier and byte length as well as its
+// bytes, so swapping two files' contents cannot produce the same digest.
+function computeStatementTemplateHash() {
+	const h = crypto.createHash("sha256");
+	for (const spec of [...STATEMENT_TEMPLATE_FILES].sort()) {
+		const buf = fs.readFileSync(require.resolve(spec));
+		h.update(spec).update("\0").update(String(buf.length)).update("\0").update(buf).update("\0");
+	}
+	return h.digest("hex").slice(0, 12);
+}
+
+// ⚠️ FAIL LOUD, AND FAIL TOWARDS SLOW-BUT-CORRECT — never towards the old
+// hand-maintained behaviour, which is the bug being removed here.
+//
+// In practice this is close to unreachable: lib/payout-statement.js is
+// `require`d at the top of this file, so an unreadable one means the process
+// never got here. If it happens anyway (permissions, a file replaced by a
+// directory, EMFILE), we cannot know whether a stored PDF matches the current
+// template — so the cache is DISABLED outright and every request re-renders.
+// That is exactly the pre-cache behaviour: correct, just slower.
+//
+// Deliberately NOT a throw. This is a cache for one download; the same process
+// serves the driver app, dispatch and the Linxup GPS webhook, so refusing to
+// boot over it would be wildly disproportionate. Same instinct as
+// periodLocksReadable() — degrade in the direction that cannot be wrong.
+let statementTemplateHash = null;
+try {
+	statementTemplateHash = computeStatementTemplateHash();
+} catch (err) {
+	console.error(
+		"⚠️  PAYOUT STATEMENT CACHE DISABLED — could not hash the statement template:",
+		err.message,
+		"\n    Every statement will re-render (correct, but ~3-5 s each). Fix the file permissions/paths in STATEMENT_TEMPLATE_FILES.",
+	);
+}
+const STATEMENT_TEMPLATE_HASH = statementTemplateHash;
+const STATEMENT_CACHE_ENABLED = !!STATEMENT_TEMPLATE_HASH;
+
+// The MANUAL OVERRIDE, and no longer load-bearing. Bumping it is now a
+// deliberate act — "re-render everything for a reason the three files above
+// cannot show", i.e. the Chromium/font/bad-batch cases in the ⚠️ note there.
+// A template edit no longer needs it: the hash catches that on its own.
 const STATEMENT_TEMPLATE_VERSION = 1;
 
 // Deliberately OUTSIDE uploads/. `app.use("/uploads", express.static(...))` is
@@ -41020,6 +41218,10 @@ const STATEMENT_FILE_RE = /^payout-\d+-\d{4}-\d{2}-[0-9a-f]{10}\.pdf$/;
 function statementFingerprint(row, who) {
 	return crypto.createHash("sha256").update(JSON.stringify([
 		STATEMENT_TEMPLATE_VERSION,
+		// The template's own bytes — see computeStatementTemplateHash(). This is
+		// what makes a template edit self-invalidating instead of relying on
+		// someone remembering to bump the integer above it.
+		STATEMENT_TEMPLATE_HASH,
 		row.owner_id, row.period, row.status,
 		row.paid_at || "", row.paid_by || "",
 		row.amount, row.adjustment, row.adjustment_note || "", row.adjusted_at || "",
@@ -41137,7 +41339,10 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 		const cachedName = String(row.statement_pdf_file_name || "");
 		const freshName = statementFileName(row, who);
 		const namePrefix = statementFilePrefix(row);
-		if (cachedName && cachedName === freshName && STATEMENT_FILE_RE.test(cachedName) && cachedName.startsWith(namePrefix)) {
+		// STATEMENT_CACHE_ENABLED is false only when the template hash could not be
+		// computed at boot. With no hash there is no way to tell whether a stored
+		// PDF was rendered from the current template, so it must not be served.
+		if (STATEMENT_CACHE_ENABLED && cachedName && cachedName === freshName && STATEMENT_FILE_RE.test(cachedName) && cachedName.startsWith(namePrefix)) {
 			const abs = path.join(PAYOUT_STATEMENT_DIR, cachedName);
 			// ⚠️ ONE read, no stat first. A stat→setHeader("Content-Length")→
 			// createReadStream sequence can race: a concurrent re-render renaming
@@ -41277,6 +41482,10 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 		// cache that cannot be written must never fail a download that has already
 		// rendered successfully — the worst outcome here is today's behaviour.
 		try {
+			// Nothing is stored while the cache is disabled: the filename could not
+			// encode which template produced it, so the file would be an orphan that
+			// no later boot ever serves or reaps.
+			if (!STATEMENT_CACHE_ENABLED) throw new Error("statement cache disabled (template hash unavailable)");
 			// ⚠️ Assert the name we are about to join onto a path, symmetrically
 			// with the read leg. Unreachable today — owner_id is an integer column
 			// and `period` was regex-validated at the top of the handler — but
