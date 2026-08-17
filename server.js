@@ -38101,10 +38101,88 @@ app.get("/api/config/maintenance", (req, res) => {
 	});
 });
 
+// ⚠️ BOTH /api/geocode AND /api/geocode/search ARE PUBLIC BY NECESSITY, AND MUST STAY
+// THAT WAY. They spend real money per call on the SERVER key — reverse geocoding is
+// the billed Google Geocoding API (~$5/1k), the search route is Places (New)
+// searchText (~$32/1k) — so the instinct is to bolt requireAuth on. That was tried
+// and it is WRONG: it breaks address entry on the two public lead-generation forms.
+//
+// ⚠️⚠️ A COMPONENT'S DIRECTORY IS NOT ITS AUDIENCE. `LocationPickerModal.vue` lives
+// under `components/data-manager/`, which reads like an admin screen, but it is a
+// reusable component imported by FOUR views — and two of them are public:
+//     views/ApplyView.vue           -> /apply    PUBLIC   (driver application)
+//     views/InvestorApplyView.vue   -> /invest   PUBLIC   (investor application)
+//     views/NewJobView.vue          -> Super Admin
+//     components/data-manager/AddRowModal.vue -> admin
+// It calls BOTH halves (searchAddress + reverseGeocode). Worse, two call sites skip
+// the composable entirely, so auditing importers of `useGeocode` cannot see them:
+//     components/apply/StepPersonalInfo.vue:186   fetch('/api/geocode?lat=…')  /apply
+//     views/InvestorApplyView.vue:931             fetch('/api/geocode?lat=…')  /invest
+// This is the same bucket as GET /api/config/maps-key. And the breakage would be
+// SILENT: every call site swallows a non-2xx (`if (!res.ok) return null` / `[]`), so
+// a 401 makes the search box return nothing forever, map clicks produce no address
+// and "use my current location" does nothing, with no error shown anywhere.
+//
+// So the control is the limiter, not the gate. ONE limiter across BOTH routes,
+// deliberately — they are the two halves of the same address box and share a caller,
+// so separate buckets would just hand a scripted client twice the budget by
+// alternating endpoints. Named for the feature (`geocodeLimiter`) because it guards
+// the reverse route too.
+//
+// THREE TIERS. Authenticated callers are keyed per USER (a dispatch office behind one
+// NAT must not share one bucket); anonymous callers are keyed per IP, since that is
+// the only identity available.
+//   • Super Admin / Dispatcher 120 — ~8/min sustained, covering a bulk job-entry
+//     session (two debounced address boxes, results cached client-side per query).
+//   • Other authenticated roles 20 — headroom over a real usage of zero, so a
+//     compromised Driver/Investor session is bounded.
+//   • Anonymous 300 — MEASURED, not guessed, against the public forms. One modal
+//     session costs ~17 calls: 1 reverse on open (geolocate), ~5-10 searches while
+//     typing one address through a 500 ms debounce, 1 reverse per map click while
+//     fine-tuning the pin, 1 for "go to my location"; a thorough applicant who
+//     reopens the modal reaches ~35, and StepPersonalInfo's autofill adds 1.
+//     300 therefore leaves room for ~8 full applications from a single IP per
+//     window, which matters because mobile carriers put many applicants behind one
+//     CGNAT address. Deliberately loose: too tight is a SILENTLY broken application
+//     form (see the swallowed-error note above), too loose only costs money.
+//
+// ⚠️ BE HONEST ABOUT WHAT THIS BUYS. A per-IP bucket bounds ONE scraper; it does
+// nothing against a distributed one, which can rotate addresses and pay no cap at
+// all. That is the same trade publicFormLimiter and trackPublicLimiter already make
+// and it is the best available without breaking /apply and /invest. The real spend
+// ceiling for this key is the API allowlist plus per-API quota caps and a budget
+// alert in the Google Cloud console — see the "Maps key split" note. Do not read
+// this limiter as closing the exposure.
+const geocodeLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	// The authenticated test is `u.id`, the SAME predicate keyGenerator uses, so the
+	// tier and the bucket can never disagree (a session with no role would otherwise
+	// be billed the anonymous cap against a per-user key).
+	max: (req) => {
+		const u = req.session?.user;
+		if (!u || !u.id) return 300;
+		return (u.role === "Super Admin" || u.role === "Dispatcher") ? 120 : 20;
+	},
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many geocoding requests. Try again later." },
+	standardHeaders: true,
+});
+
 // GET /api/geocode — reverse geocode via Google Geocoding API
-app.get("/api/geocode", async (req, res) => {
-	const { lat, lng } = req.query;
-	if (!lat || !lng) return res.status(400).json({ error: "lat and lng required" });
+// ⚠️ NO requireAuth — /apply and /invest call this before a session exists. See above.
+app.get("/api/geocode", geocodeLimiter, async (req, res) => {
+	// ⚠️ Parsed as NUMBERS, not passed through. These were interpolated raw into the
+	// outbound Google URL, so a value carrying `&` could append arbitrary query
+	// parameters to a request made with our server key. Number.isFinite also rejects
+	// the empty string, NaN and Infinity, which the old truthiness test let through.
+	const lat = Number(req.query.lat);
+	const lng = Number(req.query.lng);
+	if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+		return res.status(400).json({ error: "lat and lng required" });
+	}
 	try {
 		const resp = await fetch(
 			`https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_MAPS_API_KEY}`
@@ -38133,9 +38211,16 @@ app.get("/api/geocode", async (req, res) => {
 });
 
 // GET /api/geocode/search — Forward geocode via Google Places API (New)
-app.get("/api/geocode/search", async (req, res) => {
-	const { q } = req.query;
-	if (!q || q.trim().length < 3) return res.json({ results: [] });
+// ⚠️ NO requireAuth — LocationPickerModal's search box runs on /apply and /invest
+// before a session exists. See the note on geocodeLimiter above.
+app.get("/api/geocode/search", geocodeLimiter, async (req, res) => {
+	const q = String(req.query.q ?? "").trim();
+	// Bounded with the shared ADDRESS_MAX_CHARS rather than a fresh number: `q` is
+	// interpolated into the outbound Places request, the same unbounded-string-into-a-
+	// query-string shape closed in geocodeAddress(). Symmetric with the `< 3` floor
+	// already here, and it degrades to the route's own empty-result contract rather
+	// than erroring — nothing is stored, so there is no truncation to be lossy about.
+	if (q.length < 3 || q.length > ADDRESS_MAX_CHARS) return res.json({ results: [] });
 	try {
 		const resp = await fetch("https://places.googleapis.com/v1/places:searchText", {
 			method: "POST",
@@ -38144,7 +38229,7 @@ app.get("/api/geocode/search", async (req, res) => {
 				"X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
 				"X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.location",
 			},
-			body: JSON.stringify({ textQuery: q.trim() }),
+			body: JSON.stringify({ textQuery: q }),   // already trimmed + bounded above
 		});
 		if (!resp.ok) return res.json({ results: [] });
 		const data = await resp.json();
