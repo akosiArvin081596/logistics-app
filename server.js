@@ -9198,6 +9198,40 @@ function parseOriginDestCity(addr) {
 	return { city: (trimmed.split(/[,\n]/)[0] || "").trim(), state: "", zip: "" };
 }
 
+// A few load_coordinates rows hold the geocoder's STRUCTURED object verbatim
+// instead of an address string: {"Street":…,"City":…,"State":…,"Zip":…}. There is
+// no "City, ST ZIP" anywhere in that text, so parseOriginDestCity finds nothing,
+// cityStateZip comes back "" and every caller falls through to printing the raw
+// blob — which shows the JSON *and* the street, i.e. the worst of both. Read the
+// object instead. Deliberately a JSON branch and NOT a widened pattern: the
+// regexes below feed the dashboard, the public tracker and the driver app, and
+// loosening that family is what produced the 9.4 s event-loop stall documented
+// beside cityStateZip() in lib/ratecon-load.js.
+// Returns null — meaning "fall through, unchanged" — unless the blob parses AND
+// names both a City and a 2-letter State, so a partial object never invents one.
+function jsonAddressParts(s) {
+	let o;
+	try { o = JSON.parse(s); } catch { return null; }
+	if (!o || typeof o !== "object" || Array.isArray(o)) return null;
+	// Keys are capitalised ("Street"/"City"/"State"/"Zip") in the rows we have, but
+	// match case-insensitively rather than betting on one producer's casing.
+	const pick = (want) => {
+		for (const k of Object.keys(o)) {
+			if (k.toLowerCase() === want) return o[k] == null ? "" : String(o[k]).trim();
+		}
+		return "";
+	};
+	const city = pick("city");
+	const state = pick("state");
+	if (!city || !/^[A-Za-z]{2}$/.test(state)) return null;
+	// ZIP+4 is stored unpunctuated here ("752331402"); keep the 5-digit form the rest
+	// of the app prints. Anything shorter is dropped rather than guessed at.
+	const digits = pick("zip").replace(/\D/g, "");
+	const zip = digits.length >= 5 ? digits.slice(0, 5) : "";
+	const st = state.toUpperCase();
+	return { street: pick("street"), cityStateZip: zip ? `${city}, ${st} ${zip}` : `${city}, ${st}` };
+}
+
 // Split a full address into two display lines: { street, cityStateZip }.
 //   line 1 (street)       = street + any suite / C-O / leading-name segments
 //   line 2 (cityStateZip) = canonical "City, ST 12345" (reuses parseOriginDestCity)
@@ -9208,6 +9242,10 @@ function parseOriginDestCity(addr) {
 function splitAddressLines(raw) {
 	const s = (raw == null ? "" : String(raw)).trim();
 	if (!s) return { street: "", cityStateZip: "" };
+	if (s.charCodeAt(0) === 123 /* { */) {
+		const structured = jsonAddressParts(s);
+		if (structured) return structured;
+	}
 	const cleaned = s.replace(/,?\s*(USA|United States)\.?\s*$/i, "").trim();
 	const p = parseOriginDestCity(cleaned);
 	const csz = p.city
@@ -38465,13 +38503,24 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 			if (amt && assignedMonthKey) {
 				monthlyRevenue[assignedMonthKey] = (monthlyRevenue[assignedMonthKey] || 0) + amt;
 				if (detail && assignedMonthKey === detailForMonth) {
+					// ⚠️ CITY LEVEL ONLY — these two fields reach an INVESTOR, on the
+					// payout statement PDF (lib/payout-statement.js routeText) and in the
+					// on-screen revenue drill-down, and the street belongs to the BROKER'S
+					// CUSTOMER, not to us. The raw sheet cell was being passed straight
+					// through, so a statement printed e.g. "3311 EAST LINCOLN WAY AMES, IA
+					// 50010 → 2930 114TH STREET GRAND PRAIRIE,TX 75050" — every shipper and
+					// receiver's door, handed to an outside party. resolveCityState() is the
+					// same reduction /api/investor's My Loads already uses; reduce at the
+					// PUSH SITE so both consumers of revenueLoads inherit it and neither can
+					// drift back to the raw string.
+					const lid = jtLoadIdCol ? String(r[jtLoadIdCol] || "").trim() : "";
 					detail.revenueLoads.push({
-						loadId: jtLoadIdCol ? String(r[jtLoadIdCol] || "").trim() : "",
+						loadId: lid,
 						driver: driver || "",
 						truck: jtTruckCol ? String(r[jtTruckCol] || "").trim() : "",
 						date: jtDateCol ? String(r[jtDateCol] || "").trim() : "",
-						pickup: jtPickupCol ? String(r[jtPickupCol] || "").trim() : "",
-						dropoff: jtDropCol ? String(r[jtDropCol] || "").trim() : "",
+						pickup: resolveCityState(r, "pickup", lid, jtPickupCol ? r[jtPickupCol] : ""),
+						dropoff: resolveCityState(r, "drop", lid, jtDropCol ? r[jtDropCol] : ""),
 						amount: Math.round(amt * 100) / 100,
 					});
 				}
