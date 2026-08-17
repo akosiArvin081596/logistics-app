@@ -293,6 +293,7 @@ This one **leaves the app** — it is a document the investor keeps.
 | ⚪ | `Every figure in the summary, itemized. Each section totals the rows listed below it.` |
 | ⚪ | `This statement reflects the settled payout recorded on the LogisX investor ledger for the period shown.` |
 | ⚪ | Heading is `Final Amount` (finalized, unpaid), `Amount Paid` (paid), or `Net Settled` (adjusted after payment) |
+| 🔴 | `Figures as of <date>; the portal shows current records.` — **NEW, you approved this on 2026-08-17.** Small grey italic line under the settled figure, on **both** the Final and the Paid version. `<date>` is the same "Issued" date already printed in the header. **Why it was added:** statements are now rendered once and stored, so the PDF is a snapshot of the day it was built. Two parts of the page are re-derived live at that moment — the itemized appendix, and the page-1 composition on older months — so a statement built while everything agreed stays that way and will never later grow the `The figures above reflect current records, which have changed since it closed.` caveat (§11) the *screen* would show. The alternative was to re-render on every click, which is the ~4-second delay you asked us to remove. This line is how the document stays honest instead. **The settled amount itself is frozen either way and is not affected.** |
 
 ---
 
