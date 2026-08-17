@@ -3355,6 +3355,20 @@ try { db.exec("ALTER TABLE investor_payouts ADD COLUMN finalized_at TEXT DEFAULT
 try { db.exec("ALTER TABLE investor_payouts ADD COLUMN finalized_amount REAL"); } catch {}
 try { db.exec("ALTER TABLE investor_payouts ADD COLUMN finalized_breakdown TEXT DEFAULT ''"); } catch {}
 
+// Rendered-statement cache. Client's words: "every time you click view statement
+// it's preparing the statement — why can't we just prepare the statement once".
+// He is describing the design accurately: GET …/statement had no cache at any
+// layer, so every click ran a Sheets read + two full month recomputes + a fresh
+// Puppeteer render (~3-5 s) to produce bytes identical to the previous click's.
+//
+// ONE column is enough because the FINGERPRINT LIVES IN THE FILENAME
+// (payout-<ownerId>-<period>-<hash10>.pdf, see statementFileName). A cached file
+// is therefore only ever served when every input that can change the printed
+// document still hashes to the same value — no invalidation hook to forget on
+// the adjust / status / reopen routes, and none to forget on a route added
+// later. '' = nothing rendered yet, which is every legacy row.
+try { db.exec("ALTER TABLE investor_payouts ADD COLUMN statement_pdf_file_name TEXT DEFAULT ''"); } catch {}
+
 // --- Period locks (month-end close) ---------------------------------------
 // One row per CLOSED work month, fleet-wide. Presence of a row is the lock.
 //
@@ -40809,6 +40823,74 @@ app.get("/api/investor/payouts/:period/detail", requireRole("Super Admin", "Inve
 	}
 });
 
+// ---------------------------------------------------------------------------
+// Payout statement PDF cache — render once, then serve the file.
+//
+// ⚠️⚠️ BUMP STATEMENT_TEMPLATE_VERSION WHENEVER THE DOCUMENT ITSELF CHANGES.
+// The cache key is a hash of the ROW plus this constant, and nothing else. So a
+// template edit that leaves the row untouched — which is every template edit —
+// produces the SAME key, and every investor with a cached statement keeps being
+// served the OLD document indefinitely. There is no mtime check, no content
+// hash of the template, and no way to notice from the outside: the fix looks
+// deployed and the PDF says otherwise.
+//
+// "The template" is larger than one file:
+//   • lib/payout-statement.js — buildPayoutStatementHtml, the layout itself.
+//   • lib/broker-invoice.js — payout-statement.js reuses its formatMoney /
+//     formatDate / SELLER, so a change to the seller block or to how money is
+//     formatted changes the printed page WITHOUT touching payout-statement.js.
+//   • lib/pdf-browser.js — renderHtmlToPdf's page/margin options.
+// A change in ANY of them is a template change. Bump this.
+const STATEMENT_TEMPLATE_VERSION = 1;
+
+// Deliberately OUTSIDE uploads/. `app.use("/uploads", express.static(...))` is
+// mounted behind requireAuth only, and these filenames are
+// payout-<ownerId>-<period>-<hash>.pdf — a small sequential owner id crossed
+// with a month. Only the 10 hex chars are unguessable, and relying on that is
+// exactly the reasoning that produced issue #228 (any authenticated Driver read
+// any other driver's invoice PDF straight off the static mount, because
+// GET /api/invoices/:id/pdf enforced ownership and express.static simply did
+// not). Keeping the bytes out of the static tree makes this route structurally
+// the only reader — no GUARDED_UPLOAD_DIRS entry to get right, and no path
+// shape for the guard and the static mount to disagree about.
+const PAYOUT_STATEMENT_DIR = path.join(__dirname, "storage", "payout-statements");
+
+// The filename is read back OUT OF THE DATABASE and then joined onto a path, so
+// it is validated against the exact shape this module writes before it goes
+// anywhere near path.join. A mismatch is a cache MISS, never an error — the
+// statement still renders.
+//
+// ⚠️ ON THE READ LEG this is belt-and-braces (a poisoned value also fails the
+// `cachedName === freshName` test, since freshName always matches this shape).
+// ON THE UNLINK LEG IT IS THE ONLY GUARD, and that leg is genuinely reachable:
+// there the test is `cachedName !== freshName`, which a traversal payload
+// PASSES, so nothing else stands between a DB value and
+// fs.unlinkSync(path.join(DIR, value)). Verified against a running server —
+// with the column set to `../DECOY-DO-NOT-DELETE.txt` the request re-rendered
+// normally and the decoy one directory up survived.
+const STATEMENT_FILE_RE = /^payout-\d+-\d{4}-\d{2}-[0-9a-f]{10}\.pdf$/;
+
+// Every field that can change the printed document, and nothing else.
+//
+// This is the whole invalidation strategy. PUT …/adjust, POST …/status and the
+// reopen path all move columns in this list, so each of them invalidates the
+// cache by simply doing its job — there is no hook to call and none to forget.
+// finalized_breakdown is included because the statement prints the SNAPSHOT in
+// preference to a live recompute, so re-finalizing changes the page.
+function statementFingerprint(row) {
+	return crypto.createHash("sha256").update(JSON.stringify([
+		STATEMENT_TEMPLATE_VERSION,
+		row.owner_id, row.period, row.status,
+		row.paid_at || "", row.paid_by || "",
+		row.amount, row.adjustment, row.adjustment_note || "", row.adjusted_at || "",
+		row.finalized_at || "", row.finalized_amount, row.finalized_breakdown || "",
+	])).digest("hex").slice(0, 10);
+}
+
+function statementFileName(row) {
+	return `payout-${row.owner_id}-${row.period}-${statementFingerprint(row)}.pdf`;
+}
+
 // GET /api/investor/payouts/:period/statement — PDF payout statement for a PAID
 // month. Page 1 is the waterfall ending in the FROZEN figure that was actually
 // paid (effectiveAmount), page 2+ itemizes every component.
@@ -40858,6 +40940,94 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 			});
 		}
 
+		// Investor identity — same COALESCE precedence as listSettlableInvestors().
+		// Hoisted above the cache branch because BOTH paths need it: it names the
+		// audit row and it is the `safeName` in the download filename. One copy,
+		// so a cached download can never be named differently from a fresh one.
+		const who = db.prepare(
+			`SELECT COALESCE(NULLIF(TRIM(i.full_name),''), NULLIF(TRIM(u.company_name),''), u.username) AS name,
+			        COALESCE(NULLIF(TRIM(u.company_name),''), NULLIF(TRIM(i.carrier_name),''), '') AS company
+			   FROM users u LEFT JOIN investors i ON i.user_id = u.id WHERE u.id = ?`,
+		).get(ownerId) || { name: "Investor", company: "" };
+
+		// Distinguish the two documents on disk. An investor who downloads the final
+		// statement in July and the paid one in August should not end up with two
+		// identically-named files where the second silently replaces the first.
+		const kind = row.paid_at ? "Payout_Statement" : "Final_Statement";
+		const safeName = String(who.name || "Investor").replace(/[^a-zA-Z0-9._-]/g, "_");
+		const sendStatementHeaders = () => {
+			res.setHeader("Content-Type", "application/pdf");
+			res.setHeader("Content-Disposition", `attachment; filename="LogisX_${kind}_${safeName}_${period}.pdf"`);
+		};
+
+		// ── Cached statement ────────────────────────────────────────────────────
+		// PLACEMENT IS THE WHOLE POINT. This sits after the publish gate and before
+		// getJobTrackingCached() below, because everything past this line IS the
+		// 3-5 s the client is complaining about: a Google Sheets read,
+		// reconcileInvestorPayouts (a full multi-month recompute),
+		// loadPayoutMonthDetail (a SECOND full recompute), and a Puppeteer render
+		// whose HTML fetches Google Fonts over the network. Caching below any of
+		// them would save nothing worth having.
+		//
+		// ⚠️ SKIPPING THE RECONCILE CANNOT CHANGE A PRINTED FIGURE — that is what
+		// makes this safe rather than merely fast. Any row reaching this line
+		// passed the publish gate, i.e. it is LOCKED or PAID, and
+		// reconcileInvestorPayouts refreshes `amount` only while
+		// `status='owed' && !finalized_at && !isLocked(period)`. So for a printable
+		// row `row.amount` is already frozen and the reconcile it skips would have
+		// written that column back unchanged.
+		//
+		// (The miss path's `if (!p)` 404 is likewise not lost: `p` comes from the
+		// same investor_payouts row we already read into `row`, so it can only be
+		// absent if the row was deleted between the two reads.)
+		const cachedName = String(row.statement_pdf_file_name || "");
+		const freshName = statementFileName(row);
+		if (cachedName && cachedName === freshName && STATEMENT_FILE_RE.test(cachedName)) {
+			const abs = path.join(PAYOUT_STATEMENT_DIR, cachedName);
+			// A file that is gone (manual cleanup, a restored database, a
+			// half-finished deploy) is a MISS, not a 500 — fall through and render.
+			// stat rather than existsSync so `isFile()` also rejects a directory,
+			// and so the size is available for Content-Length below (res.send() on
+			// the miss path sets one, and the two paths should not differ).
+			let st = null;
+			try { st = fs.statSync(abs); } catch { st = null; }
+			if (st && st.isFile()) {
+				// Same guard as the miss path, computed off `row` rather than the
+				// reconcile projection. This expression is verbatim how
+				// reconcileInvestorPayouts derives effectiveAmount, so the cached
+				// and fresh branches cannot disagree about whether a corrected
+				// payout has netted to zero.
+				const effectiveAmount = Math.max(0, Math.round((row.amount || 0) + Number(row.adjustment || 0)));
+				if (effectiveAmount <= 0) {
+					return res.status(409).json({
+						error: `The ${period} payout nets to $0 after corrections, so there is no statement to issue.`,
+						code: "PAYOUT_NOT_SETTLEABLE",
+					});
+				}
+
+				// ⚠️ This is an ACCESS log, not a render log. It fires on a cache
+				// hit exactly as it does on a miss — otherwise audit_trail would
+				// record the first time anyone opened a statement and silently
+				// nothing thereafter, which is the opposite of what it is for.
+				logAudit(req, "investor_payout_statement", "investor_payout", row.id,
+					`Downloaded ${period} payout statement (${who.name}${row.paid_at ? "" : " — FINAL, not yet paid"})`);
+
+				sendStatementHeaders();
+				res.setHeader("Content-Length", st.size);
+				const stream = fs.createReadStream(abs);
+				// Installed BEFORE pipe(), the same rule as the receipt-zip export:
+				// once bytes have flushed the headers are gone and a failure can
+				// only truncate, so the JSON fallback has to be armed first.
+				stream.on("error", (err) => {
+					console.error("Payout statement stream error:", err.message);
+					if (!res.headersSent) res.status(500).json({ error: "Failed to generate the payout statement" });
+					else res.destroy();
+				});
+				stream.pipe(res);
+				return;
+			}
+		}
+
 		await getJobTrackingCached();
 		const globalConfig = {};
 		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all().forEach((r) => (globalConfig[r.key] = r.value));
@@ -40878,13 +41048,6 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 		}
 
 		const { detail } = await loadPayoutMonthDetail(ownerId, preview.sessionUser, period);
-
-		// Investor identity — same COALESCE precedence as listSettlableInvestors().
-		const who = db.prepare(
-			`SELECT COALESCE(NULLIF(TRIM(i.full_name),''), NULLIF(TRIM(u.company_name),''), u.username) AS name,
-			        COALESCE(NULLIF(TRIM(u.company_name),''), NULLIF(TRIM(i.carrier_name),''), '') AS company
-			   FROM users u LEFT JOIN investors i ON i.user_id = u.id WHERE u.id = ?`,
-		).get(ownerId) || { name: "Investor", company: "" };
 
 		// A correction recorded AFTER the money went out means effectiveAmount is
 		// the corrected net, not the sum that was wired — the document has to say
@@ -40954,13 +41117,33 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 		});
 
 		const pdf = await renderHtmlToPdf(html);
-		const safeName = String(who.name || "Investor").replace(/[^a-zA-Z0-9._-]/g, "_");
-		// Distinguish the two documents on disk. An investor who downloads the final
-		// statement in July and the paid one in August should not end up with two
-		// identically-named files where the second silently replaces the first.
-		const kind = row.paid_at ? "Payout_Statement" : "Final_Statement";
-		res.setHeader("Content-Type", "application/pdf");
-		res.setHeader("Content-Disposition", `attachment; filename="LogisX_${kind}_${safeName}_${period}.pdf"`);
+
+		// Persist it so the next click is a file read. BEST-EFFORT THROUGHOUT: a
+		// cache that cannot be written must never fail a download that has already
+		// rendered successfully — the worst outcome here is today's behaviour.
+		try {
+			fs.mkdirSync(PAYOUT_STATEMENT_DIR, { recursive: true });
+			// ⚠️ Write to a temp name and rename into place. rename() is atomic
+			// within a directory, so a crash or an OOM mid-write can leave a stray
+			// .tmp but can never leave a TRUNCATED payout-…-<hash>.pdf. A truncated
+			// one would be indistinguishable from a good one on the next request —
+			// its hash still matches — so it would be served as a corrupt PDF
+			// forever.
+			const tmp = path.join(PAYOUT_STATEMENT_DIR, `.${freshName}.${process.pid}.${Date.now()}.tmp`);
+			fs.writeFileSync(tmp, pdf);
+			fs.renameSync(tmp, path.join(PAYOUT_STATEMENT_DIR, freshName));
+			// Drop the render this one supersedes (an adjustment, a reopen, a
+			// template bump). Without it the directory grows one file per
+			// correction and nothing ever reaps them.
+			if (cachedName && cachedName !== freshName && STATEMENT_FILE_RE.test(cachedName)) {
+				try { fs.unlinkSync(path.join(PAYOUT_STATEMENT_DIR, cachedName)); } catch {}
+			}
+			db.prepare("UPDATE investor_payouts SET statement_pdf_file_name = ? WHERE id = ?").run(freshName, row.id);
+		} catch (e) {
+			console.error("Payout statement cache write failed:", e.message);
+		}
+
+		sendStatementHeaders();
 		res.send(pdf);
 	} catch (err) {
 		console.error("GET /api/investor/payouts/:period/statement error:", err.message);
