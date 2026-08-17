@@ -9185,13 +9185,30 @@ const TRACK_STAGES = [
 	{ key: "at_receiver", name: "At Receiver", matchStatus: /^(at receiver|unloading)$/i },
 	{ key: "delivered", name: "Delivered", matchStatus: /^(delivered|pod received|completed)$/i },
 ];
+// Trailing country suffix, stripped before the "City, ST ZIP" anchor is applied.
+// Accepts "USA" / "United States" and the bare "US" / "U.S." / "U.S.A." forms.
+// Three details are load-bearing:
+//   • END-ANCHORED — "US Hwy 90", "US-290" and "U.S. 90 Access Rd" are all real
+//     values in this data and all sit mid-string, so only a trailing token matches.
+//   • \b BEFORE the token — without it "Columbus" strips to "Columb", and
+//     "…HWY 90 BUS" to "…HWY 90 B". The old USA-only pattern escaped this by luck.
+//   • The group is MANDATORY between the two \s*, so there is no ambiguity for a
+//     backtracker to explore — this is NOT the "\s* around an OPTIONAL token" shape
+//     that made cityStateZip() cubic (9.4 s of blocked event loop; see
+//     lib/ratecon-load.js). Do not make the group optional.
+const COUNTRY_SUFFIX_RE = /,?\s*\b(U\.?S\.?A?\.?|United States)\.?\s*$/i;
+
 function parseOriginDestCity(addr) {
 	if (!addr || typeof addr !== "string") return { city: "", state: "", zip: "" };
 	// Strip a trailing country suffix ("..., USA" / "United States"), then match
 	// "City, ST 12345" at the end. Two ordered passes so ZIP+4 ("64504-9534")
 	// and 9-digit-no-dash zips don't break the anchor; we keep the 5-digit zip.
-	const trimmed = addr.trim().replace(/,?\s*(USA|United States)\.?\s*$/i, "").trim();
-	const withZip = trimmed.match(/([^,\n]+?),\s*([A-Za-z]{2})\.?\s+(\d{5})(?:-?\d{4})?\s*$/);
+	const trimmed = addr.trim().replace(COUNTRY_SUFFIX_RE, "").trim();
+	// [\s-] not just '-': ZIP+4 also arrives SPACE-separated ("TX 75233 1402", 5
+	// loads). Both halves are fixed-width and the whole group stays optional and
+	// end-anchored, so this adds no ambiguity — it only lets the anchor survive a
+	// +4 that used to defeat it and drop the value to "" (i.e. a blank route end).
+	const withZip = trimmed.match(/([^,\n]+?),\s*([A-Za-z]{2})\.?\s+(\d{5})(?:[\s-]?\d{4})?\s*$/);
 	if (withZip) return { city: withZip[1].trim(), state: withZip[2].toUpperCase(), zip: withZip[3] };
 	const noZip = trimmed.match(/([^,\n]+?),\s*([A-Za-z]{2})\.?\s*$/);
 	if (noZip) return { city: noZip[1].trim(), state: noZip[2].toUpperCase(), zip: "" };
@@ -9246,7 +9263,7 @@ function splitAddressLines(raw) {
 		const structured = jsonAddressParts(s);
 		if (structured) return structured;
 	}
-	const cleaned = s.replace(/,?\s*(USA|United States)\.?\s*$/i, "").trim();
+	const cleaned = s.replace(COUNTRY_SUFFIX_RE, "").trim();
 	const p = parseOriginDestCity(cleaned);
 	const csz = p.city
 		? (p.zip ? `${p.city}, ${p.state} ${p.zip}` : (p.state ? `${p.city}, ${p.state}` : p.city))
