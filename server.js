@@ -31777,6 +31777,30 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 			if (String(v).length > 1000) {
 				return res.status(400).json({ error: `Field "${fieldName}" is too long (1000 characters max).` });
 			}
+			// ⚠️ THE TWO ADDRESS FIELDS ARE BOUNDED TIGHTER THAN THE GENERIC 1000 ABOVE,
+			// and that gap was a real disagreement. These are the only fields that flow
+			// into an address PARSER (buildJobTrackingRow -> the sheet's Pickup/Drop-off
+			// Address columns, geocodeAddress -> geocode_cache, and load_coordinates), and
+			// both parsers slice to ADDRESS_MAX_CHARS while anchoring "City, ST ZIP" at the
+			// END of the string. So a 501-1000 char address passed this gate, was written
+			// out in full, and then rendered BLANK on every read — stores clean, reads
+			// empty. Exactly the 512-vs-500 class settled in #298, in a second place.
+			// The generic 1000 deliberately stays for every other field: `Details` carries
+			// the commodity line and legitimately runs long, so lowering it wholesale
+			// would refuse real rate-cons.
+			// REJECT, not clamp: `fields` is hand-edited in the review modal so the caller
+			// can fix it, and this block runs BEFORE the Job Tracking append, so refusing
+			// costs no work — unlike the step-8 load_coordinates write, which clamps
+			// precisely because the row already exists by then. Unreachable in normal use;
+			// runRateConGemini caps its own fields at 500 before the dispatcher sees them.
+			if ((fieldName === "Pickup Address" || fieldName === "Drop-off Address")
+				&& boundAddressForStorage(v).tooLong) {
+				return res.status(400).json({
+					error: `Field "${fieldName}" is too long (${ADDRESS_MAX_CHARS} characters max for an address).`,
+					code: "ADDRESS_TOO_LONG",
+					maxChars: ADDRESS_MAX_CHARS,
+				});
+			}
 		}
 
 		// Claim this Load ID for the duration of the write so a double-submit
@@ -36412,7 +36436,27 @@ function decodePolyline(encoded) {
 // Forward geocode address → lat/lng with SQLite cache
 async function geocodeAddress(address) {
 	if (!address || address.trim().length < 5) return null;
-	const key = address.trim().toLowerCase();
+	const trimmed = address.trim();
+	// ⚠️ The symmetric upper bound to the `< 5` refusal above, and the ONLY gate on
+	// geocode_cache.address. This function holds BOTH of that table's INSERTs and the
+	// column is `TEXT NOT NULL UNIQUE` in a table that only ever grows, so an oversized
+	// key bloats an index that is read on the geofence hot path. It also bounds the
+	// outbound Google URL, which interpolates the address into a query string.
+	// One gate, eight callers: three already pass a value bounded at the
+	// load_coordinates write, but from-ratecon, /api/geocode/bulk and the boot
+	// backfill all read straight from the sheet or a request body. Bounding here
+	// covers every caller instead of adding a fifth copy of the same number.
+	// ⚠️ REFUSE, do not clamp. A truncated address still geocodes, and Google answers
+	// with the coordinates of a DIFFERENT place — which this app then stores in
+	// load_coordinates, drives geofence status changes from, and shows a customer on
+	// the public tracker. A missing coordinate is a recoverable gap; a confidently
+	// wrong one is not. Nothing real is near the bound (longest production address:
+	// 79 chars), so this can only fire on garbage or a crafted caller.
+	if (trimmed.length > ADDRESS_MAX_CHARS) {
+		console.warn(`geocodeAddress: refusing a ${trimmed.length}-char address (max ${ADDRESS_MAX_CHARS})`);
+		return null;
+	}
+	const key = trimmed.toLowerCase();
 	// Check cache
 	const cached = db.prepare("SELECT lat, lng FROM geocode_cache WHERE address = ?").get(key);
 	if (cached) return cached.lat ? { lat: cached.lat, lng: cached.lng } : null;
