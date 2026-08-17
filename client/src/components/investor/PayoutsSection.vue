@@ -533,7 +533,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { formatCurrency as fmt } from '../../utils/format'
 import { useApi } from '../../composables/useApi'
 import { useAuthStore } from '../../stores/auth'
@@ -653,9 +653,20 @@ const history = ref({})
 const historyLoading = ref({})
 const historyMeta = ref({})
 
+// Bumped on every previewed-investor change; async writers capture it before
+// their await and refuse to write when it has moved. Declared HERE, above its
+// first reader, rather than beside the watcher that owns it — loadHistory()
+// sits above that line and a `let` is in its temporal dead zone until it runs.
+// The full rationale is on the watcher, near the end of this script.
+let previewToken = 0
+
 async function loadHistory(period) {
   if (!period || history.value[period] || historyLoading.value[period]) return
   historyLoading.value = { ...historyLoading.value, [period]: true }
+  // Same supersede guard as openStatement() — this map is keyed on period with
+  // no investor dimension, so a response landing after a preview switch would
+  // file one investor's movement log under another's month. See the watcher.
+  const token = previewToken
   try {
     const qs = props.previewUserId ? `?as_user_id=${encodeURIComponent(props.previewUserId)}` : ''
     const r = await api.get(`/api/investor/payouts/${encodeURIComponent(period)}/history${qs}`)
@@ -666,12 +677,18 @@ async function loadHistory(period) {
       // the waterfall above it. Entries arrive newest-first, hence i + 1.
       why: describeMove(e.breakdown, all[i + 1]?.breakdown),
     }))
+    if (token !== previewToken) return
     history.value = { ...history.value, [period]: entries }
     historyMeta.value = { ...historyMeta.value, [period]: r?.recordingSince || '' }
   } catch {
+    if (token !== previewToken) return
     history.value = { ...history.value, [period]: [] }
   } finally {
-    historyLoading.value = { ...historyLoading.value, [period]: false }
+    // Guarded too: the watcher has already emptied this map, so writing the
+    // flag back would re-seed the NEW investor's map with a stale period key.
+    if (token === previewToken) {
+      historyLoading.value = { ...historyLoading.value, [period]: false }
+    }
   }
 }
 
@@ -991,9 +1008,12 @@ const stmtLabel = ref('')     // "May 2026" — modal title
 // Deliberately a plain in-component Map, not a store: it is session-scoped and
 // dies with the component, which is the correct lifetime for an object URL
 // (a store would outlive every mount and leak them). Unbounded on purpose —
-// the key space is one entry per settled month the user actually opens, and a
-// statement PDF is a page or two, so the realistic ceiling is a handful of
-// months at tens of KB each.
+// the key space is one entry per settled month the user actually opens.
+// ⚠️ MEASURED SIZE: a statement is 223–336 KB, NOT the "tens of KB" an earlier
+// revision of this comment guessed. So twenty months opened in one sitting
+// retains roughly 6.7 MB until unmount. That is still fine and is why this stays
+// unbounded — but it is the number to re-check before anyone grows the key space
+// (per-investor keys, a longer-lived owner), because the guess was 10x low.
 // Map<period, { url, fileName }> — the filename rides along because it comes
 // off the response's Content-Disposition and the Download anchor needs it.
 const stmtCache = new Map()
@@ -1037,6 +1057,55 @@ function closeStatement() {
 
 onBeforeUnmount(revokeAllStatements)
 
+// ---- Preview switch — everything cached here belongs to ONE investor --------
+// ⚠️ `stmtCache` keys on `period` ALONE, with no investor dimension, and so do
+// the history maps above. Under the Super Admin "view as investor" preview that
+// is a cross-investor mix-up by construction: preview A, open their 2026-06
+// statement, switch to B, open 2026-06 — same key, so A's settlement PDF renders
+// under B's name.
+//
+// It does not happen today, and the reason is TWO COMPONENTS AWAY:
+// InvestorPortalPreviewView mounts `<InvestorView :key="route.params.userId" />`,
+// so switching investor destroys this whole tree and onBeforeUnmount clears
+// everything. That is a real guarantee — and it is someone else's line, written
+// for an unrelated reason (forcing onMounted to refetch). Removing that `:key`
+// to avoid a full remount is a perfectly reasonable optimisation, and it would
+// silently turn this into one investor's money document rendering under
+// another's name with nothing local objecting. This watcher puts the
+// correctness beside the cache it protects. Belt and braces with the `:key`,
+// never a replacement for it.
+//
+// CLEARING, not keying on (previewUserId, period): clearing also releases the
+// blobs, whereas a compound key would quietly retain BOTH investors' settlement
+// PDFs for the rest of the session — memory holding a money document for
+// someone you have stopped looking at. Same call `resetPayouts()` makes in the
+// store, for the same reason.
+//
+// ⚠️ AND CLEARING IS ONLY HALF THE GUARANTEE. The store's note on
+// `_payoutsToken` says exactly this, having shipped that bug twice: a request
+// already in flight resolves AFTER the clear and repopulates the cache with the
+// PREVIOUS investor's data. A statement render is the worst case here, since it
+// is the slowest request on the screen (Puppeteer, several seconds) and so the
+// most likely to still be running when someone switches. `openStatement()` and
+// `loadHistory()` therefore capture `previewToken` before their await and
+// refuse to write when it has moved. (`previewToken` itself is declared near
+// the top of this script, above loadHistory() — see the note there.)
+watch(() => props.previewUserId, () => {
+  previewToken++
+  // A statement or drill-down left open across the switch would keep rendering
+  // the old investor's figures under the new investor's banner — close both
+  // rather than let them survive the scope change.
+  stmtModalOpen.value = false
+  stmtError.value = { id: null, message: '' }
+  revokeAllStatements()
+  lineModalOpen.value = false
+  lineDetail.value = null
+  history.value = {}
+  historyLoading.value = {}
+  historyMeta.value = {}
+  expandedId.value = null
+})
+
 // Deliberately raw fetch, NOT useApi(): that composable always parses the body
 // as JSON (this responds with a PDF) and aborts at 20s (a Puppeteer render can
 // run longer). Mirrors the blob download in TaxShieldSection.exportCsv().
@@ -1062,6 +1131,10 @@ async function openStatement(p) {
     return
   }
   stmtBusyId.value = p.id
+  // Captured BEFORE the await — see the preview-switch watcher. This is the
+  // slowest request on the screen, so it is the one most likely to be in flight
+  // when the previewed investor changes.
+  const token = previewToken
   try {
     // Same preview scoping as advance()/loadPayouts: a Super Admin previewing an
     // investor's portal must open THAT investor's statement.
@@ -1080,6 +1153,10 @@ async function openStatement(p) {
       throw new Error(msg || `Couldn't generate the statement (${res.status}).`)
     }
     const blob = await res.blob()
+    // Superseded by a preview switch while the render was in flight. Return
+    // BEFORE createObjectURL: nothing has been minted yet, so there is nothing
+    // to release and nothing lands in the new investor's cache.
+    if (token !== previewToken) return
     // ALWAYS carry an explicit filename through to the modal's Download anchor.
     // A blob download without one saves as a name-less UUID — the bug called out
     // in InvestorView.downloadReport().
@@ -1096,6 +1173,10 @@ async function openStatement(p) {
     stmtLabel.value = p.periodLabel || p.period
     stmtModalOpen.value = true
   } catch (err) {
+    // Same supersede check on the failure path: pinning an error to `p.id` after
+    // a switch would hang a red message on whatever row now holds that id in
+    // the new investor's table.
+    if (token !== previewToken) return
     const message = (err && err.message) || 'Failed to open the statement.'
     stmtError.value = { id: p.id, message }
     toast(message, 'error')
