@@ -28,13 +28,17 @@
       />
     </div>
 
-    <!-- Loading: lazy chunk import + first render pending. -->
+    <!-- Loading: lazy chunk import + first render pending. `label` is a prop
+         because this viewer is SHARED — it renders payout statements, rate cons
+         and PODs as well as invoices, and the hardcoded "Loading invoice…" that
+         used to live here told an investor opening their statement that an
+         invoice was loading. -->
     <div v-if="loading && !failed" class="pz-status" aria-live="polite">
-      <div class="pz-spinner" role="status" aria-label="Loading invoice PDF"></div>
-      <div class="pz-status-text">Loading invoice…</div>
+      <div class="pz-spinner" role="status" :aria-label="label"></div>
+      <div class="pz-status-text">{{ label }}</div>
     </div>
 
-    <!-- Failure fallback: the invoice is always reachable via a direct link. -->
+    <!-- Failure fallback: the document is always reachable via a direct link. -->
     <div v-if="failed" class="pz-status pz-status-fail">
       <div class="pz-status-text">Couldn't render the PDF preview.</div>
       <a :href="src" target="_blank" rel="noopener" class="pz-open-link">Open PDF &#8599;</a>
@@ -67,6 +71,12 @@ const props = defineProps({
   // PDF URL, e.g. /api/invoices/317/pdf. Same-origin, so the session cookie
   // rides along automatically — no auth wiring needed here.
   src: { type: String, default: '' },
+  // Visible loading copy, also the spinner's aria-label. The default is
+  // deliberately NEUTRAL: this component is mounted by the invoice screens, the
+  // invoice-draft reviewer (whose tabs are rate cons and PODs, not invoices at
+  // all) and the investor payout statement, so any document-specific default is
+  // wrong somewhere. Pass a specific string where the caller knows better.
+  label: { type: String, default: 'Loading document…' },
 })
 
 // pdf.js 6 DROPPED getDocument()'s string coercion. 5.x opened with

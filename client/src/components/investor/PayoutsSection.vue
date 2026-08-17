@@ -114,15 +114,38 @@
         </div>
       </div>
 
-      <!-- The three totals above are net of manual adjustments and of any loss
-           still carried. Name them here too, so this card and the Load Reports
-           banner explain the same difference rather than one of them alone. -->
-      <div v-if="totals.totalAdjustments || totals.carriedLossOutstanding" class="totals-note">
-        <span v-if="totals.totalAdjustments">
-          Includes manual adjustments of
-          <strong>{{ totals.totalAdjustments < 0 ? '−' : '+' }}{{ fmt(Math.abs(totals.totalAdjustments)) }}</strong>
-        </span>
-        <span v-if="totals.carriedLossOutstanding">
+      <!-- CARRIED LOSS ONLY. The line that used to sit above this one —
+           "Includes manual adjustments of −$661" — was removed at the owner's
+           request, and the reason is structural rather than cosmetic:
+           `totals.totalAdjustments` sums EVERY payout row for the investor with
+           no period filter, while this strip has no month picker. So a
+           correction that belonged to exactly one month (2026-06) was restated
+           under the lifetime totals on every page load, forever — which reads
+           as a recurring deduction applying to all of them. His words: "that
+           manual adjustment was only for that one month… it doesn't carry over".
+           A per-month figure needs a per-month frame or it is not the same
+           claim.
+
+           Nothing is lost, because every surface that still shows it is
+           period-scoped and therefore says WHEN it applied: the month's own
+           `Adjustment` column in Past Months below, that row's expanded
+           waterfall (Your Share + Adjustment = Payout), the Load Reports card's
+           `Manual adjustment` term, and the month's statement PDF.
+
+           ⚠️ `totals.totalAdjustments` is deliberately still fetched and still
+           on the wire — test-suite.js 48 asserts it is a number and 53 asserts
+           the ledger identity (paid + processing + owed + accruing == earned +
+           adjustments + carriedLoss − frozenDrift). This is a rendering
+           decision; do not "tidy" it by dropping the field server-side.
+
+           The carried-loss sentence stays, and the distinction is the whole
+           point: an adjustment is a settled fact about one closed month, while
+           a carried loss is FORWARD-looking — a real shortfall that future
+           months will absorb — so naming it beside a lifetime total is the
+           correct frame. It also keeps this card and the Load Reports banner
+           explaining the same difference rather than one of them alone. -->
+      <div v-if="totals.carriedLossOutstanding" class="totals-note">
+        <span>
           {{ fmt(totals.carriedLossOutstanding) }} of earlier losses is still carried against future months
         </span>
       </div>
@@ -482,7 +505,11 @@
              height, so this stage has to resolve one of its own (flex:1 inside the
              dialog's definite 96vh column) — same shape as .idp-stage. -->
         <div class="stmt-stage">
-          <PdfZoomViewer v-if="stmtSrc" :src="stmtSrc" />
+          <!-- `label` is passed because PdfZoomViewer is shared with the invoice
+               screens: its default is neutral, and without this an investor
+               opening a statement would read generic copy where the document
+               has a name. -->
+          <PdfZoomViewer v-if="stmtSrc" :src="stmtSrc" label="Loading statement…" />
         </div>
 
         <div class="stmt-modal-footer">
@@ -506,7 +533,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { formatCurrency as fmt } from '../../utils/format'
 import { useApi } from '../../composables/useApi'
 import { useAuthStore } from '../../stores/auth'
@@ -626,9 +653,20 @@ const history = ref({})
 const historyLoading = ref({})
 const historyMeta = ref({})
 
+// Bumped on every previewed-investor change; async writers capture it before
+// their await and refuse to write when it has moved. Declared HERE, above its
+// first reader, rather than beside the watcher that owns it — loadHistory()
+// sits above that line and a `let` is in its temporal dead zone until it runs.
+// The full rationale is on the watcher, near the end of this script.
+let previewToken = 0
+
 async function loadHistory(period) {
   if (!period || history.value[period] || historyLoading.value[period]) return
   historyLoading.value = { ...historyLoading.value, [period]: true }
+  // Same supersede guard as openStatement() — this map is keyed on period with
+  // no investor dimension, so a response landing after a preview switch would
+  // file one investor's movement log under another's month. See the watcher.
+  const token = previewToken
   try {
     const qs = props.previewUserId ? `?as_user_id=${encodeURIComponent(props.previewUserId)}` : ''
     const r = await api.get(`/api/investor/payouts/${encodeURIComponent(period)}/history${qs}`)
@@ -639,12 +677,18 @@ async function loadHistory(period) {
       // the waterfall above it. Entries arrive newest-first, hence i + 1.
       why: describeMove(e.breakdown, all[i + 1]?.breakdown),
     }))
+    if (token !== previewToken) return
     history.value = { ...history.value, [period]: entries }
     historyMeta.value = { ...historyMeta.value, [period]: r?.recordingSince || '' }
   } catch {
+    if (token !== previewToken) return
     history.value = { ...history.value, [period]: [] }
   } finally {
-    historyLoading.value = { ...historyLoading.value, [period]: false }
+    // Guarded too: the watcher has already emptied this map, so writing the
+    // flag back would re-seed the NEW investor's map with a stale period key.
+    if (token === previewToken) {
+      historyLoading.value = { ...historyLoading.value, [period]: false }
+    }
   }
 }
 
@@ -922,6 +966,9 @@ async function advance(payout, status) {
     if (props.previewUserId) params.set('as_user_id', String(props.previewUserId))
     const qs = params.toString() ? `?${params.toString()}` : ''
     await api.post(`/api/investor/payouts/${payout.id}/status${qs}`, { status })
+    // This month's statement just changed shape (FINAL → PAID, and it gains a
+    // paid date), so drop the memoized copy — see invalidateStatement().
+    invalidateStatement(payout.period)
     toast(status === 'paid' ? 'Payout marked paid' : 'Payout marked processing')
     await loadPayouts()
   } catch (err) {
@@ -949,19 +996,115 @@ const stmtLabel = ref('')     // "May 2026" — modal title
 // PdfZoomViewer needs a real URL, so the response is wrapped in a Blob; that
 // object URL holds the PDF bytes until it is revoked. Mirrors revokeBlobs() in
 // InvoiceDraftPreviewModal.vue.
-function revokeStatement() {
-  if (stmtSrc.value) URL.revokeObjectURL(stmtSrc.value)
+//
+// ---- Why the blob is KEPT, keyed by period -------------------------------
+// Client, verbatim: "every time you click view statement it's preparing the
+// statement". Closing used to revoke immediately, so re-opening the SAME month
+// in one sitting was a guaranteed second Puppeteer render — several seconds for
+// bytes the browser had just thrown away. The statement of a settled month is
+// also the most cacheable thing on this screen: it is a frozen figure by
+// definition, which is what makes holding it safe rather than merely faster.
+//
+// Deliberately a plain in-component Map, not a store: it is session-scoped and
+// dies with the component, which is the correct lifetime for an object URL
+// (a store would outlive every mount and leak them). Unbounded on purpose —
+// the key space is one entry per settled month the user actually opens.
+// ⚠️ MEASURED SIZE: a statement is 223–336 KB, NOT the "tens of KB" an earlier
+// revision of this comment guessed. So twenty months opened in one sitting
+// retains roughly 6.7 MB until unmount. That is still fine and is why this stays
+// unbounded — but it is the number to re-check before anyone grows the key space
+// (per-investor keys, a longer-lived owner), because the guess was 10x low.
+// Map<period, { url, fileName }> — the filename rides along because it comes
+// off the response's Content-Disposition and the Download anchor needs it.
+const stmtCache = new Map()
+// ⚠️ EVERY url this component has minted. The map above is an INDEX into this
+// set, not the owner, and that separation is what makes eviction safe: dropping
+// a period drops the lookup and never the bytes, so a url the viewer or the
+// Download anchor is still holding can't be pulled out from under it, and no
+// url can become unreachable-but-unrevoked. One release point, at unmount.
+const stmtBlobs = new Set()
+
+// Single sweep at unmount — closing the modal no longer revokes anything.
+function revokeAllStatements() {
+  for (const url of stmtBlobs) URL.revokeObjectURL(url)
+  stmtBlobs.clear()
+  stmtCache.clear()
   stmtSrc.value = ''
 }
 
-// Close = revoke: the viewer and the Download anchor both read stmtSrc, so the
-// blob can only be released once the modal is gone.
-function closeStatement() {
-  stmtModalOpen.value = false
-  revokeStatement()
+// ⚠️ Invalidate the ONE period whose document just changed. The statement is
+// dual-mode and keys on paidAt (FINAL vs PAID), so a cached copy taken before
+// "Mark Paid" says "Final Amount … not a receipt" for a payout that has since
+// been paid. Only reachable for a Super Admin, who is the one person on this
+// screen able to move a status — but that is exactly who re-opens it to check.
+//
+// Drops the LOOKUP only. Revoking here is the obvious shape and it is wrong
+// twice over: the open modal may still be rendering that url (PdfZoomViewer
+// re-fetches props.src and would fall into its "Couldn't render the PDF
+// preview" state), and the natural guard — "revoke unless it is the one on
+// screen" — leaks as soon as the user opens any other month afterwards, since
+// the url is then in neither the map nor stmtSrc. That exact leak was caught by
+// the extraction harness, not by reading the code.
+function invalidateStatement(period) {
+  stmtCache.delete(period)
 }
 
-onBeforeUnmount(revokeStatement)
+// Close leaves the blob cached for the next open; the modal unmounts the viewer
+// and the Download anchor with it, so nothing is left reading stmtSrc.
+function closeStatement() {
+  stmtModalOpen.value = false
+}
+
+onBeforeUnmount(revokeAllStatements)
+
+// ---- Preview switch — everything cached here belongs to ONE investor --------
+// ⚠️ `stmtCache` keys on `period` ALONE, with no investor dimension, and so do
+// the history maps above. Under the Super Admin "view as investor" preview that
+// is a cross-investor mix-up by construction: preview A, open their 2026-06
+// statement, switch to B, open 2026-06 — same key, so A's settlement PDF renders
+// under B's name.
+//
+// It does not happen today, and the reason is TWO COMPONENTS AWAY:
+// InvestorPortalPreviewView mounts `<InvestorView :key="route.params.userId" />`,
+// so switching investor destroys this whole tree and onBeforeUnmount clears
+// everything. That is a real guarantee — and it is someone else's line, written
+// for an unrelated reason (forcing onMounted to refetch). Removing that `:key`
+// to avoid a full remount is a perfectly reasonable optimisation, and it would
+// silently turn this into one investor's money document rendering under
+// another's name with nothing local objecting. This watcher puts the
+// correctness beside the cache it protects. Belt and braces with the `:key`,
+// never a replacement for it.
+//
+// CLEARING, not keying on (previewUserId, period): clearing also releases the
+// blobs, whereas a compound key would quietly retain BOTH investors' settlement
+// PDFs for the rest of the session — memory holding a money document for
+// someone you have stopped looking at. Same call `resetPayouts()` makes in the
+// store, for the same reason.
+//
+// ⚠️ AND CLEARING IS ONLY HALF THE GUARANTEE. The store's note on
+// `_payoutsToken` says exactly this, having shipped that bug twice: a request
+// already in flight resolves AFTER the clear and repopulates the cache with the
+// PREVIOUS investor's data. A statement render is the worst case here, since it
+// is the slowest request on the screen (Puppeteer, several seconds) and so the
+// most likely to still be running when someone switches. `openStatement()` and
+// `loadHistory()` therefore capture `previewToken` before their await and
+// refuse to write when it has moved. (`previewToken` itself is declared near
+// the top of this script, above loadHistory() — see the note there.)
+watch(() => props.previewUserId, () => {
+  previewToken++
+  // A statement or drill-down left open across the switch would keep rendering
+  // the old investor's figures under the new investor's banner — close both
+  // rather than let them survive the scope change.
+  stmtModalOpen.value = false
+  stmtError.value = { id: null, message: '' }
+  revokeAllStatements()
+  lineModalOpen.value = false
+  lineDetail.value = null
+  history.value = {}
+  historyLoading.value = {}
+  historyMeta.value = {}
+  expandedId.value = null
+})
 
 // Deliberately raw fetch, NOT useApi(): that composable always parses the body
 // as JSON (this responds with a PDF) and aborts at 20s (a Puppeteer render can
@@ -969,13 +1112,29 @@ onBeforeUnmount(revokeStatement)
 async function openStatement(p) {
   if (!p || !p.period) return
   // One Puppeteer render at a time — say so instead of silently swallowing the
-  // click, since the other rows' buttons stay enabled.
+  // click, since the other rows' buttons stay enabled. Checked BEFORE the cache
+  // so a cached open can never swap the document out from under a render that
+  // is still in flight; "one statement on screen at a time" stays true.
   if (stmtBusyId.value) {
     toast('A statement is already being prepared — one at a time.')
     return
   }
-  stmtBusyId.value = p.id
   stmtError.value = { id: null, message: '' }
+  // Already rendered this month in this sitting: reuse the bytes, no request,
+  // no "Preparing…" state at all.
+  const cached = stmtCache.get(p.period)
+  if (cached) {
+    stmtSrc.value = cached.url
+    stmtFileName.value = cached.fileName
+    stmtLabel.value = p.periodLabel || p.period
+    stmtModalOpen.value = true
+    return
+  }
+  stmtBusyId.value = p.id
+  // Captured BEFORE the await — see the preview-switch watcher. This is the
+  // slowest request on the screen, so it is the one most likely to be in flight
+  // when the previewed investor changes.
+  const token = previewToken
   try {
     // Same preview scoping as advance()/loadPayouts: a Super Admin previewing an
     // investor's portal must open THAT investor's statement.
@@ -994,18 +1153,30 @@ async function openStatement(p) {
       throw new Error(msg || `Couldn't generate the statement (${res.status}).`)
     }
     const blob = await res.blob()
+    // Superseded by a preview switch while the render was in flight. Return
+    // BEFORE createObjectURL: nothing has been minted yet, so there is nothing
+    // to release and nothing lands in the new investor's cache.
+    if (token !== previewToken) return
     // ALWAYS carry an explicit filename through to the modal's Download anchor.
     // A blob download without one saves as a name-less UUID — the bug called out
     // in InvestorView.downloadReport().
     const m = (res.headers.get('Content-Disposition') || '').match(/filename="(.+)"/)
-    stmtFileName.value = m ? m[1] : `LogisX_Payout_Statement_${p.period}.pdf`
-    // Release the previously-viewed statement before minting the next URL: the
-    // overlay is pointer-through, so another row stays clickable behind the modal.
-    revokeStatement()
-    stmtSrc.value = URL.createObjectURL(blob)
+    const fileName = m ? m[1] : `LogisX_Payout_Statement_${p.period}.pdf`
+    // The previous statement is NOT released here any more — the map keeps it
+    // so switching back to that month is instant. Everything is revoked in one
+    // sweep at unmount instead.
+    const url = URL.createObjectURL(blob)
+    stmtBlobs.add(url)
+    stmtCache.set(p.period, { url, fileName })
+    stmtFileName.value = fileName
+    stmtSrc.value = url
     stmtLabel.value = p.periodLabel || p.period
     stmtModalOpen.value = true
   } catch (err) {
+    // Same supersede check on the failure path: pinning an error to `p.id` after
+    // a switch would hang a red message on whatever row now holds that id in
+    // the new investor's table.
+    if (token !== previewToken) return
     const message = (err && err.message) || 'Failed to open the statement.'
     stmtError.value = { id: p.id, message }
     toast(message, 'error')
@@ -1200,6 +1371,10 @@ onMounted(loadPayouts)
 .data-table th, .data-table td { white-space: nowrap; }
 .data-table .inv-carry, .data-table .inv-adj-note { white-space: normal; }
 .inv-carry { font-size: 0.7rem; color: #64748b; margin-top: 0.1rem; font-family: inherit; font-style: italic; }
+/* Carries ONE line since the lifetime manual-adjustment note was removed (see
+   the template). The column layout + gap are kept rather than flattened to a
+   block: gap contributes nothing at one child, so this renders identically
+   today, and a future second line stacks correctly instead of running on. */
 .totals-note { display: flex; flex-direction: column; gap: 0.15rem; margin: 0.5rem 0 0.9rem; font-size: 0.74rem; color: var(--text-dim); }
 .inv-adj-note { color: #64748b; }
 

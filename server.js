@@ -3355,6 +3355,20 @@ try { db.exec("ALTER TABLE investor_payouts ADD COLUMN finalized_at TEXT DEFAULT
 try { db.exec("ALTER TABLE investor_payouts ADD COLUMN finalized_amount REAL"); } catch {}
 try { db.exec("ALTER TABLE investor_payouts ADD COLUMN finalized_breakdown TEXT DEFAULT ''"); } catch {}
 
+// Rendered-statement cache. Client's words: "every time you click view statement
+// it's preparing the statement — why can't we just prepare the statement once".
+// He is describing the design accurately: GET …/statement had no cache at any
+// layer, so every click ran a Sheets read + two full month recomputes + a fresh
+// Puppeteer render (~3-5 s) to produce bytes identical to the previous click's.
+//
+// ONE column is enough because the FINGERPRINT LIVES IN THE FILENAME
+// (payout-<ownerId>-<period>-<hash10>.pdf, see statementFileName). A cached file
+// is therefore only ever served when every input that can change the printed
+// document still hashes to the same value — no invalidation hook to forget on
+// the adjust / status / reopen routes, and none to forget on a route added
+// later. '' = nothing rendered yet, which is every legacy row.
+try { db.exec("ALTER TABLE investor_payouts ADD COLUMN statement_pdf_file_name TEXT DEFAULT ''"); } catch {}
+
 // --- Period locks (month-end close) ---------------------------------------
 // One row per CLOSED work month, fleet-wide. Presence of a row is the lock.
 //
@@ -9185,17 +9199,92 @@ const TRACK_STAGES = [
 	{ key: "at_receiver", name: "At Receiver", matchStatus: /^(at receiver|unloading)$/i },
 	{ key: "delivered", name: "Delivered", matchStatus: /^(delivered|pod received|completed)$/i },
 ];
+// Trailing country suffix, stripped before the "City, ST ZIP" anchor is applied.
+// Accepts "USA" / "United States" and the bare "US" / "U.S." / "U.S.A." forms.
+// Three details are load-bearing:
+//   • END-ANCHORED — "US Hwy 90", "US-290" and "U.S. 90 Access Rd" are all real
+//     values in this data and all sit mid-string, so only a trailing token matches.
+//   • \b BEFORE the token — without it "Columbus" strips to "Columb", and
+//     "…HWY 90 BUS" to "…HWY 90 B". The old USA-only pattern escaped this by luck.
+//   • The group is MANDATORY between the two \s*, so there is no ambiguity for a
+//     backtracker to explore — this is NOT the "\s* around an OPTIONAL token" shape
+//     that made cityStateZip() cubic (9.4 s of blocked event loop; see
+//     lib/ratecon-load.js). Do not make the group optional.
+const COUNTRY_SUFFIX_RE = /,?\s*\b(U\.?S\.?A?\.?|United States)\.?\s*$/i;
+
+// ⚠️ SECURITY CONTROL, NOT A UX CHOICE — the same call, and the same number, as the
+// 500-char cap on the n8n load-distance route (see cityStateZip() in
+// lib/ratecon-load.js, where an unbounded input blocked the event loop for 9.4 s).
+// One policy, two entry points; do not raise either without re-measuring.
+//
+// The address parsers below are super-linear in input length (the driver is the
+// pre-existing lazy `([^,\n]+?)…$` shape, not any one quantifier), and NOTHING
+// upstream bounds them: POST /api/data writes coordinates.pickupAddress straight
+// from the request body into load_coordinates under a 50 MB body limit. That value
+// is then re-parsed by /api/dashboard, by every statement render, and — the reason
+// this is not merely an admin footgun — by the UNAUTHENTICATED public tracker on
+// every hit. Measured at 100k chars across the two functions together: 35-113 s of
+// blocked event loop (worst is an INTERNAL whitespace run — a trailing one is only
+// ~3 ms because .trim() already eats it, so do not conclude trim() is the defence),
+// in the single process that also serves the driver app and the Linxup GPS webhook.
+// So one authenticated write becomes a repeatable ANONYMOUS stall. After the cap the
+// same seven shapes are all under 2.3 ms.
+// The longest real address in production is 79 characters.
+const ADDRESS_PARSE_MAX_CHARS = 500;
+
 function parseOriginDestCity(addr) {
 	if (!addr || typeof addr !== "string") return { city: "", state: "", zip: "" };
 	// Strip a trailing country suffix ("..., USA" / "United States"), then match
 	// "City, ST 12345" at the end. Two ordered passes so ZIP+4 ("64504-9534")
 	// and 9-digit-no-dash zips don't break the anchor; we keep the 5-digit zip.
-	const trimmed = addr.trim().replace(/,?\s*(USA|United States)\.?\s*$/i, "").trim();
-	const withZip = trimmed.match(/([^,\n]+?),\s*([A-Za-z]{2})\.?\s+(\d{5})(?:-?\d{4})?\s*$/);
+	// ⚠️ The cap is applied HERE as well as in splitAddressLines, and both are
+	// required: GET /api/public/track/:loadId calls this directly on the raw
+	// load_coordinates value, so a cap that lived only in the splitter would leave
+	// the one unauthenticated caller uncovered.
+	const trimmed = addr.trim().slice(0, ADDRESS_PARSE_MAX_CHARS).replace(COUNTRY_SUFFIX_RE, "").trim();
+	// [\s-] not just '-': ZIP+4 also arrives SPACE-separated ("TX 75233 1402", 5
+	// loads). Both halves are fixed-width and the whole group stays optional and
+	// end-anchored, so this adds no ambiguity — it only lets the anchor survive a
+	// +4 that used to defeat it and drop the value to "" (i.e. a blank route end).
+	const withZip = trimmed.match(/([^,\n]+?),\s*([A-Za-z]{2})\.?\s+(\d{5})(?:[\s-]?\d{4})?\s*$/);
 	if (withZip) return { city: withZip[1].trim(), state: withZip[2].toUpperCase(), zip: withZip[3] };
 	const noZip = trimmed.match(/([^,\n]+?),\s*([A-Za-z]{2})\.?\s*$/);
 	if (noZip) return { city: noZip[1].trim(), state: noZip[2].toUpperCase(), zip: "" };
 	return { city: (trimmed.split(/[,\n]/)[0] || "").trim(), state: "", zip: "" };
+}
+
+// A few load_coordinates rows hold the geocoder's STRUCTURED object verbatim
+// instead of an address string: {"Street":…,"City":…,"State":…,"Zip":…}. There is
+// no "City, ST ZIP" anywhere in that text, so parseOriginDestCity finds nothing,
+// cityStateZip comes back "" and every caller falls through to printing the raw
+// blob — which shows the JSON *and* the street, i.e. the worst of both. Read the
+// object instead. Deliberately a JSON branch and NOT a widened pattern: the
+// regexes below feed the dashboard, the public tracker and the driver app, and
+// loosening that family is what produced the 9.4 s event-loop stall documented
+// beside cityStateZip() in lib/ratecon-load.js.
+// Returns null — meaning "fall through, unchanged" — unless the blob parses AND
+// names both a City and a 2-letter State, so a partial object never invents one.
+function jsonAddressParts(s) {
+	let o;
+	try { o = JSON.parse(s); } catch { return null; }
+	if (!o || typeof o !== "object" || Array.isArray(o)) return null;
+	// Keys are capitalised ("Street"/"City"/"State"/"Zip") in the rows we have, but
+	// match case-insensitively rather than betting on one producer's casing.
+	const pick = (want) => {
+		for (const k of Object.keys(o)) {
+			if (k.toLowerCase() === want) return o[k] == null ? "" : String(o[k]).trim();
+		}
+		return "";
+	};
+	const city = pick("city");
+	const state = pick("state");
+	if (!city || !/^[A-Za-z]{2}$/.test(state)) return null;
+	// ZIP+4 is stored unpunctuated here ("752331402"); keep the 5-digit form the rest
+	// of the app prints. Anything shorter is dropped rather than guessed at.
+	const digits = pick("zip").replace(/\D/g, "");
+	const zip = digits.length >= 5 ? digits.slice(0, 5) : "";
+	const st = state.toUpperCase();
+	return { street: pick("street"), cityStateZip: zip ? `${city}, ${st} ${zip}` : `${city}, ${st}` };
 }
 
 // Split a full address into two display lines: { street, cityStateZip }.
@@ -9206,9 +9295,16 @@ function parseOriginDestCity(addr) {
 // international / unparseable input so nothing is dropped. The street===csz
 // guards avoid a duplicated line when a row carries only "City, ST ZIP".
 function splitAddressLines(raw) {
-	const s = (raw == null ? "" : String(raw)).trim();
+	// ⚠️ Capped for the same reason parseOriginDestCity is — see ADDRESS_PARSE_MAX_CHARS.
+	// This function runs COUNTRY_SUFFIX_RE and the `tail` regex on `cleaned` itself, so
+	// it needs its own bound rather than inheriting the one inside parseOriginDestCity.
+	const s = (raw == null ? "" : String(raw)).trim().slice(0, ADDRESS_PARSE_MAX_CHARS);
 	if (!s) return { street: "", cityStateZip: "" };
-	const cleaned = s.replace(/,?\s*(USA|United States)\.?\s*$/i, "").trim();
+	if (s.charCodeAt(0) === 123 /* { */) {
+		const structured = jsonAddressParts(s);
+		if (structured) return structured;
+	}
+	const cleaned = s.replace(COUNTRY_SUFFIX_RE, "").trim();
 	const p = parseOriginDestCity(cleaned);
 	const csz = p.city
 		? (p.zip ? `${p.city}, ${p.state} ${p.zip}` : (p.state ? `${p.city}, ${p.state}` : p.city))
@@ -9219,7 +9315,13 @@ function splitAddressLines(raw) {
 		const line2 = csz || cleaned.slice(nl).replace(/^\r?\n/, "").trim();
 		return street === line2 ? { street: "", cityStateZip: line2 } : { street, cityStateZip: line2 };
 	}
-	const tail = cleaned.match(/,\s*([^,]+?),\s*([A-Za-z]{2})\.?(?:\s+\d{5}(?:-?\d{4})?)?\s*$/);
+	// ⚠️ THE ZIP+4 FORM HERE MUST MATCH parseOriginDestCity's withZip EXACTLY.
+	// This regex finds where the STREET ends; that one builds the CITY LINE. They read
+	// the same input, so a shape one accepts and the other rejects splits the function
+	// against itself: teaching only the city half about the space-separated +4
+	// ("DALLAS, TX 75233 1402") produced a correct city line beside an untrimmed
+	// street, and the dashboard rendered the city TWICE. Keep both `[\s-]?`.
+	const tail = cleaned.match(/,\s*([^,]+?),\s*([A-Za-z]{2})\.?(?:\s+\d{5}(?:[\s-]?\d{4})?)?\s*$/);
 	if (tail && csz) {
 		const street = cleaned.slice(0, tail.index).trim().replace(/,\s*$/, "");
 		return { street: street && street !== csz ? street : "", cityStateZip: csz };
@@ -38465,13 +38567,24 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 			if (amt && assignedMonthKey) {
 				monthlyRevenue[assignedMonthKey] = (monthlyRevenue[assignedMonthKey] || 0) + amt;
 				if (detail && assignedMonthKey === detailForMonth) {
+					// ⚠️ CITY LEVEL ONLY — these two fields reach an INVESTOR, on the
+					// payout statement PDF (lib/payout-statement.js routeText) and in the
+					// on-screen revenue drill-down, and the street belongs to the BROKER'S
+					// CUSTOMER, not to us. The raw sheet cell was being passed straight
+					// through, so a statement printed e.g. "3311 EAST LINCOLN WAY AMES, IA
+					// 50010 → 2930 114TH STREET GRAND PRAIRIE,TX 75050" — every shipper and
+					// receiver's door, handed to an outside party. resolveCityState() is the
+					// same reduction /api/investor's My Loads already uses; reduce at the
+					// PUSH SITE so both consumers of revenueLoads inherit it and neither can
+					// drift back to the raw string.
+					const lid = jtLoadIdCol ? String(r[jtLoadIdCol] || "").trim() : "";
 					detail.revenueLoads.push({
-						loadId: jtLoadIdCol ? String(r[jtLoadIdCol] || "").trim() : "",
+						loadId: lid,
 						driver: driver || "",
 						truck: jtTruckCol ? String(r[jtTruckCol] || "").trim() : "",
 						date: jtDateCol ? String(r[jtDateCol] || "").trim() : "",
-						pickup: jtPickupCol ? String(r[jtPickupCol] || "").trim() : "",
-						dropoff: jtDropCol ? String(r[jtDropCol] || "").trim() : "",
+						pickup: resolveCityState(r, "pickup", lid, jtPickupCol ? r[jtPickupCol] : ""),
+						dropoff: resolveCityState(r, "drop", lid, jtDropCol ? r[jtDropCol] : ""),
 						amount: Math.round(amt * 100) / 100,
 					});
 				}
@@ -40743,6 +40856,108 @@ app.get("/api/investor/payouts/:period/detail", requireRole("Super Admin", "Inve
 	}
 });
 
+// ---------------------------------------------------------------------------
+// Payout statement PDF cache — render once, then serve the file.
+//
+// ⚠️⚠️ BUMP STATEMENT_TEMPLATE_VERSION WHENEVER THE DOCUMENT ITSELF CHANGES.
+// The cache key is a hash of the ROW plus this constant, and nothing else. So a
+// template edit that leaves the row untouched — which is every template edit —
+// produces the SAME key, and every investor with a cached statement keeps being
+// served the OLD document indefinitely. There is no mtime check, no content
+// hash of the template, and no way to notice from the outside: the fix looks
+// deployed and the PDF says otherwise.
+//
+// "The template" is larger than one file:
+//   • lib/payout-statement.js — buildPayoutStatementHtml, the layout itself.
+//   • lib/broker-invoice.js — payout-statement.js reuses its formatMoney /
+//     formatDate / SELLER, so a change to the seller block or to how money is
+//     formatted changes the printed page WITHOUT touching payout-statement.js.
+//   • lib/pdf-browser.js — renderHtmlToPdf's page/margin options.
+// A change in ANY of them is a template change. Bump this.
+const STATEMENT_TEMPLATE_VERSION = 1;
+
+// Deliberately OUTSIDE uploads/. `app.use("/uploads", express.static(...))` is
+// mounted behind requireAuth only, and these filenames are
+// payout-<ownerId>-<period>-<hash>.pdf — a small sequential owner id crossed
+// with a month. Only the 10 hex chars are unguessable, and relying on that is
+// exactly the reasoning that produced issue #228 (any authenticated Driver read
+// any other driver's invoice PDF straight off the static mount, because
+// GET /api/invoices/:id/pdf enforced ownership and express.static simply did
+// not). Keeping the bytes out of the static tree makes this route structurally
+// the only reader — no GUARDED_UPLOAD_DIRS entry to get right, and no path
+// shape for the guard and the static mount to disagree about.
+const PAYOUT_STATEMENT_DIR = path.join(__dirname, "storage", "payout-statements");
+
+// The filename is read back OUT OF THE DATABASE and then joined onto a path, so
+// it is validated against the exact shape this module writes before it goes
+// anywhere near path.join. A mismatch is a cache MISS, never an error — the
+// statement still renders.
+//
+// ⚠️ ON THE READ LEG this is belt-and-braces (a poisoned value also fails the
+// `cachedName === freshName` test, since freshName always matches this shape).
+// ON THE UNLINK LEG IT IS THE ONLY GUARD, and that leg is genuinely reachable:
+// there the test is `cachedName !== freshName`, which a traversal payload
+// PASSES, so nothing else stands between a DB value and
+// fs.unlinkSync(path.join(DIR, value)). Verified against a running server —
+// with the column set to `../DECOY-DO-NOT-DELETE.txt` the request re-rendered
+// normally and the decoy one directory up survived.
+//
+// ⚠️ SHAPE IS NOT OWNERSHIP. This pattern happily matches
+// `payout-99-2026-01-deadbeef01.pdf` on owner 5's row, so both legs ALSO bind
+// on statementFilePrefix(row) — measured: poisoning owner 42's column with
+// owner 5's filename evicted owner 5's cached file. Only a cache eviction, and
+// there is no API path to the poison (one writer, always freshName), but the
+// prefix test is two comparisons and removes the class.
+const STATEMENT_FILE_RE = /^payout-\d+-\d{4}-\d{2}-[0-9a-f]{10}\.pdf$/;
+
+// Every input that can change the printed document, and nothing else.
+//
+// This is the whole invalidation strategy. PUT …/adjust, POST …/status and the
+// reopen path all move columns in this list, so each of them invalidates the
+// cache by simply doing its job — there is no hook to call and none to forget.
+// finalized_breakdown is included because the statement prints the SNAPSHOT in
+// preference to a live recompute, so re-finalizing changes the page.
+//
+// ⚠️ `who` IS PART OF THE KEY, and leaving it out was a real bug, not an
+// oversight to tidy. The document is fed `investorName` / `investorCompany`
+// from the users ⋈ investors join, and BOTH are mutable by a Super Admin
+// (PUT /api/investors/:id writes full_name / carrier_name; PUT /api/users/:id
+// writes company_name). Keyed on the payout row alone, a legal-entity rename —
+// a routine investor request — left the cached PDF frozen on the OLD name
+// forever, with no TTL and no hook to fire. Worse, it was self-contradictory:
+// the download FILENAME is built from the live `who`, so the file arrived
+// called "ZZ_RENAMED_ENTITY_LLC" with "STATEMENT FOR Johnny Rocks Spirits"
+// printed on page 1 — a settlement document naming two different entities,
+// which an investor cannot use for tax.
+//
+// Note the mechanism, because it is the cost of hoisting `who` above the cache
+// branch: before that hoist, the name and the filename were both derived at
+// render time and COULD NOT disagree. The hoist is still right (it is what
+// makes a cached download and a fresh one identically named) — it just moves
+// the obligation here. Anything else this route reads from outside
+// investor_payouts and passes to buildPayoutStatementHtml belongs in this list.
+function statementFingerprint(row, who) {
+	return crypto.createHash("sha256").update(JSON.stringify([
+		STATEMENT_TEMPLATE_VERSION,
+		row.owner_id, row.period, row.status,
+		row.paid_at || "", row.paid_by || "",
+		row.amount, row.adjustment, row.adjustment_note || "", row.adjusted_at || "",
+		row.finalized_at || "", row.finalized_amount, row.finalized_breakdown || "",
+		(who && who.name) || "", (who && who.company) || "",
+	])).digest("hex").slice(0, 10);
+}
+
+// `payout-<ownerId>-<period>-` is a natural key: investor_payouts is
+// UNIQUE(owner_id, period). Exposed as its own helper because both the read and
+// the unlink leg bind on it — see STATEMENT_FILE_RE above.
+function statementFilePrefix(row) {
+	return `payout-${row.owner_id}-${row.period}-`;
+}
+
+function statementFileName(row, who) {
+	return `${statementFilePrefix(row)}${statementFingerprint(row, who)}.pdf`;
+}
+
 // GET /api/investor/payouts/:period/statement — PDF payout statement for a PAID
 // month. Page 1 is the waterfall ending in the FROZEN figure that was actually
 // paid (effectiveAmount), page 2+ itemizes every component.
@@ -40792,6 +41007,101 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 			});
 		}
 
+		// Investor identity — same COALESCE precedence as listSettlableInvestors().
+		// Hoisted above the cache branch because BOTH paths need it: it names the
+		// audit row and it is the `safeName` in the download filename. One copy,
+		// so a cached download can never be named differently from a fresh one.
+		const who = db.prepare(
+			`SELECT COALESCE(NULLIF(TRIM(i.full_name),''), NULLIF(TRIM(u.company_name),''), u.username) AS name,
+			        COALESCE(NULLIF(TRIM(u.company_name),''), NULLIF(TRIM(i.carrier_name),''), '') AS company
+			   FROM users u LEFT JOIN investors i ON i.user_id = u.id WHERE u.id = ?`,
+		).get(ownerId) || { name: "Investor", company: "" };
+
+		// Distinguish the two documents on disk. An investor who downloads the final
+		// statement in July and the paid one in August should not end up with two
+		// identically-named files where the second silently replaces the first.
+		const kind = row.paid_at ? "Payout_Statement" : "Final_Statement";
+		const safeName = String(who.name || "Investor").replace(/[^a-zA-Z0-9._-]/g, "_");
+		const sendStatementHeaders = () => {
+			res.setHeader("Content-Type", "application/pdf");
+			res.setHeader("Content-Disposition", `attachment; filename="LogisX_${kind}_${safeName}_${period}.pdf"`);
+			// An undirected 200 is heuristically cacheable, and this body is a
+			// settlement document carrying an investor's name and net payout. Same
+			// rule the two PII reveal routes follow. `private` is belt to no-store's
+			// braces: it names the shared-cache case explicitly, which matters if a
+			// reverse proxy is ever put in front of this app.
+			res.setHeader("Cache-Control", "private, no-store");
+		};
+
+		// ── Cached statement ────────────────────────────────────────────────────
+		// PLACEMENT IS THE WHOLE POINT. This sits after the publish gate and before
+		// getJobTrackingCached() below, because everything past this line IS the
+		// 3-5 s the client is complaining about: a Google Sheets read,
+		// reconcileInvestorPayouts (a full multi-month recompute),
+		// loadPayoutMonthDetail (a SECOND full recompute), and a Puppeteer render
+		// whose HTML fetches Google Fonts over the network. Caching below any of
+		// them would save nothing worth having.
+		//
+		// ⚠️ SKIPPING THE RECONCILE CANNOT CHANGE A PRINTED FIGURE — that is what
+		// makes this safe rather than merely fast. Any row reaching this line
+		// passed the publish gate, i.e. it is LOCKED or PAID, and
+		// reconcileInvestorPayouts refreshes `amount` only while
+		// `status='owed' && !finalized_at && !isLocked(period)`. So for a printable
+		// row `row.amount` is already frozen and the reconcile it skips would have
+		// written that column back unchanged.
+		//
+		// (The miss path's `if (!p)` 404 is likewise not lost: `p` comes from the
+		// same investor_payouts row we already read into `row`, so it can only be
+		// absent if the row was deleted between the two reads.)
+		const cachedName = String(row.statement_pdf_file_name || "");
+		const freshName = statementFileName(row, who);
+		const namePrefix = statementFilePrefix(row);
+		if (cachedName && cachedName === freshName && STATEMENT_FILE_RE.test(cachedName) && cachedName.startsWith(namePrefix)) {
+			const abs = path.join(PAYOUT_STATEMENT_DIR, cachedName);
+			// ⚠️ ONE read, no stat first. A stat→setHeader("Content-Length")→
+			// createReadStream sequence can race: a concurrent re-render renaming
+			// over the same name between the stat and the open would advertise a
+			// stale size against fresh bytes. Reading the buffer and handing it to
+			// res.send() — the SAME call the miss path makes — removes the window
+			// entirely and makes the two paths' headers identical by construction
+			// rather than by hand-maintaining a matching setHeader list.
+			// (res.sendFile was the other option and is wrong here: it adds ETag /
+			// Last-Modified / Accept-Ranges to the hit path only, so hit and miss
+			// would stop agreeing.) These are ~330 KB, so buffering costs nothing
+			// and streaming buys nothing; `await` keeps it off the event loop.
+			//
+			// A file that is gone (manual cleanup, a restored database, a
+			// half-finished deploy) is a MISS, not a 500 — the catch falls through
+			// and renders. EISDIR covers the directory case the old isFile() did.
+			let cachedPdf = null;
+			try { cachedPdf = await fs.promises.readFile(abs); } catch { cachedPdf = null; }
+			if (cachedPdf && cachedPdf.length) {
+				// Same guard as the miss path, computed off `row` rather than the
+				// reconcile projection. This expression is verbatim how
+				// reconcileInvestorPayouts derives effectiveAmount, so the cached
+				// and fresh branches cannot disagree about whether a corrected
+				// payout has netted to zero.
+				const effectiveAmount = Math.max(0, Math.round((row.amount || 0) + Number(row.adjustment || 0)));
+				if (effectiveAmount <= 0) {
+					return res.status(409).json({
+						error: `The ${period} payout nets to $0 after corrections, so there is no statement to issue.`,
+						code: "PAYOUT_NOT_SETTLEABLE",
+					});
+				}
+
+				// ⚠️ This is an ACCESS log, not a render log. It fires on a cache
+				// hit exactly as it does on a miss — otherwise audit_trail would
+				// record the first time anyone opened a statement and silently
+				// nothing thereafter, which is the opposite of what it is for.
+				logAudit(req, "investor_payout_statement", "investor_payout", row.id,
+					`Downloaded ${period} payout statement (${who.name}${row.paid_at ? "" : " — FINAL, not yet paid"})`);
+
+				sendStatementHeaders();
+				res.send(cachedPdf);
+				return;
+			}
+		}
+
 		await getJobTrackingCached();
 		const globalConfig = {};
 		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all().forEach((r) => (globalConfig[r.key] = r.value));
@@ -40812,13 +41122,6 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 		}
 
 		const { detail } = await loadPayoutMonthDetail(ownerId, preview.sessionUser, period);
-
-		// Investor identity — same COALESCE precedence as listSettlableInvestors().
-		const who = db.prepare(
-			`SELECT COALESCE(NULLIF(TRIM(i.full_name),''), NULLIF(TRIM(u.company_name),''), u.username) AS name,
-			        COALESCE(NULLIF(TRIM(u.company_name),''), NULLIF(TRIM(i.carrier_name),''), '') AS company
-			   FROM users u LEFT JOIN investors i ON i.user_id = u.id WHERE u.id = ?`,
-		).get(ownerId) || { name: "Investor", company: "" };
 
 		// A correction recorded AFTER the money went out means effectiveAmount is
 		// the corrected net, not the sum that was wired — the document has to say
@@ -40888,13 +41191,45 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 		});
 
 		const pdf = await renderHtmlToPdf(html);
-		const safeName = String(who.name || "Investor").replace(/[^a-zA-Z0-9._-]/g, "_");
-		// Distinguish the two documents on disk. An investor who downloads the final
-		// statement in July and the paid one in August should not end up with two
-		// identically-named files where the second silently replaces the first.
-		const kind = row.paid_at ? "Payout_Statement" : "Final_Statement";
-		res.setHeader("Content-Type", "application/pdf");
-		res.setHeader("Content-Disposition", `attachment; filename="LogisX_${kind}_${safeName}_${period}.pdf"`);
+
+		// Persist it so the next click is a file read. BEST-EFFORT THROUGHOUT: a
+		// cache that cannot be written must never fail a download that has already
+		// rendered successfully — the worst outcome here is today's behaviour.
+		try {
+			// ⚠️ Assert the name we are about to join onto a path, symmetrically
+			// with the read leg. Unreachable today — owner_id is an integer column
+			// and `period` was regex-validated at the top of the handler — but
+			// SQLite enforces no types, so `owner_id` is whatever was last written
+			// there, and "about to become a path segment" is the condition this
+			// route already treats as worth asserting. Cheaper than reasoning about
+			// it again the next time either input's provenance changes.
+			if (!STATEMENT_FILE_RE.test(freshName)) throw new Error(`refusing to write unexpected statement filename: ${freshName}`);
+			fs.mkdirSync(PAYOUT_STATEMENT_DIR, { recursive: true });
+			// ⚠️ Write to a temp name and rename into place. rename() is atomic
+			// within a directory, so a crash or an OOM mid-write can leave a stray
+			// .tmp but can never leave a TRUNCATED payout-…-<hash>.pdf. A truncated
+			// one would be indistinguishable from a good one on the next request —
+			// its hash still matches — so it would be served as a corrupt PDF
+			// forever.
+			const tmp = path.join(PAYOUT_STATEMENT_DIR, `.${freshName}.${process.pid}.${Date.now()}.tmp`);
+			fs.writeFileSync(tmp, pdf);
+			fs.renameSync(tmp, path.join(PAYOUT_STATEMENT_DIR, freshName));
+			// Drop the render this one supersedes (an adjustment, a reopen, a
+			// template bump). Without it the directory grows one file per
+			// correction and nothing ever reaps them.
+			// ⚠️ `cachedName !== freshName` is TRUE for any poisoned value, so the
+			// shape test AND the row-prefix test are the only things standing
+			// between a DB string and an unlink. The prefix is what stops one
+			// investor's row evicting another's file.
+			if (cachedName && cachedName !== freshName && STATEMENT_FILE_RE.test(cachedName) && cachedName.startsWith(namePrefix)) {
+				try { fs.unlinkSync(path.join(PAYOUT_STATEMENT_DIR, cachedName)); } catch {}
+			}
+			db.prepare("UPDATE investor_payouts SET statement_pdf_file_name = ? WHERE id = ?").run(freshName, row.id);
+		} catch (e) {
+			console.error("Payout statement cache write failed:", e.message);
+		}
+
+		sendStatementHeaders();
 		res.send(pdf);
 	} catch (err) {
 		console.error("GET /api/investor/payouts/:period/statement error:", err.message);
