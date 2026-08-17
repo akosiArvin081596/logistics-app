@@ -124,7 +124,11 @@
               :title="pdfExpanded ? 'Show the details panel' : 'Hide the details panel — show the invoice PDF only'"
               @click="pdfExpanded = !pdfExpanded"
             >{{ pdfExpanded ? '⇤ Show details' : '⤢ Expand PDF' }}</button>
-            <PdfZoomViewer :src="`/api/invoices/${selectedInvoice.id}/pdf`" />
+            <!-- `label` is explicit because PdfZoomViewer's default is neutral
+                 ("Loading document…") — it is shared with the payout-statement
+                 and rate-con/POD viewers, where naming an invoice would be
+                 wrong. This is the one caller that really is an invoice. -->
+            <PdfZoomViewer :src="`/api/invoices/${selectedInvoice.id}/pdf`" label="Loading invoice…" />
           </div>
 
           <!-- Right: meta + actions -->

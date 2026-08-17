@@ -257,7 +257,7 @@ Nothing below renders on an ordinary month. A month with no carry looks exactly 
 | 🔴 | `Projected payout if the month closed today` | Current-month card — **still live, you chose to keep it** |
 | 🔴 | `Accruing this month — not yet payable until the period closes, with receipts accepted through <date>.` | Current-month card |
 | 🔴 | `$X short so far — the rest of the month's earnings go against that first. Anything still short when the month closes carries into a later payout.` | Current month running at a loss |
-| 🔴 | `Includes manual adjustments of ±$X` | Under the totals grid |
+| 🔴 | `$X of earlier losses is still carried against future months` | Under the totals grid — the only line left there |
 | 🔴 | `Your expenses are already subtracted here before the split.` | Totals note |
 | 🔴 | `Your payout is the amount this month was settled at. The figures above reflect current records, which have changed since it closed.` | Drift, expanded row |
 | ⚪ | `No change history — this month closed before change tracking started.` | History, pre-2026-08-04 months |
@@ -265,6 +265,16 @@ Nothing below renders on an ordinary month. A month with no carry looks exactly 
 | 🔴 | `Active days × daily rate — percentage drivers earn a share of revenue` | Drill-down |
 | 🔴 | `Fuel, tolls, repairs and other on-the-road costs` | Drill-down |
 | ⚪ | `Scroll to zoom, drag to pan. Download a copy with the button below.` | Statement viewer |
+
+### ✅ Removed in this change
+
+| Exact text | Was |
+|---|---|
+| `Includes manual adjustments of ±$X` | Under the totals grid — **the −$661** |
+
+**Why.** Your ask: *"why is the negative 661 carrying over to the [rest] of months? That manual adjustment was only for that one month, that's it. It doesn't carry over or anything like that, and nor do we need to keep bringing it up displaying it somewhere else."* You were right, and the cause was structural: that figure summed **every** payout row with no period filter, while the totals strip it sat under has no month picker — so a correction belonging to one month (June 2026) was restated under the lifetime totals on every page load, reading as a recurring deduction.
+
+**Nothing was deleted, only un-repeated.** The −$661 still appears on the four surfaces that say *which* month it belongs to: the `Adjustment` column on June's own row in Past Months, June's expanded waterfall (`Your Share + Adjustment = Payout`), the `Manual adjustment` row on the Load Reports card (§9), and June's statement PDF (§12). Same family as the `$9,707` lifetime footer removed in §9 — a per-month fact needs a per-month frame.
 
 ---
 
