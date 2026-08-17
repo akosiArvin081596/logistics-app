@@ -9288,7 +9288,13 @@ function splitAddressLines(raw) {
 		const line2 = csz || cleaned.slice(nl).replace(/^\r?\n/, "").trim();
 		return street === line2 ? { street: "", cityStateZip: line2 } : { street, cityStateZip: line2 };
 	}
-	const tail = cleaned.match(/,\s*([^,]+?),\s*([A-Za-z]{2})\.?(?:\s+\d{5}(?:-?\d{4})?)?\s*$/);
+	// ⚠️ THE ZIP+4 FORM HERE MUST MATCH parseOriginDestCity's withZip EXACTLY.
+	// This regex finds where the STREET ends; that one builds the CITY LINE. They read
+	// the same input, so a shape one accepts and the other rejects splits the function
+	// against itself: teaching only the city half about the space-separated +4
+	// ("DALLAS, TX 75233 1402") produced a correct city line beside an untrimmed
+	// street, and the dashboard rendered the city TWICE. Keep both `[\s-]?`.
+	const tail = cleaned.match(/,\s*([^,]+?),\s*([A-Za-z]{2})\.?(?:\s+\d{5}(?:[\s-]?\d{4})?)?\s*$/);
 	if (tail && csz) {
 		const street = cleaned.slice(0, tail.index).trim().replace(/,\s*$/, "");
 		return { street: street && street !== csz ? street : "", cityStateZip: csz };
