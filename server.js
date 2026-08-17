@@ -4921,13 +4921,18 @@ app.post("/api/n8n/load-distance", n8nDistanceLimiter, async (req, res) => {
 		// broker-authored free text and an over-long one should still be
 		// measured, not 400'd into the failure-alert cascade.
 		//
-		// ⚠️ THE 500 IS A SECURITY CONTROL, not a UX choice — do not raise it
+		// ⚠️ THE BOUND IS A SECURITY CONTROL, not a UX choice — do not raise it
 		// without re-measuring. cityStateZip()'s regex is super-linear in the input
 		// length (see the note beside it); at 500 chars the worst adversarial shape
 		// costs ~0.26 ms, at 5,000 it is ~19 ms, and before that regex was made
 		// unambiguous 5,000 chars cost 9.4 SECONDS of blocked event loop.
-		const pickupAddress = String(body.pickup_address ?? "").trim().slice(0, 500);
-		const dropoffAddress = String(body.dropoff_address ?? "").trim().slice(0, 500);
+		//
+		// This used to be a hand-written `.slice(0, 500)`, i.e. a second copy of a
+		// number defined elsewhere. Folded onto the shared gate so the parse cap, the
+		// storage bound and this one cannot drift apart — the lesson of
+		// investorExpenseScopeSql() and DRIVER_RENAME_TARGETS.
+		const pickupAddress = boundAddressForStorage(body.pickup_address).value;
+		const dropoffAddress = boundAddressForStorage(body.dropoff_address).value;
 		const loadId = String(body.load_id ?? "").trim().slice(0, 64);
 		const rate = body.rate == null ? "" : String(body.rate).slice(0, 64);
 
@@ -9230,7 +9235,29 @@ const COUNTRY_SUFFIX_RE = /,?\s*\b(U\.?S\.?A?\.?|United States)\.?\s*$/i;
 // So one authenticated write becomes a repeatable ANONYMOUS stall. After the cap the
 // same seven shapes are all under 2.3 ms.
 // The longest real address in production is 79 characters.
-const ADDRESS_PARSE_MAX_CHARS = 500;
+//
+// ⚠️⚠️ THE READ CAP AND THE WRITE BOUND ARE ONE CONSTANT, AND THE WRITE BOUND MAY
+// NEVER EXCEED THE READ CAP. Both parsers anchor their "City, ST ZIP" match at the
+// END of the string, so a value admitted at (say) 512 is clipped back to 500 on
+// every read and loses its city entirely — a row that stores clean and renders
+// blank, i.e. two policies disagreeing about one string. That is the same class of
+// bug as the ZIP+4 split where parseOriginDestCity accepted a shape the sibling
+// `tail` regex rejected. Sharing the constant makes the disagreement
+// unrepresentable, which is why this is NOT two numbers that happen to be equal.
+const ADDRESS_MAX_CHARS = 500;
+
+// The single gate for every address entering load_coordinates. Reports; it does not
+// decide — reject-vs-clamp genuinely differs by entry point (see the call sites), so
+// the policy stays visible at each one instead of being buried here.
+// ⚠️ Trims BEFORE measuring, and stores the trimmed value. The parsers trim first
+// too, so measuring the raw string would let a whitespace-padded 50 MB body pass a
+// length check and still be stored — parsing would be safe and the row would not.
+// Trimming also makes the stored length provably <= the read cap, so the read-side
+// slice is a guaranteed no-op on anything this gate admitted.
+function boundAddressForStorage(raw) {
+	const s = String(raw == null ? "" : raw).trim();
+	return { value: s.slice(0, ADDRESS_MAX_CHARS), length: s.length, tooLong: s.length > ADDRESS_MAX_CHARS };
+}
 
 function parseOriginDestCity(addr) {
 	if (!addr || typeof addr !== "string") return { city: "", state: "", zip: "" };
@@ -9241,7 +9268,7 @@ function parseOriginDestCity(addr) {
 	// required: GET /api/public/track/:loadId calls this directly on the raw
 	// load_coordinates value, so a cap that lived only in the splitter would leave
 	// the one unauthenticated caller uncovered.
-	const trimmed = addr.trim().slice(0, ADDRESS_PARSE_MAX_CHARS).replace(COUNTRY_SUFFIX_RE, "").trim();
+	const trimmed = addr.trim().slice(0, ADDRESS_MAX_CHARS).replace(COUNTRY_SUFFIX_RE, "").trim();
 	// [\s-] not just '-': ZIP+4 also arrives SPACE-separated ("TX 75233 1402", 5
 	// loads). Both halves are fixed-width and the whole group stays optional and
 	// end-anchored, so this adds no ambiguity — it only lets the anchor survive a
@@ -9295,10 +9322,10 @@ function jsonAddressParts(s) {
 // international / unparseable input so nothing is dropped. The street===csz
 // guards avoid a duplicated line when a row carries only "City, ST ZIP".
 function splitAddressLines(raw) {
-	// ⚠️ Capped for the same reason parseOriginDestCity is — see ADDRESS_PARSE_MAX_CHARS.
+	// ⚠️ Capped for the same reason parseOriginDestCity is — see ADDRESS_MAX_CHARS.
 	// This function runs COUNTRY_SUFFIX_RE and the `tail` regex on `cleaned` itself, so
 	// it needs its own bound rather than inheriting the one inside parseOriginDestCity.
-	const s = (raw == null ? "" : String(raw)).trim().slice(0, ADDRESS_PARSE_MAX_CHARS);
+	const s = (raw == null ? "" : String(raw)).trim().slice(0, ADDRESS_MAX_CHARS);
 	if (!s) return { street: "", cityStateZip: "" };
 	if (s.charCodeAt(0) === 123 /* { */) {
 		const structured = jsonAddressParts(s);
@@ -24106,6 +24133,29 @@ app.post("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res)
 	try {
 		const { values, coordinates } = req.body; // values = array of cell values, coordinates = optional {loadId, originLat, originLng, destLat, destLng, pickupAddress, dropoffAddress}
 
+		// ⚠️ REJECT, and reject HERE — before the sheet append, not beside the
+		// load_coordinates INSERT ~130 lines below. This is the one entry point where
+		// the address is supplied directly by the caller rather than read back out of
+		// the sheet, so it is the one that can be refused without costing anybody a
+		// load; every other writer clamps (see boundAddressForStorage's call sites).
+		// Refusing at the write site would be worse than useless: the Job Tracking row
+		// is already appended by then, so the client would get a 400 for a load that
+		// exists. Truncating silently was the alternative and is the failure mode this
+		// codebase keeps paying for — the row looks fine and the data is wrong.
+		if (coordinates) {
+			const tooLong = [["pickupAddress", coordinates.pickupAddress], ["dropoffAddress", coordinates.dropoffAddress]]
+				.map(([field, v]) => ({ field, ...boundAddressForStorage(v) }))
+				.filter((a) => a.tooLong);
+			if (tooLong.length) {
+				return res.status(400).json({
+					error: `Address too long: ${tooLong.map((a) => `${a.field} is ${a.length} characters`).join(", ")}. Maximum is ${ADDRESS_MAX_CHARS}.`,
+					code: "ADDRESS_TOO_LONG",
+					maxChars: ADDRESS_MAX_CHARS,
+					fields: tooLong.map((a) => ({ field: a.field, length: a.length })),
+				});
+			}
+		}
+
 		const sheets = await getSheets();
 
 		// ⚠️ Canonicalize ?sheet= for the SAME reason PUT does. A1 range notation
@@ -24235,8 +24285,13 @@ app.post("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res)
 		if (sheetName === "Job Tracking" && coordinates && coordinates.loadId) {
 			try {
 				const lid = coordinates.loadId.trim().toLowerCase().replace(/^#/, "");
+				// Over-length was already refused at the top of the handler; this call is
+				// what actually applies the trim, and it keeps the bound on the statement
+				// itself so the guard cannot be separated from the write by a later edit.
+				const pu = boundAddressForStorage(coordinates.pickupAddress);
+				const dz = boundAddressForStorage(coordinates.dropoffAddress);
 				db.prepare(`INSERT OR REPLACE INTO load_coordinates (load_id, origin_lat, origin_lng, dest_lat, dest_lng, pickup_address, dropoff_address) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-					.run(lid, coordinates.originLat || null, coordinates.originLng || null, coordinates.destLat || null, coordinates.destLng || null, coordinates.pickupAddress || "", coordinates.dropoffAddress || "");
+					.run(lid, coordinates.originLat || null, coordinates.originLng || null, coordinates.destLat || null, coordinates.destLng || null, pu.value, dz.value);
 			} catch { /* non-critical */ }
 		}
 
@@ -32000,6 +32055,20 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		// ---- 8) load_coordinates + audit trail + dispatch notification ----
 		if (pickupCoords || dropoffCoords) {
 			try {
+				// ⚠️ CLAMP, never reject — this is step 8 and the Job Tracking row was
+				// appended back at step 4, so a 400 here would refuse a load that already
+				// exists. It also degrades to warnings[] like every other post-append step.
+				// A clamped address still geocodes (the coordinates above are already
+				// resolved) and still renders its city; the alternative is losing the load.
+				const pu = boundAddressForStorage(pickupAddress);
+				const dz = boundAddressForStorage(dropoffAddress);
+				if (pu.tooLong || dz.tooLong) {
+					warnings.push(
+						`Address longer than ${ADDRESS_MAX_CHARS} characters was shortened before saving for load ${loadId}` +
+						` (${[pu.tooLong && `pickup ${pu.length}`, dz.tooLong && `drop-off ${dz.length}`].filter(Boolean).join(", ")}).` +
+						" Check the pickup/drop-off addresses on the load.",
+					);
+				}
 				db.prepare(`INSERT OR REPLACE INTO load_coordinates (load_id, origin_lat, origin_lng, dest_lat, dest_lng, pickup_address, dropoff_address) VALUES (?, ?, ?, ?, ?, ?, ?)`)
 					.run(
 						loadKey,
@@ -32007,8 +32076,8 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 						pickupCoords ? pickupCoords.lng : null,
 						dropoffCoords ? dropoffCoords.lat : null,
 						dropoffCoords ? dropoffCoords.lng : null,
-						pickupAddress,
-						dropoffAddress,
+						pu.value,
+						dz.value,
 					);
 			} catch { /* non-critical */ }
 		}
@@ -35217,8 +35286,13 @@ async function ensureLoadCoordinates(loadId, loadObj, headers) {
 
 		const puCol = headers.find((h) => /pickup.*address|origin.*address|shipper.*address/i.test(h));
 		const doCol = headers.find((h) => /drop.?off.*address|dest.*address|receiver.*address|delivery.*address/i.test(h));
-		const pu = puCol ? String(loadObj[puCol] || "").trim() : "";
-		const dz = doCol ? String(loadObj[doCol] || "").trim() : "";
+		// CLAMP — the addresses come from the SHEET, not from a caller, and this runs on
+		// a GPS ping inside a function documented as best-effort/never-throws. Refusing
+		// an over-long sheet cell here would silently disable geofencing for that load,
+		// which is the exact "looks implemented, never fires" failure this function was
+		// written to fix. Geocoding still uses the full string; only storage is bounded.
+		const pu = puCol ? boundAddressForStorage(loadObj[puCol]).value : "";
+		const dz = doCol ? boundAddressForStorage(loadObj[doCol]).value : "";
 		if (!pu && !dz) return false;
 
 		const [o, d] = await Promise.all([
@@ -38092,8 +38166,12 @@ app.get("/api/geocode/load/:loadId", requireAuth, async (req, res) => {
 						const obj = {};
 						headers.forEach((h, idx) => { obj[h] = rows[i][idx] || ""; });
 						if ((obj[loadIdCol] || "").trim().toLowerCase() === loadId) {
-							const pickupAddr = pickupAddrCol ? (obj[pickupAddrCol] || "").trim() : "";
-							const dropoffAddr = dropoffAddrCol ? (obj[dropoffAddrCol] || "").trim() : "";
+							// CLAMP — sheet-sourced, and this route's whole job is to fill in a
+							// missing geocode. A 400 on an over-long cell would leave the load
+							// permanently un-geocoded (and so un-geofenced) with no way to fix it
+							// from here. See boundAddressForStorage for the reject-vs-clamp split.
+							const pickupAddr = pickupAddrCol ? boundAddressForStorage(obj[pickupAddrCol]).value : "";
+							const dropoffAddr = dropoffAddrCol ? boundAddressForStorage(obj[dropoffAddrCol]).value : "";
 							const [origin, dest] = await Promise.all([
 								pickupAddr ? geocodeAddress(pickupAddr) : Promise.resolve(null),
 								dropoffAddr ? geocodeAddress(dropoffAddr) : Promise.resolve(null),
@@ -38105,8 +38183,11 @@ app.get("/api/geocode/load/:loadId", requireAuth, async (req, res) => {
 									origin ? origin.lng : (row && row.origin_lng) || null,
 									dest ? dest.lat : (row && row.dest_lat) || null,
 									dest ? dest.lng : (row && row.dest_lng) || null,
-									pickupAddr || (row && row.pickup_address) || "",
-									dropoffAddr || (row && row.dropoff_address) || "",
+									// Bound the FALLBACK too, not just the sheet value: this branch can
+									// rewrite an existing row's address, so a legacy over-long value
+									// would otherwise be re-persisted unchanged on every re-geocode.
+									boundAddressForStorage(pickupAddr || (row && row.pickup_address) || "").value,
+									boundAddressForStorage(dropoffAddr || (row && row.dropoff_address) || "").value,
 								);
 							row = db.prepare("SELECT * FROM load_coordinates WHERE load_id = ?").get(loadId);
 							break;
@@ -45812,8 +45893,11 @@ server.listen(PORT, BIND_HOST, async () => {
 						const lid = (jtRows[i][lidIdx2] || "").trim().toLowerCase().replace(/^#/, "");
 						if (!lid || seenLids.has(lid)) continue;
 						seenLids.add(lid);
-						const pa = piIdx !== -1 ? (jtRows[i][piIdx] || "").trim() : "";
-						const da = doIdx !== -1 ? (jtRows[i][doIdx] || "").trim() : "";
+						// CLAMP — sheet-sourced, and this is unattended BOOT code. There is no
+						// caller to return a 400 to, and throwing here would abort the backfill
+						// for every remaining load. Same policy as the other sheet-fed writers.
+						const pa = piIdx !== -1 ? boundAddressForStorage(jtRows[i][piIdx]).value : "";
+						const da = doIdx !== -1 ? boundAddressForStorage(jtRows[i][doIdx]).value : "";
 						const oCache = pa ? db.prepare("SELECT lat, lng FROM geocode_cache WHERE address = ?").get(pa.toLowerCase()) : null;
 						const dCache = da ? db.prepare("SELECT lat, lng FROM geocode_cache WHERE address = ?").get(da.toLowerCase()) : null;
 						if ((oCache && oCache.lat) || (dCache && dCache.lat)) {
