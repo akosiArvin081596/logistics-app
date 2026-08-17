@@ -40874,27 +40874,61 @@ const PAYOUT_STATEMENT_DIR = path.join(__dirname, "storage", "payout-statements"
 // fs.unlinkSync(path.join(DIR, value)). Verified against a running server —
 // with the column set to `../DECOY-DO-NOT-DELETE.txt` the request re-rendered
 // normally and the decoy one directory up survived.
+//
+// ⚠️ SHAPE IS NOT OWNERSHIP. This pattern happily matches
+// `payout-99-2026-01-deadbeef01.pdf` on owner 5's row, so both legs ALSO bind
+// on statementFilePrefix(row) — measured: poisoning owner 42's column with
+// owner 5's filename evicted owner 5's cached file. Only a cache eviction, and
+// there is no API path to the poison (one writer, always freshName), but the
+// prefix test is two comparisons and removes the class.
 const STATEMENT_FILE_RE = /^payout-\d+-\d{4}-\d{2}-[0-9a-f]{10}\.pdf$/;
 
-// Every field that can change the printed document, and nothing else.
+// Every input that can change the printed document, and nothing else.
 //
 // This is the whole invalidation strategy. PUT …/adjust, POST …/status and the
 // reopen path all move columns in this list, so each of them invalidates the
 // cache by simply doing its job — there is no hook to call and none to forget.
 // finalized_breakdown is included because the statement prints the SNAPSHOT in
 // preference to a live recompute, so re-finalizing changes the page.
-function statementFingerprint(row) {
+//
+// ⚠️ `who` IS PART OF THE KEY, and leaving it out was a real bug, not an
+// oversight to tidy. The document is fed `investorName` / `investorCompany`
+// from the users ⋈ investors join, and BOTH are mutable by a Super Admin
+// (PUT /api/investors/:id writes full_name / carrier_name; PUT /api/users/:id
+// writes company_name). Keyed on the payout row alone, a legal-entity rename —
+// a routine investor request — left the cached PDF frozen on the OLD name
+// forever, with no TTL and no hook to fire. Worse, it was self-contradictory:
+// the download FILENAME is built from the live `who`, so the file arrived
+// called "ZZ_RENAMED_ENTITY_LLC" with "STATEMENT FOR Johnny Rocks Spirits"
+// printed on page 1 — a settlement document naming two different entities,
+// which an investor cannot use for tax.
+//
+// Note the mechanism, because it is the cost of hoisting `who` above the cache
+// branch: before that hoist, the name and the filename were both derived at
+// render time and COULD NOT disagree. The hoist is still right (it is what
+// makes a cached download and a fresh one identically named) — it just moves
+// the obligation here. Anything else this route reads from outside
+// investor_payouts and passes to buildPayoutStatementHtml belongs in this list.
+function statementFingerprint(row, who) {
 	return crypto.createHash("sha256").update(JSON.stringify([
 		STATEMENT_TEMPLATE_VERSION,
 		row.owner_id, row.period, row.status,
 		row.paid_at || "", row.paid_by || "",
 		row.amount, row.adjustment, row.adjustment_note || "", row.adjusted_at || "",
 		row.finalized_at || "", row.finalized_amount, row.finalized_breakdown || "",
+		(who && who.name) || "", (who && who.company) || "",
 	])).digest("hex").slice(0, 10);
 }
 
-function statementFileName(row) {
-	return `payout-${row.owner_id}-${row.period}-${statementFingerprint(row)}.pdf`;
+// `payout-<ownerId>-<period>-` is a natural key: investor_payouts is
+// UNIQUE(owner_id, period). Exposed as its own helper because both the read and
+// the unlink leg bind on it — see STATEMENT_FILE_RE above.
+function statementFilePrefix(row) {
+	return `payout-${row.owner_id}-${row.period}-`;
+}
+
+function statementFileName(row, who) {
+	return `${statementFilePrefix(row)}${statementFingerprint(row, who)}.pdf`;
 }
 
 // GET /api/investor/payouts/:period/statement — PDF payout statement for a PAID
@@ -40964,6 +40998,12 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 		const sendStatementHeaders = () => {
 			res.setHeader("Content-Type", "application/pdf");
 			res.setHeader("Content-Disposition", `attachment; filename="LogisX_${kind}_${safeName}_${period}.pdf"`);
+			// An undirected 200 is heuristically cacheable, and this body is a
+			// settlement document carrying an investor's name and net payout. Same
+			// rule the two PII reveal routes follow. `private` is belt to no-store's
+			// braces: it names the shared-cache case explicitly, which matters if a
+			// reverse proxy is ever put in front of this app.
+			res.setHeader("Cache-Control", "private, no-store");
 		};
 
 		// ── Cached statement ────────────────────────────────────────────────────
@@ -40987,17 +41027,28 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 		// same investor_payouts row we already read into `row`, so it can only be
 		// absent if the row was deleted between the two reads.)
 		const cachedName = String(row.statement_pdf_file_name || "");
-		const freshName = statementFileName(row);
-		if (cachedName && cachedName === freshName && STATEMENT_FILE_RE.test(cachedName)) {
+		const freshName = statementFileName(row, who);
+		const namePrefix = statementFilePrefix(row);
+		if (cachedName && cachedName === freshName && STATEMENT_FILE_RE.test(cachedName) && cachedName.startsWith(namePrefix)) {
 			const abs = path.join(PAYOUT_STATEMENT_DIR, cachedName);
+			// ⚠️ ONE read, no stat first. A stat→setHeader("Content-Length")→
+			// createReadStream sequence can race: a concurrent re-render renaming
+			// over the same name between the stat and the open would advertise a
+			// stale size against fresh bytes. Reading the buffer and handing it to
+			// res.send() — the SAME call the miss path makes — removes the window
+			// entirely and makes the two paths' headers identical by construction
+			// rather than by hand-maintaining a matching setHeader list.
+			// (res.sendFile was the other option and is wrong here: it adds ETag /
+			// Last-Modified / Accept-Ranges to the hit path only, so hit and miss
+			// would stop agreeing.) These are ~330 KB, so buffering costs nothing
+			// and streaming buys nothing; `await` keeps it off the event loop.
+			//
 			// A file that is gone (manual cleanup, a restored database, a
-			// half-finished deploy) is a MISS, not a 500 — fall through and render.
-			// stat rather than existsSync so `isFile()` also rejects a directory,
-			// and so the size is available for Content-Length below (res.send() on
-			// the miss path sets one, and the two paths should not differ).
-			let st = null;
-			try { st = fs.statSync(abs); } catch { st = null; }
-			if (st && st.isFile()) {
+			// half-finished deploy) is a MISS, not a 500 — the catch falls through
+			// and renders. EISDIR covers the directory case the old isFile() did.
+			let cachedPdf = null;
+			try { cachedPdf = await fs.promises.readFile(abs); } catch { cachedPdf = null; }
+			if (cachedPdf && cachedPdf.length) {
 				// Same guard as the miss path, computed off `row` rather than the
 				// reconcile projection. This expression is verbatim how
 				// reconcileInvestorPayouts derives effectiveAmount, so the cached
@@ -41019,17 +41070,7 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 					`Downloaded ${period} payout statement (${who.name}${row.paid_at ? "" : " — FINAL, not yet paid"})`);
 
 				sendStatementHeaders();
-				res.setHeader("Content-Length", st.size);
-				const stream = fs.createReadStream(abs);
-				// Installed BEFORE pipe(), the same rule as the receipt-zip export:
-				// once bytes have flushed the headers are gone and a failure can
-				// only truncate, so the JSON fallback has to be armed first.
-				stream.on("error", (err) => {
-					console.error("Payout statement stream error:", err.message);
-					if (!res.headersSent) res.status(500).json({ error: "Failed to generate the payout statement" });
-					else res.destroy();
-				});
-				stream.pipe(res);
+				res.send(cachedPdf);
 				return;
 			}
 		}
@@ -41128,6 +41169,14 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 		// cache that cannot be written must never fail a download that has already
 		// rendered successfully — the worst outcome here is today's behaviour.
 		try {
+			// ⚠️ Assert the name we are about to join onto a path, symmetrically
+			// with the read leg. Unreachable today — owner_id is an integer column
+			// and `period` was regex-validated at the top of the handler — but
+			// SQLite enforces no types, so `owner_id` is whatever was last written
+			// there, and "about to become a path segment" is the condition this
+			// route already treats as worth asserting. Cheaper than reasoning about
+			// it again the next time either input's provenance changes.
+			if (!STATEMENT_FILE_RE.test(freshName)) throw new Error(`refusing to write unexpected statement filename: ${freshName}`);
 			fs.mkdirSync(PAYOUT_STATEMENT_DIR, { recursive: true });
 			// ⚠️ Write to a temp name and rename into place. rename() is atomic
 			// within a directory, so a crash or an OOM mid-write can leave a stray
@@ -41141,7 +41190,11 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 			// Drop the render this one supersedes (an adjustment, a reopen, a
 			// template bump). Without it the directory grows one file per
 			// correction and nothing ever reaps them.
-			if (cachedName && cachedName !== freshName && STATEMENT_FILE_RE.test(cachedName)) {
+			// ⚠️ `cachedName !== freshName` is TRUE for any poisoned value, so the
+			// shape test AND the row-prefix test are the only things standing
+			// between a DB string and an unlink. The prefix is what stops one
+			// investor's row evicting another's file.
+			if (cachedName && cachedName !== freshName && STATEMENT_FILE_RE.test(cachedName) && cachedName.startsWith(namePrefix)) {
 				try { fs.unlinkSync(path.join(PAYOUT_STATEMENT_DIR, cachedName)); } catch {}
 			}
 			db.prepare("UPDATE investor_payouts SET statement_pdf_file_name = ? WHERE id = ?").run(freshName, row.id);

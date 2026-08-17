@@ -99,4 +99,8 @@ backups/
 # API route is the only reader. Runtime data: regenerated on demand, so losing
 # the directory costs one re-render. Same "track nothing under here" rule as
 # uploads/ and evidence-archive/ above.
-storage/
+#
+# Scoped to the one subdirectory rather than all of storage/: a blanket
+# `storage/` would silently hide any future tracked file added under it, and an
+# invisible file is how the onboarding templates got deleted twice.
+storage/payout-statements/
