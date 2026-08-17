@@ -41069,21 +41069,90 @@ app.get("/api/investor/payouts/:period/detail", requireRole("Super Admin", "Inve
 // ---------------------------------------------------------------------------
 // Payout statement PDF cache — render once, then serve the file.
 //
-// ⚠️⚠️ BUMP STATEMENT_TEMPLATE_VERSION WHENEVER THE DOCUMENT ITSELF CHANGES.
-// The cache key is a hash of the ROW plus this constant, and nothing else. So a
-// template edit that leaves the row untouched — which is every template edit —
-// produces the SAME key, and every investor with a cached statement keeps being
-// served the OLD document indefinitely. There is no mtime check, no content
-// hash of the template, and no way to notice from the outside: the fix looks
-// deployed and the PDF says otherwise.
+// THE TEMPLATE HASHES ITSELF. Nothing to remember, nothing to forget.
 //
-// "The template" is larger than one file:
+// This used to be a hand-maintained integer, with a comment shouting "bump it
+// whenever the document changes". Nothing enforced that — no content hash, no
+// mtime check, no test — and it bit within the hour: the "Figures as of" line
+// was added to lib/payout-statement.js, the fingerprint did not move, and the
+// cache served the OLD PDF until the directory was cleared by hand. It was
+// caught only because someone happened to be watching a scratch server. In
+// production nobody is watching, and the failure is silent in the worst
+// direction: the fix looks deployed and every investor keeps the old document
+// forever.
+//
+// So the bytes of the template decide. STATEMENT_TEMPLATE_FILES is the closure
+// of everything that can change the printed page:
 //   • lib/payout-statement.js — buildPayoutStatementHtml, the layout itself.
 //   • lib/broker-invoice.js — payout-statement.js reuses its formatMoney /
 //     formatDate / SELLER, so a change to the seller block or to how money is
 //     formatted changes the printed page WITHOUT touching payout-statement.js.
-//   • lib/pdf-browser.js — renderHtmlToPdf's page/margin options.
-// A change in ANY of them is a template change. Bump this.
+//     This is the edge a future engineer would never suspect, which is exactly
+//     why it must be enforced rather than documented.
+//   • lib/pdf-browser.js — renderHtmlToPdf's page format, margins,
+//     preferCSSPageSize, the fonts.ready wait, and the Chromium launch args
+//     (--font-render-hinting, and the darwin --disable-gpu branch). Every one
+//     of those changes the rendered bytes, so rendering counts as template.
+//
+// ⚠️ WHAT THIS HASH CANNOT SEE, which is what STATEMENT_TEMPLATE_VERSION is
+// still for: anything outside these three files. A Puppeteer/Chromium upgrade
+// re-rasterizes glyphs with no diff in lib/; a Google Fonts change upstream
+// arrives with no diff anywhere; a bad batch needs a forced re-render for
+// operational reasons. Hashing package-lock.json was considered and REJECTED —
+// it churns on every unrelated dependency bump (busting every statement for
+// nothing) and, per the deploy notes, npm 10.8.2 leaves it permanently modified
+// on the VPS, so it is not even stable across machines.
+const STATEMENT_TEMPLATE_FILES = [
+	"./lib/payout-statement.js",
+	"./lib/broker-invoice.js",
+	"./lib/pdf-browser.js",
+];
+
+// Computed ONCE, here, at module load — never per request. require.resolve so a
+// moved file is a loud MODULE_NOT_FOUND rather than a silently-skipped input,
+// and the specifier list is sorted so the value is deterministic across
+// machines. Each file contributes its specifier and byte length as well as its
+// bytes, so swapping two files' contents cannot produce the same digest.
+function computeStatementTemplateHash() {
+	const h = crypto.createHash("sha256");
+	for (const spec of [...STATEMENT_TEMPLATE_FILES].sort()) {
+		const buf = fs.readFileSync(require.resolve(spec));
+		h.update(spec).update("\0").update(String(buf.length)).update("\0").update(buf).update("\0");
+	}
+	return h.digest("hex").slice(0, 12);
+}
+
+// ⚠️ FAIL LOUD, AND FAIL TOWARDS SLOW-BUT-CORRECT — never towards the old
+// hand-maintained behaviour, which is the bug being removed here.
+//
+// In practice this is close to unreachable: lib/payout-statement.js is
+// `require`d at the top of this file, so an unreadable one means the process
+// never got here. If it happens anyway (permissions, a file replaced by a
+// directory, EMFILE), we cannot know whether a stored PDF matches the current
+// template — so the cache is DISABLED outright and every request re-renders.
+// That is exactly the pre-cache behaviour: correct, just slower.
+//
+// Deliberately NOT a throw. This is a cache for one download; the same process
+// serves the driver app, dispatch and the Linxup GPS webhook, so refusing to
+// boot over it would be wildly disproportionate. Same instinct as
+// periodLocksReadable() — degrade in the direction that cannot be wrong.
+let statementTemplateHash = null;
+try {
+	statementTemplateHash = computeStatementTemplateHash();
+} catch (err) {
+	console.error(
+		"⚠️  PAYOUT STATEMENT CACHE DISABLED — could not hash the statement template:",
+		err.message,
+		"\n    Every statement will re-render (correct, but ~3-5 s each). Fix the file permissions/paths in STATEMENT_TEMPLATE_FILES.",
+	);
+}
+const STATEMENT_TEMPLATE_HASH = statementTemplateHash;
+const STATEMENT_CACHE_ENABLED = !!STATEMENT_TEMPLATE_HASH;
+
+// The MANUAL OVERRIDE, and no longer load-bearing. Bumping it is now a
+// deliberate act — "re-render everything for a reason the three files above
+// cannot show", i.e. the Chromium/font/bad-batch cases in the ⚠️ note there.
+// A template edit no longer needs it: the hash catches that on its own.
 const STATEMENT_TEMPLATE_VERSION = 1;
 
 // Deliberately OUTSIDE uploads/. `app.use("/uploads", express.static(...))` is
@@ -41149,6 +41218,10 @@ const STATEMENT_FILE_RE = /^payout-\d+-\d{4}-\d{2}-[0-9a-f]{10}\.pdf$/;
 function statementFingerprint(row, who) {
 	return crypto.createHash("sha256").update(JSON.stringify([
 		STATEMENT_TEMPLATE_VERSION,
+		// The template's own bytes — see computeStatementTemplateHash(). This is
+		// what makes a template edit self-invalidating instead of relying on
+		// someone remembering to bump the integer above it.
+		STATEMENT_TEMPLATE_HASH,
 		row.owner_id, row.period, row.status,
 		row.paid_at || "", row.paid_by || "",
 		row.amount, row.adjustment, row.adjustment_note || "", row.adjusted_at || "",
@@ -41266,7 +41339,10 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 		const cachedName = String(row.statement_pdf_file_name || "");
 		const freshName = statementFileName(row, who);
 		const namePrefix = statementFilePrefix(row);
-		if (cachedName && cachedName === freshName && STATEMENT_FILE_RE.test(cachedName) && cachedName.startsWith(namePrefix)) {
+		// STATEMENT_CACHE_ENABLED is false only when the template hash could not be
+		// computed at boot. With no hash there is no way to tell whether a stored
+		// PDF was rendered from the current template, so it must not be served.
+		if (STATEMENT_CACHE_ENABLED && cachedName && cachedName === freshName && STATEMENT_FILE_RE.test(cachedName) && cachedName.startsWith(namePrefix)) {
 			const abs = path.join(PAYOUT_STATEMENT_DIR, cachedName);
 			// ⚠️ ONE read, no stat first. A stat→setHeader("Content-Length")→
 			// createReadStream sequence can race: a concurrent re-render renaming
@@ -41406,6 +41482,10 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 		// cache that cannot be written must never fail a download that has already
 		// rendered successfully — the worst outcome here is today's behaviour.
 		try {
+			// Nothing is stored while the cache is disabled: the filename could not
+			// encode which template produced it, so the file would be an orphan that
+			// no later boot ever serves or reaps.
+			if (!STATEMENT_CACHE_ENABLED) throw new Error("statement cache disabled (template hash unavailable)");
 			// ⚠️ Assert the name we are about to join onto a path, symmetrically
 			// with the read leg. Unreachable today — owner_id is an integer column
 			// and `period` was regex-validated at the top of the handler — but
