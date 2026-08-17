@@ -9212,12 +9212,36 @@ const TRACK_STAGES = [
 //     lib/ratecon-load.js). Do not make the group optional.
 const COUNTRY_SUFFIX_RE = /,?\s*\b(U\.?S\.?A?\.?|United States)\.?\s*$/i;
 
+// ⚠️ SECURITY CONTROL, NOT A UX CHOICE — the same call, and the same number, as the
+// 500-char cap on the n8n load-distance route (see cityStateZip() in
+// lib/ratecon-load.js, where an unbounded input blocked the event loop for 9.4 s).
+// One policy, two entry points; do not raise either without re-measuring.
+//
+// The address parsers below are super-linear in input length (the driver is the
+// pre-existing lazy `([^,\n]+?)…$` shape, not any one quantifier), and NOTHING
+// upstream bounds them: POST /api/data writes coordinates.pickupAddress straight
+// from the request body into load_coordinates under a 50 MB body limit. That value
+// is then re-parsed by /api/dashboard, by every statement render, and — the reason
+// this is not merely an admin footgun — by the UNAUTHENTICATED public tracker on
+// every hit. Measured at 100k chars across the two functions together: 35-113 s of
+// blocked event loop (worst is an INTERNAL whitespace run — a trailing one is only
+// ~3 ms because .trim() already eats it, so do not conclude trim() is the defence),
+// in the single process that also serves the driver app and the Linxup GPS webhook.
+// So one authenticated write becomes a repeatable ANONYMOUS stall. After the cap the
+// same seven shapes are all under 2.3 ms.
+// The longest real address in production is 79 characters.
+const ADDRESS_PARSE_MAX_CHARS = 500;
+
 function parseOriginDestCity(addr) {
 	if (!addr || typeof addr !== "string") return { city: "", state: "", zip: "" };
 	// Strip a trailing country suffix ("..., USA" / "United States"), then match
 	// "City, ST 12345" at the end. Two ordered passes so ZIP+4 ("64504-9534")
 	// and 9-digit-no-dash zips don't break the anchor; we keep the 5-digit zip.
-	const trimmed = addr.trim().replace(COUNTRY_SUFFIX_RE, "").trim();
+	// ⚠️ The cap is applied HERE as well as in splitAddressLines, and both are
+	// required: GET /api/public/track/:loadId calls this directly on the raw
+	// load_coordinates value, so a cap that lived only in the splitter would leave
+	// the one unauthenticated caller uncovered.
+	const trimmed = addr.trim().slice(0, ADDRESS_PARSE_MAX_CHARS).replace(COUNTRY_SUFFIX_RE, "").trim();
 	// [\s-] not just '-': ZIP+4 also arrives SPACE-separated ("TX 75233 1402", 5
 	// loads). Both halves are fixed-width and the whole group stays optional and
 	// end-anchored, so this adds no ambiguity — it only lets the anchor survive a
@@ -9271,7 +9295,10 @@ function jsonAddressParts(s) {
 // international / unparseable input so nothing is dropped. The street===csz
 // guards avoid a duplicated line when a row carries only "City, ST ZIP".
 function splitAddressLines(raw) {
-	const s = (raw == null ? "" : String(raw)).trim();
+	// ⚠️ Capped for the same reason parseOriginDestCity is — see ADDRESS_PARSE_MAX_CHARS.
+	// This function runs COUNTRY_SUFFIX_RE and the `tail` regex on `cleaned` itself, so
+	// it needs its own bound rather than inheriting the one inside parseOriginDestCity.
+	const s = (raw == null ? "" : String(raw)).trim().slice(0, ADDRESS_PARSE_MAX_CHARS);
 	if (!s) return { street: "", cityStateZip: "" };
 	if (s.charCodeAt(0) === 123 /* { */) {
 		const structured = jsonAddressParts(s);
