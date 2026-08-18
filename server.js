@@ -2870,6 +2870,12 @@ async function routemateSyncTelemetry() {
 			if (!driverName) continue;
 			if (!Number.isFinite(t.latitude) || !Number.isFinite(t.longitude)) continue;
 			if (t.latitude === 0 && t.longitude === 0) continue;
+			// Low-fuel warning. Deliberately OUTSIDE the active-load loop and not
+			// gated on having a load at all: the client's ask was that fuel be
+			// watched "even when they park even when they're idling", and a truck
+			// between loads is exactly the one nobody is looking at.
+			// Self-throttling (15 min per vehicle) and never throws.
+			maybeAlertLowFuel(t.routemate_vehicle_id, driverName);
 			// Evaluate EVERY active load for this driver, most-progressed first.
 			// Safe by construction: tryGeofenceAdvance only advances a load whose
 			// CURRENT status is the valid predecessor for the zone it is in, so
@@ -29671,6 +29677,10 @@ async function ingestLinxupPosition(pos) {
 		};
 		io.to("dispatch").emit("location-update", locationPayload);
 		if (driverLower) io.to(driverLower).emit("location-update", locationPayload);
+		// Same low-fuel check as the Routemate poller. BOTH ingest paths need it
+		// or the warning silently disappears the day Linxup fully replaces the
+		// poller — the exact class of gap that left speedMps unset here once.
+		maybeAlertLowFuel(vehicleId, driverName);
 		for (const cand of driverActiveLoads) {
 			try {
 				const advanced = await tryGeofenceAdvance({
@@ -37306,6 +37316,116 @@ function resolveCredibleFuelReading(vehicleId, rows, mpg, tank) {
 	// hasFuelSensor() does, rather than inventing a number.
 	if (!anchor) return fuelModel.resolveFuelReading({ rows: list, mpg, tankGallons: tank, ...clock });
 	return fuelModel.resolveFuelReading({ rows: [latest, anchor], mpg, tankGallons: tank, ...clock });
+}
+
+// --- low-fuel alert -------------------------------------------------------
+// ⚠️ NOTHING WARNED A DRIVER ABOUT FUEL BEFORE THIS. Verified across the whole
+// codebase: no socket event, no driver notification, no toast. The only fuel
+// signal a driver had was a badge on a COLLAPSED accordion inside one load's
+// detail screen — and a driver who runs dry is, by definition, one who never
+// opened it. So the 2026-08-17 run-dry had no mechanism that could have
+// interrupted it. This is that mechanism.
+//
+// Deliberately keyed on ABSOLUTE range, not on the route comparison. The
+// route version needs GET /api/fuel/trip-plan, which bills a Routes call and
+// needs a geocoded load; this runs on every telemetry ping, so it must cost
+// nothing but local reads. "You are under N miles of fuel" is actionable on its
+// own, and the per-load verdict still does the route maths where it belongs.
+//
+// DEFAULT ON, breaking the ships-dormant convention on purpose and for the same
+// reason as PII_MASK_ENABLED: it is a kill switch, not an enable switch. A
+// safety warning that ships disabled is a safety warning nobody turned on.
+const FUEL_LOW_ALERT_ENABLED = !/^(false|0|no|off)$/i.test(
+	String(process.env.FUEL_LOW_ALERT_ENABLED ?? "").trim());
+const FUEL_LOW_ALERT_MILES = (() => {
+	const n = parseFloat(process.env.FUEL_LOW_ALERT_MILES);
+	return Number.isFinite(n) && n > 0 ? n : 100;
+})();
+// Per-vehicle throttle + episode latch. Telemetry lands every ~15s per truck, so
+// without both of these this would recompute constantly and then alert on every
+// single ping. The latch clears only when range recovers well above the
+// threshold (a refuel), so one low-fuel episode produces one alert, not a storm.
+const FUEL_LOW_ALERT_CHECK_MS = 15 * 60 * 1000;
+const fuelLowAlertState = new Map(); // vehicleId -> { checkedAt, alerted }
+
+function maybeAlertLowFuel(vehicleId, driverName) {
+	if (!FUEL_LOW_ALERT_ENABLED || !vehicleId || !driverName) return;
+	try {
+		const st = fuelLowAlertState.get(vehicleId) || { checkedAt: 0, alerted: false };
+		if (Date.now() - st.checkedAt < FUEL_LOW_ALERT_CHECK_MS) return;
+		st.checkedAt = Date.now();
+		fuelLowAlertState.set(vehicleId, st);
+
+		const truck = db.prepare(
+			`SELECT unit_number AS unit, fuel_tank_gallons, avg_mpg
+			 FROM trucks WHERE routemate_vehicle_id = ? LIMIT 1`).get(vehicleId);
+		if (!truck) return;
+		const rows = db.prepare(
+			`SELECT odometer, fuel_pct, location_date_ms FROM routemate_telemetry
+			 WHERE routemate_vehicle_id = ? AND dropped_reason = '' ORDER BY id DESC LIMIT 200`).all(vehicleId);
+		if (!rows.length) return;
+
+		const tank = truck.fuel_tank_gallons > 0 ? truck.fuel_tank_gallons : fuelModel.DEFAULT_TANK_GALLONS;
+		const mpgBase = truck.avg_mpg > 0 ? truck.avg_mpg : fuelModel.DEFAULT_MPG;
+		const reading = resolveCredibleFuelReading(vehicleId, rows, mpgBase, tank);
+		// A stale/absent reading is NOT a low-fuel alert. We do not know the level,
+		// and crying wolf on every unlinked or offline device would train drivers
+		// to ignore the one alert that matters. The panel says "no reading"; that
+		// is the right channel for it.
+		if (reading.fuelPct == null) return;
+
+		const receipt = receiptMpgForVehicle(vehicleId);
+		const mpg = receipt ? receipt.mpg : mpgBase;
+		const shown = fuelModel.computeRange({ fuelPct: reading.fuelPct, tankGallons: tank, mpg });
+		const interval = fuelModel.rangeInterval({
+			fuelPct: reading.fuelPct, burn: burnRateForVehicle(vehicleId), rangeMiles: shown.rangeMiles,
+		});
+		const planning = interval.planning;
+		if (planning == null) return;
+
+		// Hysteresis: clear the latch only well ABOVE the threshold, so a truck
+		// hovering at the line cannot re-alert every check.
+		if (planning > FUEL_LOW_ALERT_MILES * 1.5) {
+			if (st.alerted) { st.alerted = false; fuelLowAlertState.set(vehicleId, st); }
+			return;
+		}
+		if (planning > FUEL_LOW_ALERT_MILES || st.alerted) return;
+
+		st.alerted = true;
+		fuelLowAlertState.set(vehicleId, st);
+
+		const est = reading.fuelSource === "carried" ? " (estimated — fuel sensor not reporting)" : "";
+		const driverMsg = `About ${planning} miles of fuel left${est}. Plan a fuel stop now.`;
+		const key = String(driverName).trim().toLowerCase();
+		const notif = insertNotification.run(
+			key, "fuel-low",
+			`Low fuel — ${truck.unit || "your truck"}`,
+			driverMsg,
+			JSON.stringify({ unit: truck.unit, planningMiles: planning, fuelPct: reading.fuelPct,
+				fuelSource: reading.fuelSource })
+		);
+		io.to(key).emit("fuel-low", {
+			unit: truck.unit, planningMiles: planning, fuelPct: reading.fuelPct,
+			fuelSource: reading.fuelSource, notificationId: notif.lastInsertRowid,
+		});
+		insertDispatchNotification.run(
+			"fuel-low",
+			`${driverName}: low fuel`,
+			`${driverName} (${truck.unit || "unknown truck"}) has about ${planning} miles of fuel left${est}.`,
+			JSON.stringify({ driverName, unit: truck.unit, planningMiles: planning,
+				fuelPct: reading.fuelPct, fuelSource: reading.fuelSource })
+		);
+		io.to("dispatch").emit("dispatch-notification", {
+			type: "fuel-low",
+			title: `${driverName}: low fuel`,
+			body: `${truck.unit || "unknown truck"} — about ${planning} mi of fuel left${est}.`,
+		});
+		console.log(`[fuel-low] ${driverName} (${truck.unit}) ${planning} mi, ${reading.fuelPct}% [${reading.fuelSource}]`);
+	} catch (err) {
+		// Bookkeeping for a warning must never break telemetry ingestion — this
+		// runs inside the per-ping path that also drives tracking and geofencing.
+		console.error("[fuel-low] check failed:", err.message);
+	}
 }
 
 // GET /api/fuel/range?driver=NAME  (or ?vehicleId=ID) — miles-left-in-tank estimate
