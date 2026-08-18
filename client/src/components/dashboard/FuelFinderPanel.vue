@@ -74,7 +74,23 @@
               </span>
             </span>
           </div>
+          <!-- The reading is INFERRED, and that has to be said. This truck's
+               sensor drops to 0 while driving ~47% of the time; the figure above
+               is the last credible reading minus the fuel burned since, so it is
+               a floor, not a gauge. Silently showing it as if it were live is how
+               the original bug felt trustworthy. -->
+          <div v-if="carriedNote" class="ff-range-carried" :title="carriedNote.title">
+            {{ carriedNote.text }}
+          </div>
         </div>
+      </div>
+      <!-- ⚠️ NEVER RENDER NOTHING. This branch did not exist, so a truck whose
+           ELD reports no fuel produced a completely empty panel — no number, no
+           placeholder, no reason. A blank space reads as "fine"; that is the
+           failure mode that put a driver on the shoulder. Say what is missing. -->
+      <div v-else class="ff-range-none">
+        <div class="ff-range-none-head">No fuel reading</div>
+        <div class="ff-range-none-sub">{{ noFuelReason }}</div>
       </div>
 
       <!-- TRIP VERDICT — "does the rest of this load's route fit in the tank?"
@@ -123,6 +139,11 @@
         </div>
       </div>
       <div v-else-if="planNote" class="ff-muted ff-plan-note">{{ planNote }}</div>
+      <!-- Terminal fallback: the three branches above are all conditional, so a
+           404 (planNote deliberately '') or simply no selected load left this
+           whole section rendering nothing at all. Same rule as the range block —
+           an absent verdict must be stated, never implied by blank space. -->
+      <div v-else class="ff-muted ff-plan-note">{{ noPlanReason }}</div>
 
       <!-- #2 map toggle + #4 cheapest-diesel list -->
       <div class="ff-stops">
@@ -269,6 +290,57 @@ const evidenceText = computed(() =>
     ? rangeEvidenceText(range.value && range.value.rangeEvidence)
     : '',
 )
+
+/* ── reading provenance + the "nothing to show" copy ──────────────────────
+   The server now distinguishes a live sensor reading from one CARRIED forward
+   across a dropout (see resolveFuelReading in lib/fuel-model.js). A carried
+   number is an inference, so it is labelled wherever it appears — and the
+   never-blank branches below exist because an empty panel was being read as
+   reassurance. */
+const carriedNote = computed(() => {
+  const r = range.value || plan.value
+  if (!r || r.fuelSource !== 'carried') return null
+  const miles = r.milesSinceFuelReading
+  const pct = r.fuelAnchorPct
+  const bits = []
+  if (pct != null) bits.push(`last reading ${Math.round(pct)}%`)
+  if (miles != null) bits.push(`${milesText(miles)} mi ago`)
+  return {
+    text: `estimated — sensor not reporting${bits.length ? ' · ' + bits.join(', ') : ''}`,
+    title:
+      'The truck\'s fuel sensor is not reporting. This figure is the last credible '
+      + 'reading minus the fuel burned since, so treat it as a floor, not a gauge.',
+  }
+})
+const noFuelReason = computed(() => {
+  const r = range.value
+  if (!r) return 'Could not read the fuel level for this truck.'
+  // 'stale' means the ELD stopped reporting entirely (a frozen fix, odometer
+  // included). We deliberately do NOT carry that reading into a range — but the
+  // last known value is still the most useful thing we can say, so say it.
+  if (r.fuelSource === 'stale') {
+    const age = r.fuelReadingAgeMinutes
+    const known = r.fuelAnchorPct != null ? `Last known ${Math.round(r.fuelAnchorPct)}%` : 'No recent reading'
+    return `${known}${age != null ? ', ' + agoText(age) : ''}. This truck's ELD has stopped reporting, `
+      + 'so no range can be worked out — check the gauge before dispatching.'
+  }
+  if (r.fuelSource === 'none') {
+    return "This truck's ELD has not reported a fuel level. Range cannot be estimated — check the truck's gauge."
+  }
+  return 'No fuel level reported by this truck’s ELD.'
+})
+function agoText(mins) {
+  const m = Number(mins)
+  if (!Number.isFinite(m)) return ''
+  if (m < 90) return `${Math.round(m)} min ago`
+  const h = m / 60
+  if (h < 48) return `${Math.round(h)} h ago`
+  return `${Math.round(h / 24)} d ago`
+}
+const noPlanReason = computed(() => {
+  if (!props.loadId) return 'Select a load to check its route against the tank.'
+  return 'No verdict yet for this load.'
+})
 
 // Collapsed-panel summary. A verdict outranks a figure, because a dispatcher
 // scanning the map wants to know which truck is in trouble, not how far each
@@ -586,6 +658,37 @@ watch(() => [props.driver, props.loadId], reloadAll, { immediate: true })
   font-size: 0.62rem;
   color: #94a3b8;
   font-variant-numeric: tabular-nums;
+}
+/* Amber, not grey: a carried reading is a caveat the reader must actually
+   notice, but not an error — the number is still the best available. */
+.ff-range-carried {
+  margin-top: 0.15rem;
+  font-size: 0.62rem;
+  font-weight: 600;
+  color: #b45309;
+  font-variant-numeric: tabular-nums;
+}
+/* The never-blank state. Deliberately styled as a real message rather than
+   muted filler — this is where an empty panel used to be. */
+.ff-range-none {
+  margin: 0 0 0.55rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+}
+.ff-range-none-head {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #9a3412;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.ff-range-none-sub {
+  margin-top: 0.15rem;
+  font-size: 0.66rem;
+  line-height: 1.35;
+  color: #7c2d12;
 }
 
 /* ---- trip verdict ---- */
