@@ -37233,6 +37233,81 @@ function resolveTruckForDriverName(driverName) {
 	return owned.find((r) => normalizeDriverName(r.matched_name) === target) || null;
 }
 
+// --- fuel buffer + dropout config ------------------------------------------
+// ⚠️ FUEL_RESERVE_MILES DEFAULTS TO 15 AT THE CLIENT'S EXPLICIT REQUEST
+// (2026-08-17, after a truck ran dry). It was a hardcoded 50 with a 10%
+// proportional term. The reduction was flagged back as a loss of safety margin
+// and the client kept 15; see the block comment above TRIP_RESERVE_MIN_MI in
+// lib/fuel-model.js. These live here rather than as process.env reads inside
+// that module so the module stays pure and unit-testable.
+const FUEL_RESERVE_MILES = (() => {
+	const n = parseFloat(process.env.FUEL_RESERVE_MILES);
+	return Number.isFinite(n) && n >= 0 ? n : fuelModel.TRIP_RESERVE_MIN_MI;
+})();
+const FUEL_RESERVE_FRACTION = (() => {
+	const n = parseFloat(process.env.FUEL_RESERVE_FRACTION);
+	return Number.isFinite(n) && n >= 0 ? n : fuelModel.TRIP_RESERVE_FRACTION;
+})();
+const FUEL_RESERVE_OPTS = { minMiles: FUEL_RESERVE_MILES, fraction: FUEL_RESERVE_FRACTION };
+// How far back we may reach for the last CREDIBLE fuel reading when the live one
+// is a dropout. Bounding it in SQL (rather than by age in the model) keeps the
+// staleness limit next to the query that can actually use the index.
+const FUEL_CARRY_LOOKBACK_HOURS = (() => {
+	const n = parseFloat(process.env.FUEL_CARRY_LOOKBACK_HOURS);
+	return Number.isFinite(n) && n > 0 ? n : 168; // 7 days
+})();
+// ⚠️ The SQL lookback above only bounds which row we may FIND. This bounds how
+// old that row may be before we refuse to carry it at all — the guard that stops
+// a dead ELD (LogisX-#33, frozen since 2026-08-14, odometer included) reporting
+// a confident range from a three-day-old reading. Keep it well above a real
+// sensor dropout (~4 h in the 2026-08-17 incident) and well below "the device is
+// gone". Beyond it the reading is reported as `stale`, with no range at all.
+const FUEL_CARRY_MAX_MINUTES = (() => {
+	const n = parseFloat(process.env.FUEL_CARRY_MAX_HOURS);
+	return Number.isFinite(n) && n > 0 ? n * 60 : fuelModel.CARRY_MAX_MINUTES;
+})();
+
+// resolveCredibleFuelReading(vehicleId, rows, mpg, tank)
+// The live fuel_pct cannot be trusted on this fleet. Measured on Logisx-#91 over
+// the 18h around the 2026-08-17 run-dry: 2,027 of 4,315 readings (47%) were
+// exactly 0, on rows carrying an average speed of 18.99 mph while the odometer
+// advanced 544 miles — i.e. sensor dropouts, not an empty tank. Dropouts lasted
+// HOURS, so the 200-row window the caller already holds (~50 min) can be
+// entirely zeros; the anchor therefore needs its own indexed lookup rather than
+// a bigger row fetch.
+//
+// Returns the lib's resolveFuelReading() shape. `rows` is the caller's
+// newest-first window; we only need its newest entry plus the anchor.
+function resolveCredibleFuelReading(vehicleId, rows, mpg, tank) {
+	const list = Array.isArray(rows) ? rows : [];
+	const latest = list[0] || null;
+	const latestPct = latest && Number.isFinite(latest.fuel_pct) ? latest.fuel_pct : null;
+	// Real wall-clock time and the staleness ceiling go into EVERY call, or a
+	// dead ELD's frozen reading carries forward forever. See FUEL_CARRY_MAX_MINUTES.
+	const clock = { nowMs: Date.now(), maxCarryMinutes: FUEL_CARRY_MAX_MINUTES };
+	// A positive live reading needs no anchor — skip the extra query entirely.
+	if (latestPct != null && latestPct > 0) {
+		return fuelModel.resolveFuelReading({ rows: list, mpg, tankGallons: tank, ...clock });
+	}
+	if (!vehicleId || !latest) {
+		return fuelModel.resolveFuelReading({ rows: list, mpg, tankGallons: tank, ...clock });
+	}
+	let anchor = null;
+	try {
+		anchor = db.prepare(
+			`SELECT fuel_pct, odometer, location_date_ms FROM routemate_telemetry
+			 WHERE routemate_vehicle_id = ? AND dropped_reason = '' AND fuel_pct > 0
+			   AND location_date_ms >= ?
+			 ORDER BY id DESC LIMIT 1`
+		).get(vehicleId, Date.now() - FUEL_CARRY_LOOKBACK_HOURS * 3600 * 1000);
+	} catch { anchor = null; }
+	// No credible reading inside the window -> genuinely no fuel data. Hand the
+	// model the untouched window so it reports "none" for the same reason
+	// hasFuelSensor() does, rather than inventing a number.
+	if (!anchor) return fuelModel.resolveFuelReading({ rows: list, mpg, tankGallons: tank, ...clock });
+	return fuelModel.resolveFuelReading({ rows: [latest, anchor], mpg, tankGallons: tank, ...clock });
+}
+
 // GET /api/fuel/range?driver=NAME  (or ?vehicleId=ID) — miles-left-in-tank estimate
 // from the assigned truck's latest ELD fuel% + tank size (config or 200-gal
 // default) + MPG (ELD-derived, else the truck's configured/6.5 default). Powers
@@ -37305,8 +37380,20 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (
 			}
 		}
 
+		// ⚠️ Resolve a CREDIBLE reading before the model sees it — `latest.fuel_pct`
+		// is a dropout roughly half the time on this fleet (see
+		// resolveCredibleFuelReading). Passing the carried value in also fixes
+		// hasFuelSensor() for free: the model pushes this pct onto its own recent
+		// window, so a positive carried reading proves the sensor works even when
+		// every row in the 200-row window is a zero — which is exactly the state
+		// that made LogisX-#33's panel render nothing at all.
+		const preTank = truck && truck.fuel_tank_gallons > 0
+			? truck.fuel_tank_gallons : fuelModel.DEFAULT_TANK_GALLONS;
+		const preMpg = truck && truck.avg_mpg > 0 ? truck.avg_mpg : fuelModel.DEFAULT_MPG;
+		const reading = resolveCredibleFuelReading(vehicleId, rows, preMpg, preTank);
+
 		const estimate = fuelModel.estimateRangeForVehicle({
-			fuelPct: latest ? latest.fuel_pct : null,
+			fuelPct: reading.fuelPct,
 			tankGallons: truck ? truck.fuel_tank_gallons : 0,
 			avgMpg: truck ? truck.avg_mpg : 0,
 			telemetryRows: rows,
@@ -37414,6 +37501,18 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (
 			rangePlanningMiles: interval.planning,
 			rangeBasis: interval.basis,
 			milesPerFuelPoint: interval.milesPerPoint,
+			// Provenance of the FUEL READING itself, which is a separate axis from
+			// rangeBasis (that one describes the miles-per-point evidence). 'live' =
+			// the sensor answered; 'carried' = the sensor is dropping out and this is
+			// the last credible reading minus the fuel burned since; 'none' = no
+			// credible reading at all. The UI must say which, because a carried
+			// number is an inference and the driver is entitled to know that — and
+			// because "0% fuel" from a dropout and "0% fuel" from an empty tank are
+			// the same two characters on screen.
+			fuelSource: reading.fuelSource,
+			fuelAnchorPct: reading.anchorPct,
+			fuelReadingAgeMinutes: reading.ageMinutes,
+			milesSinceFuelReading: reading.milesSinceReading,
 			// Evidence behind a 'measured' basis, so the UI can say WHY it is
 			// trusted ("from 56 of this truck's own fill-ups") instead of asserting
 			// it. Null when there are no usable legs — which is itself the reason
@@ -37656,7 +37755,7 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 
 		// Live fuel + position.
 		const latest = vehicleId ? db.prepare(`
-			SELECT latitude, longitude, fuel_pct, location_date_ms FROM routemate_telemetry
+			SELECT latitude, longitude, fuel_pct, odometer, location_date_ms FROM routemate_telemetry
 			WHERE routemate_vehicle_id = ? AND dropped_reason = '' ORDER BY id DESC LIMIT 1`).get(vehicleId) : null;
 		const fixFresh = latest && latest.location_date_ms
 			&& Date.now() - latest.location_date_ms < 6 * 60 * 60 * 1000
@@ -37688,11 +37787,17 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 		const mpg = receipt ? receipt.mpg
 			: (truck && truck.avg_mpg > 0 ? truck.avg_mpg : fuelModel.DEFAULT_MPG);
 		const tank = truck && truck.fuel_tank_gallons > 0 ? truck.fuel_tank_gallons : fuelModel.DEFAULT_TANK_GALLONS;
-		const pct = latest ? latest.fuel_pct : null;
+		// Same credible-reading resolution as /api/fuel/range — a raw latest.fuel_pct
+		// is a dropout ~47% of the time on this fleet, and this is the endpoint whose
+		// answer a driver acts on. Without it, the 2026-08-17 run-dry returns
+		// verdict 'unknown' ("No verdict") instead of 'insufficient'.
+		const reading = resolveCredibleFuelReading(vehicleId, latest ? [latest] : [], mpg, tank);
+		const pct = reading.fuelPct;
 		const shown = fuelModel.computeRange({ fuelPct: pct, tankGallons: tank, mpg });
 
 		const plan = fuelModel.planTripFuel({
 			routeMiles, fuelPct: pct, burn, rangeMiles: shown.rangeMiles, mpg,
+			reserve: FUEL_RESERVE_OPTS,
 		});
 
 		res.json({
@@ -37706,6 +37811,13 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 			// needs to know which question was answered.
 			fromLivePosition: !!fixFresh,
 			fuelPct: pct,
+			// See the same block on /api/fuel/range: provenance of the READING, which
+			// is a different axis from the verdict's rangeBasis. A 'carried' value is
+			// an inference and must be labelled as one wherever it is rendered.
+			fuelSource: reading.fuelSource,
+			fuelAnchorPct: reading.anchorPct,
+			fuelReadingAgeMinutes: reading.ageMinutes,
+			milesSinceFuelReading: reading.milesSinceReading,
 			mpg: Math.round(mpg * 100) / 100,
 			mpgSource: receipt ? "receipts" : "default",
 			...plan,

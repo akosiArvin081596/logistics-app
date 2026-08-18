@@ -297,16 +297,35 @@ const fuelSectionOpen = computed(() => openSections.value.includes('fuel'))
 
 // The trip-fuel verdict, surfaced on the collapsed section header.
 //
-// Deliberately short and deliberately not a number: the header has room for a
-// state, and a figure without its interval beside it is what this whole change
-// exists to stop. `clears` shows nothing at all — a green tick on every load
-// trains the eye to skip the strip, and then the one red badge that matters
-// gets skipped with it.
+// ⚠️ THIS BADGE USED TO RETURN null FOR BOTH `clears` AND `unknown`, WHICH MADE
+// A TRUCK WITH NO READABLE FUEL LOOK EXACTLY LIKE A TRUCK WITH A FULL TANK.
+// That is the driver-side half of the 2026-08-17 run-dry: the range panel is
+// behind a tap, so this strip is the only fuel signal a driver sees without
+// going looking, and it said nothing in the one state that most needed saying.
+// `unknown` is not "fine", it is "I cannot tell you", and it now says so.
+//
+// The original reasoning for staying silent on `clears` is kept and still
+// stands — "a green tick on every load trains the eye to skip the strip, and
+// then the one red badge that matters gets skipped with it". So `clears` does
+// NOT get a tick. It gets the planning figure as a muted, uncoloured chip:
+// that satisfies the client's "range displayed throughout" without minting a
+// reassurance signal on every load. A number is information; a green tick is a
+// verdict, and only the alarming verdicts earn colour.
 const fuelPlan = ref(null)
 const fuelBadge = computed(() => {
-  const v = fuelPlan.value && fuelPlan.value.verdict
+  const p = fuelPlan.value
+  const v = p && p.verdict
   if (v === 'insufficient') return { tone: 'bad', text: 'Fuel stop needed' }
   if (v === 'tight') return { tone: 'warn', text: 'Fuel is tight' }
+  if (v === 'unknown') return { tone: 'warn', text: 'Fuel unknown' }
+  if (v === 'clears') {
+    // decidedOn is the interval's LOW end — the same number the panel headlines.
+    // Never substitute typical/rangeMiles here; that is the original bug.
+    const mi = p.decidedOn
+    if (mi != null && Number.isFinite(Number(mi))) {
+      return { tone: 'plain', text: `${Math.round(Number(mi))} mi range` }
+    }
+  }
   return null
 })
 
@@ -571,6 +590,15 @@ const dropoffFields = computed(() => {
   background: #dc2626;
   color: #fff;
   border: 1px solid #b91c1c;
+}
+/* `clears` — information, not reassurance. Neutral grey and a lighter weight so
+   it reads as a figure rather than an all-clear; see the note on fuelBadge for
+   why this must not become a green tick. */
+.fuel-badge.fb-plain {
+  background: #f1f5f9;
+  color: #475569;
+  border: 1px solid #e2e8f0;
+  font-weight: 600;
 }
 
 .detail-collapse :deep(.doc-upload) {
