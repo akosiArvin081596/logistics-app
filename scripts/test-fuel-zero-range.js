@@ -193,6 +193,26 @@ check("omitting nowMs treats an ancient fixture as stale, not live",
 	fm.resolveFuelReading({ rows: rows([[0, 1000, 9000], [40, 1000, 5000]]), mpg: 6.5, tankGallons: 240 })
 		.fuelSource === "stale");
 
+// ⚠️ AGE APPLIES TO A POSITIVE READING TOO. Found on production before this was
+// enforced: LogisX-#2372's last fix was 161 h old and LogisX-#302's 528 h old,
+// both with a positive fuel_pct — so both resolved to `live`, showed a confident
+// range with nothing marking it stale, and would have fired a low-fuel alert
+// about trucks silent for a week and three weeks. A reading is stale because of
+// its AGE, never because of which branch found it.
+const oldButPositive = RES(rows([[12, 1000, minsAgo(60 * 24 * 22)]]));
+check("a 22-day-old POSITIVE reading is stale, not live",
+	oldButPositive.fuelSource === "stale", `got ${oldButPositive.fuelSource}`);
+check("...and publishes no fuel percentage", oldButPositive.fuelPct === null);
+check("...but still reports what was last known", oldButPositive.anchorPct === 12);
+check("a fresh positive reading is still live",
+	RES(rows([[12, 1000, minsAgo(30)]])).fuelSource === "live");
+check("live now reports its true age, not a hardcoded 0",
+	RES(rows([[12, 1000, minsAgo(30)]])).ageMinutes === 30);
+// An undatable reading cannot be aged, so it cannot be trusted as current.
+check("a reading with no timestamp is not called live",
+	fm.resolveFuelReading({ rows: [{ fuel_pct: 40, odometer: 1000 }], mpg: 6.5, tankGallons: 240, nowMs: NOW })
+		.fuelSource !== "live");
+
 // ---------------------------------------------------------------------------
 section("§5 REPLAY — the real 2026-08-17 incident (production values)");
 // Logisx-#91 / wL8e55NU0KjcB2ynE2wf1g, tank 240 gal, mpg 6.5.
