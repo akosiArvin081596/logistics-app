@@ -36072,9 +36072,23 @@ app.get("/api/tracking/hos", requireRole("Super Admin", "Dispatcher"), async (re
 
 		const payload = { clocks, fetchedAt: new Date().toISOString(), source: "routemate" };
 		hosClockCache = { at: now, payload };
+		clearRoutemateLogState("hos");
 		res.json(payload);
 	} catch (err) {
-		console.error("tracking HOS error:", err.message);
+		// De-duped like every other Routemate source. This site used to be a raw
+		// console.error, and it is the ONE that runs per REQUEST rather than on a
+		// sync interval — so with /tracking open it re-logged an identical message
+		// every HOS_FAIL_COOLDOWN_MS forever. Measured on production 2026-08-18:
+		// 782 of the error log's 2,171 lines were this single line, against an
+		// upstream that has never once succeeded for this account
+		// (/api/v0/drivers/hos answers 500 with an empty body to a fully-formed
+		// request — all four required params sent — and routemate_hos_daily has 0
+		// rows all time). Burying the log is only safe because the failure is also
+		// RECORDED below: the handler comment above promises admins see the real
+		// error via /api/routemate/health, and until now nothing ever put it there.
+		logRoutemateSyncFailure("hos", err);
+		routemateHealth.lastError = { at: new Date().toISOString(), source: "hos", message: err.message, status: err.status || null };
+		routemateHealth.errorsLast24h += 1;
 		hosClockCache.failedAt = Date.now();
 		if (hosClockCache.payload) {
 			return res.json({ ...hosClockCache.payload, stale: true });
