@@ -18,6 +18,10 @@ written.
 **Headline: disk pressure has eased on its own. 82% → 72% (79G used/18G free → 69G used/28G
 free).** Nothing here is urgent any more.
 
+**Update, same day: the OSRM extract was then deleted, taking the box to 61% — 58G used, 39G
+free.** See "Finding #6 actioned" below. The 96G filesystem now has more headroom than at any
+point in this document's history.
+
 | Original claim (2026-08-11) | Measured 2026-08-18 | Status |
 |---|---|---|
 | Root fs 82%, 79G used, 18G free | **72%, 69G used, 28G free** | Improved 10G |
@@ -64,11 +68,30 @@ but unconfirmed contributor. Recorded as unexplained rather than guessed.
 
 ### Still open, unchanged
 
-Findings **#5 (8 GB of plaintext financial PII on a multi-tenant box)** and **#6 (the 11 GB dead
-OSRM extract)** stand exactly as written. The permissions half of #5 is now fixed, but that was
-always the smaller half — the snapshots are still unencrypted plaintext copies of every SSN, EIN
-and bank account number, and that decision is still open. OSRM is now the single largest
-reclaimable item on the box by a wide margin.
+Finding **#5 (8 GB of plaintext financial PII on a multi-tenant box)** stands exactly as written.
+The permissions half is now fixed, but that was always the smaller half — the snapshots are still
+unencrypted plaintext copies of every SSN, EIN and bank account number, and that decision is
+still open.
+
+### ✅ Finding #6 actioned — OSRM extract deleted 2026-08-18
+
+The owner made the call this document asked for. `/opt/osrm/data/us-latest.osm.pbf`
+(11,805,038,885 B, mtime 2026-03-30) was **deleted 2026-08-18 06:51 UTC** after a final
+pre-flight that closed the one gap the original survey left open — whether anything still
+referenced it:
+
+- Both `Exited (137)` containers ran `osrm-extract -p /opt/car.lua /data/us-latest.osm.pbf`,
+  finishing **2026-03-30 09:50 and 10:03 UTC** — two OOM-killed attempts thirteen minutes apart,
+  both dying at the **first** of the three preprocessing stages. This confirms the original
+  inference: no `.osrm.*` output was ever produced, so the file could never have served a query.
+- They are the **only** two containers mounting `/opt/osrm/data`, and there is **no** reference
+  to `/opt/osrm` in systemd, cron, or any compose/service/env file on the box.
+
+**Result: 72% → 61%, 69G used/28G free → 58G used/39G free.** One-way door as flagged — a
+re-download from Geofabrik yields a newer extract, not this Mar 30 one.
+
+Left in place deliberately: the two dead containers (1.5 MB total) and the now-empty
+`/opt/osrm/data/`, which keeps their mount path valid. Neither is worth a maintenance window.
 
 ## Why you're reading this
 
@@ -190,7 +213,7 @@ so they will stay there indefinitely.
 > `/var/www/logistics-app`. The only non-snapshot entries remaining are `.retention-keep`,
 > `backup.log` and three small JSON one-off dumps. Where they went was not traced.
 
-### 6. `/opt/osrm/data/us-latest.osm.pbf` — 11 GB, and we believe it is dead
+### 6. `/opt/osrm/data/us-latest.osm.pbf` — 11 GB, and we believe it is dead *(✅ confirmed dead and DELETED 2026-08-18 — see reconciliation)*
 
 The single largest file on the box: **11,805,038,885 bytes (11.0 GiB)**, dated Mar 30. It is the
 only thing in `/opt/osrm/`.
@@ -232,7 +255,7 @@ Ranked by value-to-risk. **All of these are yours to run — we deliberately did
 |---|---|---|---|
 | 1 | ~~`scripts/secure-backups.sh --apply` — tighten the `0755` backups directory~~ **✅ DONE** | 0 | **Very low.** Already written, tested, dry-run by default, and your own cron is asking for it. |
 | 2 | ~~Gzip the 31 uncompressed snapshots in place~~ **⚠️ DO NOT RUN AS WRITTEN** — see reconciliation | ~~**~6.0 GB**~~ → **~1.28 GB** | ~~**Low.**~~ → **High as written**: gzip renames the file, the `.retention-keep` pin is an exact-name match, so the six pinned snapshots become prunable and the next nightly run deletes them. The other ~4.5 GB self-prunes by ~2026-09-05 anyway. |
-| 3 | Decide the fate of `/opt/osrm/data/us-latest.osm.pbf` | **11.0 GB** | **Low–moderate.** No live code path references it and preprocessing never completed. Re-downloadable from Geofabrik, but not this exact extract. Consider archiving the *decision*, not the file. |
+| 3 | ~~Decide the fate of `/opt/osrm/data/us-latest.osm.pbf`~~ **✅ DONE — deleted 2026-08-18, reclaimed 11.0 GB** | **11.0 GB** | **Low–moderate.** No live code path references it and preprocessing never completed. Re-downloadable from Geofabrik, but not this exact extract. Consider archiving the *decision*, not the file. |
 | 4 | ~~Move `.env.pre-*` files out of `backups/` into a credential store~~ **✅ DONE** | ~0 | Low. |
 | 5 | Encryption-at-rest or off-box archival for the plaintext snapshots | 0 (or all 8 GB, if off-box) | **The real remediation.** Larger change; needs a restore path that still works at 02:00 unattended. Your call. |
 | 6 | Revisit whether 30 days × full plaintext copies is the right retention shape | up to ~6 GB | Policy question. A weekly/monthly tier past day 7 would cut this a lot. |
@@ -264,9 +287,14 @@ maintenance window; `backup-db.js` already sweeps strays.
 - **Do not copy these backups off the box for convenience** (laptop, shared drive, ticket
   attachment) without treating them as regulated data. Each file is a complete, unencrypted copy
   of every SSN, EIN, and bank account number in the system.
-- **Do not delete `/opt/osrm/data/us-latest.osm.pbf` on our say-so.** Our conclusion that it is
+- ~~**Do not delete `/opt/osrm/data/us-latest.osm.pbf` on our say-so.** Our conclusion that it is
   dead is an inference from code search and container state, not a statement from whoever set it
-  up. Confirm nobody is planning a self-hosted routing return first — the 11 GB is not on fire.
+  up. Confirm nobody is planning a self-hosted routing return first — the 11 GB is not on fire.~~
+  **✅ Satisfied and actioned 2026-08-18.** The inference was independently confirmed (both
+  containers died at `osrm-extract`, nothing else mounts the path, no systemd/cron/compose
+  reference), the owner made the call rather than a disk-pressure reflex taking it, and the file
+  was deleted. This entry is retained because the *reasoning* still applies to the next such
+  artifact.
 
 ---
 
