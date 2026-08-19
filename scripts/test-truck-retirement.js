@@ -154,9 +154,21 @@ for (let y = 2025; y <= 2027; y++) for (let mo = 1; mo <= 12; mo++) ALL_MONTHS.p
 // ================================================================== §1 TEXTUAL
 section("1. TEXTUAL — every fixed-cost month gate routes through ONE predicate");
 {
-	// The four money gates + nothing else should be calling it in gate position.
+	// ⚠️ FIVE, not four — and the fifth is correct, which is why this pin moved
+	// rather than the code. The gates are: computeInvestorMonthlyEarnings ×2
+	// (the month total and its detail month), /api/investor ×2, and
+	// /api/financials ×1. The pair inside /api/investor is deliberate:
+	// getMonthlyFixedCosts() computes the total and getMonthlyFixedCostParts()
+	// the breakdown, and the breakdown re-walks THE SAME gated loop so the parts
+	// sum to the total by construction rather than by coincidence — the comment
+	// beside it records the $3,107 discrepancy that taught that lesson. Deleting
+	// one to satisfy a stale count would reintroduce exactly that bug.
+	//
+	// A bare count is a weak pin, but it is the one that catches the thing that
+	// matters: a SIXTH gate appearing that does not route through the shared
+	// predicate. If it trips, read the new call site before touching this number.
 	const gateCalls = (SRC.match(/if \(!truckChargedInMonth\(/g) || []).length;
-	eq(gateCalls, 4, "four money month-gates call truckChargedInMonth() directly");
+	eq(gateCalls, 5, "five money month-gates call truckChargedInMonth() directly");
 
 	// The guard delegates to it too, via truckFixedCostLockedMonths.
 	const guardSrc = extract("truckFixedCostLockedMonths");
