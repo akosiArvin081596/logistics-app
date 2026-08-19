@@ -378,6 +378,36 @@ const FILE = { id: "drv1", name: "Subject: Bison Transport Order #7101850", crea
 		ok(idx.safeIdToken("#LD-MP4W4LP1") === "LDMP4W4LP1", "§11 id sanitisation drifted from the Drive query's");
 	}
 
+	// ------------- §12 A CALLER THAT OMITS THE LANE CAN NEVER MATCH ANYTHING
+	//
+	// This is the shape of a real defect, not a hypothetical. MIN_CORROBORATIONS
+	// is 2 and the only load-specific facts are the total and the two lane
+	// cities — so a caller that passes `totalRate` but no addresses tops out at
+	// ONE corroboration and can never accept a file. It does not fail loudly: it
+	// downloads the whole window and reports "no matches", which reads as "there
+	// is nothing there" rather than "this caller is broken".
+	//
+	// POST /api/admin/ratecon-index shipped in exactly that state, because the
+	// draft route was updated when the load-specific rule landed and the backfill
+	// was not. Both now build loadCtx through one helper. This pins the property
+	// that made the drift fatal, so a future third caller cannot repeat it
+	// quietly.
+	{
+		const noLane = { ...LOAD, pickupAddress: "", dropoffAddress: "" };
+		const v = idx.scoreRateConMatch(noLane, RATECON_TEXT, FILE);
+		ok(v.idHit === true, "§12 the id should still be found");
+		ok(v.corroborations < idx.MIN_CORROBORATIONS,
+			`§12 CONTROL: without the lane a caller reaches ${v.corroborations}, below the bar of ${idx.MIN_CORROBORATIONS} — this is the trap`);
+		const out = await idx.pickRateConForLoad(noLane, [FILE], async () => RATECON_TEXT, {});
+		ok(out.accepted.length === 0, "§12 a lane-less caller must not accept");
+		ok(out.unconfirmed.length === 1,
+			"§12 …and it must SAY it found something it could not confirm, rather than reporting nothing at all");
+		// The same load WITH the lane is accepted — proving the fixture is capable
+		// and that §12 is measuring the caller, not a broken document.
+		const withLane = await idx.pickRateConForLoad(LOAD, [FILE], async () => RATECON_TEXT, {});
+		ok(withLane.accepted.length === 1, "§12 CONTROL: the same file IS accepted once the lane is supplied");
+	}
+
 	// ------------------------------------------------------------------ report
 	console.log(`\n${"=".repeat(64)}`);
 	if (failures.length) {
