@@ -418,8 +418,21 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
   // 46. Vendor normalization round-trip: log an expense with a raw merchant
   //     string (same seeded driver "test" the harness already uses in test 22),
   //     then find it via the q filter with the canonical brand stamped on it.
+  //
+  // ⚠️ THE AMOUNT MUST BE UNIQUE PER RUN, and this test failed for five weeks
+  // because it was not. It posted a hard-coded driver+amount+date, which is
+  // exactly the signature POST /api/expenses dedupes on — and that check went
+  // ON BY DEFAULT on 2026-08-13, five weeks after this test was written. From
+  // then on the row a previous run left behind convicted the next one with a
+  // 409 POSSIBLE_DUPLICATE, so it passed once against a virgin DB and never
+  // again. The normalization it exists to test was never broken.
+  //
+  // Same fix tests 107-110 already carry ("Seed WITHOUT the flag, so re-running
+  // the suite never trips over its own row"). NOT allowDuplicate:true, which
+  // would write an expense_duplicate_override audit row on every run.
+  const veAmount = Number((10 + (Date.now() % 900000) / 10000).toFixed(2));
   const ve = await req("POST", "/api/expenses",
-    { driver: "test", type: "Fuel", amount: 10, date: "2026-04-11", vendor: "Pilot Travel Center #123" }, ac);
+    { driver: "test", type: "Fuel", amount: veAmount, date: "2026-04-11", vendor: "Pilot Travel Center #123" }, ac);
   const veList = await req("GET", "/api/expenses/all?q=pilot", null, ac);
   const veRows = (veList.body && veList.body.expenses) || [];
   const veNormalized = veRows.some(r => r && r.vendor_normalized === "PILOT FLYING J");

@@ -5383,6 +5383,29 @@ const DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID || "";
 // The Draft Bison Invoice route matches by order number to attach the rate-con.
 const RATECON_DRIVE_FOLDER_ID =
 	process.env.RATECON_DRIVE_FOLDER_ID || "1VAMgB8xQe50xs-PuX-WW3yL6Hom2xetL";
+// The rate-con matcher's pure helpers. Required at module scope because step 1 of
+// getRateConBytes() uses filenameCarriesLoadId() on the hot path.
+const rcIndexShared = require("./lib/ratecon-drive-index.js");
+// Bounds on getRateConBytes() step 4, the by-CONTENT fallback that runs when the
+// file name does not carry our load id. Both are cost controls on Drive
+// downloads, not correctness knobs — widening them scans more PDFs per miss, it
+// does not make a match more likely to be right (lib/ratecon-drive-index.js
+// decides that, and a hit is cached to `documents` either way).
+const RATECON_CONTENT_WINDOW_DAYS = Math.max(
+	1,
+	Math.min(400, parseInt(process.env.RATECON_CONTENT_WINDOW_DAYS ?? "21", 10) || 21),
+);
+const RATECON_CONTENT_MAX_FILES = Math.max(
+	1,
+	Math.min(200, parseInt(process.env.RATECON_CONTENT_MAX_FILES ?? "40", 10) || 40),
+);
+// Overlapping Drive reads. Measured: a SEQUENTIAL 40-file scan took 137 s
+// against the live folder — round trips, not bytes (the whole window is 2.6 MB)
+// — on a route whose client gives up at 60 s.
+const RATECON_CONTENT_CONCURRENCY = Math.max(
+	1,
+	Math.min(16, parseInt(process.env.RATECON_CONTENT_CONCURRENCY ?? "6", 10) || 6),
+);
 // The SERVER key. Every outbound Google Maps Platform call in this file and in
 // lib/poi-fuel-stops.js uses this one: Geocoding, Distance Matrix, Routes, and
 // Places (New) searchNearby/searchText.
@@ -12528,6 +12551,39 @@ db.exec(`
 // untruth that costs an alert channel its credibility.
 try { db.exec("ALTER TABLE ratecon_reconcile_alerts ADD COLUMN resolution TEXT DEFAULT ''"); } catch {}
 
+// ⚠️ THE OTHER NUMBER A LOAD IS FILED UNDER, and why this sweep needs it.
+//
+// Rate-con files are named with the email SUBJECT, and reconcile reads subjects.
+// When the subject carries the BROKER's reference instead of ours, the load is
+// reported as an ingestion gap even though it is sitting in Job Tracking under a
+// different number. Live example: "Subject: Bison Transport Order #7101850" is
+// load 30080873, and reconcile duly alerted "missing loads: 7101850" for a load
+// that had been delivered and invoiced.
+//
+// This table is where getRateConBytes()' by-content matcher records what it
+// proved: file X belongs to load Y, therefore the numbers in X's name are
+// aliases for Y. Same class of exclusion as the archive check below — the load
+// did reach the sheet, we were looking it up by the wrong name.
+//
+// ⚠️ "ONLY CORROBORATED MATCHES REACH THIS TABLE" DOES NOT MEAN EVERY ALIAS IS
+// SAFE, and an earlier version of this comment claimed it did. Corroboration
+// proves file <-> LOAD; it says nothing about whether each number in that file's
+// SUBJECT LINE identifies that load. A subject carries zips, dates, phone
+// digits and the broker's other refs too, and an alias here permanently
+// suppresses a real ingestion alert with no expiry. The floor is therefore
+// 7 digits with YYYYMMDD excluded (subjectRefTokens), not the module's general
+// 5-character minimum — a US zip is exactly 5. Provenance columns exist so a bad
+// alias can be found and removed rather than living forever.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS ratecon_load_aliases (
+		alias TEXT PRIMARY KEY,
+		load_id TEXT NOT NULL,
+		source TEXT DEFAULT '',
+		drive_file_id TEXT DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+
 // ============================================================
 // Unusable-address alerting — the OTHER silent ingestion loss
 // ============================================================
@@ -12856,7 +12912,21 @@ async function reconcileRateCons({ alert = true, forceFloorWindow = false } = {}
 		console.warn("[ratecon-reconcile] archive unreadable, continuing without it:", e.message);
 	}
 
-	const missing = findMissingLoads(emails, sheetIds.concat(archiveIds), {
+	// ⚠️ A SUBJECT NUMBER WE HAVE ALREADY PROVEN BELONGS TO A LOAD IS NOT A GAP.
+	// Exactly the archive reasoning above, one step further: the load reached the
+	// sheet, it is simply filed under the broker's reference rather than ours.
+	// Live case — "Subject: Bison Transport Order #7101850" is load 30080873, and
+	// this sweep alerted "missing loads: 7101850" for a load that had already been
+	// delivered AND invoiced. Only CORROBORATED matches ever reach this table
+	// (see ratecon_load_aliases), so nothing here can suppress a genuine gap.
+	let aliasIds = [];
+	try {
+		aliasIds = db.prepare("SELECT alias FROM ratecon_load_aliases").all().map((r) => r.alias);
+	} catch (e) {
+		console.warn("[ratecon-reconcile] alias table unreadable, continuing without it:", e.message);
+	}
+
+	const missing = findMissingLoads(emails, sheetIds.concat(archiveIds, aliasIds), {
 		scanFilenames: RATECON_RECONCILE_SCAN_FILENAMES,
 		scanBody: RATECON_RECONCILE_SCAN_BODY,
 	});
@@ -14970,6 +15040,19 @@ const fuelGallonsLimiter = rateLimit({
 	message: { error: "Too many gallons-recovery runs. Try again in a few minutes." },
 	standardHeaders: true,
 });
+// Sibling of fuelGallonsLimiter, and tighter for the same kind of reason: one
+// call here can download several hundred PDFs out of Drive. 4 is enough to run
+// the whole backlog twice and inspect it, which is all this route is for.
+const RATECON_INDEX_APPLY_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.RATECON_INDEX_APPLY_ENABLED ?? "").trim());
+const rateconIndexLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 4,
+	message: { error: "Too many rate-con index runs. Try again in a few minutes." },
+	standardHeaders: true,
+});
+// One run at a time, process-wide. Two concurrent sweeps would race on the same
+// `documents` INSERTs and double the Drive traffic to reach the same answer.
+let rateconIndexRunning = false;
 // Batch cap. 25 mirrors the bulk-receipt uploader's per-batch limit, and the
 // backlog is reported as `remaining` so a caller knows to come back rather than
 // assuming an empty-looking result means done.
@@ -15319,6 +15402,190 @@ async function runGallonsRecovery({ apply = false, ids = null, limit, req } = {}
 		receipts: wire,
 	};
 }
+
+// ===========================================================================
+// POST /api/admin/ratecon-index — backfill the load -> rate-con mapping.
+//
+// getRateConBytes() resolves a missing link lazily, one load at a time, at the
+// moment somebody drafts an invoice. This is the same matcher run in bulk over
+// the loads that have no rate-con on file yet, so the backlog is fixed before
+// anyone hits it rather than one surprise at a time.
+//
+// Measured 2026-08-19 against production: 50 of 421 loads have no file-name
+// match, 3 of them Bison (6990280, 7007279, 30080873).
+//
+// ⚠️ REPORT-ONLY BY DEFAULT — `{"apply": true}` in the BODY plus
+// RATECON_INDEX_APPLY_ENABLED is what writes. The proposal is the point: a bulk
+// matcher that decides which PDF gets mailed to a broker should be read by a
+// human before it is trusted, and every proposed link comes back with the
+// reasons that earned it. Same posture as the fuel-gallons recovery pair.
+app.post("/api/admin/ratecon-index", requireRole("Super Admin"), refuseCrossSite, rateconIndexLimiter, async (req, res) => {
+	if (!RATECON_DRIVE_FOLDER_ID) return res.status(503).json({ error: "No rate-con Drive folder is configured." });
+	if (rateconIndexRunning) return res.status(409).json({ error: "A rate-con index run is already in progress.", code: "INDEX_RUNNING" });
+
+	// ⚠️ SHIPS DORMANT, and the opt-in lives in the BODY. This writes links that
+	// decide which PDF gets mailed to a broker, in bulk, so it follows the house
+	// rule every other consequential writer follows (INVOICE_AUTOGEN_ENABLED,
+	// FUEL_GALLONS_RECOVERY_ENABLED, PERIOD_FINALIZE_ENABLED): the PROPOSAL works
+	// with the flag off so a run can be read in production first, and only the
+	// write is gated. `?apply=true` was the wrong shape — a bookmarkable,
+	// shell-history-visible URL that writes up to 200 links in one call.
+	const apply = req.body && req.body.apply === true;
+	if (apply && !RATECON_INDEX_APPLY_ENABLED) {
+		return res.status(503).json({
+			error: "Rate-con index writes are disabled. Set RATECON_INDEX_APPLY_ENABLED=true to enable them.",
+			code: "RATECON_INDEX_APPLY_DISABLED",
+		});
+	}
+	const limit = Math.max(1, Math.min(200, parseInt(req.query.limit ?? "50", 10) || 50));
+	// Drive downloads dominate, so cap wall-clock rather than trusting the loop
+	// to finish. A truncated run that SAYS it was truncated beats one that looks
+	// complete — `remaining` is what tells the caller to come back.
+	const startedAt = Date.now();
+	const deadline = startedAt + 240000;
+
+	rateconIndexRunning = true;
+	try {
+		const rcIndex = require("./lib/ratecon-drive-index.js");
+		const drive = await getDrive();
+
+		// Every file in the folder, once, shared across every load in this run.
+		const files = [];
+		let pageToken = null;
+		do {
+			const page = await drive.files.list({
+				q: `'${RATECON_DRIVE_FOLDER_ID}' in parents and trashed = false`,
+				fields: "nextPageToken,files(id,name,createdTime)",
+				orderBy: "createdTime desc",
+				pageSize: 1000,
+				pageToken,
+				supportsAllDrives: true,
+				includeItemsFromAllDrives: true,
+			});
+			files.push(...(page.data.files || []));
+			pageToken = page.data.nextPageToken || null;
+		} while (pageToken);
+
+		// One text extraction per FILE per run, not per load — without this the
+		// same PDF is downloaded once for every load whose window contains it.
+		// ⚠️ BOUNDED. One extracted text per Drive file, and the folder holds ~700 —
+		// left unbounded a single run pins every one of them in memory for its
+		// whole duration. FIFO-capped like poiStopsCache; the cache exists to stop
+		// re-downloading a file that several loads' windows overlap on, and that
+		// locality is local, so evicting the oldest costs almost nothing.
+		const TEXT_CACHE_MAX = 120;
+		const textCache = new Map();
+		const cacheText = (id, text) => {
+			textCache.set(id, text);
+			if (textCache.size > TEXT_CACHE_MAX) textCache.delete(textCache.keys().next().value);
+		};
+		const readText = async (f) => {
+			if (textCache.has(f.id)) return textCache.get(f.id);
+			const resp = await drive.files.get(
+				{ fileId: f.id, alt: "media", supportsAllDrives: true },
+				{ responseType: "arraybuffer" },
+			);
+			const text = brokerInvoice.extractPdfText(Buffer.from(resp.data)) || "";
+			cacheText(f.id, text);
+			return text;
+		};
+
+		const jt = await getJobTrackingCached();
+		const headers = jt.headers || [];
+		const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h));
+		if (!loadIdCol) return res.status(500).json({ error: "Load ID column not found in Job Tracking" });
+		const emailCol = headers.find((h) => /^email$/i.test(String(h).trim()));
+		const trailerCol = headers.find((h) => /trailer/i.test(h));
+		const assignedCol = headers.find((h) => /assigned.*date/i.test(h));
+		const pickupCol = headers.find((h) => /pickup.*appo|pickup.*date/i.test(h));
+		const paymentCol = brokerInvoice.findPaymentColumn(headers);
+
+		// Only loads that have NO rate-con resolvable today: no file-name hit and
+		// no documents row. Re-matching a load that already works would spend
+		// Drive quota to confirm what is already known.
+		// Same type list as getRateConBytes() step 2 — narrowing it to 'RATECON'
+		// meant a load stored as 'RATE CON' looked unlinked, got rescanned every
+		// run, and could collect a duplicate row.
+		const linked = new Set(
+			db.prepare(
+				`SELECT load_id FROM documents
+				 WHERE UPPER(type) IN ('RATECON','RATE CON','RATE_CON','BOL') AND deleted_at IS NULL`,
+			).all().map((r) => normLoadKey(r.load_id)),
+		);
+		const pending = (jt.data || [])
+			.map((r) => ({
+				loadId: String(r[loadIdCol] || "").replace(/^#/, "").trim(),
+				totalRate: paymentCol ? brokerInvoice.parseMoney(r[paymentCol]) : 0,
+				brokerEmail: emailCol ? String(r[emailCol] || "").trim() : "",
+				trailerNumber: trailerCol ? String(r[trailerCol] || "").trim() : "",
+				assignedDate: assignedCol ? String(r[assignedCol] || "").trim() : "",
+				pickupDate: pickupCol ? String(r[pickupCol] || "").trim() : "",
+			}))
+			.filter((l) => l.loadId && !linked.has(normLoadKey(l.loadId)))
+			.filter((l) => !files.some((f) => rcIndex.filenameCarriesLoadId(f.name, l.loadId)));
+
+		const results = [];
+		let written = 0;
+		let processed = 0;
+		for (const load of pending.slice(0, limit)) {
+			if (Date.now() > deadline) break;
+			processed++;
+			const found = await rcIndex.pickRateConForLoad(load, files, readText, {
+				windowDays: RATECON_CONTENT_WINDOW_DAYS,
+				maxFiles: RATECON_CONTENT_MAX_FILES,
+				concurrency: RATECON_CONTENT_CONCURRENCY,
+			});
+			if (!found.accepted.length && !found.unconfirmed.length) continue;
+			const row = {
+				loadId: load.loadId,
+				scanned: found.scanned,
+				matches: found.accepted.map((a) => ({ file: a.file.name, score: a.score, reasons: a.reasons })),
+				unconfirmed: found.unconfirmed.map((u) => u.file.name),
+			};
+			if (apply) {
+				for (const hit of found.accepted) rememberRateConMatch(load.loadId, hit.file);
+				written += found.accepted.length;
+			}
+			results.push(row);
+		}
+
+		// ⚠️ EITHER CAUSE. This read the deadline only, so a run cut short by
+		// `limit` answered truncated:false with remaining > 0 — which scans as
+		// "covered everything" to anyone not cross-checking the two fields. A
+		// bounded run that does not say it was bounded is the silent-truncation
+		// failure this repo's own no-silent-caps rule names.
+		const truncated = processed < pending.length;
+		if (truncated) {
+			console.warn(`[ratecon-index] run stopped at the ${Math.round((Date.now() - startedAt) / 1000)}s deadline after ${processed} load(s) — ${pending.length - processed} not attempted.`);
+		}
+		logAudit(
+			req,
+			apply ? "ratecon_index_apply" : "ratecon_index_scan",
+			"ratecon_index",
+			"",
+			`${results.length} load(s) matched, ${written} link(s) written, ${pending.length} pending, truncated=${truncated}`,
+		);
+		res.json({
+			success: true,
+			apply,
+			// Named explicitly so an empty `results` cannot be read as "all done"
+			// when it really means "the deadline cut the run short".
+			truncated,
+			folderFiles: files.length,
+			pendingLoads: pending.length,
+			processed,
+			remaining: Math.max(0, pending.length - processed),
+			matched: results.length,
+			linksWritten: written,
+			results,
+		});
+	} catch (error) {
+		console.error("[ratecon-index] run failed:", error.message);
+		res.status(500).json({ error: "Rate-con index run failed" });
+	} finally {
+		rateconIndexRunning = false;
+	}
+});
 
 // GET — propose. Structurally read-only: apply is hardcoded false and no query
 // parameter can flip it. Bills Gemini, which is why it is rate-limited and
@@ -32018,9 +32285,10 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		}
 
 		// ---- 7) Archive the rate-con PDF so invoice drafting can find it later.
-		// getRateConBytes() resolves a load's rate-con from THREE sources, in
-		// order: (a) the Drive folder, (b) a `documents` row of type RATECON, and
-		// (c) a base64 in the request body. The Drive folder is a *My Drive*
+		// getRateConBytes() resolves a load's rate-con from FOUR sources, in
+		// order: (a) the Drive folder BY FILE NAME, (b) a `documents` row of type
+		// RATECON, (c) a base64 in the request body, and (d) the Drive folder BY
+		// CONTENT when the first three come up empty. The Drive folder is a *My Drive*
 		// folder owned by info@logisx.com — the app's service account is
 		// read-only there and has no storage quota, so a service-account upload
 		// ALWAYS fails in production (n8n only manages it via OAuth delegation).
@@ -32069,7 +32337,7 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 			try {
 				const { Readable } = require("stream");
 				const drive = await getDrive();
-				await drive.files.create({
+				const created = await drive.files.create({
 					requestBody: {
 						name: `${loadId}.pdf`,
 						parents: [RATECON_DRIVE_FOLDER_ID],
@@ -32079,6 +32347,21 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 					fields: "id,name",
 					supportsAllDrives: true,
 				});
+				// ⚠️ KEEP THE ID. This asked for `fields: "id,name"` and then threw
+				// the id away, so the row above was left with drive_file_id = ''.
+				// fetchDocumentBytes() falls back to Drive ONLY via drive_file_id,
+				// which means a RATECON row whose local file later goes missing
+				// returns null bytes and the rate-con silently stops being
+				// attached — even though a perfectly good copy is sitting in the
+				// folder. uploads/ is not in the nightly backup, so "the local file
+				// went missing" is a routine event, not a hypothetical.
+				const driveId = created && created.data && created.data.id;
+				if (driveId && rateconArchived) {
+					db.prepare(
+						`UPDATE documents SET drive_file_id = ?
+						 WHERE load_id = ? AND UPPER(type) = 'RATECON' AND drive_file_id = ''`,
+					).run(driveId, loadId);
+				}
 			} catch (e) {
 				// No warning to the dispatcher — the local copy already made the
 				// load invoiceable. Log for observability only.
@@ -32384,15 +32667,39 @@ async function fetchDocumentBytes(doc) {
 }
 
 // Resolve the rate-con bytes + display name for a load. Order of preference:
-//   1. The rate-con Drive folder (RATECON_DRIVE_FOLDER_ID) — the n8n dispatch
-//      workflow drops every Bison rate-con there, named by email subject
-//      ("...Bison Transport Order #7007280"). We match on the order number
-//      (== loadId for Bison) and take the most recent. Needs drive.readonly.
-//   2. A rate-con document row in the documents table (future-proofing, if a
-//      RateCon/BOL ever gets registered for the load).
+//   1. The rate-con Drive folder (RATECON_DRIVE_FOLDER_ID) BY FILE NAME — the
+//      n8n dispatch workflow drops every emailed rate-con there, named with the
+//      raw email subject ("...Bison Transport Order #7007280"). Cheap: one
+//      list call, no downloads. Needs drive.readonly.
+//   2. A rate-con document row in the documents table — written by
+//      POST /api/loads/from-ratecon, and by step 4 below once it has resolved a
+//      load the hard way.
 //   3. A caller-supplied base64 in the request body (rateconPdfBase64).
-// Returns { buffer, fileName } (buffer may be null when nothing is found).
-async function getRateConBytes(loadId, body) {
+//   4. The Drive folder BY CONTENT, when 1–3 all came up empty. See below.
+// Returns { buffer, fileName, candidates } (buffer null when nothing is found).
+//
+// ⚠️ WHY STEP 4 EXISTS — step 1 rests on an assumption that is not a rule.
+// This comment used to say "We match on the order number (== loadId for
+// Bison)". Measured 2026-08-19 against the live folder (697 files) and sheet
+// (421 rows): 50 loads have NO file-name match, 3 of them Bison. Load 30080873
+// is filed as "Subject: Bison Transport Order #7101850" — Bison's order number
+// reached the subject line, ours did not. Step 1 found nothing, extraction
+// returned all-empty, and the invoice went to Bison AP with our load id
+// standing in for Order #7101850 and no PO # at all. The document was in the
+// folder the whole time and contains both numbers.
+//
+// Step 4 reads the documents instead of trusting their names, then REMEMBERS
+// the answer as a documents row so step 2 serves every later draft for free.
+// The matching rules — and why they are biased toward finding nothing — live in
+// lib/ratecon-drive-index.js. Short version: these bytes get attached to a
+// Gmail draft addressed to the broker, so a false positive mails another
+// customer's rate to a third party.
+//
+// `loadCtx` carries the facts step 4 corroborates against ({ totalRate,
+// brokerEmail, trailerNumber, assignedDate, ... }). Omit it and step 4 is
+// skipped entirely — it has nothing independent to check a match against, and
+// an uncorroborated match is exactly what it must never attach.
+async function getRateConBytes(loadId, body, loadCtx = null, opts = {}) {
 	const orderNumber = String(loadId || "").replace(/^#/, "").trim();
 	// Sanitize before interpolating into the Drive query (avoid breaking the
 	// quoted `name contains '...'` clause). Bison order numbers are numeric.
@@ -32416,7 +32723,7 @@ async function getRateConBytes(loadId, body) {
 				supportsAllDrives: true,
 				includeItemsFromAllDrives: true,
 			});
-			const files = (list.data.files || []).filter((f) => (f.name || "").includes(safe));
+			const files = (list.data.files || []).filter((f) => rcIndexShared.filenameCarriesLoadId(f.name, orderNumber));
 			for (const f of files.slice(0, 5)) {
 				try {
 					const resp = await drive.files.get(
@@ -32435,15 +32742,45 @@ async function getRateConBytes(loadId, body) {
 	}
 
 	// 2) A rate-con document row in the documents table.
-	const row = db
-		.prepare(
-			`SELECT * FROM documents
-			 WHERE load_id = ? AND UPPER(type) IN ('RATECON','RATE CON','RATE_CON','BOL')
-			   AND deleted_at IS NULL
-			 ORDER BY uploaded_at DESC LIMIT 1`,
-		)
-		.get(loadId);
-	if (row) {
+	//
+	// ⚠️ TWO KEYS, and a rank — both were live bugs, not hypotheticals.
+	//
+	// (a) Job Tracking holds BOTH "513987502" and "#513987502" (getLoadCoordsRow()
+	//     below carries the same scar). This query used to pass the raw URL param
+	//     while the Drive branch above strips the "#", so the two halves of this
+	//     very function disagreed about what the load is called and a row that
+	//     existed was reported missing.
+	// (b) The type list includes 'BOL', and the old ORDER BY was uploaded_at
+	//     alone with LIMIT 1 — so a POD-day BOL scan OUTRANKED the real rate-con
+	//     and got mailed to the broker as "the rate con", and fed to
+	//     extractRateConFields() as the source of the Order #. A BOL is a
+	//     last-resort stand-in, never a preference. Rank RATECON first, and read
+	//     with .all() — a membership test, not fetch-one (see CLAUDE.md).
+	// TWO keys, and only two: the raw param and the "#"-stripped form. A third,
+	// normLoadKey(loadId), was passed and was INERT — it lowercases, while SQLite
+	// `IN` on TEXT is case-sensitive, so it could never match a mixed-case stored
+	// load_id. Passing it implied a coverage this lookup does not have.
+	const docKeys = [String(loadId || "").trim(), orderNumber]
+		.filter((k) => k)
+		.filter((k, i, a) => a.indexOf(k) === i);
+	const docRows = docKeys.length
+		? db
+				.prepare(
+					`SELECT * FROM documents
+					 WHERE load_id IN (${docKeys.map(() => "?").join(",")})
+					   AND UPPER(type) IN ('RATECON','RATE CON','RATE_CON','BOL')
+					   AND deleted_at IS NULL
+					 ORDER BY CASE WHEN UPPER(type) = 'BOL' THEN 1 ELSE 0 END,
+					          uploaded_at DESC`,
+				)
+				.all(...docKeys)
+		: [];
+	// Capped like the Drive branch above. A load with several BOL page-scans would
+	// otherwise push one candidate per scan — each an extra byte read, an extra
+	// base64 blob in the dryRun payload, and an extra Gemini call in the
+	// alternate-recipient loop, which is the loop that decides where the invoice
+	// is mailed. Ranked RATECON-first, so the cap only ever drops trailing BOLs.
+	for (const row of docRows.slice(0, 5)) {
 		const buffer = await fetchDocumentBytes(row);
 		if (buffer) candidates.push({ buffer, fileName: row.file_name || `${orderNumber || "ratecon"}.pdf`, label: row.file_name || "Stored rate-con", source: "documents" });
 	}
@@ -32458,6 +32795,94 @@ async function getRateConBytes(loadId, body) {
 		} catch { /* fall through */ }
 	}
 
+	// 4) LAST RESORT — the Drive folder BY CONTENT.
+	//
+	// Runs ONLY when 1–3 produced nothing, because it downloads PDFs. Bounded
+	// three ways: a date window around the load's own dates, a hard file cap,
+	// and the fact that a hit is written to `documents` so this never runs twice
+	// for the same load. Measured on the live folder: a +/-14-day window is ~26
+	// files / 2.6 MB, a few seconds — against a route that already makes Gemini
+	// calls.
+	//
+	// Skipped without loadCtx: with nothing to corroborate against, every match
+	// would be `unconfirmed`, which is precisely what must not be attached.
+	if (!candidates.length && RATECON_DRIVE_FOLDER_ID && safe && loadCtx && !rateconScanMissedRecently(safe)) {
+		try {
+			const rcIndex = require("./lib/ratecon-drive-index.js");
+			const drive = await getDrive();
+			const files = [];
+			let pageToken = null;
+			do {
+				const page = await drive.files.list({
+					q: `'${RATECON_DRIVE_FOLDER_ID}' in parents and trashed = false`,
+					fields: "nextPageToken,files(id,name,createdTime)",
+					orderBy: "createdTime desc",
+					pageSize: 1000,
+					pageToken,
+					supportsAllDrives: true,
+					includeItemsFromAllDrives: true,
+				});
+				files.push(...(page.data.files || []));
+				pageToken = page.data.nextPageToken || null;
+			} while (pageToken);
+
+			// Downloaded bytes are kept so an accepted file is not fetched twice.
+			const bytesById = new Map();
+			const readText = async (f) => {
+				const resp = await drive.files.get(
+					{ fileId: f.id, alt: "media", supportsAllDrives: true },
+					{ responseType: "arraybuffer" },
+				);
+				const buf = Buffer.from(resp.data);
+				bytesById.set(f.id, buf);
+				return brokerInvoice.extractPdfText(buf) || "";
+			};
+
+			const found = await rcIndex.pickRateConForLoad(
+				{ ...loadCtx, loadId: orderNumber },
+				files,
+				readText,
+				{
+					windowDays: RATECON_CONTENT_WINDOW_DAYS,
+					maxFiles: RATECON_CONTENT_MAX_FILES,
+					concurrency: RATECON_CONTENT_CONCURRENCY,
+				},
+			);
+
+			for (const hit of found.accepted) {
+				const buffer = bytesById.get(hit.file.id);
+				if (!buffer || !buffer.length) continue;
+				candidates.push({
+					buffer,
+					// Named for the load, but the DISPLAY label keeps the Drive
+					// subject so a reviewer can see which document was picked.
+					fileName: `${orderNumber}.pdf`,
+					label: String(hit.file.name || "").replace(/^Subject:\s*/i, "").replace(/\.pdf$/i, "").trim().slice(0, 70) || "Rate-con",
+					source: "drive-content",
+				});
+				if (opts.persist !== false) rememberRateConMatch(orderNumber, hit.file, hit, opts.req);
+			}
+			if (found.accepted.length) {
+				console.log(
+					`Draft invoice ${loadId}: rate-con resolved BY CONTENT after the file-name miss — ` +
+						`${found.accepted.length} file(s) from ${found.scanned} scanned ` +
+						`[${found.accepted.map((a) => a.reasons.join("+")).join(" | ")}]`,
+				);
+			} else if (found.unconfirmed.length) {
+				// Deliberately NOT attached. Named in the log so a human can look.
+				console.warn(
+					`Draft invoice ${loadId}: ${found.unconfirmed.length} rate-con(s) mention this load but nothing ` +
+						`corroborates them — not attaching: ${found.unconfirmed.map((u) => u.file.name).join(", ")}`,
+				);
+			}
+			if (!found.accepted.length) rememberRateConScanMiss(safe);
+		} catch (e) {
+			// Same posture as every other source here: a failure degrades to "no
+			// rate-con", which the caller already handles loudly.
+			console.error("Draft invoice: rate-con content scan failed:", e.message);
+		}
+	}
+
 	// Primary (first) drives the attachment + order/total extraction, unchanged.
 	const primary = candidates[0] || null;
 	return {
@@ -32465,6 +32890,90 @@ async function getRateConBytes(loadId, body) {
 		fileName: primary ? primary.fileName : `${orderNumber || "ratecon"}.pdf`,
 		candidates,
 	};
+}
+
+// A NEGATIVE cache for step 4, and it is not an optimization — it is what keeps
+// a load with no rate-con from re-downloading the whole window on every click.
+// The incident that prompted all of this shows why: the dispatcher pressed
+// Draft Invoice FOUR times in a row on load 30080873. Without this, that is
+// four full scans. A positive result needs no cache — it is written to
+// `documents` and served by step 2 forever after.
+//
+// Same shape as poiStopsCache (Map + TTL + FIFO cap). The TTL is short on
+// purpose: a rate-con that arrives late must become findable without a restart.
+const rateconScanMisses = new Map();
+const RATECON_SCAN_MISS_TTL_MS = 15 * 60 * 1000;
+const RATECON_SCAN_MISS_MAX = 200;
+function rateconScanMissedRecently(loadKey) {
+	const hit = rateconScanMisses.get(loadKey);
+	if (!hit) return false;
+	if (Date.now() - hit > RATECON_SCAN_MISS_TTL_MS) {
+		rateconScanMisses.delete(loadKey);
+		return false;
+	}
+	return true;
+}
+function rememberRateConScanMiss(loadKey) {
+	if (!loadKey) return;
+	rateconScanMisses.set(loadKey, Date.now());
+	if (rateconScanMisses.size > RATECON_SCAN_MISS_MAX) {
+		rateconScanMisses.delete(rateconScanMisses.keys().next().value);
+	}
+}
+
+// Persist a content-resolved rate-con so getRateConBytes() step 2 answers every
+// later draft without touching Drive. Best-effort by design: failing to write
+// the shortcut must never fail the draft that already has the bytes in hand.
+//
+// drive_url is left empty and drive_file_id carries the id, which is exactly
+// the shape fetchDocumentBytes() resolves through the Drive API — so nothing in
+// the read path changes.
+function rememberRateConMatch(loadKey, file, verdict, req) {
+	try {
+		if (!loadKey || !file || !file.id) return;
+		// ⚠️ NO `deleted_at IS NULL` HERE, deliberately. A dispatcher who
+		// soft-deletes a wrongly-matched rate-con removes it from the step-2 read,
+		// which empties `candidates`, which re-runs step 4, which re-matches the
+		// same file — so a "did I already link this?" probe that ignores deleted
+		// rows would resurrect the exact document a human just rejected. An
+		// existing row in ANY state means: do not link this file again.
+		const existing = db
+			.prepare(`SELECT id FROM documents WHERE load_id = ? AND drive_file_id = ?`)
+			.get(loadKey, file.id);
+		if (existing) return;
+		// The stored name is display-only, but fetchDocumentBytes() joins
+		// file_name onto uploads/ before it reaches the drive_file_id branch, so
+		// strip separators rather than lean on the containment assert there.
+		const name = String(file.name || "").replace(/[/\\]/g, "_").slice(0, 200) || `${loadKey}.pdf`;
+		db.prepare(
+			`INSERT INTO documents (load_id, driver, type, file_name, drive_file_id, drive_url)
+			 VALUES (?, '', 'RATECON', ?, ?, '')`,
+		).run(loadKey, name, file.id);
+		console.log(`[ratecon-index] linked load ${loadKey} -> Drive "${name}" (${file.id})`);
+		// The lazy path used to leave no evidence at all — only a console line —
+		// while the bulk route audited. Both write the same kind of row now,
+		// because this one decides what gets mailed to a broker.
+		if (req) {
+			logAudit(req, "ratecon_index_link", "documents", loadKey,
+				`linked "${name}" (${file.id})${verdict ? ` [${(verdict.reasons || []).join("+")}]` : ""}`);
+		}
+
+		// Record the numbers in the file NAME as aliases for this load, so the
+		// reconcile sweep stops calling them ingestion gaps. INSERT OR IGNORE, not
+		// REPLACE: the first load to prove an alias keeps it. If two loads ever
+		// claim the same number the honest answer is to leave the original
+		// mapping alone rather than let the later one silently overwrite it.
+		const aliasStmt = db.prepare(
+			`INSERT OR IGNORE INTO ratecon_load_aliases (alias, load_id, source, drive_file_id)
+			 VALUES (?, ?, 'drive-content', ?)`,
+		);
+		for (const alias of require("./lib/ratecon-drive-index.js").subjectRefTokens(file.name)) {
+			if (alias === loadKey) continue; // not an alias, that is the load itself
+			aliasStmt.run(alias, loadKey, file.id);
+		}
+	} catch (e) {
+		console.error("[ratecon-index] could not record the match:", e.message);
+	}
 }
 
 // ===========================================================================
@@ -32759,13 +33268,62 @@ function invoiceIdAlreadyUsed(invoiceId, loadId) {
 	}
 }
 
+// ⚠️ THE GUARDS WERE ON THE WRONG ROUTE. This one had `requireRole` and nothing
+// else, while its own preview sibling below — which does, by its own header
+// comment, "zero Sheets, zero Drive, zero Gemini, zero DB writes" — carried a
+// cross-site guard, a limiter AND an in-flight cap. Per call THIS route does a
+// full Job Tracking read (against the 300 req/min quota that is the app's
+// primary database), N Drive/POD fetches, a BILLED Gemini call, an unserialized
+// Chromium render, an IMAP APPEND that creates a REAL OUTBOUND DRAFT TO A
+// BROKER, and an irreversible bison_invoice_seq increment that leaves permanent
+// gaps in invoice numbering. Unbounded, one session could loop all of that.
+//
+// 25/15min, keyed per USER (the poiLimiter/invoicePreviewLimiter precedent — a
+// dispatch office behind one NAT must not share a bucket). Deliberately not the
+// preview's 120: that number is sized for debounced typing, and here it would
+// permit 120 invoice numbers and 120 Gmail drafts a quarter-hour. Deliberately
+// not fuelGallonsLimiter's 6 either — this same limiter covers the `?dryRun=1`
+// preview the review modal opens with, so a dispatcher working several loads in
+// a sitting has to fit inside it.
+const draftInvoiceLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 25,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many invoice draft requests. Try again in a few minutes." },
+	standardHeaders: true,
+});
+
 // POST /api/loads/:loadId/draft-invoice  (alias: .../draft-bison-invoice)
 // Restricted to Super Admin + Dispatcher (the roles that run dispatch ops).
 // The legacy Bison-specific path stays registered so any external caller
 // (bookmarks, n8n, a cached SPA bundle) keeps working — same handler.
+//
+// ⚠️ refuseCrossSite IS DEFENCE-IN-DEPTH HERE, NOT A LIVE FIX — say so plainly
+// rather than implying an exploit that does not exist. The session cookie is
+// SameSite=Lax by default (resolveSessionSameSite) and SESSION_COOKIE_SAMESITE
+// is unset in every environment, so no cross-site POST carries connect.sid
+// today. The reason to mount it anyway: this route needs NO REQUEST BODY to do
+// its damage — parseInvoiceOverrides() accepts {} and every field is optional —
+// so the "a cross-site form cannot send application/json" backstop that covers
+// its money-guard siblings does NOT cover this one. That puts it in the same
+// class as POST /api/periods/:period/finalize, the one this codebase already
+// reproduced end to end. One env var (SESSION_COOKIE_SAMESITE=none) republishes
+// it, and a guard is what makes that rollback survivable.
+//
+// Not refuseCrossOrigin: by this file's own convention (same-site = cost guard,
+// same-origin = money guard) that tier is reserved for the routes that close a
+// settlement month or move a payout. This burns a sequence number and bills an
+// API; it does not restate a settlement.
 app.post(
 	["/api/loads/:loadId/draft-invoice", "/api/loads/:loadId/draft-bison-invoice"],
 	requireRole("Super Admin", "Dispatcher"),
+	// requireRole BEFORE the limiter so an unauthenticated caller cannot spend
+	// the budget on 403s — the fuelEvents/fuelGallons precedent.
+	refuseCrossSite,
+	draftInvoiceLimiter,
 	async (req, res) => {
 		try {
 			const loadId = decodeURIComponent(req.params.loadId || "").trim();
@@ -32802,6 +33360,13 @@ app.post(
 			const deliveryDateCol =
 				headers.find((h) => /status.*update.*date|completion.*date/i.test(h)) ||
 				headers.find((h) => /drop.?off.*date|drop.?off.*appoint|deliv.*date|deliv.*appoint/i.test(h));
+			// Used only to centre the by-content rate-con scan's date window (a
+			// rate-con is filed days BEFORE pickup, while the delivery date above
+			// can be weeks after). Neither feeds the invoice itself.
+			const assignedDateCol = findCol(headers, /assigned.*date/i);
+			const pickupDateCol = findCol(headers, /pickup.*appo|pickup.*date/i);
+			const pickupAddrCol = findCol(headers, /pickup.*address/i);
+			const dropoffAddrCol = findCol(headers, /drop.?off.*address|deliv.*address/i);
 			const driverCol = findCol(headers, /^driver$/i) || findCol(headers, /driver/i);
 			const brokerNameCol = findCol(headers, /broker.*(contact|name)/i);
 			// The money column is literally "  Payment  " (real surrounding
@@ -32882,14 +33447,35 @@ app.post(
 			const podDoc = podFiles[0].doc;
 			const podBuffer = podFiles[0].buffer;
 
-			const { buffer: rateconBuffer, fileName: rateconFileName, candidates: rateconCandidates } = await getRateConBytes(loadId, req.body);
+			// Facts about this load from a source OTHER than the rate-con, so the
+			// by-content fallback has something independent to check a match
+			// against. Every one comes off the sheet row we already read.
+			const rateconLoadCtx = {
+				totalRate: paymentCol ? brokerInvoice.parseMoney(load[paymentCol]) : 0,
+				brokerEmail,
+				trailerNumber: sheetTrailer,
+				// The lane — the only facts on this row specific enough to prove a
+				// document belongs to THIS load rather than to the broker generally.
+				pickupAddress: pickupAddrCol ? (load[pickupAddrCol] || "").toString().trim() : "",
+				dropoffAddress: dropoffAddrCol ? (load[dropoffAddrCol] || "").toString().trim() : "",
+				assignedDate: assignedDateCol ? (load[assignedDateCol] || "").toString().trim() : "",
+				deliveryDate: deliveryDateCol ? (load[deliveryDateCol] || "").toString().trim() : "",
+				pickupDate: pickupDateCol ? (load[pickupDateCol] || "").toString().trim() : "",
+			};
+			// ⚠️ persist:false ON A PREVIEW. This route is documented as previewing
+			// "without burning an invoice number or creating a draft", and a preview
+			// that permanently links a guessed document to a load breaks that
+			// promise: a dispatcher who opens the modal, sees the wrong rate-con and
+			// CANCELS has already written the link, and every later draft is then
+			// served from `documents` with no rescan and no second look.
+			const { buffer: rateconBuffer, candidates: rateconCandidates } = await getRateConBytes(loadId, req.body, rateconLoadCtx, { persist: !dryRun, req });
 			// Say so plainly. The invoice still drafts without one (POD + the
 			// sheet's Payment column carry it), but brokers generally require the
 			// rate-con alongside the invoice, so an unattached one is the reason a
 			// payment later stalls. The preview modal warns the reviewer too.
 			if (!rateconBuffer || !rateconBuffer.length) {
 				console.warn(
-					`Draft invoice ${loadId}: no rate-con found (Drive folder, documents table and request body all empty) — drafting without it.`,
+					`Draft invoice ${loadId}: no rate-con found (Drive folder by name, documents table, request body and Drive folder by content all empty) — drafting without it.`,
 				);
 			}
 
@@ -32941,9 +33527,29 @@ app.post(
 			// does. Prevents defaulting the invoice to the wrong inbox (client 2026-07-30:
 			// Steam Logistics load 2214407 — carrierdocs@steamlogistics.com was only on the
 			// original file, not the newer "Re:" scan). Only runs when the primary is empty.
+			// ⚠️ A DOCUMENT WE FOUND BY INFERENCE MAY NOT CHOOSE WHERE MONEY IS SENT.
+			// For every non-Bison broker `documentsEmail` becomes the Gmail To:, so a
+			// content-matched file that turned out to belong to someone else would
+			// mail this invoice — and that customer's rate — to an address lifted off
+			// THEIR paperwork. A file matched by NAME, stored on the load, or handed
+			// to us in the request was identified by something a human can point at;
+			// one matched by reading PDFs was not. Bison is pinned regardless, so this
+			// only ever affects the brokers where it matters.
+			//
+			// Rows already in `documents` are trusted: after the persist-on-approve
+			// change above, a row exists only because a human approved a draft with
+			// that file attached and visible in the review modal.
+			const primaryFromContent = !!(rateconCandidates && rateconCandidates[0] && rateconCandidates[0].source === "drive-content");
+			if (primaryFromContent && rcFields.documentsEmail) {
+				console.warn(
+					`Draft invoice ${loadId}: ignoring the documents email on a CONTENT-matched rate-con — recipient falls back to the broker default.`,
+				);
+				rcFields.documentsEmail = "";
+			}
 			if (!rcFields.documentsEmail && Array.isArray(rateconCandidates) && rateconCandidates.length > 1) {
 				for (const cand of rateconCandidates) {
 					if (!cand || !cand.buffer || cand.buffer === rateconBuffer) continue;
+					if (cand.source === "drive-content") continue; // same reasoning as above
 					try {
 						// Drop only the GEMINI half when the key is refusing — the
 						// documents email this loop is hunting for comes from the
@@ -32998,6 +33604,20 @@ app.post(
 			// The dispatcher's correction wins — this is the field Gemini most often
 			// gets one digit wrong on, and it is what broker AP matches against.
 			const orderNumber = ov.has.orderNumber ? ov.values.orderNumber : derivedOrderNumber;
+			// ⚠️ REPORTED, not just logged. A console.log was the ONLY signal that
+			// the Order # had silently become our load id, so the review modal
+			// rendered a populated, entirely normal-looking field and the wrong
+			// number shipped. The reviewer cannot catch what nothing tells them.
+			// 'load-number' is NOT a failure — it is the designed behaviour for every
+			// non-Bison broker (PR #132), which is invoiced by OUR load number. It
+			// gets its own value because reporting it as 'ratecon' was simply untrue:
+			// the number never came from the document, and this field is the one
+			// thing a reviewer is meant to be able to trust about provenance.
+			const orderNumberSource = ov.has.orderNumber
+				? "override"
+				: !isBison
+					? "load-number"
+					: (rcFields.orderNumber ? "ratecon" : "load-id-fallback");
 			if (isBison && !rcFields.orderNumber) {
 				console.log(
 					`Draft invoice ${loadId}: no order # from the Bison rate-con (gemini=${GEMINI_API_KEY ? "on" : "off"}) — falling back to the load ID.`,
@@ -33059,6 +33679,56 @@ app.post(
 						". Refusing to draft a $0.00 invoice. Add the rate to the load, then retry." +
 						(GEMINI_API_KEY ? "" : " (Rate-con AI extraction is not configured on this server.)"),
 					code: "INVOICE_TOTAL_UNKNOWN",
+				});
+			}
+
+			// 6a) REFERENCE NUMBERS ON A BISON INVOICE — the same shape as the
+			//     total guard above, for the same reason, and it must live HERE:
+			//     nextInvoiceNumber() is called a few lines below, so a refusal
+			//     placed after it would burn an invoice number on every attempt.
+			//
+			//     ⚠️ WHY THIS IS A HARD STOP AND NOT A WARNING. Bison AP matches
+			//     payment to their Order #. When the rate-con cannot be read, the
+			//     order number silently becomes OUR load id — a number that looks
+			//     entirely valid to the clerk reading it and matches nothing on
+			//     their side, while the "…& PO #…" sentence vanishes from the body
+			//     because buildInvoiceEmailHtml() omits refs it does not have.
+			//     That is exactly what shipped on load 30080873 on 2026-08-18, and
+			//     a modal warning did not stop it. Owner's call: require a human to
+			//     type both rather than mail a plausible wrong number.
+			//
+			//     Bison ONLY. Every other broker is invoiced by our load number by
+			//     design (PR #132) and its cover note carries no PO language at all
+			//     (PR #133), so there is nothing to be wrong about.
+			//
+			//     An explicitly-sent EMPTY poNumber satisfies this — clearing a
+			//     field is a decision, omitting it is not. Same OMITTED-vs-EMPTY
+			//     rule parseInvoiceOverrides() already enforces.
+			//     ⚠️ THE SEED IS HALF THE GUARD, and without it the guard is
+			//     decorative. `buildOverrideBody()` sends `orderNumber` on EVERY
+			//     request ("always sent"), seeded from this route's own dryRun
+			//     echo — so if that echo carries the load-id fallback, the modal
+			//     hands it straight back, `ov.has.orderNumber` is true, and the
+			//     422 below can never fire on the one path every dispatcher uses.
+			//     Blanking the echo (further down, beside `totalAmount`) is what
+			//     makes the block real: an empty Order # fails the modal's own
+			//     required-field validation AND parseInvoiceOverrides' non-empty
+			//     rule, so nothing reaches the 422 by accident. This mirrors
+			//     `needsTotal`, which has always blanked `totalAmount` for exactly
+			//     this reason — the refs guard originally copied the flag and not
+			//     the seed, which is the whole difference between the two.
+			const refsUnreadable = isBison && !rcFields.orderNumber;
+			const needsOrderNumber = refsUnreadable && !ov.has.orderNumber;
+			const needsPoNumber = refsUnreadable && !ov.has.poNumber;
+			if ((needsOrderNumber || needsPoNumber) && !dryRun) {
+				return res.status(422).json({
+					error:
+						`Could not read the Order # from the rate-con for load ${loadId}, so this Bison invoice ` +
+						`would go out referencing our load id instead — Bison AP matches on their Order #, not ours. ` +
+						`Enter the Order # and PO # from the rate-con, then approve.` +
+						(GEMINI_API_KEY ? "" : " (Rate-con AI extraction is not configured on this server.)"),
+					code: "INVOICE_REFS_REQUIRED",
+					details: { needsOrderNumber, needsPoNumber, rateconFound: !!(rateconBuffer && rateconBuffer.length) },
 				});
 			}
 
@@ -33165,8 +33835,10 @@ app.post(
 					invoiceId,
 					brokerName: effBrokerName,
 					to: invoiceTo.email,
+					// The subject keeps whatever the server would actually print,
+					// even when the Order # seed below is blanked — the reviewer
+					// needs to see the wrong-looking subject the banner warns about.
 					subject: draftSubject,
-					orderNumber,
 					total,
 					totalSource,
 					// ── Seeds for the editable review form. Everything the modal has
@@ -33175,6 +33847,26 @@ app.post(
 					//    money string, because that is where the off-by-one and the
 					//    "$" round-trip come back.
 					needsTotal,
+					// The reference-number half of the same idea (step 6a). The modal
+					// blocks Approve on these, and the real approve refuses with 422
+					// INVOICE_REFS_REQUIRED — so the two agree instead of the preview
+					// promising something the approve then rejects.
+					needsOrderNumber,
+					needsPoNumber,
+					// ⚠️ BLANKED, exactly like totalAmount below. Echoing the
+					// load-id fallback here is what let the modal answer the guard
+					// with the very value the guard exists to reject.
+					orderNumber: needsOrderNumber ? "" : orderNumber,
+					// How the Order # above was arrived at: 'ratecon' | 'override' |
+					// 'load-id-fallback'. The last one is the silent failure that mailed
+					// our load id to Bison AP as their Order #; naming it is what turns
+					// it from a server log into something the reviewer can see.
+					orderNumberSource,
+					// Provenance of the attached rate-con, for the same reason:
+					// 'drive' (matched by file name) | 'documents' (stored/remembered) |
+					// 'upload' | 'drive-content' (found by reading the PDFs). null when
+					// there is no rate-con at all.
+					rateconSource: (rateconCandidates && rateconCandidates[0] && rateconCandidates[0].source) || null,
 					// RAW number, not the formatted `total`, so the input starts as
 					// "3000" and not "$3,000.00". null when there is nothing to seed —
 					// an empty field the dispatcher must fill, which is the point.

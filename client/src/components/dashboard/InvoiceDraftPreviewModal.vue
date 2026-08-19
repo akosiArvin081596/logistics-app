@@ -134,6 +134,28 @@
             it to the load first if this one does.
           </div>
 
+          <!-- How the attached rate-con was identified. A file matched by READING
+               PDFs was inferred, not pointed at, so the reviewer is told — the
+               same principle as the Order # banner below, applied to the
+               riskier of the two substitutions. -->
+          <div v-if="rateconInferred" class="idp-warn" role="status">
+            <strong>This rate confirmation was matched by its contents.</strong>
+            Its file name does not carry this load number, so it was identified by
+            reading the document. Check the Rate-con tab shows the right load before
+            approving — it is attached to the email.
+          </div>
+
+          <!-- The Order # silently became our own load id. This used to be a
+               server-side console.log ONLY, so the field below rendered populated
+               and completely ordinary, and a wrong number went to Bison AP on
+               load 30080873. Say it where the person approving is looking. -->
+          <div v-if="orderNumberIsFallback" class="idp-warn" role="status">
+            <strong>The Order # could not be read from the rate confirmation.</strong>
+            What is shown below is <em>our</em> load number, not the broker's order
+            number — Bison matches payment on theirs, so an invoice sent this way is
+            likely to sit unpaid. Enter the Order # and PO # from the rate con.
+          </div>
+
           <!-- Trailer is a SAFETY check, not a presentation field, so it is not
                editable here — but approve is refused with a 409 when it mismatches,
                and Gemini is nondeterministic enough that a clean preview can still
@@ -317,6 +339,9 @@
                 @input="onFieldInput"
               />
               <p v-if="fieldErrors.orderNumber" class="idp-hint idp-hint-warn">{{ fieldErrors.orderNumber }}</p>
+              <p v-else-if="pv.needsOrderNumber && !form.orderNumber.trim()" class="idp-hint idp-hint-warn">
+                Required — copy the broker's Order # from the rate confirmation.
+              </p>
             </div>
             <div class="idp-field">
               <label class="idp-label" for="idp-po">
@@ -333,10 +358,29 @@
                 :class="{ 'is-invalid': !!(form.poNumber && fieldErrors.poNumber), 'is-edited': edited.poNumber }"
                 :aria-invalid="!!fieldErrors.poNumber"
                 :disabled="approving"
-                placeholder="optional"
+                :placeholder="pv.needsPoNumber ? 'from the rate con' : 'optional'"
                 @input="onFieldInput"
               />
               <p v-if="fieldErrors.poNumber" class="idp-hint idp-hint-warn">{{ fieldErrors.poNumber }}</p>
+              <!-- `|| noPoOnRatecon` keeps the box mounted after it is ticked. The
+                   next preview returns needsPoNumber:false, which unmounted the
+                   whole block and left the acknowledgement on with no way to
+                   withdraw it short of reopening the modal. -->
+              <template v-else-if="pv.needsPoNumber || noPoOnRatecon">
+                <p v-if="!form.poNumber.trim() && !noPoOnRatecon" class="idp-hint idp-hint-warn">
+                  Required — copy the PO # from the rate confirmation, or tick below if it has none.
+                </p>
+                <!-- The escape hatch. Some rate-cons carry no PO at all, and
+                     without this those loads could never be invoiced again. -->
+                <label class="idp-hint idp-check">
+                  <input
+                    v-model="noPoOnRatecon"
+                    type="checkbox"
+                    :disabled="approving || !!form.poNumber.trim()"
+                  />
+                  This rate confirmation has no PO #
+                </label>
+              </template>
             </div>
           </div>
 
@@ -897,7 +941,13 @@ function buildOverrideBody({ forPreview = false } = {}) {
   }
   if (has('billToName') || edited.value.billToName) body.billToName = form.billToName.trim()
   if (has('brokerName') || edited.value.brokerName) body.brokerName = form.brokerName.trim()
-  if (has('poNumber') || edited.value.poNumber) body.poNumber = form.poNumber.trim()
+  // ⚠️ NO `has('poNumber')` ARM. The dryRun echoes poNumber, so has() is ALWAYS
+  // true — which sent the key on every request and made the server's
+  // omitted-vs-empty rule meaningless: `ov.has.poNumber` was permanently set, so
+  // needsPoNumber could never fire and the `|| noPoOnRatecon` clause below was
+  // dead code contradicting its own comment. Send it only when a human has
+  // actually answered: typed a value, or ticked "this rate-con has no PO #".
+  if (edited.value.poNumber || noPoOnRatecon.value) body.poNumber = form.poNumber.trim()
   if (has('deliveryDateIso') || edited.value.deliveryDate) body.deliveryDate = form.deliveryDate
   // A 9th, non-UI pinned field: moveNumber has no input but IS printed in the
   // Bison cover letter, so passing it through is what keeps the emailed body the
@@ -931,13 +981,46 @@ function buildOverrideBody({ forPreview = false } = {}) {
 const approving = ref(false)
 const approveError = ref('')
 
+// The Order # could not be read off the rate-con, so the server would fall back
+// to OUR load id — a number Bison AP cannot match a payment to. It refuses the
+// approve with 422 INVOICE_REFS_REQUIRED; this mirrors that refusal so the block
+// shows up beside the fields instead of arriving as an error after the click.
+//
+// A typed value satisfies it. An explicitly EMPTIED PO # also satisfies it —
+// clearing a field is a decision, leaving it untouched is not. That is the same
+// omitted-vs-empty rule the server's override parser applies, so the two agree.
+const noPoOnRatecon = ref(false)
+const refsBlocked = computed(() => {
+  const p = pv.value
+  if (p.needsOrderNumber && !String(form.orderNumber || '').trim()) return true
+  // ⚠️ THE CHECKBOX IS NOT CEREMONY — without it this is a dead end. Some
+  // rate-cons genuinely carry no PO, and "you may proceed once you type a PO"
+  // would leave those loads permanently un-invoiceable. Ticking it sends an
+  // explicit empty poNumber, which is what the server's omitted-vs-empty rule
+  // accepts: a human said "there isn't one", rather than nobody having looked.
+  if (p.needsPoNumber && !String(form.poNumber || '').trim() && !noPoOnRatecon.value) return true
+  return false
+})
+// ⚠️ STOPS BEING TRUE THE MOMENT IT IS FIXED. `pv` is the ORIGINAL dryRun
+// response and never changes while the modal is open, so keying the banner on it
+// alone would keep insisting the field shows our load number after the
+// dispatcher has replaced it with the broker's — telling them a falsehood about
+// what they are looking at, which is how a warning stops being believed.
+const rateconInferred = computed(() => pv.value.rateconSource === 'drive-content')
+const orderNumberIsFallback = computed(
+  () => pv.value.orderNumberSource === 'load-id-fallback' && !edited.value.orderNumber,
+)
+
 // Never approve a value nobody has seen rendered. A FAILED preview is deliberately
 // not a block, though: a render outage would otherwise make the whole feature
 // unusable, and the failure is surfaced loudly beside the fields instead.
-const canApprove = computed(() => formValid.value && !previewing.value && !previewPending.value)
+const canApprove = computed(() => formValid.value && !previewing.value && !previewPending.value && !refsBlocked.value)
 const approveBlockedReason = computed(() => {
   if (approving.value || canApprove.value) return ''
   if (firstFieldError.value) return firstFieldError.value
+  if (refsBlocked.value) {
+    return 'Enter the Order # and PO # from the rate confirmation — they could not be read automatically.'
+  }
   if (previewing.value) return 'Rendering your changes — approve once the preview updates.'
   if (previewPending.value) {
     return previewTabActive.value
@@ -960,6 +1043,9 @@ watch(
       approveError.value = ''
       previewError.value = ''
       previewWarnings.value = []
+      // Per-load acknowledgement — it must never carry from one load to the next,
+      // or the second load inherits "there is no PO" without anyone saying so.
+      noPoOnRatecon.value = false
       // The dryRun response IS a render of the extracted values, so its subject
       // and cover note are correct until the first edit — seed from them rather
       // than blanking and firing a render nobody asked for.
@@ -1242,6 +1328,11 @@ async function approve() {
 .idp-input.is-invalid { border-color: #dc2626; background: #fffafa; }
 .idp-hint { font-size: 0.72rem; color: #64748b; margin: 0; }
 .idp-hint-warn { color: #b45309; }
+/* The "no PO #" acknowledgement. Sits with the hints because that is what it
+   is — a line of guidance the dispatcher answers, not a settings toggle. */
+.idp-check { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.25rem; cursor: pointer; }
+.idp-check input { cursor: pointer; }
+.idp-check input:disabled { cursor: default; }
 
 /* Two-up pairs — [Invoice # | Invoice date] and [Order # | PO #]. They are read
    together, so they sit together. min-width:0 stops a date input's intrinsic
