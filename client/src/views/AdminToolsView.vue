@@ -824,7 +824,8 @@ async function startDbExport() {
     const res = await fetch('/api/db/download', {
       method: 'POST',
       credentials: 'same-origin',
-      headers: { Accept: 'application/octet-stream' },
+      // Bypasses useApi, so it carries the CSRF header itself — see useApi.js.
+      headers: { Accept: 'application/octet-stream', 'X-Requested-With': 'XMLHttpRequest' },
     })
 
     if (!res.ok) {

@@ -151,14 +151,27 @@ function request(port, method, urlPath, headers) {
 }
 
 // Caller shapes, byte-identical to the ones scripts/test-csrf-guard.js names.
+// ⚠️ EVERY SHAPE CARRIES X-Requested-With, and that is not padding. requireRole
+// now refuses a header-less write before the chain reaches crossSiteGuard (the
+// same-site CSRF control added 2026-08-19), so a shape without it would be
+// refused for the WRONG REASON and this file would silently stop testing the
+// tier it exists to test — the cross-site sections would pass while asserting
+// nothing. The SPA sends the header on every write, so carrying it here is also
+// the honest simulation of a real browser caller.
+//
+// The one shape that deliberately omits it is `noCsrfHeader` below, which pins
+// the new refusal itself.
+const XRW = { "X-Requested-With": "XMLHttpRequest" };
 const SHAPES = {
 	// The finding: no initiator document. Bookmark / address bar / native app.
-	noInitiator: { "Sec-Fetch-Site": "none" },
-	crossSite: { Origin: "https://evil.example", "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document" },
-	sameSite: { Origin: "https://drivers.logisx.com", "Sec-Fetch-Site": "same-site" },
-	sameOrigin: { "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" },
-	headerless: {},
-	corsAllowlisted: { Origin: ALLOWLIST[0], "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "cors" },
+	noInitiator: { ...XRW, "Sec-Fetch-Site": "none" },
+	crossSite: { ...XRW, Origin: "https://evil.example", "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document" },
+	sameSite: { ...XRW, Origin: "https://drivers.logisx.com", "Sec-Fetch-Site": "same-site" },
+	sameOrigin: { ...XRW, "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" },
+	headerless: { ...XRW },
+	// No X-Requested-With at all — a cross-site form POST, which cannot set headers.
+	noCsrfHeader: { "Sec-Fetch-Site": "same-origin" },
+	corsAllowlisted: { ...XRW, Origin: ALLOWLIST[0], "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "cors" },
 };
 
 async function main() {

@@ -253,17 +253,64 @@ ok("POST ratecon-reconcile/run is the alerting verb (alert true)",
 ok("no query parameter reaches the alert decision",
 	!/reconcileRateCons\(\{\s*alert:\s*!?dryRun/.test(src));
 
-const mountCount = (name) => src.split("\n").filter((l) => /^app\.(get|post|put|delete|patch)\(/.test(l) && l.includes(name + ",")).length;
+// ⚠️ A LINE-ONLY SCAN IS BLIND TO A MULTILINE REGISTRATION, and that blindness
+// is not hypothetical here — it hid a guard on the busiest route in the file.
+// `app.post(\n\t[paths],\n\trequireRole(...),\n\trefuseCrossSite,\n\t...)` puts the
+// guard on its own line, so `mountedOn`/`mountCount` — which used to filter
+// single lines starting `app.<verb>(` — reported 3 mounts for refuseCrossSite
+// when there were 6. Both draft-invoice and invoice-preview were invisible to
+// the suite whose entire job is naming which route lost its guard.
+//
+// The joiner that fixes it was ALREADY in this file, 300 lines down, written for
+// the boot-order check with a comment saying exactly this. It is hoisted here so
+// both readers share one definition rather than drifting apart.
+const ROUTE_HEAD_RE = /^app\.(get|post|put|delete|patch|use|all)\(/;
+// [{ i, head }] — one entry per registration, continuation lines joined up to
+// the handler, so a guard or a path on its own line is still seen.
+function routeHeads(lines) {
+	const out = [];
+	for (let i = 0; i < lines.length; i++) {
+		if (!ROUTE_HEAD_RE.test(lines[i])) continue;
+		let head = lines[i];
+		for (let k = 1; k <= 10 && !/=>|function/.test(head); k++) {
+			if (i + k >= lines.length) break;
+			head += "\n" + lines[i + k];
+		}
+		out.push({ i, head });
+	}
+	return out;
+}
+const mountCount = (name) => routeHeads(src.split("\n")).filter(({ head }) => head.includes(name + ",")).length;
 // ⚠️ Assert the ROUTES, not just a count. A bare count goes stale the moment a
 // new guarded route lands — this pin said 2 and broke when #250 correctly added
 // the onboarding-evidence GET, which reads signer IP/user-agent and is exactly
 // the kind of admin GET that should carry it. Naming them says WHICH is missing.
-const mountedOn = (name) => src.split("\n")
-	.filter((l) => /^app\.(get|post|put|delete|patch)\(/.test(l) && l.includes(name + ","))
-	.map((l) => (l.match(/"([^"]+)"/) || [, "?"])[1]).sort();
-eq("refuseCrossSite is on exactly the cost/exposure GETs", mountedOn("refuseCrossSite").join(" "),
+//
+// Every "/..." literal in the head is taken, not just the first: an aliased
+// registration mounts an ARRAY of paths and each one is separately reachable, so
+// each has to be pinned. Restricted to strings starting "/" so role arguments
+// like "Super Admin" cannot be mistaken for routes.
+const mountedOn = (name) => routeHeads(src.split("\n"))
+	.filter(({ head }) => head.includes(name + ","))
+	.flatMap(({ head }) => (head.match(/"(\/[^"]*)"/g) || []).map((q) => q.slice(1, -1)))
+	.sort();
+// ⚠️ NO LONGER "the cost/exposure GETs" — it is the COST tier, and it now holds
+// writes. Four routes joined after this pin was written, and the suite could see
+// only one of them: ratecon-index broke the list loudly (good), while
+// draft-invoice, its alias and invoice-preview were mounted multiline and were
+// silently invisible until routeHeads() landed above (bad — that is the mount
+// the whole rate-con work turned on).
+eq("refuseCrossSite is on exactly the cost tier", mountedOn("refuseCrossSite").join(" "),
 	["/api/admin/fuel-gallons-recovery", "/api/admin/fuel-gallons-recovery/apply",
-	 "/api/admin/onboarding-evidence/:scope/:ownerId"].sort().join(" "));
+	 "/api/admin/onboarding-evidence/:scope/:ownerId", "/api/admin/ratecon-index",
+	 // One registration, two paths — the legacy Bison alias is separately
+	 // reachable, so it is separately pinned.
+	 "/api/loads/:loadId/draft-invoice", "/api/loads/:loadId/draft-bison-invoice",
+	 "/api/loads/:loadId/invoice-preview"].sort().join(" "));
+// Six REGISTRATIONS carrying seven paths. Asserted beside the list for the same
+// reason the other tiers are: a guard that reappears under a third name shows up
+// as a list/count disagreement instead of silently.
+eq("refuseCrossSite mount count agrees with that list", mountCount("refuseCrossSite"), 6);
 // ⚠️ ALL SEVEN GUARDED ROUTES, NAMED, IN ONE PLACE — the review's finding 5.
 // The count above was the only thing covering the database export, and a count
 // cannot say WHICH route lost its guard. `mountCount` is kept beside the list so
@@ -546,7 +593,6 @@ eq("MUTANT g: without validation, garbage reaches the cookie", noValidation("ban
 // outage. requireRole is safe there only because a `function` declaration
 // hoists and a `const` does not — the asymmetry that caused the original crash.
 const LINES = src.split("\n");
-const ROUTE_HEAD_RE = /^app\.(get|post|put|delete|patch|use|all)\(/;
 // String literals are stripped before any identifier match so that PROSE cannot
 // trip these assertions. server.js legitimately names these guards in comments
 // and in a console.warn ABOVE their definitions; judging the code means judging
@@ -563,13 +609,9 @@ const isCommentLine = (l) => {
 // line-only scan would be blind to a guard mounted on its own line.
 function routeMountIndex(lines) {
 	const first = new Map();
-	for (let i = 0; i < lines.length; i++) {
-		if (!ROUTE_HEAD_RE.test(lines[i])) continue;
-		let head = lines[i];
-		for (let k = 1; k <= 10 && !/=>|function/.test(head); k++) {
-			if (i + k >= lines.length) break;
-			head += "\n" + lines[i + k];
-		}
+	// Shares routeHeads() with mountedOn/mountCount above — this joining logic
+	// used to live only here, which is why those two were blind to it.
+	for (const { i, head } of routeHeads(lines)) {
 		for (const raw of stripLiterals(head).match(/\b[A-Za-z_$][\w$]*\s*,/g) || []) {
 			const n = raw.replace(/\s*,$/, "");
 			if (!first.has(n)) first.set(n, i);

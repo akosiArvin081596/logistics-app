@@ -102,7 +102,10 @@ const INVESTOR_PASS = process.env.TEST_INVESTOR_PASS || "Password123!";
 // every other call site is unchanged and still hits PORT.
 function req(method, path, body, cookies, port) {
   return new Promise((resolve, reject) => {
-    const opts = { hostname: "localhost", port: port || PORT, path, method, headers: { "Content-Type": "application/json" } };
+    // X-Requested-With mirrors what the SPA sends on every request: the server
+    // refuses a session-gated write without it (the same-site CSRF control in
+    // requireAuth/requireRole). Without this line every write test 403s.
+    const opts = { hostname: "localhost", port: port || PORT, path, method, headers: { "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest" } };
     if (cookies) opts.headers.Cookie = cookies;
     const r = http.request(opts, res => {
       let d = ""; res.on("data", c => d += c);
@@ -1450,7 +1453,13 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
 
   // Seed WITHOUT the flag, so re-running the suite never trips over its own row.
   const dupA = await req("POST", "/api/expenses", dupBody, ac);
-  test("107. Expense POST without checkDuplicate is never blocked (driver-app path)",
+  // ⚠️ RENAMED. This used to read "without checkDuplicate", but `checkDuplicate`
+  // has been dead since the duplicate check went on by default (2026-08-13) — it
+  // survives in server.js only inside comments, never read as a value. The test
+  // passed, but for a reason its own name denied: not because the flag was
+  // absent, but because the amount is unique per run. Same drift that made test
+  // 46 fail outright, one row over.
+  test("107. A first-time expense POST is never blocked as a duplicate (driver-app path)",
     dupA.status === 200 && dupA.body?.success === true);
 
   const dupB = await req("POST", "/api/expenses", { ...dupBody, checkDuplicate: true }, ac);

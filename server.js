@@ -6024,9 +6024,51 @@ app.post("/api/investors/:id/profile-picture", requireAuth, (req, res) => {
 // ============================================================
 // Roles: Super Admin (full access), Admin (dispatch, no broker/financial), Driver (own data only, no rate/revenue), Investor (financial view)
 
+// ===========================================================================
+// THE SAME-SITE HALF OF CSRF — what crossSiteGuard cannot reach
+// ===========================================================================
+// refuseCrossSite tolerates `Sec-Fetch-Site: same-site` by design, so a page on
+// a SIBLING logisx.com host reaches every guarded route with a live session. The
+// cookie is host-only (no `domain:` in the session config), so a sibling cannot
+// READ connect.sid — but Lax still ATTACHES it on sibling→app, so blind writes
+// survive. And the credible path is not user-generated content: logisx.com is a
+// WIX site, governed by an account credential that exists nowhere in this repo
+// or on the VPS.
+//
+// A non-safelisted request header closes exactly that. It cannot be set by a
+// top-level form at all, and any cross-origin fetch carrying it must preflight —
+// there is no `cors` package here and DRIVER_MOBILE_ORIGINS is empty in
+// production, so the preflight is never answered and the real request is never
+// sent. A same-site page therefore cannot produce it.
+//
+// Be honest about what this is NOT: it is a request-SHAPE control, the same
+// class as the guards above, and it fails open if absent. It does not survive an
+// XSS on app.logisx.com itself — but neither would a per-session token, and a
+// token needs a bootstrap path the SPA does not have.
+//
+// ⚠️ THE CHECK IS DUPLICATED IN BOTH GUARDS, AND MUST STAY SELF-CONTAINED.
+// scripts/test-db-export-guard.js lifts requireRole out of this file by
+// brace-matching and runs it in a bare `new Function` with NO injected
+// identifiers, so a shared module-scope helper would make that lift throw at
+// call time. Only `req`, `res` and true globals are legal here. The
+// duplication is pinned by scripts/test-csrf-write-header.js, which asserts the
+// two copies stay identical — this repo's standing failure mode is a hand-copied
+// rule drifting, so the copy is allowed only because a test watches it.
+//
+// ⚠️ Read through process.env per call rather than a module-scope const, for the
+// same lift reason. CSRF_HEADER_REQUIRED is a KILL SWITCH, not an enable
+// switch — it defaults ON and only an explicit "false" disables it, matching
+// PII_MASK_ENABLED. It exists because the legacy public/ pages use raw fetch
+// with no header and are still served when client/dist is missing.
 function requireAuth(req, res, next) {
 	if (!req.session.user)
 		return res.status(401).json({ error: "Not authenticated" });
+	if (
+		req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS" &&
+		!(req.headers || {})["x-requested-with"] &&
+		String(process.env.CSRF_HEADER_REQUIRED || "").toLowerCase() !== "false"
+	)
+		return res.status(403).json({ error: "Missing X-Requested-With header", code: "CSRF_HEADER_REQUIRED" });
 	next();
 }
 
@@ -6036,6 +6078,12 @@ function requireRole(...roles) {
 			return res.status(401).json({ error: "Not authenticated" });
 		if (!roles.includes(req.session.user.role))
 			return res.status(403).json({ error: "Forbidden" });
+		if (
+			req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS" &&
+			!(req.headers || {})["x-requested-with"] &&
+			String(process.env.CSRF_HEADER_REQUIRED || "").toLowerCase() !== "false"
+		)
+			return res.status(403).json({ error: "Missing X-Requested-With header", code: "CSRF_HEADER_REQUIRED" });
 		next();
 	};
 }
@@ -9127,6 +9175,13 @@ const pdfPreviewLimiter = rateLimit({
 // how many ANONYMOUS renders may be in flight process-wide, which is the actual
 // resource bound. Authenticated renders (onboarding signing, invoice generation, the
 // Friday auto-invoice batch) do not pass through here and are unaffected.
+// ⚠️ KEPT, NOT RETIRED, now that lib/pdf-browser.js has a global gate — and the
+// distinction is the reason. The global gate is a RESOURCE bound: it stops the
+// box from opening unbounded Chromium tabs, and it does not care who is asking.
+// This counter is ADMISSION CONTROL for one surface, and that surface is
+// ANONYMOUS. Fold it into the global pool and an unauthenticated flood can hold
+// every slot, starving the dispatcher drafting an invoice — the global cap would
+// hold and the service would still be gone. Two layers, two different questions.
 const PDF_PREVIEW_MAX_INFLIGHT = 3;
 let pdfPreviewInflight = 0;
 app.post("/api/public/investor-preview-pdf/:docKey", pdfPreviewLimiter, async (req, res) => {
@@ -32816,7 +32871,14 @@ async function getRateConBytes(loadId, body, loadCtx = null, opts = {}) {
 	//
 	// Skipped without loadCtx: with nothing to corroborate against, every match
 	// would be `unconfirmed`, which is precisely what must not be attached.
-	if (!candidates.length && RATECON_DRIVE_FOLDER_ID && safe && loadCtx && !rateconScanMissedRecently(safe)) {
+	// ⚠️ KEYED ON THE LOAD ID, NOT `safe`. `safe` strips every non-alphanumeric so
+	// it can be interpolated into the Drive query, which means "LD-123456" and
+	// "LD123456" collapse to one key — two different loads sharing one miss. It
+	// fails safe (a shared key suppresses a scan, never permits a wrong match)
+	// and this sheet holds no such pair today, but the cache key has no reason to
+	// inherit a restriction that exists for query escaping.
+	const scanMissKey = normLoadKey(loadId);
+	if (!candidates.length && RATECON_DRIVE_FOLDER_ID && safe && loadCtx && !rateconScanMissedRecently(scanMissKey)) {
 		try {
 			const rcIndex = require("./lib/ratecon-drive-index.js");
 			const drive = await getDrive();
@@ -32885,7 +32947,7 @@ async function getRateConBytes(loadId, body, loadCtx = null, opts = {}) {
 						`corroborates them — not attaching: ${found.unconfirmed.map((u) => u.file.name).join(", ")}`,
 				);
 			}
-			if (!found.accepted.length) rememberRateConScanMiss(safe);
+			if (!found.accepted.length) rememberRateConScanMiss(scanMissKey);
 		} catch (e) {
 			// Same posture as every other source here: a failure degrades to "no
 			// rate-con", which the caller already handles loudly.
@@ -34117,6 +34179,7 @@ app.post(
 			// call still yields something useful.
 			return res.json({ success: true, preview: true, invoiceId, invoicePdfBase64, note: "No Gmail/n8n draft target configured — invoice generated (preview only).", warnings: draftWarnings });
 		} catch (err) {
+			if (sentIfRendererBusy(res, err)) return;
 			console.error("Draft invoice error:", err.message);
 			return res.status(500).json({ error: "Failed to draft the invoice." });
 		}
@@ -34170,6 +34233,10 @@ const invoicePreviewLimiter = rateLimit({
 // over ONE Chromium. The correct fix is a shared gate inside pdf-browser.js;
 // doing it in this PR would change the concurrency behaviour of onboarding
 // signing and the Friday auto-invoice batch as a side effect.
+// Kept for the same reason as PDF_PREVIEW_MAX_INFLIGHT above: this bounds ONE
+// surface — a preview that re-renders on a debounce as the dispatcher types —
+// so it is fairness between editors, not the box's resource ceiling. The global
+// gate in lib/pdf-browser.js is the ceiling, and it sits underneath this.
 const INVOICE_PREVIEW_MAX_INFLIGHT = 2;
 let invoicePreviewInflight = 0;
 app.post(
@@ -42514,6 +42581,7 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 		sendStatementHeaders();
 		res.send(pdf);
 	} catch (err) {
+		if (sentIfRendererBusy(res, err)) return;
 		console.error("GET /api/investor/payouts/:period/statement error:", err.message);
 		res.status(500).json({ error: "Failed to generate the payout statement" });
 	}
@@ -47121,6 +47189,19 @@ server.listen(PORT, BIND_HOST, async () => {
 
 // Clean up the shared Puppeteer browser process on shutdown so pm2 restarts
 // don't leak Chromium instances.
+// The PDF gate in lib/pdf-browser.js refuses with a typed error once the
+// renderer is saturated (bounded wait, then refuse — an unbounded queue would
+// blow past the client's 20 s abort and turn contention into retry storms).
+// A saturated renderer is a 503 with a Retry-After, not a 500: the caller did
+// nothing wrong and the request is worth repeating. Returns true when it has
+// answered, so a catch block reads `if (sentIfRendererBusy(res, err)) return;`.
+function sentIfRendererBusy(res, err) {
+	if (!err || err.code !== "PDF_RENDERER_BUSY") return false;
+	res.setHeader("Retry-After", "5");
+	res.status(503).json({ error: "PDF renderer is busy. Try again in a moment.", code: "PDF_RENDERER_BUSY" });
+	return true;
+}
+
 const { shutdownBrowser } = require("./lib/pdf-browser");
 async function gracefulShutdown(signal) {
 	console.log(`${signal} received — shutting down Puppeteer browser`);
