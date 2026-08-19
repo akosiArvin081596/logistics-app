@@ -15494,11 +15494,6 @@ app.post("/api/admin/ratecon-index", requireRole("Super Admin"), refuseCrossSite
 		const headers = jt.headers || [];
 		const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h));
 		if (!loadIdCol) return res.status(500).json({ error: "Load ID column not found in Job Tracking" });
-		const emailCol = headers.find((h) => /^email$/i.test(String(h).trim()));
-		const trailerCol = headers.find((h) => /trailer/i.test(h));
-		const assignedCol = headers.find((h) => /assigned.*date/i.test(h));
-		const pickupCol = headers.find((h) => /pickup.*appo|pickup.*date/i.test(h));
-		const paymentCol = brokerInvoice.findPaymentColumn(headers);
 
 		// Only loads that have NO rate-con resolvable today: no file-name hit and
 		// no documents row. Re-matching a load that already works would spend
@@ -15512,15 +15507,16 @@ app.post("/api/admin/ratecon-index", requireRole("Super Admin"), refuseCrossSite
 				 WHERE UPPER(type) IN ('RATECON','RATE CON','RATE_CON','BOL') AND deleted_at IS NULL`,
 			).all().map((r) => normLoadKey(r.load_id)),
 		);
-		const pending = (jt.data || [])
-			.map((r) => ({
-				loadId: String(r[loadIdCol] || "").replace(/^#/, "").trim(),
-				totalRate: paymentCol ? brokerInvoice.parseMoney(r[paymentCol]) : 0,
-				brokerEmail: emailCol ? String(r[emailCol] || "").trim() : "",
-				trailerNumber: trailerCol ? String(r[trailerCol] || "").trim() : "",
-				assignedDate: assignedCol ? String(r[assignedCol] || "").trim() : "",
-				pickupDate: pickupCol ? String(r[pickupCol] || "").trim() : "",
-			}))
+		// ⚠️ CANCELLED AND SOFT-DELETED LOADS ARE NOT CANDIDATES. This ran over the
+		// raw sheet, so a live production run proposed linking a rate-con to load
+		// 209875716 — a CANCELLED duplicate row of 30080873 (same commodity, same
+		// 2,940 piece count, no payment, no truck, no owner) that can never be
+		// invoiced. excludeDroppedLoads() is the single place that answers "is this
+		// load live?" for every revenue aggregator; bypassing it here is the rule
+		// drift CLAUDE.md names by name.
+		const liveRows = excludeDroppedLoads(jt.data || [], headers);
+		const pending = liveRows
+			.map((r) => buildRateConLoadCtx(r, headers))
 			.filter((l) => l.loadId && !linked.has(normLoadKey(l.loadId)))
 			.filter((l) => !files.some((f) => rcIndex.filenameCarriesLoadId(f.name, l.loadId)));
 
@@ -15554,16 +15550,26 @@ app.post("/api/admin/ratecon-index", requireRole("Super Admin"), refuseCrossSite
 		// "covered everything" to anyone not cross-checking the two fields. A
 		// bounded run that does not say it was bounded is the silent-truncation
 		// failure this repo's own no-silent-caps rule names.
+		// ⚠️ TWO CAUSES, AND THE LOG MUST NAME THE RIGHT ONE. `truncated` was
+		// widened to mean "did not cover everything" (a limit-bounded run that
+		// reported false read as "covered everything"), but the message under it
+		// still said "stopped at the Ns deadline" — so a run cut short by `limit`
+		// after 5 s claimed a 240 s deadline had fired. A log that misreports why
+		// it stopped is worse than one that says nothing.
+		const hitDeadline = Date.now() > deadline;
 		const truncated = processed < pending.length;
 		if (truncated) {
-			console.warn(`[ratecon-index] run stopped at the ${Math.round((Date.now() - startedAt) / 1000)}s deadline after ${processed} load(s) — ${pending.length - processed} not attempted.`);
+			const why = hitDeadline
+				? `the ${Math.round((Date.now() - startedAt) / 1000)}s deadline`
+				: `the requested limit of ${limit}`;
+			console.warn(`[ratecon-index] run stopped at ${why} after ${processed} load(s) — ${pending.length - processed} not attempted.`);
 		}
 		logAudit(
 			req,
 			apply ? "ratecon_index_apply" : "ratecon_index_scan",
 			"ratecon_index",
 			"",
-			`${results.length} load(s) matched, ${written} link(s) written, ${pending.length} pending, truncated=${truncated}`,
+			`${results.length} load(s) matched, ${written} link(s) written, ${pending.length} pending, truncated=${truncated}${truncated ? ` (${hitDeadline ? "deadline" : "limit"})` : ""}`,
 		);
 		res.json({
 			success: true,
@@ -15571,6 +15577,10 @@ app.post("/api/admin/ratecon-index", requireRole("Super Admin"), refuseCrossSite
 			// Named explicitly so an empty `results` cannot be read as "all done"
 			// when it really means "the deadline cut the run short".
 			truncated,
+			// Why, not just whether — "limit" is a caller asking for a small run,
+			// "deadline" is the server giving up, and only the second is a reason
+			// to worry about the folder getting slower.
+			truncatedBy: truncated ? (hitDeadline ? "deadline" : "limit") : null,
 			folderFiles: files.length,
 			pendingLoads: pending.length,
 			processed,
@@ -32892,6 +32902,43 @@ async function getRateConBytes(loadId, body, loadCtx = null, opts = {}) {
 	};
 }
 
+// ⚠️ ONE BUILDER FOR THE MATCHER'S loadCtx, and it exists because the two
+// callers already drifted once — silently, and fatally.
+//
+// scoreRateConMatch() counts corroborations only from LOAD-SPECIFIC facts
+// (the sheet total and the two lane cities) and MIN_CORROBORATIONS is 2. The
+// draft route was updated to pass pickupAddress/dropoffAddress when that rule
+// landed; POST /api/admin/ratecon-index was not. So the backfill could reach at
+// most ONE corroboration and could never accept anything — it would download up
+// to RATECON_CONTENT_MAX_FILES PDFs per load and return nothing, looking like
+// "no matches found" rather than a broken caller.
+//
+// That is exactly the hand-copied-rule drift CLAUDE.md warns about, so the
+// shape is derived in one place from (row, headers) and both callers use it.
+// `row` is a header-keyed object (getJobTrackingCached()'s shape) and findCol()
+// returns a header NAME, so this works for both without index juggling.
+function buildRateConLoadCtx(row, headers, loadId) {
+	const cell = (re) => {
+		const col = findCol(headers || [], re);
+		return col ? String(row[col] || "").trim() : "";
+	};
+	const paymentCol = brokerInvoice.findPaymentColumn(headers || []);
+	return {
+		loadId: String(loadId == null ? cell(/load.?id|job.?id/i) : loadId).replace(/^#/, "").trim(),
+		totalRate: paymentCol ? brokerInvoice.parseMoney(row[paymentCol]) : 0,
+		brokerEmail: cell(/^email$/i),
+		trailerNumber: cell(/trailer/i),
+		// The lane — the only facts on this row specific enough to prove a
+		// document belongs to THIS load rather than to the broker generally.
+		pickupAddress: cell(/pickup.*address/i),
+		dropoffAddress: cell(/drop.?off.*address|deliv.*address/i),
+		// Date anchors, used only to centre the scan window.
+		assignedDate: cell(/assigned.*date/i),
+		pickupDate: cell(/pickup.*appo|pickup.*date/i),
+		deliveryDate: cell(/status.*update.*date|completion.*date/i),
+	};
+}
+
 // A NEGATIVE cache for step 4, and it is not an optimization — it is what keeps
 // a load with no rate-con from re-downloading the whole window on every click.
 // The incident that prompted all of this shows why: the dispatcher pressed
@@ -33360,13 +33407,6 @@ app.post(
 			const deliveryDateCol =
 				headers.find((h) => /status.*update.*date|completion.*date/i.test(h)) ||
 				headers.find((h) => /drop.?off.*date|drop.?off.*appoint|deliv.*date|deliv.*appoint/i.test(h));
-			// Used only to centre the by-content rate-con scan's date window (a
-			// rate-con is filed days BEFORE pickup, while the delivery date above
-			// can be weeks after). Neither feeds the invoice itself.
-			const assignedDateCol = findCol(headers, /assigned.*date/i);
-			const pickupDateCol = findCol(headers, /pickup.*appo|pickup.*date/i);
-			const pickupAddrCol = findCol(headers, /pickup.*address/i);
-			const dropoffAddrCol = findCol(headers, /drop.?off.*address|deliv.*address/i);
 			const driverCol = findCol(headers, /^driver$/i) || findCol(headers, /driver/i);
 			const brokerNameCol = findCol(headers, /broker.*(contact|name)/i);
 			// The money column is literally "  Payment  " (real surrounding
@@ -33449,19 +33489,9 @@ app.post(
 
 			// Facts about this load from a source OTHER than the rate-con, so the
 			// by-content fallback has something independent to check a match
-			// against. Every one comes off the sheet row we already read.
-			const rateconLoadCtx = {
-				totalRate: paymentCol ? brokerInvoice.parseMoney(load[paymentCol]) : 0,
-				brokerEmail,
-				trailerNumber: sheetTrailer,
-				// The lane — the only facts on this row specific enough to prove a
-				// document belongs to THIS load rather than to the broker generally.
-				pickupAddress: pickupAddrCol ? (load[pickupAddrCol] || "").toString().trim() : "",
-				dropoffAddress: dropoffAddrCol ? (load[dropoffAddrCol] || "").toString().trim() : "",
-				assignedDate: assignedDateCol ? (load[assignedDateCol] || "").toString().trim() : "",
-				deliveryDate: deliveryDateCol ? (load[deliveryDateCol] || "").toString().trim() : "",
-				pickupDate: pickupDateCol ? (load[pickupDateCol] || "").toString().trim() : "",
-			};
+			// against. Built by the shared helper so this route and the bulk
+			// backfill cannot disagree about which facts the matcher gets.
+			const rateconLoadCtx = buildRateConLoadCtx(load, headers, loadId);
 			// ⚠️ persist:false ON A PREVIEW. This route is documented as previewing
 			// "without burning an invoice number or creating a draft", and a preview
 			// that permanently links a guessed document to a load breaks that
