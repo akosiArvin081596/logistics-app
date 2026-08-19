@@ -9127,6 +9127,13 @@ const pdfPreviewLimiter = rateLimit({
 // how many ANONYMOUS renders may be in flight process-wide, which is the actual
 // resource bound. Authenticated renders (onboarding signing, invoice generation, the
 // Friday auto-invoice batch) do not pass through here and are unaffected.
+// ⚠️ KEPT, NOT RETIRED, now that lib/pdf-browser.js has a global gate — and the
+// distinction is the reason. The global gate is a RESOURCE bound: it stops the
+// box from opening unbounded Chromium tabs, and it does not care who is asking.
+// This counter is ADMISSION CONTROL for one surface, and that surface is
+// ANONYMOUS. Fold it into the global pool and an unauthenticated flood can hold
+// every slot, starving the dispatcher drafting an invoice — the global cap would
+// hold and the service would still be gone. Two layers, two different questions.
 const PDF_PREVIEW_MAX_INFLIGHT = 3;
 let pdfPreviewInflight = 0;
 app.post("/api/public/investor-preview-pdf/:docKey", pdfPreviewLimiter, async (req, res) => {
@@ -34117,6 +34124,7 @@ app.post(
 			// call still yields something useful.
 			return res.json({ success: true, preview: true, invoiceId, invoicePdfBase64, note: "No Gmail/n8n draft target configured — invoice generated (preview only).", warnings: draftWarnings });
 		} catch (err) {
+			if (sentIfRendererBusy(res, err)) return;
 			console.error("Draft invoice error:", err.message);
 			return res.status(500).json({ error: "Failed to draft the invoice." });
 		}
@@ -34170,6 +34178,10 @@ const invoicePreviewLimiter = rateLimit({
 // over ONE Chromium. The correct fix is a shared gate inside pdf-browser.js;
 // doing it in this PR would change the concurrency behaviour of onboarding
 // signing and the Friday auto-invoice batch as a side effect.
+// Kept for the same reason as PDF_PREVIEW_MAX_INFLIGHT above: this bounds ONE
+// surface — a preview that re-renders on a debounce as the dispatcher types —
+// so it is fairness between editors, not the box's resource ceiling. The global
+// gate in lib/pdf-browser.js is the ceiling, and it sits underneath this.
 const INVOICE_PREVIEW_MAX_INFLIGHT = 2;
 let invoicePreviewInflight = 0;
 app.post(
@@ -42514,6 +42526,7 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 		sendStatementHeaders();
 		res.send(pdf);
 	} catch (err) {
+		if (sentIfRendererBusy(res, err)) return;
 		console.error("GET /api/investor/payouts/:period/statement error:", err.message);
 		res.status(500).json({ error: "Failed to generate the payout statement" });
 	}
@@ -47121,6 +47134,19 @@ server.listen(PORT, BIND_HOST, async () => {
 
 // Clean up the shared Puppeteer browser process on shutdown so pm2 restarts
 // don't leak Chromium instances.
+// The PDF gate in lib/pdf-browser.js refuses with a typed error once the
+// renderer is saturated (bounded wait, then refuse — an unbounded queue would
+// blow past the client's 20 s abort and turn contention into retry storms).
+// A saturated renderer is a 503 with a Retry-After, not a 500: the caller did
+// nothing wrong and the request is worth repeating. Returns true when it has
+// answered, so a catch block reads `if (sentIfRendererBusy(res, err)) return;`.
+function sentIfRendererBusy(res, err) {
+	if (!err || err.code !== "PDF_RENDERER_BUSY") return false;
+	res.setHeader("Retry-After", "5");
+	res.status(503).json({ error: "PDF renderer is busy. Try again in a moment.", code: "PDF_RENDERER_BUSY" });
+	return true;
+}
+
 const { shutdownBrowser } = require("./lib/pdf-browser");
 async function gracefulShutdown(signal) {
 	console.log(`${signal} received — shutting down Puppeteer browser`);
