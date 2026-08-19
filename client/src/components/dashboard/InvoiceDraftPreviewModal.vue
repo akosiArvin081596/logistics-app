@@ -362,7 +362,11 @@
                 @input="onFieldInput"
               />
               <p v-if="fieldErrors.poNumber" class="idp-hint idp-hint-warn">{{ fieldErrors.poNumber }}</p>
-              <template v-else-if="pv.needsPoNumber">
+              <!-- `|| noPoOnRatecon` keeps the box mounted after it is ticked. The
+                   next preview returns needsPoNumber:false, which unmounted the
+                   whole block and left the acknowledgement on with no way to
+                   withdraw it short of reopening the modal. -->
+              <template v-else-if="pv.needsPoNumber || noPoOnRatecon">
                 <p v-if="!form.poNumber.trim() && !noPoOnRatecon" class="idp-hint idp-hint-warn">
                   Required — copy the PO # from the rate confirmation, or tick below if it has none.
                 </p>

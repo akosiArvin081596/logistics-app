@@ -15403,14 +15403,6 @@ async function runGallonsRecovery({ apply = false, ids = null, limit, req } = {}
 	};
 }
 
-// GET — propose. Structurally read-only: apply is hardcoded false and no query
-// parameter can flip it. Bills Gemini, which is why it is rate-limited and
-// batched; requireRole is mounted BEFORE the limiter for the same reason it is
-// on the fuel-events verbs (an unauthenticated caller must not be able to spend
-// the Super Admin's budget on 403s).
-// refuseCrossSite sits BEFORE the limiter, same reasoning as requireRole: a
-// request we are going to refuse must not first consume the budget it was trying
-// to drain.
 // ===========================================================================
 // POST /api/admin/ratecon-index — backfill the load -> rate-con mapping.
 //
@@ -15476,7 +15468,17 @@ app.post("/api/admin/ratecon-index", requireRole("Super Admin"), refuseCrossSite
 
 		// One text extraction per FILE per run, not per load — without this the
 		// same PDF is downloaded once for every load whose window contains it.
+		// ⚠️ BOUNDED. One extracted text per Drive file, and the folder holds ~700 —
+		// left unbounded a single run pins every one of them in memory for its
+		// whole duration. FIFO-capped like poiStopsCache; the cache exists to stop
+		// re-downloading a file that several loads' windows overlap on, and that
+		// locality is local, so evicting the oldest costs almost nothing.
+		const TEXT_CACHE_MAX = 120;
 		const textCache = new Map();
+		const cacheText = (id, text) => {
+			textCache.set(id, text);
+			if (textCache.size > TEXT_CACHE_MAX) textCache.delete(textCache.keys().next().value);
+		};
 		const readText = async (f) => {
 			if (textCache.has(f.id)) return textCache.get(f.id);
 			const resp = await drive.files.get(
@@ -15484,7 +15486,7 @@ app.post("/api/admin/ratecon-index", requireRole("Super Admin"), refuseCrossSite
 				{ responseType: "arraybuffer" },
 			);
 			const text = brokerInvoice.extractPdfText(Buffer.from(resp.data)) || "";
-			textCache.set(f.id, text);
+			cacheText(f.id, text);
 			return text;
 		};
 
@@ -15547,7 +15549,12 @@ app.post("/api/admin/ratecon-index", requireRole("Super Admin"), refuseCrossSite
 			results.push(row);
 		}
 
-		const truncated = processed < Math.min(pending.length, limit);
+		// ⚠️ EITHER CAUSE. This read the deadline only, so a run cut short by
+		// `limit` answered truncated:false with remaining > 0 — which scans as
+		// "covered everything" to anyone not cross-checking the two fields. A
+		// bounded run that does not say it was bounded is the silent-truncation
+		// failure this repo's own no-silent-caps rule names.
+		const truncated = processed < pending.length;
 		if (truncated) {
 			console.warn(`[ratecon-index] run stopped at the ${Math.round((Date.now() - startedAt) / 1000)}s deadline after ${processed} load(s) — ${pending.length - processed} not attempted.`);
 		}
@@ -15580,6 +15587,14 @@ app.post("/api/admin/ratecon-index", requireRole("Super Admin"), refuseCrossSite
 	}
 });
 
+// GET — propose. Structurally read-only: apply is hardcoded false and no query
+// parameter can flip it. Bills Gemini, which is why it is rate-limited and
+// batched; requireRole is mounted BEFORE the limiter for the same reason it is
+// on the fuel-events verbs (an unauthenticated caller must not be able to spend
+// the Super Admin's budget on 403s).
+// refuseCrossSite sits BEFORE the limiter, same reasoning as requireRole: a
+// request we are going to refuse must not first consume the budget it was trying
+// to drain.
 app.get("/api/admin/fuel-gallons-recovery", requireRole("Super Admin"), refuseCrossSite, fuelGallonsLimiter, async (req, res) => {
 	if (!GEMINI_API_KEY) return res.status(503).json({ error: "ocr_unavailable" });
 	try {
@@ -32741,7 +32756,11 @@ async function getRateConBytes(loadId, body, loadCtx = null, opts = {}) {
 	//     extractRateConFields() as the source of the Order #. A BOL is a
 	//     last-resort stand-in, never a preference. Rank RATECON first, and read
 	//     with .all() — a membership test, not fetch-one (see CLAUDE.md).
-	const docKeys = [String(loadId || "").trim(), orderNumber, normLoadKey(loadId)]
+	// TWO keys, and only two: the raw param and the "#"-stripped form. A third,
+	// normLoadKey(loadId), was passed and was INERT — it lowercases, while SQLite
+	// `IN` on TEXT is case-sensitive, so it could never match a mixed-case stored
+	// load_id. Passing it implied a coverage this lookup does not have.
+	const docKeys = [String(loadId || "").trim(), orderNumber]
 		.filter((k) => k)
 		.filter((k, i, a) => a.indexOf(k) === i);
 	const docRows = docKeys.length
@@ -33249,13 +33268,62 @@ function invoiceIdAlreadyUsed(invoiceId, loadId) {
 	}
 }
 
+// ⚠️ THE GUARDS WERE ON THE WRONG ROUTE. This one had `requireRole` and nothing
+// else, while its own preview sibling below — which does, by its own header
+// comment, "zero Sheets, zero Drive, zero Gemini, zero DB writes" — carried a
+// cross-site guard, a limiter AND an in-flight cap. Per call THIS route does a
+// full Job Tracking read (against the 300 req/min quota that is the app's
+// primary database), N Drive/POD fetches, a BILLED Gemini call, an unserialized
+// Chromium render, an IMAP APPEND that creates a REAL OUTBOUND DRAFT TO A
+// BROKER, and an irreversible bison_invoice_seq increment that leaves permanent
+// gaps in invoice numbering. Unbounded, one session could loop all of that.
+//
+// 25/15min, keyed per USER (the poiLimiter/invoicePreviewLimiter precedent — a
+// dispatch office behind one NAT must not share a bucket). Deliberately not the
+// preview's 120: that number is sized for debounced typing, and here it would
+// permit 120 invoice numbers and 120 Gmail drafts a quarter-hour. Deliberately
+// not fuelGallonsLimiter's 6 either — this same limiter covers the `?dryRun=1`
+// preview the review modal opens with, so a dispatcher working several loads in
+// a sitting has to fit inside it.
+const draftInvoiceLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 25,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many invoice draft requests. Try again in a few minutes." },
+	standardHeaders: true,
+});
+
 // POST /api/loads/:loadId/draft-invoice  (alias: .../draft-bison-invoice)
 // Restricted to Super Admin + Dispatcher (the roles that run dispatch ops).
 // The legacy Bison-specific path stays registered so any external caller
 // (bookmarks, n8n, a cached SPA bundle) keeps working — same handler.
+//
+// ⚠️ refuseCrossSite IS DEFENCE-IN-DEPTH HERE, NOT A LIVE FIX — say so plainly
+// rather than implying an exploit that does not exist. The session cookie is
+// SameSite=Lax by default (resolveSessionSameSite) and SESSION_COOKIE_SAMESITE
+// is unset in every environment, so no cross-site POST carries connect.sid
+// today. The reason to mount it anyway: this route needs NO REQUEST BODY to do
+// its damage — parseInvoiceOverrides() accepts {} and every field is optional —
+// so the "a cross-site form cannot send application/json" backstop that covers
+// its money-guard siblings does NOT cover this one. That puts it in the same
+// class as POST /api/periods/:period/finalize, the one this codebase already
+// reproduced end to end. One env var (SESSION_COOKIE_SAMESITE=none) republishes
+// it, and a guard is what makes that rollback survivable.
+//
+// Not refuseCrossOrigin: by this file's own convention (same-site = cost guard,
+// same-origin = money guard) that tier is reserved for the routes that close a
+// settlement month or move a payout. This burns a sequence number and bills an
+// API; it does not restate a settlement.
 app.post(
 	["/api/loads/:loadId/draft-invoice", "/api/loads/:loadId/draft-bison-invoice"],
 	requireRole("Super Admin", "Dispatcher"),
+	// requireRole BEFORE the limiter so an unauthenticated caller cannot spend
+	// the budget on 403s — the fuelEvents/fuelGallons precedent.
+	refuseCrossSite,
+	draftInvoiceLimiter,
 	async (req, res) => {
 		try {
 			const loadId = decodeURIComponent(req.params.loadId || "").trim();
@@ -33400,7 +33468,7 @@ app.post(
 			// promise: a dispatcher who opens the modal, sees the wrong rate-con and
 			// CANCELS has already written the link, and every later draft is then
 			// served from `documents` with no rescan and no second look.
-			const { buffer: rateconBuffer, fileName: rateconFileName, candidates: rateconCandidates } = await getRateConBytes(loadId, req.body, rateconLoadCtx, { persist: !dryRun, req });
+			const { buffer: rateconBuffer, candidates: rateconCandidates } = await getRateConBytes(loadId, req.body, rateconLoadCtx, { persist: !dryRun, req });
 			// Say so plainly. The invoice still drafts without one (POD + the
 			// sheet's Payment column carry it), but brokers generally require the
 			// rate-con alongside the invoice, so an unattached one is the reason a
