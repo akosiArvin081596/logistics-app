@@ -597,7 +597,8 @@ async function runReceiptOcr() {
   try {
     const res = await fetch('/api/expenses/ocr', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      // Bypasses useApi, so it carries the CSRF header itself — see useApi.js.
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({ photoData: photoBase64.value }),
     })
     if (res.status === 503) {

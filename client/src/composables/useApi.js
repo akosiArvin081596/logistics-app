@@ -21,7 +21,13 @@ export function useApi() {
 
     try {
       const res = await fetch(url, {
-        headers: { 'Content-Type': 'application/json', ...fetchOptions.headers },
+        // X-Requested-With is the same-site CSRF control the server enforces in
+        // requireAuth/requireRole. It is NOT CORS-safelisted, so a cross-origin
+        // caller must preflight to send it and this server answers no preflight
+        // — and a top-level form cannot set headers at all. One line here covers
+        // every write in the app; the two components that call fetch() directly
+        // set it themselves.
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...fetchOptions.headers },
         ...fetchOptions,
         signal: controller.signal,
       })

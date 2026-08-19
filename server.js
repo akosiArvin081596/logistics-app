@@ -6024,9 +6024,51 @@ app.post("/api/investors/:id/profile-picture", requireAuth, (req, res) => {
 // ============================================================
 // Roles: Super Admin (full access), Admin (dispatch, no broker/financial), Driver (own data only, no rate/revenue), Investor (financial view)
 
+// ===========================================================================
+// THE SAME-SITE HALF OF CSRF — what crossSiteGuard cannot reach
+// ===========================================================================
+// refuseCrossSite tolerates `Sec-Fetch-Site: same-site` by design, so a page on
+// a SIBLING logisx.com host reaches every guarded route with a live session. The
+// cookie is host-only (no `domain:` in the session config), so a sibling cannot
+// READ connect.sid — but Lax still ATTACHES it on sibling→app, so blind writes
+// survive. And the credible path is not user-generated content: logisx.com is a
+// WIX site, governed by an account credential that exists nowhere in this repo
+// or on the VPS.
+//
+// A non-safelisted request header closes exactly that. It cannot be set by a
+// top-level form at all, and any cross-origin fetch carrying it must preflight —
+// there is no `cors` package here and DRIVER_MOBILE_ORIGINS is empty in
+// production, so the preflight is never answered and the real request is never
+// sent. A same-site page therefore cannot produce it.
+//
+// Be honest about what this is NOT: it is a request-SHAPE control, the same
+// class as the guards above, and it fails open if absent. It does not survive an
+// XSS on app.logisx.com itself — but neither would a per-session token, and a
+// token needs a bootstrap path the SPA does not have.
+//
+// ⚠️ THE CHECK IS DUPLICATED IN BOTH GUARDS, AND MUST STAY SELF-CONTAINED.
+// scripts/test-db-export-guard.js lifts requireRole out of this file by
+// brace-matching and runs it in a bare `new Function` with NO injected
+// identifiers, so a shared module-scope helper would make that lift throw at
+// call time. Only `req`, `res` and true globals are legal here. The
+// duplication is pinned by scripts/test-csrf-write-header.js, which asserts the
+// two copies stay identical — this repo's standing failure mode is a hand-copied
+// rule drifting, so the copy is allowed only because a test watches it.
+//
+// ⚠️ Read through process.env per call rather than a module-scope const, for the
+// same lift reason. CSRF_HEADER_REQUIRED is a KILL SWITCH, not an enable
+// switch — it defaults ON and only an explicit "false" disables it, matching
+// PII_MASK_ENABLED. It exists because the legacy public/ pages use raw fetch
+// with no header and are still served when client/dist is missing.
 function requireAuth(req, res, next) {
 	if (!req.session.user)
 		return res.status(401).json({ error: "Not authenticated" });
+	if (
+		req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS" &&
+		!(req.headers || {})["x-requested-with"] &&
+		String(process.env.CSRF_HEADER_REQUIRED || "").toLowerCase() !== "false"
+	)
+		return res.status(403).json({ error: "Missing X-Requested-With header", code: "CSRF_HEADER_REQUIRED" });
 	next();
 }
 
@@ -6036,6 +6078,12 @@ function requireRole(...roles) {
 			return res.status(401).json({ error: "Not authenticated" });
 		if (!roles.includes(req.session.user.role))
 			return res.status(403).json({ error: "Forbidden" });
+		if (
+			req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS" &&
+			!(req.headers || {})["x-requested-with"] &&
+			String(process.env.CSRF_HEADER_REQUIRED || "").toLowerCase() !== "false"
+		)
+			return res.status(403).json({ error: "Missing X-Requested-With header", code: "CSRF_HEADER_REQUIRED" });
 		next();
 	};
 }
@@ -32823,7 +32871,14 @@ async function getRateConBytes(loadId, body, loadCtx = null, opts = {}) {
 	//
 	// Skipped without loadCtx: with nothing to corroborate against, every match
 	// would be `unconfirmed`, which is precisely what must not be attached.
-	if (!candidates.length && RATECON_DRIVE_FOLDER_ID && safe && loadCtx && !rateconScanMissedRecently(safe)) {
+	// ⚠️ KEYED ON THE LOAD ID, NOT `safe`. `safe` strips every non-alphanumeric so
+	// it can be interpolated into the Drive query, which means "LD-123456" and
+	// "LD123456" collapse to one key — two different loads sharing one miss. It
+	// fails safe (a shared key suppresses a scan, never permits a wrong match)
+	// and this sheet holds no such pair today, but the cache key has no reason to
+	// inherit a restriction that exists for query escaping.
+	const scanMissKey = normLoadKey(loadId);
+	if (!candidates.length && RATECON_DRIVE_FOLDER_ID && safe && loadCtx && !rateconScanMissedRecently(scanMissKey)) {
 		try {
 			const rcIndex = require("./lib/ratecon-drive-index.js");
 			const drive = await getDrive();
@@ -32892,7 +32947,7 @@ async function getRateConBytes(loadId, body, loadCtx = null, opts = {}) {
 						`corroborates them — not attaching: ${found.unconfirmed.map((u) => u.file.name).join(", ")}`,
 				);
 			}
-			if (!found.accepted.length) rememberRateConScanMiss(safe);
+			if (!found.accepted.length) rememberRateConScanMiss(scanMissKey);
 		} catch (e) {
 			// Same posture as every other source here: a failure degrades to "no
 			// rate-con", which the caller already handles loudly.
