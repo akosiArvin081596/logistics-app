@@ -6122,8 +6122,35 @@ function requireAuth(req, res, next) {
 		req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS" &&
 		!(req.headers || {})["x-requested-with"] &&
 		String(process.env.CSRF_HEADER_REQUIRED || "").toLowerCase() !== "false"
-	)
+	) {
+		// ⚠️ A SILENT REFUSAL IS UNFALSIFIABLE. Without this line a refusal left no
+		// trace at all — no log, no audit row — so "grep the logs for CSRF
+		// refusals" returned 0 whether every client was fine OR every client was
+		// blocked. Measured an hour after this control was enabled: 0 refusals
+		// logged and 0 user writes attempted, which is exactly the state where
+		// "nothing failed" and "nothing ran" are indistinguishable — the trap this
+		// repo names elsewhere and that I walked into here.
+		//
+		// Coalesced to one line a minute with a running total, the same shape as
+		// n8nDistanceUnauthorized above. Flooding is bounded anyway: this check
+		// runs AFTER the session check, so only an authenticated caller can reach
+		// it — a broken client in a retry loop, not an anonymous attacker.
+		//
+		// ⚠️ globalThis, not a module-scope counter, and that is not style: the
+		// guards are lifted into a bare `new Function` by
+		// scripts/test-db-export-guard.js with nothing injected, so a module-scope
+		// binding here throws at call time in an unrelated suite.
+		globalThis.__csrfRefusedCount = (globalThis.__csrfRefusedCount || 0) + 1;
+		if (!globalThis.__csrfRefusedLoggedAt || Date.now() - globalThis.__csrfRefusedLoggedAt > 60000) {
+			globalThis.__csrfRefusedLoggedAt = Date.now();
+			console.warn(
+				`CSRF: ${globalThis.__csrfRefusedCount} write(s) refused for a missing X-Requested-With header ` +
+					`(most recent ${req.method} ${req.path || req.url}). A legitimate client sends it via useApi.js; ` +
+					`a burst here means a stale bundle or a caller that bypasses useApi.`,
+			);
+		}
 		return res.status(403).json({ error: "Missing X-Requested-With header", code: "CSRF_HEADER_REQUIRED" });
+	}
 	next();
 }
 
@@ -6137,8 +6164,35 @@ function requireRole(...roles) {
 			req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS" &&
 			!(req.headers || {})["x-requested-with"] &&
 			String(process.env.CSRF_HEADER_REQUIRED || "").toLowerCase() !== "false"
-		)
+		) {
+			// ⚠️ A SILENT REFUSAL IS UNFALSIFIABLE. Without this line a refusal left no
+			// trace at all — no log, no audit row — so "grep the logs for CSRF
+			// refusals" returned 0 whether every client was fine OR every client was
+			// blocked. Measured an hour after this control was enabled: 0 refusals
+			// logged and 0 user writes attempted, which is exactly the state where
+			// "nothing failed" and "nothing ran" are indistinguishable — the trap this
+			// repo names elsewhere and that I walked into here.
+			//
+			// Coalesced to one line a minute with a running total, the same shape as
+			// n8nDistanceUnauthorized above. Flooding is bounded anyway: this check
+			// runs AFTER the session check, so only an authenticated caller can reach
+			// it — a broken client in a retry loop, not an anonymous attacker.
+			//
+			// ⚠️ globalThis, not a module-scope counter, and that is not style: the
+			// guards are lifted into a bare `new Function` by
+			// scripts/test-db-export-guard.js with nothing injected, so a module-scope
+			// binding here throws at call time in an unrelated suite.
+			globalThis.__csrfRefusedCount = (globalThis.__csrfRefusedCount || 0) + 1;
+			if (!globalThis.__csrfRefusedLoggedAt || Date.now() - globalThis.__csrfRefusedLoggedAt > 60000) {
+				globalThis.__csrfRefusedLoggedAt = Date.now();
+				console.warn(
+					`CSRF: ${globalThis.__csrfRefusedCount} write(s) refused for a missing X-Requested-With header ` +
+						`(most recent ${req.method} ${req.path || req.url}). A legitimate client sends it via useApi.js; ` +
+						`a burst here means a stale bundle or a caller that bypasses useApi.`,
+				);
+			}
 			return res.status(403).json({ error: "Missing X-Requested-With header", code: "CSRF_HEADER_REQUIRED" });
+		}
 		next();
 	};
 }
