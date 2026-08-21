@@ -5069,6 +5069,61 @@ app.post("/api/n8n/load-distance", n8nDistanceLimiter, async (req, res) => {
 		// is why `details_kind` is worth publishing: it lets a consumer tell a
 		// real lane from the "Distance unavailable" sentinel that a Maps outage
 		// produces, instead of writing that sentinel into a display column.
+		// ⚠️ DUPLICATE-ROW TRIPWIRE — the app's half of the 2026-08-21 fix.
+		//
+		// C.H. Robinson sends each load as TWO emails. Normally they arrive in
+		// separate Gmail polls, so JOB DETAILS ENTRY's appendOrUpdate matches the
+		// first row and updates it. When both land in the SAME poll the workflow
+		// runs once with two items, and appendOrUpdate cannot dedupe inside its
+		// own batch — neither item sees the row the other just appended, so BOTH
+		// append. Execution 2501 wrote load 564446669 onto rows 433 and 434, and
+		// the load then could not be assigned at all: the dispatch binding ladder
+		// refuses an ambiguous load id rather than guess which row is meant.
+		//
+		// The cause is fixed upstream by the `Dedupe Loads In Batch` node added to
+		// the live workflow. This is the tripwire that says so: it runs on the one
+		// app endpoint the ingestion calls AFTER the row is written, so if the
+		// duplicate ever comes back it is visible within seconds instead of days
+		// later when someone tries to dispatch. 87 of 308 load ids already carry a
+		// historical duplicate and nobody noticed until one landed on a live load.
+		//
+		// ⚠️ IT ONLY OBSERVES. It does not delete a row and it does not touch the
+		// response: this endpoint must return a FLAT body whose top-level keys are
+		// exactly the Job Details column names, and adding one would re-create the
+		// trap that dumped 151 JSON blobs into a column literally named `output`.
+		// Deleting a sheet row from an unattended ingestion path is also precisely
+		// the kind of automatic destructive write this codebase does not do.
+		try {
+			const jtDupe = await getJobTrackingCached();
+			const dupeCheck = deduplicateLoads(jtDupe.data || [], jtDupe.headers || [], true);
+			const key = String(loadId || "").trim().toLowerCase().replace(/^#/, "");
+			const idCol = (jtDupe.headers || []).find((h) => /load.?id|job.?id/i.test(h));
+			const mine = idCol
+				? (dupeCheck.duplicates || []).filter(
+						(d) => String(d[idCol] || "").trim().toLowerCase().replace(/^#/, "") === key,
+					)
+				: [];
+			if (mine.length) {
+				console.warn(
+					`[ingest-dupe] load ${loadId} is on ${mine.length + 1} rows of Job Tracking after ingestion — ` +
+						`it cannot be dispatched until the extra row is removed. The n8n Dedupe Loads In Batch node ` +
+						`should have prevented this; check whether it is still wired.`,
+				);
+				try {
+					logAudit(
+						{ session: { user: { id: 0, username: "n8n", role: "system" } } },
+						"ingest_duplicate_row",
+						"job_tracking",
+						loadId,
+						`load ${loadId} occupies ${mine.length + 1} rows after ingestion`,
+					);
+				} catch { /* observation must never fail the ingestion */ }
+			}
+		} catch (e) {
+			// A tripwire that breaks the thing it watches is worse than no tripwire.
+			console.error("[ingest-dupe] duplicate check failed (ingestion unaffected):", e.message);
+		}
+
 		return res.json({
 			"Load ID": loadId,
 			Distance: `${rpm.distance_miles} Miles`,
