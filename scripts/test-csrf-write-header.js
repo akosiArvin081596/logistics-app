@@ -112,17 +112,47 @@ for (const [label, guard] of [["requireAuth", buildAuth()], ["requireRole", buil
 	// between them and the hand-copied-rule drift this repo keeps paying for.
 	// Whitespace-normalised: requireRole's copy is nested one level deeper inside
 	// the returned arrow, so raw text always differs by a tab. Compare the LOGIC.
+	// ⚠️ Compare the WHOLE refusal — condition AND the logging under it. This
+	// used to stop at the first "CSRF_HEADER_REQUIRED", which sits inside the env
+	// check, so the coalesced console.warn added afterwards was outside the
+	// comparison and the two copies could have drifted apart unnoticed.
 	const clause = (src) => {
 		const i = src.indexOf('req.method !== "GET"');
 		if (i < 0) return null;
-		return src
-			.slice(i, src.indexOf("CSRF_HEADER_REQUIRED", i) + "CSRF_HEADER_REQUIRED".length)
-			.replace(/\s+/g, " ")
-			.trim();
+		const end = src.indexOf('code: "CSRF_HEADER_REQUIRED" });', i);
+		if (end < 0) return null;
+		return src.slice(i, end).replace(/\s+/g, " ").trim();
 	};
 	const a = clause(REQUIRE_AUTH), b = clause(REQUIRE_ROLE);
 	ok(a && b, "§5 both guards should carry the check");
 	ok(a === b, "§5 DRIFT: the two copies of the CSRF check are no longer identical");
+}
+
+// ─────────── §5b A REFUSAL MUST BE OBSERVABLE, or "fine" and "blocking
+//             everyone" are the same reading.
+{
+	// This was a real gap: for an hour in production a refusal wrote no log line
+	// and no audit row, so grepping for refusals returned 0 in BOTH the healthy
+	// case and the everyone-is-locked-out case. There were also no user writes in
+	// that window, so nothing else disambiguated it either.
+	const logs = [];
+	const realWarn = console.warn;
+	console.warn = (...a) => logs.push(a.join(" "));
+	try {
+		delete globalThis.__csrfRefusedLoggedAt;
+		globalThis.__csrfRefusedCount = 0;
+		run(buildAuth(), { method: "POST", headers: NO_HDR });
+		ok(logs.length === 1, "§5b a refusal must leave a server-side trace");
+		ok(/X-Requested-With/.test(logs[0] || ""), "§5b …that names the header, so the cause is readable without the source");
+		// …but coalesced: a retrying client must not flood the log.
+		for (let i = 0; i < 50; i++) run(buildAuth(), { method: "POST", headers: NO_HDR });
+		ok(logs.length === 1, `§5b 51 refusals must coalesce to one line, not ${logs.length}`);
+		ok(globalThis.__csrfRefusedCount === 51, "§5b …while still counting every one of them");
+	} finally {
+		console.warn = realWarn;
+		delete globalThis.__csrfRefusedLoggedAt;
+		delete globalThis.__csrfRefusedCount;
+	}
 }
 
 // ────────────────────────── §6 self-contained (the lift must not throw)
@@ -134,8 +164,13 @@ for (const [label, guard] of [["requireAuth", buildAuth()], ["requireRole", buil
 		`§6 the check reaches for something outside the guard — test-db-export-guard.js's new Function lift will throw: ${threw && threw.message}`);
 	// Only `req`, `res` and true globals are legal. process.env is a global, so
 	// it is fine; a module-scope const is not.
-	ok(!/\bSAFE_METHODS\b|\bCSRF_[A-Z_]*\s*=/.test(REQUIRE_AUTH + REQUIRE_ROLE),
+	// globalThis and process.env are true globals and survive the lift; a bare
+	// module-scope identifier does not. That is why the refusal counter lives on
+	// globalThis rather than beside the other counters in server.js.
+	ok(!/\bSAFE_METHODS\b|^\s*(const|let|var)\s/m.test(REQUIRE_AUTH + REQUIRE_ROLE),
 		"§6 the check must not depend on a module-scope binding");
+	ok(/globalThis\.__csrfRefused/.test(REQUIRE_AUTH) && /globalThis\.__csrfRefused/.test(REQUIRE_ROLE),
+		"§6 the refusal counter must be on globalThis in BOTH guards, or the lift throws");
 }
 
 // ────────────────────────── §7 kill switch: default ON, only "false" disables
