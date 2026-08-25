@@ -149,8 +149,43 @@ jobs:
           echo "new HEAD: $NEW"
           echo "::endgroup::"
 
+          echo "::group::resolve the Node this app actually runs on"
+          # ⚠️ Build with the SAME Node pm2 will execute the app with, not
+          # whatever is on the default PATH. Native modules (better-sqlite3) are
+          # compiled against a specific NODE_MODULE_VERSION, so installing under
+          # Node 20 and running under Node 22 is an instant ERR_DLOPEN_FAILED on
+          # boot — "compiled against NODE_MODULE_VERSION 115, this version
+          # requires 127".
+          #
+          # pm2's own interpreter is the single source of truth, deliberately:
+          # hardcoding a per-target path here would silently drift the day
+          # someone repins a process. staging currently runs /opt/node22/bin/node
+          # (for puppeteer 25, which needs >=22.12); production still runs the
+          # system Node 20.
+          NODE_BIN=$(pm2 jlist | node -e '
+            let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+              const p=JSON.parse(d).find(x=>x.name===process.argv[1]);
+              process.stdout.write(p && p.pm2_env ? (p.pm2_env.exec_interpreter||"") : "");
+            });' "$PM2")
+          case "$NODE_BIN" in
+            ""|node) NODE_BIN=$(command -v node) ;;
+          esac
+          export PATH="$(dirname "$NODE_BIN"):$PATH"
+          echo "pm2 interpreter: $NODE_BIN"
+          echo "building with:   $(command -v node) $(node --version) / npm $(npm --version)"
+          echo "::endgroup::"
+
           echo "::group::install + build"
           npm install --silent --no-audit --no-fund
+          # npm tracks package VERSIONS, not ABI — it reports "up to date" and
+          # skips the rebuild when only the Node major changed. Probe the native
+          # module and rebuild only if it actually fails to load.
+          if ! node -e "require('better-sqlite3')" >/dev/null 2>&1; then
+            echo "native ABI mismatch detected — rebuilding better-sqlite3 for $(node --version)"
+            npm rebuild better-sqlite3
+            node -e "require('better-sqlite3')" || { echo "::error::better-sqlite3 still fails to load after rebuild"; exit 1; }
+          fi
+          echo "native modules OK under $(node --version)"
           npm run build:client --silent
           test -f client/dist/index.html || { echo "::error::build produced no client/dist/index.html"; exit 1; }
           echo "::endgroup::"
