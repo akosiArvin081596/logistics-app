@@ -34,7 +34,7 @@
  *
  * Every runner in scope is hermetic — `new Database(":memory:")` or a fresh
  * `mkdtemp`, no network, no fixtures, and it does not read the real `app.db`.
- * Verified on a clean checkout with no `app.db` present: 45/45 pass in ~17 s.
+ * Verified on a clean checkout with no `app.db` present: 46/46 pass in ~20 s.
  */
 
 const { spawn } = require("child_process");

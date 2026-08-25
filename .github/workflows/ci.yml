@@ -62,13 +62,9 @@ jobs:
       - name: Install root dependencies
         run: npm ci --no-audit --no-fund
 
-      # ⚠️ Expect one EBADENGINE warning here: pdfjs-dist@6.2.108 declares
-      # `node >=22.13.0 || >=24` while this job (and production) run 20.20.1.
-      # It is NOT a problem today — pdfjs-dist is bundled by Vite for the
-      # BROWSER via vue-pdf-embed, so Node's version is irrelevant to it, and
-      # the build step below proves it compiles on 20. It would matter the day
-      # anything imports pdfjs-dist server-side. Do not "fix" it by raising the
-      # CI Node version: that would stop CI matching the box.
+      # (Historical note: on the old Node 20 this step printed an EBADENGINE
+      # warning for pdfjs-dist@6.2.108, which declares `node >=22.13.0 || >=24`.
+      # The move to 22.23.2 satisfies it and the warning is gone.)
       - name: Install client dependencies (verifies client lockfile)
         run: npm ci --no-audit --no-fund
         working-directory: client

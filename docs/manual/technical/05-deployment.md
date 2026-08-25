@@ -57,8 +57,9 @@ reasoning behind each step are in
 [`.github/workflows/README.md`](../../../.github/workflows/README.md).
 
 Every PR is gated by the *CI* workflow: `node --check server.js`, the 45
-standalone runners in `scripts/`, and a client build, all on Node 20 to match
-this box.
+standalone runners in `scripts/`, and a client build, all on Node 22 to match
+what pm2 actually runs these apps with (the box's *system* node is still 20 and
+belongs to other tenants).
 
 ### Deploying by hand
 
