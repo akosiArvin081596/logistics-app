@@ -25,6 +25,8 @@ The long-form reasoning behind the trickiest parts of this system was moved out 
 
 Other long-form docs already in the repo: `scripts/README-env-refresh.md` (env-refresh runbook), `docs/ratecon-ownership-recommendation.md`, `docs/investor-portal-copy.md` (investor-facing copy sign-off inventory), `docs/manual/technical/06-operations.md`, `docs/vps-disk-and-data-handoff.md`.
 
+**Driver POD upload failures have their own triage set — start at [`docs/troubleshooting/driver-pod-upload-failures.md`](docs/troubleshooting/driver-pod-upload-failures.md).** It maps the whole chain (phone → cellular → nginx → Express → Sheets/Drive/ScanKit) to a symptom → cause → fix matrix, then hands off to two runbooks: [`docs/runbooks/nginx-upload-timeouts.md`](docs/runbooks/nginx-upload-timeouts.md) (a `499` from a driver's phone while a desktop admin gets `200` is a timeout, **not** a code bug — nginx's default `proxy_read_timeout` is 60 s and the POD flag is written to Sheets on the critical path) and [`docs/runbooks/scankit-billing.md`](docs/runbooks/scankit-billing.md) (a `402 scan_no_credits` degrades to the raw photo — scanning is an enhancement, never a gate on closing the load).
+
 **`README.md` at the repo root is the project's front door and is accurate as of 2026-08-25** — it was rewritten then, having previously described the "Google Sheets CRUD" starter this repo grew out of (a four-route `/api/data` API, `public/index.html` as "the" frontend, and an instruction to *"Open `server.js` and update these three values at the top"*). It is a short orientation that points here. **This file plus `docs/claude/` remains the real documentation** — the README deliberately does not duplicate any hazard, it links to them.
 
 ### House invariants — the rules you can break without knowing the topic exists
@@ -70,6 +72,12 @@ npm run dev          # Run with nodemon for auto-restart on file changes
 # Frontend (Vue 3 + Vite SPA)
 npm run dev:client   # Start Vite dev server on port 5173 (proxies to Express:3000)
 npm run build:client # Production build to client/dist/
+
+# Verify — this IS the CI gate (.github/workflows/ci.yml runs the same three)
+npm run ci           # check + test:unit + build:client, ~1 min. Run before pushing.
+npm run check        # node --check server.js — ~47k lines, a syntax error breaks the whole app
+npm run test:unit    # scripts/run-unit-tests.js — 46 standalone runners, ~20 s
+node scripts/test-truck-retirement.js   # run ONE runner: plain node, no server/fixtures, exits 1 on failure
 
 # Docs (Puppeteer-driven static doc/screenshot generation from scripts/docs/)
 npm run docs:build       # node scripts/docs/generate-docs.js
@@ -118,7 +126,7 @@ SPREADSHEET_ID=156Y5-OUUEZspiY7dRsJZ57iyKWLJAjdVP8a4yw0PMN0 npm start
 TEST_ADMIN_USER=super_admin TEST_INVESTOR_USER=johnny.rocks.spirits.llc \
   TEST_DISPATCHER_USER=amir_serrano TEST_DISPATCHER_PASS='Password123!' node test-suite.js
 ```
-**The other half of the test story: 42 standalone runners in `scripts/test-*.js`.** These are plain `node scripts/test-<thing>.js` — **no server, no fixtures, no sheet override, no rate-limit window** — and each exits 1 on failure. They are the only tests you can run on a whim, and several are explicitly load-bearing elsewhere in this file: `test-db-export-guard.js` (lifts `requireRole` into a bare `new Function`, which is why the CSRF check must stay self-contained), `test-csrf-write-header.js` (pins the two duplicated guard copies identical), `scripts/check-ratecon-address-parsing.js` (16 verbatim production addresses locking `cityStateZip()`), plus `test-truck-retirement.js`, `test-investor-expense-scoping.js`, `test-period-lock-queue.js`, `test-payout-carry-freeze.js`, `test-google-timeout-retry.js` (locks the Google API retry-on-timeout behaviour a googleapis major would silently break) and the rest of the money-math set. **Run the ones covering what you touched before reaching for `test-suite.js`** — they are seconds, not a 15-minute window. `ls scripts/test-*.js` for the current list.
+**The other half of the test story: the 46 standalone runners `npm run test:unit` drives.** These are plain `node scripts/test-<thing>.js` — **no server, no fixtures, no sheet override, no rate-limit window** — and each exits 1 on failure. They are the only tests you can run on a whim, and several are explicitly load-bearing elsewhere in this file: `test-db-export-guard.js` (lifts `requireRole` into a bare `new Function`, which is why the CSRF check must stay self-contained), `test-csrf-write-header.js` (pins the two duplicated guard copies identical), `scripts/check-ratecon-address-parsing.js` (16 verbatim production addresses locking `cityStateZip()`), plus `test-truck-retirement.js`, `test-investor-expense-scoping.js`, `test-period-lock-queue.js`, `test-payout-carry-freeze.js`, `test-google-timeout-retry.js` (locks the Google API retry-on-timeout behaviour a googleapis major would silently break) and the rest of the money-math set. **Run the ones covering what you touched before reaching for `test-suite.js`** — they are seconds, not a 15-minute window. ⚠️ **`ls scripts/test-*.js` under-reports: it finds 42 of the 46.** The runner also picks up the three `scripts/test-*.mjs` client-logic runners and `scripts/check-ratecon-address-parsing.js` — which is the load-bearing one named two sentences up. `node scripts/run-unit-tests.js` prints the authoritative list.
 
 **The suite cannot be run twice inside 15 minutes** — it exhausts its own rate limiters (`exportLimiter` is 20/15min), so a second back-to-back run returns 429 across the export and statement tests and looks like a regression. Wait for the window, or compare against a run from the same cold start. Covers auth, role gating, debug-endpoint auth, webhook secret, chat file validation, canceled-load exclusion. Exits 1 on any failure. When editing `server.js`, run `node --check server.js` before committing (~47k lines; a syntax error breaks the whole app).
 
@@ -205,7 +213,7 @@ Single-file Node.js/Express server (**~47,320 lines, 236 route registrations** �
 
 **Static file serving**: Express serves `client/dist/` if it exists (production build), else `public/` (legacy vanilla HTML/JS). SPA catch-all `app.get("*")` serves `index.html` for client-side routing.
 
-**SQLite** (`app.db`, WAL mode) — **58 tables** organized by domain (`grep -c 'CREATE TABLE IF NOT EXISTS' server.js`):
+**SQLite** (`app.db`, WAL mode) — **58 tables** organized by domain. ⚠️ Regenerate with `grep -oE 'CREATE TABLE IF NOT EXISTS [a-z_]+ *\(' server.js | sed -E 's/.*EXISTS ([a-z_]+).*/\1/' | sort -u | wc -l` — the trailing `\(` is what makes it right. A bare `grep -c` answers **61**, and dropping the paren answers **60** — both read as "this doc is stale". Two comment lines quote the phrase in prose (server.js:13470, 13820), and only a real `CREATE TABLE` is followed by a column list:
 
 | Domain | Tables |
 |--------|--------|

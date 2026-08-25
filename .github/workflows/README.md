@@ -1,13 +1,13 @@
 # CI/CD
 
-Two workflows. `ci.yml` verifies, `deploy.yml` ships.
+Three workflows. `ci.yml` verifies, `deploy.yml` ships, `deploy-drift.yml` catches a ship that silently never happened.
 
-| | `ci.yml` | `deploy.yml` |
-|---|---|---|
-| Fires on | PR into `main`, push to `main`, manual | push to `main` → **staging → production** (auto); manual → one chosen target |
-| Runs | `npm ci` ×2 · `node --check` · 45 of 46 runners · client build | lockfile reset · pull · install · build · scoped pm2 restart · smoke |
-| Duration | ~1 min | well under a minute |
-| Touches production | never | only on an explicit manual run |
+| | `ci.yml` | `deploy.yml` | `deploy-drift.yml` |
+|---|---|---|---|
+| Fires on | PR into `main`, push to `main`, manual | push to `main` → **staging → production** (auto); manual → one chosen target | every 30 min (cron), manual |
+| Runs | `npm ci` ×2 · `node --check` · 45 of 46 runners · client build | lockfile reset · pull · install · build · scoped pm2 restart · smoke | compare production HEAD to `origin/main` → in-sync, heal once, or alarm |
+| Duration | ~1 min | well under a minute | seconds |
+| Touches production | never | **every push to `main` — no approval gate** | only to re-run a deploy that never landed, once per commit |
 
 ---
 
@@ -55,7 +55,7 @@ Both already appear in this repo's `CLAUDE.md` and it is public, so these are se
 
 **Settings → Environments** → create `staging` and `production`.
 
-On **`production`**, add yourself under **Required reviewers**. That is what turns a production deploy into an approval gate — the job pauses and waits. Without it the manual dispatch ships immediately on click.
+⚠️ **Neither environment has a required reviewer today** — that is what makes production auto-deploy on every merge to `main` (deliberate, 2026-08-25; the safety that replaced the human is below). To re-arm the gate, add a reviewer under **`production` → Required reviewers**: the job then pauses and waits, and no workflow file changes.
 
 ---
 
