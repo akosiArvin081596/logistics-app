@@ -27,7 +27,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # ⚠️ Node 20 is NOT a default — it is the version the VPS actually runs
       # (20.20.1 / npm 10.8.2, verified 2026-08-25), pinned via .nvmrc. Testing
@@ -35,7 +35,7 @@ jobs:
       # is green here and throws on the box. `better-sqlite3@12.8.0` is a
       # concrete instance: it declares 20.x||22.x||23.x||24.x||25.x, so a
       # runner on 26 is already outside what the native module supports.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -54,6 +54,13 @@ jobs:
       - name: Install root dependencies
         run: npm ci --no-audit --no-fund
 
+      # ⚠️ Expect one EBADENGINE warning here: pdfjs-dist@6.2.108 declares
+      # `node >=22.13.0 || >=24` while this job (and production) run 20.20.1.
+      # It is NOT a problem today — pdfjs-dist is bundled by Vite for the
+      # BROWSER via vue-pdf-embed, so Node's version is irrelevant to it, and
+      # the build step below proves it compiles on 20. It would matter the day
+      # anything imports pdfjs-dist server-side. Do not "fix" it by raising the
+      # CI Node version: that would stop CI matching the box.
       - name: Install client dependencies (verifies client lockfile)
         run: npm ci --no-audit --no-fund
         working-directory: client

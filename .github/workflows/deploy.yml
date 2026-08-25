@@ -52,7 +52,7 @@ jobs:
       url: ${{ github.event.inputs.target == 'production' && 'https://app.logisx.com' || '' }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Resolve target
         id: t
