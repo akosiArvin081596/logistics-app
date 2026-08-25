@@ -1,0 +1,150 @@
+name: VPS deploy
+description: >
+  Deploy one pm2-managed app on the shared VPS: ssh with transport retry, run the
+  versioned remote scripts, smoke-check, and optionally auto-roll-back. Shared by
+  the staging and production jobs so the two can never drift apart.
+
+inputs:
+  dir:                 { description: App directory on the VPS,            required: true }
+  pm2:                 { description: pm2 process name,                    required: true }
+  ref:                 { description: Git ref to deploy,                   required: true }
+  rollback_on_failure: { description: "'true' to auto-revert on smoke failure", required: true }
+  public_url:          { description: Optional public URL to verify,       required: false, default: "" }
+  ssh_key:             { description: Deploy private key,                  required: true }
+  known_hosts:         { description: Pinned host key,                     required: true }
+  host:                { description: VPS host,                            required: true }
+  user:                { description: VPS user,                            required: true }
+
+runs:
+  using: composite
+  steps:
+    - name: Configure SSH
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.ssh && chmod 700 ~/.ssh
+        printf '%s\n' "${{ inputs.ssh_key }}" > ~/.ssh/deploy_key
+        chmod 600 ~/.ssh/deploy_key
+        # Host key is PINNED from a secret, never discovered with ssh-keyscan —
+        # keyscan trusts whatever answers first, and this step hands that host a
+        # key that can restart production.
+        printf '%s\n' "${{ inputs.known_hosts }}" > ~/.ssh/known_hosts
+        chmod 600 ~/.ssh/known_hosts
+        test -s ~/.ssh/known_hosts || { echo "::error::VPS_SSH_KNOWN_HOSTS is empty"; exit 1; }
+
+        # Retry ONLY on ssh transport failure. ssh reserves exit 255 for its own
+        # errors; any other status is the REMOTE script's and passes through. A
+        # deploy that genuinely fails must fail once and loudly, not three times.
+        cat > "$RUNNER_TEMP/ssh_retry.sh" <<'HELPER'
+        #!/bin/bash
+        set -uo pipefail
+        PAYLOAD=$(cat)
+        for attempt in 1 2 3; do
+          printf '%s' "$PAYLOAD" | ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+            -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+            "$1" "$2"
+          rc=$?
+          [ "$rc" -ne 255 ] && exit "$rc"
+          echo "::warning::ssh transport failure (255), attempt $attempt/3 — retrying in $((attempt*10))s"
+          sleep $((attempt*10))
+        done
+        echo "::error::ssh failed to connect after 3 attempts"
+        exit 255
+        HELPER
+        chmod +x "$RUNNER_TEMP/ssh_retry.sh"
+
+    - name: Deploy
+      id: deploy
+      shell: bash
+      env:
+        HOST: ${{ inputs.host }}
+        USER: ${{ inputs.user }}
+        DIR:  ${{ inputs.dir }}
+        PM2:  ${{ inputs.pm2 }}
+        REF:  ${{ inputs.ref }}
+      run: |
+        set -euo pipefail
+        out=$("$RUNNER_TEMP/ssh_retry.sh" "$USER@$HOST" \
+              "DIR='$DIR' PM2='$PM2' REF='$REF' bash -s" < scripts/deploy/remote-deploy.sh | tee /dev/stderr)
+        # Capture the pre-deploy SHA so a rollback targets a known-good commit
+        # rather than guessing.
+        prev=$(printf '%s' "$out" | grep -oE 'DEPLOYED_FROM=[0-9a-f]{7,40}' | tail -1 | cut -d= -f2 || true)
+        echo "prev=$prev" >> "$GITHUB_OUTPUT"
+        echo "deployed_from=$prev"
+
+    - name: Smoke check
+      id: smoke
+      shell: bash
+      continue-on-error: true
+      env:
+        HOST: ${{ inputs.host }}
+        USER: ${{ inputs.user }}
+        DIR:  ${{ inputs.dir }}
+        PM2:  ${{ inputs.pm2 }}
+      run: |
+        set -euo pipefail
+        "$RUNNER_TEMP/ssh_retry.sh" "$USER@$HOST" "DIR='$DIR' PM2='$PM2' bash -s" < scripts/deploy/remote-smoke.sh
+
+    - name: Public edge check
+      id: edge
+      if: inputs.public_url != '' && steps.smoke.outcome == 'success'
+      shell: bash
+      continue-on-error: true
+      run: |
+        set -euo pipefail
+        code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "${{ inputs.public_url }}")
+        echo "${{ inputs.public_url }} -> HTTP $code"
+        [ "$code" = "200" ] || { echo "::error::public edge returned $code"; exit 1; }
+
+    - name: Auto-rollback
+      # Fires only when this target is configured to self-heal AND something
+      # actually failed. Nobody is watching an auto-deploy, so production must
+      # not be able to stay broken.
+      if: |
+        inputs.rollback_on_failure == 'true' &&
+        (steps.smoke.outcome == 'failure' || steps.edge.outcome == 'failure') &&
+        steps.deploy.outputs.prev != ''
+      shell: bash
+      env:
+        HOST: ${{ inputs.host }}
+        USER: ${{ inputs.user }}
+        DIR:  ${{ inputs.dir }}
+        PM2:  ${{ inputs.pm2 }}
+        PREV: ${{ steps.deploy.outputs.prev }}
+      run: |
+        set -euo pipefail
+        echo "::warning::deploy verification failed — rolling $PM2 back to $PREV"
+        "$RUNNER_TEMP/ssh_retry.sh" "$USER@$HOST" "DIR='$DIR' PM2='$PM2' PREV='$PREV' bash -s" < scripts/deploy/remote-rollback.sh
+
+    - name: Fail the job if verification failed
+      # The smoke/edge steps are continue-on-error so the rollback can run first.
+      # The job must still go red — a successful rollback is not a successful deploy.
+      if: steps.smoke.outcome == 'failure' || steps.edge.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "::error::${{ inputs.pm2 }} failed verification (smoke=${{ steps.smoke.outcome }} edge=${{ steps.edge.outcome }})."
+        echo "rollback_on_failure was '${{ inputs.rollback_on_failure }}'."
+        exit 1
+
+    - name: Summary
+      if: always()
+      shell: bash
+      run: |
+        {
+          echo "### ${{ inputs.pm2 }}"
+          echo ""
+          echo "| | |"
+          echo "|---|---|"
+          echo "| path | \`${{ inputs.dir }}\` |"
+          echo "| ref | \`${{ inputs.ref }}\` |"
+          echo "| previous SHA | \`${{ steps.deploy.outputs.prev }}\` |"
+          echo "| smoke | ${{ steps.smoke.outcome }} |"
+          echo "| public edge | ${{ steps.edge.outcome || 'n/a' }} |"
+          echo ""
+          echo "Rollback by hand: re-run *Deploy* with **ref** = \`${{ steps.deploy.outputs.prev }}\`."
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Always remove the deploy key
+      if: always()
+      shell: bash
+      run: shred -u ~/.ssh/deploy_key 2>/dev/null || rm -f ~/.ssh/deploy_key
