@@ -87,6 +87,37 @@ jobs:
           chmod 600 ~/.ssh/known_hosts
           test -s ~/.ssh/known_hosts || { echo "::error::VPS_SSH_KNOWN_HOSTS secret is empty — see .github/workflows/README.md"; exit 1; }
 
+      # Retry ONLY on an ssh transport failure, never on a failing remote script.
+      # ssh reserves exit 255 for its own errors (connection refused/timed out,
+      # auth, host-key); any other status is the remote command's own. That
+      # distinction is the whole safety of this: a deploy that genuinely fails
+      # must fail once and loudly, not three times.
+      #
+      # Added after a production deploy died on "ssh: connect to host ... port
+      # 22: Connection timed out" — a network blip, with fail2ban clear and the
+      # box at load 1.4. It failed safe (nothing had run) but it still burned a
+      # release and an approval.
+      - name: Define ssh-with-retry
+        run: |
+          cat > "$RUNNER_TEMP/ssh_retry.sh" <<'HELPER'
+          #!/bin/bash
+          # usage: ssh_retry.sh <user@host> <remote-cmd>   (script on stdin)
+          set -uo pipefail
+          PAYLOAD=$(cat)
+          for attempt in 1 2 3; do
+            printf '%s' "$PAYLOAD" | ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+              -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+              "$1" "$2"
+            rc=$?
+            [ "$rc" -ne 255 ] && exit "$rc"
+            echo "::warning::ssh transport failure (exit 255) on attempt $attempt/3 — retrying in $((attempt*10))s"
+            sleep $((attempt*10))
+          done
+          echo "::error::ssh failed to connect after 3 attempts"
+          exit 255
+          HELPER
+          chmod +x "$RUNNER_TEMP/ssh_retry.sh"
+
       - name: Deploy
         id: deploy
         env:
@@ -97,8 +128,7 @@ jobs:
           REF: ${{ steps.t.outputs.ref }}
         run: |
           set -euo pipefail
-          ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o ConnectTimeout=20 \
-              "$USER@$HOST" "DIR='$DIR' PM2='$PM2' REF='$REF' bash -s" <<'REMOTE'
+          "$RUNNER_TEMP/ssh_retry.sh" "$USER@$HOST" "DIR='$DIR' PM2='$PM2' REF='$REF' bash -s" <<'REMOTE'
           set -euo pipefail
           cd "$DIR"
 
@@ -222,8 +252,7 @@ jobs:
           DIR: ${{ steps.t.outputs.dir }}
         run: |
           set -euo pipefail
-          ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o ConnectTimeout=20 \
-              "$USER@$HOST" "DIR='$DIR' PM2='${{ steps.t.outputs.pm2 }}' bash -s" <<'REMOTE'
+          "$RUNNER_TEMP/ssh_retry.sh" "$USER@$HOST" "DIR='$DIR' PM2='${{ steps.t.outputs.pm2 }}' bash -s" <<'REMOTE'
           set -euo pipefail
           # Read the port the target actually binds rather than hardcoding it.
           #
