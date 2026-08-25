@@ -25,7 +25,7 @@ The long-form reasoning behind the trickiest parts of this system was moved out 
 
 Other long-form docs already in the repo: `scripts/README-env-refresh.md` (env-refresh runbook), `docs/ratecon-ownership-recommendation.md`, `docs/investor-portal-copy.md` (investor-facing copy sign-off inventory), `docs/manual/technical/06-operations.md`, `docs/vps-disk-and-data-handoff.md`.
 
-**⚠️ `README.md` at the repo root is abandoned — do not read it as documentation and do not send anyone to it.** It still describes the 2026-era "Google Sheets CRUD" starter this repo grew out of: a four-route `/api/data` API, `public/index.html` as "the" frontend, and an instruction to *"Open `server.js` and update these three values at the top"*. None of that is true of a 47k-line app with 236 routes, SQLite, Socket.IO and a Vue SPA. (`package.json` still carries the matching stale `"name": "google-sheets-crud"`.) **This file plus `docs/claude/` is the documentation.**
+**`README.md` at the repo root is the project's front door and is accurate as of 2026-08-25** — it was rewritten then, having previously described the "Google Sheets CRUD" starter this repo grew out of (a four-route `/api/data` API, `public/index.html` as "the" frontend, and an instruction to *"Open `server.js` and update these three values at the top"*). It is a short orientation that points here. **This file plus `docs/claude/` remains the real documentation** — the README deliberately does not duplicate any hazard, it links to them.
 
 ### House invariants — the rules you can break without knowing the topic exists
 
