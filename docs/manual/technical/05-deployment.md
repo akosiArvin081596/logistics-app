@@ -49,9 +49,9 @@ A standard Google Cloud service account JSON key for the account `sheets-bot@log
 
 ## Deploy workflow
 
-**Deploys run through GitHub Actions.** Pushing to `main` deploys **staging**
-automatically; **production** is a manual run of the *Deploy* workflow
-(Actions → Deploy → Run workflow → target `production`). Rolling back is the
+**Deploys run through GitHub Actions.** Pushing to `main` deploys **staging and
+then production automatically** — production runs only if staging went green,
+smoke-checks itself, and rolls back on its own if verification fails. Rolling back is the
 same dialog with **ref** set to an older SHA. Setup, required secrets and the
 reasoning behind each step are in
 [`.github/workflows/README.md`](../../../.github/workflows/README.md).

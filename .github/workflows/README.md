@@ -4,7 +4,7 @@ Two workflows. `ci.yml` verifies, `deploy.yml` ships.
 
 | | `ci.yml` | `deploy.yml` |
 |---|---|---|
-| Fires on | PR into `main`, push to `main`, manual | push to `main` → **staging**; manual → staging **or** production |
+| Fires on | PR into `main`, push to `main`, manual | push to `main` → **staging → production** (auto); manual → one chosen target |
 | Runs | `npm ci` ×2 · `node --check` · 45 of 46 runners · client build | lockfile reset · pull · install · build · scoped pm2 restart · smoke |
 | Duration | ~1 min | well under a minute |
 | Touches production | never | only on an explicit manual run |
@@ -61,9 +61,9 @@ On **`production`**, add yourself under **Required reviewers**. That is what tur
 
 ## Deploying
 
-**Staging** — automatic on every push to `main`. Nothing to do.
+**Both are automatic on every push to `main`.** Staging deploys first; production runs **only if staging succeeded** (`needs: staging`). No approval step — see the safety note below.
 
-**Production** — Actions → *Deploy* → *Run workflow* → target `production` → Run.
+**Manual / rollback** — Actions → *Deploy* → *Run workflow* → pick a target and a `ref`.
 
 **Rollback** — same dialog, set **ref** to the SHA you want back:
 
@@ -101,14 +101,20 @@ The skip is never silent: it prints at the start and end of the run and appears 
 
 ---
 
-## Making production auto-deploy
+## Production auto-deploys — what carries the safety
 
-Currently production ships only on a manual run. To have a merge to `main` go straight to production, change the target default in `deploy.yml`:
+Enabled 2026-08-25 at the owner's request. There is **no approval gate and nobody watching**, so three things replace the human:
 
-```yaml
-group: deploy-${{ github.event.inputs.target || 'staging' }}   # ← 'production'
-```
+1. **staging is a hard prerequisite.** On a push, `production` has `needs: staging` and runs only on `success`. Same box, same pm2, same Node — a merge is always exercised somewhere first.
+2. **Every deploy smoke-checks**, and production additionally verifies the public edge through nginx.
+3. **Production auto-rolls-back.** If its smoke or edge check fails, the workflow checks the box back out at the SHA it was on *before* the deploy, rebuilds, restarts and re-verifies. The job still goes red — a successful rollback is not a successful deploy — but production does not sit broken waiting to be noticed. Tested for real: staging was rolled to an older SHA, served 200, and rolled forward again.
 
-…and the two `|| 'staging'` fallbacks in the `environment:` and `Resolve target` blocks.
+**Staging deliberately does NOT auto-roll-back** (`rollback_on_failure: "false"`). It is the canary; a failure should stay put so it can be inspected.
 
-Worth knowing before you do: this app writes to a live Google Sheet, a production `app.db` and real invoices, and `INVOICE_AUTOGEN_ENABLED` is on in production. An unattended bad merge is not "the site is down", it is "money data was touched". The staging process exists on the same box precisely so a merge can be exercised before a human sends it on.
+### To turn auto-deploy back off
+
+Give the `production` GitHub Environment a **required reviewer** again (Settings → Environments → production). The workflow needs no change — the job will simply pause for approval. That is the whole switch.
+
+### Where the deploy logic lives
+
+`scripts/deploy/remote-deploy.sh`, `remote-smoke.sh`, `remote-rollback.sh` — versioned in the repo, not inline in YAML, so both jobs share one reviewable copy and cannot drift. `.github/actions/vps-deploy` is the composite step that ships them over ssh (with transport retry) and wires the rollback.

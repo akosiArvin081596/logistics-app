@@ -1,16 +1,22 @@
 name: Deploy
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STAGING  deploys automatically on every push to main.
-# PRODUCTION is manual-dispatch only, and additionally gated by the GitHub
-#            Environment named `production` (add required reviewers there to
-#            make it an approval gate — see .github/workflows/README.md).
+# PUSH TO main  ->  staging, then PRODUCTION automatically if staging went green.
+# Manual dispatch ->  whichever single target you pick (and any ref, for rollback).
 #
-# To make production auto-deploy on merge instead, move `production` into the
-# `push:` branch of the target logic below. That is a ONE-LINE change and it is
-# deliberately not the default: this app writes to a live Google Sheet, a
-# production app.db and real invoices, so an unattended bad merge is not "the
-# site is down", it is "money data was touched".
+# ⚠️ PRODUCTION AUTO-DEPLOYS. There is no approval gate and nobody is watching —
+# a deliberate choice made 2026-08-25. Three things now carry the safety a human
+# used to:
+#
+#   1. staging is a hard prerequisite (`needs:`) — same box, same pm2, same Node
+#      — so a merge is always exercised somewhere before production sees it.
+#   2. every deploy smoke-checks; production also checks the public edge.
+#   3. if production's smoke check fails it ROLLS ITSELF BACK to the SHA it was
+#      on, then re-verifies. A bad merge cannot leave production down waiting to
+#      be noticed.
+#
+# The remote halves live in scripts/deploy/*.sh — in the repo, not inline here,
+# so both jobs share ONE reviewable copy and cannot drift apart.
 # ─────────────────────────────────────────────────────────────────────────────
 on:
   push:
@@ -29,292 +35,63 @@ on:
         default: main
         type: string
 
-# ⚠️ cancel-in-progress is FALSE on purpose. Cancelling a deploy mid-flight can
-# leave the box between `git pull` and `pm2 restart` — new code on disk, old
-# process serving, or a half-finished npm install. Queue instead; a deploy takes
-# well under a minute.
+# ⚠️ cancel-in-progress is FALSE on purpose. Cancelling mid-flight can leave the
+# box between `git pull` and `pm2 restart`. Queue instead; a deploy is <1 min.
 concurrency:
-  group: deploy-${{ github.event.inputs.target || 'staging' }}
+  group: deploy-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  deploy:
-    name: ${{ github.event.inputs.target || 'staging' }}
+  staging:
+    name: staging
+    if: github.event_name == 'push' || github.event.inputs.target == 'staging'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Binds to the GitHub Environment of the same name. Required reviewers,
-    # wait timers and environment secrets are configured there, not here.
     environment:
-      name: ${{ github.event.inputs.target || 'staging' }}
-      url: ${{ github.event.inputs.target == 'production' && 'https://app.logisx.com' || '' }}
-
+      name: staging
     steps:
       - uses: actions/checkout@v5
+      - uses: ./.github/actions/vps-deploy
+        with:
+          dir: /var/www/logisx-staging
+          pm2: logisx-staging
+          ref: ${{ github.event.inputs.ref || 'main' }}
+          # staging is the canary — leave a failure in place to inspect.
+          rollback_on_failure: "false"
+          ssh_key: ${{ secrets.VPS_SSH_KEY }}
+          known_hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          host: ${{ secrets.VPS_HOST }}
+          user: ${{ secrets.VPS_USER }}
 
-      - name: Resolve target
-        id: t
-        run: |
-          set -euo pipefail
-          TARGET="${{ github.event.inputs.target || 'staging' }}"
-          REF="${{ github.event.inputs.ref || 'main' }}"
-          case "$TARGET" in
-            production) DIR=/var/www/logistics-app;  PM2=logistics-app ;;
-            staging)    DIR=/var/www/logisx-staging; PM2=logisx-staging ;;
-            *) echo "::error::unknown target '$TARGET'"; exit 1 ;;
-          esac
-          {
-            echo "target=$TARGET"
-            echo "ref=$REF"
-            echo "dir=$DIR"
-            echo "pm2=$PM2"
-          } >> "$GITHUB_OUTPUT"
-          echo "Deploying **$REF** to **$TARGET** ($DIR, pm2:$PM2)" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Configure SSH
-        run: |
-          set -euo pipefail
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          printf '%s\n' "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          # Host key is PINNED from a secret, never discovered with ssh-keyscan.
-          # keyscan trusts whatever answers on the first connection, which is the
-          # exact thing host-key checking exists to prevent — and this step hands
-          # the remote end a key that can restart production.
-          printf '%s\n' "${{ secrets.VPS_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
-          test -s ~/.ssh/known_hosts || { echo "::error::VPS_SSH_KNOWN_HOSTS secret is empty — see .github/workflows/README.md"; exit 1; }
-
-      # Retry ONLY on an ssh transport failure, never on a failing remote script.
-      # ssh reserves exit 255 for its own errors (connection refused/timed out,
-      # auth, host-key); any other status is the remote command's own. That
-      # distinction is the whole safety of this: a deploy that genuinely fails
-      # must fail once and loudly, not three times.
-      #
-      # Added after a production deploy died on "ssh: connect to host ... port
-      # 22: Connection timed out" — a network blip, with fail2ban clear and the
-      # box at load 1.4. It failed safe (nothing had run) but it still burned a
-      # release and an approval.
-      - name: Define ssh-with-retry
-        run: |
-          cat > "$RUNNER_TEMP/ssh_retry.sh" <<'HELPER'
-          #!/bin/bash
-          # usage: ssh_retry.sh <user@host> <remote-cmd>   (script on stdin)
-          set -uo pipefail
-          PAYLOAD=$(cat)
-          for attempt in 1 2 3; do
-            printf '%s' "$PAYLOAD" | ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
-              -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
-              "$1" "$2"
-            rc=$?
-            [ "$rc" -ne 255 ] && exit "$rc"
-            echo "::warning::ssh transport failure (exit 255) on attempt $attempt/3 — retrying in $((attempt*10))s"
-            sleep $((attempt*10))
-          done
-          echo "::error::ssh failed to connect after 3 attempts"
-          exit 255
-          HELPER
-          chmod +x "$RUNNER_TEMP/ssh_retry.sh"
-
-      - name: Deploy
-        id: deploy
-        env:
-          HOST: ${{ secrets.VPS_HOST }}
-          USER: ${{ secrets.VPS_USER }}
-          DIR: ${{ steps.t.outputs.dir }}
-          PM2: ${{ steps.t.outputs.pm2 }}
-          REF: ${{ steps.t.outputs.ref }}
-        run: |
-          set -euo pipefail
-          "$RUNNER_TEMP/ssh_retry.sh" "$USER@$HOST" "DIR='$DIR' PM2='$PM2' REF='$REF' bash -s" <<'REMOTE'
-          set -euo pipefail
-          cd "$DIR"
-
-          PREV=$(git rev-parse HEAD)
-          echo "::group::pre-deploy state"
-          echo "current HEAD: $PREV"
-
-          # ── The load-bearing lockfile reset ───────────────────────────────
-          # The VPS runs npm 10.8.2, which does not know the `"libc"` field a
-          # newer npm writes onto optional platform deps — so EVERY npm install
-          # on this box strips it and leaves client/package-lock.json
-          # permanently modified. `git pull --ff-only` refuses to overwrite a
-          # locally-modified tracked file, so without this reset the first PR
-          # that touches the lockfile aborts the deploy. (It fails safe — before
-          # anything installs or restarts — but it blocks the release.)
-          # Discarding this one path is safe: npm regenerates it two lines down
-          # and nothing reads it at runtime.
-          for f in client/package-lock.json package-lock.json; do
-            if ! git diff --quiet -- "$f" 2>/dev/null; then
-              echo "resetting npm-skew drift on $f"
-              git checkout -- "$f"
-            fi
-          done
-
-          # ── Refuse to clobber an unexpected local change ──────────────────
-          # Anything ELSE modified on the box is a hand-applied hotfix or a
-          # mid-incident edit. A blanket `git checkout -- .` would silently
-          # destroy it, which is why CLAUDE.md forbids one here. Stop instead
-          # and let a human decide.
-          DIRTY=$(git status --porcelain --untracked-files=no)
-          if [ -n "$DIRTY" ]; then
-            echo "::error::$DIR has local modifications beyond the lockfiles — refusing to deploy over them:"
-            echo "$DIRTY"
-            exit 1
-          fi
-          echo "::endgroup::"
-
-          echo "::group::fetch + checkout $REF"
-          git fetch --prune origin
-          if [ "$REF" = "main" ]; then
-            git checkout main
-            git pull --ff-only origin main
-          else
-            # Rollback / pin path: detached HEAD at an explicit ref.
-            git checkout --detach "$REF" 2>/dev/null || git checkout --detach "origin/$REF"
-          fi
-          NEW=$(git rev-parse HEAD)
-          echo "new HEAD: $NEW"
-          echo "::endgroup::"
-
-          echo "::group::resolve the Node this app actually runs on"
-          # ⚠️ Build with the SAME Node pm2 will execute the app with, not
-          # whatever is on the default PATH. Native modules (better-sqlite3) are
-          # compiled against a specific NODE_MODULE_VERSION, so installing under
-          # Node 20 and running under Node 22 is an instant ERR_DLOPEN_FAILED on
-          # boot — "compiled against NODE_MODULE_VERSION 115, this version
-          # requires 127".
-          #
-          # pm2's own interpreter is the single source of truth, deliberately:
-          # hardcoding a per-target path here would silently drift the day
-          # someone repins a process. staging currently runs /opt/node22/bin/node
-          # (for puppeteer 25, which needs >=22.12); production still runs the
-          # system Node 20.
-          NODE_BIN=$(pm2 jlist | node -e '
-            let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
-              const p=JSON.parse(d).find(x=>x.name===process.argv[1]);
-              process.stdout.write(p && p.pm2_env ? (p.pm2_env.exec_interpreter||"") : "");
-            });' "$PM2")
-          case "$NODE_BIN" in
-            ""|node) NODE_BIN=$(command -v node) ;;
-          esac
-          export PATH="$(dirname "$NODE_BIN"):$PATH"
-          echo "pm2 interpreter: $NODE_BIN"
-          echo "building with:   $(command -v node) $(node --version) / npm $(npm --version)"
-          echo "::endgroup::"
-
-          echo "::group::install + build"
-          npm install --silent --no-audit --no-fund
-          # npm tracks package VERSIONS, not ABI — it reports "up to date" and
-          # skips the rebuild when only the Node major changed. Probe the native
-          # module and rebuild only if it actually fails to load.
-          if ! node -e "require('better-sqlite3')" >/dev/null 2>&1; then
-            echo "native ABI mismatch detected — rebuilding better-sqlite3 for $(node --version)"
-            npm rebuild better-sqlite3
-            node -e "require('better-sqlite3')" || { echo "::error::better-sqlite3 still fails to load after rebuild"; exit 1; }
-          fi
-          echo "native modules OK under $(node --version)"
-          npm run build:client --silent
-          test -f client/dist/index.html || { echo "::error::build produced no client/dist/index.html"; exit 1; }
-          echo "::endgroup::"
-
-          echo "::group::restart"
-          # ⚠️ Name-scoped, ALWAYS. This VPS hosts ~23 other pm2 processes for
-          # other clients (LendyPH, binhs-coop, dromic, …). `pm2 restart all`
-          # or `pm2 restart 0` here would take those down too.
-          pm2 restart "$PM2" --silent
-          # Parse jlist, never `pm2 describe` — describe renders a box-drawing
-          # table whose column widths shift with the value, so a sed against it
-          # silently stops matching one day and reports nothing rather than
-          # failing. jlist is JSON and stable.
-          pm2 jlist | node -e '
-            let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
-              const p=JSON.parse(d).find(x=>x.name===process.argv[1]);
-              if(!p){console.error("::error::pm2 process "+process.argv[1]+" not found after restart");process.exit(1);}
-              console.log("pm2 status: "+p.pm2_env.status+"  restarts: "+p.pm2_env.restart_time);
-              if(p.pm2_env.status!=="online"){console.error("::error::pm2 reports status="+p.pm2_env.status);process.exit(1);}
-            });' "$PM2"
-          echo "::endgroup::"
-
-          echo "DEPLOYED_FROM=$PREV"
-          echo "DEPLOYED_TO=$NEW"
-          REMOTE
-
-      # Boot is not instant — server.js runs schema migrations and a burst of
-      # boot work before it listens, which is the same burst behind the known
-      # "first PDF after a restart" stall. Poll rather than sleep-once.
-      - name: Smoke check
-        env:
-          HOST: ${{ secrets.VPS_HOST }}
-          USER: ${{ secrets.VPS_USER }}
-          DIR: ${{ steps.t.outputs.dir }}
-        run: |
-          set -euo pipefail
-          "$RUNNER_TEMP/ssh_retry.sh" "$USER@$HOST" "DIR='$DIR' PM2='${{ steps.t.outputs.pm2 }}' bash -s" <<'REMOTE'
-          set -euo pipefail
-          # Read the port the target actually binds rather than hardcoding it.
-          #
-          # ⚠️ The trailing `|| true` is load-bearing and this line has already
-          # broken a production deploy once. Production's .env has NO `PORT=`
-          # line at all — it relies on server.js defaulting to 3000, which
-          # CLAUDE.md documents — so grep matches nothing and exits 1. Under
-          # `set -e` + `pipefail` that aborts the whole script BEFORE the
-          # `${PORT:-3000}` fallback on the next line can run, and the step dies
-          # in ~2 s having never polled anything.
-          #
-          # It passed on staging precisely because staging DOES set PORT=3003,
-          # so grep succeeded there. The asymmetry between the two .env files is
-          # the bug's whole hiding place: this can only ever fail on production.
-          PORT=$(grep -oE '^PORT=[0-9]+' "$DIR/.env" 2>/dev/null | head -1 | cut -d= -f2 || true)
-          PORT=${PORT:-3000}
-          echo "resolved port: $PORT"
-          # /api/config/maintenance is unauthenticated and returns module
-          # constants only — no DB, no Sheets, no billed API. It proves the
-          # process booted and Express is serving, and costs nothing.
-          for i in $(seq 1 30); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$PORT/api/config/maintenance" || true)
-            if [ "$code" = "200" ]; then echo "smoke OK on :$PORT after $((i*2))s"; exit 0; fi
-            sleep 2
-          done
-          echo "::error::smoke check failed — no HTTP 200 from :$PORT/api/config/maintenance within 60s"
-          # ⚠️ Read the timestamps before believing this dump. `pm2 logs --nostream`
-          # tails the error log whether or not anything new was written, so an
-          # error from days ago prints here and reads exactly like a fresh
-          # regression caused by this deploy. Check the log mtime / line dates
-          # against the deploy time before concluding anything from it.
-          echo "--- pm2 error log tail (MAY BE STALE — check the dates) ---"
-          pm2 logs "$PM2" --nostream --lines 40 --err 2>/dev/null || true
-          exit 1
-          REMOTE
-
-      # Public-edge check: only meaningful for production, where nginx terminates
-      # TLS on app.logisx.com. Staging is localhost-bound with no public host.
-      - name: Public edge check (production only)
-        if: steps.t.outputs.target == 'production'
-        run: |
-          set -euo pipefail
-          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 https://app.logisx.com/api/config/maintenance)
-          echo "app.logisx.com -> HTTP $code"
-          [ "$code" = "200" ] || { echo "::error::public edge returned $code"; exit 1; }
-
-      - name: Summary
-        if: always()
-        run: |
-          {
-            echo "### Deploy ${{ job.status }}"
-            echo ""
-            echo "| | |"
-            echo "|---|---|"
-            echo "| target | \`${{ steps.t.outputs.target }}\` |"
-            echo "| ref | \`${{ steps.t.outputs.ref }}\` |"
-            echo "| path | \`${{ steps.t.outputs.dir }}\` |"
-            echo "| pm2 | \`${{ steps.t.outputs.pm2 }}\` |"
-            echo ""
-            echo "Rollback: re-run this workflow with **ref** set to the previous SHA."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Always remove the deploy key
-        if: always()
-        run: shred -u ~/.ssh/deploy_key 2>/dev/null || rm -f ~/.ssh/deploy_key
+  production:
+    name: production
+    needs: [staging]
+    # On a push: only after staging succeeds. On a dispatch: runs alone, and the
+    # skipped `staging` job must not block it — hence always() + explicit result.
+    if: |
+      always() && (
+        (github.event_name == 'push' && needs.staging.result == 'success') ||
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'production')
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: https://app.logisx.com
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/vps-deploy
+        with:
+          dir: /var/www/logistics-app
+          pm2: logistics-app
+          ref: ${{ github.event.inputs.ref || 'main' }}
+          # unattended: production must recover itself.
+          rollback_on_failure: "true"
+          public_url: https://app.logisx.com/api/config/maintenance
+          ssh_key: ${{ secrets.VPS_SSH_KEY }}
+          known_hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          host: ${{ secrets.VPS_HOST }}
+          user: ${{ secrets.VPS_USER }}
