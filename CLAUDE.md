@@ -352,6 +352,22 @@ Key directories:
 
 **Vite proxy** (`client/vite.config.js`): `/api` and `/socket.io` (with `ws: true`) both proxy to `http://localhost:3000`.
 
+### ⚠️ The two environments now run DIFFERENT Node versions (2026-08-25)
+
+The VPS has **two** Node runtimes and each pm2 process picks one. This is deliberate — it is what lets this app move forward without a Node upgrade on a box shared with ~23 other clients' processes.
+
+| | Node | pm2 `exec_interpreter` | ABI (`NODE_MODULE_VERSION`) |
+|---|---|---|---|
+| `logisx-staging` | **22.23.2** | `/opt/node22/bin/node` | 127 |
+| `logistics-app` (prod) | **20.20.1** | `node` → `/usr/bin/node` | 115 |
+| CI (`.nvmrc`) | 20.20.1 | — | 115 |
+
+- **`/usr/bin/node` is apt/nodesource-managed and stays at 20.** Node 22 was installed from a checksum-verified tarball to `/opt/node-v22.23.2-linux-x64`, symlinked `/opt/node22`. Nothing else on the box was touched; all 23 processes stayed online throughout.
+- **⚠️ `better-sqlite3` is a native module, so the Node major and the build must match.** Installing under one and running under the other is an instant `ERR_DLOPEN_FAILED` on boot — *"compiled against NODE_MODULE_VERSION 115, this version requires 127"*. **And `npm install` will NOT fix it**: npm tracks package *versions*, not ABI, so it reports "up to date" and skips the rebuild. Only `npm rebuild better-sqlite3` recompiles. `deploy.yml` now probes the module and rebuilds only when it actually fails to load.
+- **The deploy resolves its build Node from pm2's own `exec_interpreter`, never a hardcoded path** — so repinning a process automatically repoints its build, and the two cannot drift.
+- **⚠️ CI still runs Node 20**, which now matches production but *not* staging. That is the correct default while prod is on 20; **when production moves to 22, `.nvmrc` and `ci.yml` must move with it** or CI stops testing what production runs.
+- Rollback for the staging pin: `/root/.pm2/dump.pm2.bak.20260825-075431` plus `/root/pm2-state-before-node22.20260825-075431.json`.
+
 ### Dependency advisories that are BLOCKED, not ignored (audited 2026-08-25)
 
 `npm audit` reports **8 on root — 4 high, 4 moderate** (client is clean). Every one needs a **major** bump that cannot currently be taken. Re-check when the Node question below changes; do **not** re-derive this from scratch, and do **not** run `npm audit fix --force`.
