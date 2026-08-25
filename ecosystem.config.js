@@ -17,6 +17,25 @@ module.exports = {
     name: 'logistics-app',
     script: 'server.js',
     cwd: '/var/www/logistics-app',
+    // Pin the Node this process runs on, instead of inheriting whatever
+    // /usr/bin/node happens to be. The box carries TWO runtimes: the
+    // apt/nodesource system Node (20.20.1, shared by ~23 other clients'
+    // processes and therefore not ours to upgrade) and Node 22.23.2 installed
+    // from a checksum-verified tarball at /opt/node22. Pinning here is what
+    // lets this app move to 22 — and so to puppeteer 25, which requires
+    // >=22.12 and closes four HIGH advisories — without touching the shared
+    // runtime. Proven on logisx-staging first (full deploy cycle, 45/45
+    // runners, Chromium rendering, zero unstable restarts).
+    //
+    // ⚠️ better-sqlite3 is a NATIVE module: node_modules must be built against
+    // the same Node major this line names, or the process dies on boot with
+    // ERR_DLOPEN_FAILED ("compiled against NODE_MODULE_VERSION 115, this
+    // version requires 127"). And `npm install` will NOT repair that — npm
+    // tracks package versions, not ABI, so it reports "up to date" and skips
+    // the rebuild; only `npm rebuild better-sqlite3` recompiles.
+    // .github/workflows/deploy.yml reads THIS interpreter back out of pm2 and
+    // builds with it, so the two cannot drift.
+    interpreter: '/opt/node22/bin/node',
     env: {
       // 4 GB heap (was OOM'ing at the 2 GB default). heapsnapshot-near-heap-limit=1
       // writes a single .heapsnapshot to cwd if the process ever approaches 4 GB,
