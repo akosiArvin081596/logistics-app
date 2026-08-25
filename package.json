@@ -1,7 +1,7 @@
 {
-  "name": "google-sheets-crud",
+  "name": "logisx",
   "version": "1.0.0",
-  "description": "Node.js CRUD app using Google Sheets as a database",
+  "description": "Dispatch and back-office platform for a trucking carrier (Node/Express + Google Sheets + Vue 3 SPA)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

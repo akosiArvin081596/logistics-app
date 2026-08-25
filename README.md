@@ -1,110 +1,82 @@
-# Google Sheets CRUD — Node.js + Express
+# LogisX
 
-A lightweight Node.js app that uses **Google Sheets as a database** with full
-Create / Read / Update / Delete support via a REST API and a web dashboard.
+Dispatch and back-office platform for a trucking carrier: load ingestion from
+broker rate confirmations, driver dispatch and live GPS tracking, expenses and
+fuel, invoicing, driver/investor onboarding, and an investor payout ledger.
 
----
+Runs in production at **app.logisx.com**.
 
-## Quick Start
+> **Working on this codebase?** Read [`CLAUDE.md`](CLAUDE.md) first — it is the
+> real documentation, and it leads with the hazards that are expensive to
+> rediscover. The long-form reasoning lives in [`docs/claude/`](docs/claude/).
 
-### 1. Set Up Google Cloud
+## Stack
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project (or select an existing one)
-3. **Enable the Google Sheets API:**
-   - Navigate to **APIs & Services → Library**
-   - Search for "Google Sheets API" and click **Enable**
-4. **Create a Service Account:**
-   - Go to **APIs & Services → Credentials**
-   - Click **Create Credentials → Service Account**
-   - Give it a name (e.g. `sheets-bot`) and click **Done**
-5. **Download the key file:**
-   - Click on the service account you just created
-   - Go to the **Keys** tab → **Add Key → Create new key → JSON**
-   - Save the downloaded file as `service-account-key.json` in this project folder
+| Layer | What |
+|---|---|
+| Backend | Single-file Node.js + Express (`server.js`), Socket.IO for real-time |
+| Primary data | **Google Sheets** (Sheets API v4) — the operational book of record |
+| Local data | SQLite (`app.db`, WAL) — auth, messaging, fleet, finance, telemetry |
+| Frontend | Vue 3 + Vite SPA (`client/`), Tailwind v4, shadcn-vue, Vant on mobile |
+| Files | Google Drive (PODs, rate cons) + local `uploads/` |
+| AI / vision | Gemini (receipt OCR, rate-con extraction), ScanKit (document scanning) |
+| Telematics | Linxup GPS (webhook push), Routemate ELD |
 
-### 2. Prepare Your Google Sheet
+Four roles — Super Admin, Dispatcher, Driver, Investor — with per-role routing
+and server-side data scoping.
 
-1. Create a new Google Sheet (or open an existing one)
-2. **Add headers** in row 1 (e.g. `Name | Email | Role`)
-3. **Share the sheet** with your service account email  
-   (it looks like `sheets-bot@your-project.iam.gserviceaccount.com`)  
-   Give it **Editor** access
-4. Copy the **Spreadsheet ID** from the URL:
-   ```
-   https://docs.google.com/spreadsheets/d/SPREADSHEET_ID_IS_HERE/edit
-   ```
+## Running it
 
-### 3. Configure the App
-
-Open `server.js` and update these three values at the top:
-
-```js
-const SPREADSHEET_ID = "your-spreadsheet-id";
-const SHEET_NAME     = "Sheet1";           // your tab name
-const KEY_FILE       = "./service-account-key.json";
-```
-
-### 4. Install & Run
+Requires **Node 20** (see `.nvmrc`; production runs 20.20.1).
 
 ```bash
-npm install
-npm start
+npm install            # postinstall also installs client/ deps
+npm run dev            # Express on :3000  (terminal 1)
+npm run dev:client     # Vite on :5173     (terminal 2)
 ```
 
-Open [http://localhost:3000](http://localhost:3000) — you should see the dashboard.
+Open http://localhost:5173 — Vite proxies `/api` and `/socket.io` to Express.
 
----
+For a production-style run: `npm run build:client && npm start`, which serves
+the built SPA from `client/dist/`.
 
-## API Reference
+### Configuration
 
-| Method   | Endpoint            | Body                          | Description         |
-| -------- | ------------------- | ----------------------------- | ------------------- |
-| `GET`    | `/api/data`         | —                             | Read all rows       |
-| `POST`   | `/api/data`         | `{ "values": ["a","b","c"] }` | Append a new row    |
-| `PUT`    | `/api/data/:row`    | `{ "values": ["a","b","c"] }` | Update row at index |
-| `DELETE` | `/api/data/:row`    | —                             | Delete row at index |
+Two files at the repo root, neither in git:
 
-`:row` is the 1-based sheet row number (header = row 1, first data row = row 2).
+- **`.env`** — see [`.env.example`](.env.example), the canonical list of all 62
+  variables with the reasoning for each.
+- **`service-account-key.json`** — Google service account credentials.
 
-### Example with curl
+> ⚠️ **`SPREADSHEET_ID` has no safe default.** When it is unset, `server.js`
+> falls through to the **production** Dispatch Management sheet — so any server
+> started without an explicit override writes to the live book. Always set it
+> locally. Identify a sheet by its **ID, never its title**: the staging sheet is
+> titled "logisx-production".
+
+## Tests
+
+No Jest/Vitest/ESLint. Two harnesses:
 
 ```bash
-# Read all
-curl http://localhost:3000/api/data
-
-# Add a row
-curl -X POST http://localhost:3000/api/data \
-  -H "Content-Type: application/json" \
-  -d '{"values": ["Alice", "alice@example.com", "Admin"]}'
-
-# Update row 2
-curl -X PUT http://localhost:3000/api/data/2 \
-  -H "Content-Type: application/json" \
-  -d '{"values": ["Alice", "alice@newmail.com", "Super Admin"]}'
-
-# Delete row 3
-curl -X DELETE http://localhost:3000/api/data/3
+npm run check      # node --check server.js — server.js is ~47k lines in one file
+npm run test:unit  # 45 standalone runners in scripts/ — hermetic, ~17s
+npm run ci         # all of the above + client build (exactly what CI runs)
 ```
 
----
+`test-suite.js` at the repo root is a **separate, manual** HTTP harness. It needs
+a running server, it **writes**, and it is deliberately excluded from CI — see
+[`CLAUDE.md`](CLAUDE.md) for its fixture and sheet-override procedure before
+running it.
 
-## Project Structure
+## CI/CD
 
-```
-google-sheets-app/
-├── server.js                  # Express server + Sheets API logic
-├── package.json
-├── public/
-│   └── index.html             # Web dashboard (single-file frontend)
-└── service-account-key.json   # ← YOU provide this (not committed to git)
-```
+GitHub Actions. Every PR runs the `ci` gate above on Node 20. Merging to `main`
+auto-deploys **staging**; **production** is a manual, approval-gated run of the
+*Deploy* workflow. Setup and reasoning: [`.github/workflows/README.md`](.github/workflows/README.md).
 
----
+## Docs
 
-## Tips
-
-- **Don't commit** `service-account-key.json` to version control — add it to `.gitignore`.
-- The Google Sheets API has a default quota of **300 requests per minute**.
-- For production, consider adding rate limiting, input validation, and error handling middleware.
-- If you need real-time updates, poll `/api/data` on an interval or look into Google Apps Script triggers + webhooks.
+- [`CLAUDE.md`](CLAUDE.md) — architecture, conventions, and the hazards
+- [`docs/claude/`](docs/claude/) — long-form reasoning per subsystem
+- [`docs/manual/`](docs/manual/) — operational manual
