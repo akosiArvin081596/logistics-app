@@ -1,0 +1,133 @@
+name: CI
+
+# Runs on every PR into main and on every push to main (so the merge commit
+# itself is verified, not just the branch that fed it — a green PR can still
+# produce a red merge when two PRs interact).
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One run per branch. A force-push supersedes the previous run rather than
+# racing it. Safe to cancel: CI only reads, so a half-finished run leaves
+# nothing behind (the deploy workflow deliberately does NOT do this).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: check · unit · build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ⚠️ Node 20 is NOT a default — it is the version the VPS actually runs
+      # (20.20.1 / npm 10.8.2, verified 2026-08-25), pinned via .nvmrc. Testing
+      # on a newer Node than production is how you ship a post-20 API call that
+      # is green here and throws on the box. `better-sqlite3@12.8.0` is a
+      # concrete instance: it declares 20.x||22.x||23.x||24.x||25.x, so a
+      # runner on 26 is already outside what the native module supports.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            client/package-lock.json
+
+      # `npm ci` (not `npm install`) is itself a test: it FAILS if either
+      # lockfile has drifted from its package.json, which is exactly the class
+      # of breakage that otherwise only shows up mid-deploy on the VPS.
+      #
+      # The root install's `postinstall` already runs `cd client && npm install`.
+      # The explicit client `npm ci` below re-pins those deps deterministically
+      # AND verifies the client lockfile the same way. The duplicate install is
+      # a few seconds and buys lockfile verification for both packages.
+      - name: Install root dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Install client dependencies (verifies client lockfile)
+        run: npm ci --no-audit --no-fund
+        working-directory: client
+
+      # server.js is ~47k lines in ONE file. A syntax error anywhere in it does
+      # not degrade a feature, it stops the entire application from booting —
+      # so this is the cheapest, highest-value gate in the pipeline and it runs
+      # first. CLAUDE.md already asks for it by hand before every commit; this
+      # is that rule, enforced.
+      - name: Syntax-check server.js
+        run: npm run check
+
+      # The standalone runners. Hermetic — :memory:/mkdtemp only, no network,
+      # no fixtures, no app.db. ~6 s here.
+      #
+      # ⚠️ UNIT_TEST_SKIP_TIMING drops the timing-sensitive runners (currently
+      # exactly one: test-pdf-cold-start.js, which induces an event-loop stall
+      # and asserts on catching the recovery). Measured on an 8-core Mac it
+      # passes 6/6 idle but only 3/6 at load average ~11 — and a GitHub-hosted
+      # runner is TWO shared cores, i.e. worse. Left in, CI would be red a third
+      # of the time for a reason unrelated to the change under review, and a
+      # pipeline nobody trusts is worse than no pipeline.
+      #
+      # The skip is printed at the start AND end of the run and named in the job
+      # summary below — never silent. It means the PDF cold-start path is NOT
+      # covered here: run `npm run test:unit` locally (no env var) before
+      # touching lib/pdf-browser.js.
+      - name: Unit / guard runners
+        env:
+          UNIT_TEST_SKIP_TIMING: "1"
+        run: npm run test:unit
+
+      # ⚠️ Tripwire. test-suite.js must never run in CI: it needs a live server,
+      # it WRITES (test 46 logs an expense), it defaults to port 3000 — which is
+      # PRODUCTION on the VPS — and with no SPREADSHEET_ID override server.js
+      # falls through to the live Dispatch Management sheet. If a future edit
+      # adds it to a workflow, fail here rather than bill it to the client's
+      # real books.
+      - name: Refuse to run the writing HTTP suite in CI
+        run: |
+          # ⚠️ Comments are stripped BEFORE matching, and the error message below
+          # deliberately does not spell the filename out. The first version of
+          # this step grepped the raw workflow files for the bare name — and
+          # matched its own explanatory comments and its own error string, so it
+          # fired on every run and CI was red 100% of the time. A tripwire that
+          # always fires is indistinguishable from a broken build.
+          if cat .github/workflows/*.yml | sed 's/#.*$//' | grep -q 'test-suite'; then
+            echo "::error::A workflow invokes the root HTTP suite. That harness WRITES (test 46 logs an expense), defaults to port 3000 which is PRODUCTION on the VPS, and with no SPREADSHEET_ID override writes to the live Dispatch Management sheet. See CLAUDE.md."
+            exit 1
+          fi
+          echo "ok: no workflow invokes the root HTTP suite"
+
+      - name: Build client
+        run: npm run build:client
+
+      # A build that emits nothing still "succeeds". Express serves client/dist
+      # when it exists and silently falls back to the legacy public/ pages when
+      # it does not, so an empty dist would deploy as a working-but-wrong app.
+      - name: Assert the build actually produced a bundle
+        run: |
+          test -f client/dist/index.html || { echo "::error::client/dist/index.html missing after build"; exit 1; }
+          count=$(find client/dist/assets -type f 2>/dev/null | wc -l)
+          echo "client/dist/assets: $count files"
+          [ "$count" -gt 0 ] || { echo "::error::client/dist/assets is empty"; exit 1; }
+
+      - name: Note what this run did not cover
+        if: always()
+        run: |
+          {
+            echo "### CI coverage note"
+            echo ""
+            echo "Timing-sensitive runners are **skipped on CI** and are not covered by this green check:"
+            echo ""
+            echo '- `scripts/test-pdf-cold-start.js` — induces an event-loop stall and asserts on the recovery; unreliable on a 2-core shared runner.'
+            echo ""
+            echo 'Run `npm run test:unit` locally (without `UNIT_TEST_SKIP_TIMING`) to cover it — required before changing `lib/pdf-browser.js` or the PDF render path.'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -25,9 +25,21 @@ The long-form reasoning behind the trickiest parts of this system was moved out 
 
 Other long-form docs already in the repo: `scripts/README-env-refresh.md` (env-refresh runbook), `docs/ratecon-ownership-recommendation.md`, `docs/investor-portal-copy.md` (investor-facing copy sign-off inventory), `docs/manual/technical/06-operations.md`, `docs/vps-disk-and-data-handoff.md`.
 
+**⚠️ `README.md` at the repo root is abandoned — do not read it as documentation and do not send anyone to it.** It still describes the 2026-era "Google Sheets CRUD" starter this repo grew out of: a four-route `/api/data` API, `public/index.html` as "the" frontend, and an instruction to *"Open `server.js` and update these three values at the top"*. None of that is true of a 47k-line app with 236 routes, SQLite, Socket.IO and a Vue SPA. (`package.json` still carries the matching stale `"name": "google-sheets-crud"`.) **This file plus `docs/claude/` is the documentation.**
+
 ### House invariants — the rules you can break without knowing the topic exists
 
-- **Anything that moves money ships dormant** — a new flag defaults **off** (`INVOICE_AUTOGEN_ENABLED`, `PERIOD_FINALIZE_ENABLED`, `FUEL_GALLONS_RECOVERY_ENABLED`, `MAINTENANCE_NOTICE_ENABLED`, `LINXUP_ENABLED`, `ROUTEMATE_ENABLED`, `SCANKIT_ENABLED`). **⚠️ Two deliberately default ON because they are kill switches, not enable switches: `PII_MASK_ENABLED` and `RATECON_EXTRACT_ALERT_ENABLED`.**
+- **Anything that moves money ships dormant** — a new flag defaults **off**. All **11** that do, as of 2026-08-25: `INVOICE_AUTOGEN_ENABLED`, `PERIOD_FINALIZE_ENABLED`, `FUEL_GALLONS_RECOVERY_ENABLED`, `MAINTENANCE_NOTICE_ENABLED`, `LINXUP_ENABLED`, `ROUTEMATE_ENABLED`, `SCANKIT_ENABLED`, `RATECON_INDEX_APPLY_ENABLED`, `RATECON_RECONCILE_ENABLED`, `FUEL_EVENTS_ENABLED`, `CHAT_ORPHAN_SWEEP_ENABLED`.
+  - **⚠️ FOUR `*_ENABLED` flags deliberately default ON because they are kill switches, not enable switches: `PII_MASK_ENABLED`, `RATECON_EXTRACT_ALERT_ENABLED`, `EXPENSE_DUPLICATE_ALERT_ENABLED` and `FUEL_LOW_ALERT_ENABLED`.** (`CSRF_HEADER_REQUIRED` is a fifth kill switch under a different naming shape — see the CSRF decision below.) The reasoning is written out at `FUEL_LOW_ALERT_ENABLED`'s definition and applies to all four: *"a safety warning that ships disabled is a safety warning nobody turned on."*
+  - **⚠️ Read the SHAPE at the definition site, not the name.** There are **three** and only the middle one is self-describing:
+
+    | Shape | Default |
+    |---|---|
+    | `String(process.env.X \|\| "").toLowerCase() === "true"` | **off** |
+    | `/^(true\|1\|yes\|on)$/i.test(...)` | **off** |
+    | `!/^(false\|0\|no\|off)$/i.test(...)` | **ON** |
+
+    So `EXPENSE_DUPLICATE_ALERT_ENABLED=true` and `FUEL_LOW_ALERT_ENABLED=true` are **no-ops** — the only thing either variable can do is turn its alert **off**. This list goes stale; regenerate it by grepping `process.env.*ENABLED` and reading each definition.
 - **`""` means UNBOUNDED at both ends** in `truckChargeFromMonth()` / `truckChargeUntilMonth()` / `intersectMonthWindow()`. A guard that reads either `""` the other way waves through exactly the truck with the most exposure. This inversion has been corrected twice (PR #205, PR #216).
 - **`getInvestorDriverSet()` answers "who is on my trucks *right now*" and has no month dimension** — never use it as an unbounded expense filter. Use `investorExpenseScopeSql()`, and remember `COALESCE(truck_unit,'') = ''` is the other half of that guard.
 - **Ownership checks are MEMBERSHIP tests, not fetch-one-then-compare.** `invoices.pdf_file_name`, `investors.application_id` and `documents.file_name` have no unique index, so `.get()` can refuse the real owner and admit a stranger.
@@ -74,15 +86,27 @@ For production: `npm run build:client` then `npm start` — Express serves the b
 
 **Branch & PR workflow:** cut `feat/…` or `fix/…` branches off `main`; PRs target `main`, and merging to `main` is what ships to production (run the deploy command below). The `/start-task` (or `/logisx-start`) skill freshens the branch from `origin/main` and cuts a fresh feature branch; `/end-task` (or `/logisx-end`) commits, pushes, and opens/locates the PR to `main`. These skills never merge or switch branches for you.
 
-**Deploy:** production runs on a VPS at `76.13.22.110` under `/var/www/logistics-app`, managed by pm2 (process name `logistics-app`). Standard deploy flow after merging to `main`:
+**CI/CD (GitHub Actions, added 2026-08-25).** Two workflows; full setup and reasoning in **[`.github/workflows/README.md`](.github/workflows/README.md)**.
+- **`ci.yml`** — every PR into `main` and every push to `main`. `npm ci` on **both** lockfiles (which is itself the drift test), `node --check server.js`, `npm run test:unit` (the 45 standalone runners, ~17 s), `npm run build:client`, plus an assertion that the build actually emitted a bundle. **Pinned to Node 20 via `.nvmrc` because that is what the VPS runs (20.20.1)** — testing on the newer Node you develop on is how a post-20 API call ships green and throws in production.
+- **`deploy.yml`** — push to `main` auto-deploys **staging**; **production is manual dispatch only**, gated by the `production` GitHub Environment. Rollback = re-run with `ref` set to an older SHA.
+- **`npm run ci`** runs the exact same gate locally. Run it before pushing and the pipeline holds no surprises.
+- **⚠️ `test-suite.js` is BANNED from CI and a step in `ci.yml` fails the build if any workflow invokes it** — it writes, defaults to port 3000 (production on the VPS), and with no `SPREADSHEET_ID` override writes to the live sheet. That tripwire strips comments before matching, because the first version matched its own comment text and failed 100% of runs.
+- **⚠️ CI does NOT cover `test-pdf-cold-start.js`** — `scripts/run-unit-tests.js` skips it when `UNIT_TEST_SKIP_TIMING` is set, which `ci.yml` sets. It induces an event-loop stall and asserts on catching the recovery, so it is a race by construction: measured **6/6 passing idle but 3/6 at load average ~11**, and a GitHub runner is two shared cores. The skip prints at both ends of the run and in the job summary — never silent. **Run `npm run test:unit` locally (no env var) before touching `lib/pdf-browser.js` or the PDF render path.**
+- **⚠️ The retry allow-list is exactly one runner and must never become a blanket retry** — retrying everything turns a real regression into "passes sometimes", which is worse than no CI. A retry that succeeds still prints as `FLKY` so it cannot quietly rot into permanent failure.
+
+**Deploy:** production runs on a VPS at `76.13.22.110` under `/var/www/logistics-app`, managed by pm2 (process name `logistics-app`). The workflow above automates this; the manual flow after merging to `main` is still:
 ```bash
 ssh root@76.13.22.110 "cd /var/www/logistics-app && git checkout -- client/package-lock.json && git pull --ff-only origin main && npm install --silent --no-audit --no-fund && npm run build:client --silent && pm2 restart logistics-app --silent"
 ```
 ⚠️ **The leading `git checkout -- client/package-lock.json` is load-bearing, not tidiness.** The VPS runs **npm 10.8.2** (bundled with its Node 20.20.1) while the committed lockfile was generated by a newer npm that writes `"libc": [...]` on optional platform-specific deps. npm 10.8.2 does not know that field, so **every `npm install` on the box strips it and leaves `client/package-lock.json` permanently modified** — measured 2026-08-17: 15 deletions, `lockfileVersion` 3 on both sides, so it is pure metadata churn and nothing is broken by it. But `git pull --ff-only` **refuses to overwrite a locally-modified tracked file**, so the first PR that touches the lockfile would abort the deploy. That aborts *before* anything is installed or restarted, so it fails safe — it just looks alarming and blocks the release until someone clears it by hand. Discarding this one file is safe because npm regenerates it on the very next line and nothing reads it at runtime. **Keep the reset scoped to that one path** — a blanket `git checkout -- .` or `git reset --hard` on production could silently discard a deliberate hotfix. The alternative fixes (upgrade Node/npm on a box running 20+ other clients' processes, or switch the deploy to `npm ci`, which also needs the root `postinstall`'s `cd client && npm install` changed) both carry more blast radius than they are worth.
 
-A staging process (`logisx-staging`) also runs on the same VPS.
+A staging process (`logisx-staging`) also runs on the same VPS, at `/var/www/logisx-staging` on **port 3003** (production leaves `PORT` unset and defaults to 3000; both bind localhost behind nginx). Staging **does** set `SPREADSHEET_ID`; production does not, which is why an unset override there means the live sheet.
 
-**Tests & linting:** No Jest/Mocha/Vitest/ESLint configured. Integration harness at `test-suite.js` — **144** HTTP tests against a running server. Prepare fixtures first, or nearly everything fails at the login on test 2.
+**⚠️ This VPS is SHARED — it runs ~23 pm2 processes for other clients** (LendyPH, binhs-coop, dromic, and more; verified 2026-08-25). **Never `pm2 restart all`, `pm2 reload all`, `pm2 delete`, or restart by numeric id** — that is a multi-client outage, not a LogisX one. Always restart by exact process name. The same applies to anything system-wide: a Node/npm upgrade on this box touches 20+ other applications, which is one of the reasons the npm-skew lockfile workaround exists instead of just upgrading npm.
+
+**⚠️ `ecosystem.config.js` is NOT the live pm2 source of truth — `/root/.pm2/dump.pm2` is.** The deploy's `pm2 restart logistics-app` re-reads the **dump**, not this file, so editing `ecosystem.config.js` and deploying changes nothing. Apply a change with `pm2 restart ecosystem.config.js --update-env && pm2 save`, then confirm against `pm2 jlist`. Its value is that it is the only human-readable record of *why* the settings exist — chiefly `NODE_OPTIONS=--max-old-space-size=4096`, which is what stopped the app OOM'ing at the 2 GB default, and the only thing standing between a `pm2 delete && pm2 start` and a silent revert to it. Note `logisx-staging` has **none** of these settings (`NODE_OPTIONS` unset), so staging still runs at the 2 GB default — this config has only ever applied to prod. Read the header comment in the file before changing any number.
+
+**Tests & linting:** No Jest/Mocha/Vitest/ESLint configured — but there IS a pipeline now: `npm run ci` locally, and `.github/workflows/ci.yml` on every PR (see CI/CD above). Integration harness at `test-suite.js` — **136** numbered HTTP tests against a running server (the suite prints its own `results.length`; trust that over this number). Prepare fixtures first, or nearly everything fails at the login on test 2.
 
 **⚠️ The suite WRITES — point the server at a copy, never the live sheet.** Test 46 logs an expense, so this is not a read-only harness. Production's `.env` sets **no `SPREADSHEET_ID` at all**, so `server.js` falls through to its hardcoded production default (`1ey1n0AA…`) — meaning *any* server started without an explicit override (this suite's, a helper script's, a stray `npm start`) writes to the live Dispatch Management sheet. **And never identify a sheet by its title:** the VPS `logisx-staging` process uses a sheet *titled* **"logisx-production"**. Its ID is not production — the title is a leftover from how the copy was made — but read in a hurry it says the opposite of the truth. Check the ID, never the name. The safe local copy, used in the command below, is `156Y5-OUUEZspiY7dRsJZ57iyKWLJAjdVP8a4yw0PMN0` ("Dispatch Management (LOCAL)"). Same class of accident on the port: the suite defaults to **3000, which is production on the VPS** — pass `TEST_PORT` (and the server's `PORT`) to run anywhere else.
 
@@ -93,9 +117,13 @@ SPREADSHEET_ID=156Y5-OUUEZspiY7dRsJZ57iyKWLJAjdVP8a4yw0PMN0 npm start
 TEST_ADMIN_USER=super_admin TEST_INVESTOR_USER=johnny.rocks.spirits.llc \
   TEST_DISPATCHER_USER=amir_serrano TEST_DISPATCHER_PASS='Password123!' node test-suite.js
 ```
-**The suite cannot be run twice inside 15 minutes** — it exhausts its own rate limiters (`exportLimiter` is 20/15min), so a second back-to-back run returns 429 across the export and statement tests and looks like a regression. Wait for the window, or compare against a run from the same cold start. Covers auth, role gating, debug-endpoint auth, webhook secret, chat file validation, canceled-load exclusion. Exits 1 on any failure. When editing `server.js`, run `node --check server.js` before committing (~18k lines; a syntax error breaks the whole app).
+**The other half of the test story: 41 standalone runners in `scripts/test-*.js`.** These are plain `node scripts/test-<thing>.js` — **no server, no fixtures, no sheet override, no rate-limit window** — and each exits 1 on failure. They are the only tests you can run on a whim, and several are explicitly load-bearing elsewhere in this file: `test-db-export-guard.js` (lifts `requireRole` into a bare `new Function`, which is why the CSRF check must stay self-contained), `test-csrf-write-header.js` (pins the two duplicated guard copies identical), `scripts/check-ratecon-address-parsing.js` (16 verbatim production addresses locking `cityStateZip()`), plus `test-truck-retirement.js`, `test-investor-expense-scoping.js`, `test-period-lock-queue.js`, `test-payout-carry-freeze.js` and the rest of the money-math set. **Run the ones covering what you touched before reaching for `test-suite.js`** — they are seconds, not a 15-minute window. `ls scripts/test-*.js` for the current list.
+
+**The suite cannot be run twice inside 15 minutes** — it exhausts its own rate limiters (`exportLimiter` is 20/15min), so a second back-to-back run returns 429 across the export and statement tests and looks like a regression. Wait for the window, or compare against a run from the same cold start. Covers auth, role gating, debug-endpoint auth, webhook secret, chat file validation, canceled-load exclusion. Exits 1 on any failure. When editing `server.js`, run `node --check server.js` before committing (~47k lines; a syntax error breaks the whole app).
 
 ## Environment Setup
+
+**⚠️ `.env.example` (561 lines) is the canonical variable list — the block below is a curated subset.** It documents only the vars whose semantics are non-obvious or dangerous. `server.js` reads **77** distinct `process.env.*` names; when wiring anything new, grep `.env.example` first.
 
 Required files at project root:
 - `service-account-key.json` — Google service account credentials (not in git)
@@ -188,6 +216,7 @@ Shared server-side modules live in `lib/` (required from `server.js`):
 - `ratecon-load.js` — pure helpers for rate-con ingestion, now shared by **both** paths: `buildJobTrackingRow()` (header-order mapping + creation defaults), `calculateRatePerMile()` / `cityStateZip()` (ported from the n8n `Calculate RPM + Details` node — never "Calculate Rate Per Mile", which does not exist; the n8n original has since been deleted as unreachable), `extractionWarnings()`, `upsert`-support helpers. No network or DB access. Called by `POST /api/loads/from-ratecon` **and** by `POST /api/n8n/load-distance`, which is what makes the email path and the drag-and-drop path agree. See "Load ingestion" below.
   - **⚠️ `cityStateZip()` normalizes newlines to commas first, and that line is load-bearing.** Its character class was `[^,]`, which matches `\n`, so a multi-line rate-con address (`"4528 W Royal Ln\nIrving, TX 75063"` — the common shape) had its whole street swallowed into the city capture, and `Details` read `"4528 W Royal Ln\nIrving, TX 75063 - 818 Hallmark Dr\nLAREDO, TX 78045"`. Measured on the 144 production rows where the retired LLM had also answered: **118/144 (81.9%) before, 140/144 (97.2%) after**. This was the **precondition** for retiring the LLM, not a tidy-up — moving the address half onto a parser that leaks streets would have swapped a wrong distance for a wrong address. `node scripts/check-ratecon-address-parsing.js` locks it (16 cases, all verbatim production addresses, exits 1 on failure). Known residual, deliberately not chased: an address with no delimiter between street and city keeps the street — 1 of 144, and every rule that would split them guesses where a street name ends.
 - `scankit-client.js` — ScanKit.io document-scanning API adapter (single point of contact; `POST /scan/crop`). See the AI/vision services note below.
+- **Also in `lib/` and NOT detailed above** — `ls lib/` is 24 files, this file walks through 14. The rest, largest first: `ratecon-reconcile.js` (45 KB — `reconcileRateCons()`, the out-of-band catch for the ingestion blind spot described under "Load ingestion"; referenced in prose there but easy to miss as a module), `payout-statement.js` (27 KB — the per-PAID-month investor statement PDF; page 1 is a **live recompute** shown beside the **frozen** paid figure, which is what the drift disclosure exists to reconcile), `expense-analytics.js` (26 KB), `expense-ai.js` (23 KB), `ratecon-drive-index.js` (21 KB — the load→rate-con Drive linking behind `POST /api/admin/ratecon-index`), `receipt-gallons-recovery.js`, `receipt-ocr.js`, `pii-mask.js` (the masking-on-read layer from [`pii-at-rest.md`](docs/claude/pii-at-rest.md)), `receipt-duplicates.js`, `gemini-errors.js`, `csv.js`.
 - `broker-invoice.js` — invoice assembly for **every** broker: `resolveInvoiceTo()` / `resolveBrokerName()` recipient + naming, `isBisonLoad()` (now a recipient *branch*, not a gate), deterministic rate-con field extraction, and the payload shape for the Draft Invoice route. See the "Invoice drafting — all brokers" section below.
 - `imap-draft.js` — `appendGmailDraft()`: writes an assembled invoice email straight into the Gmail Drafts folder over IMAP (no send), using `GMAIL_USER` / `GMAIL_APP_PASSWORD`.
 - `receipt-gallons-recovery.js` — pure decision logic for recovering GALLONS onto fuel receipts that have a price and no volume: `cpgBand()`, `judgeGallonsRecovery()`, `summarizeRecovery()`. No network/DB/fs. See "Gallons recovery" below.
@@ -198,28 +227,37 @@ Shared server-side modules live in `lib/` (required from `server.js`):
 ## Architecture
 
 ### Backend (`server.js`)
-Single-file Node.js/Express server (~18,450 lines, ~185 REST endpoints). Google Sheets is the primary database (Sheets API v4); SQLite for local data; Drive API for uploads; Socket.IO for real-time. Body limit raised to 50mb for large payloads with embedded base64 photos/signatures.
+Single-file Node.js/Express server (**~47,320 lines, 236 route registrations** — verified 2026-08-25; the old "~18,450 lines / ~185 endpoints" figure was stale for months, so re-measure with `wc -l` rather than trusting any number written here). Google Sheets is the primary database (Sheets API v4); SQLite for local data; Drive API for uploads; Socket.IO for real-time. Body limit raised to 50mb for large payloads with embedded base64 photos/signatures.
 
 **📖 The complete endpoint reference — every route, its role gate, and the reasoning behind each guard — is [`docs/claude/backend-server.md`](docs/claude/backend-server.md). Read it before touching a route.** What follows is the index.
 
 **Static file serving**: Express serves `client/dist/` if it exists (production build), else `public/` (legacy vanilla HTML/JS). SPA catch-all `app.get("*")` serves `index.html` for client-side routing.
 
-**SQLite** (`app.db`, WAL mode) — ~35 tables organized by domain:
+**SQLite** (`app.db`, WAL mode) — **58 tables** organized by domain (`grep -c 'CREATE TABLE IF NOT EXISTS' server.js`):
 
 | Domain | Tables |
 |--------|--------|
 | Auth & users | `users` |
 | Messaging | `messages`, `notifications`, `dispatch_notifications` |
-| Dispatch | `load_responses`, `load_ratings`, `load_coordinates`, `deleted_loads` |
-| Fleet | `trucks`, `truck_assignments`, `trailers`, `drivers_directory`, `carrier_driver_history` |
-| Finance | `expenses`, `maintenance_fund`, `compliance_fees`, `invoices`, `investor_config` |
-| Investors | `investors`, `investor_applications`, `investor_onboarding`, `investor_onboarding_documents`, `investor_payment_info`, `investor_outreach_log` |
+| Dispatch | `load_responses`, `load_ratings`, `load_coordinates`, `deleted_loads`, `load_status_history` |
+| Fleet | `trucks`, `truck_assignments`, `trailers`, `drivers_directory`, `carrier_driver_history`, `excluded_driver_days` |
+| Finance | `expenses`, `maintenance_fund`, `compliance_fees`, `invoices`, `investor_config`, `invoice_autogen_runs`, `load_invoice_drafts`, `bison_invoice_seq`, `period_locks` |
+| Investors | `investors`, `investor_applications`, `investor_onboarding`, `investor_onboarding_documents`, `investor_payment_info`, `investor_outreach_log`, `investor_payouts`, `investor_payout_history` |
 | Driver onboarding | `job_applications`, `driver_onboarding`, `onboarding_documents`, `driver_payment_info` |
-| Documents | `documents`, `legal_documents` |
+| Documents | `documents`, `legal_documents`, `receipt_upload_drafts` |
 | Tracking | `driver_locations`, `geocode_cache` |
-| Admin | `audit_trail` |
+| Sheets mirror | `sheet_job_tracking` — a local mirror of Job Tracking's 26 columns **in sheet order**, including the six the endpoint never writes and the flattened `_payment_` (the sheet's `"  Payment  "` header, real spaces and all). It is kept column-identical on purpose; do not "tidy" a column out of it |
+| Rate-con ingestion | `ratecon_load_aliases`, `ratecon_reconcile_runs` |
+| Alerts (dedupe ledgers) | `ratecon_extract_alerts`, `ratecon_reconcile_alerts`, `expense_duplicate_alerts`, `fuel_event_alerts`, `onboarding_doc_alerts` |
+| Fuel | `fuel_events` |
+| Routemate / ELD | `routemate_vehicles`, `routemate_telemetry`, `routemate_fault_codes`, `routemate_dvir`, `routemate_fuel_daily`, `routemate_hos_daily` |
+| Admin | `audit_trail`, `server_state` |
 
 Session store also in SQLite.
+
+**The `*_alerts` tables are dedupe ledgers, not logs** — an alert path writes a row so the *same* condition never notifies twice. Clearing one re-arms the alert; that is the intended recovery, but it will re-fire on historical rows. This is why cancelled-duplicate load `209875716` "costs nothing ongoing" (its `ratecon_extract_alerts` row is already there).
+
+**⚠️ Money tables that outlive their inputs**: `investor_payouts` / `investor_payout_history` **freeze** a settled figure, and `period_locks` freezes a whole month. A recomputation that disagrees with a frozen row is not automatically a bug — see [`investor-money-math.md`](docs/claude/investor-money-math.md) and the payout-ledger section of [`backend-server.md`](docs/claude/backend-server.md) before "correcting" one.
 
 **Schema migrations**: On boot, server runs two types of migrations:
 - `ALTER TABLE ... ADD COLUMN` for adding new columns. Checks for existing columns first.
@@ -283,6 +321,10 @@ Fuel range, trip planning and gallons recovery have their own hazards — see [`
 - `pod-uploaded` — to dispatch room on document upload
 - `location-update` — to dispatch room on driver GPS report
 - `geofence-trigger` — to driver and dispatch room when geofence auto-triggers status
+- `load-deleted` — to dispatch room on soft delete
+- `new-load` — to dispatch room when a load is ingested; emitted from **both** paths (n8n webhook and the drag-and-drop `from-ratecon` route), which is part of keeping the two in lockstep
+- `fuel-low` — to the **driver's own room** (lowercased driver name) on a low-fuel episode. Throttled per vehicle and latched so one episode is one alert, not one per ~15 s ping. Gated by `FUEL_LOW_ALERT_ENABLED`, which is a **kill switch — default ON**
+- `tracker-update` — to the public-tracker namespace room `load:<activeLoadId>`, feeding the customer-facing tracker
 - `reload` — to all 500ms after server start (live reload during dev)
 
 Clients emit `register` with their name to join a socket room.
@@ -334,17 +376,20 @@ The n8n workflow's own traps (`pairedItem` on multi-email polls, the dead errorW
 One-click "Draft Invoice Email" on any **delivered/completed** load with a POD — `POST /api/loads/:loadId/draft-invoice` (alias `…/draft-bison-invoice`) assembles the invoice + supporting docs and writes a Gmail **draft**, never auto-sends, via `lib/imap-draft.js`. Distinct from the `/api/invoices/generate` weekly-pay flow. Bison → `QPinvoicesUSA@bisontransport.com`; **every other broker → `quickpay@megacorplogistics.com`**. Broker identity resolves via `BROKER_DOMAIN_NAMES` on the email domain (the sheet has **no** brokerage-company column — `Broker Contact Name` and `Contract ID` both hold the booking *agent*). Order number falls back to the load id — **except on a BISON load, where that fallback is now a hard stop**: the route answers **422 `INVOICE_REFS_REQUIRED`** until a human supplies the Order # and PO #, because Bison AP matches on *their* number and ours reconciles against nothing. Total falls back to the sheet's `"  Payment  "` column (real surrounding spaces, exact-`payment` match only) → **422 `INVOICE_TOTAL_UNKNOWN`** rather than a `$0.00` invoice. **⚠️ `dryRun` is a QUERY param** — a body-only run creates the real draft and burns an invoice number. Full detail in **[`docs/claude/invoice-drafting.md`](docs/claude/invoice-drafting.md)**.
 
 ### Frontend (`client/`)
-Vue 3 + Vite SPA with Vue Router, Pinia stores, Tailwind CSS v4, shadcn-vue components (via radix-vue/reka-ui), Vant mobile UI, Leaflet + Google Maps for maps, and Socket.IO client for real-time updates.
+Vue 3 + Vite SPA with Vue Router, Pinia stores, Tailwind CSS v4, shadcn-vue components (via radix-vue/reka-ui), Vant mobile UI, **Google Maps** for maps, and Socket.IO client for real-time updates. (**Leaflet is not a dependency** — earlier revisions of this file said "Leaflet + Google Maps"; there is zero Leaflet in `client/`.)
 
 Key directories:
-- `stores/` — auth, dashboard, sheets, driver, messages, investor, users, adminTools, dispatchNotifications, driversDb, investors, trucks, trailers, invoices, financials
-- `composables/` — useApi, useSocket, useToast, usePagination, useGeocode, useGoogleMaps
+- `stores/` — 17: auth, dashboard, sheets, driver, messages, investor, users, adminTools, dispatchNotifications, driversDb, investors, trucks, trailers, invoices, financials, **appShell**, **maintenance**
+- `composables/` — 14: useApi, useSocket, useSocketRefresh, useToast, usePagination, useGeocode, useGoogleMaps, useUpload, useFileDrop, useDocumentScan, useDriverPosition, useVoiceGuidance, useScreenWakeLock, useViewport
+- `lib/` (17) and `utils/` (5) — **shared client logic, and the first place to look before writing a helper.** `routeProgress.js`, `voiceLadder.js`, `payoutPeriod.js`, `monthLabel.js`, `duration.js`, `fileValidation.js`, `imageUtils.js`, `asyncPool.js`, `gallonsRecovery.js`, `fuelReview.js`, `loadReview.js`, `dataIssues.js`, `formDraft.js`, `signingConsent.js`, `address.js`, `datetime.js`, `format.js`, `usStates.js`, `cn()` in `lib/utils.js`. Several have a matching `scripts/test-*.mjs` runner (`test-route-progress.mjs`, `test-voice-ladder.mjs`, `test-payout-card-period.mjs`).
 - `components/ui/` — shadcn-vue primitives (badge, button, card, dialog, input, select, skeleton, table, tabs)
 - `components/` — feature-organized: layout, shared, dashboard, data-manager, driver, drivers-db, trucks, investors, investor, invest, apply, users
-- `views/` — 28 view components (includes the public `TrackLoadView.vue`)
+- `views/` — 32 view components (includes the public `TrackLoadView.vue`)
 - `wizard/` — JSON-driven framework for the multi-step Invest flow. `engine/WizardEngine.js` interprets a step schema from `data/`, `expressionEvaluator.js` evaluates `show-if`/`require-if` without `eval()`, `spotlight.js` drives the highlight overlay. Extend this engine for new multi-step forms instead of a bespoke stepper.
 
 **Vite proxy** (`client/vite.config.js`): `/api` and `/socket.io` (with `ws: true`) both proxy to `http://localhost:3000`.
+
+**⚠️ `client/package.json` pins `pdfjs-dist` through an `overrides` block, and it is a security fix, not a preference.** `vue-pdf-embed@2.1.5` (the latest release) depends on `pdfjs-dist ^5.7.284`, which sits inside the **CVE-2026-16633** range (`>=5.6.83 <6.2.108`, arbitrary JS execution from a malicious PDF) and has no 5.x backport — the only forward fix is forcing `6.2.108`. **The override is load-bearing only because `PdfZoomViewer.vue` imports `vue-pdf-embed/dist/index.essential.mjs`**; the package's *default* entry inlines pdf.js and would ignore the override entirely. Changing either half without the other silently reintroduces the CVE. Both files carry the explanation — read them before bumping `vue-pdf-embed`.
 
 **Composable singletons**: `useApi()`, `useSocket()`, `useToast()` are module-level singletons (not per-component). Each Pinia store does `const api = useApi()` at module scope; `useSocket` keeps one global socket connection.
 
@@ -360,7 +405,7 @@ Key directories:
 
 **Mobile / admin drawer**: A shared `appShell` Pinia store exposes `isMobile` (resize-driven) and `sidebarOpen`. On mobile, `AppSidebar.vue` is a slide-in drawer with backdrop (`v-if="isMobile && appShell.sidebarOpen"`); on desktop, the persistent collapsible sidebar. New admin views should toggle it via `appShell.openSidebar()` rather than rolling their own mobile nav. Admin pages (Dashboard, Notifications, Messages, Expenses) are responsive top-down — commits `dbe9d4e`…`8e1a62d` collapse multi-pane layouts into single-pane stacks below the `md` breakpoint and swap detail tables for card lists. Vant is reserved for driver/public surfaces; admin uses shadcn-vue + Tailwind.
 
-**Routing** (34 routes with role-based guards):
+**Routing** (35 routes with role-based guards):
 
 | Route | Access | Notes |
 |-------|--------|-------|
@@ -383,7 +428,7 @@ Key directories:
 | `/trucks` | Super Admin, Dispatcher, Investor | |
 | `/investors` | Super Admin | Investor records management |
 | `/investor-portals` | Super Admin | Index of investors — opens a read-only replica of each one's portal |
-| `/investor-portals/:userId` | Super Admin | Read-only preview of a single investor's `/investor` view (banner + same components, scoped via `?as_user_id=`) |
+| `/investor-portals/:userId` | Super Admin | Read-only preview of a single investor's `/investor` view (banner + same components, scoped via `?as_user_id=`). The component is **`InvestorPortalPreviewView.vue`** — earlier revisions called it "an `InvestorView.vue` wrapper", which is not a file that exists in that role. |
 | `/drivers` | Super Admin | Drivers directory |
 | `/trailers` | Super Admin, Dispatcher | |
 | `/applications` | Super Admin | Driver applications review |
@@ -392,6 +437,11 @@ Key directories:
 | `/admin/financials` | Super Admin | Company P&L view |
 | `/admin/fleet-health` | Super Admin, Dispatcher | Routemate ELD fleet health — fault codes, DVIR, telemetry status |
 | `/archive` | Super Admin | Archived data viewer |
+| `/payouts` | Super Admin | Investor payout ledger — the settlement layer. **Money surface**; read the payout-ledger section of [`backend-server.md`](docs/claude/backend-server.md) first |
+| `/my-payouts` | Super Admin, Investor | The investor's own side of the same ledger (`MyPayoutsView.vue`) |
+| `/admin/driver-pay-overrides` | Super Admin | Per-driver-day pay overrides (`excluded_driver_days`) — edits the driver-pay "active days" basis, so it moves invoice *and* investor math |
+| `/admin/data-issues` | Super Admin | Data-issue triage (`DataIssuesView.vue`, backed by `client/src/lib/dataIssues.js`) |
+| `/account/change-password` | Any authenticated user | Self-service password change (`changePasswordLimiter`, 5/15 min) |
 
 Auth guard calls `checkSession()` on first navigation only (blocks until resolved); later navigations use cached `isAuthenticated`. Unauthorized users redirect to `auth.roleHome` (Driver → `/driver`, Dispatcher → `/dashboard`, Investor → `/investor`).
 
@@ -506,6 +556,6 @@ Replaces phone-based driver GPS. Routemate is FMCSA-certified ELD hardware in tr
 
 ## House rules
 
-**⚠️ `.claude/rules/` does not exist in this repo** (verified 2026-08-18) — earlier revisions of this file described it as present, so do not go looking. If generic team guidelines are ever reintroduced there, treat them as defaults and let **this repo's reality override them where they conflict**: those rules called for "many small files (<800 lines)" and "TDD with 80%+ coverage", whereas the backend is a deliberate ~18k-line single-file `server.js` and there is **no test framework** — only the `test-suite.js` HTTP harness plus the standalone `scripts/test-*.js` assertion runners. Follow the surrounding code's established patterns.
+**⚠️ `.claude/rules/` does not exist in this repo** (verified 2026-08-18) — earlier revisions of this file described it as present, so do not go looking. If generic team guidelines are ever reintroduced there, treat them as defaults and let **this repo's reality override them where they conflict**: those rules called for "many small files (<800 lines)" and "TDD with 80%+ coverage", whereas the backend is a deliberate ~47k-line single-file `server.js` and there is **no test framework** — only the `test-suite.js` HTTP harness plus the standalone `scripts/test-*.js` assertion runners. Follow the surrounding code's established patterns.
 
 Two conventions do apply everywhere: **conventional-commit messages** (`feat:`/`fix:`/`refactor:`/`docs:`/`test:`/`chore:`/`perf:`/`ci:`) and **parameterized SQLite queries**.
