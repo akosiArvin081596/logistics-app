@@ -71,9 +71,14 @@ running it.
 
 ## CI/CD
 
-GitHub Actions. Every PR runs the `ci` gate above on Node 22. Merging to `main`
-auto-deploys **staging**; **production** is a manual, approval-gated run of the
-*Deploy* workflow. Setup and reasoning: [`.github/workflows/README.md`](.github/workflows/README.md).
+GitHub Actions. Every PR runs the `ci` gate above on Node 22.
+
+**Merging to `main` deploys staging and then production automatically.** Production
+runs only if staging went green, smoke-checks itself, verifies the public edge, and
+**rolls itself back** to the previous SHA if either check fails. There is no approval
+step — re-arm one by adding a required reviewer to the `production` Environment.
+
+Setup, the safety reasoning, and the rollback design: [`.github/workflows/README.md`](.github/workflows/README.md).
 
 ## Docs
 
