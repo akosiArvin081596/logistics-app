@@ -29,12 +29,20 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # ⚠️ Node 20 is NOT a default — it is the version the VPS actually runs
-      # (20.20.1 / npm 10.8.2, verified 2026-08-25), pinned via .nvmrc. Testing
-      # on a newer Node than production is how you ship a post-20 API call that
-      # is green here and throws on the box. `better-sqlite3@12.8.0` is a
-      # concrete instance: it declares 20.x||22.x||23.x||24.x||25.x, so a
-      # runner on 26 is already outside what the native module supports.
+      # ⚠️ The version here is NOT a default — it is pinned via .nvmrc to the
+      # Node the VPS actually executes this app with, and as of 2026-08-25 that
+      # is 22.23.2 for BOTH logistics-app and logisx-staging (pm2 `interpreter`
+      # → /opt/node22/bin/node; see ecosystem.config.js).
+      #
+      # ⚠️ The SYSTEM node on that box is still 20.20.1 and is NOT ours — it is
+      # apt/nodesource-managed and shared by ~23 other clients' processes. Do
+      # not "align" this file to it: pm2 decides what runs this app, and the
+      # answer is 22. Testing on a different major than production is how a
+      # post-20 API call ships green and throws on the box.
+      #
+      # This moved from 20 → 22 because puppeteer 25 requires >=22.12, and
+      # puppeteer 25 is the ONLY fix for the extract-zip advisory (no patched
+      # extract-zip exists; 2.0.1 is the latest and is itself vulnerable).
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
