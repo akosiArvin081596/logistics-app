@@ -51,7 +51,8 @@ function makeFakeBrowser({ failOpen = false, closeHangs = false } = {}) {
   const killed = { value: false };
   const proc = { pid: 999999, get killed() { return killed.value; } };
   const browser = {
-    isConnected: () => true,
+    connected: true,          // puppeteer >= 25 shape
+    isConnected: () => true,  // puppeteer <= 24 shape — both kept so the compat path in browserAlive() stays exercised
     process: () => proc,
     on: (ev, fn) => { (listeners[ev] = listeners[ev] || []).push(fn); },
     emit: (ev) => (listeners[ev] || []).forEach((f) => f()),

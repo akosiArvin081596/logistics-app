@@ -15,11 +15,11 @@
     "docs:screenshots": "node scripts/docs/capture-screenshots.js",
     "postinstall": "cd client && npm install"
   },
-  "//scripts": "`npm run ci` is the exact gate CI runs — run it locally before pushing and the pipeline holds no surprises. `test:unit` runs the 45 standalone runners in scripts/ (~17 s, hermetic). It deliberately does NOT run test-suite.js: that one needs a live server, WRITES, defaults to port 3000 (production on the VPS) and with no SPREADSHEET_ID override writes to the LIVE Dispatch Management sheet. See the header of scripts/run-unit-tests.js.",
+  "//scripts": "`npm run ci` is the exact gate CI runs \u2014 run it locally before pushing and the pipeline holds no surprises. `test:unit` runs the 45 standalone runners in scripts/ (~17 s, hermetic). It deliberately does NOT run test-suite.js: that one needs a live server, WRITES, defaults to port 3000 (production on the VPS) and with no SPREADSHEET_ID override writes to the LIVE Dispatch Management sheet. See the header of scripts/run-unit-tests.js.",
   "engines": {
-    "node": ">=20.20.0"
+    "node": ">=22.12.0"
   },
-  "//engines": "A FLOOR, deliberately not a ceiling. Production runs Node 20.20.1 / npm 10.8.2 (verified on the VPS 2026-08-25) and this repo is developed on 26.x, so an upper bound here would make every local `npm install` print EBADENGINE for no benefit. The exact production version is pinned where it actually matters — `.nvmrc` and the `node-version` in .github/workflows/ci.yml — so a green pipeline means 'passes on the box it will run on'. Anything relying on a post-20 API passes locally and breaks in production; CI on 20 is what catches it.",
+  "//engines": "A FLOOR, deliberately not a ceiling. Both the VPS environments now run Node 22.23.2 via pm2's `interpreter` (see ecosystem.config.js); the SYSTEM node on that box is still 20.20.1 and belongs to ~23 other clients' processes. 22.12 is puppeteer 25's hard floor \u2014 below it the PDF pipeline will not install. The exact version is pinned where it matters: `.nvmrc` and `node-version` in .github/workflows/ci.yml, so a green pipeline means 'passes on the runtime production actually uses'.",
   "dependencies": {
     "archiver": "^7.0.1",
     "bcryptjs": "^3.0.3",
@@ -37,7 +37,7 @@
     "nodemailer": "^9.0.5",
     "pdf-lib": "^1.17.1",
     "pdfkit": "^0.18.0",
-    "puppeteer": "^24.40.0",
+    "puppeteer": "^25.9.0",
     "socket.io": "^4.8.3",
     "tesseract.js": "^7.0.0"
   },
