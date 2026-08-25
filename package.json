@@ -44,5 +44,9 @@
   "devDependencies": {
     "marked": "^18.0.3",
     "nodemon": "^3.1.14"
-  }
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
+  },
+  "//overrides": "Forces a patched uuid under googleapis. All four moderate advisories on this package trace to ONE root: uuid <11.1.1 (GHSA-w5hq-g745-h8pq, missing buffer bounds check in v3/v5/v6 when `buf` is provided). gaxios/googleapis/googleapis-common are each flagged only 'via' it. npm's advised fix is googleapis 128 -> 176, which is NOT taken deliberately: it pulls google-auth-library 10.5 -> gaxios 7, which moves to node-fetch v3 and implements `timeout` with AbortSignal.timeout(). Measured against a never-responding server: gaxios 6 retries a timeout (4 requests), gaxios 7 does NOT (1 request). That would silently convert every Google API timeout from 'retry 3x' into 'fail the user's page', which is the exact 150s dashboard hang the google.options() block in server.js exists to prevent. gaxios 6 uses uuid ONLY as v4() for a multipart boundary (gaxios.js:417), and uuid 11 still exports v4 for CommonJS, so this override is inert at runtime. Revisit only when googleapis ships a transport whose timeout is retryable."
 }
