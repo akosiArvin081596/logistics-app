@@ -34,21 +34,40 @@ runs:
 
         # Retry ONLY on ssh transport failure. ssh reserves exit 255 for its own
         # errors; any other status is the REMOTE script's and passes through. A
-        # deploy that genuinely fails must fail once and loudly, not three times.
+        # deploy that genuinely fails must fail once and loudly, not five times.
+        #
+        # ⚠️ THE BUDGET IS SIZED FROM A MEASURED OUTAGE, not picked round.
+        # Runner→VPS connectivity drops occasionally: 2 of 25 deploy runs on
+        # 2026-08-25 (8%) hit "Connection timed out" — a network-level SYN
+        # blackhole, not the host (fail2ban clear, no sshd drops, load 0.2).
+        # The first budget was 3 attempts over ~70 s and it was EXHAUSTED at
+        # 13:19:29 / 13:19:59 / 13:20:39. Five attempts with escalating backoff
+        # spans ~5 min (5×20 s connect + 15+30+60+90 s waiting), which covers
+        # that blip with room to spare and still sits inside the 20-minute job
+        # timeout.
+        #
+        # This matters more now that production auto-deploys: a transport
+        # failure means production silently stays behind main until someone
+        # looks at the Actions tab.
         cat > "$RUNNER_TEMP/ssh_retry.sh" <<'HELPER'
         #!/bin/bash
         set -uo pipefail
         PAYLOAD=$(cat)
-        for attempt in 1 2 3; do
+        BACKOFF="15 30 60 90"
+        attempt=0
+        for wait in $BACKOFF ""; do
+          attempt=$((attempt+1))
           printf '%s' "$PAYLOAD" | ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
             -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
             "$1" "$2"
           rc=$?
           [ "$rc" -ne 255 ] && exit "$rc"
-          echo "::warning::ssh transport failure (255), attempt $attempt/3 — retrying in $((attempt*10))s"
-          sleep $((attempt*10))
+          if [ -n "$wait" ]; then
+            echo "::warning::ssh transport failure (255), attempt $attempt/5 — retrying in ${wait}s"
+            sleep "$wait"
+          fi
         done
-        echo "::error::ssh failed to connect after 3 attempts"
+        echo "::error::ssh failed to connect after 5 attempts spanning ~5 minutes — runner→VPS network, not the deploy"
         exit 255
         HELPER
         chmod +x "$RUNNER_TEMP/ssh_retry.sh"
