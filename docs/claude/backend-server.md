@@ -167,7 +167,7 @@ REST endpoints (grouped by domain):
 
 Moved here from `CLAUDE.md` (2026-08-25) — it was reference material, and `CLAUDE.md` line 37 above had promised a "rate-limiting section below" that did not exist. The *reasoning* (per-user keying, `poiStopsCache` as the real cost control, `requireRole`-before-limiter ordering) stays in `CLAUDE.md`; the numbers live here.
 
-All use `standardHeaders: true` and the `{feature}Limiter` naming convention. **36 are defined** — this table covers the ones whose limits are deliberate rather than incidental; `grep -oE 'const [a-zA-Z]+Limiter = ' server.js` for the full list.
+All use `standardHeaders: true` and the `{feature}Limiter` naming convention. **37 are defined** (verified 2026-08-25) — this table covers 12 of them, the ones whose limits are deliberate rather than incidental; `grep -oE 'const [a-zA-Z]+Limiter = ' server.js` for the full list.
 
 | Limiter | Window | Max | Scope |
 |---------|--------|-----|-------|
