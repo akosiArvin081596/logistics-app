@@ -1,0 +1,109 @@
+name: Deploy drift
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Closes the one gap auto-deploy left: a deploy can fail on TRANSPORT — ssh
+# timing out between the runner and the VPS — which fails safe (nothing is
+# deployed, production keeps serving) but fails SILENTLY. Production then sits
+# behind main until somebody happens to look at the Actions tab.
+#
+# Measured 2026-08-25: 2 of 25 deploy runs (8%) hit exactly that.
+#
+# This checks every 30 minutes, and will heal it ONCE per commit.
+# ─────────────────────────────────────────────────────────────────────────────
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-drift
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: production vs main
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure SSH
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "${{ secrets.VPS_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Check for drift
+        id: check
+        env:
+          HOST: ${{ secrets.VPS_HOST }}
+          USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          out=$(ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o ConnectTimeout=20 \
+                "$USER@$HOST" "DIR='/var/www/logistics-app' PM2='logistics-app' bash -s" \
+                < scripts/deploy/remote-drift-check.sh)
+          echo "$out"
+          state=$(printf '%s' "$out" | grep -oE 'DRIFT_STATE=[a-z-]+' | cut -d= -f2)
+          local_sha=$(printf '%s' "$out" | grep -oE 'DRIFT_LOCAL=[0-9a-f]+' | cut -d= -f2)
+          remote_sha=$(printf '%s' "$out" | grep -oE 'DRIFT_REMOTE=[0-9a-f]+' | cut -d= -f2)
+          {
+            echo "state=$state"
+            echo "local=$local_sha"
+            echo "remote=$remote_sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Heal (one attempt per commit)
+        if: steps.check.outputs.state == 'behind-healable'
+        env:
+          HOST: ${{ secrets.VPS_HOST }}
+          USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          echo "::warning::production is behind main (${{ steps.check.outputs.local }} vs ${{ steps.check.outputs.remote }}) but healthy — most likely a transport-failed deploy. Healing once."
+          # Marker first: if the deploy dies halfway, the next tick alarms
+          # instead of retrying. Fail-closed.
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o ConnectTimeout=20 \
+            "$USER@$HOST" "DIR='/var/www/logistics-app' PM2='logistics-app' REF='main' bash -s" \
+            < scripts/deploy/remote-drift-heal.sh
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o ConnectTimeout=20 \
+            "$USER@$HOST" "DIR='/var/www/logistics-app' PM2='logistics-app' REF='main' bash -s" \
+            < scripts/deploy/remote-deploy.sh
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o ConnectTimeout=20 \
+            "$USER@$HOST" "DIR='/var/www/logistics-app' PM2='logistics-app' bash -s" \
+            < scripts/deploy/remote-smoke.sh
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 https://app.logisx.com/api/config/maintenance)
+          echo "public edge -> HTTP $code"
+          [ "$code" = "200" ] || { echo "::error::healed deploy is not serving publicly"; exit 1; }
+
+      - name: Alarm
+        # Two states are NOT healed: an already-attempted commit (healing again
+        # would restart production in a loop) and behind-plus-unhealthy (that is
+        # an incident, not a missed deploy). Both must be loud.
+        if: steps.check.outputs.state == 'behind-already-attempted' || steps.check.outputs.state == 'behind-and-unhealthy'
+        run: |
+          echo "::error::production drift needs a human — state=${{ steps.check.outputs.state }}, deployed=${{ steps.check.outputs.local }}, main=${{ steps.check.outputs.remote }}"
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Deploy drift"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| state | \`${{ steps.check.outputs.state }}\` |"
+            echo "| production | \`${{ steps.check.outputs.local }}\` |"
+            echo "| main | \`${{ steps.check.outputs.remote }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Always remove the deploy key
+        if: always()
+        run: shred -u ~/.ssh/deploy_key 2>/dev/null || rm -f ~/.ssh/deploy_key
