@@ -308,7 +308,7 @@ Session-based auth with 4 roles: Super Admin, Dispatcher, Driver, Investor. Auth
 
 **Error handling**: All endpoints use try-catch with generic 500 JSON responses. Geofence check errors inside `POST /api/location` are caught and logged but never fail the location response.
 
-**Rate limiting** (express-rate-limit, all `standardHeaders: true`, naming convention `{feature}Limiter`). **36 limiters are defined; the per-limiter table now lives in [`backend-server.md`](docs/claude/backend-server.md#rate-limiting)** — `grep -oE 'const [a-zA-Z]+Limiter = ' server.js` for the current list. What matters here is *why* they are shaped the way they are:
+**Rate limiting** (express-rate-limit, all `standardHeaders: true`, naming convention `{feature}Limiter`). **37 limiters are defined; the per-limiter table now lives in [`backend-server.md`](docs/claude/backend-server.md#rate-limiting)** — `grep -oE 'const [a-zA-Z]+Limiter = ' server.js` for the current list. What matters here is *why* they are shaped the way they are:
 
 - **⚠️ `poiLimiter` and `fuelPlanLimiter` are keyed PER USER, not per IP** (`u:<id>`, `ip:<ip>` fallback). IP keying was actively backwards: a dispatch office behind one NAT shared a single bucket while every driver on cellular got a fresh one — throttling the cheap callers and not the expensive ones. Note per-user keying *raises* the aggregate ceiling, which is why the cache below, not the limiter, is the real cost control.
 - **⚠️ `poiStopsCache` is the actual cost control.** Each `/api/poi/fuel-stops` miss fans out to 4–8 billed Places calls on the Enterprise + Atmosphere SKU (~$0.16–0.32). The limiter is only the backstop on a scripted client.
