@@ -129,36 +129,7 @@ Required files at project root:
 - `service-account-key.json` — Google service account credentials (not in git)
 - `.env` — environment variables
 
-```
-SPREADSHEET_ID=<optional — Google Sheet ID for the main Dispatch Management sheet; defaults to the production sheet when unset>
-ARCHIVE_SPREADSHEET_ID=<optional — Google Sheet ID for the read-only archive; defaults to the production archive when unset>
-GOOGLE_DRIVE_FOLDER_ID=<Drive folder ID for POD uploads — optional, uploads skip Drive if empty>
-GOOGLE_API_TIMEOUT_MS=<optional — per-request ceiling on EVERY Sheets/Drive call and the OAuth token exchange; default 15000. Applied twice and independently by node-fetch (to response headers, then over the body read), so a slow body is not charged the server's think time. A timed-out request retries on a fresh socket for GET/PUT only — never POST, which would duplicate a values.append.>
-GOOGLE_SOCKET_IDLE_MS=<optional — idle timeout on FREE (pooled) sockets only; default 5000, matching Node >=19's own https.globalAgent. In-flight requests are unaffected. Do NOT raise it: that widens the window in which a stale keep-alive socket can be drawn. Both added after the 2026-08-06 dashboard outage, where a request handed to a half-open pooled socket blocked ~150 s (a TCP retransmission budget) while Google answered the same read in ~470 ms. See the note beside google.options() in server.js before changing either.>
-GOOGLE_MAPS_API_KEY=<SERVER Google Maps key — every outbound call the app makes itself: Geocoding, Distance Matrix, Routes, Places (New). Restrict by IP to the VPS. Never sent to a browser.>
-GOOGLE_MAPS_BROWSER_KEY=<optional — the BROWSER key, the only value GET /api/config/maps-key serves. Restrict by HTTP referrer + to Maps JavaScript/Places. Falls back to GOOGLE_MAPS_API_KEY when unset (the pre-split behaviour). See "Maps key split" below.>
-GMAIL_USER=<Gmail address for sending onboarding/outreach emails>
-GMAIL_APP_PASSWORD=<Gmail app password for nodemailer>
-GEMINI_API_KEY=<optional — enables receipt OCR auto-fill via Gemini 2.5 Flash vision; form falls back to manual entry when unset>
-GEMINI_OCR_MODEL=<optional — override the default gemini-2.5-flash model>
-SCANKIT_BASE_URL=<optional — ScanKit.io API base; defaults to https://api.scankit.io>
-SCANKIT_API_KEY=<optional — ScanKit.io key (sk_...) for document scanning; scanner returns 503 + raw-photo fallback when unset>
-SCANKIT_ENABLED=<optional — set "true" to enable; defaults off so the feature ships dormant>
-INVOICE_AUTOGEN_ENABLED=<optional — set "true" to enable the Friday 4 PM ET auto-generate-and-submit invoice batch; defaults off (moves money) so it ships dormant>
-MAINTENANCE_NOTICE_ENABLED=<optional — set "true" to show investors the maintenance popup + red banner; defaults off so it ships dormant>
-MAINTENANCE_NOTICE_TITLE=<optional — BANNER heading only, rendered uppercase; defaults to "SYSTEM UPDATE IN PROGRESS">
-MAINTENANCE_NOTICE_MODAL_TITLE=<optional — LOGIN POPUP heading, deliberately separate from the banner; defaults to "Application is currently under maintenance">
-MAINTENANCE_NOTICE_MESSAGE=<optional — supporting sentence under the heading>
-MAINTENANCE_NOTICE_DISCLAIMER=<optional — the figures caveat; defaults to the client's wording, "The final settlements are still being calculated.">
-MAINTENANCE_NOTICE_AUDIENCE=<optional — "investor" (default) or "all"; anything unrecognized falls back to "investor">
-MAINTENANCE_NOTICE_VERSION=<optional — bump to re-show the popup to everyone who already dismissed it; defaults to 1>
-FUEL_GALLONS_RECOVERY_ENABLED=<optional — set "true" to let POST /api/admin/fuel-gallons-recovery/apply write; defaults off so it ships dormant. The GET proposal works either way, so a run can be inspected in prod before it touches a finance row.>
-RATECON_CONTENT_WINDOW_DAYS=<optional — default 21. How far either side of a load's own dates getRateConBytes() step 4 looks when the Drive FILE NAME does not carry our load id and it has to read the PDFs instead.>
-RATECON_CONTENT_MAX_FILES=<optional — default 40. Hard cap on PDFs downloaded per miss.>
-RATECON_CONTENT_CONCURRENCY=<optional — default 6. Overlapping Drive reads. ⚠️ Round trips are the cost, not bytes: a SEQUENTIAL 40-file scan measured 137 s (the whole window is 2.6 MB) against a client that gives up at 60 s. All three are COST controls, not correctness knobs — widening them scans more PDFs, it does not make a match more likely to be right.>
-RATECON_INDEX_APPLY_ENABLED=<optional — set "true" to let POST /api/admin/ratecon-index WRITE the load→rate-con links it proposes; defaults off so it ships dormant. The proposal runs either way, so ~50 broker-facing links can be read in prod before any are committed.>
-PORT=3000  # optional, defaults to 3000
-```
+**The variable list lives in [`.env.example`](.env.example) and only there.** It documents all **62** variables with the same reasoning this file used to duplicate for 28 of them — including the ones you must not get wrong (`GOOGLE_API_TIMEOUT_MS` / `GOOGLE_SOCKET_IDLE_MS` and the 2026-08-06 socket-hang outage behind them, the `RATECON_CONTENT_*` cost controls, the `MAINTENANCE_NOTICE_*` split). Duplicating it here only reset the drift clock, which is the hazard this file warns about everywhere else — so the copy is gone rather than half-maintained. **Read `.env.example` before wiring anything new**, and see the flag-shape warning under House invariants: the name does not tell you whether a flag ships on or off.
 
 Default values in `server.js` (override via env):
 - Spreadsheet ID falls back to `"1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo"` (production Dispatch Management — n8n writes here). Override by setting `SPREADSHEET_ID` in `.env`. Staging uses this to point at its own copy.
@@ -337,21 +308,13 @@ Session-based auth with 4 roles: Super Admin, Dispatcher, Driver, Investor. Auth
 
 **Error handling**: All endpoints use try-catch with generic 500 JSON responses. Geofence check errors inside `POST /api/location` are caught and logged but never fail the location response.
 
-**Rate limiting** (express-rate-limit, all `standardHeaders: true`, naming convention `{feature}Limiter`):
-| Limiter | Window | Max | Scope |
-|---------|--------|-----|-------|
-| `publicFormLimiter` | 15 min | 10 | `POST /api/public/apply`, `POST /api/public/investor-apply` |
-| `loginLimiter` | 15 min | 20 | `POST /api/auth/login` |
-| `setupLimiter` | 15 min | 5 | `POST /api/auth/setup` — the only route that mints a Super Admin with no session. Tighter than `loginLimiter` because a legitimate caller uses it **once, ever**, so anything past a typo retry is abuse. Caps the burst on the one window the latch cannot close (a lost `app.db`). |
-| `changePasswordLimiter` | 15 min | 5 | password change |
-| `driverFilesLimiter` | 15 min | 30 | `GET /api/trucks/:id/driver-files` |
-| `truckDocViewLimiter` | 15 min | 30 | `GET /api/driver/truck-documents/:id/view` |
-| `trackPublicLimiter` | 15 min | 60 | `GET /api/public/track/:loadId` (customers refresh often) |
-| `expenseOcrLimiter` | 15 min | 100 (Super Admin/Dispatcher) · 20 (Driver) | `POST /api/expenses/ocr` (caps Gemini spend; role-aware `max` so the admin/dispatcher bulk-receipt upload — 1 OCR call/receipt — has headroom while drivers stay tight) |
-| `fuelEventsLimiter` | 15 min | 20 | `GET /api/admin/fuel-events`, `POST /api/admin/fuel-events/run` (each call re-scans telemetry synchronously). `requireRole` is mounted BEFORE it on both verbs so an unauthenticated caller can't spend the budget on 403s. |
-| `fuelGallonsLimiter` | 15 min | 6 | `GET /api/admin/fuel-gallons-recovery`, `POST /api/admin/fuel-gallons-recovery/apply`. Tighter than `fuelEventsLimiter` because the unit of work differs by orders of magnitude: one fuel-events call is ~140 ms of local CPU, one call here is up to 25 **billed Gemini vision** requests. 6 is four full passes over the whole backlog. `requireRole` before the limiter, same reasoning. |
-| `fuelPlanLimiter` | 15 min | 120 (Super Admin/Dispatcher) · 30 (Driver) | `GET /api/fuel/trip-plan` — **keyed per user**, same generator as `poiLimiter`. One Routes call per miss (`ROUTE_CACHE_TTL`-cached) plus indexed SQLite reads, an order of magnitude cheaper than `poiLimiter`'s billed Places fan-out, hence the looser caps. |
-| `poiLimiter` | 15 min | 60 (Super Admin/Dispatcher) · 6 (Driver) | `GET /api/poi/fuel-stops` — **keyed per user** (`u:<id>`, `ip:<ip>` fallback), not per IP. Each **cache miss** fans out to 4–8 `places:searchNearby` calls on the Places **Enterprise + Atmosphere** SKU (`fuelOptions` = live pump prices, ~$40/1,000 → **~$0.16–0.32 per miss**) plus a Routes call. IP keying was actively backwards here: a dispatch office behind one NAT shared one bucket while every driver on cellular got a fresh one — the cheap callers throttled, the expensive ones not. Note per-user keying *raises* the aggregate ceiling (each dispatcher gets their own 60), which is why `poiStopsCache` below, not this limiter, is the primary cost control; the cap is the backstop on a scripted client. |
+**Rate limiting** (express-rate-limit, all `standardHeaders: true`, naming convention `{feature}Limiter`). **36 limiters are defined; the per-limiter table now lives in [`backend-server.md`](docs/claude/backend-server.md#rate-limiting)** — `grep -oE 'const [a-zA-Z]+Limiter = ' server.js` for the current list. What matters here is *why* they are shaped the way they are:
+
+- **⚠️ `poiLimiter` and `fuelPlanLimiter` are keyed PER USER, not per IP** (`u:<id>`, `ip:<ip>` fallback). IP keying was actively backwards: a dispatch office behind one NAT shared a single bucket while every driver on cellular got a fresh one — throttling the cheap callers and not the expensive ones. Note per-user keying *raises* the aggregate ceiling, which is why the cache below, not the limiter, is the real cost control.
+- **⚠️ `poiStopsCache` is the actual cost control.** Each `/api/poi/fuel-stops` miss fans out to 4–8 billed Places calls on the Enterprise + Atmosphere SKU (~$0.16–0.32). The limiter is only the backstop on a scripted client.
+- **⚠️ Mount `requireRole` BEFORE the limiter** on anything expensive (`fuelEventsLimiter`, `fuelGallonsLimiter` do this), or an unauthenticated caller spends the budget on 403s.
+- **The unit of work sets the cap, not the traffic.** `fuelEventsLimiter` is 20/15min (~140 ms of local CPU per call); `fuelGallonsLimiter` is 6 (up to 25 **billed Gemini vision** requests per call). Same shape, three orders of magnitude apart.
+- **⚠️ `exportLimiter` is 20/15min and that is why `test-suite.js` cannot run twice inside 15 minutes** — a second back-to-back run returns 429 across the export/statement tests and reads as a regression.
 
 The 60s in-memory Job Tracking cache (`getJobTrackingCached()`) is the other core throttle — it absorbs bursty dashboard traffic so the Sheets 300 req/min quota isn't a real constraint day-to-day.
 

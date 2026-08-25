@@ -34,7 +34,7 @@ Session store also in SQLite.
 - **nodemailer**: emails for driver onboarding acceptance and investor outreach. Needs `GMAIL_USER` + `GMAIL_APP_PASSWORD`.
 - **compression**: Gzip response compression middleware.
 - **archiver**: Streams zip downloads directly to the response — currently the per-truck expense-receipts bundle (lazy `require`d inside the handler; error handler installed before `pipe()`).
-- **express-rate-limit**: Per-endpoint limiters; see the rate-limiting section below.
+- **express-rate-limit**: Per-endpoint limiters; see [Rate limiting](#rate-limiting) at the end of this file.
 
 **AI / vision services**:
 - **Gemini 2.5 Flash vision** — expense receipt OCR (`POST /api/expenses/ocr`). Called via `fetch` (no SDK) with `responseSchema` enforcing the JSON shape. Requires `GEMINI_API_KEY`; falls back to 503 + silent manual-entry when unset. Key is shared across Alchemy projects (rotate in one place). Retry (2 retries, exp backoff, 15 s `AbortController` timeout) mirrors the Google Routes integration. **Autofill surfaces:** the driver `ExpenseForm`, the admin/dispatcher single "Log Expense" form in `ExpensesTab` (enhance→OCR→prefill, with Undo), and the **Bulk Upload** sub-tab (`components/dashboard/expenses/BulkReceiptScan.vue`) — pick a default driver, drop N receipts (≤25/batch), each image is OCR'd (concurrency 3; bulk skips the ScanKit enhance pass to save credits) into an editable review grid, then one create per row via `POST /api/expenses`. Write-timeouts (ambiguous re: whether the insert landed) are parked in a non-auto-retried `timeout` state to avoid double-booking the P&L, since `POST /api/expenses` is not idempotent.
@@ -161,3 +161,25 @@ REST endpoints (grouped by domain):
 - **`limit` is not part of the key and never refetches.** The fill always requests `POI_FETCH_CAP` (25) and the handler slices on read. This is **billing-neutral**: `limit` only feeds `maxResultCount` per call, while the billed call count is the waypoint count — `clamp(ceil(routeMiles/75), 4, 8)` — which `limit` cannot influence. Consequence worth knowing: the returned set is now the *N genuinely cheapest* rather than the lib's internal top-N re-sorted, which matches the endpoint's stated cheapest-first contract. `cheapest` is stable across limits (the global cheapest sorts to index 0); `livePriceCount` describes the returned slice, so it stays consistent with `stops`.
 - **Empty results are deliberately NOT cached.** `findFuelStopsAlongRoute()` degrades a failed waypoint to `[]` silently, so an empty array is ambiguous between "no truck stops on this lane" and "Places was briefly down" — caching the latter would pin a blip into a 15-minute outage for that lane.
 
+
+
+## Rate limiting
+
+Moved here from `CLAUDE.md` (2026-08-25) — it was reference material, and `CLAUDE.md` line 37 above had promised a "rate-limiting section below" that did not exist. The *reasoning* (per-user keying, `poiStopsCache` as the real cost control, `requireRole`-before-limiter ordering) stays in `CLAUDE.md`; the numbers live here.
+
+All use `standardHeaders: true` and the `{feature}Limiter` naming convention. **36 are defined** — this table covers the ones whose limits are deliberate rather than incidental; `grep -oE 'const [a-zA-Z]+Limiter = ' server.js` for the full list.
+
+| Limiter | Window | Max | Scope |
+|---------|--------|-----|-------|
+| `publicFormLimiter` | 15 min | 10 | `POST /api/public/apply`, `POST /api/public/investor-apply` |
+| `loginLimiter` | 15 min | 20 | `POST /api/auth/login` |
+| `setupLimiter` | 15 min | 5 | `POST /api/auth/setup` — the only route that mints a Super Admin with no session. Tighter than `loginLimiter` because a legitimate caller uses it **once, ever**, so anything past a typo retry is abuse. Caps the burst on the one window the latch cannot close (a lost `app.db`). |
+| `changePasswordLimiter` | 15 min | 5 | password change |
+| `driverFilesLimiter` | 15 min | 30 | `GET /api/trucks/:id/driver-files` |
+| `truckDocViewLimiter` | 15 min | 30 | `GET /api/driver/truck-documents/:id/view` |
+| `trackPublicLimiter` | 15 min | 60 | `GET /api/public/track/:loadId` (customers refresh often) |
+| `expenseOcrLimiter` | 15 min | 100 (Super Admin/Dispatcher) · 20 (Driver) | `POST /api/expenses/ocr` (caps Gemini spend; role-aware `max` so the admin/dispatcher bulk-receipt upload — 1 OCR call/receipt — has headroom while drivers stay tight) |
+| `fuelEventsLimiter` | 15 min | 20 | `GET /api/admin/fuel-events`, `POST /api/admin/fuel-events/run` (each call re-scans telemetry synchronously). `requireRole` is mounted BEFORE it on both verbs so an unauthenticated caller can't spend the budget on 403s. |
+| `fuelGallonsLimiter` | 15 min | 6 | `GET /api/admin/fuel-gallons-recovery`, `POST /api/admin/fuel-gallons-recovery/apply`. Tighter than `fuelEventsLimiter` because the unit of work differs by orders of magnitude: one fuel-events call is ~140 ms of local CPU, one call here is up to 25 **billed Gemini vision** requests. 6 is four full passes over the whole backlog. `requireRole` before the limiter, same reasoning. |
+| `fuelPlanLimiter` | 15 min | 120 (Super Admin/Dispatcher) · 30 (Driver) | `GET /api/fuel/trip-plan` — **keyed per user**, same generator as `poiLimiter`. One Routes call per miss (`ROUTE_CACHE_TTL`-cached) plus indexed SQLite reads, an order of magnitude cheaper than `poiLimiter`'s billed Places fan-out, hence the looser caps. |
+| `poiLimiter` | 15 min | 60 (Super Admin/Dispatcher) · 6 (Driver) | `GET /api/poi/fuel-stops` — **keyed per user** (`u:<id>`, `ip:<ip>` fallback), not per IP. Each **cache miss** fans out to 4–8 `places:searchNearby` calls on the Places **Enterprise + Atmosphere** SKU (`fuelOptions` = live pump prices, ~$40/1,000 → **~$0.16–0.32 per miss**) plus a Routes call. IP keying was actively backwards here: a dispatch office behind one NAT shared one bucket while every driver on cellular got a fresh one — the cheap callers throttled, the expensive ones not. Note per-user keying *raises* the aggregate ceiling (each dispatcher gets their own 60), which is why `poiStopsCache` below, not this limiter, is the primary cost control; the cap is the backstop on a scripted client. |
