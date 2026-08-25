@@ -27,7 +27,7 @@ and server-side data scoping.
 
 ## Running it
 
-Requires **Node 20** (see `.nvmrc`; production runs 20.20.1).
+Requires **Node 22** (see `.nvmrc`; both VPS environments run 22.23.2 via pm2's `interpreter`). The *system* node on that box is still 20.20.1 and belongs to other tenants — don't align to it.
 
 ```bash
 npm install            # postinstall also installs client/ deps
@@ -60,7 +60,7 @@ No Jest/Vitest/ESLint. Two harnesses:
 
 ```bash
 npm run check      # node --check server.js — server.js is ~47k lines in one file
-npm run test:unit  # 45 standalone runners in scripts/ — hermetic, ~17s
+npm run test:unit  # 46 standalone runners in scripts/ — hermetic, ~20s
 npm run ci         # all of the above + client build (exactly what CI runs)
 ```
 
@@ -71,7 +71,7 @@ running it.
 
 ## CI/CD
 
-GitHub Actions. Every PR runs the `ci` gate above on Node 20. Merging to `main`
+GitHub Actions. Every PR runs the `ci` gate above on Node 22. Merging to `main`
 auto-deploys **staging**; **production** is a manual, approval-gated run of the
 *Deploy* workflow. Setup and reasoning: [`.github/workflows/README.md`](.github/workflows/README.md).
 

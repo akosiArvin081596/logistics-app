@@ -5,7 +5,7 @@ Two workflows. `ci.yml` verifies, `deploy.yml` ships.
 | | `ci.yml` | `deploy.yml` |
 |---|---|---|
 | Fires on | PR into `main`, push to `main`, manual | push to `main` → **staging**; manual → staging **or** production |
-| Runs | `npm ci` ×2 · `node --check` · 44 of 45 runners · client build | lockfile reset · pull · install · build · scoped pm2 restart · smoke |
+| Runs | `npm ci` ×2 · `node --check` · 45 of 46 runners · client build | lockfile reset · pull · install · build · scoped pm2 restart · smoke |
 | Duration | ~1 min | well under a minute |
 | Touches production | never | only on an explicit manual run |
 
