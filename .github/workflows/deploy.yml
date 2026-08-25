@@ -190,10 +190,22 @@ jobs:
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o ConnectTimeout=20 \
               "$USER@$HOST" "DIR='$DIR' PM2='${{ steps.t.outputs.pm2 }}' bash -s" <<'REMOTE'
           set -euo pipefail
-          # Read the port the target actually binds rather than hardcoding it
-          # (prod leaves PORT unset and defaults to 3000; staging sets 3003).
-          PORT=$(grep -oE '^PORT=[0-9]+' "$DIR/.env" 2>/dev/null | head -1 | cut -d= -f2)
+          # Read the port the target actually binds rather than hardcoding it.
+          #
+          # ⚠️ The trailing `|| true` is load-bearing and this line has already
+          # broken a production deploy once. Production's .env has NO `PORT=`
+          # line at all — it relies on server.js defaulting to 3000, which
+          # CLAUDE.md documents — so grep matches nothing and exits 1. Under
+          # `set -e` + `pipefail` that aborts the whole script BEFORE the
+          # `${PORT:-3000}` fallback on the next line can run, and the step dies
+          # in ~2 s having never polled anything.
+          #
+          # It passed on staging precisely because staging DOES set PORT=3003,
+          # so grep succeeded there. The asymmetry between the two .env files is
+          # the bug's whole hiding place: this can only ever fail on production.
+          PORT=$(grep -oE '^PORT=[0-9]+' "$DIR/.env" 2>/dev/null | head -1 | cut -d= -f2 || true)
           PORT=${PORT:-3000}
+          echo "resolved port: $PORT"
           # /api/config/maintenance is unauthenticated and returns module
           # constants only — no DB, no Sheets, no billed API. It proves the
           # process booted and Express is serving, and costs nothing.
