@@ -1,0 +1,244 @@
+name: Deploy
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGING  deploys automatically on every push to main.
+# PRODUCTION is manual-dispatch only, and additionally gated by the GitHub
+#            Environment named `production` (add required reviewers there to
+#            make it an approval gate — see .github/workflows/README.md).
+#
+# To make production auto-deploy on merge instead, move `production` into the
+# `push:` branch of the target logic below. That is a ONE-LINE change and it is
+# deliberately not the default: this app writes to a live Google Sheet, a
+# production app.db and real invoices, so an unattended bad merge is not "the
+# site is down", it is "money data was touched".
+# ─────────────────────────────────────────────────────────────────────────────
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Which environment to deploy
+        required: true
+        default: staging
+        type: choice
+        options: [staging, production]
+      ref:
+        description: "Branch, tag or full SHA to deploy (rollback: pass an older SHA)"
+        required: false
+        default: main
+        type: string
+
+# ⚠️ cancel-in-progress is FALSE on purpose. Cancelling a deploy mid-flight can
+# leave the box between `git pull` and `pm2 restart` — new code on disk, old
+# process serving, or a half-finished npm install. Queue instead; a deploy takes
+# well under a minute.
+concurrency:
+  group: deploy-${{ github.event.inputs.target || 'staging' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: ${{ github.event.inputs.target || 'staging' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Binds to the GitHub Environment of the same name. Required reviewers,
+    # wait timers and environment secrets are configured there, not here.
+    environment:
+      name: ${{ github.event.inputs.target || 'staging' }}
+      url: ${{ github.event.inputs.target == 'production' && 'https://app.logisx.com' || '' }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve target
+        id: t
+        run: |
+          set -euo pipefail
+          TARGET="${{ github.event.inputs.target || 'staging' }}"
+          REF="${{ github.event.inputs.ref || 'main' }}"
+          case "$TARGET" in
+            production) DIR=/var/www/logistics-app;  PM2=logistics-app ;;
+            staging)    DIR=/var/www/logisx-staging; PM2=logisx-staging ;;
+            *) echo "::error::unknown target '$TARGET'"; exit 1 ;;
+          esac
+          {
+            echo "target=$TARGET"
+            echo "ref=$REF"
+            echo "dir=$DIR"
+            echo "pm2=$PM2"
+          } >> "$GITHUB_OUTPUT"
+          echo "Deploying **$REF** to **$TARGET** ($DIR, pm2:$PM2)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Configure SSH
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Host key is PINNED from a secret, never discovered with ssh-keyscan.
+          # keyscan trusts whatever answers on the first connection, which is the
+          # exact thing host-key checking exists to prevent — and this step hands
+          # the remote end a key that can restart production.
+          printf '%s\n' "${{ secrets.VPS_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          test -s ~/.ssh/known_hosts || { echo "::error::VPS_SSH_KNOWN_HOSTS secret is empty — see .github/workflows/README.md"; exit 1; }
+
+      - name: Deploy
+        id: deploy
+        env:
+          HOST: ${{ secrets.VPS_HOST }}
+          USER: ${{ secrets.VPS_USER }}
+          DIR: ${{ steps.t.outputs.dir }}
+          PM2: ${{ steps.t.outputs.pm2 }}
+          REF: ${{ steps.t.outputs.ref }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o ConnectTimeout=20 \
+              "$USER@$HOST" "DIR='$DIR' PM2='$PM2' REF='$REF' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$DIR"
+
+          PREV=$(git rev-parse HEAD)
+          echo "::group::pre-deploy state"
+          echo "current HEAD: $PREV"
+
+          # ── The load-bearing lockfile reset ───────────────────────────────
+          # The VPS runs npm 10.8.2, which does not know the `"libc"` field a
+          # newer npm writes onto optional platform deps — so EVERY npm install
+          # on this box strips it and leaves client/package-lock.json
+          # permanently modified. `git pull --ff-only` refuses to overwrite a
+          # locally-modified tracked file, so without this reset the first PR
+          # that touches the lockfile aborts the deploy. (It fails safe — before
+          # anything installs or restarts — but it blocks the release.)
+          # Discarding this one path is safe: npm regenerates it two lines down
+          # and nothing reads it at runtime.
+          for f in client/package-lock.json package-lock.json; do
+            if ! git diff --quiet -- "$f" 2>/dev/null; then
+              echo "resetting npm-skew drift on $f"
+              git checkout -- "$f"
+            fi
+          done
+
+          # ── Refuse to clobber an unexpected local change ──────────────────
+          # Anything ELSE modified on the box is a hand-applied hotfix or a
+          # mid-incident edit. A blanket `git checkout -- .` would silently
+          # destroy it, which is why CLAUDE.md forbids one here. Stop instead
+          # and let a human decide.
+          DIRTY=$(git status --porcelain --untracked-files=no)
+          if [ -n "$DIRTY" ]; then
+            echo "::error::$DIR has local modifications beyond the lockfiles — refusing to deploy over them:"
+            echo "$DIRTY"
+            exit 1
+          fi
+          echo "::endgroup::"
+
+          echo "::group::fetch + checkout $REF"
+          git fetch --prune origin
+          if [ "$REF" = "main" ]; then
+            git checkout main
+            git pull --ff-only origin main
+          else
+            # Rollback / pin path: detached HEAD at an explicit ref.
+            git checkout --detach "$REF" 2>/dev/null || git checkout --detach "origin/$REF"
+          fi
+          NEW=$(git rev-parse HEAD)
+          echo "new HEAD: $NEW"
+          echo "::endgroup::"
+
+          echo "::group::install + build"
+          npm install --silent --no-audit --no-fund
+          npm run build:client --silent
+          test -f client/dist/index.html || { echo "::error::build produced no client/dist/index.html"; exit 1; }
+          echo "::endgroup::"
+
+          echo "::group::restart"
+          # ⚠️ Name-scoped, ALWAYS. This VPS hosts ~23 other pm2 processes for
+          # other clients (LendyPH, binhs-coop, dromic, …). `pm2 restart all`
+          # or `pm2 restart 0` here would take those down too.
+          pm2 restart "$PM2" --silent
+          # Parse jlist, never `pm2 describe` — describe renders a box-drawing
+          # table whose column widths shift with the value, so a sed against it
+          # silently stops matching one day and reports nothing rather than
+          # failing. jlist is JSON and stable.
+          pm2 jlist | node -e '
+            let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+              const p=JSON.parse(d).find(x=>x.name===process.argv[1]);
+              if(!p){console.error("::error::pm2 process "+process.argv[1]+" not found after restart");process.exit(1);}
+              console.log("pm2 status: "+p.pm2_env.status+"  restarts: "+p.pm2_env.restart_time);
+              if(p.pm2_env.status!=="online"){console.error("::error::pm2 reports status="+p.pm2_env.status);process.exit(1);}
+            });' "$PM2"
+          echo "::endgroup::"
+
+          echo "DEPLOYED_FROM=$PREV"
+          echo "DEPLOYED_TO=$NEW"
+          REMOTE
+
+      # Boot is not instant — server.js runs schema migrations and a burst of
+      # boot work before it listens, which is the same burst behind the known
+      # "first PDF after a restart" stall. Poll rather than sleep-once.
+      - name: Smoke check
+        env:
+          HOST: ${{ secrets.VPS_HOST }}
+          USER: ${{ secrets.VPS_USER }}
+          DIR: ${{ steps.t.outputs.dir }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o ConnectTimeout=20 \
+              "$USER@$HOST" "DIR='$DIR' PM2='${{ steps.t.outputs.pm2 }}' bash -s" <<'REMOTE'
+          set -euo pipefail
+          # Read the port the target actually binds rather than hardcoding it
+          # (prod leaves PORT unset and defaults to 3000; staging sets 3003).
+          PORT=$(grep -oE '^PORT=[0-9]+' "$DIR/.env" 2>/dev/null | head -1 | cut -d= -f2)
+          PORT=${PORT:-3000}
+          # /api/config/maintenance is unauthenticated and returns module
+          # constants only — no DB, no Sheets, no billed API. It proves the
+          # process booted and Express is serving, and costs nothing.
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$PORT/api/config/maintenance" || true)
+            if [ "$code" = "200" ]; then echo "smoke OK on :$PORT after $((i*2))s"; exit 0; fi
+            sleep 2
+          done
+          echo "::error::smoke check failed — no HTTP 200 from :$PORT/api/config/maintenance within 60s"
+          # ⚠️ Read the timestamps before believing this dump. `pm2 logs --nostream`
+          # tails the error log whether or not anything new was written, so an
+          # error from days ago prints here and reads exactly like a fresh
+          # regression caused by this deploy. Check the log mtime / line dates
+          # against the deploy time before concluding anything from it.
+          echo "--- pm2 error log tail (MAY BE STALE — check the dates) ---"
+          pm2 logs "$PM2" --nostream --lines 40 --err 2>/dev/null || true
+          exit 1
+          REMOTE
+
+      # Public-edge check: only meaningful for production, where nginx terminates
+      # TLS on app.logisx.com. Staging is localhost-bound with no public host.
+      - name: Public edge check (production only)
+        if: steps.t.outputs.target == 'production'
+        run: |
+          set -euo pipefail
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 https://app.logisx.com/api/config/maintenance)
+          echo "app.logisx.com -> HTTP $code"
+          [ "$code" = "200" ] || { echo "::error::public edge returned $code"; exit 1; }
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Deploy ${{ job.status }}"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| target | \`${{ steps.t.outputs.target }}\` |"
+            echo "| ref | \`${{ steps.t.outputs.ref }}\` |"
+            echo "| path | \`${{ steps.t.outputs.dir }}\` |"
+            echo "| pm2 | \`${{ steps.t.outputs.pm2 }}\` |"
+            echo ""
+            echo "Rollback: re-run this workflow with **ref** set to the previous SHA."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Always remove the deploy key
+        if: always()
+        run: shred -u ~/.ssh/deploy_key 2>/dev/null || rm -f ~/.ssh/deploy_key

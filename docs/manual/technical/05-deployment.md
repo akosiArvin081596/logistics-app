@@ -49,15 +49,48 @@ A standard Google Cloud service account JSON key for the account `sheets-bot@log
 
 ## Deploy workflow
 
-The standard flow after merging to `main`:
+**Deploys run through GitHub Actions.** Pushing to `main` deploys **staging**
+automatically; **production** is a manual run of the *Deploy* workflow
+(Actions → Deploy → Run workflow → target `production`). Rolling back is the
+same dialog with **ref** set to an older SHA. Setup, required secrets and the
+reasoning behind each step are in
+[`.github/workflows/README.md`](../../../.github/workflows/README.md).
+
+Every PR is gated by the *CI* workflow: `node --check server.js`, the 45
+standalone runners in `scripts/`, and a client build, all on Node 20 to match
+this box.
+
+### Deploying by hand
+
+Still valid when Actions is unavailable, and it is what the workflow automates:
 
 ```bash
 ssh root@76.13.22.110 "cd /var/www/logistics-app && \
+  git checkout -- client/package-lock.json && \
   git pull --ff-only origin main && \
   npm install --silent --no-audit --no-fund && \
   npm run build:client --silent && \
   pm2 restart logistics-app --silent"
 ```
+
+> **⚠️ The leading `git checkout -- client/package-lock.json` is load-bearing,
+> not tidiness.** This box runs npm 10.8.2, which does not know the `"libc"`
+> field a newer npm writes onto optional platform-specific deps — so **every**
+> `npm install` here strips it and leaves `client/package-lock.json`
+> permanently modified. `git pull --ff-only` refuses to overwrite a
+> locally-modified tracked file, so without this line the first PR that touches
+> the lockfile **aborts the deploy**. It aborts before anything is installed or
+> restarted, so it fails safe, but it blocks the release until someone clears it
+> by hand. Discarding this one path is safe: npm regenerates it on the very next
+> line and nothing reads it at runtime.
+>
+> **Keep the reset scoped to that one path.** A blanket `git checkout -- .` or
+> `git reset --hard` could silently discard a deliberate hotfix applied on the
+> box. (Earlier revisions of this document omitted the line entirely — the
+> version above is the corrected one.)
+
+Staging is the same sequence against `/var/www/logisx-staging` with
+`pm2 restart logisx-staging`.
 
 This is intentionally one shell pipeline, not a deploy script. It runs in this order:
 

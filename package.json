@@ -8,10 +8,18 @@
     "dev": "nodemon --ext js server.js",
     "dev:client": "cd client && npm run dev",
     "build:client": "cd client && npm run build",
+    "check": "node --check server.js",
+    "test:unit": "node scripts/run-unit-tests.js",
+    "ci": "npm run check && npm run test:unit && npm run build:client",
     "docs:build": "node scripts/docs/generate-docs.js",
     "docs:screenshots": "node scripts/docs/capture-screenshots.js",
     "postinstall": "cd client && npm install"
   },
+  "//scripts": "`npm run ci` is the exact gate CI runs — run it locally before pushing and the pipeline holds no surprises. `test:unit` runs the 45 standalone runners in scripts/ (~17 s, hermetic). It deliberately does NOT run test-suite.js: that one needs a live server, WRITES, defaults to port 3000 (production on the VPS) and with no SPREADSHEET_ID override writes to the LIVE Dispatch Management sheet. See the header of scripts/run-unit-tests.js.",
+  "engines": {
+    "node": ">=20.20.0"
+  },
+  "//engines": "A FLOOR, deliberately not a ceiling. Production runs Node 20.20.1 / npm 10.8.2 (verified on the VPS 2026-08-25) and this repo is developed on 26.x, so an upper bound here would make every local `npm install` print EBADENGINE for no benefit. The exact production version is pinned where it actually matters — `.nvmrc` and the `node-version` in .github/workflows/ci.yml — so a green pipeline means 'passes on the box it will run on'. Anything relying on a post-20 API passes locally and breaks in production; CI on 20 is what catches it.",
   "dependencies": {
     "archiver": "^7.0.1",
     "bcryptjs": "^3.0.3",
