@@ -374,6 +374,7 @@ import { useToast } from '../../../composables/useToast'
 import { useViewport } from '../../../composables/useViewport'
 import { useDocumentScan } from '../../../composables/useDocumentScan'
 import { compressImage, readFileAsDataURL } from '../../../lib/imageUtils'
+import { runPool } from '../../../lib/asyncPool'
 // The same formatter ExpensesTab's duplicate dialog uses (its `fmtDate` is a
 // one-line alias for this). See describeExistingExpense below — the two must
 // render the matched row's date identically or they read as two different rows.
@@ -687,18 +688,6 @@ function makeRow(file, fileHash = '') {
     allowDuplicate: false, // flipped only by the row's conscious "Save anyway"
     duplicateOf: null,
   }
-}
-
-// Concurrency-limited runner: at most `size` workers in flight over `items`.
-async function runPool(items, worker, size) {
-  let i = 0
-  const runners = Array.from({ length: Math.min(size, items.length) }, async () => {
-    while (i < items.length) {
-      const idx = i++
-      await worker(items[idx])
-    }
-  })
-  await Promise.all(runners)
 }
 
 // Best-effort ScanKit enhance (crop + deskew + flatten lighting) — the exact

@@ -21,13 +21,27 @@
 
     <!-- File thumbnails -->
     <div v-if="files.length" class="photo-grid">
-      <div v-for="(f, i) in files" :key="i" class="photo-thumb">
-        <img v-if="f.isImage" :src="f.data" alt="Photo" class="thumb-clickable" title="Tap to enlarge" @click="openPreview(f)" />
+      <!-- :key is the entry's own id, NOT the index. A tile can now be removed
+           while its neighbours are still filling in, and index keys make Vue
+           reuse DOM by position — removing tile 2 mid-batch would re-point tile
+           3's <img> at tile 2's slot and swap a spinner with the wrong photo. -->
+      <div v-for="(f, i) in files" :key="f.key" class="photo-thumb" :class="{ 'scan-tile': isPending(f) }">
+        <!-- A placeholder holds no bytes yet: <img src=""> fires a broken-image
+             request and openPreview would open an empty overlay, so a pending
+             tile gets NO click target rather than a disabled one. -->
+        <template v-if="isPending(f)">
+          <span class="scan-spinner"></span>
+          <span>Scanning&hellip;</span>
+        </template>
+        <img v-else-if="f.isImage" :src="f.data" alt="Photo" class="thumb-clickable" title="Tap to enlarge" @click="openPreview(f)" />
         <div v-else class="doc-icon thumb-clickable" title="Tap to view" @click="openPreview(f)">
           <span class="doc-icon-emoji">&#128196;</span>
           <span class="doc-icon-name">{{ f.name }}</span>
         </div>
-        <button class="thumb-remove" @click.stop="removeFile(i)">&times;</button>
+        <!-- Removal passes the ENTRY, never the index — a scan resolving while
+             the array shifts underneath would otherwise write its page into
+             whichever tile happens to occupy that slot now. -->
+        <button class="thumb-remove" @click.stop="removeFile(f)">&times;</button>
         <span class="thumb-num">{{ i + 1 }}</span>
       </div>
       <!-- Scan another page with the camera — POD/BOL only -->
@@ -53,11 +67,9 @@
         />
         <span>+</span>
       </label>
-      <!-- Placeholder shown while a captured page is being enhanced by ScanKit -->
-      <div v-if="scanning" class="photo-thumb scan-tile">
-        <span class="scan-spinner"></span>
-        <span>Scanning&hellip;</span>
-      </div>
+      <!-- The standalone v-if="scanning" tile that used to sit here is gone:
+           placeholders now occupy the grid in pick order, so it would render an
+           extra phantom tile beside them. -->
     </div>
 
     <!-- Initial capture/upload button -->
@@ -105,7 +117,25 @@
       accept="image/*"
       capture="environment"
       hidden
-      @change="handleScanFile"
+      @change="handleScanFiles"
+    />
+    <!-- The same ScanKit pipeline, MULTI-select, and deliberately NO `capture`.
+         ⚠️ Two inputs rather than one with both attributes, for the reason
+         stated at UPLOAD_ACCEPT below: `capture` and `multiple` are resolved
+         together by the platform file-chooser intent, and which one wins is not
+         uniform across Android Chrome / Samsung Internet / in-app WebViews. A
+         phone that answers `multiple` by opening the FILE BROWSER instead of
+         the camera breaks the one flow every driver uses. e0cf78f already made
+         this call once — it added `multiple` to every input EXCEPT the capture
+         ones ("Camera capture stays one-shot per tap"). Two inputs keep each
+         one's behaviour literal and independently readable. -->
+    <input
+      ref="scanPickInput"
+      type="file"
+      accept="image/*"
+      multiple
+      hidden
+      @change="handleScanFiles"
     />
 
     <button
@@ -134,6 +164,7 @@ import { useDocumentScan } from '../../composables/useDocumentScan'
 import { useUpload } from '../../composables/useUpload'
 import { useFileDrop } from '../../composables/useFileDrop'
 import { compressImage, isDecodedImage, readFileAsDataURL, SCAN_MAX_EDGE } from '../../lib/imageUtils'
+import { runPool } from '../../lib/asyncPool'
 
 const props = defineProps({
   loadId: { type: String, required: true },
@@ -160,7 +191,34 @@ const selectedType = ref(props.docType || 'POD')
 const cameraInput = ref(null)
 const fileInput = ref(null)
 const addInput = ref(null)
-const files = ref([]) // { data: base64, name: string, type: string, isImage: boolean }
+const files = ref([]) // see makeEntry for the shape
+
+// Every entry carries a stable `key` and a `status`.
+//
+// `key`: the grid used :key="i", correct for an append-only list of finished
+// pages and wrong the moment a tile can be removed while its neighbours are
+// still filling in. See the comment on the v-for.
+//
+// `status`: 'queued' | 'scanning' -> 'done'. Only a 'done' entry carries bytes.
+// Anything that arrives already complete (a plain upload, a drop) is born
+// 'done'. Mirrors BulkReceiptScan's OCR_PENDING / scanFinished pair.
+let entrySeq = 0
+function makeEntry(fields) {
+  return {
+    key: `p${entrySeq++}`,
+    data: '',
+    name: '',
+    type: '',
+    isImage: true,
+    status: 'done',
+    outcome: '',   // '' | 'scanned' | 'raw' | 'unreadable' | 'cancelled'
+    _file: null,
+    ...fields,
+  }
+}
+
+const PENDING = new Set(['queued', 'scanning'])
+const isPending = (f) => PENDING.has(f.status)
 
 // ⚠️ Kept in sync BY HAND with the accept attribute on the "+ add page" and
 // "Upload File" inputs in the template. All four file inputs stay LITERAL
@@ -172,7 +230,7 @@ const files = ref([]) // { data: base64, name: string, type: string, isImage: bo
 const UPLOAD_ACCEPT = 'image/*,.pdf,.doc,.docx,.xls,.xlsx,.csv,.txt'
 
 // ONE composable instance for the whole card. A drop routes to handleFiles —
-// the normal upload path — and NEVER to handleScanFile, which is the separate
+// the normal upload path — and NEVER to handleScanFiles, which is the separate
 // ScanKit pipeline behind the camera.
 const { dropzoneProps, dragActive, supportsDrag, error: dropError, clearMessages: clearDropError } = useFileDrop({
   multiple: true,
@@ -194,7 +252,64 @@ watch(dropError, (msg) => {
 
 // --- Scan state (ScanKit.io server-side; replaced the old jscanify/OpenCV). ---
 const scanInput = ref(null)
-const scanning = ref(false)   // true while a captured photo is being enhanced
+const scanPickInput = ref(null)
+
+// Replaces the old `scanning` ref. Every existing :disabled binding and v-if
+// reads it unchanged — a computed unwraps in the template exactly like a ref.
+// ⚠️ The ref had a `finally { scanning.value = false }` backstop; this does not.
+// The guarantee now lives in scanOne's own finally, which must ALWAYS leave an
+// entry at 'done'. One stranded placeholder disables Upload permanently.
+const scanning = computed(() => files.value.some(isPending))
+
+// Parallel ScanKit round trips. Matches BulkReceiptScan's OCR_CONCURRENCY, and
+// for the same reason — modest, so one batch can't drain scanKitLimiter's
+// 120/15min or the account's credits in a burst.
+const SCAN_CONCURRENCY = 3
+
+// Cap on the GRID, not on the pick: every image in this card rides in ONE
+// /api/documents/upload POST (the server stitches them into a single multi-page
+// PDF), so three picks of ten is one thirty-page body.
+//   · the 50MB POST — a SCAN_MAX_EDGE JPEG is ~0.3-0.5MB base64, so twenty is
+//     ~8MB, well inside express.json's limit with room for a dense page and any
+//     non-image docs attached alongside.
+//   · scanKitLimiter — 120 per 15 min keyed per USER, so six full batches.
+// The 8,500,000-char per-image scan cap never binds: compressImage's only
+// output that large is its raw-bytes fallback, which isDecodedImage rejects
+// before a request is built. Phone memory (N decoded 1280px bitmaps held live)
+// would bind sooner than any of these, but the multi-select door is desktop-only
+// by construction — a phone reaches this pipeline one camera shot at a time.
+const MAX_SCAN_PAGES = 20
+
+// One hard failure disables the scan pass for the REST of this batch. Same
+// reasoning as BulkReceiptScan's enhanceDisabled: a service that is off, out of
+// credits, or rate-limiting us answers identically for every remaining page, so
+// re-asking is N doomed 30s round trips that delay the whole grid and make the
+// tiles look frozen. Reset per batch, so it self-heals.
+//
+// The floor is SCAN_CONCURRENCY, not one: the workers already in flight when
+// the first failure lands cannot be un-fired, so a failing batch costs 3 calls
+// however long it is (measured: 3 for 6 pages, and 3 for 20). Seeing three
+// requests in the network tab is the breaker working, not leaking.
+//
+// ⚠️ Two statuses differ from BulkReceiptScan's ENHANCE_OFF_STATUS, on purpose:
+//   429 — excluded there because a receipt batch can afford to keep asking.
+//     Here it is usually our own scanKitLimiter, keyed PER USER over 15 minutes:
+//     once it fires the window is burned and every remaining page 429s too.
+//   502 — server.js masks SCANKIT_NO_KEY and SCANKIT_AUTH as a generic 502 so a
+//     driver device never learns the company key is bad. Those are the permanent
+//     failures, so they belong here; the cost of catching a transient upstream
+//     blip is that the rest of the batch attaches raw, which is still a
+//     complete, uploadable POD.
+const SCAN_OFF_STATUS = new Set([401, 402, 403, 429, 502, 503])
+let scanOffStatus = 0 // the status that tripped it, for the summary's wording
+
+// The exact sentences the single-file path used, keyed by status so the
+// aggregate toast can say the same true thing about N pages.
+const SCAN_OFF_REASON = {
+  503: "Document scanning isn't available",
+  402: 'Scanning temporarily unavailable',
+  429: 'Too many scans — try again in a few minutes',
+}
 
 // Tap-to-enlarge preview of a thumbnail (image, or an uploaded PDF).
 const previewSrc = ref(null)
@@ -255,7 +370,7 @@ async function handleFiles(selected) {
         refused.push(file.name || 'photo')
         continue
       }
-      files.value.push({ data, name: file.name, type: file.type, isImage: true })
+      files.value.push(makeEntry({ data, name: file.name, type: file.type, isImage: true }))
     } else {
       const data = await readFileAsDataURL(file)
       // '' is a FileReader error on an unreadable/corrupt file — attaching it
@@ -264,7 +379,7 @@ async function handleFiles(selected) {
         refused.push(file.name || 'file')
         continue
       }
-      files.value.push({ data, name: file.name, type: file.type, isImage: false })
+      files.value.push(makeEntry({ data, name: file.name, type: file.type, isImage: false }))
     }
   }
 
@@ -276,13 +391,24 @@ async function handleFiles(selected) {
   }
 }
 
-function removeFile(index) {
-  files.value.splice(index, 1)
+// Splices in place rather than reassigning files.value, so nothing holding a
+// reference to the array is invalidated. indexOf is proxy-aware in Vue 3, so
+// this matches whether the caller hands us a proxy or a raw target.
+// Removing a PENDING tile is allowed and is the user's cancel: the worker keeps
+// running but writes into a now-detached object, which is harmless precisely
+// because it mutates in place and never pushes.
+function removeFile(entry) {
+  const i = files.value.indexOf(entry)
+  if (i !== -1) files.value.splice(i, 1)
 }
 
 let previewBlobUrl = ''
 
 function openPreview(f) {
+  // Belt-and-braces: the template gives a pending tile no click target, but a
+  // future caller shouldn't be able to open an empty overlay. Must sit BEFORE
+  // closePreview(), or a stray call would close a preview legitimately open.
+  if (!f?.data) return
   closePreview()
   if (f.isImage) {
     previewSrc.value = f.data
@@ -320,80 +446,197 @@ onBeforeUnmount(closePreview)
 // Direct flow — capture → convert to a clean document → show it.
 // No adjustment step; on upload the image is saved as a PDF.
 // ============================================================
+// Which door startScan opens. NOT viewport width: a dispatcher with a narrow
+// browser window is still on a desktop and would be handed the camera input.
+// `(pointer: coarse)` asks the question we actually care about — is the primary
+// pointer a finger — true on phones and tablets (where `capture` really does
+// open the camera) and false on desktops and mouse-driven touchscreen laptops.
+// Unknown environments fall through to the CAMERA, because that is the flow
+// that must never break.
+function prefersCamera() {
+  if (typeof window.matchMedia !== 'function') return true
+  return window.matchMedia('(pointer: coarse)').matches
+}
+
 function startScan() {
   if (scanning.value) return
-  scanInput.value?.click()
+  ;(prefersCamera() ? scanInput.value : scanPickInput.value)?.click()
 }
 
-async function handleScanFile(event) {
-  const file = event.target.files && event.target.files[0]
-  event.target.value = ''
-  if (!file) return
-  scanning.value = true
-  let dataUrl = ''
+// Attach the un-enhanced photo so a POD/BOL upload is never blocked because
+// ScanKit is down, disabled, out of credits or rate-limiting us.
+function attachRaw(entry, dataUrl) {
+  if (!dataUrl) {
+    entry.outcome = 'unreadable'
+    removeFile(entry)
+    return
+  }
+  entry.data = dataUrl
+  entry.name = `photo-${Date.now()}-${entry.key}.jpg`
+  entry.type = 'image/jpeg'
+  entry.outcome = 'raw'
+}
+
+// Fill one placeholder. NEVER THROWS — see the contract on runPool. Owns the
+// entry's terminal status and its outcome bucket, and pushes NOTHING: the tile
+// already exists, so a tile removed mid-flight stays removed instead of
+// reappearing when its scan lands.
+async function scanOne(entry) {
+  let raw = ''
   try {
+    // The tile may have been removed while it sat in the queue. Continuing is
+    // harmless (we'd mutate a detached object) but spends a ScanKit credit and
+    // a 30s pool slot on a page nobody wants.
+    if (!files.value.includes(entry)) {
+      entry.outcome = 'cancelled'
+      return
+    }
+    entry.status = 'scanning'
+
     // Send a higher-res input than plain uploads so ScanKit detects edges well.
-    dataUrl = await compressImage(file, SCAN_MAX_EDGE)
-  } catch {
-    dataUrl = ''
-  }
-  // Covers both an empty result and compressImage's raw-bytes fallback. Without
-  // this the undecodable file goes to ScanKit, fails there, and handleScanError
-  // re-attaches it as `photo-<ts>.jpg` with type 'image/jpeg' — a filename AND a
-  // media type that are both untrue. That client-declared type is exactly the
-  // trust the server-side byte check exists to end, and it would then reject the
-  // entire POD rather than this one page.
-  if (!isDecodedImage(dataUrl)) {
-    scanning.value = false
-    toast.show('Could not read that photo. Please take it again.', 'error')
-    return
-  }
-  try {
+    try {
+      raw = await compressImage(entry._file, SCAN_MAX_EDGE)
+    } catch {
+      raw = ''
+    }
+    // Covers both an empty result and compressImage's raw-bytes fallback. The
+    // reasoning is unchanged and costs MORE in a batch, not less: the server
+    // verifies real magic bytes, so one undecodable page 400s the single POST
+    // that carries every other page with it.
+    if (!isDecodedImage(raw)) {
+      entry.outcome = 'unreadable'
+      removeFile(entry)
+      return
+    }
+
+    // Breaker already tripped by an earlier page in this batch — skip the round
+    // trip entirely and take the fallback straight away.
+    if (scanOffStatus) {
+      attachRaw(entry, raw)
+      return
+    }
+
     // Clean-document filter, image output — the server turns it into a PDF on upload.
-    const res = await scanDocument(dataUrl, { filter: 'white' })
-    const ts = Date.now()
-    files.value.push({
-      data: res.data,
-      name: `scan-${ts}.jpg`,
-      type: res.contentType || 'image/jpeg',
-      isImage: true,
-    })
+    const res = await scanDocument(raw, { filter: 'white' })
+    // ⚠️ Not in the old single-file version, and it matters more here. If
+    // ScanKit ever answers with a PDF (or anything an <img> can't draw), the
+    // entry is still flagged isImage and rides in handleUpload's photoData
+    // ARRAY — where the server's isValidImageMagic rejects it and takes every
+    // other page down with it. Falling back to the raw photo is the same trade
+    // the 402/503 path already makes.
+    if (!isDecodedImage(res?.data)) {
+      attachRaw(entry, raw)
+      return
+    }
+    entry.data = res.data
+    entry.name = `scan-${Date.now()}-${entry.key}.jpg`
+    entry.type = res.contentType || 'image/jpeg'
+    entry.outcome = 'scanned'
   } catch (err) {
-    handleScanError(err, dataUrl)
+    const s = err?.status
+    if (SCAN_OFF_STATUS.has(s)) scanOffStatus = s
+    attachRaw(entry, raw)
   } finally {
-    scanning.value = false
+    // The one guarantee that replaces `finally { scanning.value = false }`. A
+    // placeholder that never reaches 'done' disables Upload forever, because
+    // `scanning` is now a computed over exactly this field.
+    entry.status = 'done'
+    entry._file = null   // release the File
   }
 }
 
-// On a scan failure we still attach the raw captured photo (except on rate
-// limit, where the driver should just retry) so a POD/BOL upload is never
-// blocked because ScanKit is down, disabled, or out of credits.
-function handleScanError(err, dataUrl) {
-  const status = err && err.status
-  if (status === 429) {
-    toast.show('Too many scans — please wait a moment and try again.', 'error')
+async function handleScanFiles(event) {
+  // Snapshot BEFORE clearing — setting input.value = '' empties input.files.
+  // Cleared FIRST for the reason given on handleFile: without it, re-picking
+  // the same file after a refusal fires no change event at all, so the obvious
+  // recovery silently does nothing.
+  const picked = Array.from(event.target.files || [])
+  event.target.value = ''
+  if (!picked.length) return
+
+  const remaining = MAX_SCAN_PAGES - files.value.length
+  if (remaining <= 0) {
+    toast.show(`Max ${MAX_SCAN_PAGES} pages — upload or remove some first.`, 'error')
     return
   }
-  let msg = 'Scan failed — attaching your photo as-is.'
-  if (status === 503) msg = "Document scanning isn't available — attaching your photo as-is."
-  else if (status === 402) msg = 'Scanning temporarily unavailable — attaching your photo as-is.'
-  toast.show(msg, 'error')
-  if (dataUrl) {
-    files.value.push({
-      data: dataUrl,
-      name: `photo-${Date.now()}.jpg`,
-      type: 'image/jpeg',
-      isImage: true,
-    })
+  // ⚠️ The trim is reported by summarizeScan, NOT toasted here. useToast holds
+  // one global message, so an immediate notice is overwritten by the summary
+  // the moment the batch settles — which, when ScanKit is answering 503, is
+  // fast enough that the user never sees it and the truncation reads as silent.
+  let toScan = picked
+  const trimmed = picked.length - Math.min(picked.length, remaining)
+  if (trimmed) toScan = picked.slice(0, remaining)
+
+  // Fresh chance for the scanner each batch — but only when nothing else is in
+  // flight, so a second pick can't un-trip a breaker the first pick earned.
+  if (!scanning.value) scanOffStatus = 0
+
+  // Placeholders FIRST, in pick order, so every tile is on screen before the
+  // first round trip — that is what replaces the click/wait/click loop.
+  // ⚠️ `batch` is re-read out of files.value on purpose. Pushing a plain object
+  // into a reactive array stores the RAW target; mutating that raw object never
+  // notifies the proxy and THE TILES NEVER REPAINT. Same trap, same fix, as
+  // BulkReceiptScan's `const added = rows.value.slice(start)`.
+  const start = files.value.length
+  for (const file of toScan) {
+    files.value.push(makeEntry({ name: file.name || 'page', status: 'queued', _file: file }))
   }
+  const batch = files.value.slice(start) // reactive proxies for the new entries
+
+  await runPool(batch, scanOne, SCAN_CONCURRENCY)
+  summarizeScan(batch, trimmed)
+}
+
+// ONE toast per pick. Not a preference — useToast holds a SINGLE global message
+// on a shared timer, so N per-file toasts do not stack: each show() overwrites
+// the last and resets the timer, and the user sees only whichever page happened
+// to fail most recently.
+//
+// Silence on a clean batch is deliberate and preserves today's behaviour
+// exactly: a successful scan has never toasted, and a grid of finished tiles is
+// its own confirmation. This exists to make a silent failure loud, nothing else.
+function summarizeScan(batch, trimmed = 0) {
+  const raw = batch.filter(f => f.outcome === 'raw').length
+  const unreadable = batch.filter(f => f.outcome === 'unreadable')
+  if (!raw && !unreadable.length && !trimmed) return
+
+  const parts = []
+  // First, because it is the one thing the grid alone cannot tell the user:
+  // twenty tiles look identical whether they picked twenty or twenty-five.
+  if (trimmed) parts.push(`${MAX_SCAN_PAGES}-page limit — ${trimmed} not added.`)
+  if (raw) {
+    // "attached as-is" is the load-bearing phrase: the page IS on the upload,
+    // only the cleanup was skipped. Without it this reads as "your photos were
+    // lost". ⚠️ 429 now attaches raw too, where the single-file path used to
+    // attach nothing — in a batch, discarding pages already captured and
+    // compressed costs the user work they did standing at a dock, and the
+    // 402/503 path already gives up that same cleanliness property.
+    const why = SCAN_OFF_REASON[scanOffStatus] || 'Scan failed'
+    parts.push(`${why} — ${raw} page${raw === 1 ? '' : 's'} attached as-is.`)
+  }
+  if (unreadable.length) {
+    // Named, so the user knows WHICH page is missing from the grid — the same
+    // rule handleFiles states for a refused upload.
+    const names = unreadable.map(f => f.name).join(', ')
+    parts.push(`Couldn't read ${names} — take ${unreadable.length > 1 ? 'them' : 'it'} again.`)
+  }
+  toast.show(parts.join(' '), 'error')
 }
 
 async function handleUpload() {
-  if (files.value.length === 0 || uploading.value) return
+  if (uploading.value) return
 
-  const fileCount = files.value.length
-  const images = files.value.filter(f => f.isImage)
-  const docs = files.value.filter(f => !f.isImage)
+  // ⚠️ A placeholder carries no bytes. photoData: '' is a 400, and since ALL
+  // images ride in ONE POST that 400 takes every good page beside it down too.
+  // The Upload button is :disabled while `scanning`, but that is not sufficient
+  // on its own: the "+" tile is gated on `scanning` and NOT on `uploading`, so
+  // a new scan can legitimately start while an upload is already in flight.
+  const ready = files.value.filter(f => f.data)
+  if (!ready.length) return
+
+  const fileCount = ready.length
+  const images = ready.filter(f => f.isImage)
+  const docs = ready.filter(f => !f.isImage)
 
   // All images ride in ONE POST as a photoData array — the server stitches them
   // into a single multi-page PDF. Each non-image doc is its own POST. `taskSrc`
@@ -439,10 +682,15 @@ async function handleUpload() {
   // outcomes by index. It owns the `uploading` / `progress` refs the button reads.
   const { failed } = await uploadDocuments(tasks)
 
+  // Only entries THIS upload actually sent may leave the grid. A bare
+  // `files.value = []` would also wipe any placeholder a concurrent scan pushed
+  // while the POST was in flight.
+  const sent = new Set(ready)
+
   if (failed.length === 0) {
     toast.show(`${selectedType.value} uploaded (${fileCount} file${fileCount !== 1 ? 's' : ''})`)
     emit('uploaded', { type: selectedType.value })
-    files.value = []
+    files.value = files.value.filter(f => !sent.has(f))
     return
   }
 
@@ -451,7 +699,9 @@ async function handleUpload() {
   // Match by object identity (not filename) so duplicate names can't drop a file.
   const keep = new Set()
   for (const f of failed) for (const src of (taskSrc[f.index] || [])) keep.add(src)
-  files.value = files.value.filter(file => keep.has(file))
+  // One rule covering both cases: only what we sent may be dropped, and only if
+  // it landed. Anything attached after the POST began is untouched.
+  files.value = files.value.filter(f => !sent.has(f) || keep.has(f))
   toast.show(`Upload failed for ${failed.length} item${failed.length !== 1 ? 's' : ''} — tap Upload to retry.`, 'error')
 }
 </script>
