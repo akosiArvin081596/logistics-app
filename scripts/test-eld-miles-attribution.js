@@ -72,6 +72,9 @@ function check(label, actual, expected) {
 	console.error(`FAIL  ${label}\n        expected ${e}\n        actual   ${a}`);
 }
 
+const MIN = 60000;
+const HOUR = 3600000;
+
 // The real Logisx-#91 assignment history.
 const ASSIGNMENTS = [
 	{ truck_id: 11, driver_name: "Jayden Morrison", start_date: "2026-08-04T13:08:00.316Z", end_date: "2026-08-11T16:53:15.262Z" },
@@ -175,6 +178,25 @@ check("both halves land on the same truck-local day",
 const truckTotal = m.sumOdoDeltas(samples).miles;
 check("driver rows sum to the truck total exactly",
 	Math.round(list.reduce((a, x) => a + x.miles, 0) * 10) / 10, truckTotal);
+
+// --- 6b. A DAY'S first/last PING MUST FALL INSIDE THAT DAY ----------------
+// firstMs was seeded with the whole window's first sample, so the "keep the
+// earliest" guard never fired and every bucket inherited the window start.
+// Production stored single days spanning 50+ hours. Miles were unaffected, so
+// nothing failed loudly — it only surfaces where a UI prints the day's hours.
+const threeDays = [];
+for (let d = 0; d < 3; d++) {
+	for (let i = 0; i < 5; i++) {
+		threeDays.push({ ms: Date.parse("2026-08-12T13:00:00Z") + d * 86400000 + i * MIN, odo: 900000 + d * 100 + i, lng: HOUSTON_LNG });
+	}
+}
+const dayBuckets = m.splitDeltasByDayAndDriver(threeDays, { dayOf, driverAt: () => "X" });
+check("three days of pings produce three day rows", dayBuckets.size, 3);
+for (const b of dayBuckets.values()) {
+	check(`${b.localDay}: firstMs falls inside its own day`, dayOf(b.firstMs, HOUSTON_LNG), b.localDay);
+	check(`${b.localDay}: lastMs falls inside its own day`, dayOf(b.lastMs, HOUSTON_LNG), b.localDay);
+	check(`${b.localDay}: span is under 24h`, (b.lastMs - b.firstMs) < 24 * HOUR, true);
+}
 
 // --- 7. an unattributed stretch is kept for the TRUCK, excluded from drivers --
 const orphan = m.splitDeltasByDayAndDriver(

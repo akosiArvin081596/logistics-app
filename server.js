@@ -46217,7 +46217,17 @@ app.put("/api/expenses/bulk-status", requireRole("Super Admin", "Dispatcher"), (
 });
 
 // GET /api/expenses/fuel-analytics — Fuel cost analytics + compliance
-app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+// ⚠️ requireRole BEFORE the limiter, so an unauthenticated caller cannot spend
+// the budget on 403s. The limiter itself was missing entirely: this handler
+// pulls EVERY fuel row and re-derives cost/mile, reconciliation and calibration
+// on each call, with no window and no cache.
+const fuelAnalyticsLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 60,
+	message: { error: "Too many fuel analytics requests. Try again in a few minutes." },
+	standardHeaders: true,
+});
+app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher"), fuelAnalyticsLimiter, (req, res) => {
 	try {
 		const config = {};
 		db.prepare("SELECT key, value FROM investor_config").all()
@@ -46231,7 +46241,65 @@ app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher")
 
 		const totalFuelSpend = fuelExpenses.reduce((s, e) => s + (e.amount || 0), 0);
 		const totalGallons = fuelExpenses.reduce((s, e) => s + (e.gallons || 0), 0);
-		const avgCostPerGallon = totalGallons > 0 ? totalFuelSpend / totalGallons : 0;
+
+		// ⚠️ $/GAL DIVIDES ONLY THE SPEND THAT RECORDED A VOLUME.
+		// This used to be totalFuelSpend / totalGallons — WHOLE spend over
+		// PARTIAL gallons — and on this fleet 30 of 147 receipts carry no gallons
+		// at all. The result reads ~$7.95/gal for a month whose real price is
+		// ~$4.57, and individual weeks reach $12-$15. Anyone who knows the price
+		// of diesel stops trusting the page at that point, which costs more than
+		// the missing figure would.
+		// lib/expense-analytics.js has always divided it this way; these two
+		// definitions have been shipping side by side. This is the honest one.
+		// SPEND itself needs no such exclusion — a receipt without gallons is
+		// still money spent.
+		const gallonBearing = fuelExpenses.filter((e) => Number(e.gallons) > 0);
+		const gallonBearingSpend = gallonBearing.reduce((s, e) => s + (e.amount || 0), 0);
+		const avgCostPerGallon = totalGallons > 0 ? gallonBearingSpend / totalGallons : 0;
+		const receiptsWithoutGallons = fuelExpenses.length - gallonBearing.length;
+
+		// Weekly diesel spend, on the SAME Sat-Fri week the business bills on.
+		// The client asked "what are we spending on an average week"; the answer
+		// existed only as month-spend / (elapsed days / 7) inside the Financials
+		// month modal, which is Super Admin only and is not a real week.
+		// ⚠️ getWeekRange() parses a bare 'YYYY-MM-DD' as UTC midnight and then
+		// shifts it into the previous Central day, so a Saturday resolves to the
+		// week BEFORE the one it starts. Anchor at midday first.
+		const weekly = {};
+		for (const e of fuelExpenses) {
+			const day = String(e.date || "").slice(0, 10);
+			if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
+			const wk = getWeekRange(day + "T12:00:00Z").weekStart;
+			if (!weekly[wk]) weekly[wk] = { spend: 0, gallons: 0, count: 0, noGallons: 0 };
+			weekly[wk].spend += e.amount || 0;
+			weekly[wk].count++;
+			if (Number(e.gallons) > 0) weekly[wk].gallons += Number(e.gallons);
+			else weekly[wk].noGallons++;
+		}
+		const weeklyData = Object.entries(weekly)
+			.sort(([a], [b]) => a.localeCompare(b))
+			.map(([weekStart, d]) => {
+				// Only the gallon-bearing half of the week's spend prices the gallons.
+				const priced = fuelExpenses
+					.filter((e) => Number(e.gallons) > 0 && getWeekRange(String(e.date).slice(0, 10) + "T12:00:00Z").weekStart === weekStart)
+					.reduce((s, e) => s + (e.amount || 0), 0);
+				return {
+					weekStart,
+					weekEnd: getWeekRange(weekStart + "T12:00:00Z").weekEnd,
+					spend: Math.round(d.spend),
+					gallons: d.gallons > 0 ? Math.round(d.gallons * 10) / 10 : null,
+					avgPerGallon: d.gallons > 0 ? Math.round((priced / d.gallons) * 100) / 100 : null,
+					fills: d.count,
+					receiptsWithoutGallons: d.noGallons,
+				};
+			});
+		// The headline he asked for. Averaged over weeks that HAD activity — a
+		// fleet that did not buy diesel in a week did not average less that week,
+		// it simply was not running, and padding the divisor with those weeks
+		// understates the real cost of a working week.
+		const avgWeeklySpend = weeklyData.length
+			? Math.round(weeklyData.reduce((a, w) => a + w.spend, 0) / weeklyData.length)
+			: 0;
 
 		// Odometer provenance, read from the stored expenses.odometer_source column
 		// the backfill stamps — NOT inferred by comparing the receipt's odometer to
@@ -46409,13 +46477,22 @@ app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher")
 			monthly[month].gallons += e.gallons || 0;
 			monthly[month].count++;
 		});
+		// Same asymmetry fix as the fleet figure above: price the gallons with the
+		// spend that recorded gallons, not with the month's whole spend.
+		const monthlyPriced = {};
+		for (const e of gallonBearing) {
+			const month = (e.date || "").substring(0, 7);
+			if (!month) continue;
+			monthlyPriced[month] = (monthlyPriced[month] || 0) + (e.amount || 0);
+		}
 		const monthlyData = Object.entries(monthly)
 			.sort(([a], [b]) => a.localeCompare(b))
 			.map(([month, d]) => ({
 				month,
 				spend: Math.round(d.spend),
 				gallons: Math.round(d.gallons * 10) / 10,
-				avgPerGallon: d.gallons > 0 ? Math.round((d.spend / d.gallons) * 100) / 100 : 0,
+				avgPerGallon: d.gallons > 0
+					? Math.round(((monthlyPriced[month] || 0) / d.gallons) * 100) / 100 : 0,
 			}));
 
 		// Per-driver breakdown
@@ -46439,6 +46516,21 @@ app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher")
 			totalFuelSpend: Math.round(totalFuelSpend),
 			totalGallons: Math.round(totalGallons * 10) / 10,
 			avgCostPerGallon: Math.round(avgCostPerGallon * 100) / 100,
+			// Weekly diesel — the figure the client asked for, on the billing week.
+			avgWeeklySpend,
+			weeklyData,
+			weekBasis: "sat-fri",
+			// What the price figures could not see. Published rather than absorbed:
+			// a $/gal built on 117 of 147 receipts is trustworthy only if the
+			// reader knows that is what it is.
+			priceBasis: {
+				receipts: fuelExpenses.length,
+				receiptsWithoutGallons,
+				spendPricedByGallons: Math.round(gallonBearingSpend),
+				note: receiptsWithoutGallons
+					? `$/gal is priced from the ${fuelExpenses.length - receiptsWithoutGallons} receipts that recorded a volume. ${receiptsWithoutGallons} did not; their spend still counts, their gallons cannot.`
+					: "",
+			},
 			costPerMile: Math.round(costPerMile * 100) / 100,
 			// What the cost/mile is actually built from, so a reader can tell a real
 			// figure from one resting on two receipts. The two rejection counts are
@@ -47168,6 +47260,31 @@ app.get("/api/analytics/mileage",
 		const truckWeeksCovered = observed.size;
 		const truckWeeksTotal = trucks.length * Math.max(weekKeys.length, 1);
 
+		// Diesel spend bucketed into the SAME Sat-Fri weeks as the miles, so the
+		// two can be divided into a fuel cost per mile that is not comparing a
+		// calendar month against a billing week.
+		// ⚠️ SPEND uses every fuel receipt; GALLONS only those that recorded a
+		// volume. 30 of 147 receipts on this fleet have no gallons, and dividing
+		// whole spend by partial gallons is what makes a week read $12/gal
+		// against a real ~$4.57. Same asymmetry lib/expense-analytics.js already
+		// resolves this way; /api/expenses/fuel-analytics still does not.
+		const fuelWeeks = new Map();
+		let fuelRowsTotal = 0, fuelRowsNoGallons = 0;
+		for (const f of db.prepare(
+			`SELECT date, amount, gallons FROM expenses
+			 WHERE LOWER(type) = 'fuel' AND COALESCE(status,'') != 'Rejected'
+			   AND date >= ? AND date <= ?`
+		).all(from, to)) {
+			const wk = weekOf(f.date);
+			let e = fuelWeeks.get(wk);
+			if (!e) fuelWeeks.set(wk, (e = { spend: 0, gallons: 0, rows: 0, noGallons: 0 }));
+			e.spend += Number(f.amount) || 0;
+			e.rows += 1;
+			fuelRowsTotal += 1;
+			if (Number(f.gallons) > 0) e.gallons += Number(f.gallons);
+			else { e.noGallons += 1; fuelRowsNoGallons += 1; }
+		}
+
 		const lastPing = db.prepare(
 			`SELECT routemate_vehicle_id AS vid, MAX(location_date_ms) AS ms
 			 FROM routemate_telemetry GROUP BY routemate_vehicle_id`
@@ -47186,6 +47303,10 @@ app.get("/api/analytics/mileage",
 
 			trucks: [...perTruck.values()].map(e => ({
 				truckId: e.truck.id, unitNumber: e.truck.unit_number,
+				// Needed by the drill-down. Safe here: this route is Super Admin +
+				// Dispatcher only. The fuel endpoints blank this for the Driver
+				// role because it is an enumeration key; no Driver reaches this one.
+				routemateVehicleId: e.truck.routemate_vehicle_id || null,
 				eldLinked: true,
 				weeks: weekKeys.map(k => ({ weekStart: k, weekEnd: weekRangeOf(k).weekEnd, ...(shape(e.weeks.get(k)) || { miles: null, basis: "no-data", days: 0, droppedMiles: 0 }) })),
 				months: [...e.months.keys()].sort().map(k => ({ month: k, ...shape(e.months.get(k)) })),
@@ -47193,6 +47314,7 @@ app.get("/api/analytics/mileage",
 			})).concat(
 				trucks.filter(t => !perTruck.has(t.id)).map(t => ({
 					truckId: t.id, unitNumber: t.unit_number,
+					routemateVehicleId: t.routemate_vehicle_id || null,
 					eldLinked: !!t.routemate_vehicle_id,
 					// null, not 0 — see the header note.
 					weeks: weekKeys.map(k => ({ weekStart: k, weekEnd: weekRangeOf(k).weekEnd, miles: null, basis: "no-data", days: 0, droppedMiles: 0 })),
@@ -47213,7 +47335,30 @@ app.get("/api/analytics/mileage",
 				truckWeeksCovered, truckWeeksTotal,
 				totalMiles: Math.round(companyTotal),
 				basis: truckWeeksCovered < truckWeeksTotal ? "partial" : "eld",
-				weeks: weekKeys.map(k => ({ weekStart: k, weekEnd: weekRangeOf(k).weekEnd, ...shape(companyWeeks.get(k)) })),
+				weeks: weekKeys.map(k => {
+					const base = shape(companyWeeks.get(k)) || { miles: 0, basis: "no-data", days: 0, droppedMiles: 0 };
+					const f = fuelWeeks.get(k);
+					const spend = f ? Math.round(f.spend) : null;
+					return {
+						weekStart: k, weekEnd: weekRangeOf(k).weekEnd,
+						label: `${k} → ${weekRangeOf(k).weekEnd}`,
+						...base,
+						fuelSpend: spend,
+						// null, not 0 — no receipt with a volume means unknown, not free.
+						fuelGallons: f && f.gallons > 0 ? Math.round(f.gallons * 10) / 10 : null,
+						// Fuel-only. Needs BOTH sides to be real numbers.
+						fuelCostPerMile: spend != null && base.miles > 0
+							? Math.round((spend / base.miles) * 100) / 100 : null,
+					};
+				}),
+			},
+			// What the diesel figures could not see, stated rather than absorbed.
+			fuelCoverage: {
+				receipts: fuelRowsTotal,
+				receiptsWithoutGallons: fuelRowsNoGallons,
+				note: fuelRowsNoGallons
+					? `${fuelRowsNoGallons} of ${fuelRowsTotal} fuel receipts in this range record no gallons. Spend includes them; gallons and $/gal do not.`
+					: "",
 			},
 
 			coverage: {
@@ -47250,6 +47395,189 @@ app.get("/api/analytics/mileage",
 		res.status(500).json({ ok: false, error: "mileage analytics failed" });
 	}
 });
+
+// GET /api/analytics/mileage/detail?vehicleId=|driver=&from=&to=
+//
+// The drill-down behind a clicked cell on /analytics: the DAYS that make up a
+// week (or any range), and for each day what actually happened — fuel bought,
+// loads worked, when the truck first and last reported, and in plain words why
+// a day is marked `partial`.
+//
+// The client asked for this directly: "if I click something I want details, I
+// want to see what it is". A total that cannot be taken apart is a number you
+// have to trust; one that itemises is a number you can check. Same contract as
+// the investor payout drill-down — the items must sum to the headline.
+//
+// ⚠️ READS eld_miles_daily, NOT TELEMETRY. The rollup already reduced ~1M pings
+// to a few hundred day rows; re-scanning the raw table to answer a click would
+// put a multi-second synchronous query on an interactive path.
+// ⚠️ NO SHEETS CALL EITHER. Loads are resolved from load_status_history via its
+// `actor` column, which holds the DRIVER NAME on driver-initiated changes, and
+// the day row already knows its driver. That keeps a drill-down click off the
+// Google API entirely.
+app.get("/api/analytics/mileage/detail",
+	requireRole("Super Admin", "Dispatcher"),
+	mileageAnalyticsLimiter,
+	(req, res) => {
+	try {
+		const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+		const from = String(req.query.from || "");
+		const to = String(req.query.to || "");
+		if (!DAY_RE.test(from) || !DAY_RE.test(to)) return res.status(400).json({ ok: false, error: "from and to must be YYYY-MM-DD" });
+		if (to < from) return res.status(400).json({ ok: false, error: "to is before from" });
+
+		const vehicleId = String(req.query.vehicleId || "").slice(0, 64);
+		const driverKey = String(req.query.driver || "").trim().toLowerCase().slice(0, 80);
+		if (!vehicleId && !driverKey) return res.status(400).json({ ok: false, error: "vehicleId or driver is required" });
+
+		const where = ["d.local_day >= ?", "d.local_day <= ?"];
+		const args = [from, to];
+		if (vehicleId) { where.push("d.routemate_vehicle_id = ?"); args.push(vehicleId); }
+		if (driverKey) { where.push("d.driver_key = ?"); args.push(driverKey); }
+
+		const dayRows = db.prepare(
+			`SELECT d.local_day, d.driver_name, d.driver_key, d.miles, d.basis, d.samples,
+			        d.rejected_deltas, d.dropped_miles, d.max_gap_ms, d.first_ms, d.last_ms,
+			        d.routemate_vehicle_id AS vid, t.unit_number AS unit
+			 FROM eld_miles_daily d
+			 LEFT JOIN trucks t ON t.routemate_vehicle_id = d.routemate_vehicle_id
+			 WHERE ${where.join(" AND ")}
+			 ORDER BY d.local_day ASC`
+		).all(...args);
+
+		const units = [...new Set(dayRows.map(r => r.unit).filter(Boolean))];
+		const drivers = [...new Set(dayRows.map(r => r.driver_name).filter(Boolean))];
+
+		// Fuel bought on these days, by the same truck(s). Bounded by the range.
+		const fuelByDay = new Map();
+		if (units.length) {
+			for (const f of db.prepare(
+				`SELECT date, truck_unit, amount, gallons, vendor, odometer, load_id, driver
+				 FROM expenses
+				 WHERE LOWER(type) = 'fuel' AND COALESCE(status,'') != 'Rejected'
+				   AND date >= ? AND date <= ?
+				   AND LOWER(truck_unit) IN (${units.map(() => "LOWER(?)").join(",")})`
+			).all(from, to, ...units)) {
+				const list = fuelByDay.get(f.date) || [];
+				list.push({
+					amount: Number(f.amount) || 0,
+					// null, not 0 — a receipt filed without a volume is unknown, not free.
+					gallons: Number(f.gallons) > 0 ? Number(f.gallons) : null,
+					vendor: f.vendor || "", loadId: f.load_id || "", truckUnit: f.truck_unit || "",
+					odometer: Number(f.odometer) > 0 ? Number(f.odometer) : null,
+				});
+				fuelByDay.set(f.date, list);
+			}
+		}
+
+		// Loads the driver moved that day. `actor` is the driver's name on any
+		// driver-initiated status change, so this needs no sheet read.
+		const loadsByDay = new Map();
+		if (drivers.length) {
+			const ph = drivers.map(() => "LOWER(?)").join(",");
+			for (const h of db.prepare(
+				`SELECT substr(h.changed_at,1,10) AS day, h.load_id, h.new_status, h.changed_at, h.actor,
+				        c.pickup_address, c.dropoff_address
+				 FROM load_status_history h
+				 LEFT JOIN load_coordinates c ON c.load_id = h.load_id
+				 WHERE substr(h.changed_at,1,10) >= ? AND substr(h.changed_at,1,10) <= ?
+				   AND LOWER(h.actor) IN (${ph})
+				 ORDER BY h.changed_at ASC`
+			).all(from, to, ...drivers)) {
+				const list = loadsByDay.get(h.day) || [];
+				list.push({
+					loadId: h.load_id, status: h.new_status, at: h.changed_at, actor: h.actor,
+					pickup: h.pickup_address || "", dropoff: h.dropoff_address || "",
+				});
+				loadsByDay.set(h.day, list);
+			}
+		}
+
+		const iso = (ms) => (Number(ms) > 0 ? new Date(Number(ms)).toISOString() : null);
+
+		const days = dayRows.map((r) => {
+			const fuel = fuelByDay.get(r.local_day) || [];
+			const rawLoads = loadsByDay.get(r.local_day) || [];
+			// One entry per load, carrying the statuses it passed through that day —
+			// a load that went At Shipper -> In Transit -> Delivered is one load, not
+			// three rows.
+			const byLoad = new Map();
+			for (const l of rawLoads) {
+				const e = byLoad.get(l.loadId) || { loadId: l.loadId, statuses: [], pickup: l.pickup, dropoff: l.dropoff };
+				e.statuses.push(l.status);
+				byLoad.set(l.loadId, e);
+			}
+			const spend = fuel.reduce((a, f) => a + f.amount, 0);
+			const gal = fuel.reduce((a, f) => a + (f.gallons || 0), 0);
+			return {
+				localDay: r.local_day,
+				unit: r.unit || null,
+				driver: r.driver_name || "",
+				miles: Math.round(Number(r.miles) || 0),
+				basis: r.basis,
+				samples: r.samples,
+				firstAt: iso(r.first_ms),
+				lastAt: iso(r.last_ms),
+				activeHours: r.first_ms > 0 && r.last_ms > r.first_ms
+					? Math.round(((r.last_ms - r.first_ms) / 3600000) * 10) / 10 : null,
+				// Why this day is not fully observed, said in words rather than left
+				// for the reader to infer from a badge.
+				coverageNote: coverageNoteFor(r),
+				rejectedDeltas: r.rejected_deltas || 0,
+				droppedMiles: Math.round(Number(r.dropped_miles) || 0),
+				fuel, fuelSpend: Math.round(spend * 100) / 100,
+				// null, not 0: gallons are unknown when no receipt recorded them.
+				fuelGallons: gal > 0 ? Math.round(gal * 10) / 10 : null,
+				loads: [...byLoad.values()],
+			};
+		});
+
+		const totalMiles = days.reduce((a, d) => a + d.miles, 0);
+		const totalSpend = days.reduce((a, d) => a + d.fuelSpend, 0);
+		const totalGal = days.reduce((a, d) => a + (d.fuelGallons || 0), 0);
+
+		res.json({
+			ok: true, from, to,
+			unit: units.length === 1 ? units[0] : null,
+			driver: driverKey ? (drivers[0] || "") : null,
+			days,
+			totals: {
+				miles: totalMiles,
+				days: days.length,
+				movingDays: days.filter(d => d.miles > 0).length,
+				fuelSpend: Math.round(totalSpend * 100) / 100,
+				fuelGallons: totalGal > 0 ? Math.round(totalGal * 10) / 10 : null,
+				// Fuel cost per mile over this range. FUEL ONLY — it is not the
+				// all-in cost of running the truck, and the label must say so.
+				fuelCostPerMile: totalMiles > 0 && totalSpend > 0
+					? Math.round((totalSpend / totalMiles) * 100) / 100 : null,
+				basis: eldMiles.basisLabel(days.map(d => d.basis)),
+			},
+		});
+	} catch (err) {
+		console.error("[analytics/mileage/detail]", err.message);
+		res.status(500).json({ ok: false, error: "mileage detail failed" });
+	}
+});
+
+// Plain-English reason a day is not fully observed. Returns "" for a clean day —
+// the caller renders nothing rather than "no issues", which would be noise on
+// every row.
+function coverageNoteFor(r) {
+	const parts = [];
+	if (r.rejected_deltas > 0) {
+		const mi = Math.round(Number(r.dropped_miles) || 0);
+		parts.push(mi > 0
+			? `${mi.toLocaleString()} mi could not be trusted (odometer reset or jump) and were left out`
+			: `${r.rejected_deltas} odometer reading(s) were rejected`);
+	}
+	if (r.max_gap_ms > 0) {
+		const h = Math.round((r.max_gap_ms / 3600000) * 10) / 10;
+		parts.push(`the truck moved during a ${h}h gap in reporting, so those miles are not counted`);
+	}
+	if (!parts.length && r.basis === "partial") parts.push("part of this day was not observed");
+	return parts.join("; ");
+}
 
 app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
