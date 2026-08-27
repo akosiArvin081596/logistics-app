@@ -684,6 +684,22 @@
         </div>
 
         <div v-if="!reviewFocus" class="metrics-grid">
+          <!-- The question this tab could not answer: "what are we spending on
+               diesel in an average week?". It existed only as month-spend over
+               elapsed-days-times-seven, inside the Financials month modal, which
+               is Super Admin only. This is a real Saturday-Friday week — the same
+               week driver invoices are paid on. -->
+          <div class="metric-card">
+            <div class="metric-label">Avg Weekly Diesel</div>
+            <div class="metric-value" :class="{ 'metric-value-empty': !fuel.avgWeeklySpend }">
+              {{ fuel.avgWeeklySpend ? '$' + fuel.avgWeeklySpend.toLocaleString() : '—' }}
+            </div>
+            <div
+              v-if="fuel.weeklyData?.length"
+              class="metric-sub"
+              title="Averaged over the weeks that had fuel activity. A week the fleet did not buy diesel is not a cheaper week — it is a week nothing ran — so padding the divisor with those would understate the cost of a working week."
+            >over {{ fuel.weeklyData.length }} active week{{ fuel.weeklyData.length === 1 ? '' : 's' }} · Sat–Fri</div>
+          </div>
           <div class="metric-card">
             <div class="metric-label">Total Fuel Spend</div>
             <div class="metric-value">${{ fuel.totalFuelSpend?.toLocaleString() || 0 }}</div>
@@ -702,6 +718,15 @@
             <div v-if="!fuel.avgCostPerGallon && !fuel.totalGallons" class="metric-sub metric-sub-empty" title="Average price per gallon needs gallons to divide by. No fuel receipt on file records a volume yet — the “Receipts missing gallons” queue below is where that comes from.">
               No gallons recorded yet
             </div>
+            <!-- A price built on part of the receipts is trustworthy only if the
+                 reader knows that is what it is. Before this, whole spend was
+                 divided by partial gallons and July read $7.95/gal against a
+                 real $3.98. -->
+            <div
+              v-else-if="fuel.priceBasis?.receiptsWithoutGallons"
+              class="metric-sub"
+              :title="fuel.priceBasis.note"
+            >priced from {{ fuel.priceBasis.receipts - fuel.priceBasis.receiptsWithoutGallons }} of {{ fuel.priceBasis.receipts }} receipts</div>
           </div>
           <!-- Cost/mile is a FLOOR, not a measurement: the miles span the whole
                truck while the spend only counts receipts we actually hold, so
@@ -1142,6 +1167,42 @@
              volume. So it carries its basis the way Cost/Mile does, and for the
              same reason: a reader must be able to tell a measurement from a
              quotient with half its denominator missing. -->
+        <!-- WEEKLY DIESEL SPEND. Sat-Fri, the billing week, so a week here is
+             the same week the driver invoice covering it is paid on. Newest
+             first — the question is almost always "what did we just spend". -->
+        <div v-if="!reviewFocus && weeklyFuelRows.length" class="section-card">
+          <div class="section-title">Weekly Fuel Spend</div>
+          <table>
+            <thead>
+              <tr>
+                <th>Week</th>
+                <th>Spend</th>
+                <th>Gallons</th>
+                <th title="The week's gallon-bearing spend divided by the gallons it recorded. Receipts filed without a volume are counted in Spend and excluded here — pricing them would invent gallons that were never recorded.">$/Gal</th>
+                <th>Fills</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="w in weeklyFuelRows" :key="w.weekStart">
+                <td>{{ w.label }}</td>
+                <td>${{ w.spend.toLocaleString() }}</td>
+                <td>{{ w.gallons === null ? '—' : w.gallons }}</td>
+                <td>
+                  {{ w.avgPerGallon === null ? '—' : '$' + w.avgPerGallon }}
+                  <span v-if="w.receiptsWithoutGallons" class="cell-flag" :title="`${w.receiptsWithoutGallons} receipt(s) this week recorded no gallons, so the volume is an under-count. The spend is complete.`">*</span>
+                </td>
+                <td>{{ w.fills }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="table-foot">
+            <strong>Average week: ${{ (fuel.avgWeeklySpend || 0).toLocaleString() }}</strong>
+            across {{ weeklyFuelRows.length }} active week{{ weeklyFuelRows.length === 1 ? '' : 's' }}.
+            Weeks run Saturday to Friday, matching the driver invoice week.
+            <template v-if="fuel.priceBasis?.note"> {{ fuel.priceBasis.note }}</template>
+          </p>
+        </div>
+
         <div v-if="!reviewFocus && fuelMonthRows.length" class="section-card">
           <div class="section-title">Monthly Fuel Spend</div>
           <table>
@@ -3152,6 +3213,16 @@ const volumelessByMonth = computed(() => {
 // Precomputed per row rather than resolved per cell, for the same reason
 // fillRows is: the figure and the chip qualifying it must be derived together or
 // they can drift into disagreeing about the same month.
+// Newest week first. The label is built here rather than in the template so the
+// table stays declarative and the date maths has one home.
+const weeklyFuelRows = computed(() => {
+  const rows = Array.isArray(fuel.value?.weeklyData) ? fuel.value.weeklyData : []
+  return [...rows].reverse().map((w) => ({
+    ...w,
+    label: `${String(w.weekStart).slice(5).replace('-', '/')} – ${String(w.weekEnd).slice(5).replace('-', '/')}`,
+  }))
+})
+
 const fuelMonthRows = computed(() => {
   const known = isQueueAvailable(fuel.value, 'volumeless')
   return asList(fuel.value?.monthlyData).map((m) => {
