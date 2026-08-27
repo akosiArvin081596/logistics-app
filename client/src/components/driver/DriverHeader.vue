@@ -90,19 +90,40 @@ const fuelChip = computed(() => {
       title: `No usable fuel reading from this truck's ELD.${known} Check the gauge before you set off.`,
     }
   }
-  const mi = Math.round(Number(r.rangePlanningMiles))
+  const dry = Math.round(Number(r.rangePlanningMiles))
+  // The chip carries the USABLE figure — miles before a stop is mandatory —
+  // so the driver's phone and the dispatcher's Fuel & Route card cannot quote
+  // two different numbers for the same truck. Distance-to-dry moves into the
+  // tooltip rather than being dropped. An older server sends no reserve, in
+  // which case this stays exactly as it was.
+  const usable = r.rangeUsableMiles == null ? null : Math.round(Number(r.rangeUsableMiles))
+  const reserve = r.reserveMiles == null ? null : Math.round(Number(r.reserveMiles))
+  const hasReserve = usable !== null && reserve !== null
+  // Thresholds stay on the DRY figure. They were calibrated against it, and
+  // re-pointing them at a number that is 15 lower would quietly move every
+  // driver 15 miles closer to a red chip without anyone deciding to.
   // Absolute thresholds, because the header has no route context to compare
   // against. The per-load verdict does that comparison; this is the "am I about
   // to be in trouble at all" signal.
-  const tone = mi < 50 ? 'bad' : mi < 150 ? 'warn' : 'ok'
+  const tone = dry < 50 ? 'bad' : dry < 150 ? 'warn' : 'ok'
   const carried = r.fuelSource === 'carried'
     ? ' Sensor is not reporting, so this is estimated from the last reading and is a floor.'
     : ''
+  const pct = r.fuelPct != null ? ` (${Math.round(r.fuelPct)}% in the tank)` : ''
+  if (hasReserve) {
+    return {
+      tone: usable === 0 ? 'bad' : tone,
+      // 0 usable miles is an instruction, not a measurement.
+      text: usable === 0 ? 'Refuel now' : `${usable} mi`,
+      title: `About ${usable} miles before you need to refuel${pct}`
+        + `. That is ${dry} miles to dry, holding back a ${reserve} mile reserve.`
+        + ' This is the low end of the range, not the best case.' + carried,
+    }
+  }
   return {
     tone,
-    text: `${mi} mi`,
-    title: `About ${mi} miles of fuel to plan on`
-      + (r.fuelPct != null ? ` (${Math.round(r.fuelPct)}% in the tank)` : '')
+    text: `${dry} mi`,
+    title: `About ${dry} miles of fuel to plan on${pct}`
       + '. This is the low end of the range, not the best case.' + carried,
   }
 })

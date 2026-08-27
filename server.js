@@ -38533,6 +38533,29 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (
 			rangePlanningMiles: interval.planning,
 			rangeBasis: interval.basis,
 			milesPerFuelPoint: interval.milesPerPoint,
+			// THE RUN-OUT LINE. `rangePlanningMiles` above is distance-to-dry (the
+			// conservative low end); `rangeUsableMiles` is what is left after holding
+			// back the reserve, i.e. the number a human should act on. Both are sent
+			// because the panel shows both — a single figure here is what made the
+			// old readout ambiguous between "you can drive this far" and "you must
+			// refuel by here".
+			//
+			// ⚠️ The subtraction is planTripFuel()'s refuelWithinMiles verbatim
+			// (lib/fuel-model.js) so /tracking and a routed load cannot quote two
+			// different numbers for one truck. NOTE the reserve itself is the FLAT
+			// minimum here: there is no route at this endpoint, so the proportional
+			// term tripReserveMiles() applies has nothing to apply to. They agree
+			// exactly while FUEL_RESERVE_FRACTION is 0 (its default and the client's
+			// choice); set that non-zero and trip-plan will reserve MORE on a long
+			// route than this figure assumes.
+			//
+			// ⚠️ null stays null. When interval.planning is null the basis is
+			// 'unknown' and there is no honest figure; a 0 here renders as "0 mi to
+			// dry", which reads as an empty tank rather than as no reading.
+			reserveMiles: FUEL_RESERVE_MILES,
+			rangeUsableMiles: interval.planning == null
+				? null
+				: Math.max(0, Math.round(interval.planning - FUEL_RESERVE_MILES)),
 			// Provenance of the FUEL READING itself, which is a separate axis from
 			// rangeBasis (that one describes the miles-per-point evidence). 'live' =
 			// the sensor answered; 'carried' = the sensor is dropping out and this is

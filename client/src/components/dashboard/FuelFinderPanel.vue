@@ -42,9 +42,39 @@
           <span class="ff-ring-label">{{ Math.round(range.fuelPct) }}%</span>
         </div>
         <div class="ff-range-info">
+          <!-- THE RUN-OUT LINE. The headline is the USABLE figure — how far
+               this truck may go before a stop is mandatory — because that is
+               the number a dispatcher acts on. Distance-to-dry sits under it,
+               labelled, so the reserve is visible rather than implied. Both
+               come off the same interval as before; nothing here re-derives a
+               range, and rangeMiles is still never rendered.
+               Pre-reserve servers (no reserveMiles) fall back to the original
+               "mi to plan on" readout rather than inventing a buffer. -->
+          <div v-if="interval.hasReserve && !interval.mustRefuelNow" class="ff-range-miles">
+            <span class="ff-range-num">{{ milesText(interval.usable) }}</span>
+            <span class="ff-unit">mi before you refuel</span>
+            <span
+              v-if="interval.basisInfo"
+              class="ff-src"
+              :class="basisBadgeClass"
+              :title="interval.basisInfo.title"
+            >{{ interval.basisInfo.short }}</span>
+          </div>
+          <!-- 0 usable miles is an INSTRUCTION, not a measurement. Rendering it
+               as "0 mi before you refuel" reads as a dry tank; the truck in
+               fact still has the reserve under it. -->
+          <div v-else-if="interval.hasReserve" class="ff-range-miles">
+            <span class="ff-range-num ff-now">Refuel now</span>
+            <span
+              v-if="interval.basisInfo"
+              class="ff-src"
+              :class="basisBadgeClass"
+              :title="interval.basisInfo.title"
+            >{{ interval.basisInfo.short }}</span>
+          </div>
           <!-- The LOW end of the interval, labelled as such. Anything else here
                is a promise the truck has not been measured keeping. -->
-          <div class="ff-range-miles">
+          <div v-else class="ff-range-miles">
             <span class="ff-range-num">{{ interval.known ? milesText(interval.planning) : '—' }}</span>
             <span class="ff-unit">mi to plan on</span>
             <span
@@ -53,6 +83,14 @@
               :class="basisBadgeClass"
               :title="interval.basisInfo.title"
             >{{ interval.basisInfo.short }}</span>
+          </div>
+          <!-- Names the buffer on screen. Before this it appeared in exactly one
+               string in the whole client — "incl. 15 reserve", inside the trip
+               verdict — which only renders once a routed load is selected. That
+               is why the client asked for a line he was, correctly, not seeing. -->
+          <div v-if="interval.hasReserve" class="ff-range-dry">
+            {{ milesText(interval.planning) }} mi to dry · holds back
+            {{ milesText(interval.reserve) }} mi reserve
           </div>
           <div v-if="interval.hasSpread" class="ff-range-spread">
             typical {{ milesText(interval.typical) }} · best {{ milesText(interval.high) }}
@@ -352,11 +390,25 @@ const headerBadge = computed(() => {
   if (v && (v.tone === 'bad' || v.tone === 'warn')) {
     return { tone: v.tone, text: v.chip, title: v.title }
   }
-  if (interval.value.known) {
-    const b = interval.value.basisInfo
+  // Collapsed, this must agree with the expanded card or the same truck reads
+  // two different numbers depending on whether the panel happens to be open.
+  // So it carries the USABLE figure too, and says "Refuel now" on 0 rather
+  // than "0 mi" — same reasoning as the expanded readout.
+  const i = interval.value
+  if (i.hasReserve) {
+    const b = i.basisInfo
+    return {
+      tone: i.mustRefuelNow ? 'warn' : 'plain',
+      text: i.mustRefuelNow ? 'refuel now' : `${milesText(i.usable)} mi left`,
+      title: `${milesText(i.planning)} mi to dry, holding back a ${milesText(i.reserve)} mi reserve.`
+        + (b ? ` ${b.title}` : ''),
+    }
+  }
+  if (i.known) {
+    const b = i.basisInfo
     return {
       tone: 'plain',
-      text: `${milesText(interval.value.planning)} mi plan`,
+      text: `${milesText(i.planning)} mi plan`,
       title: b ? b.title : '',
     }
   }
@@ -653,6 +705,22 @@ watch(() => [props.driver, props.loadId], reloadAll, { immediate: true })
   font-variant-numeric: tabular-nums;
 }
 .ff-range-spread.muted { color: #94a3b8; font-weight: 500; font-style: italic; }
+/* The to-dry line. Deliberately quieter than the headline and louder than the
+   evidence line: it is context for the number above it, not a second answer. */
+.ff-range-dry {
+  margin-top: 0.1rem;
+  font-size: 0.66rem;
+  font-weight: 600;
+  color: #b45309;
+  font-variant-numeric: tabular-nums;
+}
+/* "Refuel now" replaces a figure, so it must not inherit the tabular-nums
+   width tricks that make a number line up — it is a sentence. */
+.ff-range-num.ff-now {
+  font-size: 0.95rem;
+  color: #b91c1c;
+  font-variant-numeric: normal;
+}
 .ff-range-evidence {
   margin-top: 0.05rem;
   font-size: 0.62rem;

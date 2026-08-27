@@ -53,10 +53,32 @@
       <div v-if="rangeLoading" class="dfp-loading">Reading your fuel level…</div>
 
       <template v-else-if="hasFuelData">
+        <!-- The hero is the USABLE figure: how far you may go before you have
+             to stop. It matches the dispatcher's Fuel & Route card and the
+             header chip on purpose — three surfaces quoting one truck must
+             agree, or a phone call between them starts with two numbers.
+             Distance-to-dry is stated underneath, never hidden. A server that
+             sends no reserve keeps the original "miles you can count on". -->
         <div class="dfp-hero" :class="'tone-' + heroTone">
-          <span class="dfp-hero-num">{{ interval.known ? milesText(interval.planning) : '—' }}</span>
-          <span class="dfp-hero-unit">miles you can count on</span>
+          <template v-if="interval.hasReserve && !interval.mustRefuelNow">
+            <span class="dfp-hero-num">{{ milesText(interval.usable) }}</span>
+            <span class="dfp-hero-unit">miles before you need to refuel</span>
+          </template>
+          <!-- 0 usable miles is an instruction. "0 miles" reads as a dry tank;
+               the reserve is still under the driver at that point. -->
+          <template v-else-if="interval.hasReserve">
+            <span class="dfp-hero-num dfp-hero-now">Refuel now</span>
+            <span class="dfp-hero-unit">you are into your reserve</span>
+          </template>
+          <template v-else>
+            <span class="dfp-hero-num">{{ interval.known ? milesText(interval.planning) : '—' }}</span>
+            <span class="dfp-hero-unit">miles you can count on</span>
+          </template>
         </div>
+        <p v-if="interval.hasReserve" class="dfp-dry">
+          That is <strong>{{ milesText(interval.planning) }} mi</strong> before the tank is dry,
+          keeping <strong>{{ milesText(interval.reserve) }} mi</strong> back as a reserve.
+        </p>
 
         <!-- The interval, drawn. Real legs at the same fuel level have run from
              the low end to the high end — a spread no single number can carry —
@@ -103,7 +125,7 @@
         <!-- Same three numbers in words, for the bar's non-visual twin and for
              the estimated basis, which has no spread to draw. -->
         <p v-if="interval.hasSpread" class="dfp-spread">
-          Plan on <strong>{{ milesText(interval.planning) }} mi</strong>. A typical run goes about
+          Plan on <strong>{{ milesText(interval.planning) }} mi</strong> to dry. A typical run goes about
           {{ milesText(interval.typical) }} mi; the furthest this truck has managed on this much fuel
           is {{ milesText(interval.high) }} mi.
         </p>
@@ -1094,6 +1116,27 @@ watch(
 }
 .dfp-spread.muted {
   color: var(--text-dim, #6b7085);
+}
+
+/* The to-dry line sits directly under the hero and is the reserve made
+   visible. Quieter than the hero, louder than the basis note. */
+.dfp-dry {
+  margin: 0.3rem 0.75rem 0;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: var(--text-dim, #6b7085);
+}
+.dfp-dry strong {
+  font-weight: 800;
+  color: var(--text, #1f2937);
+  font-variant-numeric: tabular-nums;
+}
+/* "Refuel now" replaces the figure, so it drops the tabular-nums sizing that
+   only makes sense for digits and shrinks to fit the phone's width. */
+.dfp-hero-num.dfp-hero-now {
+  font-size: 1.6rem;
+  color: #b91c1c;
+  font-variant-numeric: normal;
 }
 
 .dfp-basis {
