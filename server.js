@@ -21671,6 +21671,39 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			logAudit(req, "update_truck_owner", "truck", String(id),
 				`Owner for ${truck.unit_number}: ${ownerName(truck.owner_id)} → ${ownerName(changed.owner_id)}`);
 		}
+		// ⚠️ THE FUEL-RANGE CONFIG IS AUDITED BECAUSE IT HAS BEEN WRONG THREE TIMES.
+		// `fuel_tank_gallons` has now been corrected on three separate occasions
+		// (#33 300→198→203, #91 240→189) and every time the investigation stalled on
+		// the same question: who set this, and on what basis? Nobody could say,
+		// because this route wrote both columns silently while auditing status,
+		// in-service date, retirement and owner.
+		//
+		// It is not a cosmetic field. On the ESTIMATED range basis — the fallback for
+		// any truck without enough tank-to-tank legs to measure miles-per-gauge-point —
+		// range is tank × mpg, derated. #91 sat on that basis with a hand-entered 240
+		// against a real ~189, so the driver was shown ~25% more range than the truck
+		// could deliver, and that truck ran dry on 2026-08-17. A number that can
+		// strand a driver deserves the same trail as one that moves money.
+		if (fuelTankGallons !== undefined) {
+			const before = parseFloat(truck.fuel_tank_gallons) || 0;
+			const after = parseFloat(fuelTankGallons) || 0;
+			if (before !== after) {
+				const fmtTank = (v) => (v > 0 ? `${v} gal` : `unset (fleet default ${fuelModel.DEFAULT_TANK_GALLONS} gal)`);
+				logAudit(req, "update_truck_fuel_tank", "truck", String(id),
+					`Fuel tank for ${truck.unit_number}: ${fmtTank(before)} → ${fmtTank(after)}`);
+			}
+		}
+		// Same reasoning: avg_mpg is the other half of the estimated-basis product,
+		// so an edit here moves the range a driver plans against just as directly.
+		if (avgMpg !== undefined) {
+			const before = parseFloat(truck.avg_mpg) || 0;
+			const after = parseFloat(avgMpg) || 0;
+			if (before !== after) {
+				const fmtMpg = (v) => (v > 0 ? `${v} mpg` : "unset (derived from ELD / receipts)");
+				logAudit(req, "update_truck_avg_mpg", "truck", String(id),
+					`Average MPG for ${truck.unit_number}: ${fmtMpg(before)} → ${fmtMpg(after)}`);
+			}
+		}
 		// Log driver assignment change to history + sync to Carrier Database sheet
 		if (assignedDriver !== undefined) {
 			const oldDriver = truck.assigned_driver;
