@@ -173,6 +173,14 @@ const routes = [
     meta: { roles: ['Super Admin', 'Dispatcher'] },
   },
   {
+    path: '/analytics',
+    name: 'analytics',
+    component: () => import('../views/AnalyticsView.vue'),
+    // Dispatcher too, unlike Financials: miles driven carry no money and
+    // dispatch is who plans against them.
+    meta: { roles: ['Super Admin', 'Dispatcher'] },
+  },
+  {
     path: '/admin/financials',
     name: 'admin-financials',
     component: () => import('../views/FinancialsView.vue'),

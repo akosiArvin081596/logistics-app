@@ -728,6 +728,16 @@ export function tripVerdict(value) {
  * for rendering the typical/best-case pair. They are separate because the
  * estimated basis is `known: true, hasSpread: false` — there IS a number to
  * plan against, there is just no distribution around it.
+ *
+ * THE RESERVE PAIR. `planning` is distance-to-dry; `usable` is what is left
+ * after holding the reserve back, and it is the figure a human acts on. Both
+ * endpoints carry them in different places (flat on /api/fuel/range, split
+ * between the plan root and `range` on /api/fuel/trip-plan), so they are
+ * folded in here for the same reason the interval is — one shape, one rule.
+ *
+ * `mustRefuelNow` is derived once here rather than re-tested per component:
+ * a usable figure of 0 is an instruction ("stop now"), not a measurement, and
+ * rendering it as "0 mi" reads as an empty tank.
  */
 function normalizeRange(src) {
   const basisKey = src && typeof src.basis === 'string' ? src.basis : 'unknown';
@@ -735,6 +745,11 @@ function normalizeRange(src) {
   const planning = toNum(src && src.planning);
   const typical = toNum(src && src.typical);
   const high = toNum(src && src.high);
+  const reserve = toNum(src && src.reserve);
+  // `usable` is only meaningful next to a known planning figure. An older
+  // server sends neither, and undefined must not become 0 — that is the
+  // difference between "no reading" and "you are dry".
+  const usable = planning === null ? null : toNum(src && src.usable);
   return {
     basis: info ? info.key : '',
     basisInfo: info,
@@ -743,6 +758,10 @@ function normalizeRange(src) {
     high,
     low: toNum(src && src.low),
     milesPerPoint: toNum(src && src.milesPerPoint),
+    reserve,
+    usable,
+    hasReserve: usable !== null && reserve !== null,
+    mustRefuelNow: usable === 0,
     known: planning !== null,
     // Only a measured basis carries a distribution. Guard on the values rather
     // than on the basis string so an unrecognised future basis that DOES send a
@@ -760,12 +779,25 @@ export function rangeReadout(d) {
     high: d && d.rangeHighMiles,
     low: d && d.rangeLowMiles,
     milesPerPoint: d && d.milesPerFuelPoint,
+    reserve: d && d.reserveMiles,
+    usable: d && d.rangeUsableMiles,
   });
 }
 
-/** Interval from a GET /api/fuel/trip-plan payload (already nested). */
+/**
+ * Interval from a GET /api/fuel/trip-plan payload (already nested).
+ *
+ * The reserve pair is NOT inside `range` on this endpoint — `reserveMiles` and
+ * `refuelWithinMiles` sit on the plan root — so they are lifted in here. That
+ * makes `usable` mean the same thing on both payloads: how far you may drive
+ * before a stop is mandatory.
+ */
 export function planRangeReadout(p) {
-  return normalizeRange(p && p.range);
+  return normalizeRange({
+    ...(p && p.range),
+    reserve: p && p.reserveMiles,
+    usable: p && p.refuelWithinMiles,
+  });
 }
 
 /**

@@ -72,6 +72,7 @@ const { runReceiptOcr } = require("./lib/receipt-ocr");
 const { EXPENSE_TYPES, resolveRegionToStates, normalizeVendor, normalizeVendorDetailed, aggregateExpenses, runQuerySpec, buildInsightsAggregates } = require("./lib/expense-analytics");
 const expenseAi = require("./lib/expense-ai");
 const fuelModel = require("./lib/fuel-model");
+const eldMiles = require("./lib/eld-miles");
 const poiFuelStops = require("./lib/poi-fuel-stops");
 const rateconNormalize = require("./lib/ratecon-normalize");
 const receiptDuplicates = require("./lib/receipt-duplicates");
@@ -2307,6 +2308,73 @@ db.exec(`
 `);
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_fuel_vid ON routemate_fuel_daily(routemate_vehicle_id)`); } catch {}
 
+// --- Miles driven per truck-local day, per driver (2026-08-27) --------------
+// The basis for the /analytics mileage page.
+//
+// ⚠️ WHY THIS IS NOT routemate_fuel_daily, WHICH ALREADY HAS A `miles` COLUMN.
+// Three reasons, and the first is the one that would actually be wrong:
+//
+//  1. THE DAY BOUNDARY. routemate_fuel_daily buckets by Date.UTC(). Driver pay
+//     does not — getEldTravelDaysByVehicle() buckets by the TRUCK'S LOCAL day,
+//     and the invoice week is built on Central midnight. A Friday-evening run
+//     in Texas is Saturday in UTC, so a UTC-day mileage table drops it into the
+//     next billing week while the pay day stayed in this one. Miles-per-driver
+//     and that driver's invoice would then disagree at EVERY week seam. The
+//     same class of bug is already recorded at centralMidnightMs().
+//  2. NO DRIVER DIMENSION, and it cannot be added afterwards. Trucks change
+//     hands mid-day (truck_assignments stores full ISO instants), so
+//     attribution has to happen while the ping INSTANTS still exist — i.e.
+//     inside the 90-day retention window, at rollup time.
+//  3. IT HAS TWO LIVE CONSUMERS. /api/routemate/fuel/summary sums its miles for
+//     Fleet Health AND the investor MyTrucks panel. Overloading the table makes
+//     one column answer two questions, which is the hazard already documented
+//     for trucks.fuel_tank_gallons.
+//
+// Survives the 90-day telemetry purge for the same reason fuel_events does: the
+// pings it was derived from are deleted, the derivation is not.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS eld_miles_daily (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		routemate_vehicle_id TEXT NOT NULL,
+		local_day TEXT NOT NULL,
+		driver_key TEXT NOT NULL DEFAULT '',
+		driver_name TEXT NOT NULL DEFAULT '',
+		truck_id INTEGER DEFAULT 0,
+		miles REAL DEFAULT 0,
+		dropped_miles REAL DEFAULT 0,
+		samples INTEGER DEFAULT 0,
+		rejected_deltas INTEGER DEFAULT 0,
+		max_gap_ms INTEGER DEFAULT 0,
+		basis TEXT DEFAULT 'eld',
+		first_ms INTEGER DEFAULT 0,
+		last_ms INTEGER DEFAULT 0,
+		computed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE (routemate_vehicle_id, local_day, driver_key)
+	)
+`);
+// ⚠️ driver_key is in the UNIQUE key so a truck that changed hands mid-day
+// yields TWO rows for that day. Truck miles are then SUM() over the day and
+// driver miles are the same SUM() filtered by driver — both exact, with an
+// unattributable stretch counted for the truck and excluded from drivers
+// rather than silently misassigned.
+// ⚠️ '' IS THE UNATTRIBUTED SENTINEL, NEVER NULL. SQLite treats NULLs as
+// DISTINCT in a UNIQUE index, so a NULL driver_key would let the upsert insert
+// a fresh duplicate row on every single run, forever.
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_eld_miles_day ON eld_miles_daily(local_day)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_eld_miles_driver_day ON eld_miles_daily(driver_key, local_day)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_eld_miles_vid_day ON eld_miles_daily(routemate_vehicle_id, local_day)`); } catch {}
+
+// ⚠️ NO INDEX ON routemate_telemetry LEADS WITH location_date_ms. idx_rm_tel_vid_date
+// is (vehicle, date DESC) and cannot drive a fleet-wide date-range scan, which is
+// what the mileage rollup and GET /api/compliance/ifta both do. This one is
+// PARTIAL (matching the literal `dropped_reason = ''` every read path uses) and
+// ordered ASC, which is the direction a forward delta walk actually reads.
+try {
+	db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_tel_odo_walk
+		ON routemate_telemetry(routemate_vehicle_id, location_date_ms, odometer)
+		WHERE dropped_reason = ''`);
+} catch {}
+
 // --- Refuel episodes (2026-08-07) -------------------------------------------
 // One row per detected FILL: when the tank went up, by how much, at what
 // odometer, and which uploaded fuel receipt it turned out to be.
@@ -2926,15 +2994,28 @@ setInterval(() => { routemateHealth.errorsLast24h = 0; }, 24 * 60 * 60 * 1000);
 // a per-truck override which Phase 4 doesn't include.
 const ROUTEMATE_DEFAULT_TANK_GALLONS = 200;
 
+// Provenance for the MILES column specifically.
+//
+// ⚠️ THIS IS A NEW COLUMN AND NOT A NEW derivation_notes VALUE, AND THAT IS THE
+// WHOLE POINT. GET /api/fuel/range selects this table's MPG with
+// `WHERE derivation_notes = ''` (see the mpgSource block). Writing a miles
+// provenance string into derivation_notes would make that WHERE match NOTHING
+// and silently strip the fuel-range panel's measured MPG source — breaking a
+// different feature from the one being fixed. Keep the two axes apart.
+//   ''          = written by the legacy MAX(odo)-MIN(odo) span
+//   'odo_delta' = written by the corrected sum-of-positive-deltas
+try { db.exec(`ALTER TABLE routemate_fuel_daily ADD COLUMN miles_basis TEXT DEFAULT ''`); } catch {}
+
 const routemateUpsertFuelDailyStmt = db.prepare(`
 	INSERT INTO routemate_fuel_daily
-		(routemate_vehicle_id, date, miles, gallons_est, mpg, derivation_notes)
-	VALUES (@routemate_vehicle_id, @date, @miles, @gallons_est, @mpg, @derivation_notes)
+		(routemate_vehicle_id, date, miles, gallons_est, mpg, derivation_notes, miles_basis)
+	VALUES (@routemate_vehicle_id, @date, @miles, @gallons_est, @mpg, @derivation_notes, @miles_basis)
 	ON CONFLICT(routemate_vehicle_id, date) DO UPDATE SET
 		miles = excluded.miles,
 		gallons_est = excluded.gallons_est,
 		mpg = excluded.mpg,
-		derivation_notes = excluded.derivation_notes
+		derivation_notes = excluded.derivation_notes,
+		miles_basis = excluded.miles_basis
 `);
 
 // Per-truck usable tank size for the fuel%→gallons conversion in rollupOneDay().
@@ -2975,12 +3056,27 @@ function rollupOneDay(routemateVehicleId, dayStartMs, dayEndMs) {
 
 	if (rows.length < 2) return null;
 
-	// Miles = max odometer − min odometer (telemetry is append-only and
-	// odometer is monotonically increasing per vehicle).
-	const odoVals = rows.map(r => r.odometer).filter(o => o > 0);
-	if (odoVals.length < 2) return null;
-	const miles = Math.max(...odoVals) - Math.min(...odoVals);
-	if (miles <= 0) return { miles: 0, gallons_est: 0, mpg: 0, derivation_notes: "no_movement" };
+	// Miles = SUM OF POSITIVE CONSECUTIVE ODOMETER DELTAS.
+	//
+	// ⚠️ THIS WAS `Math.max(...odoVals) - Math.min(...odoVals)`, on the comment
+	// "odometer is monotonically increasing per vehicle". IT IS NOT. On
+	// 2026-08-11 LogisX-#2372's ELD reset and its odometer fell 219,818 miles
+	// in 0.17 h; the span billed that reset as DISTANCE and wrote a
+	// 219,818-mile day. That row is what makes that truck's all-time total read
+	// 244,562 instead of ~24,744 on Fleet Health and on the investor MyTrucks
+	// panel. Delta-sum recovers the real 3,369 for the same window.
+	//
+	// Measured across the fleet, this is a no-op wherever the sensor behaved
+	// (#33 3,904 = 3,904; #91 252 = 252) and differs only where it did not — so
+	// it is strictly better information, not a different opinion. The guard
+	// ladder, and why there is deliberately no per-day cap, are in lib/eld-miles.js.
+	const odoWalk = eldMiles.sumOdoDeltas(
+		rows.map(r => ({ ms: r.location_date_ms, odo: r.odometer }))
+	);
+	if (odoWalk.samples < 2) return null;
+	const miles = odoWalk.miles;
+	const milesBasis = "odo_delta";
+	if (miles <= 0) return { miles: 0, gallons_est: 0, mpg: 0, derivation_notes: "no_movement", miles_basis: milesBasis };
 
 	// Build a smoothed fuel_pct series. Two filters in series:
 	//   1. Drop null/empty samples.
@@ -2989,7 +3085,7 @@ function rollupOneDay(routemateVehicleId, dayStartMs, dayEndMs) {
 	//      hits a hill and fuel sloshes against the sensor).
 	const fuelRaw = rows.map(r => r.fuel_pct).filter(f => f != null);
 	if (fuelRaw.length < 3) {
-		return { miles: round1(miles), gallons_est: 0, mpg: 0, derivation_notes: "insufficient_fuel_samples" };
+		return { miles: round1(miles), gallons_est: 0, mpg: 0, derivation_notes: "insufficient_fuel_samples", miles_basis: milesBasis };
 	}
 	const fuelSmooth = medianFilter3(fuelRaw);
 
@@ -3011,16 +3107,16 @@ function rollupOneDay(routemateVehicleId, dayStartMs, dayEndMs) {
 		: ROUTEMATE_DEFAULT_TANK_GALLONS;
 	const gallons = consumptionPct * tankGallons / 100;
 	if (gallons < 0.5) {
-		return { miles: round1(miles), gallons_est: round1(gallons), mpg: 0, derivation_notes: "negligible_fuel_change" };
+		return { miles: round1(miles), gallons_est: round1(gallons), mpg: 0, derivation_notes: "negligible_fuel_change", miles_basis: milesBasis };
 	}
 	const mpg = miles / gallons;
 	// Sanity-clamp the MPG so a single bad telemetry row can't poison the
 	// dashboard. Class 8 trucks are 4–10 mpg in real life; we widen to 0–20
 	// before flagging as outlier.
 	if (mpg < 0 || mpg > 20) {
-		return { miles: round1(miles), gallons_est: round1(gallons), mpg: round1(mpg), derivation_notes: "outlier_clamped" };
+		return { miles: round1(miles), gallons_est: round1(gallons), mpg: round1(mpg), derivation_notes: "outlier_clamped", miles_basis: milesBasis };
 	}
-	return { miles: round1(miles), gallons_est: round1(gallons), mpg: round1(mpg), derivation_notes: "" };
+	return { miles: round1(miles), gallons_est: round1(gallons), mpg: round1(mpg), derivation_notes: "", miles_basis: milesBasis };
 }
 
 function round1(n) { return Math.round(n * 10) / 10; }
@@ -3052,6 +3148,7 @@ function routemateRollupFuelDaily(daysBack = 7) {
 						gallons_est: r.gallons_est,
 						mpg: r.mpg,
 						derivation_notes: r.derivation_notes,
+						miles_basis: r.miles_basis || "",
 					});
 					rolledUp += 1;
 				}
@@ -3075,6 +3172,112 @@ function routemateRollupFuelDaily(daysBack = 7) {
 // or Linxup push). No provider poll is required for this to run.
 setTimeout(() => routemateRollupFuelDaily(7), 5 * 60 * 1000);
 setInterval(() => routemateRollupFuelDaily(7), 6 * 60 * 60 * 1000);
+
+// --- Mileage rollup: truck-local days, driver attributed ---------------------
+// Fills eld_miles_daily, the basis for GET /api/analytics/mileage.
+//
+// Buckets by the TRUCK'S LOCAL day (usTzForLongitude → localDayInTz), which is
+// the same bucketing driver pay uses, so miles-per-driver-per-week and that
+// driver's invoice week agree on which days belong to whom. Attribution uses the
+// ping's INSTANT, so a truck that changes hands mid-day splits exactly.
+//
+// daysBack is 3 rather than 7: the window must re-derive the still-forming
+// current day plus enough overlap that a late Linxup push (the webhook ACKs fast
+// and ingests async) lands in a day that gets recomputed. At a 6-hour cadence
+// that is 12x redundancy.
+function rollupEldMilesDaily(daysBack = 3) {
+	try {
+		const trucks = db.prepare(
+			`SELECT id, unit_number, routemate_vehicle_id FROM trucks
+			 WHERE COALESCE(routemate_vehicle_id,'') <> ''`
+		).all();
+		if (!trucks.length) return { rolledUp: 0 };
+
+		const resolver = buildDriverAtResolver(trucks.map((t) => t.id));
+		const selectRange = db.prepare(`
+			SELECT location_date_ms AS ms, MAX(odometer) AS odo, MAX(longitude) AS lng
+			FROM routemate_telemetry
+			WHERE routemate_vehicle_id = ?
+			  AND location_date_ms >= ? AND location_date_ms < ?
+			  AND dropped_reason = '' AND odometer > 0
+			GROUP BY location_date_ms ORDER BY ms ASC
+		`);
+		// ⚠️ The upsert REFUSES to lower a row it can no longer fully re-derive.
+		// Telemetry is purged at 90 days; a recomputation that sees FEWER samples
+		// than the stored row is looking at a partially-purged window, and writing
+		// it would replace a complete historical figure with a truncated one.
+		// Fail closed: keep what we already computed while we could still see it all.
+		const upsert = db.prepare(`
+			INSERT INTO eld_miles_daily
+				(routemate_vehicle_id, local_day, driver_key, driver_name, truck_id,
+				 miles, dropped_miles, samples, rejected_deltas, max_gap_ms, basis,
+				 first_ms, last_ms, computed_at)
+			VALUES (@vid, @local_day, @driver_key, @driver_name, @truck_id,
+				 @miles, @dropped_miles, @samples, @rejected_deltas, @max_gap_ms, @basis,
+				 @first_ms, @last_ms, CURRENT_TIMESTAMP)
+			ON CONFLICT(routemate_vehicle_id, local_day, driver_key) DO UPDATE SET
+				driver_name = excluded.driver_name,
+				truck_id = excluded.truck_id,
+				miles = excluded.miles,
+				dropped_miles = excluded.dropped_miles,
+				samples = excluded.samples,
+				rejected_deltas = excluded.rejected_deltas,
+				max_gap_ms = excluded.max_gap_ms,
+				basis = excluded.basis,
+				first_ms = excluded.first_ms,
+				last_ms = excluded.last_ms,
+				computed_at = CURRENT_TIMESTAMP
+			WHERE excluded.samples >= eld_miles_daily.samples
+		`);
+
+		// One extra day of lead-in on each side so a delta spanning midnight is
+		// judged against its true neighbour rather than against nothing.
+		const now = Date.now();
+		const minMs = now - (daysBack + 1) * 86400000;
+		const maxMs = now + 86400000;
+
+		let rolledUp = 0;
+		const txn = db.transaction(() => {
+			for (const t of trucks) {
+				const rows = selectRange.all(t.routemate_vehicle_id, minMs, maxMs);
+				if (rows.length < 2) continue;
+				const buckets = eldMiles.splitDeltasByDayAndDriver(rows, {
+					dayOf: (ms, lng) => localDayInTz(ms, usTzForLongitude(lng)),
+					driverAt: (ms) => resolver.atInstant(t.id, ms),
+				});
+				for (const b of buckets.values()) {
+					if (!b.localDay) continue;
+					upsert.run({
+						vid: t.routemate_vehicle_id,
+						local_day: b.localDay,
+						driver_key: b.driverKey,
+						driver_name: b.driverName,
+						truck_id: t.id,
+						miles: b.miles,
+						dropped_miles: b.droppedMiles,
+						samples: b.samples,
+						rejected_deltas: b.rejected,
+						max_gap_ms: b.maxGapMs,
+						basis: b.basis,
+						first_ms: b.firstMs,
+						last_ms: b.lastMs,
+					});
+					rolledUp += 1;
+				}
+			}
+		});
+		txn();
+		return { rolledUp };
+	} catch (err) {
+		console.error("[eld-miles] daily rollup failed:", err.message);
+		return { rolledUp: 0, error: err.message };
+	}
+}
+
+// Same cadence and the same not-gated-on-ROUTEMATE_ENABLED reasoning as the fuel
+// rollup above: it reads the shared telemetry table, which Linxup also fills.
+setTimeout(() => rollupEldMilesDaily(3), 6 * 60 * 1000);
+setInterval(() => rollupEldMilesDaily(3), 6 * 60 * 60 * 1000);
 
 // --- Phase 5: fault codes (DTC) + DVIR sync ---
 // Routemate's /dtc/{vehicleId} returns {code, status} pairs per vehicle.
@@ -11595,24 +11798,14 @@ function getDeductibleExpensesByDriverMonth() {
 // handles CST↔CDT transitions automatically. Falls back to Central (the same zone
 // the invoice-week boundaries use, see getWeekRange) when longitude is unknown.
 // NOTE: this is US-centric; revisit if the fleet ever runs outside the lower 48.
-function usTzForLongitude(lng) {
-	if (typeof lng !== "number" || isNaN(lng)) return "America/Chicago";
-	if (lng >= -85) return "America/New_York";
-	if (lng >= -100) return "America/Chicago";
-	if (lng >= -114) return "America/Denver";
-	return "America/Los_Angeles";
-}
-// Cache one Intl formatter per zone (constructing them is the expensive part).
-const _tzDayFmtCache = {};
-function localDayInTz(ms, tz) {
-	let f = _tzDayFmtCache[tz];
-	if (!f) f = _tzDayFmtCache[tz] = new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
-	let y = "", m = "", d = "";
-	for (const p of f.formatToParts(new Date(ms))) {
-		if (p.type === "year") y = p.value; else if (p.type === "month") m = p.value; else if (p.type === "day") d = p.value;
-	}
-	return `${y}-${m}-${d}`; // "YYYY-MM-DD" in the given zone
-}
+// ⚠️ THESE NOW LIVE IN lib/eld-miles.js AND ARE RE-EXPORTED HERE UNCHANGED.
+// The mileage rollup, its backfill script and this driver-pay path must bucket a
+// ping into the same day or a driver's miles land in a different week from the
+// invoice that pays for them. One copy, shared — the drift hazard that produced
+// DRIVER_RENAME_TARGETS and truckChargedInMonth() applies squarely here.
+// Behaviour is byte-identical to the definitions that used to sit here.
+const usTzForLongitude = eldMiles.usTzForLongitude;
+const localDayInTz = eldMiles.localDayInTz;
 
 // Returns { [routemate_vehicle_id]: { travel: Set<"YYYY-MM-DD">, coverage: Set<...> } }.
 //   • coverage = days the ELD reported ANY clean ping (the truck was being tracked).
@@ -11627,6 +11820,29 @@ function localDayInTz(ms, tz) {
 // pay isn't zeroed. A covered-but-parked window legitimately yields 0 active days.
 // 2.235 m/s mirrors the MOVING_MPH_M_PER_S (~5 mph) constant used by the
 // stale-location scan.
+// buildDriverAtResolver(truckIds) — "who was driving truck X at time T".
+//
+// ⚠️ THE LOGIC LIVES IN lib/eld-miles.js. Only the query is here. The backfill
+// script needs the identical answer, and a second hand-written copy of an
+// assignment-window rule is the drift hazard that already produced
+// DRIVER_RENAME_TARGETS, truckChargedInMonth() and investorExpenseScopeSql().
+//
+// ⚠️ THERE ARE FOUR SPELLINGS OF THIS QUESTION IN THIS FILE AND ONLY ONE WAS
+// TIME-AWARE. Every other site joins on `ta.end_date = ''`, which answers "who
+// is on this truck RIGHT NOW". Those are a genuinely different question and must
+// stay as they are — using a present-tense answer as a historical filter is the
+// exact hazard recorded for getInvestorDriverSet().
+function buildDriverAtResolver(truckIds) {
+	const ids = [...new Set((truckIds || []).filter((n) => Number.isFinite(Number(n))))];
+	if (!ids.length) return eldMiles.buildDriverAtResolver([]);
+	const ph = ids.map(() => "?").join(",");
+	const rows = db.prepare(
+		`SELECT truck_id, driver_name, start_date, end_date
+		 FROM truck_assignments WHERE truck_id IN (${ph})`
+	).all(...ids);
+	return eldMiles.buildDriverAtResolver(rows);
+}
+
 function getEldTravelDaysByVehicle(vehicleIds, minMs, maxMs) {
 	const out = {};
 	const ids = (vehicleIds || []).filter(Boolean);
@@ -38533,6 +38749,29 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (
 			rangePlanningMiles: interval.planning,
 			rangeBasis: interval.basis,
 			milesPerFuelPoint: interval.milesPerPoint,
+			// THE RUN-OUT LINE. `rangePlanningMiles` above is distance-to-dry (the
+			// conservative low end); `rangeUsableMiles` is what is left after holding
+			// back the reserve, i.e. the number a human should act on. Both are sent
+			// because the panel shows both — a single figure here is what made the
+			// old readout ambiguous between "you can drive this far" and "you must
+			// refuel by here".
+			//
+			// ⚠️ The subtraction is planTripFuel()'s refuelWithinMiles verbatim
+			// (lib/fuel-model.js) so /tracking and a routed load cannot quote two
+			// different numbers for one truck. NOTE the reserve itself is the FLAT
+			// minimum here: there is no route at this endpoint, so the proportional
+			// term tripReserveMiles() applies has nothing to apply to. They agree
+			// exactly while FUEL_RESERVE_FRACTION is 0 (its default and the client's
+			// choice); set that non-zero and trip-plan will reserve MORE on a long
+			// route than this figure assumes.
+			//
+			// ⚠️ null stays null. When interval.planning is null the basis is
+			// 'unknown' and there is no honest figure; a 0 here renders as "0 mi to
+			// dry", which reads as an empty tank rather than as no reading.
+			reserveMiles: FUEL_RESERVE_MILES,
+			rangeUsableMiles: interval.planning == null
+				? null
+				: Math.max(0, Math.round(interval.planning - FUEL_RESERVE_MILES)),
 			// Provenance of the FUEL READING itself, which is a separate axis from
 			// rangeBasis (that one describes the miles-per-point evidence). 'live' =
 			// the sensor answered; 'carried' = the sensor is dropping out and this is
@@ -46767,6 +47006,218 @@ app.put("/api/compliance/fees/:id", requireRole("Super Admin", "Dispatcher"), (r
 // GET /api/compliance/ifta — Per-truck miles-by-state from Routemate ELD telemetry.
 // Each truck gets its own state breakdown; drivers attributed via truck_assignments
 // active at each point's timestamp.
+// --- Mileage analytics -------------------------------------------------------
+// Reads eld_miles_daily (a persisted day-grain rollup), so the request path does
+// NOT touch the ~1M-row telemetry table. The steady-state query is a GROUP BY
+// over a few hundred rows.
+//
+// ⚠️ requireRole IS MOUNTED BEFORE THE LIMITER on purpose — the other way round,
+// an unauthenticated caller spends the budget on 403s.
+const mileageAnalyticsLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 60,
+	message: { error: "Too many analytics requests. Try again in a few minutes." },
+	standardHeaders: true,
+});
+
+// GET /api/analytics/mileage?from=&to=&groupBy=week|month
+//
+// Miles actually DRIVEN, off the ELD odometer — distinct from the load lane
+// distance /api/financials reports, which is the quoted length of a route and
+// counts no deadhead, no detour and no repositioning.
+//
+// ⚠️ EVERY ROW CARRIES A COVERAGE BASIS AND A no-ELD TRUCK REPORTS null, NEVER 0.
+// 0 is a factual claim that the truck did not move; null is the true claim that
+// we cannot see it. Only 2 of 5 trucks in this fleet report today, so a company
+// average that quietly divided by 5 would be wrong by more than 2x. The
+// denominator is published alongside the figure instead.
+app.get("/api/analytics/mileage",
+	requireRole("Super Admin", "Dispatcher"),
+	mileageAnalyticsLimiter,
+	(req, res) => {
+	try {
+		const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+		const to = DAY_RE.test(String(req.query.to || "")) ? String(req.query.to) : houstonDay();
+		// Default window: 12 Sat-Fri billing weeks, snapped to a week start so a
+		// bucket is never half-populated.
+		const defaultFrom = getWeekRange(
+			new Date(Date.parse(to + "T12:00:00Z") - 83 * 86400000).toISOString().slice(0, 10) + "T12:00:00Z"
+		).weekStart;
+		const from = DAY_RE.test(String(req.query.from || "")) ? String(req.query.from) : defaultFrom;
+		if (to < from) return res.status(400).json({ ok: false, error: "to is before from" });
+
+		const rows = db.prepare(`
+			SELECT d.routemate_vehicle_id AS vid, d.local_day, d.driver_key, d.driver_name,
+			       d.truck_id, d.miles, d.basis, d.dropped_miles
+			FROM eld_miles_daily d
+			WHERE d.local_day >= ? AND d.local_day <= ?
+		`).all(from, to);
+
+		const trucks = db.prepare(
+			`SELECT id, unit_number, routemate_vehicle_id, status FROM trucks
+			 WHERE COALESCE(retired_at,'') = ''`
+		).all();
+		const truckByVid = new Map(trucks.filter(t => t.routemate_vehicle_id).map(t => [t.routemate_vehicle_id, t]));
+
+		// ⚠️ ANCHOR AT MIDDAY-UTC BEFORE HANDING A BARE DATE TO getWeekRange().
+		// It does `new Date(str)`, which parses 'YYYY-MM-DD' as UTC MIDNIGHT, then
+		// converts to America/Chicago — moving it to 19:00 the PREVIOUS day. A
+		// Saturday therefore reads as a Friday and resolves to the week BEFORE the
+		// one it starts. The existing invoice callers pass a Friday week-END, where
+		// the same shift lands on a Thursday inside the same Sat-Fri week and is
+		// harmless, which is why this has never bitten. Passing a week START, as
+		// this route does, is what exposes it. T12:00:00Z is far enough from both
+		// midnights that no US zone can cross a day boundary.
+		const weekRangeOf = (day) => getWeekRange(String(day).slice(0, 10) + "T12:00:00Z");
+		// week key = the Sat-Fri billing week this day falls in, so miles line up
+		// with the invoice that pays for them.
+		const weekOf = (day) => weekRangeOf(day).weekStart;
+		const monthOf = (day) => String(day).slice(0, 7);
+
+		function accum(map, key, r) {
+			let e = map.get(key);
+			if (!e) map.set(key, (e = { miles: 0, droppedMiles: 0, bases: [], days: new Set() }));
+			e.miles += Number(r.miles) || 0;
+			e.droppedMiles += Number(r.dropped_miles) || 0;
+			e.bases.push(r.basis);
+			e.days.add(r.local_day);
+			return e;
+		}
+		const shape = (e) => e ? {
+			miles: Math.round(e.miles),
+			droppedMiles: Math.round(e.droppedMiles),
+			basis: eldMiles.basisLabel(e.bases),
+			days: e.days.size,
+		} : null;
+
+		// ---- per truck ----
+		const perTruck = new Map();
+		for (const r of rows) {
+			const t = truckByVid.get(r.vid);
+			if (!t) continue;                       // unlinked vehicle — reported separately
+			let e = perTruck.get(t.id);
+			if (!e) perTruck.set(t.id, (e = { truck: t, weeks: new Map(), months: new Map(), total: null }));
+			accum(e.weeks, weekOf(r.local_day), r);
+			accum(e.months, monthOf(r.local_day), r);
+			e.total = accum(new Map([["t", e.total || { miles: 0, droppedMiles: 0, bases: [], days: new Set() }]]), "t", r);
+		}
+
+		// ---- per driver ----
+		const perDriver = new Map();
+		for (const r of rows) {
+			if (!r.driver_key) continue;            // unattributed — counted for the truck only
+			let e = perDriver.get(r.driver_key);
+			if (!e) perDriver.set(r.driver_key, (e = { name: r.driver_name, units: new Set(), weeks: new Map(), months: new Map(), total: null }));
+			const t = truckByVid.get(r.vid);
+			if (t) e.units.add(t.unit_number);
+			accum(e.weeks, weekOf(r.local_day), r);
+			accum(e.months, monthOf(r.local_day), r);
+			e.total = accum(new Map([["t", e.total || { miles: 0, droppedMiles: 0, bases: [], days: new Set() }]]), "t", r);
+		}
+
+		// ---- company ----
+		const companyWeeks = new Map();
+		for (const r of rows) {
+			if (!truckByVid.has(r.vid)) continue;
+			accum(companyWeeks, weekOf(r.local_day), r);
+		}
+		// The per-truck average restricts NUMERATOR AND DENOMINATOR TO THE SAME
+		// SET: only (truck, week) pairs we actually observed. A truck with no ELD
+		// would otherwise sit in the denominator forever contributing nothing to
+		// the numerator, dragging the fleet average down by a fixed fraction.
+		const observed = new Set();
+		for (const r of rows) {
+			const t = truckByVid.get(r.vid);
+			if (t) observed.add(`${t.id}|${weekOf(r.local_day)}`);
+		}
+		const weekKeys = [...companyWeeks.keys()].sort();
+		const companyTotal = [...companyWeeks.values()].reduce((a, e) => a + e.miles, 0);
+		const truckWeeksCovered = observed.size;
+		const truckWeeksTotal = trucks.length * Math.max(weekKeys.length, 1);
+
+		const lastPing = db.prepare(
+			`SELECT routemate_vehicle_id AS vid, MAX(location_date_ms) AS ms
+			 FROM routemate_telemetry GROUP BY routemate_vehicle_id`
+		).all();
+		const lastByVid = new Map(lastPing.map(r => [r.vid, r.ms]));
+		const nowMs = Date.now();
+
+		res.json({
+			ok: true, from, to,
+			weekBasis: "sat-fri",
+			dayBasis: "truck-local",
+			// ⚠️ NOT an all-time figure. Telemetry is purged at 90 days, so the
+			// rollup only reaches as far back as the oldest day ever rolled up.
+			coverageStartDay: db.prepare(`SELECT MIN(local_day) d FROM eld_miles_daily`).get().d || null,
+			generatedAt: new Date().toISOString(),
+
+			trucks: [...perTruck.values()].map(e => ({
+				truckId: e.truck.id, unitNumber: e.truck.unit_number,
+				eldLinked: true,
+				weeks: weekKeys.map(k => ({ weekStart: k, weekEnd: weekRangeOf(k).weekEnd, ...(shape(e.weeks.get(k)) || { miles: null, basis: "no-data", days: 0, droppedMiles: 0 }) })),
+				months: [...e.months.keys()].sort().map(k => ({ month: k, ...shape(e.months.get(k)) })),
+				total: shape(e.total),
+			})).concat(
+				trucks.filter(t => !perTruck.has(t.id)).map(t => ({
+					truckId: t.id, unitNumber: t.unit_number,
+					eldLinked: !!t.routemate_vehicle_id,
+					// null, not 0 — see the header note.
+					weeks: weekKeys.map(k => ({ weekStart: k, weekEnd: weekRangeOf(k).weekEnd, miles: null, basis: "no-data", days: 0, droppedMiles: 0 })),
+					months: [], total: { miles: null, basis: "no-data", days: 0, droppedMiles: 0 },
+				}))
+			),
+
+			drivers: [...perDriver.entries()].map(([key, e]) => ({
+				driverKey: key, driver: e.name, truckUnits: [...e.units].sort(),
+				weeks: weekKeys.map(k => ({ weekStart: k, weekEnd: weekRangeOf(k).weekEnd, ...(shape(e.weeks.get(k)) || { miles: null, basis: "no-data", days: 0, droppedMiles: 0 }) })),
+				months: [...e.months.keys()].sort().map(k => ({ month: k, ...shape(e.months.get(k)) })),
+				total: shape(e.total),
+			})),
+
+			company: {
+				weeklyAverageMiles: weekKeys.length ? Math.round(companyTotal / weekKeys.length) : null,
+				weeklyAveragePerTruck: truckWeeksCovered ? Math.round(companyTotal / truckWeeksCovered) : null,
+				truckWeeksCovered, truckWeeksTotal,
+				totalMiles: Math.round(companyTotal),
+				basis: truckWeeksCovered < truckWeeksTotal ? "partial" : "eld",
+				weeks: weekKeys.map(k => ({ weekStart: k, weekEnd: weekRangeOf(k).weekEnd, ...shape(companyWeeks.get(k)) })),
+			},
+
+			coverage: {
+				trucksInService: trucks.length,
+				trucksEldLinked: trucks.filter(t => t.routemate_vehicle_id).length,
+				trucksNoEld: trucks.filter(t => !t.routemate_vehicle_id)
+					.map(t => ({ truckId: t.id, unitNumber: t.unit_number, reason: "no_vehicle_id" })),
+				trucksDark: trucks.filter(t => t.routemate_vehicle_id).map(t => {
+					const ms = lastByVid.get(t.routemate_vehicle_id);
+					const daysDark = ms ? Math.floor((nowMs - ms) / 86400000) : null;
+					return { truckId: t.id, unitNumber: t.unit_number, routemateVehicleId: t.routemate_vehicle_id,
+						lastPingAt: ms ? new Date(ms).toISOString() : null, daysDark };
+				}).filter(x => x.daysDark === null || x.daysDark >= 2),
+				// ⚠️ A vehicle reporting telemetry that maps to NO truck. Its miles
+				// are in nobody's totals. Reported with its figures attached so the
+				// fleet total is not read as complete — and deliberately NOT guessed
+				// onto a truck: identifying it is a human's job.
+				unlinkedVehicles: [...new Set(rows.filter(r => !truckByVid.has(r.vid)).map(r => r.vid))].map(vid => ({
+					routemateVehicleId: vid,
+					milesInRange: Math.round(rows.filter(r => r.vid === vid).reduce((a, r) => a + (Number(r.miles) || 0), 0)),
+					lastPingAt: lastByVid.get(vid) ? new Date(lastByVid.get(vid)).toISOString() : null,
+					note: "reporting telemetry but linked to no truck — needs human identification",
+				})),
+			},
+
+			notes: [
+				"Miles are ELD odometer distance actually driven. This is NOT the load lane distance shown on Financials, which is the quoted length of a route and excludes deadhead and detours.",
+				"Weeks are Saturday-Friday, the same billing week driver invoices use.",
+				"A truck with no ELD reports null, never 0 — we cannot see it, which is not the same as it not moving.",
+			],
+		});
+	} catch (err) {
+		console.error("[analytics/mileage]", err.message);
+		res.status(500).json({ ok: false, error: "mileage analytics failed" });
+	}
+});
+
 app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const { start, end } = req.query;
