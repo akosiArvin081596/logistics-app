@@ -10,7 +10,7 @@ A failure can come from any link. The tell is **which device fails**: if a deskt
 
 | Symptom (where seen) | Root cause | Layer that fixes it | Runbook / file |
 |---|---|---|---|
-| `POST /api/documents/upload` → **`499`** from driver iPhone on cellular (often ×4), but **`200`** from desktop admin | Large base64 POD payload over a slow uplink **+** backend holds the request while writing the POD flag to Sheets on the critical path **+** nginx default `proxy_read_timeout` is only 60s → client aborts before the response | **nginx** (raise timeouts ≥ 90s) as the deploy-time mitigation; **backend** (fast-return) as the durable fix; **frontend** (payload size + retry) reduces how often it's hit | [nginx-upload-timeouts.md](../runbooks/nginx-upload-timeouts.md); `server.js` `POST /api/documents/upload`; `client/src/composables/useUpload.js`, `client/src/components/.../DocumentUpload.vue` |
+| `POST /api/documents/upload` → **`499`** from driver iPhone on cellular (often ×4), but **`200`** from desktop admin | Large base64 POD payload over a slow uplink **+** nginx default `proxy_read_timeout` is only 60s → client aborts before the response. (The backend used to also hold the request writing the POD flag to Sheets; that is **fixed** — see below.) | **nginx** (raise timeouts ≥ 90s); **frontend** (payload size + retry) reduces how often it's hit | [nginx-upload-timeouts.md](../runbooks/nginx-upload-timeouts.md); `server.js` `POST /api/documents/upload`; `client/src/composables/useUpload.js`, `client/src/components/.../DocumentUpload.vue` |
 | `POST /api/documents/scan` → **`402`** (`scan_no_credits`); scans silently fall back to raw photos | ScanKit account is out of credits (charged per successful scan; 4xx not billed/retried) | **ScanKit billing** — top up credits (no redeploy) | [scankit-billing.md](../runbooks/scankit-billing.md) |
 | `POST /api/documents/scan` → **`408`** from driver on a slow link | Request body didn't fully arrive within nginx default `client_body_timeout` (60s) | **nginx** (`client_body_timeout ≥ 90s`) | [nginx-upload-timeouts.md](../runbooks/nginx-upload-timeouts.md) |
 | `POST /api/documents/scan` → **`503`** (`scan_unavailable`) | ScanKit disabled (`SCANKIT_ENABLED=false`) or `SCANKIT_API_KEY` unset — by design; driver attaches raw photo | **config** — flip `SCANKIT_ENABLED=true` + set key, if scanning is supposed to be on | [scankit-billing.md](../runbooks/scankit-billing.md) (kill-switch section); `.env.example` |
@@ -22,14 +22,14 @@ A failure can come from any link. The tell is **which device fails**: if a deskt
 This is the signature of the production incident and worth calling out:
 
 - **Payload size.** A POD is a multi-megabyte base64 image (Express body limit is `express.json({limit:"50mb"})`). On Wi-Fi it uploads in a second or two; on one-bar cellular it can take tens of seconds.
-- **Backend on the critical path.** For `docType === "POD"`, `POST /api/documents/upload` (`server.js`) `await`s a Google Sheets header `get` **and** a cell `update` (to mark the POD column "Yes") *before* sending the JSON response. That is wrapped in try/catch and labeled "non-critical," but it is still inline — so a slow or quota-throttled Sheets call adds seconds to every upload's round-trip.
+- **~~Backend on the critical path.~~ FIXED — do not chase this.** This used to be true: `POST /api/documents/upload` `await`ed a Google Sheets header `get` **and** a cell `update` before responding. It no longer does. The route now sends `res.json(...)`, logs `[upload] 200 sent; deferring POD sheet update row N`, and does the Sheets write inside `setImmediate` afterwards — resolving the target row **by loadId** rather than trusting the client's `rowIndex`. A failure there logs `Sheet POD column update error (non-critical)` and never touches the response. Verify with `grep -n "deferring POD sheet update" server.js`.
 - **nginx 60s defaults.** Add the slow uplink to the inline Sheets latency and total round-trip time can cross nginx's default 60s `proxy_read_timeout` / `client_body_timeout`. nginx (or the backgrounded iPhone) drops the connection → access log records `499`. The client's own ~90s timeout never gets a chance to fire because nginx's 60s window closes first.
 
 **Three independent levers, in order of effort:**
 
 1. **nginx (deploy-time, do first):** raise the document-route timeouts to 120s so they exceed the client's 90s upload timeout. See [nginx-upload-timeouts.md](../runbooks/nginx-upload-timeouts.md). This is the immediate mitigation.
 2. **Frontend resilience:** `useUpload.js` / `DocumentUpload.vue` should compress the image before upload, set the ~90s timeout, and retry on transient failure. Smaller payloads cross the wire faster and trip fewer timeouts.
-3. **Backend fast-return (durable fix):** respond as soon as the file is persisted locally (and the SQLite document row is written), then mark the Sheets POD column **after** the response — moving the two Sheets round-trips off the critical path. This shrinks request time regardless of link quality and is the real fix for `499`s. (Code change in `server.js`; out of scope for the deploy-time runbooks.)
+3. ~~**Backend fast-return (durable fix)**~~ — **already shipped.** The response is sent before the Sheets write; both round-trips are off the critical path. Nothing to do here.
 
 ## Diagnostic commands
 
@@ -78,4 +78,4 @@ sudo nginx -T 2>/dev/null | grep -E "proxy_read_timeout|client_body_timeout|send
 2. Check the nginx access log (command 1). If `499`/`408` → apply [nginx-upload-timeouts.md](../runbooks/nginx-upload-timeouts.md).
 3. If scans specifically fail with `402` → [scankit-billing.md](../runbooks/scankit-billing.md). Remember scanning failure never blocks the POD; the raw photo still uploads.
 4. Check `pm2 logs` for backend errors (command 2) — rule out a Sheets/Drive outage.
-5. If uploads still time out after nginx timeouts are raised, escalate the backend fast-return change (move the Sheets POD write off the critical path).
+5. If uploads still time out after nginx timeouts are raised, the cause is **not** the Sheets write — that is already deferred. Look at payload size (a multi-page POD is several MB of base64) and link quality, then escalate.

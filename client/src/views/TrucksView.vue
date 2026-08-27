@@ -63,7 +63,17 @@ import { Card, CardContent } from '@/components/ui/card'
 const store = useTrucksStore()
 const authStore = useAuthStore()
 const { show: toast } = useToast()
-useSocketRefresh('trucks:changed', () => { store.loadTrucks(); store.loadDriverNames(); store.loadInvestorUsers() })
+// The driver-name list and the investor list both feed the EDIT form, and an
+// Investor cannot edit a truck (PUT /api/trucks/:id is admin-only). Their
+// endpoints are correspondingly admin-gated, so calling them here would just
+// produce a swallowed 403 on every Investor page load.
+const canEditTrucks = () =>
+  authStore.user?.role === 'Super Admin' || authStore.user?.role === 'Dispatcher'
+
+useSocketRefresh('trucks:changed', () => {
+  store.loadTrucks()
+  if (canEditTrucks()) { store.loadDriverNames(); store.loadInvestorUsers() }
+})
 
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(computed(() => store.trucks), 25)
 watch(totalPages, (tp) => { if (page.value > tp) goTo(tp) })
@@ -122,8 +132,8 @@ async function handleDeleteTruck(id) {
 
 onMounted(() => {
   store.loadTrucks()
-  store.loadDriverNames()
-  if (authStore.user?.role === 'Super Admin' || authStore.user?.role === 'Dispatcher') {
+  if (canEditTrucks()) {
+    store.loadDriverNames()
     store.loadInvestorUsers()
   }
 })

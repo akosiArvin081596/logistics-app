@@ -8,12 +8,25 @@
       </div>
       <div class="inv-right">
         <div class="inv-amount">${{ (invoice.total_earnings || 0).toFixed(2) }}</div>
+        <div class="inv-amount-label">your pay</div>
         <div :class="['inv-status', statusColor]">{{ invoice.status }}</div>
       </div>
     </div>
     <div class="inv-meta">
       <span>{{ invoice.loads_count }} load{{ invoice.loads_count !== 1 ? 's' : '' }}</span>
-      <span v-if="invoice.expenses_total > 0">Expenses: ${{ invoice.expenses_total.toFixed(2) }}</span>
+      <!-- ⚠️ "Receipts filed", not "Expenses". This figure sat unlabelled next to
+           the pay figure, and on a week like $600.00 pay / $1,140.17 of receipts
+           it reads as though the driver owes the difference.
+           It is deliberately NOT described as deducted or reimbursed here,
+           because the relationship depends on the driver's pay model — for a
+           daily-rate driver these receipts do not reduce the pay shown, while
+           for an owner-operator on a percentage the fuel and maintenance ones
+           were already netted off before the share was calculated. The card
+           does not carry the pay model, so it states the fact it can stand
+           behind and leaves the arithmetic to the PDF. -->
+      <span v-if="invoice.expenses_total > 0">
+        Receipts filed: ${{ invoice.expenses_total.toFixed(2) }}
+      </span>
     </div>
   </div>
 </template>
@@ -63,6 +76,12 @@ const statusColor = computed(() => {
   color: var(--text-dim);
 }
 .inv-right { text-align: right; }
+.inv-amount-label {
+  font-size: 0.6rem;
+  color: var(--text-dim);
+  text-align: right;
+  margin-top: -2px;
+}
 .inv-amount {
   font-weight: 700;
   font-size: 0.95rem;

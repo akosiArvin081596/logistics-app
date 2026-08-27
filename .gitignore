@@ -107,3 +107,6 @@ storage/payout-statements/
 
 # Written by the deploy drift monitor on the VPS — one heal attempt per commit.
 .drift-heal-attempted
+
+# macOS Finder metadata — never useful in the repo
+.DS_Store
