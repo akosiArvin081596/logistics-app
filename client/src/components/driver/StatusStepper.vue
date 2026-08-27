@@ -20,7 +20,7 @@
             <template v-if="stepState(i) === 'done'">&#10003;</template>
             <template v-else>{{ i + 1 }}</template>
           </div>
-          <div class="step-label">{{ step.label }}</div>
+          <div class="step-label">{{ step.short || step.label }}</div>
         </div>
       </div>
 
@@ -99,13 +99,18 @@ const showConfirm = ref(false)
 const showPodReminder = ref(false)
 const updating = ref(false)
 
+// `label` is the full sentence used on the action button ("Heading to Shipper").
+// `short` is the caption under the stepper dot, and it exists because six full
+// labels do not fit six ~58px columns on a phone — the row overflowed its card
+// and the last step rendered outside it. The short forms are the actual status
+// values, so the caption now matches the badge shown beside the load id.
 const statusFlow = [
-  { value: 'Heading to Shipper', label: 'Heading to Shipper' },
-  { value: 'At Shipper', label: 'Arrived at Shipper' },
-  { value: 'Loading', label: 'Loading' },
-  { value: 'In Transit', label: 'In Transit' },
-  { value: 'At Receiver', label: 'Arrived at Receiver' },
-  { value: 'Delivered', label: 'Delivered' },
+  { value: 'Heading to Shipper', label: 'Heading to Shipper', short: 'Heading' },
+  { value: 'At Shipper', label: 'Arrived at Shipper', short: 'At Shipper' },
+  { value: 'Loading', label: 'Loading', short: 'Loading' },
+  { value: 'In Transit', label: 'In Transit', short: 'In Transit' },
+  { value: 'At Receiver', label: 'Arrived at Receiver', short: 'At Receiver' },
+  { value: 'Delivered', label: 'Delivered', short: 'Delivered' },
 ]
 
 function findCol(headers, regex) {
@@ -177,7 +182,12 @@ async function onConfirm() {
 /* Stepper */
 .stepper {
   display: flex;
-  align-items: center;
+  /* flex-start, not center: the labels wrap to different line counts ("LOADING"
+     on one line, "ARRIVED AT RECEIVER" on three), and centering each column
+     vertically pushed the dots to visibly different heights. Aligning to the
+     top keeps all six dots on one line, which is what the connecting rule
+     behind them assumes. */
+  align-items: flex-start;
   justify-content: space-between;
   margin: 1.25rem 0;
   position: relative;
@@ -201,6 +211,12 @@ async function onConfirm() {
   gap: 0.4rem;
   z-index: 1;
   flex: 1;
+  /* ⚠️ LOAD-BEARING. A flex item defaults to min-width:auto, which refuses to
+     shrink below its content. With six steps in a ~350px card each column gets
+     ~58px, so the labels could not fit and the row overflowed its container
+     (measured 369px of content in 350px, with overflow-x visible) — the last
+     step rendered outside the card and read as "DELIVEI". */
+  min-width: 0;
 }
 
 .step-dot {
@@ -233,8 +249,17 @@ async function onConfirm() {
   color: var(--text-dim);
   text-align: center;
   font-weight: 500;
-  max-width: 60px;
+  /* Was a fixed 60px, which is wider than a column at phone width and so
+     guaranteed the overflow above. Track the column instead, and break a long
+     word rather than letting it push the layout. */
+  max-width: 100%;
   line-height: 1.2;
+  /* ⚠️ Overriding an INHERITED uppercase (it is not set here — it comes from a
+     global rule). Uppercase plus its letter-spacing is what pushed six captions
+     past the card's width. Sentence case is narrower and, at 9.6px on a phone
+     in a moving truck, easier to read. */
+  text-transform: none;
+  letter-spacing: 0;
 }
 
 .step.done .step-label,

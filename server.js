@@ -5848,7 +5848,28 @@ function getCarrierDBFromSQLite() {
 // === DRIVERS DIRECTORY API (replaces Carrier Database sheet reads) ===
 
 // GET /api/drivers-directory — all drivers from SQLite
-app.get("/api/drivers-directory", requireAuth, (req, res) => {
+//
+// ⚠️ SUPER ADMIN + DISPATCHER ONLY. THIS WAS `requireAuth`, WHICH MEANT EVERY
+// LOGGED-IN DRIVER COULD READ EVERY COLLEAGUE'S HOME ADDRESS, PHONE, EMAIL AND
+// PAY RATE — the payload carries Address / PhoneNumber / CellNumber / Email and
+// PayType / PayPercentage / PayDaily for all drivers at once.
+//
+// It was clearly an oversight rather than a decision: GET /api/driver/:driverName
+// goes out of its way to blank the driver list for a Driver caller with the
+// comment "PRIVACY: do not expose other drivers' names to a Driver-role caller",
+// and every write sibling here (POST / PUT / DELETE / :id/documents) is already
+// requireRole. Only the read was missed.
+//
+// Verified before gating: no driver surface calls this. The driver app touches
+// only POST /api/drivers-directory/:id/profile-picture, which is separately
+// gated. The GET's callers are all admin — users, drivers-db, sheets, trucks,
+// expenses and new-job stores.
+//
+// ⚠️ Investors reach /trucks, whose store called this on mount to fill a driver
+// dropdown. They cannot edit a truck (PUT /api/trucks/:id is admin-only), so the
+// dropdown was never usable by them; TrucksView now skips the call for that role
+// rather than relying on a swallowed 403.
+app.get("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const drivers = db.prepare("SELECT * FROM drivers_directory ORDER BY driver_name ASC").all();
 		// Return in a format compatible with the old sheet-based response
@@ -19809,7 +19830,12 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 });
 
 // GET /api/truck-assignments — current active truck↔driver assignments
-app.get("/api/truck-assignments", requireAuth, (req, res) => {
+//
+// ⚠️ SUPER ADMIN + DISPATCHER ONLY — was `requireAuth`, which handed any logged-in
+// session (driver or investor) the whole fleet's driver↔truck map with names,
+// start dates and vehicle details. Its only caller is DriversDbView, which is
+// Super Admin.
+app.get("/api/truck-assignments", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const assignments = db.prepare(`
 			SELECT ta.id, ta.truck_id, ta.driver_name, ta.start_date,

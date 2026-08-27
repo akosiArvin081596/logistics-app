@@ -232,7 +232,7 @@
 
     <!-- Accept / Reject buttons for dispatched loads -->
     <div v-if="showResponseButtons" class="load-response-actions">
-      <van-button type="danger" plain block :loading="responding" :disabled="responding" @click="$emit('decline', load)">Reject Load</van-button>
+      <van-button type="danger" plain block :loading="responding" :disabled="responding" @click="$emit('decline', load)">Decline Load</van-button>
       <van-button type="primary" block :loading="responding" :disabled="responding" @click="$emit('accept', load)">Accept Load</van-button>
     </div>
     <div v-else-if="showAcceptedBadge" class="load-accepted-banner">

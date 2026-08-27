@@ -26,52 +26,44 @@ This is worth doing. You'll open the app 50 times a week — a one-tap shortcut 
 
 ## Grant location access
 
-The very first time you open the driver app after onboarding, the browser will pop up a **"app.logisx.com wants to know your location"** prompt. Tap **Allow.**
+**Your phone is not what tracks you.** Position comes from the **ELD in your truck**, which reports on its own about once a minute. Dispatch, the geofence, the customer's tracking link and your pay all run off that — with the app closed, the phone locked, or location permission denied.
 
-Without GPS:
+So there is nothing you need to grant, and nothing you need to leave running, for tracking to work.
 
-- Dispatch can't see where you are.
-- Your status won't auto-advance when you arrive at pickup or delivery.
-- The customer's tracking link won't work for your load.
+### The one time your phone's location is used
 
-Tap **Allow.** If you tapped Block by mistake, the app shows a "Location Access Required" lock screen with per-browser instructions to re-enable. Generally:
+When you tap **Navigate** on a load. Turn-by-turn directions need a far more precise and frequent position than the ELD gives, so the browser will ask at that moment. Tap **Allow.**
+
+That position stays on your phone. It is never sent to LogisX and never affects tracking, pay or the geofence.
+
+If you decline, navigation still shows the route and the written directions — you just don't get the moving arrow or the spoken turns. If you tapped Block by mistake:
 
 - **Chrome (Android):** tap the lock icon in the address bar → **Permissions** → **Location** → toggle on.
 - **Safari (iPhone):** Settings → Safari → Location → Allow. Or Settings → Privacy → Location Services → Safari Websites → While Using.
 
-After re-enabling, refresh the page.
+Then tap **Navigate** again — the app can only ask while you're tapping something, so re-granting on its own won't restart it.
 
-## Keep the tab alive
+## Closing the app is safe
 
-Phones aggressively suspend background tabs to save battery. When the tab is suspended:
+Phones suspend background tabs to save battery, and that is fine here. Because tracking comes from the truck, closing the tab does **not** stop your position updating, does **not** stop the geofence advancing your status, and does **not** affect your pay.
 
-- GPS reports stop.
-- Real-time messages don't arrive.
-- Status doesn't auto-update.
+What a suspended tab does pause is the live stuff *on your screen*: new messages and load alerts won't pop up until you come back. Reopen the app and it reconnects in a few seconds and catches up on anything you missed.
 
-To keep things working:
-
-- **Don't close the LogisX tab** during a load. Leave it open.
-- **Don't kill the browser app** in the task switcher.
-- **iPhone:** lock screen is fine — Safari will keep your tab active. But if you switch to another app for more than a few minutes, iOS may suspend Safari.
-- **Android:** similar behavior. Some manufacturers (Samsung, Xiaomi, OnePlus) are especially aggressive — find Settings → Battery → App optimization and exempt Chrome.
-
-If you switch apps and come back to LogisX, it should reconnect within a few seconds. If you've been away for hours, you may need to refresh the page.
+The one exception is **Navigate** — turn-by-turn needs the screen on and the app in front. The app asks the phone to keep the screen awake while you're navigating, and releases it when you exit.
 
 ## Save battery
 
-Running GPS continuously will drain your battery faster than normal browsing. Tips:
+The app is light when you're not navigating — it isn't running GPS in the background, because it doesn't need to.
 
-- **Plug in.** Most drivers run the phone on a dash mount with a charger. Do that.
-- **Reduce screen brightness** when you don't need to see the screen. The app updates fine even when the screen is dim.
-- **Don't run other GPS apps simultaneously.** If your dispatcher's TMS, your fuel app, and LogisX are all asking for GPS, your battery will take a beating. LogisX itself is light — heavy GPS use comes from running multiple apps in parallel.
-- **Background apps.** Close apps you don't need. They add up.
+- **Plug in while navigating.** Turn-by-turn keeps the screen on and uses your phone's GPS continuously; that is the one battery-hungry mode.
+- **Reduce screen brightness** when you don't need to see it.
+- **Exit Drive Mode when you're parked** — tap ✕. That releases the screen lock and stops the GPS watcher.
 
 ## Data usage
 
 LogisX uses very little data. Average driver-day: 10-30 MB. The app:
 
-- Sends a GPS position every 60 seconds or when you've moved 50 meters (whichever happens first).
+- Sends **no** position data at all — that comes from the truck's ELD, over the ELD's own connection.
 - Receives short status messages — no images or video stream.
 - Loads small UI updates.
 

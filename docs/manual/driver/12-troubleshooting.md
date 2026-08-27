@@ -29,19 +29,23 @@ Either:
 
 If you've done all that and the page is still blank, message dispatch — there may be a server-side issue.
 
-## "I see the 'Location Access Required' screen but I'm sure I granted location."
+## "Navigation says it can't get my location."
 
-This means the browser's permission has reverted to denied or "ask every time." Re-grant:
+Only **navigation** needs your phone's location — tracking does not (see below). If you tapped Navigate and got a permission warning, re-grant it:
 
 - **Chrome (Android):** tap the lock icon in the address bar → Permissions → Location → Allow.
 - **Safari (iPhone):** Settings → Safari → Location → Allow. And Settings → Privacy → Location Services → make sure it's on for Safari.
 
-Then refresh the page.
+Then tap **Navigate** again — the app has to ask while you're tapping something, so re-granting alone won't restart it.
 
-## "My GPS shows the wrong location."
+If you'd rather not grant it, that's fine: you still get the route and the directions list, just not the moving arrow or the spoken turns.
 
-1. **Is the LogisX tab open?** GPS pauses if the tab is closed.
-2. **How's your signal?** Weak signal = inaccurate or stale GPS.
+## "The map shows my truck in the wrong place."
+
+**Your position comes from the ELD in your truck, not from your phone.** Nothing you do in the app changes it.
+
+1. **Does the map say "truck position unavailable (ELD offline)"?** Then the truck isn't reporting — that's a hardware issue. Tell dispatch.
+2. **Is the position just old?** The ELD reports about once a minute, so a fast-moving truck can look slightly behind.
 3. **How long since you came out from indoors?** Phone GPS takes 30-60 seconds to re-acquire after being inside a steel warehouse.
 4. **Is your phone hot?** Throttled phones can have erratic GPS.
 
@@ -133,9 +137,13 @@ Maps use Google's API. If they don't load:
 
 ## "I lost cell signal and now my updates didn't go through."
 
-The app **queues** position reports and other small updates locally when offline, then sends them in a burst when signal returns. You don't have to do anything; just wait.
+**There is no offline queue.** If an action didn't reach the server, it didn't happen — the app will tell you rather than pretending it worked.
 
-POD photo uploads are **not** queued — they retry once, then fail if signal is bad. You have to manually retry from the same screen when signal is back.
+- **Status changes** need signal. If one fails you'll see the error; tap again when you have bars.
+- **POD and document uploads** retry **three times** on their own, with a growing pause between attempts, before giving up. A failed file stays on screen so you can retry it — you never lose the photo.
+- **Expenses** keep everything you typed *and* the receipt photo if the submit fails. The button changes to "Try Again". Nothing is silently discarded.
+
+Your **position** needs nothing from you at all — it comes from the truck's ELD, not your phone.
 
 ## "I closed the tab and now nothing is updating."
 

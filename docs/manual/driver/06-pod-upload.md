@@ -97,7 +97,7 @@ What to do:
 3. **Try again.**
 4. **As a fallback, text or email the photo to dispatch.** They can upload from their side. Get a confirmation back from them so the load doesn't sit in limbo.
 
-The app will retry a failed upload automatically once, but after that, you have to manually try again.
+The app retries a failed upload automatically **three times**, pausing a little longer between each attempt. If all three fail, the file stays on screen so you can tap upload again once you have signal — the photo is never lost.
 
 ## When the photo is bad
 

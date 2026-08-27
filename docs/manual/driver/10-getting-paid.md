@@ -54,7 +54,7 @@ Each invoice shows:
 - **Base pay** before any adjustments.
 - **Adjustments** — additions or subtractions for unusual circumstances.
 - **Total** — what you'll be paid.
-- **Status** — Pending, Submitted, Approved, Paid.
+- **Status** — Draft, Submitted, Approved, Processing, Paid (or Rejected).
 
 You can **download the invoice as a PDF** for your records. Most drivers keep these for tax season.
 
@@ -63,13 +63,16 @@ You can **download the invoice as a PDF** for your records. Most drivers keep th
 The lifecycle:
 
 ```
-Pending → Submitted → Approved → Paid
+Draft → Submitted → Approved → Processing → Paid
+                 ↘ Rejected
 ```
 
-- **Pending** — the system generated the invoice. You should review it.
-- **Submitted** — you've submitted it for approval (some workflows have you do this; others auto-submit).
-- **Approved** — admin reviewed and approved. Payment will be processed.
+- **Draft** — the invoice has been generated but not sent. **This is the only stage you can act on:** review it, then tap **Submit & Send to Admin**. An invoice left in Draft has not reached anyone.
+- **Submitted** — it's with admin for review. The Submit button disappears at this point.
+- **Approved** — admin reviewed and approved it. Payment will be processed.
+- **Processing** — payment is being prepared.
 - **Paid** — payment has been initiated to your bank.
+- **Rejected** — admin sent it back. Message dispatch to find out what needs correcting.
 
 The payment itself goes through your company's payroll/AP process. The LogisX app shows "Paid" once admin marks it; the actual money lands in your bank a day or two later depending on the bank.
 
