@@ -292,6 +292,12 @@
             </div>
             <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="selectedDriverPosition" dispatch-mode show-arrival />
           </div>
+          <!-- The whole booked haul, under the phase-scoped map rather than
+               instead of it. The map above answers "where is the truck now and
+               how far to its next stop"; this answers "how long is this lane and
+               how far did the truck actually run for it". Both are wanted — see
+               LoadHaulSection.vue for why it does not reuse DriverRouteMap. -->
+          <LoadHaulSection :load-id="loadIdValue" :open="!!selectedJob" />
         </div>
       </DialogContent>
     </Dialog>
@@ -474,6 +480,7 @@ import StarRating from '../shared/StarRating.vue'
 import EmptyState from '../shared/EmptyState.vue'
 import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
+import LoadHaulSection from './LoadHaulSection.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import { needsReview, countNeedsReview } from '../../lib/loadReview'
 import { fmtTimestamp } from '../../utils/datetime'
