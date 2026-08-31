@@ -3732,7 +3732,7 @@ db.exec(`
 		week_start TEXT NOT NULL,
 		week_end TEXT NOT NULL,
 		loads_count INTEGER NOT NULL DEFAULT 0,
-		rate_per_load REAL NOT NULL DEFAULT 300.00,
+		rate_per_load REAL NOT NULL DEFAULT 250.00,
 		total_earnings REAL NOT NULL DEFAULT 0,
 		expenses_total REAL NOT NULL DEFAULT 0,
 		status TEXT NOT NULL DEFAULT 'Draft'
@@ -3766,7 +3766,7 @@ try {
 				week_start TEXT NOT NULL,
 				week_end TEXT NOT NULL,
 				loads_count INTEGER NOT NULL DEFAULT 0,
-				rate_per_load REAL NOT NULL DEFAULT 300.00,
+				rate_per_load REAL NOT NULL DEFAULT 250.00,
 				total_earnings REAL NOT NULL DEFAULT 0,
 				expenses_total REAL NOT NULL DEFAULT 0,
 				status TEXT NOT NULL DEFAULT 'Draft'
@@ -11612,7 +11612,7 @@ function resolveDailyRate(driverPayDaily, truckDaily) {
 	const d = Number(driverPayDaily) || 0;
 	if (d > 0) return d;
 	const t = Number(truckDaily) || 0;
-	return t > 0 ? t : 300;
+	return t > 0 ? t : 250;
 }
 
 // An expense an admin set to 'Rejected' was explicitly denied — it must never
@@ -20964,7 +20964,7 @@ function truckDailyRateCandidates(driverName) {
 	if (!lc) return [undefined];
 	const rates = db.prepare("SELECT assigned_driver, driver_pay_daily FROM trucks").all()
 		.filter((t) => normalizeDriverName(t.assigned_driver) === lc)
-		.map((t) => t.driver_pay_daily || 300);
+		.map((t) => t.driver_pay_daily || 250);
 	return rates.length ? rates : [undefined];
 }
 
@@ -21712,7 +21712,7 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		// Audit pay-rate changes — the rate drives invoices and P&L. Reuses the
 		// established truck-entity logAudit pattern (see routemate_link/unlink).
 		if (driverPayParsed && driverPayParsed.value !== (truck.driver_pay_daily || 0)) {
-			const fmtRate = (v) => (v > 0 ? `$${v}/day` : "default ($300/day)");
+			const fmtRate = (v) => (v > 0 ? `$${v}/day` : "default ($250/day)");
 			logAudit(req, "update_driver_pay", "truck", String(id),
 				`Driver daily pay for ${truck.unit_number}: ${fmtRate(truck.driver_pay_daily || 0)} → ${fmtRate(driverPayParsed.value)}`);
 		}
@@ -40922,7 +40922,7 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 			: "SELECT assigned_driver, driver_pay_daily FROM trucks";
 		db.prepare(truckQuery).all(...(investorDriverSet ? [user.id] : [])).forEach(t => {
 			const d = normalizeDriverName(t.assigned_driver);
-			if (d) trucksByDriver[d] = t.driver_pay_daily || 300;
+			if (d) trucksByDriver[d] = t.driver_pay_daily || 250;
 		});
 	}
 	const monthlyDriverPay = {};
@@ -41990,7 +41990,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				: "SELECT assigned_driver, driver_pay_daily FROM trucks";
 			db.prepare(truckQuery).all(...(investorDriverSet ? [user.id] : [])).forEach(t => {
 				const d = normalizeDriverName(t.assigned_driver);
-				if (d) trucksByDriver[d] = t.driver_pay_daily || 300;
+				if (d) trucksByDriver[d] = t.driver_pay_daily || 250;
 			});
 			for (const [driver, daySet] of Object.entries(driverDaySets)) {
 				const struct = payStructures[driver] || { payType: "fixed", payPercentage: 0 };
@@ -42089,7 +42089,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			})();
 			for (const [driver, monthsMap] of Object.entries(driverMonthlyDays)) {
 				const struct = payStructures[driver] || { payType: "fixed", payPercentage: 0 };
-				const fixedRate = (driverPayDetails[driver] && driverPayDetails[driver].dailyRate) || 300;
+				const fixedRate = (driverPayDetails[driver] && driverPayDetails[driver].dailyRate) || 250;
 				for (const [mk, daySet] of Object.entries(monthsMap)) {
 					const activeDays = daySet.size;
 					const monthRev = (driverMonthlyRevenue[driver] || {})[mk] || 0;
@@ -45498,7 +45498,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		const trucksByDriver = {};
 		db.prepare("SELECT assigned_driver, driver_pay_daily FROM trucks").all().forEach(t => {
 			const d = normalizeDriverName(t.assigned_driver);
-			if (d) trucksByDriver[d] = t.driver_pay_daily || 300;
+			if (d) trucksByDriver[d] = t.driver_pay_daily || 250;
 		});
 		const driverPayDetails = {};
 		let totalDriverPay = 0;

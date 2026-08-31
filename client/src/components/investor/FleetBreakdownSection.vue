@@ -408,7 +408,7 @@ function driverDays(t) {
 }
 function driverRate(t) {
   const driver = (t.AssignedDriver || t.assigned_driver || '').trim().toLowerCase()
-  return (props.production?.driverPayDetails || {})[driver]?.dailyRate || 300
+  return (props.production?.driverPayDetails || {})[driver]?.dailyRate || 250
 }
 function fixedCosts(t) {
   const pu = perUnit(t)
