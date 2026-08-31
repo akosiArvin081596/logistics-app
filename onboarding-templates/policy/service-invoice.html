@@ -420,7 +420,7 @@
     (function () {
       const days = ['Saturday','Sunday','Monday','Tuesday','Wednesday','Thursday','Friday'];
       const tbody = document.getElementById('invoice-rows');
-      const DAILY_RATE = 250;
+      const DAILY_RATE = 300;
 
       days.forEach((day, i) => {
         const tr = document.createElement('tr');
@@ -432,7 +432,7 @@
             /
             <label><input type="checkbox" class="na" data-row="${i}"> N/A</label>
           </td>
-          <td class="rate-cell">$250.00</td>
+          <td class="rate-cell">$300.00</td>
           <td class="total-cell"><span class="dollar">$</span><input type="text" class="blank row-total" data-row="${i}" aria-label="${day} total"></td>
         `;
         tbody.appendChild(tr);
@@ -464,7 +464,7 @@
       `;
       tbody.appendChild(totalRow);
 
-      // Auto-calc: when Completed ticked, fill row total with 250; untick clears it.
+      // Auto-calc: when Completed ticked, fill row total with 300; untick clears it.
       // Completed and N/A are mutually exclusive.
       const rows = Array.from(tbody.querySelectorAll('tr:not(.total-row)'));
       const grandTotalInput = document.getElementById('grand-total');
