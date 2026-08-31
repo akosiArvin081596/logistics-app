@@ -89,7 +89,7 @@
           </td>
           <td class="mono">
             <span v-if="truck.DriverPayDaily > 0">${{ truck.DriverPayDaily }}/day</span>
-            <span v-else class="pay-default" title="No custom rate set; pay calculations use the $300/day default">$300/day default</span>
+            <span v-else class="pay-default" title="No custom rate set; pay calculations use the $250/day default">$250/day default</span>
           </td>
           <td class="mono">
             <span v-if="tankGallons(truck)">{{ tankGallons(truck) }} gal</span>
@@ -270,7 +270,7 @@
           <div class="edit-field">
             <label>Driver Pay ($/day)</label>
             <input v-model.number="editForm.driverPayDaily" type="number" min="0" max="10000" step="any" placeholder="250 (default)" />
-            <div class="field-hint">Daily rate paid to this truck's driver (used by invoices, financials, and the investor P&amp;L). Leave blank to use the $300/day default.</div>
+            <div class="field-hint">Daily rate paid to this truck's driver (used by invoices, financials, and the investor P&amp;L). Leave blank to use the $250/day default.</div>
           </div>
 
           <div v-if="showOwner" class="edit-field">
@@ -433,7 +433,7 @@
           <div class="view-row"><span class="view-label">Insurance</span><span>{{ viewTruck.InsuranceMonthly ? '$' + viewTruck.InsuranceMonthly + '/mo' : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">ELD</span><span>{{ viewTruck.EldMonthly ? '$' + viewTruck.EldMonthly + '/mo' : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Truck Payment</span><span>{{ viewTruck.TruckPaymentMonthly ? '$' + Number(viewTruck.TruckPaymentMonthly).toLocaleString() + '/mo' : '\u2014' }}</span></div>
-          <div class="view-row"><span class="view-label">Driver Pay</span><span>{{ viewTruck.DriverPayDaily ? '$' + viewTruck.DriverPayDaily + '/day' : '$300/day (default)' }}</span></div>
+          <div class="view-row"><span class="view-label">Driver Pay</span><span>{{ viewTruck.DriverPayDaily ? '$' + viewTruck.DriverPayDaily + '/day' : '$250/day (default)' }}</span></div>
           <!-- Current mileage, derived from the latest ELD fix. Never 0: half
                the fleet has no ELD link at all, and a confident "0 mi" on a
                working tractor is worse than admitting we don't know. -->
