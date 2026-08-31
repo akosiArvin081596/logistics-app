@@ -227,12 +227,34 @@ REMOTE_ART="$REMOTE_TMP/sanitized.db.gz"
 # node_modules as a symlink beside the script: `require` resolves from the
 # script's own directory upward, so this is what makes better-sqlite3 and
 # bcryptjs load without copying anything into the production tree.
+#
+# ⚠️ RESOLVE THE REMOTE INTERPRETER — a bare `node` over ssh is the WRONG node.
+# The symlinked node_modules belongs to the production tree, where
+# better-sqlite3 is compiled for the Node pm2 runs the app with (/opt/node22,
+# ABI 127 since 2026-08-25). A non-login ssh PATH resolves `node` to
+# /usr/bin/node — 20.20.1, ABI 115 — and the require() dies at load with
+# "NODE_MODULE_VERSION 127 ... requires 115", exactly as backup.sh did.
+# Same capability-test as backup.sh: take the first interpreter that can
+# actually load the module through this symlink, so a future repin needs no
+# edit here. Fails closed — the || die below still guarantees nothing is
+# transferred if no interpreter works.
 "${SSH[@]}" "$VPS_HOST" "
 set -e
 umask 077
 cd '$REMOTE_TMP'
 ln -sfn '$PROD_APP_DIR/node_modules' node_modules
-node refresh-env.js --sanitize-only --from '$LATEST' --emit '$REMOTE_ART' ${EXTRA_ARGS[*]+${EXTRA_ARGS[*]}}
+NODE_BIN=''
+for cand in \"\$(pm2 jlist 2>/dev/null | sed -n 's/.*\"exec_interpreter\":\"\([^\"]*\)\".*/\1/p' | head -1)\" /opt/node22/bin/node \"\$(command -v node 2>/dev/null)\"; do
+  [ -n \"\$cand\" ] && [ -x \"\$cand\" ] || continue
+  if \"\$cand\" -e 'require(\"better-sqlite3\")' >/dev/null 2>&1; then NODE_BIN=\"\$cand\"; break; fi
+done
+if [ -z \"\$NODE_BIN\" ]; then
+  echo 'REFUSING: no node on the VPS can load better-sqlite3 from the production node_modules.' >&2
+  echo '  fix: npm rebuild better-sqlite3 in $PROD_APP_DIR under the interpreter pm2 uses.' >&2
+  exit 1
+fi
+echo \"[refresh] remote node: \$NODE_BIN (\$(\"\$NODE_BIN\" -v))\"
+\"\$NODE_BIN\" refresh-env.js --sanitize-only --from '$LATEST' --emit '$REMOTE_ART' ${EXTRA_ARGS[*]+${EXTRA_ARGS[*]}}
 " || die "remote sanitize failed. NOTHING was transferred. Do not work around this by copying the raw snapshot."
 
 # =============================================================================
