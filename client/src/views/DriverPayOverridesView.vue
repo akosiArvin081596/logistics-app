@@ -63,7 +63,7 @@
             <div class="driver-id">
               <div class="driver-name">{{ d.displayName }}</div>
               <div class="driver-sub">
-                {{ d.payType === 'percentage' ? `${d.payPercentage}% of net` : `$${d.dailyRate || 250}/day` }}
+                {{ d.payType === 'percentage' ? `${d.payPercentage}% of net` : `$${d.dailyRate || 300}/day` }}
               </div>
             </div>
             <span v-if="d.overrideCount > 0" class="ovr-badge" :title="`${d.addCount} added · ${d.removeCount} excluded`">
@@ -115,7 +115,7 @@
             <h2>{{ detail.displayName }}</h2>
             <div class="detail-meta">
               <span class="meta-pill">
-                {{ detail.payType === 'percentage' ? `${detail.payPercentage}% of net` : `$${detail.dailyRate || 250}/day` }}
+                {{ detail.payType === 'percentage' ? `${detail.payPercentage}% of net` : `$${detail.dailyRate || 300}/day` }}
               </span>
               <span class="meta-pill">{{ detail.activeDays }} active day{{ detail.activeDays === 1 ? '' : 's' }} all-time</span>
               <span class="meta-pill strong">{{ fmt(detail.totalPay) }} earned</span>
@@ -154,7 +154,7 @@
         </div>
         <div class="banner-times">&times;</div>
         <div class="banner-stat">
-          <span class="banner-val">${{ monthDetail.dailyRate || 250 }}</span>
+          <span class="banner-val">${{ monthDetail.dailyRate || 300 }}</span>
           <span class="banner-lbl">per day</span>
         </div>
         <div class="banner-eq">=</div>
@@ -431,7 +431,7 @@ const allDrivers = computed(() => {
       driverKey: key,
       displayName: titleCase(displayName),
       activeDays: d.activeDays || 0,
-      dailyRate: d.dailyRate || 250,
+      dailyRate: d.dailyRate || 300,
       totalPay: d.totalPay || 0,
       payType: d.payType || 'fixed',
       payPercentage: d.payPercentage || 0,

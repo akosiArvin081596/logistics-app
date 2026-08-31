@@ -138,7 +138,7 @@
         <div class="form-group">
           <label class="form-label">Driver Pay ($/day)</label>
           <input v-model.number="form.driverPayDaily" class="form-input" type="number" min="0" max="10000" step="any" placeholder="250 (default)" />
-          <div class="field-hint">Daily rate for this truck's driver. Leave blank to use the $250/day default.</div>
+          <div class="field-hint">Daily rate for this truck's driver. Leave blank to use the $300/day default.</div>
         </div>
       </div>
       <div class="form-row">
