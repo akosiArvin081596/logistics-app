@@ -61,8 +61,36 @@ LATEST="$(ls -1t $PROD_BACKUPS/app.db.*.gz 2>/dev/null | head -1 || true)"
 [ -n "$LATEST" ] || die "no nightly snapshot in $PROD_BACKUPS"
 say "snapshot: $LATEST"
 
+# ⚠️ THE THIRD VICTIM OF THE SAME ABI TRAP. backup.sh and refresh-local.sh were
+# fixed in #339; this one was missed and failed the moment it was next run.
+# A bare `node` resolves to /usr/bin/node — 20.20.1, ABI 115 — while staging's
+# own node_modules/better-sqlite3 is built for the /opt/node22 that pm2 runs it
+# with (ABI 127), so refresh-env.js dies at require():
+#
+#     NODE_MODULE_VERSION 127 ... this version of Node.js requires 115
+#
+# Same capability test as the other two: take the first interpreter that can
+# actually load the module, so a repin or rebuild needs no edit here. It fails
+# closed — refresh-env.js REFUSES rather than half-writing a database.
+pick_node() {
+  local cand
+  for cand in \
+    "$(pm2 jlist 2>/dev/null | sed -n 's/.*"exec_interpreter":"\([^"]*\)".*/\1/p' | head -1)" \
+    /opt/node22/bin/node \
+    "$(command -v node 2>/dev/null)"
+  do
+    [ -n "$cand" ] && [ -x "$cand" ] || continue
+    if (cd "$STAGING_DIR" && "$cand" -e 'require("better-sqlite3")') >/dev/null 2>&1; then
+      echo "$cand"; return 0
+    fi
+  done
+  return 1
+}
+NODE_BIN="$(pick_node)" || die "no node on this box can load better-sqlite3 from $STAGING_DIR/node_modules — run: npm rebuild better-sqlite3"
+say "node: $NODE_BIN ($("$NODE_BIN" -v))"
+
 # --from is on the same box, so this is a local read of a file with no writer.
-node scripts/refresh-env.js --from "$LATEST" --to "$STAGING_DIR/app.db" --yes-non-prod "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"
+"$NODE_BIN" scripts/refresh-env.js --from "$LATEST" --to "$STAGING_DIR/app.db" --yes-non-prod "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"
 
 # --- 3. restart -------------------------------------------------------------
 if [ "$RESTART" = "1" ]; then
