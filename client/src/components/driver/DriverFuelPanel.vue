@@ -241,6 +241,13 @@
             :aria-label="stopLabel(s, i)"
           >
             <span v-if="i === cheapestIdx" class="dfp-stop-badge">Cheapest</span>
+            <!-- ⚠️ Only ever shown on the rural fallback. findFuelStopsAlongRoute
+                 returns truck-capable stops ONLY; it degrades to car stations
+                 just when a lane genuinely has none, because an empty panel
+                 leaves the driver with nothing. When that happens the driver has
+                 to be told, or we are back to the 2026-09-05 report of the panel
+                 quietly offering a grocery store and a row of Casey's. -->
+            <span v-if="s.truckFriendly === false" class="dfp-stop-warn">Not a truck stop</span>
 
             <span class="dfp-stop-price">
               <template v-if="priceOf(s) != null">
@@ -1303,6 +1310,19 @@ watch(
 .dfp-stop:active {
   transform: scale(0.98);
 }
+.dfp-stop-warn {
+  display: inline-block;
+  margin-bottom: 4px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: #fdecec;
+  color: #a12b2b;
+  border: 1px solid #f2c2c2;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .2px;
+}
+
 .dfp-stop.cheapest {
   border-color: #16a34a;
   background: #f0fdf4;
