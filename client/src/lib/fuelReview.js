@@ -811,7 +811,7 @@ export function rangeEvidenceText(ev) {
   if (legs === null || legs <= 0) return '';
   const fills = `${Math.round(legs)} fill-up${Math.round(legs) === 1 ? '' : 's'}`;
   if (miles === null || miles <= 0) return fills;
-  return `${fills} · ${Math.round(miles).toLocaleString('en-US')} mi`;
+  return `${fills} (${Math.round(miles).toLocaleString('en-US')} mi)`;
 }
 
 /** "1,204" — miles for display. null/blank yields '' so callers can v-if it. */

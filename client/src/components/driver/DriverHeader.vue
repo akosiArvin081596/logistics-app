@@ -116,7 +116,7 @@ const fuelChip = computed(() => {
       // 0 usable miles is an instruction, not a measurement.
       text: usable === 0 ? 'Refuel now' : `${usable} mi`,
       title: `About ${usable} miles before you need to refuel${pct}`
-        + `. That is ${dry} miles to dry, holding back a ${reserve} mile reserve.`
+        + `. That is ${dry} miles until empty, minus a ${reserve} mile reserve.`
         + ' This is the low end of the range, not the best case.' + carried,
     }
   }

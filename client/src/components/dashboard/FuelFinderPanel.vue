@@ -51,8 +51,9 @@
                Pre-reserve servers (no reserveMiles) fall back to the original
                "mi to plan on" readout rather than inventing a buffer. -->
           <div v-if="interval.hasReserve && !interval.mustRefuelNow" class="ff-range-miles">
+            <span class="ff-range-lead">Refuel within</span>
             <span class="ff-range-num">{{ milesText(interval.usable) }}</span>
-            <span class="ff-unit">mi before you refuel</span>
+            <span class="ff-unit">mi</span>
             <span
               v-if="interval.basisInfo"
               class="ff-src"
@@ -89,16 +90,17 @@
                verdict — which only renders once a routed load is selected. That
                is why the client asked for a line he was, correctly, not seeing. -->
           <div v-if="interval.hasReserve" class="ff-range-dry">
-            {{ milesText(interval.planning) }} mi to dry · holds back
+            {{ milesText(interval.planning) }} mi until empty, minus
             {{ milesText(interval.reserve) }} mi reserve
           </div>
           <div v-if="interval.hasSpread" class="ff-range-spread">
-            typical {{ milesText(interval.typical) }} · best {{ milesText(interval.high) }}
+            Typical full tank {{ milesText(interval.typical) }} mi ·
+            Best ever {{ milesText(interval.high) }} mi
           </div>
           <!-- Null on purpose, so it is said in words. Substituting rangeMiles
                here would restore the original bug in one line. -->
           <div v-else-if="interval.known" class="ff-range-spread muted">
-            no typical or best case yet — too few fill-ups on this truck
+            Not enough fill-ups on this truck yet to show a typical or best case
           </div>
           <div v-if="evidenceText" class="ff-range-evidence" title="Tank-to-tank legs behind the measured basis">
             {{ evidenceText }}
@@ -139,42 +141,34 @@
         <div class="ff-plan-head" :title="verdict.title">{{ verdict.dispatch }}</div>
         <div class="ff-plan-rows">
           <div v-if="plan.routeMiles != null">
-            <span>route left</span>
+            <span>Route left</span>
             <strong>{{ milesText(plan.routeMiles) }} mi</strong>
           </div>
           <div v-if="plan.requiredMiles != null">
-            <span>needs</span>
+            <span>Needs</span>
             <strong>{{ milesText(plan.requiredMiles) }} mi</strong>
-            <em v-if="plan.reserveMiles != null">incl. {{ milesText(plan.reserveMiles) }} reserve</em>
+            <em v-if="plan.reserveMiles != null">includes the {{ milesText(plan.reserveMiles) }} mi reserve</em>
           </div>
           <div v-if="shortfallText">
-            <span>short by</span>
+            <span>Short by</span>
             <strong class="bad">{{ shortfallText }}</strong>
           </div>
-          <div v-if="refuelText">
-            <span>refuel</span>
-            <strong>{{ refuelText }}</strong>
-          </div>
-          <!-- pointsNeeded is the trustworthy half of this pair: measured, and
-               free of both tank size and MPG. gallonsNeeded inherits mpgSource
-               and is a LOWER bound, so it is labelled "at least". -->
-          <div v-if="plan.pointsNeeded != null">
-            <span>gauge</span>
-            <strong>{{ plan.pointsNeeded }} points</strong>
-          </div>
+          <!-- ONE instruction, with the gauge as its cross-check.
+               gallonsNeeded inherits mpgSource and is a LOWER bound, so it keeps
+               "at least". pointsNeeded is the trustworthy half — measured, free
+               of both tank size and MPG — but "69 points" was read by nobody as
+               "69% of the gauge", so it is spelled out and demoted to the
+               qualifier rather than standing as its own row. -->
           <div v-if="plan.gallonsNeeded != null">
-            <span>fuel</span>
+            <span>Add</span>
             <strong>at least {{ round1(plan.gallonsNeeded) }} gal</strong>
+          </div>
+          <div v-if="plan.pointsNeeded != null">
+            <span>Gauge</span>
+            <strong>about {{ plan.pointsNeeded }}% more</strong>
           </div>
         </div>
         <div v-for="c in planCaveats" :key="c" class="ff-plan-caveat">{{ c }}</div>
-        <!-- Kept visible, kept small, and kept explicitly out of the verdict.
-             Dispatch watched this panel read 449 last week; silently swapping in
-             a different number without saying so invites a bug report and, worse,
-             a call to the driver quoting the old figure. -->
-        <div v-if="plan.pointEstimateMiles != null" class="ff-plan-old">
-          old tank × mpg formula: {{ milesText(plan.pointEstimateMiles) }} mi — not used
-        </div>
       </div>
       <div v-else-if="planNote" class="ff-muted ff-plan-note">{{ planNote }}</div>
       <!-- Terminal fallback: the three branches above are all conditional, so a
@@ -323,11 +317,13 @@ const basisBadgeClass = computed(() => {
   if (!b) return ''
   return b.rank === 2 ? 'src-best' : b.rank === 1 ? 'src-est' : 'src-muted'
 })
-const evidenceText = computed(() =>
-  interval.value.basis === 'measured'
-    ? rangeEvidenceText(range.value && range.value.rangeEvidence)
-    : '',
-)
+const evidenceText = computed(() => {
+  if (interval.value.basis !== 'measured') return ''
+  const ev = rangeEvidenceText(range.value && range.value.rangeEvidence)
+  // rangeEvidenceText stays a FRAGMENT because DriverFuelPanel embeds it in a
+  // sentence of its own. Each surface supplies its own lead-in.
+  return ev ? `From your last ${ev}` : ''
+})
 
 /* ── reading provenance + the "nothing to show" copy ──────────────────────
    The server now distinguishes a live sensor reading from one CARRIED forward
@@ -400,7 +396,7 @@ const headerBadge = computed(() => {
     return {
       tone: i.mustRefuelNow ? 'warn' : 'plain',
       text: i.mustRefuelNow ? 'refuel now' : `${milesText(i.usable)} mi left`,
-      title: `${milesText(i.planning)} mi to dry, holding back a ${milesText(i.reserve)} mi reserve.`
+      title: `${milesText(i.planning)} mi until empty, holding back a ${milesText(i.reserve)} mi reserve.`
         + (b ? ` ${b.title}` : ''),
     }
   }
@@ -418,13 +414,6 @@ const headerBadge = computed(() => {
 const shortfallText = computed(() => {
   const n = Number(plan.value && plan.value.shortfallMiles)
   return Number.isFinite(n) && n > 0 ? `${milesText(n)} mi` : ''
-})
-const refuelText = computed(() => {
-  const p = plan.value
-  if (!p || !p.fuelStopsRecommended) return ''
-  const within = Number(p.refuelWithinMiles)
-  if (!Number.isFinite(within)) return 'before the run'
-  return within <= 0 ? 'now — before departure' : `within ${milesText(within)} mi`
 })
 const planCaveats = computed(() => {
   const p = plan.value
@@ -794,14 +783,6 @@ watch(() => [props.driver, props.loadId], reloadAll, { immediate: true })
   line-height: 1.35;
   color: #64748b;
 }
-.ff-plan-old {
-  margin-top: 0.35rem;
-  padding-top: 0.3rem;
-  border-top: 1px dashed rgba(100, 116, 139, 0.3);
-  font-size: 0.6rem;
-  color: #94a3b8;
-  font-variant-numeric: tabular-nums;
-}
 .ff-plan-note { padding-bottom: 0.5rem; }
 
 .ff-plan.v-ok { background: #f0fdf4; border-color: #bbf7d0; }
@@ -819,6 +800,9 @@ watch(() => [props.driver, props.loadId], reloadAll, { immediate: true })
   font-variant-numeric: tabular-nums;
 }
 .ff-unit { font-size: 0.68rem; color: #94a3b8; font-weight: 600; }
+/* Reads "Refuel within 374 mi". Sized with .ff-unit rather than the number, so
+   the figure still carries the row — the words only tell you what it is. */
+.ff-range-lead { font-size: 0.68rem; color: #64748b; font-weight: 700; }
 .ff-range-sub {
   display: flex;
   flex-wrap: wrap;
