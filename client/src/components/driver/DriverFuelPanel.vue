@@ -76,8 +76,8 @@
           </template>
         </div>
         <p v-if="interval.hasReserve" class="dfp-dry">
-          That is <strong>{{ milesText(interval.planning) }} mi</strong> before the tank is dry,
-          keeping <strong>{{ milesText(interval.reserve) }} mi</strong> back as a reserve.
+          That is <strong>{{ milesText(interval.planning) }} mi</strong> until the tank is empty,
+          minus <strong>{{ milesText(interval.reserve) }} mi</strong> kept back as a reserve.
         </p>
 
         <!-- The interval, drawn. Real legs at the same fuel level have run from
@@ -125,9 +125,9 @@
         <!-- Same three numbers in words, for the bar's non-visual twin and for
              the estimated basis, which has no spread to draw. -->
         <p v-if="interval.hasSpread" class="dfp-spread">
-          Plan on <strong>{{ milesText(interval.planning) }} mi</strong> to dry. A typical run goes about
-          {{ milesText(interval.typical) }} mi; the furthest this truck has managed on this much fuel
-          is {{ milesText(interval.high) }} mi.
+          Plan on <strong>{{ milesText(interval.planning) }} mi</strong> until empty. A typical run on this
+          much fuel goes about {{ milesText(interval.typical) }} mi; the furthest this truck has ever
+          managed on this much fuel is {{ milesText(interval.high) }} mi.
         </p>
         <!-- NOT a dash, and NOT the old tank x mpg figure. With no fill history
              there is no spread to report, and inventing one is how "449 mi"
@@ -531,7 +531,7 @@ const basisText = computed(() => {
   if (b.rank === 2) {
     const ev = rangeEvidenceText(range.value && range.value.rangeEvidence)
     return ev
-      ? `Measured from your own fill-ups — ${ev}.`
+      ? `Measured from your last ${ev}.`
       : "Measured from this truck's own fill-ups."
   }
   return "A fleet-wide estimate — this truck hasn't recorded enough fill-ups to measure its own."
