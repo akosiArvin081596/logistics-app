@@ -42758,9 +42758,22 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				// to show any data"). The truck still counts as an owned asset
 				// (purchase price etc.) in the asset section above.
 				const truckActive = String(truck.status || "").toLowerCase() === "active";
+				// ⚠️ THE VARIABLE HALF, PUBLISHED SO THE BREAKDOWN STOPS LYING.
+				// unitTotalExpenses is varExp + maintExp + compExp + fixed + driverPay,
+				// but only the TOTAL was ever sent. FleetBreakdownSection derives
+				// fixedCosts = unitMonthlyExpenses - driverPay/months - tripExp, and
+				// with no trip figure to subtract it had tripExp hardcoded to 0 —
+				// so every fuel, repair and toll on the truck was reported to the
+				// investor as a FIXED cost. Same class as the earnings waterfall whose
+				// parts did not sum to its own total.
+				// Rounded on the same divisor as avgMonthlyExpenses so the three parts
+				// still reconcile to it.
+				const unitTripExpenses = varExp + maintExp + compExp;
 				perTruckData[truck.unit_number] = {
 					unitMonthlyGross: truckActive ? avgMonthlyGross : 0,
 					unitMonthlyExpenses: truckActive ? avgMonthlyExpenses : 0,
+					unitMonthlyTripExpenses: truckActive && truckMonths > 0
+						? Math.round(unitTripExpenses / truckMonths) : 0,
 					estAnnualRevenue: truckActive ? Math.round((avgMonthlyGross - avgMonthlyExpenses) * 12) : 0,
 					totalMiles,
 					loadCount,
@@ -43808,7 +43821,12 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 			// route already treats as worth asserting. Cheaper than reasoning about
 			// it again the next time either input's provenance changes.
 			if (!STATEMENT_FILE_RE.test(freshName)) throw new Error(`refusing to write unexpected statement filename: ${freshName}`);
-			fs.mkdirSync(PAYOUT_STATEMENT_DIR, { recursive: true });
+			// 0700 on the directory, to match backups/. The boot umask 0027 already
+			// yields 0750 here, which is enough on a single-tenant box — but this is
+			// investor financial PII and the mode should not depend on a umask that
+			// a future systemd unit or a cron invocation could set differently.
+			fs.mkdirSync(PAYOUT_STATEMENT_DIR, { recursive: true, mode: 0o700 });
+			try { fs.chmodSync(PAYOUT_STATEMENT_DIR, 0o700); } catch {}
 			// ⚠️ Write to a temp name and rename into place. rename() is atomic
 			// within a directory, so a crash or an OOM mid-write can leave a stray
 			// .tmp but can never leave a TRUNCATED payout-…-<hash>.pdf. A truncated
@@ -43816,7 +43834,18 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 			// its hash still matches — so it would be served as a corrupt PDF
 			// forever.
 			const tmp = path.join(PAYOUT_STATEMENT_DIR, `.${freshName}.${process.pid}.${Date.now()}.tmp`);
-			fs.writeFileSync(tmp, pdf);
+			// ⚠️ 0600 EXPLICITLY, and set on the TEMP file so the bytes are never
+			// group-readable even for the instant before the rename. pii-at-rest.md
+			// recorded this as "verified locally … but that measurement is LOCAL:
+			// the directory does not exist on the VPS yet, so re-check after the
+			// first production render." Re-checked 2026-09-19, and the local result
+			// did not carry: umask 0027 gives a DIRECTORY 0750 but a FILE 0640, so
+			// production's one rendered statement was group-readable. Harmless in
+			// practice behind a 0750 root-owned directory, but backups/ standardised
+			// on 0600 for exactly this class of file and this should not be the
+			// exception.
+			fs.writeFileSync(tmp, pdf, { mode: 0o600 });
+			try { fs.chmodSync(tmp, 0o600); } catch {}   // writeFileSync mode is subject to umask
 			fs.renameSync(tmp, path.join(PAYOUT_STATEMENT_DIR, freshName));
 			// Drop the render this one supersedes (an adjustment, a reopen, a
 			// template bump). Without it the directory grows one file per

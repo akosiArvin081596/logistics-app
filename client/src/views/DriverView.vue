@@ -284,10 +284,17 @@
 
       <!-- MESSAGES TAB -->
       <section v-if="currentTab === 'messages'" class="tab-panel">
+        <!-- ⚠️ :load-id WAS NEVER BOUND, so tapping the chat button on a load
+             opened the FIRST working load's thread instead of that load's.
+             handleLoadChat already set chatLoadId and switched tabs; the value
+             just never reached here, and ChatView falls back to auto-detection
+             when the prop is empty — so the wrong thread looked like the right
+             one. The driver's selection was silently discarded. -->
         <ChatView
           :messages="driverStore.messages"
           :loads="driverStore.loads"
           :driver-name="driverName"
+          :load-id="chatLoadId"
           :send-handler="handleSendMessage"
           @mark-read="handleMarkRead"
         />
