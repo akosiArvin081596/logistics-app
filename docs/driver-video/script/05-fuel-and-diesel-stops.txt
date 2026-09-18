@@ -1,0 +1,20 @@
+CLIP       : 05-fuel-and-diesel-stops.mp4
+SCREEN     : Fuel range and diesel stops
+RUN TIME   : 39.5 seconds (measured, not estimated)
+WORDS      : 131 @ 2.35 w/s
+
+--- VOICE-OVER SCRIPT ---
+
+Open the Fuel section and the app tells you whether this run actually fits in your tank.
+
+The big number is the miles you can count on before you need to refuel. It's the low end of the range, not the best case — so if it says you'll make it, you'll make it.
+
+Underneath is your fuel level, the gallons left in the tank, and your truck number. All of it read straight from the truck itself.
+
+Then the diesel stops along your route. These are truck stops — places you can actually get the truck into and fuel at a truck lane, not corner gas stations. Each one shows the live pump price where we have it, how far off your route it is, and the cheapest is tagged.
+
+--- ON-SCREEN CUES ---
+
+- tap "Active"
+- tap "566293352"
+- tap section "Fuel"

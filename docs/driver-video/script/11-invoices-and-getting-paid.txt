@@ -1,0 +1,18 @@
+CLIP       : 11-invoices-and-getting-paid.mp4
+SCREEN     : Invoices and getting paid
+RUN TIME   : 36.9 seconds (measured, not estimated)
+WORDS      : 109 @ 2.35 w/s
+
+--- VOICE-OVER SCRIPT ---
+
+The Invoices tab is how you get paid. Each week's invoice covers the loads you completed in that week.
+
+You can make one yourself with the button. But you usually do not need to. The system makes it and sends it for you, on its own, every Friday evening.
+
+The deadline that matters to you is Friday, six-thirty in the evening, Central time. Anything you log after that lands on next week's invoice.
+
+Tap any invoice to see the loads on it, the receipts you sent in, and to open the PDF. If something looks wrong, message dispatch before the week closes. It is far easier to fix then.
+
+--- ON-SCREEN CUES ---
+
+- tap "Invoices"

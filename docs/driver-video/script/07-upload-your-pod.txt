@@ -1,0 +1,32 @@
+CLIP       : 07-upload-your-pod.mp4
+SCREEN     : Uploading your POD — the one step that's on you
+RUN TIME   : 59.3 seconds (measured, not estimated)
+WORDS      : 161 @ 2.35 w/s
+
+--- VOICE-OVER SCRIPT ---
+
+You'll reach the receiver and the app will mark you At Receiver on its own, like every step before it. But the last one is different.
+
+Delivered is the only status the app will never set for you. Look — five steps ticked, one to go, and there's no Delivered button. Instead it asks for a Proof of Delivery.
+
+That is on purpose, and you cannot tap past it. The signed paperwork is what we bill the customer with. No paperwork means no bill. That holds up your pay just as much as ours.
+
+So open Documents, leave the type on Proof of Delivery, and tap Scan Document.
+
+Take a picture of the signed paperwork. The app straightens it and cleans it up for you. That is why you use Scan Document instead of a plain photo — brokers send back a crooked, shadowy picture.
+
+Then tap Upload. Once it's through, the Delivered button appears — and that load is done.
+
+--- ON-SCREEN CUES ---
+
+- tap "Active"
+- tap "566293352"
+- highlight 1 element(s)
+- tap "Documents"
+- tap ".doc-upload .scan-btn"
+- upload sample-pod.png
+- tap "Upload"
+
+--- PRODUCTION NOTE ---
+
+The emotional centre of the series. Everything else is automatic; this is the one thing that genuinely needs the driver, and it gates their pay as well as ours.

@@ -1,0 +1,20 @@
+SCREENSHOT : 13-status-in-transit.png
+SCREEN     : Status — In Transit
+RUN TIME   : approx 22 seconds
+
+--- VOICE-OVER SCRIPT ---
+
+When you pull out of the shipper loaded, the app notices you've left and moves
+you to In Transit automatically. Same again when you reach the receiver.
+
+This is why keeping the truck's ELD powered and connected matters more than any
+button in this app. The tracking, your status, and the customer's view of where
+their freight is all run off it.
+
+If you ever notice the status stuck on something that's clearly wrong, that's
+worth a message to dispatch — it usually means the truck stopped reporting.
+
+--- ON-SCREEN CUES ---
+
+- Show In Transit going blue.
+- Cut to the route map tracking toward the drop-off.

@@ -1,0 +1,37 @@
+SCREENSHOT : 09-fuel-range.png
+SCREEN     : Fuel — how far you can actually go
+RUN TIME   : approx 38 seconds
+
+--- VOICE-OVER SCRIPT ---
+
+The Fuel section is one of the most useful screens in the app, and it runs
+entirely off your truck — you don't enter anything.
+
+The big number is the one to read: miles before you need to refuel. Underneath
+it tells you how far you'd get before the tank is actually dry, and how much
+it's holding back as a reserve. So the headline figure is miles you can use, not
+the last drop.
+
+Above it, the app compares that against the run you're on. Here it's saying the
+range is too close to the miles still to drive, so plan a stop — and it names
+the mileage to fuel up within.
+
+The bar shows three numbers: what you can count on, what a typical run gets, and
+the best this truck has ever managed on this much fuel.
+
+And look where those come from — your fuel level is read straight off the truck,
+and the miles per gallon is measured from your own fill-ups. This isn't a guess
+from a spreadsheet. It's your truck and your receipts.
+
+--- ON-SCREEN CUES ---
+
+- Highlight the big mileage figure first and hold on it.
+- Then the verdict banner above, naming the fuel-up mileage.
+- Trace the three-part bar: count on / typical / best.
+- Finish on the "from your truck" and "from your fuel receipts" tags.
+
+--- PRODUCTION NOTE ---
+
+⚠️ RESHOT after Deshorn's correction — the first version showed "this truck's
+ELD isn't reporting a fuel level", an empty state. This is real: a live level
+against a configured tank, with MPG measured from that driver's own fill-ups.

@@ -1,0 +1,18 @@
+SCREENSHOT : 17-status-timeline.png
+SCREEN     : Status Timeline
+RUN TIME   : approx 18 seconds
+
+--- VOICE-OVER SCRIPT ---
+
+The Status Timeline is the record of this load: every status you set, and the
+time you set it.
+
+It's worth knowing this exists. If there's ever a question about when you got to
+a shipper or how long you sat waiting, this is the record we look at — which is
+another reason to update your status as it happens rather than filling it in
+later.
+
+--- ON-SCREEN CUES ---
+
+- Scroll slowly down the timeline entries.
+- Highlight one timestamp.

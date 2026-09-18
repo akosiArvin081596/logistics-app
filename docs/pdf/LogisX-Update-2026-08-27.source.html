@@ -1,0 +1,239 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>LogisX Update</title>
+<style>
+  @page { size: Letter; margin: 16mm 15mm 18mm; }
+  * { box-sizing: border-box; }
+  body {
+    line-height: 1.45;
+    font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    color: #0f172a; font-size: 10.5pt; line-height: 1.5; margin: 0;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  }
+  .masthead { border-bottom: 2.5px solid #38bdf8; padding-bottom: 10px; margin-bottom: 20px; }
+  .brand { font-size: 15pt; font-weight: 800; letter-spacing: -0.02em; color: #0284c7; }
+  .brand span { color: #0f172a; }
+  h1 { font-size: 17pt; margin: 8px 0 4px; letter-spacing: -0.02em; }
+  .meta { font-size: 9pt; color: #64748b; }
+  .lede {
+    background: #f8fafc; border-left: 3px solid #38bdf8; padding: 10px 14px;
+    margin: 0 0 22px; font-size: 10pt; color: #334155; border-radius: 0 4px 4px 0;
+  }
+
+  .item { margin-bottom: 17px; page-break-inside: avoid; }
+  .item-head { display: flex; align-items: baseline; gap: 9px; margin-bottom: 9px; }
+  .num {
+    background: #0284c7; color: #fff; width: 21px; height: 21px; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 9.5pt; font-weight: 700; flex: none;
+  }
+  .item-title { font-size: 12pt; font-weight: 700; letter-spacing: -0.01em; }
+  .block { margin: 0 0 7px 30px; }
+  .label {
+    display: inline-block; min-width: 88px; font-size: 8pt; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; vertical-align: top;
+  }
+  .label.fix { color: #059669; }
+  .body-text { display: inline; }
+  .block-body { margin-left: 88px; margin-top: -1.5em; }
+
+  .callout {
+    margin: 9px 0 0 118px; background: #f0f9ff; border: 1px solid #bae6fd;
+    border-radius: 5px; padding: 9px 12px; font-size: 10pt;
+  }
+  .callout .big { font-size: 12.5pt; font-weight: 800; color: #0c4a6e; display: block; }
+  .callout .sub { color: #475569; font-size: 9pt; }
+
+  .cont { margin-left: 88px; }
+  .divider { border: 0; border-top: 1px solid #e2e8f0; margin: 18px 0; }
+
+  h2.section {
+    font-size: 12.5pt; margin: 0 0 4px; letter-spacing: -0.01em;
+  }
+  .section-sub { font-size: 9.5pt; color: #64748b; margin: 0 0 14px; }
+  .qgroup { font-size: 9pt; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.05em; color: #0284c7; margin: 15px 0 8px;
+    page-break-after: avoid; break-after: avoid; }
+  .q { margin: 0 0 9px; padding-left: 26px; position: relative; page-break-inside: avoid; }
+  .q .qn {
+    position: absolute; left: 0; top: 0; font-weight: 800; color: #0284c7; font-size: 10pt;
+  }
+  .q-ask { font-weight: 700; }
+  .q-why { color: #475569; }
+
+  .foot {
+    margin-top: 26px; padding-top: 10px; border-top: 1px solid #e2e8f0;
+    font-size: 8.5pt; color: #94a3b8;
+  }
+  strong { font-weight: 700; }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 9pt;
+          background: #f1f5f9; padding: 0.5px 4px; border-radius: 3px; }
+</style></head>
+<body>
+
+<div class="masthead">
+  <div class="brand">Logis<span>X</span></div>
+  <h1>Platform Update — Mileage Tracking &amp; Fuel Range</h1>
+  <div class="meta">27 August 2026 &nbsp;·&nbsp; Live in production</div>
+</div>
+
+<p class="lede">
+  Two items you raised on 26 August are built and live, plus one data error found
+  while building them. Everything below is already running — nothing here is waiting on you,
+  except the questions on the last page.
+</p>
+
+<!-- 1 -->
+<div class="item">
+  <div class="item-head"><span class="num">1</span><span class="item-title">Mileage tracking</span></div>
+  <div class="block"><span class="label">Issue</span><div class="block-body">
+    No way to see how many miles each truck or driver runs per week, per month, or in total,
+    and no company average.
+  </div></div>
+  <div class="block"><span class="label">Assessment</span><div class="block-body">
+    The platform had no driven-mileage reporting at all. The "Total Miles" figure on the
+    Financials page is the <strong>quoted</strong> length of booked routes, not odometer
+    distance — it misses deadhead, detours and repositioning, so it was never the number
+    you were asking for.
+  </div></div>
+  <div class="block"><span class="label fix">Fix</span><div class="block-body">
+    A new <strong>Mileage Analytics</strong> page in the sidebar, for Admin and Dispatch.
+    Miles per truck and per driver, broken out by week, month and total, plus the company
+    average. Weeks run <strong>Saturday to Friday</strong> — the same week driver invoices
+    are paid on — so mileage and pay line up on the same days. History has been backfilled
+    and it updates automatically from here.
+  </div></div>
+</div>
+
+<!-- 2 -->
+<div class="item">
+  <div class="item-head"><span class="num">2</span><span class="item-title">Fuel range — miles until empty</span></div>
+  <div class="block"><span class="label">Issue</span><div class="block-body">
+    "On the tracker with the fuel range Finder I need a line that clearly states how much
+    gas until they run out with a 15 mile buffer — not seeing that."
+  </div></div>
+  <div class="block"><span class="label">Assessment</span><div class="block-body">
+    You were right that it wasn't there. The 15-mile buffer has been in the system since
+    18 August, but it only appeared inside the route check — which shows up once a load
+    with a route is selected. The always-visible figure was labelled "mi to plan on",
+    which is a planning floor, not a distance to empty. The word "empty" appeared nowhere
+    on the screen.
+  </div></div>
+  <div class="block"><span class="label fix">Fix</span><div class="block-body">
+    The Fuel &amp; Route panel now leads with the number to act on, with the distance to
+    dry underneath — and it shows whether or not a load is selected:
+  </div></div>
+  <div class="callout">
+    <span class="big">168 mi before you refuel</span>
+    <span class="sub">183 mi to dry &nbsp;·&nbsp; holds back 15 mi reserve</span>
+  </div>
+  <div class="block" style="margin-top:9px"><div class="cont">
+    The same figure now appears on the driver's phone and their top-bar fuel chip, so
+    dispatch and the driver can never quote different numbers to each other. A truck already
+    into its reserve reads <strong>"Refuel now"</strong> rather than a misleadingly small
+    number, and when there is no usable fuel reading the panel says so instead of showing a
+    figure it cannot stand behind.
+  </div></div>
+</div>
+
+<!-- 3 -->
+<div class="item">
+  <div class="item-head"><span class="num">3</span><span class="item-title">Mileage error found while building this</span></div>
+  <div class="block"><span class="label">Issue</span><div class="block-body">
+    LogisX-#2372's recorded mileage was badly overstated.
+  </div></div>
+  <div class="block"><span class="label">Assessment</span><div class="block-body">
+    Its tracker reset on 11 August and the odometer dropped 219,818 miles in about ten
+    minutes. The old calculation measured a day as <em>highest reading minus lowest</em>,
+    so it counted that reset as distance driven and recorded a single 219,818-mile day.
+    That one row was inflating the truck's all-time total on Fleet Health and on the
+    investor portal.
+  </div></div>
+  <div class="block"><span class="label fix">Fix</span><div class="block-body">
+    Mileage is now measured by adding up actual movement between readings, so a device
+    reset contributes nothing.
+  </div></div>
+  <div class="callout">
+    <span class="big">#2372 corrected: 244,562 &rarr; 24,776 miles</span>
+    <span class="sub">Every other truck's figures were unchanged. Two genuinely long days
+    (1,247 and 1,232 miles) were checked and left intact.</span>
+  </div>
+</div>
+
+<hr class="divider">
+
+<h2 class="section">Questions for you</h2>
+<p class="section-sub">These are the only things holding back complete numbers.</p>
+
+<div class="qgroup">Trackers — why some drivers show "no data"</div>
+
+<div class="q"><span class="qn">1</span>
+  <span class="q-ask">There is a tracker running that isn't attached to any truck.</span>
+  <span class="q-why">Device <span class="mono">18000507597</span> has been reporting since
+  25 July and logged 167 miles in the last window. I did not guess which truck it belongs to:
+  its odometer reads about 322,000 while #302's old device read about 82,000 — too far apart
+  to assume it is the replacement. <strong>Which vehicle is it on?</strong> Once you say,
+  those miles stop being orphaned and start counting.</span>
+</div>
+
+<div class="q"><span class="qn">2</span>
+  <span class="q-ask">#302's tracker went silent on 27 July.</span>
+  <span class="q-why">Was it removed, did it fail, or was it swapped for the device above?
+  Rodney's mileage is blank from that date until this is resolved.</span>
+</div>
+
+<div class="q"><span class="qn">3</span>
+  <span class="q-ask">#2372 has been dark for about 15 days.</span>
+  <span class="q-why">Is that a dead tracker or is the truck simply parked? Those look
+  identical from our side, and it decides whether Jayden's blank weeks are a hardware fault
+  or an idle truck.</span>
+</div>
+
+<div class="q"><span class="qn">4</span>
+  <span class="q-ask">INV-24-A has no tracker linked at all.</span>
+  <span class="q-why">So Lesline produces no mileage, ever. Is a device on order for it?
+  You mentioned in August that two were ordered — I want to confirm this one was included.</span>
+</div>
+
+<div class="qgroup">Fuel accuracy — one item still open from the run-dry</div>
+
+<div class="q"><span class="qn">5</span>
+  <span class="q-ask">Can we verify the tank sizes on #91 (240 gal) and #2372 (120 gal)?</span>
+  <span class="q-why">Both were entered by hand with no record of where the figures came
+  from — which is exactly how #33 came to be wrong. <strong>#91 is Shorn's truck, the one
+  that ran out</strong>, and its tank size directly drives the "miles before you refuel"
+  number she now sees. The check is read-only and can run whenever you say.</span>
+</div>
+
+<div class="q"><span class="qn">6</span>
+  <span class="q-ask">Now that the run-out line is actually visible, is 15 miles still the
+  buffer you want?</span>
+  <span class="q-why">When you chose it in August it replaced 50, and it was flagged then
+  that this is 35 miles less margin. You kept 15, which was yours to decide — but you were
+  choosing it blind, because the number was never on screen. Worth a second look now that
+  you can see it in daily use. Changing it takes one setting and no downtime.</span>
+</div>
+
+<div class="qgroup">Confirmations — the new Mileage Analytics page</div>
+
+<div class="q"><span class="qn">7</span>
+  <span class="q-ask">Weeks run Saturday to Friday.</span>
+  <span class="q-why">That matches the week driver invoices are paid on, so mileage and pay
+  line up. Is that the week you want to read, or would you rather see Monday to Sunday?</span>
+</div>
+
+<div class="q"><span class="qn">8</span>
+  <span class="q-ask">Anything else you want on that page?</span>
+  <span class="q-why">Today it answers miles per truck, per driver, per week, month and
+  total, plus the company average. Cost per mile, revenue per mile, or loaded-versus-empty
+  miles are all possible from data we already hold — but I would rather build what you will
+  use than guess.</span>
+</div>
+
+<div class="foot">
+  Note on fleet coverage: mileage is measured from the trackers, so figures currently cover
+  the trucks that report. Where a truck cannot be seen the page shows a dash — never a zero,
+  which would wrongly claim the truck did not move — and it states on screen how much of the
+  fleet each average covers. Questions 1 to 4 are what close that gap.
+</div>
+
+</body></html>

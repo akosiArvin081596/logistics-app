@@ -110,3 +110,19 @@ storage/payout-statements/
 
 # macOS Finder metadata — never useful in the repo
 .DS_Store
+
+# ---------------------------------------------------------------------------
+# Driver documentation MEDIA is generated, not authored.
+#
+# The recorder, the storyboards, the narration text and the README are all
+# committed — `npm run docs:video` rebuilds every clip from them. The binaries
+# are not: ~72 MB of MP4/PNG/PDF that git can never shrink again, and each
+# re-record would add another ~22 MB to history forever. Share the finished
+# files through Drive; regenerate them from source.
+# ---------------------------------------------------------------------------
+docs/driver-video/.raw/
+docs/driver-video/clips/
+docs/driver-video/captions/
+docs/driver-guide/screenshots/
+docs/driver-guide/screenshots-annotated/
+docs/pdf/*.pdf

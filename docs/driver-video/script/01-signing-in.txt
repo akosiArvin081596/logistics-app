@@ -1,0 +1,21 @@
+CLIP       : 01-signing-in.mp4
+SCREEN     : Signing in
+RUN TIME   : 40.8 seconds (measured, not estimated)
+WORDS      : 96 @ 2.35 w/s
+
+--- VOICE-OVER SCRIPT ---
+
+Welcome to LogisX — the app you'll use for every load you run for us. Everything starts on this sign-in screen.
+
+Your username is not your name. It is a driver ID that dispatch gives you. On most accounts it looks like LogisX, a dash, and four numbers. It never changes. Save it in your phone.
+
+Type your password, and tap Sign In. If you've forgotten it, don't guess — call dispatch and they'll reset it for you.
+
+And you're in. This is your Loads list — home base for everything you do in the app.
+
+--- ON-SCREEN CUES ---
+
+- highlight 1 element(s)
+- type into input[autocomplete="username"]
+- type into input[autocomplete="current-password"]
+- tap "SIGN IN"

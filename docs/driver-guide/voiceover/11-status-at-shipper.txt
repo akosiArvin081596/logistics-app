@@ -1,0 +1,33 @@
+SCREENSHOT : 11-status-at-shipper.png
+SCREEN     : Status — it updates itself
+RUN TIME   : approx 34 seconds
+
+--- VOICE-OVER SCRIPT ---
+
+Now the part most drivers get wrong, so listen closely: you do not have to
+update your status.
+
+The six circles are your load, start to finish. Heading to Shipper, At Shipper,
+Loading, In Transit, At Receiver, Delivered.
+
+Your truck moves these on its own. The ELD in the cab reports where you are, and
+when you pull into the shipper the app sees it and marks you At Shipper by
+itself. You don't tap anything. You don't call it in.
+
+The button underneath is a backup, nothing more. If you've arrived and the app
+hasn't caught up — bad signal, or the yard sits outside the mapped zone — you
+can tap it to move things along yourself. Most days you won't need to.
+
+So arrive, do your job, and let the truck do the paperwork.
+
+--- ON-SCREEN CUES ---
+
+- Walk along the six circles as they're named.
+- Emphasise the tick appearing WITHOUT anyone tapping.
+- Point at the blue button only when it's called a backup — don't dwell on it.
+
+--- PRODUCTION NOTE ---
+
+⚠️ REWRITTEN after Deshorn's correction. The earlier version told drivers to
+tap the button at each stop, which is wrong: tryGeofenceAdvance() moves the
+status from the truck's own ELD position. The button is a manual fallback.

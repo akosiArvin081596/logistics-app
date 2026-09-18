@@ -1,0 +1,30 @@
+CLIP       : 03-accept-or-decline.mp4
+SCREEN     : Accepting or declining a load
+RUN TIME   : 48.2 seconds (measured, not estimated)
+WORDS      : 107 @ 2.35 w/s
+
+--- VOICE-OVER SCRIPT ---
+
+When dispatch offers you a load it lands in Pending, and you get an alert on your phone.
+
+The card tells you the load number, where it is going from and to, and your pickup and delivery dates. Read that before you answer.
+
+Two buttons sit right on the card. Decline, and Accept.
+
+If you cannot run it, tap Decline. It asks you to confirm, then the load goes back to the board for another driver. Nothing bad happens — dispatch would far rather know early.
+
+If you can run it, tap Accept.
+
+The load moves straight into your Active tab, and it is yours to run.
+
+--- ON-SCREEN CUES ---
+
+- tap "Pending"
+- highlight 1 element(s)
+- highlight 1 element(s)
+- tap ".load-card .action-btn.accept"
+- tap "Active"
+
+--- PRODUCTION NOTE ---
+
+Filmed on the LOAD CARD, not the detail page. LoadDetail's Accept/Decline sit ~344px below the fold on a 896px viewport (measured y=1240), so every take depended on a scroll landing and one silently tapped the Messages tab instead. The card buttons are on screen from the first frame — and the card is where a driver actually meets the offer.

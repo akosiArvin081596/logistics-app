@@ -1,0 +1,24 @@
+CLIP       : 10-your-kit-and-truck.mp4
+SCREEN     : Your kit and your truck
+RUN TIME   : 48.3 seconds (measured, not estimated)
+WORDS      : 125 @ 2.35 w/s
+
+--- VOICE-OVER SCRIPT ---
+
+The Kit tab is your paperwork, and it is the one to remember at a scale or an inspection.
+
+At the top is you — your name, your carrier, your truck and how we reach you.
+
+Scroll down and you get Truck Documents — the registration, the insurance and the IFTA papers for the truck you are in. Tap View, and show them straight off your phone.
+
+Keep going and you will find your own licence and medical card, and every contract you have signed with us, so you always have a copy on you.
+
+And anything the office has shared with you sits at the bottom. If your truck changes, all of this changes with it, so you are always showing the right papers.
+
+--- ON-SCREEN CUES ---
+
+- tap "Kit"
+
+--- PRODUCTION NOTE ---
+
+The Kit page is taller than three viewports. This clip SCROLLS it — narrating 'your licence, your medical card and every contract you've signed' over a static shot of the profile card promises content the clip never shows.

@@ -1,0 +1,31 @@
+SCREENSHOT : 01-login.png
+SCREEN     : Sign-in screen
+RUN TIME   : approx 20 seconds
+
+--- VOICE-OVER SCRIPT ---
+
+Welcome to LogisX — the app you'll use for every load you run for us.
+
+Everything starts here. Open the app and you'll see this sign-in screen.
+
+Your username isn't your name — it's a driver ID that dispatch gives you when
+you're set up. On most accounts it looks like "LogisX", a dash, and four numbers.
+Whatever yours is, it doesn't change, so it's worth saving in your phone.
+
+Type your username, type your password, and tap Sign In.
+
+If you've forgotten your password, don't guess at it — call dispatch and
+they'll reset it for you.
+
+--- ON-SCREEN CUES ---
+
+- Hold on the full sign-in screen for the first two sentences.
+- Highlight the username field as the driver ID is explained.
+- Highlight the password field, then the Sign In button.
+
+--- ACCURACY NOTE ---
+
+Every driver account checked used the LogisX-#### shape, but that was read off
+existing accounts, not off the onboarding process. The line is hedged ("on most
+accounts") so it stays true if dispatch ever issues a different format. Tighten
+it only if you know the format is guaranteed.

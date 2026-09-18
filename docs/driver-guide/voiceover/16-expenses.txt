@@ -1,0 +1,30 @@
+SCREENSHOT : 16-expenses.png
+SCREEN     : Expenses — logging what you spend
+RUN TIME   : approx 34 seconds
+
+--- VOICE-OVER SCRIPT ---
+
+The Expenses section is where you log anything you've paid for on this load.
+
+Pick the Type — Fuel, Repair, Maintenance, Wear and Tear, Toll, Food or Other.
+Enter the amount and the date.
+
+Take a photo of the receipt and the app will read it for you. It fills in the
+merchant, the city and the state on its own. Always check what it's filled in —
+it's very good, but it isn't perfect, and you can correct any field.
+
+If it's fuel, you'll also get Gallons and Odometer. Fill those in. That's what
+lets us track your truck's fuel economy properly.
+
+Then tap Log Expense.
+
+Do this as you go. A receipt photographed at the pump takes ten seconds; a
+shoebox of faded receipts at the end of the month is a nightmare for everyone —
+and a receipt we can't read is one we may not be able to reimburse.
+
+--- ON-SCREEN CUES ---
+
+- Open the Type dropdown to show the full list.
+- Show the receipt photo being taken and fields auto-filling.
+- Highlight Gallons and Odometer appearing for Fuel.
+- End on the Log Expense button.

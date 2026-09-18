@@ -1,0 +1,17 @@
+SCREENSHOT : 12-status-loading.png
+SCREEN     : Status — Loading
+RUN TIME   : approx 18 seconds
+
+--- VOICE-OVER SCRIPT ---
+
+Same story while they're loading you. The step ticks over on its own as the
+truck's position and movement change.
+
+Each completed step turns blue with a tick, so a glance at your phone tells you
+where the load is up to — and dispatch is seeing exactly the same thing at the
+same moment.
+
+--- ON-SCREEN CUES ---
+
+- Show the tick landing on the completed step.
+- Cut briefly to the status badge at the top changing to match.

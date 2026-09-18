@@ -1,0 +1,48 @@
+SCREENSHOT : 21-invoices.png
+SCREEN     : Invoices — your pay
+RUN TIME   : approx 32 seconds
+
+--- VOICE-OVER SCRIPT ---
+
+Last tab: Invoices. This is your pay.
+
+At the top is the pay week — it runs Saturday to Friday — and you can step back
+through previous weeks with the arrows.
+
+Generate Weekly Invoice builds this week's invoice from the loads you've
+delivered. You usually won't need it — the invoice is generated for you
+automatically every Friday evening.
+
+What does matter is the cut-off: six thirty on Friday evening, Central time.
+Anything delivered and closed out before then lands in that week's pay. Miss it,
+and the load rolls into next week. So if you deliver late on a Friday, close the
+load out — don't leave it for the morning.
+
+Underneath is your invoice history. Each one shows the invoice number, the week
+it covers, what you were paid, how many loads it covered, and the receipts you
+filed against it.
+
+The status tells you where it is: Draft means it hasn't been submitted, Submitted
+means it's with the office, and Approved means it's been signed off.
+
+Check this every week. If a load you delivered isn't on there, tell dispatch
+straight away — the sooner you spot it, the easier it is to fix.
+
+--- ON-SCREEN CUES ---
+
+- Highlight the week selector and the back arrow.
+- Hold on Generate Weekly Invoice.
+- Walk down one invoice card naming each field (the pay figure is blurred).
+- Highlight Draft, Submitted and Approved in the history list.
+- Consider a full-screen caption for "6:30pm Friday, Central" — it is the one
+  number in this guide a driver loses money by not knowing.
+
+--- PRODUCTION NOTE ---
+
+The 6:30pm Central cut-off is now spoken, because it is the one figure that
+costs a driver money to not know. The automatic run is 7:00pm Central — left out
+of the narration deliberately, since drivers don't act on it.
+
+The pay amounts in this frame are BLURRED: it is the only screenshot showing a
+real driver's earnings, and the beat teaches the invoice list's anatomy, not the
+number. Do not replace it with an unredacted capture.

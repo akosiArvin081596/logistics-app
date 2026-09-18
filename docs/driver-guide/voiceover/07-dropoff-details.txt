@@ -1,0 +1,19 @@
+SCREENSHOT : 07-dropoff-details.png
+SCREEN     : Drop-off Details
+RUN TIME   : approx 22 seconds
+
+--- VOICE-OVER SCRIPT ---
+
+Drop-off Details works exactly the same way, for the receiver.
+
+Company name, delivery address, and your delivery appointment — with the same
+pin and copy buttons.
+
+Check this before you leave the shipper, not when you're an hour out. If the
+address looks wrong, or it doesn't match your paperwork, ask dispatch before you
+roll — sorting it out early is a lot cheaper than turning a truck around.
+
+--- ON-SCREEN CUES ---
+
+- Highlight Info, Appointment and Address in order.
+- Point out the pin and clipboard icons again.

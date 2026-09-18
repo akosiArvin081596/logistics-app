@@ -1,0 +1,21 @@
+CLIP       : 12-before-you-go.mp4
+SCREEN     : Before you go
+RUN TIME   : 30.1 seconds (measured, not estimated)
+WORDS      : 68 @ 2.35 w/s
+
+--- VOICE-OVER SCRIPT ---
+
+So that is the app.
+
+Your status looks after itself — the truck reports where you are.
+
+Upload your POD at the receiver. That is the one step that is genuinely on you, and it is what gets you paid.
+
+Log your receipts while you are still standing there.
+
+And if anything looks wrong, message dispatch. Do not sit on it.
+
+That is everything. Drive safe out there.
+
+--- ON-SCREEN CUES ---
+

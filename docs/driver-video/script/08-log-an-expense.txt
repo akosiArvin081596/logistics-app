@@ -1,0 +1,20 @@
+CLIP       : 08-log-an-expense.mp4
+SCREEN     : Logging a fuel receipt
+RUN TIME   : 35.5 seconds (measured, not estimated)
+WORDS      : 106 @ 2.35 w/s
+
+--- VOICE-OVER SCRIPT ---
+
+Bought fuel, paid a toll, or had a repair on the road? Log it against the load while you're still standing there — open the load and tap Expenses.
+
+Pick the type, take a picture of the receipt, and the app reads it for you. The amount, the date, the store, the city and the state all fill themselves in.
+
+Always check what it filled in. It's very good, but it isn't perfect, and you can correct any field before you submit.
+
+Then tap Submit Expense. If you accidentally log the same receipt twice, the app catches it and asks — it won't quietly double up.
+
+--- ON-SCREEN CUES ---
+
+- tap "Active"
+- tap "566293352"
+- tap "Expenses"

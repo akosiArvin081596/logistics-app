@@ -1,0 +1,31 @@
+SCREENSHOT : 02-loads-list.png
+SCREEN     : Loads tab — the home screen
+RUN TIME   : approx 28 seconds
+
+--- VOICE-OVER SCRIPT ---
+
+Once you're in, this is your home screen: your Loads.
+
+Look at the three tabs across the top. Active is the load you're running right
+now. Pending is a load dispatch has sent you that you haven't answered yet.
+Historical is everything you've already delivered — it stays here so you can
+look back at any load you've run.
+
+Each load shows up as a card. The number at the top is the Load ID — that's the
+number dispatch will use when they call you, so it's the one to quote.
+
+On the right is your current status. Underneath, the pickup city and the
+delivery city, and the dates for each.
+
+Tap anywhere on the card to open the load.
+
+Along the bottom you've got five buttons: Loads, Alerts, Kit, Messages and
+Invoices. We'll go through each one.
+
+--- ON-SCREEN CUES ---
+
+- Highlight Active / Pending / Historical in turn.
+- Circle the Load ID at the top-left of the card.
+- Circle the status pill on the right.
+- Point to the pickup-to-delivery line and the two dates.
+- Sweep across the five bottom-bar buttons at the end.
