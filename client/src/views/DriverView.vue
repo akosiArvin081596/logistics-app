@@ -300,45 +300,6 @@
         />
       </section>
 
-      <!-- EXPENSES TAB -->
-      <section v-if="currentTab === 'expenses'" class="tab-panel">
-        <div class="section-header">Expenses</div>
-
-        <ExpenseForm
-          v-if="driverStore.workingLoads.length > 0"
-          :loads="driverStore.workingLoads"
-          :driver-name="driverName"
-          :headers="driverStore.headers.jobTracking"
-          :submit-handler="handleExpenseSubmit"
-        />
-        <EmptyState v-else>
-          No active loads.
-        </EmptyState>
-
-        <div class="section-header" style="margin-top: 1rem;">
-          History
-          <span class="section-count">{{ driverStore.expenses.length }}</span>
-        </div>
-
-        <div v-if="driverStore.expenses.length === 0">
-          <EmptyState>
-            <div class="empty-icon">&#128176;</div>
-            No expenses logged yet.
-          </EmptyState>
-        </div>
-        <div v-else class="expense-list">
-          <ExpenseCard
-            v-for="(exp, i) in driverStore.expenses"
-            :key="exp.id || i"
-            :expense="exp"
-            @preview="receiptPreview = $event"
-          />
-        </div>
-      </section>
-
-      <!-- Receipt preview overlay (zoom + pan, shared with any card in the expenses list) -->
-      <ZoomableImage :src="receiptPreview" alt="Receipt preview" @close="receiptPreview = ''" />
-
       <!-- INVOICES TAB -->
       <section v-if="currentTab === 'invoices'" class="tab-panel">
         <div class="section-header">Invoices</div>
@@ -402,8 +363,6 @@ import LoadCard from '../components/driver/LoadCard.vue'
 import LoadDetail from '../components/driver/LoadDetail.vue'
 import StatusStepper from '../components/driver/StatusStepper.vue'
 import ChatView from '../components/driver/ChatView.vue'
-import ExpenseForm from '../components/driver/ExpenseForm.vue'
-import ExpenseCard from '../components/driver/ExpenseCard.vue'
 import DriverKit from '../components/driver/DriverKit.vue'
 import DocumentUpload from '../components/driver/DocumentUpload.vue'
 import DocumentList from '../components/driver/DocumentList.vue'
@@ -413,7 +372,6 @@ import DocumentSignModal from '../components/driver/DocumentSignModal.vue'
 import InvoiceTab from '../components/driver/InvoiceTab.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
 import StatusBadge from '../components/shared/StatusBadge.vue'
-import ZoomableImage from '../components/shared/ZoomableImage.vue'
 
 const auth = useAuthStore()
 const driverStore = useDriverStore()
@@ -459,7 +417,6 @@ const showFilters = ref(false)
 const detailRowIndex = ref(null)
 const assignedNotification = ref(null)
 const showWelcomeModal = ref(false)
-const receiptPreview = ref('')
 const respondingLoadIds = reactive(new Set())
 function isResponding(load) {
   const loadIdCol = findCol(driverStore.headers.jobTracking, /load.?id|job.?id/i)
@@ -865,10 +822,6 @@ function handleLoadChat({ loadId }) {
   chatLoadId.value = loadId || ''
   currentTab.value = 'messages'
   driverStore.currentTab = 'messages'
-}
-
-function handleChatLoadChange(loadId) {
-  chatLoadId.value = loadId
 }
 
 function onStatusLoadChange() {

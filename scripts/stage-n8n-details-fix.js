@@ -1,5 +1,27 @@
 #!/usr/bin/env node
 /**
+ * ✅ APPLIED AND RETIRED — 2026-08-07. THIS SCRIPT NO LONGER RUNS.
+ *
+ * The change below is LIVE in workflow ydFgTSFpKTyyZbXW. Verified against the
+ * live n8n API on 2026-09-19: the node's mapping already reads
+ *   "Details": "={{ $('JOB DETAILS ENTRY').item.json['Details'] }}"
+ * and production data confirms the cutover — last route-shaped write was load
+ * 562787563 on 8/6/2026; the 53 loads since are all commodity-shaped.
+ *
+ * It is kept for the WHY, which is not recorded anywhere else. It is also now
+ * stale in two ways that would make it abort rather than mis-fire:
+ *   - EXPECTED_NODE_COUNT is 41; the live workflow is 42 (Dedupe Loads In Batch)
+ *   - CURRENT_EXPR "={{ $json.Details }}" no longer exists in the node
+ * Both are load-bearing assertions, so it fails safe. The hard stop below makes
+ * that explicit rather than leaving it to an assertion a future edit might
+ * "helpfully" refresh.
+ *
+ * ⚠️ If you ever need to re-apply this, re-derive it from the LIVE workflow over
+ * the API. Never from this file, and never from CLAUDE.md — node counts and node
+ * names drift, which is exactly how this script went stale.
+ *
+ * ---- original header, unchanged, for the reasoning ----
+ *
  * STAGED n8n CHANGE — awaiting owner approval. Dry run by default; writes only
  * with BOTH `--apply` and `--i-really-mean-production`.
  *
@@ -68,6 +90,15 @@
  *   node scripts/stage-n8n-details-fix.js --apply --i-really-mean-production
  *   node scripts/stage-n8n-details-fix.js --revert --apply --i-really-mean-production
  */
+
+// Hard stop: this change is already live (see header). Re-applying it would be
+// a no-op at best; the real risk is someone refreshing the stale assertions to
+// make it "work" again and PUTting a 41-node body over a 42-node workflow.
+console.error(
+	"stage-n8n-details-fix.js is RETIRED — the fix was applied 2026-08-07 and is live.\n" +
+	"Verify with: GET /api/v1/workflows/ydFgTSFpKTyyZbXW -> nodes[] -> 'Update Job Tracking (Distance)'\n" +
+	"Expected mapping: \"Details\": \"={{ $('JOB DETAILS ENTRY').item.json['Details'] }}\"");
+process.exit(3);
 
 const BASE = process.env.N8N_BASE_URL || "https://sandhub.app.n8n.cloud/api/v1";
 const WORKFLOW_ID = "ydFgTSFpKTyyZbXW";

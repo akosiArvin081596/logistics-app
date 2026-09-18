@@ -223,7 +223,12 @@
           />
           <div v-if="loadExpenses.length > 0" class="expense-history">
             <div class="expense-history-label">Expense History</div>
-            <ExpenseCard v-for="exp in loadExpenses" :key="exp.id" :expense="exp" />
+            <ExpenseCard
+              v-for="exp in loadExpenses"
+              :key="exp.id"
+              :expense="exp"
+              @preview="receiptPreview = $event"
+            />
           </div>
           <van-empty v-else-if="!isActiveLoad" description="No expenses for this load" image="search" :image-size="60" />
         </div>
@@ -239,6 +244,10 @@
       <span>&#10003; Load Accepted</span>
     </div>
 
+    <!-- Receipt preview (zoom + pan). ExpenseCard has always emitted
+         `preview` on a receipt tap; until this was wired the emit went
+         nowhere and tapping a receipt here did nothing. -->
+    <ZoomableImage :src="receiptPreview" alt="Receipt preview" @close="receiptPreview = ''" />
   </div>
 </template>
 
@@ -257,6 +266,9 @@ import RouteDirections from './RouteDirections.vue'
 import DriverFuelPanel from './DriverFuelPanel.vue'
 import ExpenseForm from './ExpenseForm.vue'
 import ExpenseCard from './ExpenseCard.vue'
+import ZoomableImage from '../shared/ZoomableImage.vue'
+
+const receiptPreview = ref('')
 
 const props = defineProps({
   load: { type: Object, required: true },

@@ -8,11 +8,6 @@
         class="status-chip warn"
         title="Real-time connection lost — trying to reconnect"
       >&#9888; Offline</span>
-      <span
-        v-else-if="gpsStatus === 'failing'"
-        class="status-chip warn"
-        title="Location not syncing to dispatch"
-      >&#128205; GPS sync</span>
       <!-- Fuel range, on every driver screen.
            The client's ask after the 2026-08-17 run-dry was that range be
            "displayed throughout even when they park even when they're idling".
@@ -43,7 +38,6 @@ import { useApi } from '../../composables/useApi'
 
 defineProps({
   driverName: { type: String, default: '' },
-  gpsStatus: { type: String, default: 'ok' },
   socketConnected: { type: Boolean, default: true },
   hasEverConnected: { type: Boolean, default: false },
 })
