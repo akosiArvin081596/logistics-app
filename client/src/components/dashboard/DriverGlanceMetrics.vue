@@ -10,11 +10,29 @@
         <path d="M12 7v5l3 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
       </svg>
       <template v-if="etaClock">
+        <!-- ⚠️ THE LEG HAS TO BE NAMED. This row showed a bare clock, and for a
+             truck still heading to the shipper that clock was the RECEIVER's
+             arrival — so it read as "arrives 5:41" about a place the driver was
+             not driving to. DriverRouteMap.arrivalLabel exists for exactly this
+             reason; this is the same fix on the dispatcher row. -->
+        <span class="glance-eta-leg">Delivery</span>
         <span class="glance-eta-time">{{ etaClock }}</span>
         <span v-if="etaDur" class="glance-eta-dur">· {{ etaDur }}</span>
       </template>
       <span v-else class="glance-eta-time muted">ETA —</span>
       <span v-if="statusLabel" class="glance-eta-flag">{{ statusLabel }}</span>
+    </div>
+
+    <!-- Pre-pickup only. The server queues this leg just for loads whose freight
+         is not aboard, so its presence IS the "heading to shipper" signal. -->
+    <div v-if="pickupClock" class="glance-eta glance-eta-pickup" :title="pickupTitle">
+      <svg class="glance-eta-ico" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true">
+        <path d="M12 21s7-6.2 7-11a7 7 0 1 0-14 0c0 4.8 7 11 7 11z" fill="none" stroke="currentColor" stroke-width="2" />
+        <circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2" />
+      </svg>
+      <span class="glance-eta-leg">Shipper</span>
+      <span class="glance-eta-time">{{ pickupClock }}</span>
+      <span v-if="pickupDur" class="glance-eta-dur">· {{ pickupDur }}</span>
     </div>
 
     <div class="glance-chips">
@@ -44,6 +62,10 @@ const props = defineProps({
   etaMinutes: { type: Number, default: null },      // minutes remaining (fallback for countdown)
   etaStatus: { type: String, default: 'unknown' },  // 'on-time' | 'delayed' | 'unknown'
   now: { type: Number, default: () => Date.now() }, // ticking clock for a live countdown
+  // Arrival at the SHIPPER. Present only while the freight is not aboard — the
+  // server queues that leg for pre-pickup loads only.
+  pickupEtaEpochMs: { type: Number, default: null },
+  pickupEtaMinutes: { type: Number, default: null },
 })
 
 const mph = computed(() =>
@@ -80,6 +102,27 @@ const etaDur = computed(() => {
   return `in ${formatMinutes(r)}`
 })
 
+// Same Houston rule and same stamp-the-epoch pattern as the delivery clock
+// above, so the two legs cannot drift apart in format or in zone.
+const pickupClock = computed(() => fmtArrivalClock(props.pickupEtaEpochMs))
+const pickupRemainingMin = computed(() => {
+  if (props.pickupEtaEpochMs != null && Number.isFinite(props.pickupEtaEpochMs)) {
+    return (props.pickupEtaEpochMs - props.now) / 60000
+  }
+  if (props.pickupEtaMinutes != null && Number.isFinite(props.pickupEtaMinutes)) return props.pickupEtaMinutes
+  return null
+})
+const pickupDur = computed(() => {
+  const r = pickupRemainingMin.value
+  if (r == null) return null
+  return r <= 0.5 ? 'arriving' : `in ${formatMinutes(r)}`
+})
+const pickupTitle = computed(() =>
+  pickupClock.value
+    ? `Estimated arrival at the shipper ${pickupClock.value}${pickupDur.value ? ' (' + pickupDur.value + ')' : ''}`
+    : '',
+)
+
 const statusClass = computed(() => ({
   'on-time': props.etaStatus === 'on-time',
   delayed: props.etaStatus === 'delayed',
@@ -93,7 +136,8 @@ const etaTitle = computed(() =>
 )
 const ariaSummary = computed(() => {
   const parts = []
-  if (etaClock.value) parts.push(`ETA ${etaClock.value}${etaDur.value ? ', ' + etaDur.value : ''}`)
+  if (pickupClock.value) parts.push(`Arrives at shipper ${pickupClock.value}${pickupDur.value ? ', ' + pickupDur.value : ''}`)
+  if (etaClock.value) parts.push(`Arrives at delivery ${etaClock.value}${etaDur.value ? ', ' + etaDur.value : ''}`)
   if (props.etaStatus === 'delayed') parts.push('delayed')
   if (mph.value != null) parts.push(`${mph.value} miles per hour`)
   if (mi.value != null) parts.push(`${mi.value} miles remaining`)
@@ -120,6 +164,16 @@ const ariaSummary = computed(() => {
   color: #64748b;
   line-height: 1.2;
 }
+.glance-eta-leg {
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  opacity: 0.75;
+}
+/* The shipper leg is context, not the headline the panel is built around. */
+.glance-eta-pickup { color: #475569; margin-top: 0.1rem; }
+
 .glance-eta.on-time { color: #15803d; }
 .glance-eta.delayed { color: #b91c1c; }
 .glance-eta-ico { flex-shrink: 0; opacity: 0.9; }

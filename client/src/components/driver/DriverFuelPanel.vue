@@ -85,6 +85,18 @@
              so the bar shows the whole thing with the route laid over it. When
              the route marker sits past the bar, "you will not get there" is
              visible before a word is read. -->
+        <!-- ⚠️ HISTORY OUT OF THE CAB, BUT NOT DELETED.
+             "Stats like 56 fill-ups, typical full tank 165 mi, and receipts
+             belong in a driver history tab, not in real-time route guidance."
+             Collapsed by default so the panel answers one question at 60 mph;
+             one tap away, because these are what make the headline auditable.
+             48px tall to match this panel's own floor (see .dfp-cells below) —
+             the DocumentList toggle this copies is 0.4rem, too small for a cab. -->
+        <button class="dfp-how" :aria-expanded="showHow" @click="showHow = !showHow">
+          <span class="dfp-how-chevron" :class="{ open: showHow }" aria-hidden="true">&#9662;</span>
+          How we know
+        </button>
+        <div v-show="showHow" class="dfp-how-body">
         <div
           v-if="interval.hasSpread"
           class="dfp-bar"
@@ -141,6 +153,8 @@
           <span class="dfp-src" :class="basisBadgeClass">{{ interval.basisInfo.short }}</span>
           {{ basisText }}
         </p>
+
+        </div>
 
         <div class="dfp-cells">
           <van-cell title="Fuel level" :value="fuelPctLabel" />
@@ -240,6 +254,7 @@
             rel="noopener noreferrer"
             :aria-label="stopLabel(s, i)"
           >
+            <span v-if="s.leg === 'to_pickup'" class="dfp-stop-leg">Before pickup</span>
             <span v-if="i === cheapestIdx" class="dfp-stop-badge">Cheapest</span>
             <!-- ⚠️ Only ever shown on the rural fallback. findFuelStopsAlongRoute
                  returns truck-capable stops ONLY; it degrades to car stations
@@ -389,6 +404,8 @@ const stops = ref([])
 const stopsError = ref('')
 const stopsLoading = ref(false)
 const livePriceCount = ref(0)
+// Collapsed by default — see the block comment on .dfp-how in the template.
+const showHow = ref(false)
 // Has a fetch ever completed for the current props? Gates the idle state.
 const loaded = ref(false)
 
@@ -1165,6 +1182,30 @@ watch(
   border: 1px solid #e2e8f0;
 }
 
+.dfp-how {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  width: calc(100% - 1.5rem);
+  min-height: 48px;
+  margin: 0.25rem 0.75rem;
+  padding: 0;
+  background: none;
+  border: 0;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #64748b;
+  text-align: left;
+}
+.dfp-how-chevron { transition: transform 0.2s; }
+.dfp-how-chevron.open { transform: rotate(180deg); }
+.dfp-how-body {
+  margin: 0 0.75rem 0.25rem;
+  padding-left: 0.6rem;
+  border-left: 3px solid rgba(100, 116, 139, 0.2);
+}
+
 .dfp-cells :deep(.van-cell) {
   /* Cab-legible + thumb-sized: Vant's 14px/44px default is the floor, not the
      target, for a phone on a dash mount. */
@@ -1329,6 +1370,18 @@ watch(
 .dfp-stop.cheapest {
   border-color: #16a34a;
   background: #f0fdf4;
+}
+
+.dfp-stop-leg {
+  display: inline-block;
+  padding: 0.05rem 0.35rem;
+  border-radius: 5px;
+  background: #eef2ff;
+  color: #3730a3;
+  border: 1px solid #c7d2fe;
+  font-size: 0.6rem;
+  font-weight: 800;
+  text-transform: uppercase;
 }
 
 .dfp-stop-badge {

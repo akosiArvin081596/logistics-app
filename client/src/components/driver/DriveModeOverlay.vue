@@ -85,7 +85,14 @@
           <div v-else class="drive-progress-time">{{ formatRemainingTime(remainingSec) }}</div>
           <div class="drive-progress-meta">
             <span>{{ formatDistance(remainingMeters) }}</span>
-            <span v-if="arrivalClock && !arrived"> · {{ arrivalClock }}</span>
+            <!-- ⚠️ Say what the time IS. It rendered as a bare "3:42 pm" beside a
+                 distance, with nothing saying it was an arrival. Deliberately NOT
+                 switched to fmtArrivalClock: every other surface is pinned to
+                 Houston because a dispatcher may be in Manila, but the driver
+                 reading THIS overlay is physically in the destination's zone, so
+                 local time is the right answer here. The missing label was the
+                 actual defect. -->
+            <span v-if="arrivalClock && !arrived"> · arrive {{ arrivalClock }}</span>
           </div>
           <div v-if="destinationLabel" class="drive-progress-dest">{{ destinationLabel }}</div>
         </div>

@@ -116,6 +116,8 @@
                   :eta-epoch-ms="numOrNull(loc._etaEpochMs)"
                   :eta-minutes="numOrNull(loc.etaMinutes)"
                   :eta-status="loc.etaStatus || 'unknown'"
+                  :pickup-eta-epoch-ms="numOrNull(loc._pickupEtaEpochMs)"
+                  :pickup-eta-minutes="numOrNull(loc.pickupEtaMinutes)"
                   :now="now"
                 />
               </div>
@@ -1785,6 +1787,10 @@ async function fetchLocations() {
     for (const l of locations.value) {
       const em = Number(l.etaMinutes)
       l._etaEpochMs = l.etaMinutes != null && Number.isFinite(em) ? nowMs + em * 60000 : null
+      // The shipper leg, stamped the same way and for the same reason. Present
+      // only on pre-pickup rows — the server queues that leg for those alone.
+      const pm = Number(l.pickupEtaMinutes)
+      l._pickupEtaEpochMs = l.pickupEtaMinutes != null && Number.isFinite(pm) ? nowMs + pm * 60000 : null
     }
     // Sync Google Maps markers
     await nextTick()
