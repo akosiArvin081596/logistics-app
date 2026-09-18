@@ -39002,6 +39002,7 @@ const FUEL_RESERVE_FRACTION = (() => {
 	return Number.isFinite(n) && n >= 0 ? n : fuelModel.TRIP_RESERVE_FRACTION;
 })();
 const FUEL_RESERVE_OPTS = { minMiles: FUEL_RESERVE_MILES, fraction: FUEL_RESERVE_FRACTION };
+
 // How far back we may reach for the last CREDIBLE fuel reading when the live one
 // is a dropout. Bounding it in SQL (rather than by age in the model) keeps the
 // staleness limit next to the query that can actually use the index.
@@ -39607,6 +39608,22 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 		const loadId = queryStr(req.query.loadId);
 		if (!loadId) return res.status(400).json({ ok: false, error: "loadId required" });
 
+		// The load's Job Tracking row. Hoisted out of the dispatcher branch because
+		// EVERY path needs it now: the status decides whether the run to the shipper
+		// is still ahead of the truck, and therefore whether its fuel counts.
+		// getJobTrackingCached() is the 60 s cache, so this is not a new sheet read.
+		const jt = await getJobTrackingCached();
+		const jtHeaders = jt.headers || [];
+		const loadIdCol = findCol(jtHeaders, /load.?id|job.?id/i);
+		const loadTarget = String(loadId).trim().toLowerCase().replace(/^#/, "");
+		const jtRow = loadIdCol
+			? (jt.data || []).find((r) =>
+				String(r[loadIdCol] || "").trim().toLowerCase().replace(/^#/, "") === loadTarget)
+			: null;
+		const statusCol = findCol(jtHeaders, /^status$/i) || findCol(jtHeaders, /status/i);
+		const loadStatus = jtRow && statusCol ? String(jtRow[statusCol] || "").trim() : "";
+		const pickedUp = fuelModel.isPickedUp(loadStatus);
+
 		let truck = null;
 		if (isDriver) {
 			const owned = await loadBelongsToDriver(loadId, req.session.user.driverName);
@@ -39621,14 +39638,8 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 			} else {
 				// Fall back to whoever is actually on the load, so dispatch can ask the
 				// question without first looking up the truck.
-				const jt = await getJobTrackingCached();
-				const headers = jt.headers || [];
-				const driverCol = findCol(headers, /driver/i);
-				const loadIdCol = findCol(headers, /load.?id|job.?id/i);
-				const target = String(loadId).trim().toLowerCase().replace(/^#/, "");
-				const row = (jt.data || []).find((r) => loadIdCol
-					&& String(r[loadIdCol] || "").trim().toLowerCase().replace(/^#/, "") === target);
-				if (row && driverCol && row[driverCol]) truck = resolveTruckForDriverName(String(row[driverCol]));
+				const driverCol = findCol(jtHeaders, /driver/i);
+				if (jtRow && driverCol && jtRow[driverCol]) truck = resolveTruckForDriverName(String(jtRow[driverCol]));
 			}
 		}
 
@@ -39652,21 +39663,59 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 				? { latitude: lc.origin_lat, longitude: lc.origin_lng } : null);
 		if (!from) return res.status(400).json({ ok: false, error: "no position to plan from" });
 
-		let routeMiles = null;
-		try {
-			const route = await getRoute(from, { latitude: lc.dest_lat, longitude: lc.dest_lng });
-			if (route && Number.isFinite(route.distanceMiles)) routeMiles = route.distanceMiles;
-		} catch { /* fall through to the straight-line floor below */ }
+		// ⚠️⚠️ THE RUN TO THE SHIPPER IS PART OF THE TRIP, AND IT USED TO BE FREE.
+		//
+		// This planned `from` -> DELIVERY in one hop, with the pickup nowhere in it.
+		// For a truck that has not collected yet that is not "pickup to drop-off" —
+		// it is a SHORTCUT past the shipper. And since d(T,D) <= d(T,P) + d(P,D),
+		// the answer was always <= the miles actually ahead of the driver, i.e. it
+		// UNDERSTATED the fuel needed. That is the one direction a verdict allowed
+		// to say "clears" must never err in. Reported by the owner 2026-09-18:
+		// "the driver needs to get from wherever he's at to the pickup and that
+		// requires fuel so we have to have that fuel calculation within the model".
+		//
+		// getRoute() sends only origin/destination — the Routes API `intermediates`
+		// field is not used — so two legs cannot be one call. Pre-pickup therefore
+		// costs two Routes calls; fuelPlanLimiter budgets for one, see its note.
+		//
+		// ⚠️ REPLACE, never ADD. Bolting an approach figure onto the old number
+		// double-counts, because the old number already spanned truck -> delivery
+		// and overlaps most of the approach.
+		const dest = { latitude: lc.dest_lat, longitude: lc.dest_lng };
+		const pickup = Number.isFinite(lc.origin_lat) && Number.isFinite(lc.origin_lng)
+			? { latitude: lc.origin_lat, longitude: lc.origin_lng } : null;
+		// Post-pickup the approach leg is zero BY DEFINITION; the status gate is what
+		// stops a phantom second leg being added to a truck already loaded.
+		const planApproach = fuelModel.shouldPlanApproach({ fixFresh, pickedUp, hasPickup: !!pickup });
+
 		// Routes API down -> straight-line distance, which is always SHORTER than
 		// the road. That understates the route, which would flatter the verdict, so
 		// it is inflated by 1.15 (a standard road-vs-crow factor) and labelled. A
 		// null here would drop the panel entirely at exactly the moment a driver is
 		// trying to decide whether to stop.
-		const routeSource = routeMiles != null ? "routes_api" : "straight_line_estimate";
-		if (routeMiles == null) {
-			routeMiles = Math.round(
-				(geolib.getDistance(from, { latitude: lc.dest_lat, longitude: lc.dest_lng }) / 1609.34) * 1.15 * 10) / 10;
+		const crowMiles = (a, b) => Math.round((geolib.getDistance(a, b) / 1609.34) * 1.15 * 10) / 10;
+		const roadMiles = async (a, b) => {
+			try {
+				const r = await getRoute(a, b);
+				return r && Number.isFinite(r.distanceMiles) ? r.distanceMiles : null;
+			} catch { return null; }
+		};
+
+		let approachMiles = 0;
+		let laneMiles = null;
+		let routedBothLegs = true;
+		if (planApproach) {
+			const [a, l] = await Promise.all([roadMiles(from, pickup), roadMiles(pickup, dest)]);
+			routedBothLegs = a != null && l != null;
+			approachMiles = a != null ? a : crowMiles(from, pickup);
+			laneMiles = l != null ? l : crowMiles(pickup, dest);
+		} else {
+			const l = await roadMiles(from, dest);
+			routedBothLegs = l != null;
+			laneMiles = l != null ? l : crowMiles(from, dest);
 		}
+		const routeSource = routedBothLegs ? "routes_api" : "straight_line_estimate";
+		const routeMiles = Math.round((approachMiles + laneMiles) * 10) / 10;
 
 		const burn = burnRateForVehicle(vehicleId);
 		const receipt = receiptMpgForVehicle(vehicleId);
@@ -39696,6 +39745,14 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 			// rather than from the load's pickup — a dispatcher reading a big number
 			// needs to know which question was answered.
 			fromLivePosition: !!fixFresh,
+			// The split, so a dispatcher can see WHY a number moved rather than
+			// distrusting it. `leg` says which question was answered:
+			//   to_pickup   -> routeMiles = truck->shipper + shipper->receiver
+			//   to_delivery -> routeMiles = from->receiver (already loaded, or no fix)
+			leg: planApproach ? "to_pickup" : "to_delivery",
+			approachMiles: planApproach ? Math.round(approachMiles * 10) / 10 : 0,
+			laneMiles: Math.round(laneMiles * 10) / 10,
+			loadStatus: loadStatus || null,
 			fuelPct: pct,
 			// See the same block on /api/fuel/range: provenance of the READING, which
 			// is a different axis from the verdict's rangeBasis. A 'carried' value is
