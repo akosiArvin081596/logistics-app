@@ -415,10 +415,11 @@ function fixedCosts(t) {
   return (pu.unitMonthlyExpenses || 0) - (driverPay(t) / (truckMonths(t) || 1)) - tripExp(t)
 }
 function tripExp(t) {
-  // tripExp = unitMonthlyExpenses - fixedCosts - driverPay/months
-  // We don't have tripExp separately, so derive: total expenses - driverPay - (monthlyGross - monthlyNet - driverPay)
-  // Simpler: just show unitMonthlyExpenses breakdown note
-  return 0 // TODO: backend doesn't send per-truck trip expenses separately yet
+  // Fuel, repairs, maintenance and compliance for this unit, per month. The
+  // server sends it now; this used to return 0 with a TODO, which made
+  // fixedCosts() — total minus driver pay minus THIS — absorb every variable
+  // cost and report it to the investor as fixed.
+  return perUnit(t).unitMonthlyTripExpenses || 0
 }
 function monthlyNet(t) {
   const pu = perUnit(t)
