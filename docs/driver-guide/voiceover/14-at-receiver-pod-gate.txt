@@ -1,0 +1,36 @@
+SCREENSHOT : 14-at-receiver-pod-gate.png
+SCREEN     : Arrived at Receiver — the one step you do yourself
+RUN TIME   : approx 36 seconds
+
+--- VOICE-OVER SCRIPT ---
+
+You'll arrive at the receiver and the app will mark you At Receiver on its own,
+like every step before it.
+
+But the last one is different. Delivered is the only status the app will never
+set for you — and here's why.
+
+Look: five steps ticked, one to go, and there's no Delivered button. Instead:
+
+"Upload a Proof of Delivery in the Documents section before marking as
+Delivered."
+
+That's deliberate and you can't tap past it. The signed paperwork is what we
+invoice the customer against. No POD means no invoice, and it holds up your pay
+as well as ours.
+
+So this is the one moment in the whole load where the app genuinely needs you.
+Photograph the signed paperwork, upload it, then mark the load Delivered.
+
+--- ON-SCREEN CUES ---
+
+- Show five ticked steps and the sixth still open.
+- Point out the action button is ABSENT, not greyed out.
+- Hold on the message long enough to read fully.
+- End pointing down at the Documents section.
+
+--- PRODUCTION NOTE ---
+
+The single most important screen in the guide, and now the pivot of the whole
+status story: everything else is automatic, THIS is the driver's job. Land it
+slowly.

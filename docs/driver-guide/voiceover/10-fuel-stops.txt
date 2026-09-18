@@ -1,0 +1,25 @@
+SCREENSHOT : 10-fuel-stops.png
+SCREEN     : Fuel — where to fill up
+RUN TIME   : approx 30 seconds
+
+--- VOICE-OVER SCRIPT ---
+
+Scroll on and the app answers the next question: where.
+
+These are diesel stops along the route you're already driving, with live pump
+prices, cheapest first. The green tag marks the best one.
+
+Each stop gives you the brand, the address, how old that price is, and how far
+it sits off your route — usually only a couple of tenths of a mile.
+
+Tap Navigate on any of them and it routes you straight there.
+
+Take thirty seconds over this before you pull in somewhere. On a full tank, a
+few cents a gallon is real money, and the cheaper stop is often barely off your
+route.
+
+--- ON-SCREEN CUES ---
+
+- Highlight the section heading, then the CHEAPEST stop card.
+- Compare the two prices side by side.
+- Point out "off route" distance, then Navigate.

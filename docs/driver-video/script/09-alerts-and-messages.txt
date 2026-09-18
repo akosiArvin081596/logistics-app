@@ -1,0 +1,19 @@
+CLIP       : 09-alerts-and-messages.mp4
+SCREEN     : Alerts and messaging dispatch
+RUN TIME   : 29.3 seconds (measured, not estimated)
+WORDS      : 76 @ 2.35 w/s
+
+--- VOICE-OVER SCRIPT ---
+
+The Alerts tab is everything the app wants to tell you — a new load offered, or a status that moved on its own when you arrived somewhere.
+
+Tap any alert and it takes you straight to the load it's about.
+
+And Messages is your direct line to dispatch. Type, send, and it's on their screen.
+
+If you're on a load, dispatch sees which load you're asking about, so you don't have to explain which one.
+
+--- ON-SCREEN CUES ---
+
+- tap "Alerts"
+- tap "Messages"

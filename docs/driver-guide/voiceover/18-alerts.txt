@@ -1,0 +1,19 @@
+SCREENSHOT : 18-alerts.png
+SCREEN     : Alerts
+RUN TIME   : approx 20 seconds
+
+--- VOICE-OVER SCRIPT ---
+
+The Alerts tab is where notifications from dispatch land — a new load assigned to
+you, a change to one you're running, or anything else that needs your attention.
+
+The red badge on the bell tells you how many you haven't read. Tap any alert to
+jump straight to the load it's about, and use Mark all read to clear them down.
+
+Check this at the start of every shift.
+
+--- ON-SCREEN CUES ---
+
+- Highlight the red count badge on the Alerts icon.
+- Tap an alert to show it opening the related load.
+- Point out Mark all read.

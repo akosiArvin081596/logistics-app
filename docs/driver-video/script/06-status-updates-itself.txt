@@ -1,0 +1,32 @@
+CLIP       : 06-status-updates-itself.mp4
+SCREEN     : Your status updates itself
+RUN TIME   : 60.7 seconds (measured, not estimated)
+WORDS      : 160 @ 2.35 w/s
+
+--- VOICE-OVER SCRIPT ---
+
+Here's the part most drivers get wrong, so it's worth thirty seconds. You do not have to update your status. Your truck does it for you.
+
+These six steps are your load start to finish: Heading to Shipper, At Shipper, Loading, In Transit, At Receiver, Delivered.
+
+The black box in your truck reports where you are. Pull into the shipper, and the app moves you to At Shipper by itself. Pull out loaded, and it moves you to In Transit. Reach the receiver, and it marks you At Receiver. You tap nothing.
+
+So the blue button underneath is your backup, not your job. If you've arrived and the app hasn't caught up — a weak signal, or the ELD is slow — tap it.
+
+It always asks you to confirm first, so you can't move a load by accident.
+
+Confirm, and the step ticks over.
+
+That's the whole thing. Arrive, do your job, and let the truck handle the paperwork.
+
+--- ON-SCREEN CUES ---
+
+- tap "Active"
+- tap "566293352"
+- highlight 1 element(s)
+- tap ".action-btn.primary"
+- tap ".confirm-dialog .btn-primary"
+
+--- PRODUCTION NOTE ---
+
+THE most important clip. Drivers routinely believe they must tap at every stop; tryGeofenceAdvance() moves the status from the truck's own ELD position. Land the 'you don't have to do this' line clearly, then the button as a backup.

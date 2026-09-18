@@ -1,0 +1,31 @@
+SCREENSHOT : 15-documents.png
+SCREEN     : Documents — uploading your POD
+RUN TIME   : approx 34 seconds
+
+--- VOICE-OVER SCRIPT ---
+
+Open the Documents section and pick what you're uploading — Proof of Delivery,
+Bill of Lading, a receipt, or anything else.
+
+For a POD or a BOL, use Scan Document. Scan straightens the page, crops the
+edges and cleans up the lighting, so it comes out like a proper scan instead of
+a photo of a bit of paper on your steering wheel. Brokers reject bad photos, and
+a rejected POD delays everyone's money.
+
+If the paperwork runs to more than one page, scan the first page, then use the
+plus button to add the next.
+
+Take Photo and Upload File are there for anything that isn't a POD or BOL.
+
+Once it's uploaded you'll see it listed with a thumbnail — tap it to check it's
+straight and readable before you drive off.
+
+And now the Delivered button will be waiting for you back up in Update Status.
+
+--- ON-SCREEN CUES ---
+
+- Highlight the document-type selector.
+- Hold on Scan Document.
+- Demonstrate adding a second page with the plus button.
+- Show the uploaded thumbnail appearing in the list.
+- Scroll back up to reveal the now-available Delivered button.

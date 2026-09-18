@@ -1,0 +1,25 @@
+CLIP       : 04-your-load-at-a-glance.mp4
+SCREEN     : Your load at a glance
+RUN TIME   : 48.7 seconds (measured, not estimated)
+WORDS      : 146 @ 2.35 w/s
+
+--- VOICE-OVER SCRIPT ---
+
+Open a load and the first thing you get is the map. The blue dot is your truck.
+
+That blue dot comes from the black box wired into your truck — the ELD. It sends your position by itself, all day. You don't have to do anything. You don't have to keep the app open. And you do not have to share your phone's location for us to see you.
+
+Tap Navigate for turn-by-turn directions, spoken out loud. That is the one place the app uses your phone's location. It stays on your phone. It only steers this map.
+
+Scroll down for Pickup Details and Drop-off Details — the addresses, the appointment times, and who to ask for.
+
+Drop-off Details sits right underneath, with the same for the receiver. And every address has a copy button, so you can paste it into whatever you navigate with.
+
+--- ON-SCREEN CUES ---
+
+- tap "Active"
+- tap "566293352"
+- tap "Route Map"
+- tap "Pickup Details"
+- tap "Pickup Details"
+- tap "Drop-off Details"

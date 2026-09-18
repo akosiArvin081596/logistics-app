@@ -1,0 +1,26 @@
+SCREENSHOT : 20-messages.png
+SCREEN     : Messages
+RUN TIME   : approx 24 seconds
+
+--- VOICE-OVER SCRIPT ---
+
+Messages is your direct line to dispatch, and it keeps the whole conversation
+attached to the app rather than scattered across personal phones.
+
+There's a General channel, and you can message about a specific load from the
+load itself — which is better, because dispatch can see exactly which load you
+mean without having to ask.
+
+Use this for anything that isn't urgent: a delay, a question about an address,
+a problem at the dock.
+
+If it's an emergency, or the truck isn't safe to move — phone. Don't type it.
+
+--- ON-SCREEN CUES ---
+
+- Show the message list and the compose box.
+- Demonstrate opening chat from a load card via the chat bubble.
+
+--- PRODUCTION NOTE ---
+
+Keep the closing line firm. Drivers have messaged about breakdowns instead of calling.

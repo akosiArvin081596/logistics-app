@@ -1,0 +1,24 @@
+SCREENSHOT : 06-pickup-details.png
+SCREEN     : Pickup Details
+RUN TIME   : approx 22 seconds
+
+--- VOICE-OVER SCRIPT ---
+
+Next, Pickup Details.
+
+This is your shipper: the company name, the full address, and your pickup
+appointment.
+
+There's a pin and a clipboard icon beside the address. The pin opens it in maps.
+The clipboard copies it, which is the quick way to send it to someone or paste
+it into another app.
+
+That appointment time is the time you're booked in for — not a suggestion. If
+you're going to miss it, message dispatch early so they can call ahead and move
+it.
+
+--- ON-SCREEN CUES ---
+
+- Highlight the shipper name, then the address.
+- Point out the pin and clipboard icons beside the address.
+- Highlight the appointment time.

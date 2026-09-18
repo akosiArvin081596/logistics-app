@@ -1,0 +1,18 @@
+SCREENSHOT : 04-load-accepted.png
+SCREEN     : Load accepted
+RUN TIME   : approx 18 seconds
+
+--- VOICE-OVER SCRIPT ---
+
+Once you accept, the load is yours. The badge at the top changes to Assigned,
+and the load moves out of Pending and into your Active tab.
+
+Dispatch sees your answer straight away — you don't need to ring in and confirm.
+
+From here, everything you need for this load lives on this one screen. Let's go
+through it section by section.
+
+--- ON-SCREEN CUES ---
+
+- Highlight the ASSIGNED badge at the top-right.
+- Then pull back to show the whole load screen.

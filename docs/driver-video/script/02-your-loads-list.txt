@@ -1,0 +1,17 @@
+CLIP       : 02-your-loads-list.mp4
+SCREEN     : Your loads list
+RUN TIME   : 32.6 seconds (measured, not estimated)
+WORDS      : 76 @ 2.35 w/s
+
+--- VOICE-OVER SCRIPT ---
+
+Your loads sit in three tabs. Active is what you are running now. Pending is a load dispatch has offered you, that you have not answered yet. Historical is everything you have finished.
+
+Each card shows the load number, where it's going from and to, and your pickup and delivery dates. Tap any card to open the full load.
+
+If you're looking for an older load, tap Filter and search by load number, city, or date.
+
+--- ON-SCREEN CUES ---
+
+- highlight 1 element(s)
+- highlight 1 element(s)

@@ -1,0 +1,35 @@
+SCREENSHOT : 05-route-map.png
+SCREEN     : Route Map
+RUN TIME   : approx 32 seconds
+
+--- VOICE-OVER SCRIPT ---
+
+First section: the Route Map.
+
+Across the top you get the three numbers that matter. Total miles for the trip.
+Your estimated driving time. And the distance from where your truck is right now
+to your next stop — that's the amber one.
+
+Underneath that is your estimated arrival time.
+
+The blue dot is your truck. That position comes from the ELD in the cab, so it
+updates on its own — you don't have to do anything, and you don't need to share
+your phone's location.
+
+The green marker is your next stop.
+
+Tap Navigate and it hands off to your maps app for turn-by-turn directions.
+
+You can switch between Map and Hybrid view, and Route Options underneath will
+show you alternative routes if there's more than one sensible way to run it.
+
+--- ON-SCREEN CUES ---
+
+- Highlight each of the three figures in turn: miles, ETA, distance to stop.
+- Point to the blue dot, then the green marker.
+- Hold on the Navigate button.
+- Tap Map / Hybrid to show the difference.
+
+--- PRODUCTION NOTE ---
+
+Say the ELD line clearly — drivers regularly assume tracking needs their phone. It does not.

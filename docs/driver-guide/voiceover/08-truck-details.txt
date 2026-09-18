@@ -1,0 +1,16 @@
+SCREENSHOT : 08-truck-details.png
+SCREEN     : Truck Details
+RUN TIME   : approx 18 seconds
+
+--- VOICE-OVER SCRIPT ---
+
+Truck Details shows the unit you're assigned to, along with the details we hold
+on it.
+
+Have a quick look at this on your first load in a truck and make sure the unit
+number matches the one you're actually sitting in. If it doesn't, tell dispatch —
+your miles, your fuel and your pay are all tracked against this unit.
+
+--- ON-SCREEN CUES ---
+
+- Highlight the unit number first, then the remaining details.

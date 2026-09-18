@@ -1,0 +1,24 @@
+SCREENSHOT : 19-kit.png
+SCREEN     : Kit — your documents
+RUN TIME   : approx 26 seconds
+
+--- VOICE-OVER SCRIPT ---
+
+Kit is where your paperwork lives, in three groups.
+
+My Identity Documents is your own — your CDL, front and back, and your medical
+card. Check the expiry dates here. If your medical card is close to running out,
+sort it before it lapses, not after.
+
+Truck Documents is the paperwork for the truck you're assigned to — registration,
+insurance and permits. If you're stopped at a scale and asked for them, this is
+where you get them.
+
+Shared Documents is anything the office has sent you specifically.
+
+It's worth opening Kit once before a long run so you know what's there.
+
+--- ON-SCREEN CUES ---
+
+- Highlight each of the three sections as named.
+- Open one identity document to show the viewer.

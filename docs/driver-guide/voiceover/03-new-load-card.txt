@@ -1,0 +1,34 @@
+SCREENSHOT : 03-new-load-card.png
+SCREEN     : Pending — accept or decline a new load
+RUN TIME   : approx 40 seconds
+
+--- VOICE-OVER SCRIPT ---
+
+When dispatch sends you a load, it lands in Pending — and the tab shows a number
+so you know something's waiting.
+
+Notice you can have one load running and another waiting here at the same time.
+That's normal — dispatch lines your next one up early so you can plan your
+hours. You still run them one at a time.
+
+There are two ways to answer it. Accept and Decline sit right on the card, so
+you can respond without opening anything.
+
+But open it first. Tap the card, read the pickup and drop-off details, and check
+the appointment times against your hours. The same two buttons are waiting at the
+bottom of the load — Accept Load takes it and it becomes yours, Decline Load
+sends it back to dispatch so they can give it to someone else.
+
+Be straight with us here. If the load doesn't work — you haven't got the hours,
+or you can't make the appointment — decline it and tell dispatch why. That's far
+better than accepting it and running late.
+
+--- ON-SCREEN CUES ---
+
+- Highlight the Pending tab and its count badge.
+- Scroll down through the load to reach the buttons.
+- Hold on Decline Load and Accept Load while both are explained.
+
+--- PRODUCTION NOTE ---
+
+The buttons sit at the very bottom of the load — show the scroll, or drivers will look for them at the top.
