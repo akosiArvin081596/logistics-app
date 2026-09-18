@@ -37104,6 +37104,8 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 
 				// First pass: attach loads + coords, collect ETA work
 				const etaTasks = [];
+				// Pre-pickup rows only; see the block comment where these are queued.
+				const pickupEtaTasks = [];
 				for (const loc of locations) {
 					loc.etaStatus = "unknown";
 					loc.etaMinutes = null;
@@ -37148,6 +37150,20 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					if (!isNaN(oLat) && !isNaN(oLng)) {
 						loc.originLat = oLat;
 						loc.originLng = oLng;
+						// ⚠️ THE ROW USED TO SAY "ARRIVES 5:41 AM" AND MEAN THE RECEIVER,
+						// EVEN WHILE THE TRUCK WAS DRIVING TO THE SHIPPER.
+						// originLat/originLng were assigned here and then never read —
+						// the only ETA computed was to dest_*. The owner asked for
+						// "the ETA when a truck is heading to shipper phase … what time
+						// they're gonna arrive at the shipper", so pre-pickup rows now
+						// carry a second, separately-labelled figure. The delivery ETA
+						// is deliberately still computed: TrackingMap's own note says the
+						// panel headline answers "how long until this load reaches
+						// delivery", and this is an ADDITION to that, not a replacement.
+						const st = statusCol ? String(load[statusCol] || "").trim() : "";
+						if (!fuelModel.isPickedUp(st) && loc.latitude != null && loc.longitude != null) {
+							pickupEtaTasks.push({ loc, oLat, oLng });
+						}
 					}
 					if (!isNaN(dLat) && !isNaN(dLng)) {
 						loc.destLat = dLat;
@@ -37191,6 +37207,29 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 								loc.etaStatus = arrival <= scheduled ? "on-time" : "delayed";
 							}
 						} catch { /* ignore parse error */ }
+					}
+				}));
+
+				// The shipper leg. Same getRoute cache (15 min, 3 dp), same haversine
+				// fallback. No on-time/delayed verdict: there is no pickup-appointment
+				// column to judge against, and inventing one would be worse than
+				// staying silent.
+				await Promise.all(pickupEtaTasks.map(async ({ loc, oLat, oLng }) => {
+					const route = await getRoute(
+						{ latitude: loc.latitude, longitude: loc.longitude },
+						{ latitude: oLat, longitude: oLng },
+					);
+					if (route) {
+						loc.pickupEtaMinutes = route.durationMin;
+						loc.pickupDistanceMiles = Number.isFinite(route.distanceMiles) ? route.distanceMiles : null;
+					} else {
+						const distMeters = geolib.getDistance(
+							{ latitude: loc.latitude, longitude: loc.longitude },
+							{ latitude: oLat, longitude: oLng },
+						);
+						loc.pickupDistanceMiles = Math.round((distMeters / 1609.34) * 10) / 10;
+						const speed = loc.speed > 1 ? loc.speed : DEFAULT_SPEED_MPS;
+						loc.pickupEtaMinutes = Math.round(distMeters / speed / 60);
 					}
 				}));
 			}
@@ -39853,6 +39892,17 @@ const POI_CACHE_MAX = 200;
 // waypoint count — clamp(ceil(routeMiles/75), 4, 8) — which `limit` cannot
 // influence. Same requests, more rows per request, one entry that fits all.
 const POI_FETCH_CAP = 25;
+// ⚠️ THE APPROACH LEG'S ORIGIN IS A MOVING TRUCK, SO IT NEEDS A COARSER GRID.
+// The lane key below rounds to 3 decimals (~111 m) because both its endpoints
+// are fixed addresses. Reuse that for a truck and the key changes every ~111 m
+// of travel — every change is a miss costing 4-8 billed Places calls, and the
+// 200-entry FIFO then evicts the stable lane entries that were earning their
+// keep. 1 decimal is ~11 km, which is far below the 20 km search radius, so two
+// positions sharing a key genuinely see the same stops.
+function poiApproachCacheKey(tLat, tLng, pLat, pLng) {
+	return `${tLat.toFixed(1)},${tLng.toFixed(1)}>${pLat.toFixed(3)},${pLng.toFixed(3)}|approach`;
+}
+
 function poiCacheKey(oLat, oLng, dLat, dLng) {
 	return `${oLat.toFixed(3)},${oLng.toFixed(3)}>${dLat.toFixed(3)},${dLng.toFixed(3)}`;
 }
@@ -39872,6 +39922,103 @@ function poiCacheKey(oLat, oLng, dLat, dLng) {
 // worse than reading one load: it is an arbitrary route-pricing oracle for any
 // lane in the country, billed to us at 4–8 Places calls a shot. Dispatch keeps
 // the raw-coordinate form (they price prospective lanes that have no load yet).
+/**
+ * Diesel stops on the run to the SHIPPER, for a load whose freight is not aboard.
+ *
+ * Returns [] — never throws to the caller — for every reason not to bother:
+ * no load, no truck, no fresh fix, already collected, or the shipper close
+ * enough that a stop on the way is not a real decision.
+ *
+ * ⚠️ Gated deliberately. Each miss fans out to 4-8 billed Places calls on the
+ * Enterprise+Atmosphere SKU, and poiLimiter allows a Driver only 6 requests per
+ * 15 min — doubling the fan-out per request would halve that budget. The
+ * distance floor is what keeps the common case (truck already at the shipper)
+ * free.
+ */
+const POI_APPROACH_MIN_MI = 30;
+// How many pre-pickup stops may appear before the haul's own list.
+const POI_APPROACH_MAX = 4;
+
+async function approachStopsFor(loadId, pickupLat, pickupLng) {
+	if (!loadId || !Number.isFinite(pickupLat) || !Number.isFinite(pickupLng)) return [];
+
+	// Status first: it is a cached sheet read, so it is the cheapest way to say no.
+	const jt = await getJobTrackingCached();
+	const headers = jt.headers || [];
+	const loadIdCol = findCol(headers, /load.?id|job.?id/i);
+	if (!loadIdCol) return [];
+	const target = String(loadId).trim().toLowerCase().replace(/^#/, "");
+	const row = (jt.data || []).find((r) =>
+		String(r[loadIdCol] || "").trim().toLowerCase().replace(/^#/, "") === target);
+	if (!row) return [];
+	const statusCol = findCol(headers, /^status$/i) || findCol(headers, /status/i);
+	if (fuelModel.isPickedUp(statusCol ? row[statusCol] : "")) return [];
+
+	const driverCol = findCol(headers, /driver/i);
+	const truck = driverCol && row[driverCol] ? resolveTruckForDriverName(String(row[driverCol])) : null;
+	const vid = (truck && truck.routemate_vehicle_id) || "";
+	if (!vid) return [];
+
+	const fix = db.prepare(`SELECT latitude, longitude, location_date_ms FROM routemate_telemetry
+		WHERE routemate_vehicle_id = ? AND dropped_reason = '' ORDER BY id DESC LIMIT 1`).get(vid);
+	const fresh = fix && fix.location_date_ms
+		&& Date.now() - fix.location_date_ms < 6 * 60 * 60 * 1000
+		&& Number.isFinite(fix.latitude) && Number.isFinite(fix.longitude);
+	if (!fresh) return [];
+
+	const awayMi = geolib.getDistance(
+		{ latitude: fix.latitude, longitude: fix.longitude },
+		{ latitude: pickupLat, longitude: pickupLng }) / 1609.34;
+	if (awayMi < POI_APPROACH_MIN_MI) return [];
+
+	const key = poiApproachCacheKey(fix.latitude, fix.longitude, pickupLat, pickupLng);
+	const hit = poiStopsCache.get(key);
+	if (hit && Date.now() - hit.time < POI_CACHE_TTL_MS) return hit.stops;
+
+	let routePath = null;
+	try {
+		const r = await getRoute(
+			{ latitude: fix.latitude, longitude: fix.longitude },
+			{ latitude: pickupLat, longitude: pickupLng });
+		if (r && Array.isArray(r.points) && r.points.length >= 2) routePath = r.points;
+	} catch { /* straight-line sampling is an acceptable degrade */ }
+
+	const stops = await poiFuelStops.findFuelStopsAlongRoute({
+		originLat: fix.latitude, originLng: fix.longitude,
+		destLat: pickupLat, destLng: pickupLng,
+		apiKey: GOOGLE_MAPS_API_KEY, limit: POI_FETCH_CAP, routePath,
+	});
+	const priced = (stops || []).map((st) => {
+		const hasLive = Number.isFinite(st.dieselPrice);
+		return {
+			...st,
+			leg: "to_pickup",
+			priceSource: hasLive ? "station" : null,
+			effectivePrice: hasLive ? st.dieselPrice : null,
+			priceAsOf: hasLive ? (st.dieselPriceUpdated || null) : null,
+		};
+	});
+	priced.sort((a, b) => {
+		const al = a.priceSource === "station", bl = b.priceSource === "station";
+		if (al && bl) return a.effectivePrice - b.effectivePrice;
+		if (al !== bl) return al ? -1 : 1;
+		return (a.aboutMilesFromRoute || 0) - (b.aboutMilesFromRoute || 0);
+	});
+	// ⚠️ CAP IT. The caller PREPENDS these, so an uncapped approach leg fills the
+	// whole result and the driver loses every stop on the actual haul — measured:
+	// 12 of 12 were to_pickup. The ask was "show a FEW locations … in the headed
+	// to shipper phase", not "replace the list".
+	priced.length = Math.min(priced.length, POI_APPROACH_MAX);
+
+	// Same rule as the lane cache: an empty array is ambiguous between "no truck
+	// stops here" and "Places was briefly down", so it is never pinned.
+	if (priced.length) {
+		poiStopsCache.set(key, { stops: priced, time: Date.now() });
+		while (poiStopsCache.size > POI_CACHE_MAX) poiStopsCache.delete(poiStopsCache.keys().next().value);
+	}
+	return priced;
+}
+
 app.get("/api/poi/fuel-stops", requireRole("Super Admin", "Dispatcher", "Driver"), poiLimiter, async (req, res) => {
 	try {
 		let oLat = parseFloat(req.query.originLat), oLng = parseFloat(req.query.originLng),
@@ -39940,6 +40087,7 @@ app.get("/api/poi/fuel-stops", requireRole("Super Admin", "Dispatcher", "Driver"
 				const hasLive = Number.isFinite(s.dieselPrice);
 				return {
 					...s,
+					leg: "to_delivery",
 					priceSource: hasLive ? "station" : null,
 					effectivePrice: hasLive ? s.dieselPrice : null,
 					priceAsOf: hasLive ? (s.dieselPriceUpdated || null) : null,
@@ -39953,6 +40101,23 @@ app.get("/api/poi/fuel-stops", requireRole("Super Admin", "Dispatcher", "Driver"
 				if (al !== bl) return al ? -1 : 1;
 				return (a.aboutMilesFromRoute || 0) - (b.aboutMilesFromRoute || 0);
 			});
+			// ⚠️ THE STOPS WERE ALL PAST THE SHIPPER.
+			//
+			// This resolved load_coordinates.origin_* -> dest_* for every role and
+			// every status, so a truck 368 mi from the pickup was shown only stops
+			// BEYOND the pickup — the owner asked for "few locations that also in
+			// the headed to shipper phase so that way the fuel stops could be
+			// before they pick up the load".
+			//
+			// ⚠️ TWO SEPARATE CALLS, NEVER ONE CONCATENATED PATH. MAX_WAYPOINTS is a
+			// hard 8 in lib/poi-fuel-stops.js, so feeding it an ~870 mi two-leg path
+			// samples one 12.4 mi circle every ~124 mi and SILENTLY THINS the lane
+			// coverage that works today. Two calls give each leg its own 4-8.
+			try {
+				const approach = await approachStopsFor(loadId, oLat, oLng);
+				if (approach.length) priced = approach.concat(priced);
+			} catch (e) { console.error("[poi/fuel-stops] approach leg:", e.message); }
+
 			// Only cache a NON-EMPTY result. findFuelStopsAlongRoute degrades a failed
 			// waypoint to [] silently, so an empty array is ambiguous between "no
 			// truck stops on this lane" and "Places was briefly down" — pinning the
