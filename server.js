@@ -7034,24 +7034,77 @@ function guardInvoicePdf(req, res, next, url, file) {
 //   uploads/rate-cons/ IS `${loadId}.pdf`, i.e. fully enumerable, and is
 //   role-gated in the handler below rather than by an ownership rule.
 //
-//   uploads/onboarding/ holds DRUG TEST results — medical data, and arguably
-//   the most sensitive tree here. It is deliberately NOT guarded, because the
-//   property that made the signed docs exploitable is absent: those filenames
-//   are `${docKey}-${userId}-signed.pdf` over a five-key vocabulary and a small
-//   sequential id, i.e. enumerable in a few hundred requests, whereas a drug
-//   test is `drug-test-${userId}-${Date.now()}.<ext>` and guessing it means
-//   guessing the millisecond it was uploaded. Its URL is also only ever handed
-//   to Super Admin / Dispatcher. So it is a secret-URL, which is weak but not
-//   free, against a guard that would need its own ownership rule and its own
-//   regression surface.
-//   ⚠️ That reasoning is entirely about the FILENAME, not about sensitivity. If
-//   anything ever makes those names predictable — a rename, a backfill, a
-//   migration that drops the timestamp, or a listing endpoint that hands the
-//   url to a Driver — add it here immediately.
+//   uploads/onboarding/ holds DRUG TEST results and IS guarded, as of the
+//   2026-09-19 review. It was previously left out on the grounds that
+//   `drug-test-${userId}-${Date.now()}.<ext>` is unguessable — but that argument
+//   was only ever about the FILENAME, and the comment that made it named its own
+//   escape condition: "a listing endpoint that hands the url to a Driver — add
+//   it here immediately." That condition was already met. GET /api/onboarding/
+//   :userId returned SELECT * from driver_onboarding, which carries
+//   drug_test_file_url, and fenced only the Driver role — so an Investor session
+//   could walk the id space and harvest every driver's result URL without
+//   guessing anything. Secret-URL was never the protection it was taken for.
+/**
+ * uploads/onboarding/ — DRUG TEST RESULTS. Medical data, and the most sensitive
+ * tree here.
+ *
+ * ⚠️ THIS GUARD DENIES THE OWNING DRIVER, WHICH INVERTS EVERY OTHER GUARD HERE.
+ * guardDriverSignedDoc lets a driver read their own document; here that is the
+ * one thing to refuse. server.js's driver payload already states the rule —
+ * "drivers must NOT see their own drug test result — legal requirement" — and
+ * strips the three columns for exactly that reason. Copying the signed-doc
+ * guard's `uid === owner -> next()` shape would hand a driver their own result
+ * through the back door.
+ *
+ * Super Admin and Dispatcher only, mirroring the two listing endpoints that are
+ * the sole legitimate sources of these URLs
+ * (GET /api/drivers-directory/:id/documents and GET /api/trucks/:id/driver-files).
+ *
+ * ⚠️ .all() + .some(), never .get(). driver_onboarding.drug_test_file_url has no
+ * unique index — the table's only index is idx_do_app_id — so a fetch-one can
+ * refuse the real row and admit a stranger. Ownership checks are MEMBERSHIP
+ * tests.
+ *
+ * ⚠️ Matches on the FULL url, not the bare filename: this column stores the
+ * whole "/uploads/onboarding/<name>" path, the opposite of invoices.pdf_file_name.
+ * That is why the caller hands over both.
+ *
+ * Roughly half the files on disk are orphans (nothing unlinks the old file when
+ * a drug test is re-uploaded), so a DB-authoritative guard 404s them. That is
+ * fail-closed and costs nothing: every legitimate link is built from a row.
+ */
+function guardDrugTestFile(req, res, next, url) {
+	let rows;
+	try {
+		rows = db.prepare(
+			"SELECT user_id FROM driver_onboarding WHERE drug_test_file_url = ?"
+		).all(url);
+	} catch {
+		return res.status(404).end();   // unreadable table -> fail closed
+	}
+	if (!rows.length) return res.status(404).end();
+
+	const user = req.session.user;
+	if (user.role === "Super Admin" || user.role === "Dispatcher") {
+		// Medical data under a SHARED super_admin login: the audit row is the only
+		// record of which session read it.
+		auditConfidentialRead(req, "driver_onboarding", rows[0].user_id, "drug test result");
+		return next();
+	}
+	// 404, never 403 — a 403 confirms a drug test exists for that user id, which
+	// is itself the disclosure.
+	return res.status(404).end();
+}
+
 const GUARDED_UPLOAD_DIRS = [
 	{ dir: "/onboarding-signed/", guard: guardDriverSignedDoc },
 	{ dir: "/investor-onboarding-signed/", guard: guardInvestorSignedDoc },
 	{ dir: "/invoices/", guard: guardInvoicePdf },
+	// ⚠️ THE TRAILING SLASH IS LOAD-BEARING. The match is a startsWith, so
+	// "/onboarding" without it would also swallow /onboarding-signed/ and
+	// /onboarding-templates/, routing signed W-9s to the drug-test guard. With
+	// the slash no entry prefixes another and array order is irrelevant.
+	{ dir: "/onboarding/", guard: guardDrugTestFile },
 ];
 
 app.use("/uploads", requireAuth, (req, res, next) => {
@@ -11078,14 +11131,31 @@ app.get("/api/onboarding", requireRole("Super Admin"), (req, res) => {
 app.get("/api/onboarding/:userId", requireAuth, (req, res) => {
 	try {
 		const userId = parseInt(req.params.userId);
-		// Drivers can only access their own
-		if (req.session.user.role === "Driver" && req.session.user.id !== userId) {
+		// ⚠️ THIS FENCED ONLY THE DRIVER ROLE, AND THERE ARE FOUR.
+		// An INVESTOR session could walk /api/onboarding/1..N and read every
+		// driver's record — including drug_test_file_url, because the query was
+		// SELECT * — then fetch the file straight off the static mount. That is
+		// what made the "unguessable filename" argument for leaving
+		// uploads/onboarding/ unguarded false: nothing had to be guessed.
+		// Anyone who is not dispatch may read their OWN record and nobody else's.
+		const me = req.session.user;
+		const privileged = me.role === "Super Admin" || me.role === "Dispatcher";
+		if (!privileged && me.id !== userId) {
 			return res.status(403).json({ error: "Forbidden" });
 		}
 		const onboarding = db.prepare(
 			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM driver_onboarding WHERE user_id = ?"
 		).get(userId);
 		if (!onboarding) return res.status(404).json({ error: "No onboarding record" });
+		// ⚠️ A DRIVER MUST NOT SEE THEIR OWN DRUG TEST RESULT — legal requirement,
+		// already stated and enforced on the main driver payload, which omits these
+		// three columns for the same reason. SELECT * here quietly handed them back
+		// on the one route a driver can call about themselves.
+		if (!privileged) {
+			delete onboarding.drug_test_result;
+			delete onboarding.drug_test_file_url;
+			delete onboarding.drug_test_uploaded_at;
+		}
 		// Stripped because this route restricts only the Driver role — a
 		// Dispatcher reaches it, and a driver's signing IP and user agent are
 		// not dispatch's business. See stripSigningEvidence().
