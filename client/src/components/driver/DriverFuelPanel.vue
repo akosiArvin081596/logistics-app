@@ -464,8 +464,11 @@ const planCaveats = computed(() => {
   const p = plan.value
   if (!p || p.verdict === 'unknown') return []
   const out = []
+  if (p.leg === 'to_pickup' && p.approachMiles) {
+    out.push(`This includes the ${milesText(p.approachMiles)} mi to get to the shipper.`)
+  }
   if (p.fromLivePosition === false) {
-    out.push("Measured from this load's pickup — your truck hasn't reported a recent position.")
+    out.push("Measured from this load's pickup — your truck hasn't reported a recent position, so the run to the shipper isn't counted.")
   }
   if (p.routeSource === 'straight_line_estimate') {
     out.push('Road distance was unavailable, so this is an estimate from the straight-line distance.')

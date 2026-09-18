@@ -419,11 +419,16 @@ const planCaveats = computed(() => {
   const p = plan.value
   if (!p) return []
   const out = []
-  // Which question was answered. Planning from the pickup on a truck already
-  // rolling overstates the distance left, so a dispatcher reading a big
-  // shortfall needs to know it may be measured from the wrong end.
+  // Which question was answered. Both halves matter to a dispatcher reading a
+  // big shortfall: where it was measured FROM, and whether the run to the
+  // shipper is inside the number.
+  if (p.leg === 'to_pickup' && p.approachMiles) {
+    out.push(`Includes ${milesText(p.approachMiles)} mi to reach the shipper.`)
+  }
   if (p.fromLivePosition === false) {
-    out.push('Measured from the load origin — no recent fix from this truck.')
+    // Without a fix there is no truck position, so the approach leg cannot be
+    // measured at all — say that, rather than implying only the start point moved.
+    out.push('Measured from the pickup — no recent fix, so the run to the shipper is not counted.')
   }
   if (p.routeSource === 'straight_line_estimate') {
     out.push('Road distance unavailable; estimated from straight-line distance.')
