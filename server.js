@@ -5768,6 +5768,30 @@ const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || "";
 const GOOGLE_MAPS_BROWSER_KEY =
 	process.env.GOOGLE_MAPS_BROWSER_KEY || GOOGLE_MAPS_API_KEY;
 
+// ⚠️ THE FALLBACK ABOVE IS SILENT, AND THAT SILENCE IS THE PROBLEM. With
+// GOOGLE_MAPS_BROWSER_KEY unset, GET /api/config/maps-key serves the SERVER key
+// to every anonymous visitor, and nothing anywhere says so — the split looks
+// deployed because the code reads the variable, while in reality one key is
+// doing both jobs and therefore cannot carry either restriction (a referrer
+// restriction breaks every server call; an IP restriction breaks every map).
+// Audited 2026-09-19: no application restriction and no API allowlist, verified
+// empirically from an off-VPS IP with no Referer.
+//
+// ⚠️ NEVER log or return the key, or any prefix of it. A digest is enough to
+// answer "are these two the same?", which is the only question being asked.
+const GOOGLE_MAPS_BROWSER_KEY_IS_DISTINCT =
+	!!process.env.GOOGLE_MAPS_BROWSER_KEY &&
+	process.env.GOOGLE_MAPS_BROWSER_KEY !== GOOGLE_MAPS_API_KEY;
+if (GOOGLE_MAPS_API_KEY && !GOOGLE_MAPS_BROWSER_KEY_IS_DISTINCT) {
+	console.warn(
+		"[maps] ⚠️ GOOGLE_MAPS_BROWSER_KEY is not set to a distinct value — " +
+		"/api/config/maps-key is serving the SERVER key to every visitor. " +
+		"One key cannot be restricted (referrer breaks server calls, IP breaks maps), " +
+		"so until a second key exists the published key cannot be locked down. " +
+		"Spend is capped only by per-API quota limits in the Google console.",
+	);
+}
+
 // Gemini OCR — optional. When GEMINI_API_KEY is unset, the expense OCR
 // endpoint returns 503 and the driver form silently falls back to manual
 // entry. Called via fetch (no SDK) so boot still works on hosts without the
@@ -40328,9 +40352,103 @@ app.get("/api/poi/fuel-stops", requireRole("Super Admin", "Dispatcher", "Driver"
 //
 // no-store so the key is never parked in a shared/proxy cache: a rotation must
 // take effect on the next page load, not whenever an intermediary expires it.
-app.get("/api/config/maps-key", (req, res) => {
+// ⚠️ DELIBERATELY GENEROUS, and this is a customer-facing dependency. The
+// public tracker's map fails to render if this 429s, so a tight limit trades a
+// real outage for a theoretical benefit. A dispatch office behind one NAT shares
+// an IP — exactly the mistake recorded for poiLimiter, which was keyed per-IP
+// and throttled the cheap shared callers while leaving the expensive ones free.
+//
+// ⚠️ BE HONEST ABOUT WHAT THIS BUYS: an attacker needs the key ONCE, so this
+// does not prevent harvesting and must never be described as if it does. Its
+// value is protecting the integrity of the handout counter below, and stopping
+// the endpoint being used as a free key-distribution service.
+const mapsKeyLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 300,
+	message: { error: "Too many requests. Try again later." },
+	standardHeaders: true,
+});
+
+// ---------------------------------------------------------------------------
+// Maps key handout counter
+// ---------------------------------------------------------------------------
+// ⚠️ WHY THIS EXISTS. Browser->Google calls never touch this server, so the
+// billed Dynamic Maps load volume was simply unmeasurable from here — an audit
+// that estimated "legitimate usage" from server-side calls alone omitted the
+// entire browser surface and understated it. But `useGoogleMaps` fetches THIS
+// endpoint once per map-loading page view, immediately before loading the Maps
+// JS API, so a handout is a close proxy for one billed map load.
+//
+// ⚠️ A PROXY, NOT GOOGLE'S COUNT. The console remains authoritative. This exists
+// so the console's number can be compared against a known baseline, and so a
+// quota cap can be sized from data instead of a guess.
+//
+// ⚠️ This does NOT reduce the exposure. The published key is unrestricted; only
+// a per-API quota cap in the Google console stops spend. This is measurement.
+const MAPS_KEY_HANDOUT_PREFIX = "maps_key_handouts:";
+// Dynamic Maps list price per 1,000 loads. Published in the response rather than
+// hidden in a calculation so the estimate can never silently drift from reality.
+const MAPS_DYNAMIC_LOAD_USD_PER_1K = Number(process.env.MAPS_DYNAMIC_LOAD_USD_PER_1K || 7);
+
+// Bucketed by the HOUSTON business day, not UTC — every other daily figure in
+// this app is Central, and a UTC bucket would disagree with all of them at the
+// seam. Reuses houstonDay() rather than re-deriving the rule.
+function bumpMapsKeyHandout() {
+	try {
+		const key = MAPS_KEY_HANDOUT_PREFIX + houstonDay();
+		db.prepare(
+			`INSERT INTO server_state (key, value, updated_at) VALUES (?, '1', CURRENT_TIMESTAMP)
+			 ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT),
+			                                updated_at = CURRENT_TIMESTAMP`,
+		).run(key);
+	} catch {
+		// ⚠️ Swallowed on purpose. A counter must never be able to fail the
+		// endpoint that hands the map its key — that would turn a diagnostic
+		// into an outage on the public tracker.
+	}
+}
+
+app.get("/api/config/maps-key", mapsKeyLimiter, (req, res) => {
 	res.set("Cache-Control", "no-store");
+	bumpMapsKeyHandout();
 	res.json({ key: GOOGLE_MAPS_BROWSER_KEY });
+});
+
+// GET /api/admin/maps-key-usage — Super Admin. Measured browser-side Maps
+// volume, so the Google console bill has something to be compared against.
+// ⚠️ Returns no key material of any kind — only whether the two keys differ.
+app.get("/api/admin/maps-key-usage", requireRole("Super Admin"), (req, res) => {
+	try {
+		const rows = db.prepare(
+			`SELECT key, value FROM server_state WHERE key LIKE ? ORDER BY key DESC LIMIT 30`,
+		).all(MAPS_KEY_HANDOUT_PREFIX + "%");
+		const days = rows.map((r) => ({
+			day: r.key.slice(MAPS_KEY_HANDOUT_PREFIX.length),
+			handouts: parseInt(r.value, 10) || 0,
+		}));
+		const today = houstonDay();
+		const total = days.reduce((a, d) => a + d.handouts, 0);
+		const perDay = days.length ? total / days.length : 0;
+		res.json({
+			today,
+			todayHandouts: (days.find((d) => d.day === today) || {}).handouts || 0,
+			days,
+			avgHandoutsPerDay: Math.round(perDay * 10) / 10,
+			// A proxy for billed Dynamic Maps loads — see the comment above.
+			estimatedBrowserUsdPerDay: Math.round((perDay / 1000) * MAPS_DYNAMIC_LOAD_USD_PER_1K * 100) / 100,
+			estimatedBrowserUsdPerMonth: Math.round((perDay * 30 / 1000) * MAPS_DYNAMIC_LOAD_USD_PER_1K * 100) / 100,
+			assumedUsdPer1kLoads: MAPS_DYNAMIC_LOAD_USD_PER_1K,
+			// ⚠️ false => the SERVER key is what every visitor receives, and it
+			// therefore cannot carry a referrer restriction without breaking
+			// every server-side Maps call.
+			browserKeyDistinct: GOOGLE_MAPS_BROWSER_KEY_IS_DISTINCT,
+			note: "Handouts are a PROXY for billed Dynamic Maps loads, not Google's own count. " +
+				"The Cloud console is authoritative. This endpoint does not restrict or cap anything — " +
+				"only a per-API quota cap in the console stops spend.",
+		});
+	} catch (e) {
+		res.status(500).json({ error: "Failed to read maps key usage" });
+	}
 });
 
 // --- Investor maintenance notice --------------------------------------------
