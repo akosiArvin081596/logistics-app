@@ -2,6 +2,29 @@
      CLAUDE.md now carries a short summary and points here. Nothing was reworded or dropped. -->
 
 # Maps key split — one key cannot be restricted, two can
+
+> **⚠️ Re-audited 2026-09-19 — still unrestricted, and my own earlier estimate was wrong.**
+> Verified empirically from an off-VPS IP: the published key works with **no `Referer`**, with a
+> **forged `Referer`**, against the **Directions API this app never calls** (so there is still no API
+> allowlist), and against **Places `searchNearby`** (so the priciest SKU is reachable from the
+> published key). `GOOGLE_MAPS_BROWSER_KEY` is **unset in production**, so the endpoint is serving
+> the **server** key — confirmed by digest.
+>
+> Three corrections to the cost analysis that was circulated, all of which made it look *better*
+> than reality:
+> - **The baseline estimate omitted the browser surface entirely.** It counted server-side calls
+>   only; **10 client files** load the Maps JavaScript API and **Dynamic Maps loads are also billed**.
+> - **"Four orders of magnitude" between normal and abuse was overstated** — measured, it is
+>   **2.3–4.2 depending on baseline, i.e. ~3**.
+> - **"Detection is easy" assumed a budget alert exists.** That was never verified and cannot be
+>   verified from the app side. Without one, the discovery point is the monthly invoice.
+>
+> **The real number now lives in the app.** `GET /api/admin/maps-key-usage` (Super Admin) reports
+> measured daily key handouts, which are a **proxy for billed Dynamic Maps loads** — `useGoogleMaps`
+> fetches the key once per map-loading page view. ⚠️ It is a proxy, not Google's count; the console
+> stays authoritative. ⚠️ **It restricts and caps nothing** — only a per-API quota cap does that. It
+> exists so the cap can be sized from data instead of a guess.
+
 `GET /api/config/maps-key` publishes a Maps key to every visitor. That is by design (the SPA needs one), so the **only** thing standing between that key and an arbitrary bill is a Google Cloud console restriction. Audited 2026-08-08: there was **none** — no application restriction and no API allowlist, verified empirically (Geocoding returned `OK` from an off-VPS IP with no `Referer`; Places New `searchNearby` returned results with a bogus `Referer`; the legacy Directions API — which this app never calls — also returned `OK`, proving no API allowlist; every denial seen was the project-level *"This API is not activated on your API project"*, never the key-level *"This API key is not authorized to use this service or API"*). Prod and staging share the identical key.
 - **⚠️ The two restriction types are mutually exclusive, which is why one key can never be locked down.** A referrer-restricted key is refused outright by the legacy web services (`API keys with referer restrictions cannot be used with this API`) and, having no `Referer` to match, by Routes/Places (New) too — so it breaks **every server call**. An IP-restricted key cannot drive the Maps JavaScript API at all — so it breaks **every map**. Anyone "just adding a referrer restriction" to the shared key takes the dashboard, tracking, geocoding and rate-per-mile down at once.
 - **The split**: `GOOGLE_MAPS_API_KEY` = server key (IP-restricted to the VPS; Geocoding + Distance Matrix + Routes + Places (New)). `GOOGLE_MAPS_BROWSER_KEY` = browser key (referrer-restricted; Maps JavaScript + Places). Only the browser key is ever served by the endpoint. Unset → falls back to the server key, i.e. deploying the split changes nothing until a second key exists.
