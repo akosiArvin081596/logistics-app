@@ -2261,6 +2261,18 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_tel_fetched ON routemate_teleme
 // path can filter them out. Empty string = clean; values like
 // 'speed_outlier' / 'invalid_coords' = forensics.
 try { db.exec(`ALTER TABLE routemate_telemetry ADD COLUMN dropped_reason TEXT DEFAULT ''`); } catch {}
+// Additive 2026-09-19. Which provider wrote the row. Before this column,
+// provenance survived only as a FINGERPRINT ACCIDENT — Linxup rows happen to
+// carry engine_hours=0 (hardcoded in normalizePosition, the Position message
+// has no engine hours), an empty geocoded_location and a numeric bearing, while
+// Routemate rows carry real values for all three. That worked, but it is a
+// coincidence, not a contract, and CLAUDE.md already described a `source`
+// column that did not exist. Empty string = written before this column; the
+// 2,343 historical Linxup rows are still identifiable by the fingerprint.
+// ⚠️ routemate_vehicles is a SHARED mirror — the Linxup webhook writes its own
+// device ids into it — so "is this id known to Routemate?" is NOT a provenance
+// test and will answer yes for a Linxup device.
+try { db.exec(`ALTER TABLE routemate_telemetry ADD COLUMN source TEXT DEFAULT ''`); } catch {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_tel_clean ON routemate_telemetry(routemate_vehicle_id, dropped_reason, id DESC)`); } catch {}
 
 db.exec(`
@@ -2585,8 +2597,8 @@ const routemateUpsertVehicleStmt = db.prepare(`
 
 const routemateInsertTelemetryStmt = db.prepare(`
 	INSERT INTO routemate_telemetry
-		(routemate_vehicle_id, latitude, longitude, speed, bearing, odometer, engine_hours, fuel_pct, geocoded_location, location_date_ms, dropped_reason)
-	VALUES (@routemate_vehicle_id, @latitude, @longitude, @speed, @bearing, @odometer, @engine_hours, @fuel_pct, @geocoded_location, @location_date_ms, @dropped_reason)
+		(routemate_vehicle_id, latitude, longitude, speed, bearing, odometer, engine_hours, fuel_pct, geocoded_location, location_date_ms, dropped_reason, source)
+	VALUES (@routemate_vehicle_id, @latitude, @longitude, @speed, @bearing, @odometer, @engine_hours, @fuel_pct, @geocoded_location, @location_date_ms, @dropped_reason, @source)
 `);
 
 // Last accepted (non-dropped, valid coords) fix for a vehicle. Used by the
@@ -2887,6 +2899,7 @@ async function routemateSyncTelemetry() {
 					geocoded_location: t.geocoded_location || "",
 					location_date_ms: t.location_date_ms || Date.now(),
 					dropped_reason: droppedReason,
+					source: "routemate",
 				});
 				// Also keep routemate_vehicles fresh with at least the IDs. This
 				// covers us when the upstream vehicles-list endpoint is broken.
@@ -30386,7 +30399,85 @@ app.get("/api/routemate/health", requireRole("Super Admin"), (req, res) => {
 const LINXUP_ENABLED = String(process.env.LINXUP_ENABLED || "").toLowerCase() === "true";
 const LINXUP_WEBHOOK_TOKEN = process.env.LINXUP_WEBHOOK_TOKEN || "";
 const LINXUP_SPEED_UNIT = process.env.LINXUP_SPEED_UNIT || "mph";
-const linxupHealth = { lastReceived: null, lastWritten: null, lastError: null, counts: {}, unlinked: 0 };
+const linxupHealth = {
+	lastReceived: null, lastWritten: null, lastError: null, counts: {}, unlinked: 0,
+	// Speed-unit guard — see lib/linxup-push.js. `verdicts` is per vehicle.
+	speedUnit: { verdicts: {}, lastAlarm: null },
+};
+
+// Per-vehicle rolling accumulator for the speed-unit guard, plus the previous
+// fix it needs. In memory on purpose: this is a drift detector, not a ledger,
+// and a process restart simply re-earns the verdict within a few hundred pings.
+// Deliberately NOT read back from routemate_telemetry — routemateLastCleanFixStmt
+// does not select `speed` (the geofence dwell check has no use for it), and
+// widening a shared query to feed a diagnostic is how shared queries rot.
+const linxupUnitState = new Map();   // vehicleId -> { prev, acc }
+
+// ⚠️ Bounded. The ingest path keeps a position whose id matched no truck (so no
+// data is lost while a device is being linked), which means the key space is
+// whatever Linxup sends, not our fleet of six. A token holder pushing novel ids
+// would otherwise grow these forever. FIFO-evict the oldest, same shape as
+// poiStopsCache's cap — evicting a diagnostic accumulator costs nothing but the
+// samples it had gathered.
+const LINXUP_UNIT_MAX_VEHICLES = 64;
+function linxupUnitCap(map) {
+	while (map.size > LINXUP_UNIT_MAX_VEHICLES) {
+		const oldest = map.keys().next();
+		if (oldest.done) break;
+		map.delete(oldest.value);
+	}
+}
+
+// One alarm per vehicle per verdict, not one per ping. Same once-per-condition
+// contract as the *_alerts dedupe ledgers; this one is in memory because the
+// condition is a live-feed property, not a durable fact about a row.
+const linxupUnitAlarmed = new Set();
+
+// Fold one accepted Linxup fix into its vehicle's speed-unit evidence. Returns
+// nothing and throws nothing — a diagnostic must never be able to fail ingestion.
+function linxupTrackSpeedUnit(vehicleId, pos) {
+	try {
+		if (!vehicleId || !Number.isFinite(pos.latitude) || !Number.isFinite(pos.longitude)) return;
+		const st = linxupUnitState.get(vehicleId) || { prev: null, acc: null };
+		const cur = {
+			latitude: pos.latitude, longitude: pos.longitude,
+			speed: pos.speed || 0, location_date_ms: pos.location_date_ms || Date.now(),
+		};
+		if (st.prev) {
+			st.acc = linxupPush.accumulateUnitSample(st.acc, st.prev, cur, geolib.getDistance, {
+				minDtMs: SPEED_CHECK_MIN_DT_MS, maxDtMs: SPEED_CHECK_MAX_DT_MS,
+			});
+		}
+		st.prev = cur;
+		linxupUnitState.set(vehicleId, st);
+		linxupUnitCap(linxupUnitState);
+
+		const v = linxupPush.judgeSpeedUnit(st.acc);
+		linxupHealth.speedUnit.verdicts[vehicleId] = v;
+		if (!linxupPush.unitVerdictIsAlarming(v.verdict)) return;
+
+		const key = vehicleId + ":" + v.verdict;
+		if (linxupUnitAlarmed.has(key)) return;
+		linxupUnitAlarmed.add(key);
+		if (linxupUnitAlarmed.size > LINXUP_UNIT_MAX_VEHICLES * 2) {
+			const first = linxupUnitAlarmed.values().next();
+			if (!first.done) linxupUnitAlarmed.delete(first.value);
+		}
+		linxupHealth.speedUnit.lastAlarm = { vehicleId, ...v, at: new Date().toISOString() };
+		// ⚠️ OBSERVE ONLY. The row is already written and stays written. Refusing
+		// ingestion on a statistical verdict would trade a pay-rounding error for
+		// permanent loss of tracking data, which is the worse failure.
+		console.error(
+			`[linxup] ⚠️ SPEED UNIT LOOKS WRONG for vehicle ${vehicleId}: ${v.verdict} ` +
+			`(reported/GPS ratio ${v.ratio} over ${v.samples} samples, ${Math.round(v.gpsM / 1609.344)} mi). ` +
+			`LINXUP_SPEED_UNIT is currently "${LINXUP_SPEED_UNIT}". ` +
+			`Driver pay counts a day when speed > 2.235 m/s, so a wrong unit mis-counts worked days.`,
+		);
+	} catch (e) {
+		// Never let the guard break the feed it is guarding.
+		try { linxupHealth.lastError = "speed-unit guard: " + e.message; } catch {}
+	}
+}
 
 // Resolve the LINXUP token from wherever Linxup places it. Until a real push
 // confirms the scheme, accept the common carriers: Authorization: Bearer <t>,
@@ -30468,8 +30559,13 @@ async function ingestLinxupPosition(pos) {
 		geocoded_location: pos.geocoded_location || "",
 		location_date_ms: pos.location_date_ms || Date.now(),
 		dropped_reason: droppedReason,
+		source: "linxup",
 	});
 	linxupHealth.lastWritten = new Date().toISOString();
+
+	// Speed-unit drift guard. Clean fixes only — a dropped row is already known
+	// to be untrustworthy, and feeding outliers to the detector would blunt it.
+	if (!droppedReason) linxupTrackSpeedUnit(vehicleId, pos);
 
 	// Fan out live UI + geofence only for clean, linked fixes (same as the poller).
 	if (!droppedReason && driverName) {
@@ -30581,6 +30677,7 @@ app.get("/api/eld/linxup/health", requireRole("Super Admin"), (req, res) => {
 		lastError: linxupHealth.lastError,
 		messageCounts: linxupHealth.counts,
 		unlinkedPositions: linxupHealth.unlinked,
+		speedUnitCheck: linxupHealth.speedUnit,
 	});
 });
 
