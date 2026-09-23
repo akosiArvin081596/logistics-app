@@ -1,0 +1,29 @@
+# TEMPORARY: remove before merging fix/drift-heal-safety.
+#
+# Proves GitHub accepts the workflow-level `concurrency.queue: max` key that
+# deploy.yml and deploy-drift.yml now use (actionlint 1.7.12 predates the key).
+# The concurrency block below has exactly the same shape and level as
+# deploy.yml's, with its own group. If GitHub rejected the key, this run would
+# fail as "Invalid workflow file" instead of running the job.
+name: Validate concurrency queue
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/validate-concurrency-queue.yml
+
+concurrency:
+  group: validate-concurrency-queue-${{ github.ref }}
+  cancel-in-progress: false
+  queue: max
+
+permissions:
+  contents: read
+
+jobs:
+  ok:
+    name: concurrency queue accepted
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo ok
