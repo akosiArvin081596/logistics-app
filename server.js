@@ -2638,8 +2638,19 @@ const ELD_UNLINKED_LOOKBACK_HOURS =
 // driver onboarding, investor outreach and the weekly invoice batch, so
 // exhausting Gmail's quota here would silence every channel this feature needs.
 // The fleet is 6 trucks; 25 is far above any real defect rate.
+// ⚠️ Counted as SENDS (eldAlertSendsInWindow), never as ledger rows: the ledger
+// holds one row per feed and a re-open overwrites its alerted_at, so a feed that
+// mailed six times in a day counted once.
 const ELD_STALE_ALERT_MAX_PER_DAY =
 	Math.max(1, parseInt(process.env.ELD_STALE_ALERT_MAX_PER_DAY ?? "25", 10) || 25);
+// ⚠️ RE-OPEN COOLDOWN. A RESOLVED feed may alert again only once its previous
+// alert is this old. A feed hovering at the trickle floor otherwise resolved and
+// re-opened every other sweep, and each re-open was a fresh email. While it waits
+// the row stays resolved and keeps its alerted_at, which is the cooldown's clock.
+const ELD_STALE_REOPEN_COOLDOWN_MS = eldFeedHealth.DEFAULT_REOPEN_COOLDOWN_HOURS * eldFeedHealth.HOUR_MS;
+// The send log's server_state row. Prepared lazily: that table is created much
+// further down this file.
+const ELD_ALERT_SEND_LOG_KEY = "eld_feed_alert_sends";
 // Hourly. The input changes continuously but the condition is measured in days,
 // so this is not latency-sensitive; an hour bounds "how late is the first ping"
 // without making the sweep itself a load.
@@ -2916,6 +2927,12 @@ function eldFeedHealthReport(nowMs) {
 			firstSeen: led ? led.first_seen : null,
 			alertedAt: led ? led.alerted_at : null,
 			resolvedAt: led ? led.resolved_at : null,
+			// A bad feed whose row is still resolved is waiting out the re-open
+			// cooldown — say until when, so a held alert does not read as a silent one.
+			alertHeldUntil: f.alert && led && led.resolved_at
+				&& eldFeedHealth.reopenCooldownActive(led.alerted_at, now, ELD_STALE_REOPEN_COOLDOWN_MS)
+				? new Date(eldFeedHealth.stampMs(led.alerted_at) + ELD_STALE_REOPEN_COOLDOWN_MS).toISOString()
+				: null,
 		};
 	});
 
@@ -2927,12 +2944,34 @@ function eldFeedHealthReport(nowMs) {
 			staleHours: ELD_STALE_HOURS,
 			minFixes24h: ELD_STALE_MIN_FIXES,
 			unlinkedLookbackHours: ELD_UNLINKED_LOOKBACK_HOURS,
+			reopenCooldownHours: ELD_STALE_REOPEN_COOLDOWN_MS / eldFeedHealth.HOUR_MS,
 		},
 		// In-memory, and labeled as such: these two are about the SWEEP, not the
 		// feeds, and a restart legitimately resets them.
 		lastSweep: eldFeedSweepHealth.lastRun,
 		lastSweepError: eldFeedSweepHealth.lastError,
 	};
+}
+
+// The send log behind ELD_STALE_ALERT_MAX_PER_DAY: one ISO stamp per DELIVERED
+// alert, in server_state, pruned to the window whenever it is written. Compared
+// as epoch ms (eldFeedHealth.sendsInWindow) — never as text against SQLite's
+// "… …" form, which stretched "the last 24 h" to the whole cutoff date. A read
+// that fails counts as no sends: the per-feed dedupe and the cooldown still hold,
+// and silencing the alert on a broken row would be the worse failure.
+function eldAlertSendsInWindow(nowMs) {
+	let sends = [];
+	try {
+		const row = db.prepare("SELECT value FROM server_state WHERE key = ?").get(ELD_ALERT_SEND_LOG_KEY);
+		sends = row ? JSON.parse(row.value) : [];
+	} catch { sends = []; }
+	return eldFeedHealth.sendsInWindow(sends, nowMs, eldFeedHealth.ALERT_WINDOW_MS);
+}
+function recordEldAlertSend(nowMs) {
+	const sends = eldAlertSendsInWindow(nowMs);
+	sends.push(new Date(nowMs).toISOString());
+	db.prepare("INSERT OR REPLACE INTO server_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)")
+		.run(ELD_ALERT_SEND_LOG_KEY, JSON.stringify(sends));
 }
 
 // Fire-and-forget. NEVER throws and never rejects — its caller is a timer, and
@@ -2952,9 +2991,14 @@ async function alertEldFeedSilence(verdict) {
 		// report, because the second death is the one nobody is watching for.
 		if (seen && seen.alerted_at && !seen.resolved_at) return { alerted: false, reason: "already_alerted", key };
 
-		const alertedToday = db.prepare(
-			"SELECT COUNT(*) AS c FROM eld_feed_alerts WHERE alerted_at > datetime('now', '-1 day')",
-		).get().c;
+		// ⚠️ RE-OPEN COOLDOWN (see ELD_STALE_REOPEN_COOLDOWN_MS). Returning BEFORE the
+		// upsert below is what keeps the clock: the row stays resolved with the last
+		// alert's alerted_at until the feed is still bad a full cooldown later.
+		if (seen && seen.resolved_at && eldFeedHealth.reopenCooldownActive(seen.alerted_at, Date.now(), ELD_STALE_REOPEN_COOLDOWN_MS)) {
+			return { alerted: false, reason: "cooldown", key };
+		}
+
+		const alertedToday = eldAlertSendsInWindow(Date.now()).length;
 		if (alertedToday >= ELD_STALE_ALERT_MAX_PER_DAY) {
 			console.warn(`[eld-feed] daily alert cap (${ELD_STALE_ALERT_MAX_PER_DAY}) reached — feed ${key} logged, not mailed`);
 			return { alerted: false, reason: "daily_cap", key };
@@ -3038,7 +3082,7 @@ async function alertEldFeedSilence(verdict) {
 				: v.state === "never_reported"
 					? `<p>This truck has an ELD device id saved but has never produced a single fix. Check the id is the right one, and that the device is installed and powered.</p>`
 					: `<p>Check the device is powered and in coverage. If the truck is genuinely out of service, set it Inactive or record its retirement date — both stop this alert at the source.</p>`) +
-			`<p style="color:#888;font-size:12px;">Reported once per feed. Reported again only after it recovers and goes silent a second time.</p>`;
+			`<p style="color:#888;font-size:12px;">Reported once per feed. Reported again only after it recovers and goes silent a second time, and no sooner than a day after this report.</p>`;
 
 		let emailed = false;
 		try {
@@ -3080,6 +3124,9 @@ async function alertEldFeedSilence(verdict) {
 		if (delivered) {
 			db.prepare("UPDATE eld_feed_alerts SET alerted_at = ? WHERE alert_key = ? AND alerted_at IS NULL")
 				.run(new Date().toISOString(), key);
+			// The cap counts this send. A failure to log it must not turn a delivered
+			// alert into a reported error.
+			try { recordEldAlertSend(Date.now()); } catch (e) { console.error("[eld-feed] send log not updated:", e.message); }
 		}
 		console.log(
 			"[eld-feed] %s — %s (%s): %s",
@@ -3315,13 +3362,26 @@ async function routemateHydrateVehicleDetails(creds, { limit = 100 } = {}) {
 			});
 			out.hydrated += 1;
 		} catch (err) {
-			// 4xx means Routemate does not recognize this ID — almost always a
-			// Linxup device sharing the mirror. Remember it and stop asking.
-			if (err && err.status >= 400 && err.status < 500) {
+			const status = err && err.status;
+			// Only 400 and 404 mean "not a Routemate vehicle" — 400 is how Routemate
+			// answers a Linxup device id sharing this mirror (see getVehicle() in
+			// lib/routemate-client.js). Remember those and stop asking.
+			if (status === 400 || status === 404) {
 				routemateNonInventoryIds.add(id);
 				out.skipped += 1;
-			} else {
-				out.failed += 1;
+				continue;
+			}
+			// ⚠️ ANYTHING ELSE IS A FAILURE, AND IS NEVER REMEMBERED AS "NOT OURS" —
+			// that would hide a real vehicle until the next restart. A 408 is the
+			// likely one: Routemate does send them, and the client gives up on a 4xx
+			// (other than 429) at once, so it arrives here looking like any other 4xx.
+			// A refused key (401/403), a throttle (429), a timeout (408) or no answer at
+			// all (network or abort: no status, and up to ~46 s of retries EACH) will
+			// hit every remaining vehicle the same way, so the loop stops on them.
+			out.failed += 1;
+			if (!status || status === 401 || status === 403 || status === 408 || status === 429) {
+				out.stoppedOn = status || "network";
+				break;
 			}
 		}
 	}
@@ -3331,15 +3391,69 @@ async function routemateHydrateVehicleDetails(creds, { limit = 100 } = {}) {
 	return out;
 }
 
-async function routemateSyncVehicles() {
+// Every Routemate vehicle id that has written telemetry, upserted as a MINIMAL
+// mirror row (ids only; COALESCE keeps any richer fields). The list endpoint
+// 500s, but the telemetry feed still names every vehicle that is reporting, so
+// this keeps the /trucks Link modal usable and gives the per-vehicle refresh its
+// candidates. Local and idempotent. Returns how many ids it wrote.
+function routemateSeedVehicleIdsFromTelemetry() {
+	const ids = db.prepare(`
+		SELECT DISTINCT routemate_vehicle_id
+		FROM routemate_telemetry
+		WHERE routemate_vehicle_id <> ''
+	`).all();
+	let n = 0;
+	db.transaction((rows) => {
+		for (const r of rows) {
+			routemateUpsertVehicleMinimalStmt.run(r.routemate_vehicle_id, "");
+			n += 1;
+		}
+	})(ids);
+	return n;
+}
+
+// ⚠️ THE VEHICLE LIST'S HTTP 500 IS THE KNOWN OUTAGE, NOT A FAILED SYNC.
+// GET /api/v0/assets/vehicles has answered HTTP 500 for this account since at
+// least 2026-05-06 (see listVehicles() in lib/routemate-client.js), while the
+// per-vehicle endpoint works. Reporting that as a failure made every boot log a
+// sync error, bumped errorsLast24h daily, and turned the admin "Sync now" button
+// into a 502 with no audit row — although the fallback below had just done the
+// job. So the KNOWN SHAPE — HTTP 500 from this one call, while the company
+// endpoint still answers — sets `listUnavailable`: ids come from telemetry, the
+// per-vehicle refresh runs ONCE, lastSync is stamped, and no error is counted.
+// The caller gets { listUnavailable: true } and says so.
+//
+// ⚠️ ONLY that shape. A 502/503/504 is Routemate or its edge actually failing,
+// and a 500 on the company endpoint too means the whole API is down; both would
+// otherwise be logged "expected" and mark the sync done — once the VINs are
+// filled, the refresh has nothing left to ask, so nothing else would notice.
+// sync-now smoke-tests the company endpoint itself (companyVerified); the boot
+// and daily ticks do not, so the check is made here.
+//
+// Still a FAILED sync: those, a 401/403 (the key is refused), a network or
+// timeout failure (no status), a 429, a failed database write, and a
+// per-vehicle refresh that could not fetch every candidate. Those count an
+// error and throw. The refresh does not run on them: with the key refused it
+// would fail on every vehicle, and with the network down every call would fail
+// the same way.
+async function routemateSyncVehicles({ companyVerified = false } = {}) {
 	if (!ROUTEMATE_ENABLED || !ROUTEMATE_API_KEY) return { skipped: true, reason: "disabled" };
 	const creds = routemateCreds();
 	const HARD_PAGE_CAP = 50;
 	let page = 0;
 	let total = 0;
+	let listUnavailable = null; // the list's known HTTP 500, when that is what stopped the paging
+	let fallbackSynced = 0;
 	try {
 		while (page < HARD_PAGE_CAP) {
-			const batch = await routemate.listVehicles(creds, { page, elements: 200 });
+			let batch;
+			try {
+				batch = await routemate.listVehicles(creds, { page, elements: 200 });
+			} catch (listErr) {
+				if (!(listErr && listErr.status === 500)) throw listErr;
+				listUnavailable = listErr;
+				break;
+			}
 			if (!batch || batch.length === 0) break;
 			const txn = db.transaction((rows) => {
 				for (const v of rows) {
@@ -3365,61 +3479,66 @@ async function routemateSyncVehicles() {
 			if (batch.length < 200) break;
 			page += 1;
 		}
-		// Even a healthy list response can omit detail for a device the telemetry
-		// sweep discovered but the inventory page hasn't caught up on. Only
-		// empty-VIN rows are fetched, so this is a no-op in the normal case.
+		if (listUnavailable) {
+			// The known bug only while the rest of the API answers: a 500 everywhere
+			// is an outage, and fails the sync — named so, or the log line would read
+			// like the known list 500.
+			if (!companyVerified) {
+				await routemate.getCompany(creds).catch((companyErr) => {
+					const err = new Error(`Routemate company endpoint failed after the vehicle list's 500 — an outage, not the known list bug: ${companyErr.message}`);
+					err.status = companyErr.status || null;
+					throw err;
+				});
+			}
+			// The list is down, so the ids come from what is actually reporting GPS.
+			fallbackSynced = routemateSeedVehicleIdsFromTelemetry();
+		}
+		// ONE per-vehicle refresh, on both paths. Only empty-VIN rows are fetched, so
+		// after a healthy list it is a no-op; with the list down it IS the sync.
 		const hydration = await routemateHydrateVehicleDetails(creds);
+		if (hydration.failed > 0) {
+			const stoppedOn = hydration.stoppedOn;
+			const err = new Error(stoppedOn === 401 || stoppedOn === 403
+				? `Routemate refused the API key during the per-vehicle refresh (HTTP ${stoppedOn})`
+				: `Routemate per-vehicle refresh failed for ${hydration.failed} vehicle(s)` +
+					(stoppedOn ? ` — stopped on ${stoppedOn === "network" ? "a network error or timeout" : `HTTP ${stoppedOn}`}` : ""));
+			err.code = "ROUTEMATE_REFRESH_FAILED";
+			err.status = typeof stoppedOn === "number" ? stoppedOn : null;
+			err.hydration = hydration;
+			err.listUnavailable = !!listUnavailable;
+			throw err;
+		}
 		routemateHealth.lastSync.vehicles = new Date().toISOString();
 		routemateHealth.lastError = null;
 		clearRoutemateLogState("vehicles");
-		return { synced: total, hydrated: hydration.hydrated };
+		if (listUnavailable) {
+			console.log(`[routemate] vehicles list unavailable (expected, upstream ${listUnavailable.status}) — per-vehicle refresh done: ` +
+				`${hydration.hydrated} updated, ${hydration.skipped} skipped${fallbackSynced ? `, ${fallbackSynced} id(s) from telemetry` : ""}`);
+		}
+		return {
+			synced: total,
+			hydrated: hydration.hydrated,
+			hydrationSkipped: hydration.skipped,
+			listUnavailable: !!listUnavailable,
+			upstreamStatus: listUnavailable ? listUnavailable.status : null,
+			fallbackSynced,
+		};
 	} catch (err) {
 		routemateHealth.lastError = { at: new Date().toISOString(), source: "vehicles", message: err.message, status: err.status || null };
 		routemateHealth.errorsLast24h += 1;
 		logRoutemateSyncFailure("vehicles", err);
-		// Routemate's /api/v0/assets/vehicles endpoint has been returning HTTP 500
-		// (their bug, confirmed against a direct probe). The telemetry endpoint
-		// still works, so derive a minimal vehicle row from any unique routemate
-		// vehicle IDs we've seen in /routemate_telemetry/ — this keeps the Link
-		// modal in /trucks usable for vehicles that are actually reporting GPS,
-		// even when Routemate's vehicle-inventory endpoint is unreachable.
-		try {
-			const telemetryVehicles = db.prepare(`
-				SELECT routemate_vehicle_id,
-				       MAX(routemate_vehicle_id) AS keep
-				FROM routemate_telemetry
-				WHERE routemate_vehicle_id <> ''
-				GROUP BY routemate_vehicle_id
-			`).all();
-			let fallbackSynced = 0;
-			const txn = db.transaction((rows) => {
-				for (const r of rows) {
-					routemateUpsertVehicleMinimalStmt.run(r.routemate_vehicle_id, "");
-					fallbackSynced += 1;
-				}
-			});
-			txn(telemetryVehicles);
-			if (fallbackSynced > 0) {
-				err.fallbackSynced = fallbackSynced;
-				err.fallbackSource = "telemetry";
+		// Keep the Link modal usable even on a failed sync: the ids come from the
+		// local telemetry table, which no upstream failure can touch.
+		if (!fallbackSynced) {
+			try {
+				fallbackSynced = routemateSeedVehicleIdsFromTelemetry();
+			} catch (fallbackErr) {
+				console.error("[routemate] vehicle-fallback also failed:", fallbackErr.message);
 			}
-		} catch (fallbackErr) {
-			console.error("[routemate] vehicle-fallback also failed:", fallbackErr.message);
 		}
-
-		// The minimal fallback above writes IDs only — no VIN — which is exactly
-		// why "Auto-match by VIN" was dead. Routemate's PER-VEHICLE endpoint is
-		// unaffected by the list bug, so now that we know the IDs, ask for each
-		// record individually and fill in the detail the list should have given
-		// us. This is the branch that actually runs in production today.
-		try {
-			const hydration = await routemateHydrateVehicleDetails(creds);
-			if (hydration.hydrated > 0) {
-				err.hydratedIndividually = hydration.hydrated;
-				err.hydrationSkipped = hydration.skipped;
-			}
-		} catch (hydrateErr) {
-			console.error("[routemate] per-vehicle hydration failed:", hydrateErr.message);
+		if (fallbackSynced > 0) {
+			err.fallbackSynced = fallbackSynced;
+			err.fallbackSource = "telemetry";
 		}
 		throw err;
 	}
@@ -13266,6 +13385,8 @@ async function appendInvoiceAdjustmentAddendum(invoiceRow) {
 //     row is now billed in NO week and reported instead: `warnings` on the
 //     response, and `undatedInWeek` — which the batch escalates — for one whose
 //     scheduled window sits in the billing week and so was probably worked in it.
+//     Every other one is reported ONCE, by the invoice_undated_alerts ledger
+//     (listUndatedCompletedLoads() + runUndatedLoadAlerts()).
 //     ⚠️ Deliberately NOT the Drop-off Appointment as a fallback. It is the
 //     SCHEDULED date, typed by hand, and wrong often enough to matter (live
 //     September 2026 rows carry "9/4/2024" and "9/21/2020"); GET
@@ -13364,6 +13485,62 @@ function selectInvoiceWeekLoads(data, headers, driverName, weekStart, weekEnd, d
 			scheduledInWeek: inWeek(cols.pickupCol && row[cols.pickupCol]) || inWeek(cols.dropoffCol && row[cols.dropoffCol]),
 		})),
 	};
+}
+
+// Every completed load that NO weekly invoice can place — across the whole
+// sheet, not one driver's week. selectInvoiceWeekLoads() names such a load only
+// to its own driver's invoice (`warnings`, which nothing reads), and the Friday
+// batch escalates it only when an appointment falls in the billing week. The
+// rest — blank appointments, or completed by a sheet edit weeks after they were
+// scheduled — were billed by nobody and reported to nobody. The reader is the
+// invoice_undated_alerts ledger (runUndatedLoadAlerts(), below the batch).
+//
+// The SAME verdict the invoice uses, so "undated" here and "billed in no week"
+// there cannot drift. invoiceWeekVerdict() decides "undated" BEFORE it compares
+// any week, so the empty week passed below changes nothing but turns every dated
+// row into "other-week". One entry per load, keyed on normalizeLoadId() ("#X"
+// and "X" are one load); a DATED copy of the load, under any driver, wins —
+// that copy is billed in its own week, so the load is not missing. Pass EVERY
+// sheet row: getJobTrackingCached() keeps one row per load (deduplicateLoads),
+// which can hide exactly the dated copy this rule turns on.
+//
+//   resolved  false when the sheet has no status, Load ID or completion-date
+//             column. `loads` then means nothing — a missing column reads as "no
+//             load is undated" (closing every open ledger row) or as "every load
+//             is undated" (a flood) — so a caller must not act on it.
+//   loads     [{ key, loadId, driver, pickup, dropoff }], the LAST undated row
+//             of each load.
+//   dated     the same shape for every completed load that DOES carry a date.
+//             The silent baseline records these too, so a load that loses its
+//             date later (its dated duplicate deleted, say) reads as history.
+//   unkeyed   completed, undated rows with no Load ID. Counted, not tracked: a
+//             sheet row number is no key (it moves when a row above is
+//             deleted). The driver's invoice `warnings` still names them.
+function listUndatedCompletedLoads(rows, headers, deletedKeys) {
+	const cols = invoiceWeekColumns(headers);
+	if (!cols.statusCol || !cols.loadIdCol || !cols.dateCol) return { resolved: false, loads: [], dated: [], unkeyed: 0 };
+	const undatedByKey = new Map();
+	const datedByKey = new Map();
+	const tombstones = deletedKeys || new Set();
+	let unkeyed = 0;
+	for (const row of rows || []) {
+		const verdict = invoiceWeekVerdict(row, cols, "", "", tombstones);
+		if (verdict === "open" || verdict === "deleted") continue;
+		const loadKey = normalizeLoadId(row[cols.loadIdCol]);
+		if (!loadKey) { if (verdict === "undated") unkeyed++; continue; }
+		if (verdict === "undated") undatedByKey.set(loadKey, row);
+		else datedByKey.set(loadKey, row); // "other-week" ("bill" cannot occur in the empty week; dated all the same)
+	}
+	for (const key of datedByKey.keys()) undatedByKey.delete(key);
+	const cell = (row, col) => (col ? String(row[col] || "").trim() : "");
+	const entry = ([key, row]) => ({
+		key,
+		loadId: cell(row, cols.loadIdCol),
+		driver: cell(row, cols.driverCol),
+		pickup: cell(row, cols.pickupCol),
+		dropoff: cell(row, cols.dropoffCol),
+	});
+	return { resolved: true, unkeyed, loads: [...undatedByKey].map(entry), dated: [...datedByKey].map(entry) };
 }
 
 // The response `warnings` for selectInvoiceWeekLoads()'s undated rows. Two
@@ -14041,12 +14218,14 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 	// reports them on both a 200 and a 400 (a driver whose ONLY load is undated gets
 	// "no loads"), so they are read before the status branch; off-roster drivers are
 	// added after the loop. Escalated, never retried: a retry cannot supply a date.
-	// ⚠️ NOT covered: an undated load whose pickup AND drop-off appointments are
-	// both blank or unreadable — nothing places it in any week, so only the
-	// handler's `warnings` name it. Alerting on those ONCE each needs a dedupe
-	// ledger (the *_alerts pattern) seeded past the 283 historical rows; a weekly
-	// alert without one would repeat the same history every Friday.
+	// An undated load with NO appointment in this week — blank, unreadable, or
+	// another week's — is the invoice_undated_alerts ledger's: reported ONCE, by
+	// runUndatedLoadAlerts() at the end of this run, never again every Friday.
+	// undatedInWeekIds holds the raw load ids behind each undatedInWeek entry,
+	// index for index, so the ledger knows which loads this run names and which
+	// of those a delivered channel actually showed.
 	const undatedInWeek = [];
+	const undatedInWeekIds = [];
 	for (const driver of rosterDrivers) {
 		const norm = normalizeDriverName(driver);
 		try {
@@ -14058,6 +14237,7 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 			]);
 			if (Array.isArray(body.undatedInWeek) && body.undatedInWeek.length) {
 				undatedInWeek.push(`${driver}: ${body.undatedInWeek.join(", ")}`);
+				undatedInWeekIds.push([...body.undatedInWeek]);
 			}
 			if (statusCode === 200 && body.invoice) {
 				created++;
@@ -14100,6 +14280,7 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 			const ids = selectInvoiceWeekLoads(jt.data, jt.headers, display, range.weekStart, range.weekEnd, deletedKeys)
 				.undated.filter((u) => u.scheduledInWeek).map((u) => u.loadId);
 			if (ids.length) undatedInWeek.push(`${display} (not on the roster): ${ids.join(", ")}`);
+			if (ids.length) undatedInWeekIds.push(ids);
 		}
 	}
 	if (submitted > 0) notifyChange("invoices");
@@ -14111,11 +14292,16 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 	const unbilled = [...expected].filter((n) => !billed.has(n));
 	const problem = unbilled.length > 0;                 // retry signal (transient/coverage)
 	const needsAttention = problem || zeroPay.length > 0 || errors.length > 0 || undatedInWeek.length > 0;
+	// How many undatedInWeek entries each channel prints: the in-app line (this
+	// summary) and the email cap them differently. The undated-load ledger reads
+	// the same two numbers, so a load counts as told only if it was printed.
+	const undatedEntriesInApp = 6;
+	const undatedEntriesByEmail = 20;
 	const summary =
 		`${submitted} generated & submitted · ${skipped} skipped (no loads)` +
 		(zeroPay.length ? ` · ${zeroPay.length} ZERO-PAY left as Draft (${zeroPay.slice(0, 6).join(", ")})` : "") +
 		(unbilled.length ? ` · ${unbilled.length} WORKED-BUT-UNBILLED (${unbilled.slice(0, 8).join(", ")})` : "") +
-		(undatedInWeek.length ? ` · UNDATED completed loads NOT billed (${undatedInWeek.slice(0, 6).join("; ")})` : "") +
+		(undatedInWeek.length ? ` · UNDATED completed loads NOT billed (${undatedInWeek.slice(0, undatedEntriesInApp).join("; ")})` : "") +
 		(errors.length ? ` · ${errors.length} errored` : "");
 
 	try {
@@ -14130,11 +14316,16 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 	// on quiet weeks + interim retries. `problem` (unbilled) drives retry; zeroPay
 	// and errors don't retry but still make the one notification action-needed.
 	const isFinalAttempt = attemptNum >= INVOICE_AUTOGEN_MAX_ATTEMPTS;
+	// How many undatedInWeek entries a DELIVERED channel put in front of a person:
+	// the in-app line once it is written, the email once Gmail takes it. Read only
+	// by the undated-load ledger below.
+	let undatedEntriesShown = 0;
 	if ((!problem && needsAttention) || (!problem && submitted > 0) || (problem && isFinalAttempt)) {
 		const detail = errors.length ? ` · Errors: ${errors.slice(0, 5).join("; ")}` : "";
 		try {
 			const title = `Weekly invoices ${needsAttention ? "— ACTION NEEDED" : "generated"} · ${range.weekStart} to ${range.weekEnd}`;
 			insertDispatchNotification.run("invoices-autogen", title, summary + detail, JSON.stringify({ weekStart: range.weekStart, weekEnd: range.weekEnd, submitted, skipped, zeroPay: zeroPay.length, unbilled: unbilled.length, undatedInWeek: undatedInWeek.length, errored: errors.length }));
+			undatedEntriesShown = Math.max(undatedEntriesShown, undatedEntriesInApp);
 			if (io) io.to("dispatch").emit("dispatch-notification", { type: "invoices-autogen", title, body: summary + detail });
 		} catch (e) { console.error("[invoice-autogen] notification failed:", e.message); }
 		try {
@@ -14151,17 +14342,350 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 					</div>
 					${zeroPay.length ? `<p style="margin:0 0 12px;color:#b45309;font-size:13px"><b>$0 invoices (not submitted — check dates):</b> ${escHtml(zeroPay.slice(0, 20).join(", "))}.</p>` : ""}
 					${unbilled.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:13px"><b>Needs manual review:</b> ${escHtml(unbilled.slice(0, 20).join(", "))}. Generate these from the Invoices page.</p>` : ""}
-					${undatedInWeek.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:13px"><b>Completed loads NOT billed — no Status Update Date or Completion Date:</b> ${escHtml(undatedInWeek.slice(0, 20).join("; "))}. They are scheduled in this week; set the date on Job Tracking, then regenerate or adjust the driver's invoice.</p>` : ""}
+					${undatedInWeek.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:13px"><b>Completed loads NOT billed — no Status Update Date or Completion Date:</b> ${escHtml(undatedInWeek.slice(0, undatedEntriesByEmail).join("; "))}. They are scheduled in this week; set the date on Job Tracking, then regenerate or adjust the driver's invoice.</p>` : ""}
 					${errors.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:12px">Errors: ${escHtml(errors.slice(0, 10).join("; "))}</p>` : ""}
 				`,
 				ctaText: "Review Invoices",
 				ctaHref: "https://app.logisx.com/invoices",
 			});
-			await sendEmail(adminEmail, `Weekly Invoices ${needsAttention ? "— ACTION NEEDED " : ""}— ${range.weekStart} to ${range.weekEnd}`, html);
+			if ((await sendEmail(adminEmail, `Weekly Invoices ${needsAttention ? "— ACTION NEEDED " : ""}— ${range.weekStart} to ${range.weekEnd}`, html)) === true) {
+				undatedEntriesShown = Math.max(undatedEntriesShown, undatedEntriesByEmail);
+			}
 		} catch (e) { console.error("[invoice-autogen] email failed:", e.message); }
 	}
 
+	// Completed loads NO weekly invoice can place: one digest of the new or
+	// re-opened ones, minus those this summary names (the loads it actually
+	// SHOWED are recorded as told). Observe-only — it writes its own ledger and
+	// never a marker, an invoice or a retry, and nothing it does reaches the
+	// return value below: a throw is caught here, and the 90 s race (the
+	// per-driver guard's) keeps a hung read from wedging the batch.
+	let undatedDigestTimer = null;
+	try {
+		await Promise.race([
+			runUndatedLoadAlerts({ range, reportedIds: undatedInWeekIds.flat(), shownIds: undatedInWeekIds.slice(0, undatedEntriesShown).flat() }),
+			new Promise((r) => { undatedDigestTimer = setTimeout(r, 90 * 1000); }),
+		]);
+	} catch (e) {
+		console.error("[invoice-undated] digest failed (batch unaffected):", e && e.message);
+	} finally {
+		clearTimeout(undatedDigestTimer);
+	}
+
 	return { created, submitted, skipped, unbilled: unbilled.length, problem };
+}
+
+// ============================================================
+// COMPLETED LOADS NO WEEKLY INVOICE CAN PLACE — reported once per load
+// ============================================================
+// A completed Job Tracking row with neither a Status Update Date nor a
+// Completion Date is billed in NO week (rule 3 of "WHICH COMPLETED LOADS A
+// WEEKLY INVOICE BILLS", above). The batch escalates one only while an
+// appointment puts it in the billing week; listUndatedCompletedLoads() finds
+// all of them, and this ledger reports each one ONCE: after the Friday batch,
+// as one digest (email + dispatch notification) of the loads that are new or
+// re-opened since the last digest.
+//
+// ONCE PER LOAD — the *_alerts shape, for the same reason: the same history
+// every Friday is a channel nobody reads. Keyed on normalizeLoadId().
+// resolved_at is stamped when a load leaves the list (it gained a date — the
+// fix — or was soft-deleted, or is no longer completed); a load that comes back
+// RE-OPENS as a new episode and is reported again, first_seen kept.
+//
+// ⚠️ HISTORY STAYS SILENT. 283 completed rows carry no date today (2025
+// history, from before status logging), and a digest listing them would bury
+// the load that matters. So the first run records EVERY completed load of the
+// day — undated ones open, dated ones closed — with seeded_at and no report,
+// and marks the baseline done in server_state (a marker, not "the table is
+// empty": a sheet with nothing undated must still count as seeded). A seeded
+// load never reports again: not when a date is set and cleared, not when its
+// dated duplicate row is deleted, not when rows vanish and come back. News is
+// a load that became completed-and-undated AFTER the baseline. A boot tick
+// seeds a few minutes after start, and the batch seeds first if the tick has
+// not, so the first digest can never be the backlog. To re-arm silently,
+// delete the rows AND the marker; deleting only the rows makes the history
+// new again, reported 25 loads per weekly run.
+//
+// ⚠️ A SHEET THAT SHRANK IS NOT A SHEET THAT GOT FIXED. Rows cut and pasted
+// back across the Friday run, a filter, or a shifted Load ID column all make
+// open loads vanish from one read, and resolving them would re-open every one
+// (re-reporting any post-baseline load) when the rows return. So a run that
+// would resolve more than min(20, 25% of the open rows), never fewer than 5,
+// resolves nothing and reports nothing, and records why in its status. The
+// same shrink still there 24 h later is accepted as real — a bulk date fix —
+// so the guard can delay the digest but never wedge it.
+//
+// OBSERVE-ONLY. It writes this table, three server_state rows (the baseline, a
+// pending shrink, the last run's status) and per digest one dispatch
+// notification and one email — never an invoice, a payroll marker or a retry —
+// and runWeeklyInvoiceBatch() returns the same value whatever happens in here.
+// The CREATE is wrapped for the same reason: a ledger that cannot be made
+// costs this alert, not the boot of the process that bills drivers.
+try {
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS invoice_undated_alerts (
+			load_key TEXT PRIMARY KEY,
+			driver TEXT DEFAULT '',
+			first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+			seeded_at DATETIME,
+			alerted_at DATETIME,
+			resolved_at DATETIME
+		)
+	`);
+} catch (e) { console.error("[invoice-undated] ledger unavailable — undated-load alerts off:", e.message); }
+
+// DEFAULTS ON, deliberately — a kill switch, not an enable switch: the same call
+// and the same shape as RATECON_EXTRACT_ALERT_ENABLED and
+// EXPENSE_DUPLICATE_ALERT_ENABLED. A detector that ships off stays off, and the
+// failure it exists to break is silence. It moves no money, so "ships dormant"
+// does not apply. Only false/0/no/off turn it off; "true" is a no-op. It runs in
+// the Friday batch, so it is inert wherever INVOICE_AUTOGEN_ENABLED is off.
+const INVOICE_UNDATED_ALERT_ENABLED =
+	!/^(false|0|no|off)$/i.test(String(process.env.INVOICE_UNDATED_ALERT_ENABLED ?? "").trim());
+// Loads one digest may name. The ledger is the primary control; this is the one
+// that still holds when the ledger is cleared (the history comes back as "new")
+// or a bulk sheet edit strips many dates at once. It is counted over a rolling
+// 24 h, and the batch runs weekly, so in practice it is 25 per weekly run; the
+// rest stay owed, recorded, for the next one.
+// ⚠️ Counted through datetime(alerted_at): the stamp is an ISO-8601 "…T…Z"
+// string, and compared raw with datetime('now', …)'s "… …" form, the "T" sorts
+// after the space, so a stamp from before the cutoff on the cutoff's own date
+// would still count as recent.
+const INVOICE_UNDATED_ALERT_MAX_PER_DAY = 25;
+// The shrink guard (see "A SHEET THAT SHRANK" above).
+const INVOICE_UNDATED_MASS_RESOLVE = { max: 20, fraction: 0.25, floor: 5, confirmMs: 24 * 60 * 60 * 1000 };
+// Its server_state rows. Every statement on server_state is prepared lazily,
+// inside the calls: that table is created much further down this file.
+const INVOICE_UNDATED_BASELINE_KEY = "invoice_undated_alerts_baseline";
+const INVOICE_UNDATED_PENDING_SHRINK_KEY = "invoice_undated_alerts_pending_shrink";
+// The last run's outcome and when — ok, seeded, undelivered, skipped (and why)
+// or error — so a dead alert is visible somewhere other than the console.
+const INVOICE_UNDATED_STATUS_KEY = "invoice_undated_alerts_status";
+// The seed's boot tick: after the batch's own 90 s catch-up and the boot burst.
+const INVOICE_UNDATED_SEED_DELAY_MS = 4 * 60 * 1000;
+let invoiceUndatedAlertsRunning = false;
+
+// ONE call per Friday batch run, and one seed-only call from the boot tick.
+// NEVER throws and never rejects; the batch ignores what it returns.
+//   reportedIds  raw load ids the batch's weekly summary names (undatedInWeek).
+//                Left out of the digest: the summary is their report.
+//   shownIds     those of them a DELIVERED channel actually printed, recorded as
+//                told. One named but never printed (past a channel's cap, or in
+//                a summary that reached nobody) stays owed to a later digest.
+//   seedOnly     the boot tick: seed if nobody has yet, and nothing else.
+async function runUndatedLoadAlerts({ range = null, reportedIds = [], shownIds = [], seedOnly = false } = {}) {
+	if (!INVOICE_UNDATED_ALERT_ENABLED) return { skipped: "disabled" };
+	if (invoiceUndatedAlertsRunning) return { skipped: "busy" };
+	invoiceUndatedAlertsRunning = true;
+	const getState = (key) => {
+		const row = db.prepare("SELECT value FROM server_state WHERE key = ?").get(key);
+		if (!row) return null;
+		try { return JSON.parse(row.value); } catch { return {}; }
+	};
+	const setState = (key, value) =>
+		db.prepare("INSERT OR REPLACE INTO server_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)").run(key, JSON.stringify(value));
+	// Every run that got going ends here, whatever became of it. Recording the
+	// outcome must never become the next failure, so it swallows its own.
+	const finish = (outcome, result) => {
+		try { setState(INVOICE_UNDATED_STATUS_KEY, { at: new Date().toISOString(), outcome, ...result }); }
+		catch (e) { console.error("[invoice-undated] status not recorded:", e && e.message); }
+		return result;
+	};
+	try {
+		if (seedOnly && getState(INVOICE_UNDATED_BASELINE_KEY)) return { skipped: "seeded" };
+
+		// EVERY row, read the way the invoice handler reads it — not the
+		// deduplicated cache (see listUndatedCompletedLoads()).
+		const sheets = await getSheets();
+		const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+		const sheet = parseSheet(resp.data);
+		// strict: a tombstone read that failed must stop the run, not report every
+		// soft-deleted load as unbilled.
+		const found = listUndatedCompletedLoads(sheet.data, sheet.headers, loadKeySet(getDeletedLoadIds({ strict: true })));
+		// An empty or unrecognisable sheet is no evidence either way. Acting on it
+		// would close every open row, or seed an empty baseline and report the
+		// whole history later.
+		if (!sheet.data.length || !found.resolved) {
+			console.warn(`[invoice-undated] Job Tracking ${sheet.data.length ? "has no status, Load ID or completion-date column" : "read back empty"} — ledger left as it was`);
+			return finish("skipped", { skipped: "sheet-unusable" });
+		}
+
+		// ⚠️ NO AWAIT between here and the ledger writes. The baseline is re-read
+		// AFTER the sheet read, so a boot tick and a batch that both got this far
+		// cannot both seed, and neither can report the backlog.
+		const now = new Date().toISOString();
+		const current = new Map(found.loads.map((l) => [l.key, l]));
+		const openKeys = () => db.prepare("SELECT load_key FROM invoice_undated_alerts WHERE resolved_at IS NULL").all().map((r) => r.load_key);
+		const close = (keys) => {
+			const stmt = db.prepare("UPDATE invoice_undated_alerts SET resolved_at = ? WHERE load_key = ? AND resolved_at IS NULL");
+			let n = 0;
+			for (const k of keys) n += stmt.run(now, k).changes;
+			return n;
+		};
+
+		if (!getState(INVOICE_UNDATED_BASELINE_KEY)) {
+			db.transaction(() => {
+				// History, all of it: the undated loads open, the dated ones closed. On
+				// a re-seed (the marker deleted by hand) an existing row keeps its
+				// first_seen and joins the history too.
+				const seed = db.prepare(`
+					INSERT INTO invoice_undated_alerts (load_key, driver, first_seen, seeded_at, alerted_at, resolved_at)
+					VALUES (?, ?, ?, ?, NULL, ?)
+					ON CONFLICT(load_key) DO UPDATE SET
+						driver = excluded.driver,
+						seeded_at = COALESCE(seeded_at, excluded.seeded_at),
+						resolved_at = CASE WHEN excluded.resolved_at IS NULL THEN NULL ELSE COALESCE(resolved_at, excluded.resolved_at) END
+				`);
+				for (const l of found.loads) seed.run(l.key, l.driver, now, now, null);
+				for (const l of found.dated) seed.run(l.key, l.driver, now, now, now);
+				close(openKeys().filter((k) => !current.has(k)));
+				setState(INVOICE_UNDATED_BASELINE_KEY, { seededAt: now, undated: found.loads.length, dated: found.dated.length });
+			})();
+			console.log(`[invoice-undated] baseline: ${found.loads.length} undated and ${found.dated.length} dated completed load(s) recorded silently as history` +
+				(found.unkeyed ? ` (${found.unkeyed} more row(s) have no Load ID and are not tracked)` : ""));
+			return finish("seeded", { seeded: found.loads.length, history: found.dated.length, unkeyed: found.unkeyed });
+		}
+		if (seedOnly) return { skipped: "seeded" };
+
+		// The shrink guard. `gone` is every open row this read no longer lists.
+		const open = openKeys();
+		const gone = open.filter((k) => !current.has(k));
+		const G = INVOICE_UNDATED_MASS_RESOLVE;
+		const massCap = Math.max(G.floor, Math.min(G.max, Math.floor(open.length * G.fraction)));
+		if (gone.length > massCap) {
+			const pending = getState(INVOICE_UNDATED_PENDING_SHRINK_KEY);
+			const goneSet = new Set(gone);
+			// "The same shrink": every load that vanished last time is still gone.
+			const sameShrink = !!pending && Array.isArray(pending.keys) && pending.keys.length > 0 && pending.keys.every((k) => goneSet.has(k));
+			const pendingSince = sameShrink ? Date.parse(pending.since) : NaN;
+			const since = Number.isFinite(pendingSince) ? pending.since : now;
+			if (!(Number.isFinite(pendingSince) && Date.now() - pendingSince >= G.confirmMs)) {
+				setState(INVOICE_UNDATED_PENDING_SHRINK_KEY, { since, keys: gone });
+				console.warn(`[invoice-undated] ${gone.length} of ${open.length} open load(s) vanished from Job Tracking at once (more than ${massCap}) — nothing resolved or reported this run; accepted if the sheet still reads this way ${G.confirmMs / 3600000} h after ${since}`);
+				return finish("skipped", { skipped: "mass-resolve", wouldResolve: gone.length, open: open.length, since });
+			}
+			console.warn(`[invoice-undated] accepting ${gone.length} resolution(s): Job Tracking has read this way since ${since}`);
+		}
+		db.prepare("DELETE FROM server_state WHERE key = ?").run(INVOICE_UNDATED_PENDING_SHRINK_KEY);
+
+		// Record the list. New → owed. Back after a resolve → owed again, as a new
+		// episode (the old stamp described the last one), first_seen kept — unless
+		// it is history, which keeps seeded_at and so re-opens silently. Still
+		// open → only the driver moves.
+		let resolved = 0;
+		db.transaction(() => {
+			resolved = close(gone);
+			const record = db.prepare(`
+				INSERT INTO invoice_undated_alerts (load_key, driver, first_seen, seeded_at, alerted_at, resolved_at)
+				VALUES (?, ?, ?, NULL, NULL, NULL)
+				ON CONFLICT(load_key) DO UPDATE SET
+					driver = excluded.driver,
+					alerted_at = CASE WHEN resolved_at IS NULL THEN alerted_at ELSE NULL END,
+					resolved_at = NULL
+			`);
+			for (const l of found.loads) record.run(l.key, l.driver, now);
+		})();
+
+		// Owed a report: open, never reported, not history. One the weekly summary
+		// names is left out of the digest (the summary is its report) and recorded
+		// as told only if a delivered channel actually printed it.
+		const keysOf = (ids) => new Set((ids || []).map((id) => normalizeLoadId(id)).filter(Boolean));
+		const reported = keysOf(reportedIds);
+		const shown = keysOf(shownIds);
+		const owed = db.prepare(
+			"SELECT load_key FROM invoice_undated_alerts WHERE resolved_at IS NULL AND alerted_at IS NULL AND seeded_at IS NULL ORDER BY first_seen, load_key",
+		).all().map((r) => r.load_key).filter((k) => current.has(k));
+		const toldBySummary = owed.filter((k) => shown.has(k));
+		const candidates = owed.filter((k) => !reported.has(k));
+		const alertedToday = db.prepare(
+			"SELECT COUNT(*) AS c FROM invoice_undated_alerts WHERE datetime(alerted_at) > datetime('now', '-1 day')",
+		).get().c;
+		const digest = candidates.slice(0, Math.max(0, INVOICE_UNDATED_ALERT_MAX_PER_DAY - alertedToday));
+		const held = candidates.length - digest.length;
+
+		let emailed = false;
+		let notified = false;
+		if (digest.length) ({ emailed, notified } = await sendUndatedLoadDigest(digest.map((k) => current.get(k)), { range, held }));
+
+		// ⚠️ STAMP ONLY ON CONFIRMED DELIVERY. A stamp before the send would file a
+		// failed Gmail call as a told human, and the load would never be named
+		// again; unstamped, it is simply owed to the next run. The in-app
+		// notification is delivery in its own right.
+		const at = new Date().toISOString();
+		const stamp = db.prepare("UPDATE invoice_undated_alerts SET alerted_at = ? WHERE load_key = ? AND alerted_at IS NULL AND resolved_at IS NULL");
+		if (emailed || notified) for (const k of digest) stamp.run(at, k);
+		for (const k of toldBySummary) stamp.run(at, k);
+
+		const delivered = emailed || notified;
+		const unshown = owed.filter((k) => reported.has(k) && !shown.has(k)).length;
+		console.log(`[invoice-undated] ${current.size} undated completed load(s) open; ` +
+			(digest.length ? `${digest.length} reported${delivered ? "" : " — UNDELIVERED, owed to the next run"}` : "none new") +
+			(held ? `, ${held} held for the next run (${INVOICE_UNDATED_ALERT_MAX_PER_DAY} per digest)` : "") +
+			(toldBySummary.length ? `, ${toldBySummary.length} shown by the weekly summary` : "") +
+			(unshown ? `, ${unshown} named by the weekly summary but not shown — owed` : "") +
+			(resolved ? `, ${resolved} resolved` : "") +
+			(found.unkeyed ? `, ${found.unkeyed} row(s) with no Load ID untracked` : ""));
+		return finish(digest.length && !delivered ? "undelivered" : "ok", {
+			open: current.size, digest: digest.length, delivered, emailed, notified, held, resolved,
+			toldBySummary: toldBySummary.length, unshown, unkeyed: found.unkeyed,
+		});
+	} catch (e) {
+		console.error("[invoice-undated] failed:", e && e.message);
+		return finish("error", { error: (e && e.message) || String(e) });
+	} finally {
+		invoiceUndatedAlertsRunning = false;
+	}
+}
+
+// The digest: one dispatch notification and one email for `loads`
+// (listUndatedCompletedLoads() entries). Each channel is tried on its own, so a
+// mail outage still leaves the in-app notification. Returns { emailed, notified }
+// and never throws.
+async function sendUndatedLoadDigest(loads, { range = null, held = 0 } = {}) {
+	// Sheet text, on one line, bounded BEFORE any regex runs on it.
+	const oneLine = (v, max = 80) => String(v == null ? "" : v).slice(0, 400).replace(/\s+/g, " ").trim().slice(0, max);
+	const n = loads.length;
+	const title = `${n} completed load${n === 1 ? "" : "s"} no weekly invoice will bill`;
+	const idOf = (l) => oneLine(l.loadId, 40) || l.key;
+	const listed = loads.slice(0, 10).map((l) => `${idOf(l)} (${oneLine(l.driver, 40) || "no driver"})`).join("; ") +
+		(n > 10 ? `; and ${n - 10} more` : "");
+	const body = `No Status Update Date or Completion Date: ${listed}.` +
+		(held ? ` ${held} more wait for the next weekly run (${INVOICE_UNDATED_ALERT_MAX_PER_DAY} per digest).` : "");
+	// Deliberately no `loadId`: a notification click opens a load through the
+	// Active Loads tab, which cannot show a completed one, so it would be a dead
+	// click. The ids ride as `loadIds`, which nothing routes on.
+	const metadata = { loadIds: loads.map(idOf), held, weekStart: range ? range.weekStart : "", weekEnd: range ? range.weekEnd : "" };
+
+	let notified = false;
+	try {
+		insertDispatchNotification.run("invoices-undated", title, body, JSON.stringify(metadata));
+		notified = true;
+		if (io) io.to("dispatch").emit("dispatch-notification", { type: "invoices-undated", title, body, metadata });
+	} catch (e) { console.error("[invoice-undated] notification failed:", e && e.message); }
+
+	let emailed = false;
+	try {
+		const cell = (v, tag = "td") => `<${tag} style="padding:6px 10px;border:1px solid #e2e8f0;text-align:left">${escHtml(v)}</${tag}>`;
+		const rows = loads.map((l) =>
+			`<tr>${cell(idOf(l))}${cell(oneLine(l.driver, 40) || "—")}${cell(oneLine(l.pickup) || "—")}${cell(oneLine(l.dropoff) || "—")}</tr>`).join("");
+		const html = invoiceEmailHtml({
+			heading: "Completed Loads No Invoice Will Bill",
+			bodyHtml: `
+				<p style="margin:0 0 12px;line-height:1.6;color:#334155">These loads are marked completed on Job Tracking but have no <b>Status Update Date</b> or <b>Completion Date</b>, so no weekly invoice will ever bill them${range ? ` (checked after the weekly run for ${escHtml(range.weekStart)} — ${escHtml(range.weekEnd)})` : ""}.</p>
+				<table style="border-collapse:collapse;font-size:13px;margin:0 0 12px">
+					<tr>${cell("Load", "th")}${cell("Driver", "th")}${cell("Pickup appointment", "th")}${cell("Drop-off appointment", "th")}</tr>
+					${rows}
+				</table>
+				<p style="margin:0 0 12px;line-height:1.6;color:#334155">To fix one, set its Status Update Date on Job Tracking to the day it was delivered, then regenerate or adjust the driver's invoice for that week.</p>
+				${held ? `<p style="margin:0 0 12px;color:#b45309;font-size:13px">${held} more ${held === 1 ? "is" : "are"} waiting: one digest names at most ${INVOICE_UNDATED_ALERT_MAX_PER_DAY} loads, and the rest follow on the next weekly run.</p>` : ""}
+				<p style="margin:0;color:#94a3b8;font-size:12px">Reported once per load, and again only if a load gets a date and later loses it.</p>
+			`,
+			ctaText: "Review Invoices",
+			ctaHref: "https://app.logisx.com/invoices",
+		});
+		emailed = (await sendEmail(process.env.GMAIL_USER || "info@logisx.com", `⚠️ ${title}`, html)) === true;
+	} catch (e) { console.error("[invoice-undated] email failed:", e && e.message); }
+	return { emailed, notified };
 }
 
 let invoiceAutogenRunning = false;
@@ -14207,6 +14731,13 @@ if (INVOICE_AUTOGEN_ENABLED) {
 	setInterval(() => { maybeRunWeeklyInvoiceBatch().catch(() => {}); }, 60 * 1000);
 	// Boot catch-up (delayed so the app finishes initializing first).
 	setTimeout(() => { maybeRunWeeklyInvoiceBatch().catch(() => {}); }, 90 * 1000);
+	// The undated-load ledger's silent baseline (runUndatedLoadAlerts). Unref'd,
+	// so it never holds the process open. When the catch-up above reaches the
+	// batch first, the batch seeds and this tick finds the marker and stops.
+	if (INVOICE_UNDATED_ALERT_ENABLED) {
+		const undatedSeedTick = setTimeout(() => { runUndatedLoadAlerts({ seedOnly: true }).catch(() => {}); }, INVOICE_UNDATED_SEED_DELAY_MS);
+		if (undatedSeedTick && typeof undatedSeedTick.unref === "function") undatedSeedTick.unref();
+	}
 	console.log("[invoice-autogen] enabled — Fridays 7:00 PM America/Chicago (after the 6:30 PM driver cutoff)");
 }
 
@@ -31805,7 +32336,23 @@ app.all("/api/admin/routemate/sync-now", (req, res, next) => {
 	res.set("Allow", "POST");
 	res.status(405).json({ error: "Method not allowed", expected: "POST" });
 });
-app.post("/api/admin/routemate/sync-now", requireRole("Super Admin"), async (req, res) => {
+app.post("/api/admin/routemate/sync-now", requireRole("Super Admin"), routemateSyncNowHandler);
+// Named so scripts/test-routemate-vehicle-sync.js can run the real handler.
+//
+// Three outcomes, and each one leaves an audit row:
+//   200, listUnavailable  the vehicle list answered its known HTTP 500 while the
+//                         company endpoint (the smoke test below) answered, and
+//                         the per-vehicle refresh did the sync — see
+//                         routemateSyncVehicles(). Not an error.
+//   200                   the list answered; the ordinary sync.
+//   502                   a real failure — the key refused (401/403), Routemate
+//                         unreachable, any other list error (a 502/503/504 too),
+//                         or vehicles the refresh could not fetch.
+//                         Audited as routemate_sync_failed. Always 502, never the
+//                         upstream 401/403 itself: this request WAS authorized;
+//                         it is our key that Routemate refused, and upstreamStatus
+//                         carries that.
+async function routemateSyncNowHandler(req, res) {
 	if (!ROUTEMATE_ENABLED) {
 		return res.status(503).json({ error: "Routemate integration disabled (set ROUTEMATE_ENABLED=true)" });
 	}
@@ -31813,40 +32360,48 @@ app.post("/api/admin/routemate/sync-now", requireRole("Super Admin"), async (req
 		return res.status(503).json({ error: "Routemate API key not configured (set ROUTEMATE_API_KEY)" });
 	}
 	try {
-		// Smoke test first via the lightest call before paginating vehicles.
+		// Smoke test first via the lightest call before paginating vehicles. It is
+		// also what lets the sync call a list 500 "expected" without asking again.
 		await routemate.getCompany(routemateCreds());
-		const result = await routemateSyncVehicles();
+		const result = await routemateSyncVehicles({ companyVerified: true });
 		// Trigger one telemetry pull so the operator sees fresh data immediately.
 		routemateSyncTelemetry().catch(() => {});
-		logAudit(req, 'routemate_sync', 'vehicles', '', `Synced ${result.synced} Routemate vehicles`);
+		if (result.listUnavailable) {
+			const hint = "vehicle list unavailable upstream; per-vehicle refresh done";
+			logAudit(req, "routemate_sync", "vehicles", "",
+				`Vehicle list unavailable upstream (HTTP ${result.upstreamStatus}); per-vehicle refresh done: ${result.hydrated} updated, ${result.hydrationSkipped} skipped`);
+			return res.json({
+				success: true, listUnavailable: true, hint, upstreamStatus: result.upstreamStatus,
+				vehiclesSynced: result.synced, vehiclesHydrated: result.hydrated || 0, fallbackSynced: result.fallbackSynced || 0,
+			});
+		}
+		logAudit(req, "routemate_sync", "vehicles", "", `Synced ${result.synced} Routemate vehicles`);
 		res.json({ success: true, vehiclesSynced: result.synced, vehiclesHydrated: result.hydrated || 0 });
 	} catch (err) {
 		console.error("Routemate sync-now error:", err.message);
-		// Pull telemetry anyway — that endpoint isn't affected by the
-		// /assets/vehicles outage and is what dispatchers actually care about.
+		// Pull telemetry anyway — it is unaffected by a vehicle-inventory failure and
+		// is what dispatchers actually care about.
 		routemateSyncTelemetry().catch(() => {});
-		const upstream500 = err.status === 500;
-		const fellBackToTelemetry = Number.isFinite(err.fallbackSynced);
-		const hydrated = Number.isFinite(err.hydratedIndividually) ? err.hydratedIndividually : 0;
-		res.status(err.status === 401 || err.status === 403 ? err.status : 502).json({
+		const status = err.status || null;
+		const code = err.code || "ROUTEMATE_SYNC_FAILED";
+		const hint = status === 401 || status === 403
+			? "Routemate refused the API key — check ROUTEMATE_API_KEY. Live GPS uses the same key."
+			: code === "ROUTEMATE_REFRESH_FAILED"
+				? "Some vehicles could not be refreshed individually; the next sync retries them. Live GPS is unaffected."
+				: !status
+					? "Routemate could not be reached (network or timeout). The daily sync retries on its own."
+					: undefined;
+		logAudit(req, "routemate_sync_failed", "vehicles", "",
+			`${code}${status ? ` (HTTP ${status})` : ""}: ${String(err.message || "").replace(/[\r\n]+/g, " ").slice(0, 200)}`);
+		res.status(502).json({
 			error: err.message || "Routemate sync failed",
-			code: err.code || "ROUTEMATE_SYNC_FAILED",
-			upstreamStatus: err.status || null,
-			// Helpful breadcrumb for support — explains *what* Routemate broke,
-			// and, when the per-vehicle fallback covered it, that the mirror is
-			// actually populated despite this non-2xx. Without that second half
-			// an operator reads "sync failed" and assumes VIN auto-match is
-			// still dead when it has just been repaired.
-			hint: upstream500
-				? (hydrated > 0
-					? `Routemate's /api/v0/assets/vehicles list endpoint is returning HTTP 500 (upstream bug). Worked around it: ${hydrated} vehicle record(s) fetched individually, so VIN/make/model are up to date and VIN auto-match works. Telemetry (live GPS) is unaffected.`
-					: "Routemate's /api/v0/assets/vehicles endpoint is returning HTTP 500. Telemetry (live GPS) is unaffected. Contact Routemate support — this is upstream.")
-				: undefined,
-			fallbackSynced: fellBackToTelemetry ? err.fallbackSynced : undefined,
-			vehiclesHydrated: hydrated || undefined,
+			code,
+			upstreamStatus: status,
+			hint,
+			fallbackSynced: Number.isFinite(err.fallbackSynced) ? err.fallbackSynced : undefined,
 		});
 	}
-});
+}
 
 // GET /api/routemate/health — Last-sync timestamps + recent error count.
 // Super Admin only. Used by the manual probe UI in TrucksView (Phase 2).

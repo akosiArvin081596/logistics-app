@@ -476,6 +476,46 @@ function sourcePins() {
 		"§7 remote-backup-check.sh never takes the deploy lock (a read-only check must not block or queue a deploy)");
 	ok(!/\bpm2\b|\bgit\b|(^|[;&|(]\s*|\s)(rm|mv|cp|truncate|tee)\s/m.test(remoteCheck),
 		"§7 remote-backup-check.sh stays read-only: no pm2, git, rm, mv, cp, truncate or tee");
+
+	// ── remote-backup-check.sh reads backup.sh's failures, all of them. backup.sh
+	// writes two shapes — "[backup] backup FAILED with exit code N" when the
+	// snapshot fails, "[backup] FAILED: <why>" when it cannot start — and the check
+	// used to grep for the first only, so a run that never started read as fine.
+	// The pattern is taken out of the script and run through real `grep -E`.
+	const failedRe = (remoteCheck.match(/^FAILED_RE='([^']+)'$/m) || [])[1];
+	ok(!!failedRe, "§7 remote-backup-check.sh names its failure pattern once (FAILED_RE)");
+	const grepCount = (line) => {
+		const r = require("child_process").spawnSync("grep", ["-cE", failedRe || "^$"], { input: `${line}\n`, encoding: "utf8" });
+		return Number(String(r.stdout).trim());
+	};
+	ok(grepCount("[backup] backup FAILED with exit code 1") === 1, "§7 the check sees '[backup] backup FAILED with exit code N'");
+	ok(grepCount("[backup] FAILED: no node on this box can load better-sqlite3") === 1, "§7 the check sees '[backup] FAILED: <why>' (a run that never started)");
+	ok(grepCount("[backup] completed: Tue Sep 23 02:03:11 UTC 2026") === 0, "§7 …and not a completed run");
+	ok(!/\\\]/.test(failedRe || ""), "§7 the pattern spells ']' as []], never \\] (newer GNU grep warns on a stray backslash)");
+	// The failure COUNT is per run: a failed snapshot writes backup-db.js's
+	// "[backup] FAILED: <why>" AND backup.sh's "backup FAILED with exit code N" into
+	// the same run, and counting lines made one bad night read as two.
+	const countProg = (remoteCheck.match(/^COUNT_FAILED_RUNS='([^']+)'$/m) || [])[1];
+	ok(!!countProg && countProg.includes(failedRe || "\u0000"), "§7 the failed-run count groups by run header and uses the same failure pattern");
+	ok(/^FAILS=\$\(awk "\$COUNT_FAILED_RUNS" backup\.log/m.test(remoteCheck), "§7 BACKUP_TOTAL_FAILURES comes from that per-run count");
+	const runLog = [
+		"[backup] ---- 2026-09-20 02:00:00 UTC ----", "[backup] completed: ok",
+		"[backup] ---- 2026-09-21 02:00:00 UTC ----", "[backup] FAILED: integrity_check failed", "[backup] backup FAILED with exit code 1",
+		"[backup] ---- 2026-09-22 02:00:00 UTC ----", "[backup] completed: ok",
+		"[backup] ---- 2026-09-23 02:00:00 UTC ----", "[backup] FAILED: no node on this box can load better-sqlite3", "[backup]   tried pm2 exec_interpreter",
+		"[backup] ---- 2026-09-24 02:00:00 UTC ----", "[backup] backup FAILED with exit code 3",
+	].join("\n") + "\n";
+	const awkCount = (prog, input) => Number(String(require("child_process").spawnSync("awk", [prog || "BEGIN{print -1}"], { input, encoding: "utf8" }).stdout).trim());
+	// Each shape has a night to itself (09-23, 09-24), so missing either one shows.
+	ok(awkCount(countProg, runLog) === 3, `§7 three bad nights count 3, not the 4 failure lines they wrote (got ${awkCount(countProg, runLog)})`);
+	ok(awkCount(countProg, "[backup] ---- 2026-09-23 02:00:00 UTC ----\n[backup] completed: ok\n") === 0, "§7 …and a clean log counts 0");
+	// Age is floored to whole hours. At the 04:00 check a missed 02:00 run is ~25h59m
+	// old (25) and the newest healthy one at most ~24 h (a check just before 02:00).
+	const maxAge = Number((remoteCheck.match(/^MAX_AGE_H=\$\{MAX_AGE_H:-(\d+)\}[ \t]*$/m) || [])[1]);
+	ok(maxAge <= Math.floor((25 * 3600 + 59 * 60) / 3600),
+		`§7 a missed night is stale at the very next 04:00 check (limit ${maxAge} h must be ≤ 25)`);
+	ok(maxAge > Math.floor((23 * 3600 + 59 * 60) / 3600) && maxAge >= 24,
+		`§7 …while a snapshot from last night never is (limit ${maxAge} h must be ≥ 24)`);
 }
 
 function mutants() {

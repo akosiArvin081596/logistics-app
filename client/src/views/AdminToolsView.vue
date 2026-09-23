@@ -476,10 +476,19 @@ async function runRoutemateSync() {
   rmSyncBusy.value = true
   try {
     const r = await api.post('/api/admin/routemate/sync-now', {})
-    toast(`Synced ${r.vehiclesSynced} Routemate vehicle${r.vehiclesSynced === 1 ? '' : 's'}`)
+    // The vehicle list has been down upstream for months (a known HTTP 500). The
+    // server then refreshes each vehicle individually and answers 200 with
+    // listUnavailable — a completed sync, not a failure.
+    if (r.listUnavailable) {
+      const n = r.vehiclesHydrated || 0
+      toast(`Vehicle list unavailable upstream; per-vehicle refresh done (${n} vehicle${n === 1 ? '' : 's'} updated)`)
+    } else {
+      toast(`Synced ${r.vehiclesSynced} Routemate vehicle${r.vehiclesSynced === 1 ? '' : 's'}`)
+    }
     await loadRoutemateHealth()
   } catch (err) {
-    toast(err?.message || 'Routemate sync failed', 'error')
+    const hint = err?.data?.hint
+    toast(hint ? `${err.message} — ${hint}` : (err?.message || 'Routemate sync failed'), 'error')
     await loadRoutemateHealth()
   } finally {
     rmSyncBusy.value = false
