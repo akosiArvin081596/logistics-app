@@ -1,0 +1,140 @@
+name: Backup freshness
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Watches the age of the nightly app.db snapshot FROM OUTSIDE THE BOX.
+#
+# backup.sh can only ever report a failure into backups/backup.log, and nothing
+# reads that file. That has now cost two silent outages of the only backup of a
+# 411 MB database holding every SSN, EIN and bank routing number:
+#
+#     2026-08-26..08-31   six nights   cron PATH resolved the wrong Node
+#     2026-09-15..09-19   five nights  pm2 jlist picked another tenant's Node
+#
+# Both root causes are fixed in backup.sh. This exists because the NEXT cause
+# will be a third thing, and the failure mode that actually hurts is not "the
+# backup broke" — it is "the backup broke and nobody found out for five days".
+#
+# Deliberately NOT self-healing. Unlike deploy-drift.yml there is nothing safe
+# to retry automatically: a backup that failed for an unknown reason should stop
+# and get a human, not re-run on a schedule.
+#
+# ⚠️ Invariants. Keep all three (scripts/test-drift-gate.js §7 pins them):
+#   1. ITS OWN CONCURRENCY GROUP, never deploy.yml's. This check is read-only;
+#      sharing the deploy group would queue it behind real deploys and hold
+#      them up in turn. remote-backup-check.sh never takes the box's deploy
+#      flock either.
+#   2. THE SHARED SSH HELPERS. scripts/deploy/ssh-setup.sh pins the host key
+#      from a secret and refuses an empty one; scripts/deploy/ssh-retry.sh
+#      retries transport failures only. Same copies as every deploy and drift
+#      check, so a fix to either reaches this job too.
+#   3. NO EXPRESSIONS INSIDE A run: SCRIPT. Secrets and step outputs reach the
+#      shell through env: only. An expression is pasted into the script TEXT
+#      before bash parses it, so a secret containing a quote breaks the step and
+#      a value read off the box would run as shell on the runner.
+# ─────────────────────────────────────────────────────────────────────────────
+on:
+  schedule:
+    # 04:00 UTC — two hours after the 02:00 UTC cron, so a missed night is
+    # caught the very next morning rather than a day later.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: backup-freshness
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: nightly snapshot age
+    runs-on: ubuntu-latest
+    # ssh-retry.sh's transport budget spans ~5 min; the check itself is seconds.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_SSH_KNOWN_HOSTS: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+        run: bash scripts/deploy/ssh-setup.sh
+
+      - name: Check snapshot freshness
+        id: check
+        env:
+          HOST: ${{ secrets.VPS_HOST }}
+          USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          # Same transport retry as every deploy and drift check. Read-only on
+          # the box: no lock, no writes, no restarts.
+          out=$(bash scripts/deploy/ssh-retry.sh "$USER@$HOST" \
+                "DIR='/var/www/logistics-app' bash -s" \
+                < scripts/deploy/remote-backup-check.sh)
+          echo "$out"
+          get() { printf '%s' "$out" | grep -m1 -oE "^$1=.*" | cut -d= -f2- || true; }
+          {
+            echo "state=$(get BACKUP_STATE)"
+            echo "reason=$(get BACKUP_REASON)"
+            echo "newest=$(get BACKUP_NEWEST)"
+            echo "age=$(get BACKUP_AGE_HOURS)"
+            echo "size=$(get BACKUP_SIZE)"
+            echo "lastrun=$(get BACKUP_LAST_RUN)"
+            echo "lastnode=$(get BACKUP_LAST_NODE)"
+            echo "lastok=$(get BACKUP_LAST_RUN_OK)"
+            echo "failures=$(get BACKUP_TOTAL_FAILURES)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Alarm
+        # An empty state (the remote script printed nothing parseable) is not
+        # 'fresh' either, so it alarms. Fail-closed.
+        if: steps.check.outputs.state != 'fresh'
+        env:
+          STATE: ${{ steps.check.outputs.state }}
+          REASON: ${{ steps.check.outputs.reason }}
+          LASTRUN: ${{ steps.check.outputs.lastrun }}
+          LASTNODE: ${{ steps.check.outputs.lastnode }}
+          LASTOK: ${{ steps.check.outputs.lastok }}
+          FAILURES: ${{ steps.check.outputs.failures }}
+        run: |
+          echo "::error::nightly app.db backup is not healthy — state=${STATE:-unknown}: ${REASON:-no reason reported}"
+          echo "last logged run: $LASTRUN using $LASTNODE"
+          echo "last scheduled run succeeded? $LASTOK   (total failures in backup.log: $FAILURES)"
+          echo "fix: ssh to the box and run  bash /var/www/logistics-app/backup.sh  — it prints which Node it chose."
+          exit 1
+
+      - name: Summary
+        if: always()
+        env:
+          STATE: ${{ steps.check.outputs.state }}
+          REASON: ${{ steps.check.outputs.reason }}
+          NEWEST: ${{ steps.check.outputs.newest }}
+          AGE: ${{ steps.check.outputs.age }}
+          SIZE: ${{ steps.check.outputs.size }}
+          LASTRUN: ${{ steps.check.outputs.lastrun }}
+          LASTNODE: ${{ steps.check.outputs.lastnode }}
+          LASTOK: ${{ steps.check.outputs.lastok }}
+          FAILURES: ${{ steps.check.outputs.failures }}
+        run: |
+          {
+            echo "### Backup freshness"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| state | \`${STATE:-n/a}\` |"
+            echo "| newest snapshot | \`$NEWEST\` |"
+            echo "| age | $AGE h |"
+            echo "| size | $SIZE bytes |"
+            echo "| last run | $LASTRUN |"
+            echo "| interpreter used | \`$LASTNODE\` |"
+            echo "| last scheduled run OK | $LASTOK |"
+            echo "| total failures in log | $FAILURES |"
+            echo ""
+            echo "$REASON"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Always remove the deploy key
+        if: always()
+        run: shred -u ~/.ssh/deploy_key 2>/dev/null || rm -f ~/.ssh/deploy_key

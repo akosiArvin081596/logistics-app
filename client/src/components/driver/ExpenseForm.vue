@@ -380,6 +380,7 @@ import { useFileDrop } from '../../composables/useFileDrop'
 import { compressImage, isDecodedImage } from '../../lib/imageUtils'
 import { RECEIPT_MAX_EDGE, RECEIPT_SCAN_WIDTH, createPhotoJobs } from '../../lib/receiptPhoto'
 import { replyLost } from '../../lib/saveOutcome'
+import { withRetakeHint } from '../../lib/uploadFailure'
 import { expenseLoadIds } from '../../lib/expenseWindow'
 // "2026-06" -> "June 2026". Shared, not local: the copy that used to live here
 // was one of several, and two of them under one name in client/src/lib/ had
@@ -1239,22 +1240,14 @@ function resetAfterSubmit(keepLoadId) {
   else if (!keepLoadId) form.loadId = ''
 }
 
-// Words that mean "the FILE was the problem". Deliberately excludes "receipt",
-// which every message on this endpoint contains — with it in, a closed-period
-// 400 ("…this receipt books to August 2026") came back telling the driver to
-// retake a photo that was never the issue. Caught in the browser, kept here as
-// the reason the list looks arbitrary.
-const PHOTO_FAILURE_RE = /image|photo|jpe?g|png|webp|format|file type|data uri/i
-
 // The server's message, verbatim — it is the only thing that knows whether this
 // was a duplicate receipt, a closed month, or a file the byte check refused, and
 // the bulk-receipt grid surfaces err.message the same way for the same reason.
 //
 // A next step is appended ONLY when the failure is attributable to the photo: a
 // media-type detail tells a driver nothing they can act on, but "take it again"
-// does. Matched on the text rather than an error code deliberately — the
-// server-side check is landing alongside this, and a wrong code guess would fail
-// silently, whereas a missed match here degrades to the verbatim message.
+// does. That decision — which statuses and which words count, and when the
+// server's message already says it — lives in lib/uploadFailure.js.
 function failureText(err) {
   // Not the transport's words ("Load failed", "Failed to fetch", "timed out …
   // try again"): each tells the driver it failed and to resend, and the resend
@@ -1263,14 +1256,9 @@ function failureText(err) {
   if (replyLost(err)) {
     return 'No answer came back from the server, so this may already be saved. Check this load’s Expense History below before you try again — if it did save, trying again will say so.'
   }
-  const msg = (err && err.message) ||
-    'Could not submit this expense. Nothing was saved — tap Try Again.'
-  const aboutPhoto = err && err.status === 400 && PHOTO_FAILURE_RE.test(msg)
-  if (!aboutPhoto) return msg
-  // Server messages don't reliably end in punctuation, and without this the two
-  // sentences run together into one unreadable line on a phone.
-  const stem = /[.!?]$/.test(msg) ? msg : `${msg}.`
-  return `${stem} Take the receipt photo again, then submit.`
+  return withRetakeHint(err,
+    'Could not submit this expense. Nothing was saved — tap Try Again.',
+    'Take the receipt photo again, then submit.')
 }
 </script>
 

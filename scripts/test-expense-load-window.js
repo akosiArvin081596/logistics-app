@@ -250,9 +250,16 @@ async function runGate(opts, role, loadId, driverName) {
 
 // ExpenseForm's own "the photo was the problem" test — a refusal must never
 // match it, or the app tells the driver to retake a photo that was never the issue.
+// The regex lives in client/src/lib/uploadFailure.js; ExpenseForm must still be
+// the one using it, or this would pin a rule the form no longer applies.
 const FORM_SRC = fs.readFileSync(path.join(ROOT, "client", "src", "components", "driver", "ExpenseForm.vue"), "utf8");
-const PHOTO_RE_SRC = (FORM_SRC.match(/const PHOTO_FAILURE_RE = (\/.+\/[a-z]*)/) || [])[1];
-if (!PHOTO_RE_SRC) { console.error("FAIL  could not locate PHOTO_FAILURE_RE in ExpenseForm.vue"); process.exit(1); }
+const FAILURE_LIB_SRC = fs.readFileSync(path.join(ROOT, "client", "src", "lib", "uploadFailure.js"), "utf8");
+if (!/^import \{[^}]*\bwithRetakeHint\b[^}]*\} from '\.\.\/\.\.\/lib\/uploadFailure'/m.test(FORM_SRC) || !/\bwithRetakeHint\(err,/.test(FORM_SRC)) {
+	console.error("FAIL  ExpenseForm.vue no longer decides its photo hint through lib/uploadFailure.js");
+	process.exit(1);
+}
+const PHOTO_RE_SRC = (FAILURE_LIB_SRC.match(/export const PHOTO_FAILURE_RE = (\/.+\/[a-z]*)/) || [])[1];
+if (!PHOTO_RE_SRC) { console.error("FAIL  could not locate PHOTO_FAILURE_RE in client/src/lib/uploadFailure.js"); process.exit(1); }
 const PHOTO_FAILURE_RE = new Function(`return ${PHOTO_RE_SRC}`)();
 
 (async () => {

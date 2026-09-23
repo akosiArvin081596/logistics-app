@@ -16,7 +16,8 @@
  *      started with a clean environment, heard from ('error') before anything
  *      else touches it, and killed at the deadline; the pixel limit is checked
  *      when a receipt is queued; the model location is pinned
- *   §2 receiptImageSize(): PNG and JPEG headers, malformed input, bounded work
+ *   §2 imageSize() (lib/image-size.js, formerly receiptImageSize() in
+ *      server.js): PNG and JPEG headers, malformed input, bounded work
  *   §3 end to end in a stand-in server process: an OCR job that crashes, hangs,
  *      fails cleanly, cannot load its model or answers; a child that cannot be
  *      started at all; images over the limit or unreadable. The server
@@ -78,7 +79,13 @@ function liftFn(name, src = SRC) {
 }
 const STATE_RE = /^(?:const|let) (?:RECEIPT_OCR_(?:TIMEOUT_MS|BACKOFF_MS|MAX_PIXELS|CHILD|CACHE_DIR|LANG_PATH|MAX_PENDING|MAX_QUEUED_BYTES)|receiptOcr(?:Chain|Pending|PausedUntil|QueuedBytes)) = [^\n;]+;[^\n]*$/gm;
 const STATE_SRC = (SRC.match(STATE_RE) || []).join("\n");
-const SIZE_SRC = liftFn("receiptImageSize");
+// The header parser lives in lib/image-size.js. The stand-in server gets the
+// same binding server.js uses — the require line itself, lifted — so the queue
+// runs against the shipped parser, not a copy of it.
+const IMAGE_LIB_PATH = path.join(REPO, "lib", "image-size.js");
+const IMAGE_LIB_SRC = fs.existsSync(IMAGE_LIB_PATH) ? fs.readFileSync(IMAGE_LIB_PATH, "utf8") : "";
+const SIZE_SRC = IMAGE_LIB_SRC ? liftFn("imageSize", IMAGE_LIB_SRC) : "";
+const SIZE_BINDING_SRC = (SRC.match(/^const imageLimits = require\("\.\/lib\/image-size"\);$/m) || [""])[0];
 const SKIP_SRC = liftFn("receiptOcrSkipReason");
 const CLEAR_SRC = liftFn("clearReceiptOcrModel");
 const EXTRACT_SRC = liftFn("extractReceiptText");
@@ -89,7 +96,7 @@ if (!EXTRACT_SRC || !QUEUE_SRC) {
 	console.error("FAIL  could not locate extractReceiptText / queueReceiptOcr in server.js");
 	process.exit(1);
 }
-const OCR_SRC = [STATE_SRC, SIZE_SRC, SKIP_SRC, CLEAR_SRC, DEADLINE_SRC, RUN_SRC, EXTRACT_SRC, QUEUE_SRC].filter(Boolean).join("\n\n");
+const OCR_SRC = [STATE_SRC, SIZE_BINDING_SRC, SKIP_SRC, CLEAR_SRC, DEADLINE_SRC, RUN_SRC, EXTRACT_SRC, QUEUE_SRC].filter(Boolean).join("\n\n");
 
 // --- fixtures ----------------------------------------------------------------
 // Headers only — a real signature and dimensions, then a marker the stand-ins
@@ -392,7 +399,7 @@ ok("...but only when the job failed BEFORE its model loaded — failing on an im
 const maxPx = Number(((SRC.match(/const RECEIPT_OCR_MAX_PIXELS = ([\d_]+);/) || [])[1] || "").replace(/_/g, ""));
 ok("RECEIPT_OCR_MAX_PIXELS is a real bound (0 < limit <= 50 MP)", maxPx > 0 && maxPx <= 50_000_000);
 ok("the pixel limit is checked when a receipt is QUEUED — an image that would be skipped never waits in memory",
-	SKIP_SRC.indexOf("receiptImageSize(") > -1 && SKIP_SRC.indexOf("RECEIPT_OCR_MAX_PIXELS") > -1 &&
+	SKIP_SRC.indexOf("imageLimits.imageSize(") > -1 && SKIP_SRC.indexOf("RECEIPT_OCR_MAX_PIXELS") > -1 &&
 	QUEUE_SRC.indexOf("receiptOcrSkipReason(") > -1 &&
 	QUEUE_SRC.indexOf("receiptOcrSkipReason(") < QUEUE_SRC.indexOf("receiptOcrChain = "));
 ok("...and again before any child starts, for any other caller",
@@ -413,10 +420,16 @@ ok("...and says { ready: true } once the model has loaded, before it recognizes"
 ok("...and exits when the server goes away", /process\.on\("disconnect", \(\) => process\.exit\(0\)\)/.test(CHILD_SRC));
 
 // ===========================================================================
-console.log("\n§2  receiptImageSize() — dimensions from the header alone");
+console.log("\n§2  imageSize() (lib/image-size.js) — dimensions from the header alone");
 // ===========================================================================
-const receiptImageSize = SIZE_SRC ? new Function(`"use strict";\n${SIZE_SRC}\nreturn receiptImageSize;`)() : null;
-ok("receiptImageSize() exists", !!receiptImageSize);
+// The name below is kept from when this parser lived in server.js as
+// receiptImageSize(); every assertion runs against the module's own export.
+const receiptImageSize = IMAGE_LIB_SRC ? require(IMAGE_LIB_PATH).imageSize : null;
+ok("imageSize() is exported by lib/image-size.js", typeof receiptImageSize === "function");
+ok("server.js binds that module and keeps no parser of its own",
+	!!SIZE_BINDING_SRC && !/\nfunction receiptImageSize\(/.test(SRC) && !/getJpegDimensions|getPngDimensions/.test(SRC));
+ok("the source the mutants below edit IS the exported function",
+	!!receiptImageSize && !!SIZE_SRC && receiptImageSize.toString() === SIZE_SRC);
 if (receiptImageSize) {
 	const eq = (got, w, h) => !!got && got.width === w && got.height === h;
 	ok("PNG: read from IHDR", eq(receiptImageSize(png(800, 600)), 800, 600));
@@ -626,7 +639,7 @@ if (receiptImageSize) {
 	ok("no mutated copy of the child was written into the repo",
 		!fs.readdirSync(path.join(REPO, "lib")).some((n) => /variant/.test(n)));
 	if (receiptImageSize && SIZE_SRC.includes("marker !== 0xc4 && ")) {
-		const loose = new Function(`"use strict";\n${SIZE_SRC.replace("marker !== 0xc4 && ", "")}\nreturn receiptImageSize;`)();
+		const loose = new Function(`"use strict";\n${SIZE_SRC.replace("marker !== 0xc4 && ", "")}\nreturn imageSize;`)();
 		const got = loose(jpeg(APP0, DHT, sof(0xc0, 1024, 768)));
 		ok("MUTANT reading DHT as a frame header: wrong dimensions — §2 flips", !(got && got.width === 1024 && got.height === 768));
 	} else ok("(DHT anchor present)", false);

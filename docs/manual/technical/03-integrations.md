@@ -54,12 +54,14 @@ Drivers can photograph a fuel or repair receipt and the form pre-fills from a Ge
 
 ## n8n — broker email ingestion
 
-When a broker emails a Rate Confirmation to `info@logisx.com`, an n8n workflow hands the PDF to the app for extraction (see **PDF parsing** below) and posts a structured payload to `POST /api/n8n/job`. The server appends a new row to the Job Tracking sheet with status `Unassigned`, and a `dispatch-notification` socket event fires immediately so dispatchers see the new load without refreshing.
+When a broker emails a Rate Confirmation to `info@logisx.com`, an n8n workflow hands the PDF to the app for extraction (see **PDF parsing** below).
+
+> **⚠️ Corrected 2026-09-19.** This section previously said the workflow posts to `POST /api/n8n/job`, that the server "appends a new row to the Job Tracking sheet with status `Unassigned`", and that a `dispatch-notification` socket event "fires immediately". All three are wrong. That route upserts into the **local SQLite mirror** `sheet_job_tracking` (not the Google Sheet), defaults `job_status` to **`Dispatched`** (not `Unassigned`), and emits **no socket event at all**. It is also **dormant**: the table holds 0 rows and nginx recorded 0 calls to it across the 14-day retention window.
 
 **Auth.** Shared secret in the `x-webhook-secret` header. Matches `N8N_WEBHOOK_SECRET` from `.env`. n8n stores the secret in its own credentials.
 
-**Endpoints.**
-- `POST /api/n8n/job` — primary ingestion path.
+**Endpoints.** The two that actually carry traffic are `POST /api/n8n/extract-pdf-via-gemini` and `POST /api/n8n/load-distance` (26 calls each in the retained window) — both documented under **PDF parsing** below, and both gated by `N8N_EXTRACT_SECRET`.
+- `POST /api/n8n/job` — **dormant**, 0 calls in the retained window. Was described here as the "primary ingestion path"; it is not. Still wired and still secret-gated, so a revival needs no code change.
 - `POST /api/webhook/new-load` — secondary, used for re-pushing after manual fixes in n8n.
 
 **Replay.** A `replay-via-webhook-injection.js` script (committed alongside the n8n workflows) lets us re-run a single message through the pipeline when a workflow change should be applied retroactively.

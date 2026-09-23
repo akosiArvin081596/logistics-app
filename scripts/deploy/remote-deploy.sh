@@ -202,10 +202,16 @@ echo "::group::install + build"
 npm install --silent --no-audit --no-fund
 # npm tracks package VERSIONS, not ABI — it reports "up to date" and skips the
 # rebuild when only the Node major changed. Probe, then rebuild only on failure.
-if ! node -e "require('better-sqlite3')" >/dev/null 2>&1; then
+#
+# ⚠️ The probe OPENS a database. require('better-sqlite3') alone passes under an
+# ABI-mismatched Node, because the native binding loads lazily, on the first
+# `new Database()`. Measured on the VPS 2026-09-19: /usr/bin/node v20 passes
+# require() and fails new Database(). backup.sh's probe was fixed the same way;
+# scripts/test-deploy-scripts.js §9 pins both.
+if ! node -e "new (require('better-sqlite3'))(':memory:').close()" >/dev/null 2>&1; then
 	echo "native ABI mismatch detected — rebuilding better-sqlite3 for $(node --version)"
 	npm rebuild better-sqlite3
-	node -e "require('better-sqlite3')" || { echo "::error::better-sqlite3 still fails to load after rebuild"; exit 1; }
+	node -e "new (require('better-sqlite3'))(':memory:').close()" || { echo "::error::better-sqlite3 still fails to load after rebuild"; exit 1; }
 fi
 echo "native modules OK under $(node --version)"
 npm run build:client --silent

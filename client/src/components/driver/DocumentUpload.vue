@@ -165,6 +165,7 @@ import { useUpload } from '../../composables/useUpload'
 import { useFileDrop } from '../../composables/useFileDrop'
 import { compressImage, isDecodedImage, readFileAsDataURL, SCAN_MAX_EDGE } from '../../lib/imageUtils'
 import { runPool } from '../../lib/asyncPool'
+import { uploadFailureToast } from '../../lib/uploadFailure'
 
 const props = defineProps({
   loadId: { type: String, required: true },
@@ -702,7 +703,10 @@ async function handleUpload() {
   // One rule covering both cases: only what we sent may be dropped, and only if
   // it landed. Anything attached after the POST began is untouched.
   files.value = files.value.filter(f => !sent.has(f) || keep.has(f))
-  toast.show(`Upload failed for ${failed.length} item${failed.length !== 1 ? 's' : ''} — tap Upload to retry.`, 'error')
+  // A refusal (4xx) is shown in the server's own words — retrying the same file
+  // cannot change it, so "tap Upload to retry" would be the wrong advice.
+  // Transient failures keep that advice. See lib/uploadFailure.js.
+  toast.show(uploadFailureToast(failed), 'error')
 }
 </script>
 

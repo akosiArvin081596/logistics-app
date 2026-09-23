@@ -64,6 +64,7 @@ const { renderHtmlToPdf } = require("./lib/pdf-browser");
 const { getStateFromCoords } = require("./lib/ifta-states");
 const routemate = require("./lib/routemate-client");
 const linxupPush = require("./lib/linxup-push");
+const eldFeedHealth = require("./lib/eld-feed-health");
 const scankit = require("./lib/scankit-client");
 const brokerInvoice = require("./lib/broker-invoice");
 const { buildPayoutStatementHtml } = require("./lib/payout-statement");
@@ -2577,6 +2578,607 @@ function purgeOldRoutemateTelemetry() {
 purgeOldRoutemateTelemetry();
 setInterval(purgeOldRoutemateTelemetry, 7 * 24 * 60 * 60 * 1000); // weekly
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ELD FEED SILENCE — detection, ledger and alerting
+//
+// Nothing in this app noticed when an ELD feed stopped. Measured on production
+// 2026-09-19, three separate shapes of silence were live at once, none of which
+// had ever produced a signal:
+//
+//   LogisX-#2372  x78f4qtVukzwiF6ur7D04A   last fix 2026-08-11  (39 days)
+//   LogisX-#302   18000505841 (Linxup)     last fix 2026-07-27  (54 days)
+//   (orphan)      18000507597 (Linxup)     linked to NO truck, degraded to
+//                                          exactly 1 ping/day from 2026-09-06
+//
+// ⚠️ THIS IS A MONEY DEFECT, NOT A DASHBOARD GAP. getEldTravelDaysByVehicle()
+// is coverage-aware: a load window with NO pings falls back to the FULL
+// scheduled window instead of reporting zero. That is right for a truck that
+// predates the feed and wrong for a truck whose device died — the load moves to
+// the `estimated` basis, which pays MORE driver days than were worked and
+// therefore LESS investor profit, and logs nothing anywhere saying so.
+//
+// WHY THE IN-MEMORY COUNTERS COULD NOT HAVE CAUGHT THIS. linxupHealth /
+// routemateHealth reset on every process restart, and the documented deploy flow
+// pm2-restarts this process on every merge to main. A 54-day silence spans
+// dozens of restarts, so the in-memory view is permanently "we just started,
+// nothing to report". Everything below is derived from the DATABASE for that
+// reason, including the `feeds` array the two health endpoints serve.
+//
+// The decision logic is pure and lives in lib/eld-feed-health.js (three
+// conditions, and why one is not enough, are written out there). This file owns
+// the queries, the dedupe ledger, the mail and the socket fan-out.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ⚠️ DEFAULTS **ON** — READ THE SHAPE, NOT THE NAME. This is CLAUDE.md's THIRD
+// flag shape (`!/^(false|0|no|off)$/i`), so ELD_STALE_ALERT_ENABLED=true is a
+// no-op: the only thing this variable can do is turn the detector OFF.
+//
+// It deliberately does NOT follow "anything that moves money ships dormant".
+// That invariant is about features which WRITE a money figure; this one writes
+// no finance row, moves no existing number and changes no pay basis — it reads
+// telemetry and tells a human. The failure it exists to break is silence, so
+// shipping it silent would be self-defeating: same call, and the same sentence,
+// as FUEL_LOW_ALERT_ENABLED — "a safety warning that ships disabled is a safety
+// warning nobody turned on."
+const ELD_STALE_ALERT_ENABLED =
+	!/^(false|0|no|off)$/i.test(String(process.env.ELD_STALE_ALERT_ENABLED ?? "").trim());
+// Hours of silence on a linked, Active, unretired truck before it alerts.
+const ELD_STALE_HOURS =
+	Math.max(1, parseFloat(process.env.ELD_STALE_HOURS ?? "") || eldFeedHealth.DEFAULT_STALE_HOURS);
+// Distinct fixes required in a rolling 24 h. Below this the feed is a trickle:
+// never stale by the clock, useless to any path that needs a position history.
+const ELD_STALE_MIN_FIXES =
+	Math.max(1, parseInt(process.env.ELD_STALE_MIN_FIXES ?? "", 10) || eldFeedHealth.DEFAULT_MIN_FIXES_24H);
+// How recently an UNLINKED device must have written telemetry to still count as
+// part of our data stream. Wider than the stale window on purpose — see the lib.
+const ELD_UNLINKED_LOOKBACK_HOURS =
+	Math.max(1, parseFloat(process.env.ELD_UNLINKED_LOOKBACK_HOURS ?? "") || eldFeedHealth.DEFAULT_UNLINKED_LOOKBACK_HOURS);
+// Ceiling on alerts per rolling 24 h, INDEPENDENT of the per-feed dedupe. Same
+// reasoning as EXPENSE_DUPLICATE_ALERT_MAX_PER_DAY: sendEmail is SHARED with
+// driver onboarding, investor outreach and the weekly invoice batch, so
+// exhausting Gmail's quota here would silence every channel this feature needs.
+// The fleet is 6 trucks; 25 is far above any real defect rate.
+const ELD_STALE_ALERT_MAX_PER_DAY =
+	Math.max(1, parseInt(process.env.ELD_STALE_ALERT_MAX_PER_DAY ?? "25", 10) || 25);
+// Hourly. The input changes continuously but the condition is measured in days,
+// so this is not latency-sensitive; an hour bounds "how late is the first ping"
+// without making the sweep itself a load.
+const ELD_STALE_SWEEP_MS =
+	Math.max(5, parseInt(process.env.ELD_STALE_SWEEP_MINUTES ?? "60", 10) || 60) * 60 * 1000;
+
+// ⚠️ STANDING-CONDITION LEDGER, NOT A LOG. Copied from expense_duplicate_alerts,
+// NOT from fuel_event_alerts: a refuel is a point event that cannot recur, so
+// that table's bare `alerted_at` short-circuit is correct there and would be
+// wrong here. A silent feed is a condition that ENDS (the device starts pinging
+// again) and can come BACK (it dies a second time), so the row must resolve and
+// re-open, and `first_seen` must survive the round trip — "how long has this
+// truck been dark" is the number that tells you whether a month's pay was built
+// on an estimate.
+//
+// alert_key is 'vid:<vehicle id>' — see feedAlertKey() in lib/eld-feed-health.js
+// for why the id is validated rather than merely trimmed.
+//
+// `alert_condition`, not `condition`: SQLite does not reserve CONDITION today,
+// but a bare column name one keyword-list revision away from being quoted
+// everywhere is not worth the two characters saved.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS eld_feed_alerts (
+		alert_key TEXT PRIMARY KEY,
+		routemate_vehicle_id TEXT DEFAULT '',
+		truck_unit TEXT DEFAULT '',
+		truck_id INTEGER DEFAULT 0,
+		alert_condition TEXT DEFAULT '',
+		last_fix_ms INTEGER DEFAULT 0,
+		silent_hours REAL DEFAULT 0,
+		fixes_24h INTEGER DEFAULT 0,
+		first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+		alerted_at DATETIME,
+		resolved_at DATETIME
+	)
+`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_eld_feed_alerts_open ON eld_feed_alerts(resolved_at, alert_key)`); } catch {}
+
+// THE per-vehicle last-clean-fix query. Lifted verbatim out of
+// GET /api/admin/fleet-health so the panel a dispatcher reads and the sweep that
+// pages someone at 2 a.m. can never disagree about what "last fix" means —
+// DRIVER_RENAME_TARGETS / truckChargedInMonth lesson, applied before the second
+// copy exists rather than after it drifts.
+//
+// Clean rows only (`dropped_reason = ''`): a speed-outlier or invalid-coords row
+// is stored for forensics and must not count as the feed being alive.
+// `source` is selected for the health endpoints; fleet-health maps its fields
+// explicitly and is unaffected by the extra columns.
+//
+// ⚠️ IT RETURNS **TWO** CLOCKS AND THEY ARE NOT THE SAME FACT. Read the one that
+// answers your question:
+//
+//   location_date_ms  — the timestamp on the LAST ROW WE RECEIVED (MAX(id), i.e.
+//                       insertion order). This is what the fleet-health panel
+//                       wants: it displays that row's lat/lng/speed/fuel, so the
+//                       timestamp has to be the one belonging to those values.
+//   last_fix_ms       — MAX(location_date_ms), the NEWEST MOMENT THE DEVICE HAS
+//                       EVER REPORTED. This is the only honest staleness clock.
+//
+// They agree whenever rows arrive in time order, which is the normal case and is
+// exactly why the difference is easy to miss. They diverge on an out-of-order
+// webhook delivery, a re-ingest or a backfill — and then MAX(id) points at an
+// OLDER timestamp than the device's newest, so a silence detector built on it
+// reports a truck as dark while it is reporting fine. Measured on a 5-row
+// fixture, the two disagreed by 4 hours. The sweep therefore reads last_fix_ms;
+// fleet-health keeps reading location_date_ms, whose meaning is unchanged.
+//
+// Both come out of the SAME grouped subquery, so this is still one query and the
+// two callers still cannot drift apart about what "clean" means.
+//
+// Empty input returns {} without touching the database — every caller must keep
+// working on a fleet with nothing linked.
+function eldLatestCleanFixByVehicle(vehicleIds) {
+	const ids = (Array.isArray(vehicleIds) ? vehicleIds : []).filter(Boolean);
+	const out = {};
+	if (ids.length === 0) return out;
+	const placeholders = ids.map(() => "?").join(",");
+	const rows = db.prepare(`
+		SELECT rt.routemate_vehicle_id, rt.latitude, rt.longitude, rt.speed,
+		       rt.fuel_pct, rt.odometer, rt.engine_hours, rt.geocoded_location,
+		       rt.location_date_ms, rt.source, latest.last_fix_ms
+		FROM routemate_telemetry rt
+		INNER JOIN (
+			SELECT routemate_vehicle_id, MAX(id) AS max_id, MAX(location_date_ms) AS last_fix_ms
+			FROM routemate_telemetry
+			WHERE routemate_vehicle_id IN (${placeholders})
+			  AND dropped_reason = ''
+			GROUP BY routemate_vehicle_id
+		) latest ON rt.id = latest.max_id
+	`).all(...ids);
+	for (const r of rows) out[r.routemate_vehicle_id] = r;
+	return out;
+}
+
+// Distinct clean fixes per vehicle inside a rolling window. COUNT(DISTINCT
+// location_date_ms), not COUNT(*): a device that re-pushes one timestamp — or a
+// webhook we accidentally double-ingest — must not read as a healthy feed. This
+// is condition (c)'s whole input, so counting the wrong thing here is how the
+// trickle detector silently becomes a no-op.
+function eldFixCountsByVehicle(vehicleIds, sinceMs) {
+	const ids = (Array.isArray(vehicleIds) ? vehicleIds : []).filter(Boolean);
+	const out = {};
+	if (ids.length === 0) return out;
+	const placeholders = ids.map(() => "?").join(",");
+	const rows = db.prepare(`
+		SELECT routemate_vehicle_id, COUNT(DISTINCT location_date_ms) AS fixes
+		FROM routemate_telemetry
+		WHERE routemate_vehicle_id IN (${placeholders})
+		  AND dropped_reason = ''
+		  AND location_date_ms >= ?
+		GROUP BY routemate_vehicle_id
+	`).all(...ids, Number(sinceMs) || 0);
+	for (const r of rows) out[r.routemate_vehicle_id] = r.fixes;
+	return out;
+}
+
+// Everything the judge needs, read in four bounded queries.
+//
+// ⚠️ THE ORPHAN CANDIDATE SET COMES FROM TELEMETRY. routemate_vehicles CANNOT
+// be the source of truth here, and the reason is specific: it is written by the
+// two ROUTEMATE paths only — routemateUpsertVehicleStmt (the vehicles-list sync)
+// and routemateUpsertVehicleMinimalStmt (the telemetry poller). Verified in this
+// file 2026-09-19: ingestLinxupPosition() writes routemate_telemetry and nothing
+// else, so a Linxup device that has only ever pushed to the webhook has NO row
+// there at all — and a Linxup device is exactly the orphan this condition was
+// written for (18000507597). Asking routemate_vehicles would miss it entirely.
+// The rows are the only thing that can answer "is this device writing telemetry
+// we are filing under no truck", so the rows are what we ask.
+//
+// routemate_vehicles is unioned in anyway, purely as an extra candidate source:
+// a Routemate vehicle that is registered but silent then still gets SURFACED on
+// the health endpoints (it judges `orphan_idle` and does not alert) instead of
+// being absent, which is how INV-24-A-class gaps stay invisible.
+function eldFeedSnapshot(nowMs) {
+	const now = Number(nowMs) || Date.now();
+	const trucks = db.prepare(`
+		SELECT id, unit_number, status, routemate_vehicle_id, retired_at
+		FROM trucks
+		ORDER BY unit_number ASC
+	`).all();
+
+	const linkedIds = new Set();
+	for (const t of trucks) {
+		const v = String(t.routemate_vehicle_id || "").trim();
+		if (v) linkedIds.add(v);
+	}
+
+	// DISTINCT over an indexed column (idx_rm_tel_vid_date leads on it), so this
+	// is an index skip-scan and not an 800k-row table walk.
+	const seenIds = new Set();
+	for (const r of db.prepare(`SELECT DISTINCT routemate_vehicle_id FROM routemate_telemetry WHERE routemate_vehicle_id != ''`).all()) {
+		seenIds.add(String(r.routemate_vehicle_id));
+	}
+	for (const r of db.prepare(`SELECT routemate_vehicle_id FROM routemate_vehicles WHERE routemate_vehicle_id != ''`).all()) {
+		seenIds.add(String(r.routemate_vehicle_id));
+	}
+
+	const orphanIds = [...seenIds].filter((v) => !linkedIds.has(v)).sort();
+	const allIds = [...new Set([...linkedIds, ...orphanIds])];
+	const latest = eldLatestCleanFixByVehicle(allIds);
+	const counts = eldFixCountsByVehicle(allIds, now - 24 * 60 * 60 * 1000);
+
+	return {
+		// ⚠️ `last_fix_ms`, NOT `location_date_ms`. The staleness clock is the newest
+		// moment the DEVICE reported, never the timestamp on the last row we
+		// happened to receive — see eldLatestCleanFixByVehicle(). Reading the wrong
+		// one reports a healthy truck as dark after any out-of-order delivery.
+		trucks: trucks.map((t) => {
+			const vid = String(t.routemate_vehicle_id || "").trim();
+			const tel = vid ? latest[vid] : null;
+			return {
+				truckId: t.id,
+				unitNumber: t.unit_number,
+				status: t.status,
+				retiredAt: t.retired_at,
+				vehicleId: vid,
+				lastFixMs: tel ? tel.last_fix_ms : null,
+				fixes24h: vid ? (counts[vid] || 0) : 0,
+				source: tel ? (tel.source || "") : "",
+			};
+		}),
+		orphans: orphanIds.map((vid) => {
+			const tel = latest[vid];
+			return {
+				vehicleId: vid,
+				lastFixMs: tel ? tel.last_fix_ms : null,
+				fixes24h: counts[vid] || 0,
+				source: tel ? (tel.source || "") : "",
+			};
+		}),
+	};
+}
+
+// Snapshot -> verdicts. The one place the thresholds meet the data, shared by
+// the sweep and by both health endpoints so a dispatcher reading the panel sees
+// the same judgement the alerter acted on.
+function eldFeedVerdicts(nowMs) {
+	const now = Number(nowMs) || Date.now();
+	const snap = eldFeedSnapshot(now);
+	const judged = eldFeedHealth.judgeEldFeeds(snap, {
+		nowMs: now,
+		staleHours: ELD_STALE_HOURS,
+		minFixes24h: ELD_STALE_MIN_FIXES,
+		unlinkedLookbackHours: ELD_UNLINKED_LOOKBACK_HOURS,
+		todayKey: todayKeyCT(),
+	});
+	// Carry provenance through so the health endpoints can say which provider
+	// last wrote for this id.
+	//
+	// ⚠️ THE COLUMN IS routemate_telemetry.source — there is NO `source` on
+	// routemate_vehicles, whatever CLAUDE.md's Linxup paragraph implies (verified
+	// against production 2026-09-19; the PR #351 ALTER landed on the telemetry
+	// table, server.js:2275). Querying it on the mirror throws `no such column`.
+	//
+	// ⚠️ '' IS THE COMMON CASE, NOT AN EDGE CASE, so never read it as "unknown
+	// provider, probably nothing". Production is 1,032,272 rows at '' (everything
+	// written before the column shipped) against 3,266 at 'routemate', and
+	// **zero** at 'linxup' — the webhook has not written since the column landed.
+	// So a silent Linxup feed necessarily reports source '', which is exactly the
+	// feed this whole sweep exists to surface. Provenance is reported, never
+	// branched on. (Historical Linxup rows remain identifiable by fingerprint —
+	// engine_hours = 0 AND geocoded_location = '' — if anyone needs to partition
+	// them; devices 18000505841 and 18000507597.)
+	const bySource = new Map();
+	for (const r of [...snap.trucks, ...snap.orphans]) bySource.set(r.vehicleId, r.source || "");
+	for (const f of judged.feeds) f.source = bySource.get(f.vehicleId) || "";
+	return judged;
+}
+
+// The DB-derived `feeds` array both health endpoints serve.
+//
+// ⚠️ DB-DERIVED IS THE POINT, not an implementation detail. The in-memory
+// linxupHealth counters zero on every restart, so "nothing received" and "we
+// restarted 20 minutes ago" are the same reading — which is precisely how a
+// 54-day outage stayed invisible. Everything here survives a restart because
+// none of it is held in this process.
+//
+// ⚠️ BOTH ENDPOINTS GET THE FULL FLEET, NOT A PER-PROVIDER SLICE. Filtering the
+// Linxup endpoint to source='linxup' would hide exactly the feeds it exists to
+// show: a silent device writes no rows, so its provenance is whatever its LAST
+// row said — and every Linxup row written before 2026-09-19 carries source=''.
+// The `source` field is reported per feed instead, so neither endpoint lies by
+// omission. Nothing here touches a token.
+function eldFeedHealthReport(nowMs) {
+	const now = Number(nowMs) || Date.now();
+	const judged = eldFeedVerdicts(now);
+	const ledger = {};
+	for (const row of db.prepare(`
+		SELECT alert_key,
+		       alert_condition,
+		       strftime('%Y-%m-%dT%H:%M:%SZ', first_seen)  AS first_seen,
+		       strftime('%Y-%m-%dT%H:%M:%SZ', alerted_at)  AS alerted_at,
+		       strftime('%Y-%m-%dT%H:%M:%SZ', resolved_at) AS resolved_at
+		FROM eld_feed_alerts
+	`).all()) ledger[row.alert_key] = row;
+
+	const feeds = judged.feeds.map((f) => {
+		const led = f.key ? ledger[f.key] : null;
+		return {
+			kind: f.kind,
+			truckId: f.truckId,
+			unitNumber: f.unitNumber,
+			vehicleId: f.vehicleId,
+			source: f.source || "",
+			state: f.state,
+			alerting: f.alert,
+			reason: f.reason,
+			// Telemetry stores epoch ms, so this is already zone-unambiguous; it is
+			// serialized as an explicit ISO-8601 Z string for the same reason the
+			// ledger columns go through strftime.
+			lastFixAt: f.lastFixMs ? new Date(f.lastFixMs).toISOString() : null,
+			silentHours: f.silentHours === null ? null : Math.round(f.silentHours * 10) / 10,
+			fixes24h: f.fixes24h,
+			firstSeen: led ? led.first_seen : null,
+			alertedAt: led ? led.alerted_at : null,
+			resolvedAt: led ? led.resolved_at : null,
+		};
+	});
+
+	return {
+		feeds,
+		summary: eldFeedHealth.summarizeFeeds(judged.feeds),
+		thresholds: {
+			enabled: ELD_STALE_ALERT_ENABLED,
+			staleHours: ELD_STALE_HOURS,
+			minFixes24h: ELD_STALE_MIN_FIXES,
+			unlinkedLookbackHours: ELD_UNLINKED_LOOKBACK_HOURS,
+		},
+		// In-memory, and labeled as such: these two are about the SWEEP, not the
+		// feeds, and a restart legitimately resets them.
+		lastSweep: eldFeedSweepHealth.lastRun,
+		lastSweepError: eldFeedSweepHealth.lastError,
+	};
+}
+
+// Fire-and-forget. NEVER throws and never rejects — its caller is a timer, and
+// the sweep must survive one unmailable feed to reach the rest.
+async function alertEldFeedSilence(verdict) {
+	if (!ELD_STALE_ALERT_ENABLED) return { alerted: false, reason: "disabled" };
+	try {
+		const v = verdict || {};
+		const key = eldFeedHealth.feedAlertKey(v.vehicleId, Date.now());
+
+		const seen = db.prepare("SELECT alert_key, alerted_at, resolved_at FROM eld_feed_alerts WHERE alert_key = ?").get(key);
+		// ⚠️ `&& !seen.resolved_at` is the half that makes the re-open below mean
+		// anything. A bare alerted_at short-circuit — fuel_event_alerts' shape,
+		// correct there because a refuel cannot recur — would silence a feed
+		// FOREVER after its first ping, including after the device was repaired
+		// and then died again. That is the one case this feature most needs to
+		// report, because the second death is the one nobody is watching for.
+		if (seen && seen.alerted_at && !seen.resolved_at) return { alerted: false, reason: "already_alerted", key };
+
+		const alertedToday = db.prepare(
+			"SELECT COUNT(*) AS c FROM eld_feed_alerts WHERE alerted_at > datetime('now', '-1 day')",
+		).get().c;
+		if (alertedToday >= ELD_STALE_ALERT_MAX_PER_DAY) {
+			console.warn(`[eld-feed] daily alert cap (${ELD_STALE_ALERT_MAX_PER_DAY}) reached — feed ${key} logged, not mailed`);
+			return { alerted: false, reason: "daily_cap", key };
+		}
+
+		// Record the sighting NOW but leave alerted_at NULL — see the stamp below.
+		// first_seen is preserved across a re-open via COALESCE so "how long has
+		// this truck been dark" survives a repair-and-fail-again cycle; that is
+		// the number that says whether a month of pay was built on an estimate.
+		db.prepare(`
+			INSERT INTO eld_feed_alerts
+				(alert_key, routemate_vehicle_id, truck_unit, truck_id, alert_condition,
+				 last_fix_ms, silent_hours, fixes_24h, first_seen, alerted_at, resolved_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?,
+				COALESCE((SELECT first_seen FROM eld_feed_alerts WHERE alert_key = ?), CURRENT_TIMESTAMP), NULL, NULL)
+			ON CONFLICT(alert_key) DO UPDATE SET
+				routemate_vehicle_id = excluded.routemate_vehicle_id,
+				truck_unit = excluded.truck_unit,
+				truck_id = excluded.truck_id,
+				alert_condition = excluded.alert_condition,
+				last_fix_ms = excluded.last_fix_ms,
+				silent_hours = excluded.silent_hours,
+				fixes_24h = excluded.fixes_24h,
+				resolved_at = NULL,
+				-- ⚠️ alerted_at IS CLEARED TOO, and leaving it set is a real defect
+				-- rather than untidiness. This UPSERT is only reached in three
+				-- states (the early return above filters out every other one): the
+				-- row is absent, the row was RESOLVED and this is a NEW episode, or
+				-- alerted_at is already NULL and this is a delivery retry. In all
+				-- three the correct value is NULL.
+				--
+				-- Carrying the previous episode's stamp forward breaks the
+				-- delivery gate exactly when it matters most: if the re-open's mail
+				-- and notification BOTH fail, the row still reads "already
+				-- alerted", so the next sweep takes the dedupe branch and the
+				-- second death is never reported at all. It also poisons the
+				-- rolling-24h cap count with a timestamp from a closed episode.
+				alerted_at = NULL
+		`).run(
+			key,
+			String(v.vehicleId || ""),
+			String(v.unitNumber || ""),
+			Number(v.truckId) || 0,
+			String(v.state || ""),
+			Number(v.lastFixMs) || 0,
+			v.silentHours === null || v.silentHours === undefined ? 0 : Number(v.silentHours) || 0,
+			Number(v.fixes24h) || 0,
+			key,
+		);
+
+		// One-line sanitize for the subject and the console line, same reason as
+		// the duplicate-receipt alerter: the unit number is stored free text and
+		// the vehicle id can arrive off a webhook body. nodemailer does strip
+		// CR/LF from a Subject, but relying on a dependency for that is not a
+		// control we own.
+		const oneLine = (s) => String(s == null ? "" : s).replace(/[\r\n]+/g, " ").slice(0, 60);
+		const who = oneLine(v.unitNumber || `device ${v.vehicleId}`) || "unknown truck";
+		const lastFix = v.lastFixMs ? new Date(Number(v.lastFixMs)).toISOString().replace("T", " ").slice(0, 16) + " UTC" : "never";
+		const silent = v.silentHours === null || v.silentHours === undefined
+			? "n/a"
+			: `${Math.floor(Number(v.silentHours) / 24)}d ${Math.floor(Number(v.silentHours) % 24)}h`;
+
+		const subject = v.state === "orphan"
+			? `⚠️ ELD device ${oneLine(v.vehicleId)} is reporting to no truck`
+			: `⚠️ ELD feed silent — ${who} (${silent})`;
+		const html =
+			`<p><b>${escHtml(who)}</b> — ${escHtml(String(v.reason || "ELD feed problem"))}.</p>` +
+			`<table style="border-collapse:collapse;font-family:system-ui,sans-serif;font-size:13px;">` +
+			`<tr><td style="padding:6px 10px;border:1px solid #ddd;">Truck</td><td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(oneLine(v.unitNumber) || "— not linked to a truck —")}</td></tr>` +
+			`<tr><td style="padding:6px 10px;border:1px solid #ddd;">ELD device id</td><td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(oneLine(v.vehicleId))}</td></tr>` +
+			`<tr><td style="padding:6px 10px;border:1px solid #ddd;">Condition</td><td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(String(v.state || ""))}</td></tr>` +
+			`<tr><td style="padding:6px 10px;border:1px solid #ddd;">Last clean fix</td><td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(lastFix)}</td></tr>` +
+			`<tr><td style="padding:6px 10px;border:1px solid #ddd;">Silent for</td><td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(silent)}</td></tr>` +
+			`<tr><td style="padding:6px 10px;border:1px solid #ddd;">Fixes in last 24 h</td><td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(String(v.fixes24h))}</td></tr>` +
+			`</table>` +
+			`<p style="margin-top:14px;"><b>Why this matters for pay.</b> Driver "active days" are counted from ELD travel, and a load window with no pings falls back to the full scheduled window — ` +
+			`so while this feed is dark, loads on this truck settle on the <i>estimated</i> basis: more driver days than were worked, and less investor profit. ` +
+			`The longer it stays dark, the more months close on an estimate.</p>` +
+			(v.state === "orphan"
+				? `<p>This device is pushing telemetry that is filed under no truck. Link it under <b>Trucks → ELD device</b>, or have the provider deactivate it if it is not ours.</p>`
+				: v.state === "never_reported"
+					? `<p>This truck has an ELD device id saved but has never produced a single fix. Check the id is the right one, and that the device is installed and powered.</p>`
+					: `<p>Check the device is powered and in coverage. If the truck is genuinely out of service, set it Inactive or record its retirement date — both stop this alert at the source.</p>`) +
+			`<p style="color:#888;font-size:12px;">Reported once per feed. Reported again only after it recovers and goes silent a second time.</p>`;
+
+		let emailed = false;
+		try {
+			emailed = (await sendEmail(process.env.GMAIL_USER, subject, html)) === true;
+		} catch (e) { console.error("[eld-feed] alert email failed:", e.message); }
+
+		let notified = false;
+		try {
+			const title = v.state === "orphan"
+				? `ELD device ${oneLine(v.vehicleId)} is linked to no truck`
+				: `ELD feed silent — ${who}`;
+			const body = `${v.reason || "ELD feed problem"} · last clean fix ${lastFix}`;
+			// ⚠️ NO loadId in metadata, deliberately. NotificationsView routes a tap
+			// to /dashboard?load=<id> when metadata carries one; a feed alert is not
+			// about any single load, and inventing one would send a dispatcher to an
+			// arbitrary load's modal. The component already no-ops when it is absent
+			// (the duplicate-receipts notification does the same thing).
+			const meta = JSON.stringify({
+				vehicleId: String(v.vehicleId || ""), truckId: Number(v.truckId) || 0,
+				unitNumber: String(v.unitNumber || ""), condition: String(v.state || ""),
+				lastFixMs: Number(v.lastFixMs) || 0, fixes24h: Number(v.fixes24h) || 0,
+			});
+			insertDispatchNotification.run("eld-feed-silent", title, body, meta);
+			io.to("dispatch").emit("dispatch-notification", {
+				type: "eld-feed-silent", title, body, metadata: JSON.parse(meta),
+			});
+			notified = true;
+		} catch (e) { console.error("[eld-feed] notification failed:", e.message); }
+
+		// ⚠️ STAMP ONLY ON CONFIRMED DELIVERY. Stamping before the send — the
+		// obvious shape — makes the once-per-feed guard suppress this feed forever
+		// on a transient Gmail 4xx or an unconfigured mailbox, and the alert that
+		// never went out would then look, in this table, exactly like one that did.
+		// Leaving alerted_at NULL costs a repeat next sweep and buys a retry; the
+		// row is recorded above either way, so first_seen is never lost. The in-app
+		// dispatch notification counts as delivery in its own right — it is the
+		// channel that still works with no GMAIL_* configured at all.
+		const delivered = emailed || notified;
+		if (delivered) {
+			db.prepare("UPDATE eld_feed_alerts SET alerted_at = ? WHERE alert_key = ? AND alerted_at IS NULL")
+				.run(new Date().toISOString(), key);
+		}
+		console.log(
+			"[eld-feed] %s — %s (%s): %s",
+			delivered ? "ALERT" : "ALERT UNDELIVERED (will retry next sweep)",
+			who, v.state, v.reason,
+		);
+		return { alerted: delivered, emailed, notified, key };
+	} catch (e) {
+		console.error("[eld-feed] alert failed:", e && e.message);
+		return { alerted: false, reason: "error" };
+	}
+}
+
+let eldFeedSweepRunning = false;
+const eldFeedSweepHealth = { lastRun: null, lastError: null, lastFeeds: 0, lastAlerted: 0, lastResolved: 0 };
+
+// The sweep. Read-only against trucks and routemate_telemetry — it never edits a
+// truck, never re-links a device and never touches a pay figure. Deciding what
+// to do about a dead ELD is a human call; this feature's whole job is to put
+// that call in front of one.
+async function sweepEldFeedSilence() {
+	const judged = eldFeedVerdicts(Date.now());
+	const alerting = judged.alerts;
+
+	// Resolve every open row whose condition has gone away: the device started
+	// pinging again, the orphan got linked, the truck was retired or marked
+	// Inactive. All are legitimate closures and all must clear the row, or a
+	// recurrence could never re-open and the second failure would be silent.
+	//
+	// Keyed on the verdict set, which covers EVERY feed (not just the alerting
+	// ones) — so "absent from the alerting set" and "no longer a problem" are the
+	// same statement here, unlike the duplicate-receipt sweep whose list is
+	// truncated at a cap. There is no cap on this one: the fleet is bounded by
+	// the trucks table.
+	const live = new Set(alerting.map((f) => f.key));
+	let resolved = 0;
+	for (const row of db.prepare("SELECT alert_key FROM eld_feed_alerts WHERE resolved_at IS NULL").all()) {
+		if (!live.has(row.alert_key)) {
+			db.prepare("UPDATE eld_feed_alerts SET resolved_at = CURRENT_TIMESTAMP WHERE alert_key = ?").run(row.alert_key);
+			resolved++;
+			console.log(`[eld-feed] RESOLVED — ${row.alert_key}`);
+		}
+	}
+
+	let alerted = 0;
+	for (const f of alerting) {
+		const r = await alertEldFeedSilence(f);
+		if (r && r.alerted) alerted++;
+		// A cap hit applies to every remaining feed too — stop rather than spend
+		// the rest of the sweep re-running the same COUNT.
+		if (r && r.reason === "daily_cap") break;
+	}
+
+	eldFeedSweepHealth.lastFeeds = judged.feeds.length;
+	eldFeedSweepHealth.lastAlerted = alerted;
+	eldFeedSweepHealth.lastResolved = resolved;
+	return { feeds: judged.feeds.length, alerting: alerting.length, alerted, resolved };
+}
+
+async function maybeSweepEldFeedSilence() {
+	if (!ELD_STALE_ALERT_ENABLED || eldFeedSweepRunning) return;
+	eldFeedSweepRunning = true;
+	try {
+		const r = await sweepEldFeedSilence();
+		eldFeedSweepHealth.lastRun = new Date().toISOString();
+		eldFeedSweepHealth.lastError = null;
+		if (r.alerting || r.resolved) {
+			console.log(`[eld-feed] ${r.feeds} feed(s); ${r.alerting} alerting, ${r.alerted} newly alerted, ${r.resolved} resolved`);
+		}
+	} catch (e) {
+		eldFeedSweepHealth.lastError = e.message;
+		console.error("[eld-feed] sweep failed:", e.message);
+	} finally {
+		eldFeedSweepRunning = false;
+	}
+}
+
+if (ELD_STALE_ALERT_ENABLED) {
+	// ⚠️ THE REJECTION HANDLER LOGS — deliberately not `.catch(() => {})`. Same
+	// call as the expense-duplicates tick: maybeSweepEldFeedSilence() owns its own
+	// try/catch/finally and should never reject, so anything arriving here is a
+	// defect in that guard itself, which is exactly why it must be noisy. An
+	// empty handler is how a throwing sweep stayed invisible through two QA ticks
+	// once already in this file.
+	const eldFeedTick = () => {
+		maybeSweepEldFeedSilence().catch((e) => {
+			console.error("[eld-feed] sweep threw outside its own guard:", (e && e.message) || e);
+		});
+	};
+	setInterval(eldFeedTick, ELD_STALE_SWEEP_MS);
+	// Boot run is DELAYED, not immediate. better-sqlite3 is synchronous, so this
+	// scan blocks the event loop, and the documented deploy flow pm2-restarts this
+	// process during business hours — the same boot burst that produced the PDF
+	// cold-start "navigation timeout". Five minutes puts it clear of that burst
+	// and of the expense-duplicates boot run at four.
+	setTimeout(eldFeedTick, 5 * 60 * 1000);
+	console.log(`[eld-feed] enabled — sweeping every ${Math.round(ELD_STALE_SWEEP_MS / 60000)} min; stale > ${ELD_STALE_HOURS} h, trickle < ${ELD_STALE_MIN_FIXES} fixes/24 h`);
+}
+
 // --- Routemate sync helpers ---
 // Both helpers are no-ops when the kill switch is off or the key is unset.
 // They update routemateHealth in place so the /api/routemate/health endpoint
@@ -4242,7 +4844,14 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_ta_driver ON truck_assignments(dri
 // "no such table". This CREATE closes that gap and nothing else: `IF NOT EXISTS`
 // means production, where the table is already present, is untouched.
 //
-// ⚠️ This is part of the LIVE n8n ingestion contract, so the shape is not
+// ⚠️ MEASURED 2026-09-19: this table holds 0 rows in production and n8n has
+// not called POST /api/n8n/job once in the 14-day nginx retention window —
+// the live n8n endpoints are /api/n8n/load-distance and
+// /api/n8n/extract-pdf-via-gemini. Treat the "live contract" note below as
+// historical. The shape still matters if the path is ever revived, which is
+// why the transcription is kept rather than deleted.
+//
+// ⚠️ This WAS part of the live n8n ingestion contract, so the shape is not
 // inferred from the endpoint's queries — it is a transcription of production's
 // actual `sqlite_master.sql`, read over the VPS on 2026-08-07. Getting a name or
 // type wrong here would be worse than the current state: today a fresh install
@@ -5678,6 +6287,14 @@ function googleAgentFor(parsedUrl) {
 // Throttled to one line per 30 s with a running count, in the spirit of
 // logRoutemateSyncFailure: enough to see "we are burning dead sockets", not
 // enough to flood the log during a real Google outage.
+// ⚠️ `count` is CUMULATIVE PER PROCESS, not per request. It is a running total
+// of every retry since boot across every Sheets/Drive call, and it resets to 0
+// on restart. The log wording below says "since boot" for exactly that reason:
+// the previous phrasing ("N retries so far") read as a per-request counter, and
+// a line saying "66 retries so far" was misdiagnosed as a runaway retry loop on
+// a single request during the 2026-09-19 audit. It was not — gaxios retries at
+// most 3 times per request (see GOOGLE_RETRY_CONFIG below); the tell is that the
+// sequence climbs monotonically and then restarts at 1 after a deploy.
 const googleRetryLog = { count: 0, lastLoggedAt: 0 };
 function onGoogleRetryAttempt(err) {
 	googleRetryLog.count += 1;
@@ -5686,7 +6303,7 @@ function onGoogleRetryAttempt(err) {
 	googleRetryLog.lastLoggedAt = now;
 	const status = err && err.response && err.response.status;
 	console.warn(
-		`[google-api] retrying request (${googleRetryLog.count} retries so far): ` +
+		`[google-api] retrying request (retry #${googleRetryLog.count} since boot): ` +
 		`${(err && err.message) || "unknown error"}${status ? ` [status ${status}]` : " [no response]"}`,
 	);
 }
@@ -7478,6 +8095,28 @@ const PUBLIC_APPLY_SCALAR_FIELDS = [
 	"signature", "signature_date", "cdl_front", "cdl_back", "medical_card", "city", "state", "zip",
 	"cell", "dot", "mc", "hazmat",
 ];
+// Header-only image checks and the limits every in-process image decode is held
+// to. Used from here to the end of the file: the application intake and PDF,
+// signatures, receipts and document uploads. See lib/image-size.js.
+const imageLimits = require("./lib/image-size");
+// The documents an applicant attaches. Each is optional here (the form requires
+// them) and, when present, must be a PDF or a JPEG within the pixel limit: the
+// application PDF (GET /api/applications/:id/pdf) shows exactly those two
+// without decoding them. Parsed the way that route parses them, so what is
+// accepted here is what it can show.
+const PUBLIC_APPLY_ATTACHMENT_FIELDS = ["cdl_front", "cdl_back", "medical_card"];
+function applicantAttachmentRefusal(value) {
+	if (value === undefined || value === null || value === "") return null;
+	const unreadable = (reason) => ({ ok: false, status: 415, code: imageLimits.UNSUPPORTED_IMAGE_TYPE, reason });
+	if (typeof value !== "string") return unreadable("type");
+	if (value.startsWith("data:application/pdf")) {
+		const pdf = Buffer.from(value.replace(/^data:application\/pdf;base64,/, ""), "base64");
+		return pdf.length >= 5 && pdf.toString("latin1", 0, 5) === "%PDF-" ? null : unreadable("pdf");
+	}
+	const buf = Buffer.from(value.replace(/^data:image\/\w+;base64,/, ""), "base64");
+	const verdict = imageLimits.checkImage(buf, imageLimits.LIMITS.APPLICANT_IMAGE);
+	return verdict.ok ? null : verdict;
+}
 app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 	try {
 		const { full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation, accident_history, accident_description, traffic_citations, certifications, availability, skills, reference_info, additional_info, signature, signature_date, cdl_front, cdl_back, medical_card, city, state, zip, cell, dot, mc, hazmat } = req.body;
@@ -7493,6 +8132,10 @@ app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 		const emailCheck = publicFormInput.checkPublicEmail(email);
 		if (!emailCheck.ok) {
 			return res.status(400).json({ error: emailCheck.message, code: "INVALID_EMAIL", reason: emailCheck.reason });
+		}
+		for (const field of PUBLIC_APPLY_ATTACHMENT_FIELDS) {
+			const refusal = applicantAttachmentRefusal(req.body[field]);
+			if (refusal) return res.status(refusal.status).json({ ...imageLimits.refusalBody(refusal, "attachment"), field });
 		}
 		const duplicate = db.prepare(
 			"SELECT id FROM job_applications WHERE LOWER(email) = LOWER(?) AND deleted_at IS NULL"
@@ -7992,29 +8635,11 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), async (req, res
 		// Renders each image at its NATIVE resolution (no upscaling / stretching).
 		// Small images are shown small so the reviewer can see they are low quality
 		// instead of being silently blown up into a pixelated mess.
-		const getJpegDimensions = (buf) => {
-			// Walk JPEG markers looking for SOF0/SOF2 to read native width/height.
-			// Returns { width, height } or null if unreadable.
-			if (!buf || buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) return null;
-			let i = 2;
-			while (i < buf.length) {
-				if (buf[i] !== 0xff) return null;
-				const marker = buf[i + 1];
-				if (marker === 0xc0 || marker === 0xc1 || marker === 0xc2) {
-					return { height: (buf[i + 5] << 8) | buf[i + 6], width: (buf[i + 7] << 8) | buf[i + 8] };
-				}
-				i += 2 + ((buf[i + 2] << 8) | buf[i + 3]);
-			}
-			return null;
-		};
-		const getPngDimensions = (buf) => {
-			if (!buf || buf.length < 24) return null;
-			if (buf[0] !== 0x89 || buf[1] !== 0x50 || buf[2] !== 0x4e || buf[3] !== 0x47) return null;
-			return {
-				width: (buf[16] << 24) | (buf[17] << 16) | (buf[18] << 8) | buf[19],
-				height: (buf[20] << 24) | (buf[21] << 16) | (buf[22] << 8) | buf[23],
-			};
-		};
+		//
+		// JPEG only, within the intake's pixel limit: pdfkit embeds a JPEG as it
+		// is, without decoding it. Anything else — including rows stored before
+		// the intake checked — gets a short placeholder instead of the image.
+
 		// Collect uploaded PDFs so we can merge them at the end via pdf-lib.
 		// Each entry: { label, base64 }
 		const uploadedPdfs = [];
@@ -8033,7 +8658,7 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), async (req, res
 				}
 				const data = base64.replace(/^data:image\/\w+;base64,/, "");
 				const buf = Buffer.from(data, "base64");
-				const dims = getJpegDimensions(buf) || getPngDimensions(buf);
+				const dims = imageLimits.checkImage(buf, imageLimits.LIMITS.APPLICANT_IMAGE);
 				doc.addPage();
 				doc.fontSize(14).font("Helvetica-Bold").fillColor("#0ea5e9").text(label, { align: "center" });
 				doc.moveDown(0.5);
@@ -8041,7 +8666,13 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), async (req, res
 				const BOX_W = 500;
 				const BOX_H = 600;
 				const LEFT_MARGIN = 56;
-				if (dims && dims.width > 0 && dims.height > 0) {
+				if (!dims.ok) {
+					doc.fontSize(10).font("Helvetica-Oblique").fillColor("#6b7280")
+						.text(dims.status === 413
+							? "Image omitted: it is too large to include in this document."
+							: "Image omitted: it is not a JPEG this document can include.",
+						LEFT_MARGIN, doc.y, { width: BOX_W, align: "center" });
+				} else {
 					// Scale DOWN to fit the box, never UP past the native size.
 					// scale === 1 means render at actual resolution.
 					const scale = Math.min(BOX_W / dims.width, BOX_H / dims.height, 1);
@@ -8060,9 +8691,6 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), async (req, res
 						doc.fontSize(9).font("Helvetica-Oblique").fillColor("#dc2626")
 							.text("Low-resolution upload — request a clearer photo from the applicant.", LEFT_MARGIN, doc.y, { width: BOX_W, align: "center" });
 					}
-				} else {
-					// Unknown format — fall back to fit (may scale up slightly).
-					doc.image(buf, LEFT_MARGIN, doc.y, { fit: [BOX_W, BOX_H], align: "center", valign: "center" });
 				}
 			} catch { /* skip if image is invalid */ }
 		};
@@ -8172,6 +8800,12 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 			const sigShape = publicFormInput.checkPublicScalars(sig, ["image"]);
 			if (!sigShape.ok) {
 				return res.status(400).json({ error: sigShape.message, code: "INVALID_FIELD", reason: sigShape.reason, field: `signatures.${doc.key}.image` });
+			}
+			// The signature image is decoded when the W-9 renders: checked here,
+			// with everything else, before the first write (lib/image-size.js).
+			const sigImage = imageLimits.checkSignatureImage(sig.image);
+			if (!sigImage.ok) {
+				return res.status(sigImage.status).json({ ...imageLimits.refusalBody(sigImage, "signature"), field: `signatures.${doc.key}.image` });
 			}
 			const consent = readTransmittedConsent(sig, res, { docLabel: doc.name });
 			if (!consent) return;
@@ -9010,12 +9644,21 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", address =
 		page1.drawText(signatureText, { x: 120, y: sigY, size: 10, font: fontBold, color: blue });
 		if (effectiveDate) page1.drawText(effectiveDate, { x: 460, y: sigY, size: 9, font, color: blue });
 		if (signatureImage) {
-			try {
-				const sigBytes = Buffer.from(signatureImage.replace(/^data:image\/\w+;base64,/, ""), "base64");
-				const sigImg = await pdfDoc.embedPng(sigBytes);
-				const nameW = fontBold.widthOfTextAtSize(signatureText, 10);
-				page1.drawImage(sigImg, { x: 120 + nameW + 10, y: sigY - 10, width: 120, height: 35 });
-			} catch { /* skip */ }
+			// pdf-lib decodes the PNG to embed it, so the image is checked first —
+			// type, dimensions and size, from the header (lib/image-size.js). The
+			// routes refuse an unacceptable one before rendering; this covers any
+			// caller that renders a stored signature. Skipped like any other embed
+			// failure: the typed signature above still stands.
+			const sig = imageLimits.checkSignatureImage(signatureImage);
+			if (!sig.ok) {
+				console.warn(`fillW9Form: signature image not embedded (${sig.code}: ${sig.reason})`);
+			} else {
+				try {
+					const sigImg = await pdfDoc.embedPng(sig.buffer);
+					const nameW = fontBold.widthOfTextAtSize(signatureText, 10);
+					page1.drawImage(sigImg, { x: 120 + nameW + 10, y: sigY - 10, width: 120, height: 35 });
+				} catch { /* skip */ }
+			}
 		}
 	}
 
@@ -9236,6 +9879,11 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", onboardingSignLimit
 		const sigShape = publicFormInput.checkPublicScalars(req.body, ["signatureImage"]);
 		if (!sigShape.ok) {
 			return res.status(400).json({ error: sigShape.message, code: "INVALID_FIELD", reason: sigShape.reason, field: sigShape.field });
+		}
+		// Checked before anything reads or renders it (lib/image-size.js).
+		const sigImage = imageLimits.checkSignatureImage(signatureImage);
+		if (!sigImage.ok) {
+			return res.status(sigImage.status).json(imageLimits.refusalBody(sigImage, "signature"));
 		}
 
 		const docRow = db.prepare("SELECT * FROM investor_onboarding_documents WHERE application_id = ? AND doc_key = ?").get(appId, docKey);
@@ -9944,11 +10592,20 @@ app.post("/api/public/investor-preview-pdf/:docKey", pdfPreviewLimiter, async (r
 		const { docKey } = req.params;
 		const { legal_name, dba, entity_type, address, contact_person, contact_title, phone, email, ein_ssn, years_in_operation, fleet_size, vehicles, banking, signatureText, signatureImage } = req.body;
 
+		// The signature image is decoded when the W-9 renders, so its type,
+		// dimensions and size are checked from the header first
+		// (lib/image-size.js): 413/415 before any renderer starts.
+		const sigImage = imageLimits.checkSignatureImage(signatureImage);
+		if (!sigImage.ok) {
+			return res.status(sigImage.status).json(imageLimits.refusalBody(sigImage, "signature"));
+		}
 		// signatureImage is assigned to img.src inside the Puppeteer page, so any
 		// non-data: value is a URL the SERVER fetches -- blind SSRF from an endpoint
 		// that needs no credential at all. renderPolicy() drops it defensively too,
-		// but refuse it here so a caller gets a clear 400 rather than a silently
-		// unsigned PDF, and so the render is never even started.
+		// but refuse it here so a caller gets a clear refusal rather than a silently
+		// unsigned PDF, and so the render is never even started. (The check above
+		// already refuses anything but a PNG data URI; this one also holds the
+		// base64 alphabet, and stays as the SSRF guard in its own right.)
 		if (signatureImage && !safeSignatureImage(signatureImage)) {
 			return res.status(400).json({ error: "signatureImage must be an inline base64 image data URI" });
 		}
@@ -11514,6 +12171,11 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, onboardi
 		}
 		if (!signatureText || !signatureText.trim()) {
 			return res.status(400).json({ error: "Signature is required" });
+		}
+		// Checked before anything reads or renders it (lib/image-size.js).
+		const sigImage = imageLimits.checkSignatureImage(signatureImage);
+		if (!sigImage.ok) {
+			return res.status(sigImage.status).json(imageLimits.refusalBody(sigImage, "signature"));
 		}
 		const docRow = db.prepare("SELECT * FROM onboarding_documents WHERE user_id = ? AND doc_key = ?").get(userId, docKey);
 		if (!docRow) return res.status(404).json({ error: "Document not found" });
@@ -15308,7 +15970,23 @@ async function alertDuplicateReceipts(group) {
 				truck_unit = excluded.truck_unit, driver = excluded.driver, local_day = excluded.local_day,
 				amount = excluded.amount, excess_amount = excluded.excess_amount,
 				confidence = excluded.confidence, row_ids = excluded.row_ids,
-				resolved_at = NULL
+				resolved_at = NULL,
+				-- ⚠️ alerted_at IS CLEARED TOO. Leaving it set was a real defect,
+				-- fixed 2026-09-19. The guard above only lets three states reach this
+				-- UPSERT: the row is absent, the row was RESOLVED and this is a NEW
+				-- episode, or alerted_at is already NULL and this is a delivery retry.
+				-- NULL is correct in all three.
+				--
+				-- Carrying the previous episode's stamp forward breaks the delivery
+				-- gate exactly when it matters most. The delivered flag below is false
+				-- when mail AND notification both fail, so no stamp runs — but the row
+				-- still read "already alerted" with resolved_at now NULL, so every
+				-- later sweep took the dedupe branch at the guard above and the
+				-- recurrence was NEVER reported again. It also poisoned the
+				-- rolling-24h cap count with a timestamp from a closed episode.
+				--
+				-- eld_feed_alerts carries the same clause for the same reason.
+				alerted_at = NULL
 		`).run(
 			key, String(group.truckUnit || ""), String(group.driver || ""), String(group.localDay || group.date || ""),
 			Number(group.amount) || 0, Number(group.excessAmount) || 0, String(group.confidence || ""),
@@ -31172,7 +31850,18 @@ app.post("/api/admin/routemate/sync-now", requireRole("Super Admin"), async (req
 
 // GET /api/routemate/health — Last-sync timestamps + recent error count.
 // Super Admin only. Used by the manual probe UI in TrucksView (Phase 2).
+//
+// ⚠️ EVERY FIELD EXCEPT `feeds` IS IN-MEMORY AND RESETS ON RESTART. That is the
+// whole reason `feeds` exists and is DB-derived: routemateHealth.lastSync reads
+// "null" after a pm2 restart whether the integration has been healthy for a
+// month or dead for two, and the deploy flow restarts this process on every
+// merge. `feeds` answers the question those counters structurally cannot —
+// "when did each device last actually write a row" — straight from the database.
+// See eldFeedHealthReport(). No token, key or secret is echoed by either half.
 app.get("/api/routemate/health", requireRole("Super Admin"), (req, res) => {
+	let feedHealth = null;
+	try { feedHealth = eldFeedHealthReport(Date.now()); }
+	catch (e) { console.error("[eld-feed] health report failed:", e.message); }
 	res.json({
 		enabled: ROUTEMATE_ENABLED,
 		hasKey: !!ROUTEMATE_API_KEY,
@@ -31180,6 +31869,13 @@ app.get("/api/routemate/health", requireRole("Super Admin"), (req, res) => {
 		lastSync: routemateHealth.lastSync,
 		lastError: routemateHealth.lastError,
 		errorsLast24h: routemateHealth.errorsLast24h,
+		// Degrades to an empty list rather than 500ing the probe UI: a broken
+		// diagnostic must not take down the panel it is a diagnostic for.
+		feeds: feedHealth ? feedHealth.feeds : [],
+		feedSummary: feedHealth ? feedHealth.summary : null,
+		feedThresholds: feedHealth ? feedHealth.thresholds : null,
+		lastFeedSweep: feedHealth ? feedHealth.lastSweep : null,
+		lastFeedSweepError: feedHealth ? feedHealth.lastSweepError : null,
 	});
 });
 
@@ -31469,7 +32165,24 @@ app.post("/api/eld/linxup/webhook", async (req, res) => {
 });
 
 // GET /api/eld/linxup/health — Super Admin. Never echoes the token.
+//
+// ⚠️ lastReceived / lastWritten / messageCounts / unlinkedPositions ARE IN-MEMORY
+// AND RESET ON EVERY RESTART, and that is not a footnote — it is the mechanism by
+// which device 18000505841 went 54 days without writing a row while this endpoint
+// kept reporting a plausible-looking blank slate. `feeds` is DB-derived precisely
+// so a restart cannot launder a silence, and it is what you should read here.
+//
+// ⚠️ IT DELIBERATELY LISTS THE WHOLE FLEET, NOT A LINXUP-ONLY SLICE. Filtering on
+// routemate_telemetry.source would hide exactly the feeds this is for: a silent
+// device writes no rows, so its provenance is whatever its LAST row said — and in
+// production that column is '' on 1,032,272 rows and 'linxup' on ZERO, because
+// the webhook has not written since the column shipped. A source filter would
+// therefore return an empty list while two Linxup devices were dark. Provenance
+// is reported per feed instead, so neither endpoint lies by omission.
 app.get("/api/eld/linxup/health", requireRole("Super Admin"), (req, res) => {
+	let feedHealth = null;
+	try { feedHealth = eldFeedHealthReport(Date.now()); }
+	catch (e) { console.error("[eld-feed] health report failed:", e.message); }
 	res.json({
 		provider: "linxup",
 		enabled: LINXUP_ENABLED,
@@ -31481,6 +32194,11 @@ app.get("/api/eld/linxup/health", requireRole("Super Admin"), (req, res) => {
 		messageCounts: linxupHealth.counts,
 		unlinkedPositions: linxupHealth.unlinked,
 		speedUnitCheck: linxupHealth.speedUnit,
+		feeds: feedHealth ? feedHealth.feeds : [],
+		feedSummary: feedHealth ? feedHealth.summary : null,
+		feedThresholds: feedHealth ? feedHealth.thresholds : null,
+		lastFeedSweep: feedHealth ? feedHealth.lastSweep : null,
+		lastFeedSweepError: feedHealth ? feedHealth.lastSweepError : null,
 	});
 });
 
@@ -31754,25 +32472,18 @@ app.get("/api/admin/fleet-health", requireRole("Super Admin", "Dispatcher"), (re
 		// Pre-fetch latest telemetry per linked vehicle and the latest "moving"
 		// timestamp in one pass so we don't N+1 the DB.
 		const linkedIds = trucks.map(t => t.routemate_vehicle_id).filter(Boolean);
-		const latestByVehicle = {};
+		// ⚠️ SHARED WITH THE FEED-SILENCE SWEEP ON PURPOSE. This query used to be
+		// written out inline here; it now lives in eldLatestCleanFixByVehicle() so
+		// the panel a dispatcher reads and the sweep that mails someone about a
+		// dead feed cannot drift apart about what "last fix" means. Same lesson as
+		// DRIVER_RENAME_TARGETS and truckChargedInMonth — applied before the second
+		// copy exists instead of after it diverges. The returned rows carry one
+		// extra column (`source`); every field below is mapped explicitly, so that
+		// is inert here.
+		const latestByVehicle = eldLatestCleanFixByVehicle(linkedIds);
 		const lastMovingByVehicle = {};
 		if (linkedIds.length > 0) {
 			const placeholders = linkedIds.map(() => "?").join(",");
-			const latestRows = db.prepare(`
-				SELECT rt.routemate_vehicle_id, rt.latitude, rt.longitude, rt.speed,
-				       rt.fuel_pct, rt.odometer, rt.engine_hours, rt.geocoded_location,
-				       rt.location_date_ms
-				FROM routemate_telemetry rt
-				INNER JOIN (
-					SELECT routemate_vehicle_id, MAX(id) AS max_id
-					FROM routemate_telemetry
-					WHERE routemate_vehicle_id IN (${placeholders})
-					  AND dropped_reason = ''
-					GROUP BY routemate_vehicle_id
-				) latest ON rt.id = latest.max_id
-			`).all(...linkedIds);
-			for (const r of latestRows) latestByVehicle[r.routemate_vehicle_id] = r;
-
 			const MOVING_MPH_M_PER_S = 2.235; // ~5 mph
 			const movingRows = db.prepare(`
 				SELECT routemate_vehicle_id, MAX(location_date_ms) AS last_moving_ms
@@ -32237,7 +32948,7 @@ const MAX_IMAGE_RECEIPT_BYTES = 20 * 1024 * 1024; // 20 MB decoded — far above
 
 // Returns { url } on success or { error, status } on refusal — the same shape as
 // savePdfReceiptToDisk() below, so the image and PDF halves of a receipt upload
-// read and fail consistently.
+// read and fail consistently. An image-limit refusal also carries `code`.
 //
 // SECURITY — this is the trust boundary, and the trusted thing is the BYTES.
 // This used to take the data-URI's MIME token straight into the on-disk file
@@ -32269,6 +32980,14 @@ function saveReceiptToDisk(photoData) {
 	const ext = sniffImageFormat(buf);
 	if (!ext || !RECEIPT_IMAGE_EXTS.has(ext)) {
 		return { error: "Receipt must be a JPEG, PNG, or WebP image", status: 400 };
+	}
+	// What is stored here is decoded later (the list thumbnail), so the pixel
+	// limit is held at the door, and an image whose dimensions cannot be read
+	// is not stored at all (lib/image-size.js).
+	const dims = imageLimits.checkImage(buf, imageLimits.LIMITS.RECEIPT_IMAGE);
+	if (!dims.ok) {
+		const body = imageLimits.refusalBody(dims, "photo");
+		return { error: body.error, code: body.code, status: dims.status };
 	}
 	const fname = `${Date.now()}-${crypto.randomBytes(6).toString("hex")}.${ext}`;
 	try {
@@ -32904,7 +33623,7 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 			wroteReceiptFile = savedPdf.url;
 		} else {
 			const savedImg = saveReceiptToDisk(photoData);
-			if (savedImg.error) return res.status(savedImg.status || 400).json({ error: savedImg.error });
+			if (savedImg.error) return res.status(savedImg.status || 400).json(savedImg.code ? { error: savedImg.error, code: savedImg.code } : { error: savedImg.error });
 			photoUrlOrPath = savedImg.url;
 			if (typeof photoData === "string" && photoData.startsWith("data:")) wroteReceiptFile = savedImg.url;
 		}
@@ -33355,7 +34074,9 @@ app.post("/api/expenses/:id/extract-details", requireRole("Super Admin", "Dispat
 // full ~283 KB originals (×150 rows ≈ 43 MB, the page's real load cost).
 // Generated on first request via jimp, cached to uploads/expense-receipts/thumbs/,
 // and revalidated by mtime. Super Admin / Dispatcher (same scope as the list).
-// Degrades to the original image on any resize error so a row never shows blank.
+// Only an image within the decode limits below gets a thumbnail; anything else
+// answers 404 (the row still opens the full receipt). A resize error on an
+// eligible image degrades to the original so that row does not show blank.
 app.get("/api/expenses/:id/receipt-thumbnail", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const id = parseInt(req.params.id, 10);
@@ -33399,9 +34120,17 @@ app.get("/api/expenses/:id/receipt-thumbnail", requireRole("Super Admin", "Dispa
 			}
 		} catch { /* stale/unreadable cache → regenerate below */ }
 
+		// Jimp decodes the whole image to make the thumbnail, so only a JPEG or
+		// PNG whose header reads, at or under the receipt OCR pixel limit, is
+		// decoded here. Anything else has no thumbnail (lib/image-size.js).
+		let source;
+		try { source = srcPath ? fs.readFileSync(srcPath) : srcBuf; } catch { return res.status(404).end(); }
+		const dims = imageLimits.checkImage(source, { types: [imageLimits.JPEG, imageLimits.PNG], maxPixels: RECEIPT_OCR_MAX_PIXELS });
+		if (!dims.ok) return res.status(404).end();
+
 		try {
 			const { Jimp } = require("jimp");
-			const img = await Jimp.read(srcPath || srcBuf);
+			const img = await Jimp.read(source);
 			img.resize({ w: 200 }); // width-constrained, aspect preserved
 			const buf = await img.getBuffer("image/jpeg", { quality: 70 });
 			try { fs.mkdirSync(THUMBS_DIR, { recursive: true }); fs.writeFileSync(thumbPath, buf); } catch { /* cache write is best-effort */ }
@@ -33414,7 +34143,7 @@ app.get("/api/expenses/:id/receipt-thumbnail", requireRole("Super Admin", "Dispa
 			// "jimp couldn't read it" and "it isn't an image" overlap exactly here.
 			console.warn("thumbnail gen failed, serving original:", genErr && genErr.message);
 			try {
-				const raw = srcPath ? fs.readFileSync(srcPath) : srcBuf;
+				const raw = source;
 				const fmt = raw ? sniffImageFormat(raw) : null;
 				if (raw && fmt) {
 					res.type(fmt === "jpg" ? "image/jpeg" : `image/${fmt}`);
@@ -33531,9 +34260,19 @@ app.post("/api/documents/scan", requireAuth, scanKitLimiter, async (req, res) =>
 });
 
 // Helper: convert image buffer(s) to PDF buffer (supports multi-page)
+//
+// JPEG only, within the document photo limits (lib/image-size.js): pdfkit embeds
+// a JPEG as it is, without decoding it. Every buffer is checked before pdfkit
+// sees any of them, and a refusal rejects with the 413/415 the upload route
+// answers. The route checks first and answers itself; this holds any other
+// caller to the same rule.
 function imageToPdf(imageBuffers) {
 	const buffers = Array.isArray(imageBuffers) ? imageBuffers : [imageBuffers];
 	return new Promise((resolve, reject) => {
+		for (const buf of buffers) {
+			const verdict = imageLimits.checkImage(buf, imageLimits.LIMITS.DOCUMENT_PHOTO);
+			if (!verdict.ok) return reject(imageLimits.refusalError(verdict, "photo"));
+		}
 		const doc = new PDFDocument({ autoFirstPage: false });
 		const chunks = [];
 		doc.on("data", (chunk) => chunks.push(chunk));
@@ -33576,42 +34315,13 @@ const RECEIPT_OCR_CHILD = path.join(__dirname, "lib", "tesseract-ocr-child.js");
 const RECEIPT_OCR_CACHE_DIR = path.join(__dirname, ".cache", "tesseract");
 const RECEIPT_OCR_LANG_PATH = "https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int";
 
-// An image's pixel dimensions, read from its header without decoding it. PNG
-// (IHDR) and JPEG (the first frame header) only — the two formats imageToPdf()
-// accepts, and so the only two that reach OCR. null when the header cannot be
-// read. Bounded: every step of the JPEG walk moves forward.
-function receiptImageSize(buf) {
-	if (!Buffer.isBuffer(buf) || buf.length < 24) return null;
-	if (buf.readUInt32BE(0) === 0x89504e47 && buf.readUInt32BE(4) === 0x0d0a1a0a) {
-		if (buf.toString("latin1", 12, 16) !== "IHDR") return null;
-		const width = buf.readUInt32BE(16), height = buf.readUInt32BE(20);
-		return width > 0 && height > 0 ? { width, height } : null;
-	}
-	if (buf[0] !== 0xff || buf[1] !== 0xd8) return null;
-	let i = 2;
-	while (i + 9 < buf.length) {
-		if (buf[i] !== 0xff) return null;                       // not at a marker: malformed
-		const marker = buf[i + 1];
-		if (marker === 0xff) { i += 1; continue; }              // fill byte
-		if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) { i += 2; continue; }   // no length
-		if (marker === 0xd9 || marker === 0xda) return null;    // image data before any frame header
-		const length = buf.readUInt16BE(i + 2);
-		if (length < 2) return null;
-		// SOF0-SOF15, except DHT (C4), JPG (C8) and DAC (CC), which share the range.
-		if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
-			const height = buf.readUInt16BE(i + 5), width = buf.readUInt16BE(i + 7);
-			return width > 0 && height > 0 ? { width, height } : null;
-		}
-		i += 2 + length;
-	}
-	return null;
-}
-
 // Why an image will not be OCR'd, or null when it will. Only a header read, so
 // it runs when the receipt is QUEUED: an image that would be skipped never
-// waits in memory for its turn.
+// waits in memory for its turn. imageLimits.imageSize() reads PNG and JPEG
+// headers only and answers null for anything else, so an image it cannot size
+// is never OCR'd (lib/image-size.js).
 function receiptOcrSkipReason(buf) {
-	const size = receiptImageSize(buf);
+	const size = imageLimits.imageSize(buf);
 	if (!size) return "image dimensions could not be read";
 	if (size.width * size.height > RECEIPT_OCR_MAX_PIXELS) {
 		return `${size.width}x${size.height} image is over the ${RECEIPT_OCR_MAX_PIXELS / 1e6} MP limit`;
@@ -37565,11 +38275,20 @@ app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, r
 				if (!isValidImageMagic(buf)) {
 					return res.status(400).json({ error: "Uploaded photo is not a recognized image format." });
 				}
+				// JPEG only, within the document photo limits, checked from the
+				// header before the converter sees it (lib/image-size.js). The app
+				// sends nothing else; 413/415 are final, so the client does not retry.
+				const verdict = imageLimits.checkImage(buf, imageLimits.LIMITS.DOCUMENT_PHOTO);
+				if (!verdict.ok) return res.status(verdict.status).json(imageLimits.refusalBody(verdict, "photo"));
 			}
 			try {
 				fileBuffer = await imageToPdf(imageBuffers);
 			} catch (pdfErr) {
-				console.error("Image-to-PDF error:", pdfErr.message);
+				// pdfkit throws plain strings for some malformed files, so log either shape.
+				console.error("Image-to-PDF error:", (pdfErr && pdfErr.message) || String(pdfErr));
+				if (pdfErr && (pdfErr.status === 413 || pdfErr.status === 415)) {
+					return res.status(pdfErr.status).json({ error: pdfErr.message, code: pdfErr.code });
+				}
 				return res.status(400).json({ error: "The photo could not be processed. Please try taking a new photo." });
 			}
 			fileName = `${safeLoadId}_${safeDocType}_${timestamp}.pdf`;

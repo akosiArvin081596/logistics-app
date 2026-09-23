@@ -82,7 +82,9 @@ PATH="$(dirname "$NODE_BIN"):$PATH"
 export PATH
 
 npm install --silent --no-audit --no-fund
-node -e "require('better-sqlite3')" >/dev/null 2>&1 || npm rebuild better-sqlite3
+# ⚠️ OPEN a database: require() alone passes under an ABI-mismatched Node (the
+# native binding loads lazily). Same probe as remote-deploy.sh.
+node -e "new (require('better-sqlite3'))(':memory:').close()" >/dev/null 2>&1 || npm rebuild better-sqlite3
 npm run build:client --silent
 if [ -f ecosystem.config.js ] && grep -q "name: '$PM2'" ecosystem.config.js; then
 	pm2 restart ecosystem.config.js --update-env --silent 9>&-
