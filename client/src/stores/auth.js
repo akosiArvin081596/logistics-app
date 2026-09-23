@@ -1,21 +1,28 @@
 import { defineStore } from 'pinia'
-import { useApi } from '../composables/useApi'
+// Explicit .js on the relative imports: scripts/test-session-check.mjs imports this
+// store under plain Node, which (unlike Vite) will not guess an extension. Same
+// reason lib/payoutPeriod.js imports './monthLabel.js'.
+import { useApi } from '../composables/useApi.js'
 import {
   ACTION,
   BACKGROUND,
+  EFFECT,
   FOREGROUND,
+  OUTCOME,
   backgroundDelayMs,
   classifySessionAttempt,
   decideBackgroundStep,
-  guardInputsChanged,
   isSessionUser,
   logoutConfirmed,
+  pageEffect,
   parsePendingLogout,
+  parseSessionEpoch,
   parseSessionHint,
   runForegroundCheck,
   serializePendingLogout,
+  serializeSessionEpoch,
   serializeSessionHint,
-} from '../lib/sessionCheck'
+} from '../lib/sessionCheck.js'
 
 const api = useApi()
 
@@ -25,6 +32,7 @@ const api = useApi()
 // What each key holds, and why it lives where it does: lib/sessionCheck.js.
 const HINT_KEY = 'logisx.session.lastUser.v1' // sessionStorage: tab-scoped, expires
 const PENDING_LOGOUT_KEY = 'logisx.session.pendingLogout.v1' // localStorage: outlives the tab, like the cookie
+const EPOCH_KEY = 'logisx.session.epoch.v1' // localStorage: shared by every tab, like the cookie
 
 function storageFor(kind) {
   try {
@@ -52,6 +60,25 @@ function removeKey(kind, key) {
   writeKey(kind, key, null)
 }
 
+// This tab's saved user, unless it has expired or predates the latest change of
+// cookie owner in ANY tab (login, logout, sign-out; see the epoch in lib/sessionCheck.js).
+function readSessionHint() {
+  return parseSessionHint(readKey('session', HINT_KEY), Date.now(), {
+    notBeforeMs: parseSessionEpoch(readKey('local', EPOCH_KEY)),
+  })
+}
+// The cookie has changed owner, or is about to: every tab's saved user is now stale.
+function stampEpoch() {
+  writeKey('local', EPOCH_KEY, serializeSessionEpoch(Date.now()))
+}
+function reloadPage() {
+  try {
+    window.location.reload()
+  } catch {
+    /* not in a browser: nothing to reload */
+  }
+}
+
 // ── Background re-check. Module scope, because timers are not state ─────────
 let reconnectTimer = null
 let reconnectTick = 0
@@ -66,9 +93,10 @@ const resolvedListeners = new Set()
 
 /**
  * Called when a BACKGROUND check changes something the router guard decides on:
- * signed out, a different user or role, a forced password change. router/index.js
- * registers here to re-run its guard on the current page. A module-level hook, not
- * Pinia state, because the router registers at import time, before Pinia exists.
+ * signed out, a different role, a forced password change. router/index.js registers
+ * here to re-run its guard on the current page. (A different PERSON reloads the page
+ * instead.) A module-level hook, not Pinia state, because the router registers at
+ * import time, before Pinia exists.
  */
 export function onSessionResolved(fn) {
   resolvedListeners.add(fn)
@@ -175,11 +203,9 @@ export const useAuthStore = defineStore('auth', {
       }
       removeKey('local', PENDING_LOGOUT_KEY) // absent or expired: tidy either way
 
-      // Known = this tab's hint (survives the reload that got us here) or, should
-      // this ever run again later in a page's life, the user already in memory.
-      const known =
-        parseSessionHint(readKey('session', HINT_KEY), Date.now()) ||
-        (isSessionUser(this.user) ? this.user : null)
+      // Known = this tab's saved user (it survives the reload that got us here) or,
+      // should this ever run again later in a page's life, the user already in memory.
+      const known = readSessionHint() || (isSessionUser(this.user) ? this.user : null)
       const result = await runForegroundCheck({ probe: probeSession, sleep, hasKnownUser: !!known })
       if (gen !== sessionGen) return
 
@@ -218,6 +244,7 @@ export const useAuthStore = defineStore('auth', {
       this.isAuthenticated = false
       this._stopReconnect()
       removeKey('session', HINT_KEY)
+      stampEpoch() // the cookie has no owner now, so no tab may restore one
     },
 
     _startReconnect() {
@@ -257,15 +284,20 @@ export const useAuthStore = defineStore('auth', {
         this._scheduleReconnect(step.delayMs)
         return
       }
-      const before = this.user
+      const shown = this.user
       if (step.action === ACTION.ACCEPT) this._applyAuthenticated(result.data.user)
       else this._applySignedOut()
-      if (guardInputsChanged(before, this.user)) notifyResolved()
+      const effect = pageEffect(shown, this.user)
+      // Someone other than the person on screen (their saved user is already the new
+      // one): every other store still holds the first person's data, so reload.
+      if (effect === EFFECT.RELOAD) reloadPage()
+      else if (effect === EFFECT.REROUTE) notifyResolved()
     },
 
     async login(username, password) {
       const data = await api.post('/api/auth/login', { username, password })
       sessionGen++
+      stampEpoch() // a new owner for the cookie: other tabs' saved users are stale
       // A fresh sign-in supersedes a logout that never reached the server: this
       // login just replaced whatever that cookie's session held.
       removeKey('local', PENDING_LOGOUT_KEY)
@@ -276,6 +308,7 @@ export const useAuthStore = defineStore('auth', {
     async setup(username, password, email) {
       const data = await api.post('/api/auth/setup', { username, password, email })
       sessionGen++
+      stampEpoch()
       removeKey('local', PENDING_LOGOUT_KEY)
       // The route answers { success, role } with no user object, so the fallback
       // below is built HERE, which is exactly why it is not stored as this tab's
@@ -285,12 +318,41 @@ export const useAuthStore = defineStore('auth', {
       return this.user
     },
 
+    // Call after POST /api/auth/change-password answered 2xx. That route answers
+    // { success: true } and nothing else, but it has cleared must_change_password on
+    // the user row AND on the session it just regenerated, so the user is re-read
+    // from the server rather than edited here. The old local edit reached memory
+    // only: this tab's saved copy kept mustChangePassword: true, and the first
+    // reload on a bad signal restored it, pinning a driver who had just changed
+    // the temporary password back on /account/change-password.
+    async afterPasswordChange() {
+      const gen = sessionGen
+      const result = await probeSession(FOREGROUND.timeoutMs)
+      if (gen !== sessionGen) return
+      const outcome = classifySessionAttempt(result)
+      if (outcome === OUTCOME.AUTHENTICATED) {
+        this._applyAuthenticated(result.data.user)
+        return
+      }
+      if (outcome === OUTCOME.SIGNED_OUT) {
+        this._applySignedOut()
+        return
+      }
+      // No answer. The 200 already settled this one field, so memory follows it and
+      // they can leave the page. The saved copy is DROPPED, not edited: the
+      // background check writes it back from the server's own answer.
+      if (isSessionUser(this.user)) this.user = { ...this.user, mustChangePassword: false }
+      removeKey('session', HINT_KEY)
+      this._startReconnect()
+    },
+
     async logout() {
       sessionGen++
       this._stopReconnect()
       // Recorded BEFORE the request, so a tab closed mid-request still finishes the
       // logout on its next load. Cleared only once the server confirms it.
       writeKey('local', PENDING_LOGOUT_KEY, serializePendingLogout(Date.now()))
+      stampEpoch() // and no other tab restores this user from its saved copy
       removeKey('session', HINT_KEY)
       if (await this._sendLogout()) removeKey('local', PENDING_LOGOUT_KEY)
       // Locally the person asked to leave, so they leave either way.

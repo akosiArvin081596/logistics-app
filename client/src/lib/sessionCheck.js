@@ -189,7 +189,34 @@ export function guardInputsChanged(prev, next) {
   const a = isSessionUser(prev) ? prev : null
   const b = isSessionUser(next) ? next : null
   if (!a || !b) return !a !== !b
-  return a.id !== b.id || a.role !== b.role || !!a.mustChangePassword !== !!b.mustChangePassword
+  return !samePerson(a, b) || a.role !== b.role || !!a.mustChangePassword !== !!b.mustChangePassword
+}
+
+// One notion of identity for both decisions: the server's user id (a number, or a
+// string if a stored copy ever held one), else the username.
+function samePerson(a, b) {
+  if (a.id != null && b.id != null) return String(a.id) === String(b.id)
+  return a.username === b.username
+}
+
+/**
+ * Does a background answer name a DIFFERENT PERSON from the one on screen? Then the
+ * page is reloaded, not patched: the auth store is not the only one holding that
+ * person's data (loads, messages, expenses), and a reload is the one reset that
+ * reaches all of them. Nobody on screen (the login page) is never "different":
+ * being signed in from there is the normal path.
+ */
+export function isDifferentUser(shown, next) {
+  if (!isSessionUser(shown) || !isSessionUser(next)) return false
+  return !samePerson(shown, next)
+}
+
+export const EFFECT = Object.freeze({ NONE: 'none', REROUTE: 'reroute', RELOAD: 'reload' })
+
+/** What a settled background check does to the page: reload, re-run the guard, or nothing. */
+export function pageEffect(shown, next) {
+  if (isDifferentUser(shown, next)) return EFFECT.RELOAD
+  return guardInputsChanged(shown, next) ? EFFECT.REROUTE : EFFECT.NONE
 }
 
 // ── The tab's last server-confirmed user (the "hint") ────────────────────────
@@ -207,6 +234,7 @@ export function guardInputsChanged(prev, next) {
 //     login, so an older hint describes a cookie that is certainly gone. A younger
 //     one can still outlive its cookie; the background check then gets a
 //     definitive "signed out" and the guard sends them to /login.
+//   - IGNORED once the cookie changes owner in ANY tab: see the epoch below.
 export const HINT_TTL_MS = 24 * 60 * 60 * 1000
 const HINT_VERSION = 1
 const HINT_FIELDS = Object.freeze([
@@ -230,8 +258,11 @@ export function serializeSessionHint(user, nowMs) {
   return JSON.stringify({ v: HINT_VERSION, confirmedAt: nowMs, user: pickHintFields(user) })
 }
 
-/** The stored hint's user, or null when absent, malformed, expired or future-dated. */
-export function parseSessionHint(raw, nowMs, ttlMs = HINT_TTL_MS) {
+/**
+ * The stored hint's user, or null when absent, malformed, expired, future-dated, or
+ * confirmed before `notBeforeMs`: the epoch, i.e. someone has logged in or out since.
+ */
+export function parseSessionHint(raw, nowMs, { ttlMs = HINT_TTL_MS, notBeforeMs = 0 } = {}) {
   if (typeof raw !== 'string' || raw === '') return null
   let parsed
   try {
@@ -244,10 +275,33 @@ export function parseSessionHint(raw, nowMs, ttlMs = HINT_TTL_MS) {
   // real age is unknowable, so it is no hint at all.
   const age = nowMs - parsed.confirmedAt
   if (!(age >= 0 && age <= ttlMs)) return null
+  // Same millisecond as the epoch is fine: login stamps the epoch, then saves.
+  if (!(parsed.confirmedAt >= notBeforeMs)) return null
   if (!isSessionUser(parsed.user)) return null
   // Re-pick on READ as well as on write (same reason as formDraft.js): a hint
   // written by another build must not smuggle extra fields in.
   return pickHintFields(parsed.user)
+}
+
+// ── Who owns the cookie now: the epoch ───────────────────────────────────────
+// The hint is per TAB, the cookie per BROWSER. So "this tab last saw A" goes stale
+// without this tab doing anything: another tab logs A out, or signs B in on the
+// same cookie. Before the epoch, an offline reload then restored the logged-out
+// user's screens, or showed A while the cookie belonged to B (no data either way:
+// the server still decides every request). Every change of owner (login, setup,
+// logout, or a definitive "signed out" answer, in any tab) stamps this epoch into
+// localStorage, which every tab shares, and a hint confirmed before it is ignored.
+// A plain epoch-ms string.
+export function serializeSessionEpoch(nowMs) {
+  return String(Math.trunc(nowMs))
+}
+
+export function parseSessionEpoch(raw) {
+  if (raw == null || raw === '') return 0 // never stamped: nothing to be older than
+  const ms = Number(raw)
+  // Present but unreadable: distrust every hint rather than guess. The next login,
+  // logout or sign-out stamps a clean one.
+  return Number.isFinite(ms) && ms >= 0 ? ms : Infinity
 }
 
 // ── A logout that has not reached the server yet ─────────────────────────────
