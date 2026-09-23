@@ -46,7 +46,7 @@ REST endpoints (grouped by domain):
 - `GET /api/tabs` — list all sheet tab names
 - `GET /api/data?sheet=&page=&limit=` — read rows (paginated, max 200/page)
 - `POST /api/data?sheet=` — append row (`{ values: [...] }`)
-- `PUT /api/data/:rowIndex?sheet=` — update row by 1-based index. On Job Tracking, a changed Job Status is recorded in `load_status_history` (source `admin-edit`, actor = session username) after the write — `recordEditorStatusChange()`; `scripts/test-editor-status-history.js`.
+- `PUT /api/data/:rowIndex?sheet=` — update row by 1-based index
 - `DELETE /api/data/:rowIndex?sheet=` — delete row (shifts rows up, Super Admin only)
 
 **Dashboard & dispatch**:
@@ -59,7 +59,7 @@ REST endpoints (grouped by domain):
 - `POST /api/loads/from-ratecon` — Super Admin/Dispatcher. `{fields, pdfBase64, fileName}` (fields = what the dispatcher reviewed/edited) → creates the load. See "Load ingestion" below.
 - `POST /api/driver/respond` — driver accepts/declines a load assignment. **Super Admin / Dispatcher / Driver only** — it was bare `requireAuth`, and since the ownership check is Driver-only, an Investor could accept or decline any row. A Driver is refused on a cancelled bound row (409 `LOAD_CANCELLED` — a decline would put it back on the board as Unassigned).
 - `GET /api/load/:loadId` — single load details
-- `PUT /api/load/:loadId` — update load fields. A changed Job Status is recorded in `load_status_history` like `PUT /api/data/:rowIndex` does (source `admin-edit`) — without it, a load marked Delivered here had no delivery time and the driver's receipt window read `unknown`.
+- `PUT /api/load/:loadId` — update load fields
 
 **Driver**:
 - `GET /api/driver/:driverName` — driver-specific data (financial columns auto-hidden for Driver role). Also returns `truckDocuments` — admin-flagged driver-visible legal docs on the driver's assigned truck. No file URLs; row IDs only. Every load carries `_expenseWindow` (`{ eligible, state, deliveredAt, closesAt }`, `withExpenseWindows()`) — the verdict the driver app renders the expense form from; see `POST /api/expenses`.
@@ -114,7 +114,7 @@ REST endpoints (grouped by domain):
 - `/api/investor/messages` — investor chat
 
 **Expenses & finance**:
-- `POST /api/expenses` — log expense (fuel w/ gallons/odometer, maintenance, optional base64 photo). Receipts re-saved under `/uploads/expense-receipts/`, URL stored in `expenses.photo_data`. **Driver role:** a load is required (400 `LOAD_REQUIRED` when missing, blank or `#` — without one the ownership check and the window both stood aside), the load must name the driver (ownership) **and** still take receipts — active, or delivered within the last **7 days** (owner, 2026-09-23; `lib/expense-window.js`). "Delivered" = when the load entered Delivered/Completed/POD Received in `load_status_history`, elapsed 7 × 24 h, inclusive; no recorded delivery → refused. Refusal is 403 `EXPENSE_WINDOW_CLOSED` with `reason` `closed`/`unknown`/`cancelled`/`none`; a failed read is a retryable 503 `EXPENSE_WINDOW_UNVERIFIED`. Admin/Dispatcher unchanged. `scripts/test-expense-load-window.js`.
+- `POST /api/expenses` — log expense (fuel w/ gallons/odometer, maintenance, optional base64 photo). Receipts re-saved under `/uploads/expense-receipts/`, URL stored in `expenses.photo_data`. **Driver role:** a load is required (400 `LOAD_REQUIRED` when missing, blank or `#` — without one the ownership check and the window both stood aside), the load must name the driver (ownership) **and** still take receipts — active, or delivered within the last **7 days** (owner, 2026-09-23; `lib/expense-window.js`). "Delivered" = when the load entered Delivered/Completed/POD Received in `load_status_history`, elapsed 7 × 24 h, inclusive; no recorded delivery → refused. ⚠️ Only the status routes record one (`PUT /api/driver/status`, `PUT /api/loads/:loadId/status-override`). The admin row editors and direct sheet edits deliberately write no history — the haul replay and the public tracker read those rows as the status routes' — so a delivery set there reads `unknown` (the driver is told to ask dispatch). Refusal is 403 `EXPENSE_WINDOW_CLOSED` with `reason` `closed`/`unknown`/`cancelled`/`none`; a failed read is a retryable 503 `EXPENSE_WINDOW_UNVERIFIED`. Admin/Dispatcher unchanged. `scripts/test-expense-load-window.js`.
 - `POST /api/expenses/ocr` — receipt JPEG/PNG → Gemini 2.5 Flash vision, returns `{amount, date, vendor, gallons, odometer, suggestedType, confidence}`. Driver ExpenseForm prefills fields before the driver confirms. Role: Driver / Super Admin / Dispatcher. Rate-limited.
 - `GET /api/expenses/all`, `PUT /api/expenses/:id/status` — manage all expenses
 - `GET /api/expenses/fuel-analytics` — fuel spend, cost/gallon, monthly + per-driver breakdown

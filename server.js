@@ -1240,42 +1240,6 @@ function recordStatusChange({ loadId, oldStatus, newStatus, source, actor, reaso
 	}
 }
 
-// A status set in the admin editors — PUT /api/data/:rowIndex and
-// PUT /api/load/:loadId — is a transition like any other, and is recorded here.
-// Those two routes rewrote Job Status and left no row, so a load marked
-// Delivered from an editor had no delivery time: the driver's 7-day receipt
-// window (lib/expense-window.js) read it as 'unknown' and sent the driver to
-// dispatch, and the status timeline skipped the step.
-//
-// `before` / `after` are the row's cells as arrays, `after` being what was
-// written. Call it only AFTER the sheet write succeeded — a refused or failed
-// write changed nothing and must record nothing. Best-effort by the same rule as
-// recordStatusChange(), which it delegates to: never throws into the edit, and a
-// re-saved identical status (case-insensitive) writes no row.
-function recordEditorStatusChange(req, headers, before, after) {
-	try {
-		const hs = Array.isArray(headers) ? headers : [];
-		const statusCol = findCol(hs, /^(job[\s._-]?)?status$/i) || findCol(hs, /status/i);
-		const loadIdCol = findCol(hs, /load.?id|job.?id/i);
-		if (!statusCol || !loadIdCol) return;
-		const cell = (row, col) => {
-			const v = (row || [])[hs.indexOf(col)];
-			return String(v == null ? "" : v).trim();
-		};
-		recordStatusChange({
-			// The id the row carries NOW: an edit that also retyped the Load ID
-			// moved this row to the new id.
-			loadId: cell(after, loadIdCol) || cell(before, loadIdCol),
-			oldStatus: cell(before, statusCol),
-			newStatus: cell(after, statusCol),
-			source: "admin-edit",
-			actor: (req && req.session && req.session.user && req.session.user.username) || "",
-		});
-	} catch (err) {
-		console.error("recordEditorStatusChange error:", err.message);
-	}
-}
-
 // Investor payout amount history — append-only log of everything that moved a
 // payout figure. Forward-only: rows accrue from the moment this ships, and prior
 // movements are NOT reconstructible because `amount` was overwritten in place.
@@ -25924,9 +25888,6 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		}
 
 		logAudit(req, "update_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("updated"));
-		// A Job Status changed here goes into load_status_history like any other
-		// status write — see recordEditorStatusChange().
-		if (guarded) recordEditorStatusChange(req, headers, before, after);
 		// The 60s Job Tracking cache would otherwise keep serving the old figures.
 		if (guarded) jtCacheInvalidate();
 
@@ -38780,9 +38741,6 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 		}
 
 		logAudit(req, "update_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("updated"));
-		// A Job Status changed here goes into load_status_history like any other
-		// status write — see recordEditorStatusChange().
-		if (guarded) recordEditorStatusChange(req, headers, before, after);
 		// The 60s Job Tracking cache would otherwise keep serving the old figures.
 		if (guarded) jtCacheInvalidate();
 

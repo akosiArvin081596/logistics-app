@@ -174,7 +174,6 @@ function humanizeDuration(ms) {
 const SOURCE_LABELS = {
   geofence: 'GPS arrival', override: 'admin override', dispatch: 'dispatch',
   accept: 'driver accept', decline: 'driver decline', cancel: 'cancellation',
-  'admin-edit': 'admin edit',
 }
 function sourceLabel(s) { return SOURCE_LABELS[s] || s }
 </script>
