@@ -1,7 +1,22 @@
 <!-- Extracted verbatim from CLAUDE.md on 2026-08-18 to keep that file inside the context budget.
      CLAUDE.md now carries a short summary and points here. Nothing was reworded or dropped. -->
 
+<!-- The "Summary" section was the CLAUDE.md summary of this topic until 2026-09-23; it moved here verbatim. -->
+
 # Environment refresh (local + staging)
+
+## Summary
+
+`./scripts/refresh-local.sh` and, on the VPS from `/var/www/logisx-staging`, `./scripts/refresh-staging.sh --yes [--restart]`. Both bring the checkout to `origin/main`, rebuild the client, and hand the database half to `scripts/refresh-env.js`. **The source is the nightly snapshot** (`/var/www/logistics-app/backups/app.db.*.gz`), never the live production `app.db`. Full runbook in **`scripts/README-env-refresh.md`**; the full rationale, including the drift audit that motivated it, in **[`docs/claude/environment-refresh.md`](environment-refresh.md)**.
+
+- **The spreadsheet gate is the load-bearing safety.** `refresh-env.js` reads the `.env` beside its `--to` target and **refuses** when `SPREADSHEET_ID` is missing or is production's — `server.js` falls through to the production sheet when it is unset, so a refreshed DB next to such an `.env` is a production writer on first boot. It checks the resolved **ID**, never the directory or sheet name. It also refuses an `.env` that can send mail or has `INVOICE_AUTOGEN_ENABLED=true`.
+- **⚠️ Telemetry is trimmed to 45 days by default, and that is not a neutral shrink.** `getEldTravelDaysByVehicle()` is coverage-aware, so a window with **no** pings falls back to the **full scheduled window** — months older than the cutoff pay drivers *more* and pay investors *less*. **Never reconcile a historical month on a trimmed copy**; pass `--telemetry-all`.
+- **Sanitization is asserted, not assumed** — sessions cleared, passwords re-hashed to `Password123!` (so `test-suite.js` runs with no extra step), emails rewritten to `.invalid`, bank/tax/identity/signature/consent fields redacted, onboarding `access_token`s regenerated, `driver_locations` emptied. Stage **`3h`** then sweeps **every text column of every table**, substituting routable emails in place with an HMAC `<10 hex>@invalid` (per-run salt, so cross-table rows still agree) and `###-##-####` with `000-00-0000`. A free-text hit is a **hard leak, not an advisory**.
+- **⚠️ Stage 3h neutralizes exactly TWO SHAPES.** Reading "every text column of every table" as "free-text PII is handled" is itself a trap — base64 licence/medical-card documents, `city`/`state`/`zip`, and the seven phone columns are all structurally invisible to it and each needed an explicit list entry. **If a column can hold personal data in any shape that is not an email or an SSN, assume stage 3h will not save you.**
+- **Not copied:** `uploads/` (unredacted PII on disk — files 404 in a refreshed environment) and the Google Sheets themselves.
+
+## Detail
+
 `./scripts/refresh-local.sh` and, on the VPS from `/var/www/logisx-staging`,
 `./scripts/refresh-staging.sh --yes [--restart]`. Both bring the checkout to `origin/main`,
 rebuild the client, and hand the database half to `scripts/refresh-env.js`. Full runbook,

@@ -1,6 +1,8 @@
 <!-- Extracted verbatim from CLAUDE.md on 2026-08-18 to keep that file inside the context budget.
      CLAUDE.md now carries a short summary and points here. Nothing was reworded or dropped. -->
 
+<!-- The "Summary" section was the CLAUDE.md summary of this topic until 2026-09-23; it moved here verbatim. -->
+
 # Maps key split — one key cannot be restricted, two can
 
 > **⚠️ Re-audited 2026-09-19 — still unrestricted, and my own earlier estimate was wrong.**
@@ -24,6 +26,19 @@
 > fetches the key once per map-loading page view. ⚠️ It is a proxy, not Google's count; the console
 > stays authoritative. ⚠️ **It restricts and caps nothing** — only a per-API quota cap does that. It
 > exists so the cap can be sized from data instead of a guess.
+
+## Summary
+
+`GET /api/config/maps-key` publishes a Maps key to every visitor, by necessity: `/apply`, `/invest` and the public `/track/:loadId` tracker all load a map before a session exists. So the **only** thing between that key and an arbitrary bill is a Google Cloud restriction. Audited 2026-08-08: there was **none** — no application restriction and no API allowlist, verified empirically. Full audit, evidence and n8n history in **[`docs/claude/maps-key-split.md`](maps-key-split.md)**.
+
+- **⚠️ The two restriction types are mutually exclusive, which is why one key can never be locked down.** A referrer-restricted key is refused outright by the legacy web services and, having no `Referer` to match, by Routes/Places (New) too — it breaks **every server call**. An IP-restricted key cannot drive the Maps JavaScript API — it breaks **every map**. Anyone "just adding a referrer restriction" to the shared key takes the dashboard, tracking, geocoding and rate-per-mile down at once.
+- **The split**: `GOOGLE_MAPS_API_KEY` = server key (IP-restricted to the VPS; Geocoding + Distance Matrix + Routes + Places New). `GOOGLE_MAPS_BROWSER_KEY` = browser key (referrer-restricted; Maps JavaScript + Places) and the **only** value the endpoint serves. Unset → falls back to the server key, so deploying the split changes nothing until a second key exists — but **it is no longer silent about it**: `server.js` warns at boot when the browser key is unset or identical to the server key, comparing by **digest, never a prefix** (re-audited 2026-09-19 from an off-VPS IP with no `Referer`: still no application restriction and no API allowlist). This also moves the expensive `places:searchNearby` SKU off the published key.
+- **⚠️⚠️ The VPS talks to Google over IPv6, so an IPv4-only allowlist breaks everything.** `76.13.22.110` is the address the box is *reached* on, not the one it *leaves* from — both curl and the Node runtime egress from **`2a02:4780:59:f4fb::1`**. An allowlist containing only the IPv4 address would silently 403 **every** Maps call in production. Allowlist **both**, and re-check after any VPS network change.
+- **⚠️ A referrer restriction is anti-scraper, not anti-attacker** — `Referer` is client-supplied and forgeable. The real spend ceiling is the **API allowlist plus per-API quota caps and a budget alert**.
+- **n8n no longer calls Maps at all.** The `Get Distance Matrix` node held a **plaintext** key and was deleted live 2026-08-09 (45 → 43 nodes), so the server key can now be IP-restricted without breaking email-ingested rate-per-mile — the app computes it via `calculateRatePerMile()`. **⚠️ That key must still be rotated: deletion is not revocation**, and n8n Cloud's internal workflow history is not readable over the public API.
+- `GET /api/weather` is **dead twice over** — it calls a `weather.googleapis.com` path that does not exist, and nothing calls it (`TrackingMap.vue`'s fetch is disabled to reduce API cost). Kept as a stub. The Weather API does **not** belong on either allowlist.
+
+## Detail
 
 `GET /api/config/maps-key` publishes a Maps key to every visitor. That is by design (the SPA needs one), so the **only** thing standing between that key and an arbitrary bill is a Google Cloud console restriction. Audited 2026-08-08: there was **none** — no application restriction and no API allowlist, verified empirically (Geocoding returned `OK` from an off-VPS IP with no `Referer`; Places New `searchNearby` returned results with a bogus `Referer`; the legacy Directions API — which this app never calls — also returned `OK`, proving no API allowlist; every denial seen was the project-level *"This API is not activated on your API project"*, never the key-level *"This API key is not authorized to use this service or API"*). Prod and staging share the identical key.
 - **⚠️ The two restriction types are mutually exclusive, which is why one key can never be locked down.** A referrer-restricted key is refused outright by the legacy web services (`API keys with referer restrictions cannot be used with this API`) and, having no `Referer` to match, by Routes/Places (New) too — so it breaks **every server call**. An IP-restricted key cannot drive the Maps JavaScript API at all — so it breaks **every map**. Anyone "just adding a referrer restriction" to the shared key takes the dashboard, tracking, geocoding and rate-per-mile down at once.

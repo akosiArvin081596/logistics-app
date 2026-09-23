@@ -1,3 +1,5 @@
+> **Superseded — not the current architecture.** This is an April 2026 plan to move the Google Sheets data (Job Tracking, Carrier Database, Payments Table, Status Logs) into SQLite. It was never carried out and is kept for history only: none of its `loads`, `carriers`, `payments` or `status_logs` tables exist, and `load_coordinates` was kept rather than folded into a `loads` table. Google Sheets is still the operational book of record, and the drift described below is gone: the app and n8n both use the production Dispatch Management sheet (`1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo`, the `SPREADSHEET_ID` fallback in `server.js`), and the copy the app used to read (`1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI`) is now the read-only archive (`ARCHIVE_SPREADSHEET_ID`). For the current design see [`CLAUDE.md`](../CLAUDE.md) and [`docs/claude/backend-server.md`](claude/backend-server.md); for how loads arrive, [`docs/claude/load-ingestion.md`](claude/load-ingestion.md).
+
 # Plan: Migrate from Google Sheets to SQLite (Full)
 
 ## Context

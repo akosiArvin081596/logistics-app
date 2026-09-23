@@ -309,6 +309,22 @@ All three strings are set in the server environment, so you can retune them with
 
 ---
 
+## 14. Investor application (`/invest`) — the email address check
+
+**You approved this on 2026-09-23; it shipped in PR #365.** This is the public application form, not the portal, so the reader is a *prospective* investor who has not logged in yet. Step 1 now checks the email address where it is typed, using the same rule the server applies when the application is submitted (the server check came in PR #364). Before this, a mistyped address was only refused at the final submit, after every document had been signed. Continue stays grey until the address is valid, and the message appears under the Email field once the applicant moves on from it. Error messages are normally left out of this inventory (see **Not listed** above); these are here because you signed them off.
+
+| Flag | Exact text | Where / when |
+|---|---|---|
+| ⚪ | `Nice work — that's Step 1 done. Click Continue at the bottom to move on to your fleet and documents. If the button is grey, you've missed a required field (legal name, address, phone, email, or EIN/SSN), or the email address isn't valid.` | Setup guide, "Ready to continue?" card (`STEP0_REVIEW` in `client/src/wizard/data/knowledge-base.json`). **Approved 2026-09-23 (PR #365)**: the new part is the closing `, or the email address isn't valid.` |
+| ⚪ | `You're missing a required field, or the email address isn't valid. The required fields are: Legal Name, Principal Address, Phone, Email, and EIN/SSN. Fill all of them with a valid email address and the button turns blue.` | Setup guide FAQ, the answer to `Why is the Continue button grey?` (`continue_grey`, same file). **Approved 2026-09-23 (PR #365)**: adds `or the email address isn't valid` and `with a valid email address` |
+| ⚪ | `Please provide a valid email address.` | Under the Email field on Step 1, once the applicant moves on with an address that isn't valid. **Approved 2026-09-23 (PR #365)** |
+| ⚪ | `Please enter a single email address.` | Same place, when the field holds more than one address (a comma, a semicolon or a second `@`). **Approved 2026-09-23 (PR #365)** |
+| ⚪ | `That email address is too long (254 characters at most).` | Same place, for an address over 254 characters. **PENDING the owner's sign-off** — not part of the 2026-09-23 approval. It shipped in the same change and an investor is very unlikely to see it, but it is investor-facing: keep / reword / cut? |
+
+The same field errors also appear as the error pop-up if the application is submitted with a bad address, and the server answers with the same words (`POST /api/public/investor-apply`). The wording is written twice, once for the browser (`client/src/lib/emailAddress.js`) and once for the server (`lib/public-form-input.js`). `scripts/test-email-address-client.mjs` fails if the two ever differ, so any reword has to change both files.
+
+---
+
 ## The ones I'd raise first
 
 0. **§2 / §12, the loss carry-forward** — the line you actually asked about. Two things to settle: (a) **one wording**, since the same deduction is currently called three different things across the PDF, the Earnings screen and the Payouts table; and (b) whether `Payable` / `Projected payout` is the right name for the figure that lands under it. Everything else in this file can wait — this one is live in August.

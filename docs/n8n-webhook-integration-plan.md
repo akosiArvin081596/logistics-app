@@ -1,3 +1,5 @@
+> **Superseded — not the current architecture.** This is an April 2026 plan, kept for history only, to have n8n POST each load to a new `POST /webhook/n8n/load` route (gated by an `N8N_API_KEY`) so the app would do the sheet writes; neither the route nor the key was ever built. Its premise is out of date as well: `1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI` is **not** the app's source but the read-only archive (`ARCHIVE_SPREADSHEET_ID`), and the app's live sheet is the production Dispatch Management sheet `1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo` (the `SPREADSHEET_ID` fallback in `server.js`), the same one n8n writes. Today n8n still writes each load's sheet rows itself and calls the app only for rate-con extraction and distance (`POST /api/n8n/extract-pdf-via-gemini`, `POST /api/n8n/load-distance`). See [`docs/claude/load-ingestion.md`](claude/load-ingestion.md) for rate-con ingestion, [`docs/claude/backend-server.md`](claude/backend-server.md) for the routes, and [`CLAUDE.md`](../CLAUDE.md) for the rest.
+
 # Plan: n8n → LogisX API Webhook Integration
 
 ## Context

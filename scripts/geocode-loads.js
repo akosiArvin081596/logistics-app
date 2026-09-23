@@ -37,7 +37,7 @@
  * spreadsheet.
  */
 
-const BASE = process.env.LOGISX_BASE_URL || "https://logistics-app.abedubas.dev";
+const BASE = process.env.LOGISX_BASE_URL || "https://app.logisx.com";
 const COOKIE = process.argv[2];
 if (!COOKIE) {
   console.error("Usage: node scripts/geocode-loads.js <connect.sid cookie value>");
