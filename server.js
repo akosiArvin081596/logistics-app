@@ -7478,6 +7478,28 @@ const PUBLIC_APPLY_SCALAR_FIELDS = [
 	"signature", "signature_date", "cdl_front", "cdl_back", "medical_card", "city", "state", "zip",
 	"cell", "dot", "mc", "hazmat",
 ];
+// Header-only image checks and the limits every in-process image decode is held
+// to. Used from here to the end of the file: the application intake and PDF,
+// signatures, receipts and document uploads. See lib/image-size.js.
+const imageLimits = require("./lib/image-size");
+// The documents an applicant attaches. Each is optional here (the form requires
+// them) and, when present, must be a PDF or a JPEG within the pixel limit: the
+// application PDF (GET /api/applications/:id/pdf) shows exactly those two
+// without decoding them. Parsed the way that route parses them, so what is
+// accepted here is what it can show.
+const PUBLIC_APPLY_ATTACHMENT_FIELDS = ["cdl_front", "cdl_back", "medical_card"];
+function applicantAttachmentRefusal(value) {
+	if (value === undefined || value === null || value === "") return null;
+	const unreadable = (reason) => ({ ok: false, status: 415, code: imageLimits.UNSUPPORTED_IMAGE_TYPE, reason });
+	if (typeof value !== "string") return unreadable("type");
+	if (value.startsWith("data:application/pdf")) {
+		const pdf = Buffer.from(value.replace(/^data:application\/pdf;base64,/, ""), "base64");
+		return pdf.length >= 5 && pdf.toString("latin1", 0, 5) === "%PDF-" ? null : unreadable("pdf");
+	}
+	const buf = Buffer.from(value.replace(/^data:image\/\w+;base64,/, ""), "base64");
+	const verdict = imageLimits.checkImage(buf, imageLimits.LIMITS.APPLICANT_IMAGE);
+	return verdict.ok ? null : verdict;
+}
 app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 	try {
 		const { full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation, accident_history, accident_description, traffic_citations, certifications, availability, skills, reference_info, additional_info, signature, signature_date, cdl_front, cdl_back, medical_card, city, state, zip, cell, dot, mc, hazmat } = req.body;
@@ -7493,6 +7515,10 @@ app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 		const emailCheck = publicFormInput.checkPublicEmail(email);
 		if (!emailCheck.ok) {
 			return res.status(400).json({ error: emailCheck.message, code: "INVALID_EMAIL", reason: emailCheck.reason });
+		}
+		for (const field of PUBLIC_APPLY_ATTACHMENT_FIELDS) {
+			const refusal = applicantAttachmentRefusal(req.body[field]);
+			if (refusal) return res.status(refusal.status).json({ ...imageLimits.refusalBody(refusal, "attachment"), field });
 		}
 		const duplicate = db.prepare(
 			"SELECT id FROM job_applications WHERE LOWER(email) = LOWER(?) AND deleted_at IS NULL"
@@ -7992,29 +8018,11 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), async (req, res
 		// Renders each image at its NATIVE resolution (no upscaling / stretching).
 		// Small images are shown small so the reviewer can see they are low quality
 		// instead of being silently blown up into a pixelated mess.
-		const getJpegDimensions = (buf) => {
-			// Walk JPEG markers looking for SOF0/SOF2 to read native width/height.
-			// Returns { width, height } or null if unreadable.
-			if (!buf || buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) return null;
-			let i = 2;
-			while (i < buf.length) {
-				if (buf[i] !== 0xff) return null;
-				const marker = buf[i + 1];
-				if (marker === 0xc0 || marker === 0xc1 || marker === 0xc2) {
-					return { height: (buf[i + 5] << 8) | buf[i + 6], width: (buf[i + 7] << 8) | buf[i + 8] };
-				}
-				i += 2 + ((buf[i + 2] << 8) | buf[i + 3]);
-			}
-			return null;
-		};
-		const getPngDimensions = (buf) => {
-			if (!buf || buf.length < 24) return null;
-			if (buf[0] !== 0x89 || buf[1] !== 0x50 || buf[2] !== 0x4e || buf[3] !== 0x47) return null;
-			return {
-				width: (buf[16] << 24) | (buf[17] << 16) | (buf[18] << 8) | buf[19],
-				height: (buf[20] << 24) | (buf[21] << 16) | (buf[22] << 8) | buf[23],
-			};
-		};
+		//
+		// JPEG only, within the intake's pixel limit: pdfkit embeds a JPEG as it
+		// is, without decoding it. Anything else — including rows stored before
+		// the intake checked — gets a short placeholder instead of the image.
+
 		// Collect uploaded PDFs so we can merge them at the end via pdf-lib.
 		// Each entry: { label, base64 }
 		const uploadedPdfs = [];
@@ -8033,7 +8041,7 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), async (req, res
 				}
 				const data = base64.replace(/^data:image\/\w+;base64,/, "");
 				const buf = Buffer.from(data, "base64");
-				const dims = getJpegDimensions(buf) || getPngDimensions(buf);
+				const dims = imageLimits.checkImage(buf, imageLimits.LIMITS.APPLICANT_IMAGE);
 				doc.addPage();
 				doc.fontSize(14).font("Helvetica-Bold").fillColor("#0ea5e9").text(label, { align: "center" });
 				doc.moveDown(0.5);
@@ -8041,7 +8049,13 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), async (req, res
 				const BOX_W = 500;
 				const BOX_H = 600;
 				const LEFT_MARGIN = 56;
-				if (dims && dims.width > 0 && dims.height > 0) {
+				if (!dims.ok) {
+					doc.fontSize(10).font("Helvetica-Oblique").fillColor("#6b7280")
+						.text(dims.status === 413
+							? "Image omitted: it is too large to include in this document."
+							: "Image omitted: it is not a JPEG this document can include.",
+						LEFT_MARGIN, doc.y, { width: BOX_W, align: "center" });
+				} else {
 					// Scale DOWN to fit the box, never UP past the native size.
 					// scale === 1 means render at actual resolution.
 					const scale = Math.min(BOX_W / dims.width, BOX_H / dims.height, 1);
@@ -8060,9 +8074,6 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), async (req, res
 						doc.fontSize(9).font("Helvetica-Oblique").fillColor("#dc2626")
 							.text("Low-resolution upload — request a clearer photo from the applicant.", LEFT_MARGIN, doc.y, { width: BOX_W, align: "center" });
 					}
-				} else {
-					// Unknown format — fall back to fit (may scale up slightly).
-					doc.image(buf, LEFT_MARGIN, doc.y, { fit: [BOX_W, BOX_H], align: "center", valign: "center" });
 				}
 			} catch { /* skip if image is invalid */ }
 		};
@@ -8172,6 +8183,12 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 			const sigShape = publicFormInput.checkPublicScalars(sig, ["image"]);
 			if (!sigShape.ok) {
 				return res.status(400).json({ error: sigShape.message, code: "INVALID_FIELD", reason: sigShape.reason, field: `signatures.${doc.key}.image` });
+			}
+			// The signature image is decoded when the W-9 renders: checked here,
+			// with everything else, before the first write (lib/image-size.js).
+			const sigImage = imageLimits.checkSignatureImage(sig.image);
+			if (!sigImage.ok) {
+				return res.status(sigImage.status).json({ ...imageLimits.refusalBody(sigImage, "signature"), field: `signatures.${doc.key}.image` });
 			}
 			const consent = readTransmittedConsent(sig, res, { docLabel: doc.name });
 			if (!consent) return;
@@ -9010,12 +9027,21 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", address =
 		page1.drawText(signatureText, { x: 120, y: sigY, size: 10, font: fontBold, color: blue });
 		if (effectiveDate) page1.drawText(effectiveDate, { x: 460, y: sigY, size: 9, font, color: blue });
 		if (signatureImage) {
-			try {
-				const sigBytes = Buffer.from(signatureImage.replace(/^data:image\/\w+;base64,/, ""), "base64");
-				const sigImg = await pdfDoc.embedPng(sigBytes);
-				const nameW = fontBold.widthOfTextAtSize(signatureText, 10);
-				page1.drawImage(sigImg, { x: 120 + nameW + 10, y: sigY - 10, width: 120, height: 35 });
-			} catch { /* skip */ }
+			// pdf-lib decodes the PNG to embed it, so the image is checked first —
+			// type, dimensions and size, from the header (lib/image-size.js). The
+			// routes refuse an unacceptable one before rendering; this covers any
+			// caller that renders a stored signature. Skipped like any other embed
+			// failure: the typed signature above still stands.
+			const sig = imageLimits.checkSignatureImage(signatureImage);
+			if (!sig.ok) {
+				console.warn(`fillW9Form: signature image not embedded (${sig.code}: ${sig.reason})`);
+			} else {
+				try {
+					const sigImg = await pdfDoc.embedPng(sig.buffer);
+					const nameW = fontBold.widthOfTextAtSize(signatureText, 10);
+					page1.drawImage(sigImg, { x: 120 + nameW + 10, y: sigY - 10, width: 120, height: 35 });
+				} catch { /* skip */ }
+			}
 		}
 	}
 
@@ -9236,6 +9262,11 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", onboardingSignLimit
 		const sigShape = publicFormInput.checkPublicScalars(req.body, ["signatureImage"]);
 		if (!sigShape.ok) {
 			return res.status(400).json({ error: sigShape.message, code: "INVALID_FIELD", reason: sigShape.reason, field: sigShape.field });
+		}
+		// Checked before anything reads or renders it (lib/image-size.js).
+		const sigImage = imageLimits.checkSignatureImage(signatureImage);
+		if (!sigImage.ok) {
+			return res.status(sigImage.status).json(imageLimits.refusalBody(sigImage, "signature"));
 		}
 
 		const docRow = db.prepare("SELECT * FROM investor_onboarding_documents WHERE application_id = ? AND doc_key = ?").get(appId, docKey);
@@ -9944,11 +9975,20 @@ app.post("/api/public/investor-preview-pdf/:docKey", pdfPreviewLimiter, async (r
 		const { docKey } = req.params;
 		const { legal_name, dba, entity_type, address, contact_person, contact_title, phone, email, ein_ssn, years_in_operation, fleet_size, vehicles, banking, signatureText, signatureImage } = req.body;
 
+		// The signature image is decoded when the W-9 renders, so its type,
+		// dimensions and size are checked from the header first
+		// (lib/image-size.js): 413/415 before any renderer starts.
+		const sigImage = imageLimits.checkSignatureImage(signatureImage);
+		if (!sigImage.ok) {
+			return res.status(sigImage.status).json(imageLimits.refusalBody(sigImage, "signature"));
+		}
 		// signatureImage is assigned to img.src inside the Puppeteer page, so any
 		// non-data: value is a URL the SERVER fetches -- blind SSRF from an endpoint
 		// that needs no credential at all. renderPolicy() drops it defensively too,
-		// but refuse it here so a caller gets a clear 400 rather than a silently
-		// unsigned PDF, and so the render is never even started.
+		// but refuse it here so a caller gets a clear refusal rather than a silently
+		// unsigned PDF, and so the render is never even started. (The check above
+		// already refuses anything but a PNG data URI; this one also holds the
+		// base64 alphabet, and stays as the SSRF guard in its own right.)
 		if (signatureImage && !safeSignatureImage(signatureImage)) {
 			return res.status(400).json({ error: "signatureImage must be an inline base64 image data URI" });
 		}
@@ -11514,6 +11554,11 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, onboardi
 		}
 		if (!signatureText || !signatureText.trim()) {
 			return res.status(400).json({ error: "Signature is required" });
+		}
+		// Checked before anything reads or renders it (lib/image-size.js).
+		const sigImage = imageLimits.checkSignatureImage(signatureImage);
+		if (!sigImage.ok) {
+			return res.status(sigImage.status).json(imageLimits.refusalBody(sigImage, "signature"));
 		}
 		const docRow = db.prepare("SELECT * FROM onboarding_documents WHERE user_id = ? AND doc_key = ?").get(userId, docKey);
 		if (!docRow) return res.status(404).json({ error: "Document not found" });
@@ -32169,7 +32214,7 @@ const MAX_IMAGE_RECEIPT_BYTES = 20 * 1024 * 1024; // 20 MB decoded — far above
 
 // Returns { url } on success or { error, status } on refusal — the same shape as
 // savePdfReceiptToDisk() below, so the image and PDF halves of a receipt upload
-// read and fail consistently.
+// read and fail consistently. An image-limit refusal also carries `code`.
 //
 // SECURITY — this is the trust boundary, and the trusted thing is the BYTES.
 // This used to take the data-URI's MIME token straight into the on-disk file
@@ -32201,6 +32246,14 @@ function saveReceiptToDisk(photoData) {
 	const ext = sniffImageFormat(buf);
 	if (!ext || !RECEIPT_IMAGE_EXTS.has(ext)) {
 		return { error: "Receipt must be a JPEG, PNG, or WebP image", status: 400 };
+	}
+	// What is stored here is decoded later (the list thumbnail), so the pixel
+	// limit is held at the door, and an image whose dimensions cannot be read
+	// is not stored at all (lib/image-size.js).
+	const dims = imageLimits.checkImage(buf, imageLimits.LIMITS.RECEIPT_IMAGE);
+	if (!dims.ok) {
+		const body = imageLimits.refusalBody(dims, "photo");
+		return { error: body.error, code: body.code, status: dims.status };
 	}
 	const fname = `${Date.now()}-${crypto.randomBytes(6).toString("hex")}.${ext}`;
 	try {
@@ -32836,7 +32889,7 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 			wroteReceiptFile = savedPdf.url;
 		} else {
 			const savedImg = saveReceiptToDisk(photoData);
-			if (savedImg.error) return res.status(savedImg.status || 400).json({ error: savedImg.error });
+			if (savedImg.error) return res.status(savedImg.status || 400).json(savedImg.code ? { error: savedImg.error, code: savedImg.code } : { error: savedImg.error });
 			photoUrlOrPath = savedImg.url;
 			if (typeof photoData === "string" && photoData.startsWith("data:")) wroteReceiptFile = savedImg.url;
 		}
@@ -33287,7 +33340,9 @@ app.post("/api/expenses/:id/extract-details", requireRole("Super Admin", "Dispat
 // full ~283 KB originals (×150 rows ≈ 43 MB, the page's real load cost).
 // Generated on first request via jimp, cached to uploads/expense-receipts/thumbs/,
 // and revalidated by mtime. Super Admin / Dispatcher (same scope as the list).
-// Degrades to the original image on any resize error so a row never shows blank.
+// Only an image within the decode limits below gets a thumbnail; anything else
+// answers 404 (the row still opens the full receipt). A resize error on an
+// eligible image degrades to the original so that row does not show blank.
 app.get("/api/expenses/:id/receipt-thumbnail", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const id = parseInt(req.params.id, 10);
@@ -33331,9 +33386,17 @@ app.get("/api/expenses/:id/receipt-thumbnail", requireRole("Super Admin", "Dispa
 			}
 		} catch { /* stale/unreadable cache → regenerate below */ }
 
+		// Jimp decodes the whole image to make the thumbnail, so only a JPEG or
+		// PNG whose header reads, at or under the receipt OCR pixel limit, is
+		// decoded here. Anything else has no thumbnail (lib/image-size.js).
+		let source;
+		try { source = srcPath ? fs.readFileSync(srcPath) : srcBuf; } catch { return res.status(404).end(); }
+		const dims = imageLimits.checkImage(source, { types: [imageLimits.JPEG, imageLimits.PNG], maxPixels: RECEIPT_OCR_MAX_PIXELS });
+		if (!dims.ok) return res.status(404).end();
+
 		try {
 			const { Jimp } = require("jimp");
-			const img = await Jimp.read(srcPath || srcBuf);
+			const img = await Jimp.read(source);
 			img.resize({ w: 200 }); // width-constrained, aspect preserved
 			const buf = await img.getBuffer("image/jpeg", { quality: 70 });
 			try { fs.mkdirSync(THUMBS_DIR, { recursive: true }); fs.writeFileSync(thumbPath, buf); } catch { /* cache write is best-effort */ }
@@ -33346,7 +33409,7 @@ app.get("/api/expenses/:id/receipt-thumbnail", requireRole("Super Admin", "Dispa
 			// "jimp couldn't read it" and "it isn't an image" overlap exactly here.
 			console.warn("thumbnail gen failed, serving original:", genErr && genErr.message);
 			try {
-				const raw = srcPath ? fs.readFileSync(srcPath) : srcBuf;
+				const raw = source;
 				const fmt = raw ? sniffImageFormat(raw) : null;
 				if (raw && fmt) {
 					res.type(fmt === "jpg" ? "image/jpeg" : `image/${fmt}`);
@@ -33463,9 +33526,19 @@ app.post("/api/documents/scan", requireAuth, scanKitLimiter, async (req, res) =>
 });
 
 // Helper: convert image buffer(s) to PDF buffer (supports multi-page)
+//
+// JPEG only, within the document photo limits (lib/image-size.js): pdfkit embeds
+// a JPEG as it is, without decoding it. Every buffer is checked before pdfkit
+// sees any of them, and a refusal rejects with the 413/415 the upload route
+// answers. The route checks first and answers itself; this holds any other
+// caller to the same rule.
 function imageToPdf(imageBuffers) {
 	const buffers = Array.isArray(imageBuffers) ? imageBuffers : [imageBuffers];
 	return new Promise((resolve, reject) => {
+		for (const buf of buffers) {
+			const verdict = imageLimits.checkImage(buf, imageLimits.LIMITS.DOCUMENT_PHOTO);
+			if (!verdict.ok) return reject(imageLimits.refusalError(verdict, "photo"));
+		}
 		const doc = new PDFDocument({ autoFirstPage: false });
 		const chunks = [];
 		doc.on("data", (chunk) => chunks.push(chunk));
@@ -33508,42 +33581,13 @@ const RECEIPT_OCR_CHILD = path.join(__dirname, "lib", "tesseract-ocr-child.js");
 const RECEIPT_OCR_CACHE_DIR = path.join(__dirname, ".cache", "tesseract");
 const RECEIPT_OCR_LANG_PATH = "https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int";
 
-// An image's pixel dimensions, read from its header without decoding it. PNG
-// (IHDR) and JPEG (the first frame header) only — the two formats imageToPdf()
-// accepts, and so the only two that reach OCR. null when the header cannot be
-// read. Bounded: every step of the JPEG walk moves forward.
-function receiptImageSize(buf) {
-	if (!Buffer.isBuffer(buf) || buf.length < 24) return null;
-	if (buf.readUInt32BE(0) === 0x89504e47 && buf.readUInt32BE(4) === 0x0d0a1a0a) {
-		if (buf.toString("latin1", 12, 16) !== "IHDR") return null;
-		const width = buf.readUInt32BE(16), height = buf.readUInt32BE(20);
-		return width > 0 && height > 0 ? { width, height } : null;
-	}
-	if (buf[0] !== 0xff || buf[1] !== 0xd8) return null;
-	let i = 2;
-	while (i + 9 < buf.length) {
-		if (buf[i] !== 0xff) return null;                       // not at a marker: malformed
-		const marker = buf[i + 1];
-		if (marker === 0xff) { i += 1; continue; }              // fill byte
-		if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) { i += 2; continue; }   // no length
-		if (marker === 0xd9 || marker === 0xda) return null;    // image data before any frame header
-		const length = buf.readUInt16BE(i + 2);
-		if (length < 2) return null;
-		// SOF0-SOF15, except DHT (C4), JPG (C8) and DAC (CC), which share the range.
-		if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
-			const height = buf.readUInt16BE(i + 5), width = buf.readUInt16BE(i + 7);
-			return width > 0 && height > 0 ? { width, height } : null;
-		}
-		i += 2 + length;
-	}
-	return null;
-}
-
 // Why an image will not be OCR'd, or null when it will. Only a header read, so
 // it runs when the receipt is QUEUED: an image that would be skipped never
-// waits in memory for its turn.
+// waits in memory for its turn. imageLimits.imageSize() reads PNG and JPEG
+// headers only and answers null for anything else, so an image it cannot size
+// is never OCR'd (lib/image-size.js).
 function receiptOcrSkipReason(buf) {
-	const size = receiptImageSize(buf);
+	const size = imageLimits.imageSize(buf);
 	if (!size) return "image dimensions could not be read";
 	if (size.width * size.height > RECEIPT_OCR_MAX_PIXELS) {
 		return `${size.width}x${size.height} image is over the ${RECEIPT_OCR_MAX_PIXELS / 1e6} MP limit`;
@@ -37497,11 +37541,20 @@ app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, r
 				if (!isValidImageMagic(buf)) {
 					return res.status(400).json({ error: "Uploaded photo is not a recognized image format." });
 				}
+				// JPEG only, within the document photo limits, checked from the
+				// header before the converter sees it (lib/image-size.js). The app
+				// sends nothing else; 413/415 are final, so the client does not retry.
+				const verdict = imageLimits.checkImage(buf, imageLimits.LIMITS.DOCUMENT_PHOTO);
+				if (!verdict.ok) return res.status(verdict.status).json(imageLimits.refusalBody(verdict, "photo"));
 			}
 			try {
 				fileBuffer = await imageToPdf(imageBuffers);
 			} catch (pdfErr) {
-				console.error("Image-to-PDF error:", pdfErr.message);
+				// pdfkit throws plain strings for some malformed files, so log either shape.
+				console.error("Image-to-PDF error:", (pdfErr && pdfErr.message) || String(pdfErr));
+				if (pdfErr && (pdfErr.status === 413 || pdfErr.status === 415)) {
+					return res.status(pdfErr.status).json({ error: pdfErr.message, code: pdfErr.code });
+				}
 				return res.status(400).json({ error: "The photo could not be processed. Please try taking a new photo." });
 			}
 			fileName = `${safeLoadId}_${safeDocType}_${timestamp}.pdf`;
