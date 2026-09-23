@@ -18693,6 +18693,9 @@ app.post("/api/auth/setup", setupLimiter, async (req, res) => {
 		// this is the one route in the app that mints a Super Admin, and "the ID
 		// that carries admin was never chosen by the caller" is worth being
 		// explicit about rather than inheriting from a session-store setting.
+		// The live-update sockets of the session being replaced end with it,
+		// before regenerate() retires the ID they were opened on.
+		disconnectSessionSockets(req.sessionID);
 		req.session.regenerate((regenErr) => {
 			if (regenErr) {
 				console.error("setup: session regenerate failed:", regenErr.message);
@@ -18751,6 +18754,12 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 		// the request arrived with carries over. It only ever stored `user`.
 		// scripts/test-login-session-rotation.js pins this.
 		rotating = true;
+		// The live-update sockets opened on the session being replaced end with
+		// it, and so do the rooms they joined: this sign-in may be a different
+		// person, and every tab on this browser shares the cookie. Before
+		// regenerate(), while req.sessionID still names that session. See
+		// disconnectSessionSockets() and scripts/test-session-sockets.js.
+		disconnectSessionSockets(req.sessionID);
 		try {
 			await new Promise((resolve, reject) => req.session.regenerate((err) => (err ? reject(err) : resolve())));
 		} catch (regenErr) {
@@ -18818,6 +18827,10 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 
 // Logout
 app.post("/api/auth/logout", (req, res) => {
+	// This browser's live-update sockets end with its session: before destroy(),
+	// while req.sessionID still names it. Only this session. The account's other
+	// devices stay signed in, over HTTP and over their sockets alike.
+	disconnectSessionSockets(req.sessionID);
 	req.session.destroy();
 	res.json({ success: true });
 });
@@ -18888,31 +18901,80 @@ app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async 
 		const valid = await bcrypt.compare(currentPassword, row.password_hash);
 		if (!valid) return res.status(401).json({ error: "Current password is incorrect" });
 		const hash = await bcrypt.hash(newPassword, 10);
-		db.prepare("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?").run(hash, userId);
-		if (req.session.user) req.session.user.mustChangePassword = false;
 
-		// Invalidate every other session for this user. Connect-style session
-		// stores serialize the session as JSON in the `sess` column, so we use
-		// json_extract to match and delete. The current session is preserved
-		// by matching on sid; we then rotate its ID via regenerate() below.
+		// ⚠️ RE-READ AFTER THE LAST AWAIT (the house rule: no await between a check
+		// and its write). bcrypt.compare and bcrypt.hash both yielded; everything
+		// from here to regenerate() is synchronous.
+		//  - This session must still exist. A role change, password reset or delete
+		//    landing in that window revoked it (purgeUserSessions), and carrying on
+		//    would mint a fresh session for the identity just revoked. Refused with
+		//    nothing written, and destroyed so the end of the response cannot save
+		//    the in-memory copy back into the store.
+		//  - The password verified above must still be the account's password. An
+		//    admin reset, or a second submit of this form, can land in between, and
+		//    writing over it would undo that change.
+		//  - The whole row is read: the rotated session is rebuilt from it below,
+		//    never from the copy this request arrived with, which a role change in
+		//    the window would have left stale.
+		//  - Whether this was a REQUIRED change is read here, for the audit row,
+		//    because the UPDATE below clears the flag.
 		const currentSid = req.sessionID;
-		try {
-			db.prepare(
-				"DELETE FROM sessions WHERE json_extract(sess, '$.user.id') = ? AND sid != ?"
-			).run(userId, currentSid);
-		} catch (purgeErr) {
-			console.error("change-password: session purge failed:", purgeErr.message);
+		const stillLive = liveSessionIds([currentSid]);
+		if (!stillLive || !stillLive.has(currentSid)) {
+			req.session.destroy(() => {});
+			return res.status(401).json({ code: "SESSION_ENDED", error: "Your session has ended. Sign in again." });
 		}
+		const current = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+		if (!current) return res.status(404).json({ error: "User not found" });
+		if (current.password_hash !== row.password_hash) {
+			return res.status(409).json({
+				code: "PASSWORD_CHANGED_MEANWHILE",
+				error: "Your password was changed while this request was in progress. Sign in again with the new password.",
+			});
+		}
+		const requiredChange = !!current.must_change_password;
+		db.prepare("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?").run(hash, userId);
+
+		// Invalidate every other session for this user, and the live-update
+		// sockets opened on them (see purgeUserSessions(), which the role and
+		// delete routes share). The current session is spared here and rotated by
+		// regenerate() below.
+		const sessionsRevoked = purgeUserSessions(userId, currentSid);
+
+		// The rotated session is the account as it is NOW: the fields login writes,
+		// from the row re-read above, with the flag the UPDATE just cleared.
+		const freshUser = {
+			id: current.id,
+			username: current.username,
+			role: current.role,
+			driverName: current.driver_name || "",
+			email: current.email || "",
+			fullName: current.full_name || "",
+			companyName: current.company_name || "",
+			mustChangePassword: false,
+		};
+
+		// The change was not recorded anywhere before. The row says THAT the
+		// password changed, whether the change was required, and how many other
+		// sessions it signed out. Never the password, never the hash. The actor is
+		// the account as re-read, not the copy this request arrived with.
+		logAudit({ session: { user: freshUser } }, "change_password", "user", userId,
+			`Password changed${requiredChange ? " (required change)" : ""}; other sessions signed out: ${sessionsRevoked}`);
+
+		// This session's live-update sockets end with its old ID, before
+		// regenerate() retires it: a socket opened on a copied cookie must not
+		// outlive the change. The tab that asked reconnects by itself on the new
+		// cookie (useSocket re-checks the session after a server disconnect).
+		disconnectSessionSockets(currentSid);
 
 		// Rotate the current session ID so a previously captured cookie
 		// (the pre-change one) no longer authenticates.
-		const userSnapshot = { ...req.session.user };
 		req.session.regenerate((regenErr) => {
 			if (regenErr) {
 				console.error("change-password: regenerate failed:", regenErr.message);
 				return res.status(500).json({ error: "Password updated but session rotate failed. Please log out and back in." });
 			}
-			req.session.user = userSnapshot;
+			req.session.user = freshUser;
 			req.session.save(() => res.json({ success: true }));
 		});
 	} catch (err) {
@@ -19130,12 +19192,18 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 // The same gap made the standard incident response — "reset their password" —
 // useless: it left the attacker's session logged in.
 //
-// This is the purge POST /api/auth/change-password already performs; it is
-// lifted here so the three routes that can invalidate an identity all revoke it
-// the same way. Connect-style stores serialise the session as JSON in `sess`,
-// hence json_extract. Never throws — a failed purge must not turn a completed
-// role change into a 500.
+// The three routes that can invalidate an identity (a role change or password
+// reset, a delete, and POST /api/auth/change-password) all revoke it through
+// this one function. Connect-style stores serialise the session as JSON in
+// `sess`, hence json_extract. Never throws — a failed purge must not turn a
+// completed role change into a 500.
+//
+// The session copy was not the only thing trusting the old identity: a socket
+// reads its session once, at the handshake, and keeps the rooms it earned. So
+// the user's live-update sockets end here too, first, on every session but
+// the spared one (see disconnectUserSockets()).
 function purgeUserSessions(userId, exceptSid) {
+	disconnectUserSockets(userId, { exceptSid });
 	try {
 		const sql = "DELETE FROM sessions WHERE json_extract(sess, '$.user.id') = ?" + (exceptSid ? " AND sid != ?" : "");
 		const args = exceptSid ? [userId, exceptSid] : [userId];
@@ -50830,8 +50898,122 @@ app.get("*", (req, res) => {
 });
 
 // ============================================================
-// Socket.IO — Real-time messaging + live reload
+// Socket.IO — a live-update connection ends with its session
 // ============================================================
+// A socket reads its session ONCE, at the handshake (io.engine.use beside
+// sessionMiddleware), and keeps the rooms that session earned for as long as
+// the connection stays up. Ending the session used to reach only the cookie:
+// logout, a sign-in or first-time setup that replaces the session, a password
+// change, and a role change or deletion (purgeUserSessions) all left the
+// socket behind it joined to its rooms. So each of those ends the socket too,
+// and sweepSessionlessSockets() catches a session that ends any other way
+// (expiry, or a script that clears `sessions` while the server runs).
+//
+// Identity lives in socket.data = { sid, userId }, set at connection below.
+// The helpers walk io.of("/").sockets instead of joining `sid:` / `user:`
+// rooms: rooms share one namespace with the username and driver-name rooms
+// `register` joins, so an identity room could collide with a name.
+//
+// ⚠️ NAMESPACE-LEVEL socket.disconnect(), never disconnect(true). A signed-in
+// tab that opens the public tracker multiplexes /public-track onto the same
+// transport, and disconnect(true) closes the transport, taking the tracker
+// with it. Closing only the default namespace is enough because the
+// connection gate below consults the store: a CONNECT sent again over the old
+// transport presents the handshake's session object, and that session is gone.
+//
+// All synchronous, and none of them throws. They run inside the auth routes,
+// and a failure here must never turn a logout, a sign-in or a password change
+// into a 500. Being synchronous also means nothing yields between a helper and
+// the session write beside it, so no socket can connect in between.
+
+// Every default-namespace socket whose identity passes `test`.
+function socketsWhere(test) {
+	const hits = [];
+	try {
+		for (const socket of io.of("/").sockets.values()) {
+			if (test(socket.data || {})) hits.push(socket);
+		}
+	} catch (err) {
+		console.error("[sockets] could not list live-update sockets:", err.message);
+	}
+	return hits;
+}
+
+// Collected first, then closed: closing removes a socket from the map being
+// walked. Returns how many were closed.
+function endSockets(sockets) {
+	let n = 0;
+	for (const socket of sockets) {
+		try {
+			socket.disconnect();
+			n++;
+		} catch (err) {
+			console.error("[sockets] disconnect failed:", err.message);
+		}
+	}
+	return n;
+}
+
+// The sockets opened on session `sid`: every tab of the browser that holds
+// that cookie. Called BEFORE the session is destroyed or regenerated, while
+// req.sessionID still names it.
+function disconnectSessionSockets(sid) {
+	if (!sid) return 0;
+	return endSockets(socketsWhere((d) => d.sid === sid));
+}
+
+// The sockets signed in as `userId`, on any session except `exceptSid` (the
+// one a caller keeps, as purgeUserSessions() keeps it).
+function disconnectUserSockets(userId, { exceptSid = null } = {}) {
+	const uid = Number(userId);
+	if (!Number.isInteger(uid) || uid <= 0) return 0;
+	return endSockets(socketsWhere((d) => d.userId === uid && d.sid !== exceptSid));
+}
+
+// Which of `sids` the session store would still return: the row exists and has
+// not expired, SqliteStore.get()'s own test, so a socket is held to exactly
+// what an HTTP request on the same cookie is. One statement for any number of
+// IDs (json_each, so no bound-variable limit). null when the store cannot be
+// read: each caller picks its own direction for that.
+function liveSessionIds(sids) {
+	try {
+		const rows = db.prepare(
+			"SELECT sid FROM sessions WHERE sid IN (SELECT value FROM json_each(?)) AND datetime('now') < datetime(expire)"
+		).all(JSON.stringify(sids));
+		return new Set(rows.map((r) => r.sid));
+	} catch (err) {
+		console.error("[sockets] session store read failed:", err.message);
+		return null;
+	}
+}
+
+// The backstop. Every eager path above is a call someone could forget, and a
+// session can end without any of them: the store's own expiry clear, or a
+// script that clears `sessions` from a shell while the server runs. Once a
+// minute, any socket whose session the store no longer returns is closed.
+// ⚠️ FAILS OPEN on an unreadable store: a read error is not evidence that
+// every session ended, and closing every socket once a minute for as long as
+// the error lasted would take live updates down for the whole fleet.
+const SOCKET_SESSION_SWEEP_MS = 60 * 1000;
+function sweepSessionlessSockets() {
+	try {
+		const sockets = socketsWhere(() => true);
+		if (!sockets.length) return 0;
+		const sidOf = (s) => (s.data && s.data.sid) || "";
+		const live = liveSessionIds([...new Set(sockets.map(sidOf))]);
+		if (!live) return 0;
+		const n = endSockets(sockets.filter((s) => !live.has(sidOf(s))));
+		if (n) console.log(`[sockets] sweep closed ${n} live-update socket(s) whose session has ended`);
+		return n;
+	} catch (err) {
+		console.error("[sockets] sweep failed:", err.message);
+		return 0;
+	}
+}
+// unref'd: the HTTP server is what keeps the process alive, never this timer.
+const socketSessionSweepTimer = setInterval(sweepSessionlessSockets, SOCKET_SESSION_SWEEP_MS);
+if (typeof socketSessionSweepTimer.unref === "function") socketSessionSweepTimer.unref();
+
 io.on("connection", (socket) => {
 	// Auth gate: every Socket.IO connection must carry a valid session cookie.
 	// Without this, an anonymous client could `emit("register", "dispatch")`
@@ -50842,6 +51024,21 @@ io.on("connection", (socket) => {
 		socket.disconnect(true);
 		return;
 	}
+	// ...and that session must still be in the store NOW. The object above was
+	// loaded once, at the handshake, and a CONNECT sent again over the same
+	// transport after the session ended would present it unchanged (the helpers
+	// above close this namespace, not the transport). Fails CLOSED: a session
+	// the store cannot confirm is not treated as one. Closes this namespace
+	// only, like the helpers: the same transport may carry the public tracker.
+	const sid = socket.request.sessionID;
+	const live = sid ? liveSessionIds([sid]) : null;
+	if (!live || !live.has(sid)) {
+		socket.disconnect();
+		return;
+	}
+	// Who this socket is, for the helpers above.
+	socket.data.sid = sid;
+	socket.data.userId = Number(sessionUser.id) || null;
 	const role = sessionUser.role;
 	const driverNameLower = (sessionUser.driverName || "").trim().toLowerCase();
 	const usernameLower = (sessionUser.username || "").trim().toLowerCase();
@@ -50852,13 +51049,13 @@ io.on("connection", (socket) => {
 		// the database on every register: refreshPasswordChangeFlag does not run
 		// on engine requests, and the change clears the flag mid-connection.
 		// ⚠️ Deliberately NOT a disconnect at connection time. socket.io-client
-		// never retries a server-initiated disconnect and useSocket() keeps the
-		// dead socket, and the SPA can open one while forced: on a reload,
-		// App.vue shows the sidebar (whose onMounted connects) before the router
-		// has redirected to the change screen. A refused connection would leave
-		// that driver with no live updates after the change until a full reload.
-		// Refusing the join instead leaves the socket inert, and the register the
-		// next page sends after the change joins as normal.
+		// never retries a server-initiated disconnect by itself (useSocket()
+		// re-checks the session a few times, then gives up), and the SPA can open
+		// one while forced: on a reload, App.vue shows the sidebar (whose
+		// onMounted connects) before the router has redirected to the change
+		// screen. Refusing the join instead leaves the socket inert until the
+		// change, which closes it with the old session ID; the client reconnects
+		// on the new cookie, and its register joins as normal.
 		if (currentMustChangePassword(sessionUser)) return;
 		const requested = (clientName || "").trim().toLowerCase();
 		// The client passes a room name (their driver name, "dispatch",

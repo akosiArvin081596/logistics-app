@@ -46,6 +46,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
+import { useSocket } from '../../composables/useSocket'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -114,6 +115,10 @@ async function submit() {
       currentPassword: currentPassword.value,
       newPassword: newPassword.value,
     })
+    // The change closed this tab's live-update socket along with the old
+    // session. The driver app stays mounted, so no page will reconnect it:
+    // come back on the new cookie now.
+    useSocket().resume()
     success.value = true
     setTimeout(() => close(), 900)
   } catch (err) {
