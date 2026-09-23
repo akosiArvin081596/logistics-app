@@ -30432,19 +30432,17 @@ app.get("/api/loads/completed/export", requireRole("Super Admin"), exportLimiter
 		]];
 		for (const r of matched) {
 			const lid = loadIdCol ? (r[loadIdCol] || "").toString().trim() : "";
-			// Prefer the enriched "City, ST ZIP" the dashboard computed — these ARE
-			// the shared cache's row objects, so the fields are already there
-			// whenever the dashboard ran inside the 60s TTL. Otherwise derive it
-			// the same way (geocoded address first, sheet column second), and only
-			// fall back to the raw cell when nothing parses.
+			// "City, ST ZIP", derived exactly as the dashboard derives it (same
+			// column pick, geocoded address first, sheet column second), and the raw
+			// cell only when nothing parses. This used to try the dashboard's
+			// `_pickupLocation` first, off the SHARED cache's rows; routes now
+			// annotate private copies (liveJobTrackingView()), so that shortcut could
+			// never hit again — and reading another route's annotations is the
+			// coupling that let one request's writes leak into the next.
 			const pickupRaw = originAddrCol ? r[originAddrCol] : "";
 			const dropRaw = destAddrCol ? r[destAddrCol] : "";
-			const pickup = r._pickupLocation
-				|| resolveAddressParts(r, "pickup", lid, pickupRaw).cityStateZip
-				|| oneLine(pickupRaw);
-			const drop = r._dropLocation
-				|| resolveAddressParts(r, "drop", lid, dropRaw).cityStateZip
-				|| oneLine(dropRaw);
+			const pickup = resolveAddressParts(r, "pickup", lid, pickupRaw).cityStateZip || oneLine(pickupRaw);
+			const drop = resolveAddressParts(r, "drop", lid, dropRaw).cityStateZip || oneLine(dropRaw);
 			out.push([
 				lid,
 				cell(r, statusCol),

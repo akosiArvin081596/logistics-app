@@ -25,7 +25,9 @@
  *   §2 the four routes: their binding statement extracted and executed
  *   §3 SOURCE SWEEP over every getJobTrackingCached() caller in server.js — no
  *      write to the cached object, its arrays, or (by the `_x` annotation
- *      convention and by direct loops) its rows
+ *      convention and by direct loops) its rows; and no READ of a `_x`
+ *      annotation off a cached row, since only another route could have put it
+ *      there (the completed export read the dashboard's until 2026-09-23)
  *   §4 the incident, replayed: the old statement hides a cancelled load from a
  *      second reader; the view does not
  *   §5 the readers that must NOT see dropped loads now filter them themselves
@@ -271,6 +273,13 @@ function sweep(src) {
 			const allowed = ANNOTATION_ALLOW.some((a) => a.fn === fnName && m[0].startsWith(a.write.replace(/ =$/, "")));
 			if (!allowed) findings.push(`${where}: writes a \`_\` annotation (\`${m[0].trim()}\`) while holding the RAW cache — read through liveJobTrackingView()`);
 		}
+		// (e) ...nor READ one. A cached row carries only its sheet cells plus
+		// parseSheet()'s `_rowIndex`; any other `_x` on it could only have been left
+		// there by another route's write — the coupling (d) forbids. The completed
+		// export read the dashboard's `_pickupLocation` this way until 2026-09-23.
+		for (const m of t.matchAll(/\b(r|row|jtRow|loadObj|match)\._(?!rowIndex\b)[A-Za-z]\w*\b(?!\s*=(?!=))/g)) {
+			findings.push(`${where}: reads \`${m[0]}\` off a RAW cached row — no route may rely on another route's annotations`);
+		}
 	});
 	return { findings, sites };
 }
@@ -278,7 +287,8 @@ function sweep(src) {
 console.log("\n§3  source sweep — every getJobTrackingCached() caller in server.js");
 const live = sweep(SRC);
 for (const f of live.findings) console.log(`      ${f}`);
-ok("no caller writes to the shared cache, its arrays or its rows", live.findings.length === 0);
+ok("no caller writes to the shared cache, its arrays or its rows — or reads another route's annotations off them",
+	live.findings.length === 0);
 const kinds = live.sites.reduce((a, s) => ((a[s.kind] = (a[s.kind] || 0) + 1), a), {});
 ok(`found the callers (${live.sites.length}: ${kinds.raw || 0} raw, ${kinds.view || 0} view, ${kinds.prime || 0} prime) — ` +
 	"a sweep that finds nothing proves nothing", live.sites.length >= 25 && (kinds.view || 0) === 4);
@@ -402,6 +412,11 @@ ok("MUTANT a write to a cached row in a forEach callback: flagged",
 	sweep(injectAfterGeoRead("\n\tjt.data.forEach((r) => { r[\"Driver\"] = \"\"; });")).findings.some((f) => /CACHED ROW \(r\)/.test(f)));
 ok("MUTANT a `_x` annotation in a raw-cache function: flagged",
 	sweep(injectAfterGeoRead("\n\tconst m = jt.data[0]; if (m) m._touched = 1;")).findings.some((f) => /_touched/.test(f)));
+const EXPORT_PICKUP = 'const pickup = resolveAddressParts(r, "pickup", lid, pickupRaw).cityStateZip';
+ok("(export anchor present)", SRC.includes(EXPORT_PICKUP));
+ok("MUTANT the completed export reading the dashboard's `r._pickupLocation` again: flagged",
+	sweep(SRC.replace(EXPORT_PICKUP, 'const pickup = r._pickupLocation || resolveAddressParts(r, "pickup", lid, pickupRaw).cityStateZip'))
+		.findings.some((f) => /reads `r\._pickupLocation` off a RAW cached row/.test(f)));
 
 const GEO_SKIP_RE = /\n\tif \(getDeletedLoadIds\(\)\.has\([^\n]+\n/;
 ok("(geofence mutation anchor present)", GEO_SKIP_RE.test(GEO_SRC));
