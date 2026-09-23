@@ -35,28 +35,3 @@ Client ask (2026-08-07), verbatim: *"the 449 miles to empty — we need to write
 - **Everything above is inert until the sweep runs.** `mpgSource:'receipts'` and `rangeBasis:'measured'` both need a populated `fuel_events`, i.e. `FUEL_EVENTS_ENABLED=true` in prod. With the sweep off, #33 reads the original **449**; with it on, 348 point / **164 planning**.
 
 **Truck resolution for the fuel endpoints** (`resolveTruckForDriverName()`, beside `/api/fuel/range`) deliberately closes two divergences that both read to a user as "the app says I have no fuel data": (a) **source** — `/api/fuel/range` historically read only the active `truck_assignments` row while `/api/driver/:driverName` reads `trucks.assigned_driver`; `assignDriverToTruck()` writes both, but the helper now falls back to `assigned_driver` exactly as the truck-document guard does "in case the history table lags"; (b) **name matching** — it used SQL `TRIM(LOWER(...))` while every other driver path uses `normalizeDriverName()`, which *also* collapses internal whitespace. SQLite has no regex replace, so the collapse can't live in SQL: the helper reads the active rows (fleet-sized) and compares in JS. Both are strictly **widening** — every name/truck that matched before still matches — so Dispatcher/Super Admin results only ever improve. Applied to **both** the Driver and the dispatch path on purpose: fixing only one half would recreate the divergence in the other direction (driver sees fuel, dispatch doesn't).
-- `GET /api/weather` — weather data for coordinates
-
-**Admin tools**:
-- `GET /api/admin/audit-trail` — view audit log
-- `PUT /api/admin/fix-driver-name` — rename driver across all sheets
-- `GET /api/admin/scan-duplicates` — find duplicate rows in sheets
-- `GET /api/admin/scan-driver-mismatches` — find driver name inconsistencies
-- `GET /api/admin/scan-orphans` — find orphaned data
-- `GET /api/admin/scan-stale-locations` — find stale GPS locations
-- `POST /api/admin/fix-stale-locations` — clean up stale locations
-- `POST /api/admin/remove-rows` — batch remove rows from sheets
-- `GET /api/archive`, `GET /api/archive/tabs` — view archived sheet data
-
-**Database admin** (Super Admin only):
-- `POST /api/db/download` — export the SQLite database file. **POST, not GET, and the verb IS the control** — a GET returns 405 (`app.all` method guard, so it can't fall through to the SPA catch-all and answer index.html + 200). `SameSite=Lax` withholds the session cookie from every cross-site POST but **not** from a top-level cross-site GET *navigation*, so as a GET one link a Super Admin followed ran a full ~313 MB `db.backup()` and landed a complete unencrypted copy of every SSN/EIN/routing/account number in their Downloads folder. `refuseCrossOrigin` did **not** cover that: it allows `Sec-Fetch-Site: none`, which is exactly what a bookmark, an address-bar paste and a link opened from Slack/Outlook/Mail/Teams all send — and with no UI caller anywhere in `client/`, `none` was also the route's *only* legitimate browser shape, so it could not simply be refused. Carries `refuseCrossOriginStrict` (same-origin, **no** CORS-allowlist escape, **refuses `none`**, audits every refusal as `db_export_blocked` — never purged). Export via `curl -X POST` (recipe in `docs/manual/technical/06-operations.md`); a Super-Admin-only SPA button is the open follow-up.
-- `GET /api/db/tables` — list all tables
-- `GET /api/db/query/:table` — query a table
-
-**Auth & users**:
-- `GET /api/auth/setup-check`, `POST /api/auth/setup`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/session`
-- `GET /api/users`, `POST /api/users`, `PUT /api/users/:id`, `DELETE /api/users/:id`
-- `PUT /api/users/:id/rating` — rate a user
-- `/api/load-ratings/*` — per-load driver ratings
-- `GET /api/users/investors` — list users with Investor role
-
