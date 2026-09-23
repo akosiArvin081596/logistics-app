@@ -5223,6 +5223,8 @@ function sheetRowsCarryingLoad(headers, rows, loadId) {
 // full-tab read costs n8n nothing. Observes only — reads, logs, audits; never
 // writes the sheet, never touches the response. Never throws.
 async function ingestDuplicateTripwire(loadId) {
+	// No load id, nothing to count — and no reason to spend a full-tab read.
+	if (!normLoadKey(loadId)) return;
 	try {
 		const sheets = await getSheets();
 		const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
