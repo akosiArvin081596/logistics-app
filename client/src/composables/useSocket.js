@@ -1,44 +1,111 @@
 import { ref } from 'vue'
 import { io } from 'socket.io-client'
+// Explicit .js: stores/auth.js imports this module, and scripts/test-session-check.mjs
+// loads that store under plain Node, which (unlike Vite) will not guess an extension.
+import { useApi } from './useApi.js'
+import { OUTCOME, classifySessionAttempt } from '../lib/sessionCheck.js'
 
 // One socket for the whole app, opened by the first component that calls
 // connect(). scripts/test-socket-session-client.mjs drives this module.
 let socket = null
 let registeredName = null
+// Every listener a component has added with on() and not yet removed with
+// off(), in order. A socket opened by a reconnect is a new object: the pages
+// still mounted added theirs to the old one, so each is attached to every
+// socket opened here. Otherwise the new socket would join its rooms and
+// deliver to nobody. Components pair on() with off() on unmount.
+const listeners = []
 
 const isConnected = ref(false)
 const hasEverConnected = ref(false)
 
+// When the server closes the socket it has ended the session the socket was
+// opened on, and socket.io never reconnects after that by itself. But this
+// browser may still be signed in on a NEW session: this tab changed its
+// password, or another tab signed in again. So ask, and reconnect only on a yes.
+// Bounded: three checks, then stop, so a server that keeps closing the socket
+// is never answered with a reconnect loop.
+const RECONNECT_DELAYS_MS = [1000, 3000, 10000]
+// A socket that stays up this long has proved its session good: a later close
+// starts again from the first delay.
+const STABLE_AFTER_MS = 30000
+let reconnectAttempt = 0
+let reconnectTimer = null
+let stableTimer = null
+// Bumped by disconnect(). A check scheduled before it answers for a socket life
+// that has ended, and must do nothing.
+let lifeGen = 0
+
+const api = useApi()
+
+// One GET /api/auth/session, classified by the same rules the auth store's own
+// session check uses (only a 401 or `authenticated: false` means signed out).
+async function checkSession() {
+  try {
+    return classifySessionAttempt({ data: await api.get('/api/auth/session', { timeout: 10000 }) })
+  } catch (error) {
+    return classifySessionAttempt({ error })
+  }
+}
+
+function scheduleReconnect() {
+  clearTimeout(reconnectTimer)
+  reconnectTimer = null
+  if (reconnectAttempt >= RECONNECT_DELAYS_MS.length) {
+    registeredName = null // given up: nothing will re-register it
+    return
+  }
+  const gen = lifeGen
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null
+    if (gen !== lifeGen || socket) return // ended, or a page has opened one since
+    const outcome = await checkSession()
+    if (gen !== lifeGen || socket) return
+    if (outcome === OUTCOME.AUTHENTICATED) openSocket() // re-registers on 'connect'
+    else if (outcome === OUTCOME.SIGNED_OUT) registeredName = null // stay down
+    else scheduleReconnect() // no answer: ask again, within the same budget
+  }, RECONNECT_DELAYS_MS[reconnectAttempt++])
+}
+
+function openSocket() {
+  const s = io({ transports: ['websocket', 'polling'] })
+  socket = s
+  // Every handler checks it still belongs to the CURRENT socket: a socket that
+  // was replaced can still deliver a late event, and it must not mark the new
+  // one connected or disconnected, or drop it.
+  s.on('connect', () => {
+    if (socket !== s) return
+    isConnected.value = true
+    hasEverConnected.value = true
+    if (registeredName) s.emit('register', registeredName)
+    clearTimeout(stableTimer)
+    stableTimer = setTimeout(() => {
+      if (socket === s && s.connected) reconnectAttempt = 0
+    }, STABLE_AFTER_MS)
+  })
+  s.on('disconnect', (reason) => {
+    if (socket !== s) return
+    isConnected.value = false
+    clearTimeout(stableTimer)
+    stableTimer = null
+    // The server ended this socket together with its session: a logout, a new
+    // sign-in on this browser, a password change or role change, or expiry.
+    // Drop it (keeping connect() a no-op would strand the page) and ask whether
+    // this browser is still signed in. Any other reason (network, a server
+    // restart) is a transport drop, which socket.io reconnects by itself,
+    // re-registering on 'connect' above.
+    if (reason === 'io server disconnect') {
+      socket = null
+      scheduleReconnect()
+    }
+  })
+  for (const [event, callback] of listeners) s.on(event, callback)
+}
+
 export function useSocket() {
   function connect() {
     if (socket) return
-    const s = io({ transports: ['websocket', 'polling'] })
-    socket = s
-    // Every handler checks it still belongs to the CURRENT socket: a socket that
-    // was replaced can still deliver a late event, and it must not mark the new
-    // one connected or disconnected, or drop it.
-    s.on('connect', () => {
-      if (socket !== s) return
-      isConnected.value = true
-      hasEverConnected.value = true
-      if (registeredName) s.emit('register', registeredName)
-    })
-    s.on('disconnect', (reason) => {
-      if (socket !== s) return
-      isConnected.value = false
-      // The server ended this socket together with its session: a logout, a new
-      // sign-in on this browser, a password change or role change made
-      // elsewhere, or expiry. socket.io never reconnects after this one, so
-      // keeping it would make connect() a no-op for the rest of the page. Drop
-      // it, and the room name it registered: the next connect() opens a fresh
-      // socket on whatever the cookie holds by then. Any other reason (network,
-      // a server restart) is a transport drop, which socket.io reconnects by
-      // itself, re-registering on 'connect' above.
-      if (reason === 'io server disconnect') {
-        socket = null
-        registeredName = null
-      }
-    })
+    openSocket()
   }
 
   function register(name) {
@@ -51,23 +118,33 @@ export function useSocket() {
   }
 
   function on(event, callback) {
+    listeners.push([event, callback])
     socket?.on(event, callback)
   }
 
+  // Removes one registration, as socket.io's own off() does.
   function off(event, callback) {
+    const i = listeners.findIndex(([e, cb]) => e === event && cb === callback)
+    if (i >= 0) listeners.splice(i, 1)
     socket?.off(event, callback)
   }
 
   // Ends this socket's life: logout, a new sign-in, or a view leaving. The room
   // name goes with it, or the next connect() would register it again for
-  // whoever signs in next. Cleared before the socket is closed, so its own
-  // disconnect event finds it already replaced.
+  // whoever signs in next, and so does any pending reconnect. Cleared before
+  // the socket is closed, so its own disconnect event finds it already replaced.
   function disconnect() {
     const s = socket
     socket = null
     registeredName = null
     isConnected.value = false
     hasEverConnected.value = false
+    lifeGen++
+    reconnectAttempt = 0
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+    clearTimeout(stableTimer)
+    stableTimer = null
     s?.disconnect()
   }
 

@@ -18225,15 +18225,28 @@ app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async 
 		const hash = await bcrypt.hash(newPassword, 10);
 
 		// ⚠️ RE-READ AFTER THE LAST AWAIT (the house rule: no await between a check
-		// and its write). `row` was read before bcrypt.compare and bcrypt.hash both
-		// yielded; everything from this read to regenerate() is synchronous.
+		// and its write). bcrypt.compare and bcrypt.hash both yielded; everything
+		// from here to regenerate() is synchronous.
+		//  - This session must still exist. A role change, password reset or delete
+		//    landing in that window revoked it (purgeUserSessions), and carrying on
+		//    would mint a fresh session for the identity just revoked. Refused with
+		//    nothing written, and destroyed so the end of the response cannot save
+		//    the in-memory copy back into the store.
 		//  - The password verified above must still be the account's password. An
 		//    admin reset, or a second submit of this form, can land in between, and
-		//    writing over it would undo that change, while the purge below signed
-		//    out the session it had just created.
+		//    writing over it would undo that change.
+		//  - The whole row is read: the rotated session is rebuilt from it below,
+		//    never from the copy this request arrived with, which a role change in
+		//    the window would have left stale.
 		//  - Whether this was a REQUIRED change is read here, for the audit row,
 		//    because the UPDATE below clears the flag.
-		const current = db.prepare("SELECT password_hash, must_change_password FROM users WHERE id = ?").get(userId);
+		const currentSid = req.sessionID;
+		const stillLive = liveSessionIds([currentSid]);
+		if (!stillLive || !stillLive.has(currentSid)) {
+			req.session.destroy(() => {});
+			return res.status(401).json({ code: "SESSION_ENDED", error: "Your session has ended. Sign in again." });
+		}
+		const current = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
 		if (!current) return res.status(404).json({ error: "User not found" });
 		if (current.password_hash !== row.password_hash) {
 			return res.status(409).json({
@@ -18243,33 +18256,47 @@ app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async 
 		}
 		const requiredChange = !!current.must_change_password;
 		db.prepare("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?").run(hash, userId);
-		if (req.session.user) req.session.user.mustChangePassword = false;
 
 		// Invalidate every other session for this user, and the live-update
 		// sockets opened on them (see purgeUserSessions(), which the role and
 		// delete routes share). The current session is spared here and rotated by
 		// regenerate() below.
-		const currentSid = req.sessionID;
 		const sessionsRevoked = purgeUserSessions(userId, currentSid);
+
+		// The rotated session is the account as it is NOW: the fields login writes,
+		// from the row re-read above, with the flag the UPDATE just cleared.
+		const freshUser = {
+			id: current.id,
+			username: current.username,
+			role: current.role,
+			driverName: current.driver_name || "",
+			email: current.email || "",
+			fullName: current.full_name || "",
+			companyName: current.company_name || "",
+			mustChangePassword: false,
+		};
 
 		// The change was not recorded anywhere before. The row says THAT the
 		// password changed, whether the change was required, and how many other
-		// sessions it signed out. Never the password, never the hash.
-		logAudit(req, "change_password", "user", userId,
+		// sessions it signed out. Never the password, never the hash. The actor is
+		// the account as re-read, not the copy this request arrived with.
+		logAudit({ session: { user: freshUser } }, "change_password", "user", userId,
 			`Password changed${requiredChange ? " (required change)" : ""}; other sessions signed out: ${sessionsRevoked}`);
+
+		// This session's live-update sockets end with its old ID, before
+		// regenerate() retires it: a socket opened on a copied cookie must not
+		// outlive the change. The tab that asked reconnects by itself on the new
+		// cookie (useSocket re-checks the session after a server disconnect).
+		disconnectSessionSockets(currentSid);
 
 		// Rotate the current session ID so a previously captured cookie
 		// (the pre-change one) no longer authenticates.
-		const userSnapshot = { ...req.session.user };
 		req.session.regenerate((regenErr) => {
 			if (regenErr) {
 				console.error("change-password: regenerate failed:", regenErr.message);
 				return res.status(500).json({ error: "Password updated but session rotate failed. Please log out and back in." });
 			}
-			req.session.user = userSnapshot;
-			// This browser keeps its live updates: the tabs on this cookie follow it
-			// to the new ID rather than being swept as orphans of the old one.
-			moveSessionSockets(currentSid, req.sessionID);
+			req.session.user = freshUser;
 			req.session.save(() => res.json({ success: true }));
 		});
 	} catch (err) {
@@ -50224,16 +50251,6 @@ function disconnectUserSockets(userId, { exceptSid = null } = {}) {
 	return endSockets(socketsWhere((d) => d.userId === uid && d.sid !== exceptSid));
 }
 
-// Re-point the sockets of `fromSid` at `toSid`. POST /api/auth/change-password
-// rotates the ID of the session that asked, and the tabs on that cookie follow
-// it: they stay connected instead of being swept as orphans of the old ID.
-function moveSessionSockets(fromSid, toSid) {
-	if (!fromSid || !toSid || fromSid === toSid) return 0;
-	const hits = socketsWhere((d) => d.sid === fromSid);
-	for (const socket of hits) socket.data.sid = toSid;
-	return hits.length;
-}
-
 // Which of `sids` the session store would still return: the row exists and has
 // not expired, SqliteStore.get()'s own test, so a socket is held to exactly
 // what an HTTP request on the same cookie is. One statement for any number of
@@ -50313,13 +50330,13 @@ io.on("connection", (socket) => {
 		// the database on every register: refreshPasswordChangeFlag does not run
 		// on engine requests, and the change clears the flag mid-connection.
 		// ⚠️ Deliberately NOT a disconnect at connection time. socket.io-client
-		// never retries a server-initiated disconnect (useSocket() drops such a
-		// socket, and nothing opens another until a page calls connect() again),
-		// and the SPA can open one while forced: on a reload, App.vue shows the
-		// sidebar (whose onMounted connects) before the router has redirected to
-		// the change screen. Refusing the join instead leaves the socket inert,
-		// the change moves it to the new session ID (moveSessionSockets), and the
-		// register the next page sends after the change joins as normal.
+		// never retries a server-initiated disconnect by itself (useSocket()
+		// re-checks the session a few times, then gives up), and the SPA can open
+		// one while forced: on a reload, App.vue shows the sidebar (whose
+		// onMounted connects) before the router has redirected to the change
+		// screen. Refusing the join instead leaves the socket inert until the
+		// change, which closes it with the old session ID; the client reconnects
+		// on the new cookie, and its register joins as normal.
 		if (currentMustChangePassword(sessionUser)) return;
 		const requested = (clientName || "").trim().toLowerCase();
 		// The client passes a room name (their driver name, "dispatch",

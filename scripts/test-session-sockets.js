@@ -15,18 +15,23 @@
  *      sign-in closes nothing; the new session's socket joins its own rooms
  *   §3 purgeUserSessions() (role change, password reset, delete) closes the
  *      user's sockets on every session but the spared one, and nobody else's
- *   §4 CHANGE-PASSWORD closes the account's other sessions' sockets, keeps
- *      every tab of this browser connected on the NEW session ID (so the sweep
- *      leaves them), and the register sent after the change joins; it writes
- *      one change_password audit row saying whether the change was required
- *      and how many sessions it signed out, with no password and no hash in
- *      it; and a password changed underneath the request (after its last
- *      await) is answered 409 rather than overwritten
+ *   §4 CHANGE-PASSWORD closes the sockets of every session of the account,
+ *      this browser's old one included (a socket must not outlive the cookie
+ *      it was opened on), and a socket on the NEW cookie is accepted and joins;
+ *      the rotated session carries the fields login writes; it writes one
+ *      change_password audit row saying whether the change was required and
+ *      how many sessions it signed out, with no password and no hash in it
+ *   §4b AFTER ITS LAST AWAIT, change-password re-reads everything it trusts:
+ *      a session revoked in the bcrypt window (a demotion does that) is
+ *      refused 401 with nothing written and nothing saved back; a role changed
+ *      in the window reaches the rotated session, and its socket's rooms; a
+ *      password changed in the window is answered 409, not overwritten
  *   §5 THE SWEEP closes sockets whose session row is gone or expired, leaves
  *      live ones, and closes NOTHING when the store cannot be read
  *   §6 THE CONNECTION GATE: a CONNECT sent again over the old transport after
  *      the session ended presents the handshake's session object, and is
- *      refused because the store no longer has that session
+ *      refused because the store no longer has that session; and when the
+ *      store cannot be read at all, the gate refuses (fails CLOSED)
  *   §7 THE PUBLIC TRACKER (/public-track, no session) is untouched by all of
  *      it, including when it shares the signed-in tab's transport
  *   §8 SOURCE pins (comment-stripped): each call sits before the session write
@@ -151,7 +156,6 @@ const HELPER_HEADS = [
 	"function endSockets(sockets) {",
 	"function disconnectSessionSockets(sid) {",
 	"function disconnectUserSockets(userId, { exceptSid = null } = {}) {",
-	"function moveSessionSockets(fromSid, toSid) {",
 	"function liveSessionIds(sids) {",
 	"function sweepSessionlessSockets() {",
 ];
@@ -267,7 +271,7 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 	io.engine.use(sessionMiddleware); // where server.js mounts it
 
 	const helpers = new Function("io", "db",
-		`${sources.helpers}\nreturn { socketsWhere, endSockets, disconnectSessionSockets, disconnectUserSockets, moveSessionSockets, liveSessionIds, sweepSessionlessSockets };`)(io, db);
+		`${sources.helpers}\nreturn { socketsWhere, endSockets, disconnectSessionSockets, disconnectUserSockets, liveSessionIds, sweepSessionlessSockets };`)(io, db);
 	io.on("connection", new Function("currentMustChangePassword", "liveSessionIds", `return (${sources.ioHandler});`)(
 		flags.currentMustChangePassword, helpers.liveSessionIds));
 	const LOAD_ID_RE = new Function(`${LOAD_ID_RE_SRC}\nreturn LOAD_ID_RE;`)();
@@ -286,8 +290,8 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 		app, passThrough, db, bcryptImpl, () => false, "", () => false, logAudit, stampLastLogin, helpers.disconnectSessionSockets);
 	new Function("app", "disconnectSessionSockets", sources.logout)(app, helpers.disconnectSessionSockets);
 	new Function("app", SESSION_ROUTE_SRC)(app);
-	new Function("app", "requireAuth", "changePasswordLimiter", "db", "bcrypt", "purgeUserSessions", "logAudit", "moveSessionSockets", sources.change)(
-		app, requireAuth, passThrough, db, bcryptImpl, purgeUserSessions, logAudit, helpers.moveSessionSockets);
+	new Function("app", "requireAuth", "changePasswordLimiter", "db", "bcrypt", "purgeUserSessions", "logAudit", "liveSessionIds", "disconnectSessionSockets", sources.change)(
+		app, requireAuth, passThrough, db, bcryptImpl, purgeUserSessions, logAudit, helpers.liveSessionIds, helpers.disconnectSessionSockets);
 
 	server.listen(0, "127.0.0.1");
 	await once(server, "listening");
@@ -350,6 +354,14 @@ const signSid = (sid) => `${sid}.${crypto.createHmac("sha256", SECRET).update(si
 const cookieFor = (sid) => `connect.sid=${encodeURIComponent("s:" + signSid(sid))}`;
 const storeSet = (store, sid, sess) => new Promise((resolve, reject) => store.set(sid, sess, (err) => (err ? reject(err) : resolve())));
 const cookieShape = () => ({ originalMaxAge: 86400000, expires: new Date(Date.now() + 86400000).toISOString(), httpOnly: true, path: "/" });
+// The user object stored under `sid`, or undefined when there is no such row.
+function storedUser(db, sid) {
+	const row = db.prepare("SELECT sess FROM sessions WHERE sid = ?").get(sid);
+	return row ? (JSON.parse(row.sess).user || null) : undefined;
+}
+const sessionsOf = (db, userId) =>
+	db.prepare("SELECT sid FROM sessions WHERE json_extract(sess, '$.user.id') = ?").all(userId).map((r) => r.sid);
+const changeAudits = (db) => db.prepare("SELECT * FROM audit_trail WHERE action = 'change_password'").all();
 
 // ── sockets ─────────────────────────────────────────────────────────────────
 function waitFor(emitter, event, ms = 2000) {
@@ -495,6 +507,7 @@ const SCENARIOS = {
 				const here = await login(w, "carol", PW.carol);
 				const there = await login(w, "carol", PW.carol);
 				const bystander = await login(w, "alice", PW.alice);
+				const shapeAtLogin = Object.keys(storedUser(w.db, sidOf(here.cookie)) || {}).sort().join();
 				const t1 = await connectTab(w, here.cookie);
 				const t2 = await connectTab(w, here.cookie);
 				const o = await connectTab(w, there.cookie);
@@ -502,17 +515,22 @@ const SCENARIOS = {
 				const r = await changePassword(w, here.cookie, PW.carol, NEW_PW);
 				const newSid = sidOf(r.cookie);
 				const answered = r.status === 200 && !!newSid && newSid !== sidOf(here.cookie);
+				// Every socket of the old cookie goes, the asking tab's included: one
+				// opened on a copied cookie must not survive the change.
+				p.changeClosesThisSessionsSockets = answered && (await closedByServer(w, t1)) && (await closedByServer(w, t2));
 				p.changeClosesOtherDevices = answered && (await closedByServer(w, o));
-				p.changeKeepsThisBrowser = answered && isOpen(w, t1) && isOpen(w, t2) && t1.s.connected && t2.s.connected;
-				p.changeMovesToNewSession = answered && [t1, t2].every((t) => { const ss = serverSocket(w, t); return !!ss && ss.data.sid === newSid; });
 				p.changeSparesOtherUsers = isOpen(w, sa);
-				w.helpers.sweepSessionlessSockets();
-				p.changeSurvivesSweep = answered && isOpen(w, t1) && isOpen(w, t2);
-				// The register the next page sends joins, now that the flag is clear.
-				p.changeThenRegisterJoins = (await joins(w, t1, "dispatch", "dispatch")) &&
-					(await receives(t1.s, "location-update", () => w.io.to("dispatch").emit("location-update", { lat: 2 })));
+				// The asking tab comes back on the NEW cookie (the client reconnects by
+				// itself once the server closed its socket): accepted, and it joins now
+				// that the flag is clear.
+				const back = answered ? await connectTab(w, r.cookie) : null;
+				p.changeNewCookieSocketJoins = !!back && isOpen(w, back) && (await joins(w, back, "dispatch", "dispatch")) &&
+					(await receives(back.s, "location-update", () => w.io.to("dispatch").emit("location-update", { lat: 2 })));
 				const s = await request(w.port, "GET", "/api/auth/session", { cookie: r.cookie });
-				p.changeNewCookieIsLive = !!s.json && s.json.authenticated === true && s.json.user.id === 3;
+				p.changeNewCookieIsLive = !!s.json && s.json.authenticated === true && s.json.user.id === 3 && s.json.user.mustChangePassword === false;
+				const rotated = answered ? storedUser(w.db, newSid) : null;
+				p.changeSessionHasLoginShape = !!rotated && Object.keys(rotated).sort().join() === shapeAtLogin &&
+					rotated.id === 3 && rotated.username === "carol" && rotated.role === "Dispatcher" && rotated.mustChangePassword === false;
 
 				const rows = w.db.prepare("SELECT * FROM audit_trail WHERE action = 'change_password'").all();
 				const row = rows.length === 1 ? rows[0] : null;
@@ -560,6 +578,86 @@ const SCENARIOS = {
 				p.concurrentChangeRefused = r.status === 409 && !!r.json && r.json.code === "PASSWORD_CHANGED_MEANWHILE" &&
 					stored === adminHash && audited === 0 && isOpen(w, o);
 			} finally { await w.close(); }
+		}
+	},
+
+	// §4b: what changes while change-password awaits bcrypt
+	async changeRace(sources, p) {
+		const demote = (db) => db.prepare("UPDATE users SET role = 'Driver', driver_name = 'Alice Driver' WHERE id = 1").run();
+		// A bcrypt whose hash() runs `during` in the window after the password is
+		// verified: the point where another request can land.
+		const racingBcrypt = (during) => ({
+			compare: (pw, h) => bcrypt.compare(pw, h),
+			hash: async (pw) => { const h = await bcrypt.hash(pw, 4); during(); return h; },
+		});
+		{
+			// Demoted the way PUT /api/users/:id does it: the role changes and every
+			// session of the account is revoked.
+			let w = null;
+			w = await startWorld({ sources, bcryptImpl: racingBcrypt(() => { demote(w.db); w.purgeUserSessions(1, null); }) });
+			try {
+				const a = await login(w, "alice", PW.alice);
+				// Flagged after this sign-in, so the flag refresh edits the session at
+				// the start of the change request: a response that saved the session
+				// would write the revoked one straight back into the store.
+				w.db.prepare("UPDATE users SET must_change_password = 1 WHERE id = 1").run();
+				const hashBefore = w.db.prepare("SELECT password_hash FROM users WHERE id = 1").get().password_hash;
+				const r = await changePassword(w, a.cookie, PW.alice, NEW_PW);
+				const hashAfter = w.db.prepare("SELECT password_hash FROM users WHERE id = 1").get().password_hash;
+				p.revokedMidChangeRefused = r.status === 401 && !!r.json && r.json.code === "SESSION_ENDED" && !r.cookie &&
+					hashAfter === hashBefore && changeAudits(w.db).length === 0;
+				p.revokedMidChangeNotSavedBack = storedUser(w.db, sidOf(a.cookie)) === undefined && sessionsOf(w.db, 1).length === 0;
+			} finally { await w.close(); }
+		}
+		{
+			// Demoted while this session survives (the role row changed, nothing was
+			// revoked): the rotated session must say what the row says NOW.
+			let w = null;
+			w = await startWorld({ sources, bcryptImpl: racingBcrypt(() => demote(w.db)) });
+			try {
+				const a = await login(w, "alice", PW.alice);
+				const r = await changePassword(w, a.cookie, PW.alice, NEW_PW);
+				const rotated = r.status === 200 && r.cookie ? storedUser(w.db, sidOf(r.cookie)) : null;
+				const sessionSaysDriver = !!rotated && rotated.role === "Driver" && rotated.driverName === "Alice Driver";
+				// ...and a socket on that cookie gets the driver's rooms, not dispatch.
+				const tab = sessionSaysDriver ? await connectTab(w, r.cookie) : null;
+				const driverRoom = !!tab && (await joins(w, tab, "dispatch", "alice driver"));
+				p.demotedMidChangeGetsNewRole = sessionSaysDriver && driverRoom && !inRoom(w, "dispatch", tab.id);
+				// The audit row records the account as it is now, not the incoming copy.
+				const audits = changeAudits(w.db);
+				p.auditActorIsTheAccountNow = r.status === 200 && audits.length === 1 && audits[0].user_id === 1 && audits[0].role === "Driver";
+			} finally { await w.close(); }
+		}
+	},
+
+	// §6: the gate when the store cannot be read. The transport is opened while
+	// the store is fine (the public tracker holds it open), THEN the store goes
+	// away, THEN the default namespace connects over that transport.
+	async gateStore(sources, p) {
+		const w = await startWorld({ sources });
+		let m = null;
+		try {
+			const a = await login(w, "alice", PW.alice);
+			m = new ioClient.Manager(`http://127.0.0.1:${w.port}`, {
+				transports: ["websocket"], reconnection: false, extraHeaders: { cookie: a.cookie },
+			});
+			const tracker = m.socket("/public-track");
+			w.clients.push(tracker);
+			if (!(await waitFor(tracker, "connect"))) throw new Error("the tracker never connected");
+			w.db.exec("ALTER TABLE sessions RENAME TO sessions_offline");
+			try {
+				const dflt = m.socket("/");
+				w.clients.push(dflt);
+				const got = await waitFor(dflt, "connect");
+				const id = dflt.id;
+				p.gateFailsClosedOnUnreadableStore = !!got && !w.io.of("/").sockets.get(id) &&
+					![...w.io.of("/").sockets.values()].some((s) => s.data && s.data.sid === sidOf(a.cookie));
+			} finally {
+				w.db.exec("ALTER TABLE sessions_offline RENAME TO sessions");
+			}
+		} finally {
+			try { if (m && m.engine) m.engine.close(); } catch { /* closed */ }
+			await w.close();
 		}
 	},
 
@@ -681,13 +779,17 @@ const PROPS = {
 	purgeSparesKeptSession: ["purge", "§3 ...but not on the session it spares"],
 	purgeSparesOtherUsers: ["purge", "§3 ...and never another user's"],
 	purgeWithNoSpareClosesAll: ["purge", "§3 with nothing spared, it must close every socket of the user"],
-	changeClosesOtherDevices: ["change", "§4 change-password must close the sockets of the account's other sessions"],
-	changeKeepsThisBrowser: ["change", "§4 ...keep every tab of this browser connected"],
-	changeMovesToNewSession: ["change", "§4 ...on the NEW session ID the change rotated to"],
+	changeClosesThisSessionsSockets: ["change", "§4 change-password must close every socket of the old cookie, the asking tab's included"],
+	changeClosesOtherDevices: ["change", "§4 ...and the sockets of the account's other sessions"],
 	changeSparesOtherUsers: ["change", "§4 ...and leave other accounts alone"],
-	changeSurvivesSweep: ["change", "§4 this browser's tabs must survive the sweep after the change (they follow the rotated ID)"],
-	changeThenRegisterJoins: ["change", "§4 the register sent after a required change must join and receive"],
-	changeNewCookieIsLive: ["change", "§4 the rotated cookie must be the live session"],
+	changeNewCookieSocketJoins: ["change", "§4 a socket on the NEW cookie must be accepted and, the flag cleared, join and receive"],
+	changeNewCookieIsLive: ["change", "§4 the rotated cookie must be the live session, with the flag cleared"],
+	changeSessionHasLoginShape: ["change", "§4 the rotated session must carry exactly the fields login writes, from the account row"],
+	revokedMidChangeRefused: ["changeRace", "§4b a session revoked while the change awaited bcrypt must be answered 401 SESSION_ENDED, with no password, cookie or audit row written"],
+	revokedMidChangeNotSavedBack: ["changeRace", "§4b ...and the revoked session must not be saved back into the store by the response"],
+	demotedMidChangeGetsNewRole: ["changeRace", "§4b a role changed while the change awaited bcrypt must reach the rotated session, and its socket must get the new role's rooms"],
+	auditActorIsTheAccountNow: ["changeRace", "§4b ...and the change_password audit row must record the account as re-read, not the incoming copy"],
+	gateFailsClosedOnUnreadableStore: ["gateStore", "§6 the connection gate must refuse when the session store cannot be read (fail CLOSED)"],
 	changeAudited: ["change", "§4 a password change must write one change_password audit row, as the account itself"],
 	auditSaysRequired: ["change", "§4 ...saying the change was required, read after the last await and before the flag is cleared"],
 	auditCountsRevoked: ["change", "§4 ...and how many other sessions it signed out"],
@@ -728,21 +830,35 @@ function sectionSource() {
 
 	const change = stripComments(SRCS.change);
 	const lastAwait = change.lastIndexOf("await ");
-	const reread = at(change, 'db.prepare("SELECT password_hash, must_change_password FROM users WHERE id = ?").get(userId)');
+	const live = at(change, "const stillLive = liveSessionIds([currentSid]);");
+	const refusal = at(change, "if (!stillLive || !stillLive.has(currentSid)) {");
+	const destroyed = at(change, "req.session.destroy(() => {});");
+	const reread = at(change, 'db.prepare("SELECT * FROM users WHERE id = ?").get(userId)');
 	const check = at(change, "if (current.password_hash !== row.password_hash)");
 	const flag = at(change, "const requiredChange = !!current.must_change_password;");
 	const update = at(change, 'db.prepare("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?")');
 	const purge = at(change, "const sessionsRevoked = purgeUserSessions(userId, currentSid);");
-	const audit = at(change, 'logAudit(req, "change_password"');
+	const audit = at(change, 'logAudit({ session: { user: freshUser } }, "change_password"');
+	const fresh = at(change, "const freshUser = {");
+	const closeOwn = at(change, "disconnectSessionSockets(currentSid);");
 	const regen = at(change, "req.session.regenerate(");
-	const assign = at(change, "req.session.user = userSnapshot;");
-	const move = at(change, "moveSessionSockets(currentSid, req.sessionID);");
+	const assign = at(change, "req.session.user = freshUser;");
 	const save = at(change, "req.session.save(");
-	ok(lastAwait > 0 && reread > lastAwait && check > reread && flag > check && update > flag,
-		"§8 change-password must re-read the account after its LAST await, refuse a changed hash, and read the required flag, all before the UPDATE");
-	ok(update < purge && purge < audit && audit < regen, "§8 ...then UPDATE → purge (sessions and their sockets) → audit → rotate");
-	ok(regen < assign && assign < move && move < save, "§8 ...and move this browser's sockets to the new ID inside the rotation, before the save");
+	ok(lastAwait > 0 && live > lastAwait && refusal > live && destroyed > refusal && reread > destroyed &&
+		check > reread && flag > check && update > flag,
+		"§8 after its LAST await, change-password must confirm its session is live (refusing and destroying otherwise), re-read the whole account row, refuse a changed hash and read the required flag, all before the UPDATE");
+	ok(update < purge && purge < fresh && fresh < audit && audit < closeOwn && closeOwn < regen,
+		"§8 ...then UPDATE → purge (other sessions and their sockets) → rebuild the session → audit (as the rebuilt account) → close this session's sockets → rotate");
+	ok(regen < assign && assign < save, "§8 ...and the rotated session is the rebuilt one, assigned inside the rotation before the save");
+	const freshSrc = fresh > 0 ? change.slice(fresh, change.indexOf("};", fresh)) : "";
+	const LOGIN_FIELDS = ["id: current.id", "username: current.username", "role: current.role", "driverName: current.driver_name",
+		"email: current.email", "fullName: current.full_name", "companyName: current.company_name", "mustChangePassword: false"];
+	ok(LOGIN_FIELDS.every((f) => freshSrc.includes(f)),
+		"§8 the rotated session is built from the re-read row, field by field, with the flag the UPDATE cleared");
+	ok(!/\.\.\.\s*req\.session\b/.test(change) && !/Object\.assign\([^)]*req\.session/.test(change),
+		"§8 ...and never copied from the session the request arrived with, which a change in the bcrypt window leaves stale");
 	ok(!/DELETE FROM sessions/.test(change), "§8 change-password must revoke through purgeUserSessions(); a hand-copied DELETE would leave the sockets up");
+	ok(!/moveSessionSockets/.test(stripComments(SRC)), "§8 no socket follows a rotated session: the old cookie's sockets are closed, never re-pointed");
 	const auditCall = change.slice(audit, change.indexOf(");", audit));
 	ok(audit > 0 && !/newPassword|currentPassword|\bhash\b|password_hash|\brow\b|\bcurrent\b/.test(auditCall),
 		"§8 the change_password audit row must be built from no password and no hash");
@@ -821,15 +937,45 @@ const MUTANTS = [
 		caughtBy: ["changeClosesOtherDevices"],
 	},
 	{
-		name: "change-password does not move this browser's sockets to the new ID",
+		name: "change-password leaves the old cookie's sockets open",
 		target: "change",
-		mutate: dropLine(/^\s*moveSessionSockets\(currentSid, req\.sessionID\);\n/m),
-		caughtBy: ["changeMovesToNewSession", "changeSurvivesSweep"],
+		mutate: dropLine(/^\s*disconnectSessionSockets\(currentSid\);\n/m),
+		caughtBy: ["changeClosesThisSessionsSockets"],
+	},
+	{
+		name: "no session check after the last await (a revoked session carries on)",
+		target: "change",
+		mutate: (s) => s.replace("if (!stillLive || !stillLive.has(currentSid)) {", "if (false) {"),
+		caughtBy: ["revokedMidChangeRefused", "revokedMidChangeNotSavedBack"],
+	},
+	{
+		name: "the 401 leaves the in-memory session to be saved back",
+		target: "change",
+		mutate: dropLine(/^\s*req\.session\.destroy\(\(\) => \{\}\);\n/m),
+		caughtBy: ["revokedMidChangeNotSavedBack"],
+	},
+	{
+		name: "the audit row's actor taken from the incoming session copy",
+		target: "change",
+		mutate: (s) => s.replace('logAudit({ session: { user: freshUser } }, "change_password"', 'logAudit(req, "change_password"'),
+		caughtBy: ["auditActorIsTheAccountNow"],
+	},
+	{
+		name: "the rotated session copied from the session the request arrived with",
+		target: "change",
+		mutate: (s) => {
+			const REGEN = "\t\treq.session.regenerate((regenErr) => {";
+			if (!s.includes(REGEN) || !s.includes("req.session.user = freshUser;")) return s;
+			return s
+				.replace(REGEN, "\t\tconst staleCopy = Object.assign({}, req.session.user, { mustChangePassword: false });\n" + REGEN)
+				.replace("req.session.user = freshUser;", "req.session.user = staleCopy;");
+		},
+		caughtBy: ["demotedMidChangeGetsNewRole"],
 	},
 	{
 		name: "change-password writes no audit row",
 		target: "change",
-		mutate: (s) => s.replace(/\n\t\tlogAudit\(req, "change_password"[\s\S]*?\);\n/, "\n"),
+		mutate: (s) => s.replace(/\n\t\tlogAudit\(\{ session: \{ user: freshUser \} \}, "change_password"[\s\S]*?\);\n/, "\n"),
 		caughtBy: ["changeAudited", "auditPlainWhenNotRequired"],
 	},
 	{
@@ -865,13 +1011,19 @@ const MUTANTS = [
 		name: "the connection handler does not record who the socket is",
 		target: "ioHandler",
 		mutate: dropLine(/^\s*socket\.data\.sid = sid;\n\s*socket\.data\.userId = [^\n]*\n/m),
-		caughtBy: ["logoutClosesSession", "purgeClosesUser", "changeMovesToNewSession", "sweepSparesLiveSession"],
+		caughtBy: ["logoutClosesSession", "purgeClosesUser", "changeClosesThisSessionsSockets", "sweepSparesLiveSession"],
 	},
 	{
 		name: "the connection gate trusts the handshake's session object (no store check)",
 		target: "ioHandler",
 		mutate: (s) => s.replace("if (!live || !live.has(sid)) {", "if (!sid) {"),
 		caughtBy: ["staleReconnectRefused"],
+	},
+	{
+		name: "the connection gate fails OPEN when the store cannot be read",
+		target: "ioHandler",
+		mutate: (s) => s.replace("if (!live || !live.has(sid)) {", "if (live && !live.has(sid)) {"),
+		caughtBy: ["gateFailsClosedOnUnreadableStore"],
 	},
 	{
 		name: "the helpers close the whole transport (disconnect(true))",
@@ -904,13 +1056,15 @@ const MUTANTS = [
 			change: (s) => s
 				.replace("const sessionsRevoked = purgeUserSessions(userId, currentSid);",
 					"const sessionsRevoked = db.prepare(\"DELETE FROM sessions WHERE json_extract(sess, '$.user.id') = ? AND sid != ?\").run(userId, currentSid).changes;")
-				.replace(/^\s*moveSessionSockets\(currentSid, req\.sessionID\);\n/m, "")
-				.replace(/\n\t\tlogAudit\(req, "change_password"[\s\S]*?\);\n/, "\n")
+				.replace(/^\s*disconnectSessionSockets\(currentSid\);\n/m, "")
+				.replace(/\n\t\tlogAudit\(\{ session: \{ user: freshUser \} \}, "change_password"[\s\S]*?\);\n/, "\n")
+				.replace("if (!stillLive || !stillLive.has(currentSid)) {", "if (false) {")
 				.replace("if (current.password_hash !== row.password_hash) {", "if (false) {"),
 		},
 		caughtBy: [
 			"logoutClosesSession", "loginClosesReplacedSession", "setupClosesReplacedSession", "purgeClosesUser",
-			"changeClosesOtherDevices", "changeSurvivesSweep", "changeAudited", "concurrentChangeRefused", "staleReconnectRefused",
+			"changeClosesThisSessionsSockets", "changeClosesOtherDevices", "changeAudited", "concurrentChangeRefused",
+			"revokedMidChangeRefused", "staleReconnectRefused",
 		],
 	},
 ];
