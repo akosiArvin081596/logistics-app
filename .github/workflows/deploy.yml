@@ -15,6 +15,10 @@ name: Deploy
 #      on, then re-verifies. A bad merge cannot leave production down waiting to
 #      be noticed.
 #
+# On a push, BOTH jobs deploy exactly the commit that triggered the run
+# (`sha: github.sha`), so production receives the very commit that staging
+# verified in the same run.
+#
 # The remote halves live in scripts/deploy/*.sh — in the repo, not inline here,
 # so both jobs share ONE reviewable copy and cannot drift apart.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -37,15 +41,35 @@ on:
 
 # ⚠️ cancel-in-progress is FALSE on purpose. Cancelling mid-flight can leave the
 # box between `git pull` and `pm2 restart`. Queue instead; a deploy is <1 min.
+#
+# ⚠️ The group is a LITERAL, and deploy-drift.yml uses the SAME one. Concurrency
+# groups are repository-wide, so this is what makes a drift heal wait for an
+# in-flight deploy (and a deploy wait for a heal) instead of running a second
+# deploy in the same directory. It was `deploy-${{ github.ref }}`, which is this
+# exact value for every push to main, so nothing changes for main. A dispatch
+# from another branch now queues too, since it touches the same box.
+#
+# ⚠️ `queue: max` (GitHub, 2026-05) keeps up to 100 runs waiting in FIFO order.
+# The default holds ONE pending run and CANCELS it when another arrives, which
+# in a group shared with deploy-drift.yml could cancel a queued deploy. The
+# trade-off: a burst of merges deploys every commit in turn rather than only the
+# last one.
+# actionlint 1.7.12 predates the key and reports it as unexpected; GitHub
+# accepts it.
 concurrency:
-  group: deploy-${{ github.ref }}
+  group: deploy-refs/heads/main
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read
 
 jobs:
   staging:
+    # ⚠️ scripts/deploy/drift-gate.js finds this job BY THIS NAME to decide
+    # whether a drift heal may deploy a commit. Rename it and every heal fails
+    # closed until drift-gate.js moves with it (scripts/test-drift-gate.js pins
+    # the two together).
     name: staging
     if: github.event_name == 'push' || github.event.inputs.target == 'staging'
     runs-on: ubuntu-latest
@@ -59,6 +83,9 @@ jobs:
           dir: /var/www/logisx-staging
           pm2: logisx-staging
           ref: ${{ github.event.inputs.ref || 'main' }}
+          # On a push: exactly the commit that triggered this run. On a manual
+          # dispatch: empty, so `ref` means what it always meant.
+          sha: ${{ github.event_name == 'push' && github.sha || '' }}
           # staging is the canary — leave a failure in place to inspect.
           rollback_on_failure: "false"
           ssh_key: ${{ secrets.VPS_SSH_KEY }}
@@ -88,6 +115,8 @@ jobs:
           dir: /var/www/logistics-app
           pm2: logistics-app
           ref: ${{ github.event.inputs.ref || 'main' }}
+          # The same commit staging just verified, never a newer one.
+          sha: ${{ github.event_name == 'push' && github.sha || '' }}
           # unattended: production must recover itself.
           rollback_on_failure: "true"
           public_url: https://app.logisx.com/api/config/maintenance
