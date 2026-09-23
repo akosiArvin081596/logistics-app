@@ -15,7 +15,10 @@
 set -uo pipefail
 : "${DIR:?}"
 BK="$DIR/backups"
-MAX_AGE_H=${MAX_AGE_H:-26}     # cron is 02:00 daily; 26h catches the first missed night
+# cron is 02:00 daily and this runs at 04:00, so after a missed night the newest
+# snapshot is ~25h59m old — 25 in the whole hours AGE_H floors to. A limit of 26
+# let that pass, and caught the miss a day late.
+MAX_AGE_H=${MAX_AGE_H:-25}
 MIN_BYTES=${MIN_BYTES:-1048576} # a real snapshot is ~68 MB gzipped
 
 cd "$BK" 2>/dev/null || { echo "BACKUP_STATE=missing"; echo "BACKUP_REASON=no backups dir at $BK"; exit 0; }
@@ -45,14 +48,18 @@ PREV_SIZE=$(stat -c %s "$PREV" 2>/dev/null || echo 0)
 LAST_RUN=$(grep -E '^\[backup\] ---- ' backup.log 2>/dev/null | tail -1 | sed 's/^\[backup\] ---- //;s/ ----$//')
 LAST_NODE=$(grep -E '^\[backup\] node: ' backup.log 2>/dev/null | tail -1 | sed 's/^\[backup\] node: //')
 LAST_BLOCK=$(awk '/^\[backup\] ---- /{buf=""} {buf=buf"\n"$0} END{print buf}' backup.log 2>/dev/null || true)
-if printf '%s' "$LAST_BLOCK" | grep -q 'backup FAILED'; then
+# backup.sh writes a failure TWO ways: "[backup] backup FAILED with exit code N"
+# when the snapshot step fails, and "[backup] FAILED: <why>" when it cannot even
+# start (no node that loads better-sqlite3, no app dir). Match both.
+FAILED_RE='\] (backup )?FAILED'
+if printf '%s' "$LAST_BLOCK" | grep -qE "$FAILED_RE"; then
 	LAST_OK=no
 elif printf '%s' "$LAST_BLOCK" | grep -q '^\[backup\] completed:'; then
 	LAST_OK=yes
 else
 	LAST_OK=unknown
 fi
-FAILS=$(grep -c 'backup FAILED' backup.log 2>/dev/null || true)
+FAILS=$(grep -cE "$FAILED_RE" backup.log 2>/dev/null || true)
 
 echo "BACKUP_NEWEST=$NEWEST"
 echo "BACKUP_AGE_HOURS=$AGE_H"

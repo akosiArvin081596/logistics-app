@@ -146,9 +146,9 @@ But the failure mode that actually hurt was never "the backup broke" — it was 
 
 | State | Meaning |
 |---|---|
-| `fresh` | newest nightly snapshot is < 26 h old, over the size floor, passes `gzip -t`, and the last scheduled run succeeded |
-| `stale` | newest snapshot is ≥ 26 h old — 02:00 cron plus 2 h slack, so the **first** missed night alarms |
-| `degraded` | snapshot is fresh but the last **scheduled** run FAILED — i.e. someone ran it by hand while cron is still broken. This was the live state on 2026-09-19 and is exactly the case a naive age check would wave through |
+| `fresh` | newest nightly snapshot is < 25 h old, over the size floor, passes `gzip -t`, and the last scheduled run succeeded |
+| `stale` | newest snapshot is ≥ 25 h old. Age is counted in whole hours, and at the 04:00 check a missed 02:00 run leaves a snapshot ~25h59m old — 25, which a 26 h limit let through for a day. At 25 the **first** missed night alarms |
+| `degraded` | snapshot is fresh but the last **scheduled** run FAILED — i.e. someone ran it by hand while cron is still broken. This was the live state on 2026-09-19 and is exactly the case a naive age check would wave through. Both of `backup.sh`'s failure lines count: `[backup] backup FAILED with exit code N` and `[backup] FAILED: <why>` |
 | `too-small` / `corrupt` | under the 1 MB floor, or `gzip -t` fails — catches a truncated write that age and size both pass |
 | `missing` | no `app.db.<date>_<time>.gz` at all. The glob deliberately matches only the dated nightly shape, so a **pinned** pre-operation snapshot in `.retention-keep` can never masquerade as a fresh one |
 

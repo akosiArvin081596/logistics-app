@@ -476,6 +476,30 @@ function sourcePins() {
 		"§7 remote-backup-check.sh never takes the deploy lock (a read-only check must not block or queue a deploy)");
 	ok(!/\bpm2\b|\bgit\b|(^|[;&|(]\s*|\s)(rm|mv|cp|truncate|tee)\s/m.test(remoteCheck),
 		"§7 remote-backup-check.sh stays read-only: no pm2, git, rm, mv, cp, truncate or tee");
+
+	// ── remote-backup-check.sh reads backup.sh's failures, all of them. backup.sh
+	// writes two shapes — "[backup] backup FAILED with exit code N" when the
+	// snapshot fails, "[backup] FAILED: <why>" when it cannot start — and the check
+	// used to grep for the first only, so a run that never started read as fine.
+	// The pattern is taken out of the script and run through real `grep -E`.
+	const failedRe = (remoteCheck.match(/^FAILED_RE='([^']+)'$/m) || [])[1];
+	ok(!!failedRe, "§7 remote-backup-check.sh names its failure pattern once (FAILED_RE)");
+	const grepCount = (line) => {
+		const r = require("child_process").spawnSync("grep", ["-cE", failedRe || "^$"], { input: `${line}\n`, encoding: "utf8" });
+		return Number(String(r.stdout).trim());
+	};
+	ok(grepCount("[backup] backup FAILED with exit code 1") === 1, "§7 the check sees '[backup] backup FAILED with exit code N'");
+	ok(grepCount("[backup] FAILED: no node on this box can load better-sqlite3") === 1, "§7 the check sees '[backup] FAILED: <why>' (a run that never started)");
+	ok(grepCount("[backup] completed: Tue Sep 23 02:03:11 UTC 2026") === 0, "§7 …and not a completed run");
+	ok((remoteCheck.match(/grep -q?c?E "\$FAILED_RE"/g) || []).length === 2,
+		"§7 both the last-run verdict and the failure count use that one pattern");
+	// Age is floored to whole hours. At the 04:00 check a missed 02:00 run is ~25h59m
+	// old (25) and the newest healthy one at most ~24 h (a check just before 02:00).
+	const maxAge = Number((remoteCheck.match(/^MAX_AGE_H=\$\{MAX_AGE_H:-(\d+)\}[ \t]*$/m) || [])[1]);
+	ok(maxAge <= Math.floor((25 * 3600 + 59 * 60) / 3600),
+		`§7 a missed night is stale at the very next 04:00 check (limit ${maxAge} h must be ≤ 25)`);
+	ok(maxAge > Math.floor((23 * 3600 + 59 * 60) / 3600) && maxAge >= 24,
+		`§7 …while a snapshot from last night never is (limit ${maxAge} h must be ≥ 24)`);
 }
 
 function mutants() {
