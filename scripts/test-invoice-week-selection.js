@@ -121,7 +121,8 @@ const SHARED_FNS = [
 ];
 const SHARED_CONSTS = [
 	"RFC2822_MONTHS", "CANCELED_STATUS_RE", "INVOICE_COMPLETED_RE", "EXPENSE_PNL_FILTER", "INVOICE_AUTOGEN_MAX_ATTEMPTS",
-	"INVOICE_UNDATED_ALERT_ENABLED", "INVOICE_UNDATED_ALERT_MAX_PER_DAY", "INVOICE_UNDATED_BASELINE_KEY",
+	"INVOICE_UNDATED_ALERT_ENABLED", "INVOICE_UNDATED_ALERT_MAX_PER_DAY", "INVOICE_UNDATED_MASS_RESOLVE",
+	"INVOICE_UNDATED_BASELINE_KEY", "INVOICE_UNDATED_PENDING_SHRINK_KEY", "INVOICE_UNDATED_STATUS_KEY",
 ];
 const ASYNC_FNS = ["generateInvoiceHandler", "runWeeklyInvoiceBatch", "runUndatedLoadAlerts", "sendUndatedLoadDigest"];
 
@@ -177,9 +178,10 @@ function buildWorld(db, opts = {}) {
 		} },
 		io: null,
 		sendEmail: async (to, subject, html) => { emails.push({ to, subject, html }); return opts.mail ? opts.mail(to, subject, html) : undefined; },
-		// The batch races each driver against a 90 s timer; a real one would hold
-		// this process open for 90 s after the last assertion.
-		setTimeout: () => 0,
+		// The batch races each driver (and the ledger) against a 90 s timer; a real
+		// one would hold this process open for 90 s after the last assertion. §7
+		// injects one that fires, to prove the ledger's race really bounds the batch.
+		setTimeout: opts.setTimeout || (() => 0),
 		console: {
 			log: (...a) => logs.push(a.join(" ")),
 			warn: (...a) => logs.push(a.join(" ")),
@@ -768,6 +770,7 @@ function oldImpl(db) {
 		row({ "Load ID": "8007", "Job Status": "POD Received" }),
 	];
 	const newLoad = (fields) => row({ Driver: "Una Undated", "Job Status": "Delivered", ...fields });
+	const dated = (r) => ({ ...r, "Status Update Date": "9/24/2026 10:00:00" });
 	const RANGE = { weekStart: WS, weekEnd: WE };
 	const ledgerDb = () => {
 		const db = freshDb();
@@ -775,11 +778,16 @@ function oldImpl(db) {
 		return db;
 	};
 	const ledgerKeys = (db) => db.prepare("SELECT load_key FROM invoice_undated_alerts ORDER BY load_key").all().map((r) => r.load_key);
+	const openLedgerKeys = (db) => db.prepare("SELECT load_key FROM invoice_undated_alerts WHERE resolved_at IS NULL ORDER BY load_key").all().map((r) => r.load_key);
 	const ledgerRow = (db, key) => db.prepare("SELECT * FROM invoice_undated_alerts WHERE load_key = ?").get(key) || {};
-	const baselineOf = (w, db) => db.prepare("SELECT value FROM server_state WHERE key = ?").get(w.INVOICE_UNDATED_BASELINE_KEY) || null;
+	const stateOf = (db, key) => { const r = db.prepare("SELECT value FROM server_state WHERE key = ?").get(key); return r ? JSON.parse(r.value) : null; };
+	const baselineOf = (w, db) => stateOf(db, w.INVOICE_UNDATED_BASELINE_KEY);
+	const statusOf = (w, db) => stateOf(db, w.INVOICE_UNDATED_STATUS_KEY) || {};
+	const pendingShrinkOf = (w, db) => stateOf(db, w.INVOICE_UNDATED_PENDING_SHRINK_KEY);
 	const digestNotes = (w) => w.notes.filter((n) => n[0] === "invoices-undated");
 	const digestEmails = (w) => w.emails.filter((e) => / no weekly invoice will bill$/.test(e.subject));
 	const digestIds = (note) => (note ? JSON.parse(note[3]).loadIds : null);
+	const isIso = (s) => typeof s === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(s);
 	const ledgerWorld = (src, opts = {}) => {
 		const db = ledgerDb();
 		return { db, w: buildWorld(db, { src, sheetValues: toValues(U), mail: () => true, quiet: true, ...opts }) };
@@ -796,7 +804,8 @@ function oldImpl(db) {
 			["detect: exactly the loads no invoice can place — '#8001'/'8001' once, 8003, 8007", found.loads.map((l) => l.key), ["8001", "8003", "8007"]],
 			["detect: a DATED copy of the load wins, even one above the undated row (8002)", found.loads.some((l) => l.key === "8002"), false],
 			["detect: …a copy the deduplicated cache cannot show (it keeps the undated row)", fromCache.loads.some((l) => l.key === "8002"), true],
-			["detect: a soft-deleted load (tombstone '#8004') is not unbilled work", found.loads.some((l) => l.key === "8004"), false],
+			["detect: the dated completed loads are listed too (the baseline's history)", found.dated.map((l) => l.key), ["8002"]],
+			["detect: a soft-deleted load (tombstone '#8004') is not unbilled work", [...found.loads, ...found.dated].some((l) => l.key === "8004"), false],
 			["detect: a completed row with no Load ID is counted, not keyed", found.unkeyed, 1],
 			["detect: the last undated row speaks for the load", found.loads[0] && [found.loads[0].loadId, found.loads[0].driver], ["8001", "Una Undated"]],
 			["detect: no completion-date column → 'unresolved', never 'every load is undated'", w.listUndatedCompletedLoads(U, noDate, keys).resolved, false],
@@ -808,13 +817,15 @@ function oldImpl(db) {
 		const { db, w } = ledgerWorld(src);
 		const out = [];
 		const seeded = await w.runUndatedLoadAlerts({ seedOnly: true });
-		out.push(["seed: the boot tick records the backlog", [seeded.seeded, ledgerKeys(db)], [3, ["8001", "8003", "8007"]]]);
-		out.push(["seed: SILENTLY — seeded_at set, nothing stamped, no notification, no email",
-			[["8001", "8003", "8007"].every((k) => ledgerRow(db, k).seeded_at && !ledgerRow(db, k).alerted_at), digestNotes(w).length, digestEmails(w).length], [true, 0, 0]]);
-		out.push(["seed: the baseline marker is in server_state", !!baselineOf(w, db), true]);
+		out.push(["seed: the boot tick records the backlog open, and the dated loads as closed history",
+			[seeded.seeded, seeded.history, openLedgerKeys(db), ledgerKeys(db)], [3, 1, ["8001", "8003", "8007"], ["8001", "8002", "8003", "8007"]]]);
+		out.push(["seed: SILENTLY — every row seeded, nothing stamped, no notification, no email",
+			[ledgerKeys(db).every((k) => ledgerRow(db, k).seeded_at && !ledgerRow(db, k).alerted_at), digestNotes(w).length, digestEmails(w).length], [true, 0, 0]]);
+		out.push(["seed: the baseline marker is in server_state, and the status says 'seeded'",
+			[!!baselineOf(w, db), statusOf(w, db).outcome, isIso(statusOf(w, db).at)], [true, "seeded", true]]);
 		out.push(["seed: a second boot tick stops at the marker", (await w.runUndatedLoadAlerts({ seedOnly: true })).skipped, "seeded"]);
 		const quiet = await w.runUndatedLoadAlerts({ range: RANGE });
-		out.push(["run: nothing new → no digest", [quiet.digest, digestNotes(w).length, digestEmails(w).length], [0, 0, 0]]);
+		out.push(["run: nothing new → no digest, status 'ok'", [quiet.digest, digestNotes(w).length, digestEmails(w).length, statusOf(w, db).outcome], [0, 0, 0, "ok"]]);
 
 		// A NEW undated load, blank appointments: the batch would never name it.
 		w.sheet.values = toValues([...U, newLoad({ "Load ID": "#8101" })]);
@@ -822,7 +833,8 @@ function oldImpl(db) {
 		const n1 = digestNotes(w);
 		const e1 = digestEmails(w);
 		out.push(["new: reported in ONE digest — one notification, one email", [first.digest, n1.length, e1.length], [1, 1, 1]]);
-		out.push(["new: the notification names the load and opens it", n1[0] && [n1[0][1], JSON.parse(n1[0][3]).loadId], ["1 completed load no weekly invoice will bill", "#8101"]]);
+		out.push(["new: the notification names the load and carries no loadId (no dead click)",
+			n1[0] && [n1[0][1], JSON.parse(n1[0][3]).loadIds, "loadId" in JSON.parse(n1[0][3])], ["1 completed load no weekly invoice will bill", ["#8101"], false]]);
 		out.push(["new: the email lists it with its driver", !!e1[0] && /<td[^>]*>#8101<\/td><td[^>]*>Una Undated<\/td>/.test(e1[0].html), true]);
 		out.push(["new: alerted_at stamped once delivered", !!ledgerRow(db, "8101").alerted_at, true]);
 		const firstSeen = ledgerRow(db, "8101").first_seen;
@@ -830,7 +842,7 @@ function oldImpl(db) {
 		out.push(["new: ONCE — the next run does not repeat it", [digestNotes(w).length, digestEmails(w).length], [1, 1]]);
 
 		// It gains a date: resolved, and nobody is told anything.
-		w.sheet.values = toValues([...U, newLoad({ "Load ID": "#8101", "Status Update Date": "9/24/2026 10:00:00" })]);
+		w.sheet.values = toValues([...U, dated(newLoad({ "Load ID": "#8101" }))]);
 		const fixed = await w.runUndatedLoadAlerts({ range: RANGE });
 		out.push(["resolve: a load that gains a date is resolved, with no digest",
 			[!!ledgerRow(db, "8101").resolved_at, fixed.resolved, digestNotes(w).length], [true, 1, 1]]);
@@ -839,16 +851,30 @@ function oldImpl(db) {
 		w.sheet.values = toValues([...U, newLoad({ "Load ID": "#8101" })]);
 		const again = await w.runUndatedLoadAlerts({ range: RANGE });
 		const reopened = ledgerRow(db, "8101");
-		out.push(["re-open: a load that loses its date again is reported again", [again.digest, digestNotes(w).length, digestEmails(w).length], [1, 2, 2]]);
+		out.push(["re-open: a post-baseline load that loses its date again is reported again", [again.digest, digestNotes(w).length, digestEmails(w).length], [1, 2, 2]]);
 		out.push(["re-open: open again, re-stamped, first_seen kept", [reopened.resolved_at, !!reopened.alerted_at, reopened.first_seen === firstSeen], [null, true, true]]);
 
-		// A SEEDED load that gets a date and then loses it is a new episode as well.
-		w.sheet.values = toValues([...U.map((x) => (x["Load ID"] === "8003" ? { ...x, "Status Update Date": "9/24/2026 11:00:00" } : x)), newLoad({ "Load ID": "#8101" })]);
+		// HISTORY: a seeded load that gets a date and then loses it re-opens SILENTLY.
+		w.sheet.values = toValues([...U.map((x) => (x["Load ID"] === "8003" ? dated(x) : x)), newLoad({ "Load ID": "#8101" })]);
 		await w.runUndatedLoadAlerts({ range: RANGE });
 		w.sheet.values = toValues([...U, newLoad({ "Load ID": "#8101" })]);
 		const back = await w.runUndatedLoadAlerts({ range: RANGE });
-		out.push(["re-open: a seeded load that comes back is reported, not re-seeded",
-			[back.digest, digestIds(digestNotes(w)[2]), ledgerRow(db, "8003").seeded_at, !!ledgerRow(db, "8003").alerted_at], [1, ["8003"], null, true]]);
+		const h = ledgerRow(db, "8003");
+		out.push(["history: a seeded load whose date is set and cleared again stays silent",
+			[back.digest, digestNotes(w).length, !!h.seeded_at, h.alerted_at, h.resolved_at], [0, 2, true, null, null]]);
+
+		// HISTORY: the dated duplicate of 8002 is deleted, leaving only its undated copy.
+		w.sheet.values = toValues([...U.filter((x) => !(x["Load ID"] === "8002" && x["Status Update Date"])), newLoad({ "Load ID": "#8101" })]);
+		const dup = await w.runUndatedLoadAlerts({ range: RANGE });
+		out.push(["history: deleting a load's dated duplicate (8002) reports nothing — it re-opens as history",
+			[dup.digest, digestNotes(w).length, ledgerRow(db, "8002").resolved_at, !!ledgerRow(db, "8002").seeded_at], [0, 2, null, true]]);
+
+		// NEWS: the same thing to a load that did not exist at the baseline is reported.
+		w.sheet.values = toValues([...U, newLoad({ "Load ID": "#8101" }), dated(newLoad({ "Load ID": "8105" })), newLoad({ "Load ID": "#8105" })]);
+		await w.runUndatedLoadAlerts({ range: RANGE });
+		w.sheet.values = toValues([...U, newLoad({ "Load ID": "#8101" }), newLoad({ "Load ID": "#8105" })]);
+		const news = await w.runUndatedLoadAlerts({ range: RANGE });
+		out.push(["news: a post-baseline load whose dated duplicate is deleted IS reported", [news.digest, digestIds(digestNotes(w)[2])], [1, ["#8105"]]]);
 		out.push(["run: nothing along the way was logged as an error", w.errors, []]);
 		return out;
 	}
@@ -863,6 +889,7 @@ function oldImpl(db) {
 		const out = [];
 		out.push(["delivery: mail refused AND the in-app insert failed — tried, not delivered", [failed.digest, failed.delivered], [1, false]]);
 		out.push(["delivery: …so NOT stamped (a failed send is not a told human)", ledgerRow(db, "8102").alerted_at, null]);
+		out.push(["delivery: …and the status records the run as 'undelivered'", statusOf(w, db).outcome, "undelivered"]);
 		feedDown = false; // the in-app feed is back; mail still refuses
 		const retried = await w.runUndatedLoadAlerts({ range: RANGE });
 		out.push(["delivery: the load is owed to the next run, which reports it", [retried.digest, digestIds(digestNotes(w)[0])], [1, ["8102"]]]);
@@ -883,19 +910,20 @@ function oldImpl(db) {
 			w.sheet.values = toValues([...U, ...Array.from({ length: 30 }, (_, i) => newLoad({ "Load ID": String(8300 + i) }))]);
 			const a = await w.runUndatedLoadAlerts({ range: RANGE });
 			out.push(["cap: 30 new loads → 25 reported, 5 held", [a.digest, a.held], [25, 5]]);
-			out.push(["cap: …and the digest says 5 are waiting", /5 more are waiting: at most 25 loads are reported a day/.test((digestEmails(w)[0] || {}).html || ""), true]);
+			out.push(["cap: …and the digest says 5 wait for the next weekly run",
+				/5 more are waiting: one digest names at most 25 loads, and the rest follow on the next weekly run/.test((digestEmails(w)[0] || {}).html || ""), true]);
 			const b = await w.runUndatedLoadAlerts({ range: RANGE });
-			out.push(["cap: the same day nothing more goes out; the 5 stay owed", [b.digest, b.held, digestNotes(w).length], [0, 5, 1]]);
+			out.push(["cap: a second run the same day sends nothing more; the 5 stay owed", [b.digest, b.held, digestNotes(w).length], [0, 5, 1]]);
 			db.prepare("UPDATE invoice_undated_alerts SET alerted_at = ? WHERE alerted_at IS NOT NULL").run(new Date(Date.now() - 2 * 86400000).toISOString());
 			const c = await w.runUndatedLoadAlerts({ range: RANGE });
-			out.push(["cap: a day later the 5 are reported", [c.digest, c.held], [5, 0]]);
+			out.push(["cap: the next run a day or more later reports the 5", [c.digest, c.held], [5, 0]]);
 			out.push(["cap: every one of the 30 reported exactly once",
 				db.prepare("SELECT COUNT(*) AS c FROM invoice_undated_alerts WHERE load_key LIKE '83%' AND alerted_at IS NOT NULL").get().c, 30]);
 		}
 		{
 			// 25 stamps from BEFORE the 24 h cutoff, on the cutoff's own date. Compared
 			// raw, "…T00:00:00.000Z" sorts after datetime()'s "… HH:MM:SS" ("T" > " "),
-			// all 25 would count as today, and the cap would silence a real new load.
+			// all 25 would count as recent, and the cap would silence a real new load.
 			const { db, w } = ledgerWorld(src);
 			await w.runUndatedLoadAlerts({ seedOnly: true });
 			const day = db.prepare("SELECT date('now', '-1 day') AS d").get().d;
@@ -923,9 +951,9 @@ function oldImpl(db) {
 		const { db, w } = world;
 		const seed = await w.runUndatedLoadAlerts({ seedOnly: true });
 		const run = await w.runUndatedLoadAlerts({ range: RANGE });
-		out.push(["kill switch: off → no seed, no digest, no ledger row, no marker",
-			[seed.skipped, run.skipped, ledgerKeys(db).length, !!baselineOf(w, db), digestNotes(w).length, digestEmails(w).length],
-			["disabled", "disabled", 0, false, 0, 0]]);
+		out.push(["kill switch: off → no seed, no digest, no ledger row, no marker, no status",
+			[seed.skipped, run.skipped, ledgerKeys(db).length, !!baselineOf(w, db), digestNotes(w).length, digestEmails(w).length, statusOf(w, db).outcome],
+			["disabled", "disabled", 0, false, 0, 0, undefined]]);
 		return out;
 	}
 
@@ -941,7 +969,8 @@ function oldImpl(db) {
 			const b = await w.runUndatedLoadAlerts({ range: RANGE });
 			out.push(["guard: a sheet with no status column is not evidence — skipped", [a.skipped, b.skipped], ["sheet-unusable", "sheet-unusable"]]);
 			out.push(["guard: …so every seeded row stays open, and nothing is reported",
-				[db.prepare("SELECT COUNT(*) AS c FROM invoice_undated_alerts WHERE resolved_at IS NULL").get().c, digestNotes(w).length], [3, 0]]);
+				[openLedgerKeys(db).length, digestNotes(w).length], [3, 0]]);
+			out.push(["guard: …and the status records the skip and why", [statusOf(w, db).outcome, statusOf(w, db).skipped], ["skipped", "sheet-unusable"]]);
 		}
 		{
 			const { db, w } = ledgerWorld(src, { sheetValues: [HEADERS] });
@@ -957,6 +986,63 @@ function oldImpl(db) {
 			const r = await w.runUndatedLoadAlerts({ range: RANGE });
 			out.push(["guard: a failed tombstone read stops the run — no soft-deleted load reported",
 				[!!r.error, digestNotes(w).length, ledgerKeys(db).includes("8004")], [true, 0, false]]);
+			out.push(["guard: …and it is not only in the console: the status records the error",
+				[statusOf(w, db).outcome, /deleted_loads/.test(statusOf(w, db).error || ""), isIso(statusOf(w, db).at)], ["error", true, true]]);
+		}
+		return out;
+	}
+
+	// ⚠️ The reviewer's shrink-then-restore probe, and the guard's threshold.
+	async function shrinkChecks(src) {
+		const out = [];
+		{
+			// Three history loads vanish for one run and come back.
+			const { db, w } = ledgerWorld(src);
+			await w.runUndatedLoadAlerts({ seedOnly: true });
+			w.sheet.values = toValues([row({ "Load ID": "9999", Driver: "X", "Job Status": "In Transit" })]);
+			const shrunk = await w.runUndatedLoadAlerts({ range: RANGE });
+			w.sheet.values = toValues(U);
+			const restored = await w.runUndatedLoadAlerts({ range: RANGE });
+			out.push(["shrink (small ledger): three history loads vanish and return — nothing is reported",
+				[shrunk.resolved, restored.digest, digestNotes(w).length], [3, 0, 0]]);
+			out.push(["shrink (small ledger): …they are open history again",
+				["8001", "8003", "8007"].map((k) => [ledgerRow(db, k).resolved_at, !!ledgerRow(db, k).seeded_at]), [[null, true], [null, true], [null, true]]]);
+		}
+		const history = Array.from({ length: 40 }, (_, i) => newLoad({ "Load ID": String(8700 + i), Driver: "Hal History" }));
+		{
+			// 43 open history loads, plus 8101: new since the baseline, reported once.
+			const { db, w } = ledgerWorld(src, { sheetValues: toValues([...history, ...U]) });
+			await w.runUndatedLoadAlerts({ seedOnly: true });
+			w.sheet.values = toValues([...history, ...U, newLoad({ "Load ID": "8101" })]);
+			await w.runUndatedLoadAlerts({ range: RANGE });
+			// Rows cut from the sheet across the Friday run: 30 history loads and 8101.
+			w.sheet.values = toValues([...history.slice(30), ...U]);
+			const shrunk = await w.runUndatedLoadAlerts({ range: RANGE });
+			out.push(["shrink: 31 of 44 open loads vanish at once (cap 11) — nothing resolved, nothing reported",
+				[shrunk.skipped, shrunk.wouldResolve, shrunk.open, ledgerRow(db, "8101").resolved_at, openLedgerKeys(db).length, digestNotes(w).length],
+				["mass-resolve", 31, 44, null, 44, 1]]);
+			out.push(["shrink: …the status says so", [statusOf(w, db).outcome, statusOf(w, db).skipped, statusOf(w, db).wouldResolve], ["skipped", "mass-resolve", 31]]);
+			// The rows are pasted back before the next run.
+			w.sheet.values = toValues([...history, ...U, newLoad({ "Load ID": "8101" })]);
+			const back = await w.runUndatedLoadAlerts({ range: RANGE });
+			out.push(["shrink: when the rows return, nothing re-opens — 8101 is not reported a second time",
+				[back.resolved, back.digest, digestNotes(w).length, pendingShrinkOf(w, db)], [0, 0, 1, null]]);
+		}
+		{
+			// A real bulk fix: 30 history loads get their dates, and keep them.
+			const { db, w } = ledgerWorld(src, { sheetValues: toValues([...history, ...U]) });
+			await w.runUndatedLoadAlerts({ seedOnly: true });
+			w.sheet.values = toValues([...history.slice(0, 30).map(dated), ...history.slice(30), ...U]);
+			const first = await w.runUndatedLoadAlerts({ range: RANGE });
+			const again = await w.runUndatedLoadAlerts({ range: RANGE }); // a retry minutes later
+			out.push(["shrink: a bulk date fix is held at first, twice within the day",
+				[first.skipped, again.skipped, again.since === first.since], ["mass-resolve", "mass-resolve", true]]);
+			const pending = pendingShrinkOf(w, db) || {};
+			db.prepare("UPDATE server_state SET value = ? WHERE key = ?")
+				.run(JSON.stringify({ ...pending, since: new Date(Date.now() - 25 * 3600 * 1000).toISOString() }), w.INVOICE_UNDATED_PENDING_SHRINK_KEY);
+			const later = await w.runUndatedLoadAlerts({ range: RANGE });
+			out.push(["shrink: …and accepted once Job Tracking has read that way for 24 h — the guard cannot wedge",
+				[later.skipped, later.resolved, pendingShrinkOf(w, db), statusOf(w, db).outcome, openLedgerKeys(db).length], [undefined, 30, null, "ok", 13]]);
 		}
 		return out;
 	}
@@ -982,7 +1068,7 @@ function oldImpl(db) {
 			const marker = db.prepare("SELECT summary FROM invoice_autogen_runs WHERE week_end = ?").get(WEEK_END_PARAM) || {};
 			out.push(["batch: the weekly summary names the in-week load (8201)", /Pat Percent: 1005, 8201/.test(marker.summary || ""), true]);
 			out.push(["batch: ONE digest, of the load nobody else named (8202) — not 8201 again", digestIds(digestNotes(w)[0]), ["8202"]]);
-			out.push(["batch: 8201 is recorded as told — its summary was delivered", !!ledgerRow(db, "8201").alerted_at, true]);
+			out.push(["batch: 8201 is recorded as told — a delivered summary printed it", !!ledgerRow(db, "8201").alerted_at, true]);
 			await w.runWeeklyInvoiceBatch("2026-10-02", 1); // the next Friday: 8201 is out of its window now
 			out.push(["batch: the next week's run reports neither again", digestNotes(w).length, 1]);
 		}
@@ -1001,35 +1087,73 @@ function oldImpl(db) {
 			await w.runWeeklyInvoiceBatch("2026-10-02", 1);
 			out.push(["batch: …and the next week's digest carries it", digestIds(digestNotes(w)[0]), ["8201"]]);
 		}
+		{
+			// Seven drivers, one in-week undated load each, and mail down. The in-app
+			// line prints six undatedInWeek entries, so the seventh load was named in
+			// the run but shown to nobody.
+			const seven = ["Seven A", "Seven B", "Seven C", "Seven D", "Seven E", "Seven F", "Seven G"];
+			const { db, w } = ledgerWorld(src, {
+				sheetValues: toValues([row({ "Load ID": "9000", Driver: "Nobody", "Job Status": "In Transit" })]),
+				mail: (to, subject) => !/^Weekly Invoices/.test(subject),
+			});
+			for (const name of seven) db.prepare("INSERT INTO drivers_directory (driver_name, pay_type, pay_percentage, pay_daily) VALUES (?, 'fixed', 0, 300)").run(name);
+			await w.runUndatedLoadAlerts({ seedOnly: true });
+			w.sheet.values = toValues(seven.map((name, i) => row({ "Load ID": String(8601 + i), Driver: name, "Job Status": "Delivered", "Pickup Appointment": "9/22/2026 8:00", "Drop-off Appointment": "9/23/2026 8:00" })));
+			await w.runWeeklyInvoiceBatch(WEEK_END_PARAM, 1);
+			out.push(["batch: mail down — only the six loads the in-app line printed are recorded as told",
+				["8601", "8602", "8603", "8604", "8605", "8606", "8607"].map((k) => !!ledgerRow(db, k).alerted_at), [true, true, true, true, true, true, false]]);
+			out.push(["batch: …the seventh is not in this run's digest either (the summary named it)", digestNotes(w).length, 0]);
+			await w.runWeeklyInvoiceBatch("2026-10-02", 1);
+			out.push(["batch: …and the next week's digest carries the seventh", digestIds(digestNotes(w)[0]), ["8607"]]);
+		}
 		return out;
 	}
 
 	// The batch's whole observable output — return value, marker, invoices, every
-	// notification and email — minus wall-clock stamps.
+	// notification and email — minus wall-clock stamps. A batch still running
+	// after 2 s of real time is recorded as such (the hang case).
+	async function batchOutput(src, opts) {
+		const { db, w } = ledgerWorld(src, { sheetValues: toValues([...ALL, ...U]), ...opts });
+		let result = null;
+		let threw = null;
+		let guard = null;
+		try {
+			result = await Promise.race([
+				w.runWeeklyInvoiceBatch(WEEK_END_PARAM, 1),
+				new Promise((r) => { guard = setTimeout(() => r("STILL PENDING after 2 s"), 2000); }),
+			]);
+		} catch (e) { threw = e.message; } finally { clearTimeout(guard); }
+		return JSON.stringify({
+			threw, result,
+			marker: db.prepare("SELECT week_end, attempts, created, submitted, skipped, failed, summary FROM invoice_autogen_runs").all(),
+			invoices: db.prepare("SELECT invoice_number, driver, week_start, week_end, loads_count, total_earnings, expenses_total, status, load_ids, render_data FROM invoices ORDER BY id").all(),
+			notes: w.notes, emails: w.emails,
+		});
+	}
 	async function throwChecks(src) {
-		const snapshot = async (overrides) => {
-			const { db, w } = ledgerWorld(src, { sheetValues: toValues([...ALL, ...U]), overrides });
-			let result = null;
-			let threw = null;
-			try { result = await w.runWeeklyInvoiceBatch(WEEK_END_PARAM, 1); } catch (e) { threw = e.message; }
-			return JSON.stringify({
-				threw, result,
-				marker: db.prepare("SELECT week_end, attempts, created, submitted, skipped, failed, summary FROM invoice_autogen_runs").all(),
-				invoices: db.prepare("SELECT invoice_number, driver, week_start, week_end, loads_count, total_earnings, expenses_total, status, load_ids, render_data FROM invoices ORDER BY id").all(),
-				notes: w.notes, emails: w.emails,
-			});
-		};
-		const noLedger = await snapshot(overrides(async () => ({})));
-		function overrides(fn) { return fn ? { runUndatedLoadAlerts: fn } : undefined; }
+		const withHelper = (fn) => ({ overrides: { runUndatedLoadAlerts: fn } });
+		const noLedger = await batchOutput(src, withHelper(async () => ({})));
 		return [
 			["isolation: the helper throwing SYNCHRONOUSLY leaves the batch output byte-identical",
-				await snapshot(overrides(() => { throw new Error("ledger exploded"); })) === noLedger, true],
-			["isolation: …and so does a REJECTED helper", await snapshot(overrides(async () => { throw new Error("ledger exploded"); })) === noLedger, true],
-			["isolation: …and so does the real ledger's first run (its silent seed)", await snapshot(undefined) === noLedger, true],
+				await batchOutput(src, withHelper(() => { throw new Error("ledger exploded"); })) === noLedger, true],
+			["isolation: …and so does a REJECTED helper", await batchOutput(src, withHelper(async () => { throw new Error("ledger exploded"); })) === noLedger, true],
+			["isolation: …and so does the real ledger's first run (its silent seed)", await batchOutput(src, {}) === noLedger, true],
 		];
 	}
+	// A helper that never settles. The injected timer fires only once the helper
+	// has been called, so the per-driver races run as usual and only the ledger's
+	// 90 s race is cut short — the real branch, not a textual pin.
+	async function hangChecks(src) {
+		const noLedger = await batchOutput(src, { overrides: { runUndatedLoadAlerts: async () => ({}) } });
+		let hung = false;
+		const hanging = await batchOutput(src, {
+			overrides: { runUndatedLoadAlerts: () => { hung = true; return new Promise(() => {}); } },
+			setTimeout: (fn) => { if (hung) fn(); return 0; },
+		});
+		return [["isolation: a HUNG helper — the batch still returns, byte-identical, when its 90 s race fires", hanging === noLedger, true]];
+	}
 
-	const LEDGER_SUITES = [detectChecks, lifecycleChecks, deliveryChecks, capChecks, killSwitchChecks, guardChecks, ledgerBatchChecks, throwChecks];
+	const LEDGER_SUITES = [detectChecks, lifecycleChecks, deliveryChecks, capChecks, killSwitchChecks, guardChecks, shrinkChecks, ledgerBatchChecks, throwChecks, hangChecks];
 	for (const suite of LEDGER_SUITES) run(await suite(SRC));
 
 	// Pins: the wiring the suites above cannot see.
@@ -1042,6 +1166,8 @@ function oldImpl(db) {
 		eq(batchSrc.indexOf("runUndatedLoadAlerts({") > batchSrc.indexOf("sendEmail(adminEmail"), true, "pin: …after the weekly summary, whose delivery it reads");
 		eq(batchSrc.trimEnd().endsWith("return { created, submitted, skipped, unbilled: unbilled.length, problem };\n}"), true,
 			"pin: the batch's return value is untouched, and still its last statement");
+		eq([/undatedInWeek\.slice\(0, undatedEntriesInApp\)/.test(batchSrc), /undatedInWeek\.slice\(0, undatedEntriesByEmail\)/.test(batchSrc), /undatedInWeek\.slice\(0, \d+\)/.test(batchSrc)],
+			[true, true, false], "pin: the summary and the email print through the same two caps the ledger counts with");
 		const bootStart = SRC.indexOf("\nif (INVOICE_AUTOGEN_ENABLED) {\n");
 		const boot = SRC.slice(bootStart, SRC.indexOf("\n}\n", bootStart));
 		eq(/if \(INVOICE_UNDATED_ALERT_ENABLED\) \{\n\t\tconst undatedSeedTick = setTimeout\(\(\) => \{ runUndatedLoadAlerts\(\{ seedOnly: true \}\)/.test(boot) && boot.includes("undatedSeedTick.unref()"),
@@ -1061,13 +1187,14 @@ function oldImpl(db) {
 		if (hits !== 1) throw new Error(`mutant ${id}: anchor must occur exactly once in server.js, found ${hits}`);
 		return SRC.replace(from, () => to);
 	};
+	const LEDGER_CALL = "runUndatedLoadAlerts({ range, reportedIds: undatedInWeekIds.flat(), shownIds: undatedInWeekIds.slice(0, undatedEntriesShown).flat() }),";
 	const LEDGER_MUTANTS = [
-		["MU1", "a dated copy no longer wins", "for (const key of datedKeys) undatedByKey.delete(key);", "",
+		["MU1", "a dated copy no longer wins", "for (const key of datedByKey.keys()) undatedByKey.delete(key);", "",
 			detectChecks, "detect: a DATED copy of the load wins, even one above the undated row (8002)"],
 		["MU2", "the key is the raw cell, not normalizeLoadId()", "const loadKey = normalizeLoadId(row[cols.loadIdCol]);", "const loadKey = String(row[cols.loadIdCol] || \"\").trim().toLowerCase();",
 			detectChecks, "detect: exactly the loads no invoice can place — '#8001'/'8001' once, 8003, 8007"],
-		["MU3", "no silent baseline", "if (!baselineDone()) {", "if (false) {",
-			lifecycleChecks, "seed: the boot tick records the backlog"],
+		["MU3", "no silent baseline", "if (!getState(INVOICE_UNDATED_BASELINE_KEY)) {", "if (false) {",
+			lifecycleChecks, "seed: the boot tick records the backlog open, and the dated loads as closed history"],
 		["MU4", "stamped whether or not it was delivered", "if (emailed || notified) for (const k of digest) stamp.run(at, k);", "for (const k of digest) stamp.run(at, k);",
 			deliveryChecks, "delivery: …so NOT stamped (a failed send is not a told human)"],
 		["MU5", "the cap compares the raw ISO string", "WHERE datetime(alerted_at) > datetime('now', '-1 day')", "WHERE alerted_at > datetime('now', '-1 day')",
@@ -1075,28 +1202,45 @@ function oldImpl(db) {
 		["MU6", "the flag ships dormant (enable-switch shape)", "!/^(false|0|no|off)$/i.test(String(process.env.INVOICE_UNDATED_ALERT_ENABLED", "/^(true|1|yes|on)$/i.test(String(process.env.INVOICE_UNDATED_ALERT_ENABLED",
 			killSwitchChecks, "kill switch: ON by default (unset, or empty)"],
 		["MU7", "the batch awaits the helper unguarded",
-			"\ttry {\n\t\tawait Promise.race([\n\t\t\trunUndatedLoadAlerts({ range, reportedIds: undatedInWeekLoadIds, reportedDelivered: summaryDelivered }),",
-			"\t{\n\t\tawait runUndatedLoadAlerts({ range, reportedIds: undatedInWeekLoadIds, reportedDelivered: summaryDelivered });\n\t}\n\ttry {\n\t\tawait Promise.race([\n\t\t\tPromise.resolve(),",
+			`\ttry {\n\t\tawait Promise.race([\n\t\t\t${LEDGER_CALL}`,
+			`\t{\n\t\tawait ${LEDGER_CALL.slice(0, -1)};\n\t}\n\ttry {\n\t\tawait Promise.race([\n\t\t\tPromise.resolve(),`,
 			throwChecks, "isolation: the helper throwing SYNCHRONOUSLY leaves the batch output byte-identical"],
 		["MU8", "a re-opened load keeps its old stamp", "alerted_at = CASE WHEN resolved_at IS NULL THEN alerted_at ELSE NULL END,", "alerted_at = alerted_at,",
-			lifecycleChecks, "re-open: a load that loses its date again is reported again"],
+			lifecycleChecks, "re-open: a post-baseline load that loses its date again is reported again"],
 		["MU9", "the digest repeats what the weekly summary named", "const candidates = owed.filter((k) => !reported.has(k));", "const candidates = owed;",
 			ledgerBatchChecks, "batch: ONE digest, of the load nobody else named (8202) — not 8201 again"],
-		["MU10", "nothing is ever resolved", "if (!current.has(r.load_key)) n += close.run(now, r.load_key).changes;", "if (false) n += 0;",
+		["MU10", "nothing is ever resolved", "resolved = close(gone);", "resolved = 0;",
 			lifecycleChecks, "resolve: a load that gains a date is resolved, with no digest"],
-		["MU11", "origin/main: the batch never consults the ledger",
-			"runUndatedLoadAlerts({ range, reportedIds: undatedInWeekLoadIds, reportedDelivered: summaryDelivered }),", "Promise.resolve(),",
+		["MU11", "origin/main: the batch never consults the ledger", LEDGER_CALL, "Promise.resolve(),",
 			ledgerBatchChecks, "batch: ONE digest, of the load nobody else named (8202) — not 8201 again"],
 		["MU12", "the ledger reads the deduplicated cache", "const sheet = parseSheet(resp.data);", "const sheet = await getJobTrackingCached();",
-			lifecycleChecks, "seed: the boot tick records the backlog"],
+			lifecycleChecks, "seed: the boot tick records the backlog open, and the dated loads as closed history"],
 		["MU13", "an unusable sheet is taken as evidence", "if (!sheet.data.length || !found.resolved) {", "if (false) {",
 			guardChecks, "guard: …so every seeded row stays open, and nothing is reported"],
-		["MU14", "the weekly summary's report is never recorded", "if (reportedDelivered) for (const k of namedBySummary) stamp.run(at, k);", "",
-			ledgerBatchChecks, "batch: 8201 is recorded as told — its summary was delivered"],
-		["MU15", "the summary counts as delivered even when it was not", "reportedDelivered: summaryDelivered }", "reportedDelivered: true }",
-			ledgerBatchChecks, "batch: an undelivered weekly summary leaves 8201 owed, not told"],
+		["MU14", "the weekly summary's report is never recorded", "for (const k of toldBySummary) stamp.run(at, k);", "",
+			ledgerBatchChecks, "batch: 8201 is recorded as told — a delivered summary printed it"],
+		["MU15", "every load the summary NAMED counts as told, printed or not", "shownIds: undatedInWeekIds.slice(0, undatedEntriesShown).flat() })", "shownIds: undatedInWeekIds.flat() })",
+			ledgerBatchChecks, "batch: mail down — only the six loads the in-app line printed are recorded as told"],
 		["MU16", "the tombstones are read leniently", "loadKeySet(getDeletedLoadIds({ strict: true }))", "loadKeySet(getDeletedLoadIds())",
 			guardChecks, "guard: a failed tombstone read stops the run — no soft-deleted load reported"],
+		["MU17", "the ledger's race has no timer", "\t\t\tnew Promise((r) => { undatedDigestTimer = setTimeout(r, 90 * 1000); }),\n", "",
+			hangChecks, "isolation: a HUNG helper — the batch still returns, byte-identical, when its 90 s race fires"],
+		["MU18", "no shrink guard", "if (gone.length > massCap) {", "if (false) {",
+			shrinkChecks, "shrink: when the rows return, nothing re-opens — 8101 is not reported a second time"],
+		["MU19", "history re-opens loudly", "driver = excluded.driver,\n\t\t\t\t\talerted_at = CASE", "driver = excluded.driver,\n\t\t\t\t\tseeded_at = CASE WHEN resolved_at IS NULL THEN seeded_at ELSE NULL END,\n\t\t\t\t\talerted_at = CASE",
+			lifecycleChecks, "history: a seeded load whose date is set and cleared again stays silent"],
+		["MU20", "the baseline skips the dated loads", "for (const l of found.dated) seed.run(l.key, l.driver, now, now, now);", "",
+			lifecycleChecks, "history: deleting a load's dated duplicate (8002) reports nothing — it re-opens as history"],
+		["MU21", "a shrink is never accepted", "Date.now() - pendingSince >= G.confirmMs", "false",
+			shrinkChecks, "shrink: …and accepted once Job Tracking has read that way for 24 h — the guard cannot wedge"],
+		["MU22", "an error is left in the console only", "return finish(\"error\", { error: (e && e.message) || String(e) });", "return { error: (e && e.message) || String(e) };",
+			guardChecks, "guard: …and it is not only in the console: the status records the error"],
+		["MU23", "the dead click is back", "const metadata = { loadIds: loads.map(idOf),", "const metadata = { loadId: idOf(loads[0]), loadIds: loads.map(idOf),",
+			lifecycleChecks, "new: the notification names the load and carries no loadId (no dead click)"],
+		["MU24", "the in-app line counted as if it printed the email's twenty", "undatedEntriesShown = Math.max(undatedEntriesShown, undatedEntriesInApp);", "undatedEntriesShown = Math.max(undatedEntriesShown, undatedEntriesByEmail);",
+			ledgerBatchChecks, "batch: mail down — only the six loads the in-app line printed are recorded as told"],
+		["MU25", "a summary that reached nobody counts as shown", "let undatedEntriesShown = 0;", "let undatedEntriesShown = 99;",
+			ledgerBatchChecks, "batch: an undelivered weekly summary leaves 8201 owed, not told"],
 	];
 	for (const [id, what, from, to, suite, mustFail] of LEDGER_MUTANTS) {
 		let failedHere;
