@@ -380,6 +380,7 @@ import { useFileDrop } from '../../composables/useFileDrop'
 import { compressImage, isDecodedImage } from '../../lib/imageUtils'
 import { RECEIPT_MAX_EDGE, RECEIPT_SCAN_WIDTH, createPhotoJobs } from '../../lib/receiptPhoto'
 import { replyLost } from '../../lib/saveOutcome'
+import { expenseLoadIds } from '../../lib/expenseWindow'
 // "2026-06" -> "June 2026". Shared, not local: the copy that used to live here
 // was one of several, and two of them under one name in client/src/lib/ had
 // OPPOSITE failure behaviour. This one returns '' when it cannot read the key,
@@ -611,20 +612,12 @@ const typeColumns = [
   { text: 'Other', value: 'Other' },
 ]
 
-function findCol(headers, regex) {
-  return (headers || []).find((h) => regex.test(h)) || null
-}
-
-const loadIdOptions = computed(() => {
-  const loadIdCol = findCol(props.headers, /load.?id|job.?id/i)
-  const statusCol = findCol(props.headers, /status/i)
-  if (!loadIdCol) return []
-  const completedRe = /^(delivered|completed|pod received|cancelled)$/i
-  return props.loads
-    .filter((l) => !statusCol || !completedRe.test((l[statusCol] || '').trim()))
-    .map((l) => l[loadIdCol])
-    .filter(Boolean)
-})
+// The loads this form may file against: exactly those the server will accept a
+// receipt on — active, or delivered within the window (lib/expenseWindow.js,
+// from the verdict GET /api/driver/:driverName puts on each load). This used to
+// drop every delivered load, so on a delivered load's own page the preselected
+// Load field named a load its own picker did not list.
+const loadIdOptions = computed(() => expenseLoadIds(props.loads, props.headers))
 
 const loadColumns = computed(() =>
   loadIdOptions.value.map((id) => ({ text: id, value: id }))
@@ -635,8 +628,12 @@ function onTypePick({ selectedOptions }) {
   showTypePicker.value = false
 }
 
+// An empty picker confirms with no option — reachable when the page keeps the
+// form for a load whose window has since closed (LoadDetail). Close, change
+// nothing: the field keeps the load it already names.
 function onLoadPick({ selectedOptions }) {
-  form.loadId = selectedOptions[0].value
+  const picked = selectedOptions && selectedOptions[0]
+  if (picked) form.loadId = picked.value
   showLoadPicker.value = false
 }
 

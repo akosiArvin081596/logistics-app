@@ -8,36 +8,61 @@ name: Deploy drift
 #
 # Measured 2026-08-25: 2 of 25 deploy runs (8%) hit exactly that.
 #
-# This checks every 30 minutes, and will heal it ONCE per commit.
+# This checks on a schedule and heals ONCE per commit, and only a commit that
+# already PASSED STAGING. The heal runs the same deploy, smoke check, edge check
+# and auto-rollback as deploy.yml's production job.
+#
+# ⚠️ Nothing here depends on the cadence. The cron says every 30 min, but
+# GitHub has been observed firing it every 2.5–6 h, 8–26 min late.
+#
+# ⚠️ Invariants. Keep all four:
+#   1. SERIALIZED WITH DEPLOYS. The same concurrency group as deploy.yml
+#      (queue: max): a drift run waits for any in-flight deploy and reads the
+#      box after it. remote-deploy.sh also holds a box-level flock, whatever
+#      started it.
+#   2. STAGING GATE. A heal deploys only a commit whose own staging job passed.
+#      scripts/deploy/drift-gate.js asks GitHub, because the box cannot see it.
+#   3. ROLLBACK. The heal runs .github/actions/vps-deploy with
+#      rollback_on_failure, exactly like deploy.yml's production job.
+#   4. SAME APPROVAL. The heal job runs in the `production` environment, so a
+#      required reviewer added there gates heals too.
 # ─────────────────────────────────────────────────────────────────────────────
 on:
   schedule:
     - cron: "*/30 * * * *"
   workflow_dispatch:
 
+# ⚠️ SAME literal group as deploy.yml, on purpose. See the note there.
 concurrency:
-  group: deploy-drift
+  group: deploy-refs/heads/main
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read
+  actions: read   # the staging gate reads Deploy runs and their jobs
 
 jobs:
   check:
     name: production vs main
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
+    outputs:
+      action: ${{ steps.gate.outputs.action }}
+      local: ${{ steps.check.outputs.local }}
+      remote: ${{ steps.check.outputs.remote }}
     steps:
       - uses: actions/checkout@v5
 
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+
       - name: Configure SSH
-        run: |
-          set -euo pipefail
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          printf '%s\n' "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          printf '%s\n' "${{ secrets.VPS_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_SSH_KNOWN_HOSTS: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+        run: bash scripts/deploy/ssh-setup.sh
 
       - name: Check for drift
         id: check
@@ -46,8 +71,9 @@ jobs:
           USER: ${{ secrets.VPS_USER }}
         run: |
           set -euo pipefail
-          out=$(ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o ConnectTimeout=20 \
-                "$USER@$HOST" "DIR='/var/www/logistics-app' PM2='logistics-app' bash -s" \
+          # Same transport retry as every deploy (scripts/deploy/ssh-retry.sh).
+          out=$(bash scripts/deploy/ssh-retry.sh "$USER@$HOST" \
+                "DIR='/var/www/logistics-app' PM2='logistics-app' bash -s" \
                 < scripts/deploy/remote-drift-check.sh)
           echo "$out"
           state=$(printf '%s' "$out" | grep -oE 'DRIFT_STATE=[a-z-]+' | cut -d= -f2)
@@ -59,50 +85,122 @@ jobs:
             echo "remote=$remote_sha"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Heal (one attempt per commit)
-        if: steps.check.outputs.state == 'behind-healable'
+      - name: Staging gate
+        # The box can tell "behind and serving". Only GitHub can tell whether
+        # main's commit passed staging. Only `behind-healable` calls the API.
+        id: gate
         env:
-          HOST: ${{ secrets.VPS_HOST }}
-          USER: ${{ secrets.VPS_USER }}
-        run: |
-          set -euo pipefail
-          echo "::warning::production is behind main (${{ steps.check.outputs.local }} vs ${{ steps.check.outputs.remote }}) but healthy — most likely a transport-failed deploy. Healing once."
-          # Marker first: if the deploy dies halfway, the next tick alarms
-          # instead of retrying. Fail-closed.
-          ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o ConnectTimeout=20 \
-            "$USER@$HOST" "DIR='/var/www/logistics-app' PM2='logistics-app' REF='main' bash -s" \
-            < scripts/deploy/remote-drift-heal.sh
-          ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o ConnectTimeout=20 \
-            "$USER@$HOST" "DIR='/var/www/logistics-app' PM2='logistics-app' REF='main' bash -s" \
-            < scripts/deploy/remote-deploy.sh
-          ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o ConnectTimeout=20 \
-            "$USER@$HOST" "DIR='/var/www/logistics-app' PM2='logistics-app' bash -s" \
-            < scripts/deploy/remote-smoke.sh
-          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 https://app.logisx.com/api/config/maintenance)
-          echo "public edge -> HTTP $code"
-          [ "$code" = "200" ] || { echo "::error::healed deploy is not serving publicly"; exit 1; }
+          BOX_STATE: ${{ steps.check.outputs.state }}
+          TARGET_SHA: ${{ steps.check.outputs.remote }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/deploy/drift-gate.js
+
+      - name: Deploy still on its way
+        if: steps.gate.outputs.action == 'notice'
+        env:
+          HINT: ${{ steps.gate.outputs.hint }}
+          DETAIL: ${{ steps.gate.outputs.detail }}
+        run: echo "::notice::$HINT ($DETAIL)"
 
       - name: Alarm
-        # Two states are NOT healed: an already-attempted commit (healing again
-        # would restart production in a loop) and behind-plus-unhealthy (that is
-        # an incident, not a missed deploy). Both must be loud.
-        if: steps.check.outputs.state == 'behind-already-attempted' || steps.check.outputs.state == 'behind-and-unhealthy'
+        # Loud and never healed: already attempted, behind-and-unhealthy,
+        # staging failed, staging unverified, or an unrecognised state.
+        if: steps.gate.outputs.action == 'alarm'
+        env:
+          STATE: ${{ steps.gate.outputs.state }}
+          HINT: ${{ steps.gate.outputs.hint }}
+          DETAIL: ${{ steps.gate.outputs.detail }}
+          DEPLOYED: ${{ steps.check.outputs.local }}
+          MAIN: ${{ steps.check.outputs.remote }}
         run: |
-          echo "::error::production drift needs a human — state=${{ steps.check.outputs.state }}, deployed=${{ steps.check.outputs.local }}, main=${{ steps.check.outputs.remote }}"
+          echo "::error::production drift needs a human — state=$STATE, deployed=$DEPLOYED, main=$MAIN. $HINT"
+          echo "staging gate: $DETAIL"
           exit 1
 
       - name: Summary
         if: always()
+        env:
+          BOX_STATE: ${{ steps.check.outputs.state }}
+          STATE: ${{ steps.gate.outputs.state }}
+          ACTION: ${{ steps.gate.outputs.action }}
+          VERDICT: ${{ steps.gate.outputs.verdict }}
+          DETAIL: ${{ steps.gate.outputs.detail }}
+          GATE_URL: ${{ steps.gate.outputs.url }}
+          DEPLOYED: ${{ steps.check.outputs.local }}
+          MAIN: ${{ steps.check.outputs.remote }}
         run: |
           {
             echo "### Deploy drift"
             echo ""
             echo "| | |"
             echo "|---|---|"
-            echo "| state | \`${{ steps.check.outputs.state }}\` |"
-            echo "| production | \`${{ steps.check.outputs.local }}\` |"
-            echo "| main | \`${{ steps.check.outputs.remote }}\` |"
+            echo "| box state | \`$BOX_STATE\` |"
+            echo "| final state | \`$STATE\` |"
+            echo "| action | \`$ACTION\` |"
+            echo "| staging gate | $VERDICT — $DETAIL ${GATE_URL:+([job]($GATE_URL))} |"
+            echo "| production | \`$DEPLOYED\` |"
+            echo "| main | \`$MAIN\` |"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Always remove the deploy key
+        if: always()
+        run: shred -u ~/.ssh/deploy_key 2>/dev/null || rm -f ~/.ssh/deploy_key
+
+  heal:
+    name: heal production (staging-gated, auto-rollback)
+    needs: check
+    if: needs.check.outputs.action == 'heal'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Same environment as deploy.yml's production job, so a required reviewer
+    # added there gates this heal as well.
+    environment:
+      name: production
+      url: https://app.logisx.com
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_SSH_KNOWN_HOSTS: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+        run: bash scripts/deploy/ssh-setup.sh
+
+      - name: Heal prep — re-read the box, write the one-attempt marker
+        id: prep
+        env:
+          HOST: ${{ secrets.VPS_HOST }}
+          USER: ${{ secrets.VPS_USER }}
+          TARGET: ${{ needs.check.outputs.remote }}
+          EXPECT: ${{ needs.check.outputs.local }}
+        run: |
+          set -euo pipefail
+          echo "::warning::production ($EXPECT) is behind main ($TARGET), main's commit passed staging, and production is serving. Most likely a transport-failed deploy. Healing once."
+          # Marker first: if the deploy dies halfway, the next tick alarms
+          # instead of retrying. Fail-closed.
+          out=$(bash scripts/deploy/ssh-retry.sh "$USER@$HOST" \
+                "DIR='/var/www/logistics-app' TARGET='$TARGET' EXPECT='$EXPECT' bash -s" \
+                < scripts/deploy/remote-drift-heal.sh)
+          echo "$out"
+          ready=$(printf '%s\n' "$out" | grep -oE '^HEAL_READY=(yes|no)$' | tail -1 | cut -d= -f2 || true)
+          echo "ready=${ready:-no}" >> "$GITHUB_OUTPUT"
+
+      - name: Heal — the same deploy, smoke, edge check and auto-rollback as deploy.yml
+        if: steps.prep.outputs.ready == 'yes'
+        uses: ./.github/actions/vps-deploy
+        with:
+          dir: /var/www/logistics-app
+          pm2: logistics-app
+          ref: main
+          # EXACTLY the commit the staging gate approved, never whatever main
+          # has moved on to since.
+          sha: ${{ needs.check.outputs.remote }}
+          rollback_on_failure: "true"
+          public_url: https://app.logisx.com/api/config/maintenance
+          ssh_key: ${{ secrets.VPS_SSH_KEY }}
+          known_hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          host: ${{ secrets.VPS_HOST }}
+          user: ${{ secrets.VPS_USER }}
 
       - name: Always remove the deploy key
         if: always()

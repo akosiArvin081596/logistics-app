@@ -213,11 +213,23 @@
 
       <van-collapse-item title="Expenses" name="expenses">
         <div class="expenses-section">
+          <!-- Receipts are taken on an active load, and for 7 days after
+               delivery (owner, 2026-09-23) — the server's verdict on this load,
+               see expenseWin below. A delivered load that still takes them says
+               so, and until when; one that no longer does says why and who to
+               ask, so "No expenses" is never all a driver holding a receipt sees. -->
+          <div v-if="expenseCopy.note" class="expense-window-note" role="note">
+            <strong>{{ expenseCopy.note.title }}</strong>
+            <span>{{ expenseCopy.note.body }}</span>
+          </div>
+          <div v-else-if="expenseCopy.hint" class="expense-window-hint" role="note">
+            {{ expenseCopy.hint }}
+          </div>
           <!-- preset-load-id: this page IS the load, so the form starts on it
                rather than on a blank Load field whose "Select a load" error sat
                off-screen and made Submit look dead. -->
           <ExpenseForm
-            v-if="isActiveLoad"
+            v-if="showExpenseForm"
             :loads="[load]"
             :driver-name="driverName"
             :headers="headers"
@@ -234,7 +246,7 @@
               @preview="receiptPreview = $event"
             />
           </div>
-          <van-empty v-else-if="!isActiveLoad" description="No expenses for this load" image="search" :image-size="60" />
+          <van-empty v-else-if="!showExpenseForm" description="No expenses for this load" image="search" :image-size="60" />
         </div>
       </van-collapse-item>
     </van-collapse>
@@ -256,9 +268,10 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watchEffect, onMounted, onBeforeUnmount } from 'vue'
 import { Collapse as VanCollapse, CollapseItem as VanCollapseItem, Cell as VanCell, Button as VanButton, Empty as VanEmpty } from 'vant'
 import { splitAddress, formatLoadRoute } from '../../lib/address.js'
+import { isActiveLoadStatus, liveExpenseWindow, expenseWindowCopy } from '../../lib/expenseWindow.js'
 import StatusBadge from '../shared/StatusBadge.vue'
 import StatusTimeline from '../shared/StatusTimeline.vue'
 import StatusStepper from './StatusStepper.vue'
@@ -458,7 +471,50 @@ const isPending = computed(() => /^(assigned|dispatched|)$/i.test(status.value))
 const isDispatched = computed(() => /^(dispatched)$/i.test(status.value))
 const showResponseButtons = computed(() => isDispatched.value && !props.load._accepted)
 const showAcceptedBadge = computed(() => isDispatched.value && props.load._accepted)
-const isActiveLoad = computed(() => /^(assigned|dispatched|heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i.test(status.value))
+// The same status set the expense verdict falls back to (lib/expenseWindow.js),
+// so the stepper and the form can never disagree about what "active" means.
+const isActiveLoad = computed(() => isActiveLoadStatus(status.value))
+
+// The phone's clock, re-read once a minute while this page is open and again the
+// moment the app returns to the foreground. Without it the window below was
+// re-checked only when the load data changed, so a page left open past the
+// closing time kept saying "Open until …" (the server refuses the submit
+// either way).
+const nowTick = ref(Date.now())
+let nowTimer = null
+function refreshNow() { nowTick.value = Date.now() }
+function onVisibility() { if (document.visibilityState === 'visible') refreshNow() }
+onMounted(() => {
+  nowTimer = setInterval(refreshNow, 60 * 1000)
+  document.addEventListener('visibilitychange', onVisibility)
+})
+onBeforeUnmount(() => {
+  clearInterval(nowTimer)
+  document.removeEventListener('visibilitychange', onVisibility)
+})
+
+// May the driver add a receipt here? The SERVER's verdict for this load
+// (`_expenseWindow`, from GET /api/driver/:driverName — active, or delivered
+// within the last 7 days), re-checked against this phone's clock (nowTick). Never
+// re-derived from the status here; POST /api/expenses enforces the same verdict.
+const expenseWin = computed(() => liveExpenseWindow(props.load && props.load._expenseWindow, { status: status.value, now: nowTick.value }))
+const expenseCopy = computed(() => expenseWindowCopy(expenseWin.value))
+
+// Once the form has been on screen for THIS load it stays for as long as the
+// page does, even if the window closes underneath it — the page was left open
+// across the 7-day mark, or the load was marked delivered from the sheet, which
+// records no delivery time. Taking the form away would throw out a half-typed
+// entry and its photo. Left in place, the hint above it says why a submit will
+// be refused, the server refuses it with the same reason, and the entry stays on
+// screen. A different load starts over.
+const expenseFormLoadId = ref(null)
+watchEffect(() => {
+  if (expenseWin.value.eligible) expenseFormLoadId.value = String(loadId.value || '')
+})
+const showExpenseForm = computed(() =>
+  expenseWin.value.eligible ||
+  (expenseFormLoadId.value !== null && expenseFormLoadId.value === String(loadId.value || '')),
+)
 
 // "Is there still road left on this load?" — gates the Fuel section's trip
 // check. On a delivered load that check is not merely useless but WRONG: it
@@ -699,6 +755,26 @@ const dropoffFields = computed(() => {
 .expenses-section { padding: 0.5rem; background: var(--bg, #f8f9fa); border-radius: 8px; }
 .expense-history { margin-top: 0.75rem; }
 .expense-history-label { font-size: 0.72rem; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--border, #e5e7eb); }
+
+/* Receipt window on a delivered load. The note (still open) is blue —
+   information, nothing is wrong. The hint (closed, or no delivery time on
+   record) is slate, not red: nothing failed, it only says who can add it now. */
+.expense-window-note,
+.expense-window-hint {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin-bottom: 0.6rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.expense-window-note { background: #eff6ff; border-color: #bfdbfe; color: #1e3a8a; }
+.expense-window-note strong { font-size: 0.82rem; font-weight: 700; }
+.expense-window-hint { background: #f8fafc; border-color: #cbd5e1; color: #334155; }
 
 /* Phone-GPS banner. Informational only — see the note beside bannerTitle.
    There is deliberately NO red variant: this banner reports an optional

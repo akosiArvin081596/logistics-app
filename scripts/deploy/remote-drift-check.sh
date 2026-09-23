@@ -1,9 +1,14 @@
 #!/bin/bash
 # Reports whether a deployed app is behind origin/main, and whether it is safe
-# to heal automatically. Runs ON THE VPS. Inputs (env): DIR, PM2
+# to heal automatically AS FAR AS THE BOX CAN TELL. Runs ON THE VPS.
+# Inputs (env): DIR, PM2
 #
-# Prints DRIFT_*=... lines for the workflow to parse. Read-only apart from the
-# heal marker, which is written by remote-drift-heal.sh, not here.
+# Prints DRIFT_*=... lines for the workflow to parse. Read-only: it never writes
+# the marker it reads.
+#
+# ⚠️ `behind-healable` is the box's view only, NOT permission to heal: the box
+# cannot see whether main's commit passed staging.
+# scripts/deploy/drift-gate.js asks GitHub before any heal.
 set -uo pipefail
 : "${DIR:?}"; : "${PM2:?}"
 cd "$DIR" || exit 1
@@ -20,6 +25,13 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "http://127.0.0.1:$PO
 # a genuinely broken deploy would be retried on every schedule tick, restarting
 # production in a loop. Transport failures are worth one retry; a deploy that
 # actually landed and failed verification is not.
+#
+# The marker names the ONE main commit drift must not auto-deploy. It has three
+# writers, and all three mean "a human decides now":
+#   remote-drift-heal.sh  a heal of that commit was already attempted
+#   remote-rollback.sh    production verification rejected it and rolled back
+#   remote-deploy.sh      a human pinned production to another ref while main
+#                         was at it (a manual rollback, or a hotfix)
 MARKER="$DIR/.drift-heal-attempted"
 LAST=$(cat "$MARKER" 2>/dev/null || echo "")
 
