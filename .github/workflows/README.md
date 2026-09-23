@@ -4,10 +4,10 @@ Four workflows. `ci.yml` verifies, `deploy.yml` ships, `deploy-drift.yml` catche
 
 | | `ci.yml` | `deploy.yml` | `deploy-drift.yml` | `backup-freshness.yml` |
 |---|---|---|---|---|
-| Fires on | PR into `main`, push to `main`, manual | push to `main` → **staging → production** (auto); manual → one chosen target | every 30 min (cron), manual | 04:00 UTC daily (cron), manual |
-| Runs | `npm ci` ×2 · `node --check` · 58 of 59 runners · client build | lockfile reset · pull · install · build · scoped pm2 restart · smoke | compare production HEAD to `origin/main` → in-sync, heal once, or alarm | age + size + `gzip -t` of the newest nightly `app.db` snapshot, and whether the last **scheduled** run succeeded |
-| Duration | ~1 min | well under a minute | seconds | seconds |
-| Touches production | never | **every push to `main` — no approval gate** | only to re-run a deploy that never landed, once per commit | never — strictly read-only |
+| Fires on | PR into `main`, push to `main`, manual | push to `main` → **staging → production** (auto); manual → one chosen target | every 30 min (cron; GitHub actually fires it every 2.5–6 h), manual | 04:00 UTC daily (cron), manual |
+| Runs | `npm ci` ×2 · `node --check` · every runner but the timing one · client build | box lock · lockfile reset · checkout of the **exact pushed commit** · install · build · scoped pm2 restart · smoke | compare production HEAD to `origin/main`, then ask GitHub whether that commit **passed staging** → in-sync, alarm, or heal once | age + size + `gzip -t` of the newest nightly `app.db` snapshot, and whether the last **scheduled** run succeeded |
+| Duration | ~1 min | well under a minute | seconds (a heal: a deploy) | seconds |
+| Touches production | never | **every push to `main` — no approval gate** | only to re-run a deploy that never landed: once per commit, only if that commit passed staging, with the same auto-rollback | never — strictly read-only |
 | Self-heals | n/a | rolls back on failed verification | yes, once per commit | **no, by design** |
 
 ---
@@ -64,7 +64,11 @@ Both already appear in this repo's `CLAUDE.md` and it is public, so these are se
 
 **Both are automatic on every push to `main`.** Staging deploys first; production runs **only if staging succeeded** (`needs: staging`). No approval step — see the safety note below.
 
-**Manual / rollback** — Actions → *Deploy* → *Run workflow* → pick a target and a `ref`.
+**A push deploys exactly its own commit** (`sha: github.sha`), on both jobs, so production receives the very commit its staging job verified. Several quick merges deploy one after another, in order (`queue: max`). A run that starts after a newer commit is already live does nothing (`DEPLOY_NOOP=1`); it never moves backwards.
+
+**Manual / rollback** — Actions → *Deploy* → *Run workflow* → pick a target and a `ref`. A manual run keeps the old meaning of `ref` (`main` = its tip at pull time).
+
+From a terminal: `gh workflow run deploy.yml -f target=production -f ref=main` redeploys main's tip; `-f ref=<sha>` is the pin described next.
 
 **Rollback** — same dialog, set **ref** to the SHA you want back:
 
@@ -72,17 +76,23 @@ Both already appear in this repo's `CLAUDE.md` and it is public, so these are se
 git log --oneline -10 main    # pick the last good SHA
 ```
 
-The box checks that SHA out detached, rebuilds and restarts. Deploying `main` afterwards returns to normal — nothing needs undoing.
+The box checks that SHA out detached, rebuilds and restarts. It also writes main's tip into the drift marker, because a pin is a human decision: `deploy-drift.yml` **raises an alarm about it and does not deploy `main` over it**. Deploying `main` afterwards returns to normal — a push, or this dialog with `ref` = `main`.
 
 ---
 
 ## Things the deploy does on purpose
 
+**It holds a box-level lock, and a second deploy of the same app fails fast.** `remote-deploy.sh` and `remote-rollback.sh` take `flock -n` on `/var/lock/logisx-deploy<dir>.lock`. The file sits outside the repo tree, and `/var/lock` is `/run/lock` on Ubuntu (root-writable tmpfs). It holds one deploy per app directory, whatever started it: `deploy.yml`, the drift heal, an auto-rollback, or a human over ssh. A contender exits **75** and names the holder. `ssh-retry.sh` never retries 75, only ssh's own 255. The lock is a backstop: both workflows already share one concurrency group (below). ⚠️ Every `pm2` call runs with the lock descriptor closed (`9>&-`). If pm2 has to start its daemon, that daemon would otherwise inherit the descriptor and hold the lock after the deploy ended. This was demonstrated on Linux, not assumed. If a deploy ever refuses with no deploy running, `fuser -v <lockfile>` names the holder.
+
+**It checks every git step.** The script runs without `set -e`, so each step is checked explicitly. A failed fast-forward or checkout fails the deploy with nothing built or restarted, and so does a pinned `sha` that is missing or that `main` does not contain. (A failed fetch is only a warning. Whatever step needed the missing commit then fails.)
+
 **It resets `client/package-lock.json` before pulling.** The VPS runs npm 10.8.2, which does not know the `"libc"` field a newer npm writes onto optional platform deps, so *every* install on the box strips it and leaves the file permanently modified. `git pull --ff-only` refuses to overwrite a modified tracked file, so without the reset the first PR touching that lockfile aborts the deploy. It is pure metadata churn — npm regenerates it two steps later. **It is already modified on production right now**, so this is live, not hypothetical.
 
 **It aborts if anything *else* is modified.** A blanket `git checkout -- .` would clear the lockfile drift and silently destroy a hand-applied hotfix with it. The deploy stops and prints what it found instead.
 
-**It restarts by process name, never `pm2 restart all`.** This VPS runs ~23 pm2 processes for other clients (LendyPH, binhs-coop, dromic, and more). A broad restart is a multi-client outage.
+**It restarts one process, never `pm2 restart all`.** This VPS runs ~23 pm2 processes for other clients (LendyPH, binhs-coop, dromic, and more). A broad restart is a multi-client outage. Production restarts through `ecosystem.config.js` (`pm2 restart ecosystem.config.js --update-env`, which touches only the process the file names), staging by name; nothing runs `pm2 save`, so a changed setting reaches the live process but not `/root/.pm2/dump.pm2`.
+
+**It probes `better-sqlite3` by opening a database.** The native binding loads lazily, so a bare `require()` passes under the wrong Node. The probe opens an in-memory database; on failure it runs `npm rebuild better-sqlite3` and probes again, and a module still broken fails the deploy before any restart.
 
 **It smoke-checks `/api/config/maintenance`.** Unauthenticated, returns module constants only — no DB, no Sheets, no billed API call. It proves the process booted and Express is serving, and costs nothing. It polls for up to 60 s because boot runs schema migrations first.
 
@@ -94,7 +104,7 @@ The box checks that SHA out detached, rebuilds and restarts. Deploying `main` af
 
 **`test-suite.js`.** It needs a live server, it **writes** (test 46 logs an expense), it defaults to **port 3000 — production on the VPS** — and with no `SPREADSHEET_ID` override `server.js` falls through to the **live Dispatch Management sheet**. Running it from CI would write to the client's real books.
 
-A step in `ci.yml` greps the workflows and fails the build if anything ever invokes it. It stays a manual, deliberate, local-only harness — see CLAUDE.md for the fixture and sheet-override procedure.
+A step in `ci.yml` greps the workflows and fails the build if anything ever invokes it. It stays a manual, deliberate, local-only harness — see [`docs/claude/testing.md`](../../docs/claude/testing.md) for the fixture and sheet-override procedure.
 
 **And one runner is skipped on CI: `scripts/test-pdf-cold-start.js`.** It deliberately induces an event-loop stall and asserts that the PDF renderer's retry caught it — which is a race by construction. Measured on an 8-core Mac it passes **6/6 idle but only 3/6 at load average ~11**, and a GitHub-hosted runner is **two shared cores**. Left in, CI would be red a third of the time for reasons unrelated to the change under review, and a pipeline nobody trusts is worse than none.
 
@@ -112,13 +122,46 @@ Enabled 2026-08-25 at the owner's request. There is **no approval gate and nobod
 
 **Staging deliberately does NOT auto-roll-back** (`rollback_on_failure: "false"`). It is the canary; a failure should stay put so it can be inspected.
 
+A rollback also records the commit it rejected in the drift marker, so no automatic path deploys that commit again. A human decides what happens next.
+
+**Deploys never overlap.** `deploy.yml` and `deploy-drift.yml` share **one literal concurrency group** (`deploy-refs/heads/main`) with `queue: max`. A drift run therefore waits for an in-flight deploy and reads the box after it; a deploy waits for a heal. The default queue keeps only one pending run and **cancels** it when another arrives, which in a shared group could cancel a queued deploy; `queue: max` keeps up to 100 waiting, in order. The box lock (above) catches anything that does not come through Actions. ⚠️ actionlint 1.7.12 predates `queue` (GitHub, 2026-05) and reports it as an unexpected key. Lint with `-ignore 'unexpected key "queue" for "concurrency" section'`.
+
 ### To turn auto-deploy back off
 
-Give the `production` GitHub Environment a **required reviewer** again (Settings → Environments → production). The workflow needs no change — the job will simply pause for approval. That is the whole switch.
+Give the `production` GitHub Environment a **required reviewer** again (Settings → Environments → production). The workflow needs no change — the job will simply pause for approval. That is the whole switch. It covers the drift heal too, which runs in the same `production` environment. Note that a run waiting for approval holds the shared deploy queue, so everything behind it waits as well. Reject a stale one rather than leaving it pending.
 
 ### Where the deploy logic lives
 
-`scripts/deploy/remote-deploy.sh`, `remote-smoke.sh`, `remote-rollback.sh` — versioned in the repo, not inline in YAML, so both jobs share one reviewable copy and cannot drift. `.github/actions/vps-deploy` is the composite step that ships them over ssh (with transport retry) and wires the rollback.
+`scripts/deploy/remote-deploy.sh`, `remote-smoke.sh`, `remote-rollback.sh` — versioned in the repo, not inline in YAML, so both jobs share one reviewable copy and cannot drift. `.github/actions/vps-deploy` is the composite step that ships them over ssh and wires the rollback. deploy.yml's two jobs **and** the drift heal all use it. Runner-side, `ssh-setup.sh` writes the key and the pinned host key, and `ssh-retry.sh` is the one copy of the transport retry, used by every connection. `remote-drift-check.sh`, `remote-drift-heal.sh` and `drift-gate.js` are the drift path, described below.
+
+Tests: `scripts/test-deploy-scripts.js` runs the real scripts through `bash -s` against a throwaway git sandbox: the lock, exact-SHA deploys, the marker's three writers, retry and setup, each with mutants. `scripts/test-drift-gate.js` covers the staging gate. Both are picked up by `npm run test:unit`, so CI runs them.
+
+---
+
+## Deploy drift — what each state does
+
+`deploy-drift.yml` has two jobs. **check** reads the box (`remote-drift-check.sh`). For `behind-healable` only, it then asks GitHub whether main's exact commit passed the **`staging` job of its push-triggered Deploy run** (`drift-gate.js`, with `actions: read`). **heal** runs only on a green gate, in the `production` environment. It first re-reads the box and writes the marker (`remote-drift-heal.sh`, which refuses if production moved since the check). Then it runs the same `vps-deploy` action as production, pinned to that exact commit, with auto-rollback.
+
+| State | Meaning | Action |
+|---|---|---|
+| `in-sync` | production HEAD = `origin/main` | pass |
+| `behind-healable` | behind, serving 200, no marker, **and main's commit passed staging** | **heal once** (deploy → smoke → edge → rollback on failure) |
+| `behind-staging-pending` | behind, but main's Deploy run has not finished staging yet | notice only; the deploy is on its way |
+| `behind-staging-failed` | staging **rejected** main's commit | **alarm**; production must not get it |
+| `behind-staging-unverified` | no push-triggered Deploy run for the commit (e.g. `[skip ci]`), still none on a re-look 20 s later; or the API lookup failed | **alarm**; no heal without a verdict |
+| `behind-already-attempted` | the marker names main's commit | **alarm** |
+| `behind-and-unhealthy` | behind **and** not serving 200 | **alarm**; an incident, not a missed deploy |
+
+A production job that failed on **transport** after staging passed stays healable. That is the case this workflow exists for. A production job that failed **verification** is not healable, because its rollback wrote the marker.
+
+**The marker (`.drift-heal-attempted`) names the one main commit drift must not auto-deploy.** It has three writers, and each means a human decides now:
+- `remote-drift-heal.sh`: a heal of that commit was already attempted. It is written before the deploy, so a heal that dies halfway still counts.
+- `remote-rollback.sh`: production verification rejected that commit.
+- `remote-deploy.sh` with a non-`main` `ref`: a human pinned production elsewhere while `main` was at that commit.
+
+It never needs clearing by hand. Once production reaches `main` (a push, or a manual Deploy of `main`), the state is `in-sync` and the marker no longer matches anything.
+
+⚠️ **The gate finds deploy.yml's job by its `name: staging`.** Rename it and every heal fails closed as `behind-staging-unverified` until `STAGING_JOB_NAME` in `drift-gate.js` moves with it. `scripts/test-drift-gate.js` pins the two together.
 
 ---
 
