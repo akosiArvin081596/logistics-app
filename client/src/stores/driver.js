@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { useApi } from '../composables/useApi'
 import { parseYmdLocal, sheetSortKey } from '../utils/datetime'
+import { replyLost } from '../lib/saveOutcome'
 
 const api = useApi()
 
@@ -441,12 +442,13 @@ export const useDriverStore = defineStore('driver', {
           allowDuplicate: data?.allowDuplicate === true,
         }, { timeout: EXPENSE_SAVE_TIMEOUT_MS })
       } catch (err) {
-        // No HTTP answer at all — our own timeout, or a connection that dropped.
-        // The row may well have been saved; only the reply was lost. Re-read the
-        // driver's data in the background so the load's Expense History shows it
-        // if it did, which is what ExpenseForm tells the driver to check before
-        // trying again. A READ, never a re-send: see EXPENSE_SAVE_TIMEOUT_MS.
-        if (!err?.status) this.loadData().catch(() => {})
+        // No answer from the application — our own timeout, a dropped
+        // connection, or a gateway 502/504 (see lib/saveOutcome.js). The row may
+        // well have been saved; only the reply was lost. Re-read the driver's
+        // data in the background so the load's Expense History shows it if it
+        // did, which is what ExpenseForm tells the driver to check before trying
+        // again. A READ, never a re-send: see EXPENSE_SAVE_TIMEOUT_MS.
+        if (replyLost(err)) this.loadData().catch(() => {})
         throw err
       }
       // The expense is saved at this point. A failing refresh must NOT surface

@@ -155,11 +155,15 @@
       >
         <template #input>
           <div class="receipt-photo">
+            <!-- :deletable — no × while the entry is being sent (up to 90 s).
+                 Deleting mid-save made the retry photo-less, and without its
+                 photo the byte-level duplicate check cannot catch that retry. -->
             <van-uploader
               v-if="fileList.length"
               v-model="fileList"
               :max-count="1"
               :show-upload="false"
+              :deletable="!submitting"
               @delete="onPhotoDelete"
             />
             <div v-else class="receipt-pick" role="group" aria-label="Add a receipt photo">
@@ -229,7 +233,8 @@
          cannot (a duplicate receipt, a closed month, a size cap). The heading is
          the part that matters at 2am: everything typed above is still there.
 
-         ⚠️ Unless NO reply came back at all (our timeout, a dropped connection).
+         ⚠️ Unless NO answer came back from the app (our timeout, a dropped
+         connection, a gateway 502/504 — lib/saveOutcome.js, replyLost()).
          Then the row may well be saved and "Not submitted" would be a lie that
          sends the driver straight into a duplicate — so it says "Not confirmed",
          in amber, and points at the load's history, which the store re-reads in
@@ -374,6 +379,7 @@ import { useDocumentScan } from '../../composables/useDocumentScan'
 import { useFileDrop } from '../../composables/useFileDrop'
 import { compressImage, isDecodedImage } from '../../lib/imageUtils'
 import { RECEIPT_MAX_EDGE, RECEIPT_SCAN_WIDTH, createPhotoJobs } from '../../lib/receiptPhoto'
+import { replyLost } from '../../lib/saveOutcome'
 // "2026-06" -> "June 2026". Shared, not local: the copy that used to live here
 // was one of several, and two of them under one name in client/src/lib/ had
 // OPPOSITE failure behaviour. This one returns '' when it cannot read the key,
@@ -492,7 +498,8 @@ const form = reactive({
   type: 'Fuel',
   amount: '',
   date: houstonToday(),
-  loadId: '',
+  // The load this form was opened from, preselected. See the watcher below.
+  loadId: props.presetLoadId || '',
   vendor: '',
   description: '',
   city: '',
@@ -501,17 +508,25 @@ const form = reactive({
   odometer: '',
 })
 
-// Preselect the load this form was opened from — and follow it if the page
-// switches to another load under a still-mounted form (tapping a "new load"
-// banner does exactly that). Only a value this watcher could have put there is
-// replaced; the entry itself (photo, amount, …) is never touched.
+// The page can switch to another load under a still-mounted form: the "new
+// load" banner does exactly that, and LoadDetail has no :key. The Load field
+// follows the page ONLY while the entry is pristine. Mid-entry it stays put:
+// following would file load A's fuel under load B with nothing on screen to
+// say so, while left alone the field still names A for the driver to check. A
+// load the driver picked themselves is never overridden either. `presetApplied`
+// is the last value this watcher (or a reset) put in the field, which is how a
+// preset is told apart from a pick.
+//
+// Not `immediate`: `form` already starts on the preset, and isPristineEntry()
+// reads state declared further down this file.
+let presetApplied = form.loadId
 watch(
   () => props.presetLoadId,
-  (id, prev) => {
-    if (!id) return
-    if (!form.loadId || form.loadId === prev) form.loadId = id
+  (id) => {
+    if (!id || !isPristineEntry()) return
+    if (form.loadId && form.loadId !== presetApplied) return
+    form.loadId = presetApplied = id
   },
-  { immediate: true },
 )
 
 // ── Date hygiene ────────────────────────────────────────────────────────────
@@ -719,6 +734,17 @@ async function handlePhoto(item) {
   // The previous photo stops being the attachment NOW, not when this one is
   // ready: nothing may be sent with a picture the thumbnail no longer shows.
   photoBase64.value = ''
+  // ...and so does everything the previous photo's READ left behind. ocrDetails
+  // is never on screen but rides on the submit, and the server classifies the
+  // receipt from it (isDefReceipt): without this, photo B tapped through with
+  // Skip was filed carrying photo A's details — a diesel fill flagged as DEF,
+  // or the reverse — under a "Parsed from receipt" line and an Undo that no
+  // longer matched anything. Fields A's read filled in stay: they are on
+  // screen, and B's read or the driver replaces them.
+  ocrApplied.value = false
+  ocrConfidence.value = ''
+  ocrDetails.value = []
+  preOcrSnapshot.value = null
   // Decode + downscale to a JPEG data URL via the shared one-pass helper (see
   // imageUtils for the low-RAM OOM fix, and its HEIC → JPEG conversion — which
   // a gallery pick needs far more often than a camera shot does).
@@ -1052,15 +1078,10 @@ function handleSubmitFailure(err, keepLoadId) {
     revealDecision()
     return
   }
-  submitUnconfirmed.value = noReply(err)
+  // No answer from the app (timeout, dropped connection, gateway 502/504): the
+  // row may have SAVED. The same test drives the store's background re-read.
+  submitUnconfirmed.value = replyLost(err)
   submitError.value = failureText(err)
-}
-
-// No HTTP reply at all: our own timeout (useApi: status 0, code TIMEOUT) or a
-// connection that dropped mid-request (fetch's TypeError, no status). Either way
-// the request may have reached the server and SAVED — only the answer was lost.
-function noReply(err) {
-  return !!err && !err.status
 }
 
 // The question replaces the submit button the driver just tapped, and on a long
@@ -1213,9 +1234,12 @@ function resetAfterSubmit(keepLoadId) {
   ocrConfidence.value = ''
   ocrDetails.value = []
   preOcrSnapshot.value = null
-  // Keep loadId if only one load (inside load detail). Otherwise back to the
-  // load this form belongs to, if it belongs to one — never blank on a load page.
-  if (!keepLoadId) form.loadId = props.presetLoadId || ''
+  // A finished entry hands the form back to the page's own load — including
+  // when the field was deliberately left on another load mid-entry (see the
+  // presetLoadId watcher). With no page load, the old rule: keep the load when
+  // there is only one to pick (inside load detail), otherwise clear it.
+  if (props.presetLoadId) form.loadId = presetApplied = props.presetLoadId
+  else if (!keepLoadId) form.loadId = ''
 }
 
 // Words that mean "the FILE was the problem". Deliberately excludes "receipt",
@@ -1239,8 +1263,8 @@ function failureText(err) {
   // try again"): each tells the driver it failed and to resend, and the resend
   // is what the duplicate guard then refuses. The honest answer is "unknown",
   // plus where to look — the store re-reads the history in the background.
-  if (noReply(err)) {
-    return 'The connection dropped before the server answered, so this may already be saved. Check this load’s Expense History below before you try again — if it did save, trying again will say so.'
+  if (replyLost(err)) {
+    return 'No answer came back from the server, so this may already be saved. Check this load’s Expense History below before you try again — if it did save, trying again will say so.'
   }
   const msg = (err && err.message) ||
     'Could not submit this expense. Nothing was saved — tap Try Again.'
