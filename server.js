@@ -8308,13 +8308,18 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 		});
 
 		// Send emails (async, don't block response)
+		//
+		// Every request value interpolated below goes through escapeHtml(), the
+		// same helper the driver application emails use: all of it is text typed
+		// into the public /invest form and must render as text. Only numbers
+		// computed on this side are left bare.
 		const vehicleRows = vehiclesArr.map((v, i) => `<tr>
 			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${i + 1}</td>
-			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${v.year || ""} ${v.make || ""} ${v.model || ""}</td>
-			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${v.vin || ""}</td>
-			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${v.licensePlate || ""}</td>
-			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${v.titleState || ""}</td>
-			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${v.purchasePrice ? "$" + Number(v.purchasePrice).toLocaleString() : ""}</td>
+			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${escapeHtml(v.year || "")} ${escapeHtml(v.make || "")} ${escapeHtml(v.model || "")}</td>
+			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${escapeHtml(v.vin || "")}</td>
+			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${escapeHtml(v.licensePlate || "")}</td>
+			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${escapeHtml(v.titleState || "")}</td>
+			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${v.purchasePrice ? "$" + escapeHtml(Number(v.purchasePrice).toLocaleString()) : ""}</td>
 		</tr>`).join("");
 
 		// Email A: Applicant confirmation (simple)
@@ -8325,12 +8330,12 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 			</div>
 			<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
 				<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Application Received</h2>
-				<p>Hi <b>${legal_name}</b>,</p>
+				<p>Hi <b>${escapeHtml(legal_name)}</b>,</p>
 				<p>Thank you for submitting your investor application with LogisX. We have received all your information and signed documents.</p>
 				<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:20px 0">
 					<table style="width:100%;border-collapse:collapse;font-size:14px">
-						<tr><td style="padding:4px 0;color:#64748b;width:140px">Company</td><td style="padding:4px 0;font-weight:600">${legal_name}${dba ? ` (DBA: ${dba})` : ""}</td></tr>
-						${entity_type ? `<tr><td style="padding:4px 0;color:#64748b">Entity Type</td><td style="padding:4px 0">${entity_type}</td></tr>` : ""}
+						<tr><td style="padding:4px 0;color:#64748b;width:140px">Company</td><td style="padding:4px 0;font-weight:600">${escapeHtml(legal_name)}${dba ? ` (DBA: ${escapeHtml(dba)})` : ""}</td></tr>
+						${entity_type ? `<tr><td style="padding:4px 0;color:#64748b">Entity Type</td><td style="padding:4px 0">${escapeHtml(entity_type)}</td></tr>` : ""}
 						<tr><td style="padding:4px 0;color:#64748b">Fleet Size</td><td style="padding:4px 0">${vehiclesArr.length} vehicle(s)</td></tr>
 						<tr><td style="padding:4px 0;color:#64748b">Documents</td><td style="padding:4px 0;color:${failedDocs.length ? "#b45309" : "#16a34a"};font-weight:600">${signedDocCount}/${INVESTOR_ONBOARDING_DOCS.length} Signed</td></tr>
 					</table>
@@ -8370,18 +8375,18 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 
 				<h3 style="font-size:15px;margin:0 0 12px;color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:6px">Company Information</h3>
 				<table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:24px">
-					<tr><td style="padding:5px 0;color:#64748b;width:180px">Legal Name</td><td style="padding:5px 0;font-weight:600">${legal_name}</td></tr>
-					${dba ? `<tr><td style="padding:5px 0;color:#64748b">DBA</td><td style="padding:5px 0">${dba}</td></tr>` : ""}
-					${entity_type ? `<tr><td style="padding:5px 0;color:#64748b">Entity Type</td><td style="padding:5px 0">${entity_type}</td></tr>` : ""}
-					<tr><td style="padding:5px 0;color:#64748b">Address</td><td style="padding:5px 0">${address}</td></tr>
-					${contact_person ? `<tr><td style="padding:5px 0;color:#64748b">Contact Person</td><td style="padding:5px 0">${contact_person}${contact_title ? " (" + contact_title + ")" : ""}</td></tr>` : ""}
-					<tr><td style="padding:5px 0;color:#64748b">Phone</td><td style="padding:5px 0">${phone}</td></tr>
-					<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0"><a href="mailto:${email}">${email}</a></td></tr>
-					${ein_ssn ? `<tr><td style="padding:5px 0;color:#64748b">EIN/SSN</td><td style="padding:5px 0">${piiMask.maskTaxId(ein_ssn)}</td></tr>` : ""}
-					${tax_classification ? `<tr><td style="padding:5px 0;color:#64748b">Tax Classification</td><td style="padding:5px 0">${tax_classification}</td></tr>` : ""}
-					${years_in_operation ? `<tr><td style="padding:5px 0;color:#64748b">Years in Operation</td><td style="padding:5px 0">${years_in_operation}</td></tr>` : ""}
-					${industry_experience ? `<tr><td style="padding:5px 0;color:#64748b">Industry Experience</td><td style="padding:5px 0">${industry_experience}</td></tr>` : ""}
-					${bankruptcy_liens ? `<tr><td style="padding:5px 0;color:#64748b">Bankruptcy/Liens</td><td style="padding:5px 0">${bankruptcy_liens}</td></tr>` : ""}
+					<tr><td style="padding:5px 0;color:#64748b;width:180px">Legal Name</td><td style="padding:5px 0;font-weight:600">${escapeHtml(legal_name)}</td></tr>
+					${dba ? `<tr><td style="padding:5px 0;color:#64748b">DBA</td><td style="padding:5px 0">${escapeHtml(dba)}</td></tr>` : ""}
+					${entity_type ? `<tr><td style="padding:5px 0;color:#64748b">Entity Type</td><td style="padding:5px 0">${escapeHtml(entity_type)}</td></tr>` : ""}
+					<tr><td style="padding:5px 0;color:#64748b">Address</td><td style="padding:5px 0">${escapeHtml(address)}</td></tr>
+					${contact_person ? `<tr><td style="padding:5px 0;color:#64748b">Contact Person</td><td style="padding:5px 0">${escapeHtml(contact_person)}${contact_title ? " (" + escapeHtml(contact_title) + ")" : ""}</td></tr>` : ""}
+					<tr><td style="padding:5px 0;color:#64748b">Phone</td><td style="padding:5px 0">${escapeHtml(phone)}</td></tr>
+					<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0"><a href="mailto:${escapeHtml(email)}">${escapeHtml(email)}</a></td></tr>
+					${ein_ssn ? `<tr><td style="padding:5px 0;color:#64748b">EIN/SSN</td><td style="padding:5px 0">${escapeHtml(piiMask.maskTaxId(ein_ssn))}</td></tr>` : ""}
+					${tax_classification ? `<tr><td style="padding:5px 0;color:#64748b">Tax Classification</td><td style="padding:5px 0">${escapeHtml(tax_classification)}</td></tr>` : ""}
+					${years_in_operation ? `<tr><td style="padding:5px 0;color:#64748b">Years in Operation</td><td style="padding:5px 0">${escapeHtml(years_in_operation)}</td></tr>` : ""}
+					${industry_experience ? `<tr><td style="padding:5px 0;color:#64748b">Industry Experience</td><td style="padding:5px 0">${escapeHtml(industry_experience)}</td></tr>` : ""}
+					${bankruptcy_liens ? `<tr><td style="padding:5px 0;color:#64748b">Bankruptcy/Liens</td><td style="padding:5px 0">${escapeHtml(bankruptcy_liens)}</td></tr>` : ""}
 				</table>
 
 				<h3 style="font-size:15px;margin:0 0 12px;color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:6px">Fleet (${vehiclesArr.length} Vehicle${vehiclesArr.length !== 1 ? "s" : ""})</h3>
@@ -8399,18 +8404,18 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 
 				<h3 style="font-size:15px;margin:0 0 12px;color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:6px">Banking</h3>
 				<table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:24px">
-					<tr><td style="padding:5px 0;color:#64748b;width:180px">Bank</td><td style="padding:5px 0">${banking.bank_name}</td></tr>
-					${banking.account_type ? `<tr><td style="padding:5px 0;color:#64748b">Account Type</td><td style="padding:5px 0">${banking.account_type}</td></tr>` : ""}
-					<tr><td style="padding:5px 0;color:#64748b">Routing Number</td><td style="padding:5px 0">${piiMask.maskRouting(banking.routing_number)}</td></tr>
-					<tr><td style="padding:5px 0;color:#64748b">Account Number</td><td style="padding:5px 0">${piiMask.maskAccount(banking.account_number)}</td></tr>
-					${banking.account_name ? `<tr><td style="padding:5px 0;color:#64748b">Name on Account</td><td style="padding:5px 0">${banking.account_name}</td></tr>` : ""}
+					<tr><td style="padding:5px 0;color:#64748b;width:180px">Bank</td><td style="padding:5px 0">${escapeHtml(banking.bank_name)}</td></tr>
+					${banking.account_type ? `<tr><td style="padding:5px 0;color:#64748b">Account Type</td><td style="padding:5px 0">${escapeHtml(banking.account_type)}</td></tr>` : ""}
+					<tr><td style="padding:5px 0;color:#64748b">Routing Number</td><td style="padding:5px 0">${escapeHtml(piiMask.maskRouting(banking.routing_number))}</td></tr>
+					<tr><td style="padding:5px 0;color:#64748b">Account Number</td><td style="padding:5px 0">${escapeHtml(piiMask.maskAccount(banking.account_number))}</td></tr>
+					${banking.account_name ? `<tr><td style="padding:5px 0;color:#64748b">Name on Account</td><td style="padding:5px 0">${escapeHtml(banking.account_name)}</td></tr>` : ""}
 				</table>
 
 				<h3 style="font-size:15px;margin:0 0 12px;color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:6px">Signed Documents</h3>
 				<table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:24px">
 					${INVESTOR_ONBOARDING_DOCS.map(doc => {
 						const sig = signatures[doc.key];
-						return `<tr><td style="padding:5px 0;color:#64748b">${doc.name}</td><td style="padding:5px 0;color:#16a34a;font-weight:600">Signed by ${sig.text.trim()}</td></tr>`;
+						return `<tr><td style="padding:5px 0;color:#64748b">${escapeHtml(doc.name)}</td><td style="padding:5px 0;color:#16a34a;font-weight:600">Signed by ${escapeHtml(sig.text.trim())}</td></tr>`;
 					}).join("")}
 				</table>
 				<p style="font-size:13px;color:#64748b">Signed PDFs are attached to this email.</p>
@@ -8433,7 +8438,7 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 		const docWarningHtml = failedDocs.length
 			? `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:700px;margin:0 auto 12px;padding:14px 18px;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;color:#991b1b">
 					<b>ACTION NEEDED — ${failedDocs.length} document(s) NOT signed.</b><br>
-					${failedDocs.map(n => `&bull; ${n}`).join("<br>")}<br><br>
+					${failedDocs.map(n => `&bull; ${escapeHtml(n)}`).join("<br>")}<br><br>
 					The applicant's signature was captured, but the PDF could not be generated, so these are recorded as <b>unsigned</b> and are not attached. Regenerate them before approving this investor.
 				</div>`
 			: "";
@@ -10940,8 +10945,13 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			}
 			const tempPassword = crypto.randomBytes(4).toString("hex");
 			const hash = await bcrypt.hash(tempPassword, 10);
+			// must_change_password = 1, set exactly as the driver acceptance sets it
+			// (PUT /api/applications/:id/status). The temporary password is emailed
+			// in plaintext below, so until it is changed the account can do nothing
+			// else: requireAuth / requireRole refuse it (FORCED PASSWORD CHANGE) and
+			// the client router sends every role to /account/change-password.
 			const userResult = db.prepare(
-				"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name) VALUES (?, ?, 'Investor', '', ?, ?, ?)"
+				"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name, must_change_password) VALUES (?, ?, 'Investor', '', ?, ?, ?, 1)"
 			).run(username, hash, application.email || "", fullName, application.dba || fullName);
 			const userId = userResult.lastInsertRowid;
 
@@ -10986,6 +10996,9 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			res.json({ success: true, accountCreated: true, credentials: { username, tempPassword, userId, investorName: fullName } });
 
 			// Send welcome email to investor (async, non-blocking)
+			// Every interpolated value goes through escapeHtml(), as in the driver
+			// acceptance emails: the name, email and entity type are text typed into
+			// the public /invest form and must render as text.
 			const welcomeHtml = `
 			<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;color:#1e293b">
 				<div style="background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0">
@@ -10993,14 +11006,14 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 				</div>
 				<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
 					<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Welcome to LogisX!</h2>
-					<p style="margin:0 0 12px;line-height:1.6;color:#334155">Hi <b>${fullName}</b>,</p>
+					<p style="margin:0 0 12px;line-height:1.6;color:#334155">Hi <b>${escapeHtml(fullName)}</b>,</p>
 					<p style="margin:0 0 20px;line-height:1.6;color:#334155">Your investor application has been <b style="color:#16a34a">approved</b>. Your account is ready and ${vehicles.length} vehicle(s) have been registered to your fleet.</p>
 
 					<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:20px;margin:0 0 20px">
 						<div style="font-size:12px;font-weight:700;color:#0369a1;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Your Login Credentials</div>
 						<table style="width:100%;border-collapse:collapse;font-size:14px">
-							<tr><td style="padding:6px 0;color:#64748b;width:130px">Username</td><td style="padding:6px 0;font-weight:700;color:#0f172a;font-family:monospace">${username}</td></tr>
-							<tr><td style="padding:6px 0;color:#64748b">Temporary Password</td><td style="padding:6px 0;font-weight:700;color:#d97706;font-family:monospace">${tempPassword}</td></tr>
+							<tr><td style="padding:6px 0;color:#64748b;width:130px">Username</td><td style="padding:6px 0;font-weight:700;color:#0f172a;font-family:monospace">${escapeHtml(username)}</td></tr>
+							<tr><td style="padding:6px 0;color:#64748b">Temporary Password</td><td style="padding:6px 0;font-weight:700;color:#d97706;font-family:monospace">${escapeHtml(tempPassword)}</td></tr>
 						</table>
 					</div>
 
@@ -11028,15 +11041,15 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 				</div>
 				<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
 					<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Investor Accepted</h2>
-					<p style="margin:0 0 20px;line-height:1.6;color:#334155">Investor <b>${fullName}</b> has been accepted and their account has been created.</p>
+					<p style="margin:0 0 20px;line-height:1.6;color:#334155">Investor <b>${escapeHtml(fullName)}</b> has been accepted and their account has been created.</p>
 
 					<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 20px">
 						<table style="width:100%;border-collapse:collapse;font-size:14px">
-							<tr><td style="padding:5px 0;color:#64748b;width:140px">Username</td><td style="padding:5px 0;font-weight:600;font-family:monospace">${username}</td></tr>
-							<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0">${application.email}</td></tr>
-							<tr><td style="padding:5px 0;color:#64748b">Entity Type</td><td style="padding:5px 0">${application.entity_type || "-"}</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b;width:140px">Username</td><td style="padding:5px 0;font-weight:600;font-family:monospace">${escapeHtml(username)}</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0">${escapeHtml(application.email)}</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b">Entity Type</td><td style="padding:5px 0">${escapeHtml(application.entity_type || "-")}</td></tr>
 							<tr><td style="padding:5px 0;color:#64748b">Fleet</td><td style="padding:5px 0;font-weight:600">${vehicles.length} vehicle(s) added</td></tr>
-							<tr><td style="padding:5px 0;color:#64748b">Accepted By</td><td style="padding:5px 0">${req.session.user.username}</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b">Accepted By</td><td style="padding:5px 0">${escapeHtml(req.session.user.username)}</td></tr>
 						</table>
 					</div>
 
@@ -11285,6 +11298,9 @@ async function checkAndCompleteOnboarding(userId) {
 		}).filter(Boolean);
 
 		// Email to driver — documents received + next steps
+		// The name, email, phone and position below all trace back to the public
+		// /apply form (driver_name is the application's full_name), so they go
+		// through escapeHtml() exactly as the application and acceptance emails do.
 		const driverDocsHtml = `
 		<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;color:#1e293b">
 			<div style="background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0">
@@ -11292,7 +11308,7 @@ async function checkAndCompleteOnboarding(userId) {
 			</div>
 			<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none">
 				<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Onboarding Status: Documents Received!</h2>
-				<p style="margin:0 0 12px;line-height:1.6;color:#334155">Hi <b>${driverName}</b>,</p>
+				<p style="margin:0 0 12px;line-height:1.6;color:#334155">Hi <b>${escapeHtml(driverName)}</b>,</p>
 				<p style="margin:0 0 20px;line-height:1.6;color:#334155">Thanks for getting your paperwork squared away. Now that the legal stuff is signed and uploaded, you've officially cleared Phase 1. We are currently reviewing your file.</p>
 
 				<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 24px">
@@ -11339,14 +11355,14 @@ async function checkAndCompleteOnboarding(userId) {
 			</div>
 			<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
 				<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Driver Documents Signed</h2>
-				<p style="margin:0 0 20px;line-height:1.6;color:#334155">Driver <b>${driverName}</b> has signed all ${ONBOARDING_DOCS.length} onboarding documents. Signed copies are attached.</p>
+				<p style="margin:0 0 20px;line-height:1.6;color:#334155">Driver <b>${escapeHtml(driverName)}</b> has signed all ${ONBOARDING_DOCS.length} onboarding documents. Signed copies are attached.</p>
 
 				<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 20px">
 					<table style="width:100%;border-collapse:collapse;font-size:14px">
-						<tr><td style="padding:5px 0;color:#64748b;width:140px">Driver Name</td><td style="padding:5px 0;font-weight:600">${driverName}</td></tr>
-						<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0">${driverEmail}</td></tr>
-						<tr><td style="padding:5px 0;color:#64748b">Phone</td><td style="padding:5px 0">${application?.phone || "—"}</td></tr>
-						<tr><td style="padding:5px 0;color:#64748b">Position</td><td style="padding:5px 0">${application?.position || "—"}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b;width:140px">Driver Name</td><td style="padding:5px 0;font-weight:600">${escapeHtml(driverName)}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0">${escapeHtml(driverEmail)}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Phone</td><td style="padding:5px 0">${escapeHtml(application?.phone || "—")}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Position</td><td style="padding:5px 0">${escapeHtml(application?.position || "—")}</td></tr>
 						<tr><td style="padding:5px 0;color:#64748b">Documents</td><td style="padding:5px 0;font-weight:600;color:#16a34a">${ONBOARDING_DOCS.length}/${ONBOARDING_DOCS.length} Signed</td></tr>
 						<tr><td style="padding:5px 0;color:#64748b">Status</td><td style="padding:5px 0;font-weight:600;color:#d97706">Awaiting Drug Test</td></tr>
 					</table>
@@ -18012,6 +18028,18 @@ app.post("/api/auth/setup", setupLimiter, async (req, res) => {
 // Login — rate limited to prevent brute-force
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, message: { error: "Too many login attempts. Try again in 15 minutes." }, standardHeaders: true });
 app.post("/api/auth/login", loginLimiter, async (req, res) => {
+	// Set once the session rotation below has started. From then on a failure
+	// must not leave a half-built session behind: express-session saves a
+	// regenerated session when the response ends, so a save that failed here and
+	// then succeeded there would hand a signed-in cookie to a response that
+	// reported failure. refuse() destroys it first, and the response sets no
+	// cookie. Before rotation it only answers, so the session the request arrived
+	// with is left exactly as it was.
+	let rotating = false;
+	const refuse = (status, error) => {
+		if (rotating && req.session) req.session.destroy(() => {});
+		return res.status(status).json({ error });
+	};
 	try {
 		const { username, password } = req.body;
 		if (!username || !password) {
@@ -18031,39 +18059,76 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 			return res.status(401).json({ error: "Invalid credentials" });
 		}
 
+		// A NEW SESSION ID FOR EVERY SIGN-IN, as POST /api/auth/setup and
+		// POST /api/auth/change-password already do. regenerate() destroys the
+		// session this request arrived with (SqliteStore runs DELETE FROM sessions
+		// WHERE sid = ?) and issues a fresh ID, so the identity below is only ever
+		// attached to an ID minted by this response, and nothing from the session
+		// the request arrived with carries over. It only ever stored `user`.
+		// scripts/test-login-session-rotation.js pins this.
+		rotating = true;
+		try {
+			await new Promise((resolve, reject) => req.session.regenerate((err) => (err ? reject(err) : resolve())));
+		} catch (regenErr) {
+			console.error("login: session regenerate failed:", regenErr.message);
+			return refuse(500, "Could not start a session. Please try again.");
+		}
+
+		// ⚠️ RE-READ AFTER THE LAST AWAIT (the house rule: no await between a check
+		// and its write). `user` was read before bcrypt.compare and regenerate()
+		// both yielded, so the session is built from the row as it is NOW, and the
+		// sign-in is refused if the account is gone or its password changed in
+		// between: the password just verified is then not this account's password.
+		// Everything from this read to the session assignment is synchronous.
+		const current = db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
+		if (!current || current.password_hash !== user.password_hash) {
+			return refuse(401, "Invalid credentials");
+		}
+
+		req.session.user = {
+			id: current.id,
+			username: current.username,
+			role: current.role,
+			driverName: current.driver_name || "",
+			email: current.email || "",
+			fullName: current.full_name || "",
+			companyName: current.company_name || "",
+			mustChangePassword: !!current.must_change_password,
+		};
+		try {
+			await new Promise((resolve, reject) => req.session.save((err) => (err ? reject(err) : resolve())));
+		} catch (saveErr) {
+			console.error("login: session save failed:", saveErr.message);
+			return refuse(500, "Could not start a session. Please try again.");
+		}
+
 		// This route is the ONLY sign-in path in the app — there are exactly two
 		// bcrypt.compare call sites (here and change-password's current-password
 		// check), so this one stamp covers every role: admin, dispatcher, driver,
-		// investor. Placed AFTER the password check so a failed attempt never
-		// looks like a sign-in. Never throws — see stampLastLogin().
-		stampLastLogin(user.id);
-
-		req.session.user = {
-			id: user.id,
-			username: user.username,
-			role: user.role,
-			driverName: user.driver_name || "",
-			email: user.email || "",
-			fullName: user.full_name || "",
-			companyName: user.company_name || "",
-			mustChangePassword: !!user.must_change_password,
-		};
+		// investor. Placed AFTER the password check and after the session is
+		// saved, so neither a failed attempt nor a sign-in that could not start a
+		// session looks like a sign-in. Never throws — see stampLastLogin().
+		stampLastLogin(current.id);
 
 		res.json({
 			success: true,
 			user: {
-				id: user.id,
-				username: user.username,
-				role: user.role,
-				driverName: user.driver_name || "",
-				companyName: user.company_name || "",
-				fullName: user.full_name || "",
-				mustChangePassword: !!user.must_change_password,
+				id: current.id,
+				username: current.username,
+				role: current.role,
+				driverName: current.driver_name || "",
+				companyName: current.company_name || "",
+				fullName: current.full_name || "",
+				mustChangePassword: !!current.must_change_password,
 			},
 		});
 	} catch (error) {
+		// Through refuse(), so an unexpected throw after rotation (the re-read,
+		// say) cleans up like every other failure. The detail goes to the log,
+		// not to the unauthenticated caller.
 		console.error("Error during login:", error.message);
-		res.status(500).json({ error: error.message });
+		if (res.headersSent) return;
+		refuse(500, "Could not sign in. Please try again.");
 	}
 });
 
@@ -32244,9 +32309,11 @@ function withExpenseWindows(rows, headers, now = Date.now()) {
 			deliveredAt: expenseWindowRule.deliveredAtFromHistory(history.get(keyOf(row)) || []),
 			now,
 		}));
-		// One answer per load id — the gate's: it judges an id across ALL of the
-		// driver's rows (bestExpenseWindow), so two rows of one id must not show
-		// different answers, or one of them would offer a form the gate refuses.
+		// One answer per load id, ranked exactly as the gate ranks it. Defensive:
+		// these rows come from getJobTrackingCached(), which deduplicateLoads() has
+		// already cut to one row per id (the bottom one), so today every id arrives
+		// once. Kept so that, if that ever changes, no two rows of one id could show
+		// different answers — one offering a form the gate refuses.
 		const byId = new Map();
 		rows.forEach((row, i) => {
 			const k = keyOf(row);
@@ -32259,6 +32326,25 @@ function withExpenseWindows(rows, headers, now = Date.now()) {
 	}
 }
 
+// A Driver's receipt must name its load — 400 LOAD_REQUIRED otherwise. With no
+// loadId, POST /api/expenses skipped both the ownership check and the receipt
+// window, and still stamped the expense with the driver's truck and owner, so it
+// reached an investor's P&L attached to no load. The driver app never sends one
+// without a load (its form requires it). Judged on normalizeLoadId(): "#" or a
+// blank string is no load either — and must not reach the ownership check, where
+// a sheet row with a blank Load ID naming the driver would make "#" look owned.
+// Driver role only; Super Admin and Dispatcher are unchanged. Returns true when
+// it has answered.
+function sentIfDriverExpenseLoadMissing(req, res, loadId) {
+	if (req.session?.user?.role !== "Driver") return false;
+	if (normalizeLoadId(loadId)) return false;
+	res.status(400).json({
+		error: "Choose the load this receipt is for, then submit again.",
+		code: "LOAD_REQUIRED",
+	});
+	return true;
+}
+
 // ⚠️ THE GATE. Until this, POST /api/expenses checked OWNERSHIP only — any load
 // naming the driver, in any status, at any age — and the driver app's
 // active-only form was the whole rule. Now a Driver's receipt is refused unless
@@ -32269,21 +32355,27 @@ function withExpenseWindows(rows, headers, now = Date.now()) {
 //     that is the "ask dispatch" every refusal points to.
 //   • Runs AFTER the ownership check (which it does not replace) and BEFORE the
 //     duplicate checks and every write, so a refusal leaves no receipt file.
-//   • Judged on THIS DRIVER'S rows for the id. A load id can sit on two rows, and
-//     a live row beside a cancelled copy must still take receipts; a row naming
-//     another driver never opens the window.
+//   • Judged on the row naming THIS driver for the id — and in practice there is
+//     exactly one, because getJobTrackingCached() has already collapsed every
+//     duplicated id to its BOTTOM row (deduplicateLoads()). So a live row ABOVE a
+//     cancelled "#id" copy is never seen here: the load reads as cancelled and is
+//     refused, consistently with the driver app, which does not list it at all.
+//     The loop still takes a list (and bestExpenseWindow() still ranks one) so
+//     the gate and withExpenseWindows() stay identical should that ever change; a
+//     row naming another driver never opens the window.
 //   • load_status_history is read ONLY when one of those rows is completed, so a
 //     receipt on an active load never depends on that read.
 //   • A failed read REFUSES with a retryable 503, never a 403: the driver did
 //     nothing wrong and the same request succeeds once the read does. It never
 //     admits.
-//   • No loadId → untouched here, as before: the ownership check skips that case
-//     too, and the app never sends one.
+//   • No usable load id → 400 LOAD_REQUIRED. The route refuses that before the
+//     ownership check (sentIfDriverExpenseLoadMissing()); answering it here too
+//     keeps this gate from ever admitting an unattached receipt on its own.
 // Returns true when it has answered.
 async function sentIfDriverExpenseWindowClosed(req, res, loadId, driverName) {
 	if (req.session?.user?.role !== "Driver") return false;
 	const targetLid = normalizeLoadId(loadId);
-	if (!targetLid) return false;
+	if (!targetLid) return sentIfDriverExpenseLoadMissing(req, res, loadId);
 	const unverified = (what, err) => {
 		// The id is caller-supplied: capped and JSON-quoted so it cannot forge a line.
 		console.warn(`[expense-window] could not check load ${JSON.stringify(targetLid.slice(0, 40))}: ${what}${err && err.message ? ` — ${err.message}` : ""}`);
@@ -32413,6 +32505,10 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 			const det = normalizeVendorDetailed(safeDescription);
 			if (det.aliasHit) vendorNormalized = det.normalized;
 		}
+
+		// A Driver's receipt must name its load (400 LOAD_REQUIRED) — without one,
+		// both checks below stood aside. See sentIfDriverExpenseLoadMissing().
+		if (sentIfDriverExpenseLoadMissing(req, res, safeLoadId)) return;
 
 		// SECURITY: drivers can only file expenses against loads assigned to
 		// them. Without this check a driver could pollute another driver's
