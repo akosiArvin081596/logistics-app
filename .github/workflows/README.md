@@ -152,7 +152,7 @@ Tests: `scripts/test-deploy-scripts.js` runs the real scripts through `bash -s` 
 | `behind-already-attempted` | the marker names main's commit | **alarm** |
 | `behind-and-unhealthy` | behind **and** not serving 200 | **alarm**; an incident, not a missed deploy |
 
-A production job that failed on **transport** after staging passed stays healable. That is the case this workflow exists for. A production job that failed **verification** is not healable, because its rollback wrote the marker.
+A production job that failed on **transport** after staging passed stays healable. That is the case this workflow exists for. A production job that failed **verification** is not healable, because its rollback wrote the marker. ⚠️ **A STAGING job that failed on transport is not healable either:** the gate cannot tell it from a staging job that failed verification, so it reads `behind-staging-failed` and alarms. Rerun the Deploy run's failed jobs (`gh run rerun <run-id> --failed`); production then follows staging as usual.
 
 **The marker (`.drift-heal-attempted`) names the one main commit drift must not auto-deploy.** It has three writers, and each means a human decides now:
 - `remote-drift-heal.sh`: a heal of that commit was already attempted. It is written before the deploy, so a heal that dies halfway still counts.
