@@ -208,7 +208,9 @@ const USERS_ALTERS = ["full_name", "company_name", "must_change_password", "last
 });
 
 // ── §1 the acceptance emails, from the shipped route ─────────────────────────
-async function acceptanceMail(routeSrc) {
+// `vals` overrides the stored application's fields (§5 gives each its own marker).
+async function acceptanceMail(routeSrc, vals = {}) {
+	const row = { legal_name: HOSTILE, dba: HOSTILE, entity_type: HOSTILE, email: HOSTILE_EMAIL, ...vals };
 	const db = new Database(":memory:");
 	db.exec(USERS_CREATE);
 	for (const alter of USERS_ALTERS) db.exec(alter);
@@ -231,7 +233,7 @@ async function acceptanceMail(routeSrc) {
 	`);
 	const appId = Number(db.prepare(
 		"INSERT INTO investor_applications (legal_name, dba, entity_type, email, vehicles_json) VALUES (?, ?, ?, ?, ?)",
-	).run(HOSTILE, HOSTILE, HOSTILE, HOSTILE_EMAIL, JSON.stringify([{ year: "2021", make: "Volvo" }])).lastInsertRowid);
+	).run(row.legal_name, row.dba, row.entity_type, row.email, JSON.stringify([{ year: "2021", make: "Volvo" }])).lastInsertRowid);
 
 	let handler = null;
 	const mail = [];
@@ -247,7 +249,7 @@ async function acceptanceMail(routeSrc) {
 	}, { status() { return this; }, json(b) { out.body = b; return this; } });
 	return {
 		body: out.body,
-		welcome: (mail.find((m) => m.to === HOSTILE_EMAIL) || {}).html,
+		welcome: (mail.find((m) => m.to === row.email) || {}).html,
 		admin: (mail.find((m) => m.to === "info@logisx.com") || {}).html,
 	};
 }
@@ -279,6 +281,53 @@ function renderOnboardingTemplates(onboardSrc) {
 		adminDocsHtml: render(liftConst(onboardSrc, "adminDocsHtml"), "adminDocsHtml", b),
 	};
 }
+
+// ── §5/§6 every applicant field of /invest, one marker per field ─────────────
+// §2 binds ONE hostile value to every field. That proves nothing is emitted
+// raw, but not WHICH fields were covered. Here every field gets its own marker,
+// so each is checked by name — including the fields the emails do not show
+// today, which must stay escaped if they are ever added.
+const marker = (name) => `<i data-f="${name}">O'Hare "${name}" & co</i>`;
+// The names the route destructures from req.body: the list the form sends.
+function bodyFieldNames(applySrc) {
+	const m = applySrc.match(/const \{([^}]*)\} = req\.body;/);
+	if (!m) die("no req.body destructuring in /api/public/investor-apply");
+	return m[1].split(",").map((s) => s.trim()).filter(Boolean);
+}
+// An object that answers every key with that key's own marker, and records
+// which keys the template read.
+function markedRecord(prefix, read, known = {}) {
+	return new Proxy(known, {
+		get: (t, k) => {
+			if (typeof k !== "string" || k === "then" || k === "toJSON") return undefined;
+			read.add(k);
+			return k in t ? t[k] : marker(`${prefix}.${k}`);
+		},
+	});
+}
+function renderApplyPerField(applySrc) {
+	const top = bodyFieldNames(applySrc).filter((f) => !["vehicles", "banking", "signatures"].includes(f));
+	const b = { escapeHtml, piiMask, INVESTOR_ONBOARDING_DOCS, failedDocs: [], signedDocCount: INVESTOR_ONBOARDING_DOCS.length };
+	for (const f of top) b[f] = f === "email" ? HOSTILE_EMAIL : marker(f);
+	const vehicleRead = new Set();
+	const bankingRead = new Set();
+	b.vehiclesArr = [markedRecord("vehicle", vehicleRead)];
+	b.banking = markedRecord("banking", bankingRead);
+	b.signatures = Object.fromEntries(INVESTOR_ONBOARDING_DOCS.map((d) => [d.key, { text: marker(`signature.${d.key}`) }]));
+	const vehicleRows = render(liftConst(applySrc, "vehicleRows"), "vehicleRows", b);
+	const applicantHtml = render(liftConst(applySrc, "applicantHtml"), "applicantHtml", b);
+	const adminHtml = render(liftConst(applySrc, "adminHtml"), "adminHtml", { ...b, vehicleRows });
+	// The "ACTION NEEDED" banner above the admin email, when a document failed.
+	const docWarningHtml = render(liftConst(applySrc, "docWarningHtml"), "docWarningHtml",
+		{ ...b, failedDocs: [marker("failedDoc")] });
+	return { top, vehicleRead, bankingRead, bodies: { applicantHtml, adminHtml: docWarningHtml + adminHtml } };
+}
+// What each email is expected to SHOW, escaped. Every other field must simply
+// never appear raw (masked numbers, and fields the emails leave out).
+const SHOWN_TOP = ["legal_name", "dba", "entity_type", "address", "contact_person", "contact_title", "phone", "email",
+	"tax_classification", "years_in_operation", "industry_experience", "bankruptcy_liens"];
+const SHOWN_VEHICLE = ["year", "make", "model", "vin", "licensePlate", "titleState"];
+const SHOWN_BANKING = ["bank_name", "account_type", "account_name"];
 
 async function main() {
 	// §1
@@ -339,6 +388,59 @@ async function main() {
 	for (const p of probe) ok(p.caught, `§4 MUTANT NOT CAUGHT — ${p.label} with escapeHtml() stripped must fail the checks`);
 	ok(stripEscapes(ACCEPT_SRC) !== ACCEPT_SRC && stripEscapes(APPLY_SRC) !== APPLY_SRC && stripEscapes(ONBOARD_SRC) !== ONBOARD_SRC,
 		"§4 the mutants must actually differ from the shipped source");
+
+	// §5 /invest: every field the form sends, one marker each
+	const pf = renderApplyPerField(APPLY_SRC);
+	const all = Object.values(pf.bodies).join("\n");
+	const rawFree = (value) => !all.includes(value);
+	const shown = (value) => all.includes(refEscape(value));
+	ok(pf.top.length >= 16, `§5 the route's own field list must be read (found ${pf.top.length})`);
+	for (const f of pf.top) {
+		const value = f === "email" ? HOSTILE_EMAIL : marker(f);
+		ok(rawFree(value), `§5 /invest field "${f}" must never appear raw in the emails`);
+	}
+	for (const f of SHOWN_TOP) {
+		ok(pf.top.includes(f), `§5 "${f}" must still be one of the fields the route reads`);
+		ok(shown(f === "email" ? HOSTILE_EMAIL : marker(f)), `§5 /invest field "${f}" must be shown, escaped as text`);
+	}
+	ok(!/onmouseover="/i.test(all), "§5 the email address must not break out of its mailto: attribute");
+	for (const k of pf.vehicleRead) ok(rawFree(marker(`vehicle.${k}`)), `§5 vehicle field "${k}" must never appear raw`);
+	for (const k of SHOWN_VEHICLE) ok(shown(marker(`vehicle.${k}`)), `§5 vehicle field "${k}" must be shown, escaped as text`);
+	for (const k of pf.bankingRead) ok(rawFree(marker(`banking.${k}`)), `§5 banking field "${k}" must never appear raw`);
+	for (const k of SHOWN_BANKING) ok(shown(marker(`banking.${k}`)), `§5 banking field "${k}" must be shown, escaped as text`);
+	ok(pf.bankingRead.has("routing_number") && pf.bankingRead.has("account_number") &&
+		!shown(marker("banking.routing_number")) && !shown(marker("banking.account_number")),
+		"§5 the routing and account numbers are read but only ever shown masked");
+	for (const d of INVESTOR_ONBOARDING_DOCS) {
+		const value = marker(`signature.${d.key}`);
+		ok(rawFree(value) && shown(value), `§5 the signature on "${d.key}" must be shown escaped, never raw`);
+	}
+
+	// §6 the "ACTION NEEDED" banner names the failed documents, escaped
+	ok(rawFree(marker("failedDoc")) && shown(marker("failedDoc")), "§6 a failed document's name must be shown escaped, never raw");
+
+	// §5 the acceptance emails, one marker per stored column
+	const accPf = await acceptanceMail(ACCEPT_SRC, { legal_name: marker("legal_name"), dba: marker("dba"), entity_type: marker("entity_type") });
+	const accAll = `${accPf.welcome || ""}\n${accPf.admin || ""}`;
+	for (const f of ["legal_name", "dba", "entity_type"]) {
+		ok(!accAll.includes(marker(f)), `§5 acceptance emails: stored "${f}" must never appear raw`);
+	}
+	ok((accPf.welcome || "").includes(refEscape(marker("legal_name"))), "§5 acceptance welcome: the legal name must be shown, escaped");
+	ok((accPf.admin || "").includes(refEscape(marker("legal_name"))) && (accPf.admin || "").includes(refEscape(marker("entity_type"))),
+		"§5 acceptance admin note: the legal name and entity type must be shown, escaped");
+
+	// §5/§6 DISCRIMINATION: with the escapes stripped, every field shown above
+	// must come out raw, so each per-field check is one that can fail.
+	const pfM = renderApplyPerField(stripEscapes(APPLY_SRC));
+	const allM = Object.values(pfM.bodies).join("\n");
+	const flipped = [
+		...SHOWN_TOP.map((f) => (f === "email" ? HOSTILE_EMAIL : marker(f))),
+		...SHOWN_VEHICLE.map((k) => marker(`vehicle.${k}`)),
+		...SHOWN_BANKING.map((k) => marker(`banking.${k}`)),
+		...INVESTOR_ONBOARDING_DOCS.map((d) => marker(`signature.${d.key}`)),
+		marker("failedDoc"),
+	].filter((v) => !allM.includes(v));
+	ok(flipped.length === 0, `§5/§6 MUTANT NOT CAUGHT — with escapeHtml() stripped these would still pass: ${flipped.join(" | ")}`);
 }
 
 main().then(() => {

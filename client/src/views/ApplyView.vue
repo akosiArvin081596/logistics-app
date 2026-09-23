@@ -256,6 +256,7 @@
 <script setup>
 import { ref, reactive, watch, onMounted } from 'vue'
 import { createFormDraft, deleteIndexedDb } from '../lib/formDraft'
+import { checkEmail } from '../lib/emailAddress'
 import LocationPickerModal from '../components/data-manager/LocationPickerModal.vue'
 import StepPersonalInfo from '../components/apply/StepPersonalInfo.vue'
 import StepExperience from '../components/apply/StepExperience.vue'
@@ -407,7 +408,9 @@ function goToStep(i) {
 function validate(s) {
   if (s === 0) {
     if (!form.first_name || !form.last_name || !form.email || !form.phone || !form.dob || !form.address || !form.city || !form.state || !form.zip || !form.ssn || !form.drivers_license || !form.position || !form.hazmat) return 'Please fill in all required fields in this section.'
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)) return 'Please enter a valid email address.'
+    // Same rule as the server (client copy: src/lib/emailAddress.js), so a bad address is caught here.
+    const email = checkEmail(form.email)
+    if (!email.ok) return email.message
     if (!form.cdl_front || !form.cdl_back || !form.medical_card) return 'Please upload CDL (front and back) and medical card images.'
   }
   if (s === 1) {

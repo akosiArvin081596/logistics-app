@@ -136,7 +136,16 @@
               </select>
             </div>
             <div class="field"><label>Phone <span class="req">*</span></label><input v-model="form.phone" type="tel" placeholder="(555) 123-4567" data-wizard-target="phone" required /></div>
-            <div class="field"><label>Email <span class="req">*</span></label><input v-model="form.email" type="email" placeholder="you@company.com" data-wizard-target="email" required /></div>
+            <div class="field">
+              <label>Email <span class="req">*</span></label>
+              <input
+                v-model="form.email" type="email" placeholder="you@company.com" data-wizard-target="email" required
+                :aria-invalid="showEmailError ? 'true' : 'false'"
+                :aria-describedby="showEmailError ? 'invest-email-error' : undefined"
+                @focus="emailFocused = true" @blur="emailFocused = false"
+              />
+              <p v-if="showEmailError" id="invest-email-error" class="field-error" role="alert">{{ emailCheck.message }}</p>
+            </div>
           </div>
 
           <div class="section-divider">
@@ -515,6 +524,7 @@ import { ref, computed, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { createFormDraft } from '../lib/formDraft'
+import { checkEmail } from '../lib/emailAddress'
 import InvestorSignModal from '../components/invest/InvestorSignModal.vue'
 import LocationPickerModal from '../components/data-manager/LocationPickerModal.vue'
 import InvestWizardOverlay from '../wizard/components/InvestWizardOverlay.vue'
@@ -943,7 +953,15 @@ async function useCurrentLocation() {
   )
 }
 
-const canProceedStep1 = computed(() => form.legal_name && form.email && form.phone && form.address && form.ein_ssn)
+// The email is checked here, on the step it is typed, with the server's own rule
+// (client copy: src/lib/emailAddress.js). Otherwise a typo is refused only at the
+// final submit, after every document has been signed.
+const emailCheck = computed(() => checkEmail(form.email))
+const emailFocused = ref(false)
+// Shown once the applicant leaves the field, never while they are still typing.
+const showEmailError = computed(() => !!form.email && !emailCheck.value.ok && !emailFocused.value)
+const step0FieldsFilled = computed(() => !!(form.legal_name && form.email && form.phone && form.address && form.ein_ssn))
+const canProceedStep1 = computed(() => step0FieldsFilled.value && emailCheck.value.ok)
 const allVehiclesValid = computed(() => vehicles.value.every(v => v.year && v.make && v.model && v.vin))
 const signedCount = computed(() => documents.value.filter(d => d.signed).length)
 const canSubmitBanking = computed(() => banking.bank_name && banking.routing_number && banking.account_number)
@@ -1037,7 +1055,8 @@ async function submitOnboarding() {
     step.value = 0
     maxStep.value = Math.max(maxStep.value, 0)
     showReviewModal.value = false
-    toast('Please complete your business details before submitting.', 'error')
+    // When every field is filled, the email is what failed: say so.
+    toast(step0FieldsFilled.value ? emailCheck.value.message : 'Please complete your business details before submitting.', 'error')
     return
   }
   if (signedCount.value < totalDocs) {
@@ -1341,6 +1360,8 @@ async function submitOnboarding() {
 .field label { font-size: 0.75rem; font-weight: 600; color: #475569; }
 .req { color: #ef4444; }
 .opt { font-weight: 400; color: #94a3b8; font-size: 0.72rem; }
+.field-error { margin: 0; font-size: 0.72rem; color: #ef4444; }
+.field input[aria-invalid="true"] { border-color: #ef4444; }
 
 .field input,
 .field select {

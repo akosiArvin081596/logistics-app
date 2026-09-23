@@ -88,7 +88,7 @@
     },
     "STEP0_REVIEW": {
       "title": "Ready to continue?",
-      "body": "Nice work — that's Step 1 done. Click Continue at the bottom to move on to your fleet and documents. If the button is grey, you've missed a required field (legal name, address, phone, email, or EIN/SSN).",
+      "body": "Nice work — that's Step 1 done. Click Continue at the bottom to move on to your fleet and documents. If the button is grey, you've missed a required field (legal name, address, phone, email, or EIN/SSN), or the email address isn't valid.",
       "target": "[data-wizard-target='continue-step0']",
       "action": "click",
       "highlight": "pulse",
@@ -307,7 +307,7 @@
     },
     "continue_grey": {
       "q": "Why is the Continue button grey?",
-      "a": "You're missing a required field. The required fields are: Legal Name, Principal Address, Phone, Email, and EIN/SSN. Fill all of them and the button turns blue.",
+      "a": "You're missing a required field, or the email address isn't valid. The required fields are: Legal Name, Principal Address, Phone, Email, and EIN/SSN. Fill all of them with a valid email address and the button turns blue.",
       "category": "troubleshooting"
     },
     "do_i_need_to_own": {
