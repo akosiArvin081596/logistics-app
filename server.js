@@ -33130,79 +33130,139 @@ function imageToPdf(imageBuffers) {
 	});
 }
 
-// Receipt OCR text, via tesseract.js. Called ONLY by queueReceiptOcr() below,
-// after the upload has answered; it logs and swallows whatever this throws.
+// Receipt OCR text for POST /api/documents/upload. Called ONLY by
+// queueReceiptOcr() below, after the upload has answered; that logs and
+// swallows whatever this throws.
 //
-// ⚠️ TESSERACT.JS CAN KILL THE PROCESS FROM OUTSIDE ANY try/catch. In 7.0.0 a
-// failed job rejects its promise AND THEN — unless the worker was created with
-// an `errorHandler` — throws from the worker's 'message' listener
-// (node_modules/tesseract.js/src/createWorker.js, `throw Error(data)`). A throw
-// in an event listener reaches no caller: it is an uncaught exception, and the
-// server exits. A crafted 76-byte JPEG that passes isValidImageMagic() and
-// pdfkit is enough, so any driver with a load could do it — and so could a
-// corrupt photo. Tesseract.recognize(), used here until 2026-09-23, passes no
-// errorHandler. So, all four, together:
-//   1. createWorker(…, { errorHandler }): the listener logs instead of throwing.
-//   2. A deadline on BOTH steps. createWorker()'s promise rejects only for a
-//      failed 'load'; a failed language download or `initialize` leaves it
-//      pending FOREVER, which would park the one-at-a-time queue and quietly
-//      stop all OCR until a restart.
-//   3. terminate() in `finally`, on every path — including a recognition that
-//      timed out — and on arrival for a worker that finishes starting late. An
-//      abandoned worker is a live thread holding the wasm core.
-//   4. A start that failed or timed out pauses OCR for RECEIPT_OCR_BACKOFF_MS.
-//      A start that never settles leaves a worker nothing can reach to
-//      terminate, so retrying on every receipt through an outage would leak one
-//      thread per receipt.
-// ⚠️ NOT covered, and not reachable from a request: when `initialize` fails (a
-// corrupt cached ./eng.traineddata) the worker script sends 'reject' and THEN
-// 'resolve' for the same job, and createWorker's listener throws a TypeError on
-// the second, errorHandler or not. Only running OCR in a child process closes
-// that. scripts/test-receipt-ocr-crash.js pins 1-4 against the real listener.
-const RECEIPT_OCR_TIMEOUT_MS = 90_000;        // per step: starting the worker, then reading the image
-const RECEIPT_OCR_BACKOFF_MS = 30 * 60_000;   // after a worker start that failed or timed out
-let receiptOcrPausedUntil = 0;
-function receiptOcrDeadline(promise, step) {
-	let timer;
-	const deadline = new Promise((_, reject) => {
-		timer = setTimeout(() => reject(new Error(`tesseract ${step} timed out after ${RECEIPT_OCR_TIMEOUT_MS} ms`)), RECEIPT_OCR_TIMEOUT_MS);
-	});
-	return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+// ⚠️ THE OCR ENGINE NEVER RUNS IN THIS PROCESS. Each job runs in its own
+// short-lived child (lib/tesseract-ocr-child.js), so however the engine fails —
+// an error it throws, one it never catches, a start that never finishes, memory
+// it does not give back — the failure ends with that child. It is killed at the
+// deadline, and the server carries on. Never require("tesseract.js") here;
+// scripts/test-receipt-ocr-crash.js fails if anything does.
+//
+// Images over RECEIPT_OCR_MAX_PIXELS are not OCR'd at all: the cost of decoding
+// grows with pixel count, not file size. The app scales every photo to ~1.6 MP
+// before upload, so only an image that did not come through the app reaches the
+// limit, and the receipt itself is still stored.
+//
+// The model is fetched once from a version-pinned URL (RECEIPT_OCR_LANG_PATH)
+// and cached in RECEIPT_OCR_CACHE_DIR, which git ignores. A child that dies
+// before its model has loaded takes the cached copy with it, so a damaged model
+// is fetched again instead of failing every receipt after it. One that dies
+// later died on its image, and the model is kept.
+const RECEIPT_OCR_TIMEOUT_MS = 90_000;        // one budget for the whole job: start, model, recognition
+const RECEIPT_OCR_MAX_PIXELS = 25_000_000;    // above this, the receipt is stored without OCR text
+const RECEIPT_OCR_CHILD = path.join(__dirname, "lib", "tesseract-ocr-child.js");
+const RECEIPT_OCR_CACHE_DIR = path.join(__dirname, ".cache", "tesseract");
+const RECEIPT_OCR_LANG_PATH = "https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int";
+
+// An image's pixel dimensions, read from its header without decoding it. PNG
+// (IHDR) and JPEG (the first frame header) only — the two formats imageToPdf()
+// accepts, and so the only two that reach OCR. null when the header cannot be
+// read. Bounded: every step of the JPEG walk moves forward.
+function receiptImageSize(buf) {
+	if (!Buffer.isBuffer(buf) || buf.length < 24) return null;
+	if (buf.readUInt32BE(0) === 0x89504e47 && buf.readUInt32BE(4) === 0x0d0a1a0a) {
+		if (buf.toString("latin1", 12, 16) !== "IHDR") return null;
+		const width = buf.readUInt32BE(16), height = buf.readUInt32BE(20);
+		return width > 0 && height > 0 ? { width, height } : null;
+	}
+	if (buf[0] !== 0xff || buf[1] !== 0xd8) return null;
+	let i = 2;
+	while (i + 9 < buf.length) {
+		if (buf[i] !== 0xff) return null;                       // not at a marker: malformed
+		const marker = buf[i + 1];
+		if (marker === 0xff) { i += 1; continue; }              // fill byte
+		if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) { i += 2; continue; }   // no length
+		if (marker === 0xd9 || marker === 0xda) return null;    // image data before any frame header
+		const length = buf.readUInt16BE(i + 2);
+		if (length < 2) return null;
+		// SOF0-SOF15, except DHT (C4), JPG (C8) and DAC (CC), which share the range.
+		if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+			const height = buf.readUInt16BE(i + 5), width = buf.readUInt16BE(i + 7);
+			return width > 0 && height > 0 ? { width, height } : null;
+		}
+		i += 2 + length;
+	}
+	return null;
 }
+
 async function extractReceiptText(imageBuffer) {
-	if (Date.now() < receiptOcrPausedUntil) {
-		throw new Error(`receipt OCR is paused after a failed worker start, until ${new Date(receiptOcrPausedUntil).toISOString()}`);
+	const size = receiptImageSize(imageBuffer);
+	if (!size) throw new Error("receipt OCR skipped: image dimensions could not be read");
+	if (size.width * size.height > RECEIPT_OCR_MAX_PIXELS) {
+		throw new Error(`receipt OCR skipped: ${size.width}x${size.height} image is over the ${RECEIPT_OCR_MAX_PIXELS / 1e6} MP limit`);
 	}
-	const { createWorker } = require("tesseract.js");
-	const starting = createWorker("eng", 1, {
-		errorHandler: (data) => console.warn(`[upload] tesseract job failed (non-critical): ${String(data).slice(0, 200)}`),
-	});
-	let worker = null;
-	try {
+	return runReceiptOcrChild(imageBuffer);
+}
+
+// One OCR job in its own process. Resolves with the text; rejects on anything
+// else — a failure the child reports, a child that dies, the deadline. Settles
+// exactly once, and the child never outlives it.
+function runReceiptOcrChild(imageBuffer) {
+	const { fork } = require("child_process");
+	return new Promise((resolve, reject) => {
+		let child;
 		try {
-			worker = await receiptOcrDeadline(starting, "worker start");
+			child = fork(RECEIPT_OCR_CHILD, [], {
+				cwd: __dirname,
+				env: {},                  // the engine needs nothing from the server's environment
+				execArgv: [],             // and none of its runtime flags
+				serialization: "advanced",
+				stdio: ["ignore", "ignore", "pipe", "ipc"],
+			});
 		} catch (err) {
-			starting.then((late) => Promise.resolve(late.terminate()).catch(() => {}), () => {});
-			receiptOcrPausedUntil = Date.now() + RECEIPT_OCR_BACKOFF_MS;
-			console.warn(`[upload] receipt OCR paused for ${Math.round(RECEIPT_OCR_BACKOFF_MS / 60_000)} min: ${(err && err.message) || err}`);
-			throw err;
+			reject(err);
+			return;
 		}
-		const { data: { text } } = await receiptOcrDeadline(worker.recognize(imageBuffer), "recognition");
-		return String(text || "").trim();
-	} finally {
-		if (worker) {
-			try { await worker.terminate(); } catch { /* already gone */ }
+		let settled = false;
+		let modelLoaded = false;
+		let stderr = "";
+		const finish = (err, text) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+			if (err) reject(err);
+			else resolve(text);
+		};
+		const timer = setTimeout(() => finish(new Error(`receipt OCR timed out after ${RECEIPT_OCR_TIMEOUT_MS} ms`)), RECEIPT_OCR_TIMEOUT_MS);
+		child.stderr.setEncoding("utf8").on("data", (chunk) => { if (stderr.length < 2000) stderr += chunk; });
+		child.on("error", (err) => finish(err));
+		child.on("message", (msg) => {
+			if (msg && msg.ready === true) { modelLoaded = true; return; }
+			if (msg && typeof msg.text === "string") finish(null, msg.text.trim());
+			else finish(new Error(`receipt OCR failed: ${String((msg && msg.error) || "no result").slice(0, 200)}`));
+		});
+		// 'close', not 'exit': it follows the last IPC message, so "no answer" is final.
+		// A child that died before its model loaded drops the cached model — BEFORE
+		// the job settles, synchronously: the queue starts the next job the moment
+		// this one settles, and that job must not read the same copy.
+		child.on("close", (code, signal) => {
+			if (settled) return;
+			if (!modelLoaded) {
+				try { fs.rmSync(path.join(RECEIPT_OCR_CACHE_DIR, "eng.traineddata"), { force: true }); } catch { /* best effort */ }
+			}
+			const last = stderr.trim().split("\n").pop() || "";
+			finish(new Error(`receipt OCR process exited (${signal || `code ${code}`})${last ? `: ${last.slice(0, 200)}` : ""}`));
+		});
+		try {
+			child.send({ image: imageBuffer, cachePath: RECEIPT_OCR_CACHE_DIR, langPath: RECEIPT_OCR_LANG_PATH }, (err) => {
+				if (err) finish(err);
+			});
+		} catch (err) {
+			finish(err);
 		}
-	}
+	});
 }
 
 // Receipt OCR for POST /api/documents/upload, run AFTER the response is sent.
 // Nothing reads the text synchronously — only documents.ocr_text, which
 // GET /api/documents/:loadId serves to DocumentList later — so the upload no
-// longer waits on it. ONE AT A TIME: every receipt starts its own tesseract
-// worker (which fetches eng.traineddata from a CDN when it is not cached), and
-// off the request path nothing else would stop a burst of uploads running them
-// all at once. Past RECEIPT_OCR_MAX_PENDING a receipt is stored without text, which
+// longer waits on it. ONE AT A TIME: every receipt starts its own OCR process
+// (see extractReceiptText()), and off the request path nothing else would stop
+// a burst of uploads running them all at once. Past RECEIPT_OCR_MAX_PENDING a receipt is stored without text, which
 // is exactly what an OCR failure has always done. Writes by documents.id, the
 // PRIMARY KEY — documents.file_name has no unique index. Never throws.
 const RECEIPT_OCR_MAX_PENDING = 20;
