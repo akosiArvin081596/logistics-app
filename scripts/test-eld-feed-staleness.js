@@ -54,7 +54,10 @@
  *   §5 MUTANTS. Each deliberately reintroduces one plausible mistake and must be
  *      caught, including the two that would make this feature silently useless:
  *      fuel_event_alerts' bare `alerted_at` short-circuit, and stamping
- *      alerted_at before the send.
+ *      alerted_at before the send. Also the opposite failure, a feed that is too
+ *      LOUD: one flapping at the trickle floor mails once a day, not on every
+ *      re-open (the re-open cooldown), and the daily cap counts SENDS in a window
+ *      measured by instant, not ledger rows compared as text.
  *
  * ⚠️ THE SCRATCH DATABASE IS A mkdtemp, NEVER THE REPO'S app.db. It also creates
  * routemate_vehicles with the EXACT production column list — which has no
@@ -133,11 +136,28 @@ const FNS = [
 	"eldFeedSnapshot",
 	"eldFeedVerdicts",
 	"eldFeedHealthReport",
+	"eldAlertSendsInWindow",
+	"recordEldAlertSend",
 	"alertEldFeedSilence",
 	"sweepEldFeedSilence",
 	"maybeSweepEldFeedSilence",
 	"escHtml",
 ];
+
+// Single-line constants taken out of server.js, like the functions: the re-open
+// cooldown and the send log's key are part of the shipped behaviour under test.
+function extractConst(name) {
+	const needle = `\nconst ${name} = `;
+	const hits = SRC.split(needle).length - 1;
+	if (hits !== 1) throw new Error(`expected exactly 1 const ${name} in server.js, found ${hits}`);
+	const start = SRC.indexOf(needle) + 1;
+	return SRC.slice(start, SRC.indexOf("\n", start));
+}
+const SERVER_STATE_DDL = (() => {
+	const m = SRC.match(/CREATE TABLE IF NOT EXISTS server_state \([\s\S]*?\n\t\)/g);
+	if (!m || m.length !== 1) throw new Error(`expected exactly 1 server_state DDL in server.js, found ${m ? m.length : 0}`);
+	return m[0];
+})();
 
 // Build the shipped functions against a real fixture DB and recording stubs.
 // ONLY the outside world is stubbed: mail, sockets, the notification INSERT and
@@ -174,6 +194,8 @@ function loadShipped(db, opts = {}, mutate = (s) => s) {
 		`const ELD_STALE_MIN_FIXES = ${env.ELD_STALE_MIN_FIXES};\n` +
 		`const ELD_UNLINKED_LOOKBACK_HOURS = ${env.ELD_UNLINKED_LOOKBACK_HOURS};\n` +
 		`const ELD_STALE_ALERT_MAX_PER_DAY = ${env.ELD_STALE_ALERT_MAX_PER_DAY};\n` +
+		`${extractConst("ELD_STALE_REOPEN_COOLDOWN_MS")}\n` +
+		`${extractConst("ELD_ALERT_SEND_LOG_KEY")}\n` +
 		`const eldFeedSweepHealth = { lastRun: null, lastError: null, lastFeeds: 0, lastAlerted: 0, lastResolved: 0 };\n` +
 		`let eldFeedSweepRunning = false;\n`;
 
@@ -182,7 +204,7 @@ function loadShipped(db, opts = {}, mutate = (s) => s) {
 	const built = new Function(
 		"db", "eldFeedHealth", "todayKeyCT", "sendEmail", "insertDispatchNotification", "io", "console", "process",
 		src,
-	)(db, feedLib, () => opts.todayKey || "2026-09-19", sendEmail, insertDispatchNotification, io, quiet,
+	)(db, opts.lib || feedLib, () => opts.todayKey || "2026-09-19", sendEmail, insertDispatchNotification, io, quiet,
 		{ env: { GMAIL_USER: "ops@example.invalid" } });
 	return { ...built, rec, db };
 }
@@ -231,6 +253,9 @@ function freshDb() {
 	// DDL is valid SQLite at all: `node --check` parses JavaScript, not the SQL
 	// string inside it, so a typo there would otherwise surface on boot in prod.
 	db.exec(LEDGER_DDL);
+	// The send log behind the daily cap lives in server_state — same rule, the
+	// shipped DDL.
+	db.exec(SERVER_STATE_DDL);
 	// ⚠️ EXACT PRODUCTION COLUMN LIST — there is deliberately NO `source` column
 	// here. CLAUDE.md's Linxup paragraph reads as if routemate_vehicles gained
 	// one in PR #351; it did not, the ALTER landed on routemate_telemetry. Any
@@ -521,6 +546,29 @@ section("§2 pure — lib/eld-feed-health.js");
 	eq("§2.49 summary counts ok", sum.ok, 1);
 	eq("§2.50 summary counts total", sum.total, 4);
 }
+{
+	// The alert cap's window and the re-open cooldown, compared as epoch ms.
+	const T = Date.UTC(2026, 8, 23, 4, 0, 0);   // 2026-09-23 04:00 UTC
+	eq("§2.51 an ISO stamp reads as its instant", feedLib.stampMs("2026-09-22T10:00:00.000Z"), Date.UTC(2026, 8, 22, 10));
+	eq("§2.52 ⚠️ a bare SQLite stamp reads as UTC, never local time", feedLib.stampMs("2026-09-22 10:00:00"), Date.UTC(2026, 8, 22, 10));
+	ok("§2.53 an unreadable stamp is NaN, not zero", Number.isNaN(feedLib.stampMs("yesterday")) && Number.isNaN(feedLib.stampMs("")));
+	const W = feedLib.ALERT_WINDOW_MS;
+	const sends = [
+		new Date(T - 23 * HOUR).toISOString(),   // inside
+		new Date(T - 25 * HOUR).toISOString(),   // outside
+		"2026-09-22T00:00:00.000Z",              // on the cutoff's own DATE, 28 h before: outside
+		"2026-09-22 05:00:00",                   // SQLite form, 23 h before: inside
+		"not a stamp",
+	];
+	eq("§2.54 ⚠️ the window counts by instant — the cutoff's own date is not 'inside'",
+		JSON.stringify(feedLib.sendsInWindow(sends, T, W)), JSON.stringify([sends[0], sends[3]]));
+	eq("§2.55 no send log is zero sends", feedLib.sendsInWindow(null, T, W).length, 0);
+	const C = feedLib.DEFAULT_REOPEN_COOLDOWN_HOURS * HOUR;
+	eq("§2.56 a resolved feed alerted 2 h ago is still cooling down", feedLib.reopenCooldownActive(new Date(T - 2 * HOUR).toISOString(), T, C), true);
+	eq("§2.57 …one alerted 25 h ago may alert again", feedLib.reopenCooldownActive(new Date(T - 25 * HOUR).toISOString(), T, C), false);
+	eq("§2.58 …and one never delivered has no cooldown", feedLib.reopenCooldownActive(null, T, C), false);
+	eq("§2.59 the cooldown is a day", feedLib.DEFAULT_REOPEN_COOLDOWN_HOURS, 24);
+}
 
 // ════════════════════════════════════ §3 BEHAVIOURAL — real DB, shipped queries
 section("§3 behavioural — the shipped sweep against a real SQLite database");
@@ -627,19 +675,33 @@ async function run() {
 		ok("§4.6 the sweep counted the resolution", r2.resolved >= 1);
 		eq("§4.7 first_seen is untouched by resolution", resolvedRow.first_seen, firstSeen);
 
-		// RE-OPEN — the device dies a second time. This is the case a bare
-		// `alerted_at` short-circuit would silence forever.
+		// RE-OPEN — the device dies a second time, the same day. Inside the re-open
+		// cooldown that is held, not mailed: the row stays resolved and its last
+		// alert is the cooldown's clock.
 		db.prepare("DELETE FROM routemate_telemetry WHERE routemate_vehicle_id = ? AND location_date_ms > ?")
 			.run(VID.t302, Date.now() - DAY);
 		const mail2 = S.rec.emails.length;
 		await S.sweepEldFeedSilence();
+		const held = alertRow(db, VID.t302);
+		ok("§4.8 ⚠️ within the re-open cooldown a re-silence is NOT mailed again", S.rec.emails.length === mail2);
+		ok("§4.8a …the row stays resolved and keeps its last alert as the clock", !!held.resolved_at && held.alerted_at === alertedAt);
+		const heldFeed = S.eldFeedHealthReport(Date.now()).feeds.find((f) => f.vehicleId === VID.t302);
+		ok("§4.8b …and the health report says the alert is held, until a day after it went out",
+			!!heldFeed && heldFeed.alerting === true && !!heldFeed.alertHeldUntil
+				&& Math.abs(Date.parse(heldFeed.alertHeldUntil) - (Date.parse(alertedAt) + DAY)) < 1000,
+			JSON.stringify(heldFeed && { alerting: heldFeed.alerting, alertHeldUntil: heldFeed.alertHeldUntil, alertedAt }));
+		// A day on, still dark: now it re-opens and reports. This is the case a bare
+		// `alerted_at` short-circuit would silence forever.
+		const dayOld = new Date(Date.now() - 25 * HOUR).toISOString();
+		db.prepare("UPDATE eld_feed_alerts SET alerted_at = ? WHERE alert_key = ?").run(dayOld, `vid:${VID.t302}`);
+		await S.sweepEldFeedSilence();
 		const reopened = alertRow(db, VID.t302);
-		eq("§4.8 re-silence clears resolved_at (the row re-opens)", reopened.resolved_at, null);
-		eq("§4.9 ⚠️ first_seen SURVIVES the round trip", reopened.first_seen, firstSeen);
-		ok("§4.10 the re-open alerts again", S.rec.emails.length > mail2);
-		eq("§4.11 still exactly one ledger row (upsert, not a second row)",
+		eq("§4.9 past the cooldown the re-silence clears resolved_at (the row re-opens)", reopened.resolved_at, null);
+		eq("§4.10 ⚠️ first_seen SURVIVES the round trip", reopened.first_seen, firstSeen);
+		ok("§4.11 the re-open alerts again", S.rec.emails.length > mail2);
+		eq("§4.11a still exactly one ledger row (upsert, not a second row)",
 			db.prepare("SELECT COUNT(*) c FROM eld_feed_alerts WHERE alert_key = ?").get(`vid:${VID.t302}`).c, 1);
-		ok("§4.12 alerted_at is restamped on the re-open", alertRow(db, VID.t302).alerted_at !== alertedAt);
+		ok("§4.12 alerted_at is restamped on the re-open", reopened.alerted_at !== dayOld && reopened.alerted_at !== alertedAt);
 		void fresh;
 		db.close();
 	}
@@ -754,6 +816,9 @@ async function run() {
 		}
 		await S.sweepEldFeedSilence();                                   // resolves
 		db.prepare("DELETE FROM routemate_telemetry WHERE routemate_vehicle_id = ? AND location_date_ms > ?").run(VID.t302, Date.now() - DAY);
+		// Past the re-open cooldown, so the SHIPPED code would report here (§4.9–§4.11)
+		// and only the mutant's short-circuit can keep it quiet.
+		db.prepare("UPDATE eld_feed_alerts SET alerted_at = ? WHERE alert_key = ?").run(new Date(Date.now() - 25 * HOUR).toISOString(), `vid:${VID.t302}`);
 		const before = S.rec.emails.length;
 		await S.sweepEldFeedSilence();                                   // re-silence
 		ok("§5.18 MUTANT (bare alerted_at short-circuit) is CAUGHT — the re-open goes silent",
@@ -852,6 +917,92 @@ async function run() {
 		ok("§5.27 capped feeds are still RECORDED, not lost",
 			db.prepare("SELECT COUNT(*) c FROM eld_feed_alerts").get().c >= 2);
 		db.close();
+	}
+
+	// ⚠️ THE FLAPPING FEED. A device hovering at the trickle floor crosses it back
+	// and forth: each dip resolves the row, each drop re-opens it. The daily cap
+	// counted LEDGER ROWS and a re-open overwrites alerted_at, so one such feed
+	// counted once however often it mailed — every other hourly sweep, all day.
+	async function flap(S, db, cycles) {
+		const topUp = db.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, speed, location_date_ms, dropped_reason, source) VALUES (?,?,?,?,?,?,?)");
+		for (let c = 0; c < cycles; c++) {
+			for (let i = 1; i <= feedLib.DEFAULT_MIN_FIXES_24H + 5; i++) topUp.run(VID.trickle, 29.7, -95.4, 0, Date.now() - 2 * HOUR - c * 1000 - i, "", "");
+			await S.sweepEldFeedSilence();   // over the floor: resolves
+			db.prepare("DELETE FROM routemate_telemetry WHERE routemate_vehicle_id = ? AND location_date_ms > ?").run(VID.trickle, Date.now() - 2 * HOUR - 60 * 1000);
+			await S.sweepEldFeedSilence();   // back under: bad again
+		}
+	}
+	const trickleMails = (S) => S.rec.emails.filter((e) => e.html.includes(VID.trickle)).length;
+	async function flappingChecks(mutate, lib) {
+		const db = seedProduction(freshDb(), Date.now());
+		const S = loadShipped(db, { lib }, mutate);
+		await S.sweepEldFeedSilence();                 // the first alert
+		await flap(S, db, 6);                          // six dips and drops in one day
+		const sameDay = trickleMails(S);
+		db.prepare("UPDATE eld_feed_alerts SET alerted_at = ? WHERE alert_key = ?").run(new Date(Date.now() - 25 * HOUR).toISOString(), `vid:${VID.trickle}`);
+		await flap(S, db, 1);                          // a day after that alert, still flapping
+		const nextDay = trickleMails(S);
+		db.close();
+		return { sameDay, nextDay };
+	}
+	{
+		const r = await flappingChecks();
+		eq("§5.28 ⚠️ a feed flapping at the trickle floor all day mails ONCE", r.sameDay, 1);
+		eq("§5.29 …and once more a day later if it is still flapping", r.nextDay, 2);
+		const m = await flappingChecks((s) => s.replace(
+			"if (seen && seen.resolved_at && eldFeedHealth.reopenCooldownActive(seen.alerted_at, Date.now(), ELD_STALE_REOPEN_COOLDOWN_MS)) {",
+			"if (false) {"));
+		ok("§5.30 MUTANT (no re-open cooldown) is CAUGHT — the flapping feed mails on every re-open", m.sameDay > 1, `sameDay=${m.sameDay}`);
+	}
+
+	// THE CAP COUNTS SENDS, in a window measured by instant.
+	async function capWindowChecks(mutate, lib) {
+		const out = {};
+		{
+			// Three sends in the last day and a cap of three: nothing more goes out.
+			const db = seedProduction(freshDb(), Date.now());
+			const recent = [3, 9, 20].map((h) => new Date(Date.now() - h * HOUR).toISOString());
+			db.prepare("INSERT INTO server_state (key, value) VALUES (?, ?)").run("eld_feed_alert_sends", JSON.stringify(recent));
+			const S = loadShipped(db, { maxPerDay: 3, lib }, mutate);
+			await S.sweepEldFeedSilence();
+			out.capped = S.rec.emails.length;
+			db.close();
+		}
+		{
+			// Three sends from BEFORE the 24 h cutoff, on the cutoff's own date: they
+			// do not count, so the sweep reports. Compared as text against SQLite's
+			// "… …" cutoff, "…T00:00:00.000Z" sorts after it and all three would.
+			const db = seedProduction(freshDb(), Date.now());
+			const day = new Date(Date.now() - DAY).toISOString().slice(0, 10);
+			db.prepare("INSERT INTO server_state (key, value) VALUES (?, ?)").run("eld_feed_alert_sends", JSON.stringify([0, 1, 2].map(() => `${day}T00:00:00.000Z`)));
+			const S = loadShipped(db, { maxPerDay: 3, lib }, mutate);
+			await S.sweepEldFeedSilence();
+			out.stale = S.rec.emails.length;
+			out.logged = JSON.parse(db.prepare("SELECT value FROM server_state WHERE key = 'eld_feed_alert_sends'").get().value).length;
+			db.close();
+		}
+		return out;
+	}
+	{
+		const r = await capWindowChecks();
+		eq("§5.31 ⚠️ the cap counts SENDS: three in the last day, cap three — nothing more is mailed", r.capped, 0);
+		eq("§5.32 sends older than 24 h do not count, even on the cutoff's own date", r.stale, 3);
+		eq("§5.33 the send log is pruned to the window when written (3 new, the 3 stale dropped)", r.logged, 3);
+		const rows = await capWindowChecks((s) => s.replace(
+			"const alertedToday = eldAlertSendsInWindow(Date.now()).length;",
+			"const alertedToday = db.prepare(\"SELECT COUNT(*) AS c FROM eld_feed_alerts WHERE alerted_at > datetime('now', '-1 day')\").get().c;"));
+		ok("§5.34 MUTANT (cap counts ledger rows) is CAUGHT — three recent sends do not stop a fourth", rows.capped > 0, `capped=${rows.capped}`);
+		// The window compared as TEXT against SQLite's cutoff form — the original
+		// stretch. Built as a mutated copy of the lib, loaded the way the shipped one is.
+		const libSrc = fs.readFileSync(path.join(ROOT, "lib", "eld-feed-health.js"), "utf8");
+		const textWindow = libSrc.replace(
+			"const t = stampMs(s);\n\t\treturn Number.isFinite(t) && t > from;",
+			"return typeof s === \"string\" && s > new Date(from).toISOString().replace(\"T\", \" \").slice(0, 19);");
+		if (textWindow === libSrc) throw new Error("mutant anchor not found: sendsInWindow");
+		const mod = { exports: {} };
+		new Function("module", "exports", "require", textWindow)(mod, mod.exports, require);
+		const txt = await capWindowChecks(undefined, mod.exports);
+		ok("§5.35 MUTANT (window compared as text) is CAUGHT — stale same-date sends block the alert", txt.stale === 0, `stale=${txt.stale}`);
 	}
 
 	// ---------------------------------------------------------------- report

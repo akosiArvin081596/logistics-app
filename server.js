@@ -2638,8 +2638,19 @@ const ELD_UNLINKED_LOOKBACK_HOURS =
 // driver onboarding, investor outreach and the weekly invoice batch, so
 // exhausting Gmail's quota here would silence every channel this feature needs.
 // The fleet is 6 trucks; 25 is far above any real defect rate.
+// ⚠️ Counted as SENDS (eldAlertSendsInWindow), never as ledger rows: the ledger
+// holds one row per feed and a re-open overwrites its alerted_at, so a feed that
+// mailed six times in a day counted once.
 const ELD_STALE_ALERT_MAX_PER_DAY =
 	Math.max(1, parseInt(process.env.ELD_STALE_ALERT_MAX_PER_DAY ?? "25", 10) || 25);
+// ⚠️ RE-OPEN COOLDOWN. A RESOLVED feed may alert again only once its previous
+// alert is this old. A feed hovering at the trickle floor otherwise resolved and
+// re-opened every other sweep, and each re-open was a fresh email. While it waits
+// the row stays resolved and keeps its alerted_at, which is the cooldown's clock.
+const ELD_STALE_REOPEN_COOLDOWN_MS = eldFeedHealth.DEFAULT_REOPEN_COOLDOWN_HOURS * eldFeedHealth.HOUR_MS;
+// The send log's server_state row. Prepared lazily: that table is created much
+// further down this file.
+const ELD_ALERT_SEND_LOG_KEY = "eld_feed_alert_sends";
 // Hourly. The input changes continuously but the condition is measured in days,
 // so this is not latency-sensitive; an hour bounds "how late is the first ping"
 // without making the sweep itself a load.
@@ -2916,6 +2927,12 @@ function eldFeedHealthReport(nowMs) {
 			firstSeen: led ? led.first_seen : null,
 			alertedAt: led ? led.alerted_at : null,
 			resolvedAt: led ? led.resolved_at : null,
+			// A bad feed whose row is still resolved is waiting out the re-open
+			// cooldown — say until when, so a held alert does not read as a silent one.
+			alertHeldUntil: f.alert && led && led.resolved_at
+				&& eldFeedHealth.reopenCooldownActive(led.alerted_at, now, ELD_STALE_REOPEN_COOLDOWN_MS)
+				? new Date(eldFeedHealth.stampMs(led.alerted_at) + ELD_STALE_REOPEN_COOLDOWN_MS).toISOString()
+				: null,
 		};
 	});
 
@@ -2927,12 +2944,34 @@ function eldFeedHealthReport(nowMs) {
 			staleHours: ELD_STALE_HOURS,
 			minFixes24h: ELD_STALE_MIN_FIXES,
 			unlinkedLookbackHours: ELD_UNLINKED_LOOKBACK_HOURS,
+			reopenCooldownHours: ELD_STALE_REOPEN_COOLDOWN_MS / eldFeedHealth.HOUR_MS,
 		},
 		// In-memory, and labeled as such: these two are about the SWEEP, not the
 		// feeds, and a restart legitimately resets them.
 		lastSweep: eldFeedSweepHealth.lastRun,
 		lastSweepError: eldFeedSweepHealth.lastError,
 	};
+}
+
+// The send log behind ELD_STALE_ALERT_MAX_PER_DAY: one ISO stamp per DELIVERED
+// alert, in server_state, pruned to the window whenever it is written. Compared
+// as epoch ms (eldFeedHealth.sendsInWindow) — never as text against SQLite's
+// "… …" form, which stretched "the last 24 h" to the whole cutoff date. A read
+// that fails counts as no sends: the per-feed dedupe and the cooldown still hold,
+// and silencing the alert on a broken row would be the worse failure.
+function eldAlertSendsInWindow(nowMs) {
+	let sends = [];
+	try {
+		const row = db.prepare("SELECT value FROM server_state WHERE key = ?").get(ELD_ALERT_SEND_LOG_KEY);
+		sends = row ? JSON.parse(row.value) : [];
+	} catch { sends = []; }
+	return eldFeedHealth.sendsInWindow(sends, nowMs, eldFeedHealth.ALERT_WINDOW_MS);
+}
+function recordEldAlertSend(nowMs) {
+	const sends = eldAlertSendsInWindow(nowMs);
+	sends.push(new Date(nowMs).toISOString());
+	db.prepare("INSERT OR REPLACE INTO server_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)")
+		.run(ELD_ALERT_SEND_LOG_KEY, JSON.stringify(sends));
 }
 
 // Fire-and-forget. NEVER throws and never rejects — its caller is a timer, and
@@ -2952,9 +2991,14 @@ async function alertEldFeedSilence(verdict) {
 		// report, because the second death is the one nobody is watching for.
 		if (seen && seen.alerted_at && !seen.resolved_at) return { alerted: false, reason: "already_alerted", key };
 
-		const alertedToday = db.prepare(
-			"SELECT COUNT(*) AS c FROM eld_feed_alerts WHERE alerted_at > datetime('now', '-1 day')",
-		).get().c;
+		// ⚠️ RE-OPEN COOLDOWN (see ELD_STALE_REOPEN_COOLDOWN_MS). Returning BEFORE the
+		// upsert below is what keeps the clock: the row stays resolved with the last
+		// alert's alerted_at until the feed is still bad a full cooldown later.
+		if (seen && seen.resolved_at && eldFeedHealth.reopenCooldownActive(seen.alerted_at, Date.now(), ELD_STALE_REOPEN_COOLDOWN_MS)) {
+			return { alerted: false, reason: "cooldown", key };
+		}
+
+		const alertedToday = eldAlertSendsInWindow(Date.now()).length;
 		if (alertedToday >= ELD_STALE_ALERT_MAX_PER_DAY) {
 			console.warn(`[eld-feed] daily alert cap (${ELD_STALE_ALERT_MAX_PER_DAY}) reached — feed ${key} logged, not mailed`);
 			return { alerted: false, reason: "daily_cap", key };
@@ -3038,7 +3082,7 @@ async function alertEldFeedSilence(verdict) {
 				: v.state === "never_reported"
 					? `<p>This truck has an ELD device id saved but has never produced a single fix. Check the id is the right one, and that the device is installed and powered.</p>`
 					: `<p>Check the device is powered and in coverage. If the truck is genuinely out of service, set it Inactive or record its retirement date — both stop this alert at the source.</p>`) +
-			`<p style="color:#888;font-size:12px;">Reported once per feed. Reported again only after it recovers and goes silent a second time.</p>`;
+			`<p style="color:#888;font-size:12px;">Reported once per feed. Reported again only after it recovers and goes silent a second time, and no sooner than a day after this report.</p>`;
 
 		let emailed = false;
 		try {
@@ -3080,6 +3124,9 @@ async function alertEldFeedSilence(verdict) {
 		if (delivered) {
 			db.prepare("UPDATE eld_feed_alerts SET alerted_at = ? WHERE alert_key = ? AND alerted_at IS NULL")
 				.run(new Date().toISOString(), key);
+			// The cap counts this send. A failure to log it must not turn a delivered
+			// alert into a reported error.
+			try { recordEldAlertSend(Date.now()); } catch (e) { console.error("[eld-feed] send log not updated:", e.message); }
 		}
 		console.log(
 			"[eld-feed] %s — %s (%s): %s",
