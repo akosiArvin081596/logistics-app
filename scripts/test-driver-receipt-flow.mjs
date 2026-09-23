@@ -23,20 +23,25 @@
 // a fixture that would not have caught the original defect proves nothing.
 //
 // Two checks LIFT production code (submitExpense, scanDocument) into a bare
-// `new Function` with its one dependency injected, as test-db-export-guard.js
+// `new Function` with its dependencies injected, as test-db-export-guard.js
 // does with requireRole, so they exercise the shipped source rather than a copy.
+// The last section goes further: it compiles ExpenseForm.vue's own
+// <script setup> with the client's vue/compiler-sfc and drives its setup() on
+// Vue's real reactivity, so the form's guards are tested where they live.
 //
-// No network, no DOM, no database — pure input/output, safe to run anywhere.
+// No network, no DOM, no database, no browser — safe to run anywhere. It needs
+// client/node_modules (vue), which CI installs before the unit runners.
 //
 //   node scripts/test-driver-receipt-flow.mjs      # exits 1 on any failure
 
 import fs from 'fs'
 import path from 'path'
 import { createRequire } from 'module'
-import { fileURLToPath } from 'url'
+import { fileURLToPath, pathToFileURL } from 'url'
 
 import { loadIdKey, sameLoadId, expenseLoadId, expensesForLoad } from '../client/src/lib/loadId.js'
 import { RECEIPT_MAX_EDGE, RECEIPT_SCAN_WIDTH, createPhotoJobs } from '../client/src/lib/receiptPhoto.js'
+import { replyLost } from '../client/src/lib/saveOutcome.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname, '..')
@@ -270,7 +275,10 @@ const tagsOf = (html, name) =>
   const timeoutMs = Number((/const EXPENSE_SAVE_TIMEOUT_MS = (\d+)/.exec(store) || [])[1])
   check('C: the expense save waits at least as long as an upload (>= 90 s)', timeoutMs >= 90000, true)
   const method = balancedBlock(store, store.indexOf('async submitExpense(data)'))
-  const makeStore = new Function('api', 'EXPENSE_SAVE_TIMEOUT_MS', `return { async submitExpense(data) ${method} }`)
+  // replyLost is injected as the REAL helper, so the store is tested against
+  // the same definition the form uses (see the replyLost block below).
+  check('C: the store imports replyLost from lib/saveOutcome', /import \{ replyLost \} from '\.\.\/lib\/saveOutcome'/.test(store), true)
+  const makeStore = new Function('api', 'EXPENSE_SAVE_TIMEOUT_MS', 'replyLost', `return { async submitExpense(data) ${method} }`)
 
   let unhandled = 0
   const onUnhandled = () => { unhandled++ }
@@ -286,7 +294,7 @@ const tagsOf = (html, name) =>
     }
     let reads = 0
     const self = {
-      ...makeStore(api, timeoutMs),
+      ...makeStore(api, timeoutMs, replyLost),
       loadData: () => { reads++; return loadDataOutcome === 'ok' ? Promise.resolve() : Promise.reject(new Error('refresh failed')) },
     }
     let result
@@ -295,7 +303,8 @@ const tagsOf = (html, name) =>
     await new Promise((r) => setTimeout(r, 0))
     return { posts, reads, result, thrown }
   }
-  const httpErr = (status, code) => Object.assign(new Error(`HTTP ${status}`), { status, code })
+  // The shape useApi throws: status, code ('' when the body had none), data.
+  const httpErr = (status, code = '', data = {}) => Object.assign(new Error(`HTTP ${status}`), { status, code, data })
 
   const ok = await run({ id: 7, postedPeriod: '' })
   const firstPost = ok.posts[0] || {}
@@ -318,10 +327,365 @@ const tagsOf = (html, name) =>
   const dup = await run(httpErr(409, 'POSSIBLE_DUPLICATE'))
   check('C: a real answer (409) → no re-read, error rethrown untouched', [dup.posts.length, dup.reads, dup.thrown && dup.thrown.code], [1, 0, 'POSSIBLE_DUPLICATE'])
 
+  // Gateway answers: nginx's HTML error page parses to nothing, so the row may
+  // have saved behind it (a deploy restart, or the 120 s read timeout).
+  const gw502 = await run(httpErr(502))
+  check('C: gateway 502 → one POST, one re-read, error rethrown', [gw502.posts.length, gw502.reads, gw502.thrown && gw502.thrown.status], [1, 1, 502])
+  const gw504 = await run(httpErr(504))
+  check('C: gateway 504 → one POST, one re-read', [gw504.posts.length, gw504.reads], [1, 1])
+  const app500 = await run(httpErr(500, '', { error: 'Failed to log expense' }))
+  check('C: an application 500 is a real answer → no re-read', app500.reads, 0)
+
   const bothFail = await run(httpErr(0, 'TIMEOUT'), 'fail')
   check('C: a failing background re-read stays silent (no unhandled rejection)', [bothFail.thrown && bothFail.thrown.code, unhandled], ['TIMEOUT', 0])
 
   process.off('unhandledRejection', onUnhandled)
+}
+
+// ══ C — "no answer" is ONE rule, shared by the store and the form ════════════
+{
+  const e = (status, code = '', data = {}) => ({ status, code, data })
+  check('C: our own timeout (status 0) is a lost reply', replyLost(e(0, 'TIMEOUT')), true)
+  check('C: a dropped connection (TypeError, no status) is a lost reply', replyLost(new TypeError('Failed to fetch')), true)
+  check('C: a gateway 502 (no app body) is a lost reply', replyLost(e(502)), true)
+  check('C: a gateway 504 (no app body) is a lost reply', replyLost(e(504)), true)
+  check('C: an app 502 with its own JSON error is a real answer', replyLost(e(502, '', { error: 'scan_failed' })), false)
+  check('C: a 502 carrying an app code is a real answer', replyLost(e(502, 'SOME_CODE')), false)
+  check('C: 500 / 503 / 400 / 409 are real answers', [500, 503, 400, 409].map((s) => replyLost(e(s))), [false, false, false, false])
+  check('C: no error is not a lost reply', replyLost(null), false)
+}
+
+// ══ The form itself — ExpenseForm.vue's real <script setup>, run in node ═════
+// Everything above checks what the form USES. This checks the form's own
+// guards: the lines that decide what a submit sends, and what a late answer
+// may still touch. The SFC's <script setup> is compiled with the client's own
+// vue/compiler-sfc, and its setup() runs on Vue's real reactivity. Only its I/O
+// is swapped for stubs this file settles one call at a time (the decoder,
+// ScanKit, the OCR fetch, the toast, the drop zone), so every race replays in a
+// fixed order. A late answer is delivered even AFTER its request was aborted:
+// on a phone the response can win that race, so the form's own gate — not the
+// abort — must be what drops it. Each M-check is a mutant that once survived
+// this runner: delete the guard it names and the run goes red.
+{
+  const clientRequire = createRequire(path.join(ROOT, 'client', 'package.json'))
+  const Vue = clientRequire('vue')
+  const { parse, compileScript } = clientRequire('vue/compiler-sfc')
+  const FORM = 'client/src/components/driver/ExpenseForm.vue'
+  const FORM_DIR = path.join(ROOT, 'client', 'src', 'components', 'driver')
+  const SRC_DIR = path.join(ROOT, 'client', 'src')
+  const { descriptor } = parse(read(FORM), { filename: 'ExpenseForm.vue' })
+  let body = compileScript(descriptor, { id: 'expense-form', inlineTemplate: false }).content
+
+  // ESM → a function body over injected modules. Anything but a one-line named
+  // import stops the run here, loudly, rather than being guessed at.
+  const specifiers = []
+  body = body.replace(/^import\s*\{([^}]*)\}\s*from\s*'([^']+)';?[ \t]*$/gm, (_, names, spec) => {
+    specifiers.push(spec)
+    const binds = names.split(',').map((n) => n.trim()).filter(Boolean).map((n) => n.replace(/\s+as\s+/, ': '))
+    return `const { ${binds.join(', ')} } = __deps[${JSON.stringify(spec)}];`
+  })
+  body = body.replace(/^export default\s*/m, 'return ')
+  if (/^\s*(import|export)\s/m.test(body)) throw new Error(`${FORM}: an import/export this harness cannot map`)
+  const buildComponent = new Function('__deps', body)
+
+  // Browser-bound modules are stubbed; every other import loads for real.
+  const moduleKey = (spec) => path.relative(SRC_DIR, path.join(FORM_DIR, spec)).split(path.sep).join('/')
+  const STUBBED = new Set(['composables/useToast', 'composables/useDocumentScan', 'composables/useFileDrop', 'lib/imageUtils'])
+  const realModules = {}
+  for (const spec of specifiers) {
+    if (spec === 'vue' || spec === 'vant' || STUBBED.has(moduleKey(spec))) continue
+    if (!spec.startsWith('.')) throw new Error(`${FORM}: unexpected import '${spec}'`)
+    realModules[spec] = await import(pathToFileURL(path.join(FORM_DIR, `${spec}.js`)).href)
+  }
+  const imageUtils = await import(pathToFileURL(path.join(SRC_DIR, 'lib', 'imageUtils.js')).href)
+  globalThis.document ??= { addEventListener() {}, removeEventListener() {}, visibilityState: 'visible' }
+
+  const deferred = () => {
+    let resolve, reject
+    const promise = new Promise((res, rej) => { resolve = res; reject = rej })
+    return { promise, resolve, reject }
+  }
+  // Let every continuation the form chained after a settled call run to the end.
+  const settle = async () => { for (let i = 0; i < 8; i++) await new Promise((r) => setImmediate(r)) }
+  const photoFile = (name) => new File([new Uint8Array([0xff, 0xd8, 0xff, 0xe0])], name, { type: 'image/jpeg' })
+  const jpeg = (tag) => `data:image/jpeg;base64,${Buffer.from(tag).toString('base64')}`
+
+  function mountForm({ presetLoadId = 'A-100', submitHandler = null } = {}) {
+    const io = { compress: [], scan: [], ocr: [], toasts: [], submits: [] }
+    const unmountHooks = []
+    let dropOptions = null
+    const deps = {
+      vue: { ...Vue, onMounted() {}, onBeforeUnmount: (fn) => unmountHooks.push(fn) },
+      vant: new Proxy({}, { get: () => ({}) }),
+      ...realModules,
+    }
+    for (const spec of specifiers) {
+      const key = spec.startsWith('.') ? moduleKey(spec) : ''
+      if (key === 'composables/useToast') {
+        deps[spec] = { useToast: () => ({ show: (message, type) => io.toasts.push({ message, type }) }) }
+      } else if (key === 'composables/useDocumentScan') {
+        deps[spec] = { useDocumentScan: () => ({ scanDocument: (dataUrl, opts) => { const d = deferred(); io.scan.push({ dataUrl, opts, ...d }); return d.promise } }) }
+      } else if (key === 'composables/useFileDrop') {
+        deps[spec] = { useFileDrop: (opts) => { dropOptions = opts; return { dropzoneProps: Vue.ref({}), dragActive: Vue.ref(false), error: Vue.ref(''), clearMessages() {} } } }
+      } else if (key === 'lib/imageUtils') {
+        deps[spec] = { ...imageUtils, compressImage: (blob, maxEdge) => { const d = deferred(); io.compress.push({ blob, maxEdge, ...d }); return d.promise } }
+      }
+    }
+    // The OCR fetch. Deliberately deaf to its abort signal: see the header.
+    globalThis.fetch = (url, opts = {}) => {
+      const d = deferred()
+      io.ocr.push({
+        url,
+        body: JSON.parse(opts.body),
+        signal: opts.signal,
+        answer: (status, json) => d.resolve({ ok: status >= 200 && status < 300, status, json: async () => json }),
+        fail: d.reject,
+      })
+      return d.promise
+    }
+    const props = Vue.shallowReactive({
+      loads: [{ 'Load ID': presetLoadId, Status: 'In Transit' }],
+      driverName: 'Test Driver',
+      headers: ['Load ID', 'Status'],
+      presetLoadId,
+      submitHandler: (payload) => {
+        io.submits.push(JSON.parse(JSON.stringify(payload)))
+        return submitHandler ? submitHandler(payload) : Promise.resolve({ id: io.submits.length })
+      },
+    })
+    const scope = Vue.effectScope()
+    const f = scope.run(() => buildComponent(deps).setup(props, { expose() {}, emit() {}, attrs: {}, slots: {} }))
+    return {
+      f,
+      io,
+      props,
+      pick: (name) => f.onPhotoPicked({ target: { files: [photoFile(name)], value: name } }),
+      drop: (name) => dropOptions.onFiles([photoFile(name)]),
+      // Vant's ×: it empties v-model first, then emits `delete`.
+      remove: () => { f.fileList.value = []; f.onPhotoDelete() },
+      unmount: () => { unmountHooks.forEach((fn) => fn()); scope.stop() },
+    }
+  }
+  // Pick a photo and let decode → scan → read all answer.
+  async function readThrough(m, name, tag, ocrJson) {
+    m.pick(name); await settle()
+    m.io.compress[m.io.compress.length - 1].resolve(jpeg(tag)); await settle()
+    m.io.scan[m.io.scan.length - 1].resolve({ data: jpeg(`${tag}+`) }); await settle()
+    m.io.ocr[m.io.ocr.length - 1].answer(200, ocrJson); await settle()
+  }
+
+  // The ordinary path, end to end — the baseline every race below departs from.
+  {
+    const m = mountForm()
+    const { f, io } = m
+    check('F: the Load field starts on the page’s load', f.form.loadId, 'A-100')
+    m.pick('a.jpg'); await settle()
+    check('F: a picked photo is decoded at the receipt edge and holds Submit', [io.compress.length, io.compress[0].maxEdge, f.photoStage.value], [1, 1024, 'preparing'])
+    io.compress[0].resolve(jpeg('A')); await settle()
+    check('F: decoded → scanned at the receipt width, with the job’s signal', [f.photoStage.value, io.scan[0].opts.outputWidth, !!io.scan[0].opts.signal], ['reading', RECEIPT_SCAN_WIDTH, true])
+    io.scan[0].resolve({ data: jpeg('A+') }); await settle()
+    check('F: the read is sent the enhanced photo', io.ocr[0].body.photoData, jpeg('A+'))
+    io.ocr[0].answer(200, { amount: 45.5, vendor: 'Pilot', details: [{ label: 'Product', value: 'Diesel' }], confidence: 'high' }); await settle()
+    check('F: the read fills the form and releases Submit', [f.form.amount, f.form.vendor, f.ocrApplied.value, f.photoBusy.value], ['45.5', 'Pilot', true, false])
+    await f.handleSubmit(); await settle()
+    const sent = io.submits[0] || {}
+    check('F: submit sends the enhanced photo, its details and the load', [sent.photoData, sent.receiptDetails, sent.loadId], [jpeg('A+'), [{ label: 'Product', value: 'Diesel' }], 'A-100'])
+    check('F: a saved entry clears the form and keeps the page’s load', [f.form.amount, f.photoBase64.value, f.fileList.value.length, f.form.loadId], ['', '', 0, 'A-100'])
+    m.unmount()
+  }
+
+  // M1 — the × takes the photo out of the payload (onPhotoDelete).
+  {
+    const m = mountForm()
+    await readThrough(m, 'a.jpg', 'A', { amount: 30 })
+    m.remove()
+    await m.f.handleSubmit(); await settle()
+    check('M1: a photo deleted with × is NOT sent', (m.io.submits[0] || {}).photoData, '')
+    m.unmount()
+  }
+  {
+    const m = mountForm()
+    const { f, io } = m
+    f.form.amount = '12'
+    m.pick('b.jpg'); await settle()
+    io.compress[0].resolve(jpeg('B')); await settle()
+    m.remove()
+    check('F: × aborts the scan in flight', io.scan[0].opts.signal.aborted, true)
+    io.scan[0].resolve({ data: jpeg('B+') }); await settle() // it answers anyway
+    check('F: a scan answering after × does not bring the photo back', [f.photoBase64.value, io.ocr.length], ['', 0])
+    await f.handleSubmit(); await settle()
+    check('F: …and that submit carries no photo', (io.submits[0] || {}).photoData, '')
+    m.unmount()
+  }
+
+  // M2 — a reset retires whatever is still in flight (resetAfterSubmit's own
+  // contract; a backstop behind the Submit hold, so it is driven directly).
+  {
+    const m = mountForm()
+    const { f, io } = m
+    m.pick('a.jpg'); await settle()
+    io.compress[0].resolve(jpeg('A')); await settle()
+    f.resetAfterSubmit(true)
+    io.scan[0].resolve({ data: jpeg('A+') }); await settle()
+    check('M2: after a reset, the old photo’s scan cannot re-attach it', f.photoBase64.value, '')
+    check('M2: …nor start a read on the emptied form', io.ocr.length, 0)
+    m.unmount()
+  }
+  {
+    const m = mountForm()
+    const { f, io } = m
+    m.pick('a.jpg'); await settle()
+    io.compress[0].resolve(jpeg('A')); await settle()
+    io.scan[0].resolve({ data: jpeg('A+') }); await settle()
+    f.resetAfterSubmit(true)
+    io.ocr[0].answer(200, { amount: 999, vendor: 'LATE' }); await settle()
+    check('M2: a read landing after a reset leaves the form empty', [f.form.amount, f.form.vendor, f.ocrApplied.value], ['', '', false])
+    m.unmount()
+  }
+
+  // M3 — late answers for a photo that is no longer the current one.
+  {
+    const m = mountForm()
+    const { f, io } = m
+    m.pick('a.jpg'); await settle()
+    m.pick('b.jpg'); await settle()
+    io.compress[1].resolve(jpeg('B')); await settle()
+    io.compress[0].resolve(jpeg('A')); await settle() // photo A's decode, late
+    check('M3: a replaced photo’s late decode does not overwrite the new one', f.photoBase64.value, jpeg('B'))
+    check('M3: …nor release Submit while the new one is still being read', f.photoStage.value, 'reading')
+    m.unmount()
+  }
+  {
+    const m = mountForm()
+    const { f, io } = m
+    m.pick('a.jpg'); await settle()
+    io.compress[0].resolve(jpeg('A')); await settle()
+    io.scan[0].resolve({ data: jpeg('A+') }); await settle()
+    f.form.amount = '20'
+    f.skipReceiptRead()
+    check('F: Skip releases Submit and aborts the read', [f.photoBusy.value, io.ocr[0].signal.aborted], [false, true])
+    io.ocr[0].answer(200, { amount: 999, vendor: 'LATE', details: [{ label: 'Product', value: 'DEF' }] }); await settle()
+    check('M3: a read answering after Skip changes nothing', [f.form.amount, f.form.vendor, f.ocrApplied.value, f.ocrDetails.value], ['20', '', false, []])
+    check('M3: …and the photo Skip kept is still the one attached', f.photoBase64.value, jpeg('A+'))
+    m.unmount()
+  }
+  {
+    const m = mountForm()
+    const { f, io } = m
+    m.pick('a.jpg'); await settle()
+    io.compress[0].resolve(jpeg('A')); await settle()
+    io.scan[0].resolve({ data: jpeg('A+') }); await settle()
+    f.skipReceiptRead()
+    io.ocr[0].fail(Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' })); await settle()
+    check('F: a read cut off by Skip is silent (no "Couldn’t read receipt")', io.toasts.length, 0)
+    m.unmount()
+  }
+  {
+    const m = mountForm()
+    const { f, io } = m
+    m.pick('a.jpg'); await settle()
+    io.compress[0].resolve(jpeg('A')); await settle()
+    m.unmount()
+    io.scan[0].resolve({ data: jpeg('A+') }); await settle()
+    check('F: after unmount, a late scan writes nothing and starts no read', [f.photoBase64.value, io.ocr.length], [jpeg('A'), 0])
+  }
+
+  // M4 — no submit while the photo is being prepared or read (Enter in a field
+  // reaches handleSubmit even with the button disabled).
+  {
+    const m = mountForm()
+    const { f, io } = m
+    f.form.amount = '10'
+    m.pick('a.jpg'); await settle()
+    await f.handleSubmit(); await settle()
+    check('M4: no submit while the photo is being prepared', io.submits.length, 0)
+    io.compress[0].resolve(jpeg('A')); await settle()
+    await f.handleSubmit(); await settle()
+    check('M4: no submit while the photo is being read', io.submits.length, 0)
+    check('M4: …and the driver is told why', io.toasts.some((t) => /Still reading/.test(t.message)), true)
+    m.unmount()
+  }
+
+  // Fix 1 — a new photo drops everything the previous photo's read left behind.
+  {
+    const m = mountForm()
+    const { f, io } = m
+    await readThrough(m, 'a.jpg', 'A', { amount: 30, details: [{ label: 'Product', value: 'DEF' }], confidence: 'high' })
+    check('Fix1: (photo A was read as DEF)', [f.ocrApplied.value, f.ocrDetails.value.length], [true, 1])
+    m.remove()
+    m.pick('b.jpg'); await settle()
+    check('Fix1: attaching photo B drops A’s read at once', [f.ocrApplied.value, f.ocrDetails.value, f.preOcrSnapshot.value], [false, [], null])
+    io.compress[1].resolve(jpeg('B')); await settle()
+    f.skipReceiptRead()
+    await f.handleSubmit(); await settle()
+    const sent = io.submits[0] || {}
+    check('Fix1: B skipped → filed with photo B and none of A’s details', [sent.photoData, sent.receiptDetails], [jpeg('B'), []])
+    m.unmount()
+  }
+  {
+    const m = mountForm()
+    await readThrough(m, 'a.jpg', 'A', { amount: 30, details: [{ label: 'Product', value: 'DEF' }] })
+    m.drop('b.jpg'); await settle() // a desktop drop replaces the photo too
+    check('Fix1: a dropped photo drops the previous read as well', [m.f.ocrApplied.value, m.f.ocrDetails.value], [false, []])
+    m.unmount()
+  }
+
+  // Fix 2 — the page's load is followed only while the entry is pristine.
+  {
+    const m = mountForm({ presetLoadId: 'A-100' })
+    const { f, props } = m
+    f.form.amount = '25'
+    props.presetLoadId = 'B-200'; await settle()
+    check('Fix2: mid-entry, the page switching loads does NOT move the entry', f.form.loadId, 'A-100')
+    await f.handleSubmit(); await settle()
+    check('Fix2: …so it is filed under the load it showed', (m.io.submits[0] || {}).loadId, 'A-100')
+    check('Fix2: after that save, the form returns to the page’s load', f.form.loadId, 'B-200')
+    props.presetLoadId = 'C-300'; await settle()
+    check('Fix2: a pristine form follows the page', f.form.loadId, 'C-300')
+    f.onLoadPick({ selectedOptions: [{ value: 'X-9' }] })
+    props.presetLoadId = 'D-400'; await settle()
+    check('Fix2: a load the driver picked is never overridden', f.form.loadId, 'X-9')
+    m.unmount()
+  }
+  {
+    const m = mountForm({ presetLoadId: 'A-100' })
+    m.pick('a.jpg'); await settle()
+    m.props.presetLoadId = 'B-200'; await settle()
+    check('Fix2: a photo alone makes the entry non-pristine', m.f.form.loadId, 'A-100')
+    m.unmount()
+  }
+
+  // Fix 3 — the form's wording follows the same replyLost() as the store.
+  const failures = [
+    [{ status: 0, code: 'TIMEOUT', data: {}, message: 'The request timed out.' }, true],
+    [{ status: 504, code: '', data: {}, message: 'Request failed (504)' }, true],
+    [{ status: 502, code: '', data: {}, message: 'Request failed (502)' }, true],
+    [{ status: 502, code: '', data: { error: 'scan_failed' }, message: 'scan_failed' }, false],
+    [{ status: 500, code: '', data: { error: 'Failed to log expense' }, message: 'Failed to log expense' }, false],
+  ]
+  for (const [shape, lost] of failures) {
+    const m = mountForm({ submitHandler: () => Promise.reject(Object.assign(new Error(shape.message), shape)) })
+    m.f.form.amount = '15'
+    await m.f.handleSubmit(); await settle()
+    const label = `${shape.status}${shape.data.error ? ' with an app error' : ''}`
+    check(`Fix3: ${label} → ${lost ? '"Not confirmed", may already be saved' : '"Not submitted"'}`, [m.f.submitUnconfirmed.value, /may already be saved/.test(m.f.submitError.value)], [lost, lost])
+    check(`Fix3: ${label} → the entry is kept`, m.f.form.amount, '15')
+    m.unmount()
+  }
+
+  // Fix 5 — nothing about the photo changes while the entry is being sent.
+  const uploaderTag = tagsOf(templateOf(read(FORM)), 'van-uploader')[0] || ''
+  check('Fix5: the thumbnail × is off while a save is in flight', /:deletable="!submitting"/.test(uploaderTag), true)
+  {
+    let release
+    const m = mountForm({ submitHandler: () => new Promise((r) => { release = r }) })
+    m.f.form.amount = '15'
+    const sending = m.f.handleSubmit(); await settle()
+    m.drop('late.jpg'); await settle()
+    check('F: nothing can be attached while the entry is being sent', [m.f.fileList.value.length, m.io.compress.length], [0, 0])
+    release({ id: 1 }); await sending; await settle()
+    m.unmount()
+  }
 }
 
 console.log(`\ndriver-receipt-flow: ${pass} passed, ${fail} failed`)
