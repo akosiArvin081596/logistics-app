@@ -3362,9 +3362,19 @@ async function routemateHydrateVehicleDetails(creds, { limit = 100 } = {}) {
 			});
 			out.hydrated += 1;
 		} catch (err) {
-			// 4xx means Routemate does not recognize this ID — almost always a
-			// Linxup device sharing the mirror. Remember it and stop asking.
-			if (err && err.status >= 400 && err.status < 500) {
+			const status = err && err.status;
+			// ⚠️ 401/403 is OUR KEY being refused, and 429 is Routemate throttling us —
+			// neither says anything about this id. Filing them under the 4xx rule below
+			// would mark every real vehicle "not ours" for the life of the process.
+			// Every remaining call would fail the same way, so count it and stop.
+			if (status === 401 || status === 403 || status === 429) {
+				out.failed += 1;
+				out.stoppedOn = status;
+				break;
+			}
+			// Any other 4xx means Routemate does not recognize this ID — almost always
+			// a Linxup device sharing the mirror. Remember it and stop asking.
+			if (status >= 400 && status < 500) {
 				routemateNonInventoryIds.add(id);
 				out.skipped += 1;
 			} else {
@@ -3378,15 +3388,61 @@ async function routemateHydrateVehicleDetails(creds, { limit = 100 } = {}) {
 	return out;
 }
 
+// Every Routemate vehicle id that has written telemetry, upserted as a MINIMAL
+// mirror row (ids only; COALESCE keeps any richer fields). The list endpoint
+// 500s, but the telemetry feed still names every vehicle that is reporting, so
+// this keeps the /trucks Link modal usable and gives the per-vehicle refresh its
+// candidates. Local and idempotent. Returns how many ids it wrote.
+function routemateSeedVehicleIdsFromTelemetry() {
+	const ids = db.prepare(`
+		SELECT DISTINCT routemate_vehicle_id
+		FROM routemate_telemetry
+		WHERE routemate_vehicle_id <> ''
+	`).all();
+	let n = 0;
+	db.transaction((rows) => {
+		for (const r of rows) {
+			routemateUpsertVehicleMinimalStmt.run(r.routemate_vehicle_id, "");
+			n += 1;
+		}
+	})(ids);
+	return n;
+}
+
+// ⚠️ A 5xx FROM THE VEHICLE LIST IS THE KNOWN OUTAGE, NOT A FAILED SYNC.
+// GET /api/v0/assets/vehicles has answered HTTP 500 for this account since at
+// least 2026-05-06 (see listVehicles() in lib/routemate-client.js), while the
+// per-vehicle endpoint works. Reporting that as a failure made every boot log a
+// sync error, bumped errorsLast24h daily, and turned the admin "Sync now" button
+// into a 502 with no audit row — although the fallback below had just done the
+// job. So a 5xx from the list sets `listUnavailable`: ids come from telemetry,
+// the per-vehicle refresh runs ONCE, lastSync is stamped, and no error is
+// counted. The caller gets { listUnavailable: true } and says so.
+//
+// Still a FAILED sync, as before: a 401/403 (the key is refused), a network or
+// timeout failure (no status), a 429, a failed database write, and a
+// per-vehicle refresh that could not fetch every candidate. Those count an
+// error and throw. The refresh does not run on them: with the key refused it
+// would file every real vehicle as "not ours", and with the network down every
+// call would fail the same way.
 async function routemateSyncVehicles() {
 	if (!ROUTEMATE_ENABLED || !ROUTEMATE_API_KEY) return { skipped: true, reason: "disabled" };
 	const creds = routemateCreds();
 	const HARD_PAGE_CAP = 50;
 	let page = 0;
 	let total = 0;
+	let listUnavailable = null; // the list endpoint's 5xx, when that is what stopped the paging
+	let fallbackSynced = 0;
 	try {
 		while (page < HARD_PAGE_CAP) {
-			const batch = await routemate.listVehicles(creds, { page, elements: 200 });
+			let batch;
+			try {
+				batch = await routemate.listVehicles(creds, { page, elements: 200 });
+			} catch (listErr) {
+				if (!(listErr && listErr.status >= 500 && listErr.status < 600)) throw listErr;
+				listUnavailable = listErr;
+				break;
+			}
 			if (!batch || batch.length === 0) break;
 			const txn = db.transaction((rows) => {
 				for (const v of rows) {
@@ -3412,61 +3468,52 @@ async function routemateSyncVehicles() {
 			if (batch.length < 200) break;
 			page += 1;
 		}
-		// Even a healthy list response can omit detail for a device the telemetry
-		// sweep discovered but the inventory page hasn't caught up on. Only
-		// empty-VIN rows are fetched, so this is a no-op in the normal case.
+		// The list is down, so the ids come from what is actually reporting GPS.
+		if (listUnavailable) fallbackSynced = routemateSeedVehicleIdsFromTelemetry();
+		// ONE per-vehicle refresh, on both paths. Only empty-VIN rows are fetched, so
+		// after a healthy list it is a no-op; with the list down it IS the sync.
 		const hydration = await routemateHydrateVehicleDetails(creds);
+		if (hydration.failed > 0) {
+			const err = new Error(hydration.stoppedOn === 401 || hydration.stoppedOn === 403
+				? `Routemate refused the API key during the per-vehicle refresh (HTTP ${hydration.stoppedOn})`
+				: `Routemate per-vehicle refresh failed for ${hydration.failed} vehicle(s)`);
+			err.code = "ROUTEMATE_REFRESH_FAILED";
+			err.status = hydration.stoppedOn || null;
+			err.hydration = hydration;
+			err.listUnavailable = !!listUnavailable;
+			throw err;
+		}
 		routemateHealth.lastSync.vehicles = new Date().toISOString();
 		routemateHealth.lastError = null;
 		clearRoutemateLogState("vehicles");
-		return { synced: total, hydrated: hydration.hydrated };
+		if (listUnavailable) {
+			console.log(`[routemate] vehicles list unavailable (expected, upstream ${listUnavailable.status}) — per-vehicle refresh done: ` +
+				`${hydration.hydrated} updated, ${hydration.skipped} skipped${fallbackSynced ? `, ${fallbackSynced} id(s) from telemetry` : ""}`);
+		}
+		return {
+			synced: total,
+			hydrated: hydration.hydrated,
+			hydrationSkipped: hydration.skipped,
+			listUnavailable: !!listUnavailable,
+			upstreamStatus: listUnavailable ? listUnavailable.status : null,
+			fallbackSynced,
+		};
 	} catch (err) {
 		routemateHealth.lastError = { at: new Date().toISOString(), source: "vehicles", message: err.message, status: err.status || null };
 		routemateHealth.errorsLast24h += 1;
 		logRoutemateSyncFailure("vehicles", err);
-		// Routemate's /api/v0/assets/vehicles endpoint has been returning HTTP 500
-		// (their bug, confirmed against a direct probe). The telemetry endpoint
-		// still works, so derive a minimal vehicle row from any unique routemate
-		// vehicle IDs we've seen in /routemate_telemetry/ — this keeps the Link
-		// modal in /trucks usable for vehicles that are actually reporting GPS,
-		// even when Routemate's vehicle-inventory endpoint is unreachable.
-		try {
-			const telemetryVehicles = db.prepare(`
-				SELECT routemate_vehicle_id,
-				       MAX(routemate_vehicle_id) AS keep
-				FROM routemate_telemetry
-				WHERE routemate_vehicle_id <> ''
-				GROUP BY routemate_vehicle_id
-			`).all();
-			let fallbackSynced = 0;
-			const txn = db.transaction((rows) => {
-				for (const r of rows) {
-					routemateUpsertVehicleMinimalStmt.run(r.routemate_vehicle_id, "");
-					fallbackSynced += 1;
-				}
-			});
-			txn(telemetryVehicles);
-			if (fallbackSynced > 0) {
-				err.fallbackSynced = fallbackSynced;
-				err.fallbackSource = "telemetry";
+		// Keep the Link modal usable even on a failed sync: the ids come from the
+		// local telemetry table, which no upstream failure can touch.
+		if (!fallbackSynced) {
+			try {
+				fallbackSynced = routemateSeedVehicleIdsFromTelemetry();
+			} catch (fallbackErr) {
+				console.error("[routemate] vehicle-fallback also failed:", fallbackErr.message);
 			}
-		} catch (fallbackErr) {
-			console.error("[routemate] vehicle-fallback also failed:", fallbackErr.message);
 		}
-
-		// The minimal fallback above writes IDs only — no VIN — which is exactly
-		// why "Auto-match by VIN" was dead. Routemate's PER-VEHICLE endpoint is
-		// unaffected by the list bug, so now that we know the IDs, ask for each
-		// record individually and fill in the detail the list should have given
-		// us. This is the branch that actually runs in production today.
-		try {
-			const hydration = await routemateHydrateVehicleDetails(creds);
-			if (hydration.hydrated > 0) {
-				err.hydratedIndividually = hydration.hydrated;
-				err.hydrationSkipped = hydration.skipped;
-			}
-		} catch (hydrateErr) {
-			console.error("[routemate] per-vehicle hydration failed:", hydrateErr.message);
+		if (fallbackSynced > 0) {
+			err.fallbackSynced = fallbackSynced;
+			err.fallbackSource = "telemetry";
 		}
 		throw err;
 	}
@@ -32196,7 +32243,21 @@ app.all("/api/admin/routemate/sync-now", (req, res, next) => {
 	res.set("Allow", "POST");
 	res.status(405).json({ error: "Method not allowed", expected: "POST" });
 });
-app.post("/api/admin/routemate/sync-now", requireRole("Super Admin"), async (req, res) => {
+app.post("/api/admin/routemate/sync-now", requireRole("Super Admin"), routemateSyncNowHandler);
+// Named so scripts/test-routemate-vehicle-sync.js can run the real handler.
+//
+// Three outcomes, and each one leaves an audit row:
+//   200, listUnavailable  the vehicle list is down upstream (the known 5xx) and
+//                         the per-vehicle refresh did the sync — see
+//                         routemateSyncVehicles(). Not an error.
+//   200                   the list answered; the ordinary sync.
+//   502                   a real failure — the key refused (401/403), Routemate
+//                         unreachable, or vehicles the refresh could not fetch.
+//                         Audited as routemate_sync_failed. Always 502, never the
+//                         upstream 401/403 itself: this request WAS authorized;
+//                         it is our key that Routemate refused, and upstreamStatus
+//                         carries that.
+async function routemateSyncNowHandler(req, res) {
 	if (!ROUTEMATE_ENABLED) {
 		return res.status(503).json({ error: "Routemate integration disabled (set ROUTEMATE_ENABLED=true)" });
 	}
@@ -32209,35 +32270,42 @@ app.post("/api/admin/routemate/sync-now", requireRole("Super Admin"), async (req
 		const result = await routemateSyncVehicles();
 		// Trigger one telemetry pull so the operator sees fresh data immediately.
 		routemateSyncTelemetry().catch(() => {});
-		logAudit(req, 'routemate_sync', 'vehicles', '', `Synced ${result.synced} Routemate vehicles`);
+		if (result.listUnavailable) {
+			const hint = "vehicle list unavailable upstream; per-vehicle refresh done";
+			logAudit(req, "routemate_sync", "vehicles", "",
+				`Vehicle list unavailable upstream (HTTP ${result.upstreamStatus}); per-vehicle refresh done: ${result.hydrated} updated, ${result.hydrationSkipped} skipped`);
+			return res.json({
+				success: true, listUnavailable: true, hint, upstreamStatus: result.upstreamStatus,
+				vehiclesSynced: result.synced, vehiclesHydrated: result.hydrated || 0, fallbackSynced: result.fallbackSynced || 0,
+			});
+		}
+		logAudit(req, "routemate_sync", "vehicles", "", `Synced ${result.synced} Routemate vehicles`);
 		res.json({ success: true, vehiclesSynced: result.synced, vehiclesHydrated: result.hydrated || 0 });
 	} catch (err) {
 		console.error("Routemate sync-now error:", err.message);
-		// Pull telemetry anyway — that endpoint isn't affected by the
-		// /assets/vehicles outage and is what dispatchers actually care about.
+		// Pull telemetry anyway — it is unaffected by a vehicle-inventory failure and
+		// is what dispatchers actually care about.
 		routemateSyncTelemetry().catch(() => {});
-		const upstream500 = err.status === 500;
-		const fellBackToTelemetry = Number.isFinite(err.fallbackSynced);
-		const hydrated = Number.isFinite(err.hydratedIndividually) ? err.hydratedIndividually : 0;
-		res.status(err.status === 401 || err.status === 403 ? err.status : 502).json({
+		const status = err.status || null;
+		const code = err.code || "ROUTEMATE_SYNC_FAILED";
+		const hint = status === 401 || status === 403
+			? "Routemate refused the API key — check ROUTEMATE_API_KEY. Live GPS uses the same key."
+			: code === "ROUTEMATE_REFRESH_FAILED"
+				? "Some vehicles could not be refreshed individually; the next sync retries them. Live GPS is unaffected."
+				: !status
+					? "Routemate could not be reached (network or timeout). The daily sync retries on its own."
+					: undefined;
+		logAudit(req, "routemate_sync_failed", "vehicles", "",
+			`${code}${status ? ` (HTTP ${status})` : ""}: ${String(err.message || "").replace(/[\r\n]+/g, " ").slice(0, 200)}`);
+		res.status(502).json({
 			error: err.message || "Routemate sync failed",
-			code: err.code || "ROUTEMATE_SYNC_FAILED",
-			upstreamStatus: err.status || null,
-			// Helpful breadcrumb for support — explains *what* Routemate broke,
-			// and, when the per-vehicle fallback covered it, that the mirror is
-			// actually populated despite this non-2xx. Without that second half
-			// an operator reads "sync failed" and assumes VIN auto-match is
-			// still dead when it has just been repaired.
-			hint: upstream500
-				? (hydrated > 0
-					? `Routemate's /api/v0/assets/vehicles list endpoint is returning HTTP 500 (upstream bug). Worked around it: ${hydrated} vehicle record(s) fetched individually, so VIN/make/model are up to date and VIN auto-match works. Telemetry (live GPS) is unaffected.`
-					: "Routemate's /api/v0/assets/vehicles endpoint is returning HTTP 500. Telemetry (live GPS) is unaffected. Contact Routemate support — this is upstream.")
-				: undefined,
-			fallbackSynced: fellBackToTelemetry ? err.fallbackSynced : undefined,
-			vehiclesHydrated: hydrated || undefined,
+			code,
+			upstreamStatus: status,
+			hint,
+			fallbackSynced: Number.isFinite(err.fallbackSynced) ? err.fallbackSynced : undefined,
 		});
 	}
-});
+}
 
 // GET /api/routemate/health — Last-sync timestamps + recent error count.
 // Super Admin only. Used by the manual probe UI in TrucksView (Phase 2).
