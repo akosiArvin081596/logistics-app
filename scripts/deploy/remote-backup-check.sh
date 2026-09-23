@@ -48,10 +48,13 @@ PREV_SIZE=$(stat -c %s "$PREV" 2>/dev/null || echo 0)
 LAST_RUN=$(grep -E '^\[backup\] ---- ' backup.log 2>/dev/null | tail -1 | sed 's/^\[backup\] ---- //;s/ ----$//')
 LAST_NODE=$(grep -E '^\[backup\] node: ' backup.log 2>/dev/null | tail -1 | sed 's/^\[backup\] node: //')
 LAST_BLOCK=$(awk '/^\[backup\] ---- /{buf=""} {buf=buf"\n"$0} END{print buf}' backup.log 2>/dev/null || true)
-# backup.sh writes a failure TWO ways: "[backup] backup FAILED with exit code N"
-# when the snapshot step fails, and "[backup] FAILED: <why>" when it cannot even
-# start (no node that loads better-sqlite3, no app dir). Match both.
-FAILED_RE='\] (backup )?FAILED'
+# A failure is written TWO ways: "[backup] FAILED: <why>" (backup-db.js, or
+# backup.sh when it cannot even start — no node that loads better-sqlite3, no
+# app dir) and "[backup] backup FAILED with exit code N" (backup.sh, after the
+# snapshot step fails). Match both. `[]]` is a literal "]" in POSIX EREs, for
+# grep and awk alike, without the stray-backslash warning newer GNU grep prints
+# for `\]`.
+FAILED_RE='[]] (backup )?FAILED'
 if printf '%s' "$LAST_BLOCK" | grep -qE "$FAILED_RE"; then
 	LAST_OK=no
 elif printf '%s' "$LAST_BLOCK" | grep -q '^\[backup\] completed:'; then
@@ -59,7 +62,12 @@ elif printf '%s' "$LAST_BLOCK" | grep -q '^\[backup\] completed:'; then
 else
 	LAST_OK=unknown
 fi
-FAILS=$(grep -cE "$FAILED_RE" backup.log 2>/dev/null || true)
+# Failed RUNS, not failure lines: a snapshot that fails writes both lines above
+# into the same run, so lines are grouped by the run header and a run counts once.
+COUNT_FAILED_RUNS='/^\[backup\] ---- /{ n += bad; bad = 0; next } /[]] (backup )?FAILED/{ bad = 1 } END{ print n + bad }'
+# No log: mawk prints nothing, gawk still runs END and prints 0 — both end as 0.
+FAILS=$(awk "$COUNT_FAILED_RUNS" backup.log 2>/dev/null)
+FAILS=${FAILS:-0}
 
 echo "BACKUP_NEWEST=$NEWEST"
 echo "BACKUP_AGE_HOURS=$AGE_H"

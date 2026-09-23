@@ -476,7 +476,7 @@ async function runRoutemateSync() {
   rmSyncBusy.value = true
   try {
     const r = await api.post('/api/admin/routemate/sync-now', {})
-    // The vehicle list has been down upstream for months (a known 5xx). The
+    // The vehicle list has been down upstream for months (a known HTTP 500). The
     // server then refreshes each vehicle individually and answers 200 with
     // listUnavailable — a completed sync, not a failure.
     if (r.listUnavailable) {

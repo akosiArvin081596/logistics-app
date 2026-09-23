@@ -3363,22 +3363,25 @@ async function routemateHydrateVehicleDetails(creds, { limit = 100 } = {}) {
 			out.hydrated += 1;
 		} catch (err) {
 			const status = err && err.status;
-			// ⚠️ 401/403 is OUR KEY being refused, and 429 is Routemate throttling us —
-			// neither says anything about this id. Filing them under the 4xx rule below
-			// would mark every real vehicle "not ours" for the life of the process.
-			// Every remaining call would fail the same way, so count it and stop.
-			if (status === 401 || status === 403 || status === 429) {
-				out.failed += 1;
-				out.stoppedOn = status;
-				break;
-			}
-			// Any other 4xx means Routemate does not recognize this ID — almost always
-			// a Linxup device sharing the mirror. Remember it and stop asking.
-			if (status >= 400 && status < 500) {
+			// Only 400 and 404 mean "not a Routemate vehicle" — 400 is how Routemate
+			// answers a Linxup device id sharing this mirror (see getVehicle() in
+			// lib/routemate-client.js). Remember those and stop asking.
+			if (status === 400 || status === 404) {
 				routemateNonInventoryIds.add(id);
 				out.skipped += 1;
-			} else {
-				out.failed += 1;
+				continue;
+			}
+			// ⚠️ ANYTHING ELSE IS A FAILURE, AND IS NEVER REMEMBERED AS "NOT OURS" —
+			// that would hide a real vehicle until the next restart. A 408 is the
+			// likely one: Routemate does send them, and the client gives up on a 4xx
+			// (other than 429) at once, so it arrives here looking like any other 4xx.
+			// A refused key (401/403), a throttle (429), a timeout (408) or no answer at
+			// all (network or abort: no status, and up to ~46 s of retries EACH) will
+			// hit every remaining vehicle the same way, so the loop stops on them.
+			out.failed += 1;
+			if (!status || status === 401 || status === 403 || status === 408 || status === 429) {
+				out.stoppedOn = status || "network";
+				break;
 			}
 		}
 	}
@@ -3409,29 +3412,37 @@ function routemateSeedVehicleIdsFromTelemetry() {
 	return n;
 }
 
-// ⚠️ A 5xx FROM THE VEHICLE LIST IS THE KNOWN OUTAGE, NOT A FAILED SYNC.
+// ⚠️ THE VEHICLE LIST'S HTTP 500 IS THE KNOWN OUTAGE, NOT A FAILED SYNC.
 // GET /api/v0/assets/vehicles has answered HTTP 500 for this account since at
 // least 2026-05-06 (see listVehicles() in lib/routemate-client.js), while the
 // per-vehicle endpoint works. Reporting that as a failure made every boot log a
 // sync error, bumped errorsLast24h daily, and turned the admin "Sync now" button
 // into a 502 with no audit row — although the fallback below had just done the
-// job. So a 5xx from the list sets `listUnavailable`: ids come from telemetry,
-// the per-vehicle refresh runs ONCE, lastSync is stamped, and no error is
-// counted. The caller gets { listUnavailable: true } and says so.
+// job. So the KNOWN SHAPE — HTTP 500 from this one call, while the company
+// endpoint still answers — sets `listUnavailable`: ids come from telemetry, the
+// per-vehicle refresh runs ONCE, lastSync is stamped, and no error is counted.
+// The caller gets { listUnavailable: true } and says so.
 //
-// Still a FAILED sync, as before: a 401/403 (the key is refused), a network or
+// ⚠️ ONLY that shape. A 502/503/504 is Routemate or its edge actually failing,
+// and a 500 on the company endpoint too means the whole API is down; both would
+// otherwise be logged "expected" and mark the sync done — once the VINs are
+// filled, the refresh has nothing left to ask, so nothing else would notice.
+// sync-now smoke-tests the company endpoint itself (companyVerified); the boot
+// and daily ticks do not, so the check is made here.
+//
+// Still a FAILED sync: those, a 401/403 (the key is refused), a network or
 // timeout failure (no status), a 429, a failed database write, and a
 // per-vehicle refresh that could not fetch every candidate. Those count an
 // error and throw. The refresh does not run on them: with the key refused it
-// would file every real vehicle as "not ours", and with the network down every
-// call would fail the same way.
-async function routemateSyncVehicles() {
+// would fail on every vehicle, and with the network down every call would fail
+// the same way.
+async function routemateSyncVehicles({ companyVerified = false } = {}) {
 	if (!ROUTEMATE_ENABLED || !ROUTEMATE_API_KEY) return { skipped: true, reason: "disabled" };
 	const creds = routemateCreds();
 	const HARD_PAGE_CAP = 50;
 	let page = 0;
 	let total = 0;
-	let listUnavailable = null; // the list endpoint's 5xx, when that is what stopped the paging
+	let listUnavailable = null; // the list's known HTTP 500, when that is what stopped the paging
 	let fallbackSynced = 0;
 	try {
 		while (page < HARD_PAGE_CAP) {
@@ -3439,7 +3450,7 @@ async function routemateSyncVehicles() {
 			try {
 				batch = await routemate.listVehicles(creds, { page, elements: 200 });
 			} catch (listErr) {
-				if (!(listErr && listErr.status >= 500 && listErr.status < 600)) throw listErr;
+				if (!(listErr && listErr.status === 500)) throw listErr;
 				listUnavailable = listErr;
 				break;
 			}
@@ -3468,17 +3479,31 @@ async function routemateSyncVehicles() {
 			if (batch.length < 200) break;
 			page += 1;
 		}
-		// The list is down, so the ids come from what is actually reporting GPS.
-		if (listUnavailable) fallbackSynced = routemateSeedVehicleIdsFromTelemetry();
+		if (listUnavailable) {
+			// The known bug only while the rest of the API answers: a 500 everywhere
+			// is an outage, and fails the sync — named so, or the log line would read
+			// like the known list 500.
+			if (!companyVerified) {
+				await routemate.getCompany(creds).catch((companyErr) => {
+					const err = new Error(`Routemate company endpoint failed after the vehicle list's 500 — an outage, not the known list bug: ${companyErr.message}`);
+					err.status = companyErr.status || null;
+					throw err;
+				});
+			}
+			// The list is down, so the ids come from what is actually reporting GPS.
+			fallbackSynced = routemateSeedVehicleIdsFromTelemetry();
+		}
 		// ONE per-vehicle refresh, on both paths. Only empty-VIN rows are fetched, so
 		// after a healthy list it is a no-op; with the list down it IS the sync.
 		const hydration = await routemateHydrateVehicleDetails(creds);
 		if (hydration.failed > 0) {
-			const err = new Error(hydration.stoppedOn === 401 || hydration.stoppedOn === 403
-				? `Routemate refused the API key during the per-vehicle refresh (HTTP ${hydration.stoppedOn})`
-				: `Routemate per-vehicle refresh failed for ${hydration.failed} vehicle(s)`);
+			const stoppedOn = hydration.stoppedOn;
+			const err = new Error(stoppedOn === 401 || stoppedOn === 403
+				? `Routemate refused the API key during the per-vehicle refresh (HTTP ${stoppedOn})`
+				: `Routemate per-vehicle refresh failed for ${hydration.failed} vehicle(s)` +
+					(stoppedOn ? ` — stopped on ${stoppedOn === "network" ? "a network error or timeout" : `HTTP ${stoppedOn}`}` : ""));
 			err.code = "ROUTEMATE_REFRESH_FAILED";
-			err.status = hydration.stoppedOn || null;
+			err.status = typeof stoppedOn === "number" ? stoppedOn : null;
 			err.hydration = hydration;
 			err.listUnavailable = !!listUnavailable;
 			throw err;
@@ -32247,12 +32272,14 @@ app.post("/api/admin/routemate/sync-now", requireRole("Super Admin"), routemateS
 // Named so scripts/test-routemate-vehicle-sync.js can run the real handler.
 //
 // Three outcomes, and each one leaves an audit row:
-//   200, listUnavailable  the vehicle list is down upstream (the known 5xx) and
+//   200, listUnavailable  the vehicle list answered its known HTTP 500 while the
+//                         company endpoint (the smoke test below) answered, and
 //                         the per-vehicle refresh did the sync — see
 //                         routemateSyncVehicles(). Not an error.
 //   200                   the list answered; the ordinary sync.
 //   502                   a real failure — the key refused (401/403), Routemate
-//                         unreachable, or vehicles the refresh could not fetch.
+//                         unreachable, any other list error (a 502/503/504 too),
+//                         or vehicles the refresh could not fetch.
 //                         Audited as routemate_sync_failed. Always 502, never the
 //                         upstream 401/403 itself: this request WAS authorized;
 //                         it is our key that Routemate refused, and upstreamStatus
@@ -32265,9 +32292,10 @@ async function routemateSyncNowHandler(req, res) {
 		return res.status(503).json({ error: "Routemate API key not configured (set ROUTEMATE_API_KEY)" });
 	}
 	try {
-		// Smoke test first via the lightest call before paginating vehicles.
+		// Smoke test first via the lightest call before paginating vehicles. It is
+		// also what lets the sync call a list 500 "expected" without asking again.
 		await routemate.getCompany(routemateCreds());
-		const result = await routemateSyncVehicles();
+		const result = await routemateSyncVehicles({ companyVerified: true });
 		// Trigger one telemetry pull so the operator sees fresh data immediately.
 		routemateSyncTelemetry().catch(() => {});
 		if (result.listUnavailable) {
