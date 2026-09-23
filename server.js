@@ -32758,6 +32758,37 @@ async function extractReceiptText(imageBuffer) {
 	}
 }
 
+// Receipt OCR for POST /api/documents/upload, run AFTER the response is sent.
+// Nothing reads the text synchronously — only documents.ocr_text, which
+// GET /api/documents/:loadId serves to DocumentList later — so the upload no
+// longer waits on it. ONE AT A TIME: Tesseract.recognize() spawns a worker per
+// call (and fetches eng.traineddata from a CDN when it is not cached), and off
+// the request path nothing else would stop a burst of uploads running them all
+// at once. Past RECEIPT_OCR_MAX_PENDING a receipt is stored without text, which
+// is exactly what an OCR failure has always done. Writes by documents.id, the
+// PRIMARY KEY — documents.file_name has no unique index. Never throws.
+const RECEIPT_OCR_MAX_PENDING = 20;
+let receiptOcrChain = Promise.resolve();
+let receiptOcrPending = 0;
+function queueReceiptOcr(documentId, imageBuffer) {
+	if (receiptOcrPending >= RECEIPT_OCR_MAX_PENDING) {
+		console.warn(`[upload] receipt OCR skipped for document ${documentId}: ${receiptOcrPending} already queued`);
+		return false;
+	}
+	receiptOcrPending++;
+	receiptOcrChain = receiptOcrChain.then(async () => {
+		try {
+			const text = await extractReceiptText(imageBuffer);
+			if (text) db.prepare("UPDATE documents SET ocr_text = ? WHERE id = ?").run(text, documentId);
+		} catch (err) {
+			console.error(`[upload] deferred receipt OCR failed for document ${documentId} (non-critical):`, err && err.message);
+		} finally {
+			receiptOcrPending--;
+		}
+	});
+	return true;
+}
+
 // ============================================================
 // Rate-con drag-and-drop → load creation
 // ============================================================
@@ -36603,19 +36634,24 @@ app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, r
 			return res.status(500).json({ error: "Could not save the document. Please try again." });
 		}
 
-		// OCR for receipts (images only). Stays ON the critical path because it
-		// populates ocrText in the response body below; it only runs for
-		// docType === "Receipt", never for the POD path.
-		let ocrText = "";
+		// OCR for receipts (images only) is OFF the critical path. It used to be
+		// awaited right here, before the response, to fill an `ocrText` field no
+		// client ever read — a fresh Tesseract worker per upload, on top of a slow
+		// cellular body, inside nginx's 60 s window (and a client that gives up
+		// re-POSTs the whole document, minting a second documents row). Only the
+		// bytes are taken now; queueReceiptOcr() runs after res.json() below and
+		// fills documents.ocr_text by id. Still docType === "Receipt" only — POD,
+		// BOL and Other uploads never ran OCR.
+		let ocrSource = null;
 		if (docType === "Receipt" && fileType !== 'document') {
 			const photoArray = Array.isArray(photoData) ? photoData : [photoData];
-			const firstBuf = Buffer.from(photoArray[0].replace(/^data:image\/\w+;base64,/, ""), "base64");
-			ocrText = await extractReceiptText(firstBuf);
+			ocrSource = Buffer.from(photoArray[0].replace(/^data:image\/\w+;base64,/, ""), "base64");
 		}
 
 		// Store metadata in SQLite
+		let documentId = null;
 		try {
-			db.prepare(
+			documentId = db.prepare(
 				`INSERT INTO documents (load_id, driver, type, file_name, drive_file_id, drive_url, ocr_text)
 				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			).run(
@@ -36625,8 +36661,8 @@ app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, r
 				fileName,
 				"",
 				driveUrl,
-				ocrText,
-			);
+				"",
+			).lastInsertRowid;
 		} catch (dbErr) {
 			console.error("SQLite insert error:", dbErr.message);
 			return res.status(500).json({ error: "Document was uploaded but could not be saved. Please try again." });
@@ -36651,7 +36687,9 @@ app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, r
 			body: `Load ${loadId}`,
 		});
 
-		res.json({ success: true, driveUrl, ocrText });
+		// No `ocrText`: the text does not exist yet (see queueReceiptOcr()), and no
+		// client read the field. It reaches DocumentList via documents.ocr_text.
+		res.json({ success: true, driveUrl });
 		console.log(`[upload] 200 sent; deferring POD sheet update row ${rowIndex}`);
 
 		// Mark the POD column in the sheet AFTER the response is sent. This Sheets
@@ -36710,6 +36748,12 @@ app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, r
 					console.error("Sheet POD column update error (non-critical):", sheetErr.message);
 				}
 			});
+		}
+
+		// Receipt OCR, deferred the same way (res is sent; never touch it here).
+		// queueReceiptOcr() serializes the work and swallows its own failures.
+		if (ocrSource && documentId != null) {
+			setImmediate(() => queueReceiptOcr(documentId, ocrSource));
 		}
 	} catch (error) {
 		console.error("Error uploading document:", error.message);
