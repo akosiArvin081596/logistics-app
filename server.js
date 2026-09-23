@@ -13266,6 +13266,8 @@ async function appendInvoiceAdjustmentAddendum(invoiceRow) {
 //     row is now billed in NO week and reported instead: `warnings` on the
 //     response, and `undatedInWeek` — which the batch escalates — for one whose
 //     scheduled window sits in the billing week and so was probably worked in it.
+//     Every other one is reported ONCE, by the invoice_undated_alerts ledger
+//     (listUndatedCompletedLoads() + runUndatedLoadAlerts()).
 //     ⚠️ Deliberately NOT the Drop-off Appointment as a fallback. It is the
 //     SCHEDULED date, typed by hand, and wrong often enough to matter (live
 //     September 2026 rows carry "9/4/2024" and "9/21/2020"); GET
@@ -13362,6 +13364,62 @@ function selectInvoiceWeekLoads(data, headers, driverName, weekStart, weekEnd, d
 			row,
 			loadId: String((cols.loadIdCol && row[cols.loadIdCol]) || "").trim() || `(sheet row ${row._rowIndex})`,
 			scheduledInWeek: inWeek(cols.pickupCol && row[cols.pickupCol]) || inWeek(cols.dropoffCol && row[cols.dropoffCol]),
+		})),
+	};
+}
+
+// Every completed load that NO weekly invoice can place — across the whole
+// sheet, not one driver's week. selectInvoiceWeekLoads() names such a load only
+// to its own driver's invoice (`warnings`, which nothing reads), and the Friday
+// batch escalates it only when an appointment falls in the billing week. The
+// rest — blank appointments, or completed by a sheet edit weeks after they were
+// scheduled — were billed by nobody and reported to nobody. The reader is the
+// invoice_undated_alerts ledger (runUndatedLoadAlerts(), below the batch).
+//
+// The SAME verdict the invoice uses, so "undated" here and "billed in no week"
+// there cannot drift. invoiceWeekVerdict() decides "undated" BEFORE it compares
+// any week, so the empty week passed below changes nothing but turns every dated
+// row into "other-week". One entry per load, keyed on normalizeLoadId() ("#X"
+// and "X" are one load); a DATED copy of the load, under any driver, wins —
+// that copy is billed in its own week, so the load is not missing. Pass EVERY
+// sheet row: getJobTrackingCached() keeps one row per load (deduplicateLoads),
+// which can hide exactly the dated copy this rule turns on.
+//
+//   resolved  false when the sheet has no status, Load ID or completion-date
+//             column. `loads` then means nothing — a missing column reads as "no
+//             load is undated" (closing every open ledger row) or as "every load
+//             is undated" (a flood) — so a caller must not act on it.
+//   loads     [{ key, loadId, driver, pickup, dropoff }], the LAST undated row
+//             of each load.
+//   unkeyed   completed, undated rows with no Load ID. Counted, not tracked: a
+//             sheet row number is no key (it moves when a row above is
+//             deleted). The driver's invoice `warnings` still names them.
+function listUndatedCompletedLoads(rows, headers, deletedKeys) {
+	const cols = invoiceWeekColumns(headers);
+	if (!cols.statusCol || !cols.loadIdCol || !cols.dateCol) return { resolved: false, loads: [], unkeyed: 0 };
+	const undatedByKey = new Map();
+	const datedKeys = new Set();
+	const tombstones = deletedKeys || new Set();
+	let unkeyed = 0;
+	for (const row of rows || []) {
+		const verdict = invoiceWeekVerdict(row, cols, "", "", tombstones);
+		if (verdict === "open" || verdict === "deleted") continue;
+		const loadKey = normalizeLoadId(row[cols.loadIdCol]);
+		if (!loadKey) { if (verdict === "undated") unkeyed++; continue; }
+		if (verdict === "undated") undatedByKey.set(loadKey, row);
+		else datedKeys.add(loadKey); // "other-week" ("bill" cannot occur in the empty week; dated all the same)
+	}
+	for (const key of datedKeys) undatedByKey.delete(key);
+	const cell = (row, col) => (col ? String(row[col] || "").trim() : "");
+	return {
+		resolved: true,
+		unkeyed,
+		loads: [...undatedByKey].map(([key, row]) => ({
+			key,
+			loadId: cell(row, cols.loadIdCol),
+			driver: cell(row, cols.driverCol),
+			pickup: cell(row, cols.pickupCol),
+			dropoff: cell(row, cols.dropoffCol),
 		})),
 	};
 }
@@ -14041,12 +14099,13 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 	// reports them on both a 200 and a 400 (a driver whose ONLY load is undated gets
 	// "no loads"), so they are read before the status branch; off-roster drivers are
 	// added after the loop. Escalated, never retried: a retry cannot supply a date.
-	// ⚠️ NOT covered: an undated load whose pickup AND drop-off appointments are
-	// both blank or unreadable — nothing places it in any week, so only the
-	// handler's `warnings` name it. Alerting on those ONCE each needs a dedupe
-	// ledger (the *_alerts pattern) seeded past the 283 historical rows; a weekly
-	// alert without one would repeat the same history every Friday.
+	// An undated load with NO appointment in this week — blank, unreadable, or
+	// another week's — is the invoice_undated_alerts ledger's: reported ONCE, by
+	// runUndatedLoadAlerts() at the end of this run, never again every Friday.
+	// undatedInWeekLoadIds hands it the raw ids named here, so it does not name
+	// them a second time.
 	const undatedInWeek = [];
+	const undatedInWeekLoadIds = [];
 	for (const driver of rosterDrivers) {
 		const norm = normalizeDriverName(driver);
 		try {
@@ -14058,6 +14117,7 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 			]);
 			if (Array.isArray(body.undatedInWeek) && body.undatedInWeek.length) {
 				undatedInWeek.push(`${driver}: ${body.undatedInWeek.join(", ")}`);
+				undatedInWeekLoadIds.push(...body.undatedInWeek);
 			}
 			if (statusCode === 200 && body.invoice) {
 				created++;
@@ -14100,6 +14160,7 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 			const ids = selectInvoiceWeekLoads(jt.data, jt.headers, display, range.weekStart, range.weekEnd, deletedKeys)
 				.undated.filter((u) => u.scheduledInWeek).map((u) => u.loadId);
 			if (ids.length) undatedInWeek.push(`${display} (not on the roster): ${ids.join(", ")}`);
+			undatedInWeekLoadIds.push(...ids);
 		}
 	}
 	if (submitted > 0) notifyChange("invoices");
@@ -14130,11 +14191,15 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 	// on quiet weeks + interim retries. `problem` (unbilled) drives retry; zeroPay
 	// and errors don't retry but still make the one notification action-needed.
 	const isFinalAttempt = attemptNum >= INVOICE_AUTOGEN_MAX_ATTEMPTS;
+	// Whether this summary — and so its undatedInWeek list — reached the in-app
+	// feed or the mailbox. Read only by the undated-load ledger below.
+	let summaryDelivered = false;
 	if ((!problem && needsAttention) || (!problem && submitted > 0) || (problem && isFinalAttempt)) {
 		const detail = errors.length ? ` · Errors: ${errors.slice(0, 5).join("; ")}` : "";
 		try {
 			const title = `Weekly invoices ${needsAttention ? "— ACTION NEEDED" : "generated"} · ${range.weekStart} to ${range.weekEnd}`;
 			insertDispatchNotification.run("invoices-autogen", title, summary + detail, JSON.stringify({ weekStart: range.weekStart, weekEnd: range.weekEnd, submitted, skipped, zeroPay: zeroPay.length, unbilled: unbilled.length, undatedInWeek: undatedInWeek.length, errored: errors.length }));
+			summaryDelivered = true;
 			if (io) io.to("dispatch").emit("dispatch-notification", { type: "invoices-autogen", title, body: summary + detail });
 		} catch (e) { console.error("[invoice-autogen] notification failed:", e.message); }
 		try {
@@ -14157,11 +14222,273 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 				ctaText: "Review Invoices",
 				ctaHref: "https://app.logisx.com/invoices",
 			});
-			await sendEmail(adminEmail, `Weekly Invoices ${needsAttention ? "— ACTION NEEDED " : ""}— ${range.weekStart} to ${range.weekEnd}`, html);
+			if ((await sendEmail(adminEmail, `Weekly Invoices ${needsAttention ? "— ACTION NEEDED " : ""}— ${range.weekStart} to ${range.weekEnd}`, html)) === true) summaryDelivered = true;
 		} catch (e) { console.error("[invoice-autogen] email failed:", e.message); }
 	}
 
+	// Completed loads NO weekly invoice can place: one digest of the new or
+	// re-opened ones, minus those this summary already named. Observe-only — it
+	// writes its own ledger and never a marker, an invoice or a retry, and nothing
+	// it does reaches the return value below: a throw is caught here, and the
+	// 90 s race (the per-driver guard's) keeps a hung read from wedging the batch.
+	let undatedDigestTimer = null;
+	try {
+		await Promise.race([
+			runUndatedLoadAlerts({ range, reportedIds: undatedInWeekLoadIds, reportedDelivered: summaryDelivered }),
+			new Promise((r) => { undatedDigestTimer = setTimeout(r, 90 * 1000); }),
+		]);
+	} catch (e) {
+		console.error("[invoice-undated] digest failed (batch unaffected):", e && e.message);
+	} finally {
+		clearTimeout(undatedDigestTimer);
+	}
+
 	return { created, submitted, skipped, unbilled: unbilled.length, problem };
+}
+
+// ============================================================
+// COMPLETED LOADS NO WEEKLY INVOICE CAN PLACE — reported once per load
+// ============================================================
+// A completed Job Tracking row with neither a Status Update Date nor a
+// Completion Date is billed in NO week (rule 3 of "WHICH COMPLETED LOADS A
+// WEEKLY INVOICE BILLS", above). The batch escalates one only while an
+// appointment puts it in the billing week;
+// listUndatedCompletedLoads() finds all of them, and this ledger reports each
+// one ONCE: after the Friday batch, as one digest (email + dispatch
+// notification) of the loads that are new or re-opened since the last digest.
+//
+// ONCE PER LOAD — the *_alerts shape, for the same reason: the same history
+// every Friday is a channel nobody reads. Keyed on normalizeLoadId().
+// resolved_at is stamped when a load leaves the list (it gained a date — the
+// fix — or was soft-deleted, or is no longer completed); a load that comes back
+// RE-OPENS as a new episode and is reported again, first_seen kept.
+//
+// ⚠️ SILENT BASELINE. 283 completed rows carry no date today (2025 history,
+// from before status logging), and a first digest listing them would bury the
+// load that matters. So the first run records whatever is undated then, with
+// seeded_at and no report, and marks the baseline done in server_state — a
+// marker, not "the table is empty": a sheet with nothing undated seeds nothing
+// and must still count as seeded. A boot tick seeds a few minutes after start,
+// and the batch seeds first if the tick has not, so the first digest can never
+// be the backlog. To re-arm silently, delete the rows AND the marker; deleting
+// only the rows reports the history again, 25 loads a day.
+//
+// OBSERVE-ONLY. It writes this table, one server_state row, and per digest one
+// dispatch notification and one email — never an invoice, a payroll marker or a
+// retry — and runWeeklyInvoiceBatch() returns the same value whatever happens in
+// here. The CREATE is wrapped for the same reason: a ledger that cannot be made
+// costs this alert, not the boot of the process that bills drivers.
+try {
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS invoice_undated_alerts (
+			load_key TEXT PRIMARY KEY,
+			driver TEXT DEFAULT '',
+			first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+			seeded_at DATETIME,
+			alerted_at DATETIME,
+			resolved_at DATETIME
+		)
+	`);
+} catch (e) { console.error("[invoice-undated] ledger unavailable — undated-load alerts off:", e.message); }
+
+// DEFAULTS ON, deliberately — a kill switch, not an enable switch: the same call
+// and the same shape as RATECON_EXTRACT_ALERT_ENABLED and
+// EXPENSE_DUPLICATE_ALERT_ENABLED. A detector that ships off stays off, and the
+// failure it exists to break is silence. It moves no money, so "ships dormant"
+// does not apply. Only false/0/no/off turn it off; "true" is a no-op. It runs in
+// the Friday batch, so it is inert wherever INVOICE_AUTOGEN_ENABLED is off.
+const INVOICE_UNDATED_ALERT_ENABLED =
+	!/^(false|0|no|off)$/i.test(String(process.env.INVOICE_UNDATED_ALERT_ENABLED ?? "").trim());
+// Loads reported per rolling 24 h, whatever the ledger says. The ledger is the
+// primary control; this is the one that still holds when the ledger is cleared
+// (the history comes back as "new") or a bulk sheet edit strips many dates at
+// once. The rest stay owed, recorded, for the next run.
+// ⚠️ Counted through datetime(alerted_at): the stamp is an
+// ISO-8601 "…T…Z" string, and compared raw with datetime('now', …)'s "… …"
+// form, the "T" sorts after the space, so a stamp from before the cutoff on the
+// cutoff's own date would still count as "today".
+const INVOICE_UNDATED_ALERT_MAX_PER_DAY = 25;
+// Its server_state row. Every statement on server_state is prepared lazily,
+// inside the calls: that table is created much further down this file.
+const INVOICE_UNDATED_BASELINE_KEY = "invoice_undated_alerts_baseline";
+// The seed's boot tick: after the batch's own 90 s catch-up and the boot burst.
+const INVOICE_UNDATED_SEED_DELAY_MS = 4 * 60 * 1000;
+let invoiceUndatedAlertsRunning = false;
+
+// ONE call per Friday batch run, and one seed-only call from the boot tick.
+// NEVER throws and never rejects; the batch ignores what it returns.
+//   reportedIds        the raw load ids this run's batch named in undatedInWeek
+//   reportedDelivered  whether that summary reached the in-app feed or the mail
+//   seedOnly           the boot tick: seed if nobody has yet, nothing else
+async function runUndatedLoadAlerts({ range = null, reportedIds = [], reportedDelivered = false, seedOnly = false } = {}) {
+	if (!INVOICE_UNDATED_ALERT_ENABLED) return { skipped: "disabled" };
+	if (invoiceUndatedAlertsRunning) return { skipped: "busy" };
+	invoiceUndatedAlertsRunning = true;
+	try {
+		const baselineDone = () => !!db.prepare("SELECT 1 FROM server_state WHERE key = ?").get(INVOICE_UNDATED_BASELINE_KEY);
+		if (seedOnly && baselineDone()) return { skipped: "seeded" };
+
+		// EVERY row, read the way the invoice handler reads it — not the
+		// deduplicated cache (see listUndatedCompletedLoads()).
+		const sheets = await getSheets();
+		const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+		const sheet = parseSheet(resp.data);
+		// strict: a tombstone read that failed must stop the run, not report every
+		// soft-deleted load as unbilled.
+		const found = listUndatedCompletedLoads(sheet.data, sheet.headers, loadKeySet(getDeletedLoadIds({ strict: true })));
+		// An empty or unrecognisable sheet is no evidence either way. Acting on it
+		// would close every open row, or seed an empty baseline and report the
+		// whole history later.
+		if (!sheet.data.length || !found.resolved) {
+			console.warn(`[invoice-undated] Job Tracking ${sheet.data.length ? "has no status, Load ID or completion-date column" : "read back empty"} — ledger left as it was`);
+			return { skipped: "sheet-unusable" };
+		}
+
+		// ⚠️ NO AWAIT between here and the ledger writes. The baseline is re-read
+		// AFTER the sheet read, so a boot tick and a batch that both got this far
+		// cannot both seed, and neither can report the backlog.
+		const now = new Date().toISOString();
+		const current = new Map(found.loads.map((l) => [l.key, l]));
+		// A load that left the list closes; if it comes back, it re-opens below.
+		const closeGone = () => {
+			const close = db.prepare("UPDATE invoice_undated_alerts SET resolved_at = ? WHERE load_key = ? AND resolved_at IS NULL");
+			let n = 0;
+			for (const r of db.prepare("SELECT load_key FROM invoice_undated_alerts WHERE resolved_at IS NULL").all()) {
+				if (!current.has(r.load_key)) n += close.run(now, r.load_key).changes;
+			}
+			return n;
+		};
+
+		if (!baselineDone()) {
+			db.transaction(() => {
+				const seed = db.prepare(`
+					INSERT INTO invoice_undated_alerts (load_key, driver, first_seen, seeded_at, alerted_at, resolved_at)
+					VALUES (?, ?, ?, ?, NULL, NULL)
+					ON CONFLICT(load_key) DO UPDATE SET
+						driver = excluded.driver,
+						seeded_at = COALESCE(seeded_at, excluded.seeded_at),
+						resolved_at = NULL
+				`);
+				for (const l of found.loads) seed.run(l.key, l.driver, now, now);
+				closeGone();
+				db.prepare("INSERT OR REPLACE INTO server_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)")
+					.run(INVOICE_UNDATED_BASELINE_KEY, JSON.stringify({ seededAt: now, loads: found.loads.length }));
+			})();
+			console.log(`[invoice-undated] baseline: ${found.loads.length} undated completed load(s) recorded silently` +
+				(found.unkeyed ? ` (${found.unkeyed} more row(s) have no Load ID and are not tracked)` : ""));
+			return { seeded: found.loads.length, unkeyed: found.unkeyed };
+		}
+		if (seedOnly) return { skipped: "seeded" };
+
+		// Record the list. New → owed. Back after a resolve → owed again: a new
+		// episode, so the old seeded/alerted stamps (which described the last one)
+		// are cleared and first_seen is kept. Still open → only the driver moves.
+		let resolved = 0;
+		db.transaction(() => {
+			resolved = closeGone();
+			const record = db.prepare(`
+				INSERT INTO invoice_undated_alerts (load_key, driver, first_seen, seeded_at, alerted_at, resolved_at)
+				VALUES (?, ?, ?, NULL, NULL, NULL)
+				ON CONFLICT(load_key) DO UPDATE SET
+					driver = excluded.driver,
+					seeded_at = CASE WHEN resolved_at IS NULL THEN seeded_at ELSE NULL END,
+					alerted_at = CASE WHEN resolved_at IS NULL THEN alerted_at ELSE NULL END,
+					resolved_at = NULL
+			`);
+			for (const l of found.loads) record.run(l.key, l.driver, now);
+		})();
+
+		// Owed a report: open, never reported, not part of the silent baseline.
+		// One the batch summary named this run is NOT repeated in the digest — the
+		// summary is its report, so it is stamped below once that was delivered.
+		const reported = new Set((reportedIds || []).map((id) => normalizeLoadId(id)).filter(Boolean));
+		const owed = db.prepare(
+			"SELECT load_key FROM invoice_undated_alerts WHERE resolved_at IS NULL AND alerted_at IS NULL AND seeded_at IS NULL ORDER BY first_seen, load_key",
+		).all().map((r) => r.load_key).filter((k) => current.has(k));
+		const namedBySummary = owed.filter((k) => reported.has(k));
+		const candidates = owed.filter((k) => !reported.has(k));
+		const alertedToday = db.prepare(
+			"SELECT COUNT(*) AS c FROM invoice_undated_alerts WHERE datetime(alerted_at) > datetime('now', '-1 day')",
+		).get().c;
+		const digest = candidates.slice(0, Math.max(0, INVOICE_UNDATED_ALERT_MAX_PER_DAY - alertedToday));
+		const held = candidates.length - digest.length;
+
+		let emailed = false;
+		let notified = false;
+		if (digest.length) ({ emailed, notified } = await sendUndatedLoadDigest(digest.map((k) => current.get(k)), { range, held }));
+
+		// ⚠️ STAMP ONLY ON CONFIRMED DELIVERY. A stamp before the send would file a
+		// failed Gmail call as a told human, and the load would never be named
+		// again; unstamped, it is simply owed to the next run. The in-app
+		// notification is delivery in its own right.
+		const at = new Date().toISOString();
+		const stamp = db.prepare("UPDATE invoice_undated_alerts SET alerted_at = ? WHERE load_key = ? AND alerted_at IS NULL AND resolved_at IS NULL");
+		if (emailed || notified) for (const k of digest) stamp.run(at, k);
+		if (reportedDelivered) for (const k of namedBySummary) stamp.run(at, k);
+
+		const delivered = emailed || notified;
+		console.log(`[invoice-undated] ${current.size} undated completed load(s) open; ` +
+			(digest.length ? `${digest.length} reported${delivered ? "" : " — UNDELIVERED, owed to the next run"}` : "none new") +
+			(held ? `, ${held} held by the ${INVOICE_UNDATED_ALERT_MAX_PER_DAY}/day cap` : "") +
+			(namedBySummary.length ? `, ${namedBySummary.length} named by the weekly summary${reportedDelivered ? "" : " (undelivered — owed)"}` : "") +
+			(resolved ? `, ${resolved} resolved` : "") +
+			(found.unkeyed ? `, ${found.unkeyed} row(s) with no Load ID untracked` : ""));
+		return { open: current.size, digest: digest.length, delivered, emailed, notified, held, resolved, namedBySummary: namedBySummary.length, unkeyed: found.unkeyed };
+	} catch (e) {
+		console.error("[invoice-undated] failed:", e && e.message);
+		return { error: (e && e.message) || String(e) };
+	} finally {
+		invoiceUndatedAlertsRunning = false;
+	}
+}
+
+// The digest: one dispatch notification and one email for `loads`
+// (listUndatedCompletedLoads() entries). Each channel is tried on its own, so a
+// mail outage still leaves the in-app notification. Returns { emailed, notified }
+// and never throws.
+async function sendUndatedLoadDigest(loads, { range = null, held = 0 } = {}) {
+	// Sheet text, on one line, bounded BEFORE any regex runs on it.
+	const oneLine = (v, max = 80) => String(v == null ? "" : v).slice(0, 400).replace(/\s+/g, " ").trim().slice(0, max);
+	const n = loads.length;
+	const title = `${n} completed load${n === 1 ? "" : "s"} no weekly invoice will bill`;
+	const idOf = (l) => oneLine(l.loadId, 40) || l.key;
+	const listed = loads.slice(0, 10).map((l) => `${idOf(l)} (${oneLine(l.driver, 40) || "no driver"})`).join("; ") +
+		(n > 10 ? `; and ${n - 10} more` : "");
+	const body = `No Status Update Date or Completion Date: ${listed}.` +
+		(held ? ` ${held} more held by the daily cap for the next run.` : "");
+	const metadata = { loadIds: loads.map(idOf), held, weekStart: range ? range.weekStart : "", weekEnd: range ? range.weekEnd : "" };
+	if (n === 1) metadata.loadId = idOf(loads[0]); // one load: tapping the notification opens it
+
+	let notified = false;
+	try {
+		insertDispatchNotification.run("invoices-undated", title, body, JSON.stringify(metadata));
+		notified = true;
+		if (io) io.to("dispatch").emit("dispatch-notification", { type: "invoices-undated", title, body, metadata, ...(metadata.loadId ? { loadId: metadata.loadId } : {}) });
+	} catch (e) { console.error("[invoice-undated] notification failed:", e && e.message); }
+
+	let emailed = false;
+	try {
+		const cell = (v, tag = "td") => `<${tag} style="padding:6px 10px;border:1px solid #e2e8f0;text-align:left">${escHtml(v)}</${tag}>`;
+		const rows = loads.map((l) =>
+			`<tr>${cell(idOf(l))}${cell(oneLine(l.driver, 40) || "—")}${cell(oneLine(l.pickup) || "—")}${cell(oneLine(l.dropoff) || "—")}</tr>`).join("");
+		const html = invoiceEmailHtml({
+			heading: "Completed Loads No Invoice Will Bill",
+			bodyHtml: `
+				<p style="margin:0 0 12px;line-height:1.6;color:#334155">These loads are marked completed on Job Tracking but have no <b>Status Update Date</b> or <b>Completion Date</b>, so no weekly invoice will ever bill them${range ? ` (checked after the weekly run for ${escHtml(range.weekStart)} — ${escHtml(range.weekEnd)})` : ""}.</p>
+				<table style="border-collapse:collapse;font-size:13px;margin:0 0 12px">
+					<tr>${cell("Load", "th")}${cell("Driver", "th")}${cell("Pickup appointment", "th")}${cell("Drop-off appointment", "th")}</tr>
+					${rows}
+				</table>
+				<p style="margin:0 0 12px;line-height:1.6;color:#334155">To fix one, set its Status Update Date on Job Tracking to the day it was delivered, then regenerate or adjust the driver's invoice for that week.</p>
+				${held ? `<p style="margin:0 0 12px;color:#b45309;font-size:13px">${held} more ${held === 1 ? "is" : "are"} waiting: at most ${INVOICE_UNDATED_ALERT_MAX_PER_DAY} loads are reported a day, and the rest follow on the next run.</p>` : ""}
+				<p style="margin:0;color:#94a3b8;font-size:12px">Reported once per load, and again only if a load gets a date and later loses it.</p>
+			`,
+			ctaText: "Review Invoices",
+			ctaHref: "https://app.logisx.com/invoices",
+		});
+		emailed = (await sendEmail(process.env.GMAIL_USER || "info@logisx.com", `⚠️ ${title}`, html)) === true;
+	} catch (e) { console.error("[invoice-undated] email failed:", e && e.message); }
+	return { emailed, notified };
 }
 
 let invoiceAutogenRunning = false;
@@ -14207,6 +14534,13 @@ if (INVOICE_AUTOGEN_ENABLED) {
 	setInterval(() => { maybeRunWeeklyInvoiceBatch().catch(() => {}); }, 60 * 1000);
 	// Boot catch-up (delayed so the app finishes initializing first).
 	setTimeout(() => { maybeRunWeeklyInvoiceBatch().catch(() => {}); }, 90 * 1000);
+	// The undated-load ledger's silent baseline (runUndatedLoadAlerts). Unref'd,
+	// so it never holds the process open. When the catch-up above reaches the
+	// batch first, the batch seeds and this tick finds the marker and stops.
+	if (INVOICE_UNDATED_ALERT_ENABLED) {
+		const undatedSeedTick = setTimeout(() => { runUndatedLoadAlerts({ seedOnly: true }).catch(() => {}); }, INVOICE_UNDATED_SEED_DELAY_MS);
+		if (undatedSeedTick && typeof undatedSeedTick.unref === "function") undatedSeedTick.unref();
+	}
 	console.log("[invoice-autogen] enabled — Fridays 7:00 PM America/Chicago (after the 6:30 PM driver cutoff)");
 }
 
