@@ -1,5 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import { useAuthStore } from '../stores/auth'
+import { useAuthStore, onSessionResolved } from '../stores/auth'
 
 import LoginView from '../views/LoginView.vue'
 
@@ -261,6 +261,30 @@ router.beforeEach(async (to) => {
   }
 
   return true
+})
+
+// When the first navigation could not reach the server, the session goes on being
+// checked in the background (stores/auth.js, rules in lib/sessionCheck.js). An
+// answer that changes what the guard above decides (signed out, a different user
+// or role, a forced password change) re-runs that guard on the page the user is
+// on, instead of waiting for a navigation that may never come in the single-page
+// driver app. `force` is what makes a same-location replace run the guards at all;
+// isReady() keeps it from cancelling a first navigation still loading its chunk.
+//
+// Public pages have nothing to re-decide, except /login, whose whole purpose is
+// getting in: a cookie that was valid all along takes the user to their home
+// screen without another password entry.
+onSessionResolved(() => {
+  router
+    .isReady()
+    .then(() => {
+      const current = router.currentRoute.value
+      if (current.meta.public && current.name !== 'login') return
+      return router.replace({ path: current.path, query: current.query, hash: current.hash, force: true })
+    })
+    .catch(() => {
+      /* superseded by another navigation: nothing to do */
+    })
 })
 
 export default router

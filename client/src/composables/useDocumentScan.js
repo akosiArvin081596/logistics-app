@@ -14,15 +14,21 @@ export function useDocumentScan() {
   const api = useApi()
 
   // photoDataUrl: "data:image/jpeg;base64,..." (caller downscales first).
-  // opts: { returnPdf?: boolean, filter?: 'original' | 'flat' | 'white' }
+  // opts: { returnPdf?: boolean, filter?: 'original' | 'flat' | 'white',
+  //         outputWidth?: number, signal?: AbortSignal }
   // resolves to { data, contentType, ext, isPdf }
+  //
+  // `outputWidth` is sent ONLY when a caller asks. Omitted, the body is exactly
+  // what it always was and the server keeps its 1536 default — which is what
+  // every POD/BOL scan still gets. The receipt form asks for less; see
+  // RECEIPT_SCAN_WIDTH in lib/receiptPhoto.js for why.
+  // `signal` lets a caller abandon a scan it no longer wants (useApi reports
+  // that as code 'ABORT', never as a timeout).
   async function scanDocument(photoDataUrl, opts = {}) {
-    const { returnPdf = false, filter = 'white' } = opts
-    return await api.post('/api/documents/scan', {
-      photoData: photoDataUrl,
-      returnPdf,
-      filter,
-    }, { timeout: 30000 })
+    const { returnPdf = false, filter = 'white', outputWidth, signal } = opts
+    const body = { photoData: photoDataUrl, returnPdf, filter }
+    if (outputWidth) body.outputWidth = outputWidth
+    return await api.post('/api/documents/scan', body, { timeout: 30000, signal })
   }
 
   return { scanDocument }

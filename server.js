@@ -4643,6 +4643,12 @@ const sessionMiddleware = session({
 });
 app.use(sessionMiddleware);
 io.engine.use(sessionMiddleware);
+// ⚠️ MUST STAY DIRECTLY BELOW sessionMiddleware AND ABOVE EVERY ROUTE. It
+// re-reads users.must_change_password into req.session.user before
+// requireAuth / requireRole look at it, so a route registered ABOVE this line
+// would enforce a stale session copy. See "FORCED PASSWORD CHANGE" beside the
+// guards; scripts/test-password-change-enforced.js pins this position.
+app.use(refreshPasswordChangeFlag);
 // ============================================================
 // n8n Webhook: Upsert job into sheet_job_tracking (replaces Google Sheets write)
 // ============================================================
@@ -6428,6 +6434,110 @@ app.post("/api/investors/:id/profile-picture", requireAuth, (req, res) => {
 // Roles: Super Admin (full access), Admin (dispatch, no broker/financial), Driver (own data only, no rate/revenue), Investor (financial view)
 
 // ===========================================================================
+// FORCED PASSWORD CHANGE — enforced by the guards, not only by the client router
+// ===========================================================================
+// Accepting a driver application (PUT /api/applications/:id/status) mints an
+// account with an 8-hex-char temporary password, emails it in plaintext, and
+// sets users.must_change_password = 1. Until 2026-09-23 nothing on the server
+// read that flag. The only enforcement was the Vue router sending the SPA to
+// /account/change-password, so anyone holding the emailed password (curl, or
+// the SPA with its router stepped around) could call every API the role allows,
+// indefinitely, without ever rotating it.
+//
+// WHAT IS REFUSED: every request that passes requireAuth / requireRole answers
+//   403 {error:"Password change required", code:"PASSWORD_CHANGE_REQUIRED"}
+// while the flag is set. Mounting one of those two guards IS this app's
+// definition of an authenticated route (every /api route that is not public or
+// secret-gated, plus both /uploads mounts), so the gate covers exactly that set
+// and inherits every future route that mounts a guard. The allowlist is the
+// three calls the change-password screen makes:
+//   POST /api/auth/change-password   mounts requireAuth; exempted in the guards
+//   GET  /api/auth/session           mounts no guard, so unaffected
+//   POST /api/auth/logout            mounts no guard, so unaffected
+// Public routes mount no guard and are unaffected, with or without a session.
+// That is why the check lives in the guards rather than in one
+// app.use("/api") middleware: a path-prefix gate cannot tell a public route from
+// an authenticated one without a hand-kept list of public paths, and without
+// that list it would 403 GET /api/config/maintenance, which App.vue fetches on
+// every page, the change-password screen included.
+//
+// ⚠️ THE EXEMPTION KEYS ON THE MATCHED ROUTE (req.route.path), NOT THE URL.
+// Express routing here is case-insensitive and non-strict (the defaults), so an
+// exact URL compare would lock `/API/auth/change-password/` out, and a substring
+// compare would let `POST /api/expenses?next=/api/auth/change-password` in.
+// Express assigns req.route only when it dispatches into a route layer, and an
+// app.use mount (the /uploads guards) never assigns it, so the exemption holds
+// for exactly one registration: POST on that path. Re-registering
+// change-password under a different path string, or moving it behind an app.use
+// mount, would lock every flagged user out of the only way to clear the flag.
+// scripts/test-password-change-enforced.js pins the registration to the
+// exempted literal.
+//
+// ⚠️ THE FLAG COMES FROM THE DATABASE ON EVERY REQUEST, not from the session.
+// The session copy is written at login and cleared by change-password, which
+// covers the normal lifecycle. It goes stale the moment the column changes any
+// other way (a script, a session purge that failed half-way, a future admin
+// "force a reset"), and a session minted before the field existed has no copy
+// at all. refreshPasswordChangeFlag() re-reads users by primary key and
+// rewrites the session copy before any guard runs, which also keeps
+// GET /api/auth/session honest (the client router reads the flag there). The
+// guards themselves read only req, for the lift reason in the CSRF note below.
+//
+// ⚠️ SAME DUPLICATION RULE AS THE CSRF CHECK: the gate is copied into both
+// guards, must stay self-contained (only req/res/globals, so no db and no
+// module-scope helper), and scripts/test-password-change-enforced.js pins the
+// two copies identical.
+//
+// Socket.IO is gated too, at `register` rather than at connection: a forced
+// session's socket joins no room, so nothing is pushed to it. The register
+// handler reads currentMustChangePassword() directly, because this middleware
+// does not run on engine requests; see the note there for why a refused
+// CONNECTION would strand the driver after the change.
+//
+// ⚠️ NO MODULE-SCOPE STATE, ON PURPOSE. These two are function declarations
+// (hoisted), and the statement is prepared per call the way the routes below do
+// it. A module-scope `let` here would sit in its temporal dead zone for every
+// line above this block, which is the class of boot crash the note beside
+// refuseCrossOrigin describes. The log throttle lives on globalThis for the
+// same reason, and scripts/test-password-change-enforced.js lifts both
+// functions with nothing but `db` injected.
+//
+// The CURRENT value of users.must_change_password for a session user: the
+// database when it can be read, otherwise the session's last-known copy.
+function currentMustChangePassword(sessionUser) {
+	if (!sessionUser) return false;
+	if (sessionUser.id != null) {
+		try {
+			const row = db.prepare("SELECT must_change_password FROM users WHERE id = ?").get(sessionUser.id);
+			// No row means the account was deleted under a live session.
+			// DELETE /api/users/:id purges its sessions, so this is reached only
+			// if that purge failed. Fall through to the copy rather than guess.
+			if (row) return !!row.must_change_password;
+		} catch (err) {
+			// Unreadable users table: keep the last-known copy. That stays CLOSED
+			// for a flagged session and changes nothing for anyone else. Logged at
+			// most once a minute, because this runs on every request.
+			if (!globalThis.__pwFlagReadErrLoggedAt || Date.now() - globalThis.__pwFlagReadErrLoggedAt > 60000) {
+				globalThis.__pwFlagReadErrLoggedAt = Date.now();
+				console.error("must_change_password read failed; using the session copy:", err.message);
+			}
+		}
+	}
+	return !!sessionUser.mustChangePassword;
+}
+// Mounted directly below sessionMiddleware (see there). Writes the session only
+// when the value CHANGED: with resave:false, express-session re-saves only a
+// modified session, so the common case costs one primary-key SELECT and no write.
+function refreshPasswordChangeFlag(req, res, next) {
+	const user = req.session && req.session.user;
+	if (user) {
+		const current = currentMustChangePassword(user);
+		if (user.mustChangePassword !== current) user.mustChangePassword = current;
+	}
+	next();
+}
+
+// ===========================================================================
 // THE SAME-SITE HALF OF CSRF — what crossSiteGuard cannot reach
 // ===========================================================================
 // refuseCrossSite tolerates `Sec-Fetch-Site: same-site` by design, so a page on
@@ -6466,6 +6576,24 @@ app.post("/api/investors/:id/profile-picture", requireAuth, (req, res) => {
 function requireAuth(req, res, next) {
 	if (!req.session.user)
 		return res.status(401).json({ error: "Not authenticated" });
+	if (req.session.user.mustChangePassword && !(req.method === "POST" && req.route && req.route.path === "/api/auth/change-password")) {
+		// FORCED PASSWORD CHANGE (see the note above refreshPasswordChangeFlag).
+		// Duplicated verbatim in requireAuth and requireRole; pinned identical.
+		// Refusals are logged, coalesced to one line a minute with a running
+		// total, for the reason the CSRF refusal below is: a silent refusal cannot
+		// tell "one stale tab" from "every new driver is stuck".
+		globalThis.__pwChangeRefusedCount = (globalThis.__pwChangeRefusedCount || 0) + 1;
+		if (!globalThis.__pwChangeRefusedLoggedAt || Date.now() - globalThis.__pwChangeRefusedLoggedAt > 60000) {
+			globalThis.__pwChangeRefusedLoggedAt = Date.now();
+			console.warn(
+				`PASSWORD_CHANGE_REQUIRED: ${globalThis.__pwChangeRefusedCount} request(s) refused for an account that must change ` +
+					`its password (most recent ${req.method} ${String(req.originalUrl || req.url || "").split("?")[0]}, user ` +
+					`${req.session.user.id}). The SPA routes such a user to /account/change-password; a burst here means a ` +
+					`stale tab or a caller that ignores the flag.`,
+			);
+		}
+		return res.status(403).json({ error: "Password change required", code: "PASSWORD_CHANGE_REQUIRED" });
+	}
 	if (
 		req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS" &&
 		!(req.headers || {})["x-requested-with"] &&
@@ -6508,6 +6636,24 @@ function requireRole(...roles) {
 			return res.status(401).json({ error: "Not authenticated" });
 		if (!roles.includes(req.session.user.role))
 			return res.status(403).json({ error: "Forbidden" });
+		if (req.session.user.mustChangePassword && !(req.method === "POST" && req.route && req.route.path === "/api/auth/change-password")) {
+			// FORCED PASSWORD CHANGE (see the note above refreshPasswordChangeFlag).
+			// Duplicated verbatim in requireAuth and requireRole; pinned identical.
+			// Refusals are logged, coalesced to one line a minute with a running
+			// total, for the reason the CSRF refusal below is: a silent refusal cannot
+			// tell "one stale tab" from "every new driver is stuck".
+			globalThis.__pwChangeRefusedCount = (globalThis.__pwChangeRefusedCount || 0) + 1;
+			if (!globalThis.__pwChangeRefusedLoggedAt || Date.now() - globalThis.__pwChangeRefusedLoggedAt > 60000) {
+				globalThis.__pwChangeRefusedLoggedAt = Date.now();
+				console.warn(
+					`PASSWORD_CHANGE_REQUIRED: ${globalThis.__pwChangeRefusedCount} request(s) refused for an account that must change ` +
+						`its password (most recent ${req.method} ${String(req.originalUrl || req.url || "").split("?")[0]}, user ` +
+						`${req.session.user.id}). The SPA routes such a user to /account/change-password; a burst here means a ` +
+						`stale tab or a caller that ignores the flag.`,
+				);
+			}
+			return res.status(403).json({ error: "Password change required", code: "PASSWORD_CHANGE_REQUIRED" });
+		}
 		if (
 			req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS" &&
 			!(req.headers || {})["x-requested-with"] &&
@@ -17707,6 +17853,16 @@ app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async 
 				error: `Password must include ${missing}.`,
 				failed,
 			});
+		}
+		// A forced change is only a change if the password actually changes:
+		// re-submitting the current one would clear must_change_password while the
+		// temporary credential stayed valid. Defence in depth today: the emailed
+		// temporaries are 8 lowercase-hex chars and already fail the complexity
+		// rules above, so this guards any future temporary that would pass them.
+		// Compares the two request fields only, so it reveals nothing about the
+		// stored hash.
+		if (newPassword === currentPassword) {
+			return res.status(400).json({ code: "PASSWORD_UNCHANGED", error: "New password must be different from your current password." });
 		}
 		const userId = req.session.user.id;
 		const row = db.prepare("SELECT id, password_hash FROM users WHERE id = ?").get(userId);
@@ -49314,6 +49470,19 @@ io.on("connection", (socket) => {
 	const usernameLower = (sessionUser.username || "").trim().toLowerCase();
 
 	socket.on("register", (clientName) => {
+		// A session that must change its password joins NO room, so nothing is
+		// pushed to it (see FORCED PASSWORD CHANGE beside requireAuth). Read from
+		// the database on every register: refreshPasswordChangeFlag does not run
+		// on engine requests, and the change clears the flag mid-connection.
+		// ⚠️ Deliberately NOT a disconnect at connection time. socket.io-client
+		// never retries a server-initiated disconnect and useSocket() keeps the
+		// dead socket, and the SPA can open one while forced: on a reload,
+		// App.vue shows the sidebar (whose onMounted connects) before the router
+		// has redirected to the change screen. A refused connection would leave
+		// that driver with no live updates after the change until a full reload.
+		// Refusing the join instead leaves the socket inert, and the register the
+		// next page sends after the change joins as normal.
+		if (currentMustChangePassword(sessionUser)) return;
 		const requested = (clientName || "").trim().toLowerCase();
 		// The client passes a room name (their driver name, "dispatch",
 		// "investor"). We ignore it for routing decisions and instead derive

@@ -213,11 +213,15 @@
 
       <van-collapse-item title="Expenses" name="expenses">
         <div class="expenses-section">
+          <!-- preset-load-id: this page IS the load, so the form starts on it
+               rather than on a blank Load field whose "Select a load" error sat
+               off-screen and made Submit look dead. -->
           <ExpenseForm
             v-if="isActiveLoad"
             :loads="[load]"
             :driver-name="driverName"
             :headers="headers"
+            :preset-load-id="String(loadId || '')"
             :submit-handler="expenseSubmitHandler"
             @submit="$emit('expense-submit', $event)"
           />

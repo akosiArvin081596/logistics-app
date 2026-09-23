@@ -118,7 +118,10 @@ async function submit() {
       currentPassword: currentPassword.value,
       newPassword: newPassword.value,
     })
-    if (auth.user) auth.user = { ...auth.user, mustChangePassword: false }
+    // Re-read the user from the server through the store, never edit it here: a
+    // local edit left this tab's saved copy at mustChangePassword: true, so a
+    // reload on a bad signal sent the driver back to this page.
+    await auth.afterPasswordChange()
     router.replace(auth.roleHome)
   } catch (err) {
     error.value = err?.message || 'Failed to update password.'
