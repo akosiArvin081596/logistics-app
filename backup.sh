@@ -18,6 +18,7 @@
 set -uo pipefail
 
 APP_DIR="/var/www/logistics-app"
+PM2_APP_NAME="logistics-app"   # matched exactly — never restart/select by numeric id on this shared box
 cd "$APP_DIR" || { echo "[backup] FAILED: cannot cd to $APP_DIR"; exit 1; }
 
 echo "[backup] ---- $(date '+%Y-%m-%d %H:%M:%S %Z') ----"
@@ -41,15 +42,79 @@ echo "[backup] ---- $(date '+%Y-%m-%d %H:%M:%S %Z') ----"
 # interpreter that can actually load the native module. That is self-correcting:
 # repinning pm2, a Node upgrade, or a rebuild all keep working with no edit here,
 # and it cannot drift the way a hardcoded /opt/node22 would.
+#
+# ⚠️ AND IT HAPPENED AGAIN — 2026-09-15..09-19, five nights — for two NEW reasons
+# the version above could not catch. Both are fixed below; keep BOTH.
+#
+#   1. `pm2 jlist` prints the entire process array on ONE line, so
+#      `sed -n 's/.*"exec_interpreter":"\([^"]*\)".*/\1/p'` was greedy: `.*` ate
+#      as much as it could and the capture landed on an ARBITRARY entry, not
+#      ours. On this shared box that resolved to /usr/bin/node (v20) — an
+#      interpreter belonging to one of the ~23 OTHER tenants. `logistics-app`
+#      sat at index 6 with /opt/node22/bin/node and was never consulted. It had
+#      worked until 09-14 purely on pm2 list ordering, which then shifted.
+#      => Select OUR process BY NAME, with a real JSON parse. Parsing JSON needs
+#         no native module, so any node on the box can safely do that step.
+#
+#   2. The capability test was too shallow. `require("better-sqlite3")` PASSES
+#      under the wrong Node, because the native binding loads LAZILY — only
+#      `new Database()` trips the ABI error, which is exactly what backup-db.js
+#      then does. Measured 2026-09-19:
+#         /usr/bin/node        v20.20.1   require() PASS   new Database() FAIL
+#         /opt/node22/bin/node v22.23.2   require() PASS   new Database() PASS
+#      => OPEN A DATABASE in the probe, don't just require the module.
+#
+# Neither fix makes this self-reporting. That is deliberately NOT this script's
+# job: .github/workflows/backup-freshness.yml watches snapshot age from outside
+# the box, because a failure here can only ever land in backups/backup.log --
+# and as both outages proved, nothing reads that.
+
+# Any node can parse JSON; that needs no native module, so it is safe to use
+# before we know which interpreter is the right one.
+json_node() {
+  local n
+  for n in /opt/node22/bin/node "$(command -v node 2>/dev/null)"; do
+    [ -n "$n" ] && [ -x "$n" ] && { echo "$n"; return 0; }
+  done
+  return 1
+}
+
+# cron's PATH usually cannot see pm2 — look in the usual places before giving up.
+pm2_bin() {
+  local p
+  for p in "$(command -v pm2 2>/dev/null)" /usr/local/bin/pm2 /usr/bin/pm2 /opt/node22/bin/pm2; do
+    [ -n "$p" ] && [ -x "$p" ] && { echo "$p"; return 0; }
+  done
+  return 1
+}
+
+# The interpreter pm2 actually runs OUR app with — matched BY NAME, never by position.
+pm2_interpreter() {
+  local pb jn
+  pb="$(pm2_bin)" || return 1
+  jn="$(json_node)" || return 1
+  "$pb" jlist 2>/dev/null | "$jn" -e '
+    let s = "";
+    process.stdin.on("data", (d) => (s += d)).on("end", () => {
+      try {
+        const want = process.argv[1];
+        const proc = JSON.parse(s).find((p) => p && p.name === want);
+        const interp = proc && proc.pm2_env && proc.pm2_env.exec_interpreter;
+        if (interp && interp !== "none") process.stdout.write(String(interp));
+      } catch { /* pm2 absent or bad JSON — fall through to the next candidate */ }
+    });' "$PM2_APP_NAME"
+}
+
 pick_node() {
   local cand
   for cand in \
-    "$(pm2 jlist 2>/dev/null | sed -n 's/.*"exec_interpreter":"\([^"]*\)".*/\1/p' | head -1)" \
+    "$(pm2_interpreter)" \
     /opt/node22/bin/node \
     "$(command -v node 2>/dev/null)"
   do
     [ -n "$cand" ] && [ -x "$cand" ] || continue
-    if (cd "$APP_DIR" && "$cand" -e 'require("better-sqlite3")') >/dev/null 2>&1; then
+    # ⚠️ OPEN a database. `require()` alone passes under an ABI-mismatched Node.
+    if (cd "$APP_DIR" && "$cand" -e 'new (require("better-sqlite3"))(":memory:").close()') >/dev/null 2>&1; then
       echo "$cand"; return 0
     fi
   done

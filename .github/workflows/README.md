@@ -1,13 +1,14 @@
 # CI/CD
 
-Three workflows. `ci.yml` verifies, `deploy.yml` ships, `deploy-drift.yml` catches a ship that silently never happened.
+Four workflows. `ci.yml` verifies, `deploy.yml` ships, `deploy-drift.yml` catches a ship that silently never happened, and `backup-freshness.yml` catches a backup that silently never happened.
 
-| | `ci.yml` | `deploy.yml` | `deploy-drift.yml` |
-|---|---|---|---|
-| Fires on | PR into `main`, push to `main`, manual | push to `main` → **staging → production** (auto); manual → one chosen target | every 30 min (cron), manual |
-| Runs | `npm ci` ×2 · `node --check` · 45 of 46 runners · client build | lockfile reset · pull · install · build · scoped pm2 restart · smoke | compare production HEAD to `origin/main` → in-sync, heal once, or alarm |
-| Duration | ~1 min | well under a minute | seconds |
-| Touches production | never | **every push to `main` — no approval gate** | only to re-run a deploy that never landed, once per commit |
+| | `ci.yml` | `deploy.yml` | `deploy-drift.yml` | `backup-freshness.yml` |
+|---|---|---|---|---|
+| Fires on | PR into `main`, push to `main`, manual | push to `main` → **staging → production** (auto); manual → one chosen target | every 30 min (cron), manual | 04:00 UTC daily (cron), manual |
+| Runs | `npm ci` ×2 · `node --check` · 58 of 59 runners · client build | lockfile reset · pull · install · build · scoped pm2 restart · smoke | compare production HEAD to `origin/main` → in-sync, heal once, or alarm | age + size + `gzip -t` of the newest nightly `app.db` snapshot, and whether the last **scheduled** run succeeded |
+| Duration | ~1 min | well under a minute | seconds | seconds |
+| Touches production | never | **every push to `main` — no approval gate** | only to re-run a deploy that never landed, once per commit | never — strictly read-only |
+| Self-heals | n/a | rolls back on failed verification | yes, once per commit | **no, by design** |
 
 ---
 
@@ -118,3 +119,39 @@ Give the `production` GitHub Environment a **required reviewer** again (Settings
 ### Where the deploy logic lives
 
 `scripts/deploy/remote-deploy.sh`, `remote-smoke.sh`, `remote-rollback.sh` — versioned in the repo, not inline in YAML, so both jobs share one reviewable copy and cannot drift. `.github/actions/vps-deploy` is the composite step that ships them over ssh (with transport retry) and wires the rollback.
+
+---
+
+## Backup freshness — why a fourth workflow exists
+
+`backup.sh` can only ever report a failure into `backups/backup.log`, and **nothing reads that file.** That has now cost two silent outages of the only backup of a 411 MB database holding every SSN, EIN and bank routing number:
+
+| When | Nights lost | Cause |
+|---|---|---|
+| 2026-08-26 .. 08-31 | six | cron's `PATH` resolved `node` to the system Node 20; `better-sqlite3` is built for 22 |
+| 2026-09-15 .. 09-19 | five | `pm2 jlist` is one line of JSON, so a greedy `sed` captured **another tenant's** `exec_interpreter` |
+
+Both root causes are fixed in `backup.sh` — it now selects the interpreter **by process name** via a real JSON parse, and its capability probe **opens a database** rather than merely `require()`-ing the module. That second point is the subtle one:
+
+```
+/usr/bin/node        v20.20.1   require("better-sqlite3") PASS   new Database() FAIL
+/opt/node22/bin/node v22.23.2   require("better-sqlite3") PASS   new Database() PASS
+```
+
+The native binding loads **lazily**, so the old probe passed under a Node that could not actually run the backup.
+
+But the failure mode that actually hurt was never "the backup broke" — it was "the backup broke and nobody found out for five days." No fix inside `backup.sh` can solve that, because the report has nowhere to go. So snapshot age is checked **from outside the box**.
+
+**States** (anything but `fresh` fails the job):
+
+| State | Meaning |
+|---|---|
+| `fresh` | newest nightly snapshot is < 26 h old, over the size floor, passes `gzip -t`, and the last scheduled run succeeded |
+| `stale` | newest snapshot is ≥ 26 h old — 02:00 cron plus 2 h slack, so the **first** missed night alarms |
+| `degraded` | snapshot is fresh but the last **scheduled** run FAILED — i.e. someone ran it by hand while cron is still broken. This was the live state on 2026-09-19 and is exactly the case a naive age check would wave through |
+| `too-small` / `corrupt` | under the 1 MB floor, or `gzip -t` fails — catches a truncated write that age and size both pass |
+| `missing` | no `app.db.<date>_<time>.gz` at all. The glob deliberately matches only the dated nightly shape, so a **pinned** pre-operation snapshot in `.retention-keep` can never masquerade as a fresh one |
+
+**Deliberately not self-healing.** Unlike `deploy-drift.yml` there is nothing safe to retry: a backup that failed for an unknown reason should stop and get a human, not re-run on a schedule.
+
+Logic lives in `scripts/deploy/remote-backup-check.sh`, versioned like the other remote halves and piped over ssh stdin.

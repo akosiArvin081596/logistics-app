@@ -1,0 +1,107 @@
+name: Backup freshness
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Watches the age of the nightly app.db snapshot FROM OUTSIDE THE BOX.
+#
+# backup.sh can only ever report a failure into backups/backup.log, and nothing
+# reads that file. That has now cost two silent outages of the only backup of a
+# 411 MB database holding every SSN, EIN and bank routing number:
+#
+#     2026-08-26..08-31   six nights   cron PATH resolved the wrong Node
+#     2026-09-15..09-19   five nights  pm2 jlist picked another tenant's Node
+#
+# Both root causes are fixed in backup.sh. This exists because the NEXT cause
+# will be a third thing, and the failure mode that actually hurts is not "the
+# backup broke" — it is "the backup broke and nobody found out for five days".
+#
+# Deliberately NOT self-healing. Unlike deploy-drift.yml there is nothing safe
+# to retry automatically: a backup that failed for an unknown reason should stop
+# and get a human, not re-run on a schedule.
+# ─────────────────────────────────────────────────────────────────────────────
+on:
+  schedule:
+    # 04:00 UTC — two hours after the 02:00 UTC cron, so a missed night is
+    # caught the very next morning rather than a day later.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: backup-freshness
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: nightly snapshot age
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure SSH
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "${{ secrets.VPS_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Check snapshot freshness
+        id: check
+        env:
+          HOST: ${{ secrets.VPS_HOST }}
+          USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          out=$(ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o ConnectTimeout=20 \
+                "$USER@$HOST" "DIR='/var/www/logistics-app' bash -s" \
+                < scripts/deploy/remote-backup-check.sh)
+          echo "$out"
+          get() { printf '%s' "$out" | grep -m1 -oE "^$1=.*" | cut -d= -f2- || true; }
+          {
+            echo "state=$(get BACKUP_STATE)"
+            echo "reason=$(get BACKUP_REASON)"
+            echo "newest=$(get BACKUP_NEWEST)"
+            echo "age=$(get BACKUP_AGE_HOURS)"
+            echo "size=$(get BACKUP_SIZE)"
+            echo "lastrun=$(get BACKUP_LAST_RUN)"
+            echo "lastnode=$(get BACKUP_LAST_NODE)"
+            echo "lastok=$(get BACKUP_LAST_RUN_OK)"
+            echo "failures=$(get BACKUP_TOTAL_FAILURES)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Alarm
+        if: steps.check.outputs.state != 'fresh'
+        run: |
+          echo "::error::nightly app.db backup is not healthy — state=${{ steps.check.outputs.state }}: ${{ steps.check.outputs.reason }}"
+          echo "last logged run: ${{ steps.check.outputs.lastrun }} using ${{ steps.check.outputs.lastnode }}"
+          echo "last scheduled run succeeded? ${{ steps.check.outputs.lastok }}   (total failures in backup.log: ${{ steps.check.outputs.failures }})"
+          echo "fix: ssh to the box and run  bash /var/www/logistics-app/backup.sh  — it prints which Node it chose."
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Backup freshness"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| state | \`${{ steps.check.outputs.state }}\` |"
+            echo "| newest snapshot | \`${{ steps.check.outputs.newest }}\` |"
+            echo "| age | ${{ steps.check.outputs.age }} h |"
+            echo "| size | ${{ steps.check.outputs.size }} bytes |"
+            echo "| last run | ${{ steps.check.outputs.lastrun }} |"
+            echo "| interpreter used | \`${{ steps.check.outputs.lastnode }}\` |"
+            echo "| last scheduled run OK | ${{ steps.check.outputs.lastok }} |"
+            echo "| total failures in log | ${{ steps.check.outputs.failures }} |"
+            echo ""
+            echo "${{ steps.check.outputs.reason }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Always remove the deploy key
+        if: always()
+        run: shred -u ~/.ssh/deploy_key 2>/dev/null || rm -f ~/.ssh/deploy_key
