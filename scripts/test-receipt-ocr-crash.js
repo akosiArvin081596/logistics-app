@@ -13,21 +13,24 @@
  * runner down with it and prove nothing.
  *
  *   §1 static: the engine is never loaded in the server process; the child is
- *      started with a clean environment and killed at the deadline; the pixel
- *      limit is checked before any child starts; the model location is pinned
+ *      started with a clean environment, heard from ('error') before anything
+ *      else touches it, and killed at the deadline; the pixel limit is checked
+ *      when a receipt is queued; the model location is pinned
  *   §2 receiptImageSize(): PNG and JPEG headers, malformed input, bounded work
  *   §3 end to end in a stand-in server process: an OCR job that crashes, hangs,
- *      fails cleanly or answers, and images over the limit or unreadable. The
- *      server survives, the queue drains, only the right rows get text, a hung
- *      job is killed, a job that dies loading its model clears the cached
- *      model, and one that dies on its image keeps it.
+ *      fails cleanly, cannot load its model or answers; a child that cannot be
+ *      started at all; images over the limit or unreadable. The server
+ *      survives, the queue drains, only the right rows get text, a hung job is
+ *      killed, a job that fails loading its model clears the cached model, one
+ *      that fails on its image keeps it, and a crash is logged by its error line.
  *      Version-agnostic on purpose: code that runs the engine IN-PROCESS meets a
  *      fake engine transport whose worker fails the way a worker thread does;
  *      code that uses the child meets a stand-in child. Either way, the question
  *      is only whether the server process lives.
  *   §4 the real lib/tesseract-ocr-child.js over a fake engine transport: it
- *      answers, reports a failed job instead of crashing, uses the model location
- *      it is given, and exits when the server goes away
+ *      answers, reports a failed job instead of crashing, answers AT ONCE when
+ *      its model cannot be loaded, uses the model location it is given, and
+ *      exits when the server goes away
  *   §5 DISCRIMINATION — remove each protection, require an assertion to flip
  *
  * No server, no app.db, no network. Temp files only, in a fresh mkdtemp.
@@ -73,9 +76,11 @@ function liftFn(name, src = SRC) {
 	}
 	throw new Error(`unbalanced braces in ${name}`);
 }
-const STATE_RE = /^(?:const|let) (?:RECEIPT_OCR_(?:TIMEOUT_MS|BACKOFF_MS|MAX_PIXELS|CHILD|CACHE_DIR|LANG_PATH|MAX_PENDING)|receiptOcr(?:Chain|Pending|PausedUntil)) = [^\n;]+;[^\n]*$/gm;
+const STATE_RE = /^(?:const|let) (?:RECEIPT_OCR_(?:TIMEOUT_MS|BACKOFF_MS|MAX_PIXELS|CHILD|CACHE_DIR|LANG_PATH|MAX_PENDING|MAX_QUEUED_BYTES)|receiptOcr(?:Chain|Pending|PausedUntil|QueuedBytes)) = [^\n;]+;[^\n]*$/gm;
 const STATE_SRC = (SRC.match(STATE_RE) || []).join("\n");
 const SIZE_SRC = liftFn("receiptImageSize");
+const SKIP_SRC = liftFn("receiptOcrSkipReason");
+const CLEAR_SRC = liftFn("clearReceiptOcrModel");
 const EXTRACT_SRC = liftFn("extractReceiptText");
 const RUN_SRC = liftFn("runReceiptOcrChild");
 const QUEUE_SRC = liftFn("queueReceiptOcr");
@@ -84,7 +89,7 @@ if (!EXTRACT_SRC || !QUEUE_SRC) {
 	console.error("FAIL  could not locate extractReceiptText / queueReceiptOcr in server.js");
 	process.exit(1);
 }
-const OCR_SRC = [STATE_SRC, SIZE_SRC, DEADLINE_SRC, RUN_SRC, EXTRACT_SRC, QUEUE_SRC].filter(Boolean).join("\n\n");
+const OCR_SRC = [STATE_SRC, SIZE_SRC, SKIP_SRC, CLEAR_SRC, DEADLINE_SRC, RUN_SRC, EXTRACT_SRC, QUEUE_SRC].filter(Boolean).join("\n\n");
 
 // --- fixtures ----------------------------------------------------------------
 // Headers only — a real signature and dimensions, then a marker the stand-ins
@@ -134,8 +139,13 @@ function installFakeEngine(repo, echo) {
 	function respond(w, packet) {
 		const { workerId, jobId, action, payload } = packet;
 		if (w.dead) return;
-		if (action === "loadLanguage") { seen.cachePath = payload.options.cachePath; seen.langPath = payload.options.langPath; }
 		let status = "resolve", data = {};
+		if (action === "loadLanguage") {
+			seen.cachePath = payload.options.cachePath; seen.langPath = payload.options.langPath;
+			// The model cannot be fetched: the engine rejects this step, and createWorker()
+			// itself never settles — it swallows the rejection.
+			if (String(seen.langPath).includes("MODELFAIL")) { status = "reject"; data = "Error: the model could not be fetched"; }
+		}
 		if (action === "recognize") {
 			const img = Buffer.from(payload.image).toString("latin1");
 			if (img.includes("CRASH") || img.includes("BROKENMODEL")) { w.emit("error", new Error("OCR worker failed")); return; }
@@ -168,6 +178,7 @@ fs.writeFileSync(path.join(__dirname, "spawned-" + process.pid), "");
 process.once("message", (job) => {
 	const img = Buffer.from(job.image).toString("latin1");
 	if (img.includes("BROKENMODEL")) { setImmediate(() => { throw new Error("OCR engine failed to start"); }); return; }
+	if (img.includes("MODELFAIL")) { process.send({ error: "could not load the model" }, () => process.exit(0)); return; }
 	if (img.includes("HANG")) { setInterval(() => {}, 1000); return; }
 	process.send({ ready: true });                                   // the model has loaded
 	if (img.includes("CRASH")) { setImmediate(() => { throw new Error("OCR engine failed"); }); return; }
@@ -195,21 +206,45 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const spawned = () => fs.readdirSync(cfg.standinDir).filter((f) => f.startsWith("spawned-")).map((f) => Number(f.slice(8)));
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const cacheFile = path.join(cfg.cacheDir, "eng.traineddata");
+// What fork() hands back when the child cannot be started for lack of file
+// descriptors: no pid, no stdio streams, no IPC channel — then 'error' and
+// 'close' on the next tick. kill() on it is counted: it must never be called.
+const cp = require("child_process"), realFork = cp.fork;
+let kills = 0;
+function failedSpawn(code) {
+	const { EventEmitter } = require("events");
+	const child = Object.assign(new EventEmitter(), {
+		pid: undefined, stdin: null, stdout: null, stderr: null, stdio: [null, null, null, null],
+		connected: false, exitCode: null, signalCode: null, killed: false,
+		kill() { kills++; return false; },
+	});
+	process.nextTick(() => {
+		child.exitCode = -24;
+		child.emit("error", Object.assign(new Error("spawn " + process.execPath + " " + code), { code, errno: -24, syscall: "spawn" }));
+		child.emit("close", -24, null);
+	});
+	return child;
+}
 (async () => {
 	const steps = [];
 	for (const s of cfg.steps) {
 		if (s.seedCache) { fs.mkdirSync(cfg.cacheDir, { recursive: true }); fs.writeFileSync(cacheFile, "model"); }
+		if (s.spawnFails) cp.fork = () => failedSpawn(s.spawnFails);
+		kills = 0;
 		const before = spawned();
-		api.queueReceiptOcr(s.doc, Buffer.from(s.image, "base64"));
+		const queued = api.queueReceiptOcr(s.doc, Buffer.from(s.image, "base64"));
+		const pendingAfterQueue = api.pending();
 		let drained = false;
 		for (const end = Date.now() + s.drain; Date.now() < end; await sleep(5)) if (api.pending() === 0) { drained = true; break; }
+		cp.fork = realFork;
 		const mine = spawned().filter((p) => !before.includes(p));
 		let stillAlive = false;
 		for (const pid of mine) {
 			for (let t = 0; t < 100 && alive(pid); t++) await sleep(10);   // reaping is asynchronous
 			if (alive(pid)) { stillAlive = true; try { process.kill(pid, "SIGKILL"); } catch {} }
 		}
-		steps.push({ doc: s.doc, drained, childrenStarted: mine.length, childAlive: stillAlive, cacheExists: fs.existsSync(cacheFile) });
+		steps.push({ doc: s.doc, queued, pendingAfterQueue, drained, kills, childrenStarted: mine.length, childAlive: stillAlive,
+			cacheExists: fs.existsSync(cacheFile) });
 	}
 	process.stdout.write("\n@@RESULT@@" + JSON.stringify({ steps, updates, logs, pending: api.pending() }) + "\n");
 	process.exit(0);
@@ -244,9 +279,14 @@ const SCENARIOS = {
 		{ doc: 2, image: b64(png(800, 600, "GOOD")), drain: 10000 },                        // the next receipt still reads
 		{ doc: 8, image: b64(png(800, 600, "CRASH")), drain: 10000, seedCache: true },       // dies on its image
 		{ doc: 5, image: b64(png(800, 600, "FAIL")), drain: 10000, seedCache: true },        // fails cleanly
+		{ doc: 9, image: b64(png(800, 600, "MODELFAIL")), drain: 10000, seedCache: true },   // reports it cannot load its model
 	] },
 	hang: { timeoutMs: 1500, steps: [
 		{ doc: 4, image: b64(png(800, 600, "HANG")), drain: 8000, seedCache: true },    // never answers
+	] },
+	spawn: { timeoutMs: 8000, steps: [
+		{ doc: 10, image: b64(png(800, 600, "GOOD")), drain: 5000, seedCache: true, spawnFails: "EMFILE" },   // cannot start
+		{ doc: 11, image: b64(png(800, 600, "GOOD")), drain: 10000 },                                       // the next one can
 	] },
 	limits: { timeoutMs: 8000, steps: [
 		{ doc: 3, image: b64(png(6000, 5000, "GOOD")), drain: 1500 },                  // over the pixel limit
@@ -275,7 +315,7 @@ const INSTALLER = path.join(TMP, "fake-engine.js");
 fs.writeFileSync(INSTALLER, FAKE_ENGINE + `\ninstallFakeEngine(${JSON.stringify(REPO)}, true);\n`);
 // `disconnectAfterMs` simulates the server going away mid-job (a restart): the
 // job is sent, then the channel closes while the engine is still working.
-function childRun(childPath, job, { disconnectAfterMs = null } = {}) {
+function childRun(childPath, job, { disconnectAfterMs = null, killAfterMs = 10_000 } = {}) {
 	return new Promise((resolve) => {
 		if (!childPath || !fs.existsSync(childPath)) return resolve({ missing: true });
 		const started = Date.now();
@@ -291,7 +331,7 @@ function childRun(childPath, job, { disconnectAfterMs = null } = {}) {
 			if (m && m.ready === true) { ready = true; readyFirst = reply === null; return; }
 			reply = m;
 		});
-		const killer = setTimeout(() => child.kill("SIGKILL"), 10_000);
+		const killer = setTimeout(() => child.kill("SIGKILL"), killAfterMs);
 		// 'close' normally; 'exit' as the backstop, so no case can hang this runner.
 		const finish = (code, signal) => {
 			if (done) return;
@@ -305,10 +345,14 @@ function childRun(childPath, job, { disconnectAfterMs = null } = {}) {
 		if (disconnectAfterMs != null) setTimeout(() => { if (child.connected) child.disconnect(); }, disconnectAfterMs);
 	});
 }
+// A mutated copy of the child, written to TMP — never into the repo. It loads the
+// engine by absolute path, so it gets the same module (and the fake transport)
+// the real child gets from its place in lib/.
+const TESSERACT_REQUIRE = 'require("tesseract.js")';
+const TESSERACT_ENTRY = require.resolve("tesseract.js", { paths: [REPO] });
 function childVariant(src) {
-	const p = path.join(REPO, "lib", `.tesseract-ocr-child.variant-${process.pid}-${++caseNo}.js`);
-	fs.writeFileSync(p, src);
-	process.on("exit", () => { try { fs.unlinkSync(p); } catch { /* gone */ } });
+	const p = path.join(TMP, `child-variant-${++caseNo}.js`);
+	fs.writeFileSync(p, src.replace(TESSERACT_REQUIRE, `require(${JSON.stringify(TESSERACT_ENTRY)})`));
 	return p;
 }
 
@@ -323,22 +367,37 @@ ok("...with a clean environment and no runtime flags (env: {}, execArgv: [])",
 	/env: \{\},/.test(RUN_SRC) && /execArgv: \[\],/.test(RUN_SRC));
 ok("...listening for 'error', 'message' and 'close' (an unheard 'error' would itself be fatal)",
 	/child\.on\("error"/.test(RUN_SRC) && /child\.on\("message"/.test(RUN_SRC) && /child\.on\("close"/.test(RUN_SRC));
-ok("...under a deadline, and the child is SIGKILLed whenever the job settles",
+const RUN_CODE = codeOnly(RUN_SRC);
+const errorAt = RUN_CODE.indexOf('child.on("error"');
+ok("...and 'error' is heard FIRST, before anything else touches the child " +
+	"(a child that could not start reports it on the next tick)",
+	errorAt > RUN_CODE.indexOf("child = fork(") &&
+	["child.stderr", 'child.on("message"', 'child.on("close"', "child.send(", "setTimeout("]
+		.every((s) => RUN_CODE.indexOf(s) > errorAt));
+ok("...and its stdio is null-checked: one that never started has no streams",
+	!/child\.std(?:in|out)\b/.test(RUN_CODE) && RUN_CODE.indexOf("if (child.stderr) {") > -1 &&
+	RUN_CODE.indexOf("child.stderr.") > RUN_CODE.indexOf("if (child.stderr) {"));
+ok("...under a deadline, and the child is SIGKILLed whenever the job settles — only if it ever started (has a pid)",
 	/setTimeout\(\(\) => finish\(new Error\(`receipt OCR timed out/.test(RUN_SRC) &&
-	/if \(child\.exitCode === null && child\.signalCode === null\) child\.kill\("SIGKILL"\);/.test(RUN_SRC));
+	/typeof child\.pid === "number" && child\.exitCode === null && child\.signalCode === null\) \{\s*try \{ child\.kill\("SIGKILL"\);/.test(RUN_SRC));
 const closeAt = RUN_SRC.indexOf('child.on("close"');
 ok("a silent exit deletes the cached model SYNCHRONOUSLY and BEFORE the job settles " +
 	"(the queue starts the next job the moment this one settles)",
-	closeAt > -1 && RUN_SRC.indexOf("fs.rmSync(", closeAt) > closeAt &&
-	RUN_SRC.indexOf("fs.rmSync(", closeAt) < RUN_SRC.indexOf("finish(new Error(`receipt OCR process exited", closeAt));
-ok("...but only when the child died BEFORE its model loaded — dying on an image keeps the model",
-	/if \(!modelLoaded\) \{\s*try \{ fs\.rmSync\(/.test(RUN_SRC) &&
+	/function clearReceiptOcrModel\(\) \{\s*try \{ fs\.rmSync\(/.test(CLEAR_SRC) &&
+	closeAt > -1 && RUN_SRC.indexOf("clearReceiptOcrModel()", closeAt) > closeAt &&
+	RUN_SRC.indexOf("clearReceiptOcrModel()", closeAt) < RUN_SRC.indexOf("finish(new Error(`receipt OCR process exited", closeAt));
+ok("...but only when the job failed BEFORE its model loaded — failing on an image keeps the model",
+	(RUN_SRC.match(/if \(!modelLoaded\) clearReceiptOcrModel\(\);/g) || []).length === 2 &&
 	/if \(msg && msg\.ready === true\) \{ modelLoaded = true; return; \}/.test(RUN_SRC));
 const maxPx = Number(((SRC.match(/const RECEIPT_OCR_MAX_PIXELS = ([\d_]+);/) || [])[1] || "").replace(/_/g, ""));
 ok("RECEIPT_OCR_MAX_PIXELS is a real bound (0 < limit <= 50 MP)", maxPx > 0 && maxPx <= 50_000_000);
-ok("the pixel limit is checked BEFORE any child starts",
-	EXTRACT_SRC.indexOf("receiptImageSize(") > -1 && EXTRACT_SRC.indexOf("RECEIPT_OCR_MAX_PIXELS") > -1 &&
-	EXTRACT_SRC.indexOf("RECEIPT_OCR_MAX_PIXELS") < EXTRACT_SRC.indexOf("runReceiptOcrChild("));
+ok("the pixel limit is checked when a receipt is QUEUED — an image that would be skipped never waits in memory",
+	SKIP_SRC.indexOf("receiptImageSize(") > -1 && SKIP_SRC.indexOf("RECEIPT_OCR_MAX_PIXELS") > -1 &&
+	QUEUE_SRC.indexOf("receiptOcrSkipReason(") > -1 &&
+	QUEUE_SRC.indexOf("receiptOcrSkipReason(") < QUEUE_SRC.indexOf("receiptOcrChain = "));
+ok("...and again before any child starts, for any other caller",
+	EXTRACT_SRC.indexOf("receiptOcrSkipReason(") > -1 &&
+	EXTRACT_SRC.indexOf("receiptOcrSkipReason(") < EXTRACT_SRC.indexOf("runReceiptOcrChild("));
 ok("the model is fetched from a VERSION-PINNED location",
 	/const RECEIPT_OCR_LANG_PATH = "https:\/\/cdn\.jsdelivr\.net\/npm\/@tesseract\.js-data\/eng@\d+\.\d+\.\d+\/4\.0\.0_best_int";/.test(SRC));
 ok("...and cached in an app-owned directory git ignores",
@@ -388,27 +447,44 @@ if (receiptImageSize) {
 
 (async () => {
 	// Every child process starts now, together; assertions read them in order.
+	const HEAL_ON_EARLY_ERROR = "\t\t\tif (!modelLoaded) clearReceiptOcrModel();\n\t\t\tfinish(new Error(`receipt OCR failed:";
 	const MUTANT = {
 		noLimit: OCR_SRC.replace(/\tif \(size\.width \* size\.height > RECEIPT_OCR_MAX_PIXELS\) \{\n[^\n]*\n\t\}\n/, ""),
-		noKill: OCR_SRC.replace('if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");', ""),
-		noHeal: OCR_SRC.replace(/\t\t\t\ttry \{ fs\.rmSync\(path\.join\(RECEIPT_OCR_CACHE_DIR, "eng\.traineddata"\)[^\n]*\n/, ""),
-		healAlways: OCR_SRC.replace("\t\t\tif (!modelLoaded) {\n", "\t\t\tif (true) {\n"),
+		noQueueCheck: OCR_SRC.replace(/\tconst skip = receiptOcrSkipReason\(imageBuffer\);\n\tif \(skip\) \{\n\t\tconsole\.warn\([^\n]*\n\t\treturn false;\n\t\}\n/, ""),
+		noKill: OCR_SRC.replace('try { child.kill("SIGKILL"); } catch { /* already gone */ }', ""),
+		noHeal: OCR_SRC.replace(/(function clearReceiptOcrModel\(\) \{\n)\ttry \{ fs\.rmSync\([^\n]*\n/, "$1"),
+		noEarlyHeal: OCR_SRC.replace(HEAL_ON_EARLY_ERROR, "\t\t\tfinish(new Error(`receipt OCR failed:"),
+		healAlways: OCR_SRC.replace(/if \(!modelLoaded\) clearReceiptOcrModel\(\);/g, "clearReceiptOcrModel();"),
+		noErrorListener: OCR_SRC.replace('\t\tchild.on("error", (err) => finish(err));\n', ""),
+		noStdioGuard: OCR_SRC.replace("\t\tif (child.stderr) {\n", "\t\tif (true) {\n"),
+		lastLine: OCR_SRC.replace(/\.find\(\(l\) => \/[^\n]*?\/\.test\(l\)\)/, ".filter(Boolean).pop()"),
 	};
 	const CHILD_NO_HANDLER = CHILD_SRC.replace(/\t\t\terrorHandler: [^\n]*\n/, "");
+	const CHILD_SILENT_HANDLER = CHILD_SRC.replace(/(\t\t\terrorHandler: )[^\n]*\n/, "$1() => {},\n");
+	const MODELFAIL_JOB = { image: png(800, 600, "GOOD"), cachePath: path.join(TMP, "child-cache-mf"), langPath: "https://example.invalid/MODELFAIL" };
 	const runs = {
 		failures: serverRun(OCR_SRC, "failures"),
 		hang: serverRun(OCR_SRC, "hang"),
 		limits: serverRun(OCR_SRC, "limits"),
+		spawn: serverRun(OCR_SRC, "spawn"),
 		good: childRun(CHILD_PATH, { image: png(800, 600, "GOOD"), cachePath: path.join(TMP, "child-cache"), langPath: "https://example.invalid/pinned" }),
 		fail: childRun(CHILD_PATH, { image: png(800, 600, "FAIL"), cachePath: path.join(TMP, "child-cache") }),
+		modelFail: childRun(CHILD_PATH, MODELFAIL_JOB, { killAfterMs: 5000 }),
 		empty: childRun(CHILD_PATH, {}),
 		gone: childRun(CHILD_PATH, { image: png(800, 600, "HANG") }, { disconnectAfterMs: 400 }),
 		mNoLimit: MUTANT.noLimit !== OCR_SRC ? serverRun(MUTANT.noLimit, "limits") : null,
+		mNoQueueCheck: MUTANT.noQueueCheck !== OCR_SRC ? serverRun(MUTANT.noQueueCheck, "limits") : null,
 		mNoKill: MUTANT.noKill !== OCR_SRC ? serverRun(MUTANT.noKill, "hang") : null,
 		mNoHeal: MUTANT.noHeal !== OCR_SRC ? serverRun(MUTANT.noHeal, "failures") : null,
+		mNoEarlyHeal: MUTANT.noEarlyHeal !== OCR_SRC ? serverRun(MUTANT.noEarlyHeal, "failures") : null,
 		mHealAlways: MUTANT.healAlways !== OCR_SRC ? serverRun(MUTANT.healAlways, "failures") : null,
+		mNoErrorListener: MUTANT.noErrorListener !== OCR_SRC ? serverRun(MUTANT.noErrorListener, "spawn") : null,
+		mNoStdioGuard: MUTANT.noStdioGuard !== OCR_SRC ? serverRun(MUTANT.noStdioGuard, "spawn") : null,
+		mLastLine: MUTANT.lastLine !== OCR_SRC ? serverRun(MUTANT.lastLine, "failures") : null,
 		mChildNoHandler: CHILD_SRC && CHILD_NO_HANDLER !== CHILD_SRC
 			? childRun(childVariant(CHILD_NO_HANDLER), { image: png(800, 600, "FAIL") }) : null,
+		mChildSilentHandler: CHILD_SRC && CHILD_SILENT_HANDLER !== CHILD_SRC
+			? childRun(childVariant(CHILD_SILENT_HANDLER), MODELFAIL_JOB, { killAfterMs: 2500 }) : null,
 	};
 	const R = {};
 	for (const [k, p] of Object.entries(runs)) R[k] = p ? await p : null;
@@ -431,14 +507,20 @@ if (receiptImageSize) {
 	survived(R.failures, "an OCR engine that crashes or fails");
 	const F = view(R.failures);
 	ok("every job settles — the queue drains after each",
-		F.o.steps.length === 4 && F.o.steps.every((x) => x.drained) && F.o.pending === 0);
-	ok("an engine that dies loading its model is logged as a failed job", F.logged(/document 1 \(non-critical\)/));
+		F.o.steps.length === 5 && F.o.steps.every((x) => x.drained) && F.o.pending === 0);
+	ok("an engine that dies loading its model is logged as a failed job, BY ITS ERROR LINE",
+		F.logged(/document 1 \(non-critical\): receipt OCR process exited \(code \d+\): Error: OCR engine failed to start$/));
 	ok("...and it clears the cached model, so a damaged copy is fetched again", F.step(1).cacheExists === false);
 	ok("the NEXT receipt is still read, and its text lands on ITS row", JSON.stringify(F.text(2)) === JSON.stringify(["SHELL #4.29"]));
 	ok("an engine that dies on its IMAGE is logged, and the model is KEPT (no re-download per bad image)",
 		F.text(8).length === 0 && F.logged(/document 8 \(non-critical\)/) && F.step(8).cacheExists === true);
+	ok("...a crash is logged by the line that names it, not the runtime's closing version banner",
+		F.logged(/document 8 \(non-critical\): receipt OCR process exited \(code \d+\): Error: OCR engine failed$/) &&
+		!F.logged(/Node\.js v\d/));
 	ok("a job that fails cleanly is logged, and the cache is kept",
 		F.text(5).length === 0 && F.step(5).cacheExists === true && F.logged(/document 5 .*could not read image/));
+	ok("a job that REPORTS it cannot load its model is logged, and that clears the cached model too",
+		F.text(9).length === 0 && F.logged(/document 9 .*could not load the model/) && F.step(9).cacheExists === false);
 
 	survived(R.hang, "an OCR job that never answers");
 	const H = view(R.hang);
@@ -447,14 +529,25 @@ if (receiptImageSize) {
 	ok("...and says so", H.logged(/document 4 .*timed out/));
 	ok("...a timeout is not a damaged model: the cache is kept", H.step(4).cacheExists === true);
 
+	survived(R.spawn, "an OCR process that cannot be started (no file descriptors left)");
+	const S = view(R.spawn);
+	ok("...the job settles as failed, with the start error, and nothing is written",
+		S.step(10).drained === true && S.text(10).length === 0 && S.logged(/document 10 \(non-critical\): spawn .* EMFILE$/));
+	ok("...the never-started child is not signalled (it has no pid), and the model is kept",
+		S.step(10).kills === 0 && S.step(10).cacheExists === true);
+	ok("...and the next receipt is still read", JSON.stringify(S.text(11)) === JSON.stringify(["SHELL #4.29"]) && S.o.pending === 0);
+
 	survived(R.limits, "the size checks");
 	const L = view(R.limits);
-	ok("over the pixel limit: the image is NOT OCR'd — no job starts, the row gets no text",
-		L.step(3).drained === true && L.step(3).childrenStarted === 0 && L.text(3).length === 0);
-	ok("...and the skip is logged with the size", L.logged(/document 3 .*6000x5000 image is over the 25 MP limit/));
-	ok("an unreadable header: not OCR'd, and logged", L.step(6).childrenStarted === 0 && L.text(6).length === 0 &&
-		L.logged(/document 6 .*could not be read/));
-	ok("an ordinary app-sized photo is still read", JSON.stringify(L.text(7)) === JSON.stringify(["SHELL #4.29"]));
+	ok("over the pixel limit: refused when QUEUED — never held in memory, no job starts, the row gets no text",
+		L.step(3).queued === false && L.step(3).pendingAfterQueue === 0 && L.step(3).childrenStarted === 0 && L.text(3).length === 0);
+	ok("...and the skip is logged with the size",
+		L.logged(/receipt OCR skipped for document 3: 6000x5000 image is over the 25 MP limit/));
+	ok("an unreadable header: refused when queued, and logged",
+		L.step(6).queued === false && L.step(6).pendingAfterQueue === 0 && L.step(6).childrenStarted === 0 &&
+		L.text(6).length === 0 && L.logged(/receipt OCR skipped for document 6: image dimensions could not be read/));
+	ok("an ordinary app-sized photo is queued and read",
+		L.step(7).queued === true && JSON.stringify(L.text(7)) === JSON.stringify(["SHELL #4.29"]));
 
 	// =========================================================================
 	console.log("\n§4  lib/tesseract-ocr-child.js itself, over a fake engine");
@@ -469,6 +562,10 @@ if (receiptImageSize) {
 	const f = R.fail;
 	ok("a failed job is REPORTED ({ error }) and the child exits normally — it does not crash",
 		!f.missing && f.code === 0 && !!(f.reply && /could not read image/.test(f.reply.error || "")));
+	const mf = R.modelFail;
+	ok(`a model that cannot be loaded is reported AT ONCE, without waiting out the deadline (${mf.ms} ms)`,
+		!mf.missing && mf.code === 0 && mf.signal === null && !!(mf.reply && /model could not be fetched/.test(mf.reply.error || "")));
+	ok("...and before any { ready: true } — so the server knows it was the model that failed", mf.ready === false);
 	ok("a job without an image is refused cleanly", !R.empty.missing && R.empty.code === 0 && !!(R.empty.reply && /no image/.test(R.empty.reply.error || "")));
 	ok(`it exits by itself when the server goes away mid-job (exit ${R.gone.code}, ${R.gone.ms} ms) — no orphan left running`,
 		!R.gone.missing && R.gone.code === 0 && R.gone.signal === null && R.gone.reply === null && R.gone.ms < 5000);
@@ -476,28 +573,58 @@ if (receiptImageSize) {
 	// =========================================================================
 	console.log("\n§5  DISCRIMINATION — each mutant must be caught");
 	// =========================================================================
-	ok("(mutant anchors present)", Object.values(MUTANT).every((m) => m !== OCR_SRC) && CHILD_NO_HANDLER !== CHILD_SRC);
+	ok("(mutant anchors present)", Object.values(MUTANT).every((m) => m !== OCR_SRC) &&
+		CHILD_NO_HANDLER !== CHILD_SRC && CHILD_SILENT_HANDLER !== CHILD_SRC && CHILD_SRC.includes(TESSERACT_REQUIRE));
 	const stepOf = (r, doc) => ((r && r.out && r.out.steps) || []).find((x) => x.doc === doc) || {};
+	const logsOf = (r) => (r && r.out && r.out.logs) || [];
 	if (R.mNoLimit) {
 		ok("MUTANT without the pixel limit: an over-limit image starts an OCR job — §3 flips",
 			stepOf(R.mNoLimit, 3).childrenStarted === 1);
+	}
+	if (R.mNoQueueCheck) {
+		ok("MUTANT checking size only when the job runs: an over-limit image is queued and held — §3 flips",
+			stepOf(R.mNoQueueCheck, 3).queued === true && stepOf(R.mNoQueueCheck, 3).pendingAfterQueue === 1);
 	}
 	if (R.mNoKill) {
 		ok("MUTANT without the SIGKILL: the hung job's process outlives its deadline — §3 flips",
 			stepOf(R.mNoKill, 4).childAlive === true);
 	}
 	if (R.mNoHeal) {
-		ok("MUTANT without clearing the model on a crash: the damaged cache stays — §3 flips",
-			stepOf(R.mNoHeal, 1).cacheExists === true);
+		ok("MUTANT without clearing the model: the damaged cache stays, on a crash and on a report — §3 flips",
+			stepOf(R.mNoHeal, 1).cacheExists === true && stepOf(R.mNoHeal, 9).cacheExists === true);
+	}
+	if (R.mNoEarlyHeal) {
+		ok("MUTANT clearing the model only on a crash: a REPORTED model failure keeps the damaged cache — §3 flips",
+			stepOf(R.mNoEarlyHeal, 9).cacheExists === true);
 	}
 	if (R.mHealAlways) {
-		ok("MUTANT clearing the model on EVERY crash: a bad image forces a re-download — §3 flips",
-			stepOf(R.mHealAlways, 8).cacheExists === false);
+		ok("MUTANT clearing the model on EVERY failure: a bad image forces a re-download — §3 flips",
+			stepOf(R.mHealAlways, 8).cacheExists === false && stepOf(R.mHealAlways, 5).cacheExists === false);
+	}
+	if (R.mNoErrorListener) {
+		ok(`MUTANT without the 'error' listener: a child that cannot start takes the SERVER down (exit ${R.mNoErrorListener.code}) — §3 flips`,
+			R.mNoErrorListener.code !== 0 && !R.mNoErrorListener.out);
+	}
+	if (R.mNoStdioGuard) {
+		ok("MUTANT reading stderr without the null check: the start error is lost behind a TypeError — §3 flips",
+			R.mNoStdioGuard.code === 0 &&
+			logsOf(R.mNoStdioGuard).some((l) => /document 10 \(non-critical\): Cannot read properties of null/.test(l)) &&
+			!logsOf(R.mNoStdioGuard).some((l) => /document 10 \(non-critical\): spawn .* EMFILE$/.test(l)));
+	}
+	if (R.mLastLine) {
+		ok("MUTANT logging the LAST stderr line: a crash is reported as the runtime's version banner — §3 flips",
+			logsOf(R.mLastLine).some((l) => /document 8 .*: Node\.js v\d/.test(l)));
 	}
 	if (R.mChildNoHandler) {
 		ok(`MUTANT child without errorHandler: a failed job CRASHES the child (exit ${R.mChildNoHandler.code}), no reply — §4 flips`,
 			R.mChildNoHandler.code !== 0 && R.mChildNoHandler.reply === null);
 	}
+	if (R.mChildSilentHandler) {
+		ok(`MUTANT child whose errorHandler stays silent: a model that cannot load leaves the job waiting until it is killed (${R.mChildSilentHandler.signal}) — §4 flips`,
+			R.mChildSilentHandler.reply === null && R.mChildSilentHandler.signal === "SIGKILL");
+	}
+	ok("no mutated copy of the child was written into the repo",
+		!fs.readdirSync(path.join(REPO, "lib")).some((n) => /variant/.test(n)));
 	if (receiptImageSize && SIZE_SRC.includes("marker !== 0xc4 && ")) {
 		const loose = new Function(`"use strict";\n${SIZE_SRC.replace("marker !== 0xc4 && ", "")}\nreturn receiptImageSize;`)();
 		const got = loose(jpeg(APP0, DHT, sof(0xc0, 1024, 768)));

@@ -73,9 +73,12 @@ pm2 logs logistics-app --lines 500 | grep -E "load-ownership|receipt OCR"
 
 - `[load-ownership] could not verify load "…": Job Tracking read failed — …` — the ownership check could not read the sheet; the driver got a retryable **503**, not a 403. A burst of these is a Sheets outage, not a permissions problem.
 - `deferred receipt OCR failed for document N (non-critical)` / `receipt OCR skipped for document N` — the receipt **was** saved; only its OCR text is missing. The reason follows the colon:
-  - `…is over the 25 MP limit` / `…dimensions could not be read` — OCR was not attempted.
-  - `receipt OCR timed out` — the job hit its 90 s deadline and its process was killed. A first-ever job also downloads the model, and a failed download looks like this.
-  - `receipt OCR process exited (…)` — the OCR process died. The server did not. If it died while loading the model, the cached model is cleared so the next receipt fetches a fresh copy.
+  - `…is over the 25 MP limit` / `…dimensions could not be read` — refused when the receipt was queued; OCR was not attempted.
+  - `the OCR queue is full (…)` — too many receipts (20) or too many image bytes (64 MB) were already waiting for OCR.
+  - `receipt OCR timed out` — the job hit its 90 s deadline and its process was killed. A download that stalls, rather than failing, looks like this.
+  - `receipt OCR failed: …` — the OCR process reported the failure. If it happened before the model loaded (the model could not be fetched or read), the cached model is cleared, so the next receipt fetches a fresh copy. A burst of these during a CDN outage settles at once instead of waiting out the deadline.
+  - `receipt OCR process exited (…): <error line>` — the OCR process died. The server did not. The text after the colon is the error that ended it. If it died while loading the model, the cached model is cleared.
+  - `spawn … EMFILE` / `ENFILE` / `EAGAIN` — the OCR process could not be started at all (out of file descriptors or processes). Only that receipt is affected. A steady stream of these points at the host, not at OCR.
 
 **3. ScanKit health — credits / enabled / errors:**
 

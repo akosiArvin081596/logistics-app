@@ -33149,10 +33149,11 @@ function imageToPdf(imageBuffers) {
 // limit, and the receipt itself is still stored.
 //
 // The model is fetched once from a version-pinned URL (RECEIPT_OCR_LANG_PATH)
-// and cached in RECEIPT_OCR_CACHE_DIR, which git ignores. A child that dies
-// before its model has loaded takes the cached copy with it, so a damaged model
-// is fetched again instead of failing every receipt after it. One that dies
-// later died on its image, and the model is kept.
+// and cached in RECEIPT_OCR_CACHE_DIR, which git ignores. A job that fails
+// before its model has loaded — the child reports it, or dies — takes the cached
+// copy with it, so a damaged model is fetched again instead of failing every
+// receipt after it. One that fails later failed on its image, and the model is
+// kept.
 const RECEIPT_OCR_TIMEOUT_MS = 90_000;        // one budget for the whole job: start, model, recognition
 const RECEIPT_OCR_MAX_PIXELS = 25_000_000;    // above this, the receipt is stored without OCR text
 const RECEIPT_OCR_CHILD = path.join(__dirname, "lib", "tesseract-ocr-child.js");
@@ -33190,22 +33191,53 @@ function receiptImageSize(buf) {
 	return null;
 }
 
-async function extractReceiptText(imageBuffer) {
-	const size = receiptImageSize(imageBuffer);
-	if (!size) throw new Error("receipt OCR skipped: image dimensions could not be read");
+// Why an image will not be OCR'd, or null when it will. Only a header read, so
+// it runs when the receipt is QUEUED: an image that would be skipped never
+// waits in memory for its turn.
+function receiptOcrSkipReason(buf) {
+	const size = receiptImageSize(buf);
+	if (!size) return "image dimensions could not be read";
 	if (size.width * size.height > RECEIPT_OCR_MAX_PIXELS) {
-		throw new Error(`receipt OCR skipped: ${size.width}x${size.height} image is over the ${RECEIPT_OCR_MAX_PIXELS / 1e6} MP limit`);
+		return `${size.width}x${size.height} image is over the ${RECEIPT_OCR_MAX_PIXELS / 1e6} MP limit`;
 	}
+	return null;
+}
+
+async function extractReceiptText(imageBuffer) {
+	// queueReceiptOcr() already refused these; the rule stays here for any other caller.
+	const skip = receiptOcrSkipReason(imageBuffer);
+	if (skip) throw new Error(`receipt OCR skipped: ${skip}`);
 	return runReceiptOcrChild(imageBuffer);
 }
 
+// Drops the cached model after a job that failed before the model loaded, so the
+// next job fetches a fresh copy. Synchronous on purpose: see runReceiptOcrChild().
+function clearReceiptOcrModel() {
+	try { fs.rmSync(path.join(RECEIPT_OCR_CACHE_DIR, "eng.traineddata"), { force: true }); } catch { /* best effort */ }
+}
+
 // One OCR job in its own process. Resolves with the text; rejects on anything
-// else — a failure the child reports, a child that dies, the deadline. Settles
-// exactly once, and the child never outlives it.
+// else — a failure the child reports, a child that dies or never starts, the
+// deadline. Settles exactly once, and the child never outlives it.
 function runReceiptOcrChild(imageBuffer) {
 	const { fork } = require("child_process");
 	return new Promise((resolve, reject) => {
-		let child;
+		let child = null;
+		let timer = null;
+		let settled = false;
+		let modelLoaded = false;
+		let stderr = "";
+		const finish = (err, text) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			// Only a child that started has a pid; one that never started has nothing to stop.
+			if (child && typeof child.pid === "number" && child.exitCode === null && child.signalCode === null) {
+				try { child.kill("SIGKILL"); } catch { /* already gone */ }
+			}
+			if (err) reject(err);
+			else resolve(text);
+		};
 		try {
 			child = fork(RECEIPT_OCR_CHILD, [], {
 				cwd: __dirname,
@@ -33215,27 +33247,25 @@ function runReceiptOcrChild(imageBuffer) {
 				stdio: ["ignore", "ignore", "pipe", "ipc"],
 			});
 		} catch (err) {
-			reject(err);
+			finish(err);
 			return;
 		}
-		let settled = false;
-		let modelLoaded = false;
-		let stderr = "";
-		const finish = (err, text) => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timer);
-			if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-			if (err) reject(err);
-			else resolve(text);
-		};
-		const timer = setTimeout(() => finish(new Error(`receipt OCR timed out after ${RECEIPT_OCR_TIMEOUT_MS} ms`)), RECEIPT_OCR_TIMEOUT_MS);
-		child.stderr.setEncoding("utf8").on("data", (chunk) => { if (stderr.length < 2000) stderr += chunk; });
+		// FIRST, before anything else touches the child. A process that could not be
+		// started (out of file descriptors, say) comes back with no stdio streams and
+		// no IPC channel, and reports the failure here on the next tick — an 'error'
+		// nobody listens for would end the server.
 		child.on("error", (err) => finish(err));
+		timer = setTimeout(() => finish(new Error(`receipt OCR timed out after ${RECEIPT_OCR_TIMEOUT_MS} ms`)), RECEIPT_OCR_TIMEOUT_MS);
+		if (child.stderr) {
+			child.stderr.on("error", () => { /* diagnostics only; a pipe error must not go unheard either */ });
+			child.stderr.setEncoding("utf8").on("data", (chunk) => { if (stderr.length < 16_000) stderr += chunk; });
+		}
 		child.on("message", (msg) => {
 			if (msg && msg.ready === true) { modelLoaded = true; return; }
-			if (msg && typeof msg.text === "string") finish(null, msg.text.trim());
-			else finish(new Error(`receipt OCR failed: ${String((msg && msg.error) || "no result").slice(0, 200)}`));
+			if (msg && typeof msg.text === "string") return finish(null, msg.text.trim());
+			// A failure reported before the model loaded is a failure to load it.
+			if (!modelLoaded) clearReceiptOcrModel();
+			finish(new Error(`receipt OCR failed: ${String((msg && msg.error) || "no result").slice(0, 200)}`));
 		});
 		// 'close', not 'exit': it follows the last IPC message, so "no answer" is final.
 		// A child that died before its model loaded drops the cached model — BEFORE
@@ -33243,12 +33273,12 @@ function runReceiptOcrChild(imageBuffer) {
 		// this one settles, and that job must not read the same copy.
 		child.on("close", (code, signal) => {
 			if (settled) return;
-			if (!modelLoaded) {
-				try { fs.rmSync(path.join(RECEIPT_OCR_CACHE_DIR, "eng.traineddata"), { force: true }); } catch { /* best effort */ }
-			}
-			const last = stderr.trim().split("\n").pop() || "";
-			finish(new Error(`receipt OCR process exited (${signal || `code ${code}`})${last ? `: ${last.slice(0, 200)}` : ""}`));
+			if (!modelLoaded) clearReceiptOcrModel();
+			// Name the failure by its error line; a crash's LAST line is only the runtime's version banner.
+			const cause = stderr.split("\n").map((l) => l.trim()).find((l) => /^(?:[\w$.]{0,60}(?:Error|Exception)\b|FATAL ERROR\b)/.test(l)) || "";
+			finish(new Error(`receipt OCR process exited (${signal || `code ${code}`})${cause ? `: ${cause.slice(0, 200)}` : ""}`));
 		});
+		if (typeof child.send !== "function") return;   // never started: its 'error' settles the job
 		try {
 			child.send({ image: imageBuffer, cachePath: RECEIPT_OCR_CACHE_DIR, langPath: RECEIPT_OCR_LANG_PATH }, (err) => {
 				if (err) finish(err);
@@ -33264,18 +33294,32 @@ function runReceiptOcrChild(imageBuffer) {
 // GET /api/documents/:loadId serves to DocumentList later — so the upload no
 // longer waits on it. ONE AT A TIME: every receipt starts its own OCR process
 // (see extractReceiptText()), and off the request path nothing else would stop
-// a burst of uploads running them all at once. Past RECEIPT_OCR_MAX_PENDING a receipt is stored without text, which
-// is exactly what an OCR failure has always done. Writes by documents.id, the
-// PRIMARY KEY — documents.file_name has no unique index. Never throws.
+// a burst of uploads running them all at once. A queued receipt holds its image
+// in memory until its turn, so an image OCR would skip is refused here, and the
+// queue is capped both in jobs (RECEIPT_OCR_MAX_PENDING) and in image bytes
+// (RECEIPT_OCR_MAX_QUEUED_BYTES — app photos are well under 1 MB each). A refused
+// receipt is stored without text, which is exactly what an OCR failure has always
+// done. Writes by documents.id, the PRIMARY KEY — documents.file_name has no
+// unique index. Never throws.
 const RECEIPT_OCR_MAX_PENDING = 20;
+const RECEIPT_OCR_MAX_QUEUED_BYTES = 64 * 1024 * 1024;
 let receiptOcrChain = Promise.resolve();
 let receiptOcrPending = 0;
+let receiptOcrQueuedBytes = 0;
 function queueReceiptOcr(documentId, imageBuffer) {
-	if (receiptOcrPending >= RECEIPT_OCR_MAX_PENDING) {
-		console.warn(`[upload] receipt OCR skipped for document ${documentId}: ${receiptOcrPending} already queued`);
+	const skip = receiptOcrSkipReason(imageBuffer);
+	if (skip) {
+		console.warn(`[upload] receipt OCR skipped for document ${documentId}: ${skip}`);
+		return false;
+	}
+	const bytes = imageBuffer.length;
+	if (receiptOcrPending >= RECEIPT_OCR_MAX_PENDING || receiptOcrQueuedBytes + bytes > RECEIPT_OCR_MAX_QUEUED_BYTES) {
+		console.warn(`[upload] receipt OCR skipped for document ${documentId}: the OCR queue is full ` +
+			`(${receiptOcrPending} queued, ${Math.ceil(receiptOcrQueuedBytes / 1e6)} MB)`);
 		return false;
 	}
 	receiptOcrPending++;
+	receiptOcrQueuedBytes += bytes;
 	receiptOcrChain = receiptOcrChain.then(async () => {
 		try {
 			const text = await extractReceiptText(imageBuffer);
@@ -33284,6 +33328,7 @@ function queueReceiptOcr(documentId, imageBuffer) {
 			console.error(`[upload] deferred receipt OCR failed for document ${documentId} (non-critical):`, (err && err.message) || err);
 		} finally {
 			receiptOcrPending--;
+			receiptOcrQueuedBytes -= bytes;
 		}
 	});
 	return true;
