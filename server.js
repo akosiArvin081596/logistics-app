@@ -64,6 +64,7 @@ const { renderHtmlToPdf } = require("./lib/pdf-browser");
 const { getStateFromCoords } = require("./lib/ifta-states");
 const routemate = require("./lib/routemate-client");
 const linxupPush = require("./lib/linxup-push");
+const eldFeedHealth = require("./lib/eld-feed-health");
 const scankit = require("./lib/scankit-client");
 const brokerInvoice = require("./lib/broker-invoice");
 const { buildPayoutStatementHtml } = require("./lib/payout-statement");
@@ -2577,6 +2578,607 @@ function purgeOldRoutemateTelemetry() {
 purgeOldRoutemateTelemetry();
 setInterval(purgeOldRoutemateTelemetry, 7 * 24 * 60 * 60 * 1000); // weekly
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ELD FEED SILENCE — detection, ledger and alerting
+//
+// Nothing in this app noticed when an ELD feed stopped. Measured on production
+// 2026-09-19, three separate shapes of silence were live at once, none of which
+// had ever produced a signal:
+//
+//   LogisX-#2372  x78f4qtVukzwiF6ur7D04A   last fix 2026-08-11  (39 days)
+//   LogisX-#302   18000505841 (Linxup)     last fix 2026-07-27  (54 days)
+//   (orphan)      18000507597 (Linxup)     linked to NO truck, degraded to
+//                                          exactly 1 ping/day from 2026-09-06
+//
+// ⚠️ THIS IS A MONEY DEFECT, NOT A DASHBOARD GAP. getEldTravelDaysByVehicle()
+// is coverage-aware: a load window with NO pings falls back to the FULL
+// scheduled window instead of reporting zero. That is right for a truck that
+// predates the feed and wrong for a truck whose device died — the load moves to
+// the `estimated` basis, which pays MORE driver days than were worked and
+// therefore LESS investor profit, and logs nothing anywhere saying so.
+//
+// WHY THE IN-MEMORY COUNTERS COULD NOT HAVE CAUGHT THIS. linxupHealth /
+// routemateHealth reset on every process restart, and the documented deploy flow
+// pm2-restarts this process on every merge to main. A 54-day silence spans
+// dozens of restarts, so the in-memory view is permanently "we just started,
+// nothing to report". Everything below is derived from the DATABASE for that
+// reason, including the `feeds` array the two health endpoints serve.
+//
+// The decision logic is pure and lives in lib/eld-feed-health.js (three
+// conditions, and why one is not enough, are written out there). This file owns
+// the queries, the dedupe ledger, the mail and the socket fan-out.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ⚠️ DEFAULTS **ON** — READ THE SHAPE, NOT THE NAME. This is CLAUDE.md's THIRD
+// flag shape (`!/^(false|0|no|off)$/i`), so ELD_STALE_ALERT_ENABLED=true is a
+// no-op: the only thing this variable can do is turn the detector OFF.
+//
+// It deliberately does NOT follow "anything that moves money ships dormant".
+// That invariant is about features which WRITE a money figure; this one writes
+// no finance row, moves no existing number and changes no pay basis — it reads
+// telemetry and tells a human. The failure it exists to break is silence, so
+// shipping it silent would be self-defeating: same call, and the same sentence,
+// as FUEL_LOW_ALERT_ENABLED — "a safety warning that ships disabled is a safety
+// warning nobody turned on."
+const ELD_STALE_ALERT_ENABLED =
+	!/^(false|0|no|off)$/i.test(String(process.env.ELD_STALE_ALERT_ENABLED ?? "").trim());
+// Hours of silence on a linked, Active, unretired truck before it alerts.
+const ELD_STALE_HOURS =
+	Math.max(1, parseFloat(process.env.ELD_STALE_HOURS ?? "") || eldFeedHealth.DEFAULT_STALE_HOURS);
+// Distinct fixes required in a rolling 24 h. Below this the feed is a trickle:
+// never stale by the clock, useless to any path that needs a position history.
+const ELD_STALE_MIN_FIXES =
+	Math.max(1, parseInt(process.env.ELD_STALE_MIN_FIXES ?? "", 10) || eldFeedHealth.DEFAULT_MIN_FIXES_24H);
+// How recently an UNLINKED device must have written telemetry to still count as
+// part of our data stream. Wider than the stale window on purpose — see the lib.
+const ELD_UNLINKED_LOOKBACK_HOURS =
+	Math.max(1, parseFloat(process.env.ELD_UNLINKED_LOOKBACK_HOURS ?? "") || eldFeedHealth.DEFAULT_UNLINKED_LOOKBACK_HOURS);
+// Ceiling on alerts per rolling 24 h, INDEPENDENT of the per-feed dedupe. Same
+// reasoning as EXPENSE_DUPLICATE_ALERT_MAX_PER_DAY: sendEmail is SHARED with
+// driver onboarding, investor outreach and the weekly invoice batch, so
+// exhausting Gmail's quota here would silence every channel this feature needs.
+// The fleet is 6 trucks; 25 is far above any real defect rate.
+const ELD_STALE_ALERT_MAX_PER_DAY =
+	Math.max(1, parseInt(process.env.ELD_STALE_ALERT_MAX_PER_DAY ?? "25", 10) || 25);
+// Hourly. The input changes continuously but the condition is measured in days,
+// so this is not latency-sensitive; an hour bounds "how late is the first ping"
+// without making the sweep itself a load.
+const ELD_STALE_SWEEP_MS =
+	Math.max(5, parseInt(process.env.ELD_STALE_SWEEP_MINUTES ?? "60", 10) || 60) * 60 * 1000;
+
+// ⚠️ STANDING-CONDITION LEDGER, NOT A LOG. Copied from expense_duplicate_alerts,
+// NOT from fuel_event_alerts: a refuel is a point event that cannot recur, so
+// that table's bare `alerted_at` short-circuit is correct there and would be
+// wrong here. A silent feed is a condition that ENDS (the device starts pinging
+// again) and can come BACK (it dies a second time), so the row must resolve and
+// re-open, and `first_seen` must survive the round trip — "how long has this
+// truck been dark" is the number that tells you whether a month's pay was built
+// on an estimate.
+//
+// alert_key is 'vid:<vehicle id>' — see feedAlertKey() in lib/eld-feed-health.js
+// for why the id is validated rather than merely trimmed.
+//
+// `alert_condition`, not `condition`: SQLite does not reserve CONDITION today,
+// but a bare column name one keyword-list revision away from being quoted
+// everywhere is not worth the two characters saved.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS eld_feed_alerts (
+		alert_key TEXT PRIMARY KEY,
+		routemate_vehicle_id TEXT DEFAULT '',
+		truck_unit TEXT DEFAULT '',
+		truck_id INTEGER DEFAULT 0,
+		alert_condition TEXT DEFAULT '',
+		last_fix_ms INTEGER DEFAULT 0,
+		silent_hours REAL DEFAULT 0,
+		fixes_24h INTEGER DEFAULT 0,
+		first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+		alerted_at DATETIME,
+		resolved_at DATETIME
+	)
+`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_eld_feed_alerts_open ON eld_feed_alerts(resolved_at, alert_key)`); } catch {}
+
+// THE per-vehicle last-clean-fix query. Lifted verbatim out of
+// GET /api/admin/fleet-health so the panel a dispatcher reads and the sweep that
+// pages someone at 2 a.m. can never disagree about what "last fix" means —
+// DRIVER_RENAME_TARGETS / truckChargedInMonth lesson, applied before the second
+// copy exists rather than after it drifts.
+//
+// Clean rows only (`dropped_reason = ''`): a speed-outlier or invalid-coords row
+// is stored for forensics and must not count as the feed being alive.
+// `source` is selected for the health endpoints; fleet-health maps its fields
+// explicitly and is unaffected by the extra columns.
+//
+// ⚠️ IT RETURNS **TWO** CLOCKS AND THEY ARE NOT THE SAME FACT. Read the one that
+// answers your question:
+//
+//   location_date_ms  — the timestamp on the LAST ROW WE RECEIVED (MAX(id), i.e.
+//                       insertion order). This is what the fleet-health panel
+//                       wants: it displays that row's lat/lng/speed/fuel, so the
+//                       timestamp has to be the one belonging to those values.
+//   last_fix_ms       — MAX(location_date_ms), the NEWEST MOMENT THE DEVICE HAS
+//                       EVER REPORTED. This is the only honest staleness clock.
+//
+// They agree whenever rows arrive in time order, which is the normal case and is
+// exactly why the difference is easy to miss. They diverge on an out-of-order
+// webhook delivery, a re-ingest or a backfill — and then MAX(id) points at an
+// OLDER timestamp than the device's newest, so a silence detector built on it
+// reports a truck as dark while it is reporting fine. Measured on a 5-row
+// fixture, the two disagreed by 4 hours. The sweep therefore reads last_fix_ms;
+// fleet-health keeps reading location_date_ms, whose meaning is unchanged.
+//
+// Both come out of the SAME grouped subquery, so this is still one query and the
+// two callers still cannot drift apart about what "clean" means.
+//
+// Empty input returns {} without touching the database — every caller must keep
+// working on a fleet with nothing linked.
+function eldLatestCleanFixByVehicle(vehicleIds) {
+	const ids = (Array.isArray(vehicleIds) ? vehicleIds : []).filter(Boolean);
+	const out = {};
+	if (ids.length === 0) return out;
+	const placeholders = ids.map(() => "?").join(",");
+	const rows = db.prepare(`
+		SELECT rt.routemate_vehicle_id, rt.latitude, rt.longitude, rt.speed,
+		       rt.fuel_pct, rt.odometer, rt.engine_hours, rt.geocoded_location,
+		       rt.location_date_ms, rt.source, latest.last_fix_ms
+		FROM routemate_telemetry rt
+		INNER JOIN (
+			SELECT routemate_vehicle_id, MAX(id) AS max_id, MAX(location_date_ms) AS last_fix_ms
+			FROM routemate_telemetry
+			WHERE routemate_vehicle_id IN (${placeholders})
+			  AND dropped_reason = ''
+			GROUP BY routemate_vehicle_id
+		) latest ON rt.id = latest.max_id
+	`).all(...ids);
+	for (const r of rows) out[r.routemate_vehicle_id] = r;
+	return out;
+}
+
+// Distinct clean fixes per vehicle inside a rolling window. COUNT(DISTINCT
+// location_date_ms), not COUNT(*): a device that re-pushes one timestamp — or a
+// webhook we accidentally double-ingest — must not read as a healthy feed. This
+// is condition (c)'s whole input, so counting the wrong thing here is how the
+// trickle detector silently becomes a no-op.
+function eldFixCountsByVehicle(vehicleIds, sinceMs) {
+	const ids = (Array.isArray(vehicleIds) ? vehicleIds : []).filter(Boolean);
+	const out = {};
+	if (ids.length === 0) return out;
+	const placeholders = ids.map(() => "?").join(",");
+	const rows = db.prepare(`
+		SELECT routemate_vehicle_id, COUNT(DISTINCT location_date_ms) AS fixes
+		FROM routemate_telemetry
+		WHERE routemate_vehicle_id IN (${placeholders})
+		  AND dropped_reason = ''
+		  AND location_date_ms >= ?
+		GROUP BY routemate_vehicle_id
+	`).all(...ids, Number(sinceMs) || 0);
+	for (const r of rows) out[r.routemate_vehicle_id] = r.fixes;
+	return out;
+}
+
+// Everything the judge needs, read in four bounded queries.
+//
+// ⚠️ THE ORPHAN CANDIDATE SET COMES FROM TELEMETRY. routemate_vehicles CANNOT
+// be the source of truth here, and the reason is specific: it is written by the
+// two ROUTEMATE paths only — routemateUpsertVehicleStmt (the vehicles-list sync)
+// and routemateUpsertVehicleMinimalStmt (the telemetry poller). Verified in this
+// file 2026-09-19: ingestLinxupPosition() writes routemate_telemetry and nothing
+// else, so a Linxup device that has only ever pushed to the webhook has NO row
+// there at all — and a Linxup device is exactly the orphan this condition was
+// written for (18000507597). Asking routemate_vehicles would miss it entirely.
+// The rows are the only thing that can answer "is this device writing telemetry
+// we are filing under no truck", so the rows are what we ask.
+//
+// routemate_vehicles is unioned in anyway, purely as an extra candidate source:
+// a Routemate vehicle that is registered but silent then still gets SURFACED on
+// the health endpoints (it judges `orphan_idle` and does not alert) instead of
+// being absent, which is how INV-24-A-class gaps stay invisible.
+function eldFeedSnapshot(nowMs) {
+	const now = Number(nowMs) || Date.now();
+	const trucks = db.prepare(`
+		SELECT id, unit_number, status, routemate_vehicle_id, retired_at
+		FROM trucks
+		ORDER BY unit_number ASC
+	`).all();
+
+	const linkedIds = new Set();
+	for (const t of trucks) {
+		const v = String(t.routemate_vehicle_id || "").trim();
+		if (v) linkedIds.add(v);
+	}
+
+	// DISTINCT over an indexed column (idx_rm_tel_vid_date leads on it), so this
+	// is an index skip-scan and not an 800k-row table walk.
+	const seenIds = new Set();
+	for (const r of db.prepare(`SELECT DISTINCT routemate_vehicle_id FROM routemate_telemetry WHERE routemate_vehicle_id != ''`).all()) {
+		seenIds.add(String(r.routemate_vehicle_id));
+	}
+	for (const r of db.prepare(`SELECT routemate_vehicle_id FROM routemate_vehicles WHERE routemate_vehicle_id != ''`).all()) {
+		seenIds.add(String(r.routemate_vehicle_id));
+	}
+
+	const orphanIds = [...seenIds].filter((v) => !linkedIds.has(v)).sort();
+	const allIds = [...new Set([...linkedIds, ...orphanIds])];
+	const latest = eldLatestCleanFixByVehicle(allIds);
+	const counts = eldFixCountsByVehicle(allIds, now - 24 * 60 * 60 * 1000);
+
+	return {
+		// ⚠️ `last_fix_ms`, NOT `location_date_ms`. The staleness clock is the newest
+		// moment the DEVICE reported, never the timestamp on the last row we
+		// happened to receive — see eldLatestCleanFixByVehicle(). Reading the wrong
+		// one reports a healthy truck as dark after any out-of-order delivery.
+		trucks: trucks.map((t) => {
+			const vid = String(t.routemate_vehicle_id || "").trim();
+			const tel = vid ? latest[vid] : null;
+			return {
+				truckId: t.id,
+				unitNumber: t.unit_number,
+				status: t.status,
+				retiredAt: t.retired_at,
+				vehicleId: vid,
+				lastFixMs: tel ? tel.last_fix_ms : null,
+				fixes24h: vid ? (counts[vid] || 0) : 0,
+				source: tel ? (tel.source || "") : "",
+			};
+		}),
+		orphans: orphanIds.map((vid) => {
+			const tel = latest[vid];
+			return {
+				vehicleId: vid,
+				lastFixMs: tel ? tel.last_fix_ms : null,
+				fixes24h: counts[vid] || 0,
+				source: tel ? (tel.source || "") : "",
+			};
+		}),
+	};
+}
+
+// Snapshot -> verdicts. The one place the thresholds meet the data, shared by
+// the sweep and by both health endpoints so a dispatcher reading the panel sees
+// the same judgement the alerter acted on.
+function eldFeedVerdicts(nowMs) {
+	const now = Number(nowMs) || Date.now();
+	const snap = eldFeedSnapshot(now);
+	const judged = eldFeedHealth.judgeEldFeeds(snap, {
+		nowMs: now,
+		staleHours: ELD_STALE_HOURS,
+		minFixes24h: ELD_STALE_MIN_FIXES,
+		unlinkedLookbackHours: ELD_UNLINKED_LOOKBACK_HOURS,
+		todayKey: todayKeyCT(),
+	});
+	// Carry provenance through so the health endpoints can say which provider
+	// last wrote for this id.
+	//
+	// ⚠️ THE COLUMN IS routemate_telemetry.source — there is NO `source` on
+	// routemate_vehicles, whatever CLAUDE.md's Linxup paragraph implies (verified
+	// against production 2026-09-19; the PR #351 ALTER landed on the telemetry
+	// table, server.js:2275). Querying it on the mirror throws `no such column`.
+	//
+	// ⚠️ '' IS THE COMMON CASE, NOT AN EDGE CASE, so never read it as "unknown
+	// provider, probably nothing". Production is 1,032,272 rows at '' (everything
+	// written before the column shipped) against 3,266 at 'routemate', and
+	// **zero** at 'linxup' — the webhook has not written since the column landed.
+	// So a silent Linxup feed necessarily reports source '', which is exactly the
+	// feed this whole sweep exists to surface. Provenance is reported, never
+	// branched on. (Historical Linxup rows remain identifiable by fingerprint —
+	// engine_hours = 0 AND geocoded_location = '' — if anyone needs to partition
+	// them; devices 18000505841 and 18000507597.)
+	const bySource = new Map();
+	for (const r of [...snap.trucks, ...snap.orphans]) bySource.set(r.vehicleId, r.source || "");
+	for (const f of judged.feeds) f.source = bySource.get(f.vehicleId) || "";
+	return judged;
+}
+
+// The DB-derived `feeds` array both health endpoints serve.
+//
+// ⚠️ DB-DERIVED IS THE POINT, not an implementation detail. The in-memory
+// linxupHealth counters zero on every restart, so "nothing received" and "we
+// restarted 20 minutes ago" are the same reading — which is precisely how a
+// 54-day outage stayed invisible. Everything here survives a restart because
+// none of it is held in this process.
+//
+// ⚠️ BOTH ENDPOINTS GET THE FULL FLEET, NOT A PER-PROVIDER SLICE. Filtering the
+// Linxup endpoint to source='linxup' would hide exactly the feeds it exists to
+// show: a silent device writes no rows, so its provenance is whatever its LAST
+// row said — and every Linxup row written before 2026-09-19 carries source=''.
+// The `source` field is reported per feed instead, so neither endpoint lies by
+// omission. Nothing here touches a token.
+function eldFeedHealthReport(nowMs) {
+	const now = Number(nowMs) || Date.now();
+	const judged = eldFeedVerdicts(now);
+	const ledger = {};
+	for (const row of db.prepare(`
+		SELECT alert_key,
+		       alert_condition,
+		       strftime('%Y-%m-%dT%H:%M:%SZ', first_seen)  AS first_seen,
+		       strftime('%Y-%m-%dT%H:%M:%SZ', alerted_at)  AS alerted_at,
+		       strftime('%Y-%m-%dT%H:%M:%SZ', resolved_at) AS resolved_at
+		FROM eld_feed_alerts
+	`).all()) ledger[row.alert_key] = row;
+
+	const feeds = judged.feeds.map((f) => {
+		const led = f.key ? ledger[f.key] : null;
+		return {
+			kind: f.kind,
+			truckId: f.truckId,
+			unitNumber: f.unitNumber,
+			vehicleId: f.vehicleId,
+			source: f.source || "",
+			state: f.state,
+			alerting: f.alert,
+			reason: f.reason,
+			// Telemetry stores epoch ms, so this is already zone-unambiguous; it is
+			// serialized as an explicit ISO-8601 Z string for the same reason the
+			// ledger columns go through strftime.
+			lastFixAt: f.lastFixMs ? new Date(f.lastFixMs).toISOString() : null,
+			silentHours: f.silentHours === null ? null : Math.round(f.silentHours * 10) / 10,
+			fixes24h: f.fixes24h,
+			firstSeen: led ? led.first_seen : null,
+			alertedAt: led ? led.alerted_at : null,
+			resolvedAt: led ? led.resolved_at : null,
+		};
+	});
+
+	return {
+		feeds,
+		summary: eldFeedHealth.summarizeFeeds(judged.feeds),
+		thresholds: {
+			enabled: ELD_STALE_ALERT_ENABLED,
+			staleHours: ELD_STALE_HOURS,
+			minFixes24h: ELD_STALE_MIN_FIXES,
+			unlinkedLookbackHours: ELD_UNLINKED_LOOKBACK_HOURS,
+		},
+		// In-memory, and labeled as such: these two are about the SWEEP, not the
+		// feeds, and a restart legitimately resets them.
+		lastSweep: eldFeedSweepHealth.lastRun,
+		lastSweepError: eldFeedSweepHealth.lastError,
+	};
+}
+
+// Fire-and-forget. NEVER throws and never rejects — its caller is a timer, and
+// the sweep must survive one unmailable feed to reach the rest.
+async function alertEldFeedSilence(verdict) {
+	if (!ELD_STALE_ALERT_ENABLED) return { alerted: false, reason: "disabled" };
+	try {
+		const v = verdict || {};
+		const key = eldFeedHealth.feedAlertKey(v.vehicleId, Date.now());
+
+		const seen = db.prepare("SELECT alert_key, alerted_at, resolved_at FROM eld_feed_alerts WHERE alert_key = ?").get(key);
+		// ⚠️ `&& !seen.resolved_at` is the half that makes the re-open below mean
+		// anything. A bare alerted_at short-circuit — fuel_event_alerts' shape,
+		// correct there because a refuel cannot recur — would silence a feed
+		// FOREVER after its first ping, including after the device was repaired
+		// and then died again. That is the one case this feature most needs to
+		// report, because the second death is the one nobody is watching for.
+		if (seen && seen.alerted_at && !seen.resolved_at) return { alerted: false, reason: "already_alerted", key };
+
+		const alertedToday = db.prepare(
+			"SELECT COUNT(*) AS c FROM eld_feed_alerts WHERE alerted_at > datetime('now', '-1 day')",
+		).get().c;
+		if (alertedToday >= ELD_STALE_ALERT_MAX_PER_DAY) {
+			console.warn(`[eld-feed] daily alert cap (${ELD_STALE_ALERT_MAX_PER_DAY}) reached — feed ${key} logged, not mailed`);
+			return { alerted: false, reason: "daily_cap", key };
+		}
+
+		// Record the sighting NOW but leave alerted_at NULL — see the stamp below.
+		// first_seen is preserved across a re-open via COALESCE so "how long has
+		// this truck been dark" survives a repair-and-fail-again cycle; that is
+		// the number that says whether a month of pay was built on an estimate.
+		db.prepare(`
+			INSERT INTO eld_feed_alerts
+				(alert_key, routemate_vehicle_id, truck_unit, truck_id, alert_condition,
+				 last_fix_ms, silent_hours, fixes_24h, first_seen, alerted_at, resolved_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?,
+				COALESCE((SELECT first_seen FROM eld_feed_alerts WHERE alert_key = ?), CURRENT_TIMESTAMP), NULL, NULL)
+			ON CONFLICT(alert_key) DO UPDATE SET
+				routemate_vehicle_id = excluded.routemate_vehicle_id,
+				truck_unit = excluded.truck_unit,
+				truck_id = excluded.truck_id,
+				alert_condition = excluded.alert_condition,
+				last_fix_ms = excluded.last_fix_ms,
+				silent_hours = excluded.silent_hours,
+				fixes_24h = excluded.fixes_24h,
+				resolved_at = NULL,
+				-- ⚠️ alerted_at IS CLEARED TOO, and leaving it set is a real defect
+				-- rather than untidiness. This UPSERT is only reached in three
+				-- states (the early return above filters out every other one): the
+				-- row is absent, the row was RESOLVED and this is a NEW episode, or
+				-- alerted_at is already NULL and this is a delivery retry. In all
+				-- three the correct value is NULL.
+				--
+				-- Carrying the previous episode's stamp forward breaks the
+				-- delivery gate exactly when it matters most: if the re-open's mail
+				-- and notification BOTH fail, the row still reads "already
+				-- alerted", so the next sweep takes the dedupe branch and the
+				-- second death is never reported at all. It also poisons the
+				-- rolling-24h cap count with a timestamp from a closed episode.
+				alerted_at = NULL
+		`).run(
+			key,
+			String(v.vehicleId || ""),
+			String(v.unitNumber || ""),
+			Number(v.truckId) || 0,
+			String(v.state || ""),
+			Number(v.lastFixMs) || 0,
+			v.silentHours === null || v.silentHours === undefined ? 0 : Number(v.silentHours) || 0,
+			Number(v.fixes24h) || 0,
+			key,
+		);
+
+		// One-line sanitize for the subject and the console line, same reason as
+		// the duplicate-receipt alerter: the unit number is stored free text and
+		// the vehicle id can arrive off a webhook body. nodemailer does strip
+		// CR/LF from a Subject, but relying on a dependency for that is not a
+		// control we own.
+		const oneLine = (s) => String(s == null ? "" : s).replace(/[\r\n]+/g, " ").slice(0, 60);
+		const who = oneLine(v.unitNumber || `device ${v.vehicleId}`) || "unknown truck";
+		const lastFix = v.lastFixMs ? new Date(Number(v.lastFixMs)).toISOString().replace("T", " ").slice(0, 16) + " UTC" : "never";
+		const silent = v.silentHours === null || v.silentHours === undefined
+			? "n/a"
+			: `${Math.floor(Number(v.silentHours) / 24)}d ${Math.floor(Number(v.silentHours) % 24)}h`;
+
+		const subject = v.state === "orphan"
+			? `⚠️ ELD device ${oneLine(v.vehicleId)} is reporting to no truck`
+			: `⚠️ ELD feed silent — ${who} (${silent})`;
+		const html =
+			`<p><b>${escHtml(who)}</b> — ${escHtml(String(v.reason || "ELD feed problem"))}.</p>` +
+			`<table style="border-collapse:collapse;font-family:system-ui,sans-serif;font-size:13px;">` +
+			`<tr><td style="padding:6px 10px;border:1px solid #ddd;">Truck</td><td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(oneLine(v.unitNumber) || "— not linked to a truck —")}</td></tr>` +
+			`<tr><td style="padding:6px 10px;border:1px solid #ddd;">ELD device id</td><td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(oneLine(v.vehicleId))}</td></tr>` +
+			`<tr><td style="padding:6px 10px;border:1px solid #ddd;">Condition</td><td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(String(v.state || ""))}</td></tr>` +
+			`<tr><td style="padding:6px 10px;border:1px solid #ddd;">Last clean fix</td><td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(lastFix)}</td></tr>` +
+			`<tr><td style="padding:6px 10px;border:1px solid #ddd;">Silent for</td><td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(silent)}</td></tr>` +
+			`<tr><td style="padding:6px 10px;border:1px solid #ddd;">Fixes in last 24 h</td><td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(String(v.fixes24h))}</td></tr>` +
+			`</table>` +
+			`<p style="margin-top:14px;"><b>Why this matters for pay.</b> Driver "active days" are counted from ELD travel, and a load window with no pings falls back to the full scheduled window — ` +
+			`so while this feed is dark, loads on this truck settle on the <i>estimated</i> basis: more driver days than were worked, and less investor profit. ` +
+			`The longer it stays dark, the more months close on an estimate.</p>` +
+			(v.state === "orphan"
+				? `<p>This device is pushing telemetry that is filed under no truck. Link it under <b>Trucks → ELD device</b>, or have the provider deactivate it if it is not ours.</p>`
+				: v.state === "never_reported"
+					? `<p>This truck has an ELD device id saved but has never produced a single fix. Check the id is the right one, and that the device is installed and powered.</p>`
+					: `<p>Check the device is powered and in coverage. If the truck is genuinely out of service, set it Inactive or record its retirement date — both stop this alert at the source.</p>`) +
+			`<p style="color:#888;font-size:12px;">Reported once per feed. Reported again only after it recovers and goes silent a second time.</p>`;
+
+		let emailed = false;
+		try {
+			emailed = (await sendEmail(process.env.GMAIL_USER, subject, html)) === true;
+		} catch (e) { console.error("[eld-feed] alert email failed:", e.message); }
+
+		let notified = false;
+		try {
+			const title = v.state === "orphan"
+				? `ELD device ${oneLine(v.vehicleId)} is linked to no truck`
+				: `ELD feed silent — ${who}`;
+			const body = `${v.reason || "ELD feed problem"} · last clean fix ${lastFix}`;
+			// ⚠️ NO loadId in metadata, deliberately. NotificationsView routes a tap
+			// to /dashboard?load=<id> when metadata carries one; a feed alert is not
+			// about any single load, and inventing one would send a dispatcher to an
+			// arbitrary load's modal. The component already no-ops when it is absent
+			// (the duplicate-receipts notification does the same thing).
+			const meta = JSON.stringify({
+				vehicleId: String(v.vehicleId || ""), truckId: Number(v.truckId) || 0,
+				unitNumber: String(v.unitNumber || ""), condition: String(v.state || ""),
+				lastFixMs: Number(v.lastFixMs) || 0, fixes24h: Number(v.fixes24h) || 0,
+			});
+			insertDispatchNotification.run("eld-feed-silent", title, body, meta);
+			io.to("dispatch").emit("dispatch-notification", {
+				type: "eld-feed-silent", title, body, metadata: JSON.parse(meta),
+			});
+			notified = true;
+		} catch (e) { console.error("[eld-feed] notification failed:", e.message); }
+
+		// ⚠️ STAMP ONLY ON CONFIRMED DELIVERY. Stamping before the send — the
+		// obvious shape — makes the once-per-feed guard suppress this feed forever
+		// on a transient Gmail 4xx or an unconfigured mailbox, and the alert that
+		// never went out would then look, in this table, exactly like one that did.
+		// Leaving alerted_at NULL costs a repeat next sweep and buys a retry; the
+		// row is recorded above either way, so first_seen is never lost. The in-app
+		// dispatch notification counts as delivery in its own right — it is the
+		// channel that still works with no GMAIL_* configured at all.
+		const delivered = emailed || notified;
+		if (delivered) {
+			db.prepare("UPDATE eld_feed_alerts SET alerted_at = ? WHERE alert_key = ? AND alerted_at IS NULL")
+				.run(new Date().toISOString(), key);
+		}
+		console.log(
+			"[eld-feed] %s — %s (%s): %s",
+			delivered ? "ALERT" : "ALERT UNDELIVERED (will retry next sweep)",
+			who, v.state, v.reason,
+		);
+		return { alerted: delivered, emailed, notified, key };
+	} catch (e) {
+		console.error("[eld-feed] alert failed:", e && e.message);
+		return { alerted: false, reason: "error" };
+	}
+}
+
+let eldFeedSweepRunning = false;
+const eldFeedSweepHealth = { lastRun: null, lastError: null, lastFeeds: 0, lastAlerted: 0, lastResolved: 0 };
+
+// The sweep. Read-only against trucks and routemate_telemetry — it never edits a
+// truck, never re-links a device and never touches a pay figure. Deciding what
+// to do about a dead ELD is a human call; this feature's whole job is to put
+// that call in front of one.
+async function sweepEldFeedSilence() {
+	const judged = eldFeedVerdicts(Date.now());
+	const alerting = judged.alerts;
+
+	// Resolve every open row whose condition has gone away: the device started
+	// pinging again, the orphan got linked, the truck was retired or marked
+	// Inactive. All are legitimate closures and all must clear the row, or a
+	// recurrence could never re-open and the second failure would be silent.
+	//
+	// Keyed on the verdict set, which covers EVERY feed (not just the alerting
+	// ones) — so "absent from the alerting set" and "no longer a problem" are the
+	// same statement here, unlike the duplicate-receipt sweep whose list is
+	// truncated at a cap. There is no cap on this one: the fleet is bounded by
+	// the trucks table.
+	const live = new Set(alerting.map((f) => f.key));
+	let resolved = 0;
+	for (const row of db.prepare("SELECT alert_key FROM eld_feed_alerts WHERE resolved_at IS NULL").all()) {
+		if (!live.has(row.alert_key)) {
+			db.prepare("UPDATE eld_feed_alerts SET resolved_at = CURRENT_TIMESTAMP WHERE alert_key = ?").run(row.alert_key);
+			resolved++;
+			console.log(`[eld-feed] RESOLVED — ${row.alert_key}`);
+		}
+	}
+
+	let alerted = 0;
+	for (const f of alerting) {
+		const r = await alertEldFeedSilence(f);
+		if (r && r.alerted) alerted++;
+		// A cap hit applies to every remaining feed too — stop rather than spend
+		// the rest of the sweep re-running the same COUNT.
+		if (r && r.reason === "daily_cap") break;
+	}
+
+	eldFeedSweepHealth.lastFeeds = judged.feeds.length;
+	eldFeedSweepHealth.lastAlerted = alerted;
+	eldFeedSweepHealth.lastResolved = resolved;
+	return { feeds: judged.feeds.length, alerting: alerting.length, alerted, resolved };
+}
+
+async function maybeSweepEldFeedSilence() {
+	if (!ELD_STALE_ALERT_ENABLED || eldFeedSweepRunning) return;
+	eldFeedSweepRunning = true;
+	try {
+		const r = await sweepEldFeedSilence();
+		eldFeedSweepHealth.lastRun = new Date().toISOString();
+		eldFeedSweepHealth.lastError = null;
+		if (r.alerting || r.resolved) {
+			console.log(`[eld-feed] ${r.feeds} feed(s); ${r.alerting} alerting, ${r.alerted} newly alerted, ${r.resolved} resolved`);
+		}
+	} catch (e) {
+		eldFeedSweepHealth.lastError = e.message;
+		console.error("[eld-feed] sweep failed:", e.message);
+	} finally {
+		eldFeedSweepRunning = false;
+	}
+}
+
+if (ELD_STALE_ALERT_ENABLED) {
+	// ⚠️ THE REJECTION HANDLER LOGS — deliberately not `.catch(() => {})`. Same
+	// call as the expense-duplicates tick: maybeSweepEldFeedSilence() owns its own
+	// try/catch/finally and should never reject, so anything arriving here is a
+	// defect in that guard itself, which is exactly why it must be noisy. An
+	// empty handler is how a throwing sweep stayed invisible through two QA ticks
+	// once already in this file.
+	const eldFeedTick = () => {
+		maybeSweepEldFeedSilence().catch((e) => {
+			console.error("[eld-feed] sweep threw outside its own guard:", (e && e.message) || e);
+		});
+	};
+	setInterval(eldFeedTick, ELD_STALE_SWEEP_MS);
+	// Boot run is DELAYED, not immediate. better-sqlite3 is synchronous, so this
+	// scan blocks the event loop, and the documented deploy flow pm2-restarts this
+	// process during business hours — the same boot burst that produced the PDF
+	// cold-start "navigation timeout". Five minutes puts it clear of that burst
+	// and of the expense-duplicates boot run at four.
+	setTimeout(eldFeedTick, 5 * 60 * 1000);
+	console.log(`[eld-feed] enabled — sweeping every ${Math.round(ELD_STALE_SWEEP_MS / 60000)} min; stale > ${ELD_STALE_HOURS} h, trickle < ${ELD_STALE_MIN_FIXES} fixes/24 h`);
+}
+
 // --- Routemate sync helpers ---
 // Both helpers are no-ops when the kill switch is off or the key is unset.
 // They update routemateHealth in place so the /api/routemate/health endpoint
@@ -4242,7 +4844,14 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_ta_driver ON truck_assignments(dri
 // "no such table". This CREATE closes that gap and nothing else: `IF NOT EXISTS`
 // means production, where the table is already present, is untouched.
 //
-// ⚠️ This is part of the LIVE n8n ingestion contract, so the shape is not
+// ⚠️ MEASURED 2026-09-19: this table holds 0 rows in production and n8n has
+// not called POST /api/n8n/job once in the 14-day nginx retention window —
+// the live n8n endpoints are /api/n8n/load-distance and
+// /api/n8n/extract-pdf-via-gemini. Treat the "live contract" note below as
+// historical. The shape still matters if the path is ever revived, which is
+// why the transcription is kept rather than deleted.
+//
+// ⚠️ This WAS part of the live n8n ingestion contract, so the shape is not
 // inferred from the endpoint's queries — it is a transcription of production's
 // actual `sqlite_master.sql`, read over the VPS on 2026-08-07. Getting a name or
 // type wrong here would be worse than the current state: today a fresh install
@@ -5678,6 +6287,14 @@ function googleAgentFor(parsedUrl) {
 // Throttled to one line per 30 s with a running count, in the spirit of
 // logRoutemateSyncFailure: enough to see "we are burning dead sockets", not
 // enough to flood the log during a real Google outage.
+// ⚠️ `count` is CUMULATIVE PER PROCESS, not per request. It is a running total
+// of every retry since boot across every Sheets/Drive call, and it resets to 0
+// on restart. The log wording below says "since boot" for exactly that reason:
+// the previous phrasing ("N retries so far") read as a per-request counter, and
+// a line saying "66 retries so far" was misdiagnosed as a runaway retry loop on
+// a single request during the 2026-09-19 audit. It was not — gaxios retries at
+// most 3 times per request (see GOOGLE_RETRY_CONFIG below); the tell is that the
+// sequence climbs monotonically and then restarts at 1 after a deploy.
 const googleRetryLog = { count: 0, lastLoggedAt: 0 };
 function onGoogleRetryAttempt(err) {
 	googleRetryLog.count += 1;
@@ -5686,7 +6303,7 @@ function onGoogleRetryAttempt(err) {
 	googleRetryLog.lastLoggedAt = now;
 	const status = err && err.response && err.response.status;
 	console.warn(
-		`[google-api] retrying request (${googleRetryLog.count} retries so far): ` +
+		`[google-api] retrying request (retry #${googleRetryLog.count} since boot): ` +
 		`${(err && err.message) || "unknown error"}${status ? ` [status ${status}]` : " [no response]"}`,
 	);
 }
@@ -15308,7 +15925,23 @@ async function alertDuplicateReceipts(group) {
 				truck_unit = excluded.truck_unit, driver = excluded.driver, local_day = excluded.local_day,
 				amount = excluded.amount, excess_amount = excluded.excess_amount,
 				confidence = excluded.confidence, row_ids = excluded.row_ids,
-				resolved_at = NULL
+				resolved_at = NULL,
+				-- ⚠️ alerted_at IS CLEARED TOO. Leaving it set was a real defect,
+				-- fixed 2026-09-19. The guard above only lets three states reach this
+				-- UPSERT: the row is absent, the row was RESOLVED and this is a NEW
+				-- episode, or alerted_at is already NULL and this is a delivery retry.
+				-- NULL is correct in all three.
+				--
+				-- Carrying the previous episode's stamp forward breaks the delivery
+				-- gate exactly when it matters most. The delivered flag below is false
+				-- when mail AND notification both fail, so no stamp runs — but the row
+				-- still read "already alerted" with resolved_at now NULL, so every
+				-- later sweep took the dedupe branch at the guard above and the
+				-- recurrence was NEVER reported again. It also poisoned the
+				-- rolling-24h cap count with a timestamp from a closed episode.
+				--
+				-- eld_feed_alerts carries the same clause for the same reason.
+				alerted_at = NULL
 		`).run(
 			key, String(group.truckUnit || ""), String(group.driver || ""), String(group.localDay || group.date || ""),
 			Number(group.amount) || 0, Number(group.excessAmount) || 0, String(group.confidence || ""),
@@ -31104,7 +31737,18 @@ app.post("/api/admin/routemate/sync-now", requireRole("Super Admin"), async (req
 
 // GET /api/routemate/health — Last-sync timestamps + recent error count.
 // Super Admin only. Used by the manual probe UI in TrucksView (Phase 2).
+//
+// ⚠️ EVERY FIELD EXCEPT `feeds` IS IN-MEMORY AND RESETS ON RESTART. That is the
+// whole reason `feeds` exists and is DB-derived: routemateHealth.lastSync reads
+// "null" after a pm2 restart whether the integration has been healthy for a
+// month or dead for two, and the deploy flow restarts this process on every
+// merge. `feeds` answers the question those counters structurally cannot —
+// "when did each device last actually write a row" — straight from the database.
+// See eldFeedHealthReport(). No token, key or secret is echoed by either half.
 app.get("/api/routemate/health", requireRole("Super Admin"), (req, res) => {
+	let feedHealth = null;
+	try { feedHealth = eldFeedHealthReport(Date.now()); }
+	catch (e) { console.error("[eld-feed] health report failed:", e.message); }
 	res.json({
 		enabled: ROUTEMATE_ENABLED,
 		hasKey: !!ROUTEMATE_API_KEY,
@@ -31112,6 +31756,13 @@ app.get("/api/routemate/health", requireRole("Super Admin"), (req, res) => {
 		lastSync: routemateHealth.lastSync,
 		lastError: routemateHealth.lastError,
 		errorsLast24h: routemateHealth.errorsLast24h,
+		// Degrades to an empty list rather than 500ing the probe UI: a broken
+		// diagnostic must not take down the panel it is a diagnostic for.
+		feeds: feedHealth ? feedHealth.feeds : [],
+		feedSummary: feedHealth ? feedHealth.summary : null,
+		feedThresholds: feedHealth ? feedHealth.thresholds : null,
+		lastFeedSweep: feedHealth ? feedHealth.lastSweep : null,
+		lastFeedSweepError: feedHealth ? feedHealth.lastSweepError : null,
 	});
 });
 
@@ -31401,7 +32052,24 @@ app.post("/api/eld/linxup/webhook", async (req, res) => {
 });
 
 // GET /api/eld/linxup/health — Super Admin. Never echoes the token.
+//
+// ⚠️ lastReceived / lastWritten / messageCounts / unlinkedPositions ARE IN-MEMORY
+// AND RESET ON EVERY RESTART, and that is not a footnote — it is the mechanism by
+// which device 18000505841 went 54 days without writing a row while this endpoint
+// kept reporting a plausible-looking blank slate. `feeds` is DB-derived precisely
+// so a restart cannot launder a silence, and it is what you should read here.
+//
+// ⚠️ IT DELIBERATELY LISTS THE WHOLE FLEET, NOT A LINXUP-ONLY SLICE. Filtering on
+// routemate_telemetry.source would hide exactly the feeds this is for: a silent
+// device writes no rows, so its provenance is whatever its LAST row said — and in
+// production that column is '' on 1,032,272 rows and 'linxup' on ZERO, because
+// the webhook has not written since the column shipped. A source filter would
+// therefore return an empty list while two Linxup devices were dark. Provenance
+// is reported per feed instead, so neither endpoint lies by omission.
 app.get("/api/eld/linxup/health", requireRole("Super Admin"), (req, res) => {
+	let feedHealth = null;
+	try { feedHealth = eldFeedHealthReport(Date.now()); }
+	catch (e) { console.error("[eld-feed] health report failed:", e.message); }
 	res.json({
 		provider: "linxup",
 		enabled: LINXUP_ENABLED,
@@ -31413,6 +32081,11 @@ app.get("/api/eld/linxup/health", requireRole("Super Admin"), (req, res) => {
 		messageCounts: linxupHealth.counts,
 		unlinkedPositions: linxupHealth.unlinked,
 		speedUnitCheck: linxupHealth.speedUnit,
+		feeds: feedHealth ? feedHealth.feeds : [],
+		feedSummary: feedHealth ? feedHealth.summary : null,
+		feedThresholds: feedHealth ? feedHealth.thresholds : null,
+		lastFeedSweep: feedHealth ? feedHealth.lastSweep : null,
+		lastFeedSweepError: feedHealth ? feedHealth.lastSweepError : null,
 	});
 });
 
@@ -31686,25 +32359,18 @@ app.get("/api/admin/fleet-health", requireRole("Super Admin", "Dispatcher"), (re
 		// Pre-fetch latest telemetry per linked vehicle and the latest "moving"
 		// timestamp in one pass so we don't N+1 the DB.
 		const linkedIds = trucks.map(t => t.routemate_vehicle_id).filter(Boolean);
-		const latestByVehicle = {};
+		// ⚠️ SHARED WITH THE FEED-SILENCE SWEEP ON PURPOSE. This query used to be
+		// written out inline here; it now lives in eldLatestCleanFixByVehicle() so
+		// the panel a dispatcher reads and the sweep that mails someone about a
+		// dead feed cannot drift apart about what "last fix" means. Same lesson as
+		// DRIVER_RENAME_TARGETS and truckChargedInMonth — applied before the second
+		// copy exists instead of after it diverges. The returned rows carry one
+		// extra column (`source`); every field below is mapped explicitly, so that
+		// is inert here.
+		const latestByVehicle = eldLatestCleanFixByVehicle(linkedIds);
 		const lastMovingByVehicle = {};
 		if (linkedIds.length > 0) {
 			const placeholders = linkedIds.map(() => "?").join(",");
-			const latestRows = db.prepare(`
-				SELECT rt.routemate_vehicle_id, rt.latitude, rt.longitude, rt.speed,
-				       rt.fuel_pct, rt.odometer, rt.engine_hours, rt.geocoded_location,
-				       rt.location_date_ms
-				FROM routemate_telemetry rt
-				INNER JOIN (
-					SELECT routemate_vehicle_id, MAX(id) AS max_id
-					FROM routemate_telemetry
-					WHERE routemate_vehicle_id IN (${placeholders})
-					  AND dropped_reason = ''
-					GROUP BY routemate_vehicle_id
-				) latest ON rt.id = latest.max_id
-			`).all(...linkedIds);
-			for (const r of latestRows) latestByVehicle[r.routemate_vehicle_id] = r;
-
 			const MOVING_MPH_M_PER_S = 2.235; // ~5 mph
 			const movingRows = db.prepare(`
 				SELECT routemate_vehicle_id, MAX(location_date_ms) AS last_moving_ms
