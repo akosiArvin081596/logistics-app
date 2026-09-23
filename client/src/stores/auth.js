@@ -48,12 +48,15 @@ function readKey(kind, key) {
     return null
   }
 }
+// false when the storage call threw. A full store (quota) refuses setItem but
+// never removeItem, which is what _applyAuthenticated relies on.
 function writeKey(kind, key, value) {
   try {
     if (value == null) storageFor(kind)?.removeItem(key)
     else storageFor(kind)?.setItem(key, value)
+    return true
   } catch {
-    /* quota or disabled: see above */
+    return false
   }
 }
 function removeKey(kind, key) {
@@ -234,7 +237,12 @@ export const useAuthStore = defineStore('auth', {
       this.user = user
       this.isAuthenticated = true
       this._stopReconnect()
-      if (persist) writeKey('session', HINT_KEY, serializeSessionHint(user, Date.now()))
+      // A save that fails must not leave the PREVIOUS user saved. Otherwise a reload
+      // restores them, the background check answers with this user again, the page
+      // reloads again, and so on for as long as the store stays full.
+      if (persist && !writeKey('session', HINT_KEY, serializeSessionHint(user, Date.now()))) {
+        removeKey('session', HINT_KEY)
+      }
     },
 
     // Reached only on a DEFINITIVE answer (lib/sessionCheck.js, rule 1), or when

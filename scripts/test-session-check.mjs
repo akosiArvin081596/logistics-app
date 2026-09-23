@@ -32,14 +32,16 @@
 //   M10 the guard not re-run when only the role changed
 //   M11 a different person on screen patched in place instead of reloaded
 //   M12 a hint from before another tab's login/logout still trusted
+//   M13 identity by username instead of the user id (names can be edited)
 // The tripwire rejects the verbatim pre-fix checkSession() and a catch that signs
 // out through _applySignedOut() (T1), a logout() that writes its pending marker
 // only after the request (T3), and the old local edit in ChangePasswordView (T5).
 //
 // Sections 1–3 prove the RULES. Section 4 proves the STORE follows them: it imports
 // the committed stores/auth.js with the real Pinia and useApi and drives it through
-// page loads, and its own mutants (SM1, SM2 are the two review mutations that sections
-// 1–3 alone let through) must each fail a scenario.
+// page loads, and its own mutants must each fail a scenario. SM1/SM2 (first review)
+// and SM6/SM7 (second review) are mutations that got through an earlier version of
+// this file.
 //
 // No network, no DOM. Section 4 loads Pinia/Vue from client/node_modules, which
 // `npm ci` at the repo root installs (postinstall) and CI installs before this runs.
@@ -299,9 +301,25 @@ function suiteGuardInputs(impl, eq) {
   eq('reroute: a role-less object counts as nobody', g(null, { id: 7 }), false)
 }
 
+// Identity is the user id, the one field nobody edits: PUT /api/users/:id renames
+// drivers across tables (DRIVER_RENAME_TARGETS in server.js). Called directly, not
+// only through pageEffect(), so a mutant of this function alone is caught too.
+function suiteIdentity(impl, eq) {
+  const d = (a, b) => impl.isDifferentUser(a, b)
+  eq('identity: same id, same names → the same person', d(DRIVER_HINT, DRIVER), false)
+  eq('identity: same id, NEW username → still the same person', d(DRIVER_HINT, { ...DRIVER, username: 'dwayne.jones' }), false)
+  eq('identity: same id, renamed driver → still the same person', d(DRIVER_HINT, { ...DRIVER, driverName: 'Dwayne A. Jones' }), false)
+  eq('identity: a DIFFERENT id under the same username → a different person', d(DRIVER_HINT, { ...DRIVER, id: 70 }), true)
+  eq('identity: a different id and username → a different person', d(DRIVER_HINT, OTHER), true)
+  eq('identity: nobody shown (the login page) is never "different"', d(null, DRIVER), false)
+  eq('identity: signed out is not "different" (that is a reroute)', d(DRIVER_HINT, null), false)
+}
+
 function suitePageEffect(impl, eq) {
   const e = (a, b) => impl.pageEffect(a, b)
   eq('page: same person, nothing changed → nothing', e(DRIVER_HINT, DRIVER), 'none')
+  eq('page: same id under a new username → nothing, NOT a reload', e(DRIVER_HINT, { ...DRIVER, username: 'dwayne.jones' }), 'none')
+  eq('page: a different id under the same username → full reload', e(DRIVER_HINT, { ...DRIVER, id: 70 }), 'reload')
   eq('page: same person, new role → re-run the guard', e(DRIVER_HINT, { ...DRIVER, role: 'Dispatcher' }), 'reroute')
   eq('page: signed out → re-run the guard (to /login), not a reload', e(DRIVER_HINT, null), 'reroute')
   eq('page: nobody shown (login page), now signed in → re-run the guard, not a reload', e(null, DRIVER), 'reroute')
@@ -319,6 +337,7 @@ const SUITES = [
   suiteEpoch,
   suitePendingLogout,
   suiteGuardInputs,
+  suiteIdentity,
   suitePageEffect,
 ]
 
@@ -431,6 +450,9 @@ const MUTANTS = [
   }],
   ['M12 a hint from before another tab\'s login/logout still trusted', {
     parseSessionHint: (raw, now, opts = {}) => real.parseSessionHint(raw, now, { ...opts, notBeforeMs: 0 }),
+  }],
+  ['M13 identity by username instead of the user id', {
+    isDifferentUser: (a, b) => real.isSessionUser(a) && real.isSessionUser(b) && a.username !== b.username,
   }],
 ]
 
@@ -599,11 +621,13 @@ const EPOCH_KEY = 'logisx.session.epoch.v1'
 class MemStorage {
   constructor() {
     this.m = new Map()
+    this.full = false // a browser store at its quota: setItem throws, removeItem still works
   }
   getItem(k) {
     return this.m.has(k) ? this.m.get(k) : null
   }
   setItem(k, v) {
+    if (this.full) throw Object.assign(new Error('The quota has been exceeded.'), { name: 'QuotaExceededError' })
     this.m.set(k, String(v))
   }
   removeItem(k) {
@@ -770,6 +794,12 @@ function makeCtx(source, expect) {
     expect,
     load: (tabName) => pageLoad(source, tabName),
     answer: (...answers) => world.server.push(...answers),
+    dropAnswers: () => {
+      world.server = []
+    },
+    fillStorage: (tabName) => {
+      tabStorage(tabName).full = true
+    },
     sent: () => {
       const s = world.sent
       world.sent = []
@@ -977,6 +1007,14 @@ const STORE_SCENARIOS = [
     await c.advance(2000)
     c.expect("the background check saves the server's answer", c.saved('A')?.mustChangePassword === false && !p.store.isReconnecting)
   }],
+  ['…and when re-reading the user after the change says the session is gone', async (c) => {
+    const p = await signedIn(c, 'A', { ...DRIVER, mustChangePassword: true })
+    c.answer(json(SIGNED_OUT))
+    await c.settle(p.store.afterPasswordChange())
+    c.expect('authenticated:false signs them out: no user, not signed in', !p.store.isAuthenticated && p.store.user === null)
+    c.expect('…with no background check left running', !p.store.isReconnecting)
+    c.expect('…the saved user gone and the epoch stamped', c.saved('A') === null && c.local(EPOCH_KEY) !== null)
+  }],
   // Review finding 3: the saved user versus other tabs and the cookie's owner.
   ['another tab logs out: this tab never restores that user', async (c) => {
     await signedIn(c, 'A')
@@ -1016,6 +1054,26 @@ const STORE_SCENARIOS = [
     await c.advance(2000)
     c.expect('a full reload, not an in-place patch', c.reloads() === 1 && p.rerouted() === 0)
     c.expect("the reload starts from the server's user", c.saved('A')?.id === OTHER.id)
+  }],
+  // Second review: when saving the new user fails, the old one must not stay saved,
+  // or every reload restores them and the background answer reloads the page again.
+  ['a full sessionStorage cannot turn a new user into a reload loop', async (c) => {
+    await signedIn(c, 'A')
+    await c.advance(60_000)
+    c.fillStorage('A')
+    let p = null
+    for (let cycle = 0; cycle < 5; cycle++) {
+      const before = c.reloads()
+      c.answer(HANG, HANG, HANG) // the first check keeps timing out at 6 s…
+      p = await c.load('A')
+      await c.settle(p.store.checkSession())
+      c.dropAnswers()
+      c.answer(json({ authenticated: true, user: OTHER })) // …and the background one answers
+      await c.advance(2000)
+      if (c.reloads() === before) break // no reload this time: the page has settled
+    }
+    c.expect('at most one reload, not one per cycle', c.reloads() <= 1)
+    c.expect("…and the tab settles on the server's user", p.store.isAuthenticated && p.store.user?.id === OTHER.id)
   }],
 ]
 
@@ -1072,6 +1130,14 @@ const STORE_MUTANTS = [
     (s) => replaceOnce(s, /if \(effect === EFFECT\.RELOAD\) reloadPage\(\)/, 'if (effect === EFFECT.RELOAD) notifyResolved()')],
   ['SM5 afterPasswordChange() back to the old local edit',
     (s) => replaceMethodBody(s, 'afterPasswordChange', '\n      if (this.user) this.user = { ...this.user, mustChangePassword: false }\n    ')],
+  ['SM6 (second review) a failed save leaves the previous user saved',
+    (s) => replaceOnce(
+      s,
+      /if \(persist && !writeKey\('session', HINT_KEY, serializeSessionHint\(user, Date\.now\(\)\)\)\) \{\s*removeKey\('session', HINT_KEY\)\s*\}/,
+      "if (persist) writeKey('session', HINT_KEY, serializeSessionHint(user, Date.now()))",
+    )],
+  ['SM7 (second review) afterPasswordChange() ignores an authenticated:false answer',
+    (s) => replaceOnce(s, /if \(outcome === OUTCOME\.SIGNED_OUT\) \{\s*this\._applySignedOut\(\)\s*return\s*\}/, '')],
 ]
 
 try {

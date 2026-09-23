@@ -192,8 +192,11 @@ export function guardInputsChanged(prev, next) {
   return !samePerson(a, b) || a.role !== b.role || !!a.mustChangePassword !== !!b.mustChangePassword
 }
 
-// One notion of identity for both decisions: the server's user id (a number, or a
-// string if a stored copy ever held one), else the username.
+// One notion of identity for both decisions: the server's user id, the one field
+// nobody edits. Names are not identity: PUT /api/users/:id rewrites a driver's name
+// across tables (DRIVER_RENAME_TARGETS), so the same id under a new name is the same
+// person, and a different id under the same name is not. The username comparison
+// only covers a user with no id at all, i.e. the fallback setup() builds itself.
 function samePerson(a, b) {
   if (a.id != null && b.id != null) return String(a.id) === String(b.id)
   return a.username === b.username
