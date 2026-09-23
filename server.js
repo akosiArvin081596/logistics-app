@@ -10852,8 +10852,13 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			}
 			const tempPassword = crypto.randomBytes(4).toString("hex");
 			const hash = await bcrypt.hash(tempPassword, 10);
+			// must_change_password = 1, set exactly as the driver acceptance sets it
+			// (PUT /api/applications/:id/status). The temporary password is emailed
+			// in plaintext below, so until it is changed the account can do nothing
+			// else: requireAuth / requireRole refuse it (FORCED PASSWORD CHANGE) and
+			// the client router sends every role to /account/change-password.
 			const userResult = db.prepare(
-				"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name) VALUES (?, ?, 'Investor', '', ?, ?, ?)"
+				"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name, must_change_password) VALUES (?, ?, 'Investor', '', ?, ?, ?, 1)"
 			).run(username, hash, application.email || "", fullName, application.dba || fullName);
 			const userId = userResult.lastInsertRowid;
 
