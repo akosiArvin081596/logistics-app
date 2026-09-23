@@ -34,11 +34,19 @@
 //   L1 a listener added with on() is attached to every socket opened later (a
 //      reconnected socket must not join its rooms and deliver to nobody), once,
 //      until off() removes it
+//   L2 logout drops every listener, one a page registered too late to remove
+//      included, so nothing reaches the next person to sign in on the tab
+//   R7 resume() (a password change answered 2xx on a page that stays mounted)
+//      reopens at once with the name re-registered, even after a stale check
+//      stopped the ladder, restores the budget, and never opens a second socket
 //   A1 auth.login(): a successful POST ends the socket, resets the state and
 //      cancels a pending reconnect; a refused sign-in leaves the socket alone
 //   A2 auth.setup(): the same
 //   A3 auth.logout(): the socket ends whether or not the request gets through
-//   T  every logout button reaches auth.logout(), the one caller of the route
+//   T  every logout button reaches auth.logout(), the one caller of the route;
+//      no page subscribes after an await unless guarded by isMounted (scanned
+//      over all of client/src, and shown to catch the shapes it exists for);
+//      the driver's password modal calls resume() after a 2xx
 // Then MUTANTS of both files, each of which must flip the property it names.
 //
 // Loads useSocket.js with socket.io-client replaced by a scripted fake, and
@@ -475,6 +483,55 @@ const SCENARIOS = {
     p.offStopsLaterSockets = !!third && got.join() === 'a,b' && (third.handlers.get('location-update') || []).length === 0
   },
 
+  async l2(src, p) {
+    const { useSocket, created, store } = await freshWorld({ ...src, withStore: true })
+    const s = useSocket()
+    const heard = []
+    const { sock } = liveTab(useSocket, created)
+    // A page's late registration: its off() already ran, so nothing removes it.
+    s.on('status-updated', (x) => heard.push(x))
+    answers.push({ status: 200, json: { success: true } })
+    await store.logout()
+    answers.push({ status: 200, json: { success: true, user: USER } })
+    await store.login('bob', 'Bob-Pass-2!')
+    s.connect() // the next person's first page
+    const next = created[created.length - 1]
+    if (next && next !== sock) {
+      next.serverConnect()
+      next.fire('status-updated', 'for-the-next-person')
+    }
+    p.logoutDropsEveryListener = !!next && next !== sock && heard.length === 0 && (next.handlers.get('status-updated') || []).length === 0
+  },
+
+  async r7(src, p) {
+    {
+      // The change closed the socket, and the first check went out before the
+      // browser stored the new cookie: "signed out", and the ladder stopped.
+      const { useSocket, created } = await freshWorld(src)
+      const { s, sock } = liveTab(useSocket, created, 'bob driver')
+      answers.push(SIGNED_OUT())
+      sock.serverDisconnect('io server disconnect')
+      await advance(120000)
+      const stopped = sessionChecks() === 1 && created.length === 1
+      s.resume() // the change's 2xx: this session is good
+      const next = created[1]
+      if (next) next.serverConnect()
+      p.resumeReopensAfterAStaleCheck = stopped && created.length === 2 && !!next && next.registered().join() === 'bob driver' && s.isConnected.value === true
+      // ...with the whole budget back: a later close is checked after the FIRST delay.
+      answers.push(SIGNED_IN())
+      if (next) next.serverDisconnect('io server disconnect')
+      await advance(1000)
+      p.resumeRestoresTheBudget = !!next && sessionChecks() === 2 && created.length === 3
+    }
+    {
+      // The 2xx arrives while the socket is still open: nothing opens twice.
+      const { useSocket, created } = await freshWorld(src)
+      const { s } = liveTab(useSocket, created, 'bob driver')
+      s.resume()
+      p.resumeKeepsAnOpenSocket = created.length === 1
+    }
+  },
+
   async a1(src, p) {
     const { useSocket, created, store } = await freshWorld({ ...src, withStore: true })
     const { s, sock } = liveTab(useSocket, created)
@@ -561,6 +618,10 @@ const PROPS = {
   pageConnectPreemptsReconnect: 'R6 a page that connects while a reconnect waits must pre-empt it (no second socket, no check)',
   listenersFollowTheReconnect: 'L1 a listener added with on() (even before any socket) must hear every socket opened later, the reconnect included, once each',
   offStopsLaterSockets: 'L1 ...and off() must keep it off every socket opened afterwards',
+  logoutDropsEveryListener: 'L2 logout must drop every listener, a late registration a page never removed included: none may reach the next person to sign in',
+  resumeReopensAfterAStaleCheck: 'R7 resume() after a password change must reopen at once, re-registering the name, even when a stale check had stopped the ladder',
+  resumeRestoresTheBudget: 'R7 ...with the whole reconnect budget back',
+  resumeKeepsAnOpenSocket: 'R7 ...and never open a second socket while one is still open',
   refusedLoginKeepsSocket: 'A1 a refused sign-in changed no session, so the socket must stay',
   loginEndsSocket: 'A1 a successful sign-in must reset the socket state',
   loginCancelsPendingReconnect: 'A1 ...and cancel the reconnect its own server-side close would otherwise start',
@@ -594,6 +655,44 @@ function walk(dir) {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
     e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)])
 }
+// The text inside the block whose `{` is at openIdx.
+function blockFrom(src, openIdx) {
+  let depth = 0
+  for (let i = openIdx; i < src.length; i++) {
+    if (src[i] === '{') depth++
+    else if (src[i] === '}' && --depth === 0) return src.slice(openIdx + 1, i)
+  }
+  return src.slice(openIdx + 1)
+}
+// Socket subscriptions made after an await inside an async onMounted or an
+// async function: registered after the page may already have unmounted. One
+// inside an `if (… isMounted …)` block is the guarded, allowed form.
+function lateSubscriptions(src) {
+  const code = stripComments(src)
+  const hits = []
+  const heads = /onMounted\(\s*async\s*\([^)]*\)\s*=>\s*\{|async\s+function\s+[\w$]+\s*\([^)]*\)\s*\{/g
+  let m
+  while ((m = heads.exec(code))) {
+    const body = blockFrom(code, m.index + m[0].length - 1)
+    const firstAwait = body.search(/\bawait\b/)
+    if (firstAwait < 0) continue
+    const tail = body.slice(firstAwait)
+    const subscribe = /\bsocket\.on\(/g
+    let s
+    while ((s = subscribe.exec(tail))) {
+      const guarded = /if\s*\([^)]*\bisMounted\b[^)]*\)\s*\{[^}]*$/.test(tail.slice(0, s.index))
+      if (!guarded) hits.push(tail.slice(s.index, s.index + 48).replace(/\s+/g, ' '))
+    }
+  }
+  return hits
+}
+function modalResumesAfterChange(src) {
+  const code = stripComments(src)
+  const post = code.indexOf("await api.post('/api/auth/change-password'")
+  const resume = post >= 0 ? code.indexOf('useSocket().resume()', post) : -1
+  const caught = post >= 0 ? code.indexOf('} catch', post) : -1
+  return post >= 0 && resume > post && resume < caught
+}
 {
   for (const rel of ['components/layout/AppSidebar.vue', 'views/ChangePasswordView.vue', 'views/DriverView.vue']) {
     ok(/\bauth\.logout\(\)/.test(stripComments(read(rel))), `T ${rel} must log out through auth.logout(), which ends the socket`)
@@ -607,6 +706,28 @@ function walk(dir) {
   const code = stripComments(USE_SOCKET_SRC)
   ok(/const RECONNECT_DELAYS_MS = \[1000, 3000, 10000\]/.test(code), 'T the reconnect backoff is 1 s, 3 s, 10 s, then stop')
   ok(/\bclassifySessionAttempt\(/.test(code), "T the reconnect decision reuses lib/sessionCheck.js's rules, never a second copy of them")
+
+  // No page subscribes after an await: a page left mid-load has already run
+  // its onUnmounted off(), so a late on() is never removed. Checked over every
+  // file in client/src, and shown to catch the shapes it exists for.
+  const every = walk(SRC_DIR).filter((f) => /\.(js|vue)$/.test(f))
+  const late = every.flatMap((f) => lateSubscriptions(fs.readFileSync(f, 'utf8')).map((hit) => `${path.relative(SRC_DIR, f)}: ${hit}`))
+  ok(late.length === 0, `T no socket subscription may follow an await in a page's async code, unless guarded by isMounted (found: ${late.join(' | ')})`)
+  const dataManager = read('views/DataManagerView.vue')
+  const SUBS = "  socket.connect()\n  socket.register('dispatch')\n  socket.on('status-updated', onStatusUpdated)\n  socket.on('load-assigned', onLoadAssigned)\n  socket.on('pod-uploaded', onPodUploaded)\n"
+  const lateAgain = dataManager.includes(SUBS) ? dataManager.replace(SUBS, '').replace("    toast('Failed to load data', 'error')\n  }\n", `    toast('Failed to load data', 'error')\n  }\n${SUBS}`) : null
+  ok(!!lateAgain && lateAgain !== dataManager && lateSubscriptions(lateAgain).length > 0,
+    'T (tripwire check) the scan must catch DataManagerView subscribing after its awaits again')
+  const driverView = read('views/DriverView.vue')
+  const unguarded = driverView.replace('if (!socketSetupDone && isMounted) {', 'if (!socketSetupDone) {')
+  ok(unguarded !== driverView && lateSubscriptions(unguarded).length > 0,
+    "T (tripwire check) the scan must catch DriverView's post-load subscriptions losing their isMounted guard")
+
+  // The driver app's password modal brings the socket back itself: the app
+  // stays mounted, so no page would.
+  const modal = read('components/driver/ChangePasswordModal.vue')
+  ok(modalResumesAfterChange(modal), 'T ChangePasswordModal must call useSocket().resume() once change-password answers 2xx')
+  ok(!modalResumesAfterChange(modal.replace(/\n\s*useSocket\(\)\.resume\(\)/, '')), 'T (tripwire check) ...and a modal without the call must be caught')
 }
 
 // ── mutants ──────────────────────────────────────────────────────────────────
@@ -669,6 +790,23 @@ const MUTANTS = [
     ['listenersFollowTheReconnect']],
   ['off() leaves the listener for later sockets', { socketSrc: swap('    if (i >= 0) listeners.splice(i, 1)\n', '') },
     ['offStopsLaterSockets']],
+  ['disconnect() keeps the listeners (a page left behind reaches the next person)', {
+    socketSrc: (s) => editBlock(s, 'function disconnect() {', (b) => b.replace('\n    listeners.length = 0', '')),
+  }, ['logoutDropsEveryListener']],
+  ['resume() does not reopen', {
+    socketSrc: (s) => editBlock(s, 'function resume() {', (b) => b.replace("\n    if (!socket) openSocket() // registers on 'connect'", '')),
+  }, ['resumeReopensAfterAStaleCheck']],
+  ['resume() does not restore the name a stale check dropped', {
+    socketSrc: (s) => editBlock(s, 'function resume() {', (b) => b.replace('\n    if (!registeredName) registeredName = lastRegisteredName', '')),
+  }, ['resumeReopensAfterAStaleCheck']],
+  ['register() does not remember the name for resume()', {
+    socketSrc: (s) => editBlock(s, 'function register(name) {', (b) => b.replace('\n    lastRegisteredName = name', '')),
+  }, ['resumeReopensAfterAStaleCheck']],
+  ['resume() keeps the spent budget', { socketSrc: (s) => editBlock(s, 'function resume() {', (b) => b.replace('\n    reconnectAttempt = 0', '')) },
+    ['resumeRestoresTheBudget']],
+  ['resume() opens a second socket beside an open one', {
+    socketSrc: swap("    if (!socket) openSocket() // registers on 'connect'", "    openSocket() // registers on 'connect'"),
+  }, ['resumeKeepsAnOpenSocket']],
   ['login() does not end the socket', { authSrc: (s) => editBlock(s, 'async login(username, password) {', (b) => b.replace(DISCONNECT_LINE, '')) },
     ['loginCancelsPendingReconnect', 'loginClosesAnOpenSocket']],
   ['login() ends the socket before the POST, so a refused sign-in drops it', {

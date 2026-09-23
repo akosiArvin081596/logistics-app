@@ -1121,7 +1121,10 @@ async function attemptInitialLoad() {
     toast.show('Failed to load data', 'error')
     return
   }
-  if (!socketSetupDone) {
+  // Only while still mounted: this runs after an await, and a view left during
+  // loadData() has already run onUnmounted's off(), so these would never be
+  // removed.
+  if (!socketSetupDone && isMounted) {
     socket.on('new-message', onNewMessage)
     socket.on('load-assigned', onLoadAssigned)
     socket.on('load-cancelled', onLoadCancelled)

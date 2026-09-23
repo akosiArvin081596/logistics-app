@@ -9,11 +9,18 @@ import { OUTCOME, classifySessionAttempt } from '../lib/sessionCheck.js'
 // connect(). scripts/test-socket-session-client.mjs drives this module.
 let socket = null
 let registeredName = null
+// The last name a page registered. A session check can answer "signed out"
+// just before a password change's new cookie lands, and that drops
+// registeredName; resume() restores it from here. Only disconnect() forgets it.
+let lastRegisteredName = null
 // Every listener a component has added with on() and not yet removed with
 // off(), in order. A socket opened by a reconnect is a new object: the pages
 // still mounted added theirs to the old one, so each is attached to every
 // socket opened here. Otherwise the new socket would join its rooms and
-// deliver to nobody. Components pair on() with off() on unmount.
+// deliver to nobody. Components pair on() with off() on unmount, and must
+// subscribe before their first await (an on() landing after the page's
+// off() would never be removed); disconnect() empties the list regardless, so
+// nothing a page left behind reaches whoever signs in next.
 const listeners = []
 
 const isConnected = ref(false)
@@ -110,7 +117,19 @@ export function useSocket() {
 
   function register(name) {
     registeredName = name
+    lastRegisteredName = name
     socket?.emit('register', name)
+  }
+
+  // This tab's session was just renewed (a password change answered 2xx), so
+  // come back now instead of depending on the timed checks: one that went out
+  // before the browser stored the new cookie can have answered "signed out" and
+  // stopped them. For a page that stays mounted, since nothing else would call
+  // connect() for it.
+  function resume() {
+    reconnectAttempt = 0
+    if (!registeredName) registeredName = lastRegisteredName
+    if (!socket) openSocket() // registers on 'connect'
   }
 
   function emit(event, data) {
@@ -131,12 +150,16 @@ export function useSocket() {
 
   // Ends this socket's life: logout, a new sign-in, or a view leaving. The room
   // name goes with it, or the next connect() would register it again for
-  // whoever signs in next, and so does any pending reconnect. Cleared before
-  // the socket is closed, so its own disconnect event finds it already replaced.
+  // whoever signs in next; so do the listeners (the pages that added them are
+  // leaving: the router unmounts the old page before mounting the next) and any
+  // pending reconnect. Cleared before the socket is closed, so its own
+  // disconnect event finds it already replaced.
   function disconnect() {
     const s = socket
     socket = null
     registeredName = null
+    lastRegisteredName = null
+    listeners.length = 0
     isConnected.value = false
     hasEverConnected.value = false
     lifeGen++
@@ -148,5 +171,5 @@ export function useSocket() {
     s?.disconnect()
   }
 
-  return { isConnected, hasEverConnected, connect, register, emit, on, off, disconnect }
+  return { isConnected, hasEverConnected, connect, register, resume, emit, on, off, disconnect }
 }
