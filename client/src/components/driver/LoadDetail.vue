@@ -268,7 +268,7 @@
 </template>
 
 <script setup>
-import { computed, ref, watchEffect } from 'vue'
+import { computed, ref, watchEffect, onMounted, onBeforeUnmount } from 'vue'
 import { Collapse as VanCollapse, CollapseItem as VanCollapseItem, Cell as VanCell, Button as VanButton, Empty as VanEmpty } from 'vant'
 import { splitAddress, formatLoadRoute } from '../../lib/address.js'
 import { isActiveLoadStatus, liveExpenseWindow, expenseWindowCopy } from '../../lib/expenseWindow.js'
@@ -475,11 +475,29 @@ const showAcceptedBadge = computed(() => isDispatched.value && props.load._accep
 // so the stepper and the form can never disagree about what "active" means.
 const isActiveLoad = computed(() => isActiveLoadStatus(status.value))
 
+// The phone's clock, re-read once a minute while this page is open and again the
+// moment the app returns to the foreground. Without it the window below was
+// re-checked only when the load data changed, so a page left open past the
+// closing time kept saying "Open until …" (the server refuses the submit
+// either way).
+const nowTick = ref(Date.now())
+let nowTimer = null
+function refreshNow() { nowTick.value = Date.now() }
+function onVisibility() { if (document.visibilityState === 'visible') refreshNow() }
+onMounted(() => {
+  nowTimer = setInterval(refreshNow, 60 * 1000)
+  document.addEventListener('visibilitychange', onVisibility)
+})
+onBeforeUnmount(() => {
+  clearInterval(nowTimer)
+  document.removeEventListener('visibilitychange', onVisibility)
+})
+
 // May the driver add a receipt here? The SERVER's verdict for this load
 // (`_expenseWindow`, from GET /api/driver/:driverName — active, or delivered
-// within the last 7 days), re-checked against this phone's clock. Never
+// within the last 7 days), re-checked against this phone's clock (nowTick). Never
 // re-derived from the status here; POST /api/expenses enforces the same verdict.
-const expenseWin = computed(() => liveExpenseWindow(props.load && props.load._expenseWindow, { status: status.value }))
+const expenseWin = computed(() => liveExpenseWindow(props.load && props.load._expenseWindow, { status: status.value, now: nowTick.value }))
 const expenseCopy = computed(() => expenseWindowCopy(expenseWin.value))
 
 // Once the form has been on screen for THIS load it stays for as long as the

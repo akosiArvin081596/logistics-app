@@ -32221,9 +32221,11 @@ function withExpenseWindows(rows, headers, now = Date.now()) {
 			deliveredAt: expenseWindowRule.deliveredAtFromHistory(history.get(keyOf(row)) || []),
 			now,
 		}));
-		// One answer per load id — the gate's: it judges an id across ALL of the
-		// driver's rows (bestExpenseWindow), so two rows of one id must not show
-		// different answers, or one of them would offer a form the gate refuses.
+		// One answer per load id, ranked exactly as the gate ranks it. Defensive:
+		// these rows come from getJobTrackingCached(), which deduplicateLoads() has
+		// already cut to one row per id (the bottom one), so today every id arrives
+		// once. Kept so that, if that ever changes, no two rows of one id could show
+		// different answers — one offering a form the gate refuses.
 		const byId = new Map();
 		rows.forEach((row, i) => {
 			const k = keyOf(row);
@@ -32236,6 +32238,25 @@ function withExpenseWindows(rows, headers, now = Date.now()) {
 	}
 }
 
+// A Driver's receipt must name its load — 400 LOAD_REQUIRED otherwise. With no
+// loadId, POST /api/expenses skipped both the ownership check and the receipt
+// window, and still stamped the expense with the driver's truck and owner, so it
+// reached an investor's P&L attached to no load. The driver app never sends one
+// without a load (its form requires it). Judged on normalizeLoadId(): "#" or a
+// blank string is no load either — and must not reach the ownership check, where
+// a sheet row with a blank Load ID naming the driver would make "#" look owned.
+// Driver role only; Super Admin and Dispatcher are unchanged. Returns true when
+// it has answered.
+function sentIfDriverExpenseLoadMissing(req, res, loadId) {
+	if (req.session?.user?.role !== "Driver") return false;
+	if (normalizeLoadId(loadId)) return false;
+	res.status(400).json({
+		error: "Choose the load this receipt is for, then submit again.",
+		code: "LOAD_REQUIRED",
+	});
+	return true;
+}
+
 // ⚠️ THE GATE. Until this, POST /api/expenses checked OWNERSHIP only — any load
 // naming the driver, in any status, at any age — and the driver app's
 // active-only form was the whole rule. Now a Driver's receipt is refused unless
@@ -32246,21 +32267,27 @@ function withExpenseWindows(rows, headers, now = Date.now()) {
 //     that is the "ask dispatch" every refusal points to.
 //   • Runs AFTER the ownership check (which it does not replace) and BEFORE the
 //     duplicate checks and every write, so a refusal leaves no receipt file.
-//   • Judged on THIS DRIVER'S rows for the id. A load id can sit on two rows, and
-//     a live row beside a cancelled copy must still take receipts; a row naming
-//     another driver never opens the window.
+//   • Judged on the row naming THIS driver for the id — and in practice there is
+//     exactly one, because getJobTrackingCached() has already collapsed every
+//     duplicated id to its BOTTOM row (deduplicateLoads()). So a live row ABOVE a
+//     cancelled "#id" copy is never seen here: the load reads as cancelled and is
+//     refused, consistently with the driver app, which does not list it at all.
+//     The loop still takes a list (and bestExpenseWindow() still ranks one) so
+//     the gate and withExpenseWindows() stay identical should that ever change; a
+//     row naming another driver never opens the window.
 //   • load_status_history is read ONLY when one of those rows is completed, so a
 //     receipt on an active load never depends on that read.
 //   • A failed read REFUSES with a retryable 503, never a 403: the driver did
 //     nothing wrong and the same request succeeds once the read does. It never
 //     admits.
-//   • No loadId → untouched here, as before: the ownership check skips that case
-//     too, and the app never sends one.
+//   • No usable load id → 400 LOAD_REQUIRED. The route refuses that before the
+//     ownership check (sentIfDriverExpenseLoadMissing()); answering it here too
+//     keeps this gate from ever admitting an unattached receipt on its own.
 // Returns true when it has answered.
 async function sentIfDriverExpenseWindowClosed(req, res, loadId, driverName) {
 	if (req.session?.user?.role !== "Driver") return false;
 	const targetLid = normalizeLoadId(loadId);
-	if (!targetLid) return false;
+	if (!targetLid) return sentIfDriverExpenseLoadMissing(req, res, loadId);
 	const unverified = (what, err) => {
 		// The id is caller-supplied: capped and JSON-quoted so it cannot forge a line.
 		console.warn(`[expense-window] could not check load ${JSON.stringify(targetLid.slice(0, 40))}: ${what}${err && err.message ? ` — ${err.message}` : ""}`);
@@ -32390,6 +32417,10 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 			const det = normalizeVendorDetailed(safeDescription);
 			if (det.aliasHit) vendorNormalized = det.normalized;
 		}
+
+		// A Driver's receipt must name its load (400 LOAD_REQUIRED) — without one,
+		// both checks below stood aside. See sentIfDriverExpenseLoadMissing().
+		if (sentIfDriverExpenseLoadMissing(req, res, safeLoadId)) return;
 
 		// SECURITY: drivers can only file expenses against loads assigned to
 		// them. Without this check a driver could pollute another driver's

@@ -176,7 +176,7 @@ globalThis.document ??= { addEventListener() {}, removeEventListener() {}, visib
 
 // Compile `rel` (optionally from a rewritten source) into a setup(props) runner.
 // One-line named and default imports only; anything else stops the run loudly.
-async function compileSetup(rel, { source, stubs = {} } = {}) {
+async function compileSetup(rel, { source, stubs = {}, hooks = {} } = {}) {
   const file = path.join(ROOT, rel)
   const dir = path.dirname(file)
   const { descriptor } = parse(source ?? read(rel), { filename: path.basename(file) })
@@ -195,7 +195,8 @@ async function compileSetup(rel, { source, stubs = {} } = {}) {
   if (/^\s*(import|export)\s/m.test(body)) throw new Error(`${rel}: an import/export this harness cannot map`)
   const build = new Function('__deps', body)
   const deps = {
-    vue: { ...Vue, onMounted() {}, onBeforeUnmount() {}, onUnmounted() {} },
+    // Lifecycle hooks are no-ops unless a section passes its own (to run them).
+    vue: { ...Vue, onMounted() {}, onBeforeUnmount() {}, onUnmounted() {}, ...hooks },
     vant: new Proxy({}, { get: () => ({}) }),
   }
   for (const spec of specs) {
@@ -304,8 +305,8 @@ async function compileSetup(rel, { source, stubs = {} } = {}) {
   }
   // M2 — the page gated on the status again (the bug this change fixes).
   {
-    const mutant = tpl.replace('const expenseWin = computed(() => liveExpenseWindow(props.load && props.load._expenseWindow, { status: status.value }))',
-      'const expenseWin = computed(() => liveExpenseWindow(null, { status: status.value }))')
+    const mutant = tpl.replace('liveExpenseWindow(props.load && props.load._expenseWindow, { status: status.value, now: nowTick.value })',
+      'liveExpenseWindow(null, { status: status.value, now: nowTick.value })')
     check('M2 (mutant source differs)', mutant !== tpl, true)
     const mountMutant = await compileSetup(REL, { source: mutant })
     const mm = mountMutant(props(load('564157463', 'Delivered', live.open))); await settle()
@@ -440,6 +441,84 @@ async function compileSetup(rel, { source, stubs = {} } = {}) {
   h = await expensesHtml(load('564157463', 'Delivered'))
   check('R6 no verdict on a delivered load: the old page exactly — "No expenses", no note, no hint, no form',
     [h.includes(EMPTY), h.includes('expense-window-'), h.includes('data-stub="ExpenseForm"')], [true, false, false])
+}
+
+// ══ 9 — LoadDetail.vue: the window closes on the phone's clock by itself ══════
+// The verdict used to be re-checked only when the load data changed, so a page
+// left open past the closing time kept saying "Open until …" until something
+// refetched. The page now re-reads its clock every minute while mounted, and
+// on returning to the foreground. Driven here on a fake clock, a captured
+// setInterval and a fake document, with LoadDetail's own onMounted /
+// onBeforeUnmount run as a mount would.
+{
+  const REL = 'client/src/components/driver/LoadDetail.vue'
+  const real = { now: Date.now, setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval, document: globalThis.document }
+  let clock = Date.parse('2026-09-23T15:00:00Z')
+  const timers = []
+  const listeners = {}
+  const live = () => timers.filter((t) => !t.cleared)
+  const detailProps = (l) => Vue.shallowReactive({
+    load: l, headers: HEADERS, driverName: 'Deshorn King', hasActiveJob: false, driverPosition: null, truck: null,
+    loadExpenses: [], responding: false, expenseSubmitHandler: null, phoneGpsModeActive: false, phoneGpsStatus: '',
+  })
+  // Delivered so that its window closes 30 s after "now".
+  const closingSoon = () => load('564157463', 'Delivered', verdictAt('Delivered', clock + 30e3 - 7 * DAY, clock))
+  async function mountTimed(source) {
+    const mounted = []
+    const leaving = []
+    const setup = await compileSetup(REL, { source, hooks: { onMounted: (fn) => mounted.push(fn), onBeforeUnmount: (fn) => leaving.push(fn) } })
+    const m = setup(detailProps(closingSoon()))
+    mounted.forEach((fn) => fn())
+    await settle()
+    return { ...m, leave: () => { leaving.forEach((fn) => fn()); m.stop() } }
+  }
+  try {
+    Date.now = () => clock
+    globalThis.setInterval = (fn, ms) => { const t = { fn, ms, id: timers.length + 1, cleared: false }; timers.push(t); return t.id }
+    globalThis.clearInterval = (id) => { const t = timers.find((x) => x.id === id); if (t) t.cleared = true }
+    globalThis.document = {
+      visibilityState: 'visible',
+      addEventListener: (ev, fn) => { (listeners[ev] ||= []).push(fn) },
+      removeEventListener: (ev, fn) => { listeners[ev] = (listeners[ev] || []).filter((f) => f !== fn) },
+    }
+
+    const m = await mountTimed()
+    check('T1 open at mount: the note and the form', [m.b.expenseWin.value.state, !!m.b.expenseCopy.value.note, m.b.showExpenseForm.value], ['open', true, true])
+    check('T1 a one-minute clock runs while the page is open', live().map((t) => t.ms), [60000])
+    clock += 61e3
+    live()[0].fn()
+    await settle()
+    check('T2 a minute past the deadline the page closes the window BY ITSELF — no refetch, no new load data',
+      [m.b.expenseWin.value.state, m.b.expenseCopy.value.note, /window for adding receipts to this load closed/.test(m.b.expenseCopy.value.hint || '')],
+      ['closed', null, true])
+    check('T2 …and keeps a half-typed form on screen (the latch), with the hint saying why a submit will be refused', m.b.showExpenseForm.value, true)
+    m.leave()
+    check('T3 leaving the page stops the clock and drops the listener', [live().length, (listeners.visibilitychange || []).length], [0, 0])
+
+    const back = await mountTimed()
+    clock += 61e3
+    globalThis.document.visibilityState = 'visible'
+    ;(listeners.visibilitychange || []).forEach((fn) => fn())
+    await settle()
+    check('T4 returning to the foreground re-reads the clock at once (a backgrounded phone may not run the timer)', back.b.expenseWin.value.state, 'closed')
+    back.leave()
+
+    // M — the clock left out of the verdict: the page keeps saying "open".
+    const src = read(REL)
+    const mutant = src.replace('{ status: status.value, now: nowTick.value }', '{ status: status.value }')
+    check('(mutant source differs)', mutant !== src, true)
+    const stale = await mountTimed(mutant)
+    clock += 61e3
+    live().forEach((t) => t.fn())
+    await settle()
+    check('M  without the clock in the verdict the page still says "open" past the deadline (so T2 would fail)', stale.b.expenseWin.value.state, 'open')
+    stale.leave()
+  } finally {
+    Date.now = real.now
+    globalThis.setInterval = real.setInterval
+    globalThis.clearInterval = real.clearInterval
+    globalThis.document = real.document
+  }
 }
 
 console.log(`expense-load-window-client: ${pass} passed, ${fail} failed`)
