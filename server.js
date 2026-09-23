@@ -8253,13 +8253,18 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 		});
 
 		// Send emails (async, don't block response)
+		//
+		// Every request value interpolated below goes through escapeHtml(), the
+		// same helper the driver application emails use: all of it is text typed
+		// into the public /invest form and must render as text. Only numbers
+		// computed on this side are left bare.
 		const vehicleRows = vehiclesArr.map((v, i) => `<tr>
 			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${i + 1}</td>
-			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${v.year || ""} ${v.make || ""} ${v.model || ""}</td>
-			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${v.vin || ""}</td>
-			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${v.licensePlate || ""}</td>
-			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${v.titleState || ""}</td>
-			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${v.purchasePrice ? "$" + Number(v.purchasePrice).toLocaleString() : ""}</td>
+			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${escapeHtml(v.year || "")} ${escapeHtml(v.make || "")} ${escapeHtml(v.model || "")}</td>
+			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${escapeHtml(v.vin || "")}</td>
+			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${escapeHtml(v.licensePlate || "")}</td>
+			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${escapeHtml(v.titleState || "")}</td>
+			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${v.purchasePrice ? "$" + escapeHtml(Number(v.purchasePrice).toLocaleString()) : ""}</td>
 		</tr>`).join("");
 
 		// Email A: Applicant confirmation (simple)
@@ -8270,12 +8275,12 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 			</div>
 			<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
 				<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Application Received</h2>
-				<p>Hi <b>${legal_name}</b>,</p>
+				<p>Hi <b>${escapeHtml(legal_name)}</b>,</p>
 				<p>Thank you for submitting your investor application with LogisX. We have received all your information and signed documents.</p>
 				<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:20px 0">
 					<table style="width:100%;border-collapse:collapse;font-size:14px">
-						<tr><td style="padding:4px 0;color:#64748b;width:140px">Company</td><td style="padding:4px 0;font-weight:600">${legal_name}${dba ? ` (DBA: ${dba})` : ""}</td></tr>
-						${entity_type ? `<tr><td style="padding:4px 0;color:#64748b">Entity Type</td><td style="padding:4px 0">${entity_type}</td></tr>` : ""}
+						<tr><td style="padding:4px 0;color:#64748b;width:140px">Company</td><td style="padding:4px 0;font-weight:600">${escapeHtml(legal_name)}${dba ? ` (DBA: ${escapeHtml(dba)})` : ""}</td></tr>
+						${entity_type ? `<tr><td style="padding:4px 0;color:#64748b">Entity Type</td><td style="padding:4px 0">${escapeHtml(entity_type)}</td></tr>` : ""}
 						<tr><td style="padding:4px 0;color:#64748b">Fleet Size</td><td style="padding:4px 0">${vehiclesArr.length} vehicle(s)</td></tr>
 						<tr><td style="padding:4px 0;color:#64748b">Documents</td><td style="padding:4px 0;color:${failedDocs.length ? "#b45309" : "#16a34a"};font-weight:600">${signedDocCount}/${INVESTOR_ONBOARDING_DOCS.length} Signed</td></tr>
 					</table>
@@ -8315,18 +8320,18 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 
 				<h3 style="font-size:15px;margin:0 0 12px;color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:6px">Company Information</h3>
 				<table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:24px">
-					<tr><td style="padding:5px 0;color:#64748b;width:180px">Legal Name</td><td style="padding:5px 0;font-weight:600">${legal_name}</td></tr>
-					${dba ? `<tr><td style="padding:5px 0;color:#64748b">DBA</td><td style="padding:5px 0">${dba}</td></tr>` : ""}
-					${entity_type ? `<tr><td style="padding:5px 0;color:#64748b">Entity Type</td><td style="padding:5px 0">${entity_type}</td></tr>` : ""}
-					<tr><td style="padding:5px 0;color:#64748b">Address</td><td style="padding:5px 0">${address}</td></tr>
-					${contact_person ? `<tr><td style="padding:5px 0;color:#64748b">Contact Person</td><td style="padding:5px 0">${contact_person}${contact_title ? " (" + contact_title + ")" : ""}</td></tr>` : ""}
-					<tr><td style="padding:5px 0;color:#64748b">Phone</td><td style="padding:5px 0">${phone}</td></tr>
-					<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0"><a href="mailto:${email}">${email}</a></td></tr>
-					${ein_ssn ? `<tr><td style="padding:5px 0;color:#64748b">EIN/SSN</td><td style="padding:5px 0">${piiMask.maskTaxId(ein_ssn)}</td></tr>` : ""}
-					${tax_classification ? `<tr><td style="padding:5px 0;color:#64748b">Tax Classification</td><td style="padding:5px 0">${tax_classification}</td></tr>` : ""}
-					${years_in_operation ? `<tr><td style="padding:5px 0;color:#64748b">Years in Operation</td><td style="padding:5px 0">${years_in_operation}</td></tr>` : ""}
-					${industry_experience ? `<tr><td style="padding:5px 0;color:#64748b">Industry Experience</td><td style="padding:5px 0">${industry_experience}</td></tr>` : ""}
-					${bankruptcy_liens ? `<tr><td style="padding:5px 0;color:#64748b">Bankruptcy/Liens</td><td style="padding:5px 0">${bankruptcy_liens}</td></tr>` : ""}
+					<tr><td style="padding:5px 0;color:#64748b;width:180px">Legal Name</td><td style="padding:5px 0;font-weight:600">${escapeHtml(legal_name)}</td></tr>
+					${dba ? `<tr><td style="padding:5px 0;color:#64748b">DBA</td><td style="padding:5px 0">${escapeHtml(dba)}</td></tr>` : ""}
+					${entity_type ? `<tr><td style="padding:5px 0;color:#64748b">Entity Type</td><td style="padding:5px 0">${escapeHtml(entity_type)}</td></tr>` : ""}
+					<tr><td style="padding:5px 0;color:#64748b">Address</td><td style="padding:5px 0">${escapeHtml(address)}</td></tr>
+					${contact_person ? `<tr><td style="padding:5px 0;color:#64748b">Contact Person</td><td style="padding:5px 0">${escapeHtml(contact_person)}${contact_title ? " (" + escapeHtml(contact_title) + ")" : ""}</td></tr>` : ""}
+					<tr><td style="padding:5px 0;color:#64748b">Phone</td><td style="padding:5px 0">${escapeHtml(phone)}</td></tr>
+					<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0"><a href="mailto:${escapeHtml(email)}">${escapeHtml(email)}</a></td></tr>
+					${ein_ssn ? `<tr><td style="padding:5px 0;color:#64748b">EIN/SSN</td><td style="padding:5px 0">${escapeHtml(piiMask.maskTaxId(ein_ssn))}</td></tr>` : ""}
+					${tax_classification ? `<tr><td style="padding:5px 0;color:#64748b">Tax Classification</td><td style="padding:5px 0">${escapeHtml(tax_classification)}</td></tr>` : ""}
+					${years_in_operation ? `<tr><td style="padding:5px 0;color:#64748b">Years in Operation</td><td style="padding:5px 0">${escapeHtml(years_in_operation)}</td></tr>` : ""}
+					${industry_experience ? `<tr><td style="padding:5px 0;color:#64748b">Industry Experience</td><td style="padding:5px 0">${escapeHtml(industry_experience)}</td></tr>` : ""}
+					${bankruptcy_liens ? `<tr><td style="padding:5px 0;color:#64748b">Bankruptcy/Liens</td><td style="padding:5px 0">${escapeHtml(bankruptcy_liens)}</td></tr>` : ""}
 				</table>
 
 				<h3 style="font-size:15px;margin:0 0 12px;color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:6px">Fleet (${vehiclesArr.length} Vehicle${vehiclesArr.length !== 1 ? "s" : ""})</h3>
@@ -8344,18 +8349,18 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 
 				<h3 style="font-size:15px;margin:0 0 12px;color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:6px">Banking</h3>
 				<table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:24px">
-					<tr><td style="padding:5px 0;color:#64748b;width:180px">Bank</td><td style="padding:5px 0">${banking.bank_name}</td></tr>
-					${banking.account_type ? `<tr><td style="padding:5px 0;color:#64748b">Account Type</td><td style="padding:5px 0">${banking.account_type}</td></tr>` : ""}
-					<tr><td style="padding:5px 0;color:#64748b">Routing Number</td><td style="padding:5px 0">${piiMask.maskRouting(banking.routing_number)}</td></tr>
-					<tr><td style="padding:5px 0;color:#64748b">Account Number</td><td style="padding:5px 0">${piiMask.maskAccount(banking.account_number)}</td></tr>
-					${banking.account_name ? `<tr><td style="padding:5px 0;color:#64748b">Name on Account</td><td style="padding:5px 0">${banking.account_name}</td></tr>` : ""}
+					<tr><td style="padding:5px 0;color:#64748b;width:180px">Bank</td><td style="padding:5px 0">${escapeHtml(banking.bank_name)}</td></tr>
+					${banking.account_type ? `<tr><td style="padding:5px 0;color:#64748b">Account Type</td><td style="padding:5px 0">${escapeHtml(banking.account_type)}</td></tr>` : ""}
+					<tr><td style="padding:5px 0;color:#64748b">Routing Number</td><td style="padding:5px 0">${escapeHtml(piiMask.maskRouting(banking.routing_number))}</td></tr>
+					<tr><td style="padding:5px 0;color:#64748b">Account Number</td><td style="padding:5px 0">${escapeHtml(piiMask.maskAccount(banking.account_number))}</td></tr>
+					${banking.account_name ? `<tr><td style="padding:5px 0;color:#64748b">Name on Account</td><td style="padding:5px 0">${escapeHtml(banking.account_name)}</td></tr>` : ""}
 				</table>
 
 				<h3 style="font-size:15px;margin:0 0 12px;color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:6px">Signed Documents</h3>
 				<table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:24px">
 					${INVESTOR_ONBOARDING_DOCS.map(doc => {
 						const sig = signatures[doc.key];
-						return `<tr><td style="padding:5px 0;color:#64748b">${doc.name}</td><td style="padding:5px 0;color:#16a34a;font-weight:600">Signed by ${sig.text.trim()}</td></tr>`;
+						return `<tr><td style="padding:5px 0;color:#64748b">${escapeHtml(doc.name)}</td><td style="padding:5px 0;color:#16a34a;font-weight:600">Signed by ${escapeHtml(sig.text.trim())}</td></tr>`;
 					}).join("")}
 				</table>
 				<p style="font-size:13px;color:#64748b">Signed PDFs are attached to this email.</p>
@@ -8378,7 +8383,7 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 		const docWarningHtml = failedDocs.length
 			? `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:700px;margin:0 auto 12px;padding:14px 18px;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;color:#991b1b">
 					<b>ACTION NEEDED — ${failedDocs.length} document(s) NOT signed.</b><br>
-					${failedDocs.map(n => `&bull; ${n}`).join("<br>")}<br><br>
+					${failedDocs.map(n => `&bull; ${escapeHtml(n)}`).join("<br>")}<br><br>
 					The applicant's signature was captured, but the PDF could not be generated, so these are recorded as <b>unsigned</b> and are not attached. Regenerate them before approving this investor.
 				</div>`
 			: "";
@@ -10903,6 +10908,9 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			res.json({ success: true, accountCreated: true, credentials: { username, tempPassword, userId, investorName: fullName } });
 
 			// Send welcome email to investor (async, non-blocking)
+			// Every interpolated value goes through escapeHtml(), as in the driver
+			// acceptance emails: the name, email and entity type are text typed into
+			// the public /invest form and must render as text.
 			const welcomeHtml = `
 			<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;color:#1e293b">
 				<div style="background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0">
@@ -10910,14 +10918,14 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 				</div>
 				<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
 					<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Welcome to LogisX!</h2>
-					<p style="margin:0 0 12px;line-height:1.6;color:#334155">Hi <b>${fullName}</b>,</p>
+					<p style="margin:0 0 12px;line-height:1.6;color:#334155">Hi <b>${escapeHtml(fullName)}</b>,</p>
 					<p style="margin:0 0 20px;line-height:1.6;color:#334155">Your investor application has been <b style="color:#16a34a">approved</b>. Your account is ready and ${vehicles.length} vehicle(s) have been registered to your fleet.</p>
 
 					<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:20px;margin:0 0 20px">
 						<div style="font-size:12px;font-weight:700;color:#0369a1;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Your Login Credentials</div>
 						<table style="width:100%;border-collapse:collapse;font-size:14px">
-							<tr><td style="padding:6px 0;color:#64748b;width:130px">Username</td><td style="padding:6px 0;font-weight:700;color:#0f172a;font-family:monospace">${username}</td></tr>
-							<tr><td style="padding:6px 0;color:#64748b">Temporary Password</td><td style="padding:6px 0;font-weight:700;color:#d97706;font-family:monospace">${tempPassword}</td></tr>
+							<tr><td style="padding:6px 0;color:#64748b;width:130px">Username</td><td style="padding:6px 0;font-weight:700;color:#0f172a;font-family:monospace">${escapeHtml(username)}</td></tr>
+							<tr><td style="padding:6px 0;color:#64748b">Temporary Password</td><td style="padding:6px 0;font-weight:700;color:#d97706;font-family:monospace">${escapeHtml(tempPassword)}</td></tr>
 						</table>
 					</div>
 
@@ -10945,15 +10953,15 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 				</div>
 				<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
 					<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Investor Accepted</h2>
-					<p style="margin:0 0 20px;line-height:1.6;color:#334155">Investor <b>${fullName}</b> has been accepted and their account has been created.</p>
+					<p style="margin:0 0 20px;line-height:1.6;color:#334155">Investor <b>${escapeHtml(fullName)}</b> has been accepted and their account has been created.</p>
 
 					<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 20px">
 						<table style="width:100%;border-collapse:collapse;font-size:14px">
-							<tr><td style="padding:5px 0;color:#64748b;width:140px">Username</td><td style="padding:5px 0;font-weight:600;font-family:monospace">${username}</td></tr>
-							<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0">${application.email}</td></tr>
-							<tr><td style="padding:5px 0;color:#64748b">Entity Type</td><td style="padding:5px 0">${application.entity_type || "-"}</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b;width:140px">Username</td><td style="padding:5px 0;font-weight:600;font-family:monospace">${escapeHtml(username)}</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0">${escapeHtml(application.email)}</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b">Entity Type</td><td style="padding:5px 0">${escapeHtml(application.entity_type || "-")}</td></tr>
 							<tr><td style="padding:5px 0;color:#64748b">Fleet</td><td style="padding:5px 0;font-weight:600">${vehicles.length} vehicle(s) added</td></tr>
-							<tr><td style="padding:5px 0;color:#64748b">Accepted By</td><td style="padding:5px 0">${req.session.user.username}</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b">Accepted By</td><td style="padding:5px 0">${escapeHtml(req.session.user.username)}</td></tr>
 						</table>
 					</div>
 
@@ -11201,6 +11209,9 @@ async function checkAndCompleteOnboarding(userId) {
 		}).filter(Boolean);
 
 		// Email to driver — documents received + next steps
+		// The name, email, phone and position below all trace back to the public
+		// /apply form (driver_name is the application's full_name), so they go
+		// through escapeHtml() exactly as the application and acceptance emails do.
 		const driverDocsHtml = `
 		<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;color:#1e293b">
 			<div style="background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0">
@@ -11208,7 +11219,7 @@ async function checkAndCompleteOnboarding(userId) {
 			</div>
 			<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none">
 				<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Onboarding Status: Documents Received!</h2>
-				<p style="margin:0 0 12px;line-height:1.6;color:#334155">Hi <b>${driverName}</b>,</p>
+				<p style="margin:0 0 12px;line-height:1.6;color:#334155">Hi <b>${escapeHtml(driverName)}</b>,</p>
 				<p style="margin:0 0 20px;line-height:1.6;color:#334155">Thanks for getting your paperwork squared away. Now that the legal stuff is signed and uploaded, you've officially cleared Phase 1. We are currently reviewing your file.</p>
 
 				<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 24px">
@@ -11255,14 +11266,14 @@ async function checkAndCompleteOnboarding(userId) {
 			</div>
 			<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
 				<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Driver Documents Signed</h2>
-				<p style="margin:0 0 20px;line-height:1.6;color:#334155">Driver <b>${driverName}</b> has signed all ${ONBOARDING_DOCS.length} onboarding documents. Signed copies are attached.</p>
+				<p style="margin:0 0 20px;line-height:1.6;color:#334155">Driver <b>${escapeHtml(driverName)}</b> has signed all ${ONBOARDING_DOCS.length} onboarding documents. Signed copies are attached.</p>
 
 				<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 20px">
 					<table style="width:100%;border-collapse:collapse;font-size:14px">
-						<tr><td style="padding:5px 0;color:#64748b;width:140px">Driver Name</td><td style="padding:5px 0;font-weight:600">${driverName}</td></tr>
-						<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0">${driverEmail}</td></tr>
-						<tr><td style="padding:5px 0;color:#64748b">Phone</td><td style="padding:5px 0">${application?.phone || "—"}</td></tr>
-						<tr><td style="padding:5px 0;color:#64748b">Position</td><td style="padding:5px 0">${application?.position || "—"}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b;width:140px">Driver Name</td><td style="padding:5px 0;font-weight:600">${escapeHtml(driverName)}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0">${escapeHtml(driverEmail)}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Phone</td><td style="padding:5px 0">${escapeHtml(application?.phone || "—")}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Position</td><td style="padding:5px 0">${escapeHtml(application?.position || "—")}</td></tr>
 						<tr><td style="padding:5px 0;color:#64748b">Documents</td><td style="padding:5px 0;font-weight:600;color:#16a34a">${ONBOARDING_DOCS.length}/${ONBOARDING_DOCS.length} Signed</td></tr>
 						<tr><td style="padding:5px 0;color:#64748b">Status</td><td style="padding:5px 0;font-weight:600;color:#d97706">Awaiting Drug Test</td></tr>
 					</table>
