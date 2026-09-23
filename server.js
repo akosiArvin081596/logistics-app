@@ -27057,7 +27057,12 @@ const locationLimiter = rateLimit({
 });
 
 // POST /api/driver/respond — Driver accepts or declines a load assignment
-app.post("/api/driver/respond", requireAuth, driverWriteLimiter, async (req, res) => {
+// requireRole, not bare requireAuth: the ownership check below is Driver-only,
+// so under requireAuth an INVESTOR could accept or decline any row — and read
+// row locations back out of the binding refusals. Same gate, same reason, as
+// PUT /api/driver/status. Mounted before the limiter so a refused role spends
+// no budget.
+app.post("/api/driver/respond", requireRole("Super Admin", "Dispatcher", "Driver"), driverWriteLimiter, async (req, res) => {
 	try {
 		const { loadId, rowIndex: rawRowIndex, response } = req.body;
 		const driverName = resolveDriverActor(req, res, req.body.driverName);
