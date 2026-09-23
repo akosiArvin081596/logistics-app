@@ -83,6 +83,7 @@ const rateconNormalize = require("./lib/ratecon-normalize");
 // this one function rather than its own `.toLowerCase()`.
 const { normalizeLoadId } = require("./lib/ratecon-load");
 const receiptDuplicates = require("./lib/receipt-duplicates");
+const expenseWindowRule = require("./lib/expense-window");
 const { geminiFailure } = require("./lib/gemini-errors");
 const { csvRows } = require("./lib/csv");
 const piiMask = require("./lib/pii-mask");
@@ -29295,6 +29296,12 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			});
 		}
 
+		// May the driver still add a receipt to each load — active, or delivered
+		// in the last 7 days? `_expenseWindow` is the verdict the app renders the
+		// expense form from, and the one POST /api/expenses enforces. Fresh row
+		// copies; see withExpenseWindows().
+		filteredLoads = withExpenseWindows(filteredLoads, jobTracking.headers);
+
 		// PRIVACY: do not expose other drivers' names to a Driver-role caller.
 		// Previously this returned the full carrier driver list to every
 		// /api/driver/:name response. The driver UI never consumed it; admin
@@ -32097,6 +32104,154 @@ function spendGeocodeBudget() {
 	return true;
 }
 
+// ============================================================================
+// RECEIPTS ON RECENTLY DELIVERED LOADS — the server half of lib/expense-window.js
+// ============================================================================
+// Owner, 2026-09-23: a driver may add a receipt to an ACTIVE load, or to one
+// DELIVERED WITHIN THE LAST 7 DAYS. A driver could not attach fuel receipts to
+// loads he had already delivered, so dispatch keyed them in by hand. The rule,
+// its timestamp and its boundary are decided (and explained) in the lib; the two
+// functions below are its only callers, so the app and the gate cannot disagree.
+
+// The verdict, per load, for the driver app to render from. Returns NEW row
+// objects with `_expenseWindow` ({ eligible, state, deliveredAt, closesAt }),
+// judged at this request's time, and never writes to the rows it is handed
+// (annotating in place is how route state leaked into the shared cache — see
+// liveJobTrackingView()). The app only re-checks `closesAt` against its own
+// clock (a page left open outlives the verdict); it never re-derives the rule
+// from a status.
+//
+// One indexed read of load_status_history for every COMPLETED load the driver
+// has, however many; an active load needs no delivery time and is not queried.
+//
+// ⚠️ A FAILED READ SHIPS NO VERDICT RATHER THAN A WRONG ONE. The rows go out
+// without `_expenseWindow` and the app falls back to exactly its old rule — the
+// form on active loads only — while POST /api/expenses still judges every
+// submit for itself.
+function withExpenseWindows(rows, headers, now = Date.now()) {
+	if (!Array.isArray(rows) || !rows.length) return rows;
+	try {
+		const loadIdCol = findCol(headers || [], /load.?id|job.?id/i);
+		const statusCol = findCol(headers || [], /^(job[\s._-]?)?status$/i) || findCol(headers || [], /status/i);
+		const keyOf = (row) => (loadIdCol ? normalizeLoadId(row[loadIdCol]) : "");
+		const statusOf = (row) => (statusCol ? String(row[statusCol] || "").trim() : "");
+		const keys = [...new Set(rows.filter((row) => expenseWindowRule.isCompletedLoadStatus(statusOf(row))).map(keyOf).filter(Boolean))];
+		const history = new Map();
+		// Chunked well under SQLite's bound-parameter ceiling.
+		for (let i = 0; i < keys.length; i += 500) {
+			const chunk = keys.slice(i, i + 500);
+			const found = db.prepare(
+				`SELECT load_id, old_status, new_status, strftime('%Y-%m-%dT%H:%M:%SZ', changed_at) AS changed_at
+				   FROM load_status_history
+				  WHERE load_id IN (${chunk.map(() => "?").join(",")})
+				  ORDER BY changed_at ASC, id ASC`
+			).all(...chunk);
+			for (const h of found) {
+				if (!history.has(h.load_id)) history.set(h.load_id, []);
+				history.get(h.load_id).push(h);
+			}
+		}
+		const verdicts = rows.map((row) => expenseWindowRule.expenseWindow({
+			status: statusOf(row),
+			deliveredAt: expenseWindowRule.deliveredAtFromHistory(history.get(keyOf(row)) || []),
+			now,
+		}));
+		// One answer per load id — the gate's: it judges an id across ALL of the
+		// driver's rows (bestExpenseWindow), so two rows of one id must not show
+		// different answers, or one of them would offer a form the gate refuses.
+		const byId = new Map();
+		rows.forEach((row, i) => {
+			const k = keyOf(row);
+			if (k) byId.set(k, expenseWindowRule.bestExpenseWindow([byId.get(k), verdicts[i]]));
+		});
+		return rows.map((row, i) => ({ ...row, _expenseWindow: (keyOf(row) && byId.get(keyOf(row))) || verdicts[i] }));
+	} catch (err) {
+		console.warn("[driver-data] expense window not attached:", err.message);
+		return rows;
+	}
+}
+
+// ⚠️ THE GATE. Until this, POST /api/expenses checked OWNERSHIP only — any load
+// naming the driver, in any status, at any age — and the driver app's
+// active-only form was the whole rule. Now a Driver's receipt is refused unless
+// the load is active or inside its window, judged by the same function that
+// decides what the app offers.
+//
+//   • Driver role only. Super Admin and Dispatcher still file against any load;
+//     that is the "ask dispatch" every refusal points to.
+//   • Runs AFTER the ownership check (which it does not replace) and BEFORE the
+//     duplicate checks and every write, so a refusal leaves no receipt file.
+//   • Judged on THIS DRIVER'S rows for the id. A load id can sit on two rows, and
+//     a live row beside a cancelled copy must still take receipts; a row naming
+//     another driver never opens the window.
+//   • load_status_history is read ONLY when one of those rows is completed, so a
+//     receipt on an active load never depends on that read.
+//   • A failed read REFUSES with a retryable 503, never a 403: the driver did
+//     nothing wrong and the same request succeeds once the read does. It never
+//     admits.
+//   • No loadId → untouched here, as before: the ownership check skips that case
+//     too, and the app never sends one.
+// Returns true when it has answered.
+async function sentIfDriverExpenseWindowClosed(req, res, loadId, driverName) {
+	if (req.session?.user?.role !== "Driver") return false;
+	const targetLid = normalizeLoadId(loadId);
+	if (!targetLid) return false;
+	const unverified = (what, err) => {
+		// The id is caller-supplied: capped and JSON-quoted so it cannot forge a line.
+		console.warn(`[expense-window] could not check load ${JSON.stringify(targetLid.slice(0, 40))}: ${what}${err && err.message ? ` — ${err.message}` : ""}`);
+		res.setHeader("Retry-After", "5");
+		res.status(503).json({
+			error: "Couldn't check this load right now — please try again.",
+			code: "EXPENSE_WINDOW_UNVERIFIED",
+			retryable: true,
+		});
+		return true;
+	};
+	let jt;
+	try { jt = await getJobTrackingCached(); } catch (err) { return unverified("Job Tracking read failed", err); }
+	const headers = (jt && jt.headers) || [];
+	const loadIdCol = findCol(headers, /load.?id|job.?id/i);
+	const driverCol = findCol(headers, /driver/i);
+	const statusCol = findCol(headers, /^(job[\s._-]?)?status$/i) || findCol(headers, /status/i);
+	if (!loadIdCol || !driverCol || !statusCol) return unverified("Job Tracking has no Load ID / Driver / Status column", null);
+	const target = normalizeDriverName(driverName);
+	const statuses = [];
+	for (const row of (jt && jt.data) || []) {
+		if (normalizeLoadId(row[loadIdCol]) !== targetLid) continue;
+		if (normalizeDriverName(row[driverCol]) !== target) continue;
+		statuses.push(String(row[statusCol] || "").trim());
+	}
+	// Owned a moment ago, named on no row now: the load was reassigned in between.
+	if (!statuses.length) {
+		res.status(403).json({ error: "This load is not assigned to you" });
+		return true;
+	}
+	let deliveredAt = null;
+	if (statuses.some((s) => expenseWindowRule.isCompletedLoadStatus(s))) {
+		try {
+			deliveredAt = expenseWindowRule.deliveredAtFromHistory(db.prepare(
+				`SELECT old_status, new_status, strftime('%Y-%m-%dT%H:%M:%SZ', changed_at) AS changed_at
+				   FROM load_status_history
+				  WHERE load_id = ?
+				  ORDER BY changed_at ASC, id ASC`
+			).all(targetLid));
+		} catch (err) { return unverified("load_status_history read failed", err); }
+	}
+	const now = Date.now();
+	const win = expenseWindowRule.bestExpenseWindow(
+		statuses.map((status) => expenseWindowRule.expenseWindow({ status, deliveredAt, now })),
+	);
+	if (win && win.eligible) return false;
+	res.status(403).json({
+		error: expenseWindowRule.refusalMessage(win, String(loadId || "").trim()),
+		code: "EXPENSE_WINDOW_CLOSED",
+		reason: (win && win.state) || "none",
+		deliveredAt: (win && win.deliveredAt) || null,
+		closesAt: (win && win.closesAt) || null,
+	});
+	return true;
+}
+
 // POST /api/expenses — Log a new expense (SQLite)
 // Receipt "details" = the dynamic label/value pairs runReceiptOcr extracts from
 // a receipt (fuel: pump/grade/PPG; food: items/tax/tip; etc.), stored as a JSON
@@ -32180,6 +32335,11 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 			if (sentIfLoadOwnershipUnverified(res, owned)) return;
 			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
 		}
+
+		// ...and a Driver's load must still take receipts: active, or delivered in
+		// the last 7 days (owner, 2026-09-23). The rule the driver app renders from,
+		// enforced here so the app is not the only gate. Before any write.
+		if (await sentIfDriverExpenseWindowClosed(req, res, safeLoadId, driver)) return;
 
 		const timestamp = new Date().toISOString();
 		// Look up truck/owner for this driver to stamp on expense
