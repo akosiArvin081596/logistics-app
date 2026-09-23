@@ -104,11 +104,13 @@ if (!CANCELED_RE_SRC) { console.error("FAIL  could not locate CANCELED_STATUS_RE
 
 const DELETED_ID = "209875716";
 const CANCELLED_ID = "564446669";
+const LOADKEYSET_SRC = liftFn("loadKeySet");
+const { normalizeLoadId } = require("../lib/ratecon-load");
 function buildView(viewSrc = VIEW_SRC) {
 	const getDeletedLoadIds = () => new Set([DELETED_ID]);
-	return new Function("getDeletedLoadIds",
-		`"use strict";\n${CANCELED_RE_SRC}\n${FINDCOL_SRC}\n${EXCLUDE_SRC}\n${viewSrc}\n` +
-		"return { liveJobTrackingView, excludeDroppedLoads };")(getDeletedLoadIds);
+	return new Function("getDeletedLoadIds", "normalizeLoadId",
+		`"use strict";\n${CANCELED_RE_SRC}\n${FINDCOL_SRC}\n${LOADKEYSET_SRC}\n${EXCLUDE_SRC}\n${viewSrc}\n` +
+		"return { liveJobTrackingView, excludeDroppedLoads };")(getDeletedLoadIds, normalizeLoadId);
 }
 const { liveJobTrackingView, excludeDroppedLoads } = buildView();
 
