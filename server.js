@@ -17939,6 +17939,18 @@ app.post("/api/auth/setup", setupLimiter, async (req, res) => {
 // Login — rate limited to prevent brute-force
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, message: { error: "Too many login attempts. Try again in 15 minutes." }, standardHeaders: true });
 app.post("/api/auth/login", loginLimiter, async (req, res) => {
+	// Set once the session rotation below has started. From then on a failure
+	// must not leave a half-built session behind: express-session saves a
+	// regenerated session when the response ends, so a save that failed here and
+	// then succeeded there would hand a signed-in cookie to a response that
+	// reported failure. refuse() destroys it first, and the response sets no
+	// cookie. Before rotation it only answers, so the session the request arrived
+	// with is left exactly as it was.
+	let rotating = false;
+	const refuse = (status, error) => {
+		if (rotating && req.session) req.session.destroy(() => {});
+		return res.status(status).json({ error });
+	};
 	try {
 		const { username, password } = req.body;
 		if (!username || !password) {
@@ -17958,39 +17970,76 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 			return res.status(401).json({ error: "Invalid credentials" });
 		}
 
+		// A NEW SESSION ID FOR EVERY SIGN-IN, as POST /api/auth/setup and
+		// POST /api/auth/change-password already do. regenerate() destroys the
+		// session this request arrived with (SqliteStore runs DELETE FROM sessions
+		// WHERE sid = ?) and issues a fresh ID, so the identity below is only ever
+		// attached to an ID minted by this response, and nothing from the session
+		// the request arrived with carries over. It only ever stored `user`.
+		// scripts/test-login-session-rotation.js pins this.
+		rotating = true;
+		try {
+			await new Promise((resolve, reject) => req.session.regenerate((err) => (err ? reject(err) : resolve())));
+		} catch (regenErr) {
+			console.error("login: session regenerate failed:", regenErr.message);
+			return refuse(500, "Could not start a session. Please try again.");
+		}
+
+		// ⚠️ RE-READ AFTER THE LAST AWAIT (the house rule: no await between a check
+		// and its write). `user` was read before bcrypt.compare and regenerate()
+		// both yielded, so the session is built from the row as it is NOW, and the
+		// sign-in is refused if the account is gone or its password changed in
+		// between: the password just verified is then not this account's password.
+		// Everything from this read to the session assignment is synchronous.
+		const current = db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
+		if (!current || current.password_hash !== user.password_hash) {
+			return refuse(401, "Invalid credentials");
+		}
+
+		req.session.user = {
+			id: current.id,
+			username: current.username,
+			role: current.role,
+			driverName: current.driver_name || "",
+			email: current.email || "",
+			fullName: current.full_name || "",
+			companyName: current.company_name || "",
+			mustChangePassword: !!current.must_change_password,
+		};
+		try {
+			await new Promise((resolve, reject) => req.session.save((err) => (err ? reject(err) : resolve())));
+		} catch (saveErr) {
+			console.error("login: session save failed:", saveErr.message);
+			return refuse(500, "Could not start a session. Please try again.");
+		}
+
 		// This route is the ONLY sign-in path in the app — there are exactly two
 		// bcrypt.compare call sites (here and change-password's current-password
 		// check), so this one stamp covers every role: admin, dispatcher, driver,
-		// investor. Placed AFTER the password check so a failed attempt never
-		// looks like a sign-in. Never throws — see stampLastLogin().
-		stampLastLogin(user.id);
-
-		req.session.user = {
-			id: user.id,
-			username: user.username,
-			role: user.role,
-			driverName: user.driver_name || "",
-			email: user.email || "",
-			fullName: user.full_name || "",
-			companyName: user.company_name || "",
-			mustChangePassword: !!user.must_change_password,
-		};
+		// investor. Placed AFTER the password check and after the session is
+		// saved, so neither a failed attempt nor a sign-in that could not start a
+		// session looks like a sign-in. Never throws — see stampLastLogin().
+		stampLastLogin(current.id);
 
 		res.json({
 			success: true,
 			user: {
-				id: user.id,
-				username: user.username,
-				role: user.role,
-				driverName: user.driver_name || "",
-				companyName: user.company_name || "",
-				fullName: user.full_name || "",
-				mustChangePassword: !!user.must_change_password,
+				id: current.id,
+				username: current.username,
+				role: current.role,
+				driverName: current.driver_name || "",
+				companyName: current.company_name || "",
+				fullName: current.full_name || "",
+				mustChangePassword: !!current.must_change_password,
 			},
 		});
 	} catch (error) {
+		// Through refuse(), so an unexpected throw after rotation (the re-read,
+		// say) cleans up like every other failure. The detail goes to the log,
+		// not to the unauthenticated caller.
 		console.error("Error during login:", error.message);
-		res.status(500).json({ error: error.message });
+		if (res.headersSent) return;
+		refuse(500, "Could not sign in. Please try again.");
 	}
 });
 
