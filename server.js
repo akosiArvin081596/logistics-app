@@ -5185,6 +5185,59 @@ const n8nDistanceLimiter = rateLimit({
 // so the log cannot itself be flooded. The presented value is NEVER logged.
 let n8nDistanceUnauthorized = 0;
 let n8nDistanceUnauthorizedLoggedAt = 0;
+
+// The ingestion's duplicate-row tripwire — see the ⚠️ DUPLICATE-ROW TRIPWIRE
+// note inside POST /api/n8n/load-distance. Which sheet rows carry `loadId`,
+// counted over RAW values arrays (index 0 = sheet row 2), matched through
+// normLoadKey() so "#123" and "123" are one load. Only the ingested load is
+// counted: the ~87 historical duplicate ids of OTHER loads are none of its
+// business and must never alert.
+function sheetRowsCarryingLoad(headers, rows, loadId) {
+	const key = normLoadKey(loadId);
+	const idIdx = (headers || []).findIndex((h) => /load.?id|job.?id/i.test(String(h == null ? "" : h)));
+	if (!key || idIdx === -1) return [];
+	const found = [];
+	(rows || []).forEach((row, i) => {
+		if (normLoadKey((row || [])[idIdx]) === key) found.push(i + 2);
+	});
+	return found;
+}
+// ⚠️ A FRESH, RAW read — never getJobTrackingCached(). That cache holds
+// deduplicateLoads() output, in which a load's extra row has ALREADY been
+// dropped, so no second row can ever be counted there; and it can be up to 60 s
+// old, i.e. from before the rows this ingestion just wrote. Reading it is how
+// this tripwire sat dead from the day it shipped: it deduplicated data that was
+// already deduplicated. Runs after the response (setImmediate), so the extra
+// full-tab read costs n8n nothing. Observes only — reads, logs, audits; never
+// writes the sheet, never touches the response. Never throws.
+async function ingestDuplicateTripwire(loadId) {
+	try {
+		const sheets = await getSheets();
+		const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+		const all = (resp && resp.data && resp.data.values) || [];
+		const onRows = sheetRowsCarryingLoad(all[0] || [], all.slice(1), loadId);
+		if (onRows.length < 2) return;
+		const shown = String(loadId).slice(0, 64);
+		console.warn(
+			`[ingest-dupe] load ${JSON.stringify(shown)} is on ${onRows.length} rows of Job Tracking (rows ${onRows.join(", ")}) after ingestion — ` +
+				`it cannot be dispatched until the extra row is removed. The n8n Dedupe Loads In Batch node ` +
+				`should have prevented this; check whether it is still wired.`,
+		);
+		try {
+			logAudit(
+				{ session: { user: { id: 0, username: "n8n", role: "system" } } },
+				"ingest_duplicate_row",
+				"job_tracking",
+				shown,
+				`load ${shown} occupies ${onRows.length} rows after ingestion (rows ${onRows.join(",")})`,
+			);
+		} catch { /* observation must never fail the ingestion */ }
+	} catch (e) {
+		// A tripwire that breaks the thing it watches is worse than no tripwire.
+		console.error("[ingest-dupe] duplicate check failed (ingestion unaffected):", (e && e.message) || e);
+	}
+}
+
 app.post("/api/n8n/load-distance", n8nDistanceLimiter, async (req, res) => {
 	if (!n8nDistanceAuthorized(req)) {
 		n8nDistanceUnauthorized++;
@@ -5367,36 +5420,12 @@ app.post("/api/n8n/load-distance", n8nDistanceLimiter, async (req, res) => {
 		// trap that dumped 151 JSON blobs into a column literally named `output`.
 		// Deleting a sheet row from an unattended ingestion path is also precisely
 		// the kind of automatic destructive write this codebase does not do.
-		try {
-			const jtDupe = await getJobTrackingCached();
-			const dupeCheck = deduplicateLoads(jtDupe.data || [], jtDupe.headers || [], true);
-			const key = String(loadId || "").trim().toLowerCase().replace(/^#/, "");
-			const idCol = (jtDupe.headers || []).find((h) => /load.?id|job.?id/i.test(h));
-			const mine = idCol
-				? (dupeCheck.duplicates || []).filter(
-						(d) => String(d[idCol] || "").trim().toLowerCase().replace(/^#/, "") === key,
-					)
-				: [];
-			if (mine.length) {
-				console.warn(
-					`[ingest-dupe] load ${loadId} is on ${mine.length + 1} rows of Job Tracking after ingestion — ` +
-						`it cannot be dispatched until the extra row is removed. The n8n Dedupe Loads In Batch node ` +
-						`should have prevented this; check whether it is still wired.`,
-				);
-				try {
-					logAudit(
-						{ session: { user: { id: 0, username: "n8n", role: "system" } } },
-						"ingest_duplicate_row",
-						"job_tracking",
-						loadId,
-						`load ${loadId} occupies ${mine.length + 1} rows after ingestion`,
-					);
-				} catch { /* observation must never fail the ingestion */ }
-			}
-		} catch (e) {
-			// A tripwire that breaks the thing it watches is worse than no tripwire.
-			console.error("[ingest-dupe] duplicate check failed (ingestion unaffected):", e.message);
-		}
+		//
+		// ⚠️ UNTIL 2026-09-23 IT COULD NEVER FIRE. It ran deduplicateLoads() over
+		// getJobTrackingCached() — data that cache has already deduplicated — so it
+		// could never see a second row. ingestDuplicateTripwire() counts a FRESH,
+		// RAW read instead, and runs after this response has been sent.
+		setImmediate(() => { ingestDuplicateTripwire(loadId); });
 
 		return res.json({
 			"Load ID": loadId,
