@@ -7592,6 +7592,10 @@ app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 		sendEmail("info@logisx.com", `New Driver Application: ${full_name}`, adminDriverHtml);
 	} catch (err) {
 		console.error("apply submission failed:", err);
+		// The emails above are built after res.json(), inside this same try, so
+		// this catch can run once the response is already out. Same rule as
+		// POST /api/public/investor-apply: never respond twice.
+		if (res.headersSent) return;
 		res.status(500).json({ error: "Submission failed. Please try again." });
 	}
 });

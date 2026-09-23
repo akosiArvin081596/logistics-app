@@ -24,8 +24,10 @@
  *   §5 checkPublicScalars(): every field a route binds is ONE scalar
  *   §6 wiring: every route runs the checks before its first write, render or
  *      email, and each route's field list matches what the route destructures
- *   §7 the investor-apply error handler responds at most once — executed
- *      against a real Express response on a bare http.ServerResponse
+ *   §7 the two application routes respond at most once — each route's real
+ *      error handler executed against a real Express response on a bare
+ *      http.ServerResponse; any public route that sends mail after
+ *      responding must guard its catch
  *   §8 DISCRIMINATION — defang each guard, require the assertion to flip
  *
  * TIMING. Every timed call runs in a CHILD process with a hard kill, so a
@@ -462,14 +464,14 @@ for (const { label, src } of PUBLIC_ROUTES) {
 }
 
 // ===========================================================================
-console.log("\n§7  investor-apply responds at most once (real Express response, no socket)");
+console.log("\n§7  the application routes respond at most once (real Express response, no socket)");
 // ===========================================================================
 const express = require(path.join(ROOT, "node_modules", "express"));
 const app = express();
 function reqRes() {
 	const req = new http.IncomingMessage(null);
 	req.method = "POST";
-	req.url = "/api/public/investor-apply";
+	req.url = "/";
 	req.headers = {};
 	const res = new http.ServerResponse(req);
 	Object.setPrototypeOf(req, app.request);
@@ -479,7 +481,7 @@ function reqRes() {
 }
 function finalCatchBody(routeSrc) {
 	const at = routeSrc.lastIndexOf("} catch (err) {");
-	if (at < 0) throw new Error("no final catch in investor-apply");
+	if (at < 0) throw new Error("no final catch in route");
 	const open = routeSrc.indexOf("{", at + 1);
 	let depth = 0;
 	for (let k = open; k < routeSrc.length; k++) {
@@ -488,12 +490,14 @@ function finalCatchBody(routeSrc) {
 	}
 	throw new Error("unbalanced catch");
 }
-// Wrap the route's REAL catch body in a handler that fails either after or
-// before it has answered, as the route body can.
-function harness(catchBody, afterResponse) {
+const isAsyncRoute = (routeSrc) => /,\s*async \(req, res\) =>/.test(routeSrc);
+// Wrap a route's REAL catch body in a handler of the same kind as the route
+// (async or not) that fails either after or before it has answered, as the
+// route body can.
+function harness(catchBody, afterResponse, isAsync) {
 	const logs = [];
 	const quietConsole = { error: (...a) => logs.push(a.join(" ")), log() {}, warn() {} };
-	const handler = new Function("console", `return async (req, res) => {
+	const handler = new Function("console", `return ${isAsync ? "async " : ""}(req, res) => {
 		try {
 			${afterResponse ? 'res.json({ success: true });' : ""}
 			throw new Error("step failed");
@@ -501,30 +505,65 @@ function harness(catchBody, afterResponse) {
 	};`)(quietConsole);
 	return { handler, logs };
 }
-async function runCase(catchBody, afterResponse) {
+// `escaped` is whatever left the handler: a synchronous throw or a rejection.
+async function runCase(catchBody, afterResponse, isAsync) {
 	const { req, res } = reqRes();
-	const { handler, logs } = harness(catchBody, afterResponse);
-	let settledWith = null;
-	await handler(req, res).catch((e) => { settledWith = e; });
-	return { res, logs, settledWith };
+	const { handler, logs } = harness(catchBody, afterResponse, isAsync);
+	let escaped = null;
+	try {
+		const out = handler(req, res);
+		if (out && typeof out.then === "function") await out.catch((e) => { escaped = e; });
+	} catch (e) {
+		escaped = e;
+	}
+	return { res, logs, escaped };
 }
-const CATCH = finalCatchBody(INVEST_RAW);
+// The two routes that send mail after their success response.
+const APPLY_RAW = routeSource("post", "/api/public/apply");
+const RESPOND_THEN_MAIL = [
+	{ label: "POST /api/public/apply", raw: APPLY_RAW },
+	{ label: "POST /api/public/investor-apply", raw: INVEST_RAW },
+];
 const UNGUARDED_CATCH = "\n\t\tres.status(500).json({ error: err.message });\n\t";
 
+// A public route that keeps working after its success response must not
+// answer again from its catch. A NEW route of that shape is held to the same
+// rule.
+let mailsAfterResponding = 0;
+for (const { label, src } of PUBLIC_ROUTES) {
+	const answered = src.indexOf("res.json(");
+	if (answered >= 0 && src.indexOf("sendEmail(", answered) > answered) {
+		mailsAfterResponding++;
+		ok(`${label} sends mail after responding, so its catch checks res.headersSent`,
+			finalCatchBody(src).includes("res.headersSent"));
+	}
+}
+ok("the sweep found the routes that send mail after responding", mailsAfterResponding >= RESPOND_THEN_MAIL.length);
+ok("the harness mirrors each route: /apply is synchronous, investor-apply is async",
+	!isAsyncRoute(APPLY_RAW) && isAsyncRoute(INVEST_RAW));
+
 (async () => {
-	const after = await runCase(CATCH, true);
-	ok("an error after the response: the handler settles cleanly", after.settledWith === null);
-	ok("…the response already sent stands", after.res.statusCode === 200 && after.res.headersSent === true);
-	ok("…and the error is logged, not swallowed", after.logs.length === 1 && /step failed/.test(after.logs[0]));
-	const before = await runCase(CATCH, false);
-	ok("an error before any response still answers 500", before.settledWith === null && before.res.statusCode === 500);
+	for (const { label, raw } of RESPOND_THEN_MAIL) {
+		const catchBody = finalCatchBody(raw);
+		const after = await runCase(catchBody, true, isAsyncRoute(raw));
+		ok(`${label}: an error after the response does not escape the handler`, after.escaped === null);
+		ok(`${label}: …the response already sent stands`, after.res.statusCode === 200 && after.res.headersSent === true);
+		ok(`${label}: …and the error is logged, not swallowed`, after.logs.some((l) => /step failed/.test(l)));
+		const before = await runCase(catchBody, false, isAsyncRoute(raw));
+		ok(`${label}: an error before any response still answers 500`, before.escaped === null && before.res.statusCode === 500);
+	}
 
 	// =========================================================================
 	console.log("\n§8  DISCRIMINATION — defang each guard, require the assertion to flip");
 	// =========================================================================
-	const unguarded = await runCase(UNGUARDED_CATCH, true);
-	ok("MUTANT: an error handler that always responds is caught by §7",
-		unguarded.settledWith !== null && unguarded.res.statusCode !== 200);
+	const unguarded = await runCase(UNGUARDED_CATCH, true, true);
+	ok("MUTANT: an async error handler that always responds is caught by §7",
+		!!unguarded.escaped && unguarded.escaped.code === "ERR_HTTP_HEADERS_SENT");
+	const applyCatch = finalCatchBody(APPLY_RAW);
+	const applyUnguarded = applyCatch.replace("if (res.headersSent) return;", "");
+	const applyMutant = await runCase(applyUnguarded, true, false);
+	ok("MUTANT: /apply's catch without its guard lets the error escape",
+		applyUnguarded !== applyCatch && !!applyMutant.escaped && applyMutant.escaped.code === "ERR_HTTP_HEADERS_SENT");
 
 	const noCap = LIB_SRC.replace('if (raw.length > EMAIL_MAX_LENGTH) return emailRefusal("too_long");', "");
 	ok("MUTANT: removing the length cap is caught by the source-order check",
