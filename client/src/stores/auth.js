@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 // store under plain Node, which (unlike Vite) will not guess an extension. Same
 // reason lib/payoutPeriod.js imports './monthLabel.js'.
 import { useApi } from '../composables/useApi.js'
+import { useSocket } from '../composables/useSocket.js'
 import {
   ACTION,
   BACKGROUND,
@@ -304,6 +305,12 @@ export const useAuthStore = defineStore('auth', {
 
     async login(username, password) {
       const data = await api.post('/api/auth/login', { username, password })
+      // The server has replaced this browser's session and ended the live-update
+      // socket opened on it. Drop this tab's socket and the room name it
+      // registered too, so the next page opens a fresh one as the person who just
+      // signed in (connect() is a no-op while a socket exists). Only after the
+      // POST succeeded: a refused sign-in changed no session.
+      useSocket().disconnect()
       sessionGen++
       stampEpoch() // a new owner for the cookie: other tabs' saved users are stale
       // A fresh sign-in supersedes a logout that never reached the server: this
@@ -315,6 +322,7 @@ export const useAuthStore = defineStore('auth', {
 
     async setup(username, password, email) {
       const data = await api.post('/api/auth/setup', { username, password, email })
+      useSocket().disconnect() // as in login(): setup replaced this browser's session
       sessionGen++
       stampEpoch()
       removeKey('local', PENDING_LOGOUT_KEY)
@@ -357,6 +365,10 @@ export const useAuthStore = defineStore('auth', {
     async logout() {
       sessionGen++
       this._stopReconnect()
+      // Live updates stop now, whatever the request below does: locally the
+      // person asked to leave. Every logout button (the sidebar, the driver app,
+      // the password-change screen) comes through here.
+      useSocket().disconnect()
       // Recorded BEFORE the request, so a tab closed mid-request still finishes the
       // logout on its next load. Cleared only once the server confirms it.
       writeKey('local', PENDING_LOGOUT_KEY, serializePendingLogout(Date.now()))

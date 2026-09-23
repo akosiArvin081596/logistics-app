@@ -390,8 +390,13 @@ const IO_HANDLER = (() => {
 	if (a < 0) return null;
 	return liftFrom(SRC.slice(SRC.indexOf("(socket) => {", a)), "(socket) => {");
 })();
+// Shaped like a socket.io Socket where the handler reads it: `request` is the
+// handshake request (express-session sets sessionID on it) and `data` is the
+// per-socket object socket.io always provides, where the handler records who
+// the socket is.
 function fakeSocket(user) {
-	const s = { request: { session: user ? { user } : {} }, rooms: new Set(), disconnected: false, handlers: {} };
+	const sessionID = user ? `sid-${user.id}` : "sid-anonymous";
+	const s = { request: { session: user ? { user } : {}, sessionID }, data: {}, rooms: new Set(), disconnected: false, handlers: {} };
 	s.disconnect = () => { s.disconnected = true; };
 	s.on = (ev, cb) => { s.handlers[ev] = cb; };
 	s.join = (room) => { s.rooms.add(room); };
@@ -402,7 +407,11 @@ function socketProbe(handlerSrc) {
 	const b = fakeUsers();
 	b.add(7, 1); b.add(8, 0); b.add(9, 1);
 	const { currentMustChangePassword } = buildFlag(b.db);
-	const onConnection = new Function("currentMustChangePassword", `return (${handlerSrc});`)(currentMustChangePassword);
+	// The handler also asks the session store whether the handshake's session
+	// still exists. Every session in this probe does; a session that ended is
+	// scripts/test-session-sockets.js's subject, against the real store.
+	const liveSessionIds = (sids) => new Set(sids);
+	const onConnection = new Function("currentMustChangePassword", "liveSessionIds", `return (${handlerSrc});`)(currentMustChangePassword, liveSessionIds);
 	const p = {};
 	const forced = fakeSocket({ id: 7, username: "LogisX-2609", role: "Driver", driverName: "Jane Roe", mustChangePassword: true });
 	onConnection(forced);

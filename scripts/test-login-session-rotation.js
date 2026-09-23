@@ -223,7 +223,15 @@ function buildSessionMiddleware(db, StoreClass) {
 }
 
 const buildStamp = (db) => new Function("db", `${STAMP_SRC}\nreturn stampLastLogin;`)(db);
-const buildPurge = (db) => new Function("db", `${PURGE_SRC}\nreturn purgeUserSessions;`)(db);
+// The socket half of the purge and of the rotation (disconnectUserSockets,
+// disconnectSessionSockets) is injected as a recorder: there are no sockets in
+// this runner. scripts/test-session-sockets.js drives the real ones, over real
+// Socket.IO connections, against these same lifted routes.
+const socketCalls = [];
+const disconnectUserSocketsStub = (userId, opts) => { socketCalls.push(["user", userId, opts]); return 0; };
+const disconnectSessionSocketsStub = (sid) => { socketCalls.push(["session", sid]); return 0; };
+const buildPurge = (db) =>
+	new Function("db", "disconnectUserSockets", `${PURGE_SRC}\nreturn purgeUserSessions;`)(db, disconnectUserSocketsStub);
 const buildFlagRefresh = (db) =>
 	new Function("db", `${CURRENT_FLAG_SRC}\n${REFRESH_FLAG_SRC}\nreturn refreshPasswordChangeFlag;`)(db);
 // Bare, nothing injected, the way the other guard runners lift it.
@@ -238,12 +246,12 @@ async function startApp({ db, loginSrc = LOGIN_SRC, bcryptImpl = bcrypt, withSet
 	app.use(buildFlagRefresh(db));
 	const stampLastLogin = buildStamp(db);
 	const passThrough = (req, res, next) => next();
-	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", loginSrc)(
-		app, passThrough, db, bcryptImpl, stampLastLogin);
+	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", loginSrc)(
+		app, passThrough, db, bcryptImpl, stampLastLogin, disconnectSessionSocketsStub);
 	new Function("app", SESSION_ROUTE_SRC)(app);
 	if (withSetup) {
-		new Function("app", "setupLimiter", "db", "bcrypt", "usersEverExisted", "SETUP_RECOVERY_TOKEN", "safeEqual", "logAudit", "stampLastLogin", SETUP_SRC)(
-			app, passThrough, db, bcryptImpl, () => false, "", () => false, () => {}, stampLastLogin);
+		new Function("app", "setupLimiter", "db", "bcrypt", "usersEverExisted", "SETUP_RECOVERY_TOKEN", "safeEqual", "logAudit", "stampLastLogin", "disconnectSessionSockets", SETUP_SRC)(
+			app, passThrough, db, bcryptImpl, () => false, "", () => false, () => {}, stampLastLogin, disconnectSessionSocketsStub);
 	}
 	const requireAuth = buildRequireAuth();
 	app.get("/api/whoami", requireAuth, (req, res) => res.json({ id: req.session.user.id }));
@@ -422,6 +430,8 @@ async function sectionRotation() {
 	const s1 = sidOf(first.cookie), s2 = sidOf(second.cookie);
 	ok(second.status === 200, `§1 a sign-in from an already-signed-in browser must succeed (got ${second.status})`);
 	ok(!!s2 && s2 !== s1, "§1 THE SESSION ID MUST CHANGE across login");
+	ok(socketCalls.some(([kind, sid]) => kind === "session" && sid === s1),
+		"§1 login must end the live-update sockets of the session it replaced, named by the ID the request arrived with");
 	ok(storedUser(db, s1) === undefined, "§1 the session row the request arrived with must be destroyed in the store");
 	const oldProbe = await probeSession(app, first.cookie);
 	ok(oldProbe.json && oldProbe.json.authenticated === false, "§1 the pre-login ID must no longer authenticate at GET /api/auth/session");
@@ -508,6 +518,8 @@ async function sectionFlags() {
 		// must still be findable by it, or a password reset would leave it alive.
 		const purgeUserSessions = buildPurge(db);
 		ok(purgeUserSessions(c.expect.id) >= 1, `§2 ${c.who}: purgeUserSessions() must find the rotated session by user id`);
+		ok(socketCalls.some(([kind, uid]) => kind === "user" && uid === c.expect.id),
+			`§2 ${c.who}: ...and end that user's live-update sockets with it`);
 		const after = await probeSession(app, r.cookie);
 		ok(after.json && after.json.authenticated === false, `§2 ${c.who}: ...and revoking it must sign that cookie out`);
 	}
