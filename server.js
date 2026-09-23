@@ -2939,12 +2939,18 @@ async function routemateSyncTelemetry() {
 			const statusCol = findCol(headers, /^status$/i) || findCol(headers, /status/i);
 			const driverCol = findCol(headers, /^driver$/i) || findCol(headers, /driver/i);
 			if (loadIdCol && statusCol && driverCol) {
+				// A soft-deleted load keeps its active status on the sheet, so the
+				// status test alone lets it win the driver's slot — and with it the
+				// public tracker room and the geofence writes. The shared cache no
+				// longer happens to hide it (see liveJobTrackingView()); skip it here.
+				const deletedIds = getDeletedLoadIds();
 				for (const row of (jt.data || [])) {
 					const d = (row[driverCol] || "").toString().trim().toLowerCase();
 					const s = (row[statusCol] || "").toString().trim();
 					const lid = (row[loadIdCol] || "").toString().trim();
 					if (!d || !lid) continue;
 					if (!activeRe.test(s)) continue;
+					if (deletedIds.has(lid.toLowerCase().replace(/^#/, ""))) continue;
 					if (!loadIdByDriver[d]) loadIdByDriver[d] = lid;
 					(activeLoadsByDriver[d] = activeLoadsByDriver[d] || []).push({ loadId: lid, status: s });
 				}
@@ -19903,7 +19909,10 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 		const driverCol = findCol(jt.headers, /^driver$/i);
 		const truckCol = findCol(jt.headers, /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i);
 		const completedRe = /^(delivered|completed|pod received)$/i;
-		jt.data.forEach((r) => {
+		// Dropped loads never count (the dashboard's rule). This used to lean on
+		// the shared cache having been filtered in place by another route —
+		// usually, not always; see liveJobTrackingView().
+		excludeDroppedLoads(jt.data, jt.headers).forEach((r) => {
 			const st = statusCol ? (r[statusCol] || "").trim() : "";
 			if (!completedRe.test(st)) return;
 			const driver = driverCol ? normalizeDriverName(r[driverCol]) : "";
@@ -27408,10 +27417,11 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 	try {
 		// Use shared 60s Job Tracking cache (invalidated by mutations) instead of
 		// hitting Sheets on every dashboard load.
-		const jobTracking = await getJobTrackingCached();
 		// Filter out soft-deleted + cancelled loads BEFORE any aggregation so every
-		// downstream KPI, list, and revenue total sees the same consistent view.
-		jobTracking.data = excludeDroppedLoads(jobTracking.data, jobTracking.headers);
+		// downstream KPI, list, and revenue total sees the same consistent view —
+		// on a request-local copy, because enrichLocations() below annotates these
+		// rows and the cache is shared (see liveJobTrackingView()).
+		const jobTracking = liveJobTrackingView(await getJobTrackingCached());
 		const carrierDB = getCarrierDBFromSQLite();
 
 		// Identify key columns
@@ -28007,6 +28017,28 @@ function excludeDroppedLoads(rows, headers, deletedIds) {
 		if (CANCELED_STATUS_RE.test(st)) return false;
 		return true;
 	});
+}
+
+// ⚠️ getJobTrackingCached() hands EVERY caller the SAME object for up to 60 s,
+// so writing to it — `jobTracking.data = …`, or `row._x = …` on one of its rows
+// — rewrites what every other caller reads in that window. Four routes did:
+// /api/dashboard, /api/driver/:driverName, /api/investor and /api/financials
+// each ran `jobTracking.data = excludeDroppedLoads(…)` on the shared object, so
+// for up to a minute afterwards cancelled and soft-deleted loads vanished for
+// the callers that deliberately keep them (reconcileRateCons() then reports a
+// cancelled load as an ingestion gap), and the dashboard's _pickupLocation and
+// the driver view's _docCount / _queuePosition annotations stuck to cached
+// rows. Use this instead: live rows only (the excludeDroppedLoads() rule),
+// fresh arrays, and every row a shallow copy — a full copy, since parseSheet()
+// rows hold only strings — so a route may filter, sort and annotate freely.
+// scripts/test-jt-cache-isolation.js fails if a caller writes to the cache.
+function liveJobTrackingView(jt) {
+	const headers = (jt && jt.headers) || [];
+	return {
+		...jt,
+		headers: [...headers],
+		data: excludeDroppedLoads((jt && jt.data) || [], headers).map((r) => ({ ...r })),
+	};
 }
 
 // Returns { normalizedDriverName: { remove: Set<"YYYY-MM-DD">, add: Set<"YYYY-MM-DD"> } }
@@ -28670,9 +28702,10 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 		// rest of the load-aggregating endpoints (/api/dashboard, /api/investor,
 		// /api/financials, /api/public/track). Cold reads still hit Sheets, but
 		// warm reads now respond in ~10ms instead of 2-5s, and drop cancelled +
-		// soft-deleted rows the same way the admin KPIs do.
-		const jobTracking = await getJobTrackingCached();
-		jobTracking.data = excludeDroppedLoads(jobTracking.data, jobTracking.headers);
+		// soft-deleted rows the same way the admin KPIs do. A request-local copy:
+		// the _docCount / _queuePosition annotations below must not land on the
+		// shared cache (see liveJobTrackingView()).
+		const jobTracking = liveJobTrackingView(await getJobTrackingCached());
 		const carrierDB = getCarrierDBFromSQLite();
 
 		// Find driver column in Job Tracking. Regex covers the common
@@ -30731,12 +30764,16 @@ async function ingestLinxupPosition(pos) {
 			const driverCol = findCol(headers, /^driver$/i) || findCol(headers, /driver/i);
 			const activeRe = /^(assigned|dispatched|heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
 			if (loadIdCol && statusCol && driverCol) {
+				// Soft-deleted loads keep their active status — skip them, exactly as
+				// the Routemate path does (see routemateSyncTelemetry()).
+				const deletedIds = getDeletedLoadIds();
 				for (const r of (jt.data || [])) {
 					if ((r[driverCol] || "").toString().trim().toLowerCase() !== driverLower) continue;
 					const s = (r[statusCol] || "").toString().trim();
 					if (!activeRe.test(s)) continue;
 					const lid = (r[loadIdCol] || "").toString().trim();
 					if (!lid) continue;
+					if (deletedIds.has(lid.toLowerCase().replace(/^#/, ""))) continue;
 					if (!activeLoadId) activeLoadId = lid;
 					driverActiveLoads.push({ loadId: lid, status: s });
 				}
@@ -36950,6 +36987,9 @@ function checkGeofence(lat, lng, loadData, headers, loadId) {
 // trigger so a single noisy ping can't flip status mid-highway-pass.
 async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, routemateVehicleId, speedMps }) {
 	if (!latitude || !longitude || !driverName || !loadId) return null;
+	// Never advance a soft-deleted load — its sheet row keeps its old status.
+	// Both location paths already skip them; this holds for any future caller.
+	if (getDeletedLoadIds().has(String(loadId).trim().toLowerCase().replace(/^#/, ""))) return null;
 	try {
 		const jt = await getJobTrackingCached();
 		const headers = jt.headers;
@@ -42201,10 +42241,10 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 // GET /api/investor — Aggregated financial data for investor view
 app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
-		const jobTracking = await getJobTrackingCached();
 		// Drop soft-deleted + cancelled loads before any aggregation so investor
-		// dashboards match the admin KPIs exactly.
-		jobTracking.data = excludeDroppedLoads(jobTracking.data, jobTracking.headers);
+		// dashboards match the admin KPIs exactly — on a request-local copy, never
+		// the shared cache (see liveJobTrackingView()).
+		const jobTracking = liveJobTrackingView(await getJobTrackingCached());
 		const carrierDB = getCarrierDBFromSQLite();
 
 		// Super Admin can pass ?as_user_id=N to preview a specific investor's
@@ -45836,10 +45876,10 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			return res.status(400).json({ error: "month must be in YYYY-MM format" });
 		}
 
-		const jobTracking = await getJobTrackingCached();
 		// Drop soft-deleted + cancelled loads before any aggregation so the P&L
-		// numbers match the dashboard KPIs exactly.
-		jobTracking.data = excludeDroppedLoads(jobTracking.data, jobTracking.headers);
+		// numbers match the dashboard KPIs exactly — on a request-local copy, never
+		// the shared cache (see liveJobTrackingView()).
+		const jobTracking = liveJobTrackingView(await getJobTrackingCached());
 
 		// Column resolution (same regex as investor endpoint)
 		const jtRateCol = findCol(jobTracking.headers, /payment|rate|amount|revenue/i);
