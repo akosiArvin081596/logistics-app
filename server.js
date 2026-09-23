@@ -76,6 +76,12 @@ const eldMiles = require("./lib/eld-miles");
 const loadHaul = require("./lib/load-haul");
 const poiFuelStops = require("./lib/poi-fuel-stops");
 const rateconNormalize = require("./lib/ratecon-normalize");
+// THE load-id comparison key: trim, lowercase, drop ONE leading "#". It is the rule
+// DELETE /api/loads/:loadId stores a soft-delete under and deduplicateLoads() keys
+// on, so "#540935268" and "540935268" are one load. Anything that compares load
+// ids to decide money — excludeDroppedLoads(), the weekly invoice — goes through
+// this one function rather than its own `.toLowerCase()`.
+const { normalizeLoadId } = require("./lib/ratecon-load");
 const receiptDuplicates = require("./lib/receipt-duplicates");
 const { geminiFailure } = require("./lib/gemini-errors");
 const { csvRows } = require("./lib/csv");
@@ -12445,6 +12451,167 @@ async function appendInvoiceAdjustmentAddendum(invoiceRow) {
 	fs.writeFileSync(servedPath, outBytes);
 }
 
+// ============================================================
+// WHICH COMPLETED LOADS A WEEKLY INVOICE BILLS — one rule, two readers
+// ============================================================
+// generateInvoiceHandler() bills what selectInvoiceWeekLoads() returns, and the
+// Friday batch's coverage check, driversWithCompletedLoadsInWeek(), asks the same
+// per-row question through invoiceWeekVerdict(). They used to be two hand-copied
+// filters, and the verifier's own comment records what a copy costs: while it
+// shared the handler's UTC-day bug it was blind to exactly the drivers it exists
+// to catch. One verdict now, so "worked this week" and "billed this week" cannot
+// drift apart.
+//
+// Three rules the old inline filter got wrong (measured read-only on production
+// 2026-09-23, 481 Job Tracking rows, 438 of them completed):
+//
+//  1. SOFT-DELETED LOADS MATCH ON normalizeLoadId(), BOTH SIDES (loadKeySet()).
+//     DELETE /api/loads/:loadId stores "#X" as "x"; this compared the raw
+//     lowercased cell, so a soft-deleted "#X" row was still billed. Preventive:
+//     deleted_loads holds one test row, which matches the same sheet row either way.
+//
+//  2. ONE LOAD, ONE LINE. A rate-con arrives as two emails, so 87 load ids carry
+//     a second sheet row, and 37 of those pairs are spelled both ways ("#X" beside
+//     "X"). Deduplicating on the raw text billed BOTH spellings — ten of Lesline
+//     Johnson's invoices (INV-LJ-2026W21 … W37) list the same 31 loads twice, and
+//     for a percentage-paid driver that is the load's revenue counted twice. The
+//     key is normalizeLoadId(), the one deduplicateLoads() and the delete route
+//     use; the LAST billable row still wins, as it did.
+//
+//  3. NO COMPLETION DATE, NO WEEK. A completed row belongs to the week of its
+//     Status Update Date (unchanged), else its Completion Date — the app stamps
+//     both, with one value, on every completed transition, so that is the same
+//     fact and not a guess. A row with NEITHER was "included to be safe", which
+//     put it in EVERY week: 283 of the 438 completed rows are in that state (279
+//     rows of 2025 history from before status logging, four from Jan–Feb 2026),
+//     and none has a Completion Date either, so every weekly invoice re-listed
+//     them. A day-rate driver is paid $0 for them — their
+//     pickup→drop-off windows clip to nothing — which is why this hid behind a
+//     weekly $0 Draft (Lesline Johnson) and a weekly WORKED-BUT-UNBILLED alarm
+//     (Kenrick Davis, 25 undated rows, not on the roster). A percentage driver is
+//     paid on the load's REVENUE, i.e. for every one of them, every week. Such a
+//     row is now billed in NO week and reported instead: `warnings` on the
+//     response, and `undatedInWeek` — which the batch escalates — for one whose
+//     scheduled window sits in the billing week and so was probably worked in it.
+//     ⚠️ Deliberately NOT the Drop-off Appointment as a fallback. It is the
+//     SCHEDULED date, typed by hand, and wrong often enough to matter (live
+//     September 2026 rows carry "9/4/2024" and "9/21/2020"); GET
+//     /api/loads/completed/export refuses the same substitution for the same
+//     reason. It is only ever used below to decide whether a miss is worth an
+//     alert, never to place a load in a week.
+const INVOICE_COMPLETED_RE = /delivered|completed|pod received/i;
+
+// Column resolution for the weekly invoice. Every regex here is the one the
+// handler has always used, so no row changes columns; they live in one place so
+// the handler, the verdict and the batch check read the same cells.
+function invoiceWeekColumns(headers) {
+	const find = (re) => (headers || []).find((h) => re.test(h)) || null;
+	// First header IN SHEET ORDER matching any alternative — "Status Update Date"
+	// on production (col 21, ahead of "Completion Date" at 22).
+	const dateCol = find(/status.*update.*date|completion.*date|drop.?off.*date|deliv.*date/i) || find(/date/i);
+	const completionCol = find(/completion.*date/i);
+	return {
+		driverCol: find(/driver/i),
+		// Match "Job Status" as well as plain "Status" — the production sheet uses
+		// "Job Status", and the anchored /^status$/i from before did not match it,
+		// so every row was rejected as "No completed loads".
+		statusCol: find(/^(job[\s._-]?)?status$/i),
+		loadIdCol: find(/load.?id|job.?id/i),
+		dateCol,
+		fallbackDateCol: completionCol && completionCol !== dateCol ? completionCol : null,
+		pickupCol: find(/pickup.*appo|pickup.*date/i),
+		dropoffCol: find(/drop.?off.*appo|drop.?off.*date|deliv.*appoint/i),
+	};
+}
+
+// The day a completed row was completed, or "" when neither date column reads.
+//
+// sheetDayKey, NOT new Date(raw).toISOString() — this is the site sheetDayKey's
+// own header calls out by name ("invoice-week filter … an outright conversion to
+// UTC. Same shift."). weekStart/weekEnd are HOUSTON calendar days from
+// getWeekRange; turning the cell into a UTC day shifted an RFC-2822 evening
+// delivery forward a day, so a Friday 20:15 Houston delivery fell out of its week
+// and the driver was paid one load short. Literal is the right semantic: since the
+// 2026-08-03 cutover the server stamps Houston time, so the day written in the
+// cell IS the business day.
+function invoiceCompletionDay(row, cols) {
+	return (cols.dateCol && sheetDayKey(row[cols.dateCol]))
+		|| (cols.fallbackDateCol && sheetDayKey(row[cols.fallbackDateCol]))
+		|| "";
+}
+
+// One row's standing for the billing week weekStart..weekEnd:
+//   "bill"        completed, live, completed inside the week
+//   "other-week"  completed, live, completed in some other week
+//   "undated"     completed, live, no readable completion date — billed in NO week
+//   "deleted"     completed, soft-deleted (deletedKeys comes from loadKeySet())
+//   "open"        not completed
+// The status test is the handler's historical one, unanchored, kept as it was.
+function invoiceWeekVerdict(row, cols, weekStart, weekEnd, deletedKeys) {
+	if (!cols.statusCol || !INVOICE_COMPLETED_RE.test(row[cols.statusCol] || "")) return "open";
+	const key = cols.loadIdCol ? normalizeLoadId(row[cols.loadIdCol]) : "";
+	if (key && deletedKeys.has(key)) return "deleted";
+	const day = invoiceCompletionDay(row, cols);
+	if (!day) return "undated";
+	return day >= weekStart && day <= weekEnd ? "bill" : "other-week";
+}
+
+// What ONE driver's invoice for weekStart..weekEnd bills, and what it could not
+// place:
+//   loads   one row per load, keyed on normalizeLoadId() (a row with no Load ID
+//           keys on its sheet row, as before); the LAST billable row wins.
+//   undated completed rows with no completion date, one per load — minus any load
+//           another copy of which IS dated (that load is billed in its own week,
+//           so it is not missing). Each carries `scheduledInWeek`: its pickup or
+//           drop-off appointment falls in the billing week, so it was probably
+//           worked in it and its absence is worth a human's attention.
+function selectInvoiceWeekLoads(data, headers, driverName, weekStart, weekEnd, deletedKeys) {
+	const cols = invoiceWeekColumns(headers);
+	const billed = new Map();
+	const undated = new Map();
+	const dated = new Set();
+	if (!cols.driverCol) return { cols, loads: [], undated: [] };
+	const nameNorm = normalizeDriverName(driverName);
+	for (const row of data || []) {
+		if (normalizeDriverName(row[cols.driverCol]) !== nameNorm) continue;
+		const verdict = invoiceWeekVerdict(row, cols, weekStart, weekEnd, deletedKeys);
+		const key = (cols.loadIdCol && normalizeLoadId(row[cols.loadIdCol])) || `_row_${row._rowIndex}`;
+		if (verdict === "bill") { billed.set(key, row); dated.add(key); }
+		else if (verdict === "other-week") dated.add(key);
+		else if (verdict === "undated") undated.set(key, row);
+	}
+	for (const key of dated) undated.delete(key);
+	const inWeek = (v) => { const d = v ? sheetDayKey(v) : ""; return !!d && d >= weekStart && d <= weekEnd; };
+	return {
+		cols,
+		loads: [...billed.values()],
+		undated: [...undated.values()].map((row) => ({
+			row,
+			loadId: String((cols.loadIdCol && row[cols.loadIdCol]) || "").trim() || `(sheet row ${row._rowIndex})`,
+			scheduledInWeek: inWeek(cols.pickupCol && row[cols.pickupCol]) || inWeek(cols.dropoffCol && row[cols.dropoffCol]),
+		})),
+	};
+}
+
+// The response `warnings` for selectInvoiceWeekLoads()'s undated rows. Two
+// sentences, because they mean different things: a load scheduled in this week is
+// probably unpaid work; the rest (on production, 2025 history) is billed by no
+// weekly invoice and is listed, capped, so it stays visible without drowning the
+// response.
+function invoiceWeekWarnings(undated) {
+	const out = [];
+	const list = (ids) => ids.slice(0, 10).join(", ") + (ids.length > 10 ? `, and ${ids.length - 10} more` : "");
+	const inWeek = undated.filter((u) => u.scheduledInWeek).map((u) => u.loadId);
+	const outside = undated.filter((u) => !u.scheduledInWeek).map((u) => u.loadId);
+	if (inWeek.length) {
+		out.push(`NOT BILLED: ${list(inWeek)} ${inWeek.length === 1 ? "is" : "are"} completed and scheduled in this week but ${inWeek.length === 1 ? "has" : "have"} no Status Update Date or Completion Date. Set the date on Job Tracking, then regenerate this invoice (or adjust it if it is already submitted).`);
+	}
+	if (outside.length) {
+		out.push(`${outside.length} completed load${outside.length === 1 ? "" : "s"} scheduled outside this week ${outside.length === 1 ? "has" : "have"} no Status Update Date or Completion Date, so no weekly invoice bills ${outside.length === 1 ? "it" : "them"}: ${list(outside)}.`);
+	}
+	return out;
+}
+
 // POST /api/invoices/generate — driver generates weekly invoice
 app.post("/api/invoices/generate", requireAuth, generateInvoiceHandler);
 // Named (not an inline arrow) so the Friday auto-invoice batch can invoke this
@@ -12453,6 +12620,20 @@ app.post("/api/invoices/generate", requireAuth, generateInvoiceHandler);
 async function generateInvoiceHandler(req, res) {
 	try {
 		const user = req.session.user;
+		// ⚠️ SUPER ADMIN, OR A DRIVER FOR THEMSELVES — NOTHING ELSE. The route is
+		// mounted with requireAuth only, and the one check below this used to be the
+		// whole gate: it named the Driver role, so a Dispatcher or an Investor fell
+		// straight through it with any `driver` in the body. That is the issue #228
+		// shape GET /api/invoices/:id/pdf and PUT /api/invoices/:id/submit were fixed
+		// for, and here it was worse than a read: the call deletes and re-mints the
+		// driver's Draft, and the response (and the 409 for a settled week) carries
+		// the full invoice row — pay, load ids, and render_data with the driver's
+		// home address, phone and bank name. An Investor is an EXTERNAL party. No
+		// client surface needs anyone else: the only caller is the driver app (Driver
+		// and Super Admin), and the Friday batch runs as a Super Admin system actor.
+		if (user.role !== "Super Admin" && user.role !== "Driver") {
+			return res.status(403).json({ error: "Forbidden" });
+		}
 		const driverName = user.role === "Driver" ? user.driverName : (req.body.driver || "");
 		if (!driverName) return res.status(400).json({ error: "Driver name required" });
 
@@ -12491,69 +12672,40 @@ async function generateInvoiceHandler(req, res) {
 			return obj;
 		});
 
-		const driverCol = headers.find(h => /driver/i.test(h));
-		// Match "Job Status" as well as plain "Status" — the production sheet
-		// uses "Job Status" while the anchored /^status$/i from before did
-		// not match it, causing statusCol to be undefined and the whole
-		// week filter to reject every row with "No completed loads".
-		const statusCol = headers.find(h => /^(job[\s._-]?)?status$/i.test(h));
-		const loadIdCol = headers.find(h => /load.?id|job.?id/i.test(h));
-		const dateCol = headers.find(h => /status.*update.*date|completion.*date|drop.?off.*date|deliv.*date/i.test(h))
-			|| headers.find(h => /date/i.test(h));
-
-		// Filter completed loads for this driver in the week.
-		// Tolerate internal-whitespace variants (e.g. "Shorn  King" with double
-		// space) in the sheet — exact equality silently dropped real deliveries
-		// when older sheet rows had a typo'd double space.
-		const completedRe = /delivered|completed|pod received/i;
+		// Which completed loads this invoice bills: selectInvoiceWeekLoads() above,
+		// shared with the Friday batch's coverage check. Soft-deleted and duplicate
+		// rows match on normalizeLoadId() (the sheet spells one load "#X" and "X"),
+		// and a completed row with no completion date is billed in NO week and
+		// reported — it used to be billed in every one. The driver match tolerates
+		// internal-whitespace variants ("Shorn  King"): exact equality silently
+		// dropped real deliveries when older rows had a typo'd double space. The
+		// invoice reads the sheet directly, not through excludeDroppedLoads(), so
+		// the soft-delete filter is applied here, from the same loadKeySet().
+		const week = selectInvoiceWeekLoads(data, headers, driverName, weekStart, computedWeekEnd, loadKeySet(getDeletedLoadIds()));
+		const { statusCol, loadIdCol } = week.cols;
+		if (!week.cols.dateCol) {
+			// No date column at all places no load in any week. The old filter billed
+			// EVERY completed load ever in that case; refuse loudly instead — the
+			// batch reports a 500 as an error, where a 400 would read as "no loads".
+			return res.status(500).json({
+				error: "Job Tracking has no completion-date column, so no load can be placed in a billing week.",
+				code: "INVOICE_WEEK_DATE_UNRESOLVED",
+			});
+		}
 		const nameLower = driverName.toLowerCase();
 		const nameNorm = normalizeDriverName(driverName);
-		// Don't bill soft-deleted loads. The invoice reads the sheet directly
-		// (not via the excludeDroppedLoads path the KPI endpoints use), so apply
-		// the same deleted_loads filter here for consistency.
-		const deletedIds = getDeletedLoadIds();
-		const weekLoads = data.filter(row => {
-			if (!driverCol || normalizeDriverName(row[driverCol]) !== nameNorm) return false;
-			if (!statusCol || !completedRe.test(row[statusCol])) return false;
-			const lidLc = loadIdCol ? (row[loadIdCol] || "").toString().trim().toLowerCase() : "";
-			if (lidLc && deletedIds.has(lidLc)) return false;
-			if (!dateCol) return true; // if no date column, include all completed
-			// Parse date and check if in week range
-			const rawDate = (row[dateCol] || "").replace(/^date:\s*/i, "").trim();
-			if (!rawDate) return true; // no date? include to be safe
-			// sheetDayKey, NOT new Date(raw).toISOString() — this is the site
-			// sheetDayKey's own header calls out by name ("invoice-week filter …
-			// an outright conversion to UTC. Same shift.").
-			//
-			// weekStart/computedWeekEnd are HOUSTON calendar days from
-			// getWeekRange. The old code turned the sheet cell into a UTC day, so
-			// an RFC-2822 stamp carrying an offset — the most common shape on
-			// completed rows — shifted forward a day on evening deliveries. A
-			// Friday 20:15 Houston delivery became the next day and fell outside
-			// weekEnd, so loadsCount was short by one and the driver was paid
-			// short by one load's rate on the PDF they receive. The autogen batch
-			// fires at 19:00 CT Friday, i.e. inside that window by design.
-			//
-			// Literal is the right semantic, not a workaround: since the
-			// 2026-08-03 cutover the server stamps Houston time, so the day
-			// written in the cell IS the business day. Converting it through any
-			// zone can only move it away from that.
-			const dateStr = sheetDayKey(rawDate);
-			if (!dateStr) return true; // unparseable? include, as before
-			return dateStr >= weekStart && dateStr <= computedWeekEnd;
-		});
-
-		// Deduplicate by load ID (keep last)
-		const loadMap = new Map();
-		for (const load of weekLoads) {
-			const lid = loadIdCol ? (load[loadIdCol] || "") : "";
-			if (lid) loadMap.set(lid, load);
-			else loadMap.set(`_row_${load._rowIndex}`, load);
-		}
-		const uniqueLoads = [...loadMap.values()];
+		const uniqueLoads = week.loads;
+		const warnings = invoiceWeekWarnings(week.undated);
+		const undatedInWeek = week.undated.filter((u) => u.scheduledInWeek).map((u) => u.loadId);
 
 		if (uniqueLoads.length === 0) {
-			return res.status(400).json({ error: "No completed loads found for this week", weekStart, weekEnd: computedWeekEnd });
+			// The driver app shows only `error`, so a load that was worked this week but
+			// cannot be billed is named there — not just in `warnings`. History outside
+			// the week keeps the plain message: nothing about it is actionable this week.
+			const error = undatedInWeek.length
+				? `No completed loads with a completion date this week — ${undatedInWeek.join(", ")} ${undatedInWeek.length === 1 ? "is" : "are"} marked completed but ${undatedInWeek.length === 1 ? "has" : "have"} no Status Update Date. Ask dispatch to set it, then generate again.`
+				: "No completed loads found for this week";
+			return res.status(400).json({ error, weekStart, weekEnd: computedWeekEnd, warnings, undatedInWeek });
 		}
 
 		// Fetch expenses for this week
@@ -12592,9 +12744,10 @@ async function generateInvoiceHandler(req, res) {
 		// they agree on every shape except one: an ISO stamp with a trailing offset
 		// ("…T19:16:37Z"), which sheetDayKey converts to the Houston business day and
 		// moneySheetDate reads literally. sheetDayKey is the right one HERE because
-		// this handler's other two date readers already use it — the week filter
-		// above and driversWithCompletedLoadsInWeek() — and `completionCol` resolves
-		// to "Status Update Date", THE SAME CELL the week filter reads. Resolving
+		// this handler's week filter already uses it — invoiceCompletionDay(), which
+		// driversWithCompletedLoadsInWeek() shares through invoiceWeekVerdict() —
+		// and `completionCol` resolves to "Status Update Date", THE SAME CELL the
+		// week filter reads. Resolving
 		// that one cell two ways would admit a load to week N and then place its
 		// active day in week N±1: the exact divergence this is closing, recreated
 		// one function over. moneySheetDate is the MONTH/settlement basis, and it
@@ -12629,8 +12782,8 @@ async function generateInvoiceHandler(req, res) {
 			return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 		}
 
-		const pickupCol = headers.find(h => /pickup.*appo|pickup.*date/i.test(h));
-		const dropoffCol = headers.find(h => /drop.?off.*appo|drop.?off.*date|deliv.*appoint/i.test(h));
+		// Same two cells selectInvoiceWeekLoads() reads for `scheduledInWeek`.
+		const { pickupCol, dropoffCol } = week.cols;
 		// Used as a fallback "actual end" when the dropoff appointment is blank
 		// — common when dispatch never set a delivery appointment but the
 		// driver still completed the run. Prefer Completion Date, then Status
@@ -12928,7 +13081,7 @@ async function generateInvoiceHandler(req, res) {
 			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?"
 		).get(result.lastInsertRowid);
 		const late = isAfterDeadline(computedWeekEnd);
-		res.json({ success: true, invoice, isLate: late });
+		res.json({ success: true, invoice, isLate: late, warnings, undatedInWeek });
 	} catch (err) {
 		console.error("Invoice generation error:", err.message);
 		res.status(500).json({ error: err.message });
@@ -13025,46 +13178,36 @@ const submitDraftInvoiceStmt = db.prepare(
 );
 
 // Normalized set of drivers with a completed, non-deleted load INSIDE the billing
-// week — the roster the batch must end up billing. Mirrors the handler's
-// completed/in-week/deleted filters against the same cached sheet snapshot, so a
-// driver who worked can be cross-checked against who actually got billed.
+// week — the roster the batch must end up billing. Asks invoiceWeekVerdict(), the
+// handler's own per-row rule, against the same cached sheet snapshot, so a driver
+// who worked can be cross-checked against who actually got billed.
+//
+// The rule is SHARED, not mirrored, and that is the point. This function used to
+// re-implement the handler's filter, and each copy's bug became the other's
+// blind spot: when it shared the handler's UTC-day conversion, a driver whose
+// only completed load was a Friday-evening delivery was invisible to BOTH — no
+// invoice, no retry, no alert, and the batch logged success. Its own last line of
+// defence then read "if the week rule ever changes again, change it here too",
+// which is a drift clock, not a guarantee. What this check verifies is COVERAGE —
+// every driver the rule says worked got billed — and a verdict both sides share
+// keeps exactly that: a transient per-driver failure, a driver missing from the
+// directory, or a name mismatch still shows up here as WORKED-BUT-UNBILLED.
+//
+// It now also agrees with the handler on the two rows it used to count and the
+// handler never billed: a completed row with no completion date (it counted in
+// EVERY week — the source of the weekly "WORKED-BUT-UNBILLED (kenrick davis)"
+// alarm and its three retries), and a soft-deleted "#X" row.
 function driversWithCompletedLoadsInWeek(data, headers, weekStart, weekEnd) {
 	// getJobTrackingCached() rows are header-keyed OBJECTS (parseSheet), so index
 	// by column NAME — exactly as generateInvoiceHandler does.
-	const col = (re) => headers.find((h) => re.test(h));
-	const dCol = col(/driver/i);
-	const sCol = col(/^(job[\s._-]?)?status$/i);
-	const lCol = col(/load.?id|job.?id/i);
-	const dtCol = col(/status.*update.*date|completion.*date|drop.?off.*date|deliv.*date/i) || col(/date/i);
-	const completedRe = /delivered|completed|pod received/i;
-	const deletedIds = getDeletedLoadIds();
+	const cols = invoiceWeekColumns(headers);
+	const deletedKeys = loadKeySet(getDeletedLoadIds());
 	const out = new Set();
-	if (!dCol || !sCol) return out;
+	if (!cols.driverCol || !cols.statusCol) return out;
 	for (const row of data) {
-		const name = normalizeDriverName(row[dCol]);
+		const name = normalizeDriverName(row[cols.driverCol]);
 		if (!name) continue;
-		if (!completedRe.test(row[sCol] || "")) continue;
-		const lid = lCol ? String(row[lCol] || "").trim().toLowerCase() : "";
-		if (lid && deletedIds.has(lid)) continue;
-		if (dtCol) {
-			const raw = String(row[dtCol] || "").trim();
-			if (raw) {
-				// MUST use the same day-key as generateInvoiceHandler's week filter.
-				// This function is the safety net that cross-checks "did every
-				// driver who worked this week actually get billed" — so when it
-				// shared the handler's UTC-conversion bug it inherited the same
-				// blind spot, and a driver whose only completed load was a Friday
-				// evening delivery was invisible to BOTH. No invoice, no retry, no
-				// alert, and the batch logged success. The driver found out on
-				// payday; nothing in the system ever did.
-				//
-				// A verifier that reimplements the thing it verifies is not a
-				// verifier. If the week rule ever changes again, change it here too.
-				const ds = sheetDayKey(raw);
-				if (ds && (ds < weekStart || ds > weekEnd)) continue;
-			}
-		}
-		out.add(name);
+		if (invoiceWeekVerdict(row, cols, weekStart, weekEnd, deletedKeys) === "bill") out.add(name);
 	}
 	return out;
 }
@@ -13120,6 +13263,17 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 	const billed = new Set();   // normalized names successfully billed OR already legitimately invoiced
 	const errors = [];
 	const zeroPay = [];         // generated but $0 (bad data) — left as Draft, never auto-submitted
+	// Completed loads the handler could NOT bill because they carry no completion
+	// date, yet are scheduled inside this week — probably unpaid work. The handler
+	// reports them on both a 200 and a 400 (a driver whose ONLY load is undated gets
+	// "no loads"), so they are read before the status branch; off-roster drivers are
+	// added after the loop. Escalated, never retried: a retry cannot supply a date.
+	// ⚠️ NOT covered: an undated load whose pickup AND drop-off appointments are
+	// both blank or unreadable — nothing places it in any week, so only the
+	// handler's `warnings` name it. Alerting on those ONCE each needs a dedupe
+	// ledger (the *_alerts pattern) seeded past the 283 historical rows; a weekly
+	// alert without one would repeat the same history every Friday.
+	const undatedInWeek = [];
 	for (const driver of rosterDrivers) {
 		const norm = normalizeDriverName(driver);
 		try {
@@ -13129,6 +13283,9 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 				generateInvoiceInProcess(driver, weekEnd),
 				new Promise((r) => setTimeout(() => r({ statusCode: 504, body: { error: "timed out" } }), 90 * 1000)),
 			]);
+			if (Array.isArray(body.undatedInWeek) && body.undatedInWeek.length) {
+				undatedInWeek.push(`${driver}: ${body.undatedInWeek.join(", ")}`);
+			}
 			if (statusCode === 200 && body.invoice) {
 				created++;
 				billed.add(norm); // it was generated — covered, not "unbilled"
@@ -13151,6 +13308,27 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 			errors.push(`${driver}: ${e.message}`);
 		}
 	}
+	// A driver NOT on the roster never reaches the handler above, so their undated
+	// loads would go unreported — while their DATED loads still surface below as
+	// WORKED-BUT-UNBILLED. Read them off this batch's own snapshot through the same
+	// selector. The snapshot is deduplicated (last row per load id), so a load whose
+	// dated copy sits ABOVE an undated one can alert here although the handler would
+	// bill it; that errs toward a human looking, which is the direction to err in.
+	{
+		const cols = invoiceWeekColumns(jt.headers);
+		const onRoster = new Set(rosterDrivers.map(normalizeDriverName));
+		const offRoster = new Map();
+		for (const row of cols.driverCol ? jt.data : []) {
+			const name = normalizeDriverName(row[cols.driverCol]);
+			if (name && !onRoster.has(name) && !offRoster.has(name)) offRoster.set(name, String(row[cols.driverCol]).trim());
+		}
+		const deletedKeys = loadKeySet(getDeletedLoadIds());
+		for (const [, display] of offRoster) {
+			const ids = selectInvoiceWeekLoads(jt.data, jt.headers, display, range.weekStart, range.weekEnd, deletedKeys)
+				.undated.filter((u) => u.scheduledInWeek).map((u) => u.loadId);
+			if (ids.length) undatedInWeek.push(`${display} (not on the roster): ${ids.join(", ")}`);
+		}
+	}
 	if (submitted > 0) notifyChange("invoices");
 
 	// Coverage: every driver who WORKED this week must have been billed (or already
@@ -13159,11 +13337,12 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 	// silently skipped. `unbilled` is the retry signal (stored in the marker).
 	const unbilled = [...expected].filter((n) => !billed.has(n));
 	const problem = unbilled.length > 0;                 // retry signal (transient/coverage)
-	const needsAttention = problem || zeroPay.length > 0 || errors.length > 0;
+	const needsAttention = problem || zeroPay.length > 0 || errors.length > 0 || undatedInWeek.length > 0;
 	const summary =
 		`${submitted} generated & submitted · ${skipped} skipped (no loads)` +
 		(zeroPay.length ? ` · ${zeroPay.length} ZERO-PAY left as Draft (${zeroPay.slice(0, 6).join(", ")})` : "") +
 		(unbilled.length ? ` · ${unbilled.length} WORKED-BUT-UNBILLED (${unbilled.slice(0, 8).join(", ")})` : "") +
+		(undatedInWeek.length ? ` · UNDATED completed loads NOT billed (${undatedInWeek.slice(0, 6).join("; ")})` : "") +
 		(errors.length ? ` · ${errors.length} errored` : "");
 
 	try {
@@ -13182,7 +13361,7 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 		const detail = errors.length ? ` · Errors: ${errors.slice(0, 5).join("; ")}` : "";
 		try {
 			const title = `Weekly invoices ${needsAttention ? "— ACTION NEEDED" : "generated"} · ${range.weekStart} to ${range.weekEnd}`;
-			insertDispatchNotification.run("invoices-autogen", title, summary + detail, JSON.stringify({ weekStart: range.weekStart, weekEnd: range.weekEnd, submitted, skipped, zeroPay: zeroPay.length, unbilled: unbilled.length, errored: errors.length }));
+			insertDispatchNotification.run("invoices-autogen", title, summary + detail, JSON.stringify({ weekStart: range.weekStart, weekEnd: range.weekEnd, submitted, skipped, zeroPay: zeroPay.length, unbilled: unbilled.length, undatedInWeek: undatedInWeek.length, errored: errors.length }));
 			if (io) io.to("dispatch").emit("dispatch-notification", { type: "invoices-autogen", title, body: summary + detail });
 		} catch (e) { console.error("[invoice-autogen] notification failed:", e.message); }
 		try {
@@ -13199,6 +13378,7 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 					</div>
 					${zeroPay.length ? `<p style="margin:0 0 12px;color:#b45309;font-size:13px"><b>$0 invoices (not submitted — check dates):</b> ${escHtml(zeroPay.slice(0, 20).join(", "))}.</p>` : ""}
 					${unbilled.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:13px"><b>Needs manual review:</b> ${escHtml(unbilled.slice(0, 20).join(", "))}. Generate these from the Invoices page.</p>` : ""}
+					${undatedInWeek.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:13px"><b>Completed loads NOT billed — no Status Update Date or Completion Date:</b> ${escHtml(undatedInWeek.slice(0, 20).join("; "))}. They are scheduled in this week; set the date on Job Tracking, then regenerate or adjust the driver's invoice.</p>` : ""}
 					${errors.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:12px">Errors: ${escHtml(errors.slice(0, 10).join("; "))}</p>` : ""}
 				`,
 				ctaText: "Review Invoices",
@@ -26828,7 +27008,10 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 		if (!rawId || !/^[A-Za-z0-9\-_.#]{1,40}$/.test(rawId)) {
 			return res.status(400).json({ error: "Invalid load id" });
 		}
-		const lid = rawId.toLowerCase().replace(/^#/, "");
+		// normalizeLoadId(): the key every reader of deleted_loads compares with
+		// (excludeDroppedLoads, the weekly invoice). Same rule this line always
+		// applied — rawId is already trimmed — now spelled once, not per call site.
+		const lid = normalizeLoadId(rawId);
 
 		// Fail CLOSED before anything else: isLocked() swallows every error and
 		// answers "not locked", so an unreadable period_locks would leave the guard
@@ -26864,7 +27047,7 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 		// on load_id, so it drops all of them and the guard has to answer for all
 		// of them. Matched with the same `#`-stripped lowercasing the delete uses.
 		const matches = cols.loadIdCol
-			? jobTracking.data.filter((r) => (r[cols.loadIdCol] || "").toString().trim().toLowerCase().replace(/^#/, "") === lid)
+			? jobTracking.data.filter((r) => normalizeLoadId(r[cols.loadIdCol]) === lid)
 			: [];
 
 		if (matches.length) {
@@ -28194,9 +28377,13 @@ function excludeDroppedLoads(rows, headers, deletedIds) {
 	if (!Array.isArray(rows) || rows.length === 0) return rows || [];
 	const loadIdCol = findCol(headers || [], /load.?id|job.?id/i);
 	const statusCol = findCol(headers || [], /^(job[\s._-]?)?status$/i) || findCol(headers || [], /status/i);
-	const ids = deletedIds instanceof Set ? deletedIds : getDeletedLoadIds();
+	// normalizeLoadId() on BOTH sides. The delete route stores "#X" as "x", and
+	// the sheet spells a load both ways ("#540935268" beside "540935268"), so the
+	// old raw-lowercase compare left a soft-deleted "#X" row in revenue and pay.
+	// loadKeySet() is below; the weekly invoice uses the same pair.
+	const ids = loadKeySet(deletedIds instanceof Set ? deletedIds : getDeletedLoadIds());
 	return rows.filter((r) => {
-		const lid = loadIdCol ? (r[loadIdCol] || "").toString().trim().toLowerCase() : "";
+		const lid = loadIdCol ? normalizeLoadId(r[loadIdCol]) : "";
 		if (lid && ids.has(lid)) return false;
 		const st = statusCol ? (r[statusCol] || "").toString().trim() : "";
 		if (CANCELED_STATUS_RE.test(st)) return false;
@@ -28245,6 +28432,22 @@ function getAllExcludedDriverDays() {
 		});
 	} catch { /* table missing on first boot — fall through */ }
 	return map;
+}
+
+// Soft-deleted load ids (getDeletedLoadIds(), or any Set of ids) as
+// normalizeLoadId() COMPARISON KEYS. The stored side needs it as much as the
+// sheet side: the delete route strips the "#", but a row inserted by hand in SQL
+// need not — production's only row today was ("test load 1234", deleted_by
+// "admin (test-load cleanup)"). Blank ids are dropped so they can never match a
+// row with no Load ID. Callers: excludeDroppedLoads(), generateInvoiceHandler()
+// and driversWithCompletedLoadsInWeek() — keep it the only place this is done.
+function loadKeySet(ids) {
+	const out = new Set();
+	for (const id of ids || []) {
+		const key = normalizeLoadId(id);
+		if (key) out.add(key);
+	}
+	return out;
 }
 
 // ---------------------------------------------------------------------------
