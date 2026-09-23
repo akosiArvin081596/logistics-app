@@ -446,6 +446,173 @@ check("empty string rejected", keyOk(""), false);
 	check("...while the shipped regex refuses it", keyOk("whatever I like"), false);
 }
 
+
+// ===========================================================================
+// §6  THE ALERT LEDGER'S RE-OPEN — a recurrence must never be silenced forever
+// ===========================================================================
+//
+// WHY THIS EXISTS. `alertDuplicateReceipts()` is a STANDING-CONDITION ledger:
+// a group can be alerted, settled, and then come BACK when a fresh copy is
+// filed. Three pieces have to agree for that to work, and until 2026-09-19 they
+// did not:
+//
+//   (a) the dedupe guard   `if (seen && seen.alerted_at && !seen.resolved_at)`
+//   (b) the UPSERT         cleared `resolved_at` on a re-open...
+//   (c) the delivery stamp `... WHERE group_key = ? AND alerted_at IS NULL`
+//
+// (b) did NOT clear `alerted_at`. The stamp in (c) is deliberately gated on
+// `delivered = emailed || notified`, so when BOTH channels fail nothing is
+// stamped — correct, that is the retry design. But the row still carried the
+// PREVIOUS episode's `alerted_at` while (b) had just set `resolved_at` to NULL,
+// which is exactly the shape (a) reads as "already told you". Every later sweep
+// took the dedupe branch and THE RECURRENCE WAS NEVER REPORTED AGAIN.
+//
+// The same stale stamp also counts toward the rolling-24h cap, spending the
+// day's alert budget on an episode that was closed and a send that never landed.
+//
+// ⚠️ THE MUTANT IS THE POINT. Asserting the fixed behaviour alone proves
+// nothing — a test that never sees the bug cannot tell you the bug is gone. The
+// shipped UPSERT and a mutant with `alerted_at = NULL` stripped are driven
+// through the IDENTICAL lifecycle, and the mutant is asserted to get it WRONG.
+{
+	console.log("\n§6  expense_duplicate_alerts — settle, recur, and a failed re-open");
+
+	// ⚠️ SCOPE EVERY EXTRACTION TO THIS FUNCTION. The dedupe-guard line is
+	// character-for-character identical in alertEldFeedSilence() (server.js:2944),
+	// which copied this ledger's shape ON PURPOSE — a file-wide match finds two
+	// and cannot tell you which one it grabbed. extractFn() cannot help: it looks
+	// for `\nfunction NAME(` and both of these are `async function`.
+	function fnBody(name) {
+		const needle = `\nasync function ${name}(`;
+		const hits = SRC.split(needle).length - 1;
+		if (hits !== 1) throw new Error(`expected exactly 1 async ${name}() in server.js, found ${hits}`);
+		const start = SRC.indexOf(needle) + 1;
+		let depth = 0;
+		for (let j = SRC.indexOf("{", start); j < SRC.length; j++) {
+			if (SRC[j] === "{") depth++;
+			else if (SRC[j] === "}") { depth--; if (depth === 0) return SRC.slice(start, j + 1); }
+		}
+		throw new Error(`unbalanced braces extracting ${name}()`);
+	}
+	const FN = fnBody("alertDuplicateReceipts");
+	function one(re, label) {
+		const all = FN.match(new RegExp(re.source, "g"));
+		if (!all || all.length !== 1) {
+			throw new Error(`expected exactly 1 ${label} in alertDuplicateReceipts(), found ${all ? all.length : 0}`);
+		}
+		return FN.match(re)[0];
+	}
+
+	const ddl = extractOne(
+		/CREATE TABLE IF NOT EXISTS expense_duplicate_alerts \([\s\S]*?\n\t\)/,
+		"expense_duplicate_alerts DDL",
+	)[0];
+	// The shipped UPSERT, lifted verbatim. Executing the real string is the only
+	// thing that proves the SQL is valid at all — `node --check` parses the JS
+	// around it, never the SQL inside it. (Not hypothetical: the first cut of
+	// this fix put backticks in the SQL comment and silently terminated the
+	// template literal.)
+	// ⚠️ Capture to the END OF THE STATEMENT, never to the clause under test.
+	// Anchoring on `alerted_at = NULL` makes this extraction throw the moment
+	// someone reverts the fix — a red build, but one that says "found 0" instead
+	// of "the recurrence is silenced forever", and it skips every lifecycle
+	// assertion below. A test should fail where it means something.
+	const upsertShipped = one(/INSERT INTO expense_duplicate_alerts[\s\S]*?(?=\n\t\t`\)\.run\()/, "the UPSERT");
+	const stampSql = one(
+		/UPDATE expense_duplicate_alerts SET alerted_at = \? WHERE group_key = \? AND alerted_at IS NULL/,
+		"the delivery stamp",
+	);
+	const capSql = one(
+		/SELECT COUNT\(\*\) AS c FROM expense_duplicate_alerts WHERE alerted_at > datetime\('now', '-1 day'\)/,
+		"the rolling-24h cap query",
+	);
+	const GUARD_RE = /if \(seen && seen\.alerted_at && !seen\.resolved_at\) return \{ alerted: false, reason: "already_alerted", key \};/;
+	const guardSrc = one(GUARD_RE, "the dedupe guard");
+
+	// The duplication is deliberate; pin it so an accidental THIRD copy is loud.
+	const guardCopies = (SRC.match(new RegExp(GUARD_RE.source, "g")) || []).length;
+	check("the dedupe guard is duplicated exactly twice, on purpose", guardCopies, 2);
+	check(
+		"...and the other copy is alertEldFeedSilence()",
+		GUARD_RE.test(fnBody("alertEldFeedSilence")),
+		true,
+	);
+
+	check("the shipped UPSERT clears alerted_at", /alerted_at = NULL/.test(upsertShipped), true);
+	check("the shipped UPSERT clears resolved_at", /resolved_at = NULL/.test(upsertShipped), true);
+	check("the stamp is still gated on alerted_at IS NULL", /alerted_at IS NULL/.test(stampSql), true);
+
+	// The guard, executed rather than eyeballed.
+	const guard = new Function("seen", `const key = "k"; ${guardSrc} return null;`);
+	check("guard: alerted + unresolved  -> dedupe", guard({ alerted_at: "t", resolved_at: null }) !== null, true);
+	check("guard: alerted + RESOLVED    -> let through", guard({ alerted_at: "t", resolved_at: "t" }), null);
+	check("guard: never alerted         -> let through", guard({ alerted_at: null, resolved_at: null }), null);
+
+	// Strip exactly the clause this fix added — nothing else changes.
+	const upsertMutant = upsertShipped.replace(/resolved_at = NULL,[\s\S]*?alerted_at = NULL/, "resolved_at = NULL");
+	check("mutant really did drop the clause", /alerted_at = NULL/.test(upsertMutant), false);
+	check("...and kept everything else", /resolved_at = NULL/.test(upsertMutant), true);
+
+	const KEY = "t:LogisX-#33|2026-09-18|12000";
+	const MAX_PER_DAY = 25;
+
+	// One sweep of the shipped decision path, with the send result injected.
+	function sweepOnce(db, upsertSql, { delivered }) {
+		const seen = db
+			.prepare("SELECT group_key, alerted_at, resolved_at FROM expense_duplicate_alerts WHERE group_key = ?")
+			.get(KEY);
+		if (guard(seen) !== null) return "already_alerted";
+		if (db.prepare(capSql).get().c >= MAX_PER_DAY) return "daily_cap";
+		db.prepare(upsertSql).run(KEY, "LogisX-#33", "Howard Reddie", "2026-09-18", 120, 60, "high", "1,2", KEY);
+		if (delivered) db.prepare(stampSql).run(new Date().toISOString(), KEY);
+		return delivered ? "alerted" : "send_failed";
+	}
+	const rowOf = (db) => db.prepare("SELECT * FROM expense_duplicate_alerts WHERE group_key = ?").get(KEY);
+	const resolve = (db) =>
+		db.prepare("UPDATE expense_duplicate_alerts SET resolved_at = CURRENT_TIMESTAMP WHERE group_key = ?").run(KEY);
+
+	// Drive the IDENTICAL lifecycle through both builds.
+	function lifecycle(upsertSql) {
+		const db = new Database(":memory:");
+		db.exec(ddl);
+		const out = {};
+		out.episode1 = sweepOnce(db, upsertSql, { delivered: true });
+		out.firstSeen = rowOf(db).first_seen;
+		out.whileStanding = sweepOnce(db, upsertSql, { delivered: true });
+		resolve(db);
+		// The recurrence — and both channels are down.
+		out.reopenFailed = sweepOnce(db, upsertSql, { delivered: false });
+		out.alertedAtAfterReopen = rowOf(db).alerted_at;
+		out.capAfterReopen = db.prepare(capSql).get().c;
+		// The very next sweep is the one that decides whether this is ever told.
+		out.nextSweep = sweepOnce(db, upsertSql, { delivered: true });
+		const r = rowOf(db);
+		out.finalAlertedAt = r.alerted_at;
+		out.firstSeenPreserved = r.first_seen === out.firstSeen;
+		db.close();
+		return out;
+	}
+
+	const fixed = lifecycle(upsertShipped);
+	const buggy = lifecycle(upsertMutant);
+
+	// ── the shipped build ──────────────────────────────────────────────────
+	check("episode 1 alerts", fixed.episode1, "alerted");
+	check("a second sweep while STANDING is deduped", fixed.whileStanding, "already_alerted");
+	check("a re-open whose sends both fail reports send_failed", fixed.reopenFailed, "send_failed");
+	check("...and leaves alerted_at NULL, so the retry is live", fixed.alertedAtAfterReopen, null);
+	check("...and does NOT spend the 24h budget", fixed.capAfterReopen, 0);
+	check("THE REGRESSION: the next sweep re-alerts", fixed.nextSweep, "alerted");
+	check("...stamping alerted_at at last", fixed.finalAlertedAt !== null, true);
+	check("first_seen survives the settle-and-recur cycle", fixed.firstSeenPreserved, true);
+
+	// ── the mutant, driven through the same steps, must get it WRONG ───────
+	check("mutant: episode 1 also alerts", buggy.episode1, "alerted");
+	check("mutant: carries the stale stamp through the re-open", buggy.alertedAtAfterReopen !== null, true);
+	check("mutant: and that stale stamp poisons the 24h cap", buggy.capAfterReopen, 1);
+	check("mutant: so the recurrence is silenced FOREVER", buggy.nextSweep, "already_alerted");
+}
+
 // ---------------------------------------------------------------------------
 if (failures.length) {
 	console.log("\n─── failures ───");

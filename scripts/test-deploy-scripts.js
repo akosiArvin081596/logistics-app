@@ -28,6 +28,12 @@
  *      before anything is touched, every pm2 call closes the lock FD.
  *   §8 mutants: each property above, broken on purpose, must turn this runner
  *      red.
+ *   §9 THE NATIVE-MODULE PROBE OPENS A DATABASE. require('better-sqlite3')
+ *      passes under an ABI-mismatched Node because the binding loads lazily, on
+ *      the first `new Database()`. A module that requires fine but cannot open
+ *      a database must trigger the rebuild, in the deploy AND the rollback;
+ *      one that still cannot after the rebuild fails the deploy unrestarted.
+ *      backup.sh's probe is pinned to the same shape.
  *
  * Hermetic: a mkdtemp sandbox, local git only (the "origin" is a bare repo in
  * the sandbox), and stubbed pm2/npm/curl/ssh. No network, no VPS, no secrets.
@@ -125,7 +131,8 @@ case "$1" in
 			n=0; while [ ! -e "$STUB_HOLD_FILE" ] && [ $n -lt 600 ]; do sleep 0.05; n=$((n+1)); done
 		fi
 		echo "install-end tag=\${STUB_TAG:-}" >> "$STUB_LOG_DIR/npm.log" ;;
-	rebuild) echo "rebuild tag=\${STUB_TAG:-}" >> "$STUB_LOG_DIR/npm.log" ;;
+	rebuild) echo "rebuild tag=\${STUB_TAG:-}" >> "$STUB_LOG_DIR/npm.log"
+	         : > "$STUB_LOG_DIR/bsql-rebuilt" ;;
 	run) mkdir -p client/dist && echo "<html></html>" > client/dist/index.html
 	     echo "build tag=\${STUB_TAG:-}" >> "$STUB_LOG_DIR/npm.log" ;;
 esac
@@ -178,8 +185,27 @@ git(T, "init", "-q", "--bare", D.origin);
 git(D.seed, "remote", "add", "origin", D.origin);
 git(D.seed, "push", "-q", "origin", "main", "side");
 git(T, "clone", "-q", D.origin, D.box);
+// Stub better-sqlite3. Like the real module, require() never touches the native
+// binding: only constructing a Database does, which is why a require()-only
+// probe passes under the wrong Node. STUB_BSQL picks the behaviour:
+//   (unset)    healthy
+//   lazy-abi   require() works, construction throws until `npm rebuild` has run
+//   broken     require() works, construction always throws
 fs.mkdirSync(path.join(D.box, "node_modules", "better-sqlite3"), { recursive: true });
-fs.writeFileSync(path.join(D.box, "node_modules", "better-sqlite3", "index.js"), "module.exports = {};\n");
+fs.writeFileSync(path.join(D.box, "node_modules", "better-sqlite3", "index.js"), `"use strict";
+const fs = require("fs");
+const path = require("path");
+module.exports = class Database {
+	constructor() {
+		const mode = process.env.STUB_BSQL || "";
+		const rebuilt = fs.existsSync(path.join(process.env.STUB_LOG_DIR || "/nonexistent", "bsql-rebuilt"));
+		if (mode === "broken" || (mode === "lazy-abi" && !rebuilt)) {
+			throw new Error("was compiled against a different Node.js version using NODE_MODULE_VERSION 115. This version of Node.js requires NODE_MODULE_VERSION 127.");
+		}
+	}
+	close() {}
+};
+`);
 
 const MARKER = path.join(D.box, ".drift-heal-attempted");
 const LOCK_FILE = path.join(D.lock, `logisx-deploy${D.box.replace(/[^A-Za-z0-9._-]/g, "_")}.lock`);
@@ -395,6 +421,59 @@ const DRIFT_CASES = {
 };
 const runCases = (cases, S, tag = "") => Object.values(cases).flatMap((fn) => fn(S, tag));
 
+// ─────────────────────────────────── §9 the native-module probe opens a DB
+// Measured on the VPS 2026-09-19: /usr/bin/node v20 passes
+// require('better-sqlite3') and fails `new Database()`. A probe that only
+// requires the module therefore waves a wrong-ABI build through to a restart
+// that dies on boot.
+const PROBE_CASES = {
+	healthy(S, tag) {
+		resetBox(C1);
+		const x = runSh(S.deploy, deployEnv({ SHA: C2 }));
+		return [[x.code === 0 && !/rebuild/.test(log("npm")), `${tag}§9 a module that opens a database is not rebuilt (code ${x.code})`]];
+	},
+	lazyAbi(S, tag) {
+		resetBox(C1);
+		const x = runSh(S.deploy, deployEnv({ SHA: C2, STUB_BSQL: "lazy-abi" }));
+		return [
+			[/rebuild/.test(log("npm")) && /native ABI mismatch detected/.test(x.out), `${tag}§9 require() OK but new Database() throws → the deploy REBUILDS better-sqlite3`],
+			[x.code === 0 && head() === C2 && /restart/.test(log("pm2")), `${tag}§9 …and once rebuilt it builds and restarts normally (code ${x.code})`],
+		];
+	},
+	stillBroken(S, tag) {
+		resetBox(C1);
+		const x = runSh(S.deploy, deployEnv({ SHA: C2, STUB_BSQL: "broken" }));
+		return [[x.code !== 0 && /still fails to load after rebuild/.test(x.out) && !/restart/.test(log("pm2")),
+			`${tag}§9 still unable to open a database after the rebuild → the deploy fails and restarts nothing (code ${x.code})`]];
+	},
+	rollbackLazyAbi(S, tag) {
+		resetBox(C2);
+		const x = runSh(S.rollback, { DIR: D.box, PM2: "logistics-app", PREV: C1, STUB_BSQL: "lazy-abi" });
+		return [[x.code === 0 && /rebuild/.test(log("npm")), `${tag}§9 the rollback's probe opens a database too: require() OK + construction throws → rebuild (code ${x.code})`]];
+	},
+};
+
+// The probe's exact text, shared by the static pin and the mutants below.
+const DB_PROBE = `node -e "new (require('better-sqlite3'))(':memory:').close()"`;
+const REQUIRE_ONLY_PROBE = `node -e "require('better-sqlite3')"`;
+function probePins() {
+	const scripts = [
+		["remote-deploy.sh", REAL.deploy],
+		["remote-rollback.sh", REAL.rollback],
+		["backup.sh", fs.readFileSync(path.join(__dirname, "..", "backup.sh"), "utf8")],
+	];
+	for (const [name, text] of scripts) {
+		// Every `-e '...require(better-sqlite3)...'` line outside a comment is a
+		// capability probe, whichever quote style it uses.
+		const probes = text.split("\n").filter((l) => !/^\s*#/.test(l) && /-e\s+["'][^"']*require\(\s*["']better-sqlite3["']\s*\)/.test(l));
+		const opens = probes.filter((l) => /new \(require\(\s*["']better-sqlite3["']\s*\)\)\(\s*["']:memory:["']\s*\)\.close\(\)/.test(l));
+		ok(probes.length > 0 && opens.length === probes.length,
+			`§9 every better-sqlite3 probe in ${name} opens a database, not just require()s it (${opens.length} of ${probes.length})`);
+	}
+	ok(REAL.deploy.split(DB_PROBE).length - 1 === 2 && REAL.rollback.split(DB_PROBE).length - 1 === 1,
+		"§9 the deploy probes before and after its rebuild, the rollback once — all with the same text the mutants swap");
+}
+
 // ───────────────────────────────────────── §6 runner-side ssh helpers
 function sshScenarios() {
 	const retry = path.join(DEPLOY_DIR, "ssh-retry.sh");
@@ -494,6 +573,12 @@ async function mutants() {
 	expectCaught("rollback leaves no marker", DRIFT_CASES.rollbackMarker({ ...REAL, rollback: swap(REAL.rollback, 'printf \'%s\' "$FAILED" > "$DIR/.drift-heal-attempted"', "true") }, M));
 	expectCaught("manual pin leaves no marker", DRIFT_CASES.manualPin({ ...REAL, deploy: swap(REAL.deploy, 'printf \'%s\' "$PIN_MAIN" > "$DIR/.drift-heal-attempted"', "true") }, M));
 	expectCaught("heal prep skips its compare-and-swap", DRIFT_CASES.healPrep({ ...REAL, heal: swap(REAL.heal, '[ "$NOW" = "$EXPECT" ] ||', "true ||") }, M));
+	expectCaught("deploy probe only require()s the module (passes under the wrong Node)", PROBE_CASES.lazyAbi({ ...REAL, deploy: swap(REAL.deploy, DB_PROBE, REQUIRE_ONLY_PROBE) }, M));
+	expectCaught("rollback probe only require()s the module", PROBE_CASES.rollbackLazyAbi({ ...REAL, rollback: swap(REAL.rollback, DB_PROBE, REQUIRE_ONLY_PROBE) }, M));
+	expectCaught("deploy restarts even when the rebuild did not help", PROBE_CASES.stillBroken({
+		...REAL,
+		deploy: swap(REAL.deploy, `|| { echo "::error::better-sqlite3 still fails to load after rebuild"; exit 1; }`, `|| echo "better-sqlite3 still fails to load after rebuild"`),
+	}, M));
 }
 
 (async () => {
@@ -501,8 +586,10 @@ async function mutants() {
 	record(await lockScenario(REAL));
 	record(runCases(PIN_CASES, REAL));
 	record(runCases(DRIFT_CASES, REAL));
+	record(runCases(PROBE_CASES, REAL));
 	sshScenarios();
 	sourcePins();
+	probePins();
 	await mutants();
 })()
 	.catch((err) => failures.push(`runner crashed: ${err && err.stack ? err.stack : err}`))
