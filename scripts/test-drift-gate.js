@@ -17,7 +17,10 @@
  *   §6 the CLI end to end against a local fake GitHub API, including the
  *      $GITHUB_OUTPUT contract deploy-drift.yml reads
  *   §7 source pins — the workflow files and the gate agree (job name,
- *      concurrency group, queue: max, the heal's rollback, the retry helper)
+ *      concurrency group, queue: max, the heal's rollback, the retry helper);
+ *      no workflow or action puts an expression inside a run: script or uses a
+ *      bare `ssh -i`; backup-freshness.yml uses the shared ssh helpers under
+ *      its OWN concurrency group and its remote half never takes the deploy lock
  *   §8 mutants — a gate that heals on a staging failure, or trusts a run for
  *      another commit, must be caught by the assertions above
  *
@@ -335,6 +338,32 @@ async function cliScenarios() {
 	}
 }
 
+// Every run: script in a workflow or action file, as { line, text }. Indentation
+// aware: a script is the run: line's own value plus every following line that
+// is blank or indented deeper than the `run` key, which covers `run: |`,
+// `run: >-` and a plain one-liner alike. The text is NOT comment-stripped on
+// purpose: GitHub substitutes an expression before bash runs, so one inside a
+// shell comment is substituted too.
+function runScripts(yaml) {
+	const lines = yaml.split("\n");
+	const out = [];
+	for (let i = 0; i < lines.length; i++) {
+		const m = /^(\s*)(-\s+)?run:(.*)$/.exec(lines[i]);
+		if (!m) continue;
+		const keyCol = m[1].length + (m[2] ? m[2].length : 0);
+		const body = [m[3]];
+		let j = i + 1;
+		for (; j < lines.length; j++) {
+			const l = lines[j];
+			if (l.trim() !== "" && l.length - l.trimStart().length <= keyCol) break;
+			body.push(l);
+		}
+		out.push({ line: i + 1, text: body.join("\n") });
+		i = j - 1;
+	}
+	return out;
+}
+
 function sourcePins() {
 	const read = (p) => fs.readFileSync(path.join(ROOT, p), "utf8");
 	const deploy = read(".github/workflows/deploy.yml");
@@ -378,6 +407,75 @@ function sourcePins() {
 	const shaPins = pd.match(/sha:\s*\$\{\{\s*github\.event_name == 'push' && github\.sha \|\| '' \}\}/g) || [];
 	ok(shaPins.length === 2, `§7 both deploy.yml jobs pin a push to github.sha (found ${shaPins.length})`);
 	ok(/SHA='\$SHA'/.test(action), "§7 the action forwards SHA to remote-deploy.sh");
+
+	// ── The run: scanner checks itself first. A scanner that silently matches
+	// nothing would make every rule below pass vacuously — the quiet inverse of
+	// ci.yml's tripwire, which once matched its own comment text.
+	const fixture = [
+		"jobs:",
+		"  j:",
+		"    steps:",
+		"      - name: bad",
+		"        run: |",
+		"          echo \"${{ secrets.X }}\"",
+		"      - name: good",
+		"        env:",
+		"          X: ${{ secrets.X }}",
+		"        if: steps.a.outputs.b != 'c'",
+		"        run: |",
+		"          echo \"$X\"",
+		"      - run: echo ${{ github.head_ref }}",
+		"      - uses: ./x",
+		"        with:",
+		"          k: ${{ secrets.K }}",
+	].join("\n");
+	const fxRuns = runScripts(fixture);
+	const fxHits = fxRuns.filter((s) => /\$\{\{/.test(s.text)).map((s) => s.line).join(",");
+	ok(fxRuns.length === 3 && fxHits === "5,13",
+		`§7 the run: scanner flags an expression in a block script and in a one-liner, and nothing in env:/with:/if: (got ${fxRuns.length} scripts, hits at ${fxHits})`);
+
+	// ── Every workflow and composite action. ⚠️ An expression inside a run:
+	// script is pasted into the script TEXT before bash parses it: a secret with
+	// a quote in it breaks the step, and a value read off the box runs as shell
+	// on the runner. Secrets and step outputs reach the shell through env: only.
+	const wfFiles = fs.readdirSync(path.join(ROOT, ".github/workflows")).filter((f) => /\.ya?ml$/.test(f)).map((f) => `.github/workflows/${f}`);
+	const actionFiles = fs.readdirSync(path.join(ROOT, ".github/actions"))
+		.map((a) => `.github/actions/${a}/action.yml`)
+		.filter((p) => fs.existsSync(path.join(ROOT, p)));
+	const allFiles = [...wfFiles, ...actionFiles];
+	ok(allFiles.includes(".github/workflows/backup-freshness.yml") && allFiles.includes(".github/actions/vps-deploy/action.yml") && allFiles.length >= 5,
+		`§7 the workflow scan sees every workflow and action (got ${allFiles.join(", ")})`);
+	for (const f of allFiles) {
+		const text = read(f);
+		const hits = runScripts(text).filter((s) => /\$\{\{/.test(s.text)).map((s) => s.line);
+		ok(hits.length === 0, `§7 ${f}: no expression inside a run: script — pass it through env: (run: at line ${hits.join(", ")})`);
+		ok(!/\bssh\s+-i\b/.test(noComments(text)), `§7 ${f}: no bare \`ssh -i\` — every connection goes through scripts/deploy/ssh-retry.sh`);
+	}
+
+	// ── backup-freshness.yml: read-only, so it must never share the deploy
+	// queue or the box's deploy lock, and it reaches the box exactly the way a
+	// deploy does.
+	const backup = read(".github/workflows/backup-freshness.yml");
+	const cb = conc(backup);
+	ok(cb.group && cb.group !== cd.group && !/\$\{\{/.test(cb.group),
+		`§7 backup-freshness.yml keeps its OWN literal concurrency group, never deploy.yml's (got ${cb.group}; deploy group ${cd.group})`);
+	ok(cb.noCancel, "§7 backup-freshness.yml never cancels an in-progress check");
+	const bRuns = runScripts(backup);
+	const bNoComments = noComments(backup);
+	ok(/VPS_SSH_KEY:\s*\$\{\{\s*secrets\.VPS_SSH_KEY\s*\}\}/.test(bNoComments)
+		&& /VPS_SSH_KNOWN_HOSTS:\s*\$\{\{\s*secrets\.VPS_SSH_KNOWN_HOSTS\s*\}\}/.test(bNoComments)
+		&& bRuns.some((s) => /^\s*bash scripts\/deploy\/ssh-setup\.sh\s*$/.test(s.text)),
+		"§7 backup-freshness.yml writes its key through ssh-setup.sh, secrets in env: (the host key is pinned and an empty one is refused)");
+	const sshRun = bRuns.find((s) => /scripts\/deploy\/ssh-retry\.sh/.test(s.text));
+	ok(sshRun && /<\s*scripts\/deploy\/remote-backup-check\.sh/.test(sshRun.text),
+		"§7 backup-freshness.yml reaches the box through ssh-retry.sh, piping remote-backup-check.sh");
+	ok(!bRuns.some((s) => />\s*~\/\.ssh\//.test(s.text)), "§7 backup-freshness.yml never writes ~/.ssh itself — only ssh-setup.sh does");
+	ok(/if:\s*always\(\)\s*\n\s*run:\s*shred -u ~\/\.ssh\/deploy_key/.test(bNoComments), "§7 backup-freshness.yml always shreds the deploy key");
+	const remoteCheck = noComments(read("scripts/deploy/remote-backup-check.sh"));
+	ok(!/\bflock\b|deploy-lock|DEPLOY_LOCK_DIR|logisx-deploy/.test(remoteCheck),
+		"§7 remote-backup-check.sh never takes the deploy lock (a read-only check must not block or queue a deploy)");
+	ok(!/\bpm2\b|\bgit\b|(^|[;&|(]\s*|\s)(rm|mv|cp|truncate|tee)\s/m.test(remoteCheck),
+		"§7 remote-backup-check.sh stays read-only: no pm2, git, rm, mv, cp, truncate or tee");
 }
 
 function mutants() {

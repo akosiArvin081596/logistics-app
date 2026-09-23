@@ -154,4 +154,4 @@ But the failure mode that actually hurt was never "the backup broke" — it was 
 
 **Deliberately not self-healing.** Unlike `deploy-drift.yml` there is nothing safe to retry: a backup that failed for an unknown reason should stop and get a human, not re-run on a schedule.
 
-Logic lives in `scripts/deploy/remote-backup-check.sh`, versioned like the other remote halves and piped over ssh stdin.
+Logic lives in `scripts/deploy/remote-backup-check.sh`, versioned like the other remote halves and piped over ssh stdin. It connects through the same `scripts/deploy/ssh-setup.sh` (pinned host key, refuses an empty one) and `ssh-retry.sh` (transport-only retry) as every deploy, under **its own** concurrency group: it never queues behind a deploy, never holds one up, and never takes the box's deploy lock. `scripts/test-drift-gate.js` §7 pins all of that, plus a repo-wide rule that no workflow puts an expression inside a `run:` script.

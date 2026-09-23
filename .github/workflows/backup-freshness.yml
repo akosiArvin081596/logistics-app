@@ -17,6 +17,20 @@ name: Backup freshness
 # Deliberately NOT self-healing. Unlike deploy-drift.yml there is nothing safe
 # to retry automatically: a backup that failed for an unknown reason should stop
 # and get a human, not re-run on a schedule.
+#
+# ⚠️ Invariants. Keep all three (scripts/test-drift-gate.js §7 pins them):
+#   1. ITS OWN CONCURRENCY GROUP, never deploy.yml's. This check is read-only;
+#      sharing the deploy group would queue it behind real deploys and hold
+#      them up in turn. remote-backup-check.sh never takes the box's deploy
+#      flock either.
+#   2. THE SHARED SSH HELPERS. scripts/deploy/ssh-setup.sh pins the host key
+#      from a secret and refuses an empty one; scripts/deploy/ssh-retry.sh
+#      retries transport failures only. Same copies as every deploy and drift
+#      check, so a fix to either reaches this job too.
+#   3. NO EXPRESSIONS INSIDE A run: SCRIPT. Secrets and step outputs reach the
+#      shell through env: only. An expression is pasted into the script TEXT
+#      before bash parses it, so a secret containing a quote breaks the step and
+#      a value read off the box would run as shell on the runner.
 # ─────────────────────────────────────────────────────────────────────────────
 on:
   schedule:
@@ -36,18 +50,16 @@ jobs:
   check:
     name: nightly snapshot age
     runs-on: ubuntu-latest
+    # ssh-retry.sh's transport budget spans ~5 min; the check itself is seconds.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
 
       - name: Configure SSH
-        run: |
-          set -euo pipefail
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          printf '%s\n' "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          printf '%s\n' "${{ secrets.VPS_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_SSH_KNOWN_HOSTS: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+        run: bash scripts/deploy/ssh-setup.sh
 
       - name: Check snapshot freshness
         id: check
@@ -56,8 +68,10 @@ jobs:
           USER: ${{ secrets.VPS_USER }}
         run: |
           set -euo pipefail
-          out=$(ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o ConnectTimeout=20 \
-                "$USER@$HOST" "DIR='/var/www/logistics-app' bash -s" \
+          # Same transport retry as every deploy and drift check. Read-only on
+          # the box: no lock, no writes, no restarts.
+          out=$(bash scripts/deploy/ssh-retry.sh "$USER@$HOST" \
+                "DIR='/var/www/logistics-app' bash -s" \
                 < scripts/deploy/remote-backup-check.sh)
           echo "$out"
           get() { printf '%s' "$out" | grep -m1 -oE "^$1=.*" | cut -d= -f2- || true; }
@@ -74,32 +88,51 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Alarm
+        # An empty state (the remote script printed nothing parseable) is not
+        # 'fresh' either, so it alarms. Fail-closed.
         if: steps.check.outputs.state != 'fresh'
+        env:
+          STATE: ${{ steps.check.outputs.state }}
+          REASON: ${{ steps.check.outputs.reason }}
+          LASTRUN: ${{ steps.check.outputs.lastrun }}
+          LASTNODE: ${{ steps.check.outputs.lastnode }}
+          LASTOK: ${{ steps.check.outputs.lastok }}
+          FAILURES: ${{ steps.check.outputs.failures }}
         run: |
-          echo "::error::nightly app.db backup is not healthy — state=${{ steps.check.outputs.state }}: ${{ steps.check.outputs.reason }}"
-          echo "last logged run: ${{ steps.check.outputs.lastrun }} using ${{ steps.check.outputs.lastnode }}"
-          echo "last scheduled run succeeded? ${{ steps.check.outputs.lastok }}   (total failures in backup.log: ${{ steps.check.outputs.failures }})"
+          echo "::error::nightly app.db backup is not healthy — state=${STATE:-unknown}: ${REASON:-no reason reported}"
+          echo "last logged run: $LASTRUN using $LASTNODE"
+          echo "last scheduled run succeeded? $LASTOK   (total failures in backup.log: $FAILURES)"
           echo "fix: ssh to the box and run  bash /var/www/logistics-app/backup.sh  — it prints which Node it chose."
           exit 1
 
       - name: Summary
         if: always()
+        env:
+          STATE: ${{ steps.check.outputs.state }}
+          REASON: ${{ steps.check.outputs.reason }}
+          NEWEST: ${{ steps.check.outputs.newest }}
+          AGE: ${{ steps.check.outputs.age }}
+          SIZE: ${{ steps.check.outputs.size }}
+          LASTRUN: ${{ steps.check.outputs.lastrun }}
+          LASTNODE: ${{ steps.check.outputs.lastnode }}
+          LASTOK: ${{ steps.check.outputs.lastok }}
+          FAILURES: ${{ steps.check.outputs.failures }}
         run: |
           {
             echo "### Backup freshness"
             echo ""
             echo "| | |"
             echo "|---|---|"
-            echo "| state | \`${{ steps.check.outputs.state }}\` |"
-            echo "| newest snapshot | \`${{ steps.check.outputs.newest }}\` |"
-            echo "| age | ${{ steps.check.outputs.age }} h |"
-            echo "| size | ${{ steps.check.outputs.size }} bytes |"
-            echo "| last run | ${{ steps.check.outputs.lastrun }} |"
-            echo "| interpreter used | \`${{ steps.check.outputs.lastnode }}\` |"
-            echo "| last scheduled run OK | ${{ steps.check.outputs.lastok }} |"
-            echo "| total failures in log | ${{ steps.check.outputs.failures }} |"
+            echo "| state | \`${STATE:-n/a}\` |"
+            echo "| newest snapshot | \`$NEWEST\` |"
+            echo "| age | $AGE h |"
+            echo "| size | $SIZE bytes |"
+            echo "| last run | $LASTRUN |"
+            echo "| interpreter used | \`$LASTNODE\` |"
+            echo "| last scheduled run OK | $LASTOK |"
+            echo "| total failures in log | $FAILURES |"
             echo ""
-            echo "${{ steps.check.outputs.reason }}"
+            echo "$REASON"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Always remove the deploy key
