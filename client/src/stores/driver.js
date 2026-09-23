@@ -1,8 +1,23 @@
 import { defineStore } from 'pinia'
 import { useApi } from '../composables/useApi'
 import { parseYmdLocal, sheetSortKey } from '../utils/datetime'
+import { replyLost } from '../lib/saveOutcome'
 
 const api = useApi()
+
+// How long the driver's expense save may take before the phone stops waiting.
+//
+// It rode useApi's 20 s default, while a document upload gets 90 s per attempt
+// (useUpload) — and this request carries the same kind of body: a receipt photo,
+// base64, over a truck-stop cellular uplink. So the phone gave up while the
+// server was still saving the row, told the driver it had failed, and their
+// retry was refused as a duplicate of the receipt that DID save.
+//
+// ⚠️ ONE ATTEMPT, NEVER RETRIED — unlike useUpload's three. POST /api/expenses
+// is not idempotent: an automatic re-send after a lost reply books the money
+// twice (or, since the duplicate guard, dead-ends in a 409 nobody asked for).
+// When no reply comes back at all, submitExpense re-reads instead of re-sending.
+const EXPENSE_SAVE_TIMEOUT_MS = 90000
 
 export const useDriverStore = defineStore('driver', {
   state: () => ({
@@ -398,32 +413,44 @@ export const useDriverStore = defineStore('driver', {
     },
 
     async submitExpense(data) {
-      const res = await api.post('/api/expenses', {
-        ...data,
-        // ⚠️ THERE IS NO OPT-IN KEY TO SEND, AND DELIBERATELY NO OPT-OUT ONE.
-        // The server runs the same-driver/day/amount content check
-        // UNCONDITIONALLY — `wantsDuplicateCheck = req.body?.allowDuplicate !== true`
-        // — and accepts-then-ignores `checkDuplicate`, so that a second, silent
-        // door around the guard cannot reappear (locked by
-        // scripts/test-duplicate-guard.js, "no silent opt-out door").
-        //
-        // A `checkDuplicate: true` used to sit here, and its comment said to take
-        // it back out if this surface ever stopped surviving a 409. That
-        // instruction was actively harmful: removing the key changes nothing, so
-        // following it would leave an engineer believing they had disarmed the
-        // check while drivers kept hitting an unhandled 409.
-        //
-        // What this surface owes is 409 SURVIVAL, not a flag: ExpenseForm keeps
-        // the photo and every typed field on POSSIBLE_DUPLICATE and asks. If that
-        // ever regresses, the fix is in the FORM — there is nothing to turn off
-        // here.
-        //
-        // The conscious override, set ONLY by the driver answering "these are two
-        // separate purchases". Normalised to a strict boolean because the server
-        // tests `=== true`, so a stray truthy value must never read as consent.
-        // It is the one override, and it is audited (`expense_duplicate_override`).
-        allowDuplicate: data?.allowDuplicate === true,
-      })
+      let res
+      try {
+        res = await api.post('/api/expenses', {
+          ...data,
+          // ⚠️ THERE IS NO OPT-IN KEY TO SEND, AND DELIBERATELY NO OPT-OUT ONE.
+          // The server runs the same-driver/day/amount content check
+          // UNCONDITIONALLY — `wantsDuplicateCheck = req.body?.allowDuplicate !== true`
+          // — and accepts-then-ignores `checkDuplicate`, so that a second, silent
+          // door around the guard cannot reappear (locked by
+          // scripts/test-duplicate-guard.js, "no silent opt-out door").
+          //
+          // A `checkDuplicate: true` used to sit here, and its comment said to take
+          // it back out if this surface ever stopped surviving a 409. That
+          // instruction was actively harmful: removing the key changes nothing, so
+          // following it would leave an engineer believing they had disarmed the
+          // check while drivers kept hitting an unhandled 409.
+          //
+          // What this surface owes is 409 SURVIVAL, not a flag: ExpenseForm keeps
+          // the photo and every typed field on POSSIBLE_DUPLICATE and asks. If that
+          // ever regresses, the fix is in the FORM — there is nothing to turn off
+          // here.
+          //
+          // The conscious override, set ONLY by the driver answering "these are two
+          // separate purchases". Normalised to a strict boolean because the server
+          // tests `=== true`, so a stray truthy value must never read as consent.
+          // It is the one override, and it is audited (`expense_duplicate_override`).
+          allowDuplicate: data?.allowDuplicate === true,
+        }, { timeout: EXPENSE_SAVE_TIMEOUT_MS })
+      } catch (err) {
+        // No answer from the application — our own timeout, a dropped
+        // connection, or a gateway 502/504 (see lib/saveOutcome.js). The row may
+        // well have been saved; only the reply was lost. Re-read the driver's
+        // data in the background so the load's Expense History shows it if it
+        // did, which is what ExpenseForm tells the driver to check before trying
+        // again. A READ, never a re-send: see EXPENSE_SAVE_TIMEOUT_MS.
+        if (replyLost(err)) this.loadData().catch(() => {})
+        throw err
+      }
       // The expense is saved at this point. A failing refresh must NOT surface
       // as a failing submit: the form now keeps the driver's entry on error and
       // invites a retry, and POST /api/expenses is not idempotent — so letting
