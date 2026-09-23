@@ -27082,6 +27082,7 @@ app.post("/api/driver/respond", requireRole("Super Admin", "Dispatcher", "Driver
 		// SECURITY: drivers can only respond to loads currently assigned to them
 		if (req.session.user.role === "Driver") {
 			const owned = await loadBelongsToDriver(loadId, driverName);
+			if (sentIfLoadOwnershipUnverified(res, owned)) return;
 			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
 		}
 
@@ -27123,6 +27124,11 @@ app.post("/api/driver/respond", requireRole("Super Admin", "Dispatcher", "Driver
 				);
 			}
 		}
+
+		// A cancelled row is not a driver's to accept or decline (a decline would
+		// put it back on the board as Unassigned) — on the BOUND row, before the
+		// period guard and every write. See sentIfDriverWriteOnCancelledRow().
+		if (sentIfDriverWriteOnCancelledRow(req, res, headers, snapshot.row, "driver_respond_blocked", loadId)) return;
 
 		// PERIOD GUARD — before the first write of either kind, including the
 		// load_responses row below. Included with its three siblings because a
@@ -27849,26 +27855,124 @@ function resolveDriverActor(req, res, bodyDriverName) {
 // given driver (case + whitespace tolerant). Used by driver-side write paths
 // (status update, POD upload, GPS ping) to reject spoofed rowIndex/loadId.
 // Uses the cached sheet so it does not add a Sheets API call per request.
+//
+// ⚠️ THREE ANSWERS, NOT TWO — and the third is FALSY ON PURPOSE.
+//   true  — the load is live and names this driver.
+//   false — it does not: no such load, another driver's, soft-deleted, or no
+//           loadId / driverName to check.
+//   null  — COULD NOT VERIFY: the deleted_loads or Job Tracking read failed, or
+//           the sheet came back without a Driver / Load ID column.
+// A failed read used to answer `false`, so a Sheets blip told a driver filing a
+// fuel receipt "This load is not assigned to you" — a false accusation, and one
+// the upload client never retries (it fails fast on a 4xx). Every call site now
+// answers null with sentIfLoadOwnershipUnverified()'s retryable 503, BEFORE its
+// 403 line. null stays falsy so a caller that only tests `!owned` still
+// REFUSES: the worst a call site missing that line can do is send the old,
+// misleading 403 — it can never admit. So never test the result with
+// `=== false`, and never make "could not verify" truthy.
+// scripts/test-load-ownership-guard.js pins every call site and both rules.
 async function loadBelongsToDriver(loadId, driverName) {
 	if (!loadId || !driverName) return false;
 	const target = normalizeDriverName(driverName);
 	const targetLid = String(loadId).trim().toLowerCase().replace(/^#/, "");
-	// Soft-deleted loads are not assignable. A driver who cached the loadId
-	// before admin removed the load can otherwise still drive status mutations
-	// against the sheet row, which would re-surface the load in admin lists.
-	if (getDeletedLoadIds().has(targetLid)) return false;
-	let jt;
-	try { jt = await getJobTrackingCached(); } catch { return false; }
+	// BOTH reads before ANY answer. Answering "soft-deleted → false" ahead of the
+	// sheet read gave a deleted id a 403 and every other id a 503 during an
+	// outage — a one-bit oracle. An outage now answers null for every id alike.
+	let deleted, jt;
+	try { deleted = getDeletedLoadIds({ strict: true }); } catch (err) { return ownershipUnverified(targetLid, "deleted_loads read failed", err); }
+	try { jt = await getJobTrackingCached(); } catch (err) { return ownershipUnverified(targetLid, "Job Tracking read failed", err); }
 	const headers = jt.headers || [];
 	const driverCol = findCol(headers, /driver/i);
 	const loadIdCol = findCol(headers, /load.?id|job.?id/i);
-	if (!driverCol || !loadIdCol) return false;
+	if (!driverCol || !loadIdCol) return ownershipUnverified(targetLid, "Job Tracking has no Driver / Load ID column", null);
+	// Soft-deleted loads are not assignable. A driver who cached the loadId
+	// before admin removed the load can otherwise still drive status mutations
+	// against the sheet row, which would re-surface the load in admin lists.
+	if (deleted.has(targetLid)) return false;
 	for (const row of jt.data || []) {
 		const lid = String(row[loadIdCol] || "").trim().toLowerCase().replace(/^#/, "");
 		if (lid !== targetLid) continue;
 		if (normalizeDriverName(row[driverCol]) === target) return true;
 	}
 	return false;
+}
+
+// loadBelongsToDriver()'s "could not verify" exit: says why in the log and
+// returns the null sentinel. The id is capped and JSON-quoted — it is
+// caller-supplied, and the upload route accepts a 50 MB body.
+function ownershipUnverified(loadKey, what, err) {
+	console.warn(`[load-ownership] could not verify load ${JSON.stringify(String(loadKey || "").slice(0, 40))}: ${what}${err && err.message ? ` — ${err.message}` : ""}`);
+	return null;
+}
+
+// The one answer to loadBelongsToDriver() === null. A 503 with Retry-After, the
+// shape sentIfRendererBusy() uses: the driver did nothing wrong, and the same
+// request succeeds once the read does. Every call site sends it BEFORE any
+// write, so a retry cannot duplicate anything (useUpload.js already retries a
+// 5xx on its own). `extra` carries a route's own envelope ({ ok: false },
+// { stops: [] }) and cannot override the error, code or status. Returns true
+// when it has answered:
+//     if (sentIfLoadOwnershipUnverified(res, owned)) return;
+//     if (!owned) return res.status(403).json(…);   // keep it — null is falsy
+function sentIfLoadOwnershipUnverified(res, owned, extra) {
+	if (owned !== null) return false;
+	res.setHeader("Retry-After", "5");
+	res.status(503).json({
+		...(extra || {}),
+		error: "Couldn't verify this load right now — please try again.",
+		code: "LOAD_OWNERSHIP_UNVERIFIED",
+		retryable: true,
+	});
+	return true;
+}
+
+// ⚠️ A CANCELLED ROW IS NOT A DRIVER'S TO MOVE. loadBelongsToDriver() answers
+// "does this load name this driver" and ignores status, and only POST
+// /api/dispatch/cancel blanks the Driver cell — a load cancelled by a sheet
+// edit or PUT /api/data still names its driver. Until liveJobTrackingView(),
+// the in-place excludeDroppedLoads() four routes ran on the shared cache
+// USUALLY hid such a row from the guard, and that accident was all that stopped
+// a driver (or a stale driver app) moving a cancelled load to Delivered — back
+// into revenue, driver pay and the investor payout — or declining it back onto
+// the board as Unassigned. It is a rule now, judged on the BOUND row the write
+// lands on and never on the deduplicated view: load 7052901 has a live row
+// above a cancelled "#7052901" copy, and its driver must keep advancing the
+// live one. Driver role only. Returns true when it has answered.
+function sentIfDriverWriteOnCancelledRow(req, res, headers, row, action, loadId) {
+	if (req.session?.user?.role !== "Driver") return false;
+	const statusIdx = (headers || []).findIndex((h) => /status/i.test(h));
+	if (statusIdx === -1) return false;
+	if (!CANCELED_STATUS_RE.test(String((row || [])[statusIdx] || "").trim())) return false;
+	logAuditRefusal(req, action, "load", String(loadId || "").slice(0, 100),
+		"Blocked a driver write to a cancelled load [LOAD_CANCELLED]", "LOAD_CANCELLED");
+	res.status(409).json({
+		code: "LOAD_CANCELLED",
+		error: "This load was cancelled, so it can't be changed from the driver app. Contact dispatch if that's a mistake.",
+	});
+	return true;
+}
+
+// ⚠️ THE BOUND ROW MUST NAME THE ACTING DRIVER — the narrowing that
+// resolveLoadBinding()'s rung-4 note calls for. PUT /api/driver/status lets a
+// Driver choose WHICH copy of a duplicated id to write, which was safe only
+// while ownership was judged on a bottom row that named them. With the shared
+// cache no longer filtered in place, a cancelled bottom copy naming driver B
+// makes B the "owner" of the id every time — and B could then rewrite driver
+// A's earlier copy (Delivered → Dispatched in an open month moves A's weekly
+// pay). Load 7052901 is unaffected: its live row names its own driver. Driver
+// role only. Returns true when it has answered.
+function sentIfDriverWriteOnOthersRow(req, res, headers, row, driverName, action, loadId) {
+	if (req.session?.user?.role !== "Driver") return false;
+	const driverIdx = (headers || []).findIndex((h) => /driver/i.test(h));
+	const onRow = driverIdx === -1 ? "" : normalizeDriverName((row || [])[driverIdx]);
+	if (onRow && onRow === normalizeDriverName(driverName)) return false;
+	logAuditRefusal(req, action, "load", String(loadId || "").slice(0, 100),
+		"Blocked a driver write to a row naming another driver [ROW_NOT_ASSIGNED]", "ROW_NOT_ASSIGNED");
+	res.status(403).json({
+		code: "ROW_NOT_ASSIGNED",
+		error: "This copy of the load is assigned to another driver. Refresh the app and try again.",
+	});
+	return true;
 }
 
 // Load-drop filtering — single source of truth for "this load should not
@@ -27878,11 +27982,16 @@ async function loadBelongsToDriver(loadId, driverName) {
 // Used by /api/dashboard, /api/financials, /api/investor, and /api/public/track
 // so every surface stays consistent.
 const CANCELED_STATUS_RE = /^(cancel|canceled|cancelled)$/i;
-function getDeletedLoadIds() {
+// `{ strict: true }` rethrows a failed read instead of answering "nothing is
+// deleted". A filter can live with the empty Set; an authorization check cannot
+// — loadBelongsToDriver() would otherwise re-admit a soft-deleted load's driver
+// whenever this read failed.
+function getDeletedLoadIds(opts) {
 	try {
 		const rows = db.prepare("SELECT load_id FROM deleted_loads").all();
 		return new Set(rows.map((r) => (r.load_id || "").toString().trim().toLowerCase()));
-	} catch {
+	} catch (err) {
+		if (opts && opts.strict) throw err;
 		return new Set();
 	}
 }
@@ -29303,6 +29412,7 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 		// which has its own audit/reason gate, so this guard is Driver-only.
 		if (req.session.user.role === "Driver") {
 			const owned = await loadBelongsToDriver(loadId, driverName);
+			if (sentIfLoadOwnershipUnverified(res, owned)) return;
 			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
 		}
 		const sheets = await getSheets();
@@ -29386,6 +29496,12 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 		if (statusIdx === -1) {
 			return res.status(400).json({ error: "Status column not found in sheet" });
 		}
+
+		// A cancelled row is not a driver's to move — on the BOUND row, before the
+		// POD gate and every write. See sentIfDriverWriteOnCancelledRow().
+		if (sentIfDriverWriteOnCancelledRow(req, res, headers, dataRows[rowIndex - 2], "status_update_blocked", loadId)) return;
+		// ...and the bound copy must name this driver — see sentIfDriverWriteOnOthersRow().
+		if (sentIfDriverWriteOnOthersRow(req, res, headers, dataRows[rowIndex - 2], driverName, "status_update_blocked", loadId)) return;
 
 		// Enforce one active job at a time: block transition to "At Shipper" if another load is active
 		//
@@ -29916,6 +30032,7 @@ app.get("/api/loads/:loadId/status-history", requireAuth, async (req, res) => {
 		const role = req.session.user.role;
 		if (role === "Driver") {
 			const owned = await loadBelongsToDriver(rawId, req.session.user.driverName || "");
+			if (sentIfLoadOwnershipUnverified(res, owned)) return;
 			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
 		} else if (role !== "Super Admin" && role !== "Dispatcher") {
 			return res.status(403).json({ error: "Forbidden" });
@@ -31637,6 +31754,7 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		// Admin/Dispatcher act on behalf of any driver so they're exempt.
 		if (req.session.user.role === "Driver" && safeLoadId) {
 			const owned = await loadBelongsToDriver(safeLoadId, driver);
+			if (sentIfLoadOwnershipUnverified(res, owned)) return;
 			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
 		}
 
@@ -33148,6 +33266,7 @@ app.get("/api/documents/:loadId", requireAuth, async (req, res) => {
 		// receipts on any other driver's load by guessing the loadId.
 		if (req.session.user.role === "Driver") {
 			const owned = await loadBelongsToDriver(loadId, req.session.user.driverName);
+			if (sentIfLoadOwnershipUnverified(res, owned)) return;
 			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
 		}
 		// RATECON rows are EXCLUDED from this list, by owner request 2026-08-06:
@@ -36364,6 +36483,7 @@ app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, r
 		// SECURITY: drivers can only upload docs for loads assigned to them
 		if (req.session.user.role === "Driver") {
 			const owned = await loadBelongsToDriver(loadId, driverName);
+			if (sentIfLoadOwnershipUnverified(res, owned)) return;
 			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
 		}
 
@@ -39000,6 +39120,7 @@ app.get("/api/loads/:loadId/haul", requireAuth, haulLimiter, async (req, res) =>
 		const role = req.session.user.role;
 		if (role === "Driver") {
 			const owned = await loadBelongsToDriver(rawId, req.session.user.driverName || "");
+			if (sentIfLoadOwnershipUnverified(res, owned)) return;
 			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
 		} else if (role !== "Super Admin" && role !== "Dispatcher") {
 			return res.status(403).json({ error: "Forbidden" });
@@ -39862,6 +39983,7 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 		let truck = null;
 		if (isDriver) {
 			const owned = await loadBelongsToDriver(loadId, req.session.user.driverName);
+			if (sentIfLoadOwnershipUnverified(res, owned, { ok: false })) return;
 			if (!owned) return res.status(403).json({ ok: false, error: "This load is not assigned to you" });
 			truck = resolveTruckForDriverName(
 				(req.session.user.driverName || req.session.user.driver_name || "").trim());
@@ -40231,6 +40353,7 @@ app.get("/api/poi/fuel-stops", requireRole("Super Admin", "Dispatcher", "Driver"
 				return res.status(403).json({ ok: false, error: "Drivers must request fuel stops by loadId", stops: [] });
 			}
 			const owned = await loadBelongsToDriver(loadId, req.session.user.driverName);
+			if (sentIfLoadOwnershipUnverified(res, owned, { ok: false, stops: [] })) return;
 			if (!owned) return res.status(403).json({ ok: false, error: "This load is not assigned to you", stops: [] });
 			// Defense in depth: force the load_coordinates lookup below to be the
 			// only source of coordinates for this request, whatever was passed.
@@ -40800,6 +40923,7 @@ app.get("/api/geocode/load/:loadId", requireAuth, async (req, res) => {
 		const geoRole = req.session.user.role;
 		if (geoRole === "Driver") {
 			const owned = await loadBelongsToDriver(req.params.loadId, req.session.user.driverName);
+			if (sentIfLoadOwnershipUnverified(res, owned)) return;
 			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
 		} else if (geoRole !== "Super Admin" && geoRole !== "Dispatcher") {
 			return res.status(403).json({ error: "Forbidden" });
