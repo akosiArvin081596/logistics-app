@@ -31,6 +31,19 @@
  *      the route ships it — and it agrees with the gate on every fixture load
  *   §7 DISCRIMINATION — mutants of the lib, the gate and the route; each must be
  *      caught by an assertion above, or that assertion is decorative
+ *   §8 LOAD_REQUIRED: a Driver's receipt must name its load. The route's Driver
+ *      checks are replayed with no load / "#" — before this they all stood aside
+ *      and the receipt reached the write
+ *   §9 the gate as production feeds it: the fixture sheet run through the REAL
+ *      deduplicateLoads() first, as getJobTrackingCached() does
+ *
+ * ⚠️ SEVERAL FIXTURE ROWS SHARE A LOAD ID (7052901, 100007, 100012). Production
+ * never hands the gate such a list: getJobTrackingCached() keeps only the BOTTOM
+ * row per id. §4/§6 feed them un-deduplicated on purpose, to pin the defensive
+ * list handling; §9 is what the gate actually sees.
+ *
+ * SERVER_JS=<path> points the run at another copy of server.js (e.g. the pre-fix
+ * base) to show the §8 assertions fail there.
  *
  * Pure: no server, no app.db, no network, no fixtures on disk.
  *
@@ -43,7 +56,7 @@ const fs = require("fs");
 const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(ROOT, "server.js"), "utf8");
 const LIB_PATH = path.join(ROOT, "lib", "expense-window.js");
 const LIB_SRC = fs.readFileSync(LIB_PATH, "utf8");
 const lib = require(LIB_PATH);
@@ -117,6 +130,18 @@ const FINDCOL_SRC = liftFn("findCol");
 const NORM_SRC = liftFn("normalizeDriverName");
 const GATE_SRC = liftFn("sentIfDriverExpenseWindowClosed");
 const ANNOTATE_SRC = liftFn("withExpenseWindows");
+// Soft: absent from pre-fix server.js, and §8 must REPORT that, not crash on it.
+const softLift = (name) => { try { return liftFn(name); } catch (e) { return null; } };
+const LOAD_MISSING_SRC = softLift("sentIfDriverExpenseLoadMissing");
+const OWNERSHIP_503_SRC = softLift("sentIfLoadOwnershipUnverified");
+const DEDUPE_SRC = softLift("deduplicateLoads");
+
+// sentIfDriverExpenseLoadMissing, built from (possibly mutated) source — or, when
+// server.js has none, a stand-in that never answers (which is what the absence means).
+function buildLoadMissing(src = LOAD_MISSING_SRC) {
+	if (!src) return () => false;
+	return new Function("normalizeLoadId", `"use strict";\n${src}\nreturn sentIfDriverExpenseLoadMissing;`)(normalizeLoadId);
+}
 
 // --- fixtures --------------------------------------------------------------
 const DAY = 24 * 60 * 60 * 1000;
@@ -136,16 +161,20 @@ const SHEET = {
 		row("100003", "Deshorn King", "Delivered"),             // delivered 8 d ago → closed
 		row("100004", "Deshorn King", "Delivered"),             // no history → unknown
 		row("100005", "Deshorn King", "Cancelled"),             // cancelled → never
+		// ⚠️ The three shared-id pairs below (7052901, 100007, 100012) are what the
+		// SHEET can hold, not what the gate is handed: getJobTrackingCached() keeps
+		// only the bottom row of each (deduplicateLoads()). §4/§6 feed them raw to
+		// pin the defensive list handling; §9 runs them through the real dedup.
 		row("7052901", "Howard Reddie", "In Transit"),          // live row…
-		row("#7052901", "Howard Reddie", "Cancelled"),          // …beside a cancelled copy
+		row("#7052901", "Howard Reddie", "Cancelled"),          // …above a cancelled copy (the bottom row wins)
 		row("100007", "Shorn King", "In Transit"),              // ANOTHER driver's active row…
-		row("100007", "Deshorn King", "Delivered"),             // …beside ours, delivered 30 d ago
+		row("100007", "Deshorn King", "Delivered"),             // …above ours, delivered 30 d ago
 		row("100008", "Deshorn King", "Unassigned"),            // neither active nor delivered
 		row("100009", "Deshorn King", "Completed"),             // delivered 9 d ago, "Completed" 1 d ago
 		row("100010", "Deshorn King", "Delivered"),             // reverted and re-delivered 1 d ago
 		row("100011", "Deshorn King", "Delivered"),             // exactly 7 d ago
 		row("100012", "Deshorn King", "Delivered"),             // one id on TWO of our rows:
-		row("#100012", "Deshorn King", "In Transit"),           // …a live row beside a stale one
+		row("#100012", "Deshorn King", "In Transit"),           // …a stale row above a live one
 	],
 };
 const hist = (load_id, old_status, new_status, changed_at) => ({ load_id, old_status, new_status, changed_at });
@@ -199,15 +228,15 @@ const asRole = (role, driverName = role === "Driver" ? "Deshorn King" : null) =>
 
 // The gate, built from (possibly mutated) server.js source, with its reads and
 // its clock injected. `sheet` resolves, `sheetThrows` rejects.
-function buildGate({ gateSrc = GATE_SRC, libObj = lib, sheet = SHEET, sheetThrows = null, db = fakeDb(), now = NOW } = {}) {
+function buildGate({ gateSrc = GATE_SRC, libObj = lib, sheet = SHEET, sheetThrows = null, db = fakeDb(), now = NOW, loadMissing = buildLoadMissing() } = {}) {
 	const logs = [];
 	let sheetReads = 0;
 	const getJobTrackingCached = async () => { sheetReads++; if (sheetThrows) throw sheetThrows; return sheet; };
 	class FixedDate extends Date { static now() { return now; } }
 	const fn = new Function(
-		"getJobTrackingCached", "db", "expenseWindowRule", "normalizeLoadId", "console", "Date",
+		"getJobTrackingCached", "db", "expenseWindowRule", "normalizeLoadId", "sentIfDriverExpenseLoadMissing", "console", "Date",
 		`"use strict";\n${FINDCOL_SRC}\n${NORM_SRC}\n${gateSrc}\nreturn sentIfDriverExpenseWindowClosed;`,
-	)(getJobTrackingCached, db, libObj, normalizeLoadId, { warn: (...a) => logs.push(a.join(" ")), error: (...a) => logs.push(a.join(" ")), log() {} }, FixedDate);
+	)(getJobTrackingCached, db, libObj, normalizeLoadId, loadMissing, { warn: (...a) => logs.push(a.join(" ")), error: (...a) => logs.push(a.join(" ")), log() {} }, FixedDate);
 	return { gate: fn, logs, db, sheetReads: () => sheetReads };
 }
 
@@ -312,7 +341,7 @@ const PHOTO_FAILURE_RE = new Function(`return ${PHOTO_RE_SRC}`)();
 	section("§3  bestExpenseWindow() and the refusal sentence");
 	// =========================================================================
 	const V = (state, eligible = state === "active" || state === "open") => ({ state, eligible });
-	ok("a live row beside a cancelled copy opens the load (7052901's shape)", lib.bestExpenseWindow([V("cancelled"), V("active")]).state === "active");
+	ok("(defensive — production passes one verdict) any eligible verdict opens the id", lib.bestExpenseWindow([V("cancelled"), V("active")]).state === "active");
 	ok("open beats closed; closed beats unknown; unknown beats none; none beats cancelled",
 		lib.bestExpenseWindow([V("closed"), V("open")]).state === "open" &&
 		lib.bestExpenseWindow([V("unknown"), V("closed")]).state === "closed" &&
@@ -361,9 +390,9 @@ const PHOTO_FAILURE_RE = new Function(`return ${PHOTO_RE_SRC}`)();
 	r = await runGate({}, "Driver", "100005");
 	ok("CANCELLED (even though delivered 1 day before) → refused, reason 'cancelled'", refused(r, "cancelled"));
 	r = await runGate({}, "Driver", "7052901", "Howard Reddie");
-	ok("7052901: the live row beside a cancelled '#7052901' copy still takes receipts", proceeds(r));
+	ok("(defensive, un-deduplicated input) a live row in the list opens the id — §9 shows production never hands the gate this list", proceeds(r));
 	r = await runGate({}, "Driver", "100007");
-	ok("another driver's ACTIVE row on the same id does not open OUR delivered-30-days-ago row", refused(r, "closed"));
+	ok("(defensive) another driver's ACTIVE row on the same id does not open OUR delivered-30-days-ago row", refused(r, "closed"));
 	r = await runGate({}, "Driver", "100008");
 	ok("'Unassigned' → refused, reason 'none'", refused(r, "none"));
 	r = await runGate({}, "Driver", "100009");
@@ -382,8 +411,11 @@ const PHOTO_FAILURE_RE = new Function(`return ${PHOTO_RE_SRC}`)();
 		ok(`${role} filing on a load closed 1 day ago → untouched (false), nothing sent`, proceeds(r));
 		ok(`...and not even a sheet read — the gate is Driver-only`, r.sheetReads() === 0);
 	}
-	r = await runGate({}, "Driver", "");
-	ok("a Driver with NO loadId → untouched here, as before (the ownership check skips it too)", proceeds(r) && r.sheetReads() === 0);
+	for (const none of ["", "#", "  # "]) {
+		r = await runGate({}, "Driver", none);
+		ok(`a Driver with no usable load id (${JSON.stringify(none)}) is refused HERE too, 400 LOAD_REQUIRED — never admitted — with no read`,
+			r.answered === true && r.res.statusCode === 400 && r.res.body && r.res.body.code === "LOAD_REQUIRED" && r.sheetReads() === 0);
+	}
 
 	const SHEETS_DOWN = Object.assign(new Error("socket hang up"), { code: "ECONNRESET" });
 	r = await runGate({ sheetThrows: SHEETS_DOWN }, "Driver", "100001");
@@ -483,7 +515,7 @@ const PHOTO_FAILURE_RE = new Function(`return ${PHOTO_RE_SRC}`)();
 	ok("...asking only for DELIVERED loads (active ones need no delivery time)",
 		asked === ["100002", "100003", "100004", "100007", "100009", "100010", "100011", "100012"].join());
 	const both12 = (out || []).filter((o) => o["Load ID"].replace("#", "") === "100012").map((o) => o._expenseWindow.state);
-	ok("one load id on two of the driver's rows gets ONE answer on both — the gate's (the live row opens it)",
+	ok("(defensive, un-deduplicated input) two rows of one id get ONE answer, the gate's ranking",
 		both12.length === 2 && both12.every((s) => s === "active"));
 	{
 		const many = Array.from({ length: 1234 }, (_, i) => row(String(200000 + i), "Deshorn King", "Delivered"));
@@ -597,6 +629,132 @@ const PHOTO_FAILURE_RE = new Function(`return ${PHOTO_RE_SRC}`)();
 	{
 		const m = mutate(DRIVER_ROUTE, `\t\t${ANNOTATE_LINE}\n`, "");
 		ok("M10 GET /api/driver/:driverName without the verdict is caught by §6's wiring check", driverRouteWiring(m).length > 0);
+	}
+
+	// =========================================================================
+	section("§8  LOAD_REQUIRED — a Driver's receipt must name its load");
+	// =========================================================================
+	// Before this, a Driver POST with no loadId skipped the ownership check (it
+	// runs only `&& safeLoadId`) AND the window (no id → "untouched"), and the
+	// expense was still stamped with the driver's truck and owner. "#" was worse:
+	// the ownership guard folds it to "" and matches a sheet row whose Load ID is
+	// BLANK, so a blank-id row naming the driver made "#" look owned.
+	const LOAD_LINE = "if (sentIfDriverExpenseLoadMissing(req, res, safeLoadId)) return;";
+	ok("sentIfDriverExpenseLoadMissing() exists in server.js", !!LOAD_MISSING_SRC);
+	{
+		const missing = buildLoadMissing();
+		for (const none of ["", "#", "   ", " # ", null, undefined]) {
+			const res = fakeRes();
+			const answered = missing(asRole("Driver"), res, none);
+			ok(`Driver + ${JSON.stringify(none)} → 400 LOAD_REQUIRED`, answered === true && res.statusCode === 400 && res.body && res.body.code === "LOAD_REQUIRED");
+		}
+		const sample = fakeRes();
+		missing(asRole("Driver"), sample, "");
+		ok("…with a sentence that says what to do, and no word the app reads as a PHOTO problem",
+			!!(sample.body && /load/i.test(sample.body.error || "") && !PHOTO_FAILURE_RE.test(sample.body.error || "")));
+		for (const id of ["100001", "#100001"]) {
+			const res = fakeRes();
+			ok(`Driver + ${JSON.stringify(id)} → passes, nothing sent`, missing(asRole("Driver"), res, id) === false && res.sends === 0);
+		}
+		for (const role of ["Super Admin", "Dispatcher"]) {
+			const res = fakeRes();
+			ok(`${role} + no load → unchanged (not refused here)`, missing(asRole(role), res, "") === false && res.sends === 0);
+		}
+	}
+	// Wiring: once, before the ownership check, before any write.
+	function loadRequiredWiring(src) {
+		const problems = [];
+		let route;
+		try { route = routeSource("post", "/api/expenses", src); } catch (e) { return [e.message]; }
+		const lines = route.split("\n").map((l) => l.trim());
+		const at = lines.indexOf(LOAD_LINE);
+		const count = lines.filter((l) => l === LOAD_LINE).length;
+		if (count !== 1) problems.push(`the LOAD_REQUIRED line appears ${count}× (expected exactly 1)`);
+		const owned = lines.findIndex((l) => /const owned = await loadBelongsToDriver\(safeLoadId, driver\);/.test(l));
+		const write = lines.findIndex((l) => /saveReceiptToDisk\(|INSERT INTO expenses/.test(l));
+		if (owned < 0 || write < 0) problems.push("could not find the ownership check or the first write");
+		if (at >= 0 && (at > owned || at > write)) problems.push("LOAD_REQUIRED runs after the ownership check or a write");
+		return problems;
+	}
+	const lw = loadRequiredWiring(SRC);
+	for (const p of lw) console.log(`      ${p}`);
+	ok("POST /api/expenses refuses a Driver with no load once, before the ownership check and every write", lw.length === 0);
+
+	// Replay: the route's Driver checks exactly as written — the LOAD_REQUIRED
+	// line (when present), the ownership block, the window gate — against a guard
+	// that behaves like the real one on a sheet holding a blank-id row naming the
+	// driver. "PROCEEDED" means the request would have gone on to the write.
+	function driverChecksSlice(src) {
+		const lines = routeSource("post", "/api/expenses", src).split("\n");
+		const end = lines.findIndex((l) => l.trim() === GATE_LINE);
+		let start = lines.findIndex((l) => /SECURITY: drivers can only file expenses against loads assigned to/.test(l));
+		for (let k = start - 1; k >= Math.max(0, start - 8); k--) if (/sentIfDriverExpenseLoadMissing\(/.test(lines[k])) { start = k; break; }
+		if (start < 0 || end < start) throw new Error("could not slice the route's Driver checks");
+		return lines.slice(start, end + 1).join("\n");
+	}
+	const ownership503 = OWNERSHIP_503_SRC ? new Function(`"use strict";\n${OWNERSHIP_503_SRC}\nreturn sentIfLoadOwnershipUnverified;`)() : () => false;
+	async function replay({ src = SRC, gateSrc = GATE_SRC, loadMissing = buildLoadMissing(), role = "Driver", loadId }) {
+		const loadBelongsToDriver = async (id, driver) => {
+			if (!id || !driver) return false;
+			const lid = normalizeLoadId(id);
+			if (!lid) return true; // the real guard's "" key matches the blank-id row naming this driver
+			return SHEET.data.some((r) => normalizeLoadId(r["Load ID"]) === lid && r.Driver === driver);
+		};
+		const { gate } = buildGate({ gateSrc, loadMissing });
+		const res = fakeRes();
+		const run = new Function("req", "res", "safeLoadId", "driver", "loadBelongsToDriver",
+			"sentIfLoadOwnershipUnverified", "sentIfDriverExpenseWindowClosed", "sentIfDriverExpenseLoadMissing",
+			`"use strict"; return (async () => {\n${driverChecksSlice(src)}\nreturn "PROCEEDED";\n})();`);
+		const out = await run(asRole(role), res, loadId, "Deshorn King", loadBelongsToDriver, ownership503, gate, loadMissing);
+		return { proceeded: out === "PROCEEDED", res };
+	}
+	{
+		let x = await replay({ loadId: "" });
+		ok("REPLAY Driver, no loadId → refused 400 LOAD_REQUIRED, never reaches the write", !x.proceeded && x.res.statusCode === 400 && x.res.body.code === "LOAD_REQUIRED");
+		x = await replay({ loadId: "#" });
+		ok("REPLAY Driver, loadId \"#\" (a blank-id row names the driver) → refused 400, never reaches the write", !x.proceeded && x.res.statusCode === 400);
+		x = await replay({ loadId: "100002" });
+		ok("REPLAY Driver, load delivered 2 days ago → proceeds", x.proceeded && x.res.sends === 0);
+		x = await replay({ loadId: "100003" });
+		ok("REPLAY Driver, load closed 1 day ago → 403", !x.proceeded && x.res.statusCode === 403);
+		x = await replay({ role: "Dispatcher", loadId: "" });
+		ok("REPLAY Dispatcher, no loadId → unchanged, proceeds", x.proceeded);
+	}
+	// M12-M14 — each defang must flip an assertion above.
+	if (LOAD_MISSING_SRC) {
+		const noLine = mutate(SRC, `\t\t${LOAD_LINE}\n`, "");
+		ok("M12 the route without its LOAD_REQUIRED line is caught by the wiring check", loadRequiredWiring(noLine).length > 0);
+		const oldGate = mutate(GATE_SRC, "if (!targetLid) return sentIfDriverExpenseLoadMissing(req, res, loadId);", "if (!targetLid) return false;");
+		const both = await replay({ src: noLine, gateSrc: oldGate, loadId: "" });
+		ok("M13 without the line AND the gate's backstop (the pre-fix shape), a Driver's load-less receipt PROCEEDS — the replay catches it", both.proceeded);
+		const truthy = buildLoadMissing(mutate(LOAD_MISSING_SRC, "if (normalizeLoadId(loadId)) return false;", "if (loadId) return false;"));
+		const hash = await replay({ loadMissing: truthy, loadId: "#" });
+		ok("M14 a raw-truthiness test lets \"#\" through to the write — the replay catches it", hash.proceeded);
+	}
+
+	// =========================================================================
+	section("§9  the gate as production feeds it — through the real deduplicateLoads()");
+	// =========================================================================
+	ok("deduplicateLoads() found in server.js", !!DEDUPE_SRC);
+	if (DEDUPE_SRC) {
+		const deduplicateLoads = new Function(`"use strict";\n${DEDUPE_SRC}\nreturn deduplicateLoads;`)();
+		const cached = { headers: HEADERS, data: deduplicateLoads(SHEET.data.map((x) => ({ ...x })), HEADERS) };
+		const ids = cached.data.map((x) => normalizeLoadId(x["Load ID"]));
+		ok("one row per load id reaches the gate (the bottom one)", new Set(ids).size === ids.length);
+		r = await runGate({ sheet: cached }, "Driver", "7052901", "Howard Reddie");
+		ok("7052901: only the cancelled BOTTOM copy survives, so the load reads cancelled and is refused — as the app, which does not list it",
+			refused(r, "cancelled"));
+		r = await runGate({ sheet: cached }, "Driver", "100012");
+		ok("100012: the bottom row is the live one → accepted", proceeds(r));
+		r = await runGate({ sheet: cached }, "Driver", "100007");
+		ok("100007: the bottom row is ours, delivered 30 days ago → closed", refused(r, "closed"));
+		const view = buildAnnotate().fn(cached.data.filter((x) => x.Driver === "Deshorn King"), HEADERS, NOW);
+		let agree = true;
+		for (const o of view) {
+			const g = await runGate({ sheet: cached }, "Driver", o["Load ID"]);
+			if (o._expenseWindow.eligible !== !g.answered) agree = false;
+		}
+		ok("…and on that same view the app's verdict and the gate agree on every load", agree && view.length > 0);
 	}
 
 	console.log(`\nexpense-load-window: ${pass} passed, ${fail} failed`);
