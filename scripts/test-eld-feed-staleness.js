@@ -658,16 +658,19 @@ async function run() {
 			db.prepare("SELECT COUNT(*) c FROM eld_feed_alerts WHERE alert_key = ?").get(`vid:${VID.t302}`).c, 1);
 		eq("§4.4 alerted_at is not restamped", alertRow(db, VID.t302).alerted_at, alertedAt);
 
-		// RESOLVE — a fresh ping arrives.
+		// RESOLVE — a fresh ping arrives. One clock read for every row below: the
+		// fixes must differ by construction, never by how fast the inserts run (see
+		// flap() in §5).
+		const freshAt = Date.now();
 		const fresh = db.prepare(
 			"INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, speed, location_date_ms, dropped_reason, source) VALUES (?,?,?,?,?,?,?)",
-		).run(VID.t302, 29.7, -95.4, 20, Date.now() - 60 * 1000, "", "linxup");
+		).run(VID.t302, 29.7, -95.4, 20, freshAt - 60 * 1000, "", "linxup");
 		// One ping is enough to clear (a) but not (c), so top the feed up past the
 		// fix floor — otherwise this would resolve `stale` and immediately re-open
 		// as `trickle`, which is correct behaviour but tests a different thing.
-		for (let i = 1; i < 40; i++) {
+		for (let i = 2; i <= 40; i++) {
 			db.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, speed, location_date_ms, dropped_reason, source) VALUES (?,?,?,?,?,?,?)")
-				.run(VID.t302, 29.7, -95.4, 20, Date.now() - i * 60 * 1000, "", "linxup");
+				.run(VID.t302, 29.7, -95.4, 20, freshAt - i * 60 * 1000, "", "linxup");
 		}
 		const r2 = await S.sweepEldFeedSilence();
 		const resolvedRow = alertRow(db, VID.t302);
@@ -679,7 +682,7 @@ async function run() {
 		// cooldown that is held, not mailed: the row stays resolved and its last
 		// alert is the cooldown's clock.
 		db.prepare("DELETE FROM routemate_telemetry WHERE routemate_vehicle_id = ? AND location_date_ms > ?")
-			.run(VID.t302, Date.now() - DAY);
+			.run(VID.t302, freshAt - DAY);
 		const mail2 = S.rec.emails.length;
 		await S.sweepEldFeedSilence();
 		const held = alertRow(db, VID.t302);
@@ -810,12 +813,13 @@ async function run() {
 			"if (seen && seen.alerted_at) return",
 		));
 		await S.sweepEldFeedSilence();
+		const topUpAt = Date.now();   // one clock read for every row (see flap())
 		for (let i = 1; i < 40; i++) {
 			db.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, speed, location_date_ms, dropped_reason, source) VALUES (?,?,?,?,?,?,?)")
-				.run(VID.t302, 29.7, -95.4, 20, Date.now() - i * 60 * 1000, "", "linxup");
+				.run(VID.t302, 29.7, -95.4, 20, topUpAt - i * 60 * 1000, "", "linxup");
 		}
 		await S.sweepEldFeedSilence();                                   // resolves
-		db.prepare("DELETE FROM routemate_telemetry WHERE routemate_vehicle_id = ? AND location_date_ms > ?").run(VID.t302, Date.now() - DAY);
+		db.prepare("DELETE FROM routemate_telemetry WHERE routemate_vehicle_id = ? AND location_date_ms > ?").run(VID.t302, topUpAt - DAY);
 		// Past the re-open cooldown, so the SHIPPED code would report here (§4.9–§4.11)
 		// and only the mutant's short-circuit can keep it quiet.
 		db.prepare("UPDATE eld_feed_alerts SET alerted_at = ? WHERE alert_key = ?").run(new Date(Date.now() - 25 * HOUR).toISOString(), `vid:${VID.t302}`);
@@ -923,36 +927,66 @@ async function run() {
 	// and forth: each dip resolves the row, each drop re-opens it. The daily cap
 	// counted LEDGER ROWS and a re-open overwrites alerted_at, so one such feed
 	// counted once however often it mailed — every other hourly sweep, all day.
+	//
+	// ⚠️ ONE CLOCK READ PER FLAP, NEVER ONE PER ROW — the §5.22 trap again. The
+	// sweep counts COUNT(DISTINCT location_date_ms), so the top-up rows must differ
+	// BY CONSTRUCTION. They were stamped `Date.now() - … - i`, one read per row:
+	// wherever an insert takes about a millisecond the clock and the `- i` cancel,
+	// and on CI the 15 rows collapsed onto one or two timestamps, never cleared the
+	// floor, and the feed never flapped — §5.28 passed vacuously while §5.29 and
+	// §5.30 failed, and every run on a fast machine passed. `flips` now proves each
+	// cycle really crossed the floor both ways, and §5.29a replays the whole block
+	// on a simulated slow runner, so that shape fails here on every machine.
 	async function flap(S, db, cycles) {
 		const topUp = db.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, speed, location_date_ms, dropped_reason, source) VALUES (?,?,?,?,?,?,?)");
+		const base = Date.now() - 2 * HOUR;
+		const trickleAlerting = () => S.eldFeedVerdicts(Date.now()).alerts.some((f) => f.vehicleId === VID.trickle);
+		let flips = 0;
 		for (let c = 0; c < cycles; c++) {
-			for (let i = 1; i <= feedLib.DEFAULT_MIN_FIXES_24H + 5; i++) topUp.run(VID.trickle, 29.7, -95.4, 0, Date.now() - 2 * HOUR - c * 1000 - i, "", "");
+			for (let i = 1; i <= feedLib.DEFAULT_MIN_FIXES_24H + 5; i++) topUp.run(VID.trickle, 29.7, -95.4, 0, base - c * 1000 - i, "", "");
+			const cleared = !trickleAlerting();
 			await S.sweepEldFeedSilence();   // over the floor: resolves
-			db.prepare("DELETE FROM routemate_telemetry WHERE routemate_vehicle_id = ? AND location_date_ms > ?").run(VID.trickle, Date.now() - 2 * HOUR - 60 * 1000);
+			db.prepare("DELETE FROM routemate_telemetry WHERE routemate_vehicle_id = ? AND location_date_ms > ?").run(VID.trickle, base - 60 * 1000);
+			const dropped = trickleAlerting();
 			await S.sweepEldFeedSilence();   // back under: bad again
+			if (cleared && dropped) flips++;
 		}
+		return flips;
 	}
 	const trickleMails = (S) => S.rec.emails.filter((e) => e.html.includes(VID.trickle)).length;
 	async function flappingChecks(mutate, lib) {
 		const db = seedProduction(freshDb(), Date.now());
 		const S = loadShipped(db, { lib }, mutate);
 		await S.sweepEldFeedSilence();                 // the first alert
-		await flap(S, db, 6);                          // six dips and drops in one day
+		let flips = await flap(S, db, 6);              // six dips and drops in one day
 		const sameDay = trickleMails(S);
 		db.prepare("UPDATE eld_feed_alerts SET alerted_at = ? WHERE alert_key = ?").run(new Date(Date.now() - 25 * HOUR).toISOString(), `vid:${VID.trickle}`);
-		await flap(S, db, 1);                          // a day after that alert, still flapping
+		flips += await flap(S, db, 1);                 // a day after that alert, still flapping
 		const nextDay = trickleMails(S);
 		db.close();
-		return { sameDay, nextDay };
+		return { sameDay, nextDay, flips };
+	}
+	// A slow runner, simulated: Date.now() steps exactly 1 ms per call (or jumps to
+	// the real clock when that is further ahead) — the CI shape, where each SQLite
+	// insert takes about a millisecond. Restored however the block ends.
+	async function withSteppedClock(fn) {
+		const realNow = Date.now;
+		let last = realNow();
+		Date.now = () => (last = Math.max(last + 1, realNow()));
+		try { return await fn(); } finally { Date.now = realNow; }
 	}
 	{
 		const r = await flappingChecks();
+		eq("§5.27a ⚠️ the fixture really flaps — all 7 top-ups clear the floor and all 7 deletes drop back under it", r.flips, 7);
 		eq("§5.28 ⚠️ a feed flapping at the trickle floor all day mails ONCE", r.sameDay, 1);
 		eq("§5.29 …and once more a day later if it is still flapping", r.nextDay, 2);
+		const slow = await withSteppedClock(() => flappingChecks());
+		eq("§5.29a the same on a simulated slow runner (Date.now() stepping 1 ms per call — the shape that collapsed the old fixture on CI)",
+			JSON.stringify(slow), JSON.stringify({ sameDay: 1, nextDay: 2, flips: 7 }));
 		const m = await flappingChecks((s) => s.replace(
 			"if (seen && seen.resolved_at && eldFeedHealth.reopenCooldownActive(seen.alerted_at, Date.now(), ELD_STALE_REOPEN_COOLDOWN_MS)) {",
 			"if (false) {"));
-		ok("§5.30 MUTANT (no re-open cooldown) is CAUGHT — the flapping feed mails on every re-open", m.sameDay > 1, `sameDay=${m.sameDay}`);
+		ok("§5.30 MUTANT (no re-open cooldown) is CAUGHT — the flapping feed mails on every re-open", m.sameDay > 1 && m.flips === 7, `sameDay=${m.sameDay} flips=${m.flips}`);
 	}
 
 	// THE CAP COUNTS SENDS, in a window measured by instant.
@@ -960,8 +994,9 @@ async function run() {
 		const out = {};
 		{
 			// Three sends in the last day and a cap of three: nothing more goes out.
-			const db = seedProduction(freshDb(), Date.now());
-			const recent = [3, 9, 20].map((h) => new Date(Date.now() - h * HOUR).toISOString());
+			const sentAt = Date.now();
+			const db = seedProduction(freshDb(), sentAt);
+			const recent = [3, 9, 20].map((h) => new Date(sentAt - h * HOUR).toISOString());
 			db.prepare("INSERT INTO server_state (key, value) VALUES (?, ?)").run("eld_feed_alert_sends", JSON.stringify(recent));
 			const S = loadShipped(db, { maxPerDay: 3, lib }, mutate);
 			await S.sweepEldFeedSilence();

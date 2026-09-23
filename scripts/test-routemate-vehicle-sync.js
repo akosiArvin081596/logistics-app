@@ -158,7 +158,8 @@ const vehiclesOk = (id, req, res) => (id === LINXUP
 	: reply(res, 200, vehicleRecord(id)));
 function seedTelemetry(db, ids = [RM_A, RM_B, LINXUP]) {
 	const ins = db.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, location_date_ms) VALUES (?, 29.7, -95.4, ?)");
-	for (const id of ids) ins.run(id, Date.now() - 60000);
+	const at = Date.now() - 60000;   // one clock read for every row, never one per row
+	for (const id of ids) ins.run(id, at);
 }
 // One direct (boot/daily-tick) sync, never throwing: { result, err }.
 async function syncOnce(w) {
