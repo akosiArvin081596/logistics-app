@@ -35,4 +35,4 @@ Helper scripts in `scripts/`:
   Backup API (a plain `cp` misses `-wal`). Driven nightly by `backup.sh` at 02:00 into
   `backups/`; those files are what the refresh scripts read.
 - `geocode-loads.js` — backfill geocodes for rows in "Job Tracking".
-- ~~`generate-timeline-docx.py` / `generate-timeline-apr13-apr17.py`~~ — **gone; `scripts/` contains no `.py` file at all** (verified 2026-08-26). They were never committed, so `git log` shows no deletion and any tracked-file query reports them as "not in the repo" rather than "removed" — the exact inverse of the `reset-super-admin-password.js` trap below. **Stat the path.**
+- ~~`generate-timeline-docx.py` / `generate-timeline-apr13-apr17.py`~~ — **gone; `scripts/` contains no `.py` file at all** (verified 2026-08-26). They were never committed, so `git log` shows no deletion and any tracked-file query reports them as "not in the repo" rather than "removed" — the exact inverse of the `reset-super-admin-password.js` trap above. **Stat the path.**

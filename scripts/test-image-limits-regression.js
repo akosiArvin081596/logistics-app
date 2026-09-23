@@ -114,8 +114,18 @@ fs.writeFileSync(newFile, NEW_CHILD);
 
 const runChild = (file) => spawnSync(process.execPath, [file], { cwd: REPO, encoding: "utf8", timeout: 15000 });
 const oldRun = runChild(oldFile);
-ok(`the pre-fix converter ends its process on this input (exit ${oldRun.status}, signal ${oldRun.signal})`,
-	oldRun.status !== 0 && !/RESOLVED|REJECTED|SURVIVED/.test(oldRun.stdout || ""));
+// A PRECONDITION, not an assertion: it pins the upstream behaviour this input
+// was built for. If a pdfkit / png-js release stops ending the process here,
+// that is good news upstream and not a regression here, so it is reported and
+// skipped. The shipped guard is still checked below, and by test-image-limits.js.
+const oldEnded = oldRun.status !== 0 && !/RESOLVED|REJECTED|SURVIVED/.test(oldRun.stdout || "");
+if (oldEnded) {
+	ok(`the pre-fix converter ends its process on this input (exit ${oldRun.status}, signal ${oldRun.signal})`, true);
+} else {
+	console.log("SKIP  upstream behaviour changed — precondition not met: the converter without the header check " +
+		`no longer ends its process on this input (exit ${oldRun.status}, output ${JSON.stringify((oldRun.stdout || "").trim())}). ` +
+		"The guard is still verified by scripts/test-image-limits.js and by the assertion below.");
+}
 const newRun = runChild(newFile);
 ok("the shipped converter REJECTS this input with a 415 and the process survives (exit 0)",
 	newRun.status === 0 && /^REJECTED 415 /m.test(newRun.stdout || ""));

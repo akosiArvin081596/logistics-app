@@ -2279,9 +2279,11 @@ try { db.exec(`ALTER TABLE routemate_telemetry ADD COLUMN dropped_reason TEXT DE
 // coincidence, not a contract, and CLAUDE.md already described a `source`
 // column that did not exist. Empty string = written before this column; the
 // 2,343 historical Linxup rows are still identifiable by the fingerprint.
-// ⚠️ routemate_vehicles is a SHARED mirror — the Linxup webhook writes its own
-// device ids into it — so "is this id known to Routemate?" is NOT a provenance
-// test and will answer yes for a Linxup device.
+// ⚠️ routemate_vehicles is a SHARED mirror — Linxup device ids reach it through
+// the Routemate vehicle-sync fallback, which seeds a row for every vehicle id in
+// routemate_telemetry (the Linxup webhook itself never writes it) — so "is this
+// id known to Routemate?" is NOT a provenance test and will answer yes for a
+// Linxup device.
 try { db.exec(`ALTER TABLE routemate_telemetry ADD COLUMN source TEXT DEFAULT ''`); } catch {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_tel_clean ON routemate_telemetry(routemate_vehicle_id, dropped_reason, id DESC)`); } catch {}
 
@@ -3298,11 +3300,11 @@ const routemateUpsertVehicleMinimalStmt = db.prepare(`
 		last_synced_at = CURRENT_TIMESTAMP
 `);
 
-// IDs that Routemate's per-vehicle endpoint has rejected with a 4xx, i.e. "this
-// is not one of our vehicles". routemate_vehicles is a SHARED mirror: the Linxup
-// webhook path writes its own device IDs (numeric, e.g. 18000505841) into the
-// same table, and Routemate answers those with 400 "The given id must not be
-// null". Without this set every sync would re-probe every foreign ID forever.
+// IDs that Routemate's per-vehicle endpoint has rejected with a 400 or 404, i.e.
+// "this is not one of our vehicles". routemate_vehicles is a SHARED mirror: Linxup
+// device IDs (numeric, e.g. 18000505841) reach the same table through the
+// vehicle-sync fallback, which seeds every id in routemate_telemetry, and
+// Routemate answers those with 400 "The given id must not be null". Without this set every sync would re-probe every foreign ID forever.
 // Process-lifetime only, deliberately: a restart re-checks, which is the cheap
 // way to pick up an ID that has since become real without persisting a tombstone.
 const routemateNonInventoryIds = new Set();
@@ -14048,7 +14050,7 @@ async function generateInvoiceHandler(req, res) {
 // Approval stays 100% manual — nothing is ever auto-approved or auto-paid.
 //
 // Idempotent per week via the invoice_autogen_runs marker (keyed on the billing
-// Friday). A per-minute tick fires once the current week's Friday 4 PM ET has
+// Friday). A per-minute tick fires once the current week's Friday 7 PM Central has
 // passed; a boot-time run covers a restart across the trigger. On first-ever
 // startup a baseline marker is seeded so the feature never retroactively bills
 // past weeks — the first real run is the NEXT Friday. Kill switch:
@@ -14715,14 +14717,14 @@ async function maybeRunWeeklyInvoiceBatch() {
 if (INVOICE_AUTOGEN_ENABLED) {
 	// First-ever startup: seed a baseline marker (recorded as a clean, exhausted
 	// run) for the most recent billing Friday so the feature NEVER retroactively
-	// bills a pre-feature week. First real run is the next Friday 4 PM ET.
+	// bills a pre-feature week. First real run is the next Friday 7 PM Central.
 	try {
 		const hasRuns = db.prepare("SELECT 1 FROM invoice_autogen_runs LIMIT 1").get();
 		if (!hasRuns) {
 			db.prepare(
 				"INSERT OR IGNORE INTO invoice_autogen_runs (week_end, ran_at, attempts, failed, summary) VALUES (?, ?, ?, 0, ?)",
 			).run(mostRecentInvoiceFridayCT(), new Date().toISOString(), INVOICE_AUTOGEN_MAX_ATTEMPTS, "baseline (feature enabled — no retroactive run)");
-			console.log("[invoice-autogen] baseline seeded; first run is the next Friday 4 PM ET");
+			console.log("[invoice-autogen] baseline seeded; first run is the next Friday 7 PM Central");
 		}
 	} catch (e) { console.error("[invoice-autogen] baseline seed failed:", e.message); }
 
