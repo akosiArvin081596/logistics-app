@@ -180,6 +180,15 @@ const WITH_HISTORY = raw("111111", "111111", "222222", "564446669");          //
 		ok("the ~87 historical duplicates of OTHER loads never alert an ingestion",
 			history.seen.warns.length === 0 && history.seen.audits.length === 0);
 	}
+	// The route requires only the two addresses, so an ingestion can arrive with
+	// no load id at all. There is nothing to count, so there must be no read.
+	for (const empty of ["", "   ", "#", null, undefined]) {
+		const t = buildTrip({ values: EXEC_2501 });
+		if (!t) break;
+		const r = await t.fn(empty);
+		ok(`no load id (${JSON.stringify(empty)}): the sheet is NOT read, nothing is logged`,
+			r === undefined && t.seen.reads.length === 0 && t.seen.warns.length === 0 && t.seen.errors.length === 0);
+	}
 	const readFails = buildTrip({ readThrows: new Error("socket hang up") });
 	if (readFails) {
 		const r = await readFails.fn("564446669");
@@ -267,6 +276,14 @@ const WITH_HISTORY = raw("111111", "111111", "222222", "564446669");          //
 		const t2 = buildTrip({ tripSrc: offByOne, values: raw("1", "2", "3") });
 		await t2.fn("2");
 		ok("MUTANT alerting at ONE row: every ingestion alerts — §2 flips", t2.seen.warns.length === 1);
+	}
+	const EMPTY_GUARD = /\n\t\/\/ No load id[^\n]*\n\tif \(!normLoadKey\(loadId\)\) return;/;
+	ok("(empty-id guard anchor present)", !!TRIP_SRC && EMPTY_GUARD.test(TRIP_SRC));
+	if (TRIP_SRC && EMPTY_GUARD.test(TRIP_SRC)) {
+		const t3 = buildTrip({ tripSrc: TRIP_SRC.replace(EMPTY_GUARD, ""), values: EXEC_2501 });
+		await t3.fn("");
+		ok("MUTANT without the empty-id guard: an id-less ingestion pays for a full-tab read — §2 flips",
+			t3.seen.reads.length === 1);
 	}
 
 	console.log(failed ? `\n${failed} test(s) failed` : "\nall passed");

@@ -58,6 +58,12 @@ evidence-archive/
 # Local backups and ad-hoc test artifacts
 attachments/
 *.bak
+
+# Runtime caches (the receipt-OCR model is downloaded here on first use — see
+# RECEIPT_OCR_CACHE_DIR). /eng.traineddata is where the OCR engine cached its
+# model before the location was pinned; a stray copy must never be committed.
+.cache/
+/eng.traineddata
 *.bak2
 scripts/.wf-backup-*.json
 

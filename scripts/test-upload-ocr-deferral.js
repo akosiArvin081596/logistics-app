@@ -20,7 +20,8 @@
  *      already load-bearing (ownership before the disk write, the POD sheet
  *      write deferred) still hold
  *   §2 queueReceiptOcr() executed for real with its I/O injected: one at a
- *      time, written by PRIMARY KEY, failures swallowed, backlog bounded
+ *      time, written by PRIMARY KEY, failures swallowed, backlog bounded in
+ *      jobs AND in image bytes, and an image OCR would skip refused at the door
  *   §3 DISCRIMINATION — mutants of the route and of the queue
  *
  * Pure: no server, no app.db, no network, no Tesseract, no fixtures.
@@ -74,8 +75,10 @@ function liftLine(re, label) {
 const ROUTE = routeSource("post", "/api/documents/upload");
 const QUEUE_SRC = liftFn("queueReceiptOcr");
 const MAX_SRC = liftLine(/const RECEIPT_OCR_MAX_PENDING = \d+;/, "RECEIPT_OCR_MAX_PENDING");
+const BYTES_SRC = liftLine(/const RECEIPT_OCR_MAX_QUEUED_BYTES = [^;\n]+;/, "RECEIPT_OCR_MAX_QUEUED_BYTES");
 const CHAIN_SRC = liftLine(/let receiptOcrChain = Promise\.resolve\(\);/, "receiptOcrChain");
 const PENDING_SRC = liftLine(/let receiptOcrPending = 0;/, "receiptOcrPending");
+const QUEUED_BYTES_SRC = liftLine(/let receiptOcrQueuedBytes = 0;/, "receiptOcrQueuedBytes");
 
 // ⚠️ Comments are stripped first: the route's own comments NAME
 // queueReceiptOcr() above res.json(), and an ordering check that reads them
@@ -119,6 +122,9 @@ ok("the POD sheet write is still deferred too (and its triage log line is intact
 	ROUTE.includes("deferring POD sheet update"));
 ok("the backlog cap is 20 (a bound, not a queue that grows with the backlog)",
 	/const RECEIPT_OCR_MAX_PENDING = 20;/.test(MAX_SRC));
+const maxQueuedBytes = new Function(`"use strict";\n${BYTES_SRC}\nreturn RECEIPT_OCR_MAX_QUEUED_BYTES;`)();
+ok(`the queued-image byte cap is a real bound (${maxQueuedBytes} bytes: at least one maximum-size upload, at most 256 MB)`,
+	Number.isInteger(maxQueuedBytes) && maxQueuedBytes >= 40 * 1024 * 1024 && maxQueuedBytes <= 256 * 1024 * 1024);
 
 // ===========================================================================
 // §2 harness
@@ -126,7 +132,10 @@ ok("the backlog cap is 20 (a bound, not a queue that grows with the backlog)",
 const tick = () => new Promise((r) => setImmediate(r));
 async function settle(n = 8) { for (let i = 0; i < n; i++) await tick(); } // eslint-disable-line no-await-in-loop
 
-function buildQueue({ queueSrc = QUEUE_SRC, maxSrc = MAX_SRC, ocr, runThrows = null } = {}) {
+// `skipReason` stands in for receiptOcrSkipReason() (the image-header check,
+// covered by scripts/test-receipt-ocr-crash.js): by default every buffer passes,
+// so these cases exercise the queue itself.
+function buildQueue({ queueSrc = QUEUE_SRC, maxSrc = MAX_SRC, bytesSrc = BYTES_SRC, ocr, runThrows = null, skipReason = () => null } = {}) {
 	const logs = [], updates = [];
 	const db = {
 		prepare(sql) {
@@ -134,9 +143,10 @@ function buildQueue({ queueSrc = QUEUE_SRC, maxSrc = MAX_SRC, ocr, runThrows = n
 		},
 	};
 	const fakeConsole = { warn: (...a) => logs.push(a.join(" ")), error: (...a) => logs.push(a.join(" ")), log() {} };
-	const api = new Function("extractReceiptText", "db", "console",
-		`"use strict";\n${maxSrc}\n${CHAIN_SRC}\n${PENDING_SRC}\n${queueSrc}\n` +
-		"return { queueReceiptOcr, pending: () => receiptOcrPending, chain: () => receiptOcrChain };")(ocr, db, fakeConsole);
+	const api = new Function("extractReceiptText", "receiptOcrSkipReason", "db", "console",
+		`"use strict";\n${maxSrc}\n${bytesSrc}\n${CHAIN_SRC}\n${PENDING_SRC}\n${QUEUED_BYTES_SRC}\n${queueSrc}\n` +
+		"return { queueReceiptOcr, pending: () => receiptOcrPending, queuedBytes: () => receiptOcrQueuedBytes, chain: () => receiptOcrChain };")(
+		ocr, skipReason, db, fakeConsole);
 	return { ...api, logs, updates };
 }
 
@@ -182,6 +192,14 @@ async function capRun(queueSrc) {
 	return { g, q, accepted };
 }
 
+// Three 4-byte images against a 10-byte cap: the third would make 12.
+async function bytesRun(queueSrc) {
+	const g = gatedOcr();
+	const q = buildQueue({ queueSrc, bytesSrc: "const RECEIPT_OCR_MAX_QUEUED_BYTES = 10;", ocr: g.fn });
+	const accepted = [71, 72, 73].map((id) => q.queueReceiptOcr(id, Buffer.alloc(4)));
+	return { g, q, accepted };
+}
+
 async function failureRun(queueSrc) {
 	const q = buildQueue({
 		queueSrc,
@@ -220,6 +238,29 @@ async function failureRun(queueSrc) {
 			q.logs.some((l) => /deferred receipt OCR failed for document 21 \(non-critical\).*tesseract exploded/.test(l)));
 		ok("...and the NEXT receipt is still read (a failure must not wedge the chain)",
 			q.updates.length === 1 && q.updates[0].args.join(":") === "SHELL 4.29:22" && q.pending() === 0);
+		ok("...and every held byte is given back, failure or not", q.queuedBytes() === 0);
+	}
+	{
+		const g = gatedOcr();
+		const q = buildQueue({ ocr: g.fn, skipReason: (buf) => (String(buf) === "huge" ? "9000x9000 image is over the 25 MP limit" : null) });
+		const accepted = q.queueReceiptOcr(61, Buffer.from("huge"));
+		await settle();
+		ok("an image OCR would skip is refused when QUEUED — nothing held, no OCR started",
+			accepted === false && q.pending() === 0 && q.queuedBytes() === 0 && g.stats().calls === 0);
+		ok("...and the reason is logged",
+			q.logs.some((l) => /receipt OCR skipped for document 61: 9000x9000 image is over the 25 MP limit/.test(l)));
+	}
+	{
+		const { g, q, accepted } = await bytesRun(QUEUE_SRC);
+		ok("BOUNDED IN BYTES: past the byte cap a receipt is refused, however few jobs are queued",
+			accepted.join() === "true,true,false" && q.pending() === 2 && q.queuedBytes() === 8);
+		ok("...and the refusal says so", q.logs.some((l) => /receipt OCR skipped for document 73: the OCR queue is full \(2 queued/.test(l)));
+		for (let i = 0; i < 2; i++) {
+			await settle(); // eslint-disable-line no-await-in-loop
+			if (g.gates[i]) g.gates[i].release("t");
+		}
+		await settle();
+		ok("...and the bytes are given back as jobs finish", q.pending() === 0 && q.queuedBytes() === 0);
 	}
 	{
 		const q = buildQueue({ ocr: async () => "text", runThrows: new Error("SQLITE_BUSY") });
@@ -239,7 +280,7 @@ async function failureRun(queueSrc) {
 		ok("BOUNDED: past the cap a receipt is refused rather than queued",
 			accepted.join() === "true,true,true,false,false" && q.pending() === 3);
 		ok("...and each refusal says so in the log",
-			q.logs.filter((l) => /receipt OCR skipped for document [45]: 3 already queued/.test(l)).length === 2);
+			q.logs.filter((l) => /receipt OCR skipped for document [45]: the OCR queue is full \(3 queued/.test(l)).length === 2);
 		for (let i = 0; i < 3; i++) {
 			await settle(); // eslint-disable-line no-await-in-loop
 			if (g.gates[i]) g.gates[i].release("t");
@@ -275,13 +316,33 @@ async function failureRun(queueSrc) {
 			.some((v) => /never queued/.test(v)));
 
 	const SERIAL = "receiptOcrChain = receiptOcrChain.then(async () => {";
-	ok("(queue anchors present)", QUEUE_SRC.includes(SERIAL) && QUEUE_SRC.includes("if (receiptOcrPending >= RECEIPT_OCR_MAX_PENDING) {"));
+	const CAP = "if (receiptOcrPending >= RECEIPT_OCR_MAX_PENDING || receiptOcrQueuedBytes + bytes > RECEIPT_OCR_MAX_QUEUED_BYTES) {";
+	const BYTE_CAP = " || receiptOcrQueuedBytes + bytes > RECEIPT_OCR_MAX_QUEUED_BYTES";
+	const SKIP_BLOCK = /\tconst skip = receiptOcrSkipReason\(imageBuffer\);\n\tif \(skip\) \{\n\t\tconsole\.warn\([^\n]*\n\t\treturn false;\n\t\}\n/;
+	ok("(queue anchors present)", QUEUE_SRC.includes(SERIAL) && QUEUE_SRC.includes(CAP) && SKIP_BLOCK.test(QUEUE_SRC) &&
+		QUEUE_SRC.includes("receiptOcrQueuedBytes -= bytes;"));
 	const parallel = await serialRun(QUEUE_SRC.replace(SERIAL, "receiptOcrChain = Promise.resolve().then(async () => {"));
 	ok("MUTANT parallel OCR (no chaining): the one-at-a-time assertion flips",
 		parallel.startedBeforeFirstFinished === 3 && parallel.g.stats().maxInFlight === 3);
-	const uncapped = await capRun(QUEUE_SRC.replace("if (receiptOcrPending >= RECEIPT_OCR_MAX_PENDING) {", "if (false) {"));
+	const uncapped = await capRun(QUEUE_SRC.replace(CAP, "if (false) {"));
 	ok("MUTANT cap removed: the bound assertion flips", uncapped.accepted.every(Boolean));
 	uncapped.g.gates.forEach((x) => x.release("t"));
+	const noByteCap = await bytesRun(QUEUE_SRC.replace(BYTE_CAP, ""));
+	ok("MUTANT byte cap removed: the bytes bound flips", noByteCap.accepted.every(Boolean));
+	noByteCap.g.gates.forEach((x) => x.release("t"));
+	const leaky = await bytesRun(QUEUE_SRC.replace("receiptOcrQueuedBytes -= bytes;", ""));
+	leaky.g.gates.forEach((x) => x.release("t"));
+	await settle();
+	ok("MUTANT bytes never given back: the queue stays 'full' after it drains — flips", leaky.q.queuedBytes() === 8);
+	{
+		const g = gatedOcr();
+		const q = buildQueue({ queueSrc: QUEUE_SRC.replace(SKIP_BLOCK, ""), ocr: g.fn, skipReason: () => "over the limit" });
+		const accepted = q.queueReceiptOcr(81, Buffer.from("huge"));
+		await settle();
+		ok("MUTANT size checked only when the job runs: the image is queued and held — flips", accepted === true && g.stats().calls === 1);
+		g.gates.forEach((x) => x.release("t"));
+		await settle();
+	}
 	const byName = await serialRun(QUEUE_SRC.replace("WHERE id = ?", "WHERE file_name = ?"));
 	ok("MUTANT UPDATE by file_name: the primary-key assertion flips",
 		byName.q.updates.every((u) => u.sql !== "UPDATE documents SET ocr_text = ? WHERE id = ?"));
