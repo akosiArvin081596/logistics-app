@@ -1,5 +1,10 @@
 <template>
-  <van-form @submit="handleSubmit" class="expense-form">
+  <!-- @failed: Vant refused a blank amount / date / load. Its message is drawn
+       under the field, which on a phone is often off-screen above the Submit
+       button that was just tapped — so the button looked dead. onValidateFailed
+       takes the driver to it. Every validated field carries a `name`, because
+       Vant reports (and can only locate) a failed field by name. -->
+  <van-form class="expense-form" @submit="handleSubmit" @failed="onValidateFailed">
     <van-cell-group inset>
       <div class="form-title">Log Expense</div>
 
@@ -20,7 +25,9 @@
       </van-popup>
 
       <van-field
+        ref="amountField"
         v-model="form.amount"
+        name="amount"
         type="number"
         label="Amount ($)"
         placeholder="0.00"
@@ -28,7 +35,9 @@
       />
 
       <van-field
+        ref="dateField"
         v-model="form.date"
+        name="date"
         type="date"
         label="Date"
         :rules="[{ required: true, message: 'Select date' }]"
@@ -47,7 +56,9 @@
       </div>
 
       <van-field
+        ref="loadField"
         v-model="form.loadId"
+        name="loadId"
         is-link
         readonly
         label="Load"
@@ -106,52 +117,106 @@
         format-trigger="onChange"
       />
 
-      <!-- The whole "Receipt Photo" row is a drop target for desktop — drivers
-           do open the portal on a laptop. v-bind adds only drag listeners (they
-           fall through onto van-field's root cell), so the row's DOM and Vant's
-           own cell hairline are unchanged; a wrapper <div> would have made this
-           cell :last-child and silently dropped that border.
+      <!-- Receipt Photo — TWO ways in: take one now, or choose one already on
+           the phone. A receipt is as likely to be in the driver's gallery (shot
+           at the pump, already sent to dispatch) as in their hand.
 
-           ⚠️ The Vant uploader below is untouched ON PURPOSE. Camera capture,
-           the file result type, the single-file count, the thumbnail and the
-           delete cross are all its behaviours, and rejectPhoto() re-reveals the
-           camera button by emptying fileList. Drop is a second way in, no
-           more — it never replaces the widget. -->
+           ⚠️ This was ONE Vant uploader with capture="camera", and on a phone
+           `capture` opens the camera and nothing else — no gallery, no files. A
+           driver holding three fuel receipts in his gallery could not attach any
+           of them: no scan, no read, no request ever left the phone.
+
+           ⚠️ Two inputs, NOT one input without `capture`. Dropping the attribute
+           does not "offer both": on Android 14+ Chrome an image-only input opens
+           the system photo picker, which has no camera at all — that would trade
+           the live shot every driver has used so far for the gallery. So the
+           camera input keeps its `capture` exactly as before and the gallery
+           input has none. DocumentUpload made the same call (Take Photo beside
+           Upload File).
+
+           A camera shot, a gallery pick and a desktop drop onto this row all go
+           through attachPhoto(): the same HEIC → JPEG decode and 1024 px
+           downscale before anything is sent, and the same thumbnail.
+
+           The Vant uploader stays for what it does well — the thumbnail, the
+           delete cross, tap-to-enlarge — and never opens a picker itself
+           (:show-upload="false"). The pick buttons are real <button>s, so each
+           way in is one keyboard stop with a readable name.
+
+           The whole row is the drop target for desktop — drivers do open the
+           portal on a laptop. v-bind adds only drag listeners (they fall through
+           onto van-field's root cell), so the row's DOM and Vant's own cell
+           hairline are unchanged; a wrapper <div> would have made this cell
+           :last-child and silently dropped that border. -->
       <van-field
         label="Receipt Photo"
         :class="{ 'receipt-drop-over': dragActive }"
-        v-bind="receiptDropProps"
+        v-bind="dropzoneProps"
       >
         <template #input>
-          <van-uploader
-            v-model="fileList"
-            :max-count="1"
-            :after-read="handlePhoto"
-            accept="image/*"
-            capture="camera"
-            result-type="file"
-          />
+          <div class="receipt-photo">
+            <van-uploader
+              v-if="fileList.length"
+              v-model="fileList"
+              :max-count="1"
+              :show-upload="false"
+              @delete="onPhotoDelete"
+            />
+            <div v-else class="receipt-pick" role="group" aria-label="Add a receipt photo">
+              <button
+                type="button"
+                class="receipt-pick-btn receipt-pick-camera"
+                :disabled="submitting"
+                @click="cameraInput?.click()"
+              >
+                <span aria-hidden="true">&#128247;</span> Take photo
+              </button>
+              <button
+                type="button"
+                class="receipt-pick-btn"
+                :disabled="submitting"
+                @click="galleryInput?.click()"
+              >
+                <span aria-hidden="true">&#128444;&#65039;</span> Choose from gallery
+              </button>
+            </div>
+            <input ref="cameraInput" type="file" accept="image/*" capture="camera" hidden @change="onPhotoPicked" />
+            <input ref="galleryInput" type="file" accept="image/*" hidden @change="onPhotoPicked" />
+          </div>
         </template>
       </van-field>
 
       <!-- Photo refused before it was ever uploaded. Deliberately a persistent
            block and not a toast: the driver has to DO something about it, and a
            toast is gone before someone at a truck stop has looked up. It sits
-           directly under the camera button it is telling them to tap again. -->
-      <div v-if="photoError" class="form-alert form-alert-warn" role="alert">
+           directly under the Take photo button it is telling them to use. -->
+      <div v-if="photoError" ref="photoErrorEl" class="form-alert form-alert-warn" role="alert">
         <div class="form-alert-title">That photo didn&rsquo;t come through</div>
         <div class="form-alert-body">
-          Tap the camera above and take it again. If you picked it from your
-          photo library, take a fresh photo with the camera instead.
+          Tap <strong>Take photo</strong> and photograph the receipt again. If it
+          came from your gallery, a fresh photo with the camera works best.
         </div>
         <button type="button" class="form-alert-action" @click="dismissPhotoError">
           Log without a receipt
         </button>
       </div>
 
-      <div v-if="ocrLoading" class="ocr-status ocr-status-loading">
-        <span class="ocr-spinner"></span>
+      <!-- From the moment a photo is picked until its read is done or skipped.
+           Submit is held for exactly this long (see photoBusy). Skip appears
+           once the network half starts: it keeps the photo and stops the read,
+           so a slow scan or read can never hold the driver hostage. -->
+      <div v-if="photoBusy" class="ocr-status ocr-status-loading" role="status" aria-live="polite">
+        <span class="ocr-spinner" aria-hidden="true"></span>
         Reading receipt&hellip;
+        <button
+          v-if="photoStage === 'reading'"
+          type="button"
+          class="ocr-skip"
+          aria-label="Skip reading the receipt and fill in the fields yourself"
+          @click="skipReceiptRead"
+        >
+          Skip
+        </button>
       </div>
       <div v-else-if="ocrApplied" class="ocr-status ocr-status-applied" :class="`ocr-conf-${ocrConfidence || 'medium'}`">
         <span class="ocr-dot"></span>
@@ -162,9 +227,23 @@
 
     <!-- Submit failed. The server's own words, because it knows things this form
          cannot (a duplicate receipt, a closed month, a size cap). The heading is
-         the part that matters at 2am: everything typed above is still there. -->
-    <div v-if="submitError" class="form-alert form-alert-error" role="alert">
-      <div class="form-alert-title">Not submitted &mdash; your entry is still here</div>
+         the part that matters at 2am: everything typed above is still there.
+
+         ⚠️ Unless NO reply came back at all (our timeout, a dropped connection).
+         Then the row may well be saved and "Not submitted" would be a lie that
+         sends the driver straight into a duplicate — so it says "Not confirmed",
+         in amber, and points at the load's history, which the store re-reads in
+         the background (stores/driver.js, submitExpense). -->
+    <div
+      v-if="submitError"
+      class="form-alert"
+      :class="submitUnconfirmed ? 'form-alert-warn form-alert-outer' : 'form-alert-error'"
+      role="alert"
+    >
+      <div class="form-alert-title">
+        <template v-if="submitUnconfirmed">Not confirmed &mdash; your entry is still here</template>
+        <template v-else>Not submitted &mdash; your entry is still here</template>
+      </div>
       <div class="form-alert-body">{{ submitError }}</div>
     </div>
 
@@ -266,9 +345,21 @@
          (the watcher below clears `duplicateWarning` only); `alreadyLogged` is a
          statement, not a question, and is cleared solely by its own button. -->
 
+    <!-- Held while a photo is still being prepared or read. Submitting then
+         filed the expense and cleared the form — and the read, landing late,
+         refilled it with the old amount and a hidden photo, so a receipt that
+         HAD saved looked unsent and was sent again. The label says why it is
+         held; Skip on the reading line releases it. -->
     <div v-if="!decisionPending" class="form-submit">
-      <van-button round block type="primary" native-type="submit" :loading="submitting">
-        {{ submitError ? 'Try Again' : 'Submit Expense' }}
+      <van-button
+        round
+        block
+        type="primary"
+        native-type="submit"
+        :loading="submitting"
+        :disabled="photoBusy"
+      >
+        {{ photoBusy ? 'Reading receipt…' : submitError ? 'Try Again' : 'Submit Expense' }}
       </van-button>
     </div>
   </van-form>
@@ -282,6 +373,7 @@ import { useToast } from '../../composables/useToast'
 import { useDocumentScan } from '../../composables/useDocumentScan'
 import { useFileDrop } from '../../composables/useFileDrop'
 import { compressImage, isDecodedImage } from '../../lib/imageUtils'
+import { RECEIPT_MAX_EDGE, RECEIPT_SCAN_WIDTH, createPhotoJobs } from '../../lib/receiptPhoto'
 // "2026-06" -> "June 2026". Shared, not local: the copy that used to live here
 // was one of several, and two of them under one name in client/src/lib/ had
 // OPPOSITE failure behaviour. This one returns '' when it cannot read the key,
@@ -292,6 +384,11 @@ const props = defineProps({
   loads: { type: Array, default: () => [] },
   driverName: { type: String, required: true },
   headers: { type: Array, default: () => [] },
+  // The load this form belongs to when it is opened from that load's own page
+  // (LoadDetail passes its id). Preselected, and restored after every reset.
+  // Without it the Load field started blank on a page with exactly one load to
+  // pick, and its "Select a load" error sat off-screen, so Submit looked dead.
+  presetLoadId: { type: String, default: '' },
   // Awaitable submit, mirroring ChatView's `send-handler`. When supplied the
   // form waits for the request, keeps every field on failure, and shows the
   // reason inline beside the retry. The `submit` emit below stays as the legacy
@@ -318,6 +415,23 @@ const photoError = ref(false)
 // Why the last submit failed, in the server's words. Never cleared by a
 // refetch or a re-render — only by the next attempt or a new photo.
 const submitError = ref('')
+// The last submit got NO reply (timeout, dropped connection), so it may have
+// saved. Changes the heading from "Not submitted" to "Not confirmed".
+const submitUnconfirmed = ref(false)
+
+// The receipt photo in flight: '' (idle), 'preparing' (decoding on the phone),
+// 'reading' (ScanKit + Gemini, over the network). Anything but '' holds Submit.
+const photoStage = ref('')
+const photoBusy = computed(() => photoStage.value !== '')
+// One job per picked photo; a late answer for a photo that is gone is dropped.
+// See createPhotoJobs() in lib/receiptPhoto.js.
+const photoJobs = createPhotoJobs()
+const cameraInput = ref(null)
+const galleryInput = ref(null)
+const photoErrorEl = ref(null)
+const amountField = ref(null)
+const dateField = ref(null)
+const loadField = ref(null)
 
 // ── Duplicate outcomes ──────────────────────────────────────────────────────
 // Two different 409s, and the difference matters to the driver:
@@ -346,15 +460,16 @@ const postedNote = ref(null)
 // the HEIC/HEIF extensions are there because every non-Safari browser leaves
 // file.type blank for an iPhone photo, so MIME alone would refuse the format
 // this form receives most (compressImage converts it downstream).
-// A refusal is a toast, not the photoError block: that block's copy is "tap the
-// camera and take it again", which is the wrong instruction for "you dropped a
-// PDF", and nothing was attached so there is no state to unwind.
+// A refusal is a toast, not the photoError block: that block's copy is "tap Take
+// photo and photograph it again", which is the wrong instruction for "you
+// dropped a PDF", and nothing was attached so there is no state to unwind.
 const { dropzoneProps, dragActive, error: dropError, clearMessages: clearDropError } = useFileDrop({
   accept: 'image/*,.heic,.heif',
   maxSizeMb: 20,
-  // handlePhoto's argument is Vant's after-read wrapper. Hand it that exact
-  // shape rather than widening the signature — Vant is its other caller.
-  onFiles: (files) => handlePhoto({ file: files[0] }),
+  // Attached exactly like a pick — thumbnail, delete cross and all. A drop used
+  // to go straight to handlePhoto and skip the uploader, so the photo rode along
+  // on the submit with no thumbnail: attached, but invisible and undeletable.
+  onFiles: (files) => attachPhoto(files[0]),
 })
 
 // ⚠️ Watched on the `error` REF, not through onReject: a dropped FOLDER is
@@ -366,24 +481,12 @@ watch(dropError, (msg) => {
   clearDropError()
 })
 
-// ⚠️ Vant's uploader paints its own bare <input type="file"> across the "+"
-// tile, and a drop that lands ON that input is handled natively — that is what
-// produces the thumbnail and fires after-read. preventDefault()ing it from an
-// ancestor would cancel the input's default action and silently swallow a drop
-// that visibly landed on it (the same trap useFileDrop's window guard calls
-// out), so the input keeps first refusal and this only covers the rest of the
-// row. The highlight still clears either way: the window-level drop listener
-// resets every zone's drag depth.
-const receiptDropProps = computed(() => {
-  const base = dropzoneProps.value
-  return {
-    ...base,
-    onDrop: (e) => {
-      if (e.target?.closest?.('input[type="file"]')) return
-      base.onDrop(e)
-    },
-  }
-})
+// The row binds dropzoneProps as they are. It used to wrap onDrop so that a drop
+// landing ON Vant's visible "+" tile input was left to the input — Vant's own
+// uploader then read it. Neither exists any more: the uploader never shows its
+// upload tile (:show-upload="false") and both pick inputs are `hidden`, so there
+// is no visible file input on this row for a drop to land on, and every drop
+// goes through attachPhoto().
 
 const form = reactive({
   type: 'Fuel',
@@ -397,6 +500,19 @@ const form = reactive({
   gallons: '',
   odometer: '',
 })
+
+// Preselect the load this form was opened from — and follow it if the page
+// switches to another load under a still-mounted form (tapping a "new load"
+// banner does exactly that). Only a value this watcher could have put there is
+// replaced; the entry itself (photo, amount, …) is never touched.
+watch(
+  () => props.presetLoadId,
+  (id, prev) => {
+    if (!id) return
+    if (!form.loadId || form.loadId === prev) form.loadId = id
+  },
+  { immediate: true },
+)
 
 // ── Date hygiene ────────────────────────────────────────────────────────────
 // The expense date decides which MONTH the money lands in, and both ways of
@@ -425,9 +541,12 @@ watch(
 // started typing at 11:58 PM, which is the same wrong-month bug pointed the
 // other way.
 function isPristineEntry() {
+  // fileList/photoBusy: a photo still decoding has no photoBase64 yet, but it
+  // is already the driver's entry.
   return (
     !form.amount && !form.vendor && !form.description && !form.city && !form.state &&
-    !form.gallons && !form.odometer && !photoBase64.value && !ocrApplied.value && !photoError.value
+    !form.gallons && !form.odometer && !photoBase64.value && !ocrApplied.value && !photoError.value &&
+    !fileList.value.length && !photoBusy.value
   )
 }
 
@@ -509,48 +628,141 @@ function onLoadPick({ selectedOptions }) {
 // Snapshot of the form values before OCR prefill so "Undo autofill" can
 // restore what the driver had typed.
 const preOcrSnapshot = ref(null)
-const ocrLoading = ref(false)
 const ocrApplied = ref(false)
 const ocrConfidence = ref('')
 // Dynamic receipt details parsed by OCR ({label,value}[]). Carried straight
 // through to create under the same trust model as amount/vendor — no editor UI.
 const ocrDetails = ref([])
 
-async function handlePhoto(file) {
-  const blob = file && file.file
+// How long the driver waits on the Gemini read before it is abandoned. The
+// server's own budget is three 15 s attempts (lib/receipt-ocr.js), and the admin
+// receipt forms use the same 50 s. This fetch used to have NO timeout — harmless
+// while nothing waited on it, but it now holds Submit, so an unanswered read
+// would hold Submit forever. (Skip releases it sooner.)
+const OCR_TIMEOUT_MS = 50000
+
+// ── Receipt photo ────────────────────────────────────────────────────────────
+// A picked (or dropped) file becomes the uploader's single item, in the shape
+// Vant's own after-read built — { file, status, message, objectUrl } — so the
+// thumbnail, the delete cross and tap-to-enlarge behave as they always did.
+// reactive() as Vant does it, because showDecodedPreview() repoints the
+// thumbnail later and the uploader must see that.
+function attachPhoto(file) {
+  if (!file) return
+  // Not while this entry is being sent: a successful save resets the form, and
+  // a photo added mid-flight would be wiped with it, unsent. (The pick buttons
+  // are disabled for the same window; this also covers a desktop drop.)
+  if (submitting.value) {
+    toast.show('Wait until this expense has finished sending', 'warning')
+    return
+  }
+  const item = reactive({ file, status: '', message: '', objectUrl: URL.createObjectURL(file) })
+  fileList.value = [item]
+  handlePhoto(item)
+}
+
+// Both pick inputs land here. ⚠️ The input is cleared BEFORE handling, not after
+// (DocumentUpload's handleFile learned this): re-picking the same file after a
+// refusal otherwise fires no change event, so the driver's obvious recovery —
+// pick it again — silently does nothing.
+function onPhotoPicked(event) {
+  const file = event.target.files && event.target.files[0]
+  event.target.value = ''
+  attachPhoto(file)
+}
+
+// An object URL pins the picked file in memory until it is revoked. Released
+// the moment the item leaves the uploader — replaced, deleted, refused, reset —
+// and on unmount. (Vant revokes only the URLs it created itself.)
+function releasePhotoItem(item) {
+  if (item && item.objectUrl) {
+    URL.revokeObjectURL(item.objectUrl)
+    item.objectUrl = ''
+  }
+}
+watch(fileList, (next, prev) => {
+  for (const item of prev || []) {
+    if (!(next || []).includes(item)) releasePhotoItem(item)
+  }
+})
+
+// Point the thumbnail at the decoded JPEG — the picture that will actually be
+// sent — instead of the picked file. A gallery HEIC on Chrome/Android cannot be
+// drawn from its own bytes, so its thumbnail was a broken image over a receipt
+// that was perfectly fine: exactly the "did it attach?" doubt this form exists
+// to remove. `content` feeds the thumbnail, `url` feeds tap-to-enlarge.
+function showDecodedPreview(item, dataUrl) {
+  releasePhotoItem(item)
+  item.content = dataUrl
+  item.url = dataUrl
+  item.isImage = true
+}
+
+// decode → enhance → read, for ONE photo. Every await is followed by a check
+// that this photo is still the one on the form (photoJobs, lib/receiptPhoto.js):
+// a new photo, the delete cross, a successful submit's reset and unmounting all
+// retire the job, and a retired job writes nothing — not the picture, not the
+// fields, not a toast. That is what stops a late read refilling a form that has
+// already been filed.
+async function handlePhoto(item) {
+  const blob = item && item.file
   if (!blob) return
+  const job = photoJobs.start()
+  photoStage.value = 'preparing'
   photoError.value = false
   submitError.value = ''
+  submitUnconfirmed.value = false
   // A new receipt is a new question. In particular DUPLICATE_RECEIPT is keyed on
   // the bytes, so replacing the photo is one of the two ways out of it.
   duplicateWarning.value = null
   alreadyLogged.value = null
-  // Decode + downscale to a JPEG data URL via the shared one-pass helper
-  // (see imageUtils for the low-RAM OOM fix). Keep the receipt's 1024 max-edge.
-  photoBase64.value = await compressImage(blob, 1024)
+  // The previous photo stops being the attachment NOW, not when this one is
+  // ready: nothing may be sent with a picture the thumbnail no longer shows.
+  photoBase64.value = ''
+  // Decode + downscale to a JPEG data URL via the shared one-pass helper (see
+  // imageUtils for the low-RAM OOM fix, and its HEIC → JPEG conversion — which
+  // a gallery pick needs far more often than a camera shot does).
+  // compressImage is written never to throw; the catch makes that guarantee
+  // local, because a throw here would leave photoStage at 'preparing' and hold
+  // Submit for good. A decode that throws is a photo we could not read.
+  let decoded = ''
+  try {
+    decoded = await compressImage(blob, RECEIPT_MAX_EDGE)
+  } catch {
+    decoded = ''
+  }
+  if (!photoJobs.isCurrent(job)) return
   // Two failures, one outcome. '' is an unreadable file; a non-JPEG/PNG/WebP
   // data URL is compressImage's raw-bytes fallback, i.e. a file it could not
   // decode at all — an SVG, a mislabelled document, a HEIC even heic2any
   // refused. The server verifies the real magic bytes and 400s that, and the
   // path this replaces booked the expense while silently dropping the receipt.
   // Catch it here, while the driver still has the camera in their hand.
-  if (!photoBase64.value || !isDecodedImage(photoBase64.value)) {
+  if (!decoded || !isDecodedImage(decoded)) {
     rejectPhoto()
+    return
+  }
+  photoBase64.value = decoded
+  showDecodedPreview(item, decoded)
+  if (!photoJobs.mayRead(job)) {
+    photoStage.value = ''
     return
   }
   // Enhance the receipt via ScanKit (crop + flatten lighting) before OCR — a
   // cleaner image improves Gemini's read and is what we store as the receipt.
-  // Cover the round-trip with the existing "Reading receipt…" spinner.
-  ocrLoading.value = true
-  await enhanceReceiptPhoto()
-  await runReceiptOcr()
+  photoStage.value = 'reading'
+  await enhanceReceiptPhoto(job)
+  await runReceiptOcr(job)
+  if (photoJobs.isCurrent(job)) photoStage.value = ''
 }
 
 // Drop an unusable photo and say so. Emptying fileList matters as much as the
-// message: max-count is 1, so a refused file left in the uploader HIDES the
-// camera button, and the driver cannot retake without first finding the small
-// delete cross on the thumbnail.
+// message: max-count is 1, so a refused file left in the uploader would keep
+// its thumbnail up and the two pick buttons hidden, and the driver could not
+// retake without first finding the small delete cross.
 function rejectPhoto() {
+  photoJobs.cancel()
+  photoStage.value = ''
   photoBase64.value = ''
   fileList.value = []
   photoError.value = true
@@ -563,22 +775,52 @@ function dismissPhotoError() {
   photoError.value = false
 }
 
+// The delete cross on the thumbnail. What the driver sees is what gets sent:
+// the picture leaves the payload with its thumbnail — before this, a deleted
+// photo stayed in photoBase64 and quietly rode along on the next submit — and
+// anything still in flight for it is dropped. Typed and read-in fields stay;
+// "Undo autofill" still covers the latter.
+function onPhotoDelete() {
+  photoJobs.cancel()
+  photoStage.value = ''
+  photoBase64.value = ''
+}
+
+// "Skip" on the reading line: stop waiting for ScanKit and Gemini. The photo
+// stays attached exactly as it is at this moment — raw, or already enhanced —
+// and nothing the read returns afterwards may touch the form. Offered only
+// while 'reading': during 'preparing' there is no photo to keep yet, so
+// releasing Submit then would file the expense without it.
+function skipReceiptRead() {
+  if (photoStage.value !== 'reading') return
+  photoJobs.skipRead()
+  photoStage.value = ''
+  preOcrSnapshot.value = null
+}
+
 // Best-effort receipt enhancement. Any failure (scanning disabled, no credits,
-// rate limited, network) keeps the raw compressed photo so OCR + submit still
-// work — the driver is never blocked.
-async function enhanceReceiptPhoto() {
-  if (!photoBase64.value) return
+// rate limited, network, Skip) keeps the raw compressed photo so OCR + submit
+// still work — the driver is never blocked.
+async function enhanceReceiptPhoto(job) {
+  const raw = photoBase64.value
+  if (!raw) return
   try {
-    const res = await scanDocument(photoBase64.value, { returnPdf: false, filter: 'flat' })
-    if (res && res.data) photoBase64.value = res.data
+    const res = await scanDocument(raw, {
+      returnPdf: false,
+      filter: 'flat',
+      // No wider than the photo's own long edge — the server default of 1536
+      // upscaled every receipt before it was uploaded. See RECEIPT_SCAN_WIDTH.
+      outputWidth: RECEIPT_SCAN_WIDTH,
+      signal: job.signal,
+    })
+    if (photoJobs.mayRead(job) && res && res.data) photoBase64.value = res.data
   } catch {
     // Keep the raw photo — enhancement is a nice-to-have, not required.
   }
 }
 
-async function runReceiptOcr() {
-  if (!photoBase64.value) return
-  ocrLoading.value = true
+async function runReceiptOcr(job) {
+  if (!photoJobs.mayRead(job) || !photoBase64.value) return
   ocrApplied.value = false
   ocrConfidence.value = ''
   ocrDetails.value = []
@@ -594,13 +836,25 @@ async function runReceiptOcr() {
     gallons: form.gallons,
     odometer: form.odometer,
   }
+  // Aborted by the job (new photo, delete, Skip, reset, unmount) or by our own
+  // timeout, whichever comes first. Composed by hand: AbortSignal.any/timeout
+  // are too new for the older iPhones drivers carry.
+  const ctrl = new AbortController()
+  const onJobAbort = () => ctrl.abort()
+  job.signal.addEventListener('abort', onJobAbort)
+  const timer = setTimeout(() => ctrl.abort(), OCR_TIMEOUT_MS)
   try {
     const res = await fetch('/api/expenses/ocr', {
       method: 'POST',
       // Bypasses useApi, so it carries the CSRF header itself — see useApi.js.
       headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({ photoData: photoBase64.value }),
+      signal: ctrl.signal,
     })
+    const data = res.ok ? await res.json() : null
+    // Answered for a photo that is gone, or after Skip: drop it, silently. Its
+    // values would land on a form that has moved on — which is the bug.
+    if (!photoJobs.mayRead(job)) return
     if (res.status === 503) {
       // API key not configured — silent fallback to manual entry.
       preOcrSnapshot.value = null
@@ -611,7 +865,6 @@ async function runReceiptOcr() {
       preOcrSnapshot.value = null
       return
     }
-    const data = await res.json()
     // Prefill non-null fields only. Never override type if the driver already
     // picked something other than the default Fuel.
     if (data.amount != null) form.amount = String(data.amount)
@@ -627,12 +880,20 @@ async function runReceiptOcr() {
     ocrApplied.value = true
     ocrConfidence.value = data.confidence || ''
   } catch {
+    // A retired job's abort lands here too — and must stay silent.
+    if (!photoJobs.mayRead(job)) return
     toast.show('Couldn\'t read receipt — please fill in the fields', 'error')
     preOcrSnapshot.value = null
   } finally {
-    ocrLoading.value = false
+    clearTimeout(timer)
+    job.signal.removeEventListener('abort', onJobAbort)
   }
 }
+
+onBeforeUnmount(() => {
+  photoJobs.cancel()
+  fileList.value.forEach(releasePhotoItem)
+})
 
 function undoAutofill() {
   if (!preOcrSnapshot.value) return
@@ -654,7 +915,16 @@ async function handleSubmit() {
   // and off inside one synchronous block, so it never actually disabled and a
   // double-tap posted twice. POST /api/expenses is not idempotent.
   if (submitting.value) return
+  // The button is disabled while a photo is being prepared or read; this covers
+  // every other way into a submit (Enter in a field). Filing now would send the
+  // entry without the picture on screen, or let a late read rewrite the form
+  // that replaced it. Checked before anything below is cleared.
+  if (photoBusy.value) {
+    toast.show('Still reading the receipt — one moment', 'warning')
+    return
+  }
   submitError.value = ''
+  submitUnconfirmed.value = false
   // Each of these describes the PREVIOUS attempt. Clearing them here (and only
   // here) is what keeps the posted-month note on screen after a successful
   // submit — resetAfterSubmit deliberately leaves it alone.
@@ -662,13 +932,17 @@ async function handleSubmit() {
   alreadyLogged.value = null
   postedNote.value = null
 
+  // Each refusal below also TAKES the driver to the field: a toast alone left
+  // them staring at a Submit button that "did nothing" (see onValidateFailed).
   if (!form.loadId) {
     toast.show('Select a load for this expense', 'error')
+    revealField('loadId')
     return
   }
   const amount = parseFloat(form.amount)
   if (!amount || amount <= 0) {
     toast.show('Enter a valid amount', 'error')
+    revealField('amount')
     return
   }
   // A photo was attached, refused, and not replaced. Submitting now books the
@@ -676,6 +950,7 @@ async function handleSubmit() {
   // exists to stop — so make dropping it a decision rather than a default.
   if (photoError.value) {
     toast.show('Retake the photo, or tap "Log without a receipt"', 'error')
+    photoErrorEl.value?.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
     return
   }
 
@@ -777,7 +1052,15 @@ function handleSubmitFailure(err, keepLoadId) {
     revealDecision()
     return
   }
+  submitUnconfirmed.value = noReply(err)
   submitError.value = failureText(err)
+}
+
+// No HTTP reply at all: our own timeout (useApi: status 0, code TIMEOUT) or a
+// connection that dropped mid-request (fetch's TypeError, no status). Either way
+// the request may have reached the server and SAVED — only the answer was lost.
+function noReply(err) {
+  return !!err && !err.status
 }
 
 // The question replaces the submit button the driver just tapped, and on a long
@@ -786,6 +1069,24 @@ function revealDecision() {
   nextTick(() => {
     decisionEl.value?.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
   })
+}
+
+// Vant refused the submit (a required field is blank) and drew its message under
+// that field — often off-screen above the button that was tapped, so Submit
+// looked dead. errors[] arrives in form order; take the driver to the first.
+function onValidateFailed({ errors } = {}) {
+  revealField(errors && errors[0] && errors[0].name)
+}
+
+// Scroll a validated field (by its `name`) to the middle of the screen and put
+// focus in it, so a screen reader lands where the error was just drawn. Focus
+// uses preventScroll: a second, instant jump would fight the smooth one.
+const FIELD_REFS = { amount: amountField, date: dateField, loadId: loadField }
+function revealField(name) {
+  const el = FIELD_REFS[name]?.value?.$el
+  if (!el) return
+  el.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
+  el.querySelector?.('input, textarea')?.focus?.({ preventScroll: true })
 }
 
 // What the server already has, in the driver's terms — enough to hold against
@@ -882,6 +1183,12 @@ watch(
 )
 
 function resetAfterSubmit(keepLoadId) {
+  // Anything still decoding, scanning or reading belongs to the entry that was
+  // just filed, and must never land on the empty form that replaces it — that
+  // is what made a SAVED receipt look unsent. (Submit is held while a photo is
+  // busy, so this is the backstop for the paths that clear without a submit.)
+  photoJobs.cancel()
+  photoStage.value = ''
   form.amount = ''
   // Back to today, recomputed. Left alone, an OCR'd receipt date rode onto the
   // NEXT expense with no cue — a 2025-03-14 receipt followed by today's fuel
@@ -901,12 +1208,14 @@ function resetAfterSubmit(keepLoadId) {
   fileList.value = []
   photoError.value = false
   submitError.value = ''
+  submitUnconfirmed.value = false
   ocrApplied.value = false
   ocrConfidence.value = ''
   ocrDetails.value = []
   preOcrSnapshot.value = null
-  // Keep loadId if only one load (inside load detail)
-  if (!keepLoadId) form.loadId = ''
+  // Keep loadId if only one load (inside load detail). Otherwise back to the
+  // load this form belongs to, if it belongs to one — never blank on a load page.
+  if (!keepLoadId) form.loadId = props.presetLoadId || ''
 }
 
 // Words that mean "the FILE was the problem". Deliberately excludes "receipt",
@@ -926,6 +1235,13 @@ const PHOTO_FAILURE_RE = /image|photo|jpe?g|png|webp|format|file type|data uri/i
 // server-side check is landing alongside this, and a wrong code guess would fail
 // silently, whereas a missed match here degrades to the verbatim message.
 function failureText(err) {
+  // Not the transport's words ("Load failed", "Failed to fetch", "timed out …
+  // try again"): each tells the driver it failed and to resend, and the resend
+  // is what the duplicate guard then refuses. The honest answer is "unknown",
+  // plus where to look — the store re-reads the history in the background.
+  if (noReply(err)) {
+    return 'The connection dropped before the server answered, so this may already be saved. Check this load’s Expense History below before you try again — if it did save, trying again will say so.'
+  }
   const msg = (err && err.message) ||
     'Could not submit this expense. Nothing was saved — tap Try Again.'
   const aboutPhoto = err && err.status === 400 && PHOTO_FAILURE_RE.test(msg)
@@ -967,6 +1283,53 @@ function failureText(err) {
 .receipt-drop-over {
   background: var(--accent-dim, rgba(56, 189, 248, 0.1));
   box-shadow: inset 0 0 0 1.5px var(--accent, #38bdf8);
+}
+
+/* The two ways to add a receipt. Stacked full-width rather than side by side:
+   "Choose from gallery" does not fit half of a phone's value column, and each
+   target clears 44px for a gloved thumb. Dashed boxes, as DocumentUpload's
+   Take Photo / Upload File pair — the camera one tinted as the usual path. */
+.receipt-photo {
+  width: 100%;
+}
+.receipt-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  width: 100%;
+}
+.receipt-pick-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  width: 100%;
+  min-height: 44px;
+  padding: 0.5rem 0.75rem;
+  border: 1.5px dashed var(--border, #cbd5e1);
+  border-radius: var(--radius, 8px);
+  background: transparent;
+  color: var(--text-dim, #64748b);
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.receipt-pick-btn:hover {
+  border-color: var(--accent, #38bdf8);
+}
+.receipt-pick-btn:focus-visible {
+  outline: 2px solid var(--accent, #38bdf8);
+  outline-offset: 2px;
+}
+.receipt-pick-btn:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+.receipt-pick-camera {
+  color: var(--accent, #38bdf8);
+  border-color: var(--accent, #38bdf8);
 }
 
 .ocr-status {
@@ -1024,6 +1387,24 @@ function failureText(err) {
   font-family: inherit;
 }
 .ocr-undo:hover {
+  opacity: 0.75;
+}
+/* Skip on the reading line. Same outline as Undo, but a full 44px target: it is
+   the one control on this line a driver may need at a pump. */
+.ocr-skip {
+  margin-left: auto;
+  min-height: 44px;
+  padding: 0 0.9rem;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  color: inherit;
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ocr-skip:hover {
   opacity: 0.75;
 }
 
