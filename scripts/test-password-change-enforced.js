@@ -364,10 +364,15 @@ for (const makeBackend of BACKENDS) {
 	const update = body.indexOf("UPDATE users SET password_hash");
 	ok(/UPDATE users SET password_hash = \?, must_change_password = 0 WHERE id = \?/.test(body),
 		"§5 the change-password handler must clear users.must_change_password in the same UPDATE as the hash");
-	const clearCopy = body.indexOf("req.session.user.mustChangePassword = false");
-	const snapshot = body.indexOf("const userSnapshot = { ...req.session.user }");
-	ok(clearCopy > update && clearCopy < snapshot,
-		"§5 ...and clear the session copy before regenerate() snapshots the session");
+	// The rotated session must not carry the flag. It is REBUILT from the account
+	// row after the UPDATE (never copied from the session the request arrived
+	// with, which a change in the bcrypt window would leave stale), with the flag
+	// cleared, and assigned inside the rotation.
+	const rebuilt = body.indexOf("mustChangePassword: false,");
+	const regenerate = body.indexOf("req.session.regenerate(");
+	const assigned = body.indexOf("req.session.user = freshUser;");
+	ok(rebuilt > update && rebuilt < regenerate && assigned > regenerate && !/\.\.\.\s*req\.session\b/.test(body),
+		"§5 ...and the rotated session carries the cleared flag: rebuilt from the account row after the UPDATE and assigned inside the rotation, never copied from the incoming session");
 	const unchanged = body.indexOf("if (newPassword === currentPassword)");
 	ok(unchanged > 0 && unchanged < update,
 		"§5 re-submitting the current password must be refused before the UPDATE — otherwise it clears the flag without rotating the credential");
@@ -390,8 +395,13 @@ const IO_HANDLER = (() => {
 	if (a < 0) return null;
 	return liftFrom(SRC.slice(SRC.indexOf("(socket) => {", a)), "(socket) => {");
 })();
+// Shaped like a socket.io Socket where the handler reads it: `request` is the
+// handshake request (express-session sets sessionID on it) and `data` is the
+// per-socket object socket.io always provides, where the handler records who
+// the socket is.
 function fakeSocket(user) {
-	const s = { request: { session: user ? { user } : {} }, rooms: new Set(), disconnected: false, handlers: {} };
+	const sessionID = user ? `sid-${user.id}` : "sid-anonymous";
+	const s = { request: { session: user ? { user } : {}, sessionID }, data: {}, rooms: new Set(), disconnected: false, handlers: {} };
 	s.disconnect = () => { s.disconnected = true; };
 	s.on = (ev, cb) => { s.handlers[ev] = cb; };
 	s.join = (room) => { s.rooms.add(room); };
@@ -402,7 +412,11 @@ function socketProbe(handlerSrc) {
 	const b = fakeUsers();
 	b.add(7, 1); b.add(8, 0); b.add(9, 1);
 	const { currentMustChangePassword } = buildFlag(b.db);
-	const onConnection = new Function("currentMustChangePassword", `return (${handlerSrc});`)(currentMustChangePassword);
+	// The handler also asks the session store whether the handshake's session
+	// still exists. Every session in this probe does; a session that ended is
+	// scripts/test-session-sockets.js's subject, against the real store.
+	const liveSessionIds = (sids) => new Set(sids);
+	const onConnection = new Function("currentMustChangePassword", "liveSessionIds", `return (${handlerSrc});`)(currentMustChangePassword, liveSessionIds);
 	const p = {};
 	const forced = fakeSocket({ id: 7, username: "LogisX-2609", role: "Driver", driverName: "Jane Roe", mustChangePassword: true });
 	onConnection(forced);

@@ -34,11 +34,13 @@ function onNewMessage(msg) {
 }
 
 onMounted(async () => {
-  if (store.fleet.length === 0) await store.refresh()
-  msgStore.loadConversations()
+  // Subscribe BEFORE the first await: a page left mid-load has already run
+  // onUnmounted's off(), so an on() landing after it would never be removed.
   socket.connect()
   socket.register('dispatch')
   socket.on('new-message', onNewMessage)
+  if (store.fleet.length === 0) await store.refresh()
+  msgStore.loadConversations()
   try {
     const data = await api.get('/api/users/investors')
     investorNames.value = (data.investors || []).map(i => i.username)

@@ -169,18 +169,20 @@ function onPodUploaded(payload) {
 }
 
 onMounted(async () => {
+  // Subscribe BEFORE the first await: a page left mid-load has already run
+  // onUnmounted's off(), so an on() landing after it would never be removed.
+  socket.connect()
+  socket.register('dispatch')
+  socket.on('status-updated', onStatusUpdated)
+  socket.on('load-assigned', onLoadAssigned)
+  socket.on('pod-uploaded', onPodUploaded)
+
   try {
     await Promise.all([store.loadTabs(), store.loadDrivers()])
     await store.loadData()
   } catch {
     toast('Failed to load data', 'error')
   }
-
-  socket.connect()
-  socket.register('dispatch')
-  socket.on('status-updated', onStatusUpdated)
-  socket.on('load-assigned', onLoadAssigned)
-  socket.on('pod-uploaded', onPodUploaded)
 })
 
 onUnmounted(() => {
