@@ -356,6 +356,7 @@ import { useSocket } from '../composables/useSocket'
 import { useToast } from '../composables/useToast'
 import { useApi } from '../composables/useApi'
 import { useDriverPosition } from '../composables/useDriverPosition'
+import { expensesForLoad } from '../lib/loadId'
 
 import DriverHeader from '../components/driver/DriverHeader.vue'
 import BottomNav from '../components/driver/BottomNav.vue'
@@ -592,13 +593,16 @@ const driverMapHeaders = computed(() => {
   return h
 })
 
+// ⚠️ Matched through expensesForLoad(), never by hand. The inline filter this
+// replaces read `e.load_id`, a key the driver payload has never carried (the
+// server aliases it `loadId`), so no driver ever saw an expense under a load —
+// a receipt that saved looked like one that had not. See lib/loadId.js.
 const detailLoadExpenses = computed(() => {
   if (!detailLoad.value) return []
   const hdrs = driverStore.headers.jobTracking || []
   const lidCol = hdrs.find(h => /load.?id|job.?id/i.test(h))
-  const lid = lidCol ? (detailLoad.value[lidCol] || '').toString().trim() : ''
-  if (!lid) return []
-  return driverStore.expenses.filter(e => (e.load_id || '').toString().trim() === lid)
+  const lid = lidCol ? detailLoad.value[lidCol] : ''
+  return expensesForLoad(driverStore.expenses, lid)
 })
 
 // Current active load for status tab.
