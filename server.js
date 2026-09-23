@@ -2945,12 +2945,18 @@ async function routemateSyncTelemetry() {
 			const statusCol = findCol(headers, /^status$/i) || findCol(headers, /status/i);
 			const driverCol = findCol(headers, /^driver$/i) || findCol(headers, /driver/i);
 			if (loadIdCol && statusCol && driverCol) {
+				// A soft-deleted load keeps its active status on the sheet, so the
+				// status test alone lets it win the driver's slot — and with it the
+				// public tracker room and the geofence writes. The shared cache no
+				// longer happens to hide it (see liveJobTrackingView()); skip it here.
+				const deletedIds = getDeletedLoadIds();
 				for (const row of (jt.data || [])) {
 					const d = (row[driverCol] || "").toString().trim().toLowerCase();
 					const s = (row[statusCol] || "").toString().trim();
 					const lid = (row[loadIdCol] || "").toString().trim();
 					if (!d || !lid) continue;
 					if (!activeRe.test(s)) continue;
+					if (deletedIds.has(lid.toLowerCase().replace(/^#/, ""))) continue;
 					if (!loadIdByDriver[d]) loadIdByDriver[d] = lid;
 					(activeLoadsByDriver[d] = activeLoadsByDriver[d] || []).push({ loadId: lid, status: s });
 				}
@@ -4643,6 +4649,12 @@ const sessionMiddleware = session({
 });
 app.use(sessionMiddleware);
 io.engine.use(sessionMiddleware);
+// ⚠️ MUST STAY DIRECTLY BELOW sessionMiddleware AND ABOVE EVERY ROUTE. It
+// re-reads users.must_change_password into req.session.user before
+// requireAuth / requireRole look at it, so a route registered ABOVE this line
+// would enforce a stale session copy. See "FORCED PASSWORD CHANGE" beside the
+// guards; scripts/test-password-change-enforced.js pins this position.
+app.use(refreshPasswordChangeFlag);
 // ============================================================
 // n8n Webhook: Upsert job into sheet_job_tracking (replaces Google Sheets write)
 // ============================================================
@@ -5185,6 +5197,59 @@ const n8nDistanceLimiter = rateLimit({
 // so the log cannot itself be flooded. The presented value is NEVER logged.
 let n8nDistanceUnauthorized = 0;
 let n8nDistanceUnauthorizedLoggedAt = 0;
+
+// The ingestion's duplicate-row tripwire — see the ⚠️ DUPLICATE-ROW TRIPWIRE
+// note inside POST /api/n8n/load-distance. Which sheet rows carry `loadId`,
+// counted over RAW values arrays (index 0 = sheet row 2), matched through
+// normLoadKey() so "#123" and "123" are one load. Only the ingested load is
+// counted: the ~87 historical duplicate ids of OTHER loads are none of its
+// business and must never alert.
+function sheetRowsCarryingLoad(headers, rows, loadId) {
+	const key = normLoadKey(loadId);
+	const idIdx = (headers || []).findIndex((h) => /load.?id|job.?id/i.test(String(h == null ? "" : h)));
+	if (!key || idIdx === -1) return [];
+	const found = [];
+	(rows || []).forEach((row, i) => {
+		if (normLoadKey((row || [])[idIdx]) === key) found.push(i + 2);
+	});
+	return found;
+}
+// ⚠️ A FRESH, RAW read — never getJobTrackingCached(). That cache holds
+// deduplicateLoads() output, in which a load's extra row has ALREADY been
+// dropped, so no second row can ever be counted there; and it can be up to 60 s
+// old, i.e. from before the rows this ingestion just wrote. Reading it is how
+// this tripwire sat dead from the day it shipped: it deduplicated data that was
+// already deduplicated. Runs after the response (setImmediate), so the extra
+// full-tab read costs n8n nothing. Observes only — reads, logs, audits; never
+// writes the sheet, never touches the response. Never throws.
+async function ingestDuplicateTripwire(loadId) {
+	try {
+		const sheets = await getSheets();
+		const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+		const all = (resp && resp.data && resp.data.values) || [];
+		const onRows = sheetRowsCarryingLoad(all[0] || [], all.slice(1), loadId);
+		if (onRows.length < 2) return;
+		const shown = String(loadId).slice(0, 64);
+		console.warn(
+			`[ingest-dupe] load ${JSON.stringify(shown)} is on ${onRows.length} rows of Job Tracking (rows ${onRows.join(", ")}) after ingestion — ` +
+				`it cannot be dispatched until the extra row is removed. The n8n Dedupe Loads In Batch node ` +
+				`should have prevented this; check whether it is still wired.`,
+		);
+		try {
+			logAudit(
+				{ session: { user: { id: 0, username: "n8n", role: "system" } } },
+				"ingest_duplicate_row",
+				"job_tracking",
+				shown,
+				`load ${shown} occupies ${onRows.length} rows after ingestion (rows ${onRows.join(",")})`,
+			);
+		} catch { /* observation must never fail the ingestion */ }
+	} catch (e) {
+		// A tripwire that breaks the thing it watches is worse than no tripwire.
+		console.error("[ingest-dupe] duplicate check failed (ingestion unaffected):", (e && e.message) || e);
+	}
+}
+
 app.post("/api/n8n/load-distance", n8nDistanceLimiter, async (req, res) => {
 	if (!n8nDistanceAuthorized(req)) {
 		n8nDistanceUnauthorized++;
@@ -5367,36 +5432,12 @@ app.post("/api/n8n/load-distance", n8nDistanceLimiter, async (req, res) => {
 		// trap that dumped 151 JSON blobs into a column literally named `output`.
 		// Deleting a sheet row from an unattended ingestion path is also precisely
 		// the kind of automatic destructive write this codebase does not do.
-		try {
-			const jtDupe = await getJobTrackingCached();
-			const dupeCheck = deduplicateLoads(jtDupe.data || [], jtDupe.headers || [], true);
-			const key = String(loadId || "").trim().toLowerCase().replace(/^#/, "");
-			const idCol = (jtDupe.headers || []).find((h) => /load.?id|job.?id/i.test(h));
-			const mine = idCol
-				? (dupeCheck.duplicates || []).filter(
-						(d) => String(d[idCol] || "").trim().toLowerCase().replace(/^#/, "") === key,
-					)
-				: [];
-			if (mine.length) {
-				console.warn(
-					`[ingest-dupe] load ${loadId} is on ${mine.length + 1} rows of Job Tracking after ingestion — ` +
-						`it cannot be dispatched until the extra row is removed. The n8n Dedupe Loads In Batch node ` +
-						`should have prevented this; check whether it is still wired.`,
-				);
-				try {
-					logAudit(
-						{ session: { user: { id: 0, username: "n8n", role: "system" } } },
-						"ingest_duplicate_row",
-						"job_tracking",
-						loadId,
-						`load ${loadId} occupies ${mine.length + 1} rows after ingestion`,
-					);
-				} catch { /* observation must never fail the ingestion */ }
-			}
-		} catch (e) {
-			// A tripwire that breaks the thing it watches is worse than no tripwire.
-			console.error("[ingest-dupe] duplicate check failed (ingestion unaffected):", e.message);
-		}
+		//
+		// ⚠️ UNTIL 2026-09-23 IT COULD NEVER FIRE. It ran deduplicateLoads() over
+		// getJobTrackingCached() — data that cache has already deduplicated — so it
+		// could never see a second row. ingestDuplicateTripwire() counts a FRESH,
+		// RAW read instead, and runs after this response has been sent.
+		setImmediate(() => { ingestDuplicateTripwire(loadId); });
 
 		return res.json({
 			"Load ID": loadId,
@@ -6399,6 +6440,110 @@ app.post("/api/investors/:id/profile-picture", requireAuth, (req, res) => {
 // Roles: Super Admin (full access), Admin (dispatch, no broker/financial), Driver (own data only, no rate/revenue), Investor (financial view)
 
 // ===========================================================================
+// FORCED PASSWORD CHANGE — enforced by the guards, not only by the client router
+// ===========================================================================
+// Accepting a driver application (PUT /api/applications/:id/status) mints an
+// account with an 8-hex-char temporary password, emails it in plaintext, and
+// sets users.must_change_password = 1. Until 2026-09-23 nothing on the server
+// read that flag. The only enforcement was the Vue router sending the SPA to
+// /account/change-password, so anyone holding the emailed password (curl, or
+// the SPA with its router stepped around) could call every API the role allows,
+// indefinitely, without ever rotating it.
+//
+// WHAT IS REFUSED: every request that passes requireAuth / requireRole answers
+//   403 {error:"Password change required", code:"PASSWORD_CHANGE_REQUIRED"}
+// while the flag is set. Mounting one of those two guards IS this app's
+// definition of an authenticated route (every /api route that is not public or
+// secret-gated, plus both /uploads mounts), so the gate covers exactly that set
+// and inherits every future route that mounts a guard. The allowlist is the
+// three calls the change-password screen makes:
+//   POST /api/auth/change-password   mounts requireAuth; exempted in the guards
+//   GET  /api/auth/session           mounts no guard, so unaffected
+//   POST /api/auth/logout            mounts no guard, so unaffected
+// Public routes mount no guard and are unaffected, with or without a session.
+// That is why the check lives in the guards rather than in one
+// app.use("/api") middleware: a path-prefix gate cannot tell a public route from
+// an authenticated one without a hand-kept list of public paths, and without
+// that list it would 403 GET /api/config/maintenance, which App.vue fetches on
+// every page, the change-password screen included.
+//
+// ⚠️ THE EXEMPTION KEYS ON THE MATCHED ROUTE (req.route.path), NOT THE URL.
+// Express routing here is case-insensitive and non-strict (the defaults), so an
+// exact URL compare would lock `/API/auth/change-password/` out, and a substring
+// compare would let `POST /api/expenses?next=/api/auth/change-password` in.
+// Express assigns req.route only when it dispatches into a route layer, and an
+// app.use mount (the /uploads guards) never assigns it, so the exemption holds
+// for exactly one registration: POST on that path. Re-registering
+// change-password under a different path string, or moving it behind an app.use
+// mount, would lock every flagged user out of the only way to clear the flag.
+// scripts/test-password-change-enforced.js pins the registration to the
+// exempted literal.
+//
+// ⚠️ THE FLAG COMES FROM THE DATABASE ON EVERY REQUEST, not from the session.
+// The session copy is written at login and cleared by change-password, which
+// covers the normal lifecycle. It goes stale the moment the column changes any
+// other way (a script, a session purge that failed half-way, a future admin
+// "force a reset"), and a session minted before the field existed has no copy
+// at all. refreshPasswordChangeFlag() re-reads users by primary key and
+// rewrites the session copy before any guard runs, which also keeps
+// GET /api/auth/session honest (the client router reads the flag there). The
+// guards themselves read only req, for the lift reason in the CSRF note below.
+//
+// ⚠️ SAME DUPLICATION RULE AS THE CSRF CHECK: the gate is copied into both
+// guards, must stay self-contained (only req/res/globals, so no db and no
+// module-scope helper), and scripts/test-password-change-enforced.js pins the
+// two copies identical.
+//
+// Socket.IO is gated too, at `register` rather than at connection: a forced
+// session's socket joins no room, so nothing is pushed to it. The register
+// handler reads currentMustChangePassword() directly, because this middleware
+// does not run on engine requests; see the note there for why a refused
+// CONNECTION would strand the driver after the change.
+//
+// ⚠️ NO MODULE-SCOPE STATE, ON PURPOSE. These two are function declarations
+// (hoisted), and the statement is prepared per call the way the routes below do
+// it. A module-scope `let` here would sit in its temporal dead zone for every
+// line above this block, which is the class of boot crash the note beside
+// refuseCrossOrigin describes. The log throttle lives on globalThis for the
+// same reason, and scripts/test-password-change-enforced.js lifts both
+// functions with nothing but `db` injected.
+//
+// The CURRENT value of users.must_change_password for a session user: the
+// database when it can be read, otherwise the session's last-known copy.
+function currentMustChangePassword(sessionUser) {
+	if (!sessionUser) return false;
+	if (sessionUser.id != null) {
+		try {
+			const row = db.prepare("SELECT must_change_password FROM users WHERE id = ?").get(sessionUser.id);
+			// No row means the account was deleted under a live session.
+			// DELETE /api/users/:id purges its sessions, so this is reached only
+			// if that purge failed. Fall through to the copy rather than guess.
+			if (row) return !!row.must_change_password;
+		} catch (err) {
+			// Unreadable users table: keep the last-known copy. That stays CLOSED
+			// for a flagged session and changes nothing for anyone else. Logged at
+			// most once a minute, because this runs on every request.
+			if (!globalThis.__pwFlagReadErrLoggedAt || Date.now() - globalThis.__pwFlagReadErrLoggedAt > 60000) {
+				globalThis.__pwFlagReadErrLoggedAt = Date.now();
+				console.error("must_change_password read failed; using the session copy:", err.message);
+			}
+		}
+	}
+	return !!sessionUser.mustChangePassword;
+}
+// Mounted directly below sessionMiddleware (see there). Writes the session only
+// when the value CHANGED: with resave:false, express-session re-saves only a
+// modified session, so the common case costs one primary-key SELECT and no write.
+function refreshPasswordChangeFlag(req, res, next) {
+	const user = req.session && req.session.user;
+	if (user) {
+		const current = currentMustChangePassword(user);
+		if (user.mustChangePassword !== current) user.mustChangePassword = current;
+	}
+	next();
+}
+
+// ===========================================================================
 // THE SAME-SITE HALF OF CSRF — what crossSiteGuard cannot reach
 // ===========================================================================
 // refuseCrossSite tolerates `Sec-Fetch-Site: same-site` by design, so a page on
@@ -6437,6 +6582,24 @@ app.post("/api/investors/:id/profile-picture", requireAuth, (req, res) => {
 function requireAuth(req, res, next) {
 	if (!req.session.user)
 		return res.status(401).json({ error: "Not authenticated" });
+	if (req.session.user.mustChangePassword && !(req.method === "POST" && req.route && req.route.path === "/api/auth/change-password")) {
+		// FORCED PASSWORD CHANGE (see the note above refreshPasswordChangeFlag).
+		// Duplicated verbatim in requireAuth and requireRole; pinned identical.
+		// Refusals are logged, coalesced to one line a minute with a running
+		// total, for the reason the CSRF refusal below is: a silent refusal cannot
+		// tell "one stale tab" from "every new driver is stuck".
+		globalThis.__pwChangeRefusedCount = (globalThis.__pwChangeRefusedCount || 0) + 1;
+		if (!globalThis.__pwChangeRefusedLoggedAt || Date.now() - globalThis.__pwChangeRefusedLoggedAt > 60000) {
+			globalThis.__pwChangeRefusedLoggedAt = Date.now();
+			console.warn(
+				`PASSWORD_CHANGE_REQUIRED: ${globalThis.__pwChangeRefusedCount} request(s) refused for an account that must change ` +
+					`its password (most recent ${req.method} ${String(req.originalUrl || req.url || "").split("?")[0]}, user ` +
+					`${req.session.user.id}). The SPA routes such a user to /account/change-password; a burst here means a ` +
+					`stale tab or a caller that ignores the flag.`,
+			);
+		}
+		return res.status(403).json({ error: "Password change required", code: "PASSWORD_CHANGE_REQUIRED" });
+	}
 	if (
 		req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS" &&
 		!(req.headers || {})["x-requested-with"] &&
@@ -6479,6 +6642,24 @@ function requireRole(...roles) {
 			return res.status(401).json({ error: "Not authenticated" });
 		if (!roles.includes(req.session.user.role))
 			return res.status(403).json({ error: "Forbidden" });
+		if (req.session.user.mustChangePassword && !(req.method === "POST" && req.route && req.route.path === "/api/auth/change-password")) {
+			// FORCED PASSWORD CHANGE (see the note above refreshPasswordChangeFlag).
+			// Duplicated verbatim in requireAuth and requireRole; pinned identical.
+			// Refusals are logged, coalesced to one line a minute with a running
+			// total, for the reason the CSRF refusal below is: a silent refusal cannot
+			// tell "one stale tab" from "every new driver is stuck".
+			globalThis.__pwChangeRefusedCount = (globalThis.__pwChangeRefusedCount || 0) + 1;
+			if (!globalThis.__pwChangeRefusedLoggedAt || Date.now() - globalThis.__pwChangeRefusedLoggedAt > 60000) {
+				globalThis.__pwChangeRefusedLoggedAt = Date.now();
+				console.warn(
+					`PASSWORD_CHANGE_REQUIRED: ${globalThis.__pwChangeRefusedCount} request(s) refused for an account that must change ` +
+						`its password (most recent ${req.method} ${String(req.originalUrl || req.url || "").split("?")[0]}, user ` +
+						`${req.session.user.id}). The SPA routes such a user to /account/change-password; a burst here means a ` +
+						`stale tab or a caller that ignores the flag.`,
+				);
+			}
+			return res.status(403).json({ error: "Password change required", code: "PASSWORD_CHANGE_REQUIRED" });
+		}
 		if (
 			req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS" &&
 			!(req.headers || {})["x-requested-with"] &&
@@ -17853,6 +18034,16 @@ app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async 
 				failed,
 			});
 		}
+		// A forced change is only a change if the password actually changes:
+		// re-submitting the current one would clear must_change_password while the
+		// temporary credential stayed valid. Defence in depth today: the emailed
+		// temporaries are 8 lowercase-hex chars and already fail the complexity
+		// rules above, so this guards any future temporary that would pass them.
+		// Compares the two request fields only, so it reveals nothing about the
+		// stored hash.
+		if (newPassword === currentPassword) {
+			return res.status(400).json({ code: "PASSWORD_UNCHANGED", error: "New password must be different from your current password." });
+		}
 		const userId = req.session.user.id;
 		const row = db.prepare("SELECT id, password_hash FROM users WHERE id = ?").get(userId);
 		if (!row) return res.status(404).json({ error: "User not found" });
@@ -20083,7 +20274,10 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 		const driverCol = findCol(jt.headers, /^driver$/i);
 		const truckCol = findCol(jt.headers, /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i);
 		const completedRe = /^(delivered|completed|pod received)$/i;
-		jt.data.forEach((r) => {
+		// Dropped loads never count (the dashboard's rule). This used to lean on
+		// the shared cache having been filtered in place by another route —
+		// usually, not always; see liveJobTrackingView().
+		excludeDroppedLoads(jt.data, jt.headers).forEach((r) => {
 			const st = statusCol ? (r[statusCol] || "").trim() : "";
 			if (!completedRe.test(st)) return;
 			const driver = driverCol ? normalizeDriverName(r[driverCol]) : "";
@@ -27240,7 +27434,12 @@ const locationLimiter = rateLimit({
 });
 
 // POST /api/driver/respond — Driver accepts or declines a load assignment
-app.post("/api/driver/respond", requireAuth, driverWriteLimiter, async (req, res) => {
+// requireRole, not bare requireAuth: the ownership check below is Driver-only,
+// so under requireAuth an INVESTOR could accept or decline any row — and read
+// row locations back out of the binding refusals. Same gate, same reason, as
+// PUT /api/driver/status. Mounted before the limiter so a refused role spends
+// no budget.
+app.post("/api/driver/respond", requireRole("Super Admin", "Dispatcher", "Driver"), driverWriteLimiter, async (req, res) => {
 	try {
 		const { loadId, rowIndex: rawRowIndex, response } = req.body;
 		const driverName = resolveDriverActor(req, res, req.body.driverName);
@@ -27260,6 +27459,7 @@ app.post("/api/driver/respond", requireAuth, driverWriteLimiter, async (req, res
 		// SECURITY: drivers can only respond to loads currently assigned to them
 		if (req.session.user.role === "Driver") {
 			const owned = await loadBelongsToDriver(loadId, driverName);
+			if (sentIfLoadOwnershipUnverified(res, owned)) return;
 			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
 		}
 
@@ -27301,6 +27501,11 @@ app.post("/api/driver/respond", requireAuth, driverWriteLimiter, async (req, res
 				);
 			}
 		}
+
+		// A cancelled row is not a driver's to accept or decline (a decline would
+		// put it back on the board as Unassigned) — on the BOUND row, before the
+		// period guard and every write. See sentIfDriverWriteOnCancelledRow().
+		if (sentIfDriverWriteOnCancelledRow(req, res, headers, snapshot.row, "driver_respond_blocked", loadId)) return;
 
 		// PERIOD GUARD — before the first write of either kind, including the
 		// load_responses row below. Included with its three siblings because a
@@ -27580,10 +27785,11 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 	try {
 		// Use shared 60s Job Tracking cache (invalidated by mutations) instead of
 		// hitting Sheets on every dashboard load.
-		const jobTracking = await getJobTrackingCached();
 		// Filter out soft-deleted + cancelled loads BEFORE any aggregation so every
-		// downstream KPI, list, and revenue total sees the same consistent view.
-		jobTracking.data = excludeDroppedLoads(jobTracking.data, jobTracking.headers);
+		// downstream KPI, list, and revenue total sees the same consistent view —
+		// on a request-local copy, because enrichLocations() below annotates these
+		// rows and the cache is shared (see liveJobTrackingView()).
+		const jobTracking = liveJobTrackingView(await getJobTrackingCached());
 		const carrierDB = getCarrierDBFromSQLite();
 
 		// Identify key columns
@@ -28027,26 +28233,124 @@ function resolveDriverActor(req, res, bodyDriverName) {
 // given driver (case + whitespace tolerant). Used by driver-side write paths
 // (status update, POD upload, GPS ping) to reject spoofed rowIndex/loadId.
 // Uses the cached sheet so it does not add a Sheets API call per request.
+//
+// ⚠️ THREE ANSWERS, NOT TWO — and the third is FALSY ON PURPOSE.
+//   true  — the load is live and names this driver.
+//   false — it does not: no such load, another driver's, soft-deleted, or no
+//           loadId / driverName to check.
+//   null  — COULD NOT VERIFY: the deleted_loads or Job Tracking read failed, or
+//           the sheet came back without a Driver / Load ID column.
+// A failed read used to answer `false`, so a Sheets blip told a driver filing a
+// fuel receipt "This load is not assigned to you" — a false accusation, and one
+// the upload client never retries (it fails fast on a 4xx). Every call site now
+// answers null with sentIfLoadOwnershipUnverified()'s retryable 503, BEFORE its
+// 403 line. null stays falsy so a caller that only tests `!owned` still
+// REFUSES: the worst a call site missing that line can do is send the old,
+// misleading 403 — it can never admit. So never test the result with
+// `=== false`, and never make "could not verify" truthy.
+// scripts/test-load-ownership-guard.js pins every call site and both rules.
 async function loadBelongsToDriver(loadId, driverName) {
 	if (!loadId || !driverName) return false;
 	const target = normalizeDriverName(driverName);
 	const targetLid = String(loadId).trim().toLowerCase().replace(/^#/, "");
-	// Soft-deleted loads are not assignable. A driver who cached the loadId
-	// before admin removed the load can otherwise still drive status mutations
-	// against the sheet row, which would re-surface the load in admin lists.
-	if (getDeletedLoadIds().has(targetLid)) return false;
-	let jt;
-	try { jt = await getJobTrackingCached(); } catch { return false; }
+	// BOTH reads before ANY answer. Answering "soft-deleted → false" ahead of the
+	// sheet read gave a deleted id a 403 and every other id a 503 during an
+	// outage — a one-bit oracle. An outage now answers null for every id alike.
+	let deleted, jt;
+	try { deleted = getDeletedLoadIds({ strict: true }); } catch (err) { return ownershipUnverified(targetLid, "deleted_loads read failed", err); }
+	try { jt = await getJobTrackingCached(); } catch (err) { return ownershipUnverified(targetLid, "Job Tracking read failed", err); }
 	const headers = jt.headers || [];
 	const driverCol = findCol(headers, /driver/i);
 	const loadIdCol = findCol(headers, /load.?id|job.?id/i);
-	if (!driverCol || !loadIdCol) return false;
+	if (!driverCol || !loadIdCol) return ownershipUnverified(targetLid, "Job Tracking has no Driver / Load ID column", null);
+	// Soft-deleted loads are not assignable. A driver who cached the loadId
+	// before admin removed the load can otherwise still drive status mutations
+	// against the sheet row, which would re-surface the load in admin lists.
+	if (deleted.has(targetLid)) return false;
 	for (const row of jt.data || []) {
 		const lid = String(row[loadIdCol] || "").trim().toLowerCase().replace(/^#/, "");
 		if (lid !== targetLid) continue;
 		if (normalizeDriverName(row[driverCol]) === target) return true;
 	}
 	return false;
+}
+
+// loadBelongsToDriver()'s "could not verify" exit: says why in the log and
+// returns the null sentinel. The id is capped and JSON-quoted — it is
+// caller-supplied, and the upload route accepts a 50 MB body.
+function ownershipUnverified(loadKey, what, err) {
+	console.warn(`[load-ownership] could not verify load ${JSON.stringify(String(loadKey || "").slice(0, 40))}: ${what}${err && err.message ? ` — ${err.message}` : ""}`);
+	return null;
+}
+
+// The one answer to loadBelongsToDriver() === null. A 503 with Retry-After, the
+// shape sentIfRendererBusy() uses: the driver did nothing wrong, and the same
+// request succeeds once the read does. Every call site sends it BEFORE any
+// write, so a retry cannot duplicate anything (useUpload.js already retries a
+// 5xx on its own). `extra` carries a route's own envelope ({ ok: false },
+// { stops: [] }) and cannot override the error, code or status. Returns true
+// when it has answered:
+//     if (sentIfLoadOwnershipUnverified(res, owned)) return;
+//     if (!owned) return res.status(403).json(…);   // keep it — null is falsy
+function sentIfLoadOwnershipUnverified(res, owned, extra) {
+	if (owned !== null) return false;
+	res.setHeader("Retry-After", "5");
+	res.status(503).json({
+		...(extra || {}),
+		error: "Couldn't verify this load right now — please try again.",
+		code: "LOAD_OWNERSHIP_UNVERIFIED",
+		retryable: true,
+	});
+	return true;
+}
+
+// ⚠️ A CANCELLED ROW IS NOT A DRIVER'S TO MOVE. loadBelongsToDriver() answers
+// "does this load name this driver" and ignores status, and only POST
+// /api/dispatch/cancel blanks the Driver cell — a load cancelled by a sheet
+// edit or PUT /api/data still names its driver. Until liveJobTrackingView(),
+// the in-place excludeDroppedLoads() four routes ran on the shared cache
+// USUALLY hid such a row from the guard, and that accident was all that stopped
+// a driver (or a stale driver app) moving a cancelled load to Delivered — back
+// into revenue, driver pay and the investor payout — or declining it back onto
+// the board as Unassigned. It is a rule now, judged on the BOUND row the write
+// lands on and never on the deduplicated view: load 7052901 has a live row
+// above a cancelled "#7052901" copy, and its driver must keep advancing the
+// live one. Driver role only. Returns true when it has answered.
+function sentIfDriverWriteOnCancelledRow(req, res, headers, row, action, loadId) {
+	if (req.session?.user?.role !== "Driver") return false;
+	const statusIdx = (headers || []).findIndex((h) => /status/i.test(h));
+	if (statusIdx === -1) return false;
+	if (!CANCELED_STATUS_RE.test(String((row || [])[statusIdx] || "").trim())) return false;
+	logAuditRefusal(req, action, "load", String(loadId || "").slice(0, 100),
+		"Blocked a driver write to a cancelled load [LOAD_CANCELLED]", "LOAD_CANCELLED");
+	res.status(409).json({
+		code: "LOAD_CANCELLED",
+		error: "This load was cancelled, so it can't be changed from the driver app. Contact dispatch if that's a mistake.",
+	});
+	return true;
+}
+
+// ⚠️ THE BOUND ROW MUST NAME THE ACTING DRIVER — the narrowing that
+// resolveLoadBinding()'s rung-4 note calls for. PUT /api/driver/status lets a
+// Driver choose WHICH copy of a duplicated id to write, which was safe only
+// while ownership was judged on a bottom row that named them. With the shared
+// cache no longer filtered in place, a cancelled bottom copy naming driver B
+// makes B the "owner" of the id every time — and B could then rewrite driver
+// A's earlier copy (Delivered → Dispatched in an open month moves A's weekly
+// pay). Load 7052901 is unaffected: its live row names its own driver. Driver
+// role only. Returns true when it has answered.
+function sentIfDriverWriteOnOthersRow(req, res, headers, row, driverName, action, loadId) {
+	if (req.session?.user?.role !== "Driver") return false;
+	const driverIdx = (headers || []).findIndex((h) => /driver/i.test(h));
+	const onRow = driverIdx === -1 ? "" : normalizeDriverName((row || [])[driverIdx]);
+	if (onRow && onRow === normalizeDriverName(driverName)) return false;
+	logAuditRefusal(req, action, "load", String(loadId || "").slice(0, 100),
+		"Blocked a driver write to a row naming another driver [ROW_NOT_ASSIGNED]", "ROW_NOT_ASSIGNED");
+	res.status(403).json({
+		code: "ROW_NOT_ASSIGNED",
+		error: "This copy of the load is assigned to another driver. Refresh the app and try again.",
+	});
+	return true;
 }
 
 // Load-drop filtering — single source of truth for "this load should not
@@ -28056,11 +28360,16 @@ async function loadBelongsToDriver(loadId, driverName) {
 // Used by /api/dashboard, /api/financials, /api/investor, and /api/public/track
 // so every surface stays consistent.
 const CANCELED_STATUS_RE = /^(cancel|canceled|cancelled)$/i;
-function getDeletedLoadIds() {
+// `{ strict: true }` rethrows a failed read instead of answering "nothing is
+// deleted". A filter can live with the empty Set; an authorization check cannot
+// — loadBelongsToDriver() would otherwise re-admit a soft-deleted load's driver
+// whenever this read failed.
+function getDeletedLoadIds(opts) {
 	try {
 		const rows = db.prepare("SELECT load_id FROM deleted_loads").all();
 		return new Set(rows.map((r) => (r.load_id || "").toString().trim().toLowerCase()));
-	} catch {
+	} catch (err) {
+		if (opts && opts.strict) throw err;
 		return new Set();
 	}
 }
@@ -28080,6 +28389,28 @@ function excludeDroppedLoads(rows, headers, deletedIds) {
 		if (CANCELED_STATUS_RE.test(st)) return false;
 		return true;
 	});
+}
+
+// ⚠️ getJobTrackingCached() hands EVERY caller the SAME object for up to 60 s,
+// so writing to it — `jobTracking.data = …`, or `row._x = …` on one of its rows
+// — rewrites what every other caller reads in that window. Four routes did:
+// /api/dashboard, /api/driver/:driverName, /api/investor and /api/financials
+// each ran `jobTracking.data = excludeDroppedLoads(…)` on the shared object, so
+// for up to a minute afterwards cancelled and soft-deleted loads vanished for
+// the callers that deliberately keep them (reconcileRateCons() then reports a
+// cancelled load as an ingestion gap), and the dashboard's _pickupLocation and
+// the driver view's _docCount / _queuePosition annotations stuck to cached
+// rows. Use this instead: live rows only (the excludeDroppedLoads() rule),
+// fresh arrays, and every row a shallow copy — a full copy, since parseSheet()
+// rows hold only strings — so a route may filter, sort and annotate freely.
+// scripts/test-jt-cache-isolation.js fails if a caller writes to the cache.
+function liveJobTrackingView(jt) {
+	const headers = (jt && jt.headers) || [];
+	return {
+		...jt,
+		headers: [...headers],
+		data: excludeDroppedLoads((jt && jt.data) || [], headers).map((r) => ({ ...r })),
+	};
 }
 
 // Returns { normalizedDriverName: { remove: Set<"YYYY-MM-DD">, add: Set<"YYYY-MM-DD"> } }
@@ -28759,9 +29090,10 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 		// rest of the load-aggregating endpoints (/api/dashboard, /api/investor,
 		// /api/financials, /api/public/track). Cold reads still hit Sheets, but
 		// warm reads now respond in ~10ms instead of 2-5s, and drop cancelled +
-		// soft-deleted rows the same way the admin KPIs do.
-		const jobTracking = await getJobTrackingCached();
-		jobTracking.data = excludeDroppedLoads(jobTracking.data, jobTracking.headers);
+		// soft-deleted rows the same way the admin KPIs do. A request-local copy:
+		// the _docCount / _queuePosition annotations below must not land on the
+		// shared cache (see liveJobTrackingView()).
+		const jobTracking = liveJobTrackingView(await getJobTrackingCached());
 		const carrierDB = getCarrierDBFromSQLite();
 
 		// Find driver column in Job Tracking. Regex covers the common
@@ -29501,6 +29833,7 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 		// which has its own audit/reason gate, so this guard is Driver-only.
 		if (req.session.user.role === "Driver") {
 			const owned = await loadBelongsToDriver(loadId, driverName);
+			if (sentIfLoadOwnershipUnverified(res, owned)) return;
 			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
 		}
 		const sheets = await getSheets();
@@ -29584,6 +29917,12 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 		if (statusIdx === -1) {
 			return res.status(400).json({ error: "Status column not found in sheet" });
 		}
+
+		// A cancelled row is not a driver's to move — on the BOUND row, before the
+		// POD gate and every write. See sentIfDriverWriteOnCancelledRow().
+		if (sentIfDriverWriteOnCancelledRow(req, res, headers, dataRows[rowIndex - 2], "status_update_blocked", loadId)) return;
+		// ...and the bound copy must name this driver — see sentIfDriverWriteOnOthersRow().
+		if (sentIfDriverWriteOnOthersRow(req, res, headers, dataRows[rowIndex - 2], driverName, "status_update_blocked", loadId)) return;
 
 		// Enforce one active job at a time: block transition to "At Shipper" if another load is active
 		//
@@ -30114,6 +30453,7 @@ app.get("/api/loads/:loadId/status-history", requireAuth, async (req, res) => {
 		const role = req.session.user.role;
 		if (role === "Driver") {
 			const owned = await loadBelongsToDriver(rawId, req.session.user.driverName || "");
+			if (sentIfLoadOwnershipUnverified(res, owned)) return;
 			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
 		} else if (role !== "Super Admin" && role !== "Dispatcher") {
 			return res.status(403).json({ error: "Forbidden" });
@@ -30480,19 +30820,17 @@ app.get("/api/loads/completed/export", requireRole("Super Admin"), exportLimiter
 		]];
 		for (const r of matched) {
 			const lid = loadIdCol ? (r[loadIdCol] || "").toString().trim() : "";
-			// Prefer the enriched "City, ST ZIP" the dashboard computed — these ARE
-			// the shared cache's row objects, so the fields are already there
-			// whenever the dashboard ran inside the 60s TTL. Otherwise derive it
-			// the same way (geocoded address first, sheet column second), and only
-			// fall back to the raw cell when nothing parses.
+			// "City, ST ZIP", derived exactly as the dashboard derives it (same
+			// column pick, geocoded address first, sheet column second), and the raw
+			// cell only when nothing parses. This used to try the dashboard's
+			// `_pickupLocation` first, off the SHARED cache's rows; routes now
+			// annotate private copies (liveJobTrackingView()), so that shortcut could
+			// never hit again — and reading another route's annotations is the
+			// coupling that let one request's writes leak into the next.
 			const pickupRaw = originAddrCol ? r[originAddrCol] : "";
 			const dropRaw = destAddrCol ? r[destAddrCol] : "";
-			const pickup = r._pickupLocation
-				|| resolveAddressParts(r, "pickup", lid, pickupRaw).cityStateZip
-				|| oneLine(pickupRaw);
-			const drop = r._dropLocation
-				|| resolveAddressParts(r, "drop", lid, dropRaw).cityStateZip
-				|| oneLine(dropRaw);
+			const pickup = resolveAddressParts(r, "pickup", lid, pickupRaw).cityStateZip || oneLine(pickupRaw);
+			const drop = resolveAddressParts(r, "drop", lid, dropRaw).cityStateZip || oneLine(dropRaw);
 			out.push([
 				lid,
 				cell(r, statusCol),
@@ -30812,12 +31150,16 @@ async function ingestLinxupPosition(pos) {
 			const driverCol = findCol(headers, /^driver$/i) || findCol(headers, /driver/i);
 			const activeRe = /^(assigned|dispatched|heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
 			if (loadIdCol && statusCol && driverCol) {
+				// Soft-deleted loads keep their active status — skip them, exactly as
+				// the Routemate path does (see routemateSyncTelemetry()).
+				const deletedIds = getDeletedLoadIds();
 				for (const r of (jt.data || [])) {
 					if ((r[driverCol] || "").toString().trim().toLowerCase() !== driverLower) continue;
 					const s = (r[statusCol] || "").toString().trim();
 					if (!activeRe.test(s)) continue;
 					const lid = (r[loadIdCol] || "").toString().trim();
 					if (!lid) continue;
+					if (deletedIds.has(lid.toLowerCase().replace(/^#/, ""))) continue;
 					if (!activeLoadId) activeLoadId = lid;
 					driverActiveLoads.push({ loadId: lid, status: s });
 				}
@@ -31835,6 +32177,7 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		// Admin/Dispatcher act on behalf of any driver so they're exempt.
 		if (req.session.user.role === "Driver" && safeLoadId) {
 			const owned = await loadBelongsToDriver(safeLoadId, driver);
+			if (sentIfLoadOwnershipUnverified(res, owned)) return;
 			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
 		}
 
@@ -32787,18 +33130,101 @@ function imageToPdf(imageBuffers) {
 	});
 }
 
-// Helper: OCR text extraction for receipts
+// Receipt OCR text, via tesseract.js. Called ONLY by queueReceiptOcr() below,
+// after the upload has answered; it logs and swallows whatever this throws.
+//
+// ⚠️ TESSERACT.JS CAN KILL THE PROCESS FROM OUTSIDE ANY try/catch. In 7.0.0 a
+// failed job rejects its promise AND THEN — unless the worker was created with
+// an `errorHandler` — throws from the worker's 'message' listener
+// (node_modules/tesseract.js/src/createWorker.js, `throw Error(data)`). A throw
+// in an event listener reaches no caller: it is an uncaught exception, and the
+// server exits. A crafted 76-byte JPEG that passes isValidImageMagic() and
+// pdfkit is enough, so any driver with a load could do it — and so could a
+// corrupt photo. Tesseract.recognize(), used here until 2026-09-23, passes no
+// errorHandler. So, all four, together:
+//   1. createWorker(…, { errorHandler }): the listener logs instead of throwing.
+//   2. A deadline on BOTH steps. createWorker()'s promise rejects only for a
+//      failed 'load'; a failed language download or `initialize` leaves it
+//      pending FOREVER, which would park the one-at-a-time queue and quietly
+//      stop all OCR until a restart.
+//   3. terminate() in `finally`, on every path — including a recognition that
+//      timed out — and on arrival for a worker that finishes starting late. An
+//      abandoned worker is a live thread holding the wasm core.
+//   4. A start that failed or timed out pauses OCR for RECEIPT_OCR_BACKOFF_MS.
+//      A start that never settles leaves a worker nothing can reach to
+//      terminate, so retrying on every receipt through an outage would leak one
+//      thread per receipt.
+// ⚠️ NOT covered, and not reachable from a request: when `initialize` fails (a
+// corrupt cached ./eng.traineddata) the worker script sends 'reject' and THEN
+// 'resolve' for the same job, and createWorker's listener throws a TypeError on
+// the second, errorHandler or not. Only running OCR in a child process closes
+// that. scripts/test-receipt-ocr-crash.js pins 1-4 against the real listener.
+const RECEIPT_OCR_TIMEOUT_MS = 90_000;        // per step: starting the worker, then reading the image
+const RECEIPT_OCR_BACKOFF_MS = 30 * 60_000;   // after a worker start that failed or timed out
+let receiptOcrPausedUntil = 0;
+function receiptOcrDeadline(promise, step) {
+	let timer;
+	const deadline = new Promise((_, reject) => {
+		timer = setTimeout(() => reject(new Error(`tesseract ${step} timed out after ${RECEIPT_OCR_TIMEOUT_MS} ms`)), RECEIPT_OCR_TIMEOUT_MS);
+	});
+	return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
 async function extractReceiptText(imageBuffer) {
-	try {
-		const Tesseract = require("tesseract.js");
-		const {
-			data: { text },
-		} = await Tesseract.recognize(imageBuffer, "eng");
-		return text.trim();
-	} catch (err) {
-		console.error("OCR failed:", err.message);
-		return "";
+	if (Date.now() < receiptOcrPausedUntil) {
+		throw new Error(`receipt OCR is paused after a failed worker start, until ${new Date(receiptOcrPausedUntil).toISOString()}`);
 	}
+	const { createWorker } = require("tesseract.js");
+	const starting = createWorker("eng", 1, {
+		errorHandler: (data) => console.warn(`[upload] tesseract job failed (non-critical): ${String(data).slice(0, 200)}`),
+	});
+	let worker = null;
+	try {
+		try {
+			worker = await receiptOcrDeadline(starting, "worker start");
+		} catch (err) {
+			starting.then((late) => Promise.resolve(late.terminate()).catch(() => {}), () => {});
+			receiptOcrPausedUntil = Date.now() + RECEIPT_OCR_BACKOFF_MS;
+			console.warn(`[upload] receipt OCR paused for ${Math.round(RECEIPT_OCR_BACKOFF_MS / 60_000)} min: ${(err && err.message) || err}`);
+			throw err;
+		}
+		const { data: { text } } = await receiptOcrDeadline(worker.recognize(imageBuffer), "recognition");
+		return String(text || "").trim();
+	} finally {
+		if (worker) {
+			try { await worker.terminate(); } catch { /* already gone */ }
+		}
+	}
+}
+
+// Receipt OCR for POST /api/documents/upload, run AFTER the response is sent.
+// Nothing reads the text synchronously — only documents.ocr_text, which
+// GET /api/documents/:loadId serves to DocumentList later — so the upload no
+// longer waits on it. ONE AT A TIME: every receipt starts its own tesseract
+// worker (which fetches eng.traineddata from a CDN when it is not cached), and
+// off the request path nothing else would stop a burst of uploads running them
+// all at once. Past RECEIPT_OCR_MAX_PENDING a receipt is stored without text, which
+// is exactly what an OCR failure has always done. Writes by documents.id, the
+// PRIMARY KEY — documents.file_name has no unique index. Never throws.
+const RECEIPT_OCR_MAX_PENDING = 20;
+let receiptOcrChain = Promise.resolve();
+let receiptOcrPending = 0;
+function queueReceiptOcr(documentId, imageBuffer) {
+	if (receiptOcrPending >= RECEIPT_OCR_MAX_PENDING) {
+		console.warn(`[upload] receipt OCR skipped for document ${documentId}: ${receiptOcrPending} already queued`);
+		return false;
+	}
+	receiptOcrPending++;
+	receiptOcrChain = receiptOcrChain.then(async () => {
+		try {
+			const text = await extractReceiptText(imageBuffer);
+			if (text) db.prepare("UPDATE documents SET ocr_text = ? WHERE id = ?").run(text, documentId);
+		} catch (err) {
+			console.error(`[upload] deferred receipt OCR failed for document ${documentId} (non-critical):`, (err && err.message) || err);
+		} finally {
+			receiptOcrPending--;
+		}
+	});
+	return true;
 }
 
 // ============================================================
@@ -33346,6 +33772,7 @@ app.get("/api/documents/:loadId", requireAuth, async (req, res) => {
 		// receipts on any other driver's load by guessing the loadId.
 		if (req.session.user.role === "Driver") {
 			const owned = await loadBelongsToDriver(loadId, req.session.user.driverName);
+			if (sentIfLoadOwnershipUnverified(res, owned)) return;
 			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
 		}
 		// RATECON rows are EXCLUDED from this list, by owner request 2026-08-06:
@@ -36562,6 +36989,7 @@ app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, r
 		// SECURITY: drivers can only upload docs for loads assigned to them
 		if (req.session.user.role === "Driver") {
 			const owned = await loadBelongsToDriver(loadId, driverName);
+			if (sentIfLoadOwnershipUnverified(res, owned)) return;
 			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
 		}
 
@@ -36644,19 +37072,24 @@ app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, r
 			return res.status(500).json({ error: "Could not save the document. Please try again." });
 		}
 
-		// OCR for receipts (images only). Stays ON the critical path because it
-		// populates ocrText in the response body below; it only runs for
-		// docType === "Receipt", never for the POD path.
-		let ocrText = "";
+		// OCR for receipts (images only) is OFF the critical path. It used to be
+		// awaited right here, before the response, to fill an `ocrText` field no
+		// client ever read — a fresh Tesseract worker per upload, on top of a slow
+		// cellular body, inside nginx's 60 s window (and a client that gives up
+		// re-POSTs the whole document, minting a second documents row). Only the
+		// bytes are taken now; queueReceiptOcr() runs after res.json() below and
+		// fills documents.ocr_text by id. Still docType === "Receipt" only — POD,
+		// BOL and Other uploads never ran OCR.
+		let ocrSource = null;
 		if (docType === "Receipt" && fileType !== 'document') {
 			const photoArray = Array.isArray(photoData) ? photoData : [photoData];
-			const firstBuf = Buffer.from(photoArray[0].replace(/^data:image\/\w+;base64,/, ""), "base64");
-			ocrText = await extractReceiptText(firstBuf);
+			ocrSource = Buffer.from(photoArray[0].replace(/^data:image\/\w+;base64,/, ""), "base64");
 		}
 
 		// Store metadata in SQLite
+		let documentId = null;
 		try {
-			db.prepare(
+			documentId = db.prepare(
 				`INSERT INTO documents (load_id, driver, type, file_name, drive_file_id, drive_url, ocr_text)
 				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			).run(
@@ -36666,8 +37099,8 @@ app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, r
 				fileName,
 				"",
 				driveUrl,
-				ocrText,
-			);
+				"",
+			).lastInsertRowid;
 		} catch (dbErr) {
 			console.error("SQLite insert error:", dbErr.message);
 			return res.status(500).json({ error: "Document was uploaded but could not be saved. Please try again." });
@@ -36692,7 +37125,9 @@ app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, r
 			body: `Load ${loadId}`,
 		});
 
-		res.json({ success: true, driveUrl, ocrText });
+		// No `ocrText`: the text does not exist yet (see queueReceiptOcr()), and no
+		// client read the field. It reaches DocumentList via documents.ocr_text.
+		res.json({ success: true, driveUrl });
 		console.log(`[upload] 200 sent; deferring POD sheet update row ${rowIndex}`);
 
 		// Mark the POD column in the sheet AFTER the response is sent. This Sheets
@@ -36751,6 +37186,12 @@ app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, r
 					console.error("Sheet POD column update error (non-critical):", sheetErr.message);
 				}
 			});
+		}
+
+		// Receipt OCR, deferred the same way (res is sent; never touch it here).
+		// queueReceiptOcr() serializes the work and swallows its own failures.
+		if (ocrSource && documentId != null) {
+			setImmediate(() => queueReceiptOcr(documentId, ocrSource));
 		}
 	} catch (error) {
 		console.error("Error uploading document:", error.message);
@@ -37028,6 +37469,9 @@ function checkGeofence(lat, lng, loadData, headers, loadId) {
 // trigger so a single noisy ping can't flip status mid-highway-pass.
 async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, routemateVehicleId, speedMps }) {
 	if (!latitude || !longitude || !driverName || !loadId) return null;
+	// Never advance a soft-deleted load — its sheet row keeps its old status.
+	// Both location paths already skip them; this holds for any future caller.
+	if (getDeletedLoadIds().has(String(loadId).trim().toLowerCase().replace(/^#/, ""))) return null;
 	try {
 		const jt = await getJobTrackingCached();
 		const headers = jt.headers;
@@ -39198,6 +39642,7 @@ app.get("/api/loads/:loadId/haul", requireAuth, haulLimiter, async (req, res) =>
 		const role = req.session.user.role;
 		if (role === "Driver") {
 			const owned = await loadBelongsToDriver(rawId, req.session.user.driverName || "");
+			if (sentIfLoadOwnershipUnverified(res, owned)) return;
 			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
 		} else if (role !== "Super Admin" && role !== "Dispatcher") {
 			return res.status(403).json({ error: "Forbidden" });
@@ -40060,6 +40505,7 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 		let truck = null;
 		if (isDriver) {
 			const owned = await loadBelongsToDriver(loadId, req.session.user.driverName);
+			if (sentIfLoadOwnershipUnverified(res, owned, { ok: false })) return;
 			if (!owned) return res.status(403).json({ ok: false, error: "This load is not assigned to you" });
 			truck = resolveTruckForDriverName(
 				(req.session.user.driverName || req.session.user.driver_name || "").trim());
@@ -40429,6 +40875,7 @@ app.get("/api/poi/fuel-stops", requireRole("Super Admin", "Dispatcher", "Driver"
 				return res.status(403).json({ ok: false, error: "Drivers must request fuel stops by loadId", stops: [] });
 			}
 			const owned = await loadBelongsToDriver(loadId, req.session.user.driverName);
+			if (sentIfLoadOwnershipUnverified(res, owned, { ok: false, stops: [] })) return;
 			if (!owned) return res.status(403).json({ ok: false, error: "This load is not assigned to you", stops: [] });
 			// Defense in depth: force the load_coordinates lookup below to be the
 			// only source of coordinates for this request, whatever was passed.
@@ -40998,6 +41445,7 @@ app.get("/api/geocode/load/:loadId", requireAuth, async (req, res) => {
 		const geoRole = req.session.user.role;
 		if (geoRole === "Driver") {
 			const owned = await loadBelongsToDriver(req.params.loadId, req.session.user.driverName);
+			if (sentIfLoadOwnershipUnverified(res, owned)) return;
 			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
 		} else if (geoRole !== "Super Admin" && geoRole !== "Dispatcher") {
 			return res.status(403).json({ error: "Forbidden" });
@@ -42275,10 +42723,10 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 // GET /api/investor — Aggregated financial data for investor view
 app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
-		const jobTracking = await getJobTrackingCached();
 		// Drop soft-deleted + cancelled loads before any aggregation so investor
-		// dashboards match the admin KPIs exactly.
-		jobTracking.data = excludeDroppedLoads(jobTracking.data, jobTracking.headers);
+		// dashboards match the admin KPIs exactly — on a request-local copy, never
+		// the shared cache (see liveJobTrackingView()).
+		const jobTracking = liveJobTrackingView(await getJobTrackingCached());
 		const carrierDB = getCarrierDBFromSQLite();
 
 		// Super Admin can pass ?as_user_id=N to preview a specific investor's
@@ -45910,10 +46358,10 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			return res.status(400).json({ error: "month must be in YYYY-MM format" });
 		}
 
-		const jobTracking = await getJobTrackingCached();
 		// Drop soft-deleted + cancelled loads before any aggregation so the P&L
-		// numbers match the dashboard KPIs exactly.
-		jobTracking.data = excludeDroppedLoads(jobTracking.data, jobTracking.headers);
+		// numbers match the dashboard KPIs exactly — on a request-local copy, never
+		// the shared cache (see liveJobTrackingView()).
+		const jobTracking = liveJobTrackingView(await getJobTrackingCached());
 
 		// Column resolution (same regex as investor endpoint)
 		const jtRateCol = findCol(jobTracking.headers, /payment|rate|amount|revenue/i);
@@ -49225,6 +49673,19 @@ io.on("connection", (socket) => {
 	const usernameLower = (sessionUser.username || "").trim().toLowerCase();
 
 	socket.on("register", (clientName) => {
+		// A session that must change its password joins NO room, so nothing is
+		// pushed to it (see FORCED PASSWORD CHANGE beside requireAuth). Read from
+		// the database on every register: refreshPasswordChangeFlag does not run
+		// on engine requests, and the change clears the flag mid-connection.
+		// ⚠️ Deliberately NOT a disconnect at connection time. socket.io-client
+		// never retries a server-initiated disconnect and useSocket() keeps the
+		// dead socket, and the SPA can open one while forced: on a reload,
+		// App.vue shows the sidebar (whose onMounted connects) before the router
+		// has redirected to the change screen. A refused connection would leave
+		// that driver with no live updates after the change until a full reload.
+		// Refusing the join instead leaves the socket inert, and the register the
+		// next page sends after the change joins as normal.
+		if (currentMustChangePassword(sessionUser)) return;
 		const requested = (clientName || "").trim().toLowerCase();
 		// The client passes a room name (their driver name, "dispatch",
 		// "investor"). We ignore it for routing decisions and instead derive
