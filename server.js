@@ -87,6 +87,8 @@ const expenseWindowRule = require("./lib/expense-window");
 const { geminiFailure } = require("./lib/gemini-errors");
 const { csvRows } = require("./lib/csv");
 const piiMask = require("./lib/pii-mask");
+// Boundary checks shared by every unauthenticated form route (email, vehicles).
+const publicFormInput = require("./lib/public-form-input");
 
 // ---------------------------------------------------------------------------
 // PII_MASK_ENABLED — deliberately defaults ON, unlike every other flag here.
@@ -7463,14 +7465,32 @@ app.use("/uploads", requireAuth, express.static(path.join(__dirname, "uploads"),
 // PUBLIC: Job Application
 // ============================================================
 const publicFormLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, message: { error: "Too many submissions. Try again later." }, standardHeaders: true });
+// Every field POST /api/public/apply binds into its INSERT as-is, each of which
+// must arrive as ONE scalar (lib/public-form-input.js checkPublicScalars). The
+// route serializes `availability` and `reference_info` itself, so they are not
+// listed. scripts/test-public-form-input.js pins this list to the route.
+const PUBLIC_APPLY_SCALAR_FIELDS = [
+	"full_name", "email", "phone", "dob", "address", "ssn", "drivers_license", "position", "experience",
+	"has_cdl", "work_authorized", "felony_convicted", "felony_explanation", "accident_history",
+	"accident_description", "traffic_citations", "certifications", "skills", "additional_info",
+	"signature", "signature_date", "cdl_front", "cdl_back", "medical_card", "city", "state", "zip",
+	"cell", "dot", "mc", "hazmat",
+];
 app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 	try {
 		const { full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation, accident_history, accident_description, traffic_citations, certifications, availability, skills, reference_info, additional_info, signature, signature_date, cdl_front, cdl_back, medical_card, city, state, zip, cell, dot, mc, hazmat } = req.body;
 		if (!full_name || !email || !phone || !dob || !address || !ssn || !drivers_license || !position || !experience || !has_cdl || !work_authorized || !felony_convicted || !accident_history || !signature) {
 			return res.status(400).json({ error: "Please fill in all required fields." });
 		}
-		if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email))) {
-			return res.status(400).json({ error: "Please provide a valid email address." });
+		const shape = publicFormInput.checkPublicScalars(req.body, PUBLIC_APPLY_SCALAR_FIELDS);
+		if (!shape.ok) {
+			return res.status(400).json({ error: shape.message, code: "INVALID_FIELD", reason: shape.reason, field: shape.field });
+		}
+		// Shared with POST /api/public/investor-apply: one address, length-capped
+		// before any pattern runs. See lib/public-form-input.js.
+		const emailCheck = publicFormInput.checkPublicEmail(email);
+		if (!emailCheck.ok) {
+			return res.status(400).json({ error: emailCheck.message, code: "INVALID_EMAIL", reason: emailCheck.reason });
 		}
 		const duplicate = db.prepare(
 			"SELECT id FROM job_applications WHERE LOWER(email) = LOWER(?) AND deleted_at IS NULL"
@@ -8084,6 +8104,16 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), async (req, res
 
 // === INVESTOR ONBOARDING ENDPOINTS (Public) ===
 
+// Fields the public investor routes bind into SQL as-is; each must arrive as
+// ONE scalar (lib/public-form-input.js checkPublicScalars).
+// scripts/test-public-form-input.js pins these lists to the routes.
+const PUBLIC_INVESTOR_SCALAR_FIELDS = [
+	"legal_name", "dba", "entity_type", "address", "contact_person", "contact_title", "phone", "email",
+	"years_in_operation", "industry_experience", "fleet_size", "preferred_communication",
+	"tax_classification", "ein_ssn", "bankruptcy_liens", "reporting_preference",
+];
+const PUBLIC_BANKING_SCALAR_FIELDS = ["bank_name", "account_type", "routing_number", "account_number", "account_name"];
+
 // POST /api/public/investor-apply — Single atomic submission: form + vehicles + banking + signatures
 app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 	try {
@@ -8096,8 +8126,28 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 		if (!legal_name || !email || !phone || !address || !ein_ssn) {
 			return res.status(400).json({ error: "Please fill in all required fields." });
 		}
+		const shape = publicFormInput.checkPublicScalars(req.body, PUBLIC_INVESTOR_SCALAR_FIELDS);
+		if (!shape.ok) {
+			return res.status(400).json({ error: shape.message, code: "INVALID_FIELD", reason: shape.reason, field: shape.field });
+		}
+		// `email` is the recipient of the confirmation below, so it must be ONE
+		// well-formed address. Same check as POST /api/public/apply.
+		const emailCheck = publicFormInput.checkPublicEmail(email);
+		if (!emailCheck.ok) {
+			return res.status(400).json({ error: emailCheck.message, code: "INVALID_EMAIL", reason: emailCheck.reason });
+		}
+		// Vehicles are read by the transaction, the document renders and the
+		// notification email. Check their shape once, here, before any of them.
+		const vehicleCheck = publicFormInput.checkPublicVehicles(vehicles);
+		if (!vehicleCheck.ok) {
+			return res.status(400).json({ error: vehicleCheck.message, code: "INVALID_VEHICLES", reason: vehicleCheck.reason });
+		}
 		if (!banking || !banking.bank_name || !banking.routing_number || !banking.account_number) {
 			return res.status(400).json({ error: "Banking information is required." });
+		}
+		const bankingShape = publicFormInput.checkPublicScalars(banking, PUBLIC_BANKING_SCALAR_FIELDS);
+		if (!bankingShape.ok) {
+			return res.status(400).json({ error: bankingShape.message, code: "INVALID_FIELD", reason: bankingShape.reason, field: `banking.${bankingShape.field}` });
 		}
 		if (!signatures || Object.keys(signatures).length < INVESTOR_ONBOARDING_DOCS.length) {
 			return res.status(400).json({ error: "All documents must be signed." });
@@ -8110,8 +8160,12 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 		const consentByDoc = {};
 		for (const doc of INVESTOR_ONBOARDING_DOCS) {
 			const sig = signatures[doc.key];
-			if (!sig || !sig.text || !sig.text.trim()) {
+			if (!sig || typeof sig.text !== "string" || !sig.text.trim()) {
 				return res.status(400).json({ error: `Signature required for ${doc.name}.` });
+			}
+			const sigShape = publicFormInput.checkPublicScalars(sig, ["image"]);
+			if (!sigShape.ok) {
+				return res.status(400).json({ error: sigShape.message, code: "INVALID_FIELD", reason: sigShape.reason, field: `signatures.${doc.key}.image` });
 			}
 			const consent = readTransmittedConsent(sig, res, { docLabel: doc.name });
 			if (!consent) return;
@@ -8120,7 +8174,7 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 		const net = signerNetworkEvidence(req);
 
 		const accessToken = crypto.randomUUID();
-		const vehiclesArr = Array.isArray(vehicles) ? vehicles : [];
+		const vehiclesArr = vehicleCheck.value;
 		const now = new Date().toISOString();
 		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: EVIDENCE_DATE_TZ });
 		const signedAt = new Date().toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
@@ -8396,6 +8450,13 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 			pdfAttachments,
 		);
 	} catch (err) {
+		// The notification emails are built AFTER res.json() above, inside this
+		// same try, so this catch can run once the response is already out.
+		// Never answer twice — the applicant already has their answer. Log it.
+		if (res.headersSent) {
+			console.error("investor-apply: post-response step failed:", err.message);
+			return;
+		}
 		res.status(500).json({ error: err.message });
 	}
 });
@@ -9165,7 +9226,11 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", onboardingSignLimit
 		if (!appId) return;
 		const { docKey } = req.params;
 		const { signatureText, signatureImage, vehicleInfo } = req.body;
-		if (!signatureText || !signatureText.trim()) return res.status(400).json({ error: "Signature required" });
+		if (typeof signatureText !== "string" || !signatureText.trim()) return res.status(400).json({ error: "Signature required" });
+		const sigShape = publicFormInput.checkPublicScalars(req.body, ["signatureImage"]);
+		if (!sigShape.ok) {
+			return res.status(400).json({ error: sigShape.message, code: "INVALID_FIELD", reason: sigShape.reason, field: sigShape.field });
+		}
 
 		const docRow = db.prepare("SELECT * FROM investor_onboarding_documents WHERE application_id = ? AND doc_key = ?").get(appId, docKey);
 		if (!docRow) return res.status(404).json({ error: "Document not found" });
@@ -9184,8 +9249,16 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", onboardingSignLimit
 		const signedPath = path.join(signedDir, signedFileName);
 		const publicUrl = `/uploads/investor-onboarding-signed/${signedFileName}`;
 
-		// Save vehicle info if provided (for Exhibit A)
-		const vehiclesArr = Array.isArray(vehicleInfo) ? vehicleInfo : (vehicleInfo ? [vehicleInfo] : []);
+		// Save vehicle info if provided (for Exhibit A). A single object is
+		// accepted as a one-vehicle list; either way the entries are checked
+		// before the first one is read.
+		const vehicleCheck = publicFormInput.checkPublicVehicles(
+			Array.isArray(vehicleInfo) ? vehicleInfo : (vehicleInfo ? [vehicleInfo] : [])
+		);
+		if (!vehicleCheck.ok) {
+			return res.status(400).json({ error: vehicleCheck.message, code: "INVALID_VEHICLES", reason: vehicleCheck.reason });
+		}
+		const vehiclesArr = vehicleCheck.value;
 		if (vehiclesArr.length > 0) {
 			const v = vehiclesArr[0];
 			db.prepare(`UPDATE investor_applications SET
@@ -9770,7 +9843,11 @@ app.post("/api/public/investor-onboarding/:id/vehicles", (req, res) => {
 		const appId = verifyInvestorToken(req, res);
 		if (!appId) return;
 		const { vehicles } = req.body;
-		const vehiclesArr = Array.isArray(vehicles) ? vehicles : [];
+		const vehicleCheck = publicFormInput.checkPublicVehicles(vehicles);
+		if (!vehicleCheck.ok) {
+			return res.status(400).json({ error: vehicleCheck.message, code: "INVALID_VEHICLES", reason: vehicleCheck.reason });
+		}
+		const vehiclesArr = vehicleCheck.value;
 		db.prepare("UPDATE investor_applications SET vehicles_json=? WHERE id=?")
 			.run(JSON.stringify(vehiclesArr), appId);
 		// Also update the legacy single-vehicle columns from the first vehicle
@@ -9796,6 +9873,10 @@ app.post("/api/public/investor-onboarding/:id/banking", (req, res) => {
 		const { bank_name, account_type, routing_number, account_number, account_name } = req.body;
 		if (!bank_name || !routing_number || !account_number) {
 			return res.status(400).json({ error: "Bank name, routing number, and account number are required" });
+		}
+		const bankingShape = publicFormInput.checkPublicScalars(req.body, PUBLIC_BANKING_SCALAR_FIELDS);
+		if (!bankingShape.ok) {
+			return res.status(400).json({ error: bankingShape.message, code: "INVALID_FIELD", reason: bankingShape.reason, field: bankingShape.field });
 		}
 		// Verify all documents are signed before accepting banking info
 		const signedCount = db.prepare("SELECT COUNT(*) AS cnt FROM investor_onboarding_documents WHERE application_id=? AND signed=1").get(appId).cnt;
@@ -9867,7 +9948,13 @@ app.post("/api/public/investor-preview-pdf/:docKey", pdfPreviewLimiter, async (r
 		}
 		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: EVIDENCE_DATE_TZ });
 		const signedAt = signatureText ? new Date().toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" }) : undefined;
-		const vehiclesArr = Array.isArray(vehicles) ? vehicles : [];
+		// Same vehicle check as POST /api/public/investor-apply, so a preview can
+		// never render a list the real submission would refuse.
+		const vehicleCheck = publicFormInput.checkPublicVehicles(vehicles);
+		if (!vehicleCheck.ok) {
+			return res.status(400).json({ error: vehicleCheck.message, code: "INVALID_VEHICLES", reason: vehicleCheck.reason });
+		}
+		const vehiclesArr = vehicleCheck.value;
 		const appData = {
 			legalName: legal_name || "",
 			dba: dba || "",
@@ -11101,7 +11188,8 @@ app.post("/api/investor-outreach/send", requireRole("Super Admin"), async (req, 
 
 		for (const email of emails) {
 			const trimmed = email.trim();
-			if (!trimmed || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+			// Same single-address rule as the public forms (lib/public-form-input.js).
+			if (!trimmed || !publicFormInput.checkPublicEmail(trimmed).ok) {
 				failures.push({ email: trimmed, error: "Invalid email format" });
 				continue;
 			}
