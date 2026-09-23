@@ -72,7 +72,7 @@ pm2 logs logistics-app --lines 500 | grep -E "load-ownership|receipt OCR"
 ```
 
 - `[load-ownership] could not verify load "…": Job Tracking read failed — …` — the ownership check could not read the sheet; the driver got a retryable **503**, not a 403. A burst of these is a Sheets outage, not a permissions problem.
-- `deferred receipt OCR failed for document N (non-critical)` / `receipt OCR skipped for document N` — the receipt **was** saved; only its OCR text is missing.
+- `deferred receipt OCR failed for document N (non-critical)` / `receipt OCR skipped for document N` — the receipt **was** saved; only its OCR text is missing. `receipt OCR paused for 30 min` means a tesseract worker failed to start (usually the first download of its language data); OCR resumes by itself after the pause.
 
 **3. ScanKit health — credits / enabled / errors:**
 
