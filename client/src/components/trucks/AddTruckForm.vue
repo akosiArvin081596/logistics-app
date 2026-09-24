@@ -137,8 +137,11 @@
         </div>
         <div class="form-group">
           <label class="form-label">Driver Pay ($/day)</label>
-          <input v-model.number="form.driverPayDaily" class="form-input" type="number" min="0" max="10000" step="any" placeholder="250 (default)" />
-          <div class="field-hint">Daily rate for this truck's driver. Leave blank to use the $250/day default.</div>
+          <!-- Pay is Super Admin only (403 PAY_EDIT_ADMIN_ONLY otherwise): anyone
+               else adds the truck on the $250/day default. -->
+          <input v-model.number="form.driverPayDaily" class="form-input" type="number" min="0" max="10000" step="any" placeholder="250 (default)" :disabled="!canEditPay" />
+          <div v-if="canEditPay" class="field-hint">Daily rate for this truck's driver. Leave blank to use the $250/day default.</div>
+          <div v-else class="field-hint">Uses the $250/day default. Only a Super Admin can set driver pay.</div>
         </div>
       </div>
       <div class="form-row">
@@ -214,10 +217,12 @@ const truckModels = {
   Nikola: ['Tre BEV', 'Tre FCEV', 'Two'],
 }
 
-defineProps({
+const props = defineProps({
   driverNames: { type: Array, default: () => [] },
   investorUsers: { type: Array, default: () => [] },
   showOwner: { type: Boolean, default: false },
+  // Driver pay is Super Admin only; everyone else adds on the default rate.
+  canEditPay: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['submit'])
@@ -316,8 +321,9 @@ function handleSubmit() {
     // fuel_tank_gallons); identical value, so whichever the server reads wins.
     in_service_date: form.inServiceDate || '',
     inServiceDate: form.inServiceDate || '',
-    // Blank input = no custom rate (server stores 0 = use $250 default)
-    driverPayDaily: form.driverPayDaily === '' ? 0 : form.driverPayDaily,
+    // Blank input = no custom rate (server stores 0 = use $250 default). Only a
+    // Super Admin sends a rate; anyone else's truck starts on the default.
+    driverPayDaily: !props.canEditPay || form.driverPayDaily === '' ? 0 : form.driverPayDaily,
     purchasePrice: form.purchasePrice,
     titleStatus: form.titleStatus,
     maintenanceFundMonthly: form.maintenanceFundMonthly,
@@ -374,6 +380,8 @@ function handleSubmit() {
 .btn-add { width: auto; padding: 0.5rem 1.5rem; }
 .error-msg { color: var(--danger); font-size: 0.78rem; margin-top: 0.5rem; min-height: 1.1em; }
 .field-hint { font-size: 0.7rem; color: var(--text-dim); margin-top: 0.25rem; }
+/* Read-only for this role (driver pay is Super Admin only): still legible. */
+.form-input:disabled { opacity: 0.6; cursor: not-allowed; }
 .fixed-costs-label {
   font-size: 0.72rem; font-weight: 600; color: var(--text-dim);
   text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer;

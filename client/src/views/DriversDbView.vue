@@ -20,7 +20,7 @@
 
     <details class="form-accordion">
       <summary class="form-toggle">+ Add Driver <span class="form-toggle-note">(Case-by-case basis only — should go through the proper application process)</span></summary>
-      <AddDriverForm @submit="handleAdd" />
+      <AddDriverForm :can-edit-pay="auth.isSuperAdmin" @submit="handleAdd" />
     </details>
 
     <template v-if="store.isLoading">
@@ -33,6 +33,7 @@
         :headers="store.headers"
         :driver-ratings="driverRatings"
         :truck-assignments="truckAssignments"
+        :can-edit-pay="auth.isSuperAdmin"
         @delete="handleDelete"
         @update="handleUpdate"
         @picture-updated="store.load()"
@@ -44,6 +45,7 @@
 <script setup>
 import { onMounted, computed, ref, watch } from 'vue'
 import { useDriversDbStore } from '../stores/driversDb'
+import { useAuthStore } from '../stores/auth'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
@@ -55,6 +57,10 @@ import { usePagination } from '../composables/usePagination'
 import { Card, CardContent } from '@/components/ui/card'
 
 const store = useDriversDbStore()
+// Driver pay is Super Admin only (the server answers 403 PAY_EDIT_ADMIN_ONLY
+// otherwise). This route is Super Admin only today; the flag keeps the pay
+// inputs read-only for any other role that is ever given the page.
+const auth = useAuthStore()
 const api = useApi()
 const { show: toast } = useToast()
 useSocketRefresh('drivers:changed', () => store.load())
