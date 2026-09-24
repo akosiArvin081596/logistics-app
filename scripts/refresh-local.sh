@@ -8,6 +8,14 @@
 #   ./scripts/refresh-local.sh --telemetry-all # full-fidelity telemetry (bigger, slower)
 #   ./scripts/refresh-local.sh --scan-legacy   # look for pre-2026-08-09 unsanitized copies
 #
+# Every account on the refreshed copy gets a random password nobody knows.
+# Before running test-suite.js against it:
+#   node scripts/prepare-test-fixtures.js --yes-local-db
+# To sign in as one Super Admin instead, put REFRESH_OPERATOR_PASSWORD (and
+# optionally REFRESH_OPERATOR_USER) in the ENVIRONMENT — never argv; see
+# scripts/README-env-refresh.md. It is applied here, at install, and is never
+# sent to the VPS.
+#
 # It never touches production data. The database source is the NIGHTLY SNAPSHOT
 # (scripts/backup-db.js output), not the live production app.db, so nothing here
 # opens a file production is writing to.
@@ -78,6 +86,14 @@ done
 say() { echo "[refresh-local] $*"; }
 die() { echo "[refresh-local] FAILED: $*" >&2; exit 1; }
 
+# Operator access: moved out of the environment before this script starts any
+# child, and handed only to the two LOCAL refresh-env.js calls that use it (the
+# preflight and the install). Left exported, `npm install` — third-party
+# lifecycle scripts — and ssh would inherit it; unset, it cannot reach the VPS.
+OPERATOR_PASSWORD="${REFRESH_OPERATOR_PASSWORD-}"
+OPERATOR_USER="${REFRESH_OPERATOR_USER-}"
+unset REFRESH_OPERATOR_PASSWORD REFRESH_OPERATOR_USER
+
 SSH=(ssh -o BatchMode=yes -o ConnectTimeout=20 -i "$VPS_KEY")
 SCP=(scp -q -o BatchMode=yes -o ConnectTimeout=20 -i "$VPS_KEY")
 
@@ -137,7 +153,14 @@ say "local sheet: $CURRENT_SHEET"
 # costs nothing and, crucially, leaks nothing.
 if [ "$CODE_ONLY" != "1" ]; then
   say "checking the target environment (sheet / mail / auto-invoice)…"
-  node scripts/refresh-env.js --check-env-only --to "$APP_DIR/app.db" \
+  # The operator password rides along so a too-short one is refused HERE,
+  # before the VPS round trip rather than after it. So do the extra arguments:
+  # they are later embedded in the remote ssh command, so anything refresh-env.js
+  # would refuse — a password typed as an argument above all — must be refused
+  # on this machine, before it can cross to the VPS. (refresh-env.js refuses a
+  # second mode flag, so none of them can turn this preflight into another mode.)
+  REFRESH_OPERATOR_PASSWORD="$OPERATOR_PASSWORD" REFRESH_OPERATOR_USER="$OPERATOR_USER" \
+    node scripts/refresh-env.js --check-env-only --to "$APP_DIR/app.db" "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}" \
     || die "target environment gates refused. Nothing was copied. Fix .env and re-run."
 fi
 
@@ -275,13 +298,18 @@ node scripts/refresh-env.js --verify "$TMP/sanitized.db.gz" \
   || die "the received artifact did not pass the sanitization assertions. It has NOT been installed."
 
 say "installing…"
-node scripts/refresh-env.js --from "$TMP/sanitized.db.gz" --to "$APP_DIR/app.db" \
+REFRESH_OPERATOR_PASSWORD="$OPERATOR_PASSWORD" REFRESH_OPERATOR_USER="$OPERATOR_USER" \
+  node scripts/refresh-env.js --from "$TMP/sanitized.db.gz" --to "$APP_DIR/app.db" \
   --from-sanitized --yes-non-prod "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"
+unset OPERATOR_PASSWORD OPERATOR_USER
 
 say ""
 say "Done. Start the stack in two terminals:"
 say "  SPREADSHEET_ID=$CURRENT_SHEET npm run dev"
 say "  npm run dev:client"
+say ""
+say "Every account on the new copy has a random password nobody knows. Before"
+say "running test-suite.js against it:  node scripts/prepare-test-fixtures.js --yes-local-db"
 say ""
 say "If you refreshed before 2026-08-09, this machine may still hold an"
 say "UNSANITIZED copy from the old flow. Find them with:"

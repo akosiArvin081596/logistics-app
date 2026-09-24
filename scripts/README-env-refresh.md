@@ -12,6 +12,10 @@ cd /var/www/logisx-staging && ./scripts/refresh-staging.sh --yes           # sta
 cd /var/www/logisx-staging && ./scripts/refresh-staging.sh --yes --restart # and restart pm2
 ```
 
+**Every account on a refreshed copy gets a random password nobody knows.** To sign in, give one
+Super Admin a password through the environment, or — for `test-suite.js` on a local copy — run
+`prepare-test-fixtures.js` afterwards. See [Signing in to a refreshed copy](#signing-in-to-a-refreshed-copy).
+
 Both wrappers call `scripts/refresh-env.js`, which does the database half and holds every
 safety gate. You can call it directly:
 
@@ -62,6 +66,9 @@ Points worth keeping:
   production sheet, send real mail, or auto-submit invoices stops the run while the data is
   still on the server. `--check-env-only` cannot open a database at all, so a refusal is
   structurally incapable of having moved anything first.
+- **Step 1 sees the same extra arguments step 3 will.** `refresh-local.sh` embeds them in the
+  remote ssh command, so anything `refresh-env.js` refuses — a password typed as an argument, a
+  second mode flag — is refused on the laptop before it can reach the VPS.
 - **There is no fallback to sanitizing locally.** If step 3 cannot run, the script fails. A
   fallback that copies the raw snapshot and redacts it on the laptop is precisely the
   behaviour being removed, and it would be taken every time the remote step got flaky.
@@ -134,8 +141,10 @@ Both wrappers pick the newest `app.db.*.gz` automatically.
 | **Spreadsheet** | the `.env` beside `--to` has **no** `SPREADSHEET_ID`, or has the production one | install, `--check-env-only` |
 | **Mail** | that `.env` has both `GMAIL_USER` and `GMAIL_APP_PASSWORD` (override: `--allow-mail`) | install, `--check-env-only` |
 | **Money** | that `.env` has `INVOICE_AUTOGEN_ENABLED=true` | install, `--check-env-only` |
+| **Password on the command line** | any argument looks like a password — a flag with a `pass`/`password`/`pw`/`secret`/`operator` component, or `REFRESH_OPERATOR_…` typed as an argument. Refused rather than ignored, and never echoed: argv lands in shell history and in `ps` | all modes |
+| **Operator password** | `REFRESH_OPERATOR_PASSWORD` is shorter than 16 characters; at install, `REFRESH_OPERATOR_USER` names no account, or one that is not a Super Admin | install, `--check-env-only` (length only) |
 | Integrity | the file fails `integrity_check` | all modes that open one |
-| **Assertions** | any scrubbed column still holds a value — see below | sanitize, `--verify`, install |
+| **Assertions** | any scrubbed column still holds a value, or any account accepts a known or shared password — see below | sanitize, `--verify`, install |
 
 The spreadsheet gate is the one that matters. `server.js` falls back to the production sheet
 whenever `SPREADSHEET_ID` is unset, so **the override is the safety** — a refreshed database
@@ -148,6 +157,65 @@ Nothing is deleted without a fallback — the previous `app.db` is renamed to
 `app.db.pre-refresh-<stamp>` (with its `-wal`/`-shm`, which belong to the old database and
 would be read as corruption if left beside the new one). Use `--dry-run` to see the plan and
 the row counts without replacing anything.
+
+---
+
+## Signing in to a refreshed copy
+
+Every account on a refreshed copy gets its own random secret, hashed and then discarded, so
+**nothing signs in until you choose a way in.** There are two, for two different jobs.
+
+### One Super Admin, local or staging — `REFRESH_OPERATOR_PASSWORD`
+
+| Variable | Meaning |
+|---|---|
+| `REFRESH_OPERATOR_PASSWORD` | The password to set. **Environment only** — a password-like command-line argument is refused, because argv lands in shell history and in `ps`. At least 16 characters. Never printed, logged or echoed. |
+| `REFRESH_OPERATOR_USER` | The account it is set on. Default `super_admin`. Must be the exact username of an existing **Super Admin**; anything else is refused and nothing is installed. |
+
+```bash
+read -rs REFRESH_OPERATOR_PASSWORD && export REFRESH_OPERATOR_PASSWORD   # typed, not echoed, not in history
+cd /var/www/logisx-staging && ./scripts/refresh-staging.sh --yes          # or, locally: ./scripts/refresh-local.sh
+unset REFRESH_OPERATOR_PASSWORD
+```
+
+- **Exactly one account.** Every other keeps its unknowable secret, so this is the only
+  password the copy accepts. The checks are `reset-super-admin-password.js`'s for `NEW_PASSWORD`:
+  a 16-character floor, the hash verified before it is written, exactly one row changed. That
+  account's forced-password-change flag is cleared, so the first sign-in is not refused.
+- **Applied only where a database is installed** — the one-pass form and `--from-sanitized`.
+  `--sanitize-only` ignores it and says so, so the artifact that crosses the network never
+  carries an operator's password; `refresh-local.sh` applies it on the laptop, at install.
+- **The wrappers hand it to `refresh-env.js` and to nothing else.** Both move it out of their
+  environment before starting any other command: `npm install` runs third-party lifecycle
+  scripts, ssh would carry it toward the VPS, and `pm2 restart --update-env` would copy it into
+  the running staging process, where `pm2 env` would show it. Both also run a
+  `--check-env-only` gate with it — and with their extra arguments — before anything slow or
+  remote, so a short password, or one typed as an argument, is refused before any connection
+  opens (`refresh-local.sh`) or any install and build runs (`refresh-staging.sh`).
+- **Never in `.env`, and not in `.env.example`**: it is a per-run value, not configuration, and
+  nothing reads it from a file.
+- Forgot it? `node scripts/reset-super-admin-password.js <app.db>` sets `super_admin`'s password
+  on any copy afterwards, from `NEW_PASSWORD` in the environment, under the same rules — load it
+  with `read -rs` the same way, since a `VAR=… command` prefix is itself saved in shell history.
+
+### `test-suite.js` on a LOCAL copy — `prepare-test-fixtures.js`
+
+```bash
+./scripts/refresh-local.sh
+node scripts/prepare-test-fixtures.js --yes-local-db    # prints the exact test-suite.js command
+```
+
+It sets its own known test password on one account per role the suite signs in as. It is
+**local only**: it refuses `NODE_ENV=production`, and anything under `/var/www` judged three
+ways — the path as given, the path with every symlink resolved, and the file's identity against
+each deployed database (so a hardlink, or the `DATABASE_PATH` a deployed `.env` names, is refused
+too). ⚠️ No check can stop a server being pointed at a prepared copy *afterwards*: never serve
+one from anywhere reachable. `refresh-env.js --verify` refuses a prepared copy outright, so it can
+never pass for a sanitized one.
+
+Proof: `node scripts/test-refresh-sign-in.js` — the refusals, the local flow end to end, and the
+real wrappers run against stubbed `npm`/`git`/`ssh`/`scp`/`pm2` that record their whole
+environment, none of which may contain the operator password.
 
 ---
 
@@ -214,7 +282,7 @@ because it produces a file everyone believes is clean):
 | Data | Treatment | Why |
 |---|---|---|
 | `sessions` | deleted | A session row caches the user record, so a survivor authenticates against the **old** hash — clearing them is what makes the re-hash below take effect. Forces re-login. |
-| `users.password_hash` | all replaced with `Password123!` | bcrypt is not reversible, but these *are* production's live credentials. A copy on a laptop is a copy of production authentication. Uses the same password as `prepare-test-fixtures.js` and `test-suite.js`, so the harness runs with no extra step. |
+| `users.password_hash` | each replaced with a bcrypt hash of **its own** random 32-byte secret, which is then discarded | bcrypt is not reversible, but these *are* production's live credentials — a copy on a laptop is a copy of production authentication. A separate unknowable secret per account means the copy accepts **no** password anyone knows, and no secret could open a second account. Nothing prints or stores them. See [Signing in to a refreshed copy](#signing-in-to-a-refreshed-copy). |
 | `demo_viewer` | deleted | Super Admin role, password published in a public repo, gated only by a method check. Removed from production 2026-08-04; a copy is the same hole. |
 | Email — `users`, `drivers_directory`, `investors`, `investor_applications`, `investor_outreach_log`, `job_applications`, `sheet_job_tracking` | rewritten to `<id-or-username>@invalid` | `.invalid` is RFC 2606 reserved and **can never resolve**, so even a misconfigured mailer cannot deliver. Per-row rather than a single constant, so accounts stay distinguishable. |
 | Phone / cell | `555-0100` | NANP reserved fictional range. |
@@ -289,7 +357,7 @@ stops covering something.
 **The tiering was INVERTED on 2026-08-13.** Read the rest of this section before restoring the
 old behaviour.
 
-**Hard failures**, two kinds, both an unconditional refusal:
+**Hard failures**, three kinds, each an unconditional refusal:
 
 1. **A named column the sanitizer owns did not get scrubbed.** Three lists in
    `refresh-env.js`, and the lists themselves are the specification — do not re-enumerate them
@@ -316,6 +384,12 @@ old behaviour.
    with every check in the file still green.
 2. **Any routable address or SSN shape anywhere in free text** — the sweep over every text column
    of every table. Advisory until 2026-08-13; a refusal since.
+3. **A password anyone could know.** Any account that accepts a password published in this
+   repository's source (`PUBLISHED_PASSWORDS` in `refresh-env.js`), any two accounts sharing one
+   hash, and — in the sanitize pass, the only one that saw the snapshot's hashes — any account
+   still carrying the hash it had before the refresh. Hashes are counted, never printed. A copy
+   `prepare-test-fixtures.js` has touched fails the first two on purpose: it is a local test
+   fixture, not a sanitized copy.
 
 ⚠️ **Why (2) stopped being an advisory.** The old rationale was sound *for its time*: the sweep
 read columns nobody scrubbed, so a broker's address in a message body was ordinary operational

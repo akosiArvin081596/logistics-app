@@ -138,7 +138,7 @@ Default values in `server.js` (override via env):
 Helper scripts in `scripts/` — `reset-super-admin-password.js`, `prepare-test-fixtures.js`, `seed-staging.js`, `refresh-env.js` with `refresh-local.sh` / `refresh-staging.sh`, `backup-db.js`, `geocode-loads.js` → [`docs/claude/helper-scripts.md`](docs/claude/helper-scripts.md). ⚠️ The password-reset script covers a forgotten password only; it does not stand in for the last-Super-Admin guards.
 
 ### Environment refresh → [`docs/claude/environment-refresh.md`](docs/claude/environment-refresh.md)
-`refresh-local.sh` / `refresh-staging.sh` (runbook: `scripts/README-env-refresh.md`). ⚠️ The target `.env` must name its own non-production `SPREADSHEET_ID`, and the default telemetry trim changes old months' pay math.
+`refresh-local.sh` / `refresh-staging.sh` (runbook: `scripts/README-env-refresh.md`). ⚠️ The target `.env` must name its own non-production `SPREADSHEET_ID`, and the default telemetry trim changes old months' pay math. Every account on a refreshed copy gets a random password nobody knows: `REFRESH_OPERATOR_PASSWORD` (environment only) opts one Super Admin in, and a local copy needs `prepare-test-fixtures.js` before `test-suite.js`.
 
 ## Architecture
 

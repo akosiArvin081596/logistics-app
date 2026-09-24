@@ -24,13 +24,20 @@ Helper scripts in `scripts/`:
     months *older* than the verification that denied it. **A tracked-file query cannot answer "does this
     file exist" — stat the path.**
 - `prepare-test-fixtures.js` — makes a LOCAL app.db runnable by `test-suite.js` by setting known
-  passwords on the accounts that already own the test data. Refuses to touch a deployed path or
-  `NODE_ENV=production`, and requires `--yes-local-db`. Deliberately does NOT wipe/reseed: loads live
-  in Google Sheets, so a truncate destroys the fixture chain and cannot rebuild it.
+  passwords on the accounts that already own the test data, and prints the exact suite command
+  (dispatcher password included — the suite has no default for it). Refuses `NODE_ENV=production`,
+  requires `--yes-local-db`, and refuses anything under `/var/www` by the path as given, by the path
+  with symlinks resolved, and by file identity against each deployed database (hardlinks and a
+  deployed `.env`'s `DATABASE_PATH` included). Its password is published in this repo, so a database
+  it has touched must never be served from anywhere reachable — `refresh-env.js --verify` refuses one.
+  Run it after `refresh-local.sh`: a refreshed copy gives every account a random password.
+  Deliberately does NOT wipe/reseed: loads live in Google Sheets, so a truncate destroys the fixture
+  chain and cannot rebuild it.
 - `seed-staging.js` — seed a staging DB.
 - `refresh-env.js` + `refresh-local.sh` / `refresh-staging.sh` — rebuild LOCAL/STAGING from
-  current `main` plus a trimmed, sanitized production snapshot. See [`environment-refresh.md`](environment-refresh.md)
-  and `scripts/README-env-refresh.md`.
+  current `main` plus a trimmed, sanitized production snapshot. Every account on the result gets a
+  random password nobody knows; `REFRESH_OPERATOR_PASSWORD` (environment only) sets one Super Admin.
+  See [`environment-refresh.md`](environment-refresh.md) and `scripts/README-env-refresh.md`.
 - `backup-db.js` — consistent, verified, gzipped snapshot of a LIVE `app.db` via SQLite's Online
   Backup API (a plain `cp` misses `-wal`). Driven nightly by `backup.sh` at 02:00 into
   `backups/`; those files are what the refresh scripts read.
