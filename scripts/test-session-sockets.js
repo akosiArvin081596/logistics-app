@@ -251,6 +251,17 @@ function buildSessionMiddleware(db, StoreClass) {
 // every probe fast without changing what the route does with the hash.
 const fastBcrypt = { compare: (pw, h) => bcrypt.compare(pw, h), hash: (pw) => bcrypt.hash(pw, 4) };
 
+// The room helpers the connection handler names its rooms with, as shipped.
+// This runner asks which room a socket joins; how a room is spelled is
+// scripts/test-socket-hardening.js's subject.
+const ROOMS = new Function(
+	`${["function identityRoomKey(name) {", "function driverRoom(name) {", "function userRoom(username) {"].map(liftFunction).join("\n")}\nreturn { identityRoomKey, driverRoom, userRoom };`)();
+// The SHIPPED per-listener guard both connection handlers wrap their events in;
+// the fault-containment it provides is scripts/test-socket-hardening.js's
+// subject, so here it just needs to be the real wrapper the handlers call.
+const socketHandler = new Function(
+	`${["function socketHandler(event, fn) {", "function logSocketHandlerFault(event, err) {"].map(liftFunction).join("\n")}\nreturn socketHandler;`)();
+
 // One complete app: HTTP routes and Socket.IO on one loopback server, built
 // from `sources` (the shipped text, or a mutant of one piece of it).
 async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt } = {}) {
@@ -272,10 +283,10 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 
 	const helpers = new Function("io", "db",
 		`${sources.helpers}\nreturn { socketsWhere, endSockets, disconnectSessionSockets, disconnectUserSockets, liveSessionIds, sweepSessionlessSockets };`)(io, db);
-	io.on("connection", new Function("currentMustChangePassword", "liveSessionIds", `return (${sources.ioHandler});`)(
-		flags.currentMustChangePassword, helpers.liveSessionIds));
+	io.on("connection", new Function("currentMustChangePassword", "liveSessionIds", "identityRoomKey", "driverRoom", "userRoom", "socketHandler", `return (${sources.ioHandler});`)(
+		flags.currentMustChangePassword, helpers.liveSessionIds, ROOMS.identityRoomKey, ROOMS.driverRoom, ROOMS.userRoom, socketHandler));
 	const LOAD_ID_RE = new Function(`${LOAD_ID_RE_SRC}\nreturn LOAD_ID_RE;`)();
-	io.of("/public-track").on("connection", new Function("LOAD_ID_RE", `return (${TRACKER_HANDLER_SRC});`)(LOAD_ID_RE));
+	io.of("/public-track").on("connection", new Function("LOAD_ID_RE", "socketHandler", `return (${TRACKER_HANDLER_SRC});`)(LOAD_ID_RE, socketHandler));
 
 	const stampLastLogin = new Function("db", `${STAMP_SRC}\nreturn stampLastLogin;`)(db);
 	const logAudit = new Function("db", `${AUDIT_SRC}\nreturn logAudit;`)(db);
@@ -455,7 +466,7 @@ const SCENARIOS = {
 			p.loginSparesOtherSessions = isOpen(w, te);
 			const tb = await connectTab(w, b.cookie);
 			// The driver asks for "dispatch"; the server derives rooms from the session.
-			const own = await joins(w, tb, "dispatch", "bob driver");
+			const own = await joins(w, tb, "dispatch", ROOMS.driverRoom("Bob Driver"));
 			const ss = serverSocket(w, tb);
 			p.newSessionIsNewPerson = own && !inRoom(w, "dispatch", tb.id) && !!ss && ss.data.userId === 2 && ss.data.sid === sidOf(b.cookie);
 		} finally { await w.close(); }
@@ -621,7 +632,7 @@ const SCENARIOS = {
 				const sessionSaysDriver = !!rotated && rotated.role === "Driver" && rotated.driverName === "Alice Driver";
 				// ...and a socket on that cookie gets the driver's rooms, not dispatch.
 				const tab = sessionSaysDriver ? await connectTab(w, r.cookie) : null;
-				const driverRoom = !!tab && (await joins(w, tab, "dispatch", "alice driver"));
+				const driverRoom = !!tab && (await joins(w, tab, "dispatch", ROOMS.driverRoom("Alice Driver")));
 				p.demotedMidChangeGetsNewRole = sessionSaysDriver && driverRoom && !inRoom(w, "dispatch", tab.id);
 				// The audit row records the account as it is now, not the incoming copy.
 				const audits = changeAudits(w.db);
