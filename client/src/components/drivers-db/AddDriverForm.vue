@@ -82,8 +82,11 @@
       </div>
     </div>
 
-    <fieldset class="pay-section">
+    <!-- Pay is Super Admin only (403 PAY_EDIT_ADMIN_ONLY otherwise): anyone else
+         adds the driver on the default terms, shown read-only. -->
+    <fieldset class="pay-section" :disabled="!canEditPay">
       <legend>Pay Structure</legend>
+      <p v-if="!canEditPay" class="pay-note">Uses the default terms (the truck's daily rate). Only a Super Admin can set driver pay.</p>
       <div class="pay-options">
         <label class="pay-radio">
           <input type="radio" v-model="form.payType" value="fixed" />
@@ -111,6 +114,11 @@
 
 <script setup>
 import { reactive, ref } from 'vue'
+
+const props = defineProps({
+  // Driver pay is Super Admin only; everyone else adds on the default terms.
+  canEditPay: { type: Boolean, default: false },
+})
 
 const emit = defineEmits(['submit'])
 
@@ -145,9 +153,15 @@ function handleSubmit() {
     form.mc,
     form.rating,
     '', // Status placeholder — server falls back to 'active'
-    form.payType,
-    form.payType === 'percentage' ? (Number(form.payPercentage) || 0) : 0,
-    form.payType === 'fixed' ? (Number(form.payDaily) || 0) : 0,
+    // Only a Super Admin sends pay terms; blank is the server's default
+    // (fixed, 0%, $0 — the truck's rate applies).
+    ...(props.canEditPay
+      ? [
+          form.payType,
+          form.payType === 'percentage' ? (Number(form.payPercentage) || 0) : 0,
+          form.payType === 'fixed' ? (Number(form.payDaily) || 0) : 0,
+        ]
+      : ['', '', '']),
   ])
   Object.assign(form, defaults())
 }
@@ -199,4 +213,8 @@ function handleSubmit() {
   cursor: pointer;
 }
 .pay-radio input[type="radio"] { margin: 0; }
+/* Read-only for this role (driver pay is Super Admin only): still legible. */
+.pay-section:disabled { opacity: 0.6; }
+.pay-section:disabled .pay-radio { cursor: not-allowed; }
+.pay-note { font-size: 0.72rem; color: var(--text-dim); margin: 0 0 0.4rem; }
 </style>

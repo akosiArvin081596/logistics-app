@@ -6857,6 +6857,25 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (re
 		const insPayType = (obj.PayType || "fixed").toLowerCase() === "percentage" ? "percentage" : "fixed";
 		const insPayPct = Math.max(0, Math.min(100, parseFloat(obj.PayPercentage) || 0));
 		const insPayDaily = Math.max(0, parseFloat(obj.PayDaily) || 0);
+		// A sent daily rate is held to the truck routes' cap (parseDriverPayDaily):
+		// parseFloat alone lets "Infinity" or 1e308 through to the rate every pay
+		// path multiplies.
+		if (obj.PayDaily !== undefined && obj.PayDaily !== "" && !(insPayDaily <= DRIVER_PAY_DAILY_MAX)) {
+			return res.status(400).json({ error: `Daily rate must be a number from 0 to ${DRIVER_PAY_DAILY_MAX}.`, code: "INVALID_PAY" });
+		}
+		// ⚠️ PAY SETTINGS ARE SUPER ADMIN ONLY — see PAY_EDIT_ADMIN_ONLY. A row
+		// added by anyone else takes the column defaults (fixed, 0 %, $0 — the
+		// truck's rate applies); asking for anything else is refused before the
+		// INSERT, and this handler has no await.
+		if (req.session.user.role !== "Super Admin") {
+			const payChanges = directoryPayChanges(null, { pay_type: insPayType, pay_percentage: insPayPct, pay_daily: insPayDaily });
+			if (payChanges.length) {
+				return refusePayEdit(req, res, {
+					entity: "driver", entityId: auditText(obj.Driver, 100) || "new",
+					subject: `add ${auditText(obj.Driver, 100) || "driver"}`, changes: payChanges,
+				});
+			}
+		}
 
 		// ⚠️ THIS WAS AN UPDATE VERB IN DISGUISE — `INSERT OR REPLACE` on a UNIQUE
 		// column is a DELETE followed by an INSERT, so every column the body
@@ -6989,10 +7008,50 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		const nextPayDaily = obj.PayDaily !== undefined && obj.PayDaily !== ""
 			? Math.max(0, parseFloat(obj.PayDaily) || 0)
 			: (current?.pay_daily || 0);
+		// A sent daily rate is held to the truck routes' cap (parseDriverPayDaily):
+		// parseFloat alone lets "Infinity" or 1e308 through to the rate every pay
+		// path multiplies.
+		if (obj.PayDaily !== undefined && obj.PayDaily !== "" && !(nextPayDaily <= DRIVER_PAY_DAILY_MAX)) {
+			return res.status(400).json({ error: `Daily rate must be a number from 0 to ${DRIVER_PAY_DAILY_MAX}.`, code: "INVALID_PAY" });
+		}
 		// Carrier UI was removed; the edit form now sends "" — preserve existing value.
 		const nextCarrier = obj["Carrier Name"] && obj["Carrier Name"].trim()
 			? obj["Carrier Name"]
 			: (current?.carrier_name || "");
+
+		// ⚠️ PAY SETTINGS ARE SUPER ADMIN ONLY — see PAY_EDIT_ADMIN_ONLY. Compared
+		// with the stored row as the money math reads it, so the edit form's
+		// whole-row resend of the current terms goes through, and judged before the
+		// month-end lock below, because reopening a month would not make this edit
+		// allowed. This handler has no await, so the row compared is the row the
+		// UPDATE overwrites.
+		const payEditAllowed = req.session.user.role === "Super Admin";
+		if (!payEditAllowed) {
+			const payChanges = directoryPayChanges(current, { pay_type: nextPayType, pay_percentage: nextPayPct, pay_daily: nextPayDaily });
+			// A rename moves this row's terms to whichever driver the new name is —
+			// getDriverPayStructures() finds a driver's terms by name — so it is a
+			// pay change too when the row carries terms of its own. A row on the
+			// default terms prices a driver exactly as no row does, and a respelling
+			// in case or spacing names the same driver: neither is refused.
+			if (directoryPayChanges(null, current).length &&
+				normalizeDriverName(nextName) !== normalizeDriverName(current.driver_name)) {
+				payChanges.push({ field: "driver_name", from: current.driver_name, to: nextName });
+			}
+			if (payChanges.length) {
+				return refusePayEdit(req, res, {
+					entity: "driver", entityId: String(id),
+					subject: current.driver_name || `driver #${id}`, changes: payChanges,
+				});
+			}
+		}
+		// The pay columns the UPDATE writes: a Super Admin's terms as sent, and
+		// for anyone else the stored columns exactly as they are. The check above
+		// proved the two read as the same terms, but writing the request's spelling
+		// ("fixed" over a stored "Fixed") would still record a pay change — and an
+		// update_driver_pay line — under an account that may not change pay.
+		const writePay = payEditAllowed
+			? { pay_type: nextPayType, pay_percentage: nextPayPct, pay_daily: nextPayDaily }
+			: { pay_type: current.pay_type, pay_percentage: current.pay_percentage, pay_daily: current.pay_daily };
 
 		// ⚠️ THE MONTH-END LOCK. drivers_directory is the SENIOR half of driver
 		// pay: resolveDailyRate(drivers_directory.pay_daily, trucks.driver_pay_daily)
@@ -7006,7 +7065,7 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		// a rating edit never reaches this. See directoryEditLockBlockers.
 		const nextRow = {
 			driver_name: nextName, carrier_name: nextCarrier,
-			pay_type: nextPayType, pay_percentage: nextPayPct, pay_daily: nextPayDaily,
+			pay_type: writePay.pay_type, pay_percentage: writePay.pay_percentage, pay_daily: writePay.pay_daily,
 		};
 		const dirChanged = directoryChangedColumns(current, nextRow);
 		if (Object.keys(dirChanged).length) {
@@ -7034,7 +7093,7 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 			.run(nextName, nextCarrier, obj.State || "", obj.City || "", obj.ZIP || "",
 				obj.Address || "", obj.PhoneNumber || "", obj.CellNumber || "", obj.Email || "",
 				obj.DOT || "", obj.MC || "", obj.Trucks || "", obj.Hazmat || "", obj.Rating || "",
-				nextStatus, nextPayType, nextPayPct, nextPayDaily, id);
+				nextStatus, writePay.pay_type, writePay.pay_percentage, writePay.pay_daily, id);
 		// Sync carrier-driver history on write (not on read), under the name the
 		// row now carries.
 		if (nextName && nextCarrier) {
@@ -23341,6 +23400,95 @@ function directoryPayStruct(row) {
 // rate. This is what a delete, and what a substantive rename, leave behind.
 const DIRECTORY_DEFAULT_STRUCT = { payType: "fixed", payPercentage: 0, payDaily: 0 };
 
+// ============================================================================
+// DRIVER PAY SETTINGS ARE SUPER ADMIN ONLY (owner decision, 2026-09-24)
+// ============================================================================
+// A driver's pay is set in two tables, and resolveDailyRate() reads both:
+//   • drivers_directory.pay_type / pay_percentage / pay_daily — the driver's own
+//     terms, written by POST and PUT /api/drivers-directory;
+//   • trucks.driver_pay_daily — the truck's rate, which applies whenever the
+//     driver has no pay_daily of their own, written by POST and PUT /api/trucks.
+// Those four routes also admit a Dispatcher (POST /api/trucks an Investor too)
+// for every other column, so the rule is per FIELD, not per route: a request
+// from anyone but a Super Admin that would change one of these values is
+// refused whole — 403 PAY_EDIT_ADMIN_ONLY, nothing written — and every other
+// column keeps the role gate it had.
+//
+// ⚠️ CHANGE, NEVER PRESENCE. Both edit forms send the whole row on every save
+// (DriverTable.vue all eighteen directory columns, the Trucks form ~20 fields),
+// so a check keyed on "the body carries a pay field" would refuse a
+// Dispatcher's phone-number fix. Each check compares the value the handler
+// would write with the stored one, read the way the money math reads it —
+// directoryPayStruct() for the directory, the route's own `changed` diff for a
+// truck — so resending the current value in any spelling the handler accepts
+// ("300", 300.0, "Fixed") is not a change. On a create, "stored" is the column
+// default: fixed, 0 %, $0 (the truck's rate applies) for a directory row, and
+// $0 (the $250 fallback applies) for a truck.
+//
+// ⚠️ A RENAME CAN BE A PAY CHANGE. getDriverPayStructures() finds a driver's
+// terms by name, so renaming a directory row that carries terms of its own
+// hands them to whichever driver the new name is. PUT /api/drivers-directory/:id
+// refuses that the same way. A row on the default terms prices a driver
+// exactly as no row does, and a respelling in case or spacing names the same
+// driver (normalizeDriverName()), so neither of those renames is refused.
+// Which truck a driver is assigned to — and so which truck rate applies to a
+// driver with no pay_daily of their own — is dispatch's call and is NOT gated
+// here.
+//
+// Each check runs before its route's month-end lock, because reopening a month
+// would not make the edit allowed, and before the route's first write.
+//
+// The refusal is audited under its own action, `pay_edit_blocked` — distinct
+// from `update_driver_pay_blocked` (a pay edit the month-end lock refused) and
+// from the `update_driver_pay` success line — through logAuditRefusal(), so a
+// scripted retry coalesces to one row a minute per account. It is deliberately
+// NOT on PURGEABLE_REFUSAL_ACTIONS: an attempt to move a driver's pay without
+// the authority to do so is settlement evidence, kept like the period refusals.
+const PAY_EDIT_ADMIN_ONLY = "PAY_EDIT_ADMIN_ONLY";
+
+// The directory pay settings a write would change, as [{ field, from, to }],
+// each compared as getDriverPayStructures() reads it. `before` null = a create,
+// compared with the column defaults.
+function directoryPayChanges(before, after) {
+	const b = directoryPayStruct(before);
+	const a = directoryPayStruct(after);
+	const out = [];
+	if (b.payType !== a.payType) out.push({ field: "pay_type", from: b.payType, to: a.payType });
+	if (b.payPercentage !== a.payPercentage) out.push({ field: "pay_percentage", from: b.payPercentage, to: a.payPercentage });
+	if (b.payDaily !== a.payDaily) out.push({ field: "pay_daily", from: b.payDaily, to: a.payDaily });
+	return out;
+}
+
+// Refuse a pay change by a non-Super-Admin: the audit row first, then the 403.
+// `changes` is [{ field, from, to }]; `subject` and `entityId` may carry caller
+// text (a unit number or a name off a create body), so both go through
+// auditText(), which caps them and keeps them from forging a `[PERIOD_` marker.
+function refusePayEdit(req, res, { entity, entityId, subject, changes }) {
+	// Numbers as String(), so a non-finite value reads as itself rather than
+	// JSON's `null`; names and pay types quoted.
+	const value = (v) => (typeof v === "number" ? String(v) : JSON.stringify(v));
+	const attempted = changes.map((c) => `${c.field} ${value(c.from)} -> ${value(c.to)}`).join(", ");
+	logAuditRefusal(req, "pay_edit_blocked", entity, auditText(entityId, 100),
+		`${auditText(subject, 300) || "pay settings"}: ${auditText(attempted, 300)} WITHHELD [${PAY_EDIT_ADMIN_ONLY}] — nothing was written`,
+		PAY_EDIT_ADMIN_ONLY);
+	const LABEL = { pay_type: "pay type", pay_percentage: "owner-operator share", pay_daily: "daily rate", driver_pay_daily: "truck's driver pay" };
+	const show = (field, v) => {
+		if (field === "pay_type") return String(v);
+		if (field === "pay_percentage") return `${v}%`;
+		if (Number(v) > 0) return `$${v}/day`;
+		return field === "pay_daily" ? "none (the truck's rate applies)" : "none (the $250/day default applies)";
+	};
+	const phrase = (c) => (c.field === "driver_name"
+		? `move this driver's own pay terms from "${c.from}" to "${c.to}"`
+		: `change the ${LABEL[c.field] || c.field} from ${show(c.field, c.from)} to ${show(c.field, c.to)}`);
+	return res.status(403).json({
+		error: `Only a Super Admin can change driver pay. This save would ${changes.map(phrase).join(", and ")}. ` +
+			"Undo that part of the edit, or ask a Super Admin to make it.",
+		code: PAY_EDIT_ADMIN_ONLY,
+		fields: changes.map((c) => c.field),
+	});
+}
+
 // The five drivers_directory columns any settlement figure reads. Declared once
 // so the PUT and the DELETE cannot drift about which columns the lock reasons
 // over — the same drift that let the old rename handler write this table while
@@ -23734,6 +23882,17 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		if (driverPayParsed.error) {
 			return res.status(400).json({ error: driverPayParsed.error });
 		}
+		// ⚠️ PAY SETTINGS ARE SUPER ADMIN ONLY — see PAY_EDIT_ADMIN_ONLY. A truck
+		// added by a Dispatcher or an Investor starts with no rate of its own
+		// ($0 — the $250 fallback applies). Decided from the request and the
+		// session alone, so nothing this handler reads later can change the answer.
+		if (req.session.user.role !== "Super Admin" && driverPayParsed.value !== 0) {
+			return refusePayEdit(req, res, {
+				entity: "truck", entityId: auditText(unitNumber, 100) || "new",
+				subject: `add truck ${auditText(unitNumber, 100) || "(no unit number)"}`,
+				changes: [{ field: "driver_pay_daily", from: 0, to: driverPayParsed.value }],
+			});
+		}
 		// In-service date, same dual-case + same validator as the PUT. Optional:
 		// blank stores "" and the truck falls back to created_at, which for a
 		// freshly-added truck is usually right — but a truck entered ahead of the
@@ -23987,6 +24146,18 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		if (retiredParsed !== undefined && retiredParsed !== String(truck.retired_at || "").trim()) {
 			changed.retired_at = retiredParsed;
 		}
+		// ⚠️ PAY SETTINGS ARE SUPER ADMIN ONLY — see PAY_EDIT_ADMIN_ONLY. Keyed on
+		// `changed`, i.e. on a real difference from the stored rate, never on the
+		// field being present: the Trucks form sends driverPayDaily on every save.
+		// Ahead of the month-end lock, because reopening a month would not make
+		// this edit allowed, and of every write below.
+		const payEditAllowed = req.session.user.role === "Super Admin";
+		if (!payEditAllowed && Object.prototype.hasOwnProperty.call(changed, "driver_pay_daily")) {
+			return refusePayEdit(req, res, {
+				entity: "truck", entityId: String(id), subject: truck.unit_number || `truck #${id}`,
+				changes: [{ field: "driver_pay_daily", from: truck.driver_pay_daily || 0, to: changed.driver_pay_daily }],
+			});
+		}
 		const lock = truckEditLockBlockers(truck, changed);
 		// ⚠️ THE ATTEMPTED VALUES ARE THE RECORD HERE. This route's success path
 		// writes one audit line PER FIELD (update_truck_status, _in_service_date,
@@ -24056,7 +24227,16 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		if (hvutAnnual !== undefined) { updates.push("hvut_annual = ?"); params.push(parseFloat(hvutAnnual) || 0); }
 		if (irpAnnual !== undefined) { updates.push("irp_annual = ?"); params.push(parseFloat(irpAnnual) || 0); }
 		if (adminFeePct !== undefined) { updates.push("admin_fee_pct = ?"); params.push(parseFloat(adminFeePct) ?? 50); }
-		if (driverPayParsed) { updates.push("driver_pay_daily = ?"); params.push(driverPayParsed.value); }
+		// Only a Super Admin's request writes its own rate. The pay check above let
+		// anyone else's through only because it equals the stored rate, but the
+		// active-load check can yield between that check and this UPDATE, so their
+		// resend is written as the column's own value — a Super Admin's rate change
+		// that lands in that window is kept rather than overwritten by a form that
+		// loaded the old rate.
+		if (driverPayParsed) {
+			if (payEditAllowed) { updates.push("driver_pay_daily = ?"); params.push(driverPayParsed.value); }
+			else updates.push("driver_pay_daily = driver_pay_daily");
+		}
 		if (purchasePrice !== undefined) { updates.push("purchase_price = ?"); params.push(parseFloat(purchasePrice) || 0); }
 		if (titleStatus !== undefined) { updates.push("title_status = ?"); params.push(titleStatus || "Clean"); }
 		if (maintenanceFundMonthly !== undefined) { updates.push("maintenance_fund_monthly = ?"); params.push(parseFloat(maintenanceFundMonthly) || 0); }
