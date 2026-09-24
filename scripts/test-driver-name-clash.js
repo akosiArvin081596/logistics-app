@@ -17,6 +17,10 @@
  *      case, substrings, usernames and reserved names on the account side,
  *      exceptUserId, the table options, blank names and blank stored names, the
  *      return shape; it is read-only and synchronous.
+ *   §1b findDriverNameClashes(), the plural the rename paths classify with:
+ *      every match in a fixed order, exceptUserIds, exceptDirectoryId, and the
+ *      singular as its first match. (The rename paths themselves are
+ *      scripts/test-driver-rename-clash.js's subject.)
  *   §2 it agrees with the ownership comparison — driverOwnsInvoice(), lifted —
  *      on every pair in a table of spellings, in both tables.
  *   §3 PUT /api/applications/:id/status "Accepted", the shipped handler lifted
@@ -40,6 +44,9 @@
  *      M2  acceptance without the check
  *      M3  the password hash moved back below the checks
  *      M4  the helper without its account-namespace check (usernames, reserved)
+ *      M5  the accept email's subject quoting the applicant's name uncapped
+ *      M6  the helper ignoring exceptDirectoryId
+ *      M7  the helper ignoring exceptUserId / exceptUserIds
  *
  * Pure: no server, no app.db, no network, no mail (sendEmail is captured).
  *
@@ -96,7 +103,8 @@ function liftRoute(head) {
 }
 
 const NORM_SRC = liftFunction("normalizeDriverName");
-const CLASH_SRC = liftFunction("findDriverNameClash");
+// The singular is the first result of the plural, so both are lifted together.
+const CLASH_SRC = [liftFunction("findDriverNameClashes"), liftFunction("findDriverNameClash")].join("\n");
 const OWNS_SRC = liftFunction("driverOwnsInvoice");
 const ESCAPE_SRC = liftFunction("escapeHtml");
 const ACCEPT_SRC = liftRoute('app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, res) => {');
@@ -118,6 +126,10 @@ const auditText = new Function(`${liftFunction("scrubPurgeMarker")}\n${liftFunct
 // The helper, bound to one database. `normSrc` swaps the comparison for M1a.
 function buildClash(db, { normSrc = NORM_SRC, clashSrc = CLASH_SRC } = {}) {
 	return new Function("db", `"use strict";\n${normSrc}\n${clashSrc}\nreturn findDriverNameClash;`)(db);
+}
+// The plural, which rename paths use to classify every match.
+function buildClashes(db, { normSrc = NORM_SRC, clashSrc = CLASH_SRC } = {}) {
+	return new Function("db", `"use strict";\n${normSrc}\n${clashSrc}\nreturn findDriverNameClashes;`)(db);
 }
 
 // M1b: a helper that compares the way SQL TRIM(LOWER(...)) does — case folded
@@ -199,7 +211,7 @@ const counts = (db) => JSON.stringify(["users", "driver_onboarding", "onboarding
 	.map((t) => db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n));
 const accountsNamed = (db, name) => db.prepare("SELECT driver_name FROM users").all()
 	.filter((r) => normalizeDriverName(r.driver_name || "") === normalizeDriverName(name)).length;
-const show = (s) => String(JSON.stringify(s)).replace(/ /g, "\\u00a0");
+const show = (s) => String(JSON.stringify(s)).replace(/\u00a0/g, "\\u00a0");
 
 // The route's catch logs to console.error, which is expected noise when a
 // mutant or an injected failure answers 500.
@@ -236,7 +248,7 @@ function helperBattery(build) {
 	expect("outer whitespace", "  Shorn King  ", undefined, "users:3");
 	expect("internal double space", "Shorn  King", undefined, "users:3");
 	expect("internal tab", "Shorn\tKing", undefined, "users:3");
-	expect("internal no-break space", "Shorn King", undefined, "users:3");
+	expect("internal no-break space", "Shorn\u00a0King", undefined, "users:3");
 	expect("case and spacing together", "  sHORN   kING ", undefined, "users:3");
 	expect("non-ASCII case", "JOSÉ NÚÑEZ", undefined, "users:5");
 	expect("a driver in the directory with no account", "Deshorn King", undefined, "drivers_directory:2");
@@ -303,7 +315,7 @@ const SPELLINGS = [
 	["John Smith", "  John Smith "],
 	["John Smith", "John  Smith"],
 	["John Smith", "John \t Smith"],
-	["John Smith", "John Smith"],
+	["John Smith", "John\u00a0Smith"],
 	["John  Smith", "john smith"],
 	["José Núñez", "JOSÉ NÚÑEZ"],
 	["Shorn King", "Deshorn King"],
@@ -411,6 +423,10 @@ async function acceptBattery({ routeSrc = ACCEPT_SRC, clashSrc = CLASH_SRC } = {
 		const row = log.audits.find((a) => a.action === "accept_application");
 		t("the success audit quotes the name capped and on one line",
 			!!row && !/[\r\n]/.test(row.details) && row.details.length < 220);
+		const adminMail = log.mail.find((m) => m.to === "info@logisx.com");
+		t("the admin email's subject quotes the name the same way: capped and on one line",
+			!!adminMail && adminMail.subject.startsWith("Driver Accepted: Ava Brooks") && !/[\r\n]/.test(adminMail.subject) &&
+			adminMail.subject.length <= "Driver Accepted: ".length + 120);
 	}
 
 	// Names that are already in use: an account's driver name or username, a
@@ -712,7 +728,7 @@ async function mutants() {
 		"const tempPassword = crypto.randomBytes(4).toString(\"hex\");\n\t\t\tconst hash = await bcrypt.hash(tempPassword, 10);\n\t\t\t" + TX);
 	caught("M3 password hash moved below the checks", await acceptBattery({ routeSrc: m3 }));
 
-	const RESERVED_LINES = /\n\t+const reserved = RESERVED_NAMES\.find\(\(r\) => same\(r\)\);\n\t+if \(reserved\) return \{ source: "reserved", name: reserved \};/;
+	const RESERVED_LINES = /\n\t+for \(const r of RESERVED_NAMES\) if \(same\(r\)\) hits\.push\(\{ source: "reserved", name: r \}\);/;
 	const USERNAME_ARM = 'same(r.driver_name) ? "driver_name" : same(r.username) ? "username" : ""';
 	ok(RESERVED_LINES.test(CLASH_SRC) && CLASH_SRC.includes(USERNAME_ARM), "§7 M4 markers moved (the reserved-name lines or the username arm)");
 	const m4 = CLASH_SRC.replace(RESERVED_LINES, "").replace(USERNAME_ARM, 'same(r.driver_name) ? "driver_name" : ""');
@@ -721,11 +737,54 @@ async function mutants() {
 		...await acceptBattery({ clashSrc: m4 }),
 		...await otherCreatePaths({ clashSrc: m4 }),
 	]);
+
+	const SUBJECT = "`Driver Accepted: ${auditText(fullName, 120)}`";
+	ok(ACCEPT_SRC.includes(SUBJECT), `§7 M5 marker moved: ${SUBJECT}`);
+	caught("M5 the accept email's subject quotes the name uncapped", await acceptBattery({ routeSrc: ACCEPT_SRC.replace(SUBJECT, "`Driver Accepted: ${fullName}`") }));
+
+	const SKIP_DIRECTORY_ROW = "if (skipDirectoryId !== null && r.id === skipDirectoryId) continue;";
+	const SKIP_ACCOUNTS = "if (skipUsers.has(r.id)) continue;";
+	ok(CLASH_SRC.includes(SKIP_DIRECTORY_ROW) && CLASH_SRC.includes(SKIP_ACCOUNTS), "§7 M6/M7 markers moved (the two skip lines)");
+	caught("M6 helper ignores exceptDirectoryId", pluralBattery((db) => buildClashes(db, { clashSrc: CLASH_SRC.replace(SKIP_DIRECTORY_ROW, "") })));
+	caught("M7 helper ignores exceptUserId / exceptUserIds", pluralBattery((db) => buildClashes(db, { clashSrc: CLASH_SRC.replace(SKIP_ACCOUNTS, "") })));
+}
+
+// ─────────────────────────────── §1b the plural and the skip options
+function pluralBattery(build) {
+	const results = [];
+	const t = (name, cond) => results.push({ name, ok: !!cond });
+	const db = makeDb();
+	addUser(db, 1, "super_admin", "", "Super Admin");
+	addUser(db, 2, "shorn king", "", "Dispatcher"); // a username that folds onto the name
+	addUser(db, 3, "sking", "Shorn King");
+	addUser(db, 4, "sking2", "SHORN  KING");
+	addDirectory(db, "Shorn King"); // row 1
+	addDirectory(db, "Deshorn King"); // row 2
+	const all = build(db);
+	const tags = (hits) => hits.map((h) => (h.source === "reserved" ? `reserved:${h.name}` : `${h.source}:${h.id}${h.field ? `:${h.field}` : ""}`)).join(",");
+	const run = (name, opts) => { try { return tags(all(name, opts)); } catch (e) { return `threw ${e.message}`; } };
+	const expect = (label, got, want) => t(`${label} → ${want} (got ${got})`, got === want);
+	expect("every match, in a fixed order: accounts by id, then directory rows", run("  shorn   KING"),
+		"users:2:username,users:3:driver_name,users:4:driver_name,drivers_directory:1");
+	expect("a reserved name comes first", run("Dispatch"), "reserved:dispatch");
+	expect("exceptUserIds skips several accounts", run("Shorn King", { exceptUserIds: [3, 4] }), "users:2:username,drivers_directory:1");
+	expect("exceptUserIds accepts numeric strings", run("Shorn King", { exceptUserIds: ["2", "3"] }), "users:4:driver_name,drivers_directory:1");
+	expect("exceptUserId and exceptUserIds together", run("Shorn King", { exceptUserId: 2, exceptUserIds: [3] }), "users:4:driver_name,drivers_directory:1");
+	expect("exceptDirectoryId skips that directory row", run("shorn king", { users: false, exceptDirectoryId: 1 }), "");
+	expect("exceptDirectoryId as a numeric string", run("shorn king", { users: false, exceptDirectoryId: "1" }), "");
+	expect("exceptDirectoryId of another row still reports this one", run("shorn king", { users: false, exceptDirectoryId: 2 }), "drivers_directory:1");
+	expect("a blank name has no matches", run("   "), "");
+	const singular = buildClash(db);
+	t("the singular is the plural's first match", JSON.stringify(singular("shorn king")) === JSON.stringify(all("shorn king")[0]));
+	t("...and null when there is none", singular("Nobody Here") === null);
+	return results;
 }
 
 (async () => {
 	section("§1 findDriverNameClash()");
 	record(helperBattery((db) => buildClash(db)));
+	section("§1b findDriverNameClashes() and the skip options");
+	record(pluralBattery((db) => buildClashes(db)));
 	section("§2 agrees with the ownership comparison (driverOwnsInvoice)");
 	record(agreementBattery((db) => buildClash(db)));
 	section("§3 PUT /api/applications/:id/status — Accepted");

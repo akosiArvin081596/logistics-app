@@ -1518,7 +1518,8 @@ try { db.exec("ALTER TABLE drivers_directory ADD COLUMN pay_percentage REAL DEFA
 // ============================================================
 // ⚠️ THIS COLUMN IS A MONEY JOIN KEY WITH A CASE-BLIND READER AND A
 // CASE-SENSITIVE CONSTRAINT, WHICH IS THE WORST OF BOTH.
-// getDriverPayStructures() indexes on LOWER(driver_name) and builds a plain
+// getDriverPayStructures() indexed on LOWER(driver_name) (it now keys on
+// normalizeDriverName()) and builds a plain
 // object, so two spellings collapse to ONE key — while `TEXT NOT NULL UNIQUE`
 // carries SQLite's default BINARY collation, so nothing stops the second
 // spelling being created. Insert "SHORN KING" beside "Shorn King" and you get a
@@ -1538,7 +1539,10 @@ try { db.exec("ALTER TABLE drivers_directory ADD COLUMN pay_percentage REAL DEFA
 // ALREADY folds case (that is the bug), so there is no query to fix. The
 // constraint is the thing that disagrees with them, so the constraint is what
 // moves. COLLATE NOCASE is ASCII-only, which matches SQLite's LOWER() exactly,
-// so the constraint and getDriverPayStructures() now agree by construction.
+// so the constraint and getDriverPayStructures() agreed by construction when
+// this landed. (That key is now normalizeDriverName() — see the note there. A
+// name differing only in spacing is kept out by the naming check,
+// findDriverNameClash(), not by this constraint.)
 //
 // SQLite cannot ALTER a collation, so this is the repo's rename-recreate
 // pattern. Two deliberate departures from the two existing examples:
@@ -6751,6 +6755,12 @@ function syncDriverToCarrierSheet(driverName, opts = {}) {
 		const truckUnit = truck ? truck.unit_number : "";
 
 		if (action === "add") {
+			// A row whose name differs from this one only in case or spacing is this
+			// driver's row already (findDriverNameClash(), the comparison every
+			// ownership check uses), so there is nothing to add. INSERT OR IGNORE
+			// alone folds case, through the column's NOCASE constraint, but not
+			// spacing.
+			if (findDriverNameClash(driverName, { users: false })) return;
 			// New drivers created via onboarding start as 'pending' — they become 'active' when drug test passes
 			db.prepare(`INSERT OR IGNORE INTO drivers_directory (driver_name, carrier_name, email, trucks, status) VALUES (?, ?, ?, ?, 'pending')`)
 				.run(driverName.trim(), companyName || "", email || "", truckUnit);
@@ -6936,6 +6946,38 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		// silent no-op PUT /api/compliance/fees/:id was given a 404 for in #210.
 		const current = db.prepare("SELECT * FROM drivers_directory WHERE id = ?").get(id);
 		if (!current) return res.status(404).json({ error: "Driver not found" });
+
+		// The row's NAME, held to the same rules as POST /api/drivers-directory:
+		// text, stored trimmed, never blank, and never a name another directory row
+		// already uses once case and spacing are folded (findDriverNameClash(), the
+		// comparison every ownership check uses). A column the request did not
+		// send keeps its stored name, like status and the pay fields below.
+		// Re-spelling this row's own name is not a clash (`exceptDirectoryId`),
+		// unless another row is already stored under exactly that spelling, case
+		// aside: the pair this column's UNIQUE COLLATE NOCASE would reject.
+		if (obj.Driver !== undefined && typeof obj.Driver !== "string") {
+			return res.status(400).json({ error: "Driver must be a string.", code: "INVALID_DRIVER_NAME" });
+		}
+		const nextName = obj.Driver === undefined
+			? String(current.driver_name || "")
+			: obj.Driver.trim();
+		if (!nextName) {
+			return res.status(400).json({ error: "Driver name is required.", code: "DRIVER_NAME_REQUIRED" });
+		}
+		if (nextName !== String(current.driver_name || "")) {
+			const renamed = normalizeDriverName(nextName) !== normalizeDriverName(current.driver_name);
+			const dirClash = findDriverNameClashes(nextName, { users: false, exceptDirectoryId: id })
+				.find((h) => renamed || String(h.driver_name).toLowerCase() === nextName.toLowerCase());
+			if (dirClash) {
+				return res.status(409).json({
+					error: `"${nextName}" is already in use by drivers directory row ${dirClash.id} ("${dirClash.driver_name}") — names that differ only in case or spacing are the same driver. Edit row ${dirClash.id} instead, or choose a different name.`,
+					code: "DRIVER_EXISTS",
+					id: dirClash.id,
+					driverName: dirClash.driver_name,
+					route: `PUT /api/drivers-directory/${dirClash.id}`,
+				});
+			}
+		}
 		const nextStatus = obj.Status || current?.status || "active";
 		const sentPayType = (obj.PayType || "").toLowerCase();
 		const nextPayType = sentPayType === "fixed" || sentPayType === "percentage"
@@ -6963,7 +7005,7 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		// only when its own value actually moves — a phone number, an address or
 		// a rating edit never reaches this. See directoryEditLockBlockers.
 		const nextRow = {
-			driver_name: obj.Driver || "", carrier_name: nextCarrier,
+			driver_name: nextName, carrier_name: nextCarrier,
 			pay_type: nextPayType, pay_percentage: nextPayPct, pay_daily: nextPayDaily,
 		};
 		const dirChanged = directoryChangedColumns(current, nextRow);
@@ -6989,13 +7031,14 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		}
 
 		db.prepare(`UPDATE drivers_directory SET driver_name=?, carrier_name=?, state=?, city=?, zip=?, address=?, phone=?, cell=?, email=?, dot=?, mc=?, trucks=?, hazmat=?, rating=?, status=?, pay_type=?, pay_percentage=?, pay_daily=? WHERE id=?`)
-			.run(obj.Driver || "", nextCarrier, obj.State || "", obj.City || "", obj.ZIP || "",
+			.run(nextName, nextCarrier, obj.State || "", obj.City || "", obj.ZIP || "",
 				obj.Address || "", obj.PhoneNumber || "", obj.CellNumber || "", obj.Email || "",
 				obj.DOT || "", obj.MC || "", obj.Trucks || "", obj.Hazmat || "", obj.Rating || "",
 				nextStatus, nextPayType, nextPayPct, nextPayDaily, id);
-		// Sync carrier-driver history on write (not on read)
-		if (obj.Driver && nextCarrier) {
-			syncCarrierDriverHistory([{ ...obj, "Carrier Name": nextCarrier }], "Driver", "Carrier Name");
+		// Sync carrier-driver history on write (not on read), under the name the
+		// row now carries.
+		if (nextName && nextCarrier) {
+			syncCarrierDriverHistory([{ ...obj, Driver: nextName, "Carrier Name": nextCarrier }], "Driver", "Carrier Name");
 		}
 		// A change to any of the five settlement columns previously left no trace
 		// at all — "the directory was edited" does not tell a later reader that a
@@ -8888,7 +8931,9 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 					<div style="font-size:11px;color:#94a3b8;line-height:1.6">LogisX Inc. | 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381 | USDOT# 4302683</div>
 				</div>
 			</div>`;
-			sendEmail("info@logisx.com", `Driver Accepted: ${fullName}`, adminDriverAcceptHtml);
+			// The name comes from the application, so the subject quotes it the way the
+			// success audit does: capped, on one line.
+			sendEmail("info@logisx.com", `Driver Accepted: ${auditText(fullName, 120)}`, adminDriverAcceptHtml);
 			return;
 		}
 
@@ -12975,37 +13020,44 @@ function generateInvoiceNumber(driverName, weekStart) {
 // Brown at 30%) get the same math their invoice uses, instead of the legacy
 // activeDays × $250 estimate that overstated/understated their pay in the P&L.
 
-// Returns { [driver_name_lc]: { payType, payPercentage } } for branch decisions.
+// Returns { [normalizeDriverName(driver_name)]: { payType, payPercentage, payDaily } }
+// for branch decisions.
 //
 // ⚠️ TWO ROWS CAN STILL COLLIDE ON ONE KEY, AND WHICH ONE WINS IS MONEY.
 // drivers_directory.driver_name is now UNIQUE COLLATE NOCASE (see the migration
-// beside that table), so on any database that took it a collision is impossible.
-// It is NOT impossible on one where the migration had to skip because duplicates
-// were already present — the one database where this function is the last line
-// of defence. It used to be a bare `out[key] = …` over an unordered SELECT, i.e.
-// last row wins, which resolves to the LATER row: precisely the shadow that a
-// case-variant insert mints with the column defaults (pay_daily 0). So the
+// beside that table), so on any database that took it two rows cannot differ in
+// case alone. They can still differ in spacing, which NOCASE does not fold and
+// this key does; the naming check (findDriverNameClash()) refuses to create such
+// a pair, so only an older one can exist. On a database where the migration had
+// to skip because duplicates were already present, this function is the last
+// line of defence. It used to be a bare `out[key] = …` over an unordered SELECT,
+// i.e. last row wins, which resolves to the LATER row: precisely the shadow that
+// a case-variant insert mints with the column defaults (pay_daily 0). So the
 // default silently beat the real structure.
 //
 // Ordering by id and keeping the FIRST occurrence inverts that: the established
-// row wins and the shadow is ignored. Byte-identical wherever no duplicate
-// exists — which is every migrated database — and it makes the mis-pay inert
-// rather than merely unlikely on the ones where it isn't.
+// row wins and the shadow is ignored, which makes the mis-pay inert rather than
+// merely unlikely where two rows share a key.
 //
-// TRIM is in the key because every caller looks up with normalizeDriverName(),
-// which trims; a row stored as " Shorn King" would otherwise key as
-// " shorn king" and its pay structure would be invisible to all four readers —
-// failing to the same $250 default by a different route. Strictly widening.
+// THE KEY IS normalizeDriverName() ITSELF — the function every caller looks up
+// with — computed in JS because SQLite cannot express it (its LOWER folds ASCII
+// only, its TRIM strips spaces only, and nothing collapses a whitespace run). A
+// row is therefore found under any spelling that normalizes to its name, the
+// same answer every ownership check gives. The answer is unchanged from the old
+// SQL key, LOWER(TRIM(driver_name)), for every row whose stored name is already
+// trimmed and single-spaced with no capitals outside A–Z, where no two rows
+// share a key.
 let lastPayStructShadowWarnMs = 0;
 function getDriverPayStructures() {
 	const rows = db.prepare(
-		"SELECT id, LOWER(TRIM(driver_name)) AS name_lc, driver_name, pay_type, pay_percentage, pay_daily FROM drivers_directory ORDER BY id ASC"
+		"SELECT id, driver_name, pay_type, pay_percentage, pay_daily FROM drivers_directory ORDER BY id ASC"
 	).all();
 	const out = {};
 	const shadowed = [];
 	for (const r of rows) {
-		if (Object.prototype.hasOwnProperty.call(out, r.name_lc)) { shadowed.push(`${r.driver_name} (id ${r.id})`); continue; }
-		out[r.name_lc] = {
+		const key = normalizeDriverName(r.driver_name);
+		if (Object.prototype.hasOwnProperty.call(out, key)) { shadowed.push(`${r.driver_name} (id ${r.id})`); continue; }
+		out[key] = {
 			payType: (r.pay_type || "fixed").toLowerCase() === "percentage" ? "percentage" : "fixed",
 			payPercentage: Math.max(0, Math.min(100, Number(r.pay_percentage) || 0)),
 			payDaily: Math.max(0, Number(r.pay_daily) || 0),
@@ -20488,19 +20540,43 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		// and the merge is irreversible, because after it there is nothing left to
 		// tell them apart. Refused here rather than in the cascade so it costs
 		// nothing when it does not apply.
-		if (driverName !== undefined && String(driverName).trim() && String(driverName).trim().toLowerCase() !== (user.driver_name || "").trim().toLowerCase()) {
-			const clash = db.prepare(
-				"SELECT id, username FROM users WHERE id <> ? AND TRIM(LOWER(driver_name)) = ?"
-			).get(id, String(driverName).trim().toLowerCase());
+		//
+		// Compared through findDriverNameClash(), i.e. normalizeDriverName() — the
+		// comparison every ownership check uses — on the account side: another
+		// account's driver name or username, or a reserved name. `exceptUserId`
+		// leaves this account's own name and username out. The "is it a change"
+		// test uses the same function, so re-spelling this account's own name in
+		// case or spacing is not read as taking someone else's. The one exception
+		// is a re-spelling onto the exact spelling (trimmed, case-folded) that
+		// another account's driver name already has: the finance rows match on
+		// LOWER(driver), so it would put the two accounts' rows under one name.
+		if (driverName !== undefined && String(driverName).trim()) {
+			const nextName = String(driverName);
+			const nextSpelling = nextName.trim().toLowerCase();
+			let clash = null;
+			if (normalizeDriverName(nextName) !== normalizeDriverName(user.driver_name)) {
+				clash = findDriverNameClash(nextName, { exceptUserId: id, directory: false });
+			} else if (nextSpelling !== String(user.driver_name || "").trim().toLowerCase()) {
+				clash = findDriverNameClashes(nextName, { exceptUserId: id, directory: false })
+					.find((h) => h.field === "driver_name" && String(h.driver_name).trim().toLowerCase() === nextSpelling) || null;
+			}
 			if (clash) {
 				// The account it would have merged INTO is named in the row: after the
 				// merge nothing distinguishes the two sets of finance rows, so the only
 				// record of which two identities were involved is this line.
+				const why = clash.source === "reserved"
+					? "that name is reserved."
+					: clash.field === "username"
+						? `it is the username of ${clash.username} (user ${clash.id}), and a driver name must not be another account's username.`
+						: `it already belongs to ${clash.username} (user ${clash.id}). Two accounts sharing a driver name merge their expenses and documents irreversibly.`;
+				const matched = clash.source === "reserved"
+					? "that name is reserved"
+					: `that ${clash.field === "username" ? "is the username of" : "driver name already belongs to"} ${auditText(clash.username, 120)} (user ${clash.id})`;
 				recordPeriodRefusal({ req, ...userEditAudit,
-					tail: `nothing was written — that driver name already belongs to ${auditText(clash.username, 120)} (user ${clash.id})` },
+					tail: `nothing was written — ${matched}` },
 					"DRIVER_NAME_TAKEN", []);
 				return res.status(409).json({
-					error: `Cannot set the driver name to "${String(driverName).trim()}": it already belongs to ${clash.username} (user ${clash.id}). Two accounts sharing a driver name merge their expenses and documents irreversibly.`,
+					error: `Cannot set the driver name to "${String(driverName).trim()}": ${why}`,
 					code: "DRIVER_NAME_TAKEN",
 				});
 			}
@@ -20674,6 +20750,16 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			if (!caseOnlyRename && sheetRowsUnderNewName > 0) {
 				mergeTargets["JobTracking_sheet"] = sheetRowsUnderNewName;
 				mergeRows += sheetRowsUnderNewName;
+			}
+			// A drivers_directory row whose name differs from the new one only in
+			// case or spacing is that same driver to every ownership check, so it is
+			// a merge too. The scan above compares case-insensitively and cannot see
+			// a spacing variant; findDriverNameClash() can. Skipped when the new name
+			// is this account's own name re-spelled, whose own row is not a merge.
+			if (!mergeTargets.drivers_directory && normalizeDriverName(driverName) !== normalizeDriverName(user.driver_name)
+				&& findDriverNameClash(driverName, { users: false })) {
+				mergeTargets.drivers_directory = 1;
+				mergeRows += 1;
 			}
 			if (mergeRows > 0) {
 				return res.status(409).json({
@@ -23315,7 +23401,7 @@ const DIRECTORY_LOCK_REMEDY =
 //     pay_percentage   the multiplier, whenever percentage is the formula on
 //                      either side of the edit.
 //     driver_name      the join key getDriverPayStructures() indexes on
-//                      (LOWER(driver_name)). This route renames ONE table, so a
+//                      (normalizeDriverName(driver_name)). This route renames ONE table, so a
 //                      rename here is exactly the PARTIAL rename that
 //                      PUT /api/admin/fix-driver-name refuses to produce: the
 //                      structure detaches, payStructures[name] goes undefined,
@@ -23410,8 +23496,8 @@ function directoryEditLockBlockers(row, changed) {
 	// (4) driver_name — a rename of THIS TABLE ONLY, i.e. a partial rename.
 	//
 	// ⚠️ Case and whitespace are free, and that is what keeps this usable. Every
-	// money join key is case-insensitive (getDriverPayStructures LOWER()s,
-	// trucksByDriver and this guard normalizeDriverName(), getInvestorDriverSet
+	// money join key is case-insensitive (getDriverPayStructures, trucksByDriver
+	// and this guard normalizeDriverName(), getInvestorDriverSet
 	// trim().toLowerCase()), so a rename that changes only case or spacing CANNOT
 	// move a settlement figure — it is money-neutral by construction, and it is
 	// the commonest correction this screen is used for.
@@ -23634,6 +23720,12 @@ function truckCreateLockBlockers(truck) {
 app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), async (req, res) => {
 	try {
 		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId, driverPayDaily, purchasePrice, titleStatus, maintenanceFundMonthly } = req.body;
+		// A driver name is text. Anything else is refused before it can be coerced:
+		// String() would store {} as "[object Object]", and the directory sync
+		// would give that "driver" a row. `null` means no driver, like "".
+		if (assignedDriver !== undefined && assignedDriver !== null && typeof assignedDriver !== "string") {
+			return res.status(400).json({ error: "assignedDriver must be a string, or null for no driver.", code: "INVALID_DRIVER_NAME" });
+		}
 		// Fuel config accepts snake_case (frontend sends fuel_tank_gallons/avg_mpg)
 		// or camelCase, so either caller convention persists correctly.
 		const fuelTankGallons = req.body.fuel_tank_gallons ?? req.body.fuelTankGallons;
@@ -23671,12 +23763,13 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		// Forced BEFORE the INSERT, not just before the assignment call: writing
 		// the name into trucks.assigned_driver without an assignment row would
 		// leave two trucks claiming one driver, which getInvestorDriverSet() and
-		// the fuel-range resolver both read. One variable, applied everywhere.
+		// the fuel-range resolver both read. One variable, applied everywhere:
+		// `requestedDriver`, which `finalAssignedDriver` below only re-spells ("" stays "").
 		//
 		// Costs the investor nothing: their Add-Truck form sends unit/year/make/
 		// model/vin/plate only. Driver assignment is dispatch's job, via PUT
 		// /api/trucks/:id, which is already Super Admin / Dispatcher only.
-		const finalAssignedDriver = req.session.user.role === "Investor" ? "" : (assignedDriver || "");
+		const requestedDriver = req.session.user.role === "Investor" ? "" : String(assignedDriver || "").trim();
 		if (!unitNumber || !unitNumber.trim()) {
 			return res.status(400).json({ error: "Unit number is required" });
 		}
@@ -23686,10 +23779,15 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		}
 		const validStatus = ["Active", "Inactive", "Maintenance", "OOS"].includes(status) ? status : "Active";
 		// Check if driver has an active load before allowing assignment
-		if (finalAssignedDriver && finalAssignedDriver.trim()) {
-			const activeCheck = await checkDriverActiveLoad(finalAssignedDriver.trim());
+		if (requestedDriver) {
+			const activeCheck = await checkDriverActiveLoad(requestedDriver);
 			if (activeCheck) return res.status(409).json({ error: activeCheck });
 		}
+		// Resolved to the spelling the driver already has (canonicalDriverName()),
+		// so a name that differs only in case or spacing assigns that driver rather
+		// than a second spelling of them. Read after the route's last await, so the
+		// guard and every write below see the current spelling.
+		const finalAssignedDriver = canonicalDriverName(requestedDriver);
 
 		// ⚠️ THE MONTH-END LOCK, on the CREATE verb. PUT /api/trucks/:id refuses to
 		// back-date a truck's in-service month, re-parent it to another investor
@@ -23780,6 +23878,17 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId,
 			photo, insuranceMonthly, eldMonthly, truckPaymentMonthly, hvutAnnual, irpAnnual, adminFeePct, driverPayDaily,
 			purchasePrice, titleStatus, maintenanceFundMonthly } = req.body;
+		// A driver name is text — refused otherwise, before anything is resolved or
+		// written, as on POST /api/trucks. `null` unassigns, like "".
+		if (assignedDriver !== undefined && assignedDriver !== null && typeof assignedDriver !== "string") {
+			return res.status(400).json({ error: "assignedDriver must be a string, or null for no driver.", code: "INVALID_DRIVER_NAME" });
+		}
+		// The driver this edit assigns, resolved to the spelling that driver already
+		// has (canonicalDriverName()): a name that differs only in case or spacing
+		// assigns the existing driver — the guard, the assignment, the stored value
+		// and the directory sync all see that one spelling — instead of starting a
+		// second one. undefined = field not sent, "" = unassign.
+		const nextAssignedDriver = assignedDriver === undefined ? undefined : canonicalDriverName(String(assignedDriver || ""));
 		// Accept snake_case (frontend) or camelCase for the fuel-range config.
 		const fuelTankGallons = req.body.fuel_tank_gallons ?? req.body.fuelTankGallons;
 		const avgMpg = req.body.avg_mpg ?? req.body.avgMpg;
@@ -23863,8 +23972,8 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		// carried so checks (2b) and (6) can resolve the driver this edit LEAVES on
 		// the truck rather than the one it found, which is what closes the
 		// clear-driver-then-change-rate sequence.
-		if (assignedDriver !== undefined && String(assignedDriver || "").trim() !== String(truck.assigned_driver || "").trim()) {
-			changed.assigned_driver = assignedDriver || "";
+		if (nextAssignedDriver !== undefined && nextAssignedDriver !== String(truck.assigned_driver || "").trim()) {
+			changed.assigned_driver = nextAssignedDriver;
 		}
 		if (insuranceMonthly !== undefined) diff("insurance_monthly", parseFloat(insuranceMonthly) || 0);
 		if (eldMonthly !== undefined) diff("eld_monthly", parseFloat(eldMonthly) || 0);
@@ -23925,15 +24034,18 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			newStatus = status;
 			updates.push("status = ?"); params.push(status);
 		}
-		if (assignedDriver !== undefined) {
-			// Check if driver has an active load before allowing reassignment
-			if (assignedDriver && assignedDriver.trim() && assignedDriver.trim().toLowerCase() !== (truck.assigned_driver || "").trim().toLowerCase()) {
-				const activeCheck = await checkDriverActiveLoad(assignedDriver.trim());
+		if (nextAssignedDriver !== undefined) {
+			// Check if driver has an active load before allowing reassignment — a
+			// DIFFERENT driver only. Compared as drivers, through normalizeDriverName():
+			// the resolved spelling can differ from the stored one in case or spacing
+			// while naming this truck's own driver, whose active load is on this truck.
+			if (nextAssignedDriver && normalizeDriverName(nextAssignedDriver) !== normalizeDriverName(truck.assigned_driver)) {
+				const activeCheck = await checkDriverActiveLoad(nextAssignedDriver);
 				if (activeCheck) return res.status(409).json({ error: activeCheck });
 			}
 			// Use the assignment helper (handles history + backward compat)
-			assignDriverToTruck(id, assignedDriver || "");
-			updates.push("assigned_driver = ?"); params.push(assignedDriver);
+			assignDriverToTruck(id, nextAssignedDriver);
+			updates.push("assigned_driver = ?"); params.push(nextAssignedDriver);
 		}
 		if (ownerId !== undefined) { updates.push("owner_id = ?"); params.push(parseInt(ownerId) || 0); }
 		if (notes !== undefined) { updates.push("notes = ?"); params.push(notes); }
@@ -24052,14 +24164,17 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			}
 		}
 		// Log driver assignment change to history + sync to Carrier Database sheet
-		if (assignedDriver !== undefined) {
+		if (nextAssignedDriver !== undefined) {
 			const oldDriver = truck.assigned_driver;
 			const newOwnerId = ownerId !== undefined ? parseInt(ownerId) || 0 : truck.owner_id;
 			// Log to history if driver changed
-			if (assignedDriver && assignedDriver.trim()) {
-				syncDriverToCarrierSheet(assignedDriver.trim(), { action: "update" });
+			if (nextAssignedDriver) {
+				syncDriverToCarrierSheet(nextAssignedDriver, { action: "update" });
 			}
-			if (oldDriver && oldDriver.trim() && oldDriver.trim().toLowerCase() !== (assignedDriver || "").trim().toLowerCase()) {
+			// The driver this edit took off the truck, if it was a different driver
+			// (compared as the active-load check above compares) — not this driver
+			// under the spelling the edit replaced.
+			if (oldDriver && oldDriver.trim() && normalizeDriverName(oldDriver) !== normalizeDriverName(nextAssignedDriver)) {
 				syncDriverToCarrierSheet(oldDriver.trim(), { action: "update" });
 			}
 		}
@@ -24413,8 +24528,8 @@ app.get("/api/admin/audit-trail", requireRole("Super Admin"), (req, res) => {
 //
 // THE DISCRIMINATOR THAT KEEPS THE ROUTE USABLE: every money join key is
 // case-insensitive. getDeductibleExpensesByDriverMonth uses LOWER(driver);
-// getDriverPayStructures uses LOWER(driver_name); the investor/financials
-// driver key and trucksByDriver use normalizeDriverName(); getInvestorDriverSet
+// getDriverPayStructures, the investor/financials driver key and
+// trucksByDriver use normalizeDriverName(); getInvestorDriverSet
 // uses trim().toLowerCase(); generateInvoiceHandler uses LOWER(...) on all
 // three of its lookups. So a rename that changes only case or surrounding
 // whitespace CANNOT move a settlement figure — it is money-neutral by
@@ -24759,9 +24874,9 @@ const DRIVER_RENAME_ID_CAP = 500;
 
 // Blocker codes that NO caller may wave through — not with
 // acknowledgeLockedPeriods, and not via the caseOnly money-neutral carve-out.
-// A locked period is a business decision someone can own; these two are not.
+// A locked period is a business decision someone can own; these are not.
 // See the note beside `hardBlockers` in the fix-driver-name handler.
-const DRIVER_RENAME_HARD_BLOCK_CODES = new Set(["INVOICE_WEEK_COLLISION", "TARGET_UNREADABLE", "DIRECTORY_NAME_COLLISION"]);
+const DRIVER_RENAME_HARD_BLOCK_CODES = new Set(["INVOICE_WEEK_COLLISION", "TARGET_UNREADABLE", "DIRECTORY_NAME_COLLISION", "DIRECTORY_NAME_VARIANT", "DRIVER_NAME_TAKEN"]);
 
 // Count every target and judge the month-end lock on the two that carry a
 // period. Read-only — no writes, no side effects — so it is safe to call from a
@@ -25198,6 +25313,52 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 			({ mergeTargets, mergeRows } = driverRenameMergeScan(newLower));
 			if (sheetRowsAlreadyNewName) { mergeTargets["JobTracking_sheet"] = sheetRowsAlreadyNewName; mergeRows += sheetRowsAlreadyNewName; }
 		}
+		// ⚠️ THE NEW NAME IS ALSO COMPARED THE WAY OWNERSHIP IS. The scan above is
+		// case-insensitive; findDriverNameClashes() also folds spacing and covers
+		// the account namespace. Skipped when the new name is the old one
+		// re-spelled — the rows it would find are the rows being renamed. Every
+		// match is classified:
+		//   • a reserved name, or another account's USERNAME — refused, a hard
+		//     block (DRIVER_NAME_TAKEN): a driver name must be neither;
+		//   • another account's driver name, or a directory row — a merge, flagged
+		//     like any other (isMerge, the by-id reversal recipe);
+		//   • a directory row, when this rename also renames a directory row under
+		//     the old name — refused (DIRECTORY_NAME_VARIANT): it would leave two
+		//     rows for one driver name, which DIRECTORY_NAME_COLLISION refuses
+		//     when the two spellings differ only in case.
+		// The accounts this rename moves are left out, so renaming a driver to
+		// their own username is not a refusal.
+		//
+		// It runs HERE, in the plan, before the sheet write (this route's last
+		// await), like the merge scan and the collision pre-flight: a refusal found
+		// after the sheet is written would leave a partial rename. So it is not
+		// beside the database write, unlike every other caller of the check.
+		if (normalizeDriverName(oldTrim) !== normalizeDriverName(newTrim)) {
+			const movingAccountIds = driverRenameAccountIds(oldTrim, newTrim);
+			const oldDirectoryRows = (plan.sqlite.drivers_directory && plan.sqlite.drivers_directory.rows) || 0;
+			for (const hit of findDriverNameClashes(newTrim, { exceptUserIds: movingAccountIds })) {
+				if (hit.source === "reserved" || hit.field === "username") {
+					if (!blockers.some((b) => b.code === "DRIVER_NAME_TAKEN")) blockers.push({
+						target: hit.source === "reserved" ? "reserved name" : "users.username", table: "users", code: "DRIVER_NAME_TAKEN",
+						rows: 0, periods: [],
+						detail: hit.source === "reserved"
+							? `"${newTrim}" is a reserved name and cannot be a driver name`
+							: `"${newTrim}" is the username of ${hit.username} (user ${hit.id}), and a driver name must not be another account's username`,
+					});
+					continue;
+				}
+				const key = hit.source === "users" ? "users" : "drivers_directory";
+				if (!mergeTargets[key]) { mergeTargets[key] = 1; mergeRows += 1; }
+				if (hit.source === "drivers_directory" && oldDirectoryRows > 0
+					&& !blockers.some((b) => b.code === "DIRECTORY_NAME_COLLISION" || b.code === "DIRECTORY_NAME_VARIANT")) {
+					blockers.push({
+						target: "drivers_directory.driver_name", table: "drivers_directory", code: "DIRECTORY_NAME_VARIANT",
+						rows: 0, periods: [],
+						detail: `the drivers_directory row under "${oldTrim}" would be renamed to "${newTrim}" beside "${hit.driver_name}" (id ${hit.id}), leaving two rows for one driver name that differ only in case or spacing. Merge or delete the redundant row first`,
+					});
+				}
+			}
+		}
 		const isMerge = mergeRows > 0;
 
 		const verdict = {
@@ -25232,9 +25393,15 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		if (hardBlockers.length) {
 			verdict.decision = "block";
 			verdict.code = hardBlockers[0].code;
-			verdict.rationale = hardBlockers[0].code === "INVOICE_WEEK_COLLISION"
-				? "Two live weekly invoices for this driver share a billing week under different spellings. Folding them to one name violates idx_invoices_driver_week, and because the sheet is written first the failure would land as a PARTIAL_RENAME. Soft-delete or correct the duplicate invoice first."
-				: "A money-bearing target could not be read, so it cannot be confirmed free of finalized-month rows. Refusing — the same reasoning as PERIOD_LOCK_UNREADABLE.";
+			// One rationale per hard-block code. TARGET_UNREADABLE's is the fallback,
+			// so a code added to DRIVER_RENAME_HARD_BLOCK_CODES without its own entry
+			// still refuses, and DIRECTORY_NAME_COLLISION no longer borrows it.
+			verdict.rationale = {
+				INVOICE_WEEK_COLLISION: "Two live weekly invoices for this driver share a billing week under different spellings. Folding them to one name violates idx_invoices_driver_week, and because the sheet is written first the failure would land as a PARTIAL_RENAME. Soft-delete or correct the duplicate invoice first.",
+				DIRECTORY_NAME_COLLISION: "Two drivers_directory rows would be written the same name, which violates its UNIQUE constraint, and because the sheet is written first the failure would land as a PARTIAL_RENAME. Merge or delete the redundant row first.",
+				DIRECTORY_NAME_VARIANT: "The rename would leave two drivers_directory rows whose names differ only in case or spacing, for what every ownership check reads as one driver. Merge or delete the redundant row first.",
+				DRIVER_NAME_TAKEN: "The new name is a reserved name or another account's username, and a driver name must be neither.",
+			}[hardBlockers[0].code] || "A money-bearing target could not be read, so it cannot be confirmed free of finalized-month rows. Refusing — the same reasoning as PERIOD_LOCK_UNREADABLE.";
 		} else if (caseOnly) {
 			verdict.decision = "allow";
 			verdict.rationale = "Case/whitespace-only rename: every settlement join key folds case (LOWER / normalizeDriverName), so no locked month's figure can move.";
@@ -30035,37 +30202,46 @@ function normalizeDriverName(s) {
 	return (s || "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-// ⚠️ THE ONE ANSWER TO "IS THIS NAME ALREADY A DRIVER'S?" — every path that
-// creates a driver identity asks it immediately before its INSERT: accepting a
-// job application, POST /api/users, POST /api/drivers-directory.
+// ⚠️ THE ONE ANSWER TO "IS THIS NAME ALREADY IN USE?" — every path that
+// creates or renames a driver identity asks it immediately before its write:
+// accepting a job application, POST /api/users, POST /api/drivers-directory,
+// PUT /api/users/:id, PUT /api/admin/fix-driver-name, PUT
+// /api/drivers-directory/:id, and syncDriverToCarrierSheet()'s add branch.
 //
 // A driver's name is the key every ownership and settlement check matches on
 // (loadBelongsToDriver, driverOwnsInvoice, the expense and document routes), and
 // those compare through normalizeDriverName() above. So this compares through it
-// too, and the create-time answer and the ownership answer cannot disagree: a
-// name differing only in case or spacing ("john  SMITH ") is the same name here.
-// It runs in JS because SQLite cannot express that function — its LOWER folds
-// ASCII only, its TRIM strips spaces only, and it cannot collapse a whitespace
-// run. The scan is every users row plus every non-blank
-// drivers_directory.driver_name: two small reads, a few dozen rows on
-// production, linear in both tables.
+// too, and the naming answer and the ownership answer cannot disagree: a name
+// differing only in case or spacing ("john  SMITH ") is the same name here. It
+// runs in JS because SQLite cannot express that function — its LOWER folds ASCII
+// only, its TRIM strips spaces only, and it cannot collapse a whitespace run. The
+// scan is every users row plus every non-blank drivers_directory.driver_name:
+// two small reads, a few dozen rows on production, linear in both tables.
 //
 // THE ACCOUNT NAMESPACE IS WIDER THAN DRIVER NAMES. A driver's name, an
 // account's username and the names the app itself uses as identities are the
-// same kind of identifier, so on the `users` side a name is also taken when it
-// equals any account's USERNAME or one of the reserved names below. The list lives inside the function so a lifted copy stays
-// self-contained.
+// same kind of identifier, so on the `users` side a name is also in use when it
+// equals any account's USERNAME or one of the reserved names below. The list
+// lives inside the function so a lifted copy stays self-contained.
 //
 // SYNCHRONOUS ON PURPOSE (better-sqlite3), so a caller can sit it right beside
-// its write with no `await` in between — the house check-then-act rule.
+// its write with no `await` in between — the house check-then-act rule. The one
+// exception is PUT /api/admin/fix-driver-name, which asks in its plan, before
+// its sheet write, for the reason given there.
 //
-// Returns the first clash, or null:
+// findDriverNameClashes() returns EVERY match, in a fixed order (reserved names,
+// then accounts by id, then directory rows by id); findDriverNameClash() returns
+// the first, or null. Most callers refuse on any match and want the first; a
+// rename has to tell a merge (another driver's name) from a refusal (a username
+// or a reserved name), so it reads them all. Each match is one of:
 //     { source: "reserved", name }
 //     { source: "users", field: "driver_name" | "username", id, username, driver_name }
 //     { source: "drivers_directory", id, driver_name }
 // Options:
-//   exceptUserId — skip that one account, both its driver name and its
-//     username (a caller editing an account by id).
+//   exceptUserId / exceptUserIds — skip those accounts, both their driver names
+//     and their usernames (a caller editing accounts it already knows by id).
+//     Never skips a reserved name.
+//   exceptDirectoryId — skip that one drivers_directory row (a caller editing it).
 //   users / directory — pass false to leave that side out. `users` covers the
 //     reserved names, every account's driver name and every username. Both
 //     sides are checked by default, the wider answer, so a new caller has to
@@ -30074,31 +30250,57 @@ function normalizeDriverName(s) {
 // identity, so every caller refuses a blank name itself (DRIVER_NAME_REQUIRED)
 // before asking. Blank stored names — every non-driver account's driver name —
 // never match for the same reason. A failed read throws; each caller asks
-// inside its try, so a read error refuses the create rather than admitting it.
-function findDriverNameClash(name, opts = {}) {
+// inside its try, so a read error refuses the write rather than admitting it.
+function findDriverNameClashes(name, opts = {}) {
 	const RESERVED_NAMES = ["dispatch", "investor"];
 	const needle = normalizeDriverName(typeof name === "string" ? name : "");
-	if (!needle) return null;
-	const { exceptUserId = null, users = true, directory = true } = opts || {};
-	const skipId = exceptUserId == null ? null : Number(exceptUserId);
+	if (!needle) return [];
+	const { exceptUserId = null, exceptUserIds = [], exceptDirectoryId = null, users = true, directory = true } = opts || {};
+	const skipUsers = new Set([exceptUserId, ...(exceptUserIds || [])].filter((v) => v != null).map(Number));
+	const skipDirectoryId = exceptDirectoryId == null ? null : Number(exceptDirectoryId);
 	const same = (stored) => normalizeDriverName(stored == null ? "" : String(stored)) === needle;
+	const hits = [];
 	if (users) {
-		const reserved = RESERVED_NAMES.find((r) => same(r));
-		if (reserved) return { source: "reserved", name: reserved };
+		for (const r of RESERVED_NAMES) if (same(r)) hits.push({ source: "reserved", name: r });
 		const rows = db.prepare("SELECT id, username, driver_name FROM users ORDER BY id").all();
 		for (const r of rows) {
-			if (skipId !== null && r.id === skipId) continue;
+			if (skipUsers.has(r.id)) continue;
 			const field = same(r.driver_name) ? "driver_name" : same(r.username) ? "username" : "";
-			if (field) return { source: "users", field, id: r.id, username: r.username, driver_name: r.driver_name };
+			if (field) hits.push({ source: "users", field, id: r.id, username: r.username, driver_name: r.driver_name });
 		}
 	}
 	if (directory) {
 		const rows = db.prepare("SELECT id, driver_name FROM drivers_directory WHERE COALESCE(driver_name, '') <> '' ORDER BY id").all();
 		for (const r of rows) {
-			if (same(r.driver_name)) return { source: "drivers_directory", id: r.id, driver_name: r.driver_name };
+			if (skipDirectoryId !== null && r.id === skipDirectoryId) continue;
+			if (same(r.driver_name)) hits.push({ source: "drivers_directory", id: r.id, driver_name: r.driver_name });
 		}
 	}
-	return null;
+	return hits;
+}
+
+function findDriverNameClash(name, opts = {}) {
+	return findDriverNameClashes(name, opts)[0] || null;
+}
+
+// The spelling an existing driver identity already uses for this name — an
+// account's driver name first, then a drivers_directory row — or the trimmed
+// name itself when no identity holds it. A truck's driver is stored by NAME in
+// trucks.assigned_driver and truck_assignments, and assignDriverToTruck(),
+// syncDriverToCarrierSheet() and the driver-facing truck lookups find those
+// rows by case-insensitive equality, which does not fold spacing. Assigning
+// "Shorn  King" to a truck therefore resolves to "Shorn King", the driver it
+// names, rather than starting a second spelling of one driver. The account's
+// spelling wins because it is the one a driver's own session looks the truck up
+// by; a directory spelling is used for a driver with no account. Usernames and
+// reserved names are not driver identities and are never substituted.
+function canonicalDriverName(name) {
+	const trimmed = typeof name === "string" ? name.trim() : "";
+	if (!trimmed) return trimmed;
+	const hits = findDriverNameClashes(trimmed);
+	const known = hits.find((h) => h.source === "users" && h.field === "driver_name")
+		|| hits.find((h) => h.source === "drivers_directory");
+	return known ? String(known.driver_name).trim() : trimmed;
 }
 
 // SECURITY: enforce that a Driver-role user is acting only on their own

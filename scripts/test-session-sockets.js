@@ -246,6 +246,12 @@ const CASCADE_SRC = [
 ].join("\n");
 const HARD_BLOCK_SRC = liftConst("const DRIVER_RENAME_HARD_BLOCK_CODES = ");
 const COL_LETTER_SRC = liftFunction("function colLetter(idx) {");
+// Both rename routes compare names through normalizeDriverName() and ask
+// findDriverNameClash()/findDriverNameClashes() whether the new name is in use.
+// The comparison is the real one; the question is stubbed to "the name is free"
+// below, the way the merge scan is: which names are in use is
+// scripts/test-driver-name-clash.js's subject, not this runner's.
+const NORMALIZE_SRC = liftFunction("function normalizeDriverName(s) {");
 const CURRENT_FLAG_SRC = liftFunction("function currentMustChangePassword(sessionUser) {");
 const REFRESH_FLAG_SRC = liftFunction("function refreshPasswordChangeFlag(req, res, next) {");
 const LOAD_ID_RE_SRC = (() => {
@@ -396,12 +402,13 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 		return { data: { values: [["Load ID", "Driver"]] } };
 	} } } });
 	const auditText = (v, max) => String(v == null ? "" : v).slice(0, max);
+	const normalizeDriverName = new Function(`${NORMALIZE_SRC}\nreturn normalizeDriverName;`)();
 	new Function("app", "requireRole", "db", "getSheets", "SPREADSHEET_ID", "auditText", "recordPeriodRefusal", "userUpdateLockBlockers",
 		"periodLabel", "driverRenameMergeScan", "applyDriverRenameSqlite", "syncDriverToCarrierSheet", "purgeUserSessions", "logAudit",
-		"notifyChange", "refreshOwnSession", sources.updateUser)(
+		"notifyChange", "refreshOwnSession", "normalizeDriverName", "findDriverNameClash", "findDriverNameClashes", sources.updateUser)(
 		app, requireRole, db, noSheetRows, "t3-not-a-sheet", auditText, () => {},
 		() => ({ unreadable: false, blockers: [] }), (period) => period, () => ({ mergeTargets: {}, mergeRows: 0 }), () => ({ counts: {} }),
-		() => {}, recordPurge, logAudit, () => {}, refreshOwnSession);
+		() => {}, recordPurge, logAudit, () => {}, refreshOwnSession, normalizeDriverName, () => null, () => []);
 
 	// PUT /api/admin/fix-driver-name on the REAL cascade: the executor, the target
 	// list and its builders are server.js's own, so "the accounts whose sessions
@@ -434,12 +441,12 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 	new Function("app", "requireRole", "db", "getSheets", "SPREADSHEET_ID", "colLetter", "isLocked", "periodLocksReadable",
 		"namedLockedPeriods", "planDriverRenameSqlite", "driverRenameMergeScan", "DRIVER_RENAME_TARGETS", "DRIVER_RENAME_HARD_BLOCK_CODES",
 		"DRIVER_RENAME_ID_CAP", "recordPeriodRefusal", "auditText", "auditReasonNote", "applyDriverRenameSqlite", "driverRenameAccountIds",
-		"purgeUserSessions", "logAudit", "refreshOwnSession", sources.fixName)(
+		"purgeUserSessions", "logAudit", "refreshOwnSession", "normalizeDriverName", "findDriverNameClashes", sources.fixName)(
 		app, requireRole, db, fixSheets, "t3-not-a-sheet", new Function(`${COL_LETTER_SRC}\nreturn colLetter;`)(), () => false,
 		() => fixEnv.locksReadable, () => [], () => ({ targets: {}, blockers: [] }), () => fixEnv.merge || ({ mergeTargets: {}, mergeRows: 0 }),
 		cascade.DRIVER_RENAME_TARGETS, new Function(`${HARD_BLOCK_SRC}\nreturn DRIVER_RENAME_HARD_BLOCK_CODES;`)(), cascade.DRIVER_RENAME_ID_CAP,
 		(audit, code) => { fixEnv.refusals.push(code); }, auditText, () => "", cascade.applyDriverRenameSqlite, cascade.driverRenameAccountIds,
-		recordPurge, logAudit, refreshOwnSession);
+		recordPurge, logAudit, refreshOwnSession, normalizeDriverName, () => []);
 
 	// Test-only: refreshOwnSession()'s fail-closed branch. No route can reach it
 	// (both call it right after their own commit), so the account row is removed
