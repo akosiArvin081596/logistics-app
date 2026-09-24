@@ -87,12 +87,16 @@ const ACTIVE_JOB_ANCHOR = "\t\tif (/^at shipper$/i.test(newStatus)) {";
 const ACTIVE_JOB_BLOCK = extractAt(ACTIVE_JOB_ANCHOR, "one-active-job block");
 
 // ------------------------------------------------------------------ sandboxes
-// generateInvoiceNumber reads a COUNT off `invoices` for the sequence suffix;
-// only the -NN suffix depends on it, and every assertion here is about the
-// -YYYYWww half, so a fixed 0 keeps the suffix at -01 throughout.
-const dbStub = { prepare: () => ({ get: () => ({ cnt: 0 }) }) };
+// generateInvoiceNumber reads this driver's `invoices` rows for the week (the
+// sequence start) and asks invoiceNumberHolders() whether a number is free; only
+// the -NN suffix depends on either, and every assertion here is about the
+// -YYYYWww half, so an empty table keeps the suffix at -01 throughout. (What the
+// suffix does against real rows is scripts/test-invoice-driver-name-matching.js.)
+const dbStub = { prepare: () => ({ get: () => undefined, all: () => [] }) };
 const S = new Function("db", [
 	extract("generateInvoiceNumber"),
+	extract("invoiceNumberHolders"),
+	extract("invoicePdfFileName"),
 	extract("isAfterDeadline"),
 	extract("normalizeDriverName"),
 	extractConst("normLoadKey"),

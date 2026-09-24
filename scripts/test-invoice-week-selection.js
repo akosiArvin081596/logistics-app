@@ -114,6 +114,11 @@ const SHARED_FNS = [
 	"invoiceWeekColumns", "invoiceCompletionDay", "invoiceWeekVerdict", "selectInvoiceWeekLoads", "invoiceWeekWarnings",
 	"driversWithCompletedLoadsInWeek",
 	"resolveDailyRate", "getEldTravelDaysByVehicle", "getAllExcludedDriverDays", "generateInvoiceNumber", "isAfterDeadline",
+	// The handler's driver identity, pay lookups and guarded write (see
+	// scripts/test-invoice-driver-name-matching.js for what they decide).
+	"liveWeeklyInvoicesForDriverWeek", "invoicePdfFileName", "invoiceNumberHolders", "invoiceWriteRefusal",
+	"commitInvoiceWithPdf", "driverAccountsNamed", "getDriverPayStructures", "truckDailyRateCandidates",
+	"findDriverNameClashes", "canonicalDriverName",
 	// The Friday batch, run for real in §4b.
 	"escHtml", "invoiceEmailHtml", "generateInvoiceInProcess", "abortAutogenRun",
 	// The undated-load ledger, §7.
@@ -139,6 +144,7 @@ function buildWorld(db, opts = {}) {
 		"let invoiceAutogenAbortStreak = 0;",
 		"let invoiceAutogenAbortAlerted = false;",
 		"let invoiceUndatedAlertsRunning = false;",
+		"let lastPayStructShadowWarnMs = 0;",
 		"const submitDraftInvoiceStmt = db.prepare(\"UPDATE invoices SET status = 'Submitted', submitted_at = ? WHERE id = ? AND status = 'Draft'\");",
 		// getJobTrackingCached()'s shape: parseSheet + deduplicateLoads over the same values.
 		"async function getJobTrackingCached() { const p = parseSheet({ values: __sheet.values }); p.data = deduplicateLoads(p.data, p.headers); return p; }",
@@ -163,7 +169,7 @@ function buildWorld(db, opts = {}) {
 		SPREADSHEET_ID: "test-sheet",
 		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: sheet.values } }) } } }),
 		renderPolicy: async (templateName, data) => { rendered.push({ templateName, data }); return Buffer.from("%PDF-stub"); },
-		fs: { existsSync: () => true, mkdirSync: () => {}, writeFileSync: () => {} },
+		fs: { existsSync: () => true, mkdirSync: () => {}, writeFileSync: () => {}, renameSync: () => {}, unlinkSync: () => {} },
 		path,
 		__dirname: "/nonexistent",
 		__overrides: opts.overrides || {},
@@ -292,7 +298,7 @@ function freshDb() {
 		CREATE TABLE expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT, date TEXT, amount REAL, type TEXT, status TEXT DEFAULT '', description TEXT DEFAULT '');
 		CREATE TABLE trucks (id INTEGER PRIMARY KEY AUTOINCREMENT, unit_number TEXT, assigned_driver TEXT, driver_pay_daily REAL DEFAULT 0, routemate_vehicle_id TEXT DEFAULT '');
 		CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT, address TEXT DEFAULT '', city TEXT DEFAULT '', state TEXT DEFAULT '', zip TEXT DEFAULT '', phone TEXT DEFAULT '', cell TEXT DEFAULT '', pay_type TEXT DEFAULT 'fixed', pay_percentage REAL DEFAULT 0, pay_daily REAL DEFAULT 0);
-		CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT);
+		CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT DEFAULT '', email TEXT DEFAULT '', role TEXT DEFAULT 'Driver', driver_name TEXT);
 		CREATE TABLE driver_payment_info (user_id INTEGER, bank_name TEXT, account_type TEXT);
 		CREATE TABLE excluded_driver_days (driver_name TEXT, excluded_date TEXT, action TEXT);
 		CREATE TABLE routemate_telemetry (routemate_vehicle_id TEXT, location_date_ms INTEGER, speed REAL, longitude REAL, dropped_reason TEXT DEFAULT '');
