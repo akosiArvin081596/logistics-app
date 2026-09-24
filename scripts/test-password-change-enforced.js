@@ -378,7 +378,7 @@ for (const makeBackend of BACKENDS) {
 		"§5 re-submitting the current password must be refused before the UPDATE — otherwise it clears the flag without rotating the credential");
 
 	const io = SRC.indexOf('io.on("connection", (socket) => {');
-	const regAt = io >= 0 ? SRC.indexOf('socket.on("register", (clientName) => {', io) : -1;
+	const regAt = io >= 0 ? SRC.indexOf('socket.on("register", socketHandler("register", (clientName) => {', io) : -1;
 	const beforeRegister = regAt > io ? SRC.slice(io, regAt) : "";
 	const registerHead = regAt > 0 ? SRC.slice(regAt, SRC.indexOf("const requested", regAt)) : "";
 	ok(regAt > io && !/currentMustChangePassword/.test(beforeRegister),
@@ -394,6 +394,28 @@ const IO_HANDLER = (() => {
 	const a = SRC.indexOf('io.on("connection", (socket) => {');
 	if (a < 0) return null;
 	return liftFrom(SRC.slice(SRC.indexOf("(socket) => {", a)), "(socket) => {");
+})();
+// The room helpers the handler names its rooms with, lifted as shipped. This
+// probe asks WHICH rooms a socket joins; how a room is spelled is
+// scripts/test-socket-hardening.js's subject.
+const ROOMS = (() => {
+	try {
+		const heads = ["function identityRoomKey(name) {", "function driverRoom(name) {", "function userRoom(username) {"];
+		return new Function(`${heads.map((h) => liftFrom(SRC, h)).join("\n")}\nreturn { identityRoomKey, driverRoom, userRoom };`)();
+	} catch {
+		return null;
+	}
+})();
+// The SHIPPED per-listener guard the register handler wraps its event in; its
+// fault-containment is scripts/test-socket-hardening.js's subject, so here it
+// just needs to be the real wrapper the handler calls.
+const SOCKET_HANDLER = (() => {
+	try {
+		const heads = ["function socketHandler(event, fn) {", "function logSocketHandlerFault(event, err) {"];
+		return new Function(`${heads.map((h) => liftFrom(SRC, h)).join("\n")}\nreturn socketHandler;`)();
+	} catch {
+		return null;
+	}
 })();
 // Shaped like a socket.io Socket where the handler reads it: `request` is the
 // handshake request (express-session sets sessionID on it) and `data` is the
@@ -416,7 +438,8 @@ function socketProbe(handlerSrc) {
 	// still exists. Every session in this probe does; a session that ended is
 	// scripts/test-session-sockets.js's subject, against the real store.
 	const liveSessionIds = (sids) => new Set(sids);
-	const onConnection = new Function("currentMustChangePassword", "liveSessionIds", `return (${handlerSrc});`)(currentMustChangePassword, liveSessionIds);
+	const onConnection = new Function("currentMustChangePassword", "liveSessionIds", "identityRoomKey", "driverRoom", "userRoom", "socketHandler", `return (${handlerSrc});`)(
+		currentMustChangePassword, liveSessionIds, ROOMS.identityRoomKey, ROOMS.driverRoom, ROOMS.userRoom, SOCKET_HANDLER);
 	const p = {};
 	const forced = fakeSocket({ id: 7, username: "LogisX-2609", role: "Driver", driverName: "Jane Roe", mustChangePassword: true });
 	onConnection(forced);
@@ -425,7 +448,7 @@ function socketProbe(handlerSrc) {
 	p.forcedJoinsNothing = forced.rooms.size === 0;
 	b.setFlag(7, 0); // the change, while this socket stays open
 	forced.fromClient("register", "Jane Roe");
-	p.joinsAfterChange = forced.rooms.has("jane roe");
+	p.joinsAfterChange = forced.rooms.has(ROOMS.driverRoom("Jane Roe"));
 	const stale = fakeSocket({ id: 9, username: "LogisX-1111", role: "Driver", driverName: "Old Copy", mustChangePassword: false });
 	onConnection(stale);
 	stale.fromClient("register", "Old Copy");
@@ -433,14 +456,14 @@ function socketProbe(handlerSrc) {
 	const disp = fakeSocket({ id: 8, username: "amir_serrano", role: "Dispatcher", mustChangePassword: false });
 	onConnection(disp);
 	disp.fromClient("register", "dispatch");
-	p.unflaggedJoins = disp.rooms.has("dispatch") && disp.rooms.has("amir_serrano") && !disp.disconnected;
+	p.unflaggedJoins = disp.rooms.has("dispatch") && disp.rooms.has(ROOMS.userRoom("amir_serrano")) && !disp.disconnected;
 	const anon = fakeSocket(null);
 	onConnection(anon);
 	p.anonDisconnected = anon.disconnected;
 	return p;
 }
-if (!IO_HANDLER) {
-	ok(false, "§4b could not locate io.on(\"connection\") in server.js");
+if (!IO_HANDLER || !ROOMS || !SOCKET_HANDLER) {
+	ok(false, "§4b could not locate io.on(\"connection\"), the room helpers (driverRoom, userRoom) and socketHandler in server.js");
 } else {
 	const p = socketProbe(IO_HANDLER);
 	ok(p.forcedStaysConnected,
