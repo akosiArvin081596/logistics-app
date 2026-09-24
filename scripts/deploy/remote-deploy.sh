@@ -342,13 +342,21 @@ echo "::group::resolve the Node this app actually runs on"
 # PATH. Native modules (better-sqlite3) are compiled per NODE_MODULE_VERSION;
 # installing under one major and running under another is ERR_DLOPEN_FAILED on
 # boot. pm2's interpreter is the single source of truth so the two cannot drift.
+# ⚠️ Read by name from jlist's JSON line (pm2 can print a notice ahead of it,
+# see the pm2-restart block). When it cannot be read at all, refuse: a guess
+# at PATH's node is the box's system Node 20, whose build dies on boot under
+# pm2's Node 22. Only pm2's own default, the bare `node`, means PATH's node.
 NODE_BIN=$(pm2 jlist 9>&- | node -e '
   let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
-    const p=JSON.parse(d).find(x=>x.name===process.argv[1]);
+    let l=[];try{l=JSON.parse(d.slice(d.lastIndexOf("\n[")+1));}catch(e){}
+    const p=Array.isArray(l)?l.find(x=>x&&x.name===process.argv[1]):null;
     process.stdout.write(p && p.pm2_env ? (p.pm2_env.exec_interpreter||"") : "");
   });' "$PM2")
 case "$NODE_BIN" in
-	""|node) NODE_BIN=$(command -v node) ;;
+	node) NODE_BIN=$(command -v node) ;;
+	"")
+		echo "::error::cannot read the interpreter pm2 runs $PM2 with — refusing to build with a guess. Nothing was built or restarted."
+		exit 1 ;;
 esac
 PATH="$(dirname "$NODE_BIN"):$PATH"
 export PATH

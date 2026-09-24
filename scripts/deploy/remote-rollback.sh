@@ -90,15 +90,27 @@ if [ "$FAILED" = "$TARGET" ]; then
 	echo "::warning::the rollback target $TARGET is the commit that just failed verification: this rollback restarts it, and never records it as verified"
 fi
 
+# Build with the Node pm2 runs the app with, read as remote-deploy.sh reads it,
+# and BEFORE the checkout: when it cannot be read, refuse with nothing touched
+# rather than build with PATH's node (the box's system Node 20) and restart a
+# rollback that dies on boot.
+NODE_BIN=$(pm2 jlist 9>&- | node -e '
+  let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+    let l=[];try{l=JSON.parse(d.slice(d.lastIndexOf("\n[")+1));}catch(e){}
+    const p=Array.isArray(l)?l.find(x=>x&&x.name===process.argv[1]):null;
+    process.stdout.write(p && p.pm2_env ? (p.pm2_env.exec_interpreter||"") : "");
+  });' "$PM2")
+case "$NODE_BIN" in
+	node) NODE_BIN=$(command -v node) ;;
+	"")
+		echo "::error::ROLLBACK FAILED — cannot read the interpreter pm2 runs $PM2 with, so nothing was checked out, built or restarted. MANUAL INTERVENTION REQUIRED."
+		exit 1 ;;
+esac
+echo "pm2 interpreter: $NODE_BIN"
+
 git checkout -- client/package-lock.json package-lock.json 2>/dev/null || true
 git checkout --detach "$TARGET" || { echo "::error::cannot check out $TARGET"; exit 1; }
 
-NODE_BIN=$(pm2 jlist 9>&- | node -e '
-  let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
-    const p=JSON.parse(d).find(x=>x.name===process.argv[1]);
-    process.stdout.write(p && p.pm2_env ? (p.pm2_env.exec_interpreter||"") : "");
-  });' "$PM2")
-case "$NODE_BIN" in ""|node) NODE_BIN=$(command -v node) ;; esac
 PATH="$(dirname "$NODE_BIN"):$PATH"
 export PATH
 

@@ -339,11 +339,37 @@ const RESTART_CASES = {
 	},
 	deployProvenThroughNotice(S, tag) {
 		// pm2's CLI prints its out-of-date notice on stdout ahead of jlist's JSON.
-		// The proof still reads the JSON line, so a deploy does not fail on it.
+		// The deploy still reads the JSON line: it builds with pm2's interpreter
+		// (off the PATH here, as /opt/node22 is on the box), and proves the restart.
 		resetBox(C1, { verified: C1, started: C1 });
 		const x = runSh(S.deploy, deployEnv({ SHA: C2, STUB_PM2_JLIST_NOISE: "1" }));
-		return [[x.code === 0 && started() === C2 && /^restarting logistics-app: pm2 returned 0, start time 1000 -> 1001, status online/m.test(x.out),
-			`${tag}§15 with pm2's out-of-date notice ahead of jlist's JSON, the restart is still proven and C2 marked started (code ${x.code}, started ${short(started())})`]];
+		return [
+			[x.code === 0 && started() === C2 && /^restarting logistics-app: pm2 returned 0, start time 1000 -> 1001, status online/m.test(x.out),
+				`${tag}§15 with pm2's out-of-date notice ahead of jlist's JSON, the restart is still proven and C2 marked started (code ${x.code}, started ${short(started())})`],
+			[x.out.split("\n").includes(`pm2 interpreter: ${ENV.STUB_NODE}`) && x.out.split("\n").some((l) => l.startsWith(`building with:   ${ENV.STUB_NODE} `)),
+				`${tag}§15 …and it builds with pm2's own interpreter, never PATH's node`],
+		];
+	},
+	rollbackThroughNotice(S, tag) {
+		resetBox(C3, { verified: C1, started: C3 });
+		const x = rollback(S, C2, { RECORD_STATE: "ok", STUB_PM2_JLIST_NOISE: "1" });
+		return [[x.code === 0 && /ROLLBACK OK/.test(x.out) && x.out.split("\n").includes(`pm2 interpreter: ${ENV.STUB_NODE}`) && started() === C2 && verified() === C2,
+			`${tag}§15 a rollback with pm2's notice ahead of jlist's JSON builds with pm2's interpreter, proves its restart and records C2 (code ${x.code}, record ${short(verified())})`]];
+	},
+	deployNoInterpreter(S, tag) {
+		// jlist does not list the process: no guess at PATH's node.
+		resetBox(C1, { verified: C1, started: C1 });
+		const x = runSh(S.deploy, deployEnv({ SHA: C2, STUB_PM2_MISSING: "1" }));
+		return [[x.code === 1 && /::error::cannot read the interpreter pm2 runs logistics-app with/.test(x.out)
+			&& !/install-start/.test(log("npm")) && !/^restart /m.test(log("pm2")) && started() === C1 && lastField(x.stdout, "DEPLOY_RESULT") === "",
+		`${tag}§15 a deploy that cannot read pm2's interpreter refuses to build: nothing installed, built or restarted (code ${x.code})`]];
+	},
+	rollbackNoInterpreter(S, tag) {
+		resetBox(C3, { verified: C1, started: C3 });
+		const x = rollback(S, C2, { RECORD_STATE: "ok", STUB_PM2_MISSING: "1" });
+		return [[x.code === 1 && /ROLLBACK FAILED — cannot read the interpreter/.test(x.out) && head() === C3
+			&& !/install-start/.test(log("npm")) && !/^restart /m.test(log("pm2")) && marker() === C3 && verified() === C1,
+		`${tag}§15 a rollback that cannot read pm2's interpreter refuses before its checkout: HEAD stays C3, nothing built or restarted, the marker still names C3 (code ${x.code}, HEAD ${short(head())})`]];
 	},
 	deployRestartFails(S, tag) {
 		// pm2 answers 1. Its start time moved all the same, so only the exit

@@ -57,6 +57,12 @@ fs.writeFileSync(EMPTY_GITCONFIG, "");
 const NODE_DIR = path.join(T, "nodebin");
 fs.mkdirSync(NODE_DIR);
 fs.symlinkSync(process.execPath, path.join(NODE_DIR, "node"));
+// …and that interpreter lives OFF the PATH, so a script that builds with
+// PATH's `node` instead of pm2's interpreter can be told apart (on the box,
+// PATH's node is the system Node 20, pm2's is /opt/node22).
+const INTERP_DIR = path.join(T, "interp");
+fs.mkdirSync(INTERP_DIR);
+fs.symlinkSync(process.execPath, path.join(INTERP_DIR, "node"));
 
 const ENV = {
 	PATH: `${D.bin}:${NODE_DIR}:${process.env.PATH}`,
@@ -68,7 +74,7 @@ const ENV = {
 	GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid",
 	GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid",
 	STUB_LOG_DIR: D.logs,
-	STUB_NODE: path.join(NODE_DIR, "node"),
+	STUB_NODE: path.join(INTERP_DIR, "node"),
 	DEPLOY_LOCK_DIR: D.lock,
 };
 
@@ -93,7 +99,8 @@ function writeExec(p, body) {
 // two ways a restart can fail to take, independently: STUB_PM2_RESTART_NOOP
 // leaves pm_uptime where it was, STUB_PM2_RESTART_RC is the restart's exit code.
 // STUB_PM2_JLIST_NOISE prints the notice pm2's CLI puts on stdout, ahead of
-// the JSON, when its daemon is older than the CLI.
+// the JSON, when its daemon is older than the CLI. STUB_PM2_MISSING leaves our
+// process out of jlist altogether.
 writeExec(path.join(D.bin, "pm2"), `#!/bin/bash
 if [ -e /dev/fd/9 ]; then fd9=open; else fd9=closed; fi
 echo "$1 tag=\${STUB_TAG:-} fd9=$fd9 head=$(git rev-parse HEAD 2>/dev/null)" >> "$STUB_LOG_DIR/pm2.log"
@@ -103,7 +110,9 @@ case "$1" in
 		if [ -n "\${STUB_PM2_JLIST_NOISE:-}" ]; then
 			printf '>>>> In-memory PM2 is out-of-date, do:\\n>>>> $ pm2 update\\nIn memory PM2 version: 5.3.0\\nLocal PM2 version: 6.0.8\\n'
 		fi
-		printf '[{"name":"other-tenant","pm2_env":{"status":"online","pm_uptime":5,"restart_time":0,"exec_interpreter":"/nonexistent/other-tenant/node"}},{"name":"%s","pm2_env":{"status":"%s","pm_uptime":%s,"restart_time":1,"exec_interpreter":"%s"}}]' "$PM2" "\${STUB_PM2_STATUS:-online}" "$up" "$STUB_NODE" ;;
+		other='{"name":"other-tenant","pm2_env":{"status":"online","pm_uptime":5,"restart_time":0,"exec_interpreter":"/nonexistent/other-tenant/node"}}'
+		if [ -n "\${STUB_PM2_MISSING:-}" ]; then printf '[%s]' "$other"; exit 0; fi
+		printf '[%s,{"name":"%s","pm2_env":{"status":"%s","pm_uptime":%s,"restart_time":1,"exec_interpreter":"%s"}}]' "$other" "$PM2" "\${STUB_PM2_STATUS:-online}" "$up" "$STUB_NODE" ;;
 	restart)
 		[ -n "\${STUB_PM2_RESTART_NOOP:-}" ] || echo $((up + 1)) > "$STUB_LOG_DIR/pm2-uptime"
 		exit "\${STUB_PM2_RESTART_RC:-0}" ;;
