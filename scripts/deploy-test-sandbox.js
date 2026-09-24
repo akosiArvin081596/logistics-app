@@ -86,12 +86,27 @@ function writeExec(p, body) {
 
 // Stubs. Each logs what it was asked, which deploy asked (STUB_TAG), and
 // whether it inherited the lock's FD 9 — pm2 must NOT. STUB_PM2_STATUS is the
-// process status jlist reports (default online).
+// process status jlist reports (default online). jlist lists another tenant's
+// process FIRST, as the shared box does, so only a lookup by name finds ours.
+// Our process's pm_uptime lives in $STUB_LOG_DIR/pm2-uptime (1000 after every
+// reset, which clears that directory), and a restart moves it on by one. The
+// two ways a restart can fail to take, independently: STUB_PM2_RESTART_NOOP
+// leaves pm_uptime where it was, STUB_PM2_RESTART_RC is the restart's exit code.
+// STUB_PM2_JLIST_NOISE prints the notice pm2's CLI puts on stdout, ahead of
+// the JSON, when its daemon is older than the CLI.
 writeExec(path.join(D.bin, "pm2"), `#!/bin/bash
 if [ -e /dev/fd/9 ]; then fd9=open; else fd9=closed; fi
 echo "$1 tag=\${STUB_TAG:-} fd9=$fd9 head=$(git rev-parse HEAD 2>/dev/null)" >> "$STUB_LOG_DIR/pm2.log"
+up=$(cat "$STUB_LOG_DIR/pm2-uptime" 2>/dev/null || echo 1000)
 case "$1" in
-	jlist) printf '[{"name":"%s","pm2_env":{"status":"%s","restart_time":1,"exec_interpreter":"%s"}}]' "$PM2" "\${STUB_PM2_STATUS:-online}" "$STUB_NODE" ;;
+	jlist)
+		if [ -n "\${STUB_PM2_JLIST_NOISE:-}" ]; then
+			printf '>>>> In-memory PM2 is out-of-date, do:\\n>>>> $ pm2 update\\nIn memory PM2 version: 5.3.0\\nLocal PM2 version: 6.0.8\\n'
+		fi
+		printf '[{"name":"other-tenant","pm2_env":{"status":"online","pm_uptime":5,"restart_time":0,"exec_interpreter":"/nonexistent/other-tenant/node"}},{"name":"%s","pm2_env":{"status":"%s","pm_uptime":%s,"restart_time":1,"exec_interpreter":"%s"}}]' "$PM2" "\${STUB_PM2_STATUS:-online}" "$up" "$STUB_NODE" ;;
+	restart)
+		[ -n "\${STUB_PM2_RESTART_NOOP:-}" ] || echo $((up + 1)) > "$STUB_LOG_DIR/pm2-uptime"
+		exit "\${STUB_PM2_RESTART_RC:-0}" ;;
 esac
 exit 0
 `);

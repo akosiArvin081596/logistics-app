@@ -178,13 +178,18 @@ runs:
       # Fires only when this target is configured to self-heal AND something
       # actually failed. Nobody is watching an auto-deploy, so production must
       # not be able to stay broken. remote-rollback.sh also records the failed
-      # commit in the drift marker, so deploy-drift.yml can never re-deploy it.
-      # PREV is the box's LIVE commit as remote-deploy.sh found it before this
-      # deploy (the last commit started there that still served, else the last
-      # verified deploy), not whatever a failed deploy may have left checked
-      # out. Once the rollback serves again it records PREV as the verified
-      # deploy, but only when the deploy reported a consistent record
-      # (RECORD_STATE=ok) and the rollback's own install and build were clean.
+      # commit in the drift marker (keeping a marker that already blocks
+      # main's tip), so deploy-drift.yml can never re-deploy it. PREV is the
+      # rollback target remote-deploy.sh reported:
+      # code that ran on the box before this deploy (the last commit started
+      # there while it still served, else the last verified deploy), never
+      # whatever a failed deploy may have left checked out, and never the
+      # commit these checks judged unless that is the verified deploy. Once the
+      # rollback serves again it records PREV as the verified deploy, but only
+      # when PREV is not the commit that failed, the deploy reported a
+      # consistent record (RECORD_STATE=ok) and the rollback's own install and
+      # build were clean. A rollback whose restart pm2 does not prove fails
+      # without recording anything.
       if: |
         inputs.rollback_on_failure == 'true' &&
         (steps.smoke.outcome == 'failure' || steps.edge.outcome == 'failure') &&
@@ -244,7 +249,7 @@ runs:
           echo "| ref | \`$REF\` |"
           echo "| exact SHA | \`${SHA:-(tip of ref at pull time)}\` |"
           echo "| deployed | \`${TO:-n/a}\` (${RESULT:-no result}$([ "$RESULT" = noop ] && echo ': a newer live commit already contains it')) |"
-          echo "| rollback target (last live) | \`$PREV\` |"
+          echo "| rollback target (code that ran here) | \`$PREV\` |"
           echo "| smoke | $SMOKE |"
           echo "| public edge | $EDGE |"
           echo "| recorded as verified | $RECORD |"

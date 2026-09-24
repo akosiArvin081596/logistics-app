@@ -4,7 +4,7 @@
  * who writes it, who reads it, and how a missing or inconsistent one fails
  * safe. Runs the REAL scripts/deploy/*.sh against the throwaway sandbox from
  * scripts/deploy-test-sandbox.js, which it shares with
- * scripts/test-deploy-scripts.js (§1–§11) and scripts/test-deploy-live.js
+ * scripts/test-deploy-scripts.js (§1–§11, §15) and scripts/test-deploy-live.js
  * (§13–§14: the started mark, the LIVE commit and the action). Each is a
  * runner of its own, so each keeps its own time budget.
  *
@@ -14,8 +14,9 @@
  *   §12 THE VERIFIED RECORD. Written only by remote-record-verified.sh (which
  *       the action runs once the deploy's checks passed, and which refuses a
  *       commit HEAD is not on) and by a rollback that serves again from a
- *       consistent record with a clean install and build. remote-deploy.sh
- *       never records its own deploy. With the record, a half-finished deploy
+ *       consistent record with a clean install and build, and whose target is
+ *       not the commit that failed (whose drift marker it writes regardless).
+ *       remote-deploy.sh never records its own deploy. With the record, a half-finished deploy
  *       (HEAD moved, nothing restarted) is never a no-op floor or a rollback
  *       target, and main moves back over it; the drift check and the heal prep
  *       read production as the record. A missing record falls back to HEAD
@@ -123,6 +124,7 @@ const RECORD_CASES = {
 				`${tag}§12 deploying C2, an ancestor of the half-finished HEAD C3, lands on EXACTLY C2 on main (code ${x.code}, HEAD ${short(head())})`],
 			[didFullDeploy(x), `${tag}§12 …as a FULL deploy, not a no-op against a HEAD that never ran`],
 			[/moving main back to/.test(x.out), `${tag}§12 …moving main back only over commits past the last live deploy, and saying so`],
+			[deployedFrom(x) === C1, `${tag}§12 …with the last VERIFIED commit C1 as rollback target, not the never-run HEAD C3 (got ${short(deployedFrom(x))})`],
 		];
 	},
 	verifiedNoop(S, tag) {
@@ -305,6 +307,21 @@ const RECORD_CASES = {
 		return [[x.code !== 0 && /ROLLBACK FAILED/.test(x.out) && verified() === C1,
 			`${tag}§12 a rollback that never serves records nothing, even from a consistent record (the record stays C1)`]];
 	},
+	rollbackToFailedCommit(S, tag) {
+		// A rollback handed the very commit that failed (HEAD): a deploy with no
+		// record to return to, or a deploy script from before remote-deploy.sh
+		// stopped naming it. It restarts that commit and serves, from a
+		// consistent record and a clean build, yet records nothing, and it still
+		// writes the drift marker for it.
+		resetBox(C3, { verified: C2, started: C3 });
+		const x = rollback(S, C3, { RECORD_STATE: "ok" });
+		return [
+			[x.code === 0 && /ROLLBACK OK/.test(x.out) && head() === C3 && verified() === C2
+				&& /::warning::not recording .* it is the commit that just failed verification/.test(x.out),
+			`${tag}§12 a rollback to the commit that failed serves again but never records it as verified (record ${short(verified())}, code ${x.code})`],
+			[marker() === C3, `${tag}§12 …and still writes the drift marker for it (marker ${short(marker())})`],
+		];
+	},
 };
 
 // ──────────────────────────────────────────────────────────────── §8 mutants
@@ -319,12 +336,15 @@ function mutants() {
 	expectCaught("a missing record counts as HEAD", RECORD_CASES.missingRecordAncestor(deployWith(
 		'if ! git show-ref --verify -q "$VERIFIED_REF"; then\n\tVERIFIED_STATE=missing',
 		'if ! git show-ref --verify -q "$VERIFIED_REF"; then\n\tVERIFIED=$(git rev-parse HEAD); VERIFIED_STATE=ok'), M));
-	expectCaught("the rollback target is HEAD, not the live commit", RECORD_CASES.sameCommitAfterHalf(deployWith(
-		"if [ -n \"$LIVE\" ]; then ROLLBACK_TO=$LIVE; else ROLLBACK_TO=$PREV; fi", "ROLLBACK_TO=$PREV"), M));
+	const rollbackToHead = deployWith("else\n\tROLLBACK_TO=$LIVE\nfi", "else\n\tROLLBACK_TO=$PREV\nfi");
+	expectCaught("the rollback target is HEAD, not the live commit", [
+		...RECORD_CASES.sameCommitAfterHalf(rollbackToHead, M),
+		...RECORD_CASES.ancestorAfterHalf(rollbackToHead, M),
+	]);
 	expectCaught("no warning names the commits a rollback would drop", RECORD_CASES.sameCommitAfterHalf(deployWith(
 		'if [ -n "$DROPPED" ]; then', "if false; then"), M));
 	expectCaught("main moves back with no proof its commits never ran", RECORD_CASES.missingRecordAncestor(deployWith(
-		'elif [ -n "$LIVE" ] && git merge-base --is-ancestor "$LIVE" "$SHA" \\\n\t\t&& git merge-base --is-ancestor main origin/main; then',
+		'elif [ -n "$LIVE" ] && git merge-base --is-ancestor "$LIVE" "$SHA" \\\n\t\t&& { [ -z "$STARTED" ] || ! git merge-base --is-ancestor "$STARTED" HEAD || git merge-base --is-ancestor "$STARTED" "$SHA"; } \\\n\t\t&& git merge-base --is-ancestor main origin/main; then',
 		"elif git merge-base --is-ancestor main origin/main; then"), M));
 
 	// The drift check, the heal prep and the record script.
