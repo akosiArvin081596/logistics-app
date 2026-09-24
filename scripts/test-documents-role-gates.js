@@ -90,6 +90,13 @@ const sentIfLoadOwnershipUnverified = new Function(`${liftFn("sentIfLoadOwnershi
 const resolveDriverActor = new Function("normalizeDriverName",
 	`${liftFn("resolveDriverActor")}\nreturn resolveDriverActor;`)(normalizeDriverName);
 const readFlagOwnName = new Function(`${liftFn("readFlagOwnName")}\nreturn readFlagOwnName;`)();
+// The Documents-panel filter the list route shares with the /uploads root guard,
+// read from server.js so the lifted route runs with the shipped value.
+const LOAD_PANEL_DOCUMENT_FILTER = (() => {
+	const m = SRC.match(/const LOAD_PANEL_DOCUMENT_FILTER =\s*("(?:[^"\\]|\\.)*");/);
+	if (!m) throw new Error("LOAD_PANEL_DOCUMENT_FILTER not found in server.js");
+	return JSON.parse(m[1]);
+})();
 const UPLOAD_TYPE_SRC = liftFn("uploadDocTypeFor");
 const buildUploadDocTypeFor = (src) => new Function(`${src}\nreturn uploadDocTypeFor;`)();
 
@@ -157,7 +164,7 @@ const limiter = (req, res, next) => { counters.limiter++; next(); };
 function documentDeps(overrides = {}) {
 	return {
 		requireRole, requireAuth, driverWriteLimiter: limiter,
-		loadBelongsToDriver, sentIfLoadOwnershipUnverified, resolveDriverActor,
+		loadBelongsToDriver, sentIfLoadOwnershipUnverified, resolveDriverActor, LOAD_PANEL_DOCUMENT_FILTER,
 		uploadDocTypeFor: buildUploadDocTypeFor(UPLOAD_TYPE_SRC),
 		db: docDbRecorded,
 		// Upload plumbing. The image branch is never taken (every upload below is a
