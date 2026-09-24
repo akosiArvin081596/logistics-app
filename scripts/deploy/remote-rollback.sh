@@ -1,5 +1,7 @@
 #!/bin/bash
-# Emergency rollback. Runs ON THE VPS. Inputs (env): DIR, PM2, PREV
+# Emergency rollback. Runs ON THE VPS.
+# Inputs (env): DIR, PM2, PREV (the full commit to return to: the deploy's
+#   DEPLOYED_FROM), and RECORD_STATE (the deploy's DEPLOY_RECORD_STATE).
 #
 # Only ever invoked when a deploy's smoke check FAILED. With production
 # auto-deploying on merge there is no human watching, so a bad merge must not
@@ -7,10 +9,16 @@
 # production job AND by deploy-drift.yml's heal (same composite action).
 set -uo pipefail
 : "${DIR:?}"; : "${PM2:?}"; : "${PREV:?}"
+RECORD_STATE=${RECORD_STATE:-}
+# Validate before touching anything, including the lock.
+if ! [[ "$PREV" =~ ^[0-9a-f]{40}$ ]]; then
+	echo "::error::PREV must be a full 40-character lowercase commit id (got '$PREV') — nothing was changed"
+	exit 1
+fi
 
 LOCK_OWNER=remote-rollback.sh
-# >>> deploy-lock — keep byte-identical in remote-deploy.sh and remote-rollback.sh
-# (scripts/test-deploy-scripts.js pins the two copies)
+# >>> deploy-lock — keep byte-identical in remote-deploy.sh, remote-rollback.sh
+# and remote-record-verified.sh (scripts/test-deploy-scripts.js pins the copies)
 #
 # One deploy per app directory, whatever started it: deploy.yml, the drift heal,
 # an auto-rollback, or a human with ssh. Two at once in the same directory
@@ -81,23 +89,49 @@ case "$NODE_BIN" in ""|node) NODE_BIN=$(command -v node) ;; esac
 PATH="$(dirname "$NODE_BIN"):$PATH"
 export PATH
 
-npm install --silent --no-audit --no-fund
+# A rollback restarts whatever it managed to build, because a partial rollback
+# that serves beats none. But only a clean install and build may be recorded
+# as VERIFIED below, so every step's outcome is kept.
+BUILD_OK=1
+npm install --silent --no-audit --no-fund || BUILD_OK=0
 # ⚠️ OPEN a database: require() alone passes under an ABI-mismatched Node (the
 # native binding loads lazily). Same probe as remote-deploy.sh.
-node -e "new (require('better-sqlite3'))(':memory:').close()" >/dev/null 2>&1 || npm rebuild better-sqlite3
-npm run build:client --silent
+node -e "new (require('better-sqlite3'))(':memory:').close()" >/dev/null 2>&1 || npm rebuild better-sqlite3 || BUILD_OK=0
+npm run build:client --silent || BUILD_OK=0
+test -f client/dist/index.html || BUILD_OK=0
 if [ -f ecosystem.config.js ] && grep -q "name: '$PM2'" ecosystem.config.js; then
 	pm2 restart ecosystem.config.js --update-env --silent 9>&-
 else
 	pm2 restart "$PM2" --silent 9>&-
 fi
+# TARGET is what runs now: mark it started, as remote-deploy.sh does (see LIVE
+# there). Whether it serves is checked next.
+git update-ref --create-reflog -m "logisx: started (rollback)" refs/logisx/started-deploy "$TARGET" \
+	|| echo "::warning::could not mark $TARGET as started"
 echo "::endgroup::"
 
 PORT=$(grep -oE '^PORT=[0-9]+' "$DIR/.env" 2>/dev/null | head -1 | cut -d= -f2 || true)
 PORT=${PORT:-3000}
 for _ in $(seq 1 30); do
 	code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$PORT/api/config/maintenance" || true)
-	if [ "$code" = "200" ]; then echo "ROLLBACK OK — $PM2 serving 200 on :$PORT at $TARGET"; exit 0; fi
+	if [ "$code" = "200" ]; then
+		echo "ROLLBACK OK — $PM2 serving 200 on :$PORT at $TARGET"
+		# Serving again at TARGET: record it as the verified deploy (the
+		# verified-record block in remote-deploy.sh), still under the lock, but
+		# only when TARGET came from a consistent record (the deploy's LIVE
+		# commit; with no record it was only HEAD, never verified) AND this
+		# rollback built it cleanly. Otherwise the record stays as it was.
+		if [ "$RECORD_STATE" != ok ]; then
+			echo "::warning::not recording $TARGET as verified: the deploy reported the verified-deploy record as '${RECORD_STATE:-unknown}', so $TARGET was only its HEAD"
+		elif [ "$BUILD_OK" != 1 ]; then
+			echo "::warning::not recording $TARGET as verified: its install or build did not complete cleanly, although it serves"
+		elif git update-ref --create-reflog -m "logisx: rollback verified" refs/logisx/verified-deploy "$TARGET"; then
+			echo "verified deploy recorded: $TARGET"
+		else
+			echo "::warning::could not record $TARGET as the verified deploy — the drift check reads the previous record"
+		fi
+		exit 0
+	fi
 	sleep 2
 done
 echo "::error::ROLLBACK FAILED — $PM2 is not serving at $TARGET either. MANUAL INTERVENTION REQUIRED."

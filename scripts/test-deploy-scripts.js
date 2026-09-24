@@ -26,8 +26,10 @@
  *      exactly, and drift-gate.js must read it back as "never reached the
  *      VPS" (deploy-drift.yml re-runs such a staging job once). ssh-setup.sh
  *      refuses an empty pinned host key (a file-size test cannot see one).
- *   §7 source pins: the two lock copies are byte-identical, the lock is taken
- *      before anything is touched, every pm2 call closes the lock FD.
+ *   §7 source pins: the three lock copies are byte-identical, the lock is
+ *      taken before anything is touched (and SHA/PREV validated before it),
+ *      every pm2 call and every git fetch/pull/merge closes the lock FD, and
+ *      each of the box's two refs has only its named writers.
  *   §8 mutants: each property above, broken on purpose, must turn this runner
  *      red.
  *   §9 THE NATIVE-MODULE PROBE OPENS A DATABASE. require('better-sqlite3')
@@ -43,6 +45,12 @@
  *   §11 NO REMOTE SCRIPT EXITS 255 ITSELF: ssh-retry.sh reads 255 as its own
  *      transport failure. Literal exit codes only, no bare exit, no errexit.
  *
+ * The verified-deploy record is tested by scripts/test-deploy-record.js (§12),
+ * and the started mark, the LIVE commit and the vps-deploy action by
+ * scripts/test-deploy-live.js (§13–§14): runners of their own, so each keeps
+ * its own time budget. All three build the same sandbox from
+ * scripts/deploy-test-sandbox.js.
+ *
  * Hermetic: a mkdtemp sandbox, local git only (the "origin" is a bare repo in
  * the sandbox), and stubbed pm2/npm/curl/ssh. No network, no VPS, no secrets.
  * macOS ships no flock(1): there a perl flock(2) shim stands in (same syscall,
@@ -56,195 +64,12 @@ const os = require("os");
 const path = require("path");
 const { spawn, spawnSync } = require("child_process");
 
-const DEPLOY_DIR = path.join(__dirname, "deploy");
-const readScript = (n) => fs.readFileSync(path.join(DEPLOY_DIR, n), "utf8");
-const REAL = {
-	deploy: readScript("remote-deploy.sh"),
-	rollback: readScript("remote-rollback.sh"),
-	check: readScript("remote-drift-check.sh"),
-	heal: readScript("remote-drift-heal.sh"),
-};
-
-const failures = [];
-let pass = 0;
-const ok = (cond, msg) => { if (cond) pass++; else failures.push(msg); };
-const record = (results) => results.forEach(([c, m]) => ok(c, m));
-
-// ───────────────────────────────────────────────────────────────── sandbox
-const T = fs.mkdtempSync(path.join(os.tmpdir(), "deploy-scripts-"));
-const D = {
-	origin: path.join(T, "origin.git"),
-	seed: path.join(T, "seed"),
-	box: path.join(T, "box"),
-	bin: path.join(T, "bin"),
-	lock: path.join(T, "lock"),
-	logs: path.join(T, "logs"),
-	home: path.join(T, "home"),
-};
-for (const d of [D.bin, D.lock, D.logs, D.home]) fs.mkdirSync(d, { recursive: true });
-const EMPTY_GITCONFIG = path.join(T, "empty.gitconfig");
-fs.writeFileSync(EMPTY_GITCONFIG, "");
-
-// ⚠️ remote-deploy.sh PREPENDS the directory of pm2's interpreter to PATH (that
-// is how it builds with the Node pm2 runs the app on). A real Node install
-// keeps a real npm beside node, which would shadow the npm stub, run a genuine
-// `npm install` in the sandbox and prune it. So the stub pm2 reports an
-// interpreter in a directory that holds node and nothing else.
-const NODE_DIR = path.join(T, "nodebin");
-fs.mkdirSync(NODE_DIR);
-fs.symlinkSync(process.execPath, path.join(NODE_DIR, "node"));
-
-const ENV = {
-	PATH: `${D.bin}:${NODE_DIR}:${process.env.PATH}`,
-	HOME: D.home,
-	LC_ALL: "C",
-	GIT_CONFIG_NOSYSTEM: "1",
-	GIT_CONFIG_GLOBAL: EMPTY_GITCONFIG,
-	GIT_TERMINAL_PROMPT: "0",
-	GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid",
-	GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid",
-	STUB_LOG_DIR: D.logs,
-	STUB_NODE: path.join(NODE_DIR, "node"),
-	DEPLOY_LOCK_DIR: D.lock,
-};
-
-function git(cwd, ...args) {
-	const r = spawnSync("git", args, { cwd, env: ENV, encoding: "utf8" });
-	if (r.status !== 0) throw new Error(`git ${args.join(" ")} (in ${cwd}) failed: ${r.stderr}`);
-	return r.stdout.trim();
-}
-const tryGit = (cwd, ...args) => spawnSync("git", args, { cwd, env: ENV, encoding: "utf8" });
-
-function writeExec(p, body) {
-	fs.writeFileSync(p, body);
-	fs.chmodSync(p, 0o755);
-}
-
-// Stubs. Each logs what it was asked, which deploy asked (STUB_TAG), and
-// whether it inherited the lock's FD 9 — pm2 must NOT.
-writeExec(path.join(D.bin, "pm2"), `#!/bin/bash
-if [ -e /dev/fd/9 ]; then fd9=open; else fd9=closed; fi
-echo "$1 tag=\${STUB_TAG:-} fd9=$fd9 head=$(git rev-parse HEAD 2>/dev/null)" >> "$STUB_LOG_DIR/pm2.log"
-case "$1" in
-	jlist) printf '[{"name":"%s","pm2_env":{"status":"online","restart_time":1,"exec_interpreter":"%s"}}]' "$PM2" "$STUB_NODE" ;;
-esac
-exit 0
-`);
-writeExec(path.join(D.bin, "npm"), `#!/bin/bash
-case "$1" in
-	--version) echo 10.9.8 ;;
-	install)
-		echo "install-start tag=\${STUB_TAG:-}" >> "$STUB_LOG_DIR/npm.log"
-		if [ -n "\${STUB_HOLD_FILE:-}" ]; then
-			n=0; while [ ! -e "$STUB_HOLD_FILE" ] && [ $n -lt 600 ]; do sleep 0.05; n=$((n+1)); done
-		fi
-		echo "install-end tag=\${STUB_TAG:-}" >> "$STUB_LOG_DIR/npm.log" ;;
-	rebuild) echo "rebuild tag=\${STUB_TAG:-}" >> "$STUB_LOG_DIR/npm.log"
-	         : > "$STUB_LOG_DIR/bsql-rebuilt" ;;
-	run) mkdir -p client/dist && echo "<html></html>" > client/dist/index.html
-	     echo "build tag=\${STUB_TAG:-}" >> "$STUB_LOG_DIR/npm.log" ;;
-esac
-exit 0
-`);
-writeExec(path.join(D.bin, "curl"), `#!/bin/bash
-printf '%s' "\${STUB_HTTP_CODE:-200}"
-`);
-writeExec(path.join(D.bin, "ssh"), `#!/bin/bash
-n=$(cat "$STUB_SSH_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$STUB_SSH_COUNT"
-cat > "$STUB_LOG_DIR/ssh-payload.$n"
-printf '%s\\n' "$@" > "$STUB_LOG_DIR/ssh-args.$n"
-code=$(sed -n "\${n}p" "$STUB_SSH_CODES")
-exit "\${code:-0}"
-`);
-const hasRealFlock = spawnSync("sh", ["-c", "command -v flock"], { env: { PATH: process.env.PATH } }).status === 0;
-if (!hasRealFlock) {
-	// Implements only the form the scripts use: `flock -n <fd>`. flock(2) on the
-	// inherited descriptor, exactly like util-linux: the lock stays with the open
-	// file description, so it outlives this process and dies with the shell's FD.
-	writeExec(path.join(D.bin, "flock"), `#!/usr/bin/perl
-use strict; use Fcntl qw(:flock);
-my $nb = 0; my @a = @ARGV;
-while (@a && $a[0] =~ /^-/) { my $o = shift @a; $nb = 1 if $o eq '-n' || $o eq '--nonblock'; }
-my $fd = shift @a;
-die "flock shim: only 'flock [-n] <fd>' is supported\\n" unless defined $fd && $fd =~ /^\\d+$/ && !@a;
-open(my $fh, "+<&=", $fd) or die "flock shim: fd $fd: $!\\n";
-exit(flock($fh, LOCK_EX | ($nb ? LOCK_NB : 0)) ? 0 : 1);
-`);
-}
-
-// Repo: main = c1 → c2 → c3, plus a side-branch commit s1 that main never gets.
-fs.mkdirSync(D.seed);
-git(D.seed, "init", "-q");
-git(D.seed, "symbolic-ref", "HEAD", "refs/heads/main");
-fs.writeFileSync(path.join(D.seed, ".gitignore"), "node_modules/\nclient/dist/\n.drift-heal-attempted\n");
-const commit = (msg) => {
-	fs.writeFileSync(path.join(D.seed, "app.txt"), `${msg}\n`);
-	git(D.seed, "add", "-A");
-	git(D.seed, "commit", "-q", "-m", msg);
-	return git(D.seed, "rev-parse", "HEAD");
-};
-const C1 = commit("c1");
-const C2 = commit("c2");
-const C3 = commit("c3");
-git(D.seed, "checkout", "-q", "-b", "side", C1);
-const S1 = commit("s1");
-git(D.seed, "checkout", "-q", "main");
-git(T, "init", "-q", "--bare", D.origin);
-git(D.seed, "remote", "add", "origin", D.origin);
-git(D.seed, "push", "-q", "origin", "main", "side");
-git(T, "clone", "-q", D.origin, D.box);
-// Stub better-sqlite3. Like the real module, require() never touches the native
-// binding: only constructing a Database does, which is why a require()-only
-// probe passes under the wrong Node. STUB_BSQL picks the behaviour:
-//   (unset)    healthy
-//   lazy-abi   require() works, construction throws until `npm rebuild` has run
-//   broken     require() works, construction always throws
-fs.mkdirSync(path.join(D.box, "node_modules", "better-sqlite3"), { recursive: true });
-fs.writeFileSync(path.join(D.box, "node_modules", "better-sqlite3", "index.js"), `"use strict";
-const fs = require("fs");
-const path = require("path");
-module.exports = class Database {
-	constructor() {
-		const mode = process.env.STUB_BSQL || "";
-		const rebuilt = fs.existsSync(path.join(process.env.STUB_LOG_DIR || "/nonexistent", "bsql-rebuilt"));
-		if (mode === "broken" || (mode === "lazy-abi" && !rebuilt)) {
-			throw new Error("was compiled against a different Node.js version using NODE_MODULE_VERSION 115. This version of Node.js requires NODE_MODULE_VERSION 127.");
-		}
-	}
-	close() {}
-};
-`);
-
-const MARKER = path.join(D.box, ".drift-heal-attempted");
-const LOCK_FILE = path.join(D.lock, `logisx-deploy${D.box.replace(/[^A-Za-z0-9._-]/g, "_")}.lock`);
-const head = () => git(D.box, "rev-parse", "HEAD");
-const onMain = () => tryGit(D.box, "symbolic-ref", "-q", "HEAD").stdout.trim() === "refs/heads/main";
-const marker = () => (fs.existsSync(MARKER) ? fs.readFileSync(MARKER, "utf8") : "");
-const log = (n) => { const p = path.join(D.logs, `${n}.log`); return fs.existsSync(p) ? fs.readFileSync(p, "utf8") : ""; };
-
-function resetBox(sha, { detachAt = null } = {}) {
-	git(D.box, "checkout", "-q", "main");
-	git(D.box, "reset", "-q", "--hard", sha);
-	if (detachAt) git(D.box, "checkout", "-q", "--detach", detachAt);
-	fs.rmSync(MARKER, { force: true });
-	for (const f of fs.readdirSync(D.logs)) fs.rmSync(path.join(D.logs, f), { force: true });
-}
-
-function runSh(text, env = {}) {
-	const r = spawnSync("bash", ["-s"], { cwd: T, input: text, env: { ...ENV, ...env }, encoding: "utf8", timeout: 60000 });
-	return { code: r.status, out: `${r.stdout || ""}${r.stderr || ""}` };
-}
-const deployEnv = (extra) => ({ DIR: D.box, PM2: "logistics-app", REF: "main", ...extra });
-const field = (out, k) => { const m = new RegExp(`^${k}=(.*)$`, "m").exec(out); return m ? m[1].trim() : ""; };
-
-async function waitFor(pred, ms, what) {
-	const until = Date.now() + ms;
-	while (Date.now() < until) {
-		if (pred()) return true;
-		await new Promise((r) => setTimeout(r, 25));
-	}
-	throw new Error(`timed out waiting for ${what}`);
-}
+const {
+	DEPLOY_DIR, readScript, REAL, SMOKE, ok, record, finish, crash,
+	T, D, ENV, git, tryGit, writeExec, hasRealFlock,
+	C1, C2, C3, S1, MARKER, LOCK_FILE, head, onMain, marker, log, VERIFIED_REF, verified, STARTED_REF,
+	resetBox, runSh, deployEnv, field, waitFor, swap, cut, expectCaught, M,
+} = require("./deploy-test-sandbox.js");
 
 // ───────────────────────────────────────────────── §1 the box lock (async)
 async function lockScenario(S, tag = "") {
@@ -266,6 +91,10 @@ async function lockScenario(S, tag = "") {
 		}
 		const B = runSh(S.deploy, deployEnv({ SHA: C2, STUB_TAG: "B" }));
 		const R = runSh(S.rollback, { DIR: D.box, PM2: "logistics-app", PREV: C1, STUB_TAG: "R" });
+		// A has checked out C2 and is still installing: C2 is NOT verified. The
+		// record step shares the lock, so it can never record a deploy mid-flight.
+		const V = runSh(S.record, { DIR: D.box, SHA: C2, STUB_TAG: "V" });
+		r.push([V.code === 75 && verified() === "", `${tag}§1 recording a verified deploy while a deploy runs is refused (75) and records nothing (got ${V.code}, record '${verified().slice(0, 7)}')`]);
 		r.push([B.code === 75, `${tag}§1 a second deploy while one runs must exit 75 (got ${B.code})`]);
 		r.push([/lock .* is held/.test(B.out) && B.out.includes(LOCK_FILE), `${tag}§1 the refusal names the held lock file`]);
 		r.push([/lock holder: pid=\d+ since=\S+ by=remote-deploy\.sh ref=main sha=/.test(B.out), `${tag}§1 the refusal says who holds it`]);
@@ -303,12 +132,13 @@ const PIN_CASES = {
 		return [[x.code === 0 && head() === C3, `${tag}§2 without SHA, REF=main still means origin/main's tip (HEAD ${head().slice(0, 7)})`]];
 	},
 	noop(S, tag) {
-		resetBox(C3);
+		// A newer VERIFIED main commit is live: the only no-op there is.
+		resetBox(C3, { verified: C3 });
 		const x = runSh(S.deploy, deployEnv({ SHA: C2 }));
 		return [
-			[x.code === 0 && field(x.out, "DEPLOY_NOOP") === "1" && head() === C3, `${tag}§2 a newer main commit is live → no-op, never backwards (code ${x.code}, HEAD ${head().slice(0, 7)})`],
+			[x.code === 0 && field(x.out, "DEPLOY_NOOP") === "1" && head() === C3, `${tag}§2 a newer VERIFIED main commit is live → no-op, never backwards (code ${x.code}, HEAD ${head().slice(0, 7)})`],
 			[!/restart/.test(log("pm2")) && !/install/.test(log("npm")), `${tag}§2 the no-op restarts and installs nothing`],
-			[field(x.out, "DEPLOYED_FROM") === C3, `${tag}§2 the no-op still reports DEPLOYED_FROM for the smoke/rollback steps`],
+			[field(x.out, "DEPLOYED_FROM") === C3 && field(x.out, "DEPLOYED_TO") === C3, `${tag}§2 the no-op still reports DEPLOYED_FROM/TO (the verified commit) for the smoke/rollback steps`],
 		];
 	},
 	redeploy(S, tag) {
@@ -328,10 +158,19 @@ const PIN_CASES = {
 		resetBox(C1);
 		const a = runSh(S.deploy, deployEnv({ SHA: C2.slice(0, 7) }));
 		const b = runSh(S.deploy, deployEnv({ REF: "side", SHA: C2 }));
-		return [
+		const r = [
 			[a.code === 1 && /full 40-character/.test(a.out) && head() === C1, `${tag}§2 an abbreviated SHA is refused`],
 			[b.code === 1 && /REF must be main/.test(b.out) && head() === C1, `${tag}§2 SHA with REF other than main is refused`],
 		];
+		// The rollback's PREV comes from the deploy's output: anything but a full
+		// commit id is refused before the lock, with nothing checked out or run.
+		resetBox(C2);
+		for (const bad of [C1.slice(0, 7), C1.toUpperCase(), `${C1}'`, "HEAD~1"]) {
+			const x = runSh(S.rollback, { DIR: D.box, PM2: "logistics-app", PREV: bad });
+			r.push([x.code === 1 && /PREV must be a full 40-character/.test(x.out) && head() === C2 && !/ROLLING BACK/.test(x.out) && log("pm2") === "" && log("npm") === "",
+				`${tag}§2 the rollback refuses PREV=${JSON.stringify(bad.slice(0, 9))}: not a full commit id, nothing touched (code ${x.code})`]);
+		}
+		return r;
 	},
 	mainAhead(S, tag) {
 		// Local main already past SHA while HEAD is detached elsewhere: the ff would
@@ -568,10 +407,60 @@ function lockBlock(text) {
 	const b = text.indexOf("# <<< deploy-lock");
 	return a >= 0 && b > a ? text.slice(a, b) : null;
 }
+function verifiedBlock(text) {
+	const a = text.indexOf("# >>> verified-record");
+	const b = text.indexOf("# <<< verified-record");
+	return a >= 0 && b > a ? text.slice(a, b) : null;
+}
+// The box's two refs and the only scripts allowed to write each. The record
+// (verified-deploy): the record step, after verification, and a rollback that
+// serves again. The started mark: the deploy once pm2 reports the app online,
+// and a rollback after its restart. Never the smoke check or the drift path.
+const REF_WRITERS = {
+	[VERIFIED_REF]: ["remote-record-verified.sh", "remote-rollback.sh"],
+	[STARTED_REF]: ["remote-deploy.sh", "remote-rollback.sh"],
+};
+function refPins(scripts, tag = "") {
+	const r = [];
+	const code = (t) => t.split("\n").filter((l) => !/^\s*#/.test(l));
+	const named = new Set(Object.values(scripts).flatMap((t) => t.match(/refs\/logisx\/[A-Za-z0-9._-]+/g) || []));
+	r.push([JSON.stringify([...named].sort()) === JSON.stringify(Object.keys(REF_WRITERS).sort()),
+		`${tag}§7 the remote scripts name exactly the two refs ${Object.keys(REF_WRITERS).join(" and ")} (got ${[...named].join(", ")})`]);
+	// Every update-ref names its ref literally, so each write can be attributed.
+	const writes = Object.entries(scripts).flatMap(([n, t]) => code(t).filter((l) => /\bupdate-ref\b/.test(l)).map((l) => [n, (/refs\/logisx\/[A-Za-z0-9._-]+/.exec(l) || [""])[0]]));
+	r.push([writes.length >= 4 && writes.every(([, ref]) => ref),
+		`${tag}§7 every update-ref in a remote script names its ref literally (${writes.length} found; unattributed in: ${writes.filter(([, ref]) => !ref).map(([n]) => n).join(", ") || "none"})`]);
+	for (const [ref, want] of Object.entries(REF_WRITERS)) {
+		const got = [...new Set(writes.filter(([, x]) => x === ref).map(([n]) => n))].sort();
+		r.push([JSON.stringify(got) === JSON.stringify(want), `${tag}§7 only ${want.join(" and ")} write ${ref} (writers: ${got.join(", ") || "none"})`]);
+	}
+	return r;
+}
+// Every git fetch, pull and merge in a script that holds the lock runs with
+// the lock FD closed: git may start a credential-cache daemon, which would
+// inherit FD 9 and hold the lock after the script has exited.
+function gitFdPins(S, tag = "") {
+	return [["remote-deploy.sh", S.deploy], ["remote-rollback.sh", S.rollback], ["remote-record-verified.sh", S.record]].map(([name, text]) => {
+		const lines = text.split("\n").filter((l) => !/^\s*#/.test(l) && /\bgit (fetch|pull|merge)(?=\s|$)/.test(l));
+		const open = lines.filter((l) => !/9>&-/.test(l));
+		return [open.length === 0 && (name !== "remote-deploy.sh" || lines.length >= 3),
+			`${tag}§7 every git fetch/pull/merge in ${name} closes the lock FD (9>&-) (${lines.length} found; open: ${JSON.stringify(open.map((l) => l.trim()))})`];
+	});
+}
 function sourcePins() {
 	const ld = lockBlock(REAL.deploy);
 	const lr = lockBlock(REAL.rollback);
-	ok(ld && lr && ld === lr, "§7 the deploy-lock block is byte-identical in remote-deploy.sh and remote-rollback.sh");
+	const lv = lockBlock(REAL.record);
+	ok(ld && lr && lv && ld === lr && ld === lv, "§7 the deploy-lock block is byte-identical in remote-deploy.sh, remote-rollback.sh and remote-record-verified.sh");
+	const lockAtRecord = REAL.record.indexOf("# >>> deploy-lock");
+	ok(lockAtRecord > 0 && REAL.record.indexOf('cd "$DIR"') > lockAtRecord && REAL.record.indexOf("git rev-parse HEAD") > lockAtRecord,
+		"§7 remote-record-verified.sh takes the lock before it reads the repo");
+	ok(REAL.record.indexOf("SHA must be the full") > 0 && REAL.record.indexOf("SHA must be the full") < lockAtRecord, "§7 remote-record-verified.sh validates SHA before it takes the lock");
+	// The verified-deploy record: one reading of it, in every script that reads it.
+	const vd = verifiedBlock(REAL.deploy);
+	ok(vd && vd === verifiedBlock(REAL.check) && vd === verifiedBlock(REAL.heal),
+		"§7 the verified-record block is byte-identical in remote-deploy.sh, remote-drift-check.sh and remote-drift-heal.sh");
+	record(refPins(REMOTE_SCRIPTS));
 	for (const [name, text] of [["remote-deploy.sh", REAL.deploy], ["remote-rollback.sh", REAL.rollback]]) {
 		const lockAt = text.indexOf("# >>> deploy-lock");
 		const cdAt = text.indexOf('cd "$DIR"');
@@ -581,9 +470,12 @@ function sourcePins() {
 		const code = text.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
 		ok(!/pm2 (restart|reload|stop|delete) all\b/.test(code), `§7 ${name} never restarts ALL pm2 processes (23 other clients share the box)`);
 	}
+	record(gitFdPins(REAL));
 	ok(REAL.deploy.indexOf("SHA must be a full") < REAL.deploy.indexOf("# >>> deploy-lock"), "§7 SHA is validated before the lock is even taken");
-	for (const [name, text] of Object.entries(REAL)) {
-		ok(/\.drift-heal-attempted/.test(text), `§7 ${name} uses the one marker filename, .drift-heal-attempted`);
+	ok(REAL.rollback.indexOf("PREV must be a full") > 0 && REAL.rollback.indexOf("PREV must be a full") < REAL.rollback.indexOf("# >>> deploy-lock"),
+		"§7 the rollback validates PREV before the lock is even taken");
+	for (const name of ["deploy", "rollback", "check", "heal"]) {
+		ok(/\.drift-heal-attempted/.test(REAL[name]), `§7 ${name} uses the one marker filename, .drift-heal-attempted`);
 	}
 	const gi = fs.readFileSync(path.join(__dirname, "..", ".gitignore"), "utf8");
 	ok(/^\.drift-heal-attempted$/m.test(gi), "§7 the marker stays gitignored (the dirty-tree check must not trip on it)");
@@ -591,23 +483,20 @@ function sourcePins() {
 
 // ──────────────────────────────────────────────────────────────── §8 mutants
 async function mutants() {
-	const swap = (text, from, to) => {
-		const out = text.split(from).join(to);
-		ok(out !== text, `§8 mutant source must change — update the mutant if the code moved (${from.slice(0, 40)}…)`);
-		return out;
-	};
-	// Remove the locking but keep the script runnable (it echoes $LOCK_FILE later).
-	const cut = (text) => {
-		const a = text.indexOf("# >>> deploy-lock");
-		const b = text.indexOf("# <<< deploy-lock");
-		return `${text.slice(0, a)}LOCK_FILE="(no lock)"\n${text.slice(b)}`;
-	};
-	const expectCaught = (name, results) => ok(results.some(([c]) => !c), `§8 mutant '${name}' must be caught`);
-
 	const M = "[mutant] ";
 	expectCaught("no box lock", await lockScenario({ ...REAL, deploy: cut(REAL.deploy), rollback: cut(REAL.rollback) }, M));
 	expectCaught("SHA ignored", PIN_CASES.exact({ ...REAL, deploy: swap(REAL.deploy, 'if [ -n "$SHA" ]; then\n\tif ! git cat-file', 'if false; then\n\tif ! git cat-file') }, M));
-	expectCaught("no-op check removed (deploys backwards)", PIN_CASES.noop({ ...REAL, deploy: swap(REAL.deploy, '[ "$SHA" != "$PREV" ] && git merge-base', 'false && git merge-base') }, M));
+	expectCaught("no-op check removed (deploys backwards)", PIN_CASES.noop({ ...REAL, deploy: swap(REAL.deploy, '[ "$SHA" != "$LIVE" ] && git merge-base', 'false && git merge-base') }, M));
+	expectCaught("the rollback takes any PREV", PIN_CASES.badInput({ ...REAL, rollback: swap(REAL.rollback, 'if ! [[ "$PREV" =~ ^[0-9a-f]{40}$ ]]; then', "if false; then") }, M));
+	expectCaught("the fast-forward merge keeps the lock FD", gitFdPins({ ...REAL, deploy: swap(REAL.deploy, 'git merge --ff-only "$SHA" 9>&-', 'git merge --ff-only "$SHA"') }, M));
+	expectCaught("the deploy writes the verified record at restart", refPins({
+		...REMOTE_SCRIPTS,
+		"remote-deploy.sh": swap(REMOTE_SCRIPTS["remote-deploy.sh"], 'refs/logisx/started-deploy "$NEW"', 'refs/logisx/verified-deploy "$NEW"'),
+	}, M));
+	expectCaught("the smoke check marks a commit started", refPins({
+		...REMOTE_SCRIPTS,
+		"remote-smoke.sh": `${REMOTE_SCRIPTS["remote-smoke.sh"]}git update-ref refs/logisx/started-deploy HEAD\n`,
+	}, M));
 	expectCaught("failed pull ignored", PIN_CASES.pullFails({
 		...REAL,
 		deploy: swap(REAL.deploy, "if ! { git checkout main && git pull --ff-only origin main 9>&-; }; then", "if ! { git checkout main && git pull --ff-only origin main 9>&- || true; }; then"),
@@ -641,10 +530,11 @@ async function mutants() {
 	expectCaught("remote-deploy.sh ends with exit 255", exitPins({ ...REMOTE_SCRIPTS, "remote-deploy.sh": `${REMOTE_SCRIPTS["remote-deploy.sh"]}exit 255\n` }, M));
 	expectCaught("remote-rollback.sh turns on errexit", exitPins({ ...REMOTE_SCRIPTS, "remote-rollback.sh": swap(REMOTE_SCRIPTS["remote-rollback.sh"], "set -uo pipefail", "set -euo pipefail") }, M));
 	expectCaught("remote-drift-check.sh gets a bare exit", exitPins({ ...REMOTE_SCRIPTS, "remote-drift-check.sh": swap(REMOTE_SCRIPTS["remote-drift-check.sh"], 'cd "$DIR" || exit 1', 'cd "$DIR" || exit') }, M));
+
+	expectCaught("the record script skips the deploy lock", await lockScenario({ ...REAL, record: cut(REAL.record) }, M));
 }
 
 // ─────────────────────── §10 the smoke check's log tail, commands switched off
-const SMOKE = readScript("remote-smoke.sh");
 
 // The runner's reading of a job log: `::stop-commands::TOKEN` pauses workflow
 // commands until a line that is exactly `::TOKEN::`. What is left is what can
@@ -834,15 +724,5 @@ function exitScannerSelfCheck() {
 	record(exitPins(REMOTE_SCRIPTS));
 	await mutants();
 })()
-	.catch((err) => failures.push(`runner crashed: ${err && err.stack ? err.stack : err}`))
-	.finally(() => {
-		fs.rmSync(T, { recursive: true, force: true });
-		console.log(`\n${"=".repeat(64)}`);
-		if (failures.length) {
-			console.log(`FAILURES (${failures.length}):`);
-			failures.forEach((f) => console.log(`  ✗ ${f}`));
-			console.log(`\n${pass} passed, ${failures.length} failed`);
-			process.exit(1);
-		}
-		console.log(`✓ ${pass} assertions passed`);
-	});
+	.catch(crash)
+	.finally(finish);

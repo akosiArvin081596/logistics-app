@@ -1,9 +1,10 @@
 name: VPS deploy
 description: >
   Deploy one pm2-managed app on the shared VPS: ssh with transport retry, run the
-  versioned remote scripts, smoke-check, and optionally auto-roll-back. Shared by
-  deploy.yml's staging and production jobs AND deploy-drift.yml's heal, so no
-  path to production can drift from the others.
+  versioned remote scripts, smoke-check, record the deploy as verified only once
+  every check passed, and optionally auto-roll-back. Shared by deploy.yml's
+  staging and production jobs AND deploy-drift.yml's heal, so no path to
+  production can drift from the others.
 
 inputs:
   dir:                 { description: App directory on the VPS,            required: true }
@@ -42,13 +43,42 @@ runs:
         SHA:  ${{ inputs.sha }}
       run: |
         set -euo pipefail
+        # REF and SHA reach the box inside the remote command's quotes, so only
+        # a plain branch, tag or commit name gets that far (a dispatch's `ref`
+        # is free text). The value itself is never echoed.
+        if ! [[ "$REF" =~ ^[A-Za-z0-9._/-]{1,100}$ ]] || [[ "$REF" == -* ]]; then
+          echo "::error::the ref to deploy is not a plain branch, tag or commit name — nothing was deployed"
+          exit 1
+        fi
+        if [ -n "$SHA" ] && ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "::error::the sha to deploy is not a full 40-character commit id — nothing was deployed"
+          exit 1
+        fi
         out=$(bash scripts/deploy/ssh-retry.sh "$USER@$HOST" \
               "DIR='$DIR' PM2='$PM2' REF='$REF' SHA='$SHA' bash -s" < scripts/deploy/remote-deploy.sh | tee /dev/stderr)
-        # Capture the pre-deploy SHA so a rollback targets a known-good commit
-        # rather than guessing.
-        prev=$(printf '%s' "$out" | grep -oE 'DEPLOYED_FROM=[0-9a-f]{7,40}' | tail -1 | cut -d= -f2 || true)
-        echo "prev=$prev" >> "$GITHUB_OUTPUT"
-        echo "deployed_from=$prev"
+        # Each value is the LAST line of its kind, whole-line matches only, so
+        # nothing printed earlier in the deploy's output can stand in for it;
+        # DEPLOY_RESULT is the script's final line. prev: the rollback target
+        # (the box's LIVE commit, so a rollback restores code that ran rather
+        # than guessing). to: the commit now checked out, which "Record the
+        # verified deploy" records once it is verified. record_state: whether
+        # prev came from a consistent record, which the rollback needs.
+        # handshake_guard: whether the commit now serving refuses a foreign
+        # Origin, which the edge check needs. result: deployed or noop.
+        last_line() { printf '%s\n' "$out" | grep -E "^$1=($2)\$" | tail -1 | cut -d= -f2 || true; }
+        prev=$(last_line DEPLOYED_FROM '[0-9a-f]{40}')
+        to=$(last_line DEPLOYED_TO '[0-9a-f]{40}')
+        record_state=$(last_line DEPLOY_RECORD_STATE 'ok|missing|inconsistent')
+        handshake_guard=$(last_line DEPLOY_HANDSHAKE_GUARD '[01]')
+        result=$(last_line DEPLOY_RESULT 'deployed|noop')
+        {
+          echo "prev=$prev"
+          echo "to=$to"
+          echo "record_state=$record_state"
+          echo "handshake_guard=$handshake_guard"
+          echo "result=$result"
+        } >> "$GITHUB_OUTPUT"
+        echo "deployed_from=$prev deployed_to=$to record=$record_state handshake_guard=$handshake_guard result=$result"
 
     - name: Smoke check
       id: smoke
@@ -70,17 +100,91 @@ runs:
       continue-on-error: true
       env:
         PUBLIC_URL: ${{ inputs.public_url }}
+        HANDSHAKE_GUARD: ${{ steps.deploy.outputs.handshake_guard }}
       run: |
         set -euo pipefail
-        code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$PUBLIC_URL" || true)
+        # A failure here rolls production back, so a blip must not count: each
+        # request gets 3 tries, 10 s apart, but ONLY while it has no answer
+        # (000) or a 5xx (the edge or the app not ready yet). A definite answer
+        # is never retried: a foreign Origin let in, or the app's own Origin
+        # refused, fails at once.
+        ask() {
+          local code="" try
+          for try in 1 2 3; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$@" || true)
+            case "$code" in
+              000|5??) if [ "$try" -lt 3 ]; then sleep 10; fi ;;
+              *) break ;;
+            esac
+          done
+          printf '%s' "$code"
+        }
+        code=$(ask "$PUBLIC_URL")
         echo "$PUBLIC_URL -> HTTP $code"
         [ "$code" = "200" ] || { echo "::error::public edge returned $code"; exit 1; }
+        # Live updates through the same edge: the Socket.IO handshake admits the
+        # app's own Origin, always. Since server.js gained its Origin check
+        # (liveUpdateHandshakeAllowed) it also answers any other Origin 403.
+        # That is asked unless the deploy reported that the commit now serving
+        # predates the check (DEPLOY_HANDSHAKE_GUARD=0: a deploy by hand of an
+        # older ref must still pass); an unknown answer asks. Each such check
+        # leaves one "LIVE-UPDATE: … refused … Origin=https://example.invalid"
+        # line in the app's log, on purpose.
+        base=$(printf '%s' "$PUBLIC_URL" | grep -oE '^https?://[^/]+' || true)
+        own=$(ask -H "Origin: $base" "$base/socket.io/?EIO=4&transport=polling")
+        echo "live-update handshake, the app's own Origin -> HTTP $own"
+        [ "$own" = "200" ] || { echo "::error::live-update handshake: the app's own Origin gave $own (want 200)"; exit 1; }
+        if [ "$HANDSHAKE_GUARD" != "0" ]; then
+          foreign=$(ask -H "Origin: https://example.invalid" "$base/socket.io/?EIO=4&transport=polling")
+          echo "live-update handshake, a foreign Origin -> HTTP $foreign"
+          [ "$foreign" = "403" ] || { echo "::error::live-update handshake: a foreign Origin gave $foreign (want 403)"; exit 1; }
+        else
+          echo "::notice::the commit now serving predates the live-update Origin check, so a foreign Origin is not asked"
+        fi
+
+    - name: Record the verified deploy
+      # ⚠️ Only here, after the restart AND the smoke check (and the public edge
+      # check, where this job has one) have passed, does the box record which
+      # commit it runs (remote-record-verified.sh, under the deploy lock, and
+      # only if HEAD is still that commit). remote-deploy.sh's no-op check, its
+      # rollback target and deploy-drift.yml read the record, not HEAD: HEAD
+      # moves at checkout, before the app ever runs the commit. A no-op
+      # deployed nothing, so it records nothing: this step runs only when the
+      # deploy's last line said `deployed`.
+      #
+      # A failure here fails a PRODUCTION job: the deploy is live, but until a
+      # verified deploy is recorded the drift check reads production as behind
+      # (one heal redeploys it; remote-deploy.sh's started mark keeps a later
+      # rollback from skipping it meanwhile). On STAGING (no rollback) it is
+      # continue-on-error: staging's record only feeds staging's own no-op
+      # check and rollback target, so it must not hold production back.
+      id: record
+      if: |
+        steps.deploy.outcome == 'success' && steps.deploy.outputs.result == 'deployed' &&
+        steps.smoke.outcome == 'success' &&
+        (inputs.public_url == '' || steps.edge.outcome == 'success')
+      continue-on-error: ${{ inputs.rollback_on_failure != 'true' }}
+      shell: bash
+      env:
+        HOST: ${{ inputs.host }}
+        USER: ${{ inputs.user }}
+        DIR:  ${{ inputs.dir }}
+        SHA:  ${{ steps.deploy.outputs.to }}
+      run: |
+        set -euo pipefail
+        bash scripts/deploy/ssh-retry.sh "$USER@$HOST" "DIR='$DIR' SHA='$SHA' bash -s" < scripts/deploy/remote-record-verified.sh
 
     - name: Auto-rollback
       # Fires only when this target is configured to self-heal AND something
       # actually failed. Nobody is watching an auto-deploy, so production must
       # not be able to stay broken. remote-rollback.sh also records the failed
       # commit in the drift marker, so deploy-drift.yml can never re-deploy it.
+      # PREV is the box's LIVE commit as remote-deploy.sh found it before this
+      # deploy (the last commit started there that still served, else the last
+      # verified deploy), not whatever a failed deploy may have left checked
+      # out. Once the rollback serves again it records PREV as the verified
+      # deploy, but only when the deploy reported a consistent record
+      # (RECORD_STATE=ok) and the rollback's own install and build were clean.
       if: |
         inputs.rollback_on_failure == 'true' &&
         (steps.smoke.outcome == 'failure' || steps.edge.outcome == 'failure') &&
@@ -92,10 +196,14 @@ runs:
         DIR:  ${{ inputs.dir }}
         PM2:  ${{ inputs.pm2 }}
         PREV: ${{ steps.deploy.outputs.prev }}
+        RECORD_STATE: ${{ steps.deploy.outputs.record_state }}
       run: |
         set -euo pipefail
         echo "::warning::deploy verification failed — rolling $PM2 back to $PREV"
-        bash scripts/deploy/ssh-retry.sh "$USER@$HOST" "DIR='$DIR' PM2='$PM2' PREV='$PREV' bash -s" < scripts/deploy/remote-rollback.sh
+        # Both were read from the deploy's own last lines and matched a fixed
+        # shape there (40 hex; ok|missing|inconsistent), so they are safe in
+        # the remote command's quotes.
+        bash scripts/deploy/ssh-retry.sh "$USER@$HOST" "DIR='$DIR' PM2='$PM2' PREV='$PREV' RECORD_STATE='$RECORD_STATE' bash -s" < scripts/deploy/remote-rollback.sh
 
     - name: Fail the job if verification failed
       # The smoke/edge steps are continue-on-error so the rollback can run first.
@@ -121,8 +229,11 @@ runs:
         REF: ${{ inputs.ref }}
         SHA: ${{ inputs.sha }}
         PREV: ${{ steps.deploy.outputs.prev }}
+        TO: ${{ steps.deploy.outputs.to }}
+        RESULT: ${{ steps.deploy.outputs.result }}
         SMOKE: ${{ steps.smoke.outcome }}
         EDGE: ${{ steps.edge.outcome || 'n/a' }}
+        RECORD: ${{ steps.record.outcome || 'n/a' }}
       run: |
         {
           echo "### $PM2"
@@ -132,9 +243,11 @@ runs:
           echo "| path | \`$DIR\` |"
           echo "| ref | \`$REF\` |"
           echo "| exact SHA | \`${SHA:-(tip of ref at pull time)}\` |"
-          echo "| previous SHA | \`$PREV\` |"
+          echo "| deployed | \`${TO:-n/a}\` (${RESULT:-no result}$([ "$RESULT" = noop ] && echo ': a newer live commit already contains it')) |"
+          echo "| rollback target (last live) | \`$PREV\` |"
           echo "| smoke | $SMOKE |"
           echo "| public edge | $EDGE |"
+          echo "| recorded as verified | $RECORD |"
           echo ""
           echo "Rollback by hand: re-run *Deploy* with **ref** = \`$PREV\`."
         } >> "$GITHUB_STEP_SUMMARY"
