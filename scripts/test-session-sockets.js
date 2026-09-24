@@ -316,6 +316,17 @@ function buildSessionMiddleware(db, StoreClass) {
 // every probe fast without changing what the route does with the hash.
 const fastBcrypt = { compare: (pw, h) => bcrypt.compare(pw, h), hash: (pw) => bcrypt.hash(pw, 4) };
 
+// The room helpers the connection handler names its rooms with, as shipped.
+// This runner asks which room a socket joins; how a room is spelled is
+// scripts/test-socket-hardening.js's subject.
+const ROOMS = new Function(
+	`${["function identityRoomKey(name) {", "function driverRoom(name) {", "function userRoom(username) {"].map(liftFunction).join("\n")}\nreturn { identityRoomKey, driverRoom, userRoom };`)();
+// The SHIPPED per-listener guard both connection handlers wrap their events in;
+// the fault-containment it provides is scripts/test-socket-hardening.js's
+// subject, so here it just needs to be the real wrapper the handlers call.
+const socketHandler = new Function(
+	`${["function socketHandler(event, fn) {", "function logSocketHandlerFault(event, err) {"].map(liftFunction).join("\n")}\nreturn socketHandler;`)();
+
 // One complete app: HTTP routes and Socket.IO on one loopback server, built
 // from `sources` (the shipped text, or a mutant of one piece of it).
 async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt } = {}) {
@@ -337,10 +348,10 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 
 	const helpers = new Function("io", "db",
 		`${sources.helpers}\nreturn { socketsWhere, endSockets, disconnectSessionSockets, disconnectUserSockets, liveSessionIds, sweepSessionlessSockets };`)(io, db);
-	io.on("connection", new Function("currentMustChangePassword", "liveSessionIds", `return (${sources.ioHandler});`)(
-		flags.currentMustChangePassword, helpers.liveSessionIds));
+	io.on("connection", new Function("currentMustChangePassword", "liveSessionIds", "identityRoomKey", "driverRoom", "userRoom", "socketHandler", `return (${sources.ioHandler});`)(
+		flags.currentMustChangePassword, helpers.liveSessionIds, ROOMS.identityRoomKey, ROOMS.driverRoom, ROOMS.userRoom, socketHandler));
 	const LOAD_ID_RE = new Function(`${LOAD_ID_RE_SRC}\nreturn LOAD_ID_RE;`)();
-	io.of("/public-track").on("connection", new Function("LOAD_ID_RE", `return (${TRACKER_HANDLER_SRC});`)(LOAD_ID_RE));
+	io.of("/public-track").on("connection", new Function("LOAD_ID_RE", "socketHandler", `return (${TRACKER_HANDLER_SRC});`)(LOAD_ID_RE, socketHandler));
 
 	const stampLastLogin = new Function("db", `${STAMP_SRC}\nreturn stampLastLogin;`)(db);
 	const logAudit = new Function("db", `${AUDIT_SRC}\nreturn logAudit;`)(db);
@@ -621,7 +632,7 @@ const SCENARIOS = {
 			p.loginSparesOtherSessions = isOpen(w, te);
 			const tb = await connectTab(w, b.cookie);
 			// The driver asks for "dispatch"; the server derives rooms from the session.
-			const own = await joins(w, tb, "dispatch", "bob driver");
+			const own = await joins(w, tb, "dispatch", ROOMS.driverRoom("Bob Driver"));
 			const ss = serverSocket(w, tb);
 			p.newSessionIsNewPerson = own && !inRoom(w, "dispatch", tb.id) && !!ss && ss.data.userId === 2 && ss.data.sid === sidOf(b.cookie);
 		} finally { await w.close(); }
@@ -676,12 +687,12 @@ const SCENARIOS = {
 				const b2 = await login(w, "bob", PW.bob);
 				const tb = await connectTab(w, b1.cookie);
 				const ta = await connectTab(w, admin.cookie);
-				const joined = (await joins(w, tb, "bob driver", "bob driver")) && (await joins(w, ta, "dispatch", "dispatch"));
+				const joined = (await joins(w, tb, "bob driver", ROOMS.driverRoom("Bob Driver"))) && (await joins(w, ta, "dispatch", "dispatch"));
 				const r = await editUser(w, admin.cookie, 2, { driverName: "Robert Driver" });
 				const renamed = r.status === 200 && storedName(w.db, 2) === "Robert Driver";
 				p.renameRevokesTarget = renamed && purgedExactly(w, [[2, null]]) && sessionsOf(w.db, 2).length === 0 &&
 					!(await isLive(w, b1.cookie)) && !(await isLive(w, b2.cookie));
-				p.renameClosesTargetSockets = renamed && joined && (await closedByServer(w, tb)) && !inRoom(w, "bob driver", tb.id);
+				p.renameClosesTargetSockets = renamed && joined && (await closedByServer(w, tb)) && !inRoom(w, ROOMS.driverRoom("Bob Driver"), tb.id);
 				p.renameSparesAdmin = renamed && (await isLive(w, admin.cookie));
 				// Editing someone else leaves the editor's own session as it was: same
 				// ID (no new cookie), and its socket still in its room.
@@ -724,7 +735,7 @@ const SCENARIOS = {
 
 				// Case only: still a rename.
 				const tb = await connectTab(w, b.cookie);
-				const joined = await joins(w, tb, "bob driver", "bob driver");
+				const joined = await joins(w, tb, "bob driver", ROOMS.driverRoom("Bob Driver"));
 				const caseOnly = await editUser(w, admin.cookie, 2, { driverName: "bob driver" });
 				p.caseOnlyRenameRevokes = caseOnly.status === 200 && storedName(w.db, 2) === "bob driver" && purgedExactly(w, [[2, null]]) &&
 					!(await isLive(w, b.cookie)) && joined && (await closedByServer(w, tb));
@@ -775,7 +786,7 @@ const SCENARIOS = {
 				// Reconnecting on the new cookie, the socket is the rebuilt identity:
 				// the new name is now a room this Super Admin may ask for.
 				const back = renamed && r.cookie ? await connectTab(w, r.cookie) : null;
-				p.selfEditReconnectsAsRebuilt = !!back && (await joins(w, back, "root driver", "root driver"));
+				p.selfEditReconnectsAsRebuilt = !!back && (await joins(w, back, "root driver", ROOMS.driverRoom("Root Driver")));
 			} finally { await w.close(); }
 		}
 		{
@@ -804,7 +815,7 @@ const SCENARIOS = {
 					!!s.json && s.json.authenticated === true && s.json.user.role === "Driver" && s.json.user.driverName === "Root Driver";
 				const back = demoted && next ? await connectTab(w, next) : null;
 				p.selfDemotionMovesRooms = demoted && (await closedByServer(w, tHere)) && !inRoom(w, "dispatch", tHere.id) &&
-					!!back && (await joins(w, back, "dispatch", "root driver")) && !inRoom(w, "dispatch", back.id);
+					!!back && (await joins(w, back, "dispatch", ROOMS.driverRoom("Root Driver"))) && !inRoom(w, "dispatch", back.id);
 				// The audit line is the identity that was authorised to make the change.
 				const rows = w.db.prepare("SELECT user_id, role, details FROM audit_trail WHERE action = 'update_user' ORDER BY id").all();
 				const demotion = rows.filter((row) => /role "Super Admin" -> "Driver"/.test(row.details));
@@ -933,7 +944,7 @@ const SCENARIOS = {
 				const tb = await connectTab(w, b1.cookie);
 				const te = await connectTab(w, e.cookie);
 				const ta = await connectTab(w, admin.cookie);
-				const joined = (await joins(w, tb, "bob driver", "bob driver")) && (await joins(w, te, "erin driver", "erin driver")) &&
+				const joined = (await joins(w, tb, "bob driver", ROOMS.driverRoom("Bob Driver"))) && (await joins(w, te, "erin driver", ROOMS.driverRoom("Erin Driver"))) &&
 					(await joins(w, ta, "dispatch", "dispatch"));
 				const before = driverNames(w.db);
 				const r = await fixDriverName(w, admin.cookie, { oldName: "Bob Driver", newName: "Robert Driver" });
@@ -943,7 +954,7 @@ const SCENARIOS = {
 				p.fixRenameRevokesMoved = renamed && purgedAsSet(w, moved.map((id) => [id, null])) &&
 					sessionsOf(w.db, 2).length === 0 && sessionsOf(w.db, 5).length === 0 &&
 					!(await isLive(w, b1.cookie)) && !(await isLive(w, b2.cookie)) && !(await isLive(w, d.cookie));
-				p.fixRenameClosesSockets = renamed && joined && (await closedByServer(w, tb)) && !inRoom(w, "bob driver", tb.id);
+				p.fixRenameClosesSockets = renamed && joined && (await closedByServer(w, tb)) && !inRoom(w, ROOMS.driverRoom("Bob Driver"), tb.id);
 				// The cascade did rewrite erin's FULL name. She stays signed in.
 				const erinFull = w.db.prepare("SELECT full_name FROM users WHERE id = 6").get().full_name;
 				p.fixRenameSparesOthers = renamed && erinFull === "Robert Driver" && (await isLive(w, e.cookie)) && isOpen(w, te) &&
@@ -1024,7 +1035,7 @@ const SCENARIOS = {
 				p.fixSelfRenameSparesAndRebuilds = renamed && purgedExactly(w, [[4, sidOf(here.cookie)]]) && !!r.cookie &&
 					(await isLive(w, r.cookie)) && !(await isLive(w, here.cookie)) &&
 					!!rebuilt && rebuilt.driverName === "Rooted Driver" && (await closedByServer(w, tHere)) &&
-					!!back && (await joins(w, back, "rooted driver", "rooted driver"));
+					!!back && (await joins(w, back, "rooted driver", ROOMS.driverRoom("Rooted Driver")));
 				p.fixSelfRenameRevokesOthers = renamed && !(await isLive(w, there.cookie)) && (await closedByServer(w, tThere)) &&
 					fixAuditRevoked(w.db) === 1;
 			} finally { await w.close(); }
@@ -1190,7 +1201,7 @@ const SCENARIOS = {
 				const sessionSaysDriver = !!rotated && rotated.role === "Driver" && rotated.driverName === "Alice Driver";
 				// ...and a socket on that cookie gets the driver's rooms, not dispatch.
 				const tab = sessionSaysDriver ? await connectTab(w, r.cookie) : null;
-				const driverRoom = !!tab && (await joins(w, tab, "dispatch", "alice driver"));
+				const driverRoom = !!tab && (await joins(w, tab, "dispatch", ROOMS.driverRoom("Alice Driver")));
 				p.demotedMidChangeGetsNewRole = sessionSaysDriver && driverRoom && !inRoom(w, "dispatch", tab.id);
 				// The audit row records the account as it is now, not the incoming copy.
 				const audits = changeAudits(w.db);
