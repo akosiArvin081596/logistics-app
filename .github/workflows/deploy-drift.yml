@@ -12,20 +12,36 @@ name: Deploy drift
 # already PASSED STAGING. The heal runs the same deploy, smoke check, edge check
 # and auto-rollback as deploy.yml's production job.
 #
+# When the transport failure hit main's STAGING job instead, staging never
+# produced a verdict, so there is nothing to heal on. That Deploy run is re-run
+# ONCE instead (the rerun job), and its own staging job decides again.
+#
+# Seen 2026-09-23: two Deploy runs lost staging exactly that way, and a re-run
+# by hand turned each green on its second attempt.
+#
 # ⚠️ Nothing here depends on the cadence. The cron says every 30 min, but
 # GitHub has been observed firing it every 2.5–6 h, 8–26 min late.
 #
-# ⚠️ Invariants. Keep all four:
+# ⚠️ Invariants. Keep all five:
 #   1. SERIALIZED WITH DEPLOYS. The same concurrency group as deploy.yml
 #      (queue: max): a drift run waits for any in-flight deploy and reads the
-#      box after it. remote-deploy.sh also holds a box-level flock, whatever
-#      started it.
+#      box after it, and a re-run it asks for waits for it. remote-deploy.sh
+#      also holds a box-level flock, whatever started it.
 #   2. STAGING GATE. A heal deploys only a commit whose own staging job passed.
 #      scripts/deploy/drift-gate.js asks GitHub, because the box cannot see it.
 #   3. ROLLBACK. The heal runs .github/actions/vps-deploy with
 #      rollback_on_failure, exactly like deploy.yml's production job.
 #   4. SAME APPROVAL. The heal job runs in the `production` environment, so a
-#      required reviewer added there gates heals too.
+#      required reviewer added there gates heals too. A re-run's production
+#      job is deploy.yml's own, in that same environment.
+#   5. A STAGING JOB THAT NEVER REACHED THE VPS IS RE-RUN, NEVER HEALED. The
+#      rerun job replays main's own Deploy run, same commit and same jobs, so
+#      staging deploys and smoke-checks it first and production still runs only
+#      if staging succeeds (`needs: staging`). The staging gate is never
+#      skipped, and this workflow never deploys production itself for this
+#      case. Only a Deploy run still on its first attempt, and still main's
+#      newest, is re-run, so a commit gets one automatic re-run, counted by
+#      GitHub's run_attempt.
 # ─────────────────────────────────────────────────────────────────────────────
 on:
   schedule:
@@ -38,9 +54,11 @@ concurrency:
   cancel-in-progress: false
   queue: max
 
+# Read-only for every job but `rerun`, which sets its own (see there).
 permissions:
   contents: read
   actions: read   # the staging gate reads Deploy runs and their jobs
+  checks: read    # …and a failed staging job's annotations: failed, or never reached the VPS?
 
 jobs:
   check:
@@ -51,6 +69,8 @@ jobs:
       action: ${{ steps.gate.outputs.action }}
       local: ${{ steps.check.outputs.local }}
       remote: ${{ steps.check.outputs.remote }}
+      run_id: ${{ steps.gate.outputs.run_id }}
+      run_attempt: ${{ steps.gate.outputs.run_attempt }}
     steps:
       - uses: actions/checkout@v5
 
@@ -85,6 +105,12 @@ jobs:
             echo "remote=$remote_sha"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Remove the deploy key (nothing after the drift check needs it)
+        # The staging gate below runs node and calls the GitHub API, so it runs
+        # with no key on disk. The always() step at the end stays as the
+        # backstop for a job that failed before this point.
+        run: shred -u ~/.ssh/deploy_key 2>/dev/null || rm -f ~/.ssh/deploy_key
+
       - name: Staging gate
         # The box can tell "behind and serving". Only GitHub can tell whether
         # main's commit passed staging. Only `behind-healable` calls the API.
@@ -104,7 +130,9 @@ jobs:
 
       - name: Alarm
         # Loud and never healed: already attempted, behind-and-unhealthy,
-        # staging failed, staging unverified, or an unrecognised state.
+        # staging failed, staging unverified, staging still unreached after a
+        # re-run, or an unrecognised state. The ONLY step that fails this job:
+        # `rerun` is not an alarm, the rerun job below acts on it.
         if: steps.gate.outputs.action == 'alarm'
         env:
           STATE: ${{ steps.gate.outputs.state }}
@@ -126,6 +154,8 @@ jobs:
           VERDICT: ${{ steps.gate.outputs.verdict }}
           DETAIL: ${{ steps.gate.outputs.detail }}
           GATE_URL: ${{ steps.gate.outputs.url }}
+          RUN_ID: ${{ steps.gate.outputs.run_id }}
+          RUN_ATTEMPT: ${{ steps.gate.outputs.run_attempt }}
           DEPLOYED: ${{ steps.check.outputs.local }}
           MAIN: ${{ steps.check.outputs.remote }}
         run: |
@@ -138,6 +168,8 @@ jobs:
             echo "| final state | \`$STATE\` |"
             echo "| action | \`$ACTION\` |"
             echo "| staging gate | $VERDICT — $DETAIL ${GATE_URL:+([job]($GATE_URL))} |"
+            echo "| Deploy run | \`${RUN_ID:-n/a}\` |"
+            echo "| attempt | \`${RUN_ATTEMPT:-n/a}\` |"
             echo "| production | \`$DEPLOYED\` |"
             echo "| main | \`$MAIN\` |"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -205,3 +237,110 @@ jobs:
       - name: Always remove the deploy key
         if: always()
         run: shred -u ~/.ssh/deploy_key 2>/dev/null || rm -f ~/.ssh/deploy_key
+
+  rerun:
+    # main's staging job failed only because the runner never reached the VPS
+    # (drift-gate.js read ssh-retry.sh's give-up annotation), and its Deploy run
+    # is still on its first attempt. A re-run replays that SAME run: staging
+    # deploys and smoke-checks the exact commit, and production runs only if
+    # staging succeeds (`needs: staging`), with its own smoke, edge check and
+    # rollback. So the staging gate is never skipped, and nothing here deploys
+    # production directly. A staging job that failed for real never carries the
+    # annotation (ssh-retry.sh prints it only after its last attempt), so it
+    # still alarms in the check job. If the annotation came from the smoke step
+    # instead (the deploy ran but the smoke check never connected), staging
+    # still gave no verdict, and a re-run is still the right call.
+    #
+    # Right before asking, it reads the run back: still main's push-triggered
+    # Deploy run for the commit the check read, still on attempt 1, and still
+    # main's NEWEST Deploy run. A mismatch is an error; a re-run since the
+    # check, or a newer push, is a notice and no re-run.
+    #
+    # Concurrency: the re-run is an attempt of a deploy.yml run, so it joins
+    # the shared deploy-refs/heads/main group (queue: max) behind THIS drift run
+    # and starts after it ends. No deadlock, because this run never waits for
+    # it. Nor does anything rest on that order: this run is done with the box
+    # by now, and remote-deploy.sh's flock serializes everything else.
+    name: re-run the Deploy run whose staging never reached the VPS
+    needs: check
+    if: needs.check.outputs.action == 'rerun'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # ⚠️ The ONLY job that may write, and only what a re-run needs. Job-level
+    # permissions REPLACE the workflow-level ones for this job, so this token
+    # holds nothing else. No checkout and no action either: no code but the
+    # script below ever runs with it.
+    permissions:
+      actions: write
+    steps:
+      - name: Re-run its failed jobs (staging first; production only if staging passes)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ needs.check.outputs.run_id }}
+          ATTEMPT: ${{ needs.check.outputs.run_attempt }}
+          MAIN: ${{ needs.check.outputs.remote }}
+        run: |
+          set -euo pipefail
+          # The gate hands over digits, attempt 1 (the only attempt it ever
+          # re-runs) and the full SHA the box reported for main. This job holds
+          # a write token, so it checks again rather than build an API path,
+          # or a decision, out of anything else.
+          if ! [[ "$RUN_ID" =~ ^[0-9]+$ && "$ATTEMPT" == "1" && "$MAIN" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::not re-running: the staging gate handed over run id '$RUN_ID', attempt '$ATTEMPT', main '$MAIN' (want digits, 1 and a full SHA)"
+            exit 1
+          fi
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$RUN_ID"
+          summary() {
+            {
+              echo "### Deploy drift — re-run"
+              echo ""
+              echo "| | |"
+              echo "|---|---|"
+              echo "| Deploy run | [$RUN_ID]($url), attempt $ATTEMPT when the gate read it |"
+              echo "| main | \`$MAIN\` |"
+              echo "| re-run | $1 |"
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+          # Compare-and-swap, like the heal prep: the gate read this run a job
+          # ago, so read it again, in ONE call, right before asking. An answer
+          # that is not six fields fails loudly rather than skip under a green
+          # run.
+          now=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" --jq '"\(.run_attempt) \(.status) \(.event) \(.head_branch) \(.path) \(.head_sha)"')
+          shape='^[0-9]+ [a-z_]+ [^ ]+ [^ ]+ [^ ]+ [^ ]+$'
+          if ! [[ "$now" =~ $shape ]]; then
+            echo "::error::cannot read Deploy run $RUN_ID back (GitHub answered '$now'). Not re-running it. $url"
+            exit 1
+          fi
+          read -r run_attempt run_status run_event run_branch run_path run_sha <<<"$now"
+          # Identity: it must still be main's push-triggered Deploy run for
+          # exactly the commit the check read on the box. Anything else means
+          # the gate and this job disagree, which needs a human.
+          if [ "$run_event $run_branch $run_path $run_sha" != "push main .github/workflows/deploy.yml $MAIN" ]; then
+            echo "::error::run $RUN_ID is not main's push-triggered Deploy run for $MAIN (it is $run_event on '$run_branch', $run_path, commit $run_sha). Not re-running it. $url"
+            exit 1
+          fi
+          # Re-run since the check? Then that was its one re-run, even if it
+          # has already finished and failed again.
+          if [ "$run_attempt $run_status" != "1 completed" ]; then
+            echo "::notice::Deploy run $RUN_ID is now attempt $run_attempt, '$run_status': it was re-run since the check. Not re-running it again. $url"
+            summary "skipped: it is now attempt $run_attempt, \`$run_status\`, re-run since the check"
+            exit 0
+          fi
+          # Newest: main must not have moved on. A push since the check has
+          # queued its own Deploy run ahead of anything asked for now, and that
+          # run decides for main. A re-run of the older run behind it would
+          # meet a box that newer run already changed, where its staging
+          # deploy is a no-op and says nothing about this commit.
+          newest=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/deploy.yml/runs?branch=main&event=push&per_page=1" --jq '.workflow_runs[0].id')
+          if ! [[ "$newest" =~ ^[0-9]+$ ]]; then
+            echo "::error::cannot tell which Deploy run is main's newest (GitHub answered '$newest'). Not re-running. $url"
+            exit 1
+          fi
+          if [ "$newest" != "$RUN_ID" ]; then
+            echo "::notice::main moved on since the check: Deploy run $newest is newer than $RUN_ID and decides for main now. Not re-running $RUN_ID. $url"
+            summary "skipped: main moved on, Deploy run $newest is newer and decides"
+            exit 0
+          fi
+          echo "::warning::the staging job of main's Deploy run ($MAIN) never reached the VPS, so staging gave no verdict. Re-running its failed jobs once: staging deploys and smoke-checks the same commit, and production follows only if staging passes. $url"
+          gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/rerun-failed-jobs"
+          summary "requested: its failed jobs, staging first, production only if staging passes"

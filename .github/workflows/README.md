@@ -5,10 +5,10 @@ Four workflows. `ci.yml` verifies, `deploy.yml` ships, `deploy-drift.yml` catche
 | | `ci.yml` | `deploy.yml` | `deploy-drift.yml` | `backup-freshness.yml` |
 |---|---|---|---|---|
 | Fires on | PR into `main`, push to `main`, manual | push to `main` → **staging → production** (auto); manual → one chosen target | every 30 min (cron; GitHub actually fires it every 2.5–6 h), manual | 04:00 UTC daily (cron), manual |
-| Runs | `npm ci` ×2 · `node --check` · every runner but the timing one · client build | box lock · lockfile reset · checkout of the **exact pushed commit** · install · build · scoped pm2 restart · smoke | compare production HEAD to `origin/main`, then ask GitHub whether that commit **passed staging** → in-sync, alarm, or heal once | age + size + `gzip -t` of the newest nightly `app.db` snapshot, and whether the last **scheduled** run succeeded |
+| Runs | `npm ci` ×2 · `node --check` · every runner but the timing one · client build | box lock · lockfile reset · checkout of the **exact pushed commit** · install · build · scoped pm2 restart · smoke | compare production HEAD to `origin/main`, then ask GitHub whether that commit **passed staging** → in-sync, alarm, heal once, or re-run once a Deploy run whose staging never reached the VPS | age + size + `gzip -t` of the newest nightly `app.db` snapshot, and whether the last **scheduled** run succeeded |
 | Duration | ~1 min | well under a minute | seconds (a heal: a deploy) | seconds |
-| Touches production | never | **every push to `main` — no approval gate** | only to re-run a deploy that never landed: once per commit, only if that commit passed staging, with the same auto-rollback | never — strictly read-only |
-| Self-heals | n/a | rolls back on failed verification | yes, once per commit | **no, by design** |
+| Touches production | never | **every push to `main` — no approval gate** | only for a deploy that never landed. Per commit: at most one re-run of main's Deploy run, when its staging job never reached the VPS (production then follows staging as usual), then at most one heal, only once that commit has passed staging, with the same auto-rollback | never — strictly read-only |
+| Self-heals | n/a | rolls back on failed verification | yes: per commit, one re-run of the Deploy run, then possibly one heal | **no, by design** |
 
 ---
 
@@ -96,7 +96,7 @@ The box checks that SHA out detached, rebuilds and restarts. It also writes main
 
 **It smoke-checks `/api/config/maintenance`.** Unauthenticated, returns module constants only — no DB, no Sheets, no billed API call. It proves the process booted and Express is serving, and costs nothing. It polls for up to 60 s because boot runs schema migrations first.
 
-**On smoke failure it prints the pm2 error log, labelled as possibly stale.** `pm2 logs --nostream` tails the error log whether or not anything new was written, so a days-old error prints and reads exactly like a fresh regression. Check the dates before concluding.
+**On smoke failure it prints the pm2 error log, labelled as possibly stale.** `pm2 logs --nostream` tails the error log whether or not anything new was written, so a days-old error prints and reads exactly like a fresh regression. Check the dates before concluding. The log prints with workflow commands switched off (`::stop-commands::` with a random token), so no line of the app's log becomes an annotation that the drift gate would read.
 
 ---
 
@@ -124,7 +124,7 @@ Enabled 2026-08-25 at the owner's request. There is **no approval gate and nobod
 
 A rollback also records the commit it rejected in the drift marker, so no automatic path deploys that commit again. A human decides what happens next.
 
-**Deploys never overlap.** `deploy.yml` and `deploy-drift.yml` share **one literal concurrency group** (`deploy-refs/heads/main`) with `queue: max`. A drift run therefore waits for an in-flight deploy and reads the box after it; a deploy waits for a heal. The default queue keeps only one pending run and **cancels** it when another arrives, which in a shared group could cancel a queued deploy; `queue: max` keeps up to 100 waiting, in order. The box lock (above) catches anything that does not come through Actions. ⚠️ actionlint 1.7.12 predates `queue` (GitHub, 2026-05) and reports it as an unexpected key. Lint with `-ignore 'unexpected key "queue" for "concurrency" section'`.
+**Deploys never overlap.** `deploy.yml` and `deploy-drift.yml` share **one literal concurrency group** (`deploy-refs/heads/main`) with `queue: max`. A drift run therefore waits for an in-flight deploy and reads the box after it; a deploy waits for a heal. A Deploy re-run that a drift run asks for joins the same group behind it and starts once the drift run ends. The drift run never waits for it, so nothing can deadlock. The default queue keeps only one pending run and **cancels** it when another arrives, which in a shared group could cancel a queued deploy; `queue: max` keeps up to 100 waiting, in order. The box lock (above) catches anything that does not come through Actions. ⚠️ actionlint 1.7.12 predates `queue` (GitHub, 2026-05) and reports it as an unexpected key. Lint with `-ignore 'unexpected key "queue" for "concurrency" section'`.
 
 ### To turn auto-deploy back off
 
@@ -134,25 +134,45 @@ Give the `production` GitHub Environment a **required reviewer** again (Settings
 
 `scripts/deploy/remote-deploy.sh`, `remote-smoke.sh`, `remote-rollback.sh` — versioned in the repo, not inline in YAML, so both jobs share one reviewable copy and cannot drift. `.github/actions/vps-deploy` is the composite step that ships them over ssh and wires the rollback. deploy.yml's two jobs **and** the drift heal all use it. Runner-side, `ssh-setup.sh` writes the key and the pinned host key, and `ssh-retry.sh` is the one copy of the transport retry, used by every connection. `remote-drift-check.sh`, `remote-drift-heal.sh` and `drift-gate.js` are the drift path, described below.
 
-Tests: `scripts/test-deploy-scripts.js` runs the real scripts through `bash -s` against a throwaway git sandbox: the lock, exact-SHA deploys, the marker's three writers, retry and setup, each with mutants. `scripts/test-drift-gate.js` covers the staging gate. Both are picked up by `npm run test:unit`, so CI runs them.
+Tests: `scripts/test-deploy-scripts.js` runs the real scripts through `bash -s` against a throwaway git sandbox, each property with mutants:
+- the lock, exact-SHA deploys and the marker's three writers;
+- retry and setup, including `ssh-retry.sh`'s exact give-up line, which the gate reads back;
+- the smoke check's log tail printing with workflow commands off;
+- a static pin that no remote script exits 255 itself.
+
+`scripts/test-drift-gate.js` covers the staging gate, pins the drift workflow's permissions and deploy.yml's staging-before-production `if:`, and runs the rerun job's own script against a stub `gh`. Both are picked up by `npm run test:unit`, so CI runs them.
 
 ---
 
 ## Deploy drift — what each state does
 
-`deploy-drift.yml` has two jobs. **check** reads the box (`remote-drift-check.sh`). For `behind-healable` only, it then asks GitHub whether main's exact commit passed the **`staging` job of its push-triggered Deploy run** (`drift-gate.js`, with `actions: read`). **heal** runs only on a green gate, in the `production` environment. It first re-reads the box and writes the marker (`remote-drift-heal.sh`, which refuses if production moved since the check). Then it runs the same `vps-deploy` action as production, pinned to that exact commit, with auto-rollback.
+`deploy-drift.yml` has three jobs. **check** reads the box (`remote-drift-check.sh`). For `behind-healable` only, it then asks GitHub whether main's exact commit passed the **`staging` job of its push-triggered Deploy run** (`drift-gate.js`, with `actions: read`, plus `checks: read` for a failed staging job's annotations). **heal** runs only on a green gate, in the `production` environment. It first re-reads the box and writes the marker (`remote-drift-heal.sh`, which refuses if production moved since the check). Then it runs the same `vps-deploy` action as production, pinned to that exact commit, with auto-rollback. **rerun** runs only when main's staging job never reached the VPS. It asks GitHub to re-run that Deploy run's failed jobs, and holds the workflow's only write permission (`actions: write`, set on the job, which replaces the workflow's read-only set for that job). It checks nothing out and runs no action. The check job shreds the deploy key as soon as it has read the box, so the gate runs with no key on disk.
+
+⚠️ **A run that is not completed is `pending`, whatever its jobs say.** The gate reads the Deploy run's own status before any job. While a drift run executes it holds the shared concurrency group, so a Deploy run it sees is either completed or queued behind it, and a queued re-run still lists its previous attempt's jobs. It never keys on the staging job's own `run_attempt`: after a re-run of production alone, staging keeps attempt 1 in a run on attempt 2, and that pass still counts toward a heal.
 
 | State | Meaning | Action |
 |---|---|---|
 | `in-sync` | production HEAD = `origin/main` | pass |
 | `behind-healable` | behind, serving 200, no marker, **and main's commit passed staging** | **heal once** (deploy → smoke → edge → rollback on failure) |
-| `behind-staging-pending` | behind, but main's Deploy run has not finished staging yet | notice only; the deploy is on its way |
-| `behind-staging-failed` | staging **rejected** main's commit | **alarm**; production must not get it |
+| `behind-staging-pending` | behind, but main's Deploy run, or a queued re-run of it, has not finished yet | notice only; the deploy is on its way |
+| `behind-staging-unreached` | main's staging job **never reached the VPS** (every ssh attempt exited 255, so ssh-retry.sh gave up), and its Deploy run is still on its first attempt | **re-run once**: that run's failed jobs, so staging deploys and smoke-checks again and production follows only if it passes |
+| `behind-staging-unreached-retried` | staging never reached the VPS, but the Deploy run has already been re-run (by this workflow or by hand) or reports no attempt number | **alarm**. 255 is not only the network: a refused deploy key, a changed host key or a dropped session end the same way. Check those, then `gh run rerun <run-id> --failed` |
+| `behind-staging-failed` | staging **rejected** main's commit, or failed with annotations that could not be read | **alarm**; production must not get it |
 | `behind-staging-unverified` | no push-triggered Deploy run for the commit (e.g. `[skip ci]`), still none on a re-look 20 s later; or the API lookup failed | **alarm**; no heal without a verdict |
 | `behind-already-attempted` | the marker names main's commit | **alarm** |
 | `behind-and-unhealthy` | behind **and** not serving 200 | **alarm**; an incident, not a missed deploy |
 
-A production job that failed on **transport** after staging passed stays healable. That is the case this workflow exists for. A production job that failed **verification** is not healable, because its rollback wrote the marker. ⚠️ **A STAGING job that failed on transport is not healable either:** the gate cannot tell it from a staging job that failed verification, so it reads `behind-staging-failed` and alarms. Rerun the Deploy run's failed jobs (`gh run rerun <run-id> --failed`); production then follows staging as usual.
+A production job that failed on **transport** after staging passed stays healable. That is the case this workflow exists for. A production job that failed **verification** is not healable, because its rollback wrote the marker.
+
+**A STAGING job that failed on transport is re-run, never healed.** It left no staging verdict to heal on. `ssh-retry.sh` prints `::error title=VPS unreachable::ssh failed to connect after N attempts — …` only after its last attempt, and `drift-gate.js` reads that line back from the failed staging job's check-run annotations. It matches the title, or the message prefix alone, which is all a Deploy run from before the title carries. The rerun job then re-runs that Deploy run's failed jobs. That replays the same run on the same commit: staging deploys and smoke-checks first, and production runs only if staging succeeds (`needs: staging`), so the staging gate still decides. Nothing in the drift workflow deploys production for this case. "Once" is GitHub's own `run_attempt`: only attempt 1 is re-run. A staging job that failed for real never carries the annotation, so it still alarms as `behind-staging-failed`, and so does one whose annotations cannot be read.
+
+"Never reached the VPS" means every ssh attempt exited 255. That is usually the runner→VPS network, which is what `ssh-retry.sh`'s message says, but a refused deploy key, a changed host key and a dropped session end the same way. So when the re-run fails too, check those before the network.
+
+Right before asking, the rerun job reads the run back in one call. It must still be main's push-triggered Deploy run for the commit the check read on the box, and still on attempt 1. It must also still be main's newest push-triggered Deploy run. A mismatch in the first is an error. A re-run made since the check, or a newer push to `main`, is a notice and no re-run: the newer push's own Deploy run goes first and decides for `main`.
+
+Two side effects of the re-run:
+- **A persistent staging ssh failure alarms one drift tick later than before.** The first tick re-runs; the tick after it sees attempt 2 and alarms (`behind-staging-unreached-retried`).
+- **A re-run deploys main's commit to staging again.** If someone deployed another branch to staging by hand in between, the re-run moves staging back to main over it.
 
 **The marker (`.drift-heal-attempted`) names the one main commit drift must not auto-deploy.** It has three writers, and each means a human decides now:
 - `remote-drift-heal.sh`: a heal of that commit was already attempted. It is written before the deploy, so a heal that dies halfway still counts.
