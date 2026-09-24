@@ -51576,9 +51576,18 @@ io.on("connection", (socket) => {
 	// Without this, an anonymous client could `emit("register", "dispatch")`
 	// and silently receive every live location update, geofence trigger,
 	// dispatch notification, and inter-driver chat message.
+	// Refused at NAMESPACE level, like every other close in this section (see
+	// the ⚠️ above the helpers): the transport may also carry /public-track,
+	// and disconnect(true) would end the tracker along with this socket. The
+	// refusal holds without closing the transport: the session was read once,
+	// at the handshake, so a CONNECT sent again over the same transport
+	// presents the same session, still with no user, and is refused here again.
+	// A client with nothing else on the transport closes it itself once its
+	// last socket is gone (socket.io-client's Manager does). One that keeps it
+	// open holds no more than a /public-track connection already gives anyone.
 	const sessionUser = socket.request?.session?.user;
 	if (!sessionUser || !sessionUser.role) {
-		socket.disconnect(true);
+		socket.disconnect();
 		return;
 	}
 	// ...and that session must still be in the store NOW. The object above was

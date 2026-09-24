@@ -31,12 +31,19 @@
  *   §6 THE CONNECTION GATE: a CONNECT sent again over the old transport after
  *      the session ended presents the handshake's session object, and is
  *      refused because the store no longer has that session; and when the
- *      store cannot be read at all, the gate refuses (fails CLOSED)
+ *      store cannot be read at all, the gate refuses (fails CLOSED). A
+ *      handshake that carried no session at all is refused too, and again on
+ *      every CONNECT sent over its transport; a client with nothing else on
+ *      that transport then closes it itself, once, and does not come back
  *   §7 THE PUBLIC TRACKER (/public-track, no session) is untouched by all of
- *      it, including when it shares the signed-in tab's transport
+ *      it, including when it shares the signed-in tab's transport or a
+ *      sessionless one's: whether it connected before the refusal or its
+ *      CONNECT is still pending behind the refused one (the order a reconnect
+ *      sends them in)
  *   §8 SOURCE pins (comment-stripped): each call sits before the session write
  *      it accompanies; the sweep is scheduled once, every 60 s, unref'd; the
- *      helpers close the namespace, never the transport
+ *      helpers and both connection gates close the namespace, never the
+ *      transport
  *   §9 DISCRIMINATION: one mutant per call site, and each must be caught
  *
  * Runs the SHIPPED code: the session configuration, the login / setup / logout
@@ -417,6 +424,9 @@ async function receives(socket, event, fire) {
 	fire();
 	return !!(await p);
 }
+// How long a socket must go undisturbed to count as untouched. On loopback a
+// closed transport reaches the client within a few milliseconds.
+const QUIET_MS = 300;
 
 // ── the scenarios. Each sets named properties, all true on the shipped code ──
 const SCENARIOS = {
@@ -749,6 +759,133 @@ const SCENARIOS = {
 			await w.close();
 		}
 	},
+
+	// §6 and §7, the FIRST gate: a handshake that carried no session at all. One
+	// Manager multiplexes every namespace it opens onto one transport, so the
+	// tracker can share it with a default-namespace socket the gate refuses.
+	async sessionless(sources, p) {
+		{
+			const w = await startWorld({ sources });
+			let m = null;
+			let m2 = null;
+			try {
+				// No cookie: the handshake's session has no user.
+				m = new ioClient.Manager(`http://127.0.0.1:${w.port}`, { transports: ["websocket"], reconnection: false });
+				const tracker = m.socket("/public-track");
+				w.clients.push(tracker);
+				if (!(await waitFor(tracker, "connect"))) throw new Error("the tracker never connected");
+				const trackerTab = { s: tracker, id: tracker.id, reasons: [] };
+				tracker.on("disconnect", (reason) => trackerTab.reasons.push(reason));
+				tracker.emit("subscribe", { loadId: "L-200" });
+				const subscribed = await waitUntil(() => inRoom(w, "load:L-200", trackerTab.id, "/public-track"));
+				const engineId = m.engine && m.engine.id;
+				// Connected, never told to disconnect, and on the transport it started on.
+				const trackerAlive = () => tracker.connected && isOpen(w, trackerTab, "/public-track") &&
+					trackerTab.reasons.length === 0 && !!engineId && !!m.engine && m.engine.id === engineId;
+
+				// The default namespace over the SAME transport. The server acknowledges
+				// the CONNECT before its "connection" handler runs, and both ends share
+				// this one event loop, so by the time the client reads the
+				// acknowledgement the gate has already decided. The client-side close is
+				// waited on only once the server has refused, so a mutant that lets the
+				// socket stay costs no timeout. Ids are taken inside the listener:
+				// socket.io-client clears socket.id on disconnect, which can land in the
+				// same tick.
+				const dflt = m.socket("/");
+				w.clients.push(dflt);
+				const ids = [];
+				const reasons = [];
+				dflt.on("connect", () => ids.push(dflt.id));
+				dflt.on("disconnect", (reason) => reasons.push(reason));
+				const acked = await waitFor(dflt, "connect");
+				p.sessionlessRefused = subscribed && !!acked && ids.length === 1 && !isOpen(w, { id: ids[0] }) &&
+					w.io.of("/").sockets.size === 0 &&
+					(await waitUntil(() => reasons.length >= 1)) && reasons[0] === "io server disconnect";
+				await new Promise((r) => setTimeout(r, QUIET_MS));
+				p.sessionlessRefusalSparesTracker = subscribed && !!acked && trackerAlive();
+				p.sessionlessTrackerKeepsReceiving = subscribed && trackerAlive() &&
+					(await receives(tracker, "tracker-update", () => w.io.of("/public-track").to("load:L-200").emit("tracker-update", { lat: 4 })));
+
+				// CONNECT again over the same transport: the gate runs again and refuses
+				// again, and the tracker still notices nothing.
+				if (p.sessionlessRefused && trackerAlive()) {
+					dflt.connect();
+					const again = await waitFor(dflt, "connect");
+					p.sessionlessRetryStillRefused = !!again && ids.length === 2 && ids[1] !== ids[0] && !isOpen(w, { id: ids[1] }) &&
+						w.io.of("/").sockets.size === 0 &&
+						(await waitUntil(() => reasons.length >= 2)) && reasons[1] === "io server disconnect" && trackerAlive();
+				} else {
+					p.sessionlessRetryStillRefused = false;
+				}
+
+				// The order a reconnect sends them in: the tab's socket subscribed first,
+				// so its CONNECT leaves first and the tracker's is still pending when the
+				// gate refuses. Closing the transport would drop that pending CONNECT
+				// with it; the tracker must connect over the same transport instead.
+				m2 = new ioClient.Manager(`http://127.0.0.1:${w.port}`, { transports: ["websocket"], reconnection: false });
+				const first = m2.socket("/");
+				const pending = m2.socket("/public-track");
+				w.clients.push(first, pending);
+				const firstIds = [];
+				const firstReasons = [];
+				const pendingIds = [];
+				first.on("connect", () => firstIds.push(first.id));
+				first.on("disconnect", (reason) => firstReasons.push(reason));
+				// Recorded from the start: both answers can arrive in the same read as
+				// the refusal, before the await below resumes.
+				pending.on("connect", () => pendingIds.push(pending.id));
+				const firstAcked = await waitFor(first, "connect");
+				const engineId2 = m2.engine && m2.engine.id;
+				// Whether the refusal closed the transport is already settled server-side
+				// (as above), so the tracker's connect is waited on only when it can come.
+				const conn = firstAcked && engineId2 ? w.io.engine.clients[engineId2] : null;
+				const joined = !!conn && conn.readyState === "open" && (pendingIds.length > 0 || !!(await waitFor(pending, "connect")));
+				p.sessionlessPendingTrackerConnects = joined && pendingIds.length === 1 && m2.engine.id === engineId2 &&
+					isOpen(w, { id: pendingIds[0] }, "/public-track") && firstIds.length === 1 && !isOpen(w, { id: firstIds[0] }) &&
+					(await waitUntil(() => firstReasons.length >= 1)) && firstReasons[0] === "io server disconnect";
+			} finally {
+				for (const mgr of [m, m2]) {
+					try { if (mgr && mgr.engine) mgr.engine.close(); } catch { /* closed */ }
+				}
+				await w.close();
+			}
+		}
+		{
+			// Nothing else on the transport: a well-behaved client closes it itself
+			// once refused, and does not come back. Reconnection on, as the SPA's io()
+			// has it, with a short delay so that a reconnect loop would show here.
+			const w = await startWorld({ sources });
+			let m = null;
+			try {
+				let opened = 0;
+				// Why the server saw each transport end: "transport close" is the client
+				// closing it, "forced close" the server.
+				const ended = [];
+				w.io.engine.on("connection", (conn) => {
+					opened++;
+					conn.on("close", (reason) => ended.push(reason));
+				});
+				m = new ioClient.Manager(`http://127.0.0.1:${w.port}`, {
+					transports: ["websocket"], reconnectionDelay: 20, reconnectionDelayMax: 20, randomizationFactor: 0,
+				});
+				const lone = m.socket("/");
+				w.clients.push(lone);
+				const reasons = [];
+				lone.on("disconnect", (reason) => reasons.push(reason));
+				const acked = await waitFor(lone, "connect");
+				// As above: the client-side close is waited on only once the server
+				// has refused the socket.
+				const refused = !!acked && w.io.of("/").sockets.size === 0 && (await waitUntil(() => reasons.length >= 1));
+				const closed = refused && (await waitUntil(() => w.io.engine.clientsCount === 0));
+				await new Promise((r) => setTimeout(r, QUIET_MS));
+				p.sessionlessLoneTransportClosed = closed && reasons.length === 1 && reasons[0] === "io server disconnect" &&
+					!lone.active && opened === 1 && w.io.engine.clientsCount === 0 && ended.length === 1 && ended[0] === "transport close";
+			} finally {
+				try { if (m && m.engine) m.engine.close(); } catch { /* closed */ }
+				await w.close();
+			}
+		}
+	},
 };
 
 async function probe(sources, only = null) {
@@ -806,6 +943,12 @@ const PROPS = {
 	staleReconnectRefused: ["shared", "§6 a CONNECT sent again over the old transport after the session ended must be refused"],
 	trackerSurvivesLogout: ["shared", "§7 the public tracker on that transport must stay connected and keep receiving"],
 	trackerSurvivesSweep: ["shared", "§7 ...and the sweep must never touch it"],
+	sessionlessRefused: ["sessionless", "§6 a socket whose handshake carried no session must be refused (the client sees a server disconnect, and nothing stays in the default namespace)"],
+	sessionlessRetryStillRefused: ["sessionless", "§6 ...and a CONNECT sent again over the same transport must be refused again"],
+	sessionlessLoneTransportClosed: ["sessionless", "§6 with nothing else on its transport, the refused client must close that transport itself, once, and not reconnect"],
+	sessionlessRefusalSparesTracker: ["sessionless", "§7 that refusal must close the default namespace only: the tracker on the same transport stays connected, is told nothing, and keeps its transport"],
+	sessionlessTrackerKeepsReceiving: ["sessionless", "§7 ...and keeps receiving its load's pushes after the refusal"],
+	sessionlessPendingTrackerConnects: ["sessionless", "§7 a tracker CONNECT still pending behind the refused one (the order a reconnect sends them in) must connect over the same transport"],
 };
 
 // ─────────────────────────────── §8 the source
@@ -875,6 +1018,9 @@ function sectionSource() {
 	ok(at(handler, "socket.request?.session?.user") < gate && gate > 0 && gate < dataSid && dataSid < register && dataUid > 0 && dataUid < register,
 		"§8 the connection gate must consult the store, then record who the socket is, before any room can be joined");
 	ok(!/\.join\(\s*["'`](sid|user):/.test(handler), "§8 identity must never be a room: sid:/user: rooms share a namespace with the name rooms");
+	const refusals = handler.match(/\bsocket\.disconnect\([^)]*\)/g) || [];
+	ok(refusals.length === 2 && refusals.every((call) => call === "socket.disconnect()"),
+		`§8 both connection gates refuse with a namespace-level socket.disconnect(), never disconnect(true): the transport may carry the tracker (found: ${refusals.join(", ") || "none"})`);
 
 	const helpers = stripComments(SRCS.helpers);
 	ok(!/disconnect\(\s*true\s*\)/.test(helpers), "§8 the helpers close the default namespace only, never the transport it may share with the tracker");
@@ -1024,6 +1170,27 @@ const MUTANTS = [
 		target: "ioHandler",
 		mutate: (s) => s.replace("if (!live || !live.has(sid)) {", "if (live && !live.has(sid)) {"),
 		caughtBy: ["gateFailsClosedOnUnreadableStore"],
+	},
+	{
+		name: "the first gate refuses a sessionless socket by closing the whole transport (disconnect(true))",
+		target: "ioHandler",
+		mutate: (s) => s.replace("if (!sessionUser || !sessionUser.role) {\n\t\tsocket.disconnect();",
+			"if (!sessionUser || !sessionUser.role) {\n\t\tsocket.disconnect(true);"),
+		caughtBy: ["sessionlessRefusalSparesTracker", "sessionlessTrackerKeepsReceiving", "sessionlessPendingTrackerConnects", "sessionlessLoneTransportClosed"],
+	},
+	{
+		name: "the first gate lets a sessionless socket stay connected",
+		target: "ioHandler",
+		mutate: (s) => s.replace("if (!sessionUser || !sessionUser.role) {\n\t\tsocket.disconnect();\n\t\treturn;",
+			"if (!sessionUser || !sessionUser.role) {\n\t\treturn;"),
+		caughtBy: ["sessionlessRefused", "sessionlessLoneTransportClosed"],
+	},
+	{
+		name: "the store gate refuses by closing the whole transport (disconnect(true))",
+		target: "ioHandler",
+		mutate: (s) => s.replace("if (!live || !live.has(sid)) {\n\t\tsocket.disconnect();",
+			"if (!live || !live.has(sid)) {\n\t\tsocket.disconnect(true);"),
+		caughtBy: ["trackerSurvivesSweep"],
 	},
 	{
 		name: "the helpers close the whole transport (disconnect(true))",
