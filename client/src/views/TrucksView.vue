@@ -24,6 +24,7 @@
         :driver-names="store.driverNames"
         :investor-users="store.investorUsers"
         :show-owner="true"
+        :can-edit-pay="authStore.user?.role === 'Super Admin'"
         @submit="handleAddTruck"
       />
     </details>
@@ -39,6 +40,7 @@
         :investor-users="store.investorUsers"
         :show-owner="authStore.user?.role === 'Super Admin'"
         :can-edit="authStore.user?.role === 'Super Admin' || authStore.user?.role === 'Dispatcher'"
+        :can-edit-pay="authStore.user?.role === 'Super Admin'"
         @delete="handleDeleteTruck"
         @update="handleUpdateTruck"
         @linkage-changed="handleLinkageChanged"

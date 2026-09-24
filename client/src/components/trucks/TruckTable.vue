@@ -269,8 +269,11 @@
 
           <div class="edit-field">
             <label>Driver Pay ($/day)</label>
-            <input v-model.number="editForm.driverPayDaily" type="number" min="0" max="10000" step="any" placeholder="250 (default)" />
-            <div class="field-hint">Daily rate paid to this truck's driver (used by invoices, financials, and the investor P&amp;L). Leave blank to use the $250/day default.</div>
+            <!-- Pay is Super Admin only (403 PAY_EDIT_ADMIN_ONLY otherwise): shown
+                 to everyone who can edit the truck, editable only by them. -->
+            <input v-model.number="editForm.driverPayDaily" type="number" min="0" max="10000" step="any" placeholder="250 (default)" :disabled="!canEditPay" />
+            <div v-if="canEditPay" class="field-hint">Daily rate paid to this truck's driver (used by invoices, financials, and the investor P&amp;L). Leave blank to use the $250/day default.</div>
+            <div v-else class="field-hint">Only a Super Admin can change driver pay.</div>
           </div>
 
           <div v-if="showOwner" class="edit-field">
@@ -509,6 +512,8 @@ const props = defineProps({
   investorUsers: { type: Array, default: () => [] },
   showOwner: { type: Boolean, default: false },
   canEdit: { type: Boolean, default: false },
+  // Driver pay is Super Admin only; everyone else sees the rate read-only.
+  canEditPay: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['delete', 'update', 'linkage-changed'])
@@ -692,8 +697,10 @@ function handleSaveEdit() {
       hvutAnnual: editForm.hvutAnnual,
       irpAnnual: editForm.irpAnnual,
       adminFeePct: editForm.adminFeePct,
-      // Blank input = clear the custom rate (server stores 0 = use $250 default)
-      driverPayDaily: editForm.driverPayDaily === '' ? 0 : editForm.driverPayDaily,
+      // Blank input = clear the custom rate (server stores 0 = use $250 default).
+      // Sent only by a Super Admin: anyone else leaves the rate out, so the save
+      // keeps whatever rate is stored when it lands.
+      ...(props.canEditPay ? { driverPayDaily: editForm.driverPayDaily === '' ? 0 : editForm.driverPayDaily } : {}),
       purchasePrice: editForm.purchasePrice,
       titleStatus: editForm.titleStatus,
       maintenanceFundMonthly: editForm.maintenanceFundMonthly,
@@ -971,6 +978,8 @@ async function handleUnlink(truck) {
 .edit-field textarea:focus {
   outline: none; border-color: var(--blue);
 }
+/* Read-only for this role (driver pay is Super Admin only): still legible. */
+.edit-field input:disabled { opacity: 0.6; cursor: not-allowed; }
 .field-hint {
   font-size: 0.7rem; color: var(--text-dim); margin-top: 0.25rem;
   text-transform: none; letter-spacing: normal;

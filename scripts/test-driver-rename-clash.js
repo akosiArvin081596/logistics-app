@@ -1038,7 +1038,7 @@ async function mutants() {
 		routeSrc: swap("R10", ROUTES.dirPut, "const dirClash = findDriverNameClashes(nextName, { users: false, exceptDirectoryId: id })", "const dirClash = []"),
 	}));
 	caught("R11 PUT /api/drivers-directory/:id writing the raw Driver column again", await directoryBattery({
-		routeSrc: swap("R11", ROUTES.dirPut, ".run(nextName, nextCarrier,", '.run(obj.Driver || "", nextCarrier,'),
+		routeSrc: swap("R11", ROUTES.dirPut, ".run(writeName, nextCarrier,", '.run(obj.Driver || "", nextCarrier,'),
 	}));
 	caught("R17 PUT /api/drivers-directory/:id re-spelling a row onto another row's exact spelling unchecked", await directoryBattery({
 		routeSrc: swap("R17", ROUTES.dirPut, "renamed || String(h.driver_name).toLowerCase() === nextName.toLowerCase()", "renamed"),
