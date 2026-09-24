@@ -272,14 +272,27 @@ function runDeployStep(script, { REF = "main", SHA = "", out = "" } = {}) {
 	clearLogs();
 	const outputs = path.join(T, "step-github-output");
 	fs.writeFileSync(outputs, "");
-	const x = spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", script], {
-		cwd: stepCwd,
-		encoding: "utf8",
-		env: { PATH: process.env.PATH, HOME: D.home, HOST: "203.0.113.9", USER: "deploy", DIR: "/srv/app", PM2: "logistics-app", REF, SHA, GITHUB_OUTPUT: outputs, STUB_LOG_DIR: D.logs, STUB_DEPLOY_OUT: out },
-	});
+	// ⚠️ stderr goes to a real FILE, as it does on a GitHub runner. The step
+	// pipes the deploy's output through `tee /dev/stderr`, and Node's default
+	// stdio "pipes" are UNIX sockets on Linux, where opening /dev/stderr on a
+	// socket fails (ENXIO): tee exits non-zero and pipefail ends the step with
+	// no outputs. macOS opens it either way, so only CI ever saw this.
+	const errPath = path.join(T, "step-stderr");
+	const errFd = fs.openSync(errPath, "w");
+	let x;
+	try {
+		x = spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", script], {
+			cwd: stepCwd,
+			encoding: "utf8",
+			stdio: ["pipe", "pipe", errFd],
+			env: { PATH: process.env.PATH, HOME: D.home, HOST: "203.0.113.9", USER: "deploy", DIR: "/srv/app", PM2: "logistics-app", REF, SHA, GITHUB_OUTPUT: outputs, STUB_LOG_DIR: D.logs, STUB_DEPLOY_OUT: out },
+		});
+	} finally {
+		fs.closeSync(errFd);
+	}
 	const got = {};
 	for (const l of fs.readFileSync(outputs, "utf8").split("\n").filter(Boolean)) got[l.slice(0, l.indexOf("="))] = l.slice(l.indexOf("=") + 1);
-	return { code: x.status, out: `${x.stdout}${x.stderr}`, outputs: got, calls: log("step-ssh") };
+	return { code: x.status, out: `${x.stdout}${fs.readFileSync(errPath, "utf8")}`, outputs: got, calls: log("step-ssh") };
 }
 const deployOut = (o = {}) => `${[
 	`DEPLOYED_FROM=${o.from ?? C1}`,
