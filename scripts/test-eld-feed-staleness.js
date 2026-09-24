@@ -59,18 +59,17 @@
  *      re-open (the re-open cooldown), and the daily cap counts SENDS in a window
  *      measured by instant, not ledger rows compared as text.
  *
- * ⚠️ THE SCRATCH DATABASE IS A mkdtemp, NEVER THE REPO'S app.db. It also creates
- * routemate_vehicles with the EXACT production column list — which has no
- * `source` column, whatever CLAUDE.md's Linxup paragraph implies. §1 and §3 both
- * pin that: `source` lives on routemate_telemetry, and querying it on the mirror
- * throws `no such column`.
+ * ⚠️ EVERY SCRATCH DATABASE IS IN MEMORY, NEVER THE REPO'S app.db — freshDb()
+ * says why it is not a file. It also creates routemate_vehicles with the EXACT
+ * production column list — which has no `source` column, whatever CLAUDE.md's
+ * Linxup paragraph implies. §1 and §3 both pin that: `source` lives on
+ * routemate_telemetry, and querying it on the mirror throws `no such column`.
  *
  * Run: node scripts/test-eld-feed-staleness.js
  */
 "use strict";
 
 const fs = require("fs");
-const os = require("os");
 const path = require("path");
 const Database = require("better-sqlite3");
 
@@ -103,7 +102,18 @@ function stripComments(s) {
 	return s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
 }
 
+// ⚠️ EVERY LIFT IS MEMOIZED BY NAME — safe only because SRC is read once and never
+// changes, so a lift is a pure function of its name and a second one proves
+// nothing the first did not. The exactly-once guards still run, on each name's
+// first lift. Unmemoized, every loadShipped() re-lifted 11 functions and 2
+// constants: ~330 lifts per run, each a few full scans of a 2.8 MB file, ~0.3 s
+// of CPU — the share of this runner that stretches on a contended CPU. Mutants
+// are applied to the joined text inside loadShipped(), never to a cached lift.
+const LIFTED = new Map();
+
 function extract(name) {
+	const key = `function ${name}`;
+	if (LIFTED.has(key)) return LIFTED.get(key);
 	const needle = `\nfunction ${name}(`;
 	const asyncNeedle = `\nasync function ${name}(`;
 	const hits = SRC.split(needle).length - 1 + SRC.split(asyncNeedle).length - 1;
@@ -113,7 +123,10 @@ function extract(name) {
 	let depth = 0;
 	for (let j = SRC.indexOf("{", start); j < SRC.length; j++) {
 		if (SRC[j] === "{") depth++;
-		else if (SRC[j] === "}") { depth--; if (depth === 0) return SRC.slice(start, j + 1); }
+		else if (SRC[j] === "}") {
+			depth--;
+			if (depth === 0) { LIFTED.set(key, SRC.slice(start, j + 1)); return LIFTED.get(key); }
+		}
 	}
 	throw new Error(`unbalanced braces extracting ${name}()`);
 }
@@ -147,11 +160,14 @@ const FNS = [
 // Single-line constants taken out of server.js, like the functions: the re-open
 // cooldown and the send log's key are part of the shipped behaviour under test.
 function extractConst(name) {
+	const key = `const ${name}`;
+	if (LIFTED.has(key)) return LIFTED.get(key);
 	const needle = `\nconst ${name} = `;
 	const hits = SRC.split(needle).length - 1;
 	if (hits !== 1) throw new Error(`expected exactly 1 const ${name} in server.js, found ${hits}`);
 	const start = SRC.indexOf(needle) + 1;
-	return SRC.slice(start, SRC.indexOf("\n", start));
+	LIFTED.set(key, SRC.slice(start, SRC.indexOf("\n", start)));
+	return LIFTED.get(key);
 }
 const SERVER_STATE_DDL = (() => {
 	const m = SRC.match(/CREATE TABLE IF NOT EXISTS server_state \([\s\S]*?\n\t\)/g);
@@ -216,9 +232,18 @@ function loadShipped(db, opts = {}, mutate = (s) => s) {
 const DAY = 24 * 60 * 60 * 1000;
 const HOUR = 60 * 60 * 1000;
 
+// ⚠️ IN MEMORY, NEVER A FILE — this is what keeps the runner inside the CI
+// timeout. Every write in this runner is an autocommit statement, and against a
+// FILE each one is a durable transaction: a journal written, fsync'd, deleted.
+// The 23 fixtures (~740 rows each) and their sweeps made ~18,000 of them per run,
+// 93% of the wall time, measured: about 5 s on a Mac, where fsync is cheap, and
+// on CI 17 s, 40 s and past the harness's 60 s for one unchanged tree, because
+// fsync is the cost that moves with a busy host — four copies at once on an
+// otherwise idle Mac already tripled it. Nothing here tests durability: every
+// assertion is about the shipped DDL and queries, which SQLite runs the same in
+// memory. The file version also leaked one os.tmpdir() directory per fixture.
 function freshDb() {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "eld-feed-test-"));
-	const db = new Database(path.join(dir, "scratch.db"));
+	const db = new Database(":memory:");
 	db.exec(`
 		CREATE TABLE trucks (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -642,9 +667,24 @@ async function run() {
 		const S = loadShipped(db);
 
 		await S.sweepEldFeedSilence();
+		// ⚠️ THAT SWEEP RAN AN HOUR AGO — BY CONSTRUCTION, NOT BY WAITING. §4.4, §4.7,
+		// §4.8a, §4.10 and §4.12 each compare a stamp this sweep wrote with whatever a
+		// later sweep writes, and in real time the two are milliseconds apart. With
+		// the in-memory fixture the dedupe sweeps below ran in the SAME millisecond
+		// as alerted_at in 28 of 40 runs, so a restamp would pass §4.4 unseen; and
+		// first_seen is kept to the SECOND, so a reset fails §4.7 or §4.10 only when
+		// a second boundary happens to fall in between. The old disk-bound fixture
+		// was slow enough to hide the first and, on a slow runner, sometimes the
+		// second. An hour is the sweep's real cadence: it makes any later write
+		// distinguishable and stays well inside the 24 h re-open cooldown §4.8 needs.
+		db.prepare("UPDATE eld_feed_alerts SET first_seen = datetime(first_seen, '-1 hour'), alerted_at = ? WHERE alert_key = ?")
+			.run(new Date(Date.now() - HOUR).toISOString(), `vid:${VID.t302}`);
 		const first = alertRow(db, VID.t302);
 		const firstSeen = first.first_seen;
 		const alertedAt = first.alerted_at;
+		const ageH = (stamp) => db.prepare("SELECT (julianday('now') - julianday(?)) * 24 AS h").get(stamp).h;
+		ok("§4.0 ⚠️ the first alert's stamps really are an hour old, so no later write can match them by timing",
+			ageH(alertedAt) > 0.99 && ageH(firstSeen) > 0.99, `alerted_at ${ageH(alertedAt)} h, first_seen ${ageH(firstSeen)} h`);
 		const notifCount1 = db.prepare("SELECT COUNT(*) c FROM dispatch_notifications").get().c;
 		const mail1 = S.rec.emails.length;
 
@@ -736,12 +776,18 @@ async function run() {
 		const row = alertRow(db, VID.t302);
 		ok("§4.16 an undelivered alert still records the sighting", !!row);
 		eq("§4.17 ⚠️ alerted_at stays NULL when nothing was delivered", row.alerted_at, null);
+		// The sighting was an hour ago, for the same reason as §4's first sweep: the
+		// retry must not be able to keep first_seen merely by landing in its second.
+		db.prepare("UPDATE eld_feed_alerts SET first_seen = datetime(first_seen, '-1 hour') WHERE alert_key = ?").run(`vid:${VID.t302}`);
+		const firstSeen = alertRow(db, VID.t302).first_seen;
+		ok("§4.17a the sighting really is an hour old, so the retry cannot keep first_seen by timing",
+			db.prepare("SELECT (julianday('now') - julianday(?)) * 24 AS h").get(firstSeen).h > 0.99);
 		// ... and therefore retries rather than going quiet forever.
 		const S2 = loadShipped(db, {});
 		await S2.sweepEldFeedSilence();
 		ok("§4.18 the next sweep RETRIES the undelivered alert", S2.rec.emails.length > 0);
 		ok("§4.19 the retry stamps alerted_at", !!alertRow(db, VID.t302).alerted_at);
-		eq("§4.20 first_seen was never lost across the retry", alertRow(db, VID.t302).first_seen, row.first_seen);
+		eq("§4.20 first_seen was never lost across the retry", alertRow(db, VID.t302).first_seen, firstSeen);
 		db.close();
 	}
 
