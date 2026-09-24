@@ -11,9 +11,10 @@ name: Deploy
 #   1. staging is a hard prerequisite (`needs:`) — same box, same pm2, same Node
 #      — so a merge is always exercised somewhere before production sees it.
 #   2. every deploy smoke-checks; production also checks the public edge.
-#   3. if production's smoke check fails it ROLLS ITSELF BACK to the SHA it was
-#      on, then re-verifies. A bad merge cannot leave production down waiting to
-#      be noticed.
+#   3. if production's smoke or edge check fails it ROLLS ITSELF BACK to the
+#      last live or verified commit (never merely the one a failed deploy left
+#      checked out), then re-verifies. A bad merge cannot leave production down
+#      waiting to be noticed.
 #
 # On a push, BOTH jobs deploy exactly the commit that triggered the run
 # (`sha: github.sha`), so production receives the very commit that staging
@@ -34,7 +35,7 @@ on:
         type: choice
         options: [staging, production]
       ref:
-        description: "Branch, tag or full SHA to deploy (rollback: pass an older SHA)"
+        description: "Branch, tag or full SHA to deploy: letters, digits and ._/- only (rollback: pass an older SHA)"
         required: false
         default: main
         type: string
