@@ -31244,12 +31244,14 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 		// session driver name doesn't match any row. Both manifest as "the
 		// driver app shows zero loads" with no on-screen signal. Surfacing the
 		// reason here lets an admin curl /api/driver/<name> and see what broke
-		// without having to tail server logs.
+		// without having to tail server logs. Built for Super Admin only: no other
+		// caller receives it (scripts/test-documents-role-gates.js).
 		const diagnostic = {};
-		if (!driverCol) {
+		const buildDiagnostic = req.session.user.role === "Super Admin";
+		if (buildDiagnostic && !driverCol) {
 			diagnostic.warning = "driver_column_not_matched";
 			diagnostic.sheetHeaders = jobTracking.headers;
-		} else if (jobTracking.data.length > 0 && loads.length === 0) {
+		} else if (buildDiagnostic && jobTracking.data.length > 0 && loads.length === 0) {
 			diagnostic.warning = "no_loads_for_driver";
 			diagnostic.driverNameSearched = driverNameNorm;
 			diagnostic.sampleDriverNamesInSheet = [
@@ -33990,7 +33992,26 @@ app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 	}
 });
 
+// The one name a caller's own messages and notifications are addressed to, for
+// the two read-flag routes below: a Driver's driver name (their thread is read
+// by it, GET /api/driver/:driverName) and anyone else's username (an investor's
+// thread is read by it, GET /api/investor/messages; POST /api/messages sends as
+// it). Trimmed, case kept — each route folds case the way it always has. Blank
+// means the caller has no name to match, and the route marks nothing.
+function readFlagOwnName(user) {
+	const name = user ? (user.role === "Driver" ? user.driverName : user.username) : "";
+	return typeof name === "string" ? name.trim() : "";
+}
+
 // PUT /api/messages/read — Mark messages as read
+//
+// ⚠️ SUPER ADMIN AND DISPATCHER MARK ANY MESSAGE; EVERY OTHER CALLER MARKS ONLY
+// MESSAGES ADDRESSED TO THEM (readFlagOwnName()), and a caller with no name
+// marks nothing. Staff keep the inbox-wide form because the dispatch inbox
+// (/messages, and the legacy dashboard) clears messages addressed to the shared
+// "Dispatch" desk, which no one person's name matches. The test is "not staff"
+// rather than `=== "Driver"`, so a role added later is narrowed by default.
+// Pinned by scripts/test-documents-role-gates.js.
 app.put("/api/messages/read", requireAuth, driverWriteLimiter, (req, res) => {
 	try {
 		const { messageIds } = req.body; // array of message IDs
@@ -33998,19 +34019,19 @@ app.put("/api/messages/read", requireAuth, driverWriteLimiter, (req, res) => {
 			return res.json({ success: true });
 		}
 
-		// SECURITY: Drivers can only mark messages addressed TO them. Admin/
-		// Dispatcher keep the broader behavior so they can clear inbox-wide.
 		const placeholders = messageIds.map(() => "?").join(",");
 		const user = req.session.user;
-		if (user.role === "Driver") {
-			const recipient = (user.driverName || "").trim();
-			db.prepare(
-				`UPDATE messages SET read = 1 WHERE id IN (${placeholders}) AND LOWER("to") = LOWER(?)`,
-			).run(...messageIds, recipient);
-		} else {
+		if (user.role === "Super Admin" || user.role === "Dispatcher") {
 			db.prepare(
 				`UPDATE messages SET read = 1 WHERE id IN (${placeholders})`,
 			).run(...messageIds);
+		} else {
+			const recipient = readFlagOwnName(user);
+			if (recipient) {
+				db.prepare(
+					`UPDATE messages SET read = 1 WHERE id IN (${placeholders}) AND LOWER("to") = LOWER(?)`,
+				).run(...messageIds, recipient);
+			}
 		}
 
 		res.json({ success: true });
@@ -34021,20 +34042,27 @@ app.put("/api/messages/read", requireAuth, driverWriteLimiter, (req, res) => {
 });
 
 // PUT /api/notifications/read — Mark notifications as read
+//
+// ⚠️ SUPER ADMIN MARKS ANY NOTIFICATION; EVERY OTHER CALLER, DISPATCHER INCLUDED,
+// MARKS ONLY NOTIFICATIONS ADDRESSED TO THEM (readFlagOwnName()), and a caller
+// with no name marks nothing. These rows are the per-person bell the driver app
+// reads (/driver: Driver, Super Admin), which is the only caller; dispatch's own
+// alerts are dispatch_notifications, marked by PUT /api/dispatch-notifications/read.
+// Pinned by scripts/test-documents-role-gates.js.
 app.put("/api/notifications/read", requireAuth, driverWriteLimiter, (req, res) => {
 	try {
 		const { ids } = req.body;
 		if (!ids || !ids.length) return res.json({ success: true });
 		const placeholders = ids.map(() => "?").join(",");
-		// SECURITY: Drivers can only mark their own notifications. Admin keeps
-		// broader behavior (e.g. clearing dispatch alerts on behalf).
 		const user = req.session.user;
-		if (user.role === "Driver") {
-			const driverNameLower = (user.driverName || "").trim().toLowerCase();
-			db.prepare(`UPDATE notifications SET read = 1 WHERE id IN (${placeholders}) AND LOWER(driver_name) = ?`)
-				.run(...ids, driverNameLower);
-		} else {
+		if (user.role === "Super Admin") {
 			db.prepare(`UPDATE notifications SET read = 1 WHERE id IN (${placeholders})`).run(...ids);
+		} else {
+			const recipientLower = readFlagOwnName(user).toLowerCase();
+			if (recipientLower) {
+				db.prepare(`UPDATE notifications SET read = 1 WHERE id IN (${placeholders}) AND LOWER(driver_name) = ?`)
+					.run(...ids, recipientLower);
+			}
 		}
 		res.json({ success: true });
 	} catch (error) {
@@ -36232,13 +36260,22 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 });
 
 // GET /api/documents/:loadId — Fetch all documents for a load
-app.get("/api/documents/:loadId", requireAuth, async (req, res) => {
+//
+// ⚠️ SUPER ADMIN AND DISPATCHER (ANY LOAD) OR THE LOAD'S DRIVER, AND NO OTHER
+// ROLE. requireRole answers any other role 403 "Forbidden" before the handler
+// runs, so a refused caller costs no sheet or database read. The callers, and
+// the roles they admit: the dashboard's Active and Completed load panels
+// (/dashboard: Super Admin, Dispatcher) and the driver app's DocumentList
+// (/driver: Driver, Super Admin). The ownership check below tests "not staff"
+// rather than `=== "Driver"`, so it still holds if the role list is widened.
+// Pinned by scripts/test-documents-role-gates.js.
+app.get("/api/documents/:loadId", requireRole("Super Admin", "Dispatcher", "Driver"), async (req, res) => {
 	try {
 		const loadId = decodeURIComponent(req.params.loadId);
 		// SECURITY: drivers can only read documents for their own loads.
 		// Without this guard, any logged-in driver could enumerate PODs and
 		// receipts on any other driver's load by guessing the loadId.
-		if (req.session.user.role === "Driver") {
+		if (req.session.user.role !== "Super Admin" && req.session.user.role !== "Dispatcher") {
 			const owned = await loadBelongsToDriver(loadId, req.session.user.driverName);
 			if (sentIfLoadOwnershipUnverified(res, owned)) return;
 			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
@@ -36292,8 +36329,9 @@ app.get("/api/documents/:loadId", requireAuth, async (req, res) => {
 // Super Admin ONLY, per the owner. Deleting a POD is what makes a load
 // un-invoiceable, so it sits with whoever answers for the money — not with
 // whoever is moving the freight. Note this is narrower than the UPLOAD route
-// (requireAuth), which must stay open: drivers upload their own PODs from the
-// driver app, and dispatchers attach ones that arrive by email.
+// (Super Admin, Dispatcher, or the load's Driver), which must stay that open:
+// drivers upload their own PODs from the driver app, and dispatchers attach ones
+// that arrive by email.
 app.delete("/api/documents/:id", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const id = Number(req.params.id);
@@ -39442,21 +39480,55 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 	}
 });
 
+// The document type POST /api/documents/upload stores, or null when this role may
+// not upload it. A Dispatcher or a Driver picks from the four types its only
+// client offers — DocumentUpload.vue's type selector, which is the driver app's
+// Documents panel and the dashboard's Active and Completed load panels alike.
+// Matched case-insensitively and stored in the spelling below, the one the
+// readers of documents.type compare against (the Delivered POD check, the driver
+// app's per-type counts, the receipt OCR queue, the POD sheet flag). Anything
+// else, a non-string included, is null. Super Admin is not narrowed: its value
+// is stored as sent, as before. Pinned by scripts/test-documents-role-gates.js.
+function uploadDocTypeFor(role, requested) {
+	if (role === "Super Admin") return requested;
+	const UPLOAD_DOC_TYPES = ["POD", "BOL", "Receipt", "Other"];
+	const asked = typeof requested === "string" ? requested.trim().toLowerCase() : "";
+	return UPLOAD_DOC_TYPES.find((t) => t.toLowerCase() === asked) || null;
+}
+
 // POST /api/documents/upload — Upload document (images → PDF, or direct file)
-app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, res) => {
+//
+// ⚠️ SUPER ADMIN AND DISPATCHER (ANY LOAD) OR THE LOAD'S DRIVER, AND NO OTHER
+// ROLE — the same gate as GET /api/documents/:loadId. requireRole is mounted
+// BEFORE driverWriteLimiter, so a refused role is answered 403 without spending
+// the limiter's budget, reading the sheet or writing a file. A Dispatcher or a
+// Driver uploads only the types uploadDocTypeFor() allows: 400
+// DOC_TYPE_NOT_ALLOWED otherwise, before any read. Pinned by
+// scripts/test-documents-role-gates.js.
+app.post("/api/documents/upload", requireRole("Super Admin", "Dispatcher", "Driver"), driverWriteLimiter, async (req, res) => {
 	try {
 		const { loadId, rowIndex, photoData, fileType, fileName: clientFileName } = req.body;
 		const driverName = resolveDriverActor(req, res, req.body.driverName);
 		if (driverName === null) return;
-		const docType = req.body.docType || req.body.type || "POD";
+		const docType = uploadDocTypeFor(req.session.user.role, req.body.docType || req.body.type || "POD");
 		if (!loadId || !rowIndex || !photoData) {
 			return res
 				.status(400)
 				.json({ error: "Please select a file before uploading." });
 		}
-		// SECURITY: drivers can only upload docs for loads assigned to them
-		if (req.session.user.role === "Driver") {
-			const owned = await loadBelongsToDriver(loadId, driverName);
+		if (docType === null) {
+			return res.status(400).json({
+				error: "Choose a document type: POD, BOL, Receipt or Other.",
+				code: "DOC_TYPE_NOT_ALLOWED",
+			});
+		}
+		// SECURITY: drivers can only upload docs for loads assigned to them.
+		// "Not staff" rather than `=== "Driver"`, and the SESSION's driver name
+		// rather than `driverName`: resolveDriverActor() passes a body-supplied
+		// name through for every role but Driver, so only the session name can
+		// stand for the caller if the role list is ever widened.
+		if (req.session.user.role !== "Super Admin" && req.session.user.role !== "Dispatcher") {
+			const owned = await loadBelongsToDriver(loadId, req.session.user.driverName);
 			if (sentIfLoadOwnershipUnverified(res, owned)) return;
 			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
 		}
