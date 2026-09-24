@@ -135,13 +135,13 @@ Socket.IO is the way the UI stays current without polling. Clients emit `registe
 - `load-accepted` / `load-declined` — to the dispatch room on driver response.
 - `status-updated` — to the dispatch room on every status transition.
 - `dispatch-notification` — for everything that needs to surface in the admin notifications panel. Metadata always contains `loadId` so clicks can deep-link to `/dashboard?load=…`.
-- `new-message` — to all on chat message.
+- `new-message` — to the dispatch room and each chat party's rooms.
 - `pod-uploaded` — to the dispatch room when a driver uploads proof of delivery.
 - `location-update` — to the dispatch room when a driver reports GPS.
 - `geofence-trigger` — to driver and dispatch room when the geofence auto-advances a status.
 - `reload` — to all clients 500 ms after server start, used as a dev-only live-reload signal.
 
-Investors join an `investor` room — separate from the `dispatch` room — so dispatch traffic doesn't leak to them. Drivers join a per-driver room `driver:<name>` keyed by their full name (case-insensitive after normalization).
+Investors join an `investor` room — separate from the `dispatch` room — so dispatch traffic doesn't leak to them. Drivers join a per-driver room `driver:<name>` keyed by their full name (case-insensitive after normalization), and the other roles a `user:<username>` room; the prefixes keep any name from equalling a role room. Only a page on the app's own origin can open the connection.
 
 ## The load-exclusion helper
 

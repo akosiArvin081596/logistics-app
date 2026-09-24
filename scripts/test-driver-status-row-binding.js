@@ -316,7 +316,9 @@ check("...and the feed payload no longer shorthands a bare `driver`",
 	/\{ loadId, driver, rowIndex/.test(CANCEL_CODE), false);
 check("the driver notification targets the bound driver",
 	/insertNotification\.run\(\s*boundDriver\.toLowerCase\(\)/.test(CANCEL_CODE), true);
-check("the socket room is the bound driver", /io\.to\(boundDriver\.toLowerCase\(\)\)/.test(CANCEL_CODE), true);
+// Named through driverRoom(), the one way a driver's room is spelled
+// (scripts/test-socket-hardening.js pins that).
+check("the socket room is the bound driver", /io\.to\(driverRoom\(boundDriver\)\)/.test(CANCEL_CODE), true);
 check("the dispatch feed records the bound driver", /driver: boundDriver/.test(CANCEL_CODE), true);
 check("the audit line names the bound driver", /\(driver: \$\{boundDriver\}\)/.test(CANCEL_CODE), true);
 // It must be read BEFORE the write blanks the Driver cell, or it is always "".
