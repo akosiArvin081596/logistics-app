@@ -6570,6 +6570,16 @@ const RATECON_DRIVE_FOLDER_ID =
 // The rate-con matcher's pure helpers. Required at module scope because step 1 of
 // getRateConBytes() uses filenameCarriesLoadId() on the hot path.
 const rcIndexShared = require("./lib/ratecon-drive-index.js");
+// The documents.type spellings that ARE a rate-con (compared upper-cased, as
+// UPPER(type) in SQL). 'BOL' is deliberately NOT one of them: getRateConBytes()
+// step 2 still reads BOL rows, but only as a last-resort supporting document,
+// and POST /api/admin/ratecon-index must not count one as a linked rate-con.
+// One list for both, so they cannot disagree about what "a rate-con on file" is.
+// (GET /api/documents/:loadId hides rate-cons from its list with its own, looser
+// match; that decides what is shown, never what is trusted.) The upload types
+// POST /api/documents/upload offers a Driver or Dispatcher (uploadDocTypeFor())
+// must never include one of these — scripts/test-invoice-draft-bol.js pins it.
+const RATECON_DOC_TYPES = Object.freeze(["RATECON", "RATE CON", "RATE_CON"]);
 // Bounds on getRateConBytes() step 4, the by-CONTENT fallback that runs when the
 // file name does not carry our load id. Both are cost controls on Drive
 // downloads, not correctness knobs — widening them scans more PDFs per miss, it
@@ -18343,17 +18353,13 @@ app.post("/api/admin/ratecon-index", requireRole("Super Admin"), refuseCrossSite
 		if (!loadIdCol) return res.status(500).json({ error: "Load ID column not found in Job Tracking" });
 
 		// Only loads that have NO rate-con resolvable today: no file-name hit and
-		// no documents row. Re-matching a load that already works would spend
+		// no rate-con row. Re-matching a load that already works would spend
 		// Drive quota to confirm what is already known.
 		// Same type list as getRateConBytes() step 2 — narrowing it to 'RATECON'
 		// meant a load stored as 'RATE CON' looked unlinked, got rescanned every
-		// run, and could collect a duplicate row.
-		const linked = new Set(
-			db.prepare(
-				`SELECT load_id FROM documents
-				 WHERE UPPER(type) IN ('RATECON','RATE CON','RATE_CON','BOL') AND deleted_at IS NULL`,
-			).all().map((r) => normLoadKey(r.load_id)),
-		);
+		// run, and could collect a duplicate row. A BOL row does not make a load
+		// linked (see loadsWithRateConOnFile()).
+		const linked = loadsWithRateConOnFile();
 		// ⚠️ CANCELLED AND SOFT-DELETED LOADS ARE NOT CANDIDATES. This ran over the
 		// raw sheet, so a live production run proposed linking a rate-con to load
 		// 209875716 — a CANCELLED duplicate row of 30080873 (same commodity, same
@@ -36981,7 +36987,11 @@ async function fetchDocumentBytes(doc) {
 //      load the hard way.
 //   3. A caller-supplied base64 in the request body (rateconPdfBase64).
 //   4. The Drive folder BY CONTENT, when 1–3 all came up empty. See below.
+//   Last, and only as a supporting document: the load's BOL rows, tagged
+//   'documents-bol' so the route reads nothing from them (see step 2).
 // Returns { buffer, fileName, candidates } (buffer null when nothing is found).
+// Every candidate carries `source`; brokerInvoice.rateconSourceTrust() decides
+// what the route may take from each.
 //
 // ⚠️ WHY STEP 4 EXISTS — step 1 rests on an assumption that is not a rule.
 // This comment used to say "We match on the order number (== loadId for
@@ -37073,21 +37083,39 @@ async function getRateConBytes(loadId, body, loadCtx = null, opts = {}) {
 				.prepare(
 					`SELECT * FROM documents
 					 WHERE load_id IN (${docKeys.map(() => "?").join(",")})
-					   AND UPPER(type) IN ('RATECON','RATE CON','RATE_CON','BOL')
+					   AND (UPPER(type) IN (${RATECON_DOC_TYPES.map(() => "?").join(",")}) OR UPPER(type) = 'BOL')
 					   AND deleted_at IS NULL
 					 ORDER BY CASE WHEN UPPER(type) = 'BOL' THEN 1 ELSE 0 END,
 					          uploaded_at DESC`,
 				)
-				.all(...docKeys)
+				.all(...docKeys, ...RATECON_DOC_TYPES)
 		: [];
+	// ⚠️ A BOL IS NOT A RATE-CON, and it is not READ as one. It is shipping
+	// paperwork rather than the broker's rate confirmation, so it gets its own
+	// source, 'documents-bol', which brokerInvoice.rateconSourceTrust() allows to
+	// supply NO invoice field (total, order #, PO #, move #, trailer) and NO
+	// recipient. It is also held back and appended LAST — after the body upload
+	// and after step 4 — so it never outranks a real rate-con, and a load whose
+	// only stored document is a BOL still gets the step-4 search for its
+	// rate-con. It stays a candidate only so that, when nothing else exists, it
+	// can ride along as a supporting document.
+	//
 	// Capped like the Drive branch above. A load with several BOL page-scans would
-	// otherwise push one candidate per scan — each an extra byte read, an extra
-	// base64 blob in the dryRun payload, and an extra Gemini call in the
-	// alternate-recipient loop, which is the loop that decides where the invoice
-	// is mailed. Ranked RATECON-first, so the cap only ever drops trailing BOLs.
+	// otherwise push one candidate per scan — each an extra byte read and an extra
+	// base64 blob in the dryRun payload. Ranked RATECON-first, so the cap only
+	// ever drops trailing BOLs.
+	const bolCandidates = [];
 	for (const row of docRows.slice(0, 5)) {
 		const buffer = await fetchDocumentBytes(row);
-		if (buffer) candidates.push({ buffer, fileName: row.file_name || `${orderNumber || "ratecon"}.pdf`, label: row.file_name || "Stored rate-con", source: "documents" });
+		if (!buffer) continue;
+		const isRateCon = RATECON_DOC_TYPES.includes(String(row.type || "").toUpperCase());
+		const cand = {
+			buffer,
+			fileName: row.file_name || `${orderNumber || "ratecon"}.pdf`,
+			label: row.file_name || (isRateCon ? "Stored rate-con" : "Stored BOL"),
+			source: isRateCon ? "documents" : "documents-bol",
+		};
+		(isRateCon ? candidates : bolCandidates).push(cand);
 	}
 
 	// 3) Caller-supplied base64 fallback.
@@ -37102,7 +37130,8 @@ async function getRateConBytes(loadId, body, loadCtx = null, opts = {}) {
 
 	// 4) LAST RESORT — the Drive folder BY CONTENT.
 	//
-	// Runs ONLY when 1–3 produced nothing, because it downloads PDFs. Bounded
+	// Runs ONLY when 1–3 produced no rate-con (a BOL held back in step 2 does not
+	// count — it is not one), because it downloads PDFs. Bounded
 	// three ways: a date window around the load's own dates, a hard file cap,
 	// and the fact that a hit is written to `documents` so this never runs twice
 	// for the same load. Measured on the live folder: a +/-14-day window is ~26
@@ -37195,13 +37224,35 @@ async function getRateConBytes(loadId, body, loadCtx = null, opts = {}) {
 		}
 	}
 
-	// Primary (first) drives the attachment + order/total extraction, unchanged.
+	// BOLs last, behind every rate-con source (see step 2). A BOL is the primary
+	// only when there is no rate-con at all, and even then nothing is read from it.
+	candidates.push(...bolCandidates);
+
+	// Primary (first) drives the attachment, and — when its source allows it
+	// (brokerInvoice.rateconSourceTrust()) — the order/total extraction.
 	const primary = candidates[0] || null;
 	return {
 		buffer: primary ? primary.buffer : null,
 		fileName: primary ? primary.fileName : `${orderNumber || "ratecon"}.pdf`,
 		candidates,
 	};
+}
+
+// Load keys (normLoadKey) that already have a RATE-CON row on file — the set
+// POST /api/admin/ratecon-index skips as "linked". Same type list as step 2 of
+// getRateConBytes() (RATECON_DOC_TYPES), and like step 2 it does NOT count a
+// BOL: a load whose only stored document is a BOL has no rate-con, so the
+// backfill must still look for one.
+function loadsWithRateConOnFile() {
+	return new Set(
+		db
+			.prepare(
+				`SELECT load_id FROM documents
+				 WHERE UPPER(type) IN (${RATECON_DOC_TYPES.map(() => "?").join(",")}) AND deleted_at IS NULL`,
+			)
+			.all(...RATECON_DOC_TYPES)
+			.map((r) => normLoadKey(r.load_id)),
+	);
 }
 
 // ⚠️ ONE BUILDER FOR THE MATCHER'S loadCtx, and it exists because the two
@@ -37846,58 +37897,66 @@ app.post(
 				}
 				console.error("Draft invoice: Gemini fallback failed:", e.message);
 			};
-			const rcFields = await brokerInvoice.extractRateConFields(rateconBuffer, {
-				brokerEmail, // exclude the booking agent's own email from documents-email detection
-				geminiExtract,
-				onGeminiError,
-			});
-
+			// ⚠️ WHAT A CANDIDATE MAY SUPPLY IS DECIDED BY ITS SOURCE, IN ONE PLACE.
+			// brokerInvoice.readRateConCandidates() applies rateconSourceTrust() to the
+			// primary AND to the alternate-recipient loop below it, so the two cannot
+			// drift. Do not call extractRateConFields() on a candidate directly here.
+			//
 			// A load can have MULTIPLE rate-con files (the original + a "Re:" reply, or
 			// a signed scan). getRateConBytes returns the newest as the primary, but the
 			// billing / "send documents to" email may live on ANOTHER file — so if the
-			// primary yielded none, check the other candidates and take the first that
-			// does. Prevents defaulting the invoice to the wrong inbox (client 2026-07-30:
-			// Steam Logistics load 2214407 — carrierdocs@steamlogistics.com was only on the
-			// original file, not the newer "Re:" scan). Only runs when the primary is empty.
+			// primary yielded none, the reader checks the other candidates and takes the
+			// first that does. Prevents defaulting the invoice to the wrong inbox (client
+			// 2026-07-30: Steam Logistics load 2214407 — carrierdocs@steamlogistics.com
+			// was only on the original file, not the newer "Re:" scan).
+			//
 			// ⚠️ A DOCUMENT WE FOUND BY INFERENCE MAY NOT CHOOSE WHERE MONEY IS SENT.
 			// For every non-Bison broker `documentsEmail` becomes the Gmail To:, so a
 			// content-matched file that turned out to belong to someone else would
 			// mail this invoice — and that customer's rate — to an address lifted off
-			// THEIR paperwork. A file matched by NAME, stored on the load, or handed
-			// to us in the request was identified by something a human can point at;
-			// one matched by reading PDFs was not. Bison is pinned regardless, so this
-			// only ever affects the brokers where it matters.
+			// THEIR paperwork. 'drive-content' may therefore fill in fields but never
+			// the recipient. Bison is pinned regardless, so this only ever affects the
+			// brokers where it matters.
 			//
-			// Rows already in `documents` are trusted: after the persist-on-approve
-			// change above, a row exists only because a human approved a draft with
-			// that file attached and visible in the review modal.
-			const primaryFromContent = !!(rateconCandidates && rateconCandidates[0] && rateconCandidates[0].source === "drive-content");
-			if (primaryFromContent && rcFields.documentsEmail) {
+			// ⚠️ ONLY RATE-CON ROWS in `documents` are trusted, and the trust is in who
+			// writes them: POST /api/loads/from-ratecon (a Super Admin or Dispatcher
+			// creating the load FROM that PDF), rememberRateConMatch() (a Super Admin
+			// or Dispatcher's non-preview request on this route found the file by
+			// content — normally the approve after the review modal showed it — or a
+			// Super Admin applied the backfill), and an upload typed as a rate-con,
+			// which POST /api/documents/upload's type list keeps to Super Admin
+			// (uploadDocTypeFor()). A BOL row is
+			// not a rate-con: getRateConBytes() tags it 'documents-bol', and nothing —
+			// no total, no order/PO/move #, no trailer, no recipient — is read from
+			// it. It is only attached, as a supporting document, when no rate-con
+			// exists at all.
+			const rcRead = await brokerInvoice.readRateConCandidates(
+				rateconCandidates,
+				(buf, { alternate } = {}) =>
+					brokerInvoice.extractRateConFields(buf, {
+						brokerEmail, // exclude the booking agent's own email from documents-email detection
+						// On an ALTERNATE read, drop only the GEMINI half once the key is
+						// refusing — the documents email that loop hunts for comes from the
+						// deterministic text scan, so skipping the read would throw away a
+						// recovery that never needed Gemini. null keeps the free scan.
+						geminiExtract: alternate && geminiUnavailable ? null : geminiExtract,
+						onGeminiError,
+					}),
+				{ onAlternateError: (e) => console.error("Draft invoice: alternate rate-con extract failed:", e.message) },
+			);
+			const rcFields = rcRead.fields;
+			if (rcRead.primarySource && !rcRead.primaryRead) {
 				console.warn(
-					`Draft invoice ${loadId}: ignoring the documents email on a CONTENT-matched rate-con — recipient falls back to the broker default.`,
+					`Draft invoice ${loadId}: no rate-con on file, only a ${rcRead.primarySource} document — attaching it as supporting paperwork and reading nothing from it.`,
 				);
-				rcFields.documentsEmail = "";
 			}
-			if (!rcFields.documentsEmail && Array.isArray(rateconCandidates) && rateconCandidates.length > 1) {
-				for (const cand of rateconCandidates) {
-					if (!cand || !cand.buffer || cand.buffer === rateconBuffer) continue;
-					if (cand.source === "drive-content") continue; // same reasoning as above
-					try {
-						// Drop only the GEMINI half when the key is refusing — the
-						// documents email this loop is hunting for comes from the
-						// deterministic text scan, so skipping the whole loop would
-						// throw away a recovery that never needed Gemini. Passing null
-						// keeps the free scan and spends nothing.
-						const alt = await brokerInvoice.extractRateConFields(cand.buffer, { brokerEmail, geminiExtract: geminiUnavailable ? null : geminiExtract, onGeminiError });
-						if (alt.documentsEmail) {
-							rcFields.documentsEmail = alt.documentsEmail;
-							console.log(`Draft invoice ${loadId}: documents email recovered from an alternate rate-con file (of ${rateconCandidates.length} candidates).`);
-							break;
-						}
-					} catch (e) {
-						console.error("Draft invoice: alternate rate-con extract failed:", e.message);
-					}
-				}
+			if (rcRead.recipientIgnored) {
+				console.warn(
+					`Draft invoice ${loadId}: ignoring the documents email on a ${rcRead.primarySource} rate-con — recipient falls back to the broker default.`,
+				);
+			}
+			if (rcRead.recipientFrom > 0) {
+				console.log(`Draft invoice ${loadId}: documents email recovered from an alternate rate-con file (of ${rateconCandidates.length} candidates).`);
 			}
 
 			// Recipient: the rate-con's "email documents to" address wins over the
@@ -38196,8 +38255,9 @@ app.post(
 					orderNumberSource,
 					// Provenance of the attached rate-con, for the same reason:
 					// 'drive' (matched by file name) | 'documents' (stored/remembered) |
-					// 'upload' | 'drive-content' (found by reading the PDFs). null when
-					// there is no rate-con at all.
+					// 'upload' | 'drive-content' (found by reading the PDFs) |
+					// 'documents-bol' (no rate-con on file — a BOL is attached instead and
+					// nothing was read from it). null when there is nothing at all.
 					rateconSource: (rateconCandidates && rateconCandidates[0] && rateconCandidates[0].source) || null,
 					// RAW number, not the formatted `total`, so the input starts as
 					// "3000" and not "$3,000.00". null when there is nothing to seed —
