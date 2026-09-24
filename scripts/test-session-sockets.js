@@ -21,7 +21,29 @@
  *      name (case-only and cleared included). Another admin's edit spares no
  *      session, a self-edit spares the one making it; the same name resent,
  *      even padded, or an email / full name / company edit revokes nothing;
- *      the update_user audit line carries the count
+ *      the update_user audit line carries the count. §8 pins the revocation
+ *      after the commit and before the audit line, with no await or return
+ *      between
+ *   §3c A SELF-EDIT of the caller's own role, driver name or password rebuilds
+ *      the spared session from the account row (the fields login writes) under
+ *      a NEW session ID, whose cookie the response carries, and ends the old
+ *      ID's sockets, which reconnect under the new identity; a CONNECT sent
+ *      again over a transport opened before the edit is refused. A self-demoted
+ *      admin is refused as one on the next request. The audit line keeps the
+ *      identity that made the change; editing someone else, or only a profile
+ *      field, leaves the editor's session alone; a session revoked while its
+ *      own edit awaited stays ended, and one whose account row cannot be read
+ *      is ended, never left stale; a store that cannot delete a session is
+ *      logged
+ *   §3d PUT /api/admin/fix-driver-name revokes every account whose stored
+ *      driver name its cascade changes, read after the route's last await (a
+ *      change landing during the sheet write is honoured), and no other: not a
+ *      full-name-only match, not an account already spelled the new way. A dry
+ *      run, a refusal, a failed sheet write and a rolled-back cascade revoke
+ *      nothing; a self-rename spares and rebuilds the requesting session; the
+ *      fix_driver_name audit line carries the count. Runs on the REAL cascade,
+ *      and §8 pins the read after the last await and the revocation before the
+ *      audit line, with nothing able to return between the commit and it
  *   §4 CHANGE-PASSWORD closes the sockets of every session of the account,
  *      this browser's old one included (a socket must not outlive the cookie
  *      it was opened on), and a socket on the NEW cookie is accepted and joins;
@@ -42,24 +64,27 @@
  *   §7 THE PUBLIC TRACKER (/public-track, no session) is untouched by all of
  *      it, including when it shares the signed-in tab's transport
  *   §8 SOURCE pins (comment-stripped): each call sits before the session write
- *      it accompanies; PUT /api/users/:id revokes once, synchronously, after
- *      its transaction and before its audit line; the sweep is scheduled once,
- *      every 60 s, unref'd; the helpers close the namespace, never the transport
+ *      it accompanies; the sweep is scheduled once, every 60 s, unref'd; the
+ *      helpers close the namespace, never the transport
  *   §9 DISCRIMINATION: one mutant per call site, and each must be caught
  *
  * Runs the SHIPPED code: the session configuration, the login / setup / logout
- * / session / change-password routes, PUT /api/users/:id, requireAuth,
- * requireRole, the must-change-password refresh, purgeUserSessions(),
- * stampLastLogin(), logAudit(), the socket helpers and sweep, and both
- * "connection" handlers are lifted out of server.js and wired to the real
- * express-session, the real better-sqlite3-session-store, a real Socket.IO
- * server, and real socket.io-client connections (client/node_modules, which
- * `npm ci` at the repo root installs through the postinstall). In-memory
- * SQLite, with the users and audit_trail tables built from server.js's own
- * statements. Loopback on 127.0.0.1:0: no fixed port, no app.db, no network.
+ * / session / change-password routes, PUT /api/users/:id, PUT
+ * /api/admin/fix-driver-name, requireAuth, requireRole, the must-change-password
+ * refresh, purgeUserSessions(), refreshOwnSession(), stampLastLogin(),
+ * logAudit(), the socket helpers and sweep, and both "connection" handlers are
+ * lifted out of server.js and wired to the real express-session, the real
+ * better-sqlite3-session-store, a real Socket.IO server, and real
+ * socket.io-client connections (client/node_modules, which `npm ci` at the
+ * repo root installs through the postinstall). In-memory SQLite, with the
+ * users and audit_trail tables built from server.js's own statements.
+ * Loopback on 127.0.0.1:0: no fixed port, no app.db, no network.
  * PUT /api/users/:id's period, sheet and rename-cascade calls are stubbed to
  * "nothing blocks", so every edit reaches the revocation: this runner asks who
- * stays signed in, not what the cascade writes.
+ * stays signed in, not what the cascade writes. fix-driver-name runs on the
+ * real cascade (applyDriverRenameSqlite() over DRIVER_RENAME_TARGETS, lifted;
+ * every table but `users` is absent, which the cascade skips by design), with
+ * its sheet, period and merge planning stubbed to "nothing blocks".
  *
  * Run: node scripts/test-session-sockets.js    # exits 1 on failure
  */
@@ -178,6 +203,9 @@ const SRCS = {
 	change: liftRoute('app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async (req, res) => {'),
 	purge: liftFunction("function purgeUserSessions(userId, exceptSid) {"),
 	updateUser: liftRoute('app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {'),
+	refresh: liftFunction("function refreshOwnSession(req) {"),
+	fixName: liftRoute('app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, res) => {'),
+	accountIds: liftFunction("function driverRenameAccountIds(oldName, newName, opts = {}) {"),
 	helpers: HELPER_HEADS.map(liftFunction).join("\n"),
 	ioHandler: liftHandler('io.on("connection", (socket) => {', 'io.on("connection", '),
 };
@@ -187,6 +215,30 @@ const STAMP_SRC = liftFunction("function stampLastLogin(userId) {");
 const AUDIT_SRC = liftFunction("function logAudit(req, action, entity, entityId, details) {");
 const REQUIRE_AUTH_SRC = liftFunction("function requireAuth(req, res, next) {");
 const REQUIRE_ROLE_SRC = liftFunction("function requireRole(...roles) {");
+// The driver-rename cascade fix-driver-name runs, exactly as server.js defines
+// it: the target list, its WHERE/argument/value builders, and the executor.
+// A one-line `const NAME = …;`, or a block from its head to the `];` that
+// closes it in column 0.
+function liftConst(head, close = null) {
+	const needle = `\n${head}`;
+	const hits = SRC.split(needle).length - 1;
+	if (hits !== 1) die(`expected exactly 1 statement starting ${JSON.stringify(head)}, found ${hits}`);
+	const a = SRC.indexOf(needle) + 1;
+	const end = close ? SRC.indexOf(close, a) : SRC.indexOf(";\n", a);
+	if (end < 0) die(`no end found after ${head}`);
+	return SRC.slice(a, end + (close ? close.length : 1));
+}
+const CASCADE_SRC = [
+	liftConst("const DRIVER_RENAME_TARGETS = [", "\n];"),
+	liftFunction("function driverRenameWhereSql(t, opts = {}) {"),
+	liftFunction("function driverRenameWhereArgs(t, nameLower, opts = {}) {"),
+	liftFunction("function driverRenameNewValue(t, newName) {"),
+	liftConst("const DRIVER_RENAME_ID_CAP = "),
+	liftFunction("function replaceNameOnWordBoundary(text, oldName, newName) {"),
+	liftFunction("function applyDriverRenameSqlite({ oldName, newName, userId = null, collectIds = false }) {"),
+].join("\n");
+const HARD_BLOCK_SRC = liftConst("const DRIVER_RENAME_HARD_BLOCK_CODES = ");
+const COL_LETTER_SRC = liftFunction("function colLetter(idx) {");
 const CURRENT_FLAG_SRC = liftFunction("function currentMustChangePassword(sessionUser) {");
 const REFRESH_FLAG_SRC = liftFunction("function refreshPasswordChangeFlag(req, res, next) {");
 const LOAD_ID_RE_SRC = (() => {
@@ -315,19 +367,75 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 	const requireRole = new Function(`${REQUIRE_ROLE_SRC}\nreturn requireRole;`)();
 	const purgeCalls = [];
 	const recordPurge = (userId, exceptSid) => { purgeCalls.push([userId, exceptSid]); return purgeUserSessions(userId, exceptSid); };
-	const noSheetRows = async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: [["Load ID", "Driver"]] } }) } } });
+	const refreshOwnSession = new Function("db", "disconnectSessionSockets", "liveSessionIds", `${sources.refresh}\nreturn refreshOwnSession;`)(
+		db, helpers.disconnectSessionSockets, helpers.liveSessionIds);
+	// The Job Tracking read a rename makes is one of the route's awaits; a
+	// scenario can land a change in it through `putEnv.duringSheetRead`.
+	const putEnv = { duringSheetRead: null };
+	const noSheetRows = async () => ({ spreadsheets: { values: { get: async () => {
+		await new Promise((resolve) => setImmediate(resolve));
+		if (putEnv.duringSheetRead) putEnv.duringSheetRead();
+		return { data: { values: [["Load ID", "Driver"]] } };
+	} } } });
+	const auditText = (v, max) => String(v == null ? "" : v).slice(0, max);
 	new Function("app", "requireRole", "db", "getSheets", "SPREADSHEET_ID", "auditText", "recordPeriodRefusal", "userUpdateLockBlockers",
 		"periodLabel", "driverRenameMergeScan", "applyDriverRenameSqlite", "syncDriverToCarrierSheet", "purgeUserSessions", "logAudit",
-		"notifyChange", sources.updateUser)(
-		app, requireRole, db, noSheetRows, "t3-not-a-sheet", (v, max) => String(v == null ? "" : v).slice(0, max), () => {},
+		"notifyChange", "refreshOwnSession", sources.updateUser)(
+		app, requireRole, db, noSheetRows, "t3-not-a-sheet", auditText, () => {},
 		() => ({ unreadable: false, blockers: [] }), (period) => period, () => ({ mergeTargets: {}, mergeRows: 0 }), () => ({ counts: {} }),
-		() => {}, recordPurge, logAudit, () => {});
+		() => {}, recordPurge, logAudit, () => {}, refreshOwnSession);
+
+	// PUT /api/admin/fix-driver-name on the REAL cascade: the executor, the target
+	// list and its builders are server.js's own, so "the accounts whose sessions
+	// end" can be checked against the accounts the cascade actually changed.
+	// Planning is stubbed to "nothing blocks" unless a scenario says otherwise
+	// through `fixEnv`: whether period_locks reads, whether the sheet write
+	// fails, and what lands in the database while that write — the route's last
+	// await — is in flight.
+	const cascade = new Function("db", `${CASCADE_SRC}\n${sources.accountIds}\n` +
+		"return { DRIVER_RENAME_TARGETS, DRIVER_RENAME_ID_CAP, applyDriverRenameSqlite, driverRenameAccountIds };")(db);
+	const fixEnv = {
+		locksReadable: true,
+		sheetRows: [["Load ID", "Driver", "Assigned Date"], ["L-100", "Bob Driver", "2026-09-01"]],
+		failSheetWrite: false,
+		duringSheetWrite: null,
+		sheetWrites: 0,
+		refusals: [],
+		merge: null, // a driverRenameMergeScan() answer, to make the route treat the rename as a merge
+	};
+	const fixSheets = async () => ({ spreadsheets: { values: {
+		get: async () => ({ data: { values: fixEnv.sheetRows } }),
+		batchUpdate: async () => {
+			await new Promise((resolve) => setImmediate(resolve)); // a real round trip yields
+			if (fixEnv.duringSheetWrite) fixEnv.duringSheetWrite();
+			if (fixEnv.failSheetWrite) throw new Error("simulated sheet outage");
+			fixEnv.sheetWrites++;
+			return {};
+		},
+	} } });
+	new Function("app", "requireRole", "db", "getSheets", "SPREADSHEET_ID", "colLetter", "isLocked", "periodLocksReadable",
+		"namedLockedPeriods", "planDriverRenameSqlite", "driverRenameMergeScan", "DRIVER_RENAME_TARGETS", "DRIVER_RENAME_HARD_BLOCK_CODES",
+		"DRIVER_RENAME_ID_CAP", "recordPeriodRefusal", "auditText", "auditReasonNote", "applyDriverRenameSqlite", "driverRenameAccountIds",
+		"purgeUserSessions", "logAudit", "refreshOwnSession", sources.fixName)(
+		app, requireRole, db, fixSheets, "t3-not-a-sheet", new Function(`${COL_LETTER_SRC}\nreturn colLetter;`)(), () => false,
+		() => fixEnv.locksReadable, () => [], () => ({ targets: {}, blockers: [] }), () => fixEnv.merge || ({ mergeTargets: {}, mergeRows: 0 }),
+		cascade.DRIVER_RENAME_TARGETS, new Function(`${HARD_BLOCK_SRC}\nreturn DRIVER_RENAME_HARD_BLOCK_CODES;`)(), cascade.DRIVER_RENAME_ID_CAP,
+		(audit, code) => { fixEnv.refusals.push(code); }, auditText, () => "", cascade.applyDriverRenameSqlite, cascade.driverRenameAccountIds,
+		recordPurge, logAudit, refreshOwnSession);
+
+	// Test-only: refreshOwnSession()'s fail-closed branch. No route can reach it
+	// (both call it right after their own commit), so the account row is removed
+	// here, the one way the re-read can come back empty.
+	app.post("/__t3/refresh-without-row", requireAuth, (req, res) => {
+		db.prepare("DELETE FROM users WHERE id = ?").run(req.session.user.id);
+		res.json({ refreshed: refreshOwnSession(req) });
+	});
 
 	server.listen(0, "127.0.0.1");
 	await once(server, "listening");
 	const clients = [];
 	return {
-		db, io, helpers, purgeUserSessions, purgeCalls, clients,
+		db, io, helpers, purgeUserSessions, purgeCalls, putEnv, fixEnv, clients,
 		store: holder.store,
 		port: server.address().port,
 		close: async () => {
@@ -372,6 +480,7 @@ const login = (w, username, password, cookie) => request(w.port, "POST", "/api/a
 const changePassword = (w, cookie, currentPassword, newPassword) =>
 	request(w.port, "POST", "/api/auth/change-password", { cookie, xrw: true, body: { currentPassword, newPassword } });
 const editUser = (w, cookie, id, body) => request(w.port, "PUT", `/api/users/${id}`, { cookie, xrw: true, body });
+const fixDriverName = (w, cookie, body, query = "") => request(w.port, "PUT", `/api/admin/fix-driver-name${query}`, { cookie, xrw: true, body });
 // Is this cookie still signed in? Asked the way the SPA asks it.
 async function isLive(w, cookie) {
 	const r = await request(w.port, "GET", "/api/auth/session", { cookie });
@@ -402,6 +511,23 @@ const userEditAudits = (db) => db.prepare("SELECT details FROM audit_trail WHERE
 const storedName = (db, id) => db.prepare("SELECT driver_name FROM users WHERE id = ?").get(id).driver_name;
 // The purge calls PUT /api/users/:id made, exactly: [[userId, sparedSid], …].
 const purgedExactly = (w, want) => JSON.stringify(w.purgeCalls) === JSON.stringify(want);
+// The same, as a set: fix-driver-name revokes in the order the rows come back.
+const byId = (a, b) => a[0] - b[0];
+const purgedAsSet = (w, want) => JSON.stringify([...w.purgeCalls].sort(byId)) === JSON.stringify([...want].sort(byId));
+// Another account, signing in with bob's password.
+function addUser(db, id, username, role, driverName, fullName) {
+	db.prepare(
+		"INSERT INTO users (id, username, password_hash, role, driver_name, email, full_name, company_name, must_change_password) VALUES (?, ?, ?, ?, ?, ?, ?, '', 0)",
+	).run(id, username, HASH.bob, role, driverName, `${username}@example.test`, fullName);
+}
+// id -> driver_name, to compare before and after a rename.
+const driverNames = (db) => Object.fromEntries(db.prepare("SELECT id, driver_name FROM users").all().map((r) => [r.id, r.driver_name]));
+const namesChanged = (before, after) => Object.keys(after).map(Number).filter((id) => before[id] !== after[id]).sort((a, b) => a - b);
+const fixAudits = (db) => db.prepare("SELECT user_id, role, details FROM audit_trail WHERE action = 'fix_driver_name' ORDER BY id").all();
+function fixAuditRevoked(db) {
+	const rows = fixAudits(db);
+	try { return rows.length === 1 ? JSON.parse(rows[0].details).sessionsRevoked : undefined; } catch { return undefined; }
+}
 
 // ── sockets ─────────────────────────────────────────────────────────────────
 function waitFor(emitter, event, ms = 2000) {
@@ -549,13 +675,17 @@ const SCENARIOS = {
 				const b1 = await login(w, "bob", PW.bob);
 				const b2 = await login(w, "bob", PW.bob);
 				const tb = await connectTab(w, b1.cookie);
-				const joined = await joins(w, tb, "bob driver", "bob driver");
+				const ta = await connectTab(w, admin.cookie);
+				const joined = (await joins(w, tb, "bob driver", "bob driver")) && (await joins(w, ta, "dispatch", "dispatch"));
 				const r = await editUser(w, admin.cookie, 2, { driverName: "Robert Driver" });
 				const renamed = r.status === 200 && storedName(w.db, 2) === "Robert Driver";
 				p.renameRevokesTarget = renamed && purgedExactly(w, [[2, null]]) && sessionsOf(w.db, 2).length === 0 &&
 					!(await isLive(w, b1.cookie)) && !(await isLive(w, b2.cookie));
 				p.renameClosesTargetSockets = renamed && joined && (await closedByServer(w, tb)) && !inRoom(w, "bob driver", tb.id);
 				p.renameSparesAdmin = renamed && (await isLive(w, admin.cookie));
+				// Editing someone else leaves the editor's own session as it was: same
+				// ID (no new cookie), and its socket still in its room.
+				p.renameLeavesEditorSession = renamed && !r.cookie && isOpen(w, ta) && inRoom(w, "dispatch", ta.id);
 				const audits = userEditAudits(w.db);
 				p.renameAuditCounts = audits.length === 1 && audits[0].includes('driverName "Bob Driver" -> "Robert Driver"') &&
 					/; sessions revoked: 2$/.test(audits[0]);
@@ -568,12 +698,13 @@ const SCENARIOS = {
 			try {
 				const here = await login(w, "root", PW.root);
 				const there = await login(w, "root", PW.root);
-				const tHere = await connectTab(w, here.cookie);
 				const tThere = await connectTab(w, there.cookie);
 				const r = await editUser(w, here.cookie, 4, { driverName: "Root Driver" });
 				const renamed = r.status === 200 && storedName(w.db, 4) === "Root Driver";
-				p.selfRenameSparesCurrent = renamed && purgedExactly(w, [[4, sidOf(here.cookie)]]) &&
-					(await isLive(w, here.cookie)) && isOpen(w, tHere);
+				// Spared means this browser stays signed in. The session it continues on
+				// is §3c's business: rebuilt under a new ID, whose cookie this response
+				// carries.
+				p.selfRenameSparesCurrent = renamed && purgedExactly(w, [[4, sidOf(here.cookie)]]) && !!r.cookie && (await isLive(w, r.cookie));
 				p.selfRenameRevokesOthers = renamed && !(await isLive(w, there.cookie)) && (await closedByServer(w, tThere)) &&
 					/; sessions revoked: 1$/.test(userEditAudits(w.db)[0] || "");
 			} finally { await w.close(); }
@@ -615,6 +746,322 @@ const SCENARIOS = {
 				const c = await login(w, "carol", PW.carol);
 				const reset = await editUser(w, admin.cookie, 3, { password: ADMIN_RESET_PW });
 				p.passwordResetRevokes = reset.status === 200 && purgedExactly(w, [[3, null]]) && !(await isLive(w, c.cookie));
+			} finally { await w.close(); }
+		}
+	},
+
+	// §3c: the session a self-edit spares says who it is from the account row,
+	// not from its sign-in: rebuilt under a new session ID, whose cookie the
+	// response carries, and its sockets reconnect as that identity.
+	async selfEdit(sources, p) {
+		{
+			// A Super Admin gives their own account a driver name.
+			const w = await startWorld({ sources });
+			try {
+				const here = await login(w, "root", PW.root);
+				const shapeAtLogin = Object.keys(storedUser(w.db, sidOf(here.cookie)) || {}).sort().join();
+				const tHere = await connectTab(w, here.cookie);
+				const joined = await joins(w, tHere, "dispatch", "dispatch");
+				const r = await editUser(w, here.cookie, 4, { driverName: "Root Driver" });
+				const renamed = r.status === 200 && storedName(w.db, 4) === "Root Driver";
+				const rebuilt = r.cookie ? storedUser(w.db, sidOf(r.cookie)) : undefined;
+				p.selfEditRefreshesSession = renamed && !!rebuilt && rebuilt.id === 4 && rebuilt.driverName === "Root Driver" &&
+					rebuilt.role === "Super Admin" && Object.keys(rebuilt).sort().join() === shapeAtLogin;
+				// A NEW session ID: the old one is gone from the store, its cookie no
+				// longer signs anyone in, and only the new cookie does.
+				p.selfEditRotatesSession = renamed && !!r.cookie && sidOf(r.cookie) !== sidOf(here.cookie) &&
+					storedUser(w.db, sidOf(here.cookie)) === undefined && !(await isLive(w, here.cookie)) && (await isLive(w, r.cookie));
+				p.selfEditEndsOwnSockets = renamed && joined && (await closedByServer(w, tHere)) && !inRoom(w, "dispatch", tHere.id);
+				// Reconnecting on the new cookie, the socket is the rebuilt identity:
+				// the new name is now a room this Super Admin may ask for.
+				const back = renamed && r.cookie ? await connectTab(w, r.cookie) : null;
+				p.selfEditReconnectsAsRebuilt = !!back && (await joins(w, back, "root driver", "root driver"));
+			} finally { await w.close(); }
+		}
+		{
+			// A Super Admin (another one exists) first edits only their own email,
+			// then demotes themselves to Driver.
+			const w = await startWorld({ sources });
+			try {
+				addUser(w.db, 8, "root2", "Super Admin", "", "");
+				const here = await login(w, "root", PW.root);
+				const tHere = await connectTab(w, here.cookie);
+				const joined = await joins(w, tHere, "dispatch", "dispatch");
+
+				const profile = await editUser(w, here.cookie, 4, { email: "root-new@example.test" });
+				p.selfProfileEditKeepsSession = profile.status === 200 && w.purgeCalls.length === 0 && !profile.cookie && joined &&
+					isOpen(w, tHere) && inRoom(w, "dispatch", tHere.id) && (await isLive(w, here.cookie));
+
+				const r = await editUser(w, here.cookie, 4, { role: "Driver", driverName: "Root Driver" });
+				const demoted = r.status === 200 && w.db.prepare("SELECT role FROM users WHERE id = 4").get().role === "Driver";
+				// The very next request is a Driver's: on the new cookie it is refused
+				// as an admin, and the old cookie signs no one in at all.
+				const next = r.cookie;
+				const asAdmin = demoted && next ? await editUser(w, next, 2, { email: "bob-new@example.test" }) : null;
+				const asOld = demoted ? await editUser(w, here.cookie, 2, { email: "bob-old@example.test" }) : null;
+				const s = next ? await request(w.port, "GET", "/api/auth/session", { cookie: next }) : { json: null };
+				p.selfDemotionTakesEffect = demoted && !!asAdmin && asAdmin.status === 403 && !!asOld && asOld.status === 401 &&
+					!!s.json && s.json.authenticated === true && s.json.user.role === "Driver" && s.json.user.driverName === "Root Driver";
+				const back = demoted && next ? await connectTab(w, next) : null;
+				p.selfDemotionMovesRooms = demoted && (await closedByServer(w, tHere)) && !inRoom(w, "dispatch", tHere.id) &&
+					!!back && (await joins(w, back, "dispatch", "root driver")) && !inRoom(w, "dispatch", back.id);
+				// The audit line is the identity that was authorised to make the change.
+				const rows = w.db.prepare("SELECT user_id, role, details FROM audit_trail WHERE action = 'update_user' ORDER BY id").all();
+				const demotion = rows.filter((row) => /role "Super Admin" -> "Driver"/.test(row.details));
+				p.selfEditAuditKeepsAuthority = demoted && demotion.length === 1 && demotion[0].user_id === 4 && demotion[0].role === "Super Admin";
+			} finally { await w.close(); }
+		}
+		{
+			// A transport opened BEFORE a self-demotion stays open (the public
+			// tracker shares it), and its default-namespace socket sends CONNECT
+			// again afterwards. That CONNECT presents the session ID the transport
+			// was opened with, which the rebuild retired, so it must be refused.
+			const w = await startWorld({ sources });
+			let m = null;
+			try {
+				addUser(w.db, 8, "root2", "Super Admin", "", "");
+				const here = await login(w, "root", PW.root);
+				m = new ioClient.Manager(`http://127.0.0.1:${w.port}`, {
+					transports: ["websocket"], reconnection: false, extraHeaders: { cookie: here.cookie },
+				});
+				const tracker = m.socket("/public-track");
+				const dflt = m.socket("/");
+				w.clients.push(tracker, dflt);
+				const [c1, c2] = await Promise.all([waitFor(tracker, "connect"), waitFor(dflt, "connect")]);
+				if (!c1 || !c2) throw new Error("the shared transport never connected");
+				const tab = { s: dflt, id: dflt.id, reasons: [] };
+				dflt.on("disconnect", (reason) => tab.reasons.push(reason));
+				const joined = await joins(w, tab, "dispatch", "dispatch");
+				const engineId = m.engine && m.engine.id;
+				const r = await editUser(w, here.cookie, 4, { role: "Driver", driverName: "Root Driver" });
+				const closed = r.status === 200 && joined && (await closedByServer(w, tab));
+				if (closed && m.engine && m.engine.id === engineId) {
+					dflt.connect();
+					const again = await waitFor(dflt, "connect");
+					const reId = dflt.id;
+					p.selfEditStaleTransportRefused = !!again && m.engine.id === engineId && !w.io.of("/").sockets.get(reId) &&
+						![...w.io.of("/").sockets.values()].some((s) => s.data && s.data.sid === sidOf(here.cookie));
+				} else {
+					p.selfEditStaleTransportRefused = false;
+				}
+			} finally {
+				try { if (m && m.engine) m.engine.close(); } catch { /* closed */ }
+				await w.close();
+			}
+		}
+		{
+			// The requesting session is revoked while its own self-edit awaits the
+			// Job Tracking read (another admin resets this account's password
+			// meanwhile). The edit still lands; the session must stay ended.
+			const w = await startWorld({ sources });
+			try {
+				w.db.prepare("UPDATE users SET driver_name = 'Root Driver' WHERE id = 4").run();
+				const here = await login(w, "root", PW.root);
+				w.putEnv.duringSheetRead = () => { w.purgeUserSessions(4, null); };
+				const r = await editUser(w, here.cookie, 4, { driverName: "Rooted Driver" });
+				p.selfEditRevokedMeanwhileStaysEnded = r.status === 200 && storedName(w.db, 4) === "Rooted Driver" && !r.cookie &&
+					sessionsOf(w.db, 4).length === 0 && !(await isLive(w, here.cookie));
+			} finally { await w.close(); }
+		}
+		{
+			// The account row cannot be read, so the session is ended, not kept.
+			const w = await startWorld({ sources });
+			try {
+				const a = await login(w, "alice", PW.alice);
+				const ta = await connectTab(w, a.cookie);
+				const r = await request(w.port, "POST", "/__t3/refresh-without-row", { cookie: a.cookie, xrw: true });
+				p.refreshFailsClosed = r.status === 200 && !!r.json && r.json.refreshed === false && sessionsOf(w.db, 1).length === 0 &&
+					!(await isLive(w, a.cookie)) && (await closedByServer(w, ta));
+			} finally { await w.close(); }
+		}
+		{
+			// A Super Admin resets their OWN password from one of two devices. As
+			// with change-password, the other device is signed out and this one
+			// continues on a new session ID: no copy of the old cookie outlives it.
+			const w = await startWorld({ sources });
+			try {
+				const here = await login(w, "root", PW.root);
+				const there = await login(w, "root", PW.root);
+				const r = await editUser(w, here.cookie, 4, { password: ADMIN_RESET_PW });
+				const rebuilt = r.cookie ? storedUser(w.db, sidOf(r.cookie)) : undefined;
+				p.selfPasswordResetRotatesSession = r.status === 200 && purgedExactly(w, [[4, sidOf(here.cookie)]]) &&
+					!(await isLive(w, there.cookie)) && !(await isLive(w, here.cookie)) && !!r.cookie && (await isLive(w, r.cookie)) &&
+					!!rebuilt && rebuilt.id === 4 && rebuilt.role === "Super Admin";
+			} finally { await w.close(); }
+		}
+		{
+			// The store cannot delete a session. Both refresh paths log it, and the
+			// one that rotates still signs this browser out: it answers with a fresh
+			// session that holds no user.
+			const w = await startWorld({ sources });
+			try {
+				const a = await login(w, "alice", PW.alice);
+				const root = await login(w, "root", PW.root);
+				w.db.exec("CREATE TRIGGER t3_keep_sessions BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT, 't3 simulated store failure'); END;");
+				let before = logs.length;
+				const gone = await request(w.port, "POST", "/__t3/refresh-without-row", { cookie: a.cookie, xrw: true });
+				p.refreshLogsFailedEnd = gone.status === 200 && !!gone.json && gone.json.refreshed === false &&
+					logs.slice(before).some((l) => /session refresh: ending the session failed/.test(l));
+				before = logs.length;
+				const r = await editUser(w, root.cookie, 4, { driverName: "Root Driver" });
+				const s = r.cookie ? await request(w.port, "GET", "/api/auth/session", { cookie: r.cookie }) : { json: null };
+				p.refreshLogsFailedRotation = r.status === 200 && storedName(w.db, 4) === "Root Driver" &&
+					logs.slice(before).some((l) => /session refresh: regenerate failed/.test(l)) &&
+					!!r.cookie && sidOf(r.cookie) !== sidOf(root.cookie) && !!s.json && s.json.authenticated === false;
+				w.db.exec("DROP TRIGGER t3_keep_sessions");
+			} finally { await w.close(); }
+		}
+	},
+
+	// §3d: PUT /api/admin/fix-driver-name, on the real cascade.
+	async fixName(sources, p) {
+		{
+			// Another admin renames "Bob Driver". A second account carries that name
+			// in another case; a third has it only as a FULL name; a fourth has a
+			// longer name that contains it.
+			const w = await startWorld({ sources });
+			try {
+				addUser(w.db, 5, "dave", "Driver", "BOB DRIVER", "Dave Driver");
+				addUser(w.db, 6, "erin", "Driver", "Erin Driver", "Bob Driver");
+				addUser(w.db, 7, "frank", "Driver", "Bob Driverson", "Frank Driver");
+				const admin = await login(w, "root", PW.root);
+				const b1 = await login(w, "bob", PW.bob);
+				const b2 = await login(w, "bob", PW.bob);
+				const d = await login(w, "dave", PW.bob);
+				const e = await login(w, "erin", PW.bob);
+				const f = await login(w, "frank", PW.bob);
+				const tb = await connectTab(w, b1.cookie);
+				const te = await connectTab(w, e.cookie);
+				const ta = await connectTab(w, admin.cookie);
+				const joined = (await joins(w, tb, "bob driver", "bob driver")) && (await joins(w, te, "erin driver", "erin driver")) &&
+					(await joins(w, ta, "dispatch", "dispatch"));
+				const before = driverNames(w.db);
+				const r = await fixDriverName(w, admin.cookie, { oldName: "Bob Driver", newName: "Robert Driver" });
+				const moved = namesChanged(before, driverNames(w.db));
+				const renamed = r.status === 200 && JSON.stringify(moved) === "[2,5]" && w.fixEnv.sheetWrites === 1;
+				// Exactly the accounts the cascade changed, each with nothing spared.
+				p.fixRenameRevokesMoved = renamed && purgedAsSet(w, moved.map((id) => [id, null])) &&
+					sessionsOf(w.db, 2).length === 0 && sessionsOf(w.db, 5).length === 0 &&
+					!(await isLive(w, b1.cookie)) && !(await isLive(w, b2.cookie)) && !(await isLive(w, d.cookie));
+				p.fixRenameClosesSockets = renamed && joined && (await closedByServer(w, tb)) && !inRoom(w, "bob driver", tb.id);
+				// The cascade did rewrite erin's FULL name. She stays signed in.
+				const erinFull = w.db.prepare("SELECT full_name FROM users WHERE id = 6").get().full_name;
+				p.fixRenameSparesOthers = renamed && erinFull === "Robert Driver" && (await isLive(w, e.cookie)) && isOpen(w, te) &&
+					(await isLive(w, f.cookie)) && (await isLive(w, admin.cookie));
+				// The admin who ran it keeps their session ID and their socket's room.
+				p.fixRenameLeavesEditorSession = renamed && !r.cookie && isOpen(w, ta) && inRoom(w, "dispatch", ta.id);
+				p.fixRenameAuditCounts = renamed && fixAuditRevoked(w.db) === 3;
+			} finally { await w.close(); }
+		}
+		{
+			// While the sheet write (the route's last await) is in flight, another
+			// change lands: frank takes the old name and bob gives it up. Whose
+			// sessions end is decided by what the cascade changes after that write.
+			const w = await startWorld({ sources });
+			try {
+				addUser(w.db, 7, "frank", "Driver", "Frank Driver", "Frank Driver");
+				const admin = await login(w, "root", PW.root);
+				const b = await login(w, "bob", PW.bob);
+				const f = await login(w, "frank", PW.bob);
+				w.fixEnv.duringSheetWrite = () => {
+					w.db.prepare("UPDATE users SET driver_name = 'bob driver' WHERE id = 7").run();
+					w.db.prepare("UPDATE users SET driver_name = 'Bobby Driver' WHERE id = 2").run();
+				};
+				const r = await fixDriverName(w, admin.cookie, { oldName: "Bob Driver", newName: "Robert Driver" });
+				p.fixReadsAfterLastAwait = r.status === 200 && storedName(w.db, 7) === "Robert Driver" && storedName(w.db, 2) === "Bobby Driver" &&
+					purgedExactly(w, [[7, null]]) && !(await isLive(w, f.cookie)) && (await isLive(w, b.cookie));
+			} finally { await w.close(); }
+		}
+		{
+			// Nothing reached SQLite, so nothing ends: a dry run, a refusal, a failed
+			// sheet write, and a cascade whose transaction rolled back.
+			const w = await startWorld({ sources });
+			try {
+				const admin = await login(w, "root", PW.root);
+				const b = await login(w, "bob", PW.bob);
+				const body = { oldName: "Bob Driver", newName: "Robert Driver" };
+				const untouched = async () => storedName(w.db, 2) === "Bob Driver" && w.purgeCalls.length === 0 && (await isLive(w, b.cookie));
+
+				const dry = await fixDriverName(w, admin.cookie, body, "?dryRun=true");
+				p.fixDryRunRevokesNothing = dry.status === 200 && !!dry.json && dry.json.dryRun === true && (await untouched());
+
+				w.fixEnv.locksReadable = false;
+				const refused = await fixDriverName(w, admin.cookie, body);
+				w.fixEnv.locksReadable = true;
+				p.fixRefusalRevokesNothing = refused.status === 409 && !!refused.json && refused.json.code === "PERIOD_LOCK_UNREADABLE" &&
+					w.fixEnv.refusals.length === 1 && (await untouched());
+
+				w.fixEnv.failSheetWrite = true;
+				const sheetDown = await fixDriverName(w, admin.cookie, body);
+				w.fixEnv.failSheetWrite = false;
+				p.fixSheetFailureRevokesNothing = sheetDown.status === 502 && !!sheetDown.json && sheetDown.json.code === "SHEET_WRITE_FAILED" &&
+					(await untouched());
+
+				// The cascade's own write to users fails, so its transaction rolls back.
+				w.db.exec("CREATE TRIGGER t3_refuse_rename BEFORE UPDATE OF driver_name ON users BEGIN SELECT RAISE(ABORT, 't3 simulated write failure'); END;");
+				const partial = await fixDriverName(w, admin.cookie, body);
+				w.db.exec("DROP TRIGGER t3_refuse_rename");
+				p.fixRollbackRevokesNothing = partial.status === 500 && !!partial.json && partial.json.code === "PARTIAL_RENAME" &&
+					(await untouched());
+			} finally { await w.close(); }
+		}
+		{
+			// A Super Admin renames their OWN driver name, from one of two devices.
+			const w = await startWorld({ sources });
+			try {
+				w.db.prepare("UPDATE users SET driver_name = 'Root Driver' WHERE id = 4").run();
+				w.fixEnv.sheetRows = [["Load ID", "Driver", "Assigned Date"], ["L-200", "Root Driver", "2026-09-02"]];
+				const here = await login(w, "root", PW.root);
+				const there = await login(w, "root", PW.root);
+				const tHere = await connectTab(w, here.cookie);
+				const tThere = await connectTab(w, there.cookie);
+				const r = await fixDriverName(w, here.cookie, { oldName: "Root Driver", newName: "Rooted Driver" });
+				const renamed = r.status === 200 && storedName(w.db, 4) === "Rooted Driver";
+				// Spared, then rebuilt under a new session ID: this browser continues on
+				// the cookie the response carries, and the old one signs no one in.
+				const rebuilt = r.cookie ? storedUser(w.db, sidOf(r.cookie)) : undefined;
+				const back = renamed && r.cookie ? await connectTab(w, r.cookie) : null;
+				p.fixSelfRenameSparesAndRebuilds = renamed && purgedExactly(w, [[4, sidOf(here.cookie)]]) && !!r.cookie &&
+					(await isLive(w, r.cookie)) && !(await isLive(w, here.cookie)) &&
+					!!rebuilt && rebuilt.driverName === "Rooted Driver" && (await closedByServer(w, tHere)) &&
+					!!back && (await joins(w, back, "rooted driver", "rooted driver"));
+				p.fixSelfRenameRevokesOthers = renamed && !(await isLive(w, there.cookie)) && (await closedByServer(w, tThere)) &&
+					fixAuditRevoked(w.db) === 1;
+			} finally { await w.close(); }
+		}
+		{
+			// Case only. Over an account already spelled the new way the cascade
+			// writes the same value back, so nothing about it changes; the other way
+			// round, the account's stored name does change.
+			const w = await startWorld({ sources });
+			try {
+				const admin = await login(w, "root", PW.root);
+				const b = await login(w, "bob", PW.bob);
+				const same = await fixDriverName(w, admin.cookie, { oldName: "bob driver", newName: "Bob Driver" });
+				p.fixUnchangedAccountNotRevoked = same.status === 200 && storedName(w.db, 2) === "Bob Driver" && w.purgeCalls.length === 0 &&
+					(await isLive(w, b.cookie)) && fixAuditRevoked(w.db) === 0;
+				const lower = await fixDriverName(w, admin.cookie, { oldName: "Bob Driver", newName: "bob driver" });
+				p.fixCaseOnlyRevokes = lower.status === 200 && storedName(w.db, 2) === "bob driver" && purgedExactly(w, [[2, null]]) &&
+					!(await isLive(w, b.cookie));
+			} finally { await w.close(); }
+		}
+		{
+			// A MERGE: "Robert Driver" already belongs to rob. The route treats the
+			// rename as one (the cascade collects the ids it moves). bob's stored
+			// name changes and his sessions end; rob's does not, and his stay.
+			const w = await startWorld({ sources });
+			try {
+				addUser(w.db, 9, "rob", "Driver", "Robert Driver", "Robert Driver");
+				w.fixEnv.merge = { mergeTargets: { users: 1 }, mergeRows: 1 };
+				const admin = await login(w, "root", PW.root);
+				const b = await login(w, "bob", PW.bob);
+				const rob = await login(w, "rob", PW.bob);
+				const r = await fixDriverName(w, admin.cookie, { oldName: "Bob Driver", newName: "Robert Driver" });
+				const audit = fixAudits(w.db)[0];
+				const moved = audit ? JSON.parse(audit.details).changedIds : null;
+				p.fixMergeRevokesOnlyRenamed = r.status === 200 && !!r.json && r.json.isMerge === true && !!moved &&
+					JSON.stringify(moved.users) === "[2]" && storedName(w.db, 2) === "Robert Driver" && storedName(w.db, 9) === "Robert Driver" &&
+					purgedExactly(w, [[2, null]]) && !(await isLive(w, b.cookie)) && (await isLive(w, rob.cookie)) && fixAuditRevoked(w.db) === 1;
 			} finally { await w.close(); }
 		}
 	},
@@ -904,14 +1351,44 @@ const PROPS = {
 	renameRevokesTarget: ["userEdit", "§3b PUT /api/users/:id renaming a driver must revoke every session of that account, sparing none: purgeUserSessions(id, null)"],
 	renameClosesTargetSockets: ["userEdit", "§3b ...closing their live-update sockets, and the room they joined under the old name"],
 	renameSparesAdmin: ["userEdit", "§3b ...and leave the admin who made the change signed in"],
+	renameLeavesEditorSession: ["userEdit", "§3b ...on the same session ID, with their socket still in its room: editing someone else rebuilds nothing of the editor's"],
 	renameAuditCounts: ["userEdit", "§3b the update_user audit line must record the rename and how many sessions it revoked"],
-	selfRenameSparesCurrent: ["userEdit", "§3b a self-edit must spare the session making the request: purgeUserSessions(id, currentSid)"],
+	selfRenameSparesCurrent: ["userEdit", "§3b a self-edit must spare the session making the request: purgeUserSessions(id, currentSid), the browser staying signed in"],
 	selfRenameRevokesOthers: ["userEdit", "§3b ...and revoke the account's other sessions and their sockets"],
 	unchangedNameRevokesNothing: ["userEdit", "§3b the same driver name resent (padded or not), or an email / full name / company edit, must revoke nothing"],
 	caseOnlyRenameRevokes: ["userEdit", "§3b a case-only rename must revoke: it is a rename, and the cascade has moved every row to the new spelling"],
 	clearedNameRevokes: ["userEdit", "§3b clearing the driver name must revoke"],
 	roleChangeRevokes: ["userEdit", "§3b a role change must revoke"],
 	passwordResetRevokes: ["userEdit", "§3b an admin password reset must revoke"],
+	selfEditRefreshesSession: ["selfEdit", "§3c a self-edit of the caller's own driver name must rebuild the spared session from the account row, with exactly the fields login writes"],
+	selfEditRotatesSession: ["selfEdit", "§3c ...under a NEW session ID: the response carries its cookie, and the old ID is gone from the store and signs no one in"],
+	selfEditEndsOwnSockets: ["selfEdit", "§3c ...and end the old session's live-update sockets, taking them out of the rooms the old identity earned"],
+	selfEditReconnectsAsRebuilt: ["selfEdit", "§3c a socket reconnecting on the new cookie must be the rebuilt identity"],
+	selfEditStaleTransportRefused: ["selfEdit", "§3c a CONNECT sent again, after a self-demotion, over a transport opened before it must be refused: it presents the retired session ID"],
+	selfProfileEditKeepsSession: ["selfEdit", "§3c a self-edit of a profile field only must revoke nothing and leave the session's sockets in their rooms"],
+	selfDemotionTakesEffect: ["selfEdit", "§3c a Super Admin who demotes themselves must be refused as one on the very next request (401 on the old cookie, 403 on the new), the session saying Driver"],
+	selfDemotionMovesRooms: ["selfEdit", "§3c ...their socket must leave the dispatch room, and reconnect into the driver's room only"],
+	selfEditAuditKeepsAuthority: ["selfEdit", "§3c the update_user audit line must record the identity that was authorised to make the change"],
+	selfEditRevokedMeanwhileStaysEnded: ["selfEdit", "§3c a session revoked while its own self-edit awaited must stay ended: the rebuild must not save it back"],
+	refreshFailsClosed: ["selfEdit", "§3c when the account row cannot be read the session must be ended, sockets included, never left carrying the old identity"],
+	selfPasswordResetRotatesSession: ["selfEdit", "§3c a self password reset must sign the account's other sessions out and continue this browser on a new session ID, as change-password does"],
+	refreshLogsFailedEnd: ["selfEdit", "§3c a store that fails to end the session must be logged, not swallowed"],
+	refreshLogsFailedRotation: ["selfEdit", "§3c a store that fails to rotate the session must be logged, and this browser answered with a session that holds no user"],
+	fixRenameRevokesMoved: ["fixName", "§3d fix-driver-name must revoke every account whose stored driver name its cascade changed, in any case, sparing no session"],
+	fixRenameClosesSockets: ["fixName", "§3d ...closing their live-update sockets"],
+	fixRenameSparesOthers: ["fixName", "§3d ...and no other account: not a full-name-only match (whose full name the cascade did rewrite), not a longer name, not the admin"],
+	fixRenameLeavesEditorSession: ["fixName", "§3d renaming someone else must leave the admin's own session as it was: same session ID, socket still in its room"],
+	fixMergeRevokesOnlyRenamed: ["fixName", "§3d a MERGE must revoke the renamed account only, not the account that already held the new name"],
+	fixRenameAuditCounts: ["fixName", "§3d the fix_driver_name audit line must carry how many sessions ended"],
+	fixReadsAfterLastAwait: ["fixName", "§3d the accounts must be read after the route's last await: a change landing during the sheet write decides whose sessions end"],
+	fixDryRunRevokesNothing: ["fixName", "§3d a dry run must revoke nothing"],
+	fixRefusalRevokesNothing: ["fixName", "§3d a refused rename must revoke nothing"],
+	fixSheetFailureRevokesNothing: ["fixName", "§3d a failed sheet write must revoke nothing"],
+	fixRollbackRevokesNothing: ["fixName", "§3d a cascade that rolled back (PARTIAL_RENAME) must revoke nothing"],
+	fixSelfRenameSparesAndRebuilds: ["fixName", "§3d a self-rename must spare the requesting session and rebuild it, under a new session ID, as the new name, its sockets reconnecting as that name"],
+	fixSelfRenameRevokesOthers: ["fixName", "§3d ...and revoke the account's other sessions, counted in the audit line"],
+	fixUnchangedAccountNotRevoked: ["fixName", "§3d an account the cascade writes back unchanged (already spelled the new way) must not be revoked"],
+	fixCaseOnlyRevokes: ["fixName", "§3d a case-only rename that changes an account's stored name must revoke it"],
 	changeClosesThisSessionsSockets: ["change", "§4 change-password must close every socket of the old cookie, the asking tab's included"],
 	changeClosesOtherDevices: ["change", "§4 ...and the sockets of the account's other sessions"],
 	changeSparesOtherUsers: ["change", "§4 ...and leave other accounts alone"],
@@ -1011,6 +1488,46 @@ function sectionSource() {
 	ok(uRolledBack > uTxn && uRolledBack < uPurge && !/\breturn\b|\bres\./.test(upd.slice(uRolledBack, uPurge)),
 		"§8 ...and nothing after the rollback answer can return or respond before it, so a committed change always reaches the revocation");
 	ok(!/DELETE FROM sessions/.test(upd), "§8 ...and never through a hand-copied DELETE, which would leave the sockets up");
+	const uRefresh = at(upd, "refreshOwnSession(req)");
+	ok(uRefresh > uAudit && uRefresh < at(upd, "res.json({ success: true, renamed })") && (upd.match(/refreshOwnSession\(/g) || []).length === 1,
+		"§8 PUT /api/users/:id rebuilds a self-edited session once, after its audit line and before it answers");
+
+	const fx = stripComments(SRCS.fixName);
+	const fLastAwait = fx.lastIndexOf("await ");
+	const fRead = at(fx, "renamedAccountIds = driverRenameAccountIds(oldTrim, newTrim);");
+	const fCascade = at(fx, "applyDriverRenameSqlite({");
+	const fPartial = at(fx, '"PARTIAL_RENAME"');
+	const fPurge = at(fx, "purgeUserSessions(uid, ");
+	const fAudit = at(fx, 'logAudit(req, "fix_driver_name"');
+	const fRefresh = at(fx, "refreshOwnSession(req)");
+	ok(fLastAwait > 0 && fRead > fLastAwait && fCascade > fRead && !/\bawait\b|\breturn\b|\bres\./.test(fx.slice(fRead, fCascade)),
+		"§8 fix-driver-name reads the renamed accounts after its last await, immediately before the cascade, with nothing between");
+	ok(fPartial > fCascade && fPurge > fPartial && fAudit > fPurge && !/\breturn\b|\bres\./.test(fx.slice(fPartial, fPurge)),
+		"§8 ...revokes after the cascade commits, with nothing that can return or respond in between, and before its audit line (which reports the count)");
+	ok((fx.match(/purgeUserSessions\(/g) || []).length === 1 && !/DELETE FROM sessions/.test(fx),
+		"§8 ...once, through purgeUserSessions(), never a hand-copied DELETE");
+	ok(fRefresh > fAudit && fRefresh < at(fx, "fixed: sheetChanged,") && (fx.match(/refreshOwnSession\(/g) || []).length === 1,
+		"§8 ...and rebuilds a self-renamed session after its audit line and before it answers");
+
+	const acct = stripComments(SRCS.accountIds);
+	ok(/DRIVER_RENAME_TARGETS\.find\(\(t\) => t\.key === "users"\)/.test(acct) && acct.includes("driverRenameWhereSql(leg, opts)") &&
+		acct.includes("driverRenameWhereArgs(leg, oldLower, opts)") && acct.includes("driverRenameNewValue(leg, "),
+		"§8 driverRenameAccountIds() reads through the cascade's own users leg (target, WHERE, arguments, written value), never a copy of it");
+
+	const rf = stripComments(SRCS.refresh);
+	const rLive = at(rf, "liveSessionIds([oldSid])");
+	const rRead = at(rf, 'db.prepare("SELECT * FROM users WHERE id = ?").get(uid)');
+	const rDisc = at(rf, "disconnectSessionSockets(oldSid);");
+	const rRegen = at(rf, "req.session.regenerate(");
+	const rAssign = at(rf, "req.session.user = rebuilt;");
+	ok(rLive > 0 && rRead > rLive && rDisc > rRead && rRegen > rDisc && rAssign > rRegen && at(rf, "req.session.destroy(") > 0,
+		"§8 refreshOwnSession() confirms the session is still in the store, re-reads the row, ends the old ID's sockets, then rebuilds under a new ID; otherwise it destroys the session");
+	ok(!/req\.session\.user\s*=\s*\{/.test(rf) && (rf.match(/req\.session\.user\s*=/g) || []).length === 1,
+		"§8 ...and never edits the session in place: the rebuilt user is assigned once, inside the rotation");
+	const REFRESH_FIELDS = ["id: row.id", "username: row.username", "role: row.role", "driverName: row.driver_name",
+		"email: row.email", "fullName: row.full_name", "companyName: row.company_name", "mustChangePassword: !!row.must_change_password"];
+	ok(REFRESH_FIELDS.every((f) => rf.includes(f)) && /^function refreshOwnSession\(req\) \{/.test(rf),
+		"§8 ...rebuilds it field by field from the row it re-read, and takes no account id: only the requesting session's own account");
 
 	const handler = stripComments(SRCS.ioHandler);
 	const gate = at(handler, "liveSessionIds([sid])");
@@ -1098,13 +1615,13 @@ const MUTANTS = [
 	{
 		name: "a self-edit revokes the session making the request",
 		target: "updateUser",
-		mutate: (s) => s.replace("purgeUserSessions(id, Number(req.session?.user?.id) === id ? req.sessionID : null)", "purgeUserSessions(id, null)"),
+		mutate: (s) => s.replace("purgeUserSessions(id, selfEdit ? req.sessionID : null)", "purgeUserSessions(id, null)"),
 		caughtBy: ["selfRenameSparesCurrent"],
 	},
 	{
 		name: "a role change no longer revokes",
 		target: "updateUser",
-		mutate: (s) => s.replace("if ((nextRole && nextRole !== user.role) || passwordHash || driverNameChanged) {", "if (passwordHash || driverNameChanged) {"),
+		mutate: (s) => s.replace("if (roleChanged || passwordHash || driverNameChanged) {", "if (passwordHash || driverNameChanged) {"),
 		caughtBy: ["roleChangeRevokes"],
 	},
 	{
@@ -1112,6 +1629,148 @@ const MUTANTS = [
 		target: "updateUser",
 		mutate: (s) => s.replace("|| passwordHash || driverNameChanged) {", "|| driverNameChanged) {"),
 		caughtBy: ["passwordResetRevokes"],
+	},
+	{
+		// §3c. The behaviour before the rebuild: a spared session kept its sign-in
+		// identity until it signed in again.
+		name: "PUT /api/users/:id leaves a self-edited session as it signed in",
+		target: "updateUser",
+		mutate: dropLine(/^\s*if \(selfEdit && \(roleChanged \|\| passwordHash \|\| driverNameChanged\)\) refreshOwnSession\(req\);\n/m),
+		caughtBy: ["selfEditRefreshesSession", "selfEditEndsOwnSockets", "selfEditReconnectsAsRebuilt", "selfDemotionTakesEffect", "selfDemotionMovesRooms"],
+	},
+	{
+		name: "a self password reset keeps the session ID (a copied cookie outlives it)",
+		target: "updateUser",
+		mutate: (s) => s.replace("if (selfEdit && (roleChanged || passwordHash || driverNameChanged)) refreshOwnSession(req);",
+			"if (selfEdit && (roleChanged || driverNameChanged)) refreshOwnSession(req);"),
+		caughtBy: ["selfPasswordResetRotatesSession"],
+	},
+	{
+		name: "PUT /api/users/:id rebuilds the session BEFORE its audit line (the row then names the demoted identity)",
+		target: "updateUser",
+		mutate: (s) => {
+			const REFRESH = "\t\tif (selfEdit && (roleChanged || passwordHash || driverNameChanged)) refreshOwnSession(req);\n";
+			const AUDIT = '\t\tlogAudit(req, "update_user", "user", id,';
+			const cut = s.replace(REFRESH, "");
+			return cut === s || !cut.includes(AUDIT) ? s : cut.replace(AUDIT, REFRESH + AUDIT);
+		},
+		caughtBy: ["selfEditAuditKeepsAuthority"],
+	},
+	{
+		name: "PUT /api/users/:id rebuilds the session on a profile-only self-edit too",
+		target: "updateUser",
+		mutate: (s) => s.replace("if (selfEdit && (roleChanged || passwordHash || driverNameChanged)) refreshOwnSession(req);", "if (selfEdit) refreshOwnSession(req);"),
+		caughtBy: ["selfProfileEditKeepsSession"],
+	},
+	{
+		name: "the rebuild leaves the session's sockets in their old rooms",
+		target: "refresh",
+		mutate: dropLine(/^\s*disconnectSessionSockets\(oldSid\);\n/m),
+		caughtBy: ["selfEditEndsOwnSockets", "selfDemotionMovesRooms"],
+	},
+	{
+		name: "the rebuild keeps the session ID (edits the session in place)",
+		target: "refresh",
+		mutate: (s) => s.replace(/\tlet rotated = false;\n[\s\S]*?\n\treturn rotated;/, "\treq.session.user = rebuilt;\n\treturn true;"),
+		caughtBy: ["selfEditRotatesSession", "selfEditStaleTransportRefused"],
+	},
+	{
+		name: "PUT /api/users/:id rebuilds the editor's own session when editing someone else",
+		target: "updateUser",
+		mutate: (s) => s.replace("if (selfEdit && (roleChanged || passwordHash || driverNameChanged)) refreshOwnSession(req);",
+			"if (roleChanged || passwordHash || driverNameChanged) refreshOwnSession(req);"),
+		caughtBy: ["renameLeavesEditorSession"],
+	},
+	{
+		name: "fix-driver-name rebuilds the editor's own session whenever it renames anyone",
+		target: "fixName",
+		mutate: (s) => s.replace("if (renamedAccountIds.includes(selfId)) refreshOwnSession(req);", "if (renamedAccountIds.length) refreshOwnSession(req);"),
+		caughtBy: ["fixRenameLeavesEditorSession"],
+	},
+	{
+		name: "the rebuild copies the session the request arrived with, not the account row",
+		target: "refresh",
+		mutate: (s) => s.replace('row = db.prepare("SELECT * FROM users WHERE id = ?").get(uid);',
+			"row = { id: uid, username: req.session.user.username, role: req.session.user.role, driver_name: req.session.user.driverName, " +
+			"email: req.session.user.email, full_name: req.session.user.fullName, company_name: req.session.user.companyName, " +
+			"must_change_password: req.session.user.mustChangePassword ? 1 : 0 };"),
+		caughtBy: ["selfEditRefreshesSession", "selfDemotionTakesEffect"],
+	},
+	{
+		name: "the rebuild does not check the session is still in the store (a revoked one is saved back)",
+		target: "refresh",
+		mutate: (s) => s.replace("if (live && live.has(oldSid)) {", "if (true) {"),
+		caughtBy: ["selfEditRevokedMeanwhileStaysEnded"],
+	},
+	{
+		name: "an unreadable account row leaves the session as it was",
+		target: "refresh",
+		mutate: (s) => s.replace(/\t\treq\.session\.destroy\(\(err\) => \{\n[\s\S]*?\n\t\t\}\);\n\t\treturn false;/, "\t\treturn false;"),
+		caughtBy: ["refreshFailsClosed"],
+	},
+	{
+		name: "a store that fails to end the session is not logged",
+		target: "refresh",
+		mutate: (s) => s.replace('if (err) console.error("session refresh: ending the session failed:", err.message);', ""),
+		caughtBy: ["refreshLogsFailedEnd"],
+	},
+	{
+		// §3d. The behaviour before this route revoked anything.
+		name: "fix-driver-name ends no sessions",
+		target: "fixName",
+		mutate: (s) => s.replace("sessionsRevoked += purgeUserSessions(uid, uid === selfId ? req.sessionID : null);", ""),
+		caughtBy: ["fixRenameRevokesMoved", "fixRenameClosesSockets", "fixRenameAuditCounts", "fixSelfRenameRevokesOthers", "fixCaseOnlyRevokes"],
+	},
+	{
+		name: "fix-driver-name reads the renamed accounts before its last await (the plan's view, not the commit's)",
+		target: "fixName",
+		mutate: (s) => {
+			const READ = "\t\t\trenamedAccountIds = driverRenameAccountIds(oldTrim, newTrim);\n";
+			const DECL = "\t\tlet renamedAccountIds = [];\n";
+			const ANCHOR = "\t\tlet sheetChanged = 0;\n";
+			const cut = s.replace(READ, "").replace(DECL, "");
+			if (cut === s || !cut.includes(ANCHOR)) return s;
+			return cut.replace(ANCHOR, "\t\tconst renamedAccountIds = driverRenameAccountIds(oldTrim, newTrim);\n" + ANCHOR);
+		},
+		caughtBy: ["fixReadsAfterLastAwait"],
+	},
+	{
+		name: "fix-driver-name revokes before its cascade commits (a rolled-back rename still signs people out)",
+		target: "fixName",
+		mutate: (s) => s.replace("\t\t\trenamedAccountIds = driverRenameAccountIds(oldTrim, newTrim);\n",
+			"\t\t\trenamedAccountIds = driverRenameAccountIds(oldTrim, newTrim);\n\t\t\tfor (const uid of renamedAccountIds) purgeUserSessions(uid, null);\n"),
+		caughtBy: ["fixRollbackRevokesNothing"],
+	},
+	{
+		name: "a self-rename through fix-driver-name revokes the session making the request",
+		target: "fixName",
+		mutate: (s) => s.replace("purgeUserSessions(uid, uid === selfId ? req.sessionID : null)", "purgeUserSessions(uid, null)"),
+		caughtBy: ["fixSelfRenameSparesAndRebuilds"],
+	},
+	{
+		name: "fix-driver-name leaves a self-renamed session as it signed in",
+		target: "fixName",
+		mutate: dropLine(/^\s*if \(renamedAccountIds\.includes\(selfId\)\) refreshOwnSession\(req\);\n/m),
+		caughtBy: ["fixSelfRenameSparesAndRebuilds"],
+	},
+	{
+		name: "fix-driver-name's audit line omits the count",
+		target: "fixName",
+		mutate: dropLine(/^\s*sessionsRevoked,\n/m),
+		caughtBy: ["fixRenameAuditCounts"],
+	},
+	{
+		name: "the renamed accounts read with a hand-written exact-case match instead of the cascade's leg",
+		target: "accountIds",
+		mutate: (s) => s.replace("WHERE ${driverRenameWhereSql(leg, opts)}`)\n\t\t.all(...driverRenameWhereArgs(leg, oldLower, opts))",
+			"WHERE \"${leg.column}\" = ?`)\n\t\t.all(String(oldName).trim())"),
+		caughtBy: ["fixRenameRevokesMoved"],
+	},
+	{
+		name: "the renamed accounts include ones the cascade writes back unchanged",
+		target: "accountIds",
+		mutate: dropLine(/^\s*\.filter\(\(r\) => r\.v !== written\)\n/m),
+		caughtBy: ["fixUnchangedAccountNotRevoked"],
 	},
 	{
 		name: "change-password revokes with its old hand-copied DELETE",

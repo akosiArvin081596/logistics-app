@@ -19725,11 +19725,12 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 // The same gap made the standard incident response — "reset their password" —
 // useless: it left the attacker's session logged in.
 //
-// The three routes that can invalidate an identity (a role change, password
-// reset or driver rename, a delete, and POST /api/auth/change-password) all
-// revoke it through this one function. Connect-style stores serialise the
-// session as JSON in `sess`, hence json_extract. Never throws — a failed purge
-// must not turn a completed role change into a 500.
+// The four routes that can invalidate an identity all revoke it through this
+// one function: PUT /api/users/:id (a role change, password reset or driver
+// rename), PUT /api/admin/fix-driver-name (every account it renames), DELETE
+// /api/users/:id, and POST /api/auth/change-password. Connect-style stores
+// serialise the session as JSON in `sess`, hence json_extract. Never throws — a
+// failed purge must not turn a completed role change into a 500.
 //
 // The session copy was not the only thing trusting the old identity: a socket
 // reads its session once, at the handshake, and keeps the rooms it earned. So
@@ -19745,6 +19746,88 @@ function purgeUserSessions(userId, exceptSid) {
 		console.error("session purge failed:", err.message);
 		return 0;
 	}
+}
+
+// The other half of a self-edit. purgeUserSessions() spares the session making
+// the request, and that session would otherwise go on carrying the identity it
+// signed in with: requireRole() reads its cached role, the Driver-scoped checks
+// its cached driverName, and its live-update sockets hold the rooms that
+// identity earned. So after a self-edit of the caller's OWN role, driver name
+// or password, the session is rebuilt from the account row as committed — the
+// fields login writes — under a NEW session ID, exactly as change-password
+// does, and the sockets opened on the old ID end, so they reconnect on the new
+// cookie (the client re-checks the session before it reconnects). Only ever
+// the requesting session's own account: the id is read from the session, never
+// passed in. Call it AFTER the route's audit line, which should keep recording
+// the identity that made the change.
+//
+// ⚠️ A NEW ID, NOT AN IN-PLACE EDIT. Once the old ID is removed from the store,
+// the old identity ends everywhere it was presented at once: the connection
+// gate refuses a session ID the store no longer has, and a copied old cookie
+// stops authenticating. Only the new ID, issued by this response, carries the
+// rebuilt identity.
+//
+// Synchronous, and it never throws into the route: the change has already
+// committed. This store's destroy() is synchronous, so regenerate() completes
+// before it returns; the new session reaches the store when express-session
+// saves it at the end of this response, and the response carries its cookie.
+//
+// ⚠️ THAT SAVE IS WHY THE SESSION IS CHECKED FIRST. Both callers await before
+// they write (bcrypt, the Job Tracking read, the sheet write), and the
+// requesting session can be revoked in that window — a password reset or a
+// delete by another admin. Rebuilding it would mint a fresh session for the
+// identity just revoked, so a session the store no longer returns is ended
+// instead, as change-password does. So is one whose account row cannot be
+// read: ended rather than rebuilt. A store that fails to delete the old ID is
+// logged, the way a failed purgeUserSessions() is, and that ID stays in the
+// store.
+function refreshOwnSession(req) {
+	const uid = Number(req.session && req.session.user && req.session.user.id);
+	if (!Number.isInteger(uid) || uid <= 0) return false;
+	const oldSid = req.sessionID;
+	const live = liveSessionIds([oldSid]);
+	let row = null;
+	if (live && live.has(oldSid)) {
+		try {
+			row = db.prepare("SELECT * FROM users WHERE id = ?").get(uid);
+		} catch (err) {
+			console.error("session refresh failed; ending the session instead:", err.message);
+		}
+	}
+	// The old ID's sockets end first, while req.sessionID still names it.
+	disconnectSessionSockets(oldSid);
+	if (!row) {
+		req.session.destroy((err) => {
+			if (err) console.error("session refresh: ending the session failed:", err.message);
+		});
+		return false;
+	}
+	const rebuilt = {
+		id: row.id,
+		username: row.username,
+		role: row.role,
+		driverName: row.driver_name || "",
+		email: row.email || "",
+		fullName: row.full_name || "",
+		companyName: row.company_name || "",
+		mustChangePassword: !!row.must_change_password,
+	};
+	let rotated = false;
+	let completed = false;
+	req.session.regenerate((err) => {
+		completed = true;
+		// regenerate() swaps in a fresh session before this runs, even when
+		// removing the old ID failed. On an error that fresh session holds no
+		// user, so this browser is signed out, and the failure is logged.
+		if (err) {
+			console.error("session refresh: regenerate failed; the session was not rebuilt:", err.message);
+			return;
+		}
+		req.session.user = rebuilt;
+		rotated = true;
+	});
+	if (!completed) console.error("session refresh: regenerate did not complete in this run; the session was not rebuilt");
+	return rotated;
 }
 
 // Stamp users.last_login_at. One definition, called from the two routes that
@@ -20492,7 +20575,8 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		// demotion is advisory: see the note on purgeUserSessions(). Self-edits
 		// spare the current sid so an admin does not log themselves out
 		// mid-request; every OTHER session of theirs still goes, which is the
-		// point when a cookie has been stolen.
+		// point when a cookie has been stolen. The spared session is rebuilt
+		// below, after the audit line, under a new session ID.
 		//
 		// ⚠️ THE DRIVER NAME IS IDENTITY, NOT A PROFILE FIELD. Login copies it into
 		// the session as `driverName` and nothing re-reads it, yet every
@@ -20507,14 +20591,24 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		// company_name are cached too but read by no check, and no route writes
 		// username.
 		const driverNameChanged = driverName !== undefined && driverName.trim() !== (user.driver_name || "");
+		const roleChanged = !!nextRole && nextRole !== user.role;
+		const selfEdit = Number(req.session?.user?.id) === id;
 		let sessionsRevoked = 0;
-		if ((nextRole && nextRole !== user.role) || passwordHash || driverNameChanged) {
-			sessionsRevoked = purgeUserSessions(id, Number(req.session?.user?.id) === id ? req.sessionID : null);
+		if (roleChanged || passwordHash || driverNameChanged) {
+			sessionsRevoked = purgeUserSessions(id, selfEdit ? req.sessionID : null);
 		}
 
 		const cascade = Object.entries(renamed).filter(([, n]) => n > 0).map(([t, n]) => `${t}=${n}`).join(", ");
 		logAudit(req, "update_user", "user", id,
 			`${user.role} ${user.username}: ${diff.join("; ") || "no field change"}${cascade ? `; cascade: ${cascade}` : ""}${sessionsRevoked ? `; sessions revoked: ${sessionsRevoked}` : ""}`);
+
+		// The spared session of a self-edit that revoked the account's other
+		// sessions is rebuilt from the row now, under a new session ID (see
+		// refreshOwnSession()): for a role or driver-name change so it says who
+		// it is, and for a password reset so that, as with change-password, no
+		// copy of the old cookie outlives it. After the audit line, which records
+		// the identity that was authorised to make the change.
+		if (selfEdit && (roleChanged || passwordHash || driverNameChanged)) refreshOwnSession(req);
 
 		notifyChange("users");
 		res.json({ success: true, renamed });
@@ -24719,6 +24813,24 @@ function applyDriverRenameSqlite({ oldName, newName, userId = null, collectIds =
 	return { counts, changedIds };
 }
 
+// The accounts whose stored driver name applyDriverRenameSqlite() is about to
+// CHANGE — the accounts whose sessions a rename has to end. Read through the
+// cascade's own `users` leg (the same target, WHERE and written value), so the
+// set cannot drift from what the cascade writes. A row the leg matches but
+// would write back unchanged — an account already spelled the new way, under a
+// case-only rename of rows elsewhere — is left out: nothing about that account
+// changes. `users_full_name` is not consulted: no check reads a session's full
+// name. Read-only; call it in the same synchronous run as the cascade.
+function driverRenameAccountIds(oldName, newName, opts = {}) {
+	const leg = DRIVER_RENAME_TARGETS.find((t) => t.key === "users");
+	const oldLower = String(oldName).trim().toLowerCase();
+	const written = driverRenameNewValue(leg, String(newName));
+	return db.prepare(`SELECT id, "${leg.column}" AS v FROM "${leg.table}" WHERE ${driverRenameWhereSql(leg, opts)}`)
+		.all(...driverRenameWhereArgs(leg, oldLower, opts))
+		.filter((r) => r.v !== written)
+		.map((r) => r.id);
+}
+
 app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const { oldName, newName, reason, acknowledgeLockedPeriods } = req.body || {};
@@ -24981,7 +25093,17 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		// the new name came from the old one, so swapping the arguments undoes it.
 		let sqlFixes = {};
 		let changedIds = {};
+		// ⚠️ WHOSE SESSIONS THIS RENAME ENDS is read HERE: after the route's last
+		// await, immediately before the cascade and in one synchronous run with
+		// it, so it is exactly the set of accounts the cascade changes — not the
+		// set the plan saw before the sheet write yielded. Every session caches
+		// the driver name at sign-in and nothing re-reads it (see the note in
+		// PUT /api/users/:id), so a renamed account's sessions end below. Inside
+		// the try: if this read fails, SQLite has not been written either, which
+		// is what the PARTIAL_RENAME answer reports.
+		let renamedAccountIds = [];
 		try {
+			renamedAccountIds = driverRenameAccountIds(oldTrim, newTrim);
 			({ counts: sqlFixes, changedIds } = applyDriverRenameSqlite({
 				oldName: oldTrim, newName: newTrim, collectIds: isMerge,
 			}));
@@ -25001,6 +25123,18 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 			});
 		}
 
+		// Committed. The renamed accounts' sessions end now, with their live-update
+		// sockets, through purgeUserSessions() — nothing between the commit and
+		// this loop can return, so a rename that reached SQLite always reaches it.
+		// A dry run, a refusal, a failed sheet write and a rolled-back cascade all
+		// returned above and end nothing. The session making this request is
+		// spared if its own account was renamed, and rebuilt after the audit line.
+		const selfId = Number(req.session?.user?.id);
+		let sessionsRevoked = 0;
+		for (const uid of renamedAccountIds) {
+			sessionsRevoked += purgeUserSessions(uid, uid === selfId ? req.sessionID : null);
+		}
+
 		// Per-target counts, so the sweep is reversible by hand from the log alone.
 		// The recipe BRANCHES on merge, because the naive swap is actively wrong
 		// there — see the merge-detection note above.
@@ -25013,12 +25147,17 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 			sheetRowsChanged: sheetChanged, sheetColumn: `${colLtr} (${headers[driverColIdx]})`,
 			sheetRanges: sheetRanges.length > DRIVER_RENAME_ID_CAP ? { truncated: true, of: sheetRanges.length, ranges: sheetRanges.slice(0, DRIVER_RENAME_ID_CAP) } : sheetRanges,
 			sqlite: sqlFixes,
+			sessionsRevoked,
 			changedIds: isMerge ? changedIds : undefined,
 			lockedPeriodsTouched: verdict.decision === "allow-acknowledged" ? blockers.map((b) => ({ target: b.target, rows: b.rows, periods: b.periods })) : [],
 			acknowledgedLockedPeriods: verdict.decision === "allow-acknowledged",
 			reason: String(reason || "").trim(),
 			reversal,
 		}));
+
+		// A Super Admin who renamed their OWN driver name: the spared session says
+		// who it is from the row now (see refreshOwnSession()).
+		if (renamedAccountIds.includes(selfId)) refreshOwnSession(req);
 
 		res.json({
 			fixed: sheetChanged, oldName: oldTrim, newName: newTrim, sqlite: sqlFixes,

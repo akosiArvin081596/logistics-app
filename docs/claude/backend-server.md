@@ -227,7 +227,7 @@ REST endpoints (grouped by domain):
 
 **Admin tools**:
 - `GET /api/admin/audit-trail` — view audit log
-- `PUT /api/admin/fix-driver-name` — rename driver across all sheets
+- `PUT /api/admin/fix-driver-name` — rename driver across all sheets; ends the sessions of every account whose driver name it changes (see [`user-routes-guards.md`](user-routes-guards.md))
 - `GET /api/admin/scan-duplicates` — find duplicate rows in sheets
 - `GET /api/admin/scan-driver-mismatches` — find driver name inconsistencies
 - `GET /api/admin/scan-orphans` — find orphaned data
@@ -277,7 +277,7 @@ REST endpoints (grouped by domain):
 Clients emit `register` with their name to join a socket room. The server disconnects a socket with no session, picks rooms from the session's role, honors the requested name only when it is the user's own, and joins a session that must change its password to no room at all.
 
 **A live-update socket ends with its session** (2026-09-23). A socket reads its session once, at the handshake, and used to keep the rooms it earned after the session ended. Now each socket records `socket.data = { sid, userId }` at connection, and the helpers walk `io.of("/").sockets` instead of joining `sid:` / `user:` rooms (those would share the namespace with the name rooms `register` joins):
-- `disconnectSessionSockets(sid)` runs before logout destroys a session and before login, setup and change-password regenerate one; `purgeUserSessions()` — the role-change, delete and change-password path — first ends the user's sockets on every other session (`disconnectUserSockets()`).
+- `disconnectSessionSockets(sid)` runs before logout destroys a session and before login, setup, change-password and `refreshOwnSession()` (a self-edit of the caller's own role, driver name or password) regenerate one. `purgeUserSessions()` is the path for a role change, password reset or driver rename (`PUT /api/users/:id` and `PUT /api/admin/fix-driver-name`), a delete, and change-password. It first ends the user's sockets on every other session (`disconnectUserSockets()`).
 - The connection handler refuses a socket whose session is no longer in the store (fails **closed**), and `sweepSessionlessSockets()` closes, once a minute, any socket whose session the store no longer returns — expiry, or a script that clears `sessions` — failing **open** when the store cannot be read, so a read error never drops the whole fleet.
 - Every close is namespace-level `socket.disconnect()`, never `disconnect(true)`: a signed-in tab that opens the public tracker multiplexes `/public-track` onto the same transport, and `disconnect(true)` closes the transport. The helpers are synchronous and never throw — they run inside the auth routes. `scripts/test-session-sockets.js`.
 - **⚠️ Known gap:** the connection handler's older branch for a socket with **no session user at all** still calls `socket.disconnect(true)`. So a tab whose session has ended, reconnecting, can drop its own `/public-track` connection for about 2 s until socket.io reconnects it.
