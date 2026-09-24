@@ -7026,15 +7026,17 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		// allowed. This handler has no await, so the row compared is the row the
 		// UPDATE overwrites.
 		const payEditAllowed = req.session.user.role === "Super Admin";
+		// A row with pay terms of its own keeps its stored name exactly as stored
+		// under anyone but a Super Admin: the name is how the pay paths find those
+		// terms, so any change to it — a respelling included — is a pay change. A
+		// row on the default terms prices a driver exactly as no row does, and is
+		// renamed as before.
+		const keepsName = !payEditAllowed && directoryPayChanges(null, current).length > 0;
 		if (!payEditAllowed) {
 			const payChanges = directoryPayChanges(current, { pay_type: nextPayType, pay_percentage: nextPayPct, pay_daily: nextPayDaily });
-			// A rename moves this row's terms to whichever driver the new name is —
-			// getDriverPayStructures() finds a driver's terms by name — so it is a
-			// pay change too when the row carries terms of its own. A row on the
-			// default terms prices a driver exactly as no row does, and a respelling
-			// in case or spacing names the same driver: neither is refused.
-			if (directoryPayChanges(null, current).length &&
-				normalizeDriverName(nextName) !== normalizeDriverName(current.driver_name)) {
+			// Unchanged when the name was not sent, or came back exactly as stored
+			// (before or after the trim every name gets).
+			if (keepsName && obj.Driver !== undefined && obj.Driver !== current.driver_name && nextName !== current.driver_name) {
 				payChanges.push({ field: "driver_name", from: current.driver_name, to: nextName });
 			}
 			if (payChanges.length) {
@@ -7052,6 +7054,8 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		const writePay = payEditAllowed
 			? { pay_type: nextPayType, pay_percentage: nextPayPct, pay_daily: nextPayDaily }
 			: { pay_type: current.pay_type, pay_percentage: current.pay_percentage, pay_daily: current.pay_daily };
+		// Likewise the name of a row that keeps it: the stored value, byte for byte.
+		const writeName = keepsName ? current.driver_name : nextName;
 
 		// ⚠️ THE MONTH-END LOCK. drivers_directory is the SENIOR half of driver
 		// pay: resolveDailyRate(drivers_directory.pay_daily, trucks.driver_pay_daily)
@@ -7064,7 +7068,7 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		// only when its own value actually moves — a phone number, an address or
 		// a rating edit never reaches this. See directoryEditLockBlockers.
 		const nextRow = {
-			driver_name: nextName, carrier_name: nextCarrier,
+			driver_name: writeName, carrier_name: nextCarrier,
 			pay_type: writePay.pay_type, pay_percentage: writePay.pay_percentage, pay_daily: writePay.pay_daily,
 		};
 		const dirChanged = directoryChangedColumns(current, nextRow);
@@ -7090,14 +7094,14 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		}
 
 		db.prepare(`UPDATE drivers_directory SET driver_name=?, carrier_name=?, state=?, city=?, zip=?, address=?, phone=?, cell=?, email=?, dot=?, mc=?, trucks=?, hazmat=?, rating=?, status=?, pay_type=?, pay_percentage=?, pay_daily=? WHERE id=?`)
-			.run(nextName, nextCarrier, obj.State || "", obj.City || "", obj.ZIP || "",
+			.run(writeName, nextCarrier, obj.State || "", obj.City || "", obj.ZIP || "",
 				obj.Address || "", obj.PhoneNumber || "", obj.CellNumber || "", obj.Email || "",
 				obj.DOT || "", obj.MC || "", obj.Trucks || "", obj.Hazmat || "", obj.Rating || "",
 				nextStatus, writePay.pay_type, writePay.pay_percentage, writePay.pay_daily, id);
 		// Sync carrier-driver history on write (not on read), under the name the
 		// row now carries.
-		if (nextName && nextCarrier) {
-			syncCarrierDriverHistory([{ ...obj, Driver: nextName, "Carrier Name": nextCarrier }], "Driver", "Carrier Name");
+		if (writeName && nextCarrier) {
+			syncCarrierDriverHistory([{ ...obj, Driver: writeName, "Carrier Name": nextCarrier }], "Driver", "Carrier Name");
 		}
 		// A change to any of the five settlement columns previously left no trace
 		// at all — "the directory was edited" does not tell a later reader that a
@@ -23425,12 +23429,13 @@ const DIRECTORY_DEFAULT_STRUCT = { payType: "fixed", payPercentage: 0, payDaily:
 // default: fixed, 0 %, $0 (the truck's rate applies) for a directory row, and
 // $0 (the $250 fallback applies) for a truck.
 //
-// ⚠️ A RENAME CAN BE A PAY CHANGE. getDriverPayStructures() finds a driver's
-// terms by name, so renaming a directory row that carries terms of its own
-// hands them to whichever driver the new name is. PUT /api/drivers-directory/:id
-// refuses that the same way. A row on the default terms prices a driver
-// exactly as no row does, and a respelling in case or spacing names the same
-// driver (normalizeDriverName()), so neither of those renames is refused.
+// ⚠️ A RENAME CAN BE A PAY CHANGE. The pay paths find a driver's terms by the
+// directory row's name, so the stored name of a row that carries terms of its
+// own is part of those terms: PUT /api/drivers-directory/:id refuses anyone
+// but a Super Admin any change to it — a respelling included — the same way,
+// and writes it back exactly as stored when a save resends it. A row on the
+// default terms prices a driver exactly as no row does, so it is renamed as
+// before.
 // Which truck a driver is assigned to — and so which truck rate applies to a
 // driver with no pay_daily of their own — is dispatch's call and is NOT gated
 // here.

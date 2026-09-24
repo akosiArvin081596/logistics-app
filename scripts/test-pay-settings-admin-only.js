@@ -22,11 +22,11 @@
  *      accepts, a legacy "Fixed" included), the new client's blank pay fields,
  *      or no pay columns at all: saved, with the non-pay edit written and the
  *      stored pay columns (NULLs included) left byte for byte as they were.
- *      Renaming a row that carries its own terms moves them to another driver,
- *      so it is refused the same way — even after the new name was cleared
- *      out of the way — while a rename of a row on the default terms, a
- *      respelling in case or spacing, and status and contact edits are
- *      unchanged. A daily rate above DRIVER_PAY_DAILY_MAX ("Infinity" and
+ *      The stored name of a row that carries its own terms is part of them:
+ *      any change to it — a rename, a respelling in case or spacing — is
+ *      refused the same way, and a save that resends it (padded or not) writes
+ *      it back byte for byte. A rename of a row on the default terms and
+ *      status and contact edits are unchanged. A daily rate above DRIVER_PAY_DAILY_MAX ("Infinity" and
  *      1e308 included) is 400 INVALID_PAY for every role. Hostile rate values,
  *      a duplicated header and a __proto__ header never move the stored rate.
  *      A Super Admin changes each field. With a locked month the 403 still
@@ -241,6 +241,7 @@ function makeDb() {
 	dir.run(3, "Legacy Lee", "Austin", "TX", "555-0300", "", "Fixed", 0, 280); // pay_type stored before the handler lowercased it
 	dir.run(4, "New Hire", "Waco", "TX", "555-0400", "", "fixed", 0, 0); // on the default terms: the truck's rate applies
 	dir.run(5, "Null Nell", "Tyler", "TX", "555-0500", "", null, null, null); // pay columns never written
+	dir.run(6, " Padded Pat", "Tyler", "TX", "555-0600", "", "fixed", 0, 275); // a name stored before names were trimmed
 	const truck = db.prepare("INSERT INTO trucks (id, unit_number, make, status, assigned_driver, notes, owner_id, driver_pay_daily) VALUES (?, ?, 'Freightliner', 'Active', ?, '', 5, ?)");
 	truck.run(1, "33", "Shorn King", 250);
 	truck.run(2, "302", "Rodney Brown", 20);
@@ -445,16 +446,22 @@ async function battery(opts = {}) {
 		const n = await app.dirPut(DISPATCHER, 4, dirFormBody(row(db, 4), { Driver: "New Hire Jr.", Status: "inactive" }));
 		t(`§1 Dispatcher PUT directory, renaming a driver on the default terms: saved as before (got ${n.status} ${(n.body || {}).code || ""})`,
 			n.status === 200 && row(db, 4).driver_name === "New Hire Jr." && row(db, 4).status === "inactive");
-		const c = await app.dirPut(DISPATCHER, 1, dirFormBody(row(db, 1), { Driver: "  SHORN  king " }));
-		t(`§1 Dispatcher PUT directory, re-spelling a $300 driver in case and spacing: saved (got ${c.status} ${(c.body || {}).code || ""})`,
-			c.status === 200 && row(db, 1).driver_name === "SHORN  king" && row(db, 1).pay_daily === 300);
+		const c = await app.dirPut(DISPATCHER, 1, dirFormBody(row(db, 1), { Driver: " Shorn King  " }));
+		t(`§1 Dispatcher PUT directory, a $300 driver's name resent with padding: saved, stored name unchanged (got ${c.status} ${(c.body || {}).code || ""})`,
+			c.status === 200 && row(db, 1).driver_name === "Shorn King" && row(db, 1).pay_daily === 300);
+		const p = await app.dirPut(DISPATCHER, 6, dirFormBody(row(db, 6), { PhoneNumber: "555-0666" }));
+		t(`§1 Dispatcher PUT directory, a $275 row whose stored name is padded, resent as loaded: saved, name kept byte for byte (got ${p.status} ${(p.body || {}).code || ""})`,
+			p.status === 200 && row(db, 6).driver_name === " Padded Pat" && row(db, 6).phone === "555-0666");
 		t("§1 ...and none of those is a refusal", audits(db, "pay_edit_blocked").length === 0);
 	}
-	// A rename hands a row's own terms to whichever driver the new name is.
+	// The stored name of a row with terms of its own is part of those terms.
 	for (const [label, id, to] of [
 		["a $300 driver renamed", 1, "Shorn A. King"],
 		["a 20% owner-operator renamed", 2, "Rodney B. Brown"],
 		["a $280 legacy row renamed", 3, "Lee Legacy"],
+		["a $300 driver respelled in case", 1, "SHORN KING"],
+		["a $300 driver respelled in spacing", 1, "Shorn  King"],
+		["a padded $275 row trimmed", 6, "Padded Pat"],
 	]) {
 		const db = makeDb();
 		const app = mountAll(db, opts);
@@ -467,8 +474,8 @@ async function battery(opts = {}) {
 			rows.length === 1 && rows[0].details.includes(`driver_name "${row(db, id).driver_name}" -> "${to}"`));
 	}
 	{
-		// Clearing the new name out of the way first does not help: the second
-		// rename still moves the $300 terms.
+		// A rename of a row with terms is refused even when an earlier rename
+		// freed the name it asks for.
 		const db = makeDb();
 		const app = mountAll(db, opts);
 		const first = await app.dirPut(DISPATCHER, 4, dirFormBody(row(db, 4), { Driver: "New Hire Old" }));
@@ -763,9 +770,13 @@ function sourcePins() {
 		dp.includes("nextStatus, writePay.pay_type, writePay.pay_percentage, writePay.pay_daily, id);") &&
 		!/nextStatus, nextPayType, nextPayPct, nextPayDaily/.test(dp),
 		"§6 ...and anyone but a Super Admin writes the stored pay columns back unchanged");
-	const renameCheck = dp.indexOf("if (directoryPayChanges(null, current).length &&");
-	ok(renameCheck > 0 && renameCheck < dp.indexOf("refusePayEdit(") && renameCheck > dp.indexOf("const payEditAllowed = "),
-		"§6 ...and treats a rename of a row with its own terms as a pay change, inside the non-Super-Admin branch");
+	const keeps = dp.indexOf("const keepsName = !payEditAllowed && directoryPayChanges(null, current).length > 0;");
+	const nameCheck = dp.indexOf("if (keepsName && obj.Driver !== undefined && obj.Driver !== current.driver_name && nextName !== current.driver_name) {");
+	ok(keeps > dp.indexOf("const payEditAllowed = ") && nameCheck > keeps && nameCheck < dp.indexOf("refusePayEdit("),
+		"§6 ...and treats any change to the stored name of a row with its own terms as a pay change, compared byte for byte");
+	ok(dp.includes("const writeName = keepsName ? current.driver_name : nextName;") && dp.includes(".run(writeName, nextCarrier,") &&
+		dp.includes("driver_name: writeName,"),
+		"§6 ...and writes that name back exactly as stored");
 	for (const [label, src, v] of [["PUT", dp, "nextPayDaily"], ["POST", dpo, "insPayDaily"]]) {
 		const cap = src.indexOf(`!(${v} <= DRIVER_PAY_DAILY_MAX)`);
 		ok(cap > 0 && cap < src.indexOf("refusePayEdit("),
