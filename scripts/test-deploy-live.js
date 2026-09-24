@@ -32,11 +32,13 @@
  *       check and the edge check all passed, never for a no-op, and a failed
  *       record fails production's job only. The deploy step lets only a plain
  *       ref and a full SHA reach the box, and reads each value from the LAST
- *       whole line of its kind; run end to end against the real
- *       remote-deploy.sh, a restart that did not take fails it with no
- *       outputs. The edge check retries only an unanswered or 5xx request, and
- *       asks a foreign Origin for its 403 unless the deploy reported that the
- *       commit now serving predates that check.
+ *       whole line of its kind. The edge check retries only an unanswered or
+ *       5xx request, and asks a foreign Origin for its 403 unless the deploy
+ *       reported that the commit now serving predates that check. The WHOLE
+ *       action also runs end to end against the real remote scripts, every
+ *       `if:` evaluated: a restart pm2 did not prove (DEPLOY_RESULT=unproven)
+ *       still gets the smoke and edge checks, is never recorded, rolls
+ *       production back, and ends the job red.
  *   §8  mutants: each property above, broken on purpose, must turn this
  *       runner red.
  *
@@ -50,7 +52,7 @@ const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
 const {
-	REAL, ok, record, finish, crash,
+	REAL, SMOKE, ok, record, finish, crash,
 	T, D, ENV, git, writeExec,
 	C1, C2, C3, S1, head, onMain, marker, log, verified, STARTED_REF, started,
 	resetBox, runSh, deployEnv, field, lastField, swap, expectCaught, M,
@@ -310,10 +312,11 @@ function stepValue(stepText, key) {
 	return body;
 }
 const collapse = (v) => (Array.isArray(v) ? v.join(" ") : String(v || "")).replace(/\s+/g, " ").trim();
-// A step's `run:` script, as bash gets it.
+// A step's `run:` script, as bash gets it (a `|` block, or a one-liner).
 const stepRun = (step) => {
 	const body = step ? stepValue(step.text, "run") : null;
-	return Array.isArray(body) ? `${body.map((l) => l.slice(8)).join("\n")}\n` : "";
+	if (Array.isArray(body)) return `${body.map((l) => l.slice(8)).join("\n")}\n`;
+	return body ? `${body}\n` : "";
 };
 
 const RECORD_IF = "steps.deploy.outcome == 'success' && steps.deploy.outputs.result == 'deployed' && steps.smoke.outcome == 'success' && (inputs.public_url == '' || steps.edge.outcome == 'success')";
@@ -388,18 +391,26 @@ function spawnStep(script, cwd, env) {
 	for (const l of fs.readFileSync(outputs, "utf8").split("\n").filter(Boolean)) got[l.slice(0, l.indexOf("="))] = l.slice(l.indexOf("=") + 1);
 	return { code: x.status, out: `${x.stdout}${fs.readFileSync(errPath, "utf8")}`, outputs: got };
 }
-// The deploy step end to end: here the ssh-retry.sh stand-in runs the remote
-// command locally, so the REAL remote-deploy.sh (or a mutant of it) deploys the
-// sandbox box, and the step parses what that script really printed.
+// End to end: here the ssh-retry.sh stand-in runs the remote command locally,
+// so the REAL remote scripts (or mutants of them) deploy, check, record and
+// roll back the sandbox box, and each step parses what they really printed.
 let realStepCwd = null;
-function runRealDeployStep(script, S, env = {}) {
+function realCwd(S) {
 	if (!realStepCwd) {
 		realStepCwd = path.join(T, "real-step-cwd");
 		fs.mkdirSync(path.join(realStepCwd, "scripts", "deploy"), { recursive: true });
 		fs.writeFileSync(path.join(realStepCwd, "scripts", "deploy", "ssh-retry.sh"), '#!/bin/bash\nexec bash -c "$2"\n');
+		fs.writeFileSync(path.join(realStepCwd, "scripts", "deploy", "ssh-setup.sh"), "#!/bin/bash\nexit 0\n");
 	}
-	fs.writeFileSync(path.join(realStepCwd, "scripts", "deploy", "remote-deploy.sh"), S.deploy);
-	return spawnStep(script, realStepCwd, { ...ENV, HOST: "203.0.113.9", USER: "deploy", DIR: D.box, PM2: "logistics-app", REF: "main", ...env });
+	const put = (name, text) => fs.writeFileSync(path.join(realStepCwd, "scripts", "deploy", name), text);
+	put("remote-deploy.sh", S.deploy);
+	put("remote-smoke.sh", SMOKE);
+	put("remote-record-verified.sh", S.record);
+	put("remote-rollback.sh", S.rollback);
+	return realStepCwd;
+}
+function runRealDeployStep(script, S, env = {}) {
+	return spawnStep(script, realCwd(S), { ...ENV, HOST: "203.0.113.9", USER: "deploy", DIR: D.box, PM2: "logistics-app", REF: "main", ...env });
 }
 // Named, so a mutant re-runs only the scenario that targets it.
 const REAL_STEP_CASES = {
@@ -409,17 +420,100 @@ const REAL_STEP_CASES = {
 		return [[x.code === 0 && x.outputs.result === "deployed" && x.outputs.prev === C1 && x.outputs.to === C2 && started() === C2,
 			`${tag}§14 end to end, a proven restart: the deploy step succeeds and hands the record step C2 with result=deployed (code ${x.code}, outputs ${JSON.stringify(x.outputs)})`]];
 	},
-	restartUnproven(script, S, tag) {
-		// pm2 answers 0 but the process's start time never moves: the old process
-		// still serves. The step fails and outputs nothing, so the record step,
-		// which needs this step to succeed with result=deployed, never runs.
-		resetBox(C1, { verified: C1, started: C1 });
-		const x = runRealDeployStep(script, S, { SHA: C2, STUB_PM2_RESTART_NOOP: "1" });
-		return [[x.code !== 0 && Object.keys(x.outputs).length === 0 && /the restart of logistics-app did not take/.test(x.out) && started() === C1 && verified() === C1,
-			`${tag}§14 end to end, a restart that did not take: the deploy step fails with no outputs, so nothing can record C2; C2 is not marked started (code ${x.code}, outputs ${JSON.stringify(x.outputs)}, started ${short(started())})`]];
-	},
 };
 const realStepPins = (script, S, tag = "", names = Object.keys(REAL_STEP_CASES)) => names.flatMap((n) => REAL_STEP_CASES[n](script, S, tag));
+
+// A GitHub expression, in the shapes action.yml uses: 'strings', dotted
+// context paths, true/false, == != && || and parentheses, and the status
+// functions. It returns values the way GitHub does (`a || b` gives an operand).
+function evalExpr(expr, ctx) {
+	const toks = String(expr).match(/\(|\)|&&|\|\||==|!=|'(?:[^']|'')*'|[A-Za-z_][\w.-]*(?:\(\))?/g) || [];
+	let i = 0;
+	const prim = () => {
+		const t = toks[i++];
+		if (t === "(") { const v = or(); i++; return v; }
+		if (t.startsWith("'")) return t.slice(1, -1).replace(/''/g, "'");
+		if (t.endsWith("()")) return ctx.status[t.slice(0, -2)]();
+		if (t === "true" || t === "false") return t === "true";
+		const v = t.split(".").reduce((o, k) => (o == null ? undefined : o[k]), ctx);
+		return v == null ? "" : v;
+	};
+	const cmp = () => { let l = prim(); while (toks[i] === "==" || toks[i] === "!=") { const op = toks[i++]; const r = prim(); l = (String(l) === String(r)) === (op === "=="); } return l; };
+	const and = () => { let l = cmp(); while (toks[i] === "&&") { i++; const r = cmp(); l = l && r; } return l; };
+	const or = () => { let l = and(); while (toks[i] === "||") { i++; const r = and(); l = l || r; } return l; };
+	return or();
+}
+// Whether a step runs: its `if:` with GitHub's implicit success() when it
+// names no status function, and success() when it has no `if:` at all.
+const stepRuns = (cond, ctx) => {
+	const c = cond || "success()";
+	return Boolean(evalExpr(/\b(success|failure|always|cancelled)\(\)/.test(c) ? c : `success() && (${c})`, ctx));
+};
+// A step's `env:`, each ${{ … }} evaluated.
+function stepEnvOf(stepText, ctx) {
+	const lines = stepText.split("\n");
+	const at = lines.findIndex((l) => /^ {6}env:\s*$/.test(l));
+	const env = {};
+	for (let j = at + 1; at >= 0 && j < lines.length && /^ {8}\S/.test(lines[j]); j++) {
+		const m = /^ {8}([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/.exec(lines[j]);
+		if (m) env[m[1]] = m[2].replace(/\$\{\{\s*(.*?)\s*\}\}/g, (_, e) => String(evalExpr(e, ctx)));
+	}
+	return env;
+}
+// The WHOLE action, step by step, as a runner runs it: each `if:` evaluated,
+// each `env:` resolved, each `run:` executed, continue-on-error honoured. It
+// returns each step's outcome by name, the steps context, and whether the job
+// ended red.
+function runAction(yaml, S, inputs, env = {}) {
+	const cwd = realCwd(S);
+	let failed = false;
+	const ctx = { inputs, steps: {}, status: { success: () => !failed, failure: () => failed, always: () => true, cancelled: () => false } };
+	const ran = {};
+	for (const s of actionSteps(yaml)) {
+		const id = collapse(stepValue(s.text, "id"));
+		if (!stepRuns(collapse(stepValue(s.text, "if")), ctx)) {
+			ran[s.name] = "skipped";
+			if (id) ctx.steps[id] = { outcome: "skipped", conclusion: "skipped", outputs: {} };
+			continue;
+		}
+		const x = spawnStep(stepRun(s), cwd, { ...ENV, PATH: `${fastBinDir()}:${ENV.PATH}`, GITHUB_STEP_SUMMARY: path.join(T, "step-summary"), ...env, ...stepEnvOf(s.text, ctx) });
+		const outcome = x.code === 0 ? "success" : "failure";
+		const coe = collapse(stepValue(s.text, "continue-on-error"));
+		const keepGoing = /^\$\{\{/.test(coe) ? Boolean(evalExpr(coe.replace(/^\$\{\{\s*|\s*\}\}$/g, ""), ctx)) : coe === "true";
+		if (outcome === "failure" && !keepGoing) failed = true;
+		ran[s.name] = outcome;
+		if (id) ctx.steps[id] = { outcome, conclusion: outcome === "failure" && keepGoing ? "success" : outcome, outputs: x.outputs };
+	}
+	return { ran, steps: ctx.steps, failed };
+}
+const PROD_INPUTS = {
+	dir: D.box, pm2: "logistics-app", ref: "main", sha: C2, rollback_on_failure: "true",
+	public_url: "https://app.example.test/api/config/maintenance", ssh_key: "k", known_hosts: "h", host: "203.0.113.9", user: "deploy",
+};
+// Named, so a mutant re-runs only the scenario that targets it.
+const ACTION_RUN_CASES = {
+	unprovenRollsBack(yaml, S, tag) {
+		// pm2 answers 0 but the deploy's restart never moves the start time: the
+		// old process may still serve. The deploy reports unproven; the smoke and
+		// edge checks still run (and pass, reading whatever serves); nothing
+		// records C2; production rolls back to C1, whose own restart pm2 does
+		// prove; and the job still ends red.
+		resetBox(C1, { verified: C1, started: C1 });
+		const a = runAction(yaml, S, PROD_INPUTS, { STUB_PM2_RESTART_NOOP: "once" });
+		const out = (a.steps.deploy || {}).outputs || {};
+		return [
+			[a.ran.Deploy === "success" && out.result === "unproven" && out.prev === C1 && out.to === C2,
+				`${tag}§14 the whole action, a restart that did not take: the deploy step reports result=unproven with rollback target C1 (outputs ${JSON.stringify(out)})`],
+			[a.ran["Smoke check"] === "success" && a.ran["Public edge check"] === "success" && a.ran["Record the verified deploy"] === "skipped",
+				`${tag}§14 …the smoke and edge checks still run, and the record step never does (${JSON.stringify(a.ran)})`],
+			[a.ran["Auto-rollback"] === "success" && head() === C1 && started() === C1 && verified() === C1 && marker() === C2,
+				`${tag}§14 …production rolls back to C1: C2 is never recorded, and the drift marker names C2 (HEAD ${short(head())}, record ${short(verified())}, marker ${short(marker())})`],
+			[a.ran["Fail the job if verification failed"] === "failure" && a.failed,
+				`${tag}§14 …and the job still ends red`],
+		];
+	},
+};
+const actionRunPins = (yaml, S, tag = "", names = Object.keys(ACTION_RUN_CASES)) => names.flatMap((n) => ACTION_RUN_CASES[n](yaml, S, tag));
 const deployOut = (o = {}) => `${[
 	`DEPLOYED_FROM=${o.from ?? C1}`,
 	`DEPLOYED_TO=${o.to ?? C2}`,
@@ -621,7 +715,7 @@ function mutants() {
 
 	// §13: the deploy's output.
 	expectCaught("DEPLOY_RESULT is not the last line", LIVE_CASES.resultLastLineDeployed(deployWith(
-		'echo "DEPLOY_RESULT=deployed"\n', 'echo "DEPLOY_RESULT=deployed"\necho "deploy finished"\n'), M));
+		'echo "DEPLOY_RESULT=$RESULT"\n', 'echo "DEPLOY_RESULT=$RESULT"\necho "deploy finished"\n'), M));
 	expectCaught("the handshake guard is read from the commit before the deploy", LIVE_CASES.handshakeGuard(deployWith(
 		'"$NEW" -- server.js', '"$PREV" -- server.js'), M));
 	expectCaught("the deploy looks for text server.js does not have", guardPins(swap(REAL.deploy,
@@ -659,6 +753,9 @@ function mutants() {
 		'if [ -n "$SHA" ] && ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then', "if false; then"), M, ["shaRefused"]));
 	expectCaught("the rollback target takes any hex length", deployStepPins(swap(step,
 		"last_line DEPLOYED_FROM '[0-9a-f]{40}'", "last_line DEPLOYED_FROM '[0-9a-f]+'"), M, ["shortFrom"]));
+	// §14: an unproven restart rolls production back.
+	expectCaught("an unproven restart does not roll production back", actionRunPins(swap(ACTION,
+		" ||\n         steps.deploy.outputs.result == 'unproven')", ")"), REAL, M));
 
 	// §14: the edge check.
 	const edge = edgeScript(ACTION);
@@ -676,6 +773,7 @@ function mutants() {
 	record(actionPins(ACTION));
 	record(deployStepPins(deployStepScript(ACTION)));
 	record(realStepPins(deployStepScript(ACTION), REAL));
+	record(actionRunPins(ACTION, REAL));
 	record(edgePins(edgeScript(ACTION)));
 	record(guardPins(REAL.deploy, SERVER));
 	mutants();

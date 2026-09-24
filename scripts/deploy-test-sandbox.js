@@ -114,7 +114,12 @@ case "$1" in
 		if [ -n "\${STUB_PM2_MISSING:-}" ]; then printf '[%s]' "$other"; exit 0; fi
 		printf '[%s,{"name":"%s","pm2_env":{"status":"%s","pm_uptime":%s,"restart_time":1,"exec_interpreter":"%s"}}]' "$other" "$PM2" "\${STUB_PM2_STATUS:-online}" "$up" "$STUB_NODE" ;;
 	restart)
-		[ -n "\${STUB_PM2_RESTART_NOOP:-}" ] || echo $((up + 1)) > "$STUB_LOG_DIR/pm2-uptime"
+		# STUB_PM2_RESTART_NOOP=once: only the first restart since the last reset.
+		noop="\${STUB_PM2_RESTART_NOOP:-}"
+		if [ "$noop" = once ]; then
+			if [ -e "$STUB_LOG_DIR/pm2-noop-used" ]; then noop=""; else : > "$STUB_LOG_DIR/pm2-noop-used"; fi
+		fi
+		[ -n "$noop" ] || echo $((up + 1)) > "$STUB_LOG_DIR/pm2-uptime"
 		exit "\${STUB_PM2_RESTART_RC:-0}" ;;
 esac
 exit 0

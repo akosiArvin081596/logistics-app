@@ -46,10 +46,12 @@
  *      transport failure. Literal exit codes only, no bare exit, no errexit.
  *   §15 THE RESTART IS PROVEN. pm2 must exit 0 AND the process's pm_uptime,
  *      read BY NAME from `pm2 jlist` (the stub lists another tenant first),
- *      must move. A restart that fails either, in the deploy or the rollback,
- *      marks and records nothing and fails that script, so the old process
- *      can never pass for the new commit. §7 pins the shared restart block
- *      byte-identical, with nothing marked started before its gate.
+ *      must move. A restart that fails either marks and records nothing, so
+ *      the old process can never pass for the new commit. The deploy reports
+ *      DEPLOY_RESULT=unproven (the action checks, rolls back and fails the
+ *      job; test-deploy-live.js §14 runs that), and the rollback fails. §7
+ *      pins the shared restart block byte-identical, with nothing marked
+ *      started before its gate.
  *
  * The verified-deploy record is tested by scripts/test-deploy-record.js (§12),
  * and the started mark, the LIVE commit and the vps-deploy action by
@@ -376,17 +378,17 @@ const RESTART_CASES = {
 		// code can catch this one.
 		resetBox(C1, { verified: C1, started: C1 });
 		const x = runSh(S.deploy, deployEnv({ SHA: C2, STUB_PM2_RESTART_RC: "1" }));
-		return [[x.code === 1 && /^restart /m.test(log("pm2")) && /::error::pm2 exited 1 restarting logistics-app/.test(x.out)
-			&& started() === C1 && verified() === C1 && lastField(x.stdout, "DEPLOY_RESULT") === "",
-		`${tag}§15 a restart pm2 answers 1 for fails the deploy, with C2 not marked started and no DEPLOY_RESULT, so the action's record step never runs (code ${x.code}, started ${short(started())})`]];
+		return [[x.code === 0 && /^restart /m.test(log("pm2")) && /::error::pm2 exited 1 restarting logistics-app/.test(x.out)
+			&& started() === C1 && verified() === C1 && lastField(x.stdout, "DEPLOY_RESULT") === "unproven",
+		`${tag}§15 a restart pm2 answers 1 for is reported as DEPLOY_RESULT=unproven, with C2 not marked started, so the action checks, rolls back and never records it (code ${x.code}, result ${lastField(x.stdout, "DEPLOY_RESULT") || "none"}, started ${short(started())})`]];
 	},
 	deployRestartNoop(S, tag) {
 		// pm2 answers 0, but the start time never moved: the old process serves.
 		resetBox(C1, { verified: C1, started: C1 });
 		const x = runSh(S.deploy, deployEnv({ SHA: C2, STUB_PM2_RESTART_NOOP: "1" }));
-		return [[x.code === 1 && /::error::the restart of logistics-app did not take/.test(x.out)
-			&& started() === C1 && verified() === C1 && lastField(x.stdout, "DEPLOY_RESULT") === "",
-		`${tag}§15 a restart whose start time never moved fails the deploy, with C2 not marked started and no DEPLOY_RESULT (code ${x.code}, started ${short(started())})`]];
+		return [[x.code === 0 && /::error::the restart of logistics-app did not take/.test(x.out)
+			&& started() === C1 && verified() === C1 && lastField(x.stdout, "DEPLOY_RESULT") === "unproven",
+		`${tag}§15 a restart whose start time never moved is reported as DEPLOY_RESULT=unproven, with C2 not marked started (code ${x.code}, result ${lastField(x.stdout, "DEPLOY_RESULT") || "none"}, started ${short(started())})`]];
 	},
 	rollbackRestartFails(S, tag) {
 		resetBox(C3, { verified: C1, started: C3 });

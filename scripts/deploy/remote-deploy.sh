@@ -17,12 +17,15 @@
 #               consistent record), DEPLOY_RECORD_STATE=ok|missing|inconsistent,
 #               DEPLOY_HANDSHAKE_GUARD=1|0 (whether the commit now serving
 #               refuses a foreign Origin), and, always LAST, DEPLOY_RESULT=
-#               deployed|noop (noop: a newer live main commit already contains
-#               SHA; DEPLOY_NOOP=1 is printed too, for people). The workflow
-#               takes the last line of each, so no earlier output can stand in.
-# Exit codes:   0 deployed (or a no-op), 75 another deploy holds the box lock,
-#               anything else a failure. 75 is deliberately not an ssh transport
-#               code (255), so ssh-retry.sh does not retry it.
+#               deployed|noop|unproven (noop: a newer live main commit already
+#               contains SHA, and DEPLOY_NOOP=1 is printed too, for people;
+#               unproven: pm2 did not prove the restart, and the action treats
+#               that as a failed verification). The workflow takes the last line
+#               of each, so no earlier output can stand in.
+# Exit codes:   0 deployed, a no-op or unproven (DEPLOY_RESULT says which), 75
+#               another deploy holds the box lock, anything else a failure. 75
+#               is deliberately not an ssh transport code (255), so
+#               ssh-retry.sh does not retry it.
 #
 # ⚠️ This script never records its own deploy as verified: it cannot know. The
 # record is written by remote-record-verified.sh, which .github/actions/vps-deploy
@@ -442,18 +445,26 @@ else
 	RESTART_OK=1
 fi
 # <<< pm2-restart
+# ⚠️ An unproven restart is reported, not an early exit. The process serving
+# may be the one from before this deploy, or none at all, and production must
+# still be able to recover by itself. So nothing is marked started, and the
+# deploy ends as DEPLOY_RESULT=unproven. .github/actions/vps-deploy then still
+# runs the smoke and edge checks, never records an unproven deploy as
+# verified, rolls production back whatever the checks said (with the restart
+# unproven they may be reading the old process), and fails the job. Staging,
+# which has no rollback, just fails.
+RESULT=deployed
 if [ "$RESTART_OK" != 1 ]; then
-	echo "::error::$NEW is not marked started, and this deploy fails so that nothing records it as verified: the process serving may still be the one from before it"
-	exit 1
-fi
-# Not online is reported, not fatal: the smoke check next decides (and on
-# production rolls back). It only means this commit is NOT marked started.
-if [ "$PM2_STATUS" = online ]; then
+	RESULT=unproven
+	echo "::error::$NEW is not marked started, and this deploy reports DEPLOY_RESULT=unproven: nothing records it as verified, and production rolls back"
+elif [ "$PM2_STATUS" = online ]; then
 	# Started: it is running now, whether or not the record step later gets to
 	# record it as verified (see LIVE above).
 	git update-ref --create-reflog -m "logisx: started" refs/logisx/started-deploy "$NEW" \
 		|| echo "::warning::could not mark $NEW as started"
 else
+	# Not online is reported, not fatal: the smoke check next decides (and on
+	# production rolls back). It only means this commit is NOT marked started.
 	echo "::error::pm2 reports status=$PM2_STATUS for $PM2 after the restart — $NEW is not marked started"
 fi
 echo "::endgroup::"
@@ -468,4 +479,4 @@ echo "DEPLOYED_FROM=$ROLLBACK_TO"
 echo "DEPLOYED_TO=$NEW"
 echo "DEPLOY_RECORD_STATE=$VERIFIED_STATE"
 echo "DEPLOY_HANDSHAKE_GUARD=$GUARD"
-echo "DEPLOY_RESULT=deployed"
+echo "DEPLOY_RESULT=$RESULT"

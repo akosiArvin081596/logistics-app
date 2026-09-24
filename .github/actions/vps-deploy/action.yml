@@ -64,13 +64,15 @@ runs:
         # verified deploy" records once it is verified. record_state: whether
         # prev came from a consistent record, which the rollback needs.
         # handshake_guard: whether the commit now serving refuses a foreign
-        # Origin, which the edge check needs. result: deployed or noop.
+        # Origin, which the edge check needs. result: deployed, noop, or
+        # unproven (pm2 did not prove the restart: the checks still run, the
+        # record step never does, and a failed verification follows).
         last_line() { printf '%s\n' "$out" | grep -E "^$1=($2)\$" | tail -1 | cut -d= -f2 || true; }
         prev=$(last_line DEPLOYED_FROM '[0-9a-f]{40}')
         to=$(last_line DEPLOYED_TO '[0-9a-f]{40}')
         record_state=$(last_line DEPLOY_RECORD_STATE 'ok|missing|inconsistent')
         handshake_guard=$(last_line DEPLOY_HANDSHAKE_GUARD '[01]')
-        result=$(last_line DEPLOY_RESULT 'deployed|noop')
+        result=$(last_line DEPLOY_RESULT 'deployed|noop|unproven')
         {
           echo "prev=$prev"
           echo "to=$to"
@@ -190,9 +192,14 @@ runs:
       # consistent record (RECORD_STATE=ok) and the rollback's own install and
       # build were clean. A rollback whose restart pm2 does not prove fails
       # without recording anything.
+      # ⚠️ An unproven restart (result=unproven) rolls back whatever the smoke
+      # and edge checks said: with the restart unproven they may have been
+      # reading the old process. That is how production recovers by itself
+      # when pm2 misbehaves.
       if: |
         inputs.rollback_on_failure == 'true' &&
-        (steps.smoke.outcome == 'failure' || steps.edge.outcome == 'failure') &&
+        (steps.smoke.outcome == 'failure' || steps.edge.outcome == 'failure' ||
+         steps.deploy.outputs.result == 'unproven') &&
         steps.deploy.outputs.prev != ''
       shell: bash
       env:
@@ -213,15 +220,17 @@ runs:
     - name: Fail the job if verification failed
       # The smoke/edge steps are continue-on-error so the rollback can run first.
       # The job must still go red — a successful rollback is not a successful deploy.
-      if: steps.smoke.outcome == 'failure' || steps.edge.outcome == 'failure'
+      # An unproven restart is a failed verification too, on staging as well.
+      if: steps.smoke.outcome == 'failure' || steps.edge.outcome == 'failure' || steps.deploy.outputs.result == 'unproven'
       shell: bash
       env:
         PM2: ${{ inputs.pm2 }}
         SMOKE: ${{ steps.smoke.outcome }}
         EDGE: ${{ steps.edge.outcome }}
+        RESULT: ${{ steps.deploy.outputs.result }}
         ROLLBACK: ${{ inputs.rollback_on_failure }}
       run: |
-        echo "::error::$PM2 failed verification (smoke=$SMOKE edge=$EDGE)."
+        echo "::error::$PM2 failed verification (smoke=$SMOKE edge=$EDGE deploy=$RESULT)."
         echo "rollback_on_failure was '$ROLLBACK'."
         exit 1
 
@@ -248,7 +257,7 @@ runs:
           echo "| path | \`$DIR\` |"
           echo "| ref | \`$REF\` |"
           echo "| exact SHA | \`${SHA:-(tip of ref at pull time)}\` |"
-          echo "| deployed | \`${TO:-n/a}\` (${RESULT:-no result}$([ "$RESULT" = noop ] && echo ': a newer live commit already contains it')) |"
+          echo "| deployed | \`${TO:-n/a}\` (${RESULT:-no result}$([ "$RESULT" = noop ] && echo ': a newer live commit already contains it')$([ "$RESULT" = unproven ] && echo ': pm2 did not prove the restart, so it was never recorded')) |"
           echo "| rollback target (code that ran here) | \`$PREV\` |"
           echo "| smoke | $SMOKE |"
           echo "| public edge | $EDGE |"
