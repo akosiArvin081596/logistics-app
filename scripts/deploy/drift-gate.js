@@ -70,12 +70,13 @@ const ACTIONS = Object.freeze({
 	"behind-staging-failed": "alarm",
 	"behind-staging-unverified": "alarm",
 	"behind-staging-unreached-retried": "alarm",
+	"verified-record-inconsistent": "alarm",
 });
 
 const HINTS = Object.freeze({
 	"in-sync": "production is on main.",
 	"behind-healable":
-		"production is behind main but serving, and main's commit PASSED staging: the shape of a deploy that failed on transport. Healing once, with the same smoke check and auto-rollback as deploy.yml.",
+		"production's last verified deploy is behind main but it is serving, and main's commit PASSED staging: the shape of a deploy that failed on transport, or one that died after its checkout (HEAD moved, never verified). Healing once, a full deploy of main's commit with the same smoke check, edge check and auto-rollback as deploy.yml.",
 	"behind-staging-pending":
 		"production is behind main, but the Deploy run for main's commit has not finished its staging job yet. The deploy is still on its way; the next tick re-checks.",
 	"behind-already-attempted":
@@ -90,6 +91,8 @@ const HINTS = Object.freeze({
 		"production is behind main because main's staging job never reached the VPS: every ssh attempt exited 255 and ssh-retry.sh gave up, so staging produced no verdict at all. Re-running that Deploy run's failed jobs once. Staging deploys and smoke-checks the same commit again, and production follows only if staging passes.",
 	"behind-staging-unreached-retried":
 		"main's staging job never reached the VPS (every ssh attempt exited 255), and its Deploy run is already past its first attempt (a re-run, automatic or by hand, already happened) or reports no attempt number. Not re-running it again. 255 is not only the network: a refused deploy key, a changed host key and a dropped session end the same way. Check those, then re-run it by hand: gh run rerun <run-id> --failed.",
+	"verified-record-inconsistent":
+		"production's record of its last verified deploy (git ref refs/logisx/verified-deploy) names a commit HEAD does not contain, or no commit at all: HEAD was moved back past it outside the deploy scripts, a manual deploy of an older ref died after its checkout, or a verified pin off main was followed by a deploy of main that died after its checkout. Which commit serves is unknown, so nothing heals. Check the box, then deploy main by hand (Actions → Deploy → production, ref=main); a verified deploy rewrites the record.",
 });
 
 const PENDING = new Set(["queued", "in_progress", "waiting", "requested", "pending"]);

@@ -19,6 +19,12 @@ name: Deploy drift
 # Seen 2026-09-23: two Deploy runs lost staging exactly that way, and a re-run
 # by hand turned each green on its second attempt.
 #
+# "Production" here is the box's last VERIFIED deploy (the ref
+# refs/logisx/verified-deploy, written only after a deploy's smoke and edge
+# checks passed), not its HEAD: HEAD moves at checkout, so a deploy that died
+# after it would otherwise read as in-sync while the old code serves. A box
+# with no record yet falls back to HEAD.
+#
 # ⚠️ Nothing here depends on the cadence. The cron says every 30 min, but
 # GitHub has been observed firing it every 2.5–6 h, 8–26 min late.
 #
@@ -97,12 +103,19 @@ jobs:
                 < scripts/deploy/remote-drift-check.sh)
           echo "$out"
           state=$(printf '%s' "$out" | grep -oE 'DRIFT_STATE=[a-z-]+' | cut -d= -f2)
+          # DRIFT_LOCAL is what production runs as far as the box can tell: its
+          # last VERIFIED deploy (HEAD only while no record exists yet). HEAD
+          # and the record's state are for the summary.
           local_sha=$(printf '%s' "$out" | grep -oE 'DRIFT_LOCAL=[0-9a-f]+' | cut -d= -f2)
           remote_sha=$(printf '%s' "$out" | grep -oE 'DRIFT_REMOTE=[0-9a-f]+' | cut -d= -f2)
+          head_sha=$(printf '%s' "$out" | grep -oE 'DRIFT_HEAD=[0-9a-f]+' | cut -d= -f2 || true)
+          record=$(printf '%s' "$out" | grep -oE 'DRIFT_RECORD=[a-z]+' | cut -d= -f2 || true)
           {
             echo "state=$state"
             echo "local=$local_sha"
             echo "remote=$remote_sha"
+            echo "head=$head_sha"
+            echo "record=$record"
           } >> "$GITHUB_OUTPUT"
 
       - name: Remove the deploy key (nothing after the drift check needs it)
@@ -131,8 +144,9 @@ jobs:
       - name: Alarm
         # Loud and never healed: already attempted, behind-and-unhealthy,
         # staging failed, staging unverified, staging still unreached after a
-        # re-run, or an unrecognised state. The ONLY step that fails this job:
-        # `rerun` is not an alarm, the rerun job below acts on it.
+        # re-run, verified-record-inconsistent, or an unrecognised state. The
+        # ONLY step that fails this job: `rerun` is not an alarm, the rerun job
+        # below acts on it.
         if: steps.gate.outputs.action == 'alarm'
         env:
           STATE: ${{ steps.gate.outputs.state }}
@@ -157,6 +171,8 @@ jobs:
           RUN_ID: ${{ steps.gate.outputs.run_id }}
           RUN_ATTEMPT: ${{ steps.gate.outputs.run_attempt }}
           DEPLOYED: ${{ steps.check.outputs.local }}
+          HEAD_SHA: ${{ steps.check.outputs.head }}
+          RECORD: ${{ steps.check.outputs.record }}
           MAIN: ${{ steps.check.outputs.remote }}
         run: |
           {
@@ -170,7 +186,8 @@ jobs:
             echo "| staging gate | $VERDICT — $DETAIL ${GATE_URL:+([job]($GATE_URL))} |"
             echo "| Deploy run | \`${RUN_ID:-n/a}\` |"
             echo "| attempt | \`${RUN_ATTEMPT:-n/a}\` |"
-            echo "| production | \`$DEPLOYED\` |"
+            echo "| production (last verified deploy) | \`$DEPLOYED\` |"
+            echo "| production HEAD | \`${HEAD_SHA:-n/a}\` (verified-deploy record: ${RECORD:-n/a}) |"
             echo "| main | \`$MAIN\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 

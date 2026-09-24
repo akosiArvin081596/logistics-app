@@ -12,11 +12,22 @@
 #        drift heal passes the commit whose staging job passed. Without it,
 #        REF=main means origin/main's tip at pull time.
 # Prints:       DEPLOYED_FROM=<sha> / DEPLOYED_TO=<sha>  (the workflow captures
-#               DEPLOYED_FROM so it can roll back to it without guessing), and
-#               DEPLOY_NOOP=1 when the box already runs a newer main commit.
+#               DEPLOYED_FROM so it can roll back to it without guessing: the
+#               box's LIVE commit, see below, or HEAD while there is no
+#               consistent record), DEPLOY_RECORD_STATE=ok|missing|inconsistent,
+#               DEPLOY_HANDSHAKE_GUARD=1|0 (whether the commit now serving
+#               refuses a foreign Origin), and, always LAST, DEPLOY_RESULT=
+#               deployed|noop (noop: a newer live main commit already contains
+#               SHA; DEPLOY_NOOP=1 is printed too, for people). The workflow
+#               takes the last line of each, so no earlier output can stand in.
 # Exit codes:   0 deployed (or a no-op), 75 another deploy holds the box lock,
 #               anything else a failure. 75 is deliberately not an ssh transport
 #               code (255), so ssh-retry.sh does not retry it.
+#
+# ⚠️ This script never records its own deploy as verified: it cannot know. The
+# record is written by remote-record-verified.sh, which .github/actions/vps-deploy
+# runs only after the restart AND the smoke check (and the public edge check,
+# where the job has one) passed. See the verified-record block below.
 set -uo pipefail
 
 : "${DIR:?DIR is required}"
@@ -37,8 +48,8 @@ if [ -n "$SHA" ]; then
 fi
 
 LOCK_OWNER=remote-deploy.sh
-# >>> deploy-lock — keep byte-identical in remote-deploy.sh and remote-rollback.sh
-# (scripts/test-deploy-scripts.js pins the two copies)
+# >>> deploy-lock — keep byte-identical in remote-deploy.sh, remote-rollback.sh
+# and remote-record-verified.sh (scripts/test-deploy-scripts.js pins the copies)
 #
 # One deploy per app directory, whatever started it: deploy.yml, the drift heal,
 # an auto-rollback, or a human with ssh. Two at once in the same directory
@@ -82,9 +93,84 @@ printf 'pid=%s since=%s by=%s ref=%s sha=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%
 cd "$DIR" || { echo "::error::$DIR does not exist"; exit 1; }
 
 PREV=$(git rev-parse HEAD)
+# >>> verified-record — keep byte-identical in remote-deploy.sh,
+# remote-drift-check.sh and remote-drift-heal.sh (scripts/test-deploy-scripts.js
+# pins the copies)
+#
+# The commit this box last VERIFIED. remote-record-verified.sh writes it once a
+# deploy's restart AND smoke check (and public edge check, where the job has
+# one) have passed, and remote-rollback.sh once a rollback serves again. HEAD
+# cannot tell this: it moves at checkout, BEFORE install, build and restart, so
+# a deploy that dies after its checkout leaves HEAD on a commit that never ran.
+#
+# A git ref, so it lives inside .git: never in the working tree or in
+# `git status`, never swept by `git clean`, written atomically by
+# `git update-ref`, and it keeps its commit alive through `git gc`.
+#
+#   ok            VERIFIED is a commit HEAD contains: HEAD is it, or HEAD moved
+#                 past it without being verified.
+#   missing       no record yet: the first deploy after the record was
+#                 introduced, or a fresh clone. Readers fall back to HEAD.
+#   inconsistent  the record names something HEAD does not contain, or no
+#                 commit at all: HEAD was moved back past it (by hand, or by
+#                 a manual deploy of an older ref that died after its
+#                 checkout). Nothing trusts it; the drift check alarms.
+VERIFIED_REF=refs/logisx/verified-deploy
+VERIFIED=""
+if ! git show-ref --verify -q "$VERIFIED_REF"; then
+	VERIFIED_STATE=missing
+elif VERIFIED=$(git rev-parse --verify -q "$VERIFIED_REF^{commit}") && git merge-base --is-ancestor "$VERIFIED" HEAD; then
+	VERIFIED_STATE=ok
+else
+	VERIFIED=""
+	VERIFIED_STATE=inconsistent
+fi
+# <<< verified-record
+
+# ── LIVE: the commit the app runs now, as far as the box can tell ────────────
+# The record lags a deploy whose restart and checks passed but whose SEPARATE
+# record step then failed (ssh gave up, the job timed out): that commit serves
+# while the record still names the one before. So every commit this script or
+# a rollback STARTS is marked too (refs/logisx/started-deploy, written only
+# once pm2 reports the app online). That mark is live when it follows the
+# record, HEAD still contains it, and the app answers now, before this deploy
+# changes anything. Otherwise the record is live. LIVE is the rollback target,
+# the no-op floor and the floor main may move back to; the drift check keeps
+# reading the record, so an unrecorded deploy still gets its one heal.
+PORT=$(grep -oE '^PORT=[0-9]+' "$DIR/.env" 2>/dev/null | head -1 | cut -d= -f2 || true)
+PORT=${PORT:-3000}
+SERVING=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$PORT/api/config/maintenance" || true)
+STARTED=$(git rev-parse --verify -q "refs/logisx/started-deploy^{commit}" || true)
+LIVE=""
+if [ "$VERIFIED_STATE" = ok ]; then
+	LIVE=$VERIFIED
+	if [ -n "$STARTED" ] && [ "$SERVING" = "200" ] \
+		&& git merge-base --is-ancestor "$VERIFIED" "$STARTED" && git merge-base --is-ancestor "$STARTED" HEAD; then
+		LIVE=$STARTED
+	fi
+fi
+
+# The rollback target: the LIVE commit. HEAD may be a commit a failed deploy
+# checked out and never started, and rolling back to that would restore code
+# that never ran. With no consistent record, HEAD, as before.
+if [ -n "$LIVE" ]; then ROLLBACK_TO=$LIVE; else ROLLBACK_TO=$PREV; fi
+
 echo "::group::pre-deploy state"
-echo "current HEAD: $PREV"
-echo "deploy lock:  $LOCK_FILE (held)"
+echo "current HEAD:    $PREV"
+echo "verified deploy: ${VERIFIED:-none} (record $VERIFIED_STATE)"
+echo "started deploy:  ${STARTED:-none} (app answers ${SERVING:-nothing})"
+echo "live commit:     ${LIVE:-unknown}"
+echo "rollback target: $ROLLBACK_TO"
+echo "deploy lock:     $LOCK_FILE (held)"
+if [ "$VERIFIED_STATE" = inconsistent ]; then
+	echo "::warning::the verified-deploy record does not match this clone's history — no no-op, a full deploy; the record is rewritten once this deploy is verified"
+fi
+# Whatever HEAD holds past the rollback target never ran here (or ran and was
+# never recorded), and a rollback of this deploy drops it: say which commits.
+DROPPED=$(git log --oneline "$ROLLBACK_TO..$PREV" 2>/dev/null | tr '\n' ';' | sed 's/;$//')
+if [ -n "$DROPPED" ]; then
+	echo "::warning::a rollback of this deploy returns to $ROLLBACK_TO and drops these commits HEAD holds past it: $DROPPED"
+fi
 
 # ── The load-bearing lockfile reset ──────────────────────────────────────────
 # The box's npm strips the `"libc": [...]` field a newer npm writes onto
@@ -127,25 +213,49 @@ if [ -n "$SHA" ]; then
 		echo "::error::$SHA is not on origin/main — refusing to deploy a commit main does not contain. Nothing was changed."
 		exit 1
 	fi
-	# A newer MAIN commit is already live (runs finished out of order, or an old
+	# A newer main commit is already LIVE (runs finished out of order, or an old
 	# run was re-run). Never move backwards; there is nothing to do.
-	if [ "$SHA" != "$PREV" ] && git merge-base --is-ancestor "$SHA" "$PREV" \
-		&& git merge-base --is-ancestor "$PREV" origin/main; then
-		echo "HEAD $PREV already contains $SHA — a newer main commit is live. Not moving backwards; nothing to deploy."
+	# ⚠️ Judged by LIVE, NOT HEAD. HEAD may be a commit a failed deploy checked
+	# out and never started; a no-op against it would pass the smoke check on
+	# the old process and count a commit as deployed that never ran. No
+	# consistent record means no no-op at all: a full deploy.
+	if [ -n "$LIVE" ] && [ "$SHA" != "$LIVE" ] && git merge-base --is-ancestor "$SHA" "$LIVE" \
+		&& git merge-base --is-ancestor "$LIVE" origin/main; then
+		echo "the live deploy $LIVE already contains $SHA — a newer main commit is live. Not moving backwards; nothing to deploy."
 		echo "::endgroup::"
+		if git grep -q 'allowRequest: liveUpdateHandshakeAllowed' "$LIVE" -- server.js 2>/dev/null; then GUARD=1; else GUARD=0; fi
 		echo "DEPLOY_NOOP=1"
-		echo "DEPLOYED_FROM=$PREV"
-		echo "DEPLOYED_TO=$PREV"
+		echo "DEPLOYED_FROM=$LIVE"
+		echo "DEPLOYED_TO=$LIVE"
+		echo "DEPLOY_RECORD_STATE=$VERIFIED_STATE"
+		echo "DEPLOY_HANDSHAKE_GUARD=$GUARD"
+		echo "DEPLOY_RESULT=noop"
 		exit 0
 	fi
 	# Checked BEFORE the checkout: if local main is already past $SHA, the
 	# fast-forward would "succeed" on a different commit, with HEAD moved first.
-	if ! git merge-base --is-ancestor main "$SHA"; then
-		echo "::error::local main ($(git rev-parse main 2>/dev/null)) cannot fast-forward to $SHA — nothing was changed"
-		exit 1
-	fi
-	if ! { git checkout main && git merge --ff-only "$SHA"; }; then
-		echo "::error::could not fast-forward main to $SHA — nothing was built or restarted"
+	if git merge-base --is-ancestor main "$SHA"; then
+		if ! { git checkout main && git merge --ff-only "$SHA" 9>&-; }; then
+			echo "::error::could not fast-forward main to $SHA — nothing was built or restarted"
+			exit 1
+		fi
+	elif [ -n "$LIVE" ] && git merge-base --is-ancestor "$LIVE" "$SHA" \
+		&& git merge-base --is-ancestor main origin/main; then
+		# Local main is past $SHA only by commits past the last LIVE deploy: the
+		# live commit is at or before $SHA, so whatever main holds beyond it was
+		# checked out by a deploy that never started it. Moving main back to
+		# $SHA drops no commit the app has run since its last live one, and
+		# nothing only this clone has (main is contained in origin/main); the
+		# pre-deploy warning above names what HEAD held past the live commit.
+		# Without a record there is no such proof, so this never happens then:
+		# the refusal below stands.
+		echo "local main ($(git rev-parse main)) is past $SHA only by commits past the last live deploy $LIVE — moving main back to $SHA"
+		if ! git checkout -B main "$SHA"; then
+			echo "::error::could not move main back to $SHA — nothing was built or restarted"
+			exit 1
+		fi
+	else
+		echo "::error::local main ($(git rev-parse main 2>/dev/null)) is past $SHA, and with the verified-deploy record $VERIFIED_STATE this box cannot prove main's extra commits never ran, so it will not move main back. Nothing was changed. To deploy main's tip, run Deploy with ref=main; to run exactly this commit, run Deploy with ref=$SHA (a pin)."
 		exit 1
 	fi
 elif [ "$REF" = "main" ]; then
@@ -235,14 +345,30 @@ fi
 # Parse jlist, never `pm2 describe` — describe renders a box-drawing table whose
 # column widths shift with the value, so a sed against it silently stops
 # matching. jlist is JSON and stable.
-pm2 jlist 9>&- | node -e '
+# Not online is reported, not fatal: the smoke check next decides (and on
+# production rolls back). It only means this commit is NOT marked started.
+if pm2 jlist 9>&- | node -e '
   let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
     const p=JSON.parse(d).find(x=>x.name===process.argv[1]);
     if(!p){console.error("::error::pm2 process "+process.argv[1]+" not found after restart");process.exit(1);}
     console.log("pm2 status: "+p.pm2_env.status+"  restarts: "+p.pm2_env.restart_time);
     if(p.pm2_env.status!=="online"){console.error("::error::pm2 reports status="+p.pm2_env.status);process.exit(1);}
-  });' "$PM2"
+  });' "$PM2"; then
+	# Started: it is running now, whether or not the record step later gets to
+	# record it as verified (see LIVE above).
+	git update-ref --create-reflog -m "logisx: started" refs/logisx/started-deploy "$NEW" \
+		|| echo "::warning::could not mark $NEW as started"
+fi
 echo "::endgroup::"
 
-echo "DEPLOYED_FROM=$PREV"
+# The live-update Origin check only exists in server.js since it gained
+# liveUpdateHandshakeAllowed; the public edge check asks a foreign Origin for a
+# 403 only when the commit deployed has it (a rollback by hand may not).
+if git grep -q 'allowRequest: liveUpdateHandshakeAllowed' "$NEW" -- server.js 2>/dev/null; then GUARD=1; else GUARD=0; fi
+# The workflow reads each of these from the LAST line of its kind, and
+# DEPLOY_RESULT is always the final line.
+echo "DEPLOYED_FROM=$ROLLBACK_TO"
 echo "DEPLOYED_TO=$NEW"
+echo "DEPLOY_RECORD_STATE=$VERIFIED_STATE"
+echo "DEPLOY_HANDSHAKE_GUARD=$GUARD"
+echo "DEPLOY_RESULT=deployed"

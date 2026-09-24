@@ -28,7 +28,8 @@
  *      bare `ssh -i`; backup-freshness.yml uses the shared ssh helpers under
  *      its OWN concurrency group and its remote half never takes the deploy
  *      lock; every action the gate can emit is acted on; only the rerun job
- *      may write, and the workflow reads checks
+ *      may write, and the workflow reads checks; every box state
+ *      remote-drift-check.sh can print has its own entry in the gate
  *   §8 mutants — a gate that heals on a staging failure, trusts a run for
  *      another commit, re-runs every staging failure or ignores the attempt
  *      count, and a rerun job without its guards, must all be caught above
@@ -107,6 +108,8 @@ function checkActionTable(g, tag = "") {
 		"behind-staging-unverified": "alarm",
 		"behind-staging-unreached": "rerun",
 		"behind-staging-unreached-retried": "alarm",
+		// The box's record of its last verified deploy contradicts its HEAD.
+		"verified-record-inconsistent": "alarm",
 	};
 	for (const [state, action] of Object.entries(expect)) {
 		r.push([g.actionFor(state) === action, `${tag}§1 ${state} must map to '${action}' (got '${g.actionFor(state)}')`]);
@@ -141,7 +144,7 @@ function checkRefine(g, tag = "") {
 	for (const v of ["unverified", "", undefined, null, "PASSED", "success", "UNREACHED"]) {
 		r.push([g.refineState("behind-healable", v) === "behind-staging-unverified", `${tag}§2 healable + verdict ${JSON.stringify(v)} must fail closed as unverified`]);
 	}
-	for (const box of ["in-sync", "behind-already-attempted", "behind-and-unhealthy", ""]) {
+	for (const box of ["in-sync", "behind-already-attempted", "behind-and-unhealthy", "verified-record-inconsistent", ""]) {
 		for (const v of ["passed", "failed", "pending", "unverified", "unreached"]) {
 			r.push([g.refineState(box, v, 1) === box, `${tag}§2 box state '${box}' must not be changed by verdict '${v}'`]);
 		}
@@ -775,6 +778,23 @@ function sourcePins() {
 		`§7 deploy.yml's staging job must be named '${gate.STAGING_JOB_NAME}' — drift-gate.js finds it by name (got ${stagingName && stagingName[1]})`);
 	ok(gate.DEPLOY_WORKFLOW_FILE === "deploy.yml" && fs.existsSync(path.join(ROOT, ".github/workflows", gate.DEPLOY_WORKFLOW_FILE)),
 		"§7 the gate queries the workflow file that actually exists");
+
+	// ── The box's states, as remote-drift-check.sh can print them. Each one has
+	// its own entry in the gate's table: a state the gate does not know would
+	// still alarm (actionFor's default), but under a hint that calls it
+	// unrecognised. Only `behind-healable` is ever refined by the staging gate;
+	// a half-finished deploy (HEAD moved, the verified record did not) is
+	// reported as `behind-healable` too, so the same gate decides it.
+	const boxStates = [...new Set((read("scripts/deploy/remote-drift-check.sh").match(/DRIFT_STATE=([a-z-]+)/g) || []).map((s) => s.slice("DRIFT_STATE=".length)))];
+	ok(boxStates.length >= 5 && ["in-sync", "behind-healable", "behind-already-attempted", "behind-and-unhealthy", "verified-record-inconsistent"].every((s) => boxStates.includes(s)),
+		`§7 remote-drift-check.sh prints the box states the gate expects (got ${boxStates.join(", ")})`);
+	for (const s of boxStates) {
+		ok(Object.prototype.hasOwnProperty.call(gate.ACTIONS, s) && Object.prototype.hasOwnProperty.call(gate.HINTS, s),
+			`§7 box state '${s}' from remote-drift-check.sh has its own action and hint in drift-gate.js`);
+		ok(s === "behind-healable" || ["passed", "failed", "pending", "unreached"].every((v) => gate.refineState(s, v, 1) === s),
+			`§7 box state '${s}' is never changed by a staging verdict (only behind-healable is)`);
+	}
+	ok(gate.actionFor("verified-record-inconsistent") === "alarm", "§7 an inconsistent verified-deploy record alarms; it never heals");
 
 	const conc = (s) => {
 		const m = /\nconcurrency:\n((?: {2}.*\n)+)/.exec(noComments(s));
