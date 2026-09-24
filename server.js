@@ -6872,11 +6872,16 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (re
 		// be right. The only client is AddDriverForm.vue via driversDb.add() — an
 		// Add form — so nothing legitimate was using the replace.
 		//
-		// Matched LOWER(TRIM(...)), wider than the constraint even now that it is
-		// COLLATE NOCASE, because NOCASE folds case but not surrounding
-		// whitespace: " Shorn King" would otherwise insert alongside "Shorn King"
-		// and shadow it in getDriverPayStructures(). Names are stored trimmed for
-		// the same reason.
+		// Matched through findDriverNameClash(), i.e. normalizeDriverName() — the
+		// comparison every ownership check uses — which is wider than the
+		// constraint even now that it is COLLATE NOCASE, because NOCASE folds case
+		// but not whitespace: " Shorn King" would otherwise insert alongside
+		// "Shorn King" and shadow it in getDriverPayStructures(), and "Shorn  King"
+		// would be a second row for what every ownership check treats as the same
+		// driver. Names are stored trimmed for the same reason. Directory rows
+		// only: a directory row for a name an account already holds is that
+		// account's own row (an accepted applicant gets one only once onboarding
+		// completes).
 		const insName = String(obj.Driver == null ? "" : obj.Driver).trim();
 		if (!insName) {
 			// The old handler inserted `""` into a NOT NULL UNIQUE column quite
@@ -6884,7 +6889,7 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (re
 			// and whose second occurrence 500s on the constraint.
 			return res.status(400).json({ error: "Driver name is required.", code: "DRIVER_NAME_REQUIRED" });
 		}
-		const dirExisting = db.prepare("SELECT id, driver_name FROM drivers_directory WHERE LOWER(TRIM(driver_name)) = LOWER(TRIM(?))").get(insName);
+		const dirExisting = findDriverNameClash(insName, { users: false });
 		if (dirExisting) {
 			return res.status(409).json({
 				error: `"${dirExisting.driver_name}" is already in the drivers directory (row ${dirExisting.id}). ` +
@@ -8699,22 +8704,69 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 			return res.status(400).json({ error: "Invalid status" });
 		}
 		const appId = parseInt(req.params.id);
-		db.prepare("UPDATE job_applications SET status = ? WHERE id = ?").run(status, appId);
+		// Run only once a transition is certain to go through. For "Accepted" that
+		// is after every check below, so a refused acceptance leaves the
+		// application exactly as it was.
+		const setStatus = db.prepare("UPDATE job_applications SET status = ? WHERE id = ?");
 
 		// Auto-create driver account on acceptance
 		if (status === "Accepted") {
+			// ⚠️ HASHED FIRST, ABOVE EVERY CHECK, AND IT MUST STAY HERE. This is the
+			// handler's only await, and everything from here to the INSERTs is
+			// synchronous, so no check can go stale before the write it guards — the
+			// same rule and remedy as POST /api/users. A double-submitted accept
+			// therefore finds the first one's account and answers "already exists".
+			// Generate random temp password
+			const tempPassword = crypto.randomBytes(4).toString("hex"); // 8 char hex string
+			const hash = await bcrypt.hash(tempPassword, 10);
+
 			const application = db.prepare("SELECT * FROM job_applications WHERE id = ?").get(appId);
 			if (!application) return res.status(404).json({ error: "Application not found" });
 
 			// Check if already onboarded for this application
 			const existingOnboarding = db.prepare("SELECT id FROM driver_onboarding WHERE application_id = ?").get(appId);
 			if (existingOnboarding) {
+				setStatus.run(status, appId);
 				notifyChange("applications");
 				return res.json({ success: true, message: "Application accepted (account already exists)" });
 			}
 
+			const fullName = String(application.full_name || "").trim();
+			if (!fullName) {
+				return res.status(400).json({
+					error: "Not accepted: this application has no name to create the driver account under. Nothing was changed.",
+					code: "DRIVER_NAME_REQUIRED",
+				});
+			}
+
+			// ⚠️ THE NAME MUST NOT ALREADY BE IN USE. The account below is a Driver
+			// whose driver_name is this string, and a driver's name is the key every
+			// ownership and settlement check matches on, so it must be free. Same
+			// refusal and code as POST /api/users, through the same helper, so the
+			// comparison is normalizeDriverName()'s and the account side includes
+			// every username and the reserved names. BOTH sides count here: when
+			// onboarding completes, this account is joined to the drivers_directory
+			// row of the same name (checkAndCompleteOnboarding →
+			// syncDriverToCarrierSheet), so a directory-only driver is as much an
+			// existing identity as an account. The body names nothing about what
+			// matched; the audit row does. logAudit rather than the coalescing
+			// logAuditRefusal: this refusal needs a Super Admin and a human decision,
+			// so it cannot flood, and on a shared login each refused application
+			// should keep its own row.
+			const clash = findDriverNameClash(fullName);
+			if (clash) {
+				const matched = clash.source === "reserved" ? "a reserved name"
+					: clash.source === "users" ? `the ${clash.field === "username" ? "username" : "driver name"} of user ${clash.id}`
+					: `drivers_directory row ${clash.id}`;
+				logAudit(req, "accept_application_blocked", "application", appId,
+					`Accepting application ${appId} refused: its name matches ${matched}; nothing was written [DRIVER_NAME_TAKEN]`);
+				return res.status(409).json({
+					error: "Not accepted: this name is already in use by another driver or account. Nothing was changed.",
+					code: "DRIVER_NAME_TAKEN",
+				});
+			}
+
 			// Generate username from phone: LogisX-{last4digits} (e.g., "LogisX-2609")
-			const fullName = application.full_name.trim();
 			const phoneDigits = (application.phone || "").replace(/\D/g, "");
 			const last4 = phoneDigits.slice(-4) || "0000";
 			let baseUsername = `LogisX-${last4}`;
@@ -8725,32 +8777,35 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 				suffix++;
 			}
 
-			// Generate random temp password
-			const tempPassword = crypto.randomBytes(4).toString("hex"); // 8 char hex string
-			const hash = await bcrypt.hash(tempPassword, 10);
-
 			// Create user (do NOT sync to Carrier Database yet — that happens at full onboarding).
 			// must_change_password = 1 forces the driver onto the change-password screen
 			// at first login; the existing /api/auth/change-password endpoint clears it.
-			const userResult = db.prepare(
-				"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name, must_change_password) VALUES (?, ?, 'Driver', ?, ?, ?, '', 1)"
-			).run(username, hash, fullName, application.email || "", fullName);
-			const userId = userResult.lastInsertRowid;
+			// One transaction with the status change and the onboarding rows: an
+			// acceptance that fails part-way leaves no account behind to hold the name
+			// and refuse the retry.
+			const userId = db.transaction(() => {
+				setStatus.run(status, appId);
+				const userResult = db.prepare(
+					"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name, must_change_password) VALUES (?, ?, 'Driver', ?, ?, ?, '', 1)"
+				).run(username, hash, fullName, application.email || "", fullName);
+				const newUserId = userResult.lastInsertRowid;
 
-			// Create onboarding record
-			db.prepare(
-				"INSERT INTO driver_onboarding (user_id, application_id, driver_name, status) VALUES (?, ?, ?, 'documents_pending')"
-			).run(userId, appId, fullName);
+				// Create onboarding record
+				db.prepare(
+					"INSERT INTO driver_onboarding (user_id, application_id, driver_name, status) VALUES (?, ?, ?, 'documents_pending')"
+				).run(newUserId, appId, fullName);
 
-			// Seed 6 onboarding documents
-			const seedDoc = db.prepare(
-				"INSERT OR IGNORE INTO onboarding_documents (user_id, doc_key, doc_name, confidential) VALUES (?, ?, ?, ?)"
-			);
-			for (const doc of ONBOARDING_DOCS) {
-				seedDoc.run(userId, doc.key, doc.name, doc.confidential);
-			}
+				// Seed the onboarding documents
+				const seedDoc = db.prepare(
+					"INSERT OR IGNORE INTO onboarding_documents (user_id, doc_key, doc_name, confidential) VALUES (?, ?, ?, ?)"
+				);
+				for (const doc of ONBOARDING_DOCS) {
+					seedDoc.run(newUserId, doc.key, doc.name, doc.confidential);
+				}
+				return newUserId;
+			})();
 
-			logAudit(req, "accept_application", "application", appId, `Accepted driver "${fullName}", created account "${username}"`);
+			logAudit(req, "accept_application", "application", appId, `Accepted driver "${auditText(fullName, 120)}", created account "${username}"`);
 			notifyChange("applications"); notifyChange("users"); notifyChange("drivers");
 
 			res.json({
@@ -8837,6 +8892,7 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 			return;
 		}
 
+		setStatus.run(status, appId);
 		// Non-Accepted transitions (Reviewed, Rejected, or back to New) also deserve
 		// an audit row. The Accepted branch above already logs and returns.
 		logAudit(req, `status_${String(status).toLowerCase()}_application`, "application", appId, `Set status to ${status}`);
@@ -19761,16 +19817,26 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 		// impossible in the first place. Neither one is redundant: the migration
 		// protects every other writer, this protects the users table's own
 		// invariant, and only this one names the person whose rows would merge.
+		//
+		// Compared through findDriverNameClash(), i.e. normalizeDriverName() — the
+		// comparison every ownership check uses — so a name differing only in case
+		// or spacing is refused here exactly as it is matched there. The account
+		// side only (every account's driver name and username, and the reserved
+		// names): giving a login to a driver who is already in the directory is
+		// the ordinary way such a driver gets one.
 		if (newDriverName) {
-			const clash = db.prepare(
-				"SELECT id, username FROM users WHERE TRIM(LOWER(driver_name)) = ?"
-			).get(newDriverName.toLowerCase());
+			const clash = findDriverNameClash(newDriverName, { directory: false });
 			if (clash) {
+				const why = clash.source === "reserved"
+					? "that name is reserved."
+					: clash.field === "username"
+						? `it is the username of ${clash.username} (user ${clash.id}), and a driver name must not be another account's username.`
+						: `it already belongs to ${clash.username} (user ${clash.id}). Two accounts sharing a driver name merge their expenses, invoices and documents irreversibly — every settlement join matches the name case-insensitively and would resolve to both.`;
 				return res.status(409).json({
-					error: `Cannot create an account with the driver name "${newDriverName}": it already belongs to ${clash.username} (user ${clash.id}). Two accounts sharing a driver name merge their expenses, invoices and documents irreversibly — every settlement join matches the name case-insensitively and would resolve to both.`,
+					error: `Cannot create an account with the driver name "${newDriverName}": ${why}`,
 					code: "DRIVER_NAME_TAKEN",
-					conflictUserId: clash.id,
-					conflictUsername: clash.username,
+					// A reserved name belongs to no account, so it names none.
+					...(clash.source === "users" ? { conflictUserId: clash.id, conflictUsername: clash.username } : {}),
 				});
 			}
 		}
@@ -29813,6 +29879,72 @@ function pickAddressColumn(headers, sideRe) {
 // double-spaces (see invoice generator regression May 2026).
 function normalizeDriverName(s) {
 	return (s || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+// ⚠️ THE ONE ANSWER TO "IS THIS NAME ALREADY A DRIVER'S?" — every path that
+// creates a driver identity asks it immediately before its INSERT: accepting a
+// job application, POST /api/users, POST /api/drivers-directory.
+//
+// A driver's name is the key every ownership and settlement check matches on
+// (loadBelongsToDriver, driverOwnsInvoice, the expense and document routes), and
+// those compare through normalizeDriverName() above. So this compares through it
+// too, and the create-time answer and the ownership answer cannot disagree: a
+// name differing only in case or spacing ("john  SMITH ") is the same name here.
+// It runs in JS because SQLite cannot express that function — its LOWER folds
+// ASCII only, its TRIM strips spaces only, and it cannot collapse a whitespace
+// run. The scan is every users row plus every non-blank
+// drivers_directory.driver_name: two small reads, a few dozen rows on
+// production, linear in both tables.
+//
+// THE ACCOUNT NAMESPACE IS WIDER THAN DRIVER NAMES. A driver's name, an
+// account's username and the names the app itself uses as identities are the
+// same kind of identifier, so on the `users` side a name is also taken when it
+// equals any account's USERNAME or one of the reserved names below. The list lives inside the function so a lifted copy stays
+// self-contained.
+//
+// SYNCHRONOUS ON PURPOSE (better-sqlite3), so a caller can sit it right beside
+// its write with no `await` in between — the house check-then-act rule.
+//
+// Returns the first clash, or null:
+//     { source: "reserved", name }
+//     { source: "users", field: "driver_name" | "username", id, username, driver_name }
+//     { source: "drivers_directory", id, driver_name }
+// Options:
+//   exceptUserId — skip that one account, both its driver name and its
+//     username (a caller editing an account by id).
+//   users / directory — pass false to leave that side out. `users` covers the
+//     reserved names, every account's driver name and every username. Both
+//     sides are checked by default, the wider answer, so a new caller has to
+//     opt OUT of one.
+// A blank name, or a non-string, never clashes: an empty name is not an
+// identity, so every caller refuses a blank name itself (DRIVER_NAME_REQUIRED)
+// before asking. Blank stored names — every non-driver account's driver name —
+// never match for the same reason. A failed read throws; each caller asks
+// inside its try, so a read error refuses the create rather than admitting it.
+function findDriverNameClash(name, opts = {}) {
+	const RESERVED_NAMES = ["dispatch", "investor"];
+	const needle = normalizeDriverName(typeof name === "string" ? name : "");
+	if (!needle) return null;
+	const { exceptUserId = null, users = true, directory = true } = opts || {};
+	const skipId = exceptUserId == null ? null : Number(exceptUserId);
+	const same = (stored) => normalizeDriverName(stored == null ? "" : String(stored)) === needle;
+	if (users) {
+		const reserved = RESERVED_NAMES.find((r) => same(r));
+		if (reserved) return { source: "reserved", name: reserved };
+		const rows = db.prepare("SELECT id, username, driver_name FROM users ORDER BY id").all();
+		for (const r of rows) {
+			if (skipId !== null && r.id === skipId) continue;
+			const field = same(r.driver_name) ? "driver_name" : same(r.username) ? "username" : "";
+			if (field) return { source: "users", field, id: r.id, username: r.username, driver_name: r.driver_name };
+		}
+	}
+	if (directory) {
+		const rows = db.prepare("SELECT id, driver_name FROM drivers_directory WHERE COALESCE(driver_name, '') <> '' ORDER BY id").all();
+		for (const r of rows) {
+			if (same(r.driver_name)) return { source: "drivers_directory", id: r.id, driver_name: r.driver_name };
+		}
+	}
+	return null;
 }
 
 // SECURITY: enforce that a Driver-role user is acting only on their own
