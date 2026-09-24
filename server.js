@@ -31176,16 +31176,35 @@ app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver
 });
 
 // GET /api/driver/:driverName — All data for one driver (single batchGet)
-app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
+//
+// ⚠️ SUPER ADMIN (ANY DRIVER) OR THE NAMED DRIVER, AND NO OTHER ROLE.
+// requireRole answers a Dispatcher or an Investor 403 "Forbidden" before the
+// handler runs, so a refused caller costs no sheet or database read. This is the
+// driver app's payload: the driver's loads, messages, expenses and invoice
+// totals, their carrier-directory row and their documents. Its only callers are
+// the driver app (client/src/stores/driver.js, reached from the /driver view,
+// which admits Driver and Super Admin) and the legacy public/driver.html (same
+// two roles). Dispatch reads driver data through its own routes. If a dispatch
+// screen ever needs this payload, strip what that role does not see BEFORE
+// adding it here: `invoices`, `expenses` and the rate columns are financial.
+//
+// The self check folds BOTH sides through normalizeDriverName(), the rule every
+// other ownership check here uses (driverOwnsInvoice, loadBelongsToDriver,
+// resolveDriverActor), and refuses a blank session name outright rather than
+// comparing it, the narrowing driverOwnsInvoice() made so "" never matches "".
+// It tests `!== "Super Admin"`, not `=== "Driver"`, so it still holds if the
+// role list is ever widened; the column strip and the roster below key on the
+// same test for the same reason. Pinned by scripts/test-driver-page-role-gate.js.
+app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (req, res) => {
 	try {
 		const driverName = decodeURIComponent(req.params.driverName).trim();
 
-		// Drivers can only access their own data
-		if (
-			req.session.user.role === "Driver" &&
-			req.session.user.driverName.toLowerCase() !== driverName.toLowerCase()
-		) {
-			return res.status(403).json({ error: "Forbidden" });
+		// Super Admin reads any driver; every other caller reads only themself.
+		if (req.session.user.role !== "Super Admin") {
+			const sessionName = normalizeDriverName(req.session.user.driverName);
+			if (!sessionName || normalizeDriverName(driverName) !== sessionName) {
+				return res.status(403).json({ error: "Forbidden" });
+			}
 		}
 		// Use the shared 60s in-memory cache so the driver endpoint matches the
 		// rest of the load-aggregating endpoints (/api/dashboard, /api/investor,
@@ -31341,10 +31360,11 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			load._otherCount = otherCounts[lid] || 0;
 		});
 
-		// Strip rate/revenue columns for Driver role
+		// Strip rate/revenue columns for every caller but Super Admin, which
+		// in practice is the Driver reading their own loads.
 		let filteredLoads = loads;
 		let filteredHeaders = jobTracking.headers;
-		if (req.session.user.role === "Driver") {
+		if (req.session.user.role !== "Super Admin") {
 			const rateRegex = /rate|amount|revenue|pay|charge|price|cost/i;
 			const hiddenCols = new Set(
 				jobTracking.headers.filter((h) => rateRegex.test(h)),
@@ -31408,7 +31428,7 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 		// Previously this returned the full carrier driver list to every
 		// /api/driver/:name response. The driver UI never consumed it; admin
 		// views fetch the list separately via /api/data?sheet=Carrier+Database.
-		const carrierDriverNames = req.session.user.role === "Driver"
+		const carrierDriverNames = req.session.user.role !== "Super Admin"
 			? []
 			: [
 				...new Set(
