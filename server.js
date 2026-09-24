@@ -128,7 +128,26 @@ function colLetter(idx) {
 const app = express();
 app.disable('etag');
 const server = http.createServer(app);
-const io = new Server(server);
+// The largest message a client may send over a live-update (Socket.IO)
+// connection, in bytes. Clients send three kinds of message over it, all small:
+// `register` with an account name, and the public tracker's `subscribe` /
+// `unsubscribe` with a load id of at most 40 characters (LOAD_ID_RE). Chat,
+// uploads and every other write go over HTTP. Measured as encoded on the wire
+// (scripts/test-socket-hardening.js): `register` with a 200-character name is
+// 217 bytes (417 if every character takes two bytes), a tracker subscribe 83,
+// and one long-polling request carrying all of them 407. So 16 KB leaves room
+// for a name thousands of characters long, at a sixtieth of Socket.IO's 1 MB
+// default. It bounds each WebSocket message, which closes the connection when
+// over it, and each long-polling request body, which is answered 413 when over
+// it (the client then drops the connection). Messages the SERVER sends are not
+// limited by it.
+const SOCKET_MAX_MESSAGE_BYTES = 16 * 1024;
+const io = new Server(server, {
+	// Who may open a live-update connection: the same origin rule as the HTTP
+	// guards. See liveUpdateHandshakeAllowed(), beside crossSiteGuard.
+	allowRequest: liveUpdateHandshakeAllowed,
+	maxHttpBufferSize: SOCKET_MAX_MESSAGE_BYTES,
+});
 // Emit a domain invalidation event so connected clients auto-refresh.
 // Called after successful mutations (POST/PUT/DELETE) — no payload needed.
 function notifyChange(domain) {
@@ -141,6 +160,55 @@ function notifyChange(domain) {
 		io.to("investor").emit(`${domain}:changed`);
 		io.to("investor").emit("investor:changed");
 	}
+}
+// ── Socket.IO rooms: role rooms and identity rooms ──────────────────────────
+// Two kinds of room share the default namespace:
+//   - ROLE rooms, the literals "dispatch" (Super Admin and Dispatcher) and
+//     "investor". notifyChange() and the dispatch-wide emits target these.
+//   - IDENTITY rooms, one per person, named ONLY by the helpers below, at every
+//     join (the `register` handler) and every emit: driverRoom() is
+//     `driver:<driver name>` and userRoom() is `user:<username>`, each trimmed
+//     and lower-cased, the normalisation every emit site already applied.
+// The prefixes keep the kinds apart: an identity room never equals a role
+// room, and a driver room never equals a user room.
+// scripts/test-socket-hardening.js pins that every room argument in this file
+// is a role-room literal or one of these helpers.
+//
+// (The socket-session helpers near the end of this file still find a
+// session's sockets by walking the namespace rather than through an id room:
+// `user:<id>` would be the same room as `user:<username>` for a numeric name.)
+//
+// Anything that is not a string is read as no name: `register` hands this
+// whatever JSON value a client sent.
+function identityRoomKey(name) {
+	return (typeof name === "string" ? name : "").trim().toLowerCase();
+}
+function driverRoom(name) {
+	return `driver:${identityRoomKey(name)}`;
+}
+function userRoom(username) {
+	return `user:${identityRoomKey(username)}`;
+}
+// The rooms one chat message goes to: the dispatch room, which sees every
+// message whoever it is addressed to, plus the identity rooms of each party.
+// A party is a NAME ("Dispatch" for the dispatch desk, a driver name or a
+// username), because that is all the `messages` table records, and every
+// reader selects its thread by LOWER("from") / LOWER("to"). Each name reaches
+// only the driver room and the user room of that name, through the helpers,
+// so no value in a request can select a role room or another kind's room.
+// "Dispatch", the desk's own name, adds no identity room: the dispatch room
+// already has the message. One list, deduplicated, so a socket in two of
+// these rooms receives the message once, and never empty: io.to([]) would
+// send to every socket.
+function chatRooms(from, to) {
+	const rooms = new Set(["dispatch"]);
+	for (const party of [from, to]) {
+		const key = identityRoomKey(party);
+		if (!key || key === "dispatch") continue;
+		rooms.add(driverRoom(key));
+		rooms.add(userRoom(key));
+	}
+	return [...rooms];
 }
 app.set("trust proxy", 1); // Behind nginx — use real client IP for rate limiting
 // ⚠️ ADDING AN EXTENSION HERE IS A SECURITY DECISION, NOT A CONVENIENCE ONE.
@@ -3718,9 +3786,8 @@ async function routemateSyncTelemetry() {
 			// Also push to the driver's own socket room so the driver app's
 			// Load Route Map can update the truck pin live instead of waiting
 			// for the next /api/locations/latest poll cycle. Driver sockets
-			// join a room named after their lowercased driver name on
-			// `register` (see io.on("connection") handler).
-			if (driverLower) io.to(driverLower).emit("location-update", locationPayload);
+			// join their driverRoom() on `register` (see io.on("connection")).
+			if (driverLower) io.to(driverRoom(driverLower)).emit("location-update", locationPayload);
 			if (activeLoadId) {
 				publicTrack.to("load:" + activeLoadId).emit("tracker-update", {
 					lat: t.latitude,
@@ -7711,6 +7778,113 @@ const refuseCrossOriginStrict = crossSiteGuard("same-origin", {
 	allowNoInitiator: false,
 	auditRefusal: { action: "db_export_blocked", entity: "database", entityId: "app.db" },
 });
+
+// ── Live-update (Socket.IO) handshakes: the same origin rule ────────────────
+// Engine.IO's `allowRequest`, wired at `new Server()` near the top of this
+// file. A live-update connection is admitted by the same judgement of origin
+// as the tiers above, since a WebSocket handshake cannot carry the
+// X-Requested-With header the CSRF check reads. It runs on the HANDSHAKE, the
+// request without a `sid`: that request's cookie decides the session the
+// connection carries (socket.request stays the handshake), and every later
+// request names the connection by its `sid`.
+//
+//   - An Origin that is present must be the app's own. originIsSelf() judges it
+//     exactly as the HTTP guards do, per request: Host, and X-Forwarded-Host
+//     under `trust proxy` through Express's own `hostname` getter. Then
+//     originHostIsExact() holds the PORT to it as well. On the HTTP routes the
+//     X-Requested-With check backs originIsSelf() up, and its port-blind leg
+//     serves a dev proxy that rewrites the port; neither applies here, and the
+//     Vite dev proxy keeps the browser's Host on /socket.io. So production,
+//     staging and dev each match themselves. While the session cookie is
+//     Secure (production), the Origin must also be HTTPS: no page of this app
+//     is served over plain HTTP then. An entry of DRIVER_MOBILE_ORIGINS passes:
+//     the allowlist the /api CORS middleware honours (Engine.IO itself adds no
+//     CORS headers, so such a client would connect over WebSocket).
+//     `Origin: null` is none of these.
+//   - No Origin passes, unless Sec-Fetch-Site names another origin (same-site,
+//     cross-site or none). A same-origin long-polling GET sends no Origin and
+//     `Sec-Fetch-Site: same-origin`; a client that is not a browser sends
+//     neither and holds no browser's session. That is crossSiteGuard's own
+//     order: Sec-Fetch-Site where the browser sent it, then the fall-through.
+//   - JSONP long-polling (a `j` query parameter) is refused whatever its
+//     headers: neither socket.io client this app ships (the SPA's, and the one
+//     /socket.io/socket.io.js serves the legacy pages) uses it.
+//
+// A refusal is answered before any namespace sees the connection: 403 on
+// long-polling, 400 on a WebSocket upgrade (Engine.IO answers every refused
+// upgrade that way), with the message CROSS_SITE_REFUSED, the HTTP guards'
+// code. It is logged, coalesced to one line a minute with a running total,
+// because a silent refusal cannot tell a stray page from a proxy that stopped
+// forwarding Host, and the second refuses every browser in the fleet.
+// ⚠️ So nginx must forward `Host` (or X-Forwarded-Host) on the location that
+// serves /socket.io; the log line names the Host it saw.
+//
+// Fails CLOSED if the check itself throws: it reads nothing but headers, so a
+// throw is a bug, and it must not become a way in.
+function liveUpdateHandshakeAllowed(req, callback) {
+	const headers = (req && req.headers) || {};
+	const origin = headers.origin;
+	let refused = "";
+	try {
+		const query = (req && req._query) || {};
+		// The same test Engine.IO uses to pick its JSONP transport.
+		if (typeof query.j === "string") refused = "JSONP long-polling";
+		else if (!origin) {
+			const site = headers["sec-fetch-site"];
+			if (site && site !== "same-origin") refused = `no Origin, Sec-Fetch-Site=${auditHeaderValue(site, 40)}`;
+		} else if (!DRIVER_MOBILE_ORIGINS.includes(origin)) {
+			const view = expressRequestView(req);
+			if (!originIsSelf(view, origin) || !originHostIsExact(view, origin)) refused = "Origin is not this app";
+			else if (SESSION_COOKIE_SECURE && !/^https:\/\//i.test(origin)) refused = "Origin is not HTTPS";
+		}
+	} catch (err) {
+		refused = `origin check failed: ${err && err.message}`;
+	}
+	if (!refused) return callback(null, true);
+	// On globalThis, like the CSRF refusal counter, so the function lifts into a
+	// test with nothing injected but its inputs.
+	globalThis.__liveUpdateRefusedCount = (globalThis.__liveUpdateRefusedCount || 0) + 1;
+	if (!globalThis.__liveUpdateRefusedLoggedAt || Date.now() - globalThis.__liveUpdateRefusedLoggedAt > 60000) {
+		globalThis.__liveUpdateRefusedLoggedAt = Date.now();
+		console.warn(
+			`LIVE-UPDATE: ${globalThis.__liveUpdateRefusedCount} handshake(s) refused (most recent: ${refused}; ` +
+				`Origin=${auditHeaderValue(origin, 200)} Host=${auditHeaderValue(headers.host, 200)} ` +
+				`X-Forwarded-Host=${auditHeaderValue(headers["x-forwarded-host"], 200)}). The app's own pages always ` +
+				`pass; a burst whose Origin IS this app means the proxy in front is not forwarding Host.`,
+		);
+	}
+	return callback("CROSS_SITE_REFUSED", false);
+}
+// The live-update rule's tightening of originIsSelf(): the Origin's host AND
+// port must equal the request's Host, or the forwarded host when Express took
+// its `hostname` from there (trust proxy). Both go through the URL parser under
+// the Origin's scheme, so a default port written out (`Host: app.logisx.com:443`,
+// as a `$host:$server_port` proxy header sends) equals one left out, and any
+// other port does not. A value carrying URL delimiters is no host at all.
+function originHostIsExact(req, origin) {
+	let u;
+	try { u = new URL(origin); } catch { return false; }
+	const asHost = (value) => {
+		const v = String(value || "").trim();
+		if (!v || /[/\\@?#\s]/.test(v)) return "";
+		try { return new URL(`${u.protocol}//${v}`).host.toLowerCase(); } catch { return ""; }
+	};
+	const want = u.host.toLowerCase();
+	if (want === asHost(req.get("Host"))) return true;
+	const fwd = asHost(String(req.get("X-Forwarded-Host") || "").split(",")[0]);
+	return Boolean(fwd) && want === fwd && String(req.hostname || "").toLowerCase() === u.hostname.toLowerCase();
+}
+// An Express view of a request Express never handled: Engine.IO answers
+// /socket.io itself and gives allowRequest the raw request. The view reads that
+// request's headers and socket through Express's own `get()` and `hostname`
+// getters, and so through this app's `trust proxy` setting, without modifying
+// the request. originIsSelf() and originHostIsExact() read nothing else.
+function expressRequestView(req) {
+	return Object.create(app.request, {
+		headers: { value: (req && req.headers) || {} },
+		socket: { value: req && req.socket },
+	});
+}
 
 // Rate cons state the BROKER RATE, so they are dispatch/ownership material, not
 // driver material — this app strips financial columns from the Driver role
@@ -28007,7 +28181,7 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// Always notify the driver in real time. Drivers can hold multiple
 		// accepted loads at once (dispatcher pre-planning), so there's no
 		// busy-suppression — every assignment surfaces immediately.
-		io.to(driver.trim().toLowerCase()).emit("load-assigned", { loadId, rowIndex, origin: origin || '', destination: destination || '', notificationId: notifResult.lastInsertRowid });
+		io.to(driverRoom(driver)).emit("load-assigned", { loadId, rowIndex, origin: origin || '', destination: destination || '', notificationId: notifResult.lastInsertRowid });
 
 		// Notify dispatch team
 		insertDispatchNotification.run(
@@ -28165,7 +28339,7 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 			JSON.stringify({ loadId, rowIndex })
 		);
 		// Always notify the new driver in real time (multi-load acceptance).
-		io.to(newDriver.trim().toLowerCase()).emit("load-assigned", { loadId, rowIndex });
+		io.to(driverRoom(newDriver)).emit("load-assigned", { loadId, rowIndex });
 
 		// Notify old driver — also emit a socket event so their app
 		// optimistically removes the ghost load instead of waiting for the
@@ -28179,7 +28353,7 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 				`Reassigned to ${newDriver}`,
 				JSON.stringify({ loadId, rowIndex, reassignedTo: newDriver })
 			);
-			io.to(oldDriverKey).emit("load-cancelled", {
+			io.to(driverRoom(oldDriverKey)).emit("load-cancelled", {
 				loadId, rowIndex, reason: 'reassigned',
 				notificationId: oldNotif.lastInsertRowid,
 			});
@@ -28352,7 +28526,7 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) =>
 				`Cancelled by dispatch — ${cancelReason}`,
 				JSON.stringify({ loadId, rowIndex, reason: cancelReason })
 			);
-			io.to(boundDriver.toLowerCase()).emit("load-cancelled", {
+			io.to(driverRoom(boundDriver)).emit("load-cancelled", {
 				loadId,
 				rowIndex,
 				notificationId: cancelNotif.lastInsertRowid,
@@ -32666,7 +32840,7 @@ async function ingestLinxupPosition(pos) {
 			fuelPct: Number.isFinite(pos.fuel_pct) ? pos.fuel_pct : null,
 		};
 		io.to("dispatch").emit("location-update", locationPayload);
-		if (driverLower) io.to(driverLower).emit("location-update", locationPayload);
+		if (driverLower) io.to(driverRoom(driverLower)).emit("location-update", locationPayload);
 		// Same low-fuel check as the Routemate poller. BOTH ingest paths need it
 		// or the warning silently disappears the day Linxup fully replaces the
 		// poller — the exact class of gap that left speedMps unset here once.
@@ -33285,7 +33459,9 @@ app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 		// (so admins can see all messages they're authorized to see). Previously
 		// this used io.emit() which broadcast every message to every connected
 		// client — drivers were receiving messages between other parties even
-		// though the UI hid them.
+		// though the UI hid them. chatRooms() names those rooms: the dispatch
+		// room always, plus each other party's identity rooms (the desk's own
+		// name adds none); one emit to the list reaches each socket once.
 		const payload = {
 			id: result.lastInsertRowid,
 			notificationId: msgNotif.lastInsertRowid,
@@ -33297,13 +33473,7 @@ app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 			attachment_url: attachmentUrl || "",
 			attachment_type: attachmentType || "",
 		};
-		const fromRoom = (from || "").trim().toLowerCase();
-		const toRoom = (to || "").trim().toLowerCase();
-		if (fromRoom) io.to(fromRoom).emit("new-message", payload);
-		if (toRoom && toRoom !== fromRoom) io.to(toRoom).emit("new-message", payload);
-		if (fromRoom !== "dispatch" && toRoom !== "dispatch") {
-			io.to("dispatch").emit("new-message", payload);
-		}
+		io.to(chatRooms(from, to)).emit("new-message", payload);
 
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {
@@ -39430,7 +39600,7 @@ async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, rou
 				geoMsg,
 				JSON.stringify({ loadId, status: trigger, distanceM })
 			);
-			io.to(driverName.trim().toLowerCase()).emit("geofence-trigger", {
+			io.to(driverRoom(driverName)).emit("geofence-trigger", {
 				loadId, status: trigger, distanceM,
 				notificationId: geoNotif.lastInsertRowid,
 			});
@@ -41825,7 +41995,7 @@ function maybeAlertLowFuel(vehicleId, driverName) {
 			JSON.stringify({ unit: truck.unit, planningMiles: planning, fuelPct: reading.fuelPct,
 				fuelSource: reading.fuelSource })
 		);
-		io.to(key).emit("fuel-low", {
+		io.to(driverRoom(key)).emit("fuel-low", {
 			unit: truck.unit, planningMiles: planning, fuelPct: reading.fuelPct,
 			fuelSource: reading.fuelSource, notificationId: notif.lastInsertRowid,
 		});
@@ -51467,9 +51637,10 @@ app.get("*", (req, res) => {
 // (expiry, or a script that clears `sessions` while the server runs).
 //
 // Identity lives in socket.data = { sid, userId }, set at connection below.
-// The helpers walk io.of("/").sockets instead of joining `sid:` / `user:`
-// rooms: rooms share one namespace with the username and driver-name rooms
-// `register` joins, so an identity room could collide with a name.
+// The helpers walk io.of("/").sockets instead of joining per-session or
+// per-user-id rooms: every room shares one namespace, and `user:<username>` is
+// already the identity room `register` joins (see the room helpers beside
+// notifyChange), so a `user:<id>` room would be the room of a numeric username.
 //
 // ⚠️ NAMESPACE-LEVEL socket.disconnect(), never disconnect(true). A signed-in
 // tab that opens the public tracker multiplexes /public-track onto the same
@@ -51571,6 +51742,42 @@ function sweepSessionlessSockets() {
 const socketSessionSweepTimer = setInterval(sweepSessionlessSockets, SOCKET_SESSION_SWEEP_MS);
 if (typeof socketSessionSweepTimer.unref === "function") socketSessionSweepTimer.unref();
 
+// ⚠️ EVERY socket event listener in EITHER namespace is wrapped in this. A
+// listener runs later than the code that registered it, on its own, and a
+// fault in one must stay contained to that one event on that one socket — it
+// must never reach the process and end it, taking every other connection with
+// it. socket.on("x", socketHandler("x", fn)) catches a synchronous throw and,
+// if the handler returns a promise, its rejection too; logs the fault
+// (coalesced to one line a minute per event, so a storm cannot flood the log),
+// and returns. The connection stays up. scripts/test-socket-hardening.js pins
+// that no socket.on() in either connection handler is left unwrapped, and that
+// a throwing handler leaves the server up and the socket usable.
+//
+// This is the backstop, NOT the input check. A handler still validates its own
+// payload and ignores bad input silently (see the tracker's string-only load
+// id); the guard is what keeps an UNforeseen fault from being fatal.
+function socketHandler(event, fn) {
+	return function wrappedSocketHandler(...args) {
+		try {
+			const out = fn.apply(this, args);
+			if (out && typeof out.then === "function") out.then(undefined, (err) => logSocketHandlerFault(event, err));
+		} catch (err) {
+			logSocketHandlerFault(event, err);
+		}
+	};
+}
+// Coalesced per event on globalThis, the same shape as the CSRF/live-update
+// refusal counters, so the function lifts into a test with nothing injected.
+function logSocketHandlerFault(event, err) {
+	const state = (globalThis.__socketHandlerFaults = globalThis.__socketHandlerFaults || {});
+	const s = (state[event] = state[event] || { count: 0, loggedAt: 0 });
+	s.count += 1;
+	if (Date.now() - s.loggedAt > 60000) {
+		s.loggedAt = Date.now();
+		console.error(`[sockets] ${s.count} "${event}" handler fault(s) caught; the connection stayed up. Most recent: ${err && err.message}`);
+	}
+}
+
 io.on("connection", (socket) => {
 	// Auth gate: every Socket.IO connection must carry a valid session cookie.
 	// Without this, an anonymous client could `emit("register", "dispatch")`
@@ -51597,10 +51804,10 @@ io.on("connection", (socket) => {
 	socket.data.sid = sid;
 	socket.data.userId = Number(sessionUser.id) || null;
 	const role = sessionUser.role;
-	const driverNameLower = (sessionUser.driverName || "").trim().toLowerCase();
-	const usernameLower = (sessionUser.username || "").trim().toLowerCase();
+	const driverNameLower = identityRoomKey(sessionUser.driverName);
+	const usernameLower = identityRoomKey(sessionUser.username);
 
-	socket.on("register", (clientName) => {
+	socket.on("register", socketHandler("register", (clientName) => {
 		// A session that must change its password joins NO room, so nothing is
 		// pushed to it (see FORCED PASSWORD CHANGE beside requireAuth). Read from
 		// the database on every register: refreshPasswordChangeFlag does not run
@@ -51614,26 +51821,29 @@ io.on("connection", (socket) => {
 		// change, which closes it with the old session ID; the client reconnects
 		// on the new cookie, and its register joins as normal.
 		if (currentMustChangePassword(sessionUser)) return;
-		const requested = (clientName || "").trim().toLowerCase();
-		// The client passes a room name (their driver name, "dispatch",
-		// "investor"). We ignore it for routing decisions and instead derive
-		// rooms from the session role/identity.
+		const requested = identityRoomKey(clientName);
+		// The client passes a name (their driver name, their username,
+		// "dispatch", "investor"). Rooms are derived from the session instead:
+		// the role's room, and this identity's own rooms, through driverRoom() /
+		// userRoom() so no name can reach a role room or another identity's room
+		// (see the room helpers beside notifyChange). identityRoomKey() reads a
+		// name that is not a string as no name.
 		if (role === "Super Admin" || role === "Dispatcher") {
 			socket.join("dispatch");
-			if (usernameLower) socket.join(usernameLower);
+			if (usernameLower) socket.join(userRoom(usernameLower));
 		} else if (role === "Investor") {
 			socket.join("investor");
-			if (usernameLower) socket.join(usernameLower);
+			if (usernameLower) socket.join(userRoom(usernameLower));
 		} else if (role === "Driver") {
-			if (driverNameLower) socket.join(driverNameLower);
+			if (driverNameLower) socket.join(driverRoom(driverNameLower));
 		}
-		// Honor the client's requested room only when it matches an identity
-		// they're allowed to occupy. Keeps existing client code (which sends
-		// `socket.emit("register", driverName)`) working.
-		if (requested && (requested === driverNameLower || requested === usernameLower)) {
-			socket.join(requested);
-		}
-	});
+		// The requested name only ever adds the caller's OWN identity room: the
+		// driver room when it is their driver name, the user room when it is
+		// their username (the driver app sends the username when the account
+		// has no driver name). Anything else joins nothing more.
+		if (requested && requested === driverNameLower) socket.join(driverRoom(driverNameLower));
+		if (requested && requested === usernameLower) socket.join(userRoom(usernameLower));
+	}));
 });
 
 // Public tracker namespace — unauthenticated. Customers who have a tracking
@@ -51644,17 +51854,24 @@ io.on("connection", (socket) => {
 const LOAD_ID_RE = /^[A-Za-z0-9\-_.#]{1,40}$/;
 const publicTrack = io.of("/public-track");
 publicTrack.on("connection", (socket) => {
-	socket.on("subscribe", (payload) => {
-		const loadId = (payload && payload.loadId ? String(payload.loadId) : "").trim();
+	// A load id is only ever a string; anything else is ignored, silently, the
+	// same as an id that fails LOAD_ID_RE — no room join, no reply. Reading only
+	// a string keeps a non-string payload field off every code path below.
+	// socketHandler wraps both, so even an unforeseen fault here cannot end the
+	// process (see the note beside it).
+	const readLoadId = (payload) =>
+		payload && typeof payload.loadId === "string" ? payload.loadId.trim() : "";
+	socket.on("subscribe", socketHandler("subscribe", (payload) => {
+		const loadId = readLoadId(payload);
 		if (!LOAD_ID_RE.test(loadId)) return;
 		// One room per load. Server-side emitters use the same key to push.
 		socket.join("load:" + loadId);
-	});
-	socket.on("unsubscribe", (payload) => {
-		const loadId = (payload && payload.loadId ? String(payload.loadId) : "").trim();
+	}));
+	socket.on("unsubscribe", socketHandler("unsubscribe", (payload) => {
+		const loadId = readLoadId(payload);
 		if (!LOAD_ID_RE.test(loadId)) return;
 		socket.leave("load:" + loadId);
-	});
+	}));
 });
 
 // Live reload: broadcast to all clients when server restarts (via --watch)
