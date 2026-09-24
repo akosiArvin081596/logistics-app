@@ -139,6 +139,9 @@ function makeDeps() {
 	const lower = (v) => String(v == null ? "" : v).toLowerCase();
 	const pick = (sql, args) => {
 		const who = typeof args[0] === "string" ? args[0] : null;
+		// The route reads every live invoice and matches the driver in JS through
+		// normalizeDriverName() (any stored spelling), so that query binds no name.
+		if (/FROM invoices/.test(sql) && who === null) return TABLES.invoices.map((i) => ({ deleted_at: "", ...i }));
 		if (who === null) return [];
 		if (/FROM messages/.test(sql)) return TABLES.messages.filter((m) => lower(m.from) === who || lower(m.to) === who);
 		if (/FROM notifications/.test(sql)) return TABLES.notifications.filter((n) => n.driver_name === who);

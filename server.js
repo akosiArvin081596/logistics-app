@@ -13019,7 +13019,74 @@ function houstonDay(d = new Date()) {
 	}).format(d);
 }
 
-function generateInvoiceNumber(driverName, weekStart) {
+// ============================================================
+// A WEEKLY INVOICE'S IDENTITY — one driver, one week, one number, one PDF
+// ============================================================
+// A driver's name reaches the invoice path in more than one spelling: the
+// driver's own session carries the account's, the Friday batch passes the
+// drivers_directory row's, and a Super Admin types one. Every comparison on this
+// path goes through normalizeDriverName() — the rule driverOwnsInvoice() and the
+// P&L's pay-structure key already use — so one driver in two spellings is one
+// driver: one live weekly invoice per week, one sequence of invoice numbers, one
+// pay structure. The comparisons run in JS because SQLite cannot express that
+// function (LOWER folds ASCII only, TRIM strips spaces only, nothing collapses a
+// whitespace run); the invoices, users and drivers_directory tables are small.
+//
+// idx_invoices_driver_week folds CASE (COLLATE NOCASE) but not spacing, so the
+// index alone cannot hold that rule. Two things do:
+//   1. A new row stores the spelling the driver's identity already has
+//      (canonicalDriverName(), lowercased — the column's convention), so every
+//      new row of one driver lands on ONE index entry. Stored rows keep theirs.
+//   2. The write re-checks the driver-week, the number and the PDF name after the
+//      request's last await, in the transaction that inserts the row
+//      (commitInvoiceWithPdf(), below).
+
+// Every live GENERATED invoice for this driver's billing week, in any stored
+// spelling, oldest first. The row predicate is idx_invoices_driver_week's own
+// (deleted_at = '' AND is_manual = 0). `created_at` is re-selected as ISO-8601
+// Z, like every other invoice read that reaches a client.
+function liveWeeklyInvoicesForDriverWeek(driverName, weekStart) {
+	const key = normalizeDriverName(typeof driverName === "string" ? driverName : "");
+	if (!key) return [];
+	return db.prepare(
+		"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE week_start = ? AND deleted_at = '' AND is_manual = 0 ORDER BY id ASC"
+	).all(weekStart).filter((r) => normalizeDriverName(r.driver) === key);
+}
+
+// The PDF file name for an invoice number — the one rule both INSERT paths use,
+// and the name GET /api/invoices/:id/pdf and the /uploads guard serve through
+// invoices.pdf_file_name. For every number generateInvoiceNumber() can mint
+// (its initials are already A-Z0-9) this is exactly `${number}.pdf`, the name
+// the weekly route has always written; the sanitizing is the manual route's,
+// kept for free-text payees.
+function invoicePdfFileName(invoiceNumber) {
+	return `${String(invoiceNumber || "").replace(/[^A-Za-z0-9._-]+/g, "_")}.pdf`;
+}
+
+// Rows OTHER than `exceptId` that already hold this invoice number or this PDF
+// file name — any status, soft-deleted and manual rows included: a number is an
+// invoice's identity for as long as its row exists. Case-insensitive on both
+// columns: invoice_number's UNIQUE is BINARY, but two names that differ only in
+// case are one file on a case-insensitive filesystem.
+function invoiceNumberHolders(invoiceNumber, pdfFileName, exceptId = null) {
+	return db.prepare(
+		"SELECT id, invoice_number, pdf_file_name FROM invoices WHERE invoice_number = ? COLLATE NOCASE OR pdf_file_name = ? COLLATE NOCASE"
+	).all(String(invoiceNumber || ""), String(pdfFileName || "")).filter((r) => exceptId == null || r.id !== exceptId);
+}
+
+// INV-{initials}-{YYYY}W{ww}-{nn}. Options:
+//   prefix       "INV-" (weekly) or "INV-M-" (manual) — the manual route used to
+//                mint an INV- number and swap the prefix afterwards; minting it
+//                directly lets the free-number check below see the real number.
+//   replacingId  the Draft this number is for a regeneration of: not counted in
+//                the sequence and not a holder, so a regenerated Draft keeps its
+//                number, as it always has.
+function generateInvoiceNumber(driverName, weekStart, opts) {
+	// (No default object for `opts`, and no brace characters in these comments:
+	// scripts/test-invoice-tz-and-job-conflict.js lifts this function by counting
+	// braces from the first one it meets, which must open the body.)
+	const prefix = (opts && opts.prefix) || "INV-";
+	const replacingId = opts && opts.replacingId != null ? opts.replacingId : null;
 	// The result lands in a PDF filename via path.join. It provably cannot
 	// traverse — `INV-` and `-${year}` always glue a `..` into a longer segment,
 	// and slice(0,3) is too short to form a bare `../` segment — but a `/` in a
@@ -13063,19 +13130,103 @@ function generateInvoiceNumber(driverName, weekStart) {
 	const days = Math.floor((d - jan1) / 86400000);
 	const weekNum = Math.ceil((days + jan1.getUTCDay() + 1) / 7);
 	const weekStr = String(weekNum).padStart(2, "0");
-	// Check for existing invoices this week for this driver.
-	// LOWER(driver) on BOTH sides — the same one-sided fold as the two Driver
-	// ownership checks (see driverOwnsInvoice()): `driver = ?` against an
-	// already-lowercased parameter silently skips any pre-convention display-case
-	// row. That is not cosmetic here — this COUNT is the sequence suffix, so a
-	// week that already held such an invoice restarted at `-01` and minted a
-	// DUPLICATE invoice number. Matches the duplicate guard in
-	// generateInvoiceHandler and the driver-facing list queries, all of which
-	// already use LOWER(driver); this site was the one that disagreed.
-	const existing = db.prepare("SELECT COUNT(*) AS cnt FROM invoices WHERE LOWER(driver) = ? AND week_start = ?")
-		.get(driverName.toLowerCase(), weekStart).cnt;
-	const seq = String(existing + 1).padStart(2, "0");
-	return `INV-${initials}-${year}W${weekStr}-${seq}`;
+	// Where the sequence starts: this driver's invoices for the week — any status,
+	// soft-deleted and manual included, as it always counted — matched through
+	// normalizeDriverName(), so a row stored under another spelling of the same
+	// driver counts. The count IS the suffix, so a row it cannot see restarts the
+	// sequence at a number that row already holds.
+	const key = normalizeDriverName(driverName);
+	const existing = db.prepare("SELECT id, driver FROM invoices WHERE week_start = ?").all(weekStart)
+		.filter((r) => r.id !== replacingId && normalizeDriverName(r.driver) === key).length;
+	// The first sequence from there whose number and PDF name no other row holds.
+	// Another driver with the same initials shares the rest of the number, and the
+	// count above is per driver, so it cannot see their rows; this skips them.
+	// Every number the count alone would mint that nobody holds is minted unchanged.
+	const stem = `${prefix}${initials}-${year}W${weekStr}`;
+	for (let seq = existing + 1; seq <= existing + 1000; seq++) {
+		const number = `${stem}-${String(seq).padStart(2, "0")}`;
+		if (!invoiceNumberHolders(number, invoicePdfFileName(number), replacingId).length) return number;
+	}
+	throw new Error(`No free invoice number after ${stem}-${String(existing + 1).padStart(2, "0")}`);
+}
+
+// A refusal commitInvoiceWithPdf() raises. The routes answer it as 409 { error, code }.
+function invoiceWriteRefusal(code, message) {
+	const err = new Error(message);
+	err.code = code;
+	err.invoiceWriteRefusal = true;
+	return err;
+}
+
+// Write an invoice's row and its PDF together, so an invoice's PDF is only ever
+// replaced by its own regeneration, and a number is only ever given to one row.
+//
+//   invoiceNumber, pdfFileName  what generateInvoiceNumber() minted, and its file
+//   pdfBuffer                   the rendered document
+//   replacing                   the Draft this regenerates, AS READ when the request
+//                               planned (its row object), or null
+//   slot                        { driverName, weekStart } for a weekly invoice —
+//                               the driver-week it claims; null for a manual one
+//   insert()                    runs the INSERT; its return value is returned
+//
+// The order is the point:
+//   1. the PDF is written to a temporary file beside its final name, so a failed
+//      write (a full disk) changes nothing, and a partial one is removed;
+//   2. one IMMEDIATE transaction then re-checks — after the request's last await,
+//      with no await inside — that no other row holds the number or the file
+//      name, that the week holds no other live weekly invoice for this driver in
+//      any spelling, and that the Draft being replaced is still that Draft
+//      (still a Draft, same adjustment); deletes that Draft, inserts the new
+//      row, and renames the temporary file into place as its LAST step. A
+//      refusal, or a failed INSERT, rolls back with the final file untouched and
+//      the temporary one removed.
+// A refusal throws invoiceWriteRefusal(): INVOICE_NUMBER_TAKEN when the number or
+// file was taken meanwhile, INVOICE_WEEK_CHANGED when the driver-week was. Both
+// mean "generate it again"; the retry mints the next free number and re-reads the
+// week.
+function commitInvoiceWithPdf({ invoiceNumber, pdfFileName, pdfBuffer, replacing = null, slot = null, insert }) {
+	const dir = path.join(__dirname, "uploads", "invoices");
+	if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+	const finalPath = path.join(dir, pdfFileName);
+	const tmpPath = path.join(dir, `.${pdfFileName}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 10)}.tmp`);
+	const replacingId = replacing ? replacing.id : null;
+	try {
+		fs.writeFileSync(tmpPath, pdfBuffer);
+		return db.transaction(() => {
+			if (invoiceNumberHolders(invoiceNumber, pdfFileName, replacingId).length) {
+				throw invoiceWriteRefusal("INVOICE_NUMBER_TAKEN",
+					`Invoice number ${invoiceNumber} was given to another invoice while this one was being generated. Nothing was saved; generate it again.`);
+			}
+			if (slot) {
+				const live = liveWeeklyInvoicesForDriverWeek(slot.driverName, slot.weekStart);
+				const current = replacing ? live.find((r) => r.id === replacing.id) : null;
+				const sameDraft = !replacing || (!!current && current.status === "Draft" &&
+					["adjustment", "adjustment_note", "adjusted_by", "adjusted_at"].every((k) => String(current[k] ?? "") === String(replacing[k] ?? "")));
+				if (!sameDraft || live.some((r) => r.id !== replacingId)) {
+					throw invoiceWriteRefusal("INVOICE_WEEK_CHANGED",
+						`This driver's invoice for the week of ${slot.weekStart} changed while this one was being generated. Nothing was saved; generate it again.`);
+				}
+			}
+			if (replacing && db.prepare("DELETE FROM invoices WHERE id = ? AND status = 'Draft'").run(replacing.id).changes !== 1) {
+				throw invoiceWriteRefusal("INVOICE_WEEK_CHANGED",
+					"The Draft being regenerated changed while this one was being generated. Nothing was saved; generate it again.");
+			}
+			const result = insert();
+			fs.renameSync(tmpPath, finalPath);
+			return result;
+		}).immediate();
+	} catch (err) {
+		try { fs.unlinkSync(tmpPath); } catch { /* renamed into place, or never written */ }
+		throw err;
+	}
+}
+
+// The accounts whose driver name is this driver's, in any spelling, oldest first.
+function driverAccountsNamed(driverName) {
+	const key = normalizeDriverName(typeof driverName === "string" ? driverName : "");
+	if (!key) return [];
+	return db.prepare("SELECT id, username, email, role, driver_name FROM users ORDER BY id ASC").all()
+		.filter((u) => normalizeDriverName(u.driver_name) === key);
 }
 
 // === Shared driver-pay helpers (used by /api/financials and /api/investor) ===
@@ -13544,6 +13695,16 @@ setInterval(warmEldTravelMemo, 4 * 60 * 1000);       // < the 5-min TTL, so the 
 // expenses, or ELD data (any of which could have drifted since the driver
 // submitted). The snapshot is stored as JSON in invoices.render_data.
 async function rerenderInvoicePdfFromStoredData(invoiceRow) {
+	// This rewrites the file invoices.pdf_file_name names, so it must be this
+	// row's alone. A file another row also names is refused before anything is
+	// rendered or written (the adjust route then rolls the adjustment back): the
+	// other invoice's document must not change because this one was adjusted.
+	const sharers = invoiceRow.pdf_file_name
+		? db.prepare("SELECT id, invoice_number FROM invoices WHERE pdf_file_name = ? COLLATE NOCASE AND id != ?").all(invoiceRow.pdf_file_name, invoiceRow.id)
+		: [];
+	if (sharers.length) {
+		throw new Error(`The PDF file of ${invoiceRow.invoice_number || `invoice #${invoiceRow.id}`} is also the file of ${sharers.map((r) => r.invoice_number || `invoice #${r.id}`).join(", ")}, so it cannot be re-rendered without changing that invoice's document. The adjustment was not saved.`);
+	}
 	let renderData;
 	try { renderData = JSON.parse(invoiceRow.render_data || "{}"); } catch { renderData = null; }
 	if (!renderData || !renderData.__templateName) {
@@ -13563,8 +13724,41 @@ async function rerenderInvoicePdfFromStoredData(invoiceRow) {
 	const pdfBuffer = await renderPolicy(templateName, renderData);
 	const uploadsDir = path.join(__dirname, "uploads", "invoices");
 	if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-	fs.writeFileSync(path.join(uploadsDir, invoiceRow.pdf_file_name), pdfBuffer);
+	// After the render's await: checked, then written, with nothing in between.
+	assertInvoiceFileStillOwn(invoiceRow);
+	writeInvoiceFileAtomically(path.join(uploadsDir, invoiceRow.pdf_file_name), pdfBuffer);
 	return "rerender";
+}
+
+// The adjust route re-renders an EXISTING invoice's own file, and it awaits a
+// render first. In that window another request can replace or change the row —
+// a Draft regenerated (commitInvoiceWithPdf() puts a new row on the same file),
+// another adjustment, a soft delete — so after the last await, immediately
+// before writing, the row must still be the one rendered from and the file still
+// its alone. Throws; the adjust route then rolls its own adjustment back.
+function assertInvoiceFileStillOwn(invoiceRow) {
+	const now = db.prepare(
+		"SELECT id, pdf_file_name, deleted_at, adjustment, adjustment_note, adjusted_at, render_data FROM invoices WHERE id = ?"
+	).get(invoiceRow.id);
+	const moved = !now || !!now.deleted_at || now.pdf_file_name !== invoiceRow.pdf_file_name ||
+		["adjustment", "adjustment_note", "adjusted_at", "render_data"].some((k) => String(now[k] ?? "") !== String(invoiceRow[k] ?? ""));
+	const shared = db.prepare("SELECT id FROM invoices WHERE pdf_file_name = ? COLLATE NOCASE AND id != ?")
+		.all(invoiceRow.pdf_file_name, invoiceRow.id).length > 0;
+	if (moved || shared) {
+		throw new Error(`${invoiceRow.invoice_number || `Invoice #${invoiceRow.id}`} changed while its PDF was being re-rendered, so the PDF was not written and the adjustment was not saved. Try again.`);
+	}
+}
+
+// Replace a file in one step: a temporary file beside it, then a rename.
+function writeInvoiceFileAtomically(filePath, bytes) {
+	const tmpPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 10)}.tmp`);
+	try {
+		fs.writeFileSync(tmpPath, bytes);
+		fs.renameSync(tmpPath, filePath);
+	} catch (err) {
+		try { fs.unlinkSync(tmpPath); } catch { /* renamed into place, or never written */ }
+		throw err;
+	}
 }
 
 // Append (or clear) a one-page "Adjustment Summary" on a legacy invoice PDF —
@@ -13687,7 +13881,10 @@ async function appendInvoiceAdjustmentAddendum(invoiceRow) {
 	);
 
 	const outBytes = await pdfDoc.save();
-	fs.writeFileSync(servedPath, outBytes);
+	// After the last await: checked, then written, with nothing in between (see
+	// assertInvoiceFileStillOwn()).
+	assertInvoiceFileStillOwn(invoiceRow);
+	writeInvoiceFileAtomically(servedPath, outBytes);
 }
 
 // ============================================================
@@ -13932,10 +14129,14 @@ async function generateInvoiceHandler(req, res) {
 			return res.status(403).json({ error: "Forbidden" });
 		}
 		const driverName = user.role === "Driver" ? user.driverName : (req.body.driver || "");
-		if (!driverName) return res.status(400).json({ error: "Driver name required" });
+		// One key for this driver, in any spelling — see "A WEEKLY INVOICE'S
+		// IDENTITY" above generateInvoiceNumber(). A name that normalizes to nothing
+		// (blank, whitespace, not text) names no driver.
+		const nameNorm = typeof driverName === "string" ? normalizeDriverName(driverName) : "";
+		if (!nameNorm) return res.status(400).json({ error: "Driver name required" });
 
 		// Only driver for themselves or Super Admin
-		if (user.role === "Driver" && user.driverName.toLowerCase() !== driverName.toLowerCase()) {
+		if (user.role === "Driver" && normalizeDriverName(user.driverName) !== nameNorm) {
 			return res.status(403).json({ error: "Forbidden" });
 		}
 
@@ -13943,18 +14144,33 @@ async function generateInvoiceHandler(req, res) {
 		const range = weekEnd ? getWeekRange(weekEnd) : getWeekRange();
 		const { weekStart, weekEnd: computedWeekEnd } = range;
 
-		// Check for existing invoice this week. Soft-deleted invoices and manual
-		// (admin-created) invoices never block a weekly regenerate — the partial
-		// unique index idx_invoices_driver_week applies the same scoping.
-		const existing = db.prepare(
-			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE LOWER(driver) = ? AND week_start = ? AND deleted_at = '' AND is_manual = 0"
-		).get(driverName.toLowerCase(), weekStart);
-		if (existing && existing.status !== "Draft") {
+		// Check for existing invoice this week — this driver's, in ANY stored
+		// spelling. Soft-deleted invoices and manual (admin-created) invoices never
+		// block a weekly regenerate — the partial unique index
+		// idx_invoices_driver_week applies the same scoping.
+		//   a settled (non-Draft) invoice  → 409 INVOICE_EXISTS, as before; the
+		//                                    Friday batch counts the driver billed
+		//   two live Drafts                → 409 INVOICE_WEEK_DUPLICATE: which one
+		//                                    to replace is a human's call
+		//   one live Draft                 → regenerated in place (same number); it
+		//                                    is replaced only at the write, so a
+		//                                    failed render leaves it as it was
+		const weekInvoices = liveWeeklyInvoicesForDriverWeek(driverName, weekStart);
+		const settled = weekInvoices.find((r) => r.status !== "Draft");
+		if (settled) {
 			return res.status(409).json({
-				error: `Invoice already exists for this week (${existing.invoice_number}, status: ${existing.status}). Contact admin if this needs to be regenerated.`,
-				invoice: existing,
+				error: `Invoice already exists for this week (${settled.invoice_number}, status: ${settled.status}). Contact admin if this needs to be regenerated.`,
+				code: "INVOICE_EXISTS",
+				invoice: settled,
 			});
 		}
+		if (weekInvoices.length > 1) {
+			return res.status(409).json({
+				error: `This driver already has ${weekInvoices.length} Draft invoices for the week of ${weekStart} (${weekInvoices.map((r) => r.invoice_number).join(", ")}). Delete the extra one, then generate again.`,
+				code: "INVOICE_WEEK_DUPLICATE",
+			});
+		}
+		const existing = weekInvoices[0] || null;
 
 		// Fetch loads from Google Sheets
 		const sheets = await getSheets();
@@ -13989,8 +14205,6 @@ async function generateInvoiceHandler(req, res) {
 				code: "INVOICE_WEEK_DATE_UNRESOLVED",
 			});
 		}
-		const nameLower = driverName.toLowerCase();
-		const nameNorm = normalizeDriverName(driverName);
 		const uniqueLoads = week.loads;
 		const warnings = invoiceWeekWarnings(week.undated);
 		const undatedInWeek = week.undated.filter((u) => u.scheduledInWeek).map((u) => u.loadId);
@@ -14005,22 +14219,27 @@ async function generateInvoiceHandler(req, res) {
 			return res.status(400).json({ error, weekStart, weekEnd: computedWeekEnd, warnings, undatedInWeek });
 		}
 
-		// Fetch expenses for this week
+		// Fetch expenses for this week — this driver's in any stored spelling (the
+		// ownership rule the expense routes use). The week is the purchase `date`,
+		// the operational basis the weekly invoice has always used.
 		const expenses = db.prepare(
-			`SELECT * FROM expenses WHERE LOWER(driver) = ? AND date >= ? AND date <= ? AND ${EXPENSE_PNL_FILTER} ORDER BY date ASC`
-		).all(nameLower, weekStart, computedWeekEnd);
+			`SELECT * FROM expenses WHERE date >= ? AND date <= ? AND ${EXPENSE_PNL_FILTER} ORDER BY date ASC`
+		).all(weekStart, computedWeekEnd).filter((e) => normalizeDriverName(e.driver) === nameNorm);
 
 		const loadsCount = uniqueLoads.length;
-		// Fixed-driver daily rate comes from the driver's assigned truck
-		// (trucks.driver_pay_daily) so the invoice matches the per-truck rate the
-		// investor P&L uses. Falls back to the legacy $250 when no truck rate is set.
-		const truckRateRow = db.prepare(
-			"SELECT driver_pay_daily FROM trucks WHERE LOWER(assigned_driver) = LOWER(?) AND COALESCE(driver_pay_daily, 0) > 0 LIMIT 1"
-		).get(driverName);
-		const driverDailyRow = db.prepare(
-			"SELECT pay_daily FROM drivers_directory WHERE LOWER(driver_name) = LOWER(?) LIMIT 1"
-		).get(driverName);
-		const dailyRate = resolveDailyRate(driverDailyRow && driverDailyRow.pay_daily, truckRateRow && truckRateRow.driver_pay_daily);
+		// PAY STRUCTURE AND DAILY RATE RESOLVE EXACTLY AS THE P&L RESOLVES THEM
+		// (/api/financials, /api/investor, computeInvestorMonthlyEarnings), so the
+		// invoice and the P&L cannot price one driver two ways:
+		//   - the structure is getDriverPayStructures()[normalizeDriverName(name)],
+		//     with the P&L's own fallback when the driver has no directory row;
+		//   - the truck rate is the LAST truck naming this driver, `|| 250` — what
+		//     the P&L's last-wins `trucksByDriver` loop resolves to, and exactly the
+		//     last of truckDailyRateCandidates(), which mirrors that loop.
+		// Both used to be `LOWER(x) = LOWER(?)` lookups, which miss a directory row or
+		// truck spelled with different spacing: the invoice then fell back to the
+		// truck rate or $250 and to fixed pay while the P&L priced the driver right.
+		const payStruct = getDriverPayStructures()[nameNorm] || { payType: "fixed", payPercentage: 0 };
+		const dailyRate = resolveDailyRate(payStruct.payDaily, truckDailyRateCandidates(driverName).slice(-1)[0]);
 		const expensesTotal = expenses.reduce((sum, e) => sum + (e.amount || 0), 0);
 		const loadIds = uniqueLoads.map(l => loadIdCol ? l[loadIdCol] : "").filter(Boolean);
 		const expenseIds = expenses.map(e => e.id);
@@ -14195,9 +14414,12 @@ async function generateInvoiceHandler(req, res) {
 		let totalEarnings = activeDays * dailyRate;
 
 		// Generate invoice number
-		// Delete existing draft if any. Before deleting, capture any admin-set
-		// adjustment so a driver-triggered regenerate doesn't silently wipe out
-		// an admin's intent (e.g. a $200 bonus already added to the Draft).
+		// An existing Draft is regenerated, not deleted here: commitInvoiceWithPdf()
+		// replaces it in the same transaction as the INSERT, after the render, so a
+		// failed render or a refused write leaves it exactly as it was. Capture any
+		// admin-set adjustment first so a driver-triggered regenerate doesn't
+		// silently wipe out an admin's intent (e.g. a $200 bonus already added to the
+		// Draft); the write refuses if that adjustment changes in the meantime.
 		let preservedAdjustment = null;
 		if (existing && existing.status === "Draft") {
 			if (existing.adjustment && Number(existing.adjustment) !== 0) {
@@ -14208,15 +14430,13 @@ async function generateInvoiceHandler(req, res) {
 					adjusted_at: existing.adjusted_at || "",
 				};
 			}
-			db.prepare("DELETE FROM invoices WHERE id = ?").run(existing.id);
 		}
-		const invoiceNumber = generateInvoiceNumber(driverName, weekStart);
+		// A regenerated Draft keeps its number; anything else gets the first number
+		// no other row holds (generateInvoiceNumber()).
+		const invoiceNumber = generateInvoiceNumber(driverName, weekStart, { replacingId: existing ? existing.id : null });
 
 		// Generate PDF via HTML → Puppeteer pipeline (see lib/policy-renderer.js)
-		const uploadsDir = path.join(__dirname, "uploads", "invoices");
-		if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-		const pdfFileName = `${invoiceNumber}.pdf`;
-		const pdfPath = path.join(uploadsDir, pdfFileName);
+		const pdfFileName = invoicePdfFileName(invoiceNumber);
 
 		// Bucket active days into the Sat–Fri template grid
 		const DAY_NAMES = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
@@ -14235,21 +14455,28 @@ async function generateInvoiceHandler(req, res) {
 				: bols.join(", ");
 		}
 
-		// Lookup driver's contact info + payment info for the invoice header
-		const driverUser = db.prepare("SELECT id FROM users WHERE LOWER(driver_name) = LOWER(?)").get(driverName);
+		// Lookup driver's contact info + payment info for the invoice header — this
+		// driver's account in any spelling. Only when exactly ONE account carries the
+		// name: the bank on file is printed on the invoice, and two accounts under one
+		// name cannot say whose it is.
+		const driverAccounts = driverAccountsNamed(driverName);
+		const driverUser = driverAccounts.length === 1 ? driverAccounts[0] : null;
 		const payInfo = driverUser
 			? db.prepare("SELECT * FROM driver_payment_info WHERE user_id = ?").get(driverUser.id)
 			: null;
-		// Pull provider address + phone + pay structure from drivers_directory.
+		// Provider address + phone from the directory row the pay structure came
+		// from: getDriverPayStructures() keeps the FIRST row (by id) under a name.
 		const driverRow = db.prepare(
-			"SELECT address, city, state, zip, phone, cell, pay_type, pay_percentage FROM drivers_directory WHERE LOWER(driver_name) = LOWER(?)"
-		).get(driverName);
+			"SELECT id, driver_name, address, city, state, zip, phone, cell FROM drivers_directory ORDER BY id ASC"
+		).all().find((r) => normalizeDriverName(r.driver_name) === nameNorm);
 		const providerAddress = driverRow
 			? [driverRow.address, driverRow.city, driverRow.state, driverRow.zip].filter(Boolean).join(", ")
 			: "";
 		const providerPhone = driverRow ? (driverRow.phone || driverRow.cell || "") : "";
-		const payType = (driverRow?.pay_type || "fixed").toLowerCase() === "percentage" ? "percentage" : "fixed";
-		const payPercentage = Math.max(0, Math.min(100, Number(driverRow?.pay_percentage || 0)));
+		// The P&L's structure (see the daily rate above), so the formula — fixed
+		// or percentage — and the percentage are the ones the P&L applies.
+		const payType = payStruct.payType;
+		const payPercentage = payStruct.payPercentage;
 
 		const nowStr = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 		const fmtWeekDate = (s) =>
@@ -14344,8 +14571,9 @@ async function generateInvoiceHandler(req, res) {
 		renderData.adjustment = preservedAdjustment ? preservedAdjustment.adjustment : 0;
 		renderData.adjustmentNote = preservedAdjustment ? preservedAdjustment.adjustment_note : "";
 
+		// The LAST await. Everything below runs synchronously, so what the write
+		// re-checks is what it writes against.
 		const pdfBuffer = await renderPolicy(templateName, renderData);
-		fs.writeFileSync(pdfPath, pdfBuffer);
 
 		// Persist the render snapshot so /api/invoices/:id/adjust can re-render
 		// without re-fetching source data. Tag with __templateName so the helper
@@ -14357,19 +14585,30 @@ async function generateInvoiceHandler(req, res) {
 		// For percentage:
 		// loads_count=uniqueLoads.length, rate_per_load=payPercentage (overloaded
 		// to carry the % so admin tooling has a single column to read).
-		const result = db.prepare(
-			`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name, load_ids, expense_ids, adjustment, adjustment_note, adjusted_by, adjusted_at, render_data)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Draft', ?, ?, ?, ?, ?, ?, ?, ?)`
-		).run(
-			invoiceNumber, driverName.toLowerCase(), weekStart, computedWeekEnd,
-			invoiceLoadsCount, invoiceRatePerLoad, totalEarnings, expensesTotal,
-			pdfFileName, JSON.stringify(loadIds), JSON.stringify(expenseIds),
-			preservedAdjustment ? preservedAdjustment.adjustment : 0,
-			preservedAdjustment ? preservedAdjustment.adjustment_note : "",
-			preservedAdjustment ? preservedAdjustment.adjusted_by : "",
-			preservedAdjustment ? preservedAdjustment.adjusted_at : "",
-			JSON.stringify(renderSnapshot)
-		);
+		//
+		// Row, PDF and the replaced Draft move together — commitInvoiceWithPdf()
+		// re-checks the number, the file name and this driver-week first, and writes
+		// nothing on a refusal. `driver` is the spelling this driver's identity
+		// already has (canonicalDriverName()), lowercased as this column always is,
+		// so every new row of one driver shares one idx_invoices_driver_week entry.
+		const result = commitInvoiceWithPdf({
+			invoiceNumber, pdfFileName, pdfBuffer,
+			replacing: existing,
+			slot: { driverName, weekStart },
+			insert: () => db.prepare(
+				`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name, load_ids, expense_ids, adjustment, adjustment_note, adjusted_by, adjusted_at, render_data)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Draft', ?, ?, ?, ?, ?, ?, ?, ?)`
+			).run(
+				invoiceNumber, canonicalDriverName(driverName).toLowerCase(), weekStart, computedWeekEnd,
+				invoiceLoadsCount, invoiceRatePerLoad, totalEarnings, expensesTotal,
+				pdfFileName, JSON.stringify(loadIds), JSON.stringify(expenseIds),
+				preservedAdjustment ? preservedAdjustment.adjustment : 0,
+				preservedAdjustment ? preservedAdjustment.adjustment_note : "",
+				preservedAdjustment ? preservedAdjustment.adjusted_by : "",
+				preservedAdjustment ? preservedAdjustment.adjusted_at : "",
+				JSON.stringify(renderSnapshot)
+			),
+		});
 
 		// created_at is SQLite CURRENT_TIMESTAMP — UTC but serialized without a
 		// zone, which JS parses as local time. Wrap it as ISO-8601 Z; the trailing
@@ -14380,6 +14619,9 @@ async function generateInvoiceHandler(req, res) {
 		const late = isAfterDeadline(computedWeekEnd);
 		res.json({ success: true, invoice, isLate: late, warnings, undatedInWeek });
 	} catch (err) {
+		// A write the re-check refused: nothing was saved, and generating again
+		// is the remedy. The Friday batch reports it as an error, never as billed.
+		if (err && err.invoiceWriteRefusal) return res.status(409).json({ error: err.message, code: err.code });
 		console.error("Invoice generation error:", err.message);
 		res.status(500).json({ error: err.message });
 	}
@@ -14553,9 +14795,22 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 	invoiceAutogenAbortAlerted = false;
 	const expected = driversWithCompletedLoadsInWeek(jt.data, jt.headers, range.weekStart, range.weekEnd);
 
-	const rosterDrivers = db
-		.prepare("SELECT driver_name FROM drivers_directory WHERE TRIM(COALESCE(driver_name, '')) != '' ORDER BY driver_name")
-		.all().map((r) => r.driver_name);
+	// One entry per DRIVER, not per directory row. Two rows whose names normalize
+	// alike are one driver to every ownership and pay check (the naming check
+	// refuses to create such a pair, so only an older one can exist); asking the
+	// handler twice for one driver would only count them twice. The first
+	// spelling in this order is the one passed; what the invoice stores does not
+	// depend on it (canonicalDriverName()).
+	const rosterDrivers = [];
+	{
+		const seen = new Set();
+		for (const r of db.prepare("SELECT driver_name FROM drivers_directory WHERE TRIM(COALESCE(driver_name, '')) != '' ORDER BY driver_name").all()) {
+			const key = normalizeDriverName(r.driver_name);
+			if (!key || seen.has(key)) continue;
+			seen.add(key);
+			rosterDrivers.push(r.driver_name);
+		}
+	}
 	let created = 0, submitted = 0, skipped = 0;
 	const billed = new Set();   // normalized names successfully billed OR already legitimately invoiced
 	const errors = [];
@@ -14597,8 +14852,12 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 				} else {
 					zeroPay.push(driver);
 				}
-			} else if (statusCode === 409) {
-				skipped++; billed.add(norm);   // already has a non-Draft invoice → legitimate
+			} else if (statusCode === 409 && body.code === "INVOICE_EXISTS") {
+				// Already has a non-Draft invoice → legitimate. ONLY this 409: the
+				// handler's other 409s (a write it refused, two Drafts for one week)
+				// saved nothing, so they fall through to `errors` and the driver stays
+				// in `unbilled`, which is what retries and alerts.
+				skipped++; billed.add(norm);
 			} else if (statusCode === 400) {
 				skipped++;                     // handler found no completed loads for this driver
 			} else {
@@ -18455,8 +18714,11 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 		// Manual numbers reuse the weekly scheme with an INV-M- prefix so they're
 		// visually distinct and can't collide with generated INV- numbers. The
 		// sequence inside generateInvoiceNumber counts ALL rows (incl. deleted +
-		// manual) for the payee/period, so repeats get -02, -03, ...
-		const invoiceNumber = generateInvoiceNumber(payee, periodStart).replace(/^INV-/, "INV-M-");
+		// manual) for the payee/period, so repeats get -02, -03, ... — and it
+		// skips a number another row already holds (a payee with the same
+		// initials in the same period), which is why the prefix is passed in
+		// rather than swapped in afterwards.
+		const invoiceNumber = generateInvoiceNumber(payee, periodStart, { prefix: "INV-M-" });
 		const nowStr = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 		const fmtPeriodDate = (s) =>
 			new Date(s + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
@@ -18482,13 +18744,10 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 		};
 
 		const pdfBuffer = await renderPolicy("service_invoice_manual", renderData);
-		const uploadsDir = path.join(__dirname, "uploads", "invoices");
-		if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 		// Payee is free text, so the derived number could contain characters that
 		// are unsafe in a filename — sanitize the FILE name only (the DB keeps the
 		// raw invoice_number; serving goes through pdf_file_name).
-		const pdfFileName = `${invoiceNumber.replace(/[^A-Za-z0-9._-]+/g, "_")}.pdf`;
-		fs.writeFileSync(path.join(uploadsDir, pdfFileName), pdfBuffer);
+		const pdfFileName = invoicePdfFileName(invoiceNumber);
 
 		// Same snapshot mechanism as weekly invoices so /api/invoices/:id/adjust
 		// can re-render the full manual template with a new adjustment.
@@ -18496,14 +18755,20 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 
 		// loads_count carries the line-item count for manual rows; rate_per_load
 		// is 0 (no daily-rate semantics); expenses_total carries the deductions.
-		const result = db.prepare(
-			`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name, load_ids, expense_ids, render_data, is_manual, created_by)
-			 VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'Draft', ?, '[]', '[]', ?, 1, ?)`
-		).run(
-			invoiceNumber, payee.toLowerCase(), periodStart, periodEnd,
-			itemsRes.items.length, totalDue, deductionsTotal,
-			pdfFileName, JSON.stringify(renderSnapshot), adminName
-		);
+		// Row and PDF are written together, after the number and file name are
+		// re-checked (commitInvoiceWithPdf()); no driver-week slot — a manual
+		// invoice sits outside the one-per-driver-week rule.
+		const result = commitInvoiceWithPdf({
+			invoiceNumber, pdfFileName, pdfBuffer,
+			insert: () => db.prepare(
+				`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name, load_ids, expense_ids, render_data, is_manual, created_by)
+				 VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'Draft', ?, '[]', '[]', ?, 1, ?)`
+			).run(
+				invoiceNumber, payee.toLowerCase(), periodStart, periodEnd,
+				itemsRes.items.length, totalDue, deductionsTotal,
+				pdfFileName, JSON.stringify(renderSnapshot), adminName
+			),
+		});
 
 		// created_at wrapped as ISO-8601 Z (see note in generateInvoiceHandler).
 		const invoice = db.prepare(
@@ -18519,6 +18784,7 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 		notifyChange("invoices");
 		res.json({ success: true, invoice });
 	} catch (err) {
+		if (err && err.invoiceWriteRefusal) return res.status(409).json({ error: err.message, code: err.code });
 		console.error("Manual invoice error:", err.message);
 		res.status(500).json({ error: err.message });
 	}
@@ -18542,15 +18808,24 @@ app.get("/api/invoices", requireAuth, (req, res) => {
 			let sql = "SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE 1=1";
 			const params = [];
 			if (!includeDeleted) sql += " AND deleted_at = ''";
-			if (driverFilter) { sql += " AND LOWER(driver) = ?"; params.push(driverFilter.toLowerCase()); }
 			if (statusFilter) { sql += " AND status = ?"; params.push(statusFilter); }
 			sql += " ORDER BY created_at DESC";
 			invoices = db.prepare(sql).all(...params);
+			// The driver filter matches the driver in any stored spelling
+			// (normalizeDriverName(), in JS — SQLite cannot express it).
+			if (driverFilter) {
+				const key = normalizeDriverName(String(driverFilter));
+				invoices = invoices.filter((r) => normalizeDriverName(r.driver) === key);
+			}
 		} else {
-			const driverName = user.driverName || "";
+			// Every other role: the rows driverOwnsInvoice() — the rule
+			// GET /api/invoices/:id/pdf and PUT /api/invoices/:id/submit apply — says
+			// the session owns, so the list shows exactly the invoices those routes
+			// serve. It refuses a blank session name, so a role that carries no
+			// driver name lists nothing.
 			invoices = db.prepare(
-				"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE LOWER(driver) = ? AND deleted_at = '' ORDER BY created_at DESC"
-			).all(driverName.toLowerCase());
+				"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE deleted_at = '' ORDER BY created_at DESC"
+			).all().filter((r) => driverOwnsInvoice(user, r));
 		}
 		res.json({ invoices });
 	} catch (err) {
@@ -18589,15 +18864,18 @@ function parsePaymentReportParams(req) {
 // the same number the PDF "Total Due" shows. Rejected invoices are listed but
 // excluded from payable totals.
 function buildPaymentReport(payee, from, to) {
+	// The payee in any stored spelling (normalizeDriverName(), in JS), so a
+	// driver's invoices stored under two spellings are one payee's.
+	const payeeKey = normalizeDriverName(payee);
 	const rows = db.prepare(
 		`SELECT id, invoice_number, driver, week_start, week_end, loads_count, status, is_manual,
 		        total_earnings, expenses_total, adjustment, adjustment_note,
 		        submitted_at, approved_at, approved_by, paid_at, paid_by,
 		        strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at
 		 FROM invoices
-		 WHERE LOWER(driver) = ? AND deleted_at = '' AND week_start <= ? AND week_end >= ?
+		 WHERE deleted_at = '' AND week_start <= ? AND week_end >= ?
 		 ORDER BY week_start ASC, created_at ASC`
-	).all(payee.toLowerCase(), to, from);
+	).all(to, from).filter((r) => normalizeDriverName(r.driver) === payeeKey);
 	const round2 = (n) => Math.round(n * 100) / 100;
 	const invoices = rows.map((r) => ({
 		...r,
@@ -18790,8 +19068,8 @@ app.get("/api/invoices/:id/pdf", requireAuth, (req, res) => {
 		// ⚠️ `!== "Super Admin"`, not `=== "Driver"`. The old gate named only the
 		// Driver role, so a Dispatcher or an Investor — neither of which carries a
 		// driver_name — fell through it and reached ANY invoice by id. That
-		// contradicted this feature's own listing contract: GET /api/invoices scopes
-		// every non-Super-Admin caller to `LOWER(driver) = <their own name>`, which
+		// contradicted this feature's own listing contract: GET /api/invoices lists
+		// every non-Super-Admin caller exactly the rows driverOwnsInvoice() grants, which
 		// hands a Dispatcher and an Investor zero rows, and both client surfaces are
 		// already narrower still (the /invoices view is `meta.roles: ['Super Admin']`;
 		// the driver app shows a driver only their own). So this is the detail route
@@ -18841,8 +19119,8 @@ app.put("/api/invoices/:id/submit", requireAuth, async (req, res) => {
 		// ⚠️ `!== "Super Admin"`, not `=== "Driver"`. The old gate named only the
 		// Driver role, so a Dispatcher or an Investor — neither of which carries a
 		// driver_name — fell through it and reached ANY invoice by id. That
-		// contradicted this feature's own listing contract: GET /api/invoices scopes
-		// every non-Super-Admin caller to `LOWER(driver) = <their own name>`, which
+		// contradicted this feature's own listing contract: GET /api/invoices lists
+		// every non-Super-Admin caller exactly the rows driverOwnsInvoice() grants, which
 		// hands a Dispatcher and an Investor zero rows, and both client surfaces are
 		// already narrower still (the /invoices view is `meta.roles: ['Super Admin']`;
 		// the driver app shows a driver only their own). So this is the detail route
@@ -18997,11 +19275,17 @@ app.put("/api/invoices/:id/approve", requireRole("Super Admin"), async (req, res
 		res.json({ success: true, status: newStatus });
 
 		// Fire-and-forget: email the driver about the status change. Best-effort.
+		// The recipient is the Driver account whose name is the invoice's in any
+		// spelling — and only when exactly ONE account is: the email carries the
+		// invoice's number and amount, and two accounts under one name cannot say
+		// which of them it belongs to.
 		(async () => {
 			try {
-				const driverUser = db.prepare(
-					"SELECT email FROM users WHERE LOWER(driver_name) = LOWER(?) AND role = 'Driver' LIMIT 1"
-				).get(invoice.driver);
+				const driverAccounts = driverAccountsNamed(invoice.driver).filter((u) => u.role === "Driver");
+				if (driverAccounts.length > 1) {
+					console.warn(`Invoice status email not sent: ${driverAccounts.length} Driver accounts carry the name on ${invoice.invoice_number}`);
+				}
+				const driverUser = driverAccounts.length === 1 ? driverAccounts[0] : null;
 				if (!driverUser || !driverUser.email) return;
 				const updated = { ...invoice, status: newStatus };
 				const html = invoiceStatusChangeEmail(updated, newStatus, rejectionNote || "");
@@ -19116,10 +19400,12 @@ app.put("/api/invoices/:id/adjust", requireRole("Super Admin"), refuseCrossOrigi
 			pdfMode = await rerenderInvoicePdfFromStoredData(updated);
 		} catch (renderErr) {
 			// Roll the DB change back if the PDF update genuinely fails — keeps the
-			// PDF on disk in sync with the row's claim about adjustment.
+			// PDF on disk in sync with the row's claim about adjustment. Only while
+			// the row still carries THIS request's adjustment: another adjustment or
+			// a regenerate that landed during the render is not undone.
 			db.prepare(
-				"UPDATE invoices SET adjustment = ?, adjustment_note = ?, adjusted_by = ?, adjusted_at = ? WHERE id = ?"
-			).run(oldAdjustment, oldNote, invoice.adjusted_by || "", invoice.adjusted_at || "", invoice.id);
+				"UPDATE invoices SET adjustment = ?, adjustment_note = ?, adjusted_by = ?, adjusted_at = ? WHERE id = ? AND adjustment = ? AND adjustment_note = ? AND adjusted_by = ? AND adjusted_at = ?"
+			).run(oldAdjustment, oldNote, invoice.adjusted_by || "", invoice.adjusted_at || "", invoice.id, adjustment, note, adminName, now);
 			return res.status(409).json({ error: renderErr.message || "PDF update failed" });
 		}
 
@@ -19272,17 +19558,17 @@ app.put("/api/invoices/:id/restore", requireRole("Super Admin"), (req, res) => {
 		if (!invoice) return res.status(404).json({ error: "Invoice not found" });
 		if (!invoice.deleted_at) return res.status(400).json({ error: "Invoice is not deleted" });
 		if (!invoice.is_manual) {
-			// LOWER(driver) on both sides. Both operands are stored values here, so
-			// this read looked symmetric — but the comparison is still BINARY, and
-			// `invoices.driver` holds two spellings of the same driver (see
+			// The driver in ANY stored spelling — liveWeeklyInvoicesForDriverWeek(),
+			// the same question generateInvoiceHandler() and its write ask.
+			// `invoices.driver` holds more than one spelling of the same driver (see
 			// driverOwnsInvoice()). Restoring a soft-deleted "shorn king" row for a
 			// week already covered by the live display-case "Shorn King" row found
 			// no clash and produced TWO live weekly invoices for one driver-week —
-			// the exact double-billing idx_invoices_driver_week exists to prevent,
-			// and which that index cannot catch either while its collation is BINARY.
-			const clash = db.prepare(
-				"SELECT invoice_number FROM invoices WHERE LOWER(driver) = ? AND week_start = ? AND deleted_at = '' AND is_manual = 0 AND id != ?"
-			).get(String(invoice.driver || "").toLowerCase(), invoice.week_start, invoice.id);
+			// the exact double-billing idx_invoices_driver_week exists to prevent.
+			// That index now folds case but not spacing, so a spacing variant
+			// ("shorn  king") is caught here, not by the index.
+			const clash = liveWeeklyInvoicesForDriverWeek(String(invoice.driver || ""), invoice.week_start)
+				.find((r) => r.id !== invoice.id);
 			if (clash) {
 				return res.status(409).json({ error: `Cannot restore — ${clash.invoice_number} already covers that driver/week. Delete it first.` });
 			}
@@ -24715,8 +25001,8 @@ app.get("/api/admin/audit-trail", requireRole("Super Admin"), (req, res) => {
 // case-insensitive. getDeductibleExpensesByDriverMonth uses LOWER(driver);
 // getDriverPayStructures, the investor/financials driver key and
 // trucksByDriver use normalizeDriverName(); getInvestorDriverSet
-// uses trim().toLowerCase(); generateInvoiceHandler uses LOWER(...) on all
-// three of its lookups. So a rename that changes only case or surrounding
+// uses trim().toLowerCase(); generateInvoiceHandler matches every driver lookup
+// through normalizeDriverName(). So a rename that changes only case or surrounding
 // whitespace CANNOT move a settlement figure — it is money-neutral by
 // construction — and that is precisely the class scan-driver-mismatches
 // reports most ("Case mismatch", "Multiple variants in sheet"). Those run
@@ -24784,16 +25070,16 @@ const DRIVER_RENAME_TARGETS = [
 	{ key: "expenses", table: "expenses", column: "driver", match: "ci", writes: "trimmed", money: true, period: "expense",
 		why: "deductible basis for percentage pay + every expense P&L SUM" },
 	// ⚠️ WRITES LOWERCASE, and that is not cosmetic. Both INSERT paths normalise:
-	// generateInvoiceHandler stores `driverName.toLowerCase()` and the manual
-	// route stores `payee.toLowerCase()`, so lowercase IS this column's
-	// convention. Writing the display form here mints a row no other writer
-	// could produce — and `idx_invoices_driver_week` is a UNIQUE index on
-	// (driver, week_start) with SQLite's default BINARY collation, so a
-	// mixed-case row sits OUTSIDE the one-invoice-per-driver-week constraint
-	// that protects every lowercase row. `PUT /api/invoices/:id/restore` and
-	// `generateInvoiceNumber()` both compare `driver = ?` exactly for the same
-	// reason. Production already carries one such row (see the case-watermark
-	// note below); this is what stops a rename minting the next one.
+	// generateInvoiceHandler stores the driver identity's own spelling lowercased
+	// (`canonicalDriverName(driverName).toLowerCase()`) and the manual route
+	// stores `payee.toLowerCase()`, so lowercase IS this column's convention.
+	// Writing the display form here mints a row no other writer could produce.
+	// `idx_invoices_driver_week` was a BINARY index when this was written, so a
+	// mixed-case row sat OUTSIDE the one-invoice-per-driver-week constraint; it
+	// is NOCASE now, and the invoice path's readers match through
+	// normalizeDriverName() (liveWeeklyInvoicesForDriverWeek()), but the
+	// convention still holds. Production already carries one such row (see the
+	// case-watermark note below); this is what stops a rename minting the next one.
 	{ key: "invoices", table: "invoices", column: "driver", match: "ci", writes: "lower", money: true, period: "invoice",
 		why: "weekly driver invoices, including ones already marked Paid" },
 	// --- OPERATIONAL / COSMETIC: no settlement figure reads these ---
@@ -31695,12 +31981,18 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 				};
 			}
 		}
-		// Recent invoices (soft-deleted ones are hidden from drivers)
+		// Recent invoices (soft-deleted ones are hidden from drivers) — this
+		// driver's in any stored spelling, the same normalizeDriverName() match
+		// this route applies to its loads above. `driver` is read only to match
+		// and is not returned, so the rows keep their shape.
 		const driverInvoices = db.prepare(
-			`SELECT id, invoice_number, week_start, week_end, loads_count, total_earnings, expenses_total, status, submitted_at,
+			`SELECT id, invoice_number, driver, week_start, week_end, loads_count, total_earnings, expenses_total, status, submitted_at,
 			        strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at
-			 FROM invoices WHERE LOWER(driver) = ? AND deleted_at = '' ORDER BY created_at DESC LIMIT 20`
-		).all(nameLower);
+			 FROM invoices WHERE deleted_at = '' ORDER BY created_at DESC`
+		).all()
+			.filter((r) => normalizeDriverName(r.driver) === driverNameNorm)
+			.slice(0, 20)
+			.map(({ driver: _driver, ...rest }) => rest);
 
 		// Geocode enrichment from the local cache. Lets the driver-mobile-view
 		// pre-fill its navigation handoff and render static-map thumbnails
