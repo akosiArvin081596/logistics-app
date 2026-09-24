@@ -27,5 +27,14 @@ echo "::error::smoke check failed — no HTTP 200 from :$PORT/api/config/mainten
 # the error log whether or not anything new was written, so an error from days
 # ago prints here and reads exactly like a fresh regression.
 echo "--- pm2 error log tail (MAY BE STALE — check the dates against the deploy time) ---"
-pm2 logs "$PM2" --nostream --lines 40 --err 2>/dev/null || true
+# The log is the app's text, not this script's, so it prints with workflow
+# commands switched off: no line in it becomes an annotation or an output on
+# the runner (deploy-drift.yml reads a failed staging job's annotations). The
+# token is random per run, as GitHub's docs advise, so no log line can switch
+# commands back on, and tr keeps each log line a single plain line.
+# scripts/test-deploy-scripts.js pins this shape and runs it.
+tok=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+echo "::stop-commands::$tok"
+pm2 logs "$PM2" --nostream --lines 40 --err 2>/dev/null | tr -d '\r' || true
+echo "::$tok::"
 exit 1

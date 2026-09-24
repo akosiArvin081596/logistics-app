@@ -22,8 +22,10 @@
  *   §5 remote-drift-check.sh's four box states, and the heal prep's
  *      compare-and-swap (it refuses when the box moved since the check).
  *   §6 ssh-retry.sh retries ONLY transport failures (255); a remote failure
- *      and the lock's 75 pass straight through. ssh-setup.sh refuses an empty
- *      pinned host key (a file-size test cannot see one).
+ *      and the lock's 75 pass straight through. Its give-up line is pinned
+ *      exactly, and drift-gate.js must read it back as "never reached the
+ *      VPS" (deploy-drift.yml re-runs such a staging job once). ssh-setup.sh
+ *      refuses an empty pinned host key (a file-size test cannot see one).
  *   §7 source pins: the two lock copies are byte-identical, the lock is taken
  *      before anything is touched, every pm2 call closes the lock FD.
  *   §8 mutants: each property above, broken on purpose, must turn this runner
@@ -34,6 +36,12 @@
  *      a database must trigger the rebuild, in the deploy AND the rollback;
  *      one that still cannot after the rebuild fails the deploy unrestarted.
  *      backup.sh's probe is pinned to the same shape.
+ *   §10 THE SMOKE CHECK'S LOG TAIL prints with workflow commands switched off
+ *      (a random ::stop-commands:: token), so no line of the app's log becomes
+ *      an annotation. Run for real against a stub pm2 whose log is full of
+ *      command-shaped lines.
+ *   §11 NO REMOTE SCRIPT EXITS 255 ITSELF: ssh-retry.sh reads 255 as its own
+ *      transport failure. Literal exit codes only, no bare exit, no errexit.
  *
  * Hermetic: a mkdtemp sandbox, local git only (the "origin" is a bare repo in
  * the sandbox), and stubbed pm2/npm/curl/ssh. No network, no VPS, no secrets.
@@ -475,33 +483,68 @@ function probePins() {
 }
 
 // ───────────────────────────────────────── §6 runner-side ssh helpers
+const RETRY = path.join(DEPLOY_DIR, "ssh-retry.sh");
+function runRetry(codes, backoff, script = RETRY) {
+	for (const f of fs.readdirSync(D.logs)) fs.rmSync(path.join(D.logs, f), { force: true });
+	const codesFile = path.join(T, "ssh-codes");
+	const countFile = path.join(T, "ssh-count");
+	fs.writeFileSync(codesFile, codes.join("\n") + "\n");
+	fs.rmSync(countFile, { force: true });
+	const env = { ...ENV, STUB_SSH_CODES: codesFile, STUB_SSH_COUNT: countFile };
+	if (backoff !== undefined) env.SSH_RETRY_BACKOFF = backoff;
+	const r = spawnSync("bash", [script, "root@203.0.113.9", "DIR='/x' bash -s"], { input: "echo payload\nexit 0", env, encoding: "utf8", timeout: 30000 });
+	const n = Number((fs.existsSync(countFile) && fs.readFileSync(countFile, "utf8").trim()) || 0);
+	const payloads = Array.from({ length: n }, (_, i) => fs.readFileSync(path.join(D.logs, `ssh-payload.${i + 1}`), "utf8"));
+	const args = n ? fs.readFileSync(path.join(D.logs, "ssh-args.1"), "utf8") : "";
+	return { code: r.status, out: `${r.stdout}${r.stderr}`, n, payloads, args };
+}
+
+// What the runner makes of a workflow command: `::error title=T::M` becomes a
+// check-run annotation with level "failure", title T and message M. Enough of
+// it to hand ssh-retry.sh's REAL output to drift-gate.js.
+function annotationsFrom(out) {
+	const unescape = (s) => s.replace(/%0D/gi, "\r").replace(/%0A/gi, "\n").replace(/%3A/gi, ":").replace(/%2C/gi, ",").replace(/%25/g, "%");
+	return out.split("\n").map((l) => /^::(error|warning|notice)(?: ([^:]*))?::(.*)$/.exec(l)).filter(Boolean).map(([, level, props = "", message]) => ({
+		annotation_level: level === "error" ? "failure" : level,
+		title: unescape((/(?:^|,)title=([^,]*)/.exec(props) || [])[1] || ""),
+		message: unescape(message),
+	}));
+}
+
+// ⚠️ ssh-retry.sh's give-up line is a contract with scripts/deploy/drift-gate.js,
+// which reads it back as an annotation to tell a staging job that never reached
+// the VPS (deploy-drift.yml re-runs it once) from one that failed (alarm).
+// Title and message are both pinned: the gate matches either, and Deploy runs
+// from before the title carry only the message.
+const GIVE_UP = "::error title=VPS unreachable::ssh failed to connect after 3 attempts — runner→VPS network, not the deploy";
+function giveUpPins(x, tag = "") {
+	const gate = require("./deploy/drift-gate.js");
+	const notes = annotationsFrom(x.out);
+	return [
+		[x.out.split("\n").includes(GIVE_UP), `${tag}§6 ssh-retry: gives up with exactly ${JSON.stringify(GIVE_UP)} (got ${JSON.stringify(x.out.split("\n").filter((l) => /^::error/.test(l)))})`],
+		[x.out.split("\n").filter((l) => /^::error/.test(l)).length === 1, `${tag}§6 ssh-retry: one error line, printed once, after the LAST attempt`],
+		[gate.neverReachedVps(notes), `${tag}§6 drift-gate.js reads that line, as the annotation GitHub makes of it, as "never reached the VPS"`],
+		[!gate.neverReachedVps(notes.filter((a) => a.annotation_level !== "failure")), `${tag}§6 …and never the per-attempt warnings on their own`],
+	];
+}
+
 function sshScenarios() {
-	const retry = path.join(DEPLOY_DIR, "ssh-retry.sh");
-	const runRetry = (codes, backoff) => {
-		for (const f of fs.readdirSync(D.logs)) fs.rmSync(path.join(D.logs, f), { force: true });
-		const codesFile = path.join(T, "ssh-codes");
-		const countFile = path.join(T, "ssh-count");
-		fs.writeFileSync(codesFile, codes.join("\n") + "\n");
-		fs.rmSync(countFile, { force: true });
-		const env = { ...ENV, STUB_SSH_CODES: codesFile, STUB_SSH_COUNT: countFile };
-		if (backoff !== undefined) env.SSH_RETRY_BACKOFF = backoff;
-		const r = spawnSync("bash", [retry, "root@203.0.113.9", "DIR='/x' bash -s"], { input: "echo payload\nexit 0", env, encoding: "utf8", timeout: 30000 });
-		const n = Number((fs.existsSync(countFile) && fs.readFileSync(countFile, "utf8").trim()) || 0);
-		const payloads = Array.from({ length: n }, (_, i) => fs.readFileSync(path.join(D.logs, `ssh-payload.${i + 1}`), "utf8"));
-		const args = n ? fs.readFileSync(path.join(D.logs, "ssh-args.1"), "utf8") : "";
-		return { code: r.status, out: `${r.stdout}${r.stderr}`, n, payloads, args };
-	};
 	let x = runRetry([255, 255, 0], "0 0 0 0");
 	ok(x.code === 0 && x.n === 3, `§6 ssh-retry: two transport failures then success → exit 0 after 3 attempts (code ${x.code}, n ${x.n})`);
 	ok(x.payloads.every((p) => p === "echo payload\nexit 0"), "§6 ssh-retry: the full payload is replayed on every attempt");
 	ok(/root@203\.0\.113\.9/.test(x.args) && /DIR='\/x' bash -s/.test(x.args) && /deploy_key/.test(x.args), "§6 ssh-retry: destination, remote command and the deploy key are passed to ssh");
+	const recovered = annotationsFrom(x.out);
+	ok(recovered.length === 2 && recovered.every((a) => a.annotation_level === "warning") && !require("./deploy/drift-gate.js").neverReachedVps(recovered),
+		"§6 ssh-retry: a connection that recovered leaves warnings only, which the gate never reads as unreached");
 	x = runRetry([3], "0 0 0 0");
 	ok(x.code === 3 && x.n === 1, `§6 ssh-retry: a REMOTE failure passes straight through, no retry (code ${x.code}, n ${x.n})`);
+	ok(!/^::error/m.test(x.out), "§6 ssh-retry: …and prints no give-up line: a deploy that connected and failed must still alarm");
 	x = runRetry([75], "0 0 0 0");
 	ok(x.code === 75 && x.n === 1, `§6 ssh-retry: the lock's 75 is NOT retried (code ${x.code}, n ${x.n})`);
 	x = runRetry([255, 255, 255], "0 0");
 	ok(x.code === 255 && x.n === 3 && /after 3 attempts/.test(x.out), `§6 ssh-retry: gives up after backoff+1 attempts with exit 255 (code ${x.code}, n ${x.n})`);
-	ok(/SSH_RETRY_BACKOFF-15 30 60 90\}/.test(fs.readFileSync(retry, "utf8")), "§6 ssh-retry: the production budget is still 5 attempts over 15/30/60/90 s (sized from a measured outage)");
+	record(giveUpPins(x));
+	ok(/SSH_RETRY_BACKOFF-15 30 60 90\}/.test(fs.readFileSync(RETRY, "utf8")), "§6 ssh-retry: the production budget is still 5 attempts over 15/30/60/90 s (sized from a measured outage)");
 
 	const setup = path.join(DEPLOY_DIR, "ssh-setup.sh");
 	const home2 = fs.mkdtempSync(path.join(T, "home-"));
@@ -579,6 +622,201 @@ async function mutants() {
 		...REAL,
 		deploy: swap(REAL.deploy, `|| { echo "::error::better-sqlite3 still fails to load after rebuild"; exit 1; }`, `|| echo "better-sqlite3 still fails to load after rebuild"`),
 	}, M));
+	// ssh-retry.sh's give-up line (§6): the title, the message and the level
+	// are each pinned. Each mutant runs as a real script in the sandbox.
+	const retryText = fs.readFileSync(RETRY, "utf8");
+	for (const [name, from, to] of [
+		["ssh-retry drops the give-up title", "::error title=VPS unreachable::", "::error::"],
+		["ssh-retry rewords the give-up message", "ssh failed to connect after $total attempts", "could not reach the VPS after $total attempts"],
+		["ssh-retry gives up with a warning, not an error", 'echo "::error title=VPS unreachable::', 'echo "::warning title=VPS unreachable::'],
+	]) {
+		const mutated = path.join(T, `ssh-retry-mutant-${Math.random().toString(36).slice(2)}.sh`);
+		fs.writeFileSync(mutated, swap(retryText, from, to));
+		expectCaught(name, giveUpPins(runRetry([255, 255, 255], "0 0", mutated), M));
+	}
+	// §10: the smoke check's log tail with workflow commands left on.
+	expectCaught("the smoke check prints the pm2 log with commands on", smokeLogPins(
+		swap(swap(SMOKE, 'echo "::stop-commands::$tok"', ":"), 'echo "::$tok::"', ":"), M));
+	// §11: a remote script that exits 255 itself, or lets errexit do it.
+	expectCaught("remote-deploy.sh ends with exit 255", exitPins({ ...REMOTE_SCRIPTS, "remote-deploy.sh": `${REMOTE_SCRIPTS["remote-deploy.sh"]}exit 255\n` }, M));
+	expectCaught("remote-rollback.sh turns on errexit", exitPins({ ...REMOTE_SCRIPTS, "remote-rollback.sh": swap(REMOTE_SCRIPTS["remote-rollback.sh"], "set -uo pipefail", "set -euo pipefail") }, M));
+	expectCaught("remote-drift-check.sh gets a bare exit", exitPins({ ...REMOTE_SCRIPTS, "remote-drift-check.sh": swap(REMOTE_SCRIPTS["remote-drift-check.sh"], 'cd "$DIR" || exit 1', 'cd "$DIR" || exit') }, M));
+}
+
+// ─────────────────────── §10 the smoke check's log tail, commands switched off
+const SMOKE = readScript("remote-smoke.sh");
+
+// The runner's reading of a job log: `::stop-commands::TOKEN` pauses workflow
+// commands until a line that is exactly `::TOKEN::`. What is left is what can
+// become an annotation.
+function commandLines(out) {
+	const kept = [];
+	let paused = null;
+	for (const l of out.split("\n")) {
+		if (paused !== null) {
+			if (l === `::${paused}::`) paused = null;
+			continue;
+		}
+		const m = /^::stop-commands::(.+)$/.exec(l);
+		if (m) { paused = m[1]; continue; }
+		kept.push(l);
+	}
+	return kept.join("\n");
+}
+
+// A pm2 error log holding lines shaped like workflow commands, one of them
+// behind a carriage return.
+const COMMAND_SHAPED_LOG = [
+	"2026-09-24T10:00:00Z Error: listen EADDRINUSE",
+	"::error title=VPS unreachable::ssh failed to connect after 5 attempts — runner→VPS network, not the deploy",
+	"::warning::a line from the app",
+	"progress 50%\r::error::after a carriage return",
+].join("\n");
+// Its own stub dir, first on PATH: a pm2 that prints that log, and a sleep
+// that returns at once (the real smoke loop waits up to 60 s).
+let smokeBin = null;
+function smokeBinDir() {
+	if (smokeBin) return smokeBin;
+	smokeBin = path.join(T, "smoke-bin");
+	fs.mkdirSync(smokeBin);
+	writeExec(path.join(smokeBin, "sleep"), "#!/bin/bash\nexit 0\n");
+	writeExec(path.join(smokeBin, "pm2"), "#!/bin/bash\nif [ \"$1\" = logs ]; then printf '%s\\n' \"$STUB_PM2_LOG\"; fi\nexit 0\n");
+	return smokeBin;
+}
+function runFailingSmoke(text) {
+	return runSh(text, { DIR: D.box, PM2: "logistics-app", STUB_HTTP_CODE: "503", STUB_PM2_LOG: COMMAND_SHAPED_LOG, PATH: `${smokeBinDir()}:${ENV.PATH}` });
+}
+const pausedBetween = (out) => {
+	const lines = out.split("\n");
+	const start = lines.findIndex((l) => /^::stop-commands::[0-9a-f]{32}$/.test(l));
+	const tok = start >= 0 ? lines[start].slice("::stop-commands::".length) : null;
+	const end = tok ? lines.indexOf(`::${tok}::`) : -1;
+	return { lines, start, end, tok };
+};
+function smokeLogPins(text, tag = "") {
+	const r = [];
+	const gate = require("./deploy/drift-gate.js");
+	const x = runFailingSmoke(text);
+	const p = pausedBetween(x.out);
+	r.push([x.code === 1, `${tag}§10 a failed smoke check still exits 1 (got ${x.code})`]);
+	r.push([p.start >= 0 && p.end > p.start, `${tag}§10 the pm2 log tail prints between ::stop-commands::<32 hex chars> and ::<that token>:: (start ${p.start}, end ${p.end})`]);
+	r.push([p.lines.slice(p.start + 1, p.end).some((l) => l.includes("ssh failed to connect after 5 attempts")), `${tag}§10 …and the log's lines really are inside that pause`]);
+	const notes = annotationsFrom(commandLines(x.out));
+	r.push([!gate.neverReachedVps(notes), `${tag}§10 a log line shaped like ssh-retry.sh's give-up line never becomes an annotation (got ${JSON.stringify(notes)})`]);
+	r.push([notes.length === 1 && /^smoke check failed/.test(notes[0].message), `${tag}§10 the only annotation left is the smoke check's own error`]);
+	r.push([!x.out.includes("\r"), `${tag}§10 carriage returns are stripped from the log`]);
+	const y = pausedBetween(runFailingSmoke(text).out);
+	r.push([!!p.tok && !!y.tok && p.tok !== y.tok, `${tag}§10 the token is new on every run`]);
+	return r;
+}
+function smokeStaticPins() {
+	// The reviewed shape, line for line and in order.
+	const shape = [
+		"tok=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \\n')",
+		'echo "::stop-commands::$tok"',
+		"pm2 logs \"$PM2\" --nostream --lines 40 --err 2>/dev/null | tr -d '\\r' || true",
+		'echo "::$tok::"',
+	];
+	const lines = SMOKE.split("\n");
+	const at = shape.map((s) => lines.indexOf(s));
+	ok(at.every((i, k) => i >= 0 && (k === 0 || i === at[k - 1] + 1)), `§10 remote-smoke.sh prints the pm2 log with the exact reviewed shape, in order (at lines ${at.map((i) => i + 1)})`);
+	// And no remote script prints pm2 logs any other way.
+	for (const f of fs.readdirSync(DEPLOY_DIR).filter((n) => /^remote-.*\.sh$/.test(n))) {
+		const t = readScript(f).split("\n");
+		t.forEach((l, i) => {
+			if (!/^\s*[^#]*\bpm2 logs\b/.test(l)) return;
+			const before = t.slice(0, i).reverse().find((x) => /::stop-commands::|echo "::\$tok::"/.test(x)) || "";
+			ok(/::stop-commands::\$tok/.test(before) && /^\s*echo "::\$tok::"\s*$/.test(t[i + 1] || ""), `§10 ${f}:${i + 1} prints pm2 logs only inside a stop-commands pause`);
+		});
+	}
+}
+
+// ─────────────────────── §11 no remote script takes exit 255 itself
+// ssh returns the remote command's status unchanged, and ssh-retry.sh reads 255
+// as ssh's own transport failure: it retries, then prints the give-up line that
+// deploy-drift.yml re-runs a staging job on. So the remote scripts' own exits
+// stay off 255: literal codes only, no bare `exit` (it returns the last
+// command's status), and no errexit (which would pass any failing command's
+// status out as the script's own).
+
+// The script with comments removed, quote-aware (a `#` inside quotes is text),
+// and every quoted string KEPT, so an exit inside a quoted trap is still seen.
+function stripShellComments(text) {
+	let out = "";
+	let q = null;
+	for (let i = 0; i < text.length; i++) {
+		const c = text[i];
+		if (q === "'") { out += c; if (c === "'") q = null; continue; }
+		if (q === '"') {
+			out += c;
+			if (c === "\\" && i + 1 < text.length) { out += text[++i]; continue; }
+			if (c === '"') q = null;
+			continue;
+		}
+		if (c === "\\" && i + 1 < text.length) { out += c + text[++i]; continue; }
+		if (c === "'" || c === '"') { q = c; out += c; continue; }
+		if (c === "#" && (i === 0 || /[\s;&|(]/.test(text[i - 1]))) {
+			while (i < text.length && text[i] !== "\n") i++;
+			if (i < text.length) out += "\n";
+			continue;
+		}
+		out += c;
+	}
+	return out;
+}
+// Every shell `exit` (a word of its own, so JavaScript's process.exit() in a
+// `node -e` string is not one), with its literal code or null.
+function exitFindings(text) {
+	const code = stripShellComments(text);
+	const re = /(^|[\s;&|({!])exit(?=$|[\s;&|)}])/gm;
+	const found = [];
+	let m;
+	while ((m = re.exec(code))) {
+		const lit = /^[ \t]+([0-9]+)(?=$|[\s;&|)}])/m.exec(code.slice(m.index + m[0].length));
+		const line = code.slice(0, m.index + m[1].length).split("\n").length;
+		found.push({ line, literal: lit ? Number(lit[1]) : null });
+	}
+	const errexit = /(^|[\s;&|(])set[ \t]+(-[A-Za-z]*e[A-Za-z]*(?=[ \t;]|$)|-o[ \t]+errexit\b)/m.test(code);
+	return { found, errexit };
+}
+function exitPins(scripts, tag = "") {
+	const r = [];
+	let total = 0;
+	for (const [name, text] of Object.entries(scripts)) {
+		const { found, errexit } = exitFindings(text);
+		total += found.length;
+		const bad = found.filter((f) => f.literal === null || f.literal === 255);
+		r.push([bad.length === 0,
+			`${tag}§11 ${name}: every exit the script itself takes is a literal other than 255, and none is bare, so an ssh 255 is never the script's own. This covers the scripts' own exits only, not a signal death or a dropped session (offending: ${JSON.stringify(bad)})`]);
+		r.push([!errexit, `${tag}§11 ${name}: no errexit (set -e would pass any failing command's status, 255 included, out as the script's own)`]);
+	}
+	r.push([total >= 20, `${tag}§11 the scan saw the scripts' exits (found ${total}); a scan that matched nothing would pass vacuously`]);
+	return r;
+}
+const REMOTE_SCRIPTS = Object.fromEntries(
+	fs.readdirSync(DEPLOY_DIR).filter((n) => /^remote-.*\.sh$/.test(n)).sort().map((n) => [n, readScript(n)])
+);
+function exitScannerSelfCheck() {
+	const fx = exitFindings([
+		"cd x || exit 1",
+		"{ echo hi; exit 75; }",
+		"if a; then exit 255; fi",
+		"[ -n x ] || exit",
+		"exit \"$rc\"",
+		"# exit 255 in a comment",
+		"node -e 'process.exit(255)'",
+		"echo \"a # inside quotes\"; exit 3",
+		"x=1 # a trailing comment: exit 255",
+	].join("\n"));
+	const lits = fx.found.map((f) => f.literal);
+	ok(JSON.stringify(lits) === JSON.stringify([1, 75, 255, null, null, 3]),
+		`§11 the exit scanner reads literal, bare and variable exits, and skips comments and process.exit() (got ${JSON.stringify(lits)})`);
+	ok(exitFindings("set -euo pipefail\n").errexit && exitFindings("set -o errexit\n").errexit && exitFindings("set -e\n").errexit
+		&& !exitFindings("set -uo pipefail\n").errexit && !exitFindings("# set -e\n").errexit && !exitFindings("set +e\n").errexit,
+	"§11 the errexit check sees -e in any flag cluster and -o errexit, and not set +e or a comment");
+	const names = Object.keys(REMOTE_SCRIPTS);
+	ok(["remote-backup-check.sh", "remote-deploy.sh", "remote-drift-check.sh", "remote-drift-heal.sh", "remote-rollback.sh", "remote-smoke.sh"].every((n) => names.includes(n)),
+		`§11 the scan covers every scripts/deploy/remote-*.sh (got ${names.join(", ")})`);
 }
 
 (async () => {
@@ -590,6 +828,10 @@ async function mutants() {
 	sshScenarios();
 	sourcePins();
 	probePins();
+	record(smokeLogPins(SMOKE));
+	smokeStaticPins();
+	exitScannerSelfCheck();
+	record(exitPins(REMOTE_SCRIPTS));
 	await mutants();
 })()
 	.catch((err) => failures.push(`runner crashed: ${err && err.stack ? err.stack : err}`))

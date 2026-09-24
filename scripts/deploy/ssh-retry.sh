@@ -52,5 +52,11 @@ for wait in $BACKOFF ""; do
 		sleep "$wait"
 	fi
 done
-echo "::error::ssh failed to connect after $total attempts — runner→VPS network, not the deploy"
+# ⚠️ This exact line is how deploy-drift.yml tells a staging job that never
+# reached the VPS (re-run it once) from one that failed (alarm):
+# scripts/deploy/drift-gate.js reads it back as a check-run annotation, by the
+# title, or by the message prefix alone for Deploy runs from before the title.
+# Keep both stable. Printed only here, after the LAST attempt, so a deploy that
+# connected and failed never carries it. scripts/test-deploy-scripts.js pins it.
+echo "::error title=VPS unreachable::ssh failed to connect after $total attempts — runner→VPS network, not the deploy"
 exit 255
