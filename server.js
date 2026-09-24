@@ -19725,11 +19725,11 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 // The same gap made the standard incident response — "reset their password" —
 // useless: it left the attacker's session logged in.
 //
-// The three routes that can invalidate an identity (a role change or password
-// reset, a delete, and POST /api/auth/change-password) all revoke it through
-// this one function. Connect-style stores serialise the session as JSON in
-// `sess`, hence json_extract. Never throws — a failed purge must not turn a
-// completed role change into a 500.
+// The three routes that can invalidate an identity (a role change, password
+// reset or driver rename, a delete, and POST /api/auth/change-password) all
+// revoke it through this one function. Connect-style stores serialise the
+// session as JSON in `sess`, hence json_extract. Never throws — a failed purge
+// must not turn a completed role change into a 500.
 //
 // The session copy was not the only thing trusting the old identity: a socket
 // reads its session once, at the handshake, and keeps the rooms it earned. So
@@ -20488,12 +20488,27 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		if (companyName !== undefined && companyName !== (user.company_name || "")) diff.push(`companyName "${user.company_name || ""}" -> "${companyName}"`);
 		if (password) diff.push("password reset");
 		// Revoke the target's live sessions whenever their IDENTITY changed —
-		// a role move or a password reset. Without this the demotion is advisory:
-		// see the note on purgeUserSessions(). Self-edits spare the current sid so
-		// an admin does not log themselves out mid-request; every OTHER session of
-		// theirs still goes, which is the point when a cookie has been stolen.
+		// a role move, a password reset or a new driver name. Without this the
+		// demotion is advisory: see the note on purgeUserSessions(). Self-edits
+		// spare the current sid so an admin does not log themselves out
+		// mid-request; every OTHER session of theirs still goes, which is the
+		// point when a cookie has been stolen.
+		//
+		// ⚠️ THE DRIVER NAME IS IDENTITY, NOT A PROFILE FIELD. Login copies it into
+		// the session as `driverName` and nothing re-reads it, yet every
+		// Driver-scoped check reads that copy — loadBelongsToDriver(),
+		// driverOwnsInvoice(), the GET /api/driver/:driverName guard, the
+		// live-update room — and new expenses, documents and messages are filed
+		// under it (resolveDriverActor(), POST /api/messages). ANY change to the
+		// stored value counts, case and whitespace included: those readers fold it
+		// differently, and the cascade above has already moved every row to the new
+		// spelling. Compared with what `UPDATE users` wrote (trimmed), so resending
+		// the same name with stray padding revokes nothing. email, full_name and
+		// company_name are cached too but read by no check, and no route writes
+		// username.
+		const driverNameChanged = driverName !== undefined && driverName.trim() !== (user.driver_name || "");
 		let sessionsRevoked = 0;
-		if ((nextRole && nextRole !== user.role) || passwordHash) {
+		if ((nextRole && nextRole !== user.role) || passwordHash || driverNameChanged) {
 			sessionsRevoked = purgeUserSessions(id, Number(req.session?.user?.id) === id ? req.sessionID : null);
 		}
 

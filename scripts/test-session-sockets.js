@@ -13,8 +13,15 @@
  *   §2 A SIGN-IN (login, and first-time setup) closes the sockets of the
  *      session it replaced, which may be a different person's; a refused
  *      sign-in closes nothing; the new session's socket joins its own rooms
- *   §3 purgeUserSessions() (role change, password reset, delete) closes the
- *      user's sockets on every session but the spared one, and nobody else's
+ *   §3 purgeUserSessions() (role change, password reset, driver rename,
+ *      delete) closes the user's sockets on every session but the spared one,
+ *      and nobody else's
+ *   §3b PUT /api/users/:id revokes through it whenever it changes who a
+ *      session says its user is: a new role, a password reset, a new driver
+ *      name (case-only and cleared included). Another admin's edit spares no
+ *      session, a self-edit spares the one making it; the same name resent,
+ *      even padded, or an email / full name / company edit revokes nothing;
+ *      the update_user audit line carries the count
  *   §4 CHANGE-PASSWORD closes the sockets of every session of the account,
  *      this browser's old one included (a socket must not outlive the cookie
  *      it was opened on), and a socket on the NEW cookie is accepted and joins;
@@ -35,20 +42,24 @@
  *   §7 THE PUBLIC TRACKER (/public-track, no session) is untouched by all of
  *      it, including when it shares the signed-in tab's transport
  *   §8 SOURCE pins (comment-stripped): each call sits before the session write
- *      it accompanies; the sweep is scheduled once, every 60 s, unref'd; the
- *      helpers close the namespace, never the transport
+ *      it accompanies; PUT /api/users/:id revokes once, synchronously, after
+ *      its transaction and before its audit line; the sweep is scheduled once,
+ *      every 60 s, unref'd; the helpers close the namespace, never the transport
  *   §9 DISCRIMINATION: one mutant per call site, and each must be caught
  *
  * Runs the SHIPPED code: the session configuration, the login / setup / logout
- * / session / change-password routes, requireAuth, the must-change-password
- * refresh, purgeUserSessions(), stampLastLogin(), logAudit(), the socket
- * helpers and sweep, and both "connection" handlers are lifted out of
- * server.js and wired to the real express-session, the real
- * better-sqlite3-session-store, a real Socket.IO server, and real
- * socket.io-client connections (client/node_modules, which `npm ci` at the
- * repo root installs through the postinstall). In-memory SQLite, with the
- * users and audit_trail tables built from server.js's own statements.
- * Loopback on 127.0.0.1:0: no fixed port, no app.db, no network.
+ * / session / change-password routes, PUT /api/users/:id, requireAuth,
+ * requireRole, the must-change-password refresh, purgeUserSessions(),
+ * stampLastLogin(), logAudit(), the socket helpers and sweep, and both
+ * "connection" handlers are lifted out of server.js and wired to the real
+ * express-session, the real better-sqlite3-session-store, a real Socket.IO
+ * server, and real socket.io-client connections (client/node_modules, which
+ * `npm ci` at the repo root installs through the postinstall). In-memory
+ * SQLite, with the users and audit_trail tables built from server.js's own
+ * statements. Loopback on 127.0.0.1:0: no fixed port, no app.db, no network.
+ * PUT /api/users/:id's period, sheet and rename-cascade calls are stubbed to
+ * "nothing blocks", so every edit reaches the revocation: this runner asks who
+ * stays signed in, not what the cascade writes.
  *
  * Run: node scripts/test-session-sockets.js    # exits 1 on failure
  */
@@ -166,6 +177,7 @@ const SRCS = {
 	logout: liftRoute('app.post("/api/auth/logout", (req, res) => {'),
 	change: liftRoute('app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async (req, res) => {'),
 	purge: liftFunction("function purgeUserSessions(userId, exceptSid) {"),
+	updateUser: liftRoute('app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {'),
 	helpers: HELPER_HEADS.map(liftFunction).join("\n"),
 	ioHandler: liftHandler('io.on("connection", (socket) => {', 'io.on("connection", '),
 };
@@ -174,6 +186,7 @@ const TRACKER_HANDLER_SRC = liftHandler('publicTrack.on("connection", (socket) =
 const STAMP_SRC = liftFunction("function stampLastLogin(userId) {");
 const AUDIT_SRC = liftFunction("function logAudit(req, action, entity, entityId, details) {");
 const REQUIRE_AUTH_SRC = liftFunction("function requireAuth(req, res, next) {");
+const REQUIRE_ROLE_SRC = liftFunction("function requireRole(...roles) {");
 const CURRENT_FLAG_SRC = liftFunction("function currentMustChangePassword(sessionUser) {");
 const REFRESH_FLAG_SRC = liftFunction("function refreshPasswordChangeFlag(req, res, next) {");
 const LOAD_ID_RE_SRC = (() => {
@@ -293,11 +306,28 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 	new Function("app", "requireAuth", "changePasswordLimiter", "db", "bcrypt", "purgeUserSessions", "logAudit", "liveSessionIds", "disconnectSessionSockets", sources.change)(
 		app, requireAuth, passThrough, db, bcryptImpl, purgeUserSessions, logAudit, helpers.liveSessionIds, helpers.disconnectSessionSockets);
 
+	// PUT /api/users/:id on its real guard, the real purge and the real audit
+	// writer. The purge is wrapped only to record whom it was asked to revoke and
+	// which sid it spared; it still revokes. The rest is period, sheet and
+	// rename-cascade machinery, stubbed to "nothing blocks": no lock rows, no
+	// merge, and a Job Tracking sheet that carries no driver name at all. The
+	// route hashes a password itself (`await import("bcryptjs")`), for real.
+	const requireRole = new Function(`${REQUIRE_ROLE_SRC}\nreturn requireRole;`)();
+	const purgeCalls = [];
+	const recordPurge = (userId, exceptSid) => { purgeCalls.push([userId, exceptSid]); return purgeUserSessions(userId, exceptSid); };
+	const noSheetRows = async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: [["Load ID", "Driver"]] } }) } } });
+	new Function("app", "requireRole", "db", "getSheets", "SPREADSHEET_ID", "auditText", "recordPeriodRefusal", "userUpdateLockBlockers",
+		"periodLabel", "driverRenameMergeScan", "applyDriverRenameSqlite", "syncDriverToCarrierSheet", "purgeUserSessions", "logAudit",
+		"notifyChange", sources.updateUser)(
+		app, requireRole, db, noSheetRows, "t3-not-a-sheet", (v, max) => String(v == null ? "" : v).slice(0, max), () => {},
+		() => ({ unreadable: false, blockers: [] }), (period) => period, () => ({ mergeTargets: {}, mergeRows: 0 }), () => ({ counts: {} }),
+		() => {}, recordPurge, logAudit, () => {});
+
 	server.listen(0, "127.0.0.1");
 	await once(server, "listening");
 	const clients = [];
 	return {
-		db, io, helpers, purgeUserSessions, clients,
+		db, io, helpers, purgeUserSessions, purgeCalls, clients,
 		store: holder.store,
 		port: server.address().port,
 		close: async () => {
@@ -341,6 +371,12 @@ function request(port, method, urlPath, { cookie, body, xrw } = {}) {
 const login = (w, username, password, cookie) => request(w.port, "POST", "/api/auth/login", { cookie, body: { username, password } });
 const changePassword = (w, cookie, currentPassword, newPassword) =>
 	request(w.port, "POST", "/api/auth/change-password", { cookie, xrw: true, body: { currentPassword, newPassword } });
+const editUser = (w, cookie, id, body) => request(w.port, "PUT", `/api/users/${id}`, { cookie, xrw: true, body });
+// Is this cookie still signed in? Asked the way the SPA asks it.
+async function isLive(w, cookie) {
+	const r = await request(w.port, "GET", "/api/auth/session", { cookie });
+	return !!r.json && r.json.authenticated === true;
+}
 
 // connect.sid=s%3A<sid>.<signature>
 function sidOf(cookie) {
@@ -362,6 +398,10 @@ function storedUser(db, sid) {
 const sessionsOf = (db, userId) =>
 	db.prepare("SELECT sid FROM sessions WHERE json_extract(sess, '$.user.id') = ?").all(userId).map((r) => r.sid);
 const changeAudits = (db) => db.prepare("SELECT * FROM audit_trail WHERE action = 'change_password'").all();
+const userEditAudits = (db) => db.prepare("SELECT details FROM audit_trail WHERE action = 'update_user' ORDER BY id").all().map((r) => r.details);
+const storedName = (db, id) => db.prepare("SELECT driver_name FROM users WHERE id = ?").get(id).driver_name;
+// The purge calls PUT /api/users/:id made, exactly: [[userId, sparedSid], …].
+const purgedExactly = (w, want) => JSON.stringify(w.purgeCalls) === JSON.stringify(want);
 
 // ── sockets ─────────────────────────────────────────────────────────────────
 function waitFor(emitter, event, ms = 2000) {
@@ -495,6 +535,88 @@ const SCENARIOS = {
 			w.purgeUserSessions(1, null);
 			p.purgeWithNoSpareClosesAll = (await closedByServer(w, t2)) && isOpen(w, tb);
 		} finally { await w.close(); }
+	},
+
+	// §3b: PUT /api/users/:id decides WHEN an edit revokes; purgeUserSessions()
+	// (§3) is how. The session caches the driver name that every Driver-scoped
+	// check reads, and nothing re-reads it.
+	async userEdit(sources, p) {
+		{
+			// Another admin renames a driver who is signed in on two devices.
+			const w = await startWorld({ sources });
+			try {
+				const admin = await login(w, "root", PW.root);
+				const b1 = await login(w, "bob", PW.bob);
+				const b2 = await login(w, "bob", PW.bob);
+				const tb = await connectTab(w, b1.cookie);
+				const joined = await joins(w, tb, "bob driver", "bob driver");
+				const r = await editUser(w, admin.cookie, 2, { driverName: "Robert Driver" });
+				const renamed = r.status === 200 && storedName(w.db, 2) === "Robert Driver";
+				p.renameRevokesTarget = renamed && purgedExactly(w, [[2, null]]) && sessionsOf(w.db, 2).length === 0 &&
+					!(await isLive(w, b1.cookie)) && !(await isLive(w, b2.cookie));
+				p.renameClosesTargetSockets = renamed && joined && (await closedByServer(w, tb)) && !inRoom(w, "bob driver", tb.id);
+				p.renameSparesAdmin = renamed && (await isLive(w, admin.cookie));
+				const audits = userEditAudits(w.db);
+				p.renameAuditCounts = audits.length === 1 && audits[0].includes('driverName "Bob Driver" -> "Robert Driver"') &&
+					/; sessions revoked: 2$/.test(audits[0]);
+			} finally { await w.close(); }
+		}
+		{
+			// A Super Admin gives their OWN account a driver name, from one of two
+			// devices: the session making the request is spared, the other is not.
+			const w = await startWorld({ sources });
+			try {
+				const here = await login(w, "root", PW.root);
+				const there = await login(w, "root", PW.root);
+				const tHere = await connectTab(w, here.cookie);
+				const tThere = await connectTab(w, there.cookie);
+				const r = await editUser(w, here.cookie, 4, { driverName: "Root Driver" });
+				const renamed = r.status === 200 && storedName(w.db, 4) === "Root Driver";
+				p.selfRenameSparesCurrent = renamed && purgedExactly(w, [[4, sidOf(here.cookie)]]) &&
+					(await isLive(w, here.cookie)) && isOpen(w, tHere);
+				p.selfRenameRevokesOthers = renamed && !(await isLive(w, there.cookie)) && (await closedByServer(w, tThere)) &&
+					/; sessions revoked: 1$/.test(userEditAudits(w.db)[0] || "");
+			} finally { await w.close(); }
+		}
+		{
+			const w = await startWorld({ sources });
+			try {
+				const admin = await login(w, "root", PW.root);
+				const b = await login(w, "bob", PW.bob);
+				// Resent as stored; resent padded (stored trimmed, so unchanged); and
+				// the cached fields that no check reads.
+				const same = await editUser(w, admin.cookie, 2, { driverName: "Bob Driver" });
+				const padded = await editUser(w, admin.cookie, 2, { driverName: "  Bob Driver  " });
+				const profile = await editUser(w, admin.cookie, 2, { email: "robert@example.test", fullName: "Robert D", companyName: "RD Hauling" });
+				p.unchangedNameRevokesNothing = [same, padded, profile].every((r) => r.status === 200) && storedName(w.db, 2) === "Bob Driver" &&
+					w.purgeCalls.length === 0 && (await isLive(w, b.cookie)) && !userEditAudits(w.db).some((d) => /sessions revoked/.test(d));
+
+				// Case only: still a rename.
+				const tb = await connectTab(w, b.cookie);
+				const joined = await joins(w, tb, "bob driver", "bob driver");
+				const caseOnly = await editUser(w, admin.cookie, 2, { driverName: "bob driver" });
+				p.caseOnlyRenameRevokes = caseOnly.status === 200 && storedName(w.db, 2) === "bob driver" && purgedExactly(w, [[2, null]]) &&
+					!(await isLive(w, b.cookie)) && joined && (await closedByServer(w, tb));
+
+				// Cleared: null is the documented way.
+				w.purgeCalls.length = 0;
+				const b2 = await login(w, "bob", PW.bob);
+				const cleared = await editUser(w, admin.cookie, 2, { driverName: null });
+				p.clearedNameRevokes = cleared.status === 200 && storedName(w.db, 2) === "" && purgedExactly(w, [[2, null]]) &&
+					!(await isLive(w, b2.cookie));
+
+				// The two clauses that predate the driver-name one, pinned beside it:
+				// nothing else runs this route.
+				w.purgeCalls.length = 0;
+				const a = await login(w, "alice", PW.alice);
+				const role = await editUser(w, admin.cookie, 1, { role: "Driver" });
+				p.roleChangeRevokes = role.status === 200 && purgedExactly(w, [[1, null]]) && !(await isLive(w, a.cookie));
+				w.purgeCalls.length = 0;
+				const c = await login(w, "carol", PW.carol);
+				const reset = await editUser(w, admin.cookie, 3, { password: ADMIN_RESET_PW });
+				p.passwordResetRevokes = reset.status === 200 && purgedExactly(w, [[3, null]]) && !(await isLive(w, c.cookie));
+			} finally { await w.close(); }
+		}
 	},
 
 	// §4
@@ -779,6 +901,17 @@ const PROPS = {
 	purgeSparesKeptSession: ["purge", "§3 ...but not on the session it spares"],
 	purgeSparesOtherUsers: ["purge", "§3 ...and never another user's"],
 	purgeWithNoSpareClosesAll: ["purge", "§3 with nothing spared, it must close every socket of the user"],
+	renameRevokesTarget: ["userEdit", "§3b PUT /api/users/:id renaming a driver must revoke every session of that account, sparing none: purgeUserSessions(id, null)"],
+	renameClosesTargetSockets: ["userEdit", "§3b ...closing their live-update sockets, and the room they joined under the old name"],
+	renameSparesAdmin: ["userEdit", "§3b ...and leave the admin who made the change signed in"],
+	renameAuditCounts: ["userEdit", "§3b the update_user audit line must record the rename and how many sessions it revoked"],
+	selfRenameSparesCurrent: ["userEdit", "§3b a self-edit must spare the session making the request: purgeUserSessions(id, currentSid)"],
+	selfRenameRevokesOthers: ["userEdit", "§3b ...and revoke the account's other sessions and their sockets"],
+	unchangedNameRevokesNothing: ["userEdit", "§3b the same driver name resent (padded or not), or an email / full name / company edit, must revoke nothing"],
+	caseOnlyRenameRevokes: ["userEdit", "§3b a case-only rename must revoke: it is a rename, and the cascade has moved every row to the new spelling"],
+	clearedNameRevokes: ["userEdit", "§3b clearing the driver name must revoke"],
+	roleChangeRevokes: ["userEdit", "§3b a role change must revoke"],
+	passwordResetRevokes: ["userEdit", "§3b an admin password reset must revoke"],
 	changeClosesThisSessionsSockets: ["change", "§4 change-password must close every socket of the old cookie, the asking tab's included"],
 	changeClosesOtherDevices: ["change", "§4 ...and the sockets of the account's other sessions"],
 	changeSparesOtherUsers: ["change", "§4 ...and leave other accounts alone"],
@@ -867,6 +1000,15 @@ function sectionSource() {
 	const pDisc = at(purgeSrc, "disconnectUserSockets(userId, { exceptSid });");
 	ok(pDisc > 0 && pDisc < at(purgeSrc, "DELETE FROM sessions"), "§8 purgeUserSessions() must close the user's sockets, sparing exceptSid, before the DELETE");
 
+	const upd = stripComments(SRCS.updateUser);
+	const uTxn = at(upd, "db.transaction(() => {");
+	const uPurge = at(upd, "purgeUserSessions(id, ");
+	const uAudit = at(upd, 'logAudit(req, "update_user"');
+	ok(uTxn > 0 && uPurge > uTxn && uAudit > uPurge && (upd.match(/purgeUserSessions\(/g) || []).length === 1,
+		"§8 PUT /api/users/:id must revoke through purgeUserSessions() exactly once, after its transaction commits and before its update_user audit line (which reports the count)");
+	ok(upd.lastIndexOf("await ") < uTxn, "§8 ...synchronously: no await between the write and the revocation");
+	ok(!/DELETE FROM sessions/.test(upd), "§8 ...and never through a hand-copied DELETE, which would leave the sockets up");
+
 	const handler = stripComments(SRCS.ioHandler);
 	const gate = at(handler, "liveSessionIds([sid])");
 	const dataSid = at(handler, "socket.data.sid = sid;");
@@ -928,6 +1070,45 @@ const MUTANTS = [
 		target: "purge",
 		mutate: dropLine(/^\s*disconnectUserSockets\(userId, \{ exceptSid \}\);\n/m),
 		caughtBy: ["purgeClosesUser", "purgeWithNoSpareClosesAll", "changeClosesOtherDevices"],
+	},
+	{
+		// The condition as it stood before the driver name joined it.
+		name: "PUT /api/users/:id does not revoke on a driver-name change",
+		target: "updateUser",
+		mutate: (s) => s.replace("|| passwordHash || driverNameChanged) {", "|| passwordHash) {"),
+		caughtBy: ["renameRevokesTarget", "renameClosesTargetSockets", "renameAuditCounts", "selfRenameRevokesOthers",
+			"caseOnlyRenameRevokes", "clearedNameRevokes"],
+	},
+	{
+		name: "a case-only rename treated as no change (a case-folded compare)",
+		target: "updateUser",
+		mutate: (s) => s.replace('driverName.trim() !== (user.driver_name || "")',
+			'driverName.trim().toLowerCase() !== (user.driver_name || "").toLowerCase()'),
+		caughtBy: ["caseOnlyRenameRevokes"],
+	},
+	{
+		name: "stray padding counted as a rename (the raw value compared, not the stored one)",
+		target: "updateUser",
+		mutate: (s) => s.replace('driverName.trim() !== (user.driver_name || "")', 'driverName !== (user.driver_name || "")'),
+		caughtBy: ["unchangedNameRevokesNothing"],
+	},
+	{
+		name: "a self-edit revokes the session making the request",
+		target: "updateUser",
+		mutate: (s) => s.replace("purgeUserSessions(id, Number(req.session?.user?.id) === id ? req.sessionID : null)", "purgeUserSessions(id, null)"),
+		caughtBy: ["selfRenameSparesCurrent"],
+	},
+	{
+		name: "a role change no longer revokes",
+		target: "updateUser",
+		mutate: (s) => s.replace("if ((nextRole && nextRole !== user.role) || passwordHash || driverNameChanged) {", "if (passwordHash || driverNameChanged) {"),
+		caughtBy: ["roleChangeRevokes"],
+	},
+	{
+		name: "a password reset no longer revokes",
+		target: "updateUser",
+		mutate: (s) => s.replace("|| passwordHash || driverNameChanged) {", "|| driverNameChanged) {"),
+		caughtBy: ["passwordResetRevokes"],
 	},
 	{
 		name: "change-password revokes with its old hand-copied DELETE",
