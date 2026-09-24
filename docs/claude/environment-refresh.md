@@ -11,8 +11,9 @@
 
 - **The spreadsheet gate is the load-bearing safety.** `refresh-env.js` reads the `.env` beside its `--to` target and **refuses** when `SPREADSHEET_ID` is missing or is production's — `server.js` falls through to the production sheet when it is unset, so a refreshed DB next to such an `.env` is a production writer on first boot. It checks the resolved **ID**, never the directory or sheet name. It also refuses an `.env` that can send mail or has `INVOICE_AUTOGEN_ENABLED=true`.
 - **⚠️ Telemetry is trimmed to 45 days by default, and that is not a neutral shrink.** `getEldTravelDaysByVehicle()` is coverage-aware, so a window with **no** pings falls back to the **full scheduled window** — months older than the cutoff pay drivers *more* and pay investors *less*. **Never reconcile a historical month on a trimmed copy**; pass `--telemetry-all`.
-- **Sanitization is asserted, not assumed** — sessions cleared, passwords re-hashed to `Password123!` (so `test-suite.js` runs with no extra step), emails rewritten to `.invalid`, bank/tax/identity/signature/consent fields redacted, onboarding `access_token`s regenerated, `driver_locations` emptied. Stage **`3h`** then sweeps **every text column of every table**, substituting routable emails in place with an HMAC `<10 hex>@invalid` (per-run salt, so cross-table rows still agree) and `###-##-####` with `000-00-0000`. A free-text hit is a **hard leak, not an advisory**.
+- **Sanitization is asserted, not assumed** — sessions cleared, every account's password replaced with **its own random secret that nothing prints or stores** (the run refuses if any account accepts a password published in this repository, shares a hash, or keeps its snapshot hash), emails rewritten to `.invalid`, bank/tax/identity/signature/consent fields redacted, onboarding `access_token`s regenerated, `driver_locations` emptied. Stage **`3h`** then sweeps **every text column of every table**, substituting routable emails in place with an HMAC `<10 hex>@invalid` (per-run salt, so cross-table rows still agree) and `###-##-####` with `000-00-0000`. A free-text hit is a **hard leak, not an advisory**.
 - **⚠️ Stage 3h neutralizes exactly TWO SHAPES.** Reading "every text column of every table" as "free-text PII is handled" is itself a trap — base64 licence/medical-card documents, `city`/`state`/`zip`, and the seven phone columns are all structurally invisible to it and each needed an explicit list entry. **If a column can hold personal data in any shape that is not an email or an SSN, assume stage 3h will not save you.**
+- **Signing in to a refreshed copy is opt-in.** `REFRESH_OPERATOR_PASSWORD` — environment only (a password-like argument is refused), 16+ characters — sets **one** existing Super Admin, `REFRESH_OPERATOR_USER` (default `super_admin`). It is applied only where a database is installed, never to the `--sanitize-only` artifact, and the wrappers hand it to `refresh-env.js` and nothing else. For `test-suite.js` on a **local** copy, run `scripts/prepare-test-fixtures.js --yes-local-db` after the refresh.
 - **Not copied:** `uploads/` (unredacted PII on disk — files 404 in a refreshed environment) and the Google Sheets themselves.
 
 ## Detail
@@ -39,12 +40,26 @@ including the drift audit that motivated it, in **`scripts/README-env-refresh.md
   than production and their investor payouts come out *lower*. Bounded in practice (15 months are
   already locked and frozen), but **never reconcile a historical month on a trimmed copy** — pass
   `--telemetry-all`.
-- **Sanitization is asserted, not assumed**: sessions cleared, every password re-hashed to the
-  harness default (`Password123!`, so `test-suite.js` runs with no extra step), emails rewritten
-  to RFC-2606 `.invalid` (can never resolve), bank/tax/identity fields, signatures and **signing
-  evidence** (`signed_ip`, `signed_ip_source`, `signed_user_agent`, `consent_text`) redacted,
-  investor onboarding `access_token`s regenerated, `driver_locations` emptied. The run fails if a
-  routable address, a session, or a bank account number survives.
+- **Sanitization is asserted, not assumed**: sessions cleared, every account's password replaced
+  with a bcrypt hash of **its own** random 32-byte secret, which is then discarded — nothing prints,
+  stores or can re-derive it, so a refreshed copy accepts no password anybody knows — emails
+  rewritten to RFC-2606 `.invalid` (can never resolve), bank/tax/identity fields, signatures and
+  **signing evidence** (`signed_ip`, `signed_ip_source`, `signed_user_agent`, `consent_text`)
+  redacted, investor onboarding `access_token`s regenerated, `driver_locations` emptied. The run
+  fails if a routable address, a session, or a bank account number survives — or if any account
+  accepts a password published in this repository (`PUBLISHED_PASSWORDS` in `refresh-env.js`),
+  two accounts share a hash, or an account keeps the hash it had in the snapshot.
+- **Signing in is opt-in, and there are two ways in, for two jobs.** `REFRESH_OPERATOR_PASSWORD`
+  (environment only — a password-like argument is refused, never echoed; 16+ characters) sets
+  **one** existing Super Admin, `REFRESH_OPERATOR_USER` (default `super_admin`); anything that is
+  not a Super Admin, or not there, is refused and nothing is installed. It is applied only where a
+  database is installed (the one-pass form and `--from-sanitized`), so the artifact that crosses
+  the network never carries it, and both wrappers move it out of their own environment before
+  running anything else — `pm2 restart --update-env` would otherwise copy it into the running
+  staging process. For `test-suite.js` on a **local** copy, `scripts/prepare-test-fixtures.js
+  --yes-local-db` sets its own test password on one account per role; it refuses a deployed
+  database by path, by resolved symlink and by file identity, and `--verify` refuses any copy it
+  has prepared. Runbook: *Signing in to a refreshed copy* in `scripts/README-env-refresh.md`.
 - **⚠️ That last sentence was ASPIRATIONAL until 2026-08-13 — every step above is column-aware.**
   An address typed into a notes field, embedded in a JSON blob, or recorded in an audit line
   walked straight through, and the run went on to print `clean: no routable address … survives`

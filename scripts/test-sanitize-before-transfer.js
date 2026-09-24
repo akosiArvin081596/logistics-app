@@ -35,6 +35,17 @@
 //   refusal. Sections 5-8 and the mutants below are what stop that pair
 //   regressing into a scrub that runs, does nothing, and still reports clean.
 //
+// WHY IT GREW A PASSWORD HALF (2026-09-24)
+//
+//   Every account on a refreshed copy gets its own random secret that nothing
+//   prints or stores, and signing in is opt-in: REFRESH_OPERATOR_PASSWORD sets
+//   ONE named Super Admin. Section 13 grades the copy with an oracle of its own
+//   (no account accepts the published test password, no two share a hash, no
+//   snapshot hash survives, no random value reaches the output — hooked at the
+//   crypto module, not read from the script). Section 14 grades operator access:
+//   exactly one account, a Super Admin, from the environment only. The C-series
+//   mutants in section 15 write a known password and break each guard.
+//
 // ⚠️ WHAT MAKES THIS TEST NON-VACUOUS, and what would quietly make it vacuous.
 //
 //   • collectLeaks() guards EVERY entry with has_(table, column). A column the
@@ -77,7 +88,8 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const zlib = require("zlib");
-const { execFileSync } = require("child_process");
+const { execFileSync, spawnSync } = require("child_process");
+const crypto = require("crypto");
 
 const SCRIPT = path.join(__dirname, "refresh-env.js");
 const SERVER = path.join(__dirname, "..", "server.js");
@@ -238,8 +250,37 @@ const ORIG = {
 	refInfo: `[{"name": "Dana Reference", "relationship": "former dispatcher, reachable at ${FREE.reference}", "phone": "${FAKE.phone}"}, {"name": "Lee Employer", "relationship": "prior employer — ${FREE.prevEmp}"}]`,
 };
 
+// ---------------------------------------------------------------------------
+// PASSWORDS — the values sections 13-15 grade against.
+//
+// ⚠️ RESTATED HERE, NOT READ FROM refresh-env.js. The check that grades the
+// sanitizer must not be able to share its mistakes — the same reasoning as the
+// free-text oracle below. Mutant C3 is the proof: it silences refresh-env.js's
+// own password check, and only this copy is left to notice.
+// ---------------------------------------------------------------------------
+// The test password this repository publishes (prepare-test-fixtures.js sets it
+// on LOCAL databases). No account on a refreshed copy may accept it.
+const PUBLISHED_TEST_PASSWORD = "Password123!";
+// A real bcrypt hash of it (cost 4), carried by TWO accounts in the snapshot —
+// the positive control for both "accepts a published password" and "shares a
+// hash". A literal, not generated, so the fixture is byte-stable between runs.
+const SHARED_PUBLISHED_HASH = "$2b$04$EP4ajy.RLqr3hTEHXLyY8.Umz8LHD5qwa/PkHSFcX2FrfuQ2H7gha";
+// Every password hash the snapshot holds. None may survive into anything the
+// refresh produces.
+const PRIOR_HASHES = [
+	"$2a$10$productionhashthatmustnotsurvive000000000000000000000",
+	"$2a$10$anotherproductionhash0000000000000000000000000000000",
+	"$2a$10$thirdproductionhash00000000000000000000000000000000000",
+	SHARED_PUBLISHED_HASH,
+];
+// What sections 14-15 set through REFRESH_OPERATOR_PASSWORD. Distinctive, so a
+// substring search of the output cannot hit it by accident.
+const OPERATOR_PW = "op-Tangerine-Lantern-47";
+
 // Everything that must be absent from the bytes that would cross the network.
 const MUST_NOT_SURVIVE = [
+	// The snapshot's own password hashes — see PRIOR_HASHES.
+	SHARED_PUBLISHED_HASH,
 	FAKE.ssnA, FAKE.ssnB, FAKE.einA, FAKE.einB, FAKE.routing,
 	FAKE.accountA, FAKE.accountB, FAKE.licence,
 	FAKE.mailA, FAKE.mailB, FAKE.mailC, FAKE.mailD,
@@ -333,12 +374,24 @@ function seedDatabase(dbPath) {
 		CREATE TABLE load_invoice_drafts (id INTEGER PRIMARY KEY, load_id TEXT, recipient TEXT, subject TEXT, created_at TEXT);
 	`);
 
+	// super_admin starts with a forced password change pending: operator access
+	// must clear it, or the operator's first sign-in is refused (section 14).
+	db.prepare("INSERT INTO users (id,username,email,password_hash,role,must_change_password) VALUES (?,?,?,?,?,?)")
+		.run(1, "super_admin", FAKE.mailA, PRIOR_HASHES[0], "Super Admin", 1);
 	db.prepare("INSERT INTO users (id,username,email,password_hash,role) VALUES (?,?,?,?,?)")
-		.run(1, "super_admin", FAKE.mailA, "$2a$10$productionhashthatmustnotsurvive000000000000000000000", "Super Admin");
+		.run(2, "demo_viewer", FAKE.mailB, PRIOR_HASHES[1], "Super Admin");
 	db.prepare("INSERT INTO users (id,username,email,password_hash,role) VALUES (?,?,?,?,?)")
-		.run(2, "demo_viewer", FAKE.mailB, "$2a$10$anotherproductionhash0000000000000000000000000000000", "Super Admin");
+		.run(3, "sam.driver", FAKE.mailC, PRIOR_HASHES[2], "Driver");
+	// ⚠️ The password half's positive controls: two accounts carrying ONE real
+	// hash of a password this repository publishes — what any copy with one
+	// known password on every account looks like. The raw snapshot must be refused for both
+	// reasons (section 13), and nothing derived from it may keep either.
+	// id 4 is a SECOND Super Admin on purpose: operator access must land on the
+	// one named account, never on "the Super Admins" (section 14).
 	db.prepare("INSERT INTO users (id,username,email,password_hash,role) VALUES (?,?,?,?,?)")
-		.run(3, "sam.driver", FAKE.mailC, "$2a$10$thirdproductionhash00000000000000000000000000000000000", "Driver");
+		.run(4, "second.admin", "", SHARED_PUBLISHED_HASH, "Super Admin");
+	db.prepare("INSERT INTO users (id,username,email,password_hash,role) VALUES (?,?,?,?,?)")
+		.run(5, "dana.dispatch", "", SHARED_PUBLISHED_HASH, "Dispatcher");
 
 	db.prepare("INSERT INTO sessions VALUES (?,?,?)").run("sid-live-1", '{"user":{"id":1,"role":"Super Admin"}}', 99999999);
 	db.prepare("INSERT INTO sessions VALUES (?,?,?)").run("sid-live-2", '{"user":{"id":3,"role":"Driver"}}', 99999999);
@@ -465,6 +518,87 @@ function openDb(p) {
 function writeEnv(dir, lines) {
 	fs.writeFileSync(path.join(dir, ".env"), lines.join("\n") + "\n");
 }
+
+// ===========================================================================
+// THE PASSWORD ORACLES (sections 13-15)
+// ===========================================================================
+
+// Like runScript(), but keeps stderr on success too — "nothing is printed" has
+// to read everything the run wrote — and can preload a module.
+function runFull(script, args, { cwd, env = {}, preload } = {}) {
+	const r = spawnSync(process.execPath, [...(preload ? ["--require", preload] : []), script, ...args], {
+		encoding: "utf8", cwd: cwd || undefined, env: { ...process.env, ...env },
+	});
+	return { code: r.status === null ? 1 : r.status, out: `${r.stdout || ""}${r.stderr || ""}` };
+}
+
+// ⚠️ A PRELOAD THAT RECORDS EVERY VALUE crypto.randomBytes HANDS OUT, written to
+// $RECORD_RANDOM_TO when the process exits (process.exit included). It hooks the
+// crypto MODULE, not refresh-env.js, so it sees each secret however the script
+// builds it and cannot be satisfied by the code it is grading. Section 13 also
+// asserts it saw one 32-byte value per account, so the hook going blind (a
+// switch to another random source) fails loudly instead of passing vacuously.
+const RECORDER_SRC = `"use strict";
+const crypto = require("crypto");
+const fs = require("fs");
+const seen = [];
+const orig = crypto.randomBytes;
+crypto.randomBytes = function (n, cb) {
+	if (typeof cb === "function") return orig.call(crypto, n, (e, b) => { if (b) seen.push(b.toString("hex")); cb(e, b); });
+	const b = orig.call(crypto, n);
+	seen.push(b.toString("hex"));
+	return b;
+};
+process.on("exit", () => { try { fs.writeFileSync(process.env.RECORD_RANDOM_TO, seen.join("\\n")); } catch {} });
+`;
+function readRecorded(file) {
+	try { return fs.readFileSync(file, "utf8").split("\n").filter(Boolean); } catch { return []; }
+}
+// Every recorded value of 16+ bytes, in each encoding a log line could carry it
+// in, that the output contains. None may: not a password secret, not the HMAC
+// salt, not an access token.
+function printedSecrets(out, recordedHex) {
+	const hits = [];
+	for (const hex of recordedHex) {
+		if (hex.length < 32) continue;
+		const b = Buffer.from(hex, "hex");
+		const b64 = b.toString("base64");
+		for (const form of [hex, b64, b64.replace(/=+$/, ""), b.toString("base64url")]) {
+			if (out.includes(form)) { hits.push(form.slice(0, 6) + "…"); break; }
+		}
+	}
+	return hits;
+}
+
+const bcryptjs = () => require("bcryptjs");
+const bcryptAccepts = (pw, h) => { try { return bcryptjs().compareSync(pw, h); } catch { return false; } };
+
+// Everything wrong with a copy's passwords, as a list of `cred:` findings.
+function credentialFindings(db) {
+	let rows;
+	try { rows = db.prepare("SELECT username, password_hash AS h FROM users ORDER BY id").all(); }
+	catch { return ["cred:unreadable"]; }
+	const bad = [];
+	if (!rows.length) bad.push("cred:no-accounts");
+	const holders = new Map();
+	for (const r of rows) {
+		if (!/^\$2[aby]\$\d\d\$[./A-Za-z0-9]{53}$/.test(String(r.h))) bad.push(`cred:not-a-bcrypt-hash(${r.username})`);
+		if (bcryptAccepts(PUBLISHED_TEST_PASSWORD, r.h)) bad.push(`cred:published-test-password(${r.username})`);
+		if (PRIOR_HASHES.includes(r.h)) bad.push(`cred:prior-hash(${r.username})`);
+		holders.set(r.h, (holders.get(r.h) || 0) + 1);
+	}
+	for (const n of holders.values()) if (n > 1) bad.push(`cred:shared-hash(${n} accounts)`);
+	return bad;
+}
+// The accounts on a copy that accept `pw`, as [{ username, role }].
+function accountsAccepting(dbPath, pw) {
+	const db = openDb(dbPath);
+	try {
+		return db.prepare("SELECT username, role, password_hash AS h FROM users ORDER BY id").all()
+			.filter((r) => bcryptAccepts(pw, r.h)).map(({ username, role }) => ({ username, role }));
+	} finally { try { db.close(); } catch {} }
+}
+const sha256File = (p) => { try { return crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex"); } catch { return "(absent)"; } };
 
 // ===========================================================================
 // THE FREE-TEXT ORACLE
@@ -666,6 +800,12 @@ function extractFn(src, name) {
 		fs.rmSync(ROOT, { recursive: true, force: true });
 		process.exit(1);
 	}
+
+	// Every child below inherits this process's environment. An operator
+	// password exported in the developer's shell would otherwise reach every
+	// run, and sections 1-12 would silently be testing operator access.
+	delete process.env.REFRESH_OPERATOR_PASSWORD;
+	delete process.env.REFRESH_OPERATOR_USER;
 
 	// --- fixture -----------------------------------------------------------
 	const vps = path.join(ROOT, "vps-backups");
@@ -1159,7 +1299,229 @@ function extractFn(src, name) {
 	}
 
 	// =======================================================================
-	section("13. Mutants — every assertion above is required by at least one");
+	section("13. Passwords — every account on the copy gets its own unknowable secret");
+	{
+		// Positive controls first: the checks CAN fire, on the snapshot that
+		// carries a published password on two accounts.
+		const rawV = run(["--verify", snapshot]);
+		check("CONTROL: --verify refuses the raw snapshot for accounts accepting a published password",
+			rawV.code === 1 && /\b2 account\(s\) accept a password published/.test(rawV.out));
+		check("CONTROL: …and for accounts sharing one password hash", /\b2 account\(s\) share a password hash/.test(rawV.out));
+		const rawDb = openDb(gunzipToFile(snapshot, path.join(readDir, "snapshot-13.db")));
+		try {
+			const bad = credentialFindings(rawDb);
+			check("CONTROL: the oracle finds the published password, the shared hash and the snapshot hashes on the raw file",
+				bad.some((b) => b.startsWith("cred:published-test-password")) && bad.some((b) => b.startsWith("cred:shared-hash"))
+					&& bad.some((b) => b.startsWith("cred:prior-hash")), bad.join(", "));
+		} finally { try { rawDb.close(); } catch {} }
+
+		// The artifact section 3 emitted, graded by this file's own oracle.
+		const a = openDb(artifactDb);
+		try {
+			const bad = credentialFindings(a);
+			check("no account on the artifact accepts the published test password, keeps a snapshot hash, or shares a hash",
+				bad.length === 0, bad.length ? bad.join(", ") : "every hash is its own bcrypt hash");
+			const n = a.prepare("SELECT COUNT(*) c FROM users").get().c;
+			check("…across every account the snapshot had, less the deleted demo_viewer", n === 4, `${n} account(s)`);
+			const forced = a.prepare("SELECT COUNT(*) c FROM users WHERE COALESCE(must_change_password,0) <> 0").get().c;
+			check("…none left forced to change a password nobody knows", forced === 0, `${forced}`);
+			const pubs = a.prepare("SELECT password_hash AS h FROM users").all()
+				.filter((r) => bcryptAccepts("investor123", r.h)).length;
+			check("…and none accepts the other published test password either", pubs === 0, `${pubs}`);
+		} finally { try { a.close(); } catch {} }
+
+		// ⚠️ "NOTHING IS PRINTED", hooked at the crypto module rather than read
+		// from the script: every random value the run drew, in every encoding a
+		// log line could carry it in, must be absent from everything it wrote.
+		const recDir = path.join(ROOT, "recorder");
+		fs.mkdirSync(recDir);
+		const recorder = path.join(recDir, "record-random.js");
+		fs.writeFileSync(recorder, RECORDER_SRC);
+		const recFile = path.join(recDir, "random.txt");
+		const r = runFull(SCRIPT, ["--sanitize-only", "--from", snapshot, "--emit", path.join(recDir, "a.db.gz"), "--telemetry-days", "45"],
+			{ preload: recorder, env: { RECORD_RANDOM_TO: recFile } });
+		const rec = readRecorded(recFile);
+		// Five, not four: stage 3b re-hashes every row before demo_viewer is deleted.
+		const secrets32 = rec.filter((h) => h.length === 64).length;
+		check("the recorder saw a 32-byte secret for every account in the snapshot (so the next check is not vacuous)",
+			r.code === 0 && secrets32 >= 5, `exit ${r.code}, ${secrets32} of 5`);
+		const printed = printedSecrets(r.out, rec);
+		check("no random value the run drew appears in its output — hex, base64 or base64url",
+			printed.length === 0, printed.length ? `PRINTED: ${printed.join(", ")}` : `${rec.length} value(s) checked`);
+		check("the summary says each account got its own secret, and names no password",
+			/users: 5 password\(s\) replaced, each with its own random secret/.test(r.out) && !r.out.includes(PUBLISHED_TEST_PASSWORD));
+
+		// An install tells the operator how to get in, and never with a password.
+		const dir = path.join(ROOT, "no-operator");
+		fs.mkdirSync(dir);
+		writeEnv(dir, GOOD_ENV);
+		const inst = runFull(SCRIPT, ["--from", snapshot, "--to", path.join(dir, "app.db"), "--yes-non-prod", "--telemetry-days", "45"]);
+		check("a plain install succeeds and says every password is random", inst.code === 0
+			&& /Every account has a random password that nobody knows/.test(inst.out), `exit ${inst.code}`);
+		check("…pointing at REFRESH_OPERATOR_PASSWORD and prepare-test-fixtures.js, and printing no password",
+			/REFRESH_OPERATOR_PASSWORD/.test(inst.out) && /prepare-test-fixtures\.js --yes-local-db/.test(inst.out)
+				&& !inst.out.includes(PUBLISHED_TEST_PASSWORD) && !/password is now/i.test(inst.out));
+		const known = accountsAccepting(path.join(dir, "app.db"), PUBLISHED_TEST_PASSWORD);
+		check("…and no account on it accepts the published test password", known.length === 0, JSON.stringify(known));
+	}
+
+	// =======================================================================
+	section("14. Operator access — ONE named Super Admin, from the environment only");
+	{
+		const dir = path.join(ROOT, "operator");
+		fs.mkdirSync(dir);
+		writeEnv(dir, GOOD_ENV);
+		const target = path.join(dir, "app.db");
+		const install = (env, extra = []) => runFull(SCRIPT,
+			["--from", snapshot, "--to", target, "--yes-non-prod", "--telemetry-days", "45", "--no-backup", ...extra], { env });
+		const leftovers = () => fs.readdirSync(dir).filter((f) => /\.tmp($|-)|-journal$|-wal$|-shm$/.test(f));
+
+		// -- the default account ------------------------------------------------
+		const r = install({ REFRESH_OPERATOR_PASSWORD: OPERATOR_PW });
+		check("an install with REFRESH_OPERATOR_PASSWORD succeeds", r.code === 0,
+			r.code === 0 ? "" : r.out.split("\n").slice(-3).join(" | "));
+		let who = accountsAccepting(target, OPERATOR_PW);
+		check("EXACTLY ONE account accepts it — super_admin, a Super Admin", who.length === 1
+			&& who[0].username === "super_admin" && who[0].role === "Super Admin", JSON.stringify(who));
+		check("…not the OTHER Super Admin in the same database", !who.some((w) => w.username === "second.admin"));
+		{
+			const db = openDb(target);
+			try {
+				const mc = db.prepare("SELECT must_change_password m FROM users WHERE username = 'super_admin'").get().m;
+				check("…its pending forced password change is cleared, so the operator can actually sign in", mc === 0, `${mc}`);
+				const others = credentialFindings(db);
+				check("…and every other account is still unknowable (this file's oracle)", others.length === 0, others.join(", "));
+			} finally { try { db.close(); } catch {} }
+		}
+		check("the operator password appears nowhere in the run's output", !r.out.includes(OPERATOR_PW));
+		check("…which names the account and says it is the only one with a known password",
+			/'super_admin' \(Super Admin\) accepts the password from REFRESH_OPERATOR_PASSWORD — the only account/.test(r.out)
+				&& /Sign in as 'super_admin'/.test(r.out));
+		check("…and the installed copy still verifies clean", run(["--verify", target]).code === 0);
+
+		// -- a named account ----------------------------------------------------
+		const named = install({ REFRESH_OPERATOR_PASSWORD: OPERATOR_PW, REFRESH_OPERATOR_USER: "second.admin" });
+		who = accountsAccepting(target, OPERATOR_PW);
+		check("REFRESH_OPERATOR_USER names the account: exactly second.admin, and not super_admin",
+			named.code === 0 && who.length === 1 && who[0].username === "second.admin", JSON.stringify(who));
+
+		// -- the length floor, at exactly 16 ------------------------------------
+		const sixteen = "0123456789abcdef";
+		const ok16 = install({ REFRESH_OPERATOR_PASSWORD: sixteen });
+		check("a 16-character password is accepted", ok16.code === 0 && accountsAccepting(target, sixteen).length === 1, `exit ${ok16.code}`);
+		const before = sha256File(target);
+		const short = install({ REFRESH_OPERATOR_PASSWORD: sixteen.slice(0, 15) });
+		check("a 15-character password is REFUSED", short.code === 1 && /shorter than 16 characters/.test(short.out), `exit ${short.code}`);
+		check("…before anything is replaced, and without repeating it",
+			sha256File(target) === before && leftovers().length === 0 && !short.out.includes(sixteen.slice(0, 15)));
+		const earlyShort = runFull(SCRIPT, ["--check-env-only", "--to", target], { env: { REFRESH_OPERATOR_PASSWORD: "too-short" } });
+		check("--check-env-only refuses it too — the preflight catches it before any data moves",
+			earlyShort.code === 1 && /shorter than 16 characters/.test(earlyShort.out));
+		const earlyOk = runFull(SCRIPT, ["--check-env-only", "--to", target], { env: { REFRESH_OPERATOR_PASSWORD: OPERATOR_PW } });
+		check("…and passes a long one, deferring the account check to install",
+			earlyOk.code === 0 && /checked and set at install/.test(earlyOk.out) && !earlyOk.out.includes(OPERATOR_PW));
+
+		// -- never argv -----------------------------------------------------------
+		const forms = [
+			["--operator-password=" + OPERATOR_PW],
+			["--password", OPERATOR_PW],
+			["--pw=" + OPERATOR_PW],
+			["REFRESH_OPERATOR_PASSWORD=" + OPERATOR_PW],
+		];
+		const modes = [
+			["install", ["--from", snapshot, "--to", target, "--yes-non-prod"]],
+			["--verify", ["--verify", artifact]],
+			["--check-env-only", ["--check-env-only", "--to", target]],
+			["--sanitize-only", ["--sanitize-only", "--from", snapshot, "--emit", path.join(dir, "argv.gz")]],
+		];
+		const argvFails = [];
+		for (const form of forms) {
+			for (const [mode, args] of modes) {
+				const pre = sha256File(target);
+				const x = runFull(SCRIPT, [...args, ...form]);
+				const refused = x.code === 1 && /looks like a password given on the command line/.test(x.out);
+				if (!refused || x.out.includes(OPERATOR_PW) || sha256File(target) !== pre || fs.existsSync(path.join(dir, "argv.gz"))) {
+					argvFails.push(`${form[0].split("=")[0]} in ${mode} (exit ${x.code})`);
+				}
+			}
+		}
+		check(`a password on the command line is REFUSED in every mode, never echoed, nothing written (${forms.length * modes.length} cases)`,
+			argvFails.length === 0, argvFails.join("; "));
+		// The converse, so the rule cannot pass by refusing everything.
+		const bypass = run(["--verify", artifact, "--bypass-nothing"]);
+		check("…while a flag that merely CONTAINS the letters (--bypass-nothing) is not taken for one", bypass.code === 0, `exit ${bypass.code}`);
+		// refresh-local.sh hands its extra arguments to a --check-env-only
+		// preflight, so a second mode flag must not be able to turn that preflight
+		// into a --verify that judges no environment.
+		const twoModes = run(["--check-env-only", "--to", target, "--verify", artifact]);
+		check("two mode flags are REFUSED — a preflight cannot be turned into another mode",
+			twoModes.code === 1 && /conflicting modes: --verify, --check-env-only/.test(twoModes.out), `exit ${twoModes.code}`);
+
+		// -- who it may be set on ---------------------------------------------------
+		const refusedCleanly = (label, env, pattern, mustNotEcho) => {
+			const pre = sha256File(target);
+			const x = install({ REFRESH_OPERATOR_PASSWORD: OPERATOR_PW, ...env });
+			check(label, x.code === 1 && pattern.test(x.out), `exit ${x.code}: ${(x.out.match(/REFUSING: .*/) || [""])[0].slice(0, 110)}`);
+			check("…nothing replaced, no working copy left, and neither the password nor the given name repeated",
+				sha256File(target) === pre && leftovers().length === 0 && !x.out.includes(OPERATOR_PW)
+					&& (!mustNotEcho || !x.out.includes(mustNotEcho)), leftovers().join(", "));
+		};
+		refusedCleanly("an account that does not exist is REFUSED",
+			{ REFRESH_OPERATOR_USER: "no-such-operator-9f3c" }, /names no account in this database/, "no-such-operator-9f3c");
+		refusedCleanly("a Driver is REFUSED — operator access is for a Super Admin only",
+			{ REFRESH_OPERATOR_USER: "sam.driver" }, /'sam\.driver' is a Driver, not a Super Admin/);
+		refusedCleanly("a Dispatcher is REFUSED too",
+			{ REFRESH_OPERATOR_USER: "dana.dispatch" }, /is a Dispatcher, not a Super Admin/);
+		refusedCleanly("demo_viewer is REFUSED — the scrub deleted it, and this cannot bring it back",
+			{ REFRESH_OPERATOR_USER: "demo_viewer" }, /names no account in this database/);
+
+		// -- --from-sanitized: the local half of refresh-local.sh ------------------
+		const lap = path.join(ROOT, "operator-laptop");
+		fs.mkdirSync(lap);
+		writeEnv(lap, GOOD_ENV);
+		const fs1 = runFull(SCRIPT, ["--from", artifact, "--to", path.join(lap, "app.db"), "--from-sanitized", "--yes-non-prod"],
+			{ env: { REFRESH_OPERATOR_PASSWORD: OPERATOR_PW } });
+		who = fs1.code === 0 ? accountsAccepting(path.join(lap, "app.db"), OPERATOR_PW) : [];
+		check("--from-sanitized applies it too: exactly one account, super_admin", fs1.code === 0 && who.length === 1
+			&& who[0].username === "super_admin", fs1.code === 0 ? JSON.stringify(who) : fs1.out.split("\n").slice(-3).join(" | "));
+		check("…with the password absent from the output, and the result verifying clean",
+			!fs1.out.includes(OPERATOR_PW) && run(["--verify", path.join(lap, "app.db")]).code === 0);
+		const fsBad = runFull(SCRIPT, ["--from", artifact, "--to", path.join(lap, "app.db"), "--from-sanitized", "--yes-non-prod"],
+			{ env: { REFRESH_OPERATOR_PASSWORD: OPERATOR_PW, REFRESH_OPERATOR_USER: "sam.driver" } });
+		check("…and refuses a non-admin there as well, leaving no -journal behind",
+			fsBad.code === 1 && /not a Super Admin/.test(fsBad.out)
+				&& fs.readdirSync(lap).filter((f) => /\.tmp($|-)|-journal$/.test(f)).length === 0);
+
+		// -- the artifact never carries it ----------------------------------------
+		const emitted = path.join(dir, "with-operator-env.db.gz");
+		const so = runFull(SCRIPT, ["--sanitize-only", "--from", snapshot, "--emit", emitted, "--telemetry-days", "45"],
+			{ env: { REFRESH_OPERATOR_PASSWORD: OPERATOR_PW } });
+		check("--sanitize-only ignores it, and says so", so.code === 0 && /ignored in this mode/.test(so.out), `exit ${so.code}`);
+		const soDb = so.code === 0 ? gunzipToFile(emitted, path.join(dir, "with-operator-env.db")) : null;
+		check("…so the artifact that crosses the network accepts no known password at all",
+			!!soDb && accountsAccepting(soDb, OPERATOR_PW).length === 0 && accountsAccepting(soDb, PUBLISHED_TEST_PASSWORD).length === 0);
+
+		// -- a user without a password -------------------------------------------
+		const userOnly = install({ REFRESH_OPERATOR_USER: "super_admin" });
+		check("REFRESH_OPERATOR_USER alone warns that no account will accept a known password",
+			userOnly.code === 0 && /REFRESH_OPERATOR_USER is set but REFRESH_OPERATOR_PASSWORD is not/.test(userOnly.out)
+				&& accountsAccepting(target, OPERATOR_PW).length === 0);
+
+		// -- nothing printed, with the operator path in play ------------------------
+		const recDir = path.join(ROOT, "recorder");
+		const recorder = path.join(recDir, "record-random.js");
+		const recFile = path.join(recDir, "random-operator.txt");
+		const withRec = runFull(SCRIPT, ["--from", snapshot, "--to", target, "--yes-non-prod", "--telemetry-days", "45", "--no-backup"],
+			{ preload: recorder, env: { RECORD_RANDOM_TO: recFile, REFRESH_OPERATOR_PASSWORD: OPERATOR_PW } });
+		const rec = readRecorded(recFile);
+		const printed = printedSecrets(withRec.out, rec);
+		check("an operator install prints neither the operator password nor any random value it drew",
+			withRec.code === 0 && rec.length > 0 && printed.length === 0 && !withRec.out.includes(OPERATOR_PW),
+			printed.length ? `PRINTED: ${printed.join(", ")}` : `${rec.length} value(s) checked`);
+	}
+
+	// =======================================================================
+	section("15. Mutants — every assertion above is required by at least one");
 	{
 		// Each mutant is a byte-edit of the SHIPPED refresh-env.js, executed as a
 		// copy in its own directory, and graded by coreInvariants() — the same
@@ -1383,6 +1745,148 @@ function extractFn(src, name) {
 			` OR length(CAST("${"$"}{c}" AS BLOB)) <> length("${"$"}{c}")`,
 			``,
 			/audit_trail\.details: \d+ value\(s\) matching/);
+
+		// ===================================================================
+		// C-SERIES — the password half (sections 13 and 14).
+		//
+		// Same discipline as scrubMutant(): every edit must match the shipped
+		// source EXACTLY ONCE, and the mutant must still parse, before a result
+		// is allowed to count as caught — a stale anchor or a syntax error is a
+		// vacuous pass, not a catch. Where refresh-env.js refusing IS the catch,
+		// the refusal must name the one check under test and NOT a neighbour, so
+		// each mutant proves a specific check is load-bearing.
+		// ===================================================================
+		function credMutant(id, label, edits, runIt, grade) {
+			const dir = path.join(ROOT, "mutants", id);
+			fs.mkdirSync(dir, { recursive: true });
+			let src = fs.readFileSync(SCRIPT, "utf8");
+			let applyErr = "";
+			for (const [from, to] of edits) {
+				const hits = src.split(from).length - 1;
+				if (hits !== 1) { applyErr = `anchor matched ${hits} times, not once: ${from.slice(0, 70)}`; break; }
+				src = src.replace(from, () => to);   // function form: `to` is taken literally
+			}
+			check(`${id}: ${label} — actually mutated the shipped source`, !applyErr, applyErr);
+			if (applyErr) { check(`${id}: ${label} — is caught`, false, "not evaluated"); return; }
+			const script = path.join(dir, "refresh-env.js");
+			fs.writeFileSync(script, src);
+			try { fs.symlinkSync(NODE_MODULES, path.join(dir, "node_modules"), "dir"); } catch {}
+			const parsed = spawnSync(process.execPath, ["--check", script], { encoding: "utf8" });
+			check(`${id}: ${label} — the mutant still parses`, parsed.status === 0,
+				parsed.status === 0 ? "" : "the mutation broke the syntax — a crash is not a catch");
+			if (parsed.status !== 0) { check(`${id}: ${label} — is caught`, false, "not evaluated"); return; }
+			const { caught, detail } = grade(runIt(script, dir), dir);
+			check(`${id}: ${label} — is caught`, caught, detail);
+		}
+		const sanitizeWith = (env = {}, preload) => (script, dir) => {
+			const out = path.join(dir, "mutant.db.gz");
+			const r = runFull(script, ["--sanitize-only", "--from", snapshot, "--emit", out, "--telemetry-days", "45"], { cwd: dir, env, preload });
+			return { ...r, artifact: fs.existsSync(out) ? out : null };
+		};
+		const installWith = (env = {}, extra = []) => (script, dir) => {
+			writeEnv(dir, GOOD_ENV);
+			const target = path.join(dir, "app.db");
+			const r = runFull(script, ["--from", snapshot, "--to", target, "--yes-non-prod", "--telemetry-days", "45", ...extra], { cwd: dir, env });
+			return { ...r, target: fs.existsSync(target) ? target : null };
+		};
+		const refusedNaming = (pattern, notPattern) => (r) => {
+			const named = pattern.test(r.out);
+			const other = notPattern ? notPattern.test(r.out) : false;
+			return {
+				caught: r.code !== 0 && !r.artifact && !r.target && named && !other,
+				detail: !named ? `SURVIVED — exit ${r.code}, and no refusal named it`
+					: `refused: ${(r.out.match(pattern) || [""])[0]}${other ? ` — but ALSO ${(r.out.match(notPattern) || [""])[0]}, so this is not the check doing the catching` : ""}`,
+			};
+		};
+		const REHASH = "rehash.run(bcrypt.hashSync(unknowableSecret(), UNKNOWABLE_SECRET_COST), r.rid);";
+		const PUBLISHED_RE = /\d+ account\(s\) accept a password published/;
+		const SHARED_RE = /\d+ account\(s\) share a password hash/;
+		const CARRIED_RE = /\d+ account\(s\) still carry the password hash they had before the refresh/;
+
+		// ⚠️ C1: ONE KNOWN PASSWORD ON EVERY ACCOUNT — the shape a refresh must
+		// never produce. Each account gets its own hash (bcrypt salts differ), so
+		// only the published-password check can see it; the refusal must name it.
+		credMutant("C1", "the published test password written to every account",
+			[[REHASH, 'rehash.run(bcrypt.hashSync("Password123!", UNKNOWABLE_SECRET_COST), r.rid);']],
+			sanitizeWith(), refusedNaming(PUBLISHED_RE, SHARED_RE));
+		// C2: an unknown secret, but ONE for everybody — only uniqueness sees it.
+		credMutant("C2", "one random hash shared by every account",
+			[[REHASH, "rehash.run((globalThis.__oneHash ||= bcrypt.hashSync(unknowableSecret(), UNKNOWABLE_SECRET_COST)), r.rid);"]],
+			sanitizeWith(), refusedNaming(SHARED_RE, PUBLISHED_RE));
+		// ⚠️ C3: C1 AND refresh-env.js's own check silenced. The artifact now ships,
+		// and only this file's independent oracle is left to notice — the reason
+		// it restates the password instead of reading it from the script.
+		credMutant("C3", "the published test password written AND refresh-env.js's own check silenced",
+			[[REHASH, 'rehash.run(bcrypt.hashSync("Password123!", UNKNOWABLE_SECRET_COST), r.rid);'],
+				["if (published) leaks.push(", "if (false) leaks.push("]],
+			sanitizeWith(), (r, dir) => {
+				if (r.code !== 0 || !r.artifact) {
+					return { caught: false, detail: `expected an EMITTED artifact for this file's oracle to grade — exit ${r.code}` };
+				}
+				const db = openDb(gunzipToFile(r.artifact, path.join(dir, "mutant.db")));
+				try {
+					const bad = credentialFindings(db);
+					return { caught: bad.some((b) => b.startsWith("cred:published-test-password")), detail: `this file's oracle: ${bad.slice(0, 3).join(", ") || "nothing"}` };
+				} finally { try { db.close(); } catch {} }
+			});
+		// C4: the re-hash misses ONE account (super_admin, rowid 1). Its snapshot
+		// hash is neither published nor shared, so only the before/after
+		// comparison can see it survive.
+		credMutant("C4", "the re-hash skips one account, whose snapshot hash survives",
+			[[': ""} WHERE rowid = ?`', ': ""} WHERE rowid = ? AND rowid <> 1`']],
+			sanitizeWith(), refusedNaming(CARRIED_RE, /accept a password published|share a password hash/));
+		// C5 / C6: nothing printed. C5 is the operator's password, C6 the random
+		// secrets — the second caught only through the crypto-module recorder.
+		const OP_HASH = "const hash = bcrypt.hashSync(OPERATOR_PASSWORD, HUMAN_PASSWORD_COST);";
+		credMutant("C5", "the operator password written to the log",
+			[[OP_HASH, "log(`operator password: ${OPERATOR_PASSWORD}`); " + OP_HASH]],
+			installWith({ REFRESH_OPERATOR_PASSWORD: OPERATOR_PW }),
+			(r) => ({ caught: r.out.includes(OPERATOR_PW), detail: r.out.includes(OPERATOR_PW) ? "the output carries the operator password — section 14 fails" : `SURVIVED — exit ${r.code}` }));
+		const recorderPath = path.join(ROOT, "recorder", "record-random.js");
+		credMutant("C6", "each account's random secret written to the log",
+			[[REHASH, "{ const s = unknowableSecret(); log(`secret ${s}`); rehash.run(bcrypt.hashSync(s, UNKNOWABLE_SECRET_COST), r.rid); }"]],
+			(script, dir) => {
+				const recFile = path.join(dir, "random.txt");
+				const r = sanitizeWith({ RECORD_RANDOM_TO: recFile }, recorderPath)(script, dir);
+				return { ...r, rec: readRecorded(recFile) };
+			},
+			(r) => {
+				const printed = printedSecrets(r.out, r.rec);
+				return { caught: printed.length > 0, detail: printed.length ? `${printed.length} drawn value(s) found in the output — section 13 fails` : `SURVIVED — ${r.rec.length} recorded, none found` };
+			});
+		// C7: operator access without its WHERE — every account gets the password.
+		// The exactly-one-row guard refuses before anything is installed.
+		credMutant("C7", "operator access written to EVERY account",
+			[["WHERE rowid = ? AND username = ?`", "WHERE 1 = 1 OR (rowid = ? AND username = ?)`"]],
+			installWith({ REFRESH_OPERATOR_PASSWORD: OPERATOR_PW }),
+			refusedNaming(/expected exactly 1 account to change, got \d+/));
+		// C8-C11: each operator guard removed, driven by the input section 14
+		// relies on it to refuse. Caught = that input now gets through, which is
+		// what proves the guard, and not something else, was doing the refusing.
+		credMutant("C8", "the command-line password refusal removed",
+			[["if (argvSecretAt !== -1) {", "if (false) {"]],
+			installWith({}, ["--operator-password=" + OPERATOR_PW]),
+			(r) => ({ caught: r.code === 0, detail: r.code === 0 ? "the argv password was accepted — section 14 fails" : `SURVIVED — exit ${r.code}` }));
+		credMutant("C9", "the 16-character floor removed",
+			[["} else if (OPERATOR_PASSWORD.length < OPERATOR_MIN_LENGTH) {", "} else if (false) {"]],
+			installWith({ REFRESH_OPERATOR_PASSWORD: "only-15-chars.." }),
+			(r) => ({ caught: r.code === 0 && !!r.target && accountsAccepting(r.target, "only-15-chars..").length === 1,
+				detail: r.code === 0 ? "a 15-character password was set — section 14 fails" : `SURVIVED — exit ${r.code}` }));
+		credMutant("C10", "the Super Admin requirement removed",
+			[['if (who.role !== "Super Admin") {', "if (false) {"]],
+			installWith({ REFRESH_OPERATOR_PASSWORD: OPERATOR_PW, REFRESH_OPERATOR_USER: "sam.driver" }),
+			(r) => {
+				const who = r.target ? accountsAccepting(r.target, OPERATOR_PW) : [];
+				return { caught: who.some((w) => w.role === "Driver"), detail: who.length ? `a ${who[0].role} accepts the operator password — section 14 fails` : `SURVIVED — exit ${r.code}` };
+			});
+		credMutant("C11", "operator access applied to the artifact that crosses the network",
+			[["if (OPERATOR_PASSWORD && INSTALLS) {", "if (OPERATOR_PASSWORD) {"]],
+			sanitizeWith({ REFRESH_OPERATOR_PASSWORD: OPERATOR_PW }),
+			(r, dir) => {
+				if (!r.artifact) return { caught: false, detail: `no artifact to grade — exit ${r.code}` };
+				const who = accountsAccepting(gunzipToFile(r.artifact, path.join(dir, "mutant.db")), OPERATOR_PW);
+				return { caught: who.length > 0, detail: who.length ? `the artifact accepts it for ${who[0].username} — section 14 fails` : "SURVIVED" };
+			});
 	}
 
 	// =======================================================================

@@ -31,6 +31,9 @@
 //   node scripts/refresh-env.js --verify <file.db|.gz> [--strict-scan]          # assert only
 //   node scripts/refresh-env.js --from <sanitized.gz> --to <app.db> --from-sanitized …
 //
+//   Optional, ENVIRONMENT ONLY (see OPERATOR ACCESS below):
+//     REFRESH_OPERATOR_PASSWORD=…  [REFRESH_OPERATOR_USER=<a Super Admin>]
+//
 // See scripts/README-env-refresh.md for the full runbook.
 //
 // ---------------------------------------------------------------------------
@@ -75,9 +78,41 @@ const PROD_SHEET_ID = "1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo";
 const PROD_ARCHIVE_ID = "1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI";
 const PROD_APP_DIR = "/var/www/logistics-app";
 
-// Matches scripts/prepare-test-fixtures.js and test-suite.js's own default, so a
-// refreshed DB is immediately runnable by the harness without a second step.
-const PASSWORD = "Password123!";
+// ---------------------------------------------------------------------------
+// PASSWORDS ON A REFRESHED COPY
+//
+// Every account gets its OWN random secret, hashed and immediately discarded:
+// nothing prints it, stores it or can re-derive it, so a refreshed copy accepts
+// no password anybody could know in advance. Signing in is opt-in, per run, for
+// ONE Super Admin — see OPERATOR ACCESS below. For test-suite.js on a LOCAL
+// copy, run scripts/prepare-test-fixtures.js after the refresh: it sets its own
+// known password on one account per role, and refuses any deployed path.
+//
+// ⚠️ ONE SECRET PER ACCOUNT, never one for all. A single hash written to every
+// row makes one leaked secret a key to every account, and it is exactly the
+// shape collectLeaks() refuses ("share a password hash").
+// ---------------------------------------------------------------------------
+const UNKNOWABLE_SECRET_BYTES = 32;   // 256 bits: 44 base64 chars, inside bcrypt's 72-byte input limit
+// The work factor exists to slow down guessing a LOW-entropy password from its
+// hash. This secret is 256 random bits and is thrown away, so no factor makes it
+// guessable and none makes it safer. The minimum keeps one hash per account —
+// and the assertion that re-verifies every one of them — from costing seconds on
+// every run. A password a human chose (the operator's) gets the app's factor.
+const UNKNOWABLE_SECRET_COST = 4;
+const HUMAN_PASSWORD_COST = 10;       // what server.js and reset-super-admin-password.js use
+
+// Handed straight to bcrypt; never bound to anything that outlives the call.
+function unknowableSecret() {
+	return crypto.randomBytes(UNKNOWABLE_SECRET_BYTES).toString("base64");
+}
+
+// Passwords that appear in this repository's own source for test accounts. A
+// refreshed copy must accept NONE of them, and collectLeaks() checks every
+// account against this list. It is what that check runs AGAINST, never a
+// default: nothing in this file hashes these values.
+//   "Password123!" — scripts/prepare-test-fixtures.js and test-suite.js (LOCAL databases)
+//   "investor123"  — scripts/seed-staging.js
+const PUBLISHED_PASSWORDS = ["Password123!", "investor123"];
 
 // RFC 2606 reserves .invalid: guaranteed never to resolve, so even a
 // misconfigured mailer cannot deliver. A real-looking domain (example.com,
@@ -236,6 +271,68 @@ function usage() {
 	console.error("   or: node scripts/refresh-env.js --verify <file.db|.gz> [--strict-scan]");
 	process.exit(2);
 }
+
+// Exactly one mode. MODE above ranks --verify over the others, so a stray mode
+// flag would silently turn one run into another — either wrapper's
+// --check-env-only gate, which is handed the operator's extra arguments, into a
+// --verify that judges no environment at all.
+const modeFlags = ["--verify", "--sanitize-only", "--check-env-only"].filter(has);
+if (modeFlags.length > 1) refuse(`conflicting modes: ${modeFlags.join(", ")} — pass exactly one.`);
+
+// ---------------------------------------------------------------------------
+// OPERATOR ACCESS — optional: one named Super Admin, password from the
+// ENVIRONMENT only.
+//
+//   REFRESH_OPERATOR_PASSWORD   at least 16 characters, or the run is refused
+//   REFRESH_OPERATOR_USER       the account it is set on (default super_admin);
+//                               it must exist and be a Super Admin, or refused
+//
+// Modeled on scripts/reset-super-admin-password.js and its NEW_PASSWORD: never
+// argv, the same 16-character floor, the hash verified to round-trip before it
+// is written, and exactly one row changed or nothing is installed. Every other
+// account keeps its unknowable secret, so this is the ONLY password the copy
+// accepts. The value is never printed, logged or echoed — not even its length.
+//
+// Applied only where a database is INSTALLED: the one-pass form and
+// --from-sanitized. --sanitize-only produces an artifact for somebody else to
+// install, and an operator's password has no business travelling inside it.
+//
+// ⚠️ A PASSWORD ON THE COMMAND LINE IS REFUSED, NOT IGNORED. argv lands in shell
+// history and is readable by every user on the machine through `ps`. Ignoring a
+// --password flag would leave the operator believing one had been set; refusing
+// says so, and the refusal never repeats what was typed.
+// ---------------------------------------------------------------------------
+const OPERATOR_MIN_LENGTH = 16;
+const OPERATOR_PASSWORD = process.env.REFRESH_OPERATOR_PASSWORD || "";
+const OPERATOR_USER_GIVEN = String(process.env.REFRESH_OPERATOR_USER || "").trim();
+const OPERATOR_USER = OPERATOR_USER_GIVEN || "super_admin";
+// Read once, then dropped from this process's environment, so nothing later in
+// the run can pass it on or print it along with the rest of process.env.
+delete process.env.REFRESH_OPERATOR_PASSWORD;
+
+// A flag whose name has a password-ish component (--password, --operator-pass,
+// --pw=…), or the variable's own name typed as an argument. Component-matched,
+// so an unrelated flag that merely contains the letters (a --bypass-…) is not.
+const ARGV_SECRET_FLAG = /^--?(?:[a-z0-9]+[-_])*(?:pass|passwd|password|pw|secret|operator)(?:[-_][a-z0-9]+)*(?:=[\s\S]*)?$/i;
+const argvSecretAt = argv.findIndex((a) => ARGV_SECRET_FLAG.test(a) || /REFRESH_OPERATOR_/i.test(a));
+if (argvSecretAt !== -1) {
+	refuse(
+		`argument ${argvSecretAt + 1} looks like a password given on the command line.`,
+		"The operator password is read from REFRESH_OPERATOR_PASSWORD in the ENVIRONMENT only:",
+		"argv is recorded in shell history and is readable by every user on this machine via ps.",
+		"Treat whatever was typed there as exposed, and choose a different password."
+	);
+}
+if (OPERATOR_PASSWORD) {
+	if (!NEEDS_TARGET_ENV) {
+		warn("REFRESH_OPERATOR_PASSWORD is ignored in this mode — it is applied only where a database is installed.");
+	} else if (OPERATOR_PASSWORD.length < OPERATOR_MIN_LENGTH) {
+		refuse(`REFRESH_OPERATOR_PASSWORD is shorter than ${OPERATOR_MIN_LENGTH} characters — refusing to set a weak password.`);
+	}
+} else if (OPERATOR_USER_GIVEN && NEEDS_TARGET_ENV) {
+	warn("REFRESH_OPERATOR_USER is set but REFRESH_OPERATOR_PASSWORD is not — no account on this copy will accept a known password.");
+}
+
 if (MODE === "install" && (!FROM || !TO)) usage();
 if (MODE === "sanitize-only" && (!FROM || !EMIT)) usage();
 if (MODE === "check-env-only" && !TO) usage();
@@ -392,6 +489,9 @@ function runTargetEnvGates() {
 if (NEEDS_TARGET_ENV) runTargetEnvGates();
 
 if (MODE === "check-env-only") {
+	// The length was judged above. Whether the account exists and is a Super
+	// Admin can only be judged against the database, so that waits for install.
+	if (OPERATOR_PASSWORD) log("operator access requested: the REFRESH_OPERATOR_USER account is checked and set at install.");
 	log("target environment gates passed. Nothing was read, copied or written.");
 	process.exit(0);
 }
@@ -425,7 +525,9 @@ const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
 const workBase = MODE === "sanitize-only" ? emitPath : MODE === "verify" ? verifyPath : dstPath;
 const workPath = `${workBase}.refresh-${stamp}.tmp`;
 function rmWork() {
-	for (const p of [workPath, `${workPath}-shm`, `${workPath}-wal`]) {
+	// -journal too: --from-sanitized opens the work file read-write, in the
+	// default rollback-journal mode, when it applies operator access.
+	for (const p of [workPath, `${workPath}-shm`, `${workPath}-wal`, `${workPath}-journal`]) {
 		try { fs.unlinkSync(p); } catch {}
 	}
 }
@@ -550,13 +652,27 @@ async function main() {
 
 	// 3b. Passwords. Production hashes are bcrypt, so they are not reversible —
 	//     but they ARE the live credentials, and a copy of them on a laptop or a
-	//     staging box is a copy of production's authentication. Replace every
-	//     one with the harness's own default so the DB is usable AND no
-	//     production password works here.
+	//     staging box is a copy of production's authentication. Each account
+	//     gets its own unknowable secret instead (PASSWORDS ON A REFRESHED COPY,
+	//     at the top), so no production password works here and neither does
+	//     any other. The previous hashes are held in memory only, for the
+	//     assertion below that none of them survived.
+	let priorHashes = null;
+	let operatorUser = null;
 	if (tableExists("users")) {
-		const hash = bcrypt.hashSync(PASSWORD, 10);
-		const n = setCols("users", { password_hash: hash, must_change_password: 0 });
-		summary.push(`users: ${n} password hash(es) replaced with the test default`);
+		const userCols = new Set(colsOf("users"));
+		if (userCols.has("password_hash")) {
+			priorHashes = new Set(
+				db.prepare("SELECT password_hash AS h FROM users").all()
+					.map((r) => r.h).filter((h) => typeof h === "string" && h !== "")
+			);
+			const rows = db.prepare("SELECT rowid AS rid FROM users").all();
+			const rehash = db.prepare(
+				`UPDATE users SET password_hash = ?${userCols.has("must_change_password") ? ", must_change_password = 0" : ""} WHERE rowid = ?`
+			);
+			for (const r of rows) rehash.run(bcrypt.hashSync(unknowableSecret(), UNKNOWABLE_SECRET_COST), r.rid);
+			summary.push(`users: ${rows.length} password(s) replaced, each with its own random secret — none printed or stored`);
+		}
 
 		// demo_viewer: role "Super Admin", password published in a public repo,
 		// gated only by an HTTP-method check. Removed from production
@@ -578,6 +694,13 @@ async function main() {
 				.run().changes;
 			summary.push(`users: ${n2} email(s) redirected to @${MAIL_DOMAIN}`);
 		}
+	}
+	// Operator access goes on the post-scrub users table, so an account the
+	// scrub removed (demo_viewer) cannot be brought back through it.
+	if (OPERATOR_PASSWORD && INSTALLS) {
+		const granted = grantOperatorAccess(db);
+		operatorUser = granted.username;
+		summary.push(granted.line);
 	}
 
 	// 3d. Every other address/phone the app could actually send to. These are
@@ -842,8 +965,10 @@ async function main() {
 	}
 
 	// A sanitizer that silently no-ops is worse than none: it produces a file
-	// everyone believes is clean.
-	const { leaks, advisories } = collectLeaks(workPath);
+	// everyone believes is clean. priorHashes is what lets this pass — and only
+	// this pass — prove every production hash was replaced, not merely that the
+	// ones left are unique.
+	const { leaks, advisories } = collectLeaks(workPath, { priorHashes });
 	for (const a of advisories) warn(a);
 	if (leaks.length) {
 		rmWork();
@@ -889,7 +1014,7 @@ async function main() {
 	for (const sfx of ["-wal", "-shm"]) { try { fs.unlinkSync(`${workPath}${sfx}`); } catch {} }
 	log(`installed ${dstPath}`);
 	log("");
-	log(`Every account's password is now: ${PASSWORD}`);
+	signInNote(operatorUser);
 	log("Start the server with an explicit non-production SPREADSHEET_ID:");
 	log(`  SPREADSHEET_ID=${effectiveSheet} PORT=<non-3000> npm start`);
 }
@@ -1035,7 +1160,16 @@ const MUST_BE_EMPTY_TABLES = [
 	["driver_locations", "retired phone-GPS position row(s) survived"],
 ];
 
-function collectLeaks(dbPath, { scan = true } = {}) {
+// A malformed hash (truncated, or a foreign format) makes bcryptjs throw rather
+// than answer. Nobody can sign in against one either, so it is not a match.
+function bcryptAccepts(password, hash) {
+	try { return bcrypt.compareSync(password, hash); } catch { return false; }
+}
+
+// priorHashes — the sanitize pass only: the password hashes the snapshot held
+// before stage 3b. --verify and --from-sanitized cannot know them, and they do
+// not need to: the other two credential checks still hold on any file.
+function collectLeaks(dbPath, { scan = true, priorHashes = null } = {}) {
 	const leaks = [];
 	const advisories = [];
 	const check = new Database(dbPath, { readonly: true });
@@ -1064,6 +1198,31 @@ function collectLeaks(dbPath, { scan = true } = {}) {
 		for (const [t, why] of MUST_BE_EMPTY_TABLES) {
 			const n = count(`SELECT COUNT(*) c FROM "${t}"`);
 			if (n) leaks.push(`${n} ${why}`);
+		}
+
+		// CREDENTIALS — asserted, not assumed, like every column above. Three
+		// properties of stage 3b, each a refusal:
+		//   • no account accepts a password published in this repository;
+		//   • no two accounts share a hash (one secret must never open several);
+		//   • (sanitize pass) no account kept the hash it had before the refresh.
+		// Hashes are counted, never printed.
+		if (has_("users", "password_hash")) {
+			let rows = [];
+			try { rows = check.prepare("SELECT password_hash AS h FROM users").all(); } catch {}
+			const holders = new Map();   // hash -> how many accounts carry it
+			for (const { h } of rows) {
+				if (typeof h !== "string" || h === "") continue;
+				holders.set(h, (holders.get(h) || 0) + 1);
+			}
+			let published = 0, shared = 0, carried = 0;
+			for (const [h, n] of holders) {
+				if (PUBLISHED_PASSWORDS.some((pw) => bcryptAccepts(pw, h))) published += n;
+				if (n > 1) shared += n;
+				if (priorHashes && priorHashes.has(h)) carried += n;
+			}
+			if (published) leaks.push(`${published} account(s) accept a password published in this repository's source`);
+			if (shared) leaks.push(`${shared} account(s) share a password hash with another account — one secret would open all of them`);
+			if (carried) leaks.push(`${carried} account(s) still carry the password hash they had before the refresh`);
 		}
 
 		if (scan) {
@@ -1179,7 +1338,7 @@ async function runVerify() {
 	if (result.advisories.length) {
 		log(`no leak found — but ${result.advisories.length} advisory finding(s) above are in a category this sanitizer does not scrub. Review them.`);
 	} else {
-		log(`clean: no routable address, bank number, tax id or session survives${STRICT_SCAN ? " (strict scan)" : ""}.`);
+		log(`clean: no routable address, bank number, tax id or session survives, and no account accepts a published or shared password${STRICT_SCAN ? " (strict scan)" : ""}.`);
 	}
 	log("integrity_check ok");
 }
@@ -1215,6 +1374,19 @@ function emitArtifact() {
 // is not a property of the bytes. If the assertions fail the install is
 // refused, which is the correct outcome — that artifact must not land.
 function installSanitized() {
+	// Operator access BEFORE the assertions, so they grade the bytes that will
+	// actually be installed — the operator's hash included. This writes one row;
+	// it is not a re-sanitize, and nothing else in the artifact is touched.
+	let operatorUser = null;
+	if (OPERATOR_PASSWORD) {
+		const w = new Database(workPath, { fileMustExist: true });
+		try {
+			const granted = grantOperatorAccess(w);
+			operatorUser = granted.username;
+			log(granted.line);
+		} finally { w.close(); }
+	}
+
 	const integrity = new Database(workPath, { readonly: true });
 	const ok = integrity.pragma("integrity_check", { simple: true });
 	const tables = integrity.prepare("SELECT COUNT(*) c FROM sqlite_master WHERE type='table'").get().c;
@@ -1260,13 +1432,79 @@ function installSanitized() {
 	for (const sfx of ["-wal", "-shm"]) { try { fs.unlinkSync(`${workPath}${sfx}`); } catch {} }
 	log(`installed ${dstPath}`);
 	log("");
-	log(`Every account's password is now: ${PASSWORD}`);
+	signInNote(operatorUser);
 	log("Start the server with an explicit non-production SPREADSHEET_ID:");
 	log(`  SPREADSHEET_ID=${effectiveSheet} PORT=<non-3000> npm start`);
+}
+
+// ===========================================================================
+// OPERATOR ACCESS — applying it. The rules are at the top of the file.
+//
+// This is the one place the script deliberately makes a copy accept a known
+// password, so every check fails closed: it throws, and main()'s handler turns
+// that into a refusal with the working copy removed and nothing installed.
+// Returns { username, line } — the username only once it is proven to be a
+// real Super Admin's.
+// ===========================================================================
+function grantOperatorAccess(db) {
+	const fail = (...lines) => {
+		const e = new Error(lines[0]);
+		e.extra = lines.slice(1);
+		throw e;
+	};
+	let cols = new Set();
+	try { cols = new Set(db.prepare('PRAGMA table_info("users")').all().map((c) => c.name)); } catch {}
+	if (!cols.has("username") || !cols.has("role") || !cols.has("password_hash")) {
+		fail("REFRESH_OPERATOR_PASSWORD is set, but this database has no users table to set it on — nothing was installed.");
+	}
+	// Exact match: `username` is UNIQUE and case-sensitive, so this names at most
+	// one row. A received artifact is not trusted to honour that, hence the count.
+	const rows = db.prepare("SELECT rowid AS rid, username, role FROM users WHERE username = ?").all(OPERATOR_USER);
+	if (rows.length === 0) {
+		// ⚠️ The name is NOT repeated here. Swap the two variables by mistake and
+		// REFRESH_OPERATOR_USER holds the password — this line would print it.
+		fail(
+			"REFRESH_OPERATOR_USER names no account in this database — nothing was installed.",
+			"It must be the exact username of an existing Super Admin (default: super_admin)."
+		);
+	}
+	if (rows.length > 1) fail(`REFRESH_OPERATOR_USER matches ${rows.length} accounts — nothing was installed.`);
+	const who = rows[0];
+	if (who.role !== "Super Admin") {
+		fail(
+			`REFRESH_OPERATOR_USER '${who.username}' is a ${who.role}, not a Super Admin — nothing was installed.`,
+			"Operator access is for exactly one Super Admin."
+		);
+	}
+	const hash = bcrypt.hashSync(OPERATOR_PASSWORD, HUMAN_PASSWORD_COST);
+	// Round-trip before writing, as reset-super-admin-password.js does.
+	if (!bcrypt.compareSync(OPERATOR_PASSWORD, hash)) {
+		fail("the operator password's hash failed self-verification — nothing was installed.");
+	}
+	const changed = db.prepare(
+		`UPDATE users SET password_hash = ?${cols.has("must_change_password") ? ", must_change_password = 0" : ""} WHERE rowid = ? AND username = ?`
+	).run(hash, who.rid, who.username).changes;
+	if (changed !== 1) fail(`operator access: expected exactly 1 account to change, got ${changed} — nothing was installed.`);
+	return {
+		username: who.username,
+		line: `users: '${who.username}' (Super Admin) accepts the password from REFRESH_OPERATOR_PASSWORD — the only account with a known password`,
+	};
+}
+
+// What an operator is told once a database is installed. Never a password.
+function signInNote(operatorUser) {
+	if (operatorUser) {
+		log(`Sign in as '${operatorUser}' with the password from REFRESH_OPERATOR_PASSWORD.`);
+		log("Every other account has a random password that nobody knows.");
+		return;
+	}
+	log("Every account has a random password that nobody knows; none was printed or stored. To sign in:");
+	log("  - re-run with REFRESH_OPERATOR_PASSWORD (and optionally REFRESH_OPERATOR_USER) in the environment, or");
+	log("  - on a LOCAL copy, before test-suite.js: node scripts/prepare-test-fixtures.js --yes-local-db");
 }
 
 // ---------------------------------------------------------------------------
 main().catch((e) => {
 	rmWork();
-	refuse(e && e.message ? e.message : String(e));
+	refuse(e && e.message ? e.message : String(e), ...(e && Array.isArray(e.extra) ? e.extra : []));
 });

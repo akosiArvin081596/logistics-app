@@ -10,6 +10,13 @@
 # The pm2 restart is OPT-IN. Staging is a shared environment; someone may be
 # mid-test on it. Without --restart the new code and database are staged on disk
 # and the running process keeps the old ones until you restart it yourself.
+#
+# Every account on the refreshed copy gets a random password nobody knows. To
+# be able to sign in, give ONE Super Admin a password through the environment
+# (never argv; see scripts/README-env-refresh.md):
+#   read -rs REFRESH_OPERATOR_PASSWORD && export REFRESH_OPERATOR_PASSWORD
+#   ./scripts/refresh-staging.sh --yes            # REFRESH_OPERATOR_USER defaults to super_admin
+#   unset REFRESH_OPERATOR_PASSWORD
 set -euo pipefail
 
 STAGING_DIR="/var/www/logisx-staging"
@@ -19,6 +26,16 @@ PROD_SHEET_ID="1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo"
 
 say() { echo "[refresh-staging] $*"; }
 die() { echo "[refresh-staging] FAILED: $*" >&2; exit 1; }
+
+# --- operator access: handed to refresh-env.js and to NOTHING else -----------
+# Moved out of the environment before this script starts any child, then passed
+# to the single refresh-env.js call below. Left exported, every child would
+# inherit it: `npm install` runs third-party lifecycle scripts, and
+# `pm2 restart --update-env` copies this shell's environment into the running
+# staging process — where the password would persist and `pm2 env` would show it.
+OPERATOR_PASSWORD="${REFRESH_OPERATOR_PASSWORD-}"
+OPERATOR_USER="${REFRESH_OPERATOR_USER-}"
+unset REFRESH_OPERATOR_PASSWORD REFRESH_OPERATOR_USER
 
 CONFIRMED=0; RESTART=0; EXTRA_ARGS=()
 for a in "$@"; do
@@ -50,6 +67,20 @@ git fetch origin --prune
 git checkout main
 git reset --hard origin/main
 say "now: main @ $(git rev-parse --short HEAD)"
+
+# --- 1b. gates, before the slow part ------------------------------------------
+# The checks the install below will run anyway — the .env (sheet / mail /
+# auto-invoice), the operator password's length, and the extra arguments (a
+# password typed as one, a stray mode flag) — run here first, with the checkout
+# already current, so a refusal costs seconds rather than an npm install and a
+# client build with any such argument sitting in this script's argv on a shared
+# box. --check-env-only loads no native module, so any node will do; the
+# ABI-matched one is picked below, for the step that needs it.
+PRE_NODE="$(command -v node 2>/dev/null || true)"
+[ -n "$PRE_NODE" ] && [ -x "$PRE_NODE" ] || PRE_NODE=/opt/node22/bin/node
+REFRESH_OPERATOR_PASSWORD="$OPERATOR_PASSWORD" REFRESH_OPERATOR_USER="$OPERATOR_USER" \
+  "$PRE_NODE" scripts/refresh-env.js --check-env-only --to "$STAGING_DIR/app.db" "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}" \
+  || die "target environment gates refused. The code is updated; the database was not touched."
 
 say "installing dependencies…"
 npm install --silent --no-audit --no-fund
@@ -90,7 +121,10 @@ NODE_BIN="$(pick_node)" || die "no node on this box can load better-sqlite3 from
 say "node: $NODE_BIN ($("$NODE_BIN" -v))"
 
 # --from is on the same box, so this is a local read of a file with no writer.
-"$NODE_BIN" scripts/refresh-env.js --from "$LATEST" --to "$STAGING_DIR/app.db" --yes-non-prod "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"
+# The operator variables reach this one process only (see the top of the file).
+REFRESH_OPERATOR_PASSWORD="$OPERATOR_PASSWORD" REFRESH_OPERATOR_USER="$OPERATOR_USER" \
+  "$NODE_BIN" scripts/refresh-env.js --from "$LATEST" --to "$STAGING_DIR/app.db" --yes-non-prod "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"
+unset OPERATOR_PASSWORD OPERATOR_USER
 
 # --- 3. restart -------------------------------------------------------------
 if [ "$RESTART" = "1" ]; then

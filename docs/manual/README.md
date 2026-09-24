@@ -44,14 +44,16 @@ npm run docs:screenshots
 # or: node scripts/docs/capture-screenshots.js --filter driver
 ```
 
-Seeded test credentials (from `scripts/seed-staging.js`):
+Accounts the capture signs in as — on a **local** database, after step 2 above:
 
-| Username | Password | Role |
+| Username | Role | Password set by |
 |---|---|---|
-| `super_admin` | `Password123!` | Super Admin |
-| `dispatch1` | `investor123` | Dispatcher |
-| `lesline` | `investor123` | Driver |
-| `kevin` | `investor123` | Investor (owns 2 trucks) |
+| `super_admin` | Super Admin | `scripts/prepare-test-fixtures.js` (its local test password) |
+| `dispatch1` | Dispatcher | `scripts/seed-staging.js` |
+| `lesline` | Driver | `scripts/seed-staging.js` |
+| `kevin` | Investor (owns 2 trucks) | `scripts/seed-staging.js` |
+
+`capture-screenshots.js` already carries these as its defaults, so nothing needs typing. They exist only on a local database those two scripts have written to: a refreshed copy accepts none of them, because `scripts/refresh-env.js` gives every account its own random password.
 
 The capture script logs in via `POST /api/auth/login`, forwards the session cookie to a new Puppeteer page, navigates to each route in `screenshot-manifest.js`, waits for animations to settle, and writes a PNG to `assets/screenshots/`.
 
