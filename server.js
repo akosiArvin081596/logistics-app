@@ -2163,6 +2163,12 @@ try { db.exec("ALTER TABLE documents ADD COLUMN delete_reason TEXT DEFAULT ''");
 // The hot read is "live docs for this load" (POD gate, per-load list, invoice
 // attach) and the dashboard's load_id IN (...) POD-count fan-out.
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_documents_load_live ON documents(load_id, deleted_at)"); } catch {}
+// The /uploads root-file guard (guardRootLoadDocument) resolves every Driver and
+// Investor request for a flat /uploads/<name> by `file_name`. ⚠️ NOT UNIQUE, and
+// it must never become unique: nothing stops two rows sharing a name, which is
+// exactly why that guard asks "does ANY row with this name belong to you?"
+// rather than fetching one row and comparing.
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_documents_file_name ON documents(file_name)"); } catch {}
 
 // Per-day Bison invoice counter. Powers nextInvoiceNumber(): each calendar
 // day gets its own sequence so invoice IDs read "MMDDYYYY-N" (first of the
@@ -8085,9 +8091,16 @@ function normalizedUploadPath(req) {
 	let rel;
 	try { rel = decodeURIComponent(req.path || ""); } catch { return null; }   // malformed escape → refuse
 	if (!rel || rel.includes("\0")) return null;
-	// Backslashes are separators to some layers and literal to others; fold them
-	// so they cannot be used to dodge the prefix test below.
-	const collapsed = rel.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+	// ⚠️ A BACKSLASH IS REFUSED, NOT FOLDED TO `/`. On Linux and macOS `send`
+	// (inside express.static) reads a decoded `\` as an ordinary filename
+	// character, so refusing it is the only way this function judges exactly the
+	// path express.static resolves — including the number of path segments, which
+	// is what the uploads-root rule is decided on. It costs nothing: the names this
+	// app writes into uploads/ are built from ids, timestamps and sanitized or
+	// allowlisted parts, and a browser turns `\` into `/` before sending, so no
+	// legitimate request carries one.
+	if (rel.includes("\\")) return null;
+	const collapsed = rel.replace(/\/{2,}/g, "/");
 	// ⚠️ Reject `..` BEFORE normalizing, not after. path.posix.normalize absorbs
 	// a `..` on an absolute path, so a post-normalize test can only ever fire on
 	// one normalize could not resolve — i.e. it was dead code. It also matters
@@ -8285,13 +8298,15 @@ function guardInvoicePdf(req, res, next, url, file) {
 //   rule had a second door standing open to every authenticated session.
 //   See guardInvoicePdf above.
 //
-//   Swept at the same time and deliberately left (all four are timestamped, so
-//   the URL is a weak secret rather than a free enumeration, and none has a
-//   sub-second-guessable name):
-//     uploads/ root         `${loadId}_POD_${Date.now()}.pdf`  — PODs/BOLs
+//   Swept at the same time and deliberately left (all timestamped, so the URL is
+//   a weak secret rather than a free enumeration):
 //     uploads/chat/         `chat_${Date.now()}_${rand5}.<ext>`
 //     uploads/expense-receipts/  `${Date.now()}-${12 hex}.<ext>`
 //     uploads/legal/        `${scope}_${DocType}_${Date.now()}.pdf`
+//   The uploads ROOT was on that list too — `${loadId}_${docType}_${Date.now()}`
+//   PODs, BOLs and receipts — and is now guarded by guardRootLoadDocument (see
+//   there). It is not a GUARDED_UPLOAD_DIRS entry because it is not a directory
+//   prefix: uploadsPathGuard sends it every single-segment path.
 //   uploads/onboarding-templates/ holds blank forms — no PII, nothing to guard.
 //   uploads/rate-cons/ IS `${loadId}.pdf`, i.e. fully enumerable, and is
 //   role-gated in the handler below rather than by an ownership rule.
@@ -8358,6 +8373,104 @@ function guardDrugTestFile(req, res, next, url) {
 	return res.status(404).end();
 }
 
+// ---------------------------------------------------------------------------
+// uploads/ ROOT — load documents: POD, BOL, receipt, "Other".
+//
+// POST /api/documents/upload is the only writer into the root. It saves
+// `${loadId}_${docType}_${ms}.<ext>` there and records a `documents` row with
+// the bare name in `file_name` and `/uploads/<name>` in `drive_url`, which is
+// the link every Documents panel renders. So, as with every guard above, the
+// ROW decides who may read the file: a reader is someone whose own listing
+// hands them that link.
+//
+//   Super Admin, Dispatcher — pass, with no lookup. Both already read every
+//     load's documents (the dashboard's Documents panels, invoice drafting), so
+//     a row would add nothing to the decision, and a file without one stays
+//     readable to them exactly as before.
+//   Driver — a row their load's Documents panel lists (LOAD_PANEL_DOCUMENT_
+//     FILTER, shared with GET /api/documents/:loadId) on a load
+//     loadBelongsToDriver() says is theirs, the same check that listing runs.
+//     "Could not verify" answers the shared retryable 503: never a pass, never
+//     a refusal.
+//   Investor — a row in the scope GET /api/investor/documents lists
+//     (investorDocumentScope(), shared), so every file the Document Portal
+//     lists opens and nothing else does.
+//   Anyone else, and every refusal — 404, never 403: a 403 would confirm that
+//     a name exists.
+//
+// A file with no row (the upload route writes the file first, so a failed row
+// insert leaves one) has no link anywhere, so refusing it to a Driver or an
+// Investor breaks nothing.
+//
+// ⚠️ MEMBERSHIP TEST. documents.file_name is not unique (idx_documents_file_name
+// is deliberately non-unique), so each rule asks whether ANY row with this name
+// grants access — never fetch-one-then-compare. The name is matched EXACTLY,
+// case included, so a spelling that only resolves on a case-insensitive
+// filesystem finds no row and is refused.
+// ---------------------------------------------------------------------------
+
+// The rows a load's Documents panel lists: live, and not a rate con. ONE copy,
+// read by GET /api/documents/:loadId and by guardRootLoadDocument's Driver rule,
+// so the files a driver may open cannot drift from the list they are shown.
+// A constant fragment — nothing from a request is ever interpolated into it.
+const LOAD_PANEL_DOCUMENT_FILTER =
+	"deleted_at IS NULL AND UPPER(REPLACE(REPLACE(COALESCE(type,''), ' ', ''), '_', '')) != 'RATECON'";
+
+// The documents an Investor's Document Portal lists. ONE copy, read by
+// GET /api/investor/documents and by guardRootLoadDocument, so a file the portal
+// lists always opens and a file it does not list never does. null when the
+// investor has no drivers (the portal then lists nothing). `sql` holds only `?`
+// placeholders; the driver names travel as bound parameters.
+function investorDocumentScope(userId) {
+	const cdb = getCarrierDBFromSQLite();
+	const cDriverCol = findCol(cdb.headers, /driver/i) || cdb.headers[0];
+	const cCarrierCol = findCol(cdb.headers, /carrier/i);
+	const drivers = [...getInvestorDriverSet(userId, cdb.data, cDriverCol, cCarrierCol)];
+	if (!drivers.length) return null;
+	return {
+		sql: `LOWER(driver) IN (${drivers.map(() => "?").join(",")}) AND deleted_at IS NULL`,
+		params: drivers,
+	};
+}
+
+// ⚠️ ASYNC, AND IT MUST NEVER REJECT: Express 4 ignores the promise a middleware
+// returns, and this process has no unhandledRejection handler, so a throw that
+// escaped here would end the process. Everything is inside the try; an
+// unexpected failure is refused (404), which is how every guard above treats an
+// unreadable table.
+async function guardRootLoadDocument(req, res, next, file) {
+	try {
+		const user = req.session.user;
+		if (user.role === "Super Admin" || user.role === "Dispatcher") return next();
+
+		if (user.role === "Driver") {
+			const loadIds = db.prepare(
+				`SELECT DISTINCT load_id FROM documents WHERE file_name = ? AND ${LOAD_PANEL_DOCUMENT_FILTER}`
+			).all(file).map((r) => r.load_id);
+			if (!loadIds.length) return res.status(404).end();
+			const owned = await driverOwnsAnyLoad(loadIds, user.driverName);
+			if (sentIfLoadOwnershipUnverified(res, owned)) return;
+			if (!owned) return res.status(404).end();
+			return next();
+		}
+
+		if (user.role === "Investor") {
+			const scope = investorDocumentScope(user.id);
+			if (!scope) return res.status(404).end();
+			const rows = db.prepare(
+				`SELECT id FROM documents WHERE file_name = ? AND ${scope.sql}`
+			).all(file, ...scope.params);
+			if (!rows.length) return res.status(404).end();
+			return next();
+		}
+
+		return res.status(404).end();
+	} catch (err) {
+		console.error("[uploads] root document guard failed:", err && err.message);
+		if (!res.headersSent) res.status(404).end();
+	}
+}
+
 const GUARDED_UPLOAD_DIRS = [
 	{ dir: "/onboarding-signed/", guard: guardDriverSignedDoc },
 	{ dir: "/investor-onboarding-signed/", guard: guardInvestorSignedDoc },
@@ -8369,7 +8482,76 @@ const GUARDED_UPLOAD_DIRS = [
 	{ dir: "/onboarding/", guard: guardDrugTestFile },
 ];
 
-app.use("/uploads", requireAuth, (req, res, next) => {
+// ---------------------------------------------------------------------------
+// /uploads misses, counted per user.
+//
+// Every refusal under /uploads is a 404, and so (see the terminal handler below
+// the static mount) is a name that matches no file. A session that keeps
+// collecting them is guessing names, so once one has UPLOAD_MISS_MAX of them
+// inside UPLOAD_MISS_WINDOW_MS, its /uploads requests answer 429 until the
+// window ends.
+//
+// ⚠️ WHY THIS IS NOT express-rate-limit: that library counts a request when it
+// STARTS and, with skipSuccessfulRequests, takes a successful one back off only
+// when it finishes. A screen that opens many uploads at once — the investor
+// Expenses section renders one <img> per receipt straight from /uploads, with
+// no paging — would have every in-flight image counted against a miss cap and
+// could be refused mid-page without a single miss. So a MISS is recorded only
+// when a 404 completes. Requests still in flight are counted separately, and
+// only against the larger UPLOAD_MISS_BURST_MAX: that is what stops a burst of
+// simultaneous guesses from all passing the check before any of them has been
+// counted, while leaving room for a heavy page.
+//
+// Keyed per USER (the per-user precedent of the limiters above: an office behind
+// one NAT must not share a bucket). requireAuth is mounted in front, so there is
+// always a user; a request without one is not counted and not refused here.
+// In-memory, like every other limiter in this process.
+// ---------------------------------------------------------------------------
+const UPLOAD_MISS_WINDOW_MS = 15 * 60 * 1000;
+const UPLOAD_MISS_MAX = 100;         // completed 404s per user per window
+const UPLOAD_MISS_BURST_MAX = 300;   // completed 404s + that user's requests in flight
+const UPLOAD_MISS_KEYS_MAX = 5000;
+const uploadMissCounts = new Map();   // "u:<id>" -> { misses, inflight, resetAt }
+function uploadMissLimiter(req, res, next) {
+	const id = req.session && req.session.user && req.session.user.id;
+	if (!id) return next();
+	const key = `u:${id}`;
+	const now = Date.now();
+	let w = uploadMissCounts.get(key);
+	if (!w) {
+		w = { misses: 0, inflight: 0, resetAt: now + UPLOAD_MISS_WINDOW_MS };
+		uploadMissCounts.set(key, w);
+		// A backstop, not a working limit — there is one key per user. Drop the
+		// oldest entry first, like the other bounded maps in this file.
+		if (uploadMissCounts.size > UPLOAD_MISS_KEYS_MAX) {
+			uploadMissCounts.delete(uploadMissCounts.keys().next().value);
+		}
+	} else if (now >= w.resetAt) {
+		// Reset IN PLACE: requests still in flight hold this object and settle
+		// against it, so replacing it would strand their in-flight count.
+		w.misses = 0;
+		w.resetAt = now + UPLOAD_MISS_WINDOW_MS;
+	}
+	if (w.misses >= UPLOAD_MISS_MAX || w.misses + w.inflight >= UPLOAD_MISS_BURST_MAX) {
+		res.setHeader("Retry-After", String(Math.max(1, Math.ceil((w.resetAt - now) / 1000))));
+		return res.status(429).json({ error: "Too many requests for files that could not be found. Try again later." });
+	}
+	w.inflight++;
+	let settled = false;
+	const settle = () => {
+		if (settled) return;
+		settled = true;
+		w.inflight--;
+		if (res.statusCode === 404) w.misses++;
+	};
+	// Either event settles, once: "finish" for a completed response, "close"
+	// for one the client abandoned (which never emits "finish").
+	res.once("finish", settle);
+	res.once("close", settle);
+	next();
+}
+
+function uploadsPathGuard(req, res, next) {
 	const norm = normalizedUploadPath(req);
 	if (norm === null) return res.status(404).end();
 
@@ -8416,8 +8598,18 @@ app.use("/uploads", requireAuth, (req, res, next) => {
 		// re-deriving one from the other and drifting when a prefix changes.
 		return guard(req, res, next, "/uploads" + dir + file, file);
 	}
+
+	// A single segment — `/name` or `/name/` — is a file in the uploads ROOT, or a
+	// directory name without its trailing slash. Decided on `norm`, the same
+	// decoded, normalized string express.static resolves, so no spelling of a
+	// root file reaches the static mount without this rule. The name keeps its
+	// case for the exact lookup (see guardRootLoadDocument).
+	const segments = norm.split("/").filter(Boolean);
+	if (segments.length === 1) return guardRootLoadDocument(req, res, next, segments[0]);
 	next();
-});
+}
+
+app.use("/uploads", requireAuth, uploadMissLimiter, uploadsPathGuard);
 
 // Authenticated static serving for uploads (drug tests, signed PDFs, invoices, legal docs, etc.)
 // Every subdirectory under uploads/ contains sensitive documents (PII, signatures, banking info, SSN on W-9),
@@ -8477,6 +8669,12 @@ app.use("/uploads", requireAuth, express.static(path.join(__dirname, "uploads"),
 		}
 	},
 }));
+// A path under /uploads that names no file ends HERE, as a 404. express.static
+// passes a miss on, and without this line it fell through to the SPA catch-all
+// at the bottom of this file and came back as a 200 carrying the app's
+// index.html — so a miss never looked like one, and uploadMissLimiter could not
+// count it. Nothing links to a missing upload expecting a page.
+app.use("/uploads", requireAuth, (req, res) => res.status(404).end());
 
 // NOTE: a read-only `demo_viewer` account and its lockdown middleware lived here
 // and were removed 2026-08-04, account and all.
@@ -30882,6 +31080,29 @@ function sentIfLoadOwnershipUnverified(res, owned, extra) {
 	return true;
 }
 
+// loadBelongsToDriver() over SEVERAL loads, answering the same three ways:
+//   true  — at least one of them is this driver's.
+//   null  — none is known to be, and at least one could not be verified.
+//   false — none is, and every answer was a real one (also for an empty list).
+// For a question that is a MEMBERSHIP test over rows — the /uploads root-file
+// guard asks whether ANY documents row carrying a file name is on one of the
+// driver's loads (documents.file_name is not unique). A single `true` settles
+// it; a `null` must not be answered as `false` (that would be a false refusal)
+// nor as `true` (a pass on no evidence), so it survives unless a `true` beats
+// it. Callers answer it exactly as they answer loadBelongsToDriver():
+//     if (sentIfLoadOwnershipUnverified(res, owned)) return;
+//     if (!owned) return …refusal…;
+// scripts/test-load-ownership-guard.js executes this fold and pins its callers.
+async function driverOwnsAnyLoad(loadIds, driverName) {
+	let unverified = false;
+	for (const loadId of loadIds) {
+		const owned = await loadBelongsToDriver(loadId, driverName);
+		if (owned === true) return true;
+		if (owned === null) unverified = true;
+	}
+	return unverified ? null : false;
+}
+
 // ⚠️ A CANCELLED ROW IS NOT A DRIVER'S TO MOVE. loadBelongsToDriver() answers
 // "does this load name this driver" and ignores status, and only POST
 // /api/dispatch/cancel blanks the Driver cell — a load cancelled by a sheet
@@ -36780,12 +37001,15 @@ app.get("/api/documents/:loadId", requireRole("Super Admin", "Dispatcher", "Driv
 		//
 		// The row is NOT deleted and NOT hidden from invoicing: getRateConBytes()
 		// queries `documents` directly, so drafting still finds and attaches it.
+		//
+		// LOAD_PANEL_DOCUMENT_FILTER (live, not a rate con) is shared with the
+		// /uploads root-file guard, which lets a driver open exactly the files
+		// this list shows them.
 		const docs = db
 			.prepare(
 				`SELECT id, load_id, driver, type, file_name, drive_file_id, drive_url, strftime('%Y-%m-%dT%H:%M:%SZ', uploaded_at) AS uploaded_at, ocr_text
 				 FROM documents
-				 WHERE load_id = ? AND deleted_at IS NULL
-				   AND UPPER(REPLACE(REPLACE(COALESCE(type,''), ' ', ''), '_', '')) != 'RATECON'
+				 WHERE load_id = ? AND ${LOAD_PANEL_DOCUMENT_FILTER}
 				 ORDER BY uploaded_at DESC`,
 			)
 			.all(loadId);
@@ -39067,18 +39291,15 @@ app.get("/api/investor/documents", requireRole("Super Admin", "Investor"), async
 				 FROM documents WHERE deleted_at IS NULL ORDER BY uploaded_at DESC LIMIT 500`
 			).all();
 		} else {
-			const cdb = getCarrierDBFromSQLite();
-			const cDriverCol = findCol(cdb.headers, /driver/i) || cdb.headers[0];
-			const cCarrierCol = findCol(cdb.headers, /carrier/i);
-			const driverSet = getInvestorDriverSet(user.id, cdb.data, cDriverCol, cCarrierCol);
-			if (driverSet.size === 0) return res.json({ documents: [] });
-			const drivers = [...driverSet];
-			const placeholders = drivers.map(() => '?').join(',');
+			// investorDocumentScope() is shared with the /uploads root-file guard,
+			// so every file listed here opens for this investor and no other does.
+			const scope = investorDocumentScope(user.id);
+			if (!scope) return res.json({ documents: [] });
 			docs = db.prepare(
 				`SELECT id, load_id, driver, type, file_name, drive_url, strftime('%Y-%m-%dT%H:%M:%SZ', uploaded_at) AS uploaded_at
-				 FROM documents WHERE LOWER(driver) IN (${placeholders}) AND deleted_at IS NULL
+				 FROM documents WHERE ${scope.sql}
 				 ORDER BY uploaded_at DESC LIMIT 500`
-			).all(...drivers);
+			).all(...scope.params);
 		}
 		res.json({ documents: docs });
 	} catch (err) {

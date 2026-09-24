@@ -155,6 +155,7 @@ function fakeRes() {
 		setHeader(k, v) { this.headers[String(k).toLowerCase()] = v; return this; },
 		status(c) { this.statusCode = c; return this; },
 		json(b) { this.body = b; this.sends++; return this; },
+		end() { this.sends++; return this; },
 	};
 }
 
@@ -287,6 +288,19 @@ const DB_DOWN = Object.assign(new Error("SQLITE_IOERR: disk I/O error"), { code:
 		callSites.every((i) => /^\s*const owned = await loadBelongsToDriver\(/.test(lines[i])));
 	ok(`found the call sites (${callSites.length}; 10 when this runner was written)`, callSites.length >= 10);
 
+	// driverOwnsAnyLoad() — loadBelongsToDriver() over several loads, for a
+	// MEMBERSHIP question (the /uploads root-file guard: does ANY documents row
+	// carrying this file name sit on one of the driver's loads?). Its one call
+	// site is a loop, not the two guard lines, so it is located by the lifted
+	// function's own line span and EXECUTED below instead of shape-matched;
+	// its callers carry the two guard lines and are pinned in §3b.
+	const FOLD_SRC = liftFn("driverOwnsAnyLoad");
+	const foldStart = SRC.slice(0, SRC.indexOf(FOLD_SRC)).split("\n").length - 1;
+	const foldEnd = foldStart + FOLD_SRC.split("\n").length - 1;
+	const inFold = (i) => i >= foldStart && i <= foldEnd;
+	ok("driverOwnsAnyLoad() holds exactly one loadBelongsToDriver() call",
+		callSites.filter(inFold).length === 1);
+
 	const routes = new Set(callSites.map(routeOf));
 	for (const must of [
 		"POST /api/expenses", "POST /api/documents/upload", "GET /api/documents/:loadId",
@@ -303,6 +317,7 @@ const DB_DOWN = Object.assign(new Error("SQLITE_IOERR: disk I/O error"), { code:
 		return { proceeded: r === "PROCEEDED", res };
 	}
 	for (const i of callSites) {
+		if (inFold(i)) continue;   // executed in §3b, not shape-matched
 		const where = `${routeOf(i)} (server.js:${i + 1})`;
 		const l1 = lines[i + 1], l2 = lines[i + 2];
 		const shaped = UNVERIFIED_LINE.test(l1) && REFUSE_LINE.test(l2);
@@ -316,6 +331,68 @@ const DB_DOWN = Object.assign(new Error("SQLITE_IOERR: disk I/O error"), { code:
 		const env403 = Object.keys(no.res.body).filter((k) => k !== "error");
 		ok(`${where}: the 503 carries the route's own envelope (${env403.join(", ") || "none"})`,
 			env403.every((k) => JSON.stringify(unk.res.body[k]) === JSON.stringify(no.res.body[k])));
+	}
+
+	// =========================================================================
+	console.log("\n§3b driverOwnsAnyLoad() — the fold executed, and its callers pinned");
+	// =========================================================================
+	// The fold, run over a scripted loadBelongsToDriver: each id answers as mapped.
+	async function fold(answers, foldSrc = FOLD_SRC) {
+		const asked = [];
+		const loadBelongsToDriver = async (id) => { asked.push(id); return answers[id]; };
+		const fn = new Function("loadBelongsToDriver", `"use strict";\n${foldSrc}\nreturn driverOwnsAnyLoad;`)(loadBelongsToDriver);
+		return { owned: await fn(Object.keys(answers), "Deshorn King"), asked };
+	}
+	const T = true, F = false, N = null;
+	for (const [label, answers, want] of [
+		["no loads at all → false (nothing to own, nothing failed)", {}, F],
+		["one owned → true", { a: T }, T],
+		["one not owned → false", { a: F }, F],
+		["one unverifiable → null", { a: N }, N],
+		["not owned, then owned → true (ANY row grants)", { a: F, b: T }, T],
+		["unverifiable, then owned → true (a real yes beats a could-not-say)", { a: N, b: T }, T],
+		["not owned, then unverifiable → null — never a false refusal", { a: F, b: N }, N],
+		["unverifiable, then not owned → null — order does not matter", { a: N, b: F }, N],
+		["two not owned → false", { a: F, b: F }, F],
+	]) {
+		const { owned } = await fold(answers);
+		ok(`fold: ${label}`, owned === want);
+	}
+	{
+		const { owned } = await fold({ a: 1, b: "yes" });
+		ok("fold: a truthy answer that is not `true` does not admit (strict === true)", owned === false);
+		const { asked } = await fold({ a: T, b: N });
+		ok("fold: stops at the first true", asked.length === 1);
+	}
+	{
+		// DISCRIMINATION: collapsing null into false is the tempting "simplification",
+		// and it turns an outage into a false refusal.
+		const collapsed = FOLD_SRC.replace("return unverified ? null : false;", "return false;");
+		ok("MUTANT: a fold that forgets `null` is caught",
+			collapsed !== FOLD_SRC && (await fold({ a: F, b: N }, collapsed)).owned === false);
+	}
+
+	// Every caller of the fold: `const owned = await driverOwnsAnyLoad(`, then the
+	// shared 503 line, then a refusal. Its one caller today is the /uploads root
+	// guard, whose refusal is a bare 404 (a 403 there would confirm a file name).
+	const FOLD_REFUSE_LINE = /^\s*if \(!owned\) return res\.status\(404\)\.end\(\);\s*$/;
+	const foldCalls = [];
+	lines.forEach((l, i) => {
+		if (l.includes("driverOwnsAnyLoad(") && !isComment(l) && !/async function driverOwnsAnyLoad\(/.test(l)) foldCalls.push(i);
+	});
+	ok(`driverOwnsAnyLoad() has a caller (${foldCalls.length})`, foldCalls.length >= 1);
+	for (const i of foldCalls) {
+		const where = `driverOwnsAnyLoad caller (server.js:${i + 1})`;
+		const l1 = lines[i + 1], l2 = lines[i + 2];
+		const shaped = /^\s*const owned = await driverOwnsAnyLoad\(/.test(lines[i]) &&
+			UNVERIFIED_LINE.test(l1) && FOLD_REFUSE_LINE.test(l2);
+		ok(`${where}: awaited into \`owned\`, then the 503 line, then the \`!owned\` 404 line`, shaped);
+		if (!shaped) continue;
+		const yes = runSite(l1, l2, true), no = runSite(l1, l2, false), unk = runSite(l1, l2, null);
+		ok(`${where}: owner proceeds, nothing sent`, yes.proceeded && yes.res.sends === 0);
+		ok(`${where}: non-owner → 404`, !no.proceeded && no.res.statusCode === 404);
+		ok(`${where}: read failure → 503 LOAD_OWNERSHIP_UNVERIFIED, never 404, never proceeds`,
+			!unk.proceeded && unk.res.statusCode === 503 && unk.res.body.code === "LOAD_OWNERSHIP_UNVERIFIED");
 	}
 
 	// =========================================================================
