@@ -1007,6 +1007,9 @@ function sectionSource() {
 	ok(uTxn > 0 && uPurge > uTxn && uAudit > uPurge && (upd.match(/purgeUserSessions\(/g) || []).length === 1,
 		"§8 PUT /api/users/:id must revoke through purgeUserSessions() exactly once, after its transaction commits and before its update_user audit line (which reports the count)");
 	ok(upd.lastIndexOf("await ") < uTxn, "§8 ...synchronously: no await between the write and the revocation");
+	const uRolledBack = at(upd, '"UPDATE_ROLLED_BACK"');
+	ok(uRolledBack > uTxn && uRolledBack < uPurge && !/\breturn\b|\bres\./.test(upd.slice(uRolledBack, uPurge)),
+		"§8 ...and nothing after the rollback answer can return or respond before it, so a committed change always reaches the revocation");
 	ok(!/DELETE FROM sessions/.test(upd), "§8 ...and never through a hand-copied DELETE, which would leave the sockets up");
 
 	const handler = stripComments(SRCS.ioHandler);
