@@ -3,18 +3,24 @@
 # rebuild app.db from the latest production snapshot, SANITIZED ON THE VPS.
 #
 # Run it from the repository root:
-#   ./scripts/refresh-local.sh                 # code + data
-#   ./scripts/refresh-local.sh --code-only     # skip the database
-#   ./scripts/refresh-local.sh --telemetry-all # full-fidelity telemetry (bigger, slower)
-#   ./scripts/refresh-local.sh --scan-legacy   # look for pre-2026-08-09 unsanitized copies
+#   ./scripts/refresh-local.sh                      # code + data
+#   ./scripts/refresh-local.sh --code-only          # skip the database
+#   ./scripts/refresh-local.sh --telemetry-all      # full-fidelity telemetry (bigger, slower)
+#   ./scripts/refresh-local.sh --telemetry-days 90  # a longer telemetry window (default 45)
+#   ./scripts/refresh-local.sh --scan-legacy        # look for pre-2026-08-09 unsanitized copies
+#   ./scripts/refresh-local.sh --help               # every option; anything else is refused
 #
 # Every account on the refreshed copy gets a random password nobody knows.
 # Before running test-suite.js against it:
 #   node scripts/prepare-test-fixtures.js --yes-local-db
-# To sign in as one Super Admin instead, put REFRESH_OPERATOR_PASSWORD (and
-# optionally REFRESH_OPERATOR_USER) in the ENVIRONMENT — never argv; see
-# scripts/README-env-refresh.md. It is applied here, at install, and is never
-# sent to the VPS.
+# To sign in as one Super Admin instead, hand this script
+# REFRESH_OPERATOR_PASSWORD (and optionally REFRESH_OPERATOR_USER) through its
+# ENVIRONMENT, never argv, and without exporting it in your shell, where
+# everything you start afterwards would inherit it (scripts/README-env-refresh.md):
+#   unset REFRESH_OPERATOR_PASSWORD; read -rs REFRESH_OPERATOR_PASSWORD
+#   REFRESH_OPERATOR_PASSWORD="$REFRESH_OPERATOR_PASSWORD" ./scripts/refresh-local.sh
+#   unset REFRESH_OPERATOR_PASSWORD
+# It is applied here, at install, and is never sent to the VPS.
 #
 # It never touches production data. The database source is the NIGHTLY SNAPSHOT
 # (scripts/backup-db.js output), not the live production app.db, so nothing here
@@ -55,6 +61,26 @@
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
+# Operator access — REFRESH_OPERATOR_PASSWORD (and REFRESH_OPERATOR_USER) —
+# moves out of the environment FIRST, before this script runs a single
+# command, and is handed only to the two LOCAL refresh-env.js calls that use
+# it: the preflight and the install. Left exported, every child would inherit
+# it: `npm install` runs third-party lifecycle scripts, and ssh would carry it
+# toward the VPS. ⚠️ Keep these lines above everything that starts a child,
+# the `$(dirname …)` that finds APP_DIR below included.
+# ⚠️ `export -n` is load-bearing too: assigning to a name the caller had
+# already exported (an OPERATOR_PASSWORD of its own), or under an inherited
+# allexport, keeps that name exported, and the copy would reach every child.
+# (scripts/test-refresh-sign-in.js pins all of it: nothing runs above these
+# lines, and no command but those two refresh-env.js calls ever sees the
+# value, even with such a name already exported.)
+OPERATOR_PASSWORD="${REFRESH_OPERATOR_PASSWORD-}"
+OPERATOR_USER="${REFRESH_OPERATOR_USER-}"
+export -n OPERATOR_PASSWORD OPERATOR_USER
+unset REFRESH_OPERATOR_PASSWORD REFRESH_OPERATOR_USER
+OPERATOR_REQUESTED=0
+[ -z "$OPERATOR_PASSWORD$OPERATOR_USER" ] || OPERATOR_REQUESTED=1
+
 VPS_HOST="${VPS_HOST:-root@76.13.22.110}"
 VPS_KEY="${VPS_KEY:-$HOME/.ssh/abedubas_vps}"
 PROD_BACKUPS="/var/www/logistics-app/backups"
@@ -70,30 +96,96 @@ PROD_SHEET_ID="1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo"
 # worse — this directory is deleted explicitly, not by reboot semantics.
 REMOTE_TMP_ROOT="${REMOTE_TMP_ROOT:-/var/tmp}"
 
-APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$APP_DIR"
-
-CODE_ONLY=0
-SCAN_LEGACY=0
-EXTRA_ARGS=()
-for a in "$@"; do
-  case "$a" in
-    --code-only)   CODE_ONLY=1 ;;
-    --scan-legacy) SCAN_LEGACY=1 ;;
-    *) EXTRA_ARGS+=("$a") ;;
-  esac
-done
-
 say() { echo "[refresh-local] $*"; }
 die() { echo "[refresh-local] FAILED: $*" >&2; exit 1; }
 
-# Operator access: moved out of the environment before this script starts any
-# child, and handed only to the two LOCAL refresh-env.js calls that use it (the
-# preflight and the install). Left exported, `npm install` — third-party
-# lifecycle scripts — and ssh would inherit it; unset, it cannot reach the VPS.
-OPERATOR_PASSWORD="${REFRESH_OPERATOR_PASSWORD-}"
-OPERATOR_USER="${REFRESH_OPERATOR_USER-}"
-unset REFRESH_OPERATOR_PASSWORD REFRESH_OPERATOR_USER
+# The operator variables came from the calling shell's environment, where
+# this script cannot unset them. If they are exported there, everything
+# started from that shell afterwards inherits them (`npm run dev` below
+# included), so the operator is told how to drop them.
+remind_unset() {
+  [ "$OPERATOR_REQUESTED" = "1" ] || return 0
+  say ""
+  say "The operator variables reached this script from your shell. If they are exported there, unset them"
+  say "before you start anything else from that shell, which would inherit them:"
+  say "  unset REFRESH_OPERATOR_PASSWORD REFRESH_OPERATOR_USER"
+}
+
+usage() {
+  echo "usage: ./scripts/refresh-local.sh [--telemetry-days N | --telemetry-all] [--allow-mail] [--no-backup]"
+  echo "       ./scripts/refresh-local.sh --code-only      # code only: the database is left alone"
+  echo "       ./scripts/refresh-local.sh --scan-legacy    # report pre-2026-08-09 unsanitized copies"
+  echo "Operator access: REFRESH_OPERATOR_PASSWORD [REFRESH_OPERATOR_USER] in the ENVIRONMENT, never"
+  echo "as an argument (scripts/README-env-refresh.md, 'Signing in to a refreshed copy')."
+}
+# Names the argument by POSITION only. Its text is never repeated: an argument
+# this script does not know may be a password typed on the command line.
+refuse_argument() {
+  {
+    echo "[refresh-local] FAILED: argument $1 is not an option refresh-local.sh accepts. Nothing was run."
+    echo "[refresh-local]   It is not repeated here, in case it is a secret. If it is a password, treat it as"
+    echo "[refresh-local]   exposed (argv lands in shell history and in ps) and choose another: the operator"
+    echo "[refresh-local]   password is read from REFRESH_OPERATOR_PASSWORD in the ENVIRONMENT only."
+    usage
+  } >&2
+  exit 1
+}
+
+# =============================================================================
+# 0. ARGUMENTS — every one known, or the run stops before any command starts
+#
+# The database options are handed to refresh-env.js three times: the local
+# preflight, the sanitize ON THE VPS (inside an ssh command, which the VPS's
+# shell parses again) and the local install. So only options that mean the
+# same thing to all three are accepted, and each crosses to the VPS quoted as
+# exactly one word (REMOTE_EXTRA_ARGS, below). Anything else is refused here,
+# while nothing has run: refresh-env.js skips an argument it does not know, so
+# a mistyped --code-only would otherwise run a full refresh, and a bare word
+# would be carried to the VPS in the ssh command line. refresh-env.js's
+# --dry-run is not among them: under it the remote sanitize emits nothing, so
+# this script would have nothing to transfer.
+# (scripts/test-refresh-remote-node.js §7 runs every form.)
+# =============================================================================
+CODE_ONLY=0
+SCAN_LEGACY=0
+EXTRA_ARGS=()   # the database options, handed to refresh-env.js exactly as given
+DB_OPTS=""      # the same, on one line, for the messages below
+argn=0
+while [ $# -gt 0 ]; do
+  argn=$((argn + 1))
+  case "$1" in
+    --code-only)   CODE_ONLY=1 ;;
+    --scan-legacy) SCAN_LEGACY=1 ;;
+    -h|--help)     usage; exit 0 ;;
+    --telemetry-all|--allow-mail|--no-backup)
+      EXTRA_ARGS+=("$1"); DB_OPTS="$DB_OPTS $1" ;;
+    --telemetry-days)
+      case "${2-}" in
+        ''|*[!0-9]*|??????*) die "--telemetry-days (argument $argn) takes a whole number of days, at most 5 digits, as the next argument: e.g. --telemetry-days 45." ;;
+      esac
+      EXTRA_ARGS+=("$1" "$2"); DB_OPTS="$DB_OPTS $1 $2"
+      shift; argn=$((argn + 1)) ;;
+    *) refuse_argument "$argn" ;;
+  esac
+  shift
+done
+
+if [ "$CODE_ONLY" = "1" ] && [ "$SCAN_LEGACY" = "1" ]; then
+  die "--code-only and --scan-legacy are separate runs: pass one of them."
+fi
+if [ "$CODE_ONLY" = "1" ] || [ "$SCAN_LEGACY" = "1" ]; then
+  if [ "$CODE_ONLY" = "1" ]; then ONLY_FLAG=--code-only; else ONLY_FLAG=--scan-legacy; fi
+  [ -z "$DB_OPTS" ] || die "$ONLY_FLAG installs no database, so${DB_OPTS} would do nothing: drop them, or drop $ONLY_FLAG."
+  # Operator access is applied only where a database is installed, which
+  # neither of these does. Said rather than silently dropped, as refresh-env.js
+  # says it in its own modes that install nothing.
+  if [ -n "$OPERATOR_PASSWORD$OPERATOR_USER" ]; then
+    say "WARNING: REFRESH_OPERATOR_PASSWORD / REFRESH_OPERATOR_USER are ignored with $ONLY_FLAG: operator access is applied only where a database is installed."
+  fi
+fi
+
+APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$APP_DIR"
 
 SSH=(ssh -o BatchMode=yes -o ConnectTimeout=20 -i "$VPS_KEY")
 SCP=(scp -q -o BatchMode=yes -o ConnectTimeout=20 -i "$VPS_KEY")
@@ -130,6 +222,7 @@ if [ "$SCAN_LEGACY" = "1" ]; then
   say ""
   say "Then delete what --verify calls NOT sanitized. Deliberately not automatic:"
   say "see 'Already-downloaded copies' in scripts/README-env-refresh.md."
+  remind_unset
   exit 0
 fi
 
@@ -155,11 +248,11 @@ say "local sheet: $CURRENT_SHEET"
 if [ "$CODE_ONLY" != "1" ]; then
   say "checking the target environment (sheet / mail / auto-invoice)…"
   # The operator password rides along so a too-short one is refused HERE,
-  # before the VPS round trip rather than after it. So do the extra arguments:
-  # they are later embedded in the remote ssh command, so anything refresh-env.js
-  # would refuse — a password typed as an argument above all — must be refused
-  # on this machine, before it can cross to the VPS. (refresh-env.js refuses a
-  # second mode flag, so none of them can turn this preflight into another mode.)
+  # before the VPS round trip rather than after it. So do the database options:
+  # this preflight judges exactly the arguments the remote sanitize and the
+  # install are handed (--allow-mail, above all), and anything refresh-env.js
+  # refuses is refused on this machine, before any connection. (The parser at
+  # the top has already refused every argument that is not one of them.)
   REFRESH_OPERATOR_PASSWORD="$OPERATOR_PASSWORD" REFRESH_OPERATOR_USER="$OPERATOR_USER" \
     node scripts/refresh-env.js --check-env-only --to "$APP_DIR/app.db" "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}" \
     || die "target environment gates refused. Nothing was copied. Fix .env and re-run."
@@ -185,6 +278,7 @@ npm run build:client --silent
 
 if [ "$CODE_ONLY" = "1" ]; then
   say "--code-only: database left alone. Done."
+  remind_unset
   exit 0
 fi
 
@@ -310,6 +404,33 @@ case "$PICK_NODE" in
   *'pick_node() {'*) : ;;
   *) die "could not read the pick-node block (bash could not create a here-document). Nothing was transferred." ;;
 esac
+# The database options, each as ONE word for the VPS's shell. The command
+# below is parsed again over there, so each is single-quoted (a ' inside is
+# written '\''): refresh-env.js on the VPS then receives exactly the arguments
+# the preflight did and the install will, whatever characters they hold.
+# POSIX quoting on purpose: `printf %q` writes bash-only $'…' for some
+# characters, and nothing here should depend on the remote login shell.
+sq() {
+  local q="'" s="$1" out="'" head
+  while :; do
+    case $s in
+      *$q*)
+        head=${s%%$q*}
+        out="$out$head$q\\$q$q"
+        s=${s#*$q}
+        ;;
+      *)
+        out="$out$s$q"
+        break
+        ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+REMOTE_EXTRA_ARGS=""
+for a in "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"; do
+  REMOTE_EXTRA_ARGS="$REMOTE_EXTRA_ARGS $(sq "$a")"
+done
 "${SSH[@]}" "$VPS_HOST" "
 set -e
 umask 077
@@ -322,7 +443,7 @@ NODE_BIN=\$(pick_node '$REMOTE_TMP' '$PROD_PM2_NAME') || {
   exit 1
 }
 echo \"[refresh] remote node: \$NODE_BIN (\$(\"\$NODE_BIN\" -v))\"
-\"\$NODE_BIN\" refresh-env.js --sanitize-only --from '$LATEST' --emit '$REMOTE_ART' ${EXTRA_ARGS[*]+${EXTRA_ARGS[*]}}
+\"\$NODE_BIN\" refresh-env.js --sanitize-only --from '$LATEST' --emit '$REMOTE_ART'$REMOTE_EXTRA_ARGS
 " || die "remote sanitize failed. NOTHING was transferred. Do not work around this by copying the raw snapshot."
 
 # =============================================================================
@@ -359,3 +480,4 @@ say ""
 say "If you refreshed before 2026-08-09, this machine may still hold an"
 say "UNSANITIZED copy from the old flow. Find them with:"
 say "  ./scripts/refresh-local.sh --scan-legacy"
+remind_unset

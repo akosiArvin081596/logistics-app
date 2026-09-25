@@ -12,11 +12,13 @@
 # and the running process keeps the old ones until you restart it yourself.
 #
 # Every account on the refreshed copy gets a random password nobody knows. To
-# be able to sign in, give ONE Super Admin a password through the environment
-# (never argv; see scripts/README-env-refresh.md):
-#   read -rs REFRESH_OPERATOR_PASSWORD && export REFRESH_OPERATOR_PASSWORD
-#   ./scripts/refresh-staging.sh --yes            # REFRESH_OPERATOR_USER defaults to super_admin
-#   unset REFRESH_OPERATOR_PASSWORD
+# be able to sign in, give ONE Super Admin a password through this script's
+# environment, never argv, and never `export` it in your shell: a later
+# `pm2 restart --update-env` from that shell would copy it into the running
+# staging process (see scripts/README-env-refresh.md):
+#   unset REFRESH_OPERATOR_PASSWORD; read -rs REFRESH_OPERATOR_PASSWORD
+#   REFRESH_OPERATOR_PASSWORD="$REFRESH_OPERATOR_PASSWORD" ./scripts/refresh-staging.sh --yes
+#   unset REFRESH_OPERATOR_PASSWORD    # REFRESH_OPERATOR_USER defaults to super_admin
 set -euo pipefail
 
 STAGING_DIR="/var/www/logisx-staging"
@@ -29,13 +31,31 @@ die() { echo "[refresh-staging] FAILED: $*" >&2; exit 1; }
 
 # --- operator access: handed to refresh-env.js and to NOTHING else -----------
 # Moved out of the environment before this script starts any child, then passed
-# to the single refresh-env.js call below. Left exported, every child would
-# inherit it: `npm install` runs third-party lifecycle scripts, and
-# `pm2 restart --update-env` copies this shell's environment into the running
-# staging process — where the password would persist and `pm2 env` would show it.
+# to the two refresh-env.js calls below, the preflight and the install. Left
+# exported, every child would inherit it: `npm install` runs third-party
+# lifecycle scripts, and `pm2 restart --update-env` copies this shell's
+# environment into the running staging process — where the password would
+# persist and `pm2 env` would show it. ⚠️ `export -n` too: assigning to a name
+# the caller had already exported (an OPERATOR_PASSWORD of its own), or under
+# an inherited allexport, keeps that name exported.
 OPERATOR_PASSWORD="${REFRESH_OPERATOR_PASSWORD-}"
 OPERATOR_USER="${REFRESH_OPERATOR_USER-}"
+export -n OPERATOR_PASSWORD OPERATOR_USER
 unset REFRESH_OPERATOR_PASSWORD REFRESH_OPERATOR_USER
+OPERATOR_REQUESTED=0
+[ -z "$OPERATOR_PASSWORD$OPERATOR_USER" ] || OPERATOR_REQUESTED=1
+
+# The operator variables came from the calling shell's environment, where this
+# script cannot unset them. If they are exported there, a `pm2 restart
+# --update-env` run from that shell later would copy them into staging, so
+# the operator is told how to drop them.
+remind_unset() {
+  [ "$OPERATOR_REQUESTED" = "1" ] || return 0
+  say ""
+  say "The operator variables reached this script from your shell. If they are exported there, unset them"
+  say "before you run anything else from that shell (a pm2 restart --update-env would copy them into staging):"
+  say "  unset REFRESH_OPERATOR_PASSWORD REFRESH_OPERATOR_USER"
+}
 
 CONFIRMED=0; RESTART=0; EXTRA_ARGS=()
 for a in "$@"; do
@@ -82,37 +102,29 @@ REFRESH_OPERATOR_PASSWORD="$OPERATOR_PASSWORD" REFRESH_OPERATOR_USER="$OPERATOR_
   "$PRE_NODE" scripts/refresh-env.js --check-env-only --to "$STAGING_DIR/app.db" "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}" \
   || die "target environment gates refused. The code is updated; the database was not touched."
 
-say "installing dependencies…"
-npm install --silent --no-audit --no-fund
-say "building client…"
-npm run build:client --silent
-
-# --- 2. data ----------------------------------------------------------------
-LATEST="$(ls -1t $PROD_BACKUPS/app.db.*.gz 2>/dev/null | head -1 || true)"
-[ -n "$LATEST" ] || die "no nightly snapshot in $PROD_BACKUPS"
-say "snapshot: $LATEST"
-
-# ⚠️ THE THIRD VICTIM OF THE SAME ABI TRAP. backup.sh and refresh-local.sh were
-# fixed in #339; this one was missed and failed the moment it was next run.
-# A bare `node` resolves to /usr/bin/node — 20.20.1, ABI 115 — while staging's
-# own node_modules/better-sqlite3 is built for the /opt/node22 that pm2 runs it
-# with (ABI 127), so refresh-env.js dies opening the database:
+# --- 1c. install + build, under the Node pm2 runs $PM2_NAME with --------------
+# ⚠️ A bare `npm` here is the WRONG npm. On this box PATH resolves node and npm
+# to the system Node 20 (ABI 115, the other tenants'), while pm2 runs
+# $PM2_NAME under /opt/node22 (ABI 127). An install that fetches or rebuilds
+# better-sqlite3 under Node 20 leaves a module staging cannot load, and its
+# next restart dies with "NODE_MODULE_VERSION 115 ... requires 127".
 #
-#     NODE_MODULE_VERSION 127 ... this version of Node.js requires 115
-#
-# ⚠️ AND THAT PICK (#339's, copied here in #342) HAD TWO HOLES OF ITS OWN,
-# found when refresh-local.sh failed with exactly that error on 2026-09-25.
-# backup.sh was fixed for both in #366; the two refresh scripts were missed:
-#   1. `pm2 jlist` prints every process on ONE line, so a greedy
-#      `sed 's/.*"exec_interpreter":…/'` took the LAST process's interpreter —
-#      another tenant's /usr/bin/node on this shared box. It had only worked
-#      while a LogisX process happened to be last. => read $PM2_NAME BY NAME
-#      (its build is the node_modules loaded here), with a real JSON parse.
-#   2. `require("better-sqlite3")` passes under the wrong Node, because the
-#      binding loads lazily. => the probe OPENS an in-memory database.
-# The first candidate that can open a database wins, so a repin or rebuild
-# needs no edit here. It fails closed — refresh-env.js never runs, so nothing
-# is written, when none can.
+# So this is scripts/deploy/remote-deploy.sh's install, step for step — the
+# way production and staging's own deploys already build:
+#   1. the interpreter pm2 runs $PM2_NAME with, read BY NAME from jlist's JSON
+#      (pm2_interpreter, in the pick-node block just below). pm2's default, a
+#      bare `node`, means PATH's node; unreadable means refuse, never a guess.
+#   2. that Node's directory first on PATH, so npm and every install script
+#      run under it.
+#   3. npm install, then a probe that OPENS an in-memory database; if it
+#      fails, `npm rebuild better-sqlite3` and probe again. npm tracks package
+#      versions, not ABI, so an install alone never repairs a module built for
+#      another Node.
+#   4. still failing: stop. Nothing is built, the database is not replaced,
+#      and --restart does not restart.
+# PATH is put back afterwards: `pm2 restart --update-env` copies this shell's
+# environment into the running process, and pick_node's last candidate is
+# PATH's own node. (scripts/test-refresh-remote-node.js §6 runs every step.)
 # >>> pick-node - keep byte-identical in refresh-local.sh and refresh-staging.sh
 # (scripts/test-refresh-remote-node.js pins the copies, and pins the jlist
 # parse to scripts/deploy/remote-deploy.sh's)
@@ -141,6 +153,58 @@ pick_node() {
   return 1
 }
 # <<< pick-node
+PM2_NODE="$(pm2_interpreter "$PM2_NAME" 2>/dev/null || true)"
+case "$PM2_NODE" in
+  node) PM2_NODE="$(command -v node 2>/dev/null || true)" ;;
+esac
+if [ -z "$PM2_NODE" ] || [ ! -x "$PM2_NODE" ]; then
+  die "cannot read the interpreter pm2 runs $PM2_NAME with, so refusing to install with a guess (PATH's node here is the system Node 20, and a build under it does not load under pm2's Node 22). The code is updated; nothing was installed, built or restarted, and the database was not touched."
+fi
+SAVED_PATH="$PATH"
+PATH="$(dirname "$PM2_NODE"):$PATH"
+export PATH
+say "pm2 runs $PM2_NAME with $PM2_NODE"
+say "installing dependencies with $(command -v node) $(node --version) / npm $(npm --version)…"
+npm install --silent --no-audit --no-fund
+if ! node -e "new (require('better-sqlite3'))(':memory:').close()" >/dev/null 2>&1; then
+  say "native ABI mismatch detected — rebuilding better-sqlite3 for $(node --version)"
+  npm rebuild better-sqlite3
+  node -e "new (require('better-sqlite3'))(':memory:').close()" \
+    || die "better-sqlite3 still cannot open a database under $(node --version) after the rebuild, so $PM2_NAME would not boot on it. The code and node_modules are updated; NOT restarted, the client was not built and the database was not touched."
+fi
+say "native modules OK under $(node --version)"
+say "building client…"
+npm run build:client --silent
+PATH="$SAVED_PATH"
+export PATH
+
+# --- 2. data ----------------------------------------------------------------
+LATEST="$(ls -1t $PROD_BACKUPS/app.db.*.gz 2>/dev/null | head -1 || true)"
+[ -n "$LATEST" ] || die "no nightly snapshot in $PROD_BACKUPS"
+say "snapshot: $LATEST"
+
+# ⚠️ THE THIRD VICTIM OF THE SAME ABI TRAP. backup.sh and refresh-local.sh were
+# fixed in #339; this one was missed and failed the moment it was next run.
+# A bare `node` resolves to /usr/bin/node — 20.20.1, ABI 115 — while staging's
+# own node_modules/better-sqlite3 is built for the /opt/node22 that pm2 runs it
+# with (ABI 127), so refresh-env.js dies opening the database:
+#
+#     NODE_MODULE_VERSION 127 ... this version of Node.js requires 115
+#
+# ⚠️ AND THAT PICK (#339's, copied here in #342) HAD TWO HOLES OF ITS OWN,
+# found when refresh-local.sh failed with exactly that error on 2026-09-25.
+# backup.sh was fixed for both in #366; the two refresh scripts were missed:
+#   1. `pm2 jlist` prints every process on ONE line, so a greedy
+#      `sed 's/.*"exec_interpreter":…/'` took the LAST process's interpreter —
+#      another tenant's /usr/bin/node on this shared box. It had only worked
+#      while a LogisX process happened to be last. => read $PM2_NAME BY NAME
+#      (its build is the node_modules loaded here), with a real JSON parse.
+#   2. `require("better-sqlite3")` passes under the wrong Node, because the
+#      binding loads lazily. => the probe OPENS an in-memory database.
+# pick_node (in the pick-node block, above step 1c) takes the first candidate
+# that can open a database, so a repin or rebuild needs no edit here; after
+# 1c built the module for pm2's own Node, that is pm2's Node. It fails closed —
+# refresh-env.js never runs, so nothing is written, when none can.
 NODE_BIN="$(pick_node "$STAGING_DIR" "$PM2_NAME")" || die "no node on this box can open a better-sqlite3 database from $STAGING_DIR/node_modules — run: npm rebuild better-sqlite3 (under the interpreter pm2 runs $PM2_NAME with)"
 say "node: $NODE_BIN ($("$NODE_BIN" -v))"
 
@@ -159,5 +223,10 @@ if [ "$RESTART" = "1" ]; then
 else
   say ""
   say "NOT restarted. New code + database are on disk; the running process still holds the old ones."
-  say "When ready:  pm2 restart $PM2_NAME --update-env"
+  # --update-env copies the environment of whoever runs it into the running
+  # process, so the command handed out drops the operator variables from it:
+  # whatever the shell it is run from has exported, they never reach staging.
+  # (scripts/test-refresh-sign-in.js runs this line from a shell that exports them.)
+  say "When ready:  env -u REFRESH_OPERATOR_PASSWORD -u REFRESH_OPERATOR_USER pm2 restart $PM2_NAME --update-env"
 fi
+remind_unset

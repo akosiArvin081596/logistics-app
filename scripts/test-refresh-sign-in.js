@@ -19,21 +19,35 @@
 //      the local test password; prepare -> exactly one per role does; and
 //      refresh-env.js --verify then REFUSES the result, so a prepared copy can
 //      never pass for a sanitized one.
-//   §4 the wrappers hand REFRESH_OPERATOR_PASSWORD to refresh-env.js and to
-//      NOTHING else — not npm (third-party lifecycle scripts), not git, not
+//   §4 the wrappers hand REFRESH_OPERATOR_PASSWORD to exactly two commands,
+//      the refresh-env.js preflight and the refresh-env.js install, and to
+//      NOTHING else: not npm (third-party lifecycle scripts), not git, not
 //      ssh/scp (it must never reach the VPS), not `pm2 restart --update-env`
-//      (which would copy it into the running staging process). The REAL
-//      scripts run under bash with those commands stubbed; every stub records
-//      its argv and its whole environment, and the password must appear in
-//      none of them — while the installed database proves it DID reach
-//      refresh-env.js. And both stop BEFORE anything slow or remote (no ssh,
-//      no npm, no pm2) on a password typed as an argument, a too-short
-//      operator password, or a stray mode flag.
+//      (which would copy it into the running staging process), not the
+//      --verify call, and not the `dirname` refresh-local.sh runs first. The
+//      REAL scripts run under bash with those commands, and node itself,
+//      behind recording stubs; every stub records its argv and its whole
+//      environment, so the log shows exactly which commands the password
+//      reached, and the installed database proves it did reach refresh-env.js.
+//      That holds too when the caller already exports an OPERATOR_PASSWORD
+//      or OPERATOR_USER of its own (bash keeps an inherited export across an
+//      assignment; the wrappers `export -n` their copies). refresh-local.sh
+//      moves it out of its environment before its first command (pinned in
+//      its source too), says so when --code-only ignores it, and stops before
+//      running any command at all on a password typed as an argument, with a
+//      flag or as a bare word. Both stop BEFORE anything slow or remote (no
+//      ssh, no npm, no pm2) on a too-short operator password or a stray mode
+//      flag. And since neither can unset the caller's own copy: both remind
+//      the operator to, and the restart command refresh-staging.sh hands out
+//      without --restart, run from a shell that still EXPORTS the password,
+//      gives pm2 none of it.
 //   §5 mutants: each guard above, removed, must turn this runner red.
 //
-// Hermetic: a mkdtemp sandbox; stubbed git/npm/pm2/ssh/scp/sleep; the real
-// refresh-env.js, prepare-test-fixtures.js and wrappers. No network, no VPS,
-// no app.db outside the sandbox.
+// Hermetic: a mkdtemp sandbox; stubbed git/npm/pm2/ssh/scp/sleep and
+// recording dirname/node; the real refresh-env.js, prepare-test-fixtures.js
+// and wrappers. No network, no VPS, no app.db outside the sandbox, and npm
+// resolves only to the stub, even with pm2's interpreter directory first on
+// PATH (asserted before either wrapper runs).
 //
 // Usage: node scripts/test-refresh-sign-in.js [--keep]
 "use strict";
@@ -307,7 +321,12 @@ function rewrite(srcPath, edits) {
 	// =======================================================================
 	section("4. The wrappers hand REFRESH_OPERATOR_PASSWORD to refresh-env.js and to nothing else");
 	// Every stub appends its name, argv and WHOLE environment to $STUB_LOG, then
-	// answers just enough for the wrapper to carry on.
+	// answers just enough for the wrapper to carry on. dirname and node record
+	// too and then run the real thing: dirname is the first command
+	// refresh-local.sh runs, and node is how every refresh-env.js call starts,
+	// so the log shows exactly which of those calls the password reaches.
+	const REAL_DIRNAME = ["/usr/bin/dirname", "/bin/dirname"].find((p) => fs.existsSync(p));
+	const pm2InterpreterIn = (bin) => path.join(bin, "node");
 	function writeStubs(bin) {
 		fs.mkdirSync(bin, { recursive: true });
 		const stub = (name, body) => fs.writeFileSync(path.join(bin, name),
@@ -316,13 +335,58 @@ function rewrite(srcPath, edits) {
 		stub("git", 'case "$1 $2" in\n  "rev-parse --abbrev-ref") echo feature ;;\n  "rev-parse --short") echo abc1234 ;;\nesac');
 		stub("npm", ":");
 		stub("sleep", ":");
-		stub("pm2", 'case "$1" in\n  jlist) echo "[]" ;;\n  describe) echo "status online"; echo "restarts 0" ;;\nesac');
+		stub("dirname", `exec ${JSON.stringify(REAL_DIRNAME)} "$@"`);
+		stub("node", `exec ${JSON.stringify(process.execPath)} "$@"`);
+		// pm2 runs logisx-staging with the node stub above. refresh-staging.sh
+		// installs with the directory of pm2's interpreter first on PATH, and
+		// this directory holds the npm stub, never a real npm.
+		const jlist = JSON.stringify([{ name: "logisx-staging", pm2_env: { name: "logisx-staging", status: "online", exec_interpreter: pm2InterpreterIn(bin) } }]);
+		stub("pm2", `case "$1" in\n  jlist) echo '${jlist}' ;;\n  describe) echo "status online"; echo "restarts 0" ;;\nesac`);
 		stub("ssh", 'for cmd; do :; done\ncase "$cmd" in\n  *"ls -1t"*) echo "/var/www/logistics-app/backups/app.db.20260809_020001.gz" ;;\n  *"mktemp -d"*) echo "/var/tmp/logisx-sanitize.TESTTEST" ;;\nesac');
 		stub("scp", 'for last; do :; done\ncase "$last" in\n  *:*) : ;;\n  *) cp "$STUB_ARTIFACT" "$last" ;;\nesac');
 	}
-	const wrapperPath = (bin) => `${bin}:${path.dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin`;
+	// No directory with a real node (and so a real npm) beside it: node is the
+	// recording stub, which runs this Node by its full path.
+	const SYSTEM_DIRS = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+	const wrapperPath = (bin) => [bin, ...SYSTEM_DIRS].join(":");
 	const readLog = (p) => { try { return fs.readFileSync(p, "utf8"); } catch { return ""; } };
 	const calls = (log, name) => (log.match(new RegExp(`^CALL ${name}\\b.*$`, "gm")) || []);
+	// The log as one entry per command: its CALL line (name and argv) and its environment.
+	const entries = (log) => log.split("\nEND\n").filter((b) => /^CALL /m.test(b))
+		.map((b) => ({ call: (b.match(/^CALL .*$/m) || [""])[0], text: b }));
+	// The only two commands meant to receive the operator password.
+	const isPreflight = (c) => /^CALL node <scripts\/refresh-env\.js> <--check-env-only>/.test(c);
+	const isInstall = (c) => /^CALL node <scripts\/refresh-env\.js> <--from> /.test(c) && /<--yes-non-prod>/.test(c);
+	function passwordReach(log) {
+		const es = entries(log);
+		const got = es.filter((e) => e.text.includes(OPERATOR_PW));
+		return {
+			inspected: es.length,
+			delivered: got.filter((e) => isPreflight(e.call) || isInstall(e.call)).map((e) => (isPreflight(e.call) ? "preflight" : "install")),
+			leakedTo: [...new Set(got.filter((e) => !isPreflight(e.call) && !isInstall(e.call)).map((e) => (e.call.match(/^CALL (\S+)/) || ["", "?"])[1]))],
+			inArgv: es.some((e) => e.call.includes(OPERATOR_PW)),
+			dirnameRan: es.some((e) => /^CALL dirname /.test(e.call)),
+		};
+	}
+	const reachDetail = (x) => (x.leakedTo.length || x.inArgv
+		? `LEAKED to: ${x.leakedTo.join(", ") || "(an argv)"}`
+		: `delivered to [${x.delivered}], ${x.inspected} call(s) inspected`);
+	{
+		// A real npm reached from a sandbox would run a genuine install against
+		// the node_modules the sandboxes link to. refresh-staging.sh puts the
+		// directory of pm2's interpreter first on PATH for its install, so npm
+		// must resolve to the stub on the wrappers' PATH AND with that directory
+		// in front of it — or neither wrapper runs.
+		const bin = mkdirp("npm-probe", "bin");
+		writeStubs(bin);
+		const want = path.join(bin, "npm");
+		const got = [wrapperPath(bin), `${path.dirname(pm2InterpreterIn(bin))}:${wrapperPath(bin)}`]
+			.map((p) => (spawnSync("/bin/bash", ["-c", "command -v npm"], { encoding: "utf8", env: { PATH: p } }).stdout || "").trim());
+		const safe = got.every((g) => g === want) && !!REAL_DIRNAME;
+		check("npm resolves only to the stub, on the wrappers' PATH and with pm2's interpreter directory in front; and there is a real dirname to record in front of",
+			safe, safe ? "" : `npm resolves to [${got}]${REAL_DIRNAME ? "" : "; no dirname found"}`);
+		if (!safe) finish();
+	}
 
 	// -- refresh-staging.sh -------------------------------------------------------
 	// It hardcodes /var/www paths and refuses to run anywhere but its own
@@ -346,8 +410,8 @@ function rewrite(srcPath, edits) {
 		writeStubs(path.join(sb, "bin"));
 		return { sb, stagingDir, script, bin: path.join(sb, "bin"), log: path.join(sb, "stub.log"), err: "" };
 	}
-	function runStaging(s, env, args = []) {
-		const r = spawnSync("bash", [s.script, "--yes", "--restart", ...args], {
+	function runStaging(s, env, args = [], { restart = true } = {}) {
+		const r = spawnSync("bash", [s.script, "--yes", ...(restart ? ["--restart"] : []), ...args], {
 			cwd: s.stagingDir, encoding: "utf8",
 			env: { PATH: wrapperPath(s.bin), HOME: s.sb, TMPDIR: mkdirp(path.basename(s.sb), "tmp"), STUB_LOG: s.log, ...env },
 		});
@@ -385,6 +449,26 @@ function rewrite(srcPath, edits) {
 		return { code: r.status === null ? 1 : r.status, out: `${r.stdout || ""}${r.stderr || ""}` };
 	}
 	const OPERATOR_ENV = { REFRESH_OPERATOR_PASSWORD: OPERATOR_PW, REFRESH_OPERATOR_USER: "admin.two" };
+	// A caller that already exports names of the wrappers' own: bash keeps an
+	// inherited export across an assignment, so without `export -n` the real
+	// password would land in an exported variable that every child inherits.
+	const DECOY_ENV = { ...OPERATOR_ENV, OPERATOR_PASSWORD: "decoy-exported-by-the-caller", OPERATOR_USER: "decoy-user" };
+	const REMINDER = (tag) => new RegExp(`^\\[${tag}\\] {3}unset REFRESH_OPERATOR_PASSWORD REFRESH_OPERATOR_USER$`, "m");
+	// The restart command refresh-staging.sh hands out without --restart, run
+	// the way an operator would: from a shell that still EXPORTS the password.
+	function runHint(out, name) {
+		const m = /^\[refresh-staging\] When ready:\s+(.+)$/m.exec(out);
+		if (!m) return { hint: null, restarted: false, leaked: false };
+		const bin = mkdirp(name, "bin");
+		writeStubs(bin);
+		const log = path.join(ROOT, name, "stub.log");
+		spawnSync("/bin/bash", ["-c", m[1]], {
+			encoding: "utf8",
+			env: { PATH: wrapperPath(bin), HOME: path.join(ROOT, name), STUB_LOG: log, ...OPERATOR_ENV },
+		});
+		const restarts = entries(readLog(log)).filter((e) => /^CALL pm2 <restart> <logisx-staging> <--update-env>$/.test(e.call));
+		return { hint: m[1], restarted: restarts.length === 1, leaked: restarts.some((e) => e.text.includes(OPERATOR_PW)) };
+	}
 	{
 		const s = stageStaging("wrap-staging");
 		check("refresh-staging.sh: the sandbox copy was made — both path constants matched exactly once", !s.err, s.err);
@@ -396,22 +480,49 @@ function rewrite(srcPath, edits) {
 			check("…really running npm, git and `pm2 restart --update-env` (so the next check has something to read)",
 				calls(log, "npm").length >= 2 && calls(log, "git").length >= 2 && calls(log, "pm2").some((c) => /<restart>.*<--update-env>/.test(c)),
 				`${calls(log, "npm").length} npm, ${calls(log, "git").length} git, ${calls(log, "pm2").length} pm2`);
-			check("the operator password is in NO stubbed command's argv or environment — pm2 included",
-				!log.includes(OPERATOR_PW), log.includes(OPERATOR_PW) ? "LEAKED" : `${log.split("\nEND\n").length - 1} call(s) inspected`);
+			const reach = passwordReach(log);
+			check("the operator password reaches exactly the two refresh-env.js calls meant for it, the preflight and the install, and no other command's argv or environment: npm, git, pm2 and every other node call included",
+				reach.leakedTo.length === 0 && !reach.inArgv && JSON.stringify(reach.delivered) === JSON.stringify(["preflight", "install"]),
+				reachDetail(reach));
 			const who = accepting(path.join(s.stagingDir, "app.db"), OPERATOR_PW);
 			check("…yet it DID reach refresh-env.js: exactly admin.two accepts it on the installed copy",
 				JSON.stringify(who) === JSON.stringify(["admin.two"]), JSON.stringify(who));
 			check("…and the wrapper's own output never shows it", !r.out.includes(OPERATOR_PW));
+			check("…but tells the operator to unset both variables in their own shell, which it cannot do for them",
+				REMINDER("refresh-staging").test(r.out));
+		}
+		{
+			// Without --restart the script hands out the restart command instead.
+			// --update-env copies the caller's environment into staging, so the
+			// command must drop the operator variables whatever that shell exports.
+			const s4 = stageStaging("wrap-staging-hint");
+			const r4 = s4.err ? null : runStaging(s4, OPERATOR_ENV, [], { restart: false });
+			const h = r4 && r4.code === 0 ? runHint(r4.out, "wrap-staging-hint-shell") : null;
+			check("without --restart, the restart command it hands out gives pm2 none of the operator variables, even run from a shell that still exports the password",
+				!!h && h.restarted && !h.leaked,
+				h ? `hint: ${h.hint || "(none printed)"}${h.leaked ? " — pm2 RECEIVED the password" : ""}${h.restarted ? "" : " — it did not run pm2 restart"}` : (s4.err || `exit ${r4 && r4.code}`));
+			check("…and the unset reminder is printed on that path too", !!r4 && REMINDER("refresh-staging").test(r4.out));
+		}
+		{
+			const s5 = stageStaging("wrap-staging-decoy");
+			const r5 = s5.err ? null : runStaging(s5, DECOY_ENV);
+			const reach5 = r5 ? passwordReach(readLog(s5.log)) : null;
+			check("with an OPERATOR_PASSWORD and OPERATOR_USER of the caller's already exported, refresh-staging.sh still hands the password to the preflight and the install only",
+				!!r5 && r5.code === 0 && reach5.leakedTo.length === 0 && !reach5.inArgv
+					&& JSON.stringify(reach5.delivered) === JSON.stringify(["preflight", "install"]),
+				r5 ? `exit ${r5.code}, ${reachDetail(reach5)}` : s5.err);
 		}
 		// The early gate: judged with the checkout current, before npm and pm2 run.
 		{
 			const s2 = stageStaging("wrap-staging-argv");
 			const r2 = s2.err ? null : runStaging(s2, {}, ["--operator-password=" + OPERATOR_PW]);
 			const log2 = s2.err ? "" : readLog(s2.log);
+			// The one command that may see it is the preflight that refuses it.
+			const sawIt = entries(log2).filter((e) => e.text.includes(OPERATOR_PW));
 			check("a password typed as an argument stops refresh-staging.sh BEFORE npm or pm2 run, unechoed",
 				!!r2 && r2.code !== 0 && /looks like a password given on the command line/.test(r2.out)
 					&& calls(log2, "npm").length === 0 && calls(log2, "pm2").length === 0
-					&& !log2.includes(OPERATOR_PW) && !r2.out.includes(OPERATOR_PW),
+					&& sawIt.every((e) => isPreflight(e.call)) && !r2.out.includes(OPERATOR_PW),
 				r2 ? `exit ${r2.code}, ${calls(log2, "npm").length} npm, ${calls(log2, "pm2").length} pm2` : s2.err);
 			const s3 = stageStaging("wrap-staging-short");
 			const r3 = s3.err ? null : runStaging(s3, { REFRESH_OPERATOR_PASSWORD: "too-short" });
@@ -429,12 +540,37 @@ function rewrite(srcPath, edits) {
 		check("…really running ssh, scp, git and npm (so the next check has something to read)",
 			calls(log, "ssh").length >= 5 && calls(log, "scp").length === 2 && calls(log, "git").length >= 1 && calls(log, "npm").length >= 2,
 			`${calls(log, "ssh").length} ssh, ${calls(log, "scp").length} scp, ${calls(log, "git").length} git, ${calls(log, "npm").length} npm`);
-		check("the operator password is in NO stubbed command's argv or environment — it never goes near the VPS",
-			!log.includes(OPERATOR_PW), log.includes(OPERATOR_PW) ? "LEAKED" : `${log.split("\nEND\n").length - 1} call(s) inspected`);
+		const reach = passwordReach(log);
+		check("the operator password reaches exactly the two refresh-env.js calls meant for it, the preflight and the install, and no other command: not the dirname the script runs first, git, npm, ssh, scp (it never goes near the VPS) or the --verify call",
+			reach.dirnameRan && reach.leakedTo.length === 0 && !reach.inArgv && JSON.stringify(reach.delivered) === JSON.stringify(["preflight", "install"]),
+			reach.dirnameRan ? reachDetail(reach) : "dirname never ran, so this check saw nothing");
+		{
+			// Pinned in the source as well: no command can run above the capture.
+			const lines = fs.readFileSync(LOCAL_SH, "utf8").split("\n").map((s) => s.trim()).filter((s) => s && !s.startsWith("#"));
+			const at = lines.indexOf("set -euo pipefail");
+			check("refresh-local.sh moves it out of the environment before its first command: the capture is the first code after `set -euo pipefail`, and un-exports its own copies",
+				at >= 0 && lines[at + 1] === 'OPERATOR_PASSWORD="${REFRESH_OPERATOR_PASSWORD-}"'
+					&& lines[at + 2] === 'OPERATOR_USER="${REFRESH_OPERATOR_USER-}"'
+					&& lines[at + 3] === "export -n OPERATOR_PASSWORD OPERATOR_USER"
+					&& lines[at + 4] === "unset REFRESH_OPERATOR_PASSWORD REFRESH_OPERATOR_USER",
+				at >= 0 ? `found: ${lines.slice(at + 1, at + 5).join(" | ").slice(0, 200)}` : "no `set -euo pipefail`");
+		}
 		const who = accepting(path.join(l.app, "app.db"), OPERATOR_PW);
 		check("…yet it DID reach the local install: exactly admin.two accepts it", JSON.stringify(who) === JSON.stringify(["admin.two"]), JSON.stringify(who));
 		check("…the output never shows it, and points at prepare-test-fixtures.js for test-suite.js",
 			!r.out.includes(OPERATOR_PW) && /prepare-test-fixtures\.js --yes-local-db/.test(r.out));
+		check("…and it tells the operator to unset both variables in their own shell, where `npm run dev` would inherit them",
+			REMINDER("refresh-local").test(r.out));
+		{
+			const l7 = stageLocal("wrap-local-decoy");
+			const r7 = runLocal(l7, DECOY_ENV);
+			const reach7 = passwordReach(readLog(l7.log));
+			check("with an OPERATOR_PASSWORD and OPERATOR_USER of the caller's already exported, refresh-local.sh still hands the password to the preflight and the install only",
+				r7.code === 0 && reach7.dirnameRan && reach7.leakedTo.length === 0 && !reach7.inArgv
+					&& JSON.stringify(reach7.delivered) === JSON.stringify(["preflight", "install"])
+					&& JSON.stringify(accepting(path.join(l7.app, "app.db"), OPERATOR_PW)) === JSON.stringify(["admin.two"]),
+				`exit ${r7.code}, ${reachDetail(reach7)}`);
+		}
 
 		// The preflight runs before the first connection, so a bad password costs nothing.
 		const l2 = stageLocal("wrap-local-short");
@@ -443,19 +579,38 @@ function rewrite(srcPath, edits) {
 			r2.code !== 0 && /shorter than 16 characters/.test(r2.out) && calls(readLog(l2.log), "ssh").length === 0,
 			`exit ${r2.code}, ${calls(readLog(l2.log), "ssh").length} ssh call(s)`);
 
-		// ⚠️ The extra arguments are embedded in the remote ssh command, so a
-		// password typed as one must be refused HERE, before it can cross to the VPS.
+		// ⚠️ The database options are embedded in the remote ssh command, so a
+		// password typed as an argument must be refused HERE, before it can
+		// cross to the VPS. refresh-local.sh accepts only the options it knows,
+		// so it refuses one before running any command at all, whatever its shape.
+		const refusedUnechoed = (r, log) => r.code !== 0 && /argument 1 is not an option refresh-local\.sh accepts/.test(r.out)
+			&& entries(log).length === 0 && !r.out.includes(OPERATOR_PW);
 		const l3 = stageLocal("wrap-local-argv");
 		const r3 = runLocal(l3, {}, ["--operator-password=" + OPERATOR_PW]);
 		const log3 = readLog(l3.log);
-		check("a password typed as an argument stops refresh-local.sh BEFORE any ssh connection, unechoed",
-			r3.code !== 0 && /looks like a password given on the command line/.test(r3.out)
-				&& calls(log3, "ssh").length === 0 && !log3.includes(OPERATOR_PW) && !r3.out.includes(OPERATOR_PW),
-			`exit ${r3.code}, ${calls(log3, "ssh").length} ssh call(s)`);
+		check("a password typed as an argument stops refresh-local.sh before it runs any command at all, unechoed",
+			refusedUnechoed(r3, log3), `exit ${r3.code}, ${entries(log3).length} command(s) run`);
+		const l5 = stageLocal("wrap-local-bare");
+		const r5 = runLocal(l5, {}, [OPERATOR_PW]);
+		const log5 = readLog(l5.log);
+		check("…and so does one typed as a bare word, which no flag check can recognise",
+			refusedUnechoed(r5, log5), `exit ${r5.code}, ${entries(log5).length} command(s) run`);
 		const l4 = stageLocal("wrap-local-mode");
 		const r4 = runLocal(l4, {}, ["--verify", artifact]);
 		check("…and so does a stray mode flag, which would otherwise turn the preflight into a --verify",
-			r4.code !== 0 && /conflicting modes/.test(r4.out) && calls(readLog(l4.log), "ssh").length === 0, `exit ${r4.code}`);
+			r4.code !== 0 && /argument 1 is not an option refresh-local\.sh accepts/.test(r4.out) && entries(readLog(l4.log)).length === 0, `exit ${r4.code}`);
+
+		// --code-only installs no database, so the password has nowhere to go:
+		// said, not silently dropped, and handed to nothing.
+		const l6 = stageLocal("wrap-local-code-only");
+		const r6 = runLocal(l6, OPERATOR_ENV, ["--code-only"]);
+		const log6 = readLog(l6.log);
+		const reach6 = passwordReach(log6);
+		check("--code-only says REFRESH_OPERATOR_PASSWORD is ignored rather than dropping it silently, hands it to no command, and reminds the operator to unset it",
+			r6.code === 0 && /REFRESH_OPERATOR_PASSWORD \/ REFRESH_OPERATOR_USER are ignored with --code-only/.test(r6.out)
+				&& calls(log6, "npm").length >= 2 && reach6.delivered.length === 0 && reach6.leakedTo.length === 0
+				&& !reach6.inArgv && !r6.out.includes(OPERATOR_PW) && REMINDER("refresh-local").test(r6.out),
+			`exit ${r6.code}, ${calls(log6, "npm").length} npm, ${reachDetail(reach6)}`);
 	}
 
 	// =======================================================================
@@ -530,19 +685,64 @@ function rewrite(srcPath, edits) {
 				who && who.length === 0 ? "no account accepts it — section 4 fails" : `SURVIVED — ${JSON.stringify(who)}`);
 		}
 		{
-			// W5: the preflight no longer sees the extra arguments — so a password
-			// typed as one rides the remote ssh command to the VPS before anything
-			// refuses it.
-			const s = stageLocal("mutant-W5", [[
-				'--check-env-only --to "$APP_DIR/app.db" "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}" \\',
-				'--check-env-only --to "$APP_DIR/app.db" \\',
-			]]);
-			const r = s.err ? null : runLocal(s, {}, ["--operator-password=" + OPERATOR_PW]);
+			// W5: refresh-local.sh's argument allowlist removed — a password typed
+			// as a bare word (no flag for refresh-env.js to recognise) then rides
+			// the remote ssh command to the VPS. (That the preflight still sees
+			// the same options as the remote call is test-refresh-remote-node.js's
+			// M9.)
+			const s = stageLocal("mutant-W5", [['*) refuse_argument "$argn" ;;', '*) EXTRA_ARGS+=("$1") ;;']]);
+			const r = s.err ? null : runLocal(s, {}, [OPERATOR_PW]);
 			const log = s.err ? "" : readLog(s.log);
 			const sshLeak = log.split("\nEND\n").some((blk) => /^CALL ssh/m.test(blk) && blk.includes(OPERATOR_PW));
-			check("W5: the preflight stops receiving the extra arguments — actually mutated the shipped source", !s.err, s.err);
-			check("W5: the preflight stops receiving the extra arguments — is caught", !!r && sshLeak,
-				sshLeak ? "the argv password reached the ssh command line — section 4 fails" : `SURVIVED — exit ${r && r.code}`);
+			check("W5: refresh-local.sh's argument allowlist removed — actually mutated the shipped source", !s.err, s.err);
+			check("W5: refresh-local.sh's argument allowlist removed — is caught", !!r && sshLeak,
+				sshLeak ? "a password typed as a bare word reached the ssh command line — section 4 fails" : `SURVIVED — exit ${r && r.code}`);
+		}
+		{
+			// W7: the capture moved back below the APP_DIR line — the `dirname`
+			// there then runs with the password still in its environment. The
+			// whole block moves, so nothing left above the APP_DIR line reads
+			// the variables before they exist.
+			const CAPTURE = [
+				'OPERATOR_PASSWORD="${REFRESH_OPERATOR_PASSWORD-}"',
+				'OPERATOR_USER="${REFRESH_OPERATOR_USER-}"',
+				"export -n OPERATOR_PASSWORD OPERATOR_USER",
+				"unset REFRESH_OPERATOR_PASSWORD REFRESH_OPERATOR_USER",
+				"OPERATOR_REQUESTED=0",
+				'[ -z "$OPERATOR_PASSWORD$OPERATOR_USER" ] || OPERATOR_REQUESTED=1',
+			].join("\n") + "\n";
+			const s = stageLocal("mutant-W7", [[CAPTURE, ""], ['cd "$APP_DIR"\n', `cd "$APP_DIR"\n${CAPTURE}`]]);
+			const r = s.err ? null : runLocal(s, OPERATOR_ENV);
+			const leakedTo = s.err ? [] : passwordReach(readLog(s.log)).leakedTo;
+			check("W7: refresh-local.sh captures it only after its first command — actually mutated the shipped source", !s.err, s.err);
+			check("W7: refresh-local.sh captures it only after its first command — is caught", !!r && leakedTo.includes("dirname"),
+				leakedTo.includes("dirname") ? "dirname received the password — section 4 fails" : `SURVIVED — leaked to [${leakedTo}]`);
+		}
+		// W8/W9: `export -n` removed — with a caller that already exports an
+		// OPERATOR_PASSWORD of its own, the real password then reaches every child.
+		const EXPORT_N = "export -n OPERATOR_PASSWORD OPERATOR_USER\n";
+		for (const [id, stage, run, label] of [
+			["W8", stageLocal, runLocal, "refresh-local.sh"],
+			["W9", stageStaging, runStaging, "refresh-staging.sh"],
+		]) {
+			const s = stage(`mutant-${id}`, [[EXPORT_N, ""]]);
+			const r = s.err ? null : run(s, DECOY_ENV);
+			const leakedTo = s.err ? [] : passwordReach(readLog(s.log)).leakedTo;
+			check(`${id}: ${label} no longer un-exports its copies — actually mutated the shipped source`, !s.err, s.err);
+			check(`${id}: ${label} no longer un-exports its copies — is caught`, !!r && leakedTo.length > 0,
+				leakedTo.length ? `the password reached: ${leakedTo.join(", ")} — section 4 fails` : "SURVIVED");
+		}
+		{
+			// W10: the restart hint as it was — a bare `pm2 restart --update-env`.
+			const s = stageStaging("mutant-W10", [[
+				'say "When ready:  env -u REFRESH_OPERATOR_PASSWORD -u REFRESH_OPERATOR_USER pm2 restart $PM2_NAME --update-env"',
+				'say "When ready:  pm2 restart $PM2_NAME --update-env"',
+			]]);
+			const r = s.err ? null : runStaging(s, OPERATOR_ENV, [], { restart: false });
+			const h = r && r.code === 0 ? runHint(r.out, "mutant-W10-shell") : null;
+			check("W10: refresh-staging.sh hands out a bare `pm2 restart --update-env` — actually mutated the shipped source", !s.err, s.err);
+			check("W10: refresh-staging.sh hands out a bare `pm2 restart --update-env` — is caught", !!h && h.restarted && h.leaked,
+				h && h.leaked ? "pm2 received the password from the operator's shell — section 4 fails" : `SURVIVED — ${h ? h.hint : `exit ${r && r.code}`}`);
 		}
 	}
 
