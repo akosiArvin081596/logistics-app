@@ -59,6 +59,7 @@ VPS_HOST="${VPS_HOST:-root@76.13.22.110}"
 VPS_KEY="${VPS_KEY:-$HOME/.ssh/abedubas_vps}"
 PROD_BACKUPS="/var/www/logistics-app/backups"
 PROD_APP_DIR="/var/www/logistics-app"
+PROD_PM2_NAME="logistics-app"   # the pm2 process whose build $PROD_APP_DIR/node_modules is
 LOCAL_SHEET_ID="156Y5-OUUEZspiY7dRsJZ57iyKWLJAjdVP8a4yw0PMN0"   # "Dispatch Management (LOCAL)"
 PROD_SHEET_ID="1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo"
 
@@ -255,27 +256,71 @@ REMOTE_ART="$REMOTE_TMP/sanitized.db.gz"
 # The symlinked node_modules belongs to the production tree, where
 # better-sqlite3 is compiled for the Node pm2 runs the app with (/opt/node22,
 # ABI 127 since 2026-08-25). A non-login ssh PATH resolves `node` to
-# /usr/bin/node — 20.20.1, ABI 115 — and the require() dies at load with
+# /usr/bin/node — 20.20.1, ABI 115 — and opening the database dies with
 # "NODE_MODULE_VERSION 127 ... requires 115", exactly as backup.sh did.
-# Same capability-test as backup.sh: take the first interpreter that can
-# actually load the module through this symlink, so a future repin needs no
-# edit here. Fails closed — the || die below still guarantees nothing is
-# transferred if no interpreter works.
+#
+# ⚠️ AND THE FIRST FIX (#339) FAILED THE SAME WAY on 2026-09-25, for the two
+# reasons backup.sh had already been fixed for in #366:
+#   1. `pm2 jlist` prints every process on ONE line, so a greedy
+#      `sed 's/.*"exec_interpreter":…/'` took the LAST process's interpreter —
+#      another tenant's /usr/bin/node on this shared box. It had only worked
+#      while a LogisX process happened to be last. => read $PROD_PM2_NAME BY
+#      NAME, with a real JSON parse.
+#   2. `require("better-sqlite3")` passed under that node, because the binding
+#      loads lazily. => the probe OPENS an in-memory database.
+# pick_node takes the first candidate that can open a database through this
+# symlink, so a repin needs no edit here. It is refresh-staging.sh's block,
+# sent as a quoted heredoc: nothing in it expands on this machine, so the VPS
+# runs exactly this text. PICK_NODE is emptied first and checked after, so a
+# heredoc that fails cannot leave an inherited value to run there. Fails
+# closed — the || die below still guarantees nothing is transferred if no
+# interpreter works.
+PICK_NODE=''
+IFS= read -r -d '' PICK_NODE <<'EOF_PICK_NODE' || true
+# >>> pick-node - keep byte-identical in refresh-local.sh and refresh-staging.sh
+# (scripts/test-refresh-remote-node.js pins the copies, and pins the jlist
+# parse to scripts/deploy/remote-deploy.sh's)
+#
+# pick_node DIR NAME prints the first node that can OPEN a better-sqlite3
+# database from DIR's node_modules: the interpreter pm2 runs the process NAME
+# with, then /opt/node22, then PATH's node. pm2_interpreter reads NAME from
+# jlist's JSON (one line; pm2 can print a notice ahead of it). Any node can
+# parse JSON; only better-sqlite3 cares about the ABI.
+pm2_interpreter() {
+  pm2 jlist 2>/dev/null | node -e '
+  let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+    let l=[];try{l=JSON.parse(d.slice(d.lastIndexOf("\n[")+1));}catch(e){}
+    const p=Array.isArray(l)?l.find(x=>x&&x.name===process.argv[1]):null;
+    process.stdout.write(p && p.pm2_env ? (p.pm2_env.exec_interpreter||"") : "");
+  });' "$1"
+}
+pick_node() {
+  local cand
+  for cand in "$(pm2_interpreter "$2" 2>/dev/null)" /opt/node22/bin/node "$(command -v node 2>/dev/null)"; do
+    [ -n "$cand" ] && [ -x "$cand" ] || continue
+    if (cd "$1" && "$cand" -e 'new (require("better-sqlite3"))(":memory:").close()') >/dev/null 2>&1; then
+      echo "$cand"; return 0
+    fi
+  done
+  return 1
+}
+# <<< pick-node
+EOF_PICK_NODE
+case "$PICK_NODE" in
+  *'pick_node() {'*) : ;;
+  *) die "could not read the pick-node block (bash could not create a here-document). Nothing was transferred." ;;
+esac
 "${SSH[@]}" "$VPS_HOST" "
 set -e
 umask 077
 cd '$REMOTE_TMP'
 ln -sfn '$PROD_APP_DIR/node_modules' node_modules
-NODE_BIN=''
-for cand in \"\$(pm2 jlist 2>/dev/null | sed -n 's/.*\"exec_interpreter\":\"\([^\"]*\)\".*/\1/p' | head -1)\" /opt/node22/bin/node \"\$(command -v node 2>/dev/null)\"; do
-  [ -n \"\$cand\" ] && [ -x \"\$cand\" ] || continue
-  if \"\$cand\" -e 'require(\"better-sqlite3\")' >/dev/null 2>&1; then NODE_BIN=\"\$cand\"; break; fi
-done
-if [ -z \"\$NODE_BIN\" ]; then
-  echo 'REFUSING: no node on the VPS can load better-sqlite3 from the production node_modules.' >&2
-  echo '  fix: npm rebuild better-sqlite3 in $PROD_APP_DIR under the interpreter pm2 uses.' >&2
+$PICK_NODE
+NODE_BIN=\$(pick_node '$REMOTE_TMP' '$PROD_PM2_NAME') || {
+  echo 'REFUSING: no node on the VPS can open a better-sqlite3 database from the production node_modules.' >&2
+  echo '  fix: npm rebuild better-sqlite3 in $PROD_APP_DIR under the interpreter pm2 runs $PROD_PM2_NAME with.' >&2
   exit 1
-fi
+}
 echo \"[refresh] remote node: \$NODE_BIN (\$(\"\$NODE_BIN\" -v))\"
 \"\$NODE_BIN\" refresh-env.js --sanitize-only --from '$LATEST' --emit '$REMOTE_ART' ${EXTRA_ARGS[*]+${EXTRA_ARGS[*]}}
 " || die "remote sanitize failed. NOTHING was transferred. Do not work around this by copying the raw snapshot."
