@@ -66,9 +66,16 @@ Points worth keeping:
   production sheet, send real mail, or auto-submit invoices stops the run while the data is
   still on the server. `--check-env-only` cannot open a database at all, so a refusal is
   structurally incapable of having moved anything first.
-- **Step 1 sees the same extra arguments step 3 will.** `refresh-local.sh` embeds them in the
-  remote ssh command, so anything `refresh-env.js` refuses — a password typed as an argument, a
-  second mode flag — is refused on the laptop before it can reach the VPS.
+- **Steps 1, 3 and 7 see the same arguments, and only known ones.** `refresh-local.sh` accepts
+  its own `--code-only`, `--scan-legacy` and `--help`, plus these `refresh-env.js` options:
+  `--telemetry-days N` (a whole number, at most 5 digits), `--telemetry-all`, `--allow-mail`,
+  `--dry-run`, `--no-backup`. Anything else (a typo, a `--name=value` form, a mode flag, a bare
+  word) is refused by its position, never repeated, before any command runs: `refresh-env.js`
+  skips an argument it does not know, so a mistyped `--code-only` would otherwise have run a full
+  refresh. The options reach step 1, step 3 and step 7 as one argument vector. Step 3 runs inside
+  the ssh command, where the VPS's shell parses it again, so each option crosses quoted as
+  exactly one word. With `--code-only` or `--scan-legacy` a database option is refused, since it
+  would do nothing.
 - **There is no fallback to sanitizing locally.** If step 3 cannot run, the script fails. A
   fallback that copies the raw snapshot and redacts it on the laptop is precisely the
   behaviour being removed, and it would be taken every time the remote step got flaky.
@@ -125,6 +132,21 @@ all, so month-end close and the whole fuel-honesty wave had nothing to run again
 `scripts/backup-db.js`, which uses SQLite's Online Backup API and has already passed
 `PRAGMA integrity_check`. Nothing in this refresh opens a file production is writing to.
 Both wrappers pick the newest `app.db.*.gz` automatically.
+
+---
+
+## Staging installs with the Node pm2 runs it with
+
+`refresh-staging.sh` installs and builds the way `scripts/deploy/remote-deploy.sh` does for a
+deploy. `npm` runs under the interpreter pm2 runs `logisx-staging` with, read by name from
+`pm2 jlist` (pm2's default, a bare `node`, means PATH's), never under the box's system Node 20,
+which is what a bare `npm` there resolves to. `better-sqlite3` is a native module, so a build
+under the wrong Node leaves staging unable to boot on its next restart. After the install the
+script opens an in-memory database under that Node, runs `npm rebuild better-sqlite3` if it
+cannot, and stops if it still cannot: nothing is built, the database is not replaced, and
+`--restart` does not restart. If pm2 cannot say which Node that is (the process is not listed,
+or there is no pm2), it refuses before installing rather than guess. Proof:
+`node scripts/test-refresh-remote-node.js`, section 6.
 
 ---
 
@@ -185,13 +207,17 @@ unset REFRESH_OPERATOR_PASSWORD
 - **Applied only where a database is installed** — the one-pass form and `--from-sanitized`.
   `--sanitize-only` ignores it and says so, so the artifact that crosses the network never
   carries an operator's password; `refresh-local.sh` applies it on the laptop, at install.
-- **The wrappers hand it to `refresh-env.js` and to nothing else.** Both move it out of their
-  environment before starting any other command: `npm install` runs third-party lifecycle
-  scripts, ssh would carry it toward the VPS, and `pm2 restart --update-env` would copy it into
-  the running staging process, where `pm2 env` would show it. Both also run a
-  `--check-env-only` gate with it — and with their extra arguments — before anything slow or
-  remote, so a short password, or one typed as an argument, is refused before any connection
-  opens (`refresh-local.sh`) or any install and build runs (`refresh-staging.sh`).
+- **The wrappers hand it to `refresh-env.js` and to nothing else**: to exactly two calls, the
+  `--check-env-only` preflight and the install. Both move it out of their environment before
+  starting any other command (`refresh-local.sh` as its very first step, ahead of even the
+  `dirname` that finds the checkout): `npm install` runs third-party lifecycle scripts, ssh
+  would carry it toward the VPS, and `pm2 restart --update-env` would copy it into the running
+  staging process, where `pm2 env` would show it. Both also run the preflight with it, and with
+  their extra arguments, before anything slow or remote, so a short password, or one typed as an
+  argument, is refused before any connection opens (`refresh-local.sh`) or any install and build
+  runs (`refresh-staging.sh`). `refresh-local.sh` refuses an argument it does not accept before
+  running anything at all, whether the password was typed with a flag or as a bare word. With
+  `--code-only` or `--scan-legacy`, which install no database, it says the variable is ignored.
 - **Never in `.env`, and not in `.env.example`**: it is a per-run value, not configuration, and
   nothing reads it from a file.
 - Forgot it? `node scripts/reset-super-admin-password.js <app.db>` sets `super_admin`'s password
@@ -214,8 +240,9 @@ one from anywhere reachable. `refresh-env.js --verify` refuses a prepared copy o
 never pass for a sanitized one.
 
 Proof: `node scripts/test-refresh-sign-in.js` — the refusals, the local flow end to end, and the
-real wrappers run against stubbed `npm`/`git`/`ssh`/`scp`/`pm2` that record their whole
-environment, none of which may contain the operator password.
+real wrappers run against stubbed `npm`/`git`/`ssh`/`scp`/`pm2` and recording `dirname`/`node`,
+which log their whole environment: the operator password must reach the preflight and the
+install, and no other command.
 
 ---
 
