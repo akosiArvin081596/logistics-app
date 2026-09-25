@@ -3,8 +3,16 @@ import path from 'path'
 import vue from '@vitejs/plugin-vue'
 import tailwindcss from '@tailwindcss/vite'
 
-export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, path.resolve(__dirname, '..'), '')
+export default defineConfig(({ command, mode }) => {
+  // Only `serve` (the dev server, and preview) reads the repo-root .env: its two
+  // keys configure server.* and nothing else. Never read it for a build —
+  // loadEnv() copies a NODE_ENV it finds into VITE_USER_NODE_ENV and Vite obeys
+  // it, so a local .env carrying NODE_ENV=development (harmless to Express,
+  // which only checks for "production") made `vite build` emit a development
+  // bundle on developer machines (CI has no .env; production's
+  // NODE_ENV=production is refused).
+  // scripts/test-vite-build-mode.mjs pins both halves.
+  const env = command === 'serve' ? loadEnv(mode, path.resolve(__dirname, '..'), '') : {}
   const apiTarget = env.VITE_API_TARGET || 'http://localhost:3000'
 
   return {
