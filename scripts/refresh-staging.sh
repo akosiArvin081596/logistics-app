@@ -96,28 +96,52 @@ say "snapshot: $LATEST"
 # fixed in #339; this one was missed and failed the moment it was next run.
 # A bare `node` resolves to /usr/bin/node — 20.20.1, ABI 115 — while staging's
 # own node_modules/better-sqlite3 is built for the /opt/node22 that pm2 runs it
-# with (ABI 127), so refresh-env.js dies at require():
+# with (ABI 127), so refresh-env.js dies opening the database:
 #
 #     NODE_MODULE_VERSION 127 ... this version of Node.js requires 115
 #
-# Same capability test as the other two: take the first interpreter that can
-# actually load the module, so a repin or rebuild needs no edit here. It fails
-# closed — refresh-env.js REFUSES rather than half-writing a database.
+# ⚠️ AND THAT PICK (#339's, copied here in #342) HAD TWO HOLES OF ITS OWN,
+# found when refresh-local.sh failed with exactly that error on 2026-09-25.
+# backup.sh was fixed for both in #366; the two refresh scripts were missed:
+#   1. `pm2 jlist` prints every process on ONE line, so a greedy
+#      `sed 's/.*"exec_interpreter":…/'` took the LAST process's interpreter —
+#      another tenant's /usr/bin/node on this shared box. It had only worked
+#      while a LogisX process happened to be last. => read $PM2_NAME BY NAME
+#      (its build is the node_modules loaded here), with a real JSON parse.
+#   2. `require("better-sqlite3")` passes under the wrong Node, because the
+#      binding loads lazily. => the probe OPENS an in-memory database.
+# The first candidate that can open a database wins, so a repin or rebuild
+# needs no edit here. It fails closed — refresh-env.js never runs, so nothing
+# is written, when none can.
+# >>> pick-node - keep byte-identical in refresh-local.sh and refresh-staging.sh
+# (scripts/test-refresh-remote-node.js pins the copies, and pins the jlist
+# parse to scripts/deploy/remote-deploy.sh's)
+#
+# pick_node DIR NAME prints the first node that can OPEN a better-sqlite3
+# database from DIR's node_modules: the interpreter pm2 runs the process NAME
+# with, then /opt/node22, then PATH's node. pm2_interpreter reads NAME from
+# jlist's JSON (one line; pm2 can print a notice ahead of it). Any node can
+# parse JSON; only better-sqlite3 cares about the ABI.
+pm2_interpreter() {
+  pm2 jlist 2>/dev/null | node -e '
+  let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+    let l=[];try{l=JSON.parse(d.slice(d.lastIndexOf("\n[")+1));}catch(e){}
+    const p=Array.isArray(l)?l.find(x=>x&&x.name===process.argv[1]):null;
+    process.stdout.write(p && p.pm2_env ? (p.pm2_env.exec_interpreter||"") : "");
+  });' "$1"
+}
 pick_node() {
   local cand
-  for cand in \
-    "$(pm2 jlist 2>/dev/null | sed -n 's/.*"exec_interpreter":"\([^"]*\)".*/\1/p' | head -1)" \
-    /opt/node22/bin/node \
-    "$(command -v node 2>/dev/null)"
-  do
+  for cand in "$(pm2_interpreter "$2" 2>/dev/null)" /opt/node22/bin/node "$(command -v node 2>/dev/null)"; do
     [ -n "$cand" ] && [ -x "$cand" ] || continue
-    if (cd "$STAGING_DIR" && "$cand" -e 'require("better-sqlite3")') >/dev/null 2>&1; then
+    if (cd "$1" && "$cand" -e 'new (require("better-sqlite3"))(":memory:").close()') >/dev/null 2>&1; then
       echo "$cand"; return 0
     fi
   done
   return 1
 }
-NODE_BIN="$(pick_node)" || die "no node on this box can load better-sqlite3 from $STAGING_DIR/node_modules — run: npm rebuild better-sqlite3"
+# <<< pick-node
+NODE_BIN="$(pick_node "$STAGING_DIR" "$PM2_NAME")" || die "no node on this box can open a better-sqlite3 database from $STAGING_DIR/node_modules — run: npm rebuild better-sqlite3 (under the interpreter pm2 runs $PM2_NAME with)"
 say "node: $NODE_BIN ($("$NODE_BIN" -v))"
 
 # --from is on the same box, so this is a local read of a file with no writer.
