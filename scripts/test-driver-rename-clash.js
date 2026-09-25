@@ -9,7 +9,8 @@
  * WHAT IS ASSERTED. Each route is the shipped handler, lifted out of server.js
  * and run against an in-memory SQLite that carries every rename target, with
  * server.js's own planner, merge scan, cascade, directory sync and truck
- * assignment. Only period locks, the Job Tracking sheet and sessions are stubbed.
+ * assignment. Only period locks (with the create lock's driver history), the
+ * Job Tracking sheet and sessions are stubbed.
  *   §1 PUT /api/users/:id
  *      guard (b): another account's driver name (exact, case, spacing), another
  *      account's username or a reserved name → 409 DRIVER_NAME_TAKEN, audited,
@@ -359,6 +360,11 @@ function mountTrucks(db, { putSrc = ROUTES.truckPut, postSrc = ROUTES.truckPost,
 		checkDriverActiveLoad: async (name) => (busy.map(m.normalizeDriverName).includes(m.normalizeDriverName(name))
 			? `${name} already has an active load (L-1, status: In Transit). Complete or reassign it before assigning another.`
 			: null),
+		// POST /api/trucks reads the sheet for the create lock's driver history.
+		// The lock is stubbed, so the history is too; the real pair is
+		// scripts/test-truck-create-new-driver.js's subject.
+		getJobTrackingCached: async () => ({ headers: JOB_TRACKING[0].slice(), data: [] }),
+		driverHistoryFloorMonth: () => ({ floor: "", unbounded: false }),
 		assignDriverToTruck: m.assignDriverToTruck,
 		fuelModel: { DEFAULT_TANK_GALLONS: 200 },
 		syncDriverToCarrierSheet: m.syncDriverToCarrierSheet,

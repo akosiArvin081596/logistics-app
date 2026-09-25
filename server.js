@@ -23022,14 +23022,34 @@ function truckFeeLockedRows(unitNumber, locked) {
 // unblocked while a rate change moved them. Only the FIRST month is a real
 // lower bound; there is no upper bound short of now.
 //
-// Residual, stated because it is not closed: a driver whose completed loads
-// PREDATE their first assignment row (pre-feature history) is still
-// under-covered. Nothing cheap in SQLite bounds that — driverMonthlyDays needs
-// the sheet. The real fix is the temporal pay basis named beside check (6):
-// price a historical month off the assignment row that was active THEN.
-function driverPayLockedMonths(driverName, locked) {
+// Residual, stated because it is not closed for the callers that pass no
+// `history`: a driver whose completed loads PREDATE their first assignment row
+// (pre-feature history) is still under-covered. Nothing cheap in SQLite bounds
+// that — driverMonthlyDays needs the sheet. The real fix is the temporal pay
+// basis named beside check (6): price a historical month off the assignment row
+// that was active THEN.
+//
+// `history` — OPTIONAL, driverHistoryFloorMonth()'s answer for this driver —
+// replaces the assignment rows as the lower bound: every locked month from the
+// earliest pay-relevant record anywhere (sheet included), none for a driver
+// with no record at all, all of them when a record cannot be dated. Only
+// truckCreateLockBlockers() passes it. A create is the one caller routinely
+// asked about a driver with no assignment row — its guard runs before the INSERT
+// and before assignDriverToTruck(), so a brand-new driver always has zero rows —
+// and "no rows → every month" refused a new hire's first truck whenever either
+// driver check fired (a rate other than the $250 default, or an investor owner),
+// while the pay math could reprice nothing of theirs. With the argument omitted
+// this is exactly the function it was.
+function driverPayLockedMonths(driverName, locked, history) {
 	const name = String(driverName || "").trim();
 	if (!name || !locked.length) return [];
+	if (history !== undefined) {
+		if (!history || history.unbounded) return locked.slice();
+		if (history.floor === "") return [];
+		// Anything that is not a month cannot bound anything.
+		if (!/^\d{4}-\d{2}$/.test(String(history.floor))) return locked.slice();
+		return locked.filter((p) => p >= history.floor).sort();
+	}
 	const rows = db.prepare(
 		"SELECT start_date FROM truck_assignments WHERE LOWER(driver_name) = LOWER(?)"
 	).all(name);
@@ -23045,6 +23065,87 @@ function driverPayLockedMonths(driverName, locked) {
 		if (!earliest || from < earliest) earliest = from;
 	}
 	return locked.filter((p) => p >= earliest).sort();
+}
+
+// The EARLIEST month of anything the money math could price for this driver —
+// the `history` driverPayLockedMonths() takes. Returns { floor, unbounded }:
+//   { floor: "YYYY-MM", unbounded: false }  nothing of theirs before that month
+//   { floor: "",        unbounded: false }  no pay-relevant record anywhere, so
+//                                           no closed month holds anything of
+//                                           theirs to reprice or re-parent
+//   { floor: "",        unbounded: true }   a record exists that cannot be
+//                                           dated, so no month can be ruled out
+//
+// Four sources, each read the way the settlement paths read it, and every name
+// compared through normalizeDriverName() in JS (which SQLite cannot express) —
+// at least as wide as each consumer's own match, the safe direction here:
+//   • Job Tracking (`jt`, from getJobTrackingCached()) — the pay math's own
+//     `^driver$` column, under ANY status: a cancelled or soft-deleted load is
+//     counted, not reasoned about, which can only move the floor earlier. A row
+//     dates to the earliest of EVERY date-like cell, each through moneySheetDate()
+//     and local getters as the pay math buckets it, so whichever cell the math
+//     prices off (the assigned date, or a pickup → drop-off window that only runs
+//     forward) sits at or above the floor. A matching row with no readable date,
+//     or a sheet with no Driver column, is unbounded.
+//   • excluded_driver_days — added and removed days alike.
+//   • expenses — the earlier of the month a receipt is dated and the month it is
+//     booked to (EXPENSE_PERIOD_EXPR, where posted_period wins).
+//   • truck_assignments — start_date sliced, as driverPayLockedMonths() reads it.
+// A row whose month cannot be read is unbounded, as an unreadable start_date
+// always was.
+//
+// Synchronous on purpose: the caller does its one `await getJobTrackingCached()`
+// first and hands the result in, so this sits beside the guard and the write
+// with no await between them. It reads the shared cache and never writes to it.
+function driverHistoryFloorMonth(driverName, jt) {
+	const lc = normalizeDriverName(driverName);
+	if (!lc) return { floor: "", unbounded: false };
+	const UNBOUNDED = { floor: "", unbounded: true };
+	const isMonth = (m) => /^\d{4}-\d{2}$/.test(m);
+	let floor = "";
+	const see = (m) => { if (!floor || m < floor) floor = m; };
+
+	const headers = jt && Array.isArray(jt.headers) ? jt.headers : [];
+	const driverCol = findCol(headers, /^driver$/i);
+	if (!driverCol) return UNBOUNDED;
+	const dateCols = headers.filter((h) => /date|appo/i.test(h));
+	for (const r of jt && Array.isArray(jt.data) ? jt.data : []) {
+		if (normalizeDriverName(r[driverCol]) !== lc) continue;
+		let rowMonth = "";
+		for (const col of dateCols) {
+			const d = moneySheetDate(r[col]);
+			if (!d || isNaN(d)) continue;
+			const m = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+			if (!rowMonth || m < rowMonth) rowMonth = m;
+		}
+		if (!rowMonth) return UNBOUNDED;
+		see(rowMonth);
+	}
+
+	for (const r of db.prepare("SELECT driver_name, excluded_date FROM excluded_driver_days").all()) {
+		if (normalizeDriverName(r.driver_name) !== lc) continue;
+		const m = String(r.excluded_date || "").trim().slice(0, 7);
+		if (!isMonth(m)) return UNBOUNDED;
+		see(m);
+	}
+
+	for (const r of db.prepare(
+		`SELECT driver, ${EXPENSE_PERIOD_EXPR} AS booked, ` +
+		"strftime('%Y-%m', COALESCE(NULLIF(date, ''), strftime('%Y-%m-%d', created_at))) AS dated FROM expenses"
+	).all()) {
+		if (normalizeDriverName(r.driver) !== lc) continue;
+		const months = [r.booked, r.dated].map((m) => String(m || "")).filter(isMonth);
+		if (!months.length) return UNBOUNDED;
+		months.forEach(see);
+	}
+
+	for (const r of db.prepare("SELECT driver_name, start_date FROM truck_assignments").all()) {
+		if (normalizeDriverName(r.driver_name) !== lc) continue;
+		const m = String(r.start_date || "").slice(0, 7);
+		if (!isMonth(m)) return UNBOUNDED;
+		see(m);
+	}
+	return { floor, unbounded: false };
 }
 
 // ============================================================================
@@ -24239,8 +24340,17 @@ function directoryDeleteLockBlockers(row) {
 // The everyday create stays 200 by construction: with in_service_date blank the
 // charge-from month is the CURRENT month, and the current month is never
 // locked, so fixedMonths is empty. What is refused is a create that back-dates
-// in_service_date into a closed month, or that re-parents a driver.
-function truckCreateLockBlockers(truck) {
+// in_service_date into a closed month, or that reprices or re-parents a driver
+// with history in one.
+//
+// `history` is driverHistoryFloorMonth() for truck.assigned_driver, handed to
+// both driver checks so that they size the driver's exposure off everything the
+// pay math can see — the sheet included — rather than off truck_assignments
+// alone. The guard runs before assignDriverToTruck() writes the driver's first
+// row, so on the assignment table alone every new driver read as an unbounded
+// history, and a new hire's first truck was refused whenever either driver
+// check fired. Omitted, both checks keep the assignment-only bound.
+function truckCreateLockBlockers(truck, history) {
 	if (!periodLocksReadable()) return { unreadable: true, blockers: [] };
 	const locked = lockedPeriodsDesc();
 	if (!locked.length) return { unreadable: false, blockers: [] };
@@ -24298,24 +24408,28 @@ function truckCreateLockBlockers(truck) {
 	// row becomes the truck the pay math reads for this driver — its
 	// driver_pay_daily replaces the old truck's for every month they worked.
 	// Allowed when the driver's own drivers_directory.pay_daily already overrides
-	// the truck rate, since then the truck number never reaches the pay.
+	// the truck rate, since then the truck number never reaches the pay. A driver
+	// who drives no truck yet is priced at the $250 default (resolveDailyRate's
+	// fallback), so that is the rate the new truck's would replace.
 	const driverName = String(truck.assigned_driver || "").trim();
 	if (driverName) {
 		const struct = getDriverPayStructures()[normalizeDriverName(driverName)] || null;
 		const beforeRates = truckDailyRateCandidates(driverName);
+		const drivesNoTruck = beforeRates.length === 1 && beforeRates[0] === undefined;
 		let worst = null;
 		for (const r of beforeRates) {
 			const b = resolveDailyRate(struct && struct.payDaily, r);
 			const a = resolveDailyRate(struct && struct.payDaily, truck.driver_pay_daily);
 			if (b !== a && (!worst || Math.abs(a - b) > Math.abs(worst.a - worst.b))) worst = { a, b };
 		}
-		const months = worst ? driverPayLockedMonths(driverName, locked) : [];
+		const months = worst ? driverPayLockedMonths(driverName, locked, history) : [];
 		if (months.length) {
 			blockers.push({
 				field: "driver_pay_daily", from: worst.b, to: worst.a,
 				periods: months.slice().sort(),
 				detail: `assigning ${driverName} to a new truck at ${money(worst.a)}/day replaces the ${money(worst.b)}/day ` +
-					`their current truck sets, repricing their active days across ${months.length} finalized month${months.length === 1 ? "" : "s"}`,
+					(drivesNoTruck ? "default (they drive no truck yet)" : "their current truck sets") +
+					`, repricing their active days across ${months.length} finalized month${months.length === 1 ? "" : "s"}`,
 			});
 		}
 
@@ -24342,7 +24456,7 @@ function truckCreateLockBlockers(truck) {
 			if (!byCarrier.has(t.owner_id)) heldAfter.delete(t.owner_id);
 		}
 		const moved = [...new Set([...heldBefore, ...heldAfter])].filter((id) => heldBefore.has(id) !== heldAfter.has(id));
-		const setMonths = moved.length ? driverPayLockedMonths(driverName, locked) : [];
+		const setMonths = moved.length ? driverPayLockedMonths(driverName, locked, history) : [];
 		if (setMonths.length) {
 			blockers.push({
 				field: "owner_id", from: [...heldBefore].sort((a, b) => a - b).join(", ") || "(none)",
@@ -24427,21 +24541,37 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		if (!unitNumber || !unitNumber.trim()) {
 			return res.status(400).json({ error: "Unit number is required" });
 		}
-		const existing = db.prepare("SELECT id FROM trucks WHERE LOWER(unit_number) = LOWER(?)").get(unitNumber.trim());
-		if (existing) {
-			return res.status(400).json({ error: "Unit number already exists" });
-		}
 		const validStatus = ["Active", "Inactive", "Maintenance", "OOS"].includes(status) ? status : "Active";
-		// Check if driver has an active load before allowing assignment
+		// Check if driver has an active load before allowing assignment, and read
+		// Job Tracking for the month-end lock's view of the driver's history beside
+		// it. Both awaits sit here, above canonicalDriverName(), so nothing yields
+		// between the guard and the INSERT. A failed read throws into the catch and
+		// the create is refused, as a failed active-load check refuses it.
+		let jt = null;
 		if (requestedDriver) {
 			const activeCheck = await checkDriverActiveLoad(requestedDriver);
 			if (activeCheck) return res.status(409).json({ error: activeCheck });
+			jt = await getJobTrackingCached();
 		}
 		// Resolved to the spelling the driver already has (canonicalDriverName()),
 		// so a name that differs only in case or spacing assigns that driver rather
 		// than a second spelling of them. Read after the route's last await, so the
 		// guard and every write below see the current spelling.
 		const finalAssignedDriver = canonicalDriverName(requestedDriver);
+		// The earliest month of anything the pay math can price for that driver —
+		// sheet loads, day overrides, receipts, assignments — which is what the
+		// guard's driver checks size their months off. A new hire has none, so a
+		// first truck for them is not refused over months that hold nothing of
+		// theirs; one with history is still refused from their first month onward.
+		const history = driverHistoryFloorMonth(finalAssignedDriver, jt);
+		// Below the last await for the same reason: a truck added while this request
+		// waited on the sheet is seen here. The column's UNIQUE is case-sensitive and
+		// this test is not, so it is the only thing keeping "LogisX-#23" and
+		// "logisx-#23" from both landing.
+		const existing = db.prepare("SELECT id FROM trucks WHERE LOWER(unit_number) = LOWER(?)").get(unitNumber.trim());
+		if (existing) {
+			return res.status(400).json({ error: "Unit number already exists" });
+		}
 
 		// ⚠️ THE MONTH-END LOCK, on the CREATE verb. PUT /api/trucks/:id refuses to
 		// back-date a truck's in-service month, re-parent it to another investor
@@ -24482,7 +24612,7 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 			insurance_monthly: 0, eld_monthly: 0, truck_payment_monthly: 0,
 			hvut_annual: 0, irp_annual: 0,
 			routemate_vehicle_id: "",
-		});
+		}, history);
 		// entity/entity_id mirror the `create_truck` success line — except that there
 		// is no row id yet, so the unit number is the only address the attempt has.
 		// The in-service date is recorded because it is the field that decides which
