@@ -67,25 +67,50 @@ TARGET=$(git rev-parse --verify -q "$PREV^{commit}") || { echo "::error::$PREV i
 # The drift marker names the one main commit that no automatic path may deploy
 # again. After a failed verification, what happens next is a human's call.
 # Written FIRST, like the heal's own marker: if the rollback dies halfway, the
-# commit is still recorded. Fail-closed.
+# commit is still recorded. Fail-closed. Even when the target is that same
+# commit (a deploy with no record to return to, or a redeploy of the verified
+# commit): it still failed verification.
+#
+# ⚠️ One marker is never replaced. deploy-drift.yml only ever deploys main's
+# tip, so the marker blocks something only while it names that tip. A marker
+# that already names main's tip (a manual pin's, or a heal's) stays when the
+# failed commit is not main's tip: drift can never deploy that commit anyway,
+# and replacing the marker would let drift deploy main over the pin.
 FAILED=$(git rev-parse HEAD)
-if [ "$FAILED" != "$TARGET" ]; then
-	if printf '%s' "$FAILED" > "$DIR/.drift-heal-attempted"; then
-		echo "drift marker set to $FAILED — deploy-drift.yml will not deploy it again automatically"
-	else
-		echo "::warning::could not write the drift marker — deploy-drift.yml is not told about $FAILED"
-	fi
+MAIN_TIP=$(git rev-parse --verify -q origin/main || true)
+MARKED=$(cat "$DIR/.drift-heal-attempted" 2>/dev/null || true)
+if [ -n "$MAIN_TIP" ] && [ "$MARKED" = "$MAIN_TIP" ] && [ "$FAILED" != "$MAIN_TIP" ]; then
+	echo "drift marker kept on main's tip $MAIN_TIP — $FAILED is not main's tip, so deploy-drift.yml cannot deploy it anyway"
+elif printf '%s' "$FAILED" > "$DIR/.drift-heal-attempted"; then
+	echo "drift marker set to $FAILED — deploy-drift.yml will not deploy it again automatically"
+else
+	echo "::warning::could not write the drift marker — deploy-drift.yml is not told about $FAILED"
 fi
+if [ "$FAILED" = "$TARGET" ]; then
+	echo "::warning::the rollback target $TARGET is the commit that just failed verification: this rollback restarts it, and never records it as verified"
+fi
+
+# Build with the Node pm2 runs the app with, read as remote-deploy.sh reads it,
+# and BEFORE the checkout: when it cannot be read, refuse with nothing touched
+# rather than build with PATH's node (the box's system Node 20) and restart a
+# rollback that dies on boot.
+NODE_BIN=$(pm2 jlist 9>&- | node -e '
+  let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+    let l=[];try{l=JSON.parse(d.slice(d.lastIndexOf("\n[")+1));}catch(e){}
+    const p=Array.isArray(l)?l.find(x=>x&&x.name===process.argv[1]):null;
+    process.stdout.write(p && p.pm2_env ? (p.pm2_env.exec_interpreter||"") : "");
+  });' "$PM2")
+case "$NODE_BIN" in
+	node) NODE_BIN=$(command -v node) ;;
+	"")
+		echo "::error::ROLLBACK FAILED — cannot read the interpreter pm2 runs $PM2 with, so nothing was checked out, built or restarted. MANUAL INTERVENTION REQUIRED."
+		exit 1 ;;
+esac
+echo "pm2 interpreter: $NODE_BIN"
 
 git checkout -- client/package-lock.json package-lock.json 2>/dev/null || true
 git checkout --detach "$TARGET" || { echo "::error::cannot check out $TARGET"; exit 1; }
 
-NODE_BIN=$(pm2 jlist 9>&- | node -e '
-  let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
-    const p=JSON.parse(d).find(x=>x.name===process.argv[1]);
-    process.stdout.write(p && p.pm2_env ? (p.pm2_env.exec_interpreter||"") : "");
-  });' "$PM2")
-case "$NODE_BIN" in ""|node) NODE_BIN=$(command -v node) ;; esac
 PATH="$(dirname "$NODE_BIN"):$PATH"
 export PATH
 
@@ -99,10 +124,69 @@ npm install --silent --no-audit --no-fund || BUILD_OK=0
 node -e "new (require('better-sqlite3'))(':memory:').close()" >/dev/null 2>&1 || npm rebuild better-sqlite3 || BUILD_OK=0
 npm run build:client --silent || BUILD_OK=0
 test -f client/dist/index.html || BUILD_OK=0
+# >>> pm2-restart — keep byte-identical in remote-deploy.sh and remote-rollback.sh
+# (scripts/test-deploy-scripts.js pins the copies)
+#
+# Restarts the ONE process named $PM2, then proves the restart took: pm2 must
+# exit 0 AND the process's pm_uptime (when pm2 last started it) must change. A
+# restart that silently did nothing leaves the OLD process serving, and every
+# check after it would read that old process: the commit just built would be
+# marked started, and later recorded as verified, without ever having run.
+# Sets RESTART_OK=1 only when both hold, and PM2_STATUS to pm2's status after.
+#
+# ⚠️ Name-scoped, ALWAYS. This VPS hosts ~23 other pm2 processes for other
+# clients. `pm2 restart all` or a numeric id would take those down too. The
+# proof reads this process BY NAME from `pm2 jlist` (JSON, parsed with node;
+# never `pm2 describe`, whose box-drawing columns shift with the values, and
+# never jq), so no other process can stand in for it. pm2 can print its own
+# notices on stdout ahead of the JSON (a daemon older than the CLI: "In-memory
+# PM2 is out-of-date"), and jlist's JSON is always one line, so only the last
+# line that starts with "[" is parsed.
+#
+# ⚠️ Production is restarted through ecosystem.config.js, NOT by name, because
+# it carries five pm2-level settings — NODE_OPTIONS (the 4 GB heap that exists
+# because it was OOM-ing at 2 GB), kill_timeout, max_restarts, min_uptime and
+# restart_delay. A plain by-name restart re-reads the dump and keeps them, but
+# going through the file is what makes a CHANGED setting take effect.
+pm2_state() {
+	pm2 jlist 9>&- | node -e '
+	  let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+	    let l=[];try{l=JSON.parse(d.slice(d.lastIndexOf("\n[")+1));}catch(e){}
+	    const p=Array.isArray(l)?l.find(x=>x&&x.name===process.argv[1]):null;
+	    const e=(p&&p.pm2_env)||{};
+	    const n=(v)=>Number.isFinite(v)?String(v):"none";
+	    process.stdout.write(n(e.pm_uptime)+" "+n(e.restart_time)+" "+String(e.status||"missing").replace(/[^A-Za-z0-9 _-]/g,"?"));
+	  });' "$PM2"
+}
+read -r UPTIME_BEFORE _ <<<"$(pm2_state)"
 if [ -f ecosystem.config.js ] && grep -q "name: '$PM2'" ecosystem.config.js; then
 	pm2 restart ecosystem.config.js --update-env --silent 9>&-
 else
 	pm2 restart "$PM2" --silent 9>&-
+fi
+RESTART_RC=$?
+read -r UPTIME_AFTER PM2_RESTARTS PM2_STATUS <<<"$(pm2_state)"
+UPTIME_BEFORE=${UPTIME_BEFORE:-none}
+UPTIME_AFTER=${UPTIME_AFTER:-none}
+PM2_STATUS=${PM2_STATUS:-missing}
+echo "restarting $PM2: pm2 returned $RESTART_RC, start time $UPTIME_BEFORE -> $UPTIME_AFTER, status $PM2_STATUS, restarts ${PM2_RESTARTS:-none}"
+RESTART_OK=0
+if [ "$RESTART_RC" != 0 ]; then
+	echo "::error::pm2 exited $RESTART_RC restarting $PM2 — the restart is not proven"
+elif [ "$UPTIME_BEFORE" = none ] || [ "$UPTIME_AFTER" = none ]; then
+	echo "::error::pm2 gave no start time for $PM2 (before: $UPTIME_BEFORE, after: $UPTIME_AFTER) — the restart is not proven"
+elif [ "$UPTIME_AFTER" = "$UPTIME_BEFORE" ]; then
+	echo "::error::the restart of $PM2 did not take: pm2 still reports the start time from before it ($UPTIME_AFTER)"
+else
+	RESTART_OK=1
+fi
+# <<< pm2-restart
+# An unproven restart means whatever answers next may still be the process of
+# the commit that just failed. Polling it would read that process as the
+# rollback's, so stop here: nothing is marked started or recorded.
+if [ "$RESTART_OK" != 1 ]; then
+	echo "::error::ROLLBACK FAILED — the restart of $PM2 at $TARGET is not proven, so the process serving may still be $FAILED. Nothing was marked started or recorded. MANUAL INTERVENTION REQUIRED."
+	exit 1
 fi
 # TARGET is what runs now: mark it started, as remote-deploy.sh does (see LIVE
 # there). Whether it serves is checked next.
@@ -118,10 +202,14 @@ for _ in $(seq 1 30); do
 		echo "ROLLBACK OK — $PM2 serving 200 on :$PORT at $TARGET"
 		# Serving again at TARGET: record it as the verified deploy (the
 		# verified-record block in remote-deploy.sh), still under the lock, but
-		# only when TARGET came from a consistent record (the deploy's LIVE
-		# commit; with no record it was only HEAD, never verified) AND this
-		# rollback built it cleanly. Otherwise the record stays as it was.
-		if [ "$RECORD_STATE" != ok ]; then
+		# only when TARGET is not the commit that just failed verification
+		# (restarting that commit proves nothing its checks did not), came from
+		# a consistent record (the deploy's LIVE commit; with no record it was
+		# only HEAD, never verified), AND this rollback built it cleanly.
+		# Otherwise the record stays as it was.
+		if [ "$TARGET" = "$FAILED" ]; then
+			echo "::warning::not recording $TARGET as verified: it is the commit that just failed verification"
+		elif [ "$RECORD_STATE" != ok ]; then
 			echo "::warning::not recording $TARGET as verified: the deploy reported the verified-deploy record as '${RECORD_STATE:-unknown}', so $TARGET was only its HEAD"
 		elif [ "$BUILD_OK" != 1 ]; then
 			echo "::warning::not recording $TARGET as verified: its install or build did not complete cleanly, although it serves"

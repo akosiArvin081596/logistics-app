@@ -12,17 +12,20 @@
 #        drift heal passes the commit whose staging job passed. Without it,
 #        REF=main means origin/main's tip at pull time.
 # Prints:       DEPLOYED_FROM=<sha> / DEPLOYED_TO=<sha>  (the workflow captures
-#               DEPLOYED_FROM so it can roll back to it without guessing: the
-#               box's LIVE commit, see below, or HEAD while there is no
+#               DEPLOYED_FROM so it can roll back to it without guessing: code
+#               that ran here, see ROLLBACK_TO below, or HEAD while there is no
 #               consistent record), DEPLOY_RECORD_STATE=ok|missing|inconsistent,
 #               DEPLOY_HANDSHAKE_GUARD=1|0 (whether the commit now serving
 #               refuses a foreign Origin), and, always LAST, DEPLOY_RESULT=
-#               deployed|noop (noop: a newer live main commit already contains
-#               SHA; DEPLOY_NOOP=1 is printed too, for people). The workflow
-#               takes the last line of each, so no earlier output can stand in.
-# Exit codes:   0 deployed (or a no-op), 75 another deploy holds the box lock,
-#               anything else a failure. 75 is deliberately not an ssh transport
-#               code (255), so ssh-retry.sh does not retry it.
+#               deployed|noop|unproven (noop: a newer live main commit already
+#               contains SHA, and DEPLOY_NOOP=1 is printed too, for people;
+#               unproven: pm2 did not prove the restart, and the action treats
+#               that as a failed verification). The workflow takes the last line
+#               of each, so no earlier output can stand in.
+# Exit codes:   0 deployed, a no-op or unproven (DEPLOY_RESULT says which), 75
+#               another deploy holds the box lock, anything else a failure. 75
+#               is deliberately not an ssh transport code (255), so
+#               ssh-retry.sh does not retry it.
 #
 # ⚠️ This script never records its own deploy as verified: it cannot know. The
 # record is written by remote-record-verified.sh, which .github/actions/vps-deploy
@@ -132,28 +135,50 @@ fi
 # record step then failed (ssh gave up, the job timed out): that commit serves
 # while the record still names the one before. So every commit this script or
 # a rollback STARTS is marked too (refs/logisx/started-deploy, written only
-# once pm2 reports the app online). That mark is live when it follows the
-# record, HEAD still contains it, and the app answers now, before this deploy
-# changes anything. Otherwise the record is live. LIVE is the rollback target,
-# the no-op floor and the floor main may move back to; the drift check keeps
-# reading the record, so an unrecorded deploy still gets its one heal.
+# once pm2 has proven the restart took, see the pm2-restart block). That mark
+# is live when it follows the record and HEAD still contains it; otherwise the
+# record is live. LIVE is the no-op floor and the floor main may move back to;
+# the drift check keeps reading the record, so an unrecorded deploy still gets
+# its one heal.
+#
+# ⚠️ LIVE never depends on whether the app answers. A started commit RAN, and a
+# check that happens to miss (a slow moment, a blocked event loop) must never
+# let a deploy of an older commit move main back over it while the job goes
+# green. The answer below chooses the rollback target and nothing else.
 PORT=$(grep -oE '^PORT=[0-9]+' "$DIR/.env" 2>/dev/null | head -1 | cut -d= -f2 || true)
 PORT=${PORT:-3000}
-SERVING=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$PORT/api/config/maintenance" || true)
+# Does the app answer, before this deploy changes anything? Polled like
+# remote-smoke.sh, but only 3 tries, 2 s apart: a deploy of an app that is
+# down should not wait long to fix it.
+SERVING=""
+for try in 1 2 3; do
+	SERVING=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$PORT/api/config/maintenance" || true)
+	if [ "$SERVING" = "200" ] || [ "$try" = 3 ]; then break; fi
+	sleep 2
+done
 STARTED=$(git rev-parse --verify -q "refs/logisx/started-deploy^{commit}" || true)
 LIVE=""
 if [ "$VERIFIED_STATE" = ok ]; then
 	LIVE=$VERIFIED
-	if [ -n "$STARTED" ] && [ "$SERVING" = "200" ] \
-		&& git merge-base --is-ancestor "$VERIFIED" "$STARTED" && git merge-base --is-ancestor "$STARTED" HEAD; then
+	if [ -n "$STARTED" ] && git merge-base --is-ancestor "$VERIFIED" "$STARTED" && git merge-base --is-ancestor "$STARTED" HEAD; then
 		LIVE=$STARTED
 	fi
 fi
 
-# The rollback target: the LIVE commit. HEAD may be a commit a failed deploy
+# The rollback target: code that ran here. HEAD may be a commit a failed deploy
 # checked out and never started, and rolling back to that would restore code
-# that never ran. With no consistent record, HEAD, as before.
-if [ -n "$LIVE" ]; then ROLLBACK_TO=$LIVE; else ROLLBACK_TO=$PREV; fi
+# that never ran. So the record, or the started commit while the app answers
+# now: a started commit that does not answer may be exactly what broke. With
+# no consistent record, HEAD, as before. Once the checkout is done it is also
+# never the commit this run's checks will judge, unless that commit is the
+# record (see NEW below, and the no-op).
+if [ -z "$LIVE" ]; then
+	ROLLBACK_TO=$PREV
+elif [ "$LIVE" != "$VERIFIED" ] && [ "$SERVING" != "200" ]; then
+	ROLLBACK_TO=$VERIFIED
+else
+	ROLLBACK_TO=$LIVE
+fi
 
 echo "::group::pre-deploy state"
 echo "current HEAD:    $PREV"
@@ -222,10 +247,20 @@ if [ -n "$SHA" ]; then
 	if [ -n "$LIVE" ] && [ "$SHA" != "$LIVE" ] && git merge-base --is-ancestor "$SHA" "$LIVE" \
 		&& git merge-base --is-ancestor "$LIVE" origin/main; then
 		echo "the live deploy $LIVE already contains $SHA — a newer main commit is live. Not moving backwards; nothing to deploy."
+		# A no-op changes nothing, so the checks after it judge what runs now:
+		# LIVE. Like a deploy's (see NEW below), its rollback never returns to
+		# the very commit those checks judge unless it is the verified record.
+		# A started LIVE that fails them may be exactly what broke, and after a
+		# half-finished deploy (HEAD past LIVE) a rollback to it would even
+		# record it as verified.
+		if [ "$ROLLBACK_TO" = "$LIVE" ] && [ "$VERIFIED" != "$LIVE" ]; then
+			ROLLBACK_TO=$VERIFIED
+			echo "::warning::the live commit $LIVE was started here and is not the verified deploy $VERIFIED — if the checks after this no-op fail, the rollback returns to $VERIFIED, not to $LIVE"
+		fi
 		echo "::endgroup::"
 		if git grep -q 'allowRequest: liveUpdateHandshakeAllowed' "$LIVE" -- server.js 2>/dev/null; then GUARD=1; else GUARD=0; fi
 		echo "DEPLOY_NOOP=1"
-		echo "DEPLOYED_FROM=$LIVE"
+		echo "DEPLOYED_FROM=$ROLLBACK_TO"
 		echo "DEPLOYED_TO=$LIVE"
 		echo "DEPLOY_RECORD_STATE=$VERIFIED_STATE"
 		echo "DEPLOY_HANDSHAKE_GUARD=$GUARD"
@@ -240,6 +275,7 @@ if [ -n "$SHA" ]; then
 			exit 1
 		fi
 	elif [ -n "$LIVE" ] && git merge-base --is-ancestor "$LIVE" "$SHA" \
+		&& { [ -z "$STARTED" ] || ! git merge-base --is-ancestor "$STARTED" HEAD || git merge-base --is-ancestor "$STARTED" "$SHA"; } \
 		&& git merge-base --is-ancestor main origin/main; then
 		# Local main is past $SHA only by commits past the last LIVE deploy: the
 		# live commit is at or before $SHA, so whatever main holds beyond it was
@@ -247,6 +283,10 @@ if [ -n "$SHA" ]; then
 		# $SHA drops no commit the app has run since its last live one, and
 		# nothing only this clone has (main is contained in origin/main); the
 		# pre-deploy warning above names what HEAD held past the live commit.
+		# ⚠️ Nor a started commit HEAD contains, whatever the app answered: $SHA
+		# must contain that too. LIVE already covers a started commit that
+		# follows the record; the middle clause also covers one that does not,
+		# which HEAD can still hold through a merge.
 		# Without a record there is no such proof, so this never happens then:
 		# the refusal below stands.
 		echo "local main ($(git rev-parse main)) is past $SHA only by commits past the last live deploy $LIVE — moving main back to $SHA"
@@ -255,7 +295,7 @@ if [ -n "$SHA" ]; then
 			exit 1
 		fi
 	else
-		echo "::error::local main ($(git rev-parse main 2>/dev/null)) is past $SHA, and with the verified-deploy record $VERIFIED_STATE this box cannot prove main's extra commits never ran, so it will not move main back. Nothing was changed. To deploy main's tip, run Deploy with ref=main; to run exactly this commit, run Deploy with ref=$SHA (a pin)."
+		echo "::error::local main ($(git rev-parse main 2>/dev/null)) is past $SHA, and with the verified-deploy record $VERIFIED_STATE this box cannot prove main's extra commits never ran, so it will not move main back (live commit ${LIVE:-unknown}, started deploy ${STARTED:-none}). Nothing was changed. To deploy main's tip, run Deploy with ref=main; to run exactly this commit, run Deploy with ref=$SHA (a pin)."
 		exit 1
 	fi
 elif [ "$REF" = "main" ]; then
@@ -287,6 +327,17 @@ if [ -n "$SHA" ] && [ "$NEW" != "$SHA" ]; then
 	exit 1
 fi
 echo "new HEAD: $NEW"
+# ⚠️ A rollback never returns to the very commit this deploy restarts, unless
+# that commit is the verified record. LIVE can be a started commit that is not
+# the record: one whose own checks failed while its rollback never ran (ssh
+# gave up, the job timed out). A drift heal or a re-run of that commit would
+# otherwise name it as its own rollback target, and when its checks failed
+# again the rollback would restart the same commit and, serving, record it as
+# verified. The record is the last commit that PASSED its checks.
+if [ "$ROLLBACK_TO" = "$NEW" ] && [ -n "$VERIFIED" ] && [ "$VERIFIED" != "$NEW" ]; then
+	ROLLBACK_TO=$VERIFIED
+	echo "::warning::$NEW is the commit this deploy restarts, and the verified deploy is $VERIFIED — a rollback of this deploy returns to $VERIFIED instead, and drops: $(git log --oneline "$VERIFIED..$NEW" 2>/dev/null | tr '\n' ';' | sed 's/;$//')"
+fi
 echo "::endgroup::"
 
 echo "::group::resolve the Node this app actually runs on"
@@ -294,13 +345,21 @@ echo "::group::resolve the Node this app actually runs on"
 # PATH. Native modules (better-sqlite3) are compiled per NODE_MODULE_VERSION;
 # installing under one major and running under another is ERR_DLOPEN_FAILED on
 # boot. pm2's interpreter is the single source of truth so the two cannot drift.
+# ⚠️ Read by name from jlist's JSON line (pm2 can print a notice ahead of it,
+# see the pm2-restart block). When it cannot be read at all, refuse: a guess
+# at PATH's node is the box's system Node 20, whose build dies on boot under
+# pm2's Node 22. Only pm2's own default, the bare `node`, means PATH's node.
 NODE_BIN=$(pm2 jlist 9>&- | node -e '
   let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
-    const p=JSON.parse(d).find(x=>x.name===process.argv[1]);
+    let l=[];try{l=JSON.parse(d.slice(d.lastIndexOf("\n[")+1));}catch(e){}
+    const p=Array.isArray(l)?l.find(x=>x&&x.name===process.argv[1]):null;
     process.stdout.write(p && p.pm2_env ? (p.pm2_env.exec_interpreter||"") : "");
   });' "$PM2")
 case "$NODE_BIN" in
-	""|node) NODE_BIN=$(command -v node) ;;
+	node) NODE_BIN=$(command -v node) ;;
+	"")
+		echo "::error::cannot read the interpreter pm2 runs $PM2 with — refusing to build with a guess. Nothing was built or restarted."
+		exit 1 ;;
 esac
 PATH="$(dirname "$NODE_BIN"):$PATH"
 export PATH
@@ -329,35 +388,84 @@ test -f client/dist/index.html || { echo "::error::build produced no client/dist
 echo "::endgroup::"
 
 echo "::group::restart"
+# >>> pm2-restart — keep byte-identical in remote-deploy.sh and remote-rollback.sh
+# (scripts/test-deploy-scripts.js pins the copies)
+#
+# Restarts the ONE process named $PM2, then proves the restart took: pm2 must
+# exit 0 AND the process's pm_uptime (when pm2 last started it) must change. A
+# restart that silently did nothing leaves the OLD process serving, and every
+# check after it would read that old process: the commit just built would be
+# marked started, and later recorded as verified, without ever having run.
+# Sets RESTART_OK=1 only when both hold, and PM2_STATUS to pm2's status after.
+#
 # ⚠️ Name-scoped, ALWAYS. This VPS hosts ~23 other pm2 processes for other
-# clients. `pm2 restart all` or a numeric id would take those down too.
+# clients. `pm2 restart all` or a numeric id would take those down too. The
+# proof reads this process BY NAME from `pm2 jlist` (JSON, parsed with node;
+# never `pm2 describe`, whose box-drawing columns shift with the values, and
+# never jq), so no other process can stand in for it. pm2 can print its own
+# notices on stdout ahead of the JSON (a daemon older than the CLI: "In-memory
+# PM2 is out-of-date"), and jlist's JSON is always one line, so only the last
+# line that starts with "[" is parsed.
 #
 # ⚠️ Production is restarted through ecosystem.config.js, NOT by name, because
 # it carries five pm2-level settings — NODE_OPTIONS (the 4 GB heap that exists
 # because it was OOM-ing at 2 GB), kill_timeout, max_restarts, min_uptime and
 # restart_delay. A plain by-name restart re-reads the dump and keeps them, but
 # going through the file is what makes a CHANGED setting take effect.
+pm2_state() {
+	pm2 jlist 9>&- | node -e '
+	  let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+	    let l=[];try{l=JSON.parse(d.slice(d.lastIndexOf("\n[")+1));}catch(e){}
+	    const p=Array.isArray(l)?l.find(x=>x&&x.name===process.argv[1]):null;
+	    const e=(p&&p.pm2_env)||{};
+	    const n=(v)=>Number.isFinite(v)?String(v):"none";
+	    process.stdout.write(n(e.pm_uptime)+" "+n(e.restart_time)+" "+String(e.status||"missing").replace(/[^A-Za-z0-9 _-]/g,"?"));
+	  });' "$PM2"
+}
+read -r UPTIME_BEFORE _ <<<"$(pm2_state)"
 if [ -f ecosystem.config.js ] && grep -q "name: '$PM2'" ecosystem.config.js; then
 	pm2 restart ecosystem.config.js --update-env --silent 9>&-
 else
 	pm2 restart "$PM2" --silent 9>&-
 fi
-# Parse jlist, never `pm2 describe` — describe renders a box-drawing table whose
-# column widths shift with the value, so a sed against it silently stops
-# matching. jlist is JSON and stable.
-# Not online is reported, not fatal: the smoke check next decides (and on
-# production rolls back). It only means this commit is NOT marked started.
-if pm2 jlist 9>&- | node -e '
-  let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
-    const p=JSON.parse(d).find(x=>x.name===process.argv[1]);
-    if(!p){console.error("::error::pm2 process "+process.argv[1]+" not found after restart");process.exit(1);}
-    console.log("pm2 status: "+p.pm2_env.status+"  restarts: "+p.pm2_env.restart_time);
-    if(p.pm2_env.status!=="online"){console.error("::error::pm2 reports status="+p.pm2_env.status);process.exit(1);}
-  });' "$PM2"; then
+RESTART_RC=$?
+read -r UPTIME_AFTER PM2_RESTARTS PM2_STATUS <<<"$(pm2_state)"
+UPTIME_BEFORE=${UPTIME_BEFORE:-none}
+UPTIME_AFTER=${UPTIME_AFTER:-none}
+PM2_STATUS=${PM2_STATUS:-missing}
+echo "restarting $PM2: pm2 returned $RESTART_RC, start time $UPTIME_BEFORE -> $UPTIME_AFTER, status $PM2_STATUS, restarts ${PM2_RESTARTS:-none}"
+RESTART_OK=0
+if [ "$RESTART_RC" != 0 ]; then
+	echo "::error::pm2 exited $RESTART_RC restarting $PM2 — the restart is not proven"
+elif [ "$UPTIME_BEFORE" = none ] || [ "$UPTIME_AFTER" = none ]; then
+	echo "::error::pm2 gave no start time for $PM2 (before: $UPTIME_BEFORE, after: $UPTIME_AFTER) — the restart is not proven"
+elif [ "$UPTIME_AFTER" = "$UPTIME_BEFORE" ]; then
+	echo "::error::the restart of $PM2 did not take: pm2 still reports the start time from before it ($UPTIME_AFTER)"
+else
+	RESTART_OK=1
+fi
+# <<< pm2-restart
+# ⚠️ An unproven restart is reported, not an early exit. The process serving
+# may be the one from before this deploy, or none at all, and production must
+# still be able to recover by itself. So nothing is marked started, and the
+# deploy ends as DEPLOY_RESULT=unproven. .github/actions/vps-deploy then still
+# runs the smoke and edge checks, never records an unproven deploy as
+# verified, rolls production back whatever the checks said (with the restart
+# unproven they may be reading the old process), and fails the job. Staging,
+# which has no rollback, just fails.
+RESULT=deployed
+if [ "$RESTART_OK" != 1 ]; then
+	RESULT=unproven
+	echo "::error::$NEW is not marked started, and this deploy reports DEPLOY_RESULT=unproven: nothing records it as verified, and production rolls back"
+elif [ "$PM2_STATUS" = online ]; then
 	# Started: it is running now, whether or not the record step later gets to
 	# record it as verified (see LIVE above).
 	git update-ref --create-reflog -m "logisx: started" refs/logisx/started-deploy "$NEW" \
 		|| echo "::warning::could not mark $NEW as started"
+else
+	# Not online is reported, not fatal: the smoke check next decides (and on
+	# production rolls back). It only means this commit is NOT marked started.
+	echo "::error::pm2 reports status=$PM2_STATUS for $PM2 after the restart — $NEW is not marked started"
 fi
 echo "::endgroup::"
 
@@ -371,4 +479,4 @@ echo "DEPLOYED_FROM=$ROLLBACK_TO"
 echo "DEPLOYED_TO=$NEW"
 echo "DEPLOY_RECORD_STATE=$VERIFIED_STATE"
 echo "DEPLOY_HANDSHAKE_GUARD=$GUARD"
-echo "DEPLOY_RESULT=deployed"
+echo "DEPLOY_RESULT=$RESULT"

@@ -44,6 +44,14 @@
  *      command-shaped lines.
  *   §11 NO REMOTE SCRIPT EXITS 255 ITSELF: ssh-retry.sh reads 255 as its own
  *      transport failure. Literal exit codes only, no bare exit, no errexit.
+ *   §15 THE RESTART IS PROVEN. pm2 must exit 0 AND the process's pm_uptime,
+ *      read BY NAME from `pm2 jlist` (the stub lists another tenant first),
+ *      must move. A restart that fails either marks and records nothing, so
+ *      the old process can never pass for the new commit. The deploy reports
+ *      DEPLOY_RESULT=unproven (the action checks, rolls back and fails the
+ *      job; test-deploy-live.js §14 runs that), and the rollback fails. §7
+ *      pins the shared restart block byte-identical, with nothing marked
+ *      started before its gate.
  *
  * The verified-deploy record is tested by scripts/test-deploy-record.js (§12),
  * and the started mark, the LIVE commit and the vps-deploy action by
@@ -67,8 +75,9 @@ const { spawn, spawnSync } = require("child_process");
 const {
 	DEPLOY_DIR, readScript, REAL, SMOKE, ok, record, finish, crash,
 	T, D, ENV, git, tryGit, writeExec, hasRealFlock,
-	C1, C2, C3, S1, MARKER, LOCK_FILE, head, onMain, marker, log, VERIFIED_REF, verified, STARTED_REF,
-	resetBox, runSh, deployEnv, field, waitFor, swap, cut, expectCaught, M,
+	C1, C2, C3, S1, MARKER, LOCK_FILE, head, onMain, marker, log, VERIFIED_REF, verified, STARTED_REF, started,
+	resetBox, runSh, deployEnv, field, lastField, waitFor, swap, cut, expectCaught, M,
+	short, rollback,
 } = require("./deploy-test-sandbox.js");
 
 // ───────────────────────────────────────────────── §1 the box lock (async)
@@ -253,6 +262,22 @@ const DRIFT_CASES = {
 		r.push([/^restart tag= fd9=closed/m.test(log("pm2")), `${tag}§7 the rollback's pm2 restart closes the lock FD too`]);
 		return r;
 	},
+	pinRollbackKeepsPinMarker(S, tag) {
+		// A pin to the commit already live (C2, main at C3) fails its checks and
+		// rolls back to that same C2. The pin's marker, main's tip C3, stays: the
+		// rejected C2 is not main's tip, so drift could never deploy it anyway,
+		// and replacing the marker would let drift deploy C3 over the pin.
+		const r = [];
+		resetBox(C3, { detachAt: C2, verified: C2, started: C2 });
+		const d = runSh(S.deploy, deployEnv({ REF: C2 }));
+		r.push([d.code === 0 && marker() === C3 && lastField(d.stdout, "DEPLOYED_FROM") === C2,
+			`${tag}§4 a pin to the live C2 sets the marker to main's tip C3 and names C2 as its rollback target (code ${d.code}, marker ${short(marker())})`]);
+		const x = rollback(S, lastField(d.stdout, "DEPLOYED_FROM"), { RECORD_STATE: lastField(d.stdout, "DEPLOY_RECORD_STATE") });
+		r.push([x.code === 0 && /ROLLBACK OK/.test(x.out) && head() === C2 && marker() === C3 && verified() === C2,
+			`${tag}§4 …its rollback to that same C2 keeps the marker on main's tip C3 and records nothing new (marker ${short(marker())}, record ${short(verified())})`]);
+		r.push([checkState(S) === "behind-already-attempted", `${tag}§4 …so drift still alarms over the pin; it never deploys C3 over it`]);
+		return r;
+	},
 	manualPin(S, tag) {
 		// §4 writer 3: a manual pin off main (the documented rollback path).
 		const r = [];
@@ -299,6 +324,110 @@ const PROBE_CASES = {
 		return [[x.code === 0 && /rebuild/.test(log("npm")), `${tag}§9 the rollback's probe opens a database too: require() OK + construction throws → rebuild (code ${x.code})`]];
 	},
 };
+
+// ─────────────────────────────────────────── §15 the restart is proven
+// `pm2 restart` can fail, or "succeed" without restarting anything, while the
+// OLD process keeps serving, and every check after it would read that old
+// process. So the deploy and the rollback each prove the restart took: pm2
+// exits 0 AND this process's pm_uptime, read BY NAME from `pm2 jlist` (the
+// stub lists another tenant's process first), moved. Otherwise nothing is
+// marked started or recorded, and the deploy (or the rollback) fails.
+const RESTART_CASES = {
+	deployProven(S, tag) {
+		resetBox(C1, { verified: C1, started: C1 });
+		const x = runSh(S.deploy, deployEnv({ SHA: C2 }));
+		return [[x.code === 0 && started() === C2 && /^restarting logistics-app: pm2 returned 0, start time 1000 -> 1001, status online/m.test(x.out),
+			`${tag}§15 a restart pm2 answers 0 for, whose start time moved (1000 → 1001, read by name past another tenant's process), marks C2 started (code ${x.code}, started ${short(started())})`]];
+	},
+	deployProvenThroughNotice(S, tag) {
+		// pm2's CLI prints its out-of-date notice on stdout ahead of jlist's JSON.
+		// The deploy still reads the JSON line: it builds with pm2's interpreter
+		// (off the PATH here, as /opt/node22 is on the box), and proves the restart.
+		resetBox(C1, { verified: C1, started: C1 });
+		const x = runSh(S.deploy, deployEnv({ SHA: C2, STUB_PM2_JLIST_NOISE: "1" }));
+		return [
+			[x.code === 0 && started() === C2 && /^restarting logistics-app: pm2 returned 0, start time 1000 -> 1001, status online/m.test(x.out),
+				`${tag}§15 with pm2's out-of-date notice ahead of jlist's JSON, the restart is still proven and C2 marked started (code ${x.code}, started ${short(started())})`],
+			[x.out.split("\n").includes(`pm2 interpreter: ${ENV.STUB_NODE}`) && x.out.split("\n").some((l) => l.startsWith(`building with:   ${ENV.STUB_NODE} `)),
+				`${tag}§15 …and it builds with pm2's own interpreter, never PATH's node`],
+		];
+	},
+	rollbackThroughNotice(S, tag) {
+		resetBox(C3, { verified: C1, started: C3 });
+		const x = rollback(S, C2, { RECORD_STATE: "ok", STUB_PM2_JLIST_NOISE: "1" });
+		return [[x.code === 0 && /ROLLBACK OK/.test(x.out) && x.out.split("\n").includes(`pm2 interpreter: ${ENV.STUB_NODE}`) && started() === C2 && verified() === C2,
+			`${tag}§15 a rollback with pm2's notice ahead of jlist's JSON builds with pm2's interpreter, proves its restart and records C2 (code ${x.code}, record ${short(verified())})`]];
+	},
+	deployNoInterpreter(S, tag) {
+		// jlist does not list the process: no guess at PATH's node.
+		resetBox(C1, { verified: C1, started: C1 });
+		const x = runSh(S.deploy, deployEnv({ SHA: C2, STUB_PM2_MISSING: "1" }));
+		return [[x.code === 1 && /::error::cannot read the interpreter pm2 runs logistics-app with/.test(x.out)
+			&& !/install-start/.test(log("npm")) && !/^restart /m.test(log("pm2")) && started() === C1 && lastField(x.stdout, "DEPLOY_RESULT") === "",
+		`${tag}§15 a deploy that cannot read pm2's interpreter refuses to build: nothing installed, built or restarted (code ${x.code})`]];
+	},
+	rollbackNoInterpreter(S, tag) {
+		resetBox(C3, { verified: C1, started: C3 });
+		const x = rollback(S, C2, { RECORD_STATE: "ok", STUB_PM2_MISSING: "1" });
+		return [[x.code === 1 && /ROLLBACK FAILED — cannot read the interpreter/.test(x.out) && head() === C3
+			&& !/install-start/.test(log("npm")) && !/^restart /m.test(log("pm2")) && marker() === C3 && verified() === C1,
+		`${tag}§15 a rollback that cannot read pm2's interpreter refuses before its checkout: HEAD stays C3, nothing built or restarted, the marker still names C3 (code ${x.code}, HEAD ${short(head())})`]];
+	},
+	deployRestartFails(S, tag) {
+		// pm2 answers 1. Its start time moved all the same, so only the exit
+		// code can catch this one.
+		resetBox(C1, { verified: C1, started: C1 });
+		const x = runSh(S.deploy, deployEnv({ SHA: C2, STUB_PM2_RESTART_RC: "1" }));
+		return [[x.code === 0 && /^restart /m.test(log("pm2")) && /::error::pm2 exited 1 restarting logistics-app/.test(x.out)
+			&& started() === C1 && verified() === C1 && lastField(x.stdout, "DEPLOY_RESULT") === "unproven",
+		`${tag}§15 a restart pm2 answers 1 for is reported as DEPLOY_RESULT=unproven, with C2 not marked started, so the action checks, rolls back and never records it (code ${x.code}, result ${lastField(x.stdout, "DEPLOY_RESULT") || "none"}, started ${short(started())})`]];
+	},
+	deployRestartNoop(S, tag) {
+		// pm2 answers 0, but the start time never moved: the old process serves.
+		resetBox(C1, { verified: C1, started: C1 });
+		const x = runSh(S.deploy, deployEnv({ SHA: C2, STUB_PM2_RESTART_NOOP: "1" }));
+		return [[x.code === 0 && /::error::the restart of logistics-app did not take/.test(x.out)
+			&& started() === C1 && verified() === C1 && lastField(x.stdout, "DEPLOY_RESULT") === "unproven",
+		`${tag}§15 a restart whose start time never moved is reported as DEPLOY_RESULT=unproven, with C2 not marked started (code ${x.code}, result ${lastField(x.stdout, "DEPLOY_RESULT") || "none"}, started ${short(started())})`]];
+	},
+	rollbackRestartFails(S, tag) {
+		resetBox(C3, { verified: C1, started: C3 });
+		const x = rollback(S, C2, { RECORD_STATE: "ok", STUB_PM2_RESTART_RC: "1" });
+		return [[x.code === 1 && /ROLLBACK FAILED — the restart of logistics-app at [0-9a-f]{40} is not proven/.test(x.out) && !/ROLLBACK OK/.test(x.out)
+			&& started() === C3 && verified() === C1 && marker() === C3,
+		`${tag}§15 a rollback whose restart pm2 answers 1 for fails without polling: C2 not marked started, not recorded, and the marker still names C3 (code ${x.code}, started ${short(started())}, record ${short(verified())})`]];
+	},
+	rollbackRestartNoop(S, tag) {
+		resetBox(C3, { verified: C1, started: C3 });
+		const x = rollback(S, C2, { RECORD_STATE: "ok", STUB_PM2_RESTART_NOOP: "1" });
+		return [[x.code === 1 && /::error::the restart of logistics-app did not take/.test(x.out) && !/ROLLBACK OK/.test(x.out)
+			&& started() === C3 && verified() === C1 && marker() === C3,
+		`${tag}§15 a rollback whose restart never moved the start time fails without polling the old process: nothing marked started or recorded (code ${x.code}, started ${short(started())}, record ${short(verified())})`]];
+	},
+};
+
+// The block that restarts and proves it, byte-identical in both scripts that
+// restart, and nothing marked started before the proof.
+function restartBlock(text) {
+	const a = text.indexOf("# >>> pm2-restart");
+	const b = text.indexOf("# <<< pm2-restart");
+	return a >= 0 && b > a ? text.slice(a, b) : null;
+}
+function restartPins(scripts, tag = "") {
+	const d = restartBlock(scripts.deploy);
+	const r = restartBlock(scripts.rollback);
+	const startedAfterProof = (t) => {
+		const end = t.indexOf("# <<< pm2-restart");
+		const mark = t.indexOf("refs/logisx/started-deploy \"$");
+		const gate = t.indexOf('if [ "$RESTART_OK" != 1 ]; then', end);
+		return end > 0 && gate > end && mark > gate;
+	};
+	return [
+		[d && r && d === r, `${tag}§7 the pm2-restart block is byte-identical in remote-deploy.sh and remote-rollback.sh`],
+		[startedAfterProof(scripts.deploy) && startedAfterProof(scripts.rollback),
+			`${tag}§7 both scripts mark a commit started only after the pm2-restart block, behind its RESTART_OK gate`],
+	];
+}
 
 // The probe's exact text, shared by the static pin and the mutants below.
 const DB_PROBE = `node -e "new (require('better-sqlite3'))(':memory:').close()"`;
@@ -532,6 +661,10 @@ async function mutants() {
 	expectCaught("remote-drift-check.sh gets a bare exit", exitPins({ ...REMOTE_SCRIPTS, "remote-drift-check.sh": swap(REMOTE_SCRIPTS["remote-drift-check.sh"], 'cd "$DIR" || exit 1', 'cd "$DIR" || exit') }, M));
 
 	expectCaught("the record script skips the deploy lock", await lockScenario({ ...REAL, record: cut(REAL.record) }, M));
+
+	// §15: the restart is proven.
+	expectCaught("the deploy ignores whether the start time moved", RESTART_CASES.deployRestartNoop({ ...REAL, deploy: swap(REAL.deploy,
+		'elif [ "$UPTIME_AFTER" = "$UPTIME_BEFORE" ]; then', "elif false; then") }, M));
 }
 
 // ─────────────────────── §10 the smoke check's log tail, commands switched off
@@ -715,6 +848,8 @@ function exitScannerSelfCheck() {
 	record(runCases(PIN_CASES, REAL));
 	record(runCases(DRIFT_CASES, REAL));
 	record(runCases(PROBE_CASES, REAL));
+	record(runCases(RESTART_CASES, REAL));
+	record(restartPins(REAL));
 	sshScenarios();
 	sourcePins();
 	probePins();

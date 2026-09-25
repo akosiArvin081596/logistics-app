@@ -3,33 +3,42 @@
  * What a deploy reports as LIVE, and what the vps-deploy action does with the
  * deploy's report. Runs the REAL scripts/deploy/*.sh against the throwaway
  * sandbox from scripts/deploy-test-sandbox.js (shared with
- * scripts/test-deploy-scripts.js, §1–§11, and scripts/test-deploy-record.js,
- * §12: the verified record), and the REAL steps of
- * .github/actions/vps-deploy/action.yml against stubs. Each is a runner of its
- * own, so each keeps its own time budget.
+ * scripts/test-deploy-scripts.js, §1–§11 and §15, and
+ * scripts/test-deploy-record.js, §12: the verified record), and the REAL steps
+ * of .github/actions/vps-deploy/action.yml against stubs. Each is a runner of
+ * its own, so each keeps its own time budget.
  *
  * WHY IT EXISTS. The verified record lags a deploy whose checks passed but
  * whose separate record step then failed: that commit serves while the record
  * still names the one before. Each property below is a way a deploy could
  * roll back past code that ran, or act on a report it misread:
  *   §13 THE LIVE COMMIT. remote-deploy.sh marks every commit it restarts
- *       (refs/logisx/started-deploy, only once pm2 reports the app online), as
- *       does a rollback after its restart. LIVE is that mark while it follows
- *       the record, HEAD contains it and the app answers before the deploy
- *       changes anything; otherwise the record. LIVE is the rollback target,
- *       the no-op floor and the floor main may move back to, and each clause
- *       of the no-op and the move back is exercised: (D) a commit only this
- *       clone has, (E) a verified pin off main, (F) a live commit off main.
- *       The deploy's stdout ends with DEPLOY_RESULT, each value printed once,
- *       and DEPLOY_HANDSHAKE_GUARD says whether the commit now serving has the
- *       live-update Origin check.
+ *       (refs/logisx/started-deploy, only once pm2 has proven the restart and
+ *       reports the app online), as does a rollback after its proven restart.
+ *       LIVE is that mark while it follows the record and HEAD contains it;
+ *       otherwise the record. LIVE is the no-op floor and the floor main may
+ *       move back to, whatever the app answers: a started commit that misses
+ *       the check is never moved back over, nor one HEAD holds through a
+ *       merge. Each clause of the no-op and the move back is exercised: (D) a
+ *       commit only this clone has, (E) a verified pin off main, (F) a live
+ *       commit off main. THE ROLLBACK TARGET is LIVE only while it is the
+ *       record or the app answers, and never the commit a run's checks judge
+ *       unless it is the record: a heal of a started commit that failed and
+ *       whose rollback never ran rolls back to the record, and so does a
+ *       no-op after a half-finished deploy. The deploy's stdout ends with
+ *       DEPLOY_RESULT, each value printed once, and DEPLOY_HANDSHAKE_GUARD says
+ *       whether the commit now serving has the live-update Origin check.
  *   §14 THE ACTION. The record step runs only after the deploy, the smoke
  *       check and the edge check all passed, never for a no-op, and a failed
  *       record fails production's job only. The deploy step lets only a plain
  *       ref and a full SHA reach the box, and reads each value from the LAST
  *       whole line of its kind. The edge check retries only an unanswered or
  *       5xx request, and asks a foreign Origin for its 403 unless the deploy
- *       reported that the commit now serving predates that check.
+ *       reported that the commit now serving predates that check. The WHOLE
+ *       action also runs end to end against the real remote scripts, every
+ *       `if:` evaluated: a restart pm2 did not prove (DEPLOY_RESULT=unproven)
+ *       still gets the smoke and edge checks, is never recorded, rolls
+ *       production back, and ends the job red.
  *   §8  mutants: each property above, broken on purpose, must turn this
  *       runner red.
  *
@@ -43,17 +52,22 @@ const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
 const {
-	REAL, ok, record, finish, crash,
-	T, D, git, writeExec,
-	C1, C2, C3, S1, head, onMain, log, verified, STARTED_REF, started,
+	REAL, SMOKE, ok, record, finish, crash,
+	T, D, ENV, git, writeExec,
+	C1, C2, C3, S1, head, onMain, marker, log, verified, STARTED_REF, started,
 	resetBox, runSh, deployEnv, field, lastField, swap, expectCaught, M,
 	short, runCases, clearLogs, reflog, checkOut, result, deployedFrom, didFullDeploy, isNoop, rollback,
+	fastBinDir, leaveHalfFinished,
 } = require("./deploy-test-sandbox.js");
 
 // The deploy's stdout, as the action reads it.
 const lastStdoutLine = (x) => x.stdout.trimEnd().split("\n").pop();
 const VALUE_KEYS = ["DEPLOYED_FROM", "DEPLOYED_TO", "DEPLOY_RECORD_STATE", "DEPLOY_HANDSHAKE_GUARD", "DEPLOY_RESULT"];
 const valuesOnce = (x) => VALUE_KEYS.every((k) => (x.stdout.match(new RegExp(`^${k}=`, "gm")) || []).length === 1);
+// A deploy whose app does not answer asks 3 times, 2 s apart, before it
+// changes anything. The fast sleep keeps that instant.
+const deployFast = (S, env) => runSh(S.deploy, deployEnv({ PATH: `${fastBinDir()}:${ENV.PATH}`, ...env }));
+const mainAt = () => git(D.box, "rev-parse", "main");
 
 // ─────────────────────── §13 THE LIVE COMMIT
 // Named cases, small enough that a mutant re-runs only the one that targets it.
@@ -84,21 +98,97 @@ const LIVE_CASES = {
 	startedAncestorNoop(S, tag) {
 		resetBox(C2, { verified: C1, started: C2 });
 		const x = runSh(S.deploy, deployEnv({ SHA: C1 }));
-		return [[isNoop(x) && head() === C2 && onMain() && deployedFrom(x) === C2,
-			`${tag}§13 C2 restarted but unrecorded: deploying C1, an ancestor of it, is a no-op, not a move back over code that ran (code ${x.code}, HEAD ${short(head())}, result ${result(x) || "none"})`]];
+		return [[isNoop(x) && head() === C2 && onMain() && lastField(x.stdout, "DEPLOYED_TO") === C2 && deployedFrom(x) === C1,
+			`${tag}§13 C2 restarted but unrecorded: deploying C1, an ancestor of it, is a no-op on the live C2, not a move back over code that ran; if the checks after it fail, the rollback returns to the recorded C1 (code ${x.code}, HEAD ${short(head())}, result ${result(x) || "none"}, rollback target ${short(deployedFrom(x))})`]];
 	},
 	startedNotServing(S, tag) {
 		resetBox(C2, { verified: C1, started: C2 });
-		const x = runSh(S.deploy, deployEnv({ SHA: C3, STUB_HTTP_CODE: "503" }));
-		return [[x.code === 0 && deployedFrom(x) === C1,
-			`${tag}§13 the started C2 counts only while the app answers: with the app not serving, the rollback target is the recorded C1 (got ${short(deployedFrom(x))})`]];
+		const x = deployFast(S, { SHA: C3, STUB_HTTP_CODE: "503" });
+		return [[x.code === 0 && deployedFrom(x) === C1 && new RegExp(`^live commit: +${C2}$`, "m").test(x.out),
+			`${tag}§13 the started C2 is the rollback target only while the app answers: with the app not serving, the rollback target is the recorded C1, though C2 stays the live commit (got ${short(deployedFrom(x))})`]];
 	},
 	startedNotInHead(S, tag) {
 		// HEAD was moved back past the started C3 by hand: what runs is unknown.
+		// Deploying HEAD's own C2 is a full deploy, never a no-op under C3.
 		resetBox(C2, { verified: C1, started: C3 });
+		const x = runSh(S.deploy, deployEnv({ SHA: C2 }));
+		return [[x.code === 0 && didFullDeploy(x) && deployedFrom(x) === C1,
+			`${tag}§13 a started mark HEAD does not contain is ignored: deploying HEAD's own C2 is a full deploy, not a no-op under C3, and the rollback target is the recorded C1 (result ${result(x) || "none"}, rollback target ${short(deployedFrom(x))})`]];
+	},
+	// ── N-2: whether the app answers never lets main move back over a started commit.
+	checkMissedNoop(S, tag) {
+		// C3 was started (pm2 proved the restart and reported it online) and never
+		// recorded, and the app misses the check now. Deploying C2, an older
+		// commit, is a no-op on C3: the check chooses only the rollback target.
+		resetBox(C3, { verified: C1, started: C3 });
+		const x = deployFast(S, { SHA: C2, STUB_HTTP_CODE: "503" });
+		return [
+			[isNoop(x) && mainAt() === C3 && head() === C3 && lastField(x.stdout, "DEPLOYED_TO") === C3,
+				`${tag}§13 the started C3 misses the check: deploying C2 is a no-op that never moves main back over C3 (code ${x.code}, result ${result(x) || "none"}, main ${short(mainAt())})`],
+			[deployedFrom(x) === C1, `${tag}§13 …and the missed check only makes the recorded C1 the rollback target (got ${short(deployedFrom(x))})`],
+		];
+	},
+	checkMissedPin(S, tag) {
+		// A pin, S1, started and never recorded, with main at C3, and the app
+		// missing the check. Deploying C2 would move main back from C3 (which may
+		// have run before the pin) and replace the S1 that ran. Refused.
+		resetBox(C3, { detachAt: S1, verified: C1, started: S1 });
+		const x = deployFast(S, { SHA: C2, STUB_HTTP_CODE: "503" });
+		return [[x.code === 1 && /cannot prove main's extra commits never ran/.test(x.out) && mainAt() === C3 && head() === S1 && !/restart/.test(log("pm2")),
+			`${tag}§13 a started pin S1 that misses the check: deploying C2 is refused, main stays C3 and HEAD S1, nothing restarted (code ${x.code}, main ${short(mainAt())}, HEAD ${short(head())})`]];
+	},
+	startedHeldThroughMerge(S, tag) {
+		// HEAD holds a started commit that does not follow the record, through a
+		// merge made on the box (-s ours, so no conflict) of the verified C2 and
+		// the started S1. Moving main back from C3 to C2 would drop S1, which ran:
+		// $SHA must contain every started commit HEAD holds.
+		resetBox(C3, { detachAt: C2, verified: C2, started: S1 });
+		git(D.box, "merge", "-q", "-s", "ours", "--no-ff", "-m", "box merge", S1);
+		const merged = head();
+		const x = runSh(S.deploy, deployEnv({ SHA: C2 }));
+		return [[x.code === 1 && /cannot prove main's extra commits never ran/.test(x.out) && mainAt() === C3 && head() === merged && !/restart/.test(log("pm2")),
+			`${tag}§13 HEAD holds the started S1 through a merge: deploying C2 is refused, main stays C3 and nothing restarts (code ${x.code}, main ${short(mainAt())})`]];
+	},
+	// ── N-1: a rollback never targets the commit whose checks just failed.
+	healOfFailedStarted(S, tag) {
+		const r = [];
+		// C3 deployed and started, its checks failed, and its rollback never ran
+		// (ssh gave up): started C3, recorded C2, the app still answering. That is
+		// the state startedMark shows a real deploy leaves, set up directly.
+		resetBox(C3, { verified: C2, started: C3 });
+		// Drift reads it as behind-healable; the heal prep writes the marker.
+		let out = checkOut(S);
+		const h = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: field(out, "DRIFT_LOCAL") });
+		r.push([field(out, "DRIFT_STATE") === "behind-healable" && field(h.out, "HEAL_READY") === "yes" && marker() === C3,
+			`${tag}§13 (setup) drift heals it once: behind-healable, marker C3 (got ${field(out, "DRIFT_STATE")})`]);
+		// The heal deploys C3 again. LIVE is C3, the very commit it restarts.
 		const x = runSh(S.deploy, deployEnv({ SHA: C3 }));
-		return [[x.code === 0 && deployedFrom(x) === C1,
-			`${tag}§13 a started mark HEAD does not contain is ignored: the rollback target is the recorded C1 (got ${short(deployedFrom(x))})`]];
+		const prev = deployedFrom(x);
+		r.push([x.code === 0 && didFullDeploy(x) && prev === C2 && /a rollback of this deploy returns to [0-9a-f]{40} instead, and drops: [0-9a-f]{7,} c3$/m.test(x.out),
+			`${tag}§13 a heal of the started C3 names the verified C2 as its rollback target, never C3 itself, and says what that drops (got ${short(prev)})`]);
+		// Its checks fail again: the action rolls back to what the deploy reported.
+		const y = rollback(S, prev, { RECORD_STATE: lastField(x.stdout, "DEPLOY_RECORD_STATE") });
+		r.push([y.code === 0 && /ROLLBACK OK/.test(y.out) && head() === C2 && verified() === C2 && started() === C2 && marker() === C3,
+			`${tag}§13 …failing again, it rolls back to C2: C3 is never recorded, and the drift marker names C3 (HEAD ${short(head())}, record ${short(verified())}, marker ${short(marker())})`]);
+		out = checkOut(S);
+		r.push([field(out, "DRIFT_STATE") === "behind-already-attempted",
+			`${tag}§13 …so drift alarms on C3 instead of reading in-sync (got ${field(out, "DRIFT_STATE")})`]);
+		return r;
+	},
+	noopAfterHalfFinished(S, tag) {
+		// The started C2 is live and unrecorded, and a later deploy died after
+		// checking out C3. Deploying C1 is a no-op whose checks judge C2. If they
+		// fail, the rollback returns to the recorded C1: a rollback to C2 would
+		// record C2 as verified right after it failed (HEAD, C3, is not C2).
+		resetBox(C2, { verified: C1, started: C2 });
+		leaveHalfFinished(C3);
+		const x = runSh(S.deploy, deployEnv({ SHA: C1 }));
+		const r = [[isNoop(x) && deployedFrom(x) === C1 && lastField(x.stdout, "DEPLOYED_TO") === C2,
+			`${tag}§13 a no-op on the started C2 names the recorded C1 as its rollback target, never C2 (result ${result(x) || "none"}, rollback target ${short(deployedFrom(x))})`]];
+		const y = rollback(S, deployedFrom(x), { RECORD_STATE: lastField(x.stdout, "DEPLOY_RECORD_STATE") });
+		r.push([y.code === 0 && head() === C1 && verified() === C1 && marker() === C3,
+			`${tag}§13 …so failing its checks returns the box to C1, and C2 is never recorded (record ${short(verified())}, marker ${short(marker())})`]);
+		return r;
 	},
 	notOnlineNotStarted(S, tag) {
 		resetBox(C1, { verified: C1, started: C1 });
@@ -222,10 +312,11 @@ function stepValue(stepText, key) {
 	return body;
 }
 const collapse = (v) => (Array.isArray(v) ? v.join(" ") : String(v || "")).replace(/\s+/g, " ").trim();
-// A step's `run:` script, as bash gets it.
+// A step's `run:` script, as bash gets it (a `|` block, or a one-liner).
 const stepRun = (step) => {
 	const body = step ? stepValue(step.text, "run") : null;
-	return Array.isArray(body) ? `${body.map((l) => l.slice(8)).join("\n")}\n` : "";
+	if (Array.isArray(body)) return `${body.map((l) => l.slice(8)).join("\n")}\n`;
+	return body ? `${body}\n` : "";
 };
 
 const RECORD_IF = "steps.deploy.outcome == 'success' && steps.deploy.outputs.result == 'deployed' && steps.smoke.outcome == 'success' && (inputs.public_url == '' || steps.edge.outcome == 'success')";
@@ -270,6 +361,12 @@ function runDeployStep(script, { REF = "main", SHA = "", out = "" } = {}) {
 		fs.writeFileSync(path.join(stepCwd, "scripts", "deploy", "remote-deploy.sh"), "# stands in for the real script: the stub never runs it\n");
 	}
 	clearLogs();
+	const x = spawnStep(script, stepCwd, { PATH: process.env.PATH, HOME: D.home, HOST: "203.0.113.9", USER: "deploy", DIR: "/srv/app", PM2: "logistics-app", REF, SHA, STUB_LOG_DIR: D.logs, STUB_DEPLOY_OUT: out });
+	return { ...x, calls: log("step-ssh") };
+}
+// Runs a step's script as the runner does, and returns its exit code, its
+// output and what it wrote to $GITHUB_OUTPUT.
+function spawnStep(script, cwd, env) {
 	const outputs = path.join(T, "step-github-output");
 	fs.writeFileSync(outputs, "");
 	// ⚠️ stderr goes to a real FILE, as it does on a GitHub runner. The step
@@ -282,18 +379,141 @@ function runDeployStep(script, { REF = "main", SHA = "", out = "" } = {}) {
 	let x;
 	try {
 		x = spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", script], {
-			cwd: stepCwd,
+			cwd,
 			encoding: "utf8",
 			stdio: ["pipe", "pipe", errFd],
-			env: { PATH: process.env.PATH, HOME: D.home, HOST: "203.0.113.9", USER: "deploy", DIR: "/srv/app", PM2: "logistics-app", REF, SHA, GITHUB_OUTPUT: outputs, STUB_LOG_DIR: D.logs, STUB_DEPLOY_OUT: out },
+			env: { ...env, GITHUB_OUTPUT: outputs },
 		});
 	} finally {
 		fs.closeSync(errFd);
 	}
 	const got = {};
 	for (const l of fs.readFileSync(outputs, "utf8").split("\n").filter(Boolean)) got[l.slice(0, l.indexOf("="))] = l.slice(l.indexOf("=") + 1);
-	return { code: x.status, out: `${x.stdout}${fs.readFileSync(errPath, "utf8")}`, outputs: got, calls: log("step-ssh") };
+	return { code: x.status, out: `${x.stdout}${fs.readFileSync(errPath, "utf8")}`, outputs: got };
 }
+// End to end: here the ssh-retry.sh stand-in runs the remote command locally,
+// so the REAL remote scripts (or mutants of them) deploy, check, record and
+// roll back the sandbox box, and each step parses what they really printed.
+let realStepCwd = null;
+function realCwd(S) {
+	if (!realStepCwd) {
+		realStepCwd = path.join(T, "real-step-cwd");
+		fs.mkdirSync(path.join(realStepCwd, "scripts", "deploy"), { recursive: true });
+		fs.writeFileSync(path.join(realStepCwd, "scripts", "deploy", "ssh-retry.sh"), '#!/bin/bash\nexec bash -c "$2"\n');
+		fs.writeFileSync(path.join(realStepCwd, "scripts", "deploy", "ssh-setup.sh"), "#!/bin/bash\nexit 0\n");
+	}
+	const put = (name, text) => fs.writeFileSync(path.join(realStepCwd, "scripts", "deploy", name), text);
+	put("remote-deploy.sh", S.deploy);
+	put("remote-smoke.sh", SMOKE);
+	put("remote-record-verified.sh", S.record);
+	put("remote-rollback.sh", S.rollback);
+	return realStepCwd;
+}
+function runRealDeployStep(script, S, env = {}) {
+	return spawnStep(script, realCwd(S), { ...ENV, HOST: "203.0.113.9", USER: "deploy", DIR: D.box, PM2: "logistics-app", REF: "main", ...env });
+}
+// Named, so a mutant re-runs only the scenario that targets it.
+const REAL_STEP_CASES = {
+	restartProven(script, S, tag) {
+		resetBox(C1, { verified: C1, started: C1 });
+		const x = runRealDeployStep(script, S, { SHA: C2 });
+		return [[x.code === 0 && x.outputs.result === "deployed" && x.outputs.prev === C1 && x.outputs.to === C2 && started() === C2,
+			`${tag}§14 end to end, a proven restart: the deploy step succeeds and hands the record step C2 with result=deployed (code ${x.code}, outputs ${JSON.stringify(x.outputs)})`]];
+	},
+};
+const realStepPins = (script, S, tag = "", names = Object.keys(REAL_STEP_CASES)) => names.flatMap((n) => REAL_STEP_CASES[n](script, S, tag));
+
+// A GitHub expression, in the shapes action.yml uses: 'strings', dotted
+// context paths, true/false, == != && || and parentheses, and the status
+// functions. It returns values the way GitHub does (`a || b` gives an operand).
+function evalExpr(expr, ctx) {
+	const toks = String(expr).match(/\(|\)|&&|\|\||==|!=|'(?:[^']|'')*'|[A-Za-z_][\w.-]*(?:\(\))?/g) || [];
+	let i = 0;
+	const prim = () => {
+		const t = toks[i++];
+		if (t === "(") { const v = or(); i++; return v; }
+		if (t.startsWith("'")) return t.slice(1, -1).replace(/''/g, "'");
+		if (t.endsWith("()")) return ctx.status[t.slice(0, -2)]();
+		if (t === "true" || t === "false") return t === "true";
+		const v = t.split(".").reduce((o, k) => (o == null ? undefined : o[k]), ctx);
+		return v == null ? "" : v;
+	};
+	const cmp = () => { let l = prim(); while (toks[i] === "==" || toks[i] === "!=") { const op = toks[i++]; const r = prim(); l = (String(l) === String(r)) === (op === "=="); } return l; };
+	const and = () => { let l = cmp(); while (toks[i] === "&&") { i++; const r = cmp(); l = l && r; } return l; };
+	const or = () => { let l = and(); while (toks[i] === "||") { i++; const r = and(); l = l || r; } return l; };
+	return or();
+}
+// Whether a step runs: its `if:` with GitHub's implicit success() when it
+// names no status function, and success() when it has no `if:` at all.
+const stepRuns = (cond, ctx) => {
+	const c = cond || "success()";
+	return Boolean(evalExpr(/\b(success|failure|always|cancelled)\(\)/.test(c) ? c : `success() && (${c})`, ctx));
+};
+// A step's `env:`, each ${{ … }} evaluated.
+function stepEnvOf(stepText, ctx) {
+	const lines = stepText.split("\n");
+	const at = lines.findIndex((l) => /^ {6}env:\s*$/.test(l));
+	const env = {};
+	for (let j = at + 1; at >= 0 && j < lines.length && /^ {8}\S/.test(lines[j]); j++) {
+		const m = /^ {8}([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/.exec(lines[j]);
+		if (m) env[m[1]] = m[2].replace(/\$\{\{\s*(.*?)\s*\}\}/g, (_, e) => String(evalExpr(e, ctx)));
+	}
+	return env;
+}
+// The WHOLE action, step by step, as a runner runs it: each `if:` evaluated,
+// each `env:` resolved, each `run:` executed, continue-on-error honoured. It
+// returns each step's outcome by name, the steps context, and whether the job
+// ended red.
+function runAction(yaml, S, inputs, env = {}) {
+	const cwd = realCwd(S);
+	let failed = false;
+	const ctx = { inputs, steps: {}, status: { success: () => !failed, failure: () => failed, always: () => true, cancelled: () => false } };
+	const ran = {};
+	for (const s of actionSteps(yaml)) {
+		const id = collapse(stepValue(s.text, "id"));
+		if (!stepRuns(collapse(stepValue(s.text, "if")), ctx)) {
+			ran[s.name] = "skipped";
+			if (id) ctx.steps[id] = { outcome: "skipped", conclusion: "skipped", outputs: {} };
+			continue;
+		}
+		const x = spawnStep(stepRun(s), cwd, { ...ENV, PATH: `${fastBinDir()}:${ENV.PATH}`, GITHUB_STEP_SUMMARY: path.join(T, "step-summary"), ...env, ...stepEnvOf(s.text, ctx) });
+		const outcome = x.code === 0 ? "success" : "failure";
+		const coe = collapse(stepValue(s.text, "continue-on-error"));
+		const keepGoing = /^\$\{\{/.test(coe) ? Boolean(evalExpr(coe.replace(/^\$\{\{\s*|\s*\}\}$/g, ""), ctx)) : coe === "true";
+		if (outcome === "failure" && !keepGoing) failed = true;
+		ran[s.name] = outcome;
+		if (id) ctx.steps[id] = { outcome, conclusion: outcome === "failure" && keepGoing ? "success" : outcome, outputs: x.outputs };
+	}
+	return { ran, steps: ctx.steps, failed };
+}
+const PROD_INPUTS = {
+	dir: D.box, pm2: "logistics-app", ref: "main", sha: C2, rollback_on_failure: "true",
+	public_url: "https://app.example.test/api/config/maintenance", ssh_key: "k", known_hosts: "h", host: "203.0.113.9", user: "deploy",
+};
+// Named, so a mutant re-runs only the scenario that targets it.
+const ACTION_RUN_CASES = {
+	unprovenRollsBack(yaml, S, tag) {
+		// pm2 answers 0 but the deploy's restart never moves the start time: the
+		// old process may still serve. The deploy reports unproven; the smoke and
+		// edge checks still run (and pass, reading whatever serves); nothing
+		// records C2; production rolls back to C1, whose own restart pm2 does
+		// prove; and the job still ends red.
+		resetBox(C1, { verified: C1, started: C1 });
+		const a = runAction(yaml, S, PROD_INPUTS, { STUB_PM2_RESTART_NOOP: "once" });
+		const out = (a.steps.deploy || {}).outputs || {};
+		return [
+			[a.ran.Deploy === "success" && out.result === "unproven" && out.prev === C1 && out.to === C2,
+				`${tag}§14 the whole action, a restart that did not take: the deploy step reports result=unproven with rollback target C1 (outputs ${JSON.stringify(out)})`],
+			[a.ran["Smoke check"] === "success" && a.ran["Public edge check"] === "success" && a.ran["Record the verified deploy"] === "skipped",
+				`${tag}§14 …the smoke and edge checks still run, and the record step never does (${JSON.stringify(a.ran)})`],
+			[a.ran["Auto-rollback"] === "success" && head() === C1 && started() === C1 && verified() === C1 && marker() === C2,
+				`${tag}§14 …production rolls back to C1: C2 is never recorded, and the drift marker names C2 (HEAD ${short(head())}, record ${short(verified())}, marker ${short(marker())})`],
+			[a.ran["Fail the job if verification failed"] === "failure" && a.failed,
+				`${tag}§14 …and the job still ends red`],
+		];
+	},
+};
+const actionRunPins = (yaml, S, tag = "", names = Object.keys(ACTION_RUN_CASES)) => names.flatMap((n) => ACTION_RUN_CASES[n](yaml, S, tag));
 const deployOut = (o = {}) => `${[
 	`DEPLOYED_FROM=${o.from ?? C1}`,
 	`DEPLOYED_TO=${o.to ?? C2}`,
@@ -467,14 +687,23 @@ function mutants() {
 		...LIVE_CASES.startedButUnrecorded(ignoreStarted, M),
 		...LIVE_CASES.startedAncestorNoop(ignoreStarted, M),
 	]);
-	expectCaught("a started mark counts while the app is down", LIVE_CASES.startedNotServing(deployWith(
-		'[ -n "$STARTED" ] && [ "$SERVING" = "200" ]', '[ -n "$STARTED" ]'), M));
+	expectCaught("the rollback target is a started commit the app does not answer for", LIVE_CASES.startedNotServing(deployWith(
+		'elif [ "$LIVE" != "$VERIFIED" ] && [ "$SERVING" != "200" ]; then', "elif false; then"), M));
 	expectCaught("a started mark counts though HEAD does not contain it", LIVE_CASES.startedNotInHead(deployWith(
 		' && git merge-base --is-ancestor "$STARTED" HEAD; then', "; then"), M));
 	expectCaught("a started mark older than the record wins", LIVE_CASES.startedOlderThanRecord(deployWith(
 		'git merge-base --is-ancestor "$VERIFIED" "$STARTED" && ', ""), M));
 	expectCaught("a restart pm2 does not report online is marked started", LIVE_CASES.notOnlineNotStarted(deployWith(
-		"});' \"$PM2\"; then", "});' \"$PM2\"; true; then"), M));
+		'if [ "$PM2_STATUS" = online ]; then', "if true; then"), M));
+
+	// §13 N-2: whether the app answers never moves main back over a started commit.
+	expectCaught("LIVE counts a started commit only while the app answers", LIVE_CASES.checkMissedNoop(deployWith(
+		'if [ -n "$STARTED" ] && git merge-base --is-ancestor "$VERIFIED" "$STARTED"',
+		'if [ -n "$STARTED" ] && [ "$SERVING" = "200" ] && git merge-base --is-ancestor "$VERIFIED" "$STARTED"'), M));
+
+	// §13 N-1: a rollback never targets the commit whose checks just failed.
+	expectCaught("a deploy's rollback target is the commit it restarts", LIVE_CASES.healOfFailedStarted(deployWith(
+		'if [ "$ROLLBACK_TO" = "$NEW" ] && [ -n "$VERIFIED" ] && [ "$VERIFIED" != "$NEW" ]; then', "if false; then"), M));
 
 	// §13 (D), (E), (F): each clause of the no-op and the move back.
 	expectCaught("(D) main moves back over a commit only this clone has", LIVE_CASES.boxOnlyCommit(deployWith(
@@ -486,7 +715,7 @@ function mutants() {
 
 	// §13: the deploy's output.
 	expectCaught("DEPLOY_RESULT is not the last line", LIVE_CASES.resultLastLineDeployed(deployWith(
-		'echo "DEPLOY_RESULT=deployed"\n', 'echo "DEPLOY_RESULT=deployed"\necho "deploy finished"\n'), M));
+		'echo "DEPLOY_RESULT=$RESULT"\n', 'echo "DEPLOY_RESULT=$RESULT"\necho "deploy finished"\n'), M));
 	expectCaught("the handshake guard is read from the commit before the deploy", LIVE_CASES.handshakeGuard(deployWith(
 		'"$NEW" -- server.js', '"$PREV" -- server.js'), M));
 	expectCaught("the deploy looks for text server.js does not have", guardPins(swap(REAL.deploy,
@@ -524,6 +753,9 @@ function mutants() {
 		'if [ -n "$SHA" ] && ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then', "if false; then"), M, ["shaRefused"]));
 	expectCaught("the rollback target takes any hex length", deployStepPins(swap(step,
 		"last_line DEPLOYED_FROM '[0-9a-f]{40}'", "last_line DEPLOYED_FROM '[0-9a-f]+'"), M, ["shortFrom"]));
+	// §14: an unproven restart rolls production back.
+	expectCaught("an unproven restart does not roll production back", actionRunPins(swap(ACTION,
+		" ||\n         steps.deploy.outputs.result == 'unproven')", ")"), REAL, M));
 
 	// §14: the edge check.
 	const edge = edgeScript(ACTION);
@@ -540,6 +772,8 @@ function mutants() {
 	record(runCases(LIVE_CASES, REAL));
 	record(actionPins(ACTION));
 	record(deployStepPins(deployStepScript(ACTION)));
+	record(realStepPins(deployStepScript(ACTION), REAL));
+	record(actionRunPins(ACTION, REAL));
 	record(edgePins(edgeScript(ACTION)));
 	record(guardPins(REAL.deploy, SERVER));
 	mutants();
