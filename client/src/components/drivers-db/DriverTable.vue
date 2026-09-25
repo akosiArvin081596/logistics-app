@@ -281,8 +281,11 @@
             <p class="status-help">Drivers become Active automatically after passing their drug test. Use this toggle to override.</p>
           </div>
 
-          <fieldset class="pay-section">
+          <!-- Pay is Super Admin only (403 PAY_EDIT_ADMIN_ONLY otherwise): a
+               disabled fieldset shows the terms and disables every control in it. -->
+          <fieldset class="pay-section" :disabled="!canEditPay">
             <legend>Pay Structure</legend>
+            <p v-if="!canEditPay" class="status-help">Only a Super Admin can change driver pay.</p>
             <div class="pay-options">
               <label class="pay-radio">
                 <input type="radio" v-model="editForm.payType" value="fixed" />
@@ -344,6 +347,8 @@ const props = defineProps({
   headers: { type: Array, default: () => [] },
   driverRatings: { type: Object, default: () => ({}) },
   truckAssignments: { type: Array, default: () => [] },
+  // Driver pay is Super Admin only; everyone else sees the terms read-only.
+  canEditPay: { type: Boolean, default: false },
 })
 
 function getAssignedTruck(driver) {
@@ -583,9 +588,15 @@ function handleSaveEdit() {
       editForm.zip, editForm.address, editForm.trucks, editForm.hazmat,
       editForm.phone, editForm.cell, editForm.email,
       editForm.dot, editForm.mc, editForm.rating, editForm.status,
-      editForm.payType,
-      editForm.payType === 'percentage' ? (Number(editForm.payPercentage) || 0) : 0,
-      editForm.payType === 'fixed' ? (Number(editForm.payDaily) || 0) : 0,
+      // Only a Super Admin sends pay terms. Blank tells the server "not sent",
+      // so anyone else's save keeps whatever terms are stored when it lands.
+      ...(props.canEditPay
+        ? [
+            editForm.payType,
+            editForm.payType === 'percentage' ? (Number(editForm.payPercentage) || 0) : 0,
+            editForm.payType === 'fixed' ? (Number(editForm.payDaily) || 0) : 0,
+          ]
+        : ['', '', '']),
     ],
   })
   showEdit.value = false
@@ -683,6 +694,9 @@ function handleConfirmDelete() {
   cursor: pointer;
 }
 .pay-radio input[type="radio"] { margin: 0; }
+/* Read-only for this role (driver pay is Super Admin only): still legible. */
+.pay-section:disabled { opacity: 0.6; }
+.pay-section:disabled .pay-radio { cursor: not-allowed; }
 
 .action-btns { display: flex; gap: 0.35rem; justify-content: flex-end; }
 .btn-edit, .btn-remove {
