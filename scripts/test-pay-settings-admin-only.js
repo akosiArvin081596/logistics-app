@@ -14,7 +14,9 @@
  * and run against an in-memory SQLite, with server.js's own pay rule, refusal
  * helper, audit writer (logAudit / logAuditRefusal, coalescing included), name
  * helpers, truck assignment and field parsers. Only the period locks, the
- * active-load check and the socket notification are stubbed.
+ * active-load check, the Job Tracking read and the driver history it feeds (the
+ * create lock is stubbed, so the history it would be handed is too), and the
+ * socket notification are stubbed.
  *   §1 PUT /api/drivers-directory/:id — a Dispatcher changing pay_type,
  *      pay_percentage (active or not) or pay_daily, or clearing it: 403, the
  *      fields named, nothing written, one refusal row. The edit form's
@@ -336,6 +338,10 @@ function mountAll(db, { routes = {}, moduleSrc = {}, locked = false, duringActiv
 		directoryEditLockBlockers: (rowBefore, changed) => blocked(changed),
 		truckEditLockBlockers: (truck, changed) => blocked(changed),
 		truckCreateLockBlockers: () => ({ unreadable: false, blockers: [] }),
+		// The create lock is stubbed, so the driver history it would be handed is
+		// too; the real pair is scripts/test-truck-create-new-driver.js's subject.
+		getJobTrackingCached: async () => ({ headers: ["Load ID", "Driver", "Assigned Date"], data: [] }),
+		driverHistoryFloorMonth: () => ({ floor: "", unbounded: false }),
 		periodBlockedResponse: periodRefusal,
 		periodLockUnreadableResponse: periodRefusal,
 		DIRECTORY_LOCK_REMEDY: "",
