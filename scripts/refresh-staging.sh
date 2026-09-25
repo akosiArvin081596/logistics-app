@@ -12,11 +12,13 @@
 # and the running process keeps the old ones until you restart it yourself.
 #
 # Every account on the refreshed copy gets a random password nobody knows. To
-# be able to sign in, give ONE Super Admin a password through the environment
-# (never argv; see scripts/README-env-refresh.md):
-#   read -rs REFRESH_OPERATOR_PASSWORD && export REFRESH_OPERATOR_PASSWORD
-#   ./scripts/refresh-staging.sh --yes            # REFRESH_OPERATOR_USER defaults to super_admin
-#   unset REFRESH_OPERATOR_PASSWORD
+# be able to sign in, give ONE Super Admin a password through this script's
+# environment, never argv, and never `export` it in your shell: a later
+# `pm2 restart --update-env` from that shell would copy it into the running
+# staging process (see scripts/README-env-refresh.md):
+#   unset REFRESH_OPERATOR_PASSWORD; read -rs REFRESH_OPERATOR_PASSWORD
+#   REFRESH_OPERATOR_PASSWORD="$REFRESH_OPERATOR_PASSWORD" ./scripts/refresh-staging.sh --yes
+#   unset REFRESH_OPERATOR_PASSWORD    # REFRESH_OPERATOR_USER defaults to super_admin
 set -euo pipefail
 
 STAGING_DIR="/var/www/logisx-staging"
@@ -29,13 +31,31 @@ die() { echo "[refresh-staging] FAILED: $*" >&2; exit 1; }
 
 # --- operator access: handed to refresh-env.js and to NOTHING else -----------
 # Moved out of the environment before this script starts any child, then passed
-# to the single refresh-env.js call below. Left exported, every child would
-# inherit it: `npm install` runs third-party lifecycle scripts, and
-# `pm2 restart --update-env` copies this shell's environment into the running
-# staging process — where the password would persist and `pm2 env` would show it.
+# to the two refresh-env.js calls below, the preflight and the install. Left
+# exported, every child would inherit it: `npm install` runs third-party
+# lifecycle scripts, and `pm2 restart --update-env` copies this shell's
+# environment into the running staging process — where the password would
+# persist and `pm2 env` would show it. ⚠️ `export -n` too: assigning to a name
+# the caller had already exported (an OPERATOR_PASSWORD of its own), or under
+# an inherited allexport, keeps that name exported.
 OPERATOR_PASSWORD="${REFRESH_OPERATOR_PASSWORD-}"
 OPERATOR_USER="${REFRESH_OPERATOR_USER-}"
+export -n OPERATOR_PASSWORD OPERATOR_USER
 unset REFRESH_OPERATOR_PASSWORD REFRESH_OPERATOR_USER
+OPERATOR_REQUESTED=0
+[ -z "$OPERATOR_PASSWORD$OPERATOR_USER" ] || OPERATOR_REQUESTED=1
+
+# The operator variables came from the calling shell's environment, where this
+# script cannot unset them. If they are exported there, a `pm2 restart
+# --update-env` run from that shell later would copy them into staging, so
+# the operator is told how to drop them.
+remind_unset() {
+  [ "$OPERATOR_REQUESTED" = "1" ] || return 0
+  say ""
+  say "The operator variables reached this script from your shell. If they are exported there, unset them"
+  say "before you run anything else from that shell (a pm2 restart --update-env would copy them into staging):"
+  say "  unset REFRESH_OPERATOR_PASSWORD REFRESH_OPERATOR_USER"
+}
 
 CONFIRMED=0; RESTART=0; EXTRA_ARGS=()
 for a in "$@"; do
@@ -203,5 +223,10 @@ if [ "$RESTART" = "1" ]; then
 else
   say ""
   say "NOT restarted. New code + database are on disk; the running process still holds the old ones."
-  say "When ready:  pm2 restart $PM2_NAME --update-env"
+  # --update-env copies the environment of whoever runs it into the running
+  # process, so the command handed out drops the operator variables from it:
+  # whatever the shell it is run from has exported, they never reach staging.
+  # (scripts/test-refresh-sign-in.js runs this line from a shell that exports them.)
+  say "When ready:  env -u REFRESH_OPERATOR_PASSWORD -u REFRESH_OPERATOR_USER pm2 restart $PM2_NAME --update-env"
 fi
+remind_unset

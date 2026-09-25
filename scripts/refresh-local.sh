@@ -13,10 +13,14 @@
 # Every account on the refreshed copy gets a random password nobody knows.
 # Before running test-suite.js against it:
 #   node scripts/prepare-test-fixtures.js --yes-local-db
-# To sign in as one Super Admin instead, put REFRESH_OPERATOR_PASSWORD (and
-# optionally REFRESH_OPERATOR_USER) in the ENVIRONMENT — never argv; see
-# scripts/README-env-refresh.md. It is applied here, at install, and is never
-# sent to the VPS.
+# To sign in as one Super Admin instead, hand this script
+# REFRESH_OPERATOR_PASSWORD (and optionally REFRESH_OPERATOR_USER) through its
+# ENVIRONMENT, never argv, and without exporting it in your shell, where
+# everything you start afterwards would inherit it (scripts/README-env-refresh.md):
+#   unset REFRESH_OPERATOR_PASSWORD; read -rs REFRESH_OPERATOR_PASSWORD
+#   REFRESH_OPERATOR_PASSWORD="$REFRESH_OPERATOR_PASSWORD" ./scripts/refresh-local.sh
+#   unset REFRESH_OPERATOR_PASSWORD
+# It is applied here, at install, and is never sent to the VPS.
 #
 # It never touches production data. The database source is the NIGHTLY SNAPSHOT
 # (scripts/backup-db.js output), not the live production app.db, so nothing here
@@ -62,13 +66,20 @@ set -euo pipefail
 # command, and is handed only to the two LOCAL refresh-env.js calls that use
 # it: the preflight and the install. Left exported, every child would inherit
 # it: `npm install` runs third-party lifecycle scripts, and ssh would carry it
-# toward the VPS. ⚠️ Keep these three lines above everything that starts a
-# child, the `$(dirname …)` that finds APP_DIR below included.
-# (scripts/test-refresh-sign-in.js pins both: nothing runs above them, and no
-# command but those two refresh-env.js calls ever sees the value.)
+# toward the VPS. ⚠️ Keep these lines above everything that starts a child,
+# the `$(dirname …)` that finds APP_DIR below included.
+# ⚠️ `export -n` is load-bearing too: assigning to a name the caller had
+# already exported (an OPERATOR_PASSWORD of its own), or under an inherited
+# allexport, keeps that name exported, and the copy would reach every child.
+# (scripts/test-refresh-sign-in.js pins all of it: nothing runs above these
+# lines, and no command but those two refresh-env.js calls ever sees the
+# value, even with such a name already exported.)
 OPERATOR_PASSWORD="${REFRESH_OPERATOR_PASSWORD-}"
 OPERATOR_USER="${REFRESH_OPERATOR_USER-}"
+export -n OPERATOR_PASSWORD OPERATOR_USER
 unset REFRESH_OPERATOR_PASSWORD REFRESH_OPERATOR_USER
+OPERATOR_REQUESTED=0
+[ -z "$OPERATOR_PASSWORD$OPERATOR_USER" ] || OPERATOR_REQUESTED=1
 
 VPS_HOST="${VPS_HOST:-root@76.13.22.110}"
 VPS_KEY="${VPS_KEY:-$HOME/.ssh/abedubas_vps}"
@@ -88,8 +99,20 @@ REMOTE_TMP_ROOT="${REMOTE_TMP_ROOT:-/var/tmp}"
 say() { echo "[refresh-local] $*"; }
 die() { echo "[refresh-local] FAILED: $*" >&2; exit 1; }
 
+# The operator variables came from the calling shell's environment, where
+# this script cannot unset them. If they are exported there, everything
+# started from that shell afterwards inherits them (`npm run dev` below
+# included), so the operator is told how to drop them.
+remind_unset() {
+  [ "$OPERATOR_REQUESTED" = "1" ] || return 0
+  say ""
+  say "The operator variables reached this script from your shell. If they are exported there, unset them"
+  say "before you start anything else from that shell, which would inherit them:"
+  say "  unset REFRESH_OPERATOR_PASSWORD REFRESH_OPERATOR_USER"
+}
+
 usage() {
-  echo "usage: ./scripts/refresh-local.sh [--telemetry-days N | --telemetry-all] [--allow-mail] [--dry-run] [--no-backup]"
+  echo "usage: ./scripts/refresh-local.sh [--telemetry-days N | --telemetry-all] [--allow-mail] [--no-backup]"
   echo "       ./scripts/refresh-local.sh --code-only      # code only: the database is left alone"
   echo "       ./scripts/refresh-local.sh --scan-legacy    # report pre-2026-08-09 unsanitized copies"
   echo "Operator access: REFRESH_OPERATOR_PASSWORD [REFRESH_OPERATOR_USER] in the ENVIRONMENT, never"
@@ -118,7 +141,9 @@ refuse_argument() {
 # exactly one word (REMOTE_EXTRA_ARGS, below). Anything else is refused here,
 # while nothing has run: refresh-env.js skips an argument it does not know, so
 # a mistyped --code-only would otherwise run a full refresh, and a bare word
-# would be carried to the VPS in the ssh command line.
+# would be carried to the VPS in the ssh command line. refresh-env.js's
+# --dry-run is not among them: under it the remote sanitize emits nothing, so
+# this script would have nothing to transfer.
 # (scripts/test-refresh-remote-node.js §7 runs every form.)
 # =============================================================================
 CODE_ONLY=0
@@ -132,7 +157,7 @@ while [ $# -gt 0 ]; do
     --code-only)   CODE_ONLY=1 ;;
     --scan-legacy) SCAN_LEGACY=1 ;;
     -h|--help)     usage; exit 0 ;;
-    --telemetry-all|--allow-mail|--dry-run|--no-backup)
+    --telemetry-all|--allow-mail|--no-backup)
       EXTRA_ARGS+=("$1"); DB_OPTS="$DB_OPTS $1" ;;
     --telemetry-days)
       case "${2-}" in
@@ -197,6 +222,7 @@ if [ "$SCAN_LEGACY" = "1" ]; then
   say ""
   say "Then delete what --verify calls NOT sanitized. Deliberately not automatic:"
   say "see 'Already-downloaded copies' in scripts/README-env-refresh.md."
+  remind_unset
   exit 0
 fi
 
@@ -252,6 +278,7 @@ npm run build:client --silent
 
 if [ "$CODE_ONLY" = "1" ]; then
   say "--code-only: database left alone. Done."
+  remind_unset
   exit 0
 fi
 
@@ -453,3 +480,4 @@ say ""
 say "If you refreshed before 2026-08-09, this machine may still hold an"
 say "UNSANITIZED copy from the old flow. Find them with:"
 say "  ./scripts/refresh-local.sh --scan-legacy"
+remind_unset

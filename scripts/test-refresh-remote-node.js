@@ -46,12 +46,15 @@
  *      times (the preflight, the sanitize inside the ssh command, which the
  *      VPS's shell parses again, and the install), and all three receive the
  *      same argument vector. Anything that is not one of those options is
- *      refused before any command runs, and never repeated. The quoting is
- *      proven on its own as well: in a copy with the refusal turned off,
- *      arguments holding spaces, quotes, a newline and shell syntax still reach
- *      the VPS as exactly those arguments. Mutants: the preflight without the
- *      options, and the old unquoted join. (The refusal's own mutant is W5 in
- *      test-refresh-sign-in.js, with a password typed as a bare word.)
+ *      refused before any command runs, and never repeated; so is
+ *      refresh-env.js's --dry-run, under which the remote sanitize emits
+ *      nothing to transfer. The quoting is proven on its own as well: in a
+ *      copy with the refusal turned off, arguments holding spaces, quotes, a
+ *      newline, control bytes (bash's own \001 and \177 markers among them)
+ *      and shell syntax still reach the VPS as exactly those arguments.
+ *      Mutants: the preflight without the options, and the old unquoted join.
+ *      (The refusal's own mutant is W5 in test-refresh-sign-in.js, with a
+ *      password typed as a bare word.)
  *
  * The REAL scripts run under bash against a sandbox standing in for the VPS:
  * their /var/www and /opt/node22 are rebased onto it (asserted to apply), each
@@ -59,8 +62,10 @@
  * better-sqlite3 opens a database only under the ABI it was built for, and the
  * ssh stub runs every command "on the VPS" under bash with that machine's PATH
  * and nothing from this one. Stub git/npm/pm2/scp/sleep and refresh-env.js; no
- * network, no VPS, no real app.db, and no real npm anywhere on a sandbox PATH
- * (asserted before anything runs).
+ * network, no VPS, no real app.db, and npm resolves only to a stub on every
+ * sandbox PATH: the laptop's (which also holds this Node's directory, and so
+ * a real npm, behind the stub) and the VPS's with any interpreter's directory
+ * in front (asserted before anything runs).
  *
  * Run: node scripts/test-refresh-remote-node.js [--keep]
  */
@@ -222,6 +227,7 @@ const APP = mk(LAPTOP, "app");
 fs.writeFileSync(path.join(mk(APP, "scripts"), "refresh-env.js"), STUB_REFRESH_ENV);
 fs.writeFileSync(path.join(APP, ".env"), "PORT=3931\nSPREADSHEET_ID=sandbox-local-sheet\n");
 const LAPTOP_BIN = mk(LAPTOP, "bin");
+const LAPTOP_PATH = `${LAPTOP_BIN}:${path.dirname(process.execPath)}:/usr/bin:/bin`;
 writeExec(path.join(LAPTOP_BIN, "git"), GIT_STUB.replace("#!/bin/bash\n", `#!/bin/bash\necho "git $*" >> '${LOGS}/laptop.log'\n`));
 writeExec(path.join(LAPTOP_BIN, "npm"), `#!/bin/bash\necho "npm $*" >> '${LOGS}/laptop.log'\nexit 0\n`);
 // ssh: drop the options and the host, then run the command on the VPS, under
@@ -355,7 +361,7 @@ function runLocal(src, args = []) {
 	const r = spawnSync("/bin/bash", [path.join(APP, "scripts", "refresh-local.sh"), ...args], {
 		cwd: APP, encoding: "utf8", timeout: 30000,
 		env: {
-			PATH: `${LAPTOP_BIN}:${path.dirname(process.execPath)}:/usr/bin:/bin`,
+			PATH: LAPTOP_PATH,
 			HOME: mk(LAPTOP, "home"), TMPDIR: mk(LAPTOP, "tmp"), LC_ALL: "C",
 			VPS_HOST: "stub@vps.invalid", VPS_KEY: "/dev/null", REMOTE_TMP_ROOT,
 		},
@@ -483,12 +489,16 @@ try {
 		// PATH for its install. A real npm there would run a genuine install in
 		// this sandbox, so from every interpreter's directory the only npm on
 		// reach must be the stub — or nothing below runs.
-		const stray = [VPS_PATH, ...Object.values(NODES).map((n) => `${path.dirname(n.path)}:${VPS_PATH}`)]
-			.map((p) => [p, (spawnSync("/bin/bash", ["-c", "command -v npm"], { encoding: "utf8", env: { PATH: p } }).stdout || "").trim()])
-			.filter(([, npm]) => npm !== path.join(VPS_BIN, "npm"));
-		check("the only npm the sandbox VPS can reach, from any interpreter's directory, is the stub", stray.length === 0,
+		// The laptop's PATH holds this Node's own directory, and so a real npm,
+		// behind the stub; nothing on the laptop side may resolve past it.
+		const npmOn = (p) => (spawnSync("/bin/bash", ["-c", "command -v npm"], { encoding: "utf8", env: { PATH: p } }).stdout || "").trim();
+		const stray = [
+			...[VPS_PATH, ...Object.values(NODES).map((n) => `${path.dirname(n.path)}:${VPS_PATH}`)].map((p) => [p, path.join(VPS_BIN, "npm")]),
+			[LAPTOP_PATH, path.join(LAPTOP_BIN, "npm")],
+		].map(([p, want]) => [p, npmOn(p), want]).filter(([, npm, want]) => npm !== want);
+		check("npm resolves only to a stub: on the laptop's PATH, and on the sandbox VPS's from any interpreter's directory", stray.length === 0,
 			stray.map(([p, npm]) => `${npm || "(none)"} via ${p.split(":")[0]}`).join("; "));
-		if (stray.length) throw new Error("a real npm is reachable from the sandbox VPS — refusing to run the scripts");
+		if (stray.length) throw new Error("a real npm is reachable from the sandbox — refusing to run the scripts");
 	}
 
 	section("1-3. The real scripts, one scenario at a time");
@@ -612,7 +622,7 @@ try {
 
 	section("7. Arguments reach the remote refresh-env.js exactly as typed");
 	// Every option refresh-local.sh hands on, in one run.
-	const OPTIONS = ["--telemetry-days", "30", "--telemetry-all", "--allow-mail", "--dry-run", "--no-backup"];
+	const OPTIONS = ["--telemetry-days", "30", "--telemetry-all", "--allow-mail", "--no-backup"];
 	setBox(SCENARIOS.incident);
 	{
 		const [ok, detail] = sameVectors(runLocal(SRC.local, OPTIONS), OPTIONS);
@@ -624,17 +634,21 @@ try {
 	const open = once(ORIG.local, REFUSAL_ARM, PASS_ARM);
 	check("7b the copy with the refusal turned off was made (its anchor matched exactly once)", !!open);
 	const RAN = (tag) => path.join(T, `ran-${tag}`);
-	// The lone ' goes last: under the old join it opens a quote that never
-	// closes, and anywhere earlier it would hide what the words before it do.
+	// Every element holding a ' comes after the ones holding shell syntax:
+	// under the old join a quote swallows what follows it, so ahead of them it
+	// would hide what they do. \u0001 and \u007f are bash's own internal
+	// quoting markers (CTLESC and CTLNUL), the bytes most likely to be mangled
+	// on the way through.
 	const HARD = ["with space", '"double"', `$(touch ${RAN("subst")})`, `x; touch ${RAN("semicolon")}`,
-		`\`touch ${RAN("backtick")}\``, "*", "back\\slash", "~", "$HOME", "line1\nline2", "", "it's"];
+		`\`touch ${RAN("backtick")}\``, "*", "back\\slash", "~", "$HOME", "line1\nline2",
+		"\u0001", "\u007f", "a\u0001'\u007fb", "\u001b[0m\t\r", "", "it's"];
 	const ranAny = () => ["subst", "semicolon", "backtick"].filter((t) => fs.existsSync(RAN(t)));
 	if (open) {
 		setBox(SCENARIOS.incident);
 		const x = runLocal(rebase(open), HARD);
 		const [ok, detail] = sameVectors(x, HARD);
 		const ran = ranAny();
-		check("7b …and then ANY argument, holding spaces, quotes, a newline or shell syntax, reaches the VPS's refresh-env.js as exactly that argument, and the VPS runs none of it",
+		check("7b …and then ANY argument, holding spaces, quotes, a newline, control bytes or shell syntax, reaches the VPS's refresh-env.js as exactly that argument, and the VPS runs none of it",
 			ok && ran.length === 0, ok ? (ran.length ? `ran: ${ran}` : "") : detail);
 	}
 	// Refused before any command runs, and never repeated.
@@ -642,7 +656,8 @@ try {
 		["an option refresh-local.sh does not know", ["--no-such-option"], /argument 1 is not an option refresh-local\.sh accepts\. Nothing was run\./, "no-such-option"],
 		["a bare word", ["Harbour-Kestrel-bare-word"], /argument 1 is not an option refresh-local\.sh accepts/, "Harbour-Kestrel"],
 		["a known option in --name=value form", ["--telemetry-days=30"], /argument 1 is not an option refresh-local\.sh accepts/, "--telemetry-days=30"],
-		["a mode flag of refresh-env.js's own", ["--dry-run", "--verify", "x.gz"], /argument 2 is not an option refresh-local\.sh accepts/, "x.gz"],
+		["a mode flag of refresh-env.js's own", ["--no-backup", "--verify", "x.gz"], /argument 2 is not an option refresh-local\.sh accepts/, "x.gz"],
+		["refresh-env.js's --dry-run, under which the remote sanitize emits nothing to transfer", ["--dry-run"], /argument 1 is not an option refresh-local\.sh accepts/, null],
 		["--telemetry-days with a value that is not a whole number", ["--telemetry-days", "30; x"], /--telemetry-days \(argument 1\) takes a whole number of days/, "30; x"],
 		["--telemetry-days with no value", ["--telemetry-days"], /--telemetry-days \(argument 1\) takes a whole number of days/, null],
 		["--telemetry-days with more than 5 digits", ["--telemetry-days", "123456"], /at most 5 digits/, "123456"],
@@ -662,8 +677,8 @@ try {
 		setBox(SCENARIOS.incident);
 		const x = runLocal(SRC.local, ["--help"]);
 		check("7c --help prints every option and runs nothing",
-			x.code === 0 && /usage: \.\/scripts\/refresh-local\.sh \[--telemetry-days N \| --telemetry-all\] \[--allow-mail\] \[--dry-run\] \[--no-backup\]/.test(x.out)
-				&& x.sshLog === "" && x.laptop === "" && x.argv.length === 0, `exit ${x.code}`);
+			x.code === 0 && /usage: \.\/scripts\/refresh-local\.sh \[--telemetry-days N \| --telemetry-all\] \[--allow-mail\] \[--no-backup\]/.test(x.out)
+				&& !/--dry-run/.test(x.out) && x.sshLog === "" && x.laptop === "" && x.argv.length === 0, `exit ${x.code}`);
 	}
 	{
 		const PREFLIGHT = '--check-env-only --to "$APP_DIR/app.db" "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}" \\';
