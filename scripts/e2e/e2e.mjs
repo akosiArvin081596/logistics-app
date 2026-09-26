@@ -33,14 +33,25 @@
 //   (GET /api/data) is Super Admin only
 // Maintenance notice section (M1; ONLY=maintenance, local, server booted with the
 //   notice on): a dismissal in one tab belongs to the person who dismissed it
+// Money-path section (P1, E1, N1, F1; ONLY=moneypath):
+//   P1 clearing a fixed-pay driver's daily rate (emptied, or typed 0) in the Drivers
+//      Database stores 0, and leaves the inactive pay type's value alone
+//   E1 a driver's new expense carries the unit and owner of the truck whose
+//      assigned_driver holds a spacing variant of their name (planted, local)
+//   N1 a rename on the Users page also moves the rows stored under a spacing
+//      variant of the old name (planted, local)
+//   F1 an Active Loads edit writes only the changed cell, so formula cells survive
+//      (local only: it edits the local non-production sheet, then restores it)
 //
 // Env:
 //   BASE_URL    required — e.g. http://127.0.0.1:3181 (never production)
 //   PHASE       before | after            (default: before) — names the output
 //   HEADED=1    visible browser, slowMo 350 ms, ~1400x900 window, captions pause
 //   DB_PATH     the server's database copy (inside the work dir), ONLY used to plant
-//               stored values for the serve-side cases (steps 10, 11b-f, R3, R15)
-//               and to stage and clean up R16. Unset -> those cases are SKIPPED.
+//               stored values for the serve-side cases (steps 10, 11b-f, R3, R15),
+//               to stage and clean up R16, and to plant and read back E1 and N1
+//               (and P1's own driver). Unset -> those cases are SKIPPED (P1 then
+//               uses a real driver, as on staging).
 //   CREDS_FILE  logins JSON (default: <work dir>/creds.json, written by setup-db.cjs)
 //   E2E_WORK_DIR  where every output goes (default: $TMPDIR/logisx-e2e; see paths.cjs)
 //   APP_DIR     checkout whose node_modules provides better-sqlite3 and puppeteer
@@ -52,9 +63,12 @@
 //   OUT_TAG     output name instead of PHASE (rehearsals must not overwrite a baseline)
 //   DRIVER_VIEWPORT            driver window size, default 430x900
 //   ONLY        a comma-separated list of sections: trucks (1-12, R1-R16), signout
-//               (S1-S7), dispatcher (D1-D3), maintenance (M1). Unset = all four, in
-//               that order. ⚠️ All four sign in more often than the login limiter
-//               allows one server process (see README), so split a full run.
+//               (S1-S7), dispatcher (D1-D3), maintenance (M1), moneypath (P1, E1,
+//               N1, F1). Unset = all five, in that order. ⚠️ All five sign in more
+//               often than the login limiter allows one server process (see
+//               README), so split a full run.
+//   STEPS       only these cases of the sign-out and money-path sections, e.g.
+//               STEPS=S5a,S7 or STEPS=P1,F1
 //   S3_LATENCY_MS, S3_KBPS     the CDP throttle of S3, S6 and S7 (default +2500 ms per
 //               request, 24 KB/s)
 //
@@ -79,12 +93,14 @@ const SLOWMO = Number(process.env.SLOWMO ?? (HEADED ? 350 : 0))
 const [DVW, DVH] = String(process.env.DRIVER_VIEWPORT || '430x900').split('x').map(Number)
 // ONLY picks sections, e.g. ONLY=signout or ONLY=trucks,dispatcher. Unset = all.
 const ONLY = String(process.env.ONLY || '').toLowerCase()
-const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance']
+const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypath']
 // Sign-ins (POST /api/auth/login) each section makes; the limiter allows 20 per 15
 // minutes per server process. The sign-out section's figure is its worst case: S4a's
 // second half runs, and the build sends S7's second sign-in (one fewer for each
-// that does not happen).
-const SIGN_INS = { trucks: 3, signout: 20, dispatcher: 2, maintenance: 3 }
+// that does not happen). The money path signs the Super Admin in once (P1, N1 and
+// F1 share the page) and the driver once (E1), plus the Super Admin once more when
+// E1 has to file on the driver's behalf.
+const SIGN_INS = { trucks: 3, signout: 20, dispatcher: 2, maintenance: 3, moneypath: 3 }
 
 function die(msg) { console.error(`e2e: ${msg}`); process.exit(2) }
 if (!BASE_URL) die('BASE_URL is required')
@@ -94,7 +110,8 @@ for (const s of SECTIONS) if (!ALL_SECTIONS.includes(s)) die(`ONLY takes a comma
 const runs = (s) => SECTIONS.has(s)
 // STEPS: only these cases of the sign-out section (e.g. STEPS=S5a,S7), to rerun a
 // timing-sensitive case without spending the login limiter on the rest. Each of
-// those cases has its own browser context, so any subset runs on its own.
+// those cases has its own browser context, so any subset runs on its own. The
+// money-path section takes it too (e.g. STEPS=P1,F1); the other sections ignore it.
 const STEPS = process.env.STEPS ? new Set(String(process.env.STEPS).split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)) : null
 const wantStep = (id) => !STEPS || STEPS.has(id.toUpperCase())
 let baseHost = ''
@@ -145,6 +162,7 @@ function writeResults(final = false) {
     runs('signout') && 'sign-out / sign-in (S1-S7)',
     runs('dispatcher') && 'Dispatcher data (D1-D3)',
     runs('maintenance') && 'maintenance notice (M1)',
+    runs('moneypath') && 'money path (P1, E1, N1, F1)',
   ].filter(Boolean).join(' + ')
   const lines = [
     `# ${title} — ${PHASE.toUpperCase()}`,
@@ -410,7 +428,8 @@ let db = null
 const skipWhy = () => (DB_PATH
   ? 'SKIPPED — DB_PATH is not the server\'s database (see 10*); nothing was planted'
   : 'SKIPPED — no DB_PATH (stored values cannot be planted against this server)')
-const PLANT_COLUMNS ={ trucks: ['photo'], job_applications: ['cdl_front'] }
+// E1 plants trucks.assigned_driver (a spacing variant of the driver's own name).
+const PLANT_COLUMNS = { trucks: ['photo', 'assigned_driver'], job_applications: ['cdl_front'] }
 function openDb() {
   if (!DB_PATH) return null
   const Database = paths.appRequire('better-sqlite3')
@@ -429,11 +448,26 @@ function writeCol(table, col, id, value) {
 }
 // Originals live in memory only (no PII on disk); the journal holds ids, not values.
 const originals = new Map()
+// Rows the money-path section INSERTs (or has the app create) and deletes again,
+// by table and id; F1's planted sheet cell by address. Ids and addresses only.
+const createdRows = []
+const sheetPlants = []
+function writeJournal() {
+  if (!originals.size && !createdRows.length && !sheetPlants.length) {
+    if (fs.existsSync(JOURNAL)) fs.unlinkSync(JOURNAL)
+    return
+  }
+  fs.writeFileSync(JOURNAL, JSON.stringify([
+    ...[...originals.values()].map(({ table, col, id }) => ({ table, col, id })),
+    ...createdRows.map(({ table, id }) => ({ table, id, created: true })),
+    ...sheetPlants.map(({ range }) => ({ sheet: range, planted: 'formula (clear this cell by hand if the run died)' })),
+  ], null, 2))
+}
 function plant(table, col, id, value) {
   const key = `${table}.${col}#${id}`
   if (!originals.has(key)) {
     originals.set(key, { table, col, id, value: readCol(table, col, id) })
-    fs.writeFileSync(JOURNAL, JSON.stringify([...originals.values()].map(({ table, col, id }) => ({ table, col, id })), null, 2))
+    writeJournal()
   }
   writeCol(table, col, id, value)
 }
@@ -444,8 +478,38 @@ function restoreAll() {
     out.push(`${key} ${readCol(o.table, o.col, o.id) === o.value ? 'restored' : 'RESTORE MISMATCH'}`)
     originals.delete(key)
   }
-  if (!originals.size && fs.existsSync(JOURNAL)) fs.unlinkSync(JOURNAL)
+  writeJournal()
   return out
+}
+// The tables a money-path row may be created in; names are literals, never input.
+const CREATED_TABLES = new Set(['drivers_directory', 'expenses', 'truck_assignments', 'invoices', 'users'])
+function noteCreated(table, id) {
+  if (!CREATED_TABLES.has(table)) throw new Error('table not allowed')
+  createdRows.push({ table, id: Number(id) })
+  writeJournal()
+}
+// Deletes, by id, exactly the rows noteCreated() recorded (newest first).
+function removeCreated() {
+  const out = []
+  const failed = []
+  while (createdRows.length) {
+    const r = createdRows.pop()
+    try {
+      const n = db.prepare(`DELETE FROM ${r.table} WHERE id = ?`).run(r.id).changes
+      out.push(`${r.table}#${r.id} ${n === 1 ? 'deleted' : 'already gone'}`)
+    } catch (e) {
+      failed.push(r)
+      out.push(`${r.table}#${r.id} delete error: ${e.message}`)
+    }
+  }
+  createdRows.push(...failed) // kept in the journal
+  writeJournal()
+  return out
+}
+function forgetCreated(table, id) {
+  const i = createdRows.findIndex((r) => r.table === table && r.id === Number(id))
+  if (i >= 0) createdRows.splice(i, 1)
+  writeJournal()
 }
 // R16 assigns two throwaway drivers (QA-TEST-DRV-<stamp>-A / -B) to two of its own
 // test trucks, which writes truck_assignments and drivers_directory rows. They are
@@ -470,7 +534,12 @@ function removeLeftoverQaDriverRows() {
     drivers_directory: db.prepare('DELETE FROM drivers_directory WHERE driver_name LIKE ?').run(like).changes,
   }
 }
-process.on('SIGINT', () => { try { if (db) restoreAll() } catch { /* ignore */ } process.exit(130) })
+process.on('SIGINT', () => {
+  try { if (db) restoreAll() } catch { /* ignore */ }
+  try { if (db) removeCreated() } catch { /* ignore */ }
+  // A planted sheet cell cannot be put back synchronously: the journal keeps its address.
+  process.exit(130)
+})
 
 // ---------------------------------------------------------------- the run
 const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..*/, '').replace('T', '-')
@@ -511,6 +580,12 @@ async function main() {
     try { await maintenanceSection() } catch (e) {
       exitCode = 1
       record({ step: 'M!', title: 'Maintenance notice section aborted', expected: '', observed: e.stack?.split('\n').slice(0, 3).join(' ') || String(e), verdict: 'FAIL', shot: '' })
+    }
+  }
+  if (runs('moneypath')) {
+    try { await moneyPathSection() } catch (e) {
+      exitCode = 1
+      record({ step: 'MP!', title: 'Money-path section aborted', expected: '', observed: e.stack?.split('\n').slice(0, 3).join(' ') || String(e), verdict: 'FAIL', shot: '' })
     }
   }
 }
@@ -3282,6 +3357,585 @@ async function maintenanceSection() {
     else record({ step: 'M1b', title: titleB, expected: expectedB, observed: `error: ${e.message}`, verdict: 'FAIL', shot: s })
   } finally {
     await ctx.close().catch(() => {})
+  }
+}
+
+// ================================================================ money-path section (P1, E1, N1, F1)
+// ONLY=moneypath. Every "Expected" column is the behaviour AFTER the money-path
+// follow-up:
+//   P1 (UI, local and staging) the Drivers Database's Edit dialog stores a daily rate
+//      that was emptied, or typed as 0, as 0, and leaves the percentage alone.
+//   E1 (planted, local) a driver's new expense carries the unit and owner of the truck
+//      whose assigned_driver is a spacing variant of the driver's name.
+//   N1 (planted, local) a rename on the Users page also moves the rows stored under a
+//      spacing variant of the old name.
+//   F1 (local only) an Active Loads edit writes only the cell that changed.
+// Real names stay in memory: the results name rows by id, and a spacing variant is
+// described, never printed.
+const normName = (s) => String(s ?? '').trim().toLowerCase().replace(/\s+/g, ' ')
+// The name with its first internal whitespace run doubled; a one-word name gets a
+// trailing space. Either folds back to the same name through normalizeDriverName().
+const spacingVariant = (s) => (/\s/.test(String(s).trim()) ? String(s).trim().replace(/\s+/, '  ') : `${String(s).trim()} `)
+const variantText = (s) => (/\s/.test(String(s).trim()) ? 'the name with its space doubled' : 'the name with a trailing space')
+// A day in the server's business zone (US Central), as YYYY-MM-DD.
+const dayCT = (d = new Date()) => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d)
+// STEPS=P1 selects P1a and P1b.
+const wantMp = (id) => !STEPS || [...STEPS].some((s) => id.toUpperCase().startsWith(s))
+const mpNotes = [] // what each case restored or deleted, for the MPc row
+
+// DB_PATH must be the database THIS server reads, or E1 and N1 would test nothing.
+// A throwaway directory row (QA-TEST-DRV-<stamp>-DBCHECK) is inserted, looked for
+// through GET /api/drivers-directory, and deleted again.
+async function proveMoneyPathDb(page) {
+  const name = `${QA_DRIVER_PREFIX}${stamp}-DBCHECK`
+  let reason = ''
+  try {
+    const id = db.prepare("INSERT INTO drivers_directory (driver_name, status) VALUES (?, 'active')").run(name).lastInsertRowid
+    try {
+      const r = await api(page, 'GET', '/api/drivers-directory')
+      if (!(r.json?.data || []).some((d) => String(d._id) === String(id) && d.Driver === name)) {
+        reason = `a row written to DB_PATH (#${id}) did not appear through GET /api/drivers-directory (${r.status})`
+      }
+    } finally {
+      db.prepare('DELETE FROM drivers_directory WHERE id = ? AND driver_name = ?').run(id, name)
+    }
+  } catch (e) { reason = e.message }
+  if (!reason) return true
+  record({ step: 'MP*', title: 'DB_PATH sanity check', expected: 'The server reads DB_PATH', observed: `${reason} — DB_PATH is not this server's DATABASE_PATH; E1 and N1 are skipped, P1 uses a real driver`, verdict: 'FAIL', shot: '' })
+  try { db.close() } catch { /* ignore */ }
+  db = null
+  return false
+}
+
+// ---- P1: clear a fixed-pay driver's daily rate in the Drivers Database
+// The rate is first SET, through the same dialog, to the driver's current resolved
+// rate R (their own rate, else their truck's, else the $250 default), so neither save
+// moves a figure the pay math reads and the month-end lock has nothing to refuse.
+// Local (DB_PATH): a planted directory row, QA-TEST-DRV-<stamp>-P1, fixed, rate 0,
+// owner-operator share 37 % (the inactive pay type's value, which must survive).
+// Staging: a real fixed-pay driver whose resolved rate a clear cannot move; its row
+// is put back as it was read (a page fetch of the same PUT the dialog sends).
+const payText = (d) => (d ? `PayType ${d.PayType}, PayDaily ${d.PayDaily}, PayPercentage ${d.PayPercentage}` : '(row missing)')
+async function openDriverEdit(page, name) {
+  const row = page.locator('table.drv-table tbody tr', { has: page.locator('td.name-cell', { hasText: exactText(name) }) }).first()
+  await row.waitFor({ state: 'visible', timeout: 30000 })
+  await row.scrollIntoViewIfNeeded()
+  await row.locator('button.btn-edit').click()
+  const modal = page.locator('.confirm-dialog.edit-dialog')
+  await modal.waitFor({ state: 'visible', timeout: 15000 })
+  return modal
+}
+async function saveDailyRate(page, name, id, text) {
+  const modal = await openDriverEdit(page, name)
+  if (!(await modal.locator('input[type="radio"][value="fixed"]').isChecked())) throw new Error('the Edit dialog does not show the fixed pay type')
+  await field(modal, 'Daily Rate ($/day)').fill(text)
+  // The page reloads the list after a save that succeeded (none after a refusal).
+  const reload = page.waitForResponse((r) => pathOf(r.url()) === '/api/drivers-directory' && r.request().method() === 'GET', { timeout: 15000 }).catch(() => null)
+  const [resp] = await Promise.all([
+    page.waitForResponse((r) => pathOf(r.url()) === `/api/drivers-directory/${id}` && r.request().method() === 'PUT', { timeout: 30000 }),
+    modal.locator('.confirm-actions button.btn-primary').click(),
+  ])
+  let body = null
+  try { body = await resp.json() } catch { /* not json */ }
+  if (resp.status() === 200) await reload
+  await page.waitForTimeout(400)
+  return { status: resp.status(), code: body?.code || '', error: String(body?.error || '').slice(0, 300) }
+}
+// Reopen the dialog, read what it shows, screenshot it, Cancel.
+async function showDailyRate(page, name, shotName, text) {
+  const modal = await openDriverEdit(page, name)
+  const shown = await field(modal, 'Daily Rate ($/day)').inputValue()
+  await caption(page, `${text} — the Edit dialog, reopened, shows Daily Rate "${shown}"`)
+  const s = await shot(page, shotName)
+  await modal.locator('.confirm-actions button.btn-secondary').click()
+  await modal.waitFor({ state: 'hidden', timeout: 10000 }).catch(() => {})
+  return s
+}
+async function payRateCase(page) {
+  const cases = [
+    { step: 'P1a', how: 'emptied', text: '', title: 'Drivers Database → Edit a fixed-pay driver: Daily Rate set to their current rate and saved, then EMPTIED and saved' },
+    { step: 'P1b', how: 'typed as 0', text: '0', title: 'The same driver: Daily Rate set again and saved, then TYPED AS 0 and saved' },
+  ].filter((c) => wantMp(c.step))
+  if (!cases.length) return
+  const expected = 'Stored PayDaily 0 (read back through GET /api/drivers-directory); PayPercentage and PayType as they were'
+  const skipAll = (why) => cases.forEach((c) => record({ step: c.step, title: c.title, expected, observed: why, verdict: 'SKIP', shot: '' }))
+  let id; let name; let R; let mode; let original
+  await page.goto(`${BASE_URL}/drivers`)
+  await page.locator('table.drv-table').waitFor({ state: 'visible', timeout: 30000 })
+  const readRow = async () => (await api(page, 'GET', '/api/drivers-directory')).json?.data?.find((d) => String(d._id) === String(id)) || null
+  if (db) {
+    mode = 'planted'
+    name = `${QA_DRIVER_PREFIX}${stamp}-P1`
+    id = db.prepare("INSERT INTO drivers_directory (driver_name, status, pay_type, pay_percentage, pay_daily) VALUES (?, 'active', 'fixed', 37, 0)").run(name).lastInsertRowid
+    noteCreated('drivers_directory', id)
+    R = 250 // no truck: the $250 default is what a rate of 0 resolves to
+    await page.reload()
+    await page.locator('table.drv-table').waitFor({ state: 'visible', timeout: 30000 })
+  } else {
+    mode = 'real'
+    const dir = (await api(page, 'GET', '/api/drivers-directory')).json?.data || []
+    const trucks = (await api(page, 'GET', '/api/trucks')).json?.trucks || []
+    const cands = []
+    for (const d of dir) {
+      if (String(d.PayType || 'fixed').toLowerCase() === 'percentage' || !String(d.Driver || '').trim()) continue
+      const rates = [...new Set(trucks.filter((t) => normName(t.AssignedDriver) === normName(d.Driver)).map((t) => Number(t.DriverPayDaily) || 250))]
+      if (rates.length > 1) continue
+      const truckRate = rates[0] || 250
+      const own = Number(d.PayDaily) || 0
+      if (own && own !== truckRate) continue // a clear would move their resolved rate
+      cands.push({ d, R: own || truckRate, own })
+    }
+    cands.sort((a, b) => (a.own ? 1 : 0) - (b.own ? 1 : 0) || Number(a.d._id) - Number(b.d._id))
+    if (!cands.length) return skipAll('SKIPPED — no fixed-pay driver whose resolved rate a clear leaves unchanged (the month-end lock would refuse every other one)')
+    id = cands[0].d._id
+    name = cands[0].d.Driver
+    R = cands[0].R
+  }
+  meta.ids.p1DirectoryRow = id
+  original = await readRow()
+  if (!original) return skipAll(`SKIPPED — directory row #${id} is not listed by GET /api/drivers-directory`)
+  const who = mode === 'planted' ? `planted row #${id} (fixed, rate 0, share 37 %)` : `driver row #${id} (fixed)`
+  try {
+    for (const c of cases) {
+      let observed = ''; let v = 'FAIL'; let s = ''
+      try {
+        await caption(page, `Step ${c.step} — ${who}: set Daily Rate ${R} and Save, then ${c.how} and Save`)
+        const set = await saveDailyRate(page, name, id, String(R))
+        const afterSet = await readRow()
+        if (set.status !== 200) {
+          v = 'INFO'
+          observed = `setting the rate to ${R} first answered ${set.status}${set.code ? ` ${set.code}` : ''}` +
+            `${set.status === 409 ? ' — the month-end lock refused it' : ''}: ${set.error}`
+        } else if (Number(afterSet?.PayDaily) !== R) {
+          v = 'INFO'
+          observed = `setting the rate to ${R} did not store it (${payText(afterSet)}), so there was nothing to clear`
+        } else {
+          const clr = await saveDailyRate(page, name, id, c.text)
+          const after = await readRow()
+          if (clr.status === 409) {
+            v = 'INFO'
+            observed = `set ${R} → stored ${afterSet.PayDaily}; then ${c.how} → 409 ${clr.code}: the month-end lock refused the clear (${clr.error})`
+          } else {
+            const kept = Number(after?.PayDaily) === R
+            const ok = clr.status === 200 && Number(after?.PayDaily) === 0 &&
+              Number(after?.PayPercentage) === Number(original.PayPercentage) && String(after?.PayType) === String(original.PayType)
+            v = verdict(ok)
+            observed = `${who}: set ${R} → ${set.status}, stored ${afterSet.PayDaily}; then ${c.how} → ${clr.status}${clr.code ? ` ${clr.code}` : ''}; ` +
+              `stored now: ${payText(after)} (PayPercentage before: ${original.PayPercentage})${kept ? ' — the old rate was KEPT' : ''}`
+          }
+        }
+        s = await showDailyRate(page, name, `${c.step.toLowerCase()}-daily-rate`, `Step ${c.step} — ${v}`)
+      } catch (e) {
+        observed = `error: ${e.message}`
+        s = await shot(page, `${c.step.toLowerCase()}-error`)
+      }
+      record({ step: c.step, title: c.title, expected, observed, verdict: v, shot: s })
+    }
+  } finally {
+    if (mode === 'planted') {
+      const n = db.prepare('DELETE FROM drivers_directory WHERE id = ? AND driver_name = ?').run(id, name).changes
+      forgetCreated('drivers_directory', id)
+      mpNotes.push(`P1 planted directory row #${id} ${n === 1 ? 'deleted' : 'NOT FOUND to delete (LEFT BEHIND?)'}`)
+    }
+    if (mode === 'real') {
+      // Put the row back exactly as it was read: the same PUT the dialog sends, every
+      // column as stored (a string "0" is a value to the route; a number 0 is not).
+      const cur = await readRow()
+      const heads = (await api(page, 'GET', '/api/drivers-directory')).json?.headers || []
+      const same = cur && heads.every((h) => String(cur[h] ?? '') === String(original[h] ?? ''))
+      if (same) mpNotes.push(`P1 driver row #${id} unchanged`)
+      else {
+        const put = await api(page, 'PUT', `/api/drivers-directory/${id}`, { headers: heads, values: heads.map((h) => String(original[h] ?? '')) })
+        const back = await readRow()
+        const ok = back && heads.every((h) => String(back[h] ?? '') === String(original[h] ?? ''))
+        mpNotes.push(`P1 driver row #${id} put back (${put.status}): ${ok ? 'restored' : `RESTORE MISMATCH (${payText(back)})`}`)
+      }
+    }
+  }
+}
+
+// ---- E1: a new expense is stamped with the truck whose assigned_driver is a
+// spacing variant of the driver's name. Local, planted: the harness driver's own
+// truck (creds.json's truckId) gets the variant; the driver files the expense from
+// their own page, the smallest body the route takes (no receipt).
+async function expenseStampCase() {
+  const title = 'The driver\'s truck has assigned_driver = a spacing variant of their name (planted); the driver files an expense for one of their own loads (a page fetch of POST /api/expenses, as the app does)'
+  const expected = 'The stored expense carries that truck\'s unit (truck_unit) and owner (owner_id)'
+  if (!db) return record({ step: 'E1', title, expected, observed: skipWhy(), verdict: 'SKIP', shot: '' })
+  const truck = db.prepare('SELECT id, unit_number, owner_id, assigned_driver FROM trucks WHERE id = ?').get(CREDS.driver.truckId)
+  const user = db.prepare('SELECT driver_name FROM users WHERE id = ?').get(CREDS.driver.userId)
+  if (!truck || !user || normName(truck.assigned_driver) !== normName(user.driver_name)) {
+    return record({ step: 'E1', title, expected, observed: `SKIPPED — truck #${CREDS.driver.truckId} is not assigned to the harness driver (re-run setup-db.cjs)`, verdict: 'SKIP', shot: '' })
+  }
+  meta.ids.e1Truck = truck.id
+  const { ctx, page } = await freshPage({ width: DVW, height: DVH })
+  let expenseId = null
+  let observed = ''; let v = 'FAIL'; let s = ''
+  try {
+    await login(page, 'Step E1 — Driver', CREDS.driver.username, CREDS.driver.password, '/driver')
+    // The driver's loads, as the app reads them: each carries _expenseWindow.
+    const me = await whoAmI(page)
+    const dr = await api(page, 'GET', `/api/driver/${encodeURIComponent(user.driver_name)}`)
+    const heads = Array.isArray(dr.json?.headers) ? dr.json.headers : (dr.json?.headers?.jobTracking || [])
+    const idCol = heads.find((h) => /load.?id|job.?id/i.test(String(h || '')))
+    const loads = (Array.isArray(dr.json?.loads) ? dr.json.loads : []).filter((r) => r && typeof r === 'object' && r._expenseWindow)
+    const open = loads.filter((r) => r._expenseWindow.eligible && String(r[idCol] ?? '').trim())
+    let filer = page
+    let loadId = open.length ? String(open[0][idCol]).trim() : ''
+    let via = `the driver (${me.text}), for load ${loadId} (its receipt window is open)`
+    let adminCtx2 = null
+    if (!loadId) {
+      // No load of theirs takes a receipt today: the Super Admin files it on the
+      // driver's behalf instead. The route stamps the truck by the same lookup.
+      const any = loads.find((r) => String(r[idCol] ?? '').trim())
+      if (!any) throw new Error(`the driver's page lists no load (GET /api/driver → ${dr.status})`)
+      loadId = String(any[idCol]).trim()
+      const a = await freshPage(ADMIN_VP)
+      adminCtx2 = a.ctx
+      filer = a.page
+      await login(filer, 'Step E1 — Super Admin (files on the driver\'s behalf)', CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
+      via = `the Super Admin on the driver's behalf (no load of the driver takes a receipt today: ${loads.length} load(s), windows ${[...new Set(loads.map((r) => r._expenseWindow.state))].join('/')}), for load ${loadId}`
+    }
+    plant('trucks', 'assigned_driver', truck.id, spacingVariant(user.driver_name))
+    const amount = Number((1 + (Date.now() % 89) / 100).toFixed(2))
+    const body = { loadId, type: 'Other', amount, date: dayCT(), description: `QA-TEST-E1-${stamp}` }
+    if (filer !== page) body.driver = user.driver_name
+    const res = await api(filer, 'POST', '/api/expenses', body)
+    if (res.status === 200 && res.json?.id) {
+      expenseId = res.json.id
+      noteCreated('expenses', expenseId)
+      meta.ids.e1Expense = expenseId
+    }
+    await adminCtx2?.close().catch(() => {})
+    if (!expenseId) {
+      v = 'INFO'
+      observed = `filed by ${via}: POST /api/expenses → ${res.status}${res.json?.code ? ` ${res.json.code}` : ''} ${String(res.json?.error || res.text || '').slice(0, 200)} — no expense to read back`
+    } else {
+      const row = db.prepare('SELECT truck_unit, owner_id FROM expenses WHERE id = ?').get(expenseId)
+      const ok = row.truck_unit === truck.unit_number && Number(row.owner_id) === Number(truck.owner_id)
+      v = verdict(ok)
+      observed = `truck #${truck.id} (unit ${truck.unit_number}, owner #${truck.owner_id}) planted with ${variantText(user.driver_name)}; filed by ${via}: 200, expense #${expenseId}; ` +
+        `stored truck_unit ${JSON.stringify(row.truck_unit)}, owner_id ${row.owner_id}${ok ? '' : ' — the truck was NOT found'}`
+    }
+    await caption(page, `Step E1 — ${v}: ${observed}`)
+    s = await shot(page, 'e1-expense-truck-stamp')
+  } catch (e) {
+    observed = `error: ${e.message}`
+    s = await shot(page, 'e1-error')
+  } finally {
+    await ctx.close().catch(() => {})
+    try {
+      if (expenseId) {
+        const n = db.prepare('DELETE FROM expenses WHERE id = ? AND description = ?').run(expenseId, `QA-TEST-E1-${stamp}`).changes
+        forgetCreated('expenses', expenseId)
+        mpNotes.push(`E1 expense #${expenseId} ${n === 1 ? 'deleted' : 'NOT FOUND to delete (LEFT BEHIND?)'}`)
+      }
+      mpNotes.push(...restoreAll().map((n) => `E1 ${n}`))
+    } catch (e) { mpNotes.push(`E1 clean-up error: ${e.message}`) }
+  }
+  record({ step: 'E1', title, expected, observed, verdict: v, shot: s })
+}
+
+// ---- N1: a rename on the Users page moves the rows under a spacing variant of the
+// old name. Local, planted. The Users page's Linked Driver list offers only names in
+// the drivers directory, and a rename onto a name the directory already holds is
+// refused as a merge, so the one rename this page can make is a re-spelling of the
+// account's own directory name: the account is created as "qa-test-n1-<stamp>
+// driver" beside a directory row "QA-TEST-N1-<stamp> Driver", and renamed onto it.
+async function renameSpacingCase(page) {
+  const title = 'Users page → Edit a throwaway Driver account → Linked Driver = its directory spelling → Save, with its rows in expenses, truck_assignments and invoices stored under the old name with its space doubled (planted)'
+  const expected = 'Every planted row carries the new name (expenses and truck_assignments as spelled; invoices lowercase, that column\'s own convention)'
+  if (!db) return record({ step: 'N1', title, expected, observed: skipWhy(), verdict: 'SKIP', shot: '' })
+  const base = `QA-TEST-N1-${stamp}`
+  const NEW = `${base} Driver`
+  const OLD = NEW.toLowerCase()
+  const VARIANT = spacingVariant(OLD)
+  const username = base.toLowerCase()
+  let observed = ''; let v = 'FAIL'; let s = ''
+  const planted = {}
+  try {
+    // The directory row the Linked Driver list offers, and the account (the same
+    // calls the Drivers Database and Users pages make).
+    const dAdd = await api(page, 'POST', '/api/drivers-directory', { headers: ['Driver'], values: [NEW] })
+    const dirRow = db.prepare('SELECT id FROM drivers_directory WHERE driver_name = ?').get(NEW)
+    if (dirRow) noteCreated('drivers_directory', dirRow.id)
+    const uAdd = await api(page, 'POST', '/api/users', { username, password: `qa-${Math.random().toString(36).slice(2)}-${Date.now()}`, role: 'Driver', driverName: OLD })
+    const acct = db.prepare('SELECT id, driver_name FROM users WHERE username = ?').get(username)
+    if (acct) noteCreated('users', acct.id)
+    if (dAdd.status !== 200 || !dirRow || uAdd.status !== 200 || !acct) {
+      throw new Error(`could not create the throwaway driver: directory POST → ${dAdd.status}, users POST → ${uAdd.status} ${String(uAdd.json?.error || '').slice(0, 120)}`)
+    }
+    meta.ids.n1User = acct.id
+    // Job Tracking must hold no row for it: the route refuses a rename otherwise.
+    const sheet = await page.evaluate(async (names) => {
+      const norm = (x) => String(x ?? '').trim().toLowerCase().replace(/\s+/g, ' ')
+      const res = await fetch('/api/data?sheet=Job%20Tracking', { credentials: 'same-origin', cache: 'no-store' })
+      const j = await res.json().catch(() => null)
+      const col = (j?.headers || []).find((h) => /^driver$/i.test(String(h || '').trim())) || (j?.headers || []).find((h) => /driver/i.test(String(h || '')))
+      return { status: res.status, rows: (j?.data || []).length, mine: (j?.data || []).filter((r) => names.includes(norm(r?.[col]))).length }
+    }, [OLD, NEW, VARIANT].map(normName))
+    if (sheet.status !== 200) throw new Error(`Job Tracking could not be read to confirm it holds no row for the driver (${sheet.status})`)
+    if (sheet.mine) throw new Error(`Job Tracking holds ${sheet.mine} row(s) for the throwaway driver`)
+    // Plant rows under the variant (ids recorded; deleted at the end).
+    const nowIso = new Date().toISOString()
+    planted.expenses = db.prepare("INSERT INTO expenses (timestamp, driver, load_id, type, amount, description, date) VALUES (?, ?, 'QA-TEST-N1', 'Other', 0.01, ?, ?)")
+      .run(nowIso, VARIANT, base, dayCT()).lastInsertRowid
+    noteCreated('expenses', planted.expenses)
+    const tId = db.prepare('SELECT MIN(id) AS id FROM trucks').get().id
+    planted.truck_assignments = db.prepare('INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (?, ?, ?, ?)')
+      .run(tId, VARIANT, nowIso, nowIso).lastInsertRowid
+    noteCreated('truck_assignments', planted.truck_assignments)
+    // This week's Saturday to Friday: both months open, nothing paid, so the rename's
+    // month-end check has nothing to refuse.
+    const sat = new Date(`${dayCT()}T12:00:00Z`)
+    sat.setUTCDate(sat.getUTCDate() - ((sat.getUTCDay() + 1) % 7))
+    const fri = new Date(sat.getTime() + 6 * 86400000)
+    planted.invoices = db.prepare("INSERT INTO invoices (invoice_number, driver, week_start, week_end, status) VALUES (?, ?, ?, ?, 'Draft')")
+      .run(base, VARIANT.toLowerCase(), sat.toISOString().slice(0, 10), fri.toISOString().slice(0, 10)).lastInsertRowid
+    noteCreated('invoices', planted.invoices)
+    meta.ids.n1Rows = Object.entries(planted).map(([t, i]) => `${t}#${i}`).join('/')
+    // The rename, through the Users page.
+    await page.goto(`${BASE_URL}/users`)
+    await page.locator('table.user-table').waitFor({ state: 'visible', timeout: 30000 })
+    const sizes = page.locator('select.page-size-select')
+    if (await sizes.count()) {
+      const opts = await sizes.first().locator('option').evaluateAll((os) => os.map((o) => Number(o.value)).filter(Number.isFinite))
+      if (opts.length) await sizes.first().selectOption(String(Math.max(...opts)))
+    }
+    const row = page.locator('table.user-table tbody tr', { has: page.locator('td.mono', { hasText: exactText(username) }) }).first()
+    for (let i = 0; i < 20 && !(await row.isVisible()); i++) {
+      const next = page.locator('button', { hasText: '›' }).first()
+      if (!(await next.count()) || await next.isDisabled()) break
+      await next.click()
+      await page.waitForTimeout(200)
+    }
+    await row.scrollIntoViewIfNeeded()
+    await row.locator('button.btn-edit').click()
+    const modal = page.locator('.confirm-dialog.edit-dialog')
+    await modal.waitFor({ state: 'visible', timeout: 15000 })
+    await field(modal, 'Linked Driver').selectOption(NEW)
+    await caption(page, `Step N1 — the throwaway driver (user #${acct.id}): Linked Driver set to its directory spelling; rows planted under the old name with its space doubled (${meta.ids.n1Rows})`)
+    const [resp] = await Promise.all([
+      page.waitForResponse((r) => pathOf(r.url()) === `/api/users/${acct.id}` && r.request().method() === 'PUT', { timeout: 60000 }),
+      modal.locator('.confirm-actions button.btn-primary').click(),
+    ])
+    let rb = null
+    try { rb = await resp.json() } catch { /* not json */ }
+    await page.waitForTimeout(800)
+    const now = {
+      account: db.prepare('SELECT driver_name FROM users WHERE id = ?').get(acct.id)?.driver_name,
+      expenses: db.prepare('SELECT driver FROM expenses WHERE id = ?').get(planted.expenses)?.driver,
+      truck_assignments: db.prepare('SELECT driver_name FROM truck_assignments WHERE id = ?').get(planted.truck_assignments)?.driver_name,
+      invoices: db.prepare('SELECT driver FROM invoices WHERE id = ?').get(planted.invoices)?.driver,
+    }
+    const want = { expenses: NEW, truck_assignments: NEW, invoices: NEW.toLowerCase() }
+    const moved = Object.keys(want).filter((k) => now[k] === want[k])
+    const left = Object.keys(want).filter((k) => now[k] !== want[k])
+    if (resp.status() !== 200) {
+      v = resp.status() === 409 ? 'INFO' : 'FAIL'
+      observed = `PUT /api/users/${acct.id} → ${resp.status()} ${rb?.code || ''}: ${String(rb?.error || '').slice(0, 300)}`
+    } else {
+      v = verdict(!left.length)
+      observed = `sheet check: ${sheet.rows} Job Tracking rows, 0 for this driver; the save → 200; the account now carries the new name: ${now.account === NEW}; ` +
+        `moved to the new name: ${moved.join(', ') || 'none'}; LEFT under the variant: ${left.map((k) => `${k} (${now[k] === VARIANT || now[k] === VARIANT.toLowerCase() ? 'still the variant' : 'another value'})`).join(', ') || 'none'}`
+    }
+    await row.scrollIntoViewIfNeeded().catch(() => {}) // the renamed account's row, after the list reloads
+    await caption(page, `Step N1 — ${v}: ${observed}`)
+    s = await shot(page, 'n1-users-rename')
+  } catch (e) {
+    observed = `error: ${e.message}`
+    s = await shot(page, 'n1-error')
+  } finally {
+    try { mpNotes.push(...removeCreated().map((n) => `N1 ${n}`)) } catch (e) { mpNotes.push(`N1 clean-up error: ${e.message}`) }
+    // Nothing else may keep the throwaway names (e.g. rows the app wrote for them).
+    const left = ['drivers_directory:driver_name', 'expenses:driver', 'truck_assignments:driver_name', 'invoices:driver', 'users:driver_name', 'users:username']
+      .map((tc) => { const [t, c] = tc.split(':'); return [tc, db.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE LOWER(${c}) LIKE ?`).get(`${base.toLowerCase()}%`).n] })
+      .filter(([, n]) => n)
+    mpNotes.push(left.length ? `N1 LEFT BEHIND: ${left.map(([tc, n]) => `${tc}=${n}`).join(', ')}` : 'N1 no throwaway row left')
+  }
+  record({ step: 'N1', title, expected, observed, verdict: v, shot: s })
+}
+
+// ---- F1: an Active Loads edit writes only the changed cell. Local only: it edits a
+// row of the LOCAL non-production sheet, read and restored with the service
+// account (valueRenderOption FORMULA). A row with no formula cell gets one, =1+1,
+// in an empty column no feature reads, and loses it again at the end.
+const PROD_SHEET = '1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo'
+function localSheetId() {
+  let id = process.env.SPREADSHEET_ID
+  let from = 'the environment'
+  if (id === undefined) {
+    const envFile = [path.join(paths.REPO, '.env'), path.join(paths.mainCheckout(), '.env')].find((f) => fs.existsSync(f))
+    if (!envFile) throw new Error('no .env to read SPREADSHEET_ID from')
+    id = paths.appRequire('dotenv').parse(fs.readFileSync(envFile)).SPREADSHEET_ID
+    from = envFile
+  }
+  id = String(id ?? '').trim()
+  if (!id) throw new Error(`SPREADSHEET_ID is unset or empty in ${from}`)
+  if (id === PROD_SHEET) throw new Error(`SPREADSHEET_ID in ${from} is PRODUCTION's sheet`)
+  return id
+}
+const colLetter = (n) => { let s = ''; for (let x = n; x > 0; x = Math.floor((x - 1) / 26)) s = String.fromCharCode(65 + ((x - 1) % 26)) + s; return s }
+// Columns a planted =1+1 must never land in: anything a feature reads. Among the
+// rest, a column that reads like progress or holds a link is used only when no
+// other one is empty.
+const F1_NOT_HARMLESS = /load.?id|job.?id|driver|status|truck|trailer|pay|rate|amount|revenue|charge|price|cost|mile|dist|date|time|appoint|lat|lng|lon|pick|drop|deliver|dest|origin|broker|phone|e-?mail|contact|fax|mobile|cell|details|contract|owner|invoice|pod|document|output|weight|hazmat|temp|note|info|address|city|state|zip/i
+const F1_LAST_RESORT = /phase|progress|link/i
+async function cellOnlySaveCase(page) {
+  const title = 'Active Loads → a load → Edit → change Details only → Save changes; the row read back from the sheet (valueRenderOption FORMULA)'
+  const expected = 'Only the edited cell changed; every formula cell of the row is still a formula'
+  if (!LOCAL) return record({ step: 'F1', title, expected, observed: 'SKIPPED — local only (it edits the local non-production sheet)', verdict: 'SKIP', shot: '' })
+  let observed = ''; let v = 'FAIL'; let s = ''
+  let sheets; let spreadsheetId; let range; let rowIndex; let width; let before = null; let plantedIdx = -1
+  const TAB = "'Job Tracking'"
+  const readRow = async () => ((await sheets.spreadsheets.values.get({ spreadsheetId, range, valueRenderOption: 'FORMULA' })).data.values || [[]])[0] || []
+  try {
+    spreadsheetId = localSheetId()
+    const { google } = paths.appRequire('googleapis')
+    const auth = new google.auth.GoogleAuth({ keyFile: path.join(paths.mainCheckout(), 'service-account-key.json'), scopes: ['https://www.googleapis.com/auth/spreadsheets'] })
+    sheets = google.sheets({ version: 'v4', auth })
+    const dash = (await api(page, 'GET', '/api/dashboard')).json || {}
+    const heads = dash.jobTrackingHeaders || []
+    width = heads.length
+    const idCol = heads.find((h) => /load.?id|job.?id/i.test(String(h || '')))
+    const detailsIdx = heads.findIndex((h) => String(h || '').trim().toLowerCase() === 'details')
+    if (!idCol || detailsIdx < 0) throw new Error('the dashboard\'s Job Tracking headers have no load id or no Details column')
+    const idIdx = heads.indexOf(idCol)
+    const active = (dash.activeJobs || []).filter((r) => Number(r._rowIndex) >= 2 && String(r[idCol] ?? '').trim()).slice(0, 12)
+    if (!active.length) throw new Error('the dashboard lists no active load')
+    const got = await sheets.spreadsheets.values.batchGet({
+      spreadsheetId, valueRenderOption: 'FORMULA',
+      ranges: active.map((r) => `${TAB}!A${r._rowIndex}:${colLetter(width)}${r._rowIndex}`),
+    })
+    const rowsF = (got.data.valueRanges || []).map((vr) => (vr.values || [[]])[0] || [])
+    // Same sheet as the server? The load id cell must match the server's copy.
+    const matchIdx = active.map((r, i) => String(rowsF[i]?.[idIdx] ?? '').trim() === String(r[idCol]).trim())
+    if (!matchIdx.some(Boolean)) throw new Error('no candidate row\'s load id matches the server\'s copy: this sheet is not the server\'s')
+    const withFormula = active.findIndex((r, i) => matchIdx[i] && rowsF[i].some((c, j) => j < width && j !== detailsIdx && typeof c === 'string' && c.startsWith('=')))
+    const pick = withFormula >= 0 ? withFormula : matchIdx.indexOf(true)
+    const job = active[pick]
+    rowIndex = Number(job._rowIndex)
+    range = `${TAB}!A${rowIndex}:${colLetter(width)}${rowIndex}`
+    const loadId = String(job[idCol]).trim()
+    meta.ids.f1Row = `${rowIndex} (load ${loadId})`
+    before = await readRow()
+    let formulas = before.map((c, j) => (j < width && typeof c === 'string' && c.startsWith('=') ? j : -1)).filter((j) => j >= 0)
+    if (!formulas.length) {
+      const emptyAt = (h, j) => String(h || '').trim() && !F1_NOT_HARMLESS.test(String(h)) && (before[j] === undefined || before[j] === '')
+      plantedIdx = heads.findIndex((h, j) => emptyAt(h, j) && !F1_LAST_RESORT.test(String(h)))
+      if (plantedIdx < 0) plantedIdx = heads.findIndex(emptyAt)
+      if (plantedIdx < 0) throw new Error('the row has no formula cell and no empty column that no feature reads')
+      const cell = `${TAB}!${colLetter(plantedIdx + 1)}${rowIndex}`
+      sheetPlants.push({ range: cell })
+      writeJournal()
+      await sheets.spreadsheets.values.update({ spreadsheetId, range: cell, valueInputOption: 'USER_ENTERED', requestBody: { values: [['=1+1']] } })
+      before = await readRow()
+      formulas = [plantedIdx]
+      // Wait (up to ~75 s) for the server's cached copy to show the computed value,
+      // as a person opening the load would see it.
+      const col = heads[plantedIdx]
+      for (let i = 0; i < 16; i++) {
+        const d = (await api(page, 'GET', '/api/dashboard')).json || {}
+        const r = (d.activeJobs || []).find((x) => Number(x._rowIndex) === rowIndex)
+        if (String(r?.[col] ?? '') === '2') break
+        await page.waitForTimeout(5000)
+      }
+    }
+    const formulaText = formulas.map((j) => `${String(heads[j] || '').trim() || colLetter(j + 1)} ${JSON.stringify(before[j])}`).join(', ')
+    // The UI: open the load from the dashboard, Edit, change Details only, Save.
+    await page.goto(`${BASE_URL}/dashboard?load=${encodeURIComponent(loadId)}`)
+    const editBtn = page.locator('button[title^="Manually edit load fields"]').first()
+    await editBtn.waitFor({ state: 'visible', timeout: 45000 })
+    await editBtn.click()
+    const box = page.locator('#edit-details')
+    await box.waitFor({ state: 'visible', timeout: 15000 })
+    const typed = `${(await box.inputValue()).trim()} QA-F1-${stamp}`.trim()
+    await box.fill(typed)
+    await caption(page, `Step F1 — load ${loadId} (sheet row ${rowIndex}): Details edited; formula cell(s): ${formulaText}${plantedIdx >= 0 ? ' (planted)' : ''}`)
+    const [resp] = await Promise.all([
+      page.waitForResponse((r) => r.request().method() !== 'GET' && /^\/api\/(data\/\d+|load\/)/.test(pathOf(r.url())), { timeout: 60000 }),
+      page.getByRole('button', { name: 'Save changes' }).click(),
+    ])
+    let rb = null
+    try { rb = await resp.json() } catch { /* not json */ }
+    const after = await readRow()
+    const n = Math.max(width, before.length, after.length)
+    const changed = []
+    for (let j = 0; j < n; j++) if (JSON.stringify(before[j] ?? '') !== JSON.stringify(after[j] ?? '')) changed.push(j)
+    const still = formulas.filter((j) => typeof after[j] === 'string' && after[j].startsWith('='))
+    const onlyDetails = changed.length === 1 && changed[0] === detailsIdx && after[detailsIdx] === typed
+    if (resp.status() !== 200) {
+      v = resp.status() === 409 ? 'INFO' : 'FAIL'
+      observed = `the save (${resp.request().method()} ${pathOf(resp.url())}) → ${resp.status()} ${rb?.code || ''}: ${String(rb?.error || '').slice(0, 200)}`
+    } else {
+      v = verdict(onlyDetails && still.length === formulas.length)
+      observed = `load ${loadId}, sheet row ${rowIndex}: the save → ${resp.status()} (${pathOf(resp.url())}); ${changed.length} cell(s) changed: ` +
+        `${changed.map((j) => String(heads[j] || '').trim() || colLetter(j + 1)).join(', ') || 'none'}; Details as typed: ${after[detailsIdx] === typed}; ` +
+        `formula cells still formulas: ${still.length} of ${formulas.length} (${formulas.map((j) => `${String(heads[j] || '').trim() || colLetter(j + 1)} now ${JSON.stringify(after[j] ?? '')}`).join(', ')})`
+    }
+    await page.waitForTimeout(600)
+    await caption(page, `Step F1 — ${v}: ${observed}`)
+    s = await shot(page, 'f1-active-loads-edit')
+  } catch (e) {
+    observed = `error: ${e.message}`
+    s = await shot(page, 'f1-error')
+  } finally {
+    // Put every cell that differs from the first read back (formulas and numbers as
+    // entered, text as raw text), and clear the planted formula.
+    if (sheets && before) {
+      try {
+        const now = await readRow()
+        const orig = before.slice()
+        if (plantedIdx >= 0) orig[plantedIdx] = ''
+        const raw = []; const entered = []
+        for (let j = 0; j < Math.max(width, orig.length, now.length); j++) {
+          if (JSON.stringify(orig[j] ?? '') === JSON.stringify(now[j] ?? '')) continue
+          const val = orig[j] ?? ''
+          const d = { range: `${TAB}!${colLetter(j + 1)}${rowIndex}`, values: [[val]] }
+          if (typeof val === 'number' || typeof val === 'boolean' || (typeof val === 'string' && val.startsWith('='))) entered.push(d)
+          else raw.push(d)
+        }
+        if (raw.length) await sheets.spreadsheets.values.batchUpdate({ spreadsheetId, requestBody: { valueInputOption: 'RAW', data: raw } })
+        if (entered.length) await sheets.spreadsheets.values.batchUpdate({ spreadsheetId, requestBody: { valueInputOption: 'USER_ENTERED', data: entered } })
+        const back = await readRow()
+        const ok = Array.from({ length: Math.max(width, orig.length, back.length) }, (_, j) => JSON.stringify(orig[j] ?? '') === JSON.stringify(back[j] ?? '')).every(Boolean)
+        mpNotes.push(`F1 sheet row ${rowIndex}: ${raw.length + entered.length} cell(s) written back${plantedIdx >= 0 ? ' (incl. the planted formula cleared)' : ''} — ${ok ? 'restored' : 'RESTORE MISMATCH'}`)
+        if (ok) { sheetPlants.length = 0; writeJournal() }
+      } catch (e) { mpNotes.push(`F1 sheet restore error: ${e.message}`) }
+    }
+  }
+  record({ step: 'F1', title, expected, observed, verdict: v, shot: s })
+}
+
+async function moneyPathSection() {
+  const ownDb = !db
+  if (!db) db = openDb()
+  const { ctx, page } = await freshPage(ADMIN_VP)
+  try {
+    const want = ['P1a', 'E1', 'N1', 'F1'].filter((x) => wantMp(x) || (x === 'P1a' && wantMp('P1b'))).map((x) => x.replace('P1a', 'P1'))
+    const adminNeeded = want.some((x) => x !== 'E1')
+    if (adminNeeded || db) {
+      await login(page, 'Money path — Super Admin', CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
+      if (db) await proveMoneyPathDb(page)
+    }
+    if (want.includes('P1')) {
+      try { await payRateCase(page) } catch (e) { record({ step: 'P1', title: 'Drivers Database: clear a daily rate', expected: '', observed: `error: ${e.message}`, verdict: 'FAIL', shot: await shot(page, 'p1-error') }) }
+    }
+    if (want.includes('E1')) await expenseStampCase()
+    if (want.includes('N1')) await renameSpacingCase(page)
+    if (want.includes('F1')) await cellOnlySaveCase(page)
+  } finally {
+    try { if (db) mpNotes.push(...restoreAll().map((n) => `MP ${n}`)) } catch (e) { mpNotes.push(`restore error: ${e.message}`) }
+    try { if (db) mpNotes.push(...removeCreated().map((n) => `MP ${n}`)) } catch (e) { mpNotes.push(`delete error: ${e.message}`) }
+    const left = fs.existsSync(JOURNAL)
+    record({
+      step: 'MPc', title: 'Money path: restore every planted value, delete every row the section created, put the sheet row back',
+      expected: 'Everything restored or deleted; no plant journal left',
+      observed: [...mpNotes, left ? 'plant journal still present!' : 'no plant journal left'].join('; ') || 'nothing to restore',
+      verdict: verdict(!left && !mpNotes.some((n) => /MISMATCH|error|LEFT BEHIND/.test(n))), shot: '',
+    })
+    await ctx.close().catch(() => {})
+    if (ownDb && db) { try { db.close() } catch { /* ignore */ } db = null }
   }
 }
 
