@@ -8,7 +8,7 @@ It is **not part of `npm run ci`**, and it never runs in CI or on deploy. It is 
 the root install, CI and the deploy never install it, and `scripts/run-unit-tests.js` only runs the top-level
 `scripts/test-*` / `check-*` files.
 
-What it covers today, in four sections (`ONLY` picks them):
+What it covers today, in five sections (`ONLY` picks them):
 
 - **Trucks (steps 1–12, R1–R16).** Truck photos and drivers' identity files are stored and served only as what their
   bytes are. Truck amounts are validated (400 `INVALID_AMOUNT`) and cost edits audited. The Trucks forms keep their input
@@ -25,6 +25,11 @@ What it covers today, in four sections (`ONLY` picks them):
   the sheet reader (`GET /api/data`) is Super Admin only.
 - **Maintenance notice (M1).** A popup dismissal in one tab belongs to the person who dismissed it. Local only, on a
   server booted with the notice on.
+- **Money path (P1, E1, N1, F1).** Clearing a fixed-pay driver's daily rate in the Drivers Database stores 0 and
+  leaves the other pay type's value alone (P1, local and staging). A driver's new expense carries the unit and owner of
+  their truck when the truck stores a spacing variant of their name (E1). A rename on the Users page also moves the
+  rows stored under a spacing variant of the old name (N1). An Active Loads edit writes only the cell that changed,
+  so formula cells survive (F1). E1 and N1 are planted and local only; F1 is local only.
 
 Every "Expected" column states the behaviour **after** the fix. A run on a build without it (a BEFORE baseline) is
 expected to FAIL exactly the fix rows.
@@ -49,8 +54,12 @@ expected to FAIL exactly the fix rows.
   - **Does not go out:** no write to production, no mail (Gmail is blanked) and no pushes (the n8n webhook, Routemate,
     Linxup and ScanKit are blanked or off). Production's read-only archive sheet (the `ARCHIVE_SPREADSHEET_ID` default)
     is read only by the `/archive` page and the rate-con reconcile; the run opens neither, and the reconcile is off.
-- **Nothing writes to the Google Sheet.** Every step that writes changes the SQLite copy only (trucks, sessions, audit
-  rows). The Sheet is only read.
+- **One step writes the Google Sheet: F1, and only the local non-production one.** Every other step that writes
+  changes the SQLite copy only (trucks, drivers, expenses, sessions, audit rows). F1 runs only against a server on this
+  machine. It resolves the sheet the way `boot-server.sh` does, refuses production's, and checks that the row it reads
+  matches the server's copy of that load. It edits one row through the app, with the service-account key of the main
+  checkout, then writes back every cell of that row that differs from its first read. It plants a formula there first
+  when the row has none, and clears it again (see the money-path section).
 - **Logins are never printed.** The creds file (`0600`) is read, never echoed. The scripts print ids and booleans only.
 - **Identity documents are masked** in saved screenshots (`MASK_PII`, on by default). The live headed page is not masked.
 - **Stop by PID only.** `stop-server.sh` kills the one process `boot-server.sh` recorded. It does so only while that process
@@ -93,7 +102,7 @@ directory outside every checkout.
 | `creds.json` (`0600`) | The five logins: Super Admin, Driver, two Investors (`investor`, `investor2`), Dispatcher. **Never print or paste it.** |
 | `shots/<tag>/`, `results-<tag>.md` | A run's screenshots and verdict table. The screenshots show real data. |
 | `server-<port>.log`, `server-<port>.pid` | The server's output, and the PID `stop-server.sh` stops. |
-| `plant-journal.json` | Exists only while a planted value is in a DB (see "Planting"). |
+| `plant-journal.json` | Exists only while a planted value, a row the money path created, or F1's planted sheet cell is live (see "Planting"). |
 
 ## Local run
 
@@ -120,9 +129,15 @@ E2E_MAINTENANCE_NOTICE=1 fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$P
 BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-maintenance ONLY=maintenance \
   fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
 fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
+# Part 4: the money path (2 or 3 sign-ins; it fits beside part 1 on one server process)
+fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
+BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-moneypath ONLY=moneypath DB_PATH="$W/qa.db" \
+  fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
+fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
 ```
 
-- Headless: part 1 takes about 1.5 minutes, part 2 about 2.5 minutes, part 3 about 30 s.
+- Headless: part 1 takes about 1.5 minutes, part 2 about 2.5 minutes, part 3 about 30 s, part 4 about 1.5 minutes
+  (up to 80 s more when F1 has to plant its formula and wait for the server's cached copy of the sheet).
 - Headed (`HEADED=1`) takes roughly two to three times as long. Headed uses slowMo 350 ms, a 1.6 s pause on every
   caption (none on the timing-critical ones), 1400×900 admin and investor windows, and a 430×900 driver window.
 - A BEFORE baseline is the same run on the build without the fix, with `PHASE=before`. Use a second copy from
@@ -132,9 +147,10 @@ fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
   start while `plant-journal.json` exists.
 
 ⚠️ **Login limiter:** `POST /api/auth/login` allows 20 attempts per 15 minutes per server process, counting every
-attempt. Per section: `trucks` 3, `signout` up to 20, `dispatcher` 2 and `maintenance` 3. The sign-out figure is its
+attempt. Per section: `trucks` 3, `signout` up to 20, `dispatcher` 2, `maintenance` 3 and `moneypath` up to 3 (the
+Super Admin and the driver, plus the Super Admin again when E1 has to file on the driver's behalf). The sign-out figure is its
 worst case: one fewer on a build without S4a's second half, and one fewer where S7 sends one sign-in (so 19 on a build
-with the fixes). It fills a whole window, so run it on a fresh server process, as the recipe does. **All four together
+with the fixes). It fills a whole window, so run it on a fresh server process, as the recipe does. **All five together
 are more than one window holds**, which is why the recipe restarts the server between the parts; the run prints a
 warning when the sections it was given can exceed 20. If a step answers 429, the window is spent. To rerun single
 sign-out cases, use `STEPS` (e.g. `ONLY=signout STEPS=S5a,S7`), on a server with sign-ins left in its window. S1a,
@@ -206,8 +222,9 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
 ```
 
 - **No `DB_PATH`:** nothing can be planted in a remote database. Steps 10a–e, 11b–f, R3a–b, R15 and R16 SKIP, and so
-  does R8 when the creds file has no `investor` entry. M1 SKIPs too (local only: the notice is off on staging).
-  Everything else runs unchanged, and the script discovers every id itself.
+  does R8 when the creds file has no `investor` entry. M1 SKIPs too (local only: the notice is off on staging), and so
+  do E1, N1 and F1. P1 runs on a real driver (see the money-path section). Everything else runs unchanged, and the
+  script discovers every id itself.
 - **Expected differences:** staging's environment refresh strips identity documents. So 11a (the Kit's CDL) FAILs there,
   R10 scores only its truck-photo half, and on a build that still has the driver-files route R12 can only be
   `PASS (vacuous)` (the route answers, with no files to return).
@@ -217,7 +234,8 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
   `{"superAdmin": {"username", "password", "userId"}, "driver": {…}, "investor": {…}, "dispatcher": {…}}`.
   `investor` and `dispatcher` are optional. Keep it in the work dir, `0600`.
 - ⚠️ **A full run writes on staging.** It creates, edits and deletes `QA-TEST-*` trucks, and their audit rows stay.
-  `ONLY=signout` only signs in and out.
+  `ONLY=signout` only signs in and out. `ONLY=moneypath` saves one real driver's pay terms four times and then puts the
+  row back as it was read; its `update_driver_pay` audit lines stay (SQLite only).
 
 ## Environment
 
@@ -226,10 +244,10 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
 | `BASE_URL` | Required by `e2e.mjs`. Refuses `app.logisx.com` (production). |
 | `PHASE` | `before` or `after`. Only names the output; the "Expected" column is always the after-the-fix behaviour. |
 | `OUT_TAG` | Writes `shots/<tag>/` and `results-<tag>.md` instead of `<PHASE>`, so a rehearsal cannot overwrite a baseline. |
-| `ONLY` | A comma-separated list of sections: `trucks` (1–12, R1–R16), `signout` (S1–S7), `dispatcher` (D1–D3), `maintenance` (M1). Unset: all four, in that order, then step 12's clean-up — more sign-ins than one limiter window holds (see above). |
-| `STEPS` | Only these sign-out cases, e.g. `STEPS=S5a,S7` (each has its own browser context). The other sections ignore it. |
+| `ONLY` | A comma-separated list of sections: `trucks` (1–12, R1–R16), `signout` (S1–S7), `dispatcher` (D1–D3), `maintenance` (M1), `moneypath` (P1, E1, N1, F1). Unset: all five, in that order, then step 12's clean-up — more sign-ins than one limiter window holds (see above). |
+| `STEPS` | Only these sign-out or money-path cases, e.g. `STEPS=S5a,S7` (each has its own browser context) or `STEPS=P1,F1` (`P1` selects P1a and P1b). The other sections ignore it. |
 | `HEADED=1` | A visible browser. |
-| `DB_PATH` | The copy the server runs on (inside the work dir). It is used **only** to plant stored values for steps 10, 11b–f, R3 and R15, and to stage and clean up R16. Unset: those rows SKIP. |
+| `DB_PATH` | The copy the server runs on (inside the work dir). It is used **only** to plant stored values for steps 10, 11b–f, R3 and R15, to stage and clean up R16, to plant and read back E1 and N1, and to plant P1's own driver. Unset: those rows SKIP, and P1 uses a real driver. |
 | `CREDS_FILE` | The logins. Default: `<work dir>/creds.json`. |
 | `E2E_WORK_DIR` | The work dir. Default: `$TMPDIR/logisx-e2e`. It must be private, outside every checkout, and contain none. |
 | `SOURCE_DB` | `setup-db.cjs`'s source, opened read-only. Default: the main checkout's `app.db`. |
@@ -314,9 +332,12 @@ failed (500) is INFO.
 - Clean-up (step 12) deletes every one of them. A run also starts by deleting any `QA-TEST-*` leftovers.
 
 **Planting.** Steps 10, 11b–f, R3 and R15 write test values straight into the copy (`DB_PATH`): the driver's truck
-`photo`, or their application's `cdl_front`. The originals are kept in memory only, and they are restored after each block and on
-Ctrl-C. While a plant is live, `plant-journal.json` records ids only, never values. If a run dies mid-plant, that file
-blocks the next run: recreate the copy (`setup-db.cjs … --force`), then delete the journal.
+`photo`, or their application's `cdl_front`. E1 plants the driver's truck's `assigned_driver`. The originals are kept in memory only, and they are restored after each block and on
+Ctrl-C. The money path also creates rows (a directory row, an account, expenses, an assignment, an invoice) and
+deletes them again by id. While a plant or a created row is live, `plant-journal.json` records tables and ids only,
+never values; while F1's planted formula is in the sheet, it records that cell's address. If a run dies mid-plant,
+that file blocks the next run: recreate the copy (`setup-db.cjs … --force`), clear the recorded sheet cell if there is
+one, then delete the journal.
 
 R3 turns the driver tab's HTTP cache off over CDP. The Kit URL has no cache-buster, so on a build that lets the browser
 cache it, step 11a's real CDL could otherwise answer for the planted value.
@@ -449,6 +470,47 @@ email count is the sharper signal. Everything here is read-only, and safe on sta
 |---|---|---|
 | M1a | In **one tab**: Investor A signs in, sees the popup, closes it and signs out with the sidebar; Investor B signs in on the same tab. | B sees the popup: a dismissal belongs to the person who dismissed it. |
 | M1b | B closes it (if shown) and signs out; A signs back in on that tab. | A does not see it again. `PASS (vacuous)` when B did not see it either: the tab's one dismissal then hides it from everyone. |
+
+## The money-path section (P1, E1, N1, F1)
+
+`ONLY=moneypath` (`STEPS` picks cases). The Super Admin signs in once, and P1, N1 and F1 share that page; E1 signs the
+driver in. With `DB_PATH`, the run first proves the server reads that file (a throwaway directory row must appear
+in the Drivers Database list; `MP*` FAIL otherwise, and E1 and N1 SKIP). Names stay in memory: the results name rows
+by id, and a spacing variant is described, never printed. `MPc` reports every restore and delete.
+
+| Step | How it is shown | Expected (AFTER) |
+|---|---|---|
+| P1a | **UI.** Drivers Database, Edit on a fixed-pay driver: the Daily Rate is set to the driver's current resolved rate and saved, then emptied and saved. The stored terms are read back from the list the page loads, and the dialog is reopened for the screenshot. | Daily rate stored as 0; the percentage and the pay type as they were |
+| P1b | **UI.** The same driver: the rate set again and saved, then typed as 0 and saved. | The same |
+| E1 | **Planted, local only.** The driver's truck stores a spacing variant of their name (the space doubled). The driver files an expense for one of their own loads whose receipt window is open, from their own page as the app does, with no receipt. The stored expense is read from `DB_PATH`. | The expense carries that truck's unit and owner |
+| N1 | **Planted, local only.** A throwaway Driver account (`qa-test-n1-<timestamp> driver`) beside a directory row spelled `QA-TEST-N1-<timestamp> Driver`, with an expense, a truck assignment and a Draft invoice stored under the account's name with its space doubled. The run first confirms Job Tracking has no row for it. **UI:** Users page, Edit, Linked Driver set to the directory spelling, Save. | Every planted row carries the new name: the expense and the assignment as spelled, the invoice lowercase (that column's own convention) |
+| F1 | **Local only.** A load from the Super Admin's Active Loads, its sheet row read with the service account (formulas as formulas). **UI:** the load opened from the dashboard, Edit, Details changed (a `QA-F1-<timestamp>` suffix), Save changes. The row is read again. | Only the Details cell changed; every formula cell of the row is still a formula |
+
+**Why P1 sets the rate first.** Every month but the current one may be finalized, and the month-end lock refuses a
+directory edit that moves a finalized month's pay. The rate is first set to what the driver is already paid (their own
+rate, else their truck's, else the $250 default), so neither save moves a figure the pay math reads. A refusal is
+still possible on data that disagrees, and is scored INFO with the server's reason.
+
+- **Local (`DB_PATH`):** a planted directory row, `QA-TEST-DRV-<timestamp>-P1`: fixed, rate 0, owner-operator share 37 %.
+  The share is the inactive pay type's value that must survive. It is deleted at the end.
+- **Staging (no `DB_PATH`):** a real fixed-pay driver whose resolved rate a clear cannot move. Their row is put back
+  exactly as it was read, and the `update_driver_pay` audit lines stay.
+
+**E1's fallback.** If none of the driver's loads takes a receipt today, the Super Admin files the expense on the
+driver's behalf, which reaches the same truck lookup; the row says so. The expense is deleted and the truck's name
+restored at the end.
+
+**Why N1 renames by case.** The Users page offers only names in the drivers directory as a Linked Driver. A rename onto a
+name the directory already holds is refused as a merge. So the one rename this page can make is a re-spelling of the
+account's own directory name. The throwaway account, its directory row and every planted row are deleted at the end,
+by id, and the run then counts what is left under the throwaway name (it expects none).
+
+**F1's formula cell.** A row that already has a formula keeps it as the test's subject. Otherwise `=1+1` is written
+into an empty column that no feature reads (never a money, status, date, contact, address or driver column; a column
+that reads like progress or holds a link only when nothing else is empty). The run then waits, up to about 80 s,
+until the server's cached copy of the sheet shows the computed value, as a person opening the load would see it.
+Afterwards every cell that differs from the first read is written back (formulas and numbers as entered, text as
+plain text), the planted formula is cleared, and the row is read once more to confirm it matches.
 
 ## Teardown (once the whole QA cycle is done)
 
