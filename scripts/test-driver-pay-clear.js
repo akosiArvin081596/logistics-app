@@ -23,14 +23,16 @@
  * and the REAL month-end lock: directoryEditLockBlockers() with the locked-month
  * and truck-rate helpers it calls. Only the 409 formatter, the carrier history
  * sync and the socket notification are stubbed. The Edit dialog's and the Add
- * form's pay cells come from directoryPayCells(), imported from the client, so
- * both halves of the contract run together.
+ * form's pay cells come from directoryPayCells(), and the type the dialog opens
+ * with from directoryPayType(), both imported from the client, so both halves
+ * of the contract run together.
  *   §1 "0", or a blank field, clears the driver's rate; the pay paths then read
  *      the truck's rate, or $250 with no truck
  *   §2 a numeric 0 (a page from before the fix) is not sent: nothing changes
  *   §3 the pay type not in use is never touched, on a save or a type switch
  *   §4 the month-end lock: a clear that would reprice a closed month is refused
- *      (409, nothing written, audited); one that reprices nothing goes through
+ *      (409, nothing written, audited); one that reprices nothing goes through,
+ *      as does a legacy "Fixed" / "Percentage" row saved as the dialog opens it
  *   §5 POST: the Add Driver form's cells create the terms they show
  *   §6 MUTANT: the PUT's mapping honouring a numeric 0. It must fail §2 and §3.
  *
@@ -224,8 +226,11 @@ function effectiveDailyRate(db, m, name) {
 	return m.resolveDailyRate(s.payDaily, t ? (t.driver_pay_daily || 250) : undefined);
 }
 
-// What the Edit dialog holds when it opens on a row (DriverTable.vue openEdit()).
-const dialogOpen = (r) => ({ payType: r.pay_type || "fixed", payPercentage: Number(r.pay_percentage) || 0, payDaily: Number(r.pay_daily) || 0 });
+// What the Edit dialog holds when it opens on a row (DriverTable.vue openEdit()),
+// the pay type through the client's own directoryPayType().
+const dialogOpen = (directoryPayType) => (r) => ({
+	payType: directoryPayType(r.pay_type), payPercentage: Number(r.pay_percentage) || 0, payDaily: Number(r.pay_daily) || 0,
+});
 // The pay cells a page built before the fix sent, verbatim: the oracle for §2.
 const oldPageCells = (f) => [
 	f.payType,
@@ -284,11 +289,12 @@ function mountAll(db, routes = {}) {
 }
 
 // ── the sections ────────────────────────────────────────────────────────────
-function sections(directoryPayCells, routes = {}) {
+function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 	const out = { s1: [], s2: [], s3: [], s4: [], s5: [] };
 	const t = (s, name, cond) => out[s].push({ name, ok: !!cond });
+	const dialogOpenRow = dialogOpen(directoryPayType);
 	// The Edit dialog's Save after `edit` changes the form, as a Super Admin.
-	const dialogCells = (r, edit = {}) => directoryPayCells({ canEditPay: true, ...dialogOpen(r), ...edit });
+	const dialogCells = (r, edit = {}) => directoryPayCells({ canEditPay: true, ...dialogOpenRow(r), ...edit });
 
 	// §1 "0" clears.
 	for (const [label, id, edit, want] of [
@@ -334,7 +340,7 @@ function sections(directoryPayCells, routes = {}) {
 		t("s1", `§1 a Dispatcher's "0": 403 PAY_EDIT_ADMIN_ONLY, $300 kept (got ${r.status} ${(r.body || {}).code || ""})`,
 			r.status === 403 && r.body.code === "PAY_EDIT_ADMIN_ONLY" && row(db, 1).pay_daily === 300);
 		t("s1", "§1 ...and the Dispatcher's dialog sends no pay at all",
-			JSON.stringify(directoryPayCells({ canEditPay: false, ...dialogOpen(before), payDaily: 0 })) === JSON.stringify(["", "", ""]));
+			JSON.stringify(directoryPayCells({ canEditPay: false, ...dialogOpenRow(before), payDaily: 0 })) === JSON.stringify(["", "", ""]));
 	}
 
 	// §2 a numeric 0 is not sent.
@@ -342,7 +348,7 @@ function sections(directoryPayCells, routes = {}) {
 		const db = makeDb();
 		const app = mountAll(db, routes);
 		const before = row(db, 1);
-		const cells = oldPageCells({ ...dialogOpen(before), payDaily: 0 });
+		const cells = oldPageCells({ ...dialogOpenRow(before), payDaily: 0 });
 		const r = app.dirPut(SUPER, 1, formBody(before, cells, { PhoneNumber: "555-0199" }));
 		t("s2", `§2 a page from before the fix: "set to 0" arrives as ${JSON.stringify(cells)}, saved, the $300 kept, the phone edit written (got ${r.status}, ${JSON.stringify(terms(row(db, 1)))})`,
 			JSON.stringify(cells) === JSON.stringify(["fixed", 0, 0]) && r.status === 200 &&
@@ -361,8 +367,8 @@ function sections(directoryPayCells, routes = {}) {
 	for (const [label, id, cellsOf] of [
 		["the dialog saving a fixed driver (the share stored for the other type)", 1, (r) => dialogCells(r)],
 		["the dialog saving an owner-operator (the day rate stored for the other type)", 2, (r) => dialogCells(r)],
-		["a page from before the fix saving a fixed driver (the share sent as the number 0)", 1, (r) => oldPageCells(dialogOpen(r))],
-		["a page from before the fix saving an owner-operator (the day rate sent as the number 0)", 2, (r) => oldPageCells(dialogOpen(r))],
+		["a page from before the fix saving a fixed driver (the share sent as the number 0)", 1, (r) => oldPageCells(dialogOpenRow(r))],
+		["a page from before the fix saving an owner-operator (the day rate sent as the number 0)", 2, (r) => oldPageCells(dialogOpenRow(r))],
 	]) {
 		const db = makeDb();
 		const app = mountAll(db, routes);
@@ -403,7 +409,7 @@ function sections(directoryPayCells, routes = {}) {
 	}
 	for (const [label, id, cellsOf] of [
 		["the dialog saving Shorn King's terms as they are", 1, (r) => dialogCells(r)],
-		["a page from before the fix \"setting 0\" (a numeric 0: not sent)", 1, (r) => oldPageCells({ ...dialogOpen(r), payDaily: 0 })],
+		["a page from before the fix \"setting 0\" (a numeric 0: not sent)", 1, (r) => oldPageCells({ ...dialogOpenRow(r), payDaily: 0 })],
 		["the dialog saving Rodney Brown (the day rate not in use, not sent)", 2, (r) => dialogCells(r)],
 	]) {
 		const db = makeDb({ lockedMonths: ["2026-08"] });
@@ -413,6 +419,26 @@ function sections(directoryPayCells, routes = {}) {
 		t("s4", `§4 August locked, ${label}: no change to judge, saved (got ${r.status} ${(r.body || {}).code || ""})`,
 			r.status === 200 && app.lockRefusals.length === 0 && row(db, id).phone === "555-0777" &&
 			JSON.stringify(terms(row(db, id))) === JSON.stringify(terms(before)));
+	}
+	// A legacy capitalized type: the dialog opens it on its radio (directoryPayType())
+	// and now sends its amount as text; the money math reads the same terms after
+	// the save, so even with August locked there is nothing to judge.
+	for (const [label, id, legacy, want] of [
+		["Shorn King stored as \"Fixed\"", 1, "Fixed", ["fixed", "", "300"]],
+		["Rodney Brown stored as \"Percentage\"", 2, "Percentage", ["percentage", "20", ""]],
+	]) {
+		const db = makeDb({ lockedMonths: ["2026-08"] });
+		const app = mountAll(db, routes);
+		db.prepare("UPDATE drivers_directory SET pay_type = ? WHERE id = ?").run(legacy, id);
+		const before = row(db, id);
+		const cells = dialogCells(before);
+		const rate = effectiveDailyRate(db, app.m, before.driver_name);
+		const r = app.dirPut(SUPER, id, formBody(before, cells, { PhoneNumber: "555-0777" }));
+		t("s4", `§4 August locked, ${label}: the dialog sends ${JSON.stringify(cells)}; saved with the phone edit, nothing to judge (got ${r.status} ${(r.body || {}).code || ""})`,
+			JSON.stringify(cells) === JSON.stringify(want) && r.status === 200 && app.lockRefusals.length === 0 && row(db, id).phone === "555-0777");
+		t("s4", `§4 ...${label}: the money math reads the same terms after the save, and prices the driver the same`,
+			JSON.stringify(app.m.directoryPayStruct(row(db, id))) === JSON.stringify(app.m.directoryPayStruct(before)) &&
+			effectiveDailyRate(db, app.m, before.driver_name) === rate);
 	}
 	{
 		const db = makeDb({ lockedMonths: ["2026-08"] });
@@ -444,8 +470,8 @@ function sections(directoryPayCells, routes = {}) {
 }
 
 (async () => {
-	const { directoryPayCells } = await import(pathToFileURL(path.join(__dirname, "..", "client", "src", "lib", "driverPay.js")).href);
-	const res = sections(directoryPayCells);
+	const lib = await import(pathToFileURL(path.join(__dirname, "..", "client", "src", "lib", "driverPay.js")).href);
+	const res = sections(lib);
 	for (const [key, title] of [["s1", "§1 \"0\" clears"], ["s2", "§2 a numeric 0 is not sent"], ["s3", "§3 the type not in use is untouched"],
 		["s4", "§4 the month-end lock"], ["s5", "§5 POST"]]) {
 		console.log(title);
@@ -457,7 +483,7 @@ function sections(directoryPayCells, routes = {}) {
 	console.log("§6 mutant");
 	const HONOUR_ZERO = mutate(ROUTES.dirPut, 'headers.forEach((h, i) => { obj[h] = values[i] || ""; });',
 		'headers.forEach((h, i) => { obj[h] = values[i] ?? ""; });');
-	const m = sections(directoryPayCells, { dirPut: HONOUR_ZERO });
+	const m = sections(lib, { dirPut: HONOUR_ZERO });
 	const s2 = m.s2.filter((r) => !r.ok), s3 = m.s3.filter((r) => !r.ok);
 	const caught = s2.length > 0 && s3.length > 0;
 	if (caught) pass++;
