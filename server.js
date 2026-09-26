@@ -22291,7 +22291,9 @@ function blockedExpensePeriods(rows) {
 //
 // `cascadeName` MUST be the exact string the cascade's DELETEs match on — see
 // the note at the call site. A guard that resolved the name its own way would be
-// answering for a different set of rows than the DELETEs remove.
+// answering for a different set of rows than the DELETEs remove. Blocker (4)
+// adds to that match rather than replacing it: it judges rows the delete leaves
+// in place, not rows it removes, so it also takes the driver's other spellings.
 function userDeleteLockBlockers(user, cascadeName) {
 	// Fail CLOSED, for the reason PUT /api/expenses/:id/status spells out:
 	// isLocked() swallows every error and answers "not locked", so an unreadable
@@ -22416,9 +22418,9 @@ function userDeleteLockBlockers(user, cascadeName) {
 	// of (2). The delete does NOT remove invoices (see the cascade below: they are
 	// issued documents and are deliberately retained), but it does STRAND them.
 	// `driverOwnsInvoice()` resolves ownership through the session's driverName,
-	// and `GET /api/invoices`'s non-Super-Admin branch scopes to
-	// `LOWER(driver) = <own name>` — so once the account is gone the rows sit in
-	// the table naming a person the app can no longer resolve. For a row already
+	// and `GET /api/invoices`'s non-Super-Admin branch lists the rows it says the
+	// session owns — so once the account is gone the rows sit in the table naming
+	// a person the app can no longer resolve. For a row already
 	// marked PAID that is the same event blocker (2) refuses: money left the bank
 	// against a document naming this driver, and the payee has to stay
 	// attributable.
@@ -22429,10 +22431,29 @@ function userDeleteLockBlockers(user, cascadeName) {
 	// to reopen a month that is open — the exact mislabel namedLockedPeriods()
 	// exists to prevent. Live rows only: a soft-deleted invoice is already out of
 	// every list, so stranding it changes nothing.
+	//
+	// ⚠️ MATCHED THROUGH THE RENAME CASCADE'S `invoices` LEG, NOT THE REMOVALS'
+	// `LOWER(col) = ?`. Blocker (1) judges exactly the rows the delete removes, so
+	// it shares their match. This one judges rows the delete leaves in place, and
+	// the readers of an invoice's owner fold spacing (driverOwnsInvoice(), which
+	// the list and the PDF and submit routes all ask), so an invoice stored under
+	// another spelling of the driver's name (a doubled or edge space) is this
+	// account's as much as one under the name itself. PUT /api/users/:id judges
+	// the same leg when it blanks or changes the name. So the rows are
+	// `LOWER(driver) = ?` or one of those spellings (driverRenameSpellings()),
+	// unless another account holds that spelling (driverRenameWidens(), this
+	// account excepted), which makes the row that account's. Only for an account
+	// with a driver name: a username is not a driver identity, so the username
+	// fallback of `cascadeName` keeps the case-aside match alone (`widens: false`
+	// binds no other spelling). Wider only ever means more rows judged, so this
+	// can only refuse more; it removes nothing. A failed read throws, like every
+	// read in this guard, before the delete has written anything.
 	if (cascadeName) {
+		const invoicesLeg = DRIVER_RENAME_TARGETS.find((t) => t.key === "invoices");
+		const legOpts = String(user.driver_name || "").trim() ? { userId: user.id } : { userId: user.id, widens: false };
 		const rows = db.prepare(
-			"SELECT id, invoice_number, week_start, week_end, COALESCE(paid_at, '') AS paid_at FROM invoices WHERE LOWER(driver) = ? AND deleted_at = ''"
-		).all(cascadeName);
+			`SELECT id, invoice_number, week_start, week_end, COALESCE(paid_at, '') AS paid_at FROM invoices WHERE (${driverRenameWhereSql(invoicesLeg, legOpts)}) AND deleted_at = ''`
+		).all(...driverRenameWhereArgs(invoicesLeg, cascadeName, legOpts));
 		const frozen = rows.filter(invoiceRowPeriodLocked);
 		const MONTH = /^\d{4}-\d{2}$/;
 		const monthLocked = (r) => {
@@ -22800,13 +22821,16 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 				// edge space); these DELETEs do not, and for a removal that is the
 				// safe direction. userDeleteLockBlockers() judges the expense rows by
 				// this same match, so every expense removed here was judged, and the
-				// other tables carry no period. A row under another spelling is
-				// neither judged nor removed: it stays in every month it was counted
-				// in. Widening these would permanently delete receipts and documents
-				// under another spelling, and would need the expense check widened in
-				// step. The cost is that such rows stay behind under a spelling no
-				// account holds, and the counts this route reports do not include
-				// them. The truck is the one leg matched wider: it is cleared, not
+				// other tables carry no period. A row of these tables under another
+				// spelling is neither judged nor removed: it stays in every month it
+				// was counted in. Widening these would permanently delete receipts and
+				// documents under another spelling, and would need the expense check
+				// widened in step. The cost is that such rows stay behind under a
+				// spelling no account holds, and the counts this route reports do not
+				// include them. The guard does see other spellings where this delete
+				// leaves a row in place rather than removing it: its invoice check
+				// matches the rename cascade's `invoices` leg, and only refuses. Of
+				// these writes, the truck is the one matched wider: it is cleared, not
 				// deleted (findTruckForDriverAccount()). See
 				// docs/claude/user-routes-guards.md.
 				removed.expenses = db.prepare("DELETE FROM expenses WHERE LOWER(driver) = ?").run(name).changes;

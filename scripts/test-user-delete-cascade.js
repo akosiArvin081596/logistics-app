@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Locks DELETE /api/users/:id — the FK-bearing children, the signed-evidence
-// archive, the detaches, and the invoices blocker.
+// archive, the detaches, and the invoices blocker (which also judges the
+// driver's other spellings, through the rename cascade's `invoices` leg).
 //
 // THE BUG, and it is not the one it looks like. `db.pragma("foreign_keys = ON")`
 // plus three FOREIGN KEYs on users(id) — driver_onboarding, onboarding_documents
@@ -68,6 +69,16 @@ function extract(name) {
 	if (body.split("\nfunction ").length - 1 !== 0) throw new Error(`extraction of ${name}() spanned more than one declaration`);
 	return body;
 }
+// A top-level `const` block, from its head to `close`.
+function extractConst(head, close) {
+	const needle = `\n${head}`;
+	const hits = SRC.split(needle).length - 1;
+	if (hits !== 1) throw new Error(`expected exactly 1 statement starting ${JSON.stringify(head)} in server.js, found ${hits}`);
+	const start = SRC.indexOf(needle) + 1;
+	const end = SRC.indexOf(close, start);
+	if (end < 0) throw new Error(`no end found after ${head}`);
+	return SRC.slice(start, end + close.length);
+}
 
 // The cascade body, verbatim, out of the route handler.
 // Anchored on `DELETE FROM users WHERE id = ?` — the one statement that is
@@ -98,6 +109,14 @@ check("cascade extraction found the three FK-bearing children", [
 // (Its cases are scripts/test-driver-rename-clash.js §4d's subject.)
 const TRUCK_LOOKUP_SRC = ["normalizeDriverName", "findDriverNameClashes", "driverNameHeldByOtherAccount", "findTruckForDriver", "findTruckForDriverAccount"]
 	.map(extract).join("\n");
+// The delete guard's invoice blocker matches through the rename cascade's
+// `invoices` leg (the driver's other spellings, with the other-account rule), so
+// every lift of userDeleteLockBlockers() below carries the real helpers.
+const RENAME_LEG_SRC = [
+	...["normalizeDriverName", "findDriverNameClashes", "driverNameHeldByOtherAccount"].map(extract),
+	extractConst("const DRIVER_RENAME_TARGETS = [", "\n];"),
+	...["driverRenameWhereSql", "driverRenameWhereArgs", "driverRenameWidens", "driverRenameSpellings"].map(extract),
+].join("\n");
 function runCascade(db, user, name, id, body = CASCADE) {
 	const removed = {}, detached = {};
 	const helpers = new Function("db", `${TRUCK_LOOKUP_SRC}\nreturn { normalizeDriverName, findTruckForDriverAccount };`)(db);
@@ -402,6 +421,7 @@ function seedOnboardedDriver(db) {
 		"db", "isLocked", "periodLocksReadable", "expenseRowPeriodLocked", "blockedExpensePeriods", "truckFixedCostLockedMonths",
 		`${extract("invoiceRowPeriodLocked")}
 		 ${extract("namedLockedPeriods")}
+		 ${RENAME_LEG_SRC}
 		 ${extract("userDeleteLockBlockers")}
 		 return { userDeleteLockBlockers };`
 	);
@@ -422,6 +442,7 @@ function seedOnboardedDriver(db) {
 			CREATE TABLE period_locks (period TEXT, status TEXT);
 			CREATE TABLE trucks (id INTEGER PRIMARY KEY, unit_number TEXT, owner_id INTEGER, in_service_date TEXT DEFAULT '', retired_at TEXT DEFAULT '', created_at TEXT DEFAULT '');
 			CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_number TEXT, driver TEXT, week_start TEXT, week_end TEXT, paid_at TEXT DEFAULT '', deleted_at TEXT DEFAULT '');
+			CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, driver_name TEXT DEFAULT '', role TEXT);
 		`);
 		return db;
 	};
@@ -510,7 +531,7 @@ function seedOnboardedDriver(db) {
 		inv(db, { n: "INV-SK-2026W19-01", driver: "shorn king", ws: "2026-05-09", we: "2026-05-15", paid: "2026-05-20" });
 		const M = new Function(
 			"db", "isLocked", "periodLocksReadable", "expenseRowPeriodLocked", "blockedExpensePeriods", "truckFixedCostLockedMonths",
-			`${extract("invoiceRowPeriodLocked")}\n${extract("namedLockedPeriods")}\n${noInvoiceLeg}\nreturn { userDeleteLockBlockers };`
+			`${extract("invoiceRowPeriodLocked")}\n${extract("namedLockedPeriods")}\n${RENAME_LEG_SRC}\n${noInvoiceLeg}\nreturn { userDeleteLockBlockers };`
 		)(db, (p) => LOCKED.has(p), () => true, () => false, () => [], () => []);
 		check("mutant rejected — pre-fix guard lets a PAID locked-month invoice through",
 			M.userDeleteLockBlockers({ id: 7 }, "shorn king").blockers.length, 0);
@@ -573,6 +594,7 @@ check("refusal extraction picked up the 409 and its code selection", [
 		"db", "isLocked", "periodLocksReadable", "expenseRowPeriodLocked", "blockedExpensePeriods", "truckFixedCostLockedMonths",
 		`${extract("invoiceRowPeriodLocked")}
 		 ${extract("namedLockedPeriods")}
+		 ${RENAME_LEG_SRC}
 		 ${extract("userDeleteLockBlockers")}
 		 return { userDeleteLockBlockers };`
 	);
@@ -580,6 +602,7 @@ check("refusal extraction picked up the 409 and its code selection", [
 		"db", "isLocked", "periodLocksReadable", "expenseRowPeriodLocked", "blockedExpensePeriods", "truckFixedCostLockedMonths",
 		`${extract("invoiceRowPeriodLocked")}
 		 ${extract("namedLockedPeriods")}
+		 ${RENAME_LEG_SRC}
 		 ${src || extract("userDeleteLockBlockers")}
 		 return { userDeleteLockBlockers };`
 	)(db, isLocked, () => true, () => false, () => [], () => []);
@@ -596,10 +619,12 @@ check("refusal extraction picked up the 409 and its code selection", [
 	// aside — before it was, a repeated attempt to delete a user out of a settled
 	// month left nothing behind.
 	let audited = [];
+	let status = null;
 	const refuse = (lock, src) => {
 		let captured = null;
 		audited = [];
-		const res = { status: () => ({ json: (b) => { captured = b; return b; } }) };
+		status = null;
+		const res = { status: (s) => { status = s; return { json: (b) => { captured = b; return b; } }; } };
 		new Function("lock", "user", "id", "res", "periodLabel", "req", "userDelAudit", "recordPeriodRefusal",
 			`${extract("periodLabel")}\n${src || REFUSAL}`
 		)(lock, { driver_name: "shorn king", username: "sking" }, 7, res, null,
@@ -617,6 +642,7 @@ check("refusal extraction picked up the 409 and its code selection", [
 			CREATE TABLE period_locks (period TEXT, status TEXT);
 			CREATE TABLE trucks (id INTEGER PRIMARY KEY, unit_number TEXT, owner_id INTEGER, in_service_date TEXT DEFAULT '', retired_at TEXT DEFAULT '', created_at TEXT DEFAULT '');
 			CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_number TEXT, driver TEXT, week_start TEXT, week_end TEXT, paid_at TEXT DEFAULT '', deleted_at TEXT DEFAULT '');
+			CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, driver_name TEXT DEFAULT '', role TEXT);
 		`);
 		return db;
 	};
@@ -756,6 +782,86 @@ check("refusal extraction picked up the 409 and its code selection", [
 		check("M2 rejected — with an empty periods array beside that claim",
 			body.periods, []);
 		db.close();
+	}
+
+	// -- THE DRIVER'S OTHER SPELLINGS ------------------------------------------
+	// The delete removes no invoice, so blocker (4) judges rows it leaves in
+	// place, and it finds them through the rename cascade's `invoices` leg: the
+	// stored spelling case aside, or another spelling of the driver's name (a
+	// doubled or edge space) that no other account holds. Only for an account
+	// with a driver name. The real helpers run behind it (RENAME_LEG_SRC).
+	//
+	// MUTANT W removes the widening: every account's leg is asked with
+	// `widens: false`, which binds no other spelling, leaving the plain
+	// `LOWER(driver) = ?`. That is also the baseline "today's answer" is read from.
+	{
+		const REAL = extract("userDeleteLockBlockers");
+		const WIDENS = "? { userId: user.id } :";
+		check("mutant W: its anchor appears exactly once", REAL.split(WIDENS).length - 1, 1);
+		const W = REAL.replace(WIDENS, "? { userId: user.id, widens: false } :");
+		check("mutant W removed the widening", W !== REAL, true);
+
+		const accounts = (db, ...rows) => {
+			for (const u of rows) db.prepare("INSERT INTO users (id, username, driver_name, role) VALUES (?,?,?,?)").run(u.id, u.username, u.driver_name, u.role);
+			return db;
+		};
+		const SKING = { id: 7, username: "sking", driver_name: "Shorn King", role: "Driver" };
+		const PAID = { n: "INV-SK-2026W31-01", ws: "2026-08-01", we: "2026-08-07", paid: "2026-08-09" };
+		const codes = (lock) => lock.blockers.map((b) => b.code);
+
+		// "Shorn King", with a PAID invoice stored as "shorn  king".
+		{
+			LOCKED = new Set();
+			const db = accounts(mkdb(), SKING);
+			inv(db, { ...PAID, driver: "shorn  king" });
+			const lock = guardFor(db).userDeleteLockBlockers(SKING, "shorn king");
+			check("spellings: a PAID invoice under another spacing of the driver's name blocks the delete",
+				codes(lock), ["INVOICE_ALREADY_PAID"]);
+			check("spellings: ...counting that one row", lock.blockers.map((b) => b.rows), [1]);
+			const body = refuse(lock);
+			check("spellings: ...answered 409", status, 409);
+			check("spellings: ...with INVOICE_ALREADY_PAID", body && body.code, "INVOICE_ALREADY_PAID");
+			check("mutant W caught: with the widening removed that row is not judged",
+				guardFor(db, W).userDeleteLockBlockers(SKING, "shorn king").blockers, []);
+			db.close();
+		}
+		// The stored spelling itself still blocks.
+		{
+			LOCKED = new Set();
+			const db = accounts(mkdb(), SKING);
+			inv(db, { ...PAID, driver: "shorn king" });
+			check("spellings: a PAID invoice under the exact spelling still blocks",
+				codes(guardFor(db).userDeleteLockBlockers(SKING, "shorn king")), ["INVOICE_ALREADY_PAID"]);
+			db.close();
+		}
+		// A username is not a driver identity: an account with no driver name,
+		// whose username is another spelling of a driver's name, keeps the exact
+		// match. No other account holds the name, so only that condition stands
+		// between this delete and the driver's invoice.
+		{
+			LOCKED = new Set();
+			const DISPATCHER = { id: 9, username: "shorn  king", driver_name: "", role: "Dispatcher" };
+			const db = accounts(mkdb(), DISPATCHER);
+			inv(db, { ...PAID, driver: "shorn king" });
+			const lock = guardFor(db).userDeleteLockBlockers(DISPATCHER, "shorn  king");
+			check("spellings: a username-only account is unaffected", lock.blockers, []);
+			check("spellings: ...the exact match's answer",
+				lock.blockers, guardFor(db, W).userDeleteLockBlockers(DISPATCHER, "shorn  king").blockers);
+			db.close();
+		}
+		// Another account holds the name under that spelling, so the invoice is
+		// that account's, and this delete keeps today's answer.
+		{
+			LOCKED = new Set();
+			const LEGACY = { id: 8, username: "legacy", driver_name: "Shorn  King", role: "Driver" };
+			const db = accounts(mkdb(), SKING, LEGACY);
+			inv(db, { ...PAID, driver: "shorn  king" });
+			const lock = guardFor(db).userDeleteLockBlockers(SKING, "shorn king");
+			check("spellings: another account holding that spelling keeps today's answer", lock.blockers, []);
+			check("spellings: ...the exact match's answer",
+				lock.blockers, guardFor(db, W).userDeleteLockBlockers(SKING, "shorn king").blockers);
+			db.close();
+		}
 	}
 }
 
