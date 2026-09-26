@@ -207,7 +207,7 @@
     <!-- Edit Modal -->
     <Teleport to="body">
       <div v-if="showEdit" class="confirm-overlay" @click.self="showEdit = false">
-        <div class="confirm-dialog edit-dialog">
+        <div ref="editDialogEl" class="confirm-dialog edit-dialog" @change.capture="keepUnreadableNumber">
           <h3>Edit Truck &mdash; {{ editForm.unitNumber }}</h3>
 
           <div class="edit-field">
@@ -660,8 +660,11 @@ function openEdit(truck) {
 
 const editPhotoBusy = ref(false)
 const editPhotoError = ref('')
-// Why Save was refused (an amount out of range); shown directly above Save.
+// Why Save was refused (a number box it can't read, or an amount out of
+// range); shown directly above Save.
 const editError = ref('')
+// The edit dialog's element, for unreadableNumberError (null while closed).
+const editDialogEl = ref(null)
 
 // Receives File[] from FileDropZone — a drop and a click both land here.
 // compressImage replaces a raw FileReader for the same reason as AddTruckForm:
@@ -709,9 +712,11 @@ const AMOUNT_FIELDS = [
 
 // '' when every amount is blank or a finite number in range; otherwise one
 // sentence naming the first field that is not. Blank ('' / null / undefined)
-// stays allowed — it is how a field says "unset". Needed because
-// v-model.number turns a typed 1e999 into Infinity, which JSON.stringify sends
-// as null. Same rule as AddTruckForm.vue's copy.
+// stays allowed — it is how a field says "unset". v-model.number parseFloat()s
+// whatever the input reports, so a huge entry (1e308) arrives as a number, and
+// a non-finite one, should a browser report it, as Infinity — which
+// JSON.stringify would send as null. Chrome reports '' for that case instead;
+// see unreadableNumberError. Same rule as AddTruckForm.vue's copy.
 function amountError(values, canEditPay) {
   for (const { key, label, max = AMOUNT_MAX, pay } of AMOUNT_FIELDS) {
     if (pay && !canEditPay) continue
@@ -725,11 +730,45 @@ function amountError(values, canEditPay) {
   return ''
 }
 
+// A number box the browser cannot parse keeps its text on screen but reports
+// value '' — in Chrome "1e999", "15-00" and "5e" all do — and v-model reads
+// that '' as a deliberate blank. On this form that is not harmless: the PUT
+// sends the '' and the server stores 0, so a typo in Insurance would quietly
+// zero the truck's stored insurance. Only input.validity.badInput tells
+// "cleared" from "unreadable", which is why this reads the DOM. Names the first
+// such box by its label; a disabled box (driver pay for a non-Super Admin) is
+// never sent, so it is skipped. Same rule as AddTruckForm.vue's copy.
+//
+// ⚠️ Depends on keepUnreadableNumber below: without it the evidence is gone
+// before this runs.
+function unreadableNumberError(root) {
+  if (!root) return ''
+  for (const el of root.querySelectorAll('input[type="number"]')) {
+    if (el.disabled || !el.validity?.badInput) continue
+    const label = el.closest('.form-group, .edit-field')?.querySelector('label')?.textContent.trim()
+    return `${label || 'A number field'} can't be read as a number — correct it or clear the box.`
+  }
+  return ''
+}
+
+// v-model on a number box (with or without .number) adds its own 'change'
+// listener that rewrites the box with the cast model value — '' for an
+// unreadable entry — so without this the typo, and badInput with it, would
+// vanish the moment the box loses focus: exactly when Save is pressed, before
+// its click handler runs. Stopping that one event here, in the capture phase on
+// the dialog, keeps the typo on screen for unreadableNumberError to find and
+// for the person to fix. Readable entries pass through untouched. Same as
+// AddTruckForm.vue's copy.
+function keepUnreadableNumber(e) {
+  const el = e.target
+  if (el?.tagName === 'INPUT' && el.type === 'number' && el.validity?.badInput) e.stopPropagation()
+}
+
 function handleSaveEdit() {
   // Refused here rather than left to the server: emitting `update` closes this
   // modal at once, so a server refusal would land as a toast after every edit
   // in the form was gone.
-  editError.value = amountError(editForm, props.canEditPay)
+  editError.value = unreadableNumberError(editDialogEl.value) || amountError(editForm, props.canEditPay)
   if (editError.value) return
   emit('update', {
     id: editForm.id,

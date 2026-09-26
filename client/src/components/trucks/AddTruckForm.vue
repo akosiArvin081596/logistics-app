@@ -1,5 +1,5 @@
 <template>
-  <div class="card">
+  <div ref="formEl" class="card" @change.capture="keepUnreadableNumber">
     <div class="admin-section-title">
       <div class="section-dot" style="background: var(--accent);"></div>
       New Truck
@@ -266,6 +266,8 @@ watch(() => form.make, () => { form.model = '' })
 
 const errorMsg = ref('')
 const photoBusy = ref(false)
+// The form's root element, for unreadableNumberError.
+const formEl = ref(null)
 
 // Receives File[] from FileDropZone — a drop and a click both land here.
 //
@@ -316,9 +318,11 @@ const AMOUNT_FIELDS = [
 
 // '' when every amount is blank or a finite number in range; otherwise one
 // sentence naming the first field that is not. Blank ('' / null / undefined)
-// stays allowed — it is how a field says "unset". Needed because
-// v-model.number turns a typed 1e999 into Infinity, which JSON.stringify sends
-// as null. Same rule as TruckTable.vue's copy.
+// stays allowed — it is how a field says "unset". v-model.number parseFloat()s
+// whatever the input reports, so a huge entry (1e308) arrives as a number, and
+// a non-finite one, should a browser report it, as Infinity — which
+// JSON.stringify would send as null. Chrome reports '' for that case instead;
+// see unreadableNumberError. Same rule as TruckTable.vue's copy.
 function amountError(values, canEditPay) {
   for (const { key, label, max = AMOUNT_MAX, pay } of AMOUNT_FIELDS) {
     if (pay && !canEditPay) continue
@@ -332,6 +336,39 @@ function amountError(values, canEditPay) {
   return ''
 }
 
+// A number box the browser cannot parse keeps its text on screen but reports
+// value '' — in Chrome "1e999", "15-00" and "5e" all do — and v-model reads
+// that '' as a deliberate blank, so the field would save as unset (0) without
+// a word. Only input.validity.badInput tells "cleared" from "unreadable", which
+// is why this reads the DOM. Names the first such box by its label; a disabled
+// box (driver pay for a non-Super Admin) is never sent, so it is skipped. Same
+// rule as TruckTable.vue's copy.
+//
+// ⚠️ Depends on keepUnreadableNumber below: without it the evidence is gone
+// before this runs.
+function unreadableNumberError(root) {
+  if (!root) return ''
+  for (const el of root.querySelectorAll('input[type="number"]')) {
+    if (el.disabled || !el.validity?.badInput) continue
+    const label = el.closest('.form-group, .edit-field')?.querySelector('label')?.textContent.trim()
+    return `${label || 'A number field'} can't be read as a number — correct it or clear the box.`
+  }
+  return ''
+}
+
+// v-model on a number box (with or without .number) adds its own 'change'
+// listener that rewrites the box with the cast model value — '' for an
+// unreadable entry — so without this the typo, and badInput with it, would
+// vanish the moment the box loses focus: exactly when Add Truck is pressed,
+// before its click handler runs. Stopping that one event here, in the capture
+// phase on the form, keeps the typo on screen for unreadableNumberError to find
+// and for the person to fix. Readable entries pass through untouched. Same as
+// TruckTable.vue's copy.
+function keepUnreadableNumber(e) {
+  const el = e.target
+  if (el?.tagName === 'INPUT' && el.type === 'number' && el.validity?.badInput) e.stopPropagation()
+}
+
 function handleSubmit() {
   errorMsg.value = ''
   if (!form.unitNumber.trim()) {
@@ -340,7 +377,7 @@ function handleSubmit() {
   }
   // Refused here rather than left to the server: emitting `submit` clears this
   // form at once, so a server refusal would land after everything typed was gone.
-  const badAmount = amountError(form, props.canEditPay)
+  const badAmount = unreadableNumberError(formEl.value) || amountError(form, props.canEditPay)
   if (badAmount) {
     errorMsg.value = badAmount
     return
