@@ -6853,9 +6853,9 @@ function syncDriverToCarrierSheet(driverName, opts = {}) {
 			// real "Shorn King" must not take the real driver's row, and pay terms,
 			// with it — whichever way the row matches below. DELETE /api/users/:id
 			// removes its own account before it calls this, so only the others
-			// are seen.
-			if (findDriverNameClashes(name, { directory: false })
-				.some((h) => h.source === "users" && h.field === "driver_name")) {
+			// are seen (driverNameHeldByOtherAccount(), the rule the rename and the
+			// profile-picture upload share).
+			if (driverNameHeldByOtherAccount(name)) {
 				console.warn(`[directory-sync] kept the drivers_directory row for "${name}": another account still holds that driver name`);
 				return;
 			}
@@ -7398,8 +7398,17 @@ app.post("/api/drivers-directory/:id/profile-picture", requireAuth, (req, res) =
 		const sessionUser = req.session.user;
 		if (sessionUser.role !== "Super Admin") {
 			if (sessionUser.role !== "Driver") return res.status(403).json({ error: "Forbidden" });
-			const sessionDriver = normalizeDriverName(sessionUser.driver_name || sessionUser.driverName || "");
+			const sessionName = String(sessionUser.driver_name || sessionUser.driverName || "").trim();
+			const sessionDriver = normalizeDriverName(sessionName);
 			if (!sessionDriver || sessionDriver !== normalizeDriverName(driver.driver_name)) {
+				return res.status(403).json({ error: "Forbidden" });
+			}
+			// A row that names this driver only through spacing (not equal to the
+			// session name case aside) is theirs only while no other account holds
+			// a driver name that normalizes the same — the rule the directory
+			// rename and delete apply (driverNameHeldByOtherAccount()).
+			if (sessionName.toLowerCase() !== String(driver.driver_name || "").trim().toLowerCase()
+				&& driverNameHeldByOtherAccount(sessionName, [sessionUser.id])) {
 				return res.status(403).json({ error: "Forbidden" });
 			}
 		}
@@ -8184,6 +8193,12 @@ function normalizedUploadPath(req) {
 	let rel;
 	try { rel = decodeURIComponent(req.path || ""); } catch { return null; }   // malformed escape → refuse
 	if (!rel || rel.includes("\0")) return null;
+	// ASCII ONLY. Every name this app writes under uploads/ is ASCII (each writer
+	// builds it from ids, timestamps, allowlisted types and extensions, or text
+	// cut to [A-Za-z0-9._-]), so no link it serves carries anything else, and the
+	// file-name rules below compare in ASCII (SQLite's NOCASE folds ASCII case
+	// only). Refused, like the backslash below.
+	if ([...rel].some((ch) => ch.codePointAt(0) > 127)) return null;
 	// ⚠️ A BACKSLASH IS REFUSED, NOT FOLDED TO `/`. On Linux and macOS `send`
 	// (inside express.static) reads a decoded `\` as an ordinary filename
 	// character, so refusing it is the only way this function judges exactly the
@@ -8500,25 +8515,36 @@ function guardDrugTestFile(req, res, next, url) {
 //
 // ⚠️ MEMBERSHIP TEST. documents.file_name is not unique (idx_documents_file_name
 // is deliberately non-unique), so each rule asks whether ANY row with this name
-// grants access — never fetch-one-then-compare. The name is matched EXACTLY,
-// case included, so a spelling that only resolves on a case-insensitive
-// filesystem finds no row and is refused.
+// grants access — never fetch-one-then-compare. The Driver and Investor rules
+// match the name EXACTLY, case included, so a spelling that only resolves on a
+// case-insensitive filesystem finds no row and is refused. The Dispatcher rule
+// is the other way round (a row REFUSES), so it matches the name as a
+// case-insensitive filesystem resolves it — a dev Mac serves a file under any
+// letter case — with COLLATE NOCASE. normalizedUploadPath() refuses every
+// non-ASCII path, so ASCII case is the only case to fold.
 // ---------------------------------------------------------------------------
 
-// A documents row that is a rate con, by its type: case, spaces and underscores
-// ignored, so "RATECON", "Rate Con" and "rate_con" all match. Rate cons are
-// SUPER ADMIN ONLY (owner, 2026-09-26), so every listing and file rule that
-// serves another role reads this ONE copy: the load Documents panel
-// (LOAD_PANEL_DOCUMENT_FILTER), the investor Document Portal
-// (investorDocumentScope()) and guardRootLoadDocument's Dispatcher rule.
-// isRateConDocType() is the same test for a type already in hand.
-// Deliberately looser than RATECON_DOC_TYPES: that list decides what invoice
-// drafting TRUSTS as a rate con, this one decides what is WITHHELD, and a wider
-// match here only withholds more. A constant fragment — nothing from a request
-// is ever interpolated into it.
-const RATECON_DOCUMENT_SQL = "UPPER(REPLACE(REPLACE(COALESCE(type,''), ' ', ''), '_', '')) = 'RATECON'";
+// A documents row that is a rate con, by its type: its letters, upper-cased, are
+// exactly RATECON, whatever else it holds, so "RATECON", "Rate Con", "rate_con",
+// "RATE-CON" and "Rate.Con" all match. Rate cons are SUPER ADMIN ONLY (owner,
+// 2026-09-26), so every listing and file rule that serves another role reads
+// this ONE copy: the load Documents panel (LOAD_PANEL_DOCUMENT_FILTER), the
+// investor Document Portal (investorDocumentScope()) and guardRootLoadDocument's
+// Dispatcher rule. isRateConDocType() is the same test for a type already in
+// hand. Deliberately looser than RATECON_DOC_TYPES: that list decides what
+// invoice drafting TRUSTS as a rate con, this one decides what is WITHHELD, and
+// a wider match here only withholds more. A constant fragment, built once from
+// constants — nothing from a request is ever interpolated into it.
+//
+// SQLite has no regular expressions, so the SQL asks the same question in two
+// parts: the type holds exactly as many ASCII letters as RATECON (the length
+// lost when all 26 are removed), and its letters include R, A, T, E, C, O, N in
+// that order (GLOB). Seven letters that include those seven, in order, are those
+// seven. scripts/test-uploads-root-guard.js checks that the SQL and
+// isRateConDocType() agree on every spelling it lists.
+const RATECON_DOCUMENT_SQL = ((u) => "(LENGTH(" + u + ") - LENGTH(" + [..."ABCDEFGHIJKLMNOPQRSTUVWXYZ"].reduce((s, c) => "REPLACE(" + s + ", '" + c + "', '')", u) + ") = LENGTH('RATECON') AND " + u + " GLOB '*R*A*T*E*C*O*N*')")("UPPER(COALESCE(type, ''))");
 function isRateConDocType(type) {
-	return String(type == null ? "" : type).replace(/[ _]/g, "").toUpperCase() === "RATECON";
+	return String(type == null ? "" : type).replace(/[^A-Za-z]/g, "").toUpperCase() === "RATECON";
 }
 
 // The rows a load's Documents panel lists: live, and not a rate con. ONE copy,
@@ -8556,9 +8582,9 @@ async function guardRootLoadDocument(req, res, next, file) {
 
 		if (user.role === "Dispatcher") {
 			// Any row, live or deleted: a deleted row does not stop the file being
-			// a rate con.
+			// a rate con. COLLATE NOCASE — see MEMBERSHIP TEST above.
 			const rateCon = db.prepare(
-				`SELECT id FROM documents WHERE file_name = ? AND ${RATECON_DOCUMENT_SQL} LIMIT 1`
+				`SELECT id FROM documents WHERE file_name = ? COLLATE NOCASE AND ${RATECON_DOCUMENT_SQL} LIMIT 1`
 			).all(file);
 			if (rateCon.length) return res.status(404).end();
 			return next();
@@ -26052,10 +26078,9 @@ function driverRenameDirectoryRowId(nameLower, opts = {}) {
 	if (!row) return null;
 	if (row.matchedBy === "normalized") {
 		const leg = DRIVER_RENAME_TARGETS.find((t) => t.key === "users");
-		const moved = new Set(db.prepare(`SELECT id FROM "${leg.table}" WHERE ${driverRenameWhereSql(leg, opts)}`)
-			.all(...driverRenameWhereArgs(leg, nameLower, opts)).map((r) => r.id));
-		const heldElsewhere = findDriverNameClashes(nameLower, { directory: false })
-			.some((h) => h.source === "users" && h.field === "driver_name" && !moved.has(h.id));
+		const moved = db.prepare(`SELECT id FROM "${leg.table}" WHERE ${driverRenameWhereSql(leg, opts)}`)
+			.all(...driverRenameWhereArgs(leg, nameLower, opts)).map((r) => r.id);
+		const heldElsewhere = driverNameHeldByOtherAccount(nameLower, moved);
 		if (heldElsewhere) return null;
 	}
 	return row.id;
@@ -31739,6 +31764,21 @@ function findDriverNameClashes(name, opts = {}) {
 
 function findDriverNameClash(name, opts = {}) {
 	return findDriverNameClashes(name, opts)[0] || null;
+}
+
+// Does an account, other than `exceptUserIds`, hold a driver name that
+// normalizes to `name` (normalizeDriverName())? Then a drivers_directory row that
+// names the driver only through a spacing variant is that account's row too, so
+// ONE rule, for every use of such a row: the rename cascade does not move it
+// (driverRenameDirectoryRowId(), excepting the accounts it renames), the
+// directory sync does not delete it (syncDriverToCarrierSheet(), after its own
+// account is gone), and a driver's profile-picture upload does not replace its
+// picture (POST /api/drivers-directory/:id/profile-picture, excepting the
+// uploader). A legacy account "Shorn  King" beside the real "Shorn King" must not
+// act on the real driver's row.
+function driverNameHeldByOtherAccount(name, exceptUserIds = []) {
+	return findDriverNameClashes(name, { directory: false, exceptUserIds })
+		.some((h) => h.source === "users" && h.field === "driver_name");
 }
 
 // The spelling an existing driver identity already uses for this name — an

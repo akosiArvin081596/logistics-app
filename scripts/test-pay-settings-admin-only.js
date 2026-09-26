@@ -177,6 +177,7 @@ const PIECES = {
 		liftFunction("normalizeDriverName"),
 		liftFunction("findDriverNameClashes"),
 		liftFunction("findDriverNameClash"),
+		liftFunction("driverNameHeldByOtherAccount"),
 		liftFunction("canonicalDriverName"),
 		liftFunction("findDirectoryRowForDriver"),
 		liftFunction("findTruckForDriver"),

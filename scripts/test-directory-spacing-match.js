@@ -100,7 +100,7 @@ function mutate(src, from, to) {
 // The rename cascade too (§6): its drivers_directory leg finds its row through
 // driverRenameDirectoryRowId(). Tables this runner does not create are the
 // executor's "no such table" legs, which it skips.
-const FUNCTIONS = ["normalizeDriverName", "findDriverNameClashes", "findDriverNameClash", "canonicalDriverName",
+const FUNCTIONS = ["normalizeDriverName", "findDriverNameClashes", "findDriverNameClash", "driverNameHeldByOtherAccount", "canonicalDriverName",
 	"findDirectoryRowForDriver", "findTruckForDriver", "syncDriverToCarrierSheet", "assignDriverToTruck",
 	"driverRenameWhereSql", "driverRenameWhereArgs", "driverRenameDirectoryRowId", "driverRenameNewValue",
 	"replaceNameOnWordBoundary", "applyDriverRenameSqlite"];
@@ -447,7 +447,7 @@ section("§5 the mutant — it must be caught");
 	// "delete" without asking whether another account still holds the name.
 	const NO_HOLD_CHECK = {
 		syncDriverToCarrierSheet: mutate(FN_SRC.syncDriverToCarrierSheet,
-			'if (findDriverNameClashes(name, { directory: false })\n\t\t\t\t.some((h) => h.source === "users" && h.field === "driver_name")) {', "if (false) {"),
+			"if (driverNameHeldByOtherAccount(name)) {", "if (false) {"),
 	};
 	const caught = shadowDeleteBattery(NO_HOLD_CHECK).filter((r) => !r.ok);
 	ok(caught.length > 0, "M3 \"delete\" without the remaining-account check is caught");
