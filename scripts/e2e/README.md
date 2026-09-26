@@ -17,9 +17,10 @@ What it covers today, in four sections (`ONLY` picks them):
   amounts and unit numbers with control characters are refused, the driver's "has a photo" follows the stored bytes,
   and two renames to case variants of one unit number at the same moment leave one truck with it.
 - **Sign-out / sign-in (S1–S7).** Account data does not survive a change of user in the same tab (#395). Sign-out ends
-  on the app's own login form with no network and while the server is down; other tabs follow a sign-out and a
-  different person; `/login` after a confirmed sign-out renders without a session round-trip; a second tap on Sign In
-  sends nothing.
+  on the app's own login form with no network and while the server is down. Other tabs stop showing the previous
+  person: they follow a sign-out, leave for a clean `/login` when the session ends without one, and reload as the
+  different person another tab signed in. `/login` after a confirmed sign-out renders without a session round-trip; a
+  second tap on Sign In sends nothing.
 - **Dispatcher data (D1–D3).** A Dispatcher's copies of the dashboard and of a load carry no broker/contact values, and
   the sheet reader (`GET /api/data`) is Super Admin only.
 - **Maintenance notice (M1).** A popup dismissal in one tab belongs to the person who dismissed it. Local only, on a
@@ -38,9 +39,16 @@ expected to FAIL exactly the fix rows.
   **work dir**, which is created `0700` outside every checkout. The scripts refuse a database outside the work dir or a
   symlinked one. They also refuse a work dir that is inside a checkout, contains one, or is open to other users. The source
   database is only ever opened read-only, and it is copied with SQLite's backup API, never `cp`.
-- **Nothing leaves the machine.** `boot-server.sh` blanks every outbound credential and forces every integration and
-  default-ON alert off on the command line (dotenv never overrides a variable that is already set). It refuses a
-  `SPREADSHEET_ID` that is unset, empty or production's, and it hands the server the exact value it checked.
+- **What leaves the machine, and what does not.** `boot-server.sh` blanks every outbound credential and forces every
+  integration and default-ON alert off on the command line (dotenv never overrides a variable that is already set). It
+  refuses a `SPREADSHEET_ID` that is unset, empty or production's, and it hands the server the exact value it checked.
+  - **Goes out: reads, and Maps calls that Google refuses.** The server signs in to Google with the service-account key
+    and reads that non-production Sheet (at boot, and whenever a page needs its rows). Its Google Maps calls go out
+    with the blanked key, and Google refuses them: the server log shows `Routes API HTTP error … 403`
+    (`PERMISSION_DENIED`). A page that draws a map also asks Google for the Maps script, with the blank browser key.
+  - **Does not go out:** no write to production, no mail (Gmail is blanked) and no pushes (the n8n webhook, Routemate,
+    Linxup and ScanKit are blanked or off). Production's read-only archive sheet (the `ARCHIVE_SPREADSHEET_ID` default)
+    is read only by the `/archive` page and the rate-con reconcile; the run opens neither, and the reconcile is off.
 - **Nothing writes to the Google Sheet.** Every step that writes changes the SQLite copy only (trucks, sessions, audit
   rows). The Sheet is only read.
 - **Logins are never printed.** The creds file (`0600`) is read, never echoed. The scripts print ids and booleans only.
@@ -102,7 +110,7 @@ fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"   # w
 BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-trucks ONLY=trucks,dispatcher DB_PATH="$W/qa.db" \
   fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs                          # add HEADED=1 to watch it
 fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
-# Part 2: the sign-out section, on a fresh server process (up to 18 sign-ins)
+# Part 2: the sign-out section, on a fresh server process (up to 20 sign-ins)
 fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
 BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-signout ONLY=signout \
   fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
@@ -124,11 +132,14 @@ fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
   start while `plant-journal.json` exists.
 
 ⚠️ **Login limiter:** `POST /api/auth/login` allows 20 attempts per 15 minutes per server process, counting every
-attempt. Per section: `trucks` 3, `signout` up to 18 (17 on a build without S4a's second half, 16 where S7 sends one
-sign-in), `dispatcher` 2 and `maintenance` 3. **All four together are more than one window holds**, which is why the
-recipe above restarts the server between the parts; the run prints a warning when the sections it was given can
-exceed 20. If a step answers 429, the window is spent. To rerun single sign-out cases, use `STEPS` (e.g.
-`ONLY=signout STEPS=S5a,S7`).
+attempt. Per section: `trucks` 3, `signout` up to 20, `dispatcher` 2 and `maintenance` 3. The sign-out figure is its
+worst case: one fewer on a build without S4a's second half, and one fewer where S7 sends one sign-in (so 19 on a build
+with the fixes). It fills a whole window, so run it on a fresh server process, as the recipe does. **All four together
+are more than one window holds**, which is why the recipe restarts the server between the parts; the run prints a
+warning when the sections it was given can exceed 20. If a step answers 429, the window is spent. To rerun single
+sign-out cases, use `STEPS` (e.g. `ONLY=signout STEPS=S5a,S7`), on a server with sign-ins left in its window. S1a,
+S1b, S4b, S5a and S6 sign in once; S2a, S2b, S3, S5b and S5c twice; S4a once or twice (its second half signs the
+Dispatcher in); S7 two or three times.
 
 ⚠️ **`DB_PATH` must be the file the server was booted with.** The run proves it before planting anything: it writes a
 sentinel into its own test truck and reads it back through the API. On a mismatch you get a `10*` FAIL row and the
@@ -146,8 +157,8 @@ planted cases SKIP. They are never silently mis-tested.
 - Investor: the `Investor` with the lowest id. With none, the creds file has no `investor` entry and R8 SKIPs.
 - Second Investor (`investor2`): the `Investor` with the next-lowest id. With fewer than two, there is no `investor2`
   entry and M1 SKIPs.
-- Dispatcher: the `Dispatcher` with the lowest id. With none, there is no `dispatcher` entry, and S2a, S3, S5b, S7 and
-  D1–D3 SKIP.
+- Dispatcher: the `Dispatcher` with the lowest id. With none, there is no `dispatcher` entry, and S2a, S3, S5b, S5c, S7
+  and D1–D3 SKIP.
 - The Driver, both Investors and the Dispatcher each get a random password (a bcryptjs hash,
   `must_change_password = 0`) on the copy only.
 - An existing creds file's passwords are reused, so one creds file works for every copy. The script prints the ids it
@@ -318,6 +329,9 @@ Run it alone with `ONLY=signout` (and single cases with `STEPS`). The AFTER beha
 - **(b)** Signing in as a DIFFERENT person than the page last showed (e.g. after a session expired without a sign-out)
   ends with a full page load of that person's home page.
 - **(c)** The same person again, or a first sign-in on a fresh page, keeps in-app navigation.
+- **(d)** A tab left open stops showing a person the browser's session no longer belongs to, without being touched. It
+  leaves for a fresh `/login` when another tab signs out or finds the session gone, and it reloads as the new person
+  when another tab signs someone else in.
 
 **The evidence:** each case plants a JS global, `window.__qaMarker = 'page-1'`. A full page load discards it; an in-app
 route change (`router.push`) keeps it. Each case also counts the main frame's document requests: a full load makes one.
@@ -336,7 +350,8 @@ session store.
 | S4a | The Super Admin on `/dashboard` plants the marker. `context.setOffline(true)`, then the sidebar's **Logout**; 3 s later the page is read. Then online again, and the **Dispatcher** signs in on that form (only when there is one). | The app's own login form at `/login`, not the browser's error page (`chrome-error://`); the marker still set. Then a full page load of `/dashboard` (marker `undefined`) with the Dispatcher's session. |
 | S4b | The same, with the server "down": `page.route` answers `POST /api/auth/logout` and the **document** request for `/login` with 502 and a small HTML body. | The app's own login form at `/login`, in-app (marker still set); never the 502 body. |
 | S5a | **One context, two tabs**, both the Super Admin: A on `/dashboard`, B on `/trucks` with its marker. A presses the sidebar's **Logout**; B is polled for 6 s and never touched. | Within ~5 s, B is on `/login` as a fresh page (marker `undefined`), with no truck data: no table rows, an empty trucks store, none of the unit numbers it listed in its text. |
-| S5b | The same two tabs. `context.clearCookies()` (the session "ends" without a sign-out); A goes to `/login` and the **Dispatcher** signs in through the form. B is polled for 10 s and never touched. | B loads again by itself (marker `undefined`) and shows the Dispatcher's home, `/dashboard`; its auth store holds the Dispatcher. |
+| S5b | The same two tabs. `context.clearCookies()` (the session "ends" without a sign-out); A goes to `/login`, and the **Dispatcher** signs in through the form there. B is polled for 10 s and never touched. | B leaves by itself for a fresh `/login` (marker `undefined`), holding nobody and none of the Super Admin's rows or unit numbers. It does not have to follow the later sign-in. |
+| S5c | The same two tabs. `context.clearCookies()`; A is closed and the app is opened in a **new tab A**, whose own `GET /api/auth/session` gets no answer (`page.route` on A only, aborted with `internetdisconnected`; B's requests are untouched). A shows its sign-in form without deciding "signed out", and the **Dispatcher** signs in there. B is polled for 10 s and never touched. | Within ~10 s, by itself: B is loaded again (marker `undefined`) as the Dispatcher. Its auth store and its server session are the Dispatcher's, and it shows their view of `/trucks` or their home. Nothing only the Super Admin gets is left: no Owner column, no sidebar link to a page a Dispatcher may not open. |
 | S6 | The Super Admin on `/dashboard`; the CDP throttle (as S3's) goes on, then the sidebar's **Logout**. An init script in every document of the context records when the app booted (its Vue instance, or its first `/api/` request, whichever is first), when the login form became visible, and every `/api/` request. | No `GET /api/auth/session` before the login form is visible: the form appears without a session round-trip. The boot-to-form time is recorded. |
 | S7 | S2's expiry path (the app routes itself to `/login` in-app), then the throttle, and the **Dispatcher** signs in: a different person, so the sign-in loads a fresh page. After the first sign-in answers and before that page arrives, Sign In is tapped again (see below). | Exactly one `POST /api/auth/login`: the button stays disabled until the fresh page replaces this one. |
 
@@ -389,6 +404,25 @@ document request and commit) shows the window. When the fresh page committed fir
 
 **How S7 wakes the app.** S2 toggles `context.setOffline()` to fire the browser's `online` event. S7 dispatches an
 `online` event in the page instead, so the CDP throttle it applies next is the only network emulation set on the page.
+
+**What S5b and S5c show, and why they differ.** A tab that shows someone follows every change of cookie owner another
+tab records: the epoch in `localStorage`, which every sign-in, every sign-out and every definitive "signed out" answer
+stamps.
+
+- **S5b:** A's `/login` asks the server, which answers "signed out", and A stamps the epoch. B follows that stamp to a
+  fresh `/login` within ~50 ms, before anyone signs in. Showing nobody, it has nothing to follow when the Dispatcher then
+  signs in on A. That is the design: no tab keeps showing the signed-out person. If B ever ends up showing the
+  Dispatcher on a fresh page instead (its own check answered after the sign-in), the row is INFO: not wrong, and S5c
+  scores that branch.
+- **S5c:** the first stamp B sees must be the Dispatcher's sign-in, which is the store's "different person → reload"
+  branch. So A must not decide "signed out" first, and its session check gets no answer. A must also be a new tab. A tab
+  keeps its saved user in `sessionStorage`, and one that still has it restores the Super Admin while its check gets no
+  answer, then routes itself from `/login` to `/dashboard`: there is no form to sign in on. A new tab starts with an
+  empty `sessionStorage`, so it shows the form (after about 3 s of unanswered checks) and keeps re-checking in the
+  background.
+- **Telling the two views apart on `/trucks`:** a Dispatcher loads the same truck list as a Super Admin, so rows and
+  unit numbers cannot. The Super Admin-only parts can: the Trucks table's Owner column, and the sidebar links to pages
+  the app's own router closes to a Dispatcher (their `meta.roles`). S5c counts both, before and after.
 
 ## The Dispatcher data section (D1–D3)
 
