@@ -28378,6 +28378,10 @@ function buildSheetUpdateAudit(payload) {
 		// visible afterwards.
 		...(payload.loadId ? { loadId: cap(payload.loadId, 120) } : {}),
 		...(payload.via ? { via: cap(payload.via, 60) } : {}),
+		// PUT /api/data/:rowIndex's 409 ROW_MOVED: the Load ID the caller's form
+		// opened, and the one the row holds ("" for none).
+		...(payload.expectedLoadId != null ? { expectedLoadId: cap(payload.expectedLoadId, 120) } : {}),
+		...(payload.foundLoadId != null ? { foundLoadId: cap(payload.foundLoadId, 120) } : {}),
 		...(droppedForCount > 0 ? { changesOmitted: droppedForCount } : {}),
 		...(payload.periods && payload.periods.length ? { periods: payload.periods } : {}),
 		...(payload.code ? { code: payload.code } : {}),
@@ -28478,11 +28482,16 @@ function sheetRowCellWrites(a1, rowIndex, before, after) {
 // restoreWithheldBrokerCells(), and runs before any guard, so the Owner ID
 // check, the broker restore, the formula refusal, the period guard and the
 // audit all judge the row as it will be written. A baseline that is not an
-// array of values.length cells is ignored: older pages and API callers send
-// none, and keep the diff against the row as read. It can only narrow what a
-// save writes, never widen it. Returns whether it was applied.
+// array of values.length cells is ignored (baselineApplies()): older pages and
+// API callers send none, and keep the diff against the row as read. It can only
+// narrow what a save writes, never widen it. Returns whether it was applied.
+//
+// ⚠️ IT ALSO SETS THE LOAD ID CELL TO THE ROW AS READ, because the form never
+// edits it, so once it has run nothing can tell that the row number now holds
+// another load. rowMovedRefusal() compares the baseline's Load ID with the row
+// as read, and PUT /api/data/:rowIndex runs it first.
 function restoreUntouchedCells(before, values, baseline) {
-	if (!Array.isArray(values) || !Array.isArray(baseline) || baseline.length !== values.length) return false;
+	if (!baselineApplies(values, baseline)) return false;
 	const b = Array.isArray(before) ? before : [];
 	for (let i = 0; i < values.length; i++) {
 		const sent = values[i] == null ? "" : String(values[i]);
@@ -28490,6 +28499,75 @@ function restoreUntouchedCells(before, values, baseline) {
 		if (sent === opened) values[i] = b[i] == null ? "" : b[i];
 	}
 	return true;
+}
+
+// Whether a `baseline` sent beside `values` is used at all: an array of exactly
+// values.length cells. One test for restoreUntouchedCells() and
+// rowMovedRefusal(), so a baseline is never applied without the identity check
+// that has to come with it.
+function baselineApplies(values, baseline) {
+	return Array.isArray(values) && Array.isArray(baseline) && baseline.length === values.length;
+}
+
+// PUT /api/data/:rowIndex with a baseline: is the row as read still the row the
+// caller's form opened? null when it is, or when there is nothing to compare.
+// Otherwise { body, edited }: the 409 ROW_MOVED body, and the cells the form
+// edited, for the audit line.
+//
+// ⚠️ A ROW NUMBER IS A POSITION. The Active Loads editor holds the row number of
+// the view its modal opened from (the Job Tracking cache, up to ~60 s old, for
+// as long as the modal stays open), and sorting the sheet, or deleting a row
+// above, since then points that number at another load. Without a baseline the
+// save sends the opened load's Load ID, which differs from the row as read, so
+// the DUPLICATE_LOAD check judges it as a Load ID change. With one,
+// restoreUntouchedCells() sets that cell to the row as read and no later check
+// can see the difference, so the edited cells would be written onto the other
+// load. This runs before it.
+//
+// Compared with normalizeLoadId(), as the DUPLICATE_LOAD check and
+// deduplicateLoads() compare load ids: "#111" and "111" are one load here, as in
+// every total. Identity is confirmed only by a Load ID present on both sides and
+// equal. Blank on either side, or on both, is refused, because a row without a
+// Load ID cannot be told from another. The dashboard serves no row without a
+// Load ID, so the editor never opens one.
+//
+// Nothing to compare (null; the save is judged as it was before this check): no
+// usable baseline (baselineApplies()), or no load-id column in `headers`. The
+// route runs it on the tabs the guards cover (Job Tracking) only.
+function rowMovedRefusal(headers, rowIndex, before, values, baseline) {
+	if (!baselineApplies(values, baseline)) return null;
+	const hs = Array.isArray(headers) ? headers : [];
+	const col = hs.findIndex((h) => /load.?id|job.?id/i.test(String(h == null ? "" : h)));
+	if (col < 0) return null;
+	const b = Array.isArray(before) ? before : [];
+	const opened = normalizeLoadId(baseline[col]);
+	const found = normalizeLoadId(b[col]);
+	if (opened && opened === found) return null;
+	const shown = (v) => String(v == null ? "" : v).trim().slice(0, 120);
+	const expectedLoadId = opened ? shown(baseline[col]) : "";
+	const foundLoadId = found ? shown(b[col]) : "";
+	// What the form asked for: each cell sent unlike its baseline, as the form
+	// opened it and as sent. Not the row as read, which holds another load.
+	const edited = [];
+	for (let i = 0; i < values.length; i++) {
+		const from = baseline[i] == null ? "" : String(baseline[i]);
+		const to = values[i] == null ? "" : String(values[i]);
+		if (from === to) continue;
+		edited.push({ column: String(hs[i] == null ? "" : hs[i]).trim() || "(unnamed)", index: i, from, to, why: guardedColumnReason(hs[i]) || "" });
+	}
+	const lead = expectedLoadId && foundLoadId
+		? `Row ${rowIndex} no longer holds the load this edit was opened on: it was opened on load '${expectedLoadId}', and row ${rowIndex} now holds load '${foundLoadId}'.`
+		: `Row ${rowIndex} cannot be confirmed as the row this edit was opened on: it was opened on ${expectedLoadId ? `load '${expectedLoadId}'` : "a row with no Load ID"}, row ${rowIndex} ${foundLoadId ? `now holds load '${foundLoadId}'` : "has no Load ID"}, and a row without a Load ID cannot be told from another.`;
+	return {
+		body: {
+			error: `${lead} Sorting the sheet, or deleting a row above, since the view loaded moves a load to another row. Nothing was written. Reload the dashboard, open the load again and redo the edit.`,
+			code: "ROW_MOVED",
+			rowIndex,
+			expectedLoadId,
+			foundLoadId,
+		},
+		edited,
+	};
 }
 
 // Resolve the requested ?sheet= to a REAL tab, the way the Sheets range parser
@@ -29574,6 +29652,33 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 			});
 		}
 
+		// Is the row as read still the row the caller's form opened
+		// (rowMovedRefusal())? Compared before restoreUntouchedCells(), which sets
+		// the Load ID cell the form did not edit to the row as read, after which no
+		// check below can tell. On the tabs the guards cover, like the
+		// DUPLICATE_LOAD check. Any other tab, a layout with no load-id column, and
+		// a save with no usable baseline keep today's behaviour.
+		if (guarded) {
+			const moved = rowMovedRefusal(headers, rowIndex, before, values, baseline);
+			if (moved) {
+				logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(buildSheetUpdateAudit({
+					outcome: "blocked",
+					sheet: sheetName,
+					rowIndex,
+					changed: moved.edited,
+					guardedChanged: moved.edited.filter((c) => c.why),
+					code: "ROW_MOVED",
+					expectedLoadId: moved.body.expectedLoadId,
+					foundLoadId: moved.body.foundLoadId,
+				}), "ROW_MOVED"));
+				// The view that sent this row number is out of date, and the cached
+				// Job Tracking rows may be too: drop them, so the next dashboard read
+				// shows each load on the row it is on now.
+				jtCacheInvalidate();
+				return res.status(409).json(moved.body);
+			}
+		}
+
 		// A cell the caller's form did not edit is set to the row as read, so it is
 		// not written even when the sheet changed under a stale view
 		// (restoreUntouchedCells()). Before every check below, so each judges the
@@ -29670,8 +29775,9 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		if (guarded) {
 			const lidChange = changes.find((c) => /load.?id|job.?id/i.test(c.column));
 			if (lidChange) {
-				const norm = (v) => String(v == null ? "" : v).trim().toLowerCase().replace(/^#/, "");
-				const target = norm(lidChange.to);
+				// normalizeLoadId(): the key deduplicateLoads() and the row identity
+				// check above (rowMovedRefusal()) compare load ids with.
+				const target = normalizeLoadId(lidChange.to);
 				if (target) {
 					let collision = null;
 					try {
@@ -29683,7 +29789,7 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 						const cells = (all.data.values || []).map((r) => (r && r[0]) || "");
 						for (let i = 1; i < cells.length; i++) {
 							if (i + 1 === rowIndex) continue;   // the row being edited
-							if (norm(cells[i]) === target) { collision = i + 1; break; }
+							if (normalizeLoadId(cells[i]) === target) { collision = i + 1; break; }
 						}
 					} catch (err) {
 						// Fail CLOSED: an unread Load ID column means the collision cannot
@@ -43252,6 +43358,13 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 		// a stale cell. Every body key is a column name to this route, so a
 		// `baseline` key would be refused as UNKNOWN_COLUMN, or would shadow a column
 		// of that name. No page in the app calls this route.
+		//
+		// Nor does it need PUT /api/data/:rowIndex's ROW_MOVED check
+		// (rowMovedRefusal()), which catches a row number that now holds another
+		// load. This route is given no row number: it finds the row by load id in
+		// its own read above, so the row as read holds the requested load by
+		// construction, and the SHEET_CHANGED re-read below refuses a sort or a
+		// deleted row that lands between that read and the write.
 		const updatedRow = headers.map((h, idx) => {
 			if (Object.prototype.hasOwnProperty.call(updates, h)) return updates[h];
 			return before[idx] || "";

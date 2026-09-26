@@ -20,6 +20,13 @@
 // (restoreUntouchedCells()) before any guard judges the row. A save without a
 // baseline, or with a malformed one, is judged as before.
 //
+// THE ROW THAT MOVED. A row number is a position: after a sort, or a row
+// deleted above, the editor's row number holds another load. The restore sets
+// the Load ID cell (never edited) to the row as read, so without a check the
+// edit would be written onto that other load. So on Job Tracking the baseline's
+// Load ID is compared with the row as read first (rowMovedRefusal()), and a
+// mismatch, or a Load ID blank on either side, is 409 ROW_MOVED, nothing written.
+//
 // WHAT RUNS. Both routes are lifted whole out of server.js and run against a
 // fake sheet that behaves as the real one does where it matters here: it stores
 // a formula and serves the value it displays, stores text entered with a leading
@@ -32,12 +39,15 @@
 //   §1 PUT /api/data/:rowIndex
 //   §1b PUT /api/data/:rowIndex with a baseline, on a sheet that moved under
 //      the view: untouched cells are not written; with no baseline or a
-//      malformed one, the save is judged as before
+//      malformed one, the save is judged as before. A row that now holds
+//      another load: 409 ROW_MOVED with a baseline, DUPLICATE_LOAD without
 //   §2 PUT /api/load/:loadId
-//   §3 sheetRowCellWrites() and restoreUntouchedCells() on their own, where
-//      each route calls them, and the Active Loads editor sending its baseline
+//   §3 sheetRowCellWrites(), restoreUntouchedCells() and rowMovedRefusal() on
+//      their own, where each route calls them, and the Active Loads editor
+//      sending its baseline
 //   §4 MUTANTS: back to a whole-row write (it must fail checks in §1 and in
-//      §2); the baseline ignored (it must fail checks in §1b).
+//      §2); the baseline ignored (it must fail checks in §1b); the identity
+//      check removed (it must fail checks in §1b).
 //
 // No network, no database, no sheet.
 //   node scripts/test-row-save-cell-writes.js     # exits 1 on any failure
@@ -122,13 +132,16 @@ const CONSTS = [
 const HELPERS = [
 	"resolveBrokerWithheldColumns", "sanitizeBrokerColumns", "restoreWithheldBrokerCells", "formulaCellRefusal",
 	"sheetRowAfterUpdate", "a1SheetPrefix", "a1ColumnLetter", "sheetRowCellWrites", "restoreUntouchedCells",
+	"baselineApplies", "rowMovedRefusal",
 	"guardedColumnReason", "changedGuardedCells", "scrubPurgeMarker", "capAuditField", "buildSheetUpdateAudit",
 ];
 const HELPER_SRC = Object.fromEntries(HELPERS.map((n) => [n, extract(n)]));
+// The load-id comparison key server.js imports, the shipped module.
+const { normalizeLoadId } = require("../lib/ratecon-load");
 // The shipped helpers, with `overrides` swapping one source for a mutant.
 function buildHelpers(overrides = {}) {
 	const s = { ...HELPER_SRC, ...overrides };
-	return new Function(`"use strict";\n${CONSTS}\n${HELPERS.map((n) => s[n]).join("\n")}\nreturn { ${HELPERS.join(", ")} };`)();
+	return new Function("normalizeLoadId", `"use strict";\n${CONSTS}\n${HELPERS.map((n) => s[n]).join("\n")}\nreturn { ${HELPERS.join(", ")} };`)(normalizeLoadId);
 }
 const H = buildHelpers();
 
@@ -217,7 +230,17 @@ function fakeSheet(stored, { batchGetFails = false } = {}) {
 	const values = {
 		get: async ({ range }) => {
 			const n = rowNo(range);
-			return { data: { values: n ? [shown(rows[n - 1])] : rows.map(shown) } };
+			if (n) return { data: { values: [shown(rows[n - 1])] } };
+			// A whole column ("…!B:B"), as the DUPLICATE_LOAD check reads it: one
+			// row per sheet row, an empty cell as [], trailing empty rows dropped.
+			const col = /!([A-Z]+):\1$/.exec(range);
+			if (col) {
+				const i = colIndex(col[1]);
+				const out = rows.map((r) => { const v = display((r || [])[i]); return v === "" ? [] : [v]; });
+				while (out.length && !out[out.length - 1].length) out.pop();
+				return { data: { values: out } };
+			}
+			return { data: { values: rows.map(shown) } };
 		},
 		batchGet: async ({ ranges }) => {
 			if (batchGetFails) throw new Error("fake sheet: read failed");
@@ -256,6 +279,7 @@ function mount(routeSrc, helpers, stored, { guarded = true, title = "Job Trackin
 	let handler = null;
 	const env = {
 		...helpers,
+		normalizeLoadId,
 		app: { put: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
 		getSheets: sheet.getSheets,
@@ -529,6 +553,105 @@ async function baselineSection(helpers, routeSrc = DATA_PUT_SRC) {
 		t("§1b ...and a formula the Dispatcher types is still refused, with a baseline",
 			[f.code, (f.body || {}).code, (f.body || {}).field, typed.calls.length], [400, "FORMULA_NOT_ALLOWED", "Details", 0]);
 	}
+
+	// The row moved under the view: the editor opened load 111 at row 2, then
+	// the sheet was sorted, so row 2 now holds load 222 and load 111 is on row 3
+	// (SHIFTED()). The user sets the payment to 2500.
+	const SHIFTED = () => [HEADERS.slice(), storedRow({ "Load ID": "222", Details: "Dry van", "Location Link": "" }), storedRow()];
+	const payment = (opened = DISPLAYED()) => edit("Payment", "2500", opened);
+	// The refusal's audit details: the JSON before the stubbed " [CODE]" suffix.
+	const auditOf = (app) => {
+		const a = app.audits.find((x) => x.action === "update_sheet_row_blocked");
+		const m = a && /^([\s\S]*) \[[A-Z_]+\]$/.exec(a.details);
+		try { return m ? JSON.parse(m[1]) : null; } catch { return null; }
+	};
+	{
+		const app = mount(routeSrc, helpers, SHIFTED());
+		const r = await app.run("Super Admin", P, { values: payment(), baseline: DISPLAYED() });
+		const b = r.body || {};
+		t("§1b the row moved (row 2 now holds load 222), with a baseline: 409 ROW_MOVED naming the load opened and the load found",
+			[r.code, b.code, b.rowIndex, b.expectedLoadId, b.foundLoadId], [409, "ROW_MOVED", 2, "111", "222"]);
+		t("§1b ...nothing written: no write call, every row as stored", [app.calls.length, app.rows], [0, SHIFTED()]);
+		t("§1b ...refused before any check judged the row: the Owner ID check and the period guard never ran",
+			[app.ownerSeen, app.guardCalls], [[], []]);
+		t("§1b ...one audit line: update_sheet_row_blocked on Job Tracking!2, coded ROW_MOVED",
+			app.audits.map((a) => [a.action, a.entityId, a.details.endsWith(" [ROW_MOVED]")]), [["update_sheet_row_blocked", "Job Tracking!2", true]]);
+		const d = auditOf(app);
+		t("§1b ...the audit names both loads and the edit asked for (as the form opened it, and as sent)",
+			d && [d.outcome, d.code, d.expectedLoadId, d.foundLoadId, d.changed.map((c) => [c.column, c.from, c.to]), d.guardedColumns],
+			["blocked", "ROW_MOVED", "111", "222", [["Payment", "$1,800.00", "2500"]], ["Payment"]]);
+		t("§1b ...and the cached Job Tracking rows are dropped, so the next dashboard read shows the rows where they are now",
+			app.invalidations(), 1);
+	}
+	{
+		const app = mount(routeSrc, helpers, SHIFTED());
+		const r = await app.run("Super Admin", P, { values: payment() });
+		t("§1b the same save without a baseline (today's behaviour): 409 DUPLICATE_LOAD, load 111 found on row 3, nothing written",
+			[r.code, (r.body || {}).code, (r.body || {}).conflictRowIndex, app.calls.length, app.rows], [409, "DUPLICATE_LOAD", 3, 0, SHIFTED()]);
+	}
+	{
+		const app = mount(routeSrc, helpers, STORED());
+		const r = await app.run("Super Admin", P, { values: payment(), baseline: DISPLAYED() });
+		t("§1b the same save with a baseline on the row that did not move: 200, W2 alone written, as typed",
+			[r.code, r.body, app.calls.map((c) => [c.ranges, c.values]), auditedColumns(app)],
+			[200, { success: true, updatedCells: 1 }, [[[R("W2")], [[["2500"]]]]], ["Payment"]]);
+	}
+	{
+		// Identity is judged on the baseline, not on what is sent: a caller that
+		// edits the Load ID itself, with a baseline, reaches the DUPLICATE_LOAD
+		// check as before.
+		const renamed = (lid) => edit("Load ID", lid);
+		const fresh = mount(routeSrc, helpers, STORED());
+		const r1 = await fresh.run("Super Admin", P, { values: renamed("333"), baseline: DISPLAYED() });
+		t("§1b a baseline save that renames load 111 to an unused id: 200, B2 alone written",
+			[r1.code, fresh.calls.map((c) => [c.ranges, c.values])], [200, [[[R("B2")], [[["333"]]]]]]);
+		const taken = mount(routeSrc, helpers, STORED());
+		const r2 = await taken.run("Super Admin", P, { values: renamed("222"), baseline: DISPLAYED() });
+		t("§1b a baseline save that renames load 111 to 222, which row 3 holds: 409 DUPLICATE_LOAD, nothing written",
+			[r2.code, (r2.body || {}).code, (r2.body || {}).conflictRowIndex, taken.calls.length], [409, "DUPLICATE_LOAD", 3, 0]);
+	}
+	{
+		// Identity is confirmed only by a Load ID on both sides, equal as the
+		// DUPLICATE_LOAD check compares them (normalizeLoadId()).
+		const opening = (lid) => { const v = DISPLAYED(); v[IDX["Load ID"]] = lid; return v; };
+		const blankRow = () => [HEADERS.slice(), storedRow({ "Load ID": "" })];
+		const cases = [
+			["the form opened a row with no Load ID, and row 2 holds load 111", STORED(), "", [409, "ROW_MOVED", "", "111", []]],
+			["the form opened load 111, and row 2 has no Load ID", blankRow(), "111", [409, "ROW_MOVED", "111", "", []]],
+			["neither carries a Load ID, so the row cannot be confirmed", blankRow(), "", [409, "ROW_MOVED", "", "", []]],
+			["row 2 holds \"#111 \" and the form opened \"111\": one load, as the DUPLICATE_LOAD check reads it",
+				[HEADERS.slice(), storedRow({ "Load ID": "#111 " })], "111", [200, null, null, null, [[R("W2")]]]],
+		];
+		for (const [label, store, lid, want] of cases) {
+			const app = mount(routeSrc, helpers, store);
+			const opened = opening(lid);
+			const r = await app.run("Super Admin", P, { values: payment(opened), baseline: opened.slice() });
+			const b = r.body || {};
+			t(`§1b ${label}: ${want[0] === 409 ? "409 ROW_MOVED, nothing written" : "200, W2 alone written"}`,
+				[r.code, b.code || null, b.code ? b.expectedLoadId : null, b.code ? b.foundLoadId : null, app.calls.map((c) => c.ranges)], want);
+		}
+	}
+	{
+		// The Active Loads editor as a Dispatcher sends it, on the moved row: the
+		// refusal comes before the broker restore and the formula refusal.
+		const opened = DISPLAYED().map((v, i) => (WITHHELD.includes(HEADERS[i]) ? "" : v));
+		const app = mount(routeSrc, helpers, SHIFTED());
+		const r = await app.run("Dispatcher", P, { values: edit("Trailer Number", "TR-9", opened), baseline: opened.slice() });
+		t("§1b a Dispatcher's save on the moved row, with a baseline: 409 ROW_MOVED, nothing written",
+			[r.code, (r.body || {}).code, app.calls.length], [409, "ROW_MOVED", 0]);
+	}
+	{
+		// Where the check does not apply, the baseline save is judged as before:
+		// a layout with no load-id column carries no identity to compare, and a
+		// tab the guards do not cover is not judged.
+		const NO_LID = HEADERS.map((h) => (h === "Load ID" ? "Reference" : h));
+		const noLid = mount(routeSrc, helpers, [NO_LID, ...SHIFTED().slice(1)]);
+		const r1 = await noLid.run("Super Admin", P, { values: payment(), baseline: DISPLAYED() });
+		t("§1b no load-id column: judged as before, 200, W2 alone written", [r1.code, noLid.calls.map((c) => c.ranges)], [200, [[R("W2")]]]);
+		const other = mount(routeSrc, helpers, SHIFTED(), { guarded: false, title: "Carrier History" });
+		const r2 = await other.run("Super Admin", P, { values: payment(), baseline: DISPLAYED() });
+		t("§1b a tab the guards do not cover: judged as before, 200, W2 alone written", [r2.code, other.calls.map((c) => c.ranges)], [200, [["'Carrier History'!W2"]]]);
+	}
 	return results;
 }
 
@@ -640,6 +763,46 @@ function helperSection(helpers) {
 		t("§3 PUT /api/load/:loadId: takes no baseline (its body names the columns it changes)",
 			[decomment(LOAD_PUT_SRC).includes("restoreUntouchedCells("), /\bbaseline\b/.test(decomment(LOAD_PUT_SRC))], [false, false]);
 	}
+
+	// rowMovedRefusal(headers, rowIndex, before, values, baseline): null when the
+	// row as read holds the load the form opened, or when there is nothing to
+	// compare; otherwise the 409 ROW_MOVED body and the cells the form edited.
+	{
+		const HS = ["Contract ID", "Load ID", "  Payment  "];
+		const M = (before, values, baseline, headers = HS) => {
+			const r = helpers.rowMovedRefusal(headers, 7, before, values, baseline);
+			return r && [r.body.code, r.body.rowIndex, r.body.expectedLoadId, r.body.foundLoadId, r.edited.map((c) => [c.column, c.from, c.to, !!c.why])];
+		};
+		t("§3 rowMovedRefusal(): the row holds the load the form opened: null", M(["c", "111", "$5"], ["c", "111", "$6"], ["c", "111", "$5"]), null);
+		t("§3 rowMovedRefusal(): compared as normalizeLoadId() compares, so \" #111 \" and \"111\" are one load",
+			M(["c", " #111 ", "$5"], ["c", "111", "$6"], ["c", "111", "$5"]), null);
+		t("§3 rowMovedRefusal(): another load: ROW_MOVED naming both, and the edit as the form opened it and as sent",
+			M(["c", "222", "$9"], ["c", "111", "$6"], ["c", "111", "$5"]), ["ROW_MOVED", 7, "111", "222", [["Payment", "$5", "$6", true]]]);
+		t("§3 rowMovedRefusal(): a Load ID blank on either side, or on both (\"#\" alone is blank), is refused",
+			[M(["c", "111"], ["c", "", "x"], ["c", "", "y"]), M(["c"], ["c", "111", "x"], ["c", "111", "y"]), M(["c", "#"], ["c", "", "x"], ["c", "", "y"])].map((r) => r && r.slice(0, 4)),
+			[["ROW_MOVED", 7, "", "111"], ["ROW_MOVED", 7, "111", ""], ["ROW_MOVED", 7, "", ""]]);
+		t("§3 rowMovedRefusal(): nothing to compare: no load-id column, or a baseline restoreUntouchedCells() ignores",
+			[M(["c", "222"], ["c", "111"], ["c", "111"], ["Contract ID", "Reference"]), M(["c", "222"], ["c", "111"], ["c", "111", ""]),
+				M(["c", "222"], ["c", "111"], null), M(["c", "222"], ["c", "111"], "c,111")], [null, null, null, null]);
+	}
+	// PUT /api/data/:rowIndex compares the Load ID on the guarded tabs, after the
+	// row read and before the baseline is applied; its DUPLICATE_LOAD check
+	// compares with the same normalizeLoadId(); and the two helpers decide
+	// whether a baseline applies on one test.
+	{
+		const c = decomment(DATA_PUT_SRC);
+		const checkAt = c.indexOf("const moved = rowMovedRefusal(headers, rowIndex, before, values, baseline);");
+		t("§3 PUT /api/data/:rowIndex: rowMovedRefusal() is called once, in `if (guarded)`, after the row read and before restoreUntouchedCells()",
+			[c.split("rowMovedRefusal(").length - 1, checkAt > c.indexOf("if (rowUnread)"), checkAt < c.indexOf("restoreUntouchedCells(before, values, baseline);"),
+				/if \(guarded\) \{\s*const moved = rowMovedRefusal\(/.test(c)], [1, true, true, true]);
+		t("§3 PUT /api/data/:rowIndex: the DUPLICATE_LOAD check compares with normalizeLoadId(), and no inline copy of it is left",
+			[/const target = normalizeLoadId\(lidChange\.to\);/.test(c), c.includes("if (normalizeLoadId(cells[i]) === target)"), c.includes('.trim().toLowerCase().replace(/^#/, "")')],
+			[true, true, false]);
+		t("§3 rowMovedRefusal() and restoreUntouchedCells() decide on baselineApplies(), and rowMovedRefusal() compares with normalizeLoadId()",
+			[HELPER_SRC.rowMovedRefusal.includes("if (!baselineApplies(values, baseline)) return null;"),
+				HELPER_SRC.restoreUntouchedCells.includes("if (!baselineApplies(values, baseline)) return false;"),
+				/normalizeLoadId\(baseline\[col\]\)[\s\S]*normalizeLoadId\(b\[col\]\)/.test(HELPER_SRC.rowMovedRefusal)], [true, true, true]);
+	}
 	// The Active Loads editor records the row its modal opened with and sends it
 	// as `baseline`, in the order of `values`: a column it did not edit is sent
 	// as opened in both, so the server leaves it as the sheet holds it.
@@ -688,9 +851,15 @@ const WHOLE_ROW = buildHelpers({
 // every cell sent is compared with the row as read, as before the baseline.
 const NO_BASELINE = buildHelpers({
 	restoreUntouchedCells: mutate(HELPER_SRC.restoreUntouchedCells,
-		"\tif (!Array.isArray(values) || !Array.isArray(baseline)",
-		"\treturn false;\n\tif (!Array.isArray(values) || !Array.isArray(baseline)"),
+		"\tif (!baselineApplies(values, baseline)) return false;",
+		"\treturn false;\n\tif (!baselineApplies(values, baseline)) return false;"),
 });
+// §4 MUTANT — the identity check removed: PUT /api/data/:rowIndex applying a
+// baseline without first comparing its Load ID with the row as read, as it did
+// before rowMovedRefusal().
+const NO_IDENTITY_SRC = mutate(DATA_PUT_SRC,
+	"const moved = rowMovedRefusal(headers, rowIndex, before, values, baseline);",
+	"const moved = null;");
 
 (async () => {
 	console.log("§1 PUT /api/data/:rowIndex");
@@ -728,6 +897,19 @@ const NO_BASELINE = buildHelpers({
 		if (caught) pass++;
 		else { fail++; failures.push(`mutant not caught: the baseline ignored (§1b failed ${failed.length})${detail}`); }
 		console.log(`  ${caught ? "caught " : "MISSED "} M2 the baseline ignored — §1b failed ${failed.length} check(s)` +
+			`${failed[0] ? `, e.g. ✗ ${failed[0].name}` : ""}${detail}`.slice(0, 260));
+	}
+	{
+		let failed = [], detail = "";
+		try {
+			failed = (await baselineSection(H, NO_IDENTITY_SRC)).filter((r) => !r.ok);
+		} catch (e) {
+			detail = ` — the probe threw: ${e && e.message ? e.message : e}`;
+		}
+		const caught = failed.length > 0;
+		if (caught) pass++;
+		else { fail++; failures.push(`mutant not caught: the identity check removed (§1b failed ${failed.length})${detail}`); }
+		console.log(`  ${caught ? "caught " : "MISSED "} M3 the identity check removed — §1b failed ${failed.length} check(s)` +
 			`${failed[0] ? `, e.g. ✗ ${failed[0].name}` : ""}${detail}`.slice(0, 260));
 	}
 

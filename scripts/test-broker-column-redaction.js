@@ -148,10 +148,13 @@ const G = buildModule();
 // The two PUT routes, lifted whole, and the two small pure helpers they call.
 const LOAD_PUT_SRC = extractRoute('app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (req, res) => {');
 const DATA_PUT_SRC = extractRoute('app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (req, res) => {');
-const ROUTE_HELPERS = new Function(
+// The baseline helpers need the shipped normalizeLoadId(); guardedColumnReason()
+// is stubbed as the route's env stubs it.
+const { normalizeLoadId } = require("../lib/ratecon-load");
+const ROUTE_HELPERS = new Function("normalizeLoadId", "guardedColumnReason",
 	`${extract("sheetRowAfterUpdate")}\n${extract("a1SheetPrefix")}\n${extract("a1ColumnLetter")}\n${extract("sheetRowCellWrites")}\n` +
-	`${extract("restoreUntouchedCells")}\n` +
-	"return { sheetRowAfterUpdate, a1SheetPrefix, a1ColumnLetter, sheetRowCellWrites, restoreUntouchedCells };")();
+	`${extract("restoreUntouchedCells")}\n${extract("baselineApplies")}\n${extract("rowMovedRefusal")}\n` +
+	"return { sheetRowAfterUpdate, a1SheetPrefix, a1ColumnLetter, sheetRowCellWrites, restoreUntouchedCells, rowMovedRefusal };")(normalizeLoadId, () => "");
 // GET and POST /api/data and the shipped role gate.
 const GET_DATA_HEAD = 'app.get("/api/data", requireRole("Super Admin"), async (req, res) => {';
 const GET_DATA_SRC = extractRoute(GET_DATA_HEAD);
@@ -595,9 +598,12 @@ function mountPut(routeSrc, M, rows) {
 		a1ColumnLetter: ROUTE_HELPERS.a1ColumnLetter,
 		sheetRowAfterUpdate: ROUTE_HELPERS.sheetRowAfterUpdate,
 		sheetRowCellWrites: ROUTE_HELPERS.sheetRowCellWrites,
-		// PUT /api/data/:rowIndex's optional baseline; these saves send none, so
-		// it leaves them as they are (scripts/test-row-save-cell-writes.js).
+		// PUT /api/data/:rowIndex's optional baseline and the row identity check
+		// that comes with it; these saves send none, so both leave them as they
+		// are (scripts/test-row-save-cell-writes.js).
 		restoreUntouchedCells: ROUTE_HELPERS.restoreUntouchedCells,
+		rowMovedRefusal: ROUTE_HELPERS.rowMovedRefusal,
+		normalizeLoadId,
 		changedGuardedCells: () => [],
 		guardedColumnReason: () => "",
 		validateOwnerIdCell: () => null,
@@ -747,9 +753,16 @@ async function routeSection(M = G, routes = { load: LOAD_PUT_SRC, data: DATA_PUT
 		const restoreAt = c.indexOf(`restoreWithheldBrokerCells(headers, before, ${rowVar});`);
 		const formulaAt = c.indexOf(`formulaCellRefusal(headers, before, ${rowVar});`);
 		const writeAt = c.indexOf(".values.batchUpdate(");
-		check(`${label}: the restore, then the formula rule, each once, both before the write and before any audit line`,
+		// PUT /api/data/:rowIndex refuses a row that now holds another load
+		// (409 ROW_MOVED) before these rules judge the row, and audits it there.
+		// That line records the form's own edits (as opened and as sent), never a
+		// stored cell (scripts/test-row-save-cell-writes.js). Every other audit
+		// line comes after the two rules.
+		const rowMovedEnd = c.indexOf("return res.status(409).json(moved.body);");
+		const auditAt = c.indexOf("logAudit", Math.max(0, rowMovedEnd));
+		check(`${label}: the restore, then the formula rule, each once, both before the write and before any audit line but the ROW_MOVED refusal's`,
 			[c.split("restoreWithheldBrokerCells(").length - 1, c.split("formulaCellRefusal(").length - 1,
-				restoreAt > 0 && restoreAt < formulaAt && formulaAt < writeAt && formulaAt < c.indexOf("logAudit")],
+				restoreAt > 0 && restoreAt < formulaAt && formulaAt < writeAt && formulaAt < auditAt && rowMovedEnd < restoreAt],
 			[1, 1, true]);
 		check(`${label}: no answer names a withheld column`, /\bpreserved\b/.test(c), false);
 	}
