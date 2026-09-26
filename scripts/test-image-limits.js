@@ -153,7 +153,7 @@ ok("refusalBody(…, \"truckPhoto\") has the truck photo wording for 413 and 415
 	return a.error === "This photo is too large. Use a smaller JPEG, PNG or WebP image." && a.code === IL.IMAGE_TOO_LARGE &&
 		b.error === "This photo could not be read. Use a JPEG, PNG or WebP image." && b.code === IL.UNSUPPORTED_IMAGE_TYPE;
 })());
-ok("TRUCK_PHOTO_DATA_URI_MAX_LENGTH is the base64 length of TRUCK_PHOTO_MAX_BYTES (10 MB) plus room for a prefix",
+ok("TRUCK_PHOTO_DATA_URI_MAX_LENGTH is the base64 length of TRUCK_PHOTO_MAX_BYTES (10 MiB) plus room for a prefix",
 	IL.TRUCK_PHOTO_MAX_BYTES === 10 * 1024 * 1024 && IL.TRUCK_PHOTO_DATA_URI_MAX_LENGTH === Math.ceil(IL.TRUCK_PHOTO_MAX_BYTES / 3) * 4 + 64);
 
 // limits are real bounds

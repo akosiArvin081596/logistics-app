@@ -92,12 +92,15 @@ function liftRoute(head) {
 	if (end < 0) die(`no column-0 "});" after ${head}`);
 	return SRC.slice(a, end + "\n});".length);
 }
-function liftConst(head) {
+// A one-line `const NAME = …;`, or a block from its head to `close`.
+function liftConst(head, close = null) {
 	const needle = `\n${head}`;
 	const hits = SRC.split(needle).length - 1;
 	if (hits !== 1) die(`expected exactly 1 statement starting ${JSON.stringify(head)}, found ${hits}`);
 	const a = SRC.indexOf(needle) + 1;
-	return SRC.slice(a, SRC.indexOf(";\n", a) + 1);
+	const end = close ? SRC.indexOf(close, a) : SRC.indexOf(";\n", a);
+	if (end < 0) die(`no end found after ${head}`);
+	return SRC.slice(a, end + (close ? close.length : 1));
 }
 
 const HEADS = {
@@ -109,13 +112,19 @@ const HEADS = {
 const ROUTES = Object.fromEntries(Object.entries(HEADS).map(([k, h]) => [k, liftRoute(h)]));
 
 // The subject, and the pure parsers the two truck routes call before or around
-// it. Everything else they reach is stubbed in mountTrucks().
+// it — the amounts included (their own subject is
+// scripts/test-truck-cost-amounts.js). Everything else they reach is stubbed in
+// mountTrucks().
 const FUNCTIONS = [
 	"storedFileForServing", "truckPhotoRefusal",
 	"parseDriverPayDaily", "parseInServiceDate", "parseRetiredAt", "adminFeePctOrDefault", "truckMonthlyFixed", "normalizeDriverName",
+	"parseTruckAmount", "parseTruckAmounts",
 ];
 const FN_SRC = Object.fromEntries(FUNCTIONS.map((n) => [n, liftFunction(n)]));
-const CONSTS = [liftConst("const DRIVER_PAY_DAILY_MAX = "), liftConst("const IN_SERVICE_MAX_MONTHS_AHEAD = ")].join("\n");
+const CONSTS = [
+	liftConst("const DRIVER_PAY_DAILY_MAX = "), liftConst("const IN_SERVICE_MAX_MONTHS_AHEAD = "),
+	liftConst("const TRUCK_AMOUNT_MAX = "), liftConst("const TRUCK_AMOUNT_FIELDS = [", "\n];"),
+].join("\n");
 
 // `Buffer` is handed in so the runner can count what the lifted code decodes.
 let decodes = 0;
@@ -124,7 +133,7 @@ const CountingBuffer = Object.assign(Object.create(Buffer), {
 });
 function buildModule() {
 	return new Function("imageLimits", "todayKeyCT", "Buffer",
-		`"use strict";\n${CONSTS}\n${FUNCTIONS.map((n) => FN_SRC[n]).join("\n")}\nreturn { ${FUNCTIONS.join(", ")} };`
+		`"use strict";\n${CONSTS}\n${FUNCTIONS.map((n) => FN_SRC[n]).join("\n")}\nreturn { ${FUNCTIONS.join(", ")}, TRUCK_AMOUNT_FIELDS };`
 	)(imageLimits, () => "2026-09-26", CountingBuffer);
 }
 const M = buildModule();
@@ -402,7 +411,7 @@ function refusalSection() {
 	const b64 = bigJpeg.toString("base64");
 	const atCap = `data:image/${"x".repeat(MAX - b64.length - "data:image/;base64,".length)};base64,${b64}`;
 	eq(atCap.length, MAX, "§4 (fixture) a data URI exactly at TRUCK_PHOTO_DATA_URI_MAX_LENGTH");
-	eq(M.truckPhotoRefusal(atCap), null, "§4 a 10 MB JPEG in a data URI exactly at the cap: allowed");
+	eq(M.truckPhotoRefusal(atCap), null, "§4 a 10 MiB JPEG in a data URI exactly at the cap: allowed");
 	decodes = 0;
 	eq(M.truckPhotoRefusal(`${atCap}A`), r413, "§4 one character over the cap: 413 IMAGE_TOO_LARGE");
 	eq(decodes, 0, "§4 ...refused without decoding anything");
@@ -566,8 +575,12 @@ function sourcePins() {
 		putCheck < put.indexOf("db.prepare(`UPDATE trucks SET"), "§7 ...before the month-end lock, the first await and every write");
 	const post = code(ROUTES.truckPost);
 	const postCheck = post.indexOf("truckPhotoRefusal(photo)");
-	ok(postCheck > 0 && post.lastIndexOf('(req.session.user.role === "Super Admin" || req.session.user.role === "Dispatcher") &&', postCheck) > 0,
-		"§7 POST checks the photo for the two roles whose photo is stored");
+	const postGate = post.indexOf('if (costsAllowed && photo !== undefined && photo !== null && photo !== "") {');
+	const allowedAt = post.indexOf('const costsAllowed = req.session.user.role === "Super Admin" || req.session.user.role === "Dispatcher";');
+	ok(postCheck > 0 && allowedAt > 0 && allowedAt < postGate && postGate < postCheck,
+		"§7 POST checks the photo for the two roles whose photo is stored (costsAllowed, decided above the check)");
+	ok((post.match(/req\.session\.user\.role === "Super Admin" \|\| req\.session\.user\.role === "Dispatcher"/g) || []).length === 1,
+		"§7 ...and that predicate is written once in the route");
 	ok(postCheck < post.indexOf("parseDriverPayDaily(") && postCheck < post.indexOf("await ") && postCheck < post.indexOf("INSERT INTO trucks"),
 		"§7 ...before its first read, await and the INSERT");
 }

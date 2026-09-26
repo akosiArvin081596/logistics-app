@@ -173,6 +173,11 @@ const directoryChangedColumns = new Function(`${DIR_CHANGED_SRC}\nreturn directo
 const truckParse = new Function("DRIVER_PAY_DAILY_MAX", "todayKeyCT", "IN_SERVICE_MAX_MONTHS_AHEAD",
 	`${TRUCK_PARSE_SRC}\nreturn { parseDriverPayDaily, parseInServiceDate, parseRetiredAt, adminFeePctOrDefault, TRUCK_AMOUNT_FIELDS, parseTruckAmounts };`)(10000, () => "2026-09-24", 24);
 const truckMonthlyFixed = new Function(`${FIXED_COST_SRC}\nreturn truckMonthlyFixed;`)();
+// The photo check both truck routes run, verbatim (its own subject is
+// scripts/test-stored-file-serving.js).
+const PHOTO_CHECK = new Function("imageLimits",
+	`"use strict";\n${liftFunction("storedFileForServing")}\n${liftFunction("truckPhotoRefusal")}\nreturn { storedFileForServing, truckPhotoRefusal };`
+)(require("../lib/image-size"));
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 function usersDdl() {
@@ -354,6 +359,7 @@ function mountTrucks(db, { putSrc = ROUTES.truckPut, postSrc = ROUTES.truckPost,
 	const env = {
 		db,
 		...truckParse,
+		...PHOTO_CHECK,
 		truckChargeFromMonth: () => "",
 		truckChargeUntilMonth: () => "",
 		truckEditLockBlockers: () => ({ unreadable: false, blockers: [] }),

@@ -12312,11 +12312,21 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 				// which is exactly how the accept-branch site survived.
 				const unitNum = `INV-${appId}-${colLetter(i)}`;
 				const truckStatus = validTruckStatus.includes(v.status) ? v.status : "Active";
+				// The purchase price is read by parseTruckAmount(), the parser
+				// POST /api/trucks and PUT /api/trucks/:id read it through, so this truck
+				// never holds a price those routes would refuse. Unlike them, a value it
+				// refuses does NOT refuse the acceptance: it is stored as 0 — unset, as a
+				// blank is — because an admin cannot edit the applicant's vehicle data,
+				// and the real price is set on the truck afterwards. "85,000" is 0 too,
+				// not the 85 that parseFloat() read out of it. A price left out is the
+				// parser's { value: undefined } ("not sent"), and that is 0 here as well.
+				const priceRead = parseTruckAmount(v.purchasePrice);
+				const vehiclePrice = priceRead.error || priceRead.value === undefined ? 0 : priceRead.value;
 				try {
 					db.prepare(`INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, owner_id, purchase_price, title_status, title_state, notes)
 						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 					.run(unitNum, v.make || "", v.model || "", parseInt(v.year) || 0, v.vin || "", v.licensePlate || "",
-						truckStatus, userId, parseFloat(v.purchasePrice) || 0,
+						truckStatus, userId, vehiclePrice,
 						v.titleStatus || "Clean", v.titleState || "", "");
 				} catch { /* skip duplicate */ }
 			}
@@ -23831,7 +23841,10 @@ function truckEditLockBlockers(truck, changed) {
 	//   • admin_fee_pct — stored and echoed by GET /api/trucks; no money math
 	//     reads it, server-side or client-side.
 	//   • make / model / year / vin / license_plate / notes / photo / title_status
-	//     / purchase_price — never read by any aggregator.
+	//     — never read by any aggregator.
+	//   • purchase_price — no settlement figure reads it. The investor
+	//     asset/depreciation figures do (GET /api/investor/report and
+	//     GET /api/investor), as values shown, not settled.
 	return { unreadable: false, blockers };
 }
 
@@ -24583,19 +24596,23 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		if (assignedDriver !== undefined && assignedDriver !== null && typeof assignedDriver !== "string") {
 			return res.status(400).json({ error: "assignedDriver must be a string, or null for no driver.", code: "INVALID_DRIVER_NAME" });
 		}
+		// The Add form's five fixed costs, admin fee and photo. The INSERT used to
+		// drop all seven, so a new truck always started at $0/mo, the 50% fee and
+		// no photo whatever the form said. Parsed exactly as PUT /api/trucks/:id
+		// parses them — the admin fee through the same adminFeePctOrDefault() — and
+		// honoured for the two roles it admits; an Investor's add keeps the column
+		// defaults (their form sends none of these). The month-end lock below is
+		// asked about these same values, so it answers for the row that lands.
+		// Decided once, here, because the photo check below reads it too.
+		const costsAllowed = req.session.user.role === "Super Admin" || req.session.user.role === "Dispatcher";
 		// A photo sent by a role whose photo is stored (an Investor's is ignored)
 		// must be an image GET /api/driver/me/truck-photo can serve: 415
 		// UNSUPPORTED_IMAGE_TYPE or 413 IMAGE_TOO_LARGE otherwise, with
 		// field "photo" (truckPhotoRefusal()). Before anything is read or written.
-		if ((req.session.user.role === "Super Admin" || req.session.user.role === "Dispatcher") &&
-			photo !== undefined && photo !== null && photo !== "") {
+		if (costsAllowed && photo !== undefined && photo !== null && photo !== "") {
 			const photoRefusal = truckPhotoRefusal(photo);
 			if (photoRefusal) return res.status(photoRefusal.status).json({ ...photoRefusal.body, field: "photo" });
 		}
-		// Fuel config accepts snake_case (frontend sends fuel_tank_gallons/avg_mpg)
-		// or camelCase, so either caller convention persists correctly.
-		const fuelTankGallons = req.body.fuel_tank_gallons ?? req.body.fuelTankGallons;
-		const avgMpg = req.body.avg_mpg ?? req.body.avgMpg;
 		const driverPayParsed = parseDriverPayDaily(driverPayDaily);
 		if (driverPayParsed.error) {
 			return res.status(400).json({ error: driverPayParsed.error });
@@ -24659,14 +24676,7 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 			return res.status(400).json({ error: "Unit number is required" });
 		}
 		const validStatus = ["Active", "Inactive", "Maintenance", "OOS"].includes(status) ? status : "Active";
-		// The Add form's five fixed costs, admin fee and photo. The INSERT used to
-		// drop all seven, so a new truck always started at $0/mo, the 50% fee and
-		// no photo whatever the form said. Parsed exactly as PUT /api/trucks/:id
-		// parses them — the admin fee through the same adminFeePctOrDefault() — and
-		// honoured for the two roles it admits; an Investor's add keeps the column
-		// defaults (their form sends none of these). The month-end lock below is
-		// asked about these same values, so it answers for the row that lands.
-		const costsAllowed = req.session.user.role === "Super Admin" || req.session.user.role === "Dispatcher";
+		// The five fixed costs, admin fee and photo (costsAllowed, above).
 		// Read only when the add stores them: an Investor's cost fields are never
 		// parsed, so nothing in them can refuse the add. Still above the first
 		// await, so a refused amount writes nothing.
@@ -24946,11 +24956,13 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		}
 		const lock = truckEditLockBlockers(truck, changed);
 		// ⚠️ THE ATTEMPTED VALUES ARE THE RECORD HERE. This route's success path
-		// writes one audit line PER FIELD (update_truck_status, _in_service_date,
-		// _retired_at, _owner); a refusal has no such split because the whole edit is
-		// refused as one, so the single row has to name every field that moved and
-		// what it would have become. `changed` already holds exactly that — column
-		// name → value to be written — and nothing else in the body reaches money.
+		// writes one audit line PER FIELD (update_driver_pay, update_truck_status,
+		// _in_service_date, _retired_at, _owner, _fuel_tank, _avg_mpg), plus one
+		// update_truck_costs line per save that names every cost it changed; a
+		// refusal has no such split because the whole edit is refused as one, so the
+		// single row has to name every field that moved and what it would have
+		// become. `changed` already holds exactly that — column name → value to be
+		// written — and nothing else in the body reaches money.
 		const truckEditAudit = {
 			action: "update_truck_blocked", entity: "truck", entityId: String(id),
 			subject: `${truck.unit_number || `truck #${id}`}: ` +

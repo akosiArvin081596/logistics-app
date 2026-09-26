@@ -14,14 +14,18 @@
  * changes a cost — one of the five, the purchase price, the maintenance fund or
  * the admin fee — writes exactly one `update_truck_costs` line naming each
  * change and, when one of the five moved, the monthly fixed-cost total before
- * and after. A save that resends the stored values writes none.
+ * and after. A save that resends the stored values writes none. Accepting an
+ * investor application reads each vehicle's purchase price through the same
+ * parser, but a price it refuses is stored as 0 and never refuses the
+ * acceptance.
  *
- * WHAT IS ASSERTED. The shipped parser and the two shipped handlers, lifted out
- * of server.js and run against an in-memory SQLite with server.js's own
- * parsers, audit writer, name helpers and truck assignment. Only the month-end
- * locks (which record what they were asked), the active-load check, the Job
- * Tracking read and the driver history it feeds, and the socket notification
- * are stubbed.
+ * WHAT IS ASSERTED. The shipped parser and the two shipped truck handlers,
+ * lifted out of server.js and run against an in-memory SQLite with server.js's
+ * own parsers, audit writer, name helpers and truck assignment. Only the
+ * month-end locks (which record what they were asked), the active-load check,
+ * the Job Tracking read and the driver history it feeds, and the socket
+ * notification are stubbed. §6 runs the shipped acceptance handler the same
+ * way, with its password hash, audit line, notification and emails stubbed.
  *   §1 parseTruckAmount() — every accepted and refused shape, the cap's two
  *      edges, 1e308, whitespace, the error text; the table's nine rows, their
  *      keys (the fuel pair's `a ?? b` order included), the five fixed costs,
@@ -43,6 +47,11 @@
  *   §5 source pins — both routes parse before their lock, their first await and
  *      their first write; no sent amount goes through parseFloat; exactly one
  *      writer of update_truck_costs.
+ *   §6 investor-application acceptance — the shipped PUT
+ *      /api/investor-applications/:id/status handler: "Infinity", "-5",
+ *      "85,000" and a price left out are stored as 0, 85000 and "85000" as
+ *      85000, and the acceptance still answers 200 with the account created; a
+ *      source pin that the INSERT stores what parseTruckAmount() read.
  * The mutants for these checks were run by hand before shipping and are not
  * committed (see the PR).
  *
@@ -105,7 +114,10 @@ function liftConst(head, close = null) {
 const ROUTES = {
 	post: liftRoute('app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), async (req, res) => {'),
 	put: liftRoute('app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req, res) => {'),
+	// §6: accepting an investor application creates a truck per vehicle on it.
+	accept: liftRoute('app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), async (req, res) => {'),
 };
+const colLetter = new Function(`${liftFunction("colLetter")}\nreturn colLetter;`)();
 
 // Everything the two routes call from module scope, verbatim.
 const MODULE_SRC = [
@@ -631,12 +643,94 @@ function sourcePins() {
 	console.log("  source pins checked");
 }
 
+// ═══════════════════════════════════════════════════════════════ §6
+// Accepting an investor application creates one truck per vehicle on it, its
+// purchase price read by parseTruckAmount(). A price that parser refuses is
+// stored as 0 and never refuses the acceptance. The shipped handler, on the
+// columns it writes; the password hash, the audit line, the socket
+// notification and the two emails are stubbed.
+const ACCEPT_DDL = [
+	`CREATE TABLE investor_applications (
+		id INTEGER PRIMARY KEY, status TEXT DEFAULT 'New', deleted_at TEXT, legal_name TEXT, dba TEXT DEFAULT '', email TEXT,
+		entity_type TEXT DEFAULT '', address TEXT DEFAULT '', phone TEXT DEFAULT '', ein_ssn TEXT DEFAULT '', tax_classification TEXT DEFAULT '',
+		contact_person TEXT DEFAULT '', contact_title TEXT DEFAULT '', vehicles_json TEXT DEFAULT '[]')`,
+	`CREATE TABLE users (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, password_hash TEXT, role TEXT, driver_name TEXT DEFAULT '', email TEXT,
+		full_name TEXT DEFAULT '', company_name TEXT DEFAULT '', must_change_password INTEGER DEFAULT 0)`,
+	`CREATE TABLE investors (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER UNIQUE, full_name TEXT, carrier_name TEXT, status TEXT, application_id INTEGER,
+		entity_type TEXT, address TEXT, phone TEXT, email TEXT, ein_ssn TEXT, tax_classification TEXT, contact_person TEXT, contact_title TEXT)`,
+	`CREATE TABLE trucks (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, unit_number TEXT UNIQUE, make TEXT DEFAULT '', model TEXT DEFAULT '', year INTEGER DEFAULT 0,
+		vin TEXT DEFAULT '', license_plate TEXT DEFAULT '', status TEXT DEFAULT 'Active', owner_id INTEGER DEFAULT 0,
+		purchase_price REAL DEFAULT 0, title_status TEXT DEFAULT 'Clean', title_state TEXT DEFAULT '', notes TEXT DEFAULT '')`,
+];
+async function acceptanceSection() {
+	section("§6 investor-application acceptance");
+	const { checkPublicVehicles } = require(path.join(__dirname, "..", "lib", "public-form-input.js"));
+	// [label, the purchasePrice the application carries (undefined: left out), what the truck stores]
+	const PRICES = [
+		['"Infinity"', "Infinity", 0],
+		['"-5"', "-5", 0],
+		['"85,000"', "85,000", 0],
+		["85000", 85000, 85000],
+		['"85000"', "85000", 85000],
+		["left out", undefined, 0],
+	];
+	const vehicles = PRICES.map(([, price], i) => {
+		const v = { make: "Freightliner", model: "Cascadia", year: "2021", vin: `1FUJHHDR0MLMV00${i}`, status: "Active", titleStatus: "Clean" };
+		if (price !== undefined) v.purchasePrice = price;
+		return v;
+	});
+	ok(checkPublicVehicles(vehicles).ok === true, "§6 (fixture) the vehicles pass checkPublicVehicles(), as a stored application's do");
+
+	const db = new Database(":memory:");
+	for (const sql of ACCEPT_DDL) db.exec(sql);
+	db.prepare("INSERT INTO investor_applications (id, legal_name, email, vehicles_json) VALUES (42, 'Acme Holdings', 'ops@acme.example', ?)")
+		.run(JSON.stringify(vehicles));
+	const m = buildModule(db);
+	const mail = [];
+	const accept = mountRoute(ROUTES.accept, {
+		db,
+		parseTruckAmount: m.parseTruckAmount,
+		colLetter,
+		crypto: require("crypto"),
+		bcrypt: { hash: async () => "hashed" },
+		logAudit: () => {},
+		notifyChange: () => {},
+		escapeHtml: (s) => String(s ?? ""),
+		sendEmail: (to) => { mail.push(to); },
+	});
+	const r = await quiet(() => accept({ session: { user: SUPER }, params: { id: "42" }, body: { status: "Accepted" } }));
+	const b = r.body || {};
+	ok(r.status === 200 && b.success === true && b.accountCreated === true && mail.length === 2,
+		`§6 the acceptance is not refused: 200, the account created, both emails sent (got ${r.status} ${JSON.stringify(b)}, ${mail.length} email(s))`);
+	const trucks = db.prepare("SELECT unit_number, purchase_price FROM trucks ORDER BY id").all();
+	ok(trucks.length === PRICES.length, `§6 one truck per vehicle (got ${trucks.length})`);
+	PRICES.forEach(([label, , want], i) => {
+		const t = trucks[i];
+		ok(!!t && t.unit_number === `INV-42-${colLetter(i)}` && Object.is(t.purchase_price, want),
+			`§6 a purchase price of ${label}: the truck stores ${want} (got ${t ? `${t.unit_number} ${String(t.purchase_price)}` : "no truck"})`);
+	});
+
+	const code = (s) => s.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+	const route = code(ROUTES.accept);
+	const parseAt = route.indexOf("const priceRead = parseTruckAmount(v.purchasePrice);");
+	const insertAt = route.indexOf("INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, owner_id, purchase_price,");
+	const insert = insertAt > 0 ? route.slice(insertAt, route.indexOf("} catch", insertAt)) : "";
+	ok(parseAt > 0 && parseAt < insertAt && insert.includes("truckStatus, userId, vehiclePrice,") && !route.includes("parseFloat(v.purchasePrice)"),
+		"§6 source pin: the acceptance INSERT stores the purchase price parseTruckAmount() read, never a parseFloat()");
+	ok(route.includes("const vehiclePrice = priceRead.error || priceRead.value === undefined ? 0 : priceRead.value;"),
+		"§6 source pin: a refused or missing price is 0, and nothing returns a refusal from it");
+}
+
 (async () => {
 	parserSection();
 	await putRefusalSection();
 	await putSuccessSection();
 	await postSection();
 	sourcePins();
+	await acceptanceSection();
 
 	console.log(`\n${"=".repeat(64)}`);
 	if (failures.length) {
