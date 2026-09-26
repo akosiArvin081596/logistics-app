@@ -93,6 +93,19 @@ scripts/search-gmail-for-load.js
 # Browser-automation artifacts (Playwright MCP runs) — local only, never deploy
 .playwright-mcp/
 
+# The browser E2E harness (scripts/e2e): its own install, and any output that
+# lands beside it. The harness writes its DB copies (real, unsanitized
+# production data), logins, screenshots, results and logs to a work dir OUTSIDE
+# the repo; these rules are the second line of defence.
+scripts/e2e/node_modules/
+scripts/e2e/.work/
+scripts/e2e/shots/
+scripts/e2e/results-*.md
+scripts/e2e/*.log
+scripts/e2e/*.db*
+scripts/e2e/creds*.json
+scripts/e2e/plant-journal.json
+
 # Ad-hoc screenshots dropped at the repo root (keep tracked assets like logo.png)
 /*.png
 !/logo.png

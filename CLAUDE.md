@@ -119,6 +119,7 @@ For production: `npm run build:client` then `npm start` — Express serves the b
 **CI/CD, deploy and the VPS → [`docs/claude/ci-deploy.md`](docs/claude/ci-deploy.md).** ⚠️ A merge to `main` deploys staging automatically, then **production waits for approval** — since 2026-09-25 the `production` Environment has a required reviewer, and it gates the drift heal and any manual production run too. Test staging, then approve; a run waiting for approval holds the deploy queue. Smoke + edge checks and auto-rollback still guard every deploy. ⚠️ The VPS is shared with other clients: restart by exact pm2 name, never `all` or an id. Deploy or roll back with `gh workflow run deploy.yml`, not an ssh one-liner. `npm run ci` is the CI gate.
 
 **Tests → [`docs/claude/testing.md`](docs/claude/testing.md).** `npm run test:unit` runs the standalone `scripts/{test,check}-*` runners — no server, no fixtures, safe any time. ⚠️ `test-suite.js` is an HTTP harness that **writes**: it defaults to port 3000 (production on the VPS) and, with no `SPREADSHEET_ID` override, the **live** sheet. Read the doc before running it.
+Browser end-to-end (a real, headed Playwright run through the UI, locally and on staging; not part of `npm run ci`) → [`scripts/e2e/README.md`](scripts/e2e/README.md).
 
 ## Environment Setup
 

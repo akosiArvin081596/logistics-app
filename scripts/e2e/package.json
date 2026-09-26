@@ -1,0 +1,9 @@
+{
+  "name": "logisx-e2e",
+  "private": true,
+  "type": "module",
+  "//": "The browser E2E harness, as its own package: the root install, CI and the deploy never install it, and scripts/run-unit-tests.js never runs it. Install with `npm --prefix scripts/e2e ci`. See README.md.",
+  "dependencies": {
+    "playwright-core": "1.63.0"
+  }
+}
