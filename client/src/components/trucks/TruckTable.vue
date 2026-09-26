@@ -480,7 +480,8 @@ import ConfirmModal from '../shared/ConfirmModal.vue'
 import FileDropZone from '../shared/FileDropZone.vue'
 import LegalDocumentPortal from '../investor/LegalDocumentPortal.vue'
 import { useApi } from '../../composables/useApi'
-import { compressImage, DEFAULT_MAX_EDGE, isDecodedImage } from '../../lib/imageUtils'
+import { compressImage, DEFAULT_MAX_EDGE, isDecodedImage, dataUrlHasImageBytes } from '../../lib/imageUtils'
+import { amountError } from '../../lib/truckAmounts'
 import { fmtOdometer } from '../../lib/fuelReview'
 import { fmtTimestamp } from '../../utils/datetime'
 
@@ -680,55 +681,26 @@ async function onEditPhoto(files) {
     // Only a real decode is kept. When compressImage cannot decode a file it
     // hands back the RAW bytes under the file's own media type (an SVG, a PDF,
     // …) or '' — and the server refuses any photo that is not a JPEG, PNG or
-    // WebP (415 UNSUPPORTED_IMAGE_TYPE). Either way the truck keeps its existing
-    // photo rather than losing it, or the whole save, on the next Save.
-    if (dataUrl && isDecodedImage(dataUrl)) editForm.photo = dataUrl
+    // WebP (415 UNSUPPORTED_IMAGE_TYPE). The label alone is not proof: a PDF
+    // renamed scan.jpg comes back labelled image/jpeg, so its bytes are checked
+    // too. Either way the truck keeps its existing photo rather than losing it,
+    // or the whole save, on the next Save.
+    if (isDecodedImage(dataUrl) && dataUrlHasImageBytes(dataUrl)) editForm.photo = dataUrl
     else editPhotoError.value = "Couldn't read that photo — use a JPEG, PNG or WebP image."
   } finally {
     editPhotoBusy.value = false
   }
 }
 
-// The most the server stores in a truck amount. Above it, below 0 or not a
-// finite number, the save is answered 400 INVALID_AMOUNT.
-const AMOUNT_MAX = 1000000
+// Driver pay sits at the top of this dialog, so it is named first when more
+// than one amount is refused; the rest follow in AMOUNT_FIELDS order
+// (lib/truckAmounts.js), which is also this dialog's.
+const EDIT_AMOUNT_ORDER = ['driverPayDaily']
 
-// Every amount input, in form order, so a refusal names the first bad field on
-// screen. Driver pay keeps the server's own tighter 0–10,000 range and is only
-// checked when this user may edit it; admin fee is a percentage.
-const AMOUNT_FIELDS = [
-  { key: 'driverPayDaily', label: 'Driver pay', max: 10000, pay: true },
-  { key: 'fuelTankGallons', label: 'Fuel tank' },
-  { key: 'avgMpg', label: 'Avg MPG' },
-  { key: 'purchasePrice', label: 'Purchase price' },
-  { key: 'maintenanceFundMonthly', label: 'Maintenance fund' },
-  { key: 'insuranceMonthly', label: 'Insurance' },
-  { key: 'eldMonthly', label: 'ELD' },
-  { key: 'hvutAnnual', label: 'HVUT' },
-  { key: 'irpAnnual', label: 'IRP' },
-  { key: 'truckPaymentMonthly', label: 'Truck payment' },
-  { key: 'adminFeePct', label: 'Admin fee', max: 100 },
-]
-
-// '' when every amount is blank or a finite number in range; otherwise one
-// sentence naming the first field that is not. Blank ('' / null / undefined)
-// stays allowed — it is how a field says "unset". v-model.number parseFloat()s
-// whatever the input reports, so a huge entry (1e308) arrives as a number, and
-// a non-finite one, should a browser report it, as Infinity — which
-// JSON.stringify would send as null. Chrome reports '' for that case instead;
-// see unreadableNumberError. Same rule as AddTruckForm.vue's copy.
-function amountError(values, canEditPay) {
-  for (const { key, label, max = AMOUNT_MAX, pay } of AMOUNT_FIELDS) {
-    if (pay && !canEditPay) continue
-    const v = values[key]
-    if (v === '' || v === null || v === undefined) continue
-    const n = Number(v)
-    if (!Number.isFinite(n) || n < 0 || n > max) {
-      return `${label} must be a number between 0 and ${max.toLocaleString('en-US')}.`
-    }
-  }
-  return ''
-}
+// The value rule — each amount's range, blank allowed, the refusal naming the
+// field — is amountError in lib/truckAmounts.js. The two helpers below are the
+// half that needs this dialog's elements; AddTruckForm.vue has the same pair,
+// so change them together.
 
 // A number box the browser cannot parse keeps its text on screen but reports
 // value '' — in Chrome "1e999", "15-00" and "5e" all do — and v-model reads
@@ -737,7 +709,7 @@ function amountError(values, canEditPay) {
 // zero the truck's stored insurance. Only input.validity.badInput tells
 // "cleared" from "unreadable", which is why this reads the DOM. Names the first
 // such box by its label; a disabled box (driver pay for a non-Super Admin) is
-// never sent, so it is skipped. Same rule as AddTruckForm.vue's copy.
+// never sent, so it is skipped.
 //
 // ⚠️ Depends on keepUnreadableNumber below: without it the evidence is gone
 // before this runs.
@@ -757,8 +729,7 @@ function unreadableNumberError(root) {
 // vanish the moment the box loses focus: exactly when Save is pressed, before
 // its click handler runs. Stopping that one event here, in the capture phase on
 // the dialog, keeps the typo on screen for unreadableNumberError to find and
-// for the person to fix. Readable entries pass through untouched. Same as
-// AddTruckForm.vue's copy.
+// for the person to fix. Readable entries pass through untouched.
 function keepUnreadableNumber(e) {
   const el = e.target
   if (el?.tagName === 'INPUT' && el.type === 'number' && el.validity?.badInput) e.stopPropagation()
@@ -768,7 +739,9 @@ function handleSaveEdit() {
   // Refused here rather than left to the server: emitting `update` closes this
   // modal at once, so a server refusal would land as a toast after every edit
   // in the form was gone.
-  editError.value = unreadableNumberError(editDialogEl.value) || amountError(editForm, props.canEditPay)
+  editError.value = unreadableNumberError(editDialogEl.value)
+    || amountError(editForm, { canEditPay: props.canEditPay, order: EDIT_AMOUNT_ORDER })
+    || ''
   if (editError.value) return
   emit('update', {
     id: editForm.id,
