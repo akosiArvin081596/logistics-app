@@ -180,6 +180,11 @@ const PIECES = {
 		// audit lines name.
 		liftFunction("adminFeePctOrDefault"),
 		liftFunction("truckMonthlyFixed"),
+		// The amounts both truck routes parse (scripts/test-truck-cost-amounts.js).
+		liftConst("const TRUCK_AMOUNT_MAX = "),
+		liftFunction("parseTruckAmount"),
+		liftConst("const TRUCK_AMOUNT_FIELDS = [", "\n];"),
+		liftFunction("parseTruckAmounts"),
 	].join("\n"),
 };
 const MODULE_EXPORTS = [
@@ -188,7 +193,7 @@ const MODULE_EXPORTS = [
 	"normalizeDriverName", "findDriverNameClash", "findDriverNameClashes", "canonicalDriverName",
 	"syncDriverToCarrierSheet", "assignDriverToTruck",
 	"directoryChangedColumns", "DRIVER_PAY_DAILY_MAX", "parseDriverPayDaily", "parseInServiceDate", "parseRetiredAt",
-	"adminFeePctOrDefault", "truckMonthlyFixed",
+	"adminFeePctOrDefault", "truckMonthlyFixed", "TRUCK_AMOUNT_FIELDS", "parseTruckAmounts",
 ];
 function buildModule(db, src = {}) {
 	const s = { ...PIECES, ...src };
@@ -803,9 +808,10 @@ async function battery(opts = {}) {
 	{
 		const db = makeDb();
 		const app = mountAll(db, opts);
-		const r = await app.truckPost(DISPATCHER, newTruck({ insuranceMonthly: "", eldMonthly: "abc", truckPaymentMonthly: null, hvutAnnual: undefined, irpAnnual: "1380.5", photo: undefined }));
+		// (An unreadable amount is refused — scripts/test-truck-cost-amounts.js.)
+		const r = await app.truckPost(DISPATCHER, newTruck({ insuranceMonthly: "", eldMonthly: "  ", truckPaymentMonthly: null, hvutAnnual: undefined, irpAnnual: "1380.5", photo: undefined }));
 		const made = db.prepare("SELECT * FROM trucks WHERE unit_number = '500'").get();
-		t(`§4 POST truck with blank, unreadable and missing amounts: 0 for each, the rest as sent (got ${r.status}, ${JSON.stringify(storedCosts(made))})`,
+		t(`§4 POST truck with blank and missing amounts: 0 for each, the rest as sent (got ${r.status}, ${JSON.stringify(storedCosts(made))})`,
 			r.status === 200 && JSON.stringify(storedCosts(made)) === JSON.stringify([0, 0, 0, 0, 1380.5, 50, ""]));
 	}
 

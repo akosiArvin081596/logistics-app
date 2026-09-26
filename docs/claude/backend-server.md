@@ -129,6 +129,8 @@ REST endpoints (grouped by domain):
 
 **Fleet management**:
 - `/api/trucks` — CRUD for trucks (GET, POST, PUT, DELETE)
+  - **Truck amounts are finite and in range.** `POST` and `PUT /api/trucks/:id` read the five fixed costs, `purchase_price`, `maintenance_fund_monthly`, `fuel_tank_gallons` and `avg_mpg` through one parser (`parseTruckAmount()`) and one table (`TRUCK_AMOUNT_FIELDS`): a finite number from 0 to 1,000,000 (`TRUCK_AMOUNT_MAX`), and a blank (`null`, `""`, whitespace) is 0. Anything else refuses the whole request with **400 `INVALID_AMOUNT`** (`field` names the column) before the month-end lock is asked and before any write, so the lock and the write see the same parsed values. An Investor's add never stores the fixed costs, so it never reads them. The driver's daily rate and the admin fee keep their own rules. `scripts/test-truck-cost-amounts.js`.
+  - **Cost edits are audited.** `PUT /api/trucks/:id` writes one **`update_truck_costs`** line per save that actually changes a cost: one of the five fixed costs, the purchase price, the maintenance fund or the admin fee (a stored NULL counts as 50). It keys on a change, never on presence, because the Edit form sends every field. The line names each change and, when a fixed cost moved, the monthly fixed-cost total before and after. The fuel tank and MPG keep their own lines. `scripts/test-truck-edit-audit-coverage.js` fails if any of the eight columns drops out of that audit's field list.
 - `/api/truck-assignments` — GET truck-driver assignments
 - `/api/trailers` — CRUD for trailers
 - `/api/drivers-directory` — CRUD for drivers directory (Carrier Database in SQLite)
