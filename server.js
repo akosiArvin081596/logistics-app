@@ -22913,31 +22913,28 @@ function parseRetiredAt(raw) {
 }
 
 // trucks.admin_fee_pct as POST /api/trucks and PUT /api/trucks/:id store it,
-// shared so the two cannot drift. A percentage, read with parseTruckAmount()'s
-// {error}|{value} contract:
+// shared so the two cannot drift. A percentage, read BY parseTruckAmount()
+// under the label "Admin fee" and the ceiling ADMIN_FEE_PCT_MAX, so the rule
+// is written once; only a cleared input differs:
 //   - undefined — the field was not sent: { value: undefined }, and the PUT
 //     leaves the column alone;
 //   - null, "" or only whitespace — a cleared input: { value: 50 }, the column's
-//     own default. Never NaN: the PUT once stored `parseFloat(x) ?? 50`, which
-//     never falls back (parseFloat answers NaN, not null, and SQLite stores NaN
-//     as NULL), so clearing the Edit form's Admin Fee left the column NULL;
+//     own default, where parseTruckAmount() answers 0. Never NaN: the PUT once
+//     stored `parseFloat(x) ?? 50`, which never falls back (parseFloat answers
+//     NaN, not null, and SQLite stores NaN as NULL), so clearing the Edit form's
+//     Admin Fee left the column NULL;
 //   - a number, or a string whose trimmed text is a number, finite and within
 //     0..ADMIN_FEE_PCT_MAX: { value: n };
 //   - anything else — "abc", a negative, 100.01, ±Infinity, a boolean, an
-//     array, an object: { error }. Both routes answer it 400 INVALID_AMOUNT with
-//     field "admin_fee_pct", before the month-end lock and before any write.
-// Number(), never parseFloat(), for the reason parseTruckAmount() gives.
+//     array, an object: { error } ("Admin fee must be a number between 0 and
+//     100"). Both routes answer it 400 INVALID_AMOUNT with field
+//     "admin_fee_pct", before the month-end lock and before any write.
 // POST /api/trucks reads it only for the roles whose add stores it; an
 // Investor's add keeps the 50.
 const ADMIN_FEE_PCT_MAX = 100;
 function parseAdminFeePct(raw) {
-	if (raw === undefined) return { value: undefined };
 	if (raw === null || (typeof raw === "string" && raw.trim() === "")) return { value: 50 };
-	const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : NaN;
-	if (!Number.isFinite(n) || n < 0 || n > ADMIN_FEE_PCT_MAX) {
-		return { error: `Admin fee must be a number between 0 and ${ADMIN_FEE_PCT_MAX}` };
-	}
-	return { value: n === 0 ? 0 : n }; // -0 is stored and compared as 0
+	return parseTruckAmount(raw, "Admin fee", ADMIN_FEE_PCT_MAX);
 }
 
 // ⚠️ TRUCK AMOUNTS ARE FINITE AND IN RANGE. The nine numeric columns
@@ -22971,8 +22968,9 @@ function parseAdminFeePct(raw) {
 // the row names one. TRUCK_AMOUNT_MAX is a sanity ceiling, not a business rule —
 // far above any figure these columns hold (the purchase price is the largest),
 // so it refuses only a slipped key or a value that is no amount at all. The
-// driver's daily rate (parseDriverPayDaily, DRIVER_PAY_DAILY_MAX) and the admin
-// fee (parseAdminFeePct, ADMIN_FEE_PCT_MAX) keep their own rules.
+// admin fee is read through this parser too (parseAdminFeePct: its ceiling is
+// ADMIN_FEE_PCT_MAX and a blank is its 50); the driver's daily rate keeps its
+// own rule (parseDriverPayDaily, DRIVER_PAY_DAILY_MAX).
 const TRUCK_AMOUNT_MAX = 1_000_000;
 function parseTruckAmount(raw, label = "Amount", max = TRUCK_AMOUNT_MAX) {
 	if (raw === undefined) return { value: undefined };
@@ -22993,8 +22991,11 @@ function parseTruckAmount(raw, label = "Amount", max = TRUCK_AMOUNT_MAX) {
 //   - fixed: one of the five fixed costs truckMonthlyFixed() reads, which the
 //     month-end lock and the cost audit's fixed-cost total key on;
 //   - staffOnly: POST /api/trucks stores it for a Super Admin or a Dispatcher
-//     only. An Investor's add never reads it, so it stays 0 — for the fuel pair
-//     that is the fleet default the fuel range falls back to;
+//     only. An Investor's add never reads it, so it stays 0. A 0 fuel tank is
+//     the fleet default the fuel range falls back to (DEFAULT_TANK_GALLONS); a
+//     0 average MPG is unset, and the range takes its MPG from ELD / receipts,
+//     or the model's default when neither has one (the PUT's
+//     update_truck_avg_mpg line reads it the same way);
 //   - max (optional): the row's own ceiling, else TRUCK_AMOUNT_MAX. The fuel
 //     pair's are the owner's: a 500-gallon tank and 20 MPG, above any truck in
 //     the fleet. client/src/lib/truckAmounts.js holds the forms' copy of every
@@ -24710,8 +24711,9 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		// The five fixed costs, the fuel pair and the admin fee (costsAllowed,
 		// above). Read only when the add stores them: an Investor's are never
 		// parsed, so nothing in them can refuse the add, and the row keeps the
-		// column defaults ($0, a 0 fuel tank and MPG — the fleet defaults — and the
-		// 50% fee). Still above the first await, so a refused value writes nothing.
+		// column defaults: $0; a 0 fuel tank, the fleet default; a 0 MPG, unset, so
+		// the MPG comes from ELD / receipts; and the 50% fee. Still above the first
+		// await, so a refused value writes nothing.
 		const staffParsed = costsAllowed ? parseTruckAmounts(req.body, TRUCK_AMOUNT_FIELDS.filter((f) => f.staffOnly)) : { values: {} };
 		if (staffParsed.refusal) return res.status(400).json(staffParsed.refusal);
 		const feeParsed = costsAllowed ? parseAdminFeePct(adminFeePct) : { value: 50 };
@@ -32713,6 +32715,30 @@ function storedFileForServing(dataUri, { pdf = false } = {}) {
 	return contentType ? { contentType, body } : null;
 }
 
+// The ETag GET /api/driver/me/truck-photo sends with a stored file: taken from
+// the stored value itself, as a quoted 32-hex-digit prefix of its SHA-256. One
+// stored value always has one ETag, and a different stored value a different
+// one. The stored value decides every byte the route sends and the type they
+// are sent as, so its hash stands for the whole response.
+function storedFileETag(dataUri) {
+	return `"${crypto.createHash("sha256").update(dataUri).digest("hex").slice(0, 32)}"`;
+}
+
+// Whether an If-None-Match request header names `etag`: "*", or a
+// comma-separated list compared weakly, as RFC 9110 §13.1.2 has If-None-Match
+// compared, so W/"x" names "x" (a proxy that compresses a response may weaken
+// its ETag, and the browser sends back the one it was given). Parsed without a
+// pattern: split on commas, each tag trimmed and a leading W/ dropped. An
+// absent or blank header names nothing.
+function ifNoneMatchIncludes(header, etag) {
+	if (typeof header !== "string") return false;
+	if (header.trim() === "*") return true;
+	return header.split(",").some((tag) => {
+		const t = tag.trim();
+		return (t.startsWith("W/") ? t.slice(2) : t) === etag;
+	});
+}
+
 // A truck photo sent to POST /api/trucks or PUT /api/trucks/:id, as it may be
 // stored: { value }, or { status, body } when it may not be, with body
 // { error, code } — 415 UNSUPPORTED_IMAGE_TYPE, or 413 IMAGE_TOO_LARGE (more
@@ -32790,8 +32816,8 @@ app.get("/api/driver/me/identity-file/:fileType", requireAuth, (req, res) => {
 		if (file.contentType === "application/pdf") {
 			res.setHeader("Content-Disposition", `attachment; filename="${pdfDownloadName[req.params.fileType]}"`);
 		}
-		// Private cache — drivers won't refetch the same image every page open.
-		res.setHeader("Cache-Control", "private, max-age=3600");
+		// Not kept by the browser: every use is fetched from the server.
+		res.setHeader("Cache-Control", "private, no-store");
 		res.setHeader("X-Content-Type-Options", "nosniff");
 		res.end(file.body);
 	} catch (err) {
@@ -32804,7 +32830,10 @@ app.get("/api/driver/me/identity-file/:fileType", requireAuth, (req, res) => {
 // assigned to the requesting driver. Paired with truck.has_photo in
 // /api/driver/:driverName, this lets LoadDetail render the truck image only
 // when the Truck Details accordion is expanded. Served as what the bytes are —
-// a JPEG, PNG or WebP — and 404 otherwise (storedFileForServing()).
+// a JPEG, PNG or WebP — and 404 otherwise (storedFileForServing()). Revalidated
+// with the server on every use: sent `private, no-cache` with an ETag taken
+// from the stored photo (storedFileETag()), and a request whose If-None-Match
+// names that ETag is answered 304 with no body (ifNoneMatchIncludes()).
 app.get("/api/driver/me/truck-photo", requireAuth, (req, res) => {
 	try {
 		const user = req.session.user;
@@ -32816,9 +32845,16 @@ app.get("/api/driver/me/truck-photo", requireAuth, (req, res) => {
 		const row = db.prepare("SELECT photo FROM trucks WHERE LOWER(assigned_driver) = ?").get(driverName);
 		const file = storedFileForServing(row?.photo);
 		if (!file) return res.status(404).json({ error: "Not found" });
-		res.setHeader("Content-Type", file.contentType);
-		res.setHeader("Cache-Control", "private, max-age=3600");
+		// Revalidated with the server on every use: the browser may keep a copy
+		// (`no-cache`), but shows it again only once this route has answered 304
+		// for it. A different stored photo has a different ETag, so it is sent in
+		// full. The 304 carries the ETag and Cache-Control, and no Content-Type.
+		const etag = storedFileETag(row.photo);
+		res.setHeader("ETag", etag);
+		res.setHeader("Cache-Control", "private, no-cache");
 		res.setHeader("X-Content-Type-Options", "nosniff");
+		if (ifNoneMatchIncludes(req.headers["if-none-match"], etag)) return res.status(304).end();
+		res.setHeader("Content-Type", file.contentType);
 		res.end(file.body);
 	} catch (err) {
 		console.error("truck-photo error:", err.message);

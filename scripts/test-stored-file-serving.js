@@ -13,6 +13,12 @@
  * An identity file that is a PDF is sent as a download (Content-Disposition:
  * attachment) under the name the Driver Kit's link gives it — CDL-Front.pdf,
  * CDL-Back.pdf or Medical-Card.pdf; an image stays inline.
+ * An identity file is sent Cache-Control: private, no-store — not kept by the
+ * browser. A truck photo is sent private, no-cache with an ETag taken from the
+ * stored value (storedFileETag(): a quoted 32-hex-digit prefix of its SHA-256),
+ * so the browser revalidates it with the server on every use, and a request
+ * whose If-None-Match names that ETag is answered 304 with no body
+ * (ifNoneMatchIncludes()).
  * POST /api/trucks and PUT /api/trucks/:id refuse a truck photo that is not
  * such an image, or is over 16 MP or 2 MiB: 415 UNSUPPORTED_IMAGE_TYPE / 413
  * IMAGE_TOO_LARGE with field "photo" (truckPhotoForStorage()). One that passes
@@ -25,12 +31,18 @@
  *   §1 storedFileForServing() — each type served as its bytes say, whatever the
  *      label; a PDF only for identity files; everything else null.
  *   §2 GET /api/driver/me/truck-photo — the shipped handler: 200 with the exact
- *      bytes, the sniffed type, nosniff and the private cache, inline; 404 for
- *      every non-image, a PDF, an empty payload and a malformed value; the
- *      role gate.
+ *      bytes, the sniffed type, nosniff, private, no-cache and the stored
+ *      value's ETag, inline; 304 with no body for an If-None-Match that names
+ *      that ETag (as sent, weakened, in a list, or "*"), and 200 with the new
+ *      bytes under a new ETag once the stored photo changes, or for another
+ *      driver whose truck's photo differs; 404 for every non-image, a PDF, an
+ *      empty payload and a malformed value, whatever If-None-Match names; the
+ *      role gate. ifNoneMatchIncludes() on its own.
  *   §3 GET /api/driver/me/identity-file/:fileType — the same for a PDF or an
- *      image, a PDF as an attachment under the Driver Kit's name for it and an
- *      image inline;
+ *      image, each sent private, no-store, a PDF as an attachment under the
+ *      Driver Kit's name for it (also read from DriverKit.vue — its labels and
+ *      its downloadName rule — so either side changed alone fails) and an image
+ *      inline;
  *      malformed is 404 (it was 500); an unknown type is still 400 and another
  *      role still 403.
  *   §4 truckPhotoForStorage() — absent/clear as given, the three image types
@@ -45,7 +57,7 @@
  *   §6 POST /api/trucks — a Super Admin's or a Dispatcher's non-image or
  *      oversized photo is 415 / 413 with nothing inserted, an image is stored
  *      canonical; an Investor's photo is still ignored.
- *   §7 source pins — no pattern over the payload, the GET routes send only the
+ *   §7 source pins — no pattern over the payload or If-None-Match, the GET routes send only the
  *      sniffed type, the attachment header only for a PDF, each write check
  *      before the route's first read, await and write, and each route storing
  *      the checked value.
@@ -58,6 +70,7 @@
  */
 "use strict";
 
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
@@ -128,7 +141,7 @@ const ROUTES = Object.fromEntries(Object.entries(HEADS).map(([k, h]) => [k, lift
 // scripts/test-truck-cost-amounts.js). Everything else they reach is stubbed in
 // mountTrucks().
 const FUNCTIONS = [
-	"storedFileForServing", "truckPhotoForStorage",
+	"storedFileForServing", "storedFileETag", "ifNoneMatchIncludes", "truckPhotoForStorage",
 	"parseDriverPayDaily", "parseInServiceDate", "parseRetiredAt", "parseAdminFeePct", "truckMonthlyFixed", "normalizeDriverName",
 	"parseTruckAmount", "parseTruckAmounts",
 ];
@@ -139,14 +152,16 @@ const CONSTS = [
 ].join("\n");
 
 // `Buffer` is handed in so the runner can count what the lifted code decodes.
+// `crypto` is handed in because the global of that name is Web Crypto, which
+// has no createHash().
 let decodes = 0;
 const CountingBuffer = Object.assign(Object.create(Buffer), {
 	from: (...args) => { if (args[1] === "base64") decodes++; return Buffer.from(...args); },
 });
 function buildModule() {
-	return new Function("imageLimits", "todayKeyCT", "Buffer",
+	return new Function("imageLimits", "todayKeyCT", "Buffer", "crypto",
 		`"use strict";\n${CONSTS}\n${FUNCTIONS.map((n) => FN_SRC[n]).join("\n")}\nreturn { ${FUNCTIONS.join(", ")}, TRUCK_AMOUNT_FIELDS };`
-	)(imageLimits, () => "2026-09-26", CountingBuffer);
+	)(imageLimits, () => "2026-09-26", CountingBuffer, crypto);
 }
 const M = buildModule();
 
@@ -178,7 +193,7 @@ function mountRoute(routeSrc, env) {
 			setHeader(k, v) { out.headers[String(k).toLowerCase()] = v; },
 			end(b) { out.body = b; return this; },
 		};
-		await handler({ params: {}, query: {}, body: {}, sessionID: "t-sid", ...req }, res);
+		await handler({ params: {}, query: {}, body: {}, headers: {}, sessionID: "t-sid", ...req }, res);
 		return out;
 	});
 }
@@ -311,18 +326,85 @@ function servingSection() {
 async function getSections() {
 	section("§2 GET /api/driver/me/truck-photo");
 	const db = makeDb();
-	const getPhoto = mountRoute(ROUTES.truckPhoto, { db, storedFileForServing: M.storedFileForServing });
-	const photoAs = (user, stored) => {
+	const photoEnv = (d) => ({ db: d, storedFileForServing: M.storedFileForServing, storedFileETag: M.storedFileETag, ifNoneMatchIncludes: M.ifNoneMatchIncludes });
+	const getPhoto = mountRoute(ROUTES.truckPhoto, photoEnv(db));
+	const photoAs = (user, stored, headers = {}) => {
 		db.prepare("UPDATE trucks SET photo = ? WHERE id = 1").run(stored);
-		return getPhoto({ session: { user } });
+		return getPhoto({ session: { user }, headers });
 	};
+	// The ETag scheme, worked out here rather than through the shipped helper:
+	// the quoted first 32 hex digits of the stored value's SHA-256.
+	const etagOf = (stored) => `"${crypto.createHash("sha256").update(stored).digest("hex").slice(0, 32)}"`;
 	{
 		const out = await photoAs(DRIVER, uri("image/jpeg", JPEG));
 		ok(out.status === 200 && out.headers["content-type"] === "image/jpeg" && JPEG.equals(bytesOf(out) || Buffer.alloc(0)),
 			`§2 a JPEG: 200 image/jpeg with the exact bytes (got ${out.status} ${out.headers["content-type"]})`);
-		ok(out.headers["x-content-type-options"] === "nosniff" && out.headers["cache-control"] === "private, max-age=3600",
-			`§2 ...with nosniff and the private cache header (got ${JSON.stringify(out.headers)})`);
+		eq([out.headers["cache-control"], out.headers["x-content-type-options"]], ["private, no-cache", "nosniff"],
+			"§2 ...revalidated with the server on every use (private, no-cache), with nosniff");
+		eq(out.headers.etag ?? null, etagOf(uri("image/jpeg", JPEG)), "§2 ...and an ETag: the quoted first 32 hex digits of the stored value's SHA-256");
 		eq(out.headers["content-disposition"] ?? null, null, "§2 ...and inline: no Content-Disposition");
+	}
+	{
+		// Revalidation: the browser keeps the photo with its ETag and asks again on
+		// every use; the route answers 304 while the stored photo is the one that
+		// ETag names.
+		const JPEG_URI = uri("image/jpeg", JPEG), PNG_URI = uri("image/png", PNG);
+		const E1 = etagOf(JPEG_URI), E2 = etagOf(PNG_URI);
+		ok(E1 !== E2, "§2 (fixture) two stored photos, two ETags");
+		const hit = await photoAs(DRIVER, JPEG_URI, { "if-none-match": E1 });
+		eq({ status: hit.status, body: hit.body ?? null, etag: hit.headers.etag ?? null, cache: hit.headers["cache-control"] ?? null, type: hit.headers["content-type"] ?? null },
+			{ status: 304, body: null, etag: E1, cache: "private, no-cache", type: null },
+			"§2 If-None-Match naming the stored photo's ETag: 304 with no body, its ETag and Cache-Control, no Content-Type");
+		for (const [label, header] of [
+			["that ETag weakened (W/)", `W/${E1}`],
+			["that ETag in a list", `"0000" , ${E1},W/"1111"`],
+			['"*"', "*"],
+		]) {
+			const out = await photoAs(DRIVER, JPEG_URI, { "if-none-match": header });
+			eq([out.status, out.body ?? null], [304, null], `§2 If-None-Match ${label}: 304 with no body`);
+		}
+		for (const [label, header] of [
+			["another photo's ETag", E2],
+			["that ETag unquoted", E1.slice(1, -1)],
+			["a prefix of that ETag", `${E1.slice(0, 17)}"`],
+			["blank", ""],
+			["a comma alone", ","],
+		]) {
+			const out = await photoAs(DRIVER, JPEG_URI, { "if-none-match": header });
+			ok(out.status === 200 && JPEG.equals(bytesOf(out) || Buffer.alloc(0)) && out.headers.etag === E1,
+				`§2 If-None-Match ${label}: 200 with the bytes and the stored photo's ETag (got ${out.status})`);
+		}
+		// The stored photo changes: the ETag the browser holds no longer names it.
+		const changed = await photoAs(DRIVER, PNG_URI, { "if-none-match": E1 });
+		ok(changed.status === 200 && changed.headers["content-type"] === "image/png" && PNG.equals(bytesOf(changed) || Buffer.alloc(0)),
+			`§2 a different stored photo, asked with the old ETag: 200 with the new bytes (got ${changed.status} ${changed.headers["content-type"]})`);
+		eq([changed.headers.etag ?? null, changed.headers["cache-control"] ?? null], [E2, "private, no-cache"],
+			"§2 ...under the new photo's ETag, revalidated on every use");
+		eq((await photoAs(DRIVER, PNG_URI, { "if-none-match": E2 })).status, 304, "§2 ...and that new ETag is answered 304");
+		// Nothing servable is never a 304, whatever If-None-Match names.
+		const HTML_URI = uri("image/jpeg", HTML);
+		for (const [label, header] of [["the stored value's own hash", etagOf(HTML_URI)], ['"*"', "*"]]) {
+			eq(shape(await photoAs(DRIVER, HTML_URI, { "if-none-match": header })), NOT_FOUND,
+				`§2 a stored value that is not an image, If-None-Match ${label}: 404, not 304`);
+		}
+		eq(shape(await getPhoto({ session: { user: { ...DRIVER, driverName: "Rodney Brown" } }, headers: { "if-none-match": "*" } })), NOT_FOUND,
+			'§2 a driver on no truck, If-None-Match "*": 404, not 304');
+	}
+	{
+		// Each request is answered for the session that sends it: another driver,
+		// whose truck has a different photo, sending the first photo's ETag is sent
+		// their own photo in full.
+		const db2 = makeDb();
+		db2.prepare("UPDATE trucks SET photo = ? WHERE id = 1").run(uri("image/jpeg", JPEG));
+		db2.prepare("UPDATE trucks SET assigned_driver = 'Marcus Hale', photo = ? WHERE id = 3").run(uri("image/png", PNG));
+		const get2 = mountRoute(ROUTES.truckPhoto, photoEnv(db2));
+		const E1 = etagOf(uri("image/jpeg", JPEG));
+		const mine = await get2({ session: { user: DRIVER }, headers: { "if-none-match": E1 } });
+		eq(mine.status, 304, "§2 (control) the first driver, sending their photo's ETag: 304");
+		const other = await get2({ session: { user: { id: 4, username: "mhale", role: "Driver", driverName: "Marcus Hale" } }, headers: { "if-none-match": E1 } });
+		ok(other.status === 200 && other.headers["content-type"] === "image/png" && PNG.equals(bytesOf(other) || Buffer.alloc(0)) &&
+			other.headers.etag === etagOf(uri("image/png", PNG)),
+			`§2 another driver, whose truck has a different photo, sending that ETag: 200 with their own photo under its own ETag (got ${other.status})`);
 	}
 	{
 		const out = await photoAs(DRIVER, uri("image/jpeg", PNG));
@@ -353,6 +435,24 @@ async function getSections() {
 		db.prepare("UPDATE trucks SET photo = ? WHERE id = 1").run(uri("image/jpeg", JPEG));
 		const out = await getPhoto({ session: { user } });
 		eq([out.status, out.body], [403, { error: "Forbidden" }], `§2 a ${user.role}: 403, as before`);
+		const conditional = await getPhoto({ session: { user }, headers: { "if-none-match": etagOf(uri("image/jpeg", JPEG)) } });
+		eq([conditional.status, conditional.body], [403, { error: "Forbidden" }], `§2 a ${user.role} sending the photo's ETag: still 403, not 304`);
+	}
+	// ifNoneMatchIncludes() on its own, against the tag "abc".
+	for (const [label, header, want] of [
+		["absent", undefined, false],
+		["blank", "", false],
+		["not text", ['"abc"'], false],
+		["the tag", '"abc"', true],
+		["the tag weakened", 'W/"abc"', true],
+		["the tag in a spaced list", ' "x" ,  W/"abc" ', true],
+		['"*"', "*", true],
+		['"*" with spaces', " * ", true],
+		["another tag", '"abd"', false],
+		["the tag unquoted", "abc", false],
+		["a lowercase w/ (not the weak prefix)", 'w/"abc"', false],
+	]) {
+		eq(M.ifNoneMatchIncludes(header, '"abc"'), want, `§2 ifNoneMatchIncludes(${label}): ${want}`);
 	}
 
 	section("§3 GET /api/driver/me/identity-file/:fileType");
@@ -365,8 +465,8 @@ async function getSections() {
 		const out = await fileAs(DRIVER, "cdl-front", "cdl_front", uri("application/pdf", PDF));
 		ok(out.status === 200 && out.headers["content-type"] === "application/pdf" && PDF.equals(bytesOf(out) || Buffer.alloc(0)),
 			`§3 a PDF: 200 application/pdf with the exact bytes (got ${out.status} ${out.headers["content-type"]})`);
-		ok(out.headers["x-content-type-options"] === "nosniff" && out.headers["cache-control"] === "private, max-age=3600",
-			`§3 ...with nosniff and the private cache header (got ${JSON.stringify(out.headers)})`);
+		eq([out.headers["cache-control"] ?? null, out.headers["x-content-type-options"] ?? null], ["private, no-store", "nosniff"],
+			"§3 ...not kept by the browser (private, no-store), with nosniff");
 		eq(out.headers["content-disposition"] ?? null, 'attachment; filename="CDL-Front.pdf"', "§3 ...as a download named CDL-Front.pdf, the Driver Kit's own name");
 	}
 	// The Driver Kit's <a download> names (DriverKit.vue: the label, spaces as
@@ -380,10 +480,31 @@ async function getSections() {
 			`§3 a PDF stored as ${fileType} (under an image label): a download named ${name}`);
 	}
 	{
+		// ...and the same names read from DriverKit.vue itself: its add('<label>',
+		// app.<column>_type, '<fileType>') calls and its downloadName rule, held
+		// against what the shipped route sends for each fileType. A label, the
+		// rule or the server's map changed alone fails here.
+		const KIT = fs.readFileSync(path.join(__dirname, "..", "client", "src", "components", "driver", "DriverKit.vue"), "utf8");
+		const RULE = "downloadName: `${label.replace(/\\s+/g, '-')}.${type === 'pdf' ? 'pdf' : 'jpg'}`,";
+		ok(KIT.includes(RULE), "§3 DriverKit.vue names a PDF download by its label with each whitespace run as a hyphen, plus .pdf (its downloadName rule, verbatim)");
+		const kitFiles = [...KIT.matchAll(/\badd\('([^'\n]{1,40})', app\.[a-z_]{1,40}_type, '([a-z-]{1,40})'\)/g)].map((m) => ({ label: m[1], fileType: m[2] }));
+		eq(kitFiles.map((f) => f.fileType).sort(), ["cdl-back", "cdl-front", "medical-card"], "§3 DriverKit.vue lists the three identity files, one add() each");
+		const stored = uri("application/pdf", PDF);
+		db.prepare("UPDATE job_applications SET cdl_front = ?, cdl_back = ?, medical_card = ? WHERE id = 7").run(stored, stored, stored);
+		for (const { label, fileType } of kitFiles) {
+			const kitName = `${label.replace(/\s+/g, "-")}.pdf`;
+			const out = await getFile({ session: { user: DRIVER }, params: { fileType } });
+			eq(out.headers["content-disposition"] ?? null, `attachment; filename="${kitName}"`,
+				`§3 ${fileType}: the route's download name is the Driver Kit's for ${JSON.stringify(label)}, ${kitName}`);
+		}
+	}
+	{
 		const out = await fileAs(DRIVER, "cdl-back", "cdl_back", uri("image/jpeg", JPEG));
 		ok(out.status === 200 && out.headers["content-type"] === "image/jpeg" && JPEG.equals(bytesOf(out) || Buffer.alloc(0)),
 			`§3 a JPEG: 200 image/jpeg with the exact bytes (got ${out.status} ${out.headers["content-type"]})`);
 		eq(out.headers["content-disposition"] ?? null, null, "§3 ...inline: no Content-Disposition (the Driver Kit shows it as a background)");
+		eq([out.headers["cache-control"] ?? null, out.headers["x-content-type-options"] ?? null], ["private, no-store", "nosniff"],
+			"§3 ...and an image is not kept by the browser either (private, no-store), with nosniff");
 	}
 	{
 		const out = await fileAs(DRIVER, "medical-card", "medical_card", uri("application/pdf", JPEG));
@@ -672,6 +793,14 @@ function sourcePins() {
 	for (const name of ["storedFileForServing", "truckPhotoForStorage"]) {
 		const body = code(FN_SRC[name]);
 		ok(!/\.(test|exec|match|matchAll|replace|split|search)\(|new RegExp|\/\^/.test(body), `§7 ${name}() runs no pattern over the value`);
+	}
+	{
+		// One split(), on a literal comma. A pattern literal would need a slash
+		// outside the "W/" strings.
+		const body = code(FN_SRC.ifNoneMatchIncludes);
+		ok(!/RegExp|\.(test|exec|match|matchAll|replace|search)\(/.test(body) && !body.split('"W/"').join("").includes("/") &&
+			(body.match(/\.split\(/g) || []).length === 1 && body.includes('header.split(",")'),
+			"§7 ifNoneMatchIncludes() runs no pattern over If-None-Match: one split() on a literal comma");
 	}
 	const sff = code(FN_SRC.storedFileForServing);
 	ok(sff.includes('const comma = dataUri.indexOf(",");') && sff.includes('.endsWith(";base64")') && sff.includes("imageLimits.servedType(body, { pdf })"),

@@ -8,8 +8,9 @@
  * parser, parseTruckAmount(), and one table, TRUCK_AMOUNT_FIELDS. A sent amount
  * is a finite number from 0 to the row's ceiling — 500 for the fuel tank, 20
  * for the average MPG, TRUCK_AMOUNT_MAX (1,000,000) for the rest — or blank
- * (null, "" or whitespace), which is 0. The admin fee, parseAdminFeePct(), is a
- * number from 0 to ADMIN_FEE_PCT_MAX (100), and blank is its 50. Anything else
+ * (null, "" or whitespace), which is 0. The admin fee, parseAdminFeePct(), is
+ * read through the same parser: a number from 0 to ADMIN_FEE_PCT_MAX (100),
+ * and blank is its 50. Anything else
  * refuses the whole request with 400 INVALID_AMOUNT, naming the column in
  * `field`, before the month-end lock is asked and before anything is written.
  * An Investor's add never stores the five fixed costs, the fuel pair or the
@@ -38,7 +39,8 @@
  *      ceiling at its edge under every key, and labels in the month-end lock's
  *      own wording.
  *   §1b parseAdminFeePct() — not sent, blank as 50, 0..100 inclusive, and every
- *      refused shape with its exact text.
+ *      refused shape with its exact text; a pin that it reads through
+ *      parseTruckAmount() with no number rule of its own.
  *   §2 PUT refusals — "Infinity", "-Infinity", 1e999 (a JSON number that parses
  *      to Infinity), "abc", -5, 500.01 gallons, 20.01 MPG and more, one on each
  *      of the nine fields, and the admin fee's own, each beside a driver
@@ -49,7 +51,8 @@
  *      ones; one update_truck_costs line per save that changes a cost, in the
  *      exact format, with the fixed-cost total only when a fixed cost moved;
  *      none for a resend, a notes-only save, a field left out, or a stored NULL
- *      admin fee resent as its 50; the fuel tank on its own line; each ceiling
+ *      admin fee resent as its 50; a stored fee outside 0..100 (150) named as
+ *      stored when edited; the fuel tank on its own line; each ceiling
  *      (500 gal, 20 MPG, a 100% fee) stored.
  *   §4 POST — a Super Admin's or a Dispatcher's unreadable fixed cost, fuel
  *      value or admin fee refused with nothing inserted; an Investor's fixed
@@ -496,6 +499,12 @@ function parserSection() {
 		const r = fee(raw);
 		ok(r.error === "Admin fee must be a number between 0 and 100" && r.value === undefined, `§1b ${label} → { error } (got ${JSON.stringify(r)})`);
 	}
+	// One copy of the rule: the fee is read BY parseTruckAmount(), and keeps
+	// only its own blank.
+	const feeBody = liftFunction("parseAdminFeePct").split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+	ok(feeBody.includes('return parseTruckAmount(raw, "Admin fee", ADMIN_FEE_PCT_MAX);') && feeBody.includes("return { value: 50 };") &&
+		!/Number\(|isFinite|parseFloat|between 0 and/.test(feeBody),
+		"§1b parseAdminFeePct() reads through parseTruckAmount() (its blank as 50), with no number rule of its own");
 }
 
 // ═══════════════════════════════════════════════════════════════ §2
@@ -618,6 +627,17 @@ async function putSuccessSection() {
 		const c = await app.put(SUPER, 2, truckFormBody(truckRow(db, 2), { adminFeePct: 45 }));
 		ok(c.status === 200 && JSON.stringify(costLines(db)) === JSON.stringify(["Costs for Logisx-#91: admin fee 50% → 45%"]),
 			`§3 a stored NULL admin fee changed to 45: named from 50 (got ${JSON.stringify(costLines(db))})`);
+	}
+	{
+		// A stored fee the range refuses (saved before the range existed) is named
+		// as stored: 150, edited to 40.
+		const db = makeDb();
+		db.prepare("UPDATE trucks SET admin_fee_pct = 150 WHERE id = 1").run();
+		const app = mountAll(db);
+		const r = await app.put(SUPER, 1, truckFormBody(truckRow(db, 1), { adminFeePct: 40 }));
+		ok(r.status === 200 && truckRow(db, 1).admin_fee_pct === 40 &&
+			JSON.stringify(costLines(db)) === JSON.stringify(["Costs for LogisX-#33: admin fee 150% → 40%"]),
+			`§3 a stored admin fee outside 0–100 (150) edited to 40: stored, and named from 150 as stored (got ${r.status} ${JSON.stringify(r.body)}, ${JSON.stringify(costLines(db))})`);
 	}
 	{
 		// The fuel tank keeps its own line; it is not a cost.
