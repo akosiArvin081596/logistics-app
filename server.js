@@ -5281,10 +5281,10 @@ function assignDriverToTruck(truckId, driverName) {
 	const now = new Date().toISOString();
 	const nameLower = driverName.trim().toLowerCase();
 	// A driver holds one truck, whichever way their old rows spell them: the
-	// active assignment rows and the other truck naming them through a spacing
-	// variant of the name (normalizeDriverName(), as findTruckForDriver() finds
-	// the truck) are released with the case-aside ones. Only while no other
-	// account holds the name under another spelling
+	// active assignment rows, the other truck and the open carrier pairing naming
+	// them through a spacing variant of the name (normalizeDriverName(), as
+	// findTruckForDriver() finds the truck) are released with the case-aside
+	// ones. Only while no other account holds the name under another spelling
 	// (driverNameHeldByOtherSpelling(), the rule the money stamps use): such a
 	// row may be that account's, and it is not this assignment's to release.
 	const needle = normalizeDriverName(driverName);
@@ -5322,15 +5322,30 @@ function assignDriverToTruck(truckId, driverName) {
 			const owner = db.prepare("SELECT company_name FROM users WHERE id = ?").get(truckRow.owner_id);
 			const carrierName = owner && owner.company_name ? owner.company_name.trim() : "";
 			if (carrierName) {
-				const current = db.prepare(
-					"SELECT id, carrier_name FROM carrier_driver_history WHERE LOWER(driver_name) = ? AND ended_at IS NULL"
-				).get(nameLower);
-				if (!current) {
-					db.prepare(
-						"INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at) VALUES (?, ?, ?)"
-					).run(carrierName, driverName.trim(), now);
-				} else if (current.carrier_name.toLowerCase() !== carrierName.toLowerCase()) {
-					db.prepare("UPDATE carrier_driver_history SET ended_at = ? WHERE id = ?").run(now, current.id);
+				// The driver's open pairings, found the way the assignment and truck
+				// rows above are: the rows naming the driver case aside, and, under the
+				// same guard (releaseSpacingVariants), the rows naming them through a
+				// spacing variant. Each open under another carrier is closed, and a row
+				// is opened only when none is open under this carrier already. A
+				// pairing left open keeps the driver in the old carrier's
+				// getInvestorDriverSet() leg 3 with no end to its month window.
+				const carrierLower = carrierName.toLowerCase();
+				const openPairings = db.prepare(
+					"SELECT id, carrier_name FROM carrier_driver_history WHERE LOWER(driver_name) = ? AND ended_at IS NULL ORDER BY id"
+				).all(nameLower);
+				if (releaseSpacingVariants) {
+					const found = new Set(openPairings.map((r) => r.id));
+					for (const r of db.prepare("SELECT id, carrier_name, driver_name FROM carrier_driver_history WHERE ended_at IS NULL AND COALESCE(driver_name, '') <> '' ORDER BY id").all()) {
+						if (!found.has(r.id) && normalizeDriverName(r.driver_name) === needle) openPairings.push(r);
+					}
+				}
+				const closePairing = db.prepare("UPDATE carrier_driver_history SET ended_at = ? WHERE id = ?");
+				let openUnderCarrier = false;
+				for (const r of openPairings) {
+					if (String(r.carrier_name || "").toLowerCase() === carrierLower) openUnderCarrier = true;
+					else closePairing.run(now, r.id);
+				}
+				if (!openUnderCarrier) {
 					db.prepare(
 						"INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at) VALUES (?, ?, ?)"
 					).run(carrierName, driverName.trim(), now);
