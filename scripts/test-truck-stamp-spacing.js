@@ -16,8 +16,9 @@
  * match counts only while no other account holds the name under another
  * spelling (driverNameHeldByOtherSpelling()); otherwise that step is no match,
  * as before. assignDriverToTruck() releases the driver's other truck and
- * assignment rows the same way, and the public tracker shows the unit the same
- * lookup finds.
+ * assignment rows the same way, closes their open carrier pairing
+ * (carrier_driver_history, getInvestorDriverSet() leg 3) the same way when the
+ * carrier changes, and the public tracker shows the unit the same lookup finds.
  *
  *   §1 the helpers on their own: findTruckForDriver()'s added fields,
  *      findActiveAssignmentTruckForDriver(), driverNameHeldByOtherSpelling()
@@ -26,10 +27,13 @@
  *   §3 POST /api/dispatch and /api/dispatch/reassign, lifted whole, against a
  *      real database and a fake sheet: the Truck and Owner ID cells written.
  *   §4 assignDriverToTruck(): the spacing-variant truck and assignment released.
+ *   §4b assignDriverToTruck(): the open carrier pairing stored under a spacing
+ *      variant closed when the carrier changes, under the same guard.
  *   §5 the wiring: each stamp and the tracker ask the helper, with no
  *      case-only lookup of their own.
- *   §6 the mutants: each stamp back to case-only, the guard removed, and the
- *      guard's own-spelling exception dropped.
+ *   §6 the mutants: each stamp back to case-only, the guard removed, the
+ *      guard's own-spelling exception dropped, and the open-pairing lookup back
+ *      to case-only.
  *
  *   node scripts/test-truck-stamp-spacing.js     # exits 1 on any failure
  */
@@ -158,16 +162,22 @@ const DDL = [
 	"CREATE TABLE load_responses (load_id TEXT, driver_name TEXT)",
 ];
 // accounts: [id, driver_name]; trucks: [id, unit, assigned_driver, owner_id, vehicle];
-// assignments: [truck_id, driver_name, start_date]
-function makeDb({ accounts = [], trucks = [], assignments = [] } = {}) {
+// assignments: [truck_id, driver_name, start_date]; investors: [id, company_name]
+// (a truck owner's company is its carrier); pairings: carrier_driver_history
+// rows as [carrier_name, driver_name, ended_at], open when ended_at is null.
+function makeDb({ accounts = [], trucks = [], assignments = [], investors = [], pairings = [] } = {}) {
 	const db = new Database(":memory:");
 	for (const sql of DDL) db.exec(sql);
 	const u = db.prepare("INSERT INTO users (id, username, role, driver_name) VALUES (?, ?, 'Driver', ?)");
 	for (const [id, name] of accounts) u.run(id, `LogisX-${1000 + id}`, name);
+	const inv = db.prepare("INSERT INTO users (id, username, role, company_name) VALUES (?, ?, 'Investor', ?)");
+	for (const [id, company] of investors) inv.run(id, `carrier${id}`, company);
 	const t = db.prepare("INSERT INTO trucks (id, unit_number, assigned_driver, owner_id, routemate_vehicle_id) VALUES (?, ?, ?, ?, ?)");
 	for (const [id, unit, driver, owner = 0, vehicle = ""] of trucks) t.run(id, unit, driver, owner, vehicle);
 	const a = db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (?, ?, ?)");
 	for (const [truckId, name, start] of assignments) a.run(truckId, name, start);
+	const p = db.prepare("INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at, ended_at) VALUES (?, ?, '2026-05-01T12:00:00.000Z', ?)");
+	for (const [carrier, name, ended = null] of pairings) p.run(carrier, name, ended);
 	return db;
 }
 const SK = [2, "Shorn King"];
@@ -464,6 +474,57 @@ function assignSection(helperOver = {}) {
 	return results;
 }
 
+// ─────────────────────────────────────────────────────────────── §4b the carrier pairing
+// assignDriverToTruck() mirrors the driver's carrier, the company of the truck's
+// owner, into carrier_driver_history: one open pairing per driver, which
+// getInvestorDriverSet() leg 3 reads. Truck 3 is empty and Carrier Seven's.
+function pairingSection(helperOver = {}) {
+	const { results, t: check4b } = collector();
+	const t = (name, actual, expected) => check4b(`assignDriverToTruck(), the carrier pairing: ${name}`, actual, expected);
+	const INVESTORS = [[5, "Carrier Five LLC"], [7, "Carrier Seven LLC"]];
+	const EARLIER = "2026-06-01T00:00:00.000Z";
+	const T3 = [3, "300", "", 7, ""];
+	// Each row as carrier|driver|state, in id order; "closed" means closed by
+	// this assignment.
+	const after = (world, name) => {
+		const db = makeDb({ investors: INVESTORS, trucks: [T101, T3], ...world });
+		buildHelpers(db, helperOver).assignDriverToTruck(3, name);
+		return db.prepare("SELECT carrier_name, driver_name, ended_at FROM carrier_driver_history ORDER BY id").all()
+			.map((r) => `${r.carrier_name}|${r.driver_name}|${r.ended_at == null ? "open" : r.ended_at === EARLIER ? "closed earlier" : "closed"}`);
+	};
+	t("the driver's open pairing stored with a doubled space, a truck of another carrier: that pairing closed, one open under the new carrier",
+		after({ accounts: [SK], pairings: [["Carrier Five LLC", "Shorn  King"]] }, "Shorn King"),
+		["Carrier Five LLC|Shorn  King|closed", "Carrier Seven LLC|Shorn King|open"]);
+	t("...one stored with edge spaces: closed too",
+		after({ accounts: [SK], pairings: [["Carrier Five LLC", " shorn king "]] }, "Shorn King"),
+		["Carrier Five LLC| shorn king |closed", "Carrier Seven LLC|Shorn King|open"]);
+	t("...a directory-only driver (no account): the same",
+		after({ pairings: [["Carrier Five LLC", "Shorn  King"]] }, "Shorn King"),
+		["Carrier Five LLC|Shorn  King|closed", "Carrier Seven LLC|Shorn King|open"]);
+	t("the spacing-variant pairing already under this carrier: left open, no second row",
+		after({ accounts: [SK], pairings: [["Carrier Seven LLC", "Shorn  King"]] }, "Shorn King"),
+		["Carrier Seven LLC|Shorn  King|open"]);
+	t("two open pairings the old lookup left (a variant under Carrier Five, the name under Carrier Seven): the variant closed, the other kept, no new row",
+		after({ accounts: [SK], pairings: [["Carrier Five LLC", "Shorn  King"], ["Carrier Seven LLC", "Shorn King"]] }, "Shorn King"),
+		["Carrier Five LLC|Shorn  King|closed", "Carrier Seven LLC|Shorn King|open"]);
+	t("a case-aside pairing under another carrier: closed and replaced, as before",
+		after({ accounts: [SK], pairings: [["Carrier Five LLC", "SHORN KING"]] }, "Shorn King"),
+		["Carrier Five LLC|SHORN KING|closed", "Carrier Seven LLC|Shorn King|open"]);
+	t("a pairing closed earlier is left as it was",
+		after({ accounts: [SK], pairings: [["Carrier Five LLC", "Shorn  King", EARLIER]] }, "Shorn King"),
+		["Carrier Five LLC|Shorn  King|closed earlier", "Carrier Seven LLC|Shorn King|open"]);
+	t("another account holds the name in another spacing: its pairing is left open, as before",
+		after({ accounts: [SK, SK_OTHER], pairings: [["Carrier Five LLC", "Shorn   King"]] }, "Shorn King"),
+		["Carrier Five LLC|Shorn   King|open", "Carrier Seven LLC|Shorn King|open"]);
+	t("...while a case-aside pairing is still closed",
+		after({ accounts: [SK, SK_OTHER], pairings: [["Carrier Five LLC", "shorn king"]] }, "Shorn King"),
+		["Carrier Five LLC|shorn king|closed", "Carrier Seven LLC|Shorn King|open"]);
+	t("Deshorn King's pairing is never Shorn King's to close",
+		after({ accounts: [SK, DK], pairings: [["Carrier Five LLC", "Deshorn King"]] }, "Shorn King"),
+		["Carrier Five LLC|Deshorn King|open", "Carrier Seven LLC|Shorn King|open"]);
+	return results;
+}
+
 // ─────────────────────────────────────────────────────────────── §5 wiring
 function wiringSection(routes = ROUTES) {
 	const { results, t } = collector();
@@ -490,6 +551,8 @@ function wiringSection(routes = ROUTES) {
 	record(await dispatchSection());
 	section("§4 assignDriverToTruck()");
 	record(assignSection());
+	section("§4b assignDriverToTruck(): the carrier pairing");
+	record(pairingSection());
 	section("§5 the wiring");
 	record(wiringSection());
 
@@ -519,15 +582,24 @@ function wiringSection(routes = ROUTES) {
 		["M6 the guard's own-spelling exception dropped (the driver's own account read as another)",
 			async () => {
 				const over = { driverNameHeldByOtherSpelling: mutate(HELPER_SRC.driverNameHeldByOtherSpelling, "driverNameHeldByOtherAccount(trimmed, ownIds)", "driverNameHeldByOtherAccount(trimmed, [])") };
-				return [...helperSection(over), ...(await expenseSection(ROUTES.expense, over)), ...(await dispatchSection(undefined, over)), ...assignSection(over)];
+				return [...helperSection(over), ...(await expenseSection(ROUTES.expense, over)), ...(await dispatchSection(undefined, over)), ...assignSection(over), ...pairingSection(over)];
 			}],
 		["M7 assignDriverToTruck()'s guard removed",
-			async () => assignSection({ assignDriverToTruck: mutate(HELPER_SRC.assignDriverToTruck, ASSIGN_GUARD, 'const releaseSpacingVariants = needle !== "";') })],
+			async () => {
+				const over = { assignDriverToTruck: mutate(HELPER_SRC.assignDriverToTruck, ASSIGN_GUARD, 'const releaseSpacingVariants = needle !== "";') };
+				return [...assignSection(over), ...pairingSection(over)];
+			}],
 		["M8 assignDriverToTruck()'s release back to case-only",
-			async () => assignSection({ assignDriverToTruck: mutate(HELPER_SRC.assignDriverToTruck, ASSIGN_GUARD, "const releaseSpacingVariants = false;") })],
+			async () => {
+				const over = { assignDriverToTruck: mutate(HELPER_SRC.assignDriverToTruck, ASSIGN_GUARD, "const releaseSpacingVariants = false;") };
+				return [...assignSection(over), ...pairingSection(over)];
+			}],
 		["M9 the public tracker back to its own case-only lookup",
 			async () => wiringSection({ ...ROUTES, track: mutate(ROUTES.track, "findTruckForDriverStamp(driverNameRaw)",
 				'db.prepare("SELECT unit_number FROM trucks WHERE LOWER(assigned_driver) = LOWER(?) LIMIT 1").get(driverNameRaw)') })],
+		["M10 assignDriverToTruck()'s open-pairing lookup back to case-only (the truck and assignment release kept)",
+			async () => pairingSection({ assignDriverToTruck: mutate(HELPER_SRC.assignDriverToTruck,
+				"if (!found.has(r.id) && normalizeDriverName(r.driver_name) === needle) openPairings.push(r);", "void r;") })],
 	];
 	for (const [label, run] of mutants) {
 		let caught;

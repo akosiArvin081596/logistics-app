@@ -13,6 +13,14 @@
 // cell whose value as it will be written differs from the value as read
 // (sheetRowCellWrites()), and nothing at all when no cell differs.
 //
+// THE BASELINE. That still wrote a cell the user never touched when the sheet
+// had changed under the editor's view, which can be ~60 s old: the stale copy
+// differs from the row as read. So the Active Loads editor now also sends
+// `baseline`, the row as its modal opened it, and PUT /api/data/:rowIndex sets
+// every cell sent equal to its baseline back to the row as read
+// (restoreUntouchedCells()) before any guard judges the row. A save without a
+// baseline, or with a malformed one, is judged as before.
+//
 // WHAT RUNS. Both routes are lifted whole out of server.js and run against a
 // fake sheet that behaves as the real one does where it matters here: it stores
 // a formula and serves the value it displays, stores text entered with a leading
@@ -20,11 +28,17 @@
 // value starting with "=" becomes a formula). The broker restore, the formula
 // refusal, the row diff, the column letters, the cell writes and the audit
 // builder are the shipped code. The period guard, the Owner ID check and the
-// tab resolver are stubbed; their own runners cover them.
+// tab resolver are stubbed (the stubs record what they were asked to judge);
+// their own runners cover them.
 //   §1 PUT /api/data/:rowIndex
+//   §1b PUT /api/data/:rowIndex with a baseline, on a sheet that moved under
+//      the view: untouched cells are not written; with no baseline or a
+//      malformed one, the save is judged as before
 //   §2 PUT /api/load/:loadId
-//   §3 sheetRowCellWrites() on its own, and where each route calls it
-//   §4 MUTANT: back to a whole-row write. It must fail checks in §1 and in §2.
+//   §3 sheetRowCellWrites() and restoreUntouchedCells() on their own, where
+//      each route calls them, and the Active Loads editor sending its baseline
+//   §4 MUTANTS: back to a whole-row write (it must fail checks in §1 and in
+//      §2); the baseline ignored (it must fail checks in §1b).
 //
 // No network, no database, no sheet.
 //   node scripts/test-row-save-cell-writes.js     # exits 1 on any failure
@@ -95,6 +109,8 @@ function mutate(src, from, to) {
 	if (n !== 1) throw new Error(`mutant target found ${n}x (expected 1): ${from.slice(0, 70)}`);
 	return src.replace(from, () => to);
 }
+// Source without its whole-line comments, so a wiring check reads code only.
+const decomment = (s) => s.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
 
 const reMatch = SRC.match(/const BROKER_WITHHELD_RE = (\/.*\/[a-z]*);/);
 if (!reMatch) throw new Error("BROKER_WITHHELD_RE not found in server.js");
@@ -106,7 +122,7 @@ const CONSTS = [
 ].join("\n");
 const HELPERS = [
 	"resolveBrokerWithheldColumns", "sanitizeBrokerColumns", "restoreWithheldBrokerCells", "formulaCellRefusal",
-	"sheetRowAfterUpdate", "a1SheetPrefix", "a1ColumnLetter", "sheetRowCellWrites",
+	"sheetRowAfterUpdate", "a1SheetPrefix", "a1ColumnLetter", "sheetRowCellWrites", "restoreUntouchedCells",
 	"guardedColumnReason", "changedGuardedCells", "scrubPurgeMarker", "capAuditField", "buildSheetUpdateAudit",
 ];
 const HELPER_SRC = Object.fromEntries(HELPERS.map((n) => [n, extract(n)]));
@@ -139,11 +155,13 @@ const HEADERS = [
 const IDX = Object.fromEntries(HEADERS.map((h, i) => [h.trim(), i]));
 const WITHHELD = ["Broker Contact Name", "Phone Number", "Email"];
 const PAYMENT_F = "=1500+300";
+// The payment formula after an input to it changed: it shows another value.
+const PAYMENT_F2 = "=1500+400";
 const DOCS_F = '=HYPERLINK("https://example.invalid/pod/111.pdf","POD")';
 const OUTPUT_F = "=ROUND(1800/950,2)";
 const TEXT_EQ = "'=starts with an equals sign";
 // What the sheet displays for each formula the fixture stores.
-const SHOWS = { [PAYMENT_F]: "$1,800.00", [DOCS_F]: "POD", [OUTPUT_F]: "1.89" };
+const SHOWS = { [PAYMENT_F]: "$1,800.00", [PAYMENT_F2]: "$1,900.00", [DOCS_F]: "POD", [OUTPUT_F]: "1.89" };
 function storedRow(over = {}) {
 	const r = new Array(HEADERS.length).fill("");
 	Object.assign(r, {
@@ -158,6 +176,17 @@ function storedRow(over = {}) {
 	return r;
 }
 const STORED = () => [HEADERS.slice(), storedRow(), storedRow({ "Load ID": "222", Details: "Dry van", "Location Link": "" })];
+// The same load after the sheet moved under the editor's view: another user
+// re-weighed it and marked it Completed, an input to the payment formula
+// changed (so it shows another value), the "=…" text was replaced by a link,
+// and the Owner ID was corrected. The editor opened DISPLAYED(), the row
+// before any of it.
+const MOVED = {
+	Details: "Frozen - re-weighed", "Job Status": "Completed", Payment: PAYMENT_F2,
+	"Location Link": "https://maps.example.invalid/111", "Owner ID": "42",
+};
+const MOVED_COLS = Object.keys(MOVED);
+const MOVED_STORE = () => [HEADERS.slice(), storedRow(MOVED), storedRow({ "Load ID": "222", Details: "Dry van", "Location Link": "" })];
 
 // ---------------------------------------------------------------------------
 // THE FAKE SHEET. Each stored cell is in the sheet's own terms:
@@ -220,6 +249,10 @@ function fakeSheet(stored, { batchGetFails = false } = {}) {
 function mount(routeSrc, helpers, stored, { guarded = true, title = "Job Tracking", batchGetFails = false } = {}) {
 	const sheet = fakeSheet(stored, { batchGetFails });
 	const audits = [];
+	// What the stubbed Owner ID check and period guard were asked to judge: the
+	// Owner ID cell, and the changed guarded cells as [column, from, to].
+	const ownerSeen = [];
+	const guardCalls = [];
 	let invalidations = 0;
 	let handler = null;
 	const env = {
@@ -232,8 +265,15 @@ function mount(routeSrc, helpers, stored, { guarded = true, title = "Job Trackin
 		PERIOD_GUARDED_SHEETS: ["Job Tracking"],
 		getSheetName: (req) => (req.query && req.query.sheet) || "Job Tracking",
 		resolveSheetTargetForWrite: async () => ({ resolved: true, metaUnreadable: false, title, guarded }),
-		validateOwnerIdCell: () => null,
-		sheetRowUpdateBlocker: () => null,
+		validateOwnerIdCell: (sheetName, hs, row) => {
+			const i = hs.findIndex((h) => /^owner.?id$/i.test(String(h)));
+			ownerSeen.push(i < 0 ? null : row[i]);
+			return null;
+		},
+		sheetRowUpdateBlocker: (g, hs, before, after, changes) => {
+			guardCalls.push(changes.map((c) => [c.column, c.from, c.to]));
+			return null;
+		},
 		sheetAuditWithCode: (d, code) => `${d} [${code}]`,
 		logAudit: (req, action, entity, entityId, details) => { audits.push({ action, entityId, details }); },
 		logAuditRefusal: (req, action, entity, entityId, details) => { audits.push({ action, entityId, details }); },
@@ -249,7 +289,7 @@ function mount(routeSrc, helpers, stored, { guarded = true, title = "Job Trackin
 		await handler({ params, query, body, session: { user: { id: role === "Super Admin" ? 1 : 2, role, username: role === "Super Admin" ? "super_admin" : "kevin" } } }, res);
 		return out;
 	};
-	return { run, rows: sheet.rows, calls: sheet.calls, audits, invalidations: () => invalidations };
+	return { run, rows: sheet.rows, calls: sheet.calls, audits, ownerSeen, guardCalls, invalidations: () => invalidations };
 }
 // The columns the success audit line names as changed, from the shipped builder.
 function auditedColumns(app) {
@@ -386,6 +426,114 @@ async function dataSection(helpers, routeSrc = DATA_PUT_SRC) {
 }
 
 // ---------------------------------------------------------------------------
+// §1b PUT /api/data/:rowIndex with a baseline. The sheet is MOVED_STORE(): five
+// cells changed since the editor opened DISPLAYED(), none by this user.
+// ---------------------------------------------------------------------------
+async function baselineSection(helpers, routeSrc = DATA_PUT_SRC) {
+	const { results, t } = collector();
+	const P = { rowIndex: "2" };
+	const MOVED_ROW = storedRow(MOVED);
+	const asMoved = (rows) => MOVED_COLS.map((c) => rows[1][IDX[c]]);
+	const ranges = (app) => app.calls.map((c) => c.ranges);
+	// The editor's save: every column as it opened, one edited.
+	const edit = (col, value, opened = DISPLAYED()) => { const v = opened.slice(); v[IDX[col]] = value; return v; };
+	// Today's behaviour, and what a save without a usable baseline still does:
+	// every moved cell written back as the stale view had it, beside the edit.
+	const STALE_WITH_D2 = [["C2", "D2", "L2", "U2", "W2", "Y2"].map(R)];
+	{
+		const app = mount(routeSrc, helpers, MOVED_STORE());
+		const r = await app.run("Super Admin", P, { values: edit("Trailer Number", "TR-9"), baseline: DISPLAYED() });
+		t("§1b Super Admin edits Trailer Number, with a baseline: 200 { success, updatedCells: 1 }", [r.code, r.body], [200, { success: true, updatedCells: 1 }]);
+		t("§1b ...one write, the Trailer Number cell alone, as typed",
+			app.calls.map((c) => [c.ranges, c.values]), [[[R("D2")], [[["TR-9"]]]]]);
+		t("§1b ...the five cells that moved on the sheet are as the sheet holds them (the payment formula included)",
+			asMoved(app.rows), MOVED_COLS.map((c) => MOVED_ROW[IDX[c]]));
+		t("§1b ...the audit names Trailer Number alone", auditedColumns(app), ["Trailer Number"]);
+		t("§1b ...the period guard is handed no moved cell (Trailer Number moves no money)", app.guardCalls, [[]]);
+		t("§1b ...the Owner ID check sees the Owner ID as it will stand: the sheet's", app.ownerSeen, ["42"]);
+	}
+	{
+		const app = mount(routeSrc, helpers, MOVED_STORE());
+		const r = await app.run("Super Admin", P, { values: edit("Trailer Number", "TR-9") });
+		t("§1b the same save without a baseline (today's behaviour): every moved cell written back stale, the payment formula flattened, the status reverted",
+			[r.code, ranges(app), app.rows[1][IDX["Payment"]], app.rows[1][IDX["Job Status"]], app.rows[1][IDX["Owner ID"]]],
+			[200, STALE_WITH_D2, "$1,800.00", "Delivered", "5"]);
+		t("§1b ...and the period guard is handed the stale cells as changes",
+			app.guardCalls.map((call) => call.map((c) => c[0])), [["Job Status", "Payment", "Owner ID"]]);
+	}
+	{
+		// An edited cell is written, even one that also moved on the sheet.
+		const app = mount(routeSrc, helpers, MOVED_STORE());
+		const r = await app.run("Super Admin", P, { values: edit("Details", "Frozen - 3 pallets"), baseline: DISPLAYED() });
+		t("§1b Super Admin edits Details, which also moved on the sheet: the edit is written, and nothing else",
+			[r.code, app.calls.map((c) => [c.ranges, c.values]), app.rows[1][IDX["Details"]]],
+			[200, [[[R("C2")], [[["Frozen - 3 pallets"]]]]], "Frozen - 3 pallets"]);
+	}
+	{
+		// An edited guarded cell: the guard judges it, from the row as read.
+		const app = mount(routeSrc, helpers, MOVED_STORE());
+		const r = await app.run("Super Admin", P, { values: edit("Job Status", "Invoiced"), baseline: DISPLAYED() });
+		t("§1b Super Admin edits Job Status: L2 alone written, and the period guard judges it from the sheet's value",
+			[r.code, ranges(app), app.guardCalls], [200, [[R("L2")]], [[["Job Status", "Completed", "Invoiced"]]]]);
+	}
+	{
+		// Edited to exactly what the sheet now holds: nothing to write.
+		const app = mount(routeSrc, helpers, MOVED_STORE());
+		const r = await app.run("Super Admin", P, { values: edit("Details", MOVED.Details), baseline: DISPLAYED() });
+		t("§1b Super Admin edits Details to the value the sheet already holds: nothing written, no audit, unchanged",
+			[r.code, r.body, app.calls.length, app.audits.length], [200, { success: true, updatedCells: 0, unchanged: true }, 0, 0]);
+	}
+	{
+		// Saved without an edit: nothing written, though five cells differ.
+		const app = mount(routeSrc, helpers, MOVED_STORE());
+		const r = await app.run("Super Admin", P, { values: DISPLAYED(), baseline: DISPLAYED() });
+		t("§1b a save with no edit, five cells stale: nothing written, no audit, no cache invalidation, the row as the sheet holds it",
+			[r.code, r.body, app.calls.length, app.audits.length, app.invalidations(), app.rows[1]],
+			[200, { success: true, updatedCells: 0, unchanged: true }, 0, 0, 0, MOVED_ROW]);
+	}
+	{
+		// A baseline that is not an array of values.length cells is ignored.
+		const opened = DISPLAYED();
+		const malformed = [
+			["one cell short", opened.slice(0, -1)],
+			["one cell long", opened.concat([""])],
+			["a string", opened.join(",")],
+			["an object", Object.assign({}, opened)],
+			["null", null],
+		];
+		for (const [label, baseline] of malformed) {
+			const app = mount(routeSrc, helpers, MOVED_STORE());
+			const r = await app.run("Super Admin", P, { values: edit("Trailer Number", "TR-9"), baseline });
+			t(`§1b a malformed baseline (${label}) is ignored: judged as before, every moved cell written back`, [r.code, ranges(app)], [200, STALE_WITH_D2]);
+		}
+	}
+	{
+		// The Active Loads editor as a Dispatcher sends it: the withheld contact
+		// columns blank in both values and baseline. The stale "=…" text in the
+		// view is not the user's, so it is neither judged nor written.
+		// The route updates `values` in place, as it may a parsed request body, so
+		// each run gets its own arrays.
+		const blankWithheld = (row) => row.map((v, i) => (WITHHELD.includes(HEADERS[i]) ? "" : v));
+		const opened = blankWithheld(DISPLAYED());
+		const values = () => edit("Trailer Number", "TR-9", opened);
+		const app = mount(routeSrc, helpers, MOVED_STORE());
+		const r = await app.run("Dispatcher", P, { values: values(), baseline: opened.slice() });
+		t("§1b Dispatcher edits Trailer Number, with a baseline: 200, D2 alone written, the contacts and the moved cells as the sheet holds them",
+			[r.code, ranges(app), WITHHELD.map((c) => app.rows[1][IDX[c]]), asMoved(app.rows)],
+			[200, [[R("D2")]], WITHHELD.map((c) => MOVED_ROW[IDX[c]]), MOVED_COLS.map((c) => MOVED_ROW[IDX[c]])]);
+		const old = mount(routeSrc, helpers, MOVED_STORE());
+		const o = await old.run("Dispatcher", P, { values: values() });
+		t("§1b ...without a baseline (today's behaviour): refused 400 FORMULA_NOT_ALLOWED for the stale \"=…\" text in Location Link, a cell the user never touched",
+			[o.code, (o.body || {}).code, (o.body || {}).field, old.calls.length], [400, "FORMULA_NOT_ALLOWED", "Location Link", 0]);
+		const typed = mount(routeSrc, helpers, MOVED_STORE());
+		const f = await typed.run("Dispatcher", P, { values: edit("Details", "=O2", opened), baseline: opened.slice() });
+		t("§1b ...and a formula the Dispatcher types is still refused, with a baseline",
+			[f.code, (f.body || {}).code, (f.body || {}).field, typed.calls.length], [400, "FORMULA_NOT_ALLOWED", "Details", 0]);
+	}
+	return results;
+}
+
+// ---------------------------------------------------------------------------
 // §2 PUT /api/load/:loadId — addressed by load id; the body names the columns.
 // ---------------------------------------------------------------------------
 async function loadSection(helpers, routeSrc = LOAD_PUT_SRC) {
@@ -463,6 +611,51 @@ function helperSection(helpers) {
 		[["'T'!Z7"], ["'T'!AA7"], ["'T'!AB7"], ["'T'!ZZ7"], ["'T'!AAA7"]]);
 	t("§3 surrounding whitespace is a change (compared exactly, untrimmed)", W(["Delivered"], ["Delivered "]).length, 1);
 
+	// restoreUntouchedCells(before, values, baseline): mutates values, answers
+	// whether the baseline was applied.
+	const U = (before, values, baseline) => { const v = values.slice(); const applied = helpers.restoreUntouchedCells(before, v, baseline); return [applied, v]; };
+	t("§3 restoreUntouchedCells(): a cell sent as opened takes the row as read; an edited cell is kept",
+		U(["now-a", "now-b", "now-c"], ["was-a", "edited", "was-c"], ["was-a", "was-b", "was-c"]), [true, ["now-a", "edited", "now-c"]]);
+	t("§3 restoreUntouchedCells(): compared as text, null and absent as \"\"; a cell past the row as read takes \"\"",
+		U(["x"], [5, null, "", "y"], ["5", "", null, "y"]), [true, ["x", "", "", ""]]);
+	t("§3 restoreUntouchedCells(): an edit back to the opened value is no edit",
+		U(["sheet"], ["opened"], ["opened"]), [true, ["sheet"]]);
+	for (const [label, baseline] of [["absent", undefined], ["null", null], ["a string", "a,b"], ["an object", { 0: "a", 1: "b", length: 2 }], ["one short", ["a"]], ["one long", ["a", "b", "c"]]]) {
+		t(`§3 restoreUntouchedCells(): a baseline that is ${label} is ignored, values untouched`,
+			U(["s1", "s2"], ["a", "b"], baseline), [false, ["a", "b"]]);
+	}
+
+	// PUT /api/data/:rowIndex takes the baseline and applies it once, right
+	// after the row read and before every check that judges the row: the Owner
+	// ID check, the broker restore, the formula refusal and the diff the period
+	// guard and the audit read. PUT /api/load/:loadId takes none.
+	{
+		const c = decomment(DATA_PUT_SRC);
+		const foldAt = c.indexOf("restoreUntouchedCells(before, values, baseline);");
+		const order = [c.indexOf("if (rowUnread)"), foldAt, c.indexOf("validateOwnerIdCell("), c.indexOf("restoreWithheldBrokerCells(headers, before, values);"),
+			c.indexOf("formulaCellRefusal(headers, before, values);"), c.indexOf("sheetRowAfterUpdate(before, values)")];
+		t("§3 PUT /api/data/:rowIndex: reads `baseline` beside `values`, and applies it once",
+			[c.includes("const { values, baseline } = req.body || {};"), c.split("restoreUntouchedCells(").length - 1], [true, 1]);
+		t("§3 PUT /api/data/:rowIndex: after the row read, before the Owner ID check, the broker restore, the formula refusal and the diff",
+			order.every((at, i) => at > 0 && (i === 0 || order[i - 1] < at)), true);
+		t("§3 PUT /api/load/:loadId: takes no baseline (its body names the columns it changes)",
+			[decomment(LOAD_PUT_SRC).includes("restoreUntouchedCells("), /\bbaseline\b/.test(decomment(LOAD_PUT_SRC))], [false, false]);
+	}
+	// The Active Loads editor records the row its modal opened with and sends it
+	// as `baseline`, in the order of `values`: a column it did not edit is sent
+	// as opened in both, so the server leaves it as the sheet holds it.
+	{
+		const vue = fs.readFileSync(path.join(__dirname, "..", "client", "src", "components", "dashboard", "ActiveLoadsTab.vue"), "utf8");
+		const fn = (head) => { const at = vue.indexOf(head); const end = at < 0 ? -1 : vue.indexOf("\n}\n", at); return end < 0 ? "" : vue.slice(at, end); };
+		const open = fn("function openEdit() {");
+		const submit = fn("async function submitEdit() {");
+		t("§3 ActiveLoadsTab.vue: openEdit() records every column as the modal opens it",
+			open.includes("editBaseline = Object.fromEntries(props.headers.map(col => [col, selectedJob.value[col] || '']))"), true);
+		t("§3 ActiveLoadsTab.vue: submitEdit() builds values and baseline over props.headers, an unedited column from the record in both, and sends both",
+			[submit.includes("const values = props.headers.map(col => (has(editForm, col) ? editForm[col] : opened(col)))"),
+				submit.includes("const baseline = props.headers.map(opened)"), submit.includes("{ values, baseline }")], [true, true, true]);
+	}
+
 	// Where each route calls it: once, with the row as read and the row as it
 	// will be written, after the re-read and before the one write; and no
 	// whole-row values.update is left in either route.
@@ -492,16 +685,25 @@ const WHOLE_ROW = buildHelpers({
 		"\tconst out = [];\n",
 		"\treturn [{ range: `${a1}!A${rowIndex}`, values: [a.map((v) => (v == null ? \"\" : v))] }];\n\tconst out = [];\n"),
 });
+// §4 MUTANT — the baseline ignored: restoreUntouchedCells() applying none, so
+// every cell sent is compared with the row as read, as before the baseline.
+const NO_BASELINE = buildHelpers({
+	restoreUntouchedCells: mutate(HELPER_SRC.restoreUntouchedCells,
+		"\tif (!Array.isArray(values) || !Array.isArray(baseline)",
+		"\treturn false;\n\tif (!Array.isArray(values) || !Array.isArray(baseline)"),
+});
 
 (async () => {
 	console.log("§1 PUT /api/data/:rowIndex");
 	record(await dataSection(H));
+	console.log("§1b PUT /api/data/:rowIndex with a baseline");
+	record(await baselineSection(H));
 	console.log("§2 PUT /api/load/:loadId");
 	record(await loadSection(H));
-	console.log("§3 sheetRowCellWrites()");
+	console.log("§3 sheetRowCellWrites(), restoreUntouchedCells() and the wiring");
 	record(helperSection(H));
 
-	console.log("§4 mutant");
+	console.log("§4 mutants");
 	{
 		let data = [], load = [], detail = "";
 		try {
@@ -515,6 +717,19 @@ const WHOLE_ROW = buildHelpers({
 		else { fail++; failures.push(`mutant not caught: back to a whole-row write (§1 failed ${data.length}, §2 failed ${load.length})${detail}`); }
 		console.log(`  ${caught ? "caught " : "MISSED "} M1 back to a whole-row write — §1 failed ${data.length} check(s), §2 failed ${load.length}` +
 			`${data[0] ? `, e.g. ✗ ${data[0].name}` : ""}${detail}`.slice(0, 260));
+	}
+	{
+		let failed = [], detail = "";
+		try {
+			failed = (await baselineSection(NO_BASELINE)).filter((r) => !r.ok);
+		} catch (e) {
+			detail = ` — the probe threw: ${e && e.message ? e.message : e}`;
+		}
+		const caught = failed.length > 0;
+		if (caught) pass++;
+		else { fail++; failures.push(`mutant not caught: the baseline ignored (§1b failed ${failed.length})${detail}`); }
+		console.log(`  ${caught ? "caught " : "MISSED "} M2 the baseline ignored — §1b failed ${failed.length} check(s)` +
+			`${failed[0] ? `, e.g. ✗ ${failed[0].name}` : ""}${detail}`.slice(0, 260));
 	}
 
 	console.log(`\n${pass} passed, ${fail} failed`);

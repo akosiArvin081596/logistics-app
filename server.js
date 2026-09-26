@@ -5281,10 +5281,10 @@ function assignDriverToTruck(truckId, driverName) {
 	const now = new Date().toISOString();
 	const nameLower = driverName.trim().toLowerCase();
 	// A driver holds one truck, whichever way their old rows spell them: the
-	// active assignment rows and the other truck naming them through a spacing
-	// variant of the name (normalizeDriverName(), as findTruckForDriver() finds
-	// the truck) are released with the case-aside ones. Only while no other
-	// account holds the name under another spelling
+	// active assignment rows, the other truck and the open carrier pairing naming
+	// them through a spacing variant of the name (normalizeDriverName(), as
+	// findTruckForDriver() finds the truck) are released with the case-aside
+	// ones. Only while no other account holds the name under another spelling
 	// (driverNameHeldByOtherSpelling(), the rule the money stamps use): such a
 	// row may be that account's, and it is not this assignment's to release.
 	const needle = normalizeDriverName(driverName);
@@ -5322,15 +5322,30 @@ function assignDriverToTruck(truckId, driverName) {
 			const owner = db.prepare("SELECT company_name FROM users WHERE id = ?").get(truckRow.owner_id);
 			const carrierName = owner && owner.company_name ? owner.company_name.trim() : "";
 			if (carrierName) {
-				const current = db.prepare(
-					"SELECT id, carrier_name FROM carrier_driver_history WHERE LOWER(driver_name) = ? AND ended_at IS NULL"
-				).get(nameLower);
-				if (!current) {
-					db.prepare(
-						"INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at) VALUES (?, ?, ?)"
-					).run(carrierName, driverName.trim(), now);
-				} else if (current.carrier_name.toLowerCase() !== carrierName.toLowerCase()) {
-					db.prepare("UPDATE carrier_driver_history SET ended_at = ? WHERE id = ?").run(now, current.id);
+				// The driver's open pairings, found the way the assignment and truck
+				// rows above are: the rows naming the driver case aside, and, under the
+				// same guard (releaseSpacingVariants), the rows naming them through a
+				// spacing variant. Each open under another carrier is closed, and a row
+				// is opened only when none is open under this carrier already. A
+				// pairing left open keeps the driver in the old carrier's
+				// getInvestorDriverSet() leg 3 with no end to its month window.
+				const carrierLower = carrierName.toLowerCase();
+				const openPairings = db.prepare(
+					"SELECT id, carrier_name FROM carrier_driver_history WHERE LOWER(driver_name) = ? AND ended_at IS NULL ORDER BY id"
+				).all(nameLower);
+				if (releaseSpacingVariants) {
+					const found = new Set(openPairings.map((r) => r.id));
+					for (const r of db.prepare("SELECT id, carrier_name, driver_name FROM carrier_driver_history WHERE ended_at IS NULL AND COALESCE(driver_name, '') <> '' ORDER BY id").all()) {
+						if (!found.has(r.id) && normalizeDriverName(r.driver_name) === needle) openPairings.push(r);
+					}
+				}
+				const closePairing = db.prepare("UPDATE carrier_driver_history SET ended_at = ? WHERE id = ?");
+				let openUnderCarrier = false;
+				for (const r of openPairings) {
+					if (String(r.carrier_name || "").toLowerCase() === carrierLower) openUnderCarrier = true;
+					else closePairing.run(now, r.id);
+				}
+				if (!openUnderCarrier) {
 					db.prepare(
 						"INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at) VALUES (?, ?, ?)"
 					).run(carrierName, driverName.trim(), now);
@@ -28431,6 +28446,39 @@ function sheetRowCellWrites(a1, rowIndex, before, after) {
 	return out;
 }
 
+// PUT /api/data/:rowIndex: a cell the user did not edit is not written.
+// `baseline` is the row as the caller's form opened it, in the order of
+// `values`. A cell sent equal to its baseline was not edited, so it is set to
+// the row as read (`before`), and sheetRowCellWrites() then writes none of it.
+//
+// ⚠️ WHY THE ROW AS READ IS NOT ENOUGH. The Active Loads editor sends every
+// column from a dashboard view that can be ~60 s old (the Job Tracking cache).
+// A cell that changed on the sheet since that view loaded (another user, n8n,
+// or a formula whose shown value moved) differs from the row as read, so the
+// diff alone writes the stale copy back, and over a formula cell that flattens
+// the formula. With a baseline, a cell is written only when the user edited it
+// (sent differs from the baseline) and the sheet does not already hold it (sent
+// differs from the row as read).
+//
+// Compared as sheetRowCellWrites() compares: null and absent read as "",
+// anything else as its String(). Mutates `values`, like
+// restoreWithheldBrokerCells(), and runs before any guard, so the Owner ID
+// check, the broker restore, the formula refusal, the period guard and the
+// audit all judge the row as it will be written. A baseline that is not an
+// array of values.length cells is ignored: older pages and API callers send
+// none, and keep the diff against the row as read. It can only narrow what a
+// save writes, never widen it. Returns whether it was applied.
+function restoreUntouchedCells(before, values, baseline) {
+	if (!Array.isArray(values) || !Array.isArray(baseline) || baseline.length !== values.length) return false;
+	const b = Array.isArray(before) ? before : [];
+	for (let i = 0; i < values.length; i++) {
+		const sent = values[i] == null ? "" : String(values[i]);
+		const opened = baseline[i] == null ? "" : String(baseline[i]);
+		if (sent === opened) values[i] = b[i] == null ? "" : b[i];
+	}
+	return true;
+}
+
 // Resolve the requested ?sheet= to a REAL tab, the way the Sheets range parser
 // itself resolves it.
 //
@@ -29421,7 +29469,9 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		// so a malformed index silently rewrote a real row. Same fix #209 applied to
 		// the delete.
 		const rowIndex = Number(req.params.rowIndex);
-		const { values } = req.body || {};
+		// `baseline` (optional): the row as the caller's form opened it, in the
+		// order of `values` — see restoreUntouchedCells().
+		const { values, baseline } = req.body || {};
 
 		if (!Array.isArray(values)) {
 			return res.status(400).json({ error: "values must be an array of cell values", code: "VALUES_REQUIRED" });
@@ -29510,6 +29560,13 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 				code: "ROW_READ_FAILED",
 			});
 		}
+
+		// A cell the caller's form did not edit is set to the row as read, so it is
+		// not written even when the sheet changed under a stale view
+		// (restoreUntouchedCells()). Before every check below, so each judges the
+		// row as it will be written. No baseline, or a malformed one: every cell
+		// sent is compared with the row as read, as before.
+		restoreUntouchedCells(before, values, baseline);
 
 		// Validate Job Tracking Owner ID early — reject investors.id typos before any
 		// writes happen. (Reuses the headers just read.)
@@ -43175,6 +43232,13 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 		// The row as it will be written. Object.prototype.hasOwnProperty.call, not
 		// updates.hasOwnProperty — a body carrying its own "hasOwnProperty" key
 		// shadows the method and turns this into a TypeError 500.
+		//
+		// No `baseline` here, unlike PUT /api/data/:rowIndex (restoreUntouchedCells()).
+		// This body names the columns it changes, and a column it leaves out keeps
+		// the row as read, so a caller that sends only what it edited never writes
+		// a stale cell. Every body key is a column name to this route, so a
+		// `baseline` key would be refused as UNKNOWN_COLUMN, or would shadow a column
+		// of that name. No page in the app calls this route.
 		const updatedRow = headers.map((h, idx) => {
 			if (Object.prototype.hasOwnProperty.call(updates, h)) return updates[h];
 			return before[idx] || "";

@@ -333,7 +333,7 @@ import { ref, reactive, computed, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useFileDrop } from '../../composables/useFileDrop'
 import { AVATAR_MAX_EDGE, compressImage, isDecodedImage } from '../../lib/imageUtils'
-import { directoryPayCells } from '../../lib/driverPay'
+import { directoryPayCells, directoryPayType } from '../../lib/driverPay'
 import { fmtTimestamp } from '../../utils/datetime'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
@@ -573,7 +573,9 @@ function openEdit(d) {
   editForm.mc = d[h.value.mc] || ''
   editForm.rating = d[h.value.rating] || 'Not Rated'
   editForm.status = d.Status || 'active'
-  editForm.payType = d.PayType || 'fixed'
+  // Lowercased, so a legacy "Fixed" / "Percentage" selects its radio and
+  // shows its amount. See directoryPayType().
+  editForm.payType = directoryPayType(d.PayType)
   editForm.payPercentage = Number(d.PayPercentage) || 0
   editForm.payDaily = Number(d.PayDaily) || 0
   showEdit.value = true

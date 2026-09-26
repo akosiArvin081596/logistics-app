@@ -37,9 +37,24 @@ export function directoryPayCells({ canEditPay, payType, payPercentage, payDaily
   if (!canEditPay) return ['', '', '']
   if (payType === 'percentage') return ['percentage', amountCell(payPercentage), '']
   if (payType === 'fixed') return ['fixed', '', amountCell(payDaily)]
-  // A type the radios do not offer, such as a legacy "Fixed" the row was
-  // stored with: neither amount field is on screen, so neither was edited.
-  // The type goes as loaded (the server lowercases it) and both amounts as
-  // not sent, as before this rule.
+  // A type the radios do not offer: neither amount field is on screen, so
+  // neither was edited. The type goes as loaded (the server lowercases it) and
+  // both amounts as not sent, as before this rule. A legacy "Fixed" or
+  // "Percentage" no longer lands here: the Edit dialog opens it through
+  // directoryPayType(), below.
   return [payType ?? '', '', '']
+}
+
+// The pay type the Edit dialog opens with: the stored type lowercased, so a
+// legacy "Fixed" or "Percentage" selects its radio and shows its amount, and a
+// save then sends it by the rules above. No type means "fixed", the column
+// default.
+//
+// ⚠️ LOWERCASED ONLY, NEVER TRIMMED. The money math reads the stored type with
+// toLowerCase() alone (directoryPayStruct() in server.js), so " percentage" is
+// paid as fixed there. Trimmed, it would select the percentage radio, and the
+// next save would switch that driver's pay to a share of revenue. A type that
+// still matches neither radio shows neither, as before.
+export function directoryPayType(stored) {
+  return String(stored || 'fixed').toLowerCase()
 }
