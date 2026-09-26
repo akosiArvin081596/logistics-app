@@ -24987,24 +24987,30 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 				createAudit);
 		}
 
-		// The INSERT is the first write, so a unit number another writer took after
-		// the check above (isUnitNumberTaken()) is refused as the check refuses it,
-		// with nothing written.
+		// One transaction: the INSERT and the driver assignment (assignDriverToTruck()
+		// writes truck_assignments and trucks.assigned_driver) land together or not
+		// at all, as PUT /api/trucks/:id writes its UPDATE and assignment. A failed
+		// assignment therefore leaves no truck behind for a retry to meet as
+		// "Unit number already exists". The INSERT is the first write, so a unit
+		// number another writer took after the check above (isUnitNumberTaken()) is
+		// refused as the check refuses it, with nothing written.
 		let result;
 		try {
-			result = db.prepare(
-				"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id, driver_pay_daily, purchase_price, title_status, maintenance_fund_monthly, fuel_tank_gallons, avg_mpg, in_service_date, " +
-				"photo, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, admin_fee_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-			).run(unit, make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, finalAssignedDriver, notes || "", finalOwnerId, driverPayParsed.value,
-				createAmounts.purchase_price ?? 0, titleStatus || "Clean", createAmounts.maintenance_fund_monthly ?? 0, createAmounts.fuel_tank_gallons ?? 0, createAmounts.avg_mpg ?? 0, inServiceCreate,
-				createPhoto, createCosts.insurance_monthly, createCosts.eld_monthly, createCosts.truck_payment_monthly, createCosts.hvut_annual, createCosts.irp_annual, createAdminFee);
+			result = db.transaction(() => {
+				const inserted = db.prepare(
+					"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id, driver_pay_daily, purchase_price, title_status, maintenance_fund_monthly, fuel_tank_gallons, avg_mpg, in_service_date, " +
+					"photo, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, admin_fee_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+				).run(unit, make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, finalAssignedDriver, notes || "", finalOwnerId, driverPayParsed.value,
+					createAmounts.purchase_price ?? 0, titleStatus || "Clean", createAmounts.maintenance_fund_monthly ?? 0, createAmounts.fuel_tank_gallons ?? 0, createAmounts.avg_mpg ?? 0, inServiceCreate,
+					createPhoto, createCosts.insurance_monthly, createCosts.eld_monthly, createCosts.truck_payment_monthly, createCosts.hvut_annual, createCosts.irp_annual, createAdminFee);
+				if (finalAssignedDriver && finalAssignedDriver.trim()) {
+					assignDriverToTruck(inserted.lastInsertRowid, finalAssignedDriver.trim());
+				}
+				return inserted;
+			})();
 		} catch (err) {
 			if (isUnitNumberTaken(err)) return res.status(400).json({ error: "Unit number already exists" });
 			throw err;
-		}
-		// Create truck assignment record
-		if (finalAssignedDriver && finalAssignedDriver.trim()) {
-			assignDriverToTruck(result.lastInsertRowid, finalAssignedDriver.trim());
 		}
 		// Audit creation, naming the in-service date and the monthly fixed costs it
 		// starts with. The PUT audits every change to the date because it re-books
