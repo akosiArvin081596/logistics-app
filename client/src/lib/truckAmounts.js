@@ -39,13 +39,31 @@ const FIELD_BY_KEY = new Map(AMOUNT_FIELDS.map((field) => [field.key, field]))
 
 // Each amount's ceiling by key, for the number boxes' `max` attribute in both
 // forms (`:max="AMOUNT_CAPS.fuelTankGallons"`), so the browser's range hint and
-// amountError below read the same number.
+// amountError below read the same number. A literal `max` on an amount box
+// fails scripts/test-truck-amount-caps-parity.mjs.
 export const AMOUNT_CAPS = Object.freeze(Object.fromEntries(AMOUNT_FIELDS.map((field) => [field.key, field.max])))
+
+// The number an amount reads as — the server's parsePlainDecimal() rule, so
+// the form and the server answer every input alike: a number as itself, or
+// text whose trimmed form is a plain decimal (an optional sign, digits with an
+// optional point, an optional exponent of at most three digits) no longer than
+// 32 characters. NaN for anything else, including the hex, binary and octal
+// forms a bare Number() reads ('0x10' is 16). The length is checked before the
+// pattern runs. scripts/test-truck-amount-caps-parity.mjs runs both over one
+// table of inputs.
+export function plainDecimal(v) {
+  if (typeof v === 'number') return v
+  if (typeof v !== 'string') return NaN
+  const text = v.trim()
+  if (text.length > 32 || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d{1,3})?$/.test(text)) return NaN
+  return Number(text)
+}
 
 // null when every amount in `values` is blank or a finite number in range;
 // otherwise one sentence naming the first field that is not.
 //
-// Blank ('' / null / undefined) stays allowed — it is how a field says "unset".
+// Blank ('' / null / undefined, or only whitespace, as the server reads it)
+// stays allowed — it is how a field says "unset".
 // v-model.number parseFloat()s whatever the input reports, so a huge entry
 // (1e308) arrives as a number, and a non-finite one, should a browser report
 // it, as Infinity — which JSON.stringify would send as null. Chrome reports ''
@@ -61,8 +79,8 @@ export function amountError(values, { canEditPay = false, order = [] } = {}) {
     const field = FIELD_BY_KEY.get(key)
     if (!field || (field.pay && !canEditPay)) continue
     const v = values?.[key]
-    if (v === '' || v === null || v === undefined) continue
-    const n = Number(v)
+    if (v === null || v === undefined || (typeof v === 'string' && v.trim() === '')) continue
+    const n = plainDecimal(v)
     if (!Number.isFinite(n) || n < 0 || n > field.max) {
       return `${field.label} must be a number between 0 and ${field.max.toLocaleString('en-US')}.`
     }

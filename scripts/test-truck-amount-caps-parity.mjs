@@ -17,6 +17,11 @@
 // of the server source with one ceiling changed, and client tables with a
 // ceiling changed or a field dropped, must each be reported.
 //
+// (a) The same two sides must also READ an amount alike: the server's parsers
+// (parsePlainDecimal() under each) and amountError() accept and refuse the
+// same inputs, "0x10", "0b1" and "0o7" included. (b) No amount box in the
+// Trucks forms may carry a literal `max` in place of AMOUNT_CAPS.
+//
 // No network, no DB, no server — safe anywhere.
 //   node scripts/test-truck-amount-caps-parity.mjs      # exits 1 on any failure
 
@@ -147,6 +152,118 @@ eq('a form that drops Avg MPG is reported',
 eq('a form field no server column governs is reported',
   capDifferences([...AMOUNT_FIELDS, { key: 'tireBudget', label: 'Tires', max: 1000000 }], server),
   ['tireBudget: no server column governs it'])
+
+// ══ (a) The two readers answer every input alike ═════════════════════════════
+// server.js reads a sent amount through parsePlainDecimal() (parseTruckAmount,
+// parseDriverPayDaily, parseAdminFeePct); the forms through plainDecimal()
+// (amountError). Each server parser, lifted verbatim, and amountError on the
+// field it governs must accept and refuse the same inputs — "0x10" above all,
+// which a bare Number() reads as 16.
+const { amountError, plainDecimal } = await import(pathToFileURL(path.join(__dirname, '..', 'client', 'src', 'lib', 'truckAmounts.js')).href)
+function liftFunction(src, name) {
+  const needle = `\nfunction ${name}(`
+  const hits = src.split(needle).length - 1
+  if (hits !== 1) throw new Error(`expected exactly 1 definition of ${name}() in server.js, found ${hits}`)
+  const a = src.indexOf(needle) + 1
+  const end = src.indexOf('\n}\n', a)
+  return src.slice(a, end + 2)
+}
+const PARSERS = new Function(`"use strict";\n${[
+  liftFunction(SRC, 'parsePlainDecimal'),
+  liftConst(SRC, 'const TRUCK_AMOUNT_MAX = '), liftFunction(SRC, 'parseTruckAmount'),
+  liftConst(SRC, 'const DRIVER_PAY_DAILY_MAX = '), liftFunction(SRC, 'parseDriverPayDaily'),
+  liftConst(SRC, 'const ADMIN_FEE_PCT_MAX = '), liftFunction(SRC, 'parseAdminFeePct'),
+].join('\n')}\nreturn { parsePlainDecimal, parseTruckAmount, parseDriverPayDaily, parseAdminFeePct };`)()
+
+const INPUTS = ['0x10', '0b1', '0o7', '1e3', '12.5', ' 12 ', '', '1,000', 'Infinity', '-5', '.5', '5.', '1e999',
+  '0X1F', '+5', '1e1000', '   ', '12abc', '1'.repeat(32), '1'.repeat(33), 12.5, 500, 500.01, -0, Infinity, NaN]
+// Each form field and the server reader that governs it.
+const PAIRS = [
+  ['purchasePrice', (v) => PARSERS.parseTruckAmount(v, 'Purchase price'), {}],
+  ['fuelTankGallons', (v) => PARSERS.parseTruckAmount(v, 'Fuel tank', 500), {}],
+  ['driverPayDaily', (v) => PARSERS.parseDriverPayDaily(v), { canEditPay: true }],
+  ['adminFeePct', (v) => PARSERS.parseAdminFeePct(v), {}],
+]
+function readerDisagreements(clientError) {
+  const out = []
+  for (const [key, serverRead, opts] of PAIRS) {
+    for (const v of INPUTS) {
+      const serverOk = !serverRead(v).error
+      const clientOk = clientError({ [key]: v }, opts) === null
+      if (serverOk !== clientOk) out.push(`${key} ${JSON.stringify(v)}: the server ${serverOk ? 'accepts' : 'refuses'} it, the form ${clientOk ? 'accepts' : 'refuses'} it`)
+    }
+  }
+  return out
+}
+eq('(a) the form and the server accept and refuse the same inputs, field by field', readerDisagreements(amountError), [])
+for (const v of ['0x10', '0b1', '0o7']) {
+  ok(`(a) ${JSON.stringify(v)} is refused by the server and the form alike`,
+    PARSERS.parseTruckAmount(v).error && amountError({ purchasePrice: v }) !== null)
+}
+eq('(a) parsePlainDecimal() and plainDecimal() read every input to the same number',
+  INPUTS.filter((v) => !Object.is(PARSERS.parsePlainDecimal(v), plainDecimal(v))).map((v) => JSON.stringify(v)), [])
+// Control: a form that reads text with a bare Number() is reported.
+const laxError = (values, opts) => {
+  const [[key, v]] = Object.entries(values)
+  const field = AMOUNT_FIELDS.find((f) => f.key === key)
+  if (field.pay && !opts.canEditPay) return null
+  if (v === null || v === undefined || (typeof v === 'string' && v.trim() === '')) return null
+  const n = Number(v)
+  return Number.isFinite(n) && n >= 0 && n <= field.max ? null : 'refused'
+}
+ok('(a, control) a form reading text with a bare Number() is reported on "0x10"',
+  readerDisagreements(laxError).some((d) => d.startsWith('purchasePrice "0x10"')))
+
+// ══ (b) Every amount box's `max` is AMOUNT_CAPS ═══════════════════════════════
+// The number boxes in the Trucks forms take their range hint from AMOUNT_CAPS;
+// a literal `max="…"` or `:max="<number>"` on one would be a second copy of a
+// ceiling that nothing keeps in step.
+const FORM_FILES = [
+  path.join(__dirname, '..', 'client', 'src', 'views', 'TrucksView.vue'),
+  ...fs.readdirSync(path.join(__dirname, '..', 'client', 'src', 'components', 'trucks'))
+    .filter((f) => f.endsWith('.vue')).map((f) => path.join(__dirname, '..', 'client', 'src', 'components', 'trucks', f)),
+]
+const AMOUNT_KEYS = new Set(AMOUNT_FIELDS.map((f) => f.key))
+// Each <input …> tag, read to the first `>` outside quotes.
+function inputTags(text) {
+  const tags = []
+  let at = text.indexOf('<input')
+  while (at >= 0) {
+    let quote = ''
+    let i = at + 6
+    for (; i < text.length; i++) {
+      const c = text[i]
+      if (quote) { if (c === quote) quote = '' } else if (c === '"' || c === "'") quote = c
+      else if (c === '>') break
+    }
+    tags.push(text.slice(at, i + 1))
+    at = text.indexOf('<input', i)
+  }
+  return tags
+}
+// One sentence per amount box whose `max` is not AMOUNT_CAPS.<its own key>.
+function maxBypasses(label, text) {
+  const out = []
+  for (const tag of inputTags(text)) {
+    const model = tag.match(/\bv-model(?:\.[a-z]+)*="[A-Za-z_$][\w$]*\.([A-Za-z_$][\w$]*)"/)
+    if (!model || !AMOUNT_KEYS.has(model[1])) continue
+    for (const m of tag.matchAll(/(?:^|\s)((?:v-bind)?:?max)="([^"]*)"/g)) {
+      if (m[1] === 'max' || m[2].trim() !== `AMOUNT_CAPS.${model[1]}`) out.push(`${label}: ${model[1]} has ${m[1]}="${m[2]}"`)
+    }
+  }
+  return out
+}
+const forms = FORM_FILES.map((f) => [path.relative(path.join(__dirname, '..'), f), fs.readFileSync(f, 'utf8')])
+const boxes = forms.flatMap(([, text]) => inputTags(text).filter((t) => /:max="AMOUNT_CAPS\./.test(t)))
+ok(`(b) the amount boxes' :max bindings are found (${boxes.length})`, boxes.length >= 8)
+eq('(b) no amount box in the Trucks forms carries a max that bypasses AMOUNT_CAPS', forms.flatMap(([label, text]) => maxBypasses(label, text)), [])
+const addForm = forms.find(([label]) => label.endsWith('AddTruckForm.vue'))
+const bound = ':max="AMOUNT_CAPS.fuelTankGallons"'
+ok('(b, control) the fuel tank box binds AMOUNT_CAPS in AddTruckForm.vue', !!addForm && addForm[1].split(bound).length === 2)
+for (const [what, to] of [['a literal max="600"', 'max="600"'], ['a bound number :max="600"', ':max="600"'], ["another field's cap", ':max="AMOUNT_CAPS.avgMpg"']]) {
+  ok(`(b, control) ${what} on the fuel tank box is reported`,
+    maxBypasses('AddTruckForm.vue', addForm[1].replace(bound, to)).some((d) => d.includes('fuelTankGallons')))
+}
 
 console.log(`\ntruck-amount-caps-parity: ${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)

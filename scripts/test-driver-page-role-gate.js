@@ -165,6 +165,9 @@ function makeDeps() {
 		computeDriverQueues: () => ({}),
 		withExpenseWindows: (rows) => rows.map((r) => ({ ...r })),
 		stripSigningEvidence: (rows) => rows,
+		// Which stored files exist, from their bytes (its own subject is
+		// scripts/test-stored-file-serving.js).
+		storedFileKind: new Function("imageLimits", `${liftFn("storedFileKind")}\nreturn storedFileKind;`)(require(path.join(ROOT, "lib", "image-size"))),
 		ONBOARDING_DOCS: [],
 	};
 	return { deps, reads };

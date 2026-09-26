@@ -118,8 +118,7 @@ Per-endpoint limiters using `express-rate-limit`, naming pattern `{feature}Limit
 | `publicFormLimiter` | 15 min | 10 | Public driver/investor application submission |
 | `loginLimiter` | 15 min | 20 | Brute-force protection on `/api/auth/login` |
 | `changePasswordLimiter` | 15 min | 5 | Slow password rotation attacks |
-| `driverFilesLimiter` | 15 min | 30 | Enumeration protection on `/api/trucks/:id/driver-files` |
-| `truckDocViewLimiter` | 15 min | 30 | Same for `/api/driver/truck-documents/:id/view` |
+| `truckDocViewLimiter` | 15 min | 30 | Enumeration protection on `/api/driver/truck-documents/:id/view` |
 | `trackPublicLimiter` | 15 min | 60 | Higher cap because customers refresh the public tracker often |
 | `expenseOcrLimiter` | 15 min | 20 | Caps Gemini API spend on receipt OCR |
 
