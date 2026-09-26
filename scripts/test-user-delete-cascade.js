@@ -137,7 +137,7 @@ function scratch() {
 		CREATE TABLE driver_locations (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT);
 		CREATE TABLE load_responses (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT);
 		CREATE TABLE documents (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT);
-		CREATE TABLE trucks (id INTEGER PRIMARY KEY AUTOINCREMENT, unit_number TEXT, assigned_driver TEXT DEFAULT '', owner_id INTEGER DEFAULT 0);
+		CREATE TABLE trucks (id INTEGER PRIMARY KEY AUTOINCREMENT, unit_number TEXT, assigned_driver TEXT DEFAULT '', owner_id INTEGER DEFAULT 0, routemate_vehicle_id TEXT DEFAULT '');
 		CREATE TABLE truck_assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER NOT NULL, driver_name TEXT NOT NULL, start_date TEXT NOT NULL, end_date TEXT DEFAULT '');
 		CREATE TABLE investors (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER UNIQUE, full_name TEXT DEFAULT '', carrier_name TEXT DEFAULT '');
 		CREATE TABLE investor_config (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id INTEGER);
