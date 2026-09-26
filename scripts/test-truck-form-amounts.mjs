@@ -62,10 +62,10 @@ eq('the label each refusal names',
   AMOUNT_FIELDS.map((f) => f.label),
   ['Fuel tank', 'Avg MPG', 'Purchase price', 'Maintenance fund', 'Driver pay',
     'Insurance', 'ELD', 'HVUT', 'IRP', 'Truck payment', 'Admin fee'])
-eq('ceilings: driver pay 10,000, admin fee 100, every other amount 1,000,000',
+eq('ceilings: fuel tank 500, avg MPG 20, driver pay 10,000, admin fee 100, every other amount 1,000,000',
   Object.fromEntries(AMOUNT_FIELDS.map((f) => [f.key, f.max])),
   {
-    fuelTankGallons: AMOUNT_MAX, avgMpg: AMOUNT_MAX, purchasePrice: AMOUNT_MAX, maintenanceFundMonthly: AMOUNT_MAX,
+    fuelTankGallons: 500, avgMpg: 20, purchasePrice: AMOUNT_MAX, maintenanceFundMonthly: AMOUNT_MAX,
     driverPayDaily: 10000, insuranceMonthly: AMOUNT_MAX, eldMonthly: AMOUNT_MAX, hvutAnnual: AMOUNT_MAX,
     irpAnnual: AMOUNT_MAX, truckPaymentMonthly: AMOUNT_MAX, adminFeePct: 100,
   })
@@ -105,6 +105,13 @@ eq('a negative is refused', amountError({ irpAnnual: -5 }), 'IRP must be a numbe
 eq('a number that arrives as text is read as a number', amountError({ truckPaymentMonthly: '1200' }), null)
 eq('…and refused as one', amountError({ truckPaymentMonthly: '1e999' }), 'Truck payment must be a number between 0 and 1,000,000.')
 
+eq('fuel tank: 500 gallons is allowed', amountError({ fuelTankGallons: 500 }), null)
+eq('fuel tank: 500.01 is refused', amountError({ fuelTankGallons: 500.01 }), 'Fuel tank must be a number between 0 and 500.')
+eq('fuel tank: 1,000 is refused although under 1,000,000', amountError({ fuelTankGallons: 1000 }), 'Fuel tank must be a number between 0 and 500.')
+eq('avg MPG: 20 is allowed', amountError({ avgMpg: '20' }), null)
+eq('avg MPG: 20.01 is refused', amountError({ avgMpg: 20.01 }), 'Avg MPG must be a number between 0 and 20.')
+eq('avg MPG: 65 (a slipped decimal) is refused', amountError({ avgMpg: 65 }), 'Avg MPG must be a number between 0 and 20.')
+
 eq('admin fee: 0 is allowed', amountError({ adminFeePct: 0 }), null)
 eq('admin fee: 100 is allowed', amountError({ adminFeePct: 100 }), null)
 eq('admin fee: 100.01 is refused — a percentage, not an amount', amountError({ adminFeePct: 100.01 }), 'Admin fee must be a number between 0 and 100.')
@@ -125,11 +132,11 @@ eq('a field that is not an amount is not checked (Year, unit number)', amountErr
 // ══ Which field is named first ════════════════════════════════════════════════
 const SEVERAL = { fuelTankGallons: -1, driverPayDaily: -1, adminFeePct: 101 }
 eq('Add Truck: Fuel tank comes before Driver pay on screen, so it is named',
-  amountError(SEVERAL, PAY), 'Fuel tank must be a number between 0 and 1,000,000.')
+  amountError(SEVERAL, PAY), 'Fuel tank must be a number between 0 and 500.')
 eq('Edit dialog: Driver pay is at the top of it, so it is named',
   amountError(SEVERAL, EDIT_ORDER), 'Driver pay must be a number between 0 and 10,000.')
 eq('Edit dialog, pay not editable: falls through to Fuel tank',
-  amountError(SEVERAL, { canEditPay: false, order: ['driverPayDaily'] }), 'Fuel tank must be a number between 0 and 1,000,000.')
+  amountError(SEVERAL, { canEditPay: false, order: ['driverPayDaily'] }), 'Fuel tank must be a number between 0 and 500.')
 eq('Edit dialog: after Driver pay, the rest keep the table\'s order',
   amountError({ adminFeePct: 101, maintenanceFundMonthly: -1 }, EDIT_ORDER), 'Maintenance fund must be a number between 0 and 1,000,000.')
 eq('a field left out of `order` is still checked, only named later',

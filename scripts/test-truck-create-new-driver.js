@@ -50,8 +50,9 @@
  *      stored, a back-dated Active truck carrying them refused, an Investor's
  *      add kept at the column defaults, a blank amount 0 and a negative one
  *      refused 400 INVALID_AMOUNT before the guard is asked, an admin
- *      fee kept when it is a finite number and 50 otherwise, both audit lines
- *      naming the monthly fixed costs.
+ *      fee kept when it is a number from 0 to 100, 50 when blank or not sent,
+ *      and anything else refused 400 INVALID_AMOUNT (field admin_fee_pct) with
+ *      nothing written, both audit lines naming the monthly fixed costs.
  *   §5 source pins — both awaits above canonicalDriverName(), the history
  *      computed after it and handed to the guard, the unit-number check after the
  *      last await, both driver checks sized off the history, one cost object
@@ -132,7 +133,7 @@ const FUNCTIONS = [
 	"truckFixedCostLockedMonths", "truckChargedInMonth", "truckChargeFromMonth", "truckChargeUntilMonth", "truckMonthlyFixed",
 	"truckFeeLockedRows", "getDriverPayStructures", "resolveDailyRate", "truckDailyRateCandidates", "investorsHoldingDriver",
 	// what the route calls
-	"parseDriverPayDaily", "parseInServiceDate", "adminFeePctOrDefault", "parseTruckAmount", "parseTruckAmounts",
+	"parseDriverPayDaily", "parseInServiceDate", "parseAdminFeePct", "parseTruckAmount", "parseTruckAmounts",
 	"findDriverNameClashes", "canonicalDriverName", "assignDriverToTruck",
 	"refusePayEdit", "periodBlockedResponse", "periodLockUnreadableResponse", "periodLabel",
 	// the real refusal audit, so a refusal row is the row production writes
@@ -145,6 +146,7 @@ const CONSTS = [
 	liftConst("let lastPayStructShadowWarnMs = "),
 	liftConst("const DRIVER_PAY_DAILY_MAX = "),
 	liftConst("const IN_SERVICE_MAX_MONTHS_AHEAD = "),
+	liftConst("const ADMIN_FEE_PCT_MAX = "),
 	liftConst("const TRUCK_AMOUNT_MAX = "),
 	liftConst("const TRUCK_AMOUNT_FIELDS = [", "\n];"),
 	liftConst("const AUDITED_UPSTREAM = "),
@@ -157,7 +159,7 @@ const ROUTE_POST = liftRoute('app.post("/api/trucks", requireRole("Super Admin",
 // The photo check the route runs for a Super Admin or a Dispatcher, verbatim
 // (its own subject is scripts/test-stored-file-serving.js).
 const PHOTO_CHECK = new Function("imageLimits",
-	`"use strict";\n${liftFunction("storedFileForServing")}\n${liftFunction("truckPhotoRefusal")}\nreturn { storedFileForServing, truckPhotoRefusal };`
+	`"use strict";\n${liftFunction("storedFileForServing")}\n${liftFunction("truckPhotoForStorage")}\nreturn { storedFileForServing, truckPhotoForStorage };`
 )(require("../lib/image-size"));
 
 const TODAY = "2026-09-25";
@@ -769,14 +771,28 @@ async function routeSection() {
 		eq(calls.guard.map(fiveOf), [[0, 0, 0, 0, 0]], "§4 (h) ...and the month-end lock asked about $0");
 	}
 	for (const [label, fee, expect] of [
-		["blank (\"\")", "", 50], ["missing", undefined, 50], ["null", null, 50], ["unreadable (\"abc\")", "abc", 50],
-		["\"Infinity\"", "Infinity", 50], ["0 (a deliberate zero)", 0, 0], ["\"37.5\"", "37.5", 37.5],
+		["blank (\"\")", "", 50], ["missing", undefined, 50], ["null", null, 50],
+		["0 (a deliberate zero)", 0, 0], ["\"37.5\"", "37.5", 37.5], ["100 (the ceiling)", 100, 100],
 	]) {
 		const db = makeDb();
 		const { post } = mountPost(db);
 		const r = await post(SUPER, addForm({ adminFeePct: fee }));
 		const t = truckByUnit(db, "LogisX-#23") || {};
 		ok(r.status === 200 && t.admin_fee_pct === expect, `§4 (h) the admin fee ${label}: stored as ${expect} (got ${r.status}, ${t.admin_fee_pct})`);
+	}
+	// Anything that is not blank or a number from 0 to 100 refuses the add for the
+	// two roles that store the fee, before the guard is asked and before any write.
+	for (const [label, fee] of [
+		["unreadable (\"abc\")", "abc"], ["\"Infinity\"", "Infinity"], ["100.01", 100.01], ["-1", -1], ["5000", 5000],
+	]) {
+		const db = makeDb();
+		const { post, calls } = mountPost(db);
+		const before = snapshot(db);
+		const r = await post(SUPER, addForm({ adminFeePct: fee }));
+		eq([r.status, r.body], [400, { error: "Admin fee must be a number between 0 and 100", code: "INVALID_AMOUNT", field: "admin_fee_pct" }],
+			`§4 (h) the admin fee ${label}: 400 INVALID_AMOUNT naming admin_fee_pct`);
+		ok(snapshot(db) === before && calls.guard.length === 0 && calls.jt === 0 && calls.activeLoad === 0,
+			`§4 (h) the admin fee ${label}: nothing written, and neither the guard, the sheet nor the active-load check reached`);
 	}
 	{
 		const db = makeDb();
@@ -822,7 +838,8 @@ function sourcePins() {
 	ok(tpo.includes("createPhoto, createCosts.insurance_monthly, createCosts.eld_monthly, createCosts.truck_payment_monthly, createCosts.hvut_annual, createCosts.irp_annual, createAdminFee);"),
 		"§5 the INSERT binds the same cost object");
 	ok(tpo.includes('const costsAllowed = req.session.user.role === "Super Admin" || req.session.user.role === "Dispatcher";') &&
-		tpo.includes("const createAdminFee = costsAllowed ? adminFeePctOrDefault(adminFeePct) : 50;"),
+		tpo.includes("const feeParsed = costsAllowed ? parseAdminFeePct(adminFeePct) : { value: 50 };") &&
+		tpo.includes("const createAdminFee = feeParsed.value ?? 50;"),
 		"§5 the costs are honoured for the PUT's two roles only, the admin fee through the rule the PUT shares");
 
 	const guard = code(FN_SRC.truckCreateLockBlockers);

@@ -14,12 +14,15 @@ export const AMOUNT_MAX = 1000000
 
 // Every amount the forms send, in Add Truck's on-screen order (a form laid out
 // differently passes amountError an `order`). The floor is always 0 and `max`
-// is inclusive. Driver pay keeps the server's own tighter 0–10,000 range and is
-// `pay`: checked only when the user may edit it. Admin fee is a percentage.
+// is inclusive, and each is the server's own ceiling for that field: a 500 gal
+// fuel tank and 20 MPG (TRUCK_AMOUNT_FIELDS), driver pay 0–10,000
+// (DRIVER_PAY_DAILY_MAX, and `pay`: checked only when the user may edit it), and
+// the admin fee a percentage (ADMIN_FEE_PCT_MAX). A ceiling changed on one side
+// only fails scripts/test-truck-amount-caps-parity.mjs.
 export const AMOUNT_FIELDS = Object.freeze(
   [
-    { key: 'fuelTankGallons', label: 'Fuel tank' },
-    { key: 'avgMpg', label: 'Avg MPG' },
+    { key: 'fuelTankGallons', label: 'Fuel tank', max: 500 },
+    { key: 'avgMpg', label: 'Avg MPG', max: 20 },
     { key: 'purchasePrice', label: 'Purchase price' },
     { key: 'maintenanceFundMonthly', label: 'Maintenance fund' },
     { key: 'driverPayDaily', label: 'Driver pay', max: 10000, pay: true },

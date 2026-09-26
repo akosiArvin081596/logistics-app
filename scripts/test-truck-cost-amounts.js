@@ -6,11 +6,16 @@
  * five fixed costs (insurance, ELD fee, truck payment, HVUT, IRP), the purchase
  * price, the maintenance fund, the fuel tank and the average MPG — through one
  * parser, parseTruckAmount(), and one table, TRUCK_AMOUNT_FIELDS. A sent amount
- * is a finite number from 0 to TRUCK_AMOUNT_MAX (1,000,000), or blank (null, ""
- * or whitespace), which is 0. Anything else refuses the whole request with
- * 400 INVALID_AMOUNT, naming the column in `field`, before the month-end lock is
- * asked and before anything is written. An Investor's add never stores the five
- * fixed costs, so they are not read and cannot refuse it. A PUT that actually
+ * is a finite number from 0 to the row's ceiling — 500 for the fuel tank, 20
+ * for the average MPG, TRUCK_AMOUNT_MAX (1,000,000) for the rest — or blank
+ * (null, "" or whitespace), which is 0. The admin fee, parseAdminFeePct(), is a
+ * number from 0 to ADMIN_FEE_PCT_MAX (100), and blank is its 50. Anything else
+ * refuses the whole request with 400 INVALID_AMOUNT, naming the column in
+ * `field`, before the month-end lock is asked and before anything is written.
+ * An Investor's add never stores the five fixed costs, the fuel pair or the
+ * admin fee (the `staffOnly` rows, and the fee), so they are not read and
+ * cannot refuse it. The create_truck line names the fuel tank and MPG when
+ * they are set. A PUT that actually
  * changes a cost — one of the five, the purchase price, the maintenance fund or
  * the admin fee — writes exactly one `update_truck_costs` line naming each
  * change and, when one of the five moved, the monthly fixed-cost total before
@@ -27,25 +32,34 @@
  * notification are stubbed. §6 runs the shipped acceptance handler the same
  * way, with its password hash, audit line, notification and emails stubbed.
  *   §1 parseTruckAmount() — every accepted and refused shape, the cap's two
- *      edges, 1e308, whitespace, the error text; the table's nine rows, their
- *      keys (the fuel pair's `a ?? b` order included), the five fixed costs,
- *      and labels in the month-end lock's own wording.
+ *      edges, a ceiling of the caller's own, 1e308, whitespace, the error text;
+ *      the table's nine rows, their keys (the fuel pair's `a ?? b` order
+ *      included), the five fixed costs, the seven staffOnly rows, each row's
+ *      ceiling at its edge under every key, and labels in the month-end lock's
+ *      own wording.
+ *   §1b parseAdminFeePct() — not sent, blank as 50, 0..100 inclusive, and every
+ *      refused shape with its exact text.
  *   §2 PUT refusals — "Infinity", "-Infinity", 1e999 (a JSON number that parses
- *      to Infinity), "abc", -5 and more, one on each of the nine fields, each
- *      beside a driver reassignment: 400 INVALID_AMOUNT naming the column and
- *      its label, the database byte for byte as it was (no assignment, no
+ *      to Infinity), "abc", -5, 500.01 gallons, 20.01 MPG and more, one on each
+ *      of the nine fields, and the admin fee's own, each beside a driver
+ *      reassignment: 400 INVALID_AMOUNT naming the column, its label and its
+ *      range, the database byte for byte as it was (no assignment, no
  *      directory row, no audit row), the lock never asked.
  *   §3 PUT successes — the values stored and the lock asked about the parsed
  *      ones; one update_truck_costs line per save that changes a cost, in the
  *      exact format, with the fixed-cost total only when a fixed cost moved;
  *      none for a resend, a notes-only save, a field left out, or a stored NULL
- *      admin fee resent as its 50; the fuel tank on its own line.
- *   §4 POST — a Super Admin's or a Dispatcher's unreadable fixed cost refused
- *      with nothing inserted; an Investor's junk fixed costs ignored (stored as
- *      0) while a junk purchase price is refused; the create lock and the INSERT
- *      given the parsed values.
- *   §5 source pins — both routes parse before their lock, their first await and
- *      their first write; no sent amount goes through parseFloat; exactly one
+ *      admin fee resent as its 50; the fuel tank on its own line; each ceiling
+ *      (500 gal, 20 MPG, a 100% fee) stored.
+ *   §4 POST — a Super Admin's or a Dispatcher's unreadable fixed cost, fuel
+ *      value or admin fee refused with nothing inserted; an Investor's fixed
+ *      costs, fuel pair and admin fee ignored (junk, over the ceiling or real)
+ *      while a junk purchase price is refused; the create lock and the INSERT
+ *      given the parsed values; the create_truck line naming the tank and MPG
+ *      when set.
+ *   §5 source pins — both routes parse (the admin fee included) before their
+ *      lock, their first await and their first write; no sent amount goes
+ *      through parseFloat; each row held to its own ceiling; exactly one
  *      writer of update_truck_costs.
  *   §6 investor-application acceptance — the shipped PUT
  *      /api/investor-applications/:id/status handler: "Infinity", "-5",
@@ -132,7 +146,8 @@ const MODULE_SRC = [
 	liftConst("const IN_SERVICE_MAX_MONTHS_AHEAD = "),
 	liftFunction("parseInServiceDate"),
 	liftFunction("parseRetiredAt"),
-	liftFunction("adminFeePctOrDefault"),
+	liftConst("const ADMIN_FEE_PCT_MAX = "),
+	liftFunction("parseAdminFeePct"),
 	liftFunction("truckMonthlyFixed"),
 	// the real audit writers, so a row is the row production writes
 	liftConst("const PAY_EDIT_ADMIN_ONLY = "),
@@ -154,7 +169,7 @@ const MODULE_SRC = [
 ].join("\n");
 const MODULE_EXPORTS = [
 	"TRUCK_AMOUNT_MAX", "parseTruckAmount", "TRUCK_AMOUNT_FIELDS", "parseTruckAmounts",
-	"parseDriverPayDaily", "parseInServiceDate", "parseRetiredAt", "adminFeePctOrDefault", "truckMonthlyFixed",
+	"parseDriverPayDaily", "parseInServiceDate", "parseRetiredAt", "ADMIN_FEE_PCT_MAX", "parseAdminFeePct", "truckMonthlyFixed",
 	"refusePayEdit", "logAudit", "auditText",
 	"normalizeDriverName", "findDriverNameClash", "findDriverNameClashes", "canonicalDriverName",
 	"syncDriverToCarrierSheet", "assignDriverToTruck",
@@ -377,15 +392,33 @@ function parserSection() {
 	}
 	ok(p("abc").error === "Amount must be a number between 0 and 1,000,000", `§1 the default error text (got ${JSON.stringify(p("abc").error)})`);
 	ok(p("abc", "Insurance").error === "Insurance must be a number between 0 and 1,000,000", "§1 ...and with a label");
+	// A ceiling of the caller's own: the edge is inclusive, and the text names it.
+	for (const [label, raw, max, expect] of [
+		["500 under a 500 ceiling", 500, 500, 500], ['"500" under a 500 ceiling', "500", 500, 500],
+		["20 under a 20 ceiling", 20, 20, 20], ['" 20 " under a 20 ceiling', " 20 ", 20, 20], ["0 under a 20 ceiling", 0, 20, 0],
+	]) {
+		const r = p(raw, "Fuel tank", max);
+		ok(r.value === expect && !r.error, `§1 ${label} → { value: ${expect} } (got ${JSON.stringify(r)})`);
+	}
+	for (const [label, raw, max, text] of [
+		["500.01 under a 500 ceiling", 500.01, 500, "Fuel tank must be a number between 0 and 500"],
+		['"20.01" under a 20 ceiling', "20.01", 20, "Fuel tank must be a number between 0 and 20"],
+		["1,000,000 under a 500 ceiling", 1_000_000, 500, "Fuel tank must be a number between 0 and 500"],
+	]) {
+		const r = p(raw, "Fuel tank", max);
+		ok(r.error === text && r.value === undefined, `§1 ${label} → { error: ${JSON.stringify(text)} } (got ${JSON.stringify(r)})`);
+	}
 
-	// The table: nine rows, their keys, the five fixed costs, the labels.
+	// The table: nine rows, their keys, the five fixed costs, what an Investor's
+	// add ignores, and each row's own ceiling (none: TRUCK_AMOUNT_MAX).
 	const T = m.TRUCK_AMOUNT_FIELDS;
-	ok(JSON.stringify(T.map((f) => [f.col, f.keys, f.fixed])) === JSON.stringify([
-		["insurance_monthly", ["insuranceMonthly"], true], ["eld_monthly", ["eldMonthly"], true],
-		["truck_payment_monthly", ["truckPaymentMonthly"], true], ["hvut_annual", ["hvutAnnual"], true], ["irp_annual", ["irpAnnual"], true],
-		["purchase_price", ["purchasePrice"], false], ["maintenance_fund_monthly", ["maintenanceFundMonthly"], false],
-		["fuel_tank_gallons", ["fuel_tank_gallons", "fuelTankGallons"], false], ["avg_mpg", ["avg_mpg", "avgMpg"], false],
-	]), "§1 TRUCK_AMOUNT_FIELDS: the nine columns, their body keys, and the five fixed costs flagged");
+	ok(JSON.stringify(T.map((f) => [f.col, f.keys, f.fixed, f.staffOnly, f.max ?? null])) === JSON.stringify([
+		["insurance_monthly", ["insuranceMonthly"], true, true, null], ["eld_monthly", ["eldMonthly"], true, true, null],
+		["truck_payment_monthly", ["truckPaymentMonthly"], true, true, null], ["hvut_annual", ["hvutAnnual"], true, true, null],
+		["irp_annual", ["irpAnnual"], true, true, null],
+		["purchase_price", ["purchasePrice"], false, false, null], ["maintenance_fund_monthly", ["maintenanceFundMonthly"], false, false, null],
+		["fuel_tank_gallons", ["fuel_tank_gallons", "fuelTankGallons"], false, true, 500], ["avg_mpg", ["avg_mpg", "avgMpg"], false, true, 20],
+	]), "§1 TRUCK_AMOUNT_FIELDS: the nine columns, their body keys, the five fixed costs, the seven an Investor's add ignores, and the fuel pair's 500 / 20 ceilings");
 	// The fixed-cost labels are the month-end lock's own wording, in both locks.
 	for (const f of T.filter((x) => x.fixed)) {
 		const tuple = `["${f.col}", "${f.label}"`;
@@ -408,22 +441,68 @@ function parserSection() {
 		const r = one(body, "fuel_tank_gallons");
 		ok(r.values && r.values.fuel_tank_gallons === expect, `§1 fuel tank keys: ${label} (got ${JSON.stringify(r)})`);
 	}
-	// The refusal body, per field.
+	// The refusal body, per field, naming the field's own ceiling.
 	const LABELS = ["Insurance", "ELD fee", "Truck payment", "HVUT", "IRP", "Purchase price", "Maintenance fund", "Fuel tank", "Average MPG"];
+	const MAXES = ["1,000,000", "1,000,000", "1,000,000", "1,000,000", "1,000,000", "1,000,000", "1,000,000", "500", "20"];
 	T.forEach((f, i) => {
 		const r = one({ [f.keys[0]]: "abc" }, f.col);
-		ok(JSON.stringify(r) === JSON.stringify({ refusal: { error: `${LABELS[i]} must be a number between 0 and 1,000,000`, code: "INVALID_AMOUNT", field: f.col } }),
-			`§1 ${f.col}: the refusal body names "${LABELS[i]}" and the column (got ${JSON.stringify(r)})`);
+		ok(JSON.stringify(r) === JSON.stringify({ refusal: { error: `${LABELS[i]} must be a number between 0 and ${MAXES[i]}`, code: "INVALID_AMOUNT", field: f.col } }),
+			`§1 ${f.col}: the refusal body names "${LABELS[i]}", 0 to ${MAXES[i]} and the column (got ${JSON.stringify(r)})`);
 	});
 	const first = m.parseTruckAmounts({ insuranceMonthly: "abc", avgMpg: "abc" }, T);
 	ok(first.refusal && first.refusal.field === "insurance_monthly", "§1 two bad fields: the first in table order is named");
+	// Each ceiling at its edge, under every key the row reads.
+	for (const f of T) {
+		const max = f.max ?? 1_000_000;
+		for (const k of f.keys) {
+			const at = one({ [k]: max }, f.col);
+			const over = one({ [k]: String(max + 0.01) }, f.col);
+			ok(at.values && at.values[f.col] === max, `§1 ${f.col} via ${k}: ${max} (its ceiling) is stored (got ${JSON.stringify(at)})`);
+			ok(over.refusal && over.refusal.field === f.col, `§1 ${f.col} via ${k}: "${max + 0.01}" is refused (got ${JSON.stringify(over)})`);
+		}
+	}
+	for (const [col, key] of [["fuel_tank_gallons", "fuel_tank_gallons"], ["avg_mpg", "avgMpg"]]) {
+		const r = one({ [key]: 1000 }, col);
+		ok(r.refusal && r.refusal.field === col, `§1 ${col}: 1,000, under the old shared ceiling, is refused (got ${JSON.stringify(r)})`);
+	}
+
+	section("§1b parseAdminFeePct()");
+	const fee = m.parseAdminFeePct;
+	ok(m.ADMIN_FEE_PCT_MAX === 100, `§1b ADMIN_FEE_PCT_MAX is 100 (got ${m.ADMIN_FEE_PCT_MAX})`);
+	const feeNotSent = fee(undefined);
+	ok(feeNotSent.value === undefined && !feeNotSent.error && Object.prototype.hasOwnProperty.call(feeNotSent, "value"),
+		"§1b undefined (not sent) → { value: undefined }, no error");
+	for (const [label, raw] of [["null", null], ['""', ""], ['"   "', "   "], ['"\\t\\n"', "\t\n"]]) {
+		const r = fee(raw);
+		ok(r.value === 50 && !r.error, `§1b ${label} (blank) → { value: 50 }, the column's default (got ${JSON.stringify(r)})`);
+	}
+	for (const [label, raw, expect] of [
+		["0", 0, 0], ['"0"', "0", 0], ["45", 45, 45], ['"37.5"', "37.5", 37.5], ['" 45 "', " 45 ", 45], ['"\\t40\\n"', "\t40\n", 40],
+		['".5"', ".5", 0.5], ['"1e1"', "1e1", 10], ["100 (the ceiling)", 100, 100], ['"100"', "100", 100],
+	]) {
+		const r = fee(raw);
+		ok(r.value === expect && !r.error, `§1b ${label} → { value: ${expect} } (got ${JSON.stringify(r)})`);
+	}
+	for (const [label, raw] of [["-0", -0], ['"-0"', "-0"]]) {
+		const r = fee(raw);
+		ok(Object.is(r.value, 0) && !r.error, `§1b ${label} → +0, never -0 (got ${Object.is(r.value, -0) ? "-0" : JSON.stringify(r)})`);
+	}
+	for (const [label, raw] of [
+		["100.01 (a hundredth over)", 100.01], ['"100.01"', "100.01"], ["101", 101], ["5000", 5000], ["-0.01", -0.01], ["-5", -5], ['"-5"', "-5"],
+		["Infinity", Infinity], ["-Infinity", -Infinity], ['"Infinity"', "Infinity"], ["1e999 off the wire", WIRE_1E999], ["1e308", 1e308],
+		["NaN", NaN], ['"NaN"', "NaN"], ['"abc"', "abc"], ['"12abc"', "12abc"], ['"50%"', "50%"],
+		["true", true], ["false", false], ["[]", []], ["[50]", [50]], ["{}", {}], ["{ value: 50 }", { value: 50 }],
+	]) {
+		const r = fee(raw);
+		ok(r.error === "Admin fee must be a number between 0 and 100" && r.value === undefined, `§1b ${label} → { error } (got ${JSON.stringify(r)})`);
+	}
 }
 
 // ═══════════════════════════════════════════════════════════════ §2
 async function putRefusalSection() {
 	section("§2 PUT /api/trucks/:id — refused amounts");
 	ok(WIRE_1E999 === Infinity, "§2 (a JSON 1e999 parses to Infinity — the premise of the wire case)");
-	for (const [label, who, over, field, name] of [
+	for (const [label, who, over, field, name, max = "1,000,000"] of [
 		['insurance "Infinity"', SUPER, { insuranceMonthly: "Infinity" }, "insurance_monthly", "Insurance"],
 		['ELD fee "12abc"', SUPER, { eldMonthly: "12abc" }, "eld_monthly", "ELD fee"],
 		["truck payment 1e308", SUPER, { truckPaymentMonthly: 1e308 }, "truck_payment_monthly", "Truck payment"],
@@ -431,20 +510,36 @@ async function putRefusalSection() {
 		["IRP true", DISPATCHER, { irpAnnual: true }, "irp_annual", "IRP"],
 		["purchase price 1e999 off the wire", SUPER, { purchasePrice: WIRE_1E999 }, "purchase_price", "Purchase price"],
 		["maintenance fund [800]", DISPATCHER, { maintenanceFundMonthly: [800] }, "maintenance_fund_monthly", "Maintenance fund"],
-		['fuel tank "abc"', SUPER, { fuel_tank_gallons: "abc" }, "fuel_tank_gallons", "Fuel tank"],
-		["fuel tank {} under the camelCase key", SUPER, { fuel_tank_gallons: undefined, fuelTankGallons: {} }, "fuel_tank_gallons", "Fuel tank"],
-		["average MPG -5", SUPER, { avg_mpg: -5 }, "avg_mpg", "Average MPG"],
-		['average MPG "1000000.01" under the camelCase key', DISPATCHER, { avg_mpg: null, avgMpg: "1000000.01" }, "avg_mpg", "Average MPG"],
+		['fuel tank "abc"', SUPER, { fuel_tank_gallons: "abc" }, "fuel_tank_gallons", "Fuel tank", "500"],
+		["fuel tank {} under the camelCase key", SUPER, { fuel_tank_gallons: undefined, fuelTankGallons: {} }, "fuel_tank_gallons", "Fuel tank", "500"],
+		["fuel tank 500.01 (a hundredth over its ceiling)", DISPATCHER, { fuel_tank_gallons: 500.01 }, "fuel_tank_gallons", "Fuel tank", "500"],
+		["average MPG -5", SUPER, { avg_mpg: -5 }, "avg_mpg", "Average MPG", "20"],
+		['average MPG "20.01" under the camelCase key', SUPER, { avg_mpg: undefined, avgMpg: "20.01" }, "avg_mpg", "Average MPG", "20"],
+		['average MPG "1000000.01" under the camelCase key', DISPATCHER, { avg_mpg: null, avgMpg: "1000000.01" }, "avg_mpg", "Average MPG", "20"],
 	]) {
 		const db = makeDb();
 		const app = mountAll(db);
 		const before = snapshot(db);
 		const r = await app.put(who, 1, truckFormBody(truckRow(db, 1), { ...over, assignedDriver: "Bob Driver", notes: "swap" }));
 		const b = r.body || {};
-		ok(r.status === 400 && b.code === "INVALID_AMOUNT" && b.field === field && b.error === `${name} must be a number between 0 and 1,000,000`,
-			`§2 PUT, ${label} (${who.role}): 400 INVALID_AMOUNT naming ${field} (got ${r.status} ${JSON.stringify(b)})`);
+		ok(r.status === 400 && b.code === "INVALID_AMOUNT" && b.field === field && b.error === `${name} must be a number between 0 and ${max}`,
+			`§2 PUT, ${label} (${who.role}): 400 INVALID_AMOUNT naming ${field} and 0 to ${max} (got ${r.status} ${JSON.stringify(b)})`);
 		ok(snapshot(db) === before, `§2 PUT, ${label}: nothing written — no amount, no note, no reassignment to Bob Driver, no directory row, no audit row`);
 		ok(app.seen.editLockSeen.length === 0 && app.seen.activeLoad === 0, `§2 PUT, ${label}: refused before the month-end lock and the active-load check`);
+	}
+	// The admin fee: a percentage, with a refusal of its own shape.
+	for (const [label, who, fee] of [
+		["100.01", SUPER, 100.01], ['"abc"', DISPATCHER, "abc"], ["-1", SUPER, -1], ['"Infinity"', SUPER, "Infinity"],
+		["1e999 off the wire", DISPATCHER, WIRE_1E999], ["[40]", SUPER, [40]], ["5000 (under the amount ceiling)", SUPER, 5000],
+	]) {
+		const db = makeDb();
+		const app = mountAll(db);
+		const before = snapshot(db);
+		const r = await app.put(who, 1, truckFormBody(truckRow(db, 1), { adminFeePct: fee, assignedDriver: "Bob Driver", notes: "swap" }));
+		ok(r.status === 400 && JSON.stringify(r.body) === JSON.stringify({ error: "Admin fee must be a number between 0 and 100", code: "INVALID_AMOUNT", field: "admin_fee_pct" }),
+			`§2 PUT, the admin fee ${label} (${who.role}): 400 INVALID_AMOUNT naming admin_fee_pct (got ${r.status} ${JSON.stringify(r.body)})`);
+		ok(snapshot(db) === before && app.seen.editLockSeen.length === 0 && app.seen.activeLoad === 0,
+			`§2 PUT, the admin fee ${label}: nothing written, and refused before the month-end lock and the active-load check`);
 	}
 }
 
@@ -542,28 +637,88 @@ async function putSuccessSection() {
 		const r = await app.put(SUPER, 1, truckFormBody(truckRow(db, 1), { purchasePrice: "1000000" }));
 		ok(r.status === 200 && truckRow(db, 1).purchase_price === 1_000_000, `§3 a purchase price of exactly 1,000,000: stored (got ${r.status})`);
 	}
+	{
+		// The fuel pair's ceilings are values too, each on its own audit line.
+		const db = makeDb();
+		const app = mountAll(db);
+		const r = await app.put(DISPATCHER, 1, truckFormBody(truckRow(db, 1), { fuel_tank_gallons: 500, avg_mpg: undefined, avgMpg: "20" }));
+		const t = truckRow(db, 1);
+		const lines = [...audits(db, "update_truck_fuel_tank"), ...audits(db, "update_truck_avg_mpg")].map((a) => a.details);
+		ok(r.status === 200 && t.fuel_tank_gallons === 500 && t.avg_mpg === 20 && JSON.stringify(lines) ===
+			JSON.stringify(["Fuel tank for LogisX-#33: 203 gal → 500 gal", "Average MPG for LogisX-#33: 6.5 mpg → 20 mpg"]),
+			`§3 a 500-gallon tank and 20 MPG (the ceilings): stored, each on its own line (got ${r.status} ${JSON.stringify(r.body)}, ${JSON.stringify(lines)})`);
+	}
+	for (const [label, fee, line] of [["100 (the ceiling)", 100, "admin fee 50% → 100%"], ['"0"', "0", "admin fee 50% → 0%"]]) {
+		const db = makeDb();
+		const app = mountAll(db);
+		const r = await app.put(SUPER, 1, truckFormBody(truckRow(db, 1), { adminFeePct: fee }));
+		ok(r.status === 200 && truckRow(db, 1).admin_fee_pct === Number(fee) &&
+			JSON.stringify(costLines(db)) === JSON.stringify([`Costs for LogisX-#33: ${line}`]),
+			`§3 the admin fee ${label}: stored, and named on the cost line (got ${r.status}, ${JSON.stringify(costLines(db))})`);
+	}
 }
 
 // ═══════════════════════════════════════════════════════════════ §4
 async function postSection() {
 	section("§4 POST /api/trucks");
-	for (const [label, who, over, field] of [
-		['a Super Admin, insurance "Infinity"', SUPER, { insuranceMonthly: "Infinity" }, "insurance_monthly"],
-		["a Super Admin, IRP 1e999 off the wire", SUPER, { irpAnnual: WIRE_1E999 }, "irp_annual"],
-		['a Dispatcher, truck payment "12abc"', DISPATCHER, { truckPaymentMonthly: "12abc" }, "truck_payment_monthly"],
-		["a Super Admin, fuel tank -1", SUPER, { fuel_tank_gallons: -1 }, "fuel_tank_gallons"],
-		['an Investor, purchase price "Infinity"', INVESTOR, { purchasePrice: "Infinity", driverPayDaily: undefined }, "purchase_price"],
-		["an Investor, maintenance fund 1e308", INVESTOR, { maintenanceFundMonthly: 1e308, driverPayDaily: undefined }, "maintenance_fund_monthly"],
+	for (const [label, who, over, field, error] of [
+		['a Super Admin, insurance "Infinity"', SUPER, { insuranceMonthly: "Infinity" }, "insurance_monthly", "Insurance must be a number between 0 and 1,000,000"],
+		["a Super Admin, IRP 1e999 off the wire", SUPER, { irpAnnual: WIRE_1E999 }, "irp_annual", "IRP must be a number between 0 and 1,000,000"],
+		['a Dispatcher, truck payment "12abc"', DISPATCHER, { truckPaymentMonthly: "12abc" }, "truck_payment_monthly", "Truck payment must be a number between 0 and 1,000,000"],
+		["a Super Admin, fuel tank -1", SUPER, { fuel_tank_gallons: -1 }, "fuel_tank_gallons", "Fuel tank must be a number between 0 and 500"],
+		["a Super Admin, fuel tank 500.01", SUPER, { fuel_tank_gallons: 500.01 }, "fuel_tank_gallons", "Fuel tank must be a number between 0 and 500"],
+		["a Super Admin, fuel tank 600", SUPER, { fuel_tank_gallons: 600 }, "fuel_tank_gallons", "Fuel tank must be a number between 0 and 500"],
+		['a Dispatcher, fuel tank "600" under the camelCase key', DISPATCHER, { fuel_tank_gallons: undefined, fuelTankGallons: "600" }, "fuel_tank_gallons", "Fuel tank must be a number between 0 and 500"],
+		['a Dispatcher, average MPG "20.01"', DISPATCHER, { avg_mpg: "20.01" }, "avg_mpg", "Average MPG must be a number between 0 and 20"],
+		["a Super Admin, admin fee 100.01", SUPER, { adminFeePct: 100.01 }, "admin_fee_pct", "Admin fee must be a number between 0 and 100"],
+		['a Dispatcher, admin fee "abc"', DISPATCHER, { adminFeePct: "abc" }, "admin_fee_pct", "Admin fee must be a number between 0 and 100"],
+		['an Investor, purchase price "Infinity"', INVESTOR, { purchasePrice: "Infinity", driverPayDaily: undefined }, "purchase_price", "Purchase price must be a number between 0 and 1,000,000"],
+		["an Investor, maintenance fund 1e308", INVESTOR, { maintenanceFundMonthly: 1e308, driverPayDaily: undefined }, "maintenance_fund_monthly", "Maintenance fund must be a number between 0 and 1,000,000"],
 	]) {
 		const db = makeDb();
 		const app = mountAll(db);
 		const before = snapshot(db);
 		const r = await app.post(who, addForm({ ...over, assignedDriver: who === INVESTOR ? "" : "Bob Driver" }));
 		const b = r.body || {};
-		ok(r.status === 400 && b.code === "INVALID_AMOUNT" && b.field === field && /must be a number between 0 and 1,000,000$/.test(b.error || ""),
+		ok(r.status === 400 && JSON.stringify(b) === JSON.stringify({ error, code: "INVALID_AMOUNT", field }),
 			`§4 POST by ${label}: 400 INVALID_AMOUNT naming ${field} (got ${r.status} ${JSON.stringify(b)})`);
 		ok(snapshot(db) === before && !truckByUnit(db, "500"), `§4 POST by ${label}: no truck, no assignment, no audit row`);
 		ok(app.seen.createLockSeen.length === 0 && app.seen.activeLoad === 0, `§4 POST by ${label}: refused before the lock and the active-load check`);
+	}
+	for (const [label, over] of [
+		["junk in the fuel pair and the admin fee", { fuel_tank_gallons: "abc", avg_mpg: 1e308, adminFeePct: "abc" }],
+		["the fuel pair and the admin fee over their ceilings", { fuel_tank_gallons: 500.01, avgMpg: 20.01, adminFeePct: 100.01 }],
+		["a 600-gallon fuel tank", { fuel_tank_gallons: 600 }],
+		["a real fuel tank, MPG and admin fee", { fuel_tank_gallons: 180, avg_mpg: 6.8, adminFeePct: 40 }],
+	]) {
+		// An Investor's add stores none of them, so none of them is read: the row
+		// keeps the defaults (a 0 tank and MPG — the fleet defaults — and the 50% fee).
+		const db = makeDb();
+		const app = mountAll(db);
+		const r = await app.post(INVESTOR, addForm({ ...over, driverPayDaily: undefined }));
+		const t = truckByUnit(db, "500") || {};
+		ok(r.status === 200 && t.fuel_tank_gallons === 0 && t.avg_mpg === 0 && t.admin_fee_pct === 50 && t.owner_id === 9,
+			`§4 POST by an Investor with ${label}: 200, ignored — tank 0, MPG 0, fee 50 (got ${r.status} ${JSON.stringify(r.body)}, ${t.fuel_tank_gallons}/${t.avg_mpg}/${t.admin_fee_pct})`);
+		const line = (audits(db, "create_truck")[0] || {}).details || "";
+		ok(line.endsWith(", fixed costs: $0.00/mo"), `§4 POST by an Investor with ${label}: the create_truck line names no fuel (got ${JSON.stringify(line)})`);
+	}
+	for (const [label, who, over, tank, mpg, fee, tail] of [
+		["a Super Admin, a 500-gallon tank and 20 MPG (the ceilings) and a 100% fee", SUPER, { fuel_tank_gallons: "500", avgMpg: 20, avg_mpg: undefined, adminFeePct: "100" },
+			500, 20, 100, ", fixed costs: $0.00/mo, fuel tank 500 gal, avg MPG 20"],
+		["a Dispatcher, a 180-gallon tank and 6.8 MPG", DISPATCHER, { fuel_tank_gallons: 180, avg_mpg: "6.8", adminFeePct: 0 },
+			180, 6.8, 0, ", fixed costs: $0.00/mo, fuel tank 180 gal, avg MPG 6.8"],
+		["a Super Admin, the tank alone", SUPER, { fuel_tank_gallons: 180 }, 180, 0, 50, ", fixed costs: $0.00/mo, fuel tank 180 gal"],
+		["a Super Admin, the MPG alone", SUPER, { avg_mpg: 6.8 }, 0, 6.8, 50, ", fixed costs: $0.00/mo, avg MPG 6.8"],
+		["a Super Admin, neither", SUPER, {}, 0, 0, 50, ", fixed costs: $0.00/mo"],
+	]) {
+		const db = makeDb();
+		const app = mountAll(db);
+		const r = await app.post(who, addForm(over));
+		const t = truckByUnit(db, "500") || {};
+		const line = (audits(db, "create_truck")[0] || {}).details || "";
+		ok(r.status === 200 && t.fuel_tank_gallons === tank && t.avg_mpg === mpg && t.admin_fee_pct === fee,
+			`§4 POST by ${label}: 200, stored ${tank} gal / ${mpg} MPG / ${fee}% (got ${r.status} ${JSON.stringify(r.body)}, ${t.fuel_tank_gallons}/${t.avg_mpg}/${t.admin_fee_pct})`);
+		ok(line.endsWith(tail), `§4 POST by ${label}: the create_truck line ends ${JSON.stringify(tail)} (got ${JSON.stringify(line)})`);
 	}
 	{
 		// An Investor's add stores none of the five fixed costs, so junk in them is
@@ -595,7 +750,8 @@ async function postSection() {
 		ok(app.seen.createLockSeen.length === 1 && JSON.stringify(fiveOf(asked)) === JSON.stringify([1630, 50, 1200, 580, 1380]),
 			`§4 POST by ${label}: the create lock asked about the same parsed five (got ${JSON.stringify(fiveOf(asked))})`);
 		const line = (audits(db, "create_truck")[0] || {}).details || "";
-		ok(line.endsWith(", fixed costs: $3,043.33/mo"), `§4 POST by ${label}: the create_truck line names $3,043.33/mo (got ${JSON.stringify(line)})`);
+		ok(line.endsWith(", fixed costs: $3,043.33/mo, fuel tank 203 gal, avg MPG 6.5"),
+			`§4 POST by ${label}: the create_truck line names $3,043.33/mo, the tank and the MPG (got ${JSON.stringify(line)})`);
 	}
 	{
 		// A body that leaves every amount out is a truck at $0.
@@ -632,14 +788,29 @@ function sourcePins() {
 		ok(put.includes(`if (amount.${col} !== undefined) diff("${col}", amount.${col});`), `§5 PUT hands the lock ${col} as parsed`);
 	}
 
-	const addAt = at(post, "parseTruckAmounts(req.body, TRUCK_AMOUNT_FIELDS.filter((f) => !f.fixed))");
-	const costAt = at(post, "costsAllowed ? parseTruckAmounts(req.body, TRUCK_AMOUNT_FIELDS.filter((f) => f.fixed)) : { values: {} }");
-	ok(addAt > 0 && addAt < at(post, "refusePayEdit("), "§5 POST parses the four every-role amounts before the pay check");
+	const addAt = at(post, "parseTruckAmounts(req.body, TRUCK_AMOUNT_FIELDS.filter((f) => !f.staffOnly))");
+	const costAt = at(post, "costsAllowed ? parseTruckAmounts(req.body, TRUCK_AMOUNT_FIELDS.filter((f) => f.staffOnly)) : { values: {} }");
+	ok(addAt > 0 && addAt < at(post, "refusePayEdit("), "§5 POST parses the two every-role amounts before the pay check");
 	ok(costAt > addAt && costAt > at(post, "const costsAllowed = ") && costAt < at(post, "await ") &&
 		costAt < at(post, "truckCreateLockBlockers(") && costAt < at(post, "INSERT INTO trucks"),
-		"§5 POST parses the five fixed costs only for the roles that store them, before its await, its lock and its INSERT");
+		"§5 POST parses the staffOnly amounts (fixed costs, fuel pair) only for the roles that store them, before its await, its lock and its INSERT");
+	ok(post.includes("createAmounts.fuel_tank_gallons ?? 0, createAmounts.avg_mpg ?? 0") && !/\baddAmounts\b/.test(post),
+		"§5 POST's INSERT reads the fuel pair from the parsed amounts of the role's own add");
 	ok(!/parseFloat\(/.test(post), "§5 POST reads no amount through parseFloat");
 	ok((SRC.match(/"update_truck_costs"/g) || []).length === 1, "§5 exactly one writer of update_truck_costs");
+
+	// The admin fee: parsed before the lock, the await and every write, on both.
+	const pFee = at(put, "const feeParsed = parseAdminFeePct(adminFeePct);");
+	ok(pFee > 0 && pFee < at(put, "truckEditLockBlockers(") && pFee < at(put, "await ") && pFee < at(put, "assignDriverToTruck(") &&
+		pFee < at(put, "db.prepare(`UPDATE trucks SET"), "§5 PUT parses the admin fee before its month-end lock, its await, the assignment and the UPDATE");
+	ok(put.includes('if (feeParsed.value !== undefined) { updates.push("admin_fee_pct = ?"); params.push(feeParsed.value); }'),
+		"§5 PUT writes the admin fee as parsed, and only when it was sent");
+	const postFee = at(post, "const feeParsed = costsAllowed ? parseAdminFeePct(adminFeePct) : { value: 50 };");
+	ok(postFee > at(post, "const costsAllowed = ") && postFee < at(post, "await ") && postFee < at(post, "truckCreateLockBlockers(") &&
+		postFee < at(post, "INSERT INTO trucks") && post.includes("const createAdminFee = feeParsed.value ?? 50;"),
+		"§5 POST parses the admin fee for the roles that store it (an Investor's is the 50), before its await, its lock and its INSERT");
+	ok(!/adminFeePctOrDefault/.test(SRC), "§5 the never-refusing admin-fee reader is gone from server.js");
+	ok(code(liftFunction("parseTruckAmounts")).includes("f.max ?? TRUCK_AMOUNT_MAX"), "§5 parseTruckAmounts() holds each row to its own ceiling");
 	console.log("  source pins checked");
 }
 
