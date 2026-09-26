@@ -6781,20 +6781,37 @@ function findDirectoryRowForDriver(name) {
 	return hit ? { id: hit.id, driver_name: hit.driver_name, matchedBy: "normalized" } : null;
 }
 
+// The truck a driver's name belongs to, found the same two ways as their
+// directory row (findDirectoryRowForDriver()): first the truck naming them case
+// aside — the lookup each caller used before — else the first truck, by id,
+// naming them through normalizeDriverName(), the comparison every ownership
+// check uses. The second step is what finds a truck stored under a doubled or
+// edge space: LOWER() folds case, not spacing, and SQLite cannot collapse a
+// whitespace run, so the fleet-sized table is compared in JS. The directory
+// sync below and the driver app's own truck reads (GET /api/driver/:driverName
+// and GET /api/driver/me/truck-photo, which must name the same truck) use it.
+// Returns { id, unit_number, matchedBy: "case" | "normalized" }, or null; a
+// blank name matches nothing.
+function findTruckForDriver(name) {
+	const trimmed = typeof name === "string" ? name.trim() : "";
+	if (!trimmed) return null;
+	const same = db.prepare("SELECT id, unit_number FROM trucks WHERE LOWER(assigned_driver) = LOWER(?) ORDER BY id").get(trimmed);
+	if (same) return { id: same.id, unit_number: same.unit_number, matchedBy: "case" };
+	const needle = normalizeDriverName(trimmed);
+	const hit = db.prepare("SELECT id, unit_number, assigned_driver FROM trucks WHERE COALESCE(assigned_driver, '') <> '' ORDER BY id").all()
+		.find((t) => normalizeDriverName(t.assigned_driver) === needle);
+	return hit ? { id: hit.id, unit_number: hit.unit_number, matchedBy: "normalized" } : null;
+}
+
 // Sync driver to SQLite drivers_directory (replaces Google Sheet sync)
 function syncDriverToCarrierSheet(driverName, opts = {}) {
 	const { oldName, email, companyName, action } = opts;
 	try {
-		// The driver's truck: the one naming them case aside, as before, else the
-		// first by id naming them through normalizeDriverName(), so a truck stored
-		// under another spacing of the name still fills the directory's `trucks`.
-		// The table is fleet-sized; SQLite cannot collapse a whitespace run.
+		// The driver's truck, found under any spelling of the name
+		// (findTruckForDriver()), so a truck stored under another spacing still
+		// fills the directory's `trucks`.
 		const name = typeof driverName === "string" ? driverName.trim() : "";
-		const truck = name
-			? db.prepare("SELECT unit_number FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(name)
-				|| db.prepare("SELECT unit_number, assigned_driver FROM trucks WHERE COALESCE(assigned_driver, '') <> '' ORDER BY id").all()
-					.find((t) => normalizeDriverName(t.assigned_driver) === normalizeDriverName(name))
-			: null;
+		const truck = findTruckForDriver(name);
 		const truckUnit = truck ? truck.unit_number : "";
 
 		if (action === "add") {
@@ -6829,6 +6846,18 @@ function syncDriverToCarrierSheet(driverName, opts = {}) {
 			params.push(existing.id);
 			db.prepare(`UPDATE drivers_directory SET ${sets.join(", ")} WHERE id = ?`).run(...params);
 		} else if (action === "delete") {
+			// Nothing is deleted while any remaining account still holds a driver
+			// name that normalizes to this one (normalizeDriverName()): the row is
+			// that account's too. A legacy account spelled "Shorn  King" beside the
+			// real "Shorn King" must not take the real driver's row, and pay terms,
+			// with it — whichever way the row matches below. DELETE /api/users/:id
+			// removes its own account before it calls this, so only the others
+			// are seen.
+			if (findDriverNameClashes(name, { directory: false })
+				.some((h) => h.source === "users" && h.field === "driver_name")) {
+				console.warn(`[directory-sync] kept the drivers_directory row for "${name}": another account still holds that driver name`);
+				return;
+			}
 			// Every row equal to the name case aside, as before; with none, the row
 			// that names the same driver through normalizeDriverName().
 			const existing = findDirectoryRowForDriver(name);
@@ -6914,11 +6943,20 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (re
 		const obj = {};
 		headers.forEach((h, i) => { obj[h] = values[i] || ""; });
 		const insPayType = (obj.PayType || "fixed").toLowerCase() === "percentage" ? "percentage" : "fixed";
-		const insPayPct = Math.max(0, Math.min(100, parseFloat(obj.PayPercentage) || 0));
-		const insPayDaily = Math.max(0, parseFloat(obj.PayDaily) || 0);
+		// A pay field sent is read by directoryPayValue(), as the PUT reads it;
+		// one not sent (undefined or "") takes the column default, 0.
+		const insPayPct = obj.PayPercentage !== undefined && obj.PayPercentage !== ""
+			? directoryPayValue(obj.PayPercentage, "PayPercentage")
+			: 0;
+		const insPayDaily = obj.PayDaily !== undefined && obj.PayDaily !== ""
+			? directoryPayValue(obj.PayDaily, "PayDaily")
+			: 0;
+		if (Number.isNaN(insPayPct)) {
+			return res.status(400).json({ error: "Pay percentage must be a number from 0 to 100.", code: "INVALID_PAY" });
+		}
 		// A sent daily rate is held to the truck routes' cap (parseDriverPayDaily):
 		// parseFloat alone lets "Infinity" or 1e308 through to the rate every pay
-		// path multiplies.
+		// path multiplies. One that is not a number (NaN) is refused here too.
 		if (obj.PayDaily !== undefined && obj.PayDaily !== "" && !(insPayDaily <= DRIVER_PAY_DAILY_MAX)) {
 			return res.status(400).json({ error: `Daily rate must be a number from 0 to ${DRIVER_PAY_DAILY_MAX}.`, code: "INVALID_PAY" });
 		}
@@ -7061,15 +7099,20 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		const nextPayType = sentPayType === "fixed" || sentPayType === "percentage"
 			? sentPayType
 			: (current?.pay_type || "fixed");
+		// A pay field sent is read by directoryPayValue(), as the POST reads it;
+		// one not sent (undefined or "") keeps the stored value.
 		const nextPayPct = obj.PayPercentage !== undefined && obj.PayPercentage !== ""
-			? Math.max(0, Math.min(100, parseFloat(obj.PayPercentage) || 0))
+			? directoryPayValue(obj.PayPercentage, "PayPercentage")
 			: (current?.pay_percentage || 0);
 		const nextPayDaily = obj.PayDaily !== undefined && obj.PayDaily !== ""
-			? Math.max(0, parseFloat(obj.PayDaily) || 0)
+			? directoryPayValue(obj.PayDaily, "PayDaily")
 			: (current?.pay_daily || 0);
+		if (Number.isNaN(nextPayPct)) {
+			return res.status(400).json({ error: "Pay percentage must be a number from 0 to 100.", code: "INVALID_PAY" });
+		}
 		// A sent daily rate is held to the truck routes' cap (parseDriverPayDaily):
 		// parseFloat alone lets "Infinity" or 1e308 through to the rate every pay
-		// path multiplies.
+		// path multiplies. One that is not a number (NaN) is refused here too.
 		if (obj.PayDaily !== undefined && obj.PayDaily !== "" && !(nextPayDaily <= DRIVER_PAY_DAILY_MAX)) {
 			return res.status(400).json({ error: `Daily rate must be a number from 0 to ${DRIVER_PAY_DAILY_MAX}.`, code: "INVALID_PAY" });
 		}
@@ -7346,12 +7389,16 @@ app.post("/api/drivers-directory/:id/profile-picture", requireAuth, (req, res) =
 		const driver = db.prepare("SELECT * FROM drivers_directory WHERE id = ?").get(id);
 		if (!driver) return res.status(404).json({ error: "Driver not found" });
 
-		// Ownership check: Super Admin OR Driver role with matching driver_name
+		// Ownership check: Super Admin OR Driver role with matching driver_name,
+		// compared through normalizeDriverName() — the driver app uploads to the
+		// row id GET /api/driver/:driverName found for the driver, under any
+		// spacing of the name (findDirectoryRowForDriver()). A blank session name
+		// is refused, never compared.
 		const sessionUser = req.session.user;
 		if (sessionUser.role !== "Super Admin") {
 			if (sessionUser.role !== "Driver") return res.status(403).json({ error: "Forbidden" });
-			const sessionDriver = (sessionUser.driver_name || sessionUser.driverName || "").trim().toLowerCase();
-			if (!sessionDriver || sessionDriver !== (driver.driver_name || "").trim().toLowerCase()) {
+			const sessionDriver = normalizeDriverName(sessionUser.driver_name || sessionUser.driverName || "");
+			if (!sessionDriver || sessionDriver !== normalizeDriverName(driver.driver_name)) {
 				return res.status(403).json({ error: "Forbidden" });
 			}
 		}
@@ -22934,6 +22981,22 @@ function parseDriverPayDaily(raw) {
 	return { value: n };
 }
 
+// A drivers_directory pay field — "PayPercentage" or "PayDaily" — as
+// POST /api/drivers-directory and PUT /api/drivers-directory/:id read one the
+// request sent (anything but undefined or ""; what a field not sent means stays
+// with each route). Read by parsePlainDecimal(), so "12abc" or "0x10" is NaN
+// rather than the 12 or 0 parseFloat() made of it, and a number that is not
+// finite is NaN too; both routes answer NaN with 400 INVALID_PAY. A finite
+// number keeps the ranges both routes always applied: a percentage is clamped
+// to 0–100 and a daily rate up to 0, and the routes refuse a daily rate above
+// DRIVER_PAY_DAILY_MAX. This is the per-driver input resolveDailyRate() reads
+// first; nothing about how the stored value is used changes here.
+function directoryPayValue(raw, field) {
+	const n = parsePlainDecimal(raw);
+	if (!Number.isFinite(n)) return NaN;
+	return field === "PayPercentage" ? Math.max(0, Math.min(100, n)) : Math.max(0, n);
+}
+
 // In-service date — the month a truck starts accruing fixed costs
 // (truckChargeFromMonth). Shared by POST and PUT so the two can't drift.
 // Returns {error} | {value}, where value === undefined means "field not sent"
@@ -23136,26 +23199,30 @@ function parseTruckAmounts(body, fields) {
 // shared so the two cannot drift. { value } — the trimmed text — or
 // { refusal }, the 400 body both routes send, { error, code:
 // "INVALID_UNIT_NUMBER", field: "unitNumber" }, for a value that is missing
-// where `required`, null or blank ("Unit number is required"), not text, or
-// holds a control character (C0, DEL, C1) or a text-direction/format character
-// (U+200E, U+200F, U+202A–U+202E, U+2066–U+2069). Not sent to the PUT (not
-// `required`) is { value: undefined }, and the column is left alone. A unit
-// number is one line of plain text: it is shown in every fleet list, sorted,
-// and written into audit lines, where either kind of character changes how the
-// text around it reads. Checked on the value as sent, before anything is read
-// or written. The character class is auditText()'s own, copied because each
-// function must stand alone; scripts/test-truck-cost-amounts.js fails when the
-// two copies differ.
+// where `required`, null or blank ("Unit number is required"), not text,
+// holds a character of the Unicode classes Cc (control: C0, DEL, C1), Cf
+// (format: the text-direction marks and isolates, zero-width characters,
+// U+061C, U+2060–U+2064, U+FEFF and the rest), Zl or Zp (U+2028, U+2029), or
+// is longer than 50 characters once trimmed (the longest on the production
+// mirror is 12). Not sent to the PUT (not `required`) is { value: undefined },
+// and the column is left alone. A unit number is one line of plain text: it is
+// shown in every fleet list, sorted, and written into audit lines, where any of
+// those characters changes how the text around it reads without being visible.
+// Checked on the value as sent, before anything is read or written. The class
+// is auditText()'s own, copied because each function must stand alone;
+// scripts/test-truck-cost-amounts.js fails when the two copies differ.
 function parseUnitNumber(raw, { required = false } = {}) {
+	const MAX_LENGTH = 50;
 	const refuse = (error) => ({ refusal: { error, code: "INVALID_UNIT_NUMBER", field: "unitNumber" } });
 	if (raw === undefined && !required) return { value: undefined };
 	if (raw === undefined || raw === null) return refuse("Unit number is required");
 	if (typeof raw !== "string") return refuse("Unit number must be text.");
-	if (/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(raw)) {
-		return refuse("Unit number cannot contain control or text-direction characters.");
+	if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(raw)) {
+		return refuse("Unit number cannot contain control, formatting or line-break characters.");
 	}
 	const value = raw.trim();
 	if (!value) return refuse("Unit number is required");
+	if (value.length > MAX_LENGTH) return refuse(`Unit number must be at most ${MAX_LENGTH} characters.`);
 	return { value };
 }
 
@@ -23457,13 +23524,15 @@ const AUDITED_UPSTREAM = Symbol("period refusal already recorded by the caller")
 // here because these descriptors interpolate caller-supplied driver names,
 // reasons and load ids against a 50 MB body limit.
 //
-// Newlines and tabs collapse to spaces because audit_trail is read one line per
-// row and exported as such: a reason containing "\n" would otherwise split one
-// refusal across what looks like several records. Every other control character
-// (C0, DEL, C1) and every text-direction/format character (U+200E, U+200F,
-// U+202A–U+202E, U+2066–U+2069) is dropped, for the same reason: each changes
-// how the rest of a line reads without being visible in it. That class is the
-// one parseUnitNumber() refuses, copied because each function must stand alone;
+// Newlines, tabs and the line and paragraph separators (U+2028, U+2029, which
+// render as line breaks) collapse to spaces FIRST, because audit_trail is read
+// one line per row and exported as such: a reason containing "\n" would
+// otherwise split one refusal across what looks like several records. Then
+// every other character of the Unicode classes Cc, Cf, Zl and Zp is dropped —
+// control characters, the text-direction marks and isolates, zero-width and
+// other format characters — for the same reason: each changes how the rest of
+// a line reads without being visible in it. That class is the one
+// parseUnitNumber() refuses, copied because each function must stand alone;
 // scripts/test-truck-cost-amounts.js fails when the two copies differ.
 function auditText(v, max) {
 	const s = (typeof v === "string" || typeof v === "number" || typeof v === "boolean")
@@ -23476,7 +23545,7 @@ function auditText(v, max) {
 	// AFTER the collapse and the drop: dropping a character joins the text on
 	// either side of it, so text scrubbed first could come out of the drop as a
 	// marker the scrub never saw.
-	const flat = s.replace(/[\r\n\t]+/g, " ").replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "");
+	const flat = s.replace(/[\r\n\t\u2028\u2029]+/g, " ").replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, "");
 	return scrubPurgeMarker(flat).trim().slice(0, max);
 }
 
@@ -25829,7 +25898,15 @@ const DRIVER_RENAME_TARGETS = [
 	// column alone, so any two rows folding onto the new name collide. Declared
 	// on the target rather than hardcoded in the planner so the next target that
 	// gains a UNIQUE is one flag, not a second forgotten pre-flight.
-	{ key: "drivers_directory", table: "drivers_directory", column: "driver_name", match: "ci", writes: "trimmed", money: true, period: "none", uniqueName: true,
+	// ⚠️ `match: "directory_row"` — the ROW findDirectoryRowForDriver() finds for
+	// the old name, by id: the row equal to it case aside, else the first that
+	// names the same driver through normalizeDriverName(). Matched with LOWER()
+	// alone, a row stored under a spacing variant of the old name ("Shorn  King")
+	// was left behind, and the directory sync that follows a rename then found no
+	// row under the new name and ADDED one at the default terms — a second row
+	// for one driver, the shadow row that reprices pay (identity-collation.md).
+	// The merge scan still asks case-insensitively (driverRenameMergeScan()).
+	{ key: "drivers_directory", table: "drivers_directory", column: "driver_name", match: "directory_row", writes: "trimmed", money: true, period: "none", uniqueName: true,
 		why: "pay structure — getDriverPayStructures() decides fixed vs percentage and pay_daily" },
 	{ key: "trucks_assigned_driver", table: "trucks", column: "assigned_driver", match: "ci", writes: "trimmed", money: true, period: "none",
 		why: "daily rate (trucks.driver_pay_daily) + getInvestorDriverSet leg 1" },
@@ -25891,12 +25968,39 @@ function driverRenameWhereSql(t, opts = {}) {
 	const scope = opts.userId != null && t.table === "users" ? " AND id = ?" : "";
 	if (t.match === "exact_lower") return `"${t.column}" = ?${scope}`;
 	if (t.match === "ci_driver_role") return `LOWER("${t.column}") = ? AND role = 'Driver'${scope}`;
+	if (t.match === "directory_row") return `id = ?${scope}`;
 	return `LOWER("${t.column}") = ?${scope}`;
 }
 // Bind args for the WHERE above, in order. Kept beside it so the placeholder
-// count and the argument count cannot drift apart.
+// count and the argument count cannot drift apart. A "directory_row" target
+// binds the id driverRenameDirectoryRowId() answers, or null (which matches
+// nothing); it reads the tables, so each caller resolves it inside its own try.
 function driverRenameWhereArgs(t, nameLower, opts = {}) {
-	return opts.userId != null && t.table === "users" ? [nameLower, opts.userId] : [nameLower];
+	const key = t.match === "directory_row" ? driverRenameDirectoryRowId(nameLower, opts) : nameLower;
+	return opts.userId != null && t.table === "users" ? [key, opts.userId] : [key];
+}
+// The drivers_directory row a rename of `nameLower` moves: the row
+// findDirectoryRowForDriver() finds. A row it found only through
+// normalizeDriverName() (a spacing variant) is moved only when no account this
+// rename leaves alone still holds a driver name that normalizes the same:
+// otherwise it is that account's row — a legacy account "Shorn  King" renamed
+// beside the real "Shorn King" must not take the real driver's row, and pay
+// terms, with it. The accounts this rename moves are the cascade's own `users`
+// leg (one account when PUT /api/users/:id scopes it by id). A row equal to the
+// name case aside is moved as the case-insensitive match always moved it.
+// Returns the row's id, or null.
+function driverRenameDirectoryRowId(nameLower, opts = {}) {
+	const row = findDirectoryRowForDriver(nameLower);
+	if (!row) return null;
+	if (row.matchedBy === "normalized") {
+		const leg = DRIVER_RENAME_TARGETS.find((t) => t.key === "users");
+		const moved = new Set(db.prepare(`SELECT id FROM "${leg.table}" WHERE ${driverRenameWhereSql(leg, opts)}`)
+			.all(...driverRenameWhereArgs(leg, nameLower, opts)).map((r) => r.id));
+		const heldElsewhere = findDriverNameClashes(nameLower, { directory: false })
+			.some((h) => h.source === "users" && h.field === "driver_name" && !moved.has(h.id));
+		if (heldElsewhere) return null;
+	}
+	return row.id;
 }
 function driverRenameNewValue(t, newName) {
 	return t.writes === "lower" ? newName.trim().toLowerCase() : newName.trim();
@@ -26131,9 +26235,12 @@ function planDriverRenameSqlite(oldLower, opts = {}) {
 	const blockers = [];
 	for (const t of DRIVER_RENAME_TARGETS) {
 		const where = driverRenameWhereSql(t, opts);
-		const args = driverRenameWhereArgs(t, oldLower, opts);
+		let args = [];
 		let total = 0;
-		try { total = db.prepare(`SELECT COUNT(*) AS n FROM "${t.table}" WHERE ${where}`).get(...args).n; }
+		try {
+			args = driverRenameWhereArgs(t, oldLower, opts);
+			total = db.prepare(`SELECT COUNT(*) AS n FROM "${t.table}" WHERE ${where}`).get(...args).n;
+		}
 		catch (e) {
 			targets[t.key] = { rows: 0, error: e.message, money: !!t.money };
 			// ⚠️ FAIL CLOSED ON A MONEY TARGET. Recording `rows: 0` and moving on
@@ -26266,10 +26373,16 @@ function planDriverRenameSqlite(oldLower, opts = {}) {
 		// Bound as two parameters that may be equal — a case-only rename folds them
 		// to one predicate and correctly reports no collision, because the row it
 		// matches is the row being renamed.
+		// The rows this target itself writes are counted too, by id: a directory
+		// row found through normalizeDriverName() ("directory_row", a doubled
+		// space) is not among the LOWER(TRIM()) matches, yet it is the row the
+		// executor writes the new name onto.
 		if (t.uniqueName && total) {
 			try {
 				const dupSql = `SELECT id, "${t.column}" AS name FROM "${t.table}" WHERE LOWER(TRIM("${t.column}")) = ? OR LOWER(TRIM("${t.column}")) = ?`;
-				const rowsHit = db.prepare(dupSql).all(oldLower, opts.newLower || oldLower);
+				const written = db.prepare(`SELECT id, "${t.column}" AS name FROM "${t.table}" WHERE ${where}`).all(...args);
+				const rowsHit = [...new Map([...db.prepare(dupSql).all(oldLower, opts.newLower || oldLower), ...written]
+					.map((r) => [r.id, r])).values()].sort((a, b) => a.id - b.id);
 				if (rowsHit.length > 1) {
 					entry.nameCollisions = rowsHit.map((r) => `${r.name} (id ${r.id})`);
 					blockers.push({
@@ -26290,10 +26403,17 @@ function planDriverRenameSqlite(oldLower, opts = {}) {
 // not a rename, and it cannot be undone by swapping the arguments. See the
 // merge note in the fix-driver-name handler — and the Deshorn/Shorn trap in the
 // header, which is precisely the case a similarity heuristic gets wrong.
+// ⚠️ The directory leg is asked case-insensitively here, as it always was, not
+// through findDirectoryRowForDriver() ("directory_row"): that would also find a
+// spacing variant of the new name, which is the row being renamed when an
+// account's own name is only re-spelled. Each route finds a spacing variant of
+// the new name with its own naming check (findDriverNameClashes()), with the
+// carve-outs it needs.
 function driverRenameMergeScan(newLower, opts = {}) {
 	const mergeTargets = {};
 	let mergeRows = 0;
-	for (const t of DRIVER_RENAME_TARGETS) {
+	for (const target of DRIVER_RENAME_TARGETS) {
+		const t = target.match === "directory_row" ? { ...target, match: "ci" } : target;
 		let n = 0;
 		try {
 			n = db.prepare(`SELECT COUNT(*) AS n FROM "${t.table}" WHERE ${driverRenameWhereSql(t, opts)}`)
@@ -26376,8 +26496,10 @@ function applyDriverRenameSqlite({ oldName, newName, userId = null, collectIds =
 	db.transaction(() => {
 		for (const t of DRIVER_RENAME_TARGETS) {
 			const where = driverRenameWhereSql(t, opts);
-			const args = driverRenameWhereArgs(t, oldLower, opts);
 			try {
+				// Resolved here, inside the transaction and the try: a
+				// "directory_row" target reads the table to find its row.
+				const args = driverRenameWhereArgs(t, oldLower, opts);
 				if (collectIds) {
 					try {
 						const ids = db.prepare(`SELECT id FROM "${t.table}" WHERE ${where}`).all(...args).map((r) => r.id);
@@ -31565,9 +31687,11 @@ function findDriverNameClash(name, opts = {}) {
 // The spelling an existing driver identity already uses for this name — an
 // account's driver name first, then a drivers_directory row — or the trimmed
 // name itself when no identity holds it. A truck's driver is stored by NAME in
-// trucks.assigned_driver and truck_assignments, and assignDriverToTruck(),
-// syncDriverToCarrierSheet() and the driver-facing truck lookups find those
-// rows by case-insensitive equality, which does not fold spacing. Assigning
+// trucks.assigned_driver and truck_assignments, and assignDriverToTruck() and
+// several other name-keyed truck reads (the dispatch Owner ID stamp, the
+// expense truck stamp) find those rows by case-insensitive equality, which does
+// not fold spacing; the directory sync and the driver app's own truck reads
+// fold it (findTruckForDriver()). Assigning
 // "Shorn  King" to a truck therefore resolves to "Shorn King", the driver it
 // names, rather than starting a second spelling of one driver. The account's
 // spelling wins because it is the one a driver's own session looks the truck up
@@ -32747,12 +32871,15 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 		// enough to land reliably on a flaky mobile connection. `has_photo` is 1
 		// exactly when that route would serve the stored photo, decided from its
 		// bytes (storedFileKind()) on its first 200 characters, which are read
-		// here and not returned.
-		const assignedTruckRow = db.prepare(
+		// here and not returned. The truck is found under any spelling of the
+		// driver's name (findTruckForDriver()), as the photo route finds it, so
+		// one stored under another spacing is still this driver's.
+		const truckMatch = findTruckForDriver(driverName);
+		const assignedTruckRow = truckMatch ? db.prepare(
 			`SELECT id, unit_number, make, model, year, vin, license_plate, status,
 			        substr(photo, 1, 200) AS photo_head
-			 FROM trucks WHERE LOWER(assigned_driver) = ?`
-		).get(nameLower);
+			 FROM trucks WHERE id = ?`
+		).get(truckMatch.id) : null;
 		let assignedTruck = null;
 		if (assignedTruckRow) {
 			const { photo_head: photoHead, ...truckFields } = assignedTruckRow;
@@ -33071,9 +33198,12 @@ app.get("/api/driver/me/truck-photo", requireAuth, (req, res) => {
 		if (user.role !== "Driver" && user.role !== "Super Admin") {
 			return res.status(403).json({ error: "Forbidden" });
 		}
-		const driverName = (user.driverName || user.driver_name || "").trim().toLowerCase();
+		// The truck GET /api/driver/:driverName names, found the same way
+		// (findTruckForDriver()): under any spelling of the driver's name.
+		const driverName = (user.driverName || user.driver_name || "").trim();
 		if (!driverName) return res.status(404).json({ error: "Not found" });
-		const row = db.prepare("SELECT photo FROM trucks WHERE LOWER(assigned_driver) = ?").get(driverName);
+		const truck = findTruckForDriver(driverName);
+		const row = truck ? db.prepare("SELECT photo FROM trucks WHERE id = ?").get(truck.id) : null;
 		const file = storedFileForServing(row?.photo);
 		if (!file) return res.status(404).json({ error: "Not found" });
 		// Revalidated with the server on every use: the browser may keep a copy
@@ -33109,11 +33239,15 @@ app.get("/api/driver/shared-documents/:id/download", requireAuth, (req, res) => 
 		}
 		const sessionUser = req.session.user;
 		if (sessionUser.role !== "Super Admin") {
-			// Ownership check: session user must be the driver this doc was uploaded to
+			// Ownership check: session user must be the driver this doc was uploaded
+			// to. Compared through normalizeDriverName(), so the driver whose
+			// directory row GET /api/driver/:driverName found under another spacing
+			// of their name (findDirectoryRowForDriver()) can download what it
+			// lists. A blank session name is refused, never compared.
 			const driverRow = db.prepare("SELECT driver_name FROM drivers_directory WHERE id = ?").get(doc.driver_id);
 			if (!driverRow) return res.status(403).json({ error: "Forbidden" });
-			const sessionDriver = (sessionUser.driver_name || sessionUser.driverName || "").trim().toLowerCase();
-			if (!sessionDriver || sessionDriver !== (driverRow.driver_name || "").trim().toLowerCase()) {
+			const sessionDriver = normalizeDriverName(sessionUser.driver_name || sessionUser.driverName || "");
+			if (!sessionDriver || sessionDriver !== normalizeDriverName(driverRow.driver_name)) {
 				return res.status(403).json({ error: "Forbidden" });
 			}
 		}
@@ -33162,20 +33296,23 @@ app.get("/api/driver/truck-documents/:id/view", requireAuth, truckDocViewLimiter
 		const role = req.session.user.role;
 		if (role !== "Super Admin" && role !== "Dispatcher") {
 			if (role !== "Driver") return res.status(403).json({ error: "Forbidden" });
-			// Driver must be the one currently assigned to this truck.
-			const sessionDriver = (req.session.user.driverName || req.session.user.driver_name || "").trim().toLowerCase();
+			// Driver must be the one currently assigned to this truck. Names are
+			// compared through normalizeDriverName(), the comparison every
+			// ownership check uses, so a driver whose truck is stored under another
+			// spacing of their name opens the documents GET /api/driver/:driverName
+			// lists for that truck (findTruckForDriver()). A blank session name is
+			// refused, never compared.
+			const sessionDriver = normalizeDriverName(req.session.user.driverName || req.session.user.driver_name || "");
 			if (!sessionDriver) return res.status(403).json({ error: "Forbidden" });
 			const active = db.prepare(
-				`SELECT 1 FROM truck_assignments
-				 WHERE truck_id = ? AND end_date = '' AND LOWER(driver_name) = ?
-				 LIMIT 1`
-			).get(doc.truck_id, sessionDriver);
+				"SELECT driver_name FROM truck_assignments WHERE truck_id = ? AND end_date = ''"
+			).all(doc.truck_id).some((a) => normalizeDriverName(a.driver_name) === sessionDriver);
 			if (!active) {
 				// Fallback: trucks.assigned_driver is kept in sync with the
 				// active assignment, so accept that too in case the history
 				// table lags.
 				const truck = db.prepare("SELECT assigned_driver FROM trucks WHERE id = ?").get(doc.truck_id);
-				if (!truck || (truck.assigned_driver || "").trim().toLowerCase() !== sessionDriver) {
+				if (!truck || normalizeDriverName(truck.assigned_driver) !== sessionDriver) {
 					return res.status(403).json({ error: "Forbidden" });
 				}
 			}
@@ -45248,12 +45385,14 @@ const MAINTENANCE_NOTICE_DISCLAIMER = clampNoticeCopy(
 // investor-facing notice.
 const MAINTENANCE_NOTICE_AUDIENCE = String(process.env.MAINTENANCE_NOTICE_AUDIENCE ?? "").trim().toLowerCase() === "all" ? "all" : "investor";
 // A STRING, not a number: the client store compares it with
-// `String(data?.version ?? DEFAULTS.version)` and keys the per-session
-// dismissal flag off it (client/src/stores/maintenance.js), so bumping this is
-// how an operator re-shows the popup to everyone who already dismissed it.
+// `String(data?.version ?? DEFAULTS.version)` and keys the dismissal flag off
+// it (client/src/stores/maintenance.js), so bumping this is how an operator
+// re-shows the popup to everyone who already dismissed it. The flag is kept per
+// browser tab and per person: sessionStorage, keyed by this version and the
+// signed-in user's id.
 //
-// Because it is concatenated straight into a sessionStorage key
-// (`logisx.maintenanceNotice.dismissed.v${version}`), it gets the tightest
+// Because it is concatenated straight into that sessionStorage key
+// (`logisx.maintenanceNotice.dismissed.v${version}.u${userId}`), it gets the tightest
 // handling of the four: strip to plain alphanumerics plus `. _ -`, THEN cap —
 // stripping first so the cap counts only surviving characters. That keeps a
 // pathological value (an essay, a quoted blob, a key-shaped string with its own

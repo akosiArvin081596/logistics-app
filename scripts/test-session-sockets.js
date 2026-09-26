@@ -239,6 +239,11 @@ const CASCADE_SRC = [
 	liftConst("const DRIVER_RENAME_TARGETS = [", "\n];"),
 	liftFunction("function driverRenameWhereSql(t, opts = {}) {"),
 	liftFunction("function driverRenameWhereArgs(t, nameLower, opts = {}) {"),
+	// The drivers_directory leg finds its row through driverRenameDirectoryRowId().
+	liftFunction("function driverRenameDirectoryRowId(nameLower, opts = {}) {"),
+	liftFunction("function normalizeDriverName(s) {"),
+	liftFunction("function findDriverNameClashes(name, opts = {}) {"),
+	liftFunction("function findDirectoryRowForDriver(name) {"),
 	liftFunction("function driverRenameNewValue(t, newName) {"),
 	liftConst("const DRIVER_RENAME_ID_CAP = "),
 	liftFunction("function replaceNameOnWordBoundary(text, oldName, newName) {"),

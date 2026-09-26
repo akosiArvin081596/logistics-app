@@ -331,7 +331,11 @@ function servingSection() {
 async function getSections() {
 	section("§2 GET /api/driver/me/truck-photo");
 	const db = makeDb();
-	const photoEnv = (d) => ({ db: d, storedFileForServing: M.storedFileForServing, storedFileETag: M.storedFileETag, ifNoneMatchIncludes: M.ifNoneMatchIncludes });
+	// The route finds the driver's truck through findTruckForDriver(), which
+	// reads `db` (its own subject is scripts/test-directory-spacing-match.js).
+	const truckLookup = (d) => new Function("db",
+		`"use strict";\n${FN_SRC.normalizeDriverName}\n${liftFunction("findTruckForDriver")}\nreturn findTruckForDriver;`)(d);
+	const photoEnv = (d) => ({ db: d, findTruckForDriver: truckLookup(d), storedFileForServing: M.storedFileForServing, storedFileETag: M.storedFileETag, ifNoneMatchIncludes: M.ifNoneMatchIncludes });
 	const getPhoto = mountRoute(ROUTES.truckPhoto, photoEnv(db));
 	const photoAs = (user, stored, headers = {}) => {
 		db.prepare("UPDATE trucks SET photo = ? WHERE id = 1").run(stored);
@@ -410,6 +414,11 @@ async function getSections() {
 		ok(other.status === 200 && other.headers["content-type"] === "image/png" && PNG.equals(bytesOf(other) || Buffer.alloc(0)) &&
 			other.headers.etag === etagOf(uri("image/png", PNG)),
 			`§2 another driver, whose truck has a different photo, sending that ETag: 200 with their own photo under its own ETag (got ${other.status})`);
+		// A truck stored under another spacing of the driver's name is still theirs.
+		db2.prepare("UPDATE trucks SET assigned_driver = 'Marcus  Hale' WHERE id = 3").run();
+		const spaced = await get2({ session: { user: { id: 4, username: "mhale", role: "Driver", driverName: "Marcus Hale" } }, headers: {} });
+		ok(spaced.status === 200 && PNG.equals(bytesOf(spaced) || Buffer.alloc(0)),
+			`§2 a driver whose truck is stored with a doubled space in the name: 200 with that truck's photo (got ${spaced.status})`);
 	}
 	{
 		const out = await photoAs(DRIVER, uri("image/jpeg", PNG));

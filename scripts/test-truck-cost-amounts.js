@@ -86,12 +86,15 @@
  *      digits, over-long text and non-numbers are NaN; the cap is checked
  *      before the pattern; both parsers keep their refusal text; each cost
  *      row's `per`. §2b the routes refuse those inputs with the same bodies.
- *   §7 unit numbers (parseUnitNumber()): not text, blank, or holding a control
- *      or text-direction character → 400 INVALID_UNIT_NUMBER, field unitNumber,
- *      on POST and PUT, before anything is read or written; auditText() drops
- *      the same characters before its purge-marker scrub, so none can forge a
- *      marker; the two copies of the class are identical and written as
- *      escapes; every truck audit line and refusal names the unit number
+ *   §7 unit numbers (parseUnitNumber()): not text, blank, holding a control, a
+ *      line or paragraph separator (U+2028, U+2029) or a text-direction
+ *      character, or longer than 50 characters once trimmed → 400
+ *      INVALID_UNIT_NUMBER, field unitNumber, on POST and PUT, before anything
+ *      is read or written; auditText() drops or collapses to a space (the
+ *      separators, like newlines and tabs) exactly the characters
+ *      parseUnitNumber() refuses — checked over the whole BMP — before its
+ *      purge-marker scrub, so none can forge a marker; both classes are written
+ *      as escapes; every truck audit line and refusal names the unit number
  *      through auditText(…, 100).
  *   §8 the PUT's one await: two saves renaming two trucks to one number (in
  *      another case, or exactly) at once — exactly one succeeds, the other is
@@ -212,6 +215,7 @@ const MODULE_SRC = [
 	liftFunction("findDriverNameClash"),
 	liftFunction("canonicalDriverName"),
 	liftFunction("findDirectoryRowForDriver"),
+	liftFunction("findTruckForDriver"),
 	liftFunction("syncDriverToCarrierSheet"),
 	liftFunction("assignDriverToTruck"),
 ].join("\n");
@@ -1185,11 +1189,20 @@ async function strictAmountRoutesSection() {
 const UNSAFE_UNIT_CHARS = [
 	"\u0000", "\u0007", "\t", "\n", "\r", "\u001b", "\u001f", "\u007f", "\u0080", "\u0085", "\u009f",
 	"\u200e", "\u200f", "\u202a", "\u202b", "\u202c", "\u202d", "\u202e", "\u2066", "\u2067", "\u2068", "\u2069",
+	"\u2028", "\u2029",
 ];
 const codePoint = (c) => `U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}`;
+// Format characters (Cf) the old hand list missed: the soft hyphen, the Arabic
+// letter mark, the zero-width space/non-joiner/joiner, the word joiner and
+// invisible operators, the byte-order mark, and a tag outside the BMP.
+UNSAFE_UNIT_CHARS.push(...[0x00ad, 0x061c, 0x200b, 0x200c, 0x200d, 0x2060, 0x2064, 0xfeff, 0xe0001].map((cp) => String.fromCodePoint(cp)));
 const UNSAFE_RE = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
 const INVALID_UNIT = (error) => ({ error, code: "INVALID_UNIT_NUMBER", field: "unitNumber" });
-const UNIT_CHARS_ERROR = "Unit number cannot contain control or text-direction characters.";
+const UNIT_CHARS_ERROR = "Unit number cannot contain control, formatting or line-break characters.";
+const UNIT_MAX_ERROR = "Unit number must be at most 50 characters.";
+// U+2028 and U+2029, which render as line breaks: refused in a unit number, and
+// collapsed to a space by auditText() as newlines and tabs are.
+const LINE_SEPARATORS = [String.fromCharCode(0x2028), String.fromCharCode(0x2029)];
 async function unitNumberSection() {
 	section("§7 unit numbers — one plain line of text, and named through auditText() in every truck audit line");
 	const { m } = mountAll(makeDb());
@@ -1206,6 +1219,12 @@ async function unitNumberSection() {
 		ok(same(pu(raw), { refusal: INVALID_UNIT("Unit number must be text.") }), `§7 ${label}: "Unit number must be text." (got ${JSON.stringify(pu(raw))})`);
 	}
 	ok(same(pu("  LogisX-#23  "), { value: "LogisX-#23" }), "§7 padding is trimmed");
+	ok(same(pu("X".repeat(50)), { value: "X".repeat(50) }) && same(pu(`  ${"X".repeat(50)}  `), { value: "X".repeat(50) }),
+		"§7 50 characters, once trimmed, is a unit number");
+	for (const required of [false, true]) {
+		ok(same(pu("X".repeat(51), { required }), { refusal: INVALID_UNIT(UNIT_MAX_ERROR) }),
+			`§7 51 characters${required ? " (POST)" : " (PUT)"}: "${UNIT_MAX_ERROR}"`);
+	}
 	for (const raw of ["LogisX-#23", "Unit 5", "Ünité-7", "LX¡", "LX⁰"]) {
 		ok(same(pu(raw), { value: raw }), `§7 ${JSON.stringify(raw)} is a unit number`);
 	}
@@ -1213,15 +1232,27 @@ async function unitNumberSection() {
 		ok(same(pu(`Logis${c}X-#23`), { refusal: INVALID_UNIT(UNIT_CHARS_ERROR) }), `§7 ${codePoint(c)} inside: refused`);
 		ok(same(pu(`LogisX-#23${c}`), { refusal: INVALID_UNIT(UNIT_CHARS_ERROR) }), `§7 ${codePoint(c)} at the end, where a trim would hide it: refused`);
 	}
-	// One class, two copies (each function stands alone): they must not drift.
-	const classOf = (name) => (liftFunction(name).match(/\/\[\\u0000-[^\]]*\]\/g?/) || [""])[0].replace(/g$/, "");
-	ok(classOf("parseUnitNumber") !== "" && classOf("parseUnitNumber") === classOf("auditText"),
-		`§7 parseUnitNumber() and auditText() carry the same character class (${classOf("parseUnitNumber")} / ${classOf("auditText")})`);
-	ok(classOf("parseUnitNumber") === "/[\\u0000-\\u001f\\u007f-\\u009f\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]/",
-		`§7 ...which is C0, DEL + C1 and the text-direction characters, written as escapes (got ${classOf("parseUnitNumber")})`);
+	// One rule, two copies (each function stands alone): parseUnitNumber()
+	// refuses exactly the characters auditText() drops or collapses to a space.
+	// Checked one character at a time over the Basic Multilingual Plane, and a
+	// few characters beyond it (a format character and a tag among them).
+	const disagree = [];
+	for (const cp of [...Array(0x10000).keys(), 0x10000, 0x110bd, 0x1d173, 0x1f600, 0xe0001, 0xe0041]) {
+		const c = String.fromCodePoint(cp);
+		if (!!pu(`L${c}X`).refusal !== (m.auditText(`L${c}X`, 100) !== `L${c}X`)) disagree.push(codePoint(c));
+	}
+	ok(disagree.length === 0, `§7 parseUnitNumber() refuses exactly the characters auditText() drops or collapses (they disagree on ${disagree.slice(0, 8).join(", ") || "none"})`);
+	const CLASS = String.raw`/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/`;
+	const classOf = (name) => (liftFunction(name).match(/\/\[\\p\{Cc\}[^\]]*\]\/[gu]*/) || [""])[0].replace(/[gu]+$/, "");
+	ok(classOf("parseUnitNumber") === CLASS && classOf("auditText") === CLASS,
+		`§7 parseUnitNumber() and auditText() carry one class, Cc Cf Zl Zp, written as escapes (got ${classOf("parseUnitNumber")} / ${classOf("auditText")})`);
+	ok(liftFunction("parseUnitNumber").includes(`${CLASS}u.test(raw)`) && liftFunction("auditText").includes(`.replace(${CLASS}gu, "")`),
+		"§7 ...each with the u flag, which the property escapes need");
+	ok(liftFunction("auditText").includes(String.raw`s.replace(/[\r\n\t\u2028\u2029]+/g, " ").replace(${CLASS}gu, "")`),
+		"§7 auditText() collapses a run of CR, LF, tab, U+2028 and U+2029 to one space, then drops the rest of the class, written as escapes");
 	// The characters themselves never appear in the source: written as escapes,
 	// so the code reads as it runs.
-	const literal = new RegExp("[\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]");
+	const literal = new RegExp("[\\u00ad\\u061c\\u200b-\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2060-\\u2064\\u2066-\\u2069\\ufeff]");
 	for (const [label, text] of [["server.js", SRC], ["client/src/lib/truckAmounts.js", fs.readFileSync(path.join(__dirname, "..", "client", "src", "lib", "truckAmounts.js"), "utf8")]]) {
 		ok(!literal.test(text), `§7 ${label} carries no literal text-direction character`);
 	}
@@ -1233,6 +1264,7 @@ async function unitNumberSection() {
 		["a unit number that is an object", { unitNumber: { v: "500" } }, INVALID_UNIT("Unit number must be text.")],
 		["no unit number", { unitNumber: undefined }, INVALID_UNIT("Unit number is required")],
 		["a blank unit number", { unitNumber: "  " }, INVALID_UNIT("Unit number is required")],
+		["a unit number of 51 characters", { unitNumber: "X".repeat(51) }, INVALID_UNIT(UNIT_MAX_ERROR)],
 	]) {
 		const db = makeDb();
 		const app = mountAll(db);
@@ -1250,6 +1282,7 @@ async function unitNumberSection() {
 		["null", null, INVALID_UNIT("Unit number is required")],
 		['""', "", INVALID_UNIT("Unit number is required")],
 		['"   "', "   ", INVALID_UNIT("Unit number is required")],
+		["a unit number of 51 characters", "X".repeat(51), INVALID_UNIT(UNIT_MAX_ERROR)],
 	]) {
 		const db = makeDb();
 		const app = mountAll(db);
@@ -1269,10 +1302,12 @@ async function unitNumberSection() {
 	// tabs a space, and dropped BEFORE the purge-marker scrub.
 	const at = m.auditText;
 	for (const c of UNSAFE_UNIT_CHARS) {
-		const want = ["\t", "\n", "\r"].includes(c) ? "a b" : "ab";
+		const want = ["\t", "\n", "\r", ...LINE_SEPARATORS].includes(c) ? "a b" : "ab";
 		ok(at(`a${c}b`, 100) === want, `§7 auditText() turns ${codePoint(c)} between two letters into ${JSON.stringify(want)} (got ${JSON.stringify(at(`a${c}b`, 100))})`);
 	}
 	ok(at("a\r\n\tb", 100) === "a b", "§7 auditText() still collapses a run of newlines and tabs to one space");
+	ok(at(`a${LINE_SEPARATORS.join("")}${String.fromCharCode(13, 10)}b`, 100) === "a b",
+		"§7 ...and a run holding U+2028 and U+2029 with them");
 	for (const c of ["\u0001", "\u0085", "\u200e", "\u202e", "\u2066"]) {
 		for (const text of [`[${c}PERIOD_FINALIZED]`, `[PER${c}IOD_FINALIZED]`, `[${c}period_x`]) {
 			const out = at(text, 100);
@@ -1508,6 +1543,7 @@ const BEHAVIOUR = [parserSection, plainDecimalSection, putRefusalSection, strict
 	putRenameSyncSection, postSection, unitNumberSection, renameRaceSection, photoChangeSection];
 const AWAIT_IF = "if (nextAssignedDriver && normalizeDriverName(nextAssignedDriver) !== normalizeDriverName(truck.assigned_driver)) {";
 const UNSAFE_CLASS = String.raw`/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/`;
+const UNIT_CLASS = String.raw`/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/`;
 const MUTANTS = [
 	["M1 an amount no longer held finite and in range", [["module", "if (!Number.isFinite(n) || n < 0 || n > max) {", "if (false) {"]]],
 	["M2 text read by a bare Number(), so \"0x10\" is 16", [["module",
@@ -1521,11 +1557,15 @@ const MUTANTS = [
 	["M6 the admin fee held to the amount ceiling instead of 0–100", [["module", 'return parseTruckAmount(raw, "Admin fee", ADMIN_FEE_PCT_MAX);', 'return parseTruckAmount(raw, "Admin fee", TRUCK_AMOUNT_MAX);']]],
 	["M7 the fuel tank's 500-gallon ceiling dropped", [["module", "staffOnly: true, max: 500 }", "staffOnly: true }"]]],
 	["M8 the average MPG's 20 ceiling dropped", [["module", "staffOnly: true, max: 20 }", "staffOnly: true }"]]],
-	["M9 unit numbers with control or text-direction characters let through", [["module", `if (${UNSAFE_CLASS}.test(raw)) {`, "if (false) {"]]],
-	["M10 auditText() keeping control and text-direction characters", [["module", `.replace(${UNSAFE_CLASS}g, "")`, ""]]],
+	["M9 unit numbers with control or text-direction characters let through", [["module", `if (${UNIT_CLASS}u.test(raw)) {`, "if (false) {"]]],
+	["M10 auditText() keeping control and text-direction characters", [["module", `.replace(${UNIT_CLASS}gu, "")`, ""]]],
 	["M11 auditText() dropping them after the purge-marker scrub", [["module",
-		`const flat = s.replace(/[\\r\\n\\t]+/g, " ").replace(${UNSAFE_CLASS}g, "");\n\treturn scrubPurgeMarker(flat).trim().slice(0, max);`,
-		`return scrubPurgeMarker(s).replace(/[\\r\\n\\t]+/g, " ").replace(${UNSAFE_CLASS}g, "").trim().slice(0, max);`]]],
+		`const flat = s.replace(/[\\r\\n\\t\\u2028\\u2029]+/g, " ").replace(${UNIT_CLASS}gu, "");\n\treturn scrubPurgeMarker(flat).trim().slice(0, max);`,
+		`return scrubPurgeMarker(s).replace(/[\\r\\n\\t\\u2028\\u2029]+/g, " ").replace(${UNIT_CLASS}gu, "").trim().slice(0, max);`]]],
+	["M19 the unit-number class back to the old hand list", [["module", `if (${UNIT_CLASS}u.test(raw)) {`, `if (${UNSAFE_CLASS}.test(raw)) {`]]],
+	["M22 auditText()'s class back to the old hand list", [["module", `.replace(${UNIT_CLASS}gu, "")`, `.replace(${UNSAFE_CLASS}g, "")`]]],
+	["M20 the unit number's 50-character cap dropped", [["module", "if (value.length > MAX_LENGTH) return refuse(", "if (false) return refuse("]]],
+	["M21 auditText() leaving U+2028 and U+2029 in place", [["module", String.raw`s.replace(/[\r\n\t\u2028\u2029]+/g, " ")`, String.raw`s.replace(/[\r\n\t]+/g, " ")`]]],
 	["M12 the unit-number check back above the active-load wait", [
 		["put", PUT_CLASH, ""],
 		["put", AWAIT_IF, `if (nextUnit !== undefined) {\n\t\t\t${PUT_CLASH}\n\t\t}\n\t\t${AWAIT_IF}`],
