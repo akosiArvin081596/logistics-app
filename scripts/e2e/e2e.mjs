@@ -23,7 +23,9 @@
 //      of their home; the SAME person again keeps in-app navigation (the control)
 //   S3 the visible residue: the Dispatcher's dashboard while its own fetch is in flight
 //   S4 sign-out with no network, and while the server is down, ends on the app's own
-//      login form · S5 another tab follows a sign-out, and a different person
+//      login form · S5 another tab follows a sign-out (S5a), leaves for a clean /login
+//      when the session ends without one (S5b), and reloads as the different person
+//      another tab signed in (S5c)
 //   S6 /login after a confirmed sign-out renders without a session round-trip
 //   S7 a second tap on Sign In sends no second sign-in
 // Dispatcher data section (D1-D3; ONLY=dispatcher): the Dispatcher's copies of the
@@ -79,9 +81,10 @@ const [DVW, DVH] = String(process.env.DRIVER_VIEWPORT || '430x900').split('x').m
 const ONLY = String(process.env.ONLY || '').toLowerCase()
 const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance']
 // Sign-ins (POST /api/auth/login) each section makes; the limiter allows 20 per 15
-// minutes per server process. The sign-out section's figure is its worst case
-// (a build that sends S7's second sign-in).
-const SIGN_INS = { trucks: 3, signout: 18, dispatcher: 2, maintenance: 3 }
+// minutes per server process. The sign-out section's figure is its worst case: S4a's
+// second half runs, and the build sends S7's second sign-in (one fewer for each
+// that does not happen).
+const SIGN_INS = { trucks: 3, signout: 20, dispatcher: 2, maintenance: 3 }
 
 function die(msg) { console.error(`e2e: ${msg}`); process.exit(2) }
 if (!BASE_URL) die('BASE_URL is required')
@@ -2036,11 +2039,15 @@ const readMarker = (page) => evalSafe(page, () => (window.__qaMarker === undefin
 const markerText = (m) => (m === NO_MARK ? 'undefined (a fresh page: it was loaded again)' : `'${m}' (the same page: an in-app route change, no reload)`)
 
 // Main-frame document requests from now on: a full page load makes one, an in-app route change none.
+// `times` holds when each was sent (Date.now()), for the timings S5b and S5c report.
 function trackDocuments(page) {
   const docs = []
-  const on = (r) => { if (r.resourceType() === 'document' && r.frame() === page.mainFrame()) docs.push(new URL(r.url()).pathname) }
+  const times = []
+  const on = (r) => {
+    if (r.resourceType() === 'document' && r.frame() === page.mainFrame()) { docs.push(new URL(r.url()).pathname); times.push(Date.now()) }
+  }
   page.on('request', on)
-  return { docs, stop: () => page.off('request', on) }
+  return { docs, times, stop: () => page.off('request', on) }
 }
 const docsText = (d) => (d.length ? `${d.length} (${d.join(', ')})` : 'none')
 
@@ -2582,43 +2589,203 @@ async function otherTabSignOutCase() {
   })
 }
 
-// ---- S5b: another tab follows a different person
+// A time relative to `t0`: signed on a timeline ('+38 ms'), or in words ('9 ms after').
+const relMs = (t, t0) => (t && t0 ? `${t >= t0 ? '+' : ''}${t - t0} ms` : 'not seen')
+const offsetText = (t, t0) => (!t || !t0 ? 'at a moment not seen' : t >= t0 ? `${t - t0} ms after` : `${t0 - t} ms before`)
+// The moments S5b and S5c time, taken from the page's own network events: headed, slowMo
+// delays when a Playwright action RETURNS, not when the page sent or got something.
+//   docAt    the tab's next main-frame document request (the page it loads next)
+//   checkAt  its first GET /api/auth/session answer after that, with the answer
+//   signAt   its first POST /api/auth/login answer
+function tabTimeline(page) {
+  const tl = { docAt: 0, check: null, signAt: 0 }
+  const onReq = (r) => { if (!tl.docAt && r.resourceType() === 'document' && r.frame() === page.mainFrame()) tl.docAt = Date.now() }
+  const onResp = async (r) => {
+    const p = pathOf(r.url()); const m = r.request().method()
+    if (!tl.signAt && p === '/api/auth/login' && m === 'POST') { tl.signAt = Date.now(); return }
+    if (tl.check || !tl.docAt || p !== '/api/auth/session' || m !== 'GET') return
+    tl.check = { at: Date.now(), status: r.status(), authenticated: null }
+    try { tl.check.authenticated = (await r.json())?.authenticated ?? null } catch { /* unreadable */ }
+  }
+  page.on('request', onReq)
+  page.on('response', onResp)
+  tl.stop = () => { page.off('request', onReq); page.off('response', onResp) }
+  return tl
+}
+
+// ---- S5b: the session ends without a sign-out, and tab A then signs a different person in
+// Tab A's /login asks the server, which answers "signed out". That definitive answer stamps
+// the cookie-owner epoch, and tab B (still showing the Super Admin) follows the stamp to a
+// fresh /login within ~50 ms, before anyone signs in. Showing nobody, B then has nothing to
+// follow when the Dispatcher signs in on A. That is the design (no tab keeps showing the
+// signed-out person), so B is not expected to follow the later sign-in; S5c scores a tab
+// that follows a different person.
 async function otherTabNewPersonCase() {
   const step = 'S5b'
-  let observed = ''; let ok = false
-  let ctx = null; let b = null
+  let observed = ''; let v = 'FAIL'
+  let ctx = null; let a = null; let b = null
+  let ta = null // tab A's timeline: its /login request, its own session answer (what B follows), the sign-in answer
   try {
     const t2 = await twoTabs(step)
-    ctx = t2.ctx; b = t2.b
-    const { a, units, before } = t2
-    await caption(b, `Step ${step} — tab B: the Super Admin's /trucks (${before.rows} rows); window.__qaMarker = '${MARK}'. Next: the session cookie disappears (it "expires"), nobody signs out, and tab A signs in as the Dispatcher; nothing is done on this tab`)
+    ctx = t2.ctx; a = t2.a; b = t2.b
+    const { units, before } = t2
+    await caption(b, `Step ${step} — tab B: the Super Admin's /trucks (${before.rows} rows); window.__qaMarker = '${MARK}'. Next: the session cookie disappears (it "expires"), nobody signs out, tab A loads /login and the Dispatcher signs in there; nothing is done on this tab. Expected: B leaves by itself for a fresh /login`)
     await shot(b, 's5b-1-tab-b-trucks')
     const tb = trackDocuments(b)
     await ctx.clearCookies()
+    ta = tabTimeline(a)
     await a.goto(`${BASE_URL}/login`)
     await signInHere(a, `Step ${step} — tab A: the Dispatcher`, CREDS.dispatcher.username, CREDS.dispatcher.password)
+    ta.stop()
     await settleOn(a, '/dashboard', a.locator('h2', { hasText: 'Operations Dashboard' }), 300)
     const aWho = await whoAmI(a)
+    // B has settled once it was loaded again and shows its login form, or someone.
     const t0 = Date.now()
-    let st = null; let doneMs = null
+    let st = null; let settled = false
     while (Date.now() - t0 < 10000) {
       st = await evalSafe(b, tabProbe, units).catch(() => st)
-      if (st && st.marker === NO_MARK && String(st.auth?.id) === String(CREDS.dispatcher.userId) && st.path === '/dashboard') { doneMs = Date.now() - t0; break }
+      if (st && st.marker === NO_MARK && (st.path === '/login' ? st.form : st.auth?.id != null)) { settled = true; break }
       await b.waitForTimeout(250)
     }
-    if (doneMs !== null) { await b.waitForTimeout(1000); st = await evalSafe(b, tabProbe, units) }
+    if (settled) { await b.waitForTimeout(1000); st = await evalSafe(b, tabProbe, units) }
     tb.stop()
-    ok = doneMs !== null && st.marker === NO_MARK && String(st.auth?.id) === String(CREDS.dispatcher.userId) && st.path === '/dashboard'
-    observed = `tab A: the Dispatcher signed in (server session ${aWho.text}). Tab B, untouched: ${doneMs !== null ? `followed ${doneMs} ms later` : 'did NOT follow within 10 s'}; ` +
+    const clean = !!st && st.marker === NO_MARK && st.path === '/login' && st.auth?.id == null && st.rows === 0 && st.storeTrucks === 0 && st.unitsOnScreen === 0
+    const followed = !!st && st.marker === NO_MARK && String(st.auth?.id) === String(CREDS.dispatcher.userId)
+    v = clean ? 'PASS' : followed ? 'INFO' : 'FAIL'
+    const leftAt = tb.times[0] || 0
+    const t0A = ta.docAt
+    const aCheckText = ta.check
+      ? `answered ${ta.check.status} ${ta.check.authenticated === false ? 'authenticated:false ("signed out")' : `authenticated:${ta.check.authenticated}`} at ${relMs(ta.check.at, t0A)}`
+      : 'was not seen'
+    observed = `timings from tab A's request for /login (0 ms), taken from the pages' network events: A's own session check ${aCheckText}; the Dispatcher's sign-in on A answered at ${relMs(ta.signAt, t0A)} (server session ${aWho.text}). ` +
+      `Tab B, untouched: ${leftAt ? `requested a fresh page at ${relMs(leftAt, t0A)}, ${offsetText(leftAt, ta.signAt)} the Dispatcher's sign-in answered` : 'was NOT loaded again within 10 s of the sign-in'}; ` +
       `on ${st?.path}, window.__qaMarker = ${tabMarkerText(st?.marker)}, document loads ${docsText(tb.docs)}; its auth store holds ${authText(st?.auth)}; ` +
-      `${st?.rows} truck rows on screen, ${st?.unitsOnScreen} of the ${units.length} unit numbers it listed still in its text`
+      `${st?.rows} truck rows on screen, ${st?.storeTrucks} trucks in its store, ${st?.unitsOnScreen} of the ${units.length} unit numbers it listed still in its text` +
+      (followed ? '. B followed the later sign-in on a fresh page instead of staying on /login: not wrong, and not what this row describes (S5c scores that branch), so not scored' : '')
     await caption(b, `Step ${step} — result: ${observed}`)
-  } catch (e) { observed = `error: ${e.message}` }
+  } catch (e) { observed = `error: ${e.message}` } finally { ta?.stop() }
   const s = b ? await shot(b, 's5b-2-tab-b-after') : ''
   await ctx?.close().catch(() => {})
   record({
-    step, title: 'Two tabs of the Super Admin; the session ends without a sign-out, and tab A signs in as the Dispatcher through the form; B is not touched',
-    expected: 'B loads again by itself (marker undefined) and shows the Dispatcher\'s home (/dashboard); its auth store holds the Dispatcher',
+    step, title: 'Two tabs of the Super Admin; the session ends without a sign-out, tab A loads /login and the Dispatcher signs in there through the form; B is not touched',
+    expected: 'B leaves by itself for a fresh /login (marker undefined), holding nobody and none of the Super Admin\'s rows or unit numbers; it does not have to follow the later sign-in',
+    observed, verdict: v, shot: s,
+  })
+}
+
+// What a tab shows that `role` never gets (S5c). Self-contained: it runs in the page.
+// Sidebar links to pages the app's own router closes to `role` (their meta.roles), and
+// the Trucks table's Owner column (TrucksView shows it to the Super Admin only). The
+// truck list itself cannot tell the views apart: a Dispatcher loads the same one.
+function viewProbe(role) {
+  const router = document.querySelector('#app')?.__vue_app__?.config?.globalProperties?.$router
+  const links = [...document.querySelectorAll('aside a.nav-item[href^="/"]')].map((el) => el.getAttribute('href'))
+  const closed = router
+    ? links.filter((h) => { const roles = router.resolve(h).meta?.roles; return Array.isArray(roles) && !roles.includes(role) })
+    : []
+  return {
+    routerReadable: !!router,
+    links: links.length,
+    closed,
+    ownerColumn: [...document.querySelectorAll('table.truck-table thead th')].some((th) => th.textContent.trim() === 'Owner'),
+  }
+}
+const viewText = (v, role, listClosed) => `${v.links} sidebar links, ${v.closed.length} of them to pages a ${role} may not open` +
+  `${listClosed && v.closed.length ? ` (${v.closed.join(', ')})` : ''}${v.routerReadable ? '' : ' (the router was not readable)'}; ` +
+  `the Trucks table's Owner column (Super Admin only) ${v.ownerColumn ? 'SHOWN' : 'not shown'}`
+
+// ---- S5c: another tab signs a DIFFERENT person in while this tab still shows the old one
+// The store's "different person → reload" branch (auth._followOtherTab, TAB_CHANGE.RELOAD).
+// B follows every change of cookie owner another tab stamps, so the first stamp B sees must
+// be the Dispatcher's sign-in:
+//   - A must not decide "signed out" first: that answer stamps too, and B would leave for
+//     /login (S5b). So A's own GET /api/auth/session gets no answer (page.route on A only;
+//     B's requests are untouched), and A shows its sign-in form while it keeps re-checking.
+//   - A must be a NEW tab. A tab keeps its saved user in sessionStorage, and one that still
+//     has it restores the Super Admin while its check gets no answer, then routes itself
+//     from /login to /dashboard: no form to sign in on. A new tab starts with an empty
+//     sessionStorage. So the tab that signed the Super Admin in is closed, and the app is
+//     opened again in a new tab A.
+async function otherTabDifferentPersonCase() {
+  const step = 'S5c'
+  let observed = ''; let ok = false
+  let ctx = null; let a = null; let b = null
+  const notes = []
+  let aborted = 0
+  const noAnswer = (route) => { aborted++; return route.abort('internetdisconnected') }
+  const isDispatcher = (id) => id != null && String(id) === String(CREDS.dispatcher.userId)
+  const VIEWS = ['/trucks', '/dashboard'] // the page B was on, or the Dispatcher's home
+  let ta = null // tab A's timeline: its /login request and the sign-in answer
+  let bLoadAt = 0 // tab B's next 'load' event: its fresh page finished loading
+  const onBLoad = () => { if (!bLoadAt) bLoadAt = Date.now() }
+  try {
+    const t2 = await twoTabs(step)
+    ctx = t2.ctx; b = t2.b
+    const { units, before } = t2
+    const view0 = await evalSafe(b, viewProbe, 'Dispatcher')
+    notes.push(`before: tab B on the Super Admin's /trucks, ${before.rows} rows, holding ${authText(before.auth)}; ${viewText(view0, 'Dispatcher', false)}`)
+    await caption(b, `Step ${step} — tab B: the Super Admin's /trucks (${before.rows} rows; ${viewText(view0, 'Dispatcher', false)}); window.__qaMarker = '${MARK}'. Next: the session cookie disappears, the app is opened in a new tab A, and the Dispatcher signs in there; nothing is done on this tab. Expected: B reloads by itself as the Dispatcher`)
+    await shot(b, 's5c-1-tab-b-trucks')
+    await ctx.clearCookies()
+    await t2.a.close()
+    a = await ctx.newPage()
+    await a.route('**/api/auth/session', noAnswer)
+    const tb = trackDocuments(b)
+    ta = tabTimeline(a)
+    await a.goto(`${BASE_URL}/login`)
+    await a.locator('form.login-form').waitFor({ state: 'visible', timeout: 60000 })
+    const formSeenAt = Date.now()
+    const aSt = await authState(a)
+    const bMid = await evalSafe(b, tabProbe, units)
+    notes.push(`tab A (a new tab) showed its sign-in form (the harness saw it ${offsetText(formSeenAt, ta.docAt)} its request for /login), holding ${aSt?.id != null ? `${aSt.role} #${aSt.id}` : 'nobody'}` +
+      `${aSt?.isReconnecting ? ' and still re-checking in the background' : ''} (${aborted} of its GET /api/auth/session given no answer so far); ` +
+      `tab B meanwhile: on ${bMid.path}, window.__qaMarker ${bMid.marker === MARK ? `still '${MARK}'` : bMid.marker}, holding ${authText(bMid.auth)}`)
+    await caption(a, `Step ${step} — tab A, a new tab: the sign-in form, shown while its own session check gets no answer (nobody decided "signed out", so no other tab was told). The Dispatcher signs in here → expect tab B to reload by itself as the Dispatcher`)
+    await shot(a, 's5c-2-tab-a-login-form')
+    b.on('load', onBLoad)
+    await signInHere(a, `Step ${step} — tab A: the Dispatcher`, CREDS.dispatcher.username, CREDS.dispatcher.password)
+    ta.stop()
+    const signAt = ta.signAt || Date.now()
+    const pollFrom = Date.now()
+    let st = null; let doneMs = null
+    while (Date.now() - pollFrom < 10000) {
+      st = await evalSafe(b, tabProbe, units).catch(() => st)
+      if (st && st.marker === NO_MARK && isDispatcher(st.auth?.id) && VIEWS.includes(st.path)) { doneMs = Date.now() - signAt; break }
+      await b.waitForTimeout(250)
+    }
+    b.off('load', onBLoad)
+    if (doneMs !== null) {
+      // Its own view drawn: on /trucks the table (so a missing Owner column is not vacuous).
+      if (st.path === '/trucks') await b.locator('table.truck-table tbody tr').first().waitFor({ state: 'visible', timeout: 30000 }).catch(() => {})
+      await b.waitForTimeout(1000)
+    }
+    st = await evalSafe(b, tabProbe, units)
+    const view = await evalSafe(b, viewProbe, 'Dispatcher')
+    tb.stop()
+    const bWho = await whoAmI(b)
+    await a.unroute('**/api/auth/session', noAnswer)
+    const aWho = await whoAmI(a)
+    ok = doneMs !== null && st.marker === NO_MARK && isDispatcher(st.auth?.id) && isDispatcher(bWho.id) && VIEWS.includes(st.path) &&
+      view.routerReadable && view.closed.length === 0 && !view.ownerColumn
+    const reqAt = tb.times[0] || 0
+    const bText = reqAt
+      ? `requested a fresh page at ${relMs(reqAt, signAt)}${bLoadAt ? ` and finished loading it at ${relMs(bLoadAt, signAt)}` : ''}`
+      : 'requested no fresh page'
+    observed = `${notes.join('; ')}. The Dispatcher signed in on A (A now on ${pathOf(a.url())}, server session ${aWho.text}). ` +
+      `Timings from the sign-in's answer (0 ms), taken from the pages' network and load events: tab B, untouched, ${bText}; ` +
+      `${doneMs !== null ? `it was showing the Dispatcher when checked at +${doneMs} ms` : 'it did NOT show the Dispatcher within 10 s'}; ` +
+      `then on ${st.path}, window.__qaMarker = ${tabMarkerText(st.marker)}, document loads ${docsText(tb.docs)}; its auth store holds ${authText(st.auth)}, its server session is ${bWho.text}; ` +
+      `${viewText(view, 'Dispatcher', true)}; ${st.rows} truck rows on screen (a Dispatcher loads the same truck list)`
+    await caption(b, `Step ${step} — result: ${observed}`)
+  } catch (e) { observed = `${notes.length ? `${notes.join('; ')}; ` : ''}error: ${e.message}` } finally {
+    ta?.stop()
+    b?.off('load', onBLoad)
+  }
+  const s = b ? await shot(b, 's5c-3-tab-b-after') : ''
+  await ctx?.close().catch(() => {})
+  record({
+    step, title: 'Two tabs of the Super Admin; the session ends without a sign-out, and a new tab A, whose own session check gets no answer, signs the Dispatcher in through its form; B is not touched',
+    expected: 'Within ~10 s, by itself: B is loaded again (marker undefined) as the Dispatcher: its auth store and its server session are the Dispatcher\'s, it shows their view of /trucks or their home, and nothing only the Super Admin gets is left (no Owner column, no sidebar link to a page a Dispatcher may not open)',
     observed, verdict: verdict(ok), shot: s,
   })
 }
@@ -2850,7 +3017,11 @@ async function signoutSection() {
   if (wantStep('S5a')) await otherTabSignOutCase()
   if (wantStep('S5b')) {
     if (CREDS.dispatcher) await otherTabNewPersonCase()
-    else skip('S5b', 'Another tab follows a different person')
+    else skip('S5b', 'The session ends without a sign-out; another tab leaves for a clean /login')
+  }
+  if (wantStep('S5c')) {
+    if (CREDS.dispatcher) await otherTabDifferentPersonCase()
+    else skip('S5c', 'Another tab signs a different person in; this tab reloads as them')
   }
   if (wantStep('S6')) await slowSignOutCase()
   if (wantStep('S7')) {
