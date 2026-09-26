@@ -100,9 +100,10 @@
  *      another case, or exactly) at once — exactly one succeeds, the other is
  *      400 with nothing written; a write landing during the wait is what the
  *      guards and the audit read; a non-Super-Admin's rate resend during a
- *      Super Admin's change writes no pay line; the column's UNIQUE behind the
- *      check answers 400 with the assignment rolled back; source pins on the
- *      order of the await, the re-read and the writes.
+ *      Super Admin's change writes no pay line; POST's driver assignment failing
+ *      leaves no truck behind (one transaction), so the retry is added; the
+ *      column's UNIQUE behind the check answers 400 with the assignment rolled
+ *      back; source pins on the order of the await, the re-read and the writes.
  *   §9 the photo is checked when it CHANGES, against the row as first read and
  *      again as re-read.
  *   § mutants — one break per guard, each run against every behaviour section
@@ -1442,6 +1443,25 @@ async function renameRaceSection() {
 			`§8 a Dispatcher's rate resend during a Super Admin's change: 200, 300 kept, no pay line, the lock not asked about pay (got ${out.status}, ${truckRow(db, 1).driver_pay_daily}, ${audits(db, "update_driver_pay").length} line(s), ${JSON.stringify(app.seen.editLockSeen[0])})`);
 	}
 	{
+		// POST writes the truck and its driver assignment in one transaction. An
+		// assignment that fails (here a trigger on truck_assignments, so the
+		// shipped assignDriverToTruck() really throws) leaves no truck behind, and
+		// the retry is added rather than refused "Unit number already exists".
+		const db = makeDb();
+		db.exec("CREATE TRIGGER refuse_assignment BEFORE INSERT ON truck_assignments BEGIN SELECT RAISE(ABORT, 'simulated assignment failure'); END;");
+		const app = mountAll(db);
+		const before = snapshot(db);
+		const r = await app.post(SUPER, addForm({ unitNumber: "LogisX-#60", assignedDriver: "Bob Driver" }));
+		ok(r.status === 500 && snapshot(db) === before,
+			`§8 POST whose driver assignment fails: 500 and nothing written — no truck, no assignment, no audit line (got ${r.status} ${JSON.stringify(r.body)})`);
+		db.exec("DROP TRIGGER refuse_assignment");
+		const retry = await app.post(SUPER, addForm({ unitNumber: "LogisX-#60", assignedDriver: "Bob Driver" }));
+		const t = truckByUnit(db, "LogisX-#60");
+		ok(retry.status === 200 && !!t && t.assigned_driver === "Bob Driver" &&
+			db.prepare("SELECT COUNT(*) AS n FROM truck_assignments WHERE truck_id = ? AND driver_name = 'Bob Driver' AND end_date = ''").get(t ? t.id : -1).n === 1,
+			`§8 ...and the retry adds it: 200, the truck with its assignment (got ${retry.status} ${JSON.stringify(retry.body)})`);
+	}
+	{
 		// The column's UNIQUE behind the check: with the check taken out, an exact
 		// duplicate is still refused as the check refuses it, with nothing written
 		// — the driver assignment the save carried is rolled back with the row.
@@ -1580,6 +1600,7 @@ const MUTANTS = [
 		"if (payEditAllowed && driverPayParsed && driverPayParsed.value !== (truck.driver_pay_daily || 0)) {",
 		"if (driverPayParsed && driverPayParsed.value !== (truck.driver_pay_daily || 0)) {"]]],
 	["M18 the lock asked about a rate the save does not write", [["put", "if (!payEditAllowed) delete changed.driver_pay_daily;", ""]]],
+	["M19 POST's INSERT and driver assignment written outside one transaction", [["post", "result = db.transaction(() => {", "result = (() => {"]]],
 ];
 async function mutantSection() {
 	section("§ mutants — each must be caught");

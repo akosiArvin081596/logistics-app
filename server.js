@@ -12326,18 +12326,26 @@ app.get("/api/admin/orphaned-signed-artifacts", requireRole("Super Admin"), orph
 // Accepting an investor application registers each vehicle on it as a truck
 // owned by the new account (owner_id = the user id, as the dashboard and reports
 // key it), under the unit number INV-<application id>-<A, B, …>. Returns what
-// happened to them: { created, existing, failed }.
+// happened to them: { created, existing, heldByOther, failed }.
 //
-// ⚠️ ONLY A UNIQUE VIOLATION MEANS "ALREADY EXISTS". The loop used to swallow
+// ⚠️ ONLY A UNIQUE VIOLATION MEANS "ALREADY ON FILE". The loop used to swallow
 // every error as a duplicate while the audit line and the welcome email counted
 // every vehicle on the application as registered, so a truck that was never
 // written read as added. unit_number is the trucks table's only UNIQUE column, so
-// SQLITE_CONSTRAINT_UNIQUE is a truck already on file under that number —
-// normally this application's own, from an earlier acceptance; it is left as it
-// is. Any other error is logged and counted as failed, and the admin is told to
-// add those trucks by hand.
+// SQLITE_CONSTRAINT_UNIQUE is a truck already on file under that number. Any
+// other error, or a UNIQUE violation with no truck under the number, is logged
+// and counted as failed, and the admin is told to add those trucks by hand.
+//
+// ⚠️ A TRUCK ALREADY ON FILE IS THIS ACCOUNT'S ONLY WHEN ITS owner_id SAYS SO.
+// `existing` counts a truck owned by `userId`; any other holder — an earlier
+// acceptance's account, owner 0 once that account was deleted, anyone else — is
+// `heldByOther`. Either way the truck is left exactly as it is: moving a truck
+// between investors' ledgers re-books its fixed costs, which is a month-end-lock
+// decision for PUT /api/trucks/:id, never a side effect of an acceptance. The
+// welcome email counts `created + existing` alone; the admin email and the
+// Investor Applications screen name the other two.
 function registerApplicationVehicles(vehicles, appId, userId) {
-	const counts = { created: 0, existing: 0, failed: 0 };
+	const counts = { created: 0, existing: 0, heldByOther: 0, failed: 0 };
 	const list = Array.isArray(vehicles) ? vehicles : [];
 	const validTruckStatus = ["Active", "Inactive", "Maintenance", "OOS"];
 	for (let i = 0; i < list.length; i++) {
@@ -12376,8 +12384,17 @@ function registerApplicationVehicles(vehicles, appId, userId) {
 				v.titleStatus || "Clean", v.titleState || "", "");
 			counts.created++;
 		} catch (err) {
+			// Who holds the unit number. Guarded, because this helper must never
+			// throw: the account and its temporary password already exist, and
+			// only the route's answer and the welcome email carry that password.
+			let held = null;
 			if (err && err.code === "SQLITE_CONSTRAINT_UNIQUE") {
+				try { held = db.prepare("SELECT owner_id FROM trucks WHERE unit_number = ?").get(unitNum) || null; } catch { held = null; }
+			}
+			if (held && Number(held.owner_id) === Number(userId)) {
 				counts.existing++;
+			} else if (held) {
+				counts.heldByOther++;
 			} else {
 				counts.failed++;
 				console.error(`Investor application ${appId}: vehicle ${unitNum} could not be added as a truck:`, err && err.message ? err.message : err);
@@ -12453,10 +12470,11 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			if (!Array.isArray(vehicles)) vehicles = [];
 			const vehicleCounts = registerApplicationVehicles(vehicles, appId, userId);
 			// What the investor's fleet actually holds: trucks written now plus
-			// trucks already on file under this application's unit numbers.
+			// trucks already on file that this account owns. A truck on file under
+			// another owner is not theirs and is not counted (heldByOther).
 			const vehiclesRegistered = vehicleCounts.created + vehicleCounts.existing;
 
-			logAudit(req, "accept_investor", "investor_application", appId, `Accepted investor "${fullName}", created account "${username}", ${vehicles.length} vehicle(s): ${vehicleCounts.created} created, ${vehicleCounts.existing} already existed, ${vehicleCounts.failed} failed`);
+			logAudit(req, "accept_investor", "investor_application", appId, `Accepted investor "${fullName}", created account "${username}", ${vehicles.length} vehicle(s): ${vehicleCounts.created} created, ${vehicleCounts.existing} already existed, ${vehicleCounts.heldByOther} held by another owner, ${vehicleCounts.failed} failed`);
 			notifyChange("investor-applications"); notifyChange("investors"); notifyChange("users"); notifyChange("trucks");
 			res.json({ success: true, accountCreated: true, credentials: { username, tempPassword, userId, investorName: fullName }, vehicles: vehicleCounts });
 
@@ -12513,7 +12531,7 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 							<tr><td style="padding:5px 0;color:#64748b;width:140px">Username</td><td style="padding:5px 0;font-weight:600;font-family:monospace">${escapeHtml(username)}</td></tr>
 							<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0">${escapeHtml(application.email)}</td></tr>
 							<tr><td style="padding:5px 0;color:#64748b">Entity Type</td><td style="padding:5px 0">${escapeHtml(application.entity_type || "-")}</td></tr>
-							<tr><td style="padding:5px 0;color:#64748b">Fleet</td><td style="padding:5px 0;font-weight:600">${vehiclesRegistered} vehicle(s) added${vehicleCounts.failed > 0 ? `; ${vehicleCounts.failed} could not be added — add them from the Trucks page` : ""}</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b">Fleet</td><td style="padding:5px 0;font-weight:600">${vehiclesRegistered} vehicle(s) added${vehicleCounts.heldByOther > 0 ? `; ${vehicleCounts.heldByOther} vehicle(s) are already on file under another owner (unit numbers INV-${appId}-…) — reassign them from the Trucks page` : ""}${vehicleCounts.failed > 0 ? `; ${vehicleCounts.failed} could not be added — add them from the Trucks page` : ""}</td></tr>
 							<tr><td style="padding:5px 0;color:#64748b">Accepted By</td><td style="padding:5px 0">${escapeHtml(req.session.user.username)}</td></tr>
 						</table>
 					</div>
@@ -25038,24 +25056,30 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 				createAudit);
 		}
 
-		// The INSERT is the first write, so a unit number another writer took after
-		// the check above (isUnitNumberTaken()) is refused as the check refuses it,
-		// with nothing written.
+		// One transaction: the INSERT and the driver assignment (assignDriverToTruck()
+		// writes truck_assignments and trucks.assigned_driver) land together or not
+		// at all, as PUT /api/trucks/:id writes its UPDATE and assignment. A failed
+		// assignment therefore leaves no truck behind for a retry to meet as
+		// "Unit number already exists". The INSERT is the first write, so a unit
+		// number another writer took after the check above (isUnitNumberTaken()) is
+		// refused as the check refuses it, with nothing written.
 		let result;
 		try {
-			result = db.prepare(
-				"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id, driver_pay_daily, purchase_price, title_status, maintenance_fund_monthly, fuel_tank_gallons, avg_mpg, in_service_date, " +
-				"photo, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, admin_fee_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-			).run(unit, make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, finalAssignedDriver, notes || "", finalOwnerId, driverPayParsed.value,
-				createAmounts.purchase_price ?? 0, titleStatus || "Clean", createAmounts.maintenance_fund_monthly ?? 0, createAmounts.fuel_tank_gallons ?? 0, createAmounts.avg_mpg ?? 0, inServiceCreate,
-				createPhoto, createCosts.insurance_monthly, createCosts.eld_monthly, createCosts.truck_payment_monthly, createCosts.hvut_annual, createCosts.irp_annual, createAdminFee);
+			result = db.transaction(() => {
+				const inserted = db.prepare(
+					"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id, driver_pay_daily, purchase_price, title_status, maintenance_fund_monthly, fuel_tank_gallons, avg_mpg, in_service_date, " +
+					"photo, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, admin_fee_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+				).run(unit, make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, finalAssignedDriver, notes || "", finalOwnerId, driverPayParsed.value,
+					createAmounts.purchase_price ?? 0, titleStatus || "Clean", createAmounts.maintenance_fund_monthly ?? 0, createAmounts.fuel_tank_gallons ?? 0, createAmounts.avg_mpg ?? 0, inServiceCreate,
+					createPhoto, createCosts.insurance_monthly, createCosts.eld_monthly, createCosts.truck_payment_monthly, createCosts.hvut_annual, createCosts.irp_annual, createAdminFee);
+				if (finalAssignedDriver && finalAssignedDriver.trim()) {
+					assignDriverToTruck(inserted.lastInsertRowid, finalAssignedDriver.trim());
+				}
+				return inserted;
+			})();
 		} catch (err) {
 			if (isUnitNumberTaken(err)) return res.status(400).json({ error: "Unit number already exists" });
 			throw err;
-		}
-		// Create truck assignment record
-		if (finalAssignedDriver && finalAssignedDriver.trim()) {
-			assignDriverToTruck(result.lastInsertRowid, finalAssignedDriver.trim());
 		}
 		// Audit creation, naming the in-service date and the monthly fixed costs it
 		// starts with. The PUT audits every change to the date because it re-books
@@ -25097,9 +25121,10 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			return res.status(400).json({ error: "assignedDriver must be a string, or null for no driver.", code: "INVALID_DRIVER_NAME" });
 		}
 		// A sent unit number is text, not blank, one plain line (parseUnitNumber(),
-		// POST /api/trucks's rule): 400 INVALID_UNIT_NUMBER otherwise, before
-		// anything is read or written. `nextUnit` is the trimmed value the UPDATE
-		// writes; undefined means not sent, and the column is left alone.
+		// POST /api/trucks's rule): 400 INVALID_UNIT_NUMBER otherwise, before any
+		// write. The truck is read first, so an unknown id is answered 404 either
+		// way. `nextUnit` is the trimmed value the UPDATE writes; undefined means
+		// not sent, and the column is left alone.
 		const unitParsed = parseUnitNumber(unitNumber);
 		if (unitParsed.refusal) return res.status(400).json(unitParsed.refusal);
 		const nextUnit = unitParsed.value;
@@ -27564,17 +27589,6 @@ function sheetRowSnapshot(headers, row) {
 	return cells;
 }
 
-// A raw cell array as the header-keyed object shape GET /api/data returns, so
-// the update route can ask sanitizeBrokerColumns() what a non-Super-Admin was
-// actually served for this row — rather than re-deriving the redaction rule and
-// getting it subtly different. (sanitizeBrokerColumns picks its columns by
-// header NAME, so an object is the shape it needs.)
-function rowObjectFromCells(headers, cells) {
-	const obj = {};
-	(headers || []).forEach((h, i) => { obj[h] = (cells || [])[i] == null ? "" : String(cells[i]); });
-	return obj;
-}
-
 // May this row be deleted? Returns null to allow, else the 409 body.
 //
 // REUSES periodWriteLocked(), NOT expenseRowPeriodLocked(). Reusing the shared
@@ -28690,7 +28704,16 @@ app.get("/api/tabs", requireAuth, async (req, res) => {
 });
 
 // READ — Get rows from a sheet tab (supports pagination via ?page=&limit=)
-app.get("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+//
+// ⚠️ SUPER ADMIN ONLY (2026-09-26). This route reads whichever tab ?sheet= names
+// and answers every column of every row as stored — `data`, `duplicates` and
+// the `?search=` match alike — so it serves no other role. Its SPA callers are
+// the Data Manager (/data) and New Job (/jobs/new), both Super Admin routes.
+// Dispatchers read Job Tracking through /api/dashboard and GET /api/load/:loadId,
+// which serve every broker contact column blank (sanitizeBrokerColumns()).
+// Widening this gate means redacting all three answers first.
+// scripts/test-broker-column-redaction.js pins the gate.
+app.get("/api/data", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const sheetName = getSheetName(req);
 		const page = Math.max(1, parseInt(req.query.page) || 1);
@@ -28736,12 +28759,7 @@ app.get("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res) 
 		const total = allData.length;
 		const totalPages = Math.ceil(total / limit);
 		const start = (page - 1) * limit;
-		let data = allData.slice(start, start + limit);
-
-		// Sanitize broker contact data for non-Admin roles
-		if (req.session.user.role !== "Super Admin") {
-			data = sanitizeBrokerColumns(headers, data);
-		}
+		const data = allData.slice(start, start + limit);
 
 		res.json({ headers, data, sheet: sheetName, total, page, limit, totalPages, duplicates });
 	} catch (error) {
@@ -29032,47 +29050,32 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 			if (ownerErr) return res.status(400).json({ error: ownerErr.error });
 		}
 
-		// For non-Admin users, preserve original broker/phone column values so the
-		// sanitized copy they were served doesn't overwrite the full record.
+		// For every caller but a Super Admin, two rules, both before anything is
+		// written, and both shared with PUT /api/load/:loadId:
+		//   • every broker contact column is written back exactly as stored,
+		//     whatever the request sent (restoreWithheldBrokerCells()) — they are
+		//     served blank to these callers, and the response names none of them;
+		//   • a CHANGED cell whose value starts with "=" is refused, 400
+		//     FORMULA_NOT_ALLOWED naming the column (formulaCellRefusal()). Judged
+		//     after the restore, so a withheld column never answers it.
 		//
-		// ⚠️ THIS WAS A NO-OP UNTIL NOW, and it was losing data. The old code read
+		// ⚠️ THE ROW READ ABOVE IS WHAT MAKES THE RESTORE WORK. The old code read
 		// `${sheetName}!A${rowIndex}` — in A1 notation that is the single CELL A5,
 		// not row 5 (verified against a real spreadsheet: it returns 1 value where
-		// `5:5` returns 25). So `currentValues[i]` was undefined for every column
-		// past A, the `&& currentValues[i]` test never passed, and nothing was ever
-		// spliced back. Measured against production's layout, what a Dispatcher then
-		// wrote back was lossy: sanitizeBrokerColumns() then picked its column with
-		// `headers.find(/phone|contact/i)`, which matches "Broker Contact Name"
-		// (it contains "Contact") BEFORE "Phone Number" — so the column actually
-		// redacted was Broker Contact Name, and saving the row wrote that stripped
-		// copy over the stored value. Reading the real row above is what fixed the
-		// splice.
+		// `5:5` returns 25) — so nothing past column A was ever put back, and a
+		// Dispatcher's save wrote the redacted copy over the stored value.
 		//
-		// ⚠️ THAT SHADOWING IS FIXED TOO — see resolveBrokerWithheldColumns().
-		// "Phone Number" and "Email" were reached by neither lookup, so they were
-		// served IN FULL to every non-Super-Admin caller; they are withheld now,
-		// which is exactly why the splice below must take its column list from the
-		// same resolver rather than carrying a second copy of the rule.
-		//
-		// ⚠️ RESTORE ONLY WHAT WAS REDACTED, not every matching column. Because the
-		// splice had never once run, "preserve broker columns" had never actually
-		// restricted anybody. A blanket restore would silently discard an edit,
-		// answer {success:true}, and let the UI show the change until the next
-		// refresh. So the value is put back only when the caller sent back exactly
-		// the redacted copy they were served; a genuine edit goes through.
-		//
-		// ⚠️ THE CANDIDATE SET IS DERIVED, NOT RE-SPELLED. This filter used to be
-		// its own hardcoded `/broker|phone|contact/i`, which does NOT match
-		// "Email" — so the moment the reader started redacting that column (it
-		// now does; it always should have), a Dispatcher's save would write ""
-		// straight over the stored address. A disclosure bug turns into DATA LOSS
-		// the instant the reader and the writer disagree about which columns were
-		// redacted, so both now ask resolveBrokerWithheldColumns().
-		//
-		// The rule itself is restoreWithheldBrokerCells(), beside the reader.
-		const preserved = req.session.user.role !== "Super Admin"
-			? restoreWithheldBrokerCells(headers, before, values)
-			: [];
+		// ⚠️ THE COLUMN SET IS DERIVED, NOT RE-SPELLED. This splice used to carry its
+		// own hardcoded `/broker|phone|contact/i`, which does NOT match "Email" — so
+		// once the reader redacted that column, a Dispatcher's save would have
+		// written "" over the stored address. A disclosure bug turns into DATA LOSS
+		// the instant the reader and the writer disagree about which columns are
+		// withheld, so both ask resolveBrokerWithheldColumns().
+		if (req.session.user.role !== "Super Admin") {
+			restoreWithheldBrokerCells(headers, before, values);
+			const formula = formulaCellRefusal(headers, before, values);
+			if (formula) return res.status(400).json(formula);
+		}
 
 		// Diff AFTER the splice — the spliced values are what actually get written,
 		// so they are what has to be judged and what has to be audited.
@@ -29244,10 +29247,6 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		res.json({
 			success: true,
 			updatedCells: response.data.updatedCells,
-			// Columns whose redacted value was put back rather than written. Told to
-			// the caller instead of silently swallowed, so a UI can mark them
-			// read-only rather than showing an edit that did not happen.
-			...(preserved.length ? { preserved } : {}),
 		});
 	} catch (error) {
 		console.error("Error updating row:", error.message);
@@ -31491,13 +31490,14 @@ function deduplicateLoads(data, headers, returnDuplicates = false) {
 // ⚠️ `Contract ID`, `"  Payment  "` (real surrounding spaces) and `Owner ID`
 // match nothing here and are untouched — verified against the header row above.
 //
-// ⚠️ ONE SOURCE FOR READER AND WRITER. PUT /api/data/:rowIndex splices the real
-// values back in so a non-Super-Admin's save cannot overwrite the full record
-// with the redacted copy they were served. That path used its own hardcoded
-// `/broker|phone|contact/i`, which does NOT match "Email" — so widening the
-// redaction without it would have turned a disclosure bug into DATA LOSS: a
-// Dispatcher saving a row would write "" over the stored email. Both sides now
-// call this resolver.
+// ⚠️ ONE SOURCE FOR READER AND WRITER. PUT /api/data/:rowIndex and
+// PUT /api/load/:loadId write every one of these columns back as stored for a
+// non-Super-Admin (restoreWithheldBrokerCells()), so their save can neither
+// overwrite the full record with the redacted copy they were served nor change
+// it. The PUT once used its own hardcoded `/broker|phone|contact/i`, which does
+// NOT match "Email" — so widening the redaction without it would have turned a
+// disclosure bug into DATA LOSS: a Dispatcher saving a row would write "" over
+// the stored email. Both sides now call this resolver.
 // ---------------------------------------------------------------------------
 const BROKER_WITHHELD_RE = /broker|phone|e-?mail|contact|\bfax\b|mobile|\bcell\b/i;
 function resolveBrokerWithheldColumns(headers) {
@@ -31520,59 +31520,50 @@ function sanitizeBrokerColumns(headers, rows) {
 	});
 }
 
-// The copy a non-Super-Admin was served, until 2026-09-26, for a withheld cell
-// holding a JSON contact blob: the blob reduced to its name, {"Name":…}. Nothing
-// serves it any more. It is kept for one reader, restoreWithheldBrokerCells(), so
-// a page loaded before that change and saved after it cannot write this copy
-// over the stored contact. null for any other cell: a plain one was served blank
-// then too, and a blob that does not parse was served in full.
-function legacyServedBrokerCell(stored) {
-	const trimmed = String(stored == null ? "" : stored).trim();
-	if (!trimmed.startsWith("{")) return null;
-	try {
-		const parsed = JSON.parse(trimmed);
-		return JSON.stringify({ Name: parsed.Name || parsed.name || "" });
-	} catch {
-		return null;
-	}
+// PUT /api/data/:rowIndex and PUT /api/load/:loadId, for every caller but a
+// Super Admin: every withheld column is written back exactly as stored,
+// whatever the request sent, and the response names none of them. Mutates
+// `values`, the row as it will be written, in header order; `before` is the row
+// as stored. A cell past the end of `values` is not written at all, so it is
+// left alone. An empty stored cell stays empty.
+//
+// The columns are the reader's own (resolveBrokerWithheldColumns()) — see ONE
+// SOURCE FOR READER AND WRITER above. The Active Loads editor shows them
+// read-only (its mirror of BROKER_WITHHELD_RE), so no edit there is discarded.
+function restoreWithheldBrokerCells(headers, before, values) {
+	const withheld = new Set(resolveBrokerWithheldColumns(headers));
+	(headers || []).forEach((h, i) => {
+		if (!withheld.has(h) || i >= values.length) return;
+		values[i] = before[i] == null ? "" : before[i];
+	});
 }
 
-// PUT /api/data/:rowIndex, for a non-Super-Admin's save: put the stored value
-// back into every withheld cell the caller sent back exactly as it was served to
-// them, so the redacted copy never overwrites the record. Mutates `values` and
-// returns the trimmed names of the columns it restored. `before` is the row as
-// stored, `values` the row as sent, both in header order.
-//
-// Only what was redacted is restored: a withheld column holding nothing was
-// served as stored, so a value sent for it is an edit, and so is a value that
-// differs from the served copy. The columns and the served copy come from the
-// reader's own rule (resolveBrokerWithheldColumns(), sanitizeBrokerColumns()) —
-// see ONE SOURCE FOR READER AND WRITER above.
-//
-// ⚠️ THE PRE-2026-09-26 COPY COUNTS AS A ROUND TRIP TOO. The Active Loads editor
-// sends each withheld column back as the value its row holds, and a page loaded
-// before that date still holds a JSON contact cell's name-only copy. Judged only
-// against today's blank copy, that would read as an edit and replace the stored
-// contact, phone and email with the name alone (legacyServedBrokerCell()).
-function restoreWithheldBrokerCells(headers, before, values) {
-	const preserved = [];
-	const servedRow = sanitizeBrokerColumns(headers, [rowObjectFromCells(headers, before)])[0] || {};
-	const withheldCols = new Set(resolveBrokerWithheldColumns(headers));
-	headers.forEach((h, i) => {
-		if (!withheldCols.has(h) || !before[i] || i >= values.length) return;
-		const stored = String(before[i]);
-		const served = servedRow[h] === undefined ? stored : String(servedRow[h]);
-		// Nothing was hidden from them for this column — let them edit it.
-		if (served === stored) return;
-		const sent = String(values[i] == null ? "" : values[i]);
-		// They sent a redacted copy straight back: that is the round trip this
-		// exists to catch, not an edit.
-		if (sent === served || sent === legacyServedBrokerCell(stored)) {
-			values[i] = before[i];
-			preserved.push(String(h).trim() || `col${i + 1}`);
-		}
-	});
-	return preserved;
+// PUT /api/data/:rowIndex and PUT /api/load/:loadId, for every caller but a
+// Super Admin: no formulas. Both write with valueInputOption "USER_ENTERED",
+// under which a value starting with "=" is stored as a formula. Returns null,
+// or the 400 body for the first CHANGED cell, in column order, whose trimmed
+// value starts with "=": { error, code: "FORMULA_NOT_ALLOWED", field }, where
+// `field` is the column's header exactly as the sheet holds it ("(unnamed)" for
+// a blank one). A cell equal to its stored value is never refused, so a stored
+// value that already starts with "=" does not block an unrelated edit. `before`
+// is the row as stored and `values` the row as it will be written, both in
+// header order; only the first values.length cells are written, so only they
+// are judged. The routes call it after restoreWithheldBrokerCells() and before
+// anything is written.
+function formulaCellRefusal(headers, before, values) {
+	for (let i = 0; i < values.length; i++) {
+		const to = values[i] == null ? "" : String(values[i]);
+		const from = before[i] == null ? "" : String(before[i]);
+		if (to === from || !to.trim().startsWith("=")) continue;
+		const header = headers && headers[i] != null ? String(headers[i]) : "";
+		const name = header.trim() || `Column ${i + 1}`;
+		return {
+			error: `"${name}" starts with "=", which the sheet stores as a formula. Only a Super Admin can enter formulas; remove the leading "=" to save it as text.`,
+			code: "FORMULA_NOT_ALLOWED",
+			field: header.trim() ? header : "(unnamed)",
+		};
+	}
+	return null;
 }
 
 function findCol(headers, regex) {
@@ -42586,6 +42577,16 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 			if (Object.prototype.hasOwnProperty.call(updates, h)) return updates[h];
 			return before[idx] || "";
 		});
+		// For every caller but a Super Admin, PUT /api/data/:rowIndex's two rules,
+		// before anything is written: every broker contact column is written back
+		// exactly as stored, whatever the body sent (restoreWithheldBrokerCells()),
+		// and a changed cell starting with "=" is refused 400 FORMULA_NOT_ALLOWED
+		// (formulaCellRefusal()).
+		if (req.session.user.role !== "Super Admin") {
+			restoreWithheldBrokerCells(headers, before, updatedRow);
+			const formula = formulaCellRefusal(headers, before, updatedRow);
+			if (formula) return res.status(400).json(formula);
+		}
 		const after = sheetRowAfterUpdate(before, updatedRow);
 		const changes = changedGuardedCells(headers, before, after);
 

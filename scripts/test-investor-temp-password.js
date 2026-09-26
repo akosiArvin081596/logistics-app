@@ -205,7 +205,7 @@ async function sectionUnchanged() {
 	// each vehicle on the application) was added after it.
 	ok(JSON.stringify(Object.keys(r.body || {})) === JSON.stringify(["success", "accountCreated", "credentials", "vehicles"]) &&
 		JSON.stringify(Object.keys(creds)) === JSON.stringify(["username", "tempPassword", "userId", "investorName"]) &&
-		JSON.stringify((r.body || {}).vehicles) === JSON.stringify({ created: 2, existing: 0, failed: 0 }),
+		JSON.stringify((r.body || {}).vehicles) === JSON.stringify({ created: 2, existing: 0, heldByOther: 0, failed: 0 }),
 		`§2 the response shape must be unchanged, plus the vehicle counts: ${JSON.stringify(r.body)}`);
 	ok(creds.username === "acme.hauling.llc" && creds.investorName === "Acme Hauling LLC",
 		`§2 the username derivation must be unchanged (got ${creds.username})`);

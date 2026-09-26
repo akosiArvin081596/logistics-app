@@ -79,9 +79,8 @@ export const useSheetsStore = defineStore('sheets', {
       return result
     },
 
-    // Returns the server's response so the view can report `preserved` — the
-    // broker/contact columns a non-Super-Admin was served redacted, which the
-    // server restores rather than writing the redacted copy back over the record.
+    // Returns the server's response. The Data Manager is Super Admin only, and a
+    // Super Admin's save writes every column as sent.
     async saveRow(rowIndex, values) {
       const result = await api.put(
         `/api/data/${rowIndex}?sheet=${encodeURIComponent(this.currentSheet)}`,

@@ -531,9 +531,10 @@ const EDITABLE_COLS = [
 ]
 const MULTILINE_COLS = new Set(['Details', 'Pickup Info', 'Drop-off Info', 'Pickup Address', 'Drop-off Address'])
 // ⚠️ MIRROR OF server.js BROKER_WITHHELD_RE — keep the two in step.
-// GET /api/data (and /api/dashboard) redact these columns for every non-Super-Admin,
-// and PUT /api/data/:rowIndex splices the stored values back in so a redacted copy
-// can never overwrite the real record. That restore is correct, but it left the
+// /api/dashboard (and GET /api/load/:loadId) serve these columns blank to every
+// non-Super-Admin, and PUT /api/data/:rowIndex writes each of them back exactly as
+// stored for those callers, whatever the request sent, so a redacted copy can never
+// overwrite the real record. That restore is correct, but it left the
 // dispatcher with inputs that render permanently blank, accept typing, "save", and
 // silently round-trip to the stored value — a form that looks broken. They are shown
 // read-only instead, so the UI states plainly what the API already enforces.
