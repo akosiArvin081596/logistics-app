@@ -93,11 +93,17 @@ check("cascade extraction found the three FK-bearing children", [
 	/DELETE FROM driver_payment_info WHERE user_id = \?/.test(CASCADE),
 ], [true, true, true]);
 
+// The truck clear also finds a truck stored under another spacing of the name,
+// through findTruckForDriverAccount(): the real helpers, bound to the scratch db.
+// (Its cases are scripts/test-driver-rename-clash.js §4d's subject.)
+const TRUCK_LOOKUP_SRC = ["normalizeDriverName", "findDriverNameClashes", "driverNameHeldByOtherAccount", "findTruckForDriver", "findTruckForDriverAccount"]
+	.map(extract).join("\n");
 function runCascade(db, user, name, id, body = CASCADE) {
 	const removed = {}, detached = {};
-	const fn = new Function("db", "user", "name", "id", "removed", "detached", body);
+	const helpers = new Function("db", `${TRUCK_LOOKUP_SRC}\nreturn { normalizeDriverName, findTruckForDriverAccount };`)(db);
+	const fn = new Function("db", "user", "name", "id", "removed", "detached", "normalizeDriverName", "findTruckForDriverAccount", body);
 	let threw = null;
-	try { db.transaction(() => fn(db, user, name, id, removed, detached))(); }
+	try { db.transaction(() => fn(db, user, name, id, removed, detached, helpers.normalizeDriverName, helpers.findTruckForDriverAccount))(); }
 	catch (err) { threw = err.message; }
 	return { removed, detached, threw };
 }

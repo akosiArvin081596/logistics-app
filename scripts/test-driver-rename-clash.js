@@ -60,6 +60,19 @@
  *      PUT /api/users/:id's own sync, nor a later one; renamed onto another
  *      row's name it is refused as DIRECTORY_NAME_COLLISION before anything is
  *      written.
+ *   §4d every "ci" leg takes the driver's other spellings (a doubled or edge
+ *      space): expenses, invoices, trucks, truck_assignments and carrier history
+ *      move under both routes' cascades; with another account holding such a
+ *      spelling nothing widens; the plan counts them (`variantRows`), and the
+ *      lock judgement and the invoice week-collision probe see them. PUT
+ *      /api/users/:id refuses a Job Tracking load under another spacing
+ *      (RENAME_REQUIRES_SHEET), re-spells onto its own directory row's spelling
+ *      (200, no merge) but not onto another account's (409 DRIVER_NAME_TAKEN);
+ *      fix-driver-name agrees on the re-spelling, rewrites the sheet's matching
+ *      cells, lists them in its audit (`spacingVariants`), and calls a case-only
+ *      rename that moves another spelling not money-neutral. The users routes'
+ *      truck lookups (blank → DRIVER_NAME_IN_USE, DELETE's truck clear) find a
+ *      truck under another spacing, unless another account holds it.
  *   §5 source pins: each rename check runs after its route's last await and
  *      before its write — except fix-driver-name's, which runs in the plan,
  *      before the sheet write (the route's last await), like its merge scan;
@@ -134,7 +147,12 @@ const CLASH_SRC = [liftFunction("findDriverNameClashes"), liftFunction("findDriv
 // The sync finds its directory row through findDirectoryRowForDriver() and the
 // driver's truck through findTruckForDriver(); the cascade's drivers_directory
 // leg finds its row through findDirectoryRowForDriver() too.
-const SYNC_SRC = [liftFunction("findDirectoryRowForDriver"), liftFunction("findTruckForDriver"), liftFunction("syncDriverToCarrierSheet")].join("\n");
+const SYNC_SRC = [liftFunction("findDirectoryRowForDriver"), liftFunction("findTruckForDriver"), liftFunction("syncDriverToCarrierSheet"),
+	// The users routes' truck lookup: findTruckForDriver() with the other-account rule.
+	liftFunction("findTruckForDriverAccount")].join("\n");
+// PUT /api/users/:id's lock guard, run for real where a check needs the plan's
+// answer on the driver's other spellings (`widens`) or its blank-name counts.
+const LOCK_SRC = liftFunction("userUpdateLockBlockers");
 // The pay fields PUT /api/drivers-directory/:id reads (scripts/test-pay-settings-admin-only.js).
 const DIRECTORY_PAY = new Function(`${liftFunction("parsePlainDecimal")}\n${liftFunction("directoryPayValue")}\nreturn directoryPayValue;`)();
 const ASSIGN_SRC = liftFunction("assignDriverToTruck");
@@ -146,6 +164,9 @@ const CASCADE_SRC = [
 	TARGETS_SRC,
 	liftFunction("driverRenameWhereSql"),
 	liftFunction("driverRenameWhereArgs"),
+	// One answer per rename to "does it take the driver's other spellings".
+	liftFunction("driverRenameWidens"),
+	liftFunction("driverRenameSpellings"),
 	liftFunction("driverRenameDirectoryRowId"),
 	liftFunction("driverRenameNewValue"),
 	liftConst("const DRIVER_RENAME_ID_CAP = "),
@@ -169,19 +190,24 @@ const HEADS = {
 	dirPut: 'app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), (req, res) => {',
 	truckPut: 'app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req, res) => {',
 	truckPost: 'app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), async (req, res) => {',
+	usersDelete: 'app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {',
 };
 const ROUTES = Object.fromEntries(Object.entries(HEADS).map(([k, h]) => [k, liftRoute(h)]));
 
 // Everything a route below calls from module scope, built on one database.
-// `src` swaps one piece for a mutant.
-function buildModule(db, src = {}) {
-	const s = { planner: PLANNER_SRC, sync: SYNC_SRC, clash: CLASH_SRC, hard: HARD_BLOCK_SRC, pay: PAY_SRC, cascade: CASCADE_SRC, ...src };
-	return new Function("db", "isLocked", "expenseRowPeriodLocked", "invoiceRowPeriodLocked", "namedLockedPeriods", "expensePostedPeriod",
-		`"use strict";\n${NORM_SRC}\n${s.clash}\n${s.cascade}\n${s.hard}\n${s.planner}\n${s.sync}\n${ASSIGN_SRC}\n${AUDIT_TEXT_SRC}\n${s.pay}\n` +
+// `src` swaps one piece for a mutant; `stubs` replaces a period predicate (every
+// month open unless a check says otherwise).
+function buildModule(db, src = {}, stubs = {}) {
+	const s = { planner: PLANNER_SRC, sync: SYNC_SRC, clash: CLASH_SRC, hard: HARD_BLOCK_SRC, pay: PAY_SRC, cascade: CASCADE_SRC, lock: LOCK_SRC, ...src };
+	const st = { isLocked: () => false, expenseRowPeriodLocked: () => false, invoiceRowPeriodLocked: () => false, namedLockedPeriods: () => [],
+		expensePostedPeriod: () => "", periodLocksReadable: () => true, ...stubs };
+	return new Function("db", "isLocked", "expenseRowPeriodLocked", "invoiceRowPeriodLocked", "namedLockedPeriods", "expensePostedPeriod", "periodLocksReadable",
+		`"use strict";\n${NORM_SRC}\n${s.clash}\n${s.cascade}\n${s.hard}\n${s.planner}\n${s.sync}\n${ASSIGN_SRC}\n${AUDIT_TEXT_SRC}\n${s.pay}\n${s.lock}\n` +
 		"return { normalizeDriverName, findDriverNameClash, findDriverNameClashes, canonicalDriverName, DRIVER_RENAME_TARGETS," +
 		" DRIVER_RENAME_ID_CAP, DRIVER_RENAME_HARD_BLOCK_CODES, planDriverRenameSqlite, driverRenameMergeScan, applyDriverRenameSqlite," +
-		" driverRenameAccountIds, syncDriverToCarrierSheet, assignDriverToTruck, auditText, getDriverPayStructures };")(
-		db, () => false, () => false, () => false, () => [], () => "");
+		" driverRenameAccountIds, syncDriverToCarrierSheet, assignDriverToTruck, auditText, getDriverPayStructures," +
+		" userUpdateLockBlockers, findTruckForDriverAccount, driverRenameWhereSql, driverRenameWhereArgs };")(
+		db, st.isLocked, st.expenseRowPeriodLocked, st.invoiceRowPeriodLocked, st.namedLockedPeriods, st.expensePostedPeriod, st.periodLocksReadable);
 }
 const TARGETS = new Function(`${TARGETS_SRC}\nreturn DRIVER_RENAME_TARGETS;`)();
 const colLetter = new Function(`${COL_LETTER_SRC}\nreturn colLetter;`)();
@@ -280,24 +306,29 @@ function mountRoute(routeSrc, env) {
 	};
 }
 // The route's catch logs to console.error, which is expected noise when a
-// mutant answers 500.
+// mutant answers 500; the directory sync warns when it keeps a row another
+// account holds, which §4d's deletes do on purpose.
 async function quiet(fn) {
-	const e = console.error;
+	const e = console.error, w = console.warn;
 	console.error = () => {};
-	try { return await fn(); } finally { console.error = e; }
+	console.warn = () => {};
+	try { return await fn(); } finally { console.error = e; console.warn = w; }
 }
 const JOB_TRACKING = [["Load ID", "Driver", "Assigned Date"]];
 
-function mountUsersPut(db, { routeSrc = ROUTES.usersPut, moduleSrc = {} } = {}) {
-	const m = buildModule(db, moduleSrc);
+// `realLock` runs the route's real lock guard (its plan decides whether the
+// cascade takes the driver's other spellings); otherwise it is stubbed open.
+// `sheet` is the Job Tracking the route reads.
+function mountUsersPut(db, { routeSrc = ROUTES.usersPut, moduleSrc = {}, realLock = false, sheet = JOB_TRACKING, stubs = {} } = {}) {
+	const m = buildModule(db, moduleSrc, stubs);
 	const log = { refusals: [], audits: [] };
 	const call = mountRoute(routeSrc, {
 		db,
-		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: JOB_TRACKING } }) } } }),
+		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: sheet } }) } } }),
 		SPREADSHEET_ID: "not-a-sheet",
 		auditText: m.auditText,
 		recordPeriodRefusal: (audit, code) => log.refusals.push({ code, tail: audit.tail || "" }),
-		userUpdateLockBlockers: () => ({ unreadable: false, blockers: [] }),
+		userUpdateLockBlockers: realLock ? m.userUpdateLockBlockers : () => ({ unreadable: false, blockers: [] }),
 		periodLabel: (p) => p,
 		driverRenameMergeScan: m.driverRenameMergeScan,
 		applyDriverRenameSqlite: m.applyDriverRenameSqlite,
@@ -313,14 +344,15 @@ function mountUsersPut(db, { routeSrc = ROUTES.usersPut, moduleSrc = {} } = {}) 
 	return { put: (id, body) => quiet(() => call({ params: { id: String(id) }, body })), log };
 }
 
-function mountFix(db, { routeSrc = ROUTES.fix, moduleSrc = {} } = {}) {
-	const m = buildModule(db, moduleSrc);
-	const log = { refusals: [], audits: [], sheetWrites: 0 };
+// `sheet` is the Job Tracking the route reads; `log.sheetData` what it wrote.
+function mountFix(db, { routeSrc = ROUTES.fix, moduleSrc = {}, sheet = JOB_TRACKING, stubs = {} } = {}) {
+	const m = buildModule(db, moduleSrc, stubs);
+	const log = { refusals: [], audits: [], sheetWrites: 0, sheetData: [] };
 	const call = mountRoute(routeSrc, {
 		db,
 		getSheets: async () => ({ spreadsheets: { values: {
-			get: async () => ({ data: { values: JOB_TRACKING } }),
-			batchUpdate: async () => { log.sheetWrites++; return {}; },
+			get: async () => ({ data: { values: sheet } }),
+			batchUpdate: async (req) => { log.sheetWrites++; log.sheetData.push(...((req && req.requestBody && req.requestBody.data) || [])); return {}; },
 		} } }),
 		SPREADSHEET_ID: "not-a-sheet",
 		colLetter,
@@ -993,6 +1025,19 @@ async function cascadeBattery(opts = {}) {
 			rows(db) === "1:Shaun King:300 | 2:Bob Driver:0 | 3:Deshorn King:0" && payDailyOf(db, "Shaun King", ms) === 300);
 	}
 	{
+		// Two directory rows for one driver: the account's own spelling and a
+		// doubled-space shadow. The leg renames the ONE row findDirectoryRowForDriver()
+		// finds — the case-aside one — and leaves the other for a person to resolve,
+		// rather than writing both the same name (the column is UNIQUE NOCASE). The
+		// other legs' spacing match does not stand in for this.
+		const db = usersFixture();
+		addDirectory(db, "Shorn  King"); // row 4
+		const { put } = mountUsersPut(db, opts);
+		const r = await put(2, { driverName: "Shaun King" });
+		t(`two directory rows for one driver: only the case-aside row is renamed, the doubled-space one is left, and the rename is not refused (got ${r.status}, ${rows(db)})`,
+			r.status === 200 && rows(db) === "1:Shaun King:0 | 2:Bob Driver:0 | 3:Deshorn King:0 | 4:Shorn  King:0");
+	}
+	{
 		// Renamed onto another row's name, the row found by id would be written a
 		// name another row holds: the UNIQUE pre-flight counts it and refuses before
 		// anything is written.
@@ -1002,6 +1047,282 @@ async function cascadeBattery(opts = {}) {
 		const r = await fix({ oldName: "Shorn King", newName: "Bob Driver", acknowledgeLockedPeriods: true });
 		t(`fix-driver-name renaming it onto "Bob Driver", who has a directory row: 409 DIRECTORY_NAME_COLLISION, nothing written, the sheet untouched (got ${r.status} ${(r.body || {}).code || ""})`,
 			r.status === 409 && (r.body || {}).code === "DIRECTORY_NAME_COLLISION" && rows(db) === before && log.sheetWrites === 0);
+	}
+	return results;
+}
+
+// ─────────────────────────────── §4d every leg takes the driver's other spellings
+// sking ("Shorn King", account 2) has rows stored under his own spelling, a
+// doubled space and edge spaces, on the money legs; Deshorn King's rows are a
+// different person's and never move.
+function variantFixture({ legacyAccount = null } = {}) {
+	const db = usersFixture();
+	if (legacyAccount) addUser(db, 6, "sking2", legacyAccount); // another account holding a spelling of the name
+	addTruck(db, 1, "101", "Shorn  King"); // trucks + truck_assignments, doubled space
+	addTruck(db, 2, "102", "Deshorn King");
+	const e = db.prepare("INSERT INTO expenses (id, driver, date, amount) VALUES (?, ?, ?, ?)");
+	e.run(1, "Shorn King", "2026-09-02", 10);
+	e.run(2, "Shorn  King", "2026-09-03", 20);
+	e.run(3, " shorn king ", "2026-09-04", 30);
+	e.run(4, "Deshorn King", "2026-09-05", 40);
+	const inv = db.prepare("INSERT INTO invoices (id, driver, week_start, week_end, paid_at) VALUES (?, ?, ?, ?, ?)");
+	inv.run(1, "shorn king", "2026-08-29", "2026-09-04", "");
+	inv.run(2, "shorn  king", "2026-09-05", "2026-09-11", "");
+	inv.run(3, "deshorn king", "2026-08-29", "2026-09-04", "");
+	db.prepare("INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at) VALUES ('SK Freight', 'Shorn   King', '2026-01-01')").run();
+	return db;
+}
+const moneyState = (db) => JSON.stringify({
+	expenses: db.prepare("SELECT id, driver FROM expenses ORDER BY id").all().map((r) => `${r.id}:${r.driver}`),
+	invoices: db.prepare("SELECT id, driver FROM invoices ORDER BY id").all().map((r) => `${r.id}:${r.driver}`),
+	trucks: truckDrivers(db),
+	assignments: db.prepare("SELECT truck_id, driver_name FROM truck_assignments ORDER BY id").all().map((r) => `${r.truck_id}:${r.driver_name}`),
+	history: db.prepare("SELECT driver_name FROM carrier_driver_history ORDER BY id").all().map((r) => r.driver_name),
+});
+const MOVED = JSON.stringify({
+	expenses: ["1:Shaun King", "2:Shaun King", "3:Shaun King", "4:Deshorn King"],
+	invoices: ["1:shaun king", "2:shaun king", "3:deshorn king"],
+	trucks: "1:Shaun King,2:Deshorn King",
+	assignments: ["1:Shaun King", "2:Deshorn King"],
+	history: ["Shaun King"],
+});
+// Only the rows under sking's own spelling moved.
+const LEFT = () => JSON.stringify({
+	expenses: ["1:Shaun King", "2:Shorn  King", "3: shorn king ", "4:Deshorn King"],
+	invoices: ["1:shaun king", "2:shorn  king", "3:deshorn king"],
+	trucks: "1:Shorn  King,2:Deshorn King",
+	assignments: ["1:Shorn  King", "2:Deshorn King"],
+	history: ["Shorn   King"],
+});
+
+// DELETE /api/users/:id, lifted, with its period guard, archive and sessions stubbed.
+function mountUsersDelete(db, { moduleSrc = {} } = {}) {
+	const m = buildModule(db, moduleSrc);
+	db.exec("ALTER TABLE driver_onboarding ADD COLUMN user_id INTEGER");
+	db.exec("CREATE TABLE onboarding_documents (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER)");
+	db.exec("CREATE TABLE driver_payment_info (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER)");
+	const call = mountRoute(ROUTES.usersDelete, {
+		db,
+		recordPeriodRefusal: () => {},
+		auditText: m.auditText,
+		userDeleteLockBlockers: () => ({ unreadable: false, blockers: [] }),
+		periodLabel: (p) => p,
+		archiveUserSignedArtifacts: () => ({ archived: [], skipped: [] }),
+		logAudit: () => {},
+		purgeUserSessions: () => 0,
+		syncDriverToCarrierSheet: m.syncDriverToCarrierSheet,
+		findTruckForDriverAccount: m.findTruckForDriverAccount,
+		normalizeDriverName: m.normalizeDriverName,
+		notifyChange: () => {},
+	});
+	return { del: (id) => quiet(() => call({ params: { id: String(id) } })) };
+}
+
+// `opts.usersSrc` / `opts.fixSrc` swap one route for a mutant, `opts.moduleSrc`
+// the shared module.
+async function variantBattery(opts = {}) {
+	const results = [];
+	const t = (name, cond) => results.push({ name, ok: !!cond });
+	const ms = opts.moduleSrc || {};
+	const users = (db, extra = {}) => mountUsersPut(db, { moduleSrc: ms, ...(opts.usersSrc ? { routeSrc: opts.usersSrc } : {}), ...extra });
+	const fixer = (db, extra = {}) => mountFix(db, { moduleSrc: ms, ...(opts.fixSrc ? { routeSrc: opts.fixSrc } : {}), ...extra });
+	const deleter = (db) => mountUsersDelete(db, { moduleSrc: ms });
+
+	// The cascade itself, both routes' forms.
+	{
+		const db = variantFixture();
+		buildModule(db, ms).applyDriverRenameSqlite({ oldName: "Shorn King", newName: "Shaun King", userId: 2 });
+		t(`PUT /api/users/:id's cascade moves the rows under a doubled or edge space too — expenses, invoices (lowercase), trucks, truck_assignments, carrier history — and never Deshorn King's (got ${moneyState(db)})`,
+			moneyState(db) === MOVED);
+	}
+	{
+		const db = variantFixture();
+		buildModule(db, ms).applyDriverRenameSqlite({ oldName: "Shorn King", newName: "Shaun King" });
+		t(`...and so does fix-driver-name's (got ${moneyState(db)})`, moneyState(db) === MOVED);
+	}
+	// Another account still holding a spelling of the name: nothing widens.
+	for (const [label, legacy] of [["a doubled space", "Shorn  King"], ["edge spaces", " Shorn King "]]) {
+		const db = variantFixture({ legacyAccount: legacy });
+		buildModule(db, ms).applyDriverRenameSqlite({ oldName: "Shorn King", newName: "Shaun King", userId: 2 });
+		t(`with another account spelled with ${label} (${JSON.stringify(legacy)}), PUT /api/users/:id's cascade moves only the rows under sking's own spelling (got ${moneyState(db)})`,
+			moneyState(db) === LEFT());
+		const db2 = variantFixture({ legacyAccount: legacy });
+		buildModule(db2, ms).applyDriverRenameSqlite({ oldName: "Shorn King", newName: "Shaun King" });
+		t(`...and fix-driver-name's too, leaving that account alone (got ${moneyState(db2)}, account 6 ${JSON.stringify(driverNameOf(db2, 6))})`,
+			moneyState(db2) === LEFT() && driverNameOf(db2, 6) === legacy);
+		const plan = buildModule(variantFixture({ legacyAccount: legacy }), ms).planDriverRenameSqlite("shorn king", { userId: 2 });
+		t(`...and the plan says so: widens false, no variant rows (got widens ${plan.widens}, expenses ${JSON.stringify(plan.targets.expenses)})`,
+			plan.widens === false && plan.targets.expenses.rows === 1 && !plan.targets.expenses.variantRows);
+	}
+	// The plan counts what the cascade writes.
+	{
+		const plan = buildModule(variantFixture(), ms).planDriverRenameSqlite("shorn king", { userId: 2 });
+		const x = plan.targets;
+		t(`the plan counts the other spellings and says how many (got widens ${plan.widens}, expenses ${JSON.stringify(x.expenses)}, invoices ${JSON.stringify(x.invoices)}, trucks ${JSON.stringify(x.trucks_assigned_driver)})`,
+			plan.widens === true && x.expenses.rows === 3 && x.expenses.variantRows === 2 && x.invoices.rows === 2 && x.invoices.variantRows === 1 &&
+			x.trucks_assigned_driver.rows === 1 && x.truck_assignments.rows === 1 && x.carrier_driver_history.rows === 1);
+	}
+	// The lock judgement sees them.
+	{
+		const stubs = { expenseRowPeriodLocked: (r) => r.id === 2, invoiceRowPeriodLocked: (r) => !!String(r.paid_at || "").trim() };
+		const db = variantFixture();
+		db.prepare("UPDATE invoices SET paid_at = '2026-09-12' WHERE id = 2").run();
+		const plan = buildModule(db, ms, stubs).planDriverRenameSqlite("shorn king", { userId: 2 });
+		const codes = plan.blockers.map((b) => `${b.table}:${b.code}:${b.rows}`).join(",");
+		t(`the lock judgement sees a finalized expense and a paid invoice stored under a doubled space (got ${codes})`,
+			codes.includes("expenses:PERIOD_FINALIZED:1") && codes.includes("invoices:INVOICE_ALREADY_PAID:1"));
+		const before = moneyState(db);
+		const { put } = users(db, { realLock: true, stubs });
+		const r = await put(2, { driverName: "Shaun King" });
+		t(`...so PUT /api/users/:id refuses the rename, nothing written (got ${r.status} ${(r.body || {}).code || ""})`,
+			r.status === 409 && (r.body || {}).code === "PERIOD_FINALIZED" && moneyState(db) === before);
+	}
+	// The invoice week-collision probe sees them: two spellings of one driver in
+	// one week would be written the same lowercase name.
+	{
+		const db = variantFixture();
+		db.prepare("UPDATE invoices SET week_start = '2026-08-29', week_end = '2026-09-04' WHERE id = 2").run();
+		const m = buildModule(db, ms);
+		const users = m.planDriverRenameSqlite("shorn king", { userId: 2 }).blockers.map((b) => b.code);
+		const fixForm = m.planDriverRenameSqlite("shorn king", { newLower: "shaun king" }).blockers.map((b) => b.code);
+		t(`the week-collision probe sees "shorn king" and "shorn  king" in one week, in both routes' forms (got ${users} / ${fixForm})`,
+			users.includes("INVOICE_WEEK_COLLISION") && fixForm.includes("INVOICE_WEEK_COLLISION"));
+		const before = moneyState(db);
+		const { fix, log } = fixer(db);
+		const r = await fix({ oldName: "Shorn King", newName: "Shaun King", acknowledgeLockedPeriods: true, reason: "consolidating spellings" });
+		t(`...so fix-driver-name refuses it before the sheet is written (got ${r.status} ${(r.body || {}).code || ""})`,
+			r.status === 409 && (r.body || {}).code === "INVOICE_WEEK_COLLISION" && log.sheetWrites === 0 && moneyState(db) === before);
+		const db2 = variantFixture({ legacyAccount: "Shorn  King" });
+		db2.prepare("UPDATE invoices SET week_start = '2026-08-29', week_end = '2026-09-04' WHERE id = 2").run();
+		t("...but not when another account holds that spelling: the rename would not write that invoice",
+			!buildModule(db2, ms).planDriverRenameSqlite("shorn king", { userId: 2 }).blockers.some((b) => b.code === "INVOICE_WEEK_COLLISION"));
+	}
+
+	// PUT /api/users/:id end to end.
+	{
+		const db = variantFixture();
+		const { put } = users(db, { realLock: true });
+		const r = await put(2, { driverName: "Shaun King" });
+		t(`PUT /api/users/:id renames the rows under every spelling (got ${r.status} ${(r.body || {}).code || ""}, ${moneyState(db)})`,
+			r.status === 200 && moneyState(db) === MOVED && driverNameOf(db, 2) === "Shaun King");
+	}
+	{
+		// A Job Tracking load under another spacing of the old name would be left
+		// behind by a route that does not write the sheet.
+		const db = variantFixture();
+		const before = moneyState(db);
+		const sheet = [["Load ID", "Driver", "Assigned Date"], ["L-1", "Shorn  King", "2026-09-01"]];
+		const { put } = users(db, { realLock: true, sheet });
+		const r = await put(2, { driverName: "Shaun King" });
+		t(`PUT /api/users/:id with a Job Tracking load under "Shorn  King": 409 RENAME_REQUIRES_SHEET counting it, nothing written (got ${r.status} ${(r.body || {}).code || ""} ${(r.body || {}).sheetRows})`,
+			r.status === 409 && (r.body || {}).code === "RENAME_REQUIRES_SHEET" && (r.body || {}).sheetRows === 1 && moneyState(db) === before);
+		const db2 = variantFixture({ legacyAccount: "Shorn  King" });
+		const { put: put2 } = users(db2, { realLock: true, sheet });
+		const r2 = await put2(2, { driverName: "Shaun King" });
+		t(`...but that load is not sking's to rename while another account holds "Shorn  King" (got ${r2.status} ${(r2.body || {}).code || ""})`,
+			r2.status === 200 && moneyState(db2) === LEFT());
+	}
+	// A re-spelling onto the account's own directory row's spelling.
+	{
+		const db = usersFixture();
+		db.prepare("UPDATE drivers_directory SET driver_name = 'Shorn  King', pay_daily = 300 WHERE id = 1").run();
+		const { put } = users(db, { realLock: true });
+		const r = await put(2, { driverName: "Shorn  King" });
+		t(`PUT /api/users/:id re-spelling "Shorn King" onto its own directory row's spelling "Shorn  King": 200, not a merge (got ${r.status} ${(r.body || {}).code || ""} ${JSON.stringify((r.body || {}).mergeTargets || {})})`,
+			r.status === 200 && driverNameOf(db, 2) === "Shorn  King" && JSON.stringify(directoryNames(db)) === JSON.stringify(["Shorn  King", "Bob Driver", "Deshorn King"]));
+	}
+	{
+		const db = usersFixture();
+		db.prepare("UPDATE drivers_directory SET driver_name = 'Shorn  King' WHERE id = 1").run();
+		addUser(db, 6, "sking2", "Shorn   King");
+		const before = snapshot(db);
+		const { put } = users(db, { realLock: true });
+		const r = await put(2, { driverName: " shorn   KING" });
+		t(`...while re-spelling it onto another account's exact spelling is still 409 DRIVER_NAME_TAKEN, nothing written (got ${r.status} ${(r.body || {}).code || ""})`,
+			r.status === 409 && (r.body || {}).code === "DRIVER_NAME_TAKEN" && snapshot(db) === before);
+	}
+	{
+		// fix-driver-name, the same re-spelling: not a merge either.
+		const db = fixFixture();
+		db.prepare("UPDATE drivers_directory SET driver_name = 'Shorn  King' WHERE id = 1").run();
+		const { fix } = fixer(db);
+		const dry = await fix({ oldName: "Shorn King", newName: "Shorn  King" }, { dryRun: "true" });
+		const v = (dry.body || {}).verdict || {};
+		t(`fix-driver-name re-spelling onto the driver's own directory row's spelling: no merge (got ${dry.status} isMerge=${v.isMerge} ${JSON.stringify(v.mergeTargets || {})})`,
+			dry.status === 200 && v.isMerge === false && dry.body.wouldWrite === true);
+	}
+	// fix-driver-name: the sheet moves with the database, and the recipe says which rows had another spelling.
+	{
+		const db = variantFixture();
+		const sheet = [["Load ID", "Driver", "Assigned Date"], ["L-1", "Shorn King", "2026-09-01"], ["L-2", "Shorn  King", "2026-09-02"], ["L-3", "Deshorn King", "2026-09-03"]];
+		const { fix, log } = fixer(db, { sheet });
+		const dry = await fix({ oldName: "Shorn King", newName: "Shaun King" }, { dryRun: "true" });
+		const p = (dry.body || {}).plan || {};
+		const v = (dry.body || {}).verdict || {};
+		t(`fix-driver-name's dry run counts the other spellings, sheet included (got sheet ${JSON.stringify(p.sheet || null)}, spacingVariants ${JSON.stringify(v.spacingVariants || null)})`,
+			p.sheet && p.sheet.rows === 2 && p.sheet.variantRows === 1 && v.spacingVariants && v.spacingVariants.widened === true && v.spacingVariants.rows === 7);
+		const r = await fix({ oldName: "Shorn King", newName: "Shaun King" });
+		const audit = log.audits.find((a) => a.action === "fix_driver_name");
+		const d = audit ? JSON.parse(audit.details) : {};
+		const ranges = log.sheetData.map((u) => `${u.range}=${u.values[0][0]}`).join(",");
+		t(`...renames the sheet cell under "Shorn  King" with the rest, and never Deshorn King's (got ${r.status}, ${ranges}, ${moneyState(db)})`,
+			r.status === 200 && ranges === "Job Tracking!B2=Shaun King,Job Tracking!B3=Shaun King" && moneyState(db) === MOVED);
+		t(`...and the audit lists every row that had another spelling, by id and range, with that spelling (got ${JSON.stringify(d.spacingVariants || null)})`,
+			d.spacingVariants && JSON.stringify(d.spacingVariants.sqlite.expenses) === JSON.stringify({ "Shorn  King": [2], " shorn king ": [3] }) &&
+			JSON.stringify(d.spacingVariants.sheet) === JSON.stringify([{ range: "Job Tracking!B3", was: "Shorn  King" }]) &&
+			/restore each row in spacingVariants/.test(d.reversal || "") && !/an exact undo/.test(d.reversal || ""));
+	}
+	{
+		// A case-only rename that also moves another spelling is not money-neutral.
+		const stubs = { expenseRowPeriodLocked: (r) => r.id === 2 };
+		const db = variantFixture();
+		const { fix } = fixer(db, { stubs });
+		const dry = await fix({ oldName: "Shorn King", newName: "SHORN KING" }, { dryRun: "true" });
+		const v = (dry.body || {}).verdict || {};
+		t(`fix-driver-name, case-only but moving a finalized row under "Shorn  King": not money-neutral, blocked (got moneyNeutral ${v.moneyNeutral} ${v.decision} ${v.code})`,
+			v.caseOnly === true && v.moneyNeutral === false && v.decision === "block" && v.code === "PERIOD_FINALIZED");
+		const db2 = usersFixture();
+		db2.prepare("INSERT INTO expenses (id, driver, date, amount) VALUES (2, 'Shorn King', '2026-09-03', 20)").run();
+		const dry2 = await fixer(db2, { stubs }).fix({ oldName: "Shorn King", newName: "SHORN KING" }, { dryRun: "true" });
+		const v2 = (dry2.body || {}).verdict || {};
+		t(`...while a case-only rename with no other spelling in play stays money-neutral, its finalized row no obstacle (got ${v2.moneyNeutral} ${v2.decision})`,
+			v2.moneyNeutral === true && v2.decision === "allow");
+		db2.prepare("INSERT INTO notifications (driver_name) VALUES ('shorn  king')").run();
+		const dry3 = await fixer(db2, { stubs }).fix({ oldName: "Shorn King", newName: "SHORN KING" }, { dryRun: "true" });
+		const v3 = (dry3.body || {}).verdict || {};
+		t(`...and so does one whose only other spelling is on a cosmetic leg, a notification (got ${v3.moneyNeutral} ${v3.decision}, spacingVariants ${JSON.stringify(v3.spacingVariants || null)})`,
+			v3.moneyNeutral === true && v3.decision === "allow" && v3.spacingVariants && v3.spacingVariants.rows === 1);
+	}
+
+	// The users routes' truck lookups: a truck stored under another spacing.
+	{
+		const db = usersFixture();
+		addTruck(db, 5, "105", "Bob  Driver");
+		const { put } = users(db, { realLock: true });
+		const r = await put(3, { driverName: "" });
+		const counts = ((r.body || {}).blockers || [])[0] || {};
+		t(`PUT /api/users/:id blanking "Bob Driver", whose truck is stored as "Bob  Driver": 409 DRIVER_NAME_IN_USE counting the truck (got ${r.status} ${(r.body || {}).code || ""} ${JSON.stringify(counts.counts || null)})`,
+			r.status === 409 && (r.body || {}).code === "DRIVER_NAME_IN_USE" && counts.counts && counts.counts.trucks === 1 && driverNameOf(db, 3) === "Bob Driver");
+		const db2 = usersFixture();
+		addUser(db2, 6, "bdriver2", "Bob  Driver");
+		addTruck(db2, 5, "105", "Bob  Driver");
+		const r2 = await users(db2, { realLock: true }).put(3, { driverName: "" });
+		t(`...but not while another account holds "Bob  Driver": that truck is its (got ${r2.status} ${(r2.body || {}).code || ""})`,
+			r2.status === 200 && driverNameOf(db2, 3) === "");
+	}
+	{
+		const db = usersFixture();
+		addTruck(db, 5, "105", "Bob  Driver");
+		const r = await deleter(db).del(3);
+		const open = db.prepare("SELECT COUNT(*) AS n FROM truck_assignments WHERE truck_id = 5 AND end_date = ''").get().n;
+		t(`DELETE /api/users/:id clears the truck stored under "Bob  Driver" and closes its assignment (got ${r.status}, trucks ${truckDrivers(db)}, open ${open})`,
+			r.status === 200 && truckDrivers(db) === "5:" && open === 0 && (r.body || {}).removed.trucks_unassigned === 1);
+		const db2 = usersFixture();
+		addUser(db2, 6, "bdriver2", "Bob  Driver");
+		addTruck(db2, 5, "105", "Bob  Driver");
+		const r2 = await deleter(db2).del(3);
+		t(`...but leaves it while another account holds "Bob  Driver" (got ${r2.status}, trucks ${truckDrivers(db2)})`,
+			r2.status === 200 && truckDrivers(db2) === "5:Bob  Driver");
 	}
 	return results;
 }
@@ -1027,7 +1348,7 @@ function sourcePins() {
 	ok(askAt > 0, "§5 fix-driver-name asks findDriverNameClashes(newTrim, { exceptUserIds: movingAccountIds })");
 	ok(askAt > 0 && askAt < fx.indexOf("batchUpdate(") && askAt < fx.indexOf("const isMerge = "),
 		"§5 ...in the plan, before isMerge is decided and before the sheet is written");
-	const readAt = fx.indexOf("renamedAccountIds = driverRenameAccountIds(oldTrim, newTrim);");
+	const readAt = fx.indexOf("renamedAccountIds = driverRenameAccountIds(oldTrim, newTrim, { widens: sqlPlan.widens });");
 	const cascadeAt = fx.indexOf("applyDriverRenameSqlite({");
 	ok(readAt > 0 && cascadeAt > readAt && !/findDriverNameClash/.test(fx.slice(readAt, cascadeAt)),
 		"§5 ...and outside the session read → cascade window scripts/test-session-sockets.js pins");
@@ -1192,6 +1513,17 @@ async function mutants() {
 	// a spacing variant another account holds, and for the new name that is the
 	// renamed account itself whenever the lookup would self-match, so the two
 	// answer alike in every scenario here — an equivalent mutant.
+
+	// §4d: the other spellings.
+	caught("R26 the cascade taking the driver's other spellings while another account still holds that name", await variantBattery({
+		moduleSrc: { cascade: swap("R26", CASCADE_SRC, "return !driverNameHeldByOtherAccount(nameLower, moved);", "return true;") },
+	}));
+	caught("R27 the merge scan counting the rename's own rows (the re-spelling self-match removed)", await variantBattery({
+		moduleSrc: { cascade: swap("R27", CASCADE_SRC, 'if (typeof opts.oldLower === "string" && opts.oldLower) {', "if (false) {") },
+	}));
+	caught("R28 fix-driver-name leaving the sheet's other spellings behind (the partial rename)", await variantBattery({
+		fixSrc: swap("R28", ROUTES.fix, '(sqlPlan.widens === true && cell !== "" && normalizeDriverName(cell) === oldNorm)', "false"),
+	}));
 }
 
 (async () => {
@@ -1207,6 +1539,8 @@ async function mutants() {
 	record(await payBattery());
 	section("§4c the rename cascade renames a directory row stored under a spacing variant");
 	record(await cascadeBattery());
+	section("§4d every leg takes the driver's other spellings, unless another account holds them");
+	record(await variantBattery());
 	section("§5 source pins");
 	sourcePins();
 	section("§6 mutants — each must be caught");
