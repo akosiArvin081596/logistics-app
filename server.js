@@ -12279,18 +12279,26 @@ app.get("/api/admin/orphaned-signed-artifacts", requireRole("Super Admin"), orph
 // Accepting an investor application registers each vehicle on it as a truck
 // owned by the new account (owner_id = the user id, as the dashboard and reports
 // key it), under the unit number INV-<application id>-<A, B, …>. Returns what
-// happened to them: { created, existing, failed }.
+// happened to them: { created, existing, heldByOther, failed }.
 //
-// ⚠️ ONLY A UNIQUE VIOLATION MEANS "ALREADY EXISTS". The loop used to swallow
+// ⚠️ ONLY A UNIQUE VIOLATION MEANS "ALREADY ON FILE". The loop used to swallow
 // every error as a duplicate while the audit line and the welcome email counted
 // every vehicle on the application as registered, so a truck that was never
 // written read as added. unit_number is the trucks table's only UNIQUE column, so
-// SQLITE_CONSTRAINT_UNIQUE is a truck already on file under that number —
-// normally this application's own, from an earlier acceptance; it is left as it
-// is. Any other error is logged and counted as failed, and the admin is told to
-// add those trucks by hand.
+// SQLITE_CONSTRAINT_UNIQUE is a truck already on file under that number. Any
+// other error, or a UNIQUE violation with no truck under the number, is logged
+// and counted as failed, and the admin is told to add those trucks by hand.
+//
+// ⚠️ A TRUCK ALREADY ON FILE IS THIS ACCOUNT'S ONLY WHEN ITS owner_id SAYS SO.
+// `existing` counts a truck owned by `userId`; any other holder — an earlier
+// acceptance's account, owner 0 once that account was deleted, anyone else — is
+// `heldByOther`. Either way the truck is left exactly as it is: moving a truck
+// between investors' ledgers re-books its fixed costs, which is a month-end-lock
+// decision for PUT /api/trucks/:id, never a side effect of an acceptance. The
+// welcome email counts `created + existing` alone; the admin email and the
+// Investor Applications screen name the other two.
 function registerApplicationVehicles(vehicles, appId, userId) {
-	const counts = { created: 0, existing: 0, failed: 0 };
+	const counts = { created: 0, existing: 0, heldByOther: 0, failed: 0 };
 	const list = Array.isArray(vehicles) ? vehicles : [];
 	const validTruckStatus = ["Active", "Inactive", "Maintenance", "OOS"];
 	for (let i = 0; i < list.length; i++) {
@@ -12329,8 +12337,17 @@ function registerApplicationVehicles(vehicles, appId, userId) {
 				v.titleStatus || "Clean", v.titleState || "", "");
 			counts.created++;
 		} catch (err) {
+			// Who holds the unit number. Guarded, because this helper must never
+			// throw: the account and its temporary password already exist, and
+			// only the route's answer and the welcome email carry that password.
+			let held = null;
 			if (err && err.code === "SQLITE_CONSTRAINT_UNIQUE") {
+				try { held = db.prepare("SELECT owner_id FROM trucks WHERE unit_number = ?").get(unitNum) || null; } catch { held = null; }
+			}
+			if (held && Number(held.owner_id) === Number(userId)) {
 				counts.existing++;
+			} else if (held) {
+				counts.heldByOther++;
 			} else {
 				counts.failed++;
 				console.error(`Investor application ${appId}: vehicle ${unitNum} could not be added as a truck:`, err && err.message ? err.message : err);
@@ -12406,10 +12423,11 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			if (!Array.isArray(vehicles)) vehicles = [];
 			const vehicleCounts = registerApplicationVehicles(vehicles, appId, userId);
 			// What the investor's fleet actually holds: trucks written now plus
-			// trucks already on file under this application's unit numbers.
+			// trucks already on file that this account owns. A truck on file under
+			// another owner is not theirs and is not counted (heldByOther).
 			const vehiclesRegistered = vehicleCounts.created + vehicleCounts.existing;
 
-			logAudit(req, "accept_investor", "investor_application", appId, `Accepted investor "${fullName}", created account "${username}", ${vehicles.length} vehicle(s): ${vehicleCounts.created} created, ${vehicleCounts.existing} already existed, ${vehicleCounts.failed} failed`);
+			logAudit(req, "accept_investor", "investor_application", appId, `Accepted investor "${fullName}", created account "${username}", ${vehicles.length} vehicle(s): ${vehicleCounts.created} created, ${vehicleCounts.existing} already existed, ${vehicleCounts.heldByOther} held by another owner, ${vehicleCounts.failed} failed`);
 			notifyChange("investor-applications"); notifyChange("investors"); notifyChange("users"); notifyChange("trucks");
 			res.json({ success: true, accountCreated: true, credentials: { username, tempPassword, userId, investorName: fullName }, vehicles: vehicleCounts });
 
@@ -12466,7 +12484,7 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 							<tr><td style="padding:5px 0;color:#64748b;width:140px">Username</td><td style="padding:5px 0;font-weight:600;font-family:monospace">${escapeHtml(username)}</td></tr>
 							<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0">${escapeHtml(application.email)}</td></tr>
 							<tr><td style="padding:5px 0;color:#64748b">Entity Type</td><td style="padding:5px 0">${escapeHtml(application.entity_type || "-")}</td></tr>
-							<tr><td style="padding:5px 0;color:#64748b">Fleet</td><td style="padding:5px 0;font-weight:600">${vehiclesRegistered} vehicle(s) added${vehicleCounts.failed > 0 ? `; ${vehicleCounts.failed} could not be added — add them from the Trucks page` : ""}</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b">Fleet</td><td style="padding:5px 0;font-weight:600">${vehiclesRegistered} vehicle(s) added${vehicleCounts.heldByOther > 0 ? `; ${vehicleCounts.heldByOther} vehicle(s) are already on file under another owner (unit numbers INV-${appId}-…) — reassign them from the Trucks page` : ""}${vehicleCounts.failed > 0 ? `; ${vehicleCounts.failed} could not be added — add them from the Trucks page` : ""}</td></tr>
 							<tr><td style="padding:5px 0;color:#64748b">Accepted By</td><td style="padding:5px 0">${escapeHtml(req.session.user.username)}</td></tr>
 						</table>
 					</div>

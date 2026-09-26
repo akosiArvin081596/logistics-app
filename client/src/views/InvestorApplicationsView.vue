@@ -130,6 +130,19 @@
             <span class="text-[12px] text-gray-500">Temp Password</span>
             <span class="text-[14px] font-mono font-bold text-amber-700">{{ credentials.tempPassword }}</span>
           </div>
+          <!-- What the acceptance did with the application's vehicles. The two
+               outcomes that need the admin stay here, beside the credentials,
+               rather than only in the toast, which clears after a few seconds. -->
+          <div v-if="acceptVehicles" class="flex justify-between items-center py-2 px-3 bg-gray-50 rounded-lg">
+            <span class="text-[12px] text-gray-500">Fleet</span>
+            <span class="text-[14px] font-bold text-gray-900">{{ acceptVehicles.registered }} vehicle(s) registered</span>
+          </div>
+          <div v-if="acceptVehicles && acceptVehicles.heldByOther > 0" role="alert" class="py-2 px-3 bg-amber-50 rounded-lg border border-amber-200 text-[13px] text-amber-800" data-test="accept-held-by-other">
+            {{ acceptVehicles.heldByOther }} vehicle(s) are already on file under another owner (unit numbers {{ acceptVehicles.unitPrefix }}…) — reassign them from the Trucks page.
+          </div>
+          <div v-if="acceptVehicles && acceptVehicles.failed > 0" role="alert" class="py-2 px-3 bg-red-50 rounded-lg border border-red-200 text-[13px] text-red-800" data-test="accept-failed">
+            {{ acceptVehicles.failed }} vehicle(s) could not be added — add them from the Trucks page.
+          </div>
         </div>
       </DialogContent>
     </Dialog>
@@ -281,6 +294,10 @@ function handleKpiClick(filter) {
 }
 const showCredentials = ref(false)
 const credentials = ref(null)
+// The accept response's vehicle outcomes ({ created, existing, heldByOther,
+// failed }) as the credentials dialog shows them; null when the response
+// carries none.
+const acceptVehicles = ref(null)
 const showDetail = ref(false)
 const detailLoading = ref(false)
 const showAcctNum = ref(false)
@@ -316,12 +333,23 @@ async function updateStatus(id, status) {
     const result = await api.put(`/api/investor-applications/${id}/status`, { status })
     if (result.accountCreated && result.credentials) {
       credentials.value = result.credentials
+      // A vehicle already on file under another owner is not this investor's,
+      // and one that failed was not written: the dialog says so beside the
+      // credentials (the welcome email counts only created + existing).
+      const v = result.vehicles || null
+      const failed = v?.failed || 0
+      const heldByOther = v?.heldByOther || 0
+      acceptVehicles.value = v
+        ? { registered: (v.created || 0) + (v.existing || 0), heldByOther, failed, unitPrefix: `INV-${id}-` }
+        : null
       showCredentials.value = true
-      // The toast holds one message, so a vehicle that could not be registered
-      // replaces the success line rather than being overwritten by it.
-      const failed = result.vehicles?.failed || 0
-      if (failed > 0) {
-        toast(`Investor accepted — account created. ${failed} vehicle(s) could not be added — add them from the Trucks page`, 'warning')
+      // The toast holds one message, so a vehicle that needs the admin replaces
+      // the success line rather than being overwritten by it.
+      const notes = []
+      if (heldByOther > 0) notes.push(`${heldByOther} vehicle(s) are already on file under another owner — reassign them from the Trucks page`)
+      if (failed > 0) notes.push(`${failed} vehicle(s) could not be added — add them from the Trucks page`)
+      if (notes.length) {
+        toast(`Investor accepted — account created. ${notes.join('; ')}`, 'warning')
       } else {
         toast('Investor accepted — account created', 'success')
       }
