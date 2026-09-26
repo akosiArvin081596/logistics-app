@@ -41,9 +41,15 @@
  *      assignment the same save carried). Resending the stored rate, leaving it
  *      out, or sending only the stored rate: saved. A Super Admin's rate change
  *      that lands while a Dispatcher's save is waiting on the active-load check
- *      is kept, not overwritten. A Super Admin changes the rate.
+ *      is kept, not overwritten. A Super Admin changes the rate. The same form's
+ *      Admin Fee (not a pay setting — either role may edit it): a number is
+ *      stored as given, a blank or unreadable one is the column's 50, never
+ *      NULL, and a save that leaves it out leaves the column alone.
  *   §4 POST /api/trucks — a Dispatcher or an Investor adding a truck with a
- *      rate: 403, no truck; without one: created. A Super Admin sets one.
+ *      rate: 403, no truck; without one: created. A Super Admin sets one. The
+ *      Add form's fixed costs, admin fee and photo are stored for a Super Admin
+ *      or a Dispatcher (and are what the month-end lock is asked about), not for
+ *      an Investor; a blank or unreadable admin fee is the column's 50.
  *   §5 the refusal row: action pay_edit_blocked, the entity and id, the
  *      account, the attempted change and [PAY_EDIT_ADMIN_ONLY]; coalesced by
  *      logAuditRefusal(); caller text capped and unable to forge a
@@ -51,7 +57,8 @@
  *   §6 source pins: each check sits before its route's month-end lock and its
  *      first write; the directory handlers never await; a non-Super-Admin's
  *      save never writes its own pay values on either PUT; the rename check
- *      and the rate cap sit where they must.
+ *      and the rate cap sit where they must; both truck routes store the admin
+ *      fee through one rule.
  *   §7 MUTANTS — three breaks of the pay guard: the check removed, the check
  *      keyed on presence instead of change, and the role test inverted. Each is
  *      applied to all four routes at once and must fail at least one check in
@@ -169,6 +176,10 @@ const PIECES = {
 		liftConst("const IN_SERVICE_MAX_MONTHS_AHEAD = "),
 		liftFunction("parseInServiceDate"),
 		liftFunction("parseRetiredAt"),
+		// The admin fee both truck routes store, and the monthly total the create's
+		// audit lines name.
+		liftFunction("adminFeePctOrDefault"),
+		liftFunction("truckMonthlyFixed"),
 	].join("\n"),
 };
 const MODULE_EXPORTS = [
@@ -177,6 +188,7 @@ const MODULE_EXPORTS = [
 	"normalizeDriverName", "findDriverNameClash", "findDriverNameClashes", "canonicalDriverName",
 	"syncDriverToCarrierSheet", "assignDriverToTruck",
 	"directoryChangedColumns", "DRIVER_PAY_DAILY_MAX", "parseDriverPayDaily", "parseInServiceDate", "parseRetiredAt",
+	"adminFeePctOrDefault", "truckMonthlyFixed",
 ];
 function buildModule(db, src = {}) {
 	const s = { ...PIECES, ...src };
@@ -332,12 +344,14 @@ function mountAll(db, { routes = {}, moduleSrc = {}, locked = false, duringActiv
 		? { unreadable: false, blockers: [{ field: Object.keys(changed)[0], periods: ["2026-06"], detail: "restates June" }] }
 		: { unreadable: false, blockers: [] });
 	const periodRefusal = (req, res) => res.status(409).json({ code: "PERIOD_FINALIZED" });
+	// What POST /api/trucks asked its month-end lock about, one entry per call.
+	const createLockSeen = [];
 	const env = {
 		db,
 		...m,
 		directoryEditLockBlockers: (rowBefore, changed) => blocked(changed),
 		truckEditLockBlockers: (truck, changed) => blocked(changed),
-		truckCreateLockBlockers: () => ({ unreadable: false, blockers: [] }),
+		truckCreateLockBlockers: (truck) => { createLockSeen.push({ ...truck }); return { unreadable: false, blockers: [] }; },
 		// The create lock is stubbed, so the driver history it would be handed is
 		// too; the real pair is scripts/test-truck-create-new-driver.js's subject.
 		getJobTrackingCached: async () => ({ headers: ["Load ID", "Driver", "Assigned Date"], data: [] }),
@@ -363,6 +377,7 @@ function mountAll(db, { routes = {}, moduleSrc = {}, locked = false, duringActiv
 		dirPut: (user, id, body) => quiet(() => call.dirPut({ ...as(user), params: { id: String(id) }, body })),
 		truckPost: (user, body) => quiet(() => call.truckPost({ ...as(user), body })),
 		truckPut: (user, id, body) => quiet(() => call.truckPut({ ...as(user), params: { id: String(id) }, body })),
+		createLockSeen,
 	};
 }
 
@@ -689,6 +704,26 @@ async function battery(opts = {}) {
 		const r = await app.truckPut(DISPATCHER, 1, truckFormBody(truckRow(db, 1), { driverPayDaily: 300 }));
 		refused("§3 in a locked month, a Dispatcher's rate change", r, ["driver_pay_daily"]);
 	}
+	// The Edit form's Admin Fee, from a stored 40. Clearing the field sends ""
+	// (v-model.number keeps an empty input as the empty string).
+	for (const [label, who, fee, expect] of [
+		["a Super Admin clearing it (\"\")", SUPER, "", 50],
+		["a Dispatcher clearing it (\"\")", DISPATCHER, "", 50],
+		["null", SUPER, null, 50],
+		["unreadable (\"abc\")", SUPER, "abc", 50],
+		["\"Infinity\"", SUPER, "Infinity", 50],
+		["35", DISPATCHER, 35, 35],
+		["\"37.5\"", SUPER, "37.5", 37.5],
+		["0 (a deliberate zero)", SUPER, 0, 0],
+		["left out of the save", SUPER, undefined, 40],
+	]) {
+		const db = makeDb();
+		db.prepare("UPDATE trucks SET admin_fee_pct = 40 WHERE id = 1").run();
+		const app = mountAll(db, opts);
+		const r = await app.truckPut(who, 1, truckFormBody(truckRow(db, 1), { adminFeePct: fee }));
+		const after = truckRow(db, 1).admin_fee_pct;
+		t(`§3 PUT truck, the admin fee ${label}: stored as ${expect} (got ${r.status}, ${after})`, r.status === 200 && after === expect);
+	}
 
 	// ── §4 POST /api/trucks ──
 	const newTruck = (over = {}) => {
@@ -726,6 +761,52 @@ async function battery(opts = {}) {
 		const r = await app.truckPost(SUPER, newTruck({ driverPayDaily: 300 }));
 		const made = db.prepare("SELECT * FROM trucks WHERE unit_number = '500'").get();
 		t(`§4 Super Admin POST truck with a $300/day rate: created with it (got ${r.status})`, r.status === 200 && made && made.driver_pay_daily === 300);
+	}
+	// The Add form's fixed costs, admin fee and photo (AddTruckForm.vue sends all
+	// seven). Stored for the two roles PUT /api/trucks/:id lets edit them, parsed
+	// the way that route parses them, and handed to the month-end lock as stored.
+	const COSTS = { insuranceMonthly: 1630, eldMonthly: "50", truckPaymentMonthly: 1200, hvutAnnual: 580, irpAnnual: "1380", adminFeePct: 40, photo: "data:image/jpeg;base64,/9j/4AAQSkZJRg==" };
+	const storedCosts = (r) => r && [r.insurance_monthly, r.eld_monthly, r.truck_payment_monthly, r.hvut_annual, r.irp_annual, r.admin_fee_pct, r.photo];
+	for (const [label, who] of [["Super Admin", SUPER], ["Dispatcher", DISPATCHER]]) {
+		const db = makeDb();
+		const app = mountAll(db, opts);
+		const r = await app.truckPost(who, newTruck(COSTS));
+		const made = db.prepare("SELECT * FROM trucks WHERE unit_number = '500'").get();
+		t(`§4 POST truck by a ${label} with the Add form's costs: stored as sent (got ${r.status}, ${JSON.stringify(storedCosts(made))})`,
+			r.status === 200 && JSON.stringify(storedCosts(made)) === JSON.stringify([1630, 50, 1200, 580, 1380, 40, COSTS.photo]));
+		const seen = app.createLockSeen[0] || {};
+		t(`§4 POST truck by a ${label} with the Add form's costs: the month-end lock is asked about the same amounts`,
+			app.createLockSeen.length === 1 && seen.insurance_monthly === 1630 && seen.eld_monthly === 50 && seen.truck_payment_monthly === 1200 &&
+			seen.hvut_annual === 580 && seen.irp_annual === 1380);
+	}
+	{
+		const db = makeDb();
+		const app = mountAll(db, opts);
+		const r = await app.truckPost(INVESTOR, newTruck({ ...COSTS, driverPayDaily: undefined }));
+		const made = db.prepare("SELECT * FROM trucks WHERE unit_number = '500'").get();
+		const seen = app.createLockSeen[0] || {};
+		t(`§4 POST truck by an Investor with costs: created with the defaults — $0, the 50% fee, no photo (got ${r.status}, ${JSON.stringify(storedCosts(made))})`,
+			r.status === 200 && JSON.stringify(storedCosts(made)) === JSON.stringify([0, 0, 0, 0, 0, 50, ""]) &&
+			seen.insurance_monthly === 0 && seen.irp_annual === 0);
+	}
+	for (const [label, fee, expect] of [
+		["blank (\"\")", "", 50], ["missing", undefined, 50], ["unreadable (\"abc\")", "abc", 50], ["\"Infinity\"", "Infinity", 50],
+		["0 (a deliberate zero)", 0, 0], ["\"37.5\"", "37.5", 37.5],
+	]) {
+		const db = makeDb();
+		const app = mountAll(db, opts);
+		const r = await app.truckPost(SUPER, newTruck({ adminFeePct: fee }));
+		const made = db.prepare("SELECT * FROM trucks WHERE unit_number = '500'").get();
+		t(`§4 POST truck with the admin fee ${label}: stored as ${expect} (got ${r.status}, ${made && made.admin_fee_pct})`,
+			r.status === 200 && made && made.admin_fee_pct === expect);
+	}
+	{
+		const db = makeDb();
+		const app = mountAll(db, opts);
+		const r = await app.truckPost(DISPATCHER, newTruck({ insuranceMonthly: "", eldMonthly: "abc", truckPaymentMonthly: null, hvutAnnual: undefined, irpAnnual: "1380.5", photo: undefined }));
+		const made = db.prepare("SELECT * FROM trucks WHERE unit_number = '500'").get();
+		t(`§4 POST truck with blank, unreadable and missing amounts: 0 for each, the rest as sent (got ${r.status}, ${JSON.stringify(storedCosts(made))})`,
+			r.status === 200 && JSON.stringify(storedCosts(made)) === JSON.stringify([0, 0, 0, 0, 1380.5, 50, ""]));
 	}
 
 	// ── §5 the refusal row ──
@@ -805,6 +886,9 @@ function sourcePins() {
 	const tpo = code(ROUTES.truckPost);
 	ok(before(tpo, "refusePayEdit(", "await ") && before(tpo, "refusePayEdit(", "INSERT INTO trucks"),
 		"§6 POST /api/trucks refuses a rate before its await and its INSERT");
+	ok(tp.includes('updates.push("admin_fee_pct = ?"); params.push(adminFeePctOrDefault(adminFeePct));') &&
+		tpo.includes("adminFeePctOrDefault(adminFeePct)") && !/parseFloat\(adminFeePct\)/.test(tp + tpo),
+		"§6 both truck routes store the admin fee through adminFeePctOrDefault(), neither through a bare parseFloat");
 
 	// The refusal action: its own name, coalesced (not a PERIOD_ code), and kept.
 	const purge = (() => {
