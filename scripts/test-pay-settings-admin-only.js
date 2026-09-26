@@ -307,9 +307,11 @@ const snapshot = (db) => JSON.stringify({
 const audits = (db, action) => db.prepare("SELECT * FROM audit_trail WHERE action = ? ORDER BY id").all(action);
 
 // The body DriverTable.vue's Save sends: every column, from the loaded row.
-// `over` replaces individual columns by header name. (The component zeroes the
-// inactive pay field; a numeric 0 reads as "not sent" in this handler, so it
-// is sent here as the stored value, which is what that zero amounts to.)
+// `over` replaces individual columns by header name. (The component sends the
+// inactive pay field as "", and a page loaded before 2026-09-26 as a numeric
+// 0; the handler reads both as "not sent", so it is sent here as the stored
+// value, which is what not sending it amounts to. scripts/test-driver-pay-clear.js
+// runs the component's own cells.)
 function dirFormBody(r, over = {}) {
 	const v = {
 		Driver: r.driver_name, "Carrier Name": "", State: r.state, City: r.city, ZIP: r.zip, Address: r.address,

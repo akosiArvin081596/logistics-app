@@ -7022,6 +7022,10 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (re
 		const { values, headers } = req.body;
 		if (!values || !headers) return res.status(400).json({ error: "values and headers required" });
 		const obj = {};
+		// The PUT's contract (see its mapping): a NUMBER 0 arrives as "", not sent,
+		// and the TEXT "0" as a value. On a create, a pay field not sent takes the
+		// column default (fixed, 0 %, $0, so the truck's rate applies), which a
+		// sent "0" equals.
 		headers.forEach((h, i) => { obj[h] = values[i] || ""; });
 		const insPayType = (obj.PayType || "fixed").toLowerCase() === "percentage" ? "percentage" : "fixed";
 		// A pay field sent is read by directoryPayValue(), as the PUT reads it;
@@ -7135,6 +7139,20 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		const { values, headers } = req.body;
 		if (!values || !headers) return res.status(400).json({ error: "values and headers required" });
 		const obj = {};
+		// ⚠️ TEXT IS A VALUE; A NUMBER 0 IS "NOT SENT". `|| ""` turns a falsy cell
+		// (the NUMBER 0, null, false) into "", which every field below reads as
+		// "not sent", so a pay field keeps its stored value. Keep it that way: a
+		// Drivers Database page loaded before 2026-09-26 sends the pay type not in
+		// use as a numeric 0 on every save, and honouring that 0 would wipe the
+		// terms stored for that type and ask the month-end lock about a change
+		// nobody made. The TEXT "0" is truthy and arrives as a value. On PayDaily
+		// it clears the driver's own rate, so resolveDailyRate() falls back to the
+		// truck's rate, else $250; on PayPercentage it is 0 %. The forms send the
+		// active type's amount as text and the other type's as "" (not sent), in
+		// client/src/lib/driverPay.js. A value that differs from the stored one is
+		// still judged below: by the Super Admin check (directoryPayChanges(), 403
+		// PAY_EDIT_ADMIN_ONLY), then by the month-end lock
+		// (directoryEditLockBlockers()), each of which sees only a real change.
 		headers.forEach((h, i) => { obj[h] = values[i] || ""; });
 		// Keep existing status / pay fields if the client didn't send them.
 		// SELECT * (was: five columns) because the period guard also needs
@@ -27876,9 +27894,10 @@ function guardedColumnReason(header) {
 	return null;
 }
 
-// The row as it will exist AFTER the write. values.update writes `values` from
-// column A, so a SHORT array leaves the tail of the row untouched — an edit that
-// sends 12 cells cannot be judged as if it had blanked columns 13..26.
+// The row as it will exist AFTER the write. A SHORT `values` leaves the tail of
+// the row untouched — the tail equals the row as read, so sheetRowCellWrites()
+// writes none of it — and an edit that sends 12 cells cannot be judged as if it
+// had blanked columns 13..26.
 function sheetRowAfterUpdate(before, values) {
 	const b = Array.isArray(before) ? before : [];
 	const v = Array.isArray(values) ? values : [];
@@ -28120,6 +28139,36 @@ function a1ColumnLetter(index) {
 		const rem = (n - 1) % 26;
 		out = String.fromCharCode(65 + rem) + out;
 		n = Math.floor((n - 1) / 26);
+	}
+	return out;
+}
+
+// The cells a row save writes: one A1 range per cell whose value as it will be
+// written (`after`) differs from the value as read (`before`), in column order,
+// as the `data` of one values.batchUpdate. PUT /api/data/:rowIndex and
+// PUT /api/load/:loadId both write through it. Nothing changed is [], and the
+// route writes nothing.
+//
+// ⚠️ WHY NOT THE WHOLE ROW. Both routes read the row as the sheet DISPLAYS it
+// (the API's default FORMATTED_VALUE), the Active Loads editor and the Data
+// Manager send every column back as displayed, and both routes write with
+// USER_ENTERED. Rewriting the row from column A therefore turned every formula
+// cell into its displayed value, and re-read a text cell displaying "=…" as a
+// formula, on every save, whichever cell was edited. A cell sent back exactly as
+// read is left alone, so neither happens unless that cell is the one edited.
+//
+// Compared as the period guard (changedGuardedCells()) and the audit compare:
+// null and absent read as "", anything else as its String(). A null is written
+// as "", the value the guard and the audit judged; the Sheets API skips a null.
+function sheetRowCellWrites(a1, rowIndex, before, after) {
+	const b = Array.isArray(before) ? before : [];
+	const a = Array.isArray(after) ? after : [];
+	const out = [];
+	for (let i = 0; i < Math.max(b.length, a.length); i++) {
+		const from = b[i] == null ? "" : String(b[i]);
+		const to = a[i] == null ? "" : String(a[i]);
+		if (from === to) continue;
+		out.push({ range: `${a1}!${a1ColumnLetter(i)}${rowIndex}`, values: [[a[i] == null ? "" : a[i]]] });
 	}
 	return out;
 }
@@ -29167,6 +29216,7 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		let headers = [];
 		let before = [];
 		let snapshotUnavailable = false;
+		let rowUnread = false;
 		try {
 			const pre = await sheets.spreadsheets.values.batchGet({
 				spreadsheetId: SPREADSHEET_ID,
@@ -29183,11 +29233,22 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 			if (!headers.length) snapshotUnavailable = true;
 		} catch (err) {
 			snapshotUnavailable = true;
+			rowUnread = true;
 			if (!guarded && req.session.user.role !== "Super Admin") throw err;
 		}
 		if (snapshotUnavailable && guarded) {
 			return res.status(409).json({
 				error: "The current contents of this row could not be read, so the edit cannot be shown to leave closed months alone and cannot be recorded reversibly. Try again.",
+				code: "ROW_READ_FAILED",
+			});
+		}
+		// The write below is only the cells that differ from the row as read
+		// (sheetRowCellWrites()), so a row that could not be read cannot be saved on
+		// any tab: which cells this save changes is unknown, and writing every cell
+		// sent would put back the whole-row rewrite that function replaced.
+		if (rowUnread) {
+			return res.status(409).json({
+				error: "The current contents of this row could not be read, so which cells this save changes cannot be told. Try again.",
 				code: "ROW_READ_FAILED",
 			});
 		}
@@ -29379,15 +29440,19 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 			}
 		}
 
+		// Only the cells this save changes, one range each (sheetRowCellWrites()):
+		// a cell sent back as read is not rewritten, so a formula shown as its value
+		// and a text cell showing "=…" stay as they are. Nothing changed, nothing
+		// written, and no audit line: there is no write to reverse.
+		const cellWrites = sheetRowCellWrites(a1, rowIndex, before, after);
+		if (!cellWrites.length) {
+			return res.json({ success: true, updatedCells: 0, unchanged: true });
+		}
 		let response;
 		try {
-			response = await sheets.spreadsheets.values.update({
+			response = await sheets.spreadsheets.values.batchUpdate({
 				spreadsheetId: SPREADSHEET_ID,
-				range: `${a1}!A${rowIndex}`,
-				valueInputOption: "USER_ENTERED",
-				requestBody: {
-					values: [values],
-				},
+				requestBody: { valueInputOption: "USER_ENTERED", data: cellWrites },
 			});
 		} catch (err) {
 			// Audit the failed attempt too. A timed-out Sheets write leaves it
@@ -29403,7 +29468,7 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 
 		res.json({
 			success: true,
-			updatedCells: response.data.updatedCells,
+			updatedCells: response.data.totalUpdatedCells,
 		});
 	} catch (error) {
 		console.error("Error updating row:", error.message);
@@ -42970,32 +43035,42 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 			}
 		}
 
-		try {
-			await sheets.spreadsheets.values.update({
-				spreadsheetId: SPREADSHEET_ID,
-				range: `${a1}!A${rowIndex}`,
-				valueInputOption: "USER_ENTERED",
-				requestBody: { values: [updatedRow] },
-			});
-		} catch (err) {
-			// Audit the failed attempt too. A timed-out Sheets write leaves it
-			// genuinely unknown whether the row changed, and that is precisely when the
-			// before/after values are worth having.
-			logAudit(req, "update_sheet_row_failed", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("failed", { error: err.message }));
-			throw err;
+		// Only the cells this save changes, one range each (sheetRowCellWrites(), as
+		// PUT /api/data/:rowIndex writes): a column the body left out, or sent back
+		// as read, is not rewritten, so a formula shown as its value and a text cell
+		// showing "=…" stay as they are. Nothing changed, nothing written, and no
+		// audit line: there is no write to reverse.
+		const cellWrites = sheetRowCellWrites(a1, rowIndex, before, after);
+		if (cellWrites.length) {
+			try {
+				await sheets.spreadsheets.values.batchUpdate({
+					spreadsheetId: SPREADSHEET_ID,
+					requestBody: { valueInputOption: "USER_ENTERED", data: cellWrites },
+				});
+			} catch (err) {
+				// Audit the failed attempt too. A timed-out Sheets write leaves it
+				// genuinely unknown whether the row changed, and that is precisely when the
+				// before/after values are worth having.
+				logAudit(req, "update_sheet_row_failed", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("failed", { error: err.message }));
+				throw err;
+			}
+
+			logAudit(req, "update_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("updated"));
+			// The 60s Job Tracking cache would otherwise keep serving the old figures.
+			if (guarded) jtCacheInvalidate();
 		}
 
-		logAudit(req, "update_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("updated"));
-		// The 60s Job Tracking cache would otherwise keep serving the old figures.
-		if (guarded) jtCacheInvalidate();
-
-		// Return updated load — unchanged response shape. Every role but Super
-		// Admin gets the broker contact columns blank, as GET /api/load/:loadId
-		// serves them.
+		// Return updated load — unchanged response shape, plus `unchanged: true`
+		// when nothing was written. Every role but Super Admin gets the broker
+		// contact columns blank, as GET /api/load/:loadId serves them.
 		const result = {};
 		headers.forEach((h, idx) => { result[h] = updatedRow[idx]; });
 		result._rowIndex = rowIndex;
-		res.json({ success: true, load: req.session.user.role !== "Super Admin" ? sanitizeBrokerColumns(headers, [result])[0] : result });
+		res.json({
+			success: true,
+			load: req.session.user.role !== "Super Admin" ? sanitizeBrokerColumns(headers, [result])[0] : result,
+			...(cellWrites.length ? {} : { unchanged: true }),
+		});
 	} catch (error) {
 		console.error("Error updating load:", error.message);
 		res.status(500).json({ error: error.message });
