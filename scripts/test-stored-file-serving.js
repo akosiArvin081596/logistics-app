@@ -144,7 +144,7 @@ const ROUTES = Object.fromEntries(Object.entries(HEADS).map(([k, h]) => [k, lift
 const FUNCTIONS = [
 	"storedFileForServing", "storedFileETag", "ifNoneMatchIncludes", "truckPhotoForStorage",
 	"parseDriverPayDaily", "parseInServiceDate", "parseRetiredAt", "parseAdminFeePct", "truckMonthlyFixed", "normalizeDriverName",
-	"parseTruckAmount", "parseTruckAmounts",
+	"parsePlainDecimal", "parseTruckAmount", "parseTruckAmounts", "parseUnitNumber", "isUnitNumberTaken", "storedFileKind",
 ];
 const FN_SRC = Object.fromEntries(FUNCTIONS.map((n) => [n, liftFunction(n)]));
 const CONSTS = [
@@ -156,8 +156,12 @@ const CONSTS = [
 // `crypto` is handed in because the global of that name is Web Crypto, which
 // has no createHash().
 let decodes = 0;
+let decodedChars = 0;
 const CountingBuffer = Object.assign(Object.create(Buffer), {
-	from: (...args) => { if (args[1] === "base64") decodes++; return Buffer.from(...args); },
+	from: (...args) => {
+		if (args[1] === "base64") { decodes++; decodedChars += String(args[0]).length; }
+		return Buffer.from(...args);
+	},
 });
 function buildModule() {
 	return new Function("imageLimits", "todayKeyCT", "Buffer", "crypto",
@@ -327,7 +331,11 @@ function servingSection() {
 async function getSections() {
 	section("§2 GET /api/driver/me/truck-photo");
 	const db = makeDb();
-	const photoEnv = (d) => ({ db: d, storedFileForServing: M.storedFileForServing, storedFileETag: M.storedFileETag, ifNoneMatchIncludes: M.ifNoneMatchIncludes });
+	// The route finds the driver's truck through findTruckForDriver(), which
+	// reads `db` (its own subject is scripts/test-directory-spacing-match.js).
+	const truckLookup = (d) => new Function("db",
+		`"use strict";\n${FN_SRC.normalizeDriverName}\n${liftFunction("findTruckForDriver")}\nreturn findTruckForDriver;`)(d);
+	const photoEnv = (d) => ({ db: d, findTruckForDriver: truckLookup(d), storedFileForServing: M.storedFileForServing, storedFileETag: M.storedFileETag, ifNoneMatchIncludes: M.ifNoneMatchIncludes });
 	const getPhoto = mountRoute(ROUTES.truckPhoto, photoEnv(db));
 	const photoAs = (user, stored, headers = {}) => {
 		db.prepare("UPDATE trucks SET photo = ? WHERE id = 1").run(stored);
@@ -406,6 +414,11 @@ async function getSections() {
 		ok(other.status === 200 && other.headers["content-type"] === "image/png" && PNG.equals(bytesOf(other) || Buffer.alloc(0)) &&
 			other.headers.etag === etagOf(uri("image/png", PNG)),
 			`§2 another driver, whose truck has a different photo, sending that ETag: 200 with their own photo under its own ETag (got ${other.status})`);
+		// A truck stored under another spacing of the driver's name is still theirs.
+		db2.prepare("UPDATE trucks SET assigned_driver = 'Marcus  Hale' WHERE id = 3").run();
+		const spaced = await get2({ session: { user: { id: 4, username: "mhale", role: "Driver", driverName: "Marcus Hale" } }, headers: {} });
+		ok(spaced.status === 200 && PNG.equals(bytesOf(spaced) || Buffer.alloc(0)),
+			`§2 a driver whose truck is stored with a doubled space in the name: 200 with that truck's photo (got ${spaced.status})`);
 	}
 	{
 		const out = await photoAs(DRIVER, uri("image/jpeg", PNG));
@@ -837,10 +850,18 @@ function sourcePins() {
 		ok(!code(ROUTES.truckPhoto).includes("Content-Disposition"), "§7 GET truck-photo sends no Content-Disposition");
 	}
 	const put = code(ROUTES.truckPut);
-	const putCheck = put.indexOf('if (photo !== undefined && photo !== null && photo !== "" && photo !== (truck.photo || "")) {');
+	// Two steps: the photo is checked against the row as first read, so a refused
+	// one is answered before the active-load wait, and what is stored is decided
+	// against the row as read again after it.
+	const putCheck = put.indexOf('const photoCheck = photo !== undefined && photo !== null && photo !== "" && photo !== (truck.photo || "")');
 	ok(putCheck > 0 && put.indexOf("truckPhotoForStorage(photo)") > putCheck, "§7 PUT keys the photo check on a change from the stored photo");
 	ok(putCheck < put.indexOf("truckEditLockBlockers(") && putCheck < put.indexOf("await ") && putCheck < put.indexOf("assignDriverToTruck(") &&
 		putCheck < put.indexOf("db.prepare(`UPDATE trucks SET"), "§7 ...before the month-end lock, the first await and every write");
+	const reread = put.indexOf('\t\ttruck = db.prepare("SELECT * FROM trucks WHERE id = ?").get(id);');
+	const decide = put.indexOf('if (photo !== undefined && photo !== null && photo !== "" && photo !== (truck.photo || "")) {');
+	ok(reread > put.indexOf("await ") && decide > reread && decide < put.indexOf("truckEditLockBlockers(") &&
+		decide < put.indexOf("assignDriverToTruck(") && put.includes("const photoChecked = photoCheck || truckPhotoForStorage(photo);"),
+		"§7 ...and whether it is a change is decided again against the row as re-read after the await, before the lock and every write");
 	ok(put.includes("let photoToStore = photo;") && put.includes("photoToStore = photoChecked.value;") &&
 		put.includes('if (photo !== undefined) { updates.push("photo = ?"); params.push(photoToStore); }') && !/params\.push\(photo\)/.test(put),
 		"§7 ...and the UPDATE writes the checked value when the photo changed, and a resend as it is");
@@ -858,6 +879,72 @@ function sourcePins() {
 		"§7 ...and the INSERT stores the checked value, or nothing");
 }
 
+// ═══════════════════════════════════════════════════════════════ §8
+// storedFileKind(): what storedFileForServing() would serve a stored file as,
+// read from the first 64 base64 characters of its payload alone. GET
+// /api/driver/:driverName answers `truck.has_photo` and each
+// `application.*_type` with it, so the driver app is told a file exists
+// exactly when the route that serves it would serve it.
+function kindSection() {
+	section("§8 storedFileKind() — the kind of a stored file, from its first bytes");
+	const served = (v, opts) => { const f = M.storedFileForServing(v, opts); return f ? f.contentType : null; };
+	const VALUES = [
+		["a JPEG", uri("image/jpeg", JPEG)], ["a PNG", uri("image/png", PNG)], ["a WebP", uri("image/webp", WEBP)], ["a PDF", uri("application/pdf", PDF)],
+		["PNG bytes under a JPEG label", uri("image/jpeg", PNG)], ["a PDF under an image label", uri("image/png", PDF)],
+		["a JPEG under a PDF label", uri("application/pdf", JPEG)], ["HEIC bytes", uri("image/heic", HEIC)],
+		["an HTML document under image/jpeg", uri("image/jpeg", HTML)], ["an SVG document", uri("image/svg+xml", SVG)],
+		["a JPEG in wrapped base64", wrapped("image/jpeg", JPEG)], ["a PDF in wrapped base64", wrapped("application/pdf", PDF)],
+		["no ;base64", `data:image/jpeg,${JPEG.toString("base64")}`], ["no comma", `data:image/jpeg;base64${JPEG.toString("base64")}`],
+		["bare base64, no data: prefix", JPEG.toString("base64")], ["an empty payload", "data:image/jpeg;base64,"],
+		["an 8-byte payload", uri("image/jpeg", JPEG.subarray(0, 8))], ["a 12-byte PNG payload", uri("image/png", PNG.subarray(0, 12))],
+		['""', ""], ["null", null], ["undefined", undefined], ["a number", 7], ["an object", { a: 1 }],
+	];
+	for (const pdf of [false, true]) {
+		for (const [label, v] of VALUES) {
+			eq(M.storedFileKind(v, { pdf }), served(v, { pdf }), `§8 ${label}${pdf ? ", a PDF allowed" : ""}: the type storedFileForServing() serves it as`);
+		}
+	}
+	for (const [label, v] of VALUES.filter(([, v]) => typeof v === "string")) {
+		eq(M.storedFileKind(v.slice(0, 200), { pdf: true }), served(v, { pdf: true }), `§8 ${label}: its first 200 characters give the same answer`);
+	}
+	// Only the head is decoded, however large the file.
+	const big = uri("image/jpeg", Buffer.concat([JPEG, Buffer.alloc(2 * 1024 * 1024)]));
+	decodes = 0;
+	decodedChars = 0;
+	eq(M.storedFileKind(big), "image/jpeg", "§8 a 2 MiB photo is a JPEG");
+	eq([decodes, decodedChars], [1, 64], "§8 ...read from one decode of its first 64 base64 characters");
+	// Why 64 are enough: they decode to 48 bytes, and servedType() reads 12 at most.
+	for (const [label, buf, type] of [["a JPEG", JPEG, "image/jpeg"], ["a PNG", PNG, "image/png"], ["a WebP", WEBP, "image/webp"], ["a PDF", PDF, "application/pdf"]]) {
+		eq(imageLimits.servedType(buf.subarray(0, 12), { pdf: true }), type, `§8 servedType() reads ${label} from its first 12 bytes`);
+	}
+	eq(imageLimits.servedType(PNG.subarray(0, 11)), null, "§8 ...and 11 are not enough (imageType() asks for 12)");
+
+	// GET /api/driver/:driverName answers from the bytes, never the stored label.
+	const route = liftRoute('app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (req, res) => {')
+		.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+	ok(route.includes("substr(photo, 1, 200) AS photo_head") && !/CASE WHEN photo IS NULL/.test(route),
+		"§8 the driver route reads the first 200 characters of the truck photo, no presence CASE");
+	ok(route.includes("const { photo_head: photoHead, ...truckFields } = assignedTruckRow;") &&
+		route.includes("assignedTruck = { ...truckFields, has_photo: storedFileKind(photoHead) ? 1 : 0 };"),
+		"§8 ...answers has_photo 1 or 0 from those bytes, and does not return them");
+	ok(route.includes("const kind = storedFileKind(b64, { pdf: true });") && route.includes('return kind === "application/pdf" ? "pdf" : kind ? "image" : null;') &&
+		!/startsWith\("data:(application\/pdf|image\/)"\)/.test(route),
+		"§8 ...and each identity file's type ('pdf', 'image' or null) from its bytes, never its label");
+	const kindFn = FN_SRC.storedFileKind.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+	ok(kindFn.includes("dataUri.slice(comma + 1, comma + 65)") && kindFn.includes("imageLimits.servedType(") && !/\.(test|exec|match|replace|split|search)\(|new RegExp/.test(kindFn),
+		"§8 storedFileKind() decodes 64 characters and runs no pattern over the value");
+
+	// Staff read a driver's files through the drivers directory; no route serves
+	// them by truck. An unknown GET /api/… falls through to the SPA catch-all
+	// (200, index.html) rather than a 404, so the absence is pinned in source.
+	ok(!SRC.includes("/api/trucks/:id/driver-files") && !/\bdriverFilesLimiter\b/.test(SRC),
+		"§8 GET /api/trucks/:id/driver-files and driverFilesLimiter are gone from server.js");
+	for (const doc of ["docs/claude/backend-server.md", "docs/manual/technical/01-backend.md"]) {
+		const rows = fs.readFileSync(path.join(__dirname, "..", doc), "utf8").split("\n").filter((l) => l.startsWith("|") && /driver-files|driverFilesLimiter/.test(l));
+		ok(rows.length === 0, `§8 ${doc} has no table row for the driver-files route or its limiter (got ${JSON.stringify(rows)})`);
+	}
+}
+
 (async () => {
 	const img = new Jimp({ width: 4, height: 3, color: 0x3366ccff });
 	JPEG = await img.getBuffer("image/jpeg", { quality: 80 });
@@ -868,6 +955,7 @@ function sourcePins() {
 	await putSection();
 	await postSection();
 	sourcePins();
+	kindSection();
 
 	console.log(`\n${"=".repeat(64)}`);
 	if (failures.length) {

@@ -29,7 +29,12 @@
  *      refused the same way, and a save that resends it (padded or not) writes
  *      it back byte for byte. A rename of a row on the default terms and
  *      status and contact edits are unchanged. A daily rate above DRIVER_PAY_DAILY_MAX ("Infinity" and
- *      1e308 included) is 400 INVALID_PAY for every role. Hostile rate values,
+ *      1e308 included) is 400 INVALID_PAY for every role. So is a sent pay
+ *      field that is not a plain decimal (directoryPayValue(): "300abc",
+ *      "0x1F4", "   ", ["300"], a number that is not finite), with nothing
+ *      written; a plain decimal keeps the old ranges (a percentage clamped to
+ *      0–100, a daily rate up to 0) and "" keeps the stored value. POST
+ *      reads its pay fields the same way. Hostile rate values,
  *      a duplicated header and a __proto__ header never move the stored rate.
  *      A Super Admin changes each field. With a locked month the 403 still
  *      answers first.
@@ -172,12 +177,18 @@ const PIECES = {
 		liftFunction("normalizeDriverName"),
 		liftFunction("findDriverNameClashes"),
 		liftFunction("findDriverNameClash"),
+		liftFunction("driverNameHeldByOtherAccount"),
 		liftFunction("canonicalDriverName"),
+		liftFunction("findDirectoryRowForDriver"),
+		liftFunction("findTruckForDriver"),
 		liftFunction("syncDriverToCarrierSheet"),
 		liftFunction("assignDriverToTruck"),
 	].join("\n"),
 	directory: [liftConst("const DIRECTORY_PERIOD_COLUMNS = "), liftFunction("directoryChangedColumns")].join("\n"),
+	// The pay fields both directory routes read (§1c).
+	directoryPay: liftFunction("directoryPayValue"),
 	truckParse: [
+		liftFunction("parsePlainDecimal"),
 		liftConst("const DRIVER_PAY_DAILY_MAX = "),
 		liftFunction("parseDriverPayDaily"),
 		liftConst("const IN_SERVICE_MAX_MONTHS_AHEAD = "),
@@ -193,6 +204,9 @@ const PIECES = {
 		liftFunction("parseTruckAmount"),
 		liftConst("const TRUCK_AMOUNT_FIELDS = [", "\n];"),
 		liftFunction("parseTruckAmounts"),
+		// The unit number both truck routes read, and the write-time duplicate check.
+		liftFunction("parseUnitNumber"),
+		liftFunction("isUnitNumberTaken"),
 	].join("\n"),
 };
 const MODULE_EXPORTS = [
@@ -201,12 +215,13 @@ const MODULE_EXPORTS = [
 	"normalizeDriverName", "findDriverNameClash", "findDriverNameClashes", "canonicalDriverName",
 	"syncDriverToCarrierSheet", "assignDriverToTruck",
 	"directoryChangedColumns", "DRIVER_PAY_DAILY_MAX", "parseDriverPayDaily", "parseInServiceDate", "parseRetiredAt",
-	"parseAdminFeePct", "truckMonthlyFixed", "TRUCK_AMOUNT_FIELDS", "parseTruckAmounts",
+	"parseAdminFeePct", "truckMonthlyFixed", "TRUCK_AMOUNT_FIELDS", "parseTruckAmounts", "parseUnitNumber", "isUnitNumberTaken",
+	"directoryPayValue",
 ];
 function buildModule(db, src = {}) {
 	const s = { ...PIECES, ...src };
 	return new Function("db", "todayKeyCT",
-		`"use strict";\n${s.audit}\n${s.payRule}\n${s.names}\n${s.directory}\n${s.truckParse}\n` +
+		`"use strict";\n${s.audit}\n${s.payRule}\n${s.names}\n${s.directory}\n${s.directoryPay}\n${s.truckParse}\n` +
 		`return { ${MODULE_EXPORTS.join(", ")} };`)(db, () => "2026-09-24");
 }
 
@@ -557,6 +572,41 @@ async function battery(opts = {}) {
 		t(`§1 Dispatcher PUT directory, ${label} as the daily rate: refused or a no-op, the stored $300 kept (got ${r.status})`,
 			[200, 400, 403].includes(r.status) && row(db, 1).pay_daily === 300 && row(db, 1).pay_type === "fixed");
 	}
+	// A pay field sent is read as a plain decimal (directoryPayValue()): text
+	// parseFloat() used to read as a number ("300abc" as 300, "0x1F4" as 0) is
+	// 400 INVALID_PAY with nothing written, whoever sends it.
+	for (const [label, id, field, value] of [
+		['"300abc" as the daily rate', 1, "PayDaily", "300abc"], ['"12,5" as the daily rate', 1, "PayDaily", "12,5"],
+		['"0x1F4" as the daily rate', 1, "PayDaily", "0x1F4"], ['"abc" as the daily rate', 1, "PayDaily", "abc"],
+		['"   " as the daily rate', 1, "PayDaily", "   "], ['["300"] as the daily rate', 1, "PayDaily", ["300"]],
+		["true as the daily rate", 1, "PayDaily", true], ['"-1e400" as the daily rate', 1, "PayDaily", "-1e400"],
+		['"25abc" as the percentage', 2, "PayPercentage", "25abc"], ['"0x19" as the percentage', 2, "PayPercentage", "0x19"],
+		['"abc" as the percentage', 2, "PayPercentage", "abc"], ['"1e400" as the percentage', 2, "PayPercentage", "1e400"],
+		["[25] as the percentage", 2, "PayPercentage", [25]],
+	]) {
+		const db = makeDb();
+		const app = mountAll(db, opts);
+		const before = snapshot(db);
+		const r = await app.dirPut(SUPER, id, dirFormBody(row(db, id), { [field]: value }));
+		t(`§1 Super Admin PUT directory, ${label}: 400 INVALID_PAY, nothing written (got ${r.status} ${(r.body || {}).code || ""})`,
+			r.status === 400 && (r.body || {}).code === "INVALID_PAY" && snapshot(db) === before && audits(db, "update_driver_pay").length === 0);
+	}
+	// ...while a plain decimal keeps each field's range as before.
+	for (const [label, id, over, expect] of [
+		['" 325.5 " as the daily rate: 325.5', 1, { PayDaily: " 325.5 " }, { pay_daily: 325.5 }],
+		['"1e2" as the daily rate: 100', 1, { PayDaily: "1e2" }, { pay_daily: 100 }],
+		['"-20" as the daily rate: clamped to 0', 1, { PayDaily: "-20" }, { pay_daily: 0 }],
+		['"150" as the percentage: clamped to 100', 2, { PayPercentage: "150" }, { pay_percentage: 100 }],
+		['"-5" as the percentage: clamped to 0', 2, { PayPercentage: "-5" }, { pay_percentage: 0 }],
+		['"" as both: the stored terms kept', 1, { PayDaily: "", PayPercentage: "" }, { pay_daily: 300 }],
+	]) {
+		const db = makeDb();
+		const app = mountAll(db, opts);
+		const r = await app.dirPut(SUPER, id, dirFormBody(row(db, id), over));
+		const after = row(db, id);
+		t(`§1 Super Admin PUT directory, ${label} (got ${r.status} ${(r.body || {}).code || ""}, ${JSON.stringify(expect)} → ${JSON.stringify(Object.fromEntries(Object.keys(expect).map((k) => [k, after[k]])))})`,
+			r.status === 200 && Object.entries(expect).every(([k, v]) => after[k] === v));
+	}
 	for (const [label, body] of [
 		["a PayDaily header sent twice", { headers: ["Driver", "PayDaily", "PayDaily"], values: ["Shorn King", 300, 500] }],
 		["a __proto__ header carrying a rate", { headers: ["Driver", "__proto__"], values: ["Shorn King", { PayDaily: 999, PayType: "percentage" }] }],
@@ -639,6 +689,25 @@ async function battery(opts = {}) {
 		const made = db.prepare("SELECT * FROM drivers_directory WHERE driver_name = 'NEW DRIVER'").get();
 		t(`§2 Super Admin POST directory with ${label} as the daily rate: ${status} (got ${r.status} ${(r.body || {}).code || ""})`,
 			r.status === status && (status === 200 ? made && made.pay_daily === 10000 : r.body.code === "INVALID_PAY" && !made));
+	}
+	// The same reading on create: a sent field that is not a plain decimal is
+	// 400 INVALID_PAY and no row appears; one within reach is clamped as before.
+	for (const [label, over, expect] of [
+		['"300abc" as the daily rate', { PayType: "fixed", PayDaily: "300abc" }, null],
+		['"0x1F4" as the daily rate', { PayType: "fixed", PayDaily: "0x1F4" }, null],
+		['"20abc" as the percentage', { PayType: "percentage", PayPercentage: "20abc" }, null],
+		['"abc" as the percentage', { PayType: "percentage", PayPercentage: "abc" }, null],
+		['"150" as the percentage: clamped to 100', { PayType: "percentage", PayPercentage: "150" }, { pay_percentage: 100 }],
+		['" 275 " as the daily rate: 275', { PayType: "fixed", PayDaily: " 275 " }, { pay_daily: 275 }],
+	]) {
+		const db = makeDb();
+		const app = mountAll(db, opts);
+		const r = await app.dirPost(SUPER, newDriver(over));
+		const made = db.prepare("SELECT * FROM drivers_directory WHERE driver_name = 'NEW DRIVER'").get();
+		t(`§2 Super Admin POST directory with ${label}: ${expect ? "created with it" : "400 INVALID_PAY, no row"} (got ${r.status} ${(r.body || {}).code || ""})`,
+			expect
+				? r.status === 200 && made && Object.entries(expect).every(([k, v]) => made[k] === v)
+				: r.status === 400 && (r.body || {}).code === "INVALID_PAY" && !made);
 	}
 
 	// ── §3 PUT /api/trucks/:id ──
@@ -984,6 +1053,18 @@ async function mutants() {
 		})],
 	];
 	for (const [label, opts] of M) caught(label, await battery(opts));
+
+	// M4 the directory pay fields read by parseFloat() again ("300abc" as 300).
+	// Only the two directory routes read them, so it must fail in §1 and §2.
+	{
+		const bad = (await battery({ moduleSrc: { directoryPay: swap("M4", PIECES.directoryPay,
+			"const n = parsePlainDecimal(raw);", "const n = parseFloat(raw);") } })).filter((r) => !r.ok);
+		for (const s of ["§1", "§2"]) {
+			ok(bad.some((r) => r.name.startsWith(`${s} `)), `§7 M4 the directory pay fields read by parseFloat() was NOT caught in ${s}`);
+		}
+		console.log(`  M4 the directory pay fields read by parseFloat(): caught by ${bad.length} check(s), e.g.`);
+		for (const r of bad.slice(0, 2)) console.log(`      ✗ ${r.name}`);
+	}
 }
 
 (async () => {

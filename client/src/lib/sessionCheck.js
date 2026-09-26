@@ -341,3 +341,71 @@ export function logoutConfirmed({ error } = {}) {
   if (error == null) return true
   return Number(error.status) === 401
 }
+
+// ── A sign-out the server has just confirmed: the note ───────────────────────
+// A confirmed logout() ends on a fresh /login page. That page's first check found
+// nobody known and ran the whole foreground ladder above (3 attempts, up to 21 s on
+// a poor signal) to learn what the page that sent it already knew. So logout()
+// leaves this note in the tab's sessionStorage just before replacing the page, and
+// the fresh page reads it once, removes it, and goes straight to the login screen:
+// no request, no background loop, no second epoch stamp.
+//   - WRITTEN only on the confirmed path. An unconfirmed logout stays in-app and
+//     leaves the pending-logout record instead, which always takes precedence.
+//   - A TIMESTAMP and nothing else.
+//   - TTL 60 s. It has to cover one page load: logout() writes it immediately
+//     before location.replace('/login'), and the new page reads it at its first
+//     check. A minute is generous for that on a weak signal (the ladder it skips
+//     capped at 21 s). A page that starts later than that was not the fresh page
+//     logout() asked for (its load was stopped, or failed and was retried by hand),
+//     and the ordinary check is the right answer for it: slower, never wrong.
+//   - IGNORED if older than the epoch: someone signed in, in some tab, after it.
+//   - Unreadable, expired or future-dated means NO note. Unlike the pending-logout
+//     record this fails open, because ignoring it costs one check, nothing more.
+export const SIGNED_OUT_NOTE_TTL_MS = 60 * 1000
+const SIGNED_OUT_NOTE_VERSION = 1
+
+export function serializeSignedOutNote(nowMs) {
+  if (!Number.isFinite(nowMs)) return null
+  return JSON.stringify({ v: SIGNED_OUT_NOTE_VERSION, at: nowMs })
+}
+
+/** True when `raw` is a note written within the TTL, and not before `notBeforeMs` (the epoch). */
+export function parseSignedOutNote(raw, nowMs, { ttlMs = SIGNED_OUT_NOTE_TTL_MS, notBeforeMs = 0 } = {}) {
+  if (typeof raw !== 'string' || raw === '') return false
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return false
+  }
+  if (!parsed || parsed.v !== SIGNED_OUT_NOTE_VERSION || !Number.isFinite(parsed.at)) return false
+  const age = nowMs - parsed.at
+  if (!(age >= 0 && age <= ttlMs)) return false
+  return parsed.at >= notBeforeMs
+}
+
+// ── Another tab changed who owns the cookie ──────────────────────────────────
+// A tab that signs someone in or out stamps the epoch, and a logout records itself
+// before its request goes out. The browser reports both writes to every OTHER tab
+// (a `storage` event), and a tab still showing the previous owner asks the server
+// once (stores/auth.js) and then does one of three things:
+//   KEEP    the same person: the page stays, and so do its live updates.
+//   RELOAD  someone else: a full reload from the server's user, as the background
+//           check does, because every other store holds the first person's data.
+//   LEAVE   stop showing this person. `freshPage` says whether the app answered, so
+//           a fresh /login page will load; without an answer that load would be the
+//           browser's own error page, so the app's own login screen instead.
+// Leave, whatever the server says, when a logout is recorded in this browser: the
+// record is written BEFORE its request is sent, so an answer can predate it and
+// still say "signed in". And leave when there is no answer at all: the cookie has
+// changed owner and nothing proves it is still the person on screen.
+export const TAB_CHANGE = Object.freeze({ KEEP: 'keep', RELOAD: 'reload', LEAVE: 'leave' })
+
+export function decideTabChange({ outcome, pendingLogout, shown, next } = {}) {
+  const answered = outcome === OUTCOME.AUTHENTICATED || outcome === OUTCOME.SIGNED_OUT
+  if (pendingLogout || outcome === OUTCOME.SIGNED_OUT) return { action: TAB_CHANGE.LEAVE, freshPage: answered }
+  if (outcome === OUTCOME.AUTHENTICATED) {
+    return { action: isDifferentUser(shown, next) ? TAB_CHANGE.RELOAD : TAB_CHANGE.KEEP, freshPage: false }
+  }
+  return { action: TAB_CHANGE.LEAVE, freshPage: false }
+}

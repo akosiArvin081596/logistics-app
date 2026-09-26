@@ -7,11 +7,17 @@
  * `documents` row each, and served by the authenticated /uploads static mount.
  * uploadsPathGuard sends every single-segment path to guardRootLoadDocument,
  * which admits:
- *   Super Admin, Dispatcher — always (they read every load's documents);
+ *   Super Admin — always;
+ *   a Dispatcher — anything but a rate con (they read every load's documents);
  *   a Driver   — a row their load's Documents panel lists, on a load that is theirs;
  *   an Investor — a row their Document Portal lists;
  * and answers everyone else 404. A miss anywhere under /uploads is a 404, and
  * 404s are counted per user by uploadMissLimiter.
+ *
+ * RATE CONS ARE SUPER ADMIN ONLY (owner, 2026-09-26), wherever they sit: the
+ * rate-cons/ directory by uploadsPathGuard's role branch (403, every spelling of
+ * the path), and a rate con in the root by guardRootLoadDocument (404), with
+ * neither listing (the Documents panel, the investor portal) showing one.
  *
  * WHAT IS REAL HERE. Every piece of decision code is LIFTED from server.js and
  * run as shipped: normalizedUploadPath, uploadsPathGuard, GUARDED_UPLOAD_DIRS,
@@ -109,9 +115,10 @@ function liftStatements(needle) {
 
 const LIFTED = {
 	consts: [
-		"LOAD_PANEL_DOCUMENT_FILTER", "INLINE_SAFE_UPLOAD_EXTS", "UPLOAD_MISS_WINDOW_MS", "UPLOAD_MISS_MAX",
+		"RATECON_DOCUMENT_SQL", "LOAD_PANEL_DOCUMENT_FILTER", "INLINE_SAFE_UPLOAD_EXTS", "UPLOAD_MISS_WINDOW_MS", "UPLOAD_MISS_MAX",
 		"UPLOAD_MISS_BURST_MAX", "UPLOAD_MISS_KEYS_MAX", "uploadMissCounts", "GUARDED_UPLOAD_DIRS",
 	].map(liftConst),
+	isRateConDocType: liftFn("isRateConDocType"),
 	findCol: liftFn("findCol"),
 	getInvestorDriverSet: liftFn("getInvestorDriverSet"),
 	getCarrierDBFromSQLite: liftFn("getCarrierDBFromSQLite"),
@@ -140,12 +147,15 @@ const F = {
 	B: "L200_POD_1788000000002.pdf",            // Shorn King's load
 	A_DELETED: "L100_Receipt_1788000000003.pdf", // soft-deleted row
 	A_RATECON: "L100_RATECON_1788000000004.pdf", // rate con uploaded into the root
+	A_RATECON_GONE: "L100_Rate_Con_1788000000011.pdf", // a root rate con whose only row is soft-deleted
 	ORPHAN: "L100_POD_1788000000005.pdf",        // file with no row
 	UNVERIFIED: "L300_POD_1788000000006.pdf",    // load whose ownership cannot be read
 	SHARED: "L100_BOL_1788000000007.pdf",        // ONE name, rows on two loads
 	B_UPPER: "L200_Other_1788000000008.pdf",     // row names the driver in capitals
 	BACKSLASH: "L200\\POD_1788000000009.pdf",    // a root file with a literal backslash, no row
 	CARRIER: "L400_POD_1788000000010.pdf",       // driver reached through the carrier name
+	A_RATECON_DASH: "L100_Rate-Con_1788000000013.pdf", // a root rate con whose row types it "Rate-Con"
+	NON_ASCII: `L100_POD_1788000000012${String.fromCharCode(0xE9)}.pdf`, // a root file whose name is not ASCII, no row
 };
 const body = (name) => `BODY:${name}`;
 
@@ -182,6 +192,8 @@ function makeDb() {
 	add("L200", "Shorn King", "POD", F.B);
 	add("L100", "Deshorn King", "Receipt", F.A_DELETED, "2026-09-01T00:00:00Z");
 	add("L100", "Deshorn King", "RATECON", F.A_RATECON);
+	add("L100", "Deshorn King", "Rate_Con", F.A_RATECON_GONE, "2026-09-02T00:00:00Z");
+	add("L100", "Deshorn King", "Rate-Con", F.A_RATECON_DASH);
 	add("L300", "Deshorn King", "POD", F.UNVERIFIED);
 	add("L100", "Deshorn King", "BOL", F.SHARED);
 	add("L200", "Shorn King", "BOL", F.SHARED);
@@ -228,11 +240,11 @@ class FakeDate extends Date { static now() { return clock.now; } }
 function compose(L) {
 	return [
 		'"use strict";',
-		...L.consts, L.findCol, L.getInvestorDriverSet, L.getCarrierDBFromSQLite, L.investorDocumentScope,
+		...L.consts, L.isRateConDocType, L.findCol, L.getInvestorDriverSet, L.getCarrierDBFromSQLite, L.investorDocumentScope,
 		L.resolvePreviewUser, L.sentIfLoadOwnershipUnverified, L.driverOwnsAnyLoad, L.guardRootLoadDocument,
 		L.normalizedUploadPath, L.uploadMissLimiter, L.uploadsPathGuard,
 		...L.mounts, L.loadDocsRoute, L.investorDocsRoute,
-		"return { uploadMissCounts, UPLOAD_MISS_MAX, UPLOAD_MISS_BURST_MAX, UPLOAD_MISS_WINDOW_MS, guardRootLoadDocument, uploadMissLimiter };",
+		"return { uploadMissCounts, UPLOAD_MISS_MAX, UPLOAD_MISS_BURST_MAX, UPLOAD_MISS_WINDOW_MS, guardRootLoadDocument, uploadMissLimiter, RATECON_DOCUMENT_SQL, isRateConDocType };",
 	].join("\n");
 }
 
@@ -306,6 +318,15 @@ function admit(limiter, user) {
 	limiter({ session: { user } }, res, () => { passed = true; });
 	return { res, passed, finish(code) { res.statusCode = code; res.emit("finish"); res.emit("close"); } };
 }
+// Run a build's root guard directly for one file name, as `user`. For the rules
+// an HTTP request cannot pin on every disk: on a case-sensitive one, a request in
+// another letter case 404s whatever the guard decides.
+async function guardCall(M, user, file) {
+	let status = null, nexted = false;
+	const res = { headersSent: false, statusCode: 200, setHeader() {}, status(c) { status = c; return this; }, end() { return this; }, json() { return this; } };
+	await M.guardRootLoadDocument({ session: { user } }, res, () => { nexted = true; }, file);
+	return { status, nexted };
+}
 
 (async () => {
 	const T = await build();
@@ -324,6 +345,22 @@ function admit(limiter, user) {
 		ok(`${who} keeps reading a root file with no documents row (access unchanged)`, served(await T.get(url(F.ORPHAN), u), F.ORPHAN));
 	}
 	ok("Super Admin reads a soft-deleted document", served(await T.get(url(F.A_DELETED), U.sa), F.A_DELETED));
+	ok("Super Admin reads a RATE CON in the root, live or soft-deleted",
+		served(await T.get(url(F.A_RATECON), U.sa), F.A_RATECON) && served(await T.get(url(F.A_RATECON_GONE), U.sa), F.A_RATECON_GONE));
+	await expectRefused(U.disp, F.A_RATECON, "a Dispatcher is refused a RATE CON in the root (404) — rate cons are Super Admin only");
+	await expectRefused(U.disp, F.A_RATECON_GONE, "...even when its only row is soft-deleted (the file is still a rate con)");
+	await expectRefused(U.disp, F.A_RATECON_DASH, "...and when its row types it \"Rate-Con\" (every character but a letter is ignored)");
+	{
+		const asked = (name) => guardCall(T, U.disp, name);
+		const mixed = await asked("l100_ratecon_1788000000004.PDF");
+		ok("a Dispatcher asking for a root rate con in another letter case is refused 404 (the rule matches the name without case)",
+			mixed.status === 404 && !mixed.nexted);
+		ok("...while an ordinary document asked for in another letter case still passes the Dispatcher's rate-con rule",
+			(await asked("l100_pod_1788000000001.PDF")).nexted === true);
+	}
+	ok("a Dispatcher's rate-con refusal is by the row's TYPE: every other root file still opens (PODs, BOLs, a soft-deleted receipt, a file with no row)",
+		served(await T.get(url(F.SHARED), U.disp), F.SHARED) && served(await T.get(url(F.A_DELETED), U.disp), F.A_DELETED) &&
+		served(await T.get(url(F.B_UPPER), U.disp), F.B_UPPER));
 
 	ok("a Driver reads their OWN load's root document", served(await T.get(url(F.A), U.drvA), F.A));
 	ok("...and so does the other driver, for theirs", served(await T.get(url(F.B), U.drvB), F.B));
@@ -347,7 +384,7 @@ function admit(limiter, user) {
 	ok("an Investor reads a document of a driver on their truck", served(await T.get(url(F.A), U.inv1), F.A));
 	ok("...and of a driver reached through their carrier name", served(await T.get(url(F.CARRIER), U.inv1), F.CARRIER));
 	ok("...matched case-insensitively, exactly as the portal's LOWER(driver) does", served(await T.get(url(F.B_UPPER), U.inv2), F.B_UPPER));
-	ok("...including a rate con, because the portal lists those too", served(await T.get(url(F.A_RATECON), U.inv1), F.A_RATECON));
+	await expectRefused(U.inv1, F.A_RATECON, "an Investor is refused a RATE CON, even on a driver of theirs (the portal no longer lists one)");
 	await expectRefused(U.inv1, F.B, "an Investor is refused a document of a driver who is not theirs");
 	await expectRefused(U.inv2, F.A, "...in both directions");
 	await expectRefused(U.inv1, F.A_DELETED, "an Investor is refused a soft-deleted document");
@@ -398,6 +435,16 @@ function admit(limiter, user) {
 	ok("a trailing slash never serves the file, even to its owner", refused(await T.get(`/uploads/${F.A}/`, U.drvA), F.A));
 	ok("a root file whose name holds a backslash is unreachable (%5C is refused before any lookup)",
 		refused(await T.get(url(F.BACKSLASH), U.sa), F.BACKSLASH) && refused(await T.get(url(F.BACKSLASH), U.drvA), F.BACKSLASH));
+	{
+		// ASCII ONLY: every name the app writes is ASCII, so a path holding any other
+		// character is refused before any rule. The file is on disk, so without the
+		// rule a Super Admin (who passes with no lookup) would be served it.
+		const nup = new Function("path", `${LIFTED.normalizedUploadPath}\nreturn normalizedUploadPath;`)(path);
+		ok("normalizedUploadPath refuses a path holding a non-ASCII character, and keeps its ASCII twin",
+			nup({ path: `/${encodeURIComponent(F.NON_ASCII)}` }) === null && nup({ path: `/${F.A}` }) === `/${F.A}`);
+		ok("...so a root file whose name is not ASCII is unreachable, even to Super Admin",
+			refused(await T.get(url(F.NON_ASCII), U.sa), F.NON_ASCII));
+	}
 
 	// =========================================================================
 	console.log("\n§3  directories keep their own rules");
@@ -410,8 +457,39 @@ function admit(limiter, user) {
 		const r = await T.get(p, U.drvA);
 		ok(`${p} reaches ${guard}, not the root rule`, r.headers["x-test-guard"] === guard);
 	}
-	ok("/uploads/rate-cons/<id>.pdf keeps its role gate (403 to a Driver)", (await T.get("/uploads/rate-cons/L100.pdf", U.drvA)).status === 403);
-	ok("/uploads/rate-cons/<id>.pdf still opens for a Dispatcher", served(await T.get("/uploads/rate-cons/L100.pdf", U.disp), "rate-cons/L100.pdf"));
+	const RC = "rate-cons/L100.pdf";
+	ok("/uploads/rate-cons/<id>.pdf opens for Super Admin", served(await T.get(`/uploads/${RC}`, U.sa), RC));
+	for (const [who, u] of [["a Dispatcher", U.disp], ["a Driver", U.drvA], ["an Investor", U.inv1], ["an unrecognized role", U.odd]]) {
+		const r = await T.get(`/uploads/${RC}`, u);
+		ok(`/uploads/rate-cons/<id>.pdf is 403 to ${who}, with no file bytes`, r.status === 403 && !r.body.includes(body(RC)));
+	}
+	ok("an unauthenticated request for a rate con is 401", (await T.get(`/uploads/${RC}`, null)).status === 401);
+	// Every spelling a guard judging the raw request could disagree with
+	// express.static about. The ones that normalize to /rate-cons/… must reach
+	// the role branch (403); a `..` spelling is refused before normalizing (404).
+	const RC_VARIANTS = [
+		["doubled slash before the directory", "/uploads//rate-cons/L100.pdf", 403],
+		["doubled slash after the directory", "/uploads/rate-cons//L100.pdf", 403],
+		["encoded separator", "/uploads/rate-cons%2FL100.pdf", 403],
+		["encoded leading slash", "/uploads/%2Frate-cons/L100.pdf", 403],
+		["mixed-case directory", "/uploads/Rate-Cons/L100.pdf", 403],
+		["upper-case directory", "/uploads/RATE-CONS/L100.pdf", 403],
+		["mixed-case mount", "/UPLOADS/rate-cons/L100.pdf", 403],
+		["encoded letter", "/uploads/%72ate-cons/L100.pdf", 403],
+		["encoded letter and separator", "/uploads/%52ATE-CONS%2FL100.pdf", 403],
+		["dot segment", "/uploads/./rate-cons/L100.pdf", 403],
+		["dot segment inside", "/uploads/rate-cons/./L100.pdf", 403],
+		["query string", "/uploads/rate-cons/L100.pdf?download=1", 403],
+		["`..` through a sibling", "/uploads/expense-receipts/../rate-cons/L100.pdf", 404],
+		["encoded `..`", "/uploads/x/%2e%2e/rate-cons/L100.pdf", 404],
+	];
+	for (const [label, p, want] of RC_VARIANTS) {
+		const r = await T.get(p, U.disp);
+		ok(`rate con, ${label}: ${want} to a Dispatcher with no file bytes (${r.status})`, r.status === want && !r.body.includes(body(RC)));
+	}
+	ok("...and the normalized spellings still open for Super Admin (the guard judges the path express.static resolves)",
+		served(await T.get("/uploads//rate-cons/L100.pdf", U.sa), RC) && served(await T.get("/uploads/rate-cons%2FL100.pdf", U.sa), RC) &&
+		served(await T.get("/uploads/%72ate-cons/L100.pdf", U.sa), RC));
 	ok("an unguarded directory is unchanged (a Driver still opens expense-receipts/)",
 		served(await T.get("/uploads/expense-receipts/r.jpg", U.drvA), "expense-receipts/r.jpg"));
 	ok("a directory name without its slash is a single segment → root rule → 404 to a Driver",
@@ -434,6 +512,16 @@ function admit(limiter, user) {
 			if ((await T.get(url(name), inv)).status === 200) leaked++;
 		}
 		ok(`${inv.username}: no root file the portal does NOT list opens`, leaked === 0);
+	}
+	{
+		const r = await T.get("/api/investor/documents", U.inv1);
+		const all = JSON.parse(r.body).documents || [];
+		ok("the investor portal lists no rate con, live or deleted (Super Admin only)",
+			all.length > 0 && all.every((d) => !T.isRateConDocType(d.type)) &&
+			!all.some((d) => d.file_name === F.A_RATECON || d.file_name === F.A_RATECON_GONE));
+		const sa = JSON.parse((await T.get("/api/investor/documents", U.sa)).body).documents || [];
+		ok("...while Super Admin's own view of the portal still lists the live one",
+			sa.some((d) => d.file_name === F.A_RATECON));
 	}
 	{
 		const r = await T.get("/api/documents/L100", U.drvA);
@@ -533,11 +621,11 @@ function admit(limiter, user) {
 			await B.guardRootLoadDocument({ session: { user } }, res, () => { nexted = true; }, F.A);
 			return { status, nexted };
 		};
-		for (const [who, u] of [["Driver", U.drvA], ["Investor", U.inv1]]) {
+		for (const [who, u] of [["Driver", U.drvA], ["Investor", U.inv1], ["Dispatcher", U.disp]]) {
 			const r = await call(u);
 			ok(`${who}: an unreadable documents table refuses (404) and never passes`, r.status === 404 && !r.nexted);
 		}
-		ok("staff are decided without touching the database", (await call(U.sa)).nexted === true);
+		ok("Super Admin is decided without touching the database", (await call(U.sa)).nexted === true);
 		let rejected = false;
 		try { await B.guardRootLoadDocument({ session: {} }, { headersSent: false, status() { return this; }, end() { return this; } }, () => {}, F.A); }
 		catch { rejected = true; }
@@ -558,6 +646,33 @@ function admit(limiter, user) {
 		LIFTED.loadDocsRoute.includes("${LOAD_PANEL_DOCUMENT_FILTER}") && LIFTED.guardRootLoadDocument.includes("${LOAD_PANEL_DOCUMENT_FILTER}"));
 	ok("the investor portal and the guard read ONE scope (investorDocumentScope)",
 		LIFTED.investorDocsRoute.includes("investorDocumentScope(user.id)") && LIFTED.guardRootLoadDocument.includes("investorDocumentScope(user.id)"));
+	ok("\"is a rate con\" is ONE SQL fragment, read by the panel filter, the investor scope and the Dispatcher rule",
+		LIFTED.consts[1].includes("${RATECON_DOCUMENT_SQL}") && LIFTED.investorDocumentScope.includes("${RATECON_DOCUMENT_SQL}") &&
+		LIFTED.guardRootLoadDocument.includes("${RATECON_DOCUMENT_SQL}") &&
+		(LIFTED.consts.join("\n") + LIFTED.investorDocumentScope + LIFTED.guardRootLoadDocument).split("'RATECON'").length - 1 === 1);
+	{
+		// isRateConDocType() (the type in hand) and RATECON_DOCUMENT_SQL (the row)
+		// must agree on every spelling, or the broadcast and the guard disagree.
+		const eqDb = new Database(":memory:");
+		const sqlSays = (t) => !!eqDb.prepare(`SELECT ${T.RATECON_DOCUMENT_SQL} AS m FROM (SELECT ? AS type)`).get(t).m;
+		// Every character but a letter is ignored: hyphens, dots, digits, and
+		// non-ASCII separators too (a Unicode hyphen, a no-break space). A letter
+		// outside A-Z is not a letter here, so a full-width spelling is no match.
+		const uni = (...codes) => String.fromCharCode(...codes);
+		const SPELLINGS = ["RATECON", "RATE CON", "RATE_CON", "ratecon", "Rate Con", "rate_con", "RateCon", " RATECON ", "R_A_T_E CON",
+			"RATE-CON", "Rate Confirmation", "RATECONS", "POD", "BOL", "Receipt", "Other", "", null,
+			"Rate-Con", "rate-con", "RATE.CON", "Rate.Con", "rate.con", "R.A.T.E.-C.O.N.", "RATE - CON", "-RATECON-", "RATECON 2",
+			`RATE${uni(0x2010)}CON`, `RATE${uni(0xA0)}CON`, "RATE-CONFIRMATION", "RATE-CONS", "PRE-RATECON", "RATE-CO", "CON-RATE",
+			uni(0xFF32, 0xFF21, 0xFF34, 0xFF25, 0xFF23, 0xFF2F, 0xFF2E)];
+		const disagree = SPELLINGS.filter((t) => sqlSays(t) !== T.isRateConDocType(t));
+		ok(`isRateConDocType() and RATECON_DOCUMENT_SQL agree on ${SPELLINGS.length} spellings${disagree.length ? ` (disagree: ${JSON.stringify(disagree)})` : ""}`,
+			disagree.length === 0 && sqlSays("Rate Con") && !sqlSays("POD"));
+		const MATCH = ["RATE-CON", "Rate.Con", "R.A.T.E.-C.O.N.", "RATECON 2", `RATE${uni(0x2010)}CON`, `RATE${uni(0xA0)}CON`];
+		const NO_MATCH = ["RATE-CONFIRMATION", "RATE-CONS", "PRE-RATECON", "RATE-CO", "CON-RATE", uni(0xFF32, 0xFF21, 0xFF34, 0xFF25, 0xFF23, 0xFF2F, 0xFF2E)];
+		ok("...hyphen, dot, digit and non-ASCII separator spellings are a rate con to both; other letters make it none",
+			MATCH.every((t) => sqlSays(t) && T.isRateConDocType(t)) && NO_MATCH.every((t) => !sqlSays(t) && !T.isRateConDocType(t)));
+		eqDb.close();
+	}
 	ok("idx_documents_file_name exists and is NOT unique",
 		/CREATE INDEX IF NOT EXISTS idx_documents_file_name ON documents\(file_name\)/.test(SRC) &&
 		!/CREATE UNIQUE INDEX[^\n]*documents\s*\(\s*file_name/.test(SRC));
@@ -583,6 +698,31 @@ function admit(limiter, user) {
 			'const collapsed = rel.replace(/\\\\/g, "/").replace(/\\/{2,}/g, "/");'));
 		ok("MUTANT backslash folded instead of refused: a root file slips past the root rule as a 2-segment path",
 			served(await M.get(url(F.BACKSLASH), U.drvA), F.BACKSLASH));
+	}
+	{
+		// The plain path would not show this: the sub-path mount (defence in
+		// depth) still refuses it. A spelling that mount never sees does.
+		const M = await build(mutate("uploadsPathGuard",
+			'if (req.session.user.role !== "Super Admin") return res.status(403).json({ error: "Forbidden" });',
+			'if (req.session.user.role !== "Super Admin" && req.session.user.role !== "Dispatcher") return res.status(403).json({ error: "Forbidden" });'));
+		ok("MUTANT Dispatcher re-admitted to the rate-cons branch: a Dispatcher reads /uploads//rate-cons/<id>.pdf — so §3's 403 is load-bearing",
+			served(await M.get("/uploads//rate-cons/L100.pdf", U.disp), "rate-cons/L100.pdf"));
+	}
+	{
+		const M = await build(mutate("guardRootLoadDocument", "if (rateCon.length) return res.status(404).end();", ""));
+		ok("MUTANT no Dispatcher rate-con rule: a Dispatcher reads a root rate con — so §1's refusal is load-bearing",
+			served(await M.get(url(F.A_RATECON), U.disp), F.A_RATECON));
+	}
+	{
+		const M = await build(mutate("guardRootLoadDocument", "file_name = ? COLLATE NOCASE AND", "file_name = ? AND"));
+		const r = await guardCall(M, U.disp, "l100_ratecon_1788000000004.PDF");
+		ok("MUTANT the Dispatcher's rate-con rule matching the name exactly: a rate con asked for in another letter case passes — so §1's NOCASE is load-bearing",
+			r.nexted === true && r.status === null);
+	}
+	{
+		const M = await build(mutate("investorDocumentScope", " AND NOT (${RATECON_DOCUMENT_SQL})", ""));
+		ok("MUTANT investor scope without the rate-con clause: an Investor reads a root rate con — so §1's refusal is load-bearing",
+			served(await M.get(url(F.A_RATECON), U.inv1), F.A_RATECON));
 	}
 	{
 		const M = await build(mutate("uploadMissLimiter",

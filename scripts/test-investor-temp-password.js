@@ -74,13 +74,16 @@ const ACCEPT_SRC = liftRoute(ACCEPT_HEAD);
 const DRIVER_ACCEPT_SRC = liftRoute(DRIVER_ACCEPT_HEAD);
 const ESCAPE_SRC = liftFunction("function escapeHtml(s) {");
 const COL_LETTER_SRC = liftFunction("function colLetter(idx) {");
+// The acceptance writes the vehicles through this helper (its own subject is
+// scripts/test-investor-accept-vehicles.js).
+const REGISTER_VEHICLES_SRC = liftFunction("function registerApplicationVehicles(vehicles, appId, userId) {");
 const CURRENT_FLAG_SRC = liftFunction("function currentMustChangePassword(sessionUser) {");
 // The reader of each vehicle's purchase price, with the ceiling it reads (its
 // own subject is scripts/test-truck-cost-amounts.js §6).
 const PARSE_AMOUNT_SRC = (() => {
 	const m = SRC.match(/\nconst TRUCK_AMOUNT_MAX = [^\n]*\n/);
 	if (!m) die("could not locate TRUCK_AMOUNT_MAX");
-	return `${m[0].trim()}\n${liftFunction('function parseTruckAmount(raw, label = "Amount", max = TRUCK_AMOUNT_MAX) {')}`;
+	return `${m[0].trim()}\n${liftFunction("function parsePlainDecimal(raw) {")}\n${liftFunction('function parseTruckAmount(raw, label = "Amount", max = TRUCK_AMOUNT_MAX) {')}`;
 })();
 
 const USERS_CREATE = (() => {
@@ -149,8 +152,10 @@ async function accept(db, appId, { status = "Accepted", routeSrc = ACCEPT_SRC } 
 	const escapeHtml = new Function(`${ESCAPE_SRC}\nreturn escapeHtml;`)();
 	const colLetter = new Function(`${COL_LETTER_SRC}\nreturn colLetter;`)();
 	const parseTruckAmount = new Function(`${PARSE_AMOUNT_SRC}\nreturn parseTruckAmount;`)();
-	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", routeSrc)(
-		app, requireRole, db, fastBcrypt, crypto, () => {}, () => {}, colLetter, escapeHtml, sendEmail, parseTruckAmount);
+	const registerApplicationVehicles = new Function("db", "colLetter", "parseTruckAmount",
+		`${REGISTER_VEHICLES_SRC}\nreturn registerApplicationVehicles;`)(db, colLetter, parseTruckAmount);
+	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", routeSrc)(
+		app, requireRole, db, fastBcrypt, crypto, () => {}, () => {}, colLetter, escapeHtml, sendEmail, parseTruckAmount, registerApplicationVehicles);
 	if (typeof handler !== "function") die("the lifted route did not register a handler");
 	const out = { status: 200, body: null };
 	const res = {
@@ -196,9 +201,12 @@ async function sectionUnchanged() {
 	const appId = addApplication(db);
 	const r = await accept(db, appId);
 	const creds = (r.body && r.body.credentials) || {};
-	ok(JSON.stringify(Object.keys(r.body || {})) === JSON.stringify(["success", "accountCreated", "credentials"]) &&
-		JSON.stringify(Object.keys(creds)) === JSON.stringify(["username", "tempPassword", "userId", "investorName"]),
-		`§2 the response shape must be unchanged: ${JSON.stringify(r.body)}`);
+	// Every field the response has carried is kept; `vehicles` (what became of
+	// each vehicle on the application) was added after it.
+	ok(JSON.stringify(Object.keys(r.body || {})) === JSON.stringify(["success", "accountCreated", "credentials", "vehicles"]) &&
+		JSON.stringify(Object.keys(creds)) === JSON.stringify(["username", "tempPassword", "userId", "investorName"]) &&
+		JSON.stringify((r.body || {}).vehicles) === JSON.stringify({ created: 2, existing: 0, heldByOther: 0, failed: 0 }),
+		`§2 the response shape must be unchanged, plus the vehicle counts: ${JSON.stringify(r.body)}`);
 	ok(creds.username === "acme.hauling.llc" && creds.investorName === "Acme Hauling LLC",
 		`§2 the username derivation must be unchanged (got ${creds.username})`);
 	const u = db.prepare("SELECT * FROM users WHERE id = ?").get(creds.userId) || {};

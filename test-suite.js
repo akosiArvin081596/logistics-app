@@ -975,7 +975,7 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
   const di1b = await req("POST", aliasPath("SUITE-NO-AUTH"), {});
   test("74. Draft-invoice + legacy alias blocked without auth (401)", di1.status === 401 && di1b.status === 401);
 
-  // 75. Super Admin + Dispatcher only, on both paths.
+  // 75. Super Admin only (owner, 2026-09-26), on both paths.
   const di2 = await req("POST", draftPath("SUITE-NO-ROLE"), {}, ic);
   const di2b = await req("POST", aliasPath("SUITE-NO-ROLE"), {}, ic);
   test("75. Draft-invoice + legacy alias blocked for Investor (403)", di2.status === 403 && di2b.status === 403);

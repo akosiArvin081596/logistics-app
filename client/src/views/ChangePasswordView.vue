@@ -132,6 +132,7 @@ async function submit() {
 
 async function doLogout() {
   await auth.logout()
+  // A replace, not a push: see AppSidebar's handleLogout().
   router.replace('/login')
 }
 </script>

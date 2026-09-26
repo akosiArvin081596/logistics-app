@@ -192,12 +192,15 @@ const APPLY_SRC = liftRoute(SRC, 'app.post("/api/public/investor-apply", publicF
 const ONBOARD_SRC = liftFunction(SRC, "async function checkAndCompleteOnboarding(userId) {");
 const ESCAPE_SRC = liftFunction(SRC, "function escapeHtml(s) {");
 const COL_LETTER_SRC = liftFunction(SRC, "function colLetter(idx) {");
+// The acceptance writes the vehicles through this helper (its own subject is
+// scripts/test-investor-accept-vehicles.js).
+const REGISTER_VEHICLES_SRC = liftFunction(SRC, "function registerApplicationVehicles(vehicles, appId, userId) {");
 // The reader of each vehicle's purchase price, with the ceiling it reads (its
 // own subject is scripts/test-truck-cost-amounts.js §6).
 const PARSE_AMOUNT_SRC = (() => {
 	const m = SRC.match(/\nconst TRUCK_AMOUNT_MAX = [^\n]*\n/);
 	if (!m) die("could not locate TRUCK_AMOUNT_MAX");
-	return `${m[0].trim()}\n${liftFunction(SRC, 'function parseTruckAmount(raw, label = "Amount", max = TRUCK_AMOUNT_MAX) {')}`;
+	return `${m[0].trim()}\n${liftFunction(SRC, "function parsePlainDecimal(raw) {")}\n${liftFunction(SRC, 'function parseTruckAmount(raw, label = "Amount", max = TRUCK_AMOUNT_MAX) {')}`;
 })();
 const escapeHtml = new Function(`${ESCAPE_SRC}\nreturn escapeHtml;`)();
 const INVESTOR_ONBOARDING_DOCS = render(liftConst(SRC, "INVESTOR_ONBOARDING_DOCS"), "INVESTOR_ONBOARDING_DOCS", {});
@@ -246,10 +249,12 @@ async function acceptanceMail(routeSrc, vals = {}) {
 	const mail = [];
 	const colLetter = new Function(`${COL_LETTER_SRC}\nreturn colLetter;`)();
 	const parseTruckAmount = new Function(`${PARSE_AMOUNT_SRC}\nreturn parseTruckAmount;`)();
-	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", routeSrc)(
+	const registerApplicationVehicles = new Function("db", "colLetter", "parseTruckAmount",
+		`${REGISTER_VEHICLES_SRC}\nreturn registerApplicationVehicles;`)(db, colLetter, parseTruckAmount);
+	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", routeSrc)(
 		{ put: (p, guard, h) => { handler = h; } }, () => (req, res, next) => next(), db,
 		{ hash: (pw) => bcrypt.hash(pw, 4) }, crypto, () => {}, () => {}, colLetter, escapeHtml,
-		(to, subject, html) => { mail.push({ to, subject, html }); return Promise.resolve(true); }, parseTruckAmount);
+		(to, subject, html) => { mail.push({ to, subject, html }); return Promise.resolve(true); }, parseTruckAmount, registerApplicationVehicles);
 	const out = {};
 	await handler({
 		params: { id: String(appId) }, body: { status: "Accepted" },

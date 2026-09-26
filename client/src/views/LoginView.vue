@@ -96,7 +96,7 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { useAuthStore } from '../stores/auth'
+import { isLeavingPage, useAuthStore } from '../stores/auth'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -124,6 +124,12 @@ onMounted(async () => {
   }
 })
 
+// A sign-in can end on a fresh page (stores/auth.js), and until it arrives this one
+// is still here with a live button: a second tap would send a second sign-in. So a
+// SUCCESSFUL sign-in (doSetup, doLogin) that is loading a fresh page keeps its
+// button disabled. Asked after the call succeeds, not in `finally` alone: a page an
+// unconfirmed sign-out left on this screen is already leaving, and a refused
+// sign-in there must still hand the button back.
 async function doSetup() {
   setupError.value = ''
   if (!setupForm.username || !setupForm.password) {
@@ -135,13 +141,15 @@ async function doSetup() {
     return
   }
   setupLoading.value = true
+  let freshPageComing = false
   try {
     await auth.setup(setupForm.username, setupForm.password, setupForm.email)
+    freshPageComing = isLeavingPage()
     router.push(auth.roleHome)
   } catch (err) {
     setupError.value = err.message || 'Connection failed.'
   } finally {
-    setupLoading.value = false
+    if (!freshPageComing) setupLoading.value = false
   }
 }
 
@@ -152,13 +160,15 @@ async function doLogin() {
     return
   }
   loginLoading.value = true
+  let freshPageComing = false
   try {
     await auth.login(loginForm.username, loginForm.password)
+    freshPageComing = isLeavingPage()
     router.push(auth.roleHome)
   } catch (err) {
     loginError.value = err.message || 'Connection failed.'
   } finally {
-    loginLoading.value = false
+    if (!freshPageComing) loginLoading.value = false
   }
 }
 </script>

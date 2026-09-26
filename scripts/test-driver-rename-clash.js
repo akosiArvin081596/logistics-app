@@ -53,6 +53,13 @@
  *   §4b the pay structure: a directory row re-spelled in case or spacing, by
  *      any of the three rename paths, is still found under the driver's name;
  *      of two rows for one name, the first by id wins.
+ *   §4c the cascade's drivers_directory leg renames the row
+ *      findDirectoryRowForDriver() finds for the old name: a row stored under a
+ *      spacing variant of it is renamed by both rename routes (the dry run
+ *      counts it), keeps its id and rate, and no second row appears — not from
+ *      PUT /api/users/:id's own sync, nor a later one; renamed onto another
+ *      row's name it is refused as DIRECTORY_NAME_COLLISION before anything is
+ *      written.
  *   §5 source pins: each rename check runs after its route's last await and
  *      before its write — except fix-driver-name's, which runs in the plan,
  *      before the sheet write (the route's last await), like its merge scan;
@@ -122,8 +129,14 @@ function liftConst(head, close = null) {
 }
 
 const NORM_SRC = liftFunction("normalizeDriverName");
-const CLASH_SRC = [liftFunction("findDriverNameClashes"), liftFunction("findDriverNameClash"), liftFunction("canonicalDriverName")].join("\n");
-const SYNC_SRC = liftFunction("syncDriverToCarrierSheet");
+const CLASH_SRC = [liftFunction("findDriverNameClashes"), liftFunction("findDriverNameClash"), liftFunction("driverNameHeldByOtherAccount"),
+	liftFunction("canonicalDriverName")].join("\n");
+// The sync finds its directory row through findDirectoryRowForDriver() and the
+// driver's truck through findTruckForDriver(); the cascade's drivers_directory
+// leg finds its row through findDirectoryRowForDriver() too.
+const SYNC_SRC = [liftFunction("findDirectoryRowForDriver"), liftFunction("findTruckForDriver"), liftFunction("syncDriverToCarrierSheet")].join("\n");
+// The pay fields PUT /api/drivers-directory/:id reads (scripts/test-pay-settings-admin-only.js).
+const DIRECTORY_PAY = new Function(`${liftFunction("parsePlainDecimal")}\n${liftFunction("directoryPayValue")}\nreturn directoryPayValue;`)();
 const ASSIGN_SRC = liftFunction("assignDriverToTruck");
 const AUDIT_TEXT_SRC = [liftFunction("scrubPurgeMarker"), liftFunction("auditText")].join("\n");
 const TARGETS_SRC = liftConst("const DRIVER_RENAME_TARGETS = [", "\n];");
@@ -133,6 +146,7 @@ const CASCADE_SRC = [
 	TARGETS_SRC,
 	liftFunction("driverRenameWhereSql"),
 	liftFunction("driverRenameWhereArgs"),
+	liftFunction("driverRenameDirectoryRowId"),
 	liftFunction("driverRenameNewValue"),
 	liftConst("const DRIVER_RENAME_ID_CAP = "),
 	liftFunction("driverRenameMergeScan"),
@@ -142,9 +156,10 @@ const CASCADE_SRC = [
 ].join("\n");
 const COL_LETTER_SRC = liftFunction("colLetter");
 const DIR_CHANGED_SRC = [liftConst("const DIRECTORY_PERIOD_COLUMNS = "), liftFunction("directoryChangedColumns")].join("\n");
-const TRUCK_PARSE_SRC = [liftFunction("parseDriverPayDaily"), liftFunction("parseInServiceDate"), liftFunction("parseRetiredAt"),
+const TRUCK_PARSE_SRC = [liftFunction("parsePlainDecimal"), liftFunction("parseDriverPayDaily"), liftFunction("parseInServiceDate"), liftFunction("parseRetiredAt"),
 	liftConst("const ADMIN_FEE_PCT_MAX = "), liftFunction("parseAdminFeePct"),
-	liftConst("const TRUCK_AMOUNT_MAX = "), liftFunction("parseTruckAmount"), liftConst("const TRUCK_AMOUNT_FIELDS = [", "\n];"), liftFunction("parseTruckAmounts")].join("\n");
+	liftConst("const TRUCK_AMOUNT_MAX = "), liftFunction("parseTruckAmount"), liftConst("const TRUCK_AMOUNT_FIELDS = [", "\n];"), liftFunction("parseTruckAmounts"),
+	liftFunction("parseUnitNumber"), liftFunction("isUnitNumberTaken")].join("\n");
 const FIXED_COST_SRC = liftFunction("truckMonthlyFixed");
 const PAY_SRC = [liftConst("let lastPayStructShadowWarnMs = "), liftFunction("getDriverPayStructures")].join("\n");
 
@@ -160,9 +175,9 @@ const ROUTES = Object.fromEntries(Object.entries(HEADS).map(([k, h]) => [k, lift
 // Everything a route below calls from module scope, built on one database.
 // `src` swaps one piece for a mutant.
 function buildModule(db, src = {}) {
-	const s = { planner: PLANNER_SRC, sync: SYNC_SRC, clash: CLASH_SRC, hard: HARD_BLOCK_SRC, pay: PAY_SRC, ...src };
+	const s = { planner: PLANNER_SRC, sync: SYNC_SRC, clash: CLASH_SRC, hard: HARD_BLOCK_SRC, pay: PAY_SRC, cascade: CASCADE_SRC, ...src };
 	return new Function("db", "isLocked", "expenseRowPeriodLocked", "invoiceRowPeriodLocked", "namedLockedPeriods", "expensePostedPeriod",
-		`"use strict";\n${NORM_SRC}\n${s.clash}\n${CASCADE_SRC}\n${s.hard}\n${s.planner}\n${s.sync}\n${ASSIGN_SRC}\n${AUDIT_TEXT_SRC}\n${s.pay}\n` +
+		`"use strict";\n${NORM_SRC}\n${s.clash}\n${s.cascade}\n${s.hard}\n${s.planner}\n${s.sync}\n${ASSIGN_SRC}\n${AUDIT_TEXT_SRC}\n${s.pay}\n` +
 		"return { normalizeDriverName, findDriverNameClash, findDriverNameClashes, canonicalDriverName, DRIVER_RENAME_TARGETS," +
 		" DRIVER_RENAME_ID_CAP, DRIVER_RENAME_HARD_BLOCK_CODES, planDriverRenameSqlite, driverRenameMergeScan, applyDriverRenameSqlite," +
 		" driverRenameAccountIds, syncDriverToCarrierSheet, assignDriverToTruck, auditText, getDriverPayStructures };")(
@@ -172,7 +187,7 @@ const TARGETS = new Function(`${TARGETS_SRC}\nreturn DRIVER_RENAME_TARGETS;`)();
 const colLetter = new Function(`${COL_LETTER_SRC}\nreturn colLetter;`)();
 const directoryChangedColumns = new Function(`${DIR_CHANGED_SRC}\nreturn directoryChangedColumns;`)();
 const truckParse = new Function("DRIVER_PAY_DAILY_MAX", "todayKeyCT", "IN_SERVICE_MAX_MONTHS_AHEAD",
-	`${TRUCK_PARSE_SRC}\nreturn { parseDriverPayDaily, parseInServiceDate, parseRetiredAt, parseAdminFeePct, TRUCK_AMOUNT_FIELDS, parseTruckAmounts };`)(10000, () => "2026-09-24", 24);
+	`${TRUCK_PARSE_SRC}\nreturn { parseDriverPayDaily, parseInServiceDate, parseRetiredAt, parseAdminFeePct, TRUCK_AMOUNT_FIELDS, parseTruckAmounts, parseUnitNumber, isUnitNumberTaken };`)(10000, () => "2026-09-24", 24);
 const truckMonthlyFixed = new Function(`${FIXED_COST_SRC}\nreturn truckMonthlyFixed;`)();
 // The photo check both truck routes run, verbatim (its own subject is
 // scripts/test-stored-file-serving.js).
@@ -348,6 +363,8 @@ function mountDirectoryPut(db, { routeSrc = ROUTES.dirPut, moduleSrc = {} } = {}
 		normalizeDriverName: m.normalizeDriverName,
 		findDriverNameClash: m.findDriverNameClash,
 		findDriverNameClashes: m.findDriverNameClashes,
+		directoryPayValue: DIRECTORY_PAY,
+		DRIVER_PAY_DAILY_MAX: 10000,
 	});
 	return { put: (id, headers, values) => quiet(() => call({ params: { id: String(id) }, body: { headers, values } })), log };
 }
@@ -357,6 +374,10 @@ function mountDirectoryPut(db, { routeSrc = ROUTES.dirPut, moduleSrc = {} } = {}
 function mountTrucks(db, { putSrc = ROUTES.truckPut, postSrc = ROUTES.truckPost, moduleSrc = {}, busy = [] } = {}) {
 	const m = buildModule(db, moduleSrc);
 	const refuse = (req, res) => res.status(409).json({ code: "PERIOD_STUB" });
+	// Which drivers a save syncs, by name and action — the route's own decision.
+	// The sync finds a driver's directory row and truck under any spelling, so
+	// syncing one driver twice leaves the same rows; only this record shows it.
+	const syncCalls = [];
 	const env = {
 		db,
 		...truckParse,
@@ -379,8 +400,10 @@ function mountTrucks(db, { putSrc = ROUTES.truckPut, postSrc = ROUTES.truckPost,
 		truckMonthlyFixed,
 		assignDriverToTruck: m.assignDriverToTruck,
 		fuelModel: { DEFAULT_TANK_GALLONS: 200 },
-		syncDriverToCarrierSheet: m.syncDriverToCarrierSheet,
+		syncDriverToCarrierSheet: (name, o) => { syncCalls.push([name, o && o.action]); return m.syncDriverToCarrierSheet(name, o); },
 		logAudit: () => {},
+		// The success lines name the truck through it.
+		auditText: m.auditText,
 		notifyChange: () => {},
 		canonicalDriverName: m.canonicalDriverName,
 		normalizeDriverName: m.normalizeDriverName,
@@ -391,6 +414,7 @@ function mountTrucks(db, { putSrc = ROUTES.truckPut, postSrc = ROUTES.truckPost,
 		put: (id, body) => quiet(() => put({ params: { id: String(id) }, body })),
 		post: (body, role = "Super Admin") => quiet(() => post({ body, session: { user: { id: role === "Investor" ? 9 : 1, username: "u", role } } })),
 		m,
+		syncCalls,
 	};
 }
 
@@ -837,13 +861,15 @@ async function trucksBattery(opts = {}) {
 		db.prepare("UPDATE drivers_directory SET driver_name = 'Shorn  King', trucks = '101' WHERE id = 1").run();
 		db.prepare("UPDATE trucks SET assigned_driver = 'Shorn  King' WHERE id = 1").run();
 		db.prepare("UPDATE truck_assignments SET driver_name = 'Shorn  King' WHERE truck_id = 1").run();
-		const { put } = mountTrucks(db, opts);
+		const { put, syncCalls } = mountTrucks(db, opts);
 		const r = await put(1, { assignedDriver: "Shorn  King", notes: "x" });
 		const row = db.prepare("SELECT driver_name, trucks FROM drivers_directory WHERE id = 1").get();
 		t(`an account and a directory row spelling one driver differently: the truck takes the account's spelling (got ${r.status}, trucks ${truckDrivers(db)})`,
 			r.status === 200 && truckDrivers(db) === "1:Shorn King,2:");
 		t(`...and the directory row keeps its name and its truck (got ${JSON.stringify(row)})`,
 			!!row && row.driver_name === "Shorn  King" && row.trucks === "101" && directoryNames(db).length === 3);
+		t(`...and the save syncs that driver once, under the spelling it kept — never the replaced spelling as a departing driver (got ${JSON.stringify(syncCalls)})`,
+			JSON.stringify(syncCalls) === JSON.stringify([["Shorn King", "update"]]));
 	}
 
 	// A driver name is text: anything else is refused before anything is resolved or written.
@@ -920,6 +946,62 @@ async function payBattery(opts = {}) {
 		addDirectory(db, "Shorn  King"); // a second row for the same name in another spacing, at the defaults
 		t("two rows for one name: the first by id wins, under either spelling",
 			payDailyOf(db, "Shorn King", ms) === 300 && payDailyOf(db, "Shorn  King", ms) === 300);
+	}
+	return results;
+}
+
+// ─────────────────────────────── §4c the cascade renames a spacing-variant directory row
+// The cascade's drivers_directory leg renames the row findDirectoryRowForDriver()
+// finds for the old name, so a row stored under a spacing variant of it moves
+// with the driver — and the sync that follows adds no second row at the
+// default terms (the shadow row identity-collation.md describes).
+async function cascadeBattery(opts = {}) {
+	const results = [];
+	const t = (name, cond) => results.push({ name, ok: !!cond });
+	const ms = opts.moduleSrc || {};
+	const spacedFixture = (base) => {
+		const db = base();
+		// sking's directory row, stored with a doubled space, carrying the $300 rate.
+		db.prepare("UPDATE drivers_directory SET driver_name = 'Shorn  King', pay_daily = 300 WHERE id = 1").run();
+		return db;
+	};
+	const rows = (db) => db.prepare("SELECT id, driver_name, pay_daily FROM drivers_directory ORDER BY id").all()
+		.map((r) => `${r.id}:${r.driver_name}:${r.pay_daily}`).join(" | ");
+	{
+		const db = spacedFixture(usersFixture);
+		const { put } = mountUsersPut(db, opts);
+		const r = await put(2, { driverName: "Shaun King" });
+		t(`PUT /api/users/:id renaming "Shorn King" to "Shaun King": the directory row stored as "Shorn  King" is renamed, keeping its id and rate, and no second row appears (got ${r.status}, ${rows(db)})`,
+			r.status === 200 && rows(db) === "1:Shaun King:300 | 2:Bob Driver:0 | 3:Deshorn King:0");
+		t(`...so the renamed driver's pay structure is still the $300 row (got ${payDailyOf(db, "Shaun King", ms)})`,
+			payDailyOf(db, "Shaun King", ms) === 300);
+	}
+	{
+		const db = spacedFixture(fixFixture);
+		const { fix, log } = mountFix(db, opts);
+		const dry = await fix({ oldName: "Shorn King", newName: "Shaun King" }, { dryRun: "true" });
+		const planned = dry.body && dry.body.plan && dry.body.plan.sqlite && dry.body.plan.sqlite.drivers_directory;
+		t(`fix-driver-name's dry run counts the directory row stored as "Shorn  King" (got ${dry.status}, ${JSON.stringify(planned || null)})`,
+			dry.status === 200 && planned && planned.rows === 1 && rows(db) === "1:Shorn  King:300 | 2:Bob Driver:0 | 3:Deshorn King:0");
+		const r = await fix({ oldName: "Shorn King", newName: "Shaun King" });
+		t(`fix-driver-name renames it, keeping its id and rate (got ${r.status}, ${rows(db)})`,
+			r.status === 200 && rows(db) === "1:Shaun King:300 | 2:Bob Driver:0 | 3:Deshorn King:0" && log.sheetWrites === 0);
+		// A later sync under the new name (a truck assignment, an email change)
+		// finds that row and adds nothing.
+		buildModule(db, ms).syncDriverToCarrierSheet("Shaun King", { action: "update" });
+		t(`...and a sync under the new name afterwards adds no second row (got ${rows(db)}, pay ${payDailyOf(db, "Shaun King", ms)})`,
+			rows(db) === "1:Shaun King:300 | 2:Bob Driver:0 | 3:Deshorn King:0" && payDailyOf(db, "Shaun King", ms) === 300);
+	}
+	{
+		// Renamed onto another row's name, the row found by id would be written a
+		// name another row holds: the UNIQUE pre-flight counts it and refuses before
+		// anything is written.
+		const db = spacedFixture(fixFixture);
+		const before = rows(db);
+		const { fix, log } = mountFix(db, opts);
+		const r = await fix({ oldName: "Shorn King", newName: "Bob Driver", acknowledgeLockedPeriods: true });
+		t(`fix-driver-name renaming it onto "Bob Driver", who has a directory row: 409 DIRECTORY_NAME_COLLISION, nothing written, the sheet untouched (got ${r.status} ${(r.body || {}).code || ""})`,
+			r.status === 409 && (r.body || {}).code === "DIRECTORY_NAME_COLLISION" && rows(db) === before && log.sheetWrites === 0);
 	}
 	return results;
 }
@@ -1101,6 +1183,15 @@ async function mutants() {
 	caught("R24 getDriverPayStructures() keyed differently from normalizeDriverName()", await payBattery({
 		moduleSrc: { pay: swap("R24", PAY_SRC, "const key = normalizeDriverName(r.driver_name);", 'const key = String(r.driver_name || "").trim().toLowerCase();') },
 	}));
+	const DIRECTORY_LEG = 'key: "drivers_directory", table: "drivers_directory", column: "driver_name", match: "directory_row",';
+	caught("R25 the cascade's drivers_directory leg matched with LOWER() alone again", await cascadeBattery({
+		moduleSrc: { cascade: swap("R25", CASCADE_SRC, DIRECTORY_LEG, DIRECTORY_LEG.replace('"directory_row"', '"ci"')) },
+	}));
+	// No mutant for the merge scan asking its directory leg through the row
+	// lookup instead of case-insensitively: driverRenameDirectoryRowId() refuses
+	// a spacing variant another account holds, and for the new name that is the
+	// renamed account itself whenever the lookup would self-match, so the two
+	// answer alike in every scenario here — an equivalent mutant.
 }
 
 (async () => {
@@ -1114,6 +1205,8 @@ async function mutants() {
 	record(await trucksBattery());
 	section("§4b the pay structure follows a re-spelled name");
 	record(await payBattery());
+	section("§4c the rename cascade renames a directory row stored under a spacing variant");
+	record(await cascadeBattery());
 	section("§5 source pins");
 	sourcePins();
 	section("§6 mutants — each must be caught");

@@ -21,6 +21,8 @@
  *   §2 POST /api/documents/upload — the same, plus the real resolveDriverActor
  *      and uploadDocTypeFor: every role, the type list per role, and a refusal
  *      writes no file, inserts no row, reads no sheet and spends no limiter budget.
+ *      The pod-uploaded broadcast to the dispatch room carries a document's link,
+ *      but never a rate con's (rate cons are Super Admin only; isRateConDocType()).
  *   §3 the two read-flag routes over an in-memory SQLite: each role marks exactly
  *      the rows it may, and a caller with no name marks nothing.
  *   §4 GET /api/driver/:driverName: a Driver with no loads gets no diagnostic;
@@ -91,12 +93,17 @@ const resolveDriverActor = new Function("normalizeDriverName",
 	`${liftFn("resolveDriverActor")}\nreturn resolveDriverActor;`)(normalizeDriverName);
 const readFlagOwnName = new Function(`${liftFn("readFlagOwnName")}\nreturn readFlagOwnName;`)();
 // The Documents-panel filter the list route shares with the /uploads root guard,
-// read from server.js so the lifted route runs with the shipped value.
+// and the rate-con fragment it is built from, evaluated from server.js so the
+// lifted route runs with the shipped value.
 const LOAD_PANEL_DOCUMENT_FILTER = (() => {
-	const m = SRC.match(/const LOAD_PANEL_DOCUMENT_FILTER =\s*("(?:[^"\\]|\\.)*");/);
-	if (!m) throw new Error("LOAD_PANEL_DOCUMENT_FILTER not found in server.js");
-	return JSON.parse(m[1]);
+	const line = (name) => {
+		const m = SRC.match(new RegExp(`\\nconst ${name} = [^\\n]*;\\n`));
+		if (!m) throw new Error(`${name} not found in server.js`);
+		return m[0];
+	};
+	return new Function(`${line("RATECON_DOCUMENT_SQL")}${line("LOAD_PANEL_DOCUMENT_FILTER")}return LOAD_PANEL_DOCUMENT_FILTER;`)();
 })();
+const isRateConDocType = new Function(`${liftFn("isRateConDocType")}\nreturn isRateConDocType;`)();
 const UPLOAD_TYPE_SRC = liftFn("uploadDocTypeFor");
 const buildUploadDocTypeFor = (src) => new Function(`${src}\nreturn uploadDocTypeFor;`)();
 
@@ -114,13 +121,14 @@ const JT = {
 
 // Every Job Tracking read and every statement prepared is counted, so "refused
 // before any read" is asserted rather than assumed.
-const counters = { sheetReads: 0, prepared: [], limiter: 0, files: [], emits: 0 };
+const counters = { sheetReads: 0, prepared: [], limiter: 0, files: [], emits: 0, emitted: [] };
 function resetCounters() {
 	counters.sheetReads = 0;
 	counters.prepared.length = 0;
 	counters.limiter = 0;
 	counters.files.length = 0;
 	counters.emits = 0;
+	counters.emitted.length = 0;
 }
 const readsOf = () => counters.sheetReads + counters.prepared.length;
 
@@ -164,7 +172,7 @@ const limiter = (req, res, next) => { counters.limiter++; next(); };
 function documentDeps(overrides = {}) {
 	return {
 		requireRole, requireAuth, driverWriteLimiter: limiter,
-		loadBelongsToDriver, sentIfLoadOwnershipUnverified, resolveDriverActor, LOAD_PANEL_DOCUMENT_FILTER,
+		loadBelongsToDriver, sentIfLoadOwnershipUnverified, resolveDriverActor, LOAD_PANEL_DOCUMENT_FILTER, isRateConDocType,
 		uploadDocTypeFor: buildUploadDocTypeFor(UPLOAD_TYPE_SRC),
 		db: docDbRecorded,
 		// Upload plumbing. The image branch is never taken (every upload below is a
@@ -181,7 +189,7 @@ function documentDeps(overrides = {}) {
 			mkdirSync: () => {},
 			writeFileSync: (p, bytes) => { counters.files.push(p); },
 		},
-		io: { to: () => ({ emit: () => { counters.emits++; } }) },
+		io: { to: (room) => ({ emit: (event, payload) => { counters.emits++; counters.emitted.push({ room, event, payload }); } }) },
 		insertDispatchNotification: { run: () => ({}) },
 		setImmediate: () => {},
 		getSheets: async () => { throw new Error("not in this runner"); },
@@ -310,6 +318,10 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 	ok("Driver, own load, POD: 200, one file written and one row stored as POD",
 		r.status === 200 && r.body.success === true && r.inserted === 1 && counters.files.length === 1 &&
 		lastDoc().type === "POD" && lastDoc().driver === "Deshorn King", brief(r));
+	const podUploaded = () => counters.emitted.filter((e) => e.event === "pod-uploaded");
+	ok("...and the pod-uploaded broadcast to the dispatch room carries the POD's link",
+		podUploaded().length === 1 && podUploaded()[0].room === "dispatch" && podUploaded()[0].payload.driveUrl === r.body.driveUrl,
+		JSON.stringify(podUploaded()));
 	r = await uploadAs(DK, upload("L-200", "POD"));
 	ok("Driver, another driver's load: 403, no file, no row",
 		r.status === 403 && r.body.error === "This load is not assigned to you" && refusedClean(r), brief(r));
@@ -341,6 +353,15 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 	r = await uploadAs(SUPER, upload("L-200", "RATECON"));
 	ok("Super Admin is not narrowed: RATECON stored as sent",
 		r.status === 200 && r.inserted === 1 && lastDoc().type === "RATECON", brief(r));
+	// The dispatch room holds Dispatchers, and rate cons are Super Admin only
+	// (owner, 2026-09-26): the broadcast names the upload but not where it is.
+	for (const t of ["RATECON", "Rate Con", "rate_con"]) {
+		r = await uploadAs(SUPER, upload("L-200", t));
+		const ev = counters.emitted.filter((e) => e.event === "pod-uploaded");
+		ok(`Super Admin, type ${JSON.stringify(t)}: the pod-uploaded broadcast carries no link to the rate con`,
+			r.status === 200 && ev.length === 1 && ev[0].payload.docType === t && !("driveUrl" in ev[0].payload) &&
+			!JSON.stringify(counters.emitted).includes(r.body.driveUrl), JSON.stringify(counters.emitted));
+	}
 
 	// =========================================================================
 	console.log("\n§3  PUT /api/messages/read and PUT /api/notifications/read");
@@ -411,6 +432,8 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 	const driverDeps = {
 		requireRole, requireAuth, normalizeDriverName, findCol,
 		sanitizeBrokerColumns: (headers, rows) => rows,
+		findDirectoryRowForDriver: () => null,
+		findTruckForDriver: () => null,
 		db: { prepare: () => ({ all: () => [], get: () => undefined, run: () => ({}) }) },
 		getJobTrackingCached: async () => JT,
 		liveJobTrackingView: (jt) => ({ ...jt, headers: [...jt.headers], data: jt.data.map((x) => ({ ...x })) }),

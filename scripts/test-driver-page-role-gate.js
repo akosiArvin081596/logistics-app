@@ -24,6 +24,16 @@
  *      legacy driver page ask for this route, and both admit Driver and Super
  *      Admin only. A new caller fails here and points at the note above the route.
  *   §4 DISCRIMINATION: one mutant per layer, each required to flip.
+ *   §5 the driver's own drivers_directory row is found when it is stored under
+ *      another spacing of the name (findDirectoryRowForDriver()), with directory
+ *      reads on an in-memory SQLite, and the lookup's mutant flips it.
+ *   §6 the driver's truck is found the same way (findTruckForDriver()), and the
+ *      routes the app calls for what the page lists answer for the same driver:
+ *      GET /api/driver/me/truck-photo, GET /api/driver/truck-documents/:id/view,
+ *      GET /api/driver/shared-documents/:id/download and
+ *      POST /api/drivers-directory/:id/profile-picture (another driver and a
+ *      blank session name still refused). Two mutants: the truck lookup and the
+ *      truck-document check back to their old comparisons.
  *
  * Pure: no server, no port, no app.db, no network, no fixtures.
  *
@@ -47,8 +57,8 @@ function fatal(msg) { console.error(`FAIL  ${msg}`); process.exit(1); }
 
 // --- lifting ---------------------------------------------------------------
 // A top-level `function name(` up to the first line that is exactly "}". Not a
-// brace count: sanitizeBrokerContact tests `startsWith("{")`, and a brace inside
-// a string literal throws a naive counter off.
+// brace count: a brace inside a string literal (a test such as
+// `startsWith("{")`) throws a naive counter off.
 function liftFn(name) {
 	const a = SRC.indexOf(`\nfunction ${name}(`);
 	if (a < 0) fatal(`could not locate function ${name} in server.js`);
@@ -88,12 +98,25 @@ const requireAuth = new Function(`${liftFn("requireAuth")}\nreturn requireAuth;`
 const helpers = new Function([
 	liftFn("normalizeDriverName"),
 	liftFn("findCol"),
-	liftFn("sanitizeBrokerContact"),
 	liftConstLine("BROKER_WITHHELD_RE"),
 	liftFn("resolveBrokerWithheldColumns"),
 	liftFn("sanitizeBrokerColumns"),
 	"return { normalizeDriverName, findCol, sanitizeBrokerColumns };",
 ].join("\n"))();
+// The route finds the driver's directory row through findDirectoryRowForDriver(),
+// which reads `db`, so it is built over whichever db a route runs on.
+const DIRECTORY_LOOKUP_SRC = [liftFn("normalizeDriverName"), liftFn("findDriverNameClashes"), liftFn("findDirectoryRowForDriver")].join("\n");
+const directoryLookup = (db, src = DIRECTORY_LOOKUP_SRC) =>
+	new Function("db", `"use strict";\n${src}\nreturn findDirectoryRowForDriver;`)(db);
+// ...and its truck through findTruckForDriver(), found the same two ways.
+const TRUCK_LOOKUP_SRC = [liftFn("normalizeDriverName"), liftFn("findTruckForDriver")].join("\n");
+const truckLookup = (db, src = TRUCK_LOOKUP_SRC) =>
+	new Function("db", `"use strict";\n${src}\nreturn findTruckForDriver;`)(db);
+// ...and the profile-picture upload asks driverNameHeldByOtherAccount() before it
+// accepts a row that names the driver only through spacing.
+const HELD_BY_OTHER_SRC = [liftFn("normalizeDriverName"), liftFn("findDriverNameClashes"), liftFn("driverNameHeldByOtherAccount")].join("\n");
+const heldByOtherLookup = (db) =>
+	new Function("db", `"use strict";\n${HELD_BY_OTHER_SRC}\nreturn driverNameHeldByOtherAccount;`)(db);
 
 // --- fixtures --------------------------------------------------------------
 const JT = {
@@ -159,12 +182,17 @@ function makeDeps() {
 	};
 	const deps = {
 		requireRole, requireAuth, ...helpers, db,
+		findDirectoryRowForDriver: directoryLookup(db),
+		findTruckForDriver: truckLookup(db),
 		getJobTrackingCached: async () => { reads.push("getJobTrackingCached"); return JT; },
 		liveJobTrackingView: (jt) => ({ ...jt, headers: [...jt.headers], data: jt.data.map((r) => ({ ...r })) }),
 		getCarrierDBFromSQLite: () => { reads.push("getCarrierDBFromSQLite"); return CARRIER; },
 		computeDriverQueues: () => ({}),
 		withExpenseWindows: (rows) => rows.map((r) => ({ ...r })),
 		stripSigningEvidence: (rows) => rows,
+		// Which stored files exist, from their bytes (its own subject is
+		// scripts/test-stored-file-serving.js).
+		storedFileKind: new Function("imageLimits", `${liftFn("storedFileKind")}\nreturn storedFileKind;`)(require(path.join(ROOT, "lib", "image-size"))),
 		ONBOARDING_DOCS: [],
 	};
 	return { deps, reads };
@@ -348,6 +376,237 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 	r = await call(m2, NAMELESS, " ");
 	ok("MUTANT 2 (blank-name refusal dropped): the §1 blank-name assertion flips",
 		r.status === 200 && r.body.invoices.map((i) => i.id).join() === "3", brief(r));
+
+	// =========================================================================
+	console.log("\n§5  the driver's own directory row, stored under another spacing");
+	// =========================================================================
+	// The page finds its drivers_directory row (profile picture, shared documents)
+	// through findDirectoryRowForDriver(): the row equal to the name case aside,
+	// else the one normalizeDriverName() matches. Only the directory reads go to a
+	// real SQLite here, so the lookup's SQL runs as written; every other read
+	// keeps the canned fixture.
+	let Database;
+	try { Database = require("better-sqlite3"); } catch (e) { fatal(`better-sqlite3 did not load (${e.message}); run under the .nvmrc Node`); }
+	function routeWithDirectory(rows, lookupSrc = DIRECTORY_LOOKUP_SRC) {
+		const dir = new Database(":memory:");
+		dir.exec("CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT NOT NULL UNIQUE COLLATE NOCASE, profile_picture_url TEXT DEFAULT '')");
+		const ins = dir.prepare("INSERT INTO drivers_directory (id, driver_name, profile_picture_url) VALUES (?, ?, ?)");
+		for (const [id, name, pic] of rows) ins.run(id, name, pic);
+		const { deps, reads } = makeDeps();
+		const canned = deps.db;
+		deps.db = { prepare(sql) { if (/\bdrivers_directory\b/.test(sql)) { reads.push(sql); return dir.prepare(sql); } return canned.prepare(sql); } };
+		deps.findDirectoryRowForDriver = directoryLookup(deps.db, lookupSrc);
+		const names = Object.keys(deps);
+		let captured = null;
+		const app = { get: (p, ...chain) => { captured = { path: p, chain }; } };
+		new Function("app", ...names, `${ROUTE_SRC};`)(app, ...names.map((n) => deps[n]));
+		return { chain: captured.chain, reads };
+	}
+	const SK_PIC = "/uploads/profile-pictures/sk.png";
+	const found = (res, id, pic) => res.status === 200 && res.body.driverDirectoryId === id && res.body.profilePictureUrl === pic;
+	for (const [label, stored] of [["a doubled space", "Shorn  King"], ["edge spaces", " Shorn King "]]) {
+		r = await call(routeWithDirectory([[11, "Deshorn King", ""], [12, stored, SK_PIC]]), SK, "Shorn King");
+		ok(`Driver, own page, their directory row stored with ${label}: found (its id and profile picture)`,
+			found(r, 12, SK_PIC), brief(r));
+	}
+	r = await call(routeWithDirectory([[12, "Shorn  King", "/a.png"], [13, "SHORN KING", "/b.png"]]), SK, "Shorn King");
+	ok("the row equal to the name case aside is still preferred to a spacing variant", found(r, 13, "/b.png"), brief(r));
+	r = await call(routeWithDirectory([[11, "Deshorn King", "/d.png"]]), SK, "Shorn King");
+	ok("no row of their own: no directory id and no picture (Deshorn King is another driver)", found(r, 0, ""), brief(r));
+	const routeCode = ROUTE_SRC.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+	ok("the route resolves its directory row through findDirectoryRowForDriver(), with no LOWER() lookup of its own",
+		routeCode.includes("findDirectoryRowForDriver(driverName)") && !/FROM drivers_directory WHERE LOWER\(/.test(routeCode));
+
+	// The one mutant for this lookup: findDirectoryRowForDriver() back to LOWER()
+	// equality alone. The directory sync shares it; scripts/test-directory-spacing-match.js
+	// catches the same mutant there.
+	const LOWER_ONLY = mutate(DIRECTORY_LOOKUP_SRC,
+		"const hit = findDriverNameClashes(trimmed, { users: false })[0];", "const hit = null;");
+	r = await call(routeWithDirectory([[11, "Deshorn King", ""], [12, "Shorn  King", SK_PIC]], LOWER_ONLY), SK, "Shorn King");
+	ok("MUTANT 3 (the directory lookup back to LOWER() equality): the §5 doubled-space assertion flips",
+		found(r, 0, ""), brief(r));
+
+	// =========================================================================
+	console.log("\n§6  the driver's truck, and the files the page lists, under another spacing");
+	// =========================================================================
+	// The page finds the driver's truck through findTruckForDriver() (the truck
+	// naming them case aside, else the one normalizeDriverName() matches), and
+	// the routes the driver app then calls for what the page lists — the truck
+	// photo, a truck document, a shared document, the profile-picture upload —
+	// must answer for the same driver. Trucks, assignments, legal documents and
+	// the directory are a real SQLite here; each route is the shipped handler.
+	function makeFilesDb() {
+		const fdb = new Database(":memory:");
+		fdb.exec(`CREATE TABLE trucks (id INTEGER PRIMARY KEY AUTOINCREMENT, unit_number TEXT UNIQUE, make TEXT DEFAULT '', model TEXT DEFAULT '',
+			year INTEGER DEFAULT 0, vin TEXT DEFAULT '', license_plate TEXT DEFAULT '', status TEXT DEFAULT 'Active', assigned_driver TEXT DEFAULT '', photo TEXT DEFAULT '')`);
+		fdb.exec("CREATE TABLE truck_assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER, driver_name TEXT, start_date TEXT, end_date TEXT DEFAULT '')");
+		fdb.exec(`CREATE TABLE legal_documents (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER DEFAULT 0, driver_id INTEGER DEFAULT 0, investor_id INTEGER DEFAULT 0,
+			visible_to_driver INTEGER DEFAULT 0, doc_type TEXT DEFAULT '', file_name TEXT DEFAULT '', file_url TEXT DEFAULT '', notes TEXT DEFAULT '',
+			uploaded_by TEXT DEFAULT '', uploaded_at TEXT DEFAULT '2026-09-01')`);
+		fdb.exec("CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT NOT NULL UNIQUE COLLATE NOCASE, profile_picture_url TEXT DEFAULT '')");
+		const truck = fdb.prepare("INSERT INTO trucks (id, unit_number, assigned_driver, photo) VALUES (?, ?, ?, ?)");
+		truck.run(7, "33", "Deshorn King", "");
+		truck.run(8, "101", "Shorn  King", "P101"); // Shorn King's truck, stored with a doubled space
+		fdb.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (8, 'Shorn  King', '2026-09-01')").run();
+		fdb.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (7, 'Deshorn King', '2026-09-01')").run();
+		// file_url "" keeps every admitted request off the disk: it answers 404
+		// "File missing" after the ownership check, a refusal 403 before it.
+		const doc = fdb.prepare("INSERT INTO legal_documents (id, truck_id, driver_id, visible_to_driver, file_name) VALUES (?, ?, ?, 1, 'x.pdf')");
+		doc.run(50, 8, 0); doc.run(51, 7, 0); doc.run(60, 0, 12); doc.run(61, 0, 11);
+		fdb.prepare("INSERT INTO drivers_directory (id, driver_name) VALUES (11, 'Deshorn King'), (12, 'Shorn  King')").run();
+		// The two drivers' accounts (DK, SK). Nothing else holds either name.
+		fdb.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, driver_name TEXT)");
+		fdb.prepare("INSERT INTO users (id, username, driver_name) VALUES (2, 'LogisX-1001', 'Deshorn King'), (3, 'LogisX-1002', 'Shorn King')").run();
+		return fdb;
+	}
+	const FILES_TABLES = /\b(trucks|truck_assignments|legal_documents|drivers_directory)\b/;
+	function pageOverFiles(fdb, truckSrc = TRUCK_LOOKUP_SRC) {
+		const { deps, reads } = makeDeps();
+		const canned = deps.db;
+		deps.db = { prepare(sql) { if (FILES_TABLES.test(sql)) { reads.push(sql); return fdb.prepare(sql); } return canned.prepare(sql); } };
+		deps.findDirectoryRowForDriver = directoryLookup(deps.db);
+		deps.findTruckForDriver = truckLookup(deps.db, truckSrc);
+		const names = Object.keys(deps);
+		let captured = null;
+		const app = { get: (p, ...chain) => { captured = { path: p, chain }; } };
+		new Function("app", ...names, `${ROUTE_SRC};`)(app, ...names.map((n) => deps[n]));
+		return { chain: captured.chain, reads };
+	}
+	// A sibling route, lifted and run with the gate at its mount passed through
+	// (each keeps its own role and ownership checks inside, the subject here).
+	function sibling(verb, routePath, fdb, extra = {}, src = null) {
+		const deps = {
+			db: fdb, requireAuth: (req, res, next) => next(), truckDocViewLimiter: (req, res, next) => next(),
+			normalizeDriverName: helpers.normalizeDriverName, findTruckForDriver: truckLookup(fdb),
+			driverNameHeldByOtherAccount: heldByOtherLookup(fdb),
+			storedFileForServing: (v) => (v ? { contentType: "image/png", body: Buffer.from(String(v)) } : null),
+			storedFileETag: () => '"etag"', ifNoneMatchIncludes: () => false,
+			setUploadServeHeaders: () => {}, fs: { existsSync: () => false }, path, __dirname: ROOT,
+			saveProfilePicture: () => { throw new Error("no file is written in this runner"); },
+			...extra,
+		};
+		const names = Object.keys(deps);
+		let handler = null;
+		const app = { [verb]: (p, ...chain) => { handler = chain[chain.length - 1]; } };
+		new Function("app", ...names, `${src || routeSource(verb, routePath)};`)(app, ...names.map((n) => deps[n]));
+		return async (user, params = {}, body = {}) => {
+			const res = {
+				statusCode: 200, body: undefined,
+				status(c) { this.statusCode = c; return this; },
+				json(b) { this.body = b; return this; },
+				setHeader() {}, end(b) { this.body = b; return this; }, sendFile() { this.body = "<file>"; return this; },
+			};
+			await handler({ method: verb.toUpperCase(), params, body, headers: {}, session: user ? { user: { ...user } } : {} }, res);
+			return { status: res.statusCode, body: res.body };
+		};
+	}
+	const admitted = (x) => x.status === 404 && x.body && x.body.error === "File missing";
+	const said = (x) => `${x.status} ${JSON.stringify(x.body)}`.slice(0, 120);
+	{
+		const fdb = makeFilesDb();
+		r = await call(pageOverFiles(fdb), SK, "Shorn King");
+		ok("GET /api/driver/:driverName: a driver whose truck is stored with a doubled space gets that truck",
+			r.status === 200 && r.body.truck && r.body.truck.id === 8 && r.body.truck.unit_number === "101", brief(r));
+		ok("...and the driver-visible documents of that truck listed",
+			r.status === 200 && r.body.truck && r.body.truckDocuments.map((d) => d.id).join() === "50",
+			`truck ${JSON.stringify(r.body && r.body.truck)}, docs ${JSON.stringify(r.body && r.body.truckDocuments)}`);
+		r = await call(pageOverFiles(fdb), DK, "Deshorn King");
+		ok("...and Deshorn King still gets his own truck", r.status === 200 && r.body.truck && r.body.truck.id === 7, brief(r));
+		fdb.prepare("UPDATE trucks SET assigned_driver = 'SHORN KING' WHERE id = 7").run();
+		r = await call(pageOverFiles(fdb), SK, "Shorn King");
+		ok("the truck naming the driver case aside is still preferred to a spacing variant", r.status === 200 && r.body.truck.id === 7, brief(r));
+	}
+	{
+		const fdb = makeFilesDb();
+		const photo = sibling("get", "/api/driver/me/truck-photo", fdb);
+		let x = await photo(SK);
+		ok("GET /api/driver/me/truck-photo: the same driver gets that truck's photo",
+			x.status === 200 && Buffer.isBuffer(x.body) && x.body.toString() === "P101", said(x));
+		x = await photo(DK);
+		ok("...and Deshorn King, whose truck has none, gets 404", x.status === 404, said(x));
+	}
+	{
+		const fdb = makeFilesDb();
+		const view = sibling("get", "/api/driver/truck-documents/:id/view", fdb);
+		let x = await view(SK, { id: "50" });
+		ok("GET /api/driver/truck-documents/:id/view: the driver on the truck (assignment stored with a doubled space) is admitted", admitted(x), said(x));
+		x = await view(DK, { id: "50" });
+		ok("...another driver is refused 403", x.status === 403, said(x));
+		x = await view(NAMELESS, { id: "50" });
+		ok("...a blank session name is refused 403", x.status === 403, said(x));
+		x = await view(SK, { id: "51" });
+		ok("...and the driver is refused another truck's document", x.status === 403, said(x));
+		fdb.prepare("DELETE FROM truck_assignments").run();
+		x = await view(SK, { id: "50" });
+		ok("...with no assignment row, admitted through the truck's own assigned_driver (doubled space)", admitted(x), said(x));
+	}
+	{
+		const fdb = makeFilesDb();
+		const shared = sibling("get", "/api/driver/shared-documents/:id/download", fdb);
+		let x = await shared(SK, { id: "60" });
+		ok("GET /api/driver/shared-documents/:id/download: the driver whose directory row has a doubled space is admitted", admitted(x), said(x));
+		x = await shared(DK, { id: "60" });
+		ok("...another driver is refused 403", x.status === 403, said(x));
+		x = await shared(SK, { id: "61" });
+		ok("...and the driver is refused another driver's document", x.status === 403, said(x));
+		x = await shared(NAMELESS, { id: "60" });
+		ok("...a blank session name is refused 403", x.status === 403, said(x));
+	}
+	{
+		const fdb = makeFilesDb();
+		const pic = sibling("post", "/api/drivers-directory/:id/profile-picture", fdb);
+		let x = await pic(SK, { id: "12" });
+		ok("POST /api/drivers-directory/:id/profile-picture: the driver may upload to their own row (doubled space) — past the check to 400 fileData required",
+			x.status === 400 && x.body && x.body.error === "fileData required", said(x));
+		x = await pic(SK, { id: "11" });
+		ok("...and is refused another driver's row", x.status === 403, said(x));
+		x = await pic(DK, { id: "12" });
+		ok("...as another driver is refused theirs", x.status === 403, said(x));
+		x = await pic(NAMELESS, { id: "12" });
+		ok("...a blank session name is refused 403", x.status === 403, said(x));
+	}
+	{
+		// A legacy duplicate account whose driver name differs only in spacing.
+		// Row 12 ("Shorn  King") is then that account's row as much as SK's, so
+		// SK's spacing-only match is refused (driverNameHeldByOtherAccount(), the
+		// rule the directory rename and delete apply), while the account whose name
+		// equals the row case aside still uploads to it.
+		const fdb = makeFilesDb();
+		fdb.prepare("INSERT INTO users (id, username, driver_name) VALUES (9, 'LogisX-0999', 'Shorn  King')").run();
+		const LEGACY = { id: 9, role: "Driver", username: "LogisX-0999", driverName: "Shorn  King" };
+		const pic = sibling("post", "/api/drivers-directory/:id/profile-picture", fdb);
+		let x = await pic(SK, { id: "12" });
+		ok("POST /api/drivers-directory/:id/profile-picture: a spacing-only match is refused 403 while another account holds that driver name",
+			x.status === 403, said(x));
+		x = await pic(LEGACY, { id: "12" });
+		ok("...while the account whose name equals the row case aside passes the check (400 fileData required)",
+			x.status === 400 && x.body && x.body.error === "fileData required", said(x));
+		// MUTANT 6: the upload without the other-account check, as before.
+		const noHeld = mutate(routeSource("post", "/api/drivers-directory/:id/profile-picture"),
+			"driverNameHeldByOtherAccount(sessionName, [sessionUser.id])", "false");
+		x = await sibling("post", "/api/drivers-directory/:id/profile-picture", fdb, {}, noHeld)(SK, { id: "12" });
+		ok("MUTANT 6 (the profile-picture upload without the other-account check): the spacing-only match passes again",
+			x.status === 400, said(x));
+	}
+	{
+		// MUTANT 4: findTruckForDriver() back to LOWER() equality alone — the lookup
+		// the page and the photo route made before.
+		const TRUCK_LOWER_ONLY = mutate(TRUCK_LOOKUP_SRC,
+			'return hit ? { id: hit.id, unit_number: hit.unit_number, matchedBy: "normalized" } : null;', "return null;");
+		r = await call(pageOverFiles(makeFilesDb(), TRUCK_LOWER_ONLY), SK, "Shorn King");
+		ok("MUTANT 4 (the truck lookup back to LOWER() equality): the §6 doubled-space truck assertion flips",
+			r.status === 200 && r.body.truck === null, brief(r));
+		// MUTANT 5: the truck-document check comparing trimmed, lowercased names
+		// again, as it did before.
+		const viewSrc = routeSource("get", "/api/driver/truck-documents/:id/view");
+		const oldCompare = mutate(mutate(viewSrc,
+			".some((a) => normalizeDriverName(a.driver_name) === sessionDriver);",
+			'.some((a) => (a.driver_name || "").trim().toLowerCase() === sessionDriver);'),
+			"normalizeDriverName(truck.assigned_driver) !== sessionDriver",
+			'(truck.assigned_driver || "").trim().toLowerCase() !== sessionDriver');
+		const x = await sibling("get", "/api/driver/truck-documents/:id/view", makeFilesDb(), {}, oldCompare)(SK, { id: "50" });
+		ok("MUTANT 5 (the truck-document check back to trim + lowercase): the §6 admission flips to 403", x.status === 403, said(x));
+	}
 
 	console.log(`\n${passed} passed, ${failed} failed`);
 	process.exit(failed ? 1 : 0);

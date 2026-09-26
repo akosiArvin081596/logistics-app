@@ -91,10 +91,11 @@ Two additional gates:
 
 ## Role-based data sanitization
 
-Two scrubbing points where data flows out:
+Where Job Tracking data flows out, and back in:
 
-- `GET /api/data` strips columns whose headers match `/rate|amount|revenue|pay|charge|price|cost/i` when the requester is a Driver.
-- `PUT /api/data/:rowIndex` preserves broker and phone-contact columns by reading them back from the sheet and splicing them into the write payload, so a non-Super-Admin update cannot accidentally clobber broker info.
+- Broker contact columns (headers matching `BROKER_WITHHELD_RE`: "Broker Contact Name", "Phone Number", "Email") are served blank to every role but Super Admin by `sanitizeBrokerColumns()`, on `/api/dashboard`, `GET`/`PUT /api/load/:loadId` and `GET /api/driver/:driverName`. `GET /api/data` serves every column as stored, so it is Super Admin only.
+- `GET /api/driver/:driverName` also drops the columns whose headers match `/rate|amount|revenue|pay|charge|price|cost/i` for every caller but Super Admin (in practice, the Driver reading their own loads).
+- For every caller but a Super Admin, `PUT /api/data/:rowIndex` and `PUT /api/load/:loadId` write each broker contact column back exactly as stored, whatever was sent, and refuse a changed cell starting with `=` (400 `FORMULA_NOT_ALLOWED`).
 
 The pattern is "regex-detect sensitive columns at request time" — not "schema-declared sensitivity." This makes the system tolerant of differently-named columns across sheets but fragile to typos in column headers.
 
@@ -118,8 +119,7 @@ Per-endpoint limiters using `express-rate-limit`, naming pattern `{feature}Limit
 | `publicFormLimiter` | 15 min | 10 | Public driver/investor application submission |
 | `loginLimiter` | 15 min | 20 | Brute-force protection on `/api/auth/login` |
 | `changePasswordLimiter` | 15 min | 5 | Slow password rotation attacks |
-| `driverFilesLimiter` | 15 min | 30 | Enumeration protection on `/api/trucks/:id/driver-files` |
-| `truckDocViewLimiter` | 15 min | 30 | Same for `/api/driver/truck-documents/:id/view` |
+| `truckDocViewLimiter` | 15 min | 30 | Enumeration protection on `/api/driver/truck-documents/:id/view` |
 | `trackPublicLimiter` | 15 min | 60 | Higher cap because customers refresh the public tracker often |
 | `expenseOcrLimiter` | 15 min | 20 | Caps Gemini API spend on receipt OCR |
 

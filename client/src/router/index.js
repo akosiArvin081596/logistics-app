@@ -226,13 +226,15 @@ const router = createRouter({
 })
 
 router.beforeEach(async (to) => {
-  // Sign-out, and a sign-in as a different person, load a fresh page
-  // (stores/auth.js). Until it arrives this page opens no signed-in screen, so
-  // LoginView's own navigation to the new user's home waits for the fresh page.
-  // Public pages (the login screen) stay reachable.
-  if (isLeavingPage() && !to.meta.public) return false
-
   const auth = useAuthStore()
+
+  // Sign-out, and a sign-in as a different person, load a fresh page
+  // (stores/auth.js). This page opens no signed-in screen again: LoginView's own
+  // navigation to the new user's home waits for the fresh page, and a page signed
+  // out with no fresh page on the way (no signal, or another tab's sign-out it
+  // could not confirm) goes to the app's own login screen. Public pages stay
+  // reachable.
+  if (isLeavingPage() && !to.meta.public) return auth.isAuthenticated ? false : { name: 'login' }
 
   if (auth.isLoading) {
     await auth.checkSession()
@@ -279,7 +281,8 @@ router.beforeEach(async (to) => {
 //
 // Public pages have nothing to re-decide, except /login, whose whole purpose is
 // getting in: a cookie that was valid all along takes the user to their home
-// screen without another password entry.
+// screen without another password entry. A tab that another tab signed out gets
+// here too, and the guard's first rule sends it to /login.
 onSessionResolved(() => {
   router
     .isReady()
