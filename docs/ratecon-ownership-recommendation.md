@@ -1,5 +1,7 @@
 # `uploads/rate-cons/` ownership — recommendation
 
+> **Superseded 2026-09-26.** The owner decided that Dispatchers get no broker contact data, and a rate-con carries the broker's contact block, so rate-con files and invoice drafting are now **Super Admin only**. See `docs/claude/pii-at-rest.md` and the "Decisions recorded" list in `CLAUDE.md`. The reasoning below is kept as the record of the earlier role gate.
+
 **Status:** recommendation only. No code changed. Written 2026-08-11 against `main` @ `c6919cf`.
 **Decision needed from:** the owner. Workstream D3 of the current plan explicitly gates
 implementation on a product decision, and this document is that decision's input.

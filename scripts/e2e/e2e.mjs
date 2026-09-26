@@ -132,7 +132,7 @@ const rows = []
 const meta = { startedAt: new Date().toISOString(), baseUrl: BASE_URL, phase: PHASE, headed: HEADED, ids: {} }
 // Control and bidirectional-override characters (R14 sends some) are written as
 // \uXXXX, so no observed text can reorder or hide a line of the results.
-const visible = (s) => String(s ?? '').replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g,
+const visible = (s) => String(s ?? '').replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g,
   (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`)
 const cell = (s) => visible(s).replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>')
 function writeResults(final = false) {
@@ -1442,9 +1442,9 @@ async function truckSteps() {
       if (mk.status === 200 && mk.json?.id) { target = mk.json.id; created.add(target); meta.ids.r14Truck = target }
       const cases = [
         { id: 'R14a', verb: 'POST', unit: `${R14_UNIT}\u0007A`, label: 'U+0007 (BEL)' },
-        { id: 'R14b', verb: 'POST', unit: `${R14_UNIT}‮B`, label: 'U+202E (right-to-left override)' },
+        { id: 'R14b', verb: 'POST', unit: `${R14_UNIT}\u202EB`, label: 'U+202E (right-to-left override)' },
         { id: 'R14c', verb: 'PUT', unit: `${R14_UNIT}\u0007C`, label: 'U+0007 (BEL)' },
-        { id: 'R14d', verb: 'PUT', unit: `${R14_UNIT}‮D`, label: 'U+202E (right-to-left override)' },
+        { id: 'R14d', verb: 'PUT', unit: `${R14_UNIT}\u202ED`, label: 'U+202E (right-to-left override)' },
       ]
       for (const c of cases) {
         let r; let effect
