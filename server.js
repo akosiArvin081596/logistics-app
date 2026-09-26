@@ -22779,6 +22779,21 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	try {
 		db.transaction(() => {
 			if (name) {
+				// ⚠️ THESE REMOVALS MATCH THE STORED SPELLING, CASE ASIDE, AND NOTHING
+				// WIDER. PUT /api/users/:id's blank-name guard (DRIVER_NAME_IN_USE)
+				// counts rows under another spelling of the name too (a doubled or
+				// edge space); these DELETEs do not, and for a removal that is the
+				// safe direction. userDeleteLockBlockers() judges the expense rows by
+				// this same match, so every expense removed here was judged, and the
+				// other tables carry no period. A row under another spelling is
+				// neither judged nor removed: it stays in every month it was counted
+				// in. Widening these would permanently delete receipts and documents
+				// under another spelling, and would need the expense check widened in
+				// step. The cost is that such rows stay behind under a spelling no
+				// account holds, and the counts this route reports do not include
+				// them. The truck is the one leg matched wider: it is cleared, not
+				// deleted (findTruckForDriverAccount()). See
+				// docs/claude/user-routes-guards.md.
 				removed.expenses = db.prepare("DELETE FROM expenses WHERE LOWER(driver) = ?").run(name).changes;
 				removed.messages = db.prepare(`DELETE FROM messages WHERE LOWER("from") = ? OR LOWER("to") = ?`).run(name, name).changes;
 				removed.notifications = db.prepare("DELETE FROM notifications WHERE LOWER(driver_name) = ?").run(name).changes;
