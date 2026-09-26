@@ -102,7 +102,7 @@ function mutate(src, from, to) {
 // executor's "no such table" legs, which it skips.
 const FUNCTIONS = ["normalizeDriverName", "findDriverNameClashes", "findDriverNameClash", "driverNameHeldByOtherAccount", "driverNameHeldByOtherSpelling", "canonicalDriverName",
 	"findDirectoryRowForDriver", "findTruckForDriver", "syncDriverToCarrierSheet", "assignDriverToTruck",
-	"driverRenameWhereSql", "driverRenameWhereArgs", "driverRenameDirectoryRowId", "driverRenameNewValue",
+	"driverRenameWhereSql", "driverRenameWhereArgs", "driverRenameWidens", "driverRenameSpellings", "driverRenameDirectoryRowId", "driverRenameNewValue",
 	"replaceNameOnWordBoundary", "applyDriverRenameSqlite"];
 const FN_SRC = Object.fromEntries(FUNCTIONS.map((n) => [n, liftFunction(n)]));
 function liftConst(head, close) {
@@ -457,7 +457,8 @@ section("§5 the mutant — it must be caught");
 {
 	// The cascade renaming a spacing-variant row another account still holds.
 	const NO_HOLD_CHECK = {
-		driverRenameDirectoryRowId: mutate(FN_SRC.driverRenameDirectoryRowId, "\t\tif (heldElsewhere) return null;\n", ""),
+		driverRenameDirectoryRowId: mutate(FN_SRC.driverRenameDirectoryRowId,
+			'if (row.matchedBy === "normalized" && !driverRenameWidens(nameLower, opts)) return null;', "if (false) return null;"),
 	};
 	const caught = shadowRenameBattery(NO_HOLD_CHECK).filter((r) => !r.ok);
 	ok(caught.length > 0, "M4 the rename cascade without the remaining-account check is caught");
