@@ -25,11 +25,12 @@ What it covers today, in five sections (`ONLY` picks them):
   the sheet reader (`GET /api/data`) is Super Admin only.
 - **Maintenance notice (M1).** A popup dismissal in one tab belongs to the person who dismissed it. Local only, on a
   server booted with the notice on.
-- **Money path (P1, E1, N1, F1).** Clearing a fixed-pay driver's daily rate in the Drivers Database stores 0 and
+- **Money path (P1, E1, N1, N1b, F1).** Clearing a fixed-pay driver's daily rate in the Drivers Database stores 0 and
   leaves the other pay type's value alone (P1, local and staging). A driver's new expense carries the unit and owner of
   their truck when the truck stores a spacing variant of their name (E1). A rename on the Users page also moves the
-  rows stored under a spacing variant of the old name (N1). An Active Loads edit writes only the cell that changed,
-  so formula cells survive (F1). E1 and N1 are planted and local only; F1 is local only.
+  rows stored under a spacing variant of the old name (N1), and re-spelling an account onto the spacing its own
+  directory row carries saves rather than being refused as a merge (N1b). An Active Loads edit writes only the cell
+  that changed, so formula cells survive (F1). E1, N1 and N1b are planted and local only; F1 is local only.
 
 Every "Expected" column states the behaviour **after** the fix. A run on a build without it (a BEFORE baseline) is
 expected to FAIL exactly the fix rows.
@@ -223,7 +224,7 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
 
 - **No `DB_PATH`:** nothing can be planted in a remote database. Steps 10a–e, 11b–f, R3a–b, R15 and R16 SKIP, and so
   does R8 when the creds file has no `investor` entry. M1 SKIPs too (local only: the notice is off on staging), and so
-  do E1, N1 and F1. P1 runs on a real driver (see the money-path section). Everything else runs unchanged, and the
+  do E1, N1, N1b and F1. P1 runs on a real driver (see the money-path section). Everything else runs unchanged, and the
   script discovers every id itself.
 - **Expected differences:** staging's environment refresh strips identity documents. So 11a (the Kit's CDL) FAILs there,
   R10 scores only its truck-photo half, and on a build that still has the driver-files route R12 can only be
@@ -244,10 +245,10 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
 | `BASE_URL` | Required by `e2e.mjs`. Refuses `app.logisx.com` (production). |
 | `PHASE` | `before` or `after`. Only names the output; the "Expected" column is always the after-the-fix behaviour. |
 | `OUT_TAG` | Writes `shots/<tag>/` and `results-<tag>.md` instead of `<PHASE>`, so a rehearsal cannot overwrite a baseline. |
-| `ONLY` | A comma-separated list of sections: `trucks` (1–12, R1–R16), `signout` (S1–S7), `dispatcher` (D1–D3), `maintenance` (M1), `moneypath` (P1, E1, N1, F1). Unset: all five, in that order, then step 12's clean-up — more sign-ins than one limiter window holds (see above). |
-| `STEPS` | Only these sign-out or money-path cases, e.g. `STEPS=S5a,S7` (each has its own browser context) or `STEPS=P1,F1` (`P1` selects P1a and P1b). The other sections ignore it. |
+| `ONLY` | A comma-separated list of sections: `trucks` (1–12, R1–R16), `signout` (S1–S7), `dispatcher` (D1–D3), `maintenance` (M1), `moneypath` (P1, E1, N1, N1b, F1). Unset: all five, in that order, then step 12's clean-up — more sign-ins than one limiter window holds (see above). |
+| `STEPS` | Only these sign-out or money-path cases, e.g. `STEPS=S5a,S7` (each has its own browser context) or `STEPS=P1,F1` (`P1` selects P1a and P1b; `N1` selects N1 and N1b). The other sections ignore it. |
 | `HEADED=1` | A visible browser. |
-| `DB_PATH` | The copy the server runs on (inside the work dir). It is used **only** to plant stored values for steps 10, 11b–f, R3 and R15, to stage and clean up R16, to plant and read back E1 and N1, and to plant P1's own driver. Unset: those rows SKIP, and P1 uses a real driver. |
+| `DB_PATH` | The copy the server runs on (inside the work dir). It is used **only** to plant stored values for steps 10, 11b–f, R3 and R15, to stage and clean up R16, to plant and read back E1, N1 and N1b, and to plant P1's own driver. Unset: those rows SKIP, and P1 uses a real driver. |
 | `CREDS_FILE` | The logins. Default: `<work dir>/creds.json`. |
 | `E2E_WORK_DIR` | The work dir. Default: `$TMPDIR/logisx-e2e`. It must be private, outside every checkout, and contain none. |
 | `SOURCE_DB` | `setup-db.cjs`'s source, opened read-only. Default: the main checkout's `app.db`. |
@@ -471,11 +472,11 @@ email count is the sharper signal. Everything here is read-only, and safe on sta
 | M1a | In **one tab**: Investor A signs in, sees the popup, closes it and signs out with the sidebar; Investor B signs in on the same tab. | B sees the popup: a dismissal belongs to the person who dismissed it. |
 | M1b | B closes it (if shown) and signs out; A signs back in on that tab. | A does not see it again. `PASS (vacuous)` when B did not see it either: the tab's one dismissal then hides it from everyone. |
 
-## The money-path section (P1, E1, N1, F1)
+## The money-path section (P1, E1, N1, N1b, F1)
 
-`ONLY=moneypath` (`STEPS` picks cases). The Super Admin signs in once, and P1, N1 and F1 share that page; E1 signs the
-driver in. With `DB_PATH`, the run first proves the server reads that file (a throwaway directory row must appear
-in the Drivers Database list; `MP*` FAIL otherwise, and E1 and N1 SKIP). Names stay in memory: the results name rows
+`ONLY=moneypath` (`STEPS` picks cases). The Super Admin signs in once, and P1, N1, N1b and F1 share that page; E1 signs
+the driver in. With `DB_PATH`, the run first proves the server reads that file (a throwaway directory row must appear
+in the Drivers Database list; `MP*` FAIL otherwise, and E1, N1 and N1b SKIP). Names stay in memory: the results name rows
 by id, and a spacing variant is described, never printed. `MPc` reports every restore and delete.
 
 | Step | How it is shown | Expected (AFTER) |
@@ -484,6 +485,7 @@ by id, and a spacing variant is described, never printed. `MPc` reports every re
 | P1b | **UI.** The same driver: the rate set again and saved, then typed as 0 and saved. | The same |
 | E1 | **Planted, local only.** The driver's truck stores a spacing variant of their name (the space doubled). The driver files an expense for one of their own loads whose receipt window is open, from their own page as the app does, with no receipt. The stored expense is read from `DB_PATH`. | The expense carries that truck's unit and owner |
 | N1 | **Planted, local only.** A throwaway Driver account (`qa-test-n1-<timestamp> driver`) beside a directory row spelled `QA-TEST-N1-<timestamp> Driver`, with an expense, a truck assignment and a Draft invoice stored under the account's name with its space doubled. The run first confirms Job Tracking has no row for it. **UI:** Users page, Edit, Linked Driver set to the directory spelling, Save. | Every planted row carries the new name: the expense and the assignment as spelled, the invoice lowercase (that column's own convention) |
+| N1b | **Planted, local only.** A throwaway Driver account (`QA-TEST-N1B-<timestamp> Driver`) beside its own directory row, planted as the same name with its space doubled (the app adds no second directory row for it), with one expense under each spelling. The run first confirms Job Tracking has no row for it. **UI:** Users page, Edit, Linked Driver set to the directory spelling (offered as stored), Save. | Saved, not 409 `DRIVER_RENAME_IS_MERGE`: the account and both expenses carry the directory spelling, and that directory row is still the only one for the name, unchanged |
 | F1 | **Local only.** A load from the Super Admin's Active Loads, its sheet row read with the service account (formulas as formulas). **UI:** the load opened from the dashboard, Edit, Details changed (a `QA-F1-<timestamp>` suffix), Save changes. The row is read again. | Only the Details cell changed; every formula cell of the row is still a formula |
 
 **Why P1 sets the rate first.** Every month but the current one may be finalized, and the month-end lock refuses a
@@ -504,6 +506,12 @@ restored at the end.
 name the directory already holds is refused as a merge. So the one rename this page can make is a re-spelling of the
 account's own directory name. The throwaway account, its directory row and every planted row are deleted at the end,
 by id, and the run then counts what is left under the throwaway name (it expects none).
+
+**What N1b adds.** The other re-spelling the page can make is by spacing: the list trims only the ends of a name, so a
+directory row stored with its space doubled is offered as stored. Such a row, and the rows under its spelling, are the
+account's own, and a build without the fix refuses the re-spelling as a merge (409 `DRIVER_RENAME_IS_MERGE`, its
+`mergeTargets` naming that directory row and the expense). Its toast then reads "Cannot rename" between two names that
+render identically. Any other refusal (a 409 with another code) is INFO. The same clean-up and count as N1 follow.
 
 **F1's formula cell.** A row that already has a formula keeps it as the test's subject. Otherwise `=1+1` is written
 into an empty column that no feature reads (never a money, status, date, contact, address or driver column; a column

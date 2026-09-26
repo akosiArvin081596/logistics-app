@@ -40,6 +40,8 @@
 //      assigned_driver holds a spacing variant of their name (planted, local)
 //   N1 a rename on the Users page also moves the rows stored under a spacing
 //      variant of the old name (planted, local)
+//   N1b re-spelling an account onto its own directory row's spacing (the space
+//      doubled) on the Users page saves; it is not refused as a merge (planted, local)
 //   F1 an Active Loads edit writes only the changed cell, so formula cells survive
 //      (local only: it edits the local non-production sheet, then restores it)
 //
@@ -49,8 +51,8 @@
 //   HEADED=1    visible browser, slowMo 350 ms, ~1400x900 window, captions pause
 //   DB_PATH     the server's database copy (inside the work dir), ONLY used to plant
 //               stored values for the serve-side cases (steps 10, 11b-f, R3, R15),
-//               to stage and clean up R16, and to plant and read back E1 and N1
-//               (and P1's own driver). Unset -> those cases are SKIPPED (P1 then
+//               to stage and clean up R16, and to plant and read back E1, N1 and
+//               N1b (and P1's own driver). Unset -> those cases are SKIPPED (P1 then
 //               uses a real driver, as on staging).
 //   CREDS_FILE  logins JSON (default: <work dir>/creds.json, written by setup-db.cjs)
 //   E2E_WORK_DIR  where every output goes (default: $TMPDIR/logisx-e2e; see paths.cjs)
@@ -64,11 +66,12 @@
 //   DRIVER_VIEWPORT            driver window size, default 430x900
 //   ONLY        a comma-separated list of sections: trucks (1-12, R1-R16), signout
 //               (S1-S7), dispatcher (D1-D3), maintenance (M1), moneypath (P1, E1,
-//               N1, F1). Unset = all five, in that order. ⚠️ All five sign in more
+//               N1, N1b, F1). Unset = all five, in that order. ⚠️ All five sign in more
 //               often than the login limiter allows one server process (see
 //               README), so split a full run.
 //   STEPS       only these cases of the sign-out and money-path sections, e.g.
-//               STEPS=S5a,S7 or STEPS=P1,F1
+//               STEPS=S5a,S7 or STEPS=P1,F1 (P1 selects P1a and P1b; N1 selects N1
+//               and N1b)
 //   S3_LATENCY_MS, S3_KBPS     the CDP throttle of S3, S6 and S7 (default +2500 ms per
 //               request, 24 KB/s)
 //
@@ -162,7 +165,7 @@ function writeResults(final = false) {
     runs('signout') && 'sign-out / sign-in (S1-S7)',
     runs('dispatcher') && 'Dispatcher data (D1-D3)',
     runs('maintenance') && 'maintenance notice (M1)',
-    runs('moneypath') && 'money path (P1, E1, N1, F1)',
+    runs('moneypath') && 'money path (P1, E1, N1, N1b, F1)',
   ].filter(Boolean).join(' + ')
   const lines = [
     `# ${title} — ${PHASE.toUpperCase()}`,
@@ -3369,6 +3372,8 @@ async function maintenanceSection() {
 //      whose assigned_driver is a spacing variant of the driver's name.
 //   N1 (planted, local) a rename on the Users page also moves the rows stored under a
 //      spacing variant of the old name.
+//   N1b (planted, local) re-spelling an account onto its own directory row's spacing
+//      saves (no 409 DRIVER_RENAME_IS_MERGE), and moves its rows onto that spelling.
 //   F1 (local only) an Active Loads edit writes only the cell that changed.
 // Real names stay in memory: the results name rows by id, and a spacing variant is
 // described, never printed.
@@ -3401,7 +3406,7 @@ async function proveMoneyPathDb(page) {
     }
   } catch (e) { reason = e.message }
   if (!reason) return true
-  record({ step: 'MP*', title: 'DB_PATH sanity check', expected: 'The server reads DB_PATH', observed: `${reason} — DB_PATH is not this server's DATABASE_PATH; E1 and N1 are skipped, P1 uses a real driver`, verdict: 'FAIL', shot: '' })
+  record({ step: 'MP*', title: 'DB_PATH sanity check', expected: 'The server reads DB_PATH', observed: `${reason} — DB_PATH is not this server's DATABASE_PATH; E1, N1 and N1b are skipped, P1 uses a real driver`, verdict: 'FAIL', shot: '' })
   try { db.close() } catch { /* ignore */ }
   db = null
   return false
@@ -3756,6 +3761,122 @@ async function renameSpacingCase(page) {
   record({ step: 'N1', title, expected, observed, verdict: v, shot: s })
 }
 
+// ---- N1b: re-spelling an account onto its OWN directory row's spacing is a rename, not
+// a merge. Local, planted. The Users page offers the directory's names trimmed at the
+// edges only, so a directory row stored with its internal space doubled is offered as
+// stored. The throwaway account "QA-TEST-N1B-<stamp> Driver" is created beside a
+// directory row planted as the same name with its space doubled (the app adds no second
+// directory row for a name that differs only in spacing), with one expense planted
+// under each spelling (this month, so no month-end lock applies). Linking the account
+// to the directory spelling must save, not answer 409 DRIVER_RENAME_IS_MERGE: that
+// directory row, and the expense under its spelling, are the driver's own rows.
+async function renameOntoOwnDirectorySpelling(page) {
+  const title = 'Users page → Edit a throwaway Driver account → Linked Driver = its OWN directory row, stored with the space doubled (planted) → Save, with an expense planted under each spelling'
+  const expected = 'Saved (not 409 DRIVER_RENAME_IS_MERGE): the account carries the directory spelling; that directory row is still the only one for the name, unchanged; both expenses carry the directory spelling'
+  if (!db) return record({ step: 'N1b', title, expected, observed: skipWhy(), verdict: 'SKIP', shot: '' })
+  const base = `QA-TEST-N1B-${stamp}`
+  const OLD = `${base} Driver`
+  const DIR = spacingVariant(OLD)
+  const username = base.toLowerCase()
+  const dirRows = () => db.prepare('SELECT id, driver_name FROM drivers_directory WHERE LOWER(driver_name) LIKE ?').all(`${base.toLowerCase()}%`)
+  const spelling = (x) => (x === DIR ? 'the directory spelling' : x === OLD ? 'the account\'s old spelling' : x == null ? '(row missing)' : 'another value')
+  let observed = ''; let v = 'FAIL'; let s = ''
+  const planted = {}
+  try {
+    const dirId = db.prepare("INSERT INTO drivers_directory (driver_name, status) VALUES (?, 'active')").run(DIR).lastInsertRowid
+    noteCreated('drivers_directory', dirId)
+    const uAdd = await api(page, 'POST', '/api/users', { username, password: `qa-${Math.random().toString(36).slice(2)}-${Date.now()}`, role: 'Driver', driverName: OLD })
+    const acct = db.prepare('SELECT id, driver_name FROM users WHERE username = ?').get(username)
+    if (acct) noteCreated('users', acct.id)
+    const extra = dirRows().filter((r) => r.id !== Number(dirId))
+    for (const r of extra) noteCreated('drivers_directory', r.id)
+    if (uAdd.status !== 200 || !acct) throw new Error(`could not create the throwaway driver: users POST → ${uAdd.status} ${String(uAdd.json?.error || '').slice(0, 120)}`)
+    if (acct.driver_name !== OLD) throw new Error('the account was not stored under the spelling it was created with')
+    if (extra.length) throw new Error(`creating the account added ${extra.length} directory row(s) beside the planted one`)
+    meta.ids.n1bUser = acct.id
+    // Job Tracking must hold no row for it: the route refuses a rename otherwise.
+    const sheet = await page.evaluate(async (names) => {
+      const norm = (x) => String(x ?? '').trim().toLowerCase().replace(/\s+/g, ' ')
+      const res = await fetch('/api/data?sheet=Job%20Tracking', { credentials: 'same-origin', cache: 'no-store' })
+      const j = await res.json().catch(() => null)
+      const col = (j?.headers || []).find((h) => /^driver$/i.test(String(h || '').trim())) || (j?.headers || []).find((h) => /driver/i.test(String(h || '')))
+      return { status: res.status, rows: (j?.data || []).length, mine: (j?.data || []).filter((r) => names.includes(norm(r?.[col]))).length }
+    }, [normName(OLD)])
+    if (sheet.status !== 200) throw new Error(`Job Tracking could not be read to confirm it holds no row for the driver (${sheet.status})`)
+    if (sheet.mine) throw new Error(`Job Tracking holds ${sheet.mine} row(s) for the throwaway driver`)
+    const nowIso = new Date().toISOString()
+    const addExpense = (name) => db.prepare("INSERT INTO expenses (timestamp, driver, load_id, type, amount, description, date) VALUES (?, ?, 'QA-TEST-N1B', 'Other', 0.01, ?, ?)")
+      .run(nowIso, name, base, dayCT()).lastInsertRowid
+    planted.expenseOld = addExpense(OLD)
+    noteCreated('expenses', planted.expenseOld)
+    planted.expenseDir = addExpense(DIR)
+    noteCreated('expenses', planted.expenseDir)
+    meta.ids.n1bRows = `drivers_directory#${dirId}/expenses#${planted.expenseOld}+${planted.expenseDir}`
+    // The re-spelling, through the Users page.
+    await page.goto(`${BASE_URL}/users`)
+    await page.locator('table.user-table').waitFor({ state: 'visible', timeout: 30000 })
+    const sizes = page.locator('select.page-size-select')
+    if (await sizes.count()) {
+      const opts = await sizes.first().locator('option').evaluateAll((os) => os.map((o) => Number(o.value)).filter(Number.isFinite))
+      if (opts.length) await sizes.first().selectOption(String(Math.max(...opts)))
+    }
+    const row = page.locator('table.user-table tbody tr', { has: page.locator('td.mono', { hasText: exactText(username) }) }).first()
+    for (let i = 0; i < 20 && !(await row.isVisible()); i++) {
+      const next = page.locator('button', { hasText: '›' }).first()
+      if (!(await next.count()) || await next.isDisabled()) break
+      await next.click()
+      await page.waitForTimeout(200)
+    }
+    await row.scrollIntoViewIfNeeded()
+    await row.locator('button.btn-edit').click()
+    const modal = page.locator('.confirm-dialog.edit-dialog')
+    await modal.waitFor({ state: 'visible', timeout: 15000 })
+    const select = field(modal, 'Linked Driver')
+    const offered = await select.locator('option').evaluateAll((os, want) => os.filter((o) => o.value === want).length, DIR)
+    if (offered !== 1) throw new Error(`the Linked Driver list offers the directory spelling ${offered} time(s)`)
+    await select.selectOption({ value: DIR })
+    await caption(page, `Step N1b — the throwaway driver (user #${acct.id}): Linked Driver set to its own directory row, whose name has the space doubled (${meta.ids.n1bRows})`)
+    const [resp] = await Promise.all([
+      page.waitForResponse((r) => pathOf(r.url()) === `/api/users/${acct.id}` && r.request().method() === 'PUT', { timeout: 60000 }),
+      modal.locator('.confirm-actions button.btn-primary').click(),
+    ])
+    let rb = null
+    try { rb = await resp.json() } catch { /* not json */ }
+    const toast = await toastText(page, 4000)
+    await page.waitForTimeout(800)
+    const now = {
+      account: db.prepare('SELECT driver_name FROM users WHERE id = ?').get(acct.id)?.driver_name,
+      expenseOld: db.prepare('SELECT driver FROM expenses WHERE id = ?').get(planted.expenseOld)?.driver,
+      expenseDir: db.prepare('SELECT driver FROM expenses WHERE id = ?').get(planted.expenseDir)?.driver,
+      dir: dirRows(),
+    }
+    const dirOk = now.dir.length === 1 && now.dir[0].id === Number(dirId) && now.dir[0].driver_name === DIR
+    const state = `the account: ${spelling(now.account)}; expense #${planted.expenseOld} (was the old spelling): ${spelling(now.expenseOld)}; expense #${planted.expenseDir} (was the directory spelling): ${spelling(now.expenseDir)}; ` +
+      `directory rows for the name: ${now.dir.length}${dirOk ? ` (#${dirId}, spelling unchanged)` : ` (${now.dir.map((r) => `#${r.id} ${spelling(r.driver_name)}`).join(', ')})`}`
+    if (resp.status() !== 200) {
+      // The refusal this case pins is the merge; another 409 is the environment's.
+      v = resp.status() === 409 && rb?.code !== 'DRIVER_RENAME_IS_MERGE' ? 'INFO' : 'FAIL'
+      observed = `PUT /api/users/${acct.id} → ${resp.status()} ${rb?.code || ''}${rb?.mergeTargets ? ` (mergeTargets ${JSON.stringify(rb.mergeTargets)})` : ''}; toast "${toast.slice(0, 160)}"; ${state}`
+    } else {
+      v = verdict(now.account === DIR && now.expenseOld === DIR && now.expenseDir === DIR && dirOk)
+      observed = `sheet check: ${sheet.rows} Job Tracking rows, 0 for this driver; the save → 200; toast "${toast.slice(0, 80)}"; ${state}`
+    }
+    await row.scrollIntoViewIfNeeded().catch(() => {}) // the re-spelled account's row, after the list reloads
+    await caption(page, `Step N1b — ${v}: ${observed}`)
+    s = await shot(page, 'n1b-users-respell-own-directory-row')
+  } catch (e) {
+    observed = `error: ${e.message}`
+    s = await shot(page, 'n1b-error')
+  } finally {
+    try { mpNotes.push(...removeCreated().map((n) => `N1b ${n}`)) } catch (e) { mpNotes.push(`N1b clean-up error: ${e.message}`) }
+    const left = ['drivers_directory:driver_name', 'expenses:driver', 'truck_assignments:driver_name', 'invoices:driver', 'users:driver_name', 'users:username']
+      .map((tc) => { const [t, c] = tc.split(':'); return [tc, db.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE LOWER(${c}) LIKE ?`).get(`${base.toLowerCase()}%`).n] })
+      .filter(([, n]) => n)
+    mpNotes.push(left.length ? `N1b LEFT BEHIND: ${left.map(([tc, n]) => `${tc}=${n}`).join(', ')}` : 'N1b no throwaway row left')
+  }
+  record({ step: 'N1b', title, expected, observed, verdict: v, shot: s })
+}
+
 // ---- F1: an Active Loads edit writes only the changed cell. Local only: it edits a
 // row of the LOCAL non-production sheet, read and restored with the service
 // account (valueRenderOption FORMULA). A row with no formula cell gets one, =1+1,
@@ -3912,7 +4033,7 @@ async function moneyPathSection() {
   if (!db) db = openDb()
   const { ctx, page } = await freshPage(ADMIN_VP)
   try {
-    const want = ['P1a', 'E1', 'N1', 'F1'].filter((x) => wantMp(x) || (x === 'P1a' && wantMp('P1b'))).map((x) => x.replace('P1a', 'P1'))
+    const want = ['P1a', 'E1', 'N1', 'N1b', 'F1'].filter((x) => wantMp(x) || (x === 'P1a' && wantMp('P1b'))).map((x) => x.replace('P1a', 'P1'))
     const adminNeeded = want.some((x) => x !== 'E1')
     if (adminNeeded || db) {
       await login(page, 'Money path — Super Admin', CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
@@ -3923,6 +4044,7 @@ async function moneyPathSection() {
     }
     if (want.includes('E1')) await expenseStampCase()
     if (want.includes('N1')) await renameSpacingCase(page)
+    if (want.includes('N1b')) await renameOntoOwnDirectorySpelling(page)
     if (want.includes('F1')) await cellOnlySaveCase(page)
   } finally {
     try { if (db) mpNotes.push(...restoreAll().map((n) => `MP ${n}`)) } catch (e) { mpNotes.push(`restore error: ${e.message}`) }
