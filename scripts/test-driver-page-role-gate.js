@@ -24,6 +24,9 @@
  *      legacy driver page ask for this route, and both admit Driver and Super
  *      Admin only. A new caller fails here and points at the note above the route.
  *   §4 DISCRIMINATION: one mutant per layer, each required to flip.
+ *   §5 the driver's own drivers_directory row is found when it is stored under
+ *      another spacing of the name (findDirectoryRowForDriver()), with directory
+ *      reads on an in-memory SQLite, and the lookup's mutant flips it.
  *
  * Pure: no server, no port, no app.db, no network, no fixtures.
  *
@@ -94,6 +97,11 @@ const helpers = new Function([
 	liftFn("sanitizeBrokerColumns"),
 	"return { normalizeDriverName, findCol, sanitizeBrokerColumns };",
 ].join("\n"))();
+// The route finds the driver's directory row through findDirectoryRowForDriver(),
+// which reads `db`, so it is built over whichever db a route runs on.
+const DIRECTORY_LOOKUP_SRC = [liftFn("normalizeDriverName"), liftFn("findDriverNameClashes"), liftFn("findDirectoryRowForDriver")].join("\n");
+const directoryLookup = (db, src = DIRECTORY_LOOKUP_SRC) =>
+	new Function("db", `"use strict";\n${src}\nreturn findDirectoryRowForDriver;`)(db);
 
 // --- fixtures --------------------------------------------------------------
 const JT = {
@@ -159,6 +167,7 @@ function makeDeps() {
 	};
 	const deps = {
 		requireRole, requireAuth, ...helpers, db,
+		findDirectoryRowForDriver: directoryLookup(db),
 		getJobTrackingCached: async () => { reads.push("getJobTrackingCached"); return JT; },
 		liveJobTrackingView: (jt) => ({ ...jt, headers: [...jt.headers], data: jt.data.map((r) => ({ ...r })) }),
 		getCarrierDBFromSQLite: () => { reads.push("getCarrierDBFromSQLite"); return CARRIER; },
@@ -348,6 +357,55 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 	r = await call(m2, NAMELESS, " ");
 	ok("MUTANT 2 (blank-name refusal dropped): the §1 blank-name assertion flips",
 		r.status === 200 && r.body.invoices.map((i) => i.id).join() === "3", brief(r));
+
+	// =========================================================================
+	console.log("\n§5  the driver's own directory row, stored under another spacing");
+	// =========================================================================
+	// The page finds its drivers_directory row (profile picture, shared documents)
+	// through findDirectoryRowForDriver(): the row equal to the name case aside,
+	// else the one normalizeDriverName() matches. Only the directory reads go to a
+	// real SQLite here, so the lookup's SQL runs as written; every other read
+	// keeps the canned fixture.
+	let Database;
+	try { Database = require("better-sqlite3"); } catch (e) { fatal(`better-sqlite3 did not load (${e.message}); run under the .nvmrc Node`); }
+	function routeWithDirectory(rows, lookupSrc = DIRECTORY_LOOKUP_SRC) {
+		const dir = new Database(":memory:");
+		dir.exec("CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT NOT NULL UNIQUE COLLATE NOCASE, profile_picture_url TEXT DEFAULT '')");
+		const ins = dir.prepare("INSERT INTO drivers_directory (id, driver_name, profile_picture_url) VALUES (?, ?, ?)");
+		for (const [id, name, pic] of rows) ins.run(id, name, pic);
+		const { deps, reads } = makeDeps();
+		const canned = deps.db;
+		deps.db = { prepare(sql) { if (/\bdrivers_directory\b/.test(sql)) { reads.push(sql); return dir.prepare(sql); } return canned.prepare(sql); } };
+		deps.findDirectoryRowForDriver = directoryLookup(deps.db, lookupSrc);
+		const names = Object.keys(deps);
+		let captured = null;
+		const app = { get: (p, ...chain) => { captured = { path: p, chain }; } };
+		new Function("app", ...names, `${ROUTE_SRC};`)(app, ...names.map((n) => deps[n]));
+		return { chain: captured.chain, reads };
+	}
+	const SK_PIC = "/uploads/profile-pictures/sk.png";
+	const found = (res, id, pic) => res.status === 200 && res.body.driverDirectoryId === id && res.body.profilePictureUrl === pic;
+	for (const [label, stored] of [["a doubled space", "Shorn  King"], ["edge spaces", " Shorn King "]]) {
+		r = await call(routeWithDirectory([[11, "Deshorn King", ""], [12, stored, SK_PIC]]), SK, "Shorn King");
+		ok(`Driver, own page, their directory row stored with ${label}: found (its id and profile picture)`,
+			found(r, 12, SK_PIC), brief(r));
+	}
+	r = await call(routeWithDirectory([[12, "Shorn  King", "/a.png"], [13, "SHORN KING", "/b.png"]]), SK, "Shorn King");
+	ok("the row equal to the name case aside is still preferred to a spacing variant", found(r, 13, "/b.png"), brief(r));
+	r = await call(routeWithDirectory([[11, "Deshorn King", "/d.png"]]), SK, "Shorn King");
+	ok("no row of their own: no directory id and no picture (Deshorn King is another driver)", found(r, 0, ""), brief(r));
+	const routeCode = ROUTE_SRC.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+	ok("the route resolves its directory row through findDirectoryRowForDriver(), with no LOWER() lookup of its own",
+		routeCode.includes("findDirectoryRowForDriver(driverName)") && !/FROM drivers_directory WHERE LOWER\(/.test(routeCode));
+
+	// The one mutant for this lookup: findDirectoryRowForDriver() back to LOWER()
+	// equality alone. The directory sync shares it; scripts/test-directory-spacing-match.js
+	// catches the same mutant there.
+	const LOWER_ONLY = mutate(DIRECTORY_LOOKUP_SRC,
+		"const hit = findDriverNameClashes(trimmed, { users: false })[0];", "const hit = null;");
+	r = await call(routeWithDirectory([[11, "Deshorn King", ""], [12, "Shorn  King", SK_PIC]], LOWER_ONLY), SK, "Shorn King");
+	ok("MUTANT 3 (the directory lookup back to LOWER() equality): the §5 doubled-space assertion flips",
+		found(r, 0, ""), brief(r));
 
 	console.log(`\n${passed} passed, ${failed} failed`);
 	process.exit(failed ? 1 : 0);

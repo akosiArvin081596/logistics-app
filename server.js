@@ -6763,11 +6763,38 @@ async function getSheetId(sheets, sheetName) {
 // ============================================================
 // Auto-sync Driver users ↔ Carrier Database Google Sheet
 // ============================================================
+// The drivers_directory row a driver's name belongs to, for the directory sync
+// below and the driver page (GET /api/driver/:driverName). First the row equal to
+// the name case aside — the lookup both used before, and the pair the column's
+// NOCASE constraint already treats as one name — else the first row, by id, that
+// names the same driver through normalizeDriverName(), the comparison every
+// ownership check uses (findDriverNameClashes()). The second step is what finds
+// a row stored with a doubled or edge space: LOWER() folds case, not spacing.
+// Returns { id, driver_name, matchedBy: "case" | "normalized" }, or null; a
+// blank name matches nothing.
+function findDirectoryRowForDriver(name) {
+	const trimmed = typeof name === "string" ? name.trim() : "";
+	if (!trimmed) return null;
+	const same = db.prepare("SELECT id, driver_name FROM drivers_directory WHERE LOWER(driver_name) = LOWER(?) ORDER BY id").get(trimmed);
+	if (same) return { id: same.id, driver_name: same.driver_name, matchedBy: "case" };
+	const hit = findDriverNameClashes(trimmed, { users: false })[0];
+	return hit ? { id: hit.id, driver_name: hit.driver_name, matchedBy: "normalized" } : null;
+}
+
 // Sync driver to SQLite drivers_directory (replaces Google Sheet sync)
 function syncDriverToCarrierSheet(driverName, opts = {}) {
 	const { oldName, email, companyName, action } = opts;
 	try {
-		const truck = driverName ? db.prepare("SELECT unit_number FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(driverName.trim()) : null;
+		// The driver's truck: the one naming them case aside, as before, else the
+		// first by id naming them through normalizeDriverName(), so a truck stored
+		// under another spacing of the name still fills the directory's `trucks`.
+		// The table is fleet-sized; SQLite cannot collapse a whitespace run.
+		const name = typeof driverName === "string" ? driverName.trim() : "";
+		const truck = name
+			? db.prepare("SELECT unit_number FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(name)
+				|| db.prepare("SELECT unit_number, assigned_driver FROM trucks WHERE COALESCE(assigned_driver, '') <> '' ORDER BY id").all()
+					.find((t) => normalizeDriverName(t.assigned_driver) === normalizeDriverName(name))
+			: null;
 		const truckUnit = truck ? truck.unit_number : "";
 
 		if (action === "add") {
@@ -6781,19 +6808,35 @@ function syncDriverToCarrierSheet(driverName, opts = {}) {
 			db.prepare(`INSERT OR IGNORE INTO drivers_directory (driver_name, carrier_name, email, trucks, status) VALUES (?, ?, ?, ?, 'pending')`)
 				.run(driverName.trim(), companyName || "", email || "", truckUnit);
 		} else if (action === "update") {
-			const existing = db.prepare("SELECT id FROM drivers_directory WHERE LOWER(driver_name) = LOWER(?)").get((oldName || driverName || "").trim());
+			// Found through normalizeDriverName() too, so a row stored in another
+			// spacing is updated here rather than falling into "add", which would
+			// find it, add nothing and leave its `trucks` stale.
+			const existing = findDirectoryRowForDriver(oldName || driverName || "");
 			if (!existing) {
 				return syncDriverToCarrierSheet(driverName, { ...opts, action: "add" });
 			}
-			const sets = ["driver_name = ?"];
-			const params = [driverName.trim()];
+			// The stored name is rewritten on a case-aside match, as it always was,
+			// and on an explicit rename (an oldName other than the new name). A row
+			// found only through normalizeDriverName() keeps its spelling otherwise:
+			// re-spelling a stored name is a rename, and nothing asked for one.
+			const renaming = typeof oldName === "string" && oldName.trim() !== "" && oldName.trim() !== driverName.trim();
+			const sets = [];
+			const params = [];
+			if (existing.matchedBy === "case" || renaming) { sets.push("driver_name = ?"); params.push(driverName.trim()); }
 			if (companyName !== undefined) { sets.push("carrier_name = ?"); params.push(companyName); }
 			if (email !== undefined) { sets.push("email = ?"); params.push(email); }
 			sets.push("trucks = ?"); params.push(truckUnit);
 			params.push(existing.id);
 			db.prepare(`UPDATE drivers_directory SET ${sets.join(", ")} WHERE id = ?`).run(...params);
 		} else if (action === "delete") {
-			db.prepare("DELETE FROM drivers_directory WHERE LOWER(driver_name) = LOWER(?)").run(driverName.trim());
+			// Every row equal to the name case aside, as before; with none, the row
+			// that names the same driver through normalizeDriverName().
+			const existing = findDirectoryRowForDriver(name);
+			if (existing && existing.matchedBy === "case") {
+				db.prepare("DELETE FROM drivers_directory WHERE LOWER(driver_name) = LOWER(?)").run(name);
+			} else if (existing) {
+				db.prepare("DELETE FROM drivers_directory WHERE id = ?").run(existing.id);
+			}
 		}
 	} catch (err) {
 		console.error("syncDriverToDirectory error:", err.message);
@@ -32717,7 +32760,10 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 		let sharedDocuments = [];
 		let profilePictureUrl = "";
 		let driverDirectoryId = 0;
-		const directoryRow = db.prepare("SELECT id, profile_picture_url FROM drivers_directory WHERE LOWER(driver_name) = ?").get(nameLower);
+		// The row is found as the directory sync finds it, so one stored under
+		// another spacing of the name is still this driver's (findDirectoryRowForDriver()).
+		const directoryMatch = findDirectoryRowForDriver(driverName);
+		const directoryRow = directoryMatch ? db.prepare("SELECT id, profile_picture_url FROM drivers_directory WHERE id = ?").get(directoryMatch.id) : null;
 		if (directoryRow && directoryRow.id > 0) {
 			driverDirectoryId = directoryRow.id;
 			profilePictureUrl = directoryRow.profile_picture_url || "";

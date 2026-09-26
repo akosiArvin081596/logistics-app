@@ -178,6 +178,7 @@ const MODULE_SRC = [
 	liftFunction("findDriverNameClashes"),
 	liftFunction("findDriverNameClash"),
 	liftFunction("canonicalDriverName"),
+	liftFunction("findDirectoryRowForDriver"),
 	liftFunction("syncDriverToCarrierSheet"),
 	liftFunction("assignDriverToTruck"),
 ].join("\n");

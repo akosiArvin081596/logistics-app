@@ -173,6 +173,7 @@ const PIECES = {
 		liftFunction("findDriverNameClashes"),
 		liftFunction("findDriverNameClash"),
 		liftFunction("canonicalDriverName"),
+		liftFunction("findDirectoryRowForDriver"),
 		liftFunction("syncDriverToCarrierSheet"),
 		liftFunction("assignDriverToTruck"),
 	].join("\n"),
