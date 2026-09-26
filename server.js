@@ -8333,9 +8333,8 @@ function guardInvoicePdf(req, res, next, url, file) {
  * guard's `uid === owner -> next()` shape would hand a driver their own result
  * through the back door.
  *
- * Super Admin and Dispatcher only, mirroring the two listing endpoints that are
- * the sole legitimate sources of these URLs
- * (GET /api/drivers-directory/:id/documents and GET /api/trucks/:id/driver-files).
+ * Super Admin and Dispatcher only, mirroring the listing endpoint that is the
+ * sole legitimate source of these URLs (GET /api/drivers-directory/:id/documents).
  *
  * ⚠️ .all() + .some(), never .get(). driver_onboarding.drug_test_file_url has no
  * unique index — the table's only index is idx_do_app_id — so a fetch-one can
@@ -22821,15 +22820,35 @@ app.get("/api/truck-assignments", requireRole("Super Admin", "Dispatcher"), (req
 	}
 });
 
+// The number a truck amount or daily rate off a request body reads as, the one
+// reader parseTruckAmount() and parseDriverPayDaily() share: a JSON number as
+// itself, or a string whose trimmed text is a plain decimal (an optional sign,
+// digits with an optional point, an optional exponent of at most three digits)
+// no longer than 32 characters. NaN for anything else: another type, a
+// separator or currency sign, and the hex, binary and octal forms Number()
+// alone would read ("0x10" is 16). The length is checked before the pattern
+// runs, so the pattern only ever sees a short string. Never throws.
+// client/src/lib/truckAmounts.js holds the forms' copy of this rule, and
+// scripts/test-truck-amount-caps-parity.mjs fails when the two answer an input
+// differently.
+function parsePlainDecimal(raw) {
+	if (typeof raw === "number") return raw;
+	if (typeof raw !== "string") return NaN;
+	const text = raw.trim();
+	if (text.length > 32 || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d{1,3})?$/.test(text)) return NaN;
+	return Number(text);
+}
+
 // Driver daily pay ($/day) validator shared by POST/PUT /api/trucks.
 // Blank/0 means "unset" — every pay calculation (invoices, /api/financials,
 // /api/investor) falls back to the $250/day default. When a value is given it
 // must be a finite number 0..10000 so a typo or negative rate can't silently
-// corrupt invoices and P&L.
+// corrupt invoices and P&L. Blank is undefined, null, "" or only whitespace;
+// anything else is read by parsePlainDecimal().
 const DRIVER_PAY_DAILY_MAX = 10000;
 function parseDriverPayDaily(raw) {
-	if (raw === undefined || raw === null || raw === "") return { value: 0 };
-	const n = Number(raw);
+	if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) return { value: 0 };
+	const n = parsePlainDecimal(raw);
 	if (!Number.isFinite(n) || n < 0 || n > DRIVER_PAY_DAILY_MAX) {
 		return { error: `Driver daily pay must be a number between 0 and ${DRIVER_PAY_DAILY_MAX}` };
 	}
@@ -22955,14 +22974,15 @@ function parseAdminFeePct(raw) {
 //     leaves the column alone;
 //   - null, "" or only whitespace — a cleared input: { value: 0 }, as a blank
 //     has always been stored;
-//   - a number, or a string whose trimmed text is a number, finite and within
-//     0..max: { value: n };
-//   - anything else — "abc", "12abc", a negative, ±Infinity, a number too large
-//     to be an amount (1e308), a boolean, an array, an object: { error }, whose
-//     text names the label and the range ("Fuel tank must be a number between
-//     0 and 500").
-// Number(), never parseFloat(): parseFloat reads "12abc" as 12 and drops the
-// rest, which turns a typo into a figure nobody entered.
+//   - a number, or a string whose trimmed text is a plain decimal, finite and
+//     within 0..max: { value: n };
+//   - anything else — "abc", "12abc", "0x10", a negative, ±Infinity, a number
+//     too large to be an amount (1e308), a boolean, an array, an object:
+//     { error }, whose text names the label and the range ("Fuel tank must be
+//     a number between 0 and 500").
+// Read by parsePlainDecimal(), never parseFloat() or a bare Number():
+// parseFloat reads "12abc" as 12 and drops the rest, and Number() reads "0x10"
+// as 16 — either turns a typo into a figure nobody entered.
 //
 // `max` is the row's own ceiling (TRUCK_AMOUNT_FIELDS), TRUCK_AMOUNT_MAX unless
 // the row names one. TRUCK_AMOUNT_MAX is a sanity ceiling, not a business rule —
@@ -22975,7 +22995,7 @@ const TRUCK_AMOUNT_MAX = 1_000_000;
 function parseTruckAmount(raw, label = "Amount", max = TRUCK_AMOUNT_MAX) {
 	if (raw === undefined) return { value: undefined };
 	if (raw === null || (typeof raw === "string" && raw.trim() === "")) return { value: 0 };
-	const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : NaN;
+	const n = parsePlainDecimal(raw);
 	if (!Number.isFinite(n) || n < 0 || n > max) {
 		return { error: `${label} must be a number between 0 and ${max.toLocaleString("en-US")}` };
 	}
@@ -22986,10 +23006,11 @@ function parseTruckAmount(raw, label = "Amount", max = TRUCK_AMOUNT_MAX) {
 //   - col, keys: the column, and the body key(s) it arrives under. The fuel pair
 //     takes snake_case (what the Trucks forms send) or camelCase, snake_case
 //     first, exactly as `a ?? b` has always read it;
-//   - label: what a refusal and the cost audit name it by (the month-end lock's
-//     own wording, capitalized where it starts a sentence);
-//   - fixed: one of the five fixed costs truckMonthlyFixed() reads, which the
-//     month-end lock and the cost audit's fixed-cost total key on;
+//   - label: what a refusal, the cost audit and both month-end locks name it by
+//     (capitalized where it starts a sentence);
+//   - fixed: one of the five fixed costs truckMonthlyFixed() reads, which both
+//     month-end locks (truckEditLockBlockers(), truckCreateLockBlockers()) and
+//     the cost audit's fixed-cost total key on;
 //   - staffOnly: POST /api/trucks stores it for a Super Admin or a Dispatcher
 //     only. An Investor's add never reads it, so it stays 0. A 0 fuel tank is
 //     the fleet default the fuel range falls back to (DEFAULT_TANK_GALLONS); a
@@ -22999,15 +23020,19 @@ function parseTruckAmount(raw, label = "Amount", max = TRUCK_AMOUNT_MAX) {
 //   - max (optional): the row's own ceiling, else TRUCK_AMOUNT_MAX. The fuel
 //     pair's are the owner's: a 500-gallon tank and 20 MPG, above any truck in
 //     the fleet. client/src/lib/truckAmounts.js holds the forms' copy of every
-//     ceiling; scripts/test-truck-amount-caps-parity.mjs fails when they differ.
+//     ceiling; scripts/test-truck-amount-caps-parity.mjs fails when they differ;
+//   - per (cost rows only): the period the PUT's update_truck_costs line writes
+//     after each figure — "/mo", "/yr", or "" for the purchase price. That line
+//     names exactly the rows that carry it, in table order. The fuel pair
+//     carries none: it is not a cost, and keeps its own audit lines.
 const TRUCK_AMOUNT_FIELDS = [
-	{ col: "insurance_monthly", keys: ["insuranceMonthly"], label: "insurance", fixed: true, staffOnly: true },
-	{ col: "eld_monthly", keys: ["eldMonthly"], label: "ELD fee", fixed: true, staffOnly: true },
-	{ col: "truck_payment_monthly", keys: ["truckPaymentMonthly"], label: "truck payment", fixed: true, staffOnly: true },
-	{ col: "hvut_annual", keys: ["hvutAnnual"], label: "HVUT", fixed: true, staffOnly: true },
-	{ col: "irp_annual", keys: ["irpAnnual"], label: "IRP", fixed: true, staffOnly: true },
-	{ col: "purchase_price", keys: ["purchasePrice"], label: "purchase price", fixed: false, staffOnly: false },
-	{ col: "maintenance_fund_monthly", keys: ["maintenanceFundMonthly"], label: "maintenance fund", fixed: false, staffOnly: false },
+	{ col: "insurance_monthly", keys: ["insuranceMonthly"], label: "insurance", fixed: true, staffOnly: true, per: "/mo" },
+	{ col: "eld_monthly", keys: ["eldMonthly"], label: "ELD fee", fixed: true, staffOnly: true, per: "/mo" },
+	{ col: "truck_payment_monthly", keys: ["truckPaymentMonthly"], label: "truck payment", fixed: true, staffOnly: true, per: "/mo" },
+	{ col: "hvut_annual", keys: ["hvutAnnual"], label: "HVUT", fixed: true, staffOnly: true, per: "/yr" },
+	{ col: "irp_annual", keys: ["irpAnnual"], label: "IRP", fixed: true, staffOnly: true, per: "/yr" },
+	{ col: "purchase_price", keys: ["purchasePrice"], label: "purchase price", fixed: false, staffOnly: false, per: "" },
+	{ col: "maintenance_fund_monthly", keys: ["maintenanceFundMonthly"], label: "maintenance fund", fixed: false, staffOnly: false, per: "/mo" },
 	{ col: "fuel_tank_gallons", keys: ["fuel_tank_gallons", "fuelTankGallons"], label: "fuel tank", fixed: false, staffOnly: true, max: 500 },
 	{ col: "avg_mpg", keys: ["avg_mpg", "avgMpg"], label: "average MPG", fixed: false, staffOnly: true, max: 20 },
 ];
@@ -23026,6 +23051,43 @@ function parseTruckAmounts(body, fields) {
 		values[f.col] = parsed.value;
 	}
 	return { values };
+}
+
+// A truck's unit number as POST /api/trucks and PUT /api/trucks/:id store it,
+// shared so the two cannot drift. { value } — the trimmed text — or
+// { refusal }, the 400 body both routes send, { error, code:
+// "INVALID_UNIT_NUMBER", field: "unitNumber" }, for a value that is missing
+// where `required`, null or blank ("Unit number is required"), not text, or
+// holds a control character (C0, DEL, C1) or a text-direction/format character
+// (U+200E, U+200F, U+202A–U+202E, U+2066–U+2069). Not sent to the PUT (not
+// `required`) is { value: undefined }, and the column is left alone. A unit
+// number is one line of plain text: it is shown in every fleet list, sorted,
+// and written into audit lines, where either kind of character changes how the
+// text around it reads. Checked on the value as sent, before anything is read
+// or written. The character class is auditText()'s own, copied because each
+// function must stand alone; scripts/test-truck-cost-amounts.js fails when the
+// two copies differ.
+function parseUnitNumber(raw, { required = false } = {}) {
+	const refuse = (error) => ({ refusal: { error, code: "INVALID_UNIT_NUMBER", field: "unitNumber" } });
+	if (raw === undefined && !required) return { value: undefined };
+	if (raw === undefined || raw === null) return refuse("Unit number is required");
+	if (typeof raw !== "string") return refuse("Unit number must be text.");
+	if (/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(raw)) {
+		return refuse("Unit number cannot contain control or text-direction characters.");
+	}
+	const value = raw.trim();
+	if (!value) return refuse("Unit number is required");
+	return { value };
+}
+
+// Whether a write failed because another truck already holds the unit number:
+// the column's UNIQUE constraint. Both truck routes ask the same question with a
+// case-insensitive query first, directly before their write with nothing
+// awaited between, so this answers only a writer outside that window (another
+// process on the same database). They map it to the query's own 400, "Unit
+// number already exists", rather than a 500.
+function isUnitNumberTaken(err) {
+	return !!err && err.code === "SQLITE_CONSTRAINT_UNIQUE" && String(err.message || "").includes("trucks.unit_number");
 }
 
 // ============================================================
@@ -23318,7 +23380,12 @@ const AUDITED_UPSTREAM = Symbol("period refusal already recorded by the caller")
 //
 // Newlines and tabs collapse to spaces because audit_trail is read one line per
 // row and exported as such: a reason containing "\n" would otherwise split one
-// refusal across what looks like several records.
+// refusal across what looks like several records. Every other control character
+// (C0, DEL, C1) and every text-direction/format character (U+200E, U+200F,
+// U+202A–U+202E, U+2066–U+2069) is dropped, for the same reason: each changes
+// how the rest of a line reads without being visible in it. That class is the
+// one parseUnitNumber() refuses, copied because each function must stand alone;
+// scripts/test-truck-cost-amounts.js fails when the two copies differ.
 function auditText(v, max) {
 	const s = (typeof v === "string" || typeof v === "number" || typeof v === "boolean")
 		? String(v)
@@ -23326,8 +23393,12 @@ function auditText(v, max) {
 	// The purge-marker reservation — see scrubPurgeMarker(). This helper caps the
 	// SUBJECT and the caller's `reason`/`note` on every period refusal, and
 	// periodRefusalDetail() appends the real `[${code}]` outside it, so scrubbing
-	// the caller's half can never cost a row its exemption.
-	return scrubPurgeMarker(s).replace(/[\r\n\t]+/g, " ").trim().slice(0, max);
+	// the caller's half can never cost a row its exemption. ⚠️ The scrub runs
+	// AFTER the collapse and the drop: dropping a character joins the text on
+	// either side of it, so text scrubbed first could come out of the drop as a
+	// marker the scrub never saw.
+	const flat = s.replace(/[\r\n\t]+/g, " ").replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "");
+	return scrubPurgeMarker(flat).trim().slice(0, max);
 }
 
 // A caller-supplied note (`reason`, `adjustmentNote`, …) capped and collapsed
@@ -23685,15 +23756,9 @@ function truckEditLockBlockers(truck, changed) {
 	// them: truckMonthlyFixed() reads the CURRENT value and getMonthlyFixedCosts()
 	// multiplies it across every month from the in-service month onward. A new
 	// insurance premium is therefore retroactive to the truck's first month by
-	// construction, and cannot be scoped to the open one.
-	const AMOUNT_FIELDS = [
-		["insurance_monthly", "insurance"],
-		["eld_monthly", "ELD fee"],
-		["truck_payment_monthly", "truck payment"],
-		["hvut_annual", "HVUT"],
-		["irp_annual", "IRP"],
-	];
-	for (const [col, label] of AMOUNT_FIELDS) {
+	// construction, and cannot be scoped to the open one. The five are the
+	// `fixed` rows of TRUCK_AMOUNT_FIELDS, named by their labels.
+	for (const { col, label } of TRUCK_AMOUNT_FIELDS.filter((f) => f.fixed)) {
 		if (!has(col) || !chargesFixed || !fixedMonths.length) continue;
 		const after = truckMonthlyFixed({ ...truck, [col]: changed[col] }).total;
 		if (after === monthly) continue; // rounds to the same monthly figure — nothing moves
@@ -24509,10 +24574,9 @@ function truckCreateLockBlockers(truck, history) {
 	// raw annual HVUT/IRP by 12 without truckMonthlyFixed()'s rounding, so an
 	// annual line that rounds to $0.00/mo still moves them. (The edit guard's
 	// amount check likewise tests each of the five on its own, not their sum.)
-	const AMOUNTS = [
-		["insurance_monthly", "insurance", "/mo"], ["eld_monthly", "ELD fee", "/mo"],
-		["truck_payment_monthly", "truck payment", "/mo"], ["hvut_annual", "HVUT", "/yr"], ["irp_annual", "IRP", "/yr"],
-	];
+	// The five are the `fixed` rows of TRUCK_AMOUNT_FIELDS, each named by its
+	// label and period.
+	const AMOUNTS = TRUCK_AMOUNT_FIELDS.filter((f) => f.fixed).map((f) => [f.col, f.label, f.per]);
 	const carried = AMOUNTS.filter(([col]) => (Number(truck[col]) || 0) !== 0);
 	if (fixedMonths.length && carried.length) {
 		blockers.push({
@@ -24707,9 +24771,12 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		// model/vin/plate only. Driver assignment is dispatch's job, via PUT
 		// /api/trucks/:id, which is already Super Admin / Dispatcher only.
 		const requestedDriver = req.session.user.role === "Investor" ? "" : String(assignedDriver || "").trim();
-		if (!unitNumber || !unitNumber.trim()) {
-			return res.status(400).json({ error: "Unit number is required" });
-		}
+		// Text, not blank, one plain line (parseUnitNumber()): 400
+		// INVALID_UNIT_NUMBER otherwise, before anything is read or written.
+		// `unit` is the trimmed value everything below stores and compares.
+		const unitParsed = parseUnitNumber(unitNumber, { required: true });
+		if (unitParsed.refusal) return res.status(400).json(unitParsed.refusal);
+		const unit = unitParsed.value;
 		const validStatus = ["Active", "Inactive", "Maintenance", "OOS"].includes(status) ? status : "Active";
 		// The five fixed costs, the fuel pair and the admin fee (costsAllowed,
 		// above). Read only when the add stores them: an Investor's are never
@@ -24759,7 +24826,7 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		// waited on the sheet is seen here. The column's UNIQUE is case-sensitive and
 		// this test is not, so it is the only thing keeping "LogisX-#23" and
 		// "logisx-#23" from both landing.
-		const existing = db.prepare("SELECT id FROM trucks WHERE LOWER(unit_number) = LOWER(?)").get(unitNumber.trim());
+		const existing = db.prepare("SELECT id FROM trucks WHERE LOWER(unit_number) = LOWER(?)").get(unit);
 		if (existing) {
 			return res.status(400).json({ error: "Unit number already exists" });
 		}
@@ -24789,7 +24856,7 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		const createStamp = new Date().toISOString().slice(0, 19).replace("T", " ");
 		const createLock = truckCreateLockBlockers({
 			id: 0,
-			unit_number: unitNumber.trim(),
+			unit_number: unit,
 			status: validStatus,
 			owner_id: finalOwnerId,
 			assigned_driver: finalAssignedDriver,
@@ -24810,25 +24877,34 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		// together they decide which months a new truck retroactively bills, and
 		// how much — the reason this guard exists.
 		const createAudit = {
-			action: "create_truck_blocked", entity: "truck", entityId: unitNumber.trim(),
-			subject: `add truck ${unitNumber.trim()} (in service ${inServiceCreate || "unset"},` +
+			action: "create_truck_blocked", entity: "truck", entityId: unit,
+			subject: `add truck ${auditText(unit, 100)} (in service ${inServiceCreate || "unset"},` +
 				` status ${validStatus}, fixed costs ${createMonthlyFixed}, driver ${finalAssignedDriver || "none"}, day rate ${driverPayParsed.value})`,
 		};
 		if (createLock.unreadable) return periodLockUnreadableResponse(req, res, "Adding a truck", createAudit);
 		if (createLock.blockers.length) {
 			return periodBlockedResponse(req, res,
-				`Cannot add ${unitNumber.trim()}`,
+				`Cannot add ${unit}`,
 				createLock.blockers,
 				"Add the truck with an in-service date in the current month, and assign its driver once the affected periods are open — or reopen them first (POST /api/periods/:period/reopen records a reason).",
 				createAudit);
 		}
 
-		const result = db.prepare(
-			"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id, driver_pay_daily, purchase_price, title_status, maintenance_fund_monthly, fuel_tank_gallons, avg_mpg, in_service_date, " +
-			"photo, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, admin_fee_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, finalAssignedDriver, notes || "", finalOwnerId, driverPayParsed.value,
-			createAmounts.purchase_price ?? 0, titleStatus || "Clean", createAmounts.maintenance_fund_monthly ?? 0, createAmounts.fuel_tank_gallons ?? 0, createAmounts.avg_mpg ?? 0, inServiceCreate,
-			createPhoto, createCosts.insurance_monthly, createCosts.eld_monthly, createCosts.truck_payment_monthly, createCosts.hvut_annual, createCosts.irp_annual, createAdminFee);
+		// The INSERT is the first write, so a unit number another writer took after
+		// the check above (isUnitNumberTaken()) is refused as the check refuses it,
+		// with nothing written.
+		let result;
+		try {
+			result = db.prepare(
+				"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id, driver_pay_daily, purchase_price, title_status, maintenance_fund_monthly, fuel_tank_gallons, avg_mpg, in_service_date, " +
+				"photo, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, admin_fee_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+			).run(unit, make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, finalAssignedDriver, notes || "", finalOwnerId, driverPayParsed.value,
+				createAmounts.purchase_price ?? 0, titleStatus || "Clean", createAmounts.maintenance_fund_monthly ?? 0, createAmounts.fuel_tank_gallons ?? 0, createAmounts.avg_mpg ?? 0, inServiceCreate,
+				createPhoto, createCosts.insurance_monthly, createCosts.eld_monthly, createCosts.truck_payment_monthly, createCosts.hvut_annual, createCosts.irp_annual, createAdminFee);
+		} catch (err) {
+			if (isUnitNumberTaken(err)) return res.status(400).json({ error: "Unit number already exists" });
+			throw err;
+		}
 		// Create truck assignment record
 		if (finalAssignedDriver && finalAssignedDriver.trim()) {
 			assignDriverToTruck(result.lastInsertRowid, finalAssignedDriver.trim());
@@ -24842,7 +24918,7 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		const createFuel = (createAmounts.fuel_tank_gallons > 0 ? `, fuel tank ${createAmounts.fuel_tank_gallons} gal` : "") +
 			(createAmounts.avg_mpg > 0 ? `, avg MPG ${createAmounts.avg_mpg}` : "");
 		logAudit(req, "create_truck", "truck", String(result.lastInsertRowid),
-			`Created truck ${unitNumber.trim()} (${validStatus}), in-service date: ${inServiceCreate || "unset (falls back to created_at)"}, ` +
+			`Created truck ${auditText(unit, 100)} (${validStatus}), in-service date: ${inServiceCreate || "unset (falls back to created_at)"}, ` +
 			`fixed costs: ${createMonthlyFixed}${createFuel}`);
 		notifyChange("trucks");
 		res.json({ success: true, id: result.lastInsertRowid });
@@ -24856,7 +24932,12 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const id = parseInt(req.params.id);
-		const truck = db.prepare("SELECT * FROM trucks WHERE id = ?").get(id);
+		// ⚠️ READ TWICE, AND `let` ON PURPOSE. This first read answers only the
+		// checks above the active-load wait below: the 404, the photo check and the
+		// pay check. The row is read again after that wait, into this same
+		// variable, and every guard and write from there on reads that row alone,
+		// so no copy from before the wait stays in scope (see THE ONE AWAIT).
+		let truck = db.prepare("SELECT * FROM trucks WHERE id = ?").get(id);
 		if (!truck) return res.status(404).json({ error: "Truck not found" });
 
 		// The nine amounts are read through parseTruckAmounts() below, not from here.
@@ -24867,6 +24948,13 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		if (assignedDriver !== undefined && assignedDriver !== null && typeof assignedDriver !== "string") {
 			return res.status(400).json({ error: "assignedDriver must be a string, or null for no driver.", code: "INVALID_DRIVER_NAME" });
 		}
+		// A sent unit number is text, not blank, one plain line (parseUnitNumber(),
+		// POST /api/trucks's rule): 400 INVALID_UNIT_NUMBER otherwise, before
+		// anything is read or written. `nextUnit` is the trimmed value the UPDATE
+		// writes; undefined means not sent, and the column is left alone.
+		const unitParsed = parseUnitNumber(unitNumber);
+		if (unitParsed.refusal) return res.status(400).json(unitParsed.refusal);
+		const nextUnit = unitParsed.value;
 		// A photo that CHANGES must be an image GET /api/driver/me/truck-photo can
 		// serve: 415 UNSUPPORTED_IMAGE_TYPE or 413 IMAGE_TOO_LARGE otherwise, with
 		// field "photo" (truckPhotoForStorage()), and is stored in its canonical
@@ -24875,19 +24963,20 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		// still resend the stored photo on every save, so a photo stored before
 		// this check never blocks an unrelated edit, and a resend is written back
 		// exactly as it is stored. null and "" clear it; anything else that is not
-		// a string is refused. Before any write and the month-end lock.
-		let photoToStore = photo;
-		if (photo !== undefined && photo !== null && photo !== "" && photo !== (truck.photo || "")) {
-			const photoChecked = truckPhotoForStorage(photo);
-			if (photoChecked.status) return res.status(photoChecked.status).json({ ...photoChecked.body, field: "photo" });
-			photoToStore = photoChecked.value;
-		}
+		// a string is refused. Checked here, against the row as first read, so a
+		// refused photo is answered before the active-load wait; whether it is a
+		// change, and so what is stored, is decided again after the wait.
+		const photoCheck = photo !== undefined && photo !== null && photo !== "" && photo !== (truck.photo || "")
+			? truckPhotoForStorage(photo) : null;
+		if (photoCheck && photoCheck.status) return res.status(photoCheck.status).json({ ...photoCheck.body, field: "photo" });
 		// The driver this edit assigns, resolved to the spelling that driver already
 		// has (canonicalDriverName()): a name that differs only in case or spacing
 		// assigns the existing driver — the guard, the assignment, the stored value
 		// and the directory sync all see that one spelling — instead of starting a
-		// second one. undefined = field not sent, "" = unassign.
-		const nextAssignedDriver = assignedDriver === undefined ? undefined : canonicalDriverName(String(assignedDriver || ""));
+		// second one. undefined = field not sent, "" = unassign. Resolved again
+		// after the active-load wait, so the writes use the spelling current then.
+		const resolveAssignedDriver = () => (assignedDriver === undefined ? undefined : canonicalDriverName(String(assignedDriver || "")));
+		let nextAssignedDriver = resolveAssignedDriver();
 		// Validate driver pay before any side effects (assignDriverToTruck runs
 		// below) so a bad rate rejects the whole edit instead of half-applying it.
 		let driverPayParsed = null;
@@ -24933,6 +25022,104 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		}
 		const retiredParsed = retiredCheck.value;
 
+		// ⚠️ GUARD BEFORE THE FIRST WRITE. The driver assignment and the UPDATE are
+		// written together, in one transaction, at the end — a refusal discovered
+		// after that point is not a refusal.
+		//
+		// `changed` carries ONLY fields whose stored value actually differs, parsed
+		// exactly the way the UPDATE below parses them, so the guard answers for
+		// the values that would really land. This is the whole reason the guard is
+		// usable: the Trucks page sends only the fields that changed, but an older
+		// page or a direct API caller may still send all ~20 on every save, and
+		// anything keyed on presence rather than difference would refuse every
+		// such edit. One rule, changesTo(row, driver), asked twice: about the row
+		// as first read for the pay check below, and about the row as re-read, after
+		// the active-load wait, for everything else.
+		const changesTo = (row, driver) => {
+			const changed = {};
+			const diff = (col, next) => { if (next !== (row[col] || 0)) changed[col] = next; };
+			if (nextUnit !== undefined && nextUnit.toLowerCase() !== String(row.unit_number || "").trim().toLowerCase()) {
+				changed.unit_number = nextUnit;
+			}
+			// Same recognized-values test as the write below, so an unrecognized status
+			// (silently ignored there) cannot be blocked here.
+			if (status !== undefined && ["Active", "Inactive", "Maintenance", "OOS"].includes(status) && status !== row.status) {
+				changed.status = status;
+			}
+			if (ownerId !== undefined) diff("owner_id", parseInt(ownerId) || 0);
+			// Never a blocker on its own (see the note at the end of the guard) — it is
+			// carried so checks (2b) and (6) can resolve the driver this edit LEAVES on
+			// the truck rather than the one it found, which is what closes the
+			// clear-driver-then-change-rate sequence.
+			if (driver !== undefined && driver !== String(row.assigned_driver || "").trim()) {
+				changed.assigned_driver = driver;
+			}
+			if (amount.insurance_monthly !== undefined) diff("insurance_monthly", amount.insurance_monthly);
+			if (amount.eld_monthly !== undefined) diff("eld_monthly", amount.eld_monthly);
+			if (amount.truck_payment_monthly !== undefined) diff("truck_payment_monthly", amount.truck_payment_monthly);
+			if (amount.hvut_annual !== undefined) diff("hvut_annual", amount.hvut_annual);
+			if (amount.irp_annual !== undefined) diff("irp_annual", amount.irp_annual);
+			if (driverPayParsed) diff("driver_pay_daily", driverPayParsed.value);
+			if (inServiceParsed !== undefined && inServiceParsed !== String(row.in_service_date || "").trim()) {
+				changed.in_service_date = inServiceParsed;
+			}
+			if (retiredParsed !== undefined && retiredParsed !== String(row.retired_at || "").trim()) {
+				changed.retired_at = retiredParsed;
+			}
+			return changed;
+		};
+		let changed = changesTo(truck, nextAssignedDriver);
+		// ⚠️ PAY SETTINGS ARE SUPER ADMIN ONLY — see PAY_EDIT_ADMIN_ONLY. Keyed on
+		// `changed`, i.e. on a real difference from the stored rate, never on the
+		// field being present: the Trucks page sends driverPayDaily only when it
+		// changed, but an older page or a direct API caller may still resend the
+		// stored rate on every save.
+		// Ahead of the month-end lock, because reopening a month would not make
+		// this edit allowed, and of every write below. The one guard asked about
+		// the row as first read — the rate the caller's form loaded — and so the one
+		// above the active-load wait: a save it lets through writes its own rate
+		// only if a Super Admin sent it (the UPDATE below writes the column's own
+		// value otherwise), so no rate that moves during the wait is overwritten.
+		const payEditAllowed = req.session.user.role === "Super Admin";
+		if (!payEditAllowed && Object.prototype.hasOwnProperty.call(changed, "driver_pay_daily")) {
+			return refusePayEdit(req, res, {
+				entity: "truck", entityId: String(id), subject: auditText(truck.unit_number, 100) || `truck #${id}`,
+				changes: [{ field: "driver_pay_daily", from: truck.driver_pay_daily || 0, to: changed.driver_pay_daily }],
+			});
+		}
+
+		// ⚠️ THE ONE AWAIT, AND NOTHING BELOW IT YIELDS. Assigning a DIFFERENT
+		// driver needs them free of an active load, and checkDriverActiveLoad()
+		// reads Job Tracking, so other requests can write while this one waits.
+		// Everything above is decided by the request, the session and (the photo
+		// and pay checks) the row as first read. The row is read again right after
+		// the wait, and from that read to the last write nothing is awaited, so no
+		// other request can land between a guard below and the write it allows —
+		// the unit-number check, for one, sees a number another save took while
+		// this one waited, which the column's case-sensitive UNIQUE would not
+		// refuse in another case. POST /api/trucks is ordered the same way.
+		//
+		// Compared as drivers, through normalizeDriverName(): the resolved spelling
+		// can differ from the stored one in case or spacing while naming this
+		// truck's own driver, whose active load is on this truck.
+		if (nextAssignedDriver && normalizeDriverName(nextAssignedDriver) !== normalizeDriverName(truck.assigned_driver)) {
+			const activeCheck = await checkDriverActiveLoad(nextAssignedDriver);
+			if (activeCheck) return res.status(409).json({ error: activeCheck });
+		}
+		truck = db.prepare("SELECT * FROM trucks WHERE id = ?").get(id);
+		if (!truck) return res.status(404).json({ error: "Truck not found" });
+		nextAssignedDriver = resolveAssignedDriver();
+
+		// The photo this save stores, decided against the row as re-read: a change
+		// is stored in its canonical form, checked above or, if the stored photo
+		// moved during the wait, here; a resend is written back as stored.
+		let photoToStore = photo;
+		if (photo !== undefined && photo !== null && photo !== "" && photo !== (truck.photo || "")) {
+			const photoChecked = photoCheck || truckPhotoForStorage(photo);
+			if (photoChecked.status) return res.status(photoChecked.status).json({ ...photoChecked.body, field: "photo" });
+			photoToStore = photoChecked.value;
+		}
+
 		// Cross-field: a truck cannot be retired before it entered service. The
 		// interval would be empty, truckBilledMonthCount would floor to 0 and every
 		// fixed-cost gate would skip the truck in every month — i.e. it silently
@@ -24959,62 +25146,12 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			}
 		}
 
-		// ⚠️ GUARD BEFORE THE FIRST WRITE. assignDriverToTruck() runs inside the
-		// field loop below and writes truck_assignments + trucks.assigned_driver
-		// the moment it is reached, and this app has no transactions — a refusal
-		// discovered after that point is not a refusal.
-		//
-		// `changed` carries ONLY fields whose stored value actually differs, parsed
-		// exactly the way the UPDATE below parses them, so the guard answers for
-		// the values that would really land. This is the whole reason the guard is
-		// usable: the Trucks page sends only the fields that changed, but an older
-		// page or a direct API caller may still send all ~20 on every save, and
-		// anything keyed on presence rather than difference would refuse every
-		// such edit.
-		const changed = {};
-		const diff = (col, next) => { if (next !== (truck[col] || 0)) changed[col] = next; };
-		if (unitNumber !== undefined && String(unitNumber).trim().toLowerCase() !== String(truck.unit_number || "").trim().toLowerCase()) {
-			changed.unit_number = String(unitNumber).trim();
-		}
-		// Same recognized-values test as the write below, so an unrecognized status
-		// (silently ignored there) cannot be blocked here.
-		if (status !== undefined && ["Active", "Inactive", "Maintenance", "OOS"].includes(status) && status !== truck.status) {
-			changed.status = status;
-		}
-		if (ownerId !== undefined) diff("owner_id", parseInt(ownerId) || 0);
-		// Never a blocker on its own (see the note at the end of the guard) — it is
-		// carried so checks (2b) and (6) can resolve the driver this edit LEAVES on
-		// the truck rather than the one it found, which is what closes the
-		// clear-driver-then-change-rate sequence.
-		if (nextAssignedDriver !== undefined && nextAssignedDriver !== String(truck.assigned_driver || "").trim()) {
-			changed.assigned_driver = nextAssignedDriver;
-		}
-		if (amount.insurance_monthly !== undefined) diff("insurance_monthly", amount.insurance_monthly);
-		if (amount.eld_monthly !== undefined) diff("eld_monthly", amount.eld_monthly);
-		if (amount.truck_payment_monthly !== undefined) diff("truck_payment_monthly", amount.truck_payment_monthly);
-		if (amount.hvut_annual !== undefined) diff("hvut_annual", amount.hvut_annual);
-		if (amount.irp_annual !== undefined) diff("irp_annual", amount.irp_annual);
-		if (driverPayParsed) diff("driver_pay_daily", driverPayParsed.value);
-		if (inServiceParsed !== undefined && inServiceParsed !== String(truck.in_service_date || "").trim()) {
-			changed.in_service_date = inServiceParsed;
-		}
-		if (retiredParsed !== undefined && retiredParsed !== String(truck.retired_at || "").trim()) {
-			changed.retired_at = retiredParsed;
-		}
-		// ⚠️ PAY SETTINGS ARE SUPER ADMIN ONLY — see PAY_EDIT_ADMIN_ONLY. Keyed on
-		// `changed`, i.e. on a real difference from the stored rate, never on the
-		// field being present: the Trucks page sends driverPayDaily only when it
-		// changed, but an older page or a direct API caller may still resend the
-		// stored rate on every save.
-		// Ahead of the month-end lock, because reopening a month would not make
-		// this edit allowed, and of every write below.
-		const payEditAllowed = req.session.user.role === "Super Admin";
-		if (!payEditAllowed && Object.prototype.hasOwnProperty.call(changed, "driver_pay_daily")) {
-			return refusePayEdit(req, res, {
-				entity: "truck", entityId: String(id), subject: truck.unit_number || `truck #${id}`,
-				changes: [{ field: "driver_pay_daily", from: truck.driver_pay_daily || 0, to: changed.driver_pay_daily }],
-			});
-		}
+		// What this edit changes, against the row as re-read. A save from anyone
+		// but a Super Admin never writes its own rate (the pay check above), so a
+		// rate that moved during the wait is not this edit's change: the lock is
+		// not asked about it, and no pay line is written for it.
+		changed = changesTo(truck, nextAssignedDriver);
+		if (!payEditAllowed) delete changed.driver_pay_daily;
 		const lock = truckEditLockBlockers(truck, changed);
 		// ⚠️ THE ATTEMPTED VALUES ARE THE RECORD HERE. This route's success path
 		// writes one audit line PER FIELD (update_driver_pay, update_truck_status,
@@ -25026,7 +25163,7 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		// written — and nothing else in the body reaches money.
 		const truckEditAudit = {
 			action: "update_truck_blocked", entity: "truck", entityId: String(id),
-			subject: `${truck.unit_number || `truck #${id}`}: ` +
+			subject: `${auditText(truck.unit_number, 100) || `truck #${id}`}: ` +
 				Object.keys(changed).map((c) => `${c} ${JSON.stringify(truck[c] ?? "")} -> ${JSON.stringify(changed[c])}`).join(", "),
 		};
 		if (lock.unreadable) return periodLockUnreadableResponse(req, res, "Editing a truck", truckEditAudit);
@@ -25046,10 +25183,14 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		const updates = [];
 		const params = [];
 
-		if (unitNumber !== undefined) {
-			const conflict = db.prepare("SELECT id FROM trucks WHERE LOWER(unit_number) = LOWER(?) AND id != ?").get(unitNumber.trim(), id);
+		// Below the re-read with nothing awaited before the UPDATE, so a number
+		// another save took while this one waited is seen here. The column's UNIQUE
+		// is case-sensitive and this test is not, so it is what keeps "LogisX-#23"
+		// and "logisx-#23" from both landing.
+		if (nextUnit !== undefined) {
+			const conflict = db.prepare("SELECT id FROM trucks WHERE LOWER(unit_number) = LOWER(?) AND id != ?").get(nextUnit, id);
 			if (conflict) return res.status(400).json({ error: "Unit number already exists" });
-			updates.push("unit_number = ?"); params.push(unitNumber.trim());
+			updates.push("unit_number = ?"); params.push(nextUnit);
 		}
 		if (make !== undefined) { updates.push("make = ?"); params.push(make); }
 		if (model !== undefined) { updates.push("model = ?"); params.push(model); }
@@ -25064,19 +25205,8 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			newStatus = status;
 			updates.push("status = ?"); params.push(status);
 		}
-		if (nextAssignedDriver !== undefined) {
-			// Check if driver has an active load before allowing reassignment — a
-			// DIFFERENT driver only. Compared as drivers, through normalizeDriverName():
-			// the resolved spelling can differ from the stored one in case or spacing
-			// while naming this truck's own driver, whose active load is on this truck.
-			if (nextAssignedDriver && normalizeDriverName(nextAssignedDriver) !== normalizeDriverName(truck.assigned_driver)) {
-				const activeCheck = await checkDriverActiveLoad(nextAssignedDriver);
-				if (activeCheck) return res.status(409).json({ error: activeCheck });
-			}
-			// Use the assignment helper (handles history + backward compat)
-			assignDriverToTruck(id, nextAssignedDriver);
-			updates.push("assigned_driver = ?"); params.push(nextAssignedDriver);
-		}
+		// The assignment itself is written with the UPDATE, below.
+		if (nextAssignedDriver !== undefined) { updates.push("assigned_driver = ?"); params.push(nextAssignedDriver); }
 		if (ownerId !== undefined) { updates.push("owner_id = ?"); params.push(parseInt(ownerId) || 0); }
 		if (notes !== undefined) { updates.push("notes = ?"); params.push(notes); }
 		if (photo !== undefined) { updates.push("photo = ?"); params.push(photoToStore); }
@@ -25132,34 +25262,51 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 
 		if (updates.length === 0) return res.status(400).json({ error: "No valid fields to update" });
 		params.push(id);
-		db.prepare(`UPDATE trucks SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+		// One transaction: the driver assignment (assignDriverToTruck() writes
+		// truck_assignments and trucks.assigned_driver) and the row land together
+		// or not at all. A unit number another writer took after the check above
+		// (isUnitNumberTaken()) is then refused as the check refuses it, with
+		// neither written.
+		try {
+			db.transaction(() => {
+				if (nextAssignedDriver !== undefined) assignDriverToTruck(id, nextAssignedDriver);
+				db.prepare(`UPDATE trucks SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+			})();
+		} catch (err) {
+			if (isUnitNumberTaken(err)) return res.status(400).json({ error: "Unit number already exists" });
+			throw err;
+		}
+		// Audit lines name the truck by its unit number as stored before this save,
+		// through auditText(), like every other truck audit line.
+		const unitLabel = auditText(truck.unit_number, 100);
 		// Audit pay-rate changes — the rate drives invoices and P&L. Reuses the
 		// established truck-entity logAudit pattern (see routemate_link/unlink).
-		if (driverPayParsed && driverPayParsed.value !== (truck.driver_pay_daily || 0)) {
+		// Only a Super Admin's save writes a rate (see the UPDATE above).
+		if (payEditAllowed && driverPayParsed && driverPayParsed.value !== (truck.driver_pay_daily || 0)) {
 			const fmtRate = (v) => (v > 0 ? `$${v}/day` : "default ($250/day)");
 			logAudit(req, "update_driver_pay", "truck", String(id),
-				`Driver daily pay for ${truck.unit_number}: ${fmtRate(truck.driver_pay_daily || 0)} → ${fmtRate(driverPayParsed.value)}`);
+				`Driver daily pay for ${unitLabel}: ${fmtRate(truck.driver_pay_daily || 0)} → ${fmtRate(driverPayParsed.value)}`);
 		}
 		// Audit status changes for the same reason: Active/Inactive is what decides
 		// whether a truck's ~$3k/mo of fixed costs hits the P&L at all, and it used
 		// to be written with no trail of who flipped it or when.
 		if (newStatus && newStatus !== truck.status) {
 			logAudit(req, "update_truck_status", "truck", String(id),
-				`Status for ${truck.unit_number}: ${truck.status} → ${newStatus}`);
+				`Status for ${unitLabel}: ${truck.status} → ${newStatus}`);
 		}
 		// An in-service date edit re-books fixed costs across whole months, so it
 		// gets the same treatment as a pay-rate change.
 		if (inServiceParsed !== undefined && inServiceParsed !== String(truck.in_service_date || "").trim()) {
 			const fmtDay = (v) => (v ? v : "unset (falls back to created_at)");
 			logAudit(req, "update_truck_in_service_date", "truck", String(id),
-				`In-service date for ${truck.unit_number}: ${fmtDay(String(truck.in_service_date || "").trim())} → ${fmtDay(inServiceParsed)}`);
+				`In-service date for ${unitLabel}: ${fmtDay(String(truck.in_service_date || "").trim())} → ${fmtDay(inServiceParsed)}`);
 		}
 		// Retiring (or un-retiring) a truck removes or restores whole months of
 		// fixed costs from an investor's ledger. Same treatment, same reason.
 		if (retiredParsed !== undefined && retiredParsed !== String(truck.retired_at || "").trim()) {
 			const fmtRetire = (v) => (v ? v : "not retired");
 			logAudit(req, "update_truck_retired_at", "truck", String(id),
-				`Retirement date for ${truck.unit_number}: ${fmtRetire(String(truck.retired_at || "").trim())} → ${fmtRetire(retiredParsed)}`);
+				`Retirement date for ${unitLabel}: ${fmtRetire(String(truck.retired_at || "").trim())} → ${fmtRetire(retiredParsed)}`);
 		}
 		// Re-parenting a truck moves its whole fixed-cost history between two
 		// investors' ledgers. It is as consequential as a pay-rate or status change
@@ -25171,7 +25318,7 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 				return u ? `${u.company_name || u.username} (#${oid})` : `#${oid}`;
 			};
 			logAudit(req, "update_truck_owner", "truck", String(id),
-				`Owner for ${truck.unit_number}: ${ownerName(truck.owner_id)} → ${ownerName(changed.owner_id)}`);
+				`Owner for ${unitLabel}: ${ownerName(truck.owner_id)} → ${ownerName(changed.owner_id)}`);
 		}
 		// ⚠️ THE FUEL-RANGE CONFIG IS AUDITED BECAUSE IT HAS BEEN WRONG THREE TIMES.
 		// `fuel_tank_gallons` has now been corrected on three separate occasions
@@ -25192,7 +25339,7 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			if (before !== after) {
 				const fmtTank = (v) => (v > 0 ? `${v} gal` : `unset (fleet default ${fuelModel.DEFAULT_TANK_GALLONS} gal)`);
 				logAudit(req, "update_truck_fuel_tank", "truck", String(id),
-					`Fuel tank for ${truck.unit_number}: ${fmtTank(before)} → ${fmtTank(after)}`);
+					`Fuel tank for ${unitLabel}: ${fmtTank(before)} → ${fmtTank(after)}`);
 			}
 		}
 		// Same reasoning: avg_mpg is the other half of the estimated-basis product,
@@ -25203,7 +25350,7 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			if (before !== after) {
 				const fmtMpg = (v) => (v > 0 ? `${v} mpg` : "unset (derived from ELD / receipts)");
 				logAudit(req, "update_truck_avg_mpg", "truck", String(id),
-					`Average MPG for ${truck.unit_number}: ${fmtMpg(before)} → ${fmtMpg(after)}`);
+					`Average MPG for ${unitLabel}: ${fmtMpg(before)} → ${fmtMpg(after)}`);
 			}
 		}
 		// ⚠️ COST EDITS ARE AUDITED — one `update_truck_costs` line per save that
@@ -25222,16 +25369,14 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		// fuel tank and MPG keep their own lines above.
 		{
 			const money = (n) => `$${(Math.round(n * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-			// Past the UPDATE, so formatting must not be able to throw.
-			const labelOf = (col) => (TRUCK_AMOUNT_FIELDS.find((f) => f.col === col) || { label: col }).label;
 			const costChanges = [];
-			for (const [col, per] of [
-				["insurance_monthly", "/mo"], ["eld_monthly", "/mo"], ["truck_payment_monthly", "/mo"], ["hvut_annual", "/yr"], ["irp_annual", "/yr"],
-				["purchase_price", ""], ["maintenance_fund_monthly", "/mo"],
-			]) {
-				const before = truck[col] || 0;
-				if (amount[col] !== undefined && amount[col] !== before) {
-					costChanges.push(`${labelOf(col)} ${money(before)}${per} → ${money(amount[col])}${per}`);
+			// The cost rows of TRUCK_AMOUNT_FIELDS — every row with a `per` — in
+			// table order, each named by its label and period.
+			for (const f of TRUCK_AMOUNT_FIELDS) {
+				if (f.per === undefined) continue;
+				const before = truck[f.col] || 0;
+				if (amount[f.col] !== undefined && amount[f.col] !== before) {
+					costChanges.push(`${f.label} ${money(before)}${f.per} → ${money(amount[f.col])}${f.per}`);
 				}
 			}
 			// The stored fee read as a sent one would be (a NULL is its 50); one the
@@ -25247,7 +25392,7 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 				const fixedTotal = fixedMoved
 					? `; fixed costs ${money(truckMonthlyFixed(truck).total)}/mo → ${money(truckMonthlyFixed({ ...truck, ...changed }).total)}/mo`
 					: "";
-				logAudit(req, "update_truck_costs", "truck", String(id), `Costs for ${truck.unit_number}: ${costChanges.join(", ")}${fixedTotal}`);
+				logAudit(req, "update_truck_costs", "truck", String(id), `Costs for ${unitLabel}: ${costChanges.join(", ")}${fixedTotal}`);
 			}
 		}
 		// Log driver assignment change to history + sync to Carrier Database sheet
@@ -25264,7 +25409,7 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			if (oldDriver && oldDriver.trim() && normalizeDriverName(oldDriver) !== normalizeDriverName(nextAssignedDriver)) {
 				syncDriverToCarrierSheet(oldDriver.trim(), { action: "update" });
 			}
-		} else if (unitNumber !== undefined && String(unitNumber).trim() !== String(truck.unit_number || "").trim()) {
+		} else if (nextUnit !== undefined && nextUnit !== String(truck.unit_number || "").trim()) {
 			// A RENAME REFRESHES THE DRIVER'S DIRECTORY ROW. drivers_directory.trucks
 			// holds the unit number shown beside the driver on the dispatch
 			// Dashboard's fleet list and the Drivers Database page, and
@@ -25284,86 +25429,6 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 	} catch (error) {
 		console.error("Error updating truck:", error.message);
 		res.status(500).json({ error: error.message });
-	}
-});
-
-// GET /api/trucks/:id/driver-files — Files belonging to the driver assigned
-// to this truck. Super Admin + Dispatcher only. Returns CDL front/back +
-// medical card from the application, signed onboarding PDFs, and the drug
-// test file URL.
-//
-// SECURITY notes:
-// - Investor role is NOT allowed on this endpoint. Per 2026-04-13 client
-//   feedback, investors should not see driver confidential files (CDL,
-//   medical card, drug test, signed policies) even for trucks they own —
-//   these are between the driver, dispatch, and Super Admin only.
-// - Confidential onboarding docs (W-9, contractor agreement, NDA) are
-//   filtered out — only non-confidential docs are returned.
-// - signature_text is NOT returned: it is the driver's typed legal name
-//   acting as their e-signature on legally binding docs. Non-admin
-//   viewers see signed/unsigned status only.
-// - SSN and driver's license number never flow through this endpoint.
-// - Dedicated rate limiter (30/15min) prevents bulk enumeration of
-//   base64-heavy document payloads.
-const driverFilesLimiter = rateLimit({
-	windowMs: 15 * 60 * 1000,
-	max: 30,
-	message: { error: "Too many requests. Try again later." },
-	standardHeaders: true,
-});
-app.get("/api/trucks/:id/driver-files", requireRole("Super Admin", "Dispatcher"), driverFilesLimiter, (req, res) => {
-	try {
-		const id = parseInt(req.params.id);
-		const truck = db.prepare("SELECT id, unit_number, assigned_driver, owner_id FROM trucks WHERE id = ?").get(id);
-		if (!truck) return res.status(404).json({ error: "Truck not found" });
-		const driverName = (truck.assigned_driver || "").trim();
-		if (!driverName) {
-			return res.json({ driverName: "", files: [], onboardingDocs: [], drugTest: null });
-		}
-		// Resolve driver_name → user_id → application_id to reach the uploaded files.
-		const user = db.prepare("SELECT id, driver_name FROM users WHERE LOWER(driver_name) = LOWER(?) AND role = 'Driver'").get(driverName);
-		if (!user) {
-			return res.json({ driverName, files: [], onboardingDocs: [], drugTest: null });
-		}
-		const onboarding = db.prepare("SELECT application_id, drug_test_result, drug_test_file_url, strftime('%Y-%m-%dT%H:%M:%SZ', drug_test_uploaded_at) AS drug_test_uploaded_at FROM driver_onboarding WHERE user_id = ?").get(user.id);
-		const files = [];
-		if (onboarding?.application_id) {
-			const app = db.prepare("SELECT cdl_front, cdl_back, medical_card FROM job_applications WHERE id = ?").get(onboarding.application_id);
-			if (app) {
-				const mime = (b64) => {
-					if (!b64) return null;
-					if (b64.startsWith("data:application/pdf")) return "pdf";
-					if (b64.startsWith("data:image/")) return "image";
-					return null;
-				};
-				if (app.cdl_front) files.push({ label: "CDL Front", type: mime(app.cdl_front), data: app.cdl_front });
-				if (app.cdl_back) files.push({ label: "CDL Back", type: mime(app.cdl_back), data: app.cdl_back });
-				if (app.medical_card) files.push({ label: "Medical Card", type: mime(app.medical_card), data: app.medical_card });
-			}
-		}
-		// Only non-confidential onboarding docs. Never expose signature_text.
-		// Super Admin gets to see the full list via a different endpoint; this
-		// one is scoped to what dispatchers legitimately need for operations.
-		//
-		// ⚠️ The SQL filter is kept AND re-judged in JS by the shared predicate,
-		// so this listing cannot disagree with the /uploads guard about what
-		// "confidential" means. Without the second pass a row carrying an unknown
-		// doc_key with confidential = 0 would be LISTED here and then 404 at the
-		// file — the guard fails closed, so it is harmless, but a link that always
-		// breaks is worse than no link, and the point of one predicate is that
-		// there is exactly one answer.
-		const onboardingDocs = db.prepare(
-			"SELECT doc_key, doc_name, signed, signed_at, signed_pdf_url FROM onboarding_documents WHERE user_id = ? AND (confidential = 0 OR confidential IS NULL) ORDER BY id"
-		).all(user.id).filter((d) => !isConfidentialOnboardingDoc("driver", d.doc_key));
-		const drugTest = onboarding && onboarding.drug_test_result ? {
-			result: onboarding.drug_test_result,
-			file_url: onboarding.drug_test_file_url,
-			uploaded_at: onboarding.drug_test_uploaded_at,
-		} : null;
-		res.json({ driverName, files, onboardingDocs, drugTest });
-	} catch (err) {
-		console.error("GET /api/trucks/:id/driver-files error:", err.message);
-		res.status(500).json({ error: "Failed to load driver files" });
 	}
 });
 
@@ -25387,7 +25452,7 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	// fixed costs the delete would strip out of every closed month.
 	const truckDelAudit = {
 		action: "delete_truck_blocked", entity: "truck", entityId: String(id),
-		subject: `delete ${truck.unit_number || `truck #${id}`}` +
+		subject: `delete ${auditText(truck.unit_number, 100) || `truck #${id}`}` +
 			` (status ${truck.status || "unknown"}, in service ${truck.in_service_date || "unset"},` +
 			` retired ${truck.retired_at || "not retired"}, owner ${truck.owner_id || 0})`,
 	};
@@ -25456,7 +25521,7 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	// Like the user delete, this previously left no trace at all — "a truck was
 	// removed" does not tell a later reader that its service history went too.
 	logAudit(req, "delete_truck", "truck", String(id),
-		`Truck ${truck.unit_number || `#${id}`} (${truck.status}, owner ${truck.owner_id || "fleet"}) deleted; cascade: ` +
+		`Truck ${auditText(truck.unit_number, 100) || `#${id}`} (${truck.status}, owner ${truck.owner_id || "fleet"}) deleted; cascade: ` +
 		(Object.entries(removed).filter(([, n]) => n > 0).map(([t, n]) => `${t}=${n}`).join(", ") || "no rows"));
 	notifyChange("trucks");
 	res.json({ success: true, removed });
@@ -32566,12 +32631,20 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 		// run ~700KB+ for a single truck — we ship `has_photo` only and let
 		// the driver app fetch the image lazily from /api/driver/me/truck-photo
 		// when the Truck Details accordion expands. Keeps this endpoint small
-		// enough to land reliably on a flaky mobile connection.
-		const assignedTruck = db.prepare(
+		// enough to land reliably on a flaky mobile connection. `has_photo` is 1
+		// exactly when that route would serve the stored photo, decided from its
+		// bytes (storedFileKind()) on its first 200 characters, which are read
+		// here and not returned.
+		const assignedTruckRow = db.prepare(
 			`SELECT id, unit_number, make, model, year, vin, license_plate, status,
-			        CASE WHEN photo IS NULL OR photo = '' THEN 0 ELSE 1 END AS has_photo
+			        substr(photo, 1, 200) AS photo_head
 			 FROM trucks WHERE LOWER(assigned_driver) = ?`
-		).get(nameLower) || null;
+		).get(nameLower);
+		let assignedTruck = null;
+		if (assignedTruckRow) {
+			const { photo_head: photoHead, ...truckFields } = assignedTruckRow;
+			assignedTruck = { ...truckFields, has_photo: storedFileKind(photoHead) ? 1 : 0 };
+		}
 
 		// Truck-scoped legal documents the admin has explicitly marked as
 		// driver-visible. Only truck-scoped rows (truck_id > 0, no driver_id,
@@ -32620,11 +32693,13 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 			).get(onboarding.application_id);
 			if (fullApp) {
 				const { ssn: _drop, cdl_front, cdl_back, medical_card, ...safeApp } = fullApp;
+				// Which kind each file is, from its bytes (storedFileKind()) and never
+				// the stored label, so the Kit offers exactly the files
+				// GET /api/driver/me/identity-file/:fileType serves: "pdf", "image",
+				// or null for none.
 				const detectMime = (b64) => {
-					if (!b64) return null;
-					if (b64.startsWith("data:application/pdf")) return "pdf";
-					if (b64.startsWith("data:image/")) return "image";
-					return null;
+					const kind = storedFileKind(b64, { pdf: true });
+					return kind === "application/pdf" ? "pdf" : kind ? "image" : null;
 				};
 				application = {
 					...safeApp,
@@ -32739,6 +32814,23 @@ function storedFileForServing(dataUri, { pdf = false } = {}) {
 	return contentType ? { contentType, body } : null;
 }
 
+// The media type storedFileForServing() would serve a stored file as, or null
+// where it would answer 404 — for a route that only says whether a file exists
+// and what kind it is. Parsed the same way, but only the first 64 base64
+// characters of the payload are decoded (48 bytes): servedType() reads at most
+// the first 12 (imageType()'s magic numbers; "%PDF-" is 5), and a base64
+// decode of the start of a payload is the start of its full decode. So the
+// answer is storedFileForServing()'s unless those 64 characters hold fewer than
+// 16 the decoder reads (whitespace and stray characters are skipped), which
+// the canonical form never does. `dataUri` may be the whole stored value or
+// just its start.
+function storedFileKind(dataUri, { pdf = false } = {}) {
+	if (typeof dataUri !== "string" || !dataUri.startsWith("data:")) return null;
+	const comma = dataUri.indexOf(",");
+	if (comma < 0 || !dataUri.slice(0, comma).endsWith(";base64")) return null;
+	return imageLimits.servedType(Buffer.from(dataUri.slice(comma + 1, comma + 65), "base64"), { pdf });
+}
+
 // The ETag GET /api/driver/me/truck-photo sends with a stored file: taken from
 // the stored value itself, as a quoted 32-hex-digit prefix of its SHA-256. One
 // stored value always has one ETag, and a different stored value a different
@@ -32798,8 +32890,7 @@ function truckPhotoForStorage(value) {
 // files exist (and their MIME type), and this one serves the bytes lazily so
 // the Driver Kit only pays the ~2.5MB-per-file cost when the user actually
 // opens the Kit tab. Super Admin can also call this against their own session
-// (debug); admins/dispatchers fetching ON BEHALF of a driver continue to use
-// /api/trucks/:id/driver-files, which already supports that flow.
+// (debug).
 // Served as what the bytes are — a JPEG, PNG, WebP or PDF — and 404 otherwise
 // (storedFileForServing()). A PDF is sent as a download under the name the
 // Driver Kit's link already gives it (Content-Disposition: attachment;
@@ -34855,7 +34946,7 @@ app.post("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), (req
 			// it was moved to.
 			const linkAudit = {
 				action: "routemate_link_blocked", entity: "truck", entityId: String(truckId),
-				subject: `re-point ELD on ${truck.unit_number || `truck #${truckId}`}:` +
+				subject: `re-point ELD on ${auditText(truck.unit_number, 100) || `truck #${truckId}`}:` +
 					` ${truck.routemate_vehicle_id || "none"} -> ${target}`,
 			};
 			if (lock.unreadable) return periodLockUnreadableResponse(req, res, "Linking an ELD device", linkAudit);
@@ -34869,7 +34960,7 @@ app.post("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), (req
 		}
 
 		db.prepare("UPDATE trucks SET routemate_vehicle_id = ? WHERE id = ?").run(target, truckId);
-		logAudit(req, 'routemate_link', 'truck', String(truckId), `Linked truck ${truck.unit_number} → Routemate ${target}`);
+		logAudit(req, 'routemate_link', 'truck', String(truckId), `Linked truck ${auditText(truck.unit_number, 100)} → Routemate ${target}`);
 		res.json({ success: true, truckId, routemateVehicleId: target });
 	} catch (err) {
 		console.error("routemate link error:", err.message);
@@ -34900,7 +34991,7 @@ app.delete("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), (r
 			// refusal this is the only place the intended target survives.
 			const unlinkAudit = {
 				action: "routemate_unlink_blocked", entity: "truck", entityId: String(truckId),
-				subject: `unlink ELD from ${truck.unit_number || `truck #${truckId}`} (was ${prev})`,
+				subject: `unlink ELD from ${auditText(truck.unit_number, 100) || `truck #${truckId}`} (was ${prev})`,
 			};
 			if (lock.unreadable) return periodLockUnreadableResponse(req, res, "Unlinking an ELD device", unlinkAudit);
 			if (lock.blockers.length) {
@@ -34912,7 +35003,7 @@ app.delete("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), (r
 			}
 		}
 		db.prepare("UPDATE trucks SET routemate_vehicle_id = '' WHERE id = ?").run(truckId);
-		logAudit(req, 'routemate_unlink', 'truck', String(truckId), `Unlinked truck ${truck.unit_number} (was ${prev || 'none'})`);
+		logAudit(req, 'routemate_unlink', 'truck', String(truckId), `Unlinked truck ${auditText(truck.unit_number, 100)} (was ${prev || 'none'})`);
 		res.json({ success: true, truckId });
 	} catch (err) {
 		console.error("routemate unlink error:", err.message);

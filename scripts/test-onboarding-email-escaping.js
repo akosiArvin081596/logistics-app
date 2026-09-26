@@ -197,7 +197,7 @@ const COL_LETTER_SRC = liftFunction(SRC, "function colLetter(idx) {");
 const PARSE_AMOUNT_SRC = (() => {
 	const m = SRC.match(/\nconst TRUCK_AMOUNT_MAX = [^\n]*\n/);
 	if (!m) die("could not locate TRUCK_AMOUNT_MAX");
-	return `${m[0].trim()}\n${liftFunction(SRC, 'function parseTruckAmount(raw, label = "Amount", max = TRUCK_AMOUNT_MAX) {')}`;
+	return `${m[0].trim()}\n${liftFunction(SRC, "function parsePlainDecimal(raw) {")}\n${liftFunction(SRC, 'function parseTruckAmount(raw, label = "Amount", max = TRUCK_AMOUNT_MAX) {')}`;
 })();
 const escapeHtml = new Function(`${ESCAPE_SRC}\nreturn escapeHtml;`)();
 const INVESTOR_ONBOARDING_DOCS = render(liftConst(SRC, "INVESTOR_ONBOARDING_DOCS"), "INVESTOR_ONBOARDING_DOCS", {});

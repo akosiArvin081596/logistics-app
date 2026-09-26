@@ -40,8 +40,8 @@
  *      edges, a ceiling of the caller's own, 1e308, whitespace, the error text;
  *      the table's nine rows, their keys (the fuel pair's `a ?? b` order
  *      included), the five fixed costs, the seven staffOnly rows, each row's
- *      ceiling at its edge under every key, and labels in the month-end lock's
- *      own wording.
+ *      ceiling at its edge under every key, and both month-end locks reading
+ *      the five fixed costs' labels from the table, with no copy of their own.
  *   §1b parseAdminFeePct() — not sent, blank as 50, 0..100 inclusive, and every
  *      refused shape with its exact text; a pin that it reads through
  *      parseTruckAmount() with no number rule of its own.
@@ -80,8 +80,31 @@
  *      "85,000" and a price left out are stored as 0, 85000 and "85000" as
  *      85000, and the acceptance still answers 200 with the account created; a
  *      source pin that the INSERT stores what parseTruckAmount() read.
- * The mutants for these checks were run by hand before shipping and are not
- * committed (see the PR).
+ *   §1c parsePlainDecimal(), the one reader behind parseTruckAmount() and
+ *      parseDriverPayDaily(): plain decimals (sign, point, a three-digit
+ *      exponent) up to 32 characters; "0x10", "0b1", "0o7", separators, other
+ *      digits, over-long text and non-numbers are NaN; the cap is checked
+ *      before the pattern; both parsers keep their refusal text; each cost
+ *      row's `per`. §2b the routes refuse those inputs with the same bodies.
+ *   §7 unit numbers (parseUnitNumber()): not text, blank, or holding a control
+ *      or text-direction character → 400 INVALID_UNIT_NUMBER, field unitNumber,
+ *      on POST and PUT, before anything is read or written; auditText() drops
+ *      the same characters before its purge-marker scrub, so none can forge a
+ *      marker; the two copies of the class are identical and written as
+ *      escapes; every truck audit line and refusal names the unit number
+ *      through auditText(…, 100).
+ *   §8 the PUT's one await: two saves renaming two trucks to one number (in
+ *      another case, or exactly) at once — exactly one succeeds, the other is
+ *      400 with nothing written; a write landing during the wait is what the
+ *      guards and the audit read; a non-Super-Admin's rate resend during a
+ *      Super Admin's change writes no pay line; the column's UNIQUE behind the
+ *      check answers 400 with the assignment rolled back; source pins on the
+ *      order of the await, the re-read and the writes.
+ *   §9 the photo is checked when it CHANGES, against the row as first read and
+ *      again as re-read.
+ *   § mutants — one break per guard, each run against every behaviour section
+ *      above, each of which must fail at least one check. Every anchor must
+ *      occur exactly once, so a refactor fails loudly instead of skipping one.
  *
  * Pure: no server, no app.db, no network.
  *
@@ -96,7 +119,14 @@ const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 
 let pass = 0;
 const failures = [];
-const ok = (cond, msg) => { if (cond) pass++; else failures.push(msg); };
+// While a mutant runs (§ mutants), every check records into `sink` instead of
+// the tally, so the mutant's failures are counted as "caught" and never as the
+// runner's own.
+let sink = null;
+const ok = (cond, msg) => {
+	if (sink) { sink.push({ ok: !!cond, name: msg }); return; }
+	if (cond) pass++; else failures.push(msg);
+};
 function die(msg) { console.error(`FAILED: ${msg}`); process.exit(1); }
 function section(title) { console.log(`\n${title}`); }
 
@@ -150,10 +180,13 @@ const colLetter = new Function(`${liftFunction("colLetter")}\nreturn colLetter;`
 // Everything the two routes call from module scope, verbatim.
 const MODULE_SRC = [
 	// the subject
+	liftFunction("parsePlainDecimal"),
 	liftConst("const TRUCK_AMOUNT_MAX = "),
 	liftFunction("parseTruckAmount"),
 	liftConst("const TRUCK_AMOUNT_FIELDS = [", "\n];"),
 	liftFunction("parseTruckAmounts"),
+	liftFunction("parseUnitNumber"),
+	liftFunction("isUnitNumberTaken"),
 	// the routes' other parsers, and the monthly total the audit lines name
 	liftConst("const DRIVER_PAY_DAILY_MAX = "),
 	liftFunction("parseDriverPayDaily"),
@@ -182,16 +215,25 @@ const MODULE_SRC = [
 	liftFunction("assignDriverToTruck"),
 ].join("\n");
 const MODULE_EXPORTS = [
-	"TRUCK_AMOUNT_MAX", "parseTruckAmount", "TRUCK_AMOUNT_FIELDS", "parseTruckAmounts",
+	"parsePlainDecimal", "TRUCK_AMOUNT_MAX", "parseTruckAmount", "TRUCK_AMOUNT_FIELDS", "parseTruckAmounts", "parseUnitNumber", "isUnitNumberTaken",
 	"parseDriverPayDaily", "parseInServiceDate", "parseRetiredAt", "ADMIN_FEE_PCT_MAX", "parseAdminFeePct", "truckMonthlyFixed",
 	"refusePayEdit", "logAudit", "auditText",
 	"normalizeDriverName", "findDriverNameClash", "findDriverNameClashes", "canonicalDriverName",
 	"syncDriverToCarrierSheet", "assignDriverToTruck",
 ];
+// The code every check runs: the shipped source, or (§ mutants) a copy with one
+// guard broken.
+let VARIANT = { moduleSrc: MODULE_SRC, routes: ROUTES };
 function buildModule(db) {
 	return new Function("db", "todayKeyCT",
-		`"use strict";\n${MODULE_SRC}\nreturn { ${MODULE_EXPORTS.join(", ")} };`)(db, () => "2026-09-26");
+		`"use strict";\n${VARIANT.moduleSrc}\nreturn { ${MODULE_EXPORTS.join(", ")} };`)(db, () => "2026-09-26");
 }
+// The photo check the two routes run, verbatim (its own subject is
+// scripts/test-stored-file-serving.js), for the photo checks in § mutants.
+const imageLimits = require(path.join(__dirname, "..", "lib", "image-size"));
+const PHOTO_CHECK = new Function("imageLimits",
+	`"use strict";\n${liftFunction("storedFileForServing")}\n${liftFunction("truckPhotoForStorage")}\nreturn { storedFileForServing, truckPhotoForStorage };`
+)(imageLimits);
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 function usersDdl() {
@@ -331,10 +373,13 @@ function mountRoute(routeSrc, env) {
 	};
 }
 // A route's catch logs to console.error, which is expected noise on a 500.
+// Counted, because § 8 runs two requests at once: the console comes back when
+// the last of them ends, not the first.
+let quietDepth = 0;
+let loudError = null;
 async function quiet(fn) {
-	const e = console.error;
-	console.error = () => {};
-	try { return await fn(); } finally { console.error = e; }
+	if (quietDepth++ === 0) { loudError = console.error; console.error = () => {}; }
+	try { return await fn(); } finally { if (--quietDepth === 0) console.error = loudError; }
 }
 
 // The month-end locks answer "nothing blocked" and record what they were asked:
@@ -342,13 +387,16 @@ async function quiet(fn) {
 // Each directory sync a route makes is recorded in `synced` (name and action),
 // then run by the shipped syncDriverToCarrierSheet(), so the row it writes is
 // the row production writes.
-function mountAll(db) {
+// `activeLoad`, when given, answers the active-load check in place of the
+// default (a yield, then "free"); § 8 hands in one that waits until released.
+function mountAll(db, { activeLoad = null } = {}) {
 	const m = buildModule(db);
 	const seen = { editLockSeen: [], createLockSeen: [], activeLoad: 0, synced: [] };
 	const refuse = (req, res) => res.status(409).json({ code: "PERIOD_STUB" });
 	const env = {
 		db,
 		...m,
+		...PHOTO_CHECK,
 		syncDriverToCarrierSheet: (name, opts = {}) => {
 			seen.synced.push({ name, action: opts.action });
 			return m.syncDriverToCarrierSheet(name, opts);
@@ -361,12 +409,17 @@ function mountAll(db) {
 		truckChargeUntilMonth: () => "",
 		getJobTrackingCached: async () => ({ headers: ["Load ID", "Driver", "Assigned Date"], data: [] }),
 		driverHistoryFloorMonth: () => ({ floor: "", unbounded: false }),
-		checkDriverActiveLoad: async () => { seen.activeLoad++; await new Promise((done) => setImmediate(done)); return null; },
+		checkDriverActiveLoad: async (name) => {
+			seen.activeLoad++;
+			if (activeLoad) return activeLoad(name);
+			await new Promise((done) => setImmediate(done));
+			return null;
+		},
 		fuelModel: { DEFAULT_TANK_GALLONS: 200 },
 		notifyChange: () => {},
 	};
-	const put = mountRoute(ROUTES.put, env);
-	const post = mountRoute(ROUTES.post, env);
+	const put = mountRoute(VARIANT.routes.put, env);
+	const post = mountRoute(VARIANT.routes.post, env);
 	const as = (user) => ({ session: { user } });
 	return {
 		put: (user, id, body) => quiet(() => put({ ...as(user), params: { id: String(id) }, body })),
@@ -443,10 +496,13 @@ function parserSection() {
 		["purchase_price", ["purchasePrice"], false, false, null], ["maintenance_fund_monthly", ["maintenanceFundMonthly"], false, false, null],
 		["fuel_tank_gallons", ["fuel_tank_gallons", "fuelTankGallons"], false, true, 500], ["avg_mpg", ["avg_mpg", "avgMpg"], false, true, 20],
 	]), "§1 TRUCK_AMOUNT_FIELDS: the nine columns, their body keys, the five fixed costs, the seven an Investor's add ignores, and the fuel pair's 500 / 20 ceilings");
-	// The fixed-cost labels are the month-end lock's own wording, in both locks.
+	// Both month-end locks name the five fixed costs by this table's labels (and
+	// periods), reading its `fixed` rows rather than a copy of their own.
+	ok(liftFunction("truckEditLockBlockers").includes("for (const { col, label } of TRUCK_AMOUNT_FIELDS.filter((f) => f.fixed)) {") &&
+		liftFunction("truckCreateLockBlockers").includes("const AMOUNTS = TRUCK_AMOUNT_FIELDS.filter((f) => f.fixed).map((f) => [f.col, f.label, f.per]);"),
+		"§1 both month-end locks read the five fixed costs from TRUCK_AMOUNT_FIELDS");
 	for (const f of T.filter((x) => x.fixed)) {
-		const tuple = `["${f.col}", "${f.label}"`;
-		ok(SRC.split(tuple).length - 1 === 2, `§1 the ${f.col} label "${f.label}" is the one both month-end locks use`);
+		ok(!SRC.includes(`["${f.col}", "${f.label}"`), `§1 no hand-kept copy of the ${f.col} label "${f.label}" remains in server.js`);
 	}
 	// Every row reads its key(s); the fuel pair as `snake ?? camel`.
 	const one = (body, col) => m.parseTruckAmounts(body, T.filter((f) => f.col === col));
@@ -1022,14 +1078,510 @@ async function acceptanceSection() {
 		"§6 source pin: a refused or missing price is 0, and nothing returns a refusal from it");
 }
 
+// ═══════════════════════════════════════════════════════════════ §1c
+// One reader behind every sent amount and daily rate: parsePlainDecimal(). A
+// JSON number is itself; text is read only when its trimmed form is a plain
+// decimal of at most 32 characters, where Number() alone reads "0x10" as 16.
+function plainDecimalSection() {
+	section("§1c parsePlainDecimal() — the one reader behind both parsers");
+	const { m } = mountAll(makeDb());
+	const pd = m.parsePlainDecimal;
+	for (const [label, raw, expect] of [
+		['"12.5"', "12.5", 12.5], ['" 12 "', " 12 ", 12], ['"\\t7\\n"', "\t7\n", 7], ['".5"', ".5", 0.5], ['"5."', "5.", 5],
+		['"1e3"', "1e3", 1000], ['"1E3"', "1E3", 1000], ['"1e+3"', "1e+3", 1000], ['"1e-3"', "1e-3", 0.001], ['"+5"', "+5", 5],
+		['"-5" (read; the callers refuse a negative)', "-5", -5], ['"00012"', "00012", 12], ['"0"', "0", 0],
+		['"1e999" (a three-digit exponent: Infinity, which the callers refuse)', "1e999", Infinity],
+		["32 digits (the cap)", "1".repeat(32), Number("1".repeat(32))],
+		["12.5, a number", 12.5, 12.5], ["Infinity, a number (the callers refuse it)", Infinity, Infinity],
+	]) {
+		ok(Object.is(pd(raw), expect), `§1c ${label} → ${expect} (got ${pd(raw)})`);
+	}
+	for (const [label, raw] of [
+		['"0x10"', "0x10"], ['"0X1F"', "0X1F"], ['"0b1"', "0b1"], ['"0B11"', "0B11"], ['"0o7"', "0o7"], ['"0O17"', "0O17"], ['" 0x10 "', " 0x10 "],
+		['"Infinity"', "Infinity"], ['"-Infinity"', "-Infinity"], ['"NaN"', "NaN"], ['"1,000"', "1,000"], ['"$100"', "$100"], ['"1_000"', "1_000"],
+		['"12abc"', "12abc"], ['""', ""], ['"   "', "   "], ['"."', "."], ['"e3"', "e3"], ['"1e"', "1e"], ['"1e1000" (a four-digit exponent)', "1e1000"],
+		['"--5"', "--5"], ['"1.2.3"', "1.2.3"], ["Arabic-Indic digits", "١٢"], ["full-width digits", "１２"],
+		["33 digits (one over the cap)", "1".repeat(33)], ["a 1 MiB string of digits", "1".repeat(1 << 20)],
+		["true", true], ["null", null], ["undefined", undefined], ["[5]", [5]], ["{}", {}],
+	]) {
+		ok(Number.isNaN(pd(raw)), `§1c ${label} → NaN (got ${pd(raw)})`);
+	}
+	const body = liftFunction("parsePlainDecimal");
+	const capAt = body.indexOf("text.length > 32 ||");
+	ok(capAt > 0 && capAt < body.indexOf(".test(text)"), "§1c the length cap is checked before the pattern runs");
+
+	// Both parsers read through it, and their refusals keep their words.
+	for (const raw of ["0x10", "0b1", "0o7", " 0x10 ", "1".repeat(33)]) {
+		const r = m.parseTruckAmount(raw, "Insurance");
+		ok(r.error === "Insurance must be a number between 0 and 1,000,000" && r.value === undefined,
+			`§1c parseTruckAmount(${JSON.stringify(raw)}) is refused in the same words (got ${JSON.stringify(r)})`);
+	}
+	const PAY_ERROR = "Driver daily pay must be a number between 0 and 10000";
+	for (const [label, raw, expect] of [
+		["undefined", undefined, 0], ["null", null, 0], ['""', "", 0], ['"   " (blank, as before)', "   ", 0], ['"250"', "250", 250],
+		["250", 250, 250], ['" 275.5 "', " 275.5 ", 275.5], ['"1e3"', "1e3", 1000], ["10000 (the cap)", 10000, 10000],
+	]) {
+		const r = m.parseDriverPayDaily(raw);
+		ok(r.value === expect && !r.error, `§1c parseDriverPayDaily(${label}) → ${expect} (got ${JSON.stringify(r)})`);
+	}
+	for (const [label, raw] of [
+		['"0x10"', "0x10"], ['"0b1"', "0b1"], ['"0o7"', "0o7"], ['"Infinity"', "Infinity"], ["10000.01", 10000.01], ["-1", -1],
+		['"12abc"', "12abc"], ["true", true], ["[250]", [250]],
+	]) {
+		const r = m.parseDriverPayDaily(raw);
+		ok(r.error === PAY_ERROR && r.value === undefined, `§1c parseDriverPayDaily(${label}) is refused in the same words (got ${JSON.stringify(r)})`);
+	}
+	for (const name of ["parseTruckAmount", "parseDriverPayDaily"]) {
+		const src = liftFunction(name).split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+		ok(src.includes("parsePlainDecimal(raw)") && !/\bNumber\(|parseFloat\(/.test(src), `§1c ${name}() reads through parsePlainDecimal(), with no Number() or parseFloat() of its own`);
+	}
+	// The cost audit's period on each row (the fuel pair is not a cost).
+	ok(JSON.stringify(m.TRUCK_AMOUNT_FIELDS.map((f) => (f.per === undefined ? null : f.per))) === JSON.stringify(["/mo", "/mo", "/mo", "/yr", "/yr", "", "/mo", null, null]),
+		`§1c TRUCK_AMOUNT_FIELDS carries each cost row's period and none on the fuel pair (got ${JSON.stringify(m.TRUCK_AMOUNT_FIELDS.map((f) => f.per))})`);
+}
+
+// ═══════════════════════════════════════════════════════════════ §2b
+async function strictAmountRoutesSection() {
+	section("§2b the routes refuse what a bare Number() would read as a number");
+	const PAY_ERROR = "Driver daily pay must be a number between 0 and 10000";
+	for (const [label, who, over, body] of [
+		['PUT, insurance "0x10"', SUPER, { insuranceMonthly: "0x10" }, { error: "Insurance must be a number between 0 and 1,000,000", code: "INVALID_AMOUNT", field: "insurance_monthly" }],
+		['PUT, fuel tank "0b1"', DISPATCHER, { fuel_tank_gallons: "0b1" }, { error: "Fuel tank must be a number between 0 and 500", code: "INVALID_AMOUNT", field: "fuel_tank_gallons" }],
+		['PUT, admin fee "0o7"', SUPER, { adminFeePct: "0o7" }, { error: "Admin fee must be a number between 0 and 100", code: "INVALID_AMOUNT", field: "admin_fee_pct" }],
+		['PUT, driver pay "0x10"', SUPER, { driverPayDaily: "0x10" }, { error: PAY_ERROR }],
+	]) {
+		const db = makeDb();
+		const app = mountAll(db);
+		const before = snapshot(db);
+		const r = await app.put(who, 1, truckFormBody(truckRow(db, 1), { ...over, assignedDriver: "Bob Driver" }));
+		ok(r.status === 400 && JSON.stringify(r.body) === JSON.stringify(body) && snapshot(db) === before && app.seen.activeLoad === 0,
+			`§2b ${label}: 400 ${JSON.stringify(body)}, nothing written, before the active-load check (got ${r.status} ${JSON.stringify(r.body)})`);
+	}
+	for (const [label, who, over, body] of [
+		['POST by an Investor, purchase price "0x10"', INVESTOR, { purchasePrice: "0x10", driverPayDaily: undefined }, { error: "Purchase price must be a number between 0 and 1,000,000", code: "INVALID_AMOUNT", field: "purchase_price" }],
+		['POST by a Super Admin, driver pay "0b1"', SUPER, { driverPayDaily: "0b1" }, { error: PAY_ERROR }],
+	]) {
+		const db = makeDb();
+		const app = mountAll(db);
+		const before = snapshot(db);
+		const r = await app.post(who, addForm(over));
+		ok(r.status === 400 && JSON.stringify(r.body) === JSON.stringify(body) && snapshot(db) === before,
+			`§2b ${label}: 400 ${JSON.stringify(body)}, nothing inserted (got ${r.status} ${JSON.stringify(r.body)})`);
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════ §7
+// A unit number is one line of plain text (parseUnitNumber()), and every truck
+// audit line names it through auditText(), which drops the same characters.
+const UNSAFE_UNIT_CHARS = [
+	"\u0000", "\u0007", "\t", "\n", "\r", "\u001b", "\u001f", "\u007f", "\u0080", "\u0085", "\u009f",
+	"\u200e", "\u200f", "\u202a", "\u202b", "\u202c", "\u202d", "\u202e", "\u2066", "\u2067", "\u2068", "\u2069",
+];
+const codePoint = (c) => `U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}`;
+const UNSAFE_RE = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+const INVALID_UNIT = (error) => ({ error, code: "INVALID_UNIT_NUMBER", field: "unitNumber" });
+const UNIT_CHARS_ERROR = "Unit number cannot contain control or text-direction characters.";
+async function unitNumberSection() {
+	section("§7 unit numbers — one plain line of text, and named through auditText() in every truck audit line");
+	const { m } = mountAll(makeDb());
+	const pu = m.parseUnitNumber;
+	const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+	ok(same(pu(undefined), { value: undefined }) && Object.prototype.hasOwnProperty.call(pu(undefined), "value"), "§7 not sent to the PUT: { value: undefined }");
+	ok(same(pu(undefined, { required: true }), { refusal: INVALID_UNIT("Unit number is required") }), "§7 not sent to the POST: required");
+	for (const [label, raw] of [["null", null], ['""', ""], ['"   "', "   "]]) {
+		for (const required of [false, true]) {
+			ok(same(pu(raw, { required }), { refusal: INVALID_UNIT("Unit number is required") }), `§7 ${label}${required ? " (POST)" : " (PUT)"}: "Unit number is required"`);
+		}
+	}
+	for (const [label, raw] of [["23", 23], ["0", 0], ["true", true], ["{}", {}], ["[]", []], ['["LogisX-#23"]', ["LogisX-#23"]]]) {
+		ok(same(pu(raw), { refusal: INVALID_UNIT("Unit number must be text.") }), `§7 ${label}: "Unit number must be text." (got ${JSON.stringify(pu(raw))})`);
+	}
+	ok(same(pu("  LogisX-#23  "), { value: "LogisX-#23" }), "§7 padding is trimmed");
+	for (const raw of ["LogisX-#23", "Unit 5", "Ünité-7", "LX¡", "LX⁰"]) {
+		ok(same(pu(raw), { value: raw }), `§7 ${JSON.stringify(raw)} is a unit number`);
+	}
+	for (const c of UNSAFE_UNIT_CHARS) {
+		ok(same(pu(`Logis${c}X-#23`), { refusal: INVALID_UNIT(UNIT_CHARS_ERROR) }), `§7 ${codePoint(c)} inside: refused`);
+		ok(same(pu(`LogisX-#23${c}`), { refusal: INVALID_UNIT(UNIT_CHARS_ERROR) }), `§7 ${codePoint(c)} at the end, where a trim would hide it: refused`);
+	}
+	// One class, two copies (each function stands alone): they must not drift.
+	const classOf = (name) => (liftFunction(name).match(/\/\[\\u0000-[^\]]*\]\/g?/) || [""])[0].replace(/g$/, "");
+	ok(classOf("parseUnitNumber") !== "" && classOf("parseUnitNumber") === classOf("auditText"),
+		`§7 parseUnitNumber() and auditText() carry the same character class (${classOf("parseUnitNumber")} / ${classOf("auditText")})`);
+	ok(classOf("parseUnitNumber") === "/[\\u0000-\\u001f\\u007f-\\u009f\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]/",
+		`§7 ...which is C0, DEL + C1 and the text-direction characters, written as escapes (got ${classOf("parseUnitNumber")})`);
+	// The characters themselves never appear in the source: written as escapes,
+	// so the code reads as it runs.
+	const literal = new RegExp("[\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]");
+	for (const [label, text] of [["server.js", SRC], ["client/src/lib/truckAmounts.js", fs.readFileSync(path.join(__dirname, "..", "client", "src", "lib", "truckAmounts.js"), "utf8")]]) {
+		ok(!literal.test(text), `§7 ${label} carries no literal text-direction character`);
+	}
+
+	// POST: refused before anything is read or written.
+	for (const [label, over, body] of [
+		...UNSAFE_UNIT_CHARS.filter((c, i) => i % 3 === 0).map((c) => [`a unit number with ${codePoint(c)}`, { unitNumber: `LX${c}9` }, INVALID_UNIT(UNIT_CHARS_ERROR)]),
+		["a unit number that is a number", { unitNumber: 500 }, INVALID_UNIT("Unit number must be text.")],
+		["a unit number that is an object", { unitNumber: { v: "500" } }, INVALID_UNIT("Unit number must be text.")],
+		["no unit number", { unitNumber: undefined }, INVALID_UNIT("Unit number is required")],
+		["a blank unit number", { unitNumber: "  " }, INVALID_UNIT("Unit number is required")],
+	]) {
+		const db = makeDb();
+		const app = mountAll(db);
+		const before = snapshot(db);
+		const r = await app.post(SUPER, addForm({ ...over, assignedDriver: "Bob Driver" }));
+		ok(r.status === 400 && same(r.body, body) && snapshot(db) === before && app.seen.activeLoad === 0 && app.seen.createLockSeen.length === 0,
+			`§7 POST, ${label}: 400 ${JSON.stringify(body)}, nothing written, before the active-load check and the lock (got ${r.status} ${JSON.stringify(r.body)})`);
+	}
+	// PUT: the same, a non-string or a blank included.
+	for (const [label, unitNumber, body] of [
+		...UNSAFE_UNIT_CHARS.filter((c, i) => i % 3 === 1).map((c) => [`a rename with ${codePoint(c)}`, `LX${c}33`, INVALID_UNIT(UNIT_CHARS_ERROR)]),
+		["a unit number that is a number", 33, INVALID_UNIT("Unit number must be text.")],
+		["a unit number that is an object", { v: "33" }, INVALID_UNIT("Unit number must be text.")],
+		["a unit number that is true", true, INVALID_UNIT("Unit number must be text.")],
+		["null", null, INVALID_UNIT("Unit number is required")],
+		['""', "", INVALID_UNIT("Unit number is required")],
+		['"   "', "   ", INVALID_UNIT("Unit number is required")],
+	]) {
+		const db = makeDb();
+		const app = mountAll(db);
+		const before = snapshot(db);
+		const r = await app.put(DISPATCHER, 1, { unitNumber, assignedDriver: "Bob Driver", notes: "x" });
+		ok(r.status === 400 && same(r.body, body) && snapshot(db) === before && app.seen.activeLoad === 0 && app.seen.editLockSeen.length === 0,
+			`§7 PUT, ${label}: 400 ${JSON.stringify(body)}, nothing written, before the active-load check and the lock (got ${r.status} ${JSON.stringify(r.body)})`);
+	}
+	{
+		const db = makeDb();
+		const app = mountAll(db);
+		const r = await app.put(DISPATCHER, 1, { unitNumber: "LogisX-#33", notes: "resent" });
+		ok(r.status === 200 && truckRow(db, 1).notes === "resent", `§7 PUT resending the stored unit number: 200 (got ${r.status} ${JSON.stringify(r.body)})`);
+	}
+
+	// auditText(): control and text-direction characters dropped, newlines and
+	// tabs a space, and dropped BEFORE the purge-marker scrub.
+	const at = m.auditText;
+	for (const c of UNSAFE_UNIT_CHARS) {
+		const want = ["\t", "\n", "\r"].includes(c) ? "a b" : "ab";
+		ok(at(`a${c}b`, 100) === want, `§7 auditText() turns ${codePoint(c)} between two letters into ${JSON.stringify(want)} (got ${JSON.stringify(at(`a${c}b`, 100))})`);
+	}
+	ok(at("a\r\n\tb", 100) === "a b", "§7 auditText() still collapses a run of newlines and tabs to one space");
+	for (const c of ["\u0001", "\u0085", "\u200e", "\u202e", "\u2066"]) {
+		for (const text of [`[${c}PERIOD_FINALIZED]`, `[PER${c}IOD_FINALIZED]`, `[${c}period_x`]) {
+			const out = at(text, 100);
+			ok(!/\[period/i.test(out), `§7 auditText(${JSON.stringify(text)}) leaves no purge marker (got ${JSON.stringify(out)})`);
+		}
+	}
+	ok(at("U".repeat(150), 100) === "U".repeat(100), "§7 auditText(…, 100) caps at 100 characters");
+
+	// Every truck audit line names the truck through it — shown on a stored
+	// number that predates the check (written straight into the row).
+	{
+		const db = makeDb();
+		db.prepare("UPDATE trucks SET unit_number = ? WHERE id = 1").run("Logis\u202eX\n#33\u0007");
+		const app = mountAll(db);
+		const r = await app.put(SUPER, 1, {
+			status: "Maintenance", insuranceMonthly: 1700, fuel_tank_gallons: 190, avg_mpg: 6.8, driverPayDaily: 300, ownerId: 9,
+			in_service_date: "2026-04-15", retired_at: "2026-12-31",
+		});
+		const rows = db.prepare("SELECT action, details FROM audit_trail WHERE entity = 'truck' ORDER BY id").all();
+		ok(r.status === 200 && rows.length === 8, `§7 a save changing eight audited things on a truck with such a stored number: 200, eight lines (got ${r.status}, ${rows.map((x) => x.action).join(", ")})`);
+		for (const row of rows) {
+			ok(!UNSAFE_RE.test(row.details) && row.details.includes("LogisX #33"),
+				`§7 ${row.action} names the truck as "LogisX #33", with nothing unsafe left (got ${JSON.stringify(row.details)})`);
+		}
+		const refused = await app.put(DISPATCHER, 1, { driverPayDaily: 900 });
+		const blocked = db.prepare("SELECT details FROM audit_trail WHERE action = 'pay_edit_blocked'").all();
+		ok(refused.status === 403 && blocked.length === 1 && !UNSAFE_RE.test(blocked[0].details) && blocked[0].details.includes("LogisX #33"),
+			`§7 the pay refusal's audit row names it the same way (got ${refused.status}, ${JSON.stringify(blocked)})`);
+	}
+	{
+		const db = makeDb();
+		db.prepare("UPDATE trucks SET unit_number = ? WHERE id = 1").run("U".repeat(150));
+		const app = mountAll(db);
+		await app.put(SUPER, 1, { insuranceMonthly: 1700 });
+		const line = (audits(db, "update_truck_costs")[0] || {}).details || "";
+		ok(line.startsWith(`Costs for ${"U".repeat(100)}: `), `§7 a 150-character stored unit number is named by its first 100 (got ${JSON.stringify(line.slice(0, 120))})`);
+	}
+
+	// Source: every truck audit writer and truck refusal subject in server.js
+	// names the unit number through auditText() or the route's unitLabel.
+	const truckWrites = [...SRC.matchAll(/logAudit\(req, ["'][a-z_]+["'], ["']truck["'][\s\S]*?\);\n/g)].map((x) => x[0]);
+	ok(truckWrites.length === 12, `§7 source: the twelve truck audit writers are found (got ${truckWrites.length})`);
+	const raw = truckWrites.filter((w) => /\$\{(truck\.unit_number|unitNumber|unit)\b(?!Label)/.test(w));
+	ok(raw.length === 0, `§7 source: none names the unit number raw (got ${JSON.stringify(raw.map((w) => w.slice(0, 80)))})`);
+	const subjects = [...SRC.matchAll(/entity: "truck",[^\n]*\n?[^\n]*subject: `[^\n]*/g)].map((x) => x[0]);
+	ok(subjects.length >= 5 && subjects.every((s) => !/\$\{truck\.unit_number|\$\{unitNumber|\$\{unit\}/.test(s.slice(s.indexOf("subject:")))),
+		`§7 source: no truck refusal subject names the unit number raw (${subjects.length} found)`);
+}
+
+// ═══════════════════════════════════════════════════════════════ §8
+// PUT /api/trucks/:id awaits once, for the active-load check, before any guard
+// that reads the row; it then reads the row again, and nothing is awaited from
+// there to the last write. The waiting is controlled here: each save parks in
+// the active-load check until the test releases it.
+async function until(cond) {
+	for (let i = 0; i < 500 && !cond(); i++) await new Promise((done) => setImmediate(done));
+	return cond();
+}
+async function settle(promises, ms = 3000) {
+	let timer;
+	const late = new Promise((done) => { timer = setTimeout(() => done(null), ms); });
+	const out = await Promise.race([Promise.all(promises), late]);
+	clearTimeout(timer);
+	return out;
+}
+const PUT_CLASH = 'const conflict = db.prepare("SELECT id FROM trucks WHERE LOWER(unit_number) = LOWER(?) AND id != ?").get(nextUnit, id);\n\t\t\tif (conflict) return res.status(400).json({ error: "Unit number already exists" });';
+const POST_CLASH = 'const existing = db.prepare("SELECT id FROM trucks WHERE LOWER(unit_number) = LOWER(?)").get(unit);\n\t\tif (existing) {\n\t\t\treturn res.status(400).json({ error: "Unit number already exists" });\n\t\t}';
+async function renameRaceSection() {
+	section("§8 PUT /api/trucks/:id — two saves at once, one wait, one re-read");
+	for (const [label, a, b, order] of [
+		["case variants, released in order", "LogisX-#50", "logisx-#50", [0, 1]],
+		["case variants, released in reverse", "LOGISX-#50", "LogisX-#50", [1, 0]],
+		["the same number exactly", "LogisX-#50", "LogisX-#50", [0, 1]],
+	]) {
+		const db = makeDb();
+		const waiting = [];
+		const app = mountAll(db, { activeLoad: () => new Promise((done) => waiting.push(done)) });
+		const saves = [
+			app.put(SUPER, 1, { unitNumber: a, assignedDriver: "Bob Driver" }),
+			app.put(SUPER, 2, { unitNumber: b, assignedDriver: "Dan Driver" }),
+		];
+		const parked = await until(() => waiting.length === 2);
+		ok(parked, `§8 ${label}: both saves wait in the active-load check at once (got ${waiting.length})`);
+		for (const i of order) if (waiting[i]) waiting[i](null);
+		const done = await settle(saves);
+		for (const w of waiting) w(null);
+		const [x, y] = done || [{}, {}];
+		ok(!!done && [x.status, y.status].sort().join(",") === "200,400",
+			`§8 ${label}: exactly one save succeeds (got ${x.status} ${JSON.stringify(x.body)} / ${y.status} ${JSON.stringify(y.body)})`);
+		const loser = x.status === 400 ? 1 : 2;
+		ok(!!done && JSON.stringify((loser === 1 ? x : y).body) === JSON.stringify({ error: "Unit number already exists" }),
+			`§8 ${label}: the other is refused "Unit number already exists", not a 500`);
+		ok(db.prepare("SELECT COUNT(*) AS n FROM trucks WHERE LOWER(unit_number) = 'logisx-#50'").get().n === 1, `§8 ${label}: one truck holds the number`);
+		const t = truckRow(db, loser);
+		const driver = loser === 1 ? "Bob Driver" : "Dan Driver";
+		ok(t.unit_number === (loser === 1 ? "LogisX-#33" : "Logisx-#91") && t.assigned_driver === (loser === 1 ? "Shorn King" : "") &&
+			db.prepare("SELECT COUNT(*) AS n FROM truck_assignments WHERE driver_name = ? AND end_date = ''").get(driver).n === 0,
+			`§8 ${label}: the refused save wrote nothing — truck ${loser} keeps its number and driver, and ${driver} has no assignment`);
+	}
+	{
+		// A write that lands during the wait is what the guards and the audit read:
+		// insurance already 1,700 is no change; IRP moved from 1,380 to 1,450.
+		const db = makeDb();
+		const waiting = [];
+		const app = mountAll(db, { activeLoad: () => new Promise((done) => waiting.push(done)) });
+		const save = app.put(SUPER, 1, { insuranceMonthly: 1700, irpAnnual: 1500, assignedDriver: "Bob Driver" });
+		await until(() => waiting.length === 1);
+		db.prepare("UPDATE trucks SET insurance_monthly = 1700, irp_annual = 1450 WHERE id = 1").run();
+		for (const w of waiting) w(null);
+		const [out] = (await settle([save])) || [{}];
+		const asked = app.seen.editLockSeen[0] || {};
+		ok(out.status === 200 && !("insurance_monthly" in asked) && asked.irp_annual === 1500,
+			`§8 the month-end lock is asked about the row as re-read: insurance no change, IRP → 1500 (got ${out.status}, ${JSON.stringify(asked)})`);
+		ok(JSON.stringify(audits(db, "update_truck_costs").map((x) => x.details)) ===
+			JSON.stringify(["Costs for LogisX-#33: IRP $1,450.00/yr → $1,500.00/yr; fixed costs $3,119.16/mo → $3,123.33/mo"]),
+			`§8 ...and the cost line's "before" values are the re-read row's (got ${JSON.stringify(audits(db, "update_truck_costs").map((x) => x.details))})`);
+	}
+	{
+		// A Dispatcher's save resending the rate its form loaded, while a Super
+		// Admin changes the rate during the wait: the new rate is kept, and the
+		// save names no pay change it did not make.
+		const db = makeDb();
+		const waiting = [];
+		const app = mountAll(db, { activeLoad: () => new Promise((done) => waiting.push(done)) });
+		const save = app.put(DISPATCHER, 1, truckFormBody(truckRow(db, 1), { assignedDriver: "Bob Driver" }));
+		await until(() => waiting.length === 1);
+		db.prepare("UPDATE trucks SET driver_pay_daily = 300 WHERE id = 1").run();
+		for (const w of waiting) w(null);
+		const [out] = (await settle([save])) || [{}];
+		ok(out.status === 200 && truckRow(db, 1).driver_pay_daily === 300 && audits(db, "update_driver_pay").length === 0 &&
+			!("driver_pay_daily" in (app.seen.editLockSeen[0] || {})),
+			`§8 a Dispatcher's rate resend during a Super Admin's change: 200, 300 kept, no pay line, the lock not asked about pay (got ${out.status}, ${truckRow(db, 1).driver_pay_daily}, ${audits(db, "update_driver_pay").length} line(s), ${JSON.stringify(app.seen.editLockSeen[0])})`);
+	}
+	{
+		// The column's UNIQUE behind the check: with the check taken out, an exact
+		// duplicate is still refused as the check refuses it, with nothing written
+		// — the driver assignment the save carried is rolled back with the row.
+		const saved = VARIANT;
+		VARIANT = { ...saved, routes: { ...saved.routes, put: saved.routes.put.split(PUT_CLASH).join(""), post: saved.routes.post.split(POST_CLASH).join("") } };
+		try {
+			const db = makeDb();
+			const app = mountAll(db);
+			const before = snapshot(db);
+			const r = await app.put(SUPER, 2, { unitNumber: "LogisX-#33", assignedDriver: "Dan Driver" });
+			ok(r.status === 400 && JSON.stringify(r.body) === JSON.stringify({ error: "Unit number already exists" }) && snapshot(db) === before,
+				`§8 without the check, PUT's exact duplicate: 400 "Unit number already exists", nothing written, the assignment rolled back (got ${r.status} ${JSON.stringify(r.body)})`);
+			const p = await app.post(SUPER, addForm({ unitNumber: "LogisX-#33" }));
+			ok(p.status === 400 && JSON.stringify(p.body) === JSON.stringify({ error: "Unit number already exists" }) && snapshot(db) === before,
+				`§8 without the check, POST's exact duplicate: 400, nothing inserted (got ${p.status} ${JSON.stringify(p.body)})`);
+		} finally {
+			VARIANT = saved;
+		}
+	}
+	{
+		// The structure: one await in the PUT, before the re-read; none from the
+		// re-read to the transaction. POST: none from its unit-number check on.
+		const put = ROUTES.put.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+		const post = ROUTES.post.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+		const reread = put.indexOf('\t\ttruck = db.prepare("SELECT * FROM trucks WHERE id = ?").get(id);');
+		const clash = put.indexOf(PUT_CLASH);
+		const tx = put.indexOf("db.transaction(");
+		ok((put.match(/\bawait\b/g) || []).length === 1 && put.indexOf("await ") < reread && reread < clash && clash < tx && !/\bawait\b/.test(put.slice(reread)),
+			"§8 source: the PUT awaits once, then reads the row again, and nothing is awaited from there to its writes");
+		const postClash = post.indexOf(POST_CLASH);
+		ok(postClash > post.lastIndexOf("await ") && postClash < post.indexOf("INSERT INTO trucks"),
+			"§8 source: POST checks the unit number after its last await and before its INSERT");
+		const unitAt = put.indexOf("const unitParsed = parseUnitNumber(unitNumber);");
+		ok(unitAt > 0 && unitAt < put.indexOf("await ") && post.indexOf("parseUnitNumber(unitNumber, { required: true })") < post.indexOf("await "),
+			"§8 source: both routes read the unit number before their first await");
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════ §9
+// The PUT checks a photo only when it CHANGES; a resend is written back as
+// stored. Decided against the row as first read (a refusal comes before the
+// wait) and again against the row as re-read.
+const pngOf = (w, h) => {
+	const b = Buffer.alloc(33);
+	b.writeUInt32BE(0x89504e47, 0); b.writeUInt32BE(0x0d0a1a0a, 4); b.writeUInt32BE(13, 8); b.write("IHDR", 12, "latin1");
+	b.writeUInt32BE(w, 16); b.writeUInt32BE(h, 20); b[24] = 8; b[25] = 6;
+	return b;
+};
+const dataUri = (label, buf) => `data:${label};base64,${buf.toString("base64")}`;
+const LEGACY_PHOTO = dataUri("image/heic", Buffer.from("ftypheic, bytes this server cannot serve"));
+async function photoChangeSection() {
+	section("§9 PUT /api/trucks/:id — a photo is checked when it changes");
+	{
+		const db = makeDb();
+		db.prepare("UPDATE trucks SET photo = ? WHERE id = 1").run(LEGACY_PHOTO);
+		const app = mountAll(db);
+		const r = await app.put(DISPATCHER, 1, { notes: "new tyres", photo: LEGACY_PHOTO });
+		ok(r.status === 200 && truckRow(db, 1).notes === "new tyres" && truckRow(db, 1).photo === LEGACY_PHOTO,
+			`§9 a resend of a stored photo the route cannot serve, beside a note: 200, the photo as stored (got ${r.status} ${JSON.stringify(r.body)})`);
+	}
+	{
+		const db = makeDb();
+		const app = mountAll(db);
+		const before = snapshot(db);
+		const r = await app.put(DISPATCHER, 1, { photo: dataUri("image/jpeg", Buffer.from("<html>not an image</html>")), assignedDriver: "Bob Driver" });
+		ok(r.status === 415 && (r.body || {}).code === "UNSUPPORTED_IMAGE_TYPE" && (r.body || {}).field === "photo" && snapshot(db) === before && app.seen.activeLoad === 0,
+			`§9 a changed photo that is not an image: 415 before the active-load check, nothing written (got ${r.status} ${JSON.stringify(r.body)})`);
+	}
+	{
+		const db = makeDb();
+		const app = mountAll(db);
+		const r = await app.put(SUPER, 1, { photo: dataUri("image/jpeg", pngOf(2, 2)) });
+		ok(r.status === 200 && truckRow(db, 1).photo === dataUri("image/png", pngOf(2, 2)),
+			`§9 a changed photo, PNG bytes under a JPEG label: stored canonical as image/png (got ${r.status} ${JSON.stringify(r.body)})`);
+	}
+	{
+		// Resent as stored when the save began; cleared by another save during the
+		// wait, so by the time this one writes it is a change, and is checked.
+		const db = makeDb();
+		db.prepare("UPDATE trucks SET photo = ? WHERE id = 1").run(LEGACY_PHOTO);
+		const waiting = [];
+		const app = mountAll(db, { activeLoad: () => new Promise((done) => waiting.push(done)) });
+		const save = app.put(SUPER, 1, { photo: LEGACY_PHOTO, notes: "n", assignedDriver: "Bob Driver" });
+		await until(() => waiting.length === 1);
+		db.prepare("UPDATE trucks SET photo = '' WHERE id = 1").run();
+		for (const w of waiting) w(null);
+		const [out] = (await settle([save])) || [{}];
+		ok(out.status === 415 && truckRow(db, 1).photo === "" && truckRow(db, 1).notes !== "n",
+			`§9 a resend that is a change by the time the save writes: checked then — 415, nothing written (got ${out.status} ${JSON.stringify(out.body)})`);
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════ § mutants
+// Each guard broken in a copy of the shipped source; the behaviour sections
+// above, run against the copy, must fail at least one check. Every anchor is
+// asserted to occur exactly once, so a refactor that moves one fails here
+// loudly instead of leaving its mutant a no-op.
+const BEHAVIOUR = [parserSection, plainDecimalSection, putRefusalSection, strictAmountRoutesSection, putSuccessSection,
+	putRenameSyncSection, postSection, unitNumberSection, renameRaceSection, photoChangeSection];
+const AWAIT_IF = "if (nextAssignedDriver && normalizeDriverName(nextAssignedDriver) !== normalizeDriverName(truck.assigned_driver)) {";
+const UNSAFE_CLASS = String.raw`/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/`;
+const MUTANTS = [
+	["M1 an amount no longer held finite and in range", [["module", "if (!Number.isFinite(n) || n < 0 || n > max) {", "if (false) {"]]],
+	["M2 text read by a bare Number(), so \"0x10\" is 16", [["module",
+		String.raw`if (text.length > 32 || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d{1,3})?$/.test(text)) return NaN;`, 'if (text === "") return NaN;']]],
+	["M3 the length cap dropped", [["module", "text.length > 32 || ", ""]]],
+	["M4 the photo checked on presence instead of change", [
+		["put", 'photo !== "" && photo !== (truck.photo || "")\n\t\t\t? truckPhotoForStorage(photo) : null;', 'photo !== ""\n\t\t\t? truckPhotoForStorage(photo) : null;'],
+		["put", 'if (photo !== undefined && photo !== null && photo !== "" && photo !== (truck.photo || "")) {', 'if (photo !== undefined && photo !== null && photo !== "") {'],
+	]],
+	["M5 the cost audit keyed on presence instead of difference", [["put", "if (amount[f.col] !== undefined && amount[f.col] !== before) {", "if (amount[f.col] !== undefined) {"]]],
+	["M6 the admin fee held to the amount ceiling instead of 0–100", [["module", 'return parseTruckAmount(raw, "Admin fee", ADMIN_FEE_PCT_MAX);', 'return parseTruckAmount(raw, "Admin fee", TRUCK_AMOUNT_MAX);']]],
+	["M7 the fuel tank's 500-gallon ceiling dropped", [["module", "staffOnly: true, max: 500 }", "staffOnly: true }"]]],
+	["M8 the average MPG's 20 ceiling dropped", [["module", "staffOnly: true, max: 20 }", "staffOnly: true }"]]],
+	["M9 unit numbers with control or text-direction characters let through", [["module", `if (${UNSAFE_CLASS}.test(raw)) {`, "if (false) {"]]],
+	["M10 auditText() keeping control and text-direction characters", [["module", `.replace(${UNSAFE_CLASS}g, "")`, ""]]],
+	["M11 auditText() dropping them after the purge-marker scrub", [["module",
+		`const flat = s.replace(/[\\r\\n\\t]+/g, " ").replace(${UNSAFE_CLASS}g, "");\n\treturn scrubPurgeMarker(flat).trim().slice(0, max);`,
+		`return scrubPurgeMarker(s).replace(/[\\r\\n\\t]+/g, " ").replace(${UNSAFE_CLASS}g, "").trim().slice(0, max);`]]],
+	["M12 the unit-number check back above the active-load wait", [
+		["put", PUT_CLASH, ""],
+		["put", AWAIT_IF, `if (nextUnit !== undefined) {\n\t\t\t${PUT_CLASH}\n\t\t}\n\t\t${AWAIT_IF}`],
+	]],
+	["M13 the row not read again after the wait", [["put", '\t\ttruck = db.prepare("SELECT * FROM trucks WHERE id = ?").get(id);\n', "\n"]]],
+	["M14 PUT's write-time duplicate answered 500", [["put", 'if (isUnitNumberTaken(err)) return res.status(400).json({ error: "Unit number already exists" });', ""]]],
+	["M15 POST's write-time duplicate answered 500", [["post", 'if (isUnitNumberTaken(err)) return res.status(400).json({ error: "Unit number already exists" });', ""]]],
+	["M16 the driver assignment written outside the UPDATE's transaction", [["put",
+		"db.transaction(() => {\n\t\t\t\tif (nextAssignedDriver !== undefined) assignDriverToTruck(id, nextAssignedDriver);",
+		"if (nextAssignedDriver !== undefined) assignDriverToTruck(id, nextAssignedDriver);\n\t\t\tdb.transaction(() => {"]]],
+	["M17 a pay line for a rate the save did not write", [["put",
+		"if (payEditAllowed && driverPayParsed && driverPayParsed.value !== (truck.driver_pay_daily || 0)) {",
+		"if (driverPayParsed && driverPayParsed.value !== (truck.driver_pay_daily || 0)) {"]]],
+	["M18 the lock asked about a rate the save does not write", [["put", "if (!payEditAllowed) delete changed.driver_pay_daily;", ""]]],
+];
+async function mutantSection() {
+	section("§ mutants — each must be caught");
+	const shipped = { module: MODULE_SRC, put: ROUTES.put, post: ROUTES.post };
+	for (const [label, edits] of MUTANTS) {
+		const src = { ...shipped };
+		let anchored = true;
+		for (const [where, from, to] of edits) {
+			const hits = src[where].split(from).length - 1;
+			ok(hits === 1, `§M ${label}: its anchor occurs ${hits} time(s) in the ${where} source, expected exactly 1 — ${JSON.stringify(from.slice(0, 80))}`);
+			if (hits !== 1) { anchored = false; break; }
+			src[where] = src[where].replace(from, () => to);
+		}
+		if (!anchored) continue;
+		const results = [];
+		const log = console.log;
+		const err = console.error;
+		sink = results;
+		VARIANT = { moduleSrc: src.module, routes: { ...ROUTES, put: src.put, post: src.post } };
+		console.log = () => {};
+		console.error = () => {};
+		try {
+			for (const run of BEHAVIOUR) {
+				try { await run(); } catch (e) { results.push({ ok: false, name: `${run.name} threw: ${e.message}` }); }
+			}
+		} finally {
+			console.log = log;
+			console.error = err;
+			sink = null;
+			VARIANT = { moduleSrc: MODULE_SRC, routes: ROUTES };
+		}
+		const bad = results.filter((r) => !r.ok);
+		ok(bad.length > 0, `§M ${label} was NOT caught — the checks above have lost their teeth`);
+		console.log(`  ${label}: caught by ${bad.length} check(s), e.g. ✗ ${(bad[0] || {}).name || "—"}`.slice(0, 220));
+	}
+}
+
 (async () => {
 	parserSection();
+	plainDecimalSection();
 	await putRefusalSection();
+	await strictAmountRoutesSection();
 	await putSuccessSection();
 	await putRenameSyncSection();
 	await postSection();
+	await unitNumberSection();
+	await renameRaceSection();
+	await photoChangeSection();
 	sourcePins();
 	await acceptanceSection();
+	await mutantSection();
 
 	console.log(`\n${"=".repeat(64)}`);
 	if (failures.length) {

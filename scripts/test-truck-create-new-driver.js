@@ -133,7 +133,8 @@ const FUNCTIONS = [
 	"truckFixedCostLockedMonths", "truckChargedInMonth", "truckChargeFromMonth", "truckChargeUntilMonth", "truckMonthlyFixed",
 	"truckFeeLockedRows", "getDriverPayStructures", "resolveDailyRate", "truckDailyRateCandidates", "investorsHoldingDriver",
 	// what the route calls
-	"parseDriverPayDaily", "parseInServiceDate", "parseAdminFeePct", "parseTruckAmount", "parseTruckAmounts",
+	"parsePlainDecimal", "parseDriverPayDaily", "parseInServiceDate", "parseAdminFeePct", "parseTruckAmount", "parseTruckAmounts",
+	"parseUnitNumber", "isUnitNumberTaken",
 	"findDriverNameClashes", "canonicalDriverName", "assignDriverToTruck",
 	"refusePayEdit", "periodBlockedResponse", "periodLockUnreadableResponse", "periodLabel",
 	// the real refusal audit, so a refusal row is the row production writes

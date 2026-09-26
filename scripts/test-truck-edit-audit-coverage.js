@@ -31,7 +31,8 @@
 // fixed costs are billed into every month a truck is charged. They are audited
 // together, as one `update_truck_costs` line per save that changes one, so for
 // those eight the check also reads that audit's own field list and fails when a
-// column is missing from it.
+// column is missing from it. The list is the TRUCK_AMOUNT_FIELDS rows carrying
+// a `per` (the block iterates the table), plus the admin fee the block names.
 //
 // No network, no database, no server — it reads source text.
 //
@@ -113,17 +114,45 @@ function costAuditBlock(src) {
 	return open < 0 ? "" : src.slice(open, at);
 }
 
+// The block reads its field list from TRUCK_AMOUNT_FIELDS: every row that
+// carries a `per` (the period its line writes), in table order, so the table
+// is where that list lives. Evaluated from server.js source, or a sabotaged
+// copy of the statement.
+const TABLE_SRC = (() => {
+	const needle = "\nconst TRUCK_AMOUNT_FIELDS = [";
+	const hits = SRC.split(needle).length - 1;
+	if (hits !== 1) {
+		console.error(`FAIL  expected exactly 1 TRUCK_AMOUNT_FIELDS in server.js, found ${hits}`);
+		process.exit(1);
+	}
+	const a = SRC.indexOf(needle) + 1;
+	return SRC.slice(a, SRC.indexOf("\n];", a) + 3);
+})();
+const tableRows = (tableSrc) => new Function(`"use strict";\n${tableSrc}\nreturn TRUCK_AMOUNT_FIELDS;`)();
+
+// The columns the cost audit compares: the table's rows with a `per`, when the
+// block iterates the table and skips the rest, and any column the block names
+// itself (the admin fee is compared there, on its own rule).
+function costAuditColumns(src, tableSrc = TABLE_SRC) {
+	const block = costAuditBlock(src);
+	const cols = new Set();
+	if (block.includes("for (const f of TRUCK_AMOUNT_FIELDS) {") && block.includes("if (f.per === undefined) continue;")) {
+		for (const row of tableRows(tableSrc)) if (row.per !== undefined) cols.add(row.col);
+	}
+	for (const c of COST_AUDITED) if (new RegExp(`\\b${c}\\b`).test(block)) cols.add(c);
+	return cols;
+}
+
 // One answer to "does this route source audit this column?", used by section 1
 // and by the sabotage controls in section 2, so the controls exercise the check.
-function isAudited(src, col) {
+function isAudited(src, col, tableSrc = TABLE_SRC) {
 	const calls = [...src.matchAll(/logAudit\(\s*req,\s*["'`]([a-z_]+)["'`]/g)].map((m) => m[1]);
 	return calls.some((a) => a.includes(col.replace(/_gallons$/, "").replace(/^owner_id$/, "owner")))
 		|| calls.some((a) => a === `update_truck_${col}`)
 		|| (col === "driver_pay_daily" && calls.includes("update_driver_pay"))
 		|| (col === "fuel_tank_gallons" && calls.includes("update_truck_fuel_tank"))
 		|| (col === "owner_id" && calls.includes("update_truck_owner"))
-		|| (COST_AUDITED.includes(col) && calls.includes("update_truck_costs") &&
-			new RegExp(`\\b${col}\\b`).test(costAuditBlock(src)));
+		|| (COST_AUDITED.includes(col) && calls.includes("update_truck_costs") && costAuditColumns(src, tableSrc).has(col));
 }
 
 // --- 1. every must-audit column has a logAudit -------------------------------
@@ -132,7 +161,13 @@ for (const [col, why] of Object.entries(MUST_AUDIT)) {
 	check(`${col} is audited — ${why}`, isAudited(ROUTE, col), true);
 }
 check("the update_truck_costs audit's field list names each of the eight cost columns",
-	COST_AUDITED.filter((c) => !new RegExp(`\\b${c}\\b`).test(costAuditBlock(ROUTE))), []);
+	COST_AUDITED.filter((c) => !costAuditColumns(ROUTE).has(c)), []);
+// The table marks exactly the seven cost rows, in the order the line names
+// them; the fuel pair is not a cost and keeps its own lines.
+check("TRUCK_AMOUNT_FIELDS carries `per` on exactly the seven cost rows, in audit order",
+	tableRows(TABLE_SRC).filter((r) => r.per !== undefined).map((r) => [r.col, r.per]),
+	[["insurance_monthly", "/mo"], ["eld_monthly", "/mo"], ["truck_payment_monthly", "/mo"], ["hvut_annual", "/yr"], ["irp_annual", "/yr"],
+		["purchase_price", ""], ["maintenance_fund_monthly", "/mo"]]);
 
 // --- 2. THE PAIRED CASE: the scan must be able to FAIL ------------------------
 // A coverage test that cannot detect a missing audit is theatre. Strip the fuel
@@ -153,11 +188,18 @@ check("cost sabotage actually removed the call (the control is valid)",
 	/logAudit\(req, "update_truck_costs"/.test(sabotagedCosts), false);
 check("with the cost audit removed, the scan reports all eight MISSING",
 	COST_AUDITED.filter((c) => isAudited(sabotagedCosts, c)), []);
-// ...and a column dropped from its field list goes red on its own.
-const droppedIrp = ROUTE.replace('["irp_annual", "/yr"],', "");
-check("field-list sabotage actually dropped IRP (the control is valid)", droppedIrp !== ROUTE, true);
+// ...and a column dropped from its field list — IRP's row losing its `per` in
+// the table — goes red on its own.
+const IRP_ROW_TAIL = 'label: "IRP", fixed: true, staffOnly: true, per: "/yr" }';
+const droppedIrp = TABLE_SRC.replace(IRP_ROW_TAIL, 'label: "IRP", fixed: true, staffOnly: true }');
+check("field-list sabotage actually dropped IRP (the control is valid)", TABLE_SRC.split(IRP_ROW_TAIL).length === 2 && droppedIrp !== TABLE_SRC, true);
 check("with IRP dropped from the field list, the scan reports IRP MISSING and the rest audited",
-	COST_AUDITED.filter((c) => !isAudited(droppedIrp, c)), ["irp_annual"]);
+	COST_AUDITED.filter((c) => !isAudited(ROUTE, c, droppedIrp)), ["irp_annual"]);
+// ...and so does a block that stops reading the table.
+const unreadTable = ROUTE.replace("if (f.per === undefined) continue;", "if (true) continue;");
+check("table sabotage actually changed the block (the control is valid)", unreadTable !== ROUTE, true);
+check("with the block no longer reading the table, the scan reports the seven table columns MISSING",
+	COST_AUDITED.filter((c) => !isAudited(unreadTable, c)), COST_AUDITED.filter((c) => c !== "admin_fee_pct"));
 
 // --- 3. no column is silently unclassified -----------------------------------
 // This is what catches the NEXT field. A new column that is neither audited nor
@@ -169,7 +211,13 @@ check("every written column is either audited or declared cosmetic", unclassifie
 check("fuel_tank_gallons is written by this route", written.has("fuel_tank_gallons"), true);
 check("avg_mpg is written by this route", written.has("avg_mpg"), true);
 check("the fuel tank audit names the truck and both values",
-	/Fuel tank for \$\{truck\.unit_number\}: \$\{fmtTank\(before\)\} → \$\{fmtTank\(after\)\}/.test(ROUTE), true);
+	/Fuel tank for \$\{unitLabel\}: \$\{fmtTank\(before\)\} → \$\{fmtTank\(after\)\}/.test(ROUTE), true);
+// Every line names the truck through auditText(), capped at 100 characters, and
+// none interpolates the stored unit number raw.
+check("the truck is named through auditText(truck.unit_number, 100)",
+	ROUTE.includes("const unitLabel = auditText(truck.unit_number, 100);"), true);
+check("no audit line interpolates the unit number raw",
+	[...ROUTE.matchAll(/logAudit\(req,[^;]*?\$\{truck\.unit_number\}/g)].length, 0);
 // An unset tank must not read as "0 gal" — it falls back to the fleet default,
 // and the audit line should say which.
 check("an unset tank is described, not written as 0", /fleet default/.test(ROUTE), true);

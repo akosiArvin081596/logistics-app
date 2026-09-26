@@ -142,9 +142,10 @@ const CASCADE_SRC = [
 ].join("\n");
 const COL_LETTER_SRC = liftFunction("colLetter");
 const DIR_CHANGED_SRC = [liftConst("const DIRECTORY_PERIOD_COLUMNS = "), liftFunction("directoryChangedColumns")].join("\n");
-const TRUCK_PARSE_SRC = [liftFunction("parseDriverPayDaily"), liftFunction("parseInServiceDate"), liftFunction("parseRetiredAt"),
+const TRUCK_PARSE_SRC = [liftFunction("parsePlainDecimal"), liftFunction("parseDriverPayDaily"), liftFunction("parseInServiceDate"), liftFunction("parseRetiredAt"),
 	liftConst("const ADMIN_FEE_PCT_MAX = "), liftFunction("parseAdminFeePct"),
-	liftConst("const TRUCK_AMOUNT_MAX = "), liftFunction("parseTruckAmount"), liftConst("const TRUCK_AMOUNT_FIELDS = [", "\n];"), liftFunction("parseTruckAmounts")].join("\n");
+	liftConst("const TRUCK_AMOUNT_MAX = "), liftFunction("parseTruckAmount"), liftConst("const TRUCK_AMOUNT_FIELDS = [", "\n];"), liftFunction("parseTruckAmounts"),
+	liftFunction("parseUnitNumber"), liftFunction("isUnitNumberTaken")].join("\n");
 const FIXED_COST_SRC = liftFunction("truckMonthlyFixed");
 const PAY_SRC = [liftConst("let lastPayStructShadowWarnMs = "), liftFunction("getDriverPayStructures")].join("\n");
 
@@ -172,7 +173,7 @@ const TARGETS = new Function(`${TARGETS_SRC}\nreturn DRIVER_RENAME_TARGETS;`)();
 const colLetter = new Function(`${COL_LETTER_SRC}\nreturn colLetter;`)();
 const directoryChangedColumns = new Function(`${DIR_CHANGED_SRC}\nreturn directoryChangedColumns;`)();
 const truckParse = new Function("DRIVER_PAY_DAILY_MAX", "todayKeyCT", "IN_SERVICE_MAX_MONTHS_AHEAD",
-	`${TRUCK_PARSE_SRC}\nreturn { parseDriverPayDaily, parseInServiceDate, parseRetiredAt, parseAdminFeePct, TRUCK_AMOUNT_FIELDS, parseTruckAmounts };`)(10000, () => "2026-09-24", 24);
+	`${TRUCK_PARSE_SRC}\nreturn { parseDriverPayDaily, parseInServiceDate, parseRetiredAt, parseAdminFeePct, TRUCK_AMOUNT_FIELDS, parseTruckAmounts, parseUnitNumber, isUnitNumberTaken };`)(10000, () => "2026-09-24", 24);
 const truckMonthlyFixed = new Function(`${FIXED_COST_SRC}\nreturn truckMonthlyFixed;`)();
 // The photo check both truck routes run, verbatim (its own subject is
 // scripts/test-stored-file-serving.js).
@@ -381,6 +382,8 @@ function mountTrucks(db, { putSrc = ROUTES.truckPut, postSrc = ROUTES.truckPost,
 		fuelModel: { DEFAULT_TANK_GALLONS: 200 },
 		syncDriverToCarrierSheet: m.syncDriverToCarrierSheet,
 		logAudit: () => {},
+		// The success lines name the truck through it.
+		auditText: m.auditText,
 		notifyChange: () => {},
 		canonicalDriverName: m.canonicalDriverName,
 		normalizeDriverName: m.normalizeDriverName,

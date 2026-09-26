@@ -178,6 +178,7 @@ const PIECES = {
 	].join("\n"),
 	directory: [liftConst("const DIRECTORY_PERIOD_COLUMNS = "), liftFunction("directoryChangedColumns")].join("\n"),
 	truckParse: [
+		liftFunction("parsePlainDecimal"),
 		liftConst("const DRIVER_PAY_DAILY_MAX = "),
 		liftFunction("parseDriverPayDaily"),
 		liftConst("const IN_SERVICE_MAX_MONTHS_AHEAD = "),
@@ -193,6 +194,9 @@ const PIECES = {
 		liftFunction("parseTruckAmount"),
 		liftConst("const TRUCK_AMOUNT_FIELDS = [", "\n];"),
 		liftFunction("parseTruckAmounts"),
+		// The unit number both truck routes read, and the write-time duplicate check.
+		liftFunction("parseUnitNumber"),
+		liftFunction("isUnitNumberTaken"),
 	].join("\n"),
 };
 const MODULE_EXPORTS = [
@@ -201,7 +205,7 @@ const MODULE_EXPORTS = [
 	"normalizeDriverName", "findDriverNameClash", "findDriverNameClashes", "canonicalDriverName",
 	"syncDriverToCarrierSheet", "assignDriverToTruck",
 	"directoryChangedColumns", "DRIVER_PAY_DAILY_MAX", "parseDriverPayDaily", "parseInServiceDate", "parseRetiredAt",
-	"parseAdminFeePct", "truckMonthlyFixed", "TRUCK_AMOUNT_FIELDS", "parseTruckAmounts",
+	"parseAdminFeePct", "truckMonthlyFixed", "TRUCK_AMOUNT_FIELDS", "parseTruckAmounts", "parseUnitNumber", "isUnitNumberTaken",
 ];
 function buildModule(db, src = {}) {
 	const s = { ...PIECES, ...src };

@@ -108,6 +108,15 @@ eq('NaN is refused', amountError({ hvutAnnual: NaN }), 'HVUT must be a number be
 eq('a negative is refused', amountError({ irpAnnual: -5 }), 'IRP must be a number between 0 and 1,000,000.')
 eq('a number that arrives as text is read as a number', amountError({ truckPaymentMonthly: '1200' }), null)
 eq('…and refused as one', amountError({ truckPaymentMonthly: '1e999' }), 'Truck payment must be a number between 0 and 1,000,000.')
+// Text is a plain decimal or nothing (the server's parsePlainDecimal() rule):
+// the hex, binary and octal forms a bare Number() reads are refused, a padded
+// number is read, and only whitespace is a blank.
+for (const v of ['0x10', '0X1F', '0b1', '0o7', '1,000', '$100', '1'.repeat(33)]) {
+  eq(`text ${JSON.stringify(v)} is refused`, amountError({ purchasePrice: v }), 'Purchase price must be a number between 0 and 1,000,000.')
+}
+eq('text " 12 " is read as 12', amountError({ purchasePrice: ' 12 ' }), null)
+eq('text "   " is a blank', amountError({ purchasePrice: '   ' }), null)
+eq('a boolean is not an amount', amountError({ purchasePrice: true }), 'Purchase price must be a number between 0 and 1,000,000.')
 
 eq('fuel tank: 500 gallons is allowed', amountError({ fuelTankGallons: 500 }), null)
 eq('fuel tank: 500.01 is refused', amountError({ fuelTankGallons: 500.01 }), 'Fuel tank must be a number between 0 and 500.')
