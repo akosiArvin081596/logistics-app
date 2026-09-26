@@ -39,20 +39,49 @@ const STABLE_AFTER_MS = 30000
 let reconnectAttempt = 0
 let reconnectTimer = null
 let stableTimer = null
-// Bumped by disconnect(). A check scheduled before it answers for a socket life
-// that has ended, and must do nothing.
+// Bumped by disconnect() and pause(). A check scheduled before it answers for a
+// socket life that has ended, and must do nothing.
 let lifeGen = 0
+// A page has called connect() and nothing has called disconnect() since: live
+// updates are wanted. unpause() brings a socket back only then.
+let wanted = false
+
+// The person this page shows, as the auth store last reported it (setSocketOwner).
+// A reconnect opens a socket only for them: the session the server closed this
+// socket with may have been replaced by ANOTHER person's sign-in in another tab,
+// and a socket opened on that session would deliver their updates to a page still
+// showing the first person's data, under the first person's room name.
+let owner = null
+
+/**
+ * Called by stores/auth.js whenever the person on screen changes: their user id,
+ * or null for nobody. That store imports this module, so this one never imports it
+ * back; the owner is pushed in instead.
+ */
+export function setSocketOwner(id) {
+  owner = id == null || id === '' ? null : String(id)
+}
+
+// Is `user` the person on screen? Ids compared as strings (the server sends
+// numbers; a saved copy could hold either). With no owner, nobody is.
+function isOwner(user) {
+  return owner !== null && user != null && user.id != null && String(user.id) === owner
+}
 
 const api = useApi()
 
 // One GET /api/auth/session, classified by the same rules the auth store's own
 // session check uses (only a 401 or `authenticated: false` means signed out).
+// `user` is the server's user on a signed-in answer, and null otherwise.
 async function checkSession() {
+  let attempt
   try {
-    return classifySessionAttempt({ data: await api.get('/api/auth/session', { timeout: 10000 }) })
+    attempt = { data: await api.get('/api/auth/session', { timeout: 10000 }) }
   } catch (error) {
-    return classifySessionAttempt({ error })
+    attempt = { error }
   }
+  const outcome = classifySessionAttempt(attempt)
+  return { outcome, user: outcome === OUTCOME.AUTHENTICATED ? attempt.data.user : null }
 }
 
 function scheduleReconnect() {
@@ -66,11 +95,11 @@ function scheduleReconnect() {
   reconnectTimer = setTimeout(async () => {
     reconnectTimer = null
     if (gen !== lifeGen || socket) return // ended, or a page has opened one since
-    const outcome = await checkSession()
+    const { outcome, user } = await checkSession()
     if (gen !== lifeGen || socket) return
-    if (outcome === OUTCOME.AUTHENTICATED) openSocket() // re-registers on 'connect'
-    else if (outcome === OUTCOME.SIGNED_OUT) registeredName = null // stay down
-    else scheduleReconnect() // no answer: ask again, within the same budget
+    if (outcome === OUTCOME.AUTHENTICATED && isOwner(user)) openSocket() // re-registers on 'connect'
+    else if (outcome === OUTCOME.UNREACHABLE) scheduleReconnect() // no answer: ask again, within the same budget
+    else registeredName = null // signed out, or not the person on screen: stay down
   }, RECONNECT_DELAYS_MS[reconnectAttempt++])
 }
 
@@ -111,6 +140,7 @@ function openSocket() {
 
 export function useSocket() {
   function connect() {
+    wanted = true
     if (socket) return
     openSocket()
   }
@@ -127,9 +157,33 @@ export function useSocket() {
   // stopped them. For a page that stays mounted, since nothing else would call
   // connect() for it.
   function resume() {
+    wanted = true
     reconnectAttempt = 0
     if (!registeredName) registeredName = lastRegisteredName
     if (!socket) openSocket() // registers on 'connect'
+  }
+
+  // Another tab has signed someone in or out, and the auth store is asking the
+  // server whose session this browser now holds. Until it knows, nothing live
+  // reaches this page: the socket goes down and so does any pending reconnect.
+  // Unlike disconnect(), what the mounted page registered (its listeners, the room
+  // name) is kept, so that unpause() can bring its updates back.
+  function pause() {
+    const s = socket
+    socket = null
+    isConnected.value = false
+    lifeGen++
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+    clearTimeout(stableTimer)
+    stableTimer = null
+    s?.disconnect()
+  }
+
+  // ...and the answer named the same person: the page carries on where pause()
+  // left it, if it wanted live updates at all.
+  function unpause() {
+    if (wanted) resume()
   }
 
   function emit(event, data) {
@@ -157,6 +211,7 @@ export function useSocket() {
   function disconnect() {
     const s = socket
     socket = null
+    wanted = false
     registeredName = null
     lastRegisteredName = null
     listeners.length = 0
@@ -171,5 +226,5 @@ export function useSocket() {
     s?.disconnect()
   }
 
-  return { isConnected, hasEverConnected, connect, register, resume, emit, on, off, disconnect }
+  return { isConnected, hasEverConnected, connect, register, resume, pause, unpause, emit, on, off, disconnect }
 }
