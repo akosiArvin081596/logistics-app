@@ -13,6 +13,9 @@
 #   NODE_BIN      the node to run (default: `node` on PATH). Expected: .nvmrc's
 #                 version, e.g. run this script under `fnm exec --using=22.23.2`.
 #   E2E_WORK_DIR  the work dir (default: $TMPDIR/logisx-e2e; see paths.cjs)
+#   E2E_MAINTENANCE_NOTICE=1  boot with the investor maintenance notice ON
+#                 (MAINTENANCE_NOTICE_ENABLED=true, audience investor), for the
+#                 E2E's M1. Anything else, or unset: the notice stays off.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -72,6 +75,12 @@ SHEET_TRIMMED="$(printf '%s' "$SHEET" | tr -d '[:space:]')"
 [ "$SHEET_TRIMMED" != "$PROD_SHEET" ] || refuse "SPREADSHEET_ID in $SHEET_FROM is PRODUCTION's sheet"
 echo "sheet: SPREADSHEET_ID from $SHEET_FROM is set and is not production's"
 
+# The maintenance notice: off unless asked for. It shows a popup and a banner to
+# investors and sends nothing anywhere; the audience is pinned so M1 has one.
+NOTICE=false
+if [ "${E2E_MAINTENANCE_NOTICE:-}" = "1" ]; then NOTICE=true; fi
+echo "maintenance notice: $([ "$NOTICE" = true ] && echo 'ON (investor audience)' || echo off)"
+
 cd "$WT"
 # dotenv never overrides a variable that is already set, so every value below,
 # including the empty ones, wins over .env.
@@ -86,7 +95,7 @@ env PORT="$PORT" BIND_HOST=127.0.0.1 DATABASE_PATH="$DB" NODE_ENV=development \
   RATECON_RECONCILE_ENABLED=false RATECON_INDEX_APPLY_ENABLED=false FUEL_EVENTS_ENABLED=false CHAT_ORPHAN_SWEEP_ENABLED=false \
   ELD_STALE_ALERT_ENABLED=false FUEL_LOW_ALERT_ENABLED=false EXPENSE_DUPLICATE_ALERT_ENABLED=false \
   INVOICE_UNDATED_ALERT_ENABLED=false RATECON_EXTRACT_ALERT_ENABLED=false \
-  MAINTENANCE_NOTICE_ENABLED=false \
+  MAINTENANCE_NOTICE_ENABLED="$NOTICE" MAINTENANCE_NOTICE_AUDIENCE=investor \
   nohup "$NODE_BIN" server.js >"$LOG" 2>&1 &
 PID=$!
 # Line 1: the PID. Line 2: the worktree it runs from (stop-server.sh checks both).

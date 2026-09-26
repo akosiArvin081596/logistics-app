@@ -13,19 +13,32 @@
 //   R4 stored photos are normalized to what their bytes are · R5 photo limits 16 MP / 2 MiB
 //   R6 admin fee 0-100 (blank = 50) · R7 fuel tank <= 500 gal, avg MPG <= 20 (API + Edit form)
 //   R8 an Investor's add ignores the fuel pair · R9 the create_truck audit names tank + MPG
-// Sign-out / sign-in section (S1-S3; runnable alone with ONLY=signout):
+// Round 3 (R12-R16): the unused driver-files route answers no files · hexadecimal
+//   amounts are refused · unit numbers with control characters are refused · the
+//   driver's "has a photo" follows the stored bytes (planted) · two renames to case
+//   variants of one unit number at the same moment leave one truck with it (local only)
+// Sign-out / sign-in section (S1-S7; runnable alone with ONLY=signout):
 //   S1 sign-out (the sidebar's, the driver app's) ends with a full page load of /login
 //   S2 a DIFFERENT person signing in after an expired session gets a full page load
 //      of their home; the SAME person again keeps in-app navigation (the control)
 //   S3 the visible residue: the Dispatcher's dashboard while its own fetch is in flight
+//   S4 sign-out with no network, and while the server is down, ends on the app's own
+//      login form · S5 another tab follows a sign-out, and a different person
+//   S6 /login after a confirmed sign-out renders without a session round-trip
+//   S7 a second tap on Sign In sends no second sign-in
+// Dispatcher data section (D1-D3; ONLY=dispatcher): the Dispatcher's copies of the
+//   dashboard and of one load carry no broker/contact values; the sheet reader
+//   (GET /api/data) is Super Admin only
+// Maintenance notice section (M1; ONLY=maintenance, local, server booted with the
+//   notice on): a dismissal in one tab belongs to the person who dismissed it
 //
 // Env:
 //   BASE_URL    required — e.g. http://127.0.0.1:3181 (never production)
 //   PHASE       before | after            (default: before) — names the output
 //   HEADED=1    visible browser, slowMo 350 ms, ~1400x900 window, captions pause
 //   DB_PATH     the server's database copy (inside the work dir), ONLY used to plant
-//               stored values for the serve-side cases (steps 10, 11b-f, R3).
-//               Unset -> those cases are SKIPPED.
+//               stored values for the serve-side cases (steps 10, 11b-f, R3, R15)
+//               and to stage and clean up R16. Unset -> those cases are SKIPPED.
 //   CREDS_FILE  logins JSON (default: <work dir>/creds.json, written by setup-db.cjs)
 //   E2E_WORK_DIR  where every output goes (default: $TMPDIR/logisx-e2e; see paths.cjs)
 //   APP_DIR     checkout whose node_modules provides better-sqlite3 and puppeteer
@@ -36,9 +49,12 @@
 //   SLOWMO, CAPTION_PAUSE_MS   pacing overrides (headed defaults 350 / 1600)
 //   OUT_TAG     output name instead of PHASE (rehearsals must not overwrite a baseline)
 //   DRIVER_VIEWPORT            driver window size, default 430x900
-//   ONLY        signout = only the sign-out section (S1-S3) · trucks = only the truck
-//               steps (1-12, R1-R11) · unset = both
-//   S3_LATENCY_MS, S3_KBPS     S3's CDP throttle (default +2500 ms per request, 24 KB/s)
+//   ONLY        a comma-separated list of sections: trucks (1-12, R1-R16), signout
+//               (S1-S7), dispatcher (D1-D3), maintenance (M1). Unset = all four, in
+//               that order. ⚠️ All four sign in more often than the login limiter
+//               allows one server process (see README), so split a full run.
+//   S3_LATENCY_MS, S3_KBPS     the CDP throttle of S3, S6 and S7 (default +2500 ms per
+//               request, 24 KB/s)
 //
 // Output, in the work dir (outside every checkout — the screenshots show real data):
 // shots/<OUT_TAG|PHASE>/NN-name.png and results-<OUT_TAG|PHASE>.md.
@@ -59,16 +75,37 @@ const OUT_TAG = String(process.env.OUT_TAG || PHASE).replace(/[^\w.-]/g, '')
 const PAUSE = Number(process.env.CAPTION_PAUSE_MS ?? (HEADED ? 1600 : 0))
 const SLOWMO = Number(process.env.SLOWMO ?? (HEADED ? 350 : 0))
 const [DVW, DVH] = String(process.env.DRIVER_VIEWPORT || '430x900').split('x').map(Number)
-// ONLY=signout runs just the sign-out section; ONLY=trucks just the truck steps.
+// ONLY picks sections, e.g. ONLY=signout or ONLY=trucks,dispatcher. Unset = all.
 const ONLY = String(process.env.ONLY || '').toLowerCase()
+const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance']
+// Sign-ins (POST /api/auth/login) each section makes; the limiter allows 20 per 15
+// minutes per server process. The sign-out section's figure is its worst case
+// (a build that sends S7's second sign-in).
+const SIGN_INS = { trucks: 3, signout: 18, dispatcher: 2, maintenance: 3 }
 
 function die(msg) { console.error(`e2e: ${msg}`); process.exit(2) }
 if (!BASE_URL) die('BASE_URL is required')
 if (!['before', 'after'].includes(PHASE)) die('PHASE must be before or after')
-if (!['', 'signout', 'trucks'].includes(ONLY)) die('ONLY must be signout, trucks or unset')
+const SECTIONS = new Set(ONLY ? ONLY.split(',').map((s) => s.trim()).filter(Boolean) : ALL_SECTIONS)
+for (const s of SECTIONS) if (!ALL_SECTIONS.includes(s)) die(`ONLY takes a comma-separated list of ${ALL_SECTIONS.join(', ')}; got "${s}"`)
+const runs = (s) => SECTIONS.has(s)
+// STEPS: only these cases of the sign-out section (e.g. STEPS=S5a,S7), to rerun a
+// timing-sensitive case without spending the login limiter on the rest. Each of
+// those cases has its own browser context, so any subset runs on its own.
+const STEPS = process.env.STEPS ? new Set(String(process.env.STEPS).split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)) : null
+const wantStep = (id) => !STEPS || STEPS.has(id.toUpperCase())
 let baseHost = ''
 try { baseHost = new URL(BASE_URL).hostname.replace(/\.+$/, '') } catch { die(`BASE_URL is not a URL: ${BASE_URL}`) }
 if (/(^|\.)app\.logisx\.com$/i.test(baseHost)) die('refusing to run against production')
+// A server on this machine (M1 runs only here: the notice is off on staging).
+const LOCAL = /^(127\.0\.0\.1|localhost|\[?::1\]?)$/i.test(baseHost)
+{
+  const planned = [...SECTIONS].reduce((n, s) => n + SIGN_INS[s], 0)
+  if (planned > 20) {
+    console.warn(`e2e: WARNING: these sections sign in up to ${planned} times, and POST /api/auth/login allows 20 per 15 minutes ` +
+      'per server process. Expect 429s late in the run: split it with ONLY and restart the server between the parts.')
+  }
+}
 
 let WORK, DB_PATH, CHROME
 try {
@@ -93,12 +130,19 @@ for (const f of fs.readdirSync(SHOTS)) if (f.endsWith('.png')) fs.unlinkSync(pat
 // ---------------------------------------------------------------- results
 const rows = []
 const meta = { startedAt: new Date().toISOString(), baseUrl: BASE_URL, phase: PHASE, headed: HEADED, ids: {} }
-const cell = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>')
+// Control and bidirectional-override characters (R14 sends some) are written as
+// \uXXXX, so no observed text can reorder or hide a line of the results.
+const visible = (s) => String(s ?? '').replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g,
+  (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`)
+const cell = (s) => visible(s).replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>')
 function writeResults(final = false) {
   const counts = rows.reduce((a, r) => { const k = r.verdict.split(' ')[0]; a[k] = (a[k] || 0) + 1; return a }, {})
-  const title = ONLY === 'signout'
-    ? 'Sign-out / sign-in E2E (S1-S3)'
-    : `Truck fixes E2E (round 2: steps 1-12 regression + R1-R9)${ONLY === 'trucks' ? '' : ' + sign-out section (S1-S3)'}`
+  const title = 'LogisX E2E — ' + [
+    runs('trucks') && 'trucks (steps 1-12, R1-R16)',
+    runs('signout') && 'sign-out / sign-in (S1-S7)',
+    runs('dispatcher') && 'Dispatcher data (D1-D3)',
+    runs('maintenance') && 'maintenance notice (M1)',
+  ].filter(Boolean).join(' + ')
   const lines = [
     `# ${title} — ${PHASE.toUpperCase()}`,
     '',
@@ -117,7 +161,7 @@ function writeResults(final = false) {
 }
 function record(r) {
   rows.push(r)
-  console.log(`[${r.verdict.padEnd(4)}] ${r.step} ${r.title} — ${String(r.observed).replace(/\n/g, ' ')}`)
+  console.log(`[${r.verdict.padEnd(4)}] ${r.step} ${r.title} — ${visible(r.observed).replace(/\n/g, ' ')}`)
   writeResults()
 }
 const verdict = (ok) => (ok ? 'PASS' : 'FAIL')
@@ -400,6 +444,29 @@ function restoreAll() {
   if (!originals.size && fs.existsSync(JOURNAL)) fs.unlinkSync(JOURNAL)
   return out
 }
+// R16 assigns two throwaway drivers (QA-TEST-DRV-<stamp>-A / -B) to two of its own
+// test trucks, which writes truck_assignments and drivers_directory rows. They are
+// deleted by exact name, and only names with this prefix: no real driver's rows are
+// touched. A truck with an assignment row cannot be deleted (409 TRUCK_REFERENCED),
+// so this runs before those trucks are deleted. Local only (DB_PATH).
+const QA_DRIVER_PREFIX = 'QA-TEST-DRV-'
+function removeQaDriverRows(names) {
+  const out = { truck_assignments: 0, drivers_directory: 0 }
+  for (const n of names) {
+    if (!String(n).startsWith(QA_DRIVER_PREFIX)) throw new Error('refusing to delete rows of a driver name without the QA prefix')
+    out.truck_assignments += db.prepare('DELETE FROM truck_assignments WHERE driver_name = ?').run(n).changes
+    out.drivers_directory += db.prepare('DELETE FROM drivers_directory WHERE driver_name = ?').run(n).changes
+  }
+  return out
+}
+// Rows an earlier aborted run left behind (the same prefix, any stamp).
+function removeLeftoverQaDriverRows() {
+  const like = `${QA_DRIVER_PREFIX}%`
+  return {
+    truck_assignments: db.prepare('DELETE FROM truck_assignments WHERE driver_name LIKE ?').run(like).changes,
+    drivers_directory: db.prepare('DELETE FROM drivers_directory WHERE driver_name LIKE ?').run(like).changes,
+  }
+}
 process.on('SIGINT', () => { try { if (db) restoreAll() } catch { /* ignore */ } process.exit(130) })
 
 // ---------------------------------------------------------------- the run
@@ -418,17 +485,29 @@ async function main() {
     slowMo: SLOWMO,
     args: HEADED ? ['--window-size=1400,900'] : [],
   })
-  // Two independent blocks: a failure in one is recorded and the other still runs.
-  if (ONLY !== 'signout') {
+  // Independent blocks: a failure in one is recorded and the others still run.
+  if (runs('trucks')) {
     try { await truckSteps() } catch (e) {
       exitCode = 1
       record({ step: '!', title: 'Run aborted', expected: '', observed: e.stack?.split('\n').slice(0, 3).join(' ') || String(e), verdict: 'FAIL', shot: '' })
     }
   }
-  if (ONLY !== 'trucks') {
+  if (runs('signout')) {
     try { await signoutSection() } catch (e) {
       exitCode = 1
       record({ step: 'S!', title: 'Sign-out section aborted', expected: '', observed: e.stack?.split('\n').slice(0, 3).join(' ') || String(e), verdict: 'FAIL', shot: '' })
+    }
+  }
+  if (runs('dispatcher')) {
+    try { await dispatcherSection() } catch (e) {
+      exitCode = 1
+      record({ step: 'D!', title: 'Dispatcher data section aborted', expected: '', observed: e.stack?.split('\n').slice(0, 3).join(' ') || String(e), verdict: 'FAIL', shot: '' })
+    }
+  }
+  if (runs('maintenance')) {
+    try { await maintenanceSection() } catch (e) {
+      exitCode = 1
+      record({ step: 'M!', title: 'Maintenance notice section aborted', expected: '', observed: e.stack?.split('\n').slice(0, 3).join(' ') || String(e), verdict: 'FAIL', shot: '' })
     }
   }
 }
@@ -487,8 +566,13 @@ async function truckSteps() {
     if (!ok) throw new Error('cannot continue without the Super Admin session')
   }
 
-  // Clean leftovers from an earlier aborted run (our own naming only).
+  // Clean leftovers from an earlier aborted run (our own naming only). R16's
+  // throwaway-driver rows go first: a truck that still has one cannot be deleted.
   {
+    if (db) {
+      const n = removeLeftoverQaDriverRows()
+      if (n.truck_assignments || n.drivers_directory) console.log(`  pre-clean: leftover QA driver rows: ${JSON.stringify(n)}`)
+    }
     const r = await api(admin, 'GET', '/api/trucks')
     for (const t of (r.json?.trucks || []).filter((t) => /^QA-TEST-/.test(t.UnitNumber || ''))) {
       const d = await api(admin, 'DELETE', `/api/trucks/${t.id}`)
@@ -1314,6 +1398,91 @@ async function truckSteps() {
     record({ step: 'R9', title: 'Super Admin adds a truck with Fuel Tank 180 and Avg MPG 6.8 (UI), then the audit trail', expected: 'The create_truck audit line names the fuel tank (180 gal) and the MPG (6.8)', observed, verdict: verdict(ok), shot: s })
   }
 
+  // ============ R13 — hexadecimal amounts are refused, not read as numbers
+  {
+    await reloadTrucksPage().catch(() => {})
+    await caption(admin, 'Step R13 — API: PUT truck A insuranceMonthly "0x10", then driverPayDaily "0x10" → expect 400 each (insurance: INVALID_AMOUNT); stored values unchanged')
+    const cases = [
+      { id: 'R13a', key: 'insuranceMonthly', col: 'InsuranceMonthly', code: 'INVALID_AMOUNT', field: 'insurance_monthly' },
+      { id: 'R13b', key: 'driverPayDaily', col: 'DriverPayDaily' },
+    ]
+    const logs = []
+    for (const c of cases) {
+      const before = await getTruck(admin, truckId)
+      const r = await api(admin, 'PUT', putPath(), { [c.key]: '0x10' })
+      const after = await getTruck(admin, truckId)
+      const unchanged = after?.[c.col] === before?.[c.col]
+      if (!unchanged) await api(admin, 'PUT', putPath(), { [c.key]: before?.[c.col] ?? 0 })
+      const reset = unchanged ? null : (await getTruck(admin, truckId))?.[c.col]
+      logs.push(`${c.id} → ${r.status} ${r.json?.code || ''}`)
+      const ok = r.status === 400 && (!c.code || r.json?.code === c.code) && unchanged
+      record({
+        step: c.id, title: `API PUT ${c.key} "0x10" (hexadecimal)`,
+        expected: `400${c.code ? ` ${c.code}, field "${c.field}"` : ''}; stored value unchanged (a hexadecimal string is not an amount)`,
+        observed: `${r.status} ${r.json ? JSON.stringify({ code: r.json.code, field: r.json.field, error: r.json.error }).slice(0, 160) : r.text}; ` +
+          `stored ${c.col} ${before?.[c.col]} → ${after?.[c.col]}${unchanged ? ' (unchanged)' : ` (CHANGED; reset to ${reset})`}`,
+        verdict: verdict(ok), shot: '',
+      })
+    }
+    await caption(admin, `Step R13 — ${logs.join(' · ')}`)
+    const s = await shot(admin, 'r13-api-hex-amounts')
+    rows.filter((r) => /^R13[ab]$/.test(r.step)).forEach((r) => { r.shot = s })
+    writeResults()
+  }
+
+  // ============ R14 — unit numbers with control characters are refused (create and edit)
+  {
+    const R14_UNIT = `${UNIT}-R14`
+    let target = null
+    const logs = []
+    try {
+      await caption(admin, 'Step R14 — API: POST and PUT a unit number containing U+0007 (BEL) and one containing U+202E (right-to-left override) → expect 400 INVALID_UNIT_NUMBER, field "unitNumber", nothing created or renamed')
+      // The truck the PUT cases rename (its own, so truck A keeps its unit number).
+      const mk = await api(admin, 'POST', '/api/trucks', { unitNumber: R14_UNIT, status: 'Active', in_service_date: todayR, inServiceDate: todayR, assignedDriver: '' })
+      if (mk.status === 200 && mk.json?.id) { target = mk.json.id; created.add(target); meta.ids.r14Truck = target }
+      const cases = [
+        { id: 'R14a', verb: 'POST', unit: `${R14_UNIT}\u0007A`, label: 'U+0007 (BEL)' },
+        { id: 'R14b', verb: 'POST', unit: `${R14_UNIT}‮B`, label: 'U+202E (right-to-left override)' },
+        { id: 'R14c', verb: 'PUT', unit: `${R14_UNIT}\u0007C`, label: 'U+0007 (BEL)' },
+        { id: 'R14d', verb: 'PUT', unit: `${R14_UNIT}‮D`, label: 'U+202E (right-to-left override)' },
+      ]
+      for (const c of cases) {
+        let r; let effect
+        if (c.verb === 'POST') {
+          r = await api(admin, 'POST', '/api/trucks', { unitNumber: c.unit, status: 'Active' })
+          const made = ((await api(admin, 'GET', '/api/trucks')).json?.trucks || []).find((t) => t.UnitNumber === c.unit)
+          if (made) { created.add(made.id); const d = await api(admin, 'DELETE', `/api/trucks/${made.id}`); if (d.status === 200) created.delete(made.id) }
+          effect = { changed: !!made, text: made ? `truck CREATED (#${made.id}) with the character in its unit number — deleted again` : 'no truck created' }
+        } else if (!target) {
+          r = { status: 0, json: null, text: 'no target truck (its POST failed)' }
+          effect = { changed: false, text: 'not run' }
+        } else {
+          r = await api(admin, 'PUT', `/api/trucks/${target}`, { unitNumber: c.unit })
+          const now = (await getTruck(admin, target))?.UnitNumber
+          const renamed = now !== R14_UNIT
+          if (renamed) await api(admin, 'PUT', `/api/trucks/${target}`, { unitNumber: R14_UNIT })
+          effect = { changed: renamed, text: renamed ? 'truck RENAMED to a unit number carrying the character — renamed back' : 'unit number unchanged' }
+        }
+        logs.push(`${c.id} ${c.verb} → ${r.status} ${r.json?.code || ''}`)
+        const ok = r.status === 400 && r.json?.code === 'INVALID_UNIT_NUMBER' && r.json?.field === 'unitNumber' && !effect.changed
+        record({
+          step: c.id, title: `API ${c.verb} a unit number containing ${c.label}`,
+          expected: `400 INVALID_UNIT_NUMBER, field "unitNumber"; ${c.verb === 'POST' ? 'no truck created' : 'the unit number unchanged'}`,
+          observed: `${r.status} ${r.json ? JSON.stringify({ code: r.json.code, field: r.json.field, error: r.json.error }).slice(0, 160) : r.text}; ${effect.text}`,
+          verdict: verdict(ok), shot: '',
+        })
+      }
+    } catch (e) {
+      record({ step: 'R14', title: 'Unit numbers with control characters', expected: '400 INVALID_UNIT_NUMBER', observed: `error: ${e.message}`, verdict: 'FAIL', shot: '' })
+    } finally {
+      if (target) { const d = await api(admin, 'DELETE', `/api/trucks/${target}`).catch(() => null); if (d?.status === 200) created.delete(target) }
+    }
+    await caption(admin, `Step R14 — ${logs.join(' · ')}`)
+    const s = await shot(admin, 'r14-api-unit-control-chars')
+    rows.filter((r) => /^R14[a-d]?$/.test(r.step)).forEach((r) => { r.shot = s })
+    writeResults()
+  }
+
   // ============ R8 — an Investor's add ignores the fuel pair (third browser context)
   if (!CREDS.investor) {
     record({ step: 'R8', title: 'Investor POST /api/trucks with fuel_tank_gallons 400', expected: 'Created with FuelTankGallons 0', observed: 'SKIPPED — no investor login in the creds file', verdict: 'SKIP', shot: '' })
@@ -1440,6 +1609,91 @@ async function truckSteps() {
       record({ step: '10*', title: 'DB_PATH sanity check', expected: 'The server reads DB_PATH', observed: `${reason} — DB_PATH is not this server's DATABASE_PATH; planted cases skipped`, verdict: 'FAIL', shot: '' })
       try { db.close() } catch { /* ignore */ }
       db = null
+    }
+  }
+
+  // ============ R16 — two renames to case variants of one unit number, at the same moment.
+  // Local only: each save also assigns a throwaway driver (QA-TEST-DRV-…), so the
+  // route's active-load check (a live read of the sheet) runs inside each save, and
+  // the rows that assignment writes are deleted again through DB_PATH.
+  {
+    const title = 'Two test trucks renamed at the same moment to case variants of one new unit number, each save also assigning a throwaway driver'
+    const expected = 'Exactly one 200 and one 400 "Unit number already exists"; never two trucks sharing the unit number case-insensitively'
+    if (!db) {
+      record({ step: 'R16', title, expected, observed: skipWhy(), verdict: 'SKIP', shot: '' })
+    } else {
+      let observed = ''; let v = 'FAIL'; let s = ''
+      const ids = []
+      const drivers = [`${QA_DRIVER_PREFIX}${stamp}-A`, `${QA_DRIVER_PREFIX}${stamp}-B`]
+      const target = `${UNIT}-R16-DUP`
+      const variants = [target, `${UNIT}-r16-dup`] // the same unit, case-insensitively
+      try {
+        for (const suffix of ['R16A', 'R16B']) {
+          const r = await api(admin, 'POST', '/api/trucks', { unitNumber: `${UNIT}-${suffix}`, status: 'Active', in_service_date: todayR, inServiceDate: todayR, assignedDriver: '' })
+          if (r.status !== 200 || !r.json?.id) throw new Error(`could not create ${suffix}: ${r.status}`)
+          ids.push(r.json.id); created.add(r.json.id)
+        }
+        meta.ids.r16Trucks = ids.join('+')
+        await reloadTrucksPage().catch(() => {})
+        await caption(admin, `Step R16 — two page fetches at the same moment: truck #${ids[0]} → "${variants[0]}", truck #${ids[1]} → "${variants[1]}", each also assigning a throwaway driver → expect one 200 and one 400 "Unit number already exists"`)
+        // Both requests leave the page in the same tick; each one's timing is its own.
+        const res = await admin.evaluate(async (jobs) => {
+          const put = async ({ id, body }) => {
+            const t0 = performance.now()
+            const r = await fetch(`/api/trucks/${id}`, {
+              method: 'PUT', credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+              body: JSON.stringify(body),
+            })
+            const text = await r.text()
+            let json = null
+            try { json = JSON.parse(text) } catch { /* not json */ }
+            return { status: r.status, error: json?.error || '', ms: Math.round(performance.now() - t0) }
+          }
+          return Promise.all(jobs.map(put))
+        }, ids.map((id, i) => ({ id, body: { unitNumber: variants[i], assignedDriver: drivers[i] } })))
+        const list = (await api(admin, 'GET', '/api/trucks')).json?.trucks || []
+        const sharing = list.filter((t) => (t.UnitNumber || '').toLowerCase() === target.toLowerCase())
+        const ok200 = res.filter((r) => r.status === 200)
+        const dup400 = res.filter((r) => r.status === 400 && /unit number already exists/i.test(r.error))
+        const outcome = res.map((r, i) => `#${ids[i]} → ${r.status}${r.error ? ` "${r.error.slice(0, 70)}"` : ''} in ${r.ms} ms`).join('; ')
+        observed = `${outcome}; trucks now carrying the unit number (case-insensitively): ${sharing.length}${sharing.length ? ` (${sharing.map((t) => `#${t.id}`).join(', ')})` : ''}`
+        if (sharing.length >= 2 || ok200.length === 2) {
+          v = 'FAIL'
+        } else if (ok200.length === 1 && dup400.length === 1 && sharing.length === 1) {
+          // Did the two saves overlap inside the server? The refused one waited out
+          // the sheet read like the other (it was refused after it) — or it answered
+          // before the sheet could have (it was refused up front, after the other's
+          // write had landed, so they never overlapped and the race was not staged).
+          const overlapped = dup400[0].ms >= 0.5 * ok200[0].ms
+          v = overlapped ? 'PASS' : 'PASS (vacuous)'
+          if (!overlapped) observed += ' — vacuous: the refused save answered long before the other, so the two did not overlap in the server'
+        } else if (res.some((r) => r.status >= 500)) {
+          v = 'INFO'
+          observed += ' — not scored: a save failed (e.g. the active-load check could not read the sheet), so the race was not staged'
+        } else {
+          v = 'FAIL'
+        }
+        await reloadTrucksPage().catch(() => {})
+        await caption(admin, `Step R16 — result: ${observed}`)
+        s = await shot(admin, 'r16-concurrent-case-variant-renames')
+      } catch (e) {
+        observed = `${observed ? `${observed}; ` : ''}error: ${e.message}`
+        v = 'FAIL'
+      } finally {
+        // The throwaway drivers' rows first (a truck with an assignment row cannot be
+        // deleted), then the two trucks.
+        const n = (() => { try { return removeQaDriverRows(drivers) } catch (e) { return { error: e.message } } })()
+        const del = []
+        for (const id of ids) {
+          const d = await api(admin, 'DELETE', `/api/trucks/${id}`).catch(() => ({ status: 0 }))
+          del.push(`#${id} → ${d.status}`)
+          if (d.status === 200) created.delete(id)
+        }
+        observed += `. Clean-up: throwaway-driver rows deleted ${JSON.stringify(n)}; DELETE ${del.join(', ')}`
+      }
+      if (!s) s = await shot(admin, 'r16-concurrent-case-variant-renames')
+      record({ step: 'R16', title, expected, observed, verdict: v, shot: s })
     }
   }
 
@@ -1649,9 +1903,108 @@ async function truckSteps() {
       observed, verdict: verdict(ok), shot: s,
     })
   }
+
+  // ============ R15 — the driver's "has a photo" follows the stored bytes (planted, local only)
+  {
+    const title = 'Truck photo planted as HTML bytes under a data:image/jpeg label; the driver reads GET /api/driver/<name> truck.has_photo, then opens Truck Details'
+    const expected = 'truck.has_photo 0 (the stored value is not an image, so the app offers no photo)'
+    if (!db || !driverTruckIds.length || !session?.driverName) {
+      record({ step: 'R15', title, expected, observed: db ? 'no truck is assigned to this driver' : skipWhy(), verdict: 'SKIP', shot: '' })
+    } else {
+      let observed; let ok = false; let s = ''
+      try {
+        for (const tid of driverTruckIds) plant('trucks', 'photo', tid, PLANTS.htmlAsJpeg.value)
+        const r = await api(driver, 'GET', `/api/driver/${encodeURIComponent(session.driverName)}`)
+        const hp = r.json?.truck ? r.json.truck.has_photo : '(no truck in the payload)'
+        // The same payload through the UI: a fresh driver app, a load's Truck Details.
+        let ui = '(not read)'
+        try {
+          await driver.goto(`${BASE_URL}/driver`)
+          await driver.locator('.driver-app').waitFor({ state: 'visible', timeout: 30000 })
+          await driver.locator('.load-sub-tabs').waitFor({ state: 'visible', timeout: 45000 })
+          await driver.locator('.loading-skeletons').waitFor({ state: 'detached', timeout: 45000 }).catch(() => {})
+          let opened = false
+          for (const tab of await driver.locator('.load-sub-tabs .sub-tab').all()) {
+            const n = Number((await tab.locator('.sub-tab-count').innerText().catch(() => '0')).trim()) || 0
+            if (n > 0) { await tab.click(); const card = driver.locator('.load-card').first(); await card.waitFor({ state: 'visible', timeout: 15000 }); await card.click(); opened = true; break }
+          }
+          if (opened) {
+            const item = driver.locator('.van-collapse-item').filter({ hasText: 'Truck Details' }).first()
+            await item.waitFor({ state: 'visible', timeout: 20000 })
+            const head = item.locator('.van-collapse-item__title').first()
+            await head.scrollIntoViewIfNeeded()
+            if ((await head.getAttribute('aria-expanded')) !== 'true') await head.click()
+            await driver.waitForTimeout(1500)
+            const img = item.locator('img.truck-photo')
+            if (await img.count()) {
+              const w = await img.first().evaluate(async (el) => { if (!el.complete) await new Promise((res) => { el.onload = el.onerror = res; setTimeout(res, 8000) }); return el.naturalWidth })
+              ui = `Truck Details shows a photo element${w > 0 ? ` that renders (${w} px wide)` : ' that does NOT render (a broken image)'}`
+            } else ui = 'Truck Details shows no photo element'
+            await item.scrollIntoViewIfNeeded()
+          } else ui = 'no load in any sub-tab, so Truck Details could not be opened'
+        } catch (e) { ui = `(UI read failed: ${e.message.split('\n')[0]})` }
+        ok = r.status === 200 && Number(hp) === 0
+        observed = `GET /api/driver/<the driver's name> → ${r.status}; truck.has_photo ${JSON.stringify(hp)}; ${ui}`
+        await caption(driver, `Step R15 — photo planted as ${PLANTS.htmlAsJpeg.label}: ${observed}`)
+        s = await shot(driver, 'r15-has-photo-follows-bytes')
+      } catch (e) { observed = `error: ${e.message}` } finally {
+        const r = restoreAll()
+        console.log(`  restore: ${r.join('; ')}`)
+      }
+      if (!s) s = await shot(driver, 'r15-has-photo-follows-bytes')
+      record({ step: 'R15', title, expected, observed, verdict: verdict(ok), shot: s })
+    }
+  }
+
+  // ============ R12 — the unused driver-files route is gone: it answers no files
+  {
+    const title = 'Super Admin page fetch of GET /api/trucks/<the driver\'s truck>/driver-files'
+    const expected = 'No files come back (404, or any answer that is not the driver-files payload); the exact answer is recorded'
+    let observed; let v = 'FAIL'; let s = ''
+    try {
+      const list = (await api(admin, 'GET', '/api/trucks')).json?.trucks || []
+      const name = String(session?.driverName || '').trim().toLowerCase()
+      const t = (name && list.find((x) => String(x.AssignedDriver || '').trim().toLowerCase() === name)) ||
+        list.find((x) => String(x.id) === String(CREDS.driver.truckId)) || null
+      if (!t) throw new Error('no truck is assigned to the harness driver')
+      meta.ids.driverFilesTruck = t.id
+      // Summarized in the page: the documents themselves never leave it.
+      const r = await admin.evaluate(async (id) => {
+        const res = await fetch(`/api/trucks/${id}/driver-files`, { credentials: 'same-origin', cache: 'no-store' })
+        const ct = res.headers.get('content-type') || ''
+        const text = await res.text()
+        let j = null
+        try { j = JSON.parse(text) } catch { /* not json */ }
+        const files = Array.isArray(j?.files) ? j.files.map((f) => ({ label: f.label, type: f.type, chars: String(f.data || '').length })) : null
+        return {
+          status: res.status, ct, bytes: text.length, isJson: !!j,
+          keys: j && typeof j === 'object' ? Object.keys(j) : [],
+          files, onboardingDocs: Array.isArray(j?.onboardingDocs) ? j.onboardingDocs.length : null,
+          drugTest: j?.drugTest ? 'present' : (j && 'drugTest' in j ? 'none' : null),
+          error: typeof j?.error === 'string' ? j.error.slice(0, 80) : '',
+          htmlTitle: !j && /html/i.test(ct) ? ((text.match(/<title>([^<]{0,60})/i) || [])[1] || '(untitled)') : '',
+        }
+      }, t.id)
+      const isPayload = r.isJson && Array.isArray(r.files)
+      const anyFiles = isPayload && (r.files.length > 0 || r.onboardingDocs > 0 || r.drugTest === 'present')
+      if (isPayload && anyFiles) v = 'FAIL'
+      else if (isPayload) v = 'PASS (vacuous)'
+      else v = 'PASS'
+      observed = `truck #${t.id}: ${r.status} ${r.ct.split(';')[0] || '(no content-type)'} (${r.bytes} bytes)` +
+        (isPayload
+          ? `; the driver-files payload [${r.keys.join(', ')}]: ${r.files.length} file(s)${r.files.length ? ` (${r.files.map((f) => `${f.label} ${f.type || '?'} ${f.chars} chars`).join(', ')})` : ''}, ${r.onboardingDocs} onboarding doc(s), drug test ${r.drugTest}`
+          : r.isJson ? `; JSON [${r.keys.join(', ')}]${r.error ? ` error "${r.error}"` : ''}` : r.htmlTitle ? `; an HTML page titled "${r.htmlTitle}" (the SPA's catch-all), no JSON` : '; not JSON')
+      if (v === 'PASS (vacuous)') observed += ' — vacuous: the route still answers, but this driver has no files on this server'
+      await reloadTrucksPage().catch(() => {})
+      await caption(admin, `Step R12 — GET /api/trucks/${t.id}/driver-files → ${observed}`)
+      s = await shot(admin, 'r12-driver-files-route')
+    } catch (e) { observed = `error: ${e.message}`; v = 'FAIL' }
+    if (!s) s = await shot(admin, 'r12-driver-files-route')
+    record({ step: 'R12', title, expected, observed, verdict: v, shot: s })
+  }
 }
 
-// ================================================================ sign-out / sign-in section (S1-S3)
+// ================================================================ sign-out / sign-in section (S1-S7)
 // Run alone with ONLY=signout. The fix under test (the AFTER behaviour):
 //   (a) sign-out finishes with a full page load of /login (location.replace);
 //   (b) signing in as a DIFFERENT person than the page last showed (e.g. after a
@@ -1774,35 +2127,49 @@ async function signOutCase({ step, who, creds, home, viewport, ready, button, bu
 // router.replace). This build has no other in-app route to /login without a sign-out:
 // API 401s do not redirect, and a pushState+popstate to /login only changes the URL
 // bar (the router stays on the page and no login form renders).
+// The expiry path itself, shared by S2 and S7: ends on /login, reached in-app.
+// Returns the marker read there. `wake`: 'offline' (S2) toggles the context
+// offline and back, the browser's own 'online' event; 'event' (S7) dispatches an
+// 'online' event in the page instead, so the CDP throttle S7 applies next is the
+// only network emulation set on the page.
+async function expireToLoginInApp({ ctx, page, step, prefix, notes, nextWho, wake = 'offline' }) {
+  const noAnswer = (route) => route.abort('internetdisconnected')
+  await login(page, `Step ${step} — Super Admin`, CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
+  await page.route('**/api/auth/session', noAnswer)
+  await page.goto(`${BASE_URL}/trucks`)
+  await page.locator('table.truck-table').waitFor({ state: 'visible', timeout: 45000 })
+  await page.waitForTimeout(1000)
+  const st = await authState(page)
+  notes.push(`/trucks loaded with its session check unanswered → ${st ? `the store shows ${st.role} #${st.id}, reconnecting=${st.isReconnecting}` : 'store not readable'}`)
+  await plantMarker(page)
+  await caption(page, `Step ${step} — Super Admin on /trucks (data loaded; this tab's session check retries in the background). window.__qaMarker = '${MARK}'. Next: the session cookie disappears (it "expires") — nobody signs out`)
+  await shot(page, `${prefix}-1-trucks-marker`)
+  await ctx.clearCookies()
+  await page.unroute('**/api/auth/session', noAnswer)
+  const t0 = Date.now()
+  if (wake === 'event') {
+    await page.evaluate(() => window.dispatchEvent(new Event('online')))
+  } else {
+    await ctx.setOffline(true)
+    await page.waitForTimeout(300)
+    await ctx.setOffline(false) // the browser's own 'online' event
+  }
+  await page.waitForURL((u) => u.pathname === '/login', { timeout: 60000 })
+  const routedMs = Date.now() - t0
+  await settleOn(page, '/login', page.locator('form.login-form'), 1000)
+  const atLogin = await readMarker(page)
+  notes.push(`${wake === 'event' ? 'an \'online\' event' : 'offline → online'}: the app's background check answered "signed out" and the app routed itself to /login ${routedMs} ms later; marker there ${atLogin === MARK ? `'${MARK}' (in-app, no reload)` : `${atLogin} (the page had already been loaded again)`}`)
+  await caption(page, `Step ${step} — the app routed itself to /login (marker ${atLogin === MARK ? `still '${MARK}'` : 'gone'}). Now ${nextWho} signs in on this page`)
+  await shot(page, `${prefix}-2-login-in-app`)
+  return atLogin
+}
+
 async function expiredSessionCase({ step, signer, signerWho, sameUser, prefix }) {
   let observed; let ok = false
   const notes = []
   const { ctx, page } = await freshPage(ADMIN_VP)
-  const noAnswer = (route) => route.abort('internetdisconnected')
   try {
-    await login(page, `Step ${step} — Super Admin`, CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
-    await page.route('**/api/auth/session', noAnswer)
-    await page.goto(`${BASE_URL}/trucks`)
-    await page.locator('table.truck-table').waitFor({ state: 'visible', timeout: 45000 })
-    await page.waitForTimeout(1000)
-    const st = await authState(page)
-    notes.push(`/trucks loaded with its session check unanswered → ${st ? `the store shows ${st.role} #${st.id}, reconnecting=${st.isReconnecting}` : 'store not readable'}`)
-    await plantMarker(page)
-    await caption(page, `Step ${step} — Super Admin on /trucks (data loaded; this tab's session check retries in the background). window.__qaMarker = '${MARK}'. Next: the session cookie disappears (it "expires") — nobody signs out`)
-    await shot(page, `${prefix}-1-trucks-marker`)
-    await ctx.clearCookies()
-    await page.unroute('**/api/auth/session', noAnswer)
-    const t0 = Date.now()
-    await ctx.setOffline(true)
-    await page.waitForTimeout(300)
-    await ctx.setOffline(false) // the browser's own 'online' event
-    await page.waitForURL((u) => u.pathname === '/login', { timeout: 60000 })
-    const routedMs = Date.now() - t0
-    await settleOn(page, '/login', page.locator('form.login-form'), 1000)
-    const atLogin = await readMarker(page)
-    notes.push(`offline → online: the app's background check answered "signed out" and the app routed itself to /login ${routedMs} ms later; marker there ${atLogin === MARK ? `'${MARK}' (in-app, no reload)` : `${atLogin} (the page had already been loaded again)`}`)
-    await caption(page, `Step ${step} — the app routed itself to /login (marker ${atLogin === MARK ? `still '${MARK}'` : 'gone'}). Now ${signerWho} signs in on this page`)
-    await shot(page, `${prefix}-2-login-in-app`)
+    await expireToLoginInApp({ ctx, page, step, prefix, notes, nextWho: signerWho })
     const t = trackDocuments(page)
     await signInHere(page, `Step ${step} — ${signerWho}`, signer.username, signer.password)
     await settleOn(page, '/dashboard', page.locator('h2', { hasText: 'Operations Dashboard' }))
@@ -2005,35 +2372,751 @@ async function residueCase() {
   }
 }
 
+// ================================================================ S4-S7
+const KPI = '.kpi-grid:not(.revenue-grid) .kpi-value'
+const sidebarLogout = (p) => p.locator('a.nav-item', { hasText: 'Logout' }).first()
+const pathOf = (u) => { try { return new URL(u).pathname } catch { return String(u) } }
+// A tab nobody touched: its marker says whether it was loaded again.
+const tabMarkerText = (m) => (m === NO_MARK ? 'undefined (a fresh page: it was loaded again)' : `'${m}' (the same page, never loaded again)`)
+async function throttle(ctx, page) {
+  const cdp = await ctx.newCDPSession(page)
+  await cdp.send('Network.enable')
+  await cdp.send('Network.emulateNetworkConditions', {
+    offline: false, latency: THROTTLE.latencyMs,
+    downloadThroughput: THROTTLE.kbps * 1024, uploadThroughput: THROTTLE.kbps * 1024,
+  })
+  return cdp
+}
+async function unthrottle(cdp) {
+  if (!cdp) return
+  await cdp.send('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }).catch(() => {})
+  await cdp.detach().catch(() => {})
+}
+const THROTTLE_TEXT = () => `CDP Network.emulateNetworkConditions +${THROTTLE.latencyMs} ms per request, ${THROTTLE.kbps} KB/s each way`
+const S7_KEY = 'qa.e2e.s7' // sessionStorage: S7's in-page record (a timestamp, counts, the button's state)
+
+// Is this tab showing the browser's own error page (a page load that failed)?
+async function onBrowserErrorPage(page) {
+  if (/^chrome-error:/i.test(page.url())) return true
+  return page.evaluate(() => !!document.querySelector('#main-frame-error, body.neterror')).catch(() => false)
+}
+
+// ---- S4a: sign-out with no network ends on the app's own login form
+async function offlineSignOutCase() {
+  const step = 'S4a'
+  let observed = ''; let ok = false
+  const notes = []
+  const { ctx, page } = await freshPage(ADMIN_VP)
+  try {
+    await login(page, `Step ${step} — Super Admin`, CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
+    await page.locator(KPI).first().waitFor({ state: 'visible', timeout: 45000 })
+    await page.waitForTimeout(1500)
+    await plantMarker(page)
+    await caption(page, `Step ${step} — Super Admin on /dashboard; window.__qaMarker = '${MARK}'. The browser goes OFFLINE, then the sidebar's Logout → expect the app's own login form at /login (not the browser's error page), the marker still there`)
+    await shot(page, 's4a-1-dashboard-marker')
+    await ctx.setOffline(true)
+    const t = trackDocuments(page)
+    await sidebarLogout(page).click()
+    await page.waitForTimeout(3000) // either outcome has landed by now: the in-app form, or the browser's error page
+    t.stop()
+    const errorPage = await onBrowserErrorPage(page)
+    const formVisible = !errorPage && await page.locator('form.login-form').isVisible().catch(() => false)
+    const marker = errorPage ? NO_MARK : await readMarker(page).catch(() => '?')
+    const first = !errorPage && formVisible && pathOf(page.url()) === '/login' && marker === MARK
+    notes.push(`offline sign-out: ${errorPage ? `the BROWSER'S ERROR PAGE (${page.url().slice(0, 40)})` : `${formVisible ? 'the app\'s login form' : 'NO login form'} at ${pathOf(page.url())}`}; ` +
+      `window.__qaMarker ${errorPage ? 'gone with the page' : `= ${markerText(marker)}`}; document loads: ${docsText(t.docs)}`)
+    await caption(page, `Step ${step} — ${notes[0]}`)
+    await shot(page, 's4a-2-offline-signout')
+    await ctx.setOffline(false)
+    let second = false
+    if (!first) {
+      notes.push('the Dispatcher sign-in was not run: there is no in-app login form on this page to sign in on')
+    } else if (!CREDS.dispatcher) {
+      notes.push('the Dispatcher sign-in was not run: the creds file has no dispatcher login')
+      second = true
+    } else {
+      await page.waitForTimeout(500)
+      const t2 = trackDocuments(page)
+      await signInHere(page, `Step ${step} — back online, the Dispatcher`, CREDS.dispatcher.username, CREDS.dispatcher.password)
+      await settleOn(page, '/dashboard', page.locator('h2', { hasText: 'Operations Dashboard' }))
+      t2.stop()
+      const m2 = await readMarker(page)
+      const me = await whoAmI(page)
+      second = m2 === NO_MARK && String(me.id) === String(CREDS.dispatcher.userId)
+      notes.push(`back online, the Dispatcher signed in on that form: on ${pathOf(page.url())}, window.__qaMarker = ${markerText(m2)}; document loads: ${docsText(t2.docs)}; server session: ${me.text}`)
+    }
+    ok = first && second
+    observed = notes.join('; ')
+    await caption(page, `Step ${step} — result: ${observed}`)
+  } catch (e) { observed = `${notes.length ? `${notes.join('; ')}; ` : ''}error: ${e.message}` }
+  await ctx.setOffline(false).catch(() => {})
+  const s = await shot(page, 's4a-3-result')
+  await ctx.close().catch(() => {})
+  record({
+    step, title: 'Sign-out with no network (the sidebar\'s Logout while offline); back online, the Dispatcher signs in on that page',
+    expected: 'The app\'s own login form at /login, not the browser\'s error page, reached in-app (marker still set). Then a full page load of /dashboard (marker undefined) with the Dispatcher\'s session',
+    observed, verdict: verdict(ok), shot: s,
+  })
+}
+
+// ---- S4b: sign-out while the server is down (as during a deploy's restart)
+async function serverDownSignOutCase() {
+  const step = 'S4b'
+  let observed = ''; let ok = false
+  const { ctx, page } = await freshPage(ADMIN_VP)
+  const STAND_IN = 'QA stand-in: the server is restarting'
+  const BODY = `<!doctype html><html><head><title>502 Bad Gateway</title></head><body><h1>502 Bad Gateway</h1><p>${STAND_IN}</p></body></html>`
+  const down = (route) => route.fulfill({ status: 502, contentType: 'text/html', body: BODY })
+  const isLogout = (u) => u.pathname === '/api/auth/logout'
+  const isLogin = (u) => u.pathname === '/login'
+  const loginDocDown = (route) => (route.request().resourceType() === 'document' ? down(route) : route.continue())
+  let routed = false
+  try {
+    await login(page, `Step ${step} — Super Admin`, CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
+    await page.locator(KPI).first().waitFor({ state: 'visible', timeout: 45000 })
+    await page.waitForTimeout(1500)
+    await plantMarker(page)
+    await page.route(isLogout, down)
+    await page.route(isLogin, loginDocDown)
+    routed = true
+    await caption(page, `Step ${step} — Super Admin on /dashboard; window.__qaMarker = '${MARK}'. The server is DOWN: POST /api/auth/logout and a page load of /login both answer 502. Press the sidebar's Logout → expect the app's own login form (in-app)`)
+    await shot(page, 's4b-1-dashboard-marker')
+    const t = trackDocuments(page)
+    await sidebarLogout(page).click()
+    await page.waitForTimeout(3000)
+    t.stop()
+    const shows502 = await page.evaluate((txt) => (document.body?.innerText || '').includes(txt), STAND_IN).catch(() => false)
+    const formVisible = await page.locator('form.login-form').isVisible().catch(() => false)
+    const marker = await readMarker(page).catch(() => '?')
+    ok = !shows502 && formVisible && pathOf(page.url()) === '/login' && marker === MARK
+    observed = `after Logout: ${shows502 ? 'the 502 BODY is shown (the page was replaced by the failed load of /login)' : formVisible ? 'the app\'s own login form' : 'NO login form'} at ${pathOf(page.url())}; ` +
+      `window.__qaMarker = ${markerText(marker)}; document loads: ${docsText(t.docs)}`
+    await caption(page, `Step ${step} — result: ${observed}`)
+  } catch (e) { observed = `error: ${e.message}` }
+  const s = await shot(page, 's4b-2-result')
+  if (routed) {
+    await page.unroute(isLogout, down).catch(() => {})
+    await page.unroute(isLogin, loginDocDown).catch(() => {})
+  }
+  await ctx.close().catch(() => {})
+  record({
+    step, title: 'Sign-out while the server is down: POST /api/auth/logout and the page load of /login both answer 502',
+    expected: 'The app\'s own login form at /login, reached in-app (marker still set); never the 502 body',
+    observed, verdict: verdict(ok), shot: s,
+  })
+}
+
+// Truck data in a tab, plus who its auth store holds. Counts and ids only.
+// Self-contained: it runs in the page.
+function tabProbe(units) {
+  const pinia = document.querySelector('#app')?.__vue_app__?.config?.globalProperties?.$pinia
+  const st = pinia?.state?.value
+  const text = document.body?.innerText || ''
+  const a = st?.auth
+  return {
+    path: location.pathname,
+    marker: window.__qaMarker === undefined ? 'undefined' : String(window.__qaMarker),
+    rows: document.querySelectorAll('table.truck-table tbody tr').length,
+    storeTrucks: Array.isArray(st?.trucks?.trucks) ? st.trucks.trucks.length : 0,
+    unitsOnScreen: (units || []).filter((u) => u && text.includes(u)).length,
+    form: !!document.querySelector('form.login-form'),
+    auth: a ? { id: a.user?.id ?? null, role: a.user?.role ?? null } : null,
+  }
+}
+const unitsOfTab = (page) => evalSafe(page, () => {
+  const p = document.querySelector('#app')?.__vue_app__?.config?.globalProperties?.$pinia
+  return (p?.state?.value?.trucks?.trucks || []).map((t) => String(t.UnitNumber || '')).filter((u) => u.length >= 3)
+})
+const authText = (a) => (a?.id != null ? `${a.role} #${a.id}` : 'nobody')
+
+// Two tabs of the Super Admin: A on /dashboard, B on /trucks with its marker.
+async function twoTabs(step) {
+  const { ctx, page: a } = await freshPage(ADMIN_VP)
+  await login(a, `Step ${step} — Super Admin (tab A)`, CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
+  await a.locator(KPI).first().waitFor({ state: 'visible', timeout: 45000 })
+  const b = await ctx.newPage()
+  await b.goto(`${BASE_URL}/trucks`)
+  await b.locator('table.truck-table tbody tr').first().waitFor({ state: 'visible', timeout: 45000 })
+  await b.waitForTimeout(1500)
+  await plantMarker(b)
+  const units = await unitsOfTab(b)
+  return { ctx, a, b, units, before: await evalSafe(b, tabProbe, units) }
+}
+
+// ---- S5a: another tab follows a sign-out
+async function otherTabSignOutCase() {
+  const step = 'S5a'
+  let observed = ''; let ok = false
+  let ctx = null; let b = null
+  try {
+    const t2 = await twoTabs(step)
+    ctx = t2.ctx; b = t2.b
+    const { a, units, before } = t2
+    await caption(b, `Step ${step} — tab B: the Super Admin's /trucks (${before.rows} rows, ${before.storeTrucks} trucks in its store); window.__qaMarker = '${MARK}'. Next: tab A signs out; nothing is done on this tab`)
+    await shot(b, 's5a-1-tab-b-trucks')
+    await caption(a, `Step ${step} — tab A: the Super Admin's dashboard. Press the sidebar's Logout → expect tab B to follow by itself within ~5 s`)
+    const tb = trackDocuments(b)
+    await sidebarLogout(a).click()
+    const t0 = Date.now()
+    let st = null; let followedMs = null
+    while (Date.now() - t0 < 6000) {
+      st = await evalSafe(b, tabProbe, units).catch(() => st)
+      if (st && st.path === '/login' && st.marker === NO_MARK) { followedMs = Date.now() - t0; break }
+      await b.waitForTimeout(250)
+    }
+    if (followedMs !== null) { await b.waitForTimeout(1000); st = await evalSafe(b, tabProbe, units) }
+    tb.stop()
+    const aPath = pathOf(a.url())
+    ok = followedMs !== null && st.rows === 0 && st.storeTrucks === 0 && st.unitsOnScreen === 0
+    observed = `tab A signed out (now on ${aPath}). Tab B, untouched: ${followedMs !== null ? `followed ${followedMs} ms later` : 'did NOT follow within 6 s'}; ` +
+      `on ${st?.path}, window.__qaMarker = ${tabMarkerText(st?.marker)}, document loads ${docsText(tb.docs)}; ` +
+      `truck data there: ${st?.rows} table rows, ${st?.storeTrucks} trucks in its store, ${st?.unitsOnScreen} of the ${units.length} unit numbers it listed still in its text; its auth store holds ${authText(st?.auth)}`
+    await caption(b, `Step ${step} — result: ${observed}`)
+  } catch (e) { observed = `error: ${e.message}` }
+  const s = b ? await shot(b, 's5a-2-tab-b-after') : ''
+  await ctx?.close().catch(() => {})
+  record({
+    step, title: 'Two tabs of the Super Admin (A on /dashboard, B on /trucks); A signs out with the sidebar\'s Logout, B is not touched',
+    expected: 'Within ~5 s, by itself: B is on /login as a fresh page (marker undefined), with no truck data on screen or in its stores',
+    observed, verdict: verdict(ok), shot: s,
+  })
+}
+
+// ---- S5b: another tab follows a different person
+async function otherTabNewPersonCase() {
+  const step = 'S5b'
+  let observed = ''; let ok = false
+  let ctx = null; let b = null
+  try {
+    const t2 = await twoTabs(step)
+    ctx = t2.ctx; b = t2.b
+    const { a, units, before } = t2
+    await caption(b, `Step ${step} — tab B: the Super Admin's /trucks (${before.rows} rows); window.__qaMarker = '${MARK}'. Next: the session cookie disappears (it "expires"), nobody signs out, and tab A signs in as the Dispatcher; nothing is done on this tab`)
+    await shot(b, 's5b-1-tab-b-trucks')
+    const tb = trackDocuments(b)
+    await ctx.clearCookies()
+    await a.goto(`${BASE_URL}/login`)
+    await signInHere(a, `Step ${step} — tab A: the Dispatcher`, CREDS.dispatcher.username, CREDS.dispatcher.password)
+    await settleOn(a, '/dashboard', a.locator('h2', { hasText: 'Operations Dashboard' }), 300)
+    const aWho = await whoAmI(a)
+    const t0 = Date.now()
+    let st = null; let doneMs = null
+    while (Date.now() - t0 < 10000) {
+      st = await evalSafe(b, tabProbe, units).catch(() => st)
+      if (st && st.marker === NO_MARK && String(st.auth?.id) === String(CREDS.dispatcher.userId) && st.path === '/dashboard') { doneMs = Date.now() - t0; break }
+      await b.waitForTimeout(250)
+    }
+    if (doneMs !== null) { await b.waitForTimeout(1000); st = await evalSafe(b, tabProbe, units) }
+    tb.stop()
+    ok = doneMs !== null && st.marker === NO_MARK && String(st.auth?.id) === String(CREDS.dispatcher.userId) && st.path === '/dashboard'
+    observed = `tab A: the Dispatcher signed in (server session ${aWho.text}). Tab B, untouched: ${doneMs !== null ? `followed ${doneMs} ms later` : 'did NOT follow within 10 s'}; ` +
+      `on ${st?.path}, window.__qaMarker = ${tabMarkerText(st?.marker)}, document loads ${docsText(tb.docs)}; its auth store holds ${authText(st?.auth)}; ` +
+      `${st?.rows} truck rows on screen, ${st?.unitsOnScreen} of the ${units.length} unit numbers it listed still in its text`
+    await caption(b, `Step ${step} — result: ${observed}`)
+  } catch (e) { observed = `error: ${e.message}` }
+  const s = b ? await shot(b, 's5b-2-tab-b-after') : ''
+  await ctx?.close().catch(() => {})
+  record({
+    step, title: 'Two tabs of the Super Admin; the session ends without a sign-out, and tab A signs in as the Dispatcher through the form; B is not touched',
+    expected: 'B loads again by itself (marker undefined) and shows the Dispatcher\'s home (/dashboard); its auth store holds the Dispatcher',
+    observed, verdict: verdict(ok), shot: s,
+  })
+}
+
+// S6: installed in every document of its context before the app's own scripts.
+// Records, on the document's own clock, when the app booted (its Vue instance
+// exists, or its first /api/ request, whichever comes first), when the login form
+// became visible, and each /api/ request it sent. Self-contained (serialized).
+function bootProbe() {
+  if (window.__qaBoot) return
+  const P = (window.__qaBoot = { appAt: null, formAt: null, calls: [] })
+  const orig = window.fetch
+  window.fetch = function (input) {
+    try {
+      const u = new URL(typeof input === 'string' ? input : (input && input.url) || String(input), location.href)
+      if (u.pathname.startsWith('/api/')) P.calls.push({ path: u.pathname, at: performance.now() })
+    } catch { /* not a URL */ }
+    return orig.apply(this, arguments)
+  }
+  const check = () => {
+    if (P.appAt === null && document.querySelector('#app')?.__vue_app__) P.appAt = performance.now()
+    if (P.formAt === null) {
+      const f = document.querySelector('form.login-form')
+      if (f && f.getClientRects().length) P.formAt = performance.now()
+    }
+    return P.appAt !== null && P.formAt !== null
+  }
+  const mo = new MutationObserver(() => { if (check()) mo.disconnect() })
+  mo.observe(document, { childList: true, subtree: true })
+  const tick = () => { if (!check()) requestAnimationFrame(tick) }
+  requestAnimationFrame(tick)
+}
+
+// ---- S6: /login renders at once after a confirmed sign-out, on a slow network
+async function slowSignOutCase() {
+  const step = 'S6'
+  let observed = ''; let v = 'FAIL'
+  const { ctx, page } = await freshPage(ADMIN_VP)
+  await ctx.addInitScript(bootProbe)
+  let cdp = null
+  try {
+    await login(page, `Step ${step} — Super Admin`, CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
+    await page.locator(KPI).first().waitFor({ state: 'visible', timeout: 45000 })
+    await page.waitForTimeout(1500)
+    await plantMarker(page)
+    cdp = await throttle(ctx, page)
+    await caption(page, `Step ${step} — Super Admin on /dashboard; the network is now slow (+${THROTTLE.latencyMs} ms per request). Press the sidebar's Logout → on the fresh /login page, expect the form without a session round-trip (no GET /api/auth/session before it)`)
+    await shot(page, 's6-1-dashboard-throttled')
+    const t = trackDocuments(page)
+    const t0 = Date.now()
+    await sidebarLogout(page).click()
+    await page.waitForURL((u) => u.pathname === '/login', { timeout: 90000 })
+    await page.locator('form.login-form').waitFor({ state: 'visible', timeout: 90000 })
+    const wallMs = Date.now() - t0
+    await page.waitForTimeout(800)
+    t.stop()
+    const marker = await readMarker(page)
+    const P = await evalSafe(page, () => window.__qaBoot || null)
+    if (marker !== NO_MARK || !P || P.formAt === null) {
+      v = 'INFO'
+      observed = `no fresh /login page to time (window.__qaMarker = ${markerText(marker)}, document loads ${docsText(t.docs)}${P ? '' : ', probe missing'}) — not scored`
+    } else {
+      const firstApi = P.calls.length ? P.calls[0].at : Infinity
+      const boot = Math.min(P.appAt ?? Infinity, firstApi)
+      const before = P.calls.filter((c) => c.at <= P.formAt)
+      const sessions = before.filter((c) => c.path === '/api/auth/session').length
+      v = sessions === 0 ? 'PASS' : 'FAIL'
+      observed = `Logout → a fresh /login page (document loads ${docsText(t.docs)}; marker ${markerText(marker)}); ` +
+        `the login form was visible ${Math.round(P.formAt - boot)} ms after the app booted (${wallMs} ms after the click); ` +
+        `requests before the form: ${before.length ? before.map((c) => `${c.path} at +${Math.round(c.at - boot)} ms`).join(', ') : 'none'}; ` +
+        `GET /api/auth/session before the form: ${sessions}. Throttle: ${THROTTLE_TEXT()}, applied before the Logout`
+    }
+    await caption(page, `Step ${step} — result: ${observed}`)
+  } catch (e) { observed = `error: ${e.message}` } finally { await unthrottle(cdp) }
+  const s = await shot(page, 's6-2-login-after-slow-signout')
+  await ctx.close().catch(() => {})
+  record({
+    step, title: 'Sign-out on a slow network (throttled before the Logout); the fresh /login page is timed from app boot to a visible login form',
+    expected: 'No GET /api/auth/session before the login form is visible: the form appears without a session round-trip',
+    observed, verdict: v, shot: s,
+  })
+}
+
+// ---- S7: a second tap on Sign In, after the first sign-in answered, sends nothing
+async function doubleTapSignInCase() {
+  const step = 'S7'
+  let observed = ''; let v = 'FAIL'
+  const notes = []
+  const { ctx, page } = await freshPage(ADMIN_VP)
+  let cdp = null
+  const posts = []
+  // The fresh page's own timeline: its document request, and the moment it committed.
+  const tl = { docReqAt: 0, commitAt: 0 }
+  const onReq = (r) => {
+    if (r.method() === 'POST' && pathOf(r.url()) === '/api/auth/login') posts.push(Date.now())
+    if (!tl.docReqAt && r.resourceType() === 'document' && r.frame() === page.mainFrame() && pathOf(r.url()) === '/dashboard') tl.docReqAt = Date.now()
+  }
+  const onNav = (f) => { if (f === page.mainFrame() && !tl.commitAt && pathOf(f.url()) === '/dashboard') tl.commitAt = Date.now() }
+  try {
+    const atLogin = await expireToLoginInApp({ ctx, page, step, prefix: 's7', notes, nextWho: 'the Dispatcher (a different person, so signing in loads a fresh page)', wake: 'event' })
+    if (atLogin !== MARK) throw new Error('the page was loaded again on its way to /login, so a sign-in here would not load a fresh page')
+    cdp = await throttle(ctx, page)
+    const form = page.locator('form.login-form')
+    await form.locator('input[autocomplete="username"]').fill(CREDS.dispatcher.username)
+    await form.locator('input[autocomplete="current-password"]').fill(CREDS.dispatcher.password)
+    await caption(page, `Step ${step} — network slowed (+${THROTTLE.latencyMs} ms per request). The Dispatcher presses Sign In, then presses it AGAIN once the first sign-in has answered, before the fresh page arrives → expect exactly one POST /api/auth/login`, false)
+    page.on('request', onReq)
+    page.on('framenavigated', onNav)
+    const btn = form.locator('button[type="submit"]')
+    // The first press is a real click. The second tap is made by the page itself,
+    // 400 ms after the first sign-in answered: while the fresh page loads, DevTools
+    // holds every command to this page until the fresh one has committed, so no
+    // Playwright action or CDP call can reach it in that window, but the page's own
+    // script still runs, as a person's tap still lands. It clicks Sign In (a
+    // disabled button ignores click(), as it ignores a tap) and records what it saw,
+    // and every sign-in POST it sent, in sessionStorage, which the fresh page in
+    // the same tab can still read.
+    await page.evaluate(({ delay, key }) => {
+      sessionStorage.removeItem(key)
+      const log = { posts: 0, answeredAt: null, tap: null }
+      const save = () => { try { sessionStorage.setItem(key, JSON.stringify(log)) } catch { /* storage full */ } }
+      const orig = window.fetch
+      window.fetch = function (input, init) {
+        let isLogin = false
+        try {
+          isLogin = String(init?.method || 'GET').toUpperCase() === 'POST' &&
+            new URL(typeof input === 'string' ? input : input.url, location.href).pathname === '/api/auth/login'
+        } catch { /* not a URL */ }
+        const p = orig.apply(this, arguments)
+        if (isLogin) {
+          log.posts++
+          save()
+          if (log.posts === 1) {
+            p.then(() => {
+              log.answeredAt = Math.round(performance.now())
+              save()
+              setTimeout(() => {
+                const b = document.querySelector('form.login-form button[type="submit"]')
+                log.tap = {
+                  afterMs: Math.round(performance.now()) - log.answeredAt,
+                  disabled: b ? b.disabled : null, text: b ? b.textContent.trim() : '',
+                  marker: window.__qaMarker === undefined ? 'undefined' : String(window.__qaMarker),
+                }
+                save()
+                if (b) b.click()
+              }, delay)
+            }, () => {})
+          }
+        }
+        return p
+      }
+    }, { delay: 400, key: S7_KEY })
+    const firstResp = page.waitForResponse((r) => pathOf(r.url()) === '/api/auth/login' && r.request().method() === 'POST', { timeout: 90000 })
+    const clickAt = Date.now()
+    await btn.click()
+    const resp = await firstResp
+    const answeredAt = Date.now()
+    await page.waitForURL((u) => u.pathname === '/dashboard', { timeout: 90000 })
+    for (let i = 0; i < 160 && (await readMarker(page).catch(() => '?')) !== NO_MARK; i++) await page.waitForTimeout(250)
+    await page.waitForTimeout(1500)
+    page.off('request', onReq)
+    page.off('framenavigated', onNav)
+    const markerEnd = await readMarker(page)
+    // What the old page recorded, read on the fresh one (same tab), then removed.
+    const log = await evalSafe(page, (key) => { const v = sessionStorage.getItem(key); sessionStorage.removeItem(key); return v ? JSON.parse(v) : null }, S7_KEY).catch(() => null)
+    await unthrottle(cdp); cdp = null
+    const me = await whoAmI(page)
+    const rel = (t) => (t ? `${t >= answeredAt ? '+' : ''}${t - answeredAt} ms` : 'not seen')
+    const timeline = `timeline (0 = the first answer): Sign In pressed ${rel(clickAt)}; the fresh page's document requested ${rel(tl.docReqAt)}, committed ${rel(tl.commitAt)}`
+    const tap = log?.tap || null
+    const tapOnOldPage = !!tap && tap.marker === MARK
+    const tapText = !log ? 'the page\'s own record was not found (not scored)'
+      : !tap ? 'no second tap: the fresh page replaced this one first (window missed — not scored)'
+        : `second tap ${tap.afterMs} ms after the first answer, on ${tapOnOldPage ? `this page (marker '${MARK}')` : 'ANOTHER page (not scored)'}: Sign In was ${tap.disabled ? 'DISABLED' : tap.disabled === false ? 'ENABLED' : 'not found'} ("${tap.text}")`
+    v = tapOnOldPage ? (posts.length === 1 && log.posts === 1 ? 'PASS' : 'FAIL') : 'INFO'
+    observed = `${notes.join('; ')}; first POST /api/auth/login → ${resp.status()}; ${timeline}; ${tapText}; ` +
+      `POST /api/auth/login requests: ${posts.length} seen on the network, ${log ? log.posts : '?'} sent by the page; ` +
+      `then on ${pathOf(page.url())}, window.__qaMarker = ${markerText(markerEnd)}; server session ${me.text}. Throttle: ${THROTTLE_TEXT()}, applied before the sign-in`
+    await caption(page, `Step ${step} — result: ${observed}`)
+  } catch (e) { observed = `${notes.length ? `${notes.join('; ')}; ` : ''}error: ${e.message}; POST /api/auth/login requests seen: ${posts.length}` } finally {
+    page.off('request', onReq)
+    page.off('framenavigated', onNav)
+    await unthrottle(cdp)
+  }
+  const s = await shot(page, 's7-3-after')
+  await ctx.close().catch(() => {})
+  record({
+    step, title: 'The S2 expiry path, then the Dispatcher signs in (a different person: a fresh page) on a slow network, pressing Sign In a second time after the first answered',
+    expected: 'Exactly one POST /api/auth/login: the button stays disabled until the fresh page replaces this one',
+    observed, verdict: v, shot: s,
+  })
+}
+
 async function signoutSection() {
   meta.ids.superAdminUser = CREDS.superAdmin.userId
   meta.ids.driverUser = CREDS.driver.userId
   if (CREDS.dispatcher) meta.ids.dispatcherUser = CREDS.dispatcher.userId
   const skip = (step, title) => record({ step, title, expected: '—', observed: 'SKIPPED — creds.json has no dispatcher login (run setup-db.cjs)', verdict: 'SKIP', shot: '' })
 
-  await signOutCase({
-    step: 'S1a', who: 'Super Admin', creds: CREDS.superAdmin, home: '/dashboard', viewport: ADMIN_VP,
-    ready: (p) => p.locator('.kpi-grid:not(.revenue-grid) .kpi-value').first(),
-    button: (p) => p.locator('a.nav-item', { hasText: 'Logout' }).first(),
-    buttonLabel: 'the sidebar\'s Logout', prefix: 's1a',
-  })
-  await signOutCase({
-    step: 'S1b', who: 'Driver', creds: CREDS.driver, home: '/driver', viewport: { width: DVW, height: DVH },
-    ready: (p) => p.locator('button.header-btn.danger', { hasText: 'Logout' }).first(),
-    button: (p) => p.locator('button.header-btn.danger', { hasText: 'Logout' }).first(),
-    buttonLabel: 'the driver app\'s Logout button', prefix: 's1b',
-  })
-  if (CREDS.dispatcher) {
-    await expiredSessionCase({ step: 'S2a', signer: CREDS.dispatcher, signerWho: 'the Dispatcher', sameUser: false, prefix: 's2a' })
-  } else skip('S2a', 'Session expired; the Dispatcher signs in on that page')
-  await expiredSessionCase({ step: 'S2b', signer: CREDS.superAdmin, signerWho: 'the same Super Admin', sameUser: true, prefix: 's2b' })
-  if (CREDS.dispatcher) await residueCase()
-  else skip('S3', 'Visible residue after sign-out → Dispatcher sign-in')
+  if (wantStep('S1a')) {
+    await signOutCase({
+      step: 'S1a', who: 'Super Admin', creds: CREDS.superAdmin, home: '/dashboard', viewport: ADMIN_VP,
+      ready: (p) => p.locator('.kpi-grid:not(.revenue-grid) .kpi-value').first(),
+      button: (p) => p.locator('a.nav-item', { hasText: 'Logout' }).first(),
+      buttonLabel: 'the sidebar\'s Logout', prefix: 's1a',
+    })
+  }
+  if (wantStep('S1b')) {
+    await signOutCase({
+      step: 'S1b', who: 'Driver', creds: CREDS.driver, home: '/driver', viewport: { width: DVW, height: DVH },
+      ready: (p) => p.locator('button.header-btn.danger', { hasText: 'Logout' }).first(),
+      button: (p) => p.locator('button.header-btn.danger', { hasText: 'Logout' }).first(),
+      buttonLabel: 'the driver app\'s Logout button', prefix: 's1b',
+    })
+  }
+  if (wantStep('S2a')) {
+    if (CREDS.dispatcher) {
+      await expiredSessionCase({ step: 'S2a', signer: CREDS.dispatcher, signerWho: 'the Dispatcher', sameUser: false, prefix: 's2a' })
+    } else skip('S2a', 'Session expired; the Dispatcher signs in on that page')
+  }
+  if (wantStep('S2b')) await expiredSessionCase({ step: 'S2b', signer: CREDS.superAdmin, signerWho: 'the same Super Admin', sameUser: true, prefix: 's2b' })
+  if (wantStep('S3')) {
+    if (CREDS.dispatcher) await residueCase()
+    else skip('S3', 'Visible residue after sign-out → Dispatcher sign-in')
+  }
+  // S4-S7: each case in its own browser context, like S1-S3.
+  if (wantStep('S4a')) await offlineSignOutCase()
+  if (wantStep('S4b')) await serverDownSignOutCase()
+  if (wantStep('S5a')) await otherTabSignOutCase()
+  if (wantStep('S5b')) {
+    if (CREDS.dispatcher) await otherTabNewPersonCase()
+    else skip('S5b', 'Another tab follows a different person')
+  }
+  if (wantStep('S6')) await slowSignOutCase()
+  if (wantStep('S7')) {
+    if (CREDS.dispatcher) await doubleTapSignInCase()
+    else skip('S7', 'One sign-in POST on a double tap')
+  }
+}
+
+// ================================================================ Dispatcher data section (D1-D3)
+// What a Dispatcher's copies of the loads carry in the broker/contact columns
+// (BROKER_WITHHELD_RE, the mirror of server.js). Counts only: values stay in memory.
+// A Super Admin context reads the same things for comparison, so a 0 cannot come
+// from data that has nothing to withhold.
+const withheldHeadersOf = (obj) => Object.keys(obj || {}).filter((h) => BROKER_WITHHELD_RE.test(h))
+async function dispatcherSection() {
+  if (!CREDS.dispatcher) {
+    for (const [step, title] of [['D1', 'The Dispatcher\'s GET /api/dashboard: broker/contact cells'], ['D2', 'The Dispatcher\'s GET /api/load/<id>: broker/contact fields'],
+      ['D3a', 'The Dispatcher\'s GET /api/data?sheet=Job Tracking'], ['D3b', 'The Dispatcher\'s GET /api/data?sheet=Job Tracking!A2:ZZ'], ['D3c', 'The Dispatcher\'s GET /api/data?sheet=Payments Table']]) {
+      record({ step, title, expected: '—', observed: 'SKIPPED — the creds file has no dispatcher login (run setup-db.cjs)', verdict: 'SKIP', shot: '' })
+    }
+    return
+  }
+  meta.ids.dispatcherUser = CREDS.dispatcher.userId
+  const { ctx: dctx, page: dp } = await freshPage(ADMIN_VP)
+  let sctx = null
+  try {
+    // ---- D1: the payload the Dispatcher's own dashboard receives
+    let dPayload = null
+    const onResp = async (r) => {
+      if (dPayload || pathOf(r.url()) !== '/api/dashboard' || r.request().method() !== 'GET' || r.status() !== 200) return
+      try { dPayload = await r.json() } catch { /* ignore */ }
+    }
+    dp.on('response', onResp)
+    await login(dp, 'Step D1 — Dispatcher', CREDS.dispatcher.username, CREDS.dispatcher.password, '/dashboard')
+    await dp.locator(KPI).first().waitFor({ state: 'visible', timeout: 45000 })
+    for (let i = 0; i < 100 && !dPayload; i++) await dp.waitForTimeout(100)
+    dp.off('response', onResp)
+    const dVia = dPayload ? 'the dashboard\'s own request' : 'a page fetch (the dashboard\'s own response was not captured)'
+    if (!dPayload) dPayload = (await api(dp, 'GET', '/api/dashboard')).json
+    const disp = withheldOf(dPayload)
+    // The Super Admin's copy, for comparison.
+    const sa0 = await freshPage(ADMIN_VP)
+    sctx = sa0.ctx
+    const sp = sa0.page
+    await login(sp, 'Step D1 — Super Admin (the copy to compare with)', CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
+    const saPayload = (await api(sp, 'GET', '/api/dashboard')).json
+    const sa = withheldOf(saPayload)
+    const saOnly = superAdminOnlyCells(sa, disp)
+    {
+      const ok = disp.cells === 0
+      const observed = `the Dispatcher's payload (${dVia}): ${disp.headers} broker/contact column(s), ${disp.cells} non-empty cell(s)` +
+        `${disp.cells ? `, ${sa.cells - saOnly} of them identical to the Super Admin's copy (the rest reduced to a name)` : ''}; ` +
+        `the Super Admin's copy: ${sa.cells} non-empty (${saOnly} of them withheld from the Dispatcher's copy or reduced)`
+      await caption(dp, `Step D1 — the Dispatcher's dashboard: ${observed}`)
+      const s = await shot(dp, 'd1-dispatcher-dashboard')
+      record({
+        step: 'D1', title: 'The Dispatcher signs in; the payload of their dashboard\'s GET /api/dashboard (broker/contact columns: headers matching BROKER_WITHHELD_RE)',
+        expected: '0 non-empty cells in any broker/contact column (not even a name)',
+        observed: sa.cells === 0 && ok ? `${observed} — vacuous: this data has no broker/contact values to withhold` : observed,
+        verdict: ok ? (sa.cells === 0 ? 'PASS (vacuous)' : 'PASS') : 'FAIL', shot: s,
+      })
+    }
+
+    // ---- D2: one real load, read with GET /api/load/<id>
+    {
+      let observed; let v = 'FAIL'; let s = ''
+      try {
+        const hs = saPayload?.jobTrackingHeaders || []
+        const idCol = hs.find((h) => /load.?id|job.?id/i.test(String(h ?? '')))
+        const wh = hs.filter((h) => BROKER_WITHHELD_RE.test(String(h ?? '')))
+        const rowsSA = ['activeJobs', 'unassignedJobs', 'completedJobs'].flatMap((k) => saPayload?.[k] || [])
+        const candidates = rowsSA
+          .map((r) => ({ id: String(r?.[idCol] ?? ''), n: wh.filter((h) => String(r?.[h] ?? '').trim()).length }))
+          .filter((c) => c.id.trim() && c.n > 0)
+          .sort((x, y) => y.n - x.n)
+          .slice(0, 5)
+        if (!idCol) throw new Error('no load id column in the dashboard payload')
+        if (!candidates.length) throw new Error('no load in the Super Admin\'s dashboard carries a broker/contact value')
+        let pick = null; let dl = null; let sl = null
+        for (const c of candidates) {
+          dl = await api(dp, 'GET', `/api/load/${encodeURIComponent(c.id)}`)
+          if (dl.status === 404) continue
+          sl = await api(sp, 'GET', `/api/load/${encodeURIComponent(c.id)}`)
+          pick = c
+          break
+        }
+        if (!pick) throw new Error(`none of ${candidates.length} candidate loads was found by GET /api/load/<id>`)
+        meta.ids.d2Load = pick.id
+        const dLoad = dl.json?.load || null
+        const sLoad = sl?.json?.load || null
+        const dFields = withheldHeadersOf(dLoad)
+        const dNonEmpty = dFields.filter((h) => String(dLoad[h] ?? '').trim())
+        const sNonEmpty = withheldHeadersOf(sLoad).filter((h) => String(sLoad[h] ?? '').trim())
+        const same = dNonEmpty.filter((h) => sLoad && String(sLoad[h] ?? '') === String(dLoad[h] ?? '')).length
+        if (dl.status !== 200 || !dLoad) v = 'FAIL'
+        else if (dNonEmpty.length) v = 'FAIL'
+        else v = sNonEmpty.length ? 'PASS' : 'PASS (vacuous)'
+        observed = `load ${pick.id}: the Dispatcher's GET /api/load → ${dl.status}; ${dFields.length} broker/contact field(s), ${dNonEmpty.length} non-empty` +
+          `${dNonEmpty.length ? ` (${same} identical to the Super Admin's copy)` : ''}; the Super Admin's GET /api/load → ${sl?.status}, ${sNonEmpty.length} non-empty`
+        if (v === 'PASS (vacuous)') observed += ' — vacuous: the Super Admin\'s copy has none either'
+        await caption(dp, `Step D2 — ${observed}`)
+        s = await shot(dp, 'd2-dispatcher-load')
+      } catch (e) { observed = `error: ${e.message}` }
+      if (!s) s = await shot(dp, 'd2-dispatcher-load')
+      record({
+        step: 'D2', title: 'The Dispatcher\'s GET /api/load/<a real load id> (the load with the most broker/contact values in the Super Admin\'s dashboard)',
+        expected: 'The load answers 200 with every broker/contact field blank (the Super Admin\'s copy still has them)',
+        observed, verdict: v, shot: s,
+      })
+    }
+
+    // ---- D3: the sheet reader, GET /api/data, with the Dispatcher's session. Read-only.
+    // Summarized in the page: counts leave it, values never do.
+    {
+      const cases = [
+        { id: 'D3a', q: 'Job%20Tracking', label: 'Job Tracking' },
+        { id: 'D3b', q: 'Job%20Tracking!A2:ZZ', label: 'Job Tracking!A2:ZZ (a range of the tab)' },
+        { id: 'D3c', q: 'Payments%20Table', label: 'Payments Table' },
+      ]
+      const logs = []
+      for (const c of cases) {
+        let observed; let ok = false
+        try {
+          const r = await dp.evaluate(async (url) => {
+            const RE = /broker|phone|e-?mail|contact|\bfax\b|mobile|\bcell\b/i
+            const EMAIL = /[^\s@"'<>]+@[^\s@"'<>]+\.[a-z]{2,}/i
+            const PHONE = /(?:\+?1[\s.-]?)?\(?\b\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/
+            const res = await fetch(url, { credentials: 'same-origin', cache: 'no-store' })
+            const text = await res.text()
+            let j = null
+            try { j = JSON.parse(text) } catch { /* not json */ }
+            const out = { status: res.status, isJson: !!j, error: typeof j?.error === 'string' ? j.error.slice(0, 80) : '' }
+            if (!j || !Array.isArray(j.data)) return out
+            const headers = (j.headers || []).map((h) => String(h ?? ''))
+            const wh = headers.filter((h) => RE.test(h))
+            const count = (rows) => {
+              let cells = 0; let emails = 0; let phones = 0
+              for (const row of rows || []) {
+                for (const h of wh) if (String(row?.[h] ?? '').trim()) cells++
+                for (const [k, v] of Object.entries(row || {})) {
+                  if (k === '_rowIndex') continue
+                  const s = String(v ?? '')
+                  if (EMAIL.test(s)) emails++
+                  else if (PHONE.test(s)) phones++
+                }
+              }
+              return { cells, emails, phones }
+            }
+            const d = count(j.data)
+            const dup = count(j.duplicates)
+            // The headers row it returned is counted too.
+            const hEmails = headers.filter((h) => EMAIL.test(h)).length
+            const hPhones = headers.filter((h) => !EMAIL.test(h) && PHONE.test(h)).length
+            return {
+              ...out, rows: j.data.length, total: j.total, headerCount: headers.length, contactColumns: wh.length,
+              data: d, duplicates: Array.isArray(j.duplicates) ? { rows: j.duplicates.length, ...dup } : null, hEmails, hPhones,
+            }
+          }, `/api/data?sheet=${c.q}`)
+          ok = r.status === 403
+          const contact = r.isJson && r.data
+            ? r.data.emails + r.data.phones + (r.duplicates ? r.duplicates.emails + r.duplicates.phones : 0) + r.hEmails + r.hPhones
+            : 0
+          observed = `${r.status}${r.error ? ` "${r.error}"` : ''}` + (r.isJson && r.data
+            ? `; ${r.rows} row(s) of ${r.total}; ${r.contactColumns} broker/contact column(s) by header, ${r.data.cells} non-empty cell(s) in them` +
+              `${r.duplicates ? `; "duplicates": ${r.duplicates.rows} row(s), ${r.duplicates.cells} non-empty broker/contact cell(s)` : ''}` +
+              `; email-looking values ${r.data.emails + (r.duplicates?.emails || 0) + r.hEmails}, phone-looking values ${r.data.phones + (r.duplicates?.phones || 0) + r.hPhones}` +
+              ` (${r.hEmails + r.hPhones} of them in the returned headers row) → contact data ${contact ? 'PRESENT' : 'absent'}`
+            : '')
+          logs.push(`${c.id} → ${r.status}`)
+        } catch (e) { observed = `error: ${e.message}` }
+        record({
+          step: c.id, title: `The Dispatcher's page fetch of GET /api/data?sheet=${c.label}`,
+          expected: '403: the sheet reader is Super Admin only (no Dispatcher screen uses it)',
+          observed, verdict: verdict(ok), shot: '',
+        })
+      }
+      await caption(dp, `Step D3 — the Dispatcher's GET /api/data (counts only): ${logs.join(' · ')}`)
+      const s = await shot(dp, 'd3-dispatcher-sheet-reader')
+      rows.filter((r) => /^D3[a-c]$/.test(r.step)).forEach((r) => { r.shot = s })
+      writeResults()
+    }
+  } finally {
+    await sctx?.close().catch(() => {})
+    await dctx.close().catch(() => {})
+  }
+}
+
+// ================================================================ maintenance notice section (M1)
+// Local only, with the server booted with the notice on (boot-server.sh with
+// E2E_MAINTENANCE_NOTICE=1). Two Investors take turns in ONE tab.
+async function maintenanceSection() {
+  const title = 'Investor A dismisses the maintenance popup and signs out; Investor B signs in on the same tab'
+  const expected = 'B sees the popup (a dismissal belongs to the person who dismissed it)'
+  const titleB = 'Then B signs out and Investor A signs back in on that tab'
+  const expectedB = 'A does NOT see the popup again (their own dismissal still holds)'
+  const skipBoth = (why) => {
+    record({ step: 'M1a', title, expected, observed: `SKIPPED — ${why}`, verdict: 'SKIP', shot: '' })
+    record({ step: 'M1b', title: titleB, expected: expectedB, observed: `SKIPPED — ${why}`, verdict: 'SKIP', shot: '' })
+  }
+  if (!LOCAL) return skipBoth('local only (the notice is off on staging)')
+  if (!CREDS.investor || !CREDS.investor2) return skipBoth('the creds file needs two investor logins (investor, investor2): run setup-db.cjs')
+  meta.ids.investorUser = CREDS.investor.userId
+  meta.ids.investor2User = CREDS.investor2.userId
+  const { ctx, page } = await freshPage(ADMIN_VP)
+  const popup = page.locator('.maintenance-overlay .maintenance-dialog')
+  const popupShows = (ms) => popup.waitFor({ state: 'visible', timeout: ms }).then(() => true).catch(() => false)
+  const dismiss = async () => {
+    await popup.locator('.maintenance-actions button').first().click()
+    await popup.waitFor({ state: 'hidden', timeout: 10000 })
+  }
+  const signOut = async () => {
+    await sidebarLogout(page).click()
+    await settleOn(page, '/login', page.locator('form.login-form'), 800)
+  }
+  const investorHome = async () => {
+    await page.waitForURL((u) => u.pathname.startsWith('/investor'), { timeout: 45000 })
+    await page.waitForLoadState('load')
+  }
+  try {
+    await page.goto(`${BASE_URL}/login`)
+    const cfg = (await api(page, 'GET', '/api/config/maintenance')).json || {}
+    if (!cfg.enabled) { await ctx.close().catch(() => {}); return skipBoth('the notice is off on this server (boot it with E2E_MAINTENANCE_NOTICE=1)') }
+    if (!['investor', 'all'].includes(cfg.audience)) { await ctx.close().catch(() => {}); return skipBoth(`the notice's audience is "${cfg.audience}", which has no investors`) }
+    // A: sees the popup, dismisses it, signs out.
+    await login(page, 'Step M1 — Investor A', CREDS.investor.username, CREDS.investor.password, '/investor')
+    await investorHome()
+    const aSaw = await popupShows(20000)
+    await caption(page, `Step M1 — Investor A (#${CREDS.investor.userId}) signed in: the maintenance popup ${aSaw ? 'shows' : 'does NOT show'}. A dismisses it and signs out; then Investor B signs in on this same tab`)
+    await shot(page, 'm1-1-investor-a-popup')
+    if (!aSaw) throw new Error('Investor A never saw the popup, so there was no dismissal to carry over')
+    await dismiss()
+    await signOut()
+    // B: same tab.
+    await signInHere(page, 'Step M1 — Investor B, same tab', CREDS.investor2.username, CREDS.investor2.password)
+    await investorHome()
+    const bSaw = await popupShows(12000)
+    const bWho = await whoAmI(page)
+    const obsA = `A (#${CREDS.investor.userId}) saw the popup and dismissed it, then signed out; B signed in on the same tab (session ${bWho.text}): the popup ${bSaw ? 'SHOWS' : 'does NOT show'} for B within 12 s`
+    await caption(page, `Step M1a — result: ${obsA}`)
+    const sA = await shot(page, 'm1-2-investor-b-same-tab')
+    record({ step: 'M1a', title, expected, observed: obsA, verdict: verdict(bSaw), shot: sA })
+    // B signs out; A again, same tab.
+    if (bSaw) await dismiss()
+    await signOut()
+    await signInHere(page, 'Step M1 — Investor A again, same tab', CREDS.investor.username, CREDS.investor.password)
+    await investorHome()
+    const aAgain = await popupShows(8000)
+    const aWho = await whoAmI(page)
+    let obsB = `A signed back in on that tab (session ${aWho.text}): the popup ${aAgain ? 'SHOWS again' : 'does not show'} within 8 s`
+    const vB = aAgain ? 'FAIL' : (bSaw ? 'PASS' : 'PASS (vacuous)')
+    if (vB === 'PASS (vacuous)') obsB += ' — vacuous: on this build the tab\'s one dismissal hides the popup from everyone (see M1a)'
+    await caption(page, `Step M1b — result: ${obsB}`)
+    const sB = await shot(page, 'm1-3-investor-a-again')
+    record({ step: 'M1b', title: titleB, expected: expectedB, observed: obsB, verdict: vB, shot: sB })
+  } catch (e) {
+    const s = await shot(page, 'm1-error')
+    if (!rows.some((r) => r.step === 'M1a')) record({ step: 'M1a', title, expected, observed: `error: ${e.message}`, verdict: 'FAIL', shot: s })
+    else record({ step: 'M1b', title: titleB, expected: expectedB, observed: `error: ${e.message}`, verdict: 'FAIL', shot: s })
+  } finally {
+    await ctx.close().catch(() => {})
+  }
 }
 
 async function cleanup() {
-  if (ONLY === 'signout') {
-    // Nothing planted, no trucks made: the sign-out section closes its own contexts.
+  if (!runs('trucks')) {
+    // Nothing planted, no trucks made: the other sections close their own contexts.
     try { await browser?.close() } catch { /* ignore */ }
     return
   }
