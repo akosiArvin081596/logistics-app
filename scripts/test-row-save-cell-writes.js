@@ -7,8 +7,7 @@
 // Data Manager — send every column back as displayed. Both routes then rewrote
 // the WHOLE row from column A with valueInputOption USER_ENTERED, so on every
 // save, whichever cell was edited:
-//   • a formula cell was rewritten as its displayed value, and the formula lost;
-//   • a text cell displaying "=…" was read back in as a formula.
+//   • a formula cell was rewritten as its displayed value, and the formula lost.
 // Each route now writes one values.batchUpdate of single-cell ranges, one per
 // cell whose value as it will be written differs from the value as read
 // (sheetRowCellWrites()), and nothing at all when no cell differs.

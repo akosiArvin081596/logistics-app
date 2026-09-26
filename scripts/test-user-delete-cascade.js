@@ -209,6 +209,45 @@ function seedOnboardedDriver(db) {
 	db.close();
 }
 {
+	// A USERNAME IS NOT A DRIVER IDENTITY. The cascade name is
+	// `driver_name || username`, but the truck found under another spacing is
+	// released only for an account that HAS a driver name. A Dispatcher with no
+	// driver name, whose username differs only in spacing from a driver who has
+	// no login of their own, must leave that driver's truck assigned.
+	const seed = (db) => {
+		db.prepare("INSERT INTO users (id, username, driver_name, role) VALUES (9,'shorn  king','','Dispatcher')").run();
+		db.prepare("INSERT INTO trucks (id, unit_number, assigned_driver) VALUES (1,'LogisX-#33','Shorn King')").run();
+		db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (1,'Shorn King','2026-01-02','')").run();
+		return { id: 9, username: "shorn  king", driver_name: "", role: "Dispatcher" };
+	};
+	const db = scratch();
+	const { removed, detached, threw } = runCascade(db, seed(db), "shorn  king", 9);
+	check("USERNAME: the delete completes", threw, null);
+	check("USERNAME: no truck is released for an account without a driver name", removed.trucks_unassigned, 0);
+	check("USERNAME: the driver's truck keeps its driver",
+		db.prepare("SELECT assigned_driver FROM trucks WHERE id = 1").get().assigned_driver, "Shorn King");
+	check("USERNAME: the driver's open assignment stays open", detached.truck_assignments_closed, 0);
+	db.close();
+
+	// MUTANT: without the driver-name condition the username reaches the
+	// spacing-aware lookup and takes the other driver's truck.
+	const guard = 'if (!String(user.driver_name || "").trim()) return null;';
+	check("USERNAME mutant: the guard line exists exactly once", CASCADE.split(guard).length - 1, 1);
+	const db2 = scratch();
+	const mutant = runCascade(db2, seed(db2), "shorn  king", 9, CASCADE.replace(guard, ""));
+	check("USERNAME mutant is caught: without the condition the other driver's truck is released", mutant.removed.trucks_unassigned, 1);
+	db2.close();
+
+	// CONTROL: an account WITH a driver name still releases its truck stored under
+	// another spacing (no other account holds the name).
+	const db3 = scratch();
+	db3.prepare("INSERT INTO users (id, username, driver_name, role) VALUES (7,'sking','Shorn  King','Driver')").run();
+	db3.prepare("INSERT INTO trucks (id, unit_number, assigned_driver) VALUES (1,'LogisX-#33','Shorn King')").run();
+	const ctl = runCascade(db3, { id: 7, username: "sking", driver_name: "Shorn  King", role: "Driver" }, "shorn  king", 7);
+	check("DRIVER control: an account with a driver name still releases the truck under another spacing", ctl.removed.trucks_unassigned, 1);
+	db3.close();
+}
+{
 	// The investor branch: the record survives, the dangling pointer does not.
 	const db = scratch();
 	db.prepare("INSERT INTO users (id, username, driver_name, role) VALUES (5,'johnny','','Investor')").run();

@@ -21787,6 +21787,10 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 					// name-matched `users` legs can only touch THIS account.
 					const { counts } = applyDriverRenameSqlite({
 						oldName: user.driver_name, newName: driverName, userId: id,
+						// The plan's own answer on taking other spellings, as
+						// PUT /api/admin/fix-driver-name hands it on, so the executor can
+						// never widen past the rows the lock judged.
+						...(typeof lock.widens === "boolean" ? { widens: lock.widens } : {}),
 					});
 					Object.assign(renamed, counts);
 				}
@@ -22776,7 +22780,11 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 				// (findTruckForDriverAccount()): case aside, as before — every such
 				// truck — else the one naming them under another spacing, unless
 				// another account still holds that spelling. Read before the write.
+				// Only for an account with a driver name: a username is not a driver
+				// identity (canonicalDriverName() never substitutes one), so the
+				// username fallback of `name` keeps the case-aside match alone.
 				const spacedTruck = (() => {
+					if (!String(user.driver_name || "").trim()) return null;
 					const t = findTruckForDriverAccount(name, [id]);
 					return t && t.matchedBy === "normalized" ? t : null;
 				})();
@@ -28430,10 +28438,10 @@ function a1ColumnLetter(index) {
 // ⚠️ WHY NOT THE WHOLE ROW. Both routes read the row as the sheet DISPLAYS it
 // (the API's default FORMATTED_VALUE), the Active Loads editor and the Data
 // Manager send every column back as displayed, and both routes write with
-// USER_ENTERED. Rewriting the row from column A therefore turned every formula
-// cell into its displayed value, and re-read a text cell displaying "=…" as a
-// formula, on every save, whichever cell was edited. A cell sent back exactly as
-// read is left alone, so neither happens unless that cell is the one edited.
+// USER_ENTERED. Rewriting the row from column A would
+// therefore rewrite every cell on every save, whichever cell was edited, and a
+// formula cell among them would come back as its displayed value. A cell sent
+// back exactly as read is left alone, so only the edited cells are written.
 //
 // Compared as the period guard (changedGuardedCells()) and the audit compare:
 // null and absent read as "", anything else as its String(). A null is written
@@ -29761,8 +29769,8 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		}
 
 		// Only the cells this save changes, one range each (sheetRowCellWrites()):
-		// a cell sent back as read is not rewritten, so a formula shown as its value
-		// and a text cell showing "=…" stay as they are. Nothing changed, nothing
+		// a cell sent back as read is not rewritten, so every cell nobody edited,
+		// a formula cell included, stays as it is. Nothing changed, nothing
 		// written, and no audit line: there is no write to reverse.
 		const cellWrites = sheetRowCellWrites(a1, rowIndex, before, after);
 		if (!cellWrites.length) {
