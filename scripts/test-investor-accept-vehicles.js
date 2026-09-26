@@ -100,7 +100,7 @@ const COL_LETTER_SRC = liftFunction("colLetter");
 const PARSE_AMOUNT_SRC = (() => {
 	const m = SRC.match(/\nconst TRUCK_AMOUNT_MAX = [^\n]*\n/);
 	if (!m) die("could not locate TRUCK_AMOUNT_MAX");
-	return `${m[0].trim()}\n${liftFunction("parseTruckAmount")}`;
+	return `${m[0].trim()}\n${liftFunction("parsePlainDecimal")}\n${liftFunction("parseTruckAmount")}`;
 })();
 const ESCAPE_SRC = liftFunction("escapeHtml");
 const ACCEPT_SRC = liftRoute('app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), async (req, res) => {');
