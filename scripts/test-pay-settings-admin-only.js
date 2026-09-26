@@ -132,6 +132,11 @@ const HEADS = {
 	truckPut: 'app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req, res) => {',
 };
 const ROUTES = Object.fromEntries(Object.entries(HEADS).map(([k, h]) => [k, liftRoute(h)]));
+// The photo check both truck routes run, verbatim (its own subject is
+// scripts/test-stored-file-serving.js).
+const PHOTO_CHECK = new Function("imageLimits",
+	`"use strict";\n${liftFunction("storedFileForServing")}\n${liftFunction("truckPhotoRefusal")}\nreturn { storedFileForServing, truckPhotoRefusal };`
+)(require("../lib/image-size"));
 
 // The eighteen columns DriverTable.vue sends back on every save (`headers:
 // this.headers`, straight from the GET) — read off the GET route, so the
@@ -349,6 +354,7 @@ function mountAll(db, { routes = {}, moduleSrc = {}, locked = false, duringActiv
 	const env = {
 		db,
 		...m,
+		...PHOTO_CHECK,
 		directoryEditLockBlockers: (rowBefore, changed) => blocked(changed),
 		truckEditLockBlockers: (truck, changed) => blocked(changed),
 		truckCreateLockBlockers: (truck) => { createLockSeen.push({ ...truck }); return { unreadable: false, blockers: [] }; },
@@ -765,7 +771,8 @@ async function battery(opts = {}) {
 	// The Add form's fixed costs, admin fee and photo (AddTruckForm.vue sends all
 	// seven). Stored for the two roles PUT /api/trucks/:id lets edit them, parsed
 	// the way that route parses them, and handed to the month-end lock as stored.
-	const COSTS = { insuranceMonthly: 1630, eldMonthly: "50", truckPaymentMonthly: 1200, hvutAnnual: 580, irpAnnual: "1380", adminFeePct: 40, photo: "data:image/jpeg;base64,/9j/4AAQSkZJRg==" };
+	// The photo is a 4 × 3 JPEG header: the least checkImage() reads as a JPEG.
+	const COSTS = { insuranceMonthly: 1630, eldMonthly: "50", truckPaymentMonthly: 1200, hvutAnnual: 580, irpAnnual: "1380", adminFeePct: 40, photo: "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/wAARCAADAAQDAAAAAAAAAAAA/9k=" };
 	const storedCosts = (r) => r && [r.insurance_monthly, r.eld_monthly, r.truck_payment_monthly, r.hvut_annual, r.irp_annual, r.admin_fee_pct, r.photo];
 	for (const [label, who] of [["Super Admin", SUPER], ["Dispatcher", DISPATCHER]]) {
 		const db = makeDb();
