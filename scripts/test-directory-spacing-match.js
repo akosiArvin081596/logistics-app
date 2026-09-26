@@ -101,7 +101,7 @@ function mutate(src, from, to) {
 // driverRenameDirectoryRowId(). Tables this runner does not create are the
 // executor's "no such table" legs, which it skips.
 const FUNCTIONS = ["normalizeDriverName", "findDriverNameClashes", "findDriverNameClash", "driverNameHeldByOtherAccount", "driverNameHeldByOtherSpelling", "canonicalDriverName",
-	"findDirectoryRowForDriver", "findTruckForDriver", "syncDriverToCarrierSheet", "assignDriverToTruck",
+	"findDirectoryRowForDriver", "findTruckForDriver", "syncDriverToCarrierSheet", "assignDriverToTruck", "syncOpenCarrierPairing",
 	"driverRenameWhereSql", "driverRenameWhereArgs", "driverRenameWidens", "driverRenameSpellings", "driverRenameDirectoryRowId", "driverRenameNewValue",
 	"replaceNameOnWordBoundary", "applyDriverRenameSqlite"];
 const FN_SRC = Object.fromEntries(FUNCTIONS.map((n) => [n, liftFunction(n)]));

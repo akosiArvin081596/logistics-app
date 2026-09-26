@@ -156,8 +156,9 @@ const LOCK_SRC = liftFunction("userUpdateLockBlockers");
 // The pay fields PUT /api/drivers-directory/:id reads (scripts/test-pay-settings-admin-only.js).
 const DIRECTORY_PAY = new Function(`${liftFunction("parsePlainDecimal")}\n${liftFunction("directoryPayValue")}\nreturn directoryPayValue;`)();
 // assignDriverToTruck() asks driverNameHeldByOtherSpelling() before it releases a
-// spacing variant of the driver's name.
-const ASSIGN_SRC = [liftFunction("driverNameHeldByOtherSpelling"), liftFunction("assignDriverToTruck")].join("\n");
+// spacing variant of the driver's name, and keeps the carrier pairing through
+// syncOpenCarrierPairing().
+const ASSIGN_SRC = [liftFunction("driverNameHeldByOtherSpelling"), liftFunction("assignDriverToTruck"), liftFunction("syncOpenCarrierPairing")].join("\n");
 const AUDIT_TEXT_SRC = [liftFunction("scrubPurgeMarker"), liftFunction("auditText")].join("\n");
 const TARGETS_SRC = liftConst("const DRIVER_RENAME_TARGETS = [", "\n];");
 const HARD_BLOCK_SRC = liftConst("const DRIVER_RENAME_HARD_BLOCK_CODES = ");

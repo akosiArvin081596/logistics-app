@@ -1676,8 +1676,51 @@ if (driverCount === 0) {
 	}
 }
 
+// ⚠️ THE ONE RULE FOR A DRIVER'S OPEN CARRIER PAIRING (carrier_driver_history,
+// getInvestorDriverSet() leg 3: the drivers an investor's payout covers). Both
+// writers call it: assignDriverToTruck() (the carrier is the truck owner's
+// company) and syncCarrierDriverHistory() (POST and PUT /api/drivers-directory,
+// the row's carrier). The driver's open pairings are the rows naming them case
+// aside and, while driverNameHeldByOtherSpelling() allows, through a spacing
+// variant (normalizeDriverName()). Each one under another carrier is closed at
+// `now`; a row is opened, both names trimmed, only when none is open under this
+// carrier. A single case-aside open row is handled exactly as before.
+// `releaseSpacingVariants` is the guard's answer from a caller that has already
+// acted on it (assignDriverToTruck()'s release), so one assignment asks once;
+// left undefined, the helper asks.
+function syncOpenCarrierPairing(driverName, carrierName, now, releaseSpacingVariants) {
+	const driver = typeof driverName === "string" ? driverName.trim() : "";
+	const carrier = typeof carrierName === "string" ? carrierName.trim() : "";
+	if (!driver || !carrier) return;
+	const needle = normalizeDriverName(driver);
+	if (releaseSpacingVariants === undefined) releaseSpacingVariants = !driverNameHeldByOtherSpelling(driver);
+	const carrierLower = carrier.toLowerCase();
+	const openPairings = db.prepare(
+		"SELECT id, carrier_name FROM carrier_driver_history WHERE LOWER(driver_name) = ? AND ended_at IS NULL ORDER BY id"
+	).all(driver.toLowerCase());
+	if (releaseSpacingVariants) {
+		const found = new Set(openPairings.map((r) => r.id));
+		for (const r of db.prepare("SELECT id, carrier_name, driver_name FROM carrier_driver_history WHERE ended_at IS NULL AND COALESCE(driver_name, '') <> '' ORDER BY id").all()) {
+			if (!found.has(r.id) && normalizeDriverName(r.driver_name) === needle) openPairings.push(r);
+		}
+	}
+	const closePairing = db.prepare("UPDATE carrier_driver_history SET ended_at = ? WHERE id = ?");
+	let openUnderCarrier = false;
+	for (const r of openPairings) {
+		if (String(r.carrier_name || "").toLowerCase() === carrierLower) openUnderCarrier = true;
+		else closePairing.run(now, r.id);
+	}
+	if (!openUnderCarrier) {
+		db.prepare(
+			"INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at) VALUES (?, ?, ?)"
+		).run(carrier, driver, now);
+	}
+}
+
 // Helper: sync carrier-driver pairings from Carrier Database sheet into history table
-// Detects when a driver changes carriers and preserves the old pairing
+// Detects when a driver changes carriers and preserves the old pairing. Each
+// row's pairing is kept by syncOpenCarrierPairing() above, the rule
+// assignDriverToTruck() uses too.
 function syncCarrierDriverHistory(carrierDBData, driverColName, carrierColName) {
 	if (!driverColName || !carrierColName) return;
 	const now = new Date().toISOString();
@@ -1685,19 +1728,7 @@ function syncCarrierDriverHistory(carrierDBData, driverColName, carrierColName) 
 		const driverName = (row[driverColName] || "").trim();
 		const carrierName = (row[carrierColName] || "").trim();
 		if (!driverName || !carrierName) return;
-		const driverLower = driverName.toLowerCase();
-		const carrierLower = carrierName.toLowerCase();
-		// Check for open record for this driver
-		const current = db.prepare(
-			"SELECT id, carrier_name FROM carrier_driver_history WHERE LOWER(driver_name) = ? AND ended_at IS NULL"
-		).get(driverLower);
-		if (current) {
-			if (current.carrier_name.toLowerCase() === carrierLower) return; // no change
-			// Carrier changed: close old record
-			db.prepare("UPDATE carrier_driver_history SET ended_at = ? WHERE id = ?").run(now, current.id);
-		}
-		// Insert new open record
-		db.prepare("INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at) VALUES (?, ?, ?)").run(carrierName, driverName, now);
+		syncOpenCarrierPairing(driverName, carrierName, now);
 	});
 }
 
@@ -5316,41 +5347,15 @@ function assignDriverToTruck(truckId, driverName) {
 	// investor-driver-set resolver has a safety net when assignments change.
 	// Without this, swapping a driver mid-year drops the previous driver's
 	// historical loads from the investor view (only path: trucks.assigned_driver).
+	// The carrier is the company of the truck's owner. The pairing rule is
+	// syncOpenCarrierPairing(), shared with the directory routes, handed the
+	// guard's answer the release above acted on.
 	if (driverName.trim()) {
 		const truckRow = db.prepare("SELECT owner_id FROM trucks WHERE id = ?").get(truckId);
 		if (truckRow && truckRow.owner_id) {
 			const owner = db.prepare("SELECT company_name FROM users WHERE id = ?").get(truckRow.owner_id);
 			const carrierName = owner && owner.company_name ? owner.company_name.trim() : "";
-			if (carrierName) {
-				// The driver's open pairings, found the way the assignment and truck
-				// rows above are: the rows naming the driver case aside, and, under the
-				// same guard (releaseSpacingVariants), the rows naming them through a
-				// spacing variant. Each open under another carrier is closed, and a row
-				// is opened only when none is open under this carrier already. A
-				// pairing left open keeps the driver in the old carrier's
-				// getInvestorDriverSet() leg 3 with no end to its month window.
-				const carrierLower = carrierName.toLowerCase();
-				const openPairings = db.prepare(
-					"SELECT id, carrier_name FROM carrier_driver_history WHERE LOWER(driver_name) = ? AND ended_at IS NULL ORDER BY id"
-				).all(nameLower);
-				if (releaseSpacingVariants) {
-					const found = new Set(openPairings.map((r) => r.id));
-					for (const r of db.prepare("SELECT id, carrier_name, driver_name FROM carrier_driver_history WHERE ended_at IS NULL AND COALESCE(driver_name, '') <> '' ORDER BY id").all()) {
-						if (!found.has(r.id) && normalizeDriverName(r.driver_name) === needle) openPairings.push(r);
-					}
-				}
-				const closePairing = db.prepare("UPDATE carrier_driver_history SET ended_at = ? WHERE id = ?");
-				let openUnderCarrier = false;
-				for (const r of openPairings) {
-					if (String(r.carrier_name || "").toLowerCase() === carrierLower) openUnderCarrier = true;
-					else closePairing.run(now, r.id);
-				}
-				if (!openUnderCarrier) {
-					db.prepare(
-						"INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at) VALUES (?, ?, ?)"
-					).run(carrierName, driverName.trim(), now);
-				}
-			}
+			if (carrierName) syncOpenCarrierPairing(driverName.trim(), carrierName, now, releaseSpacingVariants);
 		}
 	}
 }

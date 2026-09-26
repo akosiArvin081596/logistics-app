@@ -184,6 +184,7 @@ const PIECES = {
 		liftFunction("syncDriverToCarrierSheet"),
 		liftFunction("driverNameHeldByOtherSpelling"),
 		liftFunction("assignDriverToTruck"),
+		liftFunction("syncOpenCarrierPairing"),
 	].join("\n"),
 	directory: [liftConst("const DIRECTORY_PERIOD_COLUMNS = "), liftFunction("directoryChangedColumns")].join("\n"),
 	// The pay fields both directory routes read (§1c).
