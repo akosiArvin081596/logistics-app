@@ -4,7 +4,7 @@
  * the workflows run them: each script text is fed to `bash -s` on stdin, which
  * is exactly what ssh does on the VPS.
  *
- * WHY IT EXISTS. These scripts deploy production unattended on every merge.
+ * WHY IT EXISTS. These scripts deploy production unattended on every approved merge.
  * Each property below is a way they could fail silently or by racing:
  *   §1 THE BOX LOCK: two deploys of one directory must never overlap (two
  *      pulls, two installs, two builds into one client/dist). The second fails

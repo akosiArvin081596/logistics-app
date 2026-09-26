@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * POST /api/trucks: a new truck may take a driver who has no history, while the
- * month-end lock still refuses a driver whose history reaches a finalized month.
+ * POST /api/trucks: a new truck may take a driver who has no history, and the
+ * Add form's costs land — while the month-end lock still refuses a driver whose
+ * history reaches a finalized month, and a truck that bills one.
  *
  * THE BUG. truckCreateLockBlockers() sized its two driver checks (the daily rate
  * and the investor driver set) with driverPayLockedMonths(), which answers EVERY
@@ -10,7 +11,9 @@
  * always has zero rows: a new hire's first truck was refused with 409
  * PERIOD_FINALIZED across all sixteen closed months whenever either check fired
  * — a rate other than the $250 default, or an investor owner — although nothing
- * of theirs existed in any of them.
+ * of theirs existed in any of them. Separately, the INSERT dropped the Add
+ * form's five fixed costs, admin fee and photo, and the guard was handed
+ * hard-coded zeros for the five costs.
  *
  * THE FIX, as asserted here. driverHistoryFloorMonth() dates the earliest
  * pay-relevant record the driver has anywhere — Job Tracking (any status, every
@@ -18,6 +21,9 @@
  * create guard sizes both driver checks off it: no record → no months, a floor →
  * every closed month from it onward, an undatable record → all of them. Every
  * other caller of driverPayLockedMonths() passes no history and is unchanged.
+ * The route stores the costs, admin fee and photo for a Super Admin or a
+ * Dispatcher and hands the guard the same cost object, whose check (1) fires
+ * when any of the five amounts is non-zero.
  *
  * WHAT IS ASSERTED — the shipped code, lifted out of server.js, on an in-memory
  * SQLite seeded in production's shape (the six trucks, the sixteen locked months
@@ -31,16 +37,25 @@
  *      history, reproducing the bug); history in a locked month refused from that
  *      month only; open-month history allowed; an undatable row refused in full;
  *      name variants; both wordings of check (2); day overrides and receipts as
- *      history.
+ *      history; (h) fixed costs booked backwards — refused with the amounts, and
+ *      so are a negative total, amounts that cancel to $0.00 and an annual line
+ *      that rounds to $0.00/mo; Inactive, a blank in-service date or no costs
+ *      allowed.
  *   §4 POST /api/trucks, the shipped handler with the REAL guard — the reported
  *      request succeeds, and so does a Dispatcher's add of the same driver; a
  *      refusal writes nothing and is audited; a failed sheet read refuses; the
  *      sheet is not read when no driver is named; a same-unit truck landing
- *      during the read is seen.
+ *      during the read is seen. (h) the Add form's costs, admin fee and photo:
+ *      stored for a Super Admin or a Dispatcher and handed to the guard as
+ *      stored, a back-dated Active truck carrying them refused, an Investor's
+ *      add kept at the column defaults, a blank or unreadable amount 0, an admin
+ *      fee kept when it is a finite number and 50 otherwise, both audit lines
+ *      naming the monthly fixed costs.
  *   §5 source pins — both awaits above canonicalDriverName(), the history
  *      computed after it and handed to the guard, the unit-number check after the
- *      last await, both driver checks sized off the history, the legacy branch of
- *      driverPayLockedMonths() intact.
+ *      last await, both driver checks sized off the history, one cost object
+ *      feeding the guard and the INSERT, check (1) on any non-zero amount, the
+ *      legacy branch of driverPayLockedMonths() intact.
  * The mutants for this guard were run by hand before shipping and are not
  * committed (see the PR).
  *
@@ -116,7 +131,7 @@ const FUNCTIONS = [
 	"truckFixedCostLockedMonths", "truckChargedInMonth", "truckChargeFromMonth", "truckChargeUntilMonth", "truckMonthlyFixed",
 	"truckFeeLockedRows", "getDriverPayStructures", "resolveDailyRate", "truckDailyRateCandidates", "investorsHoldingDriver",
 	// what the route calls
-	"parseDriverPayDaily", "parseInServiceDate", "findDriverNameClashes", "canonicalDriverName", "assignDriverToTruck",
+	"parseDriverPayDaily", "parseInServiceDate", "adminFeePctOrDefault", "findDriverNameClashes", "canonicalDriverName", "assignDriverToTruck",
 	"refusePayEdit", "periodBlockedResponse", "periodLockUnreadableResponse", "periodLabel",
 	// the real refusal audit, so a refusal row is the row production writes
 	"recordPeriodRefusal", "periodRefusalDetail", "logAudit", "logAuditRefusal", "scrubPurgeMarker", "auditText",
@@ -425,6 +440,8 @@ function guardSection() {
 	eq(summary(run(createTruck())), [], "§3 (a) the reported request — a new hire, owner 5, $300/day, Active, in service today: no blockers");
 	eq(summary(run(createTruck(), { withHistory: false })), both("2025-05"),
 		"§3 (a) ...and without the history, the same call is refused across all sixteen months — the reported 409");
+	eq(summary(run(createTruck({ insurance_monthly: 1680, eld_monthly: 50, truck_payment_monthly: 1210, hvut_annual: 580, irp_annual: 1410 }))), [],
+		"§3 (a) ...with a full set of fixed costs, in service in the open month: still none");
 
 	// (b) one load in a locked month.
 	{
@@ -472,6 +489,41 @@ function guardSection() {
 		"§3 (g) an admin-removed day in 2025-12 counts as history");
 	eq(summary(run(createTruck(), { setup: (db) => addExpense(db, NEW_HIRE, "2026-04-02") })), both("2026-04"),
 		"§3 (g) a receipt dated 2026-04 counts as history");
+
+	// (h) fixed costs booked backwards — check (1), on a truck with no driver so
+	// that nothing else can answer.
+	const noDriver = (over) => createTruck({ assigned_driver: "", driver_pay_daily: 0, unit_number: "LogisX-#24", ...over });
+	const BACK = ["2026-06", "2026-07", "2026-08"];
+	{
+		const res = run(noDriver({ in_service_date: "2026-06-01", insurance_monthly: 1000 }));
+		eq(summary(res), [{ field: "in_service_date", effect: null, periods: BACK }],
+			"§3 (h) Active, in service 2026-06-01, $1,000/mo insurance: refused on in_service_date for 2026-06..2026-08");
+		ok(((res.blockers[0] || {}).detail || "").endsWith("books $1,000.00/mo of fixed costs into 3 finalized months ($3,000.00) — insurance $1,000.00/mo"),
+			`§3 (h) ...naming the total and the amount (got ${JSON.stringify((res.blockers[0] || {}).detail)})`);
+	}
+	{
+		const res = run(noDriver({ in_service_date: "2026-06-01", insurance_monthly: 1630, eld_monthly: 50, truck_payment_monthly: 1200, hvut_annual: 580, irp_annual: 1380 }));
+		ok(((res.blockers[0] || {}).detail || "").endsWith("books $3,043.33/mo of fixed costs into 3 finalized months ($9,129.99) — " +
+			"insurance $1,630.00/mo, ELD fee $50.00/mo, truck payment $1,200.00/mo, HVUT $580.00/yr, IRP $1,380.00/yr"),
+			`§3 (h) the Add form's full set is totalled by truckMonthlyFixed() and itemized as entered (got ${JSON.stringify((res.blockers[0] || {}).detail)})`);
+	}
+	{
+		const res = run(noDriver({ in_service_date: "2026-06-01", insurance_monthly: 500, eld_monthly: -500 }));
+		eq(summary(res), [{ field: "in_service_date", effect: null, periods: BACK }],
+			"§3 (h) back-dated with amounts that cancel to a $0.00 total: refused — the drill-down itemizes the parts");
+		ok(((res.blockers[0] || {}).detail || "").endsWith("books $0.00/mo of fixed costs into 3 finalized months ($0.00) — insurance $500.00/mo, ELD fee $-500.00/mo"),
+			`§3 (h) ...naming both amounts, so a $0.00 total is not read as nothing (got ${JSON.stringify((res.blockers[0] || {}).detail)})`);
+	}
+	eq(summary(run(noDriver({ in_service_date: "2026-06-01", hvut_annual: 0.05 }))), [{ field: "in_service_date", effect: null, periods: BACK }],
+		"§3 (h) back-dated with an annual HVUT that rounds to $0.00/mo: refused — the fleet accruals divide it unrounded");
+	eq(summary(run(noDriver({ in_service_date: "2026-06-01", insurance_monthly: 1000, status: "Inactive" }))), [],
+		"§3 (h) the same truck added Inactive: no blocker (it books nothing)");
+	eq(summary(run(noDriver({ in_service_date: "", insurance_monthly: 1000 }))), [],
+		"§3 (h) in-service date blank: bills from created_at, the open month — no blocker");
+	eq(summary(run(noDriver({ in_service_date: "2026-06-01" }))), [],
+		"§3 (h) back-dated with no costs: allowed to say so, since it bills nothing");
+	eq(summary(run(noDriver({ in_service_date: "2026-06-01", insurance_monthly: -500 }))), [{ field: "in_service_date", effect: null, periods: BACK }],
+		"§3 (h) back-dated with a NEGATIVE amount: refused too — it restates the months just the same");
 }
 
 // ═══════════════════════════════════════════════════════════════ §4
@@ -496,12 +548,15 @@ const INVESTOR = { id: 42, username: "lx", role: "Investor" };
 // route is suspended between its checks and its writes.
 function mountPost(db, { jt = makeJt(), jtFails = false, duringRead = null } = {}) {
 	const m = buildModule(db);
-	const calls = { jt: 0, activeLoad: 0 };
+	// `guard` records a copy of each truck the route asks its month-end lock
+	// about; the real guard still answers.
+	const calls = { jt: 0, activeLoad: 0, guard: [] };
 	let handler = null;
 	const grab = (p, ...rest) => { handler = rest[rest.length - 1]; };
 	const env = {
 		app: { post: grab }, requireRole: () => (req, res, next) => next(),
 		...m, db,
+		truckCreateLockBlockers: (truck, history) => { calls.guard.push({ ...truck }); return m.truckCreateLockBlockers(truck, history); },
 		checkDriverActiveLoad: async () => { calls.activeLoad++; await tick(); return null; },
 		getJobTrackingCached: async () => {
 			calls.jt++;
@@ -526,8 +581,7 @@ function mountPost(db, { jt = makeJt(), jtFails = false, duringRead = null } = {
 }
 // The body AddTruckForm.vue's submit sends (`emit('submit', {...})`), for the
 // reported request: a Super Admin adding LogisX-#23 for owner 5 with the new
-// hire at $300/day, in service today. The form's cost fields ride along at its defaults;
-// nothing here asserts on them.
+// hire at $300/day, in service today, the cost fields at the form's defaults.
 const addForm = (over = {}) => {
 	const b = {
 		unitNumber: "LogisX-#23", make: "Freightliner", model: "Cascadia", year: 2022, vin: "", licensePlate: "",
@@ -562,8 +616,8 @@ async function routeSection() {
 		eq(calls.jt, 1, "§4 ...having read Job Tracking once");
 		eq(audits(db, "create_truck_blocked").length, 0, "§4 ...with no refusal row");
 		const line = (audits(db, "create_truck")[0] || {}).details || "";
-		ok(line === `Created truck LogisX-#23 (Active), in-service date: ${TODAY}`,
-			`§4 ...and the create_truck line naming the in-service date (got ${JSON.stringify(line)})`);
+		ok(line === `Created truck LogisX-#23 (Active), in-service date: ${TODAY}, fixed costs: $0.00/mo`,
+			`§4 ...and a create_truck line naming the in-service date and fixed costs (got ${JSON.stringify(line)})`);
 	}
 	{
 		const db = makeDb();
@@ -583,9 +637,9 @@ async function routeSection() {
 		eq((b.blockers || []).map((x) => x.field), ["driver_pay_daily", "owner_id"], "§4 ...naming the rate and the driver set");
 		ok(snapshot(db) === before, "§4 ...and nothing written: no truck, no assignment, no carrier history");
 		const [a] = audits(db, "create_truck_blocked");
-		ok(!!a && a.details.includes("[PERIOD_FINALIZED]") && a.details.includes(`driver ${NEW_HIRE}`) &&
+		ok(!!a && a.details.includes("[PERIOD_FINALIZED]") && a.details.includes("fixed costs $0.00/mo") && a.details.includes(`driver ${NEW_HIRE}`) &&
 			a.details.includes(`periods=${lockedFrom("2026-03").join(",")}`) && a.username === "super_admin",
-			`§4 ...audited as create_truck_blocked with the periods and the driver (got ${JSON.stringify(a && a.details)})`);
+			`§4 ...audited as create_truck_blocked with the periods, the driver and the fixed costs (got ${JSON.stringify(a && a.details)})`);
 	}
 	{
 		const db = makeDb();
@@ -636,6 +690,96 @@ async function routeSection() {
 		ok(r.status === 200 && t.assigned_driver === "" && t.owner_id === 42 && calls.jt === 0,
 			`§4 an Investor naming a driver: 200, no driver, the sheet not read (got ${r.status} ${JSON.stringify(r.body)}, jt ${calls.jt})`);
 	}
+
+	// ── (h) the Add form's costs, admin fee and photo ──
+	const fiveOf = (o) => o && [o.insurance_monthly, o.eld_monthly, o.truck_payment_monthly, o.hvut_annual, o.irp_annual];
+	const storedOf = (t) => t && [...fiveOf(t), t.admin_fee_pct, t.photo];
+	const PHOTO = "data:image/jpeg;base64,/9j/4AAQSkZJRg==";
+	const FULL = { insuranceMonthly: 1630, eldMonthly: "50", truckPaymentMonthly: 1200, hvutAnnual: 580, irpAnnual: "1380", adminFeePct: 40, photo: PHOTO };
+	for (const [label, who, over] of [["a Super Admin", SUPER, {}], ["a Dispatcher", DISPATCHER, { driverPayDaily: 0 }]]) {
+		const db = makeDb();
+		const { post, calls } = mountPost(db);
+		const r = await post(who, addForm({ ...FULL, ...over }));
+		eq([r.status, storedOf(truckByUnit(db, "LogisX-#23"))], [200, [1630, 50, 1200, 580, 1380, 40, PHOTO]],
+			`§4 (h) ${label} adding with the Add form's costs, admin fee and photo: stored as sent`);
+		eq(calls.guard.map(fiveOf), [[1630, 50, 1200, 580, 1380]], `§4 (h) ...and the month-end lock asked about those same five amounts (${label})`);
+		const line = (audits(db, "create_truck")[0] || {}).details || "";
+		ok(line.endsWith(", fixed costs: $3,043.33/mo"), `§4 (h) ...and the create_truck line naming $3,043.33/mo (got ${JSON.stringify(line)})`);
+	}
+	// Back-dated into the finalized months, with no driver so that only check (1)
+	// can answer.
+	const backdated = (over = {}) => addForm({
+		unitNumber: "LogisX-#24", assignedDriver: "", driverPayDaily: 0,
+		in_service_date: "2026-06-01", inServiceDate: "2026-06-01", insuranceMonthly: 1000, ...over,
+	});
+	{
+		const db = makeDb();
+		const { post, calls } = mountPost(db);
+		const before = snapshot(db);
+		const r = await post(SUPER, backdated());
+		const b = r.body || {};
+		ok(r.status === 409 && b.code === "PERIOD_FINALIZED" && JSON.stringify((b.blockers || []).map((x) => x.field)) === '["in_service_date"]',
+			`§4 (h) Active, in service 2026-06-01, $1,000/mo insurance: 409 PERIOD_FINALIZED on in_service_date (got ${r.status} ${JSON.stringify(b.blockers && b.blockers.map((x) => x.field))})`);
+		eq(b.periods, ["2026-06", "2026-07", "2026-08"], "§4 (h) ...for 2026-06..2026-08");
+		ok(snapshot(db) === before, "§4 (h) ...nothing written");
+		eq(calls.jt, 0, "§4 (h) ...and no driver named, so Job Tracking was not read");
+		ok(((audits(db, "create_truck_blocked")[0] || {}).details || "").includes("fixed costs $1,000.00/mo"),
+			"§4 (h) ...the refusal row naming the monthly fixed costs");
+	}
+	{
+		const db = makeDb();
+		const { post } = mountPost(db);
+		const r = await post(SUPER, backdated({ insuranceMonthly: "-500" }));
+		ok(r.status === 409 && ((r.body || {}).blockers || []).some((x) => x.field === "in_service_date") && !truckByUnit(db, "LogisX-#24"),
+			`§4 (h) the same truck with a negative amount: 409 too, no truck (got ${r.status})`);
+	}
+	for (const [label, over, check] of [
+		["with no costs", { insuranceMonthly: 0 }, (t) => t.in_service_date === "2026-06-01" && t.insurance_monthly === 0],
+		["added Inactive", { status: "Inactive" }, (t) => t.status === "Inactive" && t.in_service_date === "2026-06-01" && t.insurance_monthly === 1000],
+		["with the in-service date blank (bills from the open month)", { in_service_date: "", inServiceDate: "" }, (t) => t.in_service_date === "" && t.insurance_monthly === 1000],
+	]) {
+		const db = makeDb();
+		const { post } = mountPost(db);
+		const r = await post(SUPER, backdated(over));
+		const t = truckByUnit(db, "LogisX-#24");
+		ok(r.status === 200 && !!t && check(t), `§4 (h) the back-dated truck ${label}: 200, stored as sent (got ${r.status} ${JSON.stringify(r.body)})`);
+	}
+	{
+		// An Investor's add keeps the column defaults, and the guard — asked about
+		// the row that lands — sees $0, so a back-dated in-service date is allowed.
+		const db = makeDb();
+		const { post, calls } = mountPost(db);
+		const r = await post(INVESTOR, backdated({ ...FULL, unitNumber: "INV-25-C", driverPayDaily: undefined }));
+		eq([r.status, storedOf(truckByUnit(db, "INV-25-C"))], [200, [0, 0, 0, 0, 0, 50, ""]],
+			"§4 (h) an Investor adding with costs, an admin fee and a photo: created with the defaults — $0, the 50% fee, no photo");
+		eq(calls.guard.map(fiveOf), [[0, 0, 0, 0, 0]], "§4 (h) ...and the month-end lock asked about $0");
+	}
+	for (const [label, fee, expect] of [
+		["blank (\"\")", "", 50], ["missing", undefined, 50], ["null", null, 50], ["unreadable (\"abc\")", "abc", 50],
+		["\"Infinity\"", "Infinity", 50], ["0 (a deliberate zero)", 0, 0], ["\"37.5\"", "37.5", 37.5],
+	]) {
+		const db = makeDb();
+		const { post } = mountPost(db);
+		const r = await post(SUPER, addForm({ adminFeePct: fee }));
+		const t = truckByUnit(db, "LogisX-#23") || {};
+		ok(r.status === 200 && t.admin_fee_pct === expect, `§4 (h) the admin fee ${label}: stored as ${expect} (got ${r.status}, ${t.admin_fee_pct})`);
+	}
+	{
+		const db = makeDb();
+		const { post } = mountPost(db);
+		const r = await post(DISPATCHER, addForm({
+			driverPayDaily: 0, insuranceMonthly: "", eldMonthly: "abc", truckPaymentMonthly: null, hvutAnnual: undefined, irpAnnual: "1380.5", photo: undefined,
+		}));
+		eq([r.status, storedOf(truckByUnit(db, "LogisX-#23"))], [200, [0, 0, 0, 0, 1380.5, 50, ""]],
+			"§4 (h) blank, unreadable and missing amounts: 0 for each, the rest as sent, no photo");
+	}
+	{
+		const db = makeDb();
+		const { post } = mountPost(db);
+		const r = await post(SUPER, addForm({ photo: { src: PHOTO } }));
+		const t = truckByUnit(db, "LogisX-#23");
+		ok(r.status === 200 && !!t && t.photo === "", `§4 (h) a photo that is not text: created with no photo (got ${r.status}, ${JSON.stringify(t && t.photo)})`);
+	}
 }
 
 // ═══════════════════════════════════════════════════════════════ §5
@@ -657,10 +801,19 @@ function sourcePins() {
 	ok(uniqueAt > tpo.lastIndexOf("await ") && uniqueAt < guardAt, "§5 the unit-number check reads after the last await, before the guard");
 	const guardCall = guardAt > 0 && insertAt > guardAt ? tpo.slice(guardAt, insertAt) : "";
 	ok(guardCall.includes("}, history);"), "§5 the guard is handed the history");
+	ok(guardCall.includes("...createCosts,") && !/insurance_monthly: 0, eld_monthly: 0/.test(tpo), "§5 the guard is handed the parsed costs, not zeros");
+	ok(tpo.includes("createPhoto, createCosts.insurance_monthly, createCosts.eld_monthly, createCosts.truck_payment_monthly, createCosts.hvut_annual, createCosts.irp_annual, createAdminFee);"),
+		"§5 the INSERT binds the same cost object");
+	ok(tpo.includes('const costsAllowed = req.session.user.role === "Super Admin" || req.session.user.role === "Dispatcher";') &&
+		tpo.includes("const createAdminFee = costsAllowed ? adminFeePctOrDefault(adminFeePct) : 50;"),
+		"§5 the costs are honoured for the PUT's two roles only, the admin fee through the rule the PUT shares");
 
 	const guard = code(FN_SRC.truckCreateLockBlockers);
 	ok((guard.match(/driverPayLockedMonths\(driverName, locked, history\)/g) || []).length === 2 && !/driverPayLockedMonths\(driverName, locked\)/.test(guard),
 		"§5 truckCreateLockBlockers() sizes both driver checks off the history");
+	ok(guard.includes("const carried = AMOUNTS.filter(([col]) => (Number(truck[col]) || 0) !== 0);") &&
+		guard.includes("if (fixedMonths.length && carried.length) {") && !/monthly\s*(?:>=?|!==?)\s*0\b/.test(guard),
+		"§5 check (1) fires when any of the five amounts is non-zero, not on the monthly total");
 
 	const dplm = code(FN_SRC.driverPayLockedMonths);
 	ok(dplm.includes('"SELECT start_date FROM truck_assignments WHERE LOWER(driver_name) = LOWER(?)"') &&

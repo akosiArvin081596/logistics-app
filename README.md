@@ -80,10 +80,11 @@ sheet-override procedure before running it.
 GitHub Actions. Every PR into `main`, and every push to it, runs the `ci` gate
 above on the Node version in `.nvmrc`.
 
-**Merging to `main` deploys staging and then production automatically.** Production
-runs only if staging went green, smoke-checks itself, verifies the public edge, and
-**rolls itself back** to the previous SHA if either check fails. There is no approval
-step — re-arm one by adding a required reviewer to the `production` Environment.
+**Merging to `main` deploys staging automatically; production follows once a reviewer
+approves it** (the `production` Environment has a required reviewer since 2026-09-25:
+test staging, then approve). Production runs only if staging went green, smoke-checks
+itself, verifies the public edge, and **rolls itself back** to the previous SHA if
+either check fails.
 
 Setup, the safety reasoning, and the rollback design: [`.github/workflows/README.md`](.github/workflows/README.md).
 

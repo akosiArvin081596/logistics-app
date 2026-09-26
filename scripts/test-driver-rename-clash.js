@@ -142,7 +142,8 @@ const CASCADE_SRC = [
 ].join("\n");
 const COL_LETTER_SRC = liftFunction("colLetter");
 const DIR_CHANGED_SRC = [liftConst("const DIRECTORY_PERIOD_COLUMNS = "), liftFunction("directoryChangedColumns")].join("\n");
-const TRUCK_PARSE_SRC = [liftFunction("parseDriverPayDaily"), liftFunction("parseInServiceDate"), liftFunction("parseRetiredAt")].join("\n");
+const TRUCK_PARSE_SRC = [liftFunction("parseDriverPayDaily"), liftFunction("parseInServiceDate"), liftFunction("parseRetiredAt"), liftFunction("adminFeePctOrDefault")].join("\n");
+const FIXED_COST_SRC = liftFunction("truckMonthlyFixed");
 const PAY_SRC = [liftConst("let lastPayStructShadowWarnMs = "), liftFunction("getDriverPayStructures")].join("\n");
 
 const HEADS = {
@@ -169,7 +170,8 @@ const TARGETS = new Function(`${TARGETS_SRC}\nreturn DRIVER_RENAME_TARGETS;`)();
 const colLetter = new Function(`${COL_LETTER_SRC}\nreturn colLetter;`)();
 const directoryChangedColumns = new Function(`${DIR_CHANGED_SRC}\nreturn directoryChangedColumns;`)();
 const truckParse = new Function("DRIVER_PAY_DAILY_MAX", "todayKeyCT", "IN_SERVICE_MAX_MONTHS_AHEAD",
-	`${TRUCK_PARSE_SRC}\nreturn { parseDriverPayDaily, parseInServiceDate, parseRetiredAt };`)(10000, () => "2026-09-24", 24);
+	`${TRUCK_PARSE_SRC}\nreturn { parseDriverPayDaily, parseInServiceDate, parseRetiredAt, adminFeePctOrDefault };`)(10000, () => "2026-09-24", 24);
+const truckMonthlyFixed = new Function(`${FIXED_COST_SRC}\nreturn truckMonthlyFixed;`)();
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 function usersDdl() {
@@ -365,6 +367,8 @@ function mountTrucks(db, { putSrc = ROUTES.truckPut, postSrc = ROUTES.truckPost,
 		// scripts/test-truck-create-new-driver.js's subject.
 		getJobTrackingCached: async () => ({ headers: JOB_TRACKING[0].slice(), data: [] }),
 		driverHistoryFloorMonth: () => ({ floor: "", unbounded: false }),
+		// The create's audit lines name its monthly fixed costs.
+		truckMonthlyFixed,
 		assignDriverToTruck: m.assignDriverToTruck,
 		fuelModel: { DEFAULT_TANK_GALLONS: 200 },
 		syncDriverToCarrierSheet: m.syncDriverToCarrierSheet,

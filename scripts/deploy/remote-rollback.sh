@@ -3,10 +3,11 @@
 # Inputs (env): DIR, PM2, PREV (the full commit to return to: the deploy's
 #   DEPLOYED_FROM), and RECORD_STATE (the deploy's DEPLOY_RECORD_STATE).
 #
-# Only ever invoked when a deploy's smoke check FAILED. With production
-# auto-deploying on merge there is no human watching, so a bad merge must not
-# be able to leave production down until someone notices. Used by deploy.yml's
-# production job AND by deploy-drift.yml's heal (same composite action).
+# Only ever invoked when a deploy's smoke check FAILED. A reviewer approves a
+# production deploy before it starts (since 2026-09-25), but nobody watches it
+# finish, so a bad merge must not be able to leave production down until
+# someone notices. Used by deploy.yml's production job AND by
+# deploy-drift.yml's heal (same composite action).
 set -uo pipefail
 : "${DIR:?}"; : "${PM2:?}"; : "${PREV:?}"
 RECORD_STATE=${RECORD_STATE:-}
