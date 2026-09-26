@@ -102,7 +102,7 @@ function mutate(src, from, to) {
 // executor's "no such table" legs, which it skips.
 const FUNCTIONS = ["normalizeDriverName", "findDriverNameClashes", "findDriverNameClash", "driverNameHeldByOtherAccount", "driverNameHeldByOtherSpelling", "canonicalDriverName",
 	"findDirectoryRowForDriver", "findTruckForDriver", "syncDriverToCarrierSheet", "assignDriverToTruck", "syncOpenCarrierPairing",
-	"driverRenameWhereSql", "driverRenameWhereArgs", "driverRenameWidens", "driverRenameSpellings", "driverRenameDirectoryRowId", "driverRenameNewValue",
+	"driverRenameWhereSql", "driverRenameWhereArgs", "driverRenameWidens", "driverRenameSpellings", "driverRenameDirectoryRowId", "driverRenameSameNameSql", "driverRenameNewValue",
 	"replaceNameOnWordBoundary", "applyDriverRenameSqlite"];
 const FN_SRC = Object.fromEntries(FUNCTIONS.map((n) => [n, liftFunction(n)]));
 function liftConst(head, close) {

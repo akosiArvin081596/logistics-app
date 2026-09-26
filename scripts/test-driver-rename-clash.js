@@ -70,7 +70,11 @@
  *      (200, no merge) but not onto another account's (409 DRIVER_NAME_TAKEN);
  *      fix-driver-name agrees on the re-spelling, rewrites the sheet's matching
  *      cells, lists them in its audit (`spacingVariants`), and calls a case-only
- *      rename that moves another spelling not money-neutral. The users routes'
+ *      rename that moves another spelling not money-neutral — the directory row
+ *      stored as "Shorn  King" included: with every month locked that rename is
+ *      refused by the lock in both routes, and each route's audit names the row
+ *      under its original spelling; a row differing only by edge spaces keeps
+ *      its key and moves nothing. The users routes'
  *      truck lookups (blank → DRIVER_NAME_IN_USE, DELETE's truck clear) find a
  *      truck under another spacing, unless another account holds it.
  *   §5 source pins: each rename check runs after its route's last await and
@@ -171,6 +175,9 @@ const CASCADE_SRC = [
 	liftFunction("driverRenameWidens"),
 	liftFunction("driverRenameSpellings"),
 	liftFunction("driverRenameDirectoryRowId"),
+	// Which of a leg's rows are the old name itself: the plan's `variantRows`
+	// and the executor's `spacingVariants` are the rest.
+	liftFunction("driverRenameSameNameSql"),
 	liftFunction("driverRenameNewValue"),
 	liftConst("const DRIVER_RENAME_ID_CAP = "),
 	liftFunction("driverRenameMergeScan"),
@@ -349,6 +356,7 @@ function mountUsersPut(db, { routeSrc = ROUTES.usersPut, moduleSrc = {}, realLoc
 }
 
 // `sheet` is the Job Tracking the route reads; `log.sheetData` what it wrote.
+// `stubs.isLocked` / `stubs.namedLockedPeriods` also judge the sheet's months.
 function mountFix(db, { routeSrc = ROUTES.fix, moduleSrc = {}, sheet = JOB_TRACKING, stubs = {} } = {}) {
 	const m = buildModule(db, moduleSrc, stubs);
 	const log = { refusals: [], audits: [], sheetWrites: 0, sheetData: [] };
@@ -360,9 +368,9 @@ function mountFix(db, { routeSrc = ROUTES.fix, moduleSrc = {}, sheet = JOB_TRACK
 		} } }),
 		SPREADSHEET_ID: "not-a-sheet",
 		colLetter,
-		isLocked: () => false,
+		isLocked: stubs.isLocked || (() => false),
 		periodLocksReadable: () => true,
-		namedLockedPeriods: () => [],
+		namedLockedPeriods: stubs.namedLockedPeriods || (() => []),
 		planDriverRenameSqlite: m.planDriverRenameSqlite,
 		driverRenameMergeScan: m.driverRenameMergeScan,
 		DRIVER_RENAME_TARGETS: m.DRIVER_RENAME_TARGETS,
@@ -1297,6 +1305,60 @@ async function variantBattery(opts = {}) {
 		t(`...and so does one whose only other spelling is on a cosmetic leg, a notification (got ${v3.moneyNeutral} ${v3.decision}, spacingVariants ${JSON.stringify(v3.spacingVariants || null)})`,
 			v3.moneyNeutral === true && v3.decision === "allow" && v3.spacingVariants && v3.spacingVariants.rows === 1);
 	}
+	{
+		// The other spelling is the driver's DIRECTORY ROW. Every month is locked,
+		// with a load and a receipt in them, and "Shorn King" is renamed case-only.
+		// The rename moves the row stored as "Shorn  King" off the key
+		// getInvestorDriverSet() leg 2 reads it by (trimmed, lowercased), so it is
+		// not money-neutral and the lock is judged.
+		const allLocked = { isLocked: () => true, expenseRowPeriodLocked: () => true, invoiceRowPeriodLocked: () => true,
+			namedLockedPeriods: (lists) => [...new Set(lists.flat().filter(Boolean))].sort() };
+		const setUp = (directoryName = "Shorn  King") => {
+			const db = usersFixture();
+			db.prepare("UPDATE drivers_directory SET driver_name = ?, pay_daily = 300 WHERE id = 1").run(directoryName);
+			db.prepare("INSERT INTO expenses (id, driver, date, amount) VALUES (1, 'Shorn King', '2026-06-03', 20)").run();
+			return db;
+		};
+		const sheet = [["Load ID", "Driver", "Assigned Date"], ["L-1", "Shorn King", "2026-06-01"]];
+		const body = { oldName: "Shorn King", newName: "SHORN KING" };
+		const db = setUp();
+		const { fix, log } = fixer(db, { sheet, stubs: allLocked });
+		const dry = await fix(body, { dryRun: "true" });
+		const v = (dry.body || {}).verdict || {};
+		const dirPlan = (((dry.body || {}).plan || {}).sqlite || {}).drivers_directory || {};
+		t(`fix-driver-name, case-only, every month locked, moving the directory row stored as "Shorn  King": the dry run counts it, not money-neutral, blocked (got moneyNeutral ${v.moneyNeutral} ${v.decision} ${v.code}, spacingVariants ${JSON.stringify(v.spacingVariants || null)}, directory ${JSON.stringify(dirPlan)})`,
+			v.caseOnly === true && v.moneyNeutral === false && v.decision === "block" && v.code === "PERIOD_FINALIZED" &&
+			v.spacingVariants && v.spacingVariants.rows === 1 && dirPlan.variantRows === 1);
+		const r = await fix(body);
+		t(`...so the real call is refused by the lock: 409 PERIOD_FINALIZED, nothing written, the sheet untouched (got ${r.status} ${(r.body || {}).code || ""}, ${JSON.stringify(directoryNames(db))})`,
+			r.status === 409 && (r.body || {}).code === "PERIOD_FINALIZED" && log.sheetWrites === 0 &&
+			directoryNames(db)[0] === "Shorn  King" && driverNameOf(db, 2) === "Shorn King");
+		const r2 = await fix({ ...body, acknowledgeLockedPeriods: true, reason: "consolidating the spellings" });
+		const audit = log.audits.find((a) => a.action === "fix_driver_name");
+		const d = audit ? JSON.parse(audit.details) : {};
+		t(`...acknowledged, it runs, and the audit names the directory row under its original spelling, with no "exact undo" (got ${r2.status}, ${JSON.stringify(d.spacingVariants || null)}, ${JSON.stringify(d.reversal || "")})`,
+			r2.status === 200 && directoryNames(db)[0] === "SHORN KING" && d.moneyNeutral === false &&
+			JSON.stringify(((d.spacingVariants || {}).sqlite || {}).drivers_directory) === JSON.stringify({ "Shorn  King": [1] }) &&
+			/restore each row in spacingVariants/.test(d.reversal || "") && !/an exact undo/.test(d.reversal || ""));
+		// PUT /api/users/:id judges the lock on every rename, this one included,
+		const db2 = setUp();
+		const before = snapshot(db2);
+		const r3 = await users(db2, { realLock: true, stubs: allLocked }).put(2, { driverName: "SHORN KING" });
+		t(`PUT /api/users/:id, the same case-only rename with every month locked: 409 PERIOD_FINALIZED, nothing written (got ${r3.status} ${(r3.body || {}).code || ""})`,
+			r3.status === 409 && (r3.body || {}).code === "PERIOD_FINALIZED" && snapshot(db2) === before);
+		// and with the months open its audit line names the directory row too.
+		const db3 = setUp();
+		const u3 = users(db3, { realLock: true });
+		const r4 = await u3.put(2, { driverName: "SHORN KING" });
+		const line = (u3.log.audits.find((a) => a.action === "update_user") || {}).details || "";
+		t(`...and with the months open it renames, its update_user line naming the directory row under its original spelling (got ${r4.status}, ${JSON.stringify(line)})`,
+			r4.status === 200 && directoryNames(db3)[0] === "SHORN KING" && line.includes('"drivers_directory":{"Shorn  King":[1]}'));
+		// A row that differs from the name only by edge spaces keeps that key.
+		const dry5 = await fixer(setUp(" Shorn King "), { sheet, stubs: allLocked }).fix(body, { dryRun: "true" });
+		const v5 = (dry5.body || {}).verdict || {};
+		t(`...while a directory row stored as " Shorn King " (edge spaces only) keeps its key: the case-only rename stays money-neutral (got ${v5.moneyNeutral} ${v5.decision})`,
+			v5.moneyNeutral === true && v5.decision === "allow");
+	}
 
 	// The users routes' truck lookups: a truck stored under another spacing.
 	{
@@ -1527,6 +1589,11 @@ async function mutants() {
 	}));
 	caught("R28 fix-driver-name leaving the sheet's other spellings behind (the partial rename)", await variantBattery({
 		fixSrc: swap("R28", ROUTES.fix, '(sqlPlan.widens === true && cell !== "" && normalizeDriverName(cell) === oldNorm)', "false"),
+	}));
+	// The directory row moved from "Shorn  King" counted as the old name itself
+	// again: the case-only rename called money-neutral, the audit silent.
+	caught("R29 the plan and the executor not counting a directory row moved from another spelling", await variantBattery({
+		moduleSrc: { cascade: swap("R29", CASCADE_SRC, '\tif (t.match === "directory_row") return `LOWER(TRIM("${t.column}")) = ?`;\n', "") },
 	}));
 }
 
