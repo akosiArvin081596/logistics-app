@@ -80,7 +80,7 @@ const CURRENT_FLAG_SRC = liftFunction("function currentMustChangePassword(sessio
 const PARSE_AMOUNT_SRC = (() => {
 	const m = SRC.match(/\nconst TRUCK_AMOUNT_MAX = [^\n]*\n/);
 	if (!m) die("could not locate TRUCK_AMOUNT_MAX");
-	return `${m[0].trim()}\n${liftFunction('function parseTruckAmount(raw, label = "Amount") {')}`;
+	return `${m[0].trim()}\n${liftFunction('function parseTruckAmount(raw, label = "Amount", max = TRUCK_AMOUNT_MAX) {')}`;
 })();
 
 const USERS_CREATE = (() => {

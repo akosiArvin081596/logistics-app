@@ -142,7 +142,8 @@ const CASCADE_SRC = [
 ].join("\n");
 const COL_LETTER_SRC = liftFunction("colLetter");
 const DIR_CHANGED_SRC = [liftConst("const DIRECTORY_PERIOD_COLUMNS = "), liftFunction("directoryChangedColumns")].join("\n");
-const TRUCK_PARSE_SRC = [liftFunction("parseDriverPayDaily"), liftFunction("parseInServiceDate"), liftFunction("parseRetiredAt"), liftFunction("adminFeePctOrDefault"),
+const TRUCK_PARSE_SRC = [liftFunction("parseDriverPayDaily"), liftFunction("parseInServiceDate"), liftFunction("parseRetiredAt"),
+	liftConst("const ADMIN_FEE_PCT_MAX = "), liftFunction("parseAdminFeePct"),
 	liftConst("const TRUCK_AMOUNT_MAX = "), liftFunction("parseTruckAmount"), liftConst("const TRUCK_AMOUNT_FIELDS = [", "\n];"), liftFunction("parseTruckAmounts")].join("\n");
 const FIXED_COST_SRC = liftFunction("truckMonthlyFixed");
 const PAY_SRC = [liftConst("let lastPayStructShadowWarnMs = "), liftFunction("getDriverPayStructures")].join("\n");
@@ -171,12 +172,12 @@ const TARGETS = new Function(`${TARGETS_SRC}\nreturn DRIVER_RENAME_TARGETS;`)();
 const colLetter = new Function(`${COL_LETTER_SRC}\nreturn colLetter;`)();
 const directoryChangedColumns = new Function(`${DIR_CHANGED_SRC}\nreturn directoryChangedColumns;`)();
 const truckParse = new Function("DRIVER_PAY_DAILY_MAX", "todayKeyCT", "IN_SERVICE_MAX_MONTHS_AHEAD",
-	`${TRUCK_PARSE_SRC}\nreturn { parseDriverPayDaily, parseInServiceDate, parseRetiredAt, adminFeePctOrDefault, TRUCK_AMOUNT_FIELDS, parseTruckAmounts };`)(10000, () => "2026-09-24", 24);
+	`${TRUCK_PARSE_SRC}\nreturn { parseDriverPayDaily, parseInServiceDate, parseRetiredAt, parseAdminFeePct, TRUCK_AMOUNT_FIELDS, parseTruckAmounts };`)(10000, () => "2026-09-24", 24);
 const truckMonthlyFixed = new Function(`${FIXED_COST_SRC}\nreturn truckMonthlyFixed;`)();
 // The photo check both truck routes run, verbatim (its own subject is
 // scripts/test-stored-file-serving.js).
 const PHOTO_CHECK = new Function("imageLimits",
-	`"use strict";\n${liftFunction("storedFileForServing")}\n${liftFunction("truckPhotoRefusal")}\nreturn { storedFileForServing, truckPhotoRefusal };`
+	`"use strict";\n${liftFunction("storedFileForServing")}\n${liftFunction("truckPhotoForStorage")}\nreturn { storedFileForServing, truckPhotoForStorage };`
 )(require("../lib/image-size"));
 
 // ── fixtures ────────────────────────────────────────────────────────────────
@@ -808,8 +809,9 @@ async function trucksBattery(opts = {}) {
 	}
 
 	// The truck's own driver, stored in an older spelling and on an active load.
-	// The Trucks screen re-sends the stored driver on every save, so an ordinary
-	// edit must not be read as moving that driver onto this truck.
+	// The Trucks screen sends the driver only when it changed, but an older page
+	// or a direct API caller may still re-send the stored driver on every save,
+	// so an ordinary edit must not be read as moving that driver onto this truck.
 	{
 		const db = trucksFixture();
 		db.prepare("UPDATE trucks SET assigned_driver = 'Shorn  King' WHERE id = 1").run();

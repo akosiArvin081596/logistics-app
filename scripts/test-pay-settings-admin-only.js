@@ -42,14 +42,16 @@
  *      out, or sending only the stored rate: saved. A Super Admin's rate change
  *      that lands while a Dispatcher's save is waiting on the active-load check
  *      is kept, not overwritten. A Super Admin changes the rate. The same form's
- *      Admin Fee (not a pay setting — either role may edit it): a number is
- *      stored as given, a blank or unreadable one is the column's 50, never
- *      NULL, and a save that leaves it out leaves the column alone.
+ *      Admin Fee (not a pay setting — either role may edit it): a number from 0
+ *      to 100 is stored as given, a blank one is the column's 50, never NULL,
+ *      anything else is 400 INVALID_AMOUNT with the stored fee kept, and a save
+ *      that leaves it out leaves the column alone.
  *   §4 POST /api/trucks — a Dispatcher or an Investor adding a truck with a
  *      rate: 403, no truck; without one: created. A Super Admin sets one. The
  *      Add form's fixed costs, admin fee and photo are stored for a Super Admin
  *      or a Dispatcher (and are what the month-end lock is asked about), not for
- *      an Investor; a blank or unreadable admin fee is the column's 50.
+ *      an Investor; a blank admin fee is the column's 50, and one that is not a
+ *      number from 0 to 100 refuses the add.
  *   §5 the refusal row: action pay_edit_blocked, the entity and id, the
  *      account, the attempted change and [PAY_EDIT_ADMIN_ONLY]; coalesced by
  *      logAuditRefusal(); caller text capped and unable to forge a
@@ -135,7 +137,7 @@ const ROUTES = Object.fromEntries(Object.entries(HEADS).map(([k, h]) => [k, lift
 // The photo check both truck routes run, verbatim (its own subject is
 // scripts/test-stored-file-serving.js).
 const PHOTO_CHECK = new Function("imageLimits",
-	`"use strict";\n${liftFunction("storedFileForServing")}\n${liftFunction("truckPhotoRefusal")}\nreturn { storedFileForServing, truckPhotoRefusal };`
+	`"use strict";\n${liftFunction("storedFileForServing")}\n${liftFunction("truckPhotoForStorage")}\nreturn { storedFileForServing, truckPhotoForStorage };`
 )(require("../lib/image-size"));
 
 // The eighteen columns DriverTable.vue sends back on every save (`headers:
@@ -183,7 +185,8 @@ const PIECES = {
 		liftFunction("parseRetiredAt"),
 		// The admin fee both truck routes store, and the monthly total the create's
 		// audit lines name.
-		liftFunction("adminFeePctOrDefault"),
+		liftConst("const ADMIN_FEE_PCT_MAX = "),
+		liftFunction("parseAdminFeePct"),
 		liftFunction("truckMonthlyFixed"),
 		// The amounts both truck routes parse (scripts/test-truck-cost-amounts.js).
 		liftConst("const TRUCK_AMOUNT_MAX = "),
@@ -198,7 +201,7 @@ const MODULE_EXPORTS = [
 	"normalizeDriverName", "findDriverNameClash", "findDriverNameClashes", "canonicalDriverName",
 	"syncDriverToCarrierSheet", "assignDriverToTruck",
 	"directoryChangedColumns", "DRIVER_PAY_DAILY_MAX", "parseDriverPayDaily", "parseInServiceDate", "parseRetiredAt",
-	"adminFeePctOrDefault", "truckMonthlyFixed", "TRUCK_AMOUNT_FIELDS", "parseTruckAmounts",
+	"parseAdminFeePct", "truckMonthlyFixed", "TRUCK_AMOUNT_FIELDS", "parseTruckAmounts",
 ];
 function buildModule(db, src = {}) {
 	const s = { ...PIECES, ...src };
@@ -299,8 +302,11 @@ function dirFormBody(r, over = {}) {
 	};
 	return { headers: DIR_HEADERS, values: DIR_HEADERS.map((h) => v[h]) };
 }
-// The body the Trucks edit form sends (TruckTable.vue handleSaveEdit), from the
-// stored row. `over` replaces or (with undefined) removes a key.
+// A whole-row save body, from the stored row. The Trucks page sends only the
+// fields that changed (client/src/lib/truckEdit.js); an older page or a direct
+// API caller may still send the whole row, which is why the route compares
+// against the stored value rather than keying on presence, and why these
+// checks send it. `over` replaces or (with undefined) removes a key.
 function truckFormBody(t, over = {}) {
 	const b = {
 		unitNumber: t.unit_number, make: t.make, model: t.model, year: t.year, vin: t.vin, licensePlate: t.license_plate,
@@ -716,24 +722,28 @@ async function battery(opts = {}) {
 		refused("§3 in a locked month, a Dispatcher's rate change", r, ["driver_pay_daily"]);
 	}
 	// The Edit form's Admin Fee, from a stored 40. Clearing the field sends ""
-	// (v-model.number keeps an empty input as the empty string).
-	for (const [label, who, fee, expect] of [
-		["a Super Admin clearing it (\"\")", SUPER, "", 50],
-		["a Dispatcher clearing it (\"\")", DISPATCHER, "", 50],
-		["null", SUPER, null, 50],
-		["unreadable (\"abc\")", SUPER, "abc", 50],
-		["\"Infinity\"", SUPER, "Infinity", 50],
-		["35", DISPATCHER, 35, 35],
-		["\"37.5\"", SUPER, "37.5", 37.5],
-		["0 (a deliberate zero)", SUPER, 0, 0],
-		["left out of the save", SUPER, undefined, 40],
+	// (v-model.number keeps an empty input as the empty string). Anything but a
+	// blank or a number from 0 to 100 is refused, and the stored 40 kept.
+	for (const [label, who, fee, status, expect] of [
+		["a Super Admin clearing it (\"\")", SUPER, "", 200, 50],
+		["a Dispatcher clearing it (\"\")", DISPATCHER, "", 200, 50],
+		["null", SUPER, null, 200, 50],
+		["unreadable (\"abc\")", SUPER, "abc", 400, 40],
+		["\"Infinity\"", SUPER, "Infinity", 400, 40],
+		["100.01", DISPATCHER, 100.01, 400, 40],
+		["35", DISPATCHER, 35, 200, 35],
+		["\"37.5\"", SUPER, "37.5", 200, 37.5],
+		["0 (a deliberate zero)", SUPER, 0, 200, 0],
+		["left out of the save", SUPER, undefined, 200, 40],
 	]) {
 		const db = makeDb();
 		db.prepare("UPDATE trucks SET admin_fee_pct = 40 WHERE id = 1").run();
 		const app = mountAll(db, opts);
 		const r = await app.truckPut(who, 1, truckFormBody(truckRow(db, 1), { adminFeePct: fee }));
 		const after = truckRow(db, 1).admin_fee_pct;
-		t(`§3 PUT truck, the admin fee ${label}: stored as ${expect} (got ${r.status}, ${after})`, r.status === 200 && after === expect);
+		const code = status === 400 ? (r.body || {}).code === "INVALID_AMOUNT" && (r.body || {}).field === "admin_fee_pct" : true;
+		t(`§3 PUT truck, the admin fee ${label}: ${status}, stored ${expect} (got ${r.status} ${JSON.stringify(r.body)}, ${after})`,
+			r.status === status && code && after === expect);
 	}
 
 	// ── §4 POST /api/trucks ──
@@ -802,8 +812,7 @@ async function battery(opts = {}) {
 			seen.insurance_monthly === 0 && seen.irp_annual === 0);
 	}
 	for (const [label, fee, expect] of [
-		["blank (\"\")", "", 50], ["missing", undefined, 50], ["unreadable (\"abc\")", "abc", 50], ["\"Infinity\"", "Infinity", 50],
-		["0 (a deliberate zero)", 0, 0], ["\"37.5\"", "37.5", 37.5],
+		["blank (\"\")", "", 50], ["missing", undefined, 50], ["0 (a deliberate zero)", 0, 0], ["\"37.5\"", "37.5", 37.5],
 	]) {
 		const db = makeDb();
 		const app = mountAll(db, opts);
@@ -811,6 +820,15 @@ async function battery(opts = {}) {
 		const made = db.prepare("SELECT * FROM trucks WHERE unit_number = '500'").get();
 		t(`§4 POST truck with the admin fee ${label}: stored as ${expect} (got ${r.status}, ${made && made.admin_fee_pct})`,
 			r.status === 200 && made && made.admin_fee_pct === expect);
+	}
+	for (const [label, fee] of [["unreadable (\"abc\")", "abc"], ["\"Infinity\"", "Infinity"], ["101", 101]]) {
+		const db = makeDb();
+		const app = mountAll(db, opts);
+		const before = snapshot(db);
+		const r = await app.truckPost(SUPER, newTruck({ adminFeePct: fee }));
+		const b = r.body || {};
+		t(`§4 POST truck with the admin fee ${label}: 400 INVALID_AMOUNT naming admin_fee_pct, no truck (got ${r.status} ${JSON.stringify(b)})`,
+			r.status === 400 && b.code === "INVALID_AMOUNT" && b.field === "admin_fee_pct" && snapshot(db) === before);
 	}
 	{
 		const db = makeDb();
@@ -899,9 +917,10 @@ function sourcePins() {
 	const tpo = code(ROUTES.truckPost);
 	ok(before(tpo, "refusePayEdit(", "await ") && before(tpo, "refusePayEdit(", "INSERT INTO trucks"),
 		"§6 POST /api/trucks refuses a rate before its await and its INSERT");
-	ok(tp.includes('updates.push("admin_fee_pct = ?"); params.push(adminFeePctOrDefault(adminFeePct));') &&
-		tpo.includes("adminFeePctOrDefault(adminFeePct)") && !/parseFloat\(adminFeePct\)/.test(tp + tpo),
-		"§6 both truck routes store the admin fee through adminFeePctOrDefault(), neither through a bare parseFloat");
+	ok(tp.includes("const feeParsed = parseAdminFeePct(adminFeePct);") &&
+		tp.includes('if (feeParsed.value !== undefined) { updates.push("admin_fee_pct = ?"); params.push(feeParsed.value); }') &&
+		tpo.includes("parseAdminFeePct(adminFeePct)") && !/parseFloat\(adminFeePct\)/.test(tp + tpo),
+		"§6 both truck routes store the admin fee through parseAdminFeePct(), neither through a bare parseFloat");
 
 	// The refusal action: its own name, coalesced (not a PERIOD_ code), and kept.
 	const purge = (() => {

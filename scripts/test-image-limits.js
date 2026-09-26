@@ -138,14 +138,21 @@ ok("checkSignatureImage: a non-string is 415", IL.checkSignatureImage(123).statu
 }
 
 // the truck photo limit and its wording
-ok("LIMITS.TRUCK_PHOTO takes JPEG, PNG and WebP up to MAX_IMAGE_PIXELS",
-	JSON.stringify(IL.LIMITS.TRUCK_PHOTO.types) === JSON.stringify([IL.JPEG, IL.PNG, IL.WEBP]) && IL.LIMITS.TRUCK_PHOTO.maxPixels === IL.MAX_IMAGE_PIXELS &&
-	Object.isFrozen(IL.LIMITS.TRUCK_PHOTO) && Object.isFrozen(IL.LIMITS.TRUCK_PHOTO.types));
-ok("LIMITS.TRUCK_PHOTO: the three types pass, a GIF is 415 and an over-100MP JPEG is 413", (() => {
-	const pass = [jpegOf(800, 600), pngHeader(800, 600), webpVp8x(800, 600)].every((b) => IL.checkImage(b, IL.LIMITS.TRUCK_PHOTO).ok);
+ok("LIMITS.TRUCK_PHOTO takes JPEG, PNG and WebP up to 16 MP and 2 MiB",
+	JSON.stringify(IL.LIMITS.TRUCK_PHOTO.types) === JSON.stringify([IL.JPEG, IL.PNG, IL.WEBP]) && IL.LIMITS.TRUCK_PHOTO.maxPixels === 16_000_000 &&
+	IL.LIMITS.TRUCK_PHOTO.maxBytes === 2 * 1024 * 1024 && Object.isFrozen(IL.LIMITS.TRUCK_PHOTO) && Object.isFrozen(IL.LIMITS.TRUCK_PHOTO.types));
+ok("LIMITS.TRUCK_PHOTO: the three types pass up to exactly 16 MP, a GIF is 415 and one row over 16 MP is 413 (pixels)", (() => {
+	const pass = [jpegOf(800, 600), pngHeader(800, 600), webpVp8x(800, 600), jpegOf(4000, 4000), pngHeader(4000, 4000), webpVp8x(4000, 4000)]
+		.every((b) => IL.checkImage(b, IL.LIMITS.TRUCK_PHOTO).ok);
 	const gif = IL.checkImage(Buffer.from("GIF89a............", "latin1"), IL.LIMITS.TRUCK_PHOTO);
-	const big = IL.checkImage(jpegOf(12000, 12000), IL.LIMITS.TRUCK_PHOTO);
-	return pass && gif.status === 415 && big.status === 413;
+	const over = [jpegOf(4001, 4000), pngHeader(4000, 4001), webpVp8x(4001, 4000), jpegOf(12000, 12000)].map((b) => IL.checkImage(b, IL.LIMITS.TRUCK_PHOTO));
+	return pass && gif.status === 415 && over.every((r) => !r.ok && r.status === 413 && r.code === IL.IMAGE_TOO_LARGE && r.reason === "pixels");
+})());
+ok("LIMITS.TRUCK_PHOTO: exactly 2 MiB passes, one byte over is 413 (bytes)", (() => {
+	const sized = (n) => Buffer.concat([jpegOf(800, 600), Buffer.alloc(n - jpegOf(800, 600).length)]);
+	const at = IL.checkImage(sized(2 * 1024 * 1024), IL.LIMITS.TRUCK_PHOTO);
+	const over = IL.checkImage(sized(2 * 1024 * 1024 + 1), IL.LIMITS.TRUCK_PHOTO);
+	return at.ok && !over.ok && over.status === 413 && over.code === IL.IMAGE_TOO_LARGE && over.reason === "bytes";
 })());
 ok("refusalBody(…, \"truckPhoto\") has the truck photo wording for 413 and 415", (() => {
 	const a = IL.refusalBody({ status: 413, code: IL.IMAGE_TOO_LARGE }, "truckPhoto");
@@ -153,8 +160,9 @@ ok("refusalBody(…, \"truckPhoto\") has the truck photo wording for 413 and 415
 	return a.error === "This photo is too large. Use a smaller JPEG, PNG or WebP image." && a.code === IL.IMAGE_TOO_LARGE &&
 		b.error === "This photo could not be read. Use a JPEG, PNG or WebP image." && b.code === IL.UNSUPPORTED_IMAGE_TYPE;
 })());
-ok("TRUCK_PHOTO_DATA_URI_MAX_LENGTH is the base64 length of TRUCK_PHOTO_MAX_BYTES (10 MiB) plus room for a prefix",
-	IL.TRUCK_PHOTO_MAX_BYTES === 10 * 1024 * 1024 && IL.TRUCK_PHOTO_DATA_URI_MAX_LENGTH === Math.ceil(IL.TRUCK_PHOTO_MAX_BYTES / 3) * 4 + 64);
+ok("TRUCK_PHOTO_MAX_BYTES is LIMITS.TRUCK_PHOTO.maxBytes (2 MiB), and TRUCK_PHOTO_DATA_URI_MAX_LENGTH its base64 length plus room for a prefix",
+	IL.TRUCK_PHOTO_MAX_BYTES === IL.LIMITS.TRUCK_PHOTO.maxBytes && IL.TRUCK_PHOTO_MAX_BYTES === 2 * 1024 * 1024 &&
+	IL.TRUCK_PHOTO_DATA_URI_MAX_LENGTH === Math.ceil(IL.TRUCK_PHOTO_MAX_BYTES / 3) * 4 + 64);
 
 // limits are real bounds
 ok("MAX_IMAGE_PIXELS is 100 MP", IL.MAX_IMAGE_PIXELS === 100_000_000);
@@ -300,13 +308,13 @@ ok("GET receipt-thumbnail: checkImage before Jimp.read",
 // A truck photo is stored only when the driver's truck-photo route can serve it.
 // The PUT checks one that CHANGES, so the guard must precede its first write.
 const truckPostBody = routeBody('app.post("/api/trucks"');
-ok("POST /api/trucks: truckPhotoRefusal before the first await and the INSERT",
-	guardsBefore(truckPostBody, "truckPhotoRefusal(photo)", ["await ", "INSERT INTO trucks"]));
+ok("POST /api/trucks: truckPhotoForStorage before the first await and the INSERT",
+	guardsBefore(truckPostBody, "truckPhotoForStorage(photo)", ["await ", "INSERT INTO trucks"]));
 const truckPutBody = routeBody('app.put("/api/trucks/:id"');
-ok("PUT /api/trucks/:id: truckPhotoRefusal before the month-end lock, the first await and every write",
-	guardsBefore(truckPutBody, "truckPhotoRefusal(photo)", ["truckEditLockBlockers(", "await ", "assignDriverToTruck(", "UPDATE trucks SET"]));
-ok("truckPhotoRefusal(): checkImage under LIMITS.TRUCK_PHOTO",
-	stripComments(fnBody("truckPhotoRefusal")).includes("imageLimits.checkImage(file.body, imageLimits.LIMITS.TRUCK_PHOTO)"));
+ok("PUT /api/trucks/:id: truckPhotoForStorage before the month-end lock, the first await and every write",
+	guardsBefore(truckPutBody, "truckPhotoForStorage(photo)", ["truckEditLockBlockers(", "await ", "assignDriverToTruck(", "UPDATE trucks SET"]));
+ok("truckPhotoForStorage(): checkImage under LIMITS.TRUCK_PHOTO",
+	stripComments(fnBody("truckPhotoForStorage")).includes("imageLimits.checkImage(file.body, imageLimits.LIMITS.TRUCK_PHOTO)"));
 
 const skipBody = fnBody("receiptOcrSkipReason");
 ok("receiptOcrSkipReason(): reads dimensions via imageLimits.imageSize()",
@@ -367,6 +375,14 @@ console.log("\n§3  mutants — weaken a guard and a check above flips");
 {
 	const jpegSig = `data:image/jpeg;base64,${jpegOf(10, 10).toString("base64")}`;
 	ok("M5 (accept any type) caught: real refuses a JPEG signature 415", IL.checkSignatureImage(jpegSig).status === 415);
+}
+// M6: the truck photo limit without its byte ceiling would pass an image over 2 MiB.
+{
+	const big = Buffer.concat([jpegOf(800, 600), Buffer.alloc(2 * 1024 * 1024)]);
+	const noBytes = { types: IL.LIMITS.TRUCK_PHOTO.types, maxPixels: IL.LIMITS.TRUCK_PHOTO.maxPixels };
+	const real = IL.checkImage(big, IL.LIMITS.TRUCK_PHOTO);
+	ok("M6 (no truck photo byte ceiling) caught: real refuses 413 on bytes, the mutant limit would pass",
+		!real.ok && real.status === 413 && real.reason === "bytes" && IL.checkImage(big, noBytes).ok);
 }
 
 console.log(failed ? `\n${failed} test(s) failed` : "\nall passed");

@@ -5,6 +5,9 @@
       New Truck
     </div>
 
+    <!-- Disabled while an add is in flight: anything typed meanwhile would be
+         missing from the add already sent, then cleared with the form. -->
+    <fieldset class="add-fields" :disabled="submitting">
     <div class="form-row">
       <div class="form-group">
         <label class="form-label">Unit Number</label>
@@ -84,12 +87,14 @@
            the dashed-box component is a clean swap rather than a re-skin.
            The extension tokens are not decoration: drag-and-drop bypasses the
            `accept` attribute entirely, and a blank-MIME iPhone HEIC is the
-           commonest photo anyone drops here. -->
+           commonest photo anyone drops here. Not a form control, so the
+           fieldset cannot disable it. -->
       <FileDropZone
         compact
         accept="image/*,.heic,.heif"
         :max-size-mb="10"
         :busy="photoBusy"
+        :disabled="submitting"
         label="Drop a truck photo"
         busy-label="Reading photo…"
         busy-hint="Resizing it before upload"
@@ -108,12 +113,12 @@
       <div class="form-row" style="margin-top:0.5rem;">
         <div class="form-group">
           <label class="form-label">Fuel Tank (gallons)</label>
-          <input v-model.number="form.fuelTankGallons" class="form-input" type="number" min="0" max="500" step="any" placeholder="200 (default)" />
+          <input v-model.number="form.fuelTankGallons" class="form-input" type="number" min="0" :max="AMOUNT_CAPS.fuelTankGallons" step="any" placeholder="200 (default)" />
           <div class="field-hint">Usable diesel capacity — powers the Live Tracking fuel-range estimate. Blank uses the 200 gal default.</div>
         </div>
         <div class="form-group">
           <label class="form-label">Avg MPG (optional)</label>
-          <input v-model.number="form.avgMpg" class="form-input" type="number" min="0" max="20" step="any" placeholder="6.5 (default)" />
+          <input v-model.number="form.avgMpg" class="form-input" type="number" min="0" :max="AMOUNT_CAPS.avgMpg" step="any" placeholder="6.5 (default)" />
           <div class="field-hint">Average miles per gallon. Leave blank to auto-derive from ELD fuel + odometer.</div>
         </div>
       </div>
@@ -139,7 +144,7 @@
           <label class="form-label">Driver Pay ($/day)</label>
           <!-- Pay is Super Admin only (403 PAY_EDIT_ADMIN_ONLY otherwise): anyone
                else adds the truck on the $250/day default. -->
-          <input v-model.number="form.driverPayDaily" class="form-input" type="number" min="0" max="10000" step="any" placeholder="250 (default)" :disabled="!canEditPay" />
+          <input v-model.number="form.driverPayDaily" class="form-input" type="number" min="0" :max="AMOUNT_CAPS.driverPayDaily" step="any" placeholder="250 (default)" :disabled="!canEditPay" />
           <div v-if="canEditPay" class="field-hint">Daily rate for this truck's driver. Leave blank to use the $250/day default.</div>
           <div v-else class="field-hint">Uses the $250/day default. Only a Super Admin can set driver pay.</div>
         </div>
@@ -178,21 +183,25 @@
         </div>
         <div class="form-group">
           <label class="form-label">Admin Fee (%)</label>
-          <input v-model.number="form.adminFeePct" class="form-input" type="number" min="0" max="100" placeholder="50" />
+          <input v-model.number="form.adminFeePct" class="form-input" type="number" min="0" :max="AMOUNT_CAPS.adminFeePct" placeholder="50" />
         </div>
       </div>
     </details>
+    </fieldset>
 
-    <button class="btn btn-primary btn-add" @click="handleSubmit">Add Truck</button>
+    <!-- Also waits for a photo still being read, or the truck would be added
+         without it. -->
+    <button ref="addBtn" class="btn btn-primary btn-add" :disabled="submitting || photoBusy" @click="handleSubmit">{{ submitting ? 'Adding…' : 'Add Truck' }}</button>
     <div class="error-msg" role="alert">{{ errorMsg }}</div>
   </div>
 </template>
 
 <script setup>
-import { reactive, ref, computed, watch } from 'vue'
+import { reactive, ref, computed, watch, nextTick } from 'vue'
 import FileDropZone from '../shared/FileDropZone.vue'
 import { compressImage, DEFAULT_MAX_EDGE, isDecodedImage, dataUrlHasImageBytes } from '../../lib/imageUtils'
-import { amountError } from '../../lib/truckAmounts'
+import { amountError, AMOUNT_CAPS } from '../../lib/truckAmounts'
+import { replyLost } from '../../lib/saveOutcome'
 
 const truckMakes = [
   'Freightliner', 'Kenworth', 'Peterbilt', 'Volvo', 'International',
@@ -224,9 +233,12 @@ const props = defineProps({
   showOwner: { type: Boolean, default: false },
   // Driver pay is Super Admin only; everyone else adds on the default rate.
   canEditPay: { type: Boolean, default: false },
+  // The add itself, awaited in the manner of ExpenseForm's `submit-handler`.
+  // submitHandler(data) resolves once the truck exists and rejects with the
+  // server's refusal (an Error carrying its message). The fields clear only on
+  // a resolve, so a refused add keeps everything typed.
+  submitHandler: { type: Function, required: true },
 })
-
-const emit = defineEmits(['submit'])
 
 const form = reactive({
   unitNumber: '',
@@ -267,8 +279,18 @@ watch(() => form.make, () => { form.model = '' })
 
 const errorMsg = ref('')
 const photoBusy = ref(false)
+// An add is in flight: the button reads "Adding…" and the fields stay put.
+const submitting = ref(false)
+// The Add Truck button, to hand keyboard focus back once an add settles.
+const addBtn = ref(null)
 // The form's root element, for unreadableNumberError.
 const formEl = ref(null)
+
+// Numbers each photo read; resetForm() bumps it too. A read finishing under an
+// older number is dropped, so it can never land in a form that was cleared for
+// the next truck. (The drop zone is also held while an add is in flight, which
+// is when that could happen.)
+let photoRead = 0
 
 // Receives File[] from FileDropZone — a drop and a click both land here.
 //
@@ -280,10 +302,12 @@ const formEl = ref(null)
 async function onPhoto(files) {
   const file = files[0]
   if (!file) return
+  const read = ++photoRead
   errorMsg.value = ''
   photoBusy.value = true
   try {
     const dataUrl = await compressImage(file, DEFAULT_MAX_EDGE)
+    if (read !== photoRead) return
     // Only a real decode is kept. When compressImage cannot decode a file it
     // hands back the RAW bytes under the file's own media type (an SVG, a PDF,
     // …) or '' — and the server refuses any photo that is not a JPEG, PNG or
@@ -294,7 +318,7 @@ async function onPhoto(files) {
     if (isDecodedImage(dataUrl) && dataUrlHasImageBytes(dataUrl)) form.photo = dataUrl
     else errorMsg.value = "Couldn't read that photo — use a JPEG, PNG or WebP image."
   } finally {
-    photoBusy.value = false
+    if (read === photoRead) photoBusy.value = false
   }
 }
 
@@ -334,21 +358,56 @@ function keepUnreadableNumber(e) {
   if (el?.tagName === 'INPUT' && el.type === 'number' && el.validity?.badInput) e.stopPropagation()
 }
 
-function handleSubmit() {
+async function handleSubmit() {
+  if (submitting.value || photoBusy.value) return
   errorMsg.value = ''
   if (!form.unitNumber.trim()) {
     errorMsg.value = 'Unit number is required.'
     return
   }
-  // Refused here rather than left to the server: emitting `submit` clears this
-  // form at once, so a server refusal would land after everything typed was gone.
+  // Checked before anything is sent. The server cannot catch an unreadable
+  // number box at all: it arrives as a blank and is stored as 0.
   const badAmount = unreadableNumberError(formEl.value) || amountError(form, { canEditPay: props.canEditPay })
   if (badAmount) {
     errorMsg.value = badAmount
     return
   }
 
-  emit('submit', {
+  submitting.value = true
+  try {
+    await props.submitHandler(buildPayload())
+    // Only now. Clearing before the server answered lost everything typed
+    // whenever it refused the truck (a unit number already in use, a closed
+    // month, a photo it would not take).
+    resetForm()
+  } catch (err) {
+    errorMsg.value = addFailureMessage(err)
+  } finally {
+    submitting.value = false
+  }
+  // Disabling the button while the add ran dropped keyboard focus to the page
+  // body. Hand it back, unless the person has already moved it themselves.
+  await nextTick()
+  if (!document.activeElement || document.activeElement === document.body) addBtn.value?.focus()
+}
+
+// Why the add did not go through, under Add Truck. A refusal is the server's
+// own message. No answer at all (replyLost(): the 20 s timeout, a dropped
+// connection, a gateway error page) is not a refusal: the server may have added
+// the truck after the page stopped waiting, and the store re-reads the list to
+// show it, so the form says so instead of inviting a second add.
+function addFailureMessage(err) {
+  if (err?.code === 'TIMEOUT') {
+    return 'The server took too long — the truck may already have been added. Check the list before adding it again.'
+  }
+  if (replyLost(err)) {
+    return 'The server did not answer — the truck may already have been added. Check the list before adding it again.'
+  }
+  return err?.message || 'Failed to add truck.'
+}
+
+function buildPayload() {
+  return {
     unitNumber: form.unitNumber.trim(),
     make: form.make.trim(),
     model: form.model.trim(),
@@ -382,8 +441,13 @@ function handleSubmit() {
     // server falls back to its DEFAULT_TANK_GALLONS / DEFAULT_MPG.
     fuel_tank_gallons: form.fuelTankGallons === '' ? 0 : form.fuelTankGallons,
     avg_mpg: form.avgMpg === '' ? 0 : form.avgMpg,
-  })
+  }
+}
 
+function resetForm() {
+  // Drops a photo read still running, which then leaves the busy flag alone.
+  photoRead++
+  photoBusy.value = false
   form.unitNumber = ''
   form.make = ''
   form.model = ''
@@ -431,8 +495,12 @@ function handleSubmit() {
 .btn-add { width: auto; padding: 0.5rem 1.5rem; }
 .error-msg { color: var(--danger); font-size: 0.78rem; margin-top: 0.5rem; min-height: 1.1em; }
 .field-hint { font-size: 0.7rem; color: var(--text-dim); margin-top: 0.25rem; }
-/* Read-only for this role (driver pay is Super Admin only): still legible. */
-.form-input:disabled { opacity: 0.6; cursor: not-allowed; }
+/* Read-only for this role (driver pay is Super Admin only), or held while an
+   add is in flight: still legible. */
+.form-input:disabled,
+.add-fields:disabled .form-select { opacity: 0.6; cursor: not-allowed; }
+/* Groups the fields only so an add in flight can disable them all at once. */
+.add-fields { border: 0; margin: 0; padding: 0; min-width: 0; }
 .fixed-costs-label {
   font-size: 0.72rem; font-weight: 600; color: var(--text-dim);
   text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer;

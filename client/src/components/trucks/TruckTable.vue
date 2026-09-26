@@ -206,10 +206,13 @@
 
     <!-- Edit Modal -->
     <Teleport to="body">
-      <div v-if="showEdit" class="confirm-overlay" @click.self="showEdit = false">
+      <div v-if="showEdit" class="confirm-overlay" @click.self="closeEdit">
         <div ref="editDialogEl" class="confirm-dialog edit-dialog" @change.capture="keepUnreadableNumber">
           <h3>Edit Truck &mdash; {{ editForm.unitNumber }}</h3>
 
+          <!-- Disabled while a save is in flight: anything typed meanwhile would
+               be missing from the save already sent, and then shown as saved. -->
+          <fieldset class="edit-fields" :disabled="editSaving">
           <div class="edit-field">
             <label>Unit Number</label>
             <input v-model="editForm.unitNumber" type="text" />
@@ -271,7 +274,7 @@
             <label>Driver Pay ($/day)</label>
             <!-- Pay is Super Admin only (403 PAY_EDIT_ADMIN_ONLY otherwise): shown
                  to everyone who can edit the truck, editable only by them. -->
-            <input v-model.number="editForm.driverPayDaily" type="number" min="0" max="10000" step="any" placeholder="250 (default)" :disabled="!canEditPay" />
+            <input v-model.number="editForm.driverPayDaily" type="number" min="0" :max="AMOUNT_CAPS.driverPayDaily" step="any" placeholder="250 (default)" :disabled="!canEditPay" />
             <div v-if="canEditPay" class="field-hint">Daily rate paid to this truck's driver (used by invoices, financials, and the investor P&amp;L). Leave blank to use the $250/day default.</div>
             <div v-else class="field-hint">Only a Super Admin can change driver pay.</div>
           </div>
@@ -295,11 +298,13 @@
                  no chrome of its own, so the dashed box is a clean swap. The
                  extension tokens matter because a drop bypasses `accept`
                  entirely, so this validation is the only type gate. -->
+            <!-- Not a form control, so the fieldset cannot disable it. -->
             <FileDropZone
               compact
               accept="image/*,.heic,.heif"
               :max-size-mb="10"
               :busy="editPhotoBusy"
+              :disabled="editSaving"
               label="Drop a truck photo"
               busy-label="Reading photo…"
               busy-hint="Resizing it before upload"
@@ -319,12 +324,12 @@
             <div class="edit-row">
               <div class="edit-field">
                 <label>Fuel Tank (gallons)</label>
-                <input v-model.number="editForm.fuelTankGallons" type="number" min="0" max="500" step="any" placeholder="200 (default)" />
+                <input v-model.number="editForm.fuelTankGallons" type="number" min="0" :max="AMOUNT_CAPS.fuelTankGallons" step="any" placeholder="200 (default)" />
                 <div class="field-hint">Diesel capacity for the Live Tracking fuel-range estimate. Blank = 200 gal default.</div>
               </div>
               <div class="edit-field">
                 <label>Avg MPG</label>
-                <input v-model.number="editForm.avgMpg" type="number" min="0" max="20" step="any" placeholder="6.5 (default)" />
+                <input v-model.number="editForm.avgMpg" type="number" min="0" :max="AMOUNT_CAPS.avgMpg" step="any" placeholder="6.5 (default)" />
                 <div class="field-hint">Blank auto-derives MPG from ELD fuel + odometer.</div>
               </div>
             </div>
@@ -384,18 +389,28 @@
               </div>
               <div class="edit-field">
                 <label>Admin Fee (%)</label>
-                <input v-model.number="editForm.adminFeePct" type="number" min="0" max="100" />
+                <input v-model.number="editForm.adminFeePct" type="number" min="0" :max="AMOUNT_CAPS.adminFeePct" />
               </div>
             </div>
           </details>
+          </fieldset>
 
           <!-- Directly above Save: the dialog scrolls, so a message up by the
-               field could sit off screen while Save seemed to do nothing. -->
-          <div v-if="editError" class="edit-error" role="alert">{{ editError }}</div>
+               field could sit off screen while Save seemed to do nothing. A
+               deleted truck leaves nothing to save, so it outranks the rest. -->
+          <div v-if="editTruckDeleted" class="edit-error" role="alert">This truck has been deleted, so these changes can't be saved.</div>
+          <template v-else>
+            <!-- Save sends only the fields changed here, so theirs are kept. -->
+            <div v-if="editChangedUnderneath" class="edit-note" role="alert">Someone else updated this truck while you were editing — your changes will be saved on top of theirs.</div>
+            <div v-if="editError" class="edit-error" role="alert">{{ editError }}</div>
+          </template>
 
+          <!-- Save waits for a photo still being read, or it would send the old
+               one. Cancel waits for a save in flight: the PUT cannot be called
+               back, and closing would drop the form a refusal is shown against. -->
           <div class="confirm-actions">
-            <button class="btn btn-secondary" @click="showEdit = false">Cancel</button>
-            <button class="btn btn-primary" @click="handleSaveEdit">Save</button>
+            <button class="btn btn-secondary" :disabled="editSaving" @click="closeEdit">Cancel</button>
+            <button ref="editSaveBtn" class="btn btn-primary" :disabled="editSaving || editPhotoBusy || editTruckDeleted" @click="handleSaveEdit">{{ editSaving ? 'Saving…' : 'Save' }}</button>
           </div>
         </div>
       </div>
@@ -474,14 +489,15 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, nextTick, shallowRef } from 'vue'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import FileDropZone from '../shared/FileDropZone.vue'
 import LegalDocumentPortal from '../investor/LegalDocumentPortal.vue'
 import { useApi } from '../../composables/useApi'
 import { compressImage, DEFAULT_MAX_EDGE, isDecodedImage, dataUrlHasImageBytes } from '../../lib/imageUtils'
-import { amountError } from '../../lib/truckAmounts'
+import { amountError, AMOUNT_CAPS } from '../../lib/truckAmounts'
+import { formFromTruck, changedFields, bodyForFields, changedUnderneath, inServiceDate, retiredAt } from '../../lib/truckEdit'
 import { fmtOdometer } from '../../lib/fuelReview'
 import { fmtTimestamp } from '../../utils/datetime'
 
@@ -512,16 +528,26 @@ const truckModels = {
 }
 
 const props = defineProps({
+  // The rows on this page.
   trucks: { type: Array, default: () => [] },
+  // The whole fleet as last loaded, every page. An open Edit dialog finds its
+  // truck here: gone from it means deleted, where gone from `trucks` could only
+  // mean it now sorts onto another page.
+  allTrucks: { type: Array, required: true },
   driverNames: { type: Array, default: () => [] },
   investorUsers: { type: Array, default: () => [] },
   showOwner: { type: Boolean, default: false },
   canEdit: { type: Boolean, default: false },
   // Driver pay is Super Admin only; everyone else sees the rate read-only.
   canEditPay: { type: Boolean, default: false },
+  // The Edit dialog's save, awaited in the manner of ExpenseForm's
+  // `submit-handler`. saveHandler(id, data) resolves once the truck is saved and
+  // rejects with the server's refusal (an Error carrying its message). The
+  // dialog closes only on a resolve, so a refused save keeps everything typed.
+  saveHandler: { type: Function, required: true },
 })
 
-const emit = defineEmits(['delete', 'update', 'linkage-changed'])
+const emit = defineEmits(['delete', 'linkage-changed'])
 
 const showConfirm = ref(false)
 const pendingTruck = ref(null)
@@ -530,13 +556,12 @@ const viewTruck = ref(null)
 const editModelOptions = computed(() => truckModels[editForm.make] || [])
 
 const showEdit = ref(false)
-const editForm = reactive({
-  id: null, unitNumber: '', make: '', model: '', year: 0,
-  vin: '', licensePlate: '', status: 'Active', assignedDriver: '', ownerId: 0, notes: '',
-  photo: '', insuranceMonthly: 0, eldMonthly: 0, truckPaymentMonthly: 0, hvutAnnual: 0, irpAnnual: 0, adminFeePct: 50, driverPayDaily: 0,
-  purchasePrice: 0, titleStatus: 'Clean', maintenanceFundMonthly: 0,
-  fuelTankGallons: '', avgMpg: '', inServiceDate: '', retiredAt: '',
-})
+// What the Edit dialog's inputs hold (lib/truckEdit.js, formFromTruck).
+const editForm = reactive(formFromTruck(null))
+// The same values as the dialog opened with, never edited. Save sends only the
+// fields that differ from it (changedFields), so a value someone else saved
+// while the dialog was open is not put back.
+const editBaseline = shallowRef(null)
 
 // Year + make + model in one cell — "2022 Freightliner Cascadia" is how a fleet
 // writes a truck anyway, and it keeps the column COUNT at 12 with Tank added.
@@ -561,25 +586,14 @@ function tankGallons(truck) {
   return Number.isFinite(n) && n > 0 ? n : 0
 }
 
-// The trucks API serializes PascalCase (InsuranceMonthly, FuelTankGallons...),
-// but in_service_date landed after this component; read both spellings so the
-// value round-trips whichever key the server ends up emitting.
-function inServiceDate(truck) {
-  return (truck?.InServiceDate ?? truck?.in_service_date ?? '') || ''
-}
-
-// The mirror bound. Same dual-spelling read as inServiceDate above: GET
-// /api/trucks serializes RetiredAt, but read the snake_case form too so a raw
-// row (or an older cached payload) still renders.
-function retiredAt(truck) {
-  return (truck?.RetiredAt ?? truck?.retired_at ?? '') || ''
-}
+// inServiceDate(truck) and retiredAt(truck), read by the detail modal below, are
+// in lib/truckEdit.js with the Edit dialog's form, which reads them too.
 
 // Current mileage, derived server-side from the latest ELD fix. Same defensive
-// multi-spelling read as inServiceDate above, and the same tolerance for the
-// field simply not being there — an older server sends no Odometer at all, and
-// that has to look identical to "this truck has no ELD link" rather than
-// throwing or printing `undefined`.
+// multi-spelling read as inServiceDate (lib/truckEdit.js), and the same
+// tolerance for the field simply not being there — an older server sends no
+// Odometer at all, and that has to look identical to "this truck has no ELD
+// link" rather than throwing or printing `undefined`.
 //
 // fmtOdometer collapses null / undefined / '' / 0 to '—' in ONE place shared
 // with the fuel panel, so the truck record and the fuel logs can't disagree on
@@ -620,36 +634,12 @@ function formatInServiceDate(raw) {
 }
 
 function openEdit(truck) {
-  editForm.id = truck.id
-  editForm.unitNumber = truck.UnitNumber
-  editForm.make = truck.Make || ''
-  editForm.model = truck.Model || ''
-  editForm.year = truck.Year || ''
-  editForm.vin = truck.VIN || ''
-  editForm.licensePlate = truck.LicensePlate || ''
-  editForm.status = truck.Status
-  editForm.assignedDriver = truck.AssignedDriver || ''
-  editForm.ownerId = truck.OwnerId || 0
-  editForm.notes = truck.Notes || ''
-  editForm.photo = truck.Photo || ''
-  editForm.insuranceMonthly = truck.InsuranceMonthly || 0
-  editForm.eldMonthly = truck.EldMonthly || 0
-  editForm.truckPaymentMonthly = truck.TruckPaymentMonthly || 0
-  editForm.hvutAnnual = truck.HvutAnnual || 0
-  editForm.irpAnnual = truck.IrpAnnual || 0
-  editForm.adminFeePct = truck.AdminFeePct ?? 50
-  // '' (not 0) when unset so the input shows the "250 (default)" placeholder
-  // instead of a misleading literal 0.
-  editForm.driverPayDaily = truck.DriverPayDaily || ''
-  editForm.purchasePrice = truck.PurchasePrice || 0
-  editForm.titleStatus = truck.TitleStatus || 'Clean'
-  editForm.maintenanceFundMonthly = truck.MaintenanceFundMonthly || 0
-  // '' when unset/0 so the default placeholder shows instead of a literal 0.
-  editForm.fuelTankGallons = truck.FuelTankGallons || ''
-  editForm.avgMpg = truck.AvgMpg || ''
-  // '' when unset — an empty date input is what keeps the created_at fallback.
-  editForm.inServiceDate = inServiceDate(truck)
-  editForm.retiredAt = retiredAt(truck)
+  const values = formFromTruck(truck)
+  Object.assign(editForm, values)
+  editBaseline.value = Object.freeze(values)
+  // A photo still being read for the last truck edited is dropped when it
+  // finishes (onEditPhoto), rather than landing in this truck's form.
+  photoRead++
   // The modal is v-if'd, so a photo or save message from the last truck edited
   // would otherwise reappear against a different truck. Same for a busy flag
   // left set by a compress that was still running when the modal was dismissed.
@@ -659,13 +649,35 @@ function openEdit(truck) {
   showEdit.value = true
 }
 
+// The dialog's truck as the list now has it, or undefined once the list no
+// longer holds it: deleted by someone else while the dialog was open.
+const editedRow = computed(() => (showEdit.value ? props.allTrucks.find((t) => t.id === editForm.id) : undefined))
+const editTruckDeleted = computed(() => showEdit.value && !editedRow.value)
+// True when the refreshed row has changed since the dialog opened, on a field
+// where the dialog does not already hold the new value (changedUnderneath).
+// Save still sends only this dialog's own changes, so a note is all it needs.
+const editChangedUnderneath = computed(() => {
+  if (!editedRow.value || !editBaseline.value) return false
+  return changedUnderneath(editBaseline.value, formFromTruck(editedRow.value), editForm).length > 0
+})
+
 const editPhotoBusy = ref(false)
 const editPhotoError = ref('')
-// Why Save was refused (a number box it can't read, or an amount out of
-// range); shown directly above Save.
+// Why Save was refused (a number box it can't read, an amount out of range, or
+// the server's own refusal); shown directly above Save.
 const editError = ref('')
+// A save is in flight: Save reads "Saving…" and the dialog stays open.
+const editSaving = ref(false)
+// Save itself, to hand keyboard focus back after a refusal (handleSaveEdit).
+const editSaveBtn = ref(null)
 // The edit dialog's element, for unreadableNumberError (null while closed).
 const editDialogEl = ref(null)
+
+// Numbers each photo read. openEdit and every close bump it too, so a read that
+// finishes after the dialog was closed, or reopened on another truck, sees a
+// newer number and is dropped: a slow read (an iPhone HEIC) started on one truck
+// used to land in the next truck's form.
+let photoRead = 0
 
 // Receives File[] from FileDropZone — a drop and a click both land here.
 // compressImage replaces a raw FileReader for the same reason as AddTruckForm:
@@ -674,10 +686,12 @@ const editDialogEl = ref(null)
 async function onEditPhoto(files) {
   const file = files[0]
   if (!file) return
+  const read = ++photoRead
   editPhotoError.value = ''
   editPhotoBusy.value = true
   try {
     const dataUrl = await compressImage(file, DEFAULT_MAX_EDGE)
+    if (read !== photoRead) return
     // Only a real decode is kept. When compressImage cannot decode a file it
     // hands back the RAW bytes under the file's own media type (an SVG, a PDF,
     // …) or '' — and the server refuses any photo that is not a JPEG, PNG or
@@ -688,7 +702,8 @@ async function onEditPhoto(files) {
     if (isDecodedImage(dataUrl) && dataUrlHasImageBytes(dataUrl)) editForm.photo = dataUrl
     else editPhotoError.value = "Couldn't read that photo — use a JPEG, PNG or WebP image."
   } finally {
-    editPhotoBusy.value = false
+    // A dropped read leaves the busy flag to the dialog now open.
+    if (read === photoRead) editPhotoBusy.value = false
   }
 }
 
@@ -735,54 +750,63 @@ function keepUnreadableNumber(e) {
   if (el?.tagName === 'INPUT' && el.type === 'number' && el.validity?.badInput) e.stopPropagation()
 }
 
-function handleSaveEdit() {
-  // Refused here rather than left to the server: emitting `update` closes this
-  // modal at once, so a server refusal would land as a toast after every edit
-  // in the form was gone.
+// Hides the Edit dialog, and drops a photo read still running for it.
+function endEdit() {
+  photoRead++
+  showEdit.value = false
+}
+
+// Closes the Edit dialog, unless a save is still in flight (see the note above
+// its buttons).
+function closeEdit() {
+  if (editSaving.value) return
+  endEdit()
+}
+
+async function handleSaveEdit() {
+  if (editSaving.value || editPhotoBusy.value || editTruckDeleted.value) return
+  // Only the fields changed since the dialog opened are sent (lib/truckEdit.js):
+  // the rest may have been changed by someone else since, and resending them
+  // would put the old values back. Driver pay only for a Super Admin — anyone
+  // else's save never carries it. A cleared date is sent as '' (never null,
+  // never today), which the server reads as its created_at fallback.
+  const changed = changedFields(editBaseline.value, editForm, { canEditPay: props.canEditPay })
+  // Checked before anything is sent. The server cannot catch an unreadable
+  // number box at all: it arrives as a blank and is stored as 0. Only amounts
+  // being sent are range-checked, as the server checks them: a stored value
+  // from before a range existed does not block an edit that leaves it alone.
+  const sending = Object.fromEntries(changed.map((key) => [key, editForm[key]]))
   editError.value = unreadableNumberError(editDialogEl.value)
-    || amountError(editForm, { canEditPay: props.canEditPay, order: EDIT_AMOUNT_ORDER })
+    || amountError(sending, { canEditPay: props.canEditPay, order: EDIT_AMOUNT_ORDER })
     || ''
   if (editError.value) return
-  emit('update', {
-    id: editForm.id,
-    data: {
-      unitNumber: editForm.unitNumber,
-      make: editForm.make,
-      model: editForm.model,
-      year: editForm.year,
-      vin: editForm.vin,
-      licensePlate: editForm.licensePlate,
-      status: editForm.status,
-      assignedDriver: editForm.assignedDriver,
-      ownerId: editForm.ownerId,
-      notes: editForm.notes,
-      photo: editForm.photo,
-      insuranceMonthly: editForm.insuranceMonthly,
-      eldMonthly: editForm.eldMonthly,
-      truckPaymentMonthly: editForm.truckPaymentMonthly,
-      hvutAnnual: editForm.hvutAnnual,
-      irpAnnual: editForm.irpAnnual,
-      adminFeePct: editForm.adminFeePct,
-      // Blank input = clear the custom rate (server stores 0 = use $250 default).
-      // Sent only by a Super Admin: anyone else leaves the rate out, so the save
-      // keeps whatever rate is stored when it lands.
-      ...(props.canEditPay ? { driverPayDaily: editForm.driverPayDaily === '' ? 0 : editForm.driverPayDaily } : {}),
-      purchasePrice: editForm.purchasePrice,
-      titleStatus: editForm.titleStatus,
-      maintenanceFundMonthly: editForm.maintenanceFundMonthly,
-      // Fuel-model inputs (snake_case per the wave contract); blank → 0 = unset.
-      fuel_tank_gallons: editForm.fuelTankGallons === '' ? 0 : editForm.fuelTankGallons,
-      avg_mpg: editForm.avgMpg === '' ? 0 : editForm.avgMpg,
-      // Cleared input sends '' (never null, never today) so the server reverts
-      // to its created_at fallback rather than restating the owner's payout.
-      // Both key styles — the trucks API mixes camelCase and snake_case.
-      in_service_date: editForm.inServiceDate || '',
-      inServiceDate: editForm.inServiceDate || '',
-      retired_at: editForm.retiredAt || '',
-      retiredAt: editForm.retiredAt || '',
-    },
-  })
-  showEdit.value = false
+  // Nothing to save. The server would answer an empty body 400 "No valid
+  // fields to update".
+  if (!changed.length) {
+    endEdit()
+    return
+  }
+  editSaving.value = true
+  let refused = false
+  try {
+    await props.saveHandler(editForm.id, bodyForFields(editForm, changed))
+    // Only now. Closing before the server answered turned every refusal (a
+    // closed month, a unit number already in use, a photo it would not take)
+    // into a toast over a dialog whose edits were all gone.
+    endEdit()
+  } catch (err) {
+    editError.value = err?.message || 'Failed to update truck.'
+    refused = true
+  } finally {
+    editSaving.value = false
+  }
+  // Disabling Save while it ran dropped keyboard focus to the page body, which
+  // sits outside this still-open dialog. Hand it back to Save, unless the
+  // person has already moved it somewhere themselves.
+  if (refused) {
+    await nextTick()
+    if (!document.activeElement || document.activeElement === document.body) editSaveBtn.value?.focus()
+  }
 }
 
 function ownerName(ownerId) {
@@ -897,8 +921,8 @@ async function handleLink() {
     })
     showLinkRm.value = false
     // Reload-only signal: the parent should refetch trucks so the row's
-    // RoutemateVehicleId flips to "Linked". Distinct from `update` (which
-    // sends a PUT to /api/trucks for actual field edits).
+    // RoutemateVehicleId flips to "Linked". Distinct from `saveHandler` (the
+    // PUT to /api/trucks behind the Edit dialog's field edits).
     emit('linkage-changed', { id: linkTruck.value.id })
   } catch (err) {
     linkError.value = err?.message || 'Failed to link Routemate vehicle.'
@@ -1029,6 +1053,19 @@ async function handleUnlink(truck) {
   border: 1px solid #fecaca; border-radius: 6px;
 }
 .edit-error + .confirm-actions { margin-top: 0.75rem; }
+/* Someone else saved this truck meanwhile — a notice, not a refusal. */
+.edit-note {
+  padding: 0.55rem 0.7rem; font-size: 0.75rem; line-height: 1.4;
+  background: #fffbeb; color: #92400e;
+  border: 1px solid #fde68a; border-radius: 6px;
+}
+.edit-note + .edit-error { margin-top: 0.5rem; }
+.edit-note + .confirm-actions { margin-top: 0.75rem; }
+/* Groups the fields only so a save in flight can disable them all at once. */
+.edit-fields { border: 0; margin: 0; padding: 0; min-width: 0; }
+/* Matches the global .btn-primary:disabled; Cancel is held while a save or a
+   Routemate link is in flight, and should look it. */
+.confirm-actions .btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .edit-row { display: flex; gap: 1rem; }
 .edit-row .edit-field { flex: 1; }
@@ -1051,8 +1088,11 @@ async function handleUnlink(truck) {
 .edit-field textarea:focus {
   outline: none; border-color: var(--blue);
 }
-/* Read-only for this role (driver pay is Super Admin only): still legible. */
-.edit-field input:disabled { opacity: 0.6; cursor: not-allowed; }
+/* Read-only for this role (driver pay is Super Admin only), or held while a
+   save is in flight: still legible. */
+.edit-field input:disabled,
+.edit-fields:disabled select,
+.edit-fields:disabled textarea { opacity: 0.6; cursor: not-allowed; }
 .field-hint {
   font-size: 0.7rem; color: var(--text-dim); margin-top: 0.25rem;
   text-transform: none; letter-spacing: normal;
