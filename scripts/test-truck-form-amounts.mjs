@@ -5,21 +5,25 @@
 //   client/src/lib/truckAmounts.js   AMOUNT_MAX, AMOUNT_FIELDS, amountError
 //   client/src/lib/imageUtils.js     dataUrlHasImageBytes (beside isDecodedImage)
 //
-// WHY THIS EXISTS. Emitting the save clears the Add form and closes the Edit
-// dialog at once, so a refusal from the server lands after everything typed is
-// gone. Both forms therefore refuse, themselves and with the field named, an
-// amount that is not blank and not a finite number in range. That rule was
-// copied into both components, and a copied rule drifts, so it now lives in
-// one module and this pins it: each field's range and label, blank staying
-// allowed, driver pay checked only when the user may edit it, and which field
-// a refusal names first on each form.
+// WHY THIS EXISTS. Both forms wait for the server: the Add form clears, and the
+// Edit dialog closes, only once the server has accepted the save, and a refusal
+// is shown inline with everything typed still in place. Each form still checks
+// its own amounts before anything is sent: an amount that is not blank and not
+// a finite number in range is refused by the form itself, with the field named,
+// so a slip is caught without a round trip and against the ranges the server
+// holds (scripts/test-truck-amount-caps-parity.mjs keeps the two in step). That
+// rule was copied into both components, and a copied rule drifts, so it now
+// lives in one module and this pins it: each field's range and label, blank
+// staying allowed, driver pay checked only when the user may edit it, and which
+// field a refusal names first on each form.
 //
 // The photo check is here for the same reason. compressImage's raw fallback
 // labels a file it cannot decode by the file's name, so a PDF renamed scan.jpg
 // arrives as data:image/jpeg;base64,JVBERi… and passes isDecodedImage, which
-// reads the label alone; the server then refuses it (415) after the dialog has
-// closed. The forms keep a photo only when dataUrlHasImageBytes also finds the
-// signature of the labelled type in its first bytes.
+// reads the label alone; the server would refuse it (415), but only once the
+// truck is saved. The forms keep a photo only when dataUrlHasImageBytes also
+// finds the signature of the labelled type in its first bytes, so a file that
+// cannot be stored is turned away when it is attached.
 //
 // No network, no DOM, no Vue — pure input/output, safe anywhere. The half of
 // the amount rule that reads input.validity.badInput (a number box the browser

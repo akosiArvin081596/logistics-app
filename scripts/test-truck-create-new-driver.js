@@ -591,9 +591,11 @@ function mountPost(db, { jt = makeJt(), jtFails = false, duringRead = null } = {
 	});
 	return { post, calls };
 }
-// The body AddTruckForm.vue's submit sends (`emit('submit', {...})`), for the
-// reported request: a Super Admin adding LogisX-#23 for owner 5 with the new
-// hire at $300/day, in service today, the cost fields at the form's defaults.
+// The body AddTruckForm.vue sends (buildPayload(), handed to its submitHandler),
+// for the reported request: a Super Admin adding LogisX-#23 for owner 5 with the
+// new hire at $300/day, in service today, the cost fields at the form's
+// defaults. The form clears only once the server has accepted the add; a
+// refusal is shown inline, with everything typed still in place.
 const addForm = (over = {}) => {
 	const b = {
 		unitNumber: "LogisX-#23", make: "Freightliner", model: "Cascadia", year: 2022, vin: "", licensePlate: "",
