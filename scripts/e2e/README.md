@@ -401,7 +401,7 @@ page.
 |---|---|---|
 | D1 | The payload of the Dispatcher's own dashboard request, `GET /api/dashboard` (captured from the network). | 0 non-empty cells in any broker/contact column (not even a name). |
 | D2 | A page `fetch` of `GET /api/load/<id>`, as the Dispatcher and as the Super Admin. The load is the one with the most broker/contact values in the Super Admin's dashboard. | 200, with every broker/contact field blank for the Dispatcher (the Super Admin's copy still has them). |
-| D3a–c | The Dispatcher's page `fetch`es of `GET /api/data?sheet=Job%20Tracking`, `…Job%20Tracking!A2:ZZ` and `…Payments%20Table`, summarized in the page: the non-empty cells of broker/contact columns in every row list of the answer, and how many values look like an email address or a phone number. | 403 each: the sheet reader is Super Admin only. |
+| D3a–c | The Dispatcher's page `fetch`es of `GET /api/data` in three request shapes (the Job Tracking tab and two others), summarized in the page: the non-empty cells of broker/contact columns in every row list of the answer, and how many values look like an email address or a phone number. | 403 each: the sheet reader is Super Admin only. |
 
 "Phone-looking" is a pattern (ten digits in the usual groupings), so it can also count a long reference number; the
 email count is the sharper signal. Everything here is read-only, and safe on staging.
