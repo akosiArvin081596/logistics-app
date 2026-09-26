@@ -29,6 +29,9 @@
  * doubled or edge space, and none has a truck, so this is preventive.
  *
  *   §1 findDirectoryRowForDriver() on its own.
+ *   §1b findTruckForDriver() on its own: the truck found the same two ways.
+ *      The sync, GET /api/driver/:driverName and GET /api/driver/me/truck-photo
+ *      use it (the routes: scripts/test-driver-page-role-gate.js §6).
  *   §2 "update": a driver assigned a truck the way the truck routes do it
  *      (canonicalDriverName() → assignDriverToTruck() → the sync) gets the
  *      unit in the `trucks` column of a row stored with a doubled or edge space,
@@ -37,8 +40,17 @@
  *      renames as before.
  *   §3 "delete": the spacing variant is removed, a case-aside match is still
  *      preferred, and a blank name removes nothing.
+ *   §3b "delete" deletes nothing, and logs it, while another account still
+ *      holds a driver name that normalizes to the one deleted (a legacy
+ *      "Shorn  King" or "SHORN KING" account beside the real "Shorn King"),
+ *      whichever way the row matched; with none, the row goes as before.
+ *   §3c the rename cascade's drivers_directory leg leaves a spacing-variant row
+ *      alone while an account the rename does not move still holds that name
+ *      (driverRenameDirectoryRowId()), by id or by name; with none, it renames it.
  *   §4 source pins.
- *   §5 THE MUTANT: findDirectoryRowForDriver() back to LOWER() equality.
+ *   §5 THE MUTANTS: findDirectoryRowForDriver() (M1) and findTruckForDriver()
+ *      (M2) back to LOWER() equality; "delete" (M3) and the cascade (M4)
+ *      without the remaining-account check.
  *
  * Pure: no server, no app.db, no network.
  *
@@ -85,16 +97,31 @@ function mutate(src, from, to) {
 	if (n !== 1) die(`mutant target found ${n}x (expected 1): ${from.slice(0, 70)}`);
 	return src.replace(from, to);
 }
+// The rename cascade too (§6): its drivers_directory leg finds its row through
+// driverRenameDirectoryRowId(). Tables this runner does not create are the
+// executor's "no such table" legs, which it skips.
 const FUNCTIONS = ["normalizeDriverName", "findDriverNameClashes", "findDriverNameClash", "canonicalDriverName",
-	"findDirectoryRowForDriver", "syncDriverToCarrierSheet", "assignDriverToTruck"];
+	"findDirectoryRowForDriver", "findTruckForDriver", "syncDriverToCarrierSheet", "assignDriverToTruck",
+	"driverRenameWhereSql", "driverRenameWhereArgs", "driverRenameDirectoryRowId", "driverRenameNewValue",
+	"replaceNameOnWordBoundary", "applyDriverRenameSqlite"];
 const FN_SRC = Object.fromEntries(FUNCTIONS.map((n) => [n, liftFunction(n)]));
+function liftConst(head, close) {
+	const needle = `\n${head}`;
+	const hits = SRC.split(needle).length - 1;
+	if (hits !== 1) die(`expected exactly 1 statement starting ${JSON.stringify(head)}, found ${hits}`);
+	const a = SRC.indexOf(needle) + 1;
+	const end = close ? SRC.indexOf(close, a) : SRC.indexOf(";\n", a);
+	return SRC.slice(a, end + (close ? close.length : 1));
+}
+const CONST_SRC = [liftConst("const DRIVER_RENAME_TARGETS = [", "\n];"), liftConst("const DRIVER_RENAME_ID_CAP = ")].join("\n");
 function buildModule(db, overrides = {}) {
 	const s = { ...FN_SRC, ...overrides };
 	const logged = [];
-	const fakeConsole = { error: (...a) => logged.push(a.map(String).join(" ")), log() {}, warn() {} };
+	const warned = [];
+	const fakeConsole = { error: (...a) => logged.push(a.map(String).join(" ")), log() {}, warn: (...a) => warned.push(a.map(String).join(" ")) };
 	const m = new Function("db", "console",
-		`"use strict";\n${FUNCTIONS.map((n) => s[n]).join("\n")}\nreturn { ${FUNCTIONS.join(", ")} };`)(db, fakeConsole);
-	return { ...m, logged };
+		`"use strict";\n${CONST_SRC}\n${FUNCTIONS.map((n) => s[n]).join("\n")}\nreturn { ${FUNCTIONS.join(", ")} };`)(db, fakeConsole);
+	return { ...m, logged, warned };
 }
 
 // ── fixtures ────────────────────────────────────────────────────────────────
@@ -164,6 +191,29 @@ function lookupBattery(overrides) {
 	const both = makeDb({ directory: [[21, "Shorn  King", ""], [22, "SHORN KING", ""]] });
 	t(show(buildModule(both, overrides).findDirectoryRowForDriver("Shorn King")) === "22/case",
 		"the case-aside match is preferred to an earlier spacing variant");
+	return results;
+}
+
+// findTruckForDriver(): the driver's truck, found the same two ways.
+function truckLookupBattery(overrides) {
+	const results = [];
+	const t = (cond, name) => results.push({ ok: !!cond, name });
+	const db = makeDb({ trucks: [[1, "205", "Deshorn King"], [2, "101", "Shorn  King"], [3, "33", " Pat  Driver "], [4, "44", "BOB DRIVER"]] });
+	const f = buildModule(db, overrides).findTruckForDriver;
+	const show = (r) => (r ? `${r.id}/${r.unit_number}/${r.matchedBy}` : "null");
+	t(show(f("Shorn King")) === "2/101/normalized", `a truck stored with a doubled space is found through normalizeDriverName() (got ${show(f("Shorn King"))})`);
+	t(show(f("pat driver")) === "3/33/normalized", `a truck stored with edge and doubled spaces is found (got ${show(f("pat driver"))})`);
+	t(show(f("Bob Driver")) === "4/44/case", `a case-aside match is found as before, and says so (got ${show(f("Bob Driver"))})`);
+	t(show(f("Shorn  King")) === "2/101/case", `the truck's own spelling is a case-aside match (got ${show(f("Shorn  King"))})`);
+	t(f("Deshorn") === null && f("King") === null, "a part of a name finds no truck");
+	t(show(f("Deshorn King")) === "1/205/case" && !show(f("Shorn King")).startsWith("1/"), "Deshorn King and Shorn King keep their own trucks");
+	t(f("") === null && f("   ") === null && f(null) === null && f(42) === null, "a blank or non-string name finds no truck");
+	const both = makeDb({ trucks: [[21, "301", "Shorn  King"], [22, "302", "SHORN KING"]] });
+	t(show(buildModule(both, overrides).findTruckForDriver("Shorn King")) === "22/302/case",
+		"the case-aside truck is preferred to an earlier spacing variant");
+	const two = makeDb({ trucks: [[31, "401", "Shorn  King"], [32, "402", " Shorn King"]] });
+	t(show(buildModule(two, overrides).findTruckForDriver("shorn king")) === "31/401/normalized",
+		"of two spacing variants, the first by id");
 	return results;
 }
 
@@ -261,6 +311,64 @@ function deleteBattery(overrides) {
 	return results;
 }
 
+// A legacy account spelled "Shorn  King" beside the real "Shorn King": deleting
+// it must not delete the real driver's row (and pay terms). DELETE
+// /api/users/:id removes its own account before the sync runs, as here.
+function shadowDeleteBattery(overrides) {
+	const results = [];
+	const t = (cond, name) => results.push({ ok: !!cond, name });
+	for (const [label, shadow] of [["a doubled space", "Shorn  King"], ["another case", "SHORN KING"]]) {
+		const db = makeDb({ directory: [[1, "Shorn King", "101", 300], [2, "Deshorn King", ""]], accounts: ["Shorn King", shadow] });
+		const m = buildModule(db, overrides);
+		db.prepare("DELETE FROM users WHERE driver_name = ?").run(shadow);
+		m.syncDriverToCarrierSheet(shadow, { action: "delete" });
+		t(dirRows(db) === "1:Shorn King:101 | 2:Deshorn King:",
+			`deleting a legacy account spelled with ${label} ("${shadow}") keeps the real driver's row, which another account still holds (got ${dirRows(db)})`);
+		t(m.warned.length === 1 && m.warned[0].includes("another account still holds that driver name"),
+			`...and logs why (got ${JSON.stringify(m.warned)})`);
+	}
+	{
+		// With no other account holding the name, the row goes, as before.
+		const db = makeDb({ directory: [[1, "Shorn King", "101", 300]], accounts: ["Shorn  King"] });
+		const m = buildModule(db, overrides);
+		db.prepare("DELETE FROM users").run();
+		m.syncDriverToCarrierSheet("Shorn  King", { action: "delete" });
+		t(dirRows(db) === "" && m.warned.length === 0, `with no other account holding the name, the row is removed as before (got ${dirRows(db)})`);
+	}
+	return results;
+}
+
+// The same principle in the rename cascade: renaming a legacy account must not
+// rename the row another remaining account holds.
+function shadowRenameBattery(overrides) {
+	const results = [];
+	const t = (cond, name) => results.push({ ok: !!cond, name });
+	const names = (db) => db.prepare("SELECT driver_name FROM users ORDER BY id").all().map((r) => r.driver_name).join(",");
+	{
+		// PUT /api/users/:id's form: the legacy account 2, by id.
+		const db = makeDb({ directory: [[1, "Shorn King", "", 300]], accounts: ["Shorn King", "Shorn  King"] });
+		buildModule(db, overrides).applyDriverRenameSqlite({ oldName: "Shorn  King", newName: "Shaun King", userId: 2 });
+		t(dirRows(db) === "1:Shorn King:" && names(db) === "Shorn King,Shaun King",
+			`renaming the legacy account "Shorn  King" renames it and leaves the real driver's row alone (got ${dirRows(db)}; accounts ${names(db)})`);
+	}
+	{
+		// fix-driver-name's form: every account spelled "Shorn King" moves; a
+		// legacy "Shorn  King" account stays, and the row spelled like it too.
+		const db = makeDb({ directory: [[1, "Shorn  King", "", 300]], accounts: ["Shorn King", "Shorn  King"] });
+		buildModule(db, overrides).applyDriverRenameSqlite({ oldName: "Shorn King", newName: "Shaun King" });
+		t(dirRows(db) === "1:Shorn  King:" && names(db) === "Shaun King,Shorn  King",
+			`fix-driver-name's rename leaves a spacing-variant row the unmoved account "Shorn  King" still holds (got ${dirRows(db)}; accounts ${names(db)})`);
+	}
+	{
+		// With no other account holding the name, the spacing variant moves with
+		// the driver (the cascade fix itself).
+		const db = makeDb({ directory: [[1, "Shorn  King", "", 300]], accounts: ["Shorn King"] });
+		buildModule(db, overrides).applyDriverRenameSqlite({ oldName: "Shorn King", newName: "Shaun King", userId: 1 });
+		t(dirRows(db) === "1:Shaun King:", `with no other account holding the name, the spacing-variant row is renamed (got ${dirRows(db)})`);
+	}
+	return results;
+}
+
 function record(results) {
 	for (const r of results) ok(r.ok, r.name);
 	console.log(`  ${results.filter((r) => r.ok).length}/${results.length} checks`);
@@ -268,10 +376,16 @@ function record(results) {
 
 section("§1 findDirectoryRowForDriver()");
 record(lookupBattery());
+section("§1b findTruckForDriver()");
+record(truckLookupBattery());
 section('§2 syncDriverToCarrierSheet() "update"');
 record(updateBattery());
 section('§3 syncDriverToCarrierSheet() "delete"');
 record(deleteBattery());
+section('§3b "delete" of a legacy account beside the real one');
+record(shadowDeleteBattery());
+section("§3c the rename cascade and a legacy account beside the real one");
+record(shadowRenameBattery());
 
 section("§4 source pins");
 {
@@ -282,8 +396,23 @@ section("§4 source pins");
 	ok(upd.includes("findDirectoryRowForDriver(oldName || driverName") && !/SELECT id FROM drivers_directory/.test(upd),
 		'§4 "update" finds its row through findDirectoryRowForDriver(), with no lookup of its own');
 	ok(del.includes("findDirectoryRowForDriver(name)"), '§4 "delete" finds its row through findDirectoryRowForDriver()');
-	ok(/normalizeDriverName\(t\.assigned_driver\) === normalizeDriverName\(name\)/.test(sync),
-		"§4 the truck is also found through normalizeDriverName()");
+	ok(sync.includes("const truck = findTruckForDriver(name);") && !/FROM trucks/.test(sync),
+		"§4 the truck is found through findTruckForDriver(), with no trucks lookup of its own");
+	const truckFn = code(FN_SRC.findTruckForDriver);
+	ok(/normalizeDriverName\(t\.assigned_driver\) === needle/.test(truckFn) && truckFn.includes("const needle = normalizeDriverName(trimmed);"),
+		"§4 ...whose second step compares through normalizeDriverName()");
+	// One helper for "which truck is this driver's", not a copy per caller: the
+	// driver page and its photo route ask it too.
+	const routeCode = (head) => {
+		const a = SRC.indexOf(`\n${head}`);
+		if (a < 0) die(`route not found: ${head}`);
+		return code(SRC.slice(a, SRC.indexOf("\n});", a)));
+	};
+	const page = routeCode('app.get("/api/driver/:driverName"');
+	const photo = routeCode('app.get("/api/driver/me/truck-photo"');
+	ok(page.includes("findTruckForDriver(driverName)") && photo.includes("findTruckForDriver(driverName)") &&
+		!/FROM trucks WHERE LOWER\(assigned_driver\)/.test(page + photo),
+		"§4 GET /api/driver/:driverName and GET /api/driver/me/truck-photo find the truck through findTruckForDriver(), with no LOWER() lookup of their own");
 	ok(code(FN_SRC.findDirectoryRowForDriver).includes("findDriverNameClashes(trimmed, { users: false })"),
 		"§4 the helper's second step is the naming check's own comparison");
 	console.log("  source pins checked");
@@ -301,6 +430,39 @@ section("§5 the mutant — it must be caught");
 	ok(caught.length > 0, "M1 the directory lookup reverted to LOWER() equality is caught");
 	console.log(`  M1 LOWER() equality: caught by ${caught.length} check(s), e.g.`);
 	for (const r of caught.slice(0, 3)) console.log(`      ✗ ${r.name}`);
+}
+{
+	// findTruckForDriver() back to LOWER() equality alone: the lookup the driver
+	// page and its photo route used before. The sync's truck goes with it.
+	const TRUCK_LOWER_ONLY = {
+		findTruckForDriver: mutate(FN_SRC.findTruckForDriver,
+			'return hit ? { id: hit.id, unit_number: hit.unit_number, matchedBy: "normalized" } : null;', "return null;"),
+	};
+	const caught = [...truckLookupBattery(TRUCK_LOWER_ONLY), ...updateBattery(TRUCK_LOWER_ONLY)].filter((r) => !r.ok);
+	ok(caught.length > 0, "M2 the truck lookup reverted to LOWER() equality is caught");
+	console.log(`  M2 truck lookup LOWER() equality: caught by ${caught.length} check(s), e.g.`);
+	for (const r of caught.slice(0, 3)) console.log(`      ✗ ${r.name}`);
+}
+{
+	// "delete" without asking whether another account still holds the name.
+	const NO_HOLD_CHECK = {
+		syncDriverToCarrierSheet: mutate(FN_SRC.syncDriverToCarrierSheet,
+			'if (findDriverNameClashes(name, { directory: false })\n\t\t\t\t.some((h) => h.source === "users" && h.field === "driver_name")) {', "if (false) {"),
+	};
+	const caught = shadowDeleteBattery(NO_HOLD_CHECK).filter((r) => !r.ok);
+	ok(caught.length > 0, "M3 \"delete\" without the remaining-account check is caught");
+	console.log(`  M3 "delete" without the remaining-account check: caught by ${caught.length} check(s), e.g.`);
+	for (const r of caught.slice(0, 2)) console.log(`      ✗ ${r.name}`);
+}
+{
+	// The cascade renaming a spacing-variant row another account still holds.
+	const NO_HOLD_CHECK = {
+		driverRenameDirectoryRowId: mutate(FN_SRC.driverRenameDirectoryRowId, "\t\tif (heldElsewhere) return null;\n", ""),
+	};
+	const caught = shadowRenameBattery(NO_HOLD_CHECK).filter((r) => !r.ok);
+	ok(caught.length > 0, "M4 the rename cascade without the remaining-account check is caught");
+	console.log(`  M4 the rename without the remaining-account check: caught by ${caught.length} check(s), e.g.`);
+	for (const r of caught.slice(0, 2)) console.log(`      ✗ ${r.name}`);
 }
 
 console.log(`\n${"=".repeat(64)}`);
