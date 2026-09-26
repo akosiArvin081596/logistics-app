@@ -50,8 +50,8 @@ function fatal(msg) { console.error(`FAIL  ${msg}`); process.exit(1); }
 
 // --- lifting ---------------------------------------------------------------
 // A top-level `function name(` up to the first line that is exactly "}". Not a
-// brace count: sanitizeBrokerContact tests `startsWith("{")`, and a brace inside
-// a string literal throws a naive counter off.
+// brace count: a brace inside a string literal (legacyServedBrokerCell tests
+// `startsWith("{")`) throws a naive counter off.
 function liftFn(name) {
 	const a = SRC.indexOf(`\nfunction ${name}(`);
 	if (a < 0) fatal(`could not locate function ${name} in server.js`);
@@ -91,7 +91,6 @@ const requireAuth = new Function(`${liftFn("requireAuth")}\nreturn requireAuth;`
 const helpers = new Function([
 	liftFn("normalizeDriverName"),
 	liftFn("findCol"),
-	liftFn("sanitizeBrokerContact"),
 	liftConstLine("BROKER_WITHHELD_RE"),
 	liftFn("resolveBrokerWithheldColumns"),
 	liftFn("sanitizeBrokerColumns"),

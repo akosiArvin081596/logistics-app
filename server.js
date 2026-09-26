@@ -28869,11 +28869,10 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		//
 		// ⚠️ RESTORE ONLY WHAT WAS REDACTED, not every matching column. Because the
 		// splice had never once run, "preserve broker columns" had never actually
-		// restricted anybody — and both columns are editable in the Active Loads
-		// modal a Dispatcher uses. A blanket restore would silently discard their
-		// edit, answer {success:true}, and let the UI show the change until the next
+		// restricted anybody. A blanket restore would silently discard an edit,
+		// answer {success:true}, and let the UI show the change until the next
 		// refresh. So the value is put back only when the caller sent back exactly
-		// the redacted copy GET /api/data served them; a genuine edit goes through.
+		// the redacted copy they were served; a genuine edit goes through.
 		//
 		// ⚠️ THE CANDIDATE SET IS DERIVED, NOT RE-SPELLED. This filter used to be
 		// its own hardcoded `/broker|phone|contact/i`, which does NOT match
@@ -28881,27 +28880,12 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		// now does; it always should have), a Dispatcher's save would write ""
 		// straight over the stored address. A disclosure bug turns into DATA LOSS
 		// the instant the reader and the writer disagree about which columns were
-		// redacted, so both now ask resolveBrokerWithheldColumns(). The
-		// `served !== stored` test below remains the real authority; this is only
-		// the candidate list.
-		const preserved = [];
-		if (req.session.user.role !== "Super Admin") {
-			const servedRow = sanitizeBrokerColumns(headers, [rowObjectFromCells(headers, before)])[0] || {};
-			const withheldCols = new Set(resolveBrokerWithheldColumns(headers));
-			headers.forEach((h, i) => {
-				if (!withheldCols.has(h) || !before[i] || i >= values.length) return;
-				const stored = String(before[i]);
-				const served = servedRow[h] === undefined ? stored : String(servedRow[h]);
-				// Nothing was hidden from them for this column — let them edit it.
-				if (served === stored) return;
-				// They sent the redacted copy straight back: that is the round-trip
-				// this splice exists to catch, not an edit.
-				if (String(values[i] == null ? "" : values[i]) === served) {
-					values[i] = before[i];
-					preserved.push(String(h).trim() || `col${i + 1}`);
-				}
-			});
-		}
+		// redacted, so both now ask resolveBrokerWithheldColumns().
+		//
+		// The rule itself is restoreWithheldBrokerCells(), beside the reader.
+		const preserved = req.session.user.role !== "Super Admin"
+			? restoreWithheldBrokerCells(headers, before, values)
+			: [];
 
 		// Diff AFTER the splice — the spliced values are what actually get written,
 		// so they are what has to be judged and what has to be audited.
@@ -31267,20 +31251,26 @@ function deduplicateLoads(data, headers, returnDuplicates = false) {
 	return { data: filtered, duplicates };
 }
 
-function sanitizeBrokerContact(value) {
-	if (!value || typeof value !== "string") return value;
-	const trimmed = value.trim();
-	if (!trimmed.startsWith("{")) return value;
-	try {
-		const parsed = JSON.parse(trimmed);
-		return JSON.stringify({ Name: parsed.Name || parsed.name || "" });
-	} catch {
-		return value;
-	}
-}
-
 // ---------------------------------------------------------------------------
-// The broker-contact columns a non-Super-Admin must not receive in full.
+// The broker-contact columns a non-Super-Admin must not receive.
+//
+// ⚠️ OWNER'S DECISION, 2026-09-26: A NON-SUPER-ADMIN GETS NO BROKER CONTACT DATA,
+// NAMES INCLUDED, WHATEVER THE CELL'S FORMAT. Every column the resolver below
+// matches is served blank. That ends the one exception this code had: a cell
+// holding a JSON contact blob ({"Name":…,"Phone":…}) used to be reduced to its
+// name rather than blanked, on the belief that production's Job Tracking held no
+// such cell. It holds plenty — a 2026-09-26 read of a copy of production's sheet
+// found "Broker Contact Name" at 183 JSON cells and 158 plain ones, and "Phone
+// Number" at 254 JSON cells — so a Dispatcher saw the booking agent's name on
+// some loads and a blank on others. The reasoning behind withholding the name at
+// all: the control exists so dispatch works through the company rather than
+// straight to the broker, and a named agent at a known brokerage is as
+// actionable a contact as a phone number.
+//
+// ⚠️ THE RATE-CON PDF STILL CARRIES THE BROKER'S CONTACT BLOCK, and a Dispatcher
+// can open it: uploads/rate-cons/ is a role gate, not an ownership rule, by
+// recorded intent (docs/claude/pii-at-rest.md). Blanking these cells withholds
+// what the app serves out of the sheet, not what that document says.
 //
 // ⚠️ THIS IS A UNION RESOLVED BY NAME, NEVER `headers.find(...)`. The previous
 // version picked ONE column per role with two loose regexes:
@@ -31308,15 +31298,8 @@ function sanitizeBrokerContact(value) {
 // reason (a "Contact Number" column on some other sheet was redacted before and
 // still is); it is simply no longer allowed to *shadow* the phone column.
 //
-// DELIBERATE, not accidental: "Broker Contact Name" IS withheld. It was blanked
-// only by the bug above, but that is what every non-Super-Admin sees today, so
-// keeping it withheld makes this change strictly narrowing — no UI that already
-// copes with an empty cell regresses, and no new disclosure ships inside a leak
-// fix. It is also the coherent line: the control exists so dispatch cannot route
-// around the company to the broker, and a named agent at a known brokerage is a
-// directly actionable contact, so publishing the person while hiding the channel
-// is a weak boundary. Revealing it to Dispatchers is a product decision and
-// belongs in its own change, with the owner.
+// "Broker Contact Name" is withheld with the rest: it was first blanked only by
+// the bug above, and the owner's decision at the top of this block settles it.
 //
 // ⚠️ `Contract ID`, `"  Payment  "` (real surrounding spaces) and `Owner ID`
 // match nothing here and are untouched — verified against the header row above.
@@ -31334,24 +31317,75 @@ function resolveBrokerWithheldColumns(headers) {
 	return (headers || []).filter((h) => BROKER_WITHHELD_RE.test(String(h == null ? "" : h)));
 }
 
+// A copy of the rows with every withheld cell that holds anything served as "",
+// plain text and JSON contact blobs alike (the owner's decision above). An
+// absent or empty cell is left as it is. Callers apply it to every role but
+// Super Admin.
 function sanitizeBrokerColumns(headers, rows) {
 	const withheld = resolveBrokerWithheldColumns(headers);
 	if (!withheld.length) return rows;
 	return rows.map((row) => {
 		const cleaned = { ...row };
 		for (const col of withheld) {
-			if (!cleaned[col]) continue;
-			const val = String(cleaned[col]).trim();
-			// A legacy cell carrying a JSON contact blob degrades to just the
-			// name rather than vanishing — blanking it outright would destroy
-			// the load's broker association wholesale. Production's Job Tracking
-			// carries no such cell (the name column holds a plain string), so
-			// this branch is compatibility for older/other sheets and is left
-			// exactly as it behaved before.
-			cleaned[col] = val.startsWith("{") ? sanitizeBrokerContact(val) : "";
+			if (cleaned[col]) cleaned[col] = "";
 		}
 		return cleaned;
 	});
+}
+
+// The copy a non-Super-Admin was served, until 2026-09-26, for a withheld cell
+// holding a JSON contact blob: the blob reduced to its name, {"Name":…}. Nothing
+// serves it any more. It is kept for one reader, restoreWithheldBrokerCells(), so
+// a page loaded before that change and saved after it cannot write this copy
+// over the stored contact. null for any other cell: a plain one was served blank
+// then too, and a blob that does not parse was served in full.
+function legacyServedBrokerCell(stored) {
+	const trimmed = String(stored == null ? "" : stored).trim();
+	if (!trimmed.startsWith("{")) return null;
+	try {
+		const parsed = JSON.parse(trimmed);
+		return JSON.stringify({ Name: parsed.Name || parsed.name || "" });
+	} catch {
+		return null;
+	}
+}
+
+// PUT /api/data/:rowIndex, for a non-Super-Admin's save: put the stored value
+// back into every withheld cell the caller sent back exactly as it was served to
+// them, so the redacted copy never overwrites the record. Mutates `values` and
+// returns the trimmed names of the columns it restored. `before` is the row as
+// stored, `values` the row as sent, both in header order.
+//
+// Only what was redacted is restored: a withheld column holding nothing was
+// served as stored, so a value sent for it is an edit, and so is a value that
+// differs from the served copy. The columns and the served copy come from the
+// reader's own rule (resolveBrokerWithheldColumns(), sanitizeBrokerColumns()) —
+// see ONE SOURCE FOR READER AND WRITER above.
+//
+// ⚠️ THE PRE-2026-09-26 COPY COUNTS AS A ROUND TRIP TOO. The Active Loads editor
+// sends each withheld column back as the value its row holds, and a page loaded
+// before that date still holds a JSON contact cell's name-only copy. Judged only
+// against today's blank copy, that would read as an edit and replace the stored
+// contact, phone and email with the name alone (legacyServedBrokerCell()).
+function restoreWithheldBrokerCells(headers, before, values) {
+	const preserved = [];
+	const servedRow = sanitizeBrokerColumns(headers, [rowObjectFromCells(headers, before)])[0] || {};
+	const withheldCols = new Set(resolveBrokerWithheldColumns(headers));
+	headers.forEach((h, i) => {
+		if (!withheldCols.has(h) || !before[i] || i >= values.length) return;
+		const stored = String(before[i]);
+		const served = servedRow[h] === undefined ? stored : String(servedRow[h]);
+		// Nothing was hidden from them for this column — let them edit it.
+		if (served === stored) return;
+		const sent = String(values[i] == null ? "" : values[i]);
+		// They sent a redacted copy straight back: that is the round trip this
+		// exists to catch, not an edit.
+		if (sent === served || sent === legacyServedBrokerCell(stored)) {
+			values[i] = before[i];
+			preserved.push(String(h).trim() || `col${i + 1}`);
+		}
+	});
+	return preserved;
 }
 
 function findCol(headers, regex) {
@@ -42156,7 +42190,9 @@ app.get("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 			headers.forEach((h, idx) => { obj[h] = rows[i][idx] || ""; });
 			if (obj[loadIdCol] === loadId) {
 				obj._rowIndex = i + 1;
-				return res.json({ load: obj });
+				// Every role but Super Admin gets the broker contact columns blank,
+				// as from GET /api/data and /api/dashboard (sanitizeBrokerColumns()).
+				return res.json({ load: req.session.user.role !== "Super Admin" ? sanitizeBrokerColumns(headers, [obj])[0] : obj });
 			}
 		}
 
@@ -42460,11 +42496,13 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 		// The 60s Job Tracking cache would otherwise keep serving the old figures.
 		if (guarded) jtCacheInvalidate();
 
-		// Return updated load — unchanged response shape.
+		// Return updated load — unchanged response shape. Every role but Super
+		// Admin gets the broker contact columns blank, as GET /api/load/:loadId
+		// serves them.
 		const result = {};
 		headers.forEach((h, idx) => { result[h] = updatedRow[idx]; });
 		result._rowIndex = rowIndex;
-		res.json({ success: true, load: result });
+		res.json({ success: true, load: req.session.user.role !== "Super Admin" ? sanitizeBrokerColumns(headers, [result])[0] : result });
 	} catch (error) {
 		console.error("Error updating load:", error.message);
 		res.status(500).json({ error: error.message });
