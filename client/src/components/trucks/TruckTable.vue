@@ -206,7 +206,7 @@
 
     <!-- Edit Modal -->
     <Teleport to="body">
-      <div v-if="showEdit" class="confirm-overlay" @click.self="showEdit = false">
+      <div v-if="showEdit" class="confirm-overlay" @click.self="closeEdit">
         <div ref="editDialogEl" class="confirm-dialog edit-dialog" @change.capture="keepUnreadableNumber">
           <h3>Edit Truck &mdash; {{ editForm.unitNumber }}</h3>
 
@@ -393,9 +393,12 @@
                field could sit off screen while Save seemed to do nothing. -->
           <div v-if="editError" class="edit-error" role="alert">{{ editError }}</div>
 
+          <!-- Save waits for a photo still being read, or it would send the old
+               one. Cancel waits for a save in flight: the PUT cannot be called
+               back, and closing would drop the form a refusal is shown against. -->
           <div class="confirm-actions">
-            <button class="btn btn-secondary" @click="showEdit = false">Cancel</button>
-            <button class="btn btn-primary" @click="handleSaveEdit">Save</button>
+            <button class="btn btn-secondary" :disabled="editSaving" @click="closeEdit">Cancel</button>
+            <button ref="editSaveBtn" class="btn btn-primary" :disabled="editSaving || editPhotoBusy" @click="handleSaveEdit">{{ editSaving ? 'Saving…' : 'Save' }}</button>
           </div>
         </div>
       </div>
@@ -474,7 +477,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, nextTick } from 'vue'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import FileDropZone from '../shared/FileDropZone.vue'
@@ -519,9 +522,14 @@ const props = defineProps({
   canEdit: { type: Boolean, default: false },
   // Driver pay is Super Admin only; everyone else sees the rate read-only.
   canEditPay: { type: Boolean, default: false },
+  // The Edit dialog's save, awaited in the manner of ExpenseForm's
+  // `submit-handler`. saveHandler(id, data) resolves once the truck is saved and
+  // rejects with the server's refusal (an Error carrying its message). The
+  // dialog closes only on a resolve, so a refused save keeps everything typed.
+  saveHandler: { type: Function, required: true },
 })
 
-const emit = defineEmits(['delete', 'update', 'linkage-changed'])
+const emit = defineEmits(['delete', 'linkage-changed'])
 
 const showConfirm = ref(false)
 const pendingTruck = ref(null)
@@ -661,9 +669,13 @@ function openEdit(truck) {
 
 const editPhotoBusy = ref(false)
 const editPhotoError = ref('')
-// Why Save was refused (a number box it can't read, or an amount out of
-// range); shown directly above Save.
+// Why Save was refused (a number box it can't read, an amount out of range, or
+// the server's own refusal); shown directly above Save.
 const editError = ref('')
+// A save is in flight: Save reads "Saving…" and the dialog stays open.
+const editSaving = ref(false)
+// Save itself, to hand keyboard focus back after a refusal (handleSaveEdit).
+const editSaveBtn = ref(null)
 // The edit dialog's element, for unreadableNumberError (null while closed).
 const editDialogEl = ref(null)
 
@@ -735,17 +747,25 @@ function keepUnreadableNumber(e) {
   if (el?.tagName === 'INPUT' && el.type === 'number' && el.validity?.badInput) e.stopPropagation()
 }
 
-function handleSaveEdit() {
-  // Refused here rather than left to the server: emitting `update` closes this
-  // modal at once, so a server refusal would land as a toast after every edit
-  // in the form was gone.
+// Closes the Edit dialog, unless a save is still in flight (see the note above
+// its buttons).
+function closeEdit() {
+  if (editSaving.value) return
+  showEdit.value = false
+}
+
+async function handleSaveEdit() {
+  if (editSaving.value || editPhotoBusy.value) return
+  // Checked before anything is sent. The server cannot catch an unreadable
+  // number box at all: it arrives as a blank and is stored as 0.
   editError.value = unreadableNumberError(editDialogEl.value)
     || amountError(editForm, { canEditPay: props.canEditPay, order: EDIT_AMOUNT_ORDER })
     || ''
   if (editError.value) return
-  emit('update', {
-    id: editForm.id,
-    data: {
+  editSaving.value = true
+  let refused = false
+  try {
+    await props.saveHandler(editForm.id, {
       unitNumber: editForm.unitNumber,
       make: editForm.make,
       model: editForm.model,
@@ -780,9 +800,24 @@ function handleSaveEdit() {
       inServiceDate: editForm.inServiceDate || '',
       retired_at: editForm.retiredAt || '',
       retiredAt: editForm.retiredAt || '',
-    },
-  })
-  showEdit.value = false
+    })
+    // Only now. Closing before the server answered turned every refusal (a
+    // closed month, a unit number already in use, a photo it would not take)
+    // into a toast over a dialog whose edits were all gone.
+    showEdit.value = false
+  } catch (err) {
+    editError.value = err?.message || 'Failed to update truck.'
+    refused = true
+  } finally {
+    editSaving.value = false
+  }
+  // Disabling Save while it ran dropped keyboard focus to the page body, which
+  // sits outside this still-open dialog. Hand it back to Save, unless the
+  // person has already moved it somewhere themselves.
+  if (refused) {
+    await nextTick()
+    if (!document.activeElement || document.activeElement === document.body) editSaveBtn.value?.focus()
+  }
 }
 
 function ownerName(ownerId) {
@@ -897,8 +932,8 @@ async function handleLink() {
     })
     showLinkRm.value = false
     // Reload-only signal: the parent should refetch trucks so the row's
-    // RoutemateVehicleId flips to "Linked". Distinct from `update` (which
-    // sends a PUT to /api/trucks for actual field edits).
+    // RoutemateVehicleId flips to "Linked". Distinct from `saveHandler` (the
+    // PUT to /api/trucks behind the Edit dialog's field edits).
     emit('linkage-changed', { id: linkTruck.value.id })
   } catch (err) {
     linkError.value = err?.message || 'Failed to link Routemate vehicle.'
@@ -1029,6 +1064,9 @@ async function handleUnlink(truck) {
   border: 1px solid #fecaca; border-radius: 6px;
 }
 .edit-error + .confirm-actions { margin-top: 0.75rem; }
+/* Matches the global .btn-primary:disabled; Cancel is held while a save or a
+   Routemate link is in flight, and should look it. */
+.confirm-actions .btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .edit-row { display: flex; gap: 1rem; }
 .edit-row .edit-field { flex: 1; }
