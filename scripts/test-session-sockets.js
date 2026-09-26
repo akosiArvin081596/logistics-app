@@ -244,6 +244,8 @@ const CASCADE_SRC = [
 	liftFunction("function driverRenameSpellings(t, nameLower, opts = {}) {"),
 	// The drivers_directory leg finds its row through driverRenameDirectoryRowId().
 	liftFunction("function driverRenameDirectoryRowId(nameLower, opts = {}) {"),
+	// Which of a leg's rows the executor lists as moved from another spelling.
+	liftFunction("function driverRenameSameNameSql(t) {"),
 	liftFunction("function normalizeDriverName(s) {"),
 	liftFunction("function findDriverNameClashes(name, opts = {}) {"),
 	liftFunction("function driverNameHeldByOtherAccount(name, exceptUserIds = []) {"),

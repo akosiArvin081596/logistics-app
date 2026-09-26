@@ -21790,6 +21790,11 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		// in #212. Everything here is synchronous (bcrypt was hoisted above the
 		// guards), so one db.transaction() covers it.
 		const renamed = {};
+		// Rows the cascade moved from another spelling of the old name, by table,
+		// spelling and id (the executor's `spacingVariants`, the directory row
+		// included). Renaming the account back does not restore their spelling,
+		// so the audit line below is their only record.
+		const renamedVariants = {};
 		const doRename = driverName !== undefined
 			&& driverName !== (user.driver_name || "")
 			&& (user.driver_name || "").trim()
@@ -21800,7 +21805,7 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 					// THE SHARED CASCADE — the identical call
 					// PUT /api/admin/fix-driver-name makes. Scoped by userId so the two
 					// name-matched `users` legs can only touch THIS account.
-					const { counts } = applyDriverRenameSqlite({
+					const { counts, spacingVariants } = applyDriverRenameSqlite({
 						oldName: user.driver_name, newName: driverName, userId: id,
 						// The plan's own answer on taking other spellings, as
 						// PUT /api/admin/fix-driver-name hands it on, so the executor can
@@ -21808,6 +21813,7 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 						...(typeof lock.widens === "boolean" ? { widens: lock.widens } : {}),
 					});
 					Object.assign(renamed, counts);
+					Object.assign(renamedVariants, spacingVariants || {});
 				}
 				params.push(id);
 				db.prepare(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`).run(...params);
@@ -21890,8 +21896,11 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		}
 
 		const cascade = Object.entries(renamed).filter(([, n]) => n > 0).map(([t, n]) => `${t}=${n}`).join(", ");
+		const variantsMoved = Object.keys(renamedVariants).length ? JSON.stringify(renamedVariants) : "";
 		logAudit(req, "update_user", "user", id,
-			`${user.role} ${user.username}: ${diff.join("; ") || "no field change"}${cascade ? `; cascade: ${cascade}` : ""}${sessionsRevoked ? `; sessions revoked: ${sessionsRevoked}` : ""}`);
+			`${user.role} ${user.username}: ${diff.join("; ") || "no field change"}${cascade ? `; cascade: ${cascade}` : ""}` +
+			`${variantsMoved ? `; moved from another spelling, which renaming back does not restore (spacingVariants): ${variantsMoved}` : ""}` +
+			`${sessionsRevoked ? `; sessions revoked: ${sessionsRevoked}` : ""}`);
 
 		// The spared session of a self-edit that revoked the account's other
 		// sessions is rebuilt from the row now, under a new session ID (see
@@ -22785,6 +22794,21 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	try {
 		db.transaction(() => {
 			if (name) {
+				// ⚠️ THESE REMOVALS MATCH THE STORED SPELLING, CASE ASIDE, AND NOTHING
+				// WIDER. PUT /api/users/:id's blank-name guard (DRIVER_NAME_IN_USE)
+				// counts rows under another spelling of the name too (a doubled or
+				// edge space); these DELETEs do not, and for a removal that is the
+				// safe direction. userDeleteLockBlockers() judges the expense rows by
+				// this same match, so every expense removed here was judged, and the
+				// other tables carry no period. A row under another spelling is
+				// neither judged nor removed: it stays in every month it was counted
+				// in. Widening these would permanently delete receipts and documents
+				// under another spelling, and would need the expense check widened in
+				// step. The cost is that such rows stay behind under a spelling no
+				// account holds, and the counts this route reports do not include
+				// them. The truck is the one leg matched wider: it is cleared, not
+				// deleted (findTruckForDriverAccount()). See
+				// docs/claude/user-routes-guards.md.
 				removed.expenses = db.prepare("DELETE FROM expenses WHERE LOWER(driver) = ?").run(name).changes;
 				removed.messages = db.prepare(`DELETE FROM messages WHERE LOWER("from") = ? OR LOWER("to") = ?`).run(name, name).changes;
 				removed.notifications = db.prepare("DELETE FROM notifications WHERE LOWER(driver_name) = ?").run(name).changes;
@@ -26364,6 +26388,26 @@ function driverRenameDirectoryRowId(nameLower, opts = {}) {
 	if (row.matchedBy === "normalized" && !driverRenameWidens(nameLower, opts)) return null;
 	return row.id;
 }
+// The rows of one leg that ARE the old name, as opposed to another spelling of
+// it that the rename also moves: a SQL predicate bound to the old name,
+// lowercased, or null for a leg that matches the old name only. The plan counts
+// a leg's other rows as `variantRows` and the executor lists them, with the
+// spelling each had, as `spacingVariants`, so the two cannot disagree about
+// which rows a swap of the names would not restore.
+//   • A "ci" leg compares LOWER() alone, the comparison its match makes, so an
+//     edge space is another spelling too.
+//   • ⚠️ The "directory_row" leg compares LOWER(TRIM()), the key the directory's
+//     money reader uses: getInvestorDriverSet() leg 2 reads each row (through
+//     getCarrierDBFromSQLite()) trimmed and lowercased. Renaming a row stored as
+//     "Shorn  King" changes that key, so even a case-only rename can hand an
+//     investor the driver's loads in closed months. Counting the row is what
+//     stops fix-driver-name calling such a rename money-neutral. A row that
+//     differs only by edge spaces keeps its key.
+function driverRenameSameNameSql(t) {
+	if (t.match === "ci" || t.match === "ci_driver_role") return `LOWER("${t.column}") = ?`;
+	if (t.match === "directory_row") return `LOWER(TRIM("${t.column}")) = ?`;
+	return null;
+}
 function driverRenameNewValue(t, newName) {
 	return t.writes === "lower" ? newName.trim().toLowerCase() : newName.trim();
 }
@@ -26611,18 +26655,18 @@ function planDriverRenameSqlite(oldLower, opts = {}) {
 	const planOpts = { ...opts, widens };
 	for (const t of DRIVER_RENAME_TARGETS) {
 		const where = driverRenameWhereSql(t, planOpts);
-		const named = t.match === "ci" || t.match === "ci_driver_role";
+		// The rows that are the old name itself (driverRenameSameNameSql()); the
+		// rest of the leg's rows are other spellings of it that this rename moves.
+		const sameSql = driverRenameSameNameSql(t);
 		let args = [];
 		let total = 0;
 		let variantRows = 0;
 		try {
 			args = driverRenameWhereArgs(t, oldLower, planOpts);
-			// `ci` counts the rows LOWER() equality alone would have matched, so the
-			// rest are the other spellings this rename widens onto.
-			const counted = db.prepare(`SELECT COUNT(*) AS n${named ? `, COALESCE(SUM(LOWER("${t.column}") = ?), 0) AS ci` : ""} FROM "${t.table}" WHERE ${where}`)
-				.get(...(named ? [oldLower] : []), ...args);
+			const counted = db.prepare(`SELECT COUNT(*) AS n${sameSql ? `, COALESCE(SUM(${sameSql}), 0) AS same` : ""} FROM "${t.table}" WHERE ${where}`)
+				.get(...(sameSql ? [oldLower] : []), ...args);
 			total = counted.n;
-			if (named) variantRows = total - counted.ci;
+			if (sameSql) variantRows = total - counted.same;
 		}
 		catch (e) {
 			targets[t.key] = { rows: 0, error: e.message, money: !!t.money };
@@ -26644,9 +26688,11 @@ function planDriverRenameSqlite(oldLower, opts = {}) {
 		}
 		const entry = { rows: total, money: !!t.money, period: t.period };
 		if (t.why) entry.why = t.why;
-		// Rows stored under another spelling of the name — a doubled or edge
-		// space — that this rename moves too. Reported so a dry run shows them, and
-		// so fix-driver-name knows swapping the names back would not restore them.
+		// Rows stored under another spelling of the name — a doubled or edge space
+		// (the directory row's key ignores edge spaces) — that this rename moves
+		// too. Reported so a dry run shows them, so fix-driver-name knows swapping
+		// the names back would not restore them, and so it never calls a case-only
+		// rename that moves one on a money leg money-neutral.
 		if (variantRows > 0) entry.variantRows = variantRows;
 		if (total && t.money && t.period === "expense") {
 			const er = db.prepare(`SELECT id, date, posted_period, created_at, amount FROM "${t.table}" WHERE ${where}`).all(...args);
@@ -26895,10 +26941,13 @@ function replaceNameOnWordBoundary(text, oldName, newName) {
 
 // The executor. Every target plus the two dispatch_notifications substring legs,
 // in ONE transaction, so 21 independent seams commit or roll back together.
-// Returns per-target `changes` — and, when `collectIds`, the ids it moved, which
-// are the only reversal recipe a merge has, and `spacingVariants`: per target,
-// the ids of rows moved from another spelling of the old name, keyed by that
-// spelling, which swapping the names back would not restore.
+// Returns per-target `changes`, and `spacingVariants`: per target, the ids of
+// rows moved from another spelling of the old name, keyed by that spelling,
+// which swapping the names back would not restore. Those are the rows the plan
+// counts as `variantRows` (driverRenameSameNameSql()), the directory row
+// included, and they are listed on every rename so both routes' audit lines can
+// name them. With `collectIds` it also returns the ids it moved, which are the
+// only reversal recipe a merge has.
 // `widens` is the plan's driverRenameWidens() answer: fix-driver-name passes it
 // so a change during its sheet write (its last await) cannot widen the rename
 // past the rows the plan judged. Without it the executor asks once itself.
@@ -26933,17 +26982,23 @@ function applyDriverRenameSqlite({ oldName, newName, userId = null, collectIds =
 		}
 		for (const { t, spellings, where, args } of legs) {
 			try {
+				// The leg's rows that are not the old name itself, by the spelling each
+				// had. A "ci" leg has them only when it has `spellings`; the directory
+				// row is one row, by id.
+				const sameSql = driverRenameSameNameSql(t);
+				if (sameSql && (spellings.length || t.match === "directory_row")) {
+					try {
+						const byWas = {};
+						for (const r of db.prepare(`SELECT id, "${t.column}" AS was FROM "${t.table}" WHERE (${where}) AND NOT (${sameSql})`)
+							.all(...args, oldLower)) (byWas[r.was] = byWas[r.was] || []).push(r.id);
+						for (const was of Object.keys(byWas)) byWas[was] = cap(byWas[was]);
+						if (Object.keys(byWas).length) spacingVariants[t.key] = byWas;
+					} catch { /* table has no `id` column — the count still records the leg */ }
+				}
 				if (collectIds) {
 					try {
 						const ids = db.prepare(`SELECT id FROM "${t.table}" WHERE ${where}`).all(...args).map((r) => r.id);
 						if (ids.length) changedIds[t.key] = cap(ids);
-						if (spellings.length) {
-							const byWas = {};
-							for (const r of db.prepare(`SELECT id, "${t.column}" AS was FROM "${t.table}" WHERE (${where}) AND "${t.column}" IN (SELECT value FROM json_each(?))`)
-								.all(...args, JSON.stringify(spellings))) (byWas[r.was] = byWas[r.was] || []).push(r.id);
-							for (const was of Object.keys(byWas)) byWas[was] = cap(byWas[was]);
-							if (Object.keys(byWas).length) spacingVariants[t.key] = byWas;
-						}
 					} catch { /* table has no `id` column — the count still records the leg */ }
 				}
 				counts[t.key] = db.prepare(`UPDATE "${t.table}" SET "${t.column}" = ? WHERE ${where}`)
@@ -27102,8 +27157,11 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		// Rows this rename moves from another spelling of the old name, sheet and
 		// SQLite. Any on the sheet or a money target and the rename is not
 		// money-neutral, even case-only: those rows change spelling, and the
-		// readers named beside `caseOnly` above do not fold spacing. One on a
-		// cosmetic target (a notification, a message) moves no figure.
+		// readers named beside `caseOnly` above do not fold spacing. That includes
+		// the driver's directory row stored as "Shorn  King", which
+		// getInvestorDriverSet() reads by a key the rename changes
+		// (driverRenameSameNameSql()). One on a cosmetic target (a notification, a
+		// message) moves no figure.
 		const variantRowsOn = (moneyOnly) => Object.values(sqlPlan.targets || {})
 			.reduce((s, e) => s + (e && e.variantRows && (!moneyOnly || e.money) ? e.variantRows : 0), 0);
 		const spacingVariantRows = sheetVariants.length + variantRowsOn(false);
@@ -27339,10 +27397,11 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		// The SHARED executor — one transaction across every target, the same call
 		// PUT /api/users/:id makes. `collectIds` is only worth paying for on a
 		// MERGE, where the ids ARE the reversal recipe (the name alone no longer
-		// identifies which rows moved), and when rows move from another spelling
-		// of the old name, whose original spelling only their ids can restore. A
-		// pure rename needs none: every row under the new name came from the old
-		// one, so swapping the arguments undoes it.
+		// identifies which rows moved). A pure rename needs none: every row under
+		// the new name came from the old one, so swapping the arguments undoes it —
+		// except the rows moved from another spelling of the old name, whose
+		// original spelling only their ids can restore. The executor lists those on
+		// every rename (`spacingVariants`).
 		// `widens` holds the executor to the plan's answer on the other spellings,
 		// whatever changed during the sheet write above.
 		let sqlFixes = {};
@@ -27360,7 +27419,7 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		try {
 			renamedAccountIds = driverRenameAccountIds(oldTrim, newTrim, { widens: sqlPlan.widens });
 			({ counts: sqlFixes, changedIds, spacingVariants } = applyDriverRenameSqlite({
-				oldName: oldTrim, newName: newTrim, collectIds: isMerge || spacingVariantRows > 0, widens: sqlPlan.widens,
+				oldName: oldTrim, newName: newTrim, collectIds: isMerge, widens: sqlPlan.widens,
 			}));
 		} catch (e) {
 			// Transaction rolled back: SQLite is untouched, the sheet is not.
@@ -27404,7 +27463,7 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		const reversal = isMerge
 			? `MERGE — do NOT re-run with the names swapped (that would also rename ${newTrim}'s pre-existing rows). Reverse by id: for each key in changedIds, UPDATE <table> SET <column> = '${oldTrim}' WHERE id IN (...). Sheet: set the listed sheetRanges back to "${oldTrim}".${spacingVariantRecipe ? " Then restore each row in spacingVariants to the spelling it is listed under." : ""}`
 			: spacingVariantRecipe
-				? `PUT /api/admin/fix-driver-name {"oldName":"${newTrim}","newName":"${oldTrim}"} puts every row back under "${oldTrim}", but ${spacingVariantRows} of them were stored under another spelling of it: restore each row in spacingVariants (by id, and by sheet range) to the spelling it is listed under.`
+				? `PUT /api/admin/fix-driver-name {"oldName":"${newTrim}","newName":"${oldTrim}"} puts every row back under "${oldTrim}", but ${spacingVariantRows} of them ${spacingVariantRows === 1 ? "was" : "were"} stored under another spelling of it: restore each row in spacingVariants (by id, and by sheet range) to the spelling it is listed under.`
 				: `PUT /api/admin/fix-driver-name {"oldName":"${newTrim}","newName":"${oldTrim}"} — an exact undo, because every row now under "${newTrim}" came from "${oldTrim}".`;
 		logAudit(req, "fix_driver_name", "driver", oldTrim, JSON.stringify({
 			oldName: oldTrim, newName: newTrim, caseOnly, moneyNeutral, isMerge,
