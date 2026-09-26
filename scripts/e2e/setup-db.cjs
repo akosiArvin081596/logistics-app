@@ -15,7 +15,8 @@
 //    onboarded (so the Kit tab renders) and whose application has an IMAGE
 //    cdl_front, and gives that user a random password on the COPY
 //    (must_change_password = 0).
-// 4. Gives the lowest-id Investor a random password the same way (on the COPY).
+// 4. Gives the lowest-id Investor, and the next-lowest-id one ("investor2", for
+//    the maintenance notice section), a random password the same way (on the COPY).
 // 5. Gives the lowest-id Dispatcher a random password the same way (on the COPY);
 //    the E2E's sign-out section (ONLY=signout) signs in as them.
 // 6. Writes the logins to CREDS_FILE (chmod 600). Passwords are never printed.
@@ -138,32 +139,41 @@ try {
 	const r = db.prepare("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ? AND role = 'Driver'").run(hash, pick.user_id);
 	if (r.changes !== 1) throw new Error(`expected to update 1 driver row, got ${r.changes}`);
 
-	// ---- 5. investor login (on the COPY) ----
-	// The Investor with the lowest id. Same treatment as the driver: a bcryptjs
-	// hash of a random password and must_change_password = 0, on the copy only.
-	// No Investor at all → creds.investor is omitted and the E2E's R8 SKIPs.
-	const inv = db.prepare("SELECT id, username FROM users WHERE role = 'Investor' ORDER BY id LIMIT 1").get();
+	// ---- 5. investor logins (on the COPY) ----
+	// The Investor with the lowest id, and the next-lowest one (the maintenance
+	// notice section, M1, needs two people taking turns in one tab). Same
+	// treatment as the driver: a bcryptjs hash of a random password and
+	// must_change_password = 0, on the copy only. No Investor at all →
+	// creds.investor is omitted and the E2E's R8 SKIPs; fewer than two →
+	// creds.investor2 is omitted and M1 SKIPs.
+	const invRows = db.prepare("SELECT id, username FROM users WHERE role = 'Investor' ORDER BY id LIMIT 2").all();
+	const investorLogin = (row, key) => {
+		const pw = (previous?.[key]?.userId === row.id && previous?.[key]?.password) || randomPassword();
+		const h = bcrypt.hashSync(pw, 10);
+		if (!bcrypt.compareSync(pw, h)) throw new Error(`bcrypt self-check failed (${key})`);
+		const ri = db.prepare("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ? AND role = 'Investor'").run(h, row.id);
+		if (ri.changes !== 1) throw new Error(`expected to update 1 investor row (${key}), got ${ri.changes}`);
+		return { username: row.username, password: pw, userId: row.id };
+	};
 	let investor = null;
-	if (!inv) {
-		console.log("investor: no user with role 'Investor' — creds.investor omitted (R8 will SKIP)");
+	let investor2 = null;
+	if (!invRows.length) {
+		console.log("investor: no user with role 'Investor' — creds.investor omitted (R8 and M1 will SKIP)");
 	} else {
-		const invPassword = (previous?.investor?.userId === inv.id && previous?.investor?.password) || randomPassword();
-		const invHash = bcrypt.hashSync(invPassword, 10);
-		if (!bcrypt.compareSync(invPassword, invHash)) throw new Error("bcrypt self-check failed (investor)");
-		const ri = db.prepare("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ? AND role = 'Investor'").run(invHash, inv.id);
-		if (ri.changes !== 1) throw new Error(`expected to update 1 investor row, got ${ri.changes}`);
-		investor = { username: inv.username, password: invPassword, userId: inv.id };
+		investor = investorLogin(invRows[0], "investor");
+		if (invRows[1]) investor2 = investorLogin(invRows[1], "investor2");
+		else console.log("investor2: only one user with role 'Investor' — creds.investor2 omitted (M1 will SKIP)");
 	}
 
 	// ---- 6. dispatcher login (on the COPY) ----
 	// The Dispatcher with the lowest id, treated exactly like the Investor: a
 	// bcryptjs hash of a random password and must_change_password = 0, on the copy
 	// only. No Dispatcher → creds.dispatcher is omitted and the sign-out section's
-	// Dispatcher steps (S2a, S3) SKIP.
+	// Dispatcher steps (S2a, S3, S5b, S7, D1-D3) SKIP.
 	const disp = db.prepare("SELECT id, username FROM users WHERE role = 'Dispatcher' ORDER BY id LIMIT 1").get();
 	let dispatcher = null;
 	if (!disp) {
-		console.log("dispatcher: no user with role 'Dispatcher' — creds.dispatcher omitted (S2a and S3 will SKIP)");
+		console.log("dispatcher: no user with role 'Dispatcher' — creds.dispatcher omitted (S2a, S3, S5b, S7 and D1-D3 will SKIP)");
 	} else {
 		const dispPassword = (previous?.dispatcher?.userId === disp.id && previous?.dispatcher?.password) || randomPassword();
 		const dispHash = bcrypt.hashSync(dispPassword, 10);
@@ -186,12 +196,14 @@ try {
 			applicationId: pick.application_id,
 		},
 		...(investor ? { investor } : {}),
+		...(investor2 ? { investor2 } : {}),
 		...(dispatcher ? { dispatcher } : {}),
 	};
 	fs.writeFileSync(CREDS_FILE, JSON.stringify(creds, null, 2) + "\n", { mode: 0o600 });
 	fs.chmodSync(CREDS_FILE, 0o600);
 	console.log(`driver chosen: user id ${pick.user_id}, truck id ${pick.truck_id}, application id ${pick.application_id}`);
 	if (investor) console.log(`investor chosen: user id ${investor.userId} (lowest-id Investor)`);
+	if (investor2) console.log(`investor2 chosen: user id ${investor2.userId} (next-lowest-id Investor)`);
 	if (dispatcher) console.log(`dispatcher chosen: user id ${dispatcher.userId} (lowest-id Dispatcher)`);
 	console.log(`creds written (0600): ${CREDS_FILE}`);
 })().catch((err) => {

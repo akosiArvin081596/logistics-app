@@ -28,7 +28,7 @@ A Playwright (`playwright-core`) harness that drives the real UI in Chrome for T
 
 - **It is NOT part of `npm run ci`.** It is its own npm package: the root `npm install`, CI and the deploy never install it, and `run-unit-tests.js` only runs the top-level `scripts/{test,check}-*` files. Install it with `npm --prefix scripts/e2e ci`. The browser is the Chrome for Testing that the app's `puppeteer` already downloaded (`CHROME_PATH` overrides).
 - **Local recipe** (Node 22.23.2; in a worktree, prefix each command with `fnm exec --using=22.23.2`):
-  1. `setup-db.cjs <work dir>/qa.db` takes a read-only `.backup()` of the main checkout's `app.db` and sets four logins on the copy.
+  1. `setup-db.cjs <work dir>/qa.db` takes a read-only `.backup()` of the main checkout's `app.db` and sets five logins on the copy.
   2. `verify-creds.cjs` checks those logins against the copy.
   3. `prep-worktree.sh` links the main checkout's installs, `.env` and key, and builds `client/dist`.
   4. `boot-server.sh <worktree> <port> <db>` starts the server on the copy.
@@ -40,4 +40,4 @@ A Playwright (`playwright-core`) harness that drives the real UI in Chrome for T
   - The server binds 127.0.0.1 and refuses ports 3000/5173 and busy ports. It runs with every integration and default-ON alert forced off and every outbound credential blanked. It refuses a `SPREADSHEET_ID` that is unset, empty or production's, and it is stopped by its recorded PID, never `pkill`.
   - ⚠️ **The DB copies are unsanitized production data.** They, the logins, the screenshots, the results and the logs live in the work dir: `E2E_WORK_DIR`, default `$TMPDIR/logisx-e2e`, created 0700, and refused inside a checkout.
   - Identity documents are masked in saved screenshots.
-- **The login limiter** allows 20 sign-ins per 15 minutes per server process. A full run uses 11, so restart the server between full runs.
+- **The login limiter** allows 20 sign-ins per 15 minutes per server process. All four sections together need more than that, so a full run is split with `ONLY` and the server is restarted between the parts (the README's recipe); the maintenance-notice section also needs a server booted with the notice on.
