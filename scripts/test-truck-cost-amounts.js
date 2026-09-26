@@ -1202,6 +1202,7 @@ const UNSAFE_RE = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u
 const INVALID_UNIT = (error) => ({ error, code: "INVALID_UNIT_NUMBER", field: "unitNumber" });
 const UNIT_CHARS_ERROR = "Unit number cannot contain control, formatting or line-break characters.";
 const UNIT_MAX_ERROR = "Unit number must be at most 50 characters.";
+const UNIT_FORMULA_ERROR = "Unit number cannot start with =, +, - or @.";
 // U+2028 and U+2029, which render as line breaks: refused in a unit number, and
 // collapsed to a space by auditText() as newlines and tabs are.
 const LINE_SEPARATORS = [String.fromCharCode(0x2028), String.fromCharCode(0x2029)];
@@ -1229,6 +1230,17 @@ async function unitNumberSection() {
 	}
 	for (const raw of ["LogisX-#23", "Unit 5", "Ünité-7", "LX¡", "LX⁰"]) {
 		ok(same(pu(raw), { value: raw }), `§7 ${JSON.stringify(raw)} is a unit number`);
+	}
+	// Dispatch copies the unit number into Job Tracking's Truck column, written
+	// as a person typing into the sheet would, where these begin a formula.
+	for (const raw of ["=1+1", "+A1", "-5", "@x", "  =SUM(A1:A2)"]) {
+		for (const required of [false, true]) {
+			ok(same(pu(raw, { required }), { refusal: INVALID_UNIT(UNIT_FORMULA_ERROR) }),
+				`§7 ${JSON.stringify(raw)}${required ? " (POST)" : " (PUT)"}: "${UNIT_FORMULA_ERROR}" (got ${JSON.stringify(pu(raw, { required }))})`);
+		}
+	}
+	for (const raw of ["A=B", "LX+1", "Unit-5", "T@1"]) {
+		ok(same(pu(raw), { value: raw }), `§7 ${JSON.stringify(raw)}: the same characters after the first are a unit number`);
 	}
 	for (const c of UNSAFE_UNIT_CHARS) {
 		ok(same(pu(`Logis${c}X-#23`), { refusal: INVALID_UNIT(UNIT_CHARS_ERROR) }), `§7 ${codePoint(c)} inside: refused`);
@@ -1267,6 +1279,7 @@ async function unitNumberSection() {
 		["no unit number", { unitNumber: undefined }, INVALID_UNIT("Unit number is required")],
 		["a blank unit number", { unitNumber: "  " }, INVALID_UNIT("Unit number is required")],
 		["a unit number of 51 characters", { unitNumber: "X".repeat(51) }, INVALID_UNIT(UNIT_MAX_ERROR)],
+		["a unit number starting with =", { unitNumber: "=1+1" }, INVALID_UNIT(UNIT_FORMULA_ERROR)],
 	]) {
 		const db = makeDb();
 		const app = mountAll(db);
@@ -1285,6 +1298,7 @@ async function unitNumberSection() {
 		['""', "", INVALID_UNIT("Unit number is required")],
 		['"   "', "   ", INVALID_UNIT("Unit number is required")],
 		["a unit number of 51 characters", "X".repeat(51), INVALID_UNIT(UNIT_MAX_ERROR)],
+		["a rename starting with =", "=1+1", INVALID_UNIT(UNIT_FORMULA_ERROR)],
 	]) {
 		const db = makeDb();
 		const app = mountAll(db);
@@ -1586,6 +1600,7 @@ const MUTANTS = [
 	["M19 the unit-number class back to the old hand list", [["module", `if (${UNIT_CLASS}u.test(raw)) {`, `if (${UNSAFE_CLASS}.test(raw)) {`]]],
 	["M22 auditText()'s class back to the old hand list", [["module", `.replace(${UNIT_CLASS}gu, "")`, `.replace(${UNSAFE_CLASS}g, "")`]]],
 	["M20 the unit number's 50-character cap dropped", [["module", "if (value.length > MAX_LENGTH) return refuse(", "if (false) return refuse("]]],
+	["M24 a unit number starting with a formula character allowed", [["module", "if (/^[=+@-]/.test(value)) return refuse(", "if (false) return refuse("]]],
 	["M21 auditText() leaving U+2028 and U+2029 in place", [["module", String.raw`s.replace(/[\r\n\t\u2028\u2029]+/g, " ")`, String.raw`s.replace(/[\r\n\t]+/g, " ")`]]],
 	["M12 the unit-number check back above the active-load wait", [
 		["put", PUT_CLASH, ""],

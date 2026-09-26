@@ -23281,7 +23281,11 @@ function parseTruckAmounts(body, fields) {
 // (format: the text-direction marks and isolates, zero-width characters,
 // U+061C, U+2060–U+2064, U+FEFF and the rest), Zl or Zp (U+2028, U+2029), or
 // is longer than 50 characters once trimmed (the longest on the production
-// mirror is 12). Not sent to the PUT (not `required`) is { value: undefined },
+// mirror is 12), or starts with =, +, - or @ once trimmed: dispatch copies a
+// truck's unit number into Job Tracking's Truck column, which is written as a
+// person typing into the sheet would write it, and there those characters
+// begin a formula (none of the production mirror's unit numbers starts with
+// one). Not sent to the PUT (not `required`) is { value: undefined },
 // and the column is left alone. A unit number is one line of plain text: it is
 // shown in every fleet list, sorted, and written into audit lines, where any of
 // those characters changes how the text around it reads without being visible.
@@ -23300,6 +23304,7 @@ function parseUnitNumber(raw, { required = false } = {}) {
 	const value = raw.trim();
 	if (!value) return refuse("Unit number is required");
 	if (value.length > MAX_LENGTH) return refuse(`Unit number must be at most ${MAX_LENGTH} characters.`);
+	if (/^[=+@-]/.test(value)) return refuse("Unit number cannot start with =, +, - or @.");
 	return { value };
 }
 
