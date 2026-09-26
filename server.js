@@ -24583,6 +24583,15 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		if (assignedDriver !== undefined && assignedDriver !== null && typeof assignedDriver !== "string") {
 			return res.status(400).json({ error: "assignedDriver must be a string, or null for no driver.", code: "INVALID_DRIVER_NAME" });
 		}
+		// A photo sent by a role whose photo is stored (an Investor's is ignored)
+		// must be an image GET /api/driver/me/truck-photo can serve: 415
+		// UNSUPPORTED_IMAGE_TYPE or 413 IMAGE_TOO_LARGE otherwise, with
+		// field "photo" (truckPhotoRefusal()). Before anything is read or written.
+		if ((req.session.user.role === "Super Admin" || req.session.user.role === "Dispatcher") &&
+			photo !== undefined && photo !== null && photo !== "") {
+			const photoRefusal = truckPhotoRefusal(photo);
+			if (photoRefusal) return res.status(photoRefusal.status).json({ ...photoRefusal.body, field: "photo" });
+		}
 		// Fuel config accepts snake_case (frontend sends fuel_tank_gallons/avg_mpg)
 		// or camelCase, so either caller convention persists correctly.
 		const fuelTankGallons = req.body.fuel_tank_gallons ?? req.body.fuelTankGallons;
@@ -24801,6 +24810,17 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		// written, as on POST /api/trucks. `null` unassigns, like "".
 		if (assignedDriver !== undefined && assignedDriver !== null && typeof assignedDriver !== "string") {
 			return res.status(400).json({ error: "assignedDriver must be a string, or null for no driver.", code: "INVALID_DRIVER_NAME" });
+		}
+		// A photo that CHANGES must be an image GET /api/driver/me/truck-photo can
+		// serve: 415 UNSUPPORTED_IMAGE_TYPE or 413 IMAGE_TOO_LARGE otherwise, with
+		// field "photo" (truckPhotoRefusal()). Keyed on the change, never on
+		// presence: the Edit form resends the stored photo on every save, so a photo
+		// stored before this check never blocks an unrelated edit. null and "" clear
+		// it; anything else that is not a string is refused. Before any write and
+		// the month-end lock.
+		if (photo !== undefined && photo !== null && photo !== "" && photo !== (truck.photo || "")) {
+			const photoRefusal = truckPhotoRefusal(photo);
+			if (photoRefusal) return res.status(photoRefusal.status).json({ ...photoRefusal.body, field: "photo" });
 		}
 		// The driver this edit assigns, resolved to the spelling that driver already
 		// has (canonicalDriverName()): a name that differs only in case or spacing
@@ -32609,6 +32629,44 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 	}
 });
 
+// A file stored as a base64 data URI (a truck photo, a driver's identity file),
+// as the two routes below serve it: { contentType, body }, or null when there is
+// nothing servable. The media type written into the URI is never read — the
+// bytes decide it (imageLimits.servedType(): JPEG, PNG or WebP, and a PDF only
+// when `pdf` is set), so what a route sends is what the bytes are, under
+// X-Content-Type-Options: nosniff. Parsed without a pattern over the payload:
+// the value opens "data:", the text before its FIRST comma ends ";base64", and
+// the rest is decoded. Empty, malformed or any other content → null (a 404).
+function storedFileForServing(dataUri, { pdf = false } = {}) {
+	if (typeof dataUri !== "string" || !dataUri.startsWith("data:")) return null;
+	const comma = dataUri.indexOf(",");
+	if (comma < 0 || !dataUri.slice(0, comma).endsWith(";base64")) return null;
+	const body = Buffer.from(dataUri.slice(comma + 1), "base64");
+	const contentType = imageLimits.servedType(body, { pdf });
+	return contentType ? { contentType, body } : null;
+}
+
+// Why a truck photo sent to POST /api/trucks or PUT /api/trucks/:id may not be
+// stored: null when it may (undefined, null and "" are "not sent" or a clear),
+// else { status, body } with body { error, code } — 415 UNSUPPORTED_IMAGE_TYPE
+// or 413 IMAGE_TOO_LARGE. It must be a base64 data URI that
+// storedFileForServing() would serve, and its bytes must pass checkImage()
+// under LIMITS.TRUCK_PHOTO, so a photo stored here is one the driver's
+// truck-photo route can show. The length is checked before anything is decoded.
+function truckPhotoRefusal(value) {
+	if (value === undefined || value === null || value === "") return null;
+	const refusal = (verdict) => ({ status: verdict.status, body: imageLimits.refusalBody(verdict, "truckPhoto") });
+	const unreadable = { ok: false, status: 415, code: imageLimits.UNSUPPORTED_IMAGE_TYPE };
+	if (typeof value !== "string") return refusal(unreadable);
+	if (value.length > imageLimits.TRUCK_PHOTO_DATA_URI_MAX_LENGTH) {
+		return refusal({ ok: false, status: 413, code: imageLimits.IMAGE_TOO_LARGE });
+	}
+	const file = storedFileForServing(value);
+	if (!file) return refusal(unreadable);
+	const verdict = imageLimits.checkImage(file.body, imageLimits.LIMITS.TRUCK_PHOTO);
+	return verdict.ok ? null : refusal(verdict);
+}
+
 // GET /api/driver/me/identity-file/:fileType — Stream the requesting driver's
 // own CDL Front / CDL Back / Medical Card. Companion to the application_*_type
 // metadata in /api/driver/:driverName: the main endpoint advertises which
@@ -32617,6 +32675,8 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 // opens the Kit tab. Super Admin can also call this against their own session
 // (debug); admins/dispatchers fetching ON BEHALF of a driver continue to use
 // /api/trucks/:id/driver-files, which already supports that flow.
+// Served as what the bytes are — a JPEG, PNG, WebP or PDF — and 404 otherwise
+// (storedFileForServing()).
 app.get("/api/driver/me/identity-file/:fileType", requireAuth, (req, res) => {
 	try {
 		const user = req.session.user;
@@ -32628,24 +32688,21 @@ app.get("/api/driver/me/identity-file/:fileType", requireAuth, (req, res) => {
 			"cdl-back": "cdl_back",
 			"medical-card": "medical_card",
 		};
-		const col = colMap[req.params.fileType];
+		// One of the three names above, and nothing else: any other is a 400.
+		const col = Object.prototype.hasOwnProperty.call(colMap, req.params.fileType) ? colMap[req.params.fileType] : null;
 		if (!col) return res.status(400).json({ error: "Invalid file type" });
 		const onboarding = db.prepare(
 			"SELECT application_id FROM driver_onboarding WHERE user_id = ?"
 		).get(user.id);
 		if (!onboarding?.application_id) return res.status(404).json({ error: "Not found" });
 		const row = db.prepare(`SELECT ${col} AS data FROM job_applications WHERE id = ?`).get(onboarding.application_id);
-		const data = row?.data;
-		if (!data) return res.status(404).json({ error: "Not found" });
-		const match = /^data:([^;]+);base64,(.+)$/.exec(data);
-		if (!match) return res.status(500).json({ error: "Invalid file format" });
-		const [, contentType, b64] = match;
-		const buf = Buffer.from(b64, "base64");
-		res.setHeader("Content-Type", contentType);
+		const file = storedFileForServing(row?.data, { pdf: true });
+		if (!file) return res.status(404).json({ error: "Not found" });
+		res.setHeader("Content-Type", file.contentType);
 		// Private cache — drivers won't refetch the same image every page open.
 		res.setHeader("Cache-Control", "private, max-age=3600");
 		res.setHeader("X-Content-Type-Options", "nosniff");
-		res.end(buf);
+		res.end(file.body);
 	} catch (err) {
 		console.error("identity-file error:", err.message);
 		res.status(500).json({ error: err.message });
@@ -32655,7 +32712,8 @@ app.get("/api/driver/me/identity-file/:fileType", requireAuth, (req, res) => {
 // GET /api/driver/me/truck-photo — Stream the photo of the truck currently
 // assigned to the requesting driver. Paired with truck.has_photo in
 // /api/driver/:driverName, this lets LoadDetail render the truck image only
-// when the Truck Details accordion is expanded.
+// when the Truck Details accordion is expanded. Served as what the bytes are —
+// a JPEG, PNG or WebP — and 404 otherwise (storedFileForServing()).
 app.get("/api/driver/me/truck-photo", requireAuth, (req, res) => {
 	try {
 		const user = req.session.user;
@@ -32665,16 +32723,12 @@ app.get("/api/driver/me/truck-photo", requireAuth, (req, res) => {
 		const driverName = (user.driverName || user.driver_name || "").trim().toLowerCase();
 		if (!driverName) return res.status(404).json({ error: "Not found" });
 		const row = db.prepare("SELECT photo FROM trucks WHERE LOWER(assigned_driver) = ?").get(driverName);
-		const data = row?.photo;
-		if (!data) return res.status(404).json({ error: "Not found" });
-		const match = /^data:([^;]+);base64,(.+)$/.exec(data);
-		if (!match) return res.status(500).json({ error: "Invalid file format" });
-		const [, contentType, b64] = match;
-		const buf = Buffer.from(b64, "base64");
-		res.setHeader("Content-Type", contentType);
+		const file = storedFileForServing(row?.photo);
+		if (!file) return res.status(404).json({ error: "Not found" });
+		res.setHeader("Content-Type", file.contentType);
 		res.setHeader("Cache-Control", "private, max-age=3600");
 		res.setHeader("X-Content-Type-Options", "nosniff");
-		res.end(buf);
+		res.end(file.body);
 	} catch (err) {
 		console.error("truck-photo error:", err.message);
 		res.status(500).json({ error: err.message });

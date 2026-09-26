@@ -154,6 +154,11 @@ const CONSTS = [
 	liftConst("const UNCOALESCED_REFUSAL_CODES = new Set([", "\n]);"),
 ].join("\n");
 const ROUTE_POST = liftRoute('app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), async (req, res) => {');
+// The photo check the route runs for a Super Admin or a Dispatcher, verbatim
+// (its own subject is scripts/test-stored-file-serving.js).
+const PHOTO_CHECK = new Function("imageLimits",
+	`"use strict";\n${liftFunction("storedFileForServing")}\n${liftFunction("truckPhotoRefusal")}\nreturn { storedFileForServing, truckPhotoRefusal };`
+)(require("../lib/image-size"));
 
 const TODAY = "2026-09-25";
 function buildModule(db) {
@@ -560,6 +565,7 @@ function mountPost(db, { jt = makeJt(), jtFails = false, duringRead = null } = {
 	const env = {
 		app: { post: grab }, requireRole: () => (req, res, next) => next(),
 		...m, db,
+		...PHOTO_CHECK,
 		truckCreateLockBlockers: (truck, history) => { calls.guard.push({ ...truck }); return m.truckCreateLockBlockers(truck, history); },
 		checkDriverActiveLoad: async () => { calls.activeLoad++; await tick(); return null; },
 		getJobTrackingCached: async () => {
@@ -698,7 +704,8 @@ async function routeSection() {
 	// ── (h) the Add form's costs, admin fee and photo ──
 	const fiveOf = (o) => o && [o.insurance_monthly, o.eld_monthly, o.truck_payment_monthly, o.hvut_annual, o.irp_annual];
 	const storedOf = (t) => t && [...fiveOf(t), t.admin_fee_pct, t.photo];
-	const PHOTO = "data:image/jpeg;base64,/9j/4AAQSkZJRg==";
+	// A 4 × 3 JPEG header: the least checkImage() reads as a JPEG.
+	const PHOTO = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/wAARCAADAAQDAAAAAAAAAAAA/9k=";
 	const FULL = { insuranceMonthly: 1630, eldMonthly: "50", truckPaymentMonthly: 1200, hvutAnnual: 580, irpAnnual: "1380", adminFeePct: 40, photo: PHOTO };
 	for (const [label, who, over] of [["a Super Admin", SUPER, {}], ["a Dispatcher", DISPATCHER, { driverPayDaily: 0 }]]) {
 		const db = makeDb();
@@ -784,9 +791,11 @@ async function routeSection() {
 	{
 		const db = makeDb();
 		const { post } = mountPost(db);
+		const before = snapshot(db);
 		const r = await post(SUPER, addForm({ photo: { src: PHOTO } }));
-		const t = truckByUnit(db, "LogisX-#23");
-		ok(r.status === 200 && !!t && t.photo === "", `§4 (h) a photo that is not text: created with no photo (got ${r.status}, ${JSON.stringify(t && t.photo)})`);
+		const b = r.body || {};
+		ok(r.status === 415 && b.code === "UNSUPPORTED_IMAGE_TYPE" && b.field === "photo" && snapshot(db) === before,
+			`§4 (h) a photo that is not text: 415 UNSUPPORTED_IMAGE_TYPE on field "photo", nothing written (got ${r.status} ${JSON.stringify(b)})`);
 	}
 }
 
