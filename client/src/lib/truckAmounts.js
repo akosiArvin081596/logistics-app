@@ -37,6 +37,11 @@ export const AMOUNT_FIELDS = Object.freeze(
 
 const FIELD_BY_KEY = new Map(AMOUNT_FIELDS.map((field) => [field.key, field]))
 
+// Each amount's ceiling by key, for the number boxes' `max` attribute in both
+// forms (`:max="AMOUNT_CAPS.fuelTankGallons"`), so the browser's range hint and
+// amountError below read the same number.
+export const AMOUNT_CAPS = Object.freeze(Object.fromEntries(AMOUNT_FIELDS.map((field) => [field.key, field.max])))
+
 // null when every amount in `values` is blank or a finite number in range;
 // otherwise one sentence naming the first field that is not.
 //
