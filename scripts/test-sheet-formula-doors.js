@@ -374,6 +374,9 @@ function mountDispatch(routeSrc, { account = null } = {}) {
 				: /FROM trucks|truck_assignments/.test(sql) ? { unit_number: "LogisX-#91", owner_id: 5 } : undefined),
 			run: () => ({ changes: 0 }),
 		}) },
+		// The Truck / Owner ID lookup (its own subject is
+		// scripts/test-truck-stamp-spacing.js): the driver's truck, as before.
+		findTruckForDriverStamp: () => ({ unit_number: "LogisX-#91", owner_id: 5, matchedBy: "case" }),
 		getSheets: sheet.getSheets,
 		readJobTrackingSnapshot,
 		sendDispatchRefusal: (req, res, blocked) => res.status(409).json({ code: blocked.code }),

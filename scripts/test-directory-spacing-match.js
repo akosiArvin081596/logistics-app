@@ -100,7 +100,7 @@ function mutate(src, from, to) {
 // The rename cascade too (§6): its drivers_directory leg finds its row through
 // driverRenameDirectoryRowId(). Tables this runner does not create are the
 // executor's "no such table" legs, which it skips.
-const FUNCTIONS = ["normalizeDriverName", "findDriverNameClashes", "findDriverNameClash", "driverNameHeldByOtherAccount", "canonicalDriverName",
+const FUNCTIONS = ["normalizeDriverName", "findDriverNameClashes", "findDriverNameClash", "driverNameHeldByOtherAccount", "driverNameHeldByOtherSpelling", "canonicalDriverName",
 	"findDirectoryRowForDriver", "findTruckForDriver", "syncDriverToCarrierSheet", "assignDriverToTruck",
 	"driverRenameWhereSql", "driverRenameWhereArgs", "driverRenameDirectoryRowId", "driverRenameNewValue",
 	"replaceNameOnWordBoundary", "applyDriverRenameSqlite"];
@@ -147,7 +147,7 @@ const DDL = [
 		pay_type TEXT DEFAULT 'fixed', pay_percentage REAL DEFAULT 0, pay_daily REAL DEFAULT 0)`,
 	`CREATE TABLE trucks (
 		id INTEGER PRIMARY KEY AUTOINCREMENT, unit_number TEXT NOT NULL UNIQUE, status TEXT DEFAULT 'Active',
-		assigned_driver TEXT DEFAULT '', owner_id INTEGER DEFAULT 0)`,
+		assigned_driver TEXT DEFAULT '', owner_id INTEGER DEFAULT 0, routemate_vehicle_id TEXT DEFAULT '')`,
 ];
 // `directory`: [[id, driver_name, trucks]]; `trucks`: [[id, unit, assigned_driver]];
 // `accounts`: driver names that hold a Driver account.
@@ -436,7 +436,7 @@ section("§5 the mutant — it must be caught");
 	// page and its photo route used before. The sync's truck goes with it.
 	const TRUCK_LOWER_ONLY = {
 		findTruckForDriver: mutate(FN_SRC.findTruckForDriver,
-			'return hit ? { id: hit.id, unit_number: hit.unit_number, matchedBy: "normalized" } : null;', "return null;"),
+			'return hit ? { ...hit, matchedBy: "normalized" } : null;', "return null;"),
 	};
 	const caught = [...truckLookupBattery(TRUCK_LOWER_ONLY), ...updateBattery(TRUCK_LOWER_ONLY)].filter((r) => !r.ok);
 	ok(caught.length > 0, "M2 the truck lookup reverted to LOWER() equality is caught");
