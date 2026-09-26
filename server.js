@@ -25052,9 +25052,10 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			return res.status(400).json({ error: "assignedDriver must be a string, or null for no driver.", code: "INVALID_DRIVER_NAME" });
 		}
 		// A sent unit number is text, not blank, one plain line (parseUnitNumber(),
-		// POST /api/trucks's rule): 400 INVALID_UNIT_NUMBER otherwise, before
-		// anything is read or written. `nextUnit` is the trimmed value the UPDATE
-		// writes; undefined means not sent, and the column is left alone.
+		// POST /api/trucks's rule): 400 INVALID_UNIT_NUMBER otherwise, before any
+		// write. The truck is read first, so an unknown id is answered 404 either
+		// way. `nextUnit` is the trimmed value the UPDATE writes; undefined means
+		// not sent, and the column is left alone.
 		const unitParsed = parseUnitNumber(unitNumber);
 		if (unitParsed.refusal) return res.status(400).json(unitParsed.refusal);
 		const nextUnit = unitParsed.value;
