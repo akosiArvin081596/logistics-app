@@ -23045,15 +23045,17 @@ function parseTruckAmounts(body, fields) {
 // in-service date. That is why in_service_date and truckChargeFromMonth exist,
 // and it cost ~$1,553 on one investor's July before it was found.
 //
-// ⚠️ BE PRECISE OR BE DISABLED. The Trucks UI PUTs the ENTIRE truck object on
-// every save (TruckTable.vue → handleSaveEdit sends all 20 fields), so "the
-// field is present in the body" is true of every field on every edit. A guard
-// written that way would 409 a typo fix in `notes` and be switched off within a
-// week — which would be strictly worse than no guard, because the next person
-// would conclude the whole idea does not work. Every check below therefore fires
-// only on a field whose value actually CHANGES, and only for the months that
-// change with it. Renaming an un-linked truck, re-photographing one, correcting
-// a VIN, or editing a truck that only ever ran in the open month all stay 200.
+// ⚠️ BE PRECISE OR BE DISABLED. The Trucks page sends only the fields that
+// changed (client/src/lib/truckEdit.js), but an older page or a direct API
+// caller may still PUT the whole truck row, all ~20 fields, on every save, and
+// then "the field is present in the body" is true of every field on every
+// edit. A guard written that way would 409 a typo fix in `notes` and be
+// switched off within a week — which would be strictly worse than no guard,
+// because the next person would conclude the whole idea does not work. Every
+// check below therefore fires only on a field whose value actually CHANGES,
+// and only for the months that change with it. Renaming an un-linked truck,
+// re-photographing one, correcting a VIN, or editing a truck that only ever ran
+// in the open month all stay 200.
 
 // The closed months, newest first. Presence of a status='locked' row IS the lock
 // (see isLocked) — 'reopened' rows deliberately do not count.
@@ -24138,10 +24140,11 @@ const DIRECTORY_DEFAULT_STRUCT = { payType: "fixed", payPercentage: 0, payDaily:
 // refused whole — 403 PAY_EDIT_ADMIN_ONLY, nothing written — and every other
 // column keeps the role gate it had.
 //
-// ⚠️ CHANGE, NEVER PRESENCE. Both edit forms send the whole row on every save
-// (DriverTable.vue all eighteen directory columns, the Trucks form ~20 fields),
-// so a check keyed on "the body carries a pay field" would refuse a
-// Dispatcher's phone-number fix. Each check compares the value the handler
+// ⚠️ CHANGE, NEVER PRESENCE. DriverTable.vue sends all eighteen directory
+// columns on every save; the Trucks page sends only the fields that changed,
+// but an older page or a direct API caller may still send the whole truck row
+// (~20 fields). So a check keyed on "the body carries a pay field" would refuse
+// a Dispatcher's phone-number fix. Each check compares the value the handler
 // would write with the stored one, read the way the money math reads it —
 // directoryPayStruct() for the directory, the route's own `changed` diff for a
 // truck — so resending the current value in any spelling the handler accepts
@@ -24867,11 +24870,12 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		// A photo that CHANGES must be an image GET /api/driver/me/truck-photo can
 		// serve: 415 UNSUPPORTED_IMAGE_TYPE or 413 IMAGE_TOO_LARGE otherwise, with
 		// field "photo" (truckPhotoForStorage()), and is stored in its canonical
-		// form. Keyed on the change, never on presence: the Edit form resends the
-		// stored photo on every save, so a photo stored before this check never
-		// blocks an unrelated edit, and a resend is written back exactly as it is
-		// stored. null and "" clear it; anything else that is not a string is
-		// refused. Before any write and the month-end lock.
+		// form. Keyed on the change, never on presence: the Trucks page sends the
+		// photo only when it changed, but an older page or a direct API caller may
+		// still resend the stored photo on every save, so a photo stored before
+		// this check never blocks an unrelated edit, and a resend is written back
+		// exactly as it is stored. null and "" clear it; anything else that is not
+		// a string is refused. Before any write and the month-end lock.
 		let photoToStore = photo;
 		if (photo !== undefined && photo !== null && photo !== "" && photo !== (truck.photo || "")) {
 			const photoChecked = truckPhotoForStorage(photo);
@@ -24963,8 +24967,10 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		// `changed` carries ONLY fields whose stored value actually differs, parsed
 		// exactly the way the UPDATE below parses them, so the guard answers for
 		// the values that would really land. This is the whole reason the guard is
-		// usable: the Trucks UI sends all 20 fields on every save, so anything
-		// keyed on presence rather than difference would refuse every edit.
+		// usable: the Trucks page sends only the fields that changed, but an older
+		// page or a direct API caller may still send all ~20 on every save, and
+		// anything keyed on presence rather than difference would refuse every
+		// such edit.
 		const changed = {};
 		const diff = (col, next) => { if (next !== (truck[col] || 0)) changed[col] = next; };
 		if (unitNumber !== undefined && String(unitNumber).trim().toLowerCase() !== String(truck.unit_number || "").trim().toLowerCase()) {
@@ -24997,7 +25003,9 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		}
 		// ⚠️ PAY SETTINGS ARE SUPER ADMIN ONLY — see PAY_EDIT_ADMIN_ONLY. Keyed on
 		// `changed`, i.e. on a real difference from the stored rate, never on the
-		// field being present: the Trucks form sends driverPayDaily on every save.
+		// field being present: the Trucks page sends driverPayDaily only when it
+		// changed, but an older page or a direct API caller may still resend the
+		// stored rate on every save.
 		// Ahead of the month-end lock, because reopening a month would not make
 		// this edit allowed, and of every write below.
 		const payEditAllowed = req.session.user.role === "Super Admin";
@@ -25205,11 +25213,13 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		// the admin fee is a term of the investor's deal; the same save already
 		// audits the pay rate, status, dates, owner, tank and MPG beside them.
 		// Keyed on a real difference from the stored row, never on presence: the
-		// Edit form sends every cost on every save, so a presence test would log a
-		// notes edit as a cost edit and bury the real ones. A stored NULL compares
-		// as the 0 it has always meant (the admin fee as its 50), and the monthly
-		// fixed-cost total — what every billed month reads — is appended whenever
-		// one of the five moved. The fuel tank and MPG keep their own lines above.
+		// Trucks page sends only the costs that changed, but an older page or a
+		// direct API caller may still send every cost on every save, and a
+		// presence test would log such a notes edit as a cost edit and bury the
+		// real ones. A stored NULL compares as the 0 it has always meant (the
+		// admin fee as its 50), and the monthly fixed-cost total — what every
+		// billed month reads — is appended whenever one of the five moved. The
+		// fuel tank and MPG keep their own lines above.
 		{
 			const money = (n) => `$${(Math.round(n * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 			// Past the UPDATE, so formatting must not be able to throw.
@@ -25254,6 +25264,20 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			if (oldDriver && oldDriver.trim() && normalizeDriverName(oldDriver) !== normalizeDriverName(nextAssignedDriver)) {
 				syncDriverToCarrierSheet(oldDriver.trim(), { action: "update" });
 			}
+		} else if (unitNumber !== undefined && String(unitNumber).trim() !== String(truck.unit_number || "").trim()) {
+			// A RENAME REFRESHES THE DRIVER'S DIRECTORY ROW. drivers_directory.trucks
+			// holds the unit number shown beside the driver on the dispatch
+			// Dashboard's fleet list and the Drivers Database page, and
+			// syncDriverToCarrierSheet() re-reads it from `trucks`, so the driver the
+			// truck keeps is synced the same way as a driver this save assigns. The
+			// Trucks page sends only the fields that changed, so a rename no longer
+			// carries the driver. A save that does send one takes the branch above,
+			// which syncs the driver the truck is left with after this UPDATE, so no
+			// driver is synced twice; a save that unassigns leaves none to refresh.
+			// Compared as the exact trimmed string, not case-folded like `changed`
+			// above: a case-only rename changes what those pages show.
+			const driverKept = String(truck.assigned_driver || "").trim();
+			if (driverKept) syncDriverToCarrierSheet(driverKept, { action: "update" });
 		}
 		notifyChange("trucks");
 		res.json({ success: true });

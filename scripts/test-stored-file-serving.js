@@ -23,8 +23,9 @@
  * such an image, or is over 16 MP or 2 MiB: 415 UNSUPPORTED_IMAGE_TYPE / 413
  * IMAGE_TOO_LARGE with field "photo" (truckPhotoForStorage()). One that passes
  * is stored in its canonical form, `data:<the type its bytes are>;base64,<the
- * bytes re-encoded>`. The PUT keys the check on the photo CHANGING, because
- * the Trucks Edit form resends the stored photo on every save.
+ * bytes re-encoded>`. The PUT keys the check on the photo CHANGING: the Trucks
+ * page sends the photo only when it changed, but an older page or a direct API
+ * caller may still resend the stored photo on every save.
  *
  * WHAT IS ASSERTED — the shipped code, lifted out of server.js, on an in-memory
  * SQLite:
@@ -661,7 +662,8 @@ async function putSection() {
 	section("§5 PUT /api/trucks/:id");
 	const LEGACY = uri("image/heic", HEIC);
 	{
-		// The Edit form resends the stored photo with every save.
+		// An older page or a direct API caller may resend the stored photo with
+		// every save.
 		const db = makeDb();
 		const { put } = mountTrucks(db);
 		const out = await put(DISPATCHER, 2, { notes: "new tyres", photo: LEGACY });

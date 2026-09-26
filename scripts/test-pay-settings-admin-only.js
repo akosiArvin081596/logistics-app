@@ -302,8 +302,11 @@ function dirFormBody(r, over = {}) {
 	};
 	return { headers: DIR_HEADERS, values: DIR_HEADERS.map((h) => v[h]) };
 }
-// The body the Trucks edit form sends (TruckTable.vue handleSaveEdit), from the
-// stored row. `over` replaces or (with undefined) removes a key.
+// A whole-row save body, from the stored row. The Trucks page sends only the
+// fields that changed (client/src/lib/truckEdit.js); an older page or a direct
+// API caller may still send the whole row, which is why the route compares
+// against the stored value rather than keying on presence, and why these
+// checks send it. `over` replaces or (with undefined) removes a key.
 function truckFormBody(t, over = {}) {
 	const b = {
 		unitNumber: t.unit_number, make: t.make, model: t.model, year: t.year, vin: t.vin, licensePlate: t.license_plate,

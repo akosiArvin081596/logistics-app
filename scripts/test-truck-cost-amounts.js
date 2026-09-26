@@ -23,15 +23,19 @@
  * and after. A save that resends the stored values writes none. Accepting an
  * investor application reads each vehicle's purchase price through the same
  * parser, but a price it refuses is stored as 0 and never refuses the
- * acceptance.
+ * acceptance. A PUT that renames the unit number without sending the driver
+ * syncs the driver the truck keeps to drivers_directory, whose `trucks` column
+ * shows that number; a save that sends the driver syncs by the existing rule,
+ * so no driver is synced twice.
  *
  * WHAT IS ASSERTED. The shipped parser and the two shipped truck handlers,
  * lifted out of server.js and run against an in-memory SQLite with server.js's
- * own parsers, audit writer, name helpers and truck assignment. Only the
- * month-end locks (which record what they were asked), the active-load check,
- * the Job Tracking read and the driver history it feeds, and the socket
- * notification are stubbed. §6 runs the shipped acceptance handler the same
- * way, with its password hash, audit line, notification and emails stubbed.
+ * own parsers, audit writer, name helpers, directory sync and truck assignment.
+ * Only the month-end locks (which record what they were asked), the active-load
+ * check, the Job Tracking read and the driver history it feeds, and the socket
+ * notification are stubbed; each directory sync is recorded, then run as
+ * shipped. §6 runs the shipped acceptance handler the same way, with its
+ * password hash, audit line, notification and emails stubbed.
  *   §1 parseTruckAmount() — every accepted and refused shape, the cap's two
  *      edges, a ceiling of the caller's own, 1e308, whitespace, the error text;
  *      the table's nine rows, their keys (the fuel pair's `a ?? b` order
@@ -54,6 +58,13 @@
  *      admin fee resent as its 50; a stored fee outside 0..100 (150) named as
  *      stored when edited; the fuel tank on its own line; each ceiling
  *      (500 gal, 20 MPG, a 100% fee) stored.
+ *   §3b PUT renames — a unit-only rename (the Trucks page's body, which leaves
+ *      the driver out) syncs the truck's driver exactly once, and that
+ *      driver's directory row shows the new number; a case-only rename counts,
+ *      the stored number resent (padded or not) does not; a rename on a truck
+ *      with no driver, a refused rename and a save with no rename sync nobody;
+ *      a rename that also sends the driver (changed, resent unchanged in a
+ *      whole-row body, or cleared) makes exactly the existing rule's calls.
  *   §4 POST — a Super Admin's or a Dispatcher's unreadable fixed cost, fuel
  *      value or admin fee refused with nothing inserted; an Investor's fixed
  *      costs, fuel pair and admin fee ignored (junk, over the ceiling or real)
@@ -266,10 +277,13 @@ const audits = (db, action) => db.prepare("SELECT * FROM audit_trail WHERE actio
 const FIVE = ["insurance_monthly", "eld_monthly", "truck_payment_monthly", "hvut_annual", "irp_annual"];
 const fiveOf = (o) => o && FIVE.map((c) => o[c]);
 
-// The body the Trucks Edit form sends (TruckTable.vue handleSaveEdit), from the
-// stored row: every field on every save. `over` replaces or (with undefined)
-// removes a key. `photo` is left out — it is not an amount, and has checks and
-// a runner of its own.
+// A whole-row save body, from the stored row: every field. The Trucks page
+// sends only the fields that changed (client/src/lib/truckEdit.js); an older
+// page or a direct API caller may still send the whole row, which is why the
+// route compares against the stored value rather than keying on presence, and
+// why these checks send it. `over` replaces or (with undefined) removes a key.
+// `photo` is left out — it is not an amount, and has checks and a runner of
+// its own.
 function truckFormBody(t, over = {}) {
 	const b = {
 		unitNumber: t.unit_number, make: t.make, model: t.model, year: t.year, vin: t.vin, licensePlate: t.license_plate,
@@ -325,13 +339,20 @@ async function quiet(fn) {
 
 // The month-end locks answer "nothing blocked" and record what they were asked:
 // `editLockSeen` the `changed` of each PUT, `createLockSeen` each POST's row.
+// Each directory sync a route makes is recorded in `synced` (name and action),
+// then run by the shipped syncDriverToCarrierSheet(), so the row it writes is
+// the row production writes.
 function mountAll(db) {
 	const m = buildModule(db);
-	const seen = { editLockSeen: [], createLockSeen: [], activeLoad: 0 };
+	const seen = { editLockSeen: [], createLockSeen: [], activeLoad: 0, synced: [] };
 	const refuse = (req, res) => res.status(409).json({ code: "PERIOD_STUB" });
 	const env = {
 		db,
 		...m,
+		syncDriverToCarrierSheet: (name, opts = {}) => {
+			seen.synced.push({ name, action: opts.action });
+			return m.syncDriverToCarrierSheet(name, opts);
+		},
 		truckEditLockBlockers: (truck, changed) => { seen.editLockSeen.push({ ...changed }); return { unreadable: false, blockers: [] }; },
 		truckCreateLockBlockers: (truck) => { seen.createLockSeen.push({ ...truck }); return { unreadable: false, blockers: [] }; },
 		periodBlockedResponse: refuse,
@@ -678,6 +699,92 @@ async function putSuccessSection() {
 	}
 }
 
+// ═══════════════════════════════════════════════════════════════ §3b
+// drivers_directory.trucks is the unit number shown beside a driver on the
+// dispatch Dashboard's fleet list and the Drivers Database page, and
+// syncDriverToCarrierSheet() re-reads it from `trucks`. In the fixture Shorn
+// King drives LogisX-#33 and his directory row says so; Logisx-#91 has no
+// driver; Bob Driver has neither a truck nor a directory row.
+async function putRenameSyncSection() {
+	section("§3b PUT /api/trucks/:id — a unit-number rename refreshes the driver's directory row");
+	const dirRows = (db) => JSON.stringify(db.prepare("SELECT * FROM drivers_directory ORDER BY id").all());
+	const dirTrucks = (db, name) => (db.prepare("SELECT trucks FROM drivers_directory WHERE driver_name = ?").get(name) || {}).trucks;
+	const synced = (app) => JSON.stringify(app.seen.synced);
+	const updates = (...names) => JSON.stringify(names.map((name) => ({ name, action: "update" })));
+
+	// A rename alone — the Trucks page's body, which leaves the driver out — and
+	// a case-only one, which changes what those pages show.
+	for (const [label, unit] of [["a unit-only rename", "LogisX-#34"], ["a case-only rename", "LOGISX-#33"]]) {
+		const db = makeDb();
+		const app = mountAll(db);
+		const r = await app.put(DISPATCHER, 1, { unitNumber: unit });
+		const t = truckRow(db, 1);
+		ok(r.status === 200 && t.unit_number === unit && t.assigned_driver === "Shorn King",
+			`§3b ${label} to ${unit}: 200, renamed, the driver kept (got ${r.status} ${JSON.stringify(r.body)}, ${t.unit_number} / ${t.assigned_driver})`);
+		ok(synced(app) === updates("Shorn King"), `§3b ${label}: exactly one directory sync, for the driver on the truck (got ${synced(app)})`);
+		ok(dirTrucks(db, "Shorn King") === unit, `§3b ${label}: his directory row shows ${unit} (got ${JSON.stringify(dirTrucks(db, "Shorn King"))})`);
+	}
+	// The stored number resent, exactly or padded, is not a rename.
+	for (const [label, unit] of [["resent as stored", "LogisX-#33"], ["resent padded", "  LogisX-#33  "]]) {
+		const db = makeDb();
+		const app = mountAll(db);
+		const before = dirRows(db);
+		const r = await app.put(DISPATCHER, 1, { unitNumber: unit, notes: "new tires" });
+		ok(r.status === 200 && truckRow(db, 1).unit_number === "LogisX-#33" && synced(app) === "[]" && dirRows(db) === before,
+			`§3b the unit number ${label}: 200, no directory sync, the directory unchanged (got ${r.status}, ${synced(app)})`);
+	}
+	{
+		// A truck with no driver has nobody to refresh.
+		const db = makeDb();
+		const app = mountAll(db);
+		const before = dirRows(db);
+		const r = await app.put(DISPATCHER, 2, { unitNumber: "Logisx-#92" });
+		ok(r.status === 200 && truckRow(db, 2).unit_number === "Logisx-#92" && synced(app) === "[]" && dirRows(db) === before,
+			`§3b a rename on a truck with no driver: 200, no directory sync, the directory unchanged (got ${r.status}, ${synced(app)})`);
+	}
+	{
+		// A refused rename (the number is another truck's, compared case-folded)
+		// writes nothing, so it refreshes nothing.
+		const db = makeDb();
+		const app = mountAll(db);
+		const before = snapshot(db);
+		const r = await app.put(DISPATCHER, 1, { unitNumber: "logisx-#91" });
+		ok(r.status === 400 && synced(app) === "[]" && snapshot(db) === before,
+			`§3b a refused rename (another truck's number): 400, no directory sync, nothing written (got ${r.status} ${JSON.stringify(r.body)}, ${synced(app)})`);
+	}
+	// A rename that also sends the driver syncs by the existing rule — the driver
+	// it leaves on the truck, then a different one it took off — and nobody twice.
+	for (const [label, body, calls, rows] of [
+		["a rename that also assigns Bob Driver", (t) => ({ unitNumber: "LogisX-#34", assignedDriver: "Bob Driver" }),
+			["Bob Driver", "Shorn King"], [["Bob Driver", "LogisX-#34"], ["Shorn King", ""]]],
+		["a rename in a whole-row body, which resends the driver unchanged", (t) => truckFormBody(t, { unitNumber: "LogisX-#34" }),
+			["Shorn King"], [["Shorn King", "LogisX-#34"]]],
+		["a rename that also clears the driver", (t) => ({ unitNumber: "LogisX-#34", assignedDriver: "" }),
+			["Shorn King"], [["Shorn King", ""]]],
+	]) {
+		const db = makeDb();
+		const app = mountAll(db);
+		const r = await app.put(SUPER, 1, body(truckRow(db, 1)));
+		ok(r.status === 200 && truckRow(db, 1).unit_number === "LogisX-#34",
+			`§3b ${label}: 200 and renamed (got ${r.status} ${JSON.stringify(r.body)})`);
+		ok(synced(app) === updates(...calls), `§3b ${label}: the existing rule's syncs, each driver once — ${updates(...calls)} (got ${synced(app)})`);
+		for (const [name, unit] of rows) {
+			ok(dirTrucks(db, name) === unit, `§3b ${label}: ${name}'s directory row shows ${JSON.stringify(unit)} (got ${JSON.stringify(dirTrucks(db, name))})`);
+		}
+	}
+	{
+		// No rename: a notes-only save syncs nobody, and a whole-row resend keeps
+		// the existing rule's one sync for the driver it resends, with none added.
+		const db = makeDb();
+		const app = mountAll(db);
+		const notes = await app.put(DISPATCHER, 1, { notes: "new tires" });
+		ok(notes.status === 200 && synced(app) === "[]", `§3b a notes-only save: 200, no directory sync (got ${notes.status}, ${synced(app)})`);
+		const resend = await app.put(DISPATCHER, 1, truckFormBody(truckRow(db, 1)));
+		ok(resend.status === 200 && synced(app) === updates("Shorn King") && dirTrucks(db, "Shorn King") === "LogisX-#33",
+			`§3b a whole-row resend with no rename: 200, only the existing rule's one sync (got ${resend.status}, ${synced(app)})`);
+	}
+}
+
 // ═══════════════════════════════════════════════════════════════ §4
 async function postSection() {
 	section("§4 POST /api/trucks");
@@ -919,6 +1026,7 @@ async function acceptanceSection() {
 	parserSection();
 	await putRefusalSection();
 	await putSuccessSection();
+	await putRenameSyncSection();
 	await postSection();
 	sourcePins();
 	await acceptanceSection();

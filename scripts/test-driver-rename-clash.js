@@ -809,8 +809,9 @@ async function trucksBattery(opts = {}) {
 	}
 
 	// The truck's own driver, stored in an older spelling and on an active load.
-	// The Trucks screen re-sends the stored driver on every save, so an ordinary
-	// edit must not be read as moving that driver onto this truck.
+	// The Trucks screen sends the driver only when it changed, but an older page
+	// or a direct API caller may still re-send the stored driver on every save,
+	// so an ordinary edit must not be read as moving that driver onto this truck.
 	{
 		const db = trucksFixture();
 		db.prepare("UPDATE trucks SET assigned_driver = 'Shorn  King' WHERE id = 1").run();
