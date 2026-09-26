@@ -28769,7 +28769,17 @@ app.get("/api/data", requireRole("Super Admin"), async (req, res) => {
 });
 
 // CREATE — Append a new row
-app.post("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+//
+// ⚠️ SUPER ADMIN ONLY (2026-09-26), like GET. It appends a caller-built row to
+// whichever tab ?sheet= names with valueInputOption "USER_ENTERED", which stores
+// a value starting with "=" as a formula, and only a Super Admin enters
+// formulas (see formulaCellRefusal()). Its SPA callers
+// are New Job (/jobs/new) and the Data Manager (/data), both Super Admin routes;
+// the legacy public/index.html is served only when client/dist is missing, and
+// it reads GET /api/data, which is Super Admin only too. Widening this gate
+// means refusing formulas first (formulaCellRefusal(), as PUT does).
+// scripts/test-broker-column-redaction.js pins the gate.
+app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const { values, coordinates } = req.body; // values = array of cell values, coordinates = optional {loadId, originLat, originLng, destLat, destLng, pickupAddress, dropoffAddress}
 
@@ -29835,6 +29845,16 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 			return res.status(400).json({ error: "Driver column not found" });
 		}
 
+		// NO FORMULAS, for every caller but a Super Admin: the rule PUT
+		// /api/data/:rowIndex applies (formulaCellRefusal()), 400
+		// FORMULA_NOT_ALLOWED naming the Driver column. The batch below writes with
+		// valueInputOption "USER_ENTERED", and `driver` is the caller's own text
+		// whenever it names no Driver account. Before the period guard and every write.
+		if (req.session.user.role !== "Super Admin") {
+			const formula = formulaCellRefusal([headers[driverColIdx]], [snapshot.row[driverColIdx]], [driver]);
+			if (formula) return res.status(400).json(formula);
+		}
+
 		// Look up truck and owner for this driver. Primary source is the
 		// trucks.assigned_driver single-slot column, which assignDriverToTruck()
 		// keeps in sync; if that's drifted (legacy admin edits, name casing,
@@ -29993,6 +30013,14 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 		const driverCol = headers.findIndex((h) => /driver/i.test(h));
 		if (driverCol === -1) {
 			return res.status(400).json({ error: "Driver column not found" });
+		}
+
+		// NO FORMULAS, for every caller but a Super Admin — same rule and reason as
+		// POST /api/dispatch: `newDriver` is the caller's own text whenever it names
+		// no Driver account. Before the period guard and every write.
+		if (req.session.user.role !== "Super Admin") {
+			const formula = formulaCellRefusal([headers[driverCol]], [snapshot.row[driverCol]], [newDriver]);
+			if (formula) return res.status(400).json(formula);
 		}
 
 		// Reassignment to a busy driver is allowed — the load queues behind
@@ -31540,7 +31568,9 @@ function restoreWithheldBrokerCells(headers, before, values) {
 
 // PUT /api/data/:rowIndex and PUT /api/load/:loadId, for every caller but a
 // Super Admin: no formulas. Both write with valueInputOption "USER_ENTERED",
-// under which a value starting with "=" is stored as a formula. Returns null,
+// under which a value starting with "=" is stored as a formula. The same rule
+// guards POST /api/loads/from-ratecon and POST /api/dispatch{,/reassign}, which
+// pass an empty `before` for a new row. Returns null,
 // or the 400 body for the first CHANGED cell, in column order, whose trimmed
 // value starts with "=": { error, code: "FORMULA_NOT_ALLOWED", field }, where
 // `field` is the column's header exactly as the sheet holds it ("(unnamed)" for
@@ -37392,6 +37422,23 @@ app.post("/api/loads/ratecon/extract", requireRole("Super Admin", "Dispatcher"),
 	}
 });
 
+// The rate-con fields POST /api/loads/from-ratecon writes into a sheet cell,
+// whole or as part of one: Job Tracking through buildJobTrackingRow() (the three
+// reference fields only inside "Pickup Info"), and the Payments Table ("Broker
+// Name", "Rate"). The other extracted fields (Total Rate, Order / PO / Move
+// Number, Driver Name, the two notes) reach no sheet, so they are not judged.
+// For every caller but a Super Admin the route refuses any of these whose value
+// starts with "=" before it claims the load or reads a sheet — see NO FORMULAS
+// in the route. scripts/test-sheet-formula-doors.js derives the same set from
+// the shipped route and fails when the two disagree.
+const RATECON_SHEET_FIELDS = [
+	"Load Number", "Rate", "Trailer Number", "Details", "BOL Number",
+	"Broker Name", "Broker Phone", "Broker Email",
+	"Pickup Company Information", "P/U Reference Number", "Delivery Reference Number",
+	"Pickup Address", "Pickup Appointment Time",
+	"Drop-off Company Information", "Drop-off Address", "Delivery Appointment Time",
+];
+
 // POST /api/loads/from-ratecon — the reviewed fields become a live load.
 // `fields` is what the dispatcher confirmed in the review modal (Gemini output
 // is treated as a draft, never as truth). Order of operations mirrors the n8n
@@ -37452,6 +37499,24 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 					maxChars: ADDRESS_MAX_CHARS,
 				});
 			}
+		}
+
+		// NO FORMULAS, for every caller but a Super Admin — the rule PUT
+		// /api/data/:rowIndex and PUT /api/load/:loadId apply (formulaCellRefusal()).
+		// Every sheet write below uses valueInputOption "USER_ENTERED", which stores
+		// a value starting with "=" as a formula. A new load has no stored row, so
+		// every cell counts as changed. Two checks:
+		//   1. HERE, before the load is claimed and before any sheet is read: every
+		//      field in RATECON_SHEET_FIELDS, 400 FORMULA_NOT_ALLOWED with `field`
+		//      naming the field as the review modal sends it.
+		//   2. Before the Job Tracking append, over the cells as they will be
+		//      written to all three tabs: a cell built from several fields can start
+		//      with "=" when no field does (Job Details' "Details" is two
+		//      cityStateZip() results, and either can begin mid-address). That body
+		//      adds `sheet`, since Job Tracking and Job Details both have "Details".
+		if (req.session.user.role !== "Super Admin") {
+			const formula = formulaCellRefusal(RATECON_SHEET_FIELDS, [], RATECON_SHEET_FIELDS.map((k) => fields[k]));
+			if (formula) return res.status(400).json(formula);
 		}
 
 		// Claim this Load ID for the duration of the write so a double-submit
@@ -37554,6 +37619,34 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		const ownerErr = validateOwnerIdCell("Job Tracking", headers, values);
 		if (ownerErr) return res.status(400).json({ error: ownerErr.error });
 
+		// The cells steps 5/6 write, built here so the formula check below judges
+		// the very objects the two upserts are handed.
+		const paymentsMapping = {
+			" Job ID": loadId,
+			"Contract ID": String(fields["Broker Name"] || "").trim(),
+			"Payment Amount": String(fields["Rate"] || "").trim(),
+		};
+		const jobDetailsMapping = {
+			"Load ID": loadId,
+			"Rate Per Mile": `$${rpm.rate_per_mile}`,
+			"Distance": `${rpm.distance_miles} Miles`,
+			"Details": rpm.details,
+			"Payment": rpm.payment,
+		};
+		// NO FORMULAS, check 2 (see check 1 above): every cell as it will be written,
+		// before the first write. `field` is the column's header on `sheet`.
+		const sheetCells = [
+			["Job Tracking", headers, values],
+			["Payments Table", Object.keys(paymentsMapping), Object.values(paymentsMapping)],
+			["Job Details", Object.keys(jobDetailsMapping), Object.values(jobDetailsMapping)],
+		];
+		if (req.session.user.role !== "Super Admin") {
+			for (const [sheet, columns, cells] of sheetCells) {
+				const formula = formulaCellRefusal(columns, [], cells);
+				if (formula) return res.status(400).json({ ...formula, sheet });
+			}
+		}
+
 		const appendResp = await sheets.spreadsheets.values.append({
 			spreadsheetId: SPREADSHEET_ID,
 			range: "Job Tracking",
@@ -37628,11 +37721,7 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		// settled figure from a load-creation flow is not. Conflicts surface as
 		// a warning naming the columns so a human reconciles them.
 		try {
-			const payResult = await upsertByKey("Payments Table", " Job ID", {
-				" Job ID": loadId,
-				"Contract ID": String(fields["Broker Name"] || "").trim(),
-				"Payment Amount": String(fields["Rate"] || "").trim(),
-			}, { preserveFilled: true });
+			const payResult = await upsertByKey("Payments Table", " Job ID", paymentsMapping, { preserveFilled: true });
 			if (payResult.conflicts.length) {
 				warnings.push(
 					`The Payments Table already had a row for ${loadId} with a different ` +
@@ -37646,13 +37735,7 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 
 		// n8n "Google Sheets2"
 		try {
-			await upsertByKey("Job Details", "Load ID", {
-				"Load ID": loadId,
-				"Rate Per Mile": `$${rpm.rate_per_mile}`,
-				"Distance": `${rpm.distance_miles} Miles`,
-				"Details": rpm.details,
-				"Payment": rpm.payment,
-			});
+			await upsertByKey("Job Details", "Load ID", jobDetailsMapping);
 		} catch (e) {
 			console.error("Rate-con load: Job Details upsert failed:", e.message);
 			warnings.push("The Job Details row was not written — distance and rate-per-mile are missing for this load.");
