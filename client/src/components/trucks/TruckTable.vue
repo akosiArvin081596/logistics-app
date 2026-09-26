@@ -389,6 +389,10 @@
             </div>
           </details>
 
+          <!-- Directly above Save: the dialog scrolls, so a message up by the
+               field could sit off screen while Save seemed to do nothing. -->
+          <div v-if="editError" class="edit-error" role="alert">{{ editError }}</div>
+
           <div class="confirm-actions">
             <button class="btn btn-secondary" @click="showEdit = false">Cancel</button>
             <button class="btn btn-primary" @click="handleSaveEdit">Save</button>
@@ -476,7 +480,7 @@ import ConfirmModal from '../shared/ConfirmModal.vue'
 import FileDropZone from '../shared/FileDropZone.vue'
 import LegalDocumentPortal from '../investor/LegalDocumentPortal.vue'
 import { useApi } from '../../composables/useApi'
-import { compressImage, DEFAULT_MAX_EDGE } from '../../lib/imageUtils'
+import { compressImage, DEFAULT_MAX_EDGE, isDecodedImage } from '../../lib/imageUtils'
 import { fmtOdometer } from '../../lib/fuelReview'
 import { fmtTimestamp } from '../../utils/datetime'
 
@@ -645,16 +649,19 @@ function openEdit(truck) {
   // '' when unset — an empty date input is what keeps the created_at fallback.
   editForm.inServiceDate = inServiceDate(truck)
   editForm.retiredAt = retiredAt(truck)
-  // The modal is v-if'd, so a photo message from the last truck edited would
-  // otherwise reappear against a different truck. Same for a busy flag left set
-  // by a compress that was still running when the modal was dismissed.
+  // The modal is v-if'd, so a photo or save message from the last truck edited
+  // would otherwise reappear against a different truck. Same for a busy flag
+  // left set by a compress that was still running when the modal was dismissed.
   editPhotoError.value = ''
   editPhotoBusy.value = false
+  editError.value = ''
   showEdit.value = true
 }
 
 const editPhotoBusy = ref(false)
 const editPhotoError = ref('')
+// Why Save was refused (an amount out of range); shown directly above Save.
+const editError = ref('')
 
 // Receives File[] from FileDropZone — a drop and a click both land here.
 // compressImage replaces a raw FileReader for the same reason as AddTruckForm:
@@ -667,16 +674,63 @@ async function onEditPhoto(files) {
   editPhotoBusy.value = true
   try {
     const dataUrl = await compressImage(file, DEFAULT_MAX_EDGE)
-    // '' means the file was unreadable — keep the truck's existing photo rather
-    // than silently blanking it on the next save.
-    if (dataUrl) editForm.photo = dataUrl
-    else editPhotoError.value = "Couldn't read that photo — try a different file."
+    // Only a real decode is kept. When compressImage cannot decode a file it
+    // hands back the RAW bytes under the file's own media type (an SVG, a PDF,
+    // …) or '' — and the server refuses any photo that is not a JPEG, PNG or
+    // WebP (415 UNSUPPORTED_IMAGE_TYPE). Either way the truck keeps its existing
+    // photo rather than losing it, or the whole save, on the next Save.
+    if (dataUrl && isDecodedImage(dataUrl)) editForm.photo = dataUrl
+    else editPhotoError.value = "Couldn't read that photo — use a JPEG, PNG or WebP image."
   } finally {
     editPhotoBusy.value = false
   }
 }
 
+// The most the server stores in a truck amount. Above it, below 0 or not a
+// finite number, the save is answered 400 INVALID_AMOUNT.
+const AMOUNT_MAX = 1000000
+
+// Every amount input, in form order, so a refusal names the first bad field on
+// screen. Driver pay keeps the server's own tighter 0–10,000 range and is only
+// checked when this user may edit it; admin fee is a percentage.
+const AMOUNT_FIELDS = [
+  { key: 'driverPayDaily', label: 'Driver pay', max: 10000, pay: true },
+  { key: 'fuelTankGallons', label: 'Fuel tank' },
+  { key: 'avgMpg', label: 'Avg MPG' },
+  { key: 'purchasePrice', label: 'Purchase price' },
+  { key: 'maintenanceFundMonthly', label: 'Maintenance fund' },
+  { key: 'insuranceMonthly', label: 'Insurance' },
+  { key: 'eldMonthly', label: 'ELD' },
+  { key: 'hvutAnnual', label: 'HVUT' },
+  { key: 'irpAnnual', label: 'IRP' },
+  { key: 'truckPaymentMonthly', label: 'Truck payment' },
+  { key: 'adminFeePct', label: 'Admin fee', max: 100 },
+]
+
+// '' when every amount is blank or a finite number in range; otherwise one
+// sentence naming the first field that is not. Blank ('' / null / undefined)
+// stays allowed — it is how a field says "unset". Needed because
+// v-model.number turns a typed 1e999 into Infinity, which JSON.stringify sends
+// as null. Same rule as AddTruckForm.vue's copy.
+function amountError(values, canEditPay) {
+  for (const { key, label, max = AMOUNT_MAX, pay } of AMOUNT_FIELDS) {
+    if (pay && !canEditPay) continue
+    const v = values[key]
+    if (v === '' || v === null || v === undefined) continue
+    const n = Number(v)
+    if (!Number.isFinite(n) || n < 0 || n > max) {
+      return `${label} must be a number between 0 and ${max.toLocaleString('en-US')}.`
+    }
+  }
+  return ''
+}
+
 function handleSaveEdit() {
+  // Refused here rather than left to the server: emitting `update` closes this
+  // modal at once, so a server refusal would land as a toast after every edit
+  // in the form was gone.
+  editError.value = amountError(editForm, props.canEditPay)
+  if (editError.value) return
   emit('update', {
     id: editForm.id,
     data: {
@@ -956,6 +1010,13 @@ async function handleUnlink(truck) {
 .confirm-actions {
   display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1.25rem;
 }
+/* Save refusal — the same red callout as the Routemate modal's errors below. */
+.edit-error {
+  padding: 0.55rem 0.7rem; font-size: 0.75rem; line-height: 1.4;
+  background: #fef2f2; color: #991b1b;
+  border: 1px solid #fecaca; border-radius: 6px;
+}
+.edit-error + .confirm-actions { margin-top: 0.75rem; }
 
 .edit-row { display: flex; gap: 1rem; }
 .edit-row .edit-field { flex: 1; }

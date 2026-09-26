@@ -184,14 +184,14 @@
     </details>
 
     <button class="btn btn-primary btn-add" @click="handleSubmit">Add Truck</button>
-    <div class="error-msg">{{ errorMsg }}</div>
+    <div class="error-msg" role="alert">{{ errorMsg }}</div>
   </div>
 </template>
 
 <script setup>
 import { reactive, ref, computed, watch } from 'vue'
 import FileDropZone from '../shared/FileDropZone.vue'
-import { compressImage, DEFAULT_MAX_EDGE } from '../../lib/imageUtils'
+import { compressImage, DEFAULT_MAX_EDGE, isDecodedImage } from '../../lib/imageUtils'
 
 const truckMakes = [
   'Freightliner', 'Kenworth', 'Peterbilt', 'Volvo', 'International',
@@ -281,19 +281,68 @@ async function onPhoto(files) {
   photoBusy.value = true
   try {
     const dataUrl = await compressImage(file, DEFAULT_MAX_EDGE)
-    // compressImage resolves to '' only when the file could not be read at all.
-    // Keep whatever photo was already attached rather than silently clearing it.
-    if (dataUrl) form.photo = dataUrl
-    else errorMsg.value = "Couldn't read that photo — try a different file."
+    // Only a real decode is kept. When compressImage cannot decode a file it
+    // hands back the RAW bytes under the file's own media type (an SVG, a PDF,
+    // …) or '' — and the server refuses any photo that is not a JPEG, PNG or
+    // WebP (415 UNSUPPORTED_IMAGE_TYPE). Keep whatever photo was already
+    // attached rather than swapping in one the save would be refused over.
+    if (dataUrl && isDecodedImage(dataUrl)) form.photo = dataUrl
+    else errorMsg.value = "Couldn't read that photo — use a JPEG, PNG or WebP image."
   } finally {
     photoBusy.value = false
   }
+}
+
+// The most the server stores in a truck amount. Above it, below 0 or not a
+// finite number, the save is answered 400 INVALID_AMOUNT.
+const AMOUNT_MAX = 1000000
+
+// Every amount input, in form order, so a refusal names the first bad field on
+// screen. Driver pay keeps the server's own tighter 0–10,000 range and is only
+// checked when this user may edit it; admin fee is a percentage.
+const AMOUNT_FIELDS = [
+  { key: 'fuelTankGallons', label: 'Fuel tank' },
+  { key: 'avgMpg', label: 'Avg MPG' },
+  { key: 'purchasePrice', label: 'Purchase price' },
+  { key: 'maintenanceFundMonthly', label: 'Maintenance fund' },
+  { key: 'driverPayDaily', label: 'Driver pay', max: 10000, pay: true },
+  { key: 'insuranceMonthly', label: 'Insurance' },
+  { key: 'eldMonthly', label: 'ELD' },
+  { key: 'hvutAnnual', label: 'HVUT' },
+  { key: 'irpAnnual', label: 'IRP' },
+  { key: 'truckPaymentMonthly', label: 'Truck payment' },
+  { key: 'adminFeePct', label: 'Admin fee', max: 100 },
+]
+
+// '' when every amount is blank or a finite number in range; otherwise one
+// sentence naming the first field that is not. Blank ('' / null / undefined)
+// stays allowed — it is how a field says "unset". Needed because
+// v-model.number turns a typed 1e999 into Infinity, which JSON.stringify sends
+// as null. Same rule as TruckTable.vue's copy.
+function amountError(values, canEditPay) {
+  for (const { key, label, max = AMOUNT_MAX, pay } of AMOUNT_FIELDS) {
+    if (pay && !canEditPay) continue
+    const v = values[key]
+    if (v === '' || v === null || v === undefined) continue
+    const n = Number(v)
+    if (!Number.isFinite(n) || n < 0 || n > max) {
+      return `${label} must be a number between 0 and ${max.toLocaleString('en-US')}.`
+    }
+  }
+  return ''
 }
 
 function handleSubmit() {
   errorMsg.value = ''
   if (!form.unitNumber.trim()) {
     errorMsg.value = 'Unit number is required.'
+    return
+  }
+  // Refused here rather than left to the server: emitting `submit` clears this
+  // form at once, so a server refusal would land after everything typed was gone.
+  const badAmount = amountError(form, props.canEditPay)
+  if (badAmount) {
+    errorMsg.value = badAmount
     return
   }
 
