@@ -1,12 +1,20 @@
 name: Deploy
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PUSH TO main  ->  staging, then PRODUCTION automatically if staging went green.
+# PUSH TO main  ->  staging automatically, then PRODUCTION once staging went
+#                   green AND a reviewer approves the production job.
 # Manual dispatch ->  whichever single target you pick (and any ref, for rollback).
 #
-# ⚠️ PRODUCTION AUTO-DEPLOYS. There is no approval gate and nobody is watching —
-# a deliberate choice made 2026-08-25. Three things now carry the safety a human
-# used to:
+# ⚠️ PRODUCTION WAITS FOR APPROVAL, since 2026-09-25. The `production` GitHub
+# Environment has a required reviewer, so every job that names it pauses until
+# approved: this workflow's production job (a manual dispatch or rollback too)
+# and deploy-drift.yml's heal. The gate lives in the environment's settings, so
+# nothing in this file changed with it. Agreed flow: test locally -> merge ->
+# test staging -> approve production. A run waiting for approval holds the
+# deploy queue (concurrency, below), so reject a stale one rather than leave it
+# pending. From 2026-08-25 until then there was no gate and production
+# auto-deployed. Approval gates the start only — nobody watches a deploy finish
+# — so three things still carry the safety:
 #
 #   1. staging is a hard prerequisite (`needs:`) — same box, same pm2, same Node
 #      — so a merge is always exercised somewhere before production sees it.

@@ -4,11 +4,11 @@ Four workflows. `ci.yml` verifies, `deploy.yml` ships, `deploy-drift.yml` catche
 
 | | `ci.yml` | `deploy.yml` | `deploy-drift.yml` | `backup-freshness.yml` |
 |---|---|---|---|---|
-| Fires on | PR into `main`, push to `main`, manual | push to `main` → **staging → production** (auto); manual → one chosen target | every 30 min (cron; GitHub actually fires it every 2.5–6 h), manual | 04:00 UTC daily (cron), manual |
+| Fires on | PR into `main`, push to `main`, manual | push to `main` → **staging (auto) → production (after approval)**; manual → one chosen target | every 30 min (cron; GitHub actually fires it every 2.5–6 h), manual | 04:00 UTC daily (cron), manual |
 | Runs | `npm ci` ×2 · `node --check` · every runner but the timing one · client build | box lock · lockfile reset · checkout of the **exact pushed commit** · install · build · scoped pm2 restart · smoke · (production) edge + live-update handshake · record the commit as **verified** | compare production's last **verified** deploy to `origin/main`, then ask GitHub whether that commit **passed staging** → in-sync, alarm, heal once, or re-run once a Deploy run whose staging never reached the VPS | age + size + `gzip -t` of the newest nightly `app.db` snapshot, and whether the last **scheduled** run succeeded |
 | Duration | ~1 min | well under a minute | seconds (a heal: a deploy) | seconds |
-| Touches production | never | **every push to `main` — no approval gate** | only for a deploy that never landed. Per commit: at most one re-run of main's Deploy run, when its staging job never reached the VPS (production then follows staging as usual), then at most one heal, only once that commit has passed staging, with the same auto-rollback | never — strictly read-only |
-| Self-heals | n/a | rolls back on failed verification | yes: per commit, one re-run of the Deploy run, then possibly one heal | **no, by design** |
+| Touches production | never | **every push to `main`, once a reviewer approves the production job** (since 2026-09-25) | only for a deploy that never landed. Per commit: at most one re-run of main's Deploy run, when its staging job never reached the VPS (production then follows staging as usual, approval included), then at most one heal, only once that commit has passed staging, with the same auto-rollback and the same approval | never — strictly read-only |
+| Self-heals | n/a | rolls back on failed verification | yes: per commit, one re-run of the Deploy run, then possibly one heal (which waits for approval) | **no, by design** |
 
 ---
 
@@ -56,17 +56,17 @@ Both already appear in this repo's `CLAUDE.md` and it is public, so these are se
 
 **Settings → Environments** → create `staging` and `production`.
 
-⚠️ **Neither environment has a required reviewer today** — that is what makes production auto-deploy on every merge to `main` (deliberate, 2026-08-25; the safety that replaced the human is below). To re-arm the gate, add a reviewer under **`production` → Required reviewers**: the job then pauses and waits, and no workflow file changes.
+⚠️ **Since 2026-09-25 `production` has a required reviewer (`akosiArvin081596`); `staging` has none.** Every merge to `main` therefore deploys staging on its own, and every job that names `production` pauses until the reviewer approves it: deploy.yml's production job, a manual production dispatch (a rollback included) and the drift heal. The agreed flow is local test → staging deploy + test → approve production. From 2026-08-25 (the owner's request) until then neither environment had a reviewer and production auto-deployed; the safety built to replace the human then (below) still runs on every deploy. No workflow file changed either way — the gate is this setting.
 
 ---
 
 ## Deploying
 
-**Both are automatic on every push to `main`.** Staging deploys first; production runs **only if staging succeeded** (`needs: staging`). No approval step — see the safety note below.
+**Both start on every push to `main`.** Staging deploys first, on its own; production runs **only if staging succeeded** (`needs: staging`) **and the reviewer approves it** (since 2026-09-25). Test staging, then approve. See the approval gate and the safety note below.
 
 **A push deploys exactly its own commit** (`sha: github.sha`), on both jobs, so production receives the very commit its staging job verified. Several quick merges deploy one after another, in order (`queue: max`). A run that starts after a newer main commit is already **live** on the box (below) does nothing (`DEPLOY_RESULT=noop`); it never moves backwards.
 
-**Manual / rollback** — Actions → *Deploy* → *Run workflow* → pick a target and a `ref`. A manual run keeps the old meaning of `ref` (`main` = its tip at pull time). The `ref` must be a plain branch, tag or commit name: letters, digits and `._/-`, at most 100 characters, not starting with `-`. Anything else is refused before any ssh.
+**Manual / rollback** — Actions → *Deploy* → *Run workflow* → pick a target and a `ref`. A manual production run waits for the same approval, a rollback included. A manual run keeps the old meaning of `ref` (`main` = its tip at pull time). The `ref` must be a plain branch, tag or commit name: letters, digits and `._/-`, at most 100 characters, not starting with `-`. Anything else is refused before any ssh.
 
 From a terminal: `gh workflow run deploy.yml -f target=production -f ref=main` redeploys main's tip; `-f ref=<sha>` is the pin described next.
 
@@ -132,9 +132,9 @@ The skip is never silent: it prints at the start and end of the run and appears 
 
 ---
 
-## Production auto-deploys — what carries the safety
+## Production deploys — what carries the safety
 
-Enabled 2026-08-25 at the owner's request. There is **no approval gate and nobody watching**, so three things replace the human:
+A human approves each production deploy **before** it starts (since 2026-09-25), but nobody watches one finish. So three things still carry the safety — built on 2026-08-25, when the owner switched the gate off, to stand in for the human entirely:
 
 1. **staging is a hard prerequisite.** On a push, `production` has `needs: staging` and runs only on `success`. Same box, same pm2, same Node — a merge is always exercised somewhere first.
 2. **Every deploy smoke-checks**, and production additionally verifies the public edge through nginx.
@@ -146,9 +146,11 @@ A rollback also records the commit it rejected in the drift marker, even when it
 
 **Deploys never overlap.** `deploy.yml` and `deploy-drift.yml` share **one literal concurrency group** (`deploy-refs/heads/main`) with `queue: max`. A drift run therefore waits for an in-flight deploy and reads the box after it; a deploy waits for a heal. A Deploy re-run that a drift run asks for joins the same group behind it and starts once the drift run ends. The drift run never waits for it, so nothing can deadlock. The default queue keeps only one pending run and **cancels** it when another arrives, which in a shared group could cancel a queued deploy; `queue: max` keeps up to 100 waiting, in order. The box lock (above) catches anything that does not come through Actions. ⚠️ actionlint 1.7.12 predates `queue` (GitHub, 2026-05) and reports it as an unexpected key. Lint with `-ignore 'unexpected key "queue" for "concurrency" section'`.
 
-### To turn auto-deploy back off
+### The approval gate — armed since 2026-09-25
 
-Give the `production` GitHub Environment a **required reviewer** again (Settings → Environments → production). The workflow needs no change — the job will simply pause for approval. That is the whole switch. It covers the drift heal too, which runs in the same `production` environment. Note that a run waiting for approval holds the shared deploy queue, so everything behind it waits as well. Reject a stale one rather than leaving it pending.
+The `production` GitHub Environment has a **required reviewer** (Settings → Environments → production). The workflow has no approval logic of its own — the job simply pauses for approval — so that setting is the whole switch: removing the reviewer restores auto-deploy. It covers the drift heal too, which runs in the same `production` environment. Note that a run waiting for approval holds the shared deploy queue, so everything behind it waits as well. Reject a stale one rather than leaving it pending.
+
+⚠️ **A rejection does not retire the commit.** The drift gate reads only staging's verdict, and a rejected heal never reaches the step that writes the one-heal marker (`remote-drift-heal.sh` runs inside the heal job). So while `main` still names a commit that passed staging, each drift tick reads `behind-healable` and asks for approval again — and each ask holds the queue until answered. Fix forward (a newer merge supersedes it), or pin production with a manual Deploy of another ref, which writes the marker so drift alarms instead of asking.
 
 ### Where the deploy logic lives
 

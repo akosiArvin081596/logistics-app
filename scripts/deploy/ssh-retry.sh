@@ -24,9 +24,10 @@
 # spans ~5 min (5×20 s connect + 15+30+60+90 s waiting), which covers
 # that blip with room to spare and still sits inside the job timeouts.
 #
-# This matters more now that production auto-deploys: a transport
-# failure means production silently stays behind main until someone
-# looks at the Actions tab.
+# This matters because nobody watches a deploy finish (a reviewer
+# approves production's start, since 2026-09-25, not its end): a
+# transport failure means production silently stays behind main until
+# someone looks at the Actions tab.
 #
 # SSH_RETRY_BACKOFF (space-separated seconds) overrides the waits. Tests only.
 set -uo pipefail
