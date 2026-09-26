@@ -317,7 +317,14 @@ async function updateStatus(id, status) {
     if (result.accountCreated && result.credentials) {
       credentials.value = result.credentials
       showCredentials.value = true
-      toast('Investor accepted — account created', 'success')
+      // The toast holds one message, so a vehicle that could not be registered
+      // replaces the success line rather than being overwritten by it.
+      const failed = result.vehicles?.failed || 0
+      if (failed > 0) {
+        toast(`Investor accepted — account created. ${failed} vehicle(s) could not be added — add them from the Trucks page`, 'warning')
+      } else {
+        toast('Investor accepted — account created', 'success')
+      }
     } else {
       toast(`Status updated to ${status}`, 'success')
     }

@@ -123,7 +123,8 @@ function liftConst(head, close = null) {
 
 const NORM_SRC = liftFunction("normalizeDriverName");
 const CLASH_SRC = [liftFunction("findDriverNameClashes"), liftFunction("findDriverNameClash"), liftFunction("canonicalDriverName")].join("\n");
-const SYNC_SRC = liftFunction("syncDriverToCarrierSheet");
+// The sync finds its directory row through findDirectoryRowForDriver().
+const SYNC_SRC = [liftFunction("findDirectoryRowForDriver"), liftFunction("syncDriverToCarrierSheet")].join("\n");
 const ASSIGN_SRC = liftFunction("assignDriverToTruck");
 const AUDIT_TEXT_SRC = [liftFunction("scrubPurgeMarker"), liftFunction("auditText")].join("\n");
 const TARGETS_SRC = liftConst("const DRIVER_RENAME_TARGETS = [", "\n];");
@@ -358,6 +359,10 @@ function mountDirectoryPut(db, { routeSrc = ROUTES.dirPut, moduleSrc = {} } = {}
 function mountTrucks(db, { putSrc = ROUTES.truckPut, postSrc = ROUTES.truckPost, moduleSrc = {}, busy = [] } = {}) {
 	const m = buildModule(db, moduleSrc);
 	const refuse = (req, res) => res.status(409).json({ code: "PERIOD_STUB" });
+	// Which drivers a save syncs, by name and action — the route's own decision.
+	// The sync finds a driver's directory row and truck under any spelling, so
+	// syncing one driver twice leaves the same rows; only this record shows it.
+	const syncCalls = [];
 	const env = {
 		db,
 		...truckParse,
@@ -380,7 +385,7 @@ function mountTrucks(db, { putSrc = ROUTES.truckPut, postSrc = ROUTES.truckPost,
 		truckMonthlyFixed,
 		assignDriverToTruck: m.assignDriverToTruck,
 		fuelModel: { DEFAULT_TANK_GALLONS: 200 },
-		syncDriverToCarrierSheet: m.syncDriverToCarrierSheet,
+		syncDriverToCarrierSheet: (name, o) => { syncCalls.push([name, o && o.action]); return m.syncDriverToCarrierSheet(name, o); },
 		logAudit: () => {},
 		// The success lines name the truck through it.
 		auditText: m.auditText,
@@ -394,6 +399,7 @@ function mountTrucks(db, { putSrc = ROUTES.truckPut, postSrc = ROUTES.truckPost,
 		put: (id, body) => quiet(() => put({ params: { id: String(id) }, body })),
 		post: (body, role = "Super Admin") => quiet(() => post({ body, session: { user: { id: role === "Investor" ? 9 : 1, username: "u", role } } })),
 		m,
+		syncCalls,
 	};
 }
 
@@ -840,13 +846,15 @@ async function trucksBattery(opts = {}) {
 		db.prepare("UPDATE drivers_directory SET driver_name = 'Shorn  King', trucks = '101' WHERE id = 1").run();
 		db.prepare("UPDATE trucks SET assigned_driver = 'Shorn  King' WHERE id = 1").run();
 		db.prepare("UPDATE truck_assignments SET driver_name = 'Shorn  King' WHERE truck_id = 1").run();
-		const { put } = mountTrucks(db, opts);
+		const { put, syncCalls } = mountTrucks(db, opts);
 		const r = await put(1, { assignedDriver: "Shorn  King", notes: "x" });
 		const row = db.prepare("SELECT driver_name, trucks FROM drivers_directory WHERE id = 1").get();
 		t(`an account and a directory row spelling one driver differently: the truck takes the account's spelling (got ${r.status}, trucks ${truckDrivers(db)})`,
 			r.status === 200 && truckDrivers(db) === "1:Shorn King,2:");
 		t(`...and the directory row keeps its name and its truck (got ${JSON.stringify(row)})`,
 			!!row && row.driver_name === "Shorn  King" && row.trucks === "101" && directoryNames(db).length === 3);
+		t(`...and the save syncs that driver once, under the spelling it kept — never the replaced spelling as a departing driver (got ${JSON.stringify(syncCalls)})`,
+			JSON.stringify(syncCalls) === JSON.stringify([["Shorn King", "update"]]));
 	}
 
 	// A driver name is text: anything else is refused before anything is resolved or written.

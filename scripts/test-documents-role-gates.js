@@ -411,6 +411,7 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 	const driverDeps = {
 		requireRole, requireAuth, normalizeDriverName, findCol,
 		sanitizeBrokerColumns: (headers, rows) => rows,
+		findDirectoryRowForDriver: () => null,
 		db: { prepare: () => ({ all: () => [], get: () => undefined, run: () => ({}) }) },
 		getJobTrackingCached: async () => JT,
 		liveJobTrackingView: (jt) => ({ ...jt, headers: [...jt.headers], data: jt.data.map((x) => ({ ...x })) }),

@@ -6763,11 +6763,38 @@ async function getSheetId(sheets, sheetName) {
 // ============================================================
 // Auto-sync Driver users ↔ Carrier Database Google Sheet
 // ============================================================
+// The drivers_directory row a driver's name belongs to, for the directory sync
+// below and the driver page (GET /api/driver/:driverName). First the row equal to
+// the name case aside — the lookup both used before, and the pair the column's
+// NOCASE constraint already treats as one name — else the first row, by id, that
+// names the same driver through normalizeDriverName(), the comparison every
+// ownership check uses (findDriverNameClashes()). The second step is what finds
+// a row stored with a doubled or edge space: LOWER() folds case, not spacing.
+// Returns { id, driver_name, matchedBy: "case" | "normalized" }, or null; a
+// blank name matches nothing.
+function findDirectoryRowForDriver(name) {
+	const trimmed = typeof name === "string" ? name.trim() : "";
+	if (!trimmed) return null;
+	const same = db.prepare("SELECT id, driver_name FROM drivers_directory WHERE LOWER(driver_name) = LOWER(?) ORDER BY id").get(trimmed);
+	if (same) return { id: same.id, driver_name: same.driver_name, matchedBy: "case" };
+	const hit = findDriverNameClashes(trimmed, { users: false })[0];
+	return hit ? { id: hit.id, driver_name: hit.driver_name, matchedBy: "normalized" } : null;
+}
+
 // Sync driver to SQLite drivers_directory (replaces Google Sheet sync)
 function syncDriverToCarrierSheet(driverName, opts = {}) {
 	const { oldName, email, companyName, action } = opts;
 	try {
-		const truck = driverName ? db.prepare("SELECT unit_number FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(driverName.trim()) : null;
+		// The driver's truck: the one naming them case aside, as before, else the
+		// first by id naming them through normalizeDriverName(), so a truck stored
+		// under another spacing of the name still fills the directory's `trucks`.
+		// The table is fleet-sized; SQLite cannot collapse a whitespace run.
+		const name = typeof driverName === "string" ? driverName.trim() : "";
+		const truck = name
+			? db.prepare("SELECT unit_number FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(name)
+				|| db.prepare("SELECT unit_number, assigned_driver FROM trucks WHERE COALESCE(assigned_driver, '') <> '' ORDER BY id").all()
+					.find((t) => normalizeDriverName(t.assigned_driver) === normalizeDriverName(name))
+			: null;
 		const truckUnit = truck ? truck.unit_number : "";
 
 		if (action === "add") {
@@ -6781,19 +6808,35 @@ function syncDriverToCarrierSheet(driverName, opts = {}) {
 			db.prepare(`INSERT OR IGNORE INTO drivers_directory (driver_name, carrier_name, email, trucks, status) VALUES (?, ?, ?, ?, 'pending')`)
 				.run(driverName.trim(), companyName || "", email || "", truckUnit);
 		} else if (action === "update") {
-			const existing = db.prepare("SELECT id FROM drivers_directory WHERE LOWER(driver_name) = LOWER(?)").get((oldName || driverName || "").trim());
+			// Found through normalizeDriverName() too, so a row stored in another
+			// spacing is updated here rather than falling into "add", which would
+			// find it, add nothing and leave its `trucks` stale.
+			const existing = findDirectoryRowForDriver(oldName || driverName || "");
 			if (!existing) {
 				return syncDriverToCarrierSheet(driverName, { ...opts, action: "add" });
 			}
-			const sets = ["driver_name = ?"];
-			const params = [driverName.trim()];
+			// The stored name is rewritten on a case-aside match, as it always was,
+			// and on an explicit rename (an oldName other than the new name). A row
+			// found only through normalizeDriverName() keeps its spelling otherwise:
+			// re-spelling a stored name is a rename, and nothing asked for one.
+			const renaming = typeof oldName === "string" && oldName.trim() !== "" && oldName.trim() !== driverName.trim();
+			const sets = [];
+			const params = [];
+			if (existing.matchedBy === "case" || renaming) { sets.push("driver_name = ?"); params.push(driverName.trim()); }
 			if (companyName !== undefined) { sets.push("carrier_name = ?"); params.push(companyName); }
 			if (email !== undefined) { sets.push("email = ?"); params.push(email); }
 			sets.push("trucks = ?"); params.push(truckUnit);
 			params.push(existing.id);
 			db.prepare(`UPDATE drivers_directory SET ${sets.join(", ")} WHERE id = ?`).run(...params);
 		} else if (action === "delete") {
-			db.prepare("DELETE FROM drivers_directory WHERE LOWER(driver_name) = LOWER(?)").run(driverName.trim());
+			// Every row equal to the name case aside, as before; with none, the row
+			// that names the same driver through normalizeDriverName().
+			const existing = findDirectoryRowForDriver(name);
+			if (existing && existing.matchedBy === "case") {
+				db.prepare("DELETE FROM drivers_directory WHERE LOWER(driver_name) = LOWER(?)").run(name);
+			} else if (existing) {
+				db.prepare("DELETE FROM drivers_directory WHERE id = ?").run(existing.id);
+			}
 		}
 	} catch (err) {
 		console.error("syncDriverToDirectory error:", err.message);
@@ -12233,6 +12276,70 @@ app.get("/api/admin/orphaned-signed-artifacts", requireRole("Super Admin"), orph
 	}
 });
 
+// Accepting an investor application registers each vehicle on it as a truck
+// owned by the new account (owner_id = the user id, as the dashboard and reports
+// key it), under the unit number INV-<application id>-<A, B, …>. Returns what
+// happened to them: { created, existing, failed }.
+//
+// ⚠️ ONLY A UNIQUE VIOLATION MEANS "ALREADY EXISTS". The loop used to swallow
+// every error as a duplicate while the audit line and the welcome email counted
+// every vehicle on the application as registered, so a truck that was never
+// written read as added. unit_number is the trucks table's only UNIQUE column, so
+// SQLITE_CONSTRAINT_UNIQUE is a truck already on file under that number —
+// normally this application's own, from an earlier acceptance; it is left as it
+// is. Any other error is logged and counted as failed, and the admin is told to
+// add those trucks by hand.
+function registerApplicationVehicles(vehicles, appId, userId) {
+	const counts = { created: 0, existing: 0, failed: 0 };
+	const list = Array.isArray(vehicles) ? vehicles : [];
+	const validTruckStatus = ["Active", "Inactive", "Maintenance", "OOS"];
+	for (let i = 0; i < list.length; i++) {
+		// NOT the same bug as the sheet-column sites: `i` indexes an
+		// application's vehicles, never a spreadsheet column, so it can never
+		// produce an invalid A1 range — the 27th vehicle would just be named
+		// "INV-42-[", which is ugly but unique, and nothing builds a regex or a
+		// path from unit_number. Converted anyway because colLetter(i) is
+		// byte-identical for i < 26 (every application that has ever existed),
+		// strictly more readable above it, and leaving one benign
+		// String.fromCharCode(65 + …) in the tree means the next person to grep
+		// for the anti-pattern has to re-derive that this one is harmless —
+		// which is exactly how the accept-branch site survived.
+		const unitNum = `INV-${appId}-${colLetter(i)}`;
+		try {
+			// An entry that is not an object (only a row written before the public
+			// forms checked their vehicles could hold one) is refused here, as a
+			// failure, rather than throwing out of the acceptance.
+			const v = list[i];
+			if (!v || typeof v !== "object") throw new Error("the application's vehicle entry is not an object");
+			const truckStatus = validTruckStatus.includes(v.status) ? v.status : "Active";
+			// The purchase price is read by parseTruckAmount(), the parser
+			// POST /api/trucks and PUT /api/trucks/:id read it through, so this truck
+			// never holds a price those routes would refuse. Unlike them, a value it
+			// refuses does NOT refuse the acceptance: it is stored as 0 — unset, as a
+			// blank is — because an admin cannot edit the applicant's vehicle data,
+			// and the real price is set on the truck afterwards. "85,000" is 0 too,
+			// not the 85 that parseFloat() read out of it. A price left out is the
+			// parser's { value: undefined } ("not sent"), and that is 0 here as well.
+			const priceRead = parseTruckAmount(v.purchasePrice);
+			const vehiclePrice = priceRead.error || priceRead.value === undefined ? 0 : priceRead.value;
+			db.prepare(`INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, owner_id, purchase_price, title_status, title_state, notes)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+			.run(unitNum, v.make || "", v.model || "", parseInt(v.year) || 0, v.vin || "", v.licensePlate || "",
+				truckStatus, userId, vehiclePrice,
+				v.titleStatus || "Clean", v.titleState || "", "");
+			counts.created++;
+		} catch (err) {
+			if (err && err.code === "SQLITE_CONSTRAINT_UNIQUE") {
+				counts.existing++;
+			} else {
+				counts.failed++;
+				console.error(`Investor application ${appId}: vehicle ${unitNum} could not be added as a truck:`, err && err.message ? err.message : err);
+			}
+		}
+	}
+	return counts;
+}
+
 // Admin: accept/reject investor application
 app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), async (req, res) => {
 	try {
@@ -12296,43 +12403,15 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			// Create trucks from application vehicles (owner_id = user ID, consistent with dashboard/reports)
 			let vehicles = [];
 			try { vehicles = JSON.parse(application.vehicles_json || "[]"); } catch { /* skip */ }
-			const validTruckStatus = ["Active", "Inactive", "Maintenance", "OOS"];
-			for (let i = 0; i < vehicles.length; i++) {
-				const v = vehicles[i];
-				// NOT the same bug as the sheet-column sites: `i` indexes an
-				// application's vehicles, never a spreadsheet column, so it can never
-				// produce an invalid A1 range — the 27th vehicle would just be named
-				// "INV-42-[", which is ugly but unique, and nothing builds a regex or a
-				// path from unit_number. Converted anyway because colLetter(i) is
-				// byte-identical for i < 26 (every application that has ever existed),
-				// strictly more readable above it, and leaving one benign
-				// String.fromCharCode(65 + …) in the tree means the next person to grep
-				// for the anti-pattern has to re-derive that this one is harmless —
-				// which is exactly how the accept-branch site survived.
-				const unitNum = `INV-${appId}-${colLetter(i)}`;
-				const truckStatus = validTruckStatus.includes(v.status) ? v.status : "Active";
-				// The purchase price is read by parseTruckAmount(), the parser
-				// POST /api/trucks and PUT /api/trucks/:id read it through, so this truck
-				// never holds a price those routes would refuse. Unlike them, a value it
-				// refuses does NOT refuse the acceptance: it is stored as 0 — unset, as a
-				// blank is — because an admin cannot edit the applicant's vehicle data,
-				// and the real price is set on the truck afterwards. "85,000" is 0 too,
-				// not the 85 that parseFloat() read out of it. A price left out is the
-				// parser's { value: undefined } ("not sent"), and that is 0 here as well.
-				const priceRead = parseTruckAmount(v.purchasePrice);
-				const vehiclePrice = priceRead.error || priceRead.value === undefined ? 0 : priceRead.value;
-				try {
-					db.prepare(`INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, owner_id, purchase_price, title_status, title_state, notes)
-						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-					.run(unitNum, v.make || "", v.model || "", parseInt(v.year) || 0, v.vin || "", v.licensePlate || "",
-						truckStatus, userId, vehiclePrice,
-						v.titleStatus || "Clean", v.titleState || "", "");
-				} catch { /* skip duplicate */ }
-			}
+			if (!Array.isArray(vehicles)) vehicles = [];
+			const vehicleCounts = registerApplicationVehicles(vehicles, appId, userId);
+			// What the investor's fleet actually holds: trucks written now plus
+			// trucks already on file under this application's unit numbers.
+			const vehiclesRegistered = vehicleCounts.created + vehicleCounts.existing;
 
-			logAudit(req, "accept_investor", "investor_application", appId, `Accepted investor "${fullName}", created account "${username}", ${vehicles.length} vehicle(s)`);
+			logAudit(req, "accept_investor", "investor_application", appId, `Accepted investor "${fullName}", created account "${username}", ${vehicles.length} vehicle(s): ${vehicleCounts.created} created, ${vehicleCounts.existing} already existed, ${vehicleCounts.failed} failed`);
 			notifyChange("investor-applications"); notifyChange("investors"); notifyChange("users"); notifyChange("trucks");
-			res.json({ success: true, accountCreated: true, credentials: { username, tempPassword, userId, investorName: fullName } });
+			res.json({ success: true, accountCreated: true, credentials: { username, tempPassword, userId, investorName: fullName }, vehicles: vehicleCounts });
 
 			// Send welcome email to investor (async, non-blocking)
 			// Every interpolated value goes through escapeHtml(), as in the driver
@@ -12346,7 +12425,7 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 				<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
 					<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Welcome to LogisX!</h2>
 					<p style="margin:0 0 12px;line-height:1.6;color:#334155">Hi <b>${escapeHtml(fullName)}</b>,</p>
-					<p style="margin:0 0 20px;line-height:1.6;color:#334155">Your investor application has been <b style="color:#16a34a">approved</b>. Your account is ready and ${vehicles.length} vehicle(s) have been registered to your fleet.</p>
+					<p style="margin:0 0 20px;line-height:1.6;color:#334155">Your investor application has been <b style="color:#16a34a">approved</b>. Your account is ready and ${vehiclesRegistered} vehicle(s) have been registered to your fleet.</p>
 
 					<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:20px;margin:0 0 20px">
 						<div style="font-size:12px;font-weight:700;color:#0369a1;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Your Login Credentials</div>
@@ -12387,7 +12466,7 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 							<tr><td style="padding:5px 0;color:#64748b;width:140px">Username</td><td style="padding:5px 0;font-weight:600;font-family:monospace">${escapeHtml(username)}</td></tr>
 							<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0">${escapeHtml(application.email)}</td></tr>
 							<tr><td style="padding:5px 0;color:#64748b">Entity Type</td><td style="padding:5px 0">${escapeHtml(application.entity_type || "-")}</td></tr>
-							<tr><td style="padding:5px 0;color:#64748b">Fleet</td><td style="padding:5px 0;font-weight:600">${vehicles.length} vehicle(s) added</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b">Fleet</td><td style="padding:5px 0;font-weight:600">${vehiclesRegistered} vehicle(s) added${vehicleCounts.failed > 0 ? `; ${vehicleCounts.failed} could not be added — add them from the Trucks page` : ""}</td></tr>
 							<tr><td style="padding:5px 0;color:#64748b">Accepted By</td><td style="padding:5px 0">${escapeHtml(req.session.user.username)}</td></tr>
 						</table>
 					</div>
@@ -28855,11 +28934,10 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		//
 		// ⚠️ RESTORE ONLY WHAT WAS REDACTED, not every matching column. Because the
 		// splice had never once run, "preserve broker columns" had never actually
-		// restricted anybody — and both columns are editable in the Active Loads
-		// modal a Dispatcher uses. A blanket restore would silently discard their
-		// edit, answer {success:true}, and let the UI show the change until the next
+		// restricted anybody. A blanket restore would silently discard an edit,
+		// answer {success:true}, and let the UI show the change until the next
 		// refresh. So the value is put back only when the caller sent back exactly
-		// the redacted copy GET /api/data served them; a genuine edit goes through.
+		// the redacted copy they were served; a genuine edit goes through.
 		//
 		// ⚠️ THE CANDIDATE SET IS DERIVED, NOT RE-SPELLED. This filter used to be
 		// its own hardcoded `/broker|phone|contact/i`, which does NOT match
@@ -28867,27 +28945,12 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		// now does; it always should have), a Dispatcher's save would write ""
 		// straight over the stored address. A disclosure bug turns into DATA LOSS
 		// the instant the reader and the writer disagree about which columns were
-		// redacted, so both now ask resolveBrokerWithheldColumns(). The
-		// `served !== stored` test below remains the real authority; this is only
-		// the candidate list.
-		const preserved = [];
-		if (req.session.user.role !== "Super Admin") {
-			const servedRow = sanitizeBrokerColumns(headers, [rowObjectFromCells(headers, before)])[0] || {};
-			const withheldCols = new Set(resolveBrokerWithheldColumns(headers));
-			headers.forEach((h, i) => {
-				if (!withheldCols.has(h) || !before[i] || i >= values.length) return;
-				const stored = String(before[i]);
-				const served = servedRow[h] === undefined ? stored : String(servedRow[h]);
-				// Nothing was hidden from them for this column — let them edit it.
-				if (served === stored) return;
-				// They sent the redacted copy straight back: that is the round-trip
-				// this splice exists to catch, not an edit.
-				if (String(values[i] == null ? "" : values[i]) === served) {
-					values[i] = before[i];
-					preserved.push(String(h).trim() || `col${i + 1}`);
-				}
-			});
-		}
+		// redacted, so both now ask resolveBrokerWithheldColumns().
+		//
+		// The rule itself is restoreWithheldBrokerCells(), beside the reader.
+		const preserved = req.session.user.role !== "Super Admin"
+			? restoreWithheldBrokerCells(headers, before, values)
+			: [];
 
 		// Diff AFTER the splice — the spliced values are what actually get written,
 		// so they are what has to be judged and what has to be audited.
@@ -31253,20 +31316,26 @@ function deduplicateLoads(data, headers, returnDuplicates = false) {
 	return { data: filtered, duplicates };
 }
 
-function sanitizeBrokerContact(value) {
-	if (!value || typeof value !== "string") return value;
-	const trimmed = value.trim();
-	if (!trimmed.startsWith("{")) return value;
-	try {
-		const parsed = JSON.parse(trimmed);
-		return JSON.stringify({ Name: parsed.Name || parsed.name || "" });
-	} catch {
-		return value;
-	}
-}
-
 // ---------------------------------------------------------------------------
-// The broker-contact columns a non-Super-Admin must not receive in full.
+// The broker-contact columns a non-Super-Admin must not receive.
+//
+// ⚠️ OWNER'S DECISION, 2026-09-26: A NON-SUPER-ADMIN GETS NO BROKER CONTACT DATA,
+// NAMES INCLUDED, WHATEVER THE CELL'S FORMAT. Every column the resolver below
+// matches is served blank. That ends the one exception this code had: a cell
+// holding a JSON contact blob ({"Name":…,"Phone":…}) used to be reduced to its
+// name rather than blanked, on the belief that production's Job Tracking held no
+// such cell. It holds plenty — a 2026-09-26 read of a copy of production's sheet
+// found "Broker Contact Name" at 183 JSON cells and 158 plain ones, and "Phone
+// Number" at 254 JSON cells — so a Dispatcher saw the booking agent's name on
+// some loads and a blank on others. The reasoning behind withholding the name at
+// all: the control exists so dispatch works through the company rather than
+// straight to the broker, and a named agent at a known brokerage is as
+// actionable a contact as a phone number.
+//
+// ⚠️ THE RATE-CON PDF STILL CARRIES THE BROKER'S CONTACT BLOCK, and a Dispatcher
+// can open it: uploads/rate-cons/ is a role gate, not an ownership rule, by
+// recorded intent (docs/claude/pii-at-rest.md). Blanking these cells withholds
+// what the app serves out of the sheet, not what that document says.
 //
 // ⚠️ THIS IS A UNION RESOLVED BY NAME, NEVER `headers.find(...)`. The previous
 // version picked ONE column per role with two loose regexes:
@@ -31294,15 +31363,8 @@ function sanitizeBrokerContact(value) {
 // reason (a "Contact Number" column on some other sheet was redacted before and
 // still is); it is simply no longer allowed to *shadow* the phone column.
 //
-// DELIBERATE, not accidental: "Broker Contact Name" IS withheld. It was blanked
-// only by the bug above, but that is what every non-Super-Admin sees today, so
-// keeping it withheld makes this change strictly narrowing — no UI that already
-// copes with an empty cell regresses, and no new disclosure ships inside a leak
-// fix. It is also the coherent line: the control exists so dispatch cannot route
-// around the company to the broker, and a named agent at a known brokerage is a
-// directly actionable contact, so publishing the person while hiding the channel
-// is a weak boundary. Revealing it to Dispatchers is a product decision and
-// belongs in its own change, with the owner.
+// "Broker Contact Name" is withheld with the rest: it was first blanked only by
+// the bug above, and the owner's decision at the top of this block settles it.
 //
 // ⚠️ `Contract ID`, `"  Payment  "` (real surrounding spaces) and `Owner ID`
 // match nothing here and are untouched — verified against the header row above.
@@ -31320,24 +31382,75 @@ function resolveBrokerWithheldColumns(headers) {
 	return (headers || []).filter((h) => BROKER_WITHHELD_RE.test(String(h == null ? "" : h)));
 }
 
+// A copy of the rows with every withheld cell that holds anything served as "",
+// plain text and JSON contact blobs alike (the owner's decision above). An
+// absent or empty cell is left as it is. Callers apply it to every role but
+// Super Admin.
 function sanitizeBrokerColumns(headers, rows) {
 	const withheld = resolveBrokerWithheldColumns(headers);
 	if (!withheld.length) return rows;
 	return rows.map((row) => {
 		const cleaned = { ...row };
 		for (const col of withheld) {
-			if (!cleaned[col]) continue;
-			const val = String(cleaned[col]).trim();
-			// A legacy cell carrying a JSON contact blob degrades to just the
-			// name rather than vanishing — blanking it outright would destroy
-			// the load's broker association wholesale. Production's Job Tracking
-			// carries no such cell (the name column holds a plain string), so
-			// this branch is compatibility for older/other sheets and is left
-			// exactly as it behaved before.
-			cleaned[col] = val.startsWith("{") ? sanitizeBrokerContact(val) : "";
+			if (cleaned[col]) cleaned[col] = "";
 		}
 		return cleaned;
 	});
+}
+
+// The copy a non-Super-Admin was served, until 2026-09-26, for a withheld cell
+// holding a JSON contact blob: the blob reduced to its name, {"Name":…}. Nothing
+// serves it any more. It is kept for one reader, restoreWithheldBrokerCells(), so
+// a page loaded before that change and saved after it cannot write this copy
+// over the stored contact. null for any other cell: a plain one was served blank
+// then too, and a blob that does not parse was served in full.
+function legacyServedBrokerCell(stored) {
+	const trimmed = String(stored == null ? "" : stored).trim();
+	if (!trimmed.startsWith("{")) return null;
+	try {
+		const parsed = JSON.parse(trimmed);
+		return JSON.stringify({ Name: parsed.Name || parsed.name || "" });
+	} catch {
+		return null;
+	}
+}
+
+// PUT /api/data/:rowIndex, for a non-Super-Admin's save: put the stored value
+// back into every withheld cell the caller sent back exactly as it was served to
+// them, so the redacted copy never overwrites the record. Mutates `values` and
+// returns the trimmed names of the columns it restored. `before` is the row as
+// stored, `values` the row as sent, both in header order.
+//
+// Only what was redacted is restored: a withheld column holding nothing was
+// served as stored, so a value sent for it is an edit, and so is a value that
+// differs from the served copy. The columns and the served copy come from the
+// reader's own rule (resolveBrokerWithheldColumns(), sanitizeBrokerColumns()) —
+// see ONE SOURCE FOR READER AND WRITER above.
+//
+// ⚠️ THE PRE-2026-09-26 COPY COUNTS AS A ROUND TRIP TOO. The Active Loads editor
+// sends each withheld column back as the value its row holds, and a page loaded
+// before that date still holds a JSON contact cell's name-only copy. Judged only
+// against today's blank copy, that would read as an edit and replace the stored
+// contact, phone and email with the name alone (legacyServedBrokerCell()).
+function restoreWithheldBrokerCells(headers, before, values) {
+	const preserved = [];
+	const servedRow = sanitizeBrokerColumns(headers, [rowObjectFromCells(headers, before)])[0] || {};
+	const withheldCols = new Set(resolveBrokerWithheldColumns(headers));
+	headers.forEach((h, i) => {
+		if (!withheldCols.has(h) || !before[i] || i >= values.length) return;
+		const stored = String(before[i]);
+		const served = servedRow[h] === undefined ? stored : String(servedRow[h]);
+		// Nothing was hidden from them for this column — let them edit it.
+		if (served === stored) return;
+		const sent = String(values[i] == null ? "" : values[i]);
+		// They sent a redacted copy straight back: that is the round trip this
+		// exists to catch, not an edit.
+		if (sent === served || sent === legacyServedBrokerCell(stored)) {
+			values[i] = before[i];
+			preserved.push(String(h).trim() || `col${i + 1}`);
+		}
+	});
+	return preserved;
 }
 
 function findCol(headers, regex) {
@@ -32756,7 +32869,10 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 		let sharedDocuments = [];
 		let profilePictureUrl = "";
 		let driverDirectoryId = 0;
-		const directoryRow = db.prepare("SELECT id, profile_picture_url FROM drivers_directory WHERE LOWER(driver_name) = ?").get(nameLower);
+		// The row is found as the directory sync finds it, so one stored under
+		// another spacing of the name is still this driver's (findDirectoryRowForDriver()).
+		const directoryMatch = findDirectoryRowForDriver(driverName);
+		const directoryRow = directoryMatch ? db.prepare("SELECT id, profile_picture_url FROM drivers_directory WHERE id = ?").get(directoryMatch.id) : null;
 		if (directoryRow && directoryRow.id > 0) {
 			driverDirectoryId = directoryRow.id;
 			profilePictureUrl = directoryRow.profile_picture_url || "";
@@ -42165,7 +42281,9 @@ app.get("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 			headers.forEach((h, idx) => { obj[h] = rows[i][idx] || ""; });
 			if (obj[loadIdCol] === loadId) {
 				obj._rowIndex = i + 1;
-				return res.json({ load: obj });
+				// Every role but Super Admin gets the broker contact columns blank,
+				// as from GET /api/data and /api/dashboard (sanitizeBrokerColumns()).
+				return res.json({ load: req.session.user.role !== "Super Admin" ? sanitizeBrokerColumns(headers, [obj])[0] : obj });
 			}
 		}
 
@@ -42469,11 +42587,13 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 		// The 60s Job Tracking cache would otherwise keep serving the old figures.
 		if (guarded) jtCacheInvalidate();
 
-		// Return updated load — unchanged response shape.
+		// Return updated load — unchanged response shape. Every role but Super
+		// Admin gets the broker contact columns blank, as GET /api/load/:loadId
+		// serves them.
 		const result = {};
 		headers.forEach((h, idx) => { result[h] = updatedRow[idx]; });
 		result._rowIndex = rowIndex;
-		res.json({ success: true, load: result });
+		res.json({ success: true, load: req.session.user.role !== "Super Admin" ? sanitizeBrokerColumns(headers, [result])[0] : result });
 	} catch (error) {
 		console.error("Error updating load:", error.message);
 		res.status(500).json({ error: error.message });
