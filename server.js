@@ -6581,8 +6581,9 @@ const rcIndexShared = require("./lib/ratecon-drive-index.js");
 // step 2 still reads BOL rows, but only as a last-resort supporting document,
 // and POST /api/admin/ratecon-index must not count one as a linked rate-con.
 // One list for both, so they cannot disagree about what "a rate-con on file" is.
-// (GET /api/documents/:loadId hides rate-cons from its list with its own, looser
-// match; that decides what is shown, never what is trusted.) The upload types
+// (RATECON_DOCUMENT_SQL, beside the /uploads guard, is a looser match; it
+// decides what is withheld — from the Documents panel, the investor portal and
+// the root-file guard — never what is trusted.) The upload types
 // POST /api/documents/upload offers a Driver or Dispatcher (uploadDocTypeFor())
 // must never include one of these — scripts/test-invoice-draft-bol.js pins it.
 const RATECON_DOC_TYPES = Object.freeze(["RATECON", "RATE CON", "RATE_CON"]);
@@ -8056,11 +8057,13 @@ function expressRequestView(req) {
 	});
 }
 
-// Rate cons state the BROKER RATE, so they are dispatch/ownership material, not
-// driver material — this app strips financial columns from the Driver role
-// everywhere else (GET /api/driver/:driverName, the /rate|amount|pay|.../i
-// column filter). requireAuth alone is not enough here: a driver IS
-// authenticated, load ids are visible to them, and the archive filename is
+// Rate cons are SUPER ADMIN ONLY (owner, 2026-09-26). A rate con states the
+// broker rate and carries the broker's contact block, and no other role gets
+// either from this app: the Driver role loses the financial columns
+// (GET /api/driver/:driverName, the /rate|amount|pay|.../i column filter), and
+// every role but Super Admin loses the broker contact columns
+// (sanitizeBrokerColumns()). requireAuth alone is not enough here: every role
+// is authenticated, load ids are visible to them, and the archive filename is
 // exactly `<loadId>.pdf`, so the URL is guessable rather than secret.
 //
 // MUST stay ABOVE the general /uploads handler below — express matches in
@@ -8079,7 +8082,7 @@ function expressRequestView(req) {
 // normalizedUploadPath / GUARDED_UPLOAD_DIRS), which runs at the SAME mount
 // point as express.static and normalizes the path the same way, so no path
 // shape can be protected by one and served by the other.
-app.use("/uploads/rate-cons", requireRole("Super Admin", "Dispatcher"));
+app.use("/uploads/rate-cons", requireRole("Super Admin"));
 
 // ---------------------------------------------------------------------------
 // Signed onboarding PDFs — OWNERSHIP, not merely a session.
@@ -8352,7 +8355,9 @@ function guardInvoicePdf(req, res, next, url, file) {
 //   prefix: uploadsPathGuard sends it every single-segment path.
 //   uploads/onboarding-templates/ holds blank forms — no PII, nothing to guard.
 //   uploads/rate-cons/ IS `${loadId}.pdf`, i.e. fully enumerable, and is
-//   role-gated in the handler below rather than by an ownership rule.
+//   Super Admin only, by a role branch in the handler below rather than an
+//   ownership rule. A rate con in the uploads ROOT is held to the same rule by
+//   guardRootLoadDocument.
 //
 //   uploads/onboarding/ holds DRUG TEST results and IS guarded, as of the
 //   2026-09-19 review. It was previously left out on the grounds that
@@ -8425,18 +8430,20 @@ function guardDrugTestFile(req, res, next, url) {
 // ROW decides who may read the file: a reader is someone whose own listing
 // hands them that link.
 //
-//   Super Admin, Dispatcher — pass, with no lookup. Both already read every
-//     load's documents (the dashboard's Documents panels, invoice drafting), so
-//     a row would add nothing to the decision, and a file without one stays
-//     readable to them exactly as before.
+//   Super Admin — pass, with no lookup.
+//   Dispatcher — pass, unless a row with this name is a rate con
+//     (RATECON_DOCUMENT_SQL, live or deleted): rate cons are Super Admin only
+//     (owner, 2026-09-26), wherever the file is stored. Anything else needs no
+//     row: a Dispatcher reads every load's documents through the dashboard's
+//     Documents panels, and a file without a row stays readable to them.
 //   Driver — a row their load's Documents panel lists (LOAD_PANEL_DOCUMENT_
 //     FILTER, shared with GET /api/documents/:loadId) on a load
 //     loadBelongsToDriver() says is theirs, the same check that listing runs.
 //     "Could not verify" answers the shared retryable 503: never a pass, never
 //     a refusal.
 //   Investor — a row in the scope GET /api/investor/documents lists
-//     (investorDocumentScope(), shared), so every file the Document Portal
-//     lists opens and nothing else does.
+//     (investorDocumentScope(), shared, which leaves rate cons out), so every
+//     file the Document Portal lists opens and nothing else does.
 //   Anyone else, and every refusal — 404, never 403: a 403 would confirm that
 //     a name exists.
 //
@@ -8451,18 +8458,33 @@ function guardDrugTestFile(req, res, next, url) {
 // filesystem finds no row and is refused.
 // ---------------------------------------------------------------------------
 
+// A documents row that is a rate con, by its type: case, spaces and underscores
+// ignored, so "RATECON", "Rate Con" and "rate_con" all match. Rate cons are
+// SUPER ADMIN ONLY (owner, 2026-09-26), so every listing and file rule that
+// serves another role reads this ONE copy: the load Documents panel
+// (LOAD_PANEL_DOCUMENT_FILTER), the investor Document Portal
+// (investorDocumentScope()) and guardRootLoadDocument's Dispatcher rule.
+// isRateConDocType() is the same test for a type already in hand.
+// Deliberately looser than RATECON_DOC_TYPES: that list decides what invoice
+// drafting TRUSTS as a rate con, this one decides what is WITHHELD, and a wider
+// match here only withholds more. A constant fragment — nothing from a request
+// is ever interpolated into it.
+const RATECON_DOCUMENT_SQL = "UPPER(REPLACE(REPLACE(COALESCE(type,''), ' ', ''), '_', '')) = 'RATECON'";
+function isRateConDocType(type) {
+	return String(type == null ? "" : type).replace(/[ _]/g, "").toUpperCase() === "RATECON";
+}
+
 // The rows a load's Documents panel lists: live, and not a rate con. ONE copy,
 // read by GET /api/documents/:loadId and by guardRootLoadDocument's Driver rule,
 // so the files a driver may open cannot drift from the list they are shown.
-// A constant fragment — nothing from a request is ever interpolated into it.
-const LOAD_PANEL_DOCUMENT_FILTER =
-	"deleted_at IS NULL AND UPPER(REPLACE(REPLACE(COALESCE(type,''), ' ', ''), '_', '')) != 'RATECON'";
+const LOAD_PANEL_DOCUMENT_FILTER = `deleted_at IS NULL AND NOT (${RATECON_DOCUMENT_SQL})`;
 
-// The documents an Investor's Document Portal lists. ONE copy, read by
-// GET /api/investor/documents and by guardRootLoadDocument, so a file the portal
-// lists always opens and a file it does not list never does. null when the
-// investor has no drivers (the portal then lists nothing). `sql` holds only `?`
-// placeholders; the driver names travel as bound parameters.
+// The documents an Investor's Document Portal lists: live, not a rate con, and
+// on a driver of theirs. ONE copy, read by GET /api/investor/documents and by
+// guardRootLoadDocument, so a file the portal lists always opens and a file it
+// does not list never does. null when the investor has no drivers (the portal
+// then lists nothing). `sql` holds only `?` placeholders and constant fragments;
+// the driver names travel as bound parameters.
 function investorDocumentScope(userId) {
 	const cdb = getCarrierDBFromSQLite();
 	const cDriverCol = findCol(cdb.headers, /driver/i) || cdb.headers[0];
@@ -8470,7 +8492,7 @@ function investorDocumentScope(userId) {
 	const drivers = [...getInvestorDriverSet(userId, cdb.data, cDriverCol, cCarrierCol)];
 	if (!drivers.length) return null;
 	return {
-		sql: `LOWER(driver) IN (${drivers.map(() => "?").join(",")}) AND deleted_at IS NULL`,
+		sql: `LOWER(driver) IN (${drivers.map(() => "?").join(",")}) AND deleted_at IS NULL AND NOT (${RATECON_DOCUMENT_SQL})`,
 		params: drivers,
 	};
 }
@@ -8483,7 +8505,17 @@ function investorDocumentScope(userId) {
 async function guardRootLoadDocument(req, res, next, file) {
 	try {
 		const user = req.session.user;
-		if (user.role === "Super Admin" || user.role === "Dispatcher") return next();
+		if (user.role === "Super Admin") return next();
+
+		if (user.role === "Dispatcher") {
+			// Any row, live or deleted: a deleted row does not stop the file being
+			// a rate con.
+			const rateCon = db.prepare(
+				`SELECT id FROM documents WHERE file_name = ? AND ${RATECON_DOCUMENT_SQL} LIMIT 1`
+			).all(file);
+			if (rateCon.length) return res.status(404).end();
+			return next();
+		}
 
 		if (user.role === "Driver") {
 			const loadIds = db.prepare(
@@ -8611,14 +8643,15 @@ function uploadsPathGuard(req, res, next) {
 	// overlay/CIFS mount, or run on a Mac.
 	const probe = norm.toLowerCase();
 
-	// Rate cons: same role rule as the (now redundant) sub-path mount above,
-	// re-applied here because that mount does not survive a normalized path.
-	// 403 rather than 404 preserves the existing behaviour for this directory —
-	// a rate con's existence is already implied by the load id, so there is
-	// nothing to conceal, unlike a person's W-9.
+	// Rate cons: Super Admin only (owner, 2026-09-26), the same role rule as the
+	// (now redundant) sub-path mount above, re-applied here because that mount
+	// does not survive a normalized path. 403 rather than 404 preserves the
+	// existing behaviour for this directory — a rate con's existence is already
+	// implied by the load id, so there is nothing to conceal, unlike a person's
+	// W-9. A rate con stored in the uploads ROOT is refused by
+	// guardRootLoadDocument instead.
 	if (probe.startsWith("/rate-cons/")) {
-		const role = req.session.user.role;
-		if (role !== "Super Admin" && role !== "Dispatcher") return res.status(403).json({ error: "Forbidden" });
+		if (req.session.user.role !== "Super Admin") return res.status(403).json({ error: "Forbidden" });
 		return next();
 	}
 
@@ -31332,10 +31365,13 @@ function deduplicateLoads(data, headers, returnDuplicates = false) {
 // straight to the broker, and a named agent at a known brokerage is as
 // actionable a contact as a phone number.
 //
-// ⚠️ THE RATE-CON PDF STILL CARRIES THE BROKER'S CONTACT BLOCK, and a Dispatcher
-// can open it: uploads/rate-cons/ is a role gate, not an ownership rule, by
-// recorded intent (docs/claude/pii-at-rest.md). Blanking these cells withholds
-// what the app serves out of the sheet, not what that document says.
+// ⚠️ THE RATE-CON PDF CARRIES THE BROKER'S CONTACT BLOCK TOO, which is why rate
+// cons and invoice drafting are Super Admin only as well (owner, 2026-09-26).
+// Blanking these cells withholds what the app serves out of the sheet; the
+// document itself is withheld by the /uploads guard (uploadsPathGuard's
+// rate-cons branch, guardRootLoadDocument), and the invoice-draft routes —
+// whose recipient comes off the rate con — are requireRole("Super Admin"). See
+// docs/claude/pii-at-rest.md.
 //
 // ⚠️ THIS IS A UNION RESOLVED BY NAME, NEVER `headers.find(...)`. The previous
 // version picked ONE column per role with two loose regexes:
@@ -38646,7 +38682,11 @@ const draftInvoiceLimiter = rateLimit({
 });
 
 // POST /api/loads/:loadId/draft-invoice  (alias: .../draft-bison-invoice)
-// Restricted to Super Admin + Dispatcher (the roles that run dispatch ops).
+// SUPER ADMIN ONLY (owner, 2026-09-26), like every invoice-draft route —
+// invoice-preview and GET …/invoice-draft below as well. A draft is addressed
+// to the rate con's documents email, names the broker, and on ?dryRun=1 returns
+// the rate con's own bytes, and a non-Super-Admin gets no broker contact data
+// and no rate con from this app (see sanitizeBrokerColumns()).
 // The legacy Bison-specific path stays registered so any external caller
 // (bookmarks, n8n, a cached SPA bundle) keeps working — same handler.
 //
@@ -38668,7 +38708,7 @@ const draftInvoiceLimiter = rateLimit({
 // API; it does not restate a settlement.
 app.post(
 	["/api/loads/:loadId/draft-invoice", "/api/loads/:loadId/draft-bison-invoice"],
-	requireRole("Super Admin", "Dispatcher"),
+	requireRole("Super Admin"),
 	// requireRole BEFORE the limiter so an unauthenticated caller cannot spend
 	// the budget on 403s — the fuelEvents/fuelGallons precedent.
 	refuseCrossSite,
@@ -38869,10 +38909,10 @@ app.post(
 			//
 			// ⚠️ ONLY RATE-CON ROWS in `documents` are trusted, and the trust is in who
 			// writes them: POST /api/loads/from-ratecon (a Super Admin or Dispatcher
-			// creating the load FROM that PDF), rememberRateConMatch() (a Super Admin
-			// or Dispatcher's non-preview request on this route found the file by
-			// content — normally the approve after the review modal showed it — or a
-			// Super Admin applied the backfill), and an upload typed as a rate-con,
+			// creating the load FROM that PDF), rememberRateConMatch() (a Super
+			// Admin's non-preview request on this route found the file by content —
+			// normally the approve after the review modal showed it — or a Super
+			// Admin applied the backfill), and an upload typed as a rate-con,
 			// which POST /api/documents/upload's type list keeps to Super Admin
 			// (uploadDocTypeFor()). A BOL row is
 			// not a rate-con: getRateConBytes() tags it 'documents-bol', and nothing —
@@ -39490,7 +39530,7 @@ const INVOICE_PREVIEW_MAX_INFLIGHT = 2;
 let invoicePreviewInflight = 0;
 app.post(
 	"/api/loads/:loadId/invoice-preview",
-	requireRole("Super Admin", "Dispatcher"),
+	requireRole("Super Admin"),
 	// requireRole BEFORE the limiter so an unauthenticated caller cannot spend
 	// the budget on 403s — the fuelEvents/fuelGallons precedent.
 	refuseCrossSite,
@@ -39624,7 +39664,8 @@ app.post(
 
 // GET /api/loads/:loadId/invoice-draft — the latest official invoice draft created
 // for a load (recipient + invoice #), so the load modal can reflect "approved draft".
-app.get("/api/loads/:loadId/invoice-draft", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+// Super Admin only, like the draft routes above: the row names the recipient.
+app.get("/api/loads/:loadId/invoice-draft", requireRole("Super Admin"), (req, res) => {
 	try {
 		const loadId = decodeURIComponent(req.params.loadId || "").trim();
 		if (!loadId) return res.status(400).json({ error: "loadId is required" });
@@ -41138,11 +41179,13 @@ app.post("/api/documents/upload", requireRole("Super Admin", "Dispatcher", "Driv
 			return res.status(500).json({ error: "Document was uploaded but could not be saved. Please try again." });
 		}
 
-		// Notify dispatch
+		// Notify dispatch. The dispatch room holds Dispatchers, so a rate con's link
+		// stays out of the broadcast: rate cons are Super Admin only (owner,
+		// 2026-09-26). No client reads driveUrl from this event.
 		io.to("dispatch").emit("pod-uploaded", {
 			loadId,
 			driverName,
-			driveUrl,
+			...(isRateConDocType(docType) ? {} : { driveUrl }),
 			docType,
 		});
 		insertDispatchNotification.run(
