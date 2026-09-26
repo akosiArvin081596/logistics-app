@@ -136,7 +136,7 @@ const FUNCTIONS = [
 	"parsePlainDecimal", "parseDriverPayDaily", "parseInServiceDate", "parseAdminFeePct", "parseTruckAmount", "parseTruckAmounts",
 	"parseUnitNumber", "isUnitNumberTaken",
 	"findDriverNameClashes", "canonicalDriverName", "driverNameHeldByOtherAccount", "driverNameHeldByOtherSpelling", "assignDriverToTruck",
-	"refusePayEdit", "periodBlockedResponse", "periodLockUnreadableResponse", "periodLabel",
+	"syncOpenCarrierPairing", "refusePayEdit", "periodBlockedResponse", "periodLockUnreadableResponse", "periodLabel",
 	// the real refusal audit, so a refusal row is the row production writes
 	"recordPeriodRefusal", "periodRefusalDetail", "logAudit", "logAuditRefusal", "scrubPurgeMarker", "auditText",
 ];

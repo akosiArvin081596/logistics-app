@@ -221,6 +221,7 @@ const MODULE_SRC = [
 	liftFunction("syncDriverToCarrierSheet"),
 	liftFunction("driverNameHeldByOtherSpelling"),
 	liftFunction("assignDriverToTruck"),
+	liftFunction("syncOpenCarrierPairing"),
 ].join("\n");
 const MODULE_EXPORTS = [
 	"parsePlainDecimal", "TRUCK_AMOUNT_MAX", "parseTruckAmount", "TRUCK_AMOUNT_FIELDS", "parseTruckAmounts", "parseUnitNumber", "isUnitNumberTaken",
