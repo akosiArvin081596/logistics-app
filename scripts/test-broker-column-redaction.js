@@ -150,7 +150,8 @@ const LOAD_PUT_SRC = extractRoute('app.put("/api/load/:loadId", requireRole("Sup
 const DATA_PUT_SRC = extractRoute('app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (req, res) => {');
 const ROUTE_HELPERS = new Function(
 	`${extract("sheetRowAfterUpdate")}\n${extract("a1SheetPrefix")}\n${extract("a1ColumnLetter")}\n${extract("sheetRowCellWrites")}\n` +
-	"return { sheetRowAfterUpdate, a1SheetPrefix, a1ColumnLetter, sheetRowCellWrites };")();
+	`${extract("restoreUntouchedCells")}\n` +
+	"return { sheetRowAfterUpdate, a1SheetPrefix, a1ColumnLetter, sheetRowCellWrites, restoreUntouchedCells };")();
 // GET and POST /api/data and the shipped role gate.
 const GET_DATA_HEAD = 'app.get("/api/data", requireRole("Super Admin"), async (req, res) => {';
 const GET_DATA_SRC = extractRoute(GET_DATA_HEAD);
@@ -594,6 +595,9 @@ function mountPut(routeSrc, M, rows) {
 		a1ColumnLetter: ROUTE_HELPERS.a1ColumnLetter,
 		sheetRowAfterUpdate: ROUTE_HELPERS.sheetRowAfterUpdate,
 		sheetRowCellWrites: ROUTE_HELPERS.sheetRowCellWrites,
+		// PUT /api/data/:rowIndex's optional baseline; these saves send none, so
+		// it leaves them as they are (scripts/test-row-save-cell-writes.js).
+		restoreUntouchedCells: ROUTE_HELPERS.restoreUntouchedCells,
 		changedGuardedCells: () => [],
 		guardedColumnReason: () => "",
 		validateOwnerIdCell: () => null,

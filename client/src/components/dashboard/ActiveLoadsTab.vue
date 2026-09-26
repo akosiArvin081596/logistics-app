@@ -554,6 +554,12 @@ const overrideError = ref('')
 const showEdit = ref(false)
 const saving = ref(false)
 const editForm = reactive({})
+// The row as the Edit modal opened it, by column. submitEdit() sends it as
+// `baseline`, in the order of `values`, and PUT /api/data/:rowIndex then writes
+// only the cells the user edited: this view can be ~60 s old (the Job Tracking
+// cache), and a cell that changed on the sheet since it loaded (another user,
+// n8n, or a formula's shown value) would otherwise be written back stale.
+let editBaseline = {}
 const editError = ref('')
 // EDITABLE_COLS uses canonical names; the sheet sometimes pads columns
 // with whitespace ("  Payment  "), so compare trimmed lowercase.
@@ -749,6 +755,7 @@ function closeOverride() {
 function openEdit() {
   if (!selectedJob.value) return
   editError.value = ''
+  editBaseline = Object.fromEntries(props.headers.map(col => [col, selectedJob.value[col] || '']))
   for (const col of editableHeaders.value) {
     // A withheld column must not acquire a key at all: submitEdit falls back to
     // the row's own (redacted) value when the key is absent, which is byte-identical
@@ -774,14 +781,16 @@ async function submitEdit() {
     // values MUST be built from props.headers (sheet column order). selectedJob
     // carries derived fields like _pickupStreet / _rowIndex that must not appear
     // in the PUT payload.
-    const values = props.headers.map(col =>
-      Object.prototype.hasOwnProperty.call(editForm, col)
-        ? editForm[col]
-        : (selectedJob.value[col] || '')
-    )
+    const has = (obj, col) => Object.prototype.hasOwnProperty.call(obj, col)
+    // A column the modal did not open with counts as not edited.
+    const opened = col => (has(editBaseline, col) ? editBaseline[col] : (selectedJob.value[col] || ''))
+    const values = props.headers.map(col => (has(editForm, col) ? editForm[col] : opened(col)))
+    // Same order as values: a cell equal to its baseline was not edited, and
+    // the server leaves it as the sheet holds it now (see editBaseline).
+    const baseline = props.headers.map(opened)
     await api.put(
       `/api/data/${rowIndex}?sheet=${encodeURIComponent('Job Tracking')}`,
-      { values }
+      { values, baseline }
     )
     const patch = {}
     for (const col of editableHeaders.value) {
