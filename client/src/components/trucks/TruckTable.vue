@@ -207,7 +207,7 @@
     <!-- Edit Modal -->
     <Teleport to="body">
       <div v-if="showEdit" class="confirm-overlay" @click.self="showEdit = false">
-        <div class="confirm-dialog edit-dialog">
+        <div ref="editDialogEl" class="confirm-dialog edit-dialog" @change.capture="keepUnreadableNumber">
           <h3>Edit Truck &mdash; {{ editForm.unitNumber }}</h3>
 
           <div class="edit-field">
@@ -389,6 +389,10 @@
             </div>
           </details>
 
+          <!-- Directly above Save: the dialog scrolls, so a message up by the
+               field could sit off screen while Save seemed to do nothing. -->
+          <div v-if="editError" class="edit-error" role="alert">{{ editError }}</div>
+
           <div class="confirm-actions">
             <button class="btn btn-secondary" @click="showEdit = false">Cancel</button>
             <button class="btn btn-primary" @click="handleSaveEdit">Save</button>
@@ -476,7 +480,8 @@ import ConfirmModal from '../shared/ConfirmModal.vue'
 import FileDropZone from '../shared/FileDropZone.vue'
 import LegalDocumentPortal from '../investor/LegalDocumentPortal.vue'
 import { useApi } from '../../composables/useApi'
-import { compressImage, DEFAULT_MAX_EDGE } from '../../lib/imageUtils'
+import { compressImage, DEFAULT_MAX_EDGE, isDecodedImage, dataUrlHasImageBytes } from '../../lib/imageUtils'
+import { amountError } from '../../lib/truckAmounts'
 import { fmtOdometer } from '../../lib/fuelReview'
 import { fmtTimestamp } from '../../utils/datetime'
 
@@ -645,16 +650,22 @@ function openEdit(truck) {
   // '' when unset — an empty date input is what keeps the created_at fallback.
   editForm.inServiceDate = inServiceDate(truck)
   editForm.retiredAt = retiredAt(truck)
-  // The modal is v-if'd, so a photo message from the last truck edited would
-  // otherwise reappear against a different truck. Same for a busy flag left set
-  // by a compress that was still running when the modal was dismissed.
+  // The modal is v-if'd, so a photo or save message from the last truck edited
+  // would otherwise reappear against a different truck. Same for a busy flag
+  // left set by a compress that was still running when the modal was dismissed.
   editPhotoError.value = ''
   editPhotoBusy.value = false
+  editError.value = ''
   showEdit.value = true
 }
 
 const editPhotoBusy = ref(false)
 const editPhotoError = ref('')
+// Why Save was refused (a number box it can't read, or an amount out of
+// range); shown directly above Save.
+const editError = ref('')
+// The edit dialog's element, for unreadableNumberError (null while closed).
+const editDialogEl = ref(null)
 
 // Receives File[] from FileDropZone — a drop and a click both land here.
 // compressImage replaces a raw FileReader for the same reason as AddTruckForm:
@@ -667,16 +678,71 @@ async function onEditPhoto(files) {
   editPhotoBusy.value = true
   try {
     const dataUrl = await compressImage(file, DEFAULT_MAX_EDGE)
-    // '' means the file was unreadable — keep the truck's existing photo rather
-    // than silently blanking it on the next save.
-    if (dataUrl) editForm.photo = dataUrl
-    else editPhotoError.value = "Couldn't read that photo — try a different file."
+    // Only a real decode is kept. When compressImage cannot decode a file it
+    // hands back the RAW bytes under the file's own media type (an SVG, a PDF,
+    // …) or '' — and the server refuses any photo that is not a JPEG, PNG or
+    // WebP (415 UNSUPPORTED_IMAGE_TYPE). The label alone is not proof: a PDF
+    // renamed scan.jpg comes back labelled image/jpeg, so its bytes are checked
+    // too. Either way the truck keeps its existing photo rather than losing it,
+    // or the whole save, on the next Save.
+    if (isDecodedImage(dataUrl) && dataUrlHasImageBytes(dataUrl)) editForm.photo = dataUrl
+    else editPhotoError.value = "Couldn't read that photo — use a JPEG, PNG or WebP image."
   } finally {
     editPhotoBusy.value = false
   }
 }
 
+// Driver pay sits at the top of this dialog, so it is named first when more
+// than one amount is refused; the rest follow in AMOUNT_FIELDS order
+// (lib/truckAmounts.js), which is also this dialog's.
+const EDIT_AMOUNT_ORDER = ['driverPayDaily']
+
+// The value rule — each amount's range, blank allowed, the refusal naming the
+// field — is amountError in lib/truckAmounts.js. The two helpers below are the
+// half that needs this dialog's elements; AddTruckForm.vue has the same pair,
+// so change them together.
+
+// A number box the browser cannot parse keeps its text on screen but reports
+// value '' — in Chrome "1e999", "15-00" and "5e" all do — and v-model reads
+// that '' as a deliberate blank. On this form that is not harmless: the PUT
+// sends the '' and the server stores 0, so a typo in Insurance would quietly
+// zero the truck's stored insurance. Only input.validity.badInput tells
+// "cleared" from "unreadable", which is why this reads the DOM. Names the first
+// such box by its label; a disabled box (driver pay for a non-Super Admin) is
+// never sent, so it is skipped.
+//
+// ⚠️ Depends on keepUnreadableNumber below: without it the evidence is gone
+// before this runs.
+function unreadableNumberError(root) {
+  if (!root) return ''
+  for (const el of root.querySelectorAll('input[type="number"]')) {
+    if (el.disabled || !el.validity?.badInput) continue
+    const label = el.closest('.form-group, .edit-field')?.querySelector('label')?.textContent.trim()
+    return `${label || 'A number field'} can't be read as a number — correct it or clear the box.`
+  }
+  return ''
+}
+
+// v-model on a number box (with or without .number) adds its own 'change'
+// listener that rewrites the box with the cast model value — '' for an
+// unreadable entry — so without this the typo, and badInput with it, would
+// vanish the moment the box loses focus: exactly when Save is pressed, before
+// its click handler runs. Stopping that one event here, in the capture phase on
+// the dialog, keeps the typo on screen for unreadableNumberError to find and
+// for the person to fix. Readable entries pass through untouched.
+function keepUnreadableNumber(e) {
+  const el = e.target
+  if (el?.tagName === 'INPUT' && el.type === 'number' && el.validity?.badInput) e.stopPropagation()
+}
+
 function handleSaveEdit() {
+  // Refused here rather than left to the server: emitting `update` closes this
+  // modal at once, so a server refusal would land as a toast after every edit
+  // in the form was gone.
+  editError.value = unreadableNumberError(editDialogEl.value)
+    || amountError(editForm, { canEditPay: props.canEditPay, order: EDIT_AMOUNT_ORDER })
+    || ''
+  if (editError.value) return
   emit('update', {
     id: editForm.id,
     data: {
@@ -956,6 +1022,13 @@ async function handleUnlink(truck) {
 .confirm-actions {
   display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1.25rem;
 }
+/* Save refusal — the same red callout as the Routemate modal's errors below. */
+.edit-error {
+  padding: 0.55rem 0.7rem; font-size: 0.75rem; line-height: 1.4;
+  background: #fef2f2; color: #991b1b;
+  border: 1px solid #fecaca; border-radius: 6px;
+}
+.edit-error + .confirm-actions { margin-top: 0.75rem; }
 
 .edit-row { display: flex; gap: 1rem; }
 .edit-row .edit-field { flex: 1; }
