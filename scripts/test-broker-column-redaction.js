@@ -40,8 +40,11 @@
 // Both routes are run here, lifted whole out of server.js, against a fake sheet.
 //
 // GET /api/data IS SUPER ADMIN ONLY (2026-09-26): it answers any tab, and its
-// `duplicates` and `?search=` over every column, as stored. Its gate is run
-// here through the shipped requireRole().
+// `duplicates` and `?search=` over every column, as stored. So is POST
+// /api/data: it appends a caller-built row with USER_ENTERED, so it would store
+// a Dispatcher's "=…" as a formula. Both gates are run here through the shipped
+// requireRole(). The other routes that refuse a formula from a non-Super-Admin
+// (from-ratecon, dispatch, reassign) are run by scripts/test-sheet-formula-doors.js.
 //
 // ⚠️ THE FIXTURE IS THE TEST. The ordering bug is entirely about header ORDER, so
 // a synthetic list like ["Broker", "Phone"] reproduces nothing. Every case runs
@@ -146,9 +149,11 @@ const G = buildModule();
 const LOAD_PUT_SRC = extractRoute('app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (req, res) => {');
 const DATA_PUT_SRC = extractRoute('app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (req, res) => {');
 const ROUTE_HELPERS = new Function(`${extract("sheetRowAfterUpdate")}\n${extract("a1SheetPrefix")}\nreturn { sheetRowAfterUpdate, a1SheetPrefix };`)();
-// GET /api/data and the shipped role gate.
+// GET and POST /api/data and the shipped role gate.
 const GET_DATA_HEAD = 'app.get("/api/data", requireRole("Super Admin"), async (req, res) => {';
 const GET_DATA_SRC = extractRoute(GET_DATA_HEAD);
+const POST_DATA_HEAD = 'app.post("/api/data", requireRole("Super Admin"), async (req, res) => {';
+const POST_DATA_SRC = extractRoute(POST_DATA_HEAD);
 const REQUIRE_ROLE_SRC = extract("requireRole");
 
 // A raw cell array as the header-keyed row object the readers serve.
@@ -707,8 +712,8 @@ async function routeSection(M = G, routes = { load: LOAD_PUT_SRC, data: DATA_PUT
 	const unguarded = calls.filter((at) => !/req\.session\.user\.role !== "Super Admin"/.test(SRC.slice(Math.max(0, at - 160), at)));
 	check("every route call of the reader or the two writer rules is for a non-Super-Admin only",
 		unguarded.map((at) => SRC.slice(at, SRC.indexOf("\n", at)).trim()), []);
-	check("the call sites are the ones this file was sized against (reader: dashboard x3, driver page, load GET/PUT; restore and formula rule: data PUT, load PUT)",
-		calls.length, 10);
+	check("the call sites are the ones this file was sized against (reader: dashboard x3, driver page, load GET/PUT; restore: data PUT, load PUT; formula rule: data PUT, load PUT, from-ratecon x2, dispatch, reassign)",
+		calls.length, 14);
 	const code = (s) => s.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
 	for (const [label, src, rowVar] of [["PUT /api/data/:rowIndex", DATA_PUT_SRC, "values"], ["PUT /api/load/:loadId", LOAD_PUT_SRC, "updatedRow"]]) {
 		const c = code(src);
@@ -734,6 +739,30 @@ async function routeSection(M = G, routes = { load: LOAD_PUT_SRC, data: DATA_PUT
 			out.gate, { Dispatcher: 403, Investor: 403, Driver: 403, none: 401, "Super Admin": "next" });
 		check("GET /api/data, Super Admin: the stored contact in full", out.superAdminRow, ["Danna Garcia", "555-0142", "danna.garcia@example.invalid"]);
 	}));
+}
+{
+	// POST /api/data is Super Admin only too: one registration, gated by the
+	// shipped requireRole(). Only the gate is run — every request below carries
+	// X-Requested-With, so the role is the one thing that differs.
+	check("POST /api/data: one registration, Super Admin only",
+		[SRC.split('\napp.post("/api/data", ').length - 1, SRC.includes('app.post("/api/data", requireRole("Super Admin", "Dispatcher")')], [1, false]);
+	check("POST /api/data, the shipped gate: Dispatcher, Investor and Driver refused 403, no session 401, Super Admin through",
+		postDataGate(POST_DATA_SRC), { Dispatcher: 403, Investor: 403, Driver: 403, none: 401, "Super Admin": "next" });
+}
+// The gate of a POST /api/data registration, run for each role.
+function postDataGate(routeSrc) {
+	const requireRole = new Function(`${REQUIRE_ROLE_SRC}\nreturn requireRole;`)();
+	let gate = null;
+	new Function("app", "requireRole", routeSrc)({ post: (p, g) => { gate = g; } }, requireRole);
+	const out = {};
+	for (const [key, user] of [["Dispatcher", { id: 2, role: "Dispatcher" }], ["Investor", { id: 5, role: "Investor" }],
+		["Driver", { id: 3, role: "Driver" }], ["none", undefined], ["Super Admin", { id: 1, role: "Super Admin" }]]) {
+		let passed = false;
+		const res = { code: 200, status(c) { this.code = c; return this; }, json() { return this; } };
+		gate({ method: "POST", headers: { "x-requested-with": "XMLHttpRequest" }, session: { user } }, res, () => { passed = true; });
+		out[key] = passed ? "next" : res.code;
+	}
+	return out;
 }
 // The gate and the handler of a GET /api/data registration, run.
 async function getDataGate(routeSrc) {
@@ -832,6 +861,8 @@ const M9 = buildModule({
 const M10_DATA = mutate(DATA_PUT_SRC, "if (formula) return res.status(400).json(formula);", "");
 // M11: GET /api/data re-opened to Dispatchers.
 const M11_GET = mutate(GET_DATA_SRC, GET_DATA_HEAD, 'app.get("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res) => {');
+// M12: POST /api/data re-opened to Dispatchers (the gate before 2026-09-26).
+const M12_POST = mutate(POST_DATA_SRC, POST_DATA_HEAD, 'app.post("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res) => {');
 // The checks a mutant fails, from the §5–§7 sections run against it.
 const caughtBy = (results) => results.filter((r) => !r.ok);
 const mutants = [
@@ -866,6 +897,7 @@ const mutants = [
 		const out = await getDataGate(M11_GET);
 		return out.gate.Dispatcher !== 403;
 	}],
+	["M12 POST /api/data re-opened to Dispatchers", () => postDataGate(M12_POST).Dispatcher !== 403],
 ];
 
 (async () => {

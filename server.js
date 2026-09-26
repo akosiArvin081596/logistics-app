@@ -6853,9 +6853,9 @@ function syncDriverToCarrierSheet(driverName, opts = {}) {
 			// real "Shorn King" must not take the real driver's row, and pay terms,
 			// with it — whichever way the row matches below. DELETE /api/users/:id
 			// removes its own account before it calls this, so only the others
-			// are seen.
-			if (findDriverNameClashes(name, { directory: false })
-				.some((h) => h.source === "users" && h.field === "driver_name")) {
+			// are seen (driverNameHeldByOtherAccount(), the rule the rename and the
+			// profile-picture upload share).
+			if (driverNameHeldByOtherAccount(name)) {
 				console.warn(`[directory-sync] kept the drivers_directory row for "${name}": another account still holds that driver name`);
 				return;
 			}
@@ -7398,8 +7398,17 @@ app.post("/api/drivers-directory/:id/profile-picture", requireAuth, (req, res) =
 		const sessionUser = req.session.user;
 		if (sessionUser.role !== "Super Admin") {
 			if (sessionUser.role !== "Driver") return res.status(403).json({ error: "Forbidden" });
-			const sessionDriver = normalizeDriverName(sessionUser.driver_name || sessionUser.driverName || "");
+			const sessionName = String(sessionUser.driver_name || sessionUser.driverName || "").trim();
+			const sessionDriver = normalizeDriverName(sessionName);
 			if (!sessionDriver || sessionDriver !== normalizeDriverName(driver.driver_name)) {
+				return res.status(403).json({ error: "Forbidden" });
+			}
+			// A row that names this driver only through spacing (not equal to the
+			// session name case aside) is theirs only while no other account holds
+			// a driver name that normalizes the same — the rule the directory
+			// rename and delete apply (driverNameHeldByOtherAccount()).
+			if (sessionName.toLowerCase() !== String(driver.driver_name || "").trim().toLowerCase()
+				&& driverNameHeldByOtherAccount(sessionName, [sessionUser.id])) {
 				return res.status(403).json({ error: "Forbidden" });
 			}
 		}
@@ -8184,6 +8193,12 @@ function normalizedUploadPath(req) {
 	let rel;
 	try { rel = decodeURIComponent(req.path || ""); } catch { return null; }   // malformed escape → refuse
 	if (!rel || rel.includes("\0")) return null;
+	// ASCII ONLY. Every name this app writes under uploads/ is ASCII (each writer
+	// builds it from ids, timestamps, allowlisted types and extensions, or text
+	// cut to [A-Za-z0-9._-]), so no link it serves carries anything else, and the
+	// file-name rules below compare in ASCII (SQLite's NOCASE folds ASCII case
+	// only). Refused, like the backslash below.
+	if ([...rel].some((ch) => ch.codePointAt(0) > 127)) return null;
 	// ⚠️ A BACKSLASH IS REFUSED, NOT FOLDED TO `/`. On Linux and macOS `send`
 	// (inside express.static) reads a decoded `\` as an ordinary filename
 	// character, so refusing it is the only way this function judges exactly the
@@ -8500,25 +8515,36 @@ function guardDrugTestFile(req, res, next, url) {
 //
 // ⚠️ MEMBERSHIP TEST. documents.file_name is not unique (idx_documents_file_name
 // is deliberately non-unique), so each rule asks whether ANY row with this name
-// grants access — never fetch-one-then-compare. The name is matched EXACTLY,
-// case included, so a spelling that only resolves on a case-insensitive
-// filesystem finds no row and is refused.
+// grants access — never fetch-one-then-compare. The Driver and Investor rules
+// match the name EXACTLY, case included, so a spelling that only resolves on a
+// case-insensitive filesystem finds no row and is refused. The Dispatcher rule
+// is the other way round (a row REFUSES), so it matches the name as a
+// case-insensitive filesystem resolves it — a dev Mac serves a file under any
+// letter case — with COLLATE NOCASE. normalizedUploadPath() refuses every
+// non-ASCII path, so ASCII case is the only case to fold.
 // ---------------------------------------------------------------------------
 
-// A documents row that is a rate con, by its type: case, spaces and underscores
-// ignored, so "RATECON", "Rate Con" and "rate_con" all match. Rate cons are
-// SUPER ADMIN ONLY (owner, 2026-09-26), so every listing and file rule that
-// serves another role reads this ONE copy: the load Documents panel
-// (LOAD_PANEL_DOCUMENT_FILTER), the investor Document Portal
-// (investorDocumentScope()) and guardRootLoadDocument's Dispatcher rule.
-// isRateConDocType() is the same test for a type already in hand.
-// Deliberately looser than RATECON_DOC_TYPES: that list decides what invoice
-// drafting TRUSTS as a rate con, this one decides what is WITHHELD, and a wider
-// match here only withholds more. A constant fragment — nothing from a request
-// is ever interpolated into it.
-const RATECON_DOCUMENT_SQL = "UPPER(REPLACE(REPLACE(COALESCE(type,''), ' ', ''), '_', '')) = 'RATECON'";
+// A documents row that is a rate con, by its type: its letters, upper-cased, are
+// exactly RATECON, whatever else it holds, so "RATECON", "Rate Con", "rate_con",
+// "RATE-CON" and "Rate.Con" all match. Rate cons are SUPER ADMIN ONLY (owner,
+// 2026-09-26), so every listing and file rule that serves another role reads
+// this ONE copy: the load Documents panel (LOAD_PANEL_DOCUMENT_FILTER), the
+// investor Document Portal (investorDocumentScope()) and guardRootLoadDocument's
+// Dispatcher rule. isRateConDocType() is the same test for a type already in
+// hand. Deliberately looser than RATECON_DOC_TYPES: that list decides what
+// invoice drafting TRUSTS as a rate con, this one decides what is WITHHELD, and
+// a wider match here only withholds more. A constant fragment, built once from
+// constants — nothing from a request is ever interpolated into it.
+//
+// SQLite has no regular expressions, so the SQL asks the same question in two
+// parts: the type holds exactly as many ASCII letters as RATECON (the length
+// lost when all 26 are removed), and its letters include R, A, T, E, C, O, N in
+// that order (GLOB). Seven letters that include those seven, in order, are those
+// seven. scripts/test-uploads-root-guard.js checks that the SQL and
+// isRateConDocType() agree on every spelling it lists.
+const RATECON_DOCUMENT_SQL = ((u) => "(LENGTH(" + u + ") - LENGTH(" + [..."ABCDEFGHIJKLMNOPQRSTUVWXYZ"].reduce((s, c) => "REPLACE(" + s + ", '" + c + "', '')", u) + ") = LENGTH('RATECON') AND " + u + " GLOB '*R*A*T*E*C*O*N*')")("UPPER(COALESCE(type, ''))");
 function isRateConDocType(type) {
-	return String(type == null ? "" : type).replace(/[ _]/g, "").toUpperCase() === "RATECON";
+	return String(type == null ? "" : type).replace(/[^A-Za-z]/g, "").toUpperCase() === "RATECON";
 }
 
 // The rows a load's Documents panel lists: live, and not a rate con. ONE copy,
@@ -8556,9 +8582,9 @@ async function guardRootLoadDocument(req, res, next, file) {
 
 		if (user.role === "Dispatcher") {
 			// Any row, live or deleted: a deleted row does not stop the file being
-			// a rate con.
+			// a rate con. COLLATE NOCASE — see MEMBERSHIP TEST above.
 			const rateCon = db.prepare(
-				`SELECT id FROM documents WHERE file_name = ? AND ${RATECON_DOCUMENT_SQL} LIMIT 1`
+				`SELECT id FROM documents WHERE file_name = ? COLLATE NOCASE AND ${RATECON_DOCUMENT_SQL} LIMIT 1`
 			).all(file);
 			if (rateCon.length) return res.status(404).end();
 			return next();
@@ -26052,10 +26078,9 @@ function driverRenameDirectoryRowId(nameLower, opts = {}) {
 	if (!row) return null;
 	if (row.matchedBy === "normalized") {
 		const leg = DRIVER_RENAME_TARGETS.find((t) => t.key === "users");
-		const moved = new Set(db.prepare(`SELECT id FROM "${leg.table}" WHERE ${driverRenameWhereSql(leg, opts)}`)
-			.all(...driverRenameWhereArgs(leg, nameLower, opts)).map((r) => r.id));
-		const heldElsewhere = findDriverNameClashes(nameLower, { directory: false })
-			.some((h) => h.source === "users" && h.field === "driver_name" && !moved.has(h.id));
+		const moved = db.prepare(`SELECT id FROM "${leg.table}" WHERE ${driverRenameWhereSql(leg, opts)}`)
+			.all(...driverRenameWhereArgs(leg, nameLower, opts)).map((r) => r.id);
+		const heldElsewhere = driverNameHeldByOtherAccount(nameLower, moved);
 		if (heldElsewhere) return null;
 	}
 	return row.id;
@@ -28802,7 +28827,17 @@ app.get("/api/data", requireRole("Super Admin"), async (req, res) => {
 });
 
 // CREATE — Append a new row
-app.post("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+//
+// ⚠️ SUPER ADMIN ONLY (2026-09-26), like GET. It appends a caller-built row to
+// whichever tab ?sheet= names with valueInputOption "USER_ENTERED", which stores
+// a value starting with "=" as a formula, and only a Super Admin enters
+// formulas (see formulaCellRefusal()). Its SPA callers
+// are New Job (/jobs/new) and the Data Manager (/data), both Super Admin routes;
+// the legacy public/index.html is served only when client/dist is missing, and
+// it reads GET /api/data, which is Super Admin only too. Widening this gate
+// means refusing formulas first (formulaCellRefusal(), as PUT does).
+// scripts/test-broker-column-redaction.js pins the gate.
+app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const { values, coordinates } = req.body; // values = array of cell values, coordinates = optional {loadId, originLat, originLng, destLat, destLng, pickupAddress, dropoffAddress}
 
@@ -29868,6 +29903,16 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 			return res.status(400).json({ error: "Driver column not found" });
 		}
 
+		// NO FORMULAS, for every caller but a Super Admin: the rule PUT
+		// /api/data/:rowIndex applies (formulaCellRefusal()), 400
+		// FORMULA_NOT_ALLOWED naming the Driver column. The batch below writes with
+		// valueInputOption "USER_ENTERED", and `driver` is the caller's own text
+		// whenever it names no Driver account. Before the period guard and every write.
+		if (req.session.user.role !== "Super Admin") {
+			const formula = formulaCellRefusal([headers[driverColIdx]], [snapshot.row[driverColIdx]], [driver]);
+			if (formula) return res.status(400).json(formula);
+		}
+
 		// Look up truck and owner for this driver. Primary source is the
 		// trucks.assigned_driver single-slot column, which assignDriverToTruck()
 		// keeps in sync; if that's drifted (legacy admin edits, name casing,
@@ -30026,6 +30071,14 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 		const driverCol = headers.findIndex((h) => /driver/i.test(h));
 		if (driverCol === -1) {
 			return res.status(400).json({ error: "Driver column not found" });
+		}
+
+		// NO FORMULAS, for every caller but a Super Admin — same rule and reason as
+		// POST /api/dispatch: `newDriver` is the caller's own text whenever it names
+		// no Driver account. Before the period guard and every write.
+		if (req.session.user.role !== "Super Admin") {
+			const formula = formulaCellRefusal([headers[driverCol]], [snapshot.row[driverCol]], [newDriver]);
+			if (formula) return res.status(400).json(formula);
 		}
 
 		// Reassignment to a busy driver is allowed — the load queues behind
@@ -31576,7 +31629,9 @@ function restoreWithheldBrokerCells(headers, before, values) {
 
 // PUT /api/data/:rowIndex and PUT /api/load/:loadId, for every caller but a
 // Super Admin: no formulas. Both write with valueInputOption "USER_ENTERED",
-// under which a value starting with "=" is stored as a formula. Returns null,
+// under which a value starting with "=" is stored as a formula. The same rule
+// guards POST /api/loads/from-ratecon and POST /api/dispatch{,/reassign}, which
+// pass an empty `before` for a new row. Returns null,
 // or the 400 body for the first CHANGED cell, in column order, whose trimmed
 // value starts with "=": { error, code: "FORMULA_NOT_ALLOWED", field }, where
 // `field` is the column's header exactly as the sheet holds it ("(unnamed)" for
@@ -31709,6 +31764,21 @@ function findDriverNameClashes(name, opts = {}) {
 
 function findDriverNameClash(name, opts = {}) {
 	return findDriverNameClashes(name, opts)[0] || null;
+}
+
+// Does an account, other than `exceptUserIds`, hold a driver name that
+// normalizes to `name` (normalizeDriverName())? Then a drivers_directory row that
+// names the driver only through a spacing variant is that account's row too, so
+// ONE rule, for every use of such a row: the rename cascade does not move it
+// (driverRenameDirectoryRowId(), excepting the accounts it renames), the
+// directory sync does not delete it (syncDriverToCarrierSheet(), after its own
+// account is gone), and a driver's profile-picture upload does not replace its
+// picture (POST /api/drivers-directory/:id/profile-picture, excepting the
+// uploader). A legacy account "Shorn  King" beside the real "Shorn King" must not
+// act on the real driver's row.
+function driverNameHeldByOtherAccount(name, exceptUserIds = []) {
+	return findDriverNameClashes(name, { directory: false, exceptUserIds })
+		.some((h) => h.source === "users" && h.field === "driver_name");
 }
 
 // The spelling an existing driver identity already uses for this name — an
@@ -37428,6 +37498,23 @@ app.post("/api/loads/ratecon/extract", requireRole("Super Admin", "Dispatcher"),
 	}
 });
 
+// The rate-con fields POST /api/loads/from-ratecon writes into a sheet cell,
+// whole or as part of one: Job Tracking through buildJobTrackingRow() (the three
+// reference fields only inside "Pickup Info"), and the Payments Table ("Broker
+// Name", "Rate"). The other extracted fields (Total Rate, Order / PO / Move
+// Number, Driver Name, the two notes) reach no sheet, so they are not judged.
+// For every caller but a Super Admin the route refuses any of these whose value
+// starts with "=" before it claims the load or reads a sheet — see NO FORMULAS
+// in the route. scripts/test-sheet-formula-doors.js derives the same set from
+// the shipped route and fails when the two disagree.
+const RATECON_SHEET_FIELDS = [
+	"Load Number", "Rate", "Trailer Number", "Details", "BOL Number",
+	"Broker Name", "Broker Phone", "Broker Email",
+	"Pickup Company Information", "P/U Reference Number", "Delivery Reference Number",
+	"Pickup Address", "Pickup Appointment Time",
+	"Drop-off Company Information", "Drop-off Address", "Delivery Appointment Time",
+];
+
 // POST /api/loads/from-ratecon — the reviewed fields become a live load.
 // `fields` is what the dispatcher confirmed in the review modal (Gemini output
 // is treated as a draft, never as truth). Order of operations mirrors the n8n
@@ -37488,6 +37575,24 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 					maxChars: ADDRESS_MAX_CHARS,
 				});
 			}
+		}
+
+		// NO FORMULAS, for every caller but a Super Admin — the rule PUT
+		// /api/data/:rowIndex and PUT /api/load/:loadId apply (formulaCellRefusal()).
+		// Every sheet write below uses valueInputOption "USER_ENTERED", which stores
+		// a value starting with "=" as a formula. A new load has no stored row, so
+		// every cell counts as changed. Two checks:
+		//   1. HERE, before the load is claimed and before any sheet is read: every
+		//      field in RATECON_SHEET_FIELDS, 400 FORMULA_NOT_ALLOWED with `field`
+		//      naming the field as the review modal sends it.
+		//   2. Before the Job Tracking append, over the cells as they will be
+		//      written to all three tabs: a cell built from several fields can start
+		//      with "=" when no field does (Job Details' "Details" is two
+		//      cityStateZip() results, and either can begin mid-address). That body
+		//      adds `sheet`, since Job Tracking and Job Details both have "Details".
+		if (req.session.user.role !== "Super Admin") {
+			const formula = formulaCellRefusal(RATECON_SHEET_FIELDS, [], RATECON_SHEET_FIELDS.map((k) => fields[k]));
+			if (formula) return res.status(400).json(formula);
 		}
 
 		// Claim this Load ID for the duration of the write so a double-submit
@@ -37590,6 +37695,34 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		const ownerErr = validateOwnerIdCell("Job Tracking", headers, values);
 		if (ownerErr) return res.status(400).json({ error: ownerErr.error });
 
+		// The cells steps 5/6 write, built here so the formula check below judges
+		// the very objects the two upserts are handed.
+		const paymentsMapping = {
+			" Job ID": loadId,
+			"Contract ID": String(fields["Broker Name"] || "").trim(),
+			"Payment Amount": String(fields["Rate"] || "").trim(),
+		};
+		const jobDetailsMapping = {
+			"Load ID": loadId,
+			"Rate Per Mile": `$${rpm.rate_per_mile}`,
+			"Distance": `${rpm.distance_miles} Miles`,
+			"Details": rpm.details,
+			"Payment": rpm.payment,
+		};
+		// NO FORMULAS, check 2 (see check 1 above): every cell as it will be written,
+		// before the first write. `field` is the column's header on `sheet`.
+		const sheetCells = [
+			["Job Tracking", headers, values],
+			["Payments Table", Object.keys(paymentsMapping), Object.values(paymentsMapping)],
+			["Job Details", Object.keys(jobDetailsMapping), Object.values(jobDetailsMapping)],
+		];
+		if (req.session.user.role !== "Super Admin") {
+			for (const [sheet, columns, cells] of sheetCells) {
+				const formula = formulaCellRefusal(columns, [], cells);
+				if (formula) return res.status(400).json({ ...formula, sheet });
+			}
+		}
+
 		const appendResp = await sheets.spreadsheets.values.append({
 			spreadsheetId: SPREADSHEET_ID,
 			range: "Job Tracking",
@@ -37664,11 +37797,7 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		// settled figure from a load-creation flow is not. Conflicts surface as
 		// a warning naming the columns so a human reconciles them.
 		try {
-			const payResult = await upsertByKey("Payments Table", " Job ID", {
-				" Job ID": loadId,
-				"Contract ID": String(fields["Broker Name"] || "").trim(),
-				"Payment Amount": String(fields["Rate"] || "").trim(),
-			}, { preserveFilled: true });
+			const payResult = await upsertByKey("Payments Table", " Job ID", paymentsMapping, { preserveFilled: true });
 			if (payResult.conflicts.length) {
 				warnings.push(
 					`The Payments Table already had a row for ${loadId} with a different ` +
@@ -37682,13 +37811,7 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 
 		// n8n "Google Sheets2"
 		try {
-			await upsertByKey("Job Details", "Load ID", {
-				"Load ID": loadId,
-				"Rate Per Mile": `$${rpm.rate_per_mile}`,
-				"Distance": `${rpm.distance_miles} Miles`,
-				"Details": rpm.details,
-				"Payment": rpm.payment,
-			});
+			await upsertByKey("Job Details", "Load ID", jobDetailsMapping);
 		} catch (e) {
 			console.error("Rate-con load: Job Details upsert failed:", e.message);
 			warnings.push("The Job Details row was not written — distance and rate-per-mile are missing for this load.");

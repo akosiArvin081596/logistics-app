@@ -112,6 +112,11 @@ const directoryLookup = (db, src = DIRECTORY_LOOKUP_SRC) =>
 const TRUCK_LOOKUP_SRC = [liftFn("normalizeDriverName"), liftFn("findTruckForDriver")].join("\n");
 const truckLookup = (db, src = TRUCK_LOOKUP_SRC) =>
 	new Function("db", `"use strict";\n${src}\nreturn findTruckForDriver;`)(db);
+// ...and the profile-picture upload asks driverNameHeldByOtherAccount() before it
+// accepts a row that names the driver only through spacing.
+const HELD_BY_OTHER_SRC = [liftFn("normalizeDriverName"), liftFn("findDriverNameClashes"), liftFn("driverNameHeldByOtherAccount")].join("\n");
+const heldByOtherLookup = (db) =>
+	new Function("db", `"use strict";\n${HELD_BY_OTHER_SRC}\nreturn driverNameHeldByOtherAccount;`)(db);
 
 // --- fixtures --------------------------------------------------------------
 const JT = {
@@ -449,6 +454,9 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 		const doc = fdb.prepare("INSERT INTO legal_documents (id, truck_id, driver_id, visible_to_driver, file_name) VALUES (?, ?, ?, 1, 'x.pdf')");
 		doc.run(50, 8, 0); doc.run(51, 7, 0); doc.run(60, 0, 12); doc.run(61, 0, 11);
 		fdb.prepare("INSERT INTO drivers_directory (id, driver_name) VALUES (11, 'Deshorn King'), (12, 'Shorn  King')").run();
+		// The two drivers' accounts (DK, SK). Nothing else holds either name.
+		fdb.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, driver_name TEXT)");
+		fdb.prepare("INSERT INTO users (id, username, driver_name) VALUES (2, 'LogisX-1001', 'Deshorn King'), (3, 'LogisX-1002', 'Shorn King')").run();
 		return fdb;
 	}
 	const FILES_TABLES = /\b(trucks|truck_assignments|legal_documents|drivers_directory)\b/;
@@ -470,6 +478,7 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 		const deps = {
 			db: fdb, requireAuth: (req, res, next) => next(), truckDocViewLimiter: (req, res, next) => next(),
 			normalizeDriverName: helpers.normalizeDriverName, findTruckForDriver: truckLookup(fdb),
+			driverNameHeldByOtherAccount: heldByOtherLookup(fdb),
 			storedFileForServing: (v) => (v ? { contentType: "image/png", body: Buffer.from(String(v)) } : null),
 			storedFileETag: () => '"etag"', ifNoneMatchIncludes: () => false,
 			setUploadServeHeaders: () => {}, fs: { existsSync: () => false }, path, __dirname: ROOT,
@@ -555,6 +564,29 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 		ok("...as another driver is refused theirs", x.status === 403, said(x));
 		x = await pic(NAMELESS, { id: "12" });
 		ok("...a blank session name is refused 403", x.status === 403, said(x));
+	}
+	{
+		// A legacy duplicate account whose driver name differs only in spacing.
+		// Row 12 ("Shorn  King") is then that account's row as much as SK's, so
+		// SK's spacing-only match is refused (driverNameHeldByOtherAccount(), the
+		// rule the directory rename and delete apply), while the account whose name
+		// equals the row case aside still uploads to it.
+		const fdb = makeFilesDb();
+		fdb.prepare("INSERT INTO users (id, username, driver_name) VALUES (9, 'LogisX-0999', 'Shorn  King')").run();
+		const LEGACY = { id: 9, role: "Driver", username: "LogisX-0999", driverName: "Shorn  King" };
+		const pic = sibling("post", "/api/drivers-directory/:id/profile-picture", fdb);
+		let x = await pic(SK, { id: "12" });
+		ok("POST /api/drivers-directory/:id/profile-picture: a spacing-only match is refused 403 while another account holds that driver name",
+			x.status === 403, said(x));
+		x = await pic(LEGACY, { id: "12" });
+		ok("...while the account whose name equals the row case aside passes the check (400 fileData required)",
+			x.status === 400 && x.body && x.body.error === "fileData required", said(x));
+		// MUTANT 6: the upload without the other-account check, as before.
+		const noHeld = mutate(routeSource("post", "/api/drivers-directory/:id/profile-picture"),
+			"driverNameHeldByOtherAccount(sessionName, [sessionUser.id])", "false");
+		x = await sibling("post", "/api/drivers-directory/:id/profile-picture", fdb, {}, noHeld)(SK, { id: "12" });
+		ok("MUTANT 6 (the profile-picture upload without the other-account check): the spacing-only match passes again",
+			x.status === 400, said(x));
 	}
 	{
 		// MUTANT 4: findTruckForDriver() back to LOWER() equality alone — the lookup

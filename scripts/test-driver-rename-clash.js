@@ -129,7 +129,8 @@ function liftConst(head, close = null) {
 }
 
 const NORM_SRC = liftFunction("normalizeDriverName");
-const CLASH_SRC = [liftFunction("findDriverNameClashes"), liftFunction("findDriverNameClash"), liftFunction("canonicalDriverName")].join("\n");
+const CLASH_SRC = [liftFunction("findDriverNameClashes"), liftFunction("findDriverNameClash"), liftFunction("driverNameHeldByOtherAccount"),
+	liftFunction("canonicalDriverName")].join("\n");
 // The sync finds its directory row through findDirectoryRowForDriver() and the
 // driver's truck through findTruckForDriver(); the cascade's drivers_directory
 // leg finds its row through findDirectoryRowForDriver() too.

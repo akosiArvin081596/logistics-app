@@ -154,6 +154,8 @@ const F = {
 	B_UPPER: "L200_Other_1788000000008.pdf",     // row names the driver in capitals
 	BACKSLASH: "L200\\POD_1788000000009.pdf",    // a root file with a literal backslash, no row
 	CARRIER: "L400_POD_1788000000010.pdf",       // driver reached through the carrier name
+	A_RATECON_DASH: "L100_Rate-Con_1788000000013.pdf", // a root rate con whose row types it "Rate-Con"
+	NON_ASCII: `L100_POD_1788000000012${String.fromCharCode(0xE9)}.pdf`, // a root file whose name is not ASCII, no row
 };
 const body = (name) => `BODY:${name}`;
 
@@ -191,6 +193,7 @@ function makeDb() {
 	add("L100", "Deshorn King", "Receipt", F.A_DELETED, "2026-09-01T00:00:00Z");
 	add("L100", "Deshorn King", "RATECON", F.A_RATECON);
 	add("L100", "Deshorn King", "Rate_Con", F.A_RATECON_GONE, "2026-09-02T00:00:00Z");
+	add("L100", "Deshorn King", "Rate-Con", F.A_RATECON_DASH);
 	add("L300", "Deshorn King", "POD", F.UNVERIFIED);
 	add("L100", "Deshorn King", "BOL", F.SHARED);
 	add("L200", "Shorn King", "BOL", F.SHARED);
@@ -315,6 +318,15 @@ function admit(limiter, user) {
 	limiter({ session: { user } }, res, () => { passed = true; });
 	return { res, passed, finish(code) { res.statusCode = code; res.emit("finish"); res.emit("close"); } };
 }
+// Run a build's root guard directly for one file name, as `user`. For the rules
+// an HTTP request cannot pin on every disk: on a case-sensitive one, a request in
+// another letter case 404s whatever the guard decides.
+async function guardCall(M, user, file) {
+	let status = null, nexted = false;
+	const res = { headersSent: false, statusCode: 200, setHeader() {}, status(c) { status = c; return this; }, end() { return this; }, json() { return this; } };
+	await M.guardRootLoadDocument({ session: { user } }, res, () => { nexted = true; }, file);
+	return { status, nexted };
+}
 
 (async () => {
 	const T = await build();
@@ -337,6 +349,15 @@ function admit(limiter, user) {
 		served(await T.get(url(F.A_RATECON), U.sa), F.A_RATECON) && served(await T.get(url(F.A_RATECON_GONE), U.sa), F.A_RATECON_GONE));
 	await expectRefused(U.disp, F.A_RATECON, "a Dispatcher is refused a RATE CON in the root (404) — rate cons are Super Admin only");
 	await expectRefused(U.disp, F.A_RATECON_GONE, "...even when its only row is soft-deleted (the file is still a rate con)");
+	await expectRefused(U.disp, F.A_RATECON_DASH, "...and when its row types it \"Rate-Con\" (every character but a letter is ignored)");
+	{
+		const asked = (name) => guardCall(T, U.disp, name);
+		const mixed = await asked("l100_ratecon_1788000000004.PDF");
+		ok("a Dispatcher asking for a root rate con in another letter case is refused 404 (the rule matches the name without case)",
+			mixed.status === 404 && !mixed.nexted);
+		ok("...while an ordinary document asked for in another letter case still passes the Dispatcher's rate-con rule",
+			(await asked("l100_pod_1788000000001.PDF")).nexted === true);
+	}
 	ok("a Dispatcher's rate-con refusal is by the row's TYPE: every other root file still opens (PODs, BOLs, a soft-deleted receipt, a file with no row)",
 		served(await T.get(url(F.SHARED), U.disp), F.SHARED) && served(await T.get(url(F.A_DELETED), U.disp), F.A_DELETED) &&
 		served(await T.get(url(F.B_UPPER), U.disp), F.B_UPPER));
@@ -414,6 +435,16 @@ function admit(limiter, user) {
 	ok("a trailing slash never serves the file, even to its owner", refused(await T.get(`/uploads/${F.A}/`, U.drvA), F.A));
 	ok("a root file whose name holds a backslash is unreachable (%5C is refused before any lookup)",
 		refused(await T.get(url(F.BACKSLASH), U.sa), F.BACKSLASH) && refused(await T.get(url(F.BACKSLASH), U.drvA), F.BACKSLASH));
+	{
+		// ASCII ONLY: every name the app writes is ASCII, so a path holding any other
+		// character is refused before any rule. The file is on disk, so without the
+		// rule a Super Admin (who passes with no lookup) would be served it.
+		const nup = new Function("path", `${LIFTED.normalizedUploadPath}\nreturn normalizedUploadPath;`)(path);
+		ok("normalizedUploadPath refuses a path holding a non-ASCII character, and keeps its ASCII twin",
+			nup({ path: `/${encodeURIComponent(F.NON_ASCII)}` }) === null && nup({ path: `/${F.A}` }) === `/${F.A}`);
+		ok("...so a root file whose name is not ASCII is unreachable, even to Super Admin",
+			refused(await T.get(url(F.NON_ASCII), U.sa), F.NON_ASCII));
+	}
 
 	// =========================================================================
 	console.log("\n§3  directories keep their own rules");
@@ -624,11 +655,22 @@ function admit(limiter, user) {
 		// must agree on every spelling, or the broadcast and the guard disagree.
 		const eqDb = new Database(":memory:");
 		const sqlSays = (t) => !!eqDb.prepare(`SELECT ${T.RATECON_DOCUMENT_SQL} AS m FROM (SELECT ? AS type)`).get(t).m;
+		// Every character but a letter is ignored: hyphens, dots, digits, and
+		// non-ASCII separators too (a Unicode hyphen, a no-break space). A letter
+		// outside A-Z is not a letter here, so a full-width spelling is no match.
+		const uni = (...codes) => String.fromCharCode(...codes);
 		const SPELLINGS = ["RATECON", "RATE CON", "RATE_CON", "ratecon", "Rate Con", "rate_con", "RateCon", " RATECON ", "R_A_T_E CON",
-			"RATE-CON", "Rate Confirmation", "RATECONS", "POD", "BOL", "Receipt", "Other", "", null];
+			"RATE-CON", "Rate Confirmation", "RATECONS", "POD", "BOL", "Receipt", "Other", "", null,
+			"Rate-Con", "rate-con", "RATE.CON", "Rate.Con", "rate.con", "R.A.T.E.-C.O.N.", "RATE - CON", "-RATECON-", "RATECON 2",
+			`RATE${uni(0x2010)}CON`, `RATE${uni(0xA0)}CON`, "RATE-CONFIRMATION", "RATE-CONS", "PRE-RATECON", "RATE-CO", "CON-RATE",
+			uni(0xFF32, 0xFF21, 0xFF34, 0xFF25, 0xFF23, 0xFF2F, 0xFF2E)];
 		const disagree = SPELLINGS.filter((t) => sqlSays(t) !== T.isRateConDocType(t));
 		ok(`isRateConDocType() and RATECON_DOCUMENT_SQL agree on ${SPELLINGS.length} spellings${disagree.length ? ` (disagree: ${JSON.stringify(disagree)})` : ""}`,
 			disagree.length === 0 && sqlSays("Rate Con") && !sqlSays("POD"));
+		const MATCH = ["RATE-CON", "Rate.Con", "R.A.T.E.-C.O.N.", "RATECON 2", `RATE${uni(0x2010)}CON`, `RATE${uni(0xA0)}CON`];
+		const NO_MATCH = ["RATE-CONFIRMATION", "RATE-CONS", "PRE-RATECON", "RATE-CO", "CON-RATE", uni(0xFF32, 0xFF21, 0xFF34, 0xFF25, 0xFF23, 0xFF2F, 0xFF2E)];
+		ok("...hyphen, dot, digit and non-ASCII separator spellings are a rate con to both; other letters make it none",
+			MATCH.every((t) => sqlSays(t) && T.isRateConDocType(t)) && NO_MATCH.every((t) => !sqlSays(t) && !T.isRateConDocType(t)));
 		eqDb.close();
 	}
 	ok("idx_documents_file_name exists and is NOT unique",
@@ -670,6 +712,12 @@ function admit(limiter, user) {
 		const M = await build(mutate("guardRootLoadDocument", "if (rateCon.length) return res.status(404).end();", ""));
 		ok("MUTANT no Dispatcher rate-con rule: a Dispatcher reads a root rate con — so §1's refusal is load-bearing",
 			served(await M.get(url(F.A_RATECON), U.disp), F.A_RATECON));
+	}
+	{
+		const M = await build(mutate("guardRootLoadDocument", "file_name = ? COLLATE NOCASE AND", "file_name = ? AND"));
+		const r = await guardCall(M, U.disp, "l100_ratecon_1788000000004.PDF");
+		ok("MUTANT the Dispatcher's rate-con rule matching the name exactly: a rate con asked for in another letter case passes — so §1's NOCASE is load-bearing",
+			r.nexted === true && r.status === null);
 	}
 	{
 		const M = await build(mutate("investorDocumentScope", " AND NOT (${RATECON_DOCUMENT_SQL})", ""));
