@@ -45,6 +45,13 @@ let lifeGen = 0
 // A page has called connect() and nothing has called disconnect() since: live
 // updates are wanted. unpause() brings a socket back only then.
 let wanted = false
+// Set by pause(), cleared by unpause() and disconnect(). While it is set no
+// socket opens: connect() and resume() only note that live updates are wanted,
+// and unpause() decides whether they come back.
+let paused = false
+// The owner when the pause began: the person the page's room name was registered
+// for. unpause() reopens only while that person is still the owner.
+let ownerAtPause = null
 
 // The person this page shows, as the auth store last reported it (setSocketOwner).
 // A reconnect opens a socket only for them: the session the server closed this
@@ -141,7 +148,7 @@ function openSocket() {
 export function useSocket() {
   function connect() {
     wanted = true
-    if (socket) return
+    if (paused || socket) return // paused: unpause() opens it, if the answer allows
     openSocket()
   }
 
@@ -160,15 +167,20 @@ export function useSocket() {
     wanted = true
     reconnectAttempt = 0
     if (!registeredName) registeredName = lastRegisteredName
+    if (paused) return // the store is still asking whose session this is: unpause() decides
     if (!socket) openSocket() // registers on 'connect'
   }
 
   // Another tab has signed someone in or out, and the auth store is asking the
   // server whose session this browser now holds. Until it knows, nothing live
-  // reaches this page: the socket goes down and so does any pending reconnect.
-  // Unlike disconnect(), what the mounted page registered (its listeners, the room
-  // name) is kept, so that unpause() can bring its updates back.
+  // reaches this page: the socket goes down and so does any pending reconnect,
+  // and none opens (connect() and resume() wait for unpause()). Unlike
+  // disconnect(), what the mounted page registered (its listeners, the room name)
+  // is kept, so that unpause() can bring its updates back. A second pause() before
+  // the answer (a sign-out writes two keys) keeps the owner the first one noted.
   function pause() {
+    if (!paused) ownerAtPause = owner
+    paused = true
     const s = socket
     socket = null
     isConnected.value = false
@@ -181,8 +193,20 @@ export function useSocket() {
   }
 
   // ...and the answer named the same person: the page carries on where pause()
-  // left it, if it wanted live updates at all.
+  // left it, if it wanted live updates at all. The owner decides, as it does for a
+  // reconnect: only the person who was the owner when the pause began, and still
+  // is. Anyone else, or nobody, gets no socket, and the room name registered
+  // before the pause is forgotten, so no later connect() or resume() sends it.
   function unpause() {
+    if (!paused) return // disconnect() ended the pause: there is nothing to bring back
+    paused = false
+    const shownThen = ownerAtPause
+    ownerAtPause = null
+    if (owner === null || owner !== shownThen) {
+      registeredName = null
+      lastRegisteredName = null
+      return
+    }
     if (wanted) resume()
   }
 
@@ -206,12 +230,15 @@ export function useSocket() {
   // name goes with it, or the next connect() would register it again for
   // whoever signs in next; so do the listeners (the pages that added them are
   // leaving: the router unmounts the old page before mounting the next) and any
-  // pending reconnect. Cleared before the socket is closed, so its own
-  // disconnect event finds it already replaced.
+  // pending reconnect, and a pause (the next connect() opens at once). Cleared
+  // before the socket is closed, so its own disconnect event finds it already
+  // replaced.
   function disconnect() {
     const s = socket
     socket = null
     wanted = false
+    paused = false
+    ownerAtPause = null
     registeredName = null
     lastRegisteredName = null
     listeners.length = 0
