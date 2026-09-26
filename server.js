@@ -5280,16 +5280,37 @@ try {
 function assignDriverToTruck(truckId, driverName) {
 	const now = new Date().toISOString();
 	const nameLower = driverName.trim().toLowerCase();
+	// A driver holds one truck, whichever way their old rows spell them: the
+	// active assignment rows and the other truck naming them through a spacing
+	// variant of the name (normalizeDriverName(), as findTruckForDriver() finds
+	// the truck) are released with the case-aside ones. Only while no other
+	// account holds the name under another spelling
+	// (driverNameHeldByOtherSpelling(), the rule the money stamps use): such a
+	// row may be that account's, and it is not this assignment's to release.
+	const needle = normalizeDriverName(driverName);
+	const releaseSpacingVariants = needle !== "" && !driverNameHeldByOtherSpelling(driverName);
 	// Close any active assignment for this truck
 	db.prepare("UPDATE truck_assignments SET end_date = ? WHERE truck_id = ? AND end_date = ''").run(now, truckId);
 	// Close any active assignment for this driver (can only drive one truck)
 	db.prepare("UPDATE truck_assignments SET end_date = ? WHERE LOWER(driver_name) = ? AND end_date = ''").run(now, nameLower);
+	if (releaseSpacingVariants) {
+		const closeRow = db.prepare("UPDATE truck_assignments SET end_date = ? WHERE id = ?");
+		for (const r of db.prepare("SELECT id, driver_name FROM truck_assignments WHERE end_date = '' AND COALESCE(driver_name, '') <> ''").all()) {
+			if (normalizeDriverName(r.driver_name) === needle) closeRow.run(now, r.id);
+		}
+	}
 	// Insert new assignment
 	if (driverName.trim()) {
 		db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (?, ?, ?)").run(truckId, driverName.trim(), now);
 	}
 	// Sync trucks.assigned_driver for backward compat
 	db.prepare("UPDATE trucks SET assigned_driver = '' WHERE LOWER(assigned_driver) = ? AND id != ?").run(nameLower, truckId);
+	if (releaseSpacingVariants) {
+		const releaseTruck = db.prepare("UPDATE trucks SET assigned_driver = '' WHERE id = ?");
+		for (const t of db.prepare("SELECT id, assigned_driver FROM trucks WHERE id != ? AND COALESCE(assigned_driver, '') <> ''").all(truckId)) {
+			if (normalizeDriverName(t.assigned_driver) === needle) releaseTruck.run(t.id);
+		}
+	}
 	db.prepare("UPDATE trucks SET assigned_driver = ? WHERE id = ?").run(driverName.trim(), truckId);
 	// Mirror the (driver, carrier) pairing into carrier_driver_history so the
 	// investor-driver-set resolver has a safety net when assignments change.
@@ -6790,18 +6811,77 @@ function findDirectoryRowForDriver(name) {
 // edge space: LOWER() folds case, not spacing, and SQLite cannot collapse a
 // whitespace run, so the fleet-sized table is compared in JS. The directory
 // sync below and the driver app's own truck reads (GET /api/driver/:driverName
-// and GET /api/driver/me/truck-photo, which must name the same truck) use it.
-// Returns { id, unit_number, matchedBy: "case" | "normalized" }, or null; a
+// and GET /api/driver/me/truck-photo, which must name the same truck) use it,
+// and so do the money stamps, through findTruckForDriverStamp() below.
+// Returns { id, unit_number, owner_id, routemate_vehicle_id, assigned_driver
+// (the truck's stored spelling), matchedBy: "case" | "normalized" }, or null; a
 // blank name matches nothing.
 function findTruckForDriver(name) {
 	const trimmed = typeof name === "string" ? name.trim() : "";
 	if (!trimmed) return null;
-	const same = db.prepare("SELECT id, unit_number FROM trucks WHERE LOWER(assigned_driver) = LOWER(?) ORDER BY id").get(trimmed);
-	if (same) return { id: same.id, unit_number: same.unit_number, matchedBy: "case" };
+	const same = db.prepare("SELECT id, unit_number, owner_id, routemate_vehicle_id, assigned_driver FROM trucks WHERE LOWER(assigned_driver) = LOWER(?) ORDER BY id").get(trimmed);
+	if (same) return { ...same, matchedBy: "case" };
 	const needle = normalizeDriverName(trimmed);
-	const hit = db.prepare("SELECT id, unit_number, assigned_driver FROM trucks WHERE COALESCE(assigned_driver, '') <> '' ORDER BY id").all()
+	const hit = db.prepare("SELECT id, unit_number, owner_id, routemate_vehicle_id, assigned_driver FROM trucks WHERE COALESCE(assigned_driver, '') <> '' ORDER BY id").all()
 		.find((t) => normalizeDriverName(t.assigned_driver) === needle);
-	return hit ? { id: hit.id, unit_number: hit.unit_number, matchedBy: "normalized" } : null;
+	return hit ? { ...hit, matchedBy: "normalized" } : null;
+}
+
+// The truck on the driver's active truck_assignments row, found the same two
+// ways as findTruckForDriver(): first the newest active row naming them case
+// aside — the fallback POST /api/dispatch and /api/dispatch/reassign used on
+// their own before — else the newest active row naming them through
+// normalizeDriverName(). Returns { id, unit_number, owner_id,
+// routemate_vehicle_id, driver_name (the row's stored spelling), matchedBy:
+// "case" | "normalized" }, or null; a blank name matches nothing.
+function findActiveAssignmentTruckForDriver(name) {
+	const trimmed = typeof name === "string" ? name.trim() : "";
+	if (!trimmed) return null;
+	const same = db.prepare(
+		"SELECT t.id AS id, t.unit_number AS unit_number, t.owner_id AS owner_id, t.routemate_vehicle_id AS routemate_vehicle_id, ta.driver_name AS driver_name " +
+		"FROM truck_assignments ta JOIN trucks t ON t.id = ta.truck_id " +
+		"WHERE LOWER(ta.driver_name) = LOWER(?) AND ta.end_date = '' " +
+		"ORDER BY ta.start_date DESC LIMIT 1"
+	).get(trimmed);
+	if (same) return { ...same, matchedBy: "case" };
+	const needle = normalizeDriverName(trimmed);
+	const hit = db.prepare(
+		"SELECT t.id AS id, t.unit_number AS unit_number, t.owner_id AS owner_id, t.routemate_vehicle_id AS routemate_vehicle_id, ta.driver_name AS driver_name " +
+		"FROM truck_assignments ta JOIN trucks t ON t.id = ta.truck_id " +
+		"WHERE ta.end_date = '' AND COALESCE(ta.driver_name, '') <> '' " +
+		"ORDER BY ta.start_date DESC"
+	).all().find((r) => normalizeDriverName(r.driver_name) === needle);
+	return hit ? { ...hit, matchedBy: "normalized" } : null;
+}
+
+// The truck a money stamp names for a driver's name: the Truck and Owner ID
+// POST /api/dispatch and /api/dispatch/reassign write on a load, and the truck,
+// owner and ELD vehicle POST /api/expenses writes on an expense. Those decide
+// whose P&L the money lands on; a miss stamps Owner ID 0, which moves a load's
+// revenue to the company. First findTruckForDriver(); then, with
+// `activeAssignment` (the dispatch routes), the active truck_assignments row
+// (findActiveAssignmentTruckForDriver()), their fallback for a
+// trucks.assigned_driver that has drifted. Each step takes a row found only
+// through normalizeDriverName() only while no other account holds the name
+// under another spelling (driverNameHeldByOtherSpelling()); otherwise that step
+// is no match, as it was before, and the next one runs. A legacy account
+// "Shorn  King" beside the real "Shorn King" must not be stamped with the real
+// driver's truck and owner. The public tracker shows the unit it finds, so the
+// customer sees the truck the stamps name. Returns what the step found (see
+// those two helpers), or null.
+function findTruckForDriverStamp(name, { activeAssignment = false } = {}) {
+	let held;
+	const own = (hit) => {
+		if (!hit) return false;
+		if (hit.matchedBy === "case") return true;
+		if (held === undefined) held = driverNameHeldByOtherSpelling(name);
+		return !held;
+	};
+	const truck = findTruckForDriver(name);
+	if (own(truck)) return truck;
+	if (!activeAssignment) return null;
+	const assigned = findActiveAssignmentTruckForDriver(name);
+	return own(assigned) ? assigned : null;
 }
 
 // Sync driver to SQLite drivers_directory (replaces Google Sheet sync)
@@ -11971,9 +12051,13 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 			routeEtaMinutes = eta.minutesRemaining;
 		}
 
+		// The driver's truck, matched as the money stamps match it
+		// (findTruckForDriverStamp(): across spacing as well as case, a spacing
+		// match only while no other account holds the name under another
+		// spelling). Display only, so no active-assignment fallback, as before.
 		let truckUnit = "";
 		if (driverNameRaw) {
-			const t = db.prepare("SELECT unit_number FROM trucks WHERE LOWER(assigned_driver) = LOWER(?) LIMIT 1").get(driverNameRaw);
+			const t = findTruckForDriverStamp(driverNameRaw);
 			if (t && t.unit_number) truckUnit = String(t.unit_number);
 		}
 
@@ -29924,15 +30008,10 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// etc.) we fall back to the active truck_assignments row. Without this
 		// fallback a missed lookup stamps Owner ID = 0 on the load, which then
 		// blocks the driver-name fallback in /api/investor (see commit 656f1b1).
-		let truckForDriver = db.prepare("SELECT unit_number, owner_id FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(driver.trim());
-		if (!truckForDriver) {
-			truckForDriver = db.prepare(
-				"SELECT t.unit_number AS unit_number, t.owner_id AS owner_id " +
-				"FROM truck_assignments ta JOIN trucks t ON t.id = ta.truck_id " +
-				"WHERE LOWER(ta.driver_name) = LOWER(?) AND ta.end_date = '' " +
-				"ORDER BY ta.start_date DESC LIMIT 1"
-			).get(driver.trim());
-		}
+		// Both steps find the driver across spacing as well as case, a spacing
+		// match only while no other account holds the name under another
+		// spelling (findTruckForDriverStamp()).
+		const truckForDriver = findTruckForDriverStamp(driver, { activeAssignment: true });
 		const truckUnit = truckForDriver ? truckForDriver.unit_number : '';
 		const ownerId = truckForDriver ? truckForDriver.owner_id : 0;
 
@@ -30095,16 +30174,9 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 		// from a company-truck driver (Owner ID = 0) to an investor's driver
 		// keeps the stale 0, which blocks the driver-name fallback in
 		// /api/investor (commit 656f1b1) and the load never appears in their
-		// My Loads section. Same hardened lookup as /api/dispatch.
-		let truckForDriver = db.prepare("SELECT unit_number, owner_id FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(newDriver.trim());
-		if (!truckForDriver) {
-			truckForDriver = db.prepare(
-				"SELECT t.unit_number AS unit_number, t.owner_id AS owner_id " +
-				"FROM truck_assignments ta JOIN trucks t ON t.id = ta.truck_id " +
-				"WHERE LOWER(ta.driver_name) = LOWER(?) AND ta.end_date = '' " +
-				"ORDER BY ta.start_date DESC LIMIT 1"
-			).get(newDriver.trim());
-		}
+		// My Loads section. Same hardened lookup as /api/dispatch, active
+		// assignment fallback and spacing rule included.
+		const truckForDriver = findTruckForDriverStamp(newDriver, { activeAssignment: true });
 		const truckUnit = truckForDriver ? truckForDriver.unit_number : '';
 		const ownerId = truckForDriver ? truckForDriver.owner_id : 0;
 
@@ -31786,14 +31858,33 @@ function driverNameHeldByOtherAccount(name, exceptUserIds = []) {
 		.some((h) => h.source === "users" && h.field === "driver_name");
 }
 
+// driverNameHeldByOtherAccount() for a caller that knows a driver only by the
+// name it was handed: the accounts whose driver name IS this spelling (trimmed,
+// case aside) are the driver the name names, so only an account holding it
+// under another spelling counts. A name no account spells this way is held by
+// another spelling whenever any account's driver name normalizes to it. While one does, a truck or assignment row found for the name only
+// through normalizeDriverName() may be that account's, so the money stamps
+// (findTruckForDriverStamp()) and assignDriverToTruck()'s release leave such a
+// row alone. A blank name is held by no one.
+function driverNameHeldByOtherSpelling(name) {
+	const trimmed = typeof name === "string" ? name.trim() : "";
+	if (!trimmed) return false;
+	const spelling = trimmed.toLowerCase();
+	const ownIds = db.prepare("SELECT id, driver_name FROM users WHERE COALESCE(driver_name, '') <> ''").all()
+		.filter((u) => String(u.driver_name).trim().toLowerCase() === spelling)
+		.map((u) => u.id);
+	return driverNameHeldByOtherAccount(trimmed, ownIds);
+}
+
 // The spelling an existing driver identity already uses for this name — an
 // account's driver name first, then a drivers_directory row — or the trimmed
 // name itself when no identity holds it. A truck's driver is stored by NAME in
-// trucks.assigned_driver and truck_assignments, and assignDriverToTruck() and
-// several other name-keyed truck reads (the dispatch Owner ID stamp, the
-// expense truck stamp) find those rows by case-insensitive equality, which does
-// not fold spacing; the directory sync and the driver app's own truck reads
-// fold it (findTruckForDriver()). Assigning
+// trucks.assigned_driver and truck_assignments. The directory sync and the
+// driver app's own truck reads fold spacing when they look those rows up
+// (findTruckForDriver()); the money stamps (findTruckForDriverStamp()) and
+// assignDriverToTruck()'s release fold it only while no other account holds the
+// name under another spelling, and other name-keyed truck reads still compare
+// case-insensitively, which does not fold spacing. Assigning
 // "Shorn  King" to a truck therefore resolves to "Shorn King", the driver it
 // names, rather than starting a second spelling of one driver. The account's
 // spelling wins because it is the one a driver's own session looks the truck up
@@ -36250,8 +36341,10 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		if (await sentIfDriverExpenseWindowClosed(req, res, safeLoadId, driver)) return;
 
 		const timestamp = new Date().toISOString();
-		// Look up truck/owner for this driver to stamp on expense
-		const driverTruck = db.prepare("SELECT unit_number, owner_id, routemate_vehicle_id FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(driver.trim());
+		// Look up truck/owner for this driver to stamp on expense — across spacing
+		// as well as case, a spacing match only while no other account holds the
+		// name under another spelling (findTruckForDriverStamp()).
+		const driverTruck = findTruckForDriverStamp(driver);
 		const expOwnerId = driverTruck ? driverTruck.owner_id : 0;
 		const expTruckUnit = driverTruck ? driverTruck.unit_number : '';
 		// DEDUP: Deshorn bulk-uploads receipts drivers text him, and the same

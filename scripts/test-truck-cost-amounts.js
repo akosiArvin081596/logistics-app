@@ -219,6 +219,7 @@ const MODULE_SRC = [
 	liftFunction("findDirectoryRowForDriver"),
 	liftFunction("findTruckForDriver"),
 	liftFunction("syncDriverToCarrierSheet"),
+	liftFunction("driverNameHeldByOtherSpelling"),
 	liftFunction("assignDriverToTruck"),
 ].join("\n");
 const MODULE_EXPORTS = [
@@ -275,7 +276,8 @@ const DDL = [
 		purchase_price REAL DEFAULT 0, title_status TEXT DEFAULT 'Clean', maintenance_fund_monthly REAL DEFAULT 0,
 		fuel_tank_gallons REAL DEFAULT 0, avg_mpg REAL DEFAULT 0, in_service_date TEXT DEFAULT '', retired_at TEXT DEFAULT '',
 		photo TEXT DEFAULT '', insurance_monthly REAL DEFAULT 0, eld_monthly REAL DEFAULT 0, truck_payment_monthly REAL DEFAULT 0,
-		hvut_annual REAL DEFAULT 0, irp_annual REAL DEFAULT 0, admin_fee_pct REAL DEFAULT 50, created_at TEXT DEFAULT '')`,
+		hvut_annual REAL DEFAULT 0, irp_annual REAL DEFAULT 0, admin_fee_pct REAL DEFAULT 50, created_at TEXT DEFAULT '',
+		routemate_vehicle_id TEXT DEFAULT '')`,
 	"CREATE TABLE truck_assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER, driver_name TEXT, start_date TEXT, end_date TEXT DEFAULT '')",
 	"CREATE TABLE carrier_driver_history (id INTEGER PRIMARY KEY AUTOINCREMENT, carrier_name TEXT, driver_name TEXT, started_at TEXT, ended_at TEXT)",
 ];
