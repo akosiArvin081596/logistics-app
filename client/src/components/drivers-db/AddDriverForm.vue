@@ -114,6 +114,7 @@
 
 <script setup>
 import { reactive, ref } from 'vue'
+import { directoryPayCells } from '../../lib/driverPay'
 
 const props = defineProps({
   // Driver pay is Super Admin only; everyone else adds on the default terms.
@@ -153,15 +154,17 @@ function handleSubmit() {
     form.mc,
     form.rating,
     '', // Status placeholder — server falls back to 'active'
-    // Only a Super Admin sends pay terms; blank is the server's default
-    // (fixed, 0%, $0 — the truck's rate applies).
-    ...(props.canEditPay
-      ? [
-          form.payType,
-          form.payType === 'percentage' ? (Number(form.payPercentage) || 0) : 0,
-          form.payType === 'fixed' ? (Number(form.payDaily) || 0) : 0,
-        ]
-      : ['', '', '']),
+    // Only a Super Admin sends pay terms, built as the Edit dialog builds them
+    // (directoryPayCells()): the active type's amount as text, the other
+    // type's as "" (not sent, so the column default). Anyone else sends all
+    // three blank: the server's default terms (fixed, 0%, $0, so the truck's
+    // rate applies).
+    ...directoryPayCells({
+      canEditPay: props.canEditPay,
+      payType: form.payType,
+      payPercentage: form.payPercentage,
+      payDaily: form.payDaily,
+    }),
   ])
   Object.assign(form, defaults())
 }

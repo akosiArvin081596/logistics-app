@@ -6942,6 +6942,10 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (re
 		const { values, headers } = req.body;
 		if (!values || !headers) return res.status(400).json({ error: "values and headers required" });
 		const obj = {};
+		// The PUT's contract (see its mapping): a NUMBER 0 arrives as "", not sent,
+		// and the TEXT "0" as a value. On a create, a pay field not sent takes the
+		// column default (fixed, 0 %, $0, so the truck's rate applies), which a
+		// sent "0" equals.
 		headers.forEach((h, i) => { obj[h] = values[i] || ""; });
 		const insPayType = (obj.PayType || "fixed").toLowerCase() === "percentage" ? "percentage" : "fixed";
 		// A pay field sent is read by directoryPayValue(), as the PUT reads it;
@@ -7055,6 +7059,20 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		const { values, headers } = req.body;
 		if (!values || !headers) return res.status(400).json({ error: "values and headers required" });
 		const obj = {};
+		// ⚠️ TEXT IS A VALUE; A NUMBER 0 IS "NOT SENT". `|| ""` turns a falsy cell
+		// (the NUMBER 0, null, false) into "", which every field below reads as
+		// "not sent", so a pay field keeps its stored value. Keep it that way: a
+		// Drivers Database page loaded before 2026-09-26 sends the pay type not in
+		// use as a numeric 0 on every save, and honouring that 0 would wipe the
+		// terms stored for that type and ask the month-end lock about a change
+		// nobody made. The TEXT "0" is truthy and arrives as a value. On PayDaily
+		// it clears the driver's own rate, so resolveDailyRate() falls back to the
+		// truck's rate, else $250; on PayPercentage it is 0 %. The forms send the
+		// active type's amount as text and the other type's as "" (not sent), in
+		// client/src/lib/driverPay.js. A value that differs from the stored one is
+		// still judged below: by the Super Admin check (directoryPayChanges(), 403
+		// PAY_EDIT_ADMIN_ONLY), then by the month-end lock
+		// (directoryEditLockBlockers()), each of which sees only a real change.
 		headers.forEach((h, i) => { obj[h] = values[i] || ""; });
 		// Keep existing status / pay fields if the client didn't send them.
 		// SELECT * (was: five columns) because the period guard also needs
