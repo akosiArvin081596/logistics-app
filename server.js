@@ -22902,6 +22902,18 @@ function parseRetiredAt(raw) {
 	return { value: day };
 }
 
+// trucks.admin_fee_pct as POST /api/trucks and PUT /api/trucks/:id store it,
+// shared so the two cannot drift. Never refuses, and answers a NUMBER (not the
+// {error}|{value} of the parsers above): a finite number is stored as given,
+// and anything else — blank, unreadable, null, Infinity — is the column's own
+// default of 50. The PUT used to store `parseFloat(x) ?? 50`, which never falls
+// back, because parseFloat answers NaN rather than null, and SQLite stores NaN
+// as NULL — so clearing the Edit form's Admin Fee left the column NULL.
+function adminFeePctOrDefault(raw) {
+	const n = parseFloat(raw);
+	return Number.isFinite(n) ? n : 50;
+}
+
 // ============================================================
 // Truck edits / truck deletion and the month-end lock
 // ============================================================
@@ -24340,8 +24352,8 @@ function directoryDeleteLockBlockers(row) {
 // The everyday create stays 200 by construction: with in_service_date blank the
 // charge-from month is the CURRENT month, and the current month is never
 // locked, so fixedMonths is empty. What is refused is a create that back-dates
-// in_service_date into a closed month, or that reprices or re-parents a driver
-// with history in one.
+// an Active truck's in-service date into a closed month while it carries fixed
+// costs, or that reprices or re-parents a driver with history in one.
 //
 // `history` is driverHistoryFloorMonth() for truck.assigned_driver, handed to
 // both driver checks so that they size the driver's exposure off everything the
@@ -24367,17 +24379,28 @@ function truckCreateLockBlockers(truck, history) {
 	// while it bills nothing. The test is therefore what the money math would
 	// actually book, not how old the date is.
 	//
-	// Today this cannot fire on the amounts, because the INSERT carries no
-	// insurance/ELD/payment/HVUT/IRP — they default to 0, so monthly is 0 on
-	// every create. It is written against truckMonthlyFixed() rather than against
-	// today's column list so that adding any of those five fields to this route's
-	// body starts the guard working instead of silently opening a hole.
-	if (fixedMonths.length && monthly > 0) {
+	// The five amounts are the ones the route is about to INSERT (the Add form's
+	// insurance/ELD/payment/HVUT/IRP), so this answers for the row that will land.
+	// Refused when ANY of them is non-zero, not when the monthly total is:
+	// getMonthlyFixedCosts() adds truckMonthlyFixed() with no sign test, so a
+	// negative amount restates a closed month as surely as a positive one; the
+	// drill-down itemizes the parts, so amounts that cancel to a $0.00 total
+	// still restate what a closed month shows; and the fleet accruals divide the
+	// raw annual HVUT/IRP by 12 without truckMonthlyFixed()'s rounding, so an
+	// annual line that rounds to $0.00/mo still moves them. (The edit guard's
+	// amount check likewise tests each of the five on its own, not their sum.)
+	const AMOUNTS = [
+		["insurance_monthly", "insurance", "/mo"], ["eld_monthly", "ELD fee", "/mo"],
+		["truck_payment_monthly", "truck payment", "/mo"], ["hvut_annual", "HVUT", "/yr"], ["irp_annual", "IRP", "/yr"],
+	];
+	const carried = AMOUNTS.filter(([col]) => (Number(truck[col]) || 0) !== 0);
+	if (fixedMonths.length && carried.length) {
 		blockers.push({
 			field: "in_service_date", from: "(new truck)", to: String(truck.in_service_date || "") || "(unset — bills from created_at)",
 			periods: fixedMonths.slice().sort(),
 			detail: `creating ${truck.unit_number} Active from ${truckChargeFromMonth(truck) || "its creation month"} books ` +
-				`${money(monthly)}/mo of fixed costs into ${fixedMonths.length} finalized month${fixedMonths.length === 1 ? "" : "s"} (${money(monthly * fixedMonths.length)})`,
+				`${money(monthly)}/mo of fixed costs into ${fixedMonths.length} finalized month${fixedMonths.length === 1 ? "" : "s"} (${money(monthly * fixedMonths.length)})` +
+				` — ${carried.map(([col, label, per]) => `${label} ${money(Number(truck[col]))}${per}`).join(", ")}`,
 		});
 	}
 
@@ -24476,7 +24499,8 @@ function truckCreateLockBlockers(truck, history) {
 // Truck Database: add a new truck
 app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), async (req, res) => {
 	try {
-		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId, driverPayDaily, purchasePrice, titleStatus, maintenanceFundMonthly } = req.body;
+		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId, driverPayDaily, purchasePrice, titleStatus, maintenanceFundMonthly,
+			photo, insuranceMonthly, eldMonthly, truckPaymentMonthly, hvutAnnual, irpAnnual, adminFeePct } = req.body;
 		// A driver name is text. Anything else is refused before it can be coerced:
 		// String() would store {} as "[object Object]", and the directory sync
 		// would give that "driver" a row. `null` means no driver, like "".
@@ -24542,6 +24566,23 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 			return res.status(400).json({ error: "Unit number is required" });
 		}
 		const validStatus = ["Active", "Inactive", "Maintenance", "OOS"].includes(status) ? status : "Active";
+		// The Add form's five fixed costs, admin fee and photo. The INSERT used to
+		// drop all seven, so a new truck always started at $0/mo, the 50% fee and
+		// no photo whatever the form said. Parsed exactly as PUT /api/trucks/:id
+		// parses them — the admin fee through the same adminFeePctOrDefault() — and
+		// honoured for the two roles it admits; an Investor's add keeps the column
+		// defaults (their form sends none of these). The month-end lock below is
+		// asked about these same values, so it answers for the row that lands.
+		const costsAllowed = req.session.user.role === "Super Admin" || req.session.user.role === "Dispatcher";
+		const createCosts = {
+			insurance_monthly: costsAllowed ? parseFloat(insuranceMonthly) || 0 : 0,
+			eld_monthly: costsAllowed ? parseFloat(eldMonthly) || 0 : 0,
+			truck_payment_monthly: costsAllowed ? parseFloat(truckPaymentMonthly) || 0 : 0,
+			hvut_annual: costsAllowed ? parseFloat(hvutAnnual) || 0 : 0,
+			irp_annual: costsAllowed ? parseFloat(irpAnnual) || 0 : 0,
+		};
+		const createAdminFee = costsAllowed ? adminFeePctOrDefault(adminFeePct) : 50;
+		const createPhoto = costsAllowed && typeof photo === "string" ? photo : "";
 		// Check if driver has an active load before allowing assignment, and read
 		// Job Tracking for the month-end lock's view of the driver's history beside
 		// it. Both awaits sit here, above canonicalDriverName(), so nothing yields
@@ -24605,22 +24646,23 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 			driver_pay_daily: driverPayParsed.value,
 			in_service_date: inServiceCreate,
 			created_at: createStamp,
-			// The five fixed-cost amounts are NOT in this route's body, so they
-			// default to 0 and truckMonthlyFixed() totals 0 today. Named explicitly
-			// rather than left undefined so that adding any of them to this handler
-			// starts the guard working instead of silently opening a hole.
-			insurance_monthly: 0, eld_monthly: 0, truck_payment_monthly: 0,
-			hvut_annual: 0, irp_annual: 0,
+			// The five fixed-cost amounts the INSERT below stores — the same object
+			// — so an Active truck back-dated into a finalized month while carrying
+			// costs is refused by check (1), and one carrying none still is not.
+			...createCosts,
 			routemate_vehicle_id: "",
 		}, history);
+		// Formatted as the guard's refusal detail formats money ("$3,043.33").
+		const createMonthlyFixed = `$${truckMonthlyFixed(createCosts).total.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/mo`;
 		// entity/entity_id mirror the `create_truck` success line — except that there
 		// is no row id yet, so the unit number is the only address the attempt has.
-		// The in-service date is recorded because it is the field that decides which
-		// months a new truck retroactively bills, i.e. the reason this guard exists.
+		// The in-service date and the monthly fixed costs are recorded because
+		// together they decide which months a new truck retroactively bills, and
+		// how much — the reason this guard exists.
 		const createAudit = {
 			action: "create_truck_blocked", entity: "truck", entityId: unitNumber.trim(),
 			subject: `add truck ${unitNumber.trim()} (in service ${inServiceCreate || "unset"},` +
-				` status ${validStatus}, driver ${finalAssignedDriver || "none"}, day rate ${driverPayParsed.value})`,
+				` status ${validStatus}, fixed costs ${createMonthlyFixed}, driver ${finalAssignedDriver || "none"}, day rate ${driverPayParsed.value})`,
 		};
 		if (createLock.unreadable) return periodLockUnreadableResponse(req, res, "Adding a truck", createAudit);
 		if (createLock.blockers.length) {
@@ -24632,18 +24674,21 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		}
 
 		const result = db.prepare(
-			"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id, driver_pay_daily, purchase_price, title_status, maintenance_fund_monthly, fuel_tank_gallons, avg_mpg, in_service_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, finalAssignedDriver, notes || "", finalOwnerId, driverPayParsed.value, parseFloat(purchasePrice) || 0, titleStatus || "Clean", parseFloat(maintenanceFundMonthly) || 0, parseFloat(fuelTankGallons) || 0, parseFloat(avgMpg) || 0, inServiceCreate);
+			"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id, driver_pay_daily, purchase_price, title_status, maintenance_fund_monthly, fuel_tank_gallons, avg_mpg, in_service_date, " +
+			"photo, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, admin_fee_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, finalAssignedDriver, notes || "", finalOwnerId, driverPayParsed.value, parseFloat(purchasePrice) || 0, titleStatus || "Clean", parseFloat(maintenanceFundMonthly) || 0, parseFloat(fuelTankGallons) || 0, parseFloat(avgMpg) || 0, inServiceCreate,
+			createPhoto, createCosts.insurance_monthly, createCosts.eld_monthly, createCosts.truck_payment_monthly, createCosts.hvut_annual, createCosts.irp_annual, createAdminFee);
 		// Create truck assignment record
 		if (finalAssignedDriver && finalAssignedDriver.trim()) {
 			assignDriverToTruck(result.lastInsertRowid, finalAssignedDriver.trim());
 		}
-		// Audit creation, naming the in-service date. The PUT audits every change
-		// to that field because it re-books fixed costs across whole months; the
-		// value it starts at deserves the same trail, and this handler previously
-		// recorded nothing at all.
+		// Audit creation, naming the in-service date and the monthly fixed costs it
+		// starts with. The PUT audits every change to the date because it re-books
+		// fixed costs across whole months; the values a truck starts at deserve the
+		// same trail, and this handler previously recorded nothing at all.
 		logAudit(req, "create_truck", "truck", String(result.lastInsertRowid),
-			`Created truck ${unitNumber.trim()} (${validStatus}), in-service date: ${inServiceCreate || "unset (falls back to created_at)"}`);
+			`Created truck ${unitNumber.trim()} (${validStatus}), in-service date: ${inServiceCreate || "unset (falls back to created_at)"}, ` +
+			`fixed costs: ${createMonthlyFixed}`);
 		notifyChange("trucks");
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {
@@ -24851,7 +24896,10 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		if (truckPaymentMonthly !== undefined) { updates.push("truck_payment_monthly = ?"); params.push(parseFloat(truckPaymentMonthly) || 0); }
 		if (hvutAnnual !== undefined) { updates.push("hvut_annual = ?"); params.push(parseFloat(hvutAnnual) || 0); }
 		if (irpAnnual !== undefined) { updates.push("irp_annual = ?"); params.push(parseFloat(irpAnnual) || 0); }
-		if (adminFeePct !== undefined) { updates.push("admin_fee_pct = ?"); params.push(parseFloat(adminFeePct) ?? 50); }
+		// Blank or unreadable is the column's 50, never NaN (which SQLite stores as
+		// NULL) — the same rule POST /api/trucks applies. No money math reads this
+		// column, so neither the month-end lock nor `changed` carries it.
+		if (adminFeePct !== undefined) { updates.push("admin_fee_pct = ?"); params.push(adminFeePctOrDefault(adminFeePct)); }
 		// Only a Super Admin's request writes its own rate. The pay check above let
 		// anyone else's through only because it equals the stored rate, but the
 		// active-load check can yield between that check and this UPDATE, so their
