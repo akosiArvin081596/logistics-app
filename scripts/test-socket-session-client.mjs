@@ -53,6 +53,20 @@
 //   P2 unpause() opens nothing for a page that never asked for live updates
 //   P3 the store, following another tab: the same person gets the page's live
 //      updates back; someone else, or no answer, gets no socket and no listeners
+//   P4 connect() while paused opens nothing; unpause() then opens exactly one
+//      socket, with the page's listeners and room name
+//   P5 disconnect() while paused leaves the socket closed (a later unpause()
+//      opens nothing) and ends the pause: the next connect() opens at once, and a
+//      late unpause() leaves that socket and its room name alone
+//   P6 resume() while paused (a password change answered meanwhile) opens nothing
+//      until unpause()
+//   P7 unpause() reopens only for the owner when the pause began: for someone
+//      else it opens nothing and forgets the room name registered before the
+//      pause (no later resume() or connect() sends it); with no owner it opens
+//      nothing; a second pause() keeps the owner the first one noted
+//   P8 the store, following another tab: a page that mounts while it asks opens
+//      no socket until the answer; the same person then gets exactly one, and
+//      someone else, or no answer, gets none
 //   A1 auth.login(): a successful POST ends the socket, resets the state and
 //      cancels a pending reconnect; a refused sign-in leaves the socket alone
 //   A2 auth.setup(): the same
@@ -759,6 +773,139 @@ const SCENARIOS = {
     }
     p.otherOwnerOrNoAnswerGetsNothingBack = otherOk
   },
+
+  async p4(src, p) {
+    const { useSocket, created } = await freshWorld(src)
+    liveTab(useSocket, created, 'bob driver')
+    const s = useSocket()
+    s.pause()
+    // A page mounts while the store asks: it subscribes, connects and registers.
+    const got = []
+    s.on('status-updated', (x) => got.push(x))
+    s.connect()
+    s.register('bob driver')
+    p.connectWhilePausedOpensNothing = created.length === 1 && s.isConnected.value === false
+    s.unpause()
+    const next = created[1]
+    if (next) {
+      next.serverConnect()
+      next.fire('status-updated', 'z')
+    }
+    p.unpauseOpensExactlyOne = created.length === 2 && !!next && next.registered().join() === 'bob driver' && got.join() === 'z'
+  },
+
+  async p5(src, p) {
+    {
+      const { useSocket, created } = await freshWorld(src)
+      const { s } = liveTab(useSocket, created, 'bob driver')
+      s.pause()
+      s.disconnect() // a sign-in, a logout or a view leaving, while the store asks
+      s.unpause() // an answer arriving after it: the page that wanted updates has gone
+      p.disconnectWhilePausedStaysClosed = created.length === 1 && s.isConnected.value === false
+    }
+    {
+      const { useSocket, created } = await freshWorld(src)
+      const { s } = liveTab(useSocket, created, 'bob driver')
+      s.pause()
+      s.disconnect()
+      s.connect() // the next page: the pause ended with that socket's life
+      const next = created[1]
+      if (next) next.serverConnect()
+      s.register('amir')
+      p.disconnectClearsThePause = created.length === 2 && !!next && next.registered().join() === 'amir'
+      s.unpause() // a late answer for the pause disconnect() ended
+      if (next) {
+        next.serverDisconnect('transport close')
+        next.serverConnect() // socket.io's own reconnect: it registers again
+      }
+      p.lateUnpauseLeavesTheNextSocketAlone = created.length === 2 && !!next && next.registered().join() === 'amir,amir'
+    }
+  },
+
+  async p6(src, p) {
+    const { useSocket, created } = await freshWorld(src)
+    const { s } = liveTab(useSocket, created, 'bob driver')
+    s.pause()
+    s.resume() // this tab's password change answered 2xx while the store asks
+    const waited = created.length === 1
+    s.unpause()
+    const next = created[1]
+    if (next) next.serverConnect()
+    p.resumeWhilePausedWaitsForUnpause = waited && created.length === 2 && !!next && next.registered().join() === 'bob driver'
+  },
+
+  async p7(src, p) {
+    {
+      const { useSocket, setSocketOwner, created } = await freshWorld(src)
+      const { s } = liveTab(useSocket, created, 'bob driver')
+      s.pause()
+      setSocketOwner(OTHER.id) // the store now shows someone else
+      s.unpause()
+      p.unpauseForSomeoneElseOpensNothing = created.length === 1
+      s.resume() // nor may anything later send the first person's room name
+      s.connect()
+      const next = created[1]
+      if (next) next.serverConnect()
+      p.nameFromBeforeThePauseNeverReachesSomeoneElse = created.length === 2 && !!next && next.registered().length === 0
+    }
+    {
+      const { useSocket, created } = await freshWorld({ ...src, owner: null }) // nobody on screen
+      const { s } = liveTab(useSocket, created, 'bob driver')
+      s.pause()
+      s.unpause()
+      p.unpauseWithNoOwnerOpensNothing = created.length === 1
+    }
+    {
+      const { useSocket, setSocketOwner, created } = await freshWorld(src)
+      const { s } = liveTab(useSocket, created, 'bob driver')
+      s.pause() // a sign-out elsewhere writes two keys: two pauses, one answer
+      setSocketOwner(OTHER.id)
+      s.pause()
+      s.unpause()
+      p.secondPauseKeepsTheFirstOwner = created.length === 1
+    }
+  },
+
+  async p8(src, p) {
+    // The page shows USER with a live socket; another tab changes the owner, and a
+    // page mounts while the store is asking.
+    async function mountWhileAsking(answer) {
+      const w = await freshWorld({ ...src, withStore: true, owner: null })
+      answers.push({ status: 200, json: { success: true, user: USER } })
+      await w.store.login('bob', 'Bob-Pass-2!')
+      liveTab(w.useSocket, w.created, 'bob driver')
+      const before = w.created.length
+      answers.push(answer)
+      const following = w.store._followOtherTab()
+      const s = w.useSocket()
+      const got = []
+      s.on('status-updated', (x) => got.push(x))
+      s.connect()
+      s.register('bob driver')
+      const opened = w.created.slice(before)
+      for (const x of opened) x.serverConnect() // anything opened connects at once
+      const registeredWhileAsking = opened.flatMap((x) => x.registered())
+      await following
+      await advance(120000)
+      return { created: w.created, before, got, openedWhileAsking: opened.length, registeredWhileAsking }
+    }
+    {
+      const r = await mountWhileAsking(SIGNED_IN())
+      const next = r.created[r.before]
+      if (next) {
+        next.serverConnect()
+        next.fire('status-updated', 'w')
+      }
+      p.pageMountingWhileAskingWaitsForTheAnswer = r.openedWhileAsking === 0 && r.registeredWhileAsking.length === 0 &&
+        r.created.length === r.before + 1 && !!next && next.registered().join() === 'bob driver' && r.got.join() === 'w'
+    }
+    let othersOk = true
+    for (const answer of [SIGNED_IN_AS(OTHER), OFFLINE]) {
+      const r = await mountWhileAsking(answer)
+      othersOk = othersOk && r.openedWhileAsking === 0 && r.registeredWhileAsking.length === 0 && r.created.length === r.before
+    }
+    p.pageMountingWhileAskingOpensNothingForSomeoneElse = othersOk
+  },
 }
 
 const PROPS = {
@@ -809,6 +956,18 @@ const PROPS = {
   unpauseOnlyForAPageThatWantsUpdates: 'P2 unpause() must open nothing for a page that never connected, or has disconnected',
   sameOwnerGetsLiveUpdatesBack: "P3 another tab's change answered by the same person: the socket is paused while asking, then back with the page's listeners and room",
   otherOwnerOrNoAnswerGetsNothingBack: "P3 ...answered by someone else, or not at all: no socket, no listeners, no room name of the first person's comes back",
+  connectWhilePausedOpensNothing: 'P4 connect() while paused must open nothing: it only notes that live updates are wanted',
+  unpauseOpensExactlyOne: "P4 ...and unpause() must then open exactly one socket, with the page's listeners and room name",
+  disconnectWhilePausedStaysClosed: 'P5 disconnect() while paused must leave the socket closed: a later unpause() opens nothing',
+  disconnectClearsThePause: 'P5 ...and end the pause, so the next connect() opens at once',
+  lateUnpauseLeavesTheNextSocketAlone: "P5 ...and a late unpause() must leave that next socket, and its room name, alone",
+  resumeWhilePausedWaitsForUnpause: 'P6 resume() while paused must open nothing until unpause(), which opens one with the room name',
+  unpauseForSomeoneElseOpensNothing: 'P7 unpause() when the owner has changed since the pause must open nothing',
+  nameFromBeforeThePauseNeverReachesSomeoneElse: 'P7 ...and forget the room name registered before the pause: no later resume() or connect() may send it',
+  unpauseWithNoOwnerOpensNothing: 'P7 unpause() with nobody on screen (no owner) must open nothing, as no reconnect does',
+  secondPauseKeepsTheFirstOwner: 'P7 a second pause() before the answer must keep the owner the first one noted',
+  pageMountingWhileAskingWaitsForTheAnswer: 'P8 a page mounting while the store follows another tab must open no socket until the answer; the same person then gets exactly one, with its listeners and room',
+  pageMountingWhileAskingOpensNothingForSomeoneElse: 'P8 ...answered by someone else, or not at all: that page opens no socket and sends no room name',
 }
 
 async function probe(src = {}, only = null) {
@@ -1031,6 +1190,29 @@ const MUTANTS = [
   ['the store brings the socket back whoever answered', {
     authSrc: (s) => editBlock(s, 'async _followOtherTab() {', (b) => b.replace(/\n\s*useSocket\(\)\.disconnect\(\)\n/, '\n      useSocket().unpause()\n')),
   }, ['otherOwnerOrNoAnswerGetsNothingBack']],
+  // The mutant control for "no socket opens while paused".
+  ['connect() opens a socket while paused', {
+    socketSrc: (s) => editBlock(s, 'function connect() {', (b) => b.replace('if (paused || socket) return', 'if (socket) return')),
+  }, ['connectWhilePausedOpensNothing', 'unpauseOpensExactlyOne', 'pageMountingWhileAskingWaitsForTheAnswer', 'pageMountingWhileAskingOpensNothingForSomeoneElse']],
+  ['resume() opens a socket while paused', {
+    socketSrc: (s) => editBlock(s, 'function resume() {', (b) => b.replace('\n    if (paused) return // the store is still asking whose session this is: unpause() decides', '')),
+  }, ['resumeWhilePausedWaitsForUnpause']],
+  ['unpause() leaves the pause in place', { socketSrc: (s) => editBlock(s, 'function unpause() {', (b) => b.replace('\n    paused = false', '')) },
+    ['unpauseOpensExactlyOne', 'sameOwnerGetsLiveUpdatesBack', 'pageMountingWhileAskingWaitsForTheAnswer']],
+  ['disconnect() leaves the pause in place', { socketSrc: (s) => editBlock(s, 'function disconnect() {', (b) => b.replace('\n    paused = false', '')) },
+    ['disconnectClearsThePause']],
+  ['unpause() acts without a pause', { socketSrc: swap('    if (!paused) return // disconnect() ended the pause: there is nothing to bring back\n', '') },
+    ['lateUnpauseLeavesTheNextSocketAlone']],
+  ['unpause() reopens for whoever the owner is now', { socketSrc: swap('    if (owner === null || owner !== shownThen) {', '    if (owner === null) {') },
+    ['unpauseForSomeoneElseOpensNothing', 'nameFromBeforeThePauseNeverReachesSomeoneElse', 'secondPauseKeepsTheFirstOwner']],
+  ['unpause() reopens with nobody on screen', { socketSrc: swap('    if (owner === null || owner !== shownThen) {', '    if (owner !== shownThen) {') },
+    ['unpauseWithNoOwnerOpensNothing']],
+  ['unpause() for someone else keeps the room name', { socketSrc: (s) => editBlock(s, 'function unpause() {', (b) => b.replace('\n      registeredName = null', '')) },
+    ['nameFromBeforeThePauseNeverReachesSomeoneElse']],
+  ['unpause() for someone else keeps the name resume() restores', { socketSrc: (s) => editBlock(s, 'function unpause() {', (b) => b.replace('\n      lastRegisteredName = null', '')) },
+    ['nameFromBeforeThePauseNeverReachesSomeoneElse']],
+  ['a second pause() notes the owner again', { socketSrc: swap('    if (!paused) ownerAtPause = owner', '    ownerAtPause = owner') },
+    ['secondPauseKeepsTheFirstOwner']],
 ]
 
 const SCENARIO_OF = {}
