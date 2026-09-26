@@ -123,6 +123,42 @@ export function isDecodedImage(dataUrl) {
   return DECODED_IMAGE_RE.test(dataUrl || '')
 }
 
+// True only when a base64 data URL's bytes begin with the signature of the type
+// its label names: JPEG FF D8 FF, the 8-byte PNG signature, or a RIFF container
+// whose bytes 8–11 read WEBP — the types the server's lib/image-size.js
+// recognises (its JPEG size reader needs that third FF as well). Any other label,
+// a payload that is not base64, or a value that is not a string is false; it
+// never throws.
+//
+// isDecodedImage reads the label alone, and compressImage's raw fallback takes
+// the label from the file, not its contents: a PDF renamed scan.jpg comes back
+// as data:image/jpeg;base64,JVBERi… — which the server then refuses (415
+// UNSUPPORTED_IMAGE_TYPE). Only the first 24 base64 characters (18 bytes) are
+// decoded, so the size of the photo does not matter.
+export function dataUrlHasImageBytes(dataUrl) {
+  const url = typeof dataUrl === 'string' ? dataUrl : ''
+  const label = DECODED_IMAGE_RE.exec(url)
+  if (!label) return false
+  let head
+  try {
+    head = atob(url.slice(label[0].length, label[0].length + 24))
+  } catch {
+    return false
+  }
+  // atob yields one character per byte, so these compare bytes exactly.
+  switch (label[1].toLowerCase()) {
+    case 'jpeg':
+    case 'jpg':
+      return head.startsWith('\xff\xd8\xff')
+    case 'png':
+      return head.startsWith('\x89PNG\r\n\x1a\n')
+    case 'webp':
+      return head.startsWith('RIFF') && head.slice(8, 12) === 'WEBP'
+    default:
+      return false
+  }
+}
+
 export function readFileAsDataURL(file) {
   return new Promise((resolve) => {
     const reader = new FileReader()

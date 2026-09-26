@@ -12312,11 +12312,21 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 				// which is exactly how the accept-branch site survived.
 				const unitNum = `INV-${appId}-${colLetter(i)}`;
 				const truckStatus = validTruckStatus.includes(v.status) ? v.status : "Active";
+				// The purchase price is read by parseTruckAmount(), the parser
+				// POST /api/trucks and PUT /api/trucks/:id read it through, so this truck
+				// never holds a price those routes would refuse. Unlike them, a value it
+				// refuses does NOT refuse the acceptance: it is stored as 0 — unset, as a
+				// blank is — because an admin cannot edit the applicant's vehicle data,
+				// and the real price is set on the truck afterwards. "85,000" is 0 too,
+				// not the 85 that parseFloat() read out of it. A price left out is the
+				// parser's { value: undefined } ("not sent"), and that is 0 here as well.
+				const priceRead = parseTruckAmount(v.purchasePrice);
+				const vehiclePrice = priceRead.error || priceRead.value === undefined ? 0 : priceRead.value;
 				try {
 					db.prepare(`INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, owner_id, purchase_price, title_status, title_state, notes)
 						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 					.run(unitNum, v.make || "", v.model || "", parseInt(v.year) || 0, v.vin || "", v.licensePlate || "",
-						truckStatus, userId, parseFloat(v.purchasePrice) || 0,
+						truckStatus, userId, vehiclePrice,
 						v.titleStatus || "Clean", v.titleState || "", "");
 				} catch { /* skip duplicate */ }
 			}
@@ -22914,6 +22924,81 @@ function adminFeePctOrDefault(raw) {
 	return Number.isFinite(n) ? n : 50;
 }
 
+// ⚠️ TRUCK AMOUNTS ARE FINITE AND IN RANGE. The nine numeric columns
+// POST /api/trucks and PUT /api/trucks/:id store are read through ONE parser
+// and ONE table, so the two verbs cannot drift apart: the five fixed costs
+// truckMonthlyFixed() bills into every month from a truck's in-service month
+// onward, the purchase price and maintenance fund the investor report shows,
+// and the fuel tank and average MPG the estimated fuel range is built from. A
+// value that is not a real amount has no safe reading in any of them — the
+// fixed costs are multiplied across every closed month — so it is refused at
+// the boundary rather than stored: 400 INVALID_AMOUNT, naming the column in
+// `field`, before the month-end lock is asked and before anything is written.
+// The lock is asked about the parsed values, never the raw ones, so the guard
+// and the write cannot disagree.
+//
+// parseTruckAmount() has parseDriverPayDaily()'s {error}|{value} contract:
+//   - undefined — the field was not sent: { value: undefined }, and the PUT
+//     leaves the column alone;
+//   - null, "" or only whitespace — a cleared input: { value: 0 }, as a blank
+//     has always been stored;
+//   - a number, or a string whose trimmed text is a number, finite and within
+//     0..TRUCK_AMOUNT_MAX: { value: n };
+//   - anything else — "abc", "12abc", a negative, ±Infinity, a number too large
+//     to be an amount (1e308), a boolean, an array, an object: { error }.
+// Number(), never parseFloat(): parseFloat reads "12abc" as 12 and drops the
+// rest, which turns a typo into a figure nobody entered.
+//
+// TRUCK_AMOUNT_MAX is a sanity ceiling, not a business rule — far above any
+// figure these columns hold (the purchase price is the largest), so it refuses
+// only a slipped key or a value that is no amount at all. The driver's daily
+// rate (parseDriverPayDaily, DRIVER_PAY_DAILY_MAX) and the admin fee
+// (adminFeePctOrDefault, which never refuses) keep their own rules.
+const TRUCK_AMOUNT_MAX = 1_000_000;
+function parseTruckAmount(raw, label = "Amount") {
+	if (raw === undefined) return { value: undefined };
+	if (raw === null || (typeof raw === "string" && raw.trim() === "")) return { value: 0 };
+	const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : NaN;
+	if (!Number.isFinite(n) || n < 0 || n > TRUCK_AMOUNT_MAX) {
+		return { error: `${label} must be a number between 0 and ${TRUCK_AMOUNT_MAX.toLocaleString("en-US")}` };
+	}
+	return { value: n === 0 ? 0 : n }; // -0 is stored and compared as 0
+}
+
+// One row per amount, read by both routes: the column, the body key(s) it
+// arrives under, the label a refusal and the cost audit name it by (the
+// month-end lock's own wording, capitalized where it starts a sentence), and
+// whether it is one of the five fixed costs truckMonthlyFixed() reads —
+// POST /api/trucks stores those for a Super Admin or a Dispatcher only. The fuel
+// pair takes snake_case (what the Trucks forms send) or camelCase, snake_case
+// first, exactly as `a ?? b` has always read it.
+const TRUCK_AMOUNT_FIELDS = [
+	{ col: "insurance_monthly", keys: ["insuranceMonthly"], label: "insurance", fixed: true },
+	{ col: "eld_monthly", keys: ["eldMonthly"], label: "ELD fee", fixed: true },
+	{ col: "truck_payment_monthly", keys: ["truckPaymentMonthly"], label: "truck payment", fixed: true },
+	{ col: "hvut_annual", keys: ["hvutAnnual"], label: "HVUT", fixed: true },
+	{ col: "irp_annual", keys: ["irpAnnual"], label: "IRP", fixed: true },
+	{ col: "purchase_price", keys: ["purchasePrice"], label: "purchase price", fixed: false },
+	{ col: "maintenance_fund_monthly", keys: ["maintenanceFundMonthly"], label: "maintenance fund", fixed: false },
+	{ col: "fuel_tank_gallons", keys: ["fuel_tank_gallons", "fuelTankGallons"], label: "fuel tank", fixed: false },
+	{ col: "avg_mpg", keys: ["avg_mpg", "avgMpg"], label: "average MPG", fixed: false },
+];
+
+// `fields` (rows of TRUCK_AMOUNT_FIELDS) out of a request body. Answers
+// { values } — column → the number to store, or undefined for a field not sent —
+// or, at the first field that fails, { refusal }: the 400 body both routes send,
+// { error, code: "INVALID_AMOUNT", field: <column> }.
+function parseTruckAmounts(body, fields) {
+	const values = {};
+	for (const f of fields) {
+		const raw = f.keys.reduce((v, k) => v ?? body[k], undefined);
+		const parsed = parseTruckAmount(raw, f.label[0].toUpperCase() + f.label.slice(1));
+		if (parsed.error) return { refusal: { error: parsed.error, code: "INVALID_AMOUNT", field: f.col } };
+		values[f.col] = parsed.value;
+	}
+	return { values };
+}
+
 // ============================================================
 // Truck edits / truck deletion and the month-end lock
 // ============================================================
@@ -23756,7 +23841,10 @@ function truckEditLockBlockers(truck, changed) {
 	//   • admin_fee_pct — stored and echoed by GET /api/trucks; no money math
 	//     reads it, server-side or client-side.
 	//   • make / model / year / vin / license_plate / notes / photo / title_status
-	//     / purchase_price — never read by any aggregator.
+	//     — never read by any aggregator.
+	//   • purchase_price — no settlement figure reads it. The investor
+	//     asset/depreciation figures do (GET /api/investor/report and
+	//     GET /api/investor), as values shown, not settled.
 	return { unreadable: false, blockers };
 }
 
@@ -24499,22 +24587,44 @@ function truckCreateLockBlockers(truck, history) {
 // Truck Database: add a new truck
 app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), async (req, res) => {
 	try {
-		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId, driverPayDaily, purchasePrice, titleStatus, maintenanceFundMonthly,
-			photo, insuranceMonthly, eldMonthly, truckPaymentMonthly, hvutAnnual, irpAnnual, adminFeePct } = req.body;
+		// The nine amounts are read through parseTruckAmounts() below, not from here.
+		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId, driverPayDaily, titleStatus,
+			photo, adminFeePct } = req.body;
 		// A driver name is text. Anything else is refused before it can be coerced:
 		// String() would store {} as "[object Object]", and the directory sync
 		// would give that "driver" a row. `null` means no driver, like "".
 		if (assignedDriver !== undefined && assignedDriver !== null && typeof assignedDriver !== "string") {
 			return res.status(400).json({ error: "assignedDriver must be a string, or null for no driver.", code: "INVALID_DRIVER_NAME" });
 		}
-		// Fuel config accepts snake_case (frontend sends fuel_tank_gallons/avg_mpg)
-		// or camelCase, so either caller convention persists correctly.
-		const fuelTankGallons = req.body.fuel_tank_gallons ?? req.body.fuelTankGallons;
-		const avgMpg = req.body.avg_mpg ?? req.body.avgMpg;
+		// The Add form's five fixed costs, admin fee and photo. The INSERT used to
+		// drop all seven, so a new truck always started at $0/mo, the 50% fee and
+		// no photo whatever the form said. Parsed exactly as PUT /api/trucks/:id
+		// parses them — the admin fee through the same adminFeePctOrDefault() — and
+		// honoured for the two roles it admits; an Investor's add keeps the column
+		// defaults (their form sends none of these). The month-end lock below is
+		// asked about these same values, so it answers for the row that lands.
+		// Decided once, here, because the photo check below reads it too.
+		const costsAllowed = req.session.user.role === "Super Admin" || req.session.user.role === "Dispatcher";
+		// A photo sent by a role whose photo is stored (an Investor's is ignored)
+		// must be an image GET /api/driver/me/truck-photo can serve: 415
+		// UNSUPPORTED_IMAGE_TYPE or 413 IMAGE_TOO_LARGE otherwise, with
+		// field "photo" (truckPhotoRefusal()). Before anything is read or written.
+		if (costsAllowed && photo !== undefined && photo !== null && photo !== "") {
+			const photoRefusal = truckPhotoRefusal(photo);
+			if (photoRefusal) return res.status(photoRefusal.status).json({ ...photoRefusal.body, field: "photo" });
+		}
 		const driverPayParsed = parseDriverPayDaily(driverPayDaily);
 		if (driverPayParsed.error) {
 			return res.status(400).json({ error: driverPayParsed.error });
 		}
+		// The four amounts every role's add stores — purchase price, maintenance
+		// fund, fuel tank, average MPG — through parseTruckAmount() and the table
+		// PUT /api/trucks/:id reads too, before anything is read or written. The
+		// five fixed costs are parsed where they are built, below, and only for the
+		// roles whose add stores them. Not sent or blank is 0.
+		const addParsed = parseTruckAmounts(req.body, TRUCK_AMOUNT_FIELDS.filter((f) => !f.fixed));
+		if (addParsed.refusal) return res.status(400).json(addParsed.refusal);
+		const addAmounts = addParsed.values;
 		// ⚠️ PAY SETTINGS ARE SUPER ADMIN ONLY — see PAY_EDIT_ADMIN_ONLY. A truck
 		// added by a Dispatcher or an Investor starts with no rate of its own
 		// ($0 — the $250 fallback applies). Decided from the request and the
@@ -24566,20 +24676,18 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 			return res.status(400).json({ error: "Unit number is required" });
 		}
 		const validStatus = ["Active", "Inactive", "Maintenance", "OOS"].includes(status) ? status : "Active";
-		// The Add form's five fixed costs, admin fee and photo. The INSERT used to
-		// drop all seven, so a new truck always started at $0/mo, the 50% fee and
-		// no photo whatever the form said. Parsed exactly as PUT /api/trucks/:id
-		// parses them — the admin fee through the same adminFeePctOrDefault() — and
-		// honoured for the two roles it admits; an Investor's add keeps the column
-		// defaults (their form sends none of these). The month-end lock below is
-		// asked about these same values, so it answers for the row that lands.
-		const costsAllowed = req.session.user.role === "Super Admin" || req.session.user.role === "Dispatcher";
+		// The five fixed costs, admin fee and photo (costsAllowed, above).
+		// Read only when the add stores them: an Investor's cost fields are never
+		// parsed, so nothing in them can refuse the add. Still above the first
+		// await, so a refused amount writes nothing.
+		const costParsed = costsAllowed ? parseTruckAmounts(req.body, TRUCK_AMOUNT_FIELDS.filter((f) => f.fixed)) : { values: {} };
+		if (costParsed.refusal) return res.status(400).json(costParsed.refusal);
 		const createCosts = {
-			insurance_monthly: costsAllowed ? parseFloat(insuranceMonthly) || 0 : 0,
-			eld_monthly: costsAllowed ? parseFloat(eldMonthly) || 0 : 0,
-			truck_payment_monthly: costsAllowed ? parseFloat(truckPaymentMonthly) || 0 : 0,
-			hvut_annual: costsAllowed ? parseFloat(hvutAnnual) || 0 : 0,
-			irp_annual: costsAllowed ? parseFloat(irpAnnual) || 0 : 0,
+			insurance_monthly: costParsed.values.insurance_monthly ?? 0,
+			eld_monthly: costParsed.values.eld_monthly ?? 0,
+			truck_payment_monthly: costParsed.values.truck_payment_monthly ?? 0,
+			hvut_annual: costParsed.values.hvut_annual ?? 0,
+			irp_annual: costParsed.values.irp_annual ?? 0,
 		};
 		const createAdminFee = costsAllowed ? adminFeePctOrDefault(adminFeePct) : 50;
 		const createPhoto = costsAllowed && typeof photo === "string" ? photo : "";
@@ -24676,7 +24784,8 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		const result = db.prepare(
 			"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id, driver_pay_daily, purchase_price, title_status, maintenance_fund_monthly, fuel_tank_gallons, avg_mpg, in_service_date, " +
 			"photo, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, admin_fee_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, finalAssignedDriver, notes || "", finalOwnerId, driverPayParsed.value, parseFloat(purchasePrice) || 0, titleStatus || "Clean", parseFloat(maintenanceFundMonthly) || 0, parseFloat(fuelTankGallons) || 0, parseFloat(avgMpg) || 0, inServiceCreate,
+		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, finalAssignedDriver, notes || "", finalOwnerId, driverPayParsed.value,
+			addAmounts.purchase_price ?? 0, titleStatus || "Clean", addAmounts.maintenance_fund_monthly ?? 0, addAmounts.fuel_tank_gallons ?? 0, addAmounts.avg_mpg ?? 0, inServiceCreate,
 			createPhoto, createCosts.insurance_monthly, createCosts.eld_monthly, createCosts.truck_payment_monthly, createCosts.hvut_annual, createCosts.irp_annual, createAdminFee);
 		// Create truck assignment record
 		if (finalAssignedDriver && finalAssignedDriver.trim()) {
@@ -24704,13 +24813,24 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		const truck = db.prepare("SELECT * FROM trucks WHERE id = ?").get(id);
 		if (!truck) return res.status(404).json({ error: "Truck not found" });
 
+		// The nine amounts are read through parseTruckAmounts() below, not from here.
 		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId,
-			photo, insuranceMonthly, eldMonthly, truckPaymentMonthly, hvutAnnual, irpAnnual, adminFeePct, driverPayDaily,
-			purchasePrice, titleStatus, maintenanceFundMonthly } = req.body;
+			photo, adminFeePct, driverPayDaily, titleStatus } = req.body;
 		// A driver name is text — refused otherwise, before anything is resolved or
 		// written, as on POST /api/trucks. `null` unassigns, like "".
 		if (assignedDriver !== undefined && assignedDriver !== null && typeof assignedDriver !== "string") {
 			return res.status(400).json({ error: "assignedDriver must be a string, or null for no driver.", code: "INVALID_DRIVER_NAME" });
+		}
+		// A photo that CHANGES must be an image GET /api/driver/me/truck-photo can
+		// serve: 415 UNSUPPORTED_IMAGE_TYPE or 413 IMAGE_TOO_LARGE otherwise, with
+		// field "photo" (truckPhotoRefusal()). Keyed on the change, never on
+		// presence: the Edit form resends the stored photo on every save, so a photo
+		// stored before this check never blocks an unrelated edit. null and "" clear
+		// it; anything else that is not a string is refused. Before any write and
+		// the month-end lock.
+		if (photo !== undefined && photo !== null && photo !== "" && photo !== (truck.photo || "")) {
+			const photoRefusal = truckPhotoRefusal(photo);
+			if (photoRefusal) return res.status(photoRefusal.status).json({ ...photoRefusal.body, field: "photo" });
 		}
 		// The driver this edit assigns, resolved to the spelling that driver already
 		// has (canonicalDriverName()): a name that differs only in case or spacing
@@ -24718,9 +24838,6 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		// and the directory sync all see that one spelling — instead of starting a
 		// second one. undefined = field not sent, "" = unassign.
 		const nextAssignedDriver = assignedDriver === undefined ? undefined : canonicalDriverName(String(assignedDriver || ""));
-		// Accept snake_case (frontend) or camelCase for the fuel-range config.
-		const fuelTankGallons = req.body.fuel_tank_gallons ?? req.body.fuelTankGallons;
-		const avgMpg = req.body.avg_mpg ?? req.body.avgMpg;
 		// Validate driver pay before any side effects (assignDriverToTruck runs
 		// below) so a bad rate rejects the whole edit instead of half-applying it.
 		let driverPayParsed = null;
@@ -24730,6 +24847,15 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 				return res.status(400).json({ error: driverPayParsed.error });
 			}
 		}
+		// Every amount the save carries, through parseTruckAmount() and the table
+		// POST /api/trucks reads too — before the month-end lock is asked about any
+		// of them and before the first write, so a refused amount refuses the whole
+		// edit, the driver assignment included. `amount[col]` is exactly what the
+		// UPDATE writes; undefined means the field was not sent and the column is
+		// left alone. The fuel pair takes either key style (TRUCK_AMOUNT_FIELDS).
+		const amountsParsed = parseTruckAmounts(req.body, TRUCK_AMOUNT_FIELDS);
+		if (amountsParsed.refusal) return res.status(400).json(amountsParsed.refusal);
+		const amount = amountsParsed.values;
 		// Validate the in-service date up front, for the same reason: it decides
 		// which months a truck is charged $1k+ of fixed costs, so a bad value must
 		// reject the edit rather than land as garbage in the column every
@@ -24804,11 +24930,11 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		if (nextAssignedDriver !== undefined && nextAssignedDriver !== String(truck.assigned_driver || "").trim()) {
 			changed.assigned_driver = nextAssignedDriver;
 		}
-		if (insuranceMonthly !== undefined) diff("insurance_monthly", parseFloat(insuranceMonthly) || 0);
-		if (eldMonthly !== undefined) diff("eld_monthly", parseFloat(eldMonthly) || 0);
-		if (truckPaymentMonthly !== undefined) diff("truck_payment_monthly", parseFloat(truckPaymentMonthly) || 0);
-		if (hvutAnnual !== undefined) diff("hvut_annual", parseFloat(hvutAnnual) || 0);
-		if (irpAnnual !== undefined) diff("irp_annual", parseFloat(irpAnnual) || 0);
+		if (amount.insurance_monthly !== undefined) diff("insurance_monthly", amount.insurance_monthly);
+		if (amount.eld_monthly !== undefined) diff("eld_monthly", amount.eld_monthly);
+		if (amount.truck_payment_monthly !== undefined) diff("truck_payment_monthly", amount.truck_payment_monthly);
+		if (amount.hvut_annual !== undefined) diff("hvut_annual", amount.hvut_annual);
+		if (amount.irp_annual !== undefined) diff("irp_annual", amount.irp_annual);
 		if (driverPayParsed) diff("driver_pay_daily", driverPayParsed.value);
 		if (inServiceParsed !== undefined && inServiceParsed !== String(truck.in_service_date || "").trim()) {
 			changed.in_service_date = inServiceParsed;
@@ -24830,11 +24956,13 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		}
 		const lock = truckEditLockBlockers(truck, changed);
 		// ⚠️ THE ATTEMPTED VALUES ARE THE RECORD HERE. This route's success path
-		// writes one audit line PER FIELD (update_truck_status, _in_service_date,
-		// _retired_at, _owner); a refusal has no such split because the whole edit is
-		// refused as one, so the single row has to name every field that moved and
-		// what it would have become. `changed` already holds exactly that — column
-		// name → value to be written — and nothing else in the body reaches money.
+		// writes one audit line PER FIELD (update_driver_pay, update_truck_status,
+		// _in_service_date, _retired_at, _owner, _fuel_tank, _avg_mpg), plus one
+		// update_truck_costs line per save that names every cost it changed; a
+		// refusal has no such split because the whole edit is refused as one, so the
+		// single row has to name every field that moved and what it would have
+		// become. `changed` already holds exactly that — column name → value to be
+		// written — and nothing else in the body reaches money.
 		const truckEditAudit = {
 			action: "update_truck_blocked", entity: "truck", entityId: String(id),
 			subject: `${truck.unit_number || `truck #${id}`}: ` +
@@ -24891,11 +25019,11 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		if (ownerId !== undefined) { updates.push("owner_id = ?"); params.push(parseInt(ownerId) || 0); }
 		if (notes !== undefined) { updates.push("notes = ?"); params.push(notes); }
 		if (photo !== undefined) { updates.push("photo = ?"); params.push(photo); }
-		if (insuranceMonthly !== undefined) { updates.push("insurance_monthly = ?"); params.push(parseFloat(insuranceMonthly) || 0); }
-		if (eldMonthly !== undefined) { updates.push("eld_monthly = ?"); params.push(parseFloat(eldMonthly) || 0); }
-		if (truckPaymentMonthly !== undefined) { updates.push("truck_payment_monthly = ?"); params.push(parseFloat(truckPaymentMonthly) || 0); }
-		if (hvutAnnual !== undefined) { updates.push("hvut_annual = ?"); params.push(parseFloat(hvutAnnual) || 0); }
-		if (irpAnnual !== undefined) { updates.push("irp_annual = ?"); params.push(parseFloat(irpAnnual) || 0); }
+		if (amount.insurance_monthly !== undefined) { updates.push("insurance_monthly = ?"); params.push(amount.insurance_monthly); }
+		if (amount.eld_monthly !== undefined) { updates.push("eld_monthly = ?"); params.push(amount.eld_monthly); }
+		if (amount.truck_payment_monthly !== undefined) { updates.push("truck_payment_monthly = ?"); params.push(amount.truck_payment_monthly); }
+		if (amount.hvut_annual !== undefined) { updates.push("hvut_annual = ?"); params.push(amount.hvut_annual); }
+		if (amount.irp_annual !== undefined) { updates.push("irp_annual = ?"); params.push(amount.irp_annual); }
 		// Blank or unreadable is the column's 50, never NaN (which SQLite stores as
 		// NULL) — the same rule POST /api/trucks applies. No money math reads this
 		// column, so neither the month-end lock nor `changed` carries it.
@@ -24910,11 +25038,11 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			if (payEditAllowed) { updates.push("driver_pay_daily = ?"); params.push(driverPayParsed.value); }
 			else updates.push("driver_pay_daily = driver_pay_daily");
 		}
-		if (purchasePrice !== undefined) { updates.push("purchase_price = ?"); params.push(parseFloat(purchasePrice) || 0); }
+		if (amount.purchase_price !== undefined) { updates.push("purchase_price = ?"); params.push(amount.purchase_price); }
 		if (titleStatus !== undefined) { updates.push("title_status = ?"); params.push(titleStatus || "Clean"); }
-		if (maintenanceFundMonthly !== undefined) { updates.push("maintenance_fund_monthly = ?"); params.push(parseFloat(maintenanceFundMonthly) || 0); }
-		if (fuelTankGallons !== undefined) { updates.push("fuel_tank_gallons = ?"); params.push(parseFloat(fuelTankGallons) || 0); }
-		if (avgMpg !== undefined) { updates.push("avg_mpg = ?"); params.push(parseFloat(avgMpg) || 0); }
+		if (amount.maintenance_fund_monthly !== undefined) { updates.push("maintenance_fund_monthly = ?"); params.push(amount.maintenance_fund_monthly); }
+		if (amount.fuel_tank_gallons !== undefined) { updates.push("fuel_tank_gallons = ?"); params.push(amount.fuel_tank_gallons); }
+		if (amount.avg_mpg !== undefined) { updates.push("avg_mpg = ?"); params.push(amount.avg_mpg); }
 
 		// In-service date — the month a truck STARTS being charged fixed costs
 		// (truckChargeFromMonth). Written ONLY when the caller sends one. There is
@@ -24996,9 +25124,9 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		// against a real ~189, so the driver was shown ~25% more range than the truck
 		// could deliver, and that truck ran dry on 2026-08-17. A number that can
 		// strand a driver deserves the same trail as one that moves money.
-		if (fuelTankGallons !== undefined) {
+		if (amount.fuel_tank_gallons !== undefined) {
 			const before = parseFloat(truck.fuel_tank_gallons) || 0;
-			const after = parseFloat(fuelTankGallons) || 0;
+			const after = amount.fuel_tank_gallons;
 			if (before !== after) {
 				const fmtTank = (v) => (v > 0 ? `${v} gal` : `unset (fleet default ${fuelModel.DEFAULT_TANK_GALLONS} gal)`);
 				logAudit(req, "update_truck_fuel_tank", "truck", String(id),
@@ -25007,13 +25135,52 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		}
 		// Same reasoning: avg_mpg is the other half of the estimated-basis product,
 		// so an edit here moves the range a driver plans against just as directly.
-		if (avgMpg !== undefined) {
+		if (amount.avg_mpg !== undefined) {
 			const before = parseFloat(truck.avg_mpg) || 0;
-			const after = parseFloat(avgMpg) || 0;
+			const after = amount.avg_mpg;
 			if (before !== after) {
 				const fmtMpg = (v) => (v > 0 ? `${v} mpg` : "unset (derived from ELD / receipts)");
 				logAudit(req, "update_truck_avg_mpg", "truck", String(id),
 					`Average MPG for ${truck.unit_number}: ${fmtMpg(before)} → ${fmtMpg(after)}`);
+			}
+		}
+		// ⚠️ COST EDITS ARE AUDITED — one `update_truck_costs` line per save that
+		// actually changes a cost, naming each change. The five fixed costs are
+		// billed into every month the truck is charged, the purchase price and the
+		// maintenance fund are what the investor report shows for the truck, and
+		// the admin fee is a term of the investor's deal; the same save already
+		// audits the pay rate, status, dates, owner, tank and MPG beside them.
+		// Keyed on a real difference from the stored row, never on presence: the
+		// Edit form sends every cost on every save, so a presence test would log a
+		// notes edit as a cost edit and bury the real ones. A stored NULL compares
+		// as the 0 it has always meant (the admin fee as its 50), and the monthly
+		// fixed-cost total — what every billed month reads — is appended whenever
+		// one of the five moved. The fuel tank and MPG keep their own lines above.
+		{
+			const money = (n) => `$${(Math.round(n * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+			// Past the UPDATE, so formatting must not be able to throw.
+			const labelOf = (col) => (TRUCK_AMOUNT_FIELDS.find((f) => f.col === col) || { label: col }).label;
+			const costChanges = [];
+			for (const [col, per] of [
+				["insurance_monthly", "/mo"], ["eld_monthly", "/mo"], ["truck_payment_monthly", "/mo"], ["hvut_annual", "/yr"], ["irp_annual", "/yr"],
+				["purchase_price", ""], ["maintenance_fund_monthly", "/mo"],
+			]) {
+				const before = truck[col] || 0;
+				if (amount[col] !== undefined && amount[col] !== before) {
+					costChanges.push(`${labelOf(col)} ${money(before)}${per} → ${money(amount[col])}${per}`);
+				}
+			}
+			const feeBefore = adminFeePctOrDefault(truck.admin_fee_pct);
+			const feeAfter = adminFeePct === undefined ? feeBefore : adminFeePctOrDefault(adminFeePct);
+			if (feeAfter !== feeBefore) costChanges.push(`admin fee ${feeBefore}% → ${feeAfter}%`);
+			if (costChanges.length) {
+				// `changed` holds each of the five fixed costs exactly when it differs
+				// from the stored value, compared as above.
+				const fixedMoved = TRUCK_AMOUNT_FIELDS.some((f) => f.fixed && Object.prototype.hasOwnProperty.call(changed, f.col));
+				const fixedTotal = fixedMoved
+					? `; fixed costs ${money(truckMonthlyFixed(truck).total)}/mo → ${money(truckMonthlyFixed({ ...truck, ...changed }).total)}/mo`
+					: "";
+				logAudit(req, "update_truck_costs", "truck", String(id), `Costs for ${truck.unit_number}: ${costChanges.join(", ")}${fixedTotal}`);
 			}
 		}
 		// Log driver assignment change to history + sync to Carrier Database sheet
@@ -32474,6 +32641,44 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 	}
 });
 
+// A file stored as a base64 data URI (a truck photo, a driver's identity file),
+// as the two routes below serve it: { contentType, body }, or null when there is
+// nothing servable. The media type written into the URI is never read — the
+// bytes decide it (imageLimits.servedType(): JPEG, PNG or WebP, and a PDF only
+// when `pdf` is set), so what a route sends is what the bytes are, under
+// X-Content-Type-Options: nosniff. Parsed without a pattern over the payload:
+// the value opens "data:", the text before its FIRST comma ends ";base64", and
+// the rest is decoded. Empty, malformed or any other content → null (a 404).
+function storedFileForServing(dataUri, { pdf = false } = {}) {
+	if (typeof dataUri !== "string" || !dataUri.startsWith("data:")) return null;
+	const comma = dataUri.indexOf(",");
+	if (comma < 0 || !dataUri.slice(0, comma).endsWith(";base64")) return null;
+	const body = Buffer.from(dataUri.slice(comma + 1), "base64");
+	const contentType = imageLimits.servedType(body, { pdf });
+	return contentType ? { contentType, body } : null;
+}
+
+// Why a truck photo sent to POST /api/trucks or PUT /api/trucks/:id may not be
+// stored: null when it may (undefined, null and "" are "not sent" or a clear),
+// else { status, body } with body { error, code } — 415 UNSUPPORTED_IMAGE_TYPE
+// or 413 IMAGE_TOO_LARGE. It must be a base64 data URI that
+// storedFileForServing() would serve, and its bytes must pass checkImage()
+// under LIMITS.TRUCK_PHOTO, so a photo stored here is one the driver's
+// truck-photo route can show. The length is checked before anything is decoded.
+function truckPhotoRefusal(value) {
+	if (value === undefined || value === null || value === "") return null;
+	const refusal = (verdict) => ({ status: verdict.status, body: imageLimits.refusalBody(verdict, "truckPhoto") });
+	const unreadable = { ok: false, status: 415, code: imageLimits.UNSUPPORTED_IMAGE_TYPE };
+	if (typeof value !== "string") return refusal(unreadable);
+	if (value.length > imageLimits.TRUCK_PHOTO_DATA_URI_MAX_LENGTH) {
+		return refusal({ ok: false, status: 413, code: imageLimits.IMAGE_TOO_LARGE });
+	}
+	const file = storedFileForServing(value);
+	if (!file) return refusal(unreadable);
+	const verdict = imageLimits.checkImage(file.body, imageLimits.LIMITS.TRUCK_PHOTO);
+	return verdict.ok ? null : refusal(verdict);
+}
+
 // GET /api/driver/me/identity-file/:fileType — Stream the requesting driver's
 // own CDL Front / CDL Back / Medical Card. Companion to the application_*_type
 // metadata in /api/driver/:driverName: the main endpoint advertises which
@@ -32482,6 +32687,8 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 // opens the Kit tab. Super Admin can also call this against their own session
 // (debug); admins/dispatchers fetching ON BEHALF of a driver continue to use
 // /api/trucks/:id/driver-files, which already supports that flow.
+// Served as what the bytes are — a JPEG, PNG, WebP or PDF — and 404 otherwise
+// (storedFileForServing()).
 app.get("/api/driver/me/identity-file/:fileType", requireAuth, (req, res) => {
 	try {
 		const user = req.session.user;
@@ -32493,24 +32700,21 @@ app.get("/api/driver/me/identity-file/:fileType", requireAuth, (req, res) => {
 			"cdl-back": "cdl_back",
 			"medical-card": "medical_card",
 		};
-		const col = colMap[req.params.fileType];
+		// One of the three names above, and nothing else: any other is a 400.
+		const col = Object.prototype.hasOwnProperty.call(colMap, req.params.fileType) ? colMap[req.params.fileType] : null;
 		if (!col) return res.status(400).json({ error: "Invalid file type" });
 		const onboarding = db.prepare(
 			"SELECT application_id FROM driver_onboarding WHERE user_id = ?"
 		).get(user.id);
 		if (!onboarding?.application_id) return res.status(404).json({ error: "Not found" });
 		const row = db.prepare(`SELECT ${col} AS data FROM job_applications WHERE id = ?`).get(onboarding.application_id);
-		const data = row?.data;
-		if (!data) return res.status(404).json({ error: "Not found" });
-		const match = /^data:([^;]+);base64,(.+)$/.exec(data);
-		if (!match) return res.status(500).json({ error: "Invalid file format" });
-		const [, contentType, b64] = match;
-		const buf = Buffer.from(b64, "base64");
-		res.setHeader("Content-Type", contentType);
+		const file = storedFileForServing(row?.data, { pdf: true });
+		if (!file) return res.status(404).json({ error: "Not found" });
+		res.setHeader("Content-Type", file.contentType);
 		// Private cache — drivers won't refetch the same image every page open.
 		res.setHeader("Cache-Control", "private, max-age=3600");
 		res.setHeader("X-Content-Type-Options", "nosniff");
-		res.end(buf);
+		res.end(file.body);
 	} catch (err) {
 		console.error("identity-file error:", err.message);
 		res.status(500).json({ error: err.message });
@@ -32520,7 +32724,8 @@ app.get("/api/driver/me/identity-file/:fileType", requireAuth, (req, res) => {
 // GET /api/driver/me/truck-photo — Stream the photo of the truck currently
 // assigned to the requesting driver. Paired with truck.has_photo in
 // /api/driver/:driverName, this lets LoadDetail render the truck image only
-// when the Truck Details accordion is expanded.
+// when the Truck Details accordion is expanded. Served as what the bytes are —
+// a JPEG, PNG or WebP — and 404 otherwise (storedFileForServing()).
 app.get("/api/driver/me/truck-photo", requireAuth, (req, res) => {
 	try {
 		const user = req.session.user;
@@ -32530,16 +32735,12 @@ app.get("/api/driver/me/truck-photo", requireAuth, (req, res) => {
 		const driverName = (user.driverName || user.driver_name || "").trim().toLowerCase();
 		if (!driverName) return res.status(404).json({ error: "Not found" });
 		const row = db.prepare("SELECT photo FROM trucks WHERE LOWER(assigned_driver) = ?").get(driverName);
-		const data = row?.photo;
-		if (!data) return res.status(404).json({ error: "Not found" });
-		const match = /^data:([^;]+);base64,(.+)$/.exec(data);
-		if (!match) return res.status(500).json({ error: "Invalid file format" });
-		const [, contentType, b64] = match;
-		const buf = Buffer.from(b64, "base64");
-		res.setHeader("Content-Type", contentType);
+		const file = storedFileForServing(row?.photo);
+		if (!file) return res.status(404).json({ error: "Not found" });
+		res.setHeader("Content-Type", file.contentType);
 		res.setHeader("Cache-Control", "private, max-age=3600");
 		res.setHeader("X-Content-Type-Options", "nosniff");
-		res.end(buf);
+		res.end(file.body);
 	} catch (err) {
 		console.error("truck-photo error:", err.message);
 		res.status(500).json({ error: err.message });

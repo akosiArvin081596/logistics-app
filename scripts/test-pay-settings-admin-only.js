@@ -132,6 +132,11 @@ const HEADS = {
 	truckPut: 'app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req, res) => {',
 };
 const ROUTES = Object.fromEntries(Object.entries(HEADS).map(([k, h]) => [k, liftRoute(h)]));
+// The photo check both truck routes run, verbatim (its own subject is
+// scripts/test-stored-file-serving.js).
+const PHOTO_CHECK = new Function("imageLimits",
+	`"use strict";\n${liftFunction("storedFileForServing")}\n${liftFunction("truckPhotoRefusal")}\nreturn { storedFileForServing, truckPhotoRefusal };`
+)(require("../lib/image-size"));
 
 // The eighteen columns DriverTable.vue sends back on every save (`headers:
 // this.headers`, straight from the GET) — read off the GET route, so the
@@ -180,6 +185,11 @@ const PIECES = {
 		// audit lines name.
 		liftFunction("adminFeePctOrDefault"),
 		liftFunction("truckMonthlyFixed"),
+		// The amounts both truck routes parse (scripts/test-truck-cost-amounts.js).
+		liftConst("const TRUCK_AMOUNT_MAX = "),
+		liftFunction("parseTruckAmount"),
+		liftConst("const TRUCK_AMOUNT_FIELDS = [", "\n];"),
+		liftFunction("parseTruckAmounts"),
 	].join("\n"),
 };
 const MODULE_EXPORTS = [
@@ -188,7 +198,7 @@ const MODULE_EXPORTS = [
 	"normalizeDriverName", "findDriverNameClash", "findDriverNameClashes", "canonicalDriverName",
 	"syncDriverToCarrierSheet", "assignDriverToTruck",
 	"directoryChangedColumns", "DRIVER_PAY_DAILY_MAX", "parseDriverPayDaily", "parseInServiceDate", "parseRetiredAt",
-	"adminFeePctOrDefault", "truckMonthlyFixed",
+	"adminFeePctOrDefault", "truckMonthlyFixed", "TRUCK_AMOUNT_FIELDS", "parseTruckAmounts",
 ];
 function buildModule(db, src = {}) {
 	const s = { ...PIECES, ...src };
@@ -349,6 +359,7 @@ function mountAll(db, { routes = {}, moduleSrc = {}, locked = false, duringActiv
 	const env = {
 		db,
 		...m,
+		...PHOTO_CHECK,
 		directoryEditLockBlockers: (rowBefore, changed) => blocked(changed),
 		truckEditLockBlockers: (truck, changed) => blocked(changed),
 		truckCreateLockBlockers: (truck) => { createLockSeen.push({ ...truck }); return { unreadable: false, blockers: [] }; },
@@ -765,7 +776,8 @@ async function battery(opts = {}) {
 	// The Add form's fixed costs, admin fee and photo (AddTruckForm.vue sends all
 	// seven). Stored for the two roles PUT /api/trucks/:id lets edit them, parsed
 	// the way that route parses them, and handed to the month-end lock as stored.
-	const COSTS = { insuranceMonthly: 1630, eldMonthly: "50", truckPaymentMonthly: 1200, hvutAnnual: 580, irpAnnual: "1380", adminFeePct: 40, photo: "data:image/jpeg;base64,/9j/4AAQSkZJRg==" };
+	// The photo is a 4 × 3 JPEG header: the least checkImage() reads as a JPEG.
+	const COSTS = { insuranceMonthly: 1630, eldMonthly: "50", truckPaymentMonthly: 1200, hvutAnnual: 580, irpAnnual: "1380", adminFeePct: 40, photo: "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/wAARCAADAAQDAAAAAAAAAAAA/9k=" };
 	const storedCosts = (r) => r && [r.insurance_monthly, r.eld_monthly, r.truck_payment_monthly, r.hvut_annual, r.irp_annual, r.admin_fee_pct, r.photo];
 	for (const [label, who] of [["Super Admin", SUPER], ["Dispatcher", DISPATCHER]]) {
 		const db = makeDb();
@@ -803,9 +815,10 @@ async function battery(opts = {}) {
 	{
 		const db = makeDb();
 		const app = mountAll(db, opts);
-		const r = await app.truckPost(DISPATCHER, newTruck({ insuranceMonthly: "", eldMonthly: "abc", truckPaymentMonthly: null, hvutAnnual: undefined, irpAnnual: "1380.5", photo: undefined }));
+		// (An unreadable amount is refused — scripts/test-truck-cost-amounts.js.)
+		const r = await app.truckPost(DISPATCHER, newTruck({ insuranceMonthly: "", eldMonthly: "  ", truckPaymentMonthly: null, hvutAnnual: undefined, irpAnnual: "1380.5", photo: undefined }));
 		const made = db.prepare("SELECT * FROM trucks WHERE unit_number = '500'").get();
-		t(`§4 POST truck with blank, unreadable and missing amounts: 0 for each, the rest as sent (got ${r.status}, ${JSON.stringify(storedCosts(made))})`,
+		t(`§4 POST truck with blank and missing amounts: 0 for each, the rest as sent (got ${r.status}, ${JSON.stringify(storedCosts(made))})`,
 			r.status === 200 && JSON.stringify(storedCosts(made)) === JSON.stringify([0, 0, 0, 0, 1380.5, 50, ""]));
 	}
 

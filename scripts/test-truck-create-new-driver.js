@@ -48,7 +48,8 @@
  *      during the read is seen. (h) the Add form's costs, admin fee and photo:
  *      stored for a Super Admin or a Dispatcher and handed to the guard as
  *      stored, a back-dated Active truck carrying them refused, an Investor's
- *      add kept at the column defaults, a blank or unreadable amount 0, an admin
+ *      add kept at the column defaults, a blank amount 0 and a negative one
+ *      refused 400 INVALID_AMOUNT before the guard is asked, an admin
  *      fee kept when it is a finite number and 50 otherwise, both audit lines
  *      naming the monthly fixed costs.
  *   §5 source pins — both awaits above canonicalDriverName(), the history
@@ -131,7 +132,8 @@ const FUNCTIONS = [
 	"truckFixedCostLockedMonths", "truckChargedInMonth", "truckChargeFromMonth", "truckChargeUntilMonth", "truckMonthlyFixed",
 	"truckFeeLockedRows", "getDriverPayStructures", "resolveDailyRate", "truckDailyRateCandidates", "investorsHoldingDriver",
 	// what the route calls
-	"parseDriverPayDaily", "parseInServiceDate", "adminFeePctOrDefault", "findDriverNameClashes", "canonicalDriverName", "assignDriverToTruck",
+	"parseDriverPayDaily", "parseInServiceDate", "adminFeePctOrDefault", "parseTruckAmount", "parseTruckAmounts",
+	"findDriverNameClashes", "canonicalDriverName", "assignDriverToTruck",
 	"refusePayEdit", "periodBlockedResponse", "periodLockUnreadableResponse", "periodLabel",
 	// the real refusal audit, so a refusal row is the row production writes
 	"recordPeriodRefusal", "periodRefusalDetail", "logAudit", "logAuditRefusal", "scrubPurgeMarker", "auditText",
@@ -143,6 +145,8 @@ const CONSTS = [
 	liftConst("let lastPayStructShadowWarnMs = "),
 	liftConst("const DRIVER_PAY_DAILY_MAX = "),
 	liftConst("const IN_SERVICE_MAX_MONTHS_AHEAD = "),
+	liftConst("const TRUCK_AMOUNT_MAX = "),
+	liftConst("const TRUCK_AMOUNT_FIELDS = [", "\n];"),
 	liftConst("const AUDITED_UPSTREAM = "),
 	liftConst("const PAY_EDIT_ADMIN_ONLY = "),
 	liftConst("const REFUSAL_AUDIT_WINDOW_MS = "),
@@ -150,11 +154,16 @@ const CONSTS = [
 	liftConst("const UNCOALESCED_REFUSAL_CODES = new Set([", "\n]);"),
 ].join("\n");
 const ROUTE_POST = liftRoute('app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), async (req, res) => {');
+// The photo check the route runs for a Super Admin or a Dispatcher, verbatim
+// (its own subject is scripts/test-stored-file-serving.js).
+const PHOTO_CHECK = new Function("imageLimits",
+	`"use strict";\n${liftFunction("storedFileForServing")}\n${liftFunction("truckPhotoRefusal")}\nreturn { storedFileForServing, truckPhotoRefusal };`
+)(require("../lib/image-size"));
 
 const TODAY = "2026-09-25";
 function buildModule(db) {
 	return new Function("db", "todayKeyCT", "periodLocksReadable",
-		`"use strict";\n${CONSTS}\n${FUNCTIONS.map((n) => FN_SRC[n]).join("\n")}\nreturn { ${FUNCTIONS.join(", ")} };`
+		`"use strict";\n${CONSTS}\n${FUNCTIONS.map((n) => FN_SRC[n]).join("\n")}\nreturn { ${FUNCTIONS.join(", ")}, TRUCK_AMOUNT_FIELDS };`
 	)(db, () => TODAY, () => true);
 }
 
@@ -556,6 +565,7 @@ function mountPost(db, { jt = makeJt(), jtFails = false, duringRead = null } = {
 	const env = {
 		app: { post: grab }, requireRole: () => (req, res, next) => next(),
 		...m, db,
+		...PHOTO_CHECK,
 		truckCreateLockBlockers: (truck, history) => { calls.guard.push({ ...truck }); return m.truckCreateLockBlockers(truck, history); },
 		checkDriverActiveLoad: async () => { calls.activeLoad++; await tick(); return null; },
 		getJobTrackingCached: async () => {
@@ -694,7 +704,8 @@ async function routeSection() {
 	// ── (h) the Add form's costs, admin fee and photo ──
 	const fiveOf = (o) => o && [o.insurance_monthly, o.eld_monthly, o.truck_payment_monthly, o.hvut_annual, o.irp_annual];
 	const storedOf = (t) => t && [...fiveOf(t), t.admin_fee_pct, t.photo];
-	const PHOTO = "data:image/jpeg;base64,/9j/4AAQSkZJRg==";
+	// A 4 × 3 JPEG header: the least checkImage() reads as a JPEG.
+	const PHOTO = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/wAARCAADAAQDAAAAAAAAAAAA/9k=";
 	const FULL = { insuranceMonthly: 1630, eldMonthly: "50", truckPaymentMonthly: 1200, hvutAnnual: 580, irpAnnual: "1380", adminFeePct: 40, photo: PHOTO };
 	for (const [label, who, over] of [["a Super Admin", SUPER, {}], ["a Dispatcher", DISPATCHER, { driverPayDaily: 0 }]]) {
 		const db = makeDb();
@@ -727,11 +738,14 @@ async function routeSection() {
 			"§4 (h) ...the refusal row naming the monthly fixed costs");
 	}
 	{
+		// A negative amount never reaches the guard now: it is refused as an amount
+		// first. (The guard's own answer for one is in §3.)
 		const db = makeDb();
-		const { post } = mountPost(db);
+		const { post, calls } = mountPost(db);
 		const r = await post(SUPER, backdated({ insuranceMonthly: "-500" }));
-		ok(r.status === 409 && ((r.body || {}).blockers || []).some((x) => x.field === "in_service_date") && !truckByUnit(db, "LogisX-#24"),
-			`§4 (h) the same truck with a negative amount: 409 too, no truck (got ${r.status})`);
+		const b = r.body || {};
+		ok(r.status === 400 && b.code === "INVALID_AMOUNT" && b.field === "insurance_monthly" && calls.guard.length === 0 && !truckByUnit(db, "LogisX-#24"),
+			`§4 (h) the same truck with a negative amount: 400 INVALID_AMOUNT before the guard is asked, no truck (got ${r.status} ${b.code})`);
 	}
 	for (const [label, over, check] of [
 		["with no costs", { insuranceMonthly: 0 }, (t) => t.in_service_date === "2026-06-01" && t.insurance_monthly === 0],
@@ -767,18 +781,21 @@ async function routeSection() {
 	{
 		const db = makeDb();
 		const { post } = mountPost(db);
+		// (An unreadable amount is refused — scripts/test-truck-cost-amounts.js.)
 		const r = await post(DISPATCHER, addForm({
-			driverPayDaily: 0, insuranceMonthly: "", eldMonthly: "abc", truckPaymentMonthly: null, hvutAnnual: undefined, irpAnnual: "1380.5", photo: undefined,
+			driverPayDaily: 0, insuranceMonthly: "", eldMonthly: "  ", truckPaymentMonthly: null, hvutAnnual: undefined, irpAnnual: "1380.5", photo: undefined,
 		}));
 		eq([r.status, storedOf(truckByUnit(db, "LogisX-#23"))], [200, [0, 0, 0, 0, 1380.5, 50, ""]],
-			"§4 (h) blank, unreadable and missing amounts: 0 for each, the rest as sent, no photo");
+			"§4 (h) blank and missing amounts: 0 for each, the rest as sent, no photo");
 	}
 	{
 		const db = makeDb();
 		const { post } = mountPost(db);
+		const before = snapshot(db);
 		const r = await post(SUPER, addForm({ photo: { src: PHOTO } }));
-		const t = truckByUnit(db, "LogisX-#23");
-		ok(r.status === 200 && !!t && t.photo === "", `§4 (h) a photo that is not text: created with no photo (got ${r.status}, ${JSON.stringify(t && t.photo)})`);
+		const b = r.body || {};
+		ok(r.status === 415 && b.code === "UNSUPPORTED_IMAGE_TYPE" && b.field === "photo" && snapshot(db) === before,
+			`§4 (h) a photo that is not text: 415 UNSUPPORTED_IMAGE_TYPE on field "photo", nothing written (got ${r.status} ${JSON.stringify(b)})`);
 	}
 }
 

@@ -1,5 +1,5 @@
 <template>
-  <div class="card">
+  <div ref="formEl" class="card" @change.capture="keepUnreadableNumber">
     <div class="admin-section-title">
       <div class="section-dot" style="background: var(--accent);"></div>
       New Truck
@@ -184,14 +184,15 @@
     </details>
 
     <button class="btn btn-primary btn-add" @click="handleSubmit">Add Truck</button>
-    <div class="error-msg">{{ errorMsg }}</div>
+    <div class="error-msg" role="alert">{{ errorMsg }}</div>
   </div>
 </template>
 
 <script setup>
 import { reactive, ref, computed, watch } from 'vue'
 import FileDropZone from '../shared/FileDropZone.vue'
-import { compressImage, DEFAULT_MAX_EDGE } from '../../lib/imageUtils'
+import { compressImage, DEFAULT_MAX_EDGE, isDecodedImage, dataUrlHasImageBytes } from '../../lib/imageUtils'
+import { amountError } from '../../lib/truckAmounts'
 
 const truckMakes = [
   'Freightliner', 'Kenworth', 'Peterbilt', 'Volvo', 'International',
@@ -266,6 +267,8 @@ watch(() => form.make, () => { form.model = '' })
 
 const errorMsg = ref('')
 const photoBusy = ref(false)
+// The form's root element, for unreadableNumberError.
+const formEl = ref(null)
 
 // Receives File[] from FileDropZone — a drop and a click both land here.
 //
@@ -281,19 +284,67 @@ async function onPhoto(files) {
   photoBusy.value = true
   try {
     const dataUrl = await compressImage(file, DEFAULT_MAX_EDGE)
-    // compressImage resolves to '' only when the file could not be read at all.
-    // Keep whatever photo was already attached rather than silently clearing it.
-    if (dataUrl) form.photo = dataUrl
-    else errorMsg.value = "Couldn't read that photo — try a different file."
+    // Only a real decode is kept. When compressImage cannot decode a file it
+    // hands back the RAW bytes under the file's own media type (an SVG, a PDF,
+    // …) or '' — and the server refuses any photo that is not a JPEG, PNG or
+    // WebP (415 UNSUPPORTED_IMAGE_TYPE). The label alone is not proof: a PDF
+    // renamed scan.jpg comes back labelled image/jpeg, so its bytes are checked
+    // too. Keep whatever photo was already attached rather than swapping in one
+    // the save would be refused over.
+    if (isDecodedImage(dataUrl) && dataUrlHasImageBytes(dataUrl)) form.photo = dataUrl
+    else errorMsg.value = "Couldn't read that photo — use a JPEG, PNG or WebP image."
   } finally {
     photoBusy.value = false
   }
+}
+
+// The value rule — each amount's range, blank allowed, the refusal naming the
+// field — is amountError in lib/truckAmounts.js. The two helpers below are the
+// half that needs this form's elements; TruckTable.vue's Edit dialog has the
+// same pair, so change them together.
+
+// A number box the browser cannot parse keeps its text on screen but reports
+// value '' — in Chrome "1e999", "15-00" and "5e" all do — and v-model reads
+// that '' as a deliberate blank, so the field would save as unset (0) without
+// a word. Only input.validity.badInput tells "cleared" from "unreadable", which
+// is why this reads the DOM. Names the first such box by its label; a disabled
+// box (driver pay for a non-Super Admin) is never sent, so it is skipped.
+//
+// ⚠️ Depends on keepUnreadableNumber below: without it the evidence is gone
+// before this runs.
+function unreadableNumberError(root) {
+  if (!root) return ''
+  for (const el of root.querySelectorAll('input[type="number"]')) {
+    if (el.disabled || !el.validity?.badInput) continue
+    const label = el.closest('.form-group, .edit-field')?.querySelector('label')?.textContent.trim()
+    return `${label || 'A number field'} can't be read as a number — correct it or clear the box.`
+  }
+  return ''
+}
+
+// v-model on a number box (with or without .number) adds its own 'change'
+// listener that rewrites the box with the cast model value — '' for an
+// unreadable entry — so without this the typo, and badInput with it, would
+// vanish the moment the box loses focus: exactly when Add Truck is pressed,
+// before its click handler runs. Stopping that one event here, in the capture
+// phase on the form, keeps the typo on screen for unreadableNumberError to find
+// and for the person to fix. Readable entries pass through untouched.
+function keepUnreadableNumber(e) {
+  const el = e.target
+  if (el?.tagName === 'INPUT' && el.type === 'number' && el.validity?.badInput) e.stopPropagation()
 }
 
 function handleSubmit() {
   errorMsg.value = ''
   if (!form.unitNumber.trim()) {
     errorMsg.value = 'Unit number is required.'
+    return
+  }
+  // Refused here rather than left to the server: emitting `submit` clears this
+  // form at once, so a server refusal would land after everything typed was gone.
+  const badAmount = unreadableNumberError(formEl.value) || amountError(form, { canEditPay: props.canEditPay })
+  if (badAmount) {
+    errorMsg.value = badAmount
     return
   }
 

@@ -192,6 +192,13 @@ const APPLY_SRC = liftRoute(SRC, 'app.post("/api/public/investor-apply", publicF
 const ONBOARD_SRC = liftFunction(SRC, "async function checkAndCompleteOnboarding(userId) {");
 const ESCAPE_SRC = liftFunction(SRC, "function escapeHtml(s) {");
 const COL_LETTER_SRC = liftFunction(SRC, "function colLetter(idx) {");
+// The reader of each vehicle's purchase price, with the ceiling it reads (its
+// own subject is scripts/test-truck-cost-amounts.js §6).
+const PARSE_AMOUNT_SRC = (() => {
+	const m = SRC.match(/\nconst TRUCK_AMOUNT_MAX = [^\n]*\n/);
+	if (!m) die("could not locate TRUCK_AMOUNT_MAX");
+	return `${m[0].trim()}\n${liftFunction(SRC, 'function parseTruckAmount(raw, label = "Amount") {')}`;
+})();
 const escapeHtml = new Function(`${ESCAPE_SRC}\nreturn escapeHtml;`)();
 const INVESTOR_ONBOARDING_DOCS = render(liftConst(SRC, "INVESTOR_ONBOARDING_DOCS"), "INVESTOR_ONBOARDING_DOCS", {});
 const ONBOARDING_DOCS = render(liftConst(SRC, "ONBOARDING_DOCS"), "ONBOARDING_DOCS", {});
@@ -238,10 +245,11 @@ async function acceptanceMail(routeSrc, vals = {}) {
 	let handler = null;
 	const mail = [];
 	const colLetter = new Function(`${COL_LETTER_SRC}\nreturn colLetter;`)();
-	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", routeSrc)(
+	const parseTruckAmount = new Function(`${PARSE_AMOUNT_SRC}\nreturn parseTruckAmount;`)();
+	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", routeSrc)(
 		{ put: (p, guard, h) => { handler = h; } }, () => (req, res, next) => next(), db,
 		{ hash: (pw) => bcrypt.hash(pw, 4) }, crypto, () => {}, () => {}, colLetter, escapeHtml,
-		(to, subject, html) => { mail.push({ to, subject, html }); return Promise.resolve(true); });
+		(to, subject, html) => { mail.push({ to, subject, html }); return Promise.resolve(true); }, parseTruckAmount);
 	const out = {};
 	await handler({
 		params: { id: String(appId) }, body: { status: "Accepted" },

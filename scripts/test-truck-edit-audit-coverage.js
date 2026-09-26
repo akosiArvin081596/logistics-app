@@ -26,6 +26,13 @@
 // that moves money or moves a number a driver plans against will fail this test
 // until it is either audited or explicitly declared cosmetic below.
 //
+// The cost columns — the five fixed costs, the purchase price, the maintenance
+// fund and the admin fee — were listed as cosmetic here, and they are not: the
+// fixed costs are billed into every month a truck is charged. They are audited
+// together, as one `update_truck_costs` line per save that changes one, so for
+// those eight the check also reads that audit's own field list and fails when a
+// column is missing from it.
+//
 // No network, no database, no server — it reads source text.
 //
 //   node scripts/test-truck-edit-audit-coverage.js      # exits 1 on any failure
@@ -74,28 +81,58 @@ const MUST_AUDIT = {
 	driver_pay_daily: "drives invoices and P&L",
 	fuel_tank_gallons: "drives the range a driver plans against on the estimated basis",
 	avg_mpg: "the other half of that same product",
+	insurance_monthly: "a fixed cost, billed into every month the truck is charged",
+	eld_monthly: "a fixed cost, billed into every month the truck is charged",
+	truck_payment_monthly: "a fixed cost, billed into every month the truck is charged",
+	hvut_annual: "an annual fixed cost, a twelfth of it billed into every charged month",
+	irp_annual: "an annual fixed cost, a twelfth of it billed into every charged month",
+	purchase_price: "the investor report's asset value and depreciation for the truck",
+	maintenance_fund_monthly: "the maintenance reserve the investor report shows",
+	admin_fee_pct: "a term of the investor's deal on the truck",
 };
+
+// The eight audited together on one `update_truck_costs` line.
+const COST_AUDITED = [
+	"insurance_monthly", "eld_monthly", "truck_payment_monthly", "hvut_annual", "irp_annual",
+	"purchase_price", "maintenance_fund_monthly", "admin_fee_pct",
+];
 
 // Descriptive only: wrong values here are visible and harmless.
 const COSMETIC = new Set([
 	"unit_number", "make", "model", "year", "vin", "license_plate", "notes", "photo",
-	"insurance_monthly", "eld_monthly", "truck_payment_monthly", "hvut_annual",
-	"irp_annual", "admin_fee_pct", "purchase_price", "title_status",
-	"maintenance_fund_monthly", "assigned_driver", "routemate_vehicle_id",
+	"title_status", "assigned_driver", "routemate_vehicle_id",
 ]);
+
+// The cost audit's own code: its bare block, from the `{` that opens it to its
+// logAudit call. The field list must live there — a column it does not name is
+// never compared, so never audited — and "" (block not found) fails every cost.
+function costAuditBlock(src) {
+	const at = src.indexOf('logAudit(req, "update_truck_costs"');
+	if (at < 0) return "";
+	const open = src.lastIndexOf("\n\t\t{\n", at);
+	return open < 0 ? "" : src.slice(open, at);
+}
+
+// One answer to "does this route source audit this column?", used by section 1
+// and by the sabotage controls in section 2, so the controls exercise the check.
+function isAudited(src, col) {
+	const calls = [...src.matchAll(/logAudit\(\s*req,\s*["'`]([a-z_]+)["'`]/g)].map((m) => m[1]);
+	return calls.some((a) => a.includes(col.replace(/_gallons$/, "").replace(/^owner_id$/, "owner")))
+		|| calls.some((a) => a === `update_truck_${col}`)
+		|| (col === "driver_pay_daily" && calls.includes("update_driver_pay"))
+		|| (col === "fuel_tank_gallons" && calls.includes("update_truck_fuel_tank"))
+		|| (col === "owner_id" && calls.includes("update_truck_owner"))
+		|| (COST_AUDITED.includes(col) && calls.includes("update_truck_costs") &&
+			new RegExp(`\\b${col}\\b`).test(costAuditBlock(src)));
+}
 
 // --- 1. every must-audit column has a logAudit -------------------------------
 for (const [col, why] of Object.entries(MUST_AUDIT)) {
 	if (!written.has(col)) continue;   // not written here; nothing to audit
-	const audited = new RegExp(`logAudit\\([^)]*?["'\`]update_truck_[a-z_]*["'\`]`, "g");
-	const calls = [...ROUTE.matchAll(/logAudit\(\s*req,\s*["'`]([a-z_]+)["'`]/g)].map((m) => m[1]);
-	const hit = calls.some((a) => a.includes(col.replace(/_gallons$/, "").replace(/^owner_id$/, "owner")))
-		|| calls.some((a) => a === `update_truck_${col}`)
-		|| (col === "driver_pay_daily" && calls.includes("update_driver_pay"))
-		|| (col === "fuel_tank_gallons" && calls.includes("update_truck_fuel_tank"))
-		|| (col === "owner_id" && calls.includes("update_truck_owner"));
-	check(`${col} is audited — ${why}`, hit, true);
+	check(`${col} is audited — ${why}`, isAudited(ROUTE, col), true);
 }
+check("the update_truck_costs audit's field list names each of the eight cost columns",
+	COST_AUDITED.filter((c) => !new RegExp(`\\b${c}\\b`).test(costAuditBlock(ROUTE))), []);
 
 // --- 2. THE PAIRED CASE: the scan must be able to FAIL ------------------------
 // A coverage test that cannot detect a missing audit is theatre. Strip the fuel
@@ -106,6 +143,21 @@ check("sabotage actually removed the call (the control is valid)",
 const sabotagedCalls = [...sabotaged.matchAll(/logAudit\(\s*req,\s*["'`]([a-z_]+)["'`]/g)].map((m) => m[1]);
 check("with the audit removed, the scan reports it MISSING",
 	sabotagedCalls.includes("update_truck_fuel_tank"), false);
+check("...and section 1's own check goes red for the fuel tank",
+	isAudited(sabotaged, "fuel_tank_gallons"), false);
+
+// The same control for the cost audit: with its logAudit stripped, all eight go
+// red through section 1's check.
+const sabotagedCosts = ROUTE.replace(/logAudit\(req, "update_truck_costs"[\s\S]*?\);/, "/* removed */");
+check("cost sabotage actually removed the call (the control is valid)",
+	/logAudit\(req, "update_truck_costs"/.test(sabotagedCosts), false);
+check("with the cost audit removed, the scan reports all eight MISSING",
+	COST_AUDITED.filter((c) => isAudited(sabotagedCosts, c)), []);
+// ...and a column dropped from its field list goes red on its own.
+const droppedIrp = ROUTE.replace('["irp_annual", "/yr"],', "");
+check("field-list sabotage actually dropped IRP (the control is valid)", droppedIrp !== ROUTE, true);
+check("with IRP dropped from the field list, the scan reports IRP MISSING and the rest audited",
+	COST_AUDITED.filter((c) => !isAudited(droppedIrp, c)), ["irp_annual"]);
 
 // --- 3. no column is silently unclassified -----------------------------------
 // This is what catches the NEXT field. A new column that is neither audited nor

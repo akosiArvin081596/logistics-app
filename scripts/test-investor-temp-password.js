@@ -75,6 +75,13 @@ const DRIVER_ACCEPT_SRC = liftRoute(DRIVER_ACCEPT_HEAD);
 const ESCAPE_SRC = liftFunction("function escapeHtml(s) {");
 const COL_LETTER_SRC = liftFunction("function colLetter(idx) {");
 const CURRENT_FLAG_SRC = liftFunction("function currentMustChangePassword(sessionUser) {");
+// The reader of each vehicle's purchase price, with the ceiling it reads (its
+// own subject is scripts/test-truck-cost-amounts.js §6).
+const PARSE_AMOUNT_SRC = (() => {
+	const m = SRC.match(/\nconst TRUCK_AMOUNT_MAX = [^\n]*\n/);
+	if (!m) die("could not locate TRUCK_AMOUNT_MAX");
+	return `${m[0].trim()}\n${liftFunction('function parseTruckAmount(raw, label = "Amount") {')}`;
+})();
 
 const USERS_CREATE = (() => {
 	const m = SRC.match(/CREATE TABLE IF NOT EXISTS users \(([\s\S]*?)\n\t\)/);
@@ -141,8 +148,9 @@ async function accept(db, appId, { status = "Accepted", routeSrc = ACCEPT_SRC } 
 	const sendEmail = (to, subject, html) => { mail.push({ to, subject, html }); return Promise.resolve(true); };
 	const escapeHtml = new Function(`${ESCAPE_SRC}\nreturn escapeHtml;`)();
 	const colLetter = new Function(`${COL_LETTER_SRC}\nreturn colLetter;`)();
-	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", routeSrc)(
-		app, requireRole, db, fastBcrypt, crypto, () => {}, () => {}, colLetter, escapeHtml, sendEmail);
+	const parseTruckAmount = new Function(`${PARSE_AMOUNT_SRC}\nreturn parseTruckAmount;`)();
+	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", routeSrc)(
+		app, requireRole, db, fastBcrypt, crypto, () => {}, () => {}, colLetter, escapeHtml, sendEmail, parseTruckAmount);
 	if (typeof handler !== "function") die("the lifted route did not register a handler");
 	const out = { status: 200, body: null };
 	const res = {

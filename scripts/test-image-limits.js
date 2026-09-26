@@ -4,12 +4,14 @@
  * ceiling BEFORE it decodes, and must refuse an image whose dimensions it cannot
  * read. This pins that.
  *
- *   §1  the module — imageSize()/webpSize()/checkImage()/checkSignatureImage():
- *       real headers, malformed input, fuzz (never throws, null on garbage),
- *       and every limit is a real bound.
- *   §2  each server-side decode has its guard BEFORE the decode call, read from
- *       server.js with comments stripped (a comment naming the guard must not be
- *       mistaken for the guard).
+ *   §1  the module — imageSize()/webpSize()/checkImage()/checkSignatureImage()/
+ *       servedType(): real headers, malformed input, fuzz (never throws, null on
+ *       garbage), every limit is a real bound, and the truck photo limit and
+ *       wording.
+ *   §2  each server-side decode has its guard BEFORE the decode call, and each
+ *       truck photo write its check before the write, read from server.js with
+ *       comments stripped (a comment naming the guard must not be mistaken for
+ *       the guard).
  *   §3  mutants — weaken a guard and a check above flips.
  *
  * Fails on origin/main: lib/image-size.js does not exist there, and the §2
@@ -119,6 +121,41 @@ ok("checkSignatureImage: too many bytes is 413 without decoding", (() => { const
 ok("checkSignatureImage: a non-data string is 415", IL.checkSignatureImage("http://example.com/x.png").status === 415);
 ok("checkSignatureImage: a non-string is 415", IL.checkSignatureImage(123).status === 415);
 
+// servedType — what stored bytes are served as, from their magic bytes alone
+{
+	const pdf = Buffer.from("%PDF-1.7\n%%EOF\n", "latin1");
+	const html = Buffer.from("<!doctype html><html><body><p>x</p></body></html>");
+	ok("servedType: JPEG, PNG and WebP are served as image/jpeg, image/png and image/webp",
+		IL.servedType(jpegOf(4, 4)) === "image/jpeg" && IL.servedType(pngHeader(4, 4)) === "image/png" && IL.servedType(webpVp8x(4, 4)) === "image/webp");
+	ok("servedType: the pdf option does not change what an image is served as",
+		IL.servedType(jpegOf(4, 4), { pdf: true }) === "image/jpeg" && IL.servedType(pngHeader(4, 4), { pdf: true }) === "image/png");
+	ok("servedType: a PDF is application/pdf only with { pdf: true }", IL.servedType(pdf, { pdf: true }) === "application/pdf" && IL.servedType(pdf) === null);
+	ok("servedType: HTML, SVG, GIF, empty and too-short bytes are null",
+		[html, Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>'), Buffer.from("GIF89a............", "latin1"), Buffer.alloc(0), Buffer.from([0xff, 0xd8])]
+			.every((b) => IL.servedType(b) === null && IL.servedType(b, { pdf: true }) === null));
+	ok("servedType: a value that is not a Buffer is null, never a throw",
+		[undefined, null, "", "%PDF-1.7", "data:image/jpeg;base64,/9j/", 42, {}].every((v) => IL.servedType(v) === null && IL.servedType(v, { pdf: true }) === null));
+}
+
+// the truck photo limit and its wording
+ok("LIMITS.TRUCK_PHOTO takes JPEG, PNG and WebP up to MAX_IMAGE_PIXELS",
+	JSON.stringify(IL.LIMITS.TRUCK_PHOTO.types) === JSON.stringify([IL.JPEG, IL.PNG, IL.WEBP]) && IL.LIMITS.TRUCK_PHOTO.maxPixels === IL.MAX_IMAGE_PIXELS &&
+	Object.isFrozen(IL.LIMITS.TRUCK_PHOTO) && Object.isFrozen(IL.LIMITS.TRUCK_PHOTO.types));
+ok("LIMITS.TRUCK_PHOTO: the three types pass, a GIF is 415 and an over-100MP JPEG is 413", (() => {
+	const pass = [jpegOf(800, 600), pngHeader(800, 600), webpVp8x(800, 600)].every((b) => IL.checkImage(b, IL.LIMITS.TRUCK_PHOTO).ok);
+	const gif = IL.checkImage(Buffer.from("GIF89a............", "latin1"), IL.LIMITS.TRUCK_PHOTO);
+	const big = IL.checkImage(jpegOf(12000, 12000), IL.LIMITS.TRUCK_PHOTO);
+	return pass && gif.status === 415 && big.status === 413;
+})());
+ok("refusalBody(…, \"truckPhoto\") has the truck photo wording for 413 and 415", (() => {
+	const a = IL.refusalBody({ status: 413, code: IL.IMAGE_TOO_LARGE }, "truckPhoto");
+	const b = IL.refusalBody({ status: 415, code: IL.UNSUPPORTED_IMAGE_TYPE }, "truckPhoto");
+	return a.error === "This photo is too large. Use a smaller JPEG, PNG or WebP image." && a.code === IL.IMAGE_TOO_LARGE &&
+		b.error === "This photo could not be read. Use a JPEG, PNG or WebP image." && b.code === IL.UNSUPPORTED_IMAGE_TYPE;
+})());
+ok("TRUCK_PHOTO_DATA_URI_MAX_LENGTH is the base64 length of TRUCK_PHOTO_MAX_BYTES (10 MiB) plus room for a prefix",
+	IL.TRUCK_PHOTO_MAX_BYTES === 10 * 1024 * 1024 && IL.TRUCK_PHOTO_DATA_URI_MAX_LENGTH === Math.ceil(IL.TRUCK_PHOTO_MAX_BYTES / 3) * 4 + 64);
+
 // limits are real bounds
 ok("MAX_IMAGE_PIXELS is 100 MP", IL.MAX_IMAGE_PIXELS === 100_000_000);
 ok("SIGNATURE_MAX_PIXELS is 4 MP and SIGNATURE_MAX_BYTES is 256 KB", IL.SIGNATURE_MAX_PIXELS === 4_000_000 && IL.SIGNATURE_MAX_BYTES === 256 * 1024);
@@ -130,8 +167,9 @@ ok("refusalBody carries the code and a non-empty message; 413 vs 415 differ",
 // fuzz: never throws, never returns a non-null non-{w,h}. Seeds are the valid
 // headers above, each mutated at random offsets, plus wholly random buffers.
 (function fuzz() {
-	let threw = false, badShape = false;
-	const seedBufs = [jpegOf(4, 4), pngHeader(4, 4), webpVp8x(4, 4), Buffer.from("GIF89a", "latin1")];
+	let threw = false, badShape = false, badServed = false;
+	const SERVED = new Set([null, "image/jpeg", "image/png", "image/webp", "application/pdf"]);
+	const seedBufs = [jpegOf(4, 4), pngHeader(4, 4), webpVp8x(4, 4), Buffer.from("GIF89a", "latin1"), Buffer.from("%PDF-1.7\n%%EOF", "latin1")];
 	let seed = 0x1234abcd;
 	const rnd = () => { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; return (seed >>> 0) / 0xffffffff; };
 	for (let i = 0; i < 4000; i++) {
@@ -145,11 +183,15 @@ ok("refusalBody carries the code and a non-empty message; 413 vs 415 differ",
 				if (fn !== IL.imageType && r !== null && !(r && typeof r.width === "number" && typeof r.height === "number")) badShape = true;
 			}
 			IL.checkImage(buf, IL.LIMITS.RECEIPT_IMAGE);
+			IL.checkImage(buf, IL.LIMITS.TRUCK_PHOTO);
 			IL.checkSignatureImage(buf.toString("latin1"));
+			const served = [IL.servedType(buf), IL.servedType(buf, { pdf: true })];
+			if (!served.every((t) => SERVED.has(t)) || served[0] === "application/pdf") badServed = true;
 		} catch { threw = true; break; }
 	}
 	ok("fuzz: 4000 malformed inputs — never throws", !threw);
 	ok("fuzz: imageSize/webpSize only ever return null or {width,height}", !badShape);
+	ok("fuzz: servedType only ever answers one of the four served types or null, and a PDF only with { pdf: true }", !badServed);
 })();
 // A JPEG built entirely of empty segments is walked in linear time (bounded).
 {
@@ -254,6 +296,17 @@ ok("saveReceiptToDisk(): checkImage before writeFileSync",
 const thumbBody = routeBody('app.get("/api/expenses/:id/receipt-thumbnail"');
 ok("GET receipt-thumbnail: checkImage before Jimp.read",
 	guardsBefore(thumbBody, "imageLimits.checkImage(source, {", ["Jimp.read("]));
+
+// A truck photo is stored only when the driver's truck-photo route can serve it.
+// The PUT checks one that CHANGES, so the guard must precede its first write.
+const truckPostBody = routeBody('app.post("/api/trucks"');
+ok("POST /api/trucks: truckPhotoRefusal before the first await and the INSERT",
+	guardsBefore(truckPostBody, "truckPhotoRefusal(photo)", ["await ", "INSERT INTO trucks"]));
+const truckPutBody = routeBody('app.put("/api/trucks/:id"');
+ok("PUT /api/trucks/:id: truckPhotoRefusal before the month-end lock, the first await and every write",
+	guardsBefore(truckPutBody, "truckPhotoRefusal(photo)", ["truckEditLockBlockers(", "await ", "assignDriverToTruck(", "UPDATE trucks SET"]));
+ok("truckPhotoRefusal(): checkImage under LIMITS.TRUCK_PHOTO",
+	stripComments(fnBody("truckPhotoRefusal")).includes("imageLimits.checkImage(file.body, imageLimits.LIMITS.TRUCK_PHOTO)"));
 
 const skipBody = fnBody("receiptOcrSkipReason");
 ok("receiptOcrSkipReason(): reads dimensions via imageLimits.imageSize()",
