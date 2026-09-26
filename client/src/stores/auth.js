@@ -3,16 +3,19 @@ import { defineStore } from 'pinia'
 // store under plain Node, which (unlike Vite) will not guess an extension. Same
 // reason lib/payoutPeriod.js imports './monthLabel.js'.
 import { useApi } from '../composables/useApi.js'
-import { useSocket } from '../composables/useSocket.js'
+import { setSocketOwner, useSocket } from '../composables/useSocket.js'
 import {
   ACTION,
   BACKGROUND,
   EFFECT,
   FOREGROUND,
   OUTCOME,
+  TAB_CHANGE,
   backgroundDelayMs,
   classifySessionAttempt,
   decideBackgroundStep,
+  decideTabChange,
+  guardInputsChanged,
   isDifferentUser,
   isSessionUser,
   logoutConfirmed,
@@ -20,21 +23,25 @@ import {
   parsePendingLogout,
   parseSessionEpoch,
   parseSessionHint,
+  parseSignedOutNote,
   runForegroundCheck,
   serializePendingLogout,
   serializeSessionEpoch,
   serializeSessionHint,
+  serializeSignedOutNote,
 } from '../lib/sessionCheck.js'
 
 const api = useApi()
 
 // ── Browser storage, best-effort everywhere ──────────────────────────────────
 // Private mode or disabled storage throws on access. Every failure degrades to
-// "no hint" / "no marker", i.e. to how this store behaved before either existed.
-// What each key holds, and why it lives where it does: lib/sessionCheck.js.
+// "no hint" / "no marker" / "no note", i.e. to how this store behaved before any
+// of them existed. What each key holds, and why it lives where it does:
+// lib/sessionCheck.js.
 const HINT_KEY = 'logisx.session.lastUser.v1' // sessionStorage: tab-scoped, expires
 const PENDING_LOGOUT_KEY = 'logisx.session.pendingLogout.v1' // localStorage: outlives the tab, like the cookie
 const EPOCH_KEY = 'logisx.session.epoch.v1' // localStorage: shared by every tab, like the cookie
+const SIGNED_OUT_KEY = 'logisx.session.signedOut.v1' // sessionStorage: this tab's next page load only
 
 function storageFor(kind) {
   try {
@@ -76,6 +83,18 @@ function readSessionHint() {
 function stampEpoch() {
   writeKey('local', EPOCH_KEY, serializeSessionEpoch(Date.now()))
 }
+// A logout this browser recorded and the server has not confirmed yet.
+function pendingLogoutRecorded() {
+  return parsePendingLogout(readKey('local', PENDING_LOGOUT_KEY), Date.now())
+}
+// Was this page loaded by a sign-out the server had just confirmed? Answered once
+// per page load: the note is removed as it is read, whatever it says.
+function takeSignedOutNote() {
+  const raw = readKey('session', SIGNED_OUT_KEY)
+  removeKey('session', SIGNED_OUT_KEY)
+  const epoch = parseSessionEpoch(readKey('local', EPOCH_KEY))
+  return parseSignedOutNote(raw, Date.now(), { notBeforeMs: epoch })
+}
 function reloadPage() {
   try {
     window.location.reload()
@@ -85,29 +104,34 @@ function reloadPage() {
 }
 
 // ── A fresh page: sign-out, and a sign-in as a different person ─────────────
-// logout() always ends on a fresh /login. login() and setup() end on a fresh page
-// at the new user's home when this page has shown someone else. A full page load
-// is the one reset that reaches every store, the same reason a background answer
-// naming a different person reloads (lib/sessionCheck.js, isDifferentUser).
+// A confirmed logout() ends on a fresh /login; an unconfirmed one stays on the
+// app's own login screen (no fresh page would load) and leaves the next sign-in to
+// load one. login() and setup() end on a fresh page at the new user's home when
+// this page has shown someone else. A full page load is the one reset that reaches
+// every store, the same reason a background answer naming a different person
+// reloads (lib/sessionCheck.js, isDifferentUser).
 //
-// The person this page last showed. Every assignment of a real user to `this.user`
-// is followed at once by noteShown(), including the page-load restore from this
-// tab's saved copy, which does not go through _applyAuthenticated() (T8 in
+// The person this page last showed. Every real user assigned to `this.user` goes
+// through _showUser(), which notes them here, including the page-load restore from
+// this tab's saved copy, which does not go through _applyAuthenticated() (T8 in
 // scripts/test-session-check.mjs). Never cleared: a sign-out, or a session that
 // ended on its own, clears `this.user` before anyone signs in, which is why login()
 // and setup() compare against this record and never against `this.user`. A full
 // page load starts it again at null, so a first sign-in on a fresh page stays an
 // ordinary in-app navigation.
 let shownUser = null
-// Set once this page has asked for a fresh one, and kept until that page replaces
-// it. router/index.js opens no signed-in screen in the meantime.
+// Set once this page has started a sign-out or asked for a fresh page, and kept for
+// the rest of its life: router/index.js opens no signed-in screen on it again, and
+// the next sign-in here loads a fresh page (needsFreshPage).
 let leavingPage = false
+let pageshowListenerInstalled = false
+let storageListenerInstalled = false
 
 function noteShown(user) {
   if (isSessionUser(user)) shownUser = user
 }
 
-/** True once this page has asked the browser for a fresh one (read by router/index.js). */
+/** True once this page has signed out or asked for a fresh one (read by router/index.js and LoginView). */
 export function isLeavingPage() {
   return leavingPage
 }
@@ -118,10 +142,15 @@ function replacePage(url) {
   leavingPage = true
   try {
     // A browser that restores this page from its back/forward cache anyway
-    // reloads it rather than showing it again.
-    window.addEventListener('pageshow', (event) => {
-      if (event.persisted) reloadPage()
-    })
+    // reloads it rather than showing it again. Added once: a page can ask more
+    // than once (a sign-in after a sign-out whose load was stopped), and every
+    // extra listener would be one more reload of the restored page.
+    if (!pageshowListenerInstalled) {
+      window.addEventListener('pageshow', (event) => {
+        if (event.persisted) reloadPage()
+      })
+      pageshowListenerInstalled = true
+    }
     window.location.replace(url)
   } catch {
     /* not in a browser: there is no page to replace */
@@ -194,6 +223,35 @@ function installWakeListeners(store) {
   })
 }
 
+// ── Other tabs of this browser ───────────────────────────────────────────────
+// The cookie belongs to the browser, so a sign-in or sign-out in one tab changes
+// the session under every other tab too, and those kept showing the previous
+// person's screens and data. The browser fires a `storage` event in every OTHER
+// tab (never the one that wrote) when localStorage changes, and two writes mean
+// the cookie has changed owner or is about to: the epoch, which every sign-in and
+// sign-out stamps, and a pending-logout record being written, which a logout does
+// before its request goes out. The record being REMOVED is not one: a confirmed
+// logout removes it after both of those, and a sign-in right after its own stamp.
+function changesCookieOwner(event) {
+  if (!event) return false
+  if (event.key === EPOCH_KEY) return true
+  return event.key === PENDING_LOGOUT_KEY && event.newValue != null
+}
+
+// Installed once, by the first user this page shows (_showUser); a tab with nobody
+// on screen has nothing to follow. What a change leads to: _followOtherTab().
+function installStorageListener(store) {
+  if (storageListenerInstalled || typeof window === 'undefined') return
+  storageListenerInstalled = true
+  try {
+    window.addEventListener('storage', (event) => {
+      if (changesCookieOwner(event)) store._followOtherTab()
+    })
+  } catch {
+    /* no window events: nothing to follow */
+  }
+}
+
 export const useAuthStore = defineStore('auth', {
   state: () => ({
     user: null,
@@ -244,6 +302,8 @@ export const useAuthStore = defineStore('auth', {
     // Runs while the first navigation waits. The rules: lib/sessionCheck.js.
     async _resolveSessionOnLoad() {
       const gen = sessionGen
+      // Read on every load, and gone after it: it speaks for one page load only.
+      const loadedBySignOut = takeSignedOutNote()
 
       // A logout that never reached the server is finished before anything may
       // trust the cookie; otherwise this load would sign the person who asked to
@@ -260,6 +320,16 @@ export const useAuthStore = defineStore('auth', {
       }
       removeKey('local', PENDING_LOGOUT_KEY) // absent or expired: tidy either way
 
+      // This is the fresh /login a confirmed sign-out loaded (the note,
+      // lib/sessionCheck.js). The server has just said there is no session, so
+      // asking again only costs time: with nobody known the check below takes up
+      // to 21 s on a poor signal to reach this same login screen. No background
+      // loop either, and no second epoch stamp: logout() stamped it.
+      if (loadedBySignOut) {
+        this._clearUser()
+        return
+      }
+
       // Known = this tab's saved user (it survives the reload that got us here) or,
       // should this ever run again later in a page's life, the user already in memory.
       const known = readSessionHint() || (isSessionUser(this.user) ? this.user : null)
@@ -275,9 +345,9 @@ export const useAuthStore = defineStore('auth', {
           break
         case ACTION.STAY:
           // The server has said nothing since it last confirmed this user. Keep
-          // them in the app; the background check settles it either way.
-          this.user = known
-          noteShown(known) // on screen from the saved copy, not via _applyAuthenticated()
+          // them in the app; the background check settles it either way. On screen
+          // from the saved copy, not via _applyAuthenticated(): nothing is re-saved.
+          this._showUser(known)
           this.isAuthenticated = true
           this._startReconnect()
           break
@@ -288,9 +358,20 @@ export const useAuthStore = defineStore('auth', {
       }
     },
 
-    _applyAuthenticated(user, { persist = true } = {}) {
+    // The ONE place a real user is put in `this.user` (T8 in
+    // scripts/test-session-check.mjs); clearing it to null is done directly. Each
+    // person shown is noted for the fresh-page decision (noteShown), becomes the
+    // only person the live-update socket may reconnect for (setSocketOwner), and
+    // from then on this page follows sign-ins and sign-outs in other tabs.
+    _showUser(user) {
       this.user = user
       noteShown(user)
+      setSocketOwner(user.id ?? null)
+      installStorageListener(this)
+    },
+
+    _applyAuthenticated(user, { persist = true } = {}) {
+      this._showUser(user)
       this.isAuthenticated = true
       this._stopReconnect()
       // A save that fails must not leave the PREVIOUS user saved. Otherwise a reload
@@ -301,13 +382,21 @@ export const useAuthStore = defineStore('auth', {
       }
     },
 
+    // Nobody on screen: no user, no socket owner, no background check, no saved
+    // copy. The part of a sign-out that stays in this tab: _applySignedOut() adds
+    // the epoch; the paths that must not stamp it again call this alone.
+    _clearUser() {
+      this.user = null
+      this.isAuthenticated = false
+      setSocketOwner(null)
+      this._stopReconnect()
+      removeKey('session', HINT_KEY)
+    },
+
     // Reached only on a DEFINITIVE answer (lib/sessionCheck.js, rule 1), or when
     // the person on this browser asked to log out. Never on a mere failure.
     _applySignedOut() {
-      this.user = null
-      this.isAuthenticated = false
-      this._stopReconnect()
-      removeKey('session', HINT_KEY)
+      this._clearUser()
       stampEpoch() // the cookie has no owner now, so no tab may restore one
     },
 
@@ -416,16 +505,16 @@ export const useAuthStore = defineStore('auth', {
       // No answer. The 200 already settled this one field, so memory follows it and
       // they can leave the page. The saved copy is DROPPED, not edited: the
       // background check writes it back from the server's own answer.
-      if (isSessionUser(this.user)) {
-        this.user = { ...this.user, mustChangePassword: false }
-        noteShown(this.user) // the same person, but every assignment is noted (T8)
-      }
+      if (isSessionUser(this.user)) this._showUser({ ...this.user, mustChangePassword: false })
       removeKey('session', HINT_KEY)
       this._startReconnect()
     },
 
     async logout() {
       sessionGen++
+      // From here on this page opens no signed-in screen (router/index.js), and a
+      // change in another tab is left to this logout to settle (_followOtherTab).
+      leavingPage = true
       this._stopReconnect()
       // Live updates stop now, whatever the request below does: locally the
       // person asked to leave. Every logout button (the sidebar, the driver app,
@@ -436,15 +525,74 @@ export const useAuthStore = defineStore('auth', {
       writeKey('local', PENDING_LOGOUT_KEY, serializePendingLogout(Date.now()))
       stampEpoch() // and no other tab restores this user from its saved copy
       removeKey('session', HINT_KEY)
-      if (await this._sendLogout()) removeKey('local', PENDING_LOGOUT_KEY)
-      // Locally the person asked to leave, so they leave either way: signed out
-      // here, then a fresh /login page, whatever the request answered. Callers
-      // follow with router.replace('/login'), which shows the login screen until
-      // it arrives. A replace, not a push: a push adds a history entry, and the
-      // fresh page would take that one's place instead of the signed-in page's.
-      this.user = null
-      this.isAuthenticated = false
+      const confirmed = await this._sendLogout()
+      // Locally the person asked to leave, so they are signed out here whatever the
+      // request answered. Callers follow with router.replace('/login'), a replace
+      // and not a push: a push adds a history entry, and a fresh page would take
+      // that one's place instead of the signed-in page's.
+      this._clearUser()
+      if (!confirmed) {
+        // No answer from the app: no signal, a timeout, or a 5xx while a deploy
+        // restarts it. A fresh page now would be the browser's own "no connection"
+        // page or the proxy's error page, so the callers' router.replace('/login')
+        // shows the app's own login screen in this page instead. The pending record
+        // stays, so the next page load finishes the logout, and leavingPage makes
+        // the next sign-in here load the fresh page this one skipped.
+        return
+      }
+      removeKey('local', PENDING_LOGOUT_KEY)
+      // The fresh /login skips its session check: the server has just answered it.
+      writeKey('session', SIGNED_OUT_KEY, serializeSignedOutNote(Date.now()))
       replacePage('/login')
+    },
+
+    // Another tab has signed someone in or out, or is about to (the storage
+    // listener above), while this one still shows the previous owner, whose data
+    // every other store still holds. One question to the server, then keep, reload
+    // or leave the page: the rules are decideTabChange() in lib/sessionCheck.js.
+    async _followOtherTab() {
+      if (!isSessionUser(this.user) || leavingPage) return
+      sessionGen++ // a check already running here was asking about the previous owner
+      const gen = sessionGen
+      // A logout is recorded before its request is sent, so the answer below can
+      // predate it. Seen now, it counts as much as seen when the answer arrives.
+      const pendingBefore = pendingLogoutRecorded()
+      this._stopReconnect()
+      useSocket().pause() // nothing live until the answer says whose it would be
+      const result = await probeSession(FOREGROUND.timeoutMs)
+      // A newer change, or this tab's own sign-in or sign-out, settles it instead.
+      if (gen !== sessionGen || leavingPage) return
+      const shown = this.user
+      const step = decideTabChange({
+        outcome: classifySessionAttempt(result),
+        pendingLogout: pendingBefore || pendingLogoutRecorded(),
+        shown,
+        next: result.data?.user,
+      })
+
+      if (step.action === TAB_CHANGE.KEEP) {
+        // The same person. Saved again, now newer than the epoch, so a reload here
+        // still restores them; and their live updates come back.
+        this._applyAuthenticated(result.data.user)
+        useSocket().unpause()
+        if (guardInputsChanged(shown, this.user)) notifyResolved() // a new role, or a forced password change
+        return
+      }
+      useSocket().disconnect()
+      if (step.action === TAB_CHANGE.RELOAD) {
+        // Someone else, as the background check handles it (EFFECT.RELOAD): the new
+        // user is saved first, and the reload starts from them.
+        this._applyAuthenticated(result.data.user)
+        reloadPage()
+        return
+      }
+      // LEAVE. Not _applySignedOut(): the tab that made the change stamped the
+      // epoch, and a second stamp from here would be one more change for every
+      // other tab to follow, this one included.
+      this._clearUser()
+      if (step.freshPage) replacePage('/login')
+      else leavingPage = true // no answer: a fresh page would be the browser's error page
+      notifyResolved() // the app's own login screen meanwhile (router/index.js)
     },
 
     // true = the server ended the session (or there was none to end).

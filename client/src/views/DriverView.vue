@@ -845,8 +845,9 @@ async function handleRefresh() {
 async function handleLogout() {
   socket.disconnect()
   await auth.logout()
-  // logout() is already loading a fresh /login in this page's place; replace (not
-  // push) so that page takes this one's history entry.
+  // logout() is loading a fresh /login in this page's place, or, when the server
+  // could not confirm it, leaves this navigation to show the app's own login
+  // screen. A replace, not a push, so a fresh page takes this one's history entry.
   router.replace('/login')
 }
 

@@ -33,9 +33,15 @@
 //   M11 a different person on screen patched in place instead of reloaded
 //   M12 a hint from before another tab's login/logout still trusted
 //   M13 identity by username instead of the user id (names can be edited)
+//   M14 a signed-out note trusted past its TTL
+//   M15 a signed-out note from before another tab's sign-in still trusted
+//   M16 a signed-in answer outranking another tab's pending logout (the race)
+//   M17 no answer, after another tab's change, keeping the page
+//   M18 leaving with no answer onto a fresh page (the browser's error page)
 // The tripwire rejects the verbatim pre-fix checkSession() and a catch that signs
-// out through _applySignedOut() (T1), a logout() that writes its pending marker
-// only after the request (T3), and the old local edit in ChangePasswordView (T5).
+// out through _applySignedOut() or _clearUser() (T1), a logout() that writes its
+// pending marker only after the request (T3), and the old local edit in
+// ChangePasswordView (T5).
 //
 // Sections 1–3 prove the RULES. Section 4 proves the STORE follows them: it imports
 // the committed stores/auth.js with the real Pinia and useApi and drives it through
@@ -43,17 +49,22 @@
 // and SM6/SM7 (second review) are mutations that got through an earlier version of
 // this file.
 //
-// Section 4 also pins the fresh page. logout() always ends on exactly one
-// location.replace('/login'), after its request, whatever that request answered.
+// Section 4 also pins the fresh page. A logout() the server confirms ends on
+// exactly one location.replace('/login'), after its request, and leaves a note so
+// that page asks nothing (SM21, SM22); an unconfirmed one ends on the app's own
+// login screen with NO replace, which would load the browser's error page (SM17).
 // login() and setup() end on one at the new user's home only when the page showed
 // someone else (SM8–SM16). "Showed" includes a user restored from the tab's saved
-// copy and then signed out by the background check: that restore assigns this.user
-// directly, not through _applyAuthenticated(), and the sign-out clears this.user
-// before anyone signs in (SM13–SM16, and T8 for any new assignment).
-// T6 checks that the router opens no signed-in screen while the fresh page loads,
-// and T7 that every logout caller then REPLACES /login (a push would add a history
-// entry, and the fresh page would take that one's place instead of the signed-in
-// page's).
+// copy and then signed out by the background check: that restore does not go
+// through _applyAuthenticated(), and the sign-out clears this.user before anyone
+// signs in (SM11, SM13–SM16, SM24, and T8: every real user goes through _showUser()).
+// Other tabs: a sign-in or sign-out there reaches this tab as `storage` events,
+// and it keeps, reloads or leaves the page (SM18–SM20; the rules are M16–M18).
+// T6 checks that the router opens no signed-in screen while the fresh page loads
+// and sends a signed-out page to /login, T7 that every logout caller then REPLACES
+// /login (a push would add a history entry, and the fresh page would take that
+// one's place instead of the signed-in page's), and T9 that LoginView keeps Sign In
+// disabled while a fresh page loads.
 //
 // No network, no DOM. Section 4 loads Pinia/Vue from client/node_modules, which
 // `npm ci` at the repo root installs (postinstall) and CI installs before this runs.
@@ -340,6 +351,51 @@ function suitePageEffect(impl, eq) {
   eq('page: no ids on either side → compared by username', e({ ...DRIVER_HINT, id: undefined }, { ...DRIVER, id: undefined, username: 'someone.else' }), 'reload')
 }
 
+// The note a confirmed sign-out leaves for the fresh /login page it loads, so that
+// page skips its session check. It speaks for ONE page load, so it expires fast,
+// and never outlives a sign-in made after it.
+function suiteSignedOutNote(impl, eq) {
+  const TTL = real.SIGNED_OUT_NOTE_TTL_MS
+  const note = impl.serializeSignedOutNote(T0)
+  eq('note: holds a timestamp and nothing else', JSON.parse(note), { v: 1, at: T0 })
+  eq('note: read back just after it was written', impl.parseSignedOutNote(note, T0 + 1500), true)
+  eq('note: still good at exactly the TTL', impl.parseSignedOutNote(note, T0 + TTL), true)
+  eq('note: gone 1 ms past the TTL (the page that read it was not the one logout() asked for)', impl.parseSignedOutNote(note, T0 + TTL + 1), false)
+  eq('note: the TTL is short: one page load, not a session', TTL > 21000 && TTL <= 5 * 60 * 1000, true)
+  eq('note: a clock that moved backwards gives no note', impl.parseSignedOutNote(note, T0 - 1), false)
+  eq('note: absent / empty', [impl.parseSignedOutNote(null, T0), impl.parseSignedOutNote('', T0)], [false, false])
+  // Unlike the pending-logout record, an unreadable note is NO note: ignoring it costs one check.
+  eq('note: unreadable → no note (fails toward the ordinary check)', impl.parseSignedOutNote('{oops', T0), false)
+  eq('note: another version, or no time → no note', [
+    impl.parseSignedOutNote(JSON.stringify({ v: 2, at: T0 }), T0),
+    impl.parseSignedOutNote(JSON.stringify({ v: 1 }), T0),
+  ], [false, false])
+  eq('note: nothing is written for a nonsense time', impl.serializeSignedOutNote(NaN), null)
+  const at = (notBeforeMs) => impl.parseSignedOutNote(note, T0 + 1000, { notBeforeMs })
+  eq('note: written after the latest sign-in/sign-out (logout() stamps, then writes it) → good', [at(T0 - 1), at(T0)], [true, true])
+  eq('note: written BEFORE another tab signed someone in → no note', at(T0 + 1), false)
+  eq('note: an unreadable epoch (Infinity) → no note', at(Infinity), false)
+}
+
+// Another tab changed who owns the cookie; this tab still shows `shown`.
+function suiteTabChange(impl, eq) {
+  const d = (outcome, pendingLogout, next = null) => impl.decideTabChange({ outcome, pendingLogout, shown: DRIVER_HINT, next })
+  const LEAVE_FRESH = { action: 'leave', freshPage: true }
+  const LEAVE_IN_APP = { action: 'leave', freshPage: false }
+  // The race: a logout is recorded BEFORE its request, so the server can still say "signed in".
+  eq('tab change: a pending logout, and the server still says signed in (the race) → leave, fresh /login', d('authenticated', true, DRIVER), LEAVE_FRESH)
+  eq('tab change: a pending logout, and the server names someone else → leave, fresh /login', d('authenticated', true, OTHER), LEAVE_FRESH)
+  eq('tab change: a pending logout, the server confirms → leave, fresh /login', d('signed-out', true), LEAVE_FRESH)
+  eq('tab change: a pending logout and no answer → leave for the app\'s own /login (no fresh page to load)', d('unreachable', true), LEAVE_IN_APP)
+  eq('tab change: signed out (no pending record) → leave, fresh /login', d('signed-out', false), LEAVE_FRESH)
+  eq('tab change: the same person → keep the page', d('authenticated', false, DRIVER), { action: 'keep', freshPage: false })
+  eq('tab change: the same id under a new username → still keep the page', d('authenticated', false, { ...DRIVER, username: 'dwayne.jones' }), { action: 'keep', freshPage: false })
+  eq('tab change: someone else → reload from them', d('authenticated', false, OTHER), { action: 'reload', freshPage: false })
+  // No answer and nothing recorded: the owner changed and nothing proves it is still this person.
+  eq('tab change: no answer, nothing pending → leave for the app\'s own /login (the safe side)', d('unreachable', false), LEAVE_IN_APP)
+  eq('tab change: an outcome nobody planned for → leave in-app, never keep', d('???', false), LEAVE_IN_APP)
+}
+
 const SUITES = [
   suiteClassify,
   suiteForegroundDecision,
@@ -351,6 +407,8 @@ const SUITES = [
   suiteGuardInputs,
   suiteIdentity,
   suitePageEffect,
+  suiteSignedOutNote,
+  suiteTabChange,
 ]
 
 async function runSuites(impl) {
@@ -466,6 +524,24 @@ const MUTANTS = [
   ['M13 identity by username instead of the user id', {
     isDifferentUser: (a, b) => real.isSessionUser(a) && real.isSessionUser(b) && a.username !== b.username,
   }],
+  ['M14 a signed-out note trusted past its TTL', {
+    parseSignedOutNote: (raw, now, opts = {}) => real.parseSignedOutNote(raw, now, { ...opts, ttlMs: Infinity }),
+  }],
+  ['M15 a signed-out note from before another tab\'s sign-in still trusted', {
+    parseSignedOutNote: (raw, now, opts = {}) => real.parseSignedOutNote(raw, now, { ...opts, notBeforeMs: 0 }),
+  }],
+  ['M16 a signed-in answer outranks a pending logout (the race)', {
+    decideTabChange: (o = {}) => real.decideTabChange(o.outcome === 'authenticated' ? { ...o, pendingLogout: false } : o),
+  }],
+  ['M17 no answer keeps the page', {
+    decideTabChange: (o = {}) => (!o.pendingLogout && o.outcome === 'unreachable' ? { action: 'keep', freshPage: false } : real.decideTabChange(o)),
+  }],
+  ['M18 leaving with no answer loads a fresh page anyway (the browser\'s error page)', {
+    decideTabChange: (o = {}) => {
+      const step = real.decideTabChange(o)
+      return step.action === 'leave' ? { ...step, freshPage: true } : step
+    },
+  }],
 ]
 
 for (const [name, overrides] of MUTANTS) {
@@ -504,7 +580,7 @@ function catchBodies(src) {
 // T1: turning a FAILURE into a sign-out is exactly the bug, whether it is spelled
 // out inline or goes through the store's own helper. Signing out happens only
 // through the decision above, never in a catch.
-const SIGNS_OUT = /this\.user\s*=\s*null|this\.isAuthenticated\s*=\s*false|\b_applySignedOut\s*\(|\$reset\s*\(/
+const SIGNS_OUT = /this\.user\s*=\s*null|this\.isAuthenticated\s*=\s*false|\b_applySignedOut\s*\(|\b_clearUser\s*\(|\$reset\s*\(/
 function catchSignsOut(src) {
   return catchBodies(stripComments(src)).some((b) => SIGNS_OUT.test(b))
 }
@@ -584,6 +660,10 @@ report(
   'FAIL  T1 does not flag a catch that signs out through _applySignedOut(); the tripwire is blind',
 )
 report(
+  catchSignsOut('try { await probe() } catch { this._clearUser() }'),
+  'FAIL  T1 does not flag a catch that signs out through _clearUser(); the tripwire is blind',
+)
+report(
   editsAuthUserLocally('if (auth.user) auth.user = { ...auth.user, mustChangePassword: false }'),
   'FAIL  T5 does not flag the pre-fix local edit; the tripwire is blind',
 )
@@ -624,6 +704,23 @@ report(
   !guardWaitsForFreshPage(routerSrc.replace(/^.*\bisLeavingPage\(\).*$/m, '')),
   'FAIL  T6 does not flag a guard without the isLeavingPage() check; the tripwire is blind',
 )
+// …and a page that is leaving with nobody signed in (an unconfirmed sign-out, or
+// another tab's sign-out) goes to the app's own /login when the guard re-runs
+// (onSessionResolved), instead of refusing and leaving the signed-out person's
+// screen up.
+function leavingSignedOutGoesToLogin(src) {
+  const s = stripComments(src)
+  const at = s.search(/router\.beforeEach\(/)
+  if (at < 0) return false
+  const guard = blockFrom(s, s.indexOf('{', at))
+  const line = guard.split('\n').find((l) => /\bisLeavingPage\(\)/.test(l)) || ''
+  return /\bisAuthenticated\b/.test(line) && /\{\s*name:\s*['"]login['"]\s*\}|['"]\/login['"]/.test(line)
+}
+report(leavingSignedOutGoesToLogin(routerSrc), "FAIL  T6 router/index.js must send a leaving page with nobody signed in to /login (a bare `return false` leaves the signed-out person's screen up)")
+report(
+  !leavingSignedOutGoesToLogin(routerSrc.replace(/^.*\bisLeavingPage\(\).*$/m, '  if (isLeavingPage() && !to.meta.public) return false')),
+  'FAIL  T6 does not flag the #395 guard line that only refuses; the tripwire is blind',
+)
 
 // T7: every caller of auth.logout() follows it with router.replace('/login'). The
 // fresh page takes the history entry that is current when it arrives, so a push
@@ -655,48 +752,99 @@ function logoutCallersReplace(files) {
   )
 }
 
-// T8: the record of who the page showed (stores/auth.js) must see EVERY user put on
-// screen, not only those _applyAuthenticated() applies. The page-load restore from
-// the saved copy assigns this.user directly, and a sign-out clears this.user before
-// anyone signs in, so a record kept in one place misses exactly the case it exists
-// for. Every real user assigned to this.user is followed at once by noteShown().
-// Section 4 proves the sites that exist today; this catches a new one.
-function unnotedUserAssignments(src) {
+// T8: every real user put on screen goes through _showUser() (stores/auth.js), the
+// ONE place that notes who the page showed (noteShown), tells the live-update socket
+// whom it may reconnect for (setSocketOwner), and starts following other tabs. The
+// page-load restore from the saved copy used to assign this.user directly, and a
+// sign-out clears this.user before anyone signs in, so a record kept anywhere else
+// misses exactly the case it exists for. Outside _showUser(), this.user may only be
+// cleared. Section 4 proves the sites that exist today; this catches a new one.
+function methodNamed(src, name) {
+  const at = src.search(new RegExp(`\\n[ \\t]*(?:async\\s+)?${name}\\s*\\([^)]*\\)\\s*\\{`))
+  if (at < 0) return null
+  const open = src.indexOf('{', at)
+  return { open, body: blockFrom(src, open) }
+}
+function directUserAssignments(src) {
   const s = stripComments(src)
+  const show = methodNamed(s, '_showUser')
+  const outside = show ? s.slice(0, show.open + 1) + s.slice(show.open + 1 + show.body.length) : s
   const bad = []
-  let found = 0
   const re = /\bthis\.user\s*=(?![=>])\s*/g
   let m
-  while ((m = re.exec(s))) {
-    const rest = s.slice(re.lastIndex)
+  while ((m = re.exec(outside))) {
+    const rest = outside.slice(re.lastIndex)
     if (/^null\b/.test(rest)) continue // clearing it: nobody is put on screen
-    found++
-    const eol = rest.indexOf('\n')
-    const next = rest.slice(eol + 1).trimStart()
-    if (!next.startsWith('noteShown(')) bad.push(`this.user = ${rest.slice(0, eol).trim()}`)
+    bad.push(`this.user = ${rest.slice(0, rest.indexOf('\n')).trim()}`)
   }
-  return { found, bad }
+  return { showUser: show ? show.body : null, bad }
 }
 {
-  const { found, bad } = unnotedUserAssignments(authSrc)
+  const { showUser, bad } = directUserAssignments(authSrc)
+  report(bad.length === 0, `FAIL  T8 stores/auth.js must put every real user in this.user through _showUser() (assigned directly: ${bad.join(' | ') || 'none'})`)
   report(
-    found >= 2 && bad.length === 0,
-    `FAIL  T8 stores/auth.js must follow every real user assigned to this.user with noteShown() at once (found ${found}; not noted: ${bad.join(' | ') || 'none'})`,
+    showUser !== null && /\bthis\.user\s*=\s*user\b/.test(showUser) && /\bnoteShown\(user\)/.test(showUser) && /\bsetSocketOwner\(/.test(showUser),
+    'FAIL  T8 _showUser() must assign the user, note it (noteShown) and tell the socket who is on screen (setSocketOwner)',
   )
+  const calls = (stripComments(authSrc).match(/\bthis\._showUser\(/g) || []).length
+  report(calls >= 3, `FAIL  T8 the saved-copy restore, _applyAuthenticated() and afterPasswordChange() must each go through _showUser() (found ${calls} calls)`)
   const stripped = stripComments(authSrc)
-  const withoutRestoreNote = stripped.replace(/^[ \t]*noteShown\(known\).*\n/m, '')
-  if (withoutRestoreNote === stripped) {
-    report(false, 'FAIL  T8 control could not be built: the saved-copy restore has no noteShown(known) to remove')
+  const restoredDirectly = stripped.replace(/this\._showUser\(known\)/, 'this.user = known')
+  if (restoredDirectly === stripped) {
+    report(false, 'FAIL  T8 control could not be built: the saved-copy restore has no this._showUser(known) to replace')
   } else {
-    report(
-      unnotedUserAssignments(withoutRestoreNote).bad.length === 1,
-      'FAIL  T8 does not flag the saved-copy restore without noteShown(); the tripwire is blind',
-    )
+    const flagged = directUserAssignments(restoredDirectly).bad
+    report(flagged.length === 1 && flagged[0] === 'this.user = known', 'FAIL  T8 does not flag the saved-copy restore assigning this.user directly; the tripwire is blind')
   }
+  const flagged = directUserAssignments(
+    '\n_showUser(user) {\n  this.user = user\n}\ncase ACTION.STAY:\n  this.user = known\n  this.isAuthenticated = true\n',
+  ).bad
+  report(flagged.length === 1 && flagged[0] === 'this.user = known', 'FAIL  T8 does not flag a direct real-user assignment next to _showUser(); the tripwire is blind')
+}
+
+// T9: LoginView keeps Sign In (and Create Account) disabled while the fresh page a
+// successful sign-in asked for is loading, so a second tap cannot send a second
+// sign-in; and hands it back after a refused one. So the page is asked whether it
+// is leaving only once the call has SUCCEEDED (between the call and the catch), and
+// the `finally` resets the flag only conditionally. Asking in `finally` alone would
+// lock the button for good after a refused sign-in on a page an unconfirmed
+// sign-out has already marked as leaving.
+function signInHoldsButton(src, fn, call, flag) {
+  const s = stripComments(src)
+  const at = s.search(new RegExp(`async\\s+function\\s+${fn}\\s*\\(`))
+  if (at < 0) return false
+  const body = blockFrom(s, s.indexOf('{', at))
+  const callAt = body.indexOf(`await auth.${call}(`)
+  const catchAt = body.search(/\}\s*catch\b/)
+  const finAt = body.search(/\bfinally\s*\{/)
+  if (callAt < 0 || catchAt < 0 || finAt < 0) return false
+  const leavingAt = body.indexOf('isLeavingPage()')
+  const fin = blockFrom(body, body.indexOf('{', finAt))
+  const unconditional = new RegExp(`(^|[;{}\\n])\\s*${flag}\\.value\\s*=\\s*false`)
+  return leavingAt > callAt && leavingAt < catchAt && new RegExp(`${flag}\\.value\\s*=\\s*false`).test(fin) && !unconditional.test(fin)
+}
+{
+  const loginViewSrc = fs.readFileSync(path.join(CLIENT_SRC, 'views', 'LoginView.vue'), 'utf8')
   report(
-    unnotedUserAssignments('case ACTION.STAY:\n  this.user = known\n  this.isAuthenticated = true\n  this._startReconnect()\n').bad.length === 1,
-    'FAIL  T8 does not flag a direct this.user assignment with no noteShown(); the tripwire is blind',
+    /import\s*\{[^}]*\bisLeavingPage\b[^}]*\}\s*from\s*['"]\.\.\/stores\/auth(?:\.js)?['"]/.test(loginViewSrc) &&
+      signInHoldsButton(loginViewSrc, 'doLogin', 'login', 'loginLoading') &&
+      signInHoldsButton(loginViewSrc, 'doSetup', 'setup', 'setupLoading'),
+    'FAIL  T9 LoginView must keep Sign In / Create Account disabled while a successful sign-in loads a fresh page (isLeavingPage() after the call), and re-enable it after a refused one',
   )
+  const PRE_FIX_DO_LOGIN = `async function doLogin() {
+  loginLoading.value = true
+  try {
+    await auth.login(loginForm.username, loginForm.password)
+    router.push(auth.roleHome)
+  } catch (err) {
+    loginError.value = err.message || 'Connection failed.'
+  } finally {
+    loginLoading.value = false
+  }
+}`
+  report(!signInHoldsButton(PRE_FIX_DO_LOGIN, 'doLogin', 'login', 'loginLoading'), 'FAIL  T9 does not flag the #395 doLogin(), which re-enabled the button while the fresh page loaded; the tripwire is blind')
+  const ASKS_IN_FINALLY = PRE_FIX_DO_LOGIN.replace('    loginLoading.value = false', '    if (!isLeavingPage()) loginLoading.value = false')
+  report(!signInHoldsButton(ASKS_IN_FINALLY, 'doLogin', 'login', 'loginLoading'), 'FAIL  T9 does not flag a doLogin() that asks only in `finally` (a refused sign-in would lock the button); the tripwire is blind')
 }
 
 // ── 4. The real store, end to end ─────────────────────────────────────────────
@@ -723,11 +871,13 @@ const PINIA_URL = pathToFileURL(path.join(CLIENT_DIR, 'node_modules', 'pinia', '
 const HINT_KEY = 'logisx.session.lastUser.v1'
 const PENDING_KEY = 'logisx.session.pendingLogout.v1'
 const EPOCH_KEY = 'logisx.session.epoch.v1'
+const NOTE_KEY = 'logisx.session.signedOut.v1'
 
 class MemStorage {
   constructor() {
     this.m = new Map()
     this.full = false // a browser store at its quota: setItem throws, removeItem still works
+    this.writes = [] // every key setItem stored, in order: a value can repeat within one ms
   }
   getItem(k) {
     return this.m.has(k) ? this.m.get(k) : null
@@ -735,6 +885,7 @@ class MemStorage {
   setItem(k, v) {
     if (this.full) throw Object.assign(new Error('The quota has been exceeded.'), { name: 'QuotaExceededError' })
     this.m.set(k, String(v))
+    this.writes.push(k)
   }
   removeItem(k) {
     this.m.delete(k)
@@ -966,10 +1117,33 @@ function makeCtx(source, expect) {
       for (const fn of world.listeners.window.pageshow || []) fn({ type: 'pageshow', persisted })
       await drain()
     },
+    listeners: (type) => (world.listeners.window[type] || []).length,
+    // What ANOTHER tab of this browser writes to the shared localStorage, as
+    // [key, value] pairs (null removes). The browser tells this tab with one
+    // `storage` event per write, never the tab that wrote; they arrive here back
+    // to back, before any request the first one starts is answered, as they would.
+    otherTab: async (...writes) => {
+      const events = []
+      for (const [key, value] of writes) {
+        if (value == null) world.local.removeItem(key)
+        else world.local.setItem(key, value)
+        events.push({ key, newValue: value == null ? null : String(value), storageArea: world.local })
+      }
+      for (const event of events) for (const fn of world.listeners.window.storage || []) fn(event)
+      await drain()
+    },
+    // This tab's signed-out note (the fresh /login page skips its check on it).
+    note: (tabName) => tabStorage(tabName).getItem(NOTE_KEY),
+    // How many times the epoch has been stamped in this scenario, by any tab.
+    epochStamps: () => world.local.writes.filter((k) => k === EPOCH_KEY).length,
     advance,
     settle,
   }
 }
+// What another tab's logout() writes before its request goes out, and what its
+// sign-in writes (the pending record, if any, is removed after the stamp).
+const pendingRecord = () => JSON.stringify({ v: 1, at: Date.now() })
+const epochStamp = () => String(Date.now())
 
 async function signedIn(c, tabName, user = DRIVER) {
   c.answer(json({ authenticated: true, user }))
@@ -979,12 +1153,11 @@ async function signedIn(c, tabName, user = DRIVER) {
 }
 const lastOf = (list) => list[list.length - 1]
 
-// What POST /api/auth/logout answers: [label, answer, is the pending-logout record
-// still there when the page is replaced?]
+// What POST /api/auth/logout answers: [label, answer, did the server confirm it?]
 const SIGN_OUT_ANSWERS = [
-  ['the server confirms it', json({ success: true }), false],
-  ['no signal', OFFLINE, true],
-  ['a 502 page', html(502), true],
+  ['the server confirms it', json({ success: true }), true],
+  ['no signal', OFFLINE, false],
+  ['a 502 page', html(502), false],
 ]
 
 // The path a record kept in one place would miss. A page load puts user A on
@@ -1270,17 +1443,37 @@ const STORE_SCENARIOS = [
   }],
   // A fresh page: sign-out always loads one; a sign-in loads one when the page has
   // shown someone else. The router reads leaving() to open no signed-in screen.
-  ...SIGN_OUT_ANSWERS.map(([label, answer, kept]) => [`sign-out loads a fresh /login page: ${label}`, async (c) => {
+  // Confirmed: a fresh /login. Not confirmed: that load would be the browser's
+  // own "no connection" page or the proxy's error page, so the app's own login
+  // screen instead (the callers' router.replace('/login')), in this page.
+  ...SIGN_OUT_ANSWERS.map(([label, answer, confirmed]) => [`sign-out: ${label}`, async (c) => {
     const p = await signedIn(c, 'A')
     c.log()
     c.answer(answer)
     await c.settle(p.store.logout())
-    c.expect("the POST, then exactly one location.replace('/login'), and no reload", c.log().join() === 'POST /api/auth/logout,replace /login')
-    const [r] = c.replaces()
-    c.expect('signed out here before the page is replaced', r?.signedIn === false && p.store.user === null)
-    c.expect(`…with the pending-logout record ${kept ? 'kept for the next load' : 'already cleared'}`, r?.pendingLogout === kept)
+    if (confirmed) {
+      c.expect("the POST, then exactly one location.replace('/login'), and no reload", c.log().join() === 'POST /api/auth/logout,replace /login')
+      const [r] = c.replaces()
+      c.expect('signed out here before the page is replaced', r?.signedIn === false && p.store.user === null)
+      c.expect('…with the pending-logout record already cleared', r?.pendingLogout === false)
+      c.expect('…and a signed-out note left for the fresh page', c.note('A') !== null)
+    } else {
+      c.expect("the POST alone: NO location.replace (it would load the browser's error page), no reload", c.log().join() === 'POST /api/auth/logout')
+      c.expect('signed out here all the same: no user, not signed in, nothing running', p.store.user === null && !p.store.isAuthenticated && !p.store.isReconnecting)
+      c.expect('…the pending-logout record kept for the next load, and no note (nothing was confirmed)', c.local(PENDING_KEY) !== null && c.note('A') === null)
+    }
     c.expect('…and the page reports it is leaving', p.leaving() === true)
   }]),
+  ['an unconfirmed sign-out: the next sign-in on the app\'s own login screen loads a fresh page', async (c) => {
+    const p = await signedIn(c, 'A')
+    c.answer(OFFLINE)
+    await c.settle(p.store.logout())
+    c.log()
+    c.answer(json({ success: true, user: DRIVER }))
+    await c.settle(p.store.login('d.jones', 'x'))
+    c.expect('even the same person: the POST, then one location.replace of their home', c.log().join() === 'POST /api/auth/login,replace /driver')
+    c.expect('…and that sign-in supersedes the unfinished logout', c.local(PENDING_KEY) === null && p.store.isAuthenticated)
+  }],
   ['a signed-out page restored from the back/forward cache reloads', async (c) => {
     const p = await signedIn(c, 'A')
     await c.firePageshow(true)
@@ -1291,6 +1484,72 @@ const STORE_SCENARIOS = [
     c.expect('an ordinary page show does nothing', c.reloads() === 0)
     await c.firePageshow(true)
     c.expect('restored from the cache: reloaded, once', c.reloads() === 1)
+  }],
+  ['a page that asks for a fresh page twice listens for a cache restore once', async (c) => {
+    const p = await signedIn(c, 'A')
+    c.answer(json({ success: true }))
+    await c.settle(p.store.logout())
+    // Its load was stopped, so it is still here, and a sign-in asks again.
+    c.answer(json({ success: true, user: OTHER }))
+    await c.settle(p.store.login('amir', 'x'))
+    c.expect('(before) two fresh pages were asked for', c.replaces().length === 2)
+    c.expect('one pageshow listener, not one per request', c.listeners('pageshow') === 1)
+    await c.firePageshow(true)
+    c.expect('restored from the cache: reloaded once, not twice', c.reloads() === 1)
+  }],
+  // The fresh /login a confirmed sign-out loads does not ask the server again.
+  ['a confirmed sign-out: the fresh /login page asks nothing', async (c) => {
+    const p = await signedIn(c, 'A')
+    c.answer(json({ success: true }))
+    await c.settle(p.store.logout())
+    const stamps = c.epochStamps()
+    c.sent()
+    c.answer(json(SIGNED_IN)) // it would be accepted, were it asked for
+    const q = await c.load('A')
+    await c.settle(q.store.checkSession())
+    c.expect('the login page at once: not one request', c.sent().length === 0 && !q.store.isAuthenticated && q.store.user === null)
+    c.expect('…no background loop', !q.store.isReconnecting)
+    c.expect('…the note is gone, and the epoch is not stamped again', c.note('A') === null && c.epochStamps() === stamps)
+    c.dropAnswers()
+    c.answer(OFFLINE, OFFLINE, OFFLINE)
+    const r = await c.load('A')
+    await c.settle(r.store.checkSession())
+    c.expect('the next load (the note spent) asks as usual', c.sent().length === 3)
+  }],
+  ['the signed-out note never outranks a pending logout', async (c) => {
+    const p = await signedIn(c, 'A')
+    c.answer(json({ success: true }))
+    await c.settle(p.store.logout())
+    world.local.setItem(PENDING_KEY, pendingRecord()) // another tab's logout, never sent
+    c.sent()
+    c.answer(json({ success: true }))
+    const q = await c.load('A')
+    await c.settle(q.store.checkSession())
+    c.expect('the unfinished logout is sent first', c.sent().join() === 'POST /api/auth/logout' && c.local(PENDING_KEY) === null)
+    c.expect('…signed out, and the note spent all the same', !q.store.isAuthenticated && c.note('A') === null)
+  }],
+  ['a signed-out note past its TTL gets the ordinary check', async (c) => {
+    const p = await signedIn(c, 'A')
+    c.answer(json({ success: true }))
+    await c.settle(p.store.logout())
+    await c.advance(real.SIGNED_OUT_NOTE_TTL_MS + 1)
+    c.sent()
+    c.answer(json(SIGNED_OUT))
+    const q = await c.load('A')
+    await c.settle(q.store.checkSession())
+    c.expect('the session is asked', c.sent().join() === 'GET /api/auth/session' && !q.store.isAuthenticated)
+  }],
+  ['a signed-out note from before another tab\'s sign-in gets the ordinary check', async (c) => {
+    const p = await signedIn(c, 'A')
+    c.answer(json({ success: true }))
+    await c.settle(p.store.logout())
+    await c.advance(1000)
+    world.local.setItem(EPOCH_KEY, epochStamp()) // another tab signs someone in
+    c.sent()
+    c.answer(json({ authenticated: true, user: OTHER }))
+    const q = await c.load('A')
+    await c.settle(q.store.checkSession())
+    c.expect("the session is asked, and the cookie's new owner is found", c.sent().join() === 'GET /api/auth/session' && q.store.user?.id === OTHER.id)
   }],
   ['the page showed a driver: a sign-in as someone else loads a fresh page at their home', async (c) => {
     const p = await signedIn(c, 'A')
@@ -1368,6 +1627,114 @@ const STORE_SCENARIOS = [
     await c.settle(p.store.setup('d.jones', 'pw', ''))
     c.expect('the same person again: no location.replace', c.replaces().length === 0 && p.leaving() === false)
   }],
+  // Other tabs. This tab shows the driver; another tab of the same browser (the
+  // same cookie) signs someone in or out, and this one hears it as `storage` events.
+  ...[
+    ['the server has already ended it', json(SIGNED_OUT)],
+    // The race: the record and the epoch are written BEFORE the other tab's
+    // request, so the session can still be alive when this tab asks.
+    ['the server still says signed in (the race)', json(SIGNED_IN)],
+  ].map(([how, answer]) => [`another tab starts a logout, ${how}: this tab signs out, onto a fresh /login`, async (c) => {
+    const p = await signedIn(c, 'A')
+    c.log()
+    c.answer(answer, answer)
+    const stamps = c.epochStamps()
+    await c.otherTab([PENDING_KEY, pendingRecord()], [EPOCH_KEY, epochStamp()])
+    c.expect('signed out here: nobody shown, not signed in, nothing running', p.store.user === null && !p.store.isAuthenticated && !p.store.isReconnecting)
+    c.expect("one question per event, then one location.replace('/login') (the app answered)", c.log().join() === 'GET /api/auth/session,GET /api/auth/session,replace /login')
+    c.expect("…and the app's own login screen meanwhile: the guard re-runs once", p.rerouted() === 1 && p.leaving() === true)
+    c.expect('the epoch is stamped once, by the other tab: a second stamp here would send every other tab round again', c.epochStamps() === stamps + 1)
+    c.expect("the other tab's logout record is left to that tab", c.local(PENDING_KEY) !== null)
+    c.expect('the saved user is gone, and nothing reloads', c.saved('A') === null && c.reloads() === 0)
+  }]),
+  ['another tab\'s logout is confirmed before this tab\'s answer arrives: it still signs out', async (c) => {
+    const p = await signedIn(c, 'A')
+    c.log()
+    const held = { defer: true }
+    c.answer(json(SIGNED_IN), held) // the second question reached the server before the logout did
+    await c.otherTab([PENDING_KEY, pendingRecord()], [EPOCH_KEY, epochStamp()])
+    await c.otherTab([PENDING_KEY, null]) // that tab's logout is confirmed; its record goes
+    c.expect('(before) still showing the driver while the answer is out', p.store.user?.id === DRIVER.id)
+    held.release(json(SIGNED_IN))
+    await c.advance(0)
+    c.expect('signed out: the record was there when the change was heard', p.store.user === null && !p.store.isAuthenticated)
+    c.expect("…onto a fresh /login", c.replaces().map((r) => r.url).join() === '/login')
+  }],
+  ['another tab signs out with no signal, and this tab has none either: the app\'s own login screen', async (c) => {
+    const p = await signedIn(c, 'A')
+    c.log()
+    c.answer(OFFLINE, OFFLINE)
+    await c.otherTab([PENDING_KEY, pendingRecord()], [EPOCH_KEY, epochStamp()])
+    c.expect('signed out here', p.store.user === null && !p.store.isAuthenticated)
+    c.expect("NO location.replace (it would load the browser's error page)", c.replaces().length === 0 && c.reloads() === 0)
+    c.expect('…the guard re-runs to /login instead, and the page is leaving (the next sign-in loads a fresh one)', p.rerouted() === 1 && p.leaving() === true)
+  }],
+  ['another tab signs someone in and this tab gets no answer: the safe side, the app\'s own login screen', async (c) => {
+    const p = await signedIn(c, 'A')
+    c.log()
+    c.answer(OFFLINE)
+    await c.otherTab([EPOCH_KEY, epochStamp()])
+    c.expect('one question, no answer', c.log().join() === 'GET /api/auth/session')
+    c.expect('the driver is no longer shown: nothing proves the cookie is still theirs', p.store.user === null && !p.store.isAuthenticated)
+    c.expect('in-app: no location.replace, the guard re-runs, the page is leaving', c.replaces().length === 0 && p.rerouted() === 1 && p.leaving() === true)
+    c.log()
+    c.answer(json({ success: true, user: DRIVER }))
+    await c.settle(p.store.login('d.jones', 'x'))
+    c.expect('the next sign-in, the same person included, loads a fresh page', c.log().join() === 'POST /api/auth/login,replace /driver')
+  }],
+  ['another tab signs someone else in: this tab reloads, from them', async (c) => {
+    const p = await signedIn(c, 'A')
+    c.log()
+    c.answer(json({ authenticated: true, user: OTHER }))
+    await c.otherTab([EPOCH_KEY, epochStamp()])
+    c.expect('one question, then one reload', c.log().join() === 'GET /api/auth/session,reload' && c.reloads() === 1)
+    c.expect('the reload starts from the new person', c.saved('A')?.id === OTHER.id && p.store.user?.id === OTHER.id)
+    c.expect('not a replace, not a reroute', c.replaces().length === 0 && p.rerouted() === 0)
+  }],
+  ['another tab signs the same person in again: this page stays', async (c) => {
+    const p = await signedIn(c, 'A')
+    await c.advance(1000)
+    c.log()
+    c.answer(json(SIGNED_IN))
+    await c.otherTab([EPOCH_KEY, epochStamp()])
+    c.expect('one question, and nothing else: no reload, no replace, no reroute', c.log().join() === 'GET /api/auth/session' && p.rerouted() === 0 && p.leaving() === false)
+    c.expect('the driver is still shown, signed in', p.store.user?.id === DRIVER.id && p.store.isAuthenticated)
+    await c.advance(60_000)
+    c.answer(OFFLINE, OFFLINE)
+    const r = await c.load('A')
+    await c.settle(r.store.checkSession())
+    c.expect('saved again after the epoch: a reload with no signal still restores the driver', r.store.isAuthenticated && r.store.user?.id === DRIVER.id)
+  }],
+  ['another tab signs in the same person with a new role: this page re-runs its guard', async (c) => {
+    const p = await signedIn(c, 'A')
+    c.answer(json({ authenticated: true, user: { ...DRIVER, role: 'Dispatcher' } }))
+    await c.otherTab([EPOCH_KEY, epochStamp()])
+    c.expect('kept, with the new role, and the guard re-run once', p.store.user?.role === 'Dispatcher' && p.rerouted() === 1 && c.reloads() === 0)
+  }],
+  ['a page with nobody on screen, or one signing out itself, leaves other tabs\' changes alone', async (c) => {
+    let p = await restoredFromSavedCopyThenSignedOut(c, json(SIGNED_OUT))
+    c.sent()
+    await c.otherTab([EPOCH_KEY, epochStamp()])
+    c.expect('the login page (nobody shown): nothing is asked', c.sent().length === 0)
+    p = await signedIn(c, 'A')
+    c.sent()
+    const held = { defer: true }
+    c.answer(held)
+    const leaving = p.store.logout()
+    await c.otherTab([EPOCH_KEY, epochStamp()])
+    c.expect('mid-logout: only the logout is sent', c.sent().join() === 'POST /api/auth/logout')
+    held.release(json({ success: true }))
+    await c.settle(leaving)
+    c.expect("…and it alone decides the page: one location.replace('/login')", c.replaces().map((r) => r.url).join() === '/login')
+  }],
+  ['a logout record being removed, or an unrelated key, is not a change of owner', async (c) => {
+    await signedIn(c, 'A')
+    world.local.setItem(PENDING_KEY, pendingRecord())
+    c.sent()
+    await c.otherTab([PENDING_KEY, null])
+    await c.otherTab(['logisx.formDraft.v1', '{}'])
+    c.expect('nothing is asked', c.sent().length === 0)
+  }],
 ]
 
 async function runStoreScenarios(source) {
@@ -1442,14 +1809,14 @@ const STORE_MUTANTS = [
     )],
   ['SM7 (second review) afterPasswordChange() ignores an authenticated:false answer',
     (s) => replaceOnce(s, /if \(outcome === OUTCOME\.SIGNED_OUT\) \{\s*this\._applySignedOut\(\)\s*return\s*\}/, '')],
-  ['SM8 logout() ends without loading a fresh page',
-    (s) => replaceOnce(s, /replacePage\('\/login'\)/, '')],
+  ['SM8 a confirmed logout() ends without loading a fresh page',
+    (s) => replaceInMethod(s, 'logout', /replacePage\('\/login'\)/, '')],
   ['SM9 a sign-in never loads a fresh page, whoever the page showed',
     (s) => replaceOnce(s, /return leavingPage \|\| isDifferentUser\(shown, user\)/, 'return false')],
   ['SM10 every sign-in loads a fresh page, the same person too',
     (s) => replaceOnce(s, /return leavingPage \|\| isDifferentUser\(shown, user\)/, 'return true')],
-  ['SM11 the "stay" branch does not record the user it shows',
-    (s) => replaceOnce(s, /noteShown\(known\)/, '')],
+  ['SM11 the "stay" branch assigns its user directly, so nothing records it',
+    (s) => replaceOnce(s, /this\._showUser\(known\)/, 'this.user = known')],
   ['SM12 a page restored from the back/forward cache is shown, not reloaded',
     (s) => replaceOnce(s, /if \(event\.persisted\) reloadPage\(\)/, '')],
   // After _applySignedOut() there is nobody in this.user to compare against.
@@ -1457,10 +1824,28 @@ const STORE_MUTANTS = [
     (s) => replaceInMethod(s, 'login', /const shown = shownUser/, 'const shown = this.user')],
   ['SM14 setup() compares the new user with this.user, which a sign-out has cleared',
     (s) => replaceInMethod(s, 'setup', /const shown = shownUser/, 'const shown = this.user')],
-  ['SM15 _applyAuthenticated() does not record the user it shows',
-    (s) => replaceOnce(s, /this\.user = user\n\s*noteShown\(user\)/, 'this.user = user')],
+  ['SM15 _applyAuthenticated() assigns its user directly, so nothing records it',
+    (s) => replaceOnce(s, /this\._showUser\(user\)/, 'this.user = user')],
   ['SM16 a sign-out clears the record of who the page showed',
     (s) => replaceOnce(s, /_applySignedOut\(\) \{/, '_applySignedOut() {\n      shownUser = null')],
+  // The mutant control for "an unconfirmed sign-out never replaces the page".
+  ['SM17 an unconfirmed logout() replaces the page anyway (onto the browser\'s error page)',
+    (s) => replaceInMethod(s, 'logout', /if \(!confirmed\) \{\s*return\s*\}/, "if (!confirmed) {\n        replacePage('/login')\n        return\n      }")],
+  // The mutant control for "another tab's pending logout wins over a signed-in answer".
+  ['SM18 another tab\'s pending logout ignored when this tab\'s check says signed in',
+    (s) => replaceInMethod(s, '_followOtherTab', /pendingLogout: pendingBefore \|\| pendingLogoutRecorded\(\)/, 'pendingLogout: false')],
+  ['SM19 the pending logout only looked for when the answer arrives (its confirmation has removed it by then)',
+    (s) => replaceInMethod(s, '_followOtherTab', /pendingLogout: pendingBefore \|\| pendingLogoutRecorded\(\)/, 'pendingLogout: pendingLogoutRecorded()')],
+  ['SM20 following another tab\'s sign-out stamps the epoch again (tabs set each other off)',
+    (s) => replaceInMethod(s, '_followOtherTab', /this\._clearUser\(\)/, 'this._applySignedOut()')],
+  ['SM21 the signed-out note ignored: the fresh /login runs the whole check',
+    (s) => replaceOnce(s, /if \(loadedBySignOut\) \{\s*this\._clearUser\(\)\s*return\s*\}/, '')],
+  ['SM22 the signed-out note read before the pending logout is finished',
+    (s) => replaceOnce(s, /const loadedBySignOut = takeSignedOutNote\(\)/, 'const loadedBySignOut = takeSignedOutNote()\n      if (loadedBySignOut) {\n        this._clearUser()\n        return\n      }')],
+  ['SM23 a pageshow listener added on every request for a fresh page',
+    (s) => replaceOnce(s, /if \(!pageshowListenerInstalled\) \{/, 'if (true) {')],
+  ['SM24 _showUser() does not record the user it shows',
+    (s) => replaceOnce(s, /\n\s*noteShown\(user\)\n/, '\n')],
 ]
 
 try {
