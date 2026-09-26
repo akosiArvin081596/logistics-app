@@ -148,7 +148,13 @@ const G = buildModule();
 // The two PUT routes, lifted whole, and the two small pure helpers they call.
 const LOAD_PUT_SRC = extractRoute('app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (req, res) => {');
 const DATA_PUT_SRC = extractRoute('app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (req, res) => {');
-const ROUTE_HELPERS = new Function(`${extract("sheetRowAfterUpdate")}\n${extract("a1SheetPrefix")}\nreturn { sheetRowAfterUpdate, a1SheetPrefix };`)();
+// The baseline helpers need the shipped normalizeLoadId(); guardedColumnReason()
+// is stubbed as the route's env stubs it.
+const { normalizeLoadId } = require("../lib/ratecon-load");
+const ROUTE_HELPERS = new Function("normalizeLoadId", "guardedColumnReason",
+	`${extract("sheetRowAfterUpdate")}\n${extract("a1SheetPrefix")}\n${extract("a1ColumnLetter")}\n${extract("sheetRowCellWrites")}\n` +
+	`${extract("restoreUntouchedCells")}\n${extract("baselineApplies")}\n${extract("rowMovedRefusal")}\n` +
+	"return { sheetRowAfterUpdate, a1SheetPrefix, a1ColumnLetter, sheetRowCellWrites, restoreUntouchedCells, rowMovedRefusal };")(normalizeLoadId, () => "");
 // GET and POST /api/data and the shipped role gate.
 const GET_DATA_HEAD = 'app.get("/api/data", requireRole("Super Admin"), async (req, res) => {';
 const GET_DATA_SRC = extractRoute(GET_DATA_HEAD);
@@ -545,15 +551,32 @@ function fakeSheet(rows) {
 		const m = /!(\d+):\1$/.exec(range);
 		return m ? (rows[Number(m[1]) - 1] || []) : null;
 	};
+	const colIndex = (letters) => [...letters].reduce((n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0) - 1;
 	const values = {
 		get: async ({ range }) => {
 			const r = rowAt(range);
 			return { data: { values: r ? [r.slice()] : rows.map((x) => x.slice()) } };
 		},
 		batchGet: async ({ ranges }) => ({ data: { valueRanges: ranges.map((x) => ({ values: [(rowAt(x) || []).slice()] })) } }),
-		update: async ({ range, requestBody }) => {
-			writes.push({ range, row: requestBody.values[0].slice() });
-			return { data: { updatedCells: requestBody.values[0].length } };
+		// Both routes write the cells a save changes, one single-cell range each,
+		// in one values.batchUpdate (sheetRowCellWrites(); its own runner is
+		// scripts/test-row-save-cell-writes.js). The write is applied to the sheet
+		// and recorded as the ranges written and the row as it then stands, so a
+		// column the save left alone reads as stored.
+		batchUpdate: async ({ requestBody }) => {
+			const data = requestBody.data || [];
+			let rowNo = 0;
+			for (const d of data) {
+				const m = /!([A-Z]+)(\d+)$/.exec(d.range);
+				if (!m) throw new Error(`fake sheet: not a single-cell range: ${d.range}`);
+				rowNo = Number(m[2]);
+				const r = rows[rowNo - 1] || (rows[rowNo - 1] = []);
+				const i = colIndex(m[1]);
+				while (r.length <= i) r.push("");
+				r[i] = d.values[0][0];
+			}
+			writes.push({ ranges: data.map((d) => d.range), row: rowNo ? rows[rowNo - 1].slice() : [] });
+			return { data: { totalUpdatedCells: data.length } };
 		},
 	};
 	return { getSheets: async () => ({ spreadsheets: { values } }), writes };
@@ -572,8 +595,15 @@ function mountPut(routeSrc, M, rows) {
 		getSheetName: (req) => (req.query && req.query.sheet) || "Job Tracking",
 		resolveSheetTargetForWrite: async () => ({ resolved: true, metaUnreadable: false, title: "Job Tracking", guarded: true }),
 		a1SheetPrefix: ROUTE_HELPERS.a1SheetPrefix,
-		a1ColumnLetter: () => { throw new Error("a1ColumnLetter is not reached by this fixture"); },
+		a1ColumnLetter: ROUTE_HELPERS.a1ColumnLetter,
 		sheetRowAfterUpdate: ROUTE_HELPERS.sheetRowAfterUpdate,
+		sheetRowCellWrites: ROUTE_HELPERS.sheetRowCellWrites,
+		// PUT /api/data/:rowIndex's optional baseline and the row identity check
+		// that comes with it; these saves send none, so both leave them as they
+		// are (scripts/test-row-save-cell-writes.js).
+		restoreUntouchedCells: ROUTE_HELPERS.restoreUntouchedCells,
+		rowMovedRefusal: ROUTE_HELPERS.rowMovedRefusal,
+		normalizeLoadId,
 		changedGuardedCells: () => [],
 		guardedColumnReason: () => "",
 		validateOwnerIdCell: () => null,
@@ -615,7 +645,7 @@ async function routeSection(M = G, routes = { load: LOAD_PUT_SRC, data: DATA_PUT
 			{ Email: "someone.else@example.invalid", "Phone Number": "", "Broker Contact Name": "Pat Replacement", Details: "rolled pallets" });
 		const w = app.writes[0];
 		t("PUT /api/load/:loadId, Dispatcher: 200, one write", [r.code, app.writes.length], [200, 1]);
-		t("PUT /api/load/:loadId, Dispatcher: every withheld column is written back as stored", writtenWithheld(w), storedWithheld);
+		t("PUT /api/load/:loadId, Dispatcher: every withheld column is left as stored (the row after the write)", writtenWithheld(w), storedWithheld);
 		t("PUT /api/load/:loadId, Dispatcher: the rest of the edit is written", w && w.row[IDX["Details"]], "rolled pallets");
 		t("PUT /api/load/:loadId, Dispatcher: the answer is { success, load }, every withheld column blank",
 			[Object.keys(r.body || {}), WITHHELD.map((c) => ((r.body || {}).load || {})[c])], [["success", "load"], ["", "", ""]]);
@@ -636,10 +666,13 @@ async function routeSection(M = G, routes = { load: LOAD_PUT_SRC, data: DATA_PUT
 	}
 	{
 		// A formula sent for a withheld column is not judged: it is not written.
-		const app = mountPut(routes.load, M, ROWS());
+		// The restore leaves the row as stored, so the save changes nothing and
+		// nothing is written at all.
+		const rows = ROWS();
+		const app = mountPut(routes.load, M, rows);
 		const r = await app.run("Dispatcher", { loadId: "111" }, { Email: "=O2" });
-		t("PUT /api/load/:loadId, Dispatcher, a formula sent for a withheld column: 200, the stored value written",
-			[r.code, writtenWithheld(app.writes[0])], [200, storedWithheld]);
+		t("PUT /api/load/:loadId, Dispatcher, a formula sent for a withheld column: 200 unchanged, nothing written, the stored values kept",
+			[r.code, (r.body || {}).unchanged, app.writes.length, WITHHELD.map((c) => rows[1][IDX[c]])], [200, true, 0, storedWithheld]);
 	}
 	{
 		// A stored value starting with "=" resent as stored is no change.
@@ -663,7 +696,7 @@ async function routeSection(M = G, routes = { load: LOAD_PUT_SRC, data: DATA_PUT
 		const w = app.writes[0];
 		t("PUT /api/data/:rowIndex, Dispatcher: 200 { success, updatedCells }, no other field",
 			[r.code, Object.keys(r.body || {})], [200, ["success", "updatedCells"]]);
-		t("PUT /api/data/:rowIndex, Dispatcher: every withheld column is written back as stored", writtenWithheld(w), storedWithheld);
+		t("PUT /api/data/:rowIndex, Dispatcher: every withheld column is left as stored (the row after the write)", writtenWithheld(w), storedWithheld);
 		t("PUT /api/data/:rowIndex, Dispatcher: the rest of the edit is written", w && w.row[IDX["Details"]], "rolled pallets");
 	}
 	{
@@ -719,10 +752,17 @@ async function routeSection(M = G, routes = { load: LOAD_PUT_SRC, data: DATA_PUT
 		const c = code(src);
 		const restoreAt = c.indexOf(`restoreWithheldBrokerCells(headers, before, ${rowVar});`);
 		const formulaAt = c.indexOf(`formulaCellRefusal(headers, before, ${rowVar});`);
-		const writeAt = c.indexOf(".values.update(");
-		check(`${label}: the restore, then the formula rule, each once, both before the write and before any audit line`,
+		const writeAt = c.indexOf(".values.batchUpdate(");
+		// PUT /api/data/:rowIndex refuses a row that now holds another load
+		// (409 ROW_MOVED) before these rules judge the row, and audits it there.
+		// That line records the form's own edits (as opened and as sent), never a
+		// stored cell (scripts/test-row-save-cell-writes.js). Every other audit
+		// line comes after the two rules.
+		const rowMovedEnd = c.indexOf("return res.status(409).json(moved.body);");
+		const auditAt = c.indexOf("logAudit", Math.max(0, rowMovedEnd));
+		check(`${label}: the restore, then the formula rule, each once, both before the write and before any audit line but the ROW_MOVED refusal's`,
 			[c.split("restoreWithheldBrokerCells(").length - 1, c.split("formulaCellRefusal(").length - 1,
-				restoreAt > 0 && restoreAt < formulaAt && formulaAt < writeAt && formulaAt < c.indexOf("logAudit")],
+				restoreAt > 0 && restoreAt < formulaAt && formulaAt < writeAt && formulaAt < auditAt && rowMovedEnd < restoreAt],
 			[1, 1, true]);
 		check(`${label}: no answer names a withheld column`, /\bpreserved\b/.test(c), false);
 	}
@@ -823,7 +863,7 @@ async function getDataGate(routeSrc) {
 	})());
 	// PUT /api/load/:loadId answers with the updated row too.
 	check("PUT /api/load/:loadId answers a non-Super-Admin with the row redacted",
-		/res\.json\(\{ success: true, load: req\.session\.user\.role !== "Super Admin" \? sanitizeBrokerColumns\(headers, \[result\]\)\[0\] : result \}\);/.test(LOAD_PUT_SRC), true);
+		/\n\t\tres\.json\(\{\n\t\t\tsuccess: true,\n\t\t\tload: req\.session\.user\.role !== "Super Admin" \? sanitizeBrokerColumns\(headers, \[result\]\)\[0\] : result,\n/.test(LOAD_PUT_SRC), true);
 }
 
 // ---------------------------------------------------------------------------

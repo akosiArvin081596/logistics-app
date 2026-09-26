@@ -79,8 +79,11 @@ export const useSheetsStore = defineStore('sheets', {
       return result
     },
 
-    // Returns the server's response. The Data Manager is Super Admin only, and a
-    // Super Admin's save writes every column as sent.
+    // Returns the server's response. The Data Manager is Super Admin only. It
+    // sends every column, and the server writes only the cells that differ from
+    // the row as it reads it, so a column sent back as shown is not rewritten.
+    // No `baseline` is sent (the Active Loads editor sends one), so a cell that
+    // changed on the sheet since this view loaded is written back as shown here.
     async saveRow(rowIndex, values) {
       const result = await api.put(
         `/api/data/${rowIndex}?sheet=${encodeURIComponent(this.currentSheet)}`,

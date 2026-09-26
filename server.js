@@ -1676,8 +1676,63 @@ if (driverCount === 0) {
 	}
 }
 
+// ⚠️ THE ONE RULE FOR A DRIVER'S OPEN CARRIER PAIRING (carrier_driver_history,
+// getInvestorDriverSet() leg 3: the drivers an investor's payout covers). Both
+// writers call it: assignDriverToTruck() (the carrier is the truck owner's
+// company) and syncCarrierDriverHistory() (POST and PUT /api/drivers-directory,
+// the row's carrier). The driver's open pairings are the rows naming them case
+// aside and, while driverNameHeldByOtherSpelling() allows, through a spacing
+// variant (normalizeDriverName()). Each one under another carrier is closed at
+// `now`. A row is opened, both names trimmed, unless one is already open under
+// this carrier in the driver's own spelling: the name as passed, trimmed and
+// case aside, which is how leg 3 keys a row. A spacing variant open under this
+// carrier does not count, and it is left open. Leg 3 does not collapse internal
+// spaces, so with only the variant open, the investor's loads under the
+// driver's own spelling with a blank Owner ID stop matching once the driver
+// moves on; the case-only copies this helper replaced opened that row. The
+// variant is not closed: it is the same carrier, so the pairing still holds,
+// and closing it would end the months getInvestorDriverMonthWindows() leg C
+// gives that spelling. An investor keeps every spelling it already covers and
+// gains the driver's own. When the driver moves to another carrier, both rows
+// close together, under the same guard. A single case-aside open row is
+// handled exactly as before.
+// `releaseSpacingVariants` is the guard's answer from a caller that has already
+// acted on it (assignDriverToTruck()'s release), so one assignment asks once;
+// left undefined, the helper asks.
+function syncOpenCarrierPairing(driverName, carrierName, now, releaseSpacingVariants) {
+	const driver = typeof driverName === "string" ? driverName.trim() : "";
+	const carrier = typeof carrierName === "string" ? carrierName.trim() : "";
+	if (!driver || !carrier) return;
+	const needle = normalizeDriverName(driver);
+	if (releaseSpacingVariants === undefined) releaseSpacingVariants = !driverNameHeldByOtherSpelling(driver);
+	const carrierLower = carrier.toLowerCase();
+	const driverLower = driver.toLowerCase();
+	const openPairings = db.prepare(
+		"SELECT id, carrier_name, driver_name FROM carrier_driver_history WHERE LOWER(driver_name) = ? AND ended_at IS NULL ORDER BY id"
+	).all(driverLower);
+	if (releaseSpacingVariants) {
+		const found = new Set(openPairings.map((r) => r.id));
+		for (const r of db.prepare("SELECT id, carrier_name, driver_name FROM carrier_driver_history WHERE ended_at IS NULL AND COALESCE(driver_name, '') <> '' ORDER BY id").all()) {
+			if (!found.has(r.id) && normalizeDriverName(r.driver_name) === needle) openPairings.push(r);
+		}
+	}
+	const closePairing = db.prepare("UPDATE carrier_driver_history SET ended_at = ? WHERE id = ?");
+	let openUnderCarrier = false;
+	for (const r of openPairings) {
+		if (String(r.carrier_name || "").toLowerCase() !== carrierLower) closePairing.run(now, r.id);
+		else if (String(r.driver_name || "").trim().toLowerCase() === driverLower) openUnderCarrier = true;
+	}
+	if (!openUnderCarrier) {
+		db.prepare(
+			"INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at) VALUES (?, ?, ?)"
+		).run(carrier, driver, now);
+	}
+}
+
 // Helper: sync carrier-driver pairings from Carrier Database sheet into history table
-// Detects when a driver changes carriers and preserves the old pairing
+// Detects when a driver changes carriers and preserves the old pairing. Each
+// row's pairing is kept by syncOpenCarrierPairing() above, the rule
+// assignDriverToTruck() uses too.
 function syncCarrierDriverHistory(carrierDBData, driverColName, carrierColName) {
 	if (!driverColName || !carrierColName) return;
 	const now = new Date().toISOString();
@@ -1685,19 +1740,7 @@ function syncCarrierDriverHistory(carrierDBData, driverColName, carrierColName) 
 		const driverName = (row[driverColName] || "").trim();
 		const carrierName = (row[carrierColName] || "").trim();
 		if (!driverName || !carrierName) return;
-		const driverLower = driverName.toLowerCase();
-		const carrierLower = carrierName.toLowerCase();
-		// Check for open record for this driver
-		const current = db.prepare(
-			"SELECT id, carrier_name FROM carrier_driver_history WHERE LOWER(driver_name) = ? AND ended_at IS NULL"
-		).get(driverLower);
-		if (current) {
-			if (current.carrier_name.toLowerCase() === carrierLower) return; // no change
-			// Carrier changed: close old record
-			db.prepare("UPDATE carrier_driver_history SET ended_at = ? WHERE id = ?").run(now, current.id);
-		}
-		// Insert new open record
-		db.prepare("INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at) VALUES (?, ?, ?)").run(carrierName, driverName, now);
+		syncOpenCarrierPairing(driverName, carrierName, now);
 	});
 }
 
@@ -5280,41 +5323,51 @@ try {
 function assignDriverToTruck(truckId, driverName) {
 	const now = new Date().toISOString();
 	const nameLower = driverName.trim().toLowerCase();
+	// A driver holds one truck, whichever way their old rows spell them: the
+	// active assignment rows, the other truck and the open carrier pairing naming
+	// them through a spacing variant of the name (normalizeDriverName(), as
+	// findTruckForDriver() finds the truck) are released with the case-aside
+	// ones. Only while no other account holds the name under another spelling
+	// (driverNameHeldByOtherSpelling(), the rule the money stamps use): such a
+	// row may be that account's, and it is not this assignment's to release.
+	const needle = normalizeDriverName(driverName);
+	const releaseSpacingVariants = needle !== "" && !driverNameHeldByOtherSpelling(driverName);
 	// Close any active assignment for this truck
 	db.prepare("UPDATE truck_assignments SET end_date = ? WHERE truck_id = ? AND end_date = ''").run(now, truckId);
 	// Close any active assignment for this driver (can only drive one truck)
 	db.prepare("UPDATE truck_assignments SET end_date = ? WHERE LOWER(driver_name) = ? AND end_date = ''").run(now, nameLower);
+	if (releaseSpacingVariants) {
+		const closeRow = db.prepare("UPDATE truck_assignments SET end_date = ? WHERE id = ?");
+		for (const r of db.prepare("SELECT id, driver_name FROM truck_assignments WHERE end_date = '' AND COALESCE(driver_name, '') <> ''").all()) {
+			if (normalizeDriverName(r.driver_name) === needle) closeRow.run(now, r.id);
+		}
+	}
 	// Insert new assignment
 	if (driverName.trim()) {
 		db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (?, ?, ?)").run(truckId, driverName.trim(), now);
 	}
 	// Sync trucks.assigned_driver for backward compat
 	db.prepare("UPDATE trucks SET assigned_driver = '' WHERE LOWER(assigned_driver) = ? AND id != ?").run(nameLower, truckId);
+	if (releaseSpacingVariants) {
+		const releaseTruck = db.prepare("UPDATE trucks SET assigned_driver = '' WHERE id = ?");
+		for (const t of db.prepare("SELECT id, assigned_driver FROM trucks WHERE id != ? AND COALESCE(assigned_driver, '') <> ''").all(truckId)) {
+			if (normalizeDriverName(t.assigned_driver) === needle) releaseTruck.run(t.id);
+		}
+	}
 	db.prepare("UPDATE trucks SET assigned_driver = ? WHERE id = ?").run(driverName.trim(), truckId);
 	// Mirror the (driver, carrier) pairing into carrier_driver_history so the
 	// investor-driver-set resolver has a safety net when assignments change.
 	// Without this, swapping a driver mid-year drops the previous driver's
 	// historical loads from the investor view (only path: trucks.assigned_driver).
+	// The carrier is the company of the truck's owner. The pairing rule is
+	// syncOpenCarrierPairing(), shared with the directory routes, handed the
+	// guard's answer the release above acted on.
 	if (driverName.trim()) {
 		const truckRow = db.prepare("SELECT owner_id FROM trucks WHERE id = ?").get(truckId);
 		if (truckRow && truckRow.owner_id) {
 			const owner = db.prepare("SELECT company_name FROM users WHERE id = ?").get(truckRow.owner_id);
 			const carrierName = owner && owner.company_name ? owner.company_name.trim() : "";
-			if (carrierName) {
-				const current = db.prepare(
-					"SELECT id, carrier_name FROM carrier_driver_history WHERE LOWER(driver_name) = ? AND ended_at IS NULL"
-				).get(nameLower);
-				if (!current) {
-					db.prepare(
-						"INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at) VALUES (?, ?, ?)"
-					).run(carrierName, driverName.trim(), now);
-				} else if (current.carrier_name.toLowerCase() !== carrierName.toLowerCase()) {
-					db.prepare("UPDATE carrier_driver_history SET ended_at = ? WHERE id = ?").run(now, current.id);
-					db.prepare(
-						"INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at) VALUES (?, ?, ?)"
-					).run(carrierName, driverName.trim(), now);
-				}
-			}
+			if (carrierName) syncOpenCarrierPairing(driverName.trim(), carrierName, now, releaseSpacingVariants);
 		}
 	}
 }
@@ -6790,18 +6843,80 @@ function findDirectoryRowForDriver(name) {
 // edge space: LOWER() folds case, not spacing, and SQLite cannot collapse a
 // whitespace run, so the fleet-sized table is compared in JS. The directory
 // sync below and the driver app's own truck reads (GET /api/driver/:driverName
-// and GET /api/driver/me/truck-photo, which must name the same truck) use it.
-// Returns { id, unit_number, matchedBy: "case" | "normalized" }, or null; a
+// and GET /api/driver/me/truck-photo, which must name the same truck) use it,
+// and so do the money stamps, through findTruckForDriverStamp() below.
+// Returns { id, unit_number, owner_id, routemate_vehicle_id, assigned_driver
+// (the truck's stored spelling), matchedBy: "case" | "normalized" }, or null; a
 // blank name matches nothing.
 function findTruckForDriver(name) {
 	const trimmed = typeof name === "string" ? name.trim() : "";
 	if (!trimmed) return null;
-	const same = db.prepare("SELECT id, unit_number FROM trucks WHERE LOWER(assigned_driver) = LOWER(?) ORDER BY id").get(trimmed);
-	if (same) return { id: same.id, unit_number: same.unit_number, matchedBy: "case" };
+	const same = db.prepare("SELECT id, unit_number, owner_id, routemate_vehicle_id, assigned_driver FROM trucks WHERE LOWER(assigned_driver) = LOWER(?) ORDER BY id").get(trimmed);
+	if (same) return { ...same, matchedBy: "case" };
 	const needle = normalizeDriverName(trimmed);
-	const hit = db.prepare("SELECT id, unit_number, assigned_driver FROM trucks WHERE COALESCE(assigned_driver, '') <> '' ORDER BY id").all()
+	const hit = db.prepare("SELECT id, unit_number, owner_id, routemate_vehicle_id, assigned_driver FROM trucks WHERE COALESCE(assigned_driver, '') <> '' ORDER BY id").all()
 		.find((t) => normalizeDriverName(t.assigned_driver) === needle);
-	return hit ? { id: hit.id, unit_number: hit.unit_number, matchedBy: "normalized" } : null;
+	return hit ? { ...hit, matchedBy: "normalized" } : null;
+}
+
+// The truck on the driver's active truck_assignments row, found the same two
+// ways as findTruckForDriver(): first the newest active row naming them case
+// aside — the fallback POST /api/dispatch and /api/dispatch/reassign used on
+// their own before — else the newest active row naming them through
+// normalizeDriverName(). Returns { id, unit_number, owner_id,
+// routemate_vehicle_id, driver_name (the row's stored spelling), matchedBy:
+// "case" | "normalized" }, or null; a blank name matches nothing.
+function findActiveAssignmentTruckForDriver(name) {
+	const trimmed = typeof name === "string" ? name.trim() : "";
+	if (!trimmed) return null;
+	const same = db.prepare(
+		"SELECT t.id AS id, t.unit_number AS unit_number, t.owner_id AS owner_id, t.routemate_vehicle_id AS routemate_vehicle_id, ta.driver_name AS driver_name " +
+		"FROM truck_assignments ta JOIN trucks t ON t.id = ta.truck_id " +
+		"WHERE LOWER(ta.driver_name) = LOWER(?) AND ta.end_date = '' " +
+		"ORDER BY ta.start_date DESC LIMIT 1"
+	).get(trimmed);
+	if (same) return { ...same, matchedBy: "case" };
+	const needle = normalizeDriverName(trimmed);
+	const hit = db.prepare(
+		"SELECT t.id AS id, t.unit_number AS unit_number, t.owner_id AS owner_id, t.routemate_vehicle_id AS routemate_vehicle_id, ta.driver_name AS driver_name " +
+		"FROM truck_assignments ta JOIN trucks t ON t.id = ta.truck_id " +
+		"WHERE ta.end_date = '' AND COALESCE(ta.driver_name, '') <> '' " +
+		"ORDER BY ta.start_date DESC"
+	).all().find((r) => normalizeDriverName(r.driver_name) === needle);
+	return hit ? { ...hit, matchedBy: "normalized" } : null;
+}
+
+// The truck a money stamp names for a driver's name: the Truck and Owner ID
+// POST /api/dispatch and /api/dispatch/reassign write on a load, and the truck,
+// owner and ELD vehicle POST /api/expenses writes on an expense. Those decide
+// whose P&L the money lands on; a miss stamps Owner ID 0, which moves a load's
+// revenue to the company. The case-aside steps run first, in the order the
+// stamps always used: the truck naming the driver (findTruckForDriver()), then,
+// with `activeAssignment` (the dispatch routes), the active truck_assignments
+// row (findActiveAssignmentTruckForDriver()), their fallback for a
+// trucks.assigned_driver that has drifted. Only when neither names the driver
+// case aside does a row found through normalizeDriverName() count, the truck
+// before the assignment, so a spacing match only ever fills what used to be
+// Owner ID 0. A spacing step ahead of the case-aside assignment would let a
+// stale truck still naming the driver under a spacing variant, the drift that
+// fallback exists for, outrank the driver's own active assignment. A spacing
+// match counts only while no other account holds the name under another
+// spelling (driverNameHeldByOtherSpelling()); otherwise it is no match, as it
+// was before. A legacy account "Shorn  King" beside the real "Shorn King" must
+// not be stamped with the real driver's truck and owner. The expense stamp takes
+// the same four steps: its owner decides whose P&L the expense lands on too.
+// The public tracker shows the unit it finds, so the customer sees the truck
+// the stamps name. Returns what the step found (see those two helpers), or
+// null.
+function findTruckForDriverStamp(name, { activeAssignment = false } = {}) {
+	const truck = findTruckForDriver(name);
+	if (truck && truck.matchedBy === "case") return truck;
+	const assigned = activeAssignment ? findActiveAssignmentTruckForDriver(name) : null;
+	if (assigned && assigned.matchedBy === "case") return assigned;
+	// Neither names the driver case aside, so what is left is a spacing match.
+	const spacing = truck || assigned;
+	if (!spacing || driverNameHeldByOtherSpelling(name)) return null;
+	return spacing;
 }
 
 // Sync driver to SQLite drivers_directory (replaces Google Sheet sync)
@@ -6942,6 +7057,10 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (re
 		const { values, headers } = req.body;
 		if (!values || !headers) return res.status(400).json({ error: "values and headers required" });
 		const obj = {};
+		// The PUT's contract (see its mapping): a NUMBER 0 arrives as "", not sent,
+		// and the TEXT "0" as a value. On a create, a pay field not sent takes the
+		// column default (fixed, 0 %, $0, so the truck's rate applies), which a
+		// sent "0" equals.
 		headers.forEach((h, i) => { obj[h] = values[i] || ""; });
 		const insPayType = (obj.PayType || "fixed").toLowerCase() === "percentage" ? "percentage" : "fixed";
 		// A pay field sent is read by directoryPayValue(), as the PUT reads it;
@@ -7055,6 +7174,20 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		const { values, headers } = req.body;
 		if (!values || !headers) return res.status(400).json({ error: "values and headers required" });
 		const obj = {};
+		// ⚠️ TEXT IS A VALUE; A NUMBER 0 IS "NOT SENT". `|| ""` turns a falsy cell
+		// (the NUMBER 0, null, false) into "", which every field below reads as
+		// "not sent", so a pay field keeps its stored value. Keep it that way: a
+		// Drivers Database page loaded before 2026-09-26 sends the pay type not in
+		// use as a numeric 0 on every save, and honouring that 0 would wipe the
+		// terms stored for that type and ask the month-end lock about a change
+		// nobody made. The TEXT "0" is truthy and arrives as a value. On PayDaily
+		// it clears the driver's own rate, so resolveDailyRate() falls back to the
+		// truck's rate, else $250; on PayPercentage it is 0 %. The forms send the
+		// active type's amount as text and the other type's as "" (not sent), in
+		// client/src/lib/driverPay.js. A value that differs from the stored one is
+		// still judged below: by the Super Admin check (directoryPayChanges(), 403
+		// PAY_EDIT_ADMIN_ONLY), then by the month-end lock
+		// (directoryEditLockBlockers()), each of which sees only a real change.
 		headers.forEach((h, i) => { obj[h] = values[i] || ""; });
 		// Keep existing status / pay fields if the client didn't send them.
 		// SELECT * (was: five columns) because the period guard also needs
@@ -11971,9 +12104,13 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 			routeEtaMinutes = eta.minutesRemaining;
 		}
 
+		// The driver's truck, matched as the money stamps match it
+		// (findTruckForDriverStamp(): across spacing as well as case, a spacing
+		// match only while no other account holds the name under another
+		// spelling). Display only, so no active-assignment fallback, as before.
 		let truckUnit = "";
 		if (driverNameRaw) {
-			const t = db.prepare("SELECT unit_number FROM trucks WHERE LOWER(assigned_driver) = LOWER(?) LIMIT 1").get(driverNameRaw);
+			const t = findTruckForDriverStamp(driverNameRaw);
 			if (t && t.unit_number) truckUnit = String(t.unit_number);
 		}
 
@@ -20915,12 +21052,17 @@ function userUpdateLockBlockers(user, next) {
 	if (!periodLocksReadable()) return { unreadable: true, blockers: [] };
 
 	const blockers = [];
+	// The rename plan's answer on whether the cascade takes the driver's other
+	// spellings (driverRenameWidens()), returned so the route's sheet and merge
+	// guards judge the same rows the cascade writes.
+	let widens = false;
 
-	// ⚠️ The EXACT string this route's cascade matches on — `LOWER(driver) = ?`,
-	// with no whitespace collapsing and NO username fallback. The delete's
-	// cascade name is `driver_name || username`; this one is `driver_name` alone.
-	// That divergence is not incidental — it is the mechanism of hole (1) above,
-	// so the guard has to model each route's own string rather than share one.
+	// ⚠️ The EXACT string this route's cascade matches on — the cascade's own
+	// legs (`LOWER(driver) = ?` or one of the driver's other spellings, when it
+	// widens), and NO username fallback. The delete's cascade name is
+	// `driver_name || username`; this one is `driver_name` alone. That divergence
+	// is not incidental — it is the mechanism of hole (1) above, so the guard has
+	// to model each route's own string rather than share one.
 	const oldName = (user.driver_name || "").trim().toLowerCase();
 	const nextName = next.driverName === undefined ? null : String(next.driverName);
 	const nameChanging = nextName !== null && nextName !== (user.driver_name || "");
@@ -20938,6 +21080,7 @@ function userUpdateLockBlockers(user, next) {
 	if (nameChanging && oldName) {
 		const blanking = !nextName.trim();
 		const plan = planDriverRenameSqlite(oldName, { userId: user.id });
+		widens = plan.widens === true;
 		for (const b of plan.blockers) {
 			blockers.push({
 				table: b.table,
@@ -20998,16 +21141,34 @@ function userUpdateLockBlockers(user, next) {
 			// downstream reader that cares whose account they belong to, and blocking
 			// on a stale notification would refuse a legitimate change for nothing.
 			// They are still COUNTED and reported, so the admin sees the full picture.
+			//
+			// ⚠️ COUNTED THROUGH THE CASCADE'S OWN LEGS, with the plan's `widens`:
+			// a row stored under another spelling of the name (a doubled or edge
+			// space) is as stranded by the blank as one stored under the name
+			// itself. One COUNT over the legs a table carries, so a message both
+			// from and to the driver is one row.
+			const legCount = (...keys) => {
+				const legs = keys.map((k) => DRIVER_RENAME_TARGETS.find((t) => t.key === k));
+				const o = { userId: user.id, widens };
+				return db.prepare(`SELECT COUNT(*) AS n FROM "${legs[0].table}" WHERE ${legs.map((t) => `(${driverRenameWhereSql(t, o)})`).join(" OR ")}`)
+					.get(...legs.flatMap((t) => driverRenameWhereArgs(t, oldName, o))).n;
+			};
+			// The truck still naming the driver is found the way the driver app
+			// finds it, findTruckForDriver() (another spacing included), except one
+			// naming them only through a spelling another account holds.
+			const truck = findTruckForDriverAccount(user.driver_name, [user.id]);
 			const attached = {
 				expenses: expenseRows,
-				documents: db.prepare("SELECT COUNT(*) AS n FROM documents WHERE LOWER(driver) = ?").get(oldName).n,
-				trucks: db.prepare("SELECT COUNT(*) AS n FROM trucks WHERE LOWER(assigned_driver) = ?").get(oldName).n,
+				documents: legCount("documents"),
+				trucks: !truck ? 0 : truck.matchedBy === "case"
+					? db.prepare("SELECT COUNT(*) AS n FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(String(user.driver_name).trim()).n
+					: 1,
 			};
 			const informational = {
-				messages: db.prepare(`SELECT COUNT(*) AS n FROM messages WHERE LOWER("from") = ? OR LOWER("to") = ?`).get(oldName, oldName).n,
-				notifications: db.prepare("SELECT COUNT(*) AS n FROM notifications WHERE LOWER(driver_name) = ?").get(oldName).n,
-				driver_locations: db.prepare("SELECT COUNT(*) AS n FROM driver_locations WHERE LOWER(driver) = ?").get(oldName).n,
-				load_responses: db.prepare("SELECT COUNT(*) AS n FROM load_responses WHERE LOWER(driver_name) = ?").get(oldName).n,
+				messages: legCount("messages_from", "messages_to"),
+				notifications: legCount("notifications"),
+				driver_locations: legCount("driver_locations"),
+				load_responses: legCount("load_responses"),
 			};
 			const total = Object.values(attached).reduce((a, b) => a + b, 0);
 			if (total) {
@@ -21050,7 +21211,7 @@ function userUpdateLockBlockers(user, next) {
 		});
 	}
 
-	return { unreadable: false, blockers };
+	return { unreadable: false, blockers, widens };
 }
 
 // Admin: update a user's role, driverName, or email
@@ -21153,9 +21314,16 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		// period. fix-driver-name already folds this count into its merge detection
 		// (sheetRowsAlreadyNewName); this is the same check, one sheet read.
 		let sheetRowsUnderNewName = 0;
+		// Rows under ANOTHER spelling of the old name (a doubled or edge space) —
+		// neither the old spelling nor the new one. Counted here, judged below:
+		// they belong to this rename only when its cascade takes the driver's
+		// other spellings (the lock guard's `widens`), which is decided after the
+		// last await, on the account as re-read.
+		let sheetRowsUnderOldVariant = 0;
 		if (wantsRename) {
 			const oldLowerForSheet = (user.driver_name || "").trim().toLowerCase();
 			const newLowerForSheet = driverName.trim().toLowerCase();
+			const oldNormForSheet = normalizeDriverName(user.driver_name);
 			try {
 				const sheetsApi = await getSheets();
 				const resp = await sheetsApi.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
@@ -21164,16 +21332,18 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 				let idx = headers.findIndex((h) => /^driver$/i.test(String(h || "").trim()));
 				if (idx === -1) idx = headers.findIndex((h) => /driver/i.test(String(h || "")));
 				if (idx !== -1) {
-					let n = 0, m = 0;
+					let n = 0, m = 0, v = 0;
 					for (let i = 1; i < rows.length; i++) {
 						const cell = String(rows[i][idx] || "").trim().toLowerCase();
 						if (cell === oldLowerForSheet) n++;
 						// Only a DIFFERENT name can be a merge — on a case-only
 						// rename these are the same rows, counted once as `n`.
-						if (newLowerForSheet !== oldLowerForSheet && cell === newLowerForSheet) m++;
+						else if (newLowerForSheet !== oldLowerForSheet && cell === newLowerForSheet) m++;
+						else if (cell && normalizeDriverName(cell) === oldNormForSheet) v++;
 					}
 					sheetRowsUnderOldName = n;
 					sheetRowsUnderNewName = m;
+					sheetRowsUnderOldVariant = v;
 				}
 			} catch (e) {
 				console.error("PUT /api/users/:id: Job Tracking read failed, the rename will be refused:", e.message);
@@ -21457,11 +21627,19 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 					code: "SHEET_UNREADABLE",
 				});
 			}
-			if (sheetRowsUnderOldName > 0) {
+			// ⚠️ ROWS UNDER ANOTHER SPELLING OF THE OLD NAME COUNT TOO whenever the
+			// cascade takes the driver's other spellings (`lock.widens`, the same
+			// answer the lock guard judged): it moves their directory row, truck and
+			// expenses to the new name, so a load left under "Shorn  King" would
+			// resolve to the default rates. A cell already spelled the new way needs
+			// no rewrite and is not counted.
+			const sheetRowsToRename = sheetRowsUnderOldName + (lock.widens === true ? sheetRowsUnderOldVariant : 0);
+			if (sheetRowsToRename > 0) {
+				const variantNote = sheetRowsToRename > sheetRowsUnderOldName ? ` (${sheetRowsToRename - sheetRowsUnderOldName} of them under another spacing of it)` : "";
 				return res.status(409).json({
-					error: `Cannot rename "${user.driver_name}" to "${driverName.trim()}" here: ${sheetRowsUnderOldName} Job Tracking row${sheetRowsUnderOldName === 1 ? "" : "s"} still carry the old name, and this route does not write the sheet. Renaming only the database is a partial rename — the pay math would resolve those loads to default rates inside months that are already closed. Use PUT /api/admin/fix-driver-name, which renames the sheet and the database together and offers ?dryRun=true first.`,
+					error: `Cannot rename "${user.driver_name}" to "${driverName.trim()}" here: ${sheetRowsToRename} Job Tracking row${sheetRowsToRename === 1 ? "" : "s"} still carry the old name${variantNote}, and this route does not write the sheet. Renaming only the database is a partial rename — the pay math would resolve those loads to default rates inside months that are already closed. Use PUT /api/admin/fix-driver-name, which renames the sheet and the database together and offers ?dryRun=true first.`,
 					code: "RENAME_REQUIRES_SHEET",
-					sheetRows: sheetRowsUnderOldName,
+					sheetRows: sheetRowsToRename,
 					route: "PUT /api/admin/fix-driver-name",
 				});
 			}
@@ -21494,9 +21672,27 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			//     `users.full_name` is id-scoped so it cannot merge anyone.
 			// Without these the route fails CLOSED but tells the admin something
 			// factually untrue, which is how a guard gets deleted six months on.
+			//
+			// ⚠️ A SPACING-ONLY RE-SPELLING GETS THE SAME SELF-MATCH, row by row.
+			// When the cascade takes the driver's other spellings (`lock.widens`),
+			// every database row already under the new spelling — "Shorn  King",
+			// the spelling the driver's own directory row carries — is one of this
+			// rename's own rows, so the scan leaves them out (`oldLower`) and they
+			// are no merge. When it does not (another account still holds that
+			// name), those rows are not this driver's alone, and they still count.
+			// Not a blanket skip like `caseOnlyRename`, and the lock guard above
+			// keeps judging it: a change of internal spacing is not money-neutral
+			// here — getInvestorDriverSet() (trim + lowercase) and
+			// getDeductibleExpensesByDriverMonth() (LOWER) do not collapse it.
+			// For that reason Job Tracking rows under the new spelling still count
+			// below: re-spelling the truck and directory row to match them pulls
+			// those loads into an investor's driver set, in closed months too, and
+			// this route cannot judge a sheet row's month. fix-driver-name can.
 			const newLowerForMerge = driverName.trim().toLowerCase();
-			const caseOnlyRename = newLowerForMerge === (user.driver_name || "").trim().toLowerCase();
-			const scan = caseOnlyRename ? { mergeTargets: {}, mergeRows: 0 } : driverRenameMergeScan(newLowerForMerge, { userId: id });
+			const oldLowerForMerge = (user.driver_name || "").trim().toLowerCase();
+			const caseOnlyRename = newLowerForMerge === oldLowerForMerge;
+			const scan = caseOnlyRename ? { mergeTargets: {}, mergeRows: 0 }
+				: driverRenameMergeScan(newLowerForMerge, { userId: id, oldLower: oldLowerForMerge, ...(typeof lock.widens === "boolean" ? { widens: lock.widens } : {}) });
 			// (3) `job_applications` — matched on `full_name`, so a driver who
 			//     applied through POST /api/public/apply as "John Smith" and holds
 			//     the account `jsmith` self-matches their OWN application. It is
@@ -21594,6 +21790,11 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		// in #212. Everything here is synchronous (bcrypt was hoisted above the
 		// guards), so one db.transaction() covers it.
 		const renamed = {};
+		// Rows the cascade moved from another spelling of the old name, by table,
+		// spelling and id (the executor's `spacingVariants`, the directory row
+		// included). Renaming the account back does not restore their spelling,
+		// so the audit line below is their only record.
+		const renamedVariants = {};
 		const doRename = driverName !== undefined
 			&& driverName !== (user.driver_name || "")
 			&& (user.driver_name || "").trim()
@@ -21604,10 +21805,15 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 					// THE SHARED CASCADE — the identical call
 					// PUT /api/admin/fix-driver-name makes. Scoped by userId so the two
 					// name-matched `users` legs can only touch THIS account.
-					const { counts } = applyDriverRenameSqlite({
+					const { counts, spacingVariants } = applyDriverRenameSqlite({
 						oldName: user.driver_name, newName: driverName, userId: id,
+						// The plan's own answer on taking other spellings, as
+						// PUT /api/admin/fix-driver-name hands it on, so the executor can
+						// never widen past the rows the lock judged.
+						...(typeof lock.widens === "boolean" ? { widens: lock.widens } : {}),
 					});
 					Object.assign(renamed, counts);
+					Object.assign(renamedVariants, spacingVariants || {});
 				}
 				params.push(id);
 				db.prepare(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`).run(...params);
@@ -21690,8 +21896,11 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		}
 
 		const cascade = Object.entries(renamed).filter(([, n]) => n > 0).map(([t, n]) => `${t}=${n}`).join(", ");
+		const variantsMoved = Object.keys(renamedVariants).length ? JSON.stringify(renamedVariants) : "";
 		logAudit(req, "update_user", "user", id,
-			`${user.role} ${user.username}: ${diff.join("; ") || "no field change"}${cascade ? `; cascade: ${cascade}` : ""}${sessionsRevoked ? `; sessions revoked: ${sessionsRevoked}` : ""}`);
+			`${user.role} ${user.username}: ${diff.join("; ") || "no field change"}${cascade ? `; cascade: ${cascade}` : ""}` +
+			`${variantsMoved ? `; moved from another spelling, which renaming back does not restore (spacingVariants): ${variantsMoved}` : ""}` +
+			`${sessionsRevoked ? `; sessions revoked: ${sessionsRevoked}` : ""}`);
 
 		// The spared session of a self-edit that revoked the account's other
 		// sessions is rebuilt from the row now, under a new session ID (see
@@ -22082,7 +22291,9 @@ function blockedExpensePeriods(rows) {
 //
 // `cascadeName` MUST be the exact string the cascade's DELETEs match on — see
 // the note at the call site. A guard that resolved the name its own way would be
-// answering for a different set of rows than the DELETEs remove.
+// answering for a different set of rows than the DELETEs remove. Blocker (4)
+// adds to that match rather than replacing it: it judges rows the delete leaves
+// in place, not rows it removes, so it also takes the driver's other spellings.
 function userDeleteLockBlockers(user, cascadeName) {
 	// Fail CLOSED, for the reason PUT /api/expenses/:id/status spells out:
 	// isLocked() swallows every error and answers "not locked", so an unreadable
@@ -22207,9 +22418,9 @@ function userDeleteLockBlockers(user, cascadeName) {
 	// of (2). The delete does NOT remove invoices (see the cascade below: they are
 	// issued documents and are deliberately retained), but it does STRAND them.
 	// `driverOwnsInvoice()` resolves ownership through the session's driverName,
-	// and `GET /api/invoices`'s non-Super-Admin branch scopes to
-	// `LOWER(driver) = <own name>` — so once the account is gone the rows sit in
-	// the table naming a person the app can no longer resolve. For a row already
+	// and `GET /api/invoices`'s non-Super-Admin branch lists the rows it says the
+	// session owns — so once the account is gone the rows sit in the table naming
+	// a person the app can no longer resolve. For a row already
 	// marked PAID that is the same event blocker (2) refuses: money left the bank
 	// against a document naming this driver, and the payee has to stay
 	// attributable.
@@ -22220,10 +22431,29 @@ function userDeleteLockBlockers(user, cascadeName) {
 	// to reopen a month that is open — the exact mislabel namedLockedPeriods()
 	// exists to prevent. Live rows only: a soft-deleted invoice is already out of
 	// every list, so stranding it changes nothing.
+	//
+	// ⚠️ MATCHED THROUGH THE RENAME CASCADE'S `invoices` LEG, NOT THE REMOVALS'
+	// `LOWER(col) = ?`. Blocker (1) judges exactly the rows the delete removes, so
+	// it shares their match. This one judges rows the delete leaves in place, and
+	// the readers of an invoice's owner fold spacing (driverOwnsInvoice(), which
+	// the list and the PDF and submit routes all ask), so an invoice stored under
+	// another spelling of the driver's name (a doubled or edge space) is this
+	// account's as much as one under the name itself. PUT /api/users/:id judges
+	// the same leg when it blanks or changes the name. So the rows are
+	// `LOWER(driver) = ?` or one of those spellings (driverRenameSpellings()),
+	// unless another account holds that spelling (driverRenameWidens(), this
+	// account excepted), which makes the row that account's. Only for an account
+	// with a driver name: a username is not a driver identity, so the username
+	// fallback of `cascadeName` keeps the case-aside match alone (`widens: false`
+	// binds no other spelling). Wider only ever means more rows judged, so this
+	// can only refuse more; it removes nothing. A failed read throws, like every
+	// read in this guard, before the delete has written anything.
 	if (cascadeName) {
+		const invoicesLeg = DRIVER_RENAME_TARGETS.find((t) => t.key === "invoices");
+		const legOpts = String(user.driver_name || "").trim() ? { userId: user.id } : { userId: user.id, widens: false };
 		const rows = db.prepare(
-			"SELECT id, invoice_number, week_start, week_end, COALESCE(paid_at, '') AS paid_at FROM invoices WHERE LOWER(driver) = ? AND deleted_at = ''"
-		).all(cascadeName);
+			`SELECT id, invoice_number, week_start, week_end, COALESCE(paid_at, '') AS paid_at FROM invoices WHERE (${driverRenameWhereSql(invoicesLeg, legOpts)}) AND deleted_at = ''`
+		).all(...driverRenameWhereArgs(invoicesLeg, cascadeName, legOpts));
 		const frozen = rows.filter(invoiceRowPeriodLocked);
 		const MONTH = /^\d{4}-\d{2}$/;
 		const monthLocked = (r) => {
@@ -22585,13 +22815,44 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	try {
 		db.transaction(() => {
 			if (name) {
+				// ⚠️ THESE REMOVALS MATCH THE STORED SPELLING, CASE ASIDE, AND NOTHING
+				// WIDER. PUT /api/users/:id's blank-name guard (DRIVER_NAME_IN_USE)
+				// counts rows under another spelling of the name too (a doubled or
+				// edge space); these DELETEs do not, and for a removal that is the
+				// safe direction. userDeleteLockBlockers() judges the expense rows by
+				// this same match, so every expense removed here was judged, and the
+				// other tables carry no period. A row of these tables under another
+				// spelling is neither judged nor removed: it stays in every month it
+				// was counted in. Widening these would permanently delete receipts and
+				// documents under another spelling, and would need the expense check
+				// widened in step. The cost is that such rows stay behind under a
+				// spelling no account holds, and the counts this route reports do not
+				// include them. The guard does see other spellings where this delete
+				// leaves a row in place rather than removing it: its invoice check
+				// matches the rename cascade's `invoices` leg, and only refuses. Of
+				// these writes, the truck is the one matched wider: it is cleared, not
+				// deleted (findTruckForDriverAccount()). See
+				// docs/claude/user-routes-guards.md.
 				removed.expenses = db.prepare("DELETE FROM expenses WHERE LOWER(driver) = ?").run(name).changes;
 				removed.messages = db.prepare(`DELETE FROM messages WHERE LOWER("from") = ? OR LOWER("to") = ?`).run(name, name).changes;
 				removed.notifications = db.prepare("DELETE FROM notifications WHERE LOWER(driver_name) = ?").run(name).changes;
 				removed.driver_locations = db.prepare("DELETE FROM driver_locations WHERE LOWER(driver) = ?").run(name).changes;
 				removed.load_responses = db.prepare("DELETE FROM load_responses WHERE LOWER(driver_name) = ?").run(name).changes;
 				removed.documents = db.prepare("DELETE FROM documents WHERE LOWER(driver) = ?").run(name).changes;
+				// The driver's truck is found the way the driver app finds it
+				// (findTruckForDriverAccount()): case aside, as before — every such
+				// truck — else the one naming them under another spacing, unless
+				// another account still holds that spelling. Read before the write.
+				// Only for an account with a driver name: a username is not a driver
+				// identity (canonicalDriverName() never substitutes one), so the
+				// username fallback of `name` keeps the case-aside match alone.
+				const spacedTruck = (() => {
+					if (!String(user.driver_name || "").trim()) return null;
+					const t = findTruckForDriverAccount(name, [id]);
+					return t && t.matchedBy === "normalized" ? t : null;
+				})();
 				removed.trucks_unassigned = db.prepare("UPDATE trucks SET assigned_driver = '' WHERE LOWER(assigned_driver) = ?").run(name).changes;
+				if (spacedTruck) removed.trucks_unassigned += db.prepare("UPDATE trucks SET assigned_driver = '' WHERE id = ?").run(spacedTruck.id).changes;
 				// DETACH, not delete. `trucks.assigned_driver` is cleared on the line
 				// above, so leaving the OPEN truck_assignments row would make the two
 				// halves of one fact disagree — and resolveTruckForDriverName() reads
@@ -22602,9 +22863,18 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 				// decides which drivers an investor's payout covers — is preserved.
 				// Deleting the rows would retroactively narrow that set and restate
 				// open months.
+				const closedAt = new Date().toISOString();
 				detached.truck_assignments_closed = db.prepare(
 					"UPDATE truck_assignments SET end_date = ? WHERE LOWER(driver_name) = ? AND end_date = ''"
-				).run(new Date().toISOString(), name).changes;
+				).run(closedAt, name).changes;
+				// The truck cleared under another spacing: its open assignment naming
+				// this driver closes with it, so the two halves still agree.
+				if (spacedTruck) {
+					const close = db.prepare("UPDATE truck_assignments SET end_date = ? WHERE id = ?");
+					for (const a of db.prepare("SELECT id, driver_name FROM truck_assignments WHERE truck_id = ? AND end_date = ''").all(spacedTruck.id)) {
+						if (normalizeDriverName(a.driver_name) === normalizeDriverName(name)) detached.truck_assignments_closed += close.run(closedAt, a.id).changes;
+					}
+				}
 			}
 			// ⚠️ THE THREE FK-BEARING CHILDREN — without these the DELETE below
 			// raises FOREIGN KEY constraint failed and an onboarded driver simply
@@ -25957,7 +26227,9 @@ app.get("/api/admin/audit-trail", requireRole("Super Admin"), (req, res) => {
 // `match` and `writes` are INDEPENDENT and both matter. Every target matches
 // case-insensitively — a rename must find a row whatever case it was stored in,
 // and this app's storage case is a function of WHEN the row was written, not of
-// which column it is in (see the watermark note on `notifications` below).
+// which column it is in (see the watermark note on `notifications` below) — and
+// every "ci" target also matches the driver's other spellings (a doubled or edge
+// space) unless another account still holds one: see driverRenameWhereSql().
 // `writes` then puts back the value that column's OWN writers use: lowercase
 // where the INSERT path folds the name (`notifications`, `load_responses`,
 // `invoices`), the trimmed display form everywhere else. Matching narrowly is
@@ -26053,42 +26325,112 @@ const DRIVER_RENAME_TARGETS = [
 // carry the same `full_name` (`ci_driver_role` matches any Driver, not just the
 // one being edited). fix-driver-name has no id and keeps the name-matched form
 // it has always had. Every other target is name-matched for both callers.
+//
+// ⚠️ A "ci" LEG ALSO MATCHES THE DRIVER'S OTHER SPELLINGS. LOWER() folds case
+// (ASCII only), not spacing, so a row stored as "Shorn  King" or " Shorn King"
+// was left behind by a rename of "Shorn King" — on the money legs too (trucks,
+// truck_assignments, carrier_driver_history, users, expenses, invoices), while
+// every ownership check and the P&L's pay lookups read it as the same driver.
+// So each "ci" and "ci_driver_role" leg is `LOWER(col) = ?` OR the column is one
+// of the stored spellings driverRenameSpellings() resolves in JS through
+// normalizeDriverName(), bound as ONE JSON array: the placeholder count never
+// changes, and an empty array — the answer whenever driverRenameWidens()
+// refuses — is exactly the old match.
 function driverRenameWhereSql(t, opts = {}) {
 	const scope = opts.userId != null && t.table === "users" ? " AND id = ?" : "";
 	if (t.match === "exact_lower") return `"${t.column}" = ?${scope}`;
-	if (t.match === "ci_driver_role") return `LOWER("${t.column}") = ? AND role = 'Driver'${scope}`;
 	if (t.match === "directory_row") return `id = ?${scope}`;
-	return `LOWER("${t.column}") = ?${scope}`;
+	const named = `(LOWER("${t.column}") = ? OR "${t.column}" IN (SELECT value FROM json_each(?)))`;
+	if (t.match === "ci_driver_role") return `${named} AND role = 'Driver'${scope}`;
+	return `${named}${scope}`;
 }
 // Bind args for the WHERE above, in order. Kept beside it so the placeholder
 // count and the argument count cannot drift apart. A "directory_row" target
 // binds the id driverRenameDirectoryRowId() answers, or null (which matches
-// nothing); it reads the tables, so each caller resolves it inside its own try.
+// nothing); a "ci" target binds the name and its other stored spellings
+// (`opts.spellings` when the caller already resolved them for this leg). Both
+// read the tables, so each caller resolves them inside its own try.
 function driverRenameWhereArgs(t, nameLower, opts = {}) {
-	const key = t.match === "directory_row" ? driverRenameDirectoryRowId(nameLower, opts) : nameLower;
-	return opts.userId != null && t.table === "users" ? [key, opts.userId] : [key];
+	let key;
+	if (t.match === "directory_row") key = [driverRenameDirectoryRowId(nameLower, opts)];
+	else if (t.match === "ci" || t.match === "ci_driver_role") {
+		const spellings = Array.isArray(opts.spellings) ? opts.spellings : driverRenameSpellings(t, nameLower, opts);
+		key = [nameLower, JSON.stringify(spellings)];
+	} else key = [nameLower];
+	return opts.userId != null && t.table === "users" ? [...key, opts.userId] : key;
+}
+// ⚠️ ONE RULE FOR EVERY ROW A RENAME FINDS ONLY THROUGH normalizeDriverName():
+// does the rename of `nameLower` take the driver's OTHER spellings with it — a
+// spacing variant in any "ci" leg (driverRenameSpellings()), and a directory row
+// found only that way (driverRenameDirectoryRowId())? Only when no account the
+// rename leaves alone still holds a driver name that normalizes the same
+// (driverNameHeldByOtherAccount()): otherwise those rows are that account's — a
+// legacy account "Shorn  King" beside the real "Shorn King" must not take the
+// real driver's truck, invoices or pay terms with it, and renaming the real one
+// must not take the legacy account's. Rows equal to the name case aside move
+// either way, as the case-insensitive match always moved them.
+// The accounts a rename moves: PUT /api/users/:id renames exactly the one
+// account it edits, by id, whatever that row's stored spelling; fix-driver-name
+// renames the accounts its `users` leg matches case-insensitively.
+// ⚠️ ASKED ONCE PER RENAME. Every multi-leg caller resolves it first and passes
+// it on as `opts.widens`: the executor writes `users` part-way through its legs,
+// so asking again after that write could answer differently for the later legs.
+function driverRenameWidens(nameLower, opts = {}) {
+	if (typeof opts.widens === "boolean") return opts.widens;
+	let moved;
+	if (opts.userId != null) moved = [Number(opts.userId)];
+	else {
+		const leg = DRIVER_RENAME_TARGETS.find((t) => t.key === "users");
+		const caseAside = { ...opts, widens: false };
+		moved = db.prepare(`SELECT id FROM "${leg.table}" WHERE ${driverRenameWhereSql(leg, caseAside)}`)
+			.all(...driverRenameWhereArgs(leg, nameLower, caseAside)).map((r) => r.id);
+	}
+	return !driverNameHeldByOtherAccount(nameLower, moved);
+}
+// The stored spellings of the driver `nameLower` in one "ci" leg that LOWER()
+// equality misses: every distinct value normalizeDriverName() reads as the same
+// name (a doubled or edge space, a capital LOWER() cannot fold). [] when the
+// rename does not widen. Distinct VALUES, not row ids: a driver-name column
+// holds a few dozen distinct names however many rows it has, and every table
+// has the column even where it has no `id`.
+function driverRenameSpellings(t, nameLower, opts = {}) {
+	const needle = normalizeDriverName(typeof nameLower === "string" ? nameLower : "");
+	if (!needle || !driverRenameWidens(nameLower, opts)) return [];
+	return db.prepare(`SELECT DISTINCT "${t.column}" AS v FROM "${t.table}" WHERE COALESCE("${t.column}", '') <> '' AND LOWER("${t.column}") <> ?`)
+		.all(nameLower).map((r) => r.v)
+		.filter((v) => typeof v === "string" && normalizeDriverName(v) === needle);
 }
 // The drivers_directory row a rename of `nameLower` moves: the row
 // findDirectoryRowForDriver() finds. A row it found only through
-// normalizeDriverName() (a spacing variant) is moved only when no account this
-// rename leaves alone still holds a driver name that normalizes the same:
-// otherwise it is that account's row — a legacy account "Shorn  King" renamed
-// beside the real "Shorn King" must not take the real driver's row, and pay
-// terms, with it. The accounts this rename moves are the cascade's own `users`
-// leg (one account when PUT /api/users/:id scopes it by id). A row equal to the
+// normalizeDriverName() (a spacing variant) is moved only when the rename takes
+// the driver's other spellings with it (driverRenameWidens()); a row equal to the
 // name case aside is moved as the case-insensitive match always moved it.
 // Returns the row's id, or null.
 function driverRenameDirectoryRowId(nameLower, opts = {}) {
 	const row = findDirectoryRowForDriver(nameLower);
 	if (!row) return null;
-	if (row.matchedBy === "normalized") {
-		const leg = DRIVER_RENAME_TARGETS.find((t) => t.key === "users");
-		const moved = db.prepare(`SELECT id FROM "${leg.table}" WHERE ${driverRenameWhereSql(leg, opts)}`)
-			.all(...driverRenameWhereArgs(leg, nameLower, opts)).map((r) => r.id);
-		const heldElsewhere = driverNameHeldByOtherAccount(nameLower, moved);
-		if (heldElsewhere) return null;
-	}
+	if (row.matchedBy === "normalized" && !driverRenameWidens(nameLower, opts)) return null;
 	return row.id;
+}
+// The rows of one leg that ARE the old name, as opposed to another spelling of
+// it that the rename also moves: a SQL predicate bound to the old name,
+// lowercased, or null for a leg that matches the old name only. The plan counts
+// a leg's other rows as `variantRows` and the executor lists them, with the
+// spelling each had, as `spacingVariants`, so the two cannot disagree about
+// which rows a swap of the names would not restore.
+//   • A "ci" leg compares LOWER() alone, the comparison its match makes, so an
+//     edge space is another spelling too.
+//   • ⚠️ The "directory_row" leg compares LOWER(TRIM()), the key the directory's
+//     money reader uses: getInvestorDriverSet() leg 2 reads each row (through
+//     getCarrierDBFromSQLite()) trimmed and lowercased. Renaming a row stored as
+//     "Shorn  King" changes that key, so even a case-only rename can hand an
+//     investor the driver's loads in closed months. Counting the row is what
+//     stops fix-driver-name calling such a rename money-neutral. A row that
+//     differs only by edge spaces keeps its key.
+function driverRenameSameNameSql(t) {
+	if (t.match === "ci" || t.match === "ci_driver_role") return `LOWER("${t.column}") = ?`;
+	if (t.match === "directory_row") return `LOWER(TRIM("${t.column}")) = ?`;
+	return null;
 }
 function driverRenameNewValue(t, newName) {
 	return t.writes === "lower" ? newName.trim().toLowerCase() : newName.trim();
@@ -26321,13 +26663,34 @@ const DRIVER_RENAME_HARD_BLOCK_CODES = new Set(["INVOICE_WEEK_COLLISION", "TARGE
 function planDriverRenameSqlite(oldLower, opts = {}) {
 	const targets = {};
 	const blockers = [];
+	// ONE answer to "does this rename take the driver's other spellings with it"
+	// (driverRenameWidens()) for every leg, lock judgement and probe below, and
+	// returned as `widens` so the executor can be held to it. Undecidable is a
+	// hard block, like any money target that cannot be read.
+	let widens = false;
+	try {
+		widens = driverRenameWidens(oldLower, opts);
+	} catch (e) {
+		blockers.push({
+			target: "users.driver_name", table: "users", code: "TARGET_UNREADABLE", rows: 0, periods: [],
+			detail: `the accounts holding this driver name could not be read (${e.message}), so which spellings of it the rename would move cannot be decided`,
+		});
+	}
+	const planOpts = { ...opts, widens };
 	for (const t of DRIVER_RENAME_TARGETS) {
-		const where = driverRenameWhereSql(t, opts);
+		const where = driverRenameWhereSql(t, planOpts);
+		// The rows that are the old name itself (driverRenameSameNameSql()); the
+		// rest of the leg's rows are other spellings of it that this rename moves.
+		const sameSql = driverRenameSameNameSql(t);
 		let args = [];
 		let total = 0;
+		let variantRows = 0;
 		try {
-			args = driverRenameWhereArgs(t, oldLower, opts);
-			total = db.prepare(`SELECT COUNT(*) AS n FROM "${t.table}" WHERE ${where}`).get(...args).n;
+			args = driverRenameWhereArgs(t, oldLower, planOpts);
+			const counted = db.prepare(`SELECT COUNT(*) AS n${sameSql ? `, COALESCE(SUM(${sameSql}), 0) AS same` : ""} FROM "${t.table}" WHERE ${where}`)
+				.get(...(sameSql ? [oldLower] : []), ...args);
+			total = counted.n;
+			if (sameSql) variantRows = total - counted.same;
 		}
 		catch (e) {
 			targets[t.key] = { rows: 0, error: e.message, money: !!t.money };
@@ -26349,6 +26712,12 @@ function planDriverRenameSqlite(oldLower, opts = {}) {
 		}
 		const entry = { rows: total, money: !!t.money, period: t.period };
 		if (t.why) entry.why = t.why;
+		// Rows stored under another spelling of the name — a doubled or edge space
+		// (the directory row's key ignores edge spaces) — that this rename moves
+		// too. Reported so a dry run shows them, so fix-driver-name knows swapping
+		// the names back would not restore them, and so it never calls a case-only
+		// rename that moves one on a money leg money-neutral.
+		if (variantRows > 0) entry.variantRows = variantRows;
 		if (total && t.money && t.period === "expense") {
 			const er = db.prepare(`SELECT id, date, posted_period, created_at, amount FROM "${t.table}" WHERE ${where}`).all(...args);
 			const lockedRows = er.filter(expenseRowPeriodLocked);
@@ -26416,12 +26785,17 @@ function planDriverRenameSqlite(oldLower, opts = {}) {
 			//     (isMerge only sets a warning, never blocks), so this is the
 			//     reachable case, and the old-name-only probe returns [] for it.
 			// `opts.newLower` is optional so a caller that has no target name
-			// (nobody today) still gets the old-vs-old half.
+			// (PUT /api/users/:id, whose merge guard refuses rows under the new
+			// name) still gets the old-vs-old half.
+			// The old half is the rows the executor WRITES — `where`, the other
+			// spellings included — so two spellings of the driver sharing a week
+			// ("shorn king" and "shorn  king", which the NOCASE index lets in) are a
+			// collision too: both would be written the same lowercase name.
 			try {
 				const collideSql = opts.newLower
-					? `SELECT week_start, COUNT(*) AS n FROM "${t.table}" WHERE (LOWER("${t.column}") = ? OR LOWER("${t.column}") = ?) AND deleted_at = '' AND is_manual = 0 GROUP BY week_start HAVING n > 1`
-					: `SELECT week_start, COUNT(*) AS n FROM "${t.table}" WHERE ${where} AND deleted_at = '' AND is_manual = 0 GROUP BY week_start HAVING n > 1`;
-				const collideArgs = opts.newLower ? [oldLower, opts.newLower] : args;
+					? `SELECT week_start, COUNT(*) AS n FROM "${t.table}" WHERE (${where} OR LOWER("${t.column}") = ?) AND deleted_at = '' AND is_manual = 0 GROUP BY week_start HAVING n > 1`
+					: `SELECT week_start, COUNT(*) AS n FROM "${t.table}" WHERE (${where}) AND deleted_at = '' AND is_manual = 0 GROUP BY week_start HAVING n > 1`;
+				const collideArgs = opts.newLower ? [...args, opts.newLower] : args;
 				const clashes = db.prepare(collideSql).all(...collideArgs);
 				if (clashes.length) {
 					entry.weekCollisions = clashes.map((c) => c.week_start);
@@ -26484,7 +26858,7 @@ function planDriverRenameSqlite(oldLower, opts = {}) {
 
 		targets[t.key] = entry;
 	}
-	return { targets, blockers };
+	return { targets, blockers, widens };
 }
 
 // Does the NEW name already own rows? Then this is a merge of two identities,
@@ -26496,16 +26870,36 @@ function planDriverRenameSqlite(oldLower, opts = {}) {
 // spacing variant of the new name, which is the row being renamed when an
 // account's own name is only re-spelled. Each route finds a spacing variant of
 // the new name with its own naming check (findDriverNameClashes()), with the
-// carve-outs it needs.
+// carve-outs it needs. The new name's other spellings are not asked for either
+// (`widens: false`), for the same reason.
+//
+// ⚠️ THE RENAME'S OWN ROWS ARE SELF-MATCHES, NEVER A MERGE. Given the old name
+// (`opts.oldLower`), a row the cascade moves for it — its other spellings and
+// its own directory row included (driverRenameWhereSql() with the rename's
+// driverRenameWidens() answer, `opts.widens` when the caller has it) — is not
+// counted. Without this, re-spelling "Shorn King" to "Shorn  King", the spelling
+// the driver's own directory row already carries, read as a merge with that row.
+// A row is subtracted only when it is positively one of the rename's own: a NULL
+// comparison, or a directory row id of null, subtracts nothing.
 function driverRenameMergeScan(newLower, opts = {}) {
 	const mergeTargets = {};
 	let mergeRows = 0;
+	const asNew = { ...opts, widens: false };
+	let own = null;
+	if (typeof opts.oldLower === "string" && opts.oldLower) {
+		// A failed read subtracts nothing: the scan then counts MORE, the safe way.
+		try { own = { ...opts, widens: driverRenameWidens(opts.oldLower, opts) }; } catch { own = null; }
+	}
 	for (const target of DRIVER_RENAME_TARGETS) {
 		const t = target.match === "directory_row" ? { ...target, match: "ci" } : target;
 		let n = 0;
 		try {
-			n = db.prepare(`SELECT COUNT(*) AS n FROM "${t.table}" WHERE ${driverRenameWhereSql(t, opts)}`)
-				.get(...driverRenameWhereArgs(t, newLower, opts)).n;
+			const newWhere = driverRenameWhereSql(t, asNew);
+			const newArgs = driverRenameWhereArgs(t, newLower, asNew);
+			n = own
+				? db.prepare(`SELECT COALESCE(SUM(CASE WHEN ${driverRenameWhereSql(target, own)} THEN 0 ELSE 1 END), 0) AS n FROM "${t.table}" WHERE ${newWhere}`)
+					.get(...driverRenameWhereArgs(target, own.oldLower, own), ...newArgs).n
+				: db.prepare(`SELECT COUNT(*) AS n FROM "${t.table}" WHERE ${newWhere}`).get(...newArgs).n;
 		} catch { n = 0; }
 		if (n) { mergeTargets[t.key] = n; mergeRows += n; }
 	}
@@ -26571,35 +26965,69 @@ function replaceNameOnWordBoundary(text, oldName, newName) {
 
 // The executor. Every target plus the two dispatch_notifications substring legs,
 // in ONE transaction, so 21 independent seams commit or roll back together.
-// Returns per-target `changes` — and, when `collectIds`, the ids it moved, which
-// are the only reversal recipe a merge has.
-function applyDriverRenameSqlite({ oldName, newName, userId = null, collectIds = false }) {
+// Returns per-target `changes`, and `spacingVariants`: per target, the ids of
+// rows moved from another spelling of the old name, keyed by that spelling,
+// which swapping the names back would not restore. Those are the rows the plan
+// counts as `variantRows` (driverRenameSameNameSql()), the directory row
+// included, and they are listed on every rename so both routes' audit lines can
+// name them. With `collectIds` it also returns the ids it moved, which are the
+// only reversal recipe a merge has.
+// `widens` is the plan's driverRenameWidens() answer: fix-driver-name passes it
+// so a change during its sheet write (its last await) cannot widen the rename
+// past the rows the plan judged. Without it the executor asks once itself.
+function applyDriverRenameSqlite({ oldName, newName, userId = null, collectIds = false, widens = null }) {
 	const oldTrim = String(oldName).trim();
 	const newTrim = String(newName).trim();
 	const oldLower = oldTrim.toLowerCase();
 	const opts = userId != null ? { userId } : {};
 	const counts = {};
 	const changedIds = {};
+	const spacingVariants = {};
 	const ID_CAP = DRIVER_RENAME_ID_CAP;
+	const cap = (ids) => (ids.length > ID_CAP ? { truncated: true, of: ids.length, ids: ids.slice(0, ID_CAP) } : ids);
 	db.transaction(() => {
+		const runOpts = { ...opts, widens: typeof widens === "boolean" ? widens : driverRenameWidens(oldLower, opts) };
+		// ⚠️ EVERY LEG'S ROWS ARE RESOLVED BEFORE ANY LEG IS WRITTEN — the directory
+		// row, and each "ci" leg's other spellings — inside the transaction, so no
+		// leg's match can be moved by an earlier leg's write.
+		const legs = [];
 		for (const t of DRIVER_RENAME_TARGETS) {
-			const where = driverRenameWhereSql(t, opts);
 			try {
-				// Resolved here, inside the transaction and the try: a
-				// "directory_row" target reads the table to find its row.
-				const args = driverRenameWhereArgs(t, oldLower, opts);
+				const named = t.match === "ci" || t.match === "ci_driver_role";
+				const spellings = named ? driverRenameSpellings(t, oldLower, runOpts) : [];
+				legs.push({ t, spellings, where: driverRenameWhereSql(t, runOpts), args: driverRenameWhereArgs(t, oldLower, named ? { ...runOpts, spellings } : runOpts) });
+			} catch (e) {
+				// A table that does not exist on this database is not a reason to
+				// abort a rename of the ones that do; any other failure throws out of
+				// the transaction.
+				if (/no such table|no such column/i.test(e.message)) { counts[t.key] = 0; continue; }
+				throw e;
+			}
+		}
+		for (const { t, spellings, where, args } of legs) {
+			try {
+				// The leg's rows that are not the old name itself, by the spelling each
+				// had. A "ci" leg has them only when it has `spellings`; the directory
+				// row is one row, by id.
+				const sameSql = driverRenameSameNameSql(t);
+				if (sameSql && (spellings.length || t.match === "directory_row")) {
+					try {
+						const byWas = {};
+						for (const r of db.prepare(`SELECT id, "${t.column}" AS was FROM "${t.table}" WHERE (${where}) AND NOT (${sameSql})`)
+							.all(...args, oldLower)) (byWas[r.was] = byWas[r.was] || []).push(r.id);
+						for (const was of Object.keys(byWas)) byWas[was] = cap(byWas[was]);
+						if (Object.keys(byWas).length) spacingVariants[t.key] = byWas;
+					} catch { /* table has no `id` column — the count still records the leg */ }
+				}
 				if (collectIds) {
 					try {
 						const ids = db.prepare(`SELECT id FROM "${t.table}" WHERE ${where}`).all(...args).map((r) => r.id);
-						if (ids.length) changedIds[t.key] = ids.length > ID_CAP ? { truncated: true, of: ids.length, ids: ids.slice(0, ID_CAP) } : ids;
+						if (ids.length) changedIds[t.key] = cap(ids);
 					} catch { /* table has no `id` column — the count still records the leg */ }
 				}
 				counts[t.key] = db.prepare(`UPDATE "${t.table}" SET "${t.column}" = ? WHERE ${where}`)
 					.run(driverRenameNewValue(t, newTrim), ...args).changes;
 			} catch (e) {
-				// A table that does not exist on this database is not a reason to
-				// abort a rename of the ones that do; a genuine write failure still
-				// throws out of the transaction.
 				if (/no such table|no such column/i.test(e.message)) { counts[t.key] = 0; continue; }
 				throw e;
 			}
@@ -26620,7 +27048,7 @@ function applyDriverRenameSqlite({ oldName, newName, userId = null, collectIds =
 			}
 		}
 	})();
-	return { counts, changedIds };
+	return { counts, changedIds, spacingVariants };
 }
 
 // The accounts whose stored driver name applyDriverRenameSqlite() is about to
@@ -26630,7 +27058,8 @@ function applyDriverRenameSqlite({ oldName, newName, userId = null, collectIds =
 // would write back unchanged — an account already spelled the new way, under a
 // case-only rename of rows elsewhere — is left out: nothing about that account
 // changes. `users_full_name` is not consulted: no check reads a session's full
-// name. Read-only; call it in the same synchronous run as the cascade.
+// name. Read-only; call it in the same synchronous run as the cascade, with the
+// same `opts.widens` the cascade is given, so both match the same spellings.
 function driverRenameAccountIds(oldName, newName, opts = {}) {
 	const leg = DRIVER_RENAME_TARGETS.find((t) => t.key === "users");
 	const oldLower = String(oldName).trim().toLowerCase();
@@ -26663,7 +27092,11 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		// normalizeDriverName() on purpose — normalizeDriverName also collapses
 		// INTERNAL whitespace, but getInvestorDriverSet does not, so
 		// "Howard  Reddie" -> "Howard Reddie" would move an investor's driver
-		// set and must be treated as substantive.
+		// set and must be treated as substantive. (getDeductibleExpensesByDriverMonth
+		// keys on LOWER(driver) and does not collapse it either.)
+		// ⚠️ And for the same reason a case-only rename is money-neutral only while
+		// it moves no row from ANOTHER spelling of the old name — see
+		// `moneyNeutral` below: the cascade now takes those rows too.
 		const caseOnly = oldLower === newTrim.toLowerCase();
 
 		// ---- Plan: read every target, count rows, judge the lock. No writes. ----
@@ -26699,14 +27132,34 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		};
 
 		const newLower = newTrim.toLowerCase();
+		// Every SQLite target, counted and lock-judged by the SHARED planner —
+		// the same call PUT /api/users/:id makes, so the two routes cannot
+		// disagree about what a rename touches or which months it would restate.
+		// Planned before the sheet is matched: the sheet follows its answer on
+		// whether the rename takes the driver's other spellings (`widens`).
+		const sqlPlan = planDriverRenameSqlite(oldLower, { newLower });
+		const oldNorm = normalizeDriverName(oldTrim);
 		const sheetUpdates = [];
 		const sheetLockedMonths = [];
+		// Cells rewritten from another spelling of the old name, with that
+		// spelling: swapping the names back would not restore them.
+		const sheetVariants = [];
 		let sheetRowsAlreadyNewName = 0;
 		for (let i = 1; i < rows.length; i++) {
-			const cell = (rows[i][driverColIdx] || "").trim().toLowerCase();
-			if (cell === newLower) sheetRowsAlreadyNewName++;
-			if (cell !== oldLower) continue;
-			sheetUpdates.push({ range: `Job Tracking!${colLtr}${i + 1}`, values: [[newTrim]] });
+			const stored = String(rows[i][driverColIdx] || "").trim();
+			const cell = stored.toLowerCase();
+			// ⚠️ THE SHEET MOVES WITH THE SQLITE LEGS. When they take the driver's
+			// other spellings (sqlPlan.widens), a cell naming the same driver through
+			// normalizeDriverName() is this rename's row too. Left behind, it would
+			// keep a load under a spelling whose directory row, truck and expenses
+			// the cascade just moved away — the pay math would resolve it to the
+			// defaults: the partial rename this route exists to prevent.
+			const own = cell === oldLower || (sqlPlan.widens === true && cell !== "" && normalizeDriverName(cell) === oldNorm);
+			if (cell === newLower && !own) sheetRowsAlreadyNewName++;
+			if (!own) continue;
+			const range = `Job Tracking!${colLtr}${i + 1}`;
+			if (cell !== oldLower) sheetVariants.push({ range, was: stored });
+			sheetUpdates.push({ range, values: [[newTrim]] });
 			const mk = dateColIdx === -1 ? "" : sheetMonthOf(rows[i][dateColIdx]);
 			// Fail closed: an unparseable Assigned Date could be any month, and
 			// on production 183 of 421 rows have one.
@@ -26715,6 +27168,7 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 
 		const locksReadable = periodLocksReadable();
 		const plan = { sheet: { rows: sheetUpdates.length, lockedRows: sheetLockedMonths.length, money: true, period: "row" }, sqlite: {} };
+		if (sheetVariants.length) plan.sheet.variantRows = sheetVariants.length;
 		const blockers = [];
 		if (sheetLockedMonths.length) blockers.push({
 			target: "Job Tracking (sheet)", rows: sheetLockedMonths.length,
@@ -26722,12 +27176,20 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 			detail: `${sheetLockedMonths.length} load row${sheetLockedMonths.length === 1 ? "" : "s"} in a finalized month — these carry the revenue and the active days the month's driver pay was computed from`,
 		});
 
-		// Every SQLite target, counted and lock-judged by the SHARED planner —
-		// the same call PUT /api/users/:id makes, so the two routes cannot
-		// disagree about what a rename touches or which months it would restate.
-		const sqlPlan = planDriverRenameSqlite(oldLower, { newLower });
 		Object.assign(plan.sqlite, sqlPlan.targets);
 		blockers.push(...sqlPlan.blockers);
+		// Rows this rename moves from another spelling of the old name, sheet and
+		// SQLite. Any on the sheet or a money target and the rename is not
+		// money-neutral, even case-only: those rows change spelling, and the
+		// readers named beside `caseOnly` above do not fold spacing. That includes
+		// the driver's directory row stored as "Shorn  King", which
+		// getInvestorDriverSet() reads by a key the rename changes
+		// (driverRenameSameNameSql()). One on a cosmetic target (a notification, a
+		// message) moves no figure.
+		const variantRowsOn = (moneyOnly) => Object.values(sqlPlan.targets || {})
+			.reduce((s, e) => s + (e && e.variantRows && (!moneyOnly || e.money) ? e.variantRows : 0), 0);
+		const spacingVariantRows = sheetVariants.length + variantRowsOn(false);
+		const moneyNeutral = caseOnly && sheetVariants.length + variantRowsOn(true) === 0;
 
 		// The two substring legs get no lock analysis — they rewrite display text,
 		// not a key. Counted by LIKE here (a superset: the executor's word-boundary
@@ -26761,11 +27223,14 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		//
 		// Case-only is excluded because the match is case-insensitive: for
 		// "shorn king" -> "Shorn King" the new-name query returns the very rows
-		// being renamed, which is a self-match, not a merge.
+		// being renamed, which is a self-match, not a merge. The same holds for a
+		// re-spelling onto another spelling of the old name that this rename
+		// moves: the scan leaves the rename's own rows out (`oldLower`), and the
+		// sheet count above leaves out the cells it rewrites.
 		let mergeRows = 0;
 		let mergeTargets = {};
 		if (!caseOnly) {
-			({ mergeTargets, mergeRows } = driverRenameMergeScan(newLower));
+			({ mergeTargets, mergeRows } = driverRenameMergeScan(newLower, { oldLower, widens: sqlPlan.widens }));
 			if (sheetRowsAlreadyNewName) { mergeTargets["JobTracking_sheet"] = sheetRowsAlreadyNewName; mergeRows += sheetRowsAlreadyNewName; }
 		}
 		// ⚠️ THE NEW NAME IS ALSO COMPARED THE WAY OWNERSHIP IS. The scan above is
@@ -26789,7 +27254,7 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		// after the sheet is written would leave a partial rename. So it is not
 		// beside the database write, unlike every other caller of the check.
 		if (normalizeDriverName(oldTrim) !== normalizeDriverName(newTrim)) {
-			const movingAccountIds = driverRenameAccountIds(oldTrim, newTrim);
+			const movingAccountIds = driverRenameAccountIds(oldTrim, newTrim, { widens: sqlPlan.widens });
 			const oldDirectoryRows = (plan.sqlite.drivers_directory && plan.sqlite.drivers_directory.rows) || 0;
 			for (const hit of findDriverNameClashes(newTrim, { exceptUserIds: movingAccountIds })) {
 				if (hit.source === "reserved" || hit.field === "username") {
@@ -26818,13 +27283,18 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 
 		const verdict = {
 			caseOnly,
-			moneyNeutral: caseOnly,
+			moneyNeutral,
 			lockedPeriodsReadable: locksReadable,
 			// A case-only rename cannot move a settlement figure, so nothing
 			// BLOCKS it — reporting the locked rows it touches under `blockers`
 			// would make a provably safe repair read as a dangerous one. The
-			// count is still surfaced, just not as an obstacle.
-			blockers: caseOnly ? blockers.filter((b) => DRIVER_RENAME_HARD_BLOCK_CODES.has(b.code)) : blockers,
+			// count is still surfaced, just not as an obstacle. Not when it also
+			// moves rows from another spelling of the name (`moneyNeutral`).
+			blockers: moneyNeutral ? blockers.filter((b) => DRIVER_RENAME_HARD_BLOCK_CODES.has(b.code)) : blockers,
+			// Whether the rename takes the driver's other spellings (a doubled or
+			// edge space) with it, and how many rows that adds. `widened: false`
+			// means another account still holds that name, so they are its rows.
+			spacingVariants: { widened: sqlPlan.widens === true, rows: spacingVariantRows },
 			lockedRowsInScope: blockers.reduce((s, b) => s + (b.rows || 0), 0),
 			isMerge,
 			mergeTargets,
@@ -26857,7 +27327,7 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 				DIRECTORY_NAME_VARIANT: "The rename would leave two drivers_directory rows whose names differ only in case or spacing, for what every ownership check reads as one driver. Merge or delete the redundant row first.",
 				DRIVER_NAME_TAKEN: "The new name is a reserved name or another account's username, and a driver name must be neither.",
 			}[hardBlockers[0].code] || "A money-bearing target could not be read, so it cannot be confirmed free of finalized-month rows. Refusing — the same reasoning as PERIOD_LOCK_UNREADABLE.";
-		} else if (caseOnly) {
+		} else if (moneyNeutral) {
 			verdict.decision = "allow";
 			verdict.rationale = "Case/whitespace-only rename: every settlement join key folds case (LOWER / normalizeDriverName), so no locked month's figure can move.";
 		} else if (!locksReadable) {
@@ -26952,9 +27422,15 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		// PUT /api/users/:id makes. `collectIds` is only worth paying for on a
 		// MERGE, where the ids ARE the reversal recipe (the name alone no longer
 		// identifies which rows moved). A pure rename needs none: every row under
-		// the new name came from the old one, so swapping the arguments undoes it.
+		// the new name came from the old one, so swapping the arguments undoes it —
+		// except the rows moved from another spelling of the old name, whose
+		// original spelling only their ids can restore. The executor lists those on
+		// every rename (`spacingVariants`).
+		// `widens` holds the executor to the plan's answer on the other spellings,
+		// whatever changed during the sheet write above.
 		let sqlFixes = {};
 		let changedIds = {};
+		let spacingVariants = {};
 		// ⚠️ WHOSE SESSIONS THIS RENAME ENDS is read HERE: after the route's last
 		// await, immediately before the cascade and in one synchronous run with
 		// it, so it is exactly the set of accounts the cascade changes — not the
@@ -26965,9 +27441,9 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		// is what the PARTIAL_RENAME answer reports.
 		let renamedAccountIds = [];
 		try {
-			renamedAccountIds = driverRenameAccountIds(oldTrim, newTrim);
-			({ counts: sqlFixes, changedIds } = applyDriverRenameSqlite({
-				oldName: oldTrim, newName: newTrim, collectIds: isMerge,
+			renamedAccountIds = driverRenameAccountIds(oldTrim, newTrim, { widens: sqlPlan.widens });
+			({ counts: sqlFixes, changedIds, spacingVariants } = applyDriverRenameSqlite({
+				oldName: oldTrim, newName: newTrim, collectIds: isMerge, widens: sqlPlan.widens,
 			}));
 		} catch (e) {
 			// Transaction rolled back: SQLite is untouched, the sheet is not.
@@ -27001,16 +27477,26 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		// The recipe BRANCHES on merge, because the naive swap is actively wrong
 		// there — see the merge-detection note above.
 		const sheetRanges = sheetUpdates.map((u) => u.range);
+		// The rows moved from another spelling of the old name, by id and sheet
+		// range, with the spelling each had — the part of the rename a swap of
+		// the names cannot put back.
+		const spacingVariantRecipe = spacingVariantRows > 0 ? {
+			sqlite: spacingVariants || {},
+			sheet: sheetVariants.length > DRIVER_RENAME_ID_CAP ? { truncated: true, of: sheetVariants.length, cells: sheetVariants.slice(0, DRIVER_RENAME_ID_CAP) } : sheetVariants,
+		} : undefined;
 		const reversal = isMerge
-			? `MERGE — do NOT re-run with the names swapped (that would also rename ${newTrim}'s pre-existing rows). Reverse by id: for each key in changedIds, UPDATE <table> SET <column> = '${oldTrim}' WHERE id IN (...). Sheet: set the listed sheetRanges back to "${oldTrim}".`
-			: `PUT /api/admin/fix-driver-name {"oldName":"${newTrim}","newName":"${oldTrim}"} — an exact undo, because every row now under "${newTrim}" came from "${oldTrim}".`;
+			? `MERGE — do NOT re-run with the names swapped (that would also rename ${newTrim}'s pre-existing rows). Reverse by id: for each key in changedIds, UPDATE <table> SET <column> = '${oldTrim}' WHERE id IN (...). Sheet: set the listed sheetRanges back to "${oldTrim}".${spacingVariantRecipe ? " Then restore each row in spacingVariants to the spelling it is listed under." : ""}`
+			: spacingVariantRecipe
+				? `PUT /api/admin/fix-driver-name {"oldName":"${newTrim}","newName":"${oldTrim}"} puts every row back under "${oldTrim}", but ${spacingVariantRows} of them ${spacingVariantRows === 1 ? "was" : "were"} stored under another spelling of it: restore each row in spacingVariants (by id, and by sheet range) to the spelling it is listed under.`
+				: `PUT /api/admin/fix-driver-name {"oldName":"${newTrim}","newName":"${oldTrim}"} — an exact undo, because every row now under "${newTrim}" came from "${oldTrim}".`;
 		logAudit(req, "fix_driver_name", "driver", oldTrim, JSON.stringify({
-			oldName: oldTrim, newName: newTrim, caseOnly, moneyNeutral: caseOnly, isMerge,
+			oldName: oldTrim, newName: newTrim, caseOnly, moneyNeutral, isMerge,
 			sheetRowsChanged: sheetChanged, sheetColumn: `${colLtr} (${headers[driverColIdx]})`,
 			sheetRanges: sheetRanges.length > DRIVER_RENAME_ID_CAP ? { truncated: true, of: sheetRanges.length, ranges: sheetRanges.slice(0, DRIVER_RENAME_ID_CAP) } : sheetRanges,
 			sqlite: sqlFixes,
 			sessionsRevoked,
 			changedIds: isMerge ? changedIds : undefined,
+			spacingVariants: spacingVariantRecipe,
 			lockedPeriodsTouched: verdict.decision === "allow-acknowledged" ? blockers.map((b) => ({ target: b.target, rows: b.rows, periods: b.periods })) : [],
 			acknowledgedLockedPeriods: verdict.decision === "allow-acknowledged",
 			reason: String(reason || "").trim(),
@@ -27023,7 +27509,7 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 
 		res.json({
 			fixed: sheetChanged, oldName: oldTrim, newName: newTrim, sqlite: sqlFixes,
-			caseOnly, moneyNeutral: caseOnly, isMerge,
+			caseOnly, moneyNeutral, isMerge,
 			mergeWarning: verdict.mergeWarning,
 			acknowledgedLockedPeriods: verdict.decision === "allow-acknowledged",
 			lockedPeriodsRestated: verdict.decision === "allow-acknowledged" ? blockers : [],
@@ -27792,9 +28278,10 @@ function guardedColumnReason(header) {
 	return null;
 }
 
-// The row as it will exist AFTER the write. values.update writes `values` from
-// column A, so a SHORT array leaves the tail of the row untouched — an edit that
-// sends 12 cells cannot be judged as if it had blanked columns 13..26.
+// The row as it will exist AFTER the write. A SHORT `values` leaves the tail of
+// the row untouched — the tail equals the row as read, so sheetRowCellWrites()
+// writes none of it — and an edit that sends 12 cells cannot be judged as if it
+// had blanked columns 13..26.
 function sheetRowAfterUpdate(before, values) {
 	const b = Array.isArray(before) ? before : [];
 	const v = Array.isArray(values) ? values : [];
@@ -27989,6 +28476,10 @@ function buildSheetUpdateAudit(payload) {
 		// visible afterwards.
 		...(payload.loadId ? { loadId: cap(payload.loadId, 120) } : {}),
 		...(payload.via ? { via: cap(payload.via, 60) } : {}),
+		// PUT /api/data/:rowIndex's 409 ROW_MOVED: the Load ID the caller's form
+		// opened, and the one the row holds ("" for none).
+		...(payload.expectedLoadId != null ? { expectedLoadId: cap(payload.expectedLoadId, 120) } : {}),
+		...(payload.foundLoadId != null ? { foundLoadId: cap(payload.foundLoadId, 120) } : {}),
 		...(droppedForCount > 0 ? { changesOmitted: droppedForCount } : {}),
 		...(payload.periods && payload.periods.length ? { periods: payload.periods } : {}),
 		...(payload.code ? { code: payload.code } : {}),
@@ -28038,6 +28529,143 @@ function a1ColumnLetter(index) {
 		n = Math.floor((n - 1) / 26);
 	}
 	return out;
+}
+
+// The cells a row save writes: one A1 range per cell whose value as it will be
+// written (`after`) differs from the value as read (`before`), in column order,
+// as the `data` of one values.batchUpdate. PUT /api/data/:rowIndex and
+// PUT /api/load/:loadId both write through it. Nothing changed is [], and the
+// route writes nothing.
+//
+// ⚠️ WHY NOT THE WHOLE ROW. Both routes read the row as the sheet DISPLAYS it
+// (the API's default FORMATTED_VALUE), the Active Loads editor and the Data
+// Manager send every column back as displayed, and both routes write with
+// USER_ENTERED. Rewriting the row from column A would
+// therefore rewrite every cell on every save, whichever cell was edited, and a
+// formula cell among them would come back as its displayed value. A cell sent
+// back exactly as read is left alone, so only the edited cells are written.
+//
+// Compared as the period guard (changedGuardedCells()) and the audit compare:
+// null and absent read as "", anything else as its String(). A null is written
+// as "", the value the guard and the audit judged; the Sheets API skips a null.
+function sheetRowCellWrites(a1, rowIndex, before, after) {
+	const b = Array.isArray(before) ? before : [];
+	const a = Array.isArray(after) ? after : [];
+	const out = [];
+	for (let i = 0; i < Math.max(b.length, a.length); i++) {
+		const from = b[i] == null ? "" : String(b[i]);
+		const to = a[i] == null ? "" : String(a[i]);
+		if (from === to) continue;
+		out.push({ range: `${a1}!${a1ColumnLetter(i)}${rowIndex}`, values: [[a[i] == null ? "" : a[i]]] });
+	}
+	return out;
+}
+
+// PUT /api/data/:rowIndex: a cell the user did not edit is not written.
+// `baseline` is the row as the caller's form opened it, in the order of
+// `values`. A cell sent equal to its baseline was not edited, so it is set to
+// the row as read (`before`), and sheetRowCellWrites() then writes none of it.
+//
+// ⚠️ WHY THE ROW AS READ IS NOT ENOUGH. The Active Loads editor sends every
+// column from a dashboard view that can be ~60 s old (the Job Tracking cache).
+// A cell that changed on the sheet since that view loaded (another user, n8n,
+// or a formula whose shown value moved) differs from the row as read, so the
+// diff alone writes the stale copy back, and over a formula cell that flattens
+// the formula. With a baseline, a cell is written only when the user edited it
+// (sent differs from the baseline) and the sheet does not already hold it (sent
+// differs from the row as read).
+//
+// Compared as sheetRowCellWrites() compares: null and absent read as "",
+// anything else as its String(). Mutates `values`, like
+// restoreWithheldBrokerCells(), and runs before any guard, so the Owner ID
+// check, the broker restore, the formula refusal, the period guard and the
+// audit all judge the row as it will be written. A baseline that is not an
+// array of values.length cells is ignored (baselineApplies()): older pages and
+// API callers send none, and keep the diff against the row as read. It can only
+// narrow what a save writes, never widen it. Returns whether it was applied.
+//
+// ⚠️ IT ALSO SETS THE LOAD ID CELL TO THE ROW AS READ, because the form never
+// edits it, so once it has run nothing can tell that the row number now holds
+// another load. rowMovedRefusal() compares the baseline's Load ID with the row
+// as read, and PUT /api/data/:rowIndex runs it first.
+function restoreUntouchedCells(before, values, baseline) {
+	if (!baselineApplies(values, baseline)) return false;
+	const b = Array.isArray(before) ? before : [];
+	for (let i = 0; i < values.length; i++) {
+		const sent = values[i] == null ? "" : String(values[i]);
+		const opened = baseline[i] == null ? "" : String(baseline[i]);
+		if (sent === opened) values[i] = b[i] == null ? "" : b[i];
+	}
+	return true;
+}
+
+// Whether a `baseline` sent beside `values` is used at all: an array of exactly
+// values.length cells. One test for restoreUntouchedCells() and
+// rowMovedRefusal(), so a baseline is never applied without the identity check
+// that has to come with it.
+function baselineApplies(values, baseline) {
+	return Array.isArray(values) && Array.isArray(baseline) && baseline.length === values.length;
+}
+
+// PUT /api/data/:rowIndex with a baseline: is the row as read still the row the
+// caller's form opened? null when it is, or when there is nothing to compare.
+// Otherwise { body, edited }: the 409 ROW_MOVED body, and the cells the form
+// edited, for the audit line.
+//
+// ⚠️ A ROW NUMBER IS A POSITION. The Active Loads editor holds the row number of
+// the view its modal opened from (the Job Tracking cache, up to ~60 s old, for
+// as long as the modal stays open), and sorting the sheet, or deleting a row
+// above, since then points that number at another load. Without a baseline the
+// save sends the opened load's Load ID, which differs from the row as read, so
+// the DUPLICATE_LOAD check judges it as a Load ID change. With one,
+// restoreUntouchedCells() sets that cell to the row as read and no later check
+// can see the difference, so the edited cells would be written onto the other
+// load. This runs before it.
+//
+// Compared with normalizeLoadId(), as the DUPLICATE_LOAD check and
+// deduplicateLoads() compare load ids: "#111" and "111" are one load here, as in
+// every total. Identity is confirmed only by a Load ID present on both sides and
+// equal. Blank on either side, or on both, is refused, because a row without a
+// Load ID cannot be told from another. The dashboard serves no row without a
+// Load ID, so the editor never opens one.
+//
+// Nothing to compare (null; the save is judged as it was before this check): no
+// usable baseline (baselineApplies()), or no load-id column in `headers`. The
+// route runs it on the tabs the guards cover (Job Tracking) only.
+function rowMovedRefusal(headers, rowIndex, before, values, baseline) {
+	if (!baselineApplies(values, baseline)) return null;
+	const hs = Array.isArray(headers) ? headers : [];
+	const col = hs.findIndex((h) => /load.?id|job.?id/i.test(String(h == null ? "" : h)));
+	if (col < 0) return null;
+	const b = Array.isArray(before) ? before : [];
+	const opened = normalizeLoadId(baseline[col]);
+	const found = normalizeLoadId(b[col]);
+	if (opened && opened === found) return null;
+	const shown = (v) => String(v == null ? "" : v).trim().slice(0, 120);
+	const expectedLoadId = opened ? shown(baseline[col]) : "";
+	const foundLoadId = found ? shown(b[col]) : "";
+	// What the form asked for: each cell sent unlike its baseline, as the form
+	// opened it and as sent. Not the row as read, which holds another load.
+	const edited = [];
+	for (let i = 0; i < values.length; i++) {
+		const from = baseline[i] == null ? "" : String(baseline[i]);
+		const to = values[i] == null ? "" : String(values[i]);
+		if (from === to) continue;
+		edited.push({ column: String(hs[i] == null ? "" : hs[i]).trim() || "(unnamed)", index: i, from, to, why: guardedColumnReason(hs[i]) || "" });
+	}
+	const lead = expectedLoadId && foundLoadId
+		? `Row ${rowIndex} no longer holds the load this edit was opened on: it was opened on load '${expectedLoadId}', and row ${rowIndex} now holds load '${foundLoadId}'.`
+		: `Row ${rowIndex} cannot be confirmed as the row this edit was opened on: it was opened on ${expectedLoadId ? `load '${expectedLoadId}'` : "a row with no Load ID"}, row ${rowIndex} ${foundLoadId ? `now holds load '${foundLoadId}'` : "has no Load ID"}, and a row without a Load ID cannot be told from another.`;
+	return {
+		body: {
+			error: `${lead} Sorting the sheet, or deleting a row above, since the view loaded moves a load to another row. Nothing was written. Reload the dashboard, open the load again and redo the edit.`,
+			code: "ROW_MOVED",
+			rowIndex,
+			expectedLoadId,
+			foundLoadId,
+		},
+		edited,
+	};
 }
 
 // Resolve the requested ?sheet= to a REAL tab, the way the Sheets range parser
@@ -29030,7 +29658,9 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		// so a malformed index silently rewrote a real row. Same fix #209 applied to
 		// the delete.
 		const rowIndex = Number(req.params.rowIndex);
-		const { values } = req.body || {};
+		// `baseline` (optional): the row as the caller's form opened it, in the
+		// order of `values` — see restoreUntouchedCells().
+		const { values, baseline } = req.body || {};
 
 		if (!Array.isArray(values)) {
 			return res.status(400).json({ error: "values must be an array of cell values", code: "VALUES_REQUIRED" });
@@ -29083,6 +29713,7 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		let headers = [];
 		let before = [];
 		let snapshotUnavailable = false;
+		let rowUnread = false;
 		try {
 			const pre = await sheets.spreadsheets.values.batchGet({
 				spreadsheetId: SPREADSHEET_ID,
@@ -29099,6 +29730,7 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 			if (!headers.length) snapshotUnavailable = true;
 		} catch (err) {
 			snapshotUnavailable = true;
+			rowUnread = true;
 			if (!guarded && req.session.user.role !== "Super Admin") throw err;
 		}
 		if (snapshotUnavailable && guarded) {
@@ -29107,6 +29739,50 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 				code: "ROW_READ_FAILED",
 			});
 		}
+		// The write below is only the cells that differ from the row as read
+		// (sheetRowCellWrites()), so a row that could not be read cannot be saved on
+		// any tab: which cells this save changes is unknown, and writing every cell
+		// sent would put back the whole-row rewrite that function replaced.
+		if (rowUnread) {
+			return res.status(409).json({
+				error: "The current contents of this row could not be read, so which cells this save changes cannot be told. Try again.",
+				code: "ROW_READ_FAILED",
+			});
+		}
+
+		// Is the row as read still the row the caller's form opened
+		// (rowMovedRefusal())? Compared before restoreUntouchedCells(), which sets
+		// the Load ID cell the form did not edit to the row as read, after which no
+		// check below can tell. On the tabs the guards cover, like the
+		// DUPLICATE_LOAD check. Any other tab, a layout with no load-id column, and
+		// a save with no usable baseline keep today's behaviour.
+		if (guarded) {
+			const moved = rowMovedRefusal(headers, rowIndex, before, values, baseline);
+			if (moved) {
+				logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(buildSheetUpdateAudit({
+					outcome: "blocked",
+					sheet: sheetName,
+					rowIndex,
+					changed: moved.edited,
+					guardedChanged: moved.edited.filter((c) => c.why),
+					code: "ROW_MOVED",
+					expectedLoadId: moved.body.expectedLoadId,
+					foundLoadId: moved.body.foundLoadId,
+				}), "ROW_MOVED"));
+				// The view that sent this row number is out of date, and the cached
+				// Job Tracking rows may be too: drop them, so the next dashboard read
+				// shows each load on the row it is on now.
+				jtCacheInvalidate();
+				return res.status(409).json(moved.body);
+			}
+		}
+
+		// A cell the caller's form did not edit is set to the row as read, so it is
+		// not written even when the sheet changed under a stale view
+		// (restoreUntouchedCells()). Before every check below, so each judges the
+		// row as it will be written. No baseline, or a malformed one: every cell
+		// sent is compared with the row as read, as before.
+		restoreUntouchedCells(before, values, baseline);
 
 		// Validate Job Tracking Owner ID early — reject investors.id typos before any
 		// writes happen. (Reuses the headers just read.)
@@ -29197,8 +29873,9 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		if (guarded) {
 			const lidChange = changes.find((c) => /load.?id|job.?id/i.test(c.column));
 			if (lidChange) {
-				const norm = (v) => String(v == null ? "" : v).trim().toLowerCase().replace(/^#/, "");
-				const target = norm(lidChange.to);
+				// normalizeLoadId(): the key deduplicateLoads() and the row identity
+				// check above (rowMovedRefusal()) compare load ids with.
+				const target = normalizeLoadId(lidChange.to);
 				if (target) {
 					let collision = null;
 					try {
@@ -29210,7 +29887,7 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 						const cells = (all.data.values || []).map((r) => (r && r[0]) || "");
 						for (let i = 1; i < cells.length; i++) {
 							if (i + 1 === rowIndex) continue;   // the row being edited
-							if (norm(cells[i]) === target) { collision = i + 1; break; }
+							if (normalizeLoadId(cells[i]) === target) { collision = i + 1; break; }
 						}
 					} catch (err) {
 						// Fail CLOSED: an unread Load ID column means the collision cannot
@@ -29295,15 +29972,19 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 			}
 		}
 
+		// Only the cells this save changes, one range each (sheetRowCellWrites()):
+		// a cell sent back as read is not rewritten, so every cell nobody edited,
+		// a formula cell included, stays as it is. Nothing changed, nothing
+		// written, and no audit line: there is no write to reverse.
+		const cellWrites = sheetRowCellWrites(a1, rowIndex, before, after);
+		if (!cellWrites.length) {
+			return res.json({ success: true, updatedCells: 0, unchanged: true });
+		}
 		let response;
 		try {
-			response = await sheets.spreadsheets.values.update({
+			response = await sheets.spreadsheets.values.batchUpdate({
 				spreadsheetId: SPREADSHEET_ID,
-				range: `${a1}!A${rowIndex}`,
-				valueInputOption: "USER_ENTERED",
-				requestBody: {
-					values: [values],
-				},
+				requestBody: { valueInputOption: "USER_ENTERED", data: cellWrites },
 			});
 		} catch (err) {
 			// Audit the failed attempt too. A timed-out Sheets write leaves it
@@ -29319,7 +30000,7 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 
 		res.json({
 			success: true,
-			updatedCells: response.data.updatedCells,
+			updatedCells: response.data.totalUpdatedCells,
 		});
 	} catch (error) {
 		console.error("Error updating row:", error.message);
@@ -29924,15 +30605,12 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// etc.) we fall back to the active truck_assignments row. Without this
 		// fallback a missed lookup stamps Owner ID = 0 on the load, which then
 		// blocks the driver-name fallback in /api/investor (see commit 656f1b1).
-		let truckForDriver = db.prepare("SELECT unit_number, owner_id FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(driver.trim());
-		if (!truckForDriver) {
-			truckForDriver = db.prepare(
-				"SELECT t.unit_number AS unit_number, t.owner_id AS owner_id " +
-				"FROM truck_assignments ta JOIN trucks t ON t.id = ta.truck_id " +
-				"WHERE LOWER(ta.driver_name) = LOWER(?) AND ta.end_date = '' " +
-				"ORDER BY ta.start_date DESC LIMIT 1"
-			).get(driver.trim());
-		}
+		// Both steps find the driver case aside before either one looks across
+		// spacing, so a stale truck naming the driver under a spacing variant
+		// never outranks their own active assignment; a spacing match counts
+		// only while no other account holds the name under another spelling
+		// (findTruckForDriverStamp()).
+		const truckForDriver = findTruckForDriverStamp(driver, { activeAssignment: true });
 		const truckUnit = truckForDriver ? truckForDriver.unit_number : '';
 		const ownerId = truckForDriver ? truckForDriver.owner_id : 0;
 
@@ -30095,16 +30773,9 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 		// from a company-truck driver (Owner ID = 0) to an investor's driver
 		// keeps the stale 0, which blocks the driver-name fallback in
 		// /api/investor (commit 656f1b1) and the load never appears in their
-		// My Loads section. Same hardened lookup as /api/dispatch.
-		let truckForDriver = db.prepare("SELECT unit_number, owner_id FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(newDriver.trim());
-		if (!truckForDriver) {
-			truckForDriver = db.prepare(
-				"SELECT t.unit_number AS unit_number, t.owner_id AS owner_id " +
-				"FROM truck_assignments ta JOIN trucks t ON t.id = ta.truck_id " +
-				"WHERE LOWER(ta.driver_name) = LOWER(?) AND ta.end_date = '' " +
-				"ORDER BY ta.start_date DESC LIMIT 1"
-			).get(newDriver.trim());
-		}
+		// My Loads section. Same hardened lookup as /api/dispatch, active
+		// assignment fallback and spacing rule included.
+		const truckForDriver = findTruckForDriverStamp(newDriver, { activeAssignment: true });
 		const truckUnit = truckForDriver ? truckForDriver.unit_number : '';
 		const ownerId = truckForDriver ? truckForDriver.owner_id : 0;
 
@@ -31786,14 +32457,48 @@ function driverNameHeldByOtherAccount(name, exceptUserIds = []) {
 		.some((h) => h.source === "users" && h.field === "driver_name");
 }
 
+// driverNameHeldByOtherAccount() for a caller that knows a driver only by the
+// name it was handed: the accounts whose driver name IS this spelling (trimmed,
+// case aside) are the driver the name names, so only an account holding it
+// under another spelling counts. A name no account spells this way is held by
+// another spelling whenever any account's driver name normalizes to it. While
+// one does, a truck or assignment row found for the name only through
+// normalizeDriverName() may be that account's, so the money stamps
+// (findTruckForDriverStamp()) and assignDriverToTruck()'s release leave such a
+// row alone. A blank name is held by no one.
+function driverNameHeldByOtherSpelling(name) {
+	const trimmed = typeof name === "string" ? name.trim() : "";
+	if (!trimmed) return false;
+	const spelling = trimmed.toLowerCase();
+	const ownIds = db.prepare("SELECT id, driver_name FROM users WHERE COALESCE(driver_name, '') <> ''").all()
+		.filter((u) => String(u.driver_name).trim().toLowerCase() === spelling)
+		.map((u) => u.id);
+	return driverNameHeldByOtherAccount(trimmed, ownIds);
+}
+
+// The truck an account's driver name holds, for the users routes: the truck
+// findTruckForDriver() finds (case aside, else under another spacing), unless it
+// names the driver only through a spacing variant another account — outside
+// `exceptUserIds`, the accounts the caller is changing — still holds
+// (driverNameHeldByOtherAccount()); that truck is that account's. The same rule
+// the rename cascade applies to a driver's other spellings. PUT /api/users/:id
+// counts it when a driver name is blanked (DRIVER_NAME_IN_USE), and
+// DELETE /api/users/:id clears it. Returns findTruckForDriver()'s answer, or null.
+function findTruckForDriverAccount(name, exceptUserIds = []) {
+	const truck = findTruckForDriver(name);
+	if (truck && truck.matchedBy === "normalized" && driverNameHeldByOtherAccount(name, exceptUserIds)) return null;
+	return truck;
+}
+
 // The spelling an existing driver identity already uses for this name — an
 // account's driver name first, then a drivers_directory row — or the trimmed
 // name itself when no identity holds it. A truck's driver is stored by NAME in
-// trucks.assigned_driver and truck_assignments, and assignDriverToTruck() and
-// several other name-keyed truck reads (the dispatch Owner ID stamp, the
-// expense truck stamp) find those rows by case-insensitive equality, which does
-// not fold spacing; the directory sync and the driver app's own truck reads
-// fold it (findTruckForDriver()). Assigning
+// trucks.assigned_driver and truck_assignments. The directory sync and the
+// driver app's own truck reads fold spacing when they look those rows up
+// (findTruckForDriver()); the money stamps (findTruckForDriverStamp()) and
+// assignDriverToTruck()'s release fold it only while no other account holds the
+// name under another spelling, and other name-keyed truck reads still compare
+// case-insensitively, which does not fold spacing. Assigning
 // "Shorn  King" to a truck therefore resolves to "Shorn King", the driver it
 // names, rather than starting a second spelling of one driver. The account's
 // spelling wins because it is the one a driver's own session looks the truck up
@@ -36250,8 +36955,13 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		if (await sentIfDriverExpenseWindowClosed(req, res, safeLoadId, driver)) return;
 
 		const timestamp = new Date().toISOString();
-		// Look up truck/owner for this driver to stamp on expense
-		const driverTruck = db.prepare("SELECT unit_number, owner_id, routemate_vehicle_id FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(driver.trim());
+		// Look up truck/owner for this driver to stamp on expense — the dispatch
+		// stamps' four steps (findTruckForDriverStamp()): the truck and the active
+		// assignment case aside, then across spacing, a spacing match only while no
+		// other account holds the name under another spelling. The owner decides
+		// whose P&L the expense lands on, so a stale truck still naming the driver
+		// under a spacing variant never outranks the driver's own active assignment.
+		const driverTruck = findTruckForDriverStamp(driver, { activeAssignment: true });
 		const expOwnerId = driverTruck ? driverTruck.owner_id : 0;
 		const expTruckUnit = driverTruck ? driverTruck.unit_number : '';
 		// DEDUP: Deshorn bulk-uploads receipts drivers text him, and the same
@@ -42744,6 +43454,20 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 		// The row as it will be written. Object.prototype.hasOwnProperty.call, not
 		// updates.hasOwnProperty — a body carrying its own "hasOwnProperty" key
 		// shadows the method and turns this into a TypeError 500.
+		//
+		// No `baseline` here, unlike PUT /api/data/:rowIndex (restoreUntouchedCells()).
+		// This body names the columns it changes, and a column it leaves out keeps
+		// the row as read, so a caller that sends only what it edited never writes
+		// a stale cell. Every body key is a column name to this route, so a
+		// `baseline` key would be refused as UNKNOWN_COLUMN, or would shadow a column
+		// of that name. No page in the app calls this route.
+		//
+		// Nor does it need PUT /api/data/:rowIndex's ROW_MOVED check
+		// (rowMovedRefusal()), which catches a row number that now holds another
+		// load. This route is given no row number: it finds the row by load id in
+		// its own read above, so the row as read holds the requested load by
+		// construction, and the SHEET_CHANGED re-read below refuses a sort or a
+		// deleted row that lands between that read and the write.
 		const updatedRow = headers.map((h, idx) => {
 			if (Object.prototype.hasOwnProperty.call(updates, h)) return updates[h];
 			return before[idx] || "";
@@ -42877,32 +43601,42 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 			}
 		}
 
-		try {
-			await sheets.spreadsheets.values.update({
-				spreadsheetId: SPREADSHEET_ID,
-				range: `${a1}!A${rowIndex}`,
-				valueInputOption: "USER_ENTERED",
-				requestBody: { values: [updatedRow] },
-			});
-		} catch (err) {
-			// Audit the failed attempt too. A timed-out Sheets write leaves it
-			// genuinely unknown whether the row changed, and that is precisely when the
-			// before/after values are worth having.
-			logAudit(req, "update_sheet_row_failed", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("failed", { error: err.message }));
-			throw err;
+		// Only the cells this save changes, one range each (sheetRowCellWrites(), as
+		// PUT /api/data/:rowIndex writes): a column the body left out, or sent back
+		// as read, is not rewritten, so a formula shown as its value and a text cell
+		// showing "=…" stay as they are. Nothing changed, nothing written, and no
+		// audit line: there is no write to reverse.
+		const cellWrites = sheetRowCellWrites(a1, rowIndex, before, after);
+		if (cellWrites.length) {
+			try {
+				await sheets.spreadsheets.values.batchUpdate({
+					spreadsheetId: SPREADSHEET_ID,
+					requestBody: { valueInputOption: "USER_ENTERED", data: cellWrites },
+				});
+			} catch (err) {
+				// Audit the failed attempt too. A timed-out Sheets write leaves it
+				// genuinely unknown whether the row changed, and that is precisely when the
+				// before/after values are worth having.
+				logAudit(req, "update_sheet_row_failed", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("failed", { error: err.message }));
+				throw err;
+			}
+
+			logAudit(req, "update_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("updated"));
+			// The 60s Job Tracking cache would otherwise keep serving the old figures.
+			if (guarded) jtCacheInvalidate();
 		}
 
-		logAudit(req, "update_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("updated"));
-		// The 60s Job Tracking cache would otherwise keep serving the old figures.
-		if (guarded) jtCacheInvalidate();
-
-		// Return updated load — unchanged response shape. Every role but Super
-		// Admin gets the broker contact columns blank, as GET /api/load/:loadId
-		// serves them.
+		// Return updated load — unchanged response shape, plus `unchanged: true`
+		// when nothing was written. Every role but Super Admin gets the broker
+		// contact columns blank, as GET /api/load/:loadId serves them.
 		const result = {};
 		headers.forEach((h, idx) => { result[h] = updatedRow[idx]; });
 		result._rowIndex = rowIndex;
-		res.json({ success: true, load: req.session.user.role !== "Super Admin" ? sanitizeBrokerColumns(headers, [result])[0] : result });
+		res.json({
+			success: true,
+			load: req.session.user.role !== "Super Admin" ? sanitizeBrokerColumns(headers, [result])[0] : result,
+			...(cellWrites.length ? {} : { unchanged: true }),
+		});
 	} catch (error) {
 		console.error("Error updating load:", error.message);
 		res.status(500).json({ error: error.message });

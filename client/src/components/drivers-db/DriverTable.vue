@@ -333,6 +333,7 @@ import { ref, reactive, computed, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useFileDrop } from '../../composables/useFileDrop'
 import { AVATAR_MAX_EDGE, compressImage, isDecodedImage } from '../../lib/imageUtils'
+import { directoryPayCells, directoryPayType } from '../../lib/driverPay'
 import { fmtTimestamp } from '../../utils/datetime'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
@@ -572,7 +573,9 @@ function openEdit(d) {
   editForm.mc = d[h.value.mc] || ''
   editForm.rating = d[h.value.rating] || 'Not Rated'
   editForm.status = d.Status || 'active'
-  editForm.payType = d.PayType || 'fixed'
+  // Lowercased, so a legacy "Fixed" / "Percentage" selects its radio and
+  // shows its amount. See directoryPayType().
+  editForm.payType = directoryPayType(d.PayType)
   editForm.payPercentage = Number(d.PayPercentage) || 0
   editForm.payDaily = Number(d.PayDaily) || 0
   showEdit.value = true
@@ -588,15 +591,17 @@ function handleSaveEdit() {
       editForm.zip, editForm.address, editForm.trucks, editForm.hazmat,
       editForm.phone, editForm.cell, editForm.email,
       editForm.dot, editForm.mc, editForm.rating, editForm.status,
-      // Only a Super Admin sends pay terms. Blank tells the server "not sent",
-      // so anyone else's save keeps whatever terms are stored when it lands.
-      ...(props.canEditPay
-        ? [
-            editForm.payType,
-            editForm.payType === 'percentage' ? (Number(editForm.payPercentage) || 0) : 0,
-            editForm.payType === 'fixed' ? (Number(editForm.payDaily) || 0) : 0,
-          ]
-        : ['', '', '']),
+      // Only a Super Admin sends pay terms: the active type's amount as text,
+      // where "0" (or a blank field) clears it, and the other type's as ""
+      // (not sent), so a save never touches the terms stored for the type not
+      // in use. Anyone else sends all three blank, which the server reads as
+      // "not sent". See directoryPayCells().
+      ...directoryPayCells({
+        canEditPay: props.canEditPay,
+        payType: editForm.payType,
+        payPercentage: editForm.payPercentage,
+        payDaily: editForm.payDaily,
+      }),
     ],
   })
   showEdit.value = false

@@ -239,15 +239,21 @@ const CASCADE_SRC = [
 	liftConst("const DRIVER_RENAME_TARGETS = [", "\n];"),
 	liftFunction("function driverRenameWhereSql(t, opts = {}) {"),
 	liftFunction("function driverRenameWhereArgs(t, nameLower, opts = {}) {"),
+	// Whether a rename takes the driver's other spellings, and which they are.
+	liftFunction("function driverRenameWidens(nameLower, opts = {}) {"),
+	liftFunction("function driverRenameSpellings(t, nameLower, opts = {}) {"),
 	// The drivers_directory leg finds its row through driverRenameDirectoryRowId().
 	liftFunction("function driverRenameDirectoryRowId(nameLower, opts = {}) {"),
+	// Which of a leg's rows the executor lists as moved from another spelling.
+	liftFunction("function driverRenameSameNameSql(t) {"),
 	liftFunction("function normalizeDriverName(s) {"),
 	liftFunction("function findDriverNameClashes(name, opts = {}) {"),
+	liftFunction("function driverNameHeldByOtherAccount(name, exceptUserIds = []) {"),
 	liftFunction("function findDirectoryRowForDriver(name) {"),
 	liftFunction("function driverRenameNewValue(t, newName) {"),
 	liftConst("const DRIVER_RENAME_ID_CAP = "),
 	liftFunction("function replaceNameOnWordBoundary(text, oldName, newName) {"),
-	liftFunction("function applyDriverRenameSqlite({ oldName, newName, userId = null, collectIds = false }) {"),
+	liftFunction("function applyDriverRenameSqlite({ oldName, newName, userId = null, collectIds = false, widens = null }) {"),
 ].join("\n");
 const HARD_BLOCK_SRC = liftConst("const DRIVER_RENAME_HARD_BLOCK_CODES = ");
 const COL_LETTER_SRC = liftFunction("function colLetter(idx) {");
@@ -1660,7 +1666,7 @@ function sectionSource() {
 
 	const fx = stripComments(SRCS.fixName);
 	const fLastAwait = fx.lastIndexOf("await ");
-	const fRead = at(fx, "renamedAccountIds = driverRenameAccountIds(oldTrim, newTrim);");
+	const fRead = at(fx, "renamedAccountIds = driverRenameAccountIds(oldTrim, newTrim, { widens: sqlPlan.widens });");
 	const fCascade = at(fx, "applyDriverRenameSqlite({");
 	const fPartial = at(fx, '"PARTIAL_RENAME"');
 	const fPurge = at(fx, "purgeUserSessions(uid, ");
@@ -1894,20 +1900,20 @@ const MUTANTS = [
 		name: "fix-driver-name reads the renamed accounts before its last await (the plan's view, not the commit's)",
 		target: "fixName",
 		mutate: (s) => {
-			const READ = "\t\t\trenamedAccountIds = driverRenameAccountIds(oldTrim, newTrim);\n";
+			const READ = "\t\t\trenamedAccountIds = driverRenameAccountIds(oldTrim, newTrim, { widens: sqlPlan.widens });\n";
 			const DECL = "\t\tlet renamedAccountIds = [];\n";
 			const ANCHOR = "\t\tlet sheetChanged = 0;\n";
 			const cut = s.replace(READ, "").replace(DECL, "");
 			if (cut === s || !cut.includes(ANCHOR)) return s;
-			return cut.replace(ANCHOR, "\t\tconst renamedAccountIds = driverRenameAccountIds(oldTrim, newTrim);\n" + ANCHOR);
+			return cut.replace(ANCHOR, "\t\tconst renamedAccountIds = driverRenameAccountIds(oldTrim, newTrim, { widens: sqlPlan.widens });\n" + ANCHOR);
 		},
 		caughtBy: ["fixReadsAfterLastAwait"],
 	},
 	{
 		name: "fix-driver-name revokes before its cascade commits (a rolled-back rename still signs people out)",
 		target: "fixName",
-		mutate: (s) => s.replace("\t\t\trenamedAccountIds = driverRenameAccountIds(oldTrim, newTrim);\n",
-			"\t\t\trenamedAccountIds = driverRenameAccountIds(oldTrim, newTrim);\n\t\t\tfor (const uid of renamedAccountIds) purgeUserSessions(uid, null);\n"),
+		mutate: (s) => s.replace("\t\t\trenamedAccountIds = driverRenameAccountIds(oldTrim, newTrim, { widens: sqlPlan.widens });\n",
+			"\t\t\trenamedAccountIds = driverRenameAccountIds(oldTrim, newTrim, { widens: sqlPlan.widens });\n\t\t\tfor (const uid of renamedAccountIds) purgeUserSessions(uid, null);\n"),
 		caughtBy: ["fixRollbackRevokesNothing"],
 	},
 	{

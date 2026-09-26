@@ -438,7 +438,8 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 	function makeFilesDb() {
 		const fdb = new Database(":memory:");
 		fdb.exec(`CREATE TABLE trucks (id INTEGER PRIMARY KEY AUTOINCREMENT, unit_number TEXT UNIQUE, make TEXT DEFAULT '', model TEXT DEFAULT '',
-			year INTEGER DEFAULT 0, vin TEXT DEFAULT '', license_plate TEXT DEFAULT '', status TEXT DEFAULT 'Active', assigned_driver TEXT DEFAULT '', photo TEXT DEFAULT '')`);
+			year INTEGER DEFAULT 0, vin TEXT DEFAULT '', license_plate TEXT DEFAULT '', status TEXT DEFAULT 'Active', assigned_driver TEXT DEFAULT '', photo TEXT DEFAULT '',
+			owner_id INTEGER DEFAULT 0, routemate_vehicle_id TEXT DEFAULT '')`);
 		fdb.exec("CREATE TABLE truck_assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER, driver_name TEXT, start_date TEXT, end_date TEXT DEFAULT '')");
 		fdb.exec(`CREATE TABLE legal_documents (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER DEFAULT 0, driver_id INTEGER DEFAULT 0, investor_id INTEGER DEFAULT 0,
 			visible_to_driver INTEGER DEFAULT 0, doc_type TEXT DEFAULT '', file_name TEXT DEFAULT '', file_url TEXT DEFAULT '', notes TEXT DEFAULT '',
@@ -592,7 +593,7 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 		// MUTANT 4: findTruckForDriver() back to LOWER() equality alone — the lookup
 		// the page and the photo route made before.
 		const TRUCK_LOWER_ONLY = mutate(TRUCK_LOOKUP_SRC,
-			'return hit ? { id: hit.id, unit_number: hit.unit_number, matchedBy: "normalized" } : null;', "return null;");
+			'return hit ? { ...hit, matchedBy: "normalized" } : null;', "return null;");
 		r = await call(pageOverFiles(makeFilesDb(), TRUCK_LOWER_ONLY), SK, "Shorn King");
 		ok("MUTANT 4 (the truck lookup back to LOWER() equality): the §6 doubled-space truck assertion flips",
 			r.status === 200 && r.body.truck === null, brief(r));

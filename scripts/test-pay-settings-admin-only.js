@@ -182,7 +182,9 @@ const PIECES = {
 		liftFunction("findDirectoryRowForDriver"),
 		liftFunction("findTruckForDriver"),
 		liftFunction("syncDriverToCarrierSheet"),
+		liftFunction("driverNameHeldByOtherSpelling"),
 		liftFunction("assignDriverToTruck"),
+		liftFunction("syncOpenCarrierPairing"),
 	].join("\n"),
 	directory: [liftConst("const DIRECTORY_PERIOD_COLUMNS = "), liftFunction("directoryChangedColumns")].join("\n"),
 	// The pay fields both directory routes read (§1c).
@@ -258,7 +260,8 @@ const DDL = [
 		purchase_price REAL DEFAULT 0, title_status TEXT DEFAULT 'Clean', maintenance_fund_monthly REAL DEFAULT 0,
 		fuel_tank_gallons REAL DEFAULT 0, avg_mpg REAL DEFAULT 0, in_service_date TEXT DEFAULT '', retired_at TEXT DEFAULT '',
 		photo TEXT DEFAULT '', insurance_monthly REAL DEFAULT 0, eld_monthly REAL DEFAULT 0, truck_payment_monthly REAL DEFAULT 0,
-		hvut_annual REAL DEFAULT 0, irp_annual REAL DEFAULT 0, admin_fee_pct REAL DEFAULT 50, created_at TEXT DEFAULT '')`,
+		hvut_annual REAL DEFAULT 0, irp_annual REAL DEFAULT 0, admin_fee_pct REAL DEFAULT 50, created_at TEXT DEFAULT '',
+		routemate_vehicle_id TEXT DEFAULT '')`,
 	"CREATE TABLE truck_assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER, driver_name TEXT, start_date TEXT, end_date TEXT DEFAULT '')",
 	"CREATE TABLE carrier_driver_history (id INTEGER PRIMARY KEY AUTOINCREMENT, carrier_name TEXT, driver_name TEXT, started_at TEXT, ended_at TEXT)",
 ];
@@ -305,9 +308,11 @@ const snapshot = (db) => JSON.stringify({
 const audits = (db, action) => db.prepare("SELECT * FROM audit_trail WHERE action = ? ORDER BY id").all(action);
 
 // The body DriverTable.vue's Save sends: every column, from the loaded row.
-// `over` replaces individual columns by header name. (The component zeroes the
-// inactive pay field; a numeric 0 reads as "not sent" in this handler, so it
-// is sent here as the stored value, which is what that zero amounts to.)
+// `over` replaces individual columns by header name. (The component sends the
+// inactive pay field as "", and a page loaded before 2026-09-26 as a numeric
+// 0; the handler reads both as "not sent", so it is sent here as the stored
+// value, which is what not sending it amounts to. scripts/test-driver-pay-clear.js
+// runs the component's own cells.)
 function dirFormBody(r, over = {}) {
 	const v = {
 		Driver: r.driver_name, "Carrier Name": "", State: r.state, City: r.city, ZIP: r.zip, Address: r.address,
