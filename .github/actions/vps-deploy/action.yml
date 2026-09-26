@@ -178,7 +178,7 @@ runs:
 
     - name: Auto-rollback
       # Fires only when this target is configured to self-heal AND something
-      # actually failed. Nobody is watching an auto-deploy, so production must
+      # actually failed. Nobody watches a deploy to the end, so production must
       # not be able to stay broken. remote-rollback.sh also records the failed
       # commit in the drift marker (keeping a marker that already blocks
       # main's tip), so deploy-drift.yml can never re-deploy it. PREV is the
