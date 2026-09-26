@@ -99,13 +99,17 @@
           <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
             <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
             <span v-if="selectedJob && needsReview(selectedJob)" :style="reviewBadgeStyle" title="Rate or address is missing from the rate-con extract. Open in Active Loads → Edit to fill the gaps.">⚠ Needs Review</span>
-            <button type="button" :disabled="drafting" :style="draftBtnStyle" @click="draftInvoice" title="Preview the invoice, POD, and rate-con and verify the recipient, then approve to save a Gmail draft for you to send.">{{ drafting ? 'Preparing…' : '✉ Draft Invoice Email' }}</button>
+            <!-- Invoice drafting is Super Admin only (owner, 2026-09-26): every
+                 draft route answers anyone else 403. -->
+            <button v-if="auth.isSuperAdmin" type="button" :disabled="drafting" :style="draftBtnStyle" @click="draftInvoice" title="Preview the invoice, POD, and rate-con and verify the recipient, then approve to save a Gmail draft for you to send.">{{ drafting ? 'Preparing…' : '✉ Draft Invoice Email' }}</button>
           </div>
-          <div v-if="draftResult" :style="draftMsgStyle">{{ draftResult.msg }}</div>
-          <div v-if="approvedDraft" :style="approvedLineStyle">
-            <span>✓ Draft #{{ approvedDraft.invoice_id }} → {{ approvedDraft.recipient }} · {{ fmtDraftDate(approvedDraft.created_at) }}</span>
-            <button type="button" :style="reviewLinkStyle" :disabled="drafting" @click="draftInvoice">Review</button>
-          </div>
+          <template v-if="auth.isSuperAdmin">
+            <div v-if="draftResult" :style="draftMsgStyle">{{ draftResult.msg }}</div>
+            <div v-if="approvedDraft" :style="approvedLineStyle">
+              <span>✓ Draft #{{ approvedDraft.invoice_id }} → {{ approvedDraft.recipient }} · {{ fmtDraftDate(approvedDraft.created_at) }}</span>
+              <button type="button" :style="reviewLinkStyle" :disabled="drafting" @click="draftInvoice">Review</button>
+            </div>
+          </template>
           <DialogDescription class="sr-only">Details for load {{ loadIdValue }}</DialogDescription>
         </DialogHeader>
         <div style="padding:1.25rem;overflow-y:auto;flex:1;">
@@ -549,7 +553,8 @@ async function openDetail(job) {
   const p = []
   if (lid) p.push(api.get(`/api/documents/${encodeURIComponent(lid)}`).then(r => { loadDocs.value = r.documents || [] }).catch(() => {}))
   if (lid) p.push(api.get(`/api/load-ratings/${encodeURIComponent(lid)}`).then(r => { loadRating.value = r.rating || 0 }).catch(() => {}))
-  if (lid) p.push(api.get(`/api/loads/${encodeURIComponent(lid)}/invoice-draft`).then(r => { approvedDraft.value = r.draft || null }).catch(() => {}))
+  // Super Admin only, like the route: anyone else would only collect a 403.
+  if (lid && auth.isSuperAdmin) p.push(api.get(`/api/loads/${encodeURIComponent(lid)}/invoice-draft`).then(r => { approvedDraft.value = r.draft || null }).catch(() => {}))
   const hasLatCol = props.headers.some(h => /origin.*lat|pickup.*lat|dest.*lat|drop.*lat/i.test(h))
   if (!hasLatCol && lid) p.push(api.get(`/api/geocode/load/${encodeURIComponent(lid)}`).then(g => {
     if (g.originLat) { selectedJob.value['Origin Lat'] = g.originLat; selectedJob.value['Origin Lng'] = g.originLng }
@@ -697,7 +702,7 @@ const draftMsgStyle = computed(() => ({
 // Runs a dryRun (no draft, no invoice number burned) and opens the review modal.
 // Doubles as the "Review" re-open for an already-approved draft.
 async function draftInvoice() {
-  if (!loadIdValue.value || drafting.value) return
+  if (!auth.isSuperAdmin || !loadIdValue.value || drafting.value) return
   drafting.value = true; draftResult.value = null
   try {
     // The preview does the same heavy work as approve (Sheets + Drive + Gemini +
@@ -735,7 +740,7 @@ async function onDraftApproved(payload) {
     msg: `✓ Draft ready in Gmail (invoice ${payload.invoiceId}). Verify the details, then send.`,
   }
   const lid = loadIdValue.value
-  if (!lid) return
+  if (!lid || !auth.isSuperAdmin) return
   try {
     const r = await api.get(`/api/loads/${encodeURIComponent(lid)}/invoice-draft`)
     approvedDraft.value = r.draft || null

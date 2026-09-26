@@ -596,7 +596,9 @@ section("7. Wiring — the guarantees that no value can prove");
 	ok(previewRoute.text.indexOf("if (invoicePreviewInflight >= INVOICE_PREVIEW_MAX_INFLIGHT)")
 		< previewRoute.text.indexOf("invoicePreviewInflight++;"),
 		"§7 …and the cap is checked BEFORE the increment");
-	ok(/"\/api\/loads\/:loadId\/invoice-preview",\n\trequireRole\("Super Admin", "Dispatcher"\),/.test(SRC),
+	// Super Admin only since 2026-09-26; scripts/test-invoice-draft-admin-only.js
+	// executes the gate on every invoice-draft route.
+	ok(/"\/api\/loads\/:loadId\/invoice-preview",\n\trequireRole\("Super Admin"\),/.test(SRC),
 		"§7 requireRole is mounted BEFORE the limiter so a 403 cannot spend the budget");
 	ok(/\trefuseCrossSite,\n\tinvoicePreviewLimiter,/.test(SRC), "§7 the preview carries refuseCrossSite + its limiter");
 
