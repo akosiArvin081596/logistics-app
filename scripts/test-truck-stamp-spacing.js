@@ -10,39 +10,50 @@
  * Owner ID 0, which moves a load's revenue to the company. They matched the
  * truck with LOWER(assigned_driver) = LOWER(?), which folds case but not
  * spacing, so a truck stored as "Shorn  King" was missed for the driver
- * "Shorn King". They now ask findTruckForDriverStamp(): findTruckForDriver()
- * (case aside, else through normalizeDriverName()), then, for the dispatch
- * routes, the active truck_assignments row found the same two ways. A spacing
- * match counts only while no other account holds the name under another
- * spelling (driverNameHeldByOtherSpelling()); otherwise that step is no match,
- * as before. assignDriverToTruck() releases the driver's other truck and
- * assignment rows the same way, and the public tracker shows the unit the same
- * lookup finds. The driver's open carrier pairing (carrier_driver_history,
- * getInvestorDriverSet() leg 3) is kept by one helper, syncOpenCarrierPairing(),
- * which both of its writers call: assignDriverToTruck() and
- * syncCarrierDriverHistory() (POST and PUT /api/drivers-directory). A pairing
- * stored under a spacing variant is closed the same way when the carrier
- * changes.
+ * "Shorn King". They now ask findTruckForDriverStamp(): the truck naming the
+ * driver case aside, then, for the dispatch routes, the active
+ * truck_assignments row naming them case aside, the two lookups the stamps
+ * always used; only then either one through normalizeDriverName(), the truck
+ * first. So a spacing match only fills what used to be Owner ID 0, and a stale
+ * truck naming the driver under a spacing variant never outranks the driver's
+ * own active assignment. A spacing match counts only while no other account
+ * holds the name under another spelling (driverNameHeldByOtherSpelling());
+ * otherwise it is no match, as before. assignDriverToTruck() releases the
+ * driver's other truck and assignment rows the same way, and the public
+ * tracker shows the unit the same lookup finds. The driver's open carrier
+ * pairing (carrier_driver_history, getInvestorDriverSet() leg 3) is kept by one
+ * helper, syncOpenCarrierPairing(), which both of its writers call:
+ * assignDriverToTruck() and syncCarrierDriverHistory() (POST and PUT
+ * /api/drivers-directory). A pairing stored under a spacing variant is closed
+ * the same way when the carrier changes. One open under the same carrier is
+ * left open, and the driver's own spelling is opened beside it, because leg 3
+ * does not collapse internal spaces.
  *
  *   §1 the helpers on their own: findTruckForDriver()'s added fields,
  *      findActiveAssignmentTruckForDriver(), driverNameHeldByOtherSpelling()
- *      and findTruckForDriverStamp().
+ *      and findTruckForDriverStamp(), the order of its four steps included.
  *   §2 POST /api/expenses, lifted whole and run against a real database.
  *   §3 POST /api/dispatch and /api/dispatch/reassign, lifted whole, against a
  *      real database and a fake sheet: the Truck and Owner ID cells written.
  *   §4 assignDriverToTruck(): the spacing-variant truck and assignment released.
  *   §4b assignDriverToTruck(): the open carrier pairing stored under a spacing
- *      variant closed when the carrier changes, under the same guard.
- *   §4c syncCarrierDriverHistory(): the same, through the same helper, and a
- *      single case-aside open row handled exactly as by the case-only copy the
- *      helper replaced.
+ *      variant closed when the carrier changes, under the same guard. One under
+ *      the same carrier is kept, with the driver's own spelling opened beside
+ *      it, so getInvestorDriverSet() still names the driver once they move on.
+ *   §4c syncCarrierDriverHistory(): the same, through the same helper. A single
+ *      case-aside open row, or a spacing variant open only under the carrier
+ *      being written, ends exactly as under the case-only copy the helper
+ *      replaced.
  *   §5 the wiring: each stamp and the tracker ask the helper, with no
  *      case-only lookup of their own; both pairing writers ask
  *      syncOpenCarrierPairing(), the only code that opens or closes a pairing.
  *   §6 the mutants: each stamp back to case-only, the guard removed, the
  *      guard's own-spelling exception dropped, assignDriverToTruck()'s pairing
- *      handed a case-only answer, and the pairing helper's spacing step removed
- *      (run through each writer, and each must catch it).
+ *      handed a case-only answer, the pairing helper's spacing step removed,
+ *      the stamps' spacing truck step back ahead of the case-aside assignment,
+ *      and a spacing variant under the same carrier counted as the driver's own
+ *      spelling. Each pairing mutant runs through each writer, and each must
+ *      catch it.
  *
  *   node scripts/test-truck-stamp-spacing.js     # exits 1 on any failure
  */
@@ -127,7 +138,7 @@ const decomment = (s) => s.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("
 
 const HELPERS = ["normalizeDriverName", "findDriverNameClashes", "driverNameHeldByOtherAccount", "driverNameHeldByOtherSpelling",
 	"findTruckForDriver", "findActiveAssignmentTruckForDriver", "findTruckForDriverStamp", "assignDriverToTruck",
-	"syncOpenCarrierPairing", "syncCarrierDriverHistory"];
+	"syncOpenCarrierPairing", "syncCarrierDriverHistory", "getInvestorDriverSet"];
 const HELPER_SRC = Object.fromEntries(HELPERS.map((n) => [n, extract(n)]));
 function buildHelpers(db, over = {}) {
 	const s = { ...HELPER_SRC, ...over };
@@ -200,6 +211,12 @@ const T205 = [2, "205", "Deshorn King", 7, "RM-205"];
 const A101 = [1, "Shorn  King", "2026-09-01T12:00:00.000Z"];
 const A205 = [2, "Deshorn King", "2026-09-01T12:00:00.000Z"];
 const withTruck = (base, over) => { const r = base.slice(); for (const [i, v] of Object.entries(over)) r[i] = v; return r; };
+// The drift the dispatch stamps' assignment fallback exists for: the driver's
+// own active assignment, spelled exactly, is on truck 300, whose
+// assigned_driver has drifted to blank, while truck 101 is a stale truck still
+// naming them with a doubled space.
+const T300 = [3, "300", "", 9, "RM-300"];
+const DRIFTED = { accounts: [SK], trucks: [T101, T300], assignments: [[3, "Shorn King", "2026-09-01T12:00:00.000Z"]] };
 
 // ─────────────────────────────────────────────────────────────── §1 helpers
 function helperSection(over = {}) {
@@ -265,6 +282,16 @@ function helperSection(over = {}) {
 		t("findTruckForDriverStamp(), ...and a spacing-variant assignment is refused the same way",
 			stamp({ accounts: [SK, SK_OTHER], trucks: [T101], assignments: [A101] }, "Shorn King", { activeAssignment: true }), null);
 		t("findTruckForDriverStamp(), a blank name: no truck", stamp({ trucks: [withTruck(T101, { 2: "" })] }, "", { activeAssignment: true }), null);
+		// The order of the four steps: both case-aside steps before either spacing
+		// step, so a spacing match only fills what used to be Owner ID 0.
+		t("findTruckForDriverStamp(), a stale spacing-variant truck beside the driver's case-aside active assignment: the assignment, as before the spacing steps",
+			stamp(DRIFTED, "Shorn King", { activeAssignment: true }), [3, "300", 9, "RM-300", "case"]);
+		t("findTruckForDriverStamp(), ...without the assignment step (the expense stamp): the truck case aside, then across spacing",
+			stamp(DRIFTED, "Shorn King"), [1, "101", 5, "RM-101", "normalized"]);
+		t("findTruckForDriverStamp(), a case-aside truck still comes before a case-aside assignment",
+			stamp({ ...DRIFTED, trucks: [withTruck(T101, { 2: "SHORN KING" }), T300] }, "Shorn King", { activeAssignment: true }), [1, "101", 5, "RM-101", "case"]);
+		t("findTruckForDriverStamp(), and a spacing-variant truck before a spacing-variant assignment",
+			stamp({ ...DRIFTED, assignments: [[3, "Shorn   King", "2026-09-01T12:00:00.000Z"]] }, "Shorn King", { activeAssignment: true }), [1, "101", 5, "RM-101", "normalized"]);
 	}
 	return results;
 }
@@ -353,6 +380,13 @@ async function expenseSection(routeSrc = ROUTES.expense, helperOver = {}) {
 	{
 		const { r, row } = await post({ accounts: [SK, DK, SK_OTHER], trucks: [withTruck(T101, { 2: "SHORN KING" }), T205] }, DRIVER_SK);
 		t("POST /api/expenses, ...a truck naming the driver case aside is still stamped",
+			[r.code, row], [200, ["Shorn King", "101", 5, "TX", "eld"]]);
+	}
+	{
+		// No assignment step on this stamp, so the dispatch stamps' order changes
+		// nothing here: the truck case aside, then across spacing.
+		const { r, row } = await post(DRIFTED, DRIVER_SK);
+		t("POST /api/expenses, a stale spacing-variant truck beside the driver's case-aside active assignment: the truck, as the trucks steps order it",
 			[r.code, row], [200, ["Shorn King", "101", 5, "TX", "eld"]]);
 	}
 	return results;
@@ -448,6 +482,8 @@ async function dispatchSection(routes = { dispatch: ROUTES.dispatch, reassign: R
 			[200, "Shorn King", "101", "5"]);
 		t(`${label}, a name no truck or assignment names: no truck, Owner ID 0`,
 			brief(await run({ accounts: [SK], trucks: [T101] }, "Pat Newhire")), [200, "Pat Newhire", "", "0"]);
+		t(`${label}, a stale truck naming the driver with a doubled space beside the driver's case-aside active assignment: the assignment's Truck and Owner ID, as before`,
+			brief(await run(DRIFTED, "Shorn King")), [200, "Shorn King", "300", "9"]);
 	}
 	return results;
 }
@@ -514,9 +550,12 @@ function pairingSection(helperOver = {}) {
 	t("...a directory-only driver (no account): the same",
 		after({ pairings: [["Carrier Five LLC", "Shorn  King"]] }, "Shorn King"),
 		["Carrier Five LLC|Shorn  King|closed", "Carrier Seven LLC|Shorn King|open"]);
-	t("the spacing-variant pairing already under this carrier: left open, no second row",
+	t("the spacing-variant pairing already under this carrier: left open, and the driver's own spelling opened beside it, as the case-only lookup did",
 		after({ accounts: [SK], pairings: [["Carrier Seven LLC", "Shorn  King"]] }, "Shorn King"),
-		["Carrier Seven LLC|Shorn  King|open"]);
+		["Carrier Seven LLC|Shorn  King|open", "Carrier Seven LLC|Shorn King|open"]);
+	t("...one under this carrier stored with edge spaces is the driver's own spelling once trimmed, as leg 3 reads it: left open, no second row",
+		after({ accounts: [SK], pairings: [["Carrier Seven LLC", " shorn king "]] }, "Shorn King"),
+		["Carrier Seven LLC| shorn king |open"]);
 	t("two open pairings the old lookup left (a variant under Carrier Five, the name under Carrier Seven): the variant closed, the other kept, no new row",
 		after({ accounts: [SK], pairings: [["Carrier Five LLC", "Shorn  King"], ["Carrier Seven LLC", "Shorn King"]] }, "Shorn King"),
 		["Carrier Five LLC|Shorn  King|closed", "Carrier Seven LLC|Shorn King|open"]);
@@ -535,6 +574,19 @@ function pairingSection(helperOver = {}) {
 	t("Deshorn King's pairing is never Shorn King's to close",
 		after({ accounts: [SK, DK], pairings: [["Carrier Five LLC", "Deshorn King"]] }, "Shorn King"),
 		["Carrier Five LLC|Deshorn King|open", "Carrier Seven LLC|Shorn King|open"]);
+	{
+		// What the pairing is for: getInvestorDriverSet() leg 3 reads every pairing
+		// under the investor's carrier, open or closed, trimmed and case aside but
+		// with internal spaces kept. Once the driver moves on to Carrier Five's
+		// truck 101, legs 1 and 1b no longer name them for Carrier Seven.
+		const db = makeDb({ investors: INVESTORS, trucks: [T101, T3], accounts: [SK], pairings: [["Carrier Seven LLC", "Shorn  King"]] });
+		const m = buildHelpers(db, helperOver);
+		m.assignDriverToTruck(3, "Shorn King");
+		m.assignDriverToTruck(1, "Shorn King");
+		t("the driver moved on from Carrier Seven's truck to Carrier Five's: Carrier Seven's driver set still names them in their own spelling, and in the variant",
+			[[...m.getInvestorDriverSet(7, null, null, null)].sort(), pairingRows(db)],
+			[["shorn  king", "shorn king"], ["Carrier Seven LLC|Shorn  King|closed", "Carrier Seven LLC|Shorn King|closed", "Carrier Five LLC|Shorn King|open"]]);
+	}
 	return results;
 }
 
@@ -595,12 +647,26 @@ function directorySyncSection(helperOver = {}) {
 	t("...a directory-only driver (no account): the same",
 		after({ pairings: [["Carrier Five LLC", "Shorn  King"]] }, to("Shorn King")),
 		["Carrier Five LLC|Shorn  King|closed", "Carrier Seven LLC|Shorn King|open"]);
-	t("the spacing-variant pairing already open under this carrier: left open, not reopened",
+	// A spacing variant open under this carrier is the same carrier, so it stays
+	// open; but it is not the driver's own spelling, which leg 3 needs, so that
+	// is opened beside it, as the case-only copy did.
+	t("the spacing-variant pairing already open under this carrier: left open, and the driver's own spelling opened beside it",
 		after({ accounts: [SK], pairings: [["Carrier Seven LLC", "Shorn  King"]] }, to("Shorn King")),
-		["Carrier Seven LLC|Shorn  King|open"]);
-	t("...under this carrier spelled in another case: left open too",
+		["Carrier Seven LLC|Shorn  King|open", "Carrier Seven LLC|Shorn King|open"]);
+	t("...under this carrier spelled in another case: the same",
 		after({ accounts: [SK], pairings: [["CARRIER SEVEN LLC", "Shorn  King"]] }, to("Shorn King")),
-		["CARRIER SEVEN LLC|Shorn  King|open"]);
+		["CARRIER SEVEN LLC|Shorn  King|open", "Carrier Seven LLC|Shorn King|open"]);
+	{
+		const db = makeDb({ accounts: [SK], pairings: [["Carrier Seven LLC", "Shorn  King"]] });
+		const { syncCarrierDriverHistory } = buildHelpers(db, helperOver);
+		syncCarrierDriverHistory(to("Shorn King"), "Driver", "Carrier Name");
+		syncCarrierDriverHistory(to("Shorn King"), "Driver", "Carrier Name");
+		t("...and the next save of the row opens nothing more", pairingRows(db),
+			["Carrier Seven LLC|Shorn  King|open", "Carrier Seven LLC|Shorn King|open"]);
+	}
+	t("a directory row spelled with a doubled space, no account holding either spelling, the other spelling open under this carrier: the row's own spelling opened beside it",
+		after({ pairings: [["Carrier Seven LLC", "Shorn King"]] }, to("Shorn  King")),
+		["Carrier Seven LLC|Shorn King|open", "Carrier Seven LLC|Shorn  King|open"]);
 	t("two open pairings the old lookup left (a variant under Carrier Five, the name under Carrier Seven): the variant closed, the other kept, no new row",
 		after({ accounts: [SK], pairings: [["Carrier Five LLC", "Shorn  King"], ["Carrier Seven LLC", "Shorn King"]] }, to("Shorn King")),
 		["Carrier Five LLC|Shorn  King|closed", "Carrier Seven LLC|Shorn King|open"]);
@@ -643,18 +709,44 @@ function directorySyncSection(helperOver = {}) {
 	];
 	const INPUTS = [to("Shorn King"), to("Shorn King", "Carrier Five LLC"), to("SHORN KING", "carrier seven llc"), [],
 		[...to("Shorn King"), ...to("Deshorn King")]];
-	const drift = [];
-	let compared = 0;
-	for (const accounts of [[SK, DK], [SK, DK, SK_OTHER]]) {
-		WORLDS.forEach((w, wi) => INPUTS.forEach((rows, ii) => {
-			const world = { accounts, ...w };
-			const was = pairingDump(run(world, rows, { src: CASE_ONLY_SYNC_SRC }));
-			const now = pairingDump(run(world, rows));
-			compared++;
-			if (JSON.stringify(was) !== JSON.stringify(now)) drift.push({ accounts: accounts.length, world: wi, input: ii, was, now });
-		}));
+	const sweep = (worlds, inputs) => {
+		const drift = [];
+		let compared = 0;
+		for (const accounts of [[SK, DK], [SK, DK, SK_OTHER]]) {
+			worlds.forEach((w, wi) => inputs.forEach((rows, ii) => {
+				const world = { accounts, ...w };
+				const was = pairingDump(run(world, rows, { src: CASE_ONLY_SYNC_SRC }));
+				const now = pairingDump(run(world, rows));
+				compared++;
+				if (JSON.stringify(was) !== JSON.stringify(now)) drift.push({ accounts: accounts.length, world: wi, input: ii, was, now });
+			}));
+		}
+		return { compared, drift };
+	};
+	{
+		const { compared, drift } = sweep(WORLDS, INPUTS);
+		t(`one case-aside open row, or none: all ${compared} world and input pairs end exactly as under the case-only copy`, drift, []);
 	}
-	t(`one case-aside open row, or none: all ${compared} world and input pairs end exactly as under the case-only copy`, drift, []);
+	// A spacing variant open only under the carrier being written, with and
+	// without the guard engaged: nothing is under another carrier, so nothing is
+	// closed, and the rows end exactly as under the case-only copy, every column.
+	// The variant is left open, and the driver's own spelling is opened beside
+	// it unless it is open already. (A variant with only edge spaces is the
+	// driver's own spelling once trimmed, so it is not one of these; see above.)
+	const SAME_CARRIER_WORLDS = [
+		{ pairings: [["Carrier Seven LLC", "Shorn  King"]] },
+		{ pairings: [["CARRIER SEVEN LLC", "shorn   king"]] },
+		{ pairings: [["Carrier Seven LLC", " Shorn  King "]] },
+		{ pairings: [["Carrier Seven LLC", "Shorn King", EARLIER], ["Carrier Seven LLC", "Shorn  King"]] },
+		{ pairings: [["Carrier Seven LLC", "Shorn  King"], ["carrier seven llc", "Shorn King"]] },
+		{ pairings: [["Carrier Seven LLC", "Shorn  King"], ["Carrier Five LLC", "Deshorn King"]] },
+	];
+	const SAME_CARRIER_INPUTS = [to("Shorn King"), to("SHORN KING", "carrier seven llc"), to(" shorn king ", "CARRIER SEVEN LLC"),
+		[...to("Shorn King"), ...to("Deshorn King")]];
+	{
+		const { compared, drift } = sweep(SAME_CARRIER_WORLDS, SAME_CARRIER_INPUTS);
+		t(`a spacing variant open only under the carrier being written: all ${compared} world and input pairs end exactly as under the case-only copy`, drift, []);
+	}
 	return results;
 }
 
@@ -707,10 +799,14 @@ function wiringSection(routes = ROUTES) {
 	const OLD_EXPENSE = 'db.prepare("SELECT unit_number, owner_id, routemate_vehicle_id FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(driver.trim())';
 	const oldDispatch = (who) => `db.prepare("SELECT unit_number, owner_id FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(${who}.trim())
 			|| db.prepare("SELECT t.unit_number AS unit_number, t.owner_id AS owner_id FROM truck_assignments ta JOIN trucks t ON t.id = ta.truck_id WHERE LOWER(ta.driver_name) = LOWER(?) AND ta.end_date = '' ORDER BY ta.start_date DESC LIMIT 1").get(${who}.trim())`;
-	const GUARD = "if (held === undefined) held = driverNameHeldByOtherSpelling(name);\n\t\treturn !held;";
+	const GUARD = "if (!spacing || driverNameHeldByOtherSpelling(name)) return null;";
 	const ASSIGN_GUARD = 'const releaseSpacingVariants = needle !== "" && !driverNameHeldByOtherSpelling(driverName);';
 	const pairingSpacingStepRemoved = () => ({ syncOpenCarrierPairing: mutate(HELPER_SRC.syncOpenCarrierPairing,
 		"if (!found.has(r.id) && normalizeDriverName(r.driver_name) === needle) openPairings.push(r);", "void r;") });
+	// Any open row under the carrier counts, a spacing variant included: the
+	// rule before this fix.
+	const pairingSameCarrierVariantCounts = () => ({ syncOpenCarrierPairing: mutate(HELPER_SRC.syncOpenCarrierPairing,
+		'else if (String(r.driver_name || "").trim().toLowerCase() === driverLower) openUnderCarrier = true;', "else openUnderCarrier = true;") });
 	const mutants = [
 		["M1 POST /api/expenses back to the case-only truck lookup",
 			async () => expenseSection(mutate(ROUTES.expense, "findTruckForDriverStamp(driver)", OLD_EXPENSE))],
@@ -720,7 +816,7 @@ function wiringSection(routes = ROUTES) {
 			async () => dispatchSection({ dispatch: ROUTES.dispatch, reassign: mutate(ROUTES.reassign, "findTruckForDriverStamp(newDriver, { activeAssignment: true })", oldDispatch("newDriver")) })],
 		["M4 the stamps' guard removed (a spacing match taken while another account holds the name)",
 			async () => {
-				const over = { findTruckForDriverStamp: mutate(HELPER_SRC.findTruckForDriverStamp, GUARD, "return true;") };
+				const over = { findTruckForDriverStamp: mutate(HELPER_SRC.findTruckForDriverStamp, GUARD, "if (!spacing) return null;") };
 				return [...helperSection(over), ...(await expenseSection(ROUTES.expense, over)), ...(await dispatchSection(undefined, over))];
 			}],
 		["M5 the dispatch fallback's spacing step dropped (the active assignment back to case-only)",
@@ -756,6 +852,19 @@ function wiringSection(routes = ROUTES) {
 			async () => pairingSection(pairingSpacingStepRemoved())],
 		["M11 the pairing helper's spacing step removed, run through syncCarrierDriverHistory() (§4c)",
 			async () => directorySyncSection(pairingSpacingStepRemoved())],
+		// The order before this fix: the truck across spacing (under the guard)
+		// ahead of the case-aside active assignment.
+		["M12 the stamps' spacing truck step back ahead of the case-aside active assignment",
+			async () => {
+				const over = { findTruckForDriverStamp: mutate(HELPER_SRC.findTruckForDriverStamp,
+					'if (truck && truck.matchedBy === "case") return truck;',
+					'if (truck && (truck.matchedBy === "case" || !driverNameHeldByOtherSpelling(name))) return truck;') };
+				return [...helperSection(over), ...(await expenseSection(ROUTES.expense, over)), ...(await dispatchSection(undefined, over))];
+			}],
+		["M13 a spacing variant open under the same carrier counted as the driver's own spelling, run through assignDriverToTruck() (§4b)",
+			async () => pairingSection(pairingSameCarrierVariantCounts())],
+		["M13 a spacing variant open under the same carrier counted as the driver's own spelling, run through syncCarrierDriverHistory() (§4c)",
+			async () => directorySyncSection(pairingSameCarrierVariantCounts())],
 	];
 	for (const [label, run] of mutants) {
 		let caught;

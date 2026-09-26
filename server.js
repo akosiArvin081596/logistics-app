@@ -1683,8 +1683,19 @@ if (driverCount === 0) {
 // the row's carrier). The driver's open pairings are the rows naming them case
 // aside and, while driverNameHeldByOtherSpelling() allows, through a spacing
 // variant (normalizeDriverName()). Each one under another carrier is closed at
-// `now`; a row is opened, both names trimmed, only when none is open under this
-// carrier. A single case-aside open row is handled exactly as before.
+// `now`. A row is opened, both names trimmed, unless one is already open under
+// this carrier in the driver's own spelling: the name as passed, trimmed and
+// case aside, which is how leg 3 keys a row. A spacing variant open under this
+// carrier does not count, and it is left open. Leg 3 does not collapse internal
+// spaces, so with only the variant open, the investor's loads under the
+// driver's own spelling with a blank Owner ID stop matching once the driver
+// moves on; the case-only copies this helper replaced opened that row. The
+// variant is not closed: it is the same carrier, so the pairing still holds,
+// and closing it would end the months getInvestorDriverMonthWindows() leg C
+// gives that spelling. An investor keeps every spelling it already covers and
+// gains the driver's own. When the driver moves to another carrier, both rows
+// close together, under the same guard. A single case-aside open row is
+// handled exactly as before.
 // `releaseSpacingVariants` is the guard's answer from a caller that has already
 // acted on it (assignDriverToTruck()'s release), so one assignment asks once;
 // left undefined, the helper asks.
@@ -1695,9 +1706,10 @@ function syncOpenCarrierPairing(driverName, carrierName, now, releaseSpacingVari
 	const needle = normalizeDriverName(driver);
 	if (releaseSpacingVariants === undefined) releaseSpacingVariants = !driverNameHeldByOtherSpelling(driver);
 	const carrierLower = carrier.toLowerCase();
+	const driverLower = driver.toLowerCase();
 	const openPairings = db.prepare(
-		"SELECT id, carrier_name FROM carrier_driver_history WHERE LOWER(driver_name) = ? AND ended_at IS NULL ORDER BY id"
-	).all(driver.toLowerCase());
+		"SELECT id, carrier_name, driver_name FROM carrier_driver_history WHERE LOWER(driver_name) = ? AND ended_at IS NULL ORDER BY id"
+	).all(driverLower);
 	if (releaseSpacingVariants) {
 		const found = new Set(openPairings.map((r) => r.id));
 		for (const r of db.prepare("SELECT id, carrier_name, driver_name FROM carrier_driver_history WHERE ended_at IS NULL AND COALESCE(driver_name, '') <> '' ORDER BY id").all()) {
@@ -1707,8 +1719,8 @@ function syncOpenCarrierPairing(driverName, carrierName, now, releaseSpacingVari
 	const closePairing = db.prepare("UPDATE carrier_driver_history SET ended_at = ? WHERE id = ?");
 	let openUnderCarrier = false;
 	for (const r of openPairings) {
-		if (String(r.carrier_name || "").toLowerCase() === carrierLower) openUnderCarrier = true;
-		else closePairing.run(now, r.id);
+		if (String(r.carrier_name || "").toLowerCase() !== carrierLower) closePairing.run(now, r.id);
+		else if (String(r.driver_name || "").trim().toLowerCase() === driverLower) openUnderCarrier = true;
 	}
 	if (!openUnderCarrier) {
 		db.prepare(
@@ -6878,30 +6890,33 @@ function findActiveAssignmentTruckForDriver(name) {
 // POST /api/dispatch and /api/dispatch/reassign write on a load, and the truck,
 // owner and ELD vehicle POST /api/expenses writes on an expense. Those decide
 // whose P&L the money lands on; a miss stamps Owner ID 0, which moves a load's
-// revenue to the company. First findTruckForDriver(); then, with
-// `activeAssignment` (the dispatch routes), the active truck_assignments row
-// (findActiveAssignmentTruckForDriver()), their fallback for a
-// trucks.assigned_driver that has drifted. Each step takes a row found only
-// through normalizeDriverName() only while no other account holds the name
-// under another spelling (driverNameHeldByOtherSpelling()); otherwise that step
-// is no match, as it was before, and the next one runs. A legacy account
-// "Shorn  King" beside the real "Shorn King" must not be stamped with the real
-// driver's truck and owner. The public tracker shows the unit it finds, so the
-// customer sees the truck the stamps name. Returns what the step found (see
-// those two helpers), or null.
+// revenue to the company. The case-aside steps run first, in the order the
+// stamps always used: the truck naming the driver (findTruckForDriver()), then,
+// with `activeAssignment` (the dispatch routes), the active truck_assignments
+// row (findActiveAssignmentTruckForDriver()), their fallback for a
+// trucks.assigned_driver that has drifted. Only when neither names the driver
+// case aside does a row found through normalizeDriverName() count, the truck
+// before the assignment, so a spacing match only ever fills what used to be
+// Owner ID 0. A spacing step ahead of the case-aside assignment would let a
+// stale truck still naming the driver under a spacing variant, the drift that
+// fallback exists for, outrank the driver's own active assignment. A spacing
+// match counts only while no other account holds the name under another
+// spelling (driverNameHeldByOtherSpelling()); otherwise it is no match, as it
+// was before. A legacy account "Shorn  King" beside the real "Shorn King" must
+// not be stamped with the real driver's truck and owner. The expense stamp has
+// no assignment step, so it reads the truck case aside, then across spacing.
+// The public tracker shows the unit it finds, so the customer sees the truck
+// the stamps name. Returns what the step found (see those two helpers), or
+// null.
 function findTruckForDriverStamp(name, { activeAssignment = false } = {}) {
-	let held;
-	const own = (hit) => {
-		if (!hit) return false;
-		if (hit.matchedBy === "case") return true;
-		if (held === undefined) held = driverNameHeldByOtherSpelling(name);
-		return !held;
-	};
 	const truck = findTruckForDriver(name);
-	if (own(truck)) return truck;
-	if (!activeAssignment) return null;
-	const assigned = findActiveAssignmentTruckForDriver(name);
-	return own(assigned) ? assigned : null;
+	if (truck && truck.matchedBy === "case") return truck;
+	const assigned = activeAssignment ? findActiveAssignmentTruckForDriver(name) : null;
+	if (assigned && assigned.matchedBy === "case") return assigned;
+	// Neither names the driver case aside, so what is left is a spacing match.
+	const spacing = truck || assigned;
+	if (!spacing || driverNameHeldByOtherSpelling(name)) return null;
+	return spacing;
 }
 
 // Sync driver to SQLite drivers_directory (replaces Google Sheet sync)
@@ -30401,9 +30416,11 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// etc.) we fall back to the active truck_assignments row. Without this
 		// fallback a missed lookup stamps Owner ID = 0 on the load, which then
 		// blocks the driver-name fallback in /api/investor (see commit 656f1b1).
-		// Both steps find the driver across spacing as well as case, a spacing
-		// match only while no other account holds the name under another
-		// spelling (findTruckForDriverStamp()).
+		// Both steps find the driver case aside before either one looks across
+		// spacing, so a stale truck naming the driver under a spacing variant
+		// never outranks their own active assignment; a spacing match counts
+		// only while no other account holds the name under another spelling
+		// (findTruckForDriverStamp()).
 		const truckForDriver = findTruckForDriverStamp(driver, { activeAssignment: true });
 		const truckUnit = truckForDriver ? truckForDriver.unit_number : '';
 		const ownerId = truckForDriver ? truckForDriver.owner_id : 0;
