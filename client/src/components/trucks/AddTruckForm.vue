@@ -183,13 +183,15 @@
       </div>
     </details>
 
-    <button class="btn btn-primary btn-add" @click="handleSubmit">Add Truck</button>
+    <!-- Also waits for a photo still being read, or the truck would be added
+         without it. -->
+    <button ref="addBtn" class="btn btn-primary btn-add" :disabled="submitting || photoBusy" @click="handleSubmit">{{ submitting ? 'Adding…' : 'Add Truck' }}</button>
     <div class="error-msg" role="alert">{{ errorMsg }}</div>
   </div>
 </template>
 
 <script setup>
-import { reactive, ref, computed, watch } from 'vue'
+import { reactive, ref, computed, watch, nextTick } from 'vue'
 import FileDropZone from '../shared/FileDropZone.vue'
 import { compressImage, DEFAULT_MAX_EDGE, isDecodedImage, dataUrlHasImageBytes } from '../../lib/imageUtils'
 import { amountError } from '../../lib/truckAmounts'
@@ -224,9 +226,12 @@ const props = defineProps({
   showOwner: { type: Boolean, default: false },
   // Driver pay is Super Admin only; everyone else adds on the default rate.
   canEditPay: { type: Boolean, default: false },
+  // The add itself, awaited in the manner of ExpenseForm's `submit-handler`.
+  // submitHandler(data) resolves once the truck exists and rejects with the
+  // server's refusal (an Error carrying its message). The fields clear only on
+  // a resolve, so a refused add keeps everything typed.
+  submitHandler: { type: Function, required: true },
 })
-
-const emit = defineEmits(['submit'])
 
 const form = reactive({
   unitNumber: '',
@@ -267,6 +272,10 @@ watch(() => form.make, () => { form.model = '' })
 
 const errorMsg = ref('')
 const photoBusy = ref(false)
+// An add is in flight: the button reads "Adding…" and the fields stay put.
+const submitting = ref(false)
+// The Add Truck button, to hand keyboard focus back once an add settles.
+const addBtn = ref(null)
 // The form's root element, for unreadableNumberError.
 const formEl = ref(null)
 
@@ -334,21 +343,41 @@ function keepUnreadableNumber(e) {
   if (el?.tagName === 'INPUT' && el.type === 'number' && el.validity?.badInput) e.stopPropagation()
 }
 
-function handleSubmit() {
+async function handleSubmit() {
+  if (submitting.value || photoBusy.value) return
   errorMsg.value = ''
   if (!form.unitNumber.trim()) {
     errorMsg.value = 'Unit number is required.'
     return
   }
-  // Refused here rather than left to the server: emitting `submit` clears this
-  // form at once, so a server refusal would land after everything typed was gone.
+  // Checked before anything is sent. The server cannot catch an unreadable
+  // number box at all: it arrives as a blank and is stored as 0.
   const badAmount = unreadableNumberError(formEl.value) || amountError(form, { canEditPay: props.canEditPay })
   if (badAmount) {
     errorMsg.value = badAmount
     return
   }
 
-  emit('submit', {
+  submitting.value = true
+  try {
+    await props.submitHandler(buildPayload())
+    // Only now. Clearing before the server answered lost everything typed
+    // whenever it refused the truck (a unit number already in use, a closed
+    // month, a photo it would not take).
+    resetForm()
+  } catch (err) {
+    errorMsg.value = err?.message || 'Failed to add truck.'
+  } finally {
+    submitting.value = false
+  }
+  // Disabling the button while the add ran dropped keyboard focus to the page
+  // body. Hand it back, unless the person has already moved it themselves.
+  await nextTick()
+  if (!document.activeElement || document.activeElement === document.body) addBtn.value?.focus()
+}
+
+function buildPayload() {
+  return {
     unitNumber: form.unitNumber.trim(),
     make: form.make.trim(),
     model: form.model.trim(),
@@ -382,8 +411,10 @@ function handleSubmit() {
     // server falls back to its DEFAULT_TANK_GALLONS / DEFAULT_MPG.
     fuel_tank_gallons: form.fuelTankGallons === '' ? 0 : form.fuelTankGallons,
     avg_mpg: form.avgMpg === '' ? 0 : form.avgMpg,
-  })
+  }
+}
 
+function resetForm() {
   form.unitNumber = ''
   form.make = ''
   form.model = ''
