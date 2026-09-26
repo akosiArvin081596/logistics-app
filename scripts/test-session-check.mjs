@@ -43,6 +43,18 @@
 // and SM6/SM7 (second review) are mutations that got through an earlier version of
 // this file.
 //
+// Section 4 also pins the fresh page. logout() always ends on exactly one
+// location.replace('/login'), after its request, whatever that request answered.
+// login() and setup() end on one at the new user's home only when the page showed
+// someone else (SM8–SM16). "Showed" includes a user restored from the tab's saved
+// copy and then signed out by the background check: that restore assigns this.user
+// directly, not through _applyAuthenticated(), and the sign-out clears this.user
+// before anyone signs in (SM13–SM16, and T8 for any new assignment).
+// T6 checks that the router opens no signed-in screen while the fresh page loads,
+// and T7 that every logout caller then REPLACES /login (a push would add a history
+// entry, and the fresh page would take that one's place instead of the signed-in
+// page's).
+//
 // No network, no DOM. Section 4 loads Pinia/Vue from client/node_modules, which
 // `npm ci` at the repo root installs (postinstall) and CI installs before this runs.
 //
@@ -594,6 +606,99 @@ report(
   }
 }
 
+// T6: while stores/auth.js loads a fresh page (sign-out, a sign-in as a different
+// person), the router opens no signed-in screen: its guard asks isLeavingPage().
+// Section 4 cannot drive the router, so this is checked by name.
+function guardWaitsForFreshPage(src) {
+  const s = stripComments(src)
+  const at = s.search(/router\.beforeEach\(/)
+  if (at < 0) return false
+  const guard = blockFrom(s, s.indexOf('{', at))
+  return (
+    /import\s*\{[^}]*\bisLeavingPage\b[^}]*\}\s*from\s*['"]\.\.\/stores\/auth(?:\.js)?['"]/.test(s) &&
+    /\bisLeavingPage\(\)/.test(guard)
+  )
+}
+report(guardWaitsForFreshPage(routerSrc), 'FAIL  T6 router/index.js must refuse signed-in routes while stores/auth.js loads a fresh page (isLeavingPage() in beforeEach)')
+report(
+  !guardWaitsForFreshPage(routerSrc.replace(/^.*\bisLeavingPage\(\).*$/m, '')),
+  'FAIL  T6 does not flag a guard without the isLeavingPage() check; the tripwire is blind',
+)
+
+// T7: every caller of auth.logout() follows it with router.replace('/login'). The
+// fresh page takes the history entry that is current when it arrives, so a push
+// here would leave the signed-in page's entry in place for Back.
+function logoutCallersReplace(files) {
+  const bad = []
+  for (const [name, src] of files) {
+    const s = stripComments(src)
+    const re = /\bauth\.logout\(\)/g
+    let m
+    while ((m = re.exec(s))) {
+      const after = s.slice(m.index, m.index + 200)
+      if (!/^auth\.logout\(\)\s*;?\s*router\.replace\(\s*['"]\/login['"]\s*\)/.test(after)) bad.push(name)
+    }
+  }
+  return bad
+}
+{
+  const files = fs
+    .readdirSync(CLIENT_SRC, { recursive: true })
+    .filter((f) => /\.(vue|js)$/.test(f) && !f.split(path.sep).includes('node_modules'))
+    .map((f) => [f, fs.readFileSync(path.join(CLIENT_SRC, f), 'utf8')])
+    .filter(([, src]) => /\bauth\.logout\(\)/.test(src))
+  const bad = logoutCallersReplace(files)
+  report(files.length >= 3 && bad.length === 0, `FAIL  T7 every auth.logout() caller must follow it with router.replace('/login') (found ${files.length} callers; not replacing: ${bad.join(', ') || 'none'})`)
+  report(
+    logoutCallersReplace([['pre-fix AppSidebar', "async function handleLogout() {\n  await auth.logout()\n  router.push('/login')\n}"]]).length === 1,
+    'FAIL  T7 does not flag a caller that pushes /login after logout; the tripwire is blind',
+  )
+}
+
+// T8: the record of who the page showed (stores/auth.js) must see EVERY user put on
+// screen, not only those _applyAuthenticated() applies. The page-load restore from
+// the saved copy assigns this.user directly, and a sign-out clears this.user before
+// anyone signs in, so a record kept in one place misses exactly the case it exists
+// for. Every real user assigned to this.user is followed at once by noteShown().
+// Section 4 proves the sites that exist today; this catches a new one.
+function unnotedUserAssignments(src) {
+  const s = stripComments(src)
+  const bad = []
+  let found = 0
+  const re = /\bthis\.user\s*=(?![=>])\s*/g
+  let m
+  while ((m = re.exec(s))) {
+    const rest = s.slice(re.lastIndex)
+    if (/^null\b/.test(rest)) continue // clearing it: nobody is put on screen
+    found++
+    const eol = rest.indexOf('\n')
+    const next = rest.slice(eol + 1).trimStart()
+    if (!next.startsWith('noteShown(')) bad.push(`this.user = ${rest.slice(0, eol).trim()}`)
+  }
+  return { found, bad }
+}
+{
+  const { found, bad } = unnotedUserAssignments(authSrc)
+  report(
+    found >= 2 && bad.length === 0,
+    `FAIL  T8 stores/auth.js must follow every real user assigned to this.user with noteShown() at once (found ${found}; not noted: ${bad.join(' | ') || 'none'})`,
+  )
+  const stripped = stripComments(authSrc)
+  const withoutRestoreNote = stripped.replace(/^[ \t]*noteShown\(known\).*\n/m, '')
+  if (withoutRestoreNote === stripped) {
+    report(false, 'FAIL  T8 control could not be built: the saved-copy restore has no noteShown(known) to remove')
+  } else {
+    report(
+      unnotedUserAssignments(withoutRestoreNote).bad.length === 1,
+      'FAIL  T8 does not flag the saved-copy restore without noteShown(); the tripwire is blind',
+    )
+  }
+  report(
+    unnotedUserAssignments('case ACTION.STAY:\n  this.user = known\n  this.isAuthenticated = true\n  this._startReconnect()\n').bad.length === 1,
+    'FAIL  T8 does not flag a direct this.user assignment with no noteShown(); the tripwire is blind',
+  )
+}
+
 // ── 4. The real store, end to end ─────────────────────────────────────────────
 // Sections 1–3 cannot prove the store FOLLOWS the rules. In review, replacing the
 // store's own "stay" branch and its background retry with `this._applySignedOut()`
@@ -605,7 +710,8 @@ report(
 //                    nothing here is timing-sensitive on a loaded CI runner
 //   Date.now         the same clock (the saved user's age, the epoch)
 //   window/document  one sessionStorage per tab, one shared localStorage, listeners,
-//                    and location.reload() counted rather than performed
+//                    and location.reload() / location.replace() recorded rather
+//                    than performed
 // Each load is a fresh module instance and a fresh Pinia with its timers and
 // listeners dropped, like a browser reload; storage persists the way a tab's does.
 const CLIENT_DIR = path.join(__dirname, '..', 'client')
@@ -644,6 +750,11 @@ const world = {
   sent: [],
   reloads: 0,
   errors: [],
+  // Requests, location.replace() and reload() calls, in the order they happened.
+  log: [],
+  // Each location.replace(), with the state of the page at that moment.
+  replaces: [],
+  store: null, // the current page's auth store
 }
 const tabStorage = (name) => {
   if (!world.tabs.has(name)) world.tabs.set(name, new MemStorage())
@@ -735,6 +846,17 @@ function installShims() {
     location: {
       reload: () => {
         world.reloads++
+        world.log.push('reload')
+      },
+      // A full page load in this page's place: recorded with how the page stood
+      // at that moment, never performed.
+      replace: (url) => {
+        world.log.push(`replace ${url}`)
+        world.replaces.push({
+          url: String(url),
+          signedIn: !!world.store?.isAuthenticated,
+          pendingLogout: world.local.getItem(PENDING_KEY) !== null,
+        })
       },
     },
   }
@@ -745,6 +867,7 @@ function installShims() {
   // An answer nobody scripted is "no signal", never a made-up success.
   globalThis.fetch = (url, opts = {}) => {
     world.sent.push(`${opts.method || 'GET'} ${url}`)
+    world.log.push(`${opts.method || 'GET'} ${url}`)
     const a = world.server.length ? world.server.shift() : OFFLINE
     if (a.offline) return Promise.reject(new TypeError('Failed to fetch'))
     if (a.hang) {
@@ -771,6 +894,9 @@ function resetWorld() {
   world.sent = []
   world.reloads = 0
   world.errors = []
+  world.log = []
+  world.replaces = []
+  world.store = null
   clock.timers.clear()
   clock.requested = []
   clock.now += HOUR // keeps Date.now moving forward across scenarios
@@ -784,9 +910,11 @@ async function pageLoad(source, tabName) {
   world.listeners = { window: {}, document: {} }
   const mod = await import(source(++loadSeq))
   const store = mod.useAuthStore(piniaModule.createPinia())
+  world.store = store
   let rerouted = 0
   mod.onSessionResolved(() => rerouted++)
-  return { store, rerouted: () => rerouted }
+  // leaving(): what the router's guard reads (isLeavingPage) on this page.
+  return { store, rerouted: () => rerouted, leaving: () => mod.isLeavingPage() }
 }
 
 function makeCtx(source, expect) {
@@ -814,10 +942,28 @@ function makeCtx(source, expect) {
       const raw = tabStorage(tabName).getItem(HINT_KEY)
       return raw ? JSON.parse(raw).user : null
     },
+    // The saved copy exactly as stored: unchanged means nothing rewrote it.
+    savedRaw: (tabName) => tabStorage(tabName).getItem(HINT_KEY),
     local: (key) => world.local.getItem(key),
     reloads: () => world.reloads,
+    // Everything since the last call, in order: requests, location.replace(), reload().
+    log: () => {
+      const l = world.log
+      world.log = []
+      return l
+    },
+    replaces: () => {
+      const r = world.replaces
+      world.replaces = []
+      return r
+    },
     fireOnline: async () => {
       for (const fn of world.listeners.window.online || []) fn()
+      await drain()
+    },
+    // `persisted: true` is a page the browser restored from its back/forward cache.
+    firePageshow: async (persisted) => {
+      for (const fn of world.listeners.window.pageshow || []) fn({ type: 'pageshow', persisted })
       await drain()
     },
     advance,
@@ -832,6 +978,53 @@ async function signedIn(c, tabName, user = DRIVER) {
   return p
 }
 const lastOf = (list) => list[list.length - 1]
+
+// What POST /api/auth/logout answers: [label, answer, is the pending-logout record
+// still there when the page is replaced?]
+const SIGN_OUT_ANSWERS = [
+  ['the server confirms it', json({ success: true }), false],
+  ['no signal', OFFLINE, true],
+  ['a 502 page', html(502), true],
+]
+
+// The path a record kept in one place would miss. A page load puts user A on
+// screen from this tab's saved copy: the offline "stay" branch assigns this.user
+// DIRECTLY, not through _applyAuthenticated(). Then the background check gets a
+// definitive answer (`endAnswer`) and _applySignedOut() clears this.user before
+// anyone signs in, so a sign-in that compared against this.user, or a record kept
+// only in _applyAuthenticated(), would see nobody. Returns that page on the login
+// screen, log cleared.
+async function restoredFromSavedCopyThenSignedOut(c, endAnswer) {
+  await signedIn(c, 'A')
+  const savedBefore = c.savedRaw('A')
+  await c.advance(60_000)
+  c.sent()
+  c.answer(OFFLINE, OFFLINE)
+  const p = await c.load('A')
+  await c.settle(p.store.checkSession())
+  c.expect(
+    '(before) A is on screen from the saved copy: both session checks on this page failed, reconnecting',
+    p.store.user?.id === DRIVER.id && p.store.isReconnecting && c.sent().join() === 'GET /api/auth/session,GET /api/auth/session',
+  )
+  c.expect(
+    '(before) …and not through _applyAuthenticated(): the saved copy is byte-for-byte unchanged (only a server answer may refresh it)',
+    savedBefore !== null && c.savedRaw('A') === savedBefore,
+  )
+  c.answer(endAnswer)
+  await c.advance(2000)
+  c.expect(
+    '(before) the background check ends the session: _applySignedOut() cleared this.user, the guard goes to /login',
+    !p.store.isAuthenticated && p.store.user === null && !p.store.isReconnecting && p.rerouted() === 1,
+  )
+  c.log()
+  return p
+}
+
+// Both definitive answers reach _applySignedOut().
+const SESSION_END_ANSWERS = [
+  ['authenticated:false', json(SIGNED_OUT)],
+  ['a 401', json({ error: 'Not authenticated' }, 401)],
+]
 
 const STORE_SCENARIOS = [
   ['online, signed in', async (c) => {
@@ -1075,6 +1268,106 @@ const STORE_SCENARIOS = [
     c.expect('at most one reload, not one per cycle', c.reloads() <= 1)
     c.expect("…and the tab settles on the server's user", p.store.isAuthenticated && p.store.user?.id === OTHER.id)
   }],
+  // A fresh page: sign-out always loads one; a sign-in loads one when the page has
+  // shown someone else. The router reads leaving() to open no signed-in screen.
+  ...SIGN_OUT_ANSWERS.map(([label, answer, kept]) => [`sign-out loads a fresh /login page: ${label}`, async (c) => {
+    const p = await signedIn(c, 'A')
+    c.log()
+    c.answer(answer)
+    await c.settle(p.store.logout())
+    c.expect("the POST, then exactly one location.replace('/login'), and no reload", c.log().join() === 'POST /api/auth/logout,replace /login')
+    const [r] = c.replaces()
+    c.expect('signed out here before the page is replaced', r?.signedIn === false && p.store.user === null)
+    c.expect(`…with the pending-logout record ${kept ? 'kept for the next load' : 'already cleared'}`, r?.pendingLogout === kept)
+    c.expect('…and the page reports it is leaving', p.leaving() === true)
+  }]),
+  ['a signed-out page restored from the back/forward cache reloads', async (c) => {
+    const p = await signedIn(c, 'A')
+    await c.firePageshow(true)
+    c.expect('(before) a page that has not asked to leave ignores a restore', c.reloads() === 0 && p.leaving() === false)
+    c.answer(json({ success: true }))
+    await c.settle(p.store.logout())
+    await c.firePageshow(false)
+    c.expect('an ordinary page show does nothing', c.reloads() === 0)
+    await c.firePageshow(true)
+    c.expect('restored from the cache: reloaded, once', c.reloads() === 1)
+  }],
+  ['the page showed a driver: a sign-in as someone else loads a fresh page at their home', async (c) => {
+    const p = await signedIn(c, 'A')
+    c.log()
+    c.answer(json({ success: true, user: OTHER }))
+    const returned = await c.settle(p.store.login('amir', 'x'))
+    c.expect("the POST, then one location.replace of the Dispatcher's home", c.log().join() === 'POST /api/auth/login,replace /dashboard')
+    c.expect("login() still returns the server's user, and the store holds it", returned?.id === OTHER.id && p.store.user?.id === OTHER.id && p.store.isAuthenticated)
+    c.expect('…and the page reports it is leaving', p.leaving() === true)
+  }],
+  ['the page showed a driver: the same driver signing in again navigates in-app', async (c) => {
+    const p = await signedIn(c, 'A')
+    c.log()
+    c.answer(json({ success: true, user: DRIVER }))
+    const returned = await c.settle(p.store.login('d.jones', 'x'))
+    c.expect('the POST alone: no location.replace, no reload', c.log().join() === 'POST /api/auth/login' && p.leaving() === false)
+    c.expect("login() returns the server's user", returned?.id === DRIVER.id)
+  }],
+  ['a first sign-in on a fresh page navigates in-app', async (c) => {
+    c.answer(json(SIGNED_OUT))
+    const p = await c.load('A')
+    await c.settle(p.store.checkSession())
+    c.log()
+    c.answer(json({ success: true, user: DRIVER }))
+    await c.settle(p.store.login('d.jones', 'x'))
+    c.expect('signed in; the POST alone, no location.replace', p.store.isAuthenticated && c.log().join() === 'POST /api/auth/login' && p.leaving() === false)
+  }],
+  // A restored from the saved copy, then _applySignedOut(): the record still knows A.
+  ...SESSION_END_ANSWERS.flatMap(([how, endAnswer]) => [
+    [`A restored from the saved copy, signed out by ${how}: B signing in loads B's home`, async (c) => {
+      const p = await restoredFromSavedCopyThenSignedOut(c, endAnswer)
+      c.answer(json({ success: true, user: OTHER }))
+      const returned = await c.settle(p.store.login('amir', 'x'))
+      c.expect("the POST, then one location.replace of B's home (/dashboard, not A's /driver)", c.log().join() === 'POST /api/auth/login,replace /dashboard')
+      c.expect('login() still returns B, and the store holds B', returned?.id === OTHER.id && p.store.user?.id === OTHER.id && p.store.isAuthenticated)
+    }],
+    [`A restored from the saved copy, signed out by ${how}: A signing back in stays in-app (control)`, async (c) => {
+      const p = await restoredFromSavedCopyThenSignedOut(c, endAnswer)
+      c.answer(json({ success: true, user: DRIVER }))
+      await c.settle(p.store.login('d.jones', 'x'))
+      c.expect('the POST alone: no location.replace, not leaving', c.log().join() === 'POST /api/auth/login' && p.leaving() === false)
+    }],
+  ]),
+  ['A restored from the saved copy, then signed out: setup() decides like login()', async (c) => {
+    let p = await restoredFromSavedCopyThenSignedOut(c, json(SIGNED_OUT))
+    c.answer(json({ success: true, role: 'Super Admin' }))
+    await c.settle(p.store.setup('admin', 'pw', 'a@b.c'))
+    c.expect("someone else: the POST, then one location.replace of the new admin's home", c.log().join() === 'POST /api/auth/setup,replace /dashboard')
+    p = await restoredFromSavedCopyThenSignedOut(c, json(SIGNED_OUT))
+    c.answer(json({ success: true, user: DRIVER }))
+    await c.settle(p.store.setup('d.jones', 'pw', ''))
+    c.expect('A again (control): the POST alone, no location.replace', c.log().join() === 'POST /api/auth/setup' && p.leaving() === false)
+  }],
+  ['a page still here after asking for a fresh one (its load was stopped): any sign-in loads one', async (c) => {
+    const p = await signedIn(c, 'A')
+    c.answer(json({ success: true }))
+    await c.settle(p.store.logout())
+    c.log()
+    c.answer(json({ success: true, user: DRIVER }))
+    await c.settle(p.store.login('d.jones', 'x'))
+    c.expect('even the same person: the POST, then a fresh page at their home', c.log().join() === 'POST /api/auth/login,replace /driver')
+  }],
+  ['setup() decides like login()', async (c) => {
+    let p = await c.load('A')
+    c.answer(json({ success: true, role: 'Super Admin' }))
+    await c.settle(p.store.setup('admin', 'pw', 'a@b.c'))
+    c.expect('a first sign-in on a fresh page: no location.replace', p.store.isAuthenticated && c.replaces().length === 0)
+    p = await signedIn(c, 'A')
+    c.answer(json({ success: true, role: 'Super Admin' }))
+    const returned = await c.settle(p.store.setup('admin', 'pw', 'a@b.c'))
+    c.expect("after the driver, the new admin: one location.replace of their home", c.replaces().map((r) => r.url).join() === '/dashboard')
+    c.expect('setup() still returns the signed-in user', returned?.username === 'admin' && returned?.role === 'Super Admin')
+    p = await signedIn(c, 'A')
+    c.answer(json({ success: true, user: DRIVER }))
+    await c.settle(p.store.setup('d.jones', 'pw', ''))
+    c.expect('the same person again: no location.replace', c.replaces().length === 0 && p.leaving() === false)
+  }],
 ]
 
 async function runStoreScenarios(source) {
@@ -1119,6 +1412,17 @@ function replaceMethodBody(src, name, body) {
   const inner = blockFrom(src, open)
   return src.slice(0, open + 1) + body + src.slice(open + 1 + inner.length)
 }
+// replaceOnce, inside the body of async method `name` only (login() and setup()
+// share lines, so a file-wide replaceOnce could not target either one).
+function replaceInMethod(src, name, pattern, replacement) {
+  const at = src.search(new RegExp(`async\\s+${name}\\s*\\(`))
+  if (at < 0) return null
+  const open = src.indexOf('{', at)
+  const inner = blockFrom(src, open)
+  const changed = replaceOnce(inner, pattern, replacement)
+  if (changed === null) return null
+  return src.slice(0, open + 1) + changed + src.slice(open + 1 + inner.length)
+}
 const STORE_MUTANTS = [
   ['SM1 (review) the known-user "stay" branch signs out instead',
     (s) => replaceOnce(s, /case ACTION\.STAY:[\s\S]*?\n\s*break\n/, 'case ACTION.STAY:\n          this._applySignedOut()\n          break\n')],
@@ -1138,6 +1442,25 @@ const STORE_MUTANTS = [
     )],
   ['SM7 (second review) afterPasswordChange() ignores an authenticated:false answer',
     (s) => replaceOnce(s, /if \(outcome === OUTCOME\.SIGNED_OUT\) \{\s*this\._applySignedOut\(\)\s*return\s*\}/, '')],
+  ['SM8 logout() ends without loading a fresh page',
+    (s) => replaceOnce(s, /replacePage\('\/login'\)/, '')],
+  ['SM9 a sign-in never loads a fresh page, whoever the page showed',
+    (s) => replaceOnce(s, /return leavingPage \|\| isDifferentUser\(shown, user\)/, 'return false')],
+  ['SM10 every sign-in loads a fresh page, the same person too',
+    (s) => replaceOnce(s, /return leavingPage \|\| isDifferentUser\(shown, user\)/, 'return true')],
+  ['SM11 the "stay" branch does not record the user it shows',
+    (s) => replaceOnce(s, /noteShown\(known\)/, '')],
+  ['SM12 a page restored from the back/forward cache is shown, not reloaded',
+    (s) => replaceOnce(s, /if \(event\.persisted\) reloadPage\(\)/, '')],
+  // After _applySignedOut() there is nobody in this.user to compare against.
+  ['SM13 login() compares the new user with this.user, which a sign-out has cleared',
+    (s) => replaceInMethod(s, 'login', /const shown = shownUser/, 'const shown = this.user')],
+  ['SM14 setup() compares the new user with this.user, which a sign-out has cleared',
+    (s) => replaceInMethod(s, 'setup', /const shown = shownUser/, 'const shown = this.user')],
+  ['SM15 _applyAuthenticated() does not record the user it shows',
+    (s) => replaceOnce(s, /this\.user = user\n\s*noteShown\(user\)/, 'this.user = user')],
+  ['SM16 a sign-out clears the record of who the page showed',
+    (s) => replaceOnce(s, /_applySignedOut\(\) \{/, '_applySignedOut() {\n      shownUser = null')],
 ]
 
 try {

@@ -29,11 +29,13 @@ const DEFAULTS = {
 // relaunched browser shows it again.
 //
 // Read that literally, because it is not the same thing as "once per login".
-// Logging out does not clear it: auth's logout() resets store state without
-// touching storage or reloading, and App.vue fetches this config once in
-// onMounted and never again. Two investors sharing one tab therefore share one
-// dismissal — the second one logs in and sees no popup (the red banner and the
-// inline disclaimers still render for them, so the notice itself is not lost).
+// Logging out does not clear it: auth's logout() leaves this key alone and loads
+// a fresh page (so does a sign-in as a different person), and sessionStorage
+// survives that load like any other reload in the tab, so App.vue's fetch in
+// onMounted on the new page reads the same dismissal. Two investors sharing one
+// tab therefore share one dismissal — the second one logs in and sees no popup
+// (the red banner and the inline disclaimers still render for them, so the
+// notice itself is not lost).
 // Keying the dismissal per user would close that gap; it is a deliberate
 // behaviour change and hasn't been signed off, so it is NOT done here.
 //

@@ -13,6 +13,7 @@ import {
   backgroundDelayMs,
   classifySessionAttempt,
   decideBackgroundStep,
+  isDifferentUser,
   isSessionUser,
   logoutConfirmed,
   pageEffect,
@@ -81,6 +82,58 @@ function reloadPage() {
   } catch {
     /* not in a browser: nothing to reload */
   }
+}
+
+// ── A fresh page: sign-out, and a sign-in as a different person ─────────────
+// logout() always ends on a fresh /login. login() and setup() end on a fresh page
+// at the new user's home when this page has shown someone else. A full page load
+// is the one reset that reaches every store, the same reason a background answer
+// naming a different person reloads (lib/sessionCheck.js, isDifferentUser).
+//
+// The person this page last showed. Every assignment of a real user to `this.user`
+// is followed at once by noteShown(), including the page-load restore from this
+// tab's saved copy, which does not go through _applyAuthenticated() (T8 in
+// scripts/test-session-check.mjs). Never cleared: a sign-out, or a session that
+// ended on its own, clears `this.user` before anyone signs in, which is why login()
+// and setup() compare against this record and never against `this.user`. A full
+// page load starts it again at null, so a first sign-in on a fresh page stays an
+// ordinary in-app navigation.
+let shownUser = null
+// Set once this page has asked for a fresh one, and kept until that page replaces
+// it. router/index.js opens no signed-in screen in the meantime.
+let leavingPage = false
+
+function noteShown(user) {
+  if (isSessionUser(user)) shownUser = user
+}
+
+/** True once this page has asked the browser for a fresh one (read by router/index.js). */
+export function isLeavingPage() {
+  return leavingPage
+}
+
+// A full load of `url` that takes this page's place in the history, so Back does
+// not return to it.
+function replacePage(url) {
+  leavingPage = true
+  try {
+    // A browser that restores this page from its back/forward cache anyway
+    // reloads it rather than showing it again.
+    window.addEventListener('pageshow', (event) => {
+      if (event.persisted) reloadPage()
+    })
+    window.location.replace(url)
+  } catch {
+    /* not in a browser: there is no page to replace */
+  }
+}
+
+// Does a sign-in (login, setup) end on a fresh page? Yes for anyone other than the
+// person this page showed before it (`shown`). No on a fresh page, or for the same
+// person again: LoginView's in-app navigation carries on. And yes on a page that
+// already asked for a fresh one and is still here (its load was stopped).
+function needsFreshPage(shown, user) {
+  return leavingPage || isDifferentUser(shown, user)
 }
 
 // ── Background re-check. Module scope, because timers are not state ─────────
@@ -224,6 +277,7 @@ export const useAuthStore = defineStore('auth', {
           // The server has said nothing since it last confirmed this user. Keep
           // them in the app; the background check settles it either way.
           this.user = known
+          noteShown(known) // on screen from the saved copy, not via _applyAuthenticated()
           this.isAuthenticated = true
           this._startReconnect()
           break
@@ -236,6 +290,7 @@ export const useAuthStore = defineStore('auth', {
 
     _applyAuthenticated(user, { persist = true } = {}) {
       this.user = user
+      noteShown(user)
       this.isAuthenticated = true
       this._stopReconnect()
       // A save that fails must not leave the PREVIOUS user saved. Otherwise a reload
@@ -316,7 +371,9 @@ export const useAuthStore = defineStore('auth', {
       // A fresh sign-in supersedes a logout that never reached the server: this
       // login just replaced whatever that cookie's session held.
       removeKey('local', PENDING_LOGOUT_KEY)
+      const shown = shownUser
       this._applyAuthenticated(data.user)
+      if (needsFreshPage(shown, this.user)) replacePage(this.roleHome)
       return data.user
     },
 
@@ -330,7 +387,9 @@ export const useAuthStore = defineStore('auth', {
       // below is built HERE, which is exactly why it is not stored as this tab's
       // known user (rule 4). The next page load confirms it with the server.
       const serverUser = data.user
+      const shown = shownUser
       this._applyAuthenticated(serverUser || { username, role: 'Super Admin' }, { persist: !!serverUser })
+      if (needsFreshPage(shown, this.user)) replacePage(this.roleHome) // as in login()
       return this.user
     },
 
@@ -357,7 +416,10 @@ export const useAuthStore = defineStore('auth', {
       // No answer. The 200 already settled this one field, so memory follows it and
       // they can leave the page. The saved copy is DROPPED, not edited: the
       // background check writes it back from the server's own answer.
-      if (isSessionUser(this.user)) this.user = { ...this.user, mustChangePassword: false }
+      if (isSessionUser(this.user)) {
+        this.user = { ...this.user, mustChangePassword: false }
+        noteShown(this.user) // the same person, but every assignment is noted (T8)
+      }
       removeKey('session', HINT_KEY)
       this._startReconnect()
     },
@@ -375,9 +437,14 @@ export const useAuthStore = defineStore('auth', {
       stampEpoch() // and no other tab restores this user from its saved copy
       removeKey('session', HINT_KEY)
       if (await this._sendLogout()) removeKey('local', PENDING_LOGOUT_KEY)
-      // Locally the person asked to leave, so they leave either way.
+      // Locally the person asked to leave, so they leave either way: signed out
+      // here, then a fresh /login page, whatever the request answered. Callers
+      // follow with router.replace('/login'), which shows the login screen until
+      // it arrives. A replace, not a push: a push adds a history entry, and the
+      // fresh page would take that one's place instead of the signed-in page's.
       this.user = null
       this.isAuthenticated = false
+      replacePage('/login')
     },
 
     // true = the server ended the session (or there was none to end).

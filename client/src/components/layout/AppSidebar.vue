@@ -166,7 +166,9 @@ const navItems = computed(() => navConfig[auth.user?.role] || [])
 
 async function handleLogout() {
   await auth.logout()
-  router.push('/login')
+  // logout() is already loading a fresh /login in this page's place; replace (not
+  // push) so that page takes this one's history entry.
+  router.replace('/login')
 }
 </script>
 
