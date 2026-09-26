@@ -12234,6 +12234,70 @@ app.get("/api/admin/orphaned-signed-artifacts", requireRole("Super Admin"), orph
 	}
 });
 
+// Accepting an investor application registers each vehicle on it as a truck
+// owned by the new account (owner_id = the user id, as the dashboard and reports
+// key it), under the unit number INV-<application id>-<A, B, …>. Returns what
+// happened to them: { created, existing, failed }.
+//
+// ⚠️ ONLY A UNIQUE VIOLATION MEANS "ALREADY EXISTS". The loop used to swallow
+// every error as a duplicate while the audit line and the welcome email counted
+// every vehicle on the application as registered, so a truck that was never
+// written read as added. unit_number is the trucks table's only UNIQUE column, so
+// SQLITE_CONSTRAINT_UNIQUE is a truck already on file under that number —
+// normally this application's own, from an earlier acceptance; it is left as it
+// is. Any other error is logged and counted as failed, and the admin is told to
+// add those trucks by hand.
+function registerApplicationVehicles(vehicles, appId, userId) {
+	const counts = { created: 0, existing: 0, failed: 0 };
+	const list = Array.isArray(vehicles) ? vehicles : [];
+	const validTruckStatus = ["Active", "Inactive", "Maintenance", "OOS"];
+	for (let i = 0; i < list.length; i++) {
+		// NOT the same bug as the sheet-column sites: `i` indexes an
+		// application's vehicles, never a spreadsheet column, so it can never
+		// produce an invalid A1 range — the 27th vehicle would just be named
+		// "INV-42-[", which is ugly but unique, and nothing builds a regex or a
+		// path from unit_number. Converted anyway because colLetter(i) is
+		// byte-identical for i < 26 (every application that has ever existed),
+		// strictly more readable above it, and leaving one benign
+		// String.fromCharCode(65 + …) in the tree means the next person to grep
+		// for the anti-pattern has to re-derive that this one is harmless —
+		// which is exactly how the accept-branch site survived.
+		const unitNum = `INV-${appId}-${colLetter(i)}`;
+		try {
+			// An entry that is not an object (only a row written before the public
+			// forms checked their vehicles could hold one) is refused here, as a
+			// failure, rather than throwing out of the acceptance.
+			const v = list[i];
+			if (!v || typeof v !== "object") throw new Error("the application's vehicle entry is not an object");
+			const truckStatus = validTruckStatus.includes(v.status) ? v.status : "Active";
+			// The purchase price is read by parseTruckAmount(), the parser
+			// POST /api/trucks and PUT /api/trucks/:id read it through, so this truck
+			// never holds a price those routes would refuse. Unlike them, a value it
+			// refuses does NOT refuse the acceptance: it is stored as 0 — unset, as a
+			// blank is — because an admin cannot edit the applicant's vehicle data,
+			// and the real price is set on the truck afterwards. "85,000" is 0 too,
+			// not the 85 that parseFloat() read out of it. A price left out is the
+			// parser's { value: undefined } ("not sent"), and that is 0 here as well.
+			const priceRead = parseTruckAmount(v.purchasePrice);
+			const vehiclePrice = priceRead.error || priceRead.value === undefined ? 0 : priceRead.value;
+			db.prepare(`INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, owner_id, purchase_price, title_status, title_state, notes)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+			.run(unitNum, v.make || "", v.model || "", parseInt(v.year) || 0, v.vin || "", v.licensePlate || "",
+				truckStatus, userId, vehiclePrice,
+				v.titleStatus || "Clean", v.titleState || "", "");
+			counts.created++;
+		} catch (err) {
+			if (err && err.code === "SQLITE_CONSTRAINT_UNIQUE") {
+				counts.existing++;
+			} else {
+				counts.failed++;
+				console.error(`Investor application ${appId}: vehicle ${unitNum} could not be added as a truck:`, err && err.message ? err.message : err);
+			}
+		}
+	}
+	return counts;
+}
+
 // Admin: accept/reject investor application
 app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), async (req, res) => {
 	try {
@@ -12297,43 +12361,15 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			// Create trucks from application vehicles (owner_id = user ID, consistent with dashboard/reports)
 			let vehicles = [];
 			try { vehicles = JSON.parse(application.vehicles_json || "[]"); } catch { /* skip */ }
-			const validTruckStatus = ["Active", "Inactive", "Maintenance", "OOS"];
-			for (let i = 0; i < vehicles.length; i++) {
-				const v = vehicles[i];
-				// NOT the same bug as the sheet-column sites: `i` indexes an
-				// application's vehicles, never a spreadsheet column, so it can never
-				// produce an invalid A1 range — the 27th vehicle would just be named
-				// "INV-42-[", which is ugly but unique, and nothing builds a regex or a
-				// path from unit_number. Converted anyway because colLetter(i) is
-				// byte-identical for i < 26 (every application that has ever existed),
-				// strictly more readable above it, and leaving one benign
-				// String.fromCharCode(65 + …) in the tree means the next person to grep
-				// for the anti-pattern has to re-derive that this one is harmless —
-				// which is exactly how the accept-branch site survived.
-				const unitNum = `INV-${appId}-${colLetter(i)}`;
-				const truckStatus = validTruckStatus.includes(v.status) ? v.status : "Active";
-				// The purchase price is read by parseTruckAmount(), the parser
-				// POST /api/trucks and PUT /api/trucks/:id read it through, so this truck
-				// never holds a price those routes would refuse. Unlike them, a value it
-				// refuses does NOT refuse the acceptance: it is stored as 0 — unset, as a
-				// blank is — because an admin cannot edit the applicant's vehicle data,
-				// and the real price is set on the truck afterwards. "85,000" is 0 too,
-				// not the 85 that parseFloat() read out of it. A price left out is the
-				// parser's { value: undefined } ("not sent"), and that is 0 here as well.
-				const priceRead = parseTruckAmount(v.purchasePrice);
-				const vehiclePrice = priceRead.error || priceRead.value === undefined ? 0 : priceRead.value;
-				try {
-					db.prepare(`INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, owner_id, purchase_price, title_status, title_state, notes)
-						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-					.run(unitNum, v.make || "", v.model || "", parseInt(v.year) || 0, v.vin || "", v.licensePlate || "",
-						truckStatus, userId, vehiclePrice,
-						v.titleStatus || "Clean", v.titleState || "", "");
-				} catch { /* skip duplicate */ }
-			}
+			if (!Array.isArray(vehicles)) vehicles = [];
+			const vehicleCounts = registerApplicationVehicles(vehicles, appId, userId);
+			// What the investor's fleet actually holds: trucks written now plus
+			// trucks already on file under this application's unit numbers.
+			const vehiclesRegistered = vehicleCounts.created + vehicleCounts.existing;
 
-			logAudit(req, "accept_investor", "investor_application", appId, `Accepted investor "${fullName}", created account "${username}", ${vehicles.length} vehicle(s)`);
+			logAudit(req, "accept_investor", "investor_application", appId, `Accepted investor "${fullName}", created account "${username}", ${vehicles.length} vehicle(s): ${vehicleCounts.created} created, ${vehicleCounts.existing} already existed, ${vehicleCounts.failed} failed`);
 			notifyChange("investor-applications"); notifyChange("investors"); notifyChange("users"); notifyChange("trucks");
-			res.json({ success: true, accountCreated: true, credentials: { username, tempPassword, userId, investorName: fullName } });
+			res.json({ success: true, accountCreated: true, credentials: { username, tempPassword, userId, investorName: fullName }, vehicles: vehicleCounts });
 
 			// Send welcome email to investor (async, non-blocking)
 			// Every interpolated value goes through escapeHtml(), as in the driver
@@ -12347,7 +12383,7 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 				<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
 					<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Welcome to LogisX!</h2>
 					<p style="margin:0 0 12px;line-height:1.6;color:#334155">Hi <b>${escapeHtml(fullName)}</b>,</p>
-					<p style="margin:0 0 20px;line-height:1.6;color:#334155">Your investor application has been <b style="color:#16a34a">approved</b>. Your account is ready and ${vehicles.length} vehicle(s) have been registered to your fleet.</p>
+					<p style="margin:0 0 20px;line-height:1.6;color:#334155">Your investor application has been <b style="color:#16a34a">approved</b>. Your account is ready and ${vehiclesRegistered} vehicle(s) have been registered to your fleet.</p>
 
 					<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:20px;margin:0 0 20px">
 						<div style="font-size:12px;font-weight:700;color:#0369a1;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Your Login Credentials</div>
@@ -12388,7 +12424,7 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 							<tr><td style="padding:5px 0;color:#64748b;width:140px">Username</td><td style="padding:5px 0;font-weight:600;font-family:monospace">${escapeHtml(username)}</td></tr>
 							<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0">${escapeHtml(application.email)}</td></tr>
 							<tr><td style="padding:5px 0;color:#64748b">Entity Type</td><td style="padding:5px 0">${escapeHtml(application.entity_type || "-")}</td></tr>
-							<tr><td style="padding:5px 0;color:#64748b">Fleet</td><td style="padding:5px 0;font-weight:600">${vehicles.length} vehicle(s) added</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b">Fleet</td><td style="padding:5px 0;font-weight:600">${vehiclesRegistered} vehicle(s) added${vehicleCounts.failed > 0 ? `; ${vehicleCounts.failed} could not be added — add them from the Trucks page` : ""}</td></tr>
 							<tr><td style="padding:5px 0;color:#64748b">Accepted By</td><td style="padding:5px 0">${escapeHtml(req.session.user.username)}</td></tr>
 						</table>
 					</div>

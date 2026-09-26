@@ -988,8 +988,13 @@ async function acceptanceSection() {
 		.run(JSON.stringify(vehicles));
 	const m = buildModule(db);
 	const mail = [];
+	// The vehicles are written by registerApplicationVehicles(), the shipped
+	// helper (its own subject is scripts/test-investor-accept-vehicles.js).
+	const registerApplicationVehicles = new Function("db", "colLetter", "parseTruckAmount",
+		`"use strict";\n${liftFunction("registerApplicationVehicles")}\nreturn registerApplicationVehicles;`)(db, colLetter, m.parseTruckAmount);
 	const accept = mountRoute(ROUTES.accept, {
 		db,
+		registerApplicationVehicles,
 		parseTruckAmount: m.parseTruckAmount,
 		colLetter,
 		crypto: require("crypto"),
@@ -1013,12 +1018,15 @@ async function acceptanceSection() {
 
 	const code = (s) => s.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
 	const route = code(ROUTES.accept);
-	const parseAt = route.indexOf("const priceRead = parseTruckAmount(v.purchasePrice);");
-	const insertAt = route.indexOf("INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, owner_id, purchase_price,");
-	const insert = insertAt > 0 ? route.slice(insertAt, route.indexOf("} catch", insertAt)) : "";
-	ok(parseAt > 0 && parseAt < insertAt && insert.includes("truckStatus, userId, vehiclePrice,") && !route.includes("parseFloat(v.purchasePrice)"),
+	ok(route.includes("registerApplicationVehicles(vehicles, appId, userId)") && !route.includes("INSERT INTO trucks"),
+		"§6 source pin: the acceptance writes its trucks through registerApplicationVehicles() alone");
+	const helper = code(liftFunction("registerApplicationVehicles"));
+	const parseAt = helper.indexOf("const priceRead = parseTruckAmount(v.purchasePrice);");
+	const insertAt = helper.indexOf("INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, owner_id, purchase_price,");
+	const insert = insertAt > 0 ? helper.slice(insertAt, helper.indexOf("} catch", insertAt)) : "";
+	ok(parseAt > 0 && parseAt < insertAt && insert.includes("truckStatus, userId, vehiclePrice,") && !helper.includes("parseFloat(v.purchasePrice)"),
 		"§6 source pin: the acceptance INSERT stores the purchase price parseTruckAmount() read, never a parseFloat()");
-	ok(route.includes("const vehiclePrice = priceRead.error || priceRead.value === undefined ? 0 : priceRead.value;"),
+	ok(helper.includes("const vehiclePrice = priceRead.error || priceRead.value === undefined ? 0 : priceRead.value;"),
 		"§6 source pin: a refused or missing price is 0, and nothing returns a refusal from it");
 }
 
