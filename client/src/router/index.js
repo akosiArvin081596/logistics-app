@@ -1,5 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import { useAuthStore, onSessionResolved } from '../stores/auth'
+import { useAuthStore, onSessionResolved, isLeavingPage } from '../stores/auth'
 
 import LoginView from '../views/LoginView.vue'
 
@@ -226,6 +226,12 @@ const router = createRouter({
 })
 
 router.beforeEach(async (to) => {
+  // Sign-out, and a sign-in as a different person, load a fresh page
+  // (stores/auth.js). Until it arrives this page opens no signed-in screen, so
+  // LoginView's own navigation to the new user's home waits for the fresh page.
+  // Public pages (the login screen) stay reachable.
+  if (isLeavingPage() && !to.meta.public) return false
+
   const auth = useAuthStore()
 
   if (auth.isLoading) {
