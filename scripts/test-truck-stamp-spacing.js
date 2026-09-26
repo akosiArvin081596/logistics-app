@@ -286,7 +286,7 @@ function helperSection(over = {}) {
 		// step, so a spacing match only fills what used to be Owner ID 0.
 		t("findTruckForDriverStamp(), a stale spacing-variant truck beside the driver's case-aside active assignment: the assignment, as before the spacing steps",
 			stamp(DRIFTED, "Shorn King", { activeAssignment: true }), [3, "300", 9, "RM-300", "case"]);
-		t("findTruckForDriverStamp(), ...without the assignment step (the expense stamp): the truck case aside, then across spacing",
+		t("findTruckForDriverStamp(), ...without the assignment step (the public tracker): the truck case aside, then across spacing",
 			stamp(DRIFTED, "Shorn King"), [1, "101", 5, "RM-101", "normalized"]);
 		t("findTruckForDriverStamp(), a case-aside truck still comes before a case-aside assignment",
 			stamp({ ...DRIFTED, trucks: [withTruck(T101, { 2: "SHORN KING" }), T300] }, "Shorn King", { activeAssignment: true }), [1, "101", 5, "RM-101", "case"]);
@@ -383,11 +383,13 @@ async function expenseSection(routeSrc = ROUTES.expense, helperOver = {}) {
 			[r.code, row], [200, ["Shorn King", "101", 5, "TX", "eld"]]);
 	}
 	{
-		// No assignment step on this stamp, so the dispatch stamps' order changes
-		// nothing here: the truck case aside, then across spacing.
+		// The expense stamp takes the dispatch stamps' four steps, so the driver's
+		// case-aside active assignment outranks a stale truck still naming them under
+		// a spacing variant: truck 300 and owner 9, as the load itself is stamped. Its
+		// ELD vehicle has no fix in this fixture, so no location is added.
 		const { r, row } = await post(DRIFTED, DRIVER_SK);
-		t("POST /api/expenses, a stale spacing-variant truck beside the driver's case-aside active assignment: the truck, as the trucks steps order it",
-			[r.code, row], [200, ["Shorn King", "101", 5, "TX", "eld"]]);
+		t("POST /api/expenses, a stale spacing-variant truck beside the driver's case-aside active assignment: the assignment's truck and owner, as the dispatch stamps order it",
+			[r.code, row], [200, ["Shorn King", "300", 9, "", ""]]);
 	}
 	return results;
 }
@@ -755,8 +757,8 @@ function wiringSection(routes = ROUTES) {
 	const { results, t } = collector();
 	const code = (s) => decomment(s);
 	const e = code(routes.expense), d = code(routes.dispatch), r = code(routes.reassign), tr = code(routes.track);
-	t("POST /api/expenses stamps through findTruckForDriverStamp(driver), with no trucks lookup of its own",
-		[e.includes("const driverTruck = findTruckForDriverStamp(driver);"), /FROM trucks\b/.test(e), /assigned_driver/.test(e)], [true, false, false]);
+	t("POST /api/expenses stamps through findTruckForDriverStamp(driver, { activeAssignment: true }), with no trucks lookup of its own",
+		[e.includes("const driverTruck = findTruckForDriverStamp(driver, { activeAssignment: true });"), /FROM trucks\b/.test(e), /assigned_driver/.test(e)], [true, false, false]);
 	t("POST /api/dispatch stamps through findTruckForDriverStamp(driver, { activeAssignment: true }), with no truck or assignment lookup of its own",
 		[d.includes("findTruckForDriverStamp(driver, { activeAssignment: true })"), /FROM trucks\b|truck_assignments/.test(d)], [true, false]);
 	t("POST /api/dispatch/reassign stamps through findTruckForDriverStamp(newDriver, { activeAssignment: true }), with no lookup of its own",
@@ -809,7 +811,9 @@ function wiringSection(routes = ROUTES) {
 		'else if (String(r.driver_name || "").trim().toLowerCase() === driverLower) openUnderCarrier = true;', "else openUnderCarrier = true;") });
 	const mutants = [
 		["M1 POST /api/expenses back to the case-only truck lookup",
-			async () => expenseSection(mutate(ROUTES.expense, "findTruckForDriverStamp(driver)", OLD_EXPENSE))],
+			async () => expenseSection(mutate(ROUTES.expense, "findTruckForDriverStamp(driver, { activeAssignment: true })", OLD_EXPENSE))],
+		["M14 the expense stamp without the active-assignment step (a stale spacing-variant truck outranks the driver's own assignment)",
+			async () => expenseSection(mutate(ROUTES.expense, "findTruckForDriverStamp(driver, { activeAssignment: true })", "findTruckForDriverStamp(driver)"))],
 		["M2 POST /api/dispatch back to the case-only truck and assignment lookups",
 			async () => dispatchSection({ dispatch: mutate(ROUTES.dispatch, "findTruckForDriverStamp(driver, { activeAssignment: true })", oldDispatch("driver")), reassign: ROUTES.reassign })],
 		["M3 POST /api/dispatch/reassign back to the case-only truck and assignment lookups",

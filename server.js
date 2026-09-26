@@ -6903,8 +6903,8 @@ function findActiveAssignmentTruckForDriver(name) {
 // match counts only while no other account holds the name under another
 // spelling (driverNameHeldByOtherSpelling()); otherwise it is no match, as it
 // was before. A legacy account "Shorn  King" beside the real "Shorn King" must
-// not be stamped with the real driver's truck and owner. The expense stamp has
-// no assignment step, so it reads the truck case aside, then across spacing.
+// not be stamped with the real driver's truck and owner. The expense stamp takes
+// the same four steps: its owner decides whose P&L the expense lands on too.
 // The public tracker shows the unit it finds, so the customer sees the truck
 // the stamps name. Returns what the step found (see those two helpers), or
 // null.
@@ -36766,10 +36766,13 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		if (await sentIfDriverExpenseWindowClosed(req, res, safeLoadId, driver)) return;
 
 		const timestamp = new Date().toISOString();
-		// Look up truck/owner for this driver to stamp on expense — across spacing
-		// as well as case, a spacing match only while no other account holds the
-		// name under another spelling (findTruckForDriverStamp()).
-		const driverTruck = findTruckForDriverStamp(driver);
+		// Look up truck/owner for this driver to stamp on expense — the dispatch
+		// stamps' four steps (findTruckForDriverStamp()): the truck and the active
+		// assignment case aside, then across spacing, a spacing match only while no
+		// other account holds the name under another spelling. The owner decides
+		// whose P&L the expense lands on, so a stale truck still naming the driver
+		// under a spacing variant never outranks the driver's own active assignment.
+		const driverTruck = findTruckForDriverStamp(driver, { activeAssignment: true });
 		const expOwnerId = driverTruck ? driverTruck.owner_id : 0;
 		const expTruckUnit = driverTruck ? driverTruck.unit_number : '';
 		// DEDUP: Deshorn bulk-uploads receipts drivers text him, and the same
