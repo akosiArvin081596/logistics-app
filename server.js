@@ -23226,7 +23226,7 @@ function parseTruckAmounts(body, fields) {
 // and the column is left alone. A unit number is one line of plain text: it is
 // shown in every fleet list, sorted, and written into audit lines, where any of
 // those characters changes how the text around it reads without being visible.
-// Checked on the value as sent, before anything is read or written. The class
+// Checked on the value as sent, before any write. The class
 // is auditText()'s own, copied because each function must stand alone;
 // scripts/test-truck-cost-amounts.js fails when the two copies differ.
 function parseUnitNumber(raw, { required = false } = {}) {
@@ -32860,9 +32860,9 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 		// the driver app fetch the image lazily from /api/driver/me/truck-photo
 		// when the Truck Details accordion expands. Keeps this endpoint small
 		// enough to land reliably on a flaky mobile connection. `has_photo` is 1
-		// exactly when that route would serve the stored photo, decided from its
-		// bytes (storedFileKind()) on its first 200 characters, which are read
-		// here and not returned. The truck is found under any spelling of the
+		// when the first 200 characters of the stored value (read here, not
+		// returned) show a photo that route can serve (storedFileKind()); a legacy
+		// value whose data-URI header runs longer than that reads as no photo. The truck is found under any spelling of the
 		// driver's name (findTruckForDriver()), as the photo route finds it, so
 		// one stored under another spacing is still this driver's.
 		const truckMatch = findTruckForDriver(driverName);

@@ -57,7 +57,7 @@ function fatal(msg) { console.error(`FAIL  ${msg}`); process.exit(1); }
 
 // --- lifting ---------------------------------------------------------------
 // A top-level `function name(` up to the first line that is exactly "}". Not a
-// brace count: a brace inside a string literal (legacyServedBrokerCell tests
+// brace count: a brace inside a string literal (a test such as
 // `startsWith("{")`) throws a naive counter off.
 function liftFn(name) {
 	const a = SRC.indexOf(`\nfunction ${name}(`);

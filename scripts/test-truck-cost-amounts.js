@@ -1600,7 +1600,7 @@ const MUTANTS = [
 		"if (payEditAllowed && driverPayParsed && driverPayParsed.value !== (truck.driver_pay_daily || 0)) {",
 		"if (driverPayParsed && driverPayParsed.value !== (truck.driver_pay_daily || 0)) {"]]],
 	["M18 the lock asked about a rate the save does not write", [["put", "if (!payEditAllowed) delete changed.driver_pay_daily;", ""]]],
-	["M19 POST's INSERT and driver assignment written outside one transaction", [["post", "result = db.transaction(() => {", "result = (() => {"]]],
+	["M23 POST's INSERT and driver assignment written outside one transaction", [["post", "result = db.transaction(() => {", "result = (() => {"]]],
 ];
 async function mutantSection() {
 	section("§ mutants — each must be caught");
