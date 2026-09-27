@@ -4204,14 +4204,41 @@ async function payDeductionSpacingCase(page) {
 // ---- B1: the startup expense backfill across spacing. Local, planted BEFORE boot
 // with plant-before-boot.cjs. On every boot, server.js stamps truck_unit/owner_id onto
 // the expenses whose truck_unit is empty, from the truck assignment covering the
-// expense's date. The planted expense's driver is the assignment holder's name with
-// its space doubled; a build that matches the two names by case only leaves its
-// truck blank. What the row stores says what the boot did with it: '' = no boot has
-// processed it (it was planted after the boot), NULL = processed and no truck found,
-// a unit = stamped.
+// expense's date. The planted expense carries the driver's OWN account spelling, and
+// the assignment covering its date is re-spelled in the copy with the space doubled
+// (plant-before-boot.cjs records only ids, in b1-plant.json); a build that matches
+// the two names by case only leaves the truck blank. What the row stores says what
+// the boot did with it: a unit = stamped; NULL = an older build processed it and
+// found no truck; '' = no truck found by a build that writes only matched rows, or no
+// boot has processed it yet (told apart by the pid file's time). The step puts the
+// assignment's spelling back from the account's own name.
 const B1_LOAD = 'QA-TEST-B1'
+const B1_PLANT = path.join(WORK, 'b1-plant.json')
+// plant-before-boot.cjs's record of what it planted: ids only.
+function readB1Plant() {
+  try { return JSON.parse(fs.readFileSync(B1_PLANT, 'utf8')) } catch { return null }
+}
+// Puts the planted assignment's spelling back from the account's own name (while it
+// still holds a spacing variant of it), then deletes b1-plant.json.
+function restoreB1Assignment() {
+  const rec = readB1Plant()
+  if (!rec) return 'no b1-plant.json (no assignment to restore)'
+  const u = db.prepare('SELECT driver_name FROM users WHERE id = ?').get(rec.userId)
+  const a = db.prepare('SELECT driver_name FROM truck_assignments WHERE id = ?').get(rec.assignmentId)
+  let note
+  if (!u || !a) note = `assignment #${rec.assignmentId} or account #${rec.userId} not found; nothing restored`
+  else if (a.driver_name === u.driver_name) note = `assignment #${rec.assignmentId} already holds the account's spelling`
+  else if (normName(a.driver_name) !== normName(u.driver_name)) note = `assignment #${rec.assignmentId} holds another name; left alone`
+  else {
+    const n = db.prepare('UPDATE truck_assignments SET driver_name = ? WHERE id = ?').run(u.driver_name, rec.assignmentId).changes
+    const back = db.prepare('SELECT driver_name FROM truck_assignments WHERE id = ?').get(rec.assignmentId)?.driver_name === u.driver_name
+    note = `assignment #${rec.assignmentId} ${n === 1 && back ? 'restored to the account\'s spelling' : 'NOT restored'}`
+  }
+  fs.unlinkSync(B1_PLANT)
+  return note
+}
 async function bootBackfillSpacingCase(page) {
-  const title = 'Expenses → All → search the expense planted before boot (a driver\'s name with its space doubled, dated today inside their truck assignment, truck blank): its Truck column after the startup backfill'
+  const title = 'Expenses → All → search the expense planted before boot (the driver\'s own account spelling, dated today, truck blank; the truck assignment covering that day stores the name with its space doubled): its Truck column after the startup backfill'
   const expected = 'Stamped at boot: the Truck column shows the assignment\'s truck (#unit), and the row stores that truck\'s unit and owner'
   if (!db) return record({ step: 'B1', title, expected, observed: skipWhy(), verdict: 'SKIP', shot: '' })
   const planted = db.prepare('SELECT id, driver, truck_unit, owner_id, date, description, timestamp FROM expenses WHERE load_id = ? AND description LIKE ? ORDER BY id DESC').all(B1_LOAD, `${B1_LOAD}-%`)
@@ -4232,11 +4259,15 @@ async function bootBackfillSpacingCase(page) {
     const users = db.prepare("SELECT id, driver_name FROM users WHERE role = 'Driver'").all().filter((u) => normName(u.driver_name) === normName(row.driver))
     if (users.length !== 1) throw new Error(`the planted driver resolves to ${users.length} Driver account(s)`)
     const user = users[0]
-    const a = db.prepare(`SELECT ta.id, ta.truck_id, t.unit_number, t.owner_id FROM truck_assignments ta JOIN trucks t ON t.id = ta.truck_id
-      WHERE LOWER(ta.driver_name) = LOWER(?) AND substr(ta.start_date, 1, 10) <= ? AND (ta.end_date = '' OR substr(ta.end_date, 1, 10) >= ?)
-      ORDER BY ta.start_date DESC LIMIT 1`).get(user.driver_name, row.date, row.date)
+    const plantRec = readB1Plant()
+    const coveringSql = `SELECT ta.id, ta.truck_id, ta.driver_name, t.unit_number, t.owner_id FROM truck_assignments ta JOIN trucks t ON t.id = ta.truck_id
+      WHERE substr(ta.start_date, 1, 10) <= ? AND (ta.end_date = '' OR substr(ta.end_date, 1, 10) >= ?)`
+    const a = plantRec && plantRec.userId === user.id
+      ? db.prepare(`${coveringSql} AND ta.id = ?`).get(row.date, row.date, plantRec.assignmentId)
+      : db.prepare(`${coveringSql} ORDER BY ta.start_date DESC`).all(row.date, row.date).find((x) => normName(x.driver_name) === normName(user.driver_name)) || null
     if (!a) throw new Error(`no assignment of user #${user.id} covers ${row.date}`)
-    const spelling = row.driver === user.driver_name ? 'the account\'s own spelling' : normName(row.driver) === normName(user.driver_name) ? variantText(user.driver_name) : 'another name'
+    const spelling = (row.driver === user.driver_name ? 'the account\'s own spelling' : normName(row.driver) === normName(user.driver_name) ? variantText(user.driver_name) : 'another name') +
+      (a.driver_name === user.driver_name ? '; the assignment holds the same spelling (NOT the planted case)' : normName(a.driver_name) === normName(user.driver_name) ? `; the assignment holds ${variantText(user.driver_name)}` : '; the assignment holds another name')
     await page.goto(`${BASE_URL}/expenses`)
     const search = page.locator('input.filter-search[aria-label="Search expenses"]')
     await search.waitFor({ state: 'visible', timeout: 60000 })
@@ -4255,11 +4286,11 @@ async function bootBackfillSpacingCase(page) {
     const cellText = ti >= 0 ? (await tr.locator('td').nth(ti).evaluate((td) => td.textContent)).trim() : '(no Truck column)'
     await tr.scrollIntoViewIfNeeded().catch(() => {})
     const stamped = row.truck_unit === a.unit_number && Number(row.owner_id) === Number(a.owner_id)
-    v = row.truck_unit === '' || plantedLate ? 'INFO' : verdict(stamped && cellText === `#${a.unit_number}`)
+    v = plantedLate || bootedAt == null ? 'INFO' : verdict(stamped && cellText === `#${a.unit_number}`)
     observed = `expense #${row.id}: driver = user #${user.id}'s name as ${spelling}, dated ${row.date}, truck blank when planted; ${order}; ` +
       `the assignment covering that date: #${a.id} → truck #${a.truck_id} (unit ${a.unit_number}, owner #${a.owner_id}); ` +
       `stored after the boot: truck_unit ${JSON.stringify(row.truck_unit)}, owner_id ${JSON.stringify(row.owner_id)}` +
-      `${row.truck_unit === '' ? ' — no boot has processed it (plant, then boot)' : row.truck_unit == null ? ' — the backfill found NO truck' : ''}; ` +
+      `${row.truck_unit === '' ? (plantedLate || bootedAt == null ? ' — no boot has processed it (plant, then boot)' : ' — the backfill left it blank: NO truck found') : row.truck_unit == null ? ' — the backfill found NO truck' : ''}; ` +
       `the Expenses page's Truck cell: "${cellText}" (the list's truck_unit ${JSON.stringify(listed ? listed.truck_unit : '(row not listed)')})`
     await caption(page, `Step B1 — ${v}: ${observed}`)
     s = await shot(page, 'b1-expenses-truck')
@@ -4274,6 +4305,7 @@ async function bootBackfillSpacingCase(page) {
         mpNotes.push(`B1 expense #${r.id} ${n === 1 ? 'deleted' : 'NOT FOUND to delete (LEFT BEHIND?)'}`)
       } catch (e) { mpNotes.push(`B1 clean-up error: ${e.message}`) }
     }
+    try { mpNotes.push(`B1 ${restoreB1Assignment()}`) } catch (e) { mpNotes.push(`B1 assignment restore error: ${e.message}`) }
   }
   record({ step: 'B1', title, expected, observed, verdict: v, shot: s })
 }

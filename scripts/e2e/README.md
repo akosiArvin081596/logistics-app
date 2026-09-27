@@ -32,8 +32,8 @@ What it covers today, in five sections (`ONLY` picks them):
   own directory row carries saves rather than being refused as a merge (N1b). An Active Loads edit writes only the cell
   that changed, so formula cells survive (F1). A Fuel expense stored under a percentage-paid driver's name with its
   space doubled is deducted from their pay on the Financials page (E2). The startup expense backfill stamps the truck
-  onto an expense whose driver is a spacing variant of the name its truck assignment carries (B1, planted before
-  boot). A rate-con import onto a load whose Payments Table row already exists writes only the cells that change, so
+  onto an expense filed under a driver's own account spelling when the truck assignment covering it stores that name
+  with a different spacing (B1, planted before boot). A rate-con import onto a load whose Payments Table row already exists writes only the cells that change, so
   text cells stay text (RC1). E1, N1, N1b, E2 and B1 are planted and local only; F1 and RC1 are local only.
 
 Every "Expected" column states the behaviour **after** the fix. A run on a build without it (a BEFORE baseline) is
@@ -158,8 +158,9 @@ fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
 
 - Headless: part 1 takes about 1.5 minutes, part 2 about 2.5 minutes, part 3 about 30 s, part 4 about 2.5 minutes
   (up to 80 s more when F1 has to plant its formula and wait for the server's cached copy of the sheet).
-- B1 deletes its expense when it runs, so plant again before every boot that B1 is to read. A run whose server booted
-  before the plant scores B1 INFO (the boot never saw the row); a copy with nothing planted SKIPs it.
+- B1 deletes its expense and puts its assignment's spelling back when it runs, so plant again before every boot that
+  B1 is to read. A run whose server booted before the plant scores B1 INFO (the boot never saw the row); a copy with
+  nothing planted SKIPs it.
 - Headed (`HEADED=1`) takes roughly two to three times as long. Headed uses slowMo 350 ms, a 1.6 s pause on every
   caption (none on the timing-critical ones), 1400×900 admin and investor windows, and a 430×900 driver window.
 - A BEFORE baseline is the same run on the build without the fix, with `PHASE=before`. Use a second copy from
@@ -205,23 +206,34 @@ planted cases SKIP. They are never silently mis-tested.
 ### `plant-before-boot.cjs <db> [--force | --remove]`
 
 B1 shows the startup expense backfill, which runs once, as the server starts, so its input must be in the copy before
-the boot. The script plants one expense:
+the boot. The script plants the case the backfill's spacing step exists for: a receipt filed under a driver's own
+account spelling, while the truck assignment covering its date stores the name with a different spacing.
 
-- **Driver:** a Driver account's name with its space doubled. The creds file's driver is preferred, else the
-  lowest-id Driver account that qualifies. No account and no directory row holds that spelling, and no truck
-  assignment is stored under it. The account has a truck assignment, stored under its own spelling, that covers today.
-- **The row:** dated today (US Central), in a month that is not finalized. The truck is blank and the owner 0; type
-  Other, $0.01. `load_id` is `QA-TEST-B1` and the description `QA-TEST-B1-<timestamp>`, and `timestamp` records when
-  it was planted.
+- **Driver:** a Driver account whose name has two words. The creds file's driver is preferred, else the lowest-id
+  Driver account that qualifies. No other account's name reads as the same driver, and no account, directory row or
+  assignment holds the name with its space doubled. The account has a truck assignment stored under exactly its own
+  spelling that covers today.
+- **The row:** the expense is filed under the account's own spelling, dated today (US Central), in a month that is not
+  finalized. The truck is blank and the owner 0; type Other, $0.01. `load_id` is `QA-TEST-B1` and the description
+  `QA-TEST-B1-<timestamp>`, and `timestamp` records when it was planted.
+- **The assignment:** re-spelled in the copy with its space doubled. `b1-plant.json` (`0600`, in the work dir) records
+  the expense, assignment and account ids, never a name.
 - **Output:** ids, the date and the truck's unit number only.
+
+The backfill takes an assignment found only across spacing while no other account holds the name, the rule the money
+stamps apply (`findTruckForDriverStamp()`). A receipt under a spelling no account uses is left unattributed on purpose,
+so B1 plants the account's own spelling.
 
 It refuses:
 
 - a copy outside the work dir, or a symlink;
 - a copy any process has open (`lsof`): a server booted on it has already run its backfill, so stop it first;
-- a copy that already holds B1's row. `--force` replaces it, and `--remove` deletes it.
+- a copy that already holds B1's row. `--force` replaces it, and `--remove` deletes it; both put the assignment's
+  spelling back first.
 
-The run finds the row by its `load_id` and description, and deletes it at the end of B1.
+The run finds the row by its `load_id` and description, deletes it at the end of B1, and puts the assignment's spelling
+back from the account's own name. A run that dies mid-B1 leaves `b1-plant.json`: `--remove` (with the server stopped)
+restores the assignment.
 
 ### `prep-worktree.sh [<worktree>]`
 
@@ -537,7 +549,7 @@ E1, N1, N1b, F1, E2 and RC1.
 | N1b | **Planted, local only.** A throwaway Driver account (`QA-TEST-N1B-<timestamp> Driver`) beside its own directory row, planted as the same name with its space doubled (the app adds no second directory row for it), with one expense under each spelling. The run first confirms Job Tracking has no row for it. **UI:** Users page, Edit, Linked Driver set to the directory spelling (offered as stored), Save. | Saved, not 409 `DRIVER_RENAME_IS_MERGE`: the account and both expenses carry the directory spelling, and that directory row is still the only one for the name, unchanged |
 | F1 | **Local only.** A load from the Super Admin's Active Loads, its sheet row read with the service account (formulas as formulas). **UI:** the load opened from the dashboard, Edit, Details changed (a `QA-F1-<timestamp>` suffix), Save changes. The row is read again. | Only the Details cell changed; every formula cell of the row is still a formula |
 | E2 | **Planted, local only.** A percentage-paid driver who earns revenue in the month (see below). **UI:** Financials, the month's row in Monthly Performance (the current month, MTD; see below), the drill-down's Driver Pay table: the driver's Pay is read. A Fuel expense ($250, or half the driver's month net when that is smaller) is planted under their name with its space doubled, dated in that month, and the month is opened again. The response behind each opening is read too. | The driver's Pay drops by the planted amount × their percentage (±$1: the page shows whole dollars). The month's Fuel Spend rises by the planted amount on every build: the control that the receipt counts in the month |
-| B1 | **Planted before boot, local only** (`plant-before-boot.cjs`). An expense with a blank truck, under a driver's name with its space doubled, dated today inside that driver's truck assignment. **UI:** Expenses, All, its description typed into the search box: the row's Truck column. The stored row is read too. | The startup backfill stamped it: the Truck column shows the assignment's truck (`#<unit>`), and the row stores that truck's unit and owner |
+| B1 | **Planted before boot, local only** (`plant-before-boot.cjs`). An expense with a blank truck, under a driver's own account spelling, dated today inside a truck assignment re-spelled with the space doubled. **UI:** Expenses, All, its description typed into the search box: the row's Truck column. The stored row is read too. | The startup backfill stamped it: the Truck column shows the assignment's truck (`#<unit>`), and the row stores that truck's unit and owner |
 | RC1 | **Local only.** A Payments Table row planted for a synthetic load `QA-RC1-<timestamp>`: the text `00123` (Invoice Number), the text `=QA` (Payment Status) and a formula (Amount Due To Carrier, `=<Payment Amount>-<Tender Fee>`), both texts written RAW; Payment Amount blank. The page then sends `POST /api/loads/from-ratecon` as the review modal does: the load number, a rate of $1,234.00 and a Details note, with no PDF. The row is read back: each cell's entered type (grid data) and the `FORMULA` render. **UI:** the Data Manager, Payments Table, searched for the load, before and after. | Only the blank Payment Amount changed (filled with the rate). The text `00123` and the text `=QA` are still text, the formula is still the same formula, and every other cell is as planted |
 
 **Why P1 sets the rate first.** Every month but the current one may be finalized, and the month-end lock refuses a
@@ -583,9 +595,10 @@ has revenue in it yet, early in a month, it is the previous month while that is 
 `period_locks`), with the receipt dated its last day. With neither, E2 SKIPs.
 
 **Why B1 is planted before boot.** The backfill runs once per boot, over every expense with a blank truck, so a row
-planted into a running server's copy is never seen. B1 reads what the row stores: `''` means no boot has processed it
-(INFO), `NULL` means the backfill ran and found no truck (a build without the fix), and a unit means it was stamped. The
-run also compares the row's plant time with the server's pid file: a server that booted before the plant scores INFO.
+planted into a running server's copy is never seen. B1 reads what the row stores: a unit means it was stamped; `NULL` means an older build
+ran the backfill and found no truck (it rewrote unmatched rows); `''` means no truck was found by a build that writes
+only matched rows, or that no boot has processed it yet. The run compares the row's plant time with the server's pid
+file to tell those apart: a server that booted before the plant scores INFO.
 The backfill leaves finalized months alone, so the row is dated today, in an open month.
 
 **RC1's rows.** The rows RC1 and the import write are the first free rows below each tab's data. Each is snapshotted
