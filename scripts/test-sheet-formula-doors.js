@@ -27,6 +27,17 @@
 // Each route is lifted whole out of server.js and run against a fake sheet: no
 // network, no database, no real sheet. Every refusal has a mutant in §5.
 //
+// THE UPSERTS (§4b). from-ratecon's upsertByKey() reads the Payments Table and
+// Job Details with valueRenderOption FORMULA. For a row whose key matches, it
+// writes only the cells that differ, in ONE values.batchUpdate
+// (sheetRowCellWrites()), and nothing when none does; a new row is still one
+// whole-row values.update at an anchored A{lastRow+1}. The fake sheet serves a
+// FORMULA read as the API does (a formula as the formula, a number as a
+// number, text as its value) and applies a write as USER_ENTERED does, so a
+// whole-row rewrite shows up as what it did to the row: text cells came back
+// re-parsed (text holding 00123 as a number). Mutant MU in
+// §5 restores the whole-row values.update.
+//
 //   node scripts/test-sheet-formula-doors.js     # exits 1 on any failure
 
 "use strict";
@@ -115,7 +126,12 @@ ${extract("formulaCellRefusal")}
 ${extract("colLetter")}
 ${extract("sheetRowToObject")}
 ${extract("resolveSheetDataRow")}
-return { ADDRESS_MAX_CHARS, boundAddressForStorage, parseSheet, findCol, formulaCellRefusal, colLetter, sheetRowToObject, resolveSheetDataRow };
+${extract("a1SheetPrefix")}
+${extract("a1ColumnLetter")}
+${extract("sheetRowAfterUpdate")}
+${extract("sheetRowCellWrites")}
+return { ADDRESS_MAX_CHARS, boundAddressForStorage, parseSheet, findCol, formulaCellRefusal, colLetter, sheetRowToObject, resolveSheetDataRow,
+	a1SheetPrefix, sheetRowAfterUpdate, sheetRowCellWrites };
 `)();
 const RATECON_SHEET_FIELDS = new Function(`return ${extractConst("RATECON_SHEET_FIELDS")};`)();
 const RATECON_GEMINI_FIELDS = new Function(`return ${extractConst("RATECON_GEMINI_FIELDS")};`)();
@@ -170,34 +186,116 @@ const LEGIT = {
 // The one Distance Matrix answer every run gets: 500 miles, OK.
 const DM_OK = { rows: [{ elements: [{ status: "OK", distance: { value: 804670, text: "500 mi" } }] }] };
 
-// A sheet that records every read and write; `tabs` maps a tab to its rows.
+// A sheet that records every read and write and applies each write to its own
+// copy of `tabs` (a tab name → its rows), served afterwards as `store`.
+//
+// Each stored cell is in the sheet's own terms, as in
+// scripts/test-row-save-cell-writes.js:
+//   a number  a number;
+//   "=…"      a formula, shown as SHOWS[it] ("#ERROR!" for one it does not know);
+//   "'…"      text entered with a leading apostrophe; its value is the text
+//             after it ("'00123" is the text 00123, "'=QA" the text =QA);
+//   else      text, its value itself.
+// A read serves each cell as its valueRenderOption asks: FORMULA gives a formula
+// as the formula and a number as a number, the default FORMATTED_VALUE gives
+// what the cell shows, and text is its value either way. Like the API, a read
+// drops each row's trailing empty cells and the tab's trailing empty rows.
+// A write is applied as USER_ENTERED applies it: a value starting with "=" is
+// stored as a formula, "'…" as text, a plain numeral as a number (so text
+// holding 00123, written back as read, becomes 123), and other text as given
+// (this fake does not parse currency or dates). A null leaves its cell alone.
+const SHOWS = { "=1+1": "2", '=IF(FALSE,"x","")': "" };
+function cellAs(c, render) {
+	if (c == null) return "";
+	if (typeof c === "number") return render === "FORMULA" ? c : String(c);
+	const s = String(c);
+	if (s.startsWith("=")) return render === "FORMULA" ? s : (Object.prototype.hasOwnProperty.call(SHOWS, s) ? SHOWS[s] : "#ERROR!");
+	if (s.startsWith("'")) return s.slice(1);
+	return s;
+}
+function userEntered(v) {
+	if (typeof v === "number") return v;
+	const s = String(v);
+	return /^[+-]?(\d+(\.\d*)?|\.\d+)$/.test(s) ? Number(s) : s;
+}
 function fakeSheets(tabs) {
-	const log = { reads: [], writes: [] };
-	const tabOf = (range) => String(range).split("!")[0];
+	const store = JSON.parse(JSON.stringify(tabs));
+	// `reads` and `writes` keep the shape the sections above read; `calls` has
+	// one entry per API call, for the sections that count calls.
+	const log = { reads: [], writes: [], calls: [] };
+	// The tab a range names, unquoted ("'Payments Table'!C3" → Payments Table).
+	const tabOf = (range) => {
+		const t = String(range).split("!")[0];
+		return /^'.*'$/.test(t) ? t.slice(1, -1).replace(/''/g, "'") : t;
+	};
+	const colIndex = (letters) => [...letters].reduce((n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0) - 1;
+	// Where a written range starts: its tab, 0-based column and 1-based row.
+	const startOf = (range) => {
+		const m = /!([A-Z]+)(\d+)/.exec(String(range));
+		if (!m) throw new Error(`fake sheet: no start cell in ${range}`);
+		return { tab: tabOf(range), col: colIndex(m[1]), row: Number(m[2]) };
+	};
+	const rowsOf = (tab) => {
+		if (!store[tab]) throw new Error(`fake sheet has no tab ${tab}`);
+		return store[tab];
+	};
+	const put = (tab, rowNo, col, cells) => {
+		const rows = rowsOf(tab);
+		while (rows.length < rowNo) rows.push([]);
+		const r = rows[rowNo - 1];
+		cells.forEach((v, j) => {
+			if (v == null) return;
+			while (r.length <= col + j) r.push("");
+			r[col + j] = userEntered(v);
+		});
+	};
 	const values = {
-		get: async ({ range }) => {
+		get: async ({ range, valueRenderOption }) => {
 			log.reads.push(range);
-			const rows = tabs[tabOf(range)];
-			if (!rows) throw new Error(`fake sheet has no tab ${tabOf(range)}`);
-			return { data: { values: rows.map((r) => r.slice()) } };
+			const render = valueRenderOption || "FORMATTED_VALUE";
+			log.calls.push({ verb: "get", tabs: [tabOf(range)], range, valueRenderOption: render });
+			const rows = rowsOf(tabOf(range)).map((r) => {
+				const out = r.map((c) => cellAs(c, render));
+				while (out.length && out[out.length - 1] === "") out.pop();
+				return out;
+			});
+			while (rows.length && !rows[rows.length - 1].length) rows.pop();
+			return { data: { values: rows } };
 		},
 		append: async ({ range, valueInputOption, requestBody }) => {
-			log.writes.push({ op: "append", tab: tabOf(range), valueInputOption, row: requestBody.values[0].slice() });
-			const n = tabs[tabOf(range)].length + 1;
-			return { data: { updates: { updatedRange: `${tabOf(range)}!A${n}:Z${n}` } } };
+			const tab = tabOf(range);
+			const row = requestBody.values[0].slice();
+			log.writes.push({ op: "append", tab, valueInputOption, row });
+			log.calls.push({ verb: "append", tabs: [tab], range, valueInputOption, row });
+			const n = rowsOf(tab).length + 1;
+			put(tab, n, 0, row);
+			return { data: { updates: { updatedRange: `${tab}!A${n}:Z${n}` } } };
 		},
 		update: async ({ range, valueInputOption, requestBody }) => {
-			log.writes.push({ op: "update", tab: tabOf(range), range, valueInputOption, row: requestBody.values[0].slice() });
+			const at = startOf(range);
+			const row = requestBody.values[0].slice();
+			log.writes.push({ op: "update", tab: at.tab, range, valueInputOption, row });
+			log.calls.push({ verb: "update", tabs: [at.tab], range, valueInputOption, row });
+			requestBody.values.forEach((cells, k) => put(at.tab, at.row + k, at.col, cells));
 			return { data: {} };
 		},
 		batchUpdate: async ({ requestBody }) => {
-			for (const d of requestBody.data) {
-				log.writes.push({ op: "batch", tab: tabOf(d.range), range: d.range, valueInputOption: requestBody.valueInputOption, row: d.values[0].slice() });
+			const { valueInputOption, data } = requestBody;
+			for (const d of data) {
+				log.writes.push({ op: "batch", tab: tabOf(d.range), range: d.range, valueInputOption, row: d.values[0].slice() });
+			}
+			log.calls.push({
+				verb: "batchUpdate", tabs: [...new Set(data.map((d) => tabOf(d.range)))], valueInputOption,
+				ranges: data.map((d) => d.range), values: data.map((d) => d.values),
+			});
+			for (const d of data) {
+				const at = startOf(d.range);
+				d.values.forEach((cells, k) => put(at.tab, at.row + k, at.col, cells));
 			}
 			return { data: {} };
 		},
 	};
-	return { getSheets: async () => ({ spreadsheets: { values } }), log };
+	return { getSheets: async () => ({ spreadsheets: { values } }), log, store };
 }
 // Runs a lifted handler as `role`; answers { code, body } and, like a real
 // response, fires the "close" listeners once it has answered.
@@ -222,14 +320,18 @@ const bodyKeys = (r) => Object.keys((r && r.body) || {});
 // ---------------------------------------------------------------------------
 // POST /api/loads/from-ratecon, lifted whole. Everything past the sheet is
 // stubbed: no PDF is sent, so the archive (fs, db, Drive) is never reached, and
-// geocodeAddress() answers null, so load_coordinates is skipped too.
+// geocodeAddress() answers null, so load_coordinates is skipped too. The row
+// diff, the A1 quoting and the cell writes are the shipped helpers.
 // ---------------------------------------------------------------------------
-function mountRatecon(routeSrc) {
-	const sheet = fakeSheets({
-		"Job Tracking": [JT_HEADERS.slice(), jtRow("RC-1000")],
-		"Payments Table": [PAYMENTS_HEADERS.slice()],
-		"Job Details": [JOB_DETAILS_HEADERS.slice()],
-	});
+// The tabs every section but §4b runs on: one other load on Job Tracking, and
+// the two upsert tabs holding their header rows only, so both upserts append.
+const RATECON_TABS = () => ({
+	"Job Tracking": [JT_HEADERS.slice(), jtRow("RC-1000")],
+	"Payments Table": [PAYMENTS_HEADERS.slice()],
+	"Job Details": [JOB_DETAILS_HEADERS.slice()],
+});
+function mountRatecon(routeSrc, tabs = RATECON_TABS()) {
+	const sheet = fakeSheets(tabs);
 	const claims = [];
 	const inFlight = new (class extends Set { add(v) { claims.push(v); return super.add(v); } })();
 	let dmCalls = 0;
@@ -258,6 +360,9 @@ function mountRatecon(routeSrc) {
 		houstonDay: () => "2026-09-26",
 		validateOwnerIdCell: () => null,
 		jtCacheInvalidate: () => {},
+		sheetRowCellWrites: H.sheetRowCellWrites,
+		sheetRowAfterUpdate: H.sheetRowAfterUpdate,
+		a1SheetPrefix: H.a1SheetPrefix,
 		path,
 		fs: { existsSync: unreached("fs"), mkdirSync: unreached("fs"), writeFileSync: unreached("fs") },
 		__dirname: "/nonexistent",
@@ -275,7 +380,7 @@ function mountRatecon(routeSrc) {
 	const names = Object.keys(env);
 	new Function(...names, routeSrc)(...names.map((k) => env[k]));
 	if (typeof handler !== "function") throw new Error("the lifted from-ratecon route did not register a handler");
-	return { run: runAs(() => handler), log: sheet.log, claims, audits, dm: () => dmCalls };
+	return { run: runAs(() => handler), log: sheet.log, store: sheet.store, claims, audits, dm: () => dmCalls };
 }
 
 async function rateconSection(routeSrc = RATECON_SRC) {
@@ -351,6 +456,122 @@ async function rateconSection(routeSrc = RATECON_SRC) {
 		const jd = b.m.log.writes.find((w) => w.tab === "Job Details") || { row: [] };
 		t("from-ratecon, Super Admin, the built Job Details cell: 200, written",
 			[b.r.code, jd.row[JOB_DETAILS_HEADERS.indexOf("Details")]], [200, "=1+1, TX 75063 - Laredo, TX 78045"]);
+	}
+	return results;
+}
+
+// ---------------------------------------------------------------------------
+// §4b THE UPSERTS — an existing row is updated cell by cell, a new row is
+// written whole. A Dispatcher drops the clean rate-con (LEGIT, load RC-5001:
+// broker "Danna Garcia", rate "$1,500.00") on each fixture.
+// ---------------------------------------------------------------------------
+// A Payments Table wider than the three columns the route maps, as production's
+// is, and a Job Details tab WITH a Load ID column, which production's lacks
+// (there it always appends): the one way to reach that tab's update branch.
+const PAY_HEADERS = [" Job ID", "Contract ID", "Payment Amount", "Invoice Number", "Payment Status", "Payment Date", "Check Number", "Notes"];
+const JD_ID_HEADERS = ["", "Load ID", "Distance", "Rate Per Mile", "Details", "Payment", "output (retired)"];
+// Row 2: another load, filled in. Nothing this route does may touch it.
+const PAY_OTHER = () => ["RC-4000", "Other Broker", 900, "'00077", "Paid", 46200, "'00001", "ok"];
+// The load's own row: its broker already booked as another name (kept, and
+// warned about), its Payment Amount blank (filled in), and in the columns the
+// route does not map a formula, a number (a date's serial, as a FORMULA read
+// returns it), text holding 00123, text starting with "=", and a cell past
+// the last header.
+const PAY_ROW = () => ["RC-5001", "Old Broker LLC", "", "'00123", "=1+1", 46291, "", "'=QA", "stray"];
+const upsertTabs = (payRows, jobDetails = [JOB_DETAILS_HEADERS.slice()]) => ({
+	"Job Tracking": [JT_HEADERS.slice(), jtRow("RC-1000")],
+	"Payments Table": [PAY_HEADERS.slice(), PAY_OTHER(), ...payRows],
+	"Job Details": jobDetails,
+});
+
+async function upsertSection(routeSrc = RATECON_SRC) {
+	const { results, t } = collector();
+	const run = async (tabs, over = {}) => {
+		const m = mountRatecon(routeSrc, tabs);
+		const r = await m.run("Dispatcher", { fields: { ...LEGIT, ...over } });
+		return { r, m };
+	};
+	// Every call that touched `tab`, in order, as "get <render>",
+	// "batchUpdate <range> <range>…" or "<verb> <range>".
+	const callsOn = (m, tab) => m.log.calls.filter((c) => c.tabs.includes(tab)).map((c) =>
+		(c.verb === "get" ? `get ${c.valueRenderOption}` : c.verb === "batchUpdate" ? `batchUpdate ${c.ranges.join(" ")}` : `${c.verb} ${c.range}`));
+	const callOn = (m, verb, tab) => m.log.calls.find((c) => c.verb === verb && c.tabs.includes(tab)) || {};
+	const payWarnings = (r) => ((r.body && r.body.warnings) || []).filter((w) => /Payments Table/.test(w));
+	const withCell = (rows, rowNo, col, v) => { const out = JSON.parse(JSON.stringify(rows)); out[rowNo - 1][col] = v; return out; };
+	const rpm = rateconLoad.calculateRatePerMile(DM_OK, LEGIT);
+
+	// An existing Payments Table row (row 3).
+	{
+		const tabs = upsertTabs([PAY_ROW()]);
+		const { r, m } = await run(tabs);
+		const batch = callOn(m, "batchUpdate", "Payments Table");
+		t("§4b an existing Payments Table row: read once as FORMULA, then ONE values.batchUpdate of the blank mapped cell alone (Payment Amount, C3); no whole-row values.update",
+			[r.code, callsOn(m, "Payments Table")], [200, ["get FORMULA", "batchUpdate 'Payments Table'!C3"]]);
+		t("§4b an existing Payments Table row: the cell sent as built, USER_ENTERED",
+			[batch.values, batch.valueInputOption], [[[["$1,500.00"]]], "USER_ENTERED"]);
+		t("§4b an existing Payments Table row: the broker already there is kept, and warned about once",
+			payWarnings(r), ["The Payments Table already had a row for RC-5001 with a different Contract ID — the existing value was kept. Reconcile it manually."]);
+		t("§4b an existing Payments Table row: afterwards only C3 has changed; the formula, the number, the text 00123 and =QA, the kept broker, the cell past the last header and the other load's row are as they were",
+			m.store["Payments Table"], withCell(tabs["Payments Table"], 3, 2, "$1,500.00"));
+	}
+	// A short row: the API drops trailing blank cells, so the row as read is
+	// the key alone and both other mapped cells lie past its end.
+	{
+		const { r, m } = await run(upsertTabs([["RC-5001"]]));
+		t("§4b a short existing row (the key alone): the two mapped cells past its end, in ONE values.batchUpdate, and no conflict",
+			[r.code, callsOn(m, "Payments Table"), callOn(m, "batchUpdate", "Payments Table").values, payWarnings(r), m.store["Payments Table"][2]],
+			[200, ["get FORMULA", "batchUpdate 'Payments Table'!B3 'Payments Table'!C3"], [[["Danna Garcia"]], [["$1,500.00"]]], [], ["RC-5001", "Danna Garcia", "$1,500.00"]]);
+	}
+	// A row already holding every mapped value, its key and amount stored as
+	// numbers: a FORMULA read returns 5001 and 1500, and the route builds
+	// "5001" and "1500". Compared as text, they are the same cells.
+	{
+		const tabs = upsertTabs([[5001, "Danna Garcia", 1500, "'00123", "=1+1"]]);
+		const { r, m } = await run(tabs, { "Load Number": "5001", Rate: "1500" });
+		t("§4b an existing row already holding every mapped value (key and amount stored as numbers): read, then no call at all, no warning, the tab as it was",
+			[r.code, callsOn(m, "Payments Table"), payWarnings(r), m.store["Payments Table"]],
+			[200, ["get FORMULA"], [], tabs["Payments Table"]]);
+	}
+	// A formula in a MAPPED cell that shows nothing. Read as FORMULA it is
+	// filled, so it is kept and warned about; read as displayed it would be ""
+	// and overwritten.
+	{
+		const { r, m } = await run(upsertTabs([["RC-5001", '=IF(FALSE,"x","")', "", "'00123"]]));
+		t("§4b a formula that shows nothing in a mapped cell (Contract ID): kept and warned about; only the blank Payment Amount is written",
+			[r.code, callsOn(m, "Payments Table"), payWarnings(r).length, m.store["Payments Table"][2]],
+			[200, ["get FORMULA", "batchUpdate 'Payments Table'!C3"], 1, ["RC-5001", '=IF(FALSE,"x","")', "$1,500.00", "'00123"]]);
+	}
+	// An existing Job Details row, the update without preserveFilled: Distance
+	// as built, Payment stored as the number 1500 (the route builds "1500"), an
+	// older Rate Per Mile (the number 2.5) and Details, and junk in the column
+	// the route does not map.
+	{
+		const jd = [JD_ID_HEADERS.slice(), ["", "RC-5001", `${rpm.distance_miles} Miles`, 2.5, "old lane", 1500, '{"junk":1}']];
+		const tabs = upsertTabs([], jd);
+		const { r, m } = await run(tabs);
+		t("§4b an existing Job Details row: ONE values.batchUpdate of the two mapped cells that differ (Rate Per Mile D2, Details E2); the equal Distance and Payment, the key and the junk cell are not written",
+			[r.code, callsOn(m, "Job Details"), callOn(m, "batchUpdate", "Job Details").values],
+			[200, ["get FORMULA", "batchUpdate 'Job Details'!D2 'Job Details'!E2"], [[[`$${rpm.rate_per_mile}`]], [[rpm.details]]]]);
+		t("§4b an existing Job Details row: afterwards only D2 and E2 have changed",
+			m.store["Job Details"], withCell(withCell(jd, 2, 3, `$${rpm.rate_per_mile}`), 2, 4, rpm.details));
+	}
+	// No row for the load: the new-row write, unchanged.
+	{
+		const { r, m } = await run(RATECON_TABS());
+		t("§4b no row for the load (header rows only): each tab read as FORMULA, then written whole by ONE values.update at an anchored A2, USER_ENTERED; no values.batchUpdate",
+			[r.code, callsOn(m, "Payments Table"), callsOn(m, "Job Details"), m.log.calls.filter((c) => c.verb === "batchUpdate").length,
+				[callOn(m, "update", "Payments Table").valueInputOption, callOn(m, "update", "Job Details").valueInputOption]],
+			[200, ["get FORMULA", "update Payments Table!A2"], ["get FORMULA", "update Job Details!A2"], 0, ["USER_ENTERED", "USER_ENTERED"]]);
+		t("§4b no row for the load: each row written is one cell per header, as built",
+			[callOn(m, "update", "Payments Table").row, callOn(m, "update", "Job Details").row],
+			[["RC-5001", "Danna Garcia", "$1,500.00", "", ""], ["", `${rpm.distance_miles} Miles`, `$${rpm.rate_per_mile}`, rpm.details, String(rpm.payment), ""]]);
+	}
+	{
+		const tabs = upsertTabs([PAY_ROW()]);
+		const { r, m } = await run(tabs, { "Load Number": "RC-7000" });
+		t("§4b no row for the load, rows for others: ONE whole-row values.update at A{lastRow+1} (A4), the rows above as they were",
+			[r.code, callsOn(m, "Payments Table"), callOn(m, "update", "Payments Table").row, m.store["Payments Table"].slice(0, 3)],
+			[200, ["get FORMULA", "update Payments Table!A4"], ["RC-7000", "Danna Garcia", "$1,500.00", "", "", "", "", ""], tabs["Payments Table"]]);
 	}
 	return results;
 }
@@ -483,10 +704,25 @@ const MR1 = mutate(RATECON_SRC, "if (formula) return res.status(400).json(formul
 const MR2 = mutate(RATECON_SRC, "if (formula) return res.status(400).json({ ...formula, sheet });", "");
 const MD = mutate(DISPATCH_SRC, "if (formula) return res.status(400).json(formula);", "");
 const MA = mutate(REASSIGN_SRC, "if (formula) return res.status(400).json(formula);", "");
+// MU: a matched row written as it was before sheetRowCellWrites(), the whole
+// row from column A in one values.update, whatever changed. The target runs
+// from the cell diff to the branch's return, cut from the shipped route.
+const MU = (() => {
+	const head = "const cellWrites = sheetRowCellWrites(a1SheetPrefix(tabName), matchRow, existingRow,";
+	const tail = 'return { action: cellWrites.length ? "updated" : "unchanged", row: matchRow, conflicts };';
+	const from = RATECON_SRC.indexOf(head);
+	const to = from < 0 ? -1 : RATECON_SRC.indexOf(tail, from);
+	if (from < 0 || to < 0) throw new Error("mutant target MU (the matched-row cell writes in upsertByKey) not found in the from-ratecon route");
+	return mutate(RATECON_SRC, RATECON_SRC.slice(from, to + tail.length),
+		"await sheets.spreadsheets.values.update({ spreadsheetId: SPREADSHEET_ID, range: `${tabName}!A${matchRow}`, " +
+		"valueInputOption: \"USER_ENTERED\", requestBody: { values: [rowValues] } });\n" +
+		"\t\t\t\treturn { action: \"updated\", row: matchRow, conflicts };");
+})();
 const caughtBy = (results) => results.filter((r) => !r.ok);
 const mutants = [
 	["MR1 from-ratecon without check 1 (the field check before the claim and the reads)", async () => caughtBy(await rateconSection(MR1))],
 	["MR2 from-ratecon without check 2 (the cells as written)", async () => caughtBy(await rateconSection(MR2))],
+	["MU from-ratecon's upsert back to a whole-row values.update of a matched row", async () => caughtBy(await upsertSection(MU))],
 	["MD POST /api/dispatch without the refusal", async () => caughtBy(await dispatchSection({ dispatch: MD, reassign: REASSIGN_SRC }))],
 	["MA POST /api/dispatch/reassign without the refusal", async () => caughtBy(await dispatchSection({ dispatch: DISPATCH_SRC, reassign: MA }))],
 ];
@@ -504,6 +740,8 @@ const mutants = [
 	orderChecks();
 	// §4 the routes
 	record(await rateconSection());
+	// §4b the upserts
+	record(await upsertSection());
 	record(await dispatchSection());
 
 	console.log("\n§5 mutants");

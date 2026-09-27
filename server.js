@@ -5134,17 +5134,52 @@ db.exec(`
 `);
 
 // Backfill legacy expenses with truck_unit + owner_id. Older expense rows
-// pre-date the columns being stamped on insert (server.js:9370). Pass 1
-// resolves truck_unit + owner_id from truck_assignments history (driver+date).
-// Pass 2 catches rows where truck_unit is set but owner_id is stale because
-// the truck got linked to an investor *after* the expense was logged.
-// Both are idempotent via their WHERE guards.
+// pre-date the columns being stamped on insert (see expOwnerId at the
+// POST /api/expenses INSERT). Pass 1 resolves truck_unit + owner_id from
+// truck_assignments history (driver+date). Pass 2 catches rows where truck_unit
+// is set but owner_id is stale because the truck got linked to an investor
+// *after* the expense was logged.
+//
+// Pass 1 takes two steps, the second only for a row the first leaves blank:
+//   1. the assignment naming the driver case aside, in SQL, as it always has;
+//   2. the assignment naming them through a spacing variant of the name
+//      (normalizeDriverName()), compared in JS: LOWER() folds A–Z case only —
+//      not spacing, not other letters — and SQLite cannot collapse a
+//      whitespace run.
+// An expense carries the spelling it was filed under (a driver's own session
+// files under the account's spelling), an assignment the spelling its truck was
+// assigned under. So an account stored as "Shorn  King" never met its
+// assignment to "Shorn King", and its receipts stayed unattributed, off the
+// investor's P&L. Both steps take the assignment covering the expense's day
+// with the latest start_date, through ONE window (coversExpenseDay() below),
+// so step 2 differs from step 1 only in how it compares the name. Step 2
+// counts a match only while no other account holds
+// the name under another spelling (driverNameHeldByOtherSpelling()), the rule
+// findTruckForDriverStamp() applies to the same stamp at insert: a legacy
+// account "Shorn  King" beside the real "Shorn King" must not have its receipts
+// stamped with the real driver's truck and owner. Running second, step 2 only
+// ever fills a row that would otherwise stay unattributed; it never outranks a
+// case-aside assignment.
+//
+// ONLY A ROW THAT MATCHED IS WRITTEN, which is what makes a second boot over
+// the same data change nothing. Pass 1 used to write every candidate, and
+// `SET (a, b) = (SELECT ... LIMIT 1)` assigns NULL to both columns when the
+// subquery finds no row, so an expense no assignment covers went from ('', 0),
+// the column defaults and what POST /api/expenses writes when it finds no
+// truck, to (NULL, NULL). That was not a normalisation. No reader tells NULL
+// from '' or 0 (truck_unit is COALESCEd or compared with a real unit, owner_id
+// with a real investor's id), and NULL still passes the candidate filter, so
+// the same rows were rewritten, counted as applied and logged on every boot. It
+// would also have cleared an owner_id on a row with a blank truck_unit. Rows it
+// already rewrote keep their NULLs, which read exactly as '' and 0; writing
+// them back would touch finance rows to change no figure.
 //
 // ⚠️ GATED ON THE PERIOD LOCK, per the same rule as the fuel odometer backfill:
 // a row in a finalized month is never written. This one matters MORE than the
 // odometer, not less — `owner_id` decides WHOSE money a receipt lands against,
 // so an unattended boot migration rewriting it in a closed month silently
-// restates an investor's finalized P&L.
+// restates an investor's finalized P&L. Both steps of pass 1 read the one
+// lock-partitioned list, so step 2 never sees a row in a finalized month.
 //
 // The tension is real and was escalated rather than decided here: gating means a
 // legacy row in a closed month never gets attributed, freezing a known error.
@@ -5159,164 +5194,230 @@ db.exec(`
 // Ordering note: this runs long before periodLockStmt is initialised, which is
 // exactly why that statement is lazily prepared — see the comment there. Do not
 // convert it back to a module-scope const.
+//
+// ⚠️ BOOT ORDER, the same trap in general. This runs at module top level, while
+// most of this file has not yet executed. Everything it calls is a function
+// DECLARATION (hoisted and initialised) reading `db` and tables created above
+// this line: expenses, trucks, truck_assignments, period_locks, audit_trail, and
+// users for driverNameHeldByOtherSpelling(). A module-scope `const` or `let`
+// declared further down (a regex, a Map, a prepared statement,
+// EXPENSE_PNL_FILTER) is still in its temporal dead zone here, and the catch
+// below would turn its ReferenceError into a backfill skipped on every boot.
+// scripts/test-boot-expense-backfill-spacing.js runs the whole call graph with
+// every such binding still uninitialised, so a reference to one fails the
+// runner rather than the boot.
 const legacyExpenseBackfillHealth = {
-	ranAt: null, pass1: 0, pass2: 0,
+	ranAt: null, pass1: 0, pass1Spacing: 0, pass2: 0,
 	skippedLockedPeriod: 0, skippedPeriods: [], error: null,
 };
-try {
-	// Candidates are resolved in JS rather than filtered in SQL so the lock rule
-	// stays in ONE primitive (expenseRowPeriodLocked) instead of being restated as
-	// a second, drifting SQL expression. posted_period + created_at are selected
-	// because that predicate fails closed without them.
-	// POSITIVE CONTROL, and it is here because this gate already failed silently
-	// once: isLocked() swallows every error and answers "not locked", so a broken
-	// lock lookup is indistinguishable from an open month and the migration would
-	// cheerfully write the whole backlog into finalized periods. Prove the table
-	// is readable first; if it is not, treat EVERY row as locked rather than
-	// trusting an answer that cannot be wrong in the safe direction.
-	//
-	// ONE implementation, shared with the fuel-odometer backfill: a second
-	// hand-rolled copy of this try/catch is how the two callers of the same
-	// fail-open predicate came to be defended differently. periodLocksReadable is
-	// a function DECLARATION, so it is hoisted and initialised and reachable from
-	// this early-boot migration — a `const` beside it would still be in the
-	// temporal dead zone here, which is the bug this whole probe descends from.
-	const lockReadable = periodLocksReadable();
+backfillLegacyExpenseTrucks(legacyExpenseBackfillHealth);
 
-	const lockPartition = (rows) => {
-		const open = [], skipped = [];
-		for (const r of rows) (!lockReadable || expenseRowPeriodLocked(r) ? skipped : open).push(r);
-		return { open, skipped };
-	};
-	const noteSkips = (rows) => {
-		legacyExpenseBackfillHealth.skippedLockedPeriod += rows.length;
-		for (const r of rows) {
-			const p = expensePostedPeriod(r) || String(r.date || "").slice(0, 7) || "(unknown)";
-			if (!legacyExpenseBackfillHealth.skippedPeriods.includes(p)) legacyExpenseBackfillHealth.skippedPeriods.push(p);
-		}
-	};
-	// better-sqlite3 caps bound parameters, so the id list is chunked rather than
-	// expanded into one enormous IN (). A restored backup could make these sets
-	// large; today both are empty.
-	const runChunked = (sql, rows) => {
-		let changes = 0;
-		const stmt = (n) => db.prepare(sql.replace("__IDS__", Array(n).fill("?").join(",")));
-		for (let i = 0; i < rows.length; i += 400) {
-			const batch = rows.slice(i, i + 400).map((r) => r.id);
-			changes += stmt(batch.length).run(...batch).changes;
-		}
-		return { changes };
-	};
+// The backfill above, as a named declaration so a runner can lift it
+// (scripts/test-boot-expense-backfill-spacing.js). It is hoisted, so the call
+// above runs it at the point in boot the block always ran. It never throws: a
+// failure is recorded on `health` and logged. `pass1` counts both of its steps,
+// so the `applied` figure GET /api/periods reports counts every row written;
+// `pass1Spacing` is the part step 2 wrote.
+function backfillLegacyExpenseTrucks(health) {
+	try {
+		// Candidates are resolved in JS rather than filtered in SQL so the lock rule
+		// stays in ONE primitive (expenseRowPeriodLocked) instead of being restated as
+		// a second, drifting SQL expression. posted_period + created_at are selected
+		// because that predicate fails closed without them.
+		// POSITIVE CONTROL, and it is here because this gate already failed silently
+		// once: isLocked() swallows every error and answers "not locked", so a broken
+		// lock lookup is indistinguishable from an open month and the migration would
+		// cheerfully write the whole backlog into finalized periods. Prove the table
+		// is readable first; if it is not, treat EVERY row as locked rather than
+		// trusting an answer that cannot be wrong in the safe direction.
+		//
+		// ONE implementation, shared with the fuel-odometer backfill: a second
+		// hand-rolled copy of this try/catch is how the two callers of the same
+		// fail-open predicate came to be defended differently. periodLocksReadable is
+		// a function DECLARATION, so it is hoisted and initialised and reachable from
+		// this early-boot migration — a `const` beside it would still be in the
+		// temporal dead zone here, which is the bug this whole probe descends from.
+		const lockReadable = periodLocksReadable();
 
-	const pass1Candidates = db.prepare(`
-		SELECT id, date, posted_period, created_at FROM expenses
-		WHERE (truck_unit IS NULL OR truck_unit = '') AND driver IS NOT NULL AND driver != ''
-	`).all();
-	const p1 = lockPartition(pass1Candidates);
-	noteSkips(p1.skipped);
+		const lockPartition = (rows) => {
+			const open = [], skipped = [];
+			for (const r of rows) (!lockReadable || expenseRowPeriodLocked(r) ? skipped : open).push(r);
+			return { open, skipped };
+		};
+		const noteSkips = (rows) => {
+			health.skippedLockedPeriod += rows.length;
+			for (const r of rows) {
+				const p = expensePostedPeriod(r) || String(r.date || "").slice(0, 7) || "(unknown)";
+				if (!health.skippedPeriods.includes(p)) health.skippedPeriods.push(p);
+			}
+		};
+		// better-sqlite3 caps bound parameters, so the id list is chunked rather than
+		// expanded into one enormous IN (). A restored backup could make these sets
+		// large; today both are empty.
+		const runChunked = (sql, rows) => {
+			let changes = 0;
+			const stmt = (n) => db.prepare(sql.replace("__IDS__", Array(n).fill("?").join(",")));
+			for (let i = 0; i < rows.length; i += 400) {
+				const batch = rows.slice(i, i + 400).map((r) => r.id);
+				changes += stmt(batch.length).run(...batch).changes;
+			}
+			return { changes };
+		};
 
-	const pass1 = runChunked(`
-		UPDATE expenses
-		SET (truck_unit, owner_id) = (
-			SELECT t.unit_number, t.owner_id
+		// Does assignment `ta` cover the expense's day? ONE window for both steps of
+		// pass 1. `day` is the SQL naming that day: expenses.date in step 1's
+		// correlated UPDATE, a bound parameter in step 2's SELECT.
+		//
+		// substr(...,1,10) is load-bearing: these two columns hold DIFFERENT
+		// shapes and SQLite compares them as plain strings.
+		//   truck_assignments.start_date/end_date -> full ISO instant,
+		//     '2026-08-06T22:30:00.000Z' (assignDriverToTruck writes
+		//     new Date().toISOString())
+		//   expenses.date                         -> bare day, '2026-08-06'
+		// Lexicographically the longer string sorts higher at position 10, so
+		// the raw comparison was ASYMMETRIC:
+		//   start <= date  ->  FALSE  (opening bound excluded its own day)
+		//   end   >= date  ->  TRUE   (closing bound included it)
+		// Net effect: a driver's FIRST-DAY expenses never resolved to a truck,
+		// so truck_unit stayed blank and owner_id stayed 0 — which drops those
+		// receipts out of the investor's P&L entirely and over-states their
+		// profit by every first-day receipt in their fleet's history. And
+		// 22:30Z is 17:30 Houston, so this fired on ordinary afternoon
+		// assignments, not only on evening ones.
+		// Comparing day-to-day makes both bounds inclusive of the boundary day.
+		// ta.end_date = '' (still active) short-circuits before the substr.
+		const coversExpenseDay = (day) => `(substr(ta.start_date, 1, 10) <= ${day}
+				  AND (ta.end_date = '' OR substr(ta.end_date, 1, 10) >= ${day}))`;
+
+		// Step 1's match, ONE definition for both of its uses: the SET takes the
+		// newest covering assignment's truck, and the EXISTS writes a row only when
+		// there is one (see "ONLY A ROW THAT MATCHED IS WRITTEN" above).
+		const caseAsideAssignment = `
+				FROM truck_assignments ta
+				JOIN trucks t ON t.id = ta.truck_id
+				WHERE LOWER(ta.driver_name) = LOWER(expenses.driver)
+				  AND ${coversExpenseDay("expenses.date")}`;
+
+		const pass1Candidates = db.prepare(`
+			SELECT id, driver, date, posted_period, created_at FROM expenses
+			WHERE (truck_unit IS NULL OR truck_unit = '') AND driver IS NOT NULL AND driver != ''
+		`).all();
+		const p1 = lockPartition(pass1Candidates);
+		noteSkips(p1.skipped);
+
+		const pass1 = runChunked(`
+			UPDATE expenses
+			SET (truck_unit, owner_id) = (
+				SELECT t.unit_number, t.owner_id
+				${caseAsideAssignment}
+				ORDER BY ta.start_date DESC
+				LIMIT 1
+			)
+			WHERE (truck_unit IS NULL OR truck_unit = '')
+			  AND driver IS NOT NULL AND driver != ''
+			  AND EXISTS (SELECT 1 ${caseAsideAssignment})
+			  AND id IN (__IDS__)
+		`, p1.open);
+
+		// Step 2, over what step 1 left blank in the same unlocked list. Each row is
+		// re-read, because step 1 has just written some of them.
+		const stillUnattributed = db.prepare("SELECT 1 FROM expenses WHERE id = ? AND (truck_unit IS NULL OR truck_unit = '')");
+		const coveringAssignments = db.prepare(`
+			SELECT ta.driver_name AS driver_name, t.unit_number AS unit_number, t.owner_id AS owner_id
 			FROM truck_assignments ta
 			JOIN trucks t ON t.id = ta.truck_id
-			WHERE LOWER(ta.driver_name) = LOWER(expenses.driver)
-			  -- substr(...,1,10) is load-bearing: these two columns hold DIFFERENT
-			  -- shapes and SQLite compares them as plain strings.
-			  --   truck_assignments.start_date/end_date -> full ISO instant,
-			  --     '2026-08-06T22:30:00.000Z' (assignDriverToTruck writes
-			  --     new Date().toISOString())
-			  --   expenses.date                         -> bare day, '2026-08-06'
-			  -- Lexicographically the longer string sorts higher at position 10, so
-			  -- the raw comparison was ASYMMETRIC:
-			  --   start <= date  ->  FALSE  (opening bound excluded its own day)
-			  --   end   >= date  ->  TRUE   (closing bound included it)
-			  -- Net effect: a driver's FIRST-DAY expenses never resolved to a truck,
-			  -- so truck_unit stayed blank and owner_id stayed 0 — which drops those
-			  -- receipts out of the investor's P&L entirely and over-states their
-			  -- profit by every first-day receipt in their fleet's history. And
-			  -- 22:30Z is 17:30 Houston, so this fired on ordinary afternoon
-			  -- assignments, not only on evening ones.
-			  -- Comparing day-to-day makes both bounds inclusive of the boundary day.
-			  -- ta.end_date = '' (still active) short-circuits before the substr.
-			  AND substr(ta.start_date, 1, 10) <= expenses.date
-			  AND (ta.end_date = '' OR substr(ta.end_date, 1, 10) >= expenses.date)
+			WHERE COALESCE(ta.driver_name, '') <> ''
+			  AND ${coversExpenseDay("@day")}
 			ORDER BY ta.start_date DESC
-			LIMIT 1
-		)
-		WHERE (truck_unit IS NULL OR truck_unit = '')
-		  AND driver IS NOT NULL AND driver != ''
-		  AND id IN (__IDS__)
-	`, p1.open);
-
-	const pass2Candidates = db.prepare(`
-		SELECT id, date, posted_period, created_at FROM expenses
-		WHERE (owner_id IS NULL OR owner_id = 0)
-		  AND truck_unit IS NOT NULL AND truck_unit != ''
-		  AND EXISTS (
-			SELECT 1 FROM trucks t
-			WHERE LOWER(t.unit_number) = LOWER(expenses.truck_unit)
-			  AND t.owner_id > 0
-		  )
-	`).all();
-	const p2 = lockPartition(pass2Candidates);
-	noteSkips(p2.skipped);
-
-	const pass2 = runChunked(`
-		UPDATE expenses
-		SET owner_id = (
-			SELECT t.owner_id FROM trucks t
-			WHERE LOWER(t.unit_number) = LOWER(expenses.truck_unit)
-			LIMIT 1
-		)
-		WHERE (owner_id IS NULL OR owner_id = 0)
-		  AND truck_unit IS NOT NULL AND truck_unit != ''
-		  AND EXISTS (
-			SELECT 1 FROM trucks t
-			WHERE LOWER(t.unit_number) = LOWER(expenses.truck_unit)
-			  AND t.owner_id > 0
-		  )
-		  AND id IN (__IDS__)
-	`, p2.open);
-
-	legacyExpenseBackfillHealth.ranAt = new Date().toISOString();
-	legacyExpenseBackfillHealth.pass1 = pass1.changes;
-	legacyExpenseBackfillHealth.pass2 = pass2.changes;
-
-	if (pass1.changes > 0 || pass2.changes > 0) {
-		console.log(`Expense backfill: pass1 ${pass1.changes} (truck_unit+owner_id), pass2 ${pass2.changes} (owner_id refresh)`);
-	}
-	// Loud on purpose, and on EVERY boot while it is non-zero. These rows are
-	// receipts that cannot be attributed to an investor until someone reopens the
-	// month — a one-time log would scroll away and the condition would persist
-	// unseen, which is the failure mode this whole branch keeps finding.
-	if (!lockReadable) {
-		legacyExpenseBackfillHealth.error = "period_locks unreadable — every candidate row was withheld";
-		console.warn("Expense backfill: period_locks could not be read; withheld ALL candidate rows rather than risk writing into a finalized month.");
-	}
-	if (legacyExpenseBackfillHealth.skippedLockedPeriod > 0) {
-		const periods = legacyExpenseBackfillHealth.skippedPeriods.sort().join(", ");
-		// The two branches must not share wording. When the table is unreadable the
-		// withheld set is EVERY candidate row, and the periods listed are simply the
-		// months those rows fall in — most of them open. Printing them as "finalized
-		// period(s)" asserts a close that never happened on live months and sends
-		// whoever reads the log hunting for a month-end that does not exist. It also
-		// prescribes the wrong fix: reopening a period does nothing here, the
-		// period_locks table itself is broken.
-		if (!lockReadable) {
-			console.warn(`Expense backfill: ACTION NEEDED — period_locks is unreadable, so all ${legacyExpenseBackfillHealth.skippedLockedPeriod} legacy receipt(s) were withheld regardless of month (rows fall in [${periods}]; their lock state is UNKNOWN, not finalized). Repair period_locks and reboot — reopening a period will not help.`);
-			logAudit({}, "legacy_expense_backfill_skipped", "expenses", "",
-				`${legacyExpenseBackfillHealth.skippedLockedPeriod} legacy receipt(s) left unattributed because period_locks could not be read; lock state unknown for [${periods}]`);
-		} else {
-			console.warn(`Expense backfill: ACTION NEEDED — ${legacyExpenseBackfillHealth.skippedLockedPeriod} legacy receipt(s) in finalized period(s) [${periods}] could not be attributed (truck_unit/owner_id). Reopen the period to correct them.`);
-			logAudit({}, "legacy_expense_backfill_skipped", "expenses", "",
-				`${legacyExpenseBackfillHealth.skippedLockedPeriod} legacy receipt(s) left unattributed because their period(s) are finalized: ${periods}`);
+		`);
+		const stampSpacingMatch = db.prepare(`
+			UPDATE expenses SET truck_unit = ?, owner_id = ?
+			WHERE id = ? AND (truck_unit IS NULL OR truck_unit = '')
+		`);
+		// Asked once per spelling: the answer depends only on the name and on
+		// `users`, which nothing here writes.
+		const heldByOtherSpelling = new Map();
+		let spacingChanges = 0;
+		for (const r of p1.open) {
+			if (!stillUnattributed.get(r.id)) continue;
+			const needle = normalizeDriverName(r.driver);
+			if (!needle) continue;
+			const hit = coveringAssignments.all({ day: r.date }).find((a) => normalizeDriverName(a.driver_name) === needle);
+			if (!hit) continue;
+			if (!heldByOtherSpelling.has(r.driver)) heldByOtherSpelling.set(r.driver, driverNameHeldByOtherSpelling(r.driver));
+			if (heldByOtherSpelling.get(r.driver)) continue;
+			spacingChanges += stampSpacingMatch.run(hit.unit_number, hit.owner_id, r.id).changes;
 		}
+
+		const pass2Candidates = db.prepare(`
+			SELECT id, date, posted_period, created_at FROM expenses
+			WHERE (owner_id IS NULL OR owner_id = 0)
+			  AND truck_unit IS NOT NULL AND truck_unit != ''
+			  AND EXISTS (
+				SELECT 1 FROM trucks t
+				WHERE LOWER(t.unit_number) = LOWER(expenses.truck_unit)
+				  AND t.owner_id > 0
+			  )
+		`).all();
+		const p2 = lockPartition(pass2Candidates);
+		noteSkips(p2.skipped);
+
+		const pass2 = runChunked(`
+			UPDATE expenses
+			SET owner_id = (
+				SELECT t.owner_id FROM trucks t
+				WHERE LOWER(t.unit_number) = LOWER(expenses.truck_unit)
+				LIMIT 1
+			)
+			WHERE (owner_id IS NULL OR owner_id = 0)
+			  AND truck_unit IS NOT NULL AND truck_unit != ''
+			  AND EXISTS (
+				SELECT 1 FROM trucks t
+				WHERE LOWER(t.unit_number) = LOWER(expenses.truck_unit)
+				  AND t.owner_id > 0
+			  )
+			  AND id IN (__IDS__)
+		`, p2.open);
+
+		health.ranAt = new Date().toISOString();
+		health.pass1 = pass1.changes + spacingChanges;
+		health.pass1Spacing = spacingChanges;
+		health.pass2 = pass2.changes;
+
+		if (health.pass1 > 0 || health.pass2 > 0) {
+			console.log(`Expense backfill: pass1 ${health.pass1} (truck_unit+owner_id; ${health.pass1Spacing} through a spacing variant of the driver's name), pass2 ${health.pass2} (owner_id refresh)`);
+		}
+		// Loud on purpose, and on EVERY boot while it is non-zero. These rows are
+		// receipts that cannot be attributed to an investor until someone reopens the
+		// month — a one-time log would scroll away and the condition would persist
+		// unseen, which is the failure mode this whole branch keeps finding.
+		if (!lockReadable) {
+			health.error = "period_locks unreadable — every candidate row was withheld";
+			console.warn("Expense backfill: period_locks could not be read; withheld ALL candidate rows rather than risk writing into a finalized month.");
+		}
+		if (health.skippedLockedPeriod > 0) {
+			const periods = health.skippedPeriods.sort().join(", ");
+			// The two branches must not share wording. When the table is unreadable the
+			// withheld set is EVERY candidate row, and the periods listed are simply the
+			// months those rows fall in — most of them open. Printing them as "finalized
+			// period(s)" asserts a close that never happened on live months and sends
+			// whoever reads the log hunting for a month-end that does not exist. It also
+			// prescribes the wrong fix: reopening a period does nothing here, the
+			// period_locks table itself is broken.
+			if (!lockReadable) {
+				console.warn(`Expense backfill: ACTION NEEDED — period_locks is unreadable, so all ${health.skippedLockedPeriod} legacy receipt(s) were withheld regardless of month (rows fall in [${periods}]; their lock state is UNKNOWN, not finalized). Repair period_locks and reboot — reopening a period will not help.`);
+				logAudit({}, "legacy_expense_backfill_skipped", "expenses", "",
+					`${health.skippedLockedPeriod} legacy receipt(s) left unattributed because period_locks could not be read; lock state unknown for [${periods}]`);
+			} else {
+				console.warn(`Expense backfill: ACTION NEEDED — ${health.skippedLockedPeriod} legacy receipt(s) in finalized period(s) [${periods}] could not be attributed (truck_unit/owner_id). Reopen the period to correct them.`);
+				logAudit({}, "legacy_expense_backfill_skipped", "expenses", "",
+					`${health.skippedLockedPeriod} legacy receipt(s) left unattributed because their period(s) are finalized: ${periods}`);
+			}
+		}
+	} catch (e) {
+		health.error = e.message;
+		console.warn("Expense backfill skipped:", e.message);
 	}
-} catch (e) {
-	legacyExpenseBackfillHealth.error = e.message;
-	console.warn("Expense backfill skipped:", e.message);
 }
 
 // Helper: assign a driver to a truck (closes previous assignments, updates trucks.assigned_driver)
@@ -14078,9 +14179,67 @@ function periodPhase(period) {
 	return p >= currentMonthKeyCT() ? "accruing" : "pending";
 }
 
-// Returns { [driver_name_lc]: { [yyyy-mm]: total, _total: allTime } } summing
-// Fuel + Maintenance only, Rejected excluded — the same filter the invoice
+// ⚠️ THE KEY AN EXPENSE'S DRIVER IS SUMMED UNDER, in every P&L map a caller
+// reads with normalizeDriverName(): getDeductibleExpensesByDriverMonth() below,
+// and the per-truck expense maps of GET /api/investor and GET /api/financials
+// (foldExpenseTotalsByDriver()). Those maps were keyed by the query's own
+// LOWER(driver), a key no lookup asks for once a stored name carries a doubled
+// or an edge space, so a receipt stored as "Pat  Lee" or " Pat Lee " was never
+// deducted, while POST /api/invoices/generate, which matches
+// normalizeDriverName(e.driver), deducted it: the invoice and the P&L paid one
+// percentage driver two ways.
+//
+// `driverLc` is the stored name as the query's LOWER(driver) returns it; a raw
+// name gives the same key, since normalizeDriverName(LOWER(x)) is
+// normalizeDriverName(x). The fold runs here, in JS, because SQLite cannot
+// express it: its LOWER folds ASCII only, its TRIM strips spaces only, and
+// nothing collapses a whitespace run.
+//
+// ⚠️ THE QUERIES KEEP `GROUP BY LOWER(driver)`, so a name whose stored spellings
+// differ at most in A–Z case is still summed by SQLite's own SUM, exactly as
+// before to the last bit; JS adds only the groups SQLite could not merge — a
+// spacing variant, or a case variant outside A–Z (SQLite's LOWER leaves "É"
+// alone), which were never deducted before and now are, as the invoice does. Grouping by
+// the raw spelling would move case variants into the JS sum as well, and a JS
+// sum of per-spelling SUMs differs from SQLite's SUM in the last bit often
+// enough to move a percentage driver's pay by a cent once it is rounded.
+//
+// ⚠️ A NAME THAT NORMALIZES TO NOTHING IS NOT FOLDED. '' or whitespace only (or
+// NULL, which the column's NOT NULL keeps out) keeps exactly the key it always
+// had: the query's own value, which a JS object spells "null" for a NULL. No P&L
+// lookup asks for a blank name, but a per-truck map is read with
+// normalizeDriverName(truck.assigned_driver), which is '' for a truck with no
+// driver, and that read must go on matching the rows stored as '' and nothing
+// else rather than start collecting every whitespace-only row too.
+function expenseDriverKey(driverLc) {
+	return normalizeDriverName(driverLc) || String(driverLc);
+}
+
+// { [expenseDriverKey(d)]: total } from query rows of { d: LOWER(driver), t } —
+// the per-truck expense maps of GET /api/investor and GET /api/financials.
+// Spellings that fold together are summed, never overwritten, and the result is
+// built by Object.fromEntries(), as those two maps always were.
+function foldExpenseTotalsByDriver(rows) {
+	const byKey = new Map();
+	for (const r of rows) {
+		const key = expenseDriverKey(r.d);
+		byKey.set(key, (byKey.get(key) || 0) + (r.t || 0));
+	}
+	return Object.fromEntries(byKey);
+}
+
+// Returns { [expenseDriverKey(driver)]: { [yyyy-mm]: total, _total: allTime } }
+// summing Fuel + Maintenance only, Rejected excluded — the same filter the invoice
 // endpoint uses. One round-trip so financials/investor don't fan out.
+//
+// KEYED BY normalizeDriverName(), BECAUSE EVERY LOOKUP IS: GET /api/investor,
+// GET /api/financials and computeInvestorMonthlyEarnings() (the payouts, /detail
+// and /statement) all ask for a driver's deductible by the normalized name. The
+// weekly invoice matches the same way (normalizeDriverName(e.driver) ===
+// nameNorm), so the two deduct the same receipts. SQLite cannot express that
+// fold, so it runs in JS through expenseDriverKey() above, which also says why
+// the query still groups by LOWER(driver) and what a blank name keys as.
+// Spellings that fold together are summed per month and into _total.
 //
 // Settlement basis (EXPENSE_PERIOD_EXPR): this drives PERCENTAGE-driver pay,
 // which lands in netProfit and therefore in the investor payout. On plain
@@ -14097,13 +14256,15 @@ function getDeductibleExpensesByDriverMonth() {
 		WHERE type IN ('Fuel', 'Maintenance') AND ${EXPENSE_PNL_FILTER}
 		GROUP BY LOWER(driver), month
 	`).all();
-	const out = {};
+	const byKey = new Map();
 	for (const r of rows) {
-		if (!out[r.name_lc]) out[r.name_lc] = { _total: 0 };
-		if (r.month) out[r.name_lc][r.month] = r.total || 0;
-		out[r.name_lc]._total += (r.total || 0);
+		const key = expenseDriverKey(r.name_lc);
+		let entry = byKey.get(key);
+		if (!entry) byKey.set(key, (entry = { _total: 0 }));
+		if (r.month) entry[r.month] = (entry[r.month] || 0) + (r.total || 0);
+		entry._total += (r.total || 0);
 	}
-	return out;
+	return Object.fromEntries(byKey);
 }
 
 // Map a longitude to a continental-US IANA timezone. Real zone boundaries follow
@@ -21682,8 +21843,10 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			// name), those rows are not this driver's alone, and they still count.
 			// Not a blanket skip like `caseOnlyRename`, and the lock guard above
 			// keeps judging it: a change of internal spacing is not money-neutral
-			// here — getInvestorDriverSet() (trim + lowercase) and
-			// getDeductibleExpensesByDriverMonth() (LOWER) do not collapse it.
+			// here — getInvestorDriverSet() (trim + lowercase) does not collapse it.
+			// (getDeductibleExpensesByDriverMonth() does now, through
+			// normalizeDriverName(), so the percentage deduction no longer moves;
+			// the investor driver set still can, which is why the lock still judges.)
 			// For that reason Job Tracking rows under the new spelling still count
 			// below: re-spelling the truck and directory row to match them pulls
 			// those loads into an investor's driver set, in closed months too, and
@@ -26200,9 +26363,9 @@ app.get("/api/admin/audit-trail", requireRole("Super Admin"), (req, res) => {
 // all-or-nothing.
 //
 // THE DISCRIMINATOR THAT KEEPS THE ROUTE USABLE: every money join key is
-// case-insensitive. getDeductibleExpensesByDriverMonth uses LOWER(driver);
-// getDriverPayStructures, the investor/financials driver key and
-// trucksByDriver use normalizeDriverName(); getInvestorDriverSet
+// case-insensitive. getDeductibleExpensesByDriverMonth (through
+// expenseDriverKey()), getDriverPayStructures, the investor/financials driver key
+// and trucksByDriver use normalizeDriverName(); getInvestorDriverSet
 // uses trim().toLowerCase(); generateInvoiceHandler matches every driver lookup
 // through normalizeDriverName(). So a rename that changes only case or surrounding
 // whitespace CANNOT move a settlement figure — it is money-neutral by
@@ -27093,7 +27256,8 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		// INTERNAL whitespace, but getInvestorDriverSet does not, so
 		// "Howard  Reddie" -> "Howard Reddie" would move an investor's driver
 		// set and must be treated as substantive. (getDeductibleExpensesByDriverMonth
-		// keys on LOWER(driver) and does not collapse it either.)
+		// now keys through normalizeDriverName() and does collapse it, so the
+		// deduction would not move; the driver set still would.)
 		// ⚠️ And for the same reason a case-only rename is money-neutral only while
 		// it moves no row from ANOTHER spelling of the old name — see
 		// `moneyNeutral` below: the cascade now takes those rows too.
@@ -28534,8 +28698,10 @@ function a1ColumnLetter(index) {
 // The cells a row save writes: one A1 range per cell whose value as it will be
 // written (`after`) differs from the value as read (`before`), in column order,
 // as the `data` of one values.batchUpdate. PUT /api/data/:rowIndex and
-// PUT /api/load/:loadId both write through it. Nothing changed is [], and the
-// route writes nothing.
+// PUT /api/load/:loadId both write through it, and so does
+// POST /api/loads/from-ratecon when it updates an existing Payments Table or
+// Job Details row (upsertByKey). Nothing changed is [], and the route writes
+// nothing.
 //
 // ⚠️ WHY NOT THE WHOLE ROW. Both routes read the row as the sheet DISPLAYS it
 // (the API's default FORMATTED_VALUE), the Active Loads editor and the Data
@@ -38452,21 +38618,42 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 
 		// ---- 5/6) Payments Table + Job Details upserts ----
 		// Sheets v4 has no native appendOrUpdate (the n8n node fakes it the same
-		// way): read the tab, values.update the matching row, else values.append.
-		// Unmapped columns keep whatever the existing row held, so an update
-		// never blanks Invoice Number / Payment Status.
+		// way): read the tab, then update the row whose key matches, or else
+		// write a new row below the last one. Unmapped columns keep whatever the
+		// existing row held, so an update never blanks Invoice Number / Payment
+		// Status.
 		//
 		// `preserveFilled` additionally refuses to overwrite an already-populated
 		// *mapped* cell — see the Payments Table call below.
+		//
+		// ⚠️ AN UPDATE WRITES ONLY THE CELLS THAT DIFFER, NEVER THE WHOLE ROW.
+		// The row is still built in full (buildMappedRow*()), then compared with
+		// the row as read, and only the cells whose value changes are sent, one A1
+		// range each, in ONE values.batchUpdate: sheetRowCellWrites(), the helper
+		// PUT /api/data/:rowIndex and PUT /api/load/:loadId write through. When no
+		// cell differs, nothing is sent. The whole-row rewrite this replaced
+		// re-entered every cell of the row through USER_ENTERED, which parses
+		// each value as if it had been typed in, so a text cell holding "00123"
+		// came back as the number 123. It also wrote back, over any cell someone changed between this read and
+		// the write, the value this read saw, and a sort in that window landed the
+		// whole row on another load. Now a cell this route does not change is
+		// never written, so none of that can reach it (a sort can still land the
+		// changed cells on another row; there is no transaction). A NEW row is
+		// still written whole, at an anchored A{lastRow+1} (below): there is no
+		// stored row to compare with.
 		const upsertByKey = async (tabName, keyColumn, mapping, opts) => {
 			const preserveFilled = !!(opts && opts.preserveFilled);
 			const resp = await sheets.spreadsheets.values.get({
 				spreadsheetId: SPREADSHEET_ID,
 				range: tabName,
-				// Round-trip formulas as formulas. An update rewrites the WHOLE
-				// row, and the default FORMATTED_VALUE render would hand back a
-				// formula cell as its computed text — writing that back would
-				// flatten a live formula in a column this feature doesn't own.
+				// Formulas as formulas, so `preserveFilled` sees a formula in a
+				// mapped cell as filled: the default FORMATTED_VALUE render hands
+				// back its computed text, "" for a formula that shows nothing, which
+				// reads as blank and would be overwritten. The render does not decide
+				// which UNMAPPED cells an update writes: each is carried through as
+				// read, so it compares equal and is never written, whatever came back
+				// for it (under FORMULA a number comes back as a number and a date as
+				// its serial number).
 				valueRenderOption: "FORMULA",
 			});
 			const rows = resp.data.values || [];
@@ -38483,22 +38670,51 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 			} else {
 				rowValues = rateconLoad.buildMappedRow(tabHeaders, mapping, existingRow);
 			}
-			// Anchor every write to column A explicitly. values.append with a
+			if (matchRow > 0) {
+				// The existing row: only the cells that differ, in one batchUpdate
+				// (see ⚠️ AN UPDATE WRITES ONLY THE CELLS THAT DIFFER above), each at
+				// its own A1 address, quoted as PUT /api/data/:rowIndex quotes a tab.
+				//
+				// Compared as sheetRowCellWrites() compares: null and absent read as
+				// "", anything else as its String(). So the 1500 a FORMULA read
+				// returns and the "1500" buildMappedRow*() makes of a mapped value
+				// are one value, and an unmapped or preserved cell, which
+				// buildMappedRow*() carries through exactly as read, always compares
+				// equal and is not written.
+				//
+				// `rowValues` is one cell per header. The API drops a row's trailing
+				// blank cells, so the row as read can be SHORTER: a missing cell reads
+				// as "", so an unmapped one is equal, and a mapped one past the end is
+				// written when its new value is not blank. It can also be LONGER, when
+				// cells sit past the last header: sheetRowAfterUpdate() keeps that
+				// tail as read, as the whole-row write from column A left it, so it
+				// is never blanked.
+				const cellWrites = sheetRowCellWrites(a1SheetPrefix(tabName), matchRow, existingRow,
+					sheetRowAfterUpdate(existingRow, rowValues));
+				if (cellWrites.length) {
+					await sheets.spreadsheets.values.batchUpdate({
+						spreadsheetId: SPREADSHEET_ID,
+						requestBody: { valueInputOption: "USER_ENTERED", data: cellWrites },
+					});
+				}
+				return { action: cellWrites.length ? "updated" : "unchanged", row: matchRow, conflicts };
+			}
+			// A new row. Anchor it to column A explicitly. values.append with a
 			// bare tab range lets Sheets auto-detect the table's anchor column
 			// from existing data, and when a tab's leading column is empty
 			// (Job Details' column A is blank; Payments Table's early columns are
 			// sparse) the appended row lands SHIFTED right into the wrong columns.
 			// A new row goes to A{lastRow+1} — rows already excludes trailing
 			// empties, so its length is the last populated row (1-based incl. the
-			// header). Both branches therefore write starting at column A.
-			const targetRow = matchRow > 0 ? matchRow : rows.length + 1;
+			// header) — and is written whole, starting at column A.
+			const targetRow = rows.length + 1;
 			await sheets.spreadsheets.values.update({
 				spreadsheetId: SPREADSHEET_ID,
 				range: `${tabName}!A${targetRow}`,
 				valueInputOption: "USER_ENTERED",
 				requestBody: { values: [rowValues] },
 			});
-			return { action: matchRow > 0 ? "updated" : "appended", row: targetRow, conflicts };
+			return { action: "appended", row: targetRow, conflicts };
 		};
 
 		// n8n "RATE UPDATE" — the key column really is named " Job ID"
@@ -48637,8 +48853,13 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const perTruckData = {};
 		if (investorDriverSet) {
 			// Batch queries BEFORE the loop (4 queries total instead of 5N)
-			const expByDriver = Object.fromEntries(
-				db.prepare(`SELECT LOWER(driver) AS d, COALESCE(SUM(amount),0) AS t FROM expenses WHERE owner_id = ? AND ${EXPENSE_PNL_FILTER} GROUP BY LOWER(driver)`).all(user.id).map(r => [r.d, r.t])
+			// expByDriver is read below as expByDriver[normalizeDriverName(
+			// truck.assigned_driver)], so it is keyed that way
+			// (foldExpenseTotalsByDriver()): a receipt stored under a spacing
+			// variant of the driver's name counts against that driver's truck, as
+			// it does on the weekly invoice. The query and its filters are unchanged.
+			const expByDriver = foldExpenseTotalsByDriver(
+				db.prepare(`SELECT LOWER(driver) AS d, COALESCE(SUM(amount),0) AS t FROM expenses WHERE owner_id = ? AND ${EXPENSE_PNL_FILTER} GROUP BY LOWER(driver)`).all(user.id)
 			);
 			const maintByTruck = Object.fromEntries(
 				db.prepare(`SELECT LOWER(mf.truck) AS u, COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck)=LOWER(t.unit_number) WHERE t.owner_id = ? AND mf.type='service' GROUP BY LOWER(mf.truck)`).all(user.id).map(r => [r.u, r.t])
@@ -51854,8 +52075,12 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// truck inherit another truck's revenue/expenses when a single
 		// load is missing its truck column — that was the source of the
 		// negative-Net rows reported by Deshorn on /admin/financials.
+		// The driver-keyed fallback below reads expByDriver[normalizeDriverName(
+		// truck.assigned_driver)], so the map is keyed that way
+		// (foldExpenseTotalsByDriver()), and a receipt stored under a spacing
+		// variant of the driver's name is not lost from it. The query is unchanged.
 		const expByDriverRows = db.prepare(`SELECT LOWER(driver) AS d, COALESCE(SUM(amount),0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY LOWER(driver)`).all();
-		const expByDriver = Object.fromEntries(expByDriverRows.map(r => [r.d, r.t]));
+		const expByDriver = foldExpenseTotalsByDriver(expByDriverRows);
 		const expByTruck = Object.fromEntries(
 			db.prepare(`SELECT LOWER(truck_unit) AS u, COALESCE(SUM(amount),0) AS t FROM expenses WHERE truck_unit IS NOT NULL AND truck_unit != '' AND ${EXPENSE_PNL_FILTER} GROUP BY LOWER(truck_unit)`).all().map(r => [r.u, r.t])
 		);
