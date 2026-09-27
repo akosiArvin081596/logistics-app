@@ -66,7 +66,7 @@ expected to FAIL exactly the fix rows.
     (RC1) archives a rate-con to disk and mirrors it to Drive only for an attached PDF, and RC1 attaches none. It sends
     no addresses either, so the route makes no geocode or Distance Matrix call, and it never calls the Gemini
     extraction (`POST /api/loads/ratecon/extract`).
-- **Two steps write the Google Sheet: F1 and RC1, and only the local non-production one.** Every other step that
+- **Steps that write the Google Sheet: F1, RC1 and the names section (K1–K3), and only the local non-production one.** Every other step that
   writes changes the SQLite copy only (trucks, drivers, expenses, sessions, audit rows). Both run only against a server
   on this machine, and both resolve the sheet the way `boot-server.sh` does and refuse production's, with the
   service-account key of the main checkout.
@@ -301,7 +301,7 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
 | `BASE_URL` | Required by `e2e.mjs`. Refuses `app.logisx.com` (production). |
 | `PHASE` | `before` or `after`. Only names the output; the "Expected" column is always the after-the-fix behaviour. |
 | `OUT_TAG` | Writes `shots/<tag>/` and `results-<tag>.md` instead of `<PHASE>`, so a rehearsal cannot overwrite a baseline. |
-| `ONLY` | A comma-separated list of sections: `trucks` (1–12, R1–R16), `signout` (S1–S7), `dispatcher` (D1–D3), `maintenance` (M1), `moneypath` (P1, E1, N1, N1b, F1, E2, B1, RC1). Unset: all five, in that order, then step 12's clean-up — more sign-ins than one limiter window holds (see above). |
+| `ONLY` | A comma-separated list of sections: `trucks` (1–12, R1–R16), `signout` (S1–S7), `dispatcher` (D1–D3), `maintenance` (M1), `moneypath` (P1, E1, N1, N1b, F1, E2, B1, RC1), `names` (K1–K3). Unset: all six, in that order, then step 12's clean-up — more sign-ins than one limiter window holds (see above). |
 | `STEPS` | Only these sign-out or money-path cases, e.g. `STEPS=S5a,S7` (each has its own browser context), `STEPS=P1,F1` or `STEPS=E2,B1,RC1` (`P1` selects P1a and P1b; `N1` selects N1 and N1b). The other sections ignore it. |
 | `HEADED=1` | A visible browser. |
 | `DB_PATH` | The copy the server runs on (inside the work dir). It is used **only** to plant stored values for steps 10, 11b–f, R3 and R15, to stage and clean up R16, to plant and read back E1, N1, N1b and E2, to read and delete B1's planted expense, to delete the rows RC1's import writes, and to plant P1's own driver. Unset: those rows SKIP, and P1 uses a real driver. |
@@ -610,6 +610,22 @@ import's rows in the copy are deleted as well: its dispatch notification, and an
 (none, with no PDF and no addresses). Its `create_load_ratecon` audit line stays, as the harness's other audit lines
 do. The server's 60 s cache of Job Tracking can still list the load for up to a minute after the clean-up. While the
 sheet rows are live, `plant-journal.json` records their addresses.
+
+## The names section (K1–K3)
+
+`ONLY=names`, local only (a staging run SKIPs it with a reason). It writes the local non-production sheet the way F1
+and RC1 do: it resolves the sheet as `boot-server.sh` does, refuses production's, snapshots every row it touches first
+(values and formats) and restores and re-reads each one. `Kc` reports every restore. The name under test is test data;
+real driver names are never printed.
+
+| Step | How it is shown | Expected (AFTER) |
+|---|---|---|
+| K1 | The Dispatcher dispatches a real load to a driver name that reads as a built-in property name, through the request the Job Board's Assign sends (its dropdown cannot offer such a name). The row is read back. | 400 `DRIVER_NAME_RESERVED` naming the field; the row is unchanged |
+| K2 | That name is stored in the Driver cell of a completed load in the current open month (as someone with access to the sheet could), after a baseline read. **UI:** the Super Admin opens the Dashboard and Financials. | Both load (200); an unrelated driver's figure and the fleet revenue match the baseline; the load counts as unassigned |
+| K3 | The Dispatcher edits a load and saves a harmless changed cell as a value the sheet would store as a formula, then as a plain signed number. | The first is refused 400 `FORMULA_NOT_ALLOWED`, shown on the page, with nothing written; the plain number is saved |
+
+**Run order.** K1 and K3 run first and K2 last. **After a BEFORE run, stop that server and never reuse it:** a build
+without the fix can be left in a broken state for the rest of that process, so every run gets a fresh server.
 
 ## Teardown (once the whole QA cycle is done)
 
