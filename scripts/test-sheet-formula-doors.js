@@ -1,8 +1,12 @@
 #!/usr/bin/env node
 // Locks the formula refusal on the routes, besides the two PUTs, that write a
 // non-Super-Admin's text into Google Sheets. Every one of them writes with
-// valueInputOption "USER_ENTERED", which stores a value starting with "=" as a
-// formula, and only a Super Admin enters formulas.
+// valueInputOption "USER_ENTERED", which stores a value starting with "=", or
+// with "+" before anything but a plain number, as a formula, and only a Super
+// Admin enters formulas. It also locks the two dispatch routes' refusal of a
+// driver name that reads as a built-in property name (400 DRIVER_NAME_RESERVED,
+// every role, before the sheet is read), and that from-ratecon writes no driver
+// name at all.
 //
 //   • POST /api/loads/from-ratecon (Super Admin, Dispatcher). Check 1 refuses a
 //     field in RATECON_SHEET_FIELDS that starts with "=", before the load is
@@ -123,6 +127,9 @@ ${extract("boundAddressForStorage")}
 ${extract("parseSheet")}
 ${extract("findCol")}
 ${extract("formulaCellRefusal")}
+${extract("normalizeDriverName")}
+${extract("isBuiltInPropertyName")}
+${extract("reservedDriverNameRefusal")}
 ${extract("colLetter")}
 ${extract("sheetRowToObject")}
 ${extract("resolveSheetDataRow")}
@@ -130,7 +137,7 @@ ${extract("a1SheetPrefix")}
 ${extract("a1ColumnLetter")}
 ${extract("sheetRowAfterUpdate")}
 ${extract("sheetRowCellWrites")}
-return { ADDRESS_MAX_CHARS, boundAddressForStorage, parseSheet, findCol, formulaCellRefusal, colLetter, sheetRowToObject, resolveSheetDataRow,
+return { ADDRESS_MAX_CHARS, boundAddressForStorage, parseSheet, findCol, formulaCellRefusal, reservedDriverNameRefusal, colLetter, sheetRowToObject, resolveSheetDataRow,
 	a1SheetPrefix, sheetRowAfterUpdate, sheetRowCellWrites };
 `)();
 const RATECON_SHEET_FIELDS = new Function(`return ${extractConst("RATECON_SHEET_FIELDS")};`)();
@@ -410,26 +417,48 @@ async function rateconSection(routeSrc = RATECON_SRC) {
 		["leading spaces", "Broker Name", "  =SUM(A1:A2)"],
 		["a leading tab and newline", "Details", "\t\n=A1"],
 		["a lone \"=\"", "Trailer Number", "="],
+		// USER_ENTERED stores a value starting with "+" as a formula too.
+		["a \"+\" before a cell reference", "Trailer Number", "+A1"],
+		["a \"+\" before a function", "Broker Name", "+SUM(A1:A2)"],
+		["a \"+\" before an expression", "Details", "+1+1"],
+		["a \"+\" before a spaced phone number", "Broker Phone", "+1 800 555 1234"],
 	]) {
 		const { r, m } = await run("Dispatcher", { [key]: value });
 		t(`from-ratecon, Dispatcher, ${label}: refused by check 1 too`,
-			[r.code, r.body && r.body.field, m.log.reads.length], [400, key, 0]);
+			[r.code, r.body && r.body.code, r.body && r.body.field, m.log.reads.length], [400, "FORMULA_NOT_ALLOWED", key, 0]);
+	}
+	{
+		const { r } = await run("Dispatcher", { "Trailer Number": "+A1" });
+		t("from-ratecon, Dispatcher, a leading \"+\": the text names the \"+\" to remove",
+			/starts with "\+".*remove the leading "\+"/.test((r.body || {}).error || ""), true);
 	}
 	{
 		const { r } = await run("Dispatcher", { "Load Number": "=1" });
 		t("from-ratecon, Dispatcher, a Load Number starting with \"=\": its whitelist refuses it first (400, no code)",
 			[r.code, r.body && r.body.code, /unsupported characters/.test((r.body || {}).error || "")], [400, undefined, true]);
 	}
-	// Not refused: an "=" that does not lead, a "+", and a field no sheet gets.
+	// Not refused: an "=" that does not lead, a plain number after "+", a leading
+	// "-" or "@" (stored as text or a number), and a field no sheet gets.
 	for (const [label, over, absent] of [
 		["an \"=\" inside the text", { Details: "a=b pallets" }, null],
-		["a leading \"+\"", { "Trailer Number": "+A1" }, null],
+		["a plain number after \"+\"", { "Trailer Number": "+7" }, null],
+		["a plain decimal after \"+\"", { Rate: "+1500.50" }, null],
+		["a leading \"-\"", { "Trailer Number": "-1+1" }, null],
+		["a leading \"@\"", { Details: "@SUM(1,1)" }, null],
 		["a field that reaches no sheet (Pickup Notes)", { "Pickup Notes/Instructions": "=== LIVE LOAD ===" }, "=== LIVE LOAD ==="],
 		["a field that reaches no sheet (Total Rate)", { "Total Rate": "=1650" }, "=1650"],
+		// The route takes no driver name in: the extracted Driver Name reaches no sheet.
+		["a built-in property name in Driver Name, a field that reaches no sheet", { "Driver Name": "__proto__" }, "__proto__"],
 	]) {
 		const { r, m } = await run("Dispatcher", over);
 		t(`from-ratecon, Dispatcher, ${label}: 200, three writes${absent ? ", the value in none of them" : ""}`,
 			[r.code, m.log.writes.length, absent ? written(m.log).some((c) => c.includes(absent)) : false], [200, 3, false]);
+	}
+	for (const role of ["Dispatcher", "Super Admin"]) {
+		const { r, m } = await run(role, { "Driver Name": "Constructor" });
+		const jt = m.log.writes.find((w) => w.tab === "Job Tracking") || { row: [] };
+		t(`from-ratecon, ${role}: the new Job Tracking row's Driver cell is blank whatever Driver Name says`,
+			[r.code, jt.row[JT_IDX["Driver"]]], [200, ""]);
 	}
 	// CHECK 2: a built cell. Neither address starts with "=", but cityStateZip()
 	// of the pickup does, so Job Details' "Details" would.
@@ -607,6 +636,7 @@ function mountDispatch(routeSrc, { account = null } = {}) {
 		sheetRowToObject: H.sheetRowToObject,
 		colLetter: H.colLetter,
 		formulaCellRefusal: H.formulaCellRefusal,
+		reservedDriverNameRefusal: H.reservedDriverNameRefusal,
 		SPREADSHEET_ID: "sheet-under-test",
 		insertNotification: { run: () => ({ lastInsertRowid: 1 }) },
 		insertDispatchNotification: { run: () => ({}) },
@@ -629,18 +659,37 @@ async function dispatchSection(routes = { dispatch: DISPATCH_SRC, reassign: REAS
 	const DRIVER_CELL = `Job Tracking!${H.colLetter(JT_IDX["Driver"])}2`;
 	for (const [label, src, key] of [["POST /api/dispatch", routes.dispatch, "driver"], ["POST /api/dispatch/reassign", routes.reassign, "newDriver"]]) {
 		const body = (name) => ({ rowIndex: 2, loadId: "111", [key]: name });
-		for (const [what, name] of [["=SUM(A1:A2)", "=SUM(A1:A2)"], ["\"  =B2\" (leading spaces)", "  =B2"]]) {
+		for (const [what, name] of [["=SUM(A1:A2)", "=SUM(A1:A2)"], ["\"  =B2\" (leading spaces)", "  =B2"], ["\"+A1\" (a leading \"+\")", "+A1"]]) {
 			const m = mountDispatch(src);
 			const r = await m.run("Dispatcher", body(name));
 			t(`${label}, Dispatcher, ${key} ${what}: 400 FORMULA_NOT_ALLOWED naming Driver, nothing written or audited`,
 				[r.code, r.body && r.body.code, r.body && r.body.field, bodyKeys(r), m.log.writes.length, m.audits.length],
 				[400, "FORMULA_NOT_ALLOWED", "Driver", ["error", "code", "field"], 0, 0]);
 		}
+		// A driver name that reads as a built-in property name: refused for every
+		// role, before the sheet is read, naming the request field.
+		for (const role of ["Dispatcher", "Super Admin"]) {
+			for (const name of ["__proto__", " Constructor ", "toString"]) {
+				const m = mountDispatch(src);
+				const r = await m.run(role, body(name));
+				t(`${label}, ${role}, ${key} ${JSON.stringify(name)}: 400 DRIVER_NAME_RESERVED naming ${key}; nothing read, written or audited`,
+					[r.code, r.body && r.body.code, r.body && r.body.field, bodyKeys(r), m.log.reads.length, m.log.writes.length, m.audits.length],
+					[400, "DRIVER_NAME_RESERVED", key, ["error", "code", "field"], 0, 0, 0]);
+			}
+		}
+		{
+			const m = mountDispatch(src, { account: "constructor" });
+			const r = await m.run("Dispatcher", body("CONSTRUCTOR"));
+			t(`${label}, Dispatcher, a name an existing account already spells as a built-in property name: refused all the same`,
+				[r.code, r.body && r.body.code, m.log.writes.length], [400, "DRIVER_NAME_RESERVED", 0]);
+		}
 		for (const [what, role, name, account, expected] of [
 			["a name with no account", "Dispatcher", "Pat Newhire", null, "Pat Newhire"],
 			["a name matching an account", "Dispatcher", "kevin driver", "Kevin Driver", "Kevin Driver"],
 			["an \"=\" inside the name", "Dispatcher", "Kevin=Driver", null, "Kevin=Driver"],
 			["a formula from a Super Admin", "Super Admin", "=B2", null, "=B2"],
+			["a name containing a built-in property name", "Dispatcher", "Tostring Smith", null, "Tostring Smith"],
+			["...from a Super Admin", "Super Admin", "Constructor Jones", null, "Constructor Jones"],
 		]) {
 			const m = mountDispatch(src, { account });
 			const r = await m.run(role, body(name));
@@ -693,6 +742,9 @@ function orderChecks() {
 		const writes = [".values.update(", ".values.batchUpdate("].map((w) => d.indexOf(w)).filter((i) => i >= 0);
 		check(`${label}: the refusal precedes every write and the period guard`,
 			[at > 0, writes.length === 2 && writes.every((w) => at < w), at < d.indexOf("dispatchWriteBlocker(")], [true, true, true]);
+		const reservedAt = d.indexOf(`reservedDriverNameRefusal(${v}, "${v}")`);
+		check(`${label}: the driver-name refusal precedes the first sheet read`,
+			[reservedAt > 0, reservedAt < d.indexOf("getSheets()")], [true, true]);
 	}
 }
 
@@ -704,6 +756,8 @@ const MR1 = mutate(RATECON_SRC, "if (formula) return res.status(400).json(formul
 const MR2 = mutate(RATECON_SRC, "if (formula) return res.status(400).json({ ...formula, sheet });", "");
 const MD = mutate(DISPATCH_SRC, "if (formula) return res.status(400).json(formula);", "");
 const MA = mutate(REASSIGN_SRC, "if (formula) return res.status(400).json(formula);", "");
+const MDR = mutate(DISPATCH_SRC, "if (reservedDriver) return res.status(400).json(reservedDriver);", "");
+const MAR = mutate(REASSIGN_SRC, "if (reservedDriver) return res.status(400).json(reservedDriver);", "");
 // MU: a matched row written as it was before sheetRowCellWrites(), the whole
 // row from column A in one values.update, whatever changed. The target runs
 // from the cell diff to the branch's return, cut from the shipped route.
@@ -725,6 +779,8 @@ const mutants = [
 	["MU from-ratecon's upsert back to a whole-row values.update of a matched row", async () => caughtBy(await upsertSection(MU))],
 	["MD POST /api/dispatch without the refusal", async () => caughtBy(await dispatchSection({ dispatch: MD, reassign: REASSIGN_SRC }))],
 	["MA POST /api/dispatch/reassign without the refusal", async () => caughtBy(await dispatchSection({ dispatch: DISPATCH_SRC, reassign: MA }))],
+	["MDR POST /api/dispatch without the driver-name refusal", async () => caughtBy(await dispatchSection({ dispatch: MDR, reassign: REASSIGN_SRC }))],
+	["MAR POST /api/dispatch/reassign without the driver-name refusal", async () => caughtBy(await dispatchSection({ dispatch: DISPATCH_SRC, reassign: MAR }))],
 ];
 
 (async () => {

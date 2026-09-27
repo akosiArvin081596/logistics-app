@@ -12,11 +12,13 @@
  * POST /api/users and POST /api/drivers-directory ask it too.
  *
  * WHAT IS ASSERTED:
- *   §1 findDriverNameClash(), lifted with normalizeDriverName() and run against
- *      an in-memory SQLite: exact, case, outer and internal whitespace, non-ASCII
- *      case, substrings, usernames and reserved names on the account side,
- *      exceptUserId, the table options, blank names and blank stored names, the
- *      return shape; it is read-only and synchronous.
+ *   §1 findDriverNameClash(), lifted with normalizeDriverName() and
+ *      isBuiltInPropertyName() and run against an in-memory SQLite: exact, case,
+ *      outer and internal whitespace, non-ASCII case, substrings, usernames and
+ *      reserved names on the account side (built-in property names among them,
+ *      a name merely containing one not), exceptUserId, the table options, blank
+ *      names and blank stored names, the return shape; it is read-only and
+ *      synchronous.
  *   §1b findDriverNameClashes(), the plural the rename paths classify with:
  *      every match in a fixed order, exceptUserIds, exceptDirectoryId, and the
  *      singular as its first match. (The rename paths themselves are
@@ -33,7 +35,9 @@
  *      exactly one account; a failure part-way through the writes leaves nothing
  *      behind.
  *   §4 POST /api/users and POST /api/drivers-directory, lifted and run: a
- *      spacing variant is refused, and each route consults only its own side.
+ *      spacing variant is refused, and each route consults only its own side;
+ *      a built-in property name is 409 DRIVER_NAME_TAKEN on both, nothing
+ *      written, and "Tostring Smith" is created on both.
  *   §5 source pins: every route that inserts a caller-supplied driver name asks
  *      the helper after its last await and before its INSERT; the helper is
  *      synchronous; no create path keeps a TRIM/LOWER clash query of its own.
@@ -47,6 +51,8 @@
  *      M5  the accept email's subject quoting the applicant's name uncapped
  *      M6  the helper ignoring exceptDirectoryId
  *      M7  the helper ignoring exceptUserId / exceptUserIds
+ *      M8  the helper without the built-in property names
+ *      M9  POST /api/drivers-directory without its built-in property name refusal
  *
  * Pure: no server, no app.db, no network, no mail (sendEmail is captured).
  *
@@ -103,6 +109,9 @@ function liftRoute(head) {
 }
 
 const NORM_SRC = liftFunction("normalizeDriverName");
+// The built-in property names the helper reserves; lifted on its own so the
+// pins below read the helper's text alone.
+const BUILTIN_SRC = liftFunction("isBuiltInPropertyName");
 // The singular is the first result of the plural, so both are lifted together.
 const CLASH_SRC = [liftFunction("findDriverNameClashes"), liftFunction("findDriverNameClash")].join("\n");
 const OWNS_SRC = liftFunction("driverOwnsInvoice");
@@ -117,6 +126,7 @@ const ONBOARDING_DOCS = (() => {
 })();
 
 const normalizeDriverName = new Function(`${NORM_SRC}\nreturn normalizeDriverName;`)();
+const isBuiltInPropertyName = new Function(`${NORM_SRC}\n${BUILTIN_SRC}\nreturn isBuiltInPropertyName;`)();
 const driverOwnsInvoice = new Function(`${NORM_SRC}\n${OWNS_SRC}\nreturn driverOwnsInvoice;`)();
 const escapeHtml = new Function(`${ESCAPE_SRC}\nreturn escapeHtml;`)();
 // auditText() caps and flattens caller text in audit rows; it delegates to
@@ -125,11 +135,11 @@ const auditText = new Function(`${liftFunction("scrubPurgeMarker")}\n${liftFunct
 
 // The helper, bound to one database. `normSrc` swaps the comparison for M1a.
 function buildClash(db, { normSrc = NORM_SRC, clashSrc = CLASH_SRC } = {}) {
-	return new Function("db", `"use strict";\n${normSrc}\n${clashSrc}\nreturn findDriverNameClash;`)(db);
+	return new Function("db", `"use strict";\n${normSrc}\n${BUILTIN_SRC}\n${clashSrc}\nreturn findDriverNameClash;`)(db);
 }
 // The plural, which rename paths use to classify every match.
 function buildClashes(db, { normSrc = NORM_SRC, clashSrc = CLASH_SRC } = {}) {
-	return new Function("db", `"use strict";\n${normSrc}\n${clashSrc}\nreturn findDriverNameClashes;`)(db);
+	return new Function("db", `"use strict";\n${normSrc}\n${BUILTIN_SRC}\n${clashSrc}\nreturn findDriverNameClashes;`)(db);
 }
 
 // M1b: a helper that compares the way SQL TRIM(LOWER(...)) does — case folded
@@ -265,6 +275,19 @@ function helperBattery(build) {
 	expect("reserved name", "Dispatch", undefined, "reserved:dispatch");
 	expect("reserved name, case and spacing", "  INVESTOR ", undefined, "reserved:investor");
 	expect("a reserved name plus more is a different name", "Dispatch Smith", undefined, "null");
+	// A name that reads as a built-in property name is a reserved name too
+	// (isBuiltInPropertyName()), reported under its normalized spelling.
+	expect("a built-in property name", "__proto__", undefined, "reserved:__proto__");
+	expect("a built-in property name, case and spacing", " Constructor ", undefined, "reserved:constructor");
+	expect("a built-in property name, mixed case", "toString", undefined, "reserved:tostring");
+	expect("a built-in property name, upper case", "HASOWNPROPERTY", undefined, "reserved:hasownproperty");
+	expect("a built-in property name plus more is a different name", "Tostring Smith", undefined, "null");
+	expect("a name containing a built-in property name is a different name", "Constructor Jones", undefined, "null");
+	expect("a property name only other kinds of object carry is a different name", "length", undefined, "null");
+	expect("users:false leaves the built-in property names out too", "__proto__", { users: false }, "null");
+	expect("exceptUserId never skips a built-in property name", "valueOf", { exceptUserId: 3 }, "reserved:valueof");
+	t("return shape for a built-in property name: { source, name }",
+		JSON.stringify(find("  TOSTRING ")) === JSON.stringify({ source: "reserved", name: "tostring" }));
 	t("a username match says so: field \"username\"", (find("dispatch1") || {}).field === "username");
 	t("a driver-name match says so: field \"driver_name\"", (find("shorn king") || {}).field === "driver_name");
 
@@ -439,6 +462,9 @@ async function acceptBattery({ routeSrc = ACCEPT_SRC, clashSrc = CLASH_SRC } = {
 		["an account's username", "Kevin", "the username of user 3", /kevin|\d/i],
 		["a reserved name", "dispatch", "a reserved name", /\d/],
 		["a reserved name, case and spacing", " Investor ", "a reserved name", /\d/],
+		["a built-in property name", "__proto__", "a reserved name", /\d/],
+		["a built-in property name, case and spacing", " Constructor ", "a reserved name", /\d/],
+		["a built-in property name, mixed case", "toString", "a reserved name", /\d/],
 	]) {
 		const db = acceptFixture();
 		const appId = addApplication(db, name, "713-555-0122");
@@ -458,6 +484,16 @@ async function acceptBattery({ routeSrc = ACCEPT_SRC, clashSrc = CLASH_SRC } = {
 			String(refusals[0].details).includes(matched) && String(refusals[0].details).includes("[DRIVER_NAME_TAKEN]"));
 		t(`${label}: no success audit, no change notification, no email`,
 			log.audits.length === 1 && log.notified.length === 0 && log.mail.length === 0);
+	}
+
+	// A name that only contains a built-in property name is an ordinary name.
+	{
+		const db = acceptFixture();
+		const appId = addApplication(db, "Tostring Smith", "713-555-0124");
+		const { call } = mountAccept(db, { routeSrc, clashSrc });
+		const r = await quiet(() => call(appId));
+		t("a name containing a built-in property name (\"Tostring Smith\") is accepted: 200 with a new account",
+			r.status === 200 && r.body && r.body.accountCreated === true && accountsNamed(db, "Tostring Smith") === 1);
 	}
 
 	// A blank name is refused before anything is asked or written.
@@ -563,6 +599,7 @@ function mountPost(routeSrc, db, clashSrc = CLASH_SRC) {
 		db,
 		bcrypt: { hash: (pw) => bcrypt.hash(pw, 4) },
 		findDriverNameClash: buildClash(db, { clashSrc }),
+		isBuiltInPropertyName,
 		syncDriverToCarrierSheet: (name, opts) => log.synced.push({ name, opts }),
 		syncCarrierDriverHistory: () => {},
 		logAudit: () => {},
@@ -583,7 +620,7 @@ function mountPost(routeSrc, db, clashSrc = CLASH_SRC) {
 	return { call, log };
 }
 
-async function otherCreatePaths({ clashSrc = CLASH_SRC } = {}) {
+async function otherCreatePaths({ clashSrc = CLASH_SRC, directorySrc = DIRECTORY_SRC } = {}) {
 	const results = [];
 	const t = (name, cond) => results.push({ name, ok: !!cond });
 
@@ -593,7 +630,7 @@ async function otherCreatePaths({ clashSrc = CLASH_SRC } = {}) {
 		addUser(db, 2, "sking", "Shorn King");
 		addUser(db, 3, "kevin", "", "Dispatcher");
 		addDirectory(db, "Deshorn King"); // in the directory, no account
-		const { call } = mountPost(USERS_SRC, db, clashSrc);
+		const { call, log: usersLog } = mountPost(USERS_SRC, db, clashSrc);
 		const r1 = await call({ username: "sking2", password: "pw-123456", role: "Driver", driverName: "shorn  KING" });
 		t("POST /api/users: a case/spacing variant of an account's driver name is 409 DRIVER_NAME_TAKEN",
 			r1.status === 409 && r1.body && r1.body.code === "DRIVER_NAME_TAKEN" && r1.body.conflictUserId === 2);
@@ -616,6 +653,20 @@ async function otherCreatePaths({ clashSrc = CLASH_SRC } = {}) {
 		t("POST /api/users: a blank driver name (a non-driver account) is no clash", r4.status === 200);
 		const r7 = await call({ username: "Lee Park", password: "pw-123456", role: "Driver", driverName: "Lee Park" });
 		t("POST /api/users: a driver name equal to the new account's own username is no clash", r7.status === 200);
+		// A name that reads as a built-in property name is reserved.
+		for (const [i, name] of ["__proto__", " Constructor ", "toString"].entries()) {
+			const before = counts(db);
+			const syncedBefore = usersLog.synced.length;
+			const r = await call({ username: `builtin${i}`, password: "pw-123456", role: "Driver", driverName: name });
+			t(`POST /api/users: the built-in property name ${show(name)} is 409 DRIVER_NAME_TAKEN, "that name is reserved", naming no account`,
+				r.status === 409 && r.body && r.body.code === "DRIVER_NAME_TAKEN" && /reserved/.test(r.body.error || "") &&
+				r.body.conflictUserId === undefined);
+			t(`...and ${show(name)} creates no account and syncs nothing`, counts(db) === before &&
+				!db.prepare("SELECT 1 FROM users WHERE username = ?").get(`builtin${i}`) && usersLog.synced.length === syncedBefore);
+		}
+		const r8 = await call({ username: "tsmith", password: "pw-123456", role: "Driver", driverName: "Tostring Smith" });
+		t("POST /api/users: a name containing a built-in property name (\"Tostring Smith\") is created",
+			r8.status === 200 && !!db.prepare("SELECT 1 FROM users WHERE username = 'tsmith' AND driver_name = 'Tostring Smith'").get());
 	}
 
 	{
@@ -623,7 +674,7 @@ async function otherCreatePaths({ clashSrc = CLASH_SRC } = {}) {
 		addUser(db, 1, "super_admin", "", "Super Admin");
 		addUser(db, 2, "jhill", "Jonas Hill"); // an account whose directory row does not exist yet
 		const shornRow = addDirectory(db, "Shorn King");
-		const { call } = mountPost(DIRECTORY_SRC, db, clashSrc);
+		const { call } = mountPost(directorySrc, db, clashSrc);
 		const post = (name) => call({ headers: ["Driver"], values: [name] });
 		const d1 = await post("SHORN  KING");
 		t("POST /api/drivers-directory: a case/spacing variant is 409 DRIVER_EXISTS naming the existing row",
@@ -639,6 +690,18 @@ async function otherCreatePaths({ clashSrc = CLASH_SRC } = {}) {
 		const d5 = await post("   ");
 		t("POST /api/drivers-directory: a blank name is still 400 DRIVER_NAME_REQUIRED",
 			d5.status === 400 && d5.body && d5.body.code === "DRIVER_NAME_REQUIRED");
+		// A name that reads as a built-in property name is reserved here too: the
+		// route's own directory-only check does not see reserved names.
+		for (const name of ["__proto__", " Constructor ", "toString"]) {
+			const before = counts(db);
+			const d = await post(name);
+			t(`POST /api/drivers-directory: the built-in property name ${show(name)} is 409 DRIVER_NAME_TAKEN, "that name is reserved", and writes no row`,
+				d.status === 409 && d.body && d.body.code === "DRIVER_NAME_TAKEN" && /reserved/.test(d.body.error || "") &&
+				counts(db) === before);
+		}
+		const d6 = await post("Tostring Smith");
+		t("POST /api/drivers-directory: a name containing a built-in property name (\"Tostring Smith\") is created",
+			d6.status === 200 && !!db.prepare("SELECT 1 FROM drivers_directory WHERE driver_name = 'Tostring Smith'").get());
 	}
 	return results;
 }
@@ -747,6 +810,20 @@ async function mutants() {
 	ok(CLASH_SRC.includes(SKIP_DIRECTORY_ROW) && CLASH_SRC.includes(SKIP_ACCOUNTS), "§7 M6/M7 markers moved (the two skip lines)");
 	caught("M6 helper ignores exceptDirectoryId", pluralBattery((db) => buildClashes(db, { clashSrc: CLASH_SRC.replace(SKIP_DIRECTORY_ROW, "") })));
 	caught("M7 helper ignores exceptUserId / exceptUserIds", pluralBattery((db) => buildClashes(db, { clashSrc: CLASH_SRC.replace(SKIP_ACCOUNTS, "") })));
+
+	const BUILTIN_RESERVED = 'if (isBuiltInPropertyName(needle)) hits.push({ source: "reserved", name: needle });';
+	ok(CLASH_SRC.split(BUILTIN_RESERVED).length === 2, `§7 M8 marker moved: ${BUILTIN_RESERVED}`);
+	const m8 = CLASH_SRC.replace(BUILTIN_RESERVED, "");
+	caught("M8 helper without the built-in property names", [
+		...helperBattery((db) => buildClash(db, { clashSrc: m8 })),
+		...await acceptBattery({ clashSrc: m8 }),
+		...await otherCreatePaths({ clashSrc: m8 }),
+	]);
+
+	const DIRECTORY_REFUSAL = /\n\t+if \(isBuiltInPropertyName\(insName\)\) \{\n[^\n]*\n\t+\}/;
+	ok(DIRECTORY_REFUSAL.test(DIRECTORY_SRC), "§7 M9 marker moved: POST /api/drivers-directory's built-in property name refusal");
+	caught("M9 POST /api/drivers-directory without its built-in property name refusal",
+		await otherCreatePaths({ directorySrc: DIRECTORY_SRC.replace(DIRECTORY_REFUSAL, "") }));
 }
 
 // ─────────────────────────────── §1b the plural and the skip options

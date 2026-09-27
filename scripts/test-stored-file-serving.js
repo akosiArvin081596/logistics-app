@@ -144,6 +144,7 @@ const ROUTES = Object.fromEntries(Object.entries(HEADS).map(([k, h]) => [k, lift
 const FUNCTIONS = [
 	"storedFileForServing", "storedFileETag", "ifNoneMatchIncludes", "truckPhotoForStorage",
 	"parseDriverPayDaily", "parseInServiceDate", "parseRetiredAt", "parseAdminFeePct", "truckMonthlyFixed", "normalizeDriverName",
+	"isBuiltInPropertyName", "reservedDriverNameRefusal",
 	"parsePlainDecimal", "parseTruckAmount", "parseTruckAmounts", "parseUnitNumber", "isUnitNumberTaken", "storedFileKind",
 ];
 const FN_SRC = Object.fromEntries(FUNCTIONS.map((n) => [n, liftFunction(n)]));

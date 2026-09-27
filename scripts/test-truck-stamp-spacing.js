@@ -136,7 +136,7 @@ function mutate(src, from, to) {
 }
 const decomment = (s) => s.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
 
-const HELPERS = ["normalizeDriverName", "findDriverNameClashes", "driverNameHeldByOtherAccount", "driverNameHeldByOtherSpelling",
+const HELPERS = ["normalizeDriverName", "isBuiltInPropertyName", "reservedDriverNameRefusal", "findDriverNameClashes", "driverNameHeldByOtherAccount", "driverNameHeldByOtherSpelling",
 	"findTruckForDriver", "findActiveAssignmentTruckForDriver", "findTruckForDriverStamp", "assignDriverToTruck",
 	"syncOpenCarrierPairing", "syncCarrierDriverHistory", "getInvestorDriverSet"];
 const HELPER_SRC = Object.fromEntries(HELPERS.map((n) => [n, extract(n)]));
@@ -310,6 +310,7 @@ function mountExpense(db, routeSrc, helperOver) {
 		findTruckForDriverStamp: helpers.findTruckForDriverStamp,
 		sanitizeReceiptDetails: H.sanitizeReceiptDetails,
 		resolveDriverActor: new Function("normalizeDriverName", `${RESOLVE_ACTOR_SRC}\nreturn resolveDriverActor;`)(helpers.normalizeDriverName),
+		reservedDriverNameRefusal: helpers.reservedDriverNameRefusal,
 		normalizeVendor: (v) => String(v || "").trim().toLowerCase(),
 		normalizeVendorDetailed: () => ({ normalized: "", aliasHit: false }),
 		sentIfDriverExpenseLoadMissing: () => false,
@@ -391,6 +392,28 @@ async function expenseSection(routeSrc = ROUTES.expense, helperOver = {}) {
 		t("POST /api/expenses, a stale spacing-variant truck beside the driver's case-aside active assignment: the assignment's truck and owner, as the dispatch stamps order it",
 			[r.code, row], [200, ["Shorn King", "300", 9, "", ""]]);
 	}
+	// A name sent for a driver that reads as a built-in property name: 400
+	// DRIVER_NAME_RESERVED naming the field, before anything is written.
+	const DISPATCHER = { id: 3, role: "Dispatcher", username: "kevin" };
+	for (const user of [ADMIN, DISPATCHER]) {
+		for (const name of ["__proto__", " Constructor ", "toString"]) {
+			const { r, row } = await post({ accounts: [SK, DK], trucks: [T101, T205] }, user, { driver: name });
+			t(`POST /api/expenses, a ${user.role} filing for ${JSON.stringify(name)}: 400 DRIVER_NAME_RESERVED naming driver, no expense written`,
+				[r.code, r.body && r.body.code, r.body && r.body.field, row], [400, "DRIVER_NAME_RESERVED", "driver", null]);
+		}
+	}
+	{
+		const { r, row } = await post({ accounts: [SK, DK], trucks: [T101, T205] }, DISPATCHER, { driver: "Tostring Smith" });
+		t("POST /api/expenses, a Dispatcher filing for \"Tostring Smith\": 200, written under that name",
+			[r.code, row && row[0]], [200, "Tostring Smith"]);
+	}
+	{
+		// A Driver's name is their own account's, which the account routes judge
+		// when it is created; this route does not judge it again.
+		const { r, row } = await post({ accounts: [SK, DK], trucks: [T101, T205] }, { id: 9, role: "Driver", username: "LogisX-1009", driverName: "toString" });
+		t("POST /api/expenses, a Driver filing for themselves: the session's name is not judged here",
+			[r.code, row && row[0]], [200, "toString"]);
+	}
 	return results;
 }
 
@@ -436,6 +459,7 @@ function mountDispatch(db, routeSrc, helperOver) {
 		sheetRowToObject: H.sheetRowToObject,
 		colLetter: H.colLetter,
 		formulaCellRefusal: H.formulaCellRefusal,
+		reservedDriverNameRefusal: helpers.reservedDriverNameRefusal,
 		SPREADSHEET_ID: "sheet-under-test",
 		insertNotification: { run: () => ({ lastInsertRowid: 1 }) },
 		insertDispatchNotification: { run: () => ({}) },
@@ -869,6 +893,8 @@ function wiringSection(routes = ROUTES) {
 			async () => pairingSection(pairingSameCarrierVariantCounts())],
 		["M13 a spacing variant open under the same carrier counted as the driver's own spelling, run through syncCarrierDriverHistory() (§4c)",
 			async () => directorySyncSection(pairingSameCarrierVariantCounts())],
+		["M15 POST /api/expenses without its driver-name refusal",
+			async () => expenseSection(mutate(ROUTES.expense, "if (reserved) return res.status(400).json(reserved);", ""))],
 	];
 	for (const [label, run] of mutants) {
 		let caught;

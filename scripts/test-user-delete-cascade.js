@@ -107,13 +107,13 @@ check("cascade extraction found the three FK-bearing children", [
 // The truck clear also finds a truck stored under another spacing of the name,
 // through findTruckForDriverAccount(): the real helpers, bound to the scratch db.
 // (Its cases are scripts/test-driver-rename-clash.js §4d's subject.)
-const TRUCK_LOOKUP_SRC = ["normalizeDriverName", "findDriverNameClashes", "driverNameHeldByOtherAccount", "findTruckForDriver", "findTruckForDriverAccount"]
+const TRUCK_LOOKUP_SRC = ["normalizeDriverName", "isBuiltInPropertyName", "findDriverNameClashes", "driverNameHeldByOtherAccount", "findTruckForDriver", "findTruckForDriverAccount"]
 	.map(extract).join("\n");
 // The delete guard's invoice blocker matches through the rename cascade's
 // `invoices` leg (the driver's other spellings, with the other-account rule), so
 // every lift of userDeleteLockBlockers() below carries the real helpers.
 const RENAME_LEG_SRC = [
-	...["normalizeDriverName", "findDriverNameClashes", "driverNameHeldByOtherAccount"].map(extract),
+	...["normalizeDriverName", "isBuiltInPropertyName", "findDriverNameClashes", "driverNameHeldByOtherAccount"].map(extract),
 	extractConst("const DRIVER_RENAME_TARGETS = [", "\n];"),
 	...["driverRenameWhereSql", "driverRenameWhereArgs", "driverRenameWidens", "driverRenameSpellings"].map(extract),
 ].join("\n");

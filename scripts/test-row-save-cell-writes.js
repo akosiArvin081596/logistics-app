@@ -131,6 +131,7 @@ const CONSTS = [
 ].join("\n");
 const HELPERS = [
 	"resolveBrokerWithheldColumns", "sanitizeBrokerColumns", "restoreWithheldBrokerCells", "formulaCellRefusal",
+	"normalizeDriverName", "isBuiltInPropertyName", "reservedDriverNameRefusal", "driverCellRefusal",
 	"sheetRowAfterUpdate", "a1SheetPrefix", "a1ColumnLetter", "sheetRowCellWrites", "restoreUntouchedCells",
 	"baselineApplies", "rowMovedRefusal",
 	"guardedColumnReason", "changedGuardedCells", "scrubPurgeMarker", "capAuditField", "buildSheetUpdateAudit",

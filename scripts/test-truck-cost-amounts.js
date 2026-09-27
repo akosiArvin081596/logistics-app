@@ -88,7 +88,10 @@
  *      row's `per`. §2b the routes refuse those inputs with the same bodies.
  *   §7 unit numbers (parseUnitNumber()): not text, blank, holding a control, a
  *      line or paragraph separator (U+2028, U+2029) or a text-direction
- *      character, or longer than 50 characters once trimmed → 400
+ *      character, longer than 50 characters once trimmed, starting with =, +,
+ *      - or @, or reading as a built-in property name ("constructor",
+ *      " __Proto__ ", "VALUEOF", in any case or spacing; "Constructor 7" is a
+ *      unit number) → 400
  *      INVALID_UNIT_NUMBER, field unitNumber, on POST and PUT, before anything
  *      is read or written; auditText() drops or collapses to a space (the
  *      separators, like newlines and tabs) exactly the characters
@@ -212,6 +215,8 @@ const MODULE_SRC = [
 	liftFunction("auditText"),
 	// names and the assignment a reassigning save writes
 	liftFunction("normalizeDriverName"),
+	liftFunction("isBuiltInPropertyName"),
+	liftFunction("reservedDriverNameRefusal"),
 	liftFunction("findDriverNameClashes"),
 	liftFunction("findDriverNameClash"),
 	liftFunction("driverNameHeldByOtherAccount"),
@@ -227,7 +232,7 @@ const MODULE_EXPORTS = [
 	"parsePlainDecimal", "TRUCK_AMOUNT_MAX", "parseTruckAmount", "TRUCK_AMOUNT_FIELDS", "parseTruckAmounts", "parseUnitNumber", "isUnitNumberTaken",
 	"parseDriverPayDaily", "parseInServiceDate", "parseRetiredAt", "ADMIN_FEE_PCT_MAX", "parseAdminFeePct", "truckMonthlyFixed",
 	"refusePayEdit", "logAudit", "auditText",
-	"normalizeDriverName", "findDriverNameClash", "findDriverNameClashes", "canonicalDriverName",
+	"normalizeDriverName", "isBuiltInPropertyName", "reservedDriverNameRefusal", "findDriverNameClash", "findDriverNameClashes", "canonicalDriverName",
 	"syncDriverToCarrierSheet", "assignDriverToTruck",
 ];
 // The code every check runs: the shipped source, or (§ mutants) a copy with one
@@ -1206,6 +1211,7 @@ const INVALID_UNIT = (error) => ({ error, code: "INVALID_UNIT_NUMBER", field: "u
 const UNIT_CHARS_ERROR = "Unit number cannot contain control, formatting or line-break characters.";
 const UNIT_MAX_ERROR = "Unit number must be at most 50 characters.";
 const UNIT_FORMULA_ERROR = "Unit number cannot start with =, +, - or @.";
+const UNIT_RESERVED_ERROR = "Unit number is reserved. Enter a different one.";
 // U+2028 and U+2029, which render as line breaks: refused in a unit number, and
 // collapsed to a space by auditText() as newlines and tabs are.
 const LINE_SEPARATORS = [String.fromCharCode(0x2028), String.fromCharCode(0x2029)];
@@ -1235,7 +1241,10 @@ async function unitNumberSection() {
 		ok(same(pu(raw), { value: raw }), `§7 ${JSON.stringify(raw)} is a unit number`);
 	}
 	// Dispatch copies the unit number into Job Tracking's Truck column, written
-	// as a person typing into the sheet would, where these begin a formula.
+	// as a person typing into the sheet would, where a leading = or + starts a
+	// formula. The sheet keeps a leading - or @ as text or a number; a unit
+	// number is refused those as well, because other spreadsheet programs read
+	// them as the start of a formula once the data is exported.
 	for (const raw of ["=1+1", "+A1", "-5", "@x", "  =SUM(A1:A2)"]) {
 		for (const required of [false, true]) {
 			ok(same(pu(raw, { required }), { refusal: INVALID_UNIT(UNIT_FORMULA_ERROR) }),
@@ -1244,6 +1253,17 @@ async function unitNumberSection() {
 	}
 	for (const raw of ["A=B", "LX+1", "Unit-5", "T@1"]) {
 		ok(same(pu(raw), { value: raw }), `§7 ${JSON.stringify(raw)}: the same characters after the first are a unit number`);
+	}
+	// A unit number that reads as a built-in property name is reserved, in any
+	// case or spacing (isBuiltInPropertyName()).
+	for (const raw of ["constructor", "Constructor", " __Proto__ ", "__proto__", "toString", "VALUEOF", "hasOwnProperty", "isPrototypeOf"]) {
+		for (const required of [false, true]) {
+			ok(same(pu(raw, { required }), { refusal: INVALID_UNIT(UNIT_RESERVED_ERROR) }),
+				`§7 ${JSON.stringify(raw)}${required ? " (POST)" : " (PUT)"}: "${UNIT_RESERVED_ERROR}" (got ${JSON.stringify(pu(raw, { required }))})`);
+		}
+	}
+	for (const raw of ["Constructor 7", "proto", "__proto", "LX-toString", "to string", "valueOf2"]) {
+		ok(same(pu(raw), { value: raw }), `§7 ${JSON.stringify(raw)}: a unit number that only contains a built-in name is a unit number (got ${JSON.stringify(pu(raw))})`);
 	}
 	for (const c of UNSAFE_UNIT_CHARS) {
 		ok(same(pu(`Logis${c}X-#23`), { refusal: INVALID_UNIT(UNIT_CHARS_ERROR) }), `§7 ${codePoint(c)} inside: refused`);
@@ -1283,6 +1303,8 @@ async function unitNumberSection() {
 		["a blank unit number", { unitNumber: "  " }, INVALID_UNIT("Unit number is required")],
 		["a unit number of 51 characters", { unitNumber: "X".repeat(51) }, INVALID_UNIT(UNIT_MAX_ERROR)],
 		["a unit number starting with =", { unitNumber: "=1+1" }, INVALID_UNIT(UNIT_FORMULA_ERROR)],
+		["a unit number that reads as a built-in property name", { unitNumber: "constructor" }, INVALID_UNIT(UNIT_RESERVED_ERROR)],
+		["a padded, upper-case built-in property name", { unitNumber: "  __PROTO__ " }, INVALID_UNIT(UNIT_RESERVED_ERROR)],
 	]) {
 		const db = makeDb();
 		const app = mountAll(db);
@@ -1302,6 +1324,7 @@ async function unitNumberSection() {
 		['"   "', "   ", INVALID_UNIT("Unit number is required")],
 		["a unit number of 51 characters", "X".repeat(51), INVALID_UNIT(UNIT_MAX_ERROR)],
 		["a rename starting with =", "=1+1", INVALID_UNIT(UNIT_FORMULA_ERROR)],
+		["a rename to a built-in property name", " ValueOf ", INVALID_UNIT(UNIT_RESERVED_ERROR)],
 	]) {
 		const db = makeDb();
 		const app = mountAll(db);
@@ -1603,7 +1626,8 @@ const MUTANTS = [
 	["M19 the unit-number class back to the old hand list", [["module", `if (${UNIT_CLASS}u.test(raw)) {`, `if (${UNSAFE_CLASS}.test(raw)) {`]]],
 	["M22 auditText()'s class back to the old hand list", [["module", `.replace(${UNIT_CLASS}gu, "")`, `.replace(${UNSAFE_CLASS}g, "")`]]],
 	["M20 the unit number's 50-character cap dropped", [["module", "if (value.length > MAX_LENGTH) return refuse(", "if (false) return refuse("]]],
-	["M24 a unit number starting with a formula character allowed", [["module", "if (/^[=+@-]/.test(value)) return refuse(", "if (false) return refuse("]]],
+	["M24 a unit number starting with =, +, - or @ allowed", [["module", "if (/^[=+@-]/.test(value)) return refuse(", "if (false) return refuse("]]],
+	["M25 a unit number that reads as a built-in property name allowed", [["module", "if (isBuiltInPropertyName(value)) return refuse(", "if (false) return refuse("]]],
 	["M21 auditText() leaving U+2028 and U+2029 in place", [["module", String.raw`s.replace(/[\r\n\t\u2028\u2029]+/g, " ")`, String.raw`s.replace(/[\r\n\t]+/g, " ")`]]],
 	["M12 the unit-number check back above the active-load wait", [
 		["put", PUT_CLASH, ""],

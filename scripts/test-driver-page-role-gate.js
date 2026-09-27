@@ -105,7 +105,7 @@ const helpers = new Function([
 ].join("\n"))();
 // The route finds the driver's directory row through findDirectoryRowForDriver(),
 // which reads `db`, so it is built over whichever db a route runs on.
-const DIRECTORY_LOOKUP_SRC = [liftFn("normalizeDriverName"), liftFn("findDriverNameClashes"), liftFn("findDirectoryRowForDriver")].join("\n");
+const DIRECTORY_LOOKUP_SRC = [liftFn("normalizeDriverName"), liftFn("isBuiltInPropertyName"), liftFn("findDriverNameClashes"), liftFn("findDirectoryRowForDriver")].join("\n");
 const directoryLookup = (db, src = DIRECTORY_LOOKUP_SRC) =>
 	new Function("db", `"use strict";\n${src}\nreturn findDirectoryRowForDriver;`)(db);
 // ...and its truck through findTruckForDriver(), found the same two ways.
@@ -114,7 +114,7 @@ const truckLookup = (db, src = TRUCK_LOOKUP_SRC) =>
 	new Function("db", `"use strict";\n${src}\nreturn findTruckForDriver;`)(db);
 // ...and the profile-picture upload asks driverNameHeldByOtherAccount() before it
 // accepts a row that names the driver only through spacing.
-const HELD_BY_OTHER_SRC = [liftFn("normalizeDriverName"), liftFn("findDriverNameClashes"), liftFn("driverNameHeldByOtherAccount")].join("\n");
+const HELD_BY_OTHER_SRC = [liftFn("normalizeDriverName"), liftFn("isBuiltInPropertyName"), liftFn("findDriverNameClashes"), liftFn("driverNameHeldByOtherAccount")].join("\n");
 const heldByOtherLookup = (db) =>
 	new Function("db", `"use strict";\n${HELD_BY_OTHER_SRC}\nreturn driverNameHeldByOtherAccount;`)(db);
 

@@ -3771,7 +3771,10 @@ async function routemateSyncTelemetry() {
 		// a tracking link see the truck pin move in real time instead of
 		// waiting for the 30 s HTTP poll cycle.
 		const activeRe = /^(assigned|dispatched|heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
-		const loadIdByDriver = {};
+		// Both driver-keyed maps are null-prototype objects, and a Driver cell that
+		// reads as a built-in property name is skipped like a blank one
+		// (driverNameForTotals()).
+		const loadIdByDriver = Object.create(null);
 		// Geofencing needs EVERY active load for a driver, not just the first.
 		// Queueing is a supported workflow (see POST /api/dispatch), so a driver
 		// routinely carries two. loadIdByDriver keeps first-match-wins because
@@ -3784,7 +3787,7 @@ async function routemateSyncTelemetry() {
 		// completed — starving every later load that driver takes. A load left
 		// sitting in Dispatched (exactly what happened to 561151778) would
 		// silently block automation on the load actually being driven.
-		const activeLoadsByDriver = {};
+		const activeLoadsByDriver = Object.create(null);
 		try {
 			const jt = await getJobTrackingCached();
 			const headers = jt.headers || [];
@@ -3798,7 +3801,7 @@ async function routemateSyncTelemetry() {
 				// longer happens to hide it (see liveJobTrackingView()); skip it here.
 				const deletedIds = getDeletedLoadIds();
 				for (const row of (jt.data || [])) {
-					const d = (row[driverCol] || "").toString().trim().toLowerCase();
+					const d = driverNameForTotals((row[driverCol] || "").toString()).trim().toLowerCase();
 					const s = (row[statusCol] || "").toString().trim();
 					const lid = (row[loadIdCol] || "").toString().trim();
 					if (!d || !lid) continue;
@@ -7032,6 +7035,14 @@ function syncDriverToCarrierSheet(driverName, opts = {}) {
 		const truckUnit = truck ? truck.unit_number : "";
 
 		if (action === "add") {
+			// No row is added under a name that reads as a built-in property name
+			// (isBuiltInPropertyName()): it is a reserved name, and the check below
+			// asks the directory side only. The routes that reach this refuse such a
+			// name first; this holds whichever caller does.
+			if (isBuiltInPropertyName(name)) {
+				console.warn(`[directory-sync] no drivers_directory row added for ${JSON.stringify(name)}: that name is reserved`);
+				return;
+			}
 			// A row whose name differs from this one only in case or spacing is this
 			// driver's row already (findDriverNameClash(), the comparison every
 			// ownership check uses), so there is nothing to add. INSERT OR IGNORE
@@ -7236,6 +7247,13 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (re
 			// and whose second occurrence 500s on the constraint.
 			return res.status(400).json({ error: "Driver name is required.", code: "DRIVER_NAME_REQUIRED" });
 		}
+		// A name that reads as a built-in property name is a reserved name
+		// (isBuiltInPropertyName()), refused as POST /api/users refuses one: 409
+		// DRIVER_NAME_TAKEN. Asked here because the directory-only check below does
+		// not see reserved names.
+		if (isBuiltInPropertyName(insName)) {
+			return res.status(409).json({ error: `Cannot add the driver "${insName}": that name is reserved.`, code: "DRIVER_NAME_TAKEN" });
+		}
 		const dirExisting = findDriverNameClash(insName, { users: false });
 		if (dirExisting) {
 			return res.status(409).json({
@@ -7317,6 +7335,11 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		}
 		if (nextName !== String(current.driver_name || "")) {
 			const renamed = normalizeDriverName(nextName) !== normalizeDriverName(current.driver_name);
+			// A new name that reads as a built-in property name is reserved, as on
+			// POST /api/drivers-directory. Re-spelling the stored name is not a new name.
+			if (renamed && isBuiltInPropertyName(nextName)) {
+				return res.status(409).json({ error: `Cannot rename the driver to "${nextName}": that name is reserved.`, code: "DRIVER_NAME_TAKEN" });
+			}
 			const dirClash = findDriverNameClashes(nextName, { users: false, exceptDirectoryId: id })
 				.find((h) => renamed || String(h.driver_name).toLowerCase() === nextName.toLowerCase());
 			if (dirClash) {
@@ -13892,8 +13915,25 @@ function driverAccountsNamed(driverName) {
 // Brown at 30%) get the same math their invoice uses, instead of the legacy
 // activeDays × $250 estimate that overstated/understated their pay in the P&L.
 
+// ⚠️ THE DRIVER NAME AS A NAME-KEYED TOTAL READS IT. The pay, revenue, day,
+// deductible, queue and fuel totals (GET /api/investor, GET /api/financials,
+// computeInvestorMonthlyEarnings(), computeDriverQueues(), the helpers below)
+// file a row under its driver's name. A name isBuiltInPropertyName() matches is
+// read here as "", so the row is UNASSIGNED exactly as if its Driver cell were
+// blank: it still counts wherever a blank-driver row counts, and no total is
+// ever filed, or published, under that name. Any other value comes back
+// unchanged, so each caller keeps its own folding (trim, lowercase,
+// normalizeDriverName()) and a normal name reads exactly as it did.
+//
+// The maps those totals build are null-prototype objects (Object.create(null))
+// as well, which is the other half: a lookup by a name no row carries finds
+// nothing, whatever the name. Build any new name-keyed map the same way.
+function driverNameForTotals(name) {
+	return typeof name === "string" && isBuiltInPropertyName(name) ? "" : name;
+}
+
 // Returns { [normalizeDriverName(driver_name)]: { payType, payPercentage, payDaily } }
-// for branch decisions.
+// for branch decisions, as a null-prototype object (see driverNameForTotals()).
 //
 // ⚠️ TWO ROWS CAN STILL COLLIDE ON ONE KEY, AND WHICH ONE WINS IS MONEY.
 // drivers_directory.driver_name is now UNIQUE COLLATE NOCASE (see the migration
@@ -13924,7 +13964,7 @@ function getDriverPayStructures() {
 	const rows = db.prepare(
 		"SELECT id, driver_name, pay_type, pay_percentage, pay_daily FROM drivers_directory ORDER BY id ASC"
 	).all();
-	const out = {};
+	const out = Object.create(null);
 	const shadowed = [];
 	for (const r of rows) {
 		const key = normalizeDriverName(r.driver_name);
@@ -14211,21 +14251,27 @@ function periodPhase(period) {
 // normalizeDriverName(truck.assigned_driver), which is '' for a truck with no
 // driver, and that read must go on matching the rows stored as '' and nothing
 // else rather than start collecting every whitespace-only row too.
+//
+// A NAME THAT READS AS A BUILT-IN PROPERTY NAME KEYS AS '' — the key a blank
+// name stored as '' has (the rule driverNameForTotals() states): the receipt is
+// unassigned, so it counts wherever a blank-driver receipt counts and no total
+// is filed under that name.
 function expenseDriverKey(driverLc) {
+	if (isBuiltInPropertyName(driverLc)) return "";
 	return normalizeDriverName(driverLc) || String(driverLc);
 }
 
 // { [expenseDriverKey(d)]: total } from query rows of { d: LOWER(driver), t } —
 // the per-truck expense maps of GET /api/investor and GET /api/financials.
-// Spellings that fold together are summed, never overwritten, and the result is
-// built by Object.fromEntries(), as those two maps always were.
+// Spellings that fold together are summed, never overwritten, in row order, and
+// the result is a null-prototype object (see driverNameForTotals()).
 function foldExpenseTotalsByDriver(rows) {
-	const byKey = new Map();
+	const out = Object.create(null);
 	for (const r of rows) {
 		const key = expenseDriverKey(r.d);
-		byKey.set(key, (byKey.get(key) || 0) + (r.t || 0));
+		out[key] = (out[key] || 0) + (r.t || 0);
 	}
-	return Object.fromEntries(byKey);
+	return out;
 }
 
 // Returns { [expenseDriverKey(driver)]: { [yyyy-mm]: total, _total: allTime } }
@@ -14256,15 +14302,15 @@ function getDeductibleExpensesByDriverMonth() {
 		WHERE type IN ('Fuel', 'Maintenance') AND ${EXPENSE_PNL_FILTER}
 		GROUP BY LOWER(driver), month
 	`).all();
-	const byKey = new Map();
+	// A null-prototype object (see driverNameForTotals()), summed in row order.
+	const out = Object.create(null);
 	for (const r of rows) {
 		const key = expenseDriverKey(r.name_lc);
-		let entry = byKey.get(key);
-		if (!entry) byKey.set(key, (entry = { _total: 0 }));
+		const entry = out[key] || (out[key] = { _total: 0 });
 		if (r.month) entry[r.month] = (entry[r.month] || 0) + (r.total || 0);
 		entry._total += (r.total || 0);
 	}
-	return Object.fromEntries(byKey);
+	return out;
 }
 
 // Map a longitude to a continental-US IANA timezone. Real zone boundaries follow
@@ -14852,6 +14898,12 @@ async function generateInvoiceHandler(req, res) {
 		// (blank, whitespace, not text) names no driver.
 		const nameNorm = typeof driverName === "string" ? normalizeDriverName(driverName) : "";
 		if (!nameNorm) return res.status(400).json({ error: "Driver name required" });
+		// A Super Admin's `driver` that reads as a built-in property name is refused
+		// (reservedDriverNameRefusal()), before anything is read or written.
+		if (user.role !== "Driver") {
+			const reserved = reservedDriverNameRefusal(driverName, "driver");
+			if (reserved) return res.status(400).json(reserved);
+		}
 
 		// Only driver for themselves or Super Admin
 		if (user.role === "Driver" && normalizeDriverName(user.driverName) !== nameNorm) {
@@ -15454,6 +15506,13 @@ const submitDraftInvoiceStmt = db.prepare(
 // handler never billed: a completed row with no completion date (it counted in
 // EVERY week — the source of the weekly "WORKED-BUT-UNBILLED (kenrick davis)"
 // alarm and its three retries), and a soft-deleted "#X" row.
+//
+// A Driver cell that reads as a built-in property name is read through
+// driverNameForTotals(), so the row names no driver and is skipped exactly
+// like a blank one. The batch cannot invoice such a name (the handler refuses
+// it for every caller but a Driver invoicing themselves), so counting it would
+// report WORKED-BUT-UNBILLED, and retry the run, for a driver the batch can
+// never bill.
 function driversWithCompletedLoadsInWeek(data, headers, weekStart, weekEnd) {
 	// getJobTrackingCached() rows are header-keyed OBJECTS (parseSheet), so index
 	// by column NAME — exactly as generateInvoiceHandler does.
@@ -15462,7 +15521,7 @@ function driversWithCompletedLoadsInWeek(data, headers, weekStart, weekEnd) {
 	const out = new Set();
 	if (!cols.driverCol || !cols.statusCol) return out;
 	for (const row of data) {
-		const name = normalizeDriverName(row[cols.driverCol]);
+		const name = normalizeDriverName(driverNameForTotals(row[cols.driverCol]));
 		if (!name) continue;
 		if (invoiceWeekVerdict(row, cols, weekStart, weekEnd, deletedKeys) === "bill") out.add(name);
 	}
@@ -17161,11 +17220,13 @@ function matchFuelEventsToReceipts({ days = FUEL_EVENTS_MATCH_DAYS, persist = tr
 	// Per-truck reference gallons-per-point, from the big rises only, used purely
 	// as a tie-breaker. Seeded from the candidate set (not from already-matched
 	// rows) so the sweep is deterministic and does not drift run over run.
-	const seed = {};
+	// Both maps are keyed by unit number, so null-prototype objects (see
+	// parseUnitNumber()).
+	const seed = Object.create(null);
 	for (const c of cands) {
 		if (c.e.rise >= FUEL_CALIB_MIN_RISE_PCT) (seed[c.e.unit] = seed[c.e.unit] || []).push(c.implied);
 	}
-	const refImplied = {};
+	const refImplied = Object.create(null);
 	for (const u of Object.keys(seed)) {
 		const a = seed[u].sort((x, y) => x - y);
 		refImplied[u] = a[Math.floor(a.length / 2)];
@@ -19383,6 +19444,10 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 		if (!payee || payee.length > 100) {
 			return res.status(400).json({ error: "payee is required (max 100 characters)" });
 		}
+		// The payee is stored as the invoice's driver, so a payee that reads as a
+		// built-in property name is refused (reservedDriverNameRefusal()).
+		const reservedPayee = reservedDriverNameRefusal(payee, "payee");
+		if (reservedPayee) return res.status(400).json(reservedPayee);
 		const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 		const periodStart = (body.periodStart || "").toString().trim();
 		const periodEnd = (body.periodEnd || "").toString().trim();
@@ -22352,11 +22417,20 @@ app.put("/api/users/:id/rating", requireRole("Super Admin"), (req, res) => {
 });
 
 // Per-load rating: upsert
+//
+// The driver name sent is stored with the load's first rating and names the
+// driver whose average is recomputed, so it must be text (400 otherwise), and
+// one that reads as a built-in property name is refused, 400
+// DRIVER_NAME_RESERVED with `field` "driverName" (reservedDriverNameRefusal()),
+// both before the write.
 app.put("/api/load-ratings/:loadId", requireRole("Super Admin"), (req, res) => {
 	const loadId = decodeURIComponent(req.params.loadId).trim();
 	const { rating, driverName } = req.body;
 	if (!rating || rating < 1 || rating > 5) return res.status(400).json({ error: "Rating must be 1-5" });
 	if (!driverName) return res.status(400).json({ error: "Driver name required" });
+	if (typeof driverName !== "string") return res.status(400).json({ error: "Driver name must be text" });
+	const reservedDriver = reservedDriverNameRefusal(driverName, "driverName");
+	if (reservedDriver) return res.status(400).json(reservedDriver);
 	db.prepare(`
 		INSERT INTO load_ratings (load_id, driver_name, rating, rated_by, updated_at)
 		VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -22380,8 +22454,13 @@ app.get("/api/load-ratings/:loadId", requireRole("Super Admin", "Dispatcher"), (
 // Per-load rating: bulk averages for all drivers
 app.get("/api/load-ratings/averages", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	const rows = db.prepare("SELECT LOWER(driver_name) as driver, AVG(rating) as average, COUNT(*) as count FROM load_ratings GROUP BY LOWER(driver_name)").all();
-	const averages = {};
-	rows.forEach(r => { averages[r.driver] = { average: Math.round(r.average * 10) / 10, count: r.count } });
+	// Driver-keyed, so a null-prototype object; a name that reads as a built-in
+	// property name is left out (see driverNameForTotals()).
+	const averages = Object.create(null);
+	rows.forEach(r => {
+		if (isBuiltInPropertyName(r.driver)) return;
+		averages[r.driver] = { average: Math.round(r.average * 10) / 10, count: r.count };
+	});
 	res.json({ averages });
 });
 
@@ -23338,8 +23417,10 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 	// Preferred match: exact truck column (populated by n8n). Fallback: match
 	// the load's driver against the truck's assigned_driver. If the sheet
 	// fetch fails, return 0 counts rather than failing the whole endpoint.
-	let loadsByTruck = {};
-	let loadsByDriver = {};
+	// Both maps are null-prototype objects, and a Driver cell that reads as a
+	// built-in property name counts as blank (driverNameForTotals()).
+	let loadsByTruck = Object.create(null);
+	let loadsByDriver = Object.create(null);
 	try {
 		const jt = await getJobTrackingCached();
 		const statusCol = findCol(jt.headers, /status/i);
@@ -23352,7 +23433,7 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 		excludeDroppedLoads(jt.data, jt.headers).forEach((r) => {
 			const st = statusCol ? (r[statusCol] || "").trim() : "";
 			if (!completedRe.test(st)) return;
-			const driver = driverCol ? normalizeDriverName(r[driverCol]) : "";
+			const driver = driverCol ? normalizeDriverName(driverNameForTotals(r[driverCol])) : "";
 			const truckUnit = truckCol ? (r[truckCol] || "").trim().toLowerCase() : "";
 			if (truckUnit) loadsByTruck[truckUnit] = (loadsByTruck[truckUnit] || 0) + 1;
 			if (driver) loadsByDriver[driver] = (loadsByDriver[driver] || 0) + 1;
@@ -23714,11 +23795,27 @@ function parseTruckAmounts(body, fields) {
 // (format: the text-direction marks and isolates, zero-width characters,
 // U+061C, U+2060–U+2064, U+FEFF and the rest), Zl or Zp (U+2028, U+2029), or
 // is longer than 50 characters once trimmed (the longest on the production
-// mirror is 12), or starts with =, +, - or @ once trimmed: dispatch copies a
-// truck's unit number into Job Tracking's Truck column, which is written as a
-// person typing into the sheet would write it, and there those characters
-// begin a formula (none of the production mirror's unit numbers starts with
-// one). Not sent to the PUT (not `required`) is { value: undefined },
+// mirror is 12), or starts with =, +, - or @ once trimmed, or reads as a
+// built-in property name ("Unit number is reserved. Enter a different one.").
+//
+// THE LEADING CHARACTERS. Dispatch copies a truck's unit number into Job
+// Tracking's Truck column, which is written as a person typing into the sheet
+// would write it (USER_ENTERED), and there a leading = or + starts a formula
+// (formulaCellRefusal() states the sheet's rule). A leading - or @ does not:
+// the sheet stores it as text or a number. A unit number is refused those two
+// as well, as extra strictness, because other spreadsheet programs read either
+// as the start of a formula once the data is exported. None of the production
+// mirror's unit numbers starts with any of the four.
+//
+// RESERVED. A unit number that reads as a built-in property name
+// (isBuiltInPropertyName(), in any case or spacing: "constructor",
+// "__proto__", "toString", ...) is refused, as such a driver name is. This is
+// the only writer of trucks.unit_number, so it holds for both truck routes.
+// The per-truck totals are null-prototype maps keyed by unit number (GET
+// /api/investor, GET /api/financials, the fuel-gallons recovery), so a truck
+// stored under such a number before this check still totals like any other.
+//
+// Not sent to the PUT (not `required`) is { value: undefined },
 // and the column is left alone. A unit number is one line of plain text: it is
 // shown in every fleet list, sorted, and written into audit lines, where any of
 // those characters changes how the text around it reads without being visible.
@@ -23738,6 +23835,7 @@ function parseUnitNumber(raw, { required = false } = {}) {
 	if (!value) return refuse("Unit number is required");
 	if (value.length > MAX_LENGTH) return refuse(`Unit number must be at most ${MAX_LENGTH} characters.`);
 	if (/^[=+@-]/.test(value)) return refuse("Unit number cannot start with =, +, - or @.");
+	if (isBuiltInPropertyName(value)) return refuse("Unit number is reserved. Enter a different one.");
 	return { value };
 }
 
@@ -25355,6 +25453,10 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		if (assignedDriver !== undefined && assignedDriver !== null && typeof assignedDriver !== "string") {
 			return res.status(400).json({ error: "assignedDriver must be a string, or null for no driver.", code: "INVALID_DRIVER_NAME" });
 		}
+		// Nor a name that reads as a built-in property name: 400
+		// DRIVER_NAME_RESERVED (reservedDriverNameRefusal()), for every role.
+		const reservedDriver = reservedDriverNameRefusal(assignedDriver, "assignedDriver");
+		if (reservedDriver) return res.status(400).json(reservedDriver);
 		// The Add form's five fixed costs, fuel tank and MPG, admin fee and photo.
 		// The INSERT used to drop the costs, fee and photo, so a new truck always
 		// started at $0/mo, the 50% fee and no photo whatever the form said. Parsed
@@ -25616,6 +25718,14 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		// written, as on POST /api/trucks. `null` unassigns, like "".
 		if (assignedDriver !== undefined && assignedDriver !== null && typeof assignedDriver !== "string") {
 			return res.status(400).json({ error: "assignedDriver must be a string, or null for no driver.", code: "INVALID_DRIVER_NAME" });
+		}
+		// Nor, when it changes the truck's driver, a name that reads as a built-in
+		// property name: 400 DRIVER_NAME_RESERVED (reservedDriverNameRefusal()).
+		// Keyed on the change (normalizeDriverName()), so a name already stored does
+		// not block an unrelated edit.
+		if (typeof assignedDriver === "string" && normalizeDriverName(assignedDriver) !== normalizeDriverName(truck.assigned_driver)) {
+			const reservedDriver = reservedDriverNameRefusal(assignedDriver, "assignedDriver");
+			if (reservedDriver) return res.status(400).json(reservedDriver);
 		}
 		// A sent unit number is text, not blank, one plain line (parseUnitNumber(),
 		// POST /api/trucks's rule): 400 INVALID_UNIT_NUMBER otherwise, before any
@@ -27700,7 +27810,10 @@ app.get("/api/admin/scan-duplicates", requireRole("Super Admin"), async (req, re
 		const driverIdx = headers.findIndex((h) => /^driver$/i.test(h));
 		const oLatIdx = headers.findIndex((h) => /origin.*lat/i.test(h));
 
-		const byId = {};
+		// Keyed by the sheet's Load ID cell, so a null-prototype object. Not a
+		// Map: Object.entries() lists numeric ids in ascending order, and the
+		// groups keep that order.
+		const byId = Object.create(null);
 		for (let i = 1; i < rows.length; i++) {
 			const rawId = (rows[i][loadIdIdx] || "").trim();
 			if (!rawId) continue;
@@ -29196,9 +29309,10 @@ app.get("/api/admin/scan-stale-locations", requireRole("Super Admin"), async (re
 		const detailsIdx = headers.findIndex((h) => /^details$/i.test(h));
 
 		// Build sheet lookup: loadId → { status, driver, origin, dest, details }
-		const sheetLoads = {};
+		// Both maps are keyed by sheet cells, so null-prototype objects.
+		const sheetLoads = Object.create(null);
 		const activeRe = /^(assigned|dispatched|heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
-		const driverActiveLoads = {}; // driver → most recent active loadId from sheet
+		const driverActiveLoads = Object.create(null); // driver → most recent active loadId from sheet
 		for (let i = 1; i < rows.length; i++) {
 			const lid = (rows[i][loadIdIdx] || "").trim().replace(/^#/, "");
 			if (!lid) continue;
@@ -29629,7 +29743,7 @@ app.get("/api/data", requireRole("Super Admin"), async (req, res) => {
 //
 // ⚠️ SUPER ADMIN ONLY (2026-09-26), like GET. It appends a caller-built row to
 // whichever tab ?sheet= names with valueInputOption "USER_ENTERED", which stores
-// a value starting with "=" as a formula, and only a Super Admin enters
+// a value starting with "=" or "+" as a formula, and only a Super Admin enters
 // formulas (see formulaCellRefusal()). Its SPA callers
 // are New Job (/jobs/new) and the Data Manager (/data), both Super Admin routes;
 // the legacy public/index.html is served only when client/dist is missing, and
@@ -29742,6 +29856,13 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 				});
 			}
 			appendHeaders = hdrs;
+			// A Driver cell that reads as a built-in property name is refused, 400
+			// DRIVER_NAME_RESERVED naming the column (driverCellRefusal(), as the row
+			// saves refuse it). A new row has no stored cells, so every cell counts.
+			// Asked here, beside the period guard, so only on a tab that guard
+			// covers; an append to any other tab is not judged.
+			const reservedDriver = driverCellRefusal(hdrs, [], values);
+			if (reservedDriver) return res.status(400).json(reservedDriver);
 			const appendChanges = changedGuardedCells(hdrs, [], values);
 			const appendBlocker = sheetRowUpdateBlocker(true, hdrs, [], values, appendChanges);
 			if (appendBlocker) {
@@ -29970,9 +30091,10 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		//   • every broker contact column is written back exactly as stored,
 		//     whatever the request sent (restoreWithheldBrokerCells()) — they are
 		//     served blank to these callers, and the response names none of them;
-		//   • a CHANGED cell whose value starts with "=" is refused, 400
-		//     FORMULA_NOT_ALLOWED naming the column (formulaCellRefusal()). Judged
-		//     after the restore, so a withheld column never answers it.
+		//   • a CHANGED cell the sheet would store as a formula (a leading "=", or
+		//     a "+" not before a plain number) is refused, 400 FORMULA_NOT_ALLOWED
+		//     naming the column (formulaCellRefusal()). Judged after the restore,
+		//     so a withheld column never answers it.
 		//
 		// ⚠️ THE ROW READ ABOVE IS WHAT MAKES THE RESTORE WORK. The old code read
 		// `${sheetName}!A${rowIndex}` — in A1 notation that is the single CELL A5,
@@ -29991,6 +30113,12 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 			const formula = formulaCellRefusal(headers, before, values);
 			if (formula) return res.status(400).json(formula);
 		}
+		// For every caller, Super Admin included: a changed cell in a Driver column
+		// that reads as a built-in property name is refused, 400
+		// DRIVER_NAME_RESERVED naming the column (driverCellRefusal()), judged on
+		// the row as it will be written.
+		const reservedDriver = driverCellRefusal(headers, before, values);
+		if (reservedDriver) return res.status(400).json(reservedDriver);
 
 		// Diff AFTER the splice — the spliced values are what actually get written,
 		// so they are what has to be judged and what has to be audited.
@@ -30710,6 +30838,11 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// Normalize driver name against users table to prevent misspelling mismatches
 		const userMatch = db.prepare("SELECT driver_name FROM users WHERE LOWER(driver_name) = LOWER(?) AND role = 'Driver'").get(rawDriver.trim());
 		const driver = userMatch ? userMatch.driver_name : rawDriver.trim();
+		// A driver name that reads as a built-in property name is refused for every
+		// role, 400 DRIVER_NAME_RESERVED (reservedDriverNameRefusal()), before the
+		// sheet is read.
+		const reservedDriver = reservedDriverNameRefusal(driver, "driver");
+		if (reservedDriver) return res.status(400).json(reservedDriver);
 
 		// Queueing is allowed: dispatch to a driver who's already on a load,
 		// the new row lands as "Dispatched" and queues behind their current
@@ -30890,6 +31023,9 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 		// Normalize against users table (same pattern as /api/dispatch).
 		const userMatch = db.prepare("SELECT driver_name FROM users WHERE LOWER(driver_name) = LOWER(?) AND role = 'Driver'").get(rawNewDriver.trim());
 		const newDriver = userMatch ? userMatch.driver_name : rawNewDriver.trim();
+		// Refused as POST /api/dispatch refuses it (reservedDriverNameRefusal()).
+		const reservedDriver = reservedDriverNameRefusal(newDriver, "newDriver");
+		if (reservedDriver) return res.status(400).json(reservedDriver);
 
 		const sheets = await getSheets();
 		// Headers, every row AND the target row in one round trip; RUNG 2 refuses
@@ -31542,6 +31678,10 @@ app.post("/api/admin/excluded-days", requireRole("Super Admin"), async (req, res
 		const action = actionRaw === "add" ? "add" : "remove";
 		const driver = normalizeDriverName(driverNameRaw);
 		if (!driver) return res.status(400).json({ error: "Missing driverName" });
+		// A name that reads as a built-in property name is refused, 400
+		// DRIVER_NAME_RESERVED (reservedDriverNameRefusal()), before the gate.
+		const reserved = reservedDriverNameRefusal(driver, "driverName");
+		if (reserved) return res.status(400).json(reserved);
 		// ⚠️ A CALENDAR CHECK, NOT ONLY A SHAPE ONE. The shape test alone accepts
 		// `2026-13-01`, which excludedDayPeriods() slices to `2026-13` — a key no lock
 		// row can ever equal — so the month resolved, matched nothing, and the write
@@ -32214,13 +32354,16 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// difference between "Howard is driving" and "Howard has work waiting."
 		const inProgressRe = /^(heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
 		const statusColIdx = jobTracking.headers.findIndex((h) => /status/i.test(h));
+		// A Driver cell that reads as a built-in property name counts toward a
+		// directory driver exactly as a blank one does (driverNameForTotals()) —
+		// the rule driverQueues above already follows.
 		const fleet = carrierDB.data.map((r) => {
 			const name = (r[carrierDriverCol] || "").trim();
 			const nameNorm = normalizeDriverName(name);
 			// In-progression load only — excludes Dispatched and Assigned. Used
 			// to decide the "On Load" pill and the CurrentLoad ID surfacing.
 			const inProgressLoad = statusColIdx === -1 ? null : activeJobs.find(
-				(j) => driverCol && normalizeDriverName(j[driverCol]) === nameNorm
+				(j) => driverCol && normalizeDriverName(driverNameForTotals(j[driverCol])) === nameNorm
 					&& inProgressRe.test((j[statusColIdx] || "").toString().trim()),
 			);
 			const phoneCol = findCol(carrierDB.headers, /phone|contact/i);
@@ -32246,7 +32389,7 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 				QueueCount: queue.length,
 				QueuedLoadIds: queue.map((q) => q.load_id),
 				CompletedLoads: completedJobs.filter((j) => {
-					return driverCol && normalizeDriverName(j[driverCol]) === nameNorm;
+					return driverCol && normalizeDriverName(driverNameForTotals(j[driverCol])) === nameNorm;
 				}).length,
 			};
 		});
@@ -32471,30 +32614,85 @@ function restoreWithheldBrokerCells(headers, before, values) {
 
 // PUT /api/data/:rowIndex and PUT /api/load/:loadId, for every caller but a
 // Super Admin: no formulas. Both write with valueInputOption "USER_ENTERED",
-// under which a value starting with "=" is stored as a formula. The same rule
-// guards POST /api/loads/from-ratecon and POST /api/dispatch{,/reassign}, which
-// pass an empty `before` for a new row. Returns null,
-// or the 400 body for the first CHANGED cell, in column order, whose trimmed
-// value starts with "=": { error, code: "FORMULA_NOT_ALLOWED", field }, where
+// under which a value starting with "=" or "+" is stored as a formula. The same
+// rule guards POST /api/loads/from-ratecon and POST /api/dispatch{,/reassign},
+// which pass an empty `before` for a new row. Returns null, or the 400 body
+// { error, code: "FORMULA_NOT_ALLOWED", field } for the first CHANGED cell, in
+// column order, whose trimmed value starts with "=", or starts with "+" and is
+// not a plain number. A plain number is "+" and a decimal numeral of up to 30
+// digits a side ("+7", "+1500.50"), which the sheet shows as that number. A
+// leading "-" or "@" is stored as text or a number, so "-50" is never refused.
 // `field` is the column's header exactly as the sheet holds it ("(unnamed)" for
 // a blank one). A cell equal to its stored value is never refused, so a stored
-// value that already starts with "=" does not block an unrelated edit. `before`
-// is the row as stored and `values` the row as it will be written, both in
-// header order; only the first values.length cells are written, so only they
-// are judged. The routes call it after restoreWithheldBrokerCells() and before
-// anything is written.
+// value that already starts with "=" does not block an unrelated edit.
+// `before` is the row as stored and `values` the row as it will be written,
+// both in header order; only the first values.length cells are written, so
+// only they are judged. The routes call it after restoreWithheldBrokerCells()
+// and before anything is written.
 function formulaCellRefusal(headers, before, values) {
 	for (let i = 0; i < values.length; i++) {
 		const to = values[i] == null ? "" : String(values[i]);
 		const from = before[i] == null ? "" : String(before[i]);
-		if (to === from || !to.trim().startsWith("=")) continue;
+		if (to === from) continue;
+		const text = to.trim();
+		const lead = text.startsWith("=") ? "="
+			: text.startsWith("+") && !/^\+\s{0,8}(\d{1,30}(\.\d{0,30})?|\.\d{1,30})$/.test(text) ? "+"
+			: "";
+		if (!lead) continue;
 		const header = headers && headers[i] != null ? String(headers[i]) : "";
 		const name = header.trim() || `Column ${i + 1}`;
 		return {
-			error: `"${name}" starts with "=", which the sheet stores as a formula. Only a Super Admin can enter formulas; remove the leading "=" to save it as text.`,
+			error: `"${name}" starts with "${lead}", which the sheet stores as a formula. Only a Super Admin can enter formulas; remove the leading "${lead}" to save it as text.`,
 			code: "FORMULA_NOT_ALLOWED",
 			field: header.trim() ? header : "(unnamed)",
 		};
+	}
+	return null;
+}
+
+// A driver name that reads as a built-in property name (isBuiltInPropertyName())
+// is refused wherever the app takes one in. The routes that create or rename a
+// driver identity refuse it as a reserved name (409 DRIVER_NAME_TAKEN, through
+// findDriverNameClashes() or, on the directory routes, beside it). Every other
+// route that stores a driver name it was sent refuses it here, for every role,
+// before anything is written: 400 { error, code: "DRIVER_NAME_RESERVED", field },
+// `field` naming the request field, or the sheet column, that carried it. Those
+// routes are POST /api/expenses (a name sent for a driver), POST /api/dispatch
+// and /api/dispatch/reassign, the two row saves and POST /api/data (through
+// driverCellRefusal() below; POST /api/data asks it only where it runs the
+// period guard, see there), POST /api/admin/excluded-days, POST and PUT
+// /api/trucks, POST /api/invoices/generate and /api/invoices/manual, and PUT
+// /api/load-ratings/:loadId. Returns that body, or null. Only text is judged:
+// each route answers a value of another type itself.
+function reservedDriverNameRefusal(value, field) {
+	if (typeof value !== "string" || !isBuiltInPropertyName(value)) return null;
+	return {
+		error: `The name in "${field}" is reserved and cannot be used. Enter a different name.`,
+		code: "DRIVER_NAME_RESERVED",
+		field,
+	};
+}
+
+// PUT /api/data/:rowIndex (every tab), PUT /api/load/:loadId, and POST
+// /api/data only where it runs the period guard: a period-guarded tab
+// (PERIOD_GUARDED_SHEETS, Job Tracking) or a tab it cannot resolve (that guard
+// fails closed). An append to any other tab is not judged. For every
+// caller, Super Admin included: reservedDriverNameRefusal() for the first
+// CHANGED cell, in column order, in a column whose header names a driver
+// (/driver/i, the app's driver-column rule), `field` being that header exactly
+// as the sheet holds it. "Changed" as formulaCellRefusal() judges it: a cell
+// equal to its stored value is never refused, so a name already stored does
+// not block an unrelated edit. `before` is the row as stored ([] for a new
+// row) and `values` the row as it will be written, both in header order.
+function driverCellRefusal(headers, before, values) {
+	for (let i = 0; i < values.length; i++) {
+		const header = headers && headers[i] != null ? String(headers[i]) : "";
+		if (!/driver/i.test(header)) continue;
+		const to = values[i] == null ? "" : String(values[i]);
+		const from = before[i] == null ? "" : String(before[i]);
+		if (to === from) continue;
+		const refusal = reservedDriverNameRefusal(to, header);
+		if (refusal) return refusal;
 	}
 	return null;
 }
@@ -32527,6 +32725,24 @@ function normalizeDriverName(s) {
 	return (s || "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+// A name that reads, once normalized, as a property every plain object
+// inherits ("__proto__", "constructor", "tostring", ...). No driver is
+// named that: it is refused wherever a driver name is taken in, and a
+// name-keyed total treats a row carrying it as unassigned. Nor is a truck:
+// parseUnitNumber() refuses such a unit number.
+//
+// The lowercased names are built on the first call and kept on the function
+// itself (Object.prototype's own names do not change while the app runs), so
+// the dashboard's per-row calls do not rebuild the list each time, and a copy
+// lifted on its own needs only normalizeDriverName() beside it.
+function isBuiltInPropertyName(name) {
+	const key = normalizeDriverName(name);
+	if (key === "") return false;
+	const names = isBuiltInPropertyName.names
+		|| (isBuiltInPropertyName.names = new Set(Object.getOwnPropertyNames(Object.prototype).map((n) => n.toLowerCase())));
+	return names.has(key);
+}
+
 // ⚠️ THE ONE ANSWER TO "IS THIS NAME ALREADY IN USE?" — every path that
 // creates or renames a driver identity asks it immediately before its write:
 // accepting a job application, POST /api/users, POST /api/drivers-directory,
@@ -32546,8 +32762,12 @@ function normalizeDriverName(s) {
 // THE ACCOUNT NAMESPACE IS WIDER THAN DRIVER NAMES. A driver's name, an
 // account's username and the names the app itself uses as identities are the
 // same kind of identifier, so on the `users` side a name is also in use when it
-// equals any account's USERNAME or one of the reserved names below. The list
-// lives inside the function so a lifted copy stays self-contained.
+// equals any account's USERNAME or one of the reserved names below. A name that
+// reads as a built-in property name (isBuiltInPropertyName()) is a reserved
+// name too, so a lifted copy needs that function beside normalizeDriverName().
+// The callers that ask with `users: false` do not see reserved names: POST and
+// PUT /api/drivers-directory and syncDriverToCarrierSheet()'s add branch refuse
+// a built-in property name themselves.
 //
 // SYNCHRONOUS ON PURPOSE (better-sqlite3), so a caller can sit it right beside
 // its write with no `await` in between — the house check-then-act rule. The one
@@ -32568,7 +32788,8 @@ function normalizeDriverName(s) {
 //     Never skips a reserved name.
 //   exceptDirectoryId — skip that one drivers_directory row (a caller editing it).
 //   users / directory — pass false to leave that side out. `users` covers the
-//     reserved names, every account's driver name and every username. Both
+//     reserved names (built-in property names included), every account's
+//     driver name and every username. Both
 //     sides are checked by default, the wider answer, so a new caller has to
 //     opt OUT of one.
 // A blank name, or a non-string, never clashes: an empty name is not an
@@ -32587,6 +32808,7 @@ function findDriverNameClashes(name, opts = {}) {
 	const hits = [];
 	if (users) {
 		for (const r of RESERVED_NAMES) if (same(r)) hits.push({ source: "reserved", name: r });
+		if (isBuiltInPropertyName(needle)) hits.push({ source: "reserved", name: needle });
 		const rows = db.prepare("SELECT id, username, driver_name FROM users ORDER BY id").all();
 		for (const r of rows) {
 			if (skipUsers.has(r.id)) continue;
@@ -32919,11 +33141,14 @@ function liveJobTrackingView(jt) {
 // across the investor view, company P&L, and weekly invoice together.
 // `remove` strips a day from the computed active-day set; `add` credits a day
 // the ELD missed (truck offline / lost feed).
+// A null-prototype object, and a row whose name reads as a built-in property
+// name is skipped like a blank one (driverNameForTotals()), so every other
+// row's override still applies.
 function getAllExcludedDriverDays() {
-	const map = {};
+	const map = Object.create(null);
 	try {
 		db.prepare("SELECT driver_name, excluded_date, COALESCE(action, 'remove') AS action FROM excluded_driver_days").all().forEach((r) => {
-			const dn = (r.driver_name || "").trim();
+			const dn = (driverNameForTotals(r.driver_name) || "").trim();
 			const dt = (r.excluded_date || "").trim();
 			if (!dn || !dt) return;
 			if (!map[dn]) map[dn] = { remove: new Set(), add: new Set() };
@@ -33296,12 +33521,16 @@ function isPlausibleLockPeriod(period) {
 // but hasn't yet started progressing. The dispatcher's confirmation modal and
 // the driver app's "Up Next" list both read off this. Position is 1-based,
 // ordered by load_responses.responded_at ASC (the FIFO requirement).
+// Every return is a null-prototype object, the empty ones included: both callers
+// index it by a directory name (GET /api/dashboard's fleet, the driver app), and
+// a row whose Driver reads as a built-in property name is not queued, exactly
+// like a blank one (driverNameForTotals()).
 function computeDriverQueues(jobTrackingRows, headers) {
 	const driverCol = findCol(headers || [], /driver|operator/i);
 	const statusCol = findCol(headers || [], /^(job[\s._-]?)?status$/i) || findCol(headers || [], /status/i);
 	const loadIdCol = findCol(headers || [], /load.?id|job.?id/i);
-	if (!driverCol || !statusCol || !loadIdCol) return {};
-	if (!Array.isArray(jobTrackingRows) || jobTrackingRows.length === 0) return {};
+	if (!driverCol || !statusCol || !loadIdCol) return Object.create(null);
+	if (!Array.isArray(jobTrackingRows) || jobTrackingRows.length === 0) return Object.create(null);
 	// Both "Dispatched" (queued, awaiting acceptance) and "Assigned" (accepted,
 	// waiting to start) count as "in queue" — the dispatcher's (Queue: N) badge
 	// reflects total pending work for that driver. Phase 2 introduced deferred
@@ -33313,13 +33542,13 @@ function computeDriverQueues(jobTrackingRows, headers) {
 	for (const r of jobTrackingRows) {
 		const status = (r[statusCol] || "").toString().trim();
 		if (!queuedRe.test(status)) continue;
-		const driverNorm = normalizeDriverName(r[driverCol]);
+		const driverNorm = normalizeDriverName(driverNameForTotals(r[driverCol]));
 		const loadId = (r[loadIdCol] || "").toString().trim();
 		if (driverNorm && loadId) {
 			candidates.push({ driverNorm, loadId, isAssigned: /^assigned$/i.test(status) });
 		}
 	}
-	if (candidates.length === 0) return {};
+	if (candidates.length === 0) return Object.create(null);
 	const loadIds = [...new Set(candidates.map((c) => c.loadId))];
 	const placeholders = loadIds.map(() => "?").join(",");
 	// Accept timestamps for "Assigned" loads (driver's accept time = FIFO key).
@@ -33360,7 +33589,7 @@ function computeDriverQueues(jobTrackingRows, headers) {
 	} catch {
 		// Best-effort: if notifications query fails, Dispatched loads fall back to row-order.
 	}
-	const byDriver = {};
+	const byDriver = Object.create(null);
 	for (const c of candidates) {
 		const key = `${c.driverNorm}::${c.loadId}`;
 		const ts = c.isAssigned ? (acceptMap.get(key) || "") : (dispatchMap.get(key) || "");
@@ -37066,6 +37295,14 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		if (!driver || !type || !amount || !date) {
 			return res.status(400).json({ error: "Missing required fields" });
 		}
+		// A name sent for a driver (resolveDriverActor() passes a Dispatcher's or
+		// Super Admin's through) that reads as a built-in property name is refused,
+		// 400 DRIVER_NAME_RESERVED (reservedDriverNameRefusal()), before anything is
+		// read or written. A Driver's is their own session name.
+		if (req.session.user.role !== "Driver") {
+			const reserved = reservedDriverNameRefusal(driver, "driver");
+			if (reserved) return res.status(400).json(reserved);
+		}
 		const VALID_EXPENSE_TYPES = ['Fuel', 'Repair', 'Maintenance', 'Wear & Tear', 'Toll', 'Food', 'Other'];
 		if (!VALID_EXPENSE_TYPES.includes(type)) {
 			return res.status(400).json({ error: "Invalid expense type" });
@@ -38384,8 +38621,9 @@ app.post("/api/loads/ratecon/extract", requireRole("Super Admin", "Dispatcher"),
 // reference fields only inside "Pickup Info"), and the Payments Table ("Broker
 // Name", "Rate"). The other extracted fields (Total Rate, Order / PO / Move
 // Number, Driver Name, the two notes) reach no sheet, so they are not judged.
-// For every caller but a Super Admin the route refuses any of these whose value
-// starts with "=" before it claims the load or reads a sheet — see NO FORMULAS
+// For every caller but a Super Admin the route refuses any of these that the
+// sheet would store as a formula (formulaCellRefusal()) before it claims the
+// load or reads a sheet — see NO FORMULAS
 // in the route. scripts/test-sheet-formula-doors.js derives the same set from
 // the shipped route and fails when the two disagree.
 const RATECON_SHEET_FIELDS = [
@@ -38461,8 +38699,8 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		// NO FORMULAS, for every caller but a Super Admin — the rule PUT
 		// /api/data/:rowIndex and PUT /api/load/:loadId apply (formulaCellRefusal()).
 		// Every sheet write below uses valueInputOption "USER_ENTERED", which stores
-		// a value starting with "=" as a formula. A new load has no stored row, so
-		// every cell counts as changed. Two checks:
+		// a value starting with "=" or "+" as a formula. A new load has no stored
+		// row, so every cell counts as changed. Two checks:
 		//   1. HERE, before the load is claimed and before any sheet is read: every
 		//      field in RATECON_SHEET_FIELDS, 400 FORMULA_NOT_ALLOWED with `field`
 		//      naming the field as the review modal sends it.
@@ -43023,7 +43261,8 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 				  )
 				  AND rt.location_date_ms > ?
 			`).all(cutoff);
-			const routemateByDriver = {};
+			// Driver-keyed maps in this route are null-prototype objects.
+			const routemateByDriver = Object.create(null);
 			for (const r of routemateRows) {
 				routemateByDriver[r.driver_lc] = r;
 			}
@@ -43080,7 +43319,7 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 		// only one truck has a Routemate device. Source of truth is
 		// truck_assignments + trucks (not the sheet), so this stays accurate
 		// when the sheet's free-text driver names drift.
-		const assignmentByDriver = {};
+		const assignmentByDriver = Object.create(null);
 		try {
 			const assignRows = db.prepare(`
 				SELECT LOWER(ta.driver_name) AS driver_lc,
@@ -43125,8 +43364,8 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 			const deliveryTimeCol = headers.find((h) => /delivery.*time|drop.*time|delivery.*date|drop.*date/i.test(h));
 
 			if (loadIdCol) {
-				// Build load lookup
-				const loadMap = {};
+				// Build load lookup (keyed by the sheet's Load ID cell: null-prototype)
+				const loadMap = Object.create(null);
 				for (let i = 1; i < rows.length; i++) {
 					const obj = {};
 					headers.forEach((h, idx) => { obj[h] = rows[i][idx] || ""; });
@@ -43144,13 +43383,15 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 				const activeRe = /^(assigned|dispatched|heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
 				// Matches /api/dashboard's activeStatuses so the Tracking panel and Dashboard KPI agree on what counts as active.
 				const workingRe = /^(heading to shipper|in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading)$/i;
-				const driverActiveLoadMap = {};   // driver → first active loadId (for override, includes dispatched)
-				const driverActiveLoadsMap = {};  // driver → working loads for panel (matches /api/dashboard activeStatuses)
+				// A Driver cell that reads as a built-in property name is skipped like a
+				// blank one (driverNameForTotals()); both maps are null-prototype.
+				const driverActiveLoadMap = Object.create(null);   // driver → first active loadId (for override, includes dispatched)
+				const driverActiveLoadsMap = Object.create(null);  // driver → working loads for panel (matches /api/dashboard activeStatuses)
 				if (statusCol && driverCol && loadIdCol) {
 					for (let i = 1; i < rows.length; i++) {
 						const obj = {};
 						headers.forEach((h, idx) => { obj[h] = rows[i][idx] || ""; });
-						const name = (obj[driverCol] || "").trim();
+						const name = (driverNameForTotals(obj[driverCol]) || "").trim();
 						const status = (obj[statusCol] || "").trim();
 						const lid = (obj[loadIdCol] || "").trim().replace(/^#/, "");
 						if (!name || !lid) continue;
@@ -43399,9 +43640,10 @@ app.get("/api/tracking/hos", requireRole("Super Admin", "Dispatcher"), async (re
 		}
 
 		// Build the three matchers from SQLite (active assignments + vehicle links).
-		const byName = {};
-		const byUnit = {};
-		const driverByRvid = {};
+		// Read by the ELD's own driver names and labels: null-prototype objects.
+		const byName = Object.create(null);
+		const byUnit = Object.create(null);
+		const driverByRvid = Object.create(null);
 		try {
 			const assignRows = db.prepare(`
 				SELECT ta.driver_name, t.unit_number,
@@ -43420,7 +43662,7 @@ app.get("/api/tracking/hos", requireRole("Super Admin", "Dispatcher"), async (re
 		} catch (mapErr) {
 			console.error("HOS assignment-map error:", mapErr.message);
 		}
-		const rvidByLabel = {};
+		const rvidByLabel = Object.create(null);
 		try {
 			const rvRows = db.prepare(
 				"SELECT routemate_vehicle_id, vehicle_id FROM routemate_vehicles WHERE COALESCE(vehicle_id, '') <> ''"
@@ -43691,13 +43933,18 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 		// For every caller but a Super Admin, PUT /api/data/:rowIndex's two rules,
 		// before anything is written: every broker contact column is written back
 		// exactly as stored, whatever the body sent (restoreWithheldBrokerCells()),
-		// and a changed cell starting with "=" is refused 400 FORMULA_NOT_ALLOWED
-		// (formulaCellRefusal()).
+		// and a changed cell the sheet would store as a formula is refused 400
+		// FORMULA_NOT_ALLOWED (formulaCellRefusal()).
 		if (req.session.user.role !== "Super Admin") {
 			restoreWithheldBrokerCells(headers, before, updatedRow);
 			const formula = formulaCellRefusal(headers, before, updatedRow);
 			if (formula) return res.status(400).json(formula);
 		}
+		// For every caller, Super Admin included: a changed Driver cell that reads
+		// as a built-in property name is refused, 400 DRIVER_NAME_RESERVED naming
+		// the column (driverCellRefusal(), as PUT /api/data/:rowIndex refuses it).
+		const reservedDriver = driverCellRefusal(headers, before, updatedRow);
+		if (reservedDriver) return res.status(400).json(reservedDriver);
 		const after = sheetRowAfterUpdate(before, updatedRow);
 		const changes = changedGuardedCells(headers, before, after);
 
@@ -47203,6 +47450,8 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 	const detail = detailForMonth ? { revenueLoads: [], driverPayRows: [], fixedCostItems: [], tripExpenseItems: [] } : null;
 
 	// Investor-scope the rows: Owner ID column (primary) or driver-set (fallback).
+	// A Driver cell that reads as a built-in property name falls back like a
+	// blank one (driverNameForTotals()) — the same rule as GET /api/investor.
 	const filteredJobData = investorDriverSet
 		? data.filter(r => {
 			if (ownerIdCol) {
@@ -47210,7 +47459,7 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 				const hasOwnerIdValue = raw !== undefined && raw !== null && String(raw).trim() !== "";
 				if (hasOwnerIdValue) return (parseInt(raw) || 0) === investorOwnerId;
 			}
-			const driver = driverCol ? (r[driverCol] || "").trim().toLowerCase() : "";
+			const driver = driverCol ? (driverNameForTotals(r[driverCol]) || "").trim().toLowerCase() : "";
 			return driver && investorDriverSet.has(driver);
 		})
 		: data;
@@ -47224,7 +47473,8 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 	const currentMonthKey = houstonDay(now).slice(0, 7);
 
 	// ELD travel-day index per in-scope truck (same as GET /api/investor).
-	const unitToVid = {};
+	// Read by the sheet's Truck cell, so a null-prototype object.
+	const unitToVid = Object.create(null);
 	{
 		const vidQuery = investorDriverSet
 			? "SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE owner_id = ? AND COALESCE(routemate_vehicle_id, '') != ''"
@@ -47235,14 +47485,17 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 	const driverDayOverrides = getAllExcludedDriverDays();
 
 	// Pass: monthly revenue, per-driver active days (ELD-intersected), earliest date.
+	// The driver-keyed maps are null-prototype objects, and a Driver cell that
+	// reads as a built-in property name is unassigned (driverNameForTotals()):
+	// its revenue counts, no driver is paid for it — as for a blank cell.
 	const monthlyRevenue = {};
-	const driverDaySets = {};
-	const driverMonthlyDays = {};        // { driver: { mk: Set<day> } }
-	const driverMonthlyRevenue = {};     // { driver: { mk: revenue } }
+	const driverDaySets = Object.create(null);
+	const driverMonthlyDays = Object.create(null);        // { driver: { mk: Set<day> } }
+	const driverMonthlyRevenue = Object.create(null);     // { driver: { mk: revenue } }
 	let earliestDate = null;
 	filteredJobData.forEach((r) => {
 		const st = statusCol ? (r[statusCol] || "").trim() : "";
-		const driver = jtDriverCol ? normalizeDriverName(r[jtDriverCol]) : "";
+		const driver = jtDriverCol ? normalizeDriverName(driverNameForTotals(r[jtDriverCol])) : "";
 		const truckUnit = jtTruckCol ? (r[jtTruckCol] || "").trim().toLowerCase() : "";
 		let assignedMonthKey = null;
 		if (jtDateCol && r[jtDateCol]) {
@@ -47370,7 +47623,7 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 	// max(0, monthRevenue − monthDeductible) × pct. Same as GET /api/investor.
 	const payStructures = getDriverPayStructures();
 	const expensesByDriverMonth = getDeductibleExpensesByDriverMonth();
-	const trucksByDriver = {};
+	const trucksByDriver = Object.create(null);
 	{
 		const truckQuery = investorDriverSet
 			? "SELECT assigned_driver, driver_pay_daily FROM trucks WHERE owner_id = ?"
@@ -48074,6 +48327,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// the Owner ID column existed). An EXPLICIT value — including "0" — is trusted as-is
 		// and stops the fallback, so a company-truck load (Owner ID = 0) run by an investor's
 		// driver doesn't leak into that investor's view.
+		// A Driver cell that reads as a built-in property name falls back like a
+		// blank one (driverNameForTotals()) — the same rule as
+		// computeInvestorMonthlyEarnings(), so the portal and the payouts agree.
 		const driverCol = findCol(jobTracking.headers, /^driver$/i);
 		const ownerIdCol = findCol(jobTracking.headers, /^owner.?id$/i);
 		const filteredJobData = investorDriverSet
@@ -48085,7 +48341,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 						return (parseInt(raw) || 0) === investorOwnerId;
 					}
 				}
-				const driver = driverCol ? (r[driverCol] || "").trim().toLowerCase() : "";
+				const driver = driverCol ? (driverNameForTotals(r[driverCol]) || "").trim().toLowerCase() : "";
 				return driver && investorDriverSet.has(driver);
 			})
 			: jobTracking.data;
@@ -48138,8 +48394,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// ---- Miles source: load_coordinates table ----
 		// Prefer cached road distance (Google Routes API, distance_miles
 		// column). Fall back to haversine straight-line when the backfill
-		// hasn't run yet. Same pattern as /api/financials.
-		const milesByLoadId = {};
+		// hasn't run yet. Same pattern as /api/financials. Read by the sheet's
+		// Load ID cell, so a null-prototype object.
+		const milesByLoadId = Object.create(null);
 		{
 			const coordRows = db.prepare(
 				"SELECT load_id, origin_lat, origin_lng, dest_lat, dest_lng, distance_miles FROM load_coordinates WHERE origin_lat IS NOT NULL AND dest_lat IS NOT NULL"
@@ -48166,11 +48423,15 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		let latestDate = null;
 		const monthlyRevenue = {};
 		const completedLoadIds = new Set();
-		const grossByDriver = {};       // per-driver completed revenue (replaces Pass 3 inner loop)
-		const milesByDriver = {};       // per-driver haversine miles (replaces odoByDriver)
-		const milesByTruck = {};        // per-truck haversine miles
-		const loadsByDriver = {};       // per-driver completed load count (fallback when no truck column)
-		const loadsByTruck = {};        // per-truck completed load count (preferred when truck column exists)
+		// Every map below keyed by a driver or by the sheet's Truck cell is a
+		// null-prototype object, and a Driver cell that reads as a built-in
+		// property name is unassigned (driverNameForTotals()): its revenue
+		// counts, no driver is paid for it — as for a blank cell.
+		const grossByDriver = Object.create(null);       // per-driver completed revenue (replaces Pass 3 inner loop)
+		const milesByDriver = Object.create(null);       // per-driver haversine miles (replaces odoByDriver)
+		const milesByTruck = Object.create(null);        // per-truck haversine miles
+		const loadsByDriver = Object.create(null);       // per-driver completed load count (fallback when no truck column)
+		const loadsByTruck = Object.create(null);        // per-truck completed load count (preferred when truck column exists)
 		// Per-truck per-month REVENUE (completed loads only), bucketed by the load's
 		// ASSIGNED month exactly like monthlyRevenue / driverMonthlyRevenue below.
 		// Needed because perTruckData.unitMonthlyGross is DRIVER-keyed: two trucks
@@ -48179,24 +48440,24 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// handler needs revenue on the same monthly clock as monthlyEarnings, and
 		// this is the only place both keys (truckUnit + assignedMonthKey) are already
 		// in hand — so it costs no extra query and no extra sheet read.
-		const revenueByTruckMonth = {}; // { truckUnit: { "YYYY-MM": revenue } }
-		const driverDaySets = {};        // per-driver active day Sets (all-time, used for totals)
+		const revenueByTruckMonth = Object.create(null); // { truckUnit: { "YYYY-MM": revenue } }
+		const driverDaySets = Object.create(null);        // per-driver active day Sets (all-time, used for totals)
 		// Driver active days bucketed by LOAD'S ASSIGNED MONTH (not by physical day).
 		// This matches how revenue is bucketed — both should answer the question:
 		// "for loads assigned in month X, how much did we earn and how much did we
 		// pay the driver?" Previously loads assigned in April with old pickup dates
 		// in 2021 would show their revenue in April but their driver pay in 2021.
-		const driverMonthlyDays = {};    // { driver: { "YYYY-MM": Set<"YYYY-MM-DD"> } }
+		const driverMonthlyDays = Object.create(null);    // { driver: { "YYYY-MM": Set<"YYYY-MM-DD"> } }
 		// Per-driver per-month per-day → contributing load IDs. Surfaces in the
 		// "Driver Pay Explained" modal so an investor can see e.g. May 18 was
 		// covered by loads 553198052 AND 552854956 (one calendar day, two loads).
-		const driverMonthlyDayLoads = {}; // { driver: { "YYYY-MM": { "YYYY-MM-DD": Set<loadId> } } }
+		const driverMonthlyDayLoads = Object.create(null); // { driver: { "YYYY-MM": { "YYYY-MM-DD": Set<loadId> } } }
 		// Preserve original sheet casing for display ("Howard Reddie" vs the
 		// lowercased "howard reddie" key used internally).
-		const driverDisplayName = {};    // { normalizedDriver: "Original Casing" }
+		const driverDisplayName = Object.create(null);    // { normalizedDriver: "Original Casing" }
 		// Per-driver per-month REVENUE (completed loads only). Used by the
 		// percentage-pay branch so owner-op pay = (monthRevenue − monthDeductible) × pct.
-		const driverMonthlyRevenue = {}; // { driver: { "YYYY-MM": revenue } }
+		const driverMonthlyRevenue = Object.create(null); // { driver: { "YYYY-MM": revenue } }
 		// Admin overrides — Super Admin moves a (driver, date) into or out of
 		// the active-day count. `remove` drops a day the ELD over-counted;
 		// `add` credits a day the ELD missed (truck offline, etc.). Applied
@@ -48214,7 +48475,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// these days, so we never count scheduled days the truck sat still nor
 		// ELD travel on a day with no load. Trucks with no ELD link fall back to
 		// the full window (so un-instrumented investors are unaffected).
-		const unitToVid = {};
+		const unitToVid = Object.create(null);
 		{
 			const vidQuery = investorDriverSet
 				? "SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE owner_id = ? AND COALESCE(routemate_vehicle_id, '') != ''"
@@ -48223,7 +48484,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		}
 		const eldByVid = getEldTravelDaysByVehicleCached(Object.values(unitToVid), 0, Date.now() + 86400000);
 		// Per-driver-per-month ELD-source flags for the UI badge: { driver: { "YYYY-MM": {eld,est} } }
-		const driverDaySource = {};
+		const driverDaySource = Object.create(null);
 		const daySrcLabel = (o) => o ? (o.eld && o.est ? "mixed" : o.eld ? "eld" : "estimated") : "estimated";
 		const driverSrcAllTime = (drv) => {
 			const m = driverDaySource[drv]; if (!m) return "estimated";
@@ -48234,7 +48495,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 
 		filteredJobData.forEach((r) => {
 			const st = statusCol ? (r[statusCol] || "").trim() : "";
-			const driver = jtDriverCol ? normalizeDriverName(r[jtDriverCol]) : "";
+			const driver = jtDriverCol ? normalizeDriverName(driverNameForTotals(r[jtDriverCol])) : "";
 			const truckUnit = jtTruckCol ? (r[jtTruckCol] || "").trim().toLowerCase() : "";
 
 			// Resolve the load's assigned-month key once (used by both revenue and driver pay)
@@ -48436,10 +48697,10 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// Same formula their invoice uses, so the P&L matches reality.
 		const payStructures = getDriverPayStructures();
 		const expensesByDriverMonth = getDeductibleExpensesByDriverMonth();
-		const driverPayDetails = {};
+		const driverPayDetails = Object.create(null);
 		let totalDriverPay = 0;
 		{
-			const trucksByDriver = {};
+			const trucksByDriver = Object.create(null);
 			const truckQuery = investorDriverSet
 				? "SELECT assigned_driver, driver_pay_daily FROM trucks WHERE owner_id = ?"
 				: "SELECT assigned_driver, driver_pay_daily FROM trucks";
@@ -48593,7 +48854,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 							excludedAt: er.excluded_at || "",
 						}))
 						.sort((a, b) => a.date.localeCompare(b.date));
-					if (!monthlyDriverDetails[mk]) monthlyDriverDetails[mk] = {};
+					if (!monthlyDriverDetails[mk]) monthlyDriverDetails[mk] = Object.create(null); // driver-keyed
 					monthlyDriverDetails[mk][driver] = {
 						activeDays, dailyRate, totalPay: pay,
 						payType: struct.payType,
@@ -48850,7 +49111,10 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const atRiskCapital = Math.max(0, (totalPurchasePrice + totalStartupExpenses) - netRevenueToDate); // S7
 
 		// ---- Per-Truck Revenue Data (S8) — batched queries, no inner loops ----
-		const perTruckData = {};
+		// perTruckData and every map below keyed by a unit number are
+		// null-prototype objects (see driverNameForTotals()), so each holds
+		// exactly the units the data put there, whatever their names.
+		const perTruckData = Object.create(null);
 		if (investorDriverSet) {
 			// Batch queries BEFORE the loop (4 queries total instead of 5N)
 			// expByDriver is read below as expByDriver[normalizeDriverName(
@@ -48861,12 +49125,14 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			const expByDriver = foldExpenseTotalsByDriver(
 				db.prepare(`SELECT LOWER(driver) AS d, COALESCE(SUM(amount),0) AS t FROM expenses WHERE owner_id = ? AND ${EXPENSE_PNL_FILTER} GROUP BY LOWER(driver)`).all(user.id)
 			);
-			const maintByTruck = Object.fromEntries(
-				db.prepare(`SELECT LOWER(mf.truck) AS u, COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck)=LOWER(t.unit_number) WHERE t.owner_id = ? AND mf.type='service' GROUP BY LOWER(mf.truck)`).all(user.id).map(r => [r.u, r.t])
-			);
-			const compByTruck = Object.fromEntries(
-				db.prepare(`SELECT LOWER(cf.truck) AS u, COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck)=LOWER(t.unit_number) WHERE t.owner_id = ? AND cf.status='Paid' GROUP BY LOWER(cf.truck)`).all(user.id).map(r => [r.u, r.t])
-			);
+			const maintByTruck = Object.create(null);
+			for (const r of db.prepare(`SELECT LOWER(mf.truck) AS u, COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck)=LOWER(t.unit_number) WHERE t.owner_id = ? AND mf.type='service' GROUP BY LOWER(mf.truck)`).all(user.id)) {
+				maintByTruck[r.u] = r.t;
+			}
+			const compByTruck = Object.create(null);
+			for (const r of db.prepare(`SELECT LOWER(cf.truck) AS u, COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck)=LOWER(t.unit_number) WHERE t.owner_id = ? AND cf.status='Paid' GROUP BY LOWER(cf.truck)`).all(user.id)) {
+				compByTruck[r.u] = r.t;
+			}
 			// Use allOwnedTrucks (already fetched for asset section) — no extra query
 			allOwnedTrucks.forEach((truck) => {
 				const driverName = normalizeDriverName(truck.assigned_driver);
@@ -49052,9 +49318,10 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// 3-month earnings figure by them would let a truck parked since last year
 			// keep a large slice of today's projection. Revenue inside the window is the
 			// only per-truck figure on the same clock as trailing3MonthInvestor.
-			const windowRevenue = {};   // unit -> revenue earned inside trailingWindow
-			const modeByUnit = {};      // unit -> "truck" | "driver-fallback" | "no-data"
-			const insufficient = {};    // unit -> not in service for the whole window
+			// Unit-keyed, so null-prototype objects, as are basis and alloc below.
+			const windowRevenue = Object.create(null);   // unit -> revenue earned inside trailingWindow
+			const modeByUnit = Object.create(null);      // unit -> "truck" | "driver-fallback" | "no-data"
+			const insufficient = Object.create(null);    // unit -> not in service for the whole window
 			for (const unit of Object.keys(perTruckData)) {
 				const truck = allOwnedTrucks.find(t => t.unit_number === unit);
 				const unitLower = unit.toLowerCase();
@@ -49123,7 +49390,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// With no active trucks at all nothing can hold the invariant, and that was
 			// equally true before this change.
 			if (!eligible.length) eligible = Object.keys(perTruckData).filter(u => activeUnits.has(u));
-			const basis = {};
+			const basis = Object.create(null);
 			let totalBasis = 0;
 			for (const u of eligible) {
 				// Negative revenue is not expected (rates parse positive) but a floor of 0
@@ -49136,7 +49403,10 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// block did unconditionally before, and is the only defensible answer when
 			// every truck's claim is identical.
 			const shareOf = (u) => totalBasis > 0 ? basis[u] / totalBasis : (eligible.length ? 1 / eligible.length : 0);
-			const alloc = {};
+			// Whether a unit was given a share is asked as an own-property test
+			// (allocated()), never with `in`.
+			const alloc = Object.create(null);
+			const allocated = (u) => Object.prototype.hasOwnProperty.call(alloc, u);
 			{
 				let floorSum = 0;
 				const parts = eligible.map((u) => {
@@ -49163,7 +49433,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			for (const unit of Object.keys(perTruckData)) {
 				const price = (allOwnedTrucks.find(t => t.unit_number === unit)?.purchase_price) || 0;
 				const unitActive = activeUnits.has(unit);
-				const tooNew = unitActive && insufficient[unit] && !(unit in alloc);
+				const tooNew = unitActive && insufficient[unit] && !allocated(unit);
 				// null ≠ 0 here, and the difference is the whole point: null means "in
 				// service too briefly to project" (the UI renders "—"), while 0 means
 				// "in service the whole window and genuinely earned nothing". A truck
@@ -49190,7 +49460,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				perTruckData[unit].insufficientData = tooNew;
 				perTruckData[unit].attributionMode = modeByUnit[unit] || "no-data";
 				perTruckData[unit].windowRevenue = Math.round(windowRevenue[unit] || 0);
-				perTruckData[unit].windowRevenueShare = (unit in alloc)
+				perTruckData[unit].windowRevenueShare = allocated(unit)
 					? Math.round(shareOf(unit) * 1000) / 1000
 					: 0;
 			}
@@ -51710,7 +51980,8 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// distances). Fall back to haversine straight-line for any row
 		// where the backfill hasn't run yet. Old odometer-based miles
 		// were always $0 because drivers rarely filled the odometer field.
-		const milesByLoadId = {};
+		// Read by the sheet's Load ID cell, so a null-prototype object.
+		const milesByLoadId = Object.create(null);
 		let roadMilesCount = 0;
 		let haversineMilesCount = 0;
 		{
@@ -51745,21 +52016,25 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		let unassignedLoadCount = 0;
 		let unassignedMiles = 0;
 		const completedLoadIds = new Set();  // unique load IDs — used for expense matching
-		const grossByDriver = {};
-		const grossByTruck = {};         // sum revenue per truck (truck-column attribution)
-		const milesByDriver = {};        // sum of haversine miles per driver
-		const milesByTruck = {};         // sum of haversine miles per truck
+		// Every map below keyed by a driver or by the sheet's Truck cell is a
+		// null-prototype object, and a Driver cell that reads as a built-in
+		// property name is unassigned (driverNameForTotals()): it lands in
+		// unassignedGross and no driver is paid for it — as for a blank cell.
+		const grossByDriver = Object.create(null);
+		const grossByTruck = Object.create(null);         // sum revenue per truck (truck-column attribution)
+		const milesByDriver = Object.create(null);        // sum of haversine miles per driver
+		const milesByTruck = Object.create(null);         // sum of haversine miles per truck
 		let fleetTotalMiles = 0;
 		let loadsWithCoords = 0;         // data-quality signal
-		const loadsByDriver = {};
-		const loadsByTruck = {};
-		const driverDaySets = {};
-		const truckDaySets = {};         // active days per truck (per-truck driver pay)
-		const truckLoadDates = {};       // {first, last} per truck — accurate operating window
+		const loadsByDriver = Object.create(null);
+		const loadsByTruck = Object.create(null);
+		const driverDaySets = Object.create(null);
+		const truckDaySets = Object.create(null);         // active days per truck (per-truck driver pay)
+		const truckLoadDates = Object.create(null);       // {first, last} per truck — accurate operating window
 		const completedLoads = []; // for highest/lowest — store minimal fields
 		// Per-driver per-month REVENUE (completed loads only). Used by the
 		// percentage-pay branch so owner-op pay = (monthRevenue − monthDeductible) × pct.
-		const driverMonthlyRevenue = {}; // { driver_lc: { "YYYY-MM": revenue } }
+		const driverMonthlyRevenue = Object.create(null); // { driver_lc: { "YYYY-MM": revenue } }
 		// Fleet-wide completed revenue per assigned month (incl. unassigned
 		// loads) — drives the monthly performance breakdown. Keyed "YYYY-MM".
 		const monthlyRevenue = {};
@@ -51775,14 +52050,14 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// ELD, so driver/truck active days reflect real working days. Trucks with
 		// no ELD link fall back to the full window. Keeps this P&L reconciled with
 		// the investor view (the CLAUDE.md consistency invariant).
-		const unitToVid = {};
+		const unitToVid = Object.create(null);
 		db.prepare("SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''").all()
 			.forEach(t => { unitToVid[t.u] = t.vid; });
 		const eldByVid = getEldTravelDaysByVehicleCached(Object.values(unitToVid), 0, Date.now() + 86400000);
 
 		jobTracking.data.forEach((r) => {
 			const st = statusCol ? (r[statusCol] || "").trim() : "";
-			const driver = jtDriverCol ? (r[jtDriverCol] || "").trim() : "";
+			const driver = jtDriverCol ? (driverNameForTotals(r[jtDriverCol]) || "").trim() : "";
 			const driverLc = normalizeDriverName(driver);
 			const truckUnit = jtTruckCol ? (r[jtTruckCol] || "").trim().toLowerCase() : "";
 
@@ -51934,7 +52209,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// Partition each driver's final active-day set by calendar month for the
 		// monthly performance breakdown. An exact partition of driverDaySets, so
 		// per-month fixed-driver pay sums back to the annual total computed below.
-		const driverMonthlyDays = {}; // { driver_lc: { "YYYY-MM": Set<"YYYY-MM-DD"> } }
+		const driverMonthlyDays = Object.create(null); // { driver_lc: { "YYYY-MM": Set<"YYYY-MM-DD"> } }
 		for (const [drv, daySet] of Object.entries(driverDaySets)) {
 			const buckets = (driverMonthlyDays[drv] = {});
 			for (const d of daySet) {
@@ -51984,12 +52259,12 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// Same formula their invoice uses, so /admin/financials matches reality.
 		const payStructures = getDriverPayStructures();
 		const expensesByDriverMonth = getDeductibleExpensesByDriverMonth();
-		const trucksByDriver = {};
+		const trucksByDriver = Object.create(null);
 		db.prepare("SELECT assigned_driver, driver_pay_daily FROM trucks").all().forEach(t => {
 			const d = normalizeDriverName(t.assigned_driver);
 			if (d) trucksByDriver[d] = t.driver_pay_daily || 250;
 		});
-		const driverPayDetails = {};
+		const driverPayDetails = Object.create(null);
 		let totalDriverPay = 0;
 		for (const [driver, daySet] of Object.entries(driverDaySets)) {
 			const struct = payStructures[driver] || { payType: "fixed", payPercentage: 0 };
@@ -52081,15 +52356,20 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// variant of the driver's name is not lost from it. The query is unchanged.
 		const expByDriverRows = db.prepare(`SELECT LOWER(driver) AS d, COALESCE(SUM(amount),0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY LOWER(driver)`).all();
 		const expByDriver = foldExpenseTotalsByDriver(expByDriverRows);
-		const expByTruck = Object.fromEntries(
-			db.prepare(`SELECT LOWER(truck_unit) AS u, COALESCE(SUM(amount),0) AS t FROM expenses WHERE truck_unit IS NOT NULL AND truck_unit != '' AND ${EXPENSE_PNL_FILTER} GROUP BY LOWER(truck_unit)`).all().map(r => [r.u, r.t])
-		);
-		const maintByTruck = Object.fromEntries(
-			db.prepare(`SELECT LOWER(truck) AS u, COALESCE(SUM(amount),0) AS t FROM maintenance_fund WHERE type='service' GROUP BY LOWER(truck)`).all().map(r => [r.u, r.t])
-		);
-		const compByTruck = Object.fromEntries(
-			db.prepare(`SELECT LOWER(truck) AS u, COALESCE(SUM(amount),0) AS t FROM compliance_fees WHERE status='Paid' GROUP BY LOWER(truck)`).all().map(r => [r.u, r.t])
-		);
+		// The three unit-keyed maps are null-prototype objects (see
+		// driverNameForTotals()), so a unit with no row reads as undefined.
+		const expByTruck = Object.create(null);
+		for (const r of db.prepare(`SELECT LOWER(truck_unit) AS u, COALESCE(SUM(amount),0) AS t FROM expenses WHERE truck_unit IS NOT NULL AND truck_unit != '' AND ${EXPENSE_PNL_FILTER} GROUP BY LOWER(truck_unit)`).all()) {
+			expByTruck[r.u] = r.t;
+		}
+		const maintByTruck = Object.create(null);
+		for (const r of db.prepare(`SELECT LOWER(truck) AS u, COALESCE(SUM(amount),0) AS t FROM maintenance_fund WHERE type='service' GROUP BY LOWER(truck)`).all()) {
+			maintByTruck[r.u] = r.t;
+		}
+		const compByTruck = Object.create(null);
+		for (const r of db.prepare(`SELECT LOWER(truck) AS u, COALESCE(SUM(amount),0) AS t FROM compliance_fees WHERE status='Paid' GROUP BY LOWER(truck)`).all()) {
+			compByTruck[r.u] = r.t;
+		}
 
 		// Fleet-wide attribution flags: decide whether to fall back to
 		// driver-keyed maps for trucks that have zero truck-attributed data.
@@ -52240,9 +52520,9 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 
 		// ---- Driver earnings leaderboard ----
 		// Use the driver's display name from the first row they appear in rather than lowercase
-		const driverDisplayNames = {};
+		const driverDisplayNames = Object.create(null);
 		jobTracking.data.forEach(r => {
-			const d = jtDriverCol ? (r[jtDriverCol] || "").trim() : "";
+			const d = jtDriverCol ? (driverNameForTotals(r[jtDriverCol]) || "").trim() : "";
 			const k = normalizeDriverName(d);
 			if (d && k && !driverDisplayNames[k]) driverDisplayNames[k] = d;
 		});
@@ -52538,12 +52818,14 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			// invoice still showed as billed.
 			const monthStartStr = `${monthParam}-01`;
 			const monthEndStr = `${monthParam}-${pad2(daysInMonth)}`;
-			const invByDriver = {};
+			// Null-prototype, and an invoice whose driver reads as a built-in
+			// property name is skipped like a blank one (driverNameForTotals()).
+			const invByDriver = Object.create(null);
 			db.prepare(
 				`SELECT driver, COALESCE(total_earnings,0) AS earned, COALESCE(adjustment,0) AS adj
 				 FROM invoices WHERE status != 'Rejected' AND deleted_at = '' AND week_start <= ? AND week_end >= ?`
 			).all(monthEndStr, monthStartStr).forEach((r) => {
-				const k = normalizeDriverName(r.driver);
+				const k = normalizeDriverName(driverNameForTotals(r.driver));
 				if (!k) return;
 				if (!invByDriver[k]) invByDriver[k] = { count: 0, invoiced: 0, adjustments: 0 };
 				invByDriver[k].count += 1;
@@ -53484,7 +53766,7 @@ app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher")
 		const odoConsistent = (a, b) =>
 			Math.abs(a.odo - b.odo) <= odoPlausibleGap(a.day, b.day);
 
-		const readingsByTruck = {};
+		const readingsByTruck = Object.create(null);
 		for (const e of fuelExpenses) {
 			const unit = String(e.truck_unit || "").trim().toLowerCase();
 			const day = odoDay(e.date);
@@ -53570,12 +53852,16 @@ app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher")
 					? Math.round(((monthlyPriced[month] || 0) / d.gallons) * 100) / 100 : 0,
 			}));
 
-		// Per-driver breakdown
-		const byDriver = {};
+		// Per-driver breakdown, keyed by the stored name as written. A null-prototype
+		// object, and a name that reads as a built-in property name, in any case
+		// or spacing, is filed under "" with the blank-driver receipts
+		// (driverNameForTotals()).
+		const byDriver = Object.create(null);
 		fuelExpenses.forEach((e) => {
-			if (!byDriver[e.driver]) byDriver[e.driver] = { spend: 0, gallons: 0 };
-			byDriver[e.driver].spend += e.amount || 0;
-			byDriver[e.driver].gallons += e.gallons || 0;
+			const key = driverNameForTotals(e.driver);
+			if (!byDriver[key]) byDriver[key] = { spend: 0, gallons: 0 };
+			byDriver[key].spend += e.amount || 0;
+			byDriver[key].gallons += e.gallons || 0;
 		});
 
 		// National avg diesel ~$3.80/gal as baseline

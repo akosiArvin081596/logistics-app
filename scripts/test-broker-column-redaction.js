@@ -33,11 +33,16 @@
 // PUT /api/data/:rowIndex and PUT /api/load/:loadId:
 //   • write every withheld column back exactly as stored, whatever the request
 //     sent (restoreWithheldBrokerCells()), and name none of them in the answer;
-//   • refuse a CHANGED cell whose trimmed value starts with "=", 400
+//   • refuse a CHANGED cell whose trimmed value starts with "=", or with "+"
+//     before anything but a plain number ("+7" is kept), 400
 //     FORMULA_NOT_ALLOWED naming the column, before anything is written
-//     (formulaCellRefusal()) — both write with valueInputOption USER_ENTERED. A
-//     cell equal to its stored value is never refused.
+//     (formulaCellRefusal()) — both write with valueInputOption USER_ENTERED,
+//     which stores either as a formula. A cell equal to its stored value is
+//     never refused.
 // Both routes are run here, lifted whole out of server.js, against a fake sheet.
+// So is their rule for EVERY caller, and POST /api/data's (§6b, §7, §7b): a
+// changed Driver cell that reads as a built-in property name is refused 400
+// DRIVER_NAME_RESERVED naming the column (driverCellRefusal()).
 //
 // GET /api/data IS SUPER ADMIN ONLY (2026-09-26): it answers any tab, and its
 // `duplicates` and `?search=` over every column, as stored. So is POST
@@ -135,7 +140,10 @@ function mutate(src, from, to) {
 const reMatch = SRC.match(/const BROKER_WITHHELD_RE = (\/.*\/[a-z]*);/);
 if (!reMatch) throw new Error("BROKER_WITHHELD_RE not found in server.js");
 
-const REAL = ["resolveBrokerWithheldColumns", "sanitizeBrokerColumns", "restoreWithheldBrokerCells", "formulaCellRefusal"];
+// The three row routes' driver-name rule (driverCellRefusal()) and what it
+// calls are built into the same module.
+const REAL = ["resolveBrokerWithheldColumns", "sanitizeBrokerColumns", "restoreWithheldBrokerCells", "formulaCellRefusal",
+	"normalizeDriverName", "isBuiltInPropertyName", "reservedDriverNameRefusal", "driverCellRefusal"];
 const REAL_SRC = Object.fromEntries(REAL.map((n) => [n, extract(n)]));
 function buildModule(overrides = {}, reSrc = reMatch[1]) {
 	const s = { ...REAL_SRC, ...overrides };
@@ -516,10 +524,27 @@ function formulaSection(M = G) {
 	for (const [label, v] of [["leading spaces", "   =1+1"], ["a leading tab and newline", "\t\n=A1"], ["a lone \"=\"", "="]]) {
 		t(`formula: ${label} is refused too`, (refuse(before, { Details: v }) || {}).code, "FORMULA_NOT_ALLOWED");
 	}
+	// USER_ENTERED stores a value starting with "+" as a formula too, unless what
+	// follows is a plain number.
+	for (const [label, v] of [["a \"+\" before a cell reference", "+A1"], ["a \"+\" before a function", "+SUM(A1:A2)"],
+		["a \"+\" before an expression", "+1+1"], ["a \"+\" before a spaced phone number", "+1 800 555 1234"],
+		["a \"+\" before a dashed phone number", "+1-800-555-1234"], ["a \"+\" before a grouped amount", "+1,500"],
+		["a \"+\" before quoted text", "+\"x\""], ["a lone \"+\"", "+"], ["leading spaces before a \"+\"", "  +A1"]]) {
+		const r = refuse(before, { Details: v }) || {};
+		t(`formula: ${label} is refused, naming the "+"`,
+			[r.code, r.field, /^"Details" starts with "\+".*remove the leading "\+"/.test(r.error || "")], ["FORMULA_NOT_ALLOWED", "Details", true]);
+	}
 	for (const [label, v] of [["an \"=\" inside the text", "a=b"], ["plain text", "rolled pallets"], ["an emptied cell", ""],
-		["a number", 5], ["null", null], ["a full-width equals sign", String.fromCharCode(0xFF1D) + "A1"], ["a leading \"+\"", "+A1"]]) {
+		["a number", 5], ["null", null], ["a full-width equals sign", String.fromCharCode(0xFF1D) + "A1"],
+		["a full-width plus sign", String.fromCharCode(0xFF0B) + "A1"], ["a \"+\" inside the text", "a+b"],
+		["a plain number after \"+\"", "+7"], ["a plain decimal after \"+\"", "+1500.50"], ["a decimal fraction after \"+\"", "+.5"],
+		["a spaced plain number after \"+\"", "+ 7"], ["a negative number", "-50"], ["a leading \"-\" before an expression", "-1+1"],
+		["a leading \"@\"", "@SUM(1,1)"]]) {
 		t(`formula: ${label} is not refused`, refuse(before, { Details: v }), null);
 	}
+	const plusStored = row({ "Location Link": "+A1" });
+	t("formula: a stored value starting with \"+\" resent unchanged does not block an unrelated edit",
+		refuse(plusStored, { Details: "rolled pallets" }), null);
 	// Unchanged cells are never judged: a stored value starting with "=", resent
 	// as stored, does not block an unrelated edit.
 	const stored = row({ "Location Link": "=starts with an equals sign" });
@@ -536,6 +561,44 @@ function formulaSection(M = G) {
 		[unnamed && unnamed.field, /^"Column 2"/.test((unnamed || {}).error || "")], ["(unnamed)", true]);
 	t("formula: a cell past the header row is judged too",
 		(M.formulaCellRefusal(["Load ID"], ["1"], ["1", "=A1"]) || {}).field, "(unnamed)");
+	return results;
+}
+
+// ---------------------------------------------------------------------------
+// §6b DRIVER NAMES — driverCellRefusal(): for every caller, a CHANGED cell in a
+// driver column (/driver/i) that reads as a built-in property name is refused
+// 400 DRIVER_NAME_RESERVED naming the column; an unchanged one never is.
+// ---------------------------------------------------------------------------
+function driverSection(M = G) {
+	const { results, t } = collector();
+	const before = row({ Driver: "Pat Lee" });
+	const sent = (base, over) => {
+		const v = base.slice();
+		for (const [k, x] of Object.entries(over)) v[IDX[k]] = x;
+		return v;
+	};
+	const refuse = (base, over) => M.driverCellRefusal(HEADERS, base, sent(base, over));
+	const r = refuse(before, { Driver: "__proto__" });
+	t("driver: a changed Driver cell reading as a built-in property name is refused: code, field and keys",
+		[r && r.code, r && r.field, Object.keys(r || {})], ["DRIVER_NAME_RESERVED", "Driver", ["error", "code", "field"]]);
+	t("driver: ...the text names the column and says the name is reserved",
+		/"Driver"/.test((r || {}).error || "") && /reserved/.test((r || {}).error || ""), true);
+	for (const v of [" Constructor ", "toString", "VALUEOF", "hasOwnProperty"]) {
+		t(`driver: ${JSON.stringify(v)} is refused too`, (refuse(before, { Driver: v }) || {}).code, "DRIVER_NAME_RESERVED");
+	}
+	for (const [label, v] of [["a name containing one", "Tostring Smith"], ["another", "Constructor Jones"], ["an ordinary name", "Ava Brooks"],
+		["an emptied cell", ""], ["a number", 5], ["null", null]]) {
+		t(`driver: ${label} is not refused`, refuse(before, { Driver: v }), null);
+	}
+	t("driver: a built-in property name outside a driver column is not this rule's", refuse(before, { Details: "__proto__" }), null);
+	const stored = row({ Driver: "toString" });
+	t("driver: a stored built-in property name resent unchanged does not block an unrelated edit",
+		refuse(stored, { Details: "rolled pallets" }), null);
+	t("driver: ...but re-typing it as another one is refused", (refuse(stored, { Driver: "__proto__" }) || {}).code, "DRIVER_NAME_RESERVED");
+	t("driver: any header naming a driver counts, named exactly as the sheet holds it",
+		(M.driverCellRefusal(["Load ID", " Team Driver "], ["1", ""], ["1", "constructor"]) || {}).field, " Team Driver ");
+	t("driver: a new row (nothing stored) is judged cell by cell",
+		(M.driverCellRefusal(HEADERS, [], sent(row(), { Driver: "__proto__" })) || {}).field, "Driver");
 	return results;
 }
 
@@ -578,6 +641,13 @@ function fakeSheet(rows) {
 			writes.push({ ranges: data.map((d) => d.range), row: rowNo ? rows[rowNo - 1].slice() : [] });
 			return { data: { totalUpdatedCells: data.length } };
 		},
+		// POST /api/data appends one row.
+		append: async ({ requestBody }) => {
+			const cells = requestBody.values[0].slice();
+			rows.push(cells);
+			writes.push({ ranges: [`Job Tracking!A${rows.length}`], row: cells.slice(), append: true });
+			return { data: { updates: { updatedRange: `Job Tracking!A${rows.length}:Z${rows.length}` } } };
+		},
 	};
 	return { getSheets: async () => ({ spreadsheets: { values } }), writes };
 }
@@ -615,6 +685,7 @@ function mountPut(routeSrc, M, rows) {
 		jtCacheInvalidate: () => {},
 		restoreWithheldBrokerCells: M.restoreWithheldBrokerCells,
 		formulaCellRefusal: M.formulaCellRefusal,
+		driverCellRefusal: M.driverCellRefusal,
 		sanitizeBrokerColumns: M.sanitizeBrokerColumns,
 		console: { error() {}, log() {}, warn() {} },
 	};
@@ -720,6 +791,105 @@ async function routeSection(M = G, routes = { load: LOAD_PUT_SRC, data: DATA_PUT
 		const w = app.writes[0] || { row: [] };
 		t("PUT /api/data/:rowIndex, Super Admin: 200, written as sent, a formula included",
 			[r.code, w.row[IDX["Email"]], w.row[IDX["Details"]]], [200, "new@example.invalid", "=O2"]);
+	}
+
+	// ── a Driver cell that reads as a built-in property name, both routes, every
+	// role: 400 DRIVER_NAME_RESERVED naming Driver, nothing written or audited.
+	for (const role of ["Dispatcher", "Super Admin"]) {
+		for (const name of ["__proto__", " Constructor ", "toString"]) {
+			const load = mountPut(routes.load, M, ROWS());
+			const rl = await load.run(role, { loadId: "111" }, { Driver: name });
+			t(`PUT /api/load/:loadId, ${role}, Driver ${JSON.stringify(name)}: 400 DRIVER_NAME_RESERVED naming Driver, nothing written or audited`,
+				[rl.code, (rl.body || {}).code, (rl.body || {}).field, load.writes.length, load.audits.length], [400, "DRIVER_NAME_RESERVED", "Driver", 0, 0]);
+			const data = mountPut(routes.data, M, ROWS());
+			const values = role === "Super Admin" ? STORED.slice() : editorRow({});
+			values[IDX["Driver"]] = name;
+			const rd = await data.run(role, { rowIndex: "2" }, { values }, Q);
+			t(`PUT /api/data/:rowIndex, ${role}, Driver ${JSON.stringify(name)}: 400 DRIVER_NAME_RESERVED naming Driver, nothing written or audited`,
+				[rd.code, (rd.body || {}).code, (rd.body || {}).field, data.writes.length, data.audits.length], [400, "DRIVER_NAME_RESERVED", "Driver", 0, 0]);
+		}
+	}
+	{
+		const load = mountPut(routes.load, M, ROWS());
+		const rl = await load.run("Dispatcher", { loadId: "111" }, { Driver: "Tostring Smith" });
+		const data = mountPut(routes.data, M, ROWS());
+		const rd = await data.run("Dispatcher", { rowIndex: "2" }, { values: editorRow({ Driver: "Tostring Smith" }) }, Q);
+		t("both routes, Dispatcher, Driver \"Tostring Smith\": 200, written",
+			[rl.code, load.writes[0] && load.writes[0].row[IDX["Driver"]], rd.code, data.writes[0] && data.writes[0].row[IDX["Driver"]]],
+			[200, "Tostring Smith", 200, "Tostring Smith"]);
+	}
+	{
+		// A name stored before the rule, resent as stored beside an unrelated edit.
+		const rows = [HEADERS.slice(), row({ "Load ID": "111", Driver: "toString" })];
+		const load = mountPut(routes.load, M, rows.map((x) => x.slice()));
+		const rl = await load.run("Dispatcher", { loadId: "111" }, { Driver: "toString", "Trailer Number": "TR-9" });
+		const data = mountPut(routes.data, M, rows.map((x) => x.slice()));
+		const rd = await data.run("Super Admin", { rowIndex: "2" }, { values: row({ "Load ID": "111", Driver: "toString", "Trailer Number": "TR-9" }) }, Q);
+		t("both routes, a stored built-in property name resent unchanged beside an unrelated edit: 200, the edit written",
+			[rl.code, load.writes[0] && load.writes[0].row[IDX["Trailer Number"]], rd.code, data.writes[0] && data.writes[0].row[IDX["Trailer Number"]]],
+			[200, "TR-9", 200, "TR-9"]);
+	}
+	return results;
+}
+
+// ---------------------------------------------------------------------------
+// §7b POST /api/data (Super Admin only), lifted whole: a new Job Tracking row
+// whose Driver cell reads as a built-in property name is refused 400
+// DRIVER_NAME_RESERVED before anything is appended. The period guard, the Owner
+// ID check and the audit writers are stubbed, as in §7.
+// ---------------------------------------------------------------------------
+function mountPostData(routeSrc, M, rows) {
+	const sheet = fakeSheet(rows);
+	const audits = [];
+	let handler = null;
+	const env = {
+		app: { post: (p, gate, h) => { handler = h; } },
+		requireRole: () => null,
+		getSheets: sheet.getSheets,
+		SPREADSHEET_ID: "sheet-under-test",
+		getSheetName: () => "Job Tracking",
+		resolveSheetTargetForWrite: async () => ({ resolved: true, metaUnreadable: false, title: "Job Tracking", guarded: true }),
+		boundAddressForStorage: (v) => ({ value: v, tooLong: false }),
+		ADDRESS_MAX_CHARS: 500,
+		validateOwnerIdCell: () => null,
+		a1SheetPrefix: ROUTE_HELPERS.a1SheetPrefix,
+		changedGuardedCells: () => [],
+		sheetRowUpdateBlocker: () => null,
+		guardedColumnReason: () => "",
+		buildSheetUpdateAudit: (o) => o,
+		sheetAuditWithCode: (d) => d,
+		logAudit: (req, action) => { audits.push(action); },
+		logAuditRefusal: (req, action) => { audits.push(action); },
+		db: { prepare: () => { throw new Error("the database is not reached by this fixture"); } },
+		driverCellRefusal: M.driverCellRefusal,
+		console: { error() {}, log() {}, warn() {} },
+	};
+	const names = Object.keys(env);
+	new Function(...names, routeSrc)(...names.map((k) => env[k]));
+	if (typeof handler !== "function") throw new Error("the lifted POST /api/data route did not register a handler");
+	const run = async (body) => {
+		const out = { code: 200, body: null };
+		const res = { status(c) { out.code = c; return this; }, json(b) { out.body = b; return this; } };
+		await handler({ query: {}, body, session: { user: { id: 1, role: "Super Admin", username: "super_admin" } } }, res);
+		return out;
+	};
+	return { run, writes: sheet.writes, audits };
+}
+async function postDataSection(M = G, routeSrc = POST_DATA_SRC) {
+	const { results, t } = collector();
+	const ROWS = () => [HEADERS.slice(), row({ "Load ID": "111" })];
+	for (const name of ["__proto__", " Constructor ", "toString"]) {
+		const app = mountPostData(routeSrc, M, ROWS());
+		const r = await app.run({ values: row({ "Load ID": "333", Driver: name }) });
+		t(`POST /api/data, Super Admin, Driver ${JSON.stringify(name)}: 400 DRIVER_NAME_RESERVED naming Driver, nothing appended or audited`,
+			[r.code, (r.body || {}).code, (r.body || {}).field, app.writes.length, app.audits.length], [400, "DRIVER_NAME_RESERVED", "Driver", 0, 0]);
+	}
+	{
+		const app = mountPostData(routeSrc, M, ROWS());
+		const r = await app.run({ values: row({ "Load ID": "333", Driver: "Tostring Smith" }) });
+		const w = app.writes[0] || { row: [] };
+		t("POST /api/data, Super Admin, Driver \"Tostring Smith\": 200, the row appended as sent and audited",
+			[r.code, app.writes.length, w.append === true, w.row[IDX["Driver"]], app.audits], [200, 1, true, "Tostring Smith", ["create_sheet_row"]]);
 	}
 	return results;
 }
@@ -893,10 +1063,21 @@ const M7 = buildModule({
 const M8_LOAD = mutate(LOAD_PUT_SRC, "restoreWithheldBrokerCells(headers, before, updatedRow);", "");
 // M9: the formula rule keyed on the value alone, not on a change.
 const M9 = buildModule({
-	formulaCellRefusal: mutate(REAL_SRC.formulaCellRefusal,
-		'if (to === from || !to.trim().startsWith("=")) continue;',
-		'if (!to.trim().startsWith("=")) continue;'),
+	formulaCellRefusal: mutate(REAL_SRC.formulaCellRefusal, "if (to === from) continue;", ""),
 });
+// M13: the formula rule without its "+" arm (only "=" refused).
+const M13 = buildModule({
+	formulaCellRefusal: mutate(REAL_SRC.formulaCellRefusal, ': text.startsWith("+") &&', ": false &&"),
+});
+// M14: the "+" arm refusing a plain number too.
+const M14 = buildModule({
+	formulaCellRefusal: mutate(REAL_SRC.formulaCellRefusal, '!/^\\+\\s{0,8}(\\d{1,30}(\\.\\d{0,30})?|\\.\\d{1,30})$/.test(text)', "true"),
+});
+// M15-M17: each row route without its driver-name refusal.
+const DRIVER_REFUSAL = "if (reservedDriver) return res.status(400).json(reservedDriver);";
+const M15_DATA = mutate(DATA_PUT_SRC, DRIVER_REFUSAL, "");
+const M16_LOAD = mutate(LOAD_PUT_SRC, DRIVER_REFUSAL, "");
+const M17_POST = mutate(POST_DATA_SRC, DRIVER_REFUSAL, "");
 // M10: PUT /api/data/:rowIndex without the formula refusal.
 const M10_DATA = mutate(DATA_PUT_SRC, "if (formula) return res.status(400).json(formula);", "");
 // M11: GET /api/data re-opened to Dispatchers.
@@ -938,12 +1119,24 @@ const mutants = [
 		return out.gate.Dispatcher !== 403;
 	}],
 	["M12 POST /api/data re-opened to Dispatchers", () => postDataGate(M12_POST).Dispatcher !== 403],
+	["M13 the formula rule without its \"+\" arm", async () =>
+		caughtBy([...formulaSection(M13), ...await routeSection(M13)])],
+	["M14 the \"+\" arm refusing a plain number too", async () =>
+		caughtBy([...formulaSection(M14), ...await routeSection(M14)])],
+	["M15 PUT /api/data/:rowIndex without the driver-name refusal", async () =>
+		caughtBy(await routeSection(G, { load: LOAD_PUT_SRC, data: M15_DATA }))],
+	["M16 PUT /api/load/:loadId without the driver-name refusal", async () =>
+		caughtBy(await routeSection(G, { load: M16_LOAD, data: DATA_PUT_SRC }))],
+	["M17 POST /api/data without the driver-name refusal", async () =>
+		caughtBy(await postDataSection(G, M17_POST))],
 ];
 
 (async () => {
 	record(writerSection());
 	record(formulaSection());
+	record(driverSection());
 	record(await routeSection());
+	record(await postDataSection());
 	await Promise.all(asyncChecks);
 	console.log("\n§9 mutants");
 	for (const [label, probe] of mutants) {

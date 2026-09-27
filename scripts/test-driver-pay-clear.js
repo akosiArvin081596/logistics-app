@@ -137,6 +137,7 @@ const MODULE_SRC = [
 	liftFunction("directoryChangedColumns"),
 	// names
 	liftFunction("normalizeDriverName"),
+	liftFunction("isBuiltInPropertyName"),
 	liftFunction("findDriverNameClashes"),
 	liftFunction("findDriverNameClash"),
 	// the month-end lock, for real
@@ -154,7 +155,7 @@ const MODULE_SRC = [
 const MODULE_EXPORTS = [
 	"logAudit", "logAuditRefusal", "auditText", "PAY_EDIT_ADMIN_ONLY", "directoryPayStruct", "directoryPayChanges",
 	"refusePayEdit", "directoryPayValue", "DRIVER_PAY_DAILY_MAX", "directoryChangedColumns", "normalizeDriverName",
-	"findDriverNameClashes", "findDriverNameClash", "DIRECTORY_LOCK_REMEDY", "directoryEditLockBlockers",
+	"isBuiltInPropertyName", "findDriverNameClashes", "findDriverNameClash", "DIRECTORY_LOCK_REMEDY", "directoryEditLockBlockers",
 	"resolveDailyRate", "getDriverPayStructures",
 ];
 function buildModule(db) {

@@ -46,6 +46,10 @@
  *   §6 THE READERS — GET /api/invoices (Driver, other roles, Super Admin filter),
  *      the driver app's own list, the restore route's one-per-week check, the
  *      approve route's status-email recipient, the payment report.
+ *   §6b A RESERVED DRIVER NAME — a Super Admin's generate for, or a manual
+ *      invoice's payee, that reads as a built-in property name → 400
+ *      DRIVER_NAME_RESERVED naming the field, nothing rendered or written
+ *      (mutants M9, M10); "Tostring Smith" is an ordinary payee.
  *   §7 SOURCE PINS.
  *   §8 MUTANTS — one per money guard (normalized matching, the existing-invoice
  *      check, never reuse a number, never overwrite a PDF, and the P&L
@@ -107,7 +111,8 @@ const SHARED_CONSTS = [
 	"INVOICE_UNDATED_BASELINE_KEY", "INVOICE_UNDATED_PENDING_SHRINK_KEY", "INVOICE_UNDATED_STATUS_KEY",
 ];
 const SHARED_FNS = [
-	"houstonDay", "sheetDayKey", "getWeekRange", "normalizeDriverName", "findCol", "parseSheet", "deduplicateLoads",
+	"houstonDay", "sheetDayKey", "getWeekRange", "normalizeDriverName", "isBuiltInPropertyName", "reservedDriverNameRefusal",
+	"findCol", "parseSheet", "deduplicateLoads",
 	"getDeletedLoadIds", "excludeDroppedLoads", "loadKeySet",
 	"invoiceWeekColumns", "invoiceCompletionDay", "invoiceWeekVerdict", "selectInvoiceWeekLoads", "invoiceWeekWarnings",
 	"driversWithCompletedLoadsInWeek",
@@ -117,7 +122,9 @@ const SHARED_FNS = [
 	"invoiceWriteRefusal", "commitInvoiceWithPdf", "driverAccountsNamed", "getDriverPayStructures",
 	"truckDailyRateCandidates", "findDriverNameClashes", "canonicalDriverName", "driverOwnsInvoice",
 	"buildPaymentReport", "sanitizeManualInvoiceRows", "assertInvoiceFileStillOwn", "writeInvoiceFileAtomically",
-	// The P&L's deduction and the key it folds a driver's spellings to.
+	// The P&L's deduction and the key it folds a driver's spellings to — which,
+	// like getAllExcludedDriverDays(), reads a name through these two.
+	"isBuiltInPropertyName", "driverNameForTotals",
 	"expenseDriverKey", "foldExpenseTotalsByDriver", "getDeductibleExpensesByDriverMonth",
 	// The Friday batch and its mail.
 	"escHtml", "invoiceEmailHtml", "invoiceStatusChangeEmail", "generateInvoiceInProcess", "abortAutogenRun",
@@ -136,7 +143,7 @@ const ROUTES = [
 // /api/driver/:driverName; it is lifted and run on its own.
 const DRIVER_APP_LIST_ANCHOR = "const driverInvoices = db.prepare(";
 // The P&L's truck-rate map, lifted from GET /api/financials (the fleet-wide P&L).
-const PNL_TRUCKS_ANCHOR = 'const trucksByDriver = {};\n\t\tdb.prepare("SELECT assigned_driver, driver_pay_daily FROM trucks").all().forEach(t => {';
+const PNL_TRUCKS_ANCHOR = 'const trucksByDriver = Object.create(null);\n\t\tdb.prepare("SELECT assigned_driver, driver_pay_daily FROM trucks").all().forEach(t => {';
 // The two per-truck expense maps, each read as expByDriver[normalizeDriverName(
 // truck.assigned_driver)]: GET /api/investor's (one investor's receipts) and
 // GET /api/financials' driver-keyed fallback (every receipt).
@@ -1059,9 +1066,42 @@ async function batteryReaders(src) {
 	return out;
 }
 
+// ═════════════════════════════════════════════════════ §6b a reserved driver name
+// A Super Admin's `driver`, or a manual invoice's payee (stored as its driver),
+// that reads as a built-in property name: 400 DRIVER_NAME_RESERVED naming the
+// field, before anything is read, rendered or written.
+async function batteryReserved(src) {
+	const out = [];
+	const t = (label, actual, expected) => out.push([label, actual, expected]);
+	const invoiceCount = (w) => w.db.prepare("SELECT COUNT(*) AS n FROM invoices").get().n;
+	for (const name of ["__proto__", " Constructor ", "toString"]) {
+		const w = buildWorld({ src });
+		const g = await generate(w, SUPER, name, W38);
+		t(`§6b generate, a Super Admin's driver ${JSON.stringify(name)}: 400 DRIVER_NAME_RESERVED naming driver; nothing rendered or written`,
+			[g.statusCode, g.body && g.body.code, g.body && g.body.field, w.rendered.length, invoiceCount(w)], [400, "DRIVER_NAME_RESERVED", "driver", 0, 0]);
+		const m = await callRoute(w, "POST /api/invoices/manual", {
+			session: { user: SUPER },
+			body: { payee: name, periodStart: W38.start, periodEnd: "2026-09-25", lineItems: [{ description: "Yard work", amount: 100 }], payeeAddress: "", payeePhone: "" },
+		});
+		t(`§6b manual invoice, the payee ${JSON.stringify(name)}: 400 DRIVER_NAME_RESERVED naming payee; nothing rendered or written`,
+			[m.statusCode, m.body && m.body.code, m.body && m.body.field, w.rendered.length, invoiceCount(w)], [400, "DRIVER_NAME_RESERVED", "payee", 0, 0]);
+	}
+	{
+		const w = buildWorld({ src });
+		const g = await generate(w, SUPER, "Shorn King", W38);
+		const m = await callRoute(w, "POST /api/invoices/manual", {
+			session: { user: SUPER },
+			body: { payee: "Tostring Smith", periodStart: W38.start, periodEnd: "2026-09-25", lineItems: [{ description: "Yard work", amount: 100 }], payeeAddress: "", payeePhone: "" },
+		});
+		t("§6b an ordinary driver and a payee containing a built-in property name (\"Tostring Smith\") are invoiced",
+			[g.statusCode, m.statusCode, m.body && m.body.invoice && m.body.invoice.driver], [200, 200, "tostring smith"]);
+	}
+	return out;
+}
+
 const BATTERIES = [
 	["§1", batteryIdentity], ["§2", batteryNumbering], ["§3", batteryPdfs],
-	["§4", batteryPay], ["§5", batteryBatch], ["§6", batteryReaders],
+	["§4", batteryPay], ["§5", batteryBatch], ["§6", batteryReaders], ["§6b", batteryReserved],
 ];
 
 // ═════════════════════════════════════════════════════ §8 mutants
@@ -1092,6 +1132,12 @@ const MUTANTS = [
 	["M8 the deduction groups by the raw spelling, so a name's case variants are summed in JS",
 		"SELECT LOWER(driver) AS name_lc, ${EXPENSE_PERIOD_EXPR} AS month, SUM(amount) AS total\n\t\tFROM expenses\n\t\tWHERE type IN ('Fuel', 'Maintenance') AND ${EXPENSE_PNL_FILTER}\n\t\tGROUP BY LOWER(driver), month",
 		"SELECT driver AS name_lc, ${EXPENSE_PERIOD_EXPR} AS month, SUM(amount) AS total\n\t\tFROM expenses\n\t\tWHERE type IN ('Fuel', 'Maintenance') AND ${EXPENSE_PNL_FILTER}\n\t\tGROUP BY driver, month"],
+	["M9 the weekly generate takes a Super Admin's driver name unjudged",
+		'const reserved = reservedDriverNameRefusal(driverName, "driver");',
+		"const reserved = null;"],
+	["M10 the manual invoice takes its payee unjudged",
+		'const reservedPayee = reservedDriverNameRefusal(payee, "payee");',
+		"const reservedPayee = null;"],
 ];
 function mutate(find, replace, label) {
 	const hits = SRC.split(find).length - 1;
@@ -1110,6 +1156,7 @@ function mutate(find, replace, label) {
 				"§4": "PAY LOOKUPS AGREE WITH THE P&L",
 				"§5": "THE FRIDAY BATCH",
 				"§6": "THE READERS",
+				"§6b": "A RESERVED DRIVER NAME IS REFUSED",
 			}[name]}`);
 			report(await battery());
 		}
@@ -1156,7 +1203,7 @@ function mutate(find, replace, label) {
 				[true, true, true, true]],
 			["§7 the P&L's three callers read that one map, each by a normalizeDriverName() key",
 				[(SRC.match(/= getDeductibleExpensesByDriverMonth\(\);/g) || []).length,
-					(SRC.match(/const driver = jtDriverCol \? normalizeDriverName\(r\[jtDriverCol\]\) : "";/g) || []).length,
+					(SRC.match(/const driver = jtDriverCol \? normalizeDriverName\(driverNameForTotals\(r\[jtDriverCol\]\)\) : "";/g) || []).length,
 					SRC.includes("const driverLc = normalizeDriverName(driver);")],
 				[3, 2, true]],
 			["§7 both per-truck expense maps are folded, and read by normalizeDriverName(truck.assigned_driver)",

@@ -100,7 +100,7 @@ function mutate(src, from, to) {
 // The rename cascade too (§6): its drivers_directory leg finds its row through
 // driverRenameDirectoryRowId(). Tables this runner does not create are the
 // executor's "no such table" legs, which it skips.
-const FUNCTIONS = ["normalizeDriverName", "findDriverNameClashes", "findDriverNameClash", "driverNameHeldByOtherAccount", "driverNameHeldByOtherSpelling", "canonicalDriverName",
+const FUNCTIONS = ["normalizeDriverName", "isBuiltInPropertyName", "findDriverNameClashes", "findDriverNameClash", "driverNameHeldByOtherAccount", "driverNameHeldByOtherSpelling", "canonicalDriverName",
 	"findDirectoryRowForDriver", "findTruckForDriver", "syncDriverToCarrierSheet", "assignDriverToTruck", "syncOpenCarrierPairing",
 	"driverRenameWhereSql", "driverRenameWhereArgs", "driverRenameWidens", "driverRenameSpellings", "driverRenameDirectoryRowId", "driverRenameSameNameSql", "driverRenameNewValue",
 	"replaceNameOnWordBoundary", "applyDriverRenameSqlite"];
