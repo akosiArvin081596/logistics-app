@@ -81,6 +81,14 @@ NOTICE=false
 if [ "${E2E_MAINTENANCE_NOTICE:-}" = "1" ]; then NOTICE=true; fi
 echo "maintenance notice: $([ "$NOTICE" = true ] && echo 'ON (investor audience)' || echo off)"
 
+# The rate-con Drive folder. server.js reads RATECON_DRIVE_FOLDER_ID with a
+# fallback: an EMPTY value (or none) means production's rate-con folder, which is
+# hardcoded there. So it cannot be blanked like the keys below: it is set to a
+# value that names no Drive folder, and a Drive call against it (the mirror of a
+# dropped rate-con PDF, the rate-con lookups) would name no real folder.
+NO_DRIVE_FOLDER=logisx-e2e-no-drive-folder
+echo "rate-con Drive folder: RATECON_DRIVE_FOLDER_ID=$NO_DRIVE_FOLDER (names no folder; an empty value would mean production's)"
+
 cd "$WT"
 # dotenv never overrides a variable that is already set, so every value below,
 # including the empty ones, wins over .env.
@@ -88,6 +96,7 @@ env PORT="$PORT" BIND_HOST=127.0.0.1 DATABASE_PATH="$DB" NODE_ENV=development \
   SPREADSHEET_ID="$SHEET" \
   GMAIL_USER= GMAIL_APP_PASSWORD= \
   N8N_INVOICE_WEBHOOK_URL= GEMINI_API_KEY= \
+  RATECON_DRIVE_FOLDER_ID="$NO_DRIVE_FOLDER" \
   GOOGLE_MAPS_API_KEY= GOOGLE_MAPS_BROWSER_KEY= \
   ROUTEMATE_API_KEY= SCANKIT_API_KEY= LINXUP_WEBHOOK_TOKEN= \
   ROUTEMATE_ENABLED=false LINXUP_ENABLED=false SCANKIT_ENABLED=false \
