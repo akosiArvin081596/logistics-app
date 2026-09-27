@@ -43,3 +43,14 @@ Helper scripts in `scripts/`:
   `backups/`; those files are what the refresh scripts read.
 - `geocode-loads.js` — backfill geocodes for rows in "Job Tracking".
 - ~~`generate-timeline-docx.py` / `generate-timeline-apr13-apr17.py`~~ — **gone; `scripts/` contains no `.py` file at all** (verified 2026-08-26). They were never committed, so `git log` shows no deletion and any tracked-file query reports them as "not in the repo" rather than "removed" — the exact inverse of the `reset-super-admin-password.js` trap above. **Stat the path.**
+
+## Retired scripts
+
+- ~~`backfill-load-owner-id.js`~~ — **removed 2026-09-27.** A one-off that filled Job Tracking's "Owner ID" cells left blank or `"0"` with the owner of the driver's truck. It cleaned up after two defects that are fixed: `POST /api/dispatch` stamped Owner ID `0` whenever its driver-to-truck lookup missed, and `POST /api/dispatch/reassign` never rewrote Owner ID at all. Both routes now stamp it through `findTruckForDriverStamp()`, and nothing in the repo called the script. It was removed rather than kept because, as written, running it was unsafe:
+  - **It wrote to the production spreadsheet, whose ID was hard-coded in the file**, although its header said it read `SPREADSHEET_ID` as `server.js` does. It could not be pointed at staging or a local copy.
+  - **It wrote by default.** `--dry-run` was opt-in.
+  - **It had no closed-month check.** Owner ID decides whose P&L a load's revenue lands on, so a run restated finalized periods.
+  - **It took the driver's current truck** (`trucks.assigned_driver`, then the active `truck_assignments` row), not the truck on the load's date. A driver who had since changed trucks moved old loads to the new truck's owner.
+  - **It matched driver names case-only** (`LOWER(...) = LOWER(?)`), a second, divergent copy of the truck lookup `findTruckForDriverStamp()` now owns.
+
+  Read it back with `git show b4f4ea9:scripts/backfill-load-owner-id.js`. Before it is ever run again it must gain a locked-month check, a truck lookup by the load's date, and a dry-run default (writing only behind an explicit flag), and it must take its spreadsheet from `SPREADSHEET_ID`.
