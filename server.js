@@ -28534,8 +28534,10 @@ function a1ColumnLetter(index) {
 // The cells a row save writes: one A1 range per cell whose value as it will be
 // written (`after`) differs from the value as read (`before`), in column order,
 // as the `data` of one values.batchUpdate. PUT /api/data/:rowIndex and
-// PUT /api/load/:loadId both write through it. Nothing changed is [], and the
-// route writes nothing.
+// PUT /api/load/:loadId both write through it, and so does
+// POST /api/loads/from-ratecon when it updates an existing Payments Table or
+// Job Details row (upsertByKey). Nothing changed is [], and the route writes
+// nothing.
 //
 // ⚠️ WHY NOT THE WHOLE ROW. Both routes read the row as the sheet DISPLAYS it
 // (the API's default FORMATTED_VALUE), the Active Loads editor and the Data
@@ -38452,21 +38454,43 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 
 		// ---- 5/6) Payments Table + Job Details upserts ----
 		// Sheets v4 has no native appendOrUpdate (the n8n node fakes it the same
-		// way): read the tab, values.update the matching row, else values.append.
-		// Unmapped columns keep whatever the existing row held, so an update
-		// never blanks Invoice Number / Payment Status.
+		// way): read the tab, then update the row whose key matches, or else
+		// write a new row below the last one. Unmapped columns keep whatever the
+		// existing row held, so an update never blanks Invoice Number / Payment
+		// Status.
 		//
 		// `preserveFilled` additionally refuses to overwrite an already-populated
 		// *mapped* cell — see the Payments Table call below.
+		//
+		// ⚠️ AN UPDATE WRITES ONLY THE CELLS THAT DIFFER, NEVER THE WHOLE ROW.
+		// The row is still built in full (buildMappedRow*()), then compared with
+		// the row as read, and only the cells whose value changes are sent, one A1
+		// range each, in ONE values.batchUpdate: sheetRowCellWrites(), the helper
+		// PUT /api/data/:rowIndex and PUT /api/load/:loadId write through. When no
+		// cell differs, nothing is sent. The whole-row rewrite this replaced
+		// re-entered every cell of the row through USER_ENTERED, which parses
+		// each value as if it had been typed in: a text cell holding "00123" came
+		// back as the number 123, and a text cell starting with "=" as a formula.
+		// It also wrote back, over any cell someone changed between this read and
+		// the write, the value this read saw, and a sort in that window landed the
+		// whole row on another load. Now a cell this route does not change is
+		// never written, so none of that can reach it (a sort can still land the
+		// changed cells on another row; there is no transaction). A NEW row is
+		// still written whole, at an anchored A{lastRow+1} (below): there is no
+		// stored row to compare with.
 		const upsertByKey = async (tabName, keyColumn, mapping, opts) => {
 			const preserveFilled = !!(opts && opts.preserveFilled);
 			const resp = await sheets.spreadsheets.values.get({
 				spreadsheetId: SPREADSHEET_ID,
 				range: tabName,
-				// Round-trip formulas as formulas. An update rewrites the WHOLE
-				// row, and the default FORMATTED_VALUE render would hand back a
-				// formula cell as its computed text — writing that back would
-				// flatten a live formula in a column this feature doesn't own.
+				// Formulas as formulas, so `preserveFilled` sees a formula in a
+				// mapped cell as filled: the default FORMATTED_VALUE render hands
+				// back its computed text, "" for a formula that shows nothing, which
+				// reads as blank and would be overwritten. The render does not decide
+				// which UNMAPPED cells an update writes: each is carried through as
+				// read, so it compares equal and is never written, whatever came back
+				// for it (under FORMULA a number comes back as a number and a date as
+				// its serial number).
 				valueRenderOption: "FORMULA",
 			});
 			const rows = resp.data.values || [];
@@ -38483,22 +38507,51 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 			} else {
 				rowValues = rateconLoad.buildMappedRow(tabHeaders, mapping, existingRow);
 			}
-			// Anchor every write to column A explicitly. values.append with a
+			if (matchRow > 0) {
+				// The existing row: only the cells that differ, in one batchUpdate
+				// (see ⚠️ AN UPDATE WRITES ONLY THE CELLS THAT DIFFER above), each at
+				// its own A1 address, quoted as PUT /api/data/:rowIndex quotes a tab.
+				//
+				// Compared as sheetRowCellWrites() compares: null and absent read as
+				// "", anything else as its String(). So the 1500 a FORMULA read
+				// returns and the "1500" buildMappedRow*() makes of a mapped value
+				// are one value, and an unmapped or preserved cell, which
+				// buildMappedRow*() carries through exactly as read, always compares
+				// equal and is not written.
+				//
+				// `rowValues` is one cell per header. The API drops a row's trailing
+				// blank cells, so the row as read can be SHORTER: a missing cell reads
+				// as "", so an unmapped one is equal, and a mapped one past the end is
+				// written when its new value is not blank. It can also be LONGER, when
+				// cells sit past the last header: sheetRowAfterUpdate() keeps that
+				// tail as read, as the whole-row write from column A left it, so it
+				// is never blanked.
+				const cellWrites = sheetRowCellWrites(a1SheetPrefix(tabName), matchRow, existingRow,
+					sheetRowAfterUpdate(existingRow, rowValues));
+				if (cellWrites.length) {
+					await sheets.spreadsheets.values.batchUpdate({
+						spreadsheetId: SPREADSHEET_ID,
+						requestBody: { valueInputOption: "USER_ENTERED", data: cellWrites },
+					});
+				}
+				return { action: cellWrites.length ? "updated" : "unchanged", row: matchRow, conflicts };
+			}
+			// A new row. Anchor it to column A explicitly. values.append with a
 			// bare tab range lets Sheets auto-detect the table's anchor column
 			// from existing data, and when a tab's leading column is empty
 			// (Job Details' column A is blank; Payments Table's early columns are
 			// sparse) the appended row lands SHIFTED right into the wrong columns.
 			// A new row goes to A{lastRow+1} — rows already excludes trailing
 			// empties, so its length is the last populated row (1-based incl. the
-			// header). Both branches therefore write starting at column A.
-			const targetRow = matchRow > 0 ? matchRow : rows.length + 1;
+			// header) — and is written whole, starting at column A.
+			const targetRow = rows.length + 1;
 			await sheets.spreadsheets.values.update({
 				spreadsheetId: SPREADSHEET_ID,
 				range: `${tabName}!A${targetRow}`,
 				valueInputOption: "USER_ENTERED",
 				requestBody: { values: [rowValues] },
 			});
-			return { action: matchRow > 0 ? "updated" : "appended", row: targetRow, conflicts };
+			return { action: "appended", row: targetRow, conflicts };
 		};
 
 		// n8n "RATE UPDATE" — the key column really is named " Job ID"
