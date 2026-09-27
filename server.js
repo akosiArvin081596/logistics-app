@@ -14078,9 +14078,65 @@ function periodPhase(period) {
 	return p >= currentMonthKeyCT() ? "accruing" : "pending";
 }
 
-// Returns { [driver_name_lc]: { [yyyy-mm]: total, _total: allTime } } summing
-// Fuel + Maintenance only, Rejected excluded — the same filter the invoice
+// ⚠️ THE KEY AN EXPENSE'S DRIVER IS SUMMED UNDER, in every P&L map a caller
+// reads with normalizeDriverName(): getDeductibleExpensesByDriverMonth() below,
+// and the per-truck expense maps of GET /api/investor and GET /api/financials
+// (foldExpenseTotalsByDriver()). Those maps were keyed by the query's own
+// LOWER(driver), a key no lookup asks for once a stored name carries a doubled
+// or an edge space, so a receipt stored as "Pat  Lee" or " Pat Lee " was never
+// deducted, while POST /api/invoices/generate, which matches
+// normalizeDriverName(e.driver), deducted it: the invoice and the P&L paid one
+// percentage driver two ways.
+//
+// `driverLc` is the stored name as the query's LOWER(driver) returns it; a raw
+// name gives the same key, since normalizeDriverName(LOWER(x)) is
+// normalizeDriverName(x). The fold runs here, in JS, because SQLite cannot
+// express it: its LOWER folds ASCII only, its TRIM strips spaces only, and
+// nothing collapses a whitespace run.
+//
+// ⚠️ THE QUERIES KEEP `GROUP BY LOWER(driver)`, so a name whose stored spellings
+// differ at most in case is still summed by SQLite's own SUM, exactly as before
+// to the last bit; JS adds only the groups SQLite could not merge. Grouping by
+// the raw spelling would move case variants into the JS sum as well, and a JS
+// sum of per-spelling SUMs differs from SQLite's SUM in the last bit often
+// enough to move a percentage driver's pay by a cent once it is rounded.
+//
+// ⚠️ A NAME THAT NORMALIZES TO NOTHING IS NOT FOLDED. '' or whitespace only (or
+// NULL, which the column's NOT NULL keeps out) keeps exactly the key it always
+// had: the query's own value, which a JS object spells "null" for a NULL. No P&L
+// lookup asks for a blank name, but a per-truck map is read with
+// normalizeDriverName(truck.assigned_driver), which is '' for a truck with no
+// driver, and that read must go on matching the rows stored as '' and nothing
+// else rather than start collecting every whitespace-only row too.
+function expenseDriverKey(driverLc) {
+	return normalizeDriverName(driverLc) || String(driverLc);
+}
+
+// { [expenseDriverKey(d)]: total } from query rows of { d: LOWER(driver), t } —
+// the per-truck expense maps of GET /api/investor and GET /api/financials.
+// Spellings that fold together are summed, never overwritten, and the result is
+// built by Object.fromEntries(), as those two maps always were.
+function foldExpenseTotalsByDriver(rows) {
+	const byKey = new Map();
+	for (const r of rows) {
+		const key = expenseDriverKey(r.d);
+		byKey.set(key, (byKey.get(key) || 0) + (r.t || 0));
+	}
+	return Object.fromEntries(byKey);
+}
+
+// Returns { [expenseDriverKey(driver)]: { [yyyy-mm]: total, _total: allTime } }
+// summing Fuel + Maintenance only, Rejected excluded — the same filter the invoice
 // endpoint uses. One round-trip so financials/investor don't fan out.
+//
+// KEYED BY normalizeDriverName(), BECAUSE EVERY LOOKUP IS: GET /api/investor,
+// GET /api/financials and computeInvestorMonthlyEarnings() (the payouts, /detail
+// and /statement) all ask for a driver's deductible by the normalized name. The
+// weekly invoice matches the same way (normalizeDriverName(e.driver) ===
+// nameNorm), so the two deduct the same receipts. SQLite cannot express that
+// fold, so it runs in JS through expenseDriverKey() above, which also says why
+// the query still groups by LOWER(driver) and what a blank name keys as.
+// Spellings that fold together are summed per month and into _total.
 //
 // Settlement basis (EXPENSE_PERIOD_EXPR): this drives PERCENTAGE-driver pay,
 // which lands in netProfit and therefore in the investor payout. On plain
@@ -14097,13 +14153,15 @@ function getDeductibleExpensesByDriverMonth() {
 		WHERE type IN ('Fuel', 'Maintenance') AND ${EXPENSE_PNL_FILTER}
 		GROUP BY LOWER(driver), month
 	`).all();
-	const out = {};
+	const byKey = new Map();
 	for (const r of rows) {
-		if (!out[r.name_lc]) out[r.name_lc] = { _total: 0 };
-		if (r.month) out[r.name_lc][r.month] = r.total || 0;
-		out[r.name_lc]._total += (r.total || 0);
+		const key = expenseDriverKey(r.name_lc);
+		let entry = byKey.get(key);
+		if (!entry) byKey.set(key, (entry = { _total: 0 }));
+		if (r.month) entry[r.month] = (entry[r.month] || 0) + (r.total || 0);
+		entry._total += (r.total || 0);
 	}
-	return out;
+	return Object.fromEntries(byKey);
 }
 
 // Map a longitude to a continental-US IANA timezone. Real zone boundaries follow
@@ -21682,8 +21740,10 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			// name), those rows are not this driver's alone, and they still count.
 			// Not a blanket skip like `caseOnlyRename`, and the lock guard above
 			// keeps judging it: a change of internal spacing is not money-neutral
-			// here — getInvestorDriverSet() (trim + lowercase) and
-			// getDeductibleExpensesByDriverMonth() (LOWER) do not collapse it.
+			// here — getInvestorDriverSet() (trim + lowercase) does not collapse it.
+			// (getDeductibleExpensesByDriverMonth() does now, through
+			// normalizeDriverName(), so the percentage deduction no longer moves;
+			// the investor driver set still can, which is why the lock still judges.)
 			// For that reason Job Tracking rows under the new spelling still count
 			// below: re-spelling the truck and directory row to match them pulls
 			// those loads into an investor's driver set, in closed months too, and
@@ -26200,9 +26260,9 @@ app.get("/api/admin/audit-trail", requireRole("Super Admin"), (req, res) => {
 // all-or-nothing.
 //
 // THE DISCRIMINATOR THAT KEEPS THE ROUTE USABLE: every money join key is
-// case-insensitive. getDeductibleExpensesByDriverMonth uses LOWER(driver);
-// getDriverPayStructures, the investor/financials driver key and
-// trucksByDriver use normalizeDriverName(); getInvestorDriverSet
+// case-insensitive. getDeductibleExpensesByDriverMonth (through
+// expenseDriverKey()), getDriverPayStructures, the investor/financials driver key
+// and trucksByDriver use normalizeDriverName(); getInvestorDriverSet
 // uses trim().toLowerCase(); generateInvoiceHandler matches every driver lookup
 // through normalizeDriverName(). So a rename that changes only case or surrounding
 // whitespace CANNOT move a settlement figure — it is money-neutral by
@@ -27093,7 +27153,8 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		// INTERNAL whitespace, but getInvestorDriverSet does not, so
 		// "Howard  Reddie" -> "Howard Reddie" would move an investor's driver
 		// set and must be treated as substantive. (getDeductibleExpensesByDriverMonth
-		// keys on LOWER(driver) and does not collapse it either.)
+		// now keys through normalizeDriverName() and does collapse it, so the
+		// deduction would not move; the driver set still would.)
 		// ⚠️ And for the same reason a case-only rename is money-neutral only while
 		// it moves no row from ANOTHER spelling of the old name — see
 		// `moneyNeutral` below: the cascade now takes those rows too.
@@ -48637,8 +48698,13 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const perTruckData = {};
 		if (investorDriverSet) {
 			// Batch queries BEFORE the loop (4 queries total instead of 5N)
-			const expByDriver = Object.fromEntries(
-				db.prepare(`SELECT LOWER(driver) AS d, COALESCE(SUM(amount),0) AS t FROM expenses WHERE owner_id = ? AND ${EXPENSE_PNL_FILTER} GROUP BY LOWER(driver)`).all(user.id).map(r => [r.d, r.t])
+			// expByDriver is read below as expByDriver[normalizeDriverName(
+			// truck.assigned_driver)], so it is keyed that way
+			// (foldExpenseTotalsByDriver()): a receipt stored under a spacing
+			// variant of the driver's name counts against that driver's truck, as
+			// it does on the weekly invoice. The query and its filters are unchanged.
+			const expByDriver = foldExpenseTotalsByDriver(
+				db.prepare(`SELECT LOWER(driver) AS d, COALESCE(SUM(amount),0) AS t FROM expenses WHERE owner_id = ? AND ${EXPENSE_PNL_FILTER} GROUP BY LOWER(driver)`).all(user.id)
 			);
 			const maintByTruck = Object.fromEntries(
 				db.prepare(`SELECT LOWER(mf.truck) AS u, COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck)=LOWER(t.unit_number) WHERE t.owner_id = ? AND mf.type='service' GROUP BY LOWER(mf.truck)`).all(user.id).map(r => [r.u, r.t])
@@ -51854,8 +51920,12 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// truck inherit another truck's revenue/expenses when a single
 		// load is missing its truck column — that was the source of the
 		// negative-Net rows reported by Deshorn on /admin/financials.
+		// The driver-keyed fallback below reads expByDriver[normalizeDriverName(
+		// truck.assigned_driver)], so the map is keyed that way
+		// (foldExpenseTotalsByDriver()), and a receipt stored under a spacing
+		// variant of the driver's name is not lost from it. The query is unchanged.
 		const expByDriverRows = db.prepare(`SELECT LOWER(driver) AS d, COALESCE(SUM(amount),0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY LOWER(driver)`).all();
-		const expByDriver = Object.fromEntries(expByDriverRows.map(r => [r.d, r.t]));
+		const expByDriver = foldExpenseTotalsByDriver(expByDriverRows);
 		const expByTruck = Object.fromEntries(
 			db.prepare(`SELECT LOWER(truck_unit) AS u, COALESCE(SUM(amount),0) AS t FROM expenses WHERE truck_unit IS NOT NULL AND truck_unit != '' AND ${EXPENSE_PNL_FILTER} GROUP BY LOWER(truck_unit)`).all().map(r => [r.u, r.t])
 		);

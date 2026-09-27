@@ -33,7 +33,13 @@
  *   §4 PAY LOOKUPS AGREE WITH THE P&L — pay type, percentage and daily rate equal
  *      what /api/financials resolves (its trucksByDriver block is lifted and run
  *      on the same database) for every spelling; the expenses a percentage
- *      invoice deducts are the driver's in any spelling, Rejected ones excluded.
+ *      invoice deducts are the driver's in any spelling, Rejected ones excluded,
+ *      and the P&L deducts the same ones: getDeductibleExpensesByDriverMonth()
+ *      and the per-truck expense maps of GET /api/investor and GET /api/financials
+ *      (both lifted and run) fold every spelling of a driver into the key their
+ *      lookups ask for, keep EXPENSE_PNL_FILTER and posted_period deciding the
+ *      month, sum a name spelled one way exactly as origin/main did, and key a
+ *      blank name exactly as origin/main did.
  *   §5 THE FRIDAY BATCH — one directory driver in two spellings is billed once;
  *      only 409 INVOICE_EXISTS counts as billed, any other 409 is an error that
  *      leaves the driver unbilled (retry, then an alert).
@@ -42,9 +48,10 @@
  *      approve route's status-email recipient, the payment report.
  *   §7 SOURCE PINS.
  *   §8 MUTANTS — one per money guard (normalized matching, the existing-invoice
- *      check, never reuse a number, never overwrite a PDF). Each rewrites the
- *      guard back to a narrower rule and must flip at least one assertion above.
- *      A test that passes on both has not tested anything.
+ *      check, never reuse a number, never overwrite a PDF, and the P&L
+ *      deduction's key, blank-name rule, per-month sum and SQL grouping). Each
+ *      rewrites the guard back to a narrower rule and must flip at least one
+ *      assertion above. A test that passes on both has not tested anything.
  *
  * Pure: no server, no app.db, no network, no Sheets; mail is captured.
  * Run: node scripts/test-invoice-driver-name-matching.js     # exits 1 on failure
@@ -95,7 +102,7 @@ function liftFragment(src, anchor, terminator, label) {
 }
 
 const SHARED_CONSTS = [
-	"RFC2822_MONTHS", "CANCELED_STATUS_RE", "INVOICE_COMPLETED_RE", "EXPENSE_PNL_FILTER", "INVOICE_AUTOGEN_MAX_ATTEMPTS",
+	"RFC2822_MONTHS", "CANCELED_STATUS_RE", "INVOICE_COMPLETED_RE", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "INVOICE_AUTOGEN_MAX_ATTEMPTS",
 	"INVOICE_UNDATED_ALERT_ENABLED", "INVOICE_UNDATED_ALERT_MAX_PER_DAY", "INVOICE_UNDATED_MASS_RESOLVE",
 	"INVOICE_UNDATED_BASELINE_KEY", "INVOICE_UNDATED_PENDING_SHRINK_KEY", "INVOICE_UNDATED_STATUS_KEY",
 ];
@@ -110,6 +117,8 @@ const SHARED_FNS = [
 	"invoiceWriteRefusal", "commitInvoiceWithPdf", "driverAccountsNamed", "getDriverPayStructures",
 	"truckDailyRateCandidates", "findDriverNameClashes", "canonicalDriverName", "driverOwnsInvoice",
 	"buildPaymentReport", "sanitizeManualInvoiceRows", "assertInvoiceFileStillOwn", "writeInvoiceFileAtomically",
+	// The P&L's deduction and the key it folds a driver's spellings to.
+	"expenseDriverKey", "foldExpenseTotalsByDriver", "getDeductibleExpensesByDriverMonth",
 	// The Friday batch and its mail.
 	"escHtml", "invoiceEmailHtml", "invoiceStatusChangeEmail", "generateInvoiceInProcess", "abortAutogenRun",
 	"listUndatedCompletedLoads",
@@ -128,6 +137,13 @@ const ROUTES = [
 const DRIVER_APP_LIST_ANCHOR = "const driverInvoices = db.prepare(";
 // The P&L's truck-rate map, lifted from GET /api/financials (the fleet-wide P&L).
 const PNL_TRUCKS_ANCHOR = 'const trucksByDriver = {};\n\t\tdb.prepare("SELECT assigned_driver, driver_pay_daily FROM trucks").all().forEach(t => {';
+// The two per-truck expense maps, each read as expByDriver[normalizeDriverName(
+// truck.assigned_driver)]: GET /api/investor's (one investor's receipts) and
+// GET /api/financials' driver-keyed fallback (every receipt).
+const INVESTOR_TRUCK_EXP_ANCHOR = "const expByDriver = foldExpenseTotalsByDriver(\n";
+const INVESTOR_TRUCK_EXP_END = "\n\t\t\t);";
+const FINANCIALS_TRUCK_EXP_ANCHOR = "const expByDriverRows = db.prepare(";
+const FINANCIALS_TRUCK_EXP_END = "const expByDriver = foldExpenseTotalsByDriver(expByDriverRows);";
 
 // The one-per-driver-week index, exactly as the migration builds it.
 const INDEX_COLS = new Function(`${liftConst(SRC, "INVOICE_WEEK_IDX_COLS")}\nreturn INVOICE_WEEK_IDX_COLS;`)();
@@ -170,7 +186,7 @@ const DDL = `
 	CREATE TABLE deleted_loads (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, row_index INTEGER DEFAULT 0, deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP, deleted_by TEXT DEFAULT '');
 	CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_number TEXT NOT NULL UNIQUE, driver TEXT NOT NULL, week_start TEXT NOT NULL, week_end TEXT NOT NULL, loads_count INTEGER NOT NULL DEFAULT 0, rate_per_load REAL NOT NULL DEFAULT 250, total_earnings REAL NOT NULL DEFAULT 0, expenses_total REAL NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'Draft', rejection_note TEXT DEFAULT '', pdf_file_name TEXT DEFAULT '', load_ids TEXT DEFAULT '[]', expense_ids TEXT DEFAULT '[]', submitted_at TEXT DEFAULT '', approved_at TEXT DEFAULT '', approved_by TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, processed_at TEXT DEFAULT '', processed_by TEXT DEFAULT '', paid_at TEXT DEFAULT '', paid_by TEXT DEFAULT '', adjustment REAL DEFAULT 0, adjustment_note TEXT DEFAULT '', adjusted_by TEXT DEFAULT '', adjusted_at TEXT DEFAULT '', render_data TEXT DEFAULT '{}', deleted_at TEXT DEFAULT '', deleted_by TEXT DEFAULT '', delete_reason TEXT DEFAULT '', is_manual INTEGER DEFAULT 0, created_by TEXT DEFAULT '');
 	CREATE UNIQUE INDEX idx_invoices_driver_week ON ${INDEX_COLS};
-	CREATE TABLE expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT, date TEXT, amount REAL, type TEXT, status TEXT DEFAULT '', description TEXT DEFAULT '');
+	CREATE TABLE expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT, date TEXT, amount REAL, type TEXT, status TEXT DEFAULT '', description TEXT DEFAULT '', owner_id INTEGER DEFAULT 0, posted_period TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 	CREATE TABLE trucks (id INTEGER PRIMARY KEY AUTOINCREMENT, unit_number TEXT, assigned_driver TEXT, driver_pay_daily REAL DEFAULT 0, routemate_vehicle_id TEXT DEFAULT '');
 	CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT, address TEXT DEFAULT '', city TEXT DEFAULT '', state TEXT DEFAULT '', zip TEXT DEFAULT '', phone TEXT DEFAULT '', cell TEXT DEFAULT '', pay_type TEXT DEFAULT 'fixed', pay_percentage REAL DEFAULT 0, pay_daily REAL DEFAULT 0);
 	CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT DEFAULT '', email TEXT DEFAULT '', role TEXT DEFAULT 'Driver', driver_name TEXT DEFAULT '');
@@ -248,6 +264,10 @@ function liftedFor(src) {
 			`${liftFragment(src, DRIVER_APP_LIST_ANCHOR, ";\n", "the driver app's invoice list")}\nreturn driverInvoices;`),
 		pnlTrucks: new Function("db", "normalizeDriverName",
 			`${liftFragment(src, PNL_TRUCKS_ANCHOR, "\n\t\t});", "the P&L's trucksByDriver block")}\nreturn trucksByDriver;`),
+		investorTruckExp: new Function("db", "foldExpenseTotalsByDriver", "EXPENSE_PNL_FILTER", "user",
+			`${liftFragment(src, INVESTOR_TRUCK_EXP_ANCHOR, INVESTOR_TRUCK_EXP_END, "GET /api/investor's per-truck expense map")}\nreturn expByDriver;`),
+		financialsTruckExp: new Function("db", "foldExpenseTotalsByDriver", "EXPENSE_PNL_FILTER",
+			`${liftFragment(src, FINANCIALS_TRUCK_EXP_ANCHOR, FINANCIALS_TRUCK_EXP_END, "GET /api/financials' per-truck expense map")}\nreturn expByDriver;`),
 	};
 	LIFT_CACHE.set(src, lifted);
 	return lifted;
@@ -326,6 +346,11 @@ function buildWorld(opts = {}) {
 		db, root, invoicesDir, routes, rendered, emails, notes, logs, audits, sheet,
 		driverAppList: (name) => lifted.driverAppList(db, w.normalizeDriverName, w.normalizeDriverName(name), name),
 		pnlTrucks: () => lifted.pnlTrucks(db, w.normalizeDriverName),
+		// `fold` defaults to the shipped foldExpenseTotalsByDriver(); passing
+		// OLD_perTruckExpenseMap runs origin/main's construction over the same query.
+		investorTruckExp: (ownerId, fold = w.foldExpenseTotalsByDriver) =>
+			lifted.investorTruckExp(db, fold, w.EXPENSE_PNL_FILTER, { id: ownerId }),
+		financialsTruckExp: (fold = w.foldExpenseTotalsByDriver) => lifted.financialsTruckExp(db, fold, w.EXPENSE_PNL_FILTER),
 	});
 }
 
@@ -759,6 +784,65 @@ async function batteryPdfs(src) {
 }
 
 // ═════════════════════════════════════════════════════ §4 pay agrees with the P&L
+// origin/main's getDeductibleExpensesByDriverMonth() and its per-truck map
+// construction, verbatim but for the names and the parameters — the reference
+// for what the fold must NOT move: a blank name, and a name whose stored
+// spellings differ only in case.
+function OLD_getDeductibleExpensesByDriverMonth(db, EXPENSE_PERIOD_EXPR, EXPENSE_PNL_FILTER) {
+	const rows = db.prepare(`
+		SELECT LOWER(driver) AS name_lc, ${EXPENSE_PERIOD_EXPR} AS month, SUM(amount) AS total
+		FROM expenses
+		WHERE type IN ('Fuel', 'Maintenance') AND ${EXPENSE_PNL_FILTER}
+		GROUP BY LOWER(driver), month
+	`).all();
+	const out = {};
+	for (const r of rows) {
+		if (!out[r.name_lc]) out[r.name_lc] = { _total: 0 };
+		if (r.month) out[r.name_lc][r.month] = r.total || 0;
+		out[r.name_lc]._total += (r.total || 0);
+	}
+	return out;
+}
+const OLD_perTruckExpenseMap = (rows) => Object.fromEntries(rows.map(r => [r.d, r.t]));
+
+// Pat Lee's receipts in the spellings the P&L used to lose, the rows its filters
+// must keep out, a name stored in three cases, and a blank name in every shape.
+// Owner 7 is an investor; the one owner-8 receipt tells that investor's per-truck
+// map from the fleet's. The tab is built from its code point so it stays visible
+// in this source.
+const TAB = String.fromCharCode(9);
+const INVESTOR = 7, OTHER_INVESTOR = 8;
+function seedDeductions(db) {
+	const e = db.prepare("INSERT INTO expenses (driver, date, amount, type, status, posted_period, owner_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+	const at = "2026-09-30 12:00:00";
+	// (a) one driver, five spellings: a doubled space, edge spaces, capitals.
+	e.run("Pat  Lee", "2026-09-05", 100, "Fuel", "", "", INVESTOR, at);
+	e.run(" pat lee ", "2026-09-12", 40, "Maintenance", "Approved", "", INVESTOR, at);
+	e.run("PAT LEE", "2026-09-20", 7.25, "Fuel", "Pending", "", INVESTOR, at);
+	e.run("Pat Lee", "2026-09-21", 2.5, "Fuel", "", "", OTHER_INVESTOR, at);
+	// (b) Rejected, in a spelling that folds (a tab): never deducted. A Toll: the
+	// per-truck maps count every type, the deduction only Fuel and Maintenance.
+	e.run(`Pat${TAB}Lee`, "2026-09-06", 999, "Fuel", "Rejected", "", INVESTOR, at);
+	e.run("pat  lee", "2026-09-07", 500, "Toll", "", "", INVESTOR, at);
+	// (c) posted_period decides the month: an August receipt logged after August
+	// closed books to September, a September one posted to October books there,
+	// and a blank date falls back to created_at's month.
+	e.run("Pat  Lee", "2026-08-28", 60, "Fuel", "", "2026-09", INVESTOR, at);
+	e.run("pat lee ", "2026-09-29", 30, "Maintenance", "", "2026-10", INVESTOR, at);
+	e.run(" Pat Lee", "", 11, "Fuel", "", "", INVESTOR, "2026-07-15 10:00:00");
+	// A name stored in three cases and one spacing. SQLite sums $0.10 + $0.20 +
+	// $0.30 to 0.6; a JS sum of the three per-spelling SUMs does not.
+	e.run("Sam Kelly", "2026-09-08", 0.1, "Fuel", "", "", INVESTOR, at);
+	e.run("sam kelly", "2026-09-09", 0.2, "Fuel", "", "", INVESTOR, at);
+	e.run("SAM KELLY", "2026-09-10", 0.3, "Fuel", "", "", INVESTOR, at);
+	// (f) a blank name in every shape. The real column is NOT NULL; this one is
+	// not, so the NULL case runs too.
+	e.run("", "2026-09-03", 13, "Fuel", "", "", INVESTOR, at);
+	e.run("   ", "2026-09-03", 17, "Fuel", "", "", INVESTOR, at);
+	e.run(TAB, "2026-09-04", 19, "Maintenance", "", "", INVESTOR, at);
+	e.run(null, "2026-09-04", 23, "Fuel", "", "", INVESTOR, at);
+}
+
 async function batteryPay(src) {
 	const out = [];
 	const t = (label, actual, expected) => out.push([label, actual, expected]);
@@ -802,6 +886,13 @@ async function batteryPay(src) {
 		t("§4 percentage: deducts both spellings' Fuel/Maintenance ($100 + $50), never the Rejected $999", data && data.deductible, 150);
 		t("§4 percentage: 20% of ($1,500 − $150) = $270", inv && inv.total_earnings, 270);
 		t("§4 percentage: the expense total and ids are the driver's in any spelling", inv && [inv.expenses_total, JSON.parse(inv.expense_ids).length], [150, 2]);
+		// (d) …and the P&L deducts the same receipts. Pat's week and month hold the
+		// same ones here, so the figures must be equal, not merely close.
+		const pnl = w.getDeductibleExpensesByDriverMonth()[w.normalizeDriverName("Pat Percent")] || {};
+		t("§4 (d) the P&L's deduction for Pat Percent's month is what the invoice deducted for the week ($150)",
+			[pnl["2026-09"], pnl._total, inv && inv.expenses_total, data && data.deductible], [150, 150, 150, 150]);
+		const old = OLD_getDeductibleExpensesByDriverMonth(w.db, w.EXPENSE_PERIOD_EXPR, w.EXPENSE_PNL_FILTER)["pat percent"] || {};
+		t("§4 (d) premise: origin/main's P&L deducted $50 of it; the $100 stored as \"pat  percent\" was never found", old["2026-09"], 50);
 	}
 	{
 		// The address, phone and bank on the invoice come from this driver's records.
@@ -815,6 +906,61 @@ async function batteryPay(src) {
 		w2.db.prepare("INSERT INTO users (username, email, role, driver_name) VALUES ('sk2', 'sk2@example.test', 'Driver', 'SHORN  KING')").run();
 		await generate(w2, SUPER, "Shorn King", W38);
 		t("§4 …but two accounts under one name print no bank", w2.rendered[0] && w2.rendered[0].data.bankOnFile, "");
+	}
+	{
+		// THE P&L'S DEDUCTION FOLDS EVERY SPELLING into the key its three callers
+		// look it up by (§7 pins that they do).
+		const w = buildWorld({ src, seed: seedDeductions });
+		const pnl = w.getDeductibleExpensesByDriverMonth();
+		const old = OLD_getDeductibleExpensesByDriverMonth(w.db, w.EXPENSE_PERIOD_EXPR, w.EXPENSE_PNL_FILTER);
+		const pat = pnl[w.normalizeDriverName("Pat Lee")] || {};
+		t("§4 premise: origin/main's P&L found only the two spellings LOWER() folds ($7.25 + $2.50)", (old["pat lee"] || {})["2026-09"], 9.75);
+		t("§4 (a) the P&L deducts Pat's September in every spelling: $100 + $40 + $7.25 + $2.50, and $60 posted in (Toll and Rejected left out)",
+			pat["2026-09"], 209.75);
+		t("§4 (a) …all time, with October's $30 and July's $11", pat._total, 250.75);
+		t("§4 (a) …and no other key holds a spelling of his name",
+			Object.keys(pnl).filter((k) => k !== "pat lee" && w.normalizeDriverName(k) === "pat lee"), []);
+		// (b) The filter excludes the $999, not an accident of spelling: approved,
+		// the same row counts.
+		w.db.prepare("UPDATE expenses SET status = 'Approved' WHERE amount = 999").run();
+		const approved = (w.getDeductibleExpensesByDriverMonth()["pat lee"] || {})["2026-09"];
+		w.db.prepare("UPDATE expenses SET status = 'Rejected' WHERE amount = 999").run();
+		t("§4 (b) a Rejected receipt in a spelling that folds is not deducted; approved, it is", [pat["2026-09"], approved], [209.75, 1208.75]);
+		t("§4 (c) posted_period decides the month: August's receipt counts in September, a September one posted to October there, a blank date in created_at's month",
+			[pat["2026-08"] === undefined, pat["2026-10"], pat["2026-07"]], [true, 30, 11]);
+		t("§4 a name stored in three cases and one spacing sums exactly as origin/main summed it, to the last bit",
+			JSON.stringify(pnl["sam kelly"]), JSON.stringify(old["sam kelly"]));
+		t("§4 …SQLite's own SUM of $0.10 + $0.20 + $0.30", (pnl["sam kelly"] || {})["2026-09"], 0.6);
+		for (const [label, k] of [["''", ""], ["three spaces", "   "], ["a tab", TAB], ["NULL", "null"]]) {
+			t(`§4 (f) a blank name (${label}) keys exactly as origin/main keyed it`, JSON.stringify(pnl[k]), JSON.stringify(old[k]));
+		}
+		t("§4 (f) …so '' holds only the row stored as '', none of the whitespace or NULL rows", pnl[""], { _total: 13, "2026-09": 13 });
+	}
+	{
+		// THE PER-TRUCK EXPENSE MAPS FOLD THE SAME WAY. Each handler reads its map
+		// as expByDriver[normalizeDriverName(truck.assigned_driver)] || 0 (§7 pins
+		// both reads), which `read` repeats.
+		const w = buildWorld({ src, seed: seedDeductions });
+		const read = (map, assignedDriver) => map[w.normalizeDriverName(assignedDriver)] || 0;
+		const inv = w.investorTruckExp(INVESTOR);
+		const invOld = w.investorTruckExp(INVESTOR, OLD_perTruckExpenseMap);
+		const fleet = w.financialsTruckExp();
+		const fleetOld = w.financialsTruckExp(OLD_perTruckExpenseMap);
+		t("§4 premise: origin/main's per-truck maps found only \"PAT LEE\" for the investor ($7.25) and $9.75 fleet-wide",
+			[read(invOld, "Pat Lee"), read(fleetOld, "Pat Lee")], [7.25, 9.75]);
+		t("§4 (e) GET /api/investor's per-truck map charges Pat's truck his receipts in every spelling and type; Rejected and the other investor's left out",
+			read(inv, "Pat Lee"), 748.25);
+		t("§4 (e) …the other investor's map holds only its own receipt", read(w.investorTruckExp(OTHER_INVESTOR), "Pat Lee"), 2.5);
+		t("§4 (e) GET /api/financials' driver-keyed fallback charges every spelling, fleet-wide", read(fleet, "Pat Lee"), 750.75);
+		t("§4 (e) …whichever spelling the truck names its driver by", [read(inv, " pat  LEE "), read(fleet, "PAT  LEE")], [748.25, 750.75]);
+		for (const assigned of ["", null]) {
+			t(`§4 (f) a truck whose driver is ${JSON.stringify(assigned)} reads what it read on origin/main`,
+				[read(inv, assigned), read(fleet, assigned)], [read(invOld, assigned), read(fleetOld, assigned)]);
+		}
+		t("§4 (f) …the $13 stored as '' and nothing else", [read(inv, ""), read(fleet, "")], [13, 13]);
+		for (const k of ["   ", TAB, "null"]) {
+			t(`§4 (f) the per-truck maps key ${JSON.stringify(k)} exactly as origin/main did`, [inv[k], fleet[k]], [invOld[k], fleetOld[k]]);
+		}
 	}
 	return out;
 }
@@ -934,6 +1080,18 @@ const MUTANTS = [
 	["M4 never overwrite a PDF — the write does not re-check the number and file",
 		"if (invoiceNumberHolders(invoiceNumber, pdfFileName, replacingId).length) {",
 		"if (false) {"],
+	["M5 the P&L deduction's key — the query's LOWER(driver) again, origin/main's key at all three sites",
+		"return normalizeDriverName(driverLc) || String(driverLc);",
+		"return String(driverLc);"],
+	["M6 a blank name is folded into '' with the rest",
+		"return normalizeDriverName(driverLc) || String(driverLc);",
+		"return normalizeDriverName(driverLc);"],
+	["M7 spellings that fold together overwrite a month instead of summing it",
+		"if (r.month) entry[r.month] = (entry[r.month] || 0) + (r.total || 0);",
+		"if (r.month) entry[r.month] = r.total || 0;"],
+	["M8 the deduction groups by the raw spelling, so a name's case variants are summed in JS",
+		"SELECT LOWER(driver) AS name_lc, ${EXPENSE_PERIOD_EXPR} AS month, SUM(amount) AS total\n\t\tFROM expenses\n\t\tWHERE type IN ('Fuel', 'Maintenance') AND ${EXPENSE_PNL_FILTER}\n\t\tGROUP BY LOWER(driver), month",
+		"SELECT driver AS name_lc, ${EXPENSE_PERIOD_EXPR} AS month, SUM(amount) AS total\n\t\tFROM expenses\n\t\tWHERE type IN ('Fuel', 'Maintenance') AND ${EXPENSE_PNL_FILTER}\n\t\tGROUP BY driver, month"],
 ];
 function mutate(find, replace, label) {
 	const hits = SRC.split(find).length - 1;
@@ -966,6 +1124,7 @@ function mutate(find, replace, label) {
 		const approve = liftRoute(SRC, ROUTES[2]);
 		const restore = liftRoute(SRC, ROUTES[3]);
 		const report_ = liftFn(SRC, "buildPaymentReport");
+		const deduction = liftFn(SRC, "getDeductibleExpensesByDriverMonth");
 		const pins = [
 			["§7 the handler compares no driver name in SQL", /LOWER\((driver|driver_name|assigned_driver)\)/.test(handler), false],
 			["§7 the handler writes no file itself and deletes no row itself", [/writeFileSync|renameSync/.test(handler), /DELETE FROM invoices/.test(handler)], [false, false]],
@@ -988,6 +1147,24 @@ function mutate(find, replace, label) {
 			["§7 the P&L resolution §4 compares against is what /api/financials runs",
 				[SRC.includes('const struct = payStructures[driver] || { payType: "fixed", payPercentage: 0 };'),
 					SRC.includes("dailyRate = resolveDailyRate(struct.payDaily, trucksByDriver[driver]);")], [true, true]],
+			// The fold is only right because every lookup asks for the normalized name.
+			["§7 getDeductibleExpensesByDriverMonth() keys through expenseDriverKey(), its query and filters unchanged",
+				[deduction.includes("const key = expenseDriverKey(r.name_lc);"),
+					deduction.includes("SELECT LOWER(driver) AS name_lc, ${EXPENSE_PERIOD_EXPR} AS month, SUM(amount) AS total"),
+					deduction.includes("WHERE type IN ('Fuel', 'Maintenance') AND ${EXPENSE_PNL_FILTER}"),
+					deduction.includes("GROUP BY LOWER(driver), month")],
+				[true, true, true, true]],
+			["§7 the P&L's three callers read that one map, each by a normalizeDriverName() key",
+				[(SRC.match(/= getDeductibleExpensesByDriverMonth\(\);/g) || []).length,
+					(SRC.match(/const driver = jtDriverCol \? normalizeDriverName\(r\[jtDriverCol\]\) : "";/g) || []).length,
+					SRC.includes("const driverLc = normalizeDriverName(driver);")],
+				[3, 2, true]],
+			["§7 both per-truck expense maps are folded, and read by normalizeDriverName(truck.assigned_driver)",
+				[(SRC.match(/= foldExpenseTotalsByDriver\(/g) || []).length, SRC.includes(".map(r => [r.d, r.t])"),
+					(SRC.match(/const driverName = normalizeDriverName\(truck\.assigned_driver\);/g) || []).length,
+					SRC.includes("const varExp = expByDriver[driverName] || 0;"),
+					SRC.includes(": (fleetHasTruckExpenses ? 0 : (expByDriver[driverName] || 0));")],
+				[2, false, 2, true, true]],
 		];
 		report(pins);
 
