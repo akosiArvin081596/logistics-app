@@ -197,9 +197,13 @@ const CASCADE_SRC = [
 ].join("\n");
 const COL_LETTER_SRC = liftFunction("colLetter");
 const DIR_CHANGED_SRC = [liftConst("const DIRECTORY_PERIOD_COLUMNS = "), liftFunction("directoryChangedColumns")].join("\n");
+// parseUnitNumber() refuses a unit number that reads as a built-in property
+// name, through isBuiltInPropertyName() and normalizeDriverName(), so both
+// stand beside it.
 const TRUCK_PARSE_SRC = [liftFunction("parsePlainDecimal"), liftFunction("parseDriverPayDaily"), liftFunction("parseInServiceDate"), liftFunction("parseRetiredAt"),
 	liftConst("const ADMIN_FEE_PCT_MAX = "), liftFunction("parseAdminFeePct"),
 	liftConst("const TRUCK_AMOUNT_MAX = "), liftFunction("parseTruckAmount"), liftConst("const TRUCK_AMOUNT_FIELDS = [", "\n];"), liftFunction("parseTruckAmounts"),
+	NORM_SRC, liftFunction("isBuiltInPropertyName"),
 	liftFunction("parseUnitNumber"), liftFunction("isUnitNumberTaken")].join("\n");
 const FIXED_COST_SRC = liftFunction("truckMonthlyFixed");
 const PAY_SRC = [liftConst("let lastPayStructShadowWarnMs = "), liftFunction("getDriverPayStructures")].join("\n");

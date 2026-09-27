@@ -277,7 +277,9 @@ async function fetchHos() {
       hosDisabled = true
       return
     }
-    const byDriver = {}
+    // Keyed by driver names the ELD provider sends, so a null-prototype object:
+    // hosFor() finds only a clock the response carried.
+    const byDriver = Object.create(null)
     for (const c of (data.clocks || [])) {
       const key = (c.logisxDriver || c.driverName || '').trim().toLowerCase()
       if (key) byDriver[key] = c

@@ -15506,6 +15506,13 @@ const submitDraftInvoiceStmt = db.prepare(
 // handler never billed: a completed row with no completion date (it counted in
 // EVERY week — the source of the weekly "WORKED-BUT-UNBILLED (kenrick davis)"
 // alarm and its three retries), and a soft-deleted "#X" row.
+//
+// A Driver cell that reads as a built-in property name is read through
+// driverNameForTotals(), so the row names no driver and is skipped exactly
+// like a blank one. The batch cannot invoice such a name (the handler refuses
+// it for every caller but a Driver invoicing themselves), so counting it would
+// report WORKED-BUT-UNBILLED, and retry the run, for a driver the batch can
+// never bill.
 function driversWithCompletedLoadsInWeek(data, headers, weekStart, weekEnd) {
 	// getJobTrackingCached() rows are header-keyed OBJECTS (parseSheet), so index
 	// by column NAME — exactly as generateInvoiceHandler does.
@@ -15514,7 +15521,7 @@ function driversWithCompletedLoadsInWeek(data, headers, weekStart, weekEnd) {
 	const out = new Set();
 	if (!cols.driverCol || !cols.statusCol) return out;
 	for (const row of data) {
-		const name = normalizeDriverName(row[cols.driverCol]);
+		const name = normalizeDriverName(driverNameForTotals(row[cols.driverCol]));
 		if (!name) continue;
 		if (invoiceWeekVerdict(row, cols, weekStart, weekEnd, deletedKeys) === "bill") out.add(name);
 	}
@@ -17213,11 +17220,13 @@ function matchFuelEventsToReceipts({ days = FUEL_EVENTS_MATCH_DAYS, persist = tr
 	// Per-truck reference gallons-per-point, from the big rises only, used purely
 	// as a tie-breaker. Seeded from the candidate set (not from already-matched
 	// rows) so the sweep is deterministic and does not drift run over run.
-	const seed = {};
+	// Both maps are keyed by unit number, so null-prototype objects (see
+	// parseUnitNumber()).
+	const seed = Object.create(null);
 	for (const c of cands) {
 		if (c.e.rise >= FUEL_CALIB_MIN_RISE_PCT) (seed[c.e.unit] = seed[c.e.unit] || []).push(c.implied);
 	}
-	const refImplied = {};
+	const refImplied = Object.create(null);
 	for (const u of Object.keys(seed)) {
 		const a = seed[u].sort((x, y) => x - y);
 		refImplied[u] = a[Math.floor(a.length / 2)];
@@ -22408,11 +22417,20 @@ app.put("/api/users/:id/rating", requireRole("Super Admin"), (req, res) => {
 });
 
 // Per-load rating: upsert
+//
+// The driver name sent is stored with the load's first rating and names the
+// driver whose average is recomputed, so it must be text (400 otherwise), and
+// one that reads as a built-in property name is refused, 400
+// DRIVER_NAME_RESERVED with `field` "driverName" (reservedDriverNameRefusal()),
+// both before the write.
 app.put("/api/load-ratings/:loadId", requireRole("Super Admin"), (req, res) => {
 	const loadId = decodeURIComponent(req.params.loadId).trim();
 	const { rating, driverName } = req.body;
 	if (!rating || rating < 1 || rating > 5) return res.status(400).json({ error: "Rating must be 1-5" });
 	if (!driverName) return res.status(400).json({ error: "Driver name required" });
+	if (typeof driverName !== "string") return res.status(400).json({ error: "Driver name must be text" });
+	const reservedDriver = reservedDriverNameRefusal(driverName, "driverName");
+	if (reservedDriver) return res.status(400).json(reservedDriver);
 	db.prepare(`
 		INSERT INTO load_ratings (load_id, driver_name, rating, rated_by, updated_at)
 		VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -23777,11 +23795,27 @@ function parseTruckAmounts(body, fields) {
 // (format: the text-direction marks and isolates, zero-width characters,
 // U+061C, U+2060–U+2064, U+FEFF and the rest), Zl or Zp (U+2028, U+2029), or
 // is longer than 50 characters once trimmed (the longest on the production
-// mirror is 12), or starts with =, +, - or @ once trimmed: dispatch copies a
-// truck's unit number into Job Tracking's Truck column, which is written as a
-// person typing into the sheet would write it, and there those characters
-// begin a formula (none of the production mirror's unit numbers starts with
-// one). Not sent to the PUT (not `required`) is { value: undefined },
+// mirror is 12), or starts with =, +, - or @ once trimmed, or reads as a
+// built-in property name ("Unit number is reserved. Enter a different one.").
+//
+// THE LEADING CHARACTERS. Dispatch copies a truck's unit number into Job
+// Tracking's Truck column, which is written as a person typing into the sheet
+// would write it (USER_ENTERED), and there a leading = or + starts a formula
+// (formulaCellRefusal() states the sheet's rule). A leading - or @ does not:
+// the sheet stores it as text or a number. A unit number is refused those two
+// as well, as extra strictness, because other spreadsheet programs read either
+// as the start of a formula once the data is exported. None of the production
+// mirror's unit numbers starts with any of the four.
+//
+// RESERVED. A unit number that reads as a built-in property name
+// (isBuiltInPropertyName(), in any case or spacing: "constructor",
+// "__proto__", "toString", ...) is refused, as such a driver name is. This is
+// the only writer of trucks.unit_number, so it holds for both truck routes.
+// The per-truck totals are null-prototype maps keyed by unit number (GET
+// /api/investor, GET /api/financials, the fuel-gallons recovery), so a truck
+// stored under such a number before this check still totals like any other.
+//
+// Not sent to the PUT (not `required`) is { value: undefined },
 // and the column is left alone. A unit number is one line of plain text: it is
 // shown in every fleet list, sorted, and written into audit lines, where any of
 // those characters changes how the text around it reads without being visible.
@@ -23801,6 +23835,7 @@ function parseUnitNumber(raw, { required = false } = {}) {
 	if (!value) return refuse("Unit number is required");
 	if (value.length > MAX_LENGTH) return refuse(`Unit number must be at most ${MAX_LENGTH} characters.`);
 	if (/^[=+@-]/.test(value)) return refuse("Unit number cannot start with =, +, - or @.");
+	if (isBuiltInPropertyName(value)) return refuse("Unit number is reserved. Enter a different one.");
 	return { value };
 }
 
@@ -27775,7 +27810,10 @@ app.get("/api/admin/scan-duplicates", requireRole("Super Admin"), async (req, re
 		const driverIdx = headers.findIndex((h) => /^driver$/i.test(h));
 		const oLatIdx = headers.findIndex((h) => /origin.*lat/i.test(h));
 
-		const byId = {};
+		// Keyed by the sheet's Load ID cell, so a null-prototype object. Not a
+		// Map: Object.entries() lists numeric ids in ascending order, and the
+		// groups keep that order.
+		const byId = Object.create(null);
 		for (let i = 1; i < rows.length; i++) {
 			const rawId = (rows[i][loadIdIdx] || "").trim();
 			if (!rawId) continue;
@@ -29821,6 +29859,8 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 			// A Driver cell that reads as a built-in property name is refused, 400
 			// DRIVER_NAME_RESERVED naming the column (driverCellRefusal(), as the row
 			// saves refuse it). A new row has no stored cells, so every cell counts.
+			// Asked here, beside the period guard, so only on a tab that guard
+			// covers; an append to any other tab is not judged.
 			const reservedDriver = driverCellRefusal(hdrs, [], values);
 			if (reservedDriver) return res.status(400).json(reservedDriver);
 			const appendChanges = changedGuardedCells(hdrs, [], values);
@@ -32618,11 +32658,12 @@ function formulaCellRefusal(headers, before, values) {
 // before anything is written: 400 { error, code: "DRIVER_NAME_RESERVED", field },
 // `field` naming the request field, or the sheet column, that carried it. Those
 // routes are POST /api/expenses (a name sent for a driver), POST /api/dispatch
-// and /api/dispatch/reassign, POST /api/data and the two row saves (through
-// driverCellRefusal() below), POST /api/admin/excluded-days, POST and PUT
-// /api/trucks, and POST /api/invoices/generate and /api/invoices/manual.
-// Returns that body, or null. Only text is judged: each route answers a value
-// of another type itself.
+// and /api/dispatch/reassign, the two row saves and POST /api/data (through
+// driverCellRefusal() below; POST /api/data asks it only where it runs the
+// period guard, see there), POST /api/admin/excluded-days, POST and PUT
+// /api/trucks, POST /api/invoices/generate and /api/invoices/manual, and PUT
+// /api/load-ratings/:loadId. Returns that body, or null. Only text is judged:
+// each route answers a value of another type itself.
 function reservedDriverNameRefusal(value, field) {
 	if (typeof value !== "string" || !isBuiltInPropertyName(value)) return null;
 	return {
@@ -32632,7 +32673,10 @@ function reservedDriverNameRefusal(value, field) {
 	};
 }
 
-// POST /api/data, PUT /api/data/:rowIndex and PUT /api/load/:loadId, for every
+// PUT /api/data/:rowIndex (every tab), PUT /api/load/:loadId, and POST
+// /api/data only where it runs the period guard: a period-guarded tab
+// (PERIOD_GUARDED_SHEETS, Job Tracking) or a tab it cannot resolve (that guard
+// fails closed). An append to any other tab is not judged. For every
 // caller, Super Admin included: reservedDriverNameRefusal() for the first
 // CHANGED cell, in column order, in a column whose header names a driver
 // (/driver/i, the app's driver-column rule), `field` being that header exactly
@@ -32684,10 +32728,19 @@ function normalizeDriverName(s) {
 // A name that reads, once normalized, as a property every plain object
 // inherits ("__proto__", "constructor", "tostring", ...). No driver is
 // named that: it is refused wherever a driver name is taken in, and a
-// name-keyed total treats a row carrying it as unassigned.
+// name-keyed total treats a row carrying it as unassigned. Nor is a truck:
+// parseUnitNumber() refuses such a unit number.
+//
+// The lowercased names are built on the first call and kept on the function
+// itself (Object.prototype's own names do not change while the app runs), so
+// the dashboard's per-row calls do not rebuild the list each time, and a copy
+// lifted on its own needs only normalizeDriverName() beside it.
 function isBuiltInPropertyName(name) {
 	const key = normalizeDriverName(name);
-	return key !== "" && Object.getOwnPropertyNames(Object.prototype).some((n) => n.toLowerCase() === key);
+	if (key === "") return false;
+	const names = isBuiltInPropertyName.names
+		|| (isBuiltInPropertyName.names = new Set(Object.getOwnPropertyNames(Object.prototype).map((n) => n.toLowerCase())));
+	return names.has(key);
 }
 
 // ⚠️ THE ONE ANSWER TO "IS THIS NAME ALREADY IN USE?" — every path that
@@ -49058,7 +49111,10 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const atRiskCapital = Math.max(0, (totalPurchasePrice + totalStartupExpenses) - netRevenueToDate); // S7
 
 		// ---- Per-Truck Revenue Data (S8) — batched queries, no inner loops ----
-		const perTruckData = {};
+		// perTruckData and every map below keyed by a unit number are
+		// null-prototype objects (see driverNameForTotals()), so each holds
+		// exactly the units the data put there, whatever their names.
+		const perTruckData = Object.create(null);
 		if (investorDriverSet) {
 			// Batch queries BEFORE the loop (4 queries total instead of 5N)
 			// expByDriver is read below as expByDriver[normalizeDriverName(
@@ -49069,12 +49125,14 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			const expByDriver = foldExpenseTotalsByDriver(
 				db.prepare(`SELECT LOWER(driver) AS d, COALESCE(SUM(amount),0) AS t FROM expenses WHERE owner_id = ? AND ${EXPENSE_PNL_FILTER} GROUP BY LOWER(driver)`).all(user.id)
 			);
-			const maintByTruck = Object.fromEntries(
-				db.prepare(`SELECT LOWER(mf.truck) AS u, COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck)=LOWER(t.unit_number) WHERE t.owner_id = ? AND mf.type='service' GROUP BY LOWER(mf.truck)`).all(user.id).map(r => [r.u, r.t])
-			);
-			const compByTruck = Object.fromEntries(
-				db.prepare(`SELECT LOWER(cf.truck) AS u, COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck)=LOWER(t.unit_number) WHERE t.owner_id = ? AND cf.status='Paid' GROUP BY LOWER(cf.truck)`).all(user.id).map(r => [r.u, r.t])
-			);
+			const maintByTruck = Object.create(null);
+			for (const r of db.prepare(`SELECT LOWER(mf.truck) AS u, COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck)=LOWER(t.unit_number) WHERE t.owner_id = ? AND mf.type='service' GROUP BY LOWER(mf.truck)`).all(user.id)) {
+				maintByTruck[r.u] = r.t;
+			}
+			const compByTruck = Object.create(null);
+			for (const r of db.prepare(`SELECT LOWER(cf.truck) AS u, COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck)=LOWER(t.unit_number) WHERE t.owner_id = ? AND cf.status='Paid' GROUP BY LOWER(cf.truck)`).all(user.id)) {
+				compByTruck[r.u] = r.t;
+			}
 			// Use allOwnedTrucks (already fetched for asset section) — no extra query
 			allOwnedTrucks.forEach((truck) => {
 				const driverName = normalizeDriverName(truck.assigned_driver);
@@ -49260,9 +49318,10 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// 3-month earnings figure by them would let a truck parked since last year
 			// keep a large slice of today's projection. Revenue inside the window is the
 			// only per-truck figure on the same clock as trailing3MonthInvestor.
-			const windowRevenue = {};   // unit -> revenue earned inside trailingWindow
-			const modeByUnit = {};      // unit -> "truck" | "driver-fallback" | "no-data"
-			const insufficient = {};    // unit -> not in service for the whole window
+			// Unit-keyed, so null-prototype objects, as are basis and alloc below.
+			const windowRevenue = Object.create(null);   // unit -> revenue earned inside trailingWindow
+			const modeByUnit = Object.create(null);      // unit -> "truck" | "driver-fallback" | "no-data"
+			const insufficient = Object.create(null);    // unit -> not in service for the whole window
 			for (const unit of Object.keys(perTruckData)) {
 				const truck = allOwnedTrucks.find(t => t.unit_number === unit);
 				const unitLower = unit.toLowerCase();
@@ -49331,7 +49390,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// With no active trucks at all nothing can hold the invariant, and that was
 			// equally true before this change.
 			if (!eligible.length) eligible = Object.keys(perTruckData).filter(u => activeUnits.has(u));
-			const basis = {};
+			const basis = Object.create(null);
 			let totalBasis = 0;
 			for (const u of eligible) {
 				// Negative revenue is not expected (rates parse positive) but a floor of 0
@@ -49344,7 +49403,10 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// block did unconditionally before, and is the only defensible answer when
 			// every truck's claim is identical.
 			const shareOf = (u) => totalBasis > 0 ? basis[u] / totalBasis : (eligible.length ? 1 / eligible.length : 0);
-			const alloc = {};
+			// Whether a unit was given a share is asked as an own-property test
+			// (allocated()), never with `in`.
+			const alloc = Object.create(null);
+			const allocated = (u) => Object.prototype.hasOwnProperty.call(alloc, u);
 			{
 				let floorSum = 0;
 				const parts = eligible.map((u) => {
@@ -49371,7 +49433,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			for (const unit of Object.keys(perTruckData)) {
 				const price = (allOwnedTrucks.find(t => t.unit_number === unit)?.purchase_price) || 0;
 				const unitActive = activeUnits.has(unit);
-				const tooNew = unitActive && insufficient[unit] && !(unit in alloc);
+				const tooNew = unitActive && insufficient[unit] && !allocated(unit);
 				// null ≠ 0 here, and the difference is the whole point: null means "in
 				// service too briefly to project" (the UI renders "—"), while 0 means
 				// "in service the whole window and genuinely earned nothing". A truck
@@ -49398,7 +49460,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				perTruckData[unit].insufficientData = tooNew;
 				perTruckData[unit].attributionMode = modeByUnit[unit] || "no-data";
 				perTruckData[unit].windowRevenue = Math.round(windowRevenue[unit] || 0);
-				perTruckData[unit].windowRevenueShare = (unit in alloc)
+				perTruckData[unit].windowRevenueShare = allocated(unit)
 					? Math.round(shareOf(unit) * 1000) / 1000
 					: 0;
 			}
@@ -52294,15 +52356,20 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// variant of the driver's name is not lost from it. The query is unchanged.
 		const expByDriverRows = db.prepare(`SELECT LOWER(driver) AS d, COALESCE(SUM(amount),0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY LOWER(driver)`).all();
 		const expByDriver = foldExpenseTotalsByDriver(expByDriverRows);
-		const expByTruck = Object.fromEntries(
-			db.prepare(`SELECT LOWER(truck_unit) AS u, COALESCE(SUM(amount),0) AS t FROM expenses WHERE truck_unit IS NOT NULL AND truck_unit != '' AND ${EXPENSE_PNL_FILTER} GROUP BY LOWER(truck_unit)`).all().map(r => [r.u, r.t])
-		);
-		const maintByTruck = Object.fromEntries(
-			db.prepare(`SELECT LOWER(truck) AS u, COALESCE(SUM(amount),0) AS t FROM maintenance_fund WHERE type='service' GROUP BY LOWER(truck)`).all().map(r => [r.u, r.t])
-		);
-		const compByTruck = Object.fromEntries(
-			db.prepare(`SELECT LOWER(truck) AS u, COALESCE(SUM(amount),0) AS t FROM compliance_fees WHERE status='Paid' GROUP BY LOWER(truck)`).all().map(r => [r.u, r.t])
-		);
+		// The three unit-keyed maps are null-prototype objects (see
+		// driverNameForTotals()), so a unit with no row reads as undefined.
+		const expByTruck = Object.create(null);
+		for (const r of db.prepare(`SELECT LOWER(truck_unit) AS u, COALESCE(SUM(amount),0) AS t FROM expenses WHERE truck_unit IS NOT NULL AND truck_unit != '' AND ${EXPENSE_PNL_FILTER} GROUP BY LOWER(truck_unit)`).all()) {
+			expByTruck[r.u] = r.t;
+		}
+		const maintByTruck = Object.create(null);
+		for (const r of db.prepare(`SELECT LOWER(truck) AS u, COALESCE(SUM(amount),0) AS t FROM maintenance_fund WHERE type='service' GROUP BY LOWER(truck)`).all()) {
+			maintByTruck[r.u] = r.t;
+		}
+		const compByTruck = Object.create(null);
+		for (const r of db.prepare(`SELECT LOWER(truck) AS u, COALESCE(SUM(amount),0) AS t FROM compliance_fees WHERE status='Paid' GROUP BY LOWER(truck)`).all()) {
+			compByTruck[r.u] = r.t;
+		}
 
 		// Fleet-wide attribution flags: decide whether to fall back to
 		// driver-keyed maps for trucks that have zero truck-attributed data.

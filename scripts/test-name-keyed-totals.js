@@ -18,7 +18,8 @@
  * stubbed (the sheet read, the ELD day index, geocoded addresses, the audit log,
  * the fuel-event snapshots); every helper the totals call is the shipped one.
  *   §1 THE PREDICATE AND THE HELPER, on names that match and names that only
- *      look close.
+ *      look close; the predicate's lowercased names are built once and kept on
+ *      the function itself.
  *   §2 THE SHARED HELPERS — getDriverPayStructures(), getAllExcludedDriverDays(),
  *      getDeductibleExpensesByDriverMonth(), foldExpenseTotalsByDriver(),
  *      expenseDriverKey() and computeDriverQueues(): null-prototype results, no
@@ -36,14 +37,34 @@
  *      NAMED must answer exactly what BLANK answers (apart from the fields that
  *      echo a stored name as written), and every normal driver's figures must
  *      be exactly NONE's. Nothing throws or logs an error, no response carries
- *      such a key at any depth, and the built-in objects are unchanged after
- *      every call.
- *   §4 SOURCE PINS — every name-keyed map this covers, per function or route,
- *      is declared null-prototype, including the three §3 cannot run (the ELD
- *      poll, the HOS matchers, the stale-location scan).
- *   §5 MUTANTS — a plain {} restored at one site, the blank rule removed, and
- *      one per-driver map as it was before; each must fail an assertion in
- *      §1–§3.
+ *      such a key at any depth (a map keyed by unit number excepted: it lists
+ *      every truck, see §3b), and the built-in objects are unchanged after
+ *      every call. Every variant carries three trucks whose unit numbers read
+ *      as built-in property names ("constructor" and "__proto__", active;
+ *      "valueOf", inactive), stored as if before parseUnitNumber() refused
+ *      such a number.
+ *   §3b UNIT NUMBERS AND LOAD IDS — those three trucks are listed by GET
+ *      /api/investor (perTruckData), GET /api/financials (perTruck and the
+ *      month's trucks) and GET /api/trucks with well-formed figures, exactly
+ *      the ones each gets under an ordinary unit number (the same data with
+ *      "105", "106" and "107" in their place), and every other truck's
+ *      figures and the fleet totals are unchanged; the fuel-gallons recovery
+ *      (matchFuelEventsToReceipts()) matches episodes on such trucks and files
+ *      each truck's reference under its own unit; GET
+ *      /api/admin/scan-duplicates groups Load IDs so named like any other.
+ *   §3c THE LOAD-RATING SAVE — PUT /api/load-ratings/:loadId refuses a
+ *      driverName that reads as a built-in property name (400
+ *      DRIVER_NAME_RESERVED, field driverName) and one that is not text (400,
+ *      never a throw), with nothing written; an ordinary name is saved.
+ *   §4 SOURCE PINS — every name-keyed and unit-keyed map this covers, per
+ *      function or route, is declared null-prototype at each of its
+ *      declarations, including the three §3 cannot run (the ELD poll, the HOS
+ *      matchers, the stale-location scan); GET /api/investor asks whether a
+ *      unit was given a share as an own-property test, never with `in`.
+ *   §5 MUTANTS — a plain {} restored at one site, the blank rule removed, one
+ *      per-driver map as it was before, the unit-keyed maps restored one at a
+ *      time, and each load-rating refusal removed; each must fail an
+ *      assertion in §1–§3c.
  *
  * Pure: no server, no app.db, no network, no Sheets.
  * Run: node scripts/test-name-keyed-totals.js     # exits 1 on failure
@@ -95,7 +116,10 @@ function liftDecl(src, kind, name) {
 }
 
 const CONSTS = ["EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS",
-	"BROKER_WITHHELD_RE", "MOVEMENT_MOVING_MPS", "MOVEMENT_ACTIVE_MS"];
+	"BROKER_WITHHELD_RE", "MOVEMENT_MOVING_MPS", "MOVEMENT_ACTIVE_MS",
+	// The fuel-gallons recovery's thresholds (§3b).
+	"FUEL_EVENTS_MATCH_DAYS", "FUEL_MATCH_MIN_GAL_PER_100PCT", "FUEL_MATCH_MAX_GAL_PER_100PCT", "FUEL_MATCH_MIN_GALLONS",
+	"FUEL_MATCH_MAX_KM", "FUEL_MATCH_AMBIGUITY_MARGIN", "FUEL_CALIB_MIN_RISE_PCT", "FUEL_ODOMETER_CONFLICT_MI"];
 const LETS = ["lastPayStructShadowWarnMs"];
 const FNS = [
 	// Under test.
@@ -109,7 +133,10 @@ const FNS = [
 	"assignmentMonthKey", "intersectMonthWindow", "truckChargeFromMonth", "truckChargeUntilMonth",
 	"truckChargedInMonth", "truckMonthlyFixed", "truckBilledMonthCount", "computeLossCarryForward",
 	"resolveBrokerWithheldColumns", "sanitizeBrokerColumns", "sanitizeDetails", "parseRoutemateBearing",
-	"classifyMovement",
+	"classifyMovement", "reservedDriverNameRefusal",
+	// The fuel-gallons recovery (§3b), run with persist: false, so nothing it
+	// would write is reached.
+	"matchFuelEventsToReceipts", "shiftDayKey", "fuelMatchDistanceKm", "isDefReceipt",
 ];
 const ROUTES = {
 	investor: 'app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res) => {',
@@ -119,6 +146,8 @@ const ROUTES = {
 	locations: 'app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async (req, res) => {',
 	trucks: 'app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), async (req, res) => {',
 	ratings: 'app.get("/api/load-ratings/averages", requireRole("Super Admin", "Dispatcher"), (req, res) => {',
+	ratingsPut: 'app.put("/api/load-ratings/:loadId", requireRole("Super Admin"), (req, res) => {',
+	scanDuplicates: 'app.get("/api/admin/scan-duplicates", requireRole("Super Admin"), async (req, res) => {',
 };
 
 const LIFT_CACHE = new Map();
@@ -222,6 +251,14 @@ const OVERRIDES = [
 	{ driver_name: "tostring", excluded_date: "2026-08-09", action: "add", named: true },
 	{ driver_name: "sam kelly", excluded_date: "2026-08-25", action: "add", named: false },
 ];
+// Trucks whose unit numbers read as built-in property names, as if stored
+// before parseUnitNumber() refused such a number, each with the ordinary number
+// §3b compares it with: the same data with that number in its place must give
+// that truck exactly the same figures. Pairs, not an object literal: in a
+// literal, `__proto__: …` is no key at all. Ids 5, 6 and 7, so each keeps its
+// place among the trucks whichever number it carries.
+const BUILTIN_UNITS = [["constructor", "105"], ["__proto__", "106"], ["valueOf", "107"]];
+const TWIN_UNIT = new Map(BUILTIN_UNITS);
 const RATINGS = [
 	{ load_id: "1001", driver_name: "Pat Percent", rating: 5, named: false },
 	{ load_id: "1003", driver_name: "Dee Dayrate", rating: 4, named: false },
@@ -230,14 +267,14 @@ const RATINGS = [
 ];
 
 const DDL = `
-	CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT DEFAULT '', role TEXT DEFAULT '', company_name TEXT DEFAULT '', driver_name TEXT DEFAULT '', email TEXT DEFAULT '');
+	CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT DEFAULT '', role TEXT DEFAULT '', company_name TEXT DEFAULT '', driver_name TEXT DEFAULT '', email TEXT DEFAULT '', rating REAL DEFAULT 0);
 	CREATE TABLE investors (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, profile_picture_url TEXT DEFAULT '', full_name TEXT DEFAULT '', carrier_name TEXT DEFAULT '');
 	CREATE TABLE investor_config (owner_id INTEGER DEFAULT 0, key TEXT, value TEXT);
 	CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT, carrier_name TEXT DEFAULT '', state TEXT DEFAULT '', city TEXT DEFAULT '', zip TEXT DEFAULT '', address TEXT DEFAULT '', trucks TEXT DEFAULT '', hazmat TEXT DEFAULT '', phone TEXT DEFAULT '', cell TEXT DEFAULT '', email TEXT DEFAULT '', dot TEXT DEFAULT '', mc TEXT DEFAULT '', rating TEXT DEFAULT '', status TEXT DEFAULT 'active', pay_type TEXT DEFAULT 'fixed', pay_percentage REAL DEFAULT 0, pay_daily REAL DEFAULT 0);
 	CREATE TABLE trucks (id INTEGER PRIMARY KEY AUTOINCREMENT, unit_number TEXT UNIQUE, make TEXT DEFAULT '', model TEXT DEFAULT '', year TEXT DEFAULT '', vin TEXT DEFAULT '', license_plate TEXT DEFAULT '', status TEXT DEFAULT 'Active', assigned_driver TEXT DEFAULT '', owner_id INTEGER DEFAULT 0, notes TEXT DEFAULT '', created_at TEXT DEFAULT '2026-06-01 00:00:00', in_service_date TEXT DEFAULT '', retired_at TEXT DEFAULT '', photo TEXT DEFAULT '', insurance_monthly REAL DEFAULT 0, eld_monthly REAL DEFAULT 0, truck_payment_monthly REAL DEFAULT 0, hvut_annual REAL DEFAULT 0, irp_annual REAL DEFAULT 0, admin_fee_pct REAL, driver_pay_daily REAL DEFAULT 0, purchase_price REAL DEFAULT 0, title_status TEXT DEFAULT 'Clean', title_state TEXT DEFAULT '', maintenance_fund_monthly REAL DEFAULT 0, fuel_tank_gallons REAL DEFAULT 0, avg_mpg REAL DEFAULT 0, routemate_vehicle_id TEXT DEFAULT '');
 	CREATE TABLE truck_assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER, driver_name TEXT DEFAULT '', start_date TEXT DEFAULT '', end_date TEXT DEFAULT '');
 	CREATE TABLE carrier_driver_history (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT, carrier_name TEXT, started_at TEXT DEFAULT '', ended_at TEXT DEFAULT '');
-	CREATE TABLE expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT NOT NULL DEFAULT '', load_id TEXT DEFAULT '', type TEXT, amount REAL, description TEXT DEFAULT '', date TEXT DEFAULT '', gallons REAL DEFAULT 0, odometer REAL DEFAULT 0, odometer_source TEXT DEFAULT '', gallons_source TEXT DEFAULT '', status TEXT DEFAULT '', owner_id INTEGER DEFAULT 0, truck_unit TEXT DEFAULT '', posted_period TEXT DEFAULT '', created_at TEXT DEFAULT '2026-09-01 00:00:00', location_city TEXT DEFAULT '', location_state TEXT DEFAULT '');
+	CREATE TABLE expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT NOT NULL DEFAULT '', load_id TEXT DEFAULT '', type TEXT, amount REAL, description TEXT DEFAULT '', date TEXT DEFAULT '', gallons REAL DEFAULT 0, odometer REAL DEFAULT 0, odometer_source TEXT DEFAULT '', gallons_source TEXT DEFAULT '', status TEXT DEFAULT '', owner_id INTEGER DEFAULT 0, truck_unit TEXT DEFAULT '', posted_period TEXT DEFAULT '', created_at TEXT DEFAULT '2026-09-01 00:00:00', location_city TEXT DEFAULT '', location_state TEXT DEFAULT '', vendor TEXT DEFAULT '', location_lat REAL, location_lng REAL, receipt_details TEXT DEFAULT '');
 	CREATE TABLE excluded_driver_days (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT, excluded_date TEXT, reason TEXT DEFAULT '', excluded_by TEXT DEFAULT '', excluded_at TEXT DEFAULT '2026-09-01 00:00:00', action TEXT DEFAULT 'remove');
 	CREATE TABLE maintenance_fund (id INTEGER PRIMARY KEY AUTOINCREMENT, truck TEXT, amount REAL, date TEXT DEFAULT '', created_at TEXT DEFAULT '2026-09-01 00:00:00', type TEXT DEFAULT 'service');
 	CREATE TABLE compliance_fees (id INTEGER PRIMARY KEY AUTOINCREMENT, truck TEXT, amount REAL, paid_date TEXT DEFAULT '', due_date TEXT DEFAULT '', created_at TEXT DEFAULT '2026-09-01 00:00:00', status TEXT DEFAULT 'Paid');
@@ -261,7 +298,8 @@ const withIds = (rows, first) => rows.map((r, i) => ({ id: first + i, ...r }));
 const variantRows = (variant, normal, namedRows, field) =>
 	[...normal, ...namedRows.map((r) => variantOf(variant, true, r, field)).filter(Boolean)];
 
-function seed(db, variant) {
+// `unit` names each truck: as stored, or (§3b) its ordinary twin number.
+function seed(db, variant, unit = (x) => x) {
 	const u = db.prepare("INSERT INTO users (id, username, role, company_name) VALUES (?, ?, ?, ?)");
 	u.run(1, "super_admin", "Super Admin", "");
 	u.run(5, "inv5", "Investor", "Acme Carrier");
@@ -281,6 +319,21 @@ function seed(db, variant) {
 	t.run(2, "102", "Dee Dayrate", 5, 275, 900, 50, 80000);
 	t.run(3, "103", "Sam Kelly", 0, 260, 800, 0, 70000);
 	t.run(4, "104", "", 5, 0, 700, 0, 60000);
+	// The trucks whose units read as built-in names (BUILTIN_UNITS), in every
+	// variant: the investor's, with no driver. "constructor" carries a
+	// maintenance row and no compliance row, "__proto__" the other way round,
+	// so each unit-keyed map is read both for a unit it holds and for one it
+	// does not; "valueOf" is inactive, so it is given no share of the take-home.
+	const tb = db.prepare("INSERT INTO trucks (id, unit_number, assigned_driver, owner_id, status, insurance_monthly, eld_monthly, purchase_price) VALUES (?, ?, '', 5, ?, ?, ?, ?)");
+	tb.run(5, unit("constructor"), "Active", 650, 25, 55000);
+	tb.run(6, unit("__proto__"), "Active", 600, 25, 50000);
+	tb.run(7, unit("valueOf"), "Inactive", 550, 0, 45000);
+	const mf = db.prepare("INSERT INTO maintenance_fund (truck, amount, date, type) VALUES (?, ?, ?, 'service')");
+	mf.run("101", 120, "2026-08-10");
+	mf.run(unit("constructor"), 80, "2026-08-11");
+	const cf = db.prepare("INSERT INTO compliance_fees (truck, amount, paid_date, status) VALUES (?, ?, ?, 'Paid')");
+	cf.run("102", 50, "2026-08-12");
+	cf.run(unit("__proto__"), 40, "2026-08-13");
 	const a = db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (?, ?, '2026-06-01T12:00:00.000Z', '')");
 	a.run(1, "Pat Percent");
 	a.run(2, "Dee Dayrate");
@@ -288,7 +341,8 @@ function seed(db, variant) {
 	const e = db.prepare(`INSERT INTO expenses (id, driver, type, amount, date, status, owner_id, truck_unit, gallons, odometer)
 		VALUES (@id, @driver, @type, @amount, @date, @status, @owner_id, @truck_unit, @gallons, @odometer)`);
 	for (const x of variantRows(variant, withIds(NORMAL_EXPENSES, 100), withIds(NAMED_EXPENSES, 200), "driver")) {
-		e.run({ status: "", truck_unit: "", gallons: 0, odometer: 0, ...x });
+		const r = { status: "", truck_unit: "", gallons: 0, odometer: 0, ...x };
+		e.run({ ...r, truck_unit: unit(r.truck_unit) });
 	}
 	const inv = db.prepare(`INSERT INTO invoices (id, driver, week_start, week_end, total_earnings, adjustment, status)
 		VALUES (@id, @driver, @week_start, @week_end, @total_earnings, @adjustment, @status)`);
@@ -338,11 +392,16 @@ function builtinsChangedAndRestored() {
 	return changed;
 }
 
-function buildWorld(variant, { src = SHIPPED } = {}) {
+// `twins`: every truck in BUILTIN_UNITS carries its ordinary twin number
+// instead, in the trucks table, the sheet's Truck cells, the receipts and the
+// maintenance and compliance rows alike (§3b). `rows` is the one sheet every
+// reader sees, so a check may append to w.rows.
+function buildWorld(variant, { src = SHIPPED, twins = false } = {}) {
+	const unit = (x) => (twins && TWIN_UNIT.has(x) ? TWIN_UNIT.get(x) : x);
 	const db = new Database(":memory:");
 	db.exec(DDL);
-	seed(db, variant);
-	const rows = variantRows(variant, NORMAL_ROWS, NAMED_ROWS, "Driver");
+	seed(db, variant, unit);
+	const rows = variantRows(variant, NORMAL_ROWS, NAMED_ROWS, "Driver").map((r) => ({ ...r, Truck: unit(r.Truck) }));
 	const routes = {};
 	const app = {};
 	for (const verb of ["get", "post", "put", "patch", "delete"]) {
@@ -377,7 +436,7 @@ const INVESTOR = { id: 5, role: "Investor", username: "inv5", driverName: "" };
 
 // A route's answer as the browser receives it, whether anything threw or was
 // logged, and what it changed in the built-ins.
-async function call(w, route, { user = SUPER, query = {} } = {}) {
+async function call(w, route, { user = SUPER, query = {}, params = {}, body = {} } = {}) {
 	const res = {
 		statusCode: 200, body: undefined,
 		status(c) { this.statusCode = c; return this; },
@@ -385,7 +444,7 @@ async function call(w, route, { user = SUPER, query = {} } = {}) {
 	};
 	const errorsBefore = w.errors.length;
 	let threw = null;
-	try { await w.routes[route]({ session: { user }, query, params: {}, headers: {} }, res); } catch (err) { threw = err.message; }
+	try { await w.routes[route]({ session: { user }, query, params, body, headers: {} }, res); } catch (err) { threw = err.message; }
 	return {
 		status: res.statusCode,
 		body: res.body === undefined ? undefined : JSON.parse(JSON.stringify(res.body)),
@@ -402,13 +461,16 @@ async function runFn(w, fn) {
 	};
 }
 
-// Every key, at any depth, that reads as a built-in property name.
-function builtInKeys(value, at = "$", out = []) {
-	if (Array.isArray(value)) value.forEach((v, i) => builtInKeys(v, `${at}[${i}]`, out));
+// Every key, at any depth, that reads as a built-in property name, except the
+// keys of a map whose path is in `unitKeyed` ("$.production.perTruckData"):
+// that map is keyed by unit number and lists every truck, the trucks so named
+// included (§3b checks their entries). What such a map holds is still searched.
+function builtInKeys(value, unitKeyed = [], at = "$", out = []) {
+	if (Array.isArray(value)) value.forEach((v, i) => builtInKeys(v, unitKeyed, `${at}[${i}]`, out));
 	else if (value && typeof value === "object") {
 		for (const k of Object.keys(value)) {
-			if (readsAsBuiltIn(k)) out.push(`${at}.${k}`);
-			builtInKeys(value[k], `${at}.${k}`, out);
+			if (readsAsBuiltIn(k) && !unitKeyed.includes(at)) out.push(`${at}.${k}`);
+			builtInKeys(value[k], unitKeyed, `${at}.${k}`, out);
 		}
 	}
 	return out;
@@ -458,6 +520,17 @@ function battery1(src) {
 	t("§1 …and the shipped predicate agrees with an oracle over every built-in name, as written and upper-cased",
 		Object.getOwnPropertyNames(Object.prototype).flatMap((n) => [n, n.toUpperCase(), ` ${n} `])
 			.filter((n) => w.isBuiltInPropertyName(n) !== readsAsBuiltIn(n)), []);
+	{
+		// The lowercased names are built on the first call and kept on the
+		// function itself, so a later call reuses them and a lifted copy needs
+		// only normalizeDriverName() beside it.
+		const f = w.isBuiltInPropertyName;
+		f("constructor");
+		const first = f.names;
+		f("Pat Percent");
+		t("§1 isBuiltInPropertyName() keeps every built-in name, lowercased, on itself, built once",
+			[first instanceof Set, first === f.names, first instanceof Set ? [...first].sort() : null], [true, true, [...BUILTIN_NAMES].sort()]);
+	}
 	t("§1 driverNameForTotals() reads such a name as blank",
 		matches.map((n) => w.driverNameForTotals(n)), matches.map(() => ""));
 	t("§1 …and returns every other value unchanged, a non-string included",
@@ -582,6 +655,7 @@ const SURFACES = [
 		echoes: (b) => { blankEchoes(b.myLoads && b.myLoads.pending, "driver"); blankEchoes(b.myLoads && b.myLoads.active, "driver"); },
 		own: (b) => [b.production.driverPayDetails, b.production.totalDriverPay,
 			b.production.monthlyEarnings.map((m) => [m.month, m.driverPay, m.driverDetails])],
+		unitKeyed: ["$.production.perTruckData"],
 	},
 	{
 		name: "GET /api/investor fleet-wide",
@@ -589,13 +663,18 @@ const SURFACES = [
 		echoes: (b) => { blankEchoes(b.myLoads && b.myLoads.pending, "driver"); blankEchoes(b.myLoads && b.myLoads.active, "driver"); },
 		own: (b) => [b.production.driverPayDetails, b.production.totalDriverPay,
 			b.production.monthlyEarnings.map((m) => [m.month, m.driverPay, m.driverDetails])],
+		unitKeyed: ["$.production.perTruckData"],
 	},
 	{
+		// The trucks named like built-ins earn from the named rows' Truck cells,
+		// which NONE drops, so their rows are §3b's to judge, not this one's.
 		name: "GET /api/financials with the 2026-08 drill-down",
 		run: (w) => call(w, "GET /api/financials", { query: { month: "2026-08" } }),
 		echoes: () => {},
-		own: (b) => [b.drivers.filter((d) => !d.isUnassigned), b.expensesByCategory.driver_pay, b.perTruck,
-			b.monthlyPerformance.map((m) => [m.month, m.driverPay]), b.monthDetail.drivers, b.monthDetail.trucks],
+		own: (b) => [b.drivers.filter((d) => !d.isUnassigned), b.expensesByCategory.driver_pay,
+			b.perTruck.filter((x) => !readsAsBuiltIn(x.unitNumber)),
+			b.monthlyPerformance.map((m) => [m.month, m.driverPay]), b.monthDetail.drivers,
+			b.monthDetail.trucks.filter((x) => !readsAsBuiltIn(x.unitNumber))],
 	},
 	{
 		name: "GET /api/expenses/fuel-analytics",
@@ -622,7 +701,7 @@ const SURFACES = [
 		name: "GET /api/trucks",
 		run: (w) => call(w, "GET /api/trucks"),
 		echoes: () => {},
-		own: (b) => b.trucks,
+		own: (b) => b.trucks.filter((x) => !readsAsBuiltIn(x.UnitNumber)),
 	},
 ];
 
@@ -636,7 +715,7 @@ async function battery3(src) {
 		const n = r[NAMED];
 		t(`§3 ${s.name}: answers 200 with nothing thrown or logged`, [n.status, n.threw, n.logged], [200, null, []]);
 		t(`§3 ${s.name}: the built-in objects are unchanged`, n.builtins, []);
-		t(`§3 ${s.name}: no key at any depth reads as a built-in name`, builtInKeys(n.body), []);
+		t(`§3 ${s.name}: no key at any depth reads as a built-in name`, builtInKeys(n.body, s.unitKeyed), []);
 		let same = false, own = false;
 		try {
 			const nb = clone(n.body), bb = clone(r[BLANK].body);
@@ -692,6 +771,198 @@ async function battery3(src) {
 	return out;
 }
 
+// ═════════════════════════════════════════════════════ §3b unit numbers and load ids
+// What a per-truck entry holds, by kind. `projection` is null exactly while the
+// truck is in service too briefly to project (insufficientData), a number
+// otherwise; `numberOrNull` is null when the truck earns nothing a month.
+const INVESTOR_TRUCK_FIELDS = {
+	number: ["unitMonthlyGross", "unitMonthlyExpenses", "unitMonthlyTripExpenses", "estAnnualRevenue", "totalMiles", "loadCount",
+		"windowRevenue", "windowRevenueShare"],
+	string: ["status", "attributionMode"], boolean: ["insufficientData"],
+	projection: ["monthlyInvestorEarnings", "estAnnualInvestorRevenue", "investorROI"], numberOrNull: ["breakEvenMonths"],
+};
+const FINANCIALS_TRUCK_FIELDS = {
+	number: ["loadCount", "gross", "expenses", "net", "totalMiles", "ratePerMile", "monthlyCost", "operatingMonths", "driverPayPercentage"],
+	string: ["unitNumber", "assignedDriver", "driverPayType", "attributionMode"], boolean: ["driverPayUsedDefault", "idle"],
+	projection: [], numberOrNull: [],
+};
+// The fields of an entry that are missing or of the wrong kind: [] when it is
+// well-formed.
+function malformed(entry, spec) {
+	if (entry === null || typeof entry !== "object") return ["(no entry)"];
+	const bad = [];
+	for (const k of spec.number) if (!Number.isFinite(entry[k])) bad.push(k);
+	for (const k of spec.string) if (typeof entry[k] !== "string") bad.push(k);
+	for (const k of spec.boolean) if (typeof entry[k] !== "boolean") bad.push(k);
+	for (const k of spec.projection) if (!(entry.insufficientData === true ? entry[k] === null : Number.isFinite(entry[k]))) bad.push(k);
+	for (const k of spec.numberOrNull) if (!(entry[k] === null || Number.isFinite(entry[k]))) bad.push(k);
+	return bad;
+}
+const hasOwn = (o, k) => o !== null && typeof o === "object" && Object.prototype.hasOwnProperty.call(o, k);
+// The entry an array lists for `unit` under `field`, with the unit written as
+// `as`, so a truck and its twin compare field for field; null when not listed.
+function entryFor(list, field, unit, as = unit) {
+	const hit = (list || []).find((x) => x && x[field] === unit);
+	return hit ? { ...hit, [field]: as } : null;
+}
+const ORDINARY_UNITS = ["101", "102", "103", "104"];
+
+async function battery3b(src) {
+	const out = [];
+	const t = (label, actual, expected) => out.push([label, actual, expected]);
+	const read = (fn) => { try { return fn(); } catch (err) { return `unreadable: ${err.message}`; } };
+	const named = buildWorld(NAMED, { src });
+	const twins = buildWorld(NAMED, { src, twins: true });
+
+	// GET /api/investor as the investor: perTruckData, keyed by unit number.
+	{
+		const a = await call(named, "GET /api/investor", { user: INVESTOR });
+		const b = await call(twins, "GET /api/investor", { user: INVESTOR });
+		t("§3b GET /api/investor as the investor: answers 200 with nothing thrown or logged, built-ins unchanged",
+			[a.status, a.threw, a.logged, a.builtins], [200, null, [], []]);
+		const pa = read(() => a.body.production.perTruckData);
+		const pb = read(() => b.body.production.perTruckData);
+		t("§3b …perTruckData lists every one of the investor's trucks, those named like built-ins included",
+			read(() => Object.keys(pa).sort()), ["101", "102", "104", "__proto__", "constructor", "valueOf"]);
+		for (const [unit, twin] of BUILTIN_UNITS) {
+			const e = hasOwn(pa, unit) ? pa[unit] : null;
+			t(`§3b …the truck "${unit}": every figure well-formed`, malformed(e, INVESTOR_TRUCK_FIELDS), []);
+			t(`§3b …the truck "${unit}": exactly the figures it gets as "${twin}"`, canon(e), canon(hasOwn(pb, twin) ? pb[twin] : null));
+		}
+		t("§3b …the other trucks' figures are unchanged",
+			canon(["101", "102", "104"].map((u) => (hasOwn(pa, u) ? pa[u] : null))), canon(["101", "102", "104"].map((u) => (hasOwn(pb, u) ? pb[u] : null))));
+		t("§3b …and so is everything else in the answer (fleet totals, months, asset)",
+			read(() => canon({ ...a.body, production: { ...a.body.production, perTruckData: null } })),
+			read(() => canon({ ...b.body, production: { ...b.body.production, perTruckData: null } })));
+		// Stated outright, so an agreement between two wrong answers cannot pass.
+		const p = hasOwn(pa, "__proto__") ? pa["__proto__"] : {};
+		const v = hasOwn(pa, "valueOf") ? pa["valueOf"] : {};
+		t("§3b …\"__proto__\" earns its $500 load by its Truck cell and gets a share; inactive \"valueOf\" gets none",
+			[p.attributionMode, p.windowRevenue, p.loadCount, p.windowRevenueShare > 0, v.windowRevenueShare, v.estAnnualInvestorRevenue],
+			["truck", 500, 1, true, 0, 0]);
+	}
+	// GET /api/financials: the active trucks' rows, and the month's.
+	{
+		const a = await call(named, "GET /api/financials", { query: { month: "2026-08" } });
+		const b = await call(twins, "GET /api/financials", { query: { month: "2026-08" } });
+		t("§3b GET /api/financials: answers 200 with nothing thrown or logged, built-ins unchanged",
+			[a.status, a.threw, a.logged, a.builtins], [200, null, [], []]);
+		const listed = read(() => a.body.perTruck.map((x) => x.unitNumber).sort());
+		t("§3b …perTruck lists every active truck, those named like built-ins included", listed,
+			["101", "102", "103", "104", "__proto__", "constructor"]);
+		for (const [unit, twin] of BUILTIN_UNITS.filter(([u]) => u !== "valueOf")) {
+			const e = read(() => entryFor(a.body.perTruck, "unitNumber", unit));
+			t(`§3b …the truck "${unit}": every figure well-formed`, malformed(e, FINANCIALS_TRUCK_FIELDS), []);
+			t(`§3b …the truck "${unit}": exactly the row it gets as "${twin}"`,
+				canon(read(() => entryFor(a.body.perTruck, "unitNumber", unit, twin))), canon(read(() => entryFor(b.body.perTruck, "unitNumber", twin))));
+			t(`§3b …the truck "${unit}": the same month row as "${twin}"`,
+				canon(read(() => entryFor(a.body.monthDetail.trucks, "unitNumber", unit, twin))),
+				canon(read(() => entryFor(b.body.monthDetail.trucks, "unitNumber", twin))));
+		}
+		t("§3b …the other trucks' rows are unchanged",
+			canon(read(() => ORDINARY_UNITS.map((u) => entryFor(a.body.perTruck, "unitNumber", u)))),
+			canon(read(() => ORDINARY_UNITS.map((u) => entryFor(b.body.perTruck, "unitNumber", u)))));
+		t("§3b …and so are the fleet summary and the expense categories",
+			canon(read(() => [a.body.summary, a.body.expensesByCategory])), canon(read(() => [b.body.summary, b.body.expensesByCategory])));
+		t("§3b …\"__proto__\" and \"constructor\" each earn their load by their Truck cell ($500, $450)",
+			read(() => { const p = entryFor(a.body.perTruck, "unitNumber", "__proto__"); const c = entryFor(a.body.perTruck, "unitNumber", "constructor");
+				return [p.attributionMode, p.gross, p.loadCount, c.attributionMode, c.gross, c.loadCount]; }),
+			["truck", 500, 1, "truck", 450, 1]);
+	}
+	// GET /api/trucks lists all seven.
+	{
+		const a = await call(named, "GET /api/trucks");
+		const b = await call(twins, "GET /api/trucks");
+		t("§3b GET /api/trucks: answers 200, built-ins unchanged", [a.status, a.threw, a.builtins], [200, null, []]);
+		for (const [unit, twin] of BUILTIN_UNITS) {
+			t(`§3b …the truck "${unit}": exactly the entry it gets as "${twin}"`,
+				canon(read(() => entryFor(a.body.trucks, "UnitNumber", unit, twin))), canon(read(() => entryFor(b.body.trucks, "UnitNumber", twin))));
+		}
+	}
+	// The fuel-gallons recovery: one fill and its receipt on each of two trucks
+	// named like built-ins and on an ordinary one, each on its own day. A rise of
+	// 50 points is exact, so each truck's reference is gallons × 2.
+	{
+		const w = buildWorld(NONE, { src });
+		const fills = [["constructor", "2026-09-20", 100], ["__proto__", "2026-09-21", 125], ["101", "2026-09-22", 110]];
+		const ins = w.db.prepare("INSERT INTO expenses (driver, type, amount, date, owner_id, truck_unit, gallons) VALUES ('', 'Fuel', ?, ?, 5, ?, ?)");
+		const receiptIds = fills.map(([u, day, gallons]) => Number(ins.run(gallons * 4, day, u, gallons).lastInsertRowid));
+		const events = fills.map(([u, day], i) => ({
+			id: -(i + 1), routemate_vehicle_id: `rv-${i}`, unit: u, local_day: day,
+			start_ms: Date.UTC(2026, 8, 20 + i, 15), end_ms: Date.UTC(2026, 8, 20 + i, 15, 20),
+			pct_before: 25, pct_after: 75, odometer: 0, odo_span: 0, latitude: 0, longitude: 0,
+		}));
+		const r = runFnSync(() => w.matchFuelEventsToReceipts({ days: 10, persist: false, writeReceipts: false, events }));
+		const v = r.value || {};
+		t("§3b matchFuelEventsToReceipts(): does not throw on fills on trucks whose units read as built-in names", r.threw, null);
+		t("§3b …matches each fill to its own receipt", read(() => v.matched.map((m) => [m.e.unit, m.r.id]).sort()),
+			fills.map(([u], i) => [u, receiptIds[i]]).sort());
+		t("§3b …files each truck's reference gallons under its own unit, and nothing else",
+			read(() => Object.entries(v.refImplied).sort()), [["101", 220], ["__proto__", 250], ["constructor", 200]]);
+		t("§3b …as a null-prototype object", read(() => Object.getPrototypeOf(v.refImplied)), null);
+		t("§3b …the built-in objects are unchanged", builtinsChangedAndRestored(), []);
+	}
+	// GET /api/admin/scan-duplicates: Load IDs that read as built-in names are
+	// grouped like any other ("#constructor" is "constructor").
+	{
+		const w = buildWorld(NONE, { src });
+		const first = w.rows.length + 2; // the sheet row of the first appended load
+		w.rows.push(
+			jt("constructor", "Pat Percent", "Delivered", "", "", "", "", "", ""),
+			jt("#constructor", "Dee Dayrate", "Dispatched", "", "", "", "", "", ""),
+			jt("__proto__", "Sam Kelly", "Delivered", "", "", "", "", "", ""),
+			jt("__proto__", "", "Delivered", "", "", "", "", "", ""),
+			jt("toString", "Pat Percent", "Delivered", "", "", "", "", "", ""),
+		);
+		const r = await call(w, "GET /api/admin/scan-duplicates");
+		const row = (n, rawId, status, driver) => ({ row: first + n, rawId, status, driver, oLat: "" });
+		t("§3b GET /api/admin/scan-duplicates: groups Load IDs that read as built-in names like any other",
+			[r.status, r.threw, r.builtins, r.body], [200, null, [], {
+				total: 2, dangerous: 1, groups: [
+					{ loadId: "constructor", dangerous: true, rows: [row(0, "constructor", "Delivered", "Pat Percent"), row(1, "#constructor", "Dispatched", "Dee Dayrate")] },
+					{ loadId: "__proto__", dangerous: false, rows: [row(2, "__proto__", "Delivered", "Sam Kelly"), row(3, "__proto__", "Delivered", "(no driver)")] },
+				],
+			}]);
+	}
+	return out;
+}
+
+// ═════════════════════════════════════════════════════ §3c the load-rating save
+// PUT /api/load-ratings/:loadId stores the driverName it is sent: one that reads
+// as a built-in property name is refused 400 DRIVER_NAME_RESERVED, one that is
+// not text 400, each before the write.
+async function battery3c(src) {
+	const out = [];
+	const t = (label, actual, expected) => out.push([label, actual, expected]);
+	const put = (w, loadId, body) => call(w, "PUT /api/load-ratings/:loadId", { params: { loadId }, body });
+	const ratings = (w) => canon(w.db.prepare("SELECT load_id, driver_name, rating, rated_by FROM load_ratings ORDER BY load_id").all());
+	for (const name of ["__proto__", " Constructor ", "toString", "VALUEOF"]) {
+		const w = buildWorld(NONE, { src });
+		const before = ratings(w);
+		const r = await put(w, "1002", { rating: 4, driverName: name });
+		t(`§3c PUT /api/load-ratings/:loadId, driverName ${JSON.stringify(name)}: 400 DRIVER_NAME_RESERVED naming driverName, nothing written`,
+			[r.status, r.threw, r.body && r.body.code, r.body && r.body.field, ratings(w) === before, r.builtins],
+			[400, null, "DRIVER_NAME_RESERVED", "driverName", true, []]);
+	}
+	for (const [label, name] of [["a number", 7], ["an object", { name: "Pat Percent" }], ["an array", ["Pat Percent"]], ["true", true]]) {
+		const w = buildWorld(NONE, { src });
+		const before = ratings(w);
+		const r = await put(w, "1002", { rating: 4, driverName: name });
+		t(`§3c …driverName that is ${label}: 400 "Driver name must be text", not a throw, nothing written`,
+			[r.status, r.threw, r.body, ratings(w) === before], [400, null, { error: "Driver name must be text" }, true]);
+	}
+	{
+		const w = buildWorld(NONE, { src });
+		const a = await put(w, "1002", { rating: 4, driverName: "Pat Percent" });
+		const b = await put(w, "1004", { rating: 3, driverName: "Tostring Smith" });
+		const row = (id) => w.db.prepare("SELECT driver_name, rating FROM load_ratings WHERE load_id = ?").get(id) || null;
+		t("§3c …an ordinary name is saved, and so is one that only contains a built-in name (\"Tostring Smith\")",
+			[a.status, a.threw, row("1002"), b.status, b.threw, row("1004")],
+			[200, null, { driver_name: "Pat Percent", rating: 4 }, 200, null, { driver_name: "Tostring Smith", rating: 3 }]);
+	}
+	return out;
+}
+
 // ═════════════════════════════════════════════════════ §4 source pins
 // Every name-keyed map, per function or route, declared null-prototype — the
 // three §3 cannot run (the ELD poll, the HOS matchers and the stale-location
@@ -708,11 +979,17 @@ const PINNED = [
 	["GET /api/investor", ROUTES.investor,
 		["milesByLoadId", "grossByDriver", "milesByDriver", "milesByTruck", "loadsByDriver", "loadsByTruck", "revenueByTruckMonth",
 			"driverDaySets", "driverMonthlyDays", "driverMonthlyDayLoads", "driverDisplayName", "driverMonthlyRevenue", "unitToVid",
-			"driverDaySource", "driverPayDetails", "trucksByDriver"]],
+			"driverDaySource", "driverPayDetails", "trucksByDriver",
+			// keyed by unit number
+			"perTruckData", "maintByTruck", "compByTruck", "windowRevenue", "modeByUnit", "insufficient", "basis", "alloc"]],
 	["GET /api/financials", ROUTES.financials,
 		["milesByLoadId", "grossByDriver", "grossByTruck", "milesByDriver", "milesByTruck", "loadsByDriver", "loadsByTruck",
 			"driverDaySets", "truckDaySets", "truckLoadDates", "driverMonthlyRevenue", "unitToVid", "driverMonthlyDays",
-			"trucksByDriver", "driverPayDetails", "driverDisplayNames", "invByDriver"]],
+			"trucksByDriver", "driverPayDetails", "driverDisplayNames", "invByDriver",
+			// keyed by unit number
+			"expByTruck", "maintByTruck", "compByTruck"]],
+	["matchFuelEventsToReceipts()", "matchFuelEventsToReceipts", ["seed", "refImplied"]],
+	["GET /api/admin/scan-duplicates", ROUTES.scanDuplicates, ["byId"]],
 	["GET /api/expenses/fuel-analytics", ROUTES.fuel, ["readingsByTruck", "byDriver"]],
 	["GET /api/locations/latest", ROUTES.locations,
 		["routemateByDriver", "assignmentByDriver", "loadMap", "driverActiveLoadMap", "driverActiveLoadsMap"]],
@@ -728,11 +1005,22 @@ function battery4(src) {
 	const out = [];
 	const t = (label, actual, expected) => out.push([label, actual, expected]);
 	const bodyOf = (target) => (target.startsWith("app.") ? liftRoute(src, target) : liftFn(src, target));
+	// Every declaration of the name counts, so a second one in another shape
+	// ({}, Object.fromEntries(), …) fails as surely as the first would.
+	const declarations = (body, n) => [...body.matchAll(new RegExp(`\\b(?:const|let) ${n} = ([^\\n]*)`, "g"))].map((m) => m[1]);
 	for (const [label, target, names] of PINNED) {
 		const body = bodyOf(target);
-		t(`§4 ${label}: ${names.join(", ")} — each declared Object.create(null), none as a plain {}`,
-			names.filter((n) => !new RegExp(`\\b(const|let) ${n} = Object\\.create\\(null\\);`).test(body)
-				|| new RegExp(`\\b(const|let) ${n} = \\{\\};`).test(body)), []);
+		t(`§4 ${label}: ${names.join(", ")} — each declared Object.create(null), at every declaration`,
+			names.filter((n) => {
+				const found = declarations(body, n);
+				return found.length === 0 || found.some((d) => !d.startsWith("Object.create(null);"));
+			}), []);
+	}
+	{
+		const inv = liftRoute(src, ROUTES.investor);
+		t("§4 GET /api/investor: whether a unit was given a share is an own-property test, never `in`",
+			[/\bin alloc\b/.test(inv), inv.includes("const allocated = (u) => Object.prototype.hasOwnProperty.call(alloc, u);"),
+				(inv.match(/allocated\(unit\)/g) || []).length], [false, true, 2]);
 	}
 	t("§4 routemateSyncTelemetry(): the Driver cell is read through driverNameForTotals()",
 		/const d = driverNameForTotals\(\(row\[driverCol\] \|\| ""\)\.toString\(\)\)/.test(liftFn(src, "routemateSyncTelemetry")), true);
@@ -752,16 +1040,35 @@ const MUTANTS = [
 	["M3 the fuel analytics per-driver map as it was before", `\n${ROUTES.fuel}`,
 		"const byDriver = Object.create(null);\n\t\tfuelExpenses.forEach((e) => {\n\t\t\tconst key = driverNameForTotals(e.driver);",
 		"const byDriver = {};\n\t\tfuelExpenses.forEach((e) => {\n\t\t\tconst key = e.driver;"],
+	["M4 a plain {} for GET /api/investor's perTruckData", `\n${ROUTES.investor}`,
+		"const perTruckData = Object.create(null);", "const perTruckData = {};"],
+	["M5 a plain {} for GET /api/investor's maintenance map", `\n${ROUTES.investor}`,
+		"const maintByTruck = Object.create(null);", "const maintByTruck = {};"],
+	["M6 a plain {} for GET /api/investor's attribution modes", `\n${ROUTES.investor}`,
+		"const modeByUnit = Object.create(null);", "const modeByUnit = {};"],
+	["M7 GET /api/investor's share map a plain {} again, asked with `in`", `\n${ROUTES.investor}`,
+		"const alloc = Object.create(null);\n\t\t\tconst allocated = (u) => Object.prototype.hasOwnProperty.call(alloc, u);",
+		"const alloc = {};\n\t\t\tconst allocated = (u) => u in alloc;"],
+	["M8 a plain {} for GET /api/financials' per-truck receipt map", `\n${ROUTES.financials}`,
+		"const expByTruck = Object.create(null);", "const expByTruck = {};"],
+	["M9 a plain {} for the fuel-gallons recovery's per-truck samples", "\nfunction matchFuelEventsToReceipts(",
+		"const seed = Object.create(null);", "const seed = {};"],
+	["M10 a plain {} for GET /api/admin/scan-duplicates' Load ID map", `\n${ROUTES.scanDuplicates}`,
+		"const byId = Object.create(null);", "const byId = {};"],
+	["M11 PUT /api/load-ratings/:loadId takes a driver name that reads as a built-in property name", `\n${ROUTES.ratingsPut}`,
+		'const reservedDriver = reservedDriverNameRefusal(driverName, "driverName");', "const reservedDriver = null;"],
+	["M12 PUT /api/load-ratings/:loadId without its text check", `\n${ROUTES.ratingsPut}`,
+		'if (typeof driverName !== "string") return res.status(400).json({ error: "Driver name must be text" });', ""],
 ];
 function mutateWithin(anchor, find, replace, label) {
 	if (SHIPPED.split(anchor).length - 1 !== 1) throw new Error(`mutant "${label}": its anchor is not found exactly once`);
 	const start = SHIPPED.indexOf(anchor);
-	const end = SHIPPED.indexOf(anchor.includes("app.get(") ? "\n});\n" : "\n}\n", start);
+	const end = SHIPPED.indexOf(anchor.startsWith("\napp.") ? "\n});\n" : "\n}\n", start);
 	const body = SHIPPED.slice(start, end);
 	if (body.split(find).length - 1 !== 1) throw new Error(`mutant "${label}": its target is not found exactly once inside its anchor`);
 	return SHIPPED.slice(0, start) + body.replace(find, () => replace) + SHIPPED.slice(end);
 }
-const BATTERIES = [["§1", battery1], ["§2", battery2], ["§3", battery3]];
+const BATTERIES = [["§1", battery1], ["§2", battery2], ["§3", battery3], ["§3b", battery3b], ["§3c", battery3c]];
 
 // ═════════════════════════════════════════════════════ run
 (async () => {
@@ -772,10 +1079,14 @@ const BATTERIES = [["§1", battery1], ["§2", battery2], ["§3", battery3]];
 		report(battery2());
 		section("§3 THE TOTALS — NAMED vs BLANK vs NONE");
 		report(await battery3());
+		section("§3b UNIT NUMBERS AND LOAD IDS THAT READ AS BUILT-IN NAMES");
+		report(await battery3b());
+		section("§3c THE LOAD-RATING SAVE");
+		report(await battery3c());
 		section("§4 SOURCE PINS");
 		report(battery4(SHIPPED));
 
-		// Judged by §1–§3 alone: a mutant must be caught by what the code DOES,
+		// Judged by §1–§3c alone: a mutant must be caught by what the code DOES,
 		// not merely by the pins above.
 		section("§5 MUTANTS — each must flip at least one behavioural assertion above");
 		for (const [label, anchor, find, replace] of MUTANTS) {

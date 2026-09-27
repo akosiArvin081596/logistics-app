@@ -23,7 +23,10 @@
  * nothing.
  *   §1 excludeDroppedLoads()           — A on the KPI path (dashboard/investor/financials)
  *   §2 selectInvoiceWeekLoads()        — A, B, C on the invoice path
- *   §3 driversWithCompletedLoadsInWeek — the batch's coverage check agrees with §2
+ *   §3 driversWithCompletedLoadsInWeek — the batch's coverage check agrees with §2,
+ *      and skips a Driver cell that reads as a built-in property name
+ *      ("constructor", " __Proto__ ", "toString") like a blank one: the batch
+ *      cannot invoice such a name
  *   §4 the WHOLE generateInvoiceHandler, against an in-memory SQLite and stubbed
  *      Sheets/renderer: the percentage invoice's money, the day-rate invoice's
  *      load list, and the 400 + warnings for a driver with only undated rows
@@ -32,10 +35,12 @@
  *      driver's Draft and read back its render_data (address, phone, bank).
  *   §4b the WHOLE runWeeklyInvoiceBatch (the Friday run), side effects captured:
  *      what it submits, and that undated in-week loads are escalated — for
- *      drivers on the roster and off it — while undated history raises nothing
+ *      drivers on the roster and off it — while undated history raises nothing;
+ *      completed rows whose Driver cell reads as a built-in property name raise
+ *      no WORKED-BUT-UNBILLED and no retry
  *   §5 source pins — every reader goes through the shared helpers
  *   §6 DISCRIMINATION — the pre-fix code (verbatim copies below) must FAIL §1–§4b,
- *      and five mutants of the lifted code must each flip an assertion. A test
+ *      and six mutants of the lifted code must each flip an assertion. A test
  *      that passes on the broken code has not tested anything.
  *   §7 THE UNDATED-LOAD LEDGER (invoice_undated_alerts). A completed load with
  *      no completion date is billed in no week; the batch named one only when an
@@ -379,6 +384,15 @@ const KEN = [
 	row({ "Load ID": "7001", Driver: "Ken Former", "Job Status": "Completed", "Pickup Appointment": "5/16/2025", "Drop-off Appointment": "5/16/2025", "  Payment  ": " $ 750.00 " }),
 ];
 const ALL = [...PAT, ...DEE, ...LEE, ...SAM, ...MIX, ...IVY, ...KEN];
+// Completed in-week rows whose Driver cell reads as a built-in property name.
+// The batch cannot invoice such a name (the handler refuses it), so the
+// coverage check skips each like a blank Driver cell. Not in ALL: §3 and §4b
+// add them where they are the subject.
+const RESERVED = [
+	row({ "Load ID": "9101", Driver: "constructor", "Job Status": "Delivered", "Status Update Date": "9/22/2026 10:00:00", "  Payment  ": " $ 100.00 " }),
+	row({ "Load ID": "9102", Driver: " __Proto__ ", "Job Status": "Delivered", "Status Update Date": "9/23/2026 10:00:00", "  Payment  ": " $ 200.00 " }),
+	row({ "Load ID": "9103", Driver: "toString", "Job Status": "Completed", "Completion Date": "9/24/2026 11:00:00", "  Payment  ": " $ 300.00 " }),
+];
 
 // ---------------------------------------------------------------- runner
 let pass = 0, fail = 0;
@@ -438,6 +452,13 @@ function checksVerifier(impl) {
 		["verifier: Lee Legacy (only undated rows) is NOT 'worked this week'", got.includes("lee legacy"), false],
 		["verifier: Sam Deleted (only a soft-deleted '#3001') is NOT 'worked this week'", got.includes("sam deleted"), false],
 		["verifier: exactly the drivers the handler bills", got, ["dee dayrate", "pat percent"]],
+	];
+}
+function checksReservedVerifier(impl) {
+	const got = [...impl.verifier([...ALL, ...RESERVED], HEADERS, WS, WE)].sort();
+	return [
+		["verifier: a Driver cell that reads as a built-in property name, in any case or spacing, is skipped like a blank one",
+			got, ["dee dayrate", "pat percent"]],
 	];
 }
 function run(checks) { for (const [label, actual, expected] of checks) eq(actual, expected, label); }
@@ -505,6 +526,7 @@ function oldImpl(db) {
 	// ============================================================ 3. verifier
 	section("3. driversWithCompletedLoadsInWeek() — the batch's coverage check agrees");
 	run(checksVerifier(N));
+	run(checksReservedVerifier(N));
 
 	// ============================================================ 4. whole handler
 	section("4. generateInvoiceHandler — end to end on an in-memory database");
@@ -614,6 +636,15 @@ function oldImpl(db) {
 			[1, true, 1, true]],
 	];
 	run(batchChecks(await runBatch()));
+	// The same week with completed rows whose Driver cell reads as a built-in
+	// property name: there is no driver to bill, so nothing is reported unbilled
+	// and the run is not retried.
+	const reservedBatchChecks = (b) => [
+		["batch: rows whose Driver cell reads as a built-in property name raise no WORKED-BUT-UNBILLED, so no retry",
+			[/WORKED-BUT-UNBILLED/.test(b.marker.summary || ""), b.result && b.result.problem, b.marker.failed], [false, false, 0]],
+		["batch: …and every driver is billed exactly as without them", b.invoices, [["dee dayrate", "Submitted", 600], ["pat percent", "Submitted", 280]]],
+	];
+	run(reservedBatchChecks(await runBatch({ sheetValues: toValues([...ALL, ...RESERVED]) })));
 
 	// ============================================================ 5. source pins
 	section("5. Source pins — every reader goes through the shared helpers");
@@ -747,6 +778,19 @@ function oldImpl(db) {
 			"M3"));
 		eq(countFailures(checksA_kpi(m)) > 0 && failedLabels(checksInvoice(m)).some((l) => l.startsWith("A/")), true,
 			"MUTANT M3: an un-normalized tombstone set misses '3002' on both paths");
+	}
+	{
+		// M6 — the coverage check reads the Driver cell raw again.
+		const from = "const name = normalizeDriverName(driverNameForTotals(row[cols.driverCol]));";
+		const hits = SRC.split(from).length - 1;
+		if (hits !== 1) throw new Error(`mutant anchor must occur exactly once (M6), found ${hits}`);
+		const src = SRC.replace(from, () => "const name = normalizeDriverName(row[cols.driverCol]);");
+		eq(countFailures(checksReservedVerifier(mutantImpl(src))) > 0, true,
+			"MUTANT M6: read raw, a Driver cell that reads as a built-in property name counts as a driver who worked");
+		const b = await runBatch({ src, sheetValues: toValues([...ALL, ...RESERVED]) });
+		eq([failedLabels(reservedBatchChecks(b)).length > 0, b.result && b.result.problem,
+			/ · 3 WORKED-BUT-UNBILLED \(constructor, __proto__, tostring\)/.test(b.marker.summary || "")], [true, true, true],
+			"MUTANT M6: …so the Friday batch reports all three WORKED-BUT-UNBILLED and retries");
 	}
 
 	// ============================================================ 7. the undated-load ledger
