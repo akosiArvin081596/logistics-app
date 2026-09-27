@@ -5143,8 +5143,9 @@ db.exec(`
 // Pass 1 takes two steps, the second only for a row the first leaves blank:
 //   1. the assignment naming the driver case aside, in SQL, as it always has;
 //   2. the assignment naming them through a spacing variant of the name
-//      (normalizeDriverName()), compared in JS: LOWER() folds case, not
-//      spacing, and SQLite cannot collapse a whitespace run.
+//      (normalizeDriverName()), compared in JS: LOWER() folds A–Z case only —
+//      not spacing, not other letters — and SQLite cannot collapse a
+//      whitespace run.
 // An expense carries the spelling it was filed under (a driver's own session
 // files under the account's spelling), an assignment the spelling its truck was
 // assigned under. So an account stored as "Shorn  King" never met its
@@ -14195,8 +14196,10 @@ function periodPhase(period) {
 // nothing collapses a whitespace run.
 //
 // ⚠️ THE QUERIES KEEP `GROUP BY LOWER(driver)`, so a name whose stored spellings
-// differ at most in case is still summed by SQLite's own SUM, exactly as before
-// to the last bit; JS adds only the groups SQLite could not merge. Grouping by
+// differ at most in A–Z case is still summed by SQLite's own SUM, exactly as
+// before to the last bit; JS adds only the groups SQLite could not merge — a
+// spacing variant, or a case variant outside A–Z (SQLite's LOWER leaves "É"
+// alone), which were never deducted before and now are, as the invoice does. Grouping by
 // the raw spelling would move case variants into the JS sum as well, and a JS
 // sum of per-spelling SUMs differs from SQLite's SUM in the last bit often
 // enough to move a percentage driver's pay by a cent once it is rounded.
