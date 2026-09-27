@@ -45,6 +45,9 @@
  * against both the old and new code proves nothing; this run fails if the
  * discrimination itself ever stops working.
  *
+ * Section 14 is a guest: POST /api/admin/excluded-days, whose period gate this
+ * file runs, refusing a driver name that reads as a built-in property name.
+ *
  * Run: node scripts/test-date-resolvers.js
  */
 const fs = require("fs");
@@ -1203,6 +1206,73 @@ module.exports.probe = (v) => [
 	GATE.verdict({ driver: DRV, date: "2026-08-01", action: "remove", jobTracking: jt(jtRow(DRV, v, "2026-08-01", "2026-08-02")) }),
 	GATE.loadRowPeriods(jtRow(DRV, v, "", ""), COLS),
 ];
+
+// ------------------------------------------ 14. a reserved name on the day overrides
+// A guest section: POST /api/admin/excluded-days, whose period gate this file
+// already runs, refuses a driverName that reads as a built-in property name —
+// 400 DRIVER_NAME_RESERVED naming driverName, before the gate and the INSERT.
+// The real handler body against stubs, with the shipped name helpers.
+if (!process.env.TZ_CHILD) console.log("\n14. POST /api/admin/excluded-days — a reserved driver name is refused");
+const EXCLUDED_BODY = extractRouteBody("/api/admin/excluded-days");
+const NAME_FNS = new Function(`${extractFn("normalizeDriverName")}\n${extractFn("isBuiltInPropertyName")}\n${extractFn("reservedDriverNameRefusal")}\n` +
+	"return { normalizeDriverName, reservedDriverNameRefusal };")();
+function runExcludedDay(bodySrc, body) {
+	const calls = { gate: [], inserted: [], audited: [] };
+	const res = {
+		_status: 200, _json: null,
+		status(c) { this._status = c; return this; },
+		json(o) { this._json = o; return this; },
+	};
+	const db = {
+		prepare(sql) {
+			return {
+				run: (...a) => { if (/INSERT OR IGNORE INTO excluded_driver_days/.test(sql)) calls.inserted.push(a); return { changes: 1 }; },
+				get: (...a) => (/FROM excluded_driver_days/.test(sql) ? { driver_name: a[0], excluded_date: a[1] } : undefined),
+			};
+		},
+	};
+	const fn = new Function("ctx", `
+		const { req, res, db, normalizeDriverName, reservedDriverNameRefusal, excludedDayGate, sendPeriodRefusal,
+			logAudit, jtCacheInvalidate, console } = ctx;
+		return (async () => ${bodySrc})();
+	`);
+	return fn({
+		req: { body, session: { user: { username: "super_admin" } } }, res, db,
+		normalizeDriverName: NAME_FNS.normalizeDriverName,
+		reservedDriverNameRefusal: NAME_FNS.reservedDriverNameRefusal,
+		excludedDayGate: async (a) => { calls.gate.push(a); return { refuse: null, periods: [] }; },
+		sendPeriodRefusal: () => { throw new Error("the period refusal is not under test here"); },
+		logAudit: (...a) => { calls.audited.push(a); },
+		jtCacheInvalidate: () => {},
+		console: { error() {}, log() {}, warn() {} },
+	}).then(() => ({ status: res._status, body: res._json, calls }));
+}
+for (const name of ["__proto__", " Constructor ", "toString"]) {
+	routeCase(`excluded-days, the driverName ${JSON.stringify(name)}`,
+		() => runExcludedDay(EXCLUDED_BODY, { driverName: name, date: "2026-09-10", action: "remove", reason: "test" }),
+		(r, label) => {
+			eq([r.status, r.body && r.body.code, r.body && r.body.field], [400, "DRIVER_NAME_RESERVED", "driverName"],
+				`${label} — 400 DRIVER_NAME_RESERVED naming driverName`);
+			eq([r.calls.gate.length, r.calls.inserted.length, r.calls.audited.length], [0, 0, 0],
+				`${label} — refused before the gate: nothing inserted or audited`);
+		});
+}
+routeCase("excluded-days, a name containing a built-in property name (\"Tostring Smith\")",
+	() => runExcludedDay(EXCLUDED_BODY, { driverName: "Tostring Smith", date: "2026-09-10", action: "add", reason: "test" }),
+	(r, label) => {
+		eq([r.status, r.calls.gate.length, r.calls.inserted.map((a) => a[0])], [200, 1, ["tostring smith"]],
+			`${label} — 200, gated and stored under its normalized name`);
+	});
+{
+	// The mutant: the handler without its refusal must write what the checks
+	// above say it refuses, or those checks prove nothing.
+	const REFUSAL = "if (reserved) return res.status(400).json(reserved);";
+	ok(EXCLUDED_BODY.split(REFUSAL).length === 2, "excluded-days: the mutant's target, the refusal, is present exactly once");
+	routeCase("MUTANT excluded-days without its driver-name refusal",
+		() => runExcludedDay(EXCLUDED_BODY.replace(REFUSAL, ""), { driverName: "__proto__", date: "2026-09-10", action: "remove", reason: "test" }),
+		(r, label) => ok(r.status === 200 && r.calls.inserted.length === 1,
+			`${label} — is caught: it inserts the name the checks above refuse (got ${r.status}, ${r.calls.inserted.length} inserted)`));
+}
 
 // ⚠️ The section-12 route assertions are ASYNC (the finalize handler is an async
 // arrow, so its body can only be exercised through a promise). They must be

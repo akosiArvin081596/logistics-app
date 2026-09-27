@@ -100,7 +100,7 @@ const GRAPH = [
 	// The period lock.
 	"periodLocksReadable", "periodLockStmt", "isLocked", "expensePostedPeriod", "expenseRowPeriodLocked",
 	// The name rule.
-	"normalizeDriverName", "driverNameHeldByOtherSpelling", "driverNameHeldByOtherAccount", "findDriverNameClashes",
+	"normalizeDriverName", "isBuiltInPropertyName", "driverNameHeldByOtherSpelling", "driverNameHeldByOtherAccount", "findDriverNameClashes",
 	"logAudit",
 ];
 const GRAPH_SRC = Object.fromEntries(GRAPH.map((n) => [n, liftFn(n)]));

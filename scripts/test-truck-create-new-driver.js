@@ -129,7 +129,7 @@ const FUNCTIONS = [
 	// the subject
 	"driverHistoryFloorMonth", "driverPayLockedMonths", "truckCreateLockBlockers",
 	// what the guard reads
-	"normalizeDriverName", "findCol", "moneySheetDate", "lockedPeriodsDesc",
+	"normalizeDriverName", "isBuiltInPropertyName", "reservedDriverNameRefusal", "findCol", "moneySheetDate", "lockedPeriodsDesc",
 	"truckFixedCostLockedMonths", "truckChargedInMonth", "truckChargeFromMonth", "truckChargeUntilMonth", "truckMonthlyFixed",
 	"truckFeeLockedRows", "getDriverPayStructures", "resolveDailyRate", "truckDailyRateCandidates", "investorsHoldingDriver",
 	// what the route calls

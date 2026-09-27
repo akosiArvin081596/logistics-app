@@ -50,6 +50,13 @@
  *      "previous" driver); moving a driver on a load is still refused. An
  *      assignedDriver that is not text → 400 INVALID_DRIVER_NAME, nothing
  *      written; null still means no driver.
+ *   A name that reads as a built-in property name is refused on each of these:
+ *      as a reserved name by guard (b) and fix-driver-name (409
+ *      DRIVER_NAME_TAKEN), as a new name by PUT /api/drivers-directory/:id (409
+ *      DRIVER_NAME_TAKEN; re-spelling a row already stored under one is not),
+ *      by both trucks routes (400 DRIVER_NAME_RESERVED; a PUT resending a stored
+ *      one unchanged is not), and the directory sync adds no row under one.
+ *      "Tostring Smith" is an ordinary name throughout.
  *   §4b the pay structure: a directory row re-spelled in case or spacing, by
  *      any of the three rename paths, is still found under the driver's name;
  *      of two rows for one name, the first by id wins.
@@ -146,6 +153,9 @@ function liftConst(head, close = null) {
 }
 
 const NORM_SRC = liftFunction("normalizeDriverName");
+// The built-in property names the clash helper reserves, and the trucks routes'
+// refusal of one.
+const BUILTIN_SRC = [liftFunction("isBuiltInPropertyName"), liftFunction("reservedDriverNameRefusal")].join("\n");
 const CLASH_SRC = [liftFunction("findDriverNameClashes"), liftFunction("findDriverNameClash"), liftFunction("driverNameHeldByOtherAccount"),
 	liftFunction("canonicalDriverName")].join("\n");
 // The sync finds its directory row through findDirectoryRowForDriver() and the
@@ -212,8 +222,8 @@ function buildModule(db, src = {}, stubs = {}) {
 	const st = { isLocked: () => false, expenseRowPeriodLocked: () => false, invoiceRowPeriodLocked: () => false, namedLockedPeriods: () => [],
 		expensePostedPeriod: () => "", periodLocksReadable: () => true, ...stubs };
 	return new Function("db", "isLocked", "expenseRowPeriodLocked", "invoiceRowPeriodLocked", "namedLockedPeriods", "expensePostedPeriod", "periodLocksReadable",
-		`"use strict";\n${NORM_SRC}\n${s.clash}\n${s.cascade}\n${s.hard}\n${s.planner}\n${s.sync}\n${ASSIGN_SRC}\n${AUDIT_TEXT_SRC}\n${s.pay}\n${s.lock}\n` +
-		"return { normalizeDriverName, findDriverNameClash, findDriverNameClashes, canonicalDriverName, DRIVER_RENAME_TARGETS," +
+		`"use strict";\n${NORM_SRC}\n${BUILTIN_SRC}\n${s.clash}\n${s.cascade}\n${s.hard}\n${s.planner}\n${s.sync}\n${ASSIGN_SRC}\n${AUDIT_TEXT_SRC}\n${s.pay}\n${s.lock}\n` +
+		"return { normalizeDriverName, isBuiltInPropertyName, reservedDriverNameRefusal, findDriverNameClash, findDriverNameClashes, canonicalDriverName, DRIVER_RENAME_TARGETS," +
 		" DRIVER_RENAME_ID_CAP, DRIVER_RENAME_HARD_BLOCK_CODES, planDriverRenameSqlite, driverRenameMergeScan, applyDriverRenameSqlite," +
 		" driverRenameAccountIds, syncDriverToCarrierSheet, assignDriverToTruck, auditText, getDriverPayStructures," +
 		" userUpdateLockBlockers, findTruckForDriverAccount, driverRenameWhereSql, driverRenameWhereArgs };")(
@@ -405,6 +415,7 @@ function mountDirectoryPut(db, { routeSrc = ROUTES.dirPut, moduleSrc = {} } = {}
 		logAudit: () => {},
 		notifyChange: () => {},
 		normalizeDriverName: m.normalizeDriverName,
+		isBuiltInPropertyName: m.isBuiltInPropertyName,
 		findDriverNameClash: m.findDriverNameClash,
 		findDriverNameClashes: m.findDriverNameClashes,
 		directoryPayValue: DIRECTORY_PAY,
@@ -451,6 +462,7 @@ function mountTrucks(db, { putSrc = ROUTES.truckPut, postSrc = ROUTES.truckPost,
 		notifyChange: () => {},
 		canonicalDriverName: m.canonicalDriverName,
 		normalizeDriverName: m.normalizeDriverName,
+		reservedDriverNameRefusal: m.reservedDriverNameRefusal,
 	};
 	const put = mountRoute(putSrc, env);
 	const post = mountRoute(postSrc, env);
@@ -487,6 +499,9 @@ async function usersBattery(opts = {}) {
 		["another account's driver name, case and spacing changed", "  shorn   KING ", /already belongs to sking \(user 2\)/, /driver name already belongs to sking \(user 2\)/],
 		["another account's username", "KEVIN", /username of kevin \(user 4\)/, /is the username of kevin \(user 4\)/],
 		["a reserved name", " Dispatch ", /that name is reserved\.$/, /that name is reserved/],
+		["a built-in property name", "__proto__", /that name is reserved\.$/, /that name is reserved/],
+		["a built-in property name, case and spacing", " Constructor ", /that name is reserved\.$/, /that name is reserved/],
+		["a built-in property name, mixed case", "toString", /that name is reserved\.$/, /that name is reserved/],
 	]) {
 		const db = usersFixture();
 		const before = snapshot(db);
@@ -659,6 +674,9 @@ async function fixBattery(opts = {}) {
 	for (const [label, name, detail] of [
 		["a reserved name", "Dispatch", /is a reserved name/],
 		["another account's username", "Kevin", /is the username of kevin \(user 4\)/],
+		["a built-in property name", "__proto__", /is a reserved name/],
+		["a built-in property name, case and spacing", " Constructor ", /is a reserved name/],
+		["a built-in property name, mixed case", "toString", /is a reserved name/],
 	]) {
 		const db = fixFixture();
 		const before = snapshot(db);
@@ -774,6 +792,32 @@ async function directoryBattery(opts = {}) {
 		t(`a blank name: 400 DRIVER_NAME_REQUIRED, nothing written (got ${r.status} ${(r.body || {}).code || ""})`,
 			r.status === 400 && (r.body || {}).code === "DRIVER_NAME_REQUIRED" && snapshot(db) === before);
 	}
+	// A new name that reads as a built-in property name is reserved.
+	for (const name of ["__proto__", " Constructor ", "toString"]) {
+		const db = fixture();
+		const before = snapshot(db);
+		const { put } = mountDirectoryPut(db, opts);
+		const r = await put(2, ["Driver"], [name]);
+		t(`renaming a row to the built-in property name ${JSON.stringify(name)}: 409 DRIVER_NAME_TAKEN, "that name is reserved", nothing written (got ${r.status} ${(r.body || {}).code || ""})`,
+			r.status === 409 && (r.body || {}).code === "DRIVER_NAME_TAKEN" && /reserved/.test((r.body || {}).error || "") && snapshot(db) === before);
+	}
+	{
+		const db = fixture();
+		const { put } = mountDirectoryPut(db, opts);
+		const r = await put(2, ["Driver"], ["Tostring Smith"]);
+		t(`renaming a row to a name containing a built-in property name ("Tostring Smith") is saved (got ${r.status})`,
+			r.status === 200 && directoryNames(db)[1] === "Tostring Smith");
+	}
+	{
+		// A row stored under such a name before the rule: re-spelling it is not a
+		// new name, so it is not refused.
+		const db = fixture();
+		db.prepare("UPDATE drivers_directory SET driver_name = 'tostring' WHERE id = 2").run();
+		const { put } = mountDirectoryPut(db, opts);
+		const r = await put(2, ["Driver"], ["toString"]);
+		t(`re-spelling a row already stored under a built-in property name is saved (got ${r.status})`,
+			r.status === 200 && directoryNames(db)[1] === "toString");
+	}
 	{
 		const db = fixture();
 		const { put } = mountDirectoryPut(db, opts);
@@ -844,6 +888,54 @@ async function trucksBattery(opts = {}) {
 		const r = await post({ unitNumber: "104", assignedDriver: "Shorn King" }, "Investor");
 		t(`POST /api/trucks by an Investor still names no driver, and releases no one (got ${r.status}, trucks ${truckDrivers(db)})`,
 			r.status === 200 && truckDrivers(db) === "1:Shorn King,2:,3:");
+	}
+	// A driver that reads as a built-in property name: 400 DRIVER_NAME_RESERVED
+	// naming assignedDriver, before anything is written.
+	const trucksState = (db) => JSON.stringify([snapshot(db), truckDrivers(db), activeAssignments(db),
+		db.prepare("SELECT id, unit_number, notes FROM trucks ORDER BY id").all()]);
+	for (const name of ["__proto__", " Constructor ", "toString"]) {
+		const db = trucksFixture();
+		const before = trucksState(db);
+		const { put, post, syncCalls } = mountTrucks(db, opts);
+		const rp = await post({ unitNumber: "105", assignedDriver: name });
+		const ru = await put(2, { assignedDriver: name, notes: "new tyres" });
+		t(`POST and PUT /api/trucks, assignedDriver ${JSON.stringify(name)}: 400 DRIVER_NAME_RESERVED naming assignedDriver, nothing written or synced (got ${rp.status} ${(rp.body || {}).code || ""}, ${ru.status} ${(ru.body || {}).code || ""})`,
+			[rp, ru].every((r) => r.status === 400 && (r.body || {}).code === "DRIVER_NAME_RESERVED" && (r.body || {}).field === "assignedDriver") &&
+			trucksState(db) === before && syncCalls.length === 0);
+	}
+	{
+		const db = trucksFixture();
+		const { put, post } = mountTrucks(db, opts);
+		const rp = await post({ unitNumber: "105", assignedDriver: "Tostring Smith" });
+		const ru = await put(2, { assignedDriver: "Constructor Jones" });
+		t(`POST and PUT /api/trucks, names containing a built-in property name: saved (got ${rp.status}, ${ru.status}, trucks ${truckDrivers(db)})`,
+			rp.status === 200 && ru.status === 200 && truckDrivers(db) === "1:Shorn King,2:Constructor Jones,3:Tostring Smith");
+	}
+	{
+		// A truck whose driver was stored under such a name before the rule: a save
+		// that resends it unchanged is not refused.
+		const db = trucksFixture();
+		db.prepare("UPDATE trucks SET assigned_driver = 'toString' WHERE id = 2").run();
+		const { put } = mountTrucks(db, opts);
+		const r = await put(2, { assignedDriver: "toString", notes: "new tyres" });
+		t(`PUT /api/trucks/:id resending a stored built-in property name unchanged: 200, the edit saved (got ${r.status} ${(r.body || {}).code || ""})`,
+			r.status === 200 && (db.prepare("SELECT notes FROM trucks WHERE id = 2").get() || {}).notes === "new tyres");
+	}
+	{
+		// The directory sync on its own: no row is added under a built-in property
+		// name, whether asked to add or to update a driver it cannot find.
+		const db = trucksFixture();
+		const { m } = mountTrucks(db, opts);
+		await quiet(() => {
+			m.syncDriverToCarrierSheet("__proto__", { action: "add" });
+			m.syncDriverToCarrierSheet(" Constructor ", { action: "add" });
+			m.syncDriverToCarrierSheet("toString", { action: "update" });
+		});
+		t(`syncDriverToCarrierSheet adds no row under a built-in property name (directory ${JSON.stringify(directoryNames(db))})`,
+			JSON.stringify(directoryNames(db)) === JSON.stringify(["Shorn King", "Bob Driver", "Deshorn King"]));
+		m.syncDriverToCarrierSheet("Tostring Smith", { action: "add" });
+		t("...and still adds one for a name containing one",
+			directoryNames(db).includes("Tostring Smith"));
 	}
 	{
 		// The directory sync on its own: its add branch never adds a row for a
@@ -1594,6 +1686,21 @@ async function mutants() {
 	// again: the case-only rename called money-neutral, the audit silent.
 	caught("R29 the plan and the executor not counting a directory row moved from another spelling", await variantBattery({
 		moduleSrc: { cascade: swap("R29", CASCADE_SRC, '\tif (t.match === "directory_row") return `LOWER(TRIM("${t.column}")) = ?`;\n', "") },
+	}));
+
+	// A driver name that reads as a built-in property name.
+	caught("R30 PUT /api/drivers-directory/:id without its built-in property name refusal", await directoryBattery({
+		routeSrc: swap("R30", ROUTES.dirPut, "if (renamed && isBuiltInPropertyName(nextName)) {", "if (false) {"),
+	}));
+	const TRUCK_REFUSAL = "if (reservedDriver) return res.status(400).json(reservedDriver);";
+	caught("R31 POST /api/trucks without its driver-name refusal", await trucksBattery({
+		postSrc: swap("R31", ROUTES.truckPost, TRUCK_REFUSAL, ""),
+	}));
+	caught("R32 PUT /api/trucks/:id without its driver-name refusal", await trucksBattery({
+		putSrc: swap("R32", ROUTES.truckPut, TRUCK_REFUSAL, ""),
+	}));
+	caught("R33 syncDriverToCarrierSheet's add branch without its built-in property name check", await trucksBattery({
+		moduleSrc: { sync: swap("R33", SYNC_SRC, "if (isBuiltInPropertyName(name)) {", "if (false) {") },
 	}));
 }
 

@@ -175,6 +175,8 @@ const PIECES = {
 	].join("\n"),
 	names: [
 		liftFunction("normalizeDriverName"),
+		liftFunction("isBuiltInPropertyName"),
+		liftFunction("reservedDriverNameRefusal"),
 		liftFunction("findDriverNameClashes"),
 		liftFunction("findDriverNameClash"),
 		liftFunction("driverNameHeldByOtherAccount"),
@@ -214,7 +216,7 @@ const PIECES = {
 const MODULE_EXPORTS = [
 	"PAY_EDIT_ADMIN_ONLY", "directoryPayStruct", "directoryPayChanges", "refusePayEdit",
 	"logAudit", "logAuditRefusal", "auditText",
-	"normalizeDriverName", "findDriverNameClash", "findDriverNameClashes", "canonicalDriverName",
+	"normalizeDriverName", "isBuiltInPropertyName", "reservedDriverNameRefusal", "findDriverNameClash", "findDriverNameClashes", "canonicalDriverName",
 	"syncDriverToCarrierSheet", "assignDriverToTruck",
 	"directoryChangedColumns", "DRIVER_PAY_DAILY_MAX", "parseDriverPayDaily", "parseInServiceDate", "parseRetiredAt",
 	"parseAdminFeePct", "truckMonthlyFixed", "TRUCK_AMOUNT_FIELDS", "parseTruckAmounts", "parseUnitNumber", "isUnitNumberTaken",

@@ -247,6 +247,7 @@ const CASCADE_SRC = [
 	// Which of a leg's rows the executor lists as moved from another spelling.
 	liftFunction("function driverRenameSameNameSql(t) {"),
 	liftFunction("function normalizeDriverName(s) {"),
+	liftFunction("function isBuiltInPropertyName(name) {"),
 	liftFunction("function findDriverNameClashes(name, opts = {}) {"),
 	liftFunction("function driverNameHeldByOtherAccount(name, exceptUserIds = []) {"),
 	liftFunction("function findDirectoryRowForDriver(name) {"),

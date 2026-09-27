@@ -110,6 +110,9 @@ function liftCreateTable(src, table) {
 
 const SHARED_FNS = [
 	"houstonDay", "sheetDayKey", "getWeekRange", "normalizeDriverName", "findCol", "parseSheet", "deduplicateLoads",
+	// getAllExcludedDriverDays() reads each override row's name through these;
+	// the excluded-days route refuses such a name through the last one.
+	"isBuiltInPropertyName", "driverNameForTotals", "reservedDriverNameRefusal",
 	"getDeletedLoadIds", "excludeDroppedLoads", "loadKeySet",
 	"invoiceWeekColumns", "invoiceCompletionDay", "invoiceWeekVerdict", "selectInvoiceWeekLoads", "invoiceWeekWarnings",
 	"driversWithCompletedLoadsInWeek",

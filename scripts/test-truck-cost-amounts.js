@@ -212,6 +212,8 @@ const MODULE_SRC = [
 	liftFunction("auditText"),
 	// names and the assignment a reassigning save writes
 	liftFunction("normalizeDriverName"),
+	liftFunction("isBuiltInPropertyName"),
+	liftFunction("reservedDriverNameRefusal"),
 	liftFunction("findDriverNameClashes"),
 	liftFunction("findDriverNameClash"),
 	liftFunction("driverNameHeldByOtherAccount"),
@@ -227,7 +229,7 @@ const MODULE_EXPORTS = [
 	"parsePlainDecimal", "TRUCK_AMOUNT_MAX", "parseTruckAmount", "TRUCK_AMOUNT_FIELDS", "parseTruckAmounts", "parseUnitNumber", "isUnitNumberTaken",
 	"parseDriverPayDaily", "parseInServiceDate", "parseRetiredAt", "ADMIN_FEE_PCT_MAX", "parseAdminFeePct", "truckMonthlyFixed",
 	"refusePayEdit", "logAudit", "auditText",
-	"normalizeDriverName", "findDriverNameClash", "findDriverNameClashes", "canonicalDriverName",
+	"normalizeDriverName", "isBuiltInPropertyName", "reservedDriverNameRefusal", "findDriverNameClash", "findDriverNameClashes", "canonicalDriverName",
 	"syncDriverToCarrierSheet", "assignDriverToTruck",
 ];
 // The code every check runs: the shipped source, or (§ mutants) a copy with one

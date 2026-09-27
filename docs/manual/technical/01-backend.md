@@ -95,7 +95,7 @@ Where Job Tracking data flows out, and back in:
 
 - Broker contact columns (headers matching `BROKER_WITHHELD_RE`: "Broker Contact Name", "Phone Number", "Email") are served blank to every role but Super Admin by `sanitizeBrokerColumns()`, on `/api/dashboard`, `GET`/`PUT /api/load/:loadId` and `GET /api/driver/:driverName`. `GET /api/data` serves every column as stored, so it is Super Admin only.
 - `GET /api/driver/:driverName` also drops the columns whose headers match `/rate|amount|revenue|pay|charge|price|cost/i` for every caller but Super Admin (in practice, the Driver reading their own loads).
-- For every caller but a Super Admin, `PUT /api/data/:rowIndex` and `PUT /api/load/:loadId` write each broker contact column back exactly as stored, whatever was sent, and refuse a changed cell starting with `=` (400 `FORMULA_NOT_ALLOWED`).
+- For every caller but a Super Admin, `PUT /api/data/:rowIndex` and `PUT /api/load/:loadId` write each broker contact column back exactly as stored, whatever was sent, and refuse a changed cell starting with `=`, or with `+` before anything but a plain number (400 `FORMULA_NOT_ALLOWED`).
 
 The pattern is "regex-detect sensitive columns at request time" — not "schema-declared sensitivity." This makes the system tolerant of differently-named columns across sheets but fragile to typos in column headers.
 
