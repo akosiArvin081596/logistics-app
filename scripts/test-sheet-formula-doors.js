@@ -34,8 +34,8 @@
 // whole-row values.update at an anchored A{lastRow+1}. The fake sheet serves a
 // FORMULA read as the API does (a formula as the formula, a number as a
 // number, text as its value) and applies a write as USER_ENTERED does, so a
-// whole-row rewrite shows up as what it did to the row: text holding 00123
-// came back as a number, and text starting with "=" as a formula. Mutant MU in
+// whole-row rewrite shows up as what it did to the row: text cells came back
+// re-parsed (text holding 00123 as a number). Mutant MU in
 // §5 restores the whole-row values.update.
 //
 //   node scripts/test-sheet-formula-doors.js     # exits 1 on any failure

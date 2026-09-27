@@ -38633,9 +38633,8 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		// PUT /api/data/:rowIndex and PUT /api/load/:loadId write through. When no
 		// cell differs, nothing is sent. The whole-row rewrite this replaced
 		// re-entered every cell of the row through USER_ENTERED, which parses
-		// each value as if it had been typed in: a text cell holding "00123" came
-		// back as the number 123, and a text cell starting with "=" as a formula.
-		// It also wrote back, over any cell someone changed between this read and
+		// each value as if it had been typed in, so a text cell holding "00123"
+		// came back as the number 123. It also wrote back, over any cell someone changed between this read and
 		// the write, the value this read saw, and a sort in that window landed the
 		// whole row on another load. Now a cell this route does not change is
 		// never written, so none of that can reach it (a sort can still land the
