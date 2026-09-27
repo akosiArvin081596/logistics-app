@@ -25,12 +25,16 @@ What it covers today, in five sections (`ONLY` picks them):
   the sheet reader (`GET /api/data`) is Super Admin only.
 - **Maintenance notice (M1).** A popup dismissal in one tab belongs to the person who dismissed it. Local only, on a
   server booted with the notice on.
-- **Money path (P1, E1, N1, N1b, F1).** Clearing a fixed-pay driver's daily rate in the Drivers Database stores 0 and
-  leaves the other pay type's value alone (P1, local and staging). A driver's new expense carries the unit and owner of
-  their truck when the truck stores a spacing variant of their name (E1). A rename on the Users page also moves the
-  rows stored under a spacing variant of the old name (N1), and re-spelling an account onto the spacing its own
-  directory row carries saves rather than being refused as a merge (N1b). An Active Loads edit writes only the cell
-  that changed, so formula cells survive (F1). E1, N1 and N1b are planted and local only; F1 is local only.
+- **Money path (P1, E1, N1, N1b, F1, E2, B1, RC1).** Clearing a fixed-pay driver's daily rate in the Drivers Database
+  stores 0 and leaves the other pay type's value alone (P1, local and staging). A driver's new expense carries the unit
+  and owner of their truck when the truck stores a spacing variant of their name (E1). A rename on the Users page also
+  moves the rows stored under a spacing variant of the old name (N1), and re-spelling an account onto the spacing its
+  own directory row carries saves rather than being refused as a merge (N1b). An Active Loads edit writes only the cell
+  that changed, so formula cells survive (F1). A Fuel expense stored under a percentage-paid driver's name with its
+  space doubled is deducted from their pay on the Financials page (E2). The startup expense backfill stamps the truck
+  onto an expense whose driver is a spacing variant of the name its truck assignment carries (B1, planted before
+  boot). A rate-con import onto a load whose Payments Table row already exists writes only the cells that change, so
+  text cells stay text (RC1). E1, N1, N1b, E2 and B1 are planted and local only; F1 and RC1 are local only.
 
 Every "Expected" column states the behaviour **after** the fix. A run on a build without it (a BEFORE baseline) is
 expected to FAIL exactly the fix rows.
@@ -55,12 +59,24 @@ expected to FAIL exactly the fix rows.
   - **Does not go out:** no write to production, no mail (Gmail is blanked) and no pushes (the n8n webhook, Routemate,
     Linxup and ScanKit are blanked or off). Production's read-only archive sheet (the `ARCHIVE_SPREADSHEET_ID` default)
     is read only by the `/archive` page and the rate-con reconcile; the run opens neither, and the reconcile is off.
-- **One step writes the Google Sheet: F1, and only the local non-production one.** Every other step that writes
-  changes the SQLite copy only (trucks, drivers, expenses, sessions, audit rows). F1 runs only against a server on this
-  machine. It resolves the sheet the way `boot-server.sh` does, refuses production's, and checks that the row it reads
-  matches the server's copy of that load. It edits one row through the app, with the service-account key of the main
-  checkout, then writes back every cell of that row that differs from its first read. It plants a formula there first
-  when the row has none, and clears it again (see the money-path section).
+  - **The rate-con Drive folder is never reached.** `server.js` reads `RATECON_DRIVE_FOLDER_ID` with a fallback: an
+    empty value, or none (the local `.env` sets none), means production's rate-con folder, which is hardcoded there.
+    So it cannot be blanked like a key: `boot-server.sh` sets it to `logisx-e2e-no-drive-folder`, a value that names
+    no Drive folder, so a Drive call against it names no real folder. No step makes one. `POST /api/loads/from-ratecon`
+    (RC1) archives a rate-con to disk and mirrors it to Drive only for an attached PDF, and RC1 attaches none. It sends
+    no addresses either, so the route makes no geocode or Distance Matrix call, and it never calls the Gemini
+    extraction (`POST /api/loads/ratecon/extract`).
+- **Two steps write the Google Sheet: F1 and RC1, and only the local non-production one.** Every other step that
+  writes changes the SQLite copy only (trucks, drivers, expenses, sessions, audit rows). Both run only against a server
+  on this machine, and both resolve the sheet the way `boot-server.sh` does and refuse production's, with the
+  service-account key of the main checkout.
+  - F1 checks that the row it reads matches the server's copy of that load. It edits one row through the app, then
+    writes back every cell of that row that differs from its first read. It plants a formula there first when the row
+    has none, and clears it again (see the money-path section).
+  - RC1 snapshots the rows it and the import will write (values and formats): the next free row of the Payments
+    Table, of Job Tracking and of Job Details. It plants a Payments Table row for a synthetic load (`QA-RC1-<timestamp>`)
+    and checks that the server lists it. After the import it puts each of those rows back from its snapshot, when the
+    row holds that load, and re-reads it (see the money-path section).
 - **Logins are never printed.** The creds file (`0600`) is read, never echoed. The scripts print ids and booleans only.
 - **Identity documents are masked** in saved screenshots (`MASK_PII`, on by default). The live headed page is not masked.
 - **Stop by PID only.** `stop-server.sh` kills the one process `boot-server.sh` recorded. It does so only while that process
@@ -87,6 +103,7 @@ npm --prefix scripts/e2e ci      # playwright-core only, pinned; the root and cl
 | `e2e.mjs` | The run. Captions every step on screen, screenshots it, and writes `results-<tag>.md`. |
 | `paths.cjs` | Where everything is: this checkout, the main checkout, the installs, the work dir. Every other script resolves through it. `node scripts/e2e/paths.cjs work-dir` prints the work dir. |
 | `setup-db.cjs` | Makes a fresh private copy of the main checkout's `app.db` in the work dir and sets five logins on the copy. |
+| `plant-before-boot.cjs` | Plants what B1 needs in a copy BEFORE a server boots on it (one expense), or removes it (`--remove`). |
 | `verify-creds.cjs` | Confirms the creds file matches a copy. Prints booleans and ids only. |
 | `prep-worktree.sh` | Makes a worktree bootable: links the main checkout's installs, `.env` and key, then builds `client/dist`. |
 | `boot-server.sh` / `stop-server.sh` | Start a local server on a copy with every outbound effect off; stop exactly that PID. |
@@ -103,7 +120,7 @@ directory outside every checkout.
 | `creds.json` (`0600`) | The five logins: Super Admin, Driver, two Investors (`investor`, `investor2`), Dispatcher. **Never print or paste it.** |
 | `shots/<tag>/`, `results-<tag>.md` | A run's screenshots and verdict table. The screenshots show real data. |
 | `server-<port>.log`, `server-<port>.pid` | The server's output, and the PID `stop-server.sh` stops. |
-| `plant-journal.json` | Exists only while a planted value, a row the money path created, or F1's planted sheet cell is live (see "Planting"). |
+| `plant-journal.json` | Exists only while a planted value, a row the money path created, F1's planted sheet cell or RC1's sheet rows are live (see "Planting"). |
 
 ## Local run
 
@@ -130,15 +147,19 @@ E2E_MAINTENANCE_NOTICE=1 fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$P
 BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-maintenance ONLY=maintenance \
   fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
 fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
-# Part 4: the money path (2 or 3 sign-ins; it fits beside part 1 on one server process)
+# Part 4: the money path (2 or 3 sign-ins; it fits beside part 1 on one server process). B1's expense is planted
+# BEFORE the boot (the server stopped): the startup backfill it shows runs once, as the server starts.
+fnm exec --using=22.23.2 node scripts/e2e/plant-before-boot.cjs "$W/qa.db"   # --force replaces a planted row
 fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
 BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-moneypath ONLY=moneypath DB_PATH="$W/qa.db" \
   fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
 fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
 ```
 
-- Headless: part 1 takes about 1.5 minutes, part 2 about 2.5 minutes, part 3 about 30 s, part 4 about 1.5 minutes
+- Headless: part 1 takes about 1.5 minutes, part 2 about 2.5 minutes, part 3 about 30 s, part 4 about 2.5 minutes
   (up to 80 s more when F1 has to plant its formula and wait for the server's cached copy of the sheet).
+- B1 deletes its expense when it runs, so plant again before every boot that B1 is to read. A run whose server booted
+  before the plant scores B1 INFO (the boot never saw the row); a copy with nothing planted SKIPs it.
 - Headed (`HEADED=1`) takes roughly two to three times as long. Headed uses slowMo 350 ms, a 1.6 s pause on every
   caption (none on the timing-critical ones), 1400×900 admin and investor windows, and a 430×900 driver window.
 - A BEFORE baseline is the same run on the build without the fix, with `PHASE=before`. Use a second copy from
@@ -181,6 +202,27 @@ planted cases SKIP. They are never silently mis-tested.
 - An existing creds file's passwords are reused, so one creds file works for every copy. The script prints the ids it
   picked, never a password.
 
+### `plant-before-boot.cjs <db> [--force | --remove]`
+
+B1 shows the startup expense backfill, which runs once, as the server starts, so its input must be in the copy before
+the boot. The script plants one expense:
+
+- **Driver:** a Driver account's name with its space doubled. The creds file's driver is preferred, else the
+  lowest-id Driver account that qualifies. No account and no directory row holds that spelling, and no truck
+  assignment is stored under it. The account has a truck assignment, stored under its own spelling, that covers today.
+- **The row:** dated today (US Central), in a month that is not finalized. The truck is blank and the owner 0; type
+  Other, $0.01. `load_id` is `QA-TEST-B1` and the description `QA-TEST-B1-<timestamp>`, and `timestamp` records when
+  it was planted.
+- **Output:** ids, the date and the truck's unit number only.
+
+It refuses:
+
+- a copy outside the work dir, or a symlink;
+- a copy any process has open (`lsof`): a server booted on it has already run its backfill, so stop it first;
+- a copy that already holds B1's row. `--force` replaces it, and `--remove` deletes it.
+
+The run finds the row by its `load_id` and description, and deletes it at the end of B1.
+
 ### `prep-worktree.sh [<worktree>]`
 
 It defaults to the checkout it is in. It symlinks `node_modules`, `client/node_modules`, `.env` and
@@ -206,6 +248,8 @@ command line (dotenv never overrides a set variable):
 
 - **Credentials and keys blanked:** Gmail, n8n invoice webhook, Gemini, Google Maps (server and browser), Routemate,
   ScanKit and Linxup.
+- **The rate-con Drive folder named away:** `RATECON_DRIVE_FOLDER_ID=logisx-e2e-no-drive-folder`. An empty value would
+  not do: `server.js` falls back to production's folder (see "What leaves the machine").
 - **Feature flags off:** `ROUTEMATE/LINXUP/SCANKIT/INVOICE_AUTOGEN/PERIOD_FINALIZE/FUEL_GALLONS_RECOVERY/RATECON_RECONCILE/RATECON_INDEX_APPLY/FUEL_EVENTS/CHAT_ORPHAN_SWEEP_ENABLED=false`.
 - **Default-ON alerts off:** `ELD_STALE/FUEL_LOW/EXPENSE_DUPLICATE/INVOICE_UNDATED/RATECON_EXTRACT_ALERT_ENABLED=false`.
 - **The maintenance notice:** off (`MAINTENANCE_NOTICE_ENABLED=false`) unless the script is run with
@@ -224,8 +268,8 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
 
 - **No `DB_PATH`:** nothing can be planted in a remote database. Steps 10a–e, 11b–f, R3a–b, R15 and R16 SKIP, and so
   does R8 when the creds file has no `investor` entry. M1 SKIPs too (local only: the notice is off on staging), and so
-  do E1, N1, N1b and F1. P1 runs on a real driver (see the money-path section). Everything else runs unchanged, and the
-  script discovers every id itself.
+  do E1, N1, N1b, F1, E2, B1 and RC1 (RC1 and F1 because they write the sheet, which only a local run may). P1 runs on
+  a real driver (see the money-path section). Everything else runs unchanged, and the script discovers every id itself.
 - **Expected differences:** staging's environment refresh strips identity documents. So 11a (the Kit's CDL) FAILs there,
   R10 scores only its truck-photo half, and on a build that still has the driver-files route R12 can only be
   `PASS (vacuous)` (the route answers, with no files to return).
@@ -245,10 +289,10 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
 | `BASE_URL` | Required by `e2e.mjs`. Refuses `app.logisx.com` (production). |
 | `PHASE` | `before` or `after`. Only names the output; the "Expected" column is always the after-the-fix behaviour. |
 | `OUT_TAG` | Writes `shots/<tag>/` and `results-<tag>.md` instead of `<PHASE>`, so a rehearsal cannot overwrite a baseline. |
-| `ONLY` | A comma-separated list of sections: `trucks` (1–12, R1–R16), `signout` (S1–S7), `dispatcher` (D1–D3), `maintenance` (M1), `moneypath` (P1, E1, N1, N1b, F1). Unset: all five, in that order, then step 12's clean-up — more sign-ins than one limiter window holds (see above). |
-| `STEPS` | Only these sign-out or money-path cases, e.g. `STEPS=S5a,S7` (each has its own browser context) or `STEPS=P1,F1` (`P1` selects P1a and P1b; `N1` selects N1 and N1b). The other sections ignore it. |
+| `ONLY` | A comma-separated list of sections: `trucks` (1–12, R1–R16), `signout` (S1–S7), `dispatcher` (D1–D3), `maintenance` (M1), `moneypath` (P1, E1, N1, N1b, F1, E2, B1, RC1). Unset: all five, in that order, then step 12's clean-up — more sign-ins than one limiter window holds (see above). |
+| `STEPS` | Only these sign-out or money-path cases, e.g. `STEPS=S5a,S7` (each has its own browser context), `STEPS=P1,F1` or `STEPS=E2,B1,RC1` (`P1` selects P1a and P1b; `N1` selects N1 and N1b). The other sections ignore it. |
 | `HEADED=1` | A visible browser. |
-| `DB_PATH` | The copy the server runs on (inside the work dir). It is used **only** to plant stored values for steps 10, 11b–f, R3 and R15, to stage and clean up R16, to plant and read back E1, N1 and N1b, and to plant P1's own driver. Unset: those rows SKIP, and P1 uses a real driver. |
+| `DB_PATH` | The copy the server runs on (inside the work dir). It is used **only** to plant stored values for steps 10, 11b–f, R3 and R15, to stage and clean up R16, to plant and read back E1, N1, N1b and E2, to read and delete B1's planted expense, to delete the rows RC1's import writes, and to plant P1's own driver. Unset: those rows SKIP, and P1 uses a real driver. |
 | `CREDS_FILE` | The logins. Default: `<work dir>/creds.json`. |
 | `E2E_WORK_DIR` | The work dir. Default: `$TMPDIR/logisx-e2e`. It must be private, outside every checkout, and contain none. |
 | `SOURCE_DB` | `setup-db.cjs`'s source, opened read-only. Default: the main checkout's `app.db`. |
@@ -333,12 +377,13 @@ failed (500) is INFO.
 - Clean-up (step 12) deletes every one of them. A run also starts by deleting any `QA-TEST-*` leftovers.
 
 **Planting.** Steps 10, 11b–f, R3 and R15 write test values straight into the copy (`DB_PATH`): the driver's truck
-`photo`, or their application's `cdl_front`. E1 plants the driver's truck's `assigned_driver`. The originals are kept in memory only, and they are restored after each block and on
+`photo`, or their application's `cdl_front`. E1 plants the driver's truck's `assigned_driver`, and E2 a directory row's
+`pay_type` and `pay_percentage`. The originals are kept in memory only, and they are restored after each block and on
 Ctrl-C. The money path also creates rows (a directory row, an account, expenses, an assignment, an invoice) and
 deletes them again by id. While a plant or a created row is live, `plant-journal.json` records tables and ids only,
-never values; while F1's planted formula is in the sheet, it records that cell's address. If a run dies mid-plant,
-that file blocks the next run: recreate the copy (`setup-db.cjs … --force`), clear the recorded sheet cell if there is
-one, then delete the journal.
+never values; while F1's planted formula or RC1's rows are in the sheet, it records their addresses. If a run dies
+mid-plant, that file blocks the next run: recreate the copy (`setup-db.cjs … --force`), clear the recorded sheet cells
+or rows if there are any, then delete the journal.
 
 R3 turns the driver tab's HTTP cache off over CDP. The Kit URL has no cache-buster, so on a build that lets the browser
 cache it, step 11a's real CDL could otherwise answer for the planted value.
@@ -472,12 +517,16 @@ email count is the sharper signal. Everything here is read-only, and safe on sta
 | M1a | In **one tab**: Investor A signs in, sees the popup, closes it and signs out with the sidebar; Investor B signs in on the same tab. | B sees the popup: a dismissal belongs to the person who dismissed it. |
 | M1b | B closes it (if shown) and signs out; A signs back in on that tab. | A does not see it again. `PASS (vacuous)` when B did not see it either: the tab's one dismissal then hides it from everyone. |
 
-## The money-path section (P1, E1, N1, N1b, F1)
+## The money-path section (P1, E1, N1, N1b, F1, E2, B1, RC1)
 
-`ONLY=moneypath` (`STEPS` picks cases). The Super Admin signs in once, and P1, N1, N1b and F1 share that page; E1 signs
+`ONLY=moneypath` (`STEPS` picks cases). The Super Admin signs in once, and every case but E1 shares that page; E1 signs
 the driver in. With `DB_PATH`, the run first proves the server reads that file (a throwaway directory row must appear
-in the Drivers Database list; `MP*` FAIL otherwise, and E1, N1 and N1b SKIP). Names stay in memory: the results name rows
-by id, and a spacing variant is described, never printed. `MPc` reports every restore and delete.
+in the Drivers Database list; `MP*` FAIL otherwise, and E1, N1, N1b, E2, B1 and RC1 SKIP). Names stay in memory: the
+results name rows by id, and a spacing variant is described, never printed. No pay figure of a real driver is written
+out either. `MPc` reports every restore and delete.
+
+**Run order:** the DB check, then B1 (it reads its expense as the boot left it, before anything else runs), then P1,
+E1, N1, N1b, F1, E2 and RC1.
 
 | Step | How it is shown | Expected (AFTER) |
 |---|---|---|
@@ -487,6 +536,9 @@ by id, and a spacing variant is described, never printed. `MPc` reports every re
 | N1 | **Planted, local only.** A throwaway Driver account (`qa-test-n1-<timestamp> driver`) beside a directory row spelled `QA-TEST-N1-<timestamp> Driver`, with an expense, a truck assignment and a Draft invoice stored under the account's name with its space doubled. The run first confirms Job Tracking has no row for it. **UI:** Users page, Edit, Linked Driver set to the directory spelling, Save. | Every planted row carries the new name: the expense and the assignment as spelled, the invoice lowercase (that column's own convention) |
 | N1b | **Planted, local only.** A throwaway Driver account (`QA-TEST-N1B-<timestamp> Driver`) beside its own directory row, planted as the same name with its space doubled (the app adds no second directory row for it), with one expense under each spelling. The run first confirms Job Tracking has no row for it. **UI:** Users page, Edit, Linked Driver set to the directory spelling (offered as stored), Save. | Saved, not 409 `DRIVER_RENAME_IS_MERGE`: the account and both expenses carry the directory spelling, and that directory row is still the only one for the name, unchanged |
 | F1 | **Local only.** A load from the Super Admin's Active Loads, its sheet row read with the service account (formulas as formulas). **UI:** the load opened from the dashboard, Edit, Details changed (a `QA-F1-<timestamp>` suffix), Save changes. The row is read again. | Only the Details cell changed; every formula cell of the row is still a formula |
+| E2 | **Planted, local only.** A percentage-paid driver who earns revenue in the month (see below). **UI:** Financials, the month's row in Monthly Performance (the current month, MTD; see below), the drill-down's Driver Pay table: the driver's Pay is read. A Fuel expense ($250, or half the driver's month net when that is smaller) is planted under their name with its space doubled, dated in that month, and the month is opened again. The response behind each opening is read too. | The driver's Pay drops by the planted amount × their percentage (±$1: the page shows whole dollars). The month's Fuel Spend rises by the planted amount on every build: the control that the receipt counts in the month |
+| B1 | **Planted before boot, local only** (`plant-before-boot.cjs`). An expense with a blank truck, under a driver's name with its space doubled, dated today inside that driver's truck assignment. **UI:** Expenses, All, its description typed into the search box: the row's Truck column. The stored row is read too. | The startup backfill stamped it: the Truck column shows the assignment's truck (`#<unit>`), and the row stores that truck's unit and owner |
+| RC1 | **Local only.** A Payments Table row planted for a synthetic load `QA-RC1-<timestamp>`: the text `00123` (Invoice Number), the text `=QA` (Payment Status) and a formula (Amount Due To Carrier, `=<Payment Amount>-<Tender Fee>`), both texts written RAW; Payment Amount blank. The page then sends `POST /api/loads/from-ratecon` as the review modal does: the load number, a rate of $1,234.00 and a Details note, with no PDF. The row is read back: each cell's entered type (grid data) and the `FORMULA` render. **UI:** the Data Manager, Payments Table, searched for the load, before and after. | Only the blank Payment Amount changed (filled with the rate). The text `00123` and the text `=QA` are still text, the formula is still the same formula, and every other cell is as planted |
 
 **Why P1 sets the rate first.** Every month but the current one may be finalized, and the month-end lock refuses a
 directory edit that moves a finalized month's pay. The rate is first set to what the driver is already paid (their own
@@ -519,6 +571,32 @@ that reads like progress or holds a link only when nothing else is empty). The r
 until the server's cached copy of the sheet shows the computed value, as a person opening the load would see it.
 Afterwards every cell that differs from the first read is written back (formulas and numbers as entered, text as
 plain text), the planted formula is cleared, and the row is read once more to confirm it matches.
+
+**E2's driver.** The driver pay month rows are keyed by the directory row that wins for the name (the lowest id, as
+the pay math picks it). E2 uses a percentage-paid driver with revenue in the current month when there is one. With
+none, it switches the fixed-pay driver with the most revenue this month to percentage (40 %) in the copy for the step,
+and restores the directory row's pay type and percentage at the end. The name must have a space to double, and no
+account or directory row may hold the doubled spelling. The planted expense is deleted by id. The results report the
+Pay's move as a share of the expected deduction; they give it in dollars only when the percentage is the 40 % the
+step set and the receipt is the default $250. The month is the current one (the receipt dated today). When no driver
+has revenue in it yet, early in a month, it is the previous month while that is still open (not finalized in
+`period_locks`), with the receipt dated its last day. With neither, E2 SKIPs.
+
+**Why B1 is planted before boot.** The backfill runs once per boot, over every expense with a blank truck, so a row
+planted into a running server's copy is never seen. B1 reads what the row stores: `''` means no boot has processed it
+(INFO), `NULL` means the backfill ran and found no truck (a build without the fix), and a unit means it was stamped. The
+run also compares the row's plant time with the server's pid file: a server that booted before the plant scores INFO.
+The backfill leaves finalized months alone, so the row is dated today, in an open month.
+
+**RC1's rows.** The rows RC1 and the import write are the first free rows below each tab's data. Each is snapshotted
+first and must be empty. The import appends one Job Tracking row, updates the planted Payments Table row, and appends
+one Job Details row, which carries no load id (the tab's key column is unnamed), so it is recognized by position and
+by the Payment it holds. At the end each row that differs from its snapshot is put back from it (values and formats,
+`updateCells`), only when it holds this step's load, and read again. Each tab's data must then end where it did. The
+import's rows in the copy are deleted as well: its dispatch notification, and any document or `load_coordinates` row
+(none, with no PDF and no addresses). Its `create_load_ratecon` audit line stays, as the harness's other audit lines
+do. The server's 60 s cache of Job Tracking can still list the load for up to a minute after the clean-up. While the
+sheet rows are live, `plant-journal.json` records their addresses.
 
 ## Teardown (once the whole QA cycle is done)
 
