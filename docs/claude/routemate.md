@@ -27,7 +27,7 @@ Replaces phone-based driver GPS. Routemate is FMCSA-certified ELD hardware in tr
 | `routemate_fuel_daily` | Telemetry-derived MPG rollup, UNIQUE on `(routemate_vehicle_id, date)`. Phase 4. |
 | `routemate_hos_daily` | Driver duty-time rollup, UNIQUE on `(driver_id, date)`. Phase 3. |
 
-**`trucks` table** gains one additive column via the existing try/catch ALTER pattern: `routemate_vehicle_id TEXT DEFAULT ''`. Set by admins via the Trucks UI (Phase 2) to link a LogisX truck to a Routemate vehicle.
+**`trucks` table** gains one additive column via the existing try/catch ALTER pattern: `routemate_vehicle_id TEXT DEFAULT ''`. Set by admins via the Trucks UI (Phase 2) to link a LogisX truck to a Routemate vehicle. **The link is a driver-pay input**, so `POST`/`DELETE /api/trucks/:truckId/link-routemate` refuse with 409 `PERIOD_FINALIZED` when the change reaches a finalized month — check (5b) of `truckEditLockBlockers()`. Since 2026-09-28 that means only the finalized months that Job Tracking rows carrying **this unit** reach (`eldLinkRowMonths()`), so a new truck with no past loads links freely. The guard falls back to every finalized month if the tab can't be read, a row of the unit has an unreadable date, or the unit is renamed mid-request. The truck-rename check (5) still uses every finalized month. `scripts/test-eld-link-lock-scope.js`.
 
 **`driver_locations`** retains historical rows but is no longer written or read by any endpoint as of 2026-05-13. `GET /api/locations/latest` and `/api/locations/trail` now source exclusively from `routemate_telemetry`; responses tag `source: 'routemate'` with an ELD fix, else `'none'`. The 90-day purge job still ages the legacy data out.
 

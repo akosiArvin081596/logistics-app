@@ -61,6 +61,15 @@
 //   K3 for a non-Super-Admin, a changed cell the sheet would store as a formula
 //      is refused (400 FORMULA_NOT_ALLOWED), while a plain signed number is kept
 //
+// ELD-link section (L1, L2, L3; ONLY=eldlink):
+//   L1 a truck added this month, with no load in any finalized month, links to an
+//      ELD device from the Trucks page (it used to be refused over every
+//      finalized month — LogisX-#23, 2026-09-28)
+//   L2 the same truck unlinks from the Trucks page
+//   L3 local only (DB_PATH): a linked truck whose own Job Tracking loads reach a
+//      finalized month is still refused (409 PERIOD_FINALIZED), naming only the
+//      finalized months those loads reach
+//
 // Env:
 //   BASE_URL    required — e.g. http://127.0.0.1:3181 (never production)
 //   PHASE       before | after            (default: before) — names the output
@@ -83,7 +92,7 @@
 //   DRIVER_VIEWPORT            driver window size, default 430x900
 //   ONLY        a comma-separated list of sections: trucks (1-12, R1-R16), signout
 //               (S1-S7), dispatcher (D1-D3), maintenance (M1), moneypath (P1, E1,
-//               N1, N1b, F1, E2, B1, RC1), names (K1, K2, K3). Unset = all, in that
+//               N1, N1b, F1, E2, B1, RC1), names (K1, K2, K3), eldlink (L1-L3). Unset = all, in that
 //               order. ⚠️ The sections together sign in more often than the login
 //               limiter allows one server process (see README), so split a full run.
 //   STEPS       only these cases of the sign-out and money-path sections, e.g.
@@ -113,7 +122,7 @@ const SLOWMO = Number(process.env.SLOWMO ?? (HEADED ? 350 : 0))
 const [DVW, DVH] = String(process.env.DRIVER_VIEWPORT || '430x900').split('x').map(Number)
 // ONLY picks sections, e.g. ONLY=signout or ONLY=trucks,dispatcher. Unset = all.
 const ONLY = String(process.env.ONLY || '').toLowerCase()
-const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypath', 'names']
+const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypath', 'names', 'eldlink']
 // Sign-ins (POST /api/auth/login) each section makes; the limiter allows 20 per 15
 // minutes per server process. The sign-out section's figure is its worst case: S4a's
 // second half runs, and the build sends S7's second sign-in (one fewer for each
@@ -122,7 +131,7 @@ const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypa
 // more when E1 has to file on the driver's behalf.
 // The names section signs the Dispatcher in once (K1 and K3 share the page) and
 // the Super Admin once (K2 reads the dashboard and Financials).
-const SIGN_INS = { trucks: 3, signout: 20, dispatcher: 2, maintenance: 3, moneypath: 3, names: 2 }
+const SIGN_INS = { trucks: 3, signout: 20, dispatcher: 2, maintenance: 3, moneypath: 3, names: 2, eldlink: 1 }
 
 function die(msg) { console.error(`e2e: ${msg}`); process.exit(2) }
 if (!BASE_URL) die('BASE_URL is required')
@@ -453,7 +462,9 @@ const skipWhy = () => (DB_PATH
   : 'SKIPPED — no DB_PATH (stored values cannot be planted against this server)')
 // E1 plants trucks.assigned_driver (a spacing variant of the driver's own name); E2
 // switches a fixed-pay driver's directory row to percentage pay for its step.
-const PLANT_COLUMNS = { trucks: ['photo', 'assigned_driver'], job_applications: ['cdl_front'], drivers_directory: ['pay_type', 'pay_percentage'] }
+// L3 only ever writes routemate_vehicle_id back to the value it read, and only if
+// the refusal under test failed to happen.
+const PLANT_COLUMNS = { trucks: ['photo', 'assigned_driver', 'routemate_vehicle_id'], job_applications: ['cdl_front'], drivers_directory: ['pay_type', 'pay_percentage'] }
 function openDb() {
   if (!DB_PATH) return null
   const Database = paths.appRequire('better-sqlite3')
@@ -617,6 +628,12 @@ async function main() {
     try { await namesSection() } catch (e) {
       exitCode = 1
       record({ step: 'K!', title: 'Names section aborted', expected: '', observed: e.stack?.split('\n').slice(0, 3).join(' ') || String(e), verdict: 'FAIL', shot: '' })
+    }
+  }
+  if (runs('eldlink')) {
+    try { await eldLinkSection() } catch (e) {
+      exitCode = 1
+      record({ step: 'L!', title: 'ELD-link section aborted', expected: '', observed: e.stack?.split('\n').slice(0, 3).join(' ') || String(e), verdict: 'FAIL', shot: '' })
     }
   }
 }
@@ -5041,6 +5058,155 @@ async function cleanup() {
   record({ step: '12', title: 'Restore planted values; delete every test truck this run made (A, B, R9, the investor\'s)', expected: 'Originals restored; DELETE 200 each; no QA-TEST truck left', observed: notes.join('; '), verdict: verdict(ok), shot: s })
   try { await browser?.close() } catch { /* ignore */ }
   try { db?.close() } catch { /* ignore */ }
+}
+
+// ---------------------------------------------------------------- ELD link (L1-L3)
+// The ELD-link period guard (check (5b) of truckEditLockBlockers()) refused every
+// link, unlink and re-point while any month was finalized, so a truck added this
+// month could not be linked at all. It now blocks only the finalized months that
+// Job Tracking rows carrying the truck's own unit reach.
+const ELD_TRUCK_COL_RE = /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i
+async function eldLinkSection() {
+  const { ctx, page } = await freshPage(ADMIN_VP)
+  const stamp = Date.now().toString(36).toUpperCase()
+  const UNIT = `QA-TEST-ELD-${stamp}`
+  let truckId = null
+  const isLinkCall = (r) => /^\/api\/trucks\/\d+\/link-routemate$/.test(pathOf(r.url()))
+  try {
+    await login(page, 'Step L1 — Super Admin', CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
+    const per = await api(page, 'GET', '/api/periods')
+    const locked = (per.json?.periods || []).filter((p) => p.phase === 'finalized').map((p) => p.period).sort()
+    const today = await page.evaluate(() => new Date().toLocaleDateString('en-CA'))
+
+    // ---- L1: a new truck (no loads anywhere) links from the Trucks page
+    {
+      let observed = ''; let ok = false; let s = ''
+      try {
+        const mk = await api(page, 'POST', '/api/trucks', { unitNumber: UNIT, status: 'Active', in_service_date: today, inServiceDate: today, assignedDriver: '' })
+        truckId = mk.json?.id ?? mk.json?.truck?.id ?? null
+        if (!truckId) {
+          const all = await api(page, 'GET', '/api/trucks')
+          truckId = (all.json?.trucks || []).find((t) => t.UnitNumber === UNIT)?.id ?? null
+        }
+        if (!truckId) throw new Error(`POST /api/trucks answered ${mk.status}${mk.json?.code ? ` ${mk.json.code}` : ''}; no truck made`)
+        await page.goto(`${BASE_URL}/trucks`)
+        const row = rowOf(page, UNIT)
+        await row.waitFor({ state: 'visible', timeout: 30000 })
+        await row.scrollIntoViewIfNeeded()
+        await caption(page, `Step L1 — new truck ${UNIT} (${locked.length} finalized month(s) on this server, no loads on this truck): open Link`)
+        await row.locator('button.btn-link-rm').click()
+        const modal = page.locator('.confirm-dialog', { hasText: `Link Truck ${UNIT}` })
+        await modal.waitFor({ state: 'visible', timeout: 15000 })
+        const item = modal.locator('.rm-pick-item').first()
+        await item.waitFor({ state: 'visible', timeout: 20000 })
+        const device = (await item.locator('.rm-pick-id').innerText()).trim()
+        await item.click()
+        await caption(page, `Step L1 — pick device ${device}, then Link Selected`)
+        const [resp] = await Promise.all([
+          page.waitForResponse((r) => isLinkCall(r) && r.request().method() === 'POST', { timeout: 30000 }),
+          modal.getByRole('button', { name: 'Link Selected' }).click(),
+        ])
+        let body = null; try { body = await resp.json() } catch { /* ignore */ }
+        await row.locator('.rm-linked').waitFor({ state: 'visible', timeout: 15000 }).catch(() => {})
+        const t = await getTruck(page, truckId)
+        const linked = !!(t && t.RoutemateVehicleId)
+        ok = resp.status() === 200 && linked && locked.length > 0
+        observed = `POST link-routemate → ${resp.status()}${body?.code ? ` ${body.code}` : ''}` +
+          `${resp.status() !== 200 && body?.error ? ` "${String(body.error).slice(0, 220)}"` : ''}; ` +
+          `truck ${linked ? 'now linked' : 'NOT linked'}; ${locked.length} finalized month(s) on this server` +
+          (locked.length ? '' : ' — nothing to refuse over, so this proves nothing')
+        await caption(page, `Step L1 — ${observed}`)
+        s = await shot(page, 'l1-link-new-truck')
+      } catch (e) { observed = `error: ${e.message}` }
+      record({
+        step: 'L1', title: 'Super Admin links a truck added today (no load in any finalized month) to an ELD device from the Trucks page',
+        expected: '200; the row shows Linked (it used to be refused over every finalized month)', observed, verdict: verdict(ok), shot: s,
+      })
+    }
+
+    // ---- L2: the same truck unlinks from the Trucks page
+    {
+      let observed = ''; let ok = false; let s = ''
+      try {
+        if (!truckId) throw new Error('no L1 truck')
+        const row = rowOf(page, UNIT)
+        await caption(page, `Step L2 — unlink ${UNIT} with the × in the Routemate column`)
+        const [resp] = await Promise.all([
+          page.waitForResponse((r) => isLinkCall(r) && r.request().method() === 'DELETE', { timeout: 30000 }),
+          row.locator('button.btn-unlink-rm').click(),
+        ])
+        await row.locator('button.btn-link-rm').waitFor({ state: 'visible', timeout: 15000 }).catch(() => {})
+        const t = await getTruck(page, truckId)
+        ok = resp.status() === 200 && !!t && !t.RoutemateVehicleId
+        observed = `DELETE link-routemate → ${resp.status()}; truck ${t && !t.RoutemateVehicleId ? 'unlinked' : 'STILL linked'}`
+        await caption(page, `Step L2 — ${observed}`)
+        s = await shot(page, 'l2-unlink-new-truck')
+      } catch (e) { observed = `error: ${e.message}` }
+      record({ step: 'L2', title: 'The same truck unlinks from the Trucks page', expected: '200; the row shows Link again', observed, verdict: verdict(ok), shot: s })
+    }
+
+    // ---- L3: a linked truck whose own loads reach a finalized month is still refused
+    {
+      let observed = ''; let v = 'FAIL'; let s = ''
+      try {
+        if (!DB_PATH) throw Object.assign(new Error('SKIPPED — no DB_PATH (L3 restores the link it would break, so it runs locally only)'), { skip: true })
+        if (!db) db = openDb()
+        // /api/data pages at 200 rows; read every page.
+        let hs = []; const rows = []
+        for (let pg = 1, pages = 1; pg <= pages && pg <= 50; pg++) {
+          const jt = await api(page, 'GET', `/api/data?sheet=${encodeURIComponent('Job Tracking')}&limit=200&page=${pg}`)
+          if (jt.status !== 200) throw new Error(`GET /api/data page ${pg} → ${jt.status}`)
+          hs = jt.json?.headers || hs
+          rows.push(...(jt.json?.data || []))
+          pages = jt.json?.totalPages || 1
+        }
+        const cols = hs.filter((h) => ELD_TRUCK_COL_RE.test(String(h ?? '')))
+        const key = (x) => String(x ?? '').replace(/\s+/g, ' ').trim().toLowerCase()
+        const carried = new Map()
+        for (const r of rows) for (const c of cols) { const k = key(r[c]); if (k) carried.set(k, (carried.get(k) || 0) + 1) }
+        const trucks = (await api(page, 'GET', '/api/trucks')).json?.trucks || []
+        const cand = trucks.filter((t) => t.RoutemateVehicleId && carried.has(key(t.UnitNumber)))
+          .sort((a, b) => carried.get(key(b.UnitNumber)) - carried.get(key(a.UnitNumber)))
+        if (!locked.length) throw Object.assign(new Error('SKIPPED — no finalized month on this server'), { skip: true })
+        if (!cand.length) throw Object.assign(new Error(`SKIPPED — no linked truck's unit appears in Job Tracking's Truck column (${cols.length} Truck column(s), ${carried.size} distinct unit value(s))`), { skip: true })
+        // Every linked truck the sheet carries: each must be refused, over finalized
+        // months only. A truck with an unreadable date on one of its rows is refused
+        // over all of them (fail closed); the rest over the months their loads reach.
+        const parts = []; let ok = true; let scopedSeen = 0
+        for (const t of cand) {
+          const before = readCol('trucks', 'routemate_vehicle_id', t.id)
+          await caption(page, `Step L3 — ${t.UnitNumber} is linked and carried by ${carried.get(key(t.UnitNumber))} Job Tracking row(s): try to unlink it`, false)
+          const r = await api(page, 'DELETE', `/api/trucks/${t.id}/link-routemate`)
+          const after = readCol('trucks', 'routemate_vehicle_id', t.id)
+          if (after !== before) writeCol('trucks', 'routemate_vehicle_id', t.id, before)
+          const ps = r.json?.periods || []
+          const good = r.status === 409 && r.json?.code === 'PERIOD_FINALIZED' && ps.length > 0 && ps.every((p) => locked.includes(p)) && after === before
+          if (!good) ok = false
+          if (good && ps.length < locked.length) scopedSeen++
+          parts.push(`${t.UnitNumber} → ${r.status}${r.json?.code ? ` ${r.json.code}` : ''} over ${ps.length}/${locked.length}` +
+            `${ps.length && ps.length < locked.length ? ` (${ps.join(', ')})` : ''}${after === before ? '' : ' — LINK WAS CLEARED (restored from the copy)'}`)
+        }
+        v = ok ? 'PASS' : 'FAIL'
+        observed = `${parts.join('; ')}; ${scopedSeen} of ${cand.length} refused over fewer than every finalized month`
+        await caption(page, `Step L3 — ${observed}`)
+        s = await shot(page, 'l3-refused-with-loads')
+      } catch (e) { observed = e.skip ? e.message : `error: ${e.message}`; v = e.skip ? 'SKIP' : 'FAIL' }
+      record({
+        step: 'L3', title: 'A linked truck whose own Job Tracking loads reach a finalized month: unlink it',
+        expected: '409 PERIOD_FINALIZED naming only finalized months (those its loads reach); the link unchanged', observed, verdict: v, shot: s,
+      })
+    }
+  } finally {
+    if (truckId) {
+      try {
+        const t = await getTruck(page, truckId)
+        if (t?.RoutemateVehicleId) await api(page, 'DELETE', `/api/trucks/${truckId}/link-routemate`)
+        const d = await api(page, 'DELETE', `/api/trucks/${truckId}`)
+        if (d.status !== 200) console.log(`  (L clean-up: DELETE /api/trucks/${truckId} → ${d.status}${d.json?.code ? ` ${d.json.code}` : ''})`)
+      } catch (e) { console.log(`  (L clean-up failed: ${e.message})`) }
+    }
+    try { await ctx.close() } catch { /* ignore */ }
+  }
 }
 
 let exitCode = 0
