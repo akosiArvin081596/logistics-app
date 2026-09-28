@@ -24430,11 +24430,84 @@ function periodLockUnreadableResponse(req, res, what, audit) {
 	});
 }
 
+// Which months can linking, unlinking or re-pointing THIS truck's ELD device
+// move driver pay in? Feeds check (5b) of truckEditLockBlockers().
+//
+// (5b) used to answer "every finalized month" for any link change, so a truck
+// added this month could not be linked to its ELD at all (2026-09-28: LogisX-#23,
+// refused over 16 finalized months it never hauled in). But the link reaches pay
+// through exactly ONE map: every driver-pay path builds
+// `LOWER(trucks.unit_number) → routemate_vehicle_id` and looks it up with the
+// Job Tracking row's Truck cell. A row that does not carry this unit never
+// resolves through this link, so the months at risk are the accounting months of
+// the rows that do — and loadRowAccountingMonths() is already the superset of
+// what a row pays into (assigned month ∪ every date/appointment month ∪ the
+// interior of the pickup→drop-off window).
+//
+// Every approximation here only widens the answer:
+//   • every column the pay paths' Truck regex could pick, not just the first;
+//   • the cell's whitespace collapsed before comparing (the pay paths only trim);
+//   • the RAW tab, not getJobTrackingCached() — that one drops duplicate load
+//     rows, and POST /api/invoices/generate reads the tab raw;
+//   • NOT narrowed further by telemetry coverage, although a window the device
+//     never pinged falls back to the same full window either way. A load row is
+//     the whole test: simple enough to be obviously right on a money guard.
+//
+// Returns the sorted months, or NULL when a row of this unit carries a date that
+// cannot be resolved to a month — the caller must then guard EVERY finalized
+// month, exactly as it would if the tab could not be read at all.
+const ELD_LINK_TRUCK_COL_RE = /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i;
+function eldLinkUnitKey(v) {
+	return String(v == null ? "" : v).replace(/\s+/g, " ").trim().toLowerCase();
+}
+function eldLinkRowMonths(headers, rows, unitNumber) {
+	const key = eldLinkUnitKey(unitNumber);
+	// A blank Truck cell resolves nothing on any pay path (`truckUnit ? … : null`).
+	if (!key) return [];
+	const hs = Array.isArray(headers) ? headers : [];
+	const cols = [];
+	hs.forEach((h, i) => { if (ELD_LINK_TRUCK_COL_RE.test(String(h || ""))) cols.push(i); });
+	if (!cols.length) return [];
+	const months = new Set();
+	for (const row of rows || []) {
+		const vs = Array.isArray(row) ? row : [];
+		if (!cols.some((i) => eldLinkUnitKey(vs[i]) === key)) continue;
+		const ms = loadRowAccountingMonths(hs, vs);
+		if (!ms || !ms.length) return null;
+		for (const m of ms) months.add(m);
+	}
+	return [...months].sort();
+}
+async function eldLinkLoadMonths(unitNumber) {
+	const sheets = await getSheets();
+	const response = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+	const values = (response && response.data && response.data.values) || [];
+	return eldLinkRowMonths(values[0] || [], values.slice(1), unitNumber);
+}
+
+// The link/unlink routes' one await, run ABOVE every check they make (house rule:
+// no await between a check and its write). Returns the truck row re-read AFTER
+// the await, and eldLinkMonths = null — every finalized month — when the tab
+// could not be read or the unit was renamed while it was being read.
+async function eldLinkPreflight(truckId, truck) {
+	let eldLinkMonths = null;
+	if (periodLocksReadable() && lockedPeriodsDesc().length) {
+		try { eldLinkMonths = await eldLinkLoadMonths(truck.unit_number); }
+		catch (e) { console.warn(`ELD link guard: Job Tracking unreadable (${e.message}); guarding every finalized month`); }
+	}
+	const fresh = db.prepare("SELECT * FROM trucks WHERE id = ?").get(truckId);
+	if (fresh && eldLinkUnitKey(fresh.unit_number) !== eldLinkUnitKey(truck.unit_number)) eldLinkMonths = null;
+	return { truck: fresh, eldLinkMonths };
+}
+
 // Everything a PUT /api/trucks/:id would restate inside a finalized month.
 // `changed` holds ONLY the fields whose stored value actually differs, keyed by
 // COLUMN name and carrying the value that would be written. `blockers: []` means
 // the edit touches no closed month and may proceed.
-function truckEditLockBlockers(truck, changed) {
+//
+// `opts.eldLinkMonths` narrows check (5b) to the months eldLinkLoadMonths()
+// found. Anything but an array — absent, null — guards every finalized month.
+function truckEditLockBlockers(truck, changed, opts = {}) {
 	// Fail CLOSED, for the reason PUT /api/expenses/:id/status spells out:
 	// isLocked() swallows every error and answers "not locked", so an unreadable
 	// period_locks silently turns this guard off.
@@ -24632,13 +24705,20 @@ function truckEditLockBlockers(truck, changed) {
 	// because without it check (5) launders trivially:
 	//     unlink  →  rename (eldLinked is now false, so (5) passes)  →  relink.
 	// Guarding the field rather than the route is what closes both.
+	//
+	// Scoped to the finalized months this truck's own loads reach when the caller
+	// measured them (opts.eldLinkMonths, see eldLinkRowMonths()); a truck with no
+	// load in any closed month links freely.
 	if (has("routemate_vehicle_id")) {
 		const was = String(truck.routemate_vehicle_id || "").trim();
 		const now = String(changed.routemate_vehicle_id || "").trim();
-		blockers.push({
+		const scoped = Array.isArray(opts.eldLinkMonths);
+		const months = scoped ? locked.filter((m) => opts.eldLinkMonths.includes(m)) : locked.slice();
+		if (months.length) blockers.push({
 			field: "routemate_vehicle_id", from: was || "(unlinked)", to: now || "(unlinked)",
-			periods: locked.slice().sort(),
-			detail: `${was && now ? "re-pointing" : now ? "linking" : "unlinking"} the ELD device changes which days count as travelled for ${truck.unit_number}, re-deriving driver pay across ${locked.length} finalized month${locked.length === 1 ? "" : "s"}`,
+			periods: months.sort(),
+			detail: `${was && now ? "re-pointing" : now ? "linking" : "unlinking"} the ELD device changes which days count as travelled for ${truck.unit_number}, re-deriving driver pay across ${months.length} finalized month${months.length === 1 ? "" : "s"}` +
+				(scoped ? ` that carry its loads` : ""),
 		});
 	}
 
@@ -36319,14 +36399,18 @@ app.get("/api/routemate/vehicles/unlinked", requireRole("Super Admin", "Dispatch
 // POST /api/trucks/:truckId/link-routemate — Link a LogisX truck to a Routemate
 // vehicle. Body accepts either {routemateVehicleId} for explicit selection or
 // {auto:true} to attempt VIN-based auto-match. Super Admin only.
-app.post("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), (req, res) => {
+app.post("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const truckId = parseInt(req.params.truckId, 10);
 		if (!truckId) return res.status(400).json({ error: "Invalid truck id" });
 		// SELECT * (was id/unit_number/vin/routemate_vehicle_id): the period guard
 		// below reads the whole row, and a partial one would silently evaluate
 		// against zeroed fixed costs and a missing created_at.
-		const truck = db.prepare("SELECT * FROM trucks WHERE id = ?").get(truckId);
+		const found = db.prepare("SELECT * FROM trucks WHERE id = ?").get(truckId);
+		if (!found) return res.status(404).json({ error: "Truck not found" });
+		// Which finalized months this truck's loads reach — the handler's only
+		// await, above every check; `truck` is the row re-read after it.
+		const { truck, eldLinkMonths } = await eldLinkPreflight(truckId, found);
 		if (!truck) return res.status(404).json({ error: "Truck not found" });
 
 		let target = (req.body && req.body.routemateVehicleId) || "";
@@ -36394,7 +36478,7 @@ app.post("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), (req
 		// the truck PUT runs, so re-pointing a device cannot do what editing the
 		// unit number is refused for. See check (5b).
 		if (String(truck.routemate_vehicle_id || "").trim() !== String(target).trim()) {
-			const lock = truckEditLockBlockers(truck, { routemate_vehicle_id: target });
+			const lock = truckEditLockBlockers(truck, { routemate_vehicle_id: target }, { eldLinkMonths });
 			// Mirrors the `routemate_link` success line. BOTH device ids are recorded:
 			// the link is the map historical loads resolve through to get their travel
 			// days, so which device it was moved FROM is as much of the story as which
@@ -36407,7 +36491,7 @@ app.post("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), (req
 			if (lock.unreadable) return periodLockUnreadableResponse(req, res, "Linking an ELD device", linkAudit);
 			if (lock.blockers.length) {
 				return periodBlockedResponse(req, res,
-					`Cannot re-point the ELD device on ${truck.unit_number || `truck #${truckId}`}`,
+					`Cannot ${truck.routemate_vehicle_id ? "re-point" : "link"} the ELD device on ${truck.unit_number || `truck #${truckId}`}`,
 					lock.blockers,
 					"Reopen the affected periods first — POST /api/periods/:period/reopen records a reason.",
 					linkAudit);
@@ -36426,12 +36510,15 @@ app.post("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), (req
 // DELETE /api/trucks/:truckId/link-routemate — Clear the Routemate link.
 // Telemetry continues to be ingested for the underlying device but stops
 // being attributed to this truck in /api/locations/latest. Super Admin only.
-app.delete("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), (req, res) => {
+app.delete("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const truckId = parseInt(req.params.truckId, 10);
 		if (!truckId) return res.status(400).json({ error: "Invalid truck id" });
 		// SELECT * — the period guard below reads the whole row.
-		const truck = db.prepare("SELECT * FROM trucks WHERE id = ?").get(truckId);
+		const found = db.prepare("SELECT * FROM trucks WHERE id = ?").get(truckId);
+		if (!found) return res.status(404).json({ error: "Truck not found" });
+		// Same preflight as the link route: the only await, above every check.
+		const { truck, eldLinkMonths } = await eldLinkPreflight(truckId, found);
 		if (!truck) return res.status(404).json({ error: "Truck not found" });
 		const prev = truck.routemate_vehicle_id || "";
 		// Unlinking is the sharpest version of this whole class of bug: it removes
@@ -36440,7 +36527,7 @@ app.delete("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), (r
 		// the FULL scheduled window instead of the days actually travelled. One
 		// call, driver pay up across every closed month. See check (5b).
 		if (prev) {
-			const lock = truckEditLockBlockers(truck, { routemate_vehicle_id: "" });
+			const lock = truckEditLockBlockers(truck, { routemate_vehicle_id: "" }, { eldLinkMonths });
 			// Mirrors the `routemate_unlink` success line, and records the device id
 			// being detached — after a successful unlink the column is empty, so on a
 			// refusal this is the only place the intended target survives.

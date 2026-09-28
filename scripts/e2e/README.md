@@ -8,7 +8,7 @@ It is **not part of `npm run ci`**, and it never runs in CI or on deploy. It is 
 the root install, CI and the deploy never install it, and `scripts/run-unit-tests.js` only runs the top-level
 `scripts/test-*` / `check-*` files.
 
-What it covers today, in five sections (`ONLY` picks them):
+What it covers today, by section (`ONLY` picks them):
 
 - **Trucks (steps 1–12, R1–R16).** Truck photos and drivers' identity files are stored and served only as what their
   bytes are. Truck amounts are validated (400 `INVALID_AMOUNT`) and cost edits audited. The Trucks forms keep their input
@@ -35,6 +35,11 @@ What it covers today, in five sections (`ONLY` picks them):
   onto an expense filed under a driver's own account spelling when the truck assignment covering it stores that name
   with a different spacing (B1, planted before boot). A rate-con import onto a load whose Payments Table row already exists writes only the cells that change, so
   text cells stay text (RC1). E1, N1, N1b, E2 and B1 are planted and local only; F1 and RC1 are local only.
+- **ELD link (L1–L3).** A truck added today, with no load in any finalized month, links to an ELD device and unlinks
+  from the Trucks page even while months are finalized (L1, L2; local and staging). A linked truck whose own Job
+  Tracking loads reach a finalized month is still refused (409 `PERIOD_FINALIZED`), over finalized months only: every
+  one of them when a row of that truck has an unreadable date, otherwise just the months its loads reach (L3, local
+  only; it writes back any link the refusal failed to protect). One sign-in; `ONLY=eldlink`.
 
 Every "Expected" column states the behaviour **after** the fix. A run on a build without it (a BEFORE baseline) is
 expected to FAIL exactly the fix rows.
@@ -170,7 +175,7 @@ fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
   start while `plant-journal.json` exists.
 
 ⚠️ **Login limiter:** `POST /api/auth/login` allows 20 attempts per 15 minutes per server process, counting every
-attempt. Per section: `trucks` 3, `signout` up to 20, `dispatcher` 2, `maintenance` 3 and `moneypath` up to 3 (the
+attempt. Per section: `trucks` 3, `signout` up to 20, `dispatcher` 2, `maintenance` 3, `eldlink` 1 and `moneypath` up to 3 (the
 Super Admin and the driver, plus the Super Admin again when E1 has to file on the driver's behalf). The sign-out figure is its
 worst case: one fewer on a build without S4a's second half, and one fewer where S7 sends one sign-in (so 19 on a build
 with the fixes). It fills a whole window, so run it on a fresh server process, as the recipe does. **All five together
