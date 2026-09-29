@@ -13090,7 +13090,8 @@ function registerApplicationVehicles(vehicles, appId, userId) {
 // (it was accepted before) is simply marked Accepted again; nothing is created.
 // The username is derived from the legal name, else the email, else the
 // application id, so it is never empty, with a number appended while it is
-// taken, so it never collides.
+// taken (an account's username, a reserved name or a driver's name), so it
+// never collides.
 app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const { status } = req.body;
@@ -13169,13 +13170,20 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			// letter or a digit. A legal name in another script, or of punctuation
 			// only, keeps none, and used to become "" (which the sign-in form
 			// refuses), then "1", or ".". No "@", so a username never reads as
-			// another account's email at sign-in. A number is appended while it is
-			// taken, compared as POST /api/users compares (trimmed, any case).
+			// another account's email at sign-in. A number is appended while the
+			// candidate is taken: empty, an account's username (compared as
+			// POST /api/users compares, trimmed, any case), or any name
+			// findDriverNameClash() finds — a reserved name such as the dispatch
+			// desk's "Dispatch", or a driver's name — so an investor's username is
+			// never a name another identity already answers to.
 			const foldUsername = (s) => String(s || "").toLowerCase().replace(/\s+/g, ".").replace(/[^a-z0-9.]/g, "");
 			const baseUsername = [fullName, email.split("@")[0]].map(foldUsername).find((u) => /[a-z0-9]/.test(u)) || `investor${appId}`;
+			const usernameTaken = (candidate) => !candidate
+				|| !!db.prepare("SELECT id FROM users WHERE LOWER(TRIM(username)) = LOWER(?)").get(candidate)
+				|| !!findDriverNameClash(candidate);
 			let username = baseUsername;
 			let suffix = 1;
-			while (db.prepare("SELECT id FROM users WHERE LOWER(TRIM(username)) = LOWER(?)").get(username)) {
+			while (usernameTaken(username)) {
 				username = `${baseUsername}${suffix}`;
 				suffix++;
 			}
@@ -33403,6 +33411,7 @@ function isBuiltInPropertyName(name) {
 // accepting a job application, POST /api/users, POST /api/drivers-directory,
 // PUT /api/users/:id, PUT /api/admin/fix-driver-name, PUT
 // /api/drivers-directory/:id, and syncDriverToCarrierSheet()'s add branch.
+// Accepting an investor application asks it too, for each username candidate.
 //
 // A driver's name is the key every ownership and settlement check matches on
 // (loadBelongsToDriver, driverOwnsInvoice, the expense and document routes), and

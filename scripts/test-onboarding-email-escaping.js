@@ -197,6 +197,14 @@ const COL_LETTER_SRC = liftFunction(SRC, "function colLetter(idx) {");
 // The acceptance writes the vehicles through this helper (its own subject is
 // scripts/test-investor-accept-vehicles.js).
 const REGISTER_VEHICLES_SRC = liftFunction(SRC, "function registerApplicationVehicles(vehicles, appId, userId) {");
+// The naming check each username candidate goes through (its own subject is
+// scripts/test-investor-accept-guards.js §8).
+const CLASH_SRC = [
+	"function normalizeDriverName(s) {",
+	"function isBuiltInPropertyName(name) {",
+	"function findDriverNameClashes(name, opts = {}) {",
+	"function findDriverNameClash(name, opts = {}) {",
+].map((head) => liftFunction(SRC, head)).join("\n");
 // The reader of each vehicle's purchase price, with the ceiling it reads (its
 // own subject is scripts/test-truck-cost-amounts.js §6).
 const PARSE_AMOUNT_SRC = (() => {
@@ -242,6 +250,7 @@ async function acceptanceMail(routeSrc, vals = {}) {
 			id INTEGER PRIMARY KEY AUTOINCREMENT, unit_number TEXT UNIQUE, make TEXT, model TEXT, year INTEGER, vin TEXT,
 			license_plate TEXT, status TEXT, owner_id INTEGER, purchase_price REAL, title_status TEXT, title_state TEXT, notes TEXT
 		);
+		CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT NOT NULL UNIQUE COLLATE NOCASE);
 	`);
 	const appId = Number(db.prepare(
 		"INSERT INTO investor_applications (legal_name, dba, entity_type, email, vehicles_json) VALUES (?, ?, ?, ?, ?)",
@@ -253,10 +262,11 @@ async function acceptanceMail(routeSrc, vals = {}) {
 	const parseTruckAmount = new Function(`${PARSE_AMOUNT_SRC}\nreturn parseTruckAmount;`)();
 	const registerApplicationVehicles = new Function("db", "colLetter", "parseTruckAmount",
 		`${REGISTER_VEHICLES_SRC}\nreturn registerApplicationVehicles;`)(db, colLetter, parseTruckAmount);
-	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", routeSrc)(
+	const findDriverNameClash = new Function("db", `${CLASH_SRC}\nreturn findDriverNameClash;`)(db);
+	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", routeSrc)(
 		{ put: (p, guard, h) => { handler = h; } }, () => (req, res, next) => next(), db,
 		{ hash: (pw) => bcrypt.hash(pw, 4) }, crypto, () => {}, () => {}, colLetter, escapeHtml,
-		(to, subject, html) => { mail.push({ to, subject, html }); return Promise.resolve(true); }, parseTruckAmount, registerApplicationVehicles);
+		(to, subject, html) => { mail.push({ to, subject, html }); return Promise.resolve(true); }, parseTruckAmount, registerApplicationVehicles, findDriverNameClash);
 	const out = {};
 	await handler({
 		params: { id: String(appId) }, body: { status: "Accepted" },

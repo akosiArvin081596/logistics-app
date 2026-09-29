@@ -79,6 +79,14 @@ const COL_LETTER_SRC = liftFunction("function colLetter(idx) {");
 // scripts/test-investor-accept-vehicles.js).
 const REGISTER_VEHICLES_SRC = liftFunction("function registerApplicationVehicles(vehicles, appId, userId) {");
 const CURRENT_FLAG_SRC = liftFunction("function currentMustChangePassword(sessionUser) {");
+// The naming check each username candidate goes through (its own subject is
+// scripts/test-investor-accept-guards.js §8).
+const CLASH_SRC = [
+	"function normalizeDriverName(s) {",
+	"function isBuiltInPropertyName(name) {",
+	"function findDriverNameClashes(name, opts = {}) {",
+	"function findDriverNameClash(name, opts = {}) {",
+].map(liftFunction).join("\n");
 // The reader of each vehicle's purchase price, with the ceiling it reads (its
 // own subject is scripts/test-truck-cost-amounts.js §6).
 const PARSE_AMOUNT_SRC = (() => {
@@ -123,6 +131,7 @@ function makeDb() {
 			vin TEXT, license_plate TEXT, status TEXT, owner_id INTEGER, purchase_price REAL,
 			title_status TEXT, title_state TEXT, notes TEXT
 		);
+		CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT NOT NULL UNIQUE COLLATE NOCASE);
 	`);
 	return db;
 }
@@ -155,8 +164,9 @@ async function accept(db, appId, { status = "Accepted", routeSrc = ACCEPT_SRC } 
 	const parseTruckAmount = new Function(`${PARSE_AMOUNT_SRC}\nreturn parseTruckAmount;`)();
 	const registerApplicationVehicles = new Function("db", "colLetter", "parseTruckAmount",
 		`${REGISTER_VEHICLES_SRC}\nreturn registerApplicationVehicles;`)(db, colLetter, parseTruckAmount);
-	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", routeSrc)(
-		app, requireRole, db, fastBcrypt, crypto, () => {}, () => {}, colLetter, escapeHtml, sendEmail, parseTruckAmount, registerApplicationVehicles);
+	const findDriverNameClash = new Function("db", `${CLASH_SRC}\nreturn findDriverNameClash;`)(db);
+	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", routeSrc)(
+		app, requireRole, db, fastBcrypt, crypto, () => {}, () => {}, colLetter, escapeHtml, sendEmail, parseTruckAmount, registerApplicationVehicles, findDriverNameClash);
 	if (typeof handler !== "function") die("the lifted route did not register a handler");
 	const out = { status: 200, body: null };
 	const res = {

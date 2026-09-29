@@ -36,14 +36,18 @@
  *      OR IGNORE; the emails follow the transaction.
  *   §8 the username: folded to a-z, 0-9 and "." from the legal name, else the
  *      email's local part, else investor<application id>, the first that keeps
- *      a letter or a digit; a number appended while it is taken (trimmed, any
- *      case). A legal name in another script or of punctuation only used to
- *      give "" (then "1") or ".". Every username made is found by the sign-in
- *      lookup as this account and no other.
+ *      a letter or a digit; a number appended while it is taken: an account's
+ *      username (trimmed, any case), or a name findDriverNameClash() finds — a
+ *      reserved name ("Dispatch", "Investor", a built-in property name, also
+ *      when the legal name only folds to one) or a driver's name (a directory
+ *      row, or a Driver account's driver name). A legal name in another script
+ *      or of punctuation only used to give "" (then "1") or ".". Every username
+ *      made is found by the sign-in lookup as this account and no other.
  *   §9 MUTANTS: the company-name check dropped, the email check dropped, the
  *      status written before the checks; the letter-or-digit test, the email
- *      fallback, the application-id fallback and the trimmed comparison each
- *      dropped.
+ *      fallback, the application-id fallback, the name-clash test and (with the
+ *      name-clash test off, since it compares usernames too) the trimmed
+ *      comparison each dropped.
  *
  * Pure: no server, no app.db, no network, no mail (sendEmail is captured).
  *
@@ -99,6 +103,13 @@ const parseTruckAmount = (() => {
 	return new Function(`${m[0].trim()}\n${liftFunction("function parsePlainDecimal(raw) {")}\n${liftFunction('function parseTruckAmount(raw, label = "Amount", max = TRUCK_AMOUNT_MAX) {')}\nreturn parseTruckAmount;`)();
 })();
 const REGISTER_SRC = liftFunction("function registerApplicationVehicles(vehicles, appId, userId) {");
+// The naming check the username candidates go through, with what it calls.
+const CLASH_SRC = [
+	"function normalizeDriverName(s) {",
+	"function isBuiltInPropertyName(name) {",
+	"function findDriverNameClashes(name, opts = {}) {",
+	"function findDriverNameClash(name, opts = {}) {",
+].map(liftFunction).join("\n");
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 const USERS_DDL = (() => {
@@ -137,6 +148,7 @@ function makeDb() {
 			vin TEXT, license_plate TEXT, status TEXT, owner_id INTEGER, purchase_price REAL,
 			title_status TEXT, title_state TEXT, notes TEXT
 		);
+		CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT NOT NULL UNIQUE COLLATE NOCASE);
 	`);
 	db.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('super_admin', 'x', 'Super Admin', '', 'ops@logisx.example')").run();
 	return db;
@@ -166,6 +178,7 @@ async function accept(db, appId, { status = "Accepted", routeSrc = ACCEPT_SRC, d
 	const audits = [];
 	const registerApplicationVehicles = new Function("db", "colLetter", "parseTruckAmount",
 		`${REGISTER_SRC}\nreturn registerApplicationVehicles;`)(db, colLetter, parseTruckAmount);
+	const findDriverNameClash = new Function("db", `${CLASH_SRC}\nreturn findDriverNameClash;`)(db);
 	const bcrypt = {
 		hash: async (pw) => {
 			await new Promise((done) => setImmediate(done));
@@ -173,10 +186,10 @@ async function accept(db, appId, { status = "Accepted", routeSrc = ACCEPT_SRC, d
 			return `hashed:${pw.length}`;
 		},
 	};
-	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", routeSrc)(
+	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", routeSrc)(
 		{ put: (p, guard, h) => { handler = h; } }, () => (req, res, next) => next(), db, bcrypt, crypto,
 		(req, action, entity, entityId, details) => audits.push({ action, entityId, details }), () => {}, colLetter, escapeHtml,
-		(to, subject) => { mail.push({ to, subject }); return Promise.resolve(true); }, parseTruckAmount, registerApplicationVehicles);
+		(to, subject) => { mail.push({ to, subject }); return Promise.resolve(true); }, parseTruckAmount, registerApplicationVehicles, findDriverNameClash);
 	if (typeof handler !== "function") die("the lifted route did not register a handler");
 	const out = { status: 200, body: null };
 	const e = console.error;
@@ -360,6 +373,12 @@ async function usernameSection(routeSrc = ACCEPT_SRC) {
 	// POST /api/users stored it before it trimmed), and one in capitals.
 	db.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES (' trimmed.co ', 'x', 'Investor', '', 'old1@example.test')").run();
 	db.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('Taken.Name.LLC', 'x', 'Investor', '', 'old2@example.test')").run();
+	// Drivers: two one-word names in the directory (the second is the first's
+	// numbered candidate), and a Driver account whose driver name is one word,
+	// stored with spaces around it.
+	db.prepare("INSERT INTO drivers_directory (driver_name) VALUES ('Qatestsolo'), ('Qatestsolo1')").run();
+	db.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('LogisX-0101', 'x', 'Driver', ' Onename ', 'old3@example.test')").run();
+	const TRADE_MARK = String.fromCodePoint(0x2122);
 	const cases = [
 		// [what, legal name, email, the username expected (given the application id), a user to add first]
 		["a non-Latin legal name: the email's local part", "株式会社テスト", "QA.Owner+One@example.test", () => "qa.ownerone"],
@@ -372,6 +391,14 @@ async function usernameSection(routeSrc = ACCEPT_SRC) {
 		["a username held with spaces around it: a number appended", "株式会社トリム", "trimmed.co@example.test", () => "trimmed.co1"],
 		["a username held in another case: a number appended", "Taken Name LLC", "new3@example.test", () => "taken.name.llc1"],
 		["investor<id> already taken: a number appended", "合同会社テスト二", "", (id) => `investor${id}1`, (id) => `investor${id}`],
+		["the reserved name \"Dispatch\" (the dispatch desk): a number appended", "Dispatch", "desk1@example.test", () => "dispatch1"],
+		["\"Dis-patch\", which folds to the reserved name: past dispatch1 too", "Dis-patch", "desk2@example.test", () => "dispatch2"],
+		["\"Dispatch\" and a trade mark sign, which folds to the reserved name", `Dispatch${TRADE_MARK}`, "desk3@example.test", () => "dispatch3"],
+		["an email local part that is the reserved name", "株式会社デスク", "dispatch@example.test", () => "dispatch4"],
+		["the reserved name \"Investor\"", "Investor", "inv@example.test", () => "investor1"],
+		["a built-in property name", "Constructor", "proto@example.test", () => "constructor1"],
+		["a one-word driver name in the directory: past the driver holding its numbered candidate too", "QATESTSOLO", "solo@example.test", () => "qatestsolo2"],
+		["a one-word driver name on a Driver account, stored with spaces around it", "Onename", "one@example.test", () => "onename1"],
 	];
 	for (const [what, legal, email, expected, existing] of cases) {
 		const id = addApplication(db, { legal_name: legal, email, vehicles_json: "[]" });
@@ -406,8 +433,12 @@ async function mutantSection() {
 		"MUTANT the email fallback dropped: caught by §8");
 	t(failed(await usernameSection(swap(ACCEPT_SRC, "|| `investor${appId}`", '|| ""'))),
 		"MUTANT the application-id fallback dropped: caught by §8");
-	t(failed(await usernameSection(swap(ACCEPT_SRC, 'SELECT id FROM users WHERE LOWER(TRIM(username)) = LOWER(?)', 'SELECT id FROM users WHERE LOWER(username) = LOWER(?)'))),
-		"MUTANT the taken-username test not trimmed: caught by §8");
+	const noClash = swap(ACCEPT_SRC, "\n\t\t\t\t|| !!findDriverNameClash(candidate);", ";");
+	t(failed(await usernameSection(noClash)), "MUTANT the name-clash test dropped (reserved names, driver names): caught by §8");
+	// findDriverNameClash() compares usernames too (trimmed, any case), so the
+	// SQL test's trim is only observable with the name-clash test off.
+	t(failed(await usernameSection(swap(noClash, 'SELECT id FROM users WHERE LOWER(TRIM(username)) = LOWER(?)', 'SELECT id FROM users WHERE LOWER(username) = LOWER(?)'))),
+		"MUTANT the taken-username test not trimmed (the name-clash test off): caught by §8");
 	return r;
 }
 
