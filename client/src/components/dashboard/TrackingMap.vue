@@ -246,12 +246,19 @@ const panelCollapsed = ref(false)
 // drivers for dispatch triage.
 const showInactive = ref(false)
 
-// FMCSA hours-of-service clocks from GET /api/tracking/hos, keyed by
-// lowercased LogisX driver name (server resolves Routemate names/vehicles to
-// LogisX drivers; raw Routemate driverName is the fallback key). When the
-// endpoint is unavailable (Routemate disabled, no key, upstream outage) the
-// HOS pills hide entirely. Refresh rides the existing 10s `now` interval,
-// gated to the server cache's 60s TTL — no new polling loop.
+// A driver name as this view compares names: trimmed, lower-cased, runs of
+// whitespace read as one space (the server's normalizeDriverName()). The panel
+// names a driver by the directory's spelling, while a live ping and an HOS clock
+// may carry the truck assignment's or the account's, which can differ in
+// spacing as well as case.
+const normDriver = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ')
+
+// FMCSA hours-of-service clocks from GET /api/tracking/hos, keyed by the
+// LogisX driver name through normDriver() (server resolves Routemate
+// names/vehicles to LogisX drivers; raw Routemate driverName is the fallback
+// key). When the endpoint is unavailable (Routemate disabled, no key, upstream
+// outage) the HOS pills hide entirely. Refresh rides the existing 10s `now`
+// interval, gated to the server cache's 60s TTL — no new polling loop.
 const hosByDriver = ref({})
 const hosAvailable = ref(false)
 let hosFetchedAt = 0
@@ -281,7 +288,7 @@ async function fetchHos() {
     // hosFor() finds only a clock the response carried.
     const byDriver = Object.create(null)
     for (const c of (data.clocks || [])) {
-      const key = (c.logisxDriver || c.driverName || '').trim().toLowerCase()
+      const key = normDriver(c.logisxDriver || c.driverName)
       if (key) byDriver[key] = c
     }
     hosByDriver.value = byDriver
@@ -298,7 +305,7 @@ async function fetchHos() {
 
 function hosFor(loc) {
   if (!hosAvailable.value || !loc) return null
-  return hosByDriver.value[(loc.driver || '').trim().toLowerCase()] || null
+  return hosByDriver.value[normDriver(loc.driver)] || null
 }
 
 // Google Maps overlay objects (managed programmatically)
@@ -1824,30 +1831,36 @@ function onLocationUpdate(payload) {
   const targetLat = payload.latitude
   const targetLng = payload.longitude
 
-  // Case-insensitive driver match. payload.driver comes from
-  // truck_assignments.driver_name (Routemate sync) or driver_locations.driver
-  // (phone GPS) and selectedDriver was set from the locations array; their
-  // casing can differ, which would otherwise silently skip the polyline /
-  // trail / off-route updates below.
+  // Driver match through normDriver(). payload.driver is the driver's account
+  // spelling, else the truck assignment's (the ELD sync), and selectedDriver was
+  // set from the locations array, which names each driver by the directory's
+  // spelling. They can differ in case and spacing, which would otherwise
+  // silently skip the polyline / trail / off-route updates below and add a
+  // second "ghost" row for a driver already listed.
+  const payloadKey = normDriver(payload.driver)
   const isSelectedDriver = selectedDriver.value
     && payload.driver
-    && selectedDriver.value.toLowerCase() === payload.driver.toLowerCase()
+    && normDriver(selectedDriver.value) === payloadKey
 
   const idx = locations.value.findIndex(
-    (l) => l.driver.toLowerCase() === payload.driver.toLowerCase()
+    (l) => normDriver(l.driver) === payloadKey
   )
   if (idx >= 0) {
     const old = locations.value[idx]
+    // The row's own name keys its marker, its tween and its ping clock
+    // (driverMarkers, animateMarker(), lastPingAt), whatever the payload's
+    // spelling.
+    const rowDriver = old.driver
     // Stretch the tween to match the actual inter-ping gap so the pin is
     // moving continuously instead of finishing in 1s and freezing for 59s.
     // First ping for this driver falls back to the 1s default.
     const now = Date.now()
-    const prevAt = lastPingAt.get(payload.driver)
+    const prevAt = lastPingAt.get(rowDriver)
     const tweenMs = prevAt
       ? Math.min(Math.max(now - prevAt, PING_TWEEN_MIN_MS), PING_TWEEN_MAX_MS)
       : PING_TWEEN_MIN_MS
-    lastPingAt.set(payload.driver, now)
-    animateMarker(payload.driver, old.latitude, old.longitude, targetLat, targetLng, tweenMs)
+    lastPingAt.set(rowDriver, now)
+    animateMarker(rowDriver, old.latitude, old.longitude, targetLat, targetLng, tweenMs)
     // Update non-position fields immediately
     locations.value[idx].speed = payload.speed || 0
     locations.value[idx].loadId = payload.loadId || ''
