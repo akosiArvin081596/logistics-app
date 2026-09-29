@@ -198,6 +198,7 @@ const PS = String.fromCodePoint(0x2029); // PARAGRAPH SEPARATOR (Zp)
 const ZWSP = String.fromCodePoint(0x200b); // ZERO WIDTH SPACE (Cf, in EVIDENCE_TEXT_STRIP)
 const WJ = String.fromCodePoint(0x2060); // WORD JOINER (Cf, NOT in EVIDENCE_TEXT_STRIP)
 const SHY = String.fromCodePoint(0x00ad); // SOFT HYPHEN (Cf, NOT in EVIDENCE_TEXT_STRIP)
+const ZWJ = String.fromCodePoint(0x200d); // ZERO WIDTH JOINER (Cf, in EVIDENCE_TEXT_STRIP)
 const RLO = String.fromCodePoint(0x202e); // RIGHT-TO-LEFT OVERRIDE (BIDI)
 
 // -------------------------------------------------------------------- runner
@@ -536,6 +537,55 @@ section("5b. Notes — multi-line, sanitized per line, refused over 500");
 	eq(note("Advance $700 & fee — 50%", "§5b punctuation accepted"), "Advance $700 & fee — 50%", "§5b …and & is not pre-escaped");
 	// NFC, so two byte-different spellings of the same text store the same.
 	eq(note("Cafe" + String.fromCodePoint(0x301), "§5b decomposed accent accepted"), "Café", "§5b the note is NFC-normalized");
+
+	// FORMAT CHARACTERS (\p{Cf}) the strip above does not name. Each prints as
+	// nothing, so each is DELETED — a space in its place would be visible text
+	// nobody typed. Built from code points; never typed into this file.
+	const FORMAT_CHARS = [
+		[0x00ad, "SOFT HYPHEN"],
+		[0x061c, "ARABIC LETTER MARK"],
+		[0x180e, "MONGOLIAN VOWEL SEPARATOR"],
+		[0x2060, "WORD JOINER"],
+		[0x2061, "FUNCTION APPLICATION"],
+		[0x2062, "INVISIBLE TIMES"],
+		[0x2063, "INVISIBLE SEPARATOR"],
+		[0x2064, "INVISIBLE PLUS"],
+		[0x206a, "INHIBIT SYMMETRIC SWAPPING"],
+		[0x206b, "ACTIVATE SYMMETRIC SWAPPING"],
+		[0x206c, "INHIBIT ARABIC FORM SHAPING"],
+		[0x206d, "ACTIVATE ARABIC FORM SHAPING"],
+		[0x206e, "NATIONAL DIGIT SHAPES"],
+		[0x206f, "NOMINAL DIGIT SHAPES"],
+		// "The rest of Cf": one BMP and one astral (surrogate-pair) example.
+		[0xfff9, "INTERLINEAR ANNOTATION ANCHOR"],
+		[0xe0001, "LANGUAGE TAG"],
+	];
+	for (const [cp, name] of FORMAT_CHARS) {
+		const ch = String.fromCodePoint(cp);
+		const hex = "U+" + cp.toString(16).toUpperCase().padStart(4, "0");
+		// Controls: each IS a format character, and the old strip does NOT catch
+		// it — so the assertion below proves the new deletion, not the old strip.
+		ok(/^\p{Cf}$/u.test(ch), `§5b (control) ${hex} ${name} is \\p{Cf}`);
+		eq(ch.replace(M.EVIDENCE_TEXT_STRIP, ""), ch, `§5b (control) ${hex} ${name} is NOT in EVIDENCE_TEXT_STRIP`);
+		const stored = note("71" + ch + "01" + ch + ch + "850", `§5b a note with ${hex} accepted`);
+		eq(stored, "7101850", `§5b ${hex} ${name} is DELETED from the stored note (no space left behind)`);
+	}
+	const ALL_CF = FORMAT_CHARS.map(([cp]) => String.fromCodePoint(cp)).join("");
+	eq(note(ALL_CF, "§5b a note of format characters only accepted"), "", "§5b a note made ONLY of format characters stores as ''");
+	eq(note(ALL_CF + "\n" + SHY + " \n" + ALL_CF, "§5b format-only lines accepted"), "",
+		"§5b …and so do several lines of them (the trim sees nothing left)");
+	eq(note("Advance $700" + SHY + "\n" + WJ + "Balance due", "§5b format chars beside a break accepted"), "Advance $700\nBalance due",
+		"§5b format characters are deleted on each line and the \\n between them survives");
+	const PLAIN = "Advance $700 paid at pickup\nBalance due on POD\n\n  indented & <b>";
+	eq(note(PLAIN, "§5b an ordinary multi-line note accepted"), PLAIN, "§5b an ordinary note with \\n is stored unchanged");
+	// U+200D is Cf too, but the strip above already makes it a space — so a
+	// joined emoji is split into its parts (acceptable on an invoice).
+	const MAN = String.fromCodePoint(0x1f468), WOMAN = String.fromCodePoint(0x1f469);
+	eq(note(MAN + ZWJ + WOMAN, "§5b a ZWJ emoji sequence accepted"), MAN + " " + WOMAN,
+		"§5b a zero-width joiner becomes a space, splitting a joined emoji");
+	// Deleted characters never count toward the 500.
+	eq(note("x".repeat(500) + SHY.repeat(20), "§5b 500 letters + 20 soft hyphens accepted"), "x".repeat(500),
+		"§5b deleted format characters do not count against the 500 limit");
 
 	// The 500 limit, in CODEPOINTS, judged AFTER sanitizing and BEFORE any cut.
 	eq(Array.from(note("x".repeat(500), "§5b exactly 500 accepted")).length, 500, "§5b 500 characters are kept whole");
@@ -906,6 +956,20 @@ const MUTANTS = [
 		mutate: (s) => s.replace("sanitizeInvoiceNotes(src.notes, INVOICE_NOTES_SCAN_MAX)",
 			"sanitizeEvidenceText(src.notes, INVOICE_NOTES_SCAN_MAX)"),
 		expect: (m) => !m.parseInvoiceOverrides({ notes: "a\nb" }).values.notes.includes("\n"),
+	},
+	{
+		// Without the \p{Cf} pass a soft hyphen or word joiner is stored and
+		// printed on the invoice as nothing at all.
+		name: "M18 the format-character deletion is dropped from sanitizeInvoiceNotes",
+		mutate: (s) => s.replace('.replace(EVIDENCE_TEXT_STRIP, " ").replace(/\\p{Cf}+/gu, ""))',
+			'.replace(EVIDENCE_TEXT_STRIP, " "))'),
+		expect: (m) => m.parseInvoiceOverrides({ notes: "a" + SHY + "b" }).values.notes !== "ab",
+	},
+	{
+		// Spacing instead of deleting adds visible text nobody typed.
+		name: "M19 format characters become a space instead of being deleted",
+		mutate: (s) => s.replace('.replace(/\\p{Cf}+/gu, ""))', '.replace(/\\p{Cf}+/gu, " "))'),
+		expect: (m) => m.parseInvoiceOverrides({ notes: "a" + WJ + "b" }).values.notes !== "ab",
 	},
 	{
 		name: "M12 safeAttachmentName strips a leading dot-run only ONCE",

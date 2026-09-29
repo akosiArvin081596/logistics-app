@@ -77,10 +77,13 @@
 //      server-built SUBJECT carries it as typed (a literal &, never &amp;)
 //   I4-I6 an optional NOTES box prints in a labelled "Notes" box beside the totals on
 //      the invoice PDF only when it is non-empty; clearing it or Reset leaves no box
-//   I7 Approve sends the note and the Order #; Job Tracking is unchanged
+//   I7 Approve sends the note and the Order #; Job Tracking is unchanged; I7r when
+//      the server has no mail target (preview:true) the load dialog does not say
+//      "Draft ready in Gmail" and says no Gmail draft was created
 //   I8 local only (DB_PATH): a note saved on the approved draft record pre-fills the
 //      next editor and its dryRun PDF, and a preview sent with no notes key prints it
-//      (I8b) · I9 the server refuses a bad note or Order #
+//      (I8b); the pre-filled note is labelled "carried over" until it is typed into
+//      (I8h) · I9 the server refuses a bad note or Order #
 //
 // Env:
 //   BASE_URL    required — e.g. http://127.0.0.1:3181 (never production)
@@ -5246,7 +5249,10 @@ async function eldLinkSection() {
 //     letter or number; the read-only SUBJECT the server builds carries it as typed.
 //   - An optional NOTES box (500 max, line breaks kept) prints in a labelled "Notes"
 //     box beside the totals on the invoice PDF only, and only when it is non-empty.
-//     It is saved on the approved draft record, and the next dryRun pre-fills it.
+//     It is saved on the approved draft record, and the next dryRun pre-fills it,
+//     labelled as carried over until the dispatcher types into it.
+//   - An approve on a server with no mail target says so in the load dialog, never
+//     "Draft ready in Gmail".
 //   - Nothing writes Job Tracking.
 // Evidence: the page's own requests and responses (page.on), the PDF the server
 // rendered (its text, read with the app's pdfjs-dist in Node), and the form.
@@ -5254,7 +5260,7 @@ async function eldLinkSection() {
 // Spend per server process: one sign-in; POST …/draft-invoice (25 per 15 min per
 // user, the ?dryRun=1 opens included) three times (I1, I7's approve, I8's reopen)
 // plus one per candidate load whose dryRun failed; POST …/invoice-preview (120 per
-// 15 min) about sixteen times.
+// 15 min) about seventeen times.
 //
 // ⚠️ The approve (I7) creates a real Gmail draft wherever the server has a mail
 // target. boot-server.sh blanks Gmail and the n8n invoice webhook, so locally the
@@ -5335,6 +5341,10 @@ const orderField = (page) => page.locator('.idp-field', { has: page.locator('#id
 const orderErrors = (page) => orderField(page).locator('p.idp-hint-warn')
 const approveButton = (page) => page.locator('.idp-footer button.idp-btn-primary')
 const notesBox = (page) => page.locator('#idp-notes')
+// "Carried over from this load's last approved invoice …", under NOTES (I8h).
+const carriedHint = (page) => page.locator('#idp-notes-carried')
+// The message under the load's title in the load dialog, after an approve (I7r).
+const draftResultMsg = (page) => page.locator('.draft-result')
 const orderInvalid = (page) => orderInput(page).evaluate((el) => el.classList.contains('is-invalid')).catch(() => false)
 // Bring the field under test (and its hint) to the middle of the form's pane.
 async function showField(page, sel) {
@@ -5741,6 +5751,7 @@ async function invoiceSection() {
     if (wantInv('I7')) {
       const note7 = `QA-I7 note ${stamp}`
       let info = null
+      let approved = null // { status, preview } of the approve's response
       await step('I7', `Type a note and the Order # "${INV_ORDER}", then Approve & Create Draft (confirms accepted)`,
         `The approve request body carries notes exactly as typed and orderNumber "${INV_ORDER}"`, 'i7-approve', async () => {
           needEditor()
@@ -5773,6 +5784,7 @@ async function invoiceSection() {
           const hasKey = Object.prototype.hasOwnProperty.call(body, 'notes')
           const ok = hasKey && body.notes === note7 && body.orderNumber === INV_ORDER
           const pt = rj?.invoicePdfBase64 ? await pdfText(rj.invoicePdfBase64) : null
+          approved = { status: resp.status(), preview: rj?.preview === true }
           info = `POST draft-invoice → ${resp.status()}${rj?.code ? ` ${rj.code}` : ''}; response keys: ${Object.keys(rj || {}).sort().join(', ') || '—'}; preview ${rj?.preview === true}` +
             `${rj?.note ? `; note "${String(rj.note).slice(0, 100)}"` : ''}${rj?.error ? `; error "${String(rj.error).slice(0, 140)}"` : ''}; ` +
             `the approve's own PDF prints the note: ${pt ? notesAfterLabel(pt, 1).after[0] === note7 : 'no PDF in the response'}`
@@ -5782,7 +5794,35 @@ async function invoiceSection() {
           await caption(page, `Step I7 — ${verdict(ok)}: ${observed}`)
           return { verdict: verdict(ok), observed }
         })
-      if (info) record({ step: 'I7r', title: 'The approve\'s response (not scored)', expected: 'Locally: 200 with preview:true (no mail target), so no draft record is written', observed: info, verdict: 'INFO', shot: '' })
+      // I7r: what the load dialog SAYS about that approve. A server with no mail
+      // target (every local run: boot-server.sh blanks Gmail and the n8n webhook)
+      // answers 200 with preview:true and creates no draft, so the message must not
+      // send anyone to Gmail for one. Scored only then; a real draft is INFO.
+      if (info) {
+        await step('I7r', 'After the approve: its response, and the message under the load\'s title in the load dialog',
+          'When the response is preview:true (no mail target; locally always): the message does NOT say "Draft ready in Gmail" and says no Gmail draft was created. ' +
+          'Any other response: INFO', 'i7r-approve-message', async () => {
+            await draftResultMsg(page).first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {})
+            // A build from before the class existed: the innermost element carrying
+            // the old wording, so a BEFORE baseline reports what it said.
+            const msg = (await draftResultMsg(page).count())
+              ? draftResultMsg(page).first()
+              : page.locator('[role="dialog"] div', { hasText: /Draft ready in Gmail|Gmail draft/ }).last()
+            const text = (await msg.innerText().catch(() => '')).replace(/\s+/g, ' ').trim()
+            if (text) await msg.evaluate((el) => el.scrollIntoView({ block: 'center' })).catch(() => {})
+            const saysReady = /Draft ready in Gmail/i.test(text)
+            const saysNone = /no Gmail draft was created/i.test(text)
+            const observed = `${info}; the dialog's message: ${text ? `"${text.slice(0, 220)}"` : 'NONE shown'}` +
+              `${text ? `; says "Draft ready in Gmail": ${saysReady}; says no Gmail draft was created: ${saysNone}` : ''}`
+            if (!approved?.preview) {
+              await caption(page, `Step I7r — INFO: the approve made a real draft (or failed), so there is nothing to score: ${text ? `"${text.slice(0, 120)}"` : 'no message'}`)
+              return { verdict: 'INFO', observed }
+            }
+            const ok = !!text && !saysReady && saysNone
+            await caption(page, `Step I7r — ${verdict(ok)}: preview:true, and the dialog says ${text ? `"${text.slice(0, 140)}"` : 'nothing'}`)
+            return { verdict: verdict(ok), observed }
+          })
+      }
       await step('I7j', 'Job Tracking row after the edits and the approve, read again with GET /api/load/<id>',
         'Identical to I1\'s read: the editor wrote nothing to Job Tracking', 'i7j-job-tracking', async () => {
           if (!S.jtBefore) throw invSkip('no Job Tracking row was read in I1')
@@ -5801,6 +5841,7 @@ async function invoiceSection() {
     if (wantInv('I8')) {
       const note8 = `QA-I8 saved note ${stamp} & <kept>\nSecond line ${EM_DASH} after a reload`
       let i8b = null
+      let i8h = null
       await step('I8', 'Planted, local only: a saved note on this load\'s newest draft record; reload the page and open the editor again',
         'NOTES is pre-filled with the saved note exactly, and the dryRun\'s own PDF already prints it under "Notes"', 'i8-notes-prefilled', async () => {
           if (!DB_PATH) throw invSkip('no DB_PATH (the saved note is planted in the copy, so I8 runs locally only)')
@@ -5825,6 +5866,8 @@ async function invoiceSection() {
           if (!o.ok) throw new Error(`the dryRun answered ${o.err}`)
           S.open = true; S.cand = S.cand || cand
           const box = (await notesBox(page).count()) ? await notesBox(page).inputValue() : null
+          // Read now, with the pre-filled note untouched; I8h then types into the box.
+          const hintShown = await carriedHint(page).isVisible().catch(() => false)
           const echoed = o.json?.notes
           const pt = o.json?.invoicePdfBase64 ? await pdfText(o.json.invoicePdfBase64) : null
           const want = note8.split('\n')
@@ -5834,7 +5877,8 @@ async function invoiceSection() {
           const observed = hasCol
             ? `planted load_invoice_drafts #${plantedId} (the server returns it as the newest draft); after the reload: NOTES pre-filled exactly: ${box === note8}` +
               `${box !== null && box !== note8 ? ` (holds ${JSON.stringify(box.slice(0, 60))})` : box === null ? ' (no NOTES box)' : ''}; the dryRun echoes it: ${echoed === note8}; ` +
-              `the dryRun PDF: ${pt ? `"Notes" label ${nl.label}, then ${JSON.stringify(nl.after)} (as saved: ${pdfOk})` : 'no PDF (no total derived)'}`
+              `the dryRun PDF: ${pt ? `"Notes" label ${nl.label}, then ${JSON.stringify(nl.after)} (as saved: ${pdfOk})` : 'no PDF (no total derived)'}; ` +
+              `the "carried over" hint under NOTES: ${hintShown ? 'shown' : 'not shown'} (scored in I8h)`
             : `load_invoice_drafts has no notes column on this build (nothing to plant); after the reload the editor has ${box === null ? 'no NOTES box' : `a NOTES box holding ${JSON.stringify(box)}`}; ` +
               `the dryRun ${echoed === undefined ? 'has no notes key' : `echoes ${JSON.stringify(echoed)}`}`
           if (pt && nl?.label) await zoomInvoiceOn(page, totalsRow(pt))
@@ -5858,12 +5902,44 @@ async function invoiceSection() {
             }
           } catch (e) { i8b = { verdict: 'FAIL', observed: `error: ${e.message}` } }
           if (db && plantedId) cleanNotes.push(...removeCreated().map((n) => `I8 ${n}`))
+          // I8h: the note came from the last approved draft, and the form says so
+          // until the dispatcher touches it. Typed at the END of the note, as a
+          // person adding a line would; the render it triggers is waited for.
+          if (!hasCol || box !== note8) {
+            i8h = { verdict: 'SKIP', observed: `SKIPPED — ${hasCol ? 'NOTES was not pre-filled with the saved note (see I8), so nothing was carried over' : 'this build stores no note, so nothing is carried over'}; the hint shows: ${hintShown}`, shot: '' }
+          } else {
+            try {
+              const tail = ' (edited)'
+              const pv = expectPreview(page, cand.id, (b) => b.notes === note8 + tail)
+              await showField(page, '#idp-notes')
+              await caption(page, `Step I8h — the "carried over" hint under NOTES is ${hintShown ? 'shown' : 'NOT shown'}; now type "${tail.trim()}" at the end of the note`)
+              await notesBox(page).click()
+              await notesBox(page).evaluate((el) => el.setSelectionRange(el.value.length, el.value.length))
+              await page.keyboard.type(tail)
+              await page.waitForTimeout(1000)
+              const goneAfter = !(await carriedHint(page).isVisible().catch(() => false))
+              const typedOk = (await notesBox(page).inputValue()) === note8 + tail
+              if (!(await orderBlocks(page))) { await pv; await previewSettled(page) }
+              const good = hintShown && goneAfter && typedOk
+              const obs = `with the pre-filled note untouched the hint ${hintShown ? 'shows' : 'does NOT show'}; after typing at its end ` +
+                `(the box now holds the note + "${tail}": ${typedOk}) the hint is ${goneAfter ? 'gone' : 'STILL shown'}`
+              await caption(page, `Step I8h — ${verdict(good)}: ${obs}`)
+              i8h = { verdict: verdict(good), observed: obs, shot: await shot(page, 'i8h-carried-hint') }
+            } catch (e) { i8h = { verdict: 'FAIL', observed: `error: ${e.message}`, shot: await shot(page, 'i8h-carried-hint-error') } }
+          }
           return { verdict: verdict(ok), observed, shot: s }
         })
       if (i8b) {
         record({
           step: 'I8b', title: 'Planted, local only: POST invoice-preview with the notes key left out (as a tab on an older bundle sends it), while the saved note is there',
           expected: 'Its PDF prints the saved note under "Notes": the approve\'s rule, the last approved note', observed: i8b.observed, verdict: i8b.verdict, shot: '',
+        })
+      }
+      if (i8h) {
+        record({
+          step: 'I8h', title: 'Planted, local only: the pre-filled note of I8 is labelled as carried over; then type at its end',
+          expected: 'Under NOTES, "Carried over from this load\'s last approved invoice — clear it or use Reset if it no longer applies." shows while the note is untouched, and is gone once you type in the box',
+          observed: i8h.observed, verdict: i8h.verdict, shot: i8h.shot,
         })
       }
     }
