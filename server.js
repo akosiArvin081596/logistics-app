@@ -40025,6 +40025,17 @@ const INVOICE_NOTES_SCAN_MAX = 2000;
 // C0/C1 controls, zero-width and BIDI characters, and U+2028/2029 all become a
 // space, exactly as everywhere else. Only a plain \n survives as a break.
 //
+// Then every REMAINING format character (\p{Cf}) is DELETED. EVIDENCE_TEXT_STRIP
+// names only part of that category, so the rest — the soft hyphen U+00AD, the
+// Arabic letter mark U+061C, U+180E, the word joiner and invisible operators
+// U+2060–2064, U+206A–206F and the rest of Cf — would otherwise be stored and
+// printed on the invoice as nothing at all. Deleted rather than spaced: they are
+// invisible, so a space in their place would ADD visible text nobody typed.
+// U+200D, the zero-width joiner, is Cf as well; the strip above has already made
+// it a space, and either way a joined emoji (a family, a flag sequence) is split
+// into its parts — acceptable on an invoice. `\n` is a control (Cc), not Cf, and
+// the text is already split on it here, so the line breaks are untouched.
+//
 // Nothing is HTML-escaped here, by design: this is the stored, reviewed text.
 // Escaping is the renderer's job (buildInvoiceHtml esc()s it), and escaping
 // twice would print "&amp;" on the invoice.
@@ -40033,7 +40044,7 @@ function sanitizeInvoiceNotes(v, max) {
 		.normalize("NFC")
 		.replace(/\r\n?/g, "\n")
 		.split("\n")
-		.map((line) => line.replace(EVIDENCE_TEXT_STRIP, " "))
+		.map((line) => line.replace(EVIDENCE_TEXT_STRIP, " ").replace(/\p{Cf}+/gu, ""))
 		.join("\n")
 		.trim();
 	// Array.from, not slice — same surrogate-pair reasoning as sanitizeEvidenceText().
@@ -40803,8 +40814,11 @@ app.post(
 			// passes fallback "" on purpose — an empty broker name legitimately
 			// yields the bare "Invoice Order #…" form.
 			//
-			// 80, matching INVOICE_ORDER_RE, so the file name carries the WHOLE
-			// Order # the invoice prints rather than a silently shorter one.
+			// 80, matching INVOICE_ORDER_RE, so the file name carries the Order #
+			// at its full length (up to 80) rather than a silently shorter one. It
+			// is not a verbatim copy: the Windows-reserved characters
+			// \ / : * ? " < > | are still turned into spaces (and runs of spaces
+			// collapsed) by safeAttachmentName().
 			const safeName = safeAttachmentName(effBrokerName, 40, "");
 			const safeOrderNumber = safeAttachmentName(orderNumber, 80);
 			const invoiceFileName = isBison

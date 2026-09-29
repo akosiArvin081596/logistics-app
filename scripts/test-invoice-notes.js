@@ -10,7 +10,8 @@
  *      survive as real "\n" characters (shown by `white-space: pre-wrap`), never
  *      be rebuilt as <br> markup. And with NO note the document must be the
  *      exact bytes it was before notes existed, so every invoice already issued
- *      re-renders unchanged.
+ *      re-renders unchanged — pinned by a golden sha256 captured from the
+ *      pre-notes template, not merely by comparing this branch with itself.
  *
  *   §2 THE SUBJECT. buildInvoiceSubject() is an email HEADER, not HTML. It must
  *      survive nodemailer's MailComposer — which folds long headers and
@@ -31,6 +32,7 @@
  * Plain node, no server, no fixtures, no network, never touches app.db.
  * Run: node scripts/test-invoice-notes.js
  */
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const Database = require("better-sqlite3");
@@ -119,6 +121,43 @@ function renderingSection() {
 			eq(brokerInvoice.buildInvoiceHtml({ ...base, notes: v }) === plain, true,
 				`§1 ${label}: notes ${JSON.stringify(v)} renders byte-identical to no notes key`);
 		}
+	}
+
+	// ⚠️ THE GOLDEN HASH. The loop above compares this branch with ITSELF, so it
+	// would pass just as happily if the notes change had also moved a byte of the
+	// no-note invoice. This pins the no-note document to a fixed hash instead.
+	// NO_NOTE_INVOICE_SHA256 was captured from the PRE-notes lib/broker-invoice.js
+	// (commit 755f37c) and confirmed identical from the notes-aware one (718e386),
+	// so every invoice issued before notes existed re-renders to the same bytes.
+	//
+	// The fixture is fully specified on purpose — literal invoiceTo, MM/DD/YYYY
+	// dates (formatDate passes them through without a time zone) — so nothing
+	// but the template decides the output. The hash also covers the embedded
+	// logo (<repo>/logo.png, inlined as base64), so changing that file moves it.
+	//
+	// TO UPDATE IT when the template (or the logo) is changed ON PURPOSE: first
+	// confirm the no-note output was meant to move — it changes every invoice
+	// re-rendered from then on. Then run this file; the three GOLDEN failures
+	// print the new hash on their "actual" line (all three must agree). Paste it
+	// here and say in the commit message why the invoice changed. Never update it
+	// to make a change that was not supposed to touch the invoice pass.
+	const NO_NOTE_INVOICE_SHA256 = "f83cafa7fb8a24fd022a2ea3d627a8d8fee7421585e471230b6193a476412cf0";
+	const GOLDEN_FIXTURE = Object.freeze({
+		invoiceId: "08142026-1",
+		invoiceDate: "08/14/2026",
+		brokerName: "Bison Transport",
+		invoiceTo: Object.freeze({ name: "Bison Transport", email: "QPinvoicesUSA@bisontransport.com" }),
+		orderNumber: "7101850-$700 ADV",
+		poNumber: "4471",
+		deliveryDate: "08/12/2026",
+		total: "$3,000.00",
+	});
+	const sha256 = (s) => crypto.createHash("sha256").update(s, "utf8").digest("hex");
+	ok(brokerInvoice.buildInvoiceHtml(GOLDEN_FIXTURE).includes("data:image/png;base64,"),
+		"§1 (control) the golden render embeds logo.png — the file was found, so the hash is not the URL fallback's");
+	for (const [label, extra] of [["no notes key", {}], ["notes \"\"", { notes: "" }], ["notes \"  \\n \"", { notes: "  \n " }]]) {
+		eq(sha256(brokerInvoice.buildInvoiceHtml({ ...GOLDEN_FIXTURE, ...extra })), NO_NOTE_INVOICE_SHA256,
+			`§1 GOLDEN: ${label} renders the pinned pre-notes invoice (sha256)`);
 	}
 
 	// Notes are PDF-only (owner decision): the cover email must not move, even
