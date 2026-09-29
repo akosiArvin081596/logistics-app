@@ -63,6 +63,14 @@ What it covers today, by section (`ONLY` picks them):
   revoke stops a tab mid-flow (T9). The investor detail modal survives a list refresh (T10). An admin edit mid-flow
   clears the signatures (T11). Tc cleans up. Two sign-ins (the Super Admin and a throwaway test Investor). Local and
   staging. `ONLY=terms`, and see "The investor terms section" for why T0 and T1–T11 need two server processes.
+- **Investor fixes (F1–F14).** Investor config writes (F1), legal documents across investors (F2), the admin fund and
+  fuel targets (F3), the investor detail modal (F4, F5), acceptances that would collide (F6), the application status
+  select (F7), duplicate investor records (F8), previews of an id that is no investor (F9), the split shown in Admin
+  Tools and in the investor's My Loads note (F10), the `/invest` help text (F11), the account-number eye, the Docs
+  count and a refused delete's message (F12), the `/invest` thank-you after a reload (F13), and the public onboarding
+  banking route (F14). Every actor is a `QA-TEST-INV-*` account, record or application the run creates and deletes.
+  Local only (`DB_PATH`); three sign-ins; `ONLY=investorfixes`. Its F-numbers are its own: the money path's F1 is a
+  different step.
 
 Every "Expected" column states the behaviour **after** the fix. A run on a build without it (a BEFORE baseline) is
 expected to FAIL exactly the fix rows.
@@ -206,11 +214,17 @@ fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
 BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-terms ONLY=terms STEPS=T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11 DB_PATH="$W/qa.db" \
   fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
 fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
+# Part 7: the investor fixes (3 sign-ins, 4 public applications), on a fresh server process
+fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
+BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-investorfixes ONLY=investorfixes DB_PATH="$W/qa.db" \
+  fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
+fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
 ```
 
 - Headless: part 1 takes about 1.5 minutes, part 2 about 2.5 minutes, part 3 about 30 s, part 4 about 2.5 minutes
   (up to 80 s more when F1 has to plant its formula and wait for the server's cached copy of the sheet), part 5 about
-  45 s, part 6 about 1.5 minutes (T0) and 2–3 minutes (T1–T11).
+  45 s, part 6 about 1.5 minutes (T0) and 2–3 minutes (T1–T11), part 7 about 1.5 minutes (headed about 2.5
+  minutes).
 - B1 deletes its expense and puts its assignment's spelling back when it runs, so plant again before every boot that
   B1 is to read. A run whose server booted before the plant scores B1 INFO (the boot never saw the row); a copy with
   nothing planted SKIPs it.
@@ -223,7 +237,7 @@ fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
   start while `plant-journal.json` exists.
 
 ⚠️ **Login limiter:** `POST /api/auth/login` allows 20 attempts per 15 minutes per server process, counting every
-attempt. Per section: `trucks` 3, `signout` up to 20, `dispatcher` 2, `maintenance` 3, `names` 2, `eldlink` 1, `invoice` 1, `terms` 2 (the Super Admin and T7's throwaway test Investor; 0 with `STEPS=T0`) and `moneypath` up to 3 (the
+attempt. Per section: `trucks` 3, `signout` up to 20, `dispatcher` 2, `maintenance` 3, `names` 2, `eldlink` 1, `invoice` 1, `terms` 2 (the Super Admin and T7's throwaway test Investor; 0 with `STEPS=T0`), `investorfixes` 3 and `moneypath` up to 3 (the
 Super Admin and the driver, plus the Super Admin again when E1 has to file on the driver's behalf). The sign-out figure is its
 worst case: one fewer on a build without S4a's second half, and one fewer where S7 sends one sign-in (so 19 on a build
 with the fixes). It fills a whole window, so run it on a fresh server process, as the recipe does. **All five together
@@ -344,7 +358,8 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
   do E1, N1, N1b, F1, E2, B1 and RC1 (RC1 and F1 because they write the sheet, which only a local run may). P1 runs on
   a real driver (see the money-path section). I8 SKIPs (it plants the saved note), and I7 fills the form but SKIPs
   its Approve unless `E2E_INVOICE_APPROVE=1`: an approve creates a real Gmail draft wherever the server has a mail
-  target. Everything else runs unchanged, and the script discovers every id itself.
+  target. The investor-fixes section SKIPs as a whole (local only). Everything else runs unchanged, and the script
+  discovers every id itself.
 - **Expected differences:** staging's environment refresh strips identity documents. So 11a (the Kit's CDL) FAILs there,
   R10 scores only its truck-photo half, and on a build that still has the driver-files route R12 can only be
   `PASS (vacuous)` (the route answers, with no files to return).
@@ -371,10 +386,10 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
 | `BASE_URL` | Required by `e2e.mjs`. Refuses `app.logisx.com` (production). |
 | `PHASE` | `before` or `after`. Only names the output; the "Expected" column is always the after-the-fix behaviour. |
 | `OUT_TAG` | Writes `shots/<tag>/` and `results-<tag>.md` instead of `<PHASE>`, so a rehearsal cannot overwrite a baseline. |
-| `ONLY` | A comma-separated list of sections: `trucks` (1–12, R1–R16), `signout` (S1–S7), `dispatcher` (D1–D3), `maintenance` (M1), `moneypath` (P1, E1, N1, N1b, F1, E2, B1, RC1), `names` (K1–K3), `eldlink` (L1–L3), `invoice` (I1–I9), `terms` (T0–T11). Unset: all nine, in that order, then step 12's clean-up — more sign-ins than one limiter window holds (see above). |
+| `ONLY` | A comma-separated list of sections: `trucks` (1–12, R1–R16), `signout` (S1–S7), `dispatcher` (D1–D3), `maintenance` (M1), `moneypath` (P1, E1, N1, N1b, F1, E2, B1, RC1), `names` (K1–K3), `eldlink` (L1–L3), `invoice` (I1–I9), `terms` (T0–T11), `investorfixes` (F1–F14). Unset: all ten, in that order, then step 12's clean-up — more sign-ins than one limiter window holds (see above). |
 | `STEPS` | Only these sign-out, money-path or invoice cases, e.g. `STEPS=S5a,S7` (each has its own browser context), `STEPS=P1,F1` or `STEPS=E2,B1,RC1` (`P1` selects P1a and P1b; `N1` selects N1 and N1b), `STEPS=I8,I9` (`I3` selects I3a–c, `I7` selects I7, I7r and I7j, `I8` selects I8, I8b and I8h, `I9` selects I9 and I9a–c; I1 opens the editor whenever any of I1–I7 is picked), `STEPS=T0` or `STEPS=T1,T2,…,T11` (a terms step also runs the steps it builds on: T3 and T9 run T1, T4 and T7 run T2, T5 runs T4, T8 runs T5). The other sections ignore it. |
 | `HEADED=1` | A visible browser. |
-| `DB_PATH` | The copy the server runs on (inside the work dir). It is used **only** to plant stored values for steps 10, 11b–f, R3 and R15, to stage and clean up R16, to plant and read back E1, N1, N1b and E2, to read and delete B1's planted expense, to delete the rows RC1's import writes, to plant P1's own driver, to plant and delete I8's saved invoice note, and to let T8 submit a test application and hard-delete it (by id) after Tc's soft delete. Unset: those rows SKIP, P1 uses a real driver, and T8 SKIPs unless `E2E_TERMS_SUBMIT=1`. |
+| `DB_PATH` | The copy the server runs on (inside the work dir). It is used **only** to plant stored values for steps 10, 11b–f, R3 and R15, to stage and clean up R16, to plant and read back E1, N1, N1b and E2, to read and delete B1's planted expense, to delete the rows RC1's import writes, to plant P1's own driver, to plant and delete I8's saved invoice note, to let T8 submit a test application and hard-delete it (by id) after Tc's soft delete, and for the investor-fixes section (see there). Unset: those rows SKIP, P1 uses a real driver, T8 SKIPs unless `E2E_TERMS_SUBMIT=1`, and the investor-fixes section SKIPs. |
 | `E2E_TERMS_SUBMIT=1` | Lets T8 submit its test lease application on a server that is not on this machine (it writes an application; Tc soft-deletes it). Locally `DB_PATH` enables T8. |
 | `E2E_INVOICE_APPROVE=1` | Lets I7 press Approve on a server that is not on this machine. Off by default: an approve creates a real Gmail draft wherever the server has a mail target. Locally `boot-server.sh` blanks them, so I7 always approves there. |
 | `E2E_LINK_PODS=1` | For `prep-worktree.sh`, not `e2e.mjs`: link the main checkout's POD files into the worktree's `uploads/`, for the invoice section. |
@@ -922,6 +937,74 @@ has a mail target, and Tc can only soft-delete it.
   "Payment Terms" section.
 - An invite link may pre-fill and lock the legal name or email; a locked field is left as it is, and the name the form
   holds is used.
+
+## The investor-fixes section (F1–F14)
+
+`ONLY=investorfixes`, **local only** (`DB_PATH`): it plants rows (F3, F10b, F12b), reads what an acceptance created
+(F6), reads an accepted application's access token (F14), and removes the applications afterwards, which the API can
+only soft-delete. On any other server, or without `DB_PATH`, the whole section SKIPs.
+
+**Test actors only.** The copy holds real investors. Every investor account, investor record, truck and application
+the section touches is one it creates, named `QA-TEST-INV-<stamp>-…` with emails `qa-test+<stamp>-…@example.com`:
+
+- **FX0** (Super Admin API): investor accounts A and B (`POST /api/users`, random passwords kept in memory only), an
+  investor record for each (`POST /api/investors`), and a truck owned by A. The run proves `DB_PATH` is the server's
+  file by finding account A in it under the id the API lists.
+- **FX1** (the public `POST /api/public/investor-apply`, fake data): applications P and Q with the same company name,
+  and C whose email is account A's. F13 makes application E through the `/invest` UI.
+
+No real investor is signed in as, edited, uploaded for or accepted, and the creds file's investor logins are not used.
+An acceptance's temporary password is never written out; in the screenshot of the credentials dialog it is masked.
+Saved screenshots also blur, for the moment of the shot, every table row that is not QA-TEST data. A blur rather than
+a mask, because a mask box is drawn over a row even where an open dialog covers it.
+
+**What leaves the machine.** Nothing beyond the other sections: mail is blanked, so the applications' confirmation
+emails and the acceptances' welcome emails go nowhere. Each application renders its three signed PDFs in the server's
+Chromium, and `/invest` renders previews the same way. `/invest` sends an applicant to the public site 5 s after
+submitting: the run answers that navigation with a local placeholder page and aborts any other request to the
+`logisx.com` hosts.
+
+| Step | How it is shown | Expected (AFTER) |
+|---|---|---|
+| F1a | Investor A's page fetch: `PUT /api/investor/config?ownerId=<A's id>` `{"investor_split_pct":"99"}` with `X-Requested-With` | 403; `GET /api/investor/config` unchanged; no per-investor row written |
+| F1b | Super Admin's page fetch: `PUT /api/investor/config` with no `ownerId`, sending the global split's own value (nothing changes) | 400 `OWNER_ID_REQUIRED` |
+| F1c | **UI.** `/investors`, investor B's Split % cell: 45, Save. The copy's `audit_trail` is read | 200, and an audit row records the split change |
+| F2a | **UI.** Investor A uploads a document from their Legal Documents panel. B's page fetch: `DELETE /api/legal-documents/<A's id>`. A's panel is reloaded | B refused (4xx); the document still listed for A |
+| F2b, F2c | B's page fetch: `POST /api/legal-documents/upload` with `investorId` = A's record (F2b), or `truckId` = A's truck (F2c). **UI:** A's panel. `driverId` is not tried: every driver on the copy is real | Refused (4xx), or not stored against A (not in A's list) |
+| F3 | **Planted:** A's own `investor_config` rows `maintenance_fund_monthly` 98765 and `fuel_savings_target_pct` 87. **UI:** Expenses → Maintenance Fund and Fuel Logs; the two GETs behind them | The global values (800, 15%), not the planted ones |
+| F10a | The global split set to 55 (`PUT /api/investor/config`; set in the copy if the build refuses that). **UI:** Admin Tools, Fleet Configuration. Put back at once | "Owner Take %" shows 55 |
+| F10b | **Planted:** A's own split stored as `"150"`. **UI:** A's portal, My Loads expanded (the note renders with no loads) | The "Your Share" note shows the split the server applies (100) |
+| F9 | **UI:** `/investor-portals`, then `/investor-portals/99999999`. Page fetch `GET /api/investor?as_user_id=99999999`, compared with the Super Admin's own `GET /api/investor` | 404 "Investor not found"; the page says so |
+| F8 | Page fetch: `POST /api/investors` twice with one name and carrier name | The second 409 with a code; one record |
+| F5 | **UI:** `/investors` → + Add Investor (a record with no application) → its detail modal | "No application data linked" |
+| F4 | With that modal open, a page fetch `PUT /api/investors/<id>` (notes); the server emits `investors:changed`; 2 s | The modal still open |
+| F11 | **UI:** `/invest`, the guided tour resumed at its banking card, its FAQ link "Is my banking info secure?" | No "encrypted … at rest" claim, and none that bank details can be updated any time from the dashboard |
+| F13 | **UI:** the whole `/invest` flow for application E (three documents signed on the canvas), then a reload | "Thank you, <name>" after the reload |
+| F13n | While F13 signs, a trial click on each sign dialog's × (INFO) | An observation: whether the guided tour covers the × |
+| F7a | **UI:** `/investor-applications`, "Accepted" picked in P's status select; native and in-page dialogs and the `PUT …/status` are watched | A confirmation before anything is sent. (An AFTER build's dialog is confirmed, so P is accepted for what follows.) |
+| F6a, F6b | Page fetch `PUT /api/investor-applications/:id/status` "Accepted" for Q (the same company name as P) and C (A's email); the copy is read for accounts, records and trucks made | 409 with a code; the application not left Accepted; nothing made |
+| F12b | **Planted:** a fourth document row on application E. **UI:** the list's Docs cell, then E's detail | The Docs denominator is the real count (4) |
+| F7b | E soft-deleted by page fetch (the open list is not refreshed); "Reviewed" picked in its row | The refusal (409) puts the select back to the stored status |
+| F12a | **UI:** `/investors`, P's record → Banking → the eye by the account number | A real reveal (the full number) or no toggle |
+| F14 | A public page (no session) fetches `POST /api/public/investor-onboarding/<P>/banking` with P's access token, read from the copy and never printed | 404; P's bank row unchanged |
+| F12c | **UI:** `/investors`, the REC record deleted in the copy first, then Remove → Delete. The route's only refusal is an id it cannot find | The page shows the server's reason ("Investor not found") |
+| FXc | Console errors and failing responses (paths, numeric ids as `:id`, uploads cut to their folder) on every page the section opened | Recorded, not scored |
+| FXz | Clean-up (below) | Nothing left; the global split as it was |
+
+**Run order:** FX0, F1, F2, F3, F10, F9, F8, F5, F4, F11, F13 (+F13n), FX1, F7a, F6, F12b, F7b, F12a, F14, F12c, FXc,
+FXz. F7a accepts P, which F6a, F12a and F14 need; F12b plants on E before F7b removes it.
+
+**Budgets per server process:** three sign-ins; four public applications (`POST /api/public/investor-apply` allows 10 per
+15 minutes per address); about six `/invest` PDF previews (30 per 15 minutes).
+
+**Clean-up (FXz), in the `finally`:** the API first (legal documents, trucks, investor records, accounts, then the
+applications' soft delete), then the copy by exact id: the applications with their documents, onboarding and payment
+rows and the signed PDFs they name under this checkout's `uploads/`, and whatever the API refused. Then the QA-TEST
+accounts' `investor_config`, `investor_payouts` and `investor_payout_history` rows, and the `audit_trail` and
+`dispatch_notifications` rows written during the section (this private server only). The row records what is still
+above the start mark, table by table: a login session is expected, and so is the global split's row when F10a's `PUT`
+re-wrote it with its own value. The section's rows are listed in `plant-journal.json` (ids only) while they exist, and
+Ctrl-C deletes them from the copy.
 
 ## Teardown (once the whole QA cycle is done)
 

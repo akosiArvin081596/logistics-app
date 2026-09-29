@@ -102,6 +102,27 @@
 //   E2E_TERMS_SUBMIT=1) · T9 a revoke stops a tab mid-flow · T10 the investor
 //   detail modal survives a list refresh · T11 an edit mid-flow clears the
 //   signatures · Tc revokes, deletes and hard-deletes what the run made
+// Investor-fixes section (F1-F14; ONLY=investorfixes, local only, DB_PATH): every
+//   actor is a QA-TEST investor, application or record this run creates and deletes
+//   again; no real investor is signed in as, edited or uploaded for
+//   F1 an Investor's config write names only their own account (403 when it names any);
+//      an admin write without an ownerId is refused (400 OWNER_ID_REQUIRED); an admin
+//      split change writes an audit row · F2 a legal document is deleted, and uploaded
+//      against an investor or truck, only by its owner · F3 the admin fund and fuel
+//      targets read the global config, not an investor's own row (planted)
+//   F4 the investor detail modal survives an investors:changed refresh · F5 a record
+//      with no application says so · F6 an acceptance that would collide (the same
+//      company name, an email already on an account) is refused with a code and the
+//      application is not left Accepted · F7 "Accepted" asks first, and a refused
+//      save puts the select back · F8 a duplicate investor record answers 409 with a
+//      code · F9 a preview of a user id that is no investor answers "not found"
+//   F10 Admin Tools shows the stored global split; the investor's "Your share" note
+//      shows the split the server uses (planted) · F11 the applicant help text makes no
+//      "encrypted at rest" / "update any time from your dashboard" claim · F12 the
+//      account-number eye does not pretend to reveal; "Docs x/N" counts the real
+//      documents (planted); a refused delete shows the server's reason · F13 the
+//      /invest thank-you keeps the name after a reload · F14 the public onboarding
+//      banking route is gone (404) and an accepted application's bank row unchanged
 //
 // Env:
 //   BASE_URL    required — e.g. http://127.0.0.1:3181 (never production)
@@ -127,7 +148,8 @@
 //   ONLY        a comma-separated list of sections: trucks (1-12, R1-R16), signout
 //               (S1-S7), dispatcher (D1-D3), maintenance (M1), moneypath (P1, E1,
 //               N1, N1b, F1, E2, B1, RC1), names (K1, K2, K3), eldlink (L1-L3),
-//               invoice (I1-I9), terms (T0-T11). Unset = all, in that
+//               invoice (I1-I9), terms (T0-T11),
+//               investorfixes (F1-F14). Unset = all, in that
 //               order. ⚠️ The sections together sign in more often than the login
 //               limiter allows one server process (see README), so split a full run.
 //   STEPS       only these cases of the sign-out, money-path, invoice and terms
@@ -154,6 +176,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { randomBytes } from 'node:crypto'
 import paths from './paths.cjs'
 
 const BASE_URL = String(process.env.BASE_URL || '').replace(/\/+$/, '')
@@ -167,7 +190,7 @@ const SLOWMO = Number(process.env.SLOWMO ?? (HEADED ? 350 : 0))
 const [DVW, DVH] = String(process.env.DRIVER_VIEWPORT || '430x900').split('x').map(Number)
 // ONLY picks sections, e.g. ONLY=signout or ONLY=trucks,dispatcher. Unset = all.
 const ONLY = String(process.env.ONLY || '').toLowerCase()
-const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypath', 'names', 'eldlink', 'invoice', 'terms']
+const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypath', 'names', 'eldlink', 'invoice', 'terms', 'investorfixes']
 // Sign-ins (POST /api/auth/login) each section makes; the limiter allows 20 per 15
 // minutes per server process. The sign-out section's figure is its worst case: S4a's
 // second half runs, and the build sends S7's second sign-in (one fewer for each
@@ -176,10 +199,11 @@ const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypa
 // more when E1 has to file on the driver's behalf.
 // The names section signs the Dispatcher in once (K1 and K3 share the page) and
 // the Super Admin once (K2 reads the dashboard and Financials). The invoice section
-// signs the Super Admin in once; every step shares that page. The terms section's T0
+// signs the Super Admin in once; every step shares that page. The investor-fixes
+// section signs in the Super Admin and its own two QA-TEST investors, once each. The terms section's T0
 // signs nobody in (/invest is public, and it redirects a signed-in user); T1-T11
 // sign the Super Admin in once and T7's throwaway test Investor once.
-const SIGN_INS = { trucks: 3, signout: 20, dispatcher: 2, maintenance: 3, moneypath: 3, names: 2, eldlink: 1, invoice: 1, terms: 2 }
+const SIGN_INS = { trucks: 3, signout: 20, dispatcher: 2, maintenance: 3, moneypath: 3, names: 2, eldlink: 1, invoice: 1, terms: 2, investorfixes: 3 }
 // Sections that need no login at all, so they run without a creds file (e.g. on
 // staging, where no staging logins need to exist for them). The terms section is
 // one only while STEPS picks T0 alone (see TERMS_NEEDS_LOGIN).
@@ -283,6 +307,7 @@ function writeResults(final = false) {
     runs('eldlink') && 'ELD link (L1-L3)',
     runs('invoice') && 'invoice editor (I1-I9)',
     runs('terms') && `investor terms (${[...TERMS_PLAN].join(', ') || 'no step picked'})`,
+    runs('investorfixes') && 'investor fixes (F1-F14)',
   ].filter(Boolean).join(' + ')
   const lines = [
     `# ${title} — ${PHASE.toUpperCase()}`,
@@ -576,8 +601,13 @@ const originals = new Map()
 // addresses only.
 const createdRows = []
 const sheetPlants = []
+// The investor-fixes section's own rows (QA-TEST users, investor records, trucks,
+// applications and their children, legal documents, planted investor_config rows),
+// by table and id (investor_config by owner and key). Ids only, never values.
+const ifxRows = []
+const ifxUserIds = new Set() // every QA-TEST account id the section recorded, kept after its row is gone
 function writeJournal() {
-  if (!originals.size && !createdRows.length && !sheetPlants.length) {
+  if (!originals.size && !createdRows.length && !sheetPlants.length && !ifxRows.length) {
     if (fs.existsSync(JOURNAL)) fs.unlinkSync(JOURNAL)
     return
   }
@@ -585,6 +615,7 @@ function writeJournal() {
     ...[...originals.values()].map(({ table, col, id }) => ({ table, col, id })),
     ...createdRows.map(({ table, id }) => ({ table, id, created: true })),
     ...sheetPlants.map(({ range, what }) => ({ sheet: range, planted: what || 'formula (clear this cell by hand if the run died)' })),
+    ...ifxRows.map(({ table, id, owner, key }) => ({ table, ...(id != null ? { id } : { owner, key }), created: true, section: 'investorfixes' })),
   ], null, 2))
 }
 function plant(table, col, id, value) {
@@ -662,6 +693,7 @@ function removeLeftoverQaDriverRows() {
 process.on('SIGINT', () => {
   try { if (db) restoreAll() } catch { /* ignore */ }
   try { if (db) removeCreated() } catch { /* ignore */ }
+  try { if (db && ifxRows.length) ifxRemoveRowsSync() } catch { /* ignore */ }
   // A planted sheet cell cannot be put back synchronously: the journal keeps its address.
   process.exit(130)
 })
@@ -735,6 +767,12 @@ async function main() {
     try { await termsSection() } catch (e) {
       exitCode = 1
       record({ step: 'T!', title: 'Investor terms section aborted', expected: '', observed: e.stack?.split('\n').slice(0, 3).join(' ') || String(e), verdict: 'FAIL', shot: '' })
+    }
+  }
+  if (runs('investorfixes')) {
+    try { await investorFixesSection() } catch (e) {
+      exitCode = 1
+      record({ step: 'F!', title: 'Investor-fixes section aborted', expected: '', observed: e.stack?.split('\n').slice(0, 3).join(' ') || String(e), verdict: 'FAIL', shot: '' })
     }
   }
 }
@@ -7797,6 +7835,1057 @@ async function termsCleanup(S) {
     step: 'Tc', title: 'Clean-up (always runs): revoke the run\'s active invites, soft-delete (and locally hard-delete) its applications, delete its user and investor record',
     expected: 'Every step 200; nothing of the run left active', observed: notes.join('; ') || 'nothing to clean up', verdict: verdict(ok), shot: '',
   })
+}
+
+// ---------------------------------------------------------------- investor fixes (F1-F14)
+// ONLY=investorfixes, LOCAL ONLY (DB_PATH): it plants rows (F3, F10b, F12b), reads what
+// an acceptance created (F6), reads an accepted application's access token (F14), and
+// removes the applications again, which the API can only soft-delete.
+//
+// ⚠️ TEST ACTORS ONLY. The copy holds real investors. Every investor account, investor
+// record, truck and application this section touches is one it created, named
+// QA-TEST-INV-<stamp>-… (emails qa-test+<stamp>-…@example.com). No real investor is
+// signed in as, edited, uploaded for or accepted; the creds file's investor logins are
+// not used. Passwords live in memory only; an acceptance's temporary password is never
+// written out and is masked in the saved screenshot.
+//
+// Every "Expected" is the behaviour AFTER the fix: on a build without it the fix rows
+// FAIL, which is the recreation. Evidence: the page, the page's own requests (a page
+// fetch where a step has no UI), and reads of the copy (ids, statuses and counts only).
+//
+// Spend per server process: three sign-ins (the Super Admin, QA-TEST investors A and B);
+// four public applications (publicFormLimiter allows 10 per 15 minutes); six PDF
+// previews on /invest (30 per 15 minutes).
+const IFX_TABLES = new Set(['users', 'investors', 'trucks', 'legal_documents', 'investor_applications', 'investor_onboarding_documents', 'investor_config'])
+const IFX_ORDER = ['investor_config', 'legal_documents', 'investor_onboarding_documents', 'trucks', 'investors', 'users', 'investor_applications']
+function ifxNote(entry) {
+  if (!IFX_TABLES.has(entry.table)) throw new Error('table not allowed')
+  if (entry.id != null) entry.id = Number(entry.id)
+  if (entry.table === 'users') ifxUserIds.add(entry.id)
+  if (ifxRows.some((r) => r.table === entry.table && (entry.id != null ? r.id === entry.id : r.owner === entry.owner && r.key === entry.key))) return
+  ifxRows.push(entry)
+  writeJournal()
+}
+function ifxForget(table, id) {
+  const i = ifxRows.findIndex((r) => r.table === table && r.id === Number(id))
+  if (i >= 0) ifxRows.splice(i, 1)
+  writeJournal()
+}
+// Deletes, by exact id (investor_config by owner and key), the rows the section
+// recorded, children before parents, and the files those rows name under this
+// checkout's uploads/. `pick` narrows it to some of them.
+function ifxRemoveRowsSync(pick = () => true) {
+  const out = []
+  const rank = (t) => IFX_ORDER.indexOf(t)
+  const unlinkUpload = (url, dir) => {
+    if (!new RegExp(`^/uploads/${dir}/[\\w.-]+$`).test(String(url || ''))) return
+    try { fs.unlinkSync(path.join(paths.REPO, url)) } catch { /* already gone */ }
+  }
+  for (const r of ifxRows.filter(pick).sort((a, b) => rank(a.table) - rank(b.table))) {
+    const label = r.table === 'investor_config' ? `investor_config(owner ${r.owner}, ${r.key})` : `${r.table}#${r.id}`
+    try {
+      let n = 0
+      if (r.table === 'investor_config') {
+        n = db.prepare('DELETE FROM investor_config WHERE owner_id = ? AND key = ?').run(r.owner, r.key).changes
+      } else if (r.table === 'investor_applications') {
+        for (const d of db.prepare('SELECT signed_pdf_url FROM investor_onboarding_documents WHERE application_id = ?').all(r.id)) unlinkUpload(d.signed_pdf_url, 'investor-onboarding-signed')
+        for (const child of ['investor_onboarding_documents', 'investor_onboarding', 'investor_payment_info']) {
+          db.prepare(`DELETE FROM ${child} WHERE application_id = ?`).run(r.id)
+        }
+        n = db.prepare('DELETE FROM investor_applications WHERE id = ?').run(r.id).changes
+      } else if (r.table === 'users') {
+        for (const t of ['investor_config', 'investor_payouts', 'investor_payout_history']) db.prepare(`DELETE FROM ${t} WHERE owner_id = ?`).run(r.id)
+        n = db.prepare('DELETE FROM users WHERE id = ?').run(r.id).changes
+      } else if (r.table === 'legal_documents') {
+        const url = db.prepare('SELECT file_url FROM legal_documents WHERE id = ?').get(r.id)?.file_url
+        n = db.prepare('DELETE FROM legal_documents WHERE id = ?').run(r.id).changes
+        if (n) unlinkUpload(url, 'legal')
+      } else {
+        n = db.prepare(`DELETE FROM ${r.table} WHERE id = ?`).run(r.id).changes
+      }
+      out.push(`${label} ${n ? 'deleted in the copy' : 'already gone'}`)
+      ifxRows.splice(ifxRows.indexOf(r), 1)
+    } catch (e) { out.push(`${label} delete error: ${e.message}`) }
+  }
+  writeJournal()
+  return out
+}
+// Highest rowid of every table: what this section adds is whatever lies above it.
+// Table names come from the schema, never from input.
+function ifxMaxRowids() {
+  const out = {}
+  for (const { name } of db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all()) {
+    try { out[name] = db.prepare(`SELECT COALESCE(MAX(rowid), 0) AS m FROM "${String(name).replace(/"/g, '""')}"`).get().m } catch { /* WITHOUT ROWID */ }
+  }
+  return out
+}
+// A multi-line evidence box, bottom right, for the steps whose proof is a request.
+async function evidence(page, lines) {
+  try {
+    await page.evaluate((ls) => {
+      const id = '__qa_evidence__'
+      let el = document.getElementById(id)
+      if (!el) {
+        el = document.createElement('div')
+        el.id = id
+        Object.assign(el.style, {
+          position: 'fixed', right: '12px', bottom: '12px', maxWidth: '700px', zIndex: '2147483646',
+          background: 'rgba(12,12,20,0.94)', color: '#e5e7eb', padding: '10px 14px', whiteSpace: 'pre-wrap',
+          font: '500 13px/1.45 ui-monospace, Menlo, monospace', border: '2px solid #8b5cf6', borderRadius: '8px', pointerEvents: 'none',
+        })
+        ;(document.body || document.documentElement).appendChild(el)
+      }
+      el.textContent = ls.join('\n')
+    }, lines.map((l) => visible(l)))
+  } catch { /* mid-navigation — best effort */ }
+}
+async function clearEvidence(page) { try { await page.evaluate(() => document.getElementById('__qa_evidence__')?.remove()) } catch { /* ignore */ } }
+
+async function investorFixesSection() {
+  if (!LOCAL || !DB_PATH) {
+    record({ step: 'F*', title: 'Investor-fixes section', expected: 'Runs on a local server with DB_PATH', observed: 'SKIPPED — local only: it plants rows, reads what acceptances create, and removes applications (their API delete is soft)', verdict: 'SKIP', shot: '' })
+    return
+  }
+  const ownDb = !db
+  if (!db) db = openDb()
+  const T = Date.now().toString(36)
+  const TU = T.toUpperCase()
+  const NAME = (k) => `QA-TEST-INV-${TU}-${k}`
+  const EMAIL = (k) => `qa-test+${T}-${k.toLowerCase()}@example.com`
+  const UNAME = (k) => `qa-test-inv-${T}-${k.toLowerCase()}`
+  const BULLET = String.fromCodePoint(0x2022)
+  const norm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim()
+  const q1 = (sql, ...a) => db.prepare(sql).get(...a)
+  const qa = (sql, ...a) => db.prepare(sql).all(...a)
+  const codeOf = (r) => `${r.status}${r.json?.code ? ` ${r.json.code}` : ''}`
+  const errOf = (r) => (r.json?.error ? ` "${String(r.json.error).slice(0, 160)}"` : '')
+  const skip = (m) => Object.assign(new Error(`SKIPPED — ${m}`), { skip: true })
+  const globalOf = (key) => q1('SELECT value FROM investor_config WHERE owner_id = 0 AND key = ?', key)?.value
+  const invRow = (page, name) => page.locator('table.inv-table tbody tr', { has: page.locator('td.name-cell', { hasText: exactText(name) }) })
+  const detailModal = (page) => page.locator('.inv-avatar-wrap').locator('xpath=ancestor::div[contains(@style,"z-index")][1]')
+  const appRow = (page, email) => page.locator('tbody tr', { hasText: email })
+  const start = ifxMaxRowids()
+  const splitAtStart = q1("SELECT value FROM investor_config WHERE owner_id = 0 AND key = 'investor_split_pct'")?.value
+  const st = { users: {}, inv: {}, apps: {}, truckTA: null, recId: null }
+  const emailOf = { P: EMAIL('P'), Q: EMAIL('Q'), C: EMAIL('A'), E: EMAIL('E') }
+  const consoleErrs = []
+  const failedApi = []
+  const contexts = []
+  // Saved screenshots blur every table row that is not QA-TEST data (real applicants,
+  // investors, expenses, trucks) for the moment of the shot. A blur, not a mask: a mask
+  // box is drawn over a row even where an open dialog covers it, and would hide the dialog.
+  const ifxShot = async (page, name, mask = []) => {
+    if (!MASK_PII) return shot(page, name, { mask })
+    await page.evaluate(() => {
+      for (const tr of document.querySelectorAll('table tbody tr')) {
+        if (/qa-test/i.test(tr.textContent || '')) continue
+        tr.dataset.qaBlur = tr.style.filter || '-'
+        tr.style.filter = 'blur(6px)'
+      }
+    }).catch(() => {})
+    try { return await shot(page, name, { mask }) } finally {
+      await page.evaluate(() => {
+        for (const tr of document.querySelectorAll('tr[data-qa-blur]')) { tr.style.filter = tr.dataset.qaBlur === '-' ? '' : tr.dataset.qaBlur; delete tr.dataset.qaBlur }
+      }).catch(() => {})
+    }
+  }
+  // External logisx.com (the Wix site /invest sends applicants to after submitting) is
+  // never reached: a navigation there gets a local placeholder, anything else aborts.
+  const open = async (who) => {
+    const { ctx, page } = await freshPage(ADMIN_VP)
+    ctx.setDefaultTimeout(30000)
+    contexts.push(ctx)
+    await ctx.route(/^https?:\/\/([^/]*\.)?logisx\.com(\/|$)/i, (route) => (route.request().isNavigationRequest()
+      ? route.fulfill({ status: 200, contentType: 'text/html', body: '<h1>QA: navigation to logisx.com blocked by the harness</h1>' })
+      : route.abort()))
+    page.on('console', (m) => { if (m.type() === 'error') consoleErrs.push({ who, where: pathOf(page.url()), text: m.text() }) })
+    page.on('pageerror', (e) => consoleErrs.push({ who, where: pathOf(page.url()), text: `uncaught: ${e.message}` }))
+    // Failing responses behind the console errors: the path for this server (numeric
+    // segments as :id, an uploads path cut to its folder, since file names can carry a
+    // person's name), the host for anything else.
+    page.on('response', (r) => {
+      if (r.status() < 400) return
+      const u = r.url()
+      let where = ''
+      if (u.startsWith(BASE_URL)) {
+        where = pathOf(u).replace(/\/\d+(?=\/|$)/g, '/:id')
+        if (where.startsWith('/uploads/')) where = `${where.split('/').slice(0, 3).join('/')}/…`
+      } else { try { where = new URL(u).host } catch { where = '(other origin)' } }
+      failedApi.push({ who, where: pathOf(page.url()), what: `${r.request().method()} ${where} → ${r.status()}` })
+    })
+    return page
+  }
+  // One step: its own try/catch, a screenshot, one results row.
+  const step = async (id, title, expected, page, shotName, fn) => {
+    let observed = ''; let v = 'FAIL'; let s = ''
+    try {
+      await clearEvidence(page)
+      const r = await fn()
+      observed = r.observed; v = r.verdict
+      s = r.shot ?? await ifxShot(page, shotName)
+    } catch (e) {
+      observed = e.skip ? e.message : `error: ${e.message}`
+      v = e.skip ? 'SKIP' : 'FAIL'
+      s = await ifxShot(page, `${shotName}-error`)
+    }
+    record({ step: id, title, expected, observed, verdict: v, shot: s })
+  }
+  // What an acceptance of application k created, recorded for the clean-up.
+  const trackApp = (k) => {
+    const appId = st.apps[k]
+    const known = new Set(Object.values(st.users).map((u) => u.id))
+    if (!appId) return { users: [], investors: [], trucks: [] }
+    const users = qa('SELECT id FROM users WHERE LOWER(email) = LOWER(?) AND id > ?', emailOf[k], start.users || 0).map((r) => r.id).filter((id) => !known.has(id))
+    const investors = qa('SELECT id FROM investors WHERE application_id = ?', appId).map((r) => r.id)
+    const trucks = qa('SELECT id, owner_id FROM trucks WHERE unit_number LIKE ?', `INV-${appId}-%`)
+    for (const id of users) ifxNote({ table: 'users', id })
+    for (const id of investors) ifxNote({ table: 'investors', id })
+    for (const t of trucks) ifxNote({ table: 'trucks', id: t.id })
+    return { users, investors, trucks }
+  }
+  let sa = null; let ia = null; let ib = null; let pub1 = null; let pub2 = null
+  try {
+    sa = await open('Super Admin')
+    await login(sa, 'FX0 — Super Admin', CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
+
+    // ---- FX0: the QA-TEST actors (Super Admin API)
+    {
+      const notes = []
+      for (const k of ['A', 'B']) {
+        const password = randomBytes(18).toString('base64url')
+        const r = await api(sa, 'POST', '/api/users', { username: UNAME(k), password, role: 'Investor', email: EMAIL(k), fullName: NAME(k), companyName: NAME(k) })
+        const row = q1('SELECT id FROM users WHERE username = ?', UNAME(k))
+        if (row) ifxNote({ table: 'users', id: row.id })
+        if (r.status !== 200) throw new Error(`POST /api/users (${k}) → ${codeOf(r)}${errOf(r)}`)
+        const listed = ((await api(sa, 'GET', '/api/users')).json?.users || []).find((u) => u.Username === UNAME(k))
+        if (!row || !listed || Number(listed.id) !== row.id) throw new Error('DB_PATH is not the database this server runs on: the new account is not in it under the id the API lists')
+        st.users[k] = { id: row.id, password }
+        const inv = await api(sa, 'POST', '/api/investors', { userId: row.id, fullName: NAME(k), carrierName: NAME(k), status: 'Active', notes: 'QA-TEST record' })
+        if (inv.json?.id) { st.inv[k] = Number(inv.json.id); ifxNote({ table: 'investors', id: st.inv[k] }) }
+        if (inv.status !== 200 || !st.inv[k]) throw new Error(`POST /api/investors (${k}) → ${codeOf(inv)}`)
+        notes.push(`${k}: account #${row.id}, investor record #${st.inv[k]}`)
+      }
+      const today = await sa.evaluate(() => new Date().toLocaleDateString('en-CA'))
+      const tr = await api(sa, 'POST', '/api/trucks', { unitNumber: NAME('TA'), status: 'Active', ownerId: st.users.A.id, in_service_date: today, inServiceDate: today, assignedDriver: '' })
+      const trow = q1('SELECT id, owner_id FROM trucks WHERE unit_number = ?', NAME('TA'))
+      if (trow) { st.truckTA = trow.id; ifxNote({ table: 'trucks', id: trow.id }) }
+      notes.push(`truck ${NAME('TA')} → ${codeOf(tr)}${trow ? ` #${trow.id}, owned by ${trow.owner_id === st.users.A.id ? 'A' : `user ${trow.owner_id}`}` : ' (not created)'}`)
+      meta.ids.ifxInvestorA = st.users.A.id
+      meta.ids.ifxInvestorB = st.users.B.id
+      record({ step: 'FX0', title: 'Set-up (Super Admin API): QA-TEST investor accounts A and B, an investor record for each, a truck owned by A', expected: 'Created; DB_PATH is the server\'s database', observed: notes.join('; '), verdict: 'INFO', shot: '' })
+    }
+    ia = await open('QA-TEST investor A')
+    await login(ia, 'FX0 — QA-TEST investor A', UNAME('A'), st.users.A.password, '/investor')
+    ib = await open('QA-TEST investor B')
+    await login(ib, 'FX0 — QA-TEST investor B', UNAME('B'), st.users.B.password, '/investor')
+
+    // ---- F1: who may write investor config, and whether an admin split change is audited
+    await step('F1a', 'QA-TEST investor A sends PUT /api/investor/config?ownerId=<A\'s own user id> {"investor_split_pct":"99"} (page fetch from A\'s portal, X-Requested-With)',
+      '403; GET /api/investor/config unchanged; no per-investor row written', ia, 'f1a-investor-config-write', async () => {
+        const before = await api(ia, 'GET', '/api/investor/config')
+        const put = await api(ia, 'PUT', `/api/investor/config?ownerId=${st.users.A.id}`, { investor_split_pct: '99' })
+        const after = await api(ia, 'GET', '/api/investor/config')
+        const row = q1("SELECT value FROM investor_config WHERE owner_id = ? AND key = 'investor_split_pct'", st.users.A.id)
+        if (row) ifxNote({ table: 'investor_config', owner: st.users.A.id, key: 'investor_split_pct' })
+        const unchanged = String(after.json?.investor_split_pct) === String(before.json?.investor_split_pct)
+        const observed = `PUT → ${codeOf(put)}${errOf(put)}; GET split ${before.json?.investor_split_pct} before → ${after.json?.investor_split_pct} after; per-investor row stored: ${row ? `yes ("${row.value}")` : 'none'}`
+        await caption(ia, `Step F1a — ${observed}`)
+        await evidence(ia, ['F1a — QA-TEST investor A, page fetch', `GET  /api/investor/config → split ${before.json?.investor_split_pct}`,
+          `PUT  /api/investor/config?ownerId=${st.users.A.id} {"investor_split_pct":"99"} → ${codeOf(put)}`, `GET  /api/investor/config → split ${after.json?.investor_split_pct}`])
+        const s = await ifxShot(ia, 'f1a-investor-config-write')
+        ifxRemoveRowsSync((r) => r.table === 'investor_config' && r.owner === st.users.A.id)
+        return { observed, verdict: verdict(put.status === 403 && unchanged && !row), shot: s }
+      })
+    await step('F1b', 'Super Admin sends PUT /api/investor/config with no ownerId and {"investor_split_pct":"<the global value, 50>"} (page fetch)',
+      '400 OWNER_ID_REQUIRED (nothing written)', sa, 'f1b-admin-config-no-owner', async () => {
+        const g = globalOf('investor_split_pct')
+        if (g == null) throw skip('the copy has no global investor_split_pct row')
+        const put = await api(sa, 'PUT', '/api/investor/config', { investor_split_pct: String(g) })
+        const g2 = globalOf('investor_split_pct')
+        if (g2 !== g) db.prepare("UPDATE investor_config SET value = ? WHERE owner_id = 0 AND key = 'investor_split_pct'").run(g)
+        const observed = `PUT → ${codeOf(put)}${errOf(put)}; the global split "${g}" → "${g2}"${g2 !== g ? ' (put back)' : ' (the same value: nothing changed)'}`
+        await caption(sa, `Step F1b — ${observed}`)
+        await evidence(sa, ['F1b — Super Admin, page fetch', `PUT /api/investor/config (no ownerId) {"investor_split_pct":"${g}"} → ${codeOf(put)}`])
+        return { observed, verdict: verdict(put.status === 400 && put.json?.code === 'OWNER_ID_REQUIRED') }
+      })
+    await step('F1c', 'Super Admin changes QA-TEST investor B\'s split on /investors (Split % cell: 45, Save); the audit trail is read in the copy',
+      'Saved (200), and an audit_trail row records the split change', sa, 'f1c-split-audit', async () => {
+        const auditMax = q1('SELECT COALESCE(MAX(id), 0) AS m FROM audit_trail').m
+        await sa.goto(`${BASE_URL}/investors`)
+        const row = invRow(sa, NAME('B'))
+        await row.waitFor({ state: 'visible', timeout: 60000 })
+        await row.scrollIntoViewIfNeeded()
+        const input = row.locator('input.split-input')
+        await sa.waitForFunction((el) => el && !el.disabled, await input.elementHandle(), { timeout: 20000 })
+        await caption(sa, 'Step F1c — set QA-TEST investor B\'s Split % to 45 and press Save')
+        await input.fill('45')
+        const [resp] = await Promise.all([
+          sa.waitForResponse((r) => pathOf(r.url()) === '/api/investor/config' && r.request().method() === 'PUT', { timeout: 30000 }),
+          row.locator('button.split-save').click(),
+        ])
+        const stored = q1("SELECT value FROM investor_config WHERE owner_id = ? AND key = 'investor_split_pct'", st.users.B.id)
+        if (stored) ifxNote({ table: 'investor_config', owner: st.users.B.id, key: 'investor_split_pct' })
+        await sa.waitForTimeout(500)
+        const audits = qa('SELECT action, entity FROM audit_trail WHERE id > ? ORDER BY id', auditMax)
+        const splitAudits = audits.filter((a) => /split|config/i.test(`${a.action} ${a.entity}`))
+        const observed = `PUT ${pathOf(resp.url())}?ownerId=… → ${resp.status()}; B's stored split: ${stored ? `"${stored.value}"` : 'none'}; audit_trail rows written since: ${audits.length}` +
+          `${audits.length ? ` (${audits.map((a) => `${a.action}/${a.entity}`).join(', ')})` : ''}; of them about the split/config: ${splitAudits.length}`
+        await caption(sa, `Step F1c — ${observed}`)
+        const s = await ifxShot(sa, 'f1c-split-audit')
+        ifxRemoveRowsSync((r) => r.table === 'investor_config' && r.owner === st.users.B.id)
+        return { observed, verdict: verdict(resp.status() === 200 && stored?.value === '45' && splitAudits.length > 0), shot: s }
+      })
+
+    // ---- F2: legal documents across two investors
+    const legalPanel = (page) => page.locator('div.section-title', { hasText: 'Legal Documents' }).locator('xpath=..')
+    const pdfDataUrl = `data:application/pdf;base64,${PDF_BYTES.toString('base64')}`
+    let docA = null
+    await step('F2a', 'QA-TEST investor A uploads a legal document from their portal (Legal Documents panel); QA-TEST investor B sends DELETE /api/legal-documents/<A\'s document id> (page fetch)',
+      'B\'s delete is refused (4xx); the document is still listed for A', ia, 'f2a-cross-investor-delete', async () => {
+        await ia.goto(`${BASE_URL}/investor`)
+        const panel = legalPanel(ia)
+        await panel.waitFor({ state: 'visible', timeout: 120000 })
+        await panel.scrollIntoViewIfNeeded()
+        await caption(ia, 'Step F2a — QA-TEST investor A uploads a document (type Other) from their Legal Documents panel')
+        await panel.locator('.upload-row select.doc-select').last().selectOption('Other')
+        await panel.locator('input.fdz-file').setInputFiles({ name: `qa-test-legal-${T}-a.pdf`, mimeType: 'application/pdf', buffer: PDF_BYTES })
+        const [up] = await Promise.all([
+          ia.waitForResponse((r) => pathOf(r.url()) === '/api/legal-documents/upload', { timeout: 30000 }),
+          panel.locator('button.btn-upload').click(),
+        ])
+        const upJson = await up.json().catch(() => null)
+        docA = Number(upJson?.id) || null
+        if (docA) ifxNote({ table: 'legal_documents', id: docA })
+        if (up.status() !== 200 || !docA) throw new Error(`A's upload answered ${up.status()}`)
+        await panel.locator('td.file-name', { hasText: `qa-test-legal-${T}-a.pdf` }).waitFor({ state: 'visible', timeout: 20000 })
+        await caption(ib, `Step F2a — QA-TEST investor B sends DELETE /api/legal-documents/${docA} (A's document)`)
+        const del = await api(ib, 'DELETE', `/api/legal-documents/${docA}`)
+        await evidence(ib, ['F2a — QA-TEST investor B, page fetch', `DELETE /api/legal-documents/${docA} (investor A's document) → ${codeOf(del)}${errOf(del)}`])
+        const sB = await ifxShot(ib, 'f2a-b-sends-delete')
+        const still = !!q1('SELECT id FROM legal_documents WHERE id = ?', docA)
+        if (!still) ifxForget('legal_documents', docA)
+        const listA = await api(ia, 'GET', '/api/legal-documents')
+        const listed = (listA.json?.documents || []).some((d) => Number(d.id) === docA)
+        await ia.reload()
+        await panel.waitFor({ state: 'visible', timeout: 120000 })
+        await panel.scrollIntoViewIfNeeded()
+        await ia.waitForTimeout(1000)
+        const onScreen = await panel.locator('td.file-name', { hasText: `qa-test-legal-${T}-a.pdf` }).count()
+        const observed = `A's upload → 200 (#${docA}); B's DELETE → ${codeOf(del)}${errOf(del)}; afterwards the row ${still ? 'exists' : 'is GONE'} in the copy, A's list ${listed ? 'still has' : 'no longer has'} it, A's panel shows it: ${onScreen > 0} (B's side: ${path.basename(sB)})`
+        await caption(ia, `Step F2a — A's portal after B's DELETE: ${listed ? 'the document is still there' : 'the document is GONE'}`)
+        return { observed, verdict: verdict(del.status >= 400 && del.status < 500 && listed) }
+      })
+    const bUpload = async (label, extra) => {
+      const r = await api(ib, 'POST', '/api/legal-documents/upload', { fileData: pdfDataUrl, fileName: `qa-test-legal-${T}-b-${label}.pdf`, docType: 'Other', notes: 'QA-TEST', ...extra })
+      const id = Number(r.json?.id) || null
+      if (id) ifxNote({ table: 'legal_documents', id })
+      const row = id ? q1('SELECT investor_id, truck_id FROM legal_documents WHERE id = ?', id) : null
+      const listA = await api(ia, 'GET', '/api/legal-documents')
+      const inAList = !!id && (listA.json?.documents || []).some((d) => Number(d.id) === id)
+      return { r, id, row, inAList }
+    }
+    const showAPanel = async (stepId, text) => {
+      await ia.reload()
+      const panel = legalPanel(ia)
+      await panel.waitFor({ state: 'visible', timeout: 120000 })
+      await panel.scrollIntoViewIfNeeded()
+      await ia.waitForTimeout(1000)
+      await caption(ia, `Step ${stepId} — ${text}`)
+    }
+    await step('F2b', 'QA-TEST investor B uploads a legal document with investorId = QA-TEST investor A\'s investor record id (page fetch)',
+      'Refused (4xx), or stored without A\'s investor id (not in A\'s list)', ia, 'f2b-upload-as-other-investor', async () => {
+        const { r, id, row, inAList } = await bUpload('inv', { investorId: st.inv.A })
+        const againstA = !!row && Number(row.investor_id) === st.inv.A
+        const observed = `POST /api/legal-documents/upload {investorId: ${st.inv.A}} as B → ${codeOf(r)}${errOf(r)}${id ? `; stored #${id} with investor_id ${row?.investor_id === st.inv.A ? 'A\'s' : row?.investor_id}` : ''}; listed for A: ${inAList}`
+        await showAPanel('F2b', `A's own portal: B's upload "qa-test-legal-${T}-b-inv.pdf" is ${inAList ? 'LISTED here' : 'not here'}`)
+        await evidence(ia, ['F2b — QA-TEST investor B, page fetch', `POST /api/legal-documents/upload {investorId: ${st.inv.A}} → ${codeOf(r)}`, `stored against A: ${againstA}; in A's list: ${inAList}`])
+        return { observed, verdict: verdict((r.status >= 400 && r.status < 500 && !id) || (!againstA && !inAList)) }
+      })
+    await step('F2c', `QA-TEST investor B uploads a legal document with truckId = A's truck ${NAME('TA')} (page fetch). driverId is not tried: every driver on the copy is real`,
+      'Refused (4xx), or not stored against A\'s truck (not in A\'s list)', ia, 'f2c-upload-to-other-truck', async () => {
+        if (!st.truckTA) throw skip('A\'s test truck was not created')
+        const { r, id, row, inAList } = await bUpload('truck', { truckId: st.truckTA, unitNumber: NAME('TA') })
+        const againstA = !!row && Number(row.truck_id) === st.truckTA
+        const observed = `POST /api/legal-documents/upload {truckId: ${st.truckTA}} as B → ${codeOf(r)}${errOf(r)}${id ? `; stored #${id} on truck ${againstA ? `${NAME('TA')} (A's)` : row?.truck_id}` : ''}; listed for A: ${inAList}`
+        await showAPanel('F2c', `A's own portal: B's upload "qa-test-legal-${T}-b-truck.pdf" is ${inAList ? 'LISTED here' : 'not here'}`)
+        await evidence(ia, ['F2c — QA-TEST investor B, page fetch', `POST /api/legal-documents/upload {truckId: ${st.truckTA}} → ${codeOf(r)}`, `stored on A's truck: ${againstA}; in A's list: ${inAList}`])
+        return { observed, verdict: verdict((r.status >= 400 && r.status < 500 && !id) || (!againstA && !inAList)) }
+      })
+
+    // ---- F3: the admin fund and fuel targets read the GLOBAL config
+    await step('F3', 'Planted: QA-TEST investor A\'s own investor_config rows maintenance_fund_monthly = 98765 and fuel_savings_target_pct = 87; the Super Admin opens Expenses → Maintenance Fund and Fuel Logs',
+      'The admin figures use the global values (GET /api/maintenance-fund monthlyTarget and GET /api/expenses/fuel-analytics savingsTarget), not the planted ones', sa, 'f3-admin-targets', async () => {
+        const gM = globalOf('maintenance_fund_monthly')
+        const gF = globalOf('fuel_savings_target_pct')
+        const put = db.prepare('INSERT OR REPLACE INTO investor_config (owner_id, key, value) VALUES (?, ?, ?)')
+        ifxNote({ table: 'investor_config', owner: st.users.A.id, key: 'maintenance_fund_monthly' })
+        ifxNote({ table: 'investor_config', owner: st.users.A.id, key: 'fuel_savings_target_pct' })
+        put.run(st.users.A.id, 'maintenance_fund_monthly', '98765')
+        put.run(st.users.A.id, 'fuel_savings_target_pct', '87')
+        try {
+          const mf = await api(sa, 'GET', '/api/maintenance-fund')
+          const fa = await api(sa, 'GET', '/api/expenses/fuel-analytics')
+          await sa.goto(`${BASE_URL}/expenses`)
+          const tab = (label) => sa.locator('.sub-tabs button.sub-tab', { hasText: label })
+          await tab('Maintenance Fund').waitFor({ state: 'visible', timeout: 60000 })
+          await tab('Maintenance Fund').click()
+          const target = sa.locator('.metric-label', { hasText: 'Monthly Target' }).locator('xpath=..').locator('.metric-value')
+          await target.waitFor({ state: 'visible', timeout: 30000 })
+          await sa.waitForTimeout(1000)
+          const shownFund = norm(await target.innerText())
+          await caption(sa, `Step F3 — Maintenance Fund, Monthly Target: ${shownFund} (global ${gM}; planted for investor A: 98765)`)
+          const s = await ifxShot(sa, 'f3a-maintenance-target')
+          await tab('Fuel Logs').click()
+          let shownFuel = '(not rendered)'
+          try {
+            const line = sa.locator('.compliance-detail', { hasText: 'Target:' }).first()
+            await line.waitFor({ state: 'visible', timeout: 20000 })
+            await line.scrollIntoViewIfNeeded()
+            shownFuel = (norm(await line.innerText()).match(/Target:\s*[\d.]+%/) || ['(no target)'])[0]
+          } catch { /* the fuel panel may have nothing to show */ }
+          await caption(sa, `Step F3 — Fuel Logs: "${shownFuel}" (global ${gF}%; planted for investor A: 87%)`)
+          const s2 = await ifxShot(sa, 'f3b-fuel-target')
+          const okM = Number(mf.json?.monthlyTarget) === Number(gM)
+          const okF = Number(fa.json?.savingsTarget) === Number(gF)
+          const observed = `GET /api/maintenance-fund → ${mf.status}, monthlyTarget ${mf.json?.monthlyTarget} (global ${gM}); screen "${shownFund}"; ` +
+            `GET /api/expenses/fuel-analytics → ${fa.status}, savingsTarget ${fa.json?.savingsTarget} (global ${gF}); screen "${shownFuel}" (fuel shot: ${path.basename(s2)})`
+          return { observed, verdict: verdict(okM && okF), shot: s }
+        } finally {
+          ifxRemoveRowsSync((r) => r.table === 'investor_config' && r.owner === st.users.A.id)
+        }
+      })
+
+    // ---- F10: Admin Tools' Owner Take %, and the investor's "Your share" note
+    await step('F10a', 'The global split set to 55 (PUT /api/investor/config, the route the admin UI saves config through); Super Admin reloads Admin Tools (Fleet Configuration)',
+      '"Owner Take %" shows 55, the stored value; then the global is put back to 50', sa, 'f10a-owner-take', async () => {
+        const g = globalOf('investor_split_pct')
+        if (g == null) throw skip('the copy has no global investor_split_pct row')
+        let how = 'PUT /api/investor/config (no ownerId) → '
+        const put = await api(sa, 'PUT', '/api/investor/config', { investor_split_pct: '55' })
+        how += codeOf(put)
+        let planted = false
+        if (globalOf('investor_split_pct') !== '55') {
+          db.prepare("UPDATE investor_config SET value = '55' WHERE owner_id = 0 AND key = 'investor_split_pct'").run()
+          planted = true
+          how += '; set in the copy instead'
+        }
+        let shown = '(not found)'; let cfg = null; let s = ''
+        try {
+          cfg = await api(sa, 'GET', '/api/investor/config')
+          await sa.goto(`${BASE_URL}/admin/tools`)
+          const box = sa.locator('label', { hasText: 'Owner Take %' }).locator('xpath=..').locator('input')
+          await box.waitFor({ state: 'visible', timeout: 60000 })
+          await box.scrollIntoViewIfNeeded()
+          await sa.waitForTimeout(2000)
+          shown = await box.inputValue()
+          await caption(sa, `Step F10a — the stored global split is 55; Admin Tools "Owner Take %" shows ${shown}`)
+          s = await ifxShot(sa, 'f10a-owner-take')
+        } finally {
+          let back = ''
+          if (!planted) { const r = await api(sa, 'PUT', '/api/investor/config', { investor_split_pct: g }); back = `PUT back → ${r.status}` }
+          if (globalOf('investor_split_pct') !== g) { db.prepare("UPDATE investor_config SET value = ? WHERE owner_id = 0 AND key = 'investor_split_pct'").run(g); back += '; restored in the copy' }
+          st.f10Restore = `${back}; global split now "${globalOf('investor_split_pct')}"`
+        }
+        const observed = `${how}; GET /api/investor/config → split ${cfg?.json?.investor_split_pct}; "Owner Take %" shows ${shown}; ${st.f10Restore}`
+        return { observed, verdict: verdict(shown === '55' && globalOf('investor_split_pct') === g), shot: s }
+      })
+    await step('F10b', 'Planted: QA-TEST investor A\'s own split stored as "150"; A opens their portal and expands My Loads',
+      'The "Your Share" note states the split the server applies (150 clamps to 100: "gross × 100%")', ia, 'f10b-myloads-split', async () => {
+        ifxNote({ table: 'investor_config', owner: st.users.A.id, key: 'investor_split_pct' })
+        db.prepare('INSERT OR REPLACE INTO investor_config (owner_id, key, value) VALUES (?, ?, ?)').run(st.users.A.id, 'investor_split_pct', '150')
+        try {
+          await ia.goto(`${BASE_URL}/investor`)
+          const title = ia.locator('h3.section-title', { hasText: 'My Loads' })
+          await title.waitFor({ state: 'visible', timeout: 120000 })
+          const sec = title.locator('xpath=ancestor::div[contains(concat(" ", normalize-space(@class), " "), " section-card ")][1]')
+          await sec.scrollIntoViewIfNeeded()
+          const toggle = sec.locator('button.section-toggle')
+          if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click()
+          const note = sec.locator('p.footnote')
+          await note.waitFor({ state: 'visible', timeout: 15000 })
+          const text = norm(await note.innerText())
+          const loads = await sec.locator('li.load-row').count()
+          const pct = (text.match(/(\d+(?:\.\d+)?)%/) || [])[1] || '(none)'
+          await note.scrollIntoViewIfNeeded()
+          await caption(ia, `Step F10b — stored split "150"; the My Loads note reads "gross × ${pct}%" (the server applies 100)`)
+          const observed = `stored split "150"; My Loads (${loads} load row(s)) note: "${text}"; the percentage shown: ${pct}`
+          return { observed, verdict: verdict(pct === '100') }
+        } finally {
+          ifxRemoveRowsSync((r) => r.table === 'investor_config' && r.owner === st.users.A.id)
+        }
+      })
+
+    // ---- F9: preview of a user id that is no investor
+    await step('F9', 'Super Admin opens /investor-portals, then /investor-portals/99999999 (no such user), and a page fetch of GET /api/investor?as_user_id=99999999',
+      '404 "Investor not found"; the page says so instead of rendering a portal under "Previewing"', sa, 'f9-preview-missing-user', async () => {
+        if (q1('SELECT id FROM users WHERE id = 99999999')) throw skip('a user 99999999 exists on this copy')
+        await sa.goto(`${BASE_URL}/investor-portals`)
+        await sa.waitForLoadState('load')
+        await sa.waitForTimeout(2000)
+        await sa.goto(`${BASE_URL}/investor-portals/99999999`)
+        const banner = sa.locator('.preview-banner')
+        await banner.waitFor({ state: 'visible', timeout: 30000 })
+        await sa.waitForFunction(() => !document.querySelector('.skeleton-block'), null, { timeout: 120000 }).catch(() => {})
+        await sa.waitForTimeout(2000)
+        const previewing = /Previewing/.test(await banner.innerText())
+        const notFound = await sa.getByText(/investor not found/i).count()
+        const sections = await sa.locator('.section-card, .section').count()
+        const r = await api(sa, 'GET', '/api/investor?as_user_id=99999999')
+        const own = await api(sa, 'GET', '/api/investor')
+        const block = (j) => JSON.stringify(j?.production ?? null)
+        const same = r.status === 200 && own.status === 200 && r.json?.production != null && block(r.json) === block(own.json)
+        const observed = `GET /api/investor?as_user_id=99999999 → ${codeOf(r)}${errOf(r)}; its production block ${same ? 'IS IDENTICAL to' : 'differs from'} the Super Admin's own fleet-wide GET /api/investor; page: "Previewing" banner ${previewing ? 'shown' : 'absent'}, ${sections} portal section(s) rendered, "Investor not found" shown: ${notFound > 0}`
+        await caption(sa, `Step F9 — /investor-portals/99999999: ${sections} portal section(s) under the Previewing banner; API → ${r.status}${same ? ' with the fleet-wide numbers' : ''}`)
+        return { observed, verdict: verdict(r.status === 404 && notFound > 0) }
+      })
+
+    // ---- F8: a duplicate investor record
+    await step('F8', `Super Admin POST /api/investors twice with the same name and carrier name (${NAME('DUP')}) (page fetch)`,
+      'The second answers 409 with a code; one record exists', sa, 'f8-duplicate-investor', async () => {
+        const body = { fullName: NAME('DUP'), carrierName: NAME('DUP'), status: 'Active', notes: 'QA-TEST' }
+        const r1 = await api(sa, 'POST', '/api/investors', body)
+        if (r1.json?.id) ifxNote({ table: 'investors', id: r1.json.id })
+        const r2 = await api(sa, 'POST', '/api/investors', body)
+        if (r2.json?.id) ifxNote({ table: 'investors', id: r2.json.id })
+        const n = q1('SELECT COUNT(*) AS n FROM investors WHERE carrier_name = ?', NAME('DUP')).n
+        const observed = `first → ${codeOf(r1)}; second → ${codeOf(r2)}${errOf(r2)}${r2.text ? ` (body "${norm(r2.text).slice(0, 80)}")` : ''}; records under that name: ${n}`
+        await caption(sa, `Step F8 — ${observed}`)
+        await evidence(sa, ['F8 — Super Admin, page fetch', `POST /api/investors {${NAME('DUP')}} → ${codeOf(r1)}`, `POST /api/investors {${NAME('DUP')}} again → ${codeOf(r2)}${errOf(r2)}`])
+        for (const id of [r1.json?.id, r2.json?.id].filter(Boolean)) {
+          const d = await api(sa, 'DELETE', `/api/investors/${id}`)
+          if (d.status === 200) ifxForget('investors', id)
+        }
+        return { observed, verdict: verdict(r1.status === 200 && r2.status === 409 && !!r2.json?.code && n === 1) }
+      })
+
+    // ---- F5 + F4: a hand-added record's detail modal
+    await step('F5', `Super Admin adds a record on /investors (+ Add Investor: ${NAME('REC')}, no application) and opens its detail modal`,
+      'The modal says "No application data linked" (not an empty application body)', sa, 'f5-no-application', async () => {
+        await sa.goto(`${BASE_URL}/investors`)
+        await sa.locator('table.inv-table').waitFor({ state: 'visible', timeout: 60000 })
+        await sa.locator('summary.form-toggle').click()
+        const form = sa.locator('details.form-accordion')
+        await field(form, 'Investor Name *').fill(NAME('REC'))
+        await field(form, 'Notes (optional)').fill('QA-TEST record (F4, F5)')
+        await caption(sa, `Step F5 — + Add Investor: ${NAME('REC')} (hand-added, no application)`)
+        const [resp] = await Promise.all([
+          sa.waitForResponse((r) => pathOf(r.url()) === '/api/investors' && r.request().method() === 'POST', { timeout: 30000 }),
+          sa.locator('button.btn-add').click(),
+        ])
+        const j = await resp.json().catch(() => null)
+        st.recId = Number(j?.id) || null
+        if (st.recId) ifxNote({ table: 'investors', id: st.recId })
+        // The add reloads the list, and so does the investors:changed event it emits:
+        // let both land first, or the second reload closes the modal (that is F4).
+        await sa.waitForTimeout(3500)
+        await sa.locator('table.inv-table').waitFor({ state: 'visible', timeout: 30000 })
+        const row = invRow(sa, NAME('REC'))
+        await row.waitFor({ state: 'visible', timeout: 30000 })
+        await row.scrollIntoViewIfNeeded()
+        await row.locator('td.name-cell').click()
+        await sa.locator('.inv-avatar-wrap').waitFor({ state: 'visible', timeout: 15000 })
+        await sa.waitForTimeout(800)
+        const text = norm(await detailModal(sa).innerText())
+        const says = /no application data linked/i.test(text)
+        const instead = /company & business/i.test(text) ? 'a "Company & Business" section holding only the record name (Legal Name) and an empty Address' : 'no application section'
+        await caption(sa, `Step F5 — detail modal of a hand-added record: "No application data linked" ${says ? 'shown' : 'NOT shown'}`)
+        return { observed: `POST /api/investors → ${resp.status()} (#${st.recId}); modal open; "No application data linked" shown: ${says}; it shows ${instead}`, verdict: verdict(says) }
+      })
+    await step('F4', 'With that detail modal open, a page fetch PUT /api/investors/<id> changes its notes (the server emits investors:changed); then 2 s',
+      'The detail modal is still open', sa, 'f4-modal-after-refresh', async () => {
+        if (!st.recId) throw skip('F5 made no record')
+        if (!(await sa.locator('.inv-avatar-wrap').isVisible())) throw new Error('the detail modal is not open')
+        const reload = sa.waitForResponse((r) => pathOf(r.url()) === '/api/investors' && r.request().method() === 'GET', { timeout: 10000 }).catch(() => null)
+        const put = await api(sa, 'PUT', `/api/investors/${st.recId}`, { notes: `QA-TEST F4 ${T}` })
+        const got = await reload
+        await sa.waitForTimeout(2000)
+        const stillOpen = await sa.locator('.inv-avatar-wrap').isVisible()
+        const observed = `PUT → ${codeOf(put)}; the list reloaded (GET /api/investors): ${!!got}; 2 s later the modal is ${stillOpen ? 'still open' : 'CLOSED'}`
+        await caption(sa, `Step F4 — ${observed}`)
+        return { observed, verdict: verdict(put.status === 200 && stillOpen) }
+      })
+
+    // ---- F11: the /invest help text
+    pub1 = await open('Public /invest (help)')
+    await step('F11', '/invest: the guided tour\'s banking card and its FAQ "Is my banking info secure?" (client/src/wizard/data/knowledge-base.json)',
+      'No claim that bank details are encrypted at rest, and none that they can be updated any time from the investor dashboard', pub1, 'f11-invest-help', async () => {
+        await pub1.goto(`${BASE_URL}/invest`)
+        const legal = pub1.locator('input[data-wizard-target="legal-name"]')
+        await legal.waitFor({ state: 'visible', timeout: 30000 })
+        // The tour resumes at its banking card, as it would for an applicant who reached it.
+        await pub1.evaluate(() => localStorage.setItem('logisx_wizard_state', JSON.stringify({ currentStepId: 'BANKING_INTRO', history: ['WELCOME'], completed: false, dismissed: false, lastSavedAt: new Date().toISOString() })))
+        await pub1.reload()
+        await legal.waitFor({ state: 'visible', timeout: 30000 })
+        await pub1.locator('button.wizard-fab').click()
+        const panel = pub1.locator('aside.wizard-panel')
+        await panel.waitFor({ state: 'visible', timeout: 15000 })
+        const card = norm(await panel.innerText())
+        await caption(pub1, 'Step F11 — the guided tour\'s banking card; open its FAQ link "Is my banking info secure?"')
+        await panel.locator('.faq-link', { hasText: 'Is my banking info secure?' }).click()
+        const drawer = pub1.locator('.faq-drawer')
+        await drawer.waitFor({ state: 'visible', timeout: 10000 })
+        const answer = norm(await drawer.locator('.single-a').innerText())
+        const atRest = /at rest/i.test(answer)
+        const anyTime = /any time from your investor dashboard/i.test(answer)
+        await caption(pub1, `Step F11 — FAQ answer: "encrypted … at rest": ${atRest}; "update it any time from your investor dashboard": ${anyTime}`, false)
+        await drawer.locator('.single-a').waitFor({ state: 'visible', timeout: 5000 })
+        const s = await ifxShot(pub1, 'f11-invest-help')
+        const cardClaim = (card.match(/[^.]*encrypted[^.]*\./i) || [''])[0].trim()
+        return { observed: `FAQ answer shown: "${answer}"; banking card: "${cardClaim || '(no encryption claim)'}"`, verdict: verdict(!atRest && !anyTime), shot: s }
+      })
+
+    // ---- F13: the /invest flow, then a reload of the thank-you page (application E)
+    pub2 = await open('Public /invest (apply)')
+    await step('F13', `A QA-TEST applicant (${NAME('E')}) completes /invest in the UI — three documents signed on the canvas — then reloads the thank-you page`,
+      `After the reload the page still reads "Thank you, ${NAME('E')}."`, pub2, 'f13b-thank-you-after-reload', async () => {
+        const p = pub2
+        await p.goto(`${BASE_URL}/invest`)
+        await p.locator('input[data-wizard-target="legal-name"]').waitFor({ state: 'visible', timeout: 30000 })
+        await caption(p, `Step F13 — step 1 of 3: ${NAME('E')}, fake QA-TEST details`)
+        await p.locator('input[data-wizard-target="legal-name"]').fill(NAME('E'))
+        await p.locator('select[data-wizard-target="entity-type"]').selectOption('LLC')
+        await p.locator('input[data-wizard-target="address"]').fill('1 QA Test Way, Testville, TX 77001')
+        await p.locator('input[data-wizard-target="phone"]').fill('555-010-0100')
+        await p.locator('input[data-wizard-target="email"]').fill(EMAIL('E'))
+        await p.locator('input[data-wizard-target="ein-ssn"]').fill('00-0000001')
+        await p.locator('[data-wizard-target="continue-step0"]').click()
+        await p.locator('input[data-wizard-target="fleet-size"]').waitFor({ state: 'visible', timeout: 15000 })
+        await caption(p, 'Step F13 — step 2 of 3: one vehicle, then sign the three documents')
+        await p.locator('input[data-wizard-target="fleet-size"]').fill('1')
+        await p.locator('select[data-wizard-target="vehicle-make"]').selectOption('Freightliner')
+        await p.locator('select[data-wizard-target="vehicle-model"]').selectOption('Cascadia')
+        await p.locator('input[data-wizard-target="vehicle-year"]').fill('2020')
+        await p.locator('input[data-wizard-target="vehicle-vin"]').fill(`QATESTVINE${TU}`.slice(0, 17))
+        const cards = p.locator('.doc-card')
+        const nDocs = await cards.count()
+        // The guided tour opens by itself 1.2 s after a first visit and minimizes when the
+        // page is used. Before each close, a trial click checks what the × is under.
+        const closeSignDialog = async (modal, i) => {
+          const btn = modal.locator('button.modal-close')
+          try { await btn.click({ trial: true, timeout: 2500 }) } catch (e) {
+            const m = String(e.message)
+            if (!st.tourNote) {
+              const by = /minimized-tab/.test(m) ? 'the minimized guide tab ("Restore guide")' : /wizard/.test(m) ? 'the guided tour panel' : /intercepts pointer events/.test(m) ? 'another element' : 'nothing clickable'
+              st.tourNote = `document ${i + 1} of ${nDocs}: a trial click on the sign dialog's × found it covered by ${by}; a real click there would hit the tour, and the dialog has no other close control. Escape closed the tour, then the × worked`
+              await caption(p, `Step F13 — new: the sign dialog's × is covered by ${by}`, false)
+              // The caption bar would sit over the dialog's header (and its ×): hide it for this shot.
+              await evidence(p, ['F13n — the sign dialog\'s × (top right) is covered by', `${by} (the tab at the right edge)`])
+              await p.evaluate(() => { const c = document.getElementById('__qa_caption__'); if (c) c.style.display = 'none' }).catch(() => {})
+              st.tourShot = await shot(p, 'f13n-tour-covers-close')
+              await p.evaluate(() => { const c = document.getElementById('__qa_caption__'); if (c) c.style.display = '' }).catch(() => {})
+              await clearEvidence(p)
+            }
+            await p.keyboard.press('Escape')
+            await p.waitForTimeout(500)
+          }
+          await btn.click()
+        }
+        for (let i = 0; i < nDocs; i++) {
+          await cards.nth(i).click()
+          const modal = p.locator('.modal-overlay').filter({ has: p.locator('.sign-panel') })
+          await modal.waitFor({ state: 'visible', timeout: 15000 })
+          const agree = modal.locator('.sign-checkbox input[type="checkbox"]')
+          await agree.check().catch(async () => { await modal.locator('label.sign-checkbox').click() })
+          if (!(await agree.isChecked())) throw new Error('the consent box did not tick')
+          await modal.locator('input.sign-input').fill('QA Tester')
+          const canvas = modal.locator('canvas.sig-canvas')
+          await canvas.scrollIntoViewIfNeeded()
+          const box = await canvas.boundingBox()
+          await p.mouse.move(box.x + 20, box.y + box.height * 0.65)
+          await p.mouse.down()
+          for (let j = 1; j <= 10; j++) await p.mouse.move(box.x + 20 + (j * (box.width - 40)) / 10, box.y + box.height * (j % 2 ? 0.3 : 0.7), { steps: 3 })
+          await p.mouse.up()
+          await modal.locator('button.sign-btn').click()
+          await modal.locator('.sign-done').waitFor({ state: 'visible', timeout: 20000 }).catch(() => {})
+          if (await modal.isVisible()) await closeSignDialog(modal, i)
+          await modal.waitFor({ state: 'hidden', timeout: 10000 }).catch(() => {})
+        }
+        if (await p.locator('aside.wizard-panel').isVisible().catch(() => false)) { await p.keyboard.press('Escape'); await p.waitForTimeout(400) }
+        await p.locator('[data-wizard-target="continue-step1"]').click()
+        await p.locator('input[data-wizard-target="bank-name"]').waitFor({ state: 'visible', timeout: 15000 })
+        await caption(p, 'Step F13 — step 3 of 3: fake QA-TEST bank details, then Review & Complete')
+        await p.locator('input[data-wizard-target="bank-name"]').fill('QA Test Bank')
+        await p.keyboard.press('Tab')
+        await p.locator('input[data-wizard-target="routing-number"]').fill('000000000')
+        await p.locator('input[data-wizard-target="account-number"]').fill('000111222069')
+        await p.locator('[data-wizard-target="review-open"]').click()
+        const [resp] = await Promise.all([
+          p.waitForResponse((r) => pathOf(r.url()) === '/api/public/investor-apply' && r.request().method() === 'POST', { timeout: 180000 }),
+          p.locator('[data-wizard-target="submit-confirm"]').click(),
+        ])
+        const j = await resp.json().catch(() => null)
+        st.apps.E = Number(j?.applicationId) || null
+        if (st.apps.E) ifxNote({ table: 'investor_applications', id: st.apps.E })
+        if (resp.status() !== 200 || !st.apps.E) throw new Error(`POST /api/public/investor-apply → ${resp.status()}${j?.error ? ` "${j.error}"` : ''}`)
+        const success = p.locator('.success-wrap')
+        await success.waitFor({ state: 'visible', timeout: 30000 })
+        const first = norm(await success.locator('p').first().innerText())
+        await caption(p, `Step F13 — submitted (application #${st.apps.E}): "${first.slice(0, 80)}" — now reload`, false)
+        const s1 = await shot(p, 'f13a-thank-you')
+        // The page sends the applicant to logisx.com 5 s after submitting (the harness serves a
+        // placeholder there): come back to the same /invest URL if that already happened.
+        if (pathOf(p.url()) === '/invest') await p.reload()
+        else await p.goto(`${BASE_URL}/invest`)
+        await success.waitFor({ state: 'visible', timeout: 30000 })
+        const after = norm(await success.locator('p').first().innerText())
+        await caption(p, `Step F13 — after the reload: "${after.slice(0, 90)}"`)
+        const observed = `POST /api/public/investor-apply → 200 (application #${st.apps.E}, ${j.documentsSigned}/${j.documentsTotal} documents signed); before the reload: "${first.slice(0, 70)}"; after: "${after.slice(0, 70)}" (first shot: ${path.basename(s1)})`
+        return { observed, verdict: verdict(after.includes(`Thank you, ${NAME('E')}`)) }
+      })
+
+    record({
+      step: 'F13n', title: 'NEW (not in the fix list): on /invest the guided tour, which opens by itself on a first visit, and the sign dialog\'s × (1400×900 window)',
+      expected: '(an observation, not scored)', observed: st.tourNote || 'not seen in this run: the × was clickable each time', verdict: 'INFO', shot: st.tourShot || '',
+    })
+
+    // ---- FX1: the applications F6, F7, F12 and F14 act on (public API, QA-TEST data)
+    {
+      const notes = []
+      try {
+        if (!pub2.url().startsWith(BASE_URL)) await pub2.goto(`${BASE_URL}/invest`)
+        const sig = await pub2.evaluate(() => {
+          const c = document.createElement('canvas'); c.width = 300; c.height = 80
+          const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, 300, 80)
+          g.strokeStyle = '#111'; g.lineWidth = 3; g.beginPath(); g.moveTo(12, 60); g.bezierCurveTo(80, 0, 160, 90, 288, 18); g.stroke()
+          return c.toDataURL('image/png')
+        })
+        const consent = { agreed: true, text: 'I have read and agree to the terms of this document' }
+        const body = (k, legal, email) => ({
+          legal_name: legal, dba: '', entity_type: 'LLC', address: '1 QA Test Way, Testville, TX 77001', contact_person: 'QA Tester', contact_title: 'Owner',
+          phone: '555-010-0100', email, years_in_operation: '1', industry_experience: 'No', fleet_size: '1', preferred_communication: 'Email',
+          tax_classification: 'Individual/LLC', ein_ssn: '00-0000001', bankruptcy_liens: '', reporting_preference: 'Digital Portal',
+          vehicles: [{ year: '2020', make: 'Freightliner', model: 'Cascadia', vin: `QATESTVIN${k}${TU}`.slice(0, 17), licensePlate: '', mileage: '', titleState: '' }],
+          banking: { bank_name: 'QA Test Bank', account_type: 'Business Checking', routing_number: '000000000', account_number: `000111222${k.charCodeAt(0)}`, account_name: legal },
+          signatures: Object.fromEntries(['master_agreement', 'vehicle_lease', 'w9'].map((d) => [d, { text: 'QA Tester', image: sig, consent }])),
+        })
+        for (const [k, legal] of [['P', NAME('SAME')], ['Q', NAME('SAME')], ['C', NAME('C')]]) {
+          const r = await api(pub2, 'POST', '/api/public/investor-apply', body(k, legal, emailOf[k]))
+          const id = Number(r.json?.applicationId) || null
+          if (id) { st.apps[k] = id; ifxNote({ table: 'investor_applications', id }) }
+          notes.push(`${k} (${legal}${k === 'C' ? ', email = QA-TEST account A\'s' : ''}) → ${codeOf(r)}${id ? ` #${id}, ${r.json?.documentsSigned}/${r.json?.documentsTotal} documents signed` : errOf(r)}`)
+        }
+      } catch (e) { notes.push(`error: ${e.message}`) }
+      record({ step: 'FX1', title: 'Set-up (public API, fake data): QA-TEST applications P and Q with the same company name, and C whose email is QA-TEST account A\'s', expected: '200 each', observed: notes.join('; '), verdict: 'INFO', shot: '' })
+    }
+
+    // ---- F7a: "Accepted" asks first
+    await step('F7a', 'Super Admin on /investor-applications picks "Accepted" in QA-TEST application P\'s status select',
+      'A confirmation dialog appears before any request is sent', sa, 'f7a-accept-select', async () => {
+        if (!st.apps.P) throw skip('application P was not created')
+        await sa.goto(`${BASE_URL}/investor-applications`)
+        const row = appRow(sa, EMAIL('P'))
+        await row.waitFor({ state: 'visible', timeout: 30000 })
+        await row.scrollIntoViewIfNeeded()
+        const seen = { native: [], puts: [] }
+        const onDialog = (d) => { seen.native.push({ t: Date.now(), type: d.type() }); d.accept().catch(() => {}) }
+        const onReq = (r) => { if (r.method() === 'PUT' && /^\/api\/investor-applications\/\d+\/status$/.test(pathOf(r.url()))) seen.puts.push({ t: Date.now() }) }
+        sa.on('dialog', onDialog)
+        sa.on('request', onReq)
+        try {
+          await caption(sa, 'Step F7a — pick "Accepted" in application P\'s status select (the PUT is watched)', false)
+          const respP = sa.waitForResponse((r) => pathOf(r.url()) === `/api/investor-applications/${st.apps.P}/status`, { timeout: 30000 }).catch(() => null)
+          const t0 = Date.now()
+          await row.locator('select').selectOption('Accepted')
+          await sa.waitForTimeout(1500)
+          let asked = false; let how = 'none'; let confirmShot = ''
+          if (seen.native.length && (!seen.puts.length || seen.native[0].t <= seen.puts[0].t)) { asked = true; how = `a native ${seen.native[0].type}` }
+          if (!seen.puts.length && !asked) {
+            const dlg = sa.locator('[role="dialog"], [role="alertdialog"], .confirm-dialog').filter({ hasText: /accept/i }).first()
+            if (await dlg.isVisible().catch(() => false)) {
+              asked = true; how = 'an in-page dialog'
+              confirmShot = await ifxShot(sa, 'f7a-confirm-dialog')
+              await dlg.getByRole('button', { name: /accept|confirm|yes/i }).last().click().catch(() => {})
+            }
+          }
+          const resp = await respP
+          await sa.waitForTimeout(800)
+          const credsDialog = sa.locator('[role="dialog"]', { hasText: 'Investor Account Created' })
+          const credsShown = await credsDialog.isVisible().catch(() => false)
+          const sentMs = seen.puts.length ? seen.puts[0].t - t0 : null
+          let status = q1('SELECT status FROM investor_applications WHERE id = ?', st.apps.P)?.status
+          const observed0 = `confirmation: ${how}; PUT …/${st.apps.P}/status ${sentMs == null ? 'not sent' : `sent ${sentMs} ms after the pick${asked ? '' : ' with nothing asked'}`}${resp ? ` → ${resp.status()}` : ''}; the credentials dialog (username + temporary password, masked in the shot) shown: ${credsShown}`
+          await caption(sa, `Step F7a — ${observed0.slice(0, 180)}`)
+          const s = await ifxShot(sa, 'f7a-accept-select', [sa.locator('[role="dialog"] .font-mono')])
+          if (credsShown) await sa.keyboard.press('Escape').catch(() => {})
+          let apiNote = ''
+          if (status !== 'Accepted') {
+            const r = await api(sa, 'PUT', `/api/investor-applications/${st.apps.P}/status`, { status: 'Accepted' })
+            apiNote = `; P then accepted through the API for the steps that need it → ${codeOf(r)}`
+            status = q1('SELECT status FROM investor_applications WHERE id = ?', st.apps.P)?.status
+          }
+          const made = trackApp('P')
+          return { observed: `${observed0}; P now ${status}; created: ${made.users.length} account(s), ${made.investors.length} investor record(s), ${made.trucks.length} truck(s)${apiNote}${confirmShot ? ` (dialog shot: ${path.basename(confirmShot)})` : ''}`, verdict: verdict(asked), shot: s }
+        } finally {
+          sa.off('dialog', onDialog)
+          sa.off('request', onReq)
+        }
+      })
+
+    // ---- F6: acceptances that collide
+    const acceptCase = async (k, what) => {
+      if (!st.apps[k]) throw skip(`application ${k} was not created`)
+      const r = await api(sa, 'PUT', `/api/investor-applications/${st.apps[k]}/status`, { status: 'Accepted' })
+      const made = trackApp(k)
+      const status = q1('SELECT status FROM investor_applications WHERE id = ?', st.apps[k])?.status
+      const sameName = q1('SELECT COUNT(*) AS n FROM investors WHERE carrier_name = ?', NAME('SAME')).n
+      const observed = `→ ${codeOf(r)}${r.json?.message ? ` "${r.json.message}"` : ''}${r.status !== 200 ? errOf(r) : ''}; accountCreated: ${!!r.json?.accountCreated}; application ${k} now ${status}; ` +
+        `created for it: ${made.users.length} account(s), ${made.investors.length} investor record(s), ${made.trucks.length} truck(s)` +
+        `${made.trucks.length ? ` (owned by its new account: ${made.trucks.every((t) => made.users.includes(t.owner_id))})` : ''}; investor records named ${NAME('SAME')}: ${sameName}`
+      await caption(sa, `Step F6 — accept application ${k} (${what}): ${codeOf(r)}; ${made.users.length} account(s), ${made.investors.length} investor record(s), ${made.trucks.length} truck(s)`)
+      await evidence(sa, [`F6 — Super Admin, page fetch: PUT /api/investor-applications/${st.apps[k]}/status {"status":"Accepted"}`, `→ ${codeOf(r)}${r.json?.message ? ` "${r.json.message}"` : ''}`,
+        `application ${k} now ${status}`, `created: ${made.users.length} account(s), ${made.investors.length} investor record(s), ${made.trucks.length} truck(s)`])
+      return { observed, verdict: verdict(r.status === 409 && !!r.json?.code && status !== 'Accepted' && !made.users.length && !made.trucks.length) }
+    }
+    await step('F6a', 'Super Admin accepts QA-TEST application Q, whose company name is the same as the already accepted P (PUT …/status, page fetch)',
+      '409 with a code; Q not left Accepted; no account, investor record or truck made for it', sa, 'f6a-accept-same-name', () => acceptCase('Q', 'same company name as P'))
+    await step('F6b', 'Super Admin accepts QA-TEST application C, whose applicant email is QA-TEST account A\'s (PUT …/status, page fetch)',
+      '409 with a code; C not left Accepted', sa, 'f6b-accept-email-taken', async () => {
+        const r = await acceptCase('C', 'email already on an account')
+        await sa.goto(`${BASE_URL}/investor-applications`)
+        await appRow(sa, EMAIL('P')).waitFor({ state: 'visible', timeout: 30000 })
+        await caption(sa, 'Step F6 — /investor-applications after the three acceptances (P, Q, C)')
+        await evidence(sa, ['F6 — application statuses in the copy', ...['P', 'Q', 'C'].map((k) => `${k}: ${q1('SELECT status FROM investor_applications WHERE id = ?', st.apps[k])?.status}`)])
+        return r
+      })
+
+    // ---- F12b: "Docs x/3"
+    await step('F12b', 'Planted: a fourth onboarding-document row on QA-TEST application E; the /investor-applications "Docs" column, then E\'s detail',
+      'The Docs column\'s denominator is the application\'s real document count (4 here), as its detail shows', sa, 'f12b-docs-denominator', async () => {
+        if (!st.apps.E) throw skip('application E (F13) was not created')
+        const ins = db.prepare("INSERT INTO investor_onboarding_documents (application_id, doc_key, doc_name, signed) VALUES (?, 'qa_test_extra', 'QA-TEST extra document', 0)").run(st.apps.E)
+        const extraId = Number(ins.lastInsertRowid)
+        ifxNote({ table: 'investor_onboarding_documents', id: extraId })
+        try {
+          const count = q1('SELECT COUNT(*) AS n FROM investor_onboarding_documents WHERE application_id = ?', st.apps.E).n
+          await sa.goto(`${BASE_URL}/investor-applications`)
+          const row = appRow(sa, EMAIL('E'))
+          await row.waitFor({ state: 'visible', timeout: 30000 })
+          await row.scrollIntoViewIfNeeded()
+          const cellText = norm(await row.locator('td').nth(4).innerText())
+          const list = await api(sa, 'GET', '/api/investor-applications')
+          const listRow = Array.isArray(list.json) ? list.json.find((a) => Number(a.id) === st.apps.E) : null
+          const docFields = listRow ? Object.keys(listRow).filter((k) => /doc|total/i.test(k)) : []
+          await row.getByRole('button', { name: 'View' }).click()
+          const dlg = sa.locator('[role="dialog"]').filter({ hasText: 'Documents (' })
+          await dlg.waitFor({ state: 'visible', timeout: 20000 })
+          const title = norm(await dlg.getByText(/Documents \(\d+\/\d+ signed\)/).first().innerText())
+          await caption(sa, `Step F12b — the row reads "Docs ${cellText}"; the detail reads "${title}" (${count} document rows)`)
+          const s = await ifxShot(sa, 'f12b-docs-denominator')
+          await sa.keyboard.press('Escape').catch(() => {})
+          const real = qa("SELECT c, COUNT(*) AS n FROM (SELECT (SELECT COUNT(*) FROM investor_onboarding_documents d WHERE d.application_id = ia.id) AS c FROM investor_applications ia WHERE ia.id <= ? AND ia.status != 'Draft') GROUP BY c", start.investor_applications || 0)
+          return {
+            observed: `row "Docs": "${cellText}"; application E has ${count} document rows; detail: "${title}"; list row fields about documents: ${docFields.join(', ') || 'none'} (no total); real applications by document-row count: ${real.map((r) => `${r.c} rows × ${r.n}`).join(', ') || 'none'}`,
+            verdict: verdict(cellText.endsWith(`/${count}`)), shot: s,
+          }
+        } finally {
+          ifxRemoveRowsSync((r) => r.table === 'investor_onboarding_documents' && r.id === extraId)
+        }
+      })
+
+    // ---- F7b: a refused save puts the select back
+    await step('F7b', 'Refused save: QA-TEST application E is removed (API soft delete; the open list is not refreshed), then "Reviewed" is picked in its row',
+      'The server refuses it (409) and the select goes back to the stored status', sa, 'f7b-refused-reverts', async () => {
+        if (!st.apps.E) throw skip('application E (F13) was not created')
+        await sa.goto(`${BASE_URL}/investor-applications`)
+        const row = appRow(sa, EMAIL('E'))
+        await row.waitFor({ state: 'visible', timeout: 30000 })
+        await row.scrollIntoViewIfNeeded()
+        const before = await row.locator('select').inputValue()
+        const del = await api(sa, 'DELETE', `/api/investor-applications/${st.apps.E}`)
+        await sa.waitForTimeout(1500)
+        if (!(await row.isVisible())) throw skip(`the list refreshed after the delete (${codeOf(del)}), so there is no stale row to pick in`)
+        const onDialog = (d) => d.accept().catch(() => {})
+        sa.on('dialog', onDialog)
+        try {
+          await caption(sa, `Step F7b — application E removed (DELETE → ${codeOf(del)}); pick "Reviewed" in its still-listed row`)
+          const [resp] = await Promise.all([
+            sa.waitForResponse((r) => pathOf(r.url()) === `/api/investor-applications/${st.apps.E}/status`, { timeout: 30000 }),
+            row.locator('select').selectOption('Reviewed'),
+          ])
+          const j = await resp.json().catch(() => null)
+          const toast = await toastText(sa, 4000)
+          await sa.waitForTimeout(800)
+          const after = await row.locator('select').inputValue()
+          const stored = q1('SELECT status FROM investor_applications WHERE id = ?', st.apps.E)?.status
+          await caption(sa, `Step F7b — PUT → ${resp.status()}${j?.code ? ` ${j.code}` : ''}; the select shows "${after}", the server holds "${stored}"`)
+          return { observed: `DELETE → ${codeOf(del)}; PUT …/status "Reviewed" → ${resp.status()}${j?.code ? ` ${j.code}` : ''}; toast "${toast.slice(0, 120)}"; the select shows "${after}" (was "${before}"); stored status "${stored}"`, verdict: verdict(resp.status() >= 400 && after === stored) }
+        } finally { sa.off('dialog', onDialog) }
+      })
+
+    // ---- F12a: the account-number eye
+    await step('F12a', 'Super Admin opens accepted QA-TEST application P\'s investor record on /investors; Banking → the eye beside the account number',
+      'The eye does not pretend to reveal: it shows the full number (a real reveal) or is not there', sa, 'f12a-account-eye', async () => {
+        if (!st.apps.P || !q1('SELECT id FROM investors WHERE application_id = ?', st.apps.P)) throw skip('application P has no investor record')
+        await sa.goto(`${BASE_URL}/investors`)
+        const row = invRow(sa, NAME('SAME')).first()
+        await row.waitFor({ state: 'visible', timeout: 60000 })
+        await row.scrollIntoViewIfNeeded()
+        await row.locator('td.name-cell').click()
+        const modal = detailModal(sa)
+        const acct = modal.locator('.detail-label', { hasText: 'Account Number' }).locator('xpath=..')
+        await acct.waitFor({ state: 'visible', timeout: 30000 })
+        await acct.scrollIntoViewIfNeeded()
+        const before = norm(await acct.locator('.detail-value').innerText())
+        const eye = acct.locator('svg')
+        const hasEye = await eye.count()
+        let after = before
+        if (hasEye) { await eye.first().click(); await sa.waitForTimeout(700); after = norm(await acct.locator('.detail-value').innerText()) }
+        const full = q1('SELECT account_number FROM investor_payment_info WHERE application_id = ?', st.apps.P)?.account_number || ''
+        const revealed = !!full && after.includes(full)
+        await caption(sa, `Step F12a — account number "${before}" → after the eye "${after}"; the full (QA-TEST) number shown: ${revealed}`)
+        return { observed: `before: "${before}"; eye present: ${hasEye > 0}; after clicking it: "${after}"; the full QA-TEST account number shown: ${revealed}; still masked (${BULLET}): ${after.includes(BULLET)}`, verdict: verdict(!hasEye || revealed) }
+      })
+
+    // ---- F14: the public onboarding banking route
+    await step('F14', 'A public page (no session) sends POST /api/public/investor-onboarding/<P>/banking with accepted QA-TEST application P\'s access token (read from the copy, never printed)',
+      '404: the route no longer exists; P\'s bank row unchanged', pub2, 'f14-public-banking', async () => {
+        if (!st.apps.P) throw skip('application P was not created')
+        const tok = q1('SELECT access_token FROM investor_applications WHERE id = ?', st.apps.P)?.access_token
+        if (!tok) throw skip('application P has no access token')
+        const bank = () => q1('SELECT bank_name, account_type, routing_number, account_number FROM investor_payment_info WHERE application_id = ?', st.apps.P)
+        const before = bank()
+        const stBefore = q1('SELECT status FROM investor_applications WHERE id = ?', st.apps.P)?.status
+        await pub2.goto(`${BASE_URL}/invest`)
+        await pub2.waitForLoadState('load')
+        const r = await pub2.evaluate(async ({ id, tok }) => {
+          const res = await fetch(`/api/public/investor-onboarding/${id}/banking?token=${encodeURIComponent(tok)}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            body: JSON.stringify({ bank_name: 'QA-TEST CHANGED BANK', account_type: 'Savings', routing_number: '999999999', account_number: '000999888777', account_name: 'QA-TEST changed' }),
+          })
+          let json = null
+          try { json = await res.json() } catch { /* not json */ }
+          return { status: res.status, json }
+        }, { id: st.apps.P, tok })
+        const after = bank()
+        const changed = JSON.stringify(before) !== JSON.stringify(after)
+        const stAfter = q1('SELECT status FROM investor_applications WHERE id = ?', st.apps.P)?.status
+        const observed = `→ ${codeOf(r)}${errOf(r)}; P's bank row ${changed ? `CHANGED (bank name now "${after?.bank_name}")` : 'unchanged'}; application status ${stBefore} → ${stAfter}`
+        await caption(pub2, `Step F14 — ${observed}`)
+        await evidence(pub2, ['F14 — public page, no session, page fetch', `POST /api/public/investor-onboarding/${st.apps.P}/banking?token=<P's token>`, `→ ${codeOf(r)}`, `P's bank row changed: ${changed}`])
+        return { observed, verdict: verdict(r.status === 404 && !changed) }
+      })
+
+    // ---- F12c: a refused delete shows the server's reason
+    await step('F12c', `Super Admin removes ${NAME('REC')} on /investors after it was already deleted (removed in the copy; the list not refreshed). DELETE /api/investors/:id has no other refusal: it answers 404 only for an id it cannot find`,
+      'The page shows the server\'s reason ("Investor not found"), not a generic failure', sa, 'f12c-delete-refused', async () => {
+        if (!st.recId) throw skip('F5 made no record')
+        await sa.goto(`${BASE_URL}/investors`)
+        const row = invRow(sa, NAME('REC'))
+        await row.waitFor({ state: 'visible', timeout: 60000 })
+        await row.scrollIntoViewIfNeeded()
+        const n = db.prepare('DELETE FROM investors WHERE id = ?').run(st.recId).changes
+        ifxForget('investors', st.recId)
+        await caption(sa, `Step F12c — ${NAME('REC')} was just removed in the copy; press Remove on its stale row, then Delete`)
+        await row.locator('button.btn-remove').click()
+        const dlg = sa.locator('.confirm-dialog', { hasText: 'Delete Investor' })
+        await dlg.waitFor({ state: 'visible', timeout: 10000 })
+        const [resp] = await Promise.all([
+          sa.waitForResponse((r) => pathOf(r.url()) === `/api/investors/${st.recId}` && r.request().method() === 'DELETE', { timeout: 30000 }),
+          dlg.locator('button.btn-danger').click(),
+        ])
+        const j = await resp.json().catch(() => null)
+        const toast = await toastText(sa, 4000)
+        await caption(sa, `Step F12c — DELETE → ${resp.status()} "${j?.error || ''}"; the page says "${toast}"`, false)
+        const s = await ifxShot(sa, 'f12c-delete-refused')
+        return { observed: `removed in the copy (${n} row); DELETE → ${resp.status()} "${j?.error || ''}"; toast: "${toast}"`, verdict: verdict(resp.status() >= 400 && !!j?.error && toast.includes(j.error)), shot: s }
+      })
+  } finally {
+    // ---- FXc: browser console errors on the screens this section opened
+    {
+      const groups = new Map()
+      for (const e of consoleErrs) {
+        const k = `${e.who} ${e.where}`
+        if (!groups.has(k)) groups.set(k, { n: 0, texts: new Set() })
+        const gr = groups.get(k); gr.n++
+        if (gr.texts.size < 3) gr.texts.add(visible(e.text).replace(/\s+/g, ' ').slice(0, 170))
+      }
+      const lines = [...groups].map(([k, gr]) => `${k}: ${gr.n} — ${[...gr.texts].map((t) => `"${t}"`).join(' | ')}`)
+      const fails = new Map()
+      for (const f of failedApi) { const k = `${f.who} on ${f.where.replace(/\/\d+(?=\/|$)/g, '/:id')}: ${f.what}`; fails.set(k, (fails.get(k) || 0) + 1) }
+      if (fails.size) lines.push(`failing responses (4xx/5xx) behind them: ${[...fails].map(([k, n]) => `${k} ×${n}`).join('; ')}`)
+      record({ step: 'FXc', title: 'Browser console errors (console.error and uncaught) on /invest, /investors, /investor-applications, /investor-portals, Admin Tools, Expenses and the QA-TEST investors\' portal', expected: '(recorded, not scored)', observed: lines.join(' · ') || 'none', verdict: 'INFO', shot: '' })
+    }
+    // ---- FXz: remove everything this section made (the API first, then the copy by exact id)
+    const notes = []
+    for (const c of contexts.slice(1)) await c.close().catch(() => {})
+    try {
+      if (sa && !sa.isClosed()) {
+        for (const r of ifxRows.filter((x) => x.table === 'legal_documents')) {
+          const d = await api(sa, 'DELETE', `/api/legal-documents/${r.id}`)
+          if (d.status === 200 || d.status === 404) ifxForget('legal_documents', r.id)
+          notes.push(`DELETE /api/legal-documents/${r.id} → ${d.status}`)
+        }
+        for (const r of ifxRows.filter((x) => x.table === 'trucks')) {
+          const d = await api(sa, 'DELETE', `/api/trucks/${r.id}`)
+          if (d.status === 200) ifxForget('trucks', r.id)
+          notes.push(`DELETE /api/trucks/${r.id} → ${codeOf(d)}`)
+        }
+        for (const r of ifxRows.filter((x) => x.table === 'investors')) {
+          const d = await api(sa, 'DELETE', `/api/investors/${r.id}`)
+          if (d.status === 200 || d.status === 404) ifxForget('investors', r.id)
+          notes.push(`DELETE /api/investors/${r.id} → ${d.status}`)
+        }
+        for (const r of ifxRows.filter((x) => x.table === 'users')) {
+          const d = await api(sa, 'DELETE', `/api/users/${r.id}`)
+          if (d.status === 200 || d.status === 404) ifxForget('users', r.id)
+          notes.push(`DELETE /api/users/${r.id} → ${codeOf(d)}`)
+        }
+        for (const r of ifxRows.filter((x) => x.table === 'investor_applications')) {
+          const d = await api(sa, 'DELETE', `/api/investor-applications/${r.id}`)
+          notes.push(`DELETE /api/investor-applications/${r.id} (soft) → ${d.status}`)
+        }
+      } else notes.push('no Super Admin page: the API clean-up was skipped')
+    } catch (e) { notes.push(`API clean-up error: ${e.message}`) }
+    let ok = true
+    try {
+      // Catch-up by name, in case a step died between a create and its note.
+      for (const r of qa('SELECT id FROM investor_applications WHERE id > ? AND legal_name LIKE ?', start.investor_applications || 0, `QA-TEST-INV-${TU}-%`)) ifxNote({ table: 'investor_applications', id: r.id })
+      for (const r of qa('SELECT id FROM users WHERE id > ? AND (email LIKE ? OR username LIKE ?)', start.users || 0, `qa-test+${T}-%`, `qa-test-inv-${T}-%`)) ifxNote({ table: 'users', id: r.id })
+      for (const r of qa('SELECT id FROM investors WHERE id > ? AND full_name LIKE ?', start.investors || 0, `QA-TEST-INV-${TU}-%`)) ifxNote({ table: 'investors', id: r.id })
+      for (const r of qa('SELECT id FROM trucks WHERE id > ? AND unit_number LIKE ?', start.trucks || 0, `QA-TEST-INV-${TU}-%`)) ifxNote({ table: 'trucks', id: r.id })
+      for (const a of Object.values(st.apps).filter(Boolean)) for (const r of qa('SELECT id FROM trucks WHERE unit_number LIKE ?', `INV-${a}-%`)) ifxNote({ table: 'trucks', id: r.id })
+      for (const r of qa('SELECT id FROM legal_documents WHERE id > ? AND file_name LIKE ?', start.legal_documents || 0, `qa-test-legal-${T}-%`)) ifxNote({ table: 'legal_documents', id: r.id })
+      const owners = [...new Set([...ifxUserIds, ...Object.values(st.users).map((u) => u.id)])]
+      notes.push(...ifxRemoveRowsSync())
+      for (const t of ['investor_config', 'investor_payouts', 'investor_payout_history']) {
+        let n = 0
+        for (const o of owners) n += db.prepare(`DELETE FROM ${t} WHERE owner_id = ?`).run(o).changes
+        if (n) notes.push(`${t}: ${n} row(s) of the QA-TEST accounts deleted in the copy`)
+      }
+      // Rows the app wrote as a side effect of this section, on this private server only.
+      for (const t of ['audit_trail', 'dispatch_notifications']) {
+        if (start[t] == null) continue
+        const n = db.prepare(`DELETE FROM ${t} WHERE rowid > ?`).run(start[t]).changes
+        if (n) notes.push(`${t}: ${n} row(s) written during the section deleted in the copy`)
+      }
+      if (globalOf('investor_split_pct') !== splitAtStart) {
+        db.prepare("UPDATE investor_config SET value = ? WHERE owner_id = 0 AND key = 'investor_split_pct'").run(splitAtStart)
+        notes.push(`the global split was not "${splitAtStart}": put back in the copy`)
+      }
+      // What is still above the start mark, by table (sessions and the like are expected).
+      const now = ifxMaxRowids()
+      const grew = Object.keys(now).filter((t) => start[t] != null && now[t] > start[t])
+        .map((t) => [t, db.prepare(`SELECT COUNT(*) AS n FROM "${t.replace(/"/g, '""')}" WHERE rowid > ?`).get(start[t]).n]).filter(([, n]) => n > 0)
+      notes.push(`rows still above the start mark: ${grew.map(([t, n]) => `${t} ${n}`).join(', ') || 'none'}`)
+      if (start.investor_config != null) {
+        const cfg = qa('SELECT owner_id, key FROM investor_config WHERE rowid > ?', start.investor_config)
+        if (cfg.length) notes.push(`investor_config above the mark: ${cfg.map((c) => `owner ${c.owner_id} ${c.key}`).join(', ')} (a global row an INSERT OR REPLACE re-wrote with its original value)`)
+      }
+      const left = {
+        users: q1('SELECT COUNT(*) AS n FROM users WHERE email LIKE ? OR username LIKE ?', `qa-test+${T}-%`, `qa-test-inv-${T}-%`).n,
+        investors: q1('SELECT COUNT(*) AS n FROM investors WHERE full_name LIKE ?', `QA-TEST-INV-${TU}-%`).n,
+        applications: q1('SELECT COUNT(*) AS n FROM investor_applications WHERE legal_name LIKE ?', `QA-TEST-INV-${TU}-%`).n,
+        trucks: q1('SELECT COUNT(*) AS n FROM trucks WHERE unit_number LIKE ?', `QA-TEST-INV-${TU}-%`).n,
+        legal: q1('SELECT COUNT(*) AS n FROM legal_documents WHERE file_name LIKE ?', `qa-test-legal-${T}-%`).n,
+      }
+      const leftN = Object.values(left).reduce((a, b) => a + b, 0)
+      notes.push(`QA-TEST rows left: ${leftN ? JSON.stringify(left) : 'none'}; the global split: "${globalOf('investor_split_pct')}"`)
+      if (leftN || ifxRows.length || globalOf('investor_split_pct') !== splitAtStart) ok = false
+    } catch (e) { ok = false; notes.push(`copy clean-up error: ${e.message}`) }
+    record({ step: 'FXz', title: 'Clean-up: every QA-TEST account, investor record, truck, legal document and application this section made, its planted rows and side rows', expected: 'All removed; the global split as it was at the start; no plant journal left', observed: `${notes.join('; ')}; plant journal ${fs.existsSync(JOURNAL) ? 'STILL PRESENT' : 'gone'}`, verdict: verdict(ok && !fs.existsSync(JOURNAL)), shot: '' })
+    for (const c of contexts) await c.close().catch(() => {})
+    if (ownDb && db) { try { db.close() } catch { /* ignore */ } db = null }
+  }
 }
 
 let exitCode = 0
