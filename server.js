@@ -9959,7 +9959,6 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 		}
 		const net = signerNetworkEvidence(req);
 
-		const accessToken = crypto.randomUUID();
 		const vehiclesArr = vehicleCheck.value;
 		const now = new Date().toISOString();
 		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: EVIDENCE_DATE_TZ });
@@ -9985,11 +9984,11 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 			const result = db.prepare(`
 				INSERT INTO investor_applications (legal_name, dba, entity_type, address, contact_person, contact_title, phone, email,
 					years_in_operation, industry_experience, fleet_size, preferred_communication,
-					tax_classification, ein_ssn, bankruptcy_liens, reporting_preference, access_token, status)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'New')
+					tax_classification, ein_ssn, bankruptcy_liens, reporting_preference, status)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'New')
 			`).run(legal_name, dba || "", entity_type || "", address, contact_person || "", contact_title || "",
 				phone, email, years_in_operation || "", industry_experience || "", fleet_size || "",
-				preferred_communication || "", tax_classification || "", ein_ssn, bankruptcy_liens || "", reporting_preference || "", accessToken);
+				preferred_communication || "", tax_classification || "", ein_ssn, bankruptcy_liens || "", reporting_preference || "");
 
 			const appId = result.lastInsertRowid;
 
