@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /**
  * Tests for the EDITABLE INVOICE OVERRIDES — parseInvoiceOverrides(),
- * isoToMdy() and safeAttachmentName() in server.js.
+ * sanitizeInvoiceNotes(), isoToMdy() and safeAttachmentName() in server.js.
+ * (How a note RENDERS, the Subject round-trip and the notes column's SQL are in
+ * scripts/test-invoice-notes.js.)
  *
  * WHY IT LOADS THE FUNCTIONS OUT OF server.js SOURCE INSTEAD OF require()-ING IT.
  * Same reason as scripts/test-truck-retirement.js and
@@ -124,6 +126,7 @@ function insideFinallyBlock(text, needle) {
 
 const FNS = [
 	"sanitizeEvidenceText",
+	"sanitizeInvoiceNotes",
 	"isoToMdy",
 	"mdyToIso",
 	"isRealCalendarDate",
@@ -165,7 +168,10 @@ const CONSTS = [
 	"INVOICE_TOTAL_MIN",
 	"INVOICE_ID_RE",
 	"INVOICE_REF_RE",
+	"INVOICE_ORDER_RE",
 	"INVOICE_FIELD_SCAN_MAX",
+	"INVOICE_NOTES_MAX",
+	"INVOICE_NOTES_SCAN_MAX",
 	"INVOICE_YEAR_MIN",
 	"INVOICE_YEAR_MAX",
 ];
@@ -184,7 +190,15 @@ function loadShipped(mutate) {
 }
 
 const M = loadShipped(null);
-const { isoToMdy, mdyToIso, safeAttachmentName, parseInvoiceOverrides, INVOICE_TOTAL_MAX } = M;
+const { isoToMdy, mdyToIso, safeAttachmentName, parseInvoiceOverrides, INVOICE_TOTAL_MAX, INVOICE_ORDER_RE } = M;
+// Characters that must never be typed literally into this file — build them from
+// code points so an editor or a tool cannot silently drop or mangle them.
+const LS = String.fromCodePoint(0x2028); // LINE SEPARATOR (Zl)
+const PS = String.fromCodePoint(0x2029); // PARAGRAPH SEPARATOR (Zp)
+const ZWSP = String.fromCodePoint(0x200b); // ZERO WIDTH SPACE (Cf, in EVIDENCE_TEXT_STRIP)
+const WJ = String.fromCodePoint(0x2060); // WORD JOINER (Cf, NOT in EVIDENCE_TEXT_STRIP)
+const SHY = String.fromCodePoint(0x00ad); // SOFT HYPHEN (Cf, NOT in EVIDENCE_TEXT_STRIP)
+const RLO = String.fromCodePoint(0x202e); // RIGHT-TO-LEFT OVERRIDE (BIDI)
 
 // -------------------------------------------------------------------- runner
 let pass = 0;
@@ -348,13 +362,13 @@ section("4. Omitted vs empty — the manual-invoice precedent, field by field");
 	// `ov.has.x ? … : derived` falls to the derived branch.
 	const none = acc({}, "§4 an empty body is valid (nothing overridden)");
 	for (const f of ["invoiceId", "invoiceDate", "billToName", "recipientEmail", "brokerName",
-		"orderNumber", "poNumber", "deliveryDate", "total", "moveNumber"]) {
+		"orderNumber", "poNumber", "deliveryDate", "total", "moveNumber", "notes"]) {
 		eq(none.has[f], undefined, `§4 ${f}: omitted → has.${f} is falsy → server derives it`);
 	}
 
 	// Explicit undefined / null are ALSO "not supplied" — the payeeAddress rule.
 	for (const f of ["invoiceId", "invoiceDate", "billToName", "recipientEmail", "brokerName",
-		"orderNumber", "poNumber", "deliveryDate", "total", "moveNumber"]) {
+		"orderNumber", "poNumber", "deliveryDate", "total", "moveNumber", "notes"]) {
 		const u = acc({ [f]: undefined }, `§4 ${f}: undefined is accepted as "not supplied"`);
 		eq(u.has[f], undefined, `§4 ${f}: undefined → has.${f} falsy`);
 		const n = acc({ [f]: null }, `§4 ${f}: null is accepted as "not supplied"`);
@@ -376,7 +390,9 @@ section("4. Omitted vs empty — the manual-invoice precedent, field by field");
 	// "" ALLOWED — all four have fallback rendering in the template, so an empty
 	// value is a legitimate choice and must be HONOURED (has = true), not
 	// quietly replaced by the extracted one.
-	for (const f of ["brokerName", "billToName", "poNumber", "deliveryDate", "moveNumber"]) {
+	// notes too: "" is "the dispatcher deleted the last approved note", and
+	// treating it as omitted would quietly print that note again.
+	for (const f of ["brokerName", "billToName", "poNumber", "deliveryDate", "moveNumber", "notes"]) {
 		const r = acc({ [f]: "" }, `§4 ${f}: '' is allowed`);
 		eq(r.has[f], true, `§4 ${f}: '' is HONOURED (has.${f} === true), not treated as omitted`);
 		eq(r.values[f], "", `§4 ${f}: '' comes through as ''`);
@@ -405,19 +421,58 @@ section("5. Field charsets and their wire codes");
 		"A".repeat(40), "§5 …unchanged at the limit");
 	rej({ invoiceId: "A".repeat(41) }, "INVOICE_ID_INVALID", "§5 invoiceId over 40 chars is rejected, not truncated into validity");
 	rej({ invoiceId: "A".repeat(300) }, "INVOICE_ID_INVALID", "§5 invoiceId far over the scan bound is still rejected");
-	rej({ orderNumber: "9".repeat(41) }, "ORDER_NUMBER_INVALID", "§5 orderNumber over 40 chars is rejected, not truncated");
+	eq(acc({ orderNumber: "A".repeat(80) }, "§5 orderNumber of exactly 80 chars is accepted").values.orderNumber,
+		"A".repeat(80), "§5 …unchanged at the limit");
+	rej({ orderNumber: "9".repeat(81) }, "ORDER_NUMBER_INVALID", "§5 orderNumber over 80 chars is rejected, not truncated");
 	rej({ poNumber: "9".repeat(41) }, "PO_NUMBER_INVALID", "§5 poNumber over 40 chars is rejected, not truncated");
+	// The 80 counts CODEPOINTS (the `u` flag), not UTF-16 units: 80 accented
+	// letters are 80 characters, and one more is a refusal.
+	ok(acc({ orderNumber: "é".repeat(80) }, "§5 orderNumber: 80 accented letters are accepted").ok,
+		"§5 …counted as 80, not by bytes");
+	rej({ orderNumber: "é".repeat(81) }, "ORDER_NUMBER_INVALID", "§5 orderNumber: 81 accented letters are rejected");
 
-	// orderNumber / poNumber share a charset that additionally allows space and #
-	// (real broker refs read "SHP2607-A3BJ112", "PO # 4471").
-	for (const v of ["563367203", "SHP2607-A3BJ112", "PO 4471", "A#1"]) {
+	// ── orderNumber — WIDE, because dispatchers annotate it ─────────────────
+	// Any printable character after a letter/number start, 80 max. The first
+	// value is the one the old 40-char `[A-Za-z0-9 ._\/#-]` rule refused.
+	for (const v of ["7101850-$700 ADV", "563367203", "SHP2607-A3BJ112", "PO 4471", "A#1",
+		"1$2", "1,2", "1(2)", "1:2", "1+2", "1&2", "1'2", "1@2", "1%2",
+		"7101850 (ADV): 50% + fee & 'tax' @ dock", "Café 12", "École 5",
+		// Refused by the PO # charset below, accepted here on purpose.
+		"a;b", "a\"b", "a|b", "a*b"]) {
 		eq(acc({ orderNumber: v }, `§5 orderNumber accepts ${JSON.stringify(v)}`).values.orderNumber, v,
 			`§5 orderNumber ${JSON.stringify(v)} is unchanged`);
 	}
-	for (const v of ["-500", "a;b", "a<b>", "a\"b", "a|b", "a*b"]) {
+	// Still refused: < and > (the n8n fallback template is outside this repo),
+	// and any non-letter/number FIRST character — formula-style leads and a
+	// pasted "#" that would print "Order: ##…".
+	for (const v of ["a<b", "a>b", "a<b>", "-500", "$700", "#1", "=1+1", "+1", "@1", " "]) {
 		rej({ orderNumber: v }, "ORDER_NUMBER_INVALID", `§5 orderNumber rejects ${JSON.stringify(v)}`);
+	}
+	// A lone zero-width character is "" once sanitized — a clear in disguise.
+	rej({ orderNumber: ZWSP }, "ORDER_NUMBER_INVALID", "§5 orderNumber that is ONLY a zero-width char is rejected");
+	// Cf characters sanitizeEvidenceText does NOT strip are the regex's job (\p{C}).
+	rej({ orderNumber: "71" + WJ + "01850" }, "ORDER_NUMBER_INVALID", "§5 orderNumber with a WORD JOINER mid-string is rejected");
+	rej({ orderNumber: "71" + SHY + "01850" }, "ORDER_NUMBER_INVALID", "§5 orderNumber with a SOFT HYPHEN mid-string is rejected");
+	// Unicode line breaks. The REGEX refuses them outright (it is also the
+	// client's rule, and the client does not sanitize first) …
+	ok(!INVOICE_ORDER_RE.test("7101850" + LS + "ADV"), "§5 INVOICE_ORDER_RE refuses a LINE SEPARATOR mid-string");
+	ok(!INVOICE_ORDER_RE.test("7101850" + PS + "ADV"), "§5 INVOICE_ORDER_RE refuses a PARAGRAPH SEPARATOR mid-string");
+	ok(!INVOICE_ORDER_RE.test("7101850\nADV"), "§5 INVOICE_ORDER_RE refuses a \\n mid-string");
+	ok(!INVOICE_ORDER_RE.test("7101850" + ZWSP + "ADV"), "§5 INVOICE_ORDER_RE refuses a zero-width space mid-string");
+	ok(!INVOICE_ORDER_RE.test("7101850" + RLO + "ADV"), "§5 INVOICE_ORDER_RE refuses a BIDI override mid-string");
+	// … and the server, which sanitizes first, turns every one of them into a
+	// plain space — so no line break can reach the subject, file name or PDF.
+	for (const [name, ch] of [["LINE SEPARATOR", LS], ["PARAGRAPH SEPARATOR", PS], ["CRLF", "\r\n"], ["BIDI override", RLO]]) {
+		const r = acc({ orderNumber: "7101850" + ch + "ADV" }, `§5 orderNumber with a ${name} is accepted after stripping`);
+		eq(r.values.orderNumber, "7101850 ADV", `§5 …the ${name} became a plain space`);
+	}
+
+	// ── poNumber — UNCHANGED: the narrow 40-char charset ─────────────────────
+	for (const v of ["-500", "a;b", "a<b>", "a\"b", "a|b", "a*b", "a$b", "a,b", "a(b)", "Café"]) {
 		rej({ poNumber: v }, "PO_NUMBER_INVALID", `§5 poNumber rejects ${JSON.stringify(v)}`);
 	}
+	eq(acc({ poNumber: "PO # 4471" }, "§5 poNumber accepts \"PO # 4471\"").values.poNumber, "PO # 4471",
+		"§5 …unchanged");
 	// A CR in any of these forges an audit line and a MIME header; it is stripped
 	// by sanitizeEvidenceText before the charset is even consulted.
 	eq(acc({ brokerName: "Acme\r\nBcc: evil@example.com" }, "§5 brokerName with CRLF is accepted after stripping")
@@ -451,10 +506,69 @@ section("5. Field charsets and their wire codes");
 	}
 }
 
+// ===================================================== §5b INVOICE NOTES
+// Optional multi-line text printed on the invoice PDF only. The properties that
+// matter: a line break SURVIVES (sanitizeEvidenceText would flatten it), every
+// other control/BIDI/zero-width character does not, over-length is a REFUSAL
+// and never a truncation, and nothing is HTML-escaped here (that is the
+// renderer's job — escaping twice would print "&amp;").
+section("5b. Notes — multi-line, sanitized per line, refused over 500");
+{
+	const note = (v, label) => acc({ notes: v }, label).values.notes;
+	eq(parseInvoiceOverrides({}).has.notes, undefined, "§5b omitted → no has.notes (the approve re-uses the last approved note)");
+	const cleared = acc({ notes: "" }, "§5b '' is accepted");
+	eq([cleared.has.notes, cleared.values.notes], [true, ""], "§5b '' → has.notes true, value '' (cleared)");
+	eq(note("line 1\nline 2\n\nline 4", "§5b multi-line accepted"), "line 1\nline 2\n\nline 4",
+		"§5b line breaks and a blank line are preserved exactly");
+	eq(note("a\r\nb\rc", "§5b CRLF / CR accepted"), "a\nb\nc", "§5b CRLF and a lone CR both become \\n");
+	eq(note("a\tb", "§5b tab accepted"), "a b", "§5b a tab becomes a space");
+	eq(note("a\x00b\x07c\x7fd\x85e", "§5b C0/C1/DEL accepted"), "a b c d e", "§5b C0, DEL and C1 controls become spaces");
+	eq(note("a" + RLO + "b" + ZWSP + "c", "§5b BIDI / zero-width accepted"), "a b c",
+		"§5b a BIDI override and a zero-width space become spaces");
+	// U+2028/2029 are line breaks to some viewers but NOT to the PDF's
+	// pre-wrap block — only \n is a break, so they become spaces like elsewhere.
+	eq(note("a" + LS + "b" + PS + "c", "§5b LS / PS accepted"), "a b c", "§5b U+2028/2029 become spaces, not line breaks");
+	eq(note("\n\n  first\nlast  \n\n", "§5b padded note accepted"), "first\nlast",
+		"§5b leading/trailing blank lines and outer spaces are trimmed");
+	eq(note("  \n \t \n ", "§5b whitespace-only accepted"), "", "§5b whitespace-only collapses to '' (cleared)");
+	eq(note("<script>alert(1)</script>", "§5b markup accepted as text"), "<script>alert(1)</script>",
+		"§5b markup is kept VERBATIM — escaping is the renderer's job, not the parser's");
+	eq(note("Advance $700 & fee — 50%", "§5b punctuation accepted"), "Advance $700 & fee — 50%", "§5b …and & is not pre-escaped");
+	// NFC, so two byte-different spellings of the same text store the same.
+	eq(note("Cafe" + String.fromCodePoint(0x301), "§5b decomposed accent accepted"), "Café", "§5b the note is NFC-normalized");
+
+	// The 500 limit, in CODEPOINTS, judged AFTER sanitizing and BEFORE any cut.
+	eq(Array.from(note("x".repeat(500), "§5b exactly 500 accepted")).length, 500, "§5b 500 characters are kept whole");
+	eq(Array.from(note("é".repeat(500), "§5b 500 accented letters accepted")).length, 500, "§5b …counted as codepoints");
+	rej({ notes: "x".repeat(501) }, "INVOICE_NOTES_TOO_LONG", "§5b 501 characters are REFUSED");
+	const r501 = parseInvoiceOverrides({ notes: "x".repeat(501) });
+	eq([r501.field, r501.values.notes], ["notes", undefined], "§5b …naming the field, with no truncated 500-char value handed back");
+	rej({ notes: "x".repeat(3000) }, "INVOICE_NOTES_TOO_LONG", "§5b a 3000-char note (past the scan bound) is still refused");
+	// Refused on its RAW length, before any clean-up runs: 2000 tabs and one
+	// letter would strip down to "x", but nothing that long is ever cleaned.
+	rej({ notes: "\t".repeat(2000) + "x" }, "INVOICE_NOTES_TOO_LONG",
+		"§5b a raw note past the scan bound is refused before the clean-up, even if it would strip short");
+	ok(acc({ notes: "\t".repeat(1990) + "x" }, "§5b …while one inside the bound is cleaned and judged").ok,
+		"§5b a raw note inside the scan bound is judged on its cleaned length");
+	// Trailing padding does not count against the limit — it is trimmed first.
+	ok(acc({ notes: "x".repeat(500) + "\n\n   " }, "§5b 500 + trailing blank lines is accepted").ok, "§5b …trim runs before the length check");
+
+	// Non-strings are REFUSED, not coerced: String(["x"]) is "x" and String({})
+	// is "[object Object]" — text nobody typed, printed on an invoice.
+	for (const v of [["x"], 42, {}, true]) {
+		rej({ notes: v }, "INVOICE_NOTES_INVALID", `§5b notes rejects the non-string ${JSON.stringify(v)}`);
+	}
+	eq(parseInvoiceOverrides({ notes: 42 }).field, "notes", "§5b a non-string refusal names the notes field");
+}
+
 // ================================================= §6 ATTACHMENT FILENAMES
 section("6. safeAttachmentName — a filename built from attacker-supplied text");
 {
 	eq(safeAttachmentName("Bison Transport"), "Bison Transport", "§6 an ordinary name is unchanged");
+	// The wider Order # reaches the file names: its annotations survive, and only
+	// the Windows-reserved separators are neutralised.
+	eq(safeAttachmentName("7101850-$700 ADV", 80), "7101850-$700 ADV", "§6 an annotated Order # keeps its $ in the file name");
+	eq(safeAttachmentName("7101850 (ADV): 50%", 80), "7101850 (ADV) 50%", "§6 …while a : becomes a space");
 	// CRLF: forges MIME headers in the attachment disposition.
 	eq(safeAttachmentName("Acme\r\nContent-Type: text/html"), "Acme Content-Type text html",
 		"§6 CRLF is stripped and the separators neutralised");
@@ -616,6 +730,37 @@ section("7. Wiring — the guarantees that no value can prove");
 		"§7 a collision is a WARNING, never a refusal — the re-approve flow reissues on purpose");
 	ok(approveRoute.text.indexOf("invoiceIdAlreadyUsed(") < approveRoute.text.indexOf("INSERT INTO load_invoice_drafts"),
 		"§7 …and it is probed BEFORE this draft inserts its own row");
+
+	// ── Order # (80) and Notes, wired the same way in both routes. ───────────
+	// One Subject builder, so the preview can never show a subject the approve
+	// will not send — and it is the lib's plain-text one, never an esc()'d copy.
+	ok(/const draftSubject = brokerInvoice\.buildInvoiceSubject\(\{ brokerName: effBrokerName, orderNumber \}\);/.test(approveRoute.text),
+		"§7 the approve builds its Subject with buildInvoiceSubject()");
+	ok(/const subject = brokerInvoice\.buildInvoiceSubject\(\{ brokerName, orderNumber \}\);/.test(previewRoute.text),
+		"§7 the preview builds its Subject with buildInvoiceSubject()");
+	ok(!/Order #\$\{orderNumber\}/.test(SRC), "§7 no inline copy of the Subject template is left in server.js");
+	// The file name carries the whole 80-character Order #.
+	eq((SRC.match(/safeAttachmentName\(orderNumber, 80\)/g) || []).length, 2,
+		"§7 both routes name attachments with safeAttachmentName(orderNumber, 80)");
+	ok(!/safeAttachmentName\(orderNumber, 40\)/.test(SRC), "§7 …and no 40-character Order # file name remains");
+	// Notes: omitted → the last approved note, on BOTH routes — one rule, so a
+	// caller that omits the key previews exactly what the approve prints.
+	ok(/const derivedNotes = latestDraftNotes\(loadId\);\n\t{3}const notes = ov\.has\.notes \? ov\.values\.notes : derivedNotes;/.test(approveRoute.text),
+		"§7 the approve prints the supplied note, else the last approved one");
+	ok(/const notes = ov\.has\.notes \? ov\.values\.notes : latestDraftNotes\(loadId\);/.test(previewRoute.text),
+		"§7 the preview prints the supplied note, else the last approved one (same rule as the approve)");
+	ok(/\t{4}\ttotal,\n\t{5}notes,\n\t{4}\}\);\n\t{4}invoicePdf = await renderHtmlToPdf/.test(approveRoute.text),
+		"§7 the approve hands notes to buildInvoiceHtml");
+	ok(/buildInvoiceHtml\(\{\n\t{4}[^\n]*\btotal, notes,\n/.test(previewRoute.text), "§7 the preview hands notes to buildInvoiceHtml");
+	// Owner decision: notes are PDF-ONLY — the cover email is byte-identical.
+	for (const [name, text] of [["approve", approveRoute.text], ["preview", previewRoute.text]]) {
+		const call = /buildInvoiceEmailHtml\(\{[\s\S]*?\}\);/.exec(text);
+		ok(call && !/\bnotes\b/.test(call[0]), `§7 the ${name} does NOT pass notes to buildInvoiceEmailHtml (PDF only)`);
+	}
+	// The approve persists it, audits it and echoes it.
+	ok(/invoice_id_minted, notes\) VALUES \(\?(,\?){16}\)/.test(approveRoute.text), "§7 recordDraft() INSERTs the notes column (17 placeholders)");
+	ok(/\["notes", derivedNotes, notes\],\n\t{3}\]\.filter/.test(approveRoute.text),
+		"§7 editDiffs records a changed note — LAST, so the 1000-char audit cap trims it, not the money line");
 }
 
 // ======================== §7b PROTOTYPE INHERITANCE ON has / values
@@ -632,6 +777,7 @@ section("7b. Prototype inheritance — a polluted Object.prototype must not beco
 		total: 999999, recipientEmail: "attacker@evil.example.com", invoiceId: "POLLUTED",
 		orderNumber: "POLLUTED", invoiceDate: "2026-01-01", poNumber: "POLLUTED",
 		deliveryDate: "2026-01-01", brokerName: "POLLUTED", billToName: "POLLUTED", moveNumber: "POLLUTED",
+		notes: "POLLUTED",
 	};
 	for (const [key, sentinel] of Object.entries(SENTINELS)) {
 		try {
@@ -736,6 +882,30 @@ const MUTANTS = [
 		mutate: (s) => s.replace(/sanitizeEvidenceText\(src\.invoiceId, INVOICE_FIELD_SCAN_MAX\)/,
 			"sanitizeEvidenceText(src.invoiceId, 40)"),
 		expect: (m) => m.parseInvoiceOverrides({ invoiceId: "A".repeat(41) }).ok,
+	},
+	{
+		// M11's twin for the Order #, whose limit is now 80 — the scan bound (200)
+		// must stay ABOVE it or an 81-character value is cut into validity.
+		name: "M11b orderNumber sanitized to 80 (over-length TRUNCATED into validity)",
+		mutate: (s) => s.replace(/sanitizeEvidenceText\(src\.orderNumber, INVOICE_FIELD_SCAN_MAX\)/,
+			"sanitizeEvidenceText(src.orderNumber, 80)"),
+		expect: (m) => m.parseInvoiceOverrides({ orderNumber: "9".repeat(81) }).ok,
+	},
+	{
+		// And for the notes: a 501-character note must be refused, never printed
+		// as the first 500 of what the dispatcher typed.
+		name: "M16 notes sanitized to INVOICE_NOTES_MAX (over-length TRUNCATED into validity)",
+		mutate: (s) => s.replace("sanitizeInvoiceNotes(src.notes, INVOICE_NOTES_SCAN_MAX)",
+			"sanitizeInvoiceNotes(src.notes, INVOICE_NOTES_MAX)"),
+		expect: (m) => m.parseInvoiceOverrides({ notes: "x".repeat(501) }).ok,
+	},
+	{
+		// The whole reason sanitizeInvoiceNotes exists: the ordinary sanitizer
+		// flattens a multi-line note onto one line.
+		name: "M17 notes go through sanitizeEvidenceText (line breaks flattened)",
+		mutate: (s) => s.replace("sanitizeInvoiceNotes(src.notes, INVOICE_NOTES_SCAN_MAX)",
+			"sanitizeEvidenceText(src.notes, INVOICE_NOTES_SCAN_MAX)"),
+		expect: (m) => !m.parseInvoiceOverrides({ notes: "a\nb" }).values.notes.includes("\n"),
 	},
 	{
 		name: "M12 safeAttachmentName strips a leading dot-run only ONCE",

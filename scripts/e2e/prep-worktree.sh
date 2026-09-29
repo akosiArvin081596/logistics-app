@@ -6,12 +6,21 @@
 #   - warn if the worktree's dependency manifests differ from the main checkout's,
 #     because then the linked node_modules may be missing a package
 #   - build the client (client/dist, gitignored)
+#   - with E2E_LINK_PODS=1 only: link the main checkout's POD files into the
+#     worktree's uploads/ (see below)
 #
 #   scripts/e2e/prep-worktree.sh [<worktree>]     (default: the checkout this script is in)
 #
 # Env:
 #   NODE_BIN       the node to build with (default: `node` on PATH; .nvmrc's version expected)
 #   MAIN_CHECKOUT  the main checkout (default: the parent of git's common dir)
+#   E2E_LINK_PODS=1  for the invoice section: POST /api/loads/:loadId/draft-invoice
+#                  reads a load's POD from <checkout>/uploads on disk, which a worktree
+#                  lacks. Each top-level *_POD_* file of the main checkout's uploads/ is
+#                  symlinked into a real uploads/ directory here (gitignored): links, not
+#                  copies, and no other upload (receipts, onboarding, invoices) is linked.
+#                  Remove them with:
+#                  find <worktree>/uploads -maxdepth 1 -type l -name '*_POD_*' -delete
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
@@ -40,6 +49,18 @@ link client/node_modules
 link .env
 link service-account-key.json
 [ "$missing" = 0 ] || { echo "prep-worktree: set up the main checkout first (the files marked MISSING)"; exit 2; }
+
+if [ "${E2E_LINK_PODS:-}" = "1" ]; then
+  [ ! -L "$WT/uploads" ] || { echo "prep-worktree: refusing: $WT/uploads is a symlink (it must be a real, gitignored directory)"; exit 2; }
+  [ -d "$MAIN/uploads" ] || { echo "prep-worktree: the main checkout has no uploads/ to link POD files from"; exit 2; }
+  mkdir -p "$WT/uploads"
+  linked=0; present=0
+  while IFS= read -r -d '' f; do
+    dest="$WT/uploads/$(basename "$f")"
+    if [ -e "$dest" ] || [ -L "$dest" ]; then present=$((present + 1)); else ln -s "$f" "$dest"; linked=$((linked + 1)); fi
+  done < <(find "$MAIN/uploads" -maxdepth 1 -type f -name '*_POD_*' -print0)
+  echo "linked:  $linked POD file(s) into uploads/ ($present already there)"
+fi
 
 for f in package.json package-lock.json client/package.json client/package-lock.json; do
   if ! cmp -s "$WT/$f" "$MAIN/$f"; then

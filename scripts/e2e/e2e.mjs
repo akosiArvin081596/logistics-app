@@ -70,6 +70,18 @@
 //      finalized month is still refused (409 PERIOD_FINALIZED), naming only the
 //      finalized months those loads reach
 //
+// Invoice editor section (I1-I9; ONLY=invoice): the draft invoice editor
+// (Dashboard → Completed → a delivered load → Draft Invoice Email)
+//   I1 the editor opens; the load's Job Tracking row is read before any edit
+//   I2-I3 ORDER # takes any printable character but < and >, 80 max, and the
+//      server-built SUBJECT carries it as typed (a literal &, never &amp;)
+//   I4-I6 an optional NOTES box prints in a labelled "Notes" box beside the totals on
+//      the invoice PDF only when it is non-empty; clearing it or Reset leaves no box
+//   I7 Approve sends the note and the Order #; Job Tracking is unchanged
+//   I8 local only (DB_PATH): a note saved on the approved draft record pre-fills the
+//      next editor and its dryRun PDF, and a preview sent with no notes key prints it
+//      (I8b) · I9 the server refuses a bad note or Order #
+//
 // Env:
 //   BASE_URL    required — e.g. http://127.0.0.1:3181 (never production)
 //   PHASE       before | after            (default: before) — names the output
@@ -77,9 +89,9 @@
 //   DB_PATH     the server's database copy (inside the work dir), ONLY used to plant
 //               stored values for the serve-side cases (steps 10, 11b-f, R3, R15),
 //               to stage and clean up R16, to plant and read back E1, N1, N1b, E2
-//               and B1 (and P1's own driver), and to delete the rows RC1's import
-//               writes. Unset -> those cases are SKIPPED (P1 then uses a real
-//               driver, as on staging).
+//               and B1 (and P1's own driver), to delete the rows RC1's import
+//               writes, and to plant (and delete) I8's saved invoice note. Unset ->
+//               those cases are SKIPPED (P1 then uses a real driver, as on staging).
 //   CREDS_FILE  logins JSON (default: <work dir>/creds.json, written by setup-db.cjs)
 //   E2E_WORK_DIR  where every output goes (default: $TMPDIR/logisx-e2e; see paths.cjs)
 //   APP_DIR     checkout whose node_modules provides better-sqlite3 and puppeteer
@@ -92,12 +104,16 @@
 //   DRIVER_VIEWPORT            driver window size, default 430x900
 //   ONLY        a comma-separated list of sections: trucks (1-12, R1-R16), signout
 //               (S1-S7), dispatcher (D1-D3), maintenance (M1), moneypath (P1, E1,
-//               N1, N1b, F1, E2, B1, RC1), names (K1, K2, K3), eldlink (L1-L3). Unset = all, in that
+//               N1, N1b, F1, E2, B1, RC1), names (K1, K2, K3), eldlink (L1-L3),
+//               invoice (I1-I9). Unset = all, in that
 //               order. ⚠️ The sections together sign in more often than the login
 //               limiter allows one server process (see README), so split a full run.
-//   STEPS       only these cases of the sign-out and money-path sections, e.g.
-//               STEPS=S5a,S7 or STEPS=P1,F1 or STEPS=E2,B1,RC1 (P1 selects P1a and
-//               P1b; N1 selects N1 and N1b)
+//   STEPS       only these cases of the sign-out, money-path and invoice sections,
+//               e.g. STEPS=S5a,S7 or STEPS=P1,F1 or STEPS=E2,B1,RC1 (P1 selects P1a
+//               and P1b; N1 selects N1 and N1b) or STEPS=I8,I9 (I1 opens the editor
+//               whenever any of I1-I7 is picked)
+//   E2E_INVOICE_APPROVE=1  let I7 press Approve on a server that is not local (it
+//               would create a real Gmail draft wherever the server has a mail target)
 //   S3_LATENCY_MS, S3_KBPS     the CDP throttle of S3, S6 and S7 (default +2500 ms per
 //               request, 24 KB/s)
 //
@@ -109,6 +125,7 @@
 import { chromium } from 'playwright-core'
 import fs from 'node:fs'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import paths from './paths.cjs'
 
 const BASE_URL = String(process.env.BASE_URL || '').replace(/\/+$/, '')
@@ -122,7 +139,7 @@ const SLOWMO = Number(process.env.SLOWMO ?? (HEADED ? 350 : 0))
 const [DVW, DVH] = String(process.env.DRIVER_VIEWPORT || '430x900').split('x').map(Number)
 // ONLY picks sections, e.g. ONLY=signout or ONLY=trucks,dispatcher. Unset = all.
 const ONLY = String(process.env.ONLY || '').toLowerCase()
-const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypath', 'names', 'eldlink']
+const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypath', 'names', 'eldlink', 'invoice']
 // Sign-ins (POST /api/auth/login) each section makes; the limiter allows 20 per 15
 // minutes per server process. The sign-out section's figure is its worst case: S4a's
 // second half runs, and the build sends S7's second sign-in (one fewer for each
@@ -130,8 +147,9 @@ const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypa
 // E2, B1 and RC1 share the page) and the driver once (E1), plus the Super Admin once
 // more when E1 has to file on the driver's behalf.
 // The names section signs the Dispatcher in once (K1 and K3 share the page) and
-// the Super Admin once (K2 reads the dashboard and Financials).
-const SIGN_INS = { trucks: 3, signout: 20, dispatcher: 2, maintenance: 3, moneypath: 3, names: 2, eldlink: 1 }
+// the Super Admin once (K2 reads the dashboard and Financials). The invoice section
+// signs the Super Admin in once; every step shares that page.
+const SIGN_INS = { trucks: 3, signout: 20, dispatcher: 2, maintenance: 3, moneypath: 3, names: 2, eldlink: 1, invoice: 1 }
 
 function die(msg) { console.error(`e2e: ${msg}`); process.exit(2) }
 if (!BASE_URL) die('BASE_URL is required')
@@ -142,7 +160,8 @@ const runs = (s) => SECTIONS.has(s)
 // STEPS: only these cases of the sign-out section (e.g. STEPS=S5a,S7), to rerun a
 // timing-sensitive case without spending the login limiter on the rest. Each of
 // those cases has its own browser context, so any subset runs on its own. The
-// money-path section takes it too (e.g. STEPS=P1,F1); the other sections ignore it.
+// money-path section takes it too (e.g. STEPS=P1,F1), and so does the invoice section
+// (e.g. STEPS=I8,I9); the other sections ignore it.
 const STEPS = process.env.STEPS ? new Set(String(process.env.STEPS).split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)) : null
 const wantStep = (id) => !STEPS || STEPS.has(id.toUpperCase())
 let baseHost = ''
@@ -195,6 +214,8 @@ function writeResults(final = false) {
     runs('maintenance') && 'maintenance notice (M1)',
     runs('moneypath') && 'money path (P1, E1, N1, N1b, F1, E2, B1, RC1)',
     runs('names') && 'names (K1, K2, K3)',
+    runs('eldlink') && 'ELD link (L1-L3)',
+    runs('invoice') && 'invoice editor (I1-I9)',
   ].filter(Boolean).join(' + ')
   const lines = [
     `# ${title} — ${PHASE.toUpperCase()}`,
@@ -517,8 +538,9 @@ function restoreAll() {
   writeJournal()
   return out
 }
-// The tables a money-path row may be created in; names are literals, never input.
-const CREATED_TABLES = new Set(['drivers_directory', 'expenses', 'truck_assignments', 'invoices', 'users'])
+// The tables a money-path row (or I8's saved invoice note) may be created in; names
+// are literals, never input.
+const CREATED_TABLES = new Set(['drivers_directory', 'expenses', 'truck_assignments', 'invoices', 'users', 'load_invoice_drafts'])
 function noteCreated(table, id) {
   if (!CREATED_TABLES.has(table)) throw new Error('table not allowed')
   createdRows.push({ table, id: Number(id) })
@@ -634,6 +656,12 @@ async function main() {
     try { await eldLinkSection() } catch (e) {
       exitCode = 1
       record({ step: 'L!', title: 'ELD-link section aborted', expected: '', observed: e.stack?.split('\n').slice(0, 3).join(' ') || String(e), verdict: 'FAIL', shot: '' })
+    }
+  }
+  if (runs('invoice')) {
+    try { await invoiceSection() } catch (e) {
+      exitCode = 1
+      record({ step: 'I!', title: 'Invoice editor section aborted', expected: '', observed: e.stack?.split('\n').slice(0, 3).join(' ') || String(e), verdict: 'FAIL', shot: '' })
     }
   }
 }
@@ -5206,6 +5234,680 @@ async function eldLinkSection() {
       } catch (e) { console.log(`  (L clean-up failed: ${e.message})`) }
     }
     try { await ctx.close() } catch { /* ignore */ }
+  }
+}
+
+// ---------------------------------------------------------------- invoice editor (I1-I9)
+// ONLY=invoice. The draft invoice editor (InvoiceDraftPreviewModal.vue), opened from
+// Dashboard → Completed → a delivered load → Draft Invoice Email with
+// POST /api/loads/:loadId/draft-invoice?dryRun=1, and re-rendered as you type by
+// POST /api/loads/:loadId/invoice-preview. The AFTER behaviour:
+//   - ORDER # takes any printable character but < and >, 80 max, starting with a
+//     letter or number; the read-only SUBJECT the server builds carries it as typed.
+//   - An optional NOTES box (500 max, line breaks kept) prints in a labelled "Notes"
+//     box beside the totals on the invoice PDF only, and only when it is non-empty.
+//     It is saved on the approved draft record, and the next dryRun pre-fills it.
+//   - Nothing writes Job Tracking.
+// Evidence: the page's own requests and responses (page.on), the PDF the server
+// rendered (its text, read with the app's pdfjs-dist in Node), and the form.
+//
+// Spend per server process: one sign-in; POST …/draft-invoice (25 per 15 min per
+// user, the ?dryRun=1 opens included) three times (I1, I7's approve, I8's reopen)
+// plus one per candidate load whose dryRun failed; POST …/invoice-preview (120 per
+// 15 min) about sixteen times.
+//
+// ⚠️ The approve (I7) creates a real Gmail draft wherever the server has a mail
+// target. boot-server.sh blanks Gmail and the n8n invoice webhook, so locally the
+// route answers preview:true and records nothing. On any other server it is SKIPPED
+// unless E2E_INVOICE_APPROVE=1.
+//
+// ⚠️ The draft route reads a load's POD from <checkout>/uploads on disk, which a
+// worktree lacks: prep it with E2E_LINK_PODS=1 scripts/e2e/prep-worktree.sh.
+const EM_DASH = String.fromCodePoint(0x2014)
+const INV_ORDER = '7101850-$700 ADV'
+const INV_ORDER_WIDE = "A (ADV): 50% + fee & 'tax' @ dock"
+const INV_ORDER_BAD = '7101850<b>'
+const INV_ORDER_81 = `A${'1234567890'.repeat(8)}` // 81 characters, valid in every other way
+const INV_ORDER_HINT = `Must start with a letter or number ${EM_DASH} any characters except < and >, 80 max.`
+const INV_ORDER_EDITED = `Invoice only ${EM_DASH} Job Tracking is not changed.`
+const INV_NOTE3 = ['Advance $700 paid at pickup.', `Detention 2h ${EM_DASH} see POD.`, 'Ref <ADV-7101850> & thanks']
+const INV_NOTES_MAX = 500
+const wantInv = (id) => !STEPS || STEPS.has(id)
+const invPath = (id, tail) => `/api/loads/${encodeURIComponent(id)}/${tail}`
+const isPostTo = (r, p) => r.request().method() === 'POST' && pathOf(r.url()) === p
+function bodyOf(req) { try { return req.postDataJSON() } catch { return null } }
+const invSkip = (why) => Object.assign(new Error(`SKIPPED — ${why}`), { skip: true })
+// The subject names the broker; the results show only what follows it.
+const subjectTail = (s) => {
+  const t = String(s ?? ''); const i = t.indexOf('Order #')
+  return i < 0 ? `(no "Order #" in a ${t.length}-character subject)` : `${i > 0 ? '<broker> ' : ''}${t.slice(i)}`
+}
+
+// PDF → text with the app's own pdfjs-dist (client/node_modules, the legacy build
+// runs in Node). Lines come from pdfjs's end-of-line marks, whitespace-collapsed;
+// items keep each run's position (PDF points, and relative to its page).
+let pdfjsLib = null
+async function pdfText(b64) {
+  if (!b64) return null
+  if (!pdfjsLib) {
+    const p = path.join(paths.appDir(), 'client', 'node_modules', 'pdfjs-dist', 'legacy', 'build', 'pdf.mjs')
+    if (!fs.existsSync(p)) throw new Error(`pdfjs-dist is not installed at ${p} (the client install)`)
+    pdfjsLib = await import(pathToFileURL(p).href)
+  }
+  const task = pdfjsLib.getDocument({ data: new Uint8Array(Buffer.from(b64, 'base64')), isEvalSupported: false, disableFontFace: true, useSystemFonts: false, verbosity: 0 })
+  const doc = await task.promise
+  let text = ''
+  const items = []
+  try {
+    for (let i = 1; i <= doc.numPages; i++) {
+      const pg = await doc.getPage(i)
+      const [x0, y0, x1, y1] = pg.view
+      const tc = await pg.getTextContent()
+      for (const it of tc.items) {
+        if (typeof it.str !== 'string') continue
+        text += it.str
+        if (it.hasEOL) text += '\n'
+        if (it.str.trim()) {
+          items.push({ page: i, str: it.str, x: Math.round(it.transform[4] * 10) / 10, y: Math.round(it.transform[5] * 10) / 10,
+            rx: (it.transform[4] - x0) / (x1 - x0), ry: 1 - (it.transform[5] - y0) / (y1 - y0) })
+        }
+      }
+      text += '\n'
+    }
+  } finally { await task.destroy().catch(() => {}) }
+  return { text, lines: text.split('\n').map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean), items, pages: doc.numPages }
+}
+// The labelled Notes box: its label prints letter-spaced ("N O T E S"), then the note.
+const isNotesLabel = (l) => l.replace(/\s+/g, '').toUpperCase() === 'NOTES'
+function notesAfterLabel(pt, n) {
+  const i = pt.lines.findIndex(isNotesLabel)
+  return { label: i >= 0, after: i >= 0 ? pt.lines.slice(i + 1, i + 1 + n) : [] }
+}
+const layoutOf = (pt) => JSON.stringify(pt.items.map(({ page, str, x, y }) => [page, str, x, y]))
+// The totals row, as a point on the page to centre the viewer on.
+function totalsRow(pt) {
+  const it = pt?.items.find((x) => /^SUB-?TOTAL/i.test(x.str.replace(/\s+/g, '')))
+  return it ? { page: it.page, rx: 0.5, ry: it.ry } : null
+}
+
+const orderInput = (page) => page.locator('#idp-order')
+const orderField = (page) => page.locator('.idp-field', { has: page.locator('#idp-order') })
+const orderErrors = (page) => orderField(page).locator('p.idp-hint-warn')
+const approveButton = (page) => page.locator('.idp-footer button.idp-btn-primary')
+const notesBox = (page) => page.locator('#idp-notes')
+const orderInvalid = (page) => orderInput(page).evaluate((el) => el.classList.contains('is-invalid')).catch(() => false)
+// Bring the field under test (and its hint) to the middle of the form's pane.
+async function showField(page, sel) {
+  if (await page.locator(sel).count()) await page.locator(sel).evaluate((el) => el.scrollIntoView({ block: 'center' })).catch(() => {})
+}
+
+// Resolves with the first invoice-preview response whose REQUEST body matches, or
+// null (timeout, or the page went away). Registered before the edit that sends it.
+function expectPreview(page, id, match, timeout = 60000) {
+  const p = invPath(id, 'invoice-preview')
+  return page.waitForResponse((r) => { if (!isPostTo(r, p)) return false; const b = bodyOf(r.request()); return !!b && match(b) }, { timeout })
+    .then(async (r) => ({ status: r.status(), json: await r.json().catch(() => null), body: bodyOf(r.request()) }))
+    .catch(() => null)
+}
+// The modal has adopted the render: no "updating…" badge, the viewer finished.
+async function previewSettled(page) {
+  await page.locator('label[for="idp-subject"] .idp-badge-amber').waitFor({ state: 'hidden', timeout: 30000 }).catch(() => {})
+  await page.waitForTimeout(400)
+  await page.locator('.idp-stage .pz-status').waitFor({ state: 'hidden', timeout: 30000 }).catch(() => {})
+  await page.waitForTimeout(300)
+}
+// Type an Order #. Waits for the render it triggers unless the field refuses it.
+async function typeOrder(page, id, value, also = () => true) {
+  const pv = expectPreview(page, id, (b) => b.orderNumber === value && also(b))
+  await orderInput(page).fill(value)
+  await page.waitForTimeout(1200) // past the 600 ms debounce
+  if (await orderInvalid(page)) return { refused: true, preview: null }
+  const preview = await pv
+  await previewSettled(page)
+  return { refused: false, preview }
+}
+// The form renders nothing while the Order # is empty or refused.
+const orderBlocks = async (page) => !(await orderInput(page).inputValue()).trim() || await orderInvalid(page)
+// Type into NOTES (fill: real line breaks land) and wait for its render.
+async function typeNotes(page, id, value, also = () => true) {
+  const pv = expectPreview(page, id, (b) => b.notes === value && also(b))
+  await notesBox(page).fill(value)
+  await page.waitForTimeout(1000)
+  if (await orderBlocks(page)) return null
+  const preview = await pv
+  await previewSettled(page)
+  return preview
+}
+
+// Centre the invoice viewer on a point of the rendered page and zoom in a little,
+// the way a person would: a drag to pan, then the wheel over the point.
+async function zoomInvoiceOn(page, target) {
+  if (!target) return false
+  const geo = () => page.evaluate((n) => {
+    const v = document.querySelector('.idp-stage .pz-viewport')?.getBoundingClientRect()
+    const c = document.querySelectorAll('.idp-stage .pz-content canvas')[n]?.getBoundingClientRect()
+    return v && c ? { v: { x: v.x, y: v.y, w: v.width, h: v.height }, c: { x: c.x, y: c.y, w: c.width, h: c.height } } : null
+  }, target.page - 1)
+  let g = await geo()
+  if (!g) return false
+  const cx = g.v.x + g.v.w / 2
+  const cy = g.v.y + g.v.h / 2
+  const ty = g.c.y + target.ry * g.c.h
+  if (Math.abs(ty - cy) > 30) {
+    await page.mouse.move(cx, cy)
+    await page.mouse.down()
+    await page.mouse.move(cx, cy - (ty - cy), { steps: 12 })
+    await page.mouse.up()
+    await page.waitForTimeout(250)
+    g = await geo()
+    if (!g) return false
+  }
+  await page.mouse.move(g.c.x + target.rx * g.c.w, g.c.y + target.ry * g.c.h)
+  await page.mouse.wheel(0, -110)
+  await page.waitForTimeout(400)
+  return true
+}
+
+// Delivered/completed loads with a POD, from the Super Admin's own dashboard and
+// documents reads (no draft-invoice budget spent). Non-Bison loads first (a Bison
+// load needs its Order # and PO # typed before anything renders), then loads with a
+// Payment (so the dryRun renders a PDF), then loads with no draft yet (no second
+// confirm on approve). Values stay in memory: ids and booleans only.
+async function invoiceCandidates(page) {
+  const d = (await api(page, 'GET', '/api/dashboard')).json || {}
+  const jobs = d.completedJobs || []
+  const hs = d.completedHeaders || d.jobTrackingHeaders || Object.keys(jobs[0] || {})
+  const pick = (exact, loose) => hs.find((h) => exact.test(String(h ?? '').trim())) || hs.find((h) => loose.test(String(h ?? '')))
+  const idCol = hs.find((h) => /load.?id|job.?id/i.test(String(h ?? '')))
+  const stCol = pick(/^status$/i, /status/i)
+  const emCol = pick(/^email$/i, /broker.*email|email/i)
+  const payCol = pick(/^payment$/i, /payment/i)
+  if (!idCol || !stCol) return { list: [], why: 'the dashboard payload has no load-id or status column' }
+  const all = jobs
+    .map((j) => ({
+      id: String(j[idCol] ?? '').trim(), raw: String(j[idCol] ?? ''),
+      delivered: /delivered|completed|pod received/i.test(String(j[stCol] ?? '')),
+      bison: /bisontransport\.com$/i.test(String(emCol ? j[emCol] ?? '' : '').trim().toLowerCase()),
+      paid: payCol ? parseMoney(j[payCol]) > 0 : false,
+    }))
+    .filter((c) => c.id && c.delivered)
+  const rank = (c) => (c.bison ? 4 : 0) + (c.paid ? 0 : 2) + (c.drafted ? 1 : 0)
+  const order = all.map((c, i) => ({ c, i })).sort((a, b) => rank(a.c) - rank(b.c) || a.i - b.i).map((x) => x.c)
+  const out = []
+  let checked = 0
+  for (const c of order) {
+    if (out.length >= 4 || checked >= 60) break
+    checked++
+    const docs = await api(page, 'GET', `/api/documents/${encodeURIComponent(c.id)}`)
+    if (!(docs.json?.documents || []).some((x) => String(x.type || '').toUpperCase() === 'POD')) continue
+    const dr = await api(page, 'GET', invPath(c.id, 'invoice-draft'))
+    c.drafted = !!dr.json?.draft
+    out.push(c)
+  }
+  out.sort((a, b) => rank(a) - rank(b))
+  return { list: out, why: `${all.length} delivered/completed load(s) listed, ${checked} checked for a POD` }
+}
+
+// Completed Loads → search the load → open it → Draft Invoice Email. `nav` is how the
+// dashboard is reached first: 'goto', 'reload' (I8: a fresh page), or 'none' (already
+// on it, after a candidate whose dryRun failed).
+async function openInvoiceEditor(page, cand, label, nav = 'goto') {
+  if (nav === 'goto') await page.goto(`${BASE_URL}/dashboard`)
+  else if (nav === 'reload') await page.reload({ waitUntil: 'load' })
+  const tab = page.getByRole('tab', { name: /Completed/ })
+  await tab.waitFor({ state: 'visible', timeout: 45000 })
+  await tab.click()
+  const panel = page.locator('[role="tabpanel"][data-state="active"]')
+  const search = panel.getByPlaceholder('Search load number...')
+  await search.waitFor({ state: 'visible', timeout: 30000 })
+  await search.fill(cand.id)
+  const row = panel.locator('tbody tr', { hasText: cand.id }).first()
+  await row.waitFor({ state: 'visible', timeout: 30000 })
+  await caption(page, `${label} — Completed Loads: load ${cand.id}; open it`)
+  await row.click()
+  const btn = page.getByRole('button', { name: /Draft Invoice Email/ })
+  await btn.waitFor({ state: 'visible', timeout: 30000 })
+  await caption(page, `${label} — load ${cand.id}: Draft Invoice Email (the editor opens with ?dryRun=1)`)
+  const dp = invPath(cand.id, 'draft-invoice')
+  const [resp] = await Promise.all([
+    page.waitForResponse((r) => isPostTo(r, dp) && new URL(r.url()).searchParams.get('dryRun') === '1', { timeout: 120000 }),
+    btn.click(),
+  ])
+  const json = await resp.json().catch(() => null)
+  if (resp.status() !== 200) {
+    await page.waitForTimeout(800)
+    await page.keyboard.press('Escape').catch(() => {})
+    await page.waitForTimeout(500)
+    return { ok: false, err: `${resp.status()}${json?.code ? ` ${json.code}` : ''} "${String(json?.error || '').slice(0, 140)}"`, json }
+  }
+  await orderInput(page).waitFor({ state: 'visible', timeout: 30000 })
+  if (json?.invoicePdfBase64) await page.locator('.idp-stage .pz-content canvas').first().waitFor({ state: 'visible', timeout: 45000 }).catch(() => {})
+  await previewSettled(page)
+  return { ok: true, json }
+}
+
+async function invoiceSection() {
+  const ownDb = !db
+  if (!db && DB_PATH) db = openDb()
+  const { ctx, page } = await freshPage(ADMIN_VP)
+  ctx.setDefaultTimeout(30000)
+  const cleanNotes = []
+  // Approve may ask twice: a second draft for a load that has one, an edited total.
+  const dialogs = []
+  page.on('dialog', (d) => {
+    const m = d.message()
+    dialogs.push(/already exists/i.test(m) ? 'duplicate-draft confirm' : /will bill/i.test(m) ? 'edited-total confirm' : `a ${d.type()}`)
+    d.accept().catch(() => {})
+  })
+  const S = { cand: null, open: false, dry: null, jtBefore: null, pdfI2: null, list: [] }
+  const editorWanted = ['I1', 'I2', 'I3', 'I4', 'I5', 'I6', 'I7'].some(wantInv)
+  const id = () => S.cand?.id
+  const needEditor = () => { if (!S.open) throw invSkip('the editor did not open (see I1)') }
+  const needNotesBox = async () => {
+    if (!(await notesBox(page).count())) throw Object.assign(new Error('this build\'s editor has no NOTES box'), { noNotes: true })
+  }
+  // One step: its own try/catch, an error screenshot, one results row.
+  const step = async (stepId, title, expected, shotName, fn) => {
+    let observed = ''; let v = 'FAIL'; let s = ''
+    try {
+      const r = await fn()
+      observed = r.observed; v = r.verdict; s = r.shot ?? await shot(page, shotName)
+    } catch (e) {
+      observed = e.skip ? e.message : e.noNotes ? `${e.message}; nothing to type into` : `error: ${e.message}`
+      v = e.skip ? 'SKIP' : 'FAIL'
+      if (!e.skip) s = await shot(page, `${shotName}-error`)
+    }
+    record({ step: stepId, title, expected, observed, verdict: v, shot: s })
+  }
+
+  try {
+    await login(page, 'Step I1 — Super Admin', CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
+
+    // ---- I1: the editor opens on a delivered load with a POD
+    let discovery = ''
+    if (editorWanted || wantInv('I8')) {
+      const found = await invoiceCandidates(page)
+      S.list = found.list
+      discovery = found.why
+    }
+    if (editorWanted) {
+      await step('I1', 'Super Admin: Completed Loads → a delivered load with a POD → Draft Invoice Email; the draft editor opens',
+        'The editor opens (the ?dryRun=1 answers 200); the load\'s Job Tracking row is read before any edit (kept in memory)', 'i1-editor-open', async () => {
+          if (!S.list.length) throw invSkip(`no delivered/completed load with a POD (${discovery})`)
+          const failed = []
+          for (const c of S.list) {
+            const o = await openInvoiceEditor(page, c, 'Step I1', failed.length ? 'none' : 'goto')
+            if (o.ok) { S.cand = c; S.dry = o.json; S.open = true; break }
+            failed.push(`${c.id} → ${o.err}`)
+          }
+          if (!S.open) throw new Error(`no candidate's dryRun answered 200: ${failed.join('; ')}`)
+          meta.ids.invoiceLoad = id()
+          const jt = await api(page, 'GET', `/api/load/${encodeURIComponent(S.cand.raw)}`)
+          S.jtBefore = jt.status === 200 && jt.json?.load ? jt.json.load : null
+          const dry = S.dry
+          const extra = []
+          if (dry.needsPoNumber) {
+            await page.locator('.idp-field', { has: page.locator('#idp-po') }).locator('input[type="checkbox"]').check()
+            extra.push('PO # required: "This rate confirmation has no PO #" ticked')
+          }
+          if (dry.needsTotal) {
+            const pv = expectPreview(page, id(), (b) => b.total === '1234.00')
+            await page.locator('#idp-total').fill('1234.00')
+            await page.waitForTimeout(1200)
+            if (!(await orderBlocks(page))) { await pv; await previewSettled(page) }
+            extra.push('no total could be derived, so 1234.00 was typed (the approve confirms it)')
+          }
+          const hasNotesBox = (await notesBox(page).count()) > 0
+          await caption(page, `Step I1 — the editor is open for load ${id()} (Bison: ${!!dry.isBison}; NOTES box: ${hasNotesBox})`)
+          return {
+            verdict: verdict(!!S.jtBefore),
+            observed: `load ${id()}${failed.length ? ` (after ${failed.length} candidate(s) whose dryRun did not answer 200: ${failed.join('; ')})` : ''}; ` +
+              `Bison ${!!dry.isBison}; dryRun 200; total from ${dry.totalSource || '?'}; Order # seeded from ${dry.orderNumberSource || '?'}; ` +
+              `the dryRun echoes notes: ${Object.prototype.hasOwnProperty.call(dry, 'notes') ? JSON.stringify(dry.notes) : 'no such key'}; NOTES box on the form: ${hasNotesBox}; ` +
+              `Job Tracking row read: ${S.jtBefore ? `${Object.keys(S.jtBefore).length} fields` : `NO (GET /api/load → ${jt.status})`}` +
+              `${extra.length ? `; ${extra.join('; ')}` : ''}; ${discovery}`,
+          }
+        })
+    }
+
+    // ---- I2: "7101850-$700 ADV" is accepted and reaches the subject as typed
+    if (wantInv('I2')) {
+      await step('I2', `ORDER #: type "${INV_ORDER}"`,
+        `No error under the field; the hint "${INV_ORDER_EDITED}" shows; the re-rendered SUBJECT (the invoice-preview response and the form) ends "Order #${INV_ORDER}"`, 'i2-order-dollar', async () => {
+          needEditor()
+          await caption(page, `Step I2 — type "${INV_ORDER}" into ORDER #`)
+          const t = await typeOrder(page, id(), INV_ORDER)
+          const errs = (await orderErrors(page).allInnerTexts()).map((x) => x.trim()).filter(Boolean)
+          const hint = await orderField(page).locator('p.idp-hint', { hasText: INV_ORDER_EDITED }).isVisible().catch(() => false)
+          const uiSubject = await page.locator('#idp-subject').inputValue()
+          const want = `Order #${INV_ORDER}`
+          const pt = t.preview?.json?.invoicePdfBase64 ? await pdfText(t.preview.json.invoicePdfBase64) : null
+          if (pt) S.pdfI2 = pt
+          const pdfOrder = !!pt && pt.lines.some((l) => l.includes(`Order: #${INV_ORDER}`))
+          const respSubject = t.preview?.json?.subject
+          const ok = !t.refused && !errs.length && hint && t.preview?.status === 200 && String(respSubject).endsWith(want) && uiSubject.endsWith(want) && pdfOrder
+          const observed = t.refused
+            ? `REFUSED by the form: ${errs.map((x) => `"${x}"`).join(' ') || 'the field is marked invalid'}; no preview was sent`
+            : `error under the field: ${errs.length ? errs.map((x) => `"${x}"`).join(' ') : 'none'}; hint shown: ${hint}; invoice-preview → ${t.preview?.status ?? 'no response'}, ` +
+              `subject "${subjectTail(respSubject)}"; the form's SUBJECT "${subjectTail(uiSubject)}"; the invoice PDF prints "Order: #${INV_ORDER}": ${pdfOrder}`
+          await showField(page, '#idp-order')
+          await caption(page, `Step I2 — ${verdict(ok)}: ${observed}`)
+          return { verdict: verdict(ok), observed }
+        })
+    }
+
+    // ---- I3: the wider set, then < refused, then the 80 cap
+    if (wantInv('I3')) {
+      await step('I3a', `ORDER #: type "${INV_ORDER_WIDE}"`,
+        'Accepted (no error); the SUBJECT ends with it, with a literal & (never &amp;); the PDF prints it too', 'i3a-order-wide', async () => {
+          needEditor()
+          await caption(page, `Step I3 — type "${INV_ORDER_WIDE}" into ORDER #`)
+          const t = await typeOrder(page, id(), INV_ORDER_WIDE)
+          const errs = (await orderErrors(page).allInnerTexts()).map((x) => x.trim()).filter(Boolean)
+          const respSubject = String(t.preview?.json?.subject ?? '')
+          const uiSubject = await page.locator('#idp-subject').inputValue()
+          const want = `Order #${INV_ORDER_WIDE}`
+          const pt = t.preview?.json?.invoicePdfBase64 ? await pdfText(t.preview.json.invoicePdfBase64) : null
+          const pdfOrder = !!pt && pt.lines.some((l) => l.includes(`Order: #${INV_ORDER_WIDE}`)) && !pt.text.includes('&amp;')
+          const ok = !t.refused && !errs.length && respSubject.endsWith(want) && !respSubject.includes('&amp;') && uiSubject.endsWith(want) && pdfOrder
+          const observed = t.refused
+            ? `REFUSED by the form: ${errs.map((x) => `"${x}"`).join(' ') || 'the field is marked invalid'}; no preview was sent`
+            : `error: ${errs.length ? errs.join(' ') : 'none'}; invoice-preview → ${t.preview?.status ?? 'no response'}, subject "${subjectTail(respSubject)}" ` +
+              `(&amp; in it: ${respSubject.includes('&amp;')}); the form's SUBJECT "${subjectTail(uiSubject)}"; the PDF prints it with a literal &: ${pdfOrder}`
+          await showField(page, '#idp-order')
+          await caption(page, `Step I3 — ${verdict(ok)}: ${observed}`)
+          return { verdict: verdict(ok), observed }
+        })
+      await step('I3b', `ORDER #: type "${INV_ORDER_BAD}"`,
+        `The error "${INV_ORDER_HINT}" shows under the field, no preview is sent, and Approve is disabled`, 'i3b-order-angle', async () => {
+          needEditor()
+          let sent = 0
+          const pp = invPath(id(), 'invoice-preview')
+          const onReq = (r) => { if (r.method() === 'POST' && pathOf(r.url()) === pp && bodyOf(r)?.orderNumber === INV_ORDER_BAD) sent++ }
+          page.on('request', onReq)
+          try {
+            await caption(page, `Step I3 — type "${INV_ORDER_BAD}" into ORDER #`)
+            await orderInput(page).fill(INV_ORDER_BAD)
+            await page.waitForTimeout(1500)
+          } finally { page.off('request', onReq) }
+          const errs = (await orderErrors(page).allInnerTexts()).map((x) => x.trim()).filter(Boolean)
+          const disabled = await approveButton(page).isDisabled()
+          const foot = (await page.locator('.idp-foot-note').innerText().catch(() => '')).trim()
+          const ok = errs.includes(INV_ORDER_HINT) && sent === 0 && disabled
+          const observed = `error under the field: ${errs.length ? errs.map((x) => `"${x}"`).join(' ') : 'none'}; previews sent with it: ${sent}; Approve disabled: ${disabled} (footer: "${foot}")`
+          await showField(page, '#idp-order')
+          await caption(page, `Step I3 — ${verdict(ok)}: ${observed}`)
+          return { verdict: verdict(ok), observed }
+        })
+      await step('I3c', 'ORDER #: paste an 81-character value, then put back the Order # of I2',
+        'The field keeps 80 characters (maxlength); the I2 value then renders again', 'i3c-order-81', async () => {
+          needEditor()
+          await caption(page, 'Step I3 — paste an 81-character Order # (the field\'s maxlength cuts it)')
+          await orderInput(page).click()
+          await page.keyboard.press('ControlOrMeta+A')
+          await page.keyboard.insertText(INV_ORDER_81)
+          await page.waitForTimeout(700)
+          const val = await orderInput(page).inputValue()
+          const max = await orderInput(page).getAttribute('maxlength')
+          await showField(page, '#idp-order')
+          const s = await shot(page, 'i3c-order-81')
+          await caption(page, `Step I3 — put back "${INV_ORDER}"`)
+          const t = await typeOrder(page, id(), INV_ORDER)
+          const ok = val.length === 80 && val === INV_ORDER_81.slice(0, 80) && !t.refused && t.preview?.status === 200
+          const observed = `81 characters pasted → the field holds ${val.length} (maxlength="${max}"; the first ${val.length} kept: ${val === INV_ORDER_81.slice(0, val.length)}); ` +
+            `"${INV_ORDER}" put back: ${t.refused ? 'REFUSED by the form' : `invoice-preview → ${t.preview?.status ?? 'no response'}`}`
+          await caption(page, `Step I3 — ${verdict(ok)}: ${observed}`)
+          return { verdict: verdict(ok), observed, shot: s }
+        })
+    }
+
+    // ---- I4: a three-line note prints in a labelled Notes box on the PDF
+    const note3 = INV_NOTE3.join('\n')
+    if (wantInv('I4')) {
+      await step('I4', 'NOTES: type a three-line note (with <…> and &)',
+        `The counter reads "${note3.length} / ${INV_NOTES_MAX}"; the re-rendered invoice PDF has a "Notes" label followed by the three lines, in order, exactly as typed ` +
+        '(<ADV-7101850> and & as literal text); the email body does not carry it', 'i4-notes-on-pdf', async () => {
+          needEditor(); await needNotesBox()
+          await caption(page, 'Step I4 — type a three-line note into NOTES')
+          const pv = await typeNotes(page, id(), note3)
+          const counter = (await page.locator('#idp-notes-count').innerText().catch(() => '')).trim()
+          const pt = pv?.json?.invoicePdfBase64 ? await pdfText(pv.json.invoicePdfBase64) : null
+          const nl = pt ? notesAfterLabel(pt, INV_NOTE3.length) : null
+          const linesOk = !!nl && nl.label && JSON.stringify(nl.after) === JSON.stringify(INV_NOTE3)
+          const inEmail = String(pv?.json?.emailHtml ?? '').includes('Detention 2h')
+          const ok = counter === `${note3.length} / ${INV_NOTES_MAX}` && pv?.status === 200 && linesOk && !pt.text.includes('&amp;') && !inEmail
+          const observed = `counter "${counter}"; invoice-preview → ${pv?.status ?? 'no response'}; PDF: "Notes" label ${nl?.label ?? false}, the lines after it ${JSON.stringify(nl?.after ?? [])} ` +
+            `(as typed: ${linesOk}); &amp; in the PDF: ${pt ? pt.text.includes('&amp;') : '?'}; the note in the email body: ${inEmail}`
+          await zoomInvoiceOn(page, totalsRow(pt))
+          await showField(page, '#idp-notes')
+          await caption(page, `Step I4 — ${verdict(ok)}: ${observed}`)
+          return { verdict: verdict(ok), observed }
+        })
+    }
+
+    // ---- I5: clearing the note leaves no box and no gap
+    if (wantInv('I5')) {
+      await step('I5', 'NOTES: clear it',
+        'The re-rendered PDF has no "Notes" label and none of the note\'s text, and lays out exactly as the I2 render (same fields, no note): the totals box alone on the right, no gap or blank box', 'i5-notes-cleared', async () => {
+          needEditor(); await needNotesBox()
+          if (!(await notesBox(page).inputValue())) await typeNotes(page, id(), note3) // I4 did not run
+          await caption(page, 'Step I5 — clear NOTES')
+          const pv = await typeNotes(page, id(), '')
+          const pt = pv?.json?.invoicePdfBase64 ? await pdfText(pv.json.invoicePdfBase64) : null
+          const label = !!pt && pt.lines.some(isNotesLabel)
+          const leftover = !!pt && INV_NOTE3.some((l) => pt.text.includes(l.slice(0, 12)))
+          const same = pt && S.pdfI2 ? layoutOf(pt) === layoutOf(S.pdfI2) : null
+          const ok = pv?.status === 200 && !!pt && !label && !leftover && same !== false
+          const observed = `invoice-preview → ${pv?.status ?? 'no response'}; PDF: "Notes" label ${label}, leftover note text ${leftover}; ` +
+            `text and positions identical to the I2 render: ${same === null ? 'not compared (no I2 render)' : same}`
+          await zoomInvoiceOn(page, totalsRow(pt))
+          await showField(page, '#idp-notes')
+          await caption(page, `Step I5 — ${verdict(ok)}: ${observed}`)
+          return { verdict: verdict(ok), observed }
+        })
+    }
+
+    // ---- I6: Reset empties the note
+    if (wantInv('I6')) {
+      await step('I6', 'NOTES: type a note, then "Reset to extracted values"',
+        'NOTES is empty with no "edited" badge, and the next preview has no Notes section', 'i6-notes-reset', async () => {
+          needEditor(); await needNotesBox()
+          await caption(page, 'Step I6 — type a note, then Reset to extracted values')
+          await typeNotes(page, id(), 'QA-I6 note, to be reset')
+          const badgeBefore = await page.locator('label[for="idp-notes"] .idp-badge').count()
+          const pv = expectPreview(page, id(), (b) => b.notes === '')
+          await page.getByRole('button', { name: 'Reset to extracted values' }).click()
+          await page.waitForTimeout(1200)
+          // A load whose Order # is not seeded (Bison) renders nothing after a Reset
+          // until one is typed: type I2's, which is what the next preview then carries.
+          if (await orderBlocks(page)) await orderInput(page).fill(INV_ORDER)
+          const p = await pv
+          await previewSettled(page)
+          const val = await notesBox(page).inputValue()
+          const badge = await page.locator('label[for="idp-notes"] .idp-badge').count()
+          const resetDisabled = await page.getByRole('button', { name: 'Reset to extracted values' }).isDisabled()
+          const pt = p?.json?.invoicePdfBase64 ? await pdfText(p.json.invoicePdfBase64) : null
+          const label = !!pt && pt.lines.some(isNotesLabel)
+          const ok = val === '' && badge === 0 && p?.status === 200 && !!pt && !label
+          const observed = `"edited" badge before the Reset: ${badgeBefore > 0}; after: NOTES ${JSON.stringify(val)}, "edited" badge ${badge > 0}; ` +
+            `next invoice-preview (notes "") → ${p?.status ?? 'no response'}, "Notes" label in its PDF ${label}; Reset now disabled: ${resetDisabled}`
+          await showField(page, '#idp-notes')
+          await caption(page, `Step I6 — ${verdict(ok)}: ${observed}`)
+          return { verdict: verdict(ok), observed }
+        })
+    }
+
+    // ---- I7: approve carries the note and the Order #; Job Tracking is unchanged
+    if (wantInv('I7')) {
+      const note7 = `QA-I7 note ${stamp}`
+      let info = null
+      await step('I7', `Type a note and the Order # "${INV_ORDER}", then Approve & Create Draft (confirms accepted)`,
+        `The approve request body carries notes exactly as typed and orderNumber "${INV_ORDER}"`, 'i7-approve', async () => {
+          needEditor()
+          const hasNotes = (await notesBox(page).count()) > 0
+          await caption(page, `Step I7 — type a note and the Order # "${INV_ORDER}"`)
+          if (hasNotes) await typeNotes(page, id(), note7)
+          if (await orderInput(page).inputValue() !== INV_ORDER) await typeOrder(page, id(), INV_ORDER, (b) => !hasNotes || b.notes === note7)
+          const refused = await orderInvalid(page)
+          const btn = approveButton(page)
+          let enabled = false
+          for (let i = 0; i < 30 && !(enabled = await btn.isEnabled().catch(() => false)); i++) await page.waitForTimeout(500)
+          if (!enabled) {
+            const foot = (await page.locator('.idp-foot-note').innerText().catch(() => '')).trim()
+            const observed = `NOTES box: ${hasNotes}; Order # ${refused ? 'REFUSED by the form' : 'accepted'}; Approve is DISABLED ("${foot}"), so no approve request was sent`
+            await caption(page, `Step I7 — FAIL: ${observed}`)
+            return { verdict: 'FAIL', observed }
+          }
+          if (!LOCAL && process.env.E2E_INVOICE_APPROVE !== '1') {
+            throw invSkip('not a local server: Approve would create a real Gmail draft wherever the server has a mail target (E2E_INVOICE_APPROVE=1 allows it)')
+          }
+          const dp = invPath(id(), 'draft-invoice')
+          const isApprove = (u) => pathOf(u) === dp && !new URL(u).searchParams.has('dryRun')
+          const reqP = page.waitForRequest((r) => r.method() === 'POST' && isApprove(r.url()), { timeout: 30000 })
+          const respP = page.waitForResponse((r) => r.request().method() === 'POST' && isApprove(r.url()), { timeout: 150000 })
+          await caption(page, 'Step I7 — Approve & Create Draft (locally the server has no mail target: it answers preview only and records nothing)')
+          await btn.click()
+          const body = bodyOf(await reqP) || {}
+          const resp = await respP
+          const rj = await resp.json().catch(() => null)
+          const hasKey = Object.prototype.hasOwnProperty.call(body, 'notes')
+          const ok = hasKey && body.notes === note7 && body.orderNumber === INV_ORDER
+          const pt = rj?.invoicePdfBase64 ? await pdfText(rj.invoicePdfBase64) : null
+          info = `POST draft-invoice → ${resp.status()}${rj?.code ? ` ${rj.code}` : ''}; response keys: ${Object.keys(rj || {}).sort().join(', ') || '—'}; preview ${rj?.preview === true}` +
+            `${rj?.note ? `; note "${String(rj.note).slice(0, 100)}"` : ''}${rj?.error ? `; error "${String(rj.error).slice(0, 140)}"` : ''}; ` +
+            `the approve's own PDF prints the note: ${pt ? notesAfterLabel(pt, 1).after[0] === note7 : 'no PDF in the response'}`
+          const observed = `approve request body: notes ${hasKey ? (body.notes === note7 ? 'present, exactly as typed' : `present but ${JSON.stringify(String(body.notes).slice(0, 60))}`) : 'ABSENT'}; ` +
+            `orderNumber ${JSON.stringify(body.orderNumber)}; confirms accepted: ${dialogs.join(', ') || 'none'}`
+          await page.waitForTimeout(1500)
+          await caption(page, `Step I7 — ${verdict(ok)}: ${observed}`)
+          return { verdict: verdict(ok), observed }
+        })
+      if (info) record({ step: 'I7r', title: 'The approve\'s response (not scored)', expected: 'Locally: 200 with preview:true (no mail target), so no draft record is written', observed: info, verdict: 'INFO', shot: '' })
+      await step('I7j', 'Job Tracking row after the edits and the approve, read again with GET /api/load/<id>',
+        'Identical to I1\'s read: the editor wrote nothing to Job Tracking', 'i7j-job-tracking', async () => {
+          if (!S.jtBefore) throw invSkip('no Job Tracking row was read in I1')
+          const jt = await api(page, 'GET', `/api/load/${encodeURIComponent(S.cand.raw)}`)
+          const after = jt.json?.load || null
+          const keys = [...new Set([...Object.keys(S.jtBefore), ...Object.keys(after || {})])]
+          const changed = keys.filter((k) => JSON.stringify(S.jtBefore[k] ?? null) !== JSON.stringify(after?.[k] ?? null))
+          const ok = jt.status === 200 && !!after && changed.length === 0
+          const observed = `GET /api/load/${id()} → ${jt.status}; ${keys.length} field(s) compared with I1's read: ${changed.length ? `CHANGED ${changed.join(', ')}` : 'identical'}`
+          await caption(page, `Step I7 — ${verdict(ok)}: ${observed}`)
+          return { verdict: verdict(ok), observed }
+        })
+    }
+
+    // ---- I8: a note saved on the approved draft record pre-fills the next editor
+    if (wantInv('I8')) {
+      const note8 = `QA-I8 saved note ${stamp} & <kept>\nSecond line ${EM_DASH} after a reload`
+      let i8b = null
+      await step('I8', 'Planted, local only: a saved note on this load\'s newest draft record; reload the page and open the editor again',
+        'NOTES is pre-filled with the saved note exactly, and the dryRun\'s own PDF already prints it under "Notes"', 'i8-notes-prefilled', async () => {
+          if (!DB_PATH) throw invSkip('no DB_PATH (the saved note is planted in the copy, so I8 runs locally only)')
+          const cand = S.cand || S.list[0]
+          if (!cand) throw invSkip('no delivered/completed load with a POD to open')
+          const cols = db.prepare('PRAGMA table_info(load_invoice_drafts)').all().map((c) => c.name)
+          const hasCol = cols.includes('notes')
+          let plantedId = null
+          if (hasCol) {
+            const inv = `QA-I8-${stamp}`
+            plantedId = Number(db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, via, created_by, notes) VALUES (?, ?, '', 'qa-e2e', 'qa-e2e', ?)").run(cand.id, inv, note8).lastInsertRowid)
+            noteCreated('load_invoice_drafts', plantedId)
+            // The server must read this file: its newest-draft read returns the planted row.
+            const g = await api(page, 'GET', invPath(cand.id, 'invoice-draft'))
+            if (g.json?.draft?.invoice_id !== inv) {
+              cleanNotes.push(...removeCreated().map((n) => `I8 ${n}`))
+              throw invSkip('DB_PATH is not the server\'s database (GET …/invoice-draft does not return the planted row); nothing is left planted')
+            }
+          }
+          await caption(page, hasCol ? `Step I8 — draft record #${plantedId} planted with a two-line note; reload the page` : 'Step I8 — this build\'s draft records have no notes column; reload the page anyway')
+          const o = await openInvoiceEditor(page, cand, 'Step I8', 'reload')
+          if (!o.ok) throw new Error(`the dryRun answered ${o.err}`)
+          S.open = true; S.cand = S.cand || cand
+          const box = (await notesBox(page).count()) ? await notesBox(page).inputValue() : null
+          const echoed = o.json?.notes
+          const pt = o.json?.invoicePdfBase64 ? await pdfText(o.json.invoicePdfBase64) : null
+          const want = note8.split('\n')
+          const nl = pt ? notesAfterLabel(pt, want.length) : null
+          const pdfOk = !!nl && nl.label && JSON.stringify(nl.after) === JSON.stringify(want)
+          const ok = hasCol && box === note8 && echoed === note8 && pdfOk
+          const observed = hasCol
+            ? `planted load_invoice_drafts #${plantedId} (the server returns it as the newest draft); after the reload: NOTES pre-filled exactly: ${box === note8}` +
+              `${box !== null && box !== note8 ? ` (holds ${JSON.stringify(box.slice(0, 60))})` : box === null ? ' (no NOTES box)' : ''}; the dryRun echoes it: ${echoed === note8}; ` +
+              `the dryRun PDF: ${pt ? `"Notes" label ${nl.label}, then ${JSON.stringify(nl.after)} (as saved: ${pdfOk})` : 'no PDF (no total derived)'}`
+            : `load_invoice_drafts has no notes column on this build (nothing to plant); after the reload the editor has ${box === null ? 'no NOTES box' : `a NOTES box holding ${JSON.stringify(box)}`}; ` +
+              `the dryRun ${echoed === undefined ? 'has no notes key' : `echoes ${JSON.stringify(echoed)}`}`
+          if (pt && nl?.label) await zoomInvoiceOn(page, totalsRow(pt))
+          await showField(page, '#idp-notes')
+          await caption(page, `Step I8 — ${verdict(ok)}: ${observed}`)
+          const s = await shot(page, 'i8-notes-prefilled')
+          // I8b, while the saved note is still there: the preview's rule for a body
+          // with NO notes key (a tab on a bundle from before Notes sends none) is the
+          // approve's rule, the last approved note.
+          try {
+            const r = await api(page, 'POST', invPath(cand.id, 'invoice-preview'),
+              { invoiceId: `QA-I8-${stamp.slice(-6)}`, invoiceDate: dayCT(), total: '100.00', recipientEmail: 'qa-e2e@example.com', orderNumber: '7101850' })
+            const p8 = r.json?.invoicePdfBase64 ? await pdfText(r.json.invoicePdfBase64) : null
+            const n8 = p8 ? notesAfterLabel(p8, want.length) : null
+            const good = r.status === 200 && !!n8 && n8.label && JSON.stringify(n8.after) === JSON.stringify(want)
+            i8b = {
+              verdict: verdict(good),
+              observed: `POST invoice-preview with no notes key → ${r.status}${r.json?.code ? ` ${r.json.code}` : ''}; its PDF: ` +
+                `${p8 ? `"Notes" label ${n8.label}${n8.label ? `, then ${JSON.stringify(n8.after)} (the saved note: ${good})` : ''}` : 'none'}` +
+                `${hasCol ? '' : ' (this build stores no note to fall back to)'}`,
+            }
+          } catch (e) { i8b = { verdict: 'FAIL', observed: `error: ${e.message}` } }
+          if (db && plantedId) cleanNotes.push(...removeCreated().map((n) => `I8 ${n}`))
+          return { verdict: verdict(ok), observed, shot: s }
+        })
+      if (i8b) {
+        record({
+          step: 'I8b', title: 'Planted, local only: POST invoice-preview with the notes key left out (as a tab on an older bundle sends it), while the saved note is there',
+          expected: 'Its PDF prints the saved note under "Notes": the approve\'s rule, the last approved note', observed: i8b.observed, verdict: i8b.verdict, shot: '',
+        })
+      }
+    }
+
+    // ---- I9: the server's own refusals (the same session, as the page's fetch sends them)
+    if (wantInv('I9')) {
+      const lid = id() || S.list[0]?.id || 'QA-I9'
+      // An Order # every build accepts, so each refusal below is the one field under test.
+      const base = { invoiceId: `QA-I9-${stamp.slice(-6)}`, invoiceDate: dayCT(), total: '100.00', recipientEmail: 'qa-e2e@example.com', orderNumber: '7101850', notes: '' }
+      const cases = [
+        { step: 'I9', title: 'POST invoice-preview, a valid body (the control)', body: base, want: { status: 200 } },
+        { step: 'I9a', title: `POST invoice-preview with notes of ${INV_NOTES_MAX + 1} characters`, body: { ...base, notes: 'n'.repeat(INV_NOTES_MAX + 1) }, want: { status: 400, code: 'INVOICE_NOTES_TOO_LONG' } },
+        { step: 'I9b', title: 'POST invoice-preview with notes: ["x"] (not text)', body: { ...base, notes: ['x'] }, want: { status: 400, code: 'INVOICE_NOTES_INVALID' } },
+        { step: 'I9c', title: 'POST invoice-preview with orderNumber "a<b"', body: { ...base, orderNumber: 'a<b' }, want: { status: 400, code: 'ORDER_NUMBER_INVALID' } },
+      ]
+      const summary = []
+      for (const c of cases) {
+        let observed = ''; let v = 'FAIL'
+        try {
+          const r = await api(page, 'POST', invPath(lid, 'invoice-preview'), c.body)
+          v = verdict(r.status === c.want.status && (!c.want.code || r.json?.code === c.want.code))
+          observed = `→ ${r.status}${r.json?.code ? ` ${r.json.code}` : ''}${r.json?.field ? ` (field ${r.json.field})` : ''}` +
+            `${r.status !== 200 && r.json?.error ? ` "${String(r.json.error).slice(0, 160)}"` : ''}${r.status === 200 ? `; PDF rendered: ${!!r.json?.invoicePdfBase64}` : ''}`
+        } catch (e) { observed = `error: ${e.message}` }
+        summary.push(`${c.step} ${observed.split(';')[0]}`)
+        record({ step: c.step, title: c.title, expected: c.want.code ? `${c.want.status} ${c.want.code}` : `${c.want.status} (so each refusal below is its one field)`, observed: `load ${lid}: ${observed}`, verdict: v, shot: '' })
+      }
+      await caption(page, `Step I9 — the server's refusals (page fetch, X-Requested-With): ${summary.join(' · ')}`)
+      rows[rows.length - 1].shot = await shot(page, 'i9-api-refusals')
+      writeResults()
+    }
+  } finally {
+    try { if (db) cleanNotes.push(...removeCreated().map((n) => `I ${n}`)) } catch (e) { cleanNotes.push(`delete error: ${e.message}`) }
+    if (DB_PATH) {
+      const left = fs.existsSync(JOURNAL)
+      record({
+        step: 'Ic', title: 'Invoice editor: delete the planted draft record',
+        expected: 'Deleted; no plant journal left',
+        observed: [...cleanNotes, left ? 'plant journal still present!' : 'no plant journal left'].join('; '),
+        verdict: verdict(!left && !cleanNotes.some((n) => /error|LEFT BEHIND/.test(n))), shot: '',
+      })
+    }
+    await ctx.close().catch(() => {})
+    if (ownDb && db) { try { db.close() } catch { /* ignore */ } db = null }
   }
 }
 

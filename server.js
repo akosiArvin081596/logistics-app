@@ -2269,6 +2269,10 @@ try { db.exec("ALTER TABLE load_invoice_drafts ADD COLUMN ratecon_total TEXT DEF
 // different one — so "invoice 08142026-2 was never issued, where did it go?"
 // resolves to a row instead of a gap.
 try { db.exec("ALTER TABLE load_invoice_drafts ADD COLUMN invoice_id_minted TEXT DEFAULT ''"); } catch {}
+// The optional Notes printed on the invoice PDF, as approved. Kept so reopening
+// the editor pre-fills the last approved note (see latestDraftNotes()). Invoice
+// only — nothing reads it into revenue, pay, payouts or the P&L.
+try { db.exec("ALTER TABLE load_invoice_drafts ADD COLUMN notes TEXT DEFAULT ''"); } catch {}
 // NOT unique — deliberately. invoice_id is now dispatcher-supplied, and the
 // re-approve flow legitimately reissues a number; a unique index would turn a
 // warning into a 500. See the collision probe beside parseInvoiceOverrides().
@@ -39968,13 +39972,31 @@ const INVOICE_TOTAL_MAX = 1000000;
 const INVOICE_TOTAL_MIN = 0.01;
 
 // Charsets. Deliberately narrow — these strings become a filename, an email
-// subject, a PDF field and an audit line. The `{0,39}` is the LENGTH RULE, not
-// decoration: see INVOICE_FIELD_SCAN_MAX.
+// subject, a PDF field and an audit line. The trailing `{0,N}` of each is the
+// LENGTH RULE, not decoration (40 for the invoice # and PO #, 80 for the
+// Order #): see INVOICE_FIELD_SCAN_MAX.
 const INVOICE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,39}$/;
 const INVOICE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9 ._\/#-]{0,39}$/;
+// The Order # is WIDER than the PO #, on purpose: dispatchers annotate it
+// ("7101850-$700 ADV"), so any printable character is allowed — `$ , ( ) : + &
+// ' @ %`, spaces, accented letters — up to 80. What it still refuses, and why:
+//   • `\p{C}` — control, format (zero-width, BIDI), private-use and unassigned
+//     characters.
+//     sanitizeEvidenceText() already turns the dangerous ones into spaces; this
+//     is the second line, and it also catches the rest of the Cf class.
+//   • `\p{Zl}` / `\p{Zp}` — the Unicode line and paragraph separators, which
+//     are line breaks in a MIME header, a log line and JavaScript source alike.
+//   • `<` and `>`. Every renderer in this repo escapes them, but the optional
+//     n8n fallback ships orderNumber to a workflow template that lives outside
+//     this repo, and nothing here can prove that template escapes.
+//   • A first character that is not a letter or number — which keeps
+//     spreadsheet-formula leads (`=` `+` `-` `@`) out, and a pasted "#7101850"
+//     from printing as "Order: ##7101850".
+// Used for orderNumber ONLY. The PO # keeps INVOICE_REF_RE unchanged.
+const INVOICE_ORDER_RE = /^[\p{L}\p{N}][^\p{C}\p{Zl}\p{Zp}<>]{0,79}$/u;
 
 // ⚠️ The sanitize bound is DELIBERATELY LOOSER than the charset regexes' own
-// 40-char limit, and that is what makes over-length a REFUSAL instead of a
+// 40- and 80-char limits, and that is what makes over-length a REFUSAL instead of a
 // silent truncation. sanitize(v, 40) would cut a 45-character invoice number
 // down to 40 and hand the regex a string that now matches — so the dispatcher
 // types a number, the modal accepts it, and the PDF prints a different one.
@@ -39986,10 +40008,43 @@ const INVOICE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9 ._\/#-]{0,39}$/;
 // an oversized body from being copied around before it is refused.
 const INVOICE_FIELD_SCAN_MAX = 200;
 
-// The nine editable fields plus `moveNumber`, which has no UI: it is printed in
-// the Bison cover letter, so leaving it un-pinned would let a nondeterministic
-// Gemini re-run on the commit change a body the dispatcher already reviewed —
-// the same reasoning already written for the recipient below.
+// Invoice NOTES — free text printed in a "Notes" box beside the totals on the
+// invoice PDF, and nowhere else (not the email body, not the sheet). Same
+// refusal-not-truncation discipline as the fields above: the scan bound is 4×
+// the limit, so a 501-character note is REFUSED rather than cut to 500 — the
+// dispatcher must never approve a note that prints shorter than what they typed.
+const INVOICE_NOTES_MAX = 500;
+const INVOICE_NOTES_SCAN_MAX = 2000;
+
+// sanitizeEvidenceText() for text that is ALLOWED to be multi-line.
+//
+// The one difference is the line break: sanitizeEvidenceText turns \n into a
+// space, which would flatten a three-line note onto one line. So line endings
+// are normalized to \n FIRST (CRLF / lone CR from a Windows or old-Mac paste),
+// the text is split on them, and each LINE gets the ordinary strip — tabs,
+// C0/C1 controls, zero-width and BIDI characters, and U+2028/2029 all become a
+// space, exactly as everywhere else. Only a plain \n survives as a break.
+//
+// Nothing is HTML-escaped here, by design: this is the stored, reviewed text.
+// Escaping is the renderer's job (buildInvoiceHtml esc()s it), and escaping
+// twice would print "&amp;" on the invoice.
+function sanitizeInvoiceNotes(v, max) {
+	const s = String(v == null ? "" : v)
+		.normalize("NFC")
+		.replace(/\r\n?/g, "\n")
+		.split("\n")
+		.map((line) => line.replace(EVIDENCE_TEXT_STRIP, " "))
+		.join("\n")
+		.trim();
+	// Array.from, not slice — same surrogate-pair reasoning as sanitizeEvidenceText().
+	return Array.from(s).slice(0, max).join("");
+}
+
+// The nine editable fields, the optional `notes`, and `moveNumber`, which has
+// no UI: it is printed in the Bison cover letter, so leaving it un-pinned would
+// let a nondeterministic Gemini re-run on the commit change a body the
+// dispatcher already reviewed — the same reasoning already written for the
+// recipient below.
 //
 // Returns { ok, error, code, field, has, values }. `has[k]` is true only when
 // the CLIENT SENT the key: undefined/null mean "not supplied → derive it
@@ -40090,11 +40145,12 @@ function parseInvoiceOverrides(body) {
 	// --- order / PO refs ------------------------------------------------------
 	// orderNumber may NOT be cleared: it heads the invoice, drives the subject,
 	// and an empty one yields a rate-con attachment literally named ".pdf".
+	// Its charset is INVOICE_ORDER_RE (wide, 80), not the PO #'s INVOICE_REF_RE.
 	if (supplied("orderNumber")) {
 		const v = sanitizeEvidenceText(src.orderNumber, INVOICE_FIELD_SCAN_MAX);
-		if (!v || !INVOICE_REF_RE.test(v)) {
+		if (!v || !INVOICE_ORDER_RE.test(v)) {
 			return bad("ORDER_NUMBER_INVALID", "orderNumber",
-				"Order # must be 1–40 characters using letters, numbers, spaces or . _ / # - and start with a letter or number.");
+				"Order # must be 1–80 characters, start with a letter or number, and contain no line breaks, control characters, < or >.");
 		}
 		has.orderNumber = true;
 		values.orderNumber = v;
@@ -40135,6 +40191,33 @@ function parseInvoiceOverrides(body) {
 		values.total = n;
 	}
 
+	// --- notes ----------------------------------------------------------------
+	// Optional, may be cleared. "" is honoured (has = true) — the dispatcher
+	// deleted the last approved note — while an omitted key lets the approve
+	// re-use that note. A non-string is REFUSED rather than coerced, unlike the
+	// free-text names above: String(["a","b"]) === "a,b" would print text nobody
+	// typed, and this is the one field whose whole content is prose.
+	if (supplied("notes")) {
+		if (typeof src.notes !== "string") {
+			return bad("INVOICE_NOTES_INVALID", "notes", "Notes must be text.");
+		}
+		// Refused BEFORE the clean-up, not after: the body limit is 50 MB, and
+		// normalizing, splitting and scanning all of it just to cut it to 2000
+		// blocks the event loop for nothing. A raw note four times the limit is
+		// refused outright even if stripping would have shrunk it — the editor's
+		// box stops at 500, so nothing a person typed ever gets here.
+		if (src.notes.length > INVOICE_NOTES_SCAN_MAX) {
+			return bad("INVOICE_NOTES_TOO_LONG", "notes", `Notes must be ${INVOICE_NOTES_MAX} characters or fewer.`);
+		}
+		const v = sanitizeInvoiceNotes(src.notes, INVOICE_NOTES_SCAN_MAX);
+		// Counted in CODEPOINTS, like every other cap here.
+		if (Array.from(v).length > INVOICE_NOTES_MAX) {
+			return bad("INVOICE_NOTES_TOO_LONG", "notes", `Notes must be ${INVOICE_NOTES_MAX} characters or fewer.`);
+		}
+		has.notes = true;
+		values.notes = v;
+	}
+
 	return { ok: true, error: "", code: "", field: "", has, values };
 }
 
@@ -40157,6 +40240,26 @@ function invoiceIdAlreadyUsed(invoiceId, loadId) {
 		return !!(row && row.n > 0);
 	} catch {
 		return false;
+	}
+}
+
+// The note on this load's most recent APPROVED draft — the value the approve
+// prints when the request omits `notes`, and the value the ?dryRun=1 echo seeds
+// the editor with, so reopening the editor shows what was last sent.
+//
+// Newest row wins, INCLUDING a row whose note is "" — clearing a note on
+// approve must stick, not resurrect an older one. Rows written before the
+// column existed read as "" (the ALTER's DEFAULT). Any failure answers "":
+// a note is a courtesy on the document, and failing to recall one must never
+// block an invoice.
+function latestDraftNotes(loadId) {
+	try {
+		const row = db
+			.prepare("SELECT notes FROM load_invoice_drafts WHERE load_id = ? ORDER BY id DESC LIMIT 1")
+			.get(String(loadId || ""));
+		return row && typeof row.notes === "string" ? row.notes : "";
+	} catch {
+		return "";
 	}
 }
 
@@ -40647,6 +40750,11 @@ app.post(
 			const poNumber = ov.has.poNumber ? ov.values.poNumber : derivedPoNumber;
 			const derivedMoveNumber = rcFields.moveNumber || "";
 			const moveNumber = ov.has.moveNumber ? ov.values.moveNumber : derivedMoveNumber;
+			// Notes: omitted → the last APPROVED note for this load; "" → cleared.
+			// The same omitted-vs-empty rule as every field above. PDF only — the
+			// cover email is untouched, and nothing here reaches Job Tracking.
+			const derivedNotes = latestDraftNotes(loadId);
+			const notes = ov.has.notes ? ov.values.notes : derivedNotes;
 			// "" on the needsTotal dryRun — never "$0.00", which reads as a real
 			// figure the reviewer might approve.
 			const total = needsTotal ? "" : brokerInvoice.formatMoney(totalAmount);
@@ -40667,6 +40775,7 @@ app.post(
 					poNumber,
 					deliveryDate,
 					total,
+					notes,
 				});
 				invoicePdf = await renderHtmlToPdf(invoiceHtml);
 				invoicePdfBase64 = Buffer.from(invoicePdf).toString("base64");
@@ -40675,9 +40784,9 @@ app.post(
 			// 7b) Build the standard invoice email (body + signature) — the same
 			//     content the draft carries. For a Bison load brokerName is
 			//     "Bison Transport", so the subject renders exactly as before.
-			const draftSubject = effBrokerName
-				? `${effBrokerName} Order #${orderNumber}`
-				: `Order #${orderNumber}`;
+			//     One builder for this route and the preview — see
+			//     buildInvoiceSubject() for why it is plain text, never esc()'d.
+			const draftSubject = brokerInvoice.buildInvoiceSubject({ brokerName: effBrokerName, orderNumber });
 			const draftHtml = brokerInvoice.buildInvoiceEmailHtml({
 				brokerName: effBrokerName,
 				isBison,
@@ -40693,8 +40802,11 @@ app.post(
 			// dispatcher-supplied and was never sanitized at all. The broker half
 			// passes fallback "" on purpose — an empty broker name legitimately
 			// yields the bare "Invoice Order #…" form.
+			//
+			// 80, matching INVOICE_ORDER_RE, so the file name carries the WHOLE
+			// Order # the invoice prints rather than a silently shorter one.
 			const safeName = safeAttachmentName(effBrokerName, 40, "");
-			const safeOrderNumber = safeAttachmentName(orderNumber, 40);
+			const safeOrderNumber = safeAttachmentName(orderNumber, 80);
 			const invoiceFileName = isBison
 				? `Bison Invoice Order #${safeOrderNumber}.pdf`
 				: `${safeName ? safeName + " " : ""}Invoice Order #${safeOrderNumber}.pdf`;
@@ -40772,6 +40884,10 @@ app.post(
 					// approve can pin the value the reviewer actually saw, exactly as
 					// the recipient is pinned above.
 					moveNumber,
+					// The note the PDF above was rendered with — the request's own, or
+					// the last approved one when the request omitted it. "" when none.
+					// Seeds the editor's Notes box so it matches the preview.
+					notes,
 					// ⚠️ PINNED, NOT DERIVED — the same treatment as moveNumber, and for
 					// the same reason. This value is authoritative HERE and only here:
 					// it comes from the SHEET's broker email, which nobody can edit.
@@ -40844,6 +40960,9 @@ app.post(
 				["deliveryDate", derivedDeliveryDate, deliveryDate],
 				["moveNumber", derivedMoveNumber, moveNumber],
 				["total", derivedTotal, totalAmount],
+				// LAST on purpose: the audit detail is capped at 1000 characters, and a
+				// long note must be what the cap trims, never the money line above.
+				["notes", derivedNotes, notes],
 			].filter(([, from, to]) => String(from == null ? "" : from) !== String(to == null ? "" : to));
 			const editedFields = editDiffs.map(([f]) => f);
 			// Names the divergence explicitly, and names the RULE with it — an
@@ -40861,7 +40980,7 @@ app.post(
 			const recordDraft = (via) => {
 				try {
 					db.prepare(
-						"INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, total, broker_name, order_number, via, created_by, edited, edited_fields, overrides_json, total_source, sheet_total, ratecon_total, invoice_id_minted) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+						"INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, total, broker_name, order_number, via, created_by, edited, edited_fields, overrides_json, total_source, sheet_total, ratecon_total, invoice_id_minted, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 					).run(
 						loadId, invoiceId, invoiceTo.email, recipientSource, total, effBrokerName, orderNumber, via,
 						(req.session.user && req.session.user.username) || "",
@@ -40872,6 +40991,7 @@ app.post(
 						sheetTotal > 0 ? fmtMoney(sheetTotal) : "",
 						rcTotal > 0 ? fmtMoney(rcTotal) : "",
 						invoiceId === mintedInvoiceId ? "" : mintedInvoiceId,
+						notes,
 					);
 					// ⚠️ BYTE-IDENTICAL for the unedited case, deliberately — historical
 					// queries over invoice_draft_created must not change shape. The edit
@@ -40923,6 +41043,9 @@ app.post(
 					orderNumber,
 					moveNumber,
 					poNumber,
+					// Already printed inside invoicePdfBase64; carried as text too so
+					// the workflow sees the same reviewed values as the IMAP path.
+					notes,
 					to: invoiceTo.email,
 					invoicePdfBase64,
 					invoiceFileName,
@@ -41092,6 +41215,12 @@ app.post(
 			const orderNumber = ov.has.orderNumber ? ov.values.orderNumber : loadRef;
 			const poNumber = ov.has.poNumber ? ov.values.poNumber : "";
 			const moveNumber = ov.has.moveNumber ? ov.values.moveNumber : "";
+			// The SAME rule as the approve: omitted → the last approved note, "" →
+			// none. The modal always sends `notes`, but a tab still running a bundle
+			// from before Notes existed omits it — and if this route read "omitted"
+			// as "no note" while the approve read it as "the last one", that tab
+			// would preview no note and then print one. One rule, one answer.
+			const notes = ov.has.notes ? ov.values.notes : latestDraftNotes(loadId);
 			const total = brokerInvoice.formatMoney(ov.values.total);
 
 			// ⚠️ PINNED FROM THE dryRun, exactly like moveNumber — never re-derived
@@ -41124,7 +41253,7 @@ app.post(
 				: brokerInvoice.isBisonLoad({ email: invoiceTo.email });
 
 			const invoiceHtml = brokerInvoice.buildInvoiceHtml({
-				invoiceId, invoiceDate, brokerName, invoiceTo, orderNumber, poNumber, deliveryDate, total,
+				invoiceId, invoiceDate, brokerName, invoiceTo, orderNumber, poNumber, deliveryDate, total, notes,
 			});
 			const invoicePdf = await renderHtmlToPdf(invoiceHtml);
 
@@ -41132,12 +41261,13 @@ app.post(
 			// server template. emailHtml especially: the modal's Email tab renders
 			// the cover note built from the ORIGINAL values, so once those are
 			// editable it would silently show a body that will not be sent.
-			const subject = brokerName ? `${brokerName} Order #${orderNumber}` : `Order #${orderNumber}`;
+			const subject = brokerInvoice.buildInvoiceSubject({ brokerName, orderNumber });
 			const emailHtml = brokerInvoice.buildInvoiceEmailHtml({
 				brokerName, isBison, loadNumber: loadRef, orderNumber, moveNumber, poNumber,
 			});
+			// 80 for the Order # half — the same bound as the approve route above.
 			const safeName = safeAttachmentName(brokerName, 40, "");
-			const safeOrderNumber = safeAttachmentName(orderNumber, 40);
+			const safeOrderNumber = safeAttachmentName(orderNumber, 80);
 			const invoiceFileName = isBison
 				? `Bison Invoice Order #${safeOrderNumber}.pdf`
 				: `${safeName ? safeName + " " : ""}Invoice Order #${safeOrderNumber}.pdf`;
