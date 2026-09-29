@@ -12729,6 +12729,21 @@ function registerApplicationVehicles(vehicles, appId, userId) {
 }
 
 // Admin: accept/reject investor application
+//
+// New / Reviewed / Rejected only set the status. Accepted creates the
+// investor's account, their investors record and one truck per vehicle, and
+// every refusal happens BEFORE any of that is written:
+//   - 409 APPLICATION_DELETED: the application was removed.
+//   - 409 USER_ALREADY_EXISTS: an account already has the applicant's email.
+//   - 409 INVESTOR_RECORD_CONFLICT: another investors record already holds the
+//     company name the new record would take (its carrier_name, compared
+//     trimmed and case-insensitively); the message names that record.
+// The status becomes Accepted in the same transaction that writes the account,
+// the record and the trucks, so a refused or failed acceptance leaves the
+// application as it was. An application whose investors record already exists
+// (it was accepted before) is simply marked Accepted again; nothing is created.
+// The username is derived from the legal name, with a number appended while it
+// is taken, so it never collides.
 app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const { status } = req.body;
@@ -12736,6 +12751,14 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			return res.status(400).json({ error: "Invalid status" });
 		}
 		const appId = parseInt(req.params.id);
+
+		// ⚠️ HASHED FIRST, ABOVE EVERY CHECK, AND IT MUST STAY HERE. It is the
+		// handler's only await, so every check below and the transaction that
+		// follows them run synchronously on state read after it — the rule
+		// PUT /api/users/:id and the driver acceptance follow.
+		const tempPassword = crypto.randomBytes(4).toString("hex");
+		const hash = status === "Accepted" ? await bcrypt.hash(tempPassword, 10) : "";
+
 		// ⚠️ CHECKED BEFORE THE UPDATE, and this is the reader where filtering
 		// matters most. `status = 'Accepted'` does not merely set a column: it
 		// CREATES A USER ACCOUNT, mints a temporary password and emails it. A
@@ -12749,17 +12772,51 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 				code: "APPLICATION_DELETED",
 			});
 		}
-		db.prepare("UPDATE investor_applications SET status=? WHERE id=?").run(status, appId);
+		const setStatus = db.prepare("UPDATE investor_applications SET status=? WHERE id=?");
 
 		if (status === "Accepted") {
 			const application = db.prepare("SELECT * FROM investor_applications WHERE id=?").get(appId);
 			if (!application) return res.status(404).json({ error: "Application not found" });
-			// Check if user already exists
-			const existingUser = db.prepare("SELECT id FROM users WHERE LOWER(email)=LOWER(?)").get(application.email);
-			if (existingUser) return res.json({ success: true, message: "Accepted (user already exists)" });
+
+			const previous = db.prepare("SELECT id FROM investors WHERE application_id = ? AND application_id > 0").all(appId);
+			if (previous.length) {
+				setStatus.run(status, appId);
+				notifyChange("investor-applications");
+				return res.json({ success: true, accountCreated: false, message: "Accepted (this application's account already exists)" });
+			}
+
+			const fullName = String(application.legal_name || "").trim();
+			if (!fullName) {
+				return res.status(400).json({
+					error: "Not accepted: this application has no legal name to create the investor account under. Nothing was changed.",
+					code: "INVESTOR_NAME_REQUIRED",
+				});
+			}
+			const carrierName = String(application.dba || "").trim() || fullName;
+
+			const email = String(application.email || "").trim();
+			const emailHolder = email ? db.prepare("SELECT id, username FROM users WHERE LOWER(email) = LOWER(?)").get(email) : null;
+			if (emailHolder) {
+				logAudit(req, "accept_investor_blocked", "investor_application", appId,
+					`Accepting application ${appId} refused: its email is already on user ${emailHolder.id}; nothing was written [USER_ALREADY_EXISTS]`);
+				return res.status(409).json({
+					error: `Not accepted: an account with this applicant's email already exists (username "${emailHolder.username}"). Nothing was changed.`,
+					code: "USER_ALREADY_EXISTS",
+				});
+			}
+			const nameHolder = db.prepare(
+				"SELECT id, full_name, carrier_name FROM investors WHERE LOWER(TRIM(carrier_name)) = LOWER(?) ORDER BY id LIMIT 1"
+			).get(carrierName);
+			if (nameHolder) {
+				logAudit(req, "accept_investor_blocked", "investor_application", appId,
+					`Accepting application ${appId} refused: investors record ${nameHolder.id} already holds its company name; nothing was written [INVESTOR_RECORD_CONFLICT]`);
+				return res.status(409).json({
+					error: `Not accepted: the investor record "${nameHolder.full_name || nameHolder.carrier_name}" already uses the company name "${carrierName}". Nothing was changed.`,
+					code: "INVESTOR_RECORD_CONFLICT",
+				});
+			}
 
 			// Auto-create investor user account
-			const fullName = application.legal_name.trim();
 			let baseUsername = fullName.toLowerCase().replace(/\s+/g, ".").replace(/[^a-z0-9.]/g, "");
 			let username = baseUsername;
 			let suffix = 1;
@@ -12767,32 +12824,38 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 				username = `${baseUsername}${suffix}`;
 				suffix++;
 			}
-			const tempPassword = crypto.randomBytes(4).toString("hex");
-			const hash = await bcrypt.hash(tempPassword, 10);
-			// must_change_password = 1, set exactly as the driver acceptance sets it
-			// (PUT /api/applications/:id/status). The temporary password is emailed
-			// in plaintext below, so until it is changed the account can do nothing
-			// else: requireAuth / requireRole refuse it (FORCED PASSWORD CHANGE) and
-			// the client router sends every role to /account/change-password.
-			const userResult = db.prepare(
-				"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name, must_change_password) VALUES (?, ?, 'Investor', '', ?, ?, ?, 1)"
-			).run(username, hash, application.email || "", fullName, application.dba || fullName);
-			const userId = userResult.lastInsertRowid;
 
-			// Create investor record with full business info from application
-			db.prepare(`INSERT OR IGNORE INTO investors
-				(user_id, full_name, carrier_name, status, application_id, entity_type, address, phone, email, ein_ssn, tax_classification, contact_person, contact_title)
-				VALUES (?, ?, ?, 'Active', ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-				.run(userId, fullName, application.dba || fullName, appId,
-					application.entity_type || "", application.address || "", application.phone || "",
-					application.email || "", application.ein_ssn || "", application.tax_classification || "",
-					application.contact_person || "", application.contact_title || "");
-
-			// Create trucks from application vehicles (owner_id = user ID, consistent with dashboard/reports)
 			let vehicles = [];
 			try { vehicles = JSON.parse(application.vehicles_json || "[]"); } catch { /* skip */ }
 			if (!Array.isArray(vehicles)) vehicles = [];
-			const vehicleCounts = registerApplicationVehicles(vehicles, appId, userId);
+
+			// One transaction: the status, the account, the investors record and the
+			// trucks are written together or not at all.
+			const { userId, vehicleCounts } = db.transaction(() => {
+				setStatus.run(status, appId);
+				// must_change_password = 1, set exactly as the driver acceptance sets it
+				// (PUT /api/applications/:id/status). The temporary password is emailed
+				// in plaintext below, so until it is changed the account can do nothing
+				// else: requireAuth / requireRole refuse it (FORCED PASSWORD CHANGE) and
+				// the client router sends every role to /account/change-password.
+				const userResult = db.prepare(
+					"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name, must_change_password) VALUES (?, ?, 'Investor', '', ?, ?, ?, 1)"
+				).run(username, hash, application.email || "", fullName, application.dba || fullName);
+				const userId = userResult.lastInsertRowid;
+
+				// Create investor record with full business info from application
+				db.prepare(`INSERT INTO investors
+					(user_id, full_name, carrier_name, status, application_id, entity_type, address, phone, email, ein_ssn, tax_classification, contact_person, contact_title)
+					VALUES (?, ?, ?, 'Active', ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+					.run(userId, fullName, carrierName, appId,
+						application.entity_type || "", application.address || "", application.phone || "",
+						application.email || "", application.ein_ssn || "", application.tax_classification || "",
+						application.contact_person || "", application.contact_title || "");
+
+				// Create trucks from application vehicles (owner_id = user ID, consistent with dashboard/reports)
+				const vehicleCounts = registerApplicationVehicles(vehicles, appId, userId);
+				return { userId, vehicleCounts };
+			})();
 			// What the investor's fleet actually holds: trucks written now plus
 			// trucks already on file that this account owns. A truck on file under
 			// another owner is not theirs and is not counted (heldByOther).
@@ -12872,6 +12935,7 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			return;
 		}
 
+		setStatus.run(status, appId);
 		res.json({ success: true });
 	} catch (err) {
 		res.status(500).json({ error: err.message });

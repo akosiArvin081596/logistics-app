@@ -204,8 +204,8 @@ function extractHandler(mountPrefix) {
 	// password, and the status flip is what triggers it.
 	check("reader 4 (status): the guard runs BEFORE the UPDATE",
 		statusSrc.indexOf("target.deleted_at") < statusSrc.indexOf("UPDATE investor_applications SET status"), true);
-	check("reader 4 (status): and before the account-creation branch",
-		statusSrc.indexOf("target.deleted_at") < statusSrc.indexOf('status === "Accepted"'), true);
+	check("reader 4 (status): and before the account is created",
+		statusSrc.indexOf("target.deleted_at") < statusSrc.indexOf("INSERT INTO users"), true);
 
 	// Behavioural: the list SQL is a template literal with the conditional in it,
 	// so evaluate the real string and run it.

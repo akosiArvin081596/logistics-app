@@ -18,7 +18,8 @@
  *      currentMustChangePassword() reports the account as forced
  *   §2 NOTHING ELSE about acceptance changed: the investors row, the trucks
  *      from the application's vehicles, company_name, the response shape, the
- *      "user already exists" short-circuit, and non-Accepted statuses
+ *      refusal of an email that already has an account (409, nothing created),
+ *      and non-Accepted statuses
  *   §3 EVERY route that mints an emailed temporary password sets the flag in
  *      the INSERT that creates the account (today: driver + investor), so a
  *      third such route cannot quietly skip it
@@ -222,12 +223,16 @@ async function sectionUnchanged() {
 	ok(db.prepare("SELECT status FROM investor_applications WHERE id = ?").get(appId).status === "Accepted",
 		"§2 the application must be marked Accepted");
 
-	// A second application from the same email: accepted, but no second account.
-	const again = addApplication(db, { legal_name: "Acme Hauling Two LLC" });
+	// A second application from the same email is refused (409
+	// USER_ALREADY_EXISTS; scripts/test-investor-accept-guards.js): no second
+	// account, no mail, and the application is not marked Accepted.
+	const again = addApplication(db, { legal_name: "Acme Hauling Two LLC", dba: "Acme Two" });
 	const r2 = await accept(db, again);
-	ok(r2.body && r2.body.message === "Accepted (user already exists)" && r2.mail.length === 0,
-		"§2 accepting for an email that already has an account must still create nothing and mail nothing");
+	ok(r2.status === 409 && r2.body && r2.body.code === "USER_ALREADY_EXISTS" && r2.mail.length === 0,
+		`§2 accepting for an email that already has an account must create nothing and mail nothing (got ${r2.status} ${JSON.stringify(r2.body)})`);
 	ok(db.prepare("SELECT COUNT(*) AS n FROM users").get().n === 1, "§2 ...and leave exactly one account");
+	ok(db.prepare("SELECT status FROM investor_applications WHERE id = ?").get(again).status === "New",
+		"§2 ...and leave the refused application as it was");
 
 	// Any other status creates no account at all.
 	for (const status of ["Reviewed", "Rejected", "New"]) {
