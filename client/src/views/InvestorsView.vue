@@ -23,28 +23,42 @@
       <AddInvestorForm @submit="handleAdd" />
     </details>
 
-    <template v-if="store.isLoading">
+    <InvestorInvitesPanel />
+
+    <!-- The skeleton is for the first read only. Keyed on isLoading alone it
+         unmounted the table on every live update, save and avatar upload, and
+         took the open detail modal with it. -->
+    <template v-if="store.isLoading && !store.hasLoaded">
       <SkeletonLoader :rows="4" :cols="6" />
     </template>
+    <div v-else-if="!store.hasLoaded && store.loadError" class="load-error" role="alert">
+      <span>Couldn't load the investors ({{ store.loadError }}).</span>
+      <button type="button" class="btn btn-secondary btn-sm" @click="store.refresh()">Retry</button>
+    </div>
     <template v-else>
+      <p v-if="store.loadError" class="load-error" role="alert">
+        <span>Couldn't refresh the list ({{ store.loadError }}). These are the investors as last loaded.</span>
+        <button type="button" class="btn btn-secondary btn-sm" @click="store.refresh()">Retry</button>
+      </p>
       <PaginationBar :page="page" :page-size="pageSize" :total="store.investors.length" :total-pages="totalPages" @go="goTo" @size="setSize" />
       <InvestorTable
         :investors="paginatedItems"
         @delete="handleDelete"
         @update="handleUpdate"
-        @picture-updated="store.load()"
+        @picture-updated="store.refresh()"
       />
     </template>
   </div>
 </template>
 
 <script setup>
-import { onMounted, computed, watch } from 'vue'
+import { computed, watch } from 'vue'
 import { useInvestorsStore } from '../stores/investors'
 import { useToast } from '../composables/useToast'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
 import AddInvestorForm from '../components/investors/AddInvestorForm.vue'
 import InvestorTable from '../components/investors/InvestorTable.vue'
+import InvestorInvitesPanel from '../components/investors/InvestorInvitesPanel.vue'
 import SkeletonLoader from '../components/shared/SkeletonLoader.vue'
 import PaginationBar from '../components/shared/PaginationBar.vue'
 import { usePagination } from '../composables/usePagination'
@@ -52,7 +66,11 @@ import { Card, CardContent } from '@/components/ui/card'
 
 const store = useInvestorsStore()
 const { show: toast } = useToast()
-useSocketRefresh('investors:changed', () => store.load())
+useSocketRefresh('investors:changed', () => store.refresh())
+
+// Started during setup, not on mount, so the first render already shows the
+// skeleton rather than a flash of "No investors yet".
+store.refresh()
 
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(computed(() => store.investors), 25)
 watch(totalPages, (tp) => { if (page.value > tp) goTo(tp) })
@@ -92,12 +110,23 @@ async function handleDelete(id) {
   try {
     await store.remove(id)
     toast('Investor deleted')
-  } catch {
-    toast('Failed to delete investor', 'error')
+  } catch (err) {
+    toast(err.message || 'Failed to delete investor', 'error')
   }
 }
-
-onMounted(() => {
-  store.load()
-})
 </script>
+
+<style scoped>
+.load-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.85rem;
+  border-radius: var(--radius);
+  background: var(--danger-dim);
+  color: #b91c1c;
+  font-size: 0.8rem;
+}
+</style>
