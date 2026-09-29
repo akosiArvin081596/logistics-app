@@ -20,7 +20,7 @@ After completing the investor onboarding flow, you have these signed documents o
 
 The umbrella contract governing your relationship with LogisX. It defines:
 
-- The profit-sharing structure (typically 50/50 of net profit).
+- The profit-sharing structure (typically 50/50 of net profit). If you joined through a personal invitation, an **Amendment No. 1 — Payment Terms** just above the signatures can set different payment terms (for example, a fixed monthly lease payment); the same amendment is in your Commercial Vehicle Lease Agreement.
 - LogisX's management responsibilities.
 - Your responsibilities as the truck owner.
 - Dispute resolution.
