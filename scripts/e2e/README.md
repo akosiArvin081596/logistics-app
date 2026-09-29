@@ -65,10 +65,11 @@ What it covers today, by section (`ONLY` picks them):
   staging. `ONLY=terms`, and see "The investor terms section" for why T0 and T1–T11 need two server processes.
 - **Investor fixes (F1–F14).** Investor config writes (F1), legal documents across investors (F2), the admin fund and
   fuel targets (F3), the investor detail modal (F4, F5), acceptances that would collide (F6), the application status
-  select (F7), duplicate investor records (F8), previews of an id that is no investor (F9), the split shown in Admin
-  Tools and in the investor's My Loads note (F10), the `/invest` help text (F11), the account-number eye, the Docs
-  count and a refused delete's message (F12), the `/invest` thank-you after a reload (F13), and the public onboarding
-  banking route (F14). Every actor is a `QA-TEST-INV-*` account, record or application the run creates and deletes.
+  select and its refusals (F7), duplicate investor records (F8), previews of an id that is no investor (F9), the
+  split shown in Admin Tools and in the investor's My Loads note (F10), the `/invest` help text (F11), the
+  account-number eye, the Docs count and a refused delete's message (F12), the `/invest` thank-you after a reload
+  (F13), and the public onboarding banking route (F14). FXc lists every failing resource as the run's own probe or
+  the app's. Every actor is a `QA-TEST-INV-*` account, record or application the run creates and deletes.
   Local only (`DB_PATH`); three sign-ins; `ONLY=investorfixes`. Its F-numbers are its own: the money path's F1 is a
   different step.
 
@@ -941,7 +942,7 @@ has a mail target, and Tc can only soft-delete it.
 ## The investor-fixes section (F1–F14)
 
 `ONLY=investorfixes`, **local only** (`DB_PATH`): it plants rows (F3, F10b, F12b), reads what an acceptance created
-(F6), reads an accepted application's access token (F14), and removes the applications afterwards, which the API can
+(F6), reads an accepted application's bank row (F14), and removes the applications afterwards, which the API can
 only soft-delete. On any other server, or without `DB_PATH`, the whole section SKIPs.
 
 **Test actors only.** The copy holds real investors. Every investor account, investor record, truck and application
@@ -974,7 +975,7 @@ submitting: the run answers that navigation with a local placeholder page and ab
 | F3 | **Planted:** A's own `investor_config` rows `maintenance_fund_monthly` 98765 and `fuel_savings_target_pct` 87. **UI:** Expenses → Maintenance Fund and Fuel Logs; the two GETs behind them | The global values (800, 15%), not the planted ones |
 | F10a | The global split set to 55 (`PUT /api/investor/config`; set in the copy if the build refuses that). **UI:** Admin Tools, Fleet Configuration. Put back at once | "Owner Take %" shows 55 |
 | F10b | **Planted:** A's own split stored as `"150"`. **UI:** A's portal, My Loads expanded (the note renders with no loads) | The "Your Share" note shows the split the server applies (100) |
-| F9 | **UI:** `/investor-portals`, then `/investor-portals/99999999`. Page fetch `GET /api/investor?as_user_id=99999999`, compared with the Super Admin's own `GET /api/investor` | 404 "Investor not found"; the page says so |
+| F9 | **UI:** `/investor-portals`, then `/investor-portals/99999999`; the page's own requests under `/api/investor` are watched. Page fetch `GET /api/investor?as_user_id=99999999`, compared with the Super Admin's own `GET /api/investor` | 404 `INVESTOR_NOT_FOUND`; the page renders the "Investor not found" card (naming the id, with "Back to Investor Portals") and no portal: no "Previewing" banner, no portal section, no fleet numbers, no portal data request |
 | F8 | Page fetch: `POST /api/investors` twice with one name and carrier name | The second 409 with a code; one record |
 | F5 | **UI:** `/investors` → + Add Investor (a record with no application) → its detail modal | "No application data linked" |
 | F4 | With that modal open, a page fetch `PUT /api/investors/<id>` (notes); the server emits `investors:changed`; 2 s | The modal still open |
@@ -983,16 +984,18 @@ submitting: the run answers that navigation with a local placeholder page and ab
 | F13n | While F13 signs, a trial click on each sign dialog's × (INFO) | An observation: whether the guided tour covers the × |
 | F7a | **UI:** `/investor-applications`, "Accepted" picked in P's status select; native and in-page dialogs and the `PUT …/status` are watched | A confirmation before anything is sent. (An AFTER build's dialog is confirmed, so P is accepted for what follows.) |
 | F6a, F6b | Page fetch `PUT /api/investor-applications/:id/status` "Accepted" for Q (the same company name as P) and C (A's email); the copy is read for accounts, records and trucks made | 409 with a code; the application not left Accepted; nothing made |
-| F12b | **Planted:** a fourth document row on application E. **UI:** the list's Docs cell, then E's detail | The Docs denominator is the real count (4) |
-| F7b | E soft-deleted by page fetch (the open list is not refreshed); "Reviewed" picked in its row | The refusal (409) puts the select back to the stored status |
+| F12b | **Planted:** a fourth document row on application E. **UI:** the list's cell under the "Docs" header (found by its header text, not its position), then E's detail; the list API's `docs_total` for E | The Docs denominator, the API's `docs_total` and the detail all give the real count (4) |
+| F7b | **UI:** "Accepted" picked in application C's row (C's email is account A's), the confirmation accepted; the list re-reads | 409 `USER_ALREADY_EXISTS`; the select back at C's stored status, the server's message shown, C still listed and nothing created |
+| F7c | E soft-deleted by page fetch (the open list is not refreshed); "Reviewed" picked in its row | 409 `APPLICATION_DELETED` with the server's message shown; after the list re-reads, E's row is gone (or, still listed, shows the stored status) |
 | F12a | **UI:** `/investors`, P's record → Banking → the eye by the account number | A real reveal (the full number) or no toggle |
-| F14 | A public page (no session) fetches `POST /api/public/investor-onboarding/<P>/banking` with P's access token, read from the copy and never printed | 404; P's bank row unchanged |
+| F14 | A public page (no session) fetches `POST /api/public/investor-onboarding/<P>/banking` with a well-formed random token (a UUID, the removed routes' shape; in the query and the body). New applications get no token, and the route must be gone whatever token is sent | 404; P's bank row unchanged |
 | F12c | **UI:** `/investors`, the REC record deleted in the copy first, then Remove → Delete. The route's only refusal is an id it cannot find | The page shows the server's reason ("Investor not found") |
-| FXc | Console errors and failing responses (paths, numeric ids as `:id`, uploads cut to their folder) on every page the section opened | Recorded, not scored |
+| FXc | Every failing resource (an HTTP 4xx/5xx or a request with no answer: its page, method, path and status; numeric ids as `:id`, uploads cut to their folder, never a query string) on every page the section opened, split into the run's own probes and the app's. A probe is a page fetch of the run (it carries `X-QA-Probe: <step>`), a UI request a step sends on purpose (F7b, F7c, F12c) or the harness's `logisx.com` block. Console "Failed to load resource" lines are matched to their resource; other console errors are listed | Recorded, not scored |
 | FXz | Clean-up (below) | Nothing left; the global split as it was |
 
-**Run order:** FX0, F1, F2, F3, F10, F9, F8, F5, F4, F11, F13 (+F13n), FX1, F7a, F6, F12b, F7b, F12a, F14, F12c, FXc,
-FXz. F7a accepts P, which F6a, F12a and F14 need; F12b plants on E before F7b removes it.
+**Run order:** FX0, F1, F2, F3, F10, F9, F8, F5, F4, F11, F13 (+F13n), FX1, F7a, F6, F12b, F7b, F7c, F12a, F14, F12c,
+FXc, FXz. F7a accepts P, which F6a, F12a and F14 need. F6b's refused acceptance leaves C as it was, so F7b can pick
+"Accepted" in C's row again. F12b plants on E before F7c removes it.
 
 **Budgets per server process:** three sign-ins; four public applications (`POST /api/public/investor-apply` allows 10 per
 15 minutes per address); about six `/invest` PDF previews (30 per 15 minutes).
