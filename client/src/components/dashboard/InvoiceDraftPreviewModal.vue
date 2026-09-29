@@ -95,7 +95,7 @@
           </div>
         </div>
 
-        <!-- Right: the eight editable invoice fields, risk-descending.
+        <!-- Right: the nine editable invoice fields, risk-descending.
              Every one of these prints on the PDF the broker receives; before
              this form only the recipient could be corrected, so a misread order
              number or a stale sheet rate had no path except "fix the source and
@@ -331,7 +331,7 @@
                 v-model="form.orderNumber"
                 type="text"
                 autocomplete="off"
-                maxlength="40"
+                :maxlength="ORDER_NUMBER_MAX"
                 class="idp-input idp-mono"
                 :class="{ 'is-invalid': !!(form.orderNumber && fieldErrors.orderNumber), 'is-edited': edited.orderNumber }"
                 :aria-invalid="!!fieldErrors.orderNumber"
@@ -342,6 +342,8 @@
               <p v-else-if="pv.needsOrderNumber && !form.orderNumber.trim()" class="idp-hint idp-hint-warn">
                 Required — copy the broker's Order # from the rate confirmation.
               </p>
+              <!-- Same owner rule as the Total: an edited Order # is invoice-only. -->
+              <p v-else-if="edited.orderNumber" class="idp-hint">Invoice only — Job Tracking is not changed.</p>
             </div>
             <div class="idp-field">
               <label class="idp-label" for="idp-po">
@@ -405,7 +407,44 @@
             <p v-else-if="!form.deliveryDate" class="idp-hint">Optional — left blank the invoice prints no delivery date.</p>
           </div>
 
-          <!-- 8. Subject — read-only and taken verbatim from the server response,
+          <!-- 8. Notes — optional free text, printed in a labelled "Notes" box beside
+               the totals (the server leaves the box out when this is empty). Seeded
+               from the load's last APPROVED draft and always sent, so an empty box
+               means "no notes" rather than "reuse the last one". Invoice only, like
+               the Total and the Order #; the email text does not carry it. -->
+          <div class="idp-field">
+            <label class="idp-label" for="idp-notes">
+              Notes
+              <span class="idp-label-aside">optional</span>
+              <span v-if="edited.notes" class="idp-badge idp-badge-blue">edited</span>
+            </label>
+            <textarea
+              id="idp-notes"
+              v-model="form.notes"
+              rows="4"
+              :maxlength="NOTES_MAX"
+              class="idp-input idp-textarea"
+              :class="{ 'is-invalid': !!fieldErrors.notes, 'is-edited': edited.notes }"
+              :aria-invalid="!!fieldErrors.notes"
+              aria-describedby="idp-notes-count idp-notes-hint"
+              :disabled="approving"
+              @input="onFieldInput"
+            ></textarea>
+            <div class="idp-notes-foot">
+              <p v-if="fieldErrors.notes" class="idp-hint idp-hint-warn">{{ fieldErrors.notes }}</p>
+              <span
+                id="idp-notes-count"
+                class="idp-hint idp-count"
+                :class="{ 'idp-count-near': notesNearLimit }"
+              >{{ form.notes.length }} / {{ NOTES_MAX }}</span>
+            </div>
+            <p id="idp-notes-hint" class="idp-hint">
+              Printed on the invoice under “Notes”. Invoice only — Job Tracking, revenue, pay and
+              payouts are not changed.
+            </p>
+          </div>
+
+          <!-- 9. Subject — read-only and taken verbatim from the server response,
                never re-derived here. The point of showing it is that the subject
                you reviewed is provably the subject that gets sent; a client-side
                reconstruction would be a second implementation free to disagree. -->
@@ -480,6 +519,7 @@ import { computed, reactive, ref, watch, onBeforeUnmount } from 'vue'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import { useApi } from '../../composables/useApi'
 import PdfZoomViewer from '../shared/PdfZoomViewer.vue'
+import { ORDER_NUMBER_MAX, orderNumberError, NOTES_MAX, notesError } from '../../lib/invoiceFields'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -514,7 +554,10 @@ const pv = computed(() => props.preview || {})
 // These mirror the server's parseInvoiceOverrides rules. They are a courtesy, not
 // the guard — the server re-validates everything — but they are what stops a
 // doomed body costing a Chromium render, and what lets a field say WHY it's wrong.
+// The Order # rule and the Notes limit live in lib/invoiceFields.js, where
+// scripts/test-invoice-fields-client.mjs pins them to server.js.
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,39}$/
+// PO # only. Order # has its own, wider rule (ORDER_NUMBER_RE).
 const REF_RE = /^[A-Za-z0-9][A-Za-z0-9 ._/#-]{0,39}$/
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 // A FORMAT gate, deliberately ahead of any parse: the server's parseMoney is a
@@ -526,6 +569,8 @@ const MONEY_RE = /^\$?\s*(\d{1,3}(,\d{3})*|\d+)(\.\d{1,2})?$/
 // renders as zero, which would walk straight past the never-draft-a-$0.00 rule.
 const TOTAL_MIN = 0.01
 const TOTAL_MAX = 1000000
+// The Notes counter turns amber this close to the limit.
+const NOTES_WARN_AT = NOTES_MAX - 50
 
 const str = (v) => (v == null ? '' : String(v))
 // An <input type="date"> silently discards anything that isn't YYYY-MM-DD, so a
@@ -560,12 +605,13 @@ const badge = computed(() => {
 })
 
 // --- The editable invoice fields --------------------------------------------
-// One reactive object for the eight overridable fields, plus a frozen snapshot of
+// One reactive object for the nine overridable fields, plus a frozen snapshot of
 // what the server extracted. The snapshot is what "edited" and "Reset" compare
 // against — not props.preview, which must stay the untouched server response.
 const EMPTY_FORM = () => ({
   billToName: '', brokerName: '', total: '',
   invoiceId: '', invoiceDate: '', orderNumber: '', poNumber: '', deliveryDate: '',
+  notes: '',
 })
 const form = reactive(EMPTY_FORM())
 const seeded = ref(EMPTY_FORM())
@@ -599,6 +645,10 @@ function seedForm() {
     orderNumber: str(p.orderNumber),
     poNumber: str(p.poNumber),
     deliveryDate: isoDate(p.deliveryDateIso),
+    // The note from this load's last APPROVED draft ("" when none). The dryRun
+    // PDF on the left was already rendered with it, so seeding the box from it
+    // keeps what you see the thing that is sent.
+    notes: str(p.notes),
   }
   Object.assign(form, next)
   seeded.value = { ...next }
@@ -621,9 +671,14 @@ const edited = computed(() => {
     orderNumber: form.orderNumber.trim() !== str(s.orderNumber).trim(),
     poNumber: form.poNumber.trim() !== str(s.poNumber).trim(),
     deliveryDate: form.deliveryDate !== str(s.deliveryDate),
+    notes: form.notes.trim() !== str(s.notes).trim(),
   }
 })
-const anyEdited = computed(() => isEdited.value || Object.values(edited.value).some(Boolean))
+// A note counts even when it is unedited: one carried over from the last
+// approved draft is not an "extracted value", and Reset is how it is cleared.
+const anyEdited = computed(
+  () => isEdited.value || Object.values(edited.value).some(Boolean) || !!form.notes.trim(),
+)
 
 const fieldErrors = computed(() => {
   const e = {}
@@ -636,11 +691,10 @@ const fieldErrors = computed(() => {
 
   if (!ISO_DATE_RE.test(form.invoiceDate)) e.invoiceDate = 'Pick an invoice date.'
 
-  const ord = form.orderNumber.trim()
-  // Not merely required for the printed line: it also names the invoice
-  // attachment, so an empty one produces a file literally called ".pdf".
-  if (!ord) e.orderNumber = 'An order number is required — it names the invoice attachment.'
-  else if (!REF_RE.test(ord)) e.orderNumber = 'Letters, numbers, spaces and . _ / # - only, 40 max.'
+  // Required, and wider than PO #: a dispatcher's short note ("7101850-$700 ADV")
+  // belongs on this line. The rule and its wording are in lib/invoiceFields.js.
+  const ordErr = orderNumberError(form.orderNumber)
+  if (ordErr) e.orderNumber = ordErr
 
   const po = form.poNumber.trim()
   if (po && !REF_RE.test(po)) e.poNumber = 'Letters, numbers, spaces and . _ / # - only, 40 max.'
@@ -648,6 +702,9 @@ const fieldErrors = computed(() => {
   if (form.deliveryDate && !ISO_DATE_RE.test(form.deliveryDate)) {
     e.deliveryDate = 'Enter a valid delivery date, or clear it.'
   }
+
+  const notesErr = notesError(form.notes)
+  if (notesErr) e.notes = notesErr
 
   const t = form.total.trim()
   if (!t) e.total = 'An amount is required — an invoice is never drafted at $0.00.'
@@ -661,7 +718,8 @@ const fieldErrors = computed(() => {
 const formValid = computed(() => Object.keys(fieldErrors.value).length === 0)
 // Reported in the order the fields appear, so "the first thing wrong" is the
 // first thing you'd reach scrolling down.
-const FIELD_ORDER = ['recipient', 'billToName', 'brokerName', 'total', 'invoiceId', 'invoiceDate', 'orderNumber', 'poNumber', 'deliveryDate']
+const FIELD_ORDER = ['recipient', 'billToName', 'brokerName', 'total', 'invoiceId', 'invoiceDate', 'orderNumber', 'poNumber', 'deliveryDate', 'notes']
+const notesNearLimit = computed(() => form.notes.length >= NOTES_WARN_AT)
 const firstFieldError = computed(() => {
   for (const k of FIELD_ORDER) if (fieldErrors.value[k]) return fieldErrors.value[k]
   return ''
@@ -909,6 +967,10 @@ function onDateCommit() { schedulePreview({ immediate: true }) }
 
 function resetToExtracted() {
   seedForm()
+  // Notes reset to EMPTY, not to the note carried over from the last approved
+  // draft: nothing about a note is extracted, so "the extracted values" have none.
+  // Sent as "" on the next render and on approve, which the server reads as cleared.
+  form.notes = ''
   previewError.value = ''
   schedulePreview({ immediate: true })
 }
@@ -938,6 +1000,12 @@ function buildOverrideBody({ forPreview = false } = {}) {
     // extraction, so sending the reviewed address is what stops a nondeterministic
     // re-resolve redirecting the draft somewhere the dispatcher never saw.
     recipientEmail: recipient.value.trim(),
+    // ⚠️ ALWAYS sent, even empty — the one optional field with no omit arm. On
+    // approve an ABSENT key means "reuse the last approved note", so leaving it
+    // out after the dispatcher cleared the box would print the old note on an
+    // invoice whose preview showed none. Raw: the server trims, turns CRLF into
+    // LF and strips control characters itself.
+    notes: form.notes,
   }
   if (has('billToName') || edited.value.billToName) body.billToName = form.billToName.trim()
   if (has('brokerName') || edited.value.brokerName) body.brokerName = form.brokerName.trim()
@@ -949,7 +1017,7 @@ function buildOverrideBody({ forPreview = false } = {}) {
   // actually answered: typed a value, or ticked "this rate-con has no PO #".
   if (edited.value.poNumber || noPoOnRatecon.value) body.poNumber = form.poNumber.trim()
   if (has('deliveryDateIso') || edited.value.deliveryDate) body.deliveryDate = form.deliveryDate
-  // A 9th, non-UI pinned field: moveNumber has no input but IS printed in the
+  // A non-UI pinned field: moveNumber has no input but IS printed in the
   // Bison cover letter, so passing it through is what keeps the emailed body the
   // one that was reviewed. Same reasoning as the recipient.
   if (has('moveNumber')) body.moveNumber = str(pv.value.moveNumber)
@@ -1328,6 +1396,26 @@ async function approve() {
 .idp-input.is-invalid { border-color: #dc2626; background: #fffafa; }
 .idp-hint { font-size: 0.72rem; color: #64748b; margin: 0; }
 .idp-hint-warn { color: #b45309; }
+/* The Notes box: the .idp-input frame, taller, and resizable downwards only so
+   the 380px column never scrolls sideways. */
+.idp-textarea {
+  display: block;
+  min-height: 5.5rem;
+  line-height: 1.4;
+  resize: vertical;
+}
+/* An aside inside the uppercase label ("optional"): reads as a hint, not a title. */
+.idp-label-aside {
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  color: #94a3b8;
+}
+/* Error on the left, the counter pinned right whether or not there is an error. */
+.idp-notes-foot { display: flex; align-items: baseline; gap: 0.75rem; }
+.idp-count { margin-left: auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* After .idp-hint on purpose: equal specificity, so the later rule wins. */
+.idp-count-near { color: #b45309; font-weight: 600; }
 /* The "no PO #" acknowledgement. Sits with the hints because that is what it
    is — a line of guidance the dispatcher answers, not a settings toggle. */
 .idp-check { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.25rem; cursor: pointer; }
