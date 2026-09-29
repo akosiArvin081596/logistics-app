@@ -227,7 +227,7 @@
               Applied through personal invite #{{ detail.paymentTerms.invite.id }}, terms revision {{ detail.paymentTerms.invite.termsRevision }}.
             </p>
             <p v-if="detail.paymentTerms.consistent === false" class="text-[12px] text-amber-700 mt-2" role="note">
-              The signed Master Agreement and Vehicle Lease do not carry the same payment terms. Check the signed PDFs.
+              The stored payment terms don't all agree or couldn't be read. Check the signed PDFs.
             </p>
           </div>
 

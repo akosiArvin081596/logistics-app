@@ -4,21 +4,26 @@
     <span v-if="details" class="pts-snippet" :title="details">{{ details }}</span>
   </div>
   <div v-else>
-    <dl class="pts">
-      <div class="pts-item">
-        <dt class="pts-label">Payment type</dt>
-        <dd class="pts-value">{{ labels.typeLabel }}</dd>
-      </div>
-      <div v-if="labels.amountLabel" class="pts-item">
-        <dt class="pts-label">Monthly amount</dt>
-        <dd class="pts-value">{{ labels.amountLabel }}</dd>
-      </div>
-      <div class="pts-item pts-full">
-        <dt class="pts-label">Additional terms</dt>
-        <dd class="pts-value pts-details">{{ details || 'None' }}</dd>
-      </div>
-    </dl>
-    <p v-if="isDefault" class="pts-note">Standard contract terms, with no amendment.</p>
+    <!-- No type label means the server could not read the stored terms: its
+         summary says so, where a blank type and "None" would read as standard. -->
+    <p v-if="!labels.typeLabel" class="pts-value pts-unread" data-test="payment-terms-unread">{{ labels.summary }}</p>
+    <template v-else>
+      <dl class="pts">
+        <div class="pts-item">
+          <dt class="pts-label">Payment type</dt>
+          <dd class="pts-value">{{ labels.typeLabel }}</dd>
+        </div>
+        <div v-if="labels.amountLabel" class="pts-item">
+          <dt class="pts-label">Monthly amount</dt>
+          <dd class="pts-value">{{ labels.amountLabel }}</dd>
+        </div>
+        <div class="pts-item pts-full">
+          <dt class="pts-label">Additional terms</dt>
+          <dd class="pts-value pts-details">{{ details || 'None' }}</dd>
+        </div>
+      </dl>
+      <p v-if="isDefault" class="pts-note">Standard contract terms, with no amendment.</p>
+    </template>
   </div>
 </template>
 
@@ -62,6 +67,7 @@ const details = computed(() => (props.isDefault ? '' : props.terms?.details || '
   font-weight: 500;
   color: var(--text);
 }
+.pts-unread { font-weight: 600; }
 .pts-details {
   white-space: pre-wrap;
   overflow-wrap: anywhere;

@@ -17,7 +17,7 @@
         <PaymentTermsSummary :display="view.display" :terms="view.paymentTerms" :is-default="view.isDefault" />
         <p class="terms-lock" data-test="investor-terms-locked">{{ lockText }}</p>
         <p v-if="view.consistent === false" class="terms-msg terms-msg-warn" role="note">
-          The signed Master Agreement and Vehicle Lease do not carry the same payment terms. Check the signed PDFs.
+          The stored payment terms don't all agree or couldn't be read. Check the signed PDFs.
         </p>
       </template>
       <p v-else class="terms-muted" data-test="investor-terms-unsigned">No signed agreement on file</p>
