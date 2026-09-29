@@ -34,8 +34,16 @@
  *   §7 source pins: the only await is bcrypt.hash, above the first read; none
  *      between the re-read and the transaction; the record INSERT is not
  *      OR IGNORE; the emails follow the transaction.
- *   §8 MUTANTS: the company-name check dropped, the email check dropped, the
- *      status written before the checks.
+ *   §8 the username: folded to a-z, 0-9 and "." from the legal name, else the
+ *      email's local part, else investor<application id>, the first that keeps
+ *      a letter or a digit; a number appended while it is taken (trimmed, any
+ *      case). A legal name in another script or of punctuation only used to
+ *      give "" (then "1") or ".". Every username made is found by the sign-in
+ *      lookup as this account and no other.
+ *   §9 MUTANTS: the company-name check dropped, the email check dropped, the
+ *      status written before the checks; the letter-or-digit test, the email
+ *      fallback, the application-id fallback and the trimmed comparison each
+ *      dropped.
  *
  * Pure: no server, no app.db, no network, no mail (sendEmail is captured).
  *
@@ -338,7 +346,50 @@ function pinSection() {
 	return r;
 }
 
-// ─────────────────────────────────────────────────────── §8 mutants
+// ─────────────────────────────────────────────────────── §8 the username
+// The sign-in lookup, as POST /api/auth/login runs it on the trimmed input
+// (which refuses an empty username before it gets here).
+const signInMatches = (db, typed) => db.prepare("SELECT id FROM users WHERE LOWER(username) = LOWER(?) OR LOWER(email) = LOWER(?)")
+	.all(typed.trim(), typed.trim()).map((u) => u.id);
+
+async function usernameSection(routeSrc = ACCEPT_SRC) {
+	const r = [];
+	const t = (cond, name) => r.push({ ok: !!cond, name });
+	const db = makeDb();
+	// Accounts already on file: a username stored with spaces around it (as
+	// POST /api/users stored it before it trimmed), and one in capitals.
+	db.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES (' trimmed.co ', 'x', 'Investor', '', 'old1@example.test')").run();
+	db.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('Taken.Name.LLC', 'x', 'Investor', '', 'old2@example.test')").run();
+	const cases = [
+		// [what, legal name, email, the username expected (given the application id), a user to add first]
+		["a non-Latin legal name: the email's local part", "株式会社テスト", "QA.Owner+One@example.test", () => "qa.ownerone"],
+		["a punctuation-only legal name with a space (it gave \".\")", "&& &&", "p-q_r@example.test", () => "pqr"],
+		["a punctuation-only legal name", "---", "dash.co@example.test", () => "dash.co"],
+		["a non-Latin legal name, an email local part with no letter or digit: investor<id>", "テスト合同会社", "___@example.test", (id) => `investor${id}`],
+		["a non-Latin legal name and no email: investor<id>", "有限会社テスト", "", (id) => `investor${id}`],
+		["a Latin legal name: from the name, as before", "Acme Hauling LLC", "someone@example.test", () => "acme.hauling.llc"],
+		["the same email local part again (another domain): a number appended", "合資会社テスト", "qa.owner+one@other.example.test", () => "qa.ownerone1"],
+		["a username held with spaces around it: a number appended", "株式会社トリム", "trimmed.co@example.test", () => "trimmed.co1"],
+		["a username held in another case: a number appended", "Taken Name LLC", "new3@example.test", () => "taken.name.llc1"],
+		["investor<id> already taken: a number appended", "合同会社テスト二", "", (id) => `investor${id}1`, (id) => `investor${id}`],
+	];
+	for (const [what, legal, email, expected, existing] of cases) {
+		const id = addApplication(db, { legal_name: legal, email, vehicles_json: "[]" });
+		if (existing) db.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES (?, 'x', 'Investor', '', '')").run(existing(id));
+		const x = await accept(db, id, { routeSrc });
+		const creds = (x.body && x.body.credentials) || {};
+		const stored = (db.prepare("SELECT username FROM users WHERE id = ?").get(creds.userId) || {}).username;
+		const u = creds.username;
+		t(x.status === 200 && u === expected(id) && stored === u,
+			`§8 ${what}: ${JSON.stringify(expected(id))} (got ${x.status} ${JSON.stringify(u)}, stored ${JSON.stringify(stored)})`);
+		t(typeof u === "string" && /^[a-z0-9.]+$/.test(u) && /[a-z0-9]/.test(u) && JSON.stringify(signInMatches(db, u)) === JSON.stringify([creds.userId]),
+			`§8 ...a login-safe username that signs in as this account and no other (${JSON.stringify(u)})`);
+		if (x.status !== 200) break;
+	}
+	return r;
+}
+
+// ─────────────────────────────────────────────────────── §9 mutants
 async function mutantSection() {
 	const r = [];
 	const t = (cond, name) => r.push({ ok: !!cond, name });
@@ -349,6 +400,14 @@ async function mutantSection() {
 	const early = swap(ACCEPT_SRC, 'const setStatus = db.prepare("UPDATE investor_applications SET status=? WHERE id=?");',
 		'const setStatus = db.prepare("UPDATE investor_applications SET status=? WHERE id=?");\n\t\tsetStatus.run(status, appId);');
 	t(failed(await nameSection(early)), "MUTANT the status written before the checks: caught by §1");
+	t(failed(await usernameSection(swap(ACCEPT_SRC, ".find((u) => /[a-z0-9]/.test(u))", ".find((u) => typeof u === \"string\")"))),
+		"MUTANT the letter-or-digit test dropped (the old empty username): caught by §8");
+	t(failed(await usernameSection(swap(ACCEPT_SRC, '[fullName, email.split("@")[0]]', "[fullName]"))),
+		"MUTANT the email fallback dropped: caught by §8");
+	t(failed(await usernameSection(swap(ACCEPT_SRC, "|| `investor${appId}`", '|| ""'))),
+		"MUTANT the application-id fallback dropped: caught by §8");
+	t(failed(await usernameSection(swap(ACCEPT_SRC, 'SELECT id FROM users WHERE LOWER(TRIM(username)) = LOWER(?)', 'SELECT id FROM users WHERE LOWER(username) = LOWER(?)'))),
+		"MUTANT the taken-username test not trimmed: caught by §8");
 	return r;
 }
 
@@ -372,7 +431,9 @@ function record(results) {
 	record(await unchangedSection());
 	section("§7 source pins");
 	record(pinSection());
-	section("§8 mutants");
+	section("§8 the username");
+	record(await usernameSection());
+	section("§9 mutants");
 	record(await mutantSection());
 
 	if (failures.length) {
