@@ -41417,9 +41417,27 @@ app.get("/api/legal-documents", requireRole("Super Admin", "Investor"), (req, re
 });
 
 // POST /api/legal-documents/upload — Super Admin or Investor uploads a legal doc
+//
+// An Investor files documents only against what is theirs, checked before a
+// byte is written: `investorId`, when sent, must be their own investors record
+// (left out, it is theirs); `truckId`, when sent, must be a truck they own; and
+// `driverId` is refused outright — the Investor portal never sends one, only
+// the admin's driver screens do. Anything else is 403 NOT_OWNER and nothing is
+// stored. A Super Admin files against any of the three.
 app.post("/api/legal-documents/upload", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
 		const { truckId, unitNumber, docType, fileData, fileName, notes, investorId, driverId, visibleToDriver } = req.body;
+		if (req.session.user.role === "Investor") {
+			const own = db.prepare("SELECT id FROM investors WHERE user_id = ?").all(req.session.user.id).map((r) => r.id);
+			const sentInvestor = parseInt(investorId) || 0;
+			const sentTruck = parseInt(truckId) || 0;
+			const refused = (parseInt(driverId) || 0) > 0
+				|| (sentInvestor > 0 && !own.includes(sentInvestor))
+				|| (sentTruck > 0 && !db.prepare("SELECT 1 AS hit FROM trucks WHERE id = ? AND owner_id = ?").get(sentTruck, req.session.user.id));
+			if (refused) {
+				return res.status(403).json({ error: "You can upload documents only to your own profile or trucks.", code: "NOT_OWNER" });
+			}
+		}
 		if (!fileData || !fileName) {
 			return res.status(400).json({ error: "fileData and fileName are required" });
 		}
@@ -41490,12 +41508,28 @@ app.patch("/api/legal-documents/:id/visibility", requireRole("Super Admin"), (re
 	}
 });
 
-// DELETE /api/legal-documents/:id — Super Admin or owner removes a legal doc
+// DELETE /api/legal-documents/:id — a Super Admin removes any legal doc; an
+// Investor removes one only when it is theirs: uploaded under their own account
+// AND still filed against their own investors record or a truck they own (the
+// same scope GET /api/legal-documents lists for them; a driver document never
+// is). Any other document answers 404 DOCUMENT_NOT_FOUND, the same body as a
+// missing id, and nothing is deleted.
 app.delete("/api/legal-documents/:id", requireRole("Super Admin", "Investor"), (req, res) => {
 	try {
 		const id = parseInt(req.params.id);
 		const doc = db.prepare("SELECT * FROM legal_documents WHERE id = ?").get(id);
-		if (!doc) return res.status(404).json({ error: "Document not found" });
+		const notFound = () => res.status(404).json({ error: "Document not found", code: "DOCUMENT_NOT_FOUND" });
+		if (!doc) return notFound();
+		const user = req.session.user;
+		if (user.role !== "Super Admin") {
+			const ownInvestorIds = db.prepare("SELECT id FROM investors WHERE user_id = ?").all(user.id).map((r) => r.id);
+			const inScope = !(doc.driver_id > 0) && (
+				(doc.investor_id > 0 && ownInvestorIds.includes(doc.investor_id))
+				|| (doc.truck_id > 0 && !!db.prepare("SELECT 1 AS hit FROM trucks WHERE id = ? AND owner_id = ?").get(doc.truck_id, user.id))
+			);
+			const uploadedByThem = String(doc.uploaded_by || "").trim().toLowerCase() === String(user.username || "").trim().toLowerCase();
+			if (!inScope || !uploadedByThem) return notFound();
+		}
 		if (doc.file_url) {
 			const filePath = path.join(__dirname, doc.file_url);
 			try { fs.unlinkSync(filePath); } catch { /* file may already be gone */ }
