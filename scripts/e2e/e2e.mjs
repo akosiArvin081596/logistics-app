@@ -8315,8 +8315,8 @@ async function investorFixesSection() {
       '"Owner Take %" shows 55, the stored value; then the global is put back to 50', sa, 'f10a-owner-take', async () => {
         const g = globalOf('investor_split_pct')
         if (g == null) throw skip('the copy has no global investor_split_pct row')
-        let how = 'PUT /api/investor/config (no ownerId) → '
-        const put = await api(sa, 'PUT', '/api/investor/config', { investor_split_pct: '55' })
+        let how = 'PUT /api/investor/config?ownerId=global → '
+        const put = await api(sa, 'PUT', '/api/investor/config?ownerId=global', { investor_split_pct: '55' })
         how += codeOf(put)
         let planted = false
         if (globalOf('investor_split_pct') !== '55') {
@@ -8337,7 +8337,7 @@ async function investorFixesSection() {
           s = await ifxShot(sa, 'f10a-owner-take')
         } finally {
           let back = ''
-          if (!planted) { const r = await api(sa, 'PUT', '/api/investor/config', { investor_split_pct: g }); back = `PUT back → ${r.status}` }
+          if (!planted) { const r = await api(sa, 'PUT', '/api/investor/config?ownerId=global', { investor_split_pct: g }); back = `PUT back → ${r.status}` }
           if (globalOf('investor_split_pct') !== g) { db.prepare("UPDATE investor_config SET value = ? WHERE owner_id = 0 AND key = 'investor_split_pct'").run(g); back += '; restored in the copy' }
           st.f10Restore = `${back}; global split now "${globalOf('investor_split_pct')}"`
         }

@@ -13082,7 +13082,7 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 		if (!target) return res.status(404).json({ error: "Application not found" });
 		if (target.deleted_at) {
 			return res.status(409).json({
-				error: "This application was removed. Restore it first if the decision needs to change — POST /api/investor-applications/:id/restore.",
+				error: "This application was removed, so its status can't be changed.",
 				code: "APPLICATION_DELETED",
 			});
 		}
