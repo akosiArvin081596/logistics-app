@@ -6939,6 +6939,22 @@ function findDirectoryRowForDriver(name) {
 	return hit ? { id: hit.id, driver_name: hit.driver_name, matchedBy: "normalized" } : null;
 }
 
+// The drivers_directory row that is an account's own, for a caller acting on
+// that account: the row findDirectoryRowForDriver() finds for its driver name,
+// case aside or under another spacing, unless it names the driver only through
+// a spacing variant another account, outside `exceptUserIds` (the account the
+// caller acts for), still holds (driverNameHeldByOtherAccount()). That row is
+// that account's, the rule the rename cascade, the directory sync and the
+// profile-picture upload apply; this is the directory's counterpart of
+// findTruckForDriverAccount(). checkAndCompleteOnboarding() fills this row from
+// the application and activates it, by id. Returns findDirectoryRowForDriver()'s
+// answer, or null.
+function findDirectoryRowForDriverAccount(name, exceptUserIds = []) {
+	const row = findDirectoryRowForDriver(name);
+	if (row && row.matchedBy === "normalized" && driverNameHeldByOtherAccount(name, exceptUserIds)) return null;
+	return row;
+}
+
 // The truck a driver's name belongs to, found the same two ways as their
 // directory row (findDirectoryRowForDriver()): first the truck naming them case
 // aside — the lookup each caller used before — else the first truck, by id,
@@ -7486,8 +7502,15 @@ app.get("/api/drivers-directory/:id/documents", requireRole("Super Admin", "Disp
 		const driver = db.prepare("SELECT * FROM drivers_directory WHERE id = ?").get(id);
 		if (!driver) return res.status(404).json({ error: "Driver not found" });
 
-		// Find the matching user by driver_name (case-insensitive)
-		const user = db.prepare("SELECT id, driver_name FROM users WHERE LOWER(driver_name) = LOWER(?)").get((driver.driver_name || "").trim());
+		// The Driver account this row names: the one whose driver name matches the
+		// row's case aside, else the one account matching it across spacing
+		// (findDriverAccountSpelling()), so a row stored "Shorn  King" links the
+		// account "Shorn King". Two accounts matching only across spacing, a blank
+		// or reserved name, or no Driver account: linked false.
+		const accountSpelling = findDriverAccountSpelling(driver.driver_name);
+		const user = accountSpelling
+			? db.prepare("SELECT id, driver_name FROM users WHERE role = 'Driver' AND driver_name = ? ORDER BY id").get(accountSpelling)
+			: null;
 		if (!user) {
 			return res.json({ documents: [], drugTest: null, linked: false, ssn: null });
 		}
@@ -13054,9 +13077,15 @@ async function checkAndCompleteOnboarding(userId) {
 		// Add driver to drivers_directory immediately
 		if (driverName) {
 			syncDriverToCarrierSheet(driverName, { email: driverEmail, companyName: user?.company_name || "", action: "add" });
-			// Backfill directory with application details (city/state/zip/cell/dot/mc/hazmat/address/phone)
+			// Backfill directory with application details (city/state/zip/cell/dot/mc/hazmat/address/phone),
+			// on the driver's own row by id: the row the add found or created, under
+			// any spacing of the name (findDirectoryRowForDriverAccount()). The add
+			// creates nothing when a row names the driver only through spacing, so
+			// that row is the one to fill. With no such row the id is null, which
+			// matches nothing.
 			if (application) {
 				try {
+					const dirRow = findDirectoryRowForDriverAccount(driverName, [userId]);
 					db.prepare(`UPDATE drivers_directory SET
 						phone = CASE WHEN ? != '' THEN ? ELSE phone END,
 						cell = CASE WHEN ? != '' THEN ? ELSE cell END,
@@ -13067,7 +13096,7 @@ async function checkAndCompleteOnboarding(userId) {
 						dot = CASE WHEN ? != '' THEN ? ELSE dot END,
 						mc = CASE WHEN ? != '' THEN ? ELSE mc END,
 						hazmat = CASE WHEN ? != '' THEN ? ELSE hazmat END
-						WHERE LOWER(driver_name) = LOWER(?)`).run(
+						WHERE id = ?`).run(
 						application.phone || '', application.phone || '',
 						application.cell || '', application.cell || '',
 						application.address || '', application.address || '',
@@ -13077,7 +13106,7 @@ async function checkAndCompleteOnboarding(userId) {
 						application.dot || '', application.dot || '',
 						application.mc || '', application.mc || '',
 						application.hazmat || '', application.hazmat || '',
-						driverName.trim()
+						dirRow ? dirRow.id : null
 					);
 				} catch (err) { console.error("drivers_directory backfill error:", err.message); }
 			}
@@ -13194,9 +13223,11 @@ async function checkAndCompleteOnboarding(userId) {
 		if (user) {
 			syncDriverToCarrierSheet(user.driver_name, { email: user.email, companyName: user.company_name, action: "add" });
 
-			// Backfill application details (idempotent — only fills blank fields so manual edits win)
+			// Backfill application details (idempotent — only fills blank fields so manual edits win),
+			// on the driver's own row by id, found as above (findDirectoryRowForDriverAccount()).
 			if (pathTwoApplication) {
 				try {
+					const dirRow = findDirectoryRowForDriverAccount(user.driver_name, [userId]);
 					db.prepare(`UPDATE drivers_directory SET
 						phone = CASE WHEN ? != '' THEN ? ELSE phone END,
 						cell = CASE WHEN ? != '' THEN ? ELSE cell END,
@@ -13207,7 +13238,7 @@ async function checkAndCompleteOnboarding(userId) {
 						dot = CASE WHEN ? != '' THEN ? ELSE dot END,
 						mc = CASE WHEN ? != '' THEN ? ELSE mc END,
 						hazmat = CASE WHEN ? != '' THEN ? ELSE hazmat END
-						WHERE LOWER(driver_name) = LOWER(?)`).run(
+						WHERE id = ?`).run(
 						pathTwoApplication.phone || '', pathTwoApplication.phone || '',
 						pathTwoApplication.cell || '', pathTwoApplication.cell || '',
 						pathTwoApplication.address || '', pathTwoApplication.address || '',
@@ -13217,14 +13248,18 @@ async function checkAndCompleteOnboarding(userId) {
 						pathTwoApplication.dot || '', pathTwoApplication.dot || '',
 						pathTwoApplication.mc || '', pathTwoApplication.mc || '',
 						pathTwoApplication.hazmat || '', pathTwoApplication.hazmat || '',
-						(user.driver_name || '').trim()
+						dirRow ? dirRow.id : null
 					);
 				} catch (err) { console.error("drivers_directory path2 backfill error:", err.message); }
 			}
 
-			// Auto-activate the driver now that drug test passed
+			// Auto-activate the driver now that drug test passed: their own row, by id,
+			// under any spacing of the name (findDirectoryRowForDriverAccount()), so a
+			// row stored "Shorn  King" for the account "Shorn King" turns active too and
+			// the driver is listed for dispatch. A null id matches nothing.
 			try {
-				db.prepare("UPDATE drivers_directory SET status = 'active' WHERE LOWER(driver_name) = LOWER(?)").run((user.driver_name || '').trim());
+				const dirRow = findDirectoryRowForDriverAccount(user.driver_name, [userId]);
+				db.prepare("UPDATE drivers_directory SET status = 'active' WHERE id = ?").run(dirRow ? dirRow.id : null);
 			} catch (err) { console.error("drivers_directory activation error:", err.message); }
 
 			insertNotification.run(
@@ -30835,14 +30870,19 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		const rowIndex = resolveSheetDataRow(res, rawRowIndex);
 		if (rowIndex === null) return; // 400 already sent
 
-		// Normalize driver name against users table to prevent misspelling mismatches
-		const userMatch = db.prepare("SELECT driver_name FROM users WHERE LOWER(driver_name) = LOWER(?) AND role = 'Driver'").get(rawDriver.trim());
-		const driver = userMatch ? userMatch.driver_name : rawDriver.trim();
 		// A driver name that reads as a built-in property name is refused for every
-		// role, 400 DRIVER_NAME_RESERVED (reservedDriverNameRefusal()), before the
-		// sheet is read.
-		const reservedDriver = reservedDriverNameRefusal(driver, "driver");
+		// role, 400 DRIVER_NAME_RESERVED (reservedDriverNameRefusal()), judged on the
+		// name as sent, before the account lookup below and before the sheet is read.
+		const reservedDriver = reservedDriverNameRefusal(rawDriver, "driver");
 		if (reservedDriver) return res.status(400).json(reservedDriver);
+		// The driver's name as their ACCOUNT spells it (findDriverAccountSpelling()):
+		// the Driver account matching it case aside, else the one account matching
+		// it across spacing. The Driver cell, the notification row, the live
+		// banner's room and the load_responses row cleared below are all keyed by
+		// that spelling, so a name typed or picked with other spacing ("Shorn  King")
+		// reaches the account it names ("Shorn King"). With no such account, or two
+		// matching only across spacing, it is the name as sent, trimmed.
+		const driver = findDriverAccountSpelling(rawDriver) || rawDriver.trim();
 
 		// Queueing is allowed: dispatch to a driver who's already on a load,
 		// the new row lands as "Dispatched" and queues behind their current
@@ -30892,7 +30932,10 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// /api/data/:rowIndex applies (formulaCellRefusal()), 400
 		// FORMULA_NOT_ALLOWED naming the Driver column. The batch below writes with
 		// valueInputOption "USER_ENTERED", and `driver` is the caller's own text
-		// whenever it names no Driver account. Before the period guard and every write.
+		// whenever it names no Driver account; otherwise it is the account's
+		// spelling of that text, which differs from it only in letter case and
+		// spacing, so the cell is judged as it will be written and a leading "=" or
+		// "+" sent is judged either way. Before the period guard and every write.
 		if (req.session.user.role !== "Super Admin") {
 			const formula = formulaCellRefusal([headers[driverColIdx]], [snapshot.row[driverColIdx]], [driver]);
 			if (formula) return res.status(400).json(formula);
@@ -31020,12 +31063,14 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 		const rowIndex = resolveSheetDataRow(res, rawRowIndex);
 		if (rowIndex === null) return; // 400 already sent
 
-		// Normalize against users table (same pattern as /api/dispatch).
-		const userMatch = db.prepare("SELECT driver_name FROM users WHERE LOWER(driver_name) = LOWER(?) AND role = 'Driver'").get(rawNewDriver.trim());
-		const newDriver = userMatch ? userMatch.driver_name : rawNewDriver.trim();
-		// Refused as POST /api/dispatch refuses it (reservedDriverNameRefusal()).
-		const reservedDriver = reservedDriverNameRefusal(newDriver, "newDriver");
+		// Refused as POST /api/dispatch refuses it (reservedDriverNameRefusal()), on
+		// the name as sent, before the account lookup and the sheet read.
+		const reservedDriver = reservedDriverNameRefusal(rawNewDriver, "newDriver");
 		if (reservedDriver) return res.status(400).json(reservedDriver);
+		// The new driver's name as their account spells it, as POST /api/dispatch
+		// resolves it (findDriverAccountSpelling()): the Driver cell, their
+		// notification, their room and the load_responses row cleared below.
+		const newDriver = findDriverAccountSpelling(rawNewDriver) || rawNewDriver.trim();
 
 		const sheets = await getSheets();
 		// Headers, every row AND the target row in one round trip; RUNG 2 refuses
@@ -31060,7 +31105,8 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 
 		// NO FORMULAS, for every caller but a Super Admin — same rule and reason as
 		// POST /api/dispatch: `newDriver` is the caller's own text whenever it names
-		// no Driver account. Before the period guard and every write.
+		// no Driver account, and otherwise the account's spelling of it, judged as
+		// it will be written. Before the period guard and every write.
 		if (req.session.user.role !== "Super Admin") {
 			const formula = formulaCellRefusal([headers[driverCol]], [snapshot.row[driverCol]], [newDriver]);
 			if (formula) return res.status(400).json(formula);
@@ -31146,8 +31192,11 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 		// optimistically removes the ghost load instead of waiting for the
 		// next manual refresh. Without this, the old driver's UI keeps the
 		// load visible and they hit a confusing 403 when they try to act on it.
+		// `oldDriver` is the Driver cell as the caller read it, so it is resolved
+		// to the account's spelling the same way (findDriverAccountSpelling()): a
+		// cell holding "Shorn  King" reaches the account "Shorn King".
 		if (oldDriver) {
-			const oldDriverKey = oldDriver.trim().toLowerCase();
+			const oldDriverKey = (findDriverAccountSpelling(oldDriver) || oldDriver).trim().toLowerCase();
 			const oldNotif = insertNotification.run(
 				oldDriverKey, 'load-cancelled',
 				`Load Removed: ${loadId || 'Load'}`,
@@ -32741,6 +32790,24 @@ function isBuiltInPropertyName(name) {
 	const names = isBuiltInPropertyName.names
 		|| (isBuiltInPropertyName.names = new Set(Object.getOwnPropertyNames(Object.prototype).map((n) => n.toLowerCase())));
 	return names.has(key);
+}
+
+// The spelling a Driver ACCOUNT holds for this name: the account whose driver
+// name matches it case aside, else the one account whose name matches it
+// through normalizeDriverName(). Two accounts matching through spacing, a
+// reserved name, or no match answer null, and the caller keeps its own
+// spelling. Notifications, live-update rooms and load responses are keyed by
+// the account's spelling, so a name typed or stored with other spacing reaches
+// the driver it names.
+function findDriverAccountSpelling(name) {
+	const trimmed = typeof name === "string" ? name.trim() : "";
+	if (!trimmed || isBuiltInPropertyName(trimmed)) return null;
+	const exact = db.prepare("SELECT driver_name FROM users WHERE role = 'Driver' AND LOWER(driver_name) = LOWER(?) ORDER BY id").get(trimmed);
+	if (exact) return exact.driver_name;
+	const key = normalizeDriverName(trimmed);
+	const hits = db.prepare("SELECT driver_name FROM users WHERE role = 'Driver' AND COALESCE(driver_name, '') <> ''").all()
+		.filter((u) => normalizeDriverName(u.driver_name) === key);
+	return hits.length === 1 ? hits[0].driver_name : null;
 }
 
 // ⚠️ THE ONE ANSWER TO "IS THIS NAME ALREADY IN USE?" — every path that
@@ -37587,15 +37654,22 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 			// ONE DRIVER (two trucks hitting one brand on one day for the same round
 			// prepaid amount is the largest false-positive class, and $200/$400 are
 			// exactly such amounts). Bounded because a candidate set is a truck-day.
+			// The driver is compared through normalizeDriverName(), the comparison
+			// every ownership check uses, so a receipt stored under another spacing
+			// of the name ("Shorn  King") is a candidate too. SQLite cannot collapse a
+			// whitespace run, so the day's rows at this amount are read and the driver
+			// compared here, the newest 20 matches kept as before.
+			const driverKey = normalizeDriverName(driver || "");
 			const candidates = db
 				.prepare(
 					`SELECT id, driver, amount, date, vendor, vendor_normalized, gallons FROM expenses
 					 WHERE date = ? AND ROUND(amount, 2) = ROUND(?, 2)
-					   AND LOWER(TRIM(COALESCE(driver, ''))) = LOWER(TRIM(?))
 					   AND COALESCE(status, '') != 'Rejected'
-					 ORDER BY id DESC LIMIT 20`,
+					 ORDER BY id DESC`,
 				)
-				.all(date, parsedAmount, driver || "");
+				.all(date, parsedAmount)
+				.filter((c) => normalizeDriverName(c.driver) === driverKey)
+				.slice(0, 20);
 			// Report the STRONGEST match, not the newest: with two candidates on one
 			// truck-day the one that agrees on a merchant is the one worth naming.
 			let best = null, bestRank = 0;

@@ -29,12 +29,27 @@
  * left open, and the driver's own spelling is opened beside it, because leg 3
  * does not collapse internal spaces.
  *
+ * The dispatch routes reach the driver by their ACCOUNT's spelling of the name
+ * (findDriverAccountSpelling()): the Driver account matching the name sent case
+ * aside, else the one account matching it across spacing. The Driver cell, the
+ * notification row, the live-update room and the load_responses row cleared are
+ * keyed by that spelling, and so are the stamps, so any spelling of the
+ * account's name stamps what the account's own spelling stamps. Reassign's
+ * previous driver is resolved the same way. Two accounts matching only across
+ * spacing, or none, leave the name as sent. POST /api/expenses' duplicate
+ * warning compares the driver through normalizeDriverName().
+ *
  *   §1 the helpers on their own: findTruckForDriver()'s added fields,
  *      findActiveAssignmentTruckForDriver(), driverNameHeldByOtherSpelling()
- *      and findTruckForDriverStamp(), the order of its four steps included.
- *   §2 POST /api/expenses, lifted whole and run against a real database.
+ *      and findTruckForDriverStamp(), the order of its four steps included;
+ *      findDriverAccountSpelling().
+ *   §2 POST /api/expenses, lifted whole and run against a real database; the
+ *      duplicate warning across spacing.
  *   §3 POST /api/dispatch and /api/dispatch/reassign, lifted whole, against a
  *      real database and a fake sheet: the Truck and Owner ID cells written.
+ *   §3b the same two routes: the Driver cell, the notification row, the room
+ *      and the load_responses row keyed by the account's spelling; reassign's
+ *      previous driver; any spelling of the account's name stamps as its own.
  *   §4 assignDriverToTruck(): the spacing-variant truck and assignment released.
  *   §4b assignDriverToTruck(): the open carrier pairing stored under a spacing
  *      variant closed when the carrier changes, under the same guard. One under
