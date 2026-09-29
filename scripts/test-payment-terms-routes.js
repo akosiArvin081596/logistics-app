@@ -66,6 +66,7 @@ try {
 }
 const investorPaymentTerms = require(path.join(ROOT, "lib", "investor-payment-terms.js"));
 const publicFormInput = require(path.join(ROOT, "lib", "public-form-input.js"));
+const w9Input = require(path.join(ROOT, "lib", "w9-input.js"));
 const imageLimits = require(path.join(ROOT, "lib", "image-size.js"));
 const piiMask = require(path.join(ROOT, "lib", "pii-mask.js"));
 const { safeSignatureImage } = require(path.join(ROOT, "lib", "policy-renderer.js"));
@@ -182,7 +183,7 @@ function buildServer({ routes = {}, hooks = {} } = {}) {
 		db, crypto, path, fs, __dirname: TMP,
 		requireRole: () => noop, refuseCrossOrigin: noop, publicFormLimiter: noop, pdfPreviewLimiter: noop,
 		onboardingSignLimiter: noop, onboardingPreviewLimiter: noop, investorInviteLookupLimiter: noop,
-		publicFormInput, imageLimits, safeSignatureImage, piiMask, investorPaymentTerms,
+		publicFormInput, w9Input, imageLimits, safeSignatureImage, piiMask, investorPaymentTerms,
 		maskingEnabled: () => true,
 		readTransmittedConsent: (sig, res) => {
 			if (sig && sig.consent && sig.consent.agreed === true) return { agreed: 1, text: "I have read and agree." };

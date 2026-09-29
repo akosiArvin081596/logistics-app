@@ -91,6 +91,7 @@ const { csvRows } = require("./lib/csv");
 const piiMask = require("./lib/pii-mask");
 // Boundary checks shared by every unauthenticated form route (email, vehicles).
 const publicFormInput = require("./lib/public-form-input");
+const w9Input = require("./lib/w9-input");
 
 // ---------------------------------------------------------------------------
 // PII_MASK_ENABLED — deliberately defaults ON, unlike every other flag here.
@@ -9889,6 +9890,13 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 		if (!shape.ok) {
 			return res.status(400).json({ error: shape.message, code: "INVALID_FIELD", reason: shape.reason, field: shape.field });
 		}
+		// The W-9 prints the TIN in nine boxes (lib/w9-input.js). Refused here,
+		// before the first write, or the application is stored with a W-9 that
+		// cannot be produced.
+		const tinCheck = w9Input.checkW9Tin(ein_ssn);
+		if (!tinCheck.ok) {
+			return res.status(400).json({ error: tinCheck.message, code: tinCheck.code, field: "ein_ssn" });
+		}
 		// A payment terms invitation, when the applicant came through one. Checked
 		// here, before anything is written, and checked AGAIN inside applyTx()
 		// below, where it is bound. The terms themselves come only from the
@@ -10748,11 +10756,23 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", taxClassi
 	//
 	// It now REPORTS instead, and the caller asserts on the two fields that make
 	// this a tax document rather than a blank form.
+	//
+	// It reports the CAUSE, because the failure message is the alert ops acts
+	// on, and "the template changed" sends them after the wrong thing when the
+	// value was the problem. pdf-lib's own limit is asked before the value is
+	// set:
+	//   - unfilledFields: the template has no such text field, or the value did
+	//     not read back -- the AcroForm no longer matches this code;
+	//   - overlongLines: the value is longer than the field's own maximum
+	//     (Part I's boxes) -- the input, not the template.
 	const unfilledFields = [];
-	const setField = (name, value) => {
+	const overlongLines = [];
+	const setField = (name, value, line) => {
 		const want = value == null ? "" : String(value);
 		try {
 			const f = form.getTextField(name);
+			const max = f.getMaxLength();
+			if (max !== undefined && want.length > max) { overlongLines.push(line); return false; }
 			f.setText(want);
 			f.updateAppearances(font);
 			// Read it straight back off the AcroForm — "setText did not throw" is a
@@ -10767,9 +10787,9 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", taxClassi
 	let tinLanded = false;
 
 	// Line 1: Name
-	if (legalName) nameLanded = setField("topmostSubform[0].Page1[0].f1_01[0]", legalName);
+	if (legalName) nameLanded = setField("topmostSubform[0].Page1[0].f1_01[0]", legalName, "Line 1 (name)");
 	// Line 2: DBA
-	if (dba) setField("topmostSubform[0].Page1[0].f1_02[0]", dba);
+	if (dba) setField("topmostSubform[0].Page1[0].f1_02[0]", dba, "Line 2 (business name)");
 
 	// Line 3a: Entity type checkboxes
 	const entityCheckMap = {
@@ -10815,17 +10835,17 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", taxClassi
 	}
 	// LLC tax classification letter
 	if (llcLetter) {
-		setField("topmostSubform[0].Page1[0].Boxes3a-b_ReadOrder[0].f1_03[0]", llcLetter);
+		setField("topmostSubform[0].Page1[0].Boxes3a-b_ReadOrder[0].f1_03[0]", llcLetter, "Line 3a (LLC classification)");
 	}
 
 	// Line 5: Street address, Line 6: City/State/ZIP
 	if (address) {
 		const parts = address.split(",").map(s => s.trim());
 		// Line 5 — street address
-		setField("topmostSubform[0].Page1[0].Address_ReadOrder[0].f1_07[0]", parts[0] || address);
+		setField("topmostSubform[0].Page1[0].Address_ReadOrder[0].f1_07[0]", parts[0] || address, "Line 5 (address)");
 		// Line 6 — city, state, ZIP (f1_08 is Line 6; f1_09 is "Requester's name" — wrong box)
 		if (parts.length > 1) {
-			setField("topmostSubform[0].Page1[0].Address_ReadOrder[0].f1_08[0]", parts.slice(1).join(", "));
+			setField("topmostSubform[0].Page1[0].Address_ReadOrder[0].f1_08[0]", parts.slice(1).join(", "), "Line 6 (city, state, ZIP)");
 		}
 	}
 
@@ -10849,14 +10869,14 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", taxClassi
 			// SSN fields (3 + 2 + 4). All three must land: a partial TIN is not a
 			// lesser version of the right answer, it is a different (wrong)
 			// number on a tax form.
-			const a = setField("topmostSubform[0].Page1[0].f1_11[0]", digits.slice(0, 3));
-			const b = setField("topmostSubform[0].Page1[0].f1_12[0]", digits.slice(3, 5));
-			const c = setField("topmostSubform[0].Page1[0].f1_13[0]", digits.slice(5));
+			const a = setField("topmostSubform[0].Page1[0].f1_11[0]", digits.slice(0, 3), "Part I (TIN)");
+			const b = setField("topmostSubform[0].Page1[0].f1_12[0]", digits.slice(3, 5), "Part I (TIN)");
+			const c = setField("topmostSubform[0].Page1[0].f1_13[0]", digits.slice(5), "Part I (TIN)");
 			tinLanded = a && b && c;
 		} else if (digits.length >= 2) {
 			// EIN fields (2 + 7)
-			const a = setField("topmostSubform[0].Page1[0].f1_14[0]", digits.slice(0, 2));
-			const b = digits.length > 2 ? setField("topmostSubform[0].Page1[0].f1_15[0]", digits.slice(2)) : true;
+			const a = setField("topmostSubform[0].Page1[0].f1_14[0]", digits.slice(0, 2), "Part I (TIN)");
+			const b = digits.length > 2 ? setField("topmostSubform[0].Page1[0].f1_15[0]", digits.slice(2), "Part I (TIN)") : true;
 			tinLanded = a && b;
 		}
 	}
@@ -10871,6 +10891,19 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", taxClassi
 	// ⚠️ The message names FIELDS, never values. It is persisted to
 	// onboarding_documents.signing_error / investor_onboarding_documents and is
 	// emailed by alertOnboardingDocFailure() — an SSN or EIN must never reach it.
+	//
+	// A value the form cannot hold refuses the W-9 on whichever line it is: a
+	// W-9 without what was typed is not produced. Checked first, so the
+	// template-mismatch message below is only ever about the template.
+	const lines = (list) => [...new Set(list)].join(" and ");
+	if (overlongLines.length) {
+		const e = new Error(
+			`W-9 cannot print ${lines(overlongLines)}: the value is longer than its boxes on the form. ` +
+			"Refusing to produce a W-9 without it.",
+		);
+		e.code = "DOCUMENT_VALUE_TOO_LONG";
+		throw e;
+	}
 	const w9Missing = [];
 	if (legalName && !nameLanded) w9Missing.push("Line 1 (name)");
 	if (einSsn && !tinLanded) w9Missing.push("Part I (TIN)");
@@ -11646,6 +11679,13 @@ app.post("/api/public/investor-preview-pdf/:docKey", pdfPreviewLimiter, async (r
 			return res.send(pdfBuffer);
 		}
 		if (docKey === "w9") {
+			// The same TIN check as POST /api/public/investor-apply, so the preview
+			// never shows a W-9 the submission would refuse. A preview with no TIN
+			// prints none.
+			const tinCheck = w9Input.checkW9Tin(ein_ssn);
+			if (!tinCheck.ok) {
+				return res.status(400).json({ error: tinCheck.message, code: tinCheck.code, field: "ein_ssn" });
+			}
 			const pdfBytes = await fillW9Form({ ...appData, taxClassification: req.body.tax_classification });
 			if (!pdfBytes) return res.status(404).json({ error: "W-9 template not found" });
 			if (invite) setInvitePreviewHeaders(res, invite);

@@ -186,7 +186,16 @@
               <label>Tax Classification</label>
               <select v-model="form.tax_classification"><option value="">Select...</option><option>C-Corp</option><option>S-Corp</option><option>Partnership</option><option>Individual/LLC</option></select>
             </div>
-            <div class="field"><label>EIN or SSN <span class="req">*</span></label><input v-model="form.ein_ssn" placeholder="XX-XXXXXXX" data-wizard-target="ein-ssn" required /></div>
+            <div class="field">
+              <label>EIN or SSN <span class="req">*</span></label>
+              <input
+                v-model="form.ein_ssn" placeholder="XX-XXXXXXX" data-wizard-target="ein-ssn" required
+                :aria-invalid="showTinError ? 'true' : 'false'"
+                :aria-describedby="showTinError ? 'invest-tin-error' : undefined"
+                @focus="tinFocused = true" @blur="tinFocused = false"
+              />
+              <p v-if="showTinError" id="invest-tin-error" class="field-error" role="alert">{{ tinCheck.message }}</p>
+            </div>
             <div class="field">
               <label>Monthly Reporting Delivery</label>
               <select v-model="form.reporting_preference"><option value="">Select...</option><option>Digital Portal</option><option>Email PDF</option></select>
@@ -589,6 +598,7 @@ import { useToast } from '../composables/useToast'
 import { useInvestorInvite } from '../composables/useInvestorInvite'
 import { createFormDraft } from '../lib/formDraft'
 import { checkEmail } from '../lib/emailAddress'
+import { checkTin } from '../lib/taxId'
 import {
   PAYMENT_TERMS_REVISION_HEADER,
   TERMS_DOC_KEYS,
@@ -1079,8 +1089,13 @@ const emailCheck = computed(() => checkEmail(form.email))
 const emailFocused = ref(false)
 // Shown once the applicant leaves the field, never while they are still typing.
 const showEmailError = computed(() => !!form.email && !emailCheck.value.ok && !emailFocused.value)
+// The EIN/SSN the same way, with the server's rule (client copy:
+// src/lib/taxId.js): the W-9 prints nine digits.
+const tinCheck = computed(() => checkTin(form.ein_ssn))
+const tinFocused = ref(false)
+const showTinError = computed(() => !!form.ein_ssn && !tinCheck.value.ok && !tinFocused.value)
 const step0FieldsFilled = computed(() => !!(form.legal_name && form.email && form.phone && form.address && form.ein_ssn))
-const canProceedStep1 = computed(() => step0FieldsFilled.value && emailCheck.value.ok)
+const canProceedStep1 = computed(() => step0FieldsFilled.value && emailCheck.value.ok && tinCheck.value.ok)
 const allVehiclesValid = computed(() => vehicles.value.every(v => v.year && v.make && v.model && v.vin))
 const signedCount = computed(() => documents.value.filter(d => d.signed).length)
 const canSubmitBanking = computed(() => banking.bank_name && banking.routing_number && banking.account_number)
@@ -1404,8 +1419,10 @@ async function submitOnboarding() {
     step.value = 0
     maxStep.value = Math.max(maxStep.value, 0)
     showReviewModal.value = false
-    // When every field is filled, the email is what failed: say so.
-    toast(step0FieldsFilled.value ? emailCheck.value.message : 'Please complete your business details before submitting.', 'error')
+    // When every field is filled, the email or the EIN/SSN is what failed: say which.
+    const message = !step0FieldsFilled.value ? 'Please complete your business details before submitting.'
+      : !emailCheck.value.ok ? emailCheck.value.message : tinCheck.value.message
+    toast(message, 'error')
     return
   }
   if (signedCount.value < totalDocs) {
