@@ -65,7 +65,8 @@
             <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
           </div>
           <h2>Onboarding Complete</h2>
-          <p>Thank you, <strong>{{ form.legal_name }}</strong>. Your application and all documents have been submitted successfully.</p>
+          <p v-if="completedName">Thank you, <strong>{{ completedName }}</strong>. Your application and all documents have been submitted successfully.</p>
+          <p v-else>Thank you. Your application and all documents have been submitted successfully.</p>
           <div class="next-steps">
             <h4>What happens next</h4>
             <div class="next-step"><span class="ns-num">1</span><span>Our team will review your application within 1-2 business days</span></div>
@@ -75,8 +76,20 @@
         </div>
       </div>
 
+      <!-- Personal invitation (?invite=): the first lookup, then a refusal in place of the form. -->
+      <div v-else-if="invite.state === 'loading'" class="invite-loading" role="status" data-test="invite-loading">
+        <span class="spinner"></span>
+        Loading your invitation...
+      </div>
+      <InviteErrorState
+        v-else-if="invite.state === 'error'"
+        :code="invite.error.code" :message="invite.error.message"
+        @retry="loadInvite"
+      />
+
       <template v-else>
         <div v-if="restoreNotice" class="notice-bar" role="status">{{ restoreNotice }}</div>
+        <div v-if="termsNotice" class="notice-bar" role="status" data-test="invite-terms-notice">{{ termsNotice }}</div>
 
         <!-- STEP 1: Application -->
         <div v-if="step === 0" class="step-panel">
@@ -273,6 +286,8 @@
             </div>
           </details>
 
+          <InvitePaymentTermsCard v-if="inviteTerms" :payment-terms="inviteTerms" />
+
           <!-- Accordion 2: Onboarding Documents -->
           <details class="accordion" open>
             <summary class="accordion-toggle">
@@ -305,7 +320,7 @@
 
           <div class="step-actions">
             <div></div>
-            <button class="btn-primary" :disabled="!allVehiclesValid || signedCount < totalDocs" data-wizard-target="continue-step1" @click="restoreNotice = ''; vehicleInfoDone = true; step = 2; maxStep = Math.max(maxStep, 2)">
+            <button class="btn-primary" :disabled="!allVehiclesValid || signedCount < totalDocs" data-wizard-target="continue-step1" @click="restoreNotice = ''; termsNotice = ''; vehicleInfoDone = true; step = 2; maxStep = Math.max(maxStep, 2)">
               Continue
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
             </button>
@@ -432,6 +447,19 @@
             </div>
           </div>
 
+          <!-- Invitation terms: read-only, as they appear in Amendment No. 1 -->
+          <div v-if="inviteTerms" class="review-section" data-test="review-terms">
+            <div class="review-section-title">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+              Payment Terms
+            </div>
+            <div class="review-grid">
+              <div class="review-item"><span class="review-label">Payment type</span><span class="review-value">{{ inviteTerms.typeLabel }}</span></div>
+              <div v-if="inviteTerms.type === 'lease'" class="review-item"><span class="review-label">Monthly amount</span><span class="review-value">{{ inviteTerms.amountLabel }}</span></div>
+              <div class="review-item full"><span class="review-label">Additional terms</span><span class="review-value review-terms-details">{{ inviteTerms.details || 'None' }}</span></div>
+            </div>
+          </div>
+
           <!-- Step 2: Documents -->
           <div class="review-section">
             <div class="review-section-title">
@@ -489,7 +517,8 @@
     <InvestorSignModal
       :show="showSignModal" :doc="selectedDoc" :pdf-url="previewPdfUrl"
       :suggested-names="[form.contact_person, form.legal_name].filter(Boolean)"
-      @close="showSignModal = false; revokePreview()" @signed="handleSigned"
+      :payment-terms="signTerms" :notice="termsNotice" :pdf-error="previewError"
+      @close="closeSignModal" @signed="handleSigned" @retry-preview="retryPreview"
     />
     <LocationPickerModal
       :open="showMapPicker" label="Principal Address"
@@ -507,8 +536,9 @@
       </div>
     </div>
 
-    <!-- Guided wizard overlay -->
+    <!-- Guided wizard overlay. Not over a refused invitation: there is no form to guide. -->
     <InvestWizardOverlay
+      v-if="invite.state !== 'error'"
       :page-step="step"
       :form="form"
       :vehicles="vehicles"
@@ -521,11 +551,24 @@
 
 <script setup>
 import { ref, computed, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
+import { useInvestorInvite } from '../composables/useInvestorInvite'
 import { createFormDraft } from '../lib/formDraft'
 import { checkEmail } from '../lib/emailAddress'
+import {
+  PAYMENT_TERMS_REVISION_HEADER,
+  TERMS_DOC_KEYS,
+  inviteErrorMessage,
+  inviteTokenFromQuery,
+  isInviteRefusal,
+  paymentTermsView,
+  revisionChanged,
+} from '../lib/investorInvite'
 import InvestorSignModal from '../components/invest/InvestorSignModal.vue'
+import InvitePaymentTermsCard from '../components/invest/InvitePaymentTermsCard.vue'
+import InviteErrorState from '../components/invest/InviteErrorState.vue'
 import LocationPickerModal from '../components/data-manager/LocationPickerModal.vue'
 import InvestWizardOverlay from '../wizard/components/InvestWizardOverlay.vue'
 
@@ -545,9 +588,27 @@ const step = ref(0)
 const maxStep = ref(0)
 const submitting = ref(false)
 const completed = ref(false)
+// The name the success screen thanks. Its own value because the draft keeps
+// nothing else once the application is in (see saveState), and a reload of the
+// success screen used to read the emptied form: "Thank you, ."
+const completedName = ref('')
 const showSignModal = ref(false)
 const selectedDoc = ref(null)
 const vehicleInfoDone = ref(false)
+
+// ── Personal invitation (`/invest?invite=<token>`) — see lib/investorInvite.js ──
+//
+// The token stays in the URL, so a refresh keeps the invitation, and lives
+// nowhere else: it is not in the draft and never in a browser store. Without
+// `?invite=` none of this runs: no request, no element, no payload key.
+const route = useRoute()
+const invite = useInvestorInvite(() => inviteTokenFromQuery(route.query))
+// The read-only terms, or null (no invitation, or the standard contract).
+const inviteTerms = computed(() => paymentTermsView(invite))
+// The sign modal shows them only beside the two documents they amend.
+const signTerms = computed(() => (TERMS_DOC_KEYS.includes(selectedDoc.value?.doc_key) ? inviteTerms.value : null))
+// Set when LogisX changed the terms after the applicant had loaded them.
+const termsNotice = ref('')
 
 // Local document tracking — no server needed until final submit
 const ONBOARDING_DOCS = [
@@ -619,6 +680,8 @@ const photoPreviewUrl = ref('')
 const showReviewModal = ref(false)
 const showAcctNum = ref(false)
 const previewPdfUrl = ref('')
+// Why the sign modal's preview is not showing, when a fetch failed.
+const previewError = ref('')
 const reviewPdfUrl = ref('')
 const reviewPdfName = ref('')
 const bankDropOpen = ref(false)
@@ -784,12 +847,15 @@ const draft = createFormDraft({
 const restoreNotice = ref('')
 
 function saveState() {
-  // ⚠️ Once completed, persist the flag and nothing else. `draft.clear()` on
-  // submit is NOT enough on its own: setting `completed` triggers this watcher,
-  // which runs on the next tick — i.e. AFTER the clear — and would put the whole
-  // application straight back.
+  // ⚠️ Once completed, persist the flag and the name the success screen shows,
+  // and nothing else. `draft.clear()` on submit is NOT enough on its own: setting
+  // `completed` triggers this watcher, which runs on the next tick — i.e. AFTER
+  // the clear — and would put the whole application straight back.
+  // `completedName` is the legal name the draft already held while the form was
+  // being filled: not a SENSITIVE_FIELDS key, and no tax id, bank data,
+  // signature or invitation token.
   if (completed.value) {
-    draft.save({ completed: true })
+    draft.save({ completed: true, completedName: completedName.value })
     return
   }
   // Vehicle photos are stripped for SIZE, not privacy — a few base64 truck
@@ -829,6 +895,7 @@ function loadState() {
     }
   }
   if (s.completed) completed.value = s.completed
+  if (typeof s.completedName === 'string') completedName.value = s.completedName
   if (s.vehicleInfoDone != null) vehicleInfoDone.value = s.vehicleInfoDone
   if (s.step != null) step.value = s.step
   if (s.maxStep != null) maxStep.value = s.maxStep
@@ -869,9 +936,21 @@ function goToStep(i) {
   if (i <= maxStep.value) step.value = i
 }
 
-// Restore state + Google Places autocomplete
+// Look the invitation up, then fill the name and email it was sent to into
+// fields the applicant has not typed in yet.
+async function loadInvite() {
+  await invite.load()
+  if (!invite.active) return
+  if (!form.legal_name && invite.inviteeName) form.legal_name = invite.inviteeName
+  if (!form.email && invite.inviteeEmail) form.email = invite.inviteeEmail
+}
+
+// Restore state + invitation + Google Places autocomplete
 onMounted(async () => {
   loadState()
+  // A finished application skips the lookup: its invitation is used, and the
+  // success screen is what the applicant came back to.
+  if (invite.token && !completed.value) await loadInvite()
   try {
     const { key } = await api.get('/api/config/maps-key')
     if (!key) return
@@ -973,24 +1052,127 @@ function submitApplication() {
   maxStep.value = Math.max(maxStep.value, 1)
 }
 
+// ── Invitation outcomes on a preview or the submit ──
+//
+// With an active invitation the token rides along on every preview; the server
+// renders its terms from the invitation row (never from this page) and answers
+// with the revision it rendered. Returns the revision it was sent under, or null
+// when there is no invitation — and then the payload is exactly what it always was.
+function addInviteToken(payload) {
+  if (!invite.active) return null
+  payload.invite_token = invite.token
+  return { revision: invite.revision }
+}
+
+// The master agreement and the lease were signed under the terms on screen, so
+// when those terms change or end, those two signatures go. The W-9 carries no
+// terms and keeps its signature.
+function clearTermsSignatures() {
+  for (const k of TERMS_DOC_KEYS) delete signatures[k]
+  // The sign modal holds a snapshot of the document it opened; refresh it so it
+  // stops showing "Document Signed".
+  if (selectedDoc.value) {
+    selectedDoc.value = documents.value.find(d => d.doc_key === selectedDoc.value.doc_key) || selectedDoc.value
+  }
+}
+
+// LogisX changed the terms after this page loaded them: take the applicant back
+// to the documents with the new terms and ask for the two signatures again.
+async function onTermsChanged() {
+  clearTermsSignatures()
+  termsNotice.value = inviteErrorMessage('INVITE_TERMS_CHANGED')
+  showReviewModal.value = false
+  closeReviewPdf()
+  if (step.value > 1) step.value = 1
+  maxStep.value = Math.min(maxStep.value, 1)
+  await invite.load()
+  // The reload itself was refused or got no answer: the page now shows why, so
+  // nothing may stay open over it.
+  if (!invite.active) closeSignModal()
+}
+
+// The invitation was refused (not found, used, withdrawn or expired): nothing
+// signed under it stands, and the page shows why in place of the form.
+function onInviteRefused(code) {
+  clearTermsSignatures()
+  closeSignModal()
+  showReviewModal.value = false
+  closeReviewPdf()
+  invite.fail(code)
+}
+
+// 'refused' and 'changed' have been handled here; 'same' and 'other' leave the
+// response to the caller.
+async function readInviteOutcome(res, sent) {
+  if (res.status === 404 || res.status === 410) {
+    let data = {}
+    try { data = await res.json() } catch { data = {} }
+    if (!isInviteRefusal(res.status, data.code)) return 'other'
+    onInviteRefused(data.code)
+    return 'refused'
+  }
+  if (res.ok && revisionChanged(res.headers.get(PAYMENT_TERMS_REVISION_HEADER), sent.revision)) {
+    await onTermsChanged()
+    return 'changed'
+  }
+  return 'same'
+}
+
+// A preview that fails used to leave the pane on "Loading document..." for good:
+// the server refuses a fourth render in flight (503, "busy"), and nothing else
+// was ever shown. A refusal that names the problem (a 4xx other than a timeout or
+// the rate limit) is shown as the server words it; anything else gets this line.
+const PREVIEW_FAILED_MESSAGE = "We couldn't load this document just now."
+async function previewFailureMessage(res) {
+  if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
+    try {
+      const data = await res.json()
+      if (typeof data.error === 'string' && data.error) return data.error
+    } catch { /* not JSON, or already read */ }
+  }
+  return PREVIEW_FAILED_MESSAGE
+}
+
+// Each preview takes a number, and only the latest may fill the pane: opening
+// one document and then another (or closing the dialog) while a render is in
+// flight must not show the first document's PDF, or its failure, under the next.
+let previewSeq = 0
+
 // Fetch PDF preview (with optional signature data for signed docs).
 // Include banking so the master agreement preview renders the investor's bank info.
 async function fetchPreview(docKey, sig) {
   revokePreview()
+  const mine = ++previewSeq
   try {
     const stripped = vehicles.value.map(({ photo, photoName, ...rest }) => rest)
     const payload = { ...form, vehicles: stripped, banking: { ...banking } }
     if (sig) { payload.signatureText = sig.text; payload.signatureImage = sig.image }
+    const sent = addInviteToken(payload)
     const res = await fetch(`/api/public/investor-preview-pdf/${docKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     })
-    if (res.ok) {
-      const blob = await res.blob()
-      previewPdfUrl.value = URL.createObjectURL(blob)
+    if (sent) {
+      const outcome = await readInviteOutcome(res, sent)
+      if (outcome === 'refused' || !invite.active) return
+      // That signature was cleared with the old terms: show the document unsigned,
+      // as long as the applicant is still looking at it.
+      if (outcome === 'changed' && sig && TERMS_DOC_KEYS.includes(docKey)) {
+        if (showSignModal.value && selectedDoc.value?.doc_key === docKey) await fetchPreview(docKey, null)
+        return
+      }
     }
-  } catch { /* preview failed, modal still works */ }
+    if (!res.ok) {
+      const message = await previewFailureMessage(res)
+      if (mine === previewSeq) previewError.value = message
+      return
+    }
+    const blob = await res.blob()
+    if (mine === previewSeq) previewPdfUrl.value = URL.createObjectURL(blob)
+  } catch {
+    if (mine === previewSeq) previewError.value = PREVIEW_FAILED_MESSAGE
+  }
 }
 
 // Open sign modal
@@ -1001,7 +1183,21 @@ async function openDoc(doc) {
   await fetchPreview(doc.doc_key, signatures[doc.doc_key])
 }
 
+function closeSignModal() {
+  showSignModal.value = false
+  previewSeq++
+  revokePreview()
+}
+
+// The sign modal's retry: the same document, with its signature if it has one.
+// The dialog stays open, so what the signer has entered there is kept.
+function retryPreview() {
+  const doc = selectedDoc.value
+  if (doc) fetchPreview(doc.doc_key, signatures[doc.doc_key])
+}
+
 function revokePreview() {
+  previewError.value = ''
   if (previewPdfUrl.value) {
     URL.revokeObjectURL(previewPdfUrl.value)
     previewPdfUrl.value = ''
@@ -1016,11 +1212,19 @@ async function openReviewPdf(doc) {
   reviewPdfUrl.value = ''
   try {
     const stripped = vehicles.value.map(({ photo, photoName, ...rest }) => rest)
+    const payload = { ...form, vehicles: stripped, banking: { ...banking }, signatureText: sig.text, signatureImage: sig.image }
+    const sent = addInviteToken(payload)
     const res = await fetch(`/api/public/investor-preview-pdf/${doc.doc_key}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...form, vehicles: stripped, banking: { ...banking }, signatureText: sig.text, signatureImage: sig.image }),
+      body: JSON.stringify(payload),
     })
+    // Refused, or the terms changed: the review is closed and there is no
+    // signed document to show.
+    if (sent) {
+      const outcome = await readInviteOutcome(res, sent)
+      if (outcome === 'refused' || outcome === 'changed') return
+    }
     if (res.ok) {
       const blob = await res.blob()
       reviewPdfUrl.value = URL.createObjectURL(blob)
@@ -1044,6 +1248,11 @@ async function handleSigned({ docKey, text, image, consent }) {
   selectedDoc.value = documents.value.find(d => d.doc_key === docKey) || selectedDoc.value
   await fetchPreview(docKey, { text, image })
 }
+
+// The submit renders and stores three signed PDFs before it answers, which can
+// outlast useApi's 20 s default. It is not idempotent, so a timeout that fires
+// while the server is still working invites a second, duplicate application.
+const SUBMIT_TIMEOUT_MS = 90000
 
 // Final single submission — all data in one request
 async function submitOnboarding() {
@@ -1073,19 +1282,34 @@ async function submitOnboarding() {
     return
   }
   submitting.value = true
+  let sent = null
   try {
     const stripped = vehicles.value.map(({ photo, photoName, ...rest }) => rest)
-    await api.post('/api/public/investor-apply', {
+    const body = {
       ...form,
       vehicles: stripped,
       banking: { ...banking },
       signatures: { ...signatures },
-    })
+    }
+    // The revision is the one the applicant read and signed under; the server
+    // refuses the submit (409 INVITE_TERMS_CHANGED) if LogisX has changed it since.
+    sent = addInviteToken(body)
+    if (sent) body.invite_terms_revision = sent.revision
+    await api.post('/api/public/investor-apply', body, { timeout: SUBMIT_TIMEOUT_MS })
+    completedName.value = form.legal_name
     completed.value = true
     draft.clear()
     toast('Onboarding complete!', 'success')
     setTimeout(() => { window.location.href = 'https://logisx.com/' }, 5000)
   } catch (err) {
+    if (sent && err.status === 409 && err.code === 'INVITE_TERMS_CHANGED') {
+      await onTermsChanged()
+      return
+    }
+    if (sent && isInviteRefusal(err.status, err.code)) {
+      onInviteRefused(err.code)
+      return
+    }
     toast(err.message || 'Submission failed', 'error')
   } finally {
     submitting.value = false
@@ -1285,6 +1509,13 @@ async function submitOnboarding() {
   flex: 1;
   padding: 2rem 3rem 2rem;
   width: 100%;
+}
+
+/* The first invitation lookup, in place of the form. */
+.invite-loading {
+  flex: 1;
+  display: flex; align-items: center; justify-content: center; gap: 0.6rem;
+  padding: 2rem; font-size: 0.9rem; color: #64748b;
 }
 
 /* Informational, not a failure — the applicant did nothing wrong. */
@@ -1728,6 +1959,7 @@ async function submitOnboarding() {
 .review-item.full { grid-column: 1 / -1; }
 .review-label { font-size: 0.7rem; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.04em; }
 .review-value { font-size: 0.85rem; color: #0f172a; font-weight: 500; }
+.review-terms-details { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
 .text-green { color: #16a34a; }
 .text-amber { color: #d97706; }
 .doc-view-link { cursor: pointer; display: inline-flex; align-items: center; gap: 2px; transition: color 0.15s; }
