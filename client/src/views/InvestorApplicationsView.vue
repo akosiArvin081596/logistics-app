@@ -70,6 +70,12 @@
       <span>{{ statusError }}</span>
       <button type="button" class="font-bold underline shrink-0" @click="statusError = ''">Dismiss</button>
     </div>
+    <!-- An acceptance that created nothing (the account already exists) stays
+         on screen too: the admin must not read it as a new investor. -->
+    <div v-if="statusNotice" role="status" data-test="application-status-notice" class="flex items-start justify-between gap-3 mb-3 py-2 px-3 bg-amber-50 rounded-lg border border-amber-200 text-[13px] text-amber-800">
+      <span>{{ statusNotice }}</span>
+      <button type="button" class="font-bold underline shrink-0" @click="statusNotice = ''">Dismiss</button>
+    </div>
 
     <Card class="flex flex-col" style="border-radius:14px;border:1px solid #e8edf2;box-shadow:0 1px 4px rgba(0,0,0,0.06);">
       <CardContent style="padding:0;">
@@ -372,7 +378,8 @@ async function load() {
   }
 }
 
-// Rejects with the server's refusal; saveStatus() shows it.
+// Resolves to the server's answer and rejects with its refusal; saveStatus()
+// shows both.
 async function updateStatus(id, status) {
   const result = await api.put(`/api/investor-applications/${id}/status`, { status })
   if (result.accountCreated && result.credentials) {
@@ -397,10 +404,14 @@ async function updateStatus(id, status) {
     } else {
       toast('Investor accepted — account created', 'success')
     }
+  } else if (result.accountCreated === false) {
+    // Accepted, and nothing was created: the server's message says why.
+    toast(result.message || 'Accepted — no account was created', 'warning')
   } else {
     toast(`Status updated to ${status}`, 'success')
   }
   await load()
+  return result
 }
 
 async function viewDetail(app) {
@@ -443,6 +454,9 @@ function openLinkedApplication() {
 
 // A refused status change, with the server's reason; '' otherwise.
 const statusError = ref('')
+// An acceptance that created no account, record or trucks, in the server's
+// words; '' otherwise.
+const statusNotice = ref('')
 // The application whose status change is waiting for the server.
 const statusSavingId = ref(null)
 // An "Accepted" pick waiting for the admin's confirmation: { app, select }.
@@ -452,6 +466,7 @@ function onStatusChange(app, event) {
   const select = event.target
   const status = select.value
   statusError.value = ''
+  statusNotice.value = ''
   if (status === 'Accepted') {
     pendingAccept.value = { app, select }
     return
@@ -473,11 +488,16 @@ function confirmAccept() {
 
 // Sends a status change and shows its outcome. A refusal puts the select back
 // at once, keeps the server's reason on screen, and re-reads the list so the
-// row shows the status the server actually holds (or drops a deleted one).
+// row shows the status the server actually holds (or drops a deleted one). An
+// acceptance that created nothing keeps the server's message on screen.
 async function saveStatus(app, status, select) {
   statusSavingId.value = app.id
   try {
-    await updateStatus(app.id, status)
+    const result = await updateStatus(app.id, status)
+    if (result?.accountCreated === false) {
+      const message = result.message || 'Accepted. No account, investor record or trucks were created.'
+      statusNotice.value = `${app.legal_name || `Application ${app.id}`}: ${message}`
+    }
   } catch (err) {
     if (select) select.value = app.status
     statusError.value = `${app.legal_name || `Application ${app.id}`} was not set to ${status}: ${err.message}`
