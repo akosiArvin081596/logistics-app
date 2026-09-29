@@ -888,7 +888,7 @@ what was missing.
 - **Invites:** T1's split, T2's lease (and a second one if the build wrongly saves "2,000"), T11's. Tc revokes each one
   still active; T8's lease is used, and T9's split is already revoked. Their rows and audit lines stay.
 - **T7's throwaway Investor account:** deleted at T7's end, or by Tc. Its `investor_config` rows go with it (the
-  delete's own cascade; on a build that lets an Investor write its own split, T7a's 99 is one of them).
+  delete's own cascade).
 - **T8's application** (local, or `E2E_TERMS_SUBMIT=1`): Tc soft-deletes it through `DELETE /api/investor-applications/<id>`.
   Locally it then deletes it from the copy by exact id, with its `investor_onboarding`, `investor_onboarding_documents` and
   `investor_payment_info` rows. It deletes only an application with a QA-TEST name that has been soft-deleted. It also
@@ -912,12 +912,8 @@ what was missing.
 `E2E_TERMS_SUBMIT=1`: it writes a real application, which also sends staging's new-application emails wherever staging
 has a mail target, and Tc can only soft-delete it.
 
-**On today's main (the BEFORE baseline):**
-
-- T1 and T2 find no invites panel. T3–T5, T7d, T8 and T9 are not reached.
-- T7a–c answer 200 (the Investor's own split is written) and 404. T7e answers 200.
-- T10's modal is gone after the refresh (the skeleton unmounts the table). T11's `POST` answers 404.
-- T6 PASSes on both builds: it is the regression control, holding plain `/invest` to T0. T7f and Tc PASS.
+**On a build without the feature:** T6 PASSes on both builds; it is the regression control, holding plain `/invest` to
+T0. T7f and Tc PASS as well.
 
 **What the steps assume about the UI** (not fixed by the contract; check them against the built feature):
 
