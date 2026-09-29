@@ -236,10 +236,6 @@ import MetricInfoDialog from './MetricInfoDialog.vue'
 
 const props = defineProps({
   myLoads: { type: Object, default: () => ({ pending: [], active: [] }) },
-  // Still bound by InvestorView, and deliberately NOT read for the split: the
-  // raw investor_split_pct row is unclamped, so a stored 150 labelled the shares
-  // "gross × 150%" while the server computed them at 100%.
-  config: { type: Object, default: () => ({}) },
 })
 
 const store = useInvestorStore()
