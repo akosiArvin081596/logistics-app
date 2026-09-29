@@ -20,12 +20,9 @@
 //      a user account and emails a password, so its guard has to sit above the
 //      write.
 //
-//   2. THE BEARER TOKEN. `access_token` is non-expiring, accepted with NO
-//      session, and authorizes e-signing and `POST …/banking`, which rewrites
-//      where money is sent. "Deleted but the token still works" is not a
-//      disclosure bug, it is a write credential outliving the record it belongs
-//      to. Refused as 404 through the same branch as a missing id, so an
-//      unauthenticated caller gets no oracle for "this id existed once".
+//   2. NO TOKEN ROUTE. The token-gated /api/public/investor-onboarding/:id/*
+//      routes were removed, so no route accepts an application's
+//      `access_token` at all, deleted or not. Asserted over the route table.
 //
 //   3. THE MIGRATION'S POSITION. investor_applications has a rename-recreate
 //      migration that copies rows with an EXPLICIT column list. A `deleted_at`
@@ -135,46 +132,14 @@ function extractHandler(mountPrefix) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. THE BEARER TOKEN — suspended with the record.
+// 2. NO TOKEN ROUTE — nothing accepts an application's access_token.
 // ---------------------------------------------------------------------------
 {
-	const V = new Function("db", `${extractFn("verifyInvestorToken")}\nreturn { verifyInvestorToken };`);
-	const db = new Database(":memory:");
-	db.exec(`CREATE TABLE investor_applications (id INTEGER PRIMARY KEY, legal_name TEXT, access_token TEXT, deleted_at DATETIME DEFAULT NULL);`);
-	db.prepare("INSERT INTO investor_applications (id, legal_name, access_token) VALUES (1,'Acme Freight','tok-live')").run();
-	db.prepare("INSERT INTO investor_applications (id, legal_name, access_token, deleted_at) VALUES (2,'Spam LLC','tok-dead','2026-08-10 12:00:00')").run();
-	const { verifyInvestorToken } = V(db);
-
-	const call = (id, token) => {
-		const out = { status: null, body: null };
-		const res = { status(s) { out.status = s; return this; }, json(b) { out.body = b; return this; } };
-		out.ret = verifyInvestorToken({ params: { id: String(id) }, query: { token }, body: {}, headers: {} }, res);
-		return out;
-	};
-
-	const live = call(1, "tok-live");
-	check("token: a live application with the right token authorizes", live.ret, 1);
-	check("token: and no error is sent", live.status, null);
-
-	const dead = call(2, "tok-dead");
-	check("token: a SOFT-DELETED application's token no longer authorizes", dead.ret, null);
-	check("token: refused as 404, not 403 — a 403 would confirm it exists", dead.status, 404);
-
-	const ghost = call(999, "tok-dead");
-	check("token: a non-existent id is also 404", ghost.status, 404);
-	// ⚠️ Byte-identical refusal, or the route becomes an oracle for "this id
-	// existed and was removed" against an unauthenticated caller.
-	check("token: deleted and non-existent are INDISTINGUISHABLE", dead.body, ghost.body);
-
-	const wrong = call(1, "tok-wrong");
-	check("token: a wrong token on a live application is still 403", wrong.status, 403);
-	const blank = call(1, "");
-	check("token: an empty token is refused", blank.ret, null);
-
-	// Restore re-authorizes: the credential was suspended, not revoked.
-	db.prepare("UPDATE investor_applications SET deleted_at = NULL WHERE id = 2").run();
-	check("token: restoring the row makes the SAME token work again", call(2, "tok-dead").ret, 2);
-	db.close();
+	const code = stripComments(SRC);
+	const routes = [...code.matchAll(/app\.(?:get|post|put|patch|delete|all|use)\(\s*"([^"]+)"/g)].map((m) => m[1]);
+	check("token: no route is mounted under /api/public/investor-onboarding/",
+		routes.filter((p) => p.startsWith("/api/public/investor-onboarding")), []);
+	check("token: the token check is gone (no verifyInvestorToken)", /verifyInvestorToken/.test(code), false);
 }
 
 // ---------------------------------------------------------------------------
@@ -243,11 +208,9 @@ function extractHandler(mountPrefix) {
 	check("delete is idempotent by construction (AND deleted_at IS NULL)",
 		/AND deleted_at IS NULL/.test(delH), true);
 	check("delete is audited", /logAudit/.test(delH), true);
-	check("delete's audit line records that the access token stopped working",
-		/token/i.test(delH), true);
+	check("delete no longer claims to suspend an onboarding link (no route takes the token)",
+		/token|onboarding link/i.test(delH), false);
 	check("restore clears deleted_at", /SET deleted_at = NULL/.test(resH), true);
-	check("restore does NOT regenerate the access token — it was suspended, not revoked",
-		/access_token\s*=/.test(resH), false);
 	check("restore is audited", /logAudit/.test(resH), true);
 
 	const db = new Database(":memory:");

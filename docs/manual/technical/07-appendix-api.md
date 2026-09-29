@@ -74,7 +74,6 @@ A flat list of every REST endpoint in `server.js`, grouped by domain. Each row s
 | GET | `/api/applications/:id/pdf` | Super Admin | Download application PDF. |
 | POST | `/api/public/investor-apply` | public | Investor application (rate-limited). |
 | `/api/investor-applications` | CRUD | Super Admin | Manage. |
-| `/api/public/investor-onboarding/:id/*` | public | Investor onboarding flow. |
 | `/api/onboarding/*` | Driver | Driver onboarding flow. |
 
 ## Investors

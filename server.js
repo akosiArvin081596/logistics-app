@@ -10747,24 +10747,19 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", address =
 
 // --- Onboarding render limiters -------------------------------------------
 // PR #214 capped the ANONYMOUS preview route (pdfPreviewLimiter + a
-// process-wide concurrency cap) and fixed the SSRF at the renderer sink, so all
-// four render paths are SSRF-safe. Its three siblings kept spending a full
-// Puppeteer render per request once a credential is known:
-//   - GET  /api/public/investor-onboarding/:id/documents/:docKey/pdf  (token)
-//   - POST /api/public/investor-onboarding/:id/sign/:docKey           (token)
-//   - POST /api/onboarding/:userId/documents/:docKey/sign             (session)
+// process-wide concurrency cap) and fixed the SSRF at the renderer sink, so
+// every render path is SSRF-safe. The signed-in render routes kept spending a
+// full Puppeteer render per request:
+//   - GET  /api/onboarding/documents/:docKey/pdf                        (session)
+//   - POST /api/onboarding/:userId/documents/:docKey/sign               (session)
+//   - POST /api/admin/investor-onboarding/:id/documents/:docKey/regenerate (Super Admin)
 // A render is the single most expensive thing any of them can be made to do,
 // and none of them bounded how often.
 //
-// ⚠️ Keyed on the SESSION USER where there is one, else the IP — deliberately
-// NOT on the application id. Both token routes call verifyInvestorToken()
-// INSIDE the handler, so an anonymous caller reaches the limiter first; an
-// appId key would therefore let anyone lock a specific investor out of their
-// own onboarding by hammering their id unauthenticated. Per-IP, a prober only
-// exhausts their own bucket. On the two authenticated routes the guard
-// (requireAuth / requireRole) is mounted BEFORE the limiter, so a caller with
-// no business there cannot spend the budget on 403s — same ordering as
-// fuelEventsLimiter.
+// ⚠️ Keyed on the SESSION USER where there is one, else the IP, and never on an
+// id from the URL. Every route that uses these mounts its guard (requireAuth /
+// requireRole) BEFORE the limiter, so a caller with no business there cannot
+// spend the budget on 403s — same ordering as fuelEventsLimiter.
 //
 // 30 / 15 min for previews: the post-application twin of pdfPreviewLimiter, so
 // it gets the same number for the same reason — a thorough investor opening,
@@ -10811,52 +10806,6 @@ const onboardingSignLimiter = rateLimit({
 	},
 	message: { error: "Too many signing requests. Try again in a few minutes." },
 	standardHeaders: true,
-});
-
-// Helper: verify investor access token
-//
-// ⚠️ A SOFT-DELETED APPLICATION'S TOKEN NO LONGER AUTHORIZES ANYTHING. This is
-// the deliberate answer to "does the bearer credential survive the delete?", and
-// it is decided HERE because this is the single choke point every public
-// onboarding route passes through — the alternative is five copies of the rule.
-//
-// The token is not merely disclosive. It is a NON-EXPIRING bearer credential
-// accepted with no session at all, and it authorizes e-signing as that investor
-// and `POST …/banking`, which rewrites where money is sent. Soft-deleting is an
-// admin asserting "this application is spam, or a duplicate, or not real";
-// continuing to honour a write credential attached to it would mean a deleted
-// application could still sign contracts and nominate a bank account. Restoring
-// the row restores the token unchanged, so nothing is lost — the credential is
-// suspended with the record, not revoked from it.
-//
-// ⚠️ REFUSED AS 404, NOT 403, and via the same branch as a non-existent id. A
-// distinct status or message would turn this into an oracle for "an application
-// with this id exists but was removed" against an unauthenticated route. Same
-// rule the signed-document guards follow: a 403 confirms the thing exists.
-function verifyInvestorToken(req, res) {
-	const appId = parseInt(req.params.id);
-	const token = req.query.token || req.body?.accessToken || req.headers["x-access-token"] || "";
-	if (!appId || isNaN(appId)) { res.status(400).json({ error: "Invalid application ID" }); return null; }
-	const app = db.prepare("SELECT id, access_token, deleted_at FROM investor_applications WHERE id = ?").get(appId);
-	if (!app || app.deleted_at) { res.status(404).json({ error: "Application not found" }); return null; }
-	if (!app.access_token || app.access_token !== token) { res.status(403).json({ error: "Invalid access token" }); return null; }
-	return appId;
-}
-
-// GET /api/public/investor-onboarding/:id — Get application + onboarding status (token required)
-app.get("/api/public/investor-onboarding/:id", (req, res) => {
-	try {
-		const appId = verifyInvestorToken(req, res);
-		if (!appId) return;
-		const application = db.prepare("SELECT id, legal_name, dba, entity_type, address, contact_person, email, phone, status FROM investor_applications WHERE id = ?").get(appId);
-		const onboarding = db.prepare("SELECT * FROM investor_onboarding WHERE application_id = ?").get(appId);
-		const documents = stripSigningEvidence(
-			db.prepare("SELECT * FROM investor_onboarding_documents WHERE application_id = ? ORDER BY id").all(appId)
-		);
-		res.json({ application, onboarding, documents, totalDocs: INVESTOR_ONBOARDING_DOCS.length });
-	} catch (err) {
-		res.status(500).json({ error: err.message });
-	}
 });
 
 // Builds the render closure for ONE investor onboarding document.
@@ -10948,132 +10897,6 @@ function refreshInvestorOnboardingStatus(appId) {
 	return "banking_pending";
 }
 
-// POST /api/public/investor-onboarding/:id/sign/:docKey — Sign a document (token required)
-app.post("/api/public/investor-onboarding/:id/sign/:docKey", onboardingSignLimiter, async (req, res) => {
-	try {
-		const appId = verifyInvestorToken(req, res);
-		if (!appId) return;
-		const { docKey } = req.params;
-		const { signatureText, signatureImage, vehicleInfo } = req.body;
-		if (typeof signatureText !== "string" || !signatureText.trim()) return res.status(400).json({ error: "Signature required" });
-		const sigShape = publicFormInput.checkPublicScalars(req.body, ["signatureImage"]);
-		if (!sigShape.ok) {
-			return res.status(400).json({ error: sigShape.message, code: "INVALID_FIELD", reason: sigShape.reason, field: sigShape.field });
-		}
-		// Checked before anything reads or renders it (lib/image-size.js).
-		const sigImage = imageLimits.checkSignatureImage(signatureImage);
-		if (!sigImage.ok) {
-			return res.status(sigImage.status).json(imageLimits.refusalBody(sigImage, "signature"));
-		}
-
-		const docRow = db.prepare("SELECT * FROM investor_onboarding_documents WHERE application_id = ? AND doc_key = ?").get(appId, docKey);
-		if (!docRow) return res.status(404).json({ error: "Document not found" });
-		if (docRow.signed) return res.json({ success: true, message: "Already signed" });
-
-		const consent = readTransmittedConsent(req.body, res, { docLabel: docRow.doc_name || docKey });
-		if (!consent) return;
-		const net = signerNetworkEvidence(req);
-
-		// The application row is read inside buildInvestorDocRender(), at render
-		// time, so it reflects any vehicle written just below.
-		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: EVIDENCE_DATE_TZ });
-		const signedDir = path.join(__dirname, "uploads", "investor-onboarding-signed");
-		if (!fs.existsSync(signedDir)) fs.mkdirSync(signedDir, { recursive: true });
-		const signedFileName = `${docKey}-inv-${appId}-signed.pdf`;
-		const signedPath = path.join(signedDir, signedFileName);
-		const publicUrl = `/uploads/investor-onboarding-signed/${signedFileName}`;
-
-		// Save vehicle info if provided (for Exhibit A). A single object is
-		// accepted as a one-vehicle list; either way the entries are checked
-		// before the first one is read.
-		const vehicleCheck = publicFormInput.checkPublicVehicles(
-			Array.isArray(vehicleInfo) ? vehicleInfo : (vehicleInfo ? [vehicleInfo] : [])
-		);
-		if (!vehicleCheck.ok) {
-			return res.status(400).json({ error: vehicleCheck.message, code: "INVALID_VEHICLES", reason: vehicleCheck.reason });
-		}
-		const vehiclesArr = vehicleCheck.value;
-		if (vehiclesArr.length > 0) {
-			const v = vehiclesArr[0];
-			db.prepare(`UPDATE investor_applications SET
-				vehicle_year=?, vehicle_make=?, vehicle_model=?, vehicle_vin=?, vehicle_mileage=?,
-				vehicle_title_state=?, vehicle_liens=?, vehicle_registered_owner=?,
-				vehicles_json=? WHERE id=?`
-			).run(v.year || "", v.make || "", v.model || "",
-				v.vin || "", v.mileage || "", v.titleState || "",
-				v.liens || "", v.registeredOwner || "",
-				JSON.stringify(vehiclesArr), appId);
-		}
-
-		const render = buildInvestorDocRender({
-			appId, docKey,
-			signatureText, signatureImage, effectiveDate,
-			signedAt: new Date().toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" }),
-			vehiclesOverride: vehiclesArr,
-		});
-
-		const now = new Date().toISOString();
-		let artifact;
-		try {
-			artifact = await writeSignedArtifact({
-				render,
-				signedPath,
-				publicUrl,
-				label: docRow.doc_name || docKey,
-			});
-		} catch (genErr) {
-			// Signature kept, claim refused — and because `signed` stays 0 the
-			// signedCount check below cannot flip this investor to fully_onboarded.
-			//
-			// `AND signed = 0` is what stops a LOSING writer clobbering a WINNER.
-			// The client aborts at 20 s (useApi.js) while renderPolicy allows 30 s,
-			// and Express does not abort a handler on client disconnect — so the
-			// signer sees "try again", taps Sign, and the retry can succeed while
-			// the first request is still rendering. Without this guard that first
-			// request's late failure would blank signed_pdf_url on a row that is
-			// genuinely signed, which reads downstream exactly like the bug this
-			// PR fixes (checkAndCompleteOnboarding drops docs with no url) and
-			// would re-open the alert on a document that is fine.
-			//
-			// The evidence goes down on the FAILURE path too — same reasoning as
-			// the signature beside it. The consent was given; only the artifact is
-			// missing, so artifact_sha256 is the one thing left blank.
-			const failWrite = db.prepare("UPDATE investor_onboarding_documents SET signature_text=?, signature_image=?, signed_ip=?, signed_ip_source=?, signed_user_agent=?, consent_agreed=?, consent_text=?, effective_date=?, evidence_version=?, signing_error=?, signing_failed_at=?, signed_pdf_url='' WHERE application_id=? AND doc_key=? AND signed = 0")
-				.run(signatureText.trim(), signatureImage || "", net.ip, net.ipSource, net.userAgent, consent.agreed, consent.text,
-					effectiveDate, SIGNING_EVIDENCE_VERSION, genErr.message, now, appId, docKey);
-			// Only alert for a document that is actually unsigned. 0 changes means
-			// another request already signed it; there is nothing wrong to report.
-			if (failWrite.changes > 0) {
-				alertOnboardingDocFailure({
-					scope: "investor-application", ownerId: appId, docKey,
-					docName: docRow.doc_name, reason: genErr.message,
-				});
-			}
-			return res.status(503).json({
-				error: "We saved your signature but could not generate the signed document. Nothing was lost — please try again in a moment.",
-				code: genErr.code || "DOCUMENT_RENDER_FAILED",
-				retryable: true,
-			});
-		}
-
-		db.prepare(`UPDATE investor_onboarding_documents SET signed=1, signature_text=?, signature_image=?, signed_at=?, signed_pdf_url=?,
-			signed_ip=?, signed_ip_source=?, signed_user_agent=?, consent_agreed=?, consent_text=?, artifact_sha256=?, artifact_bytes=?, effective_date=?, evidence_version=?,
-			signing_error='', signing_failed_at='' WHERE application_id=? AND doc_key=?`)
-			.run(signatureText.trim(), signatureImage || "", now, artifact.url,
-				net.ip, net.ipSource, net.userAgent, consent.agreed, consent.text, artifact.sha256, artifact.bytes, effectiveDate, SIGNING_EVIDENCE_VERSION,
-				appId, docKey);
-		resolveOnboardingDocAlert({ scope: "investor-application", ownerId: appId, docKey });
-
-		// Check if all docs signed → advance status
-		refreshInvestorOnboardingStatus(appId);
-
-		res.json({ success: true });
-	} catch (err) {
-		console.error("Investor sign error:", err.message);
-		res.status(500).json({ error: err.message });
-	}
-});
-
 // ============================================================
 // ADMIN: recover a document that failed to render
 // ============================================================
@@ -11081,14 +10904,12 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", onboardingSignLimit
 // signing_error recorded, an alert raised. It did not make it RECOVERED: for an
 // investor there was no route that could ever finish the job.
 //
-// The per-document public route below is token-gated on
-// investor_applications.access_token, and that token is generated server-side,
-// stored, and NEVER emitted — not in a response body, not in either admin
-// payload (both strip it unconditionally), not in any email. `client/src` has
-// zero references to /api/public/investor-onboarding/ or to the token. The live
-// path is the bulk POST /api/public/investor-apply, which by design does not
-// fail the request. So a document that failed to render parked at
-// documents_pending until somebody hand-edited SQLite.
+// An investor signs every document in one request, the bulk
+// POST /api/public/investor-apply, which by design does not fail when one
+// document's render does, and there is no per-document public signing route
+// (the unused token-gated /api/public/investor-onboarding/:id/* routes were
+// removed). So a document that failed to render parked at documents_pending
+// until somebody hand-edited SQLite.
 //
 // These two routes are that missing path: find the parked documents, then
 // re-render one from the signature already on file.
@@ -11501,133 +11322,6 @@ app.post("/api/admin/investor-onboarding/:id/documents/:docKey/regenerate", requ
 		});
 	} catch (err) {
 		console.error("Investor document regenerate error:", err.message);
-		res.status(500).json({ error: err.message });
-	}
-});
-
-// Serve investor onboarding document PDFs (preview, token required)
-app.get("/api/public/investor-onboarding/:id/documents/:docKey/pdf", onboardingPreviewLimiter, async (req, res) => {
-	try {
-		const appId = verifyInvestorToken(req, res);
-		if (!appId) return;
-		const { docKey } = req.params;
-		const application = db.prepare("SELECT * FROM investor_applications WHERE id = ?").get(appId);
-		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: EVIDENCE_DATE_TZ });
-
-		if (docKey === "master_agreement" || docKey === "vehicle_lease") {
-			let vehicles = [];
-			try { vehicles = JSON.parse(application?.vehicles_json || "[]"); } catch { /* skip */ }
-			if (!vehicles.length && (application?.vehicle_year || application?.vehicle_make)) {
-				vehicles.push({
-					year: application.vehicle_year || "", make: application.vehicle_make || "",
-					model: application.vehicle_model || "", vin: application.vehicle_vin || "",
-					mileage: application.vehicle_mileage || "",
-					titleState: application.vehicle_title_state || "",
-					liens: application.vehicle_liens || "",
-					registeredOwner: application.vehicle_registered_owner || "",
-				});
-			}
-			const payInfo = db.prepare("SELECT * FROM investor_payment_info WHERE application_id = ?").get(appId);
-			const pdfBuffer = await renderPolicy(docKey, {
-				legalName: application?.legal_name || "",
-				dba: application?.dba || "",
-				entityType: application?.entity_type || "",
-				address: application?.address || "",
-				contactPerson: application?.contact_person || "",
-				contactTitle: application?.contact_title || "",
-				phone: application?.phone || "",
-				email: application?.email || "",
-				einSsn: application?.ein_ssn || "",
-				yearsInOperation: application?.years_in_operation || "",
-				fleetSize: application?.fleet_size || "",
-				vehicles,
-				bankName: payInfo?.bank_name || "",
-				bankRouting: payInfo?.routing_number || "",
-				bankAccount: payInfo?.account_number || "",
-				accountType: payInfo?.account_type || "",
-				effectiveDate,
-			});
-			res.setHeader("Content-Type", "application/pdf");
-			const filename = docKey === "master_agreement" ? "Master Agreement Preview.pdf" : "Vehicle Lease Preview.pdf";
-			res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
-			return res.send(pdfBuffer);
-		}
-
-		if (docKey === "w9") {
-			const pdfBytes = await fillW9Form({
-				legalName: application?.legal_name || "", dba: application?.dba || "",
-				entityType: application?.entity_type || "", address: application?.address || "",
-				einSsn: application?.ein_ssn || "", effectiveDate,
-			});
-			if (!pdfBytes) return res.status(404).json({ error: "W-9 template not found" });
-			res.setHeader("Content-Type", "application/pdf");
-			res.setHeader("Content-Disposition", 'inline; filename="W-9 Form Preview.pdf"');
-			return res.send(Buffer.from(pdfBytes));
-		}
-
-		return res.status(404).json({ error: "Unknown document" });
-	} catch (err) {
-		res.status(500).json({ error: err.message });
-	}
-});
-
-// POST /api/public/investor-onboarding/:id/vehicles — Save vehicles JSON (token required)
-app.post("/api/public/investor-onboarding/:id/vehicles", (req, res) => {
-	try {
-		const appId = verifyInvestorToken(req, res);
-		if (!appId) return;
-		const { vehicles } = req.body;
-		const vehicleCheck = publicFormInput.checkPublicVehicles(vehicles);
-		if (!vehicleCheck.ok) {
-			return res.status(400).json({ error: vehicleCheck.message, code: "INVALID_VEHICLES", reason: vehicleCheck.reason });
-		}
-		const vehiclesArr = vehicleCheck.value;
-		db.prepare("UPDATE investor_applications SET vehicles_json=? WHERE id=?")
-			.run(JSON.stringify(vehiclesArr), appId);
-		// Also update the legacy single-vehicle columns from the first vehicle
-		if (vehiclesArr.length > 0) {
-			const v = vehiclesArr[0];
-			db.prepare(`UPDATE investor_applications SET
-				vehicle_year=?, vehicle_make=?, vehicle_model=?, vehicle_vin=?, vehicle_mileage=?,
-				vehicle_title_state=?, vehicle_liens=?, vehicle_registered_owner=? WHERE id=?`
-			).run(v.year || "", v.make || "", v.model || "", v.vin || "",
-				v.mileage || "", v.titleState || "", v.liens || "", v.registeredOwner || "", appId);
-		}
-		res.json({ success: true });
-	} catch (err) {
-		res.status(500).json({ error: err.message });
-	}
-});
-
-// POST /api/public/investor-onboarding/:id/banking — Step 3: Submit banking info (token required)
-app.post("/api/public/investor-onboarding/:id/banking", (req, res) => {
-	try {
-		const appId = verifyInvestorToken(req, res);
-		if (!appId) return;
-		const { bank_name, account_type, routing_number, account_number, account_name } = req.body;
-		if (!bank_name || !routing_number || !account_number) {
-			return res.status(400).json({ error: "Bank name, routing number, and account number are required" });
-		}
-		const bankingShape = publicFormInput.checkPublicScalars(req.body, PUBLIC_BANKING_SCALAR_FIELDS);
-		if (!bankingShape.ok) {
-			return res.status(400).json({ error: bankingShape.message, code: "INVALID_FIELD", reason: bankingShape.reason, field: bankingShape.field });
-		}
-		// Verify all documents are signed before accepting banking info
-		const signedCount = db.prepare("SELECT COUNT(*) AS cnt FROM investor_onboarding_documents WHERE application_id=? AND signed=1").get(appId).cnt;
-		if (signedCount < INVESTOR_ONBOARDING_DOCS.length) {
-			return res.status(400).json({ error: "All documents must be signed before submitting banking info" });
-		}
-		db.prepare(`INSERT OR REPLACE INTO investor_payment_info (application_id, bank_name, account_type, routing_number, account_number, account_name)
-			VALUES (?, ?, ?, ?, ?, ?)`).run(appId, bank_name, account_type || "", routing_number, account_number, account_name || "");
-
-		db.prepare("UPDATE investor_onboarding SET status='fully_onboarded', onboarded_at=? WHERE application_id=?")
-			.run(new Date().toISOString(), appId);
-
-		// Promote from Draft to New — application is now visible to admins
-		db.prepare("UPDATE investor_applications SET status='New' WHERE id=? AND status='Draft'").run(appId);
-
-		res.json({ success: true });
-	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
 });
@@ -12430,17 +12124,13 @@ app.delete("/api/investor-applications/:id", requireRole("Super Admin"), (req, r
 			return res.status(400).json({ error: "Invalid application id" });
 		}
 		const row = db.prepare("SELECT legal_name, status FROM investor_applications WHERE id = ?").get(id);
-		// ⚠️ REPORT WHAT THIS SUSPENDS — do not refuse, and do not stay silent.
-		// Removing an application that is mid-onboarding also stops the
-		// investor's existing link working (see verifyInvestorToken), which is a
-		// support incident nobody would connect back to this click. A refusal is
-		// the wrong answer — a duplicate that was mistakenly Accepted is exactly
-		// what an admin needs to remove — so the caller is told instead, and
-		// restore is one call away.
+		// ⚠️ REPORT WHAT THIS LEAVES BEHIND — do not refuse, and do not stay
+		// silent. A refusal is the wrong answer — a duplicate that was mistakenly
+		// Accepted is exactly what an admin needs to remove — so the caller is told
+		// what stays on file instead, and restore is one call away.
 		const signedCount = db.prepare(
 			"SELECT COUNT(*) AS c FROM investor_onboarding_documents WHERE application_id = ? AND signed = 1"
 		).get(id)?.c || 0;
-		const onboarding = db.prepare("SELECT status FROM investor_onboarding WHERE application_id = ?").get(id);
 		const result = db.prepare(
 			"UPDATE investor_applications SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL"
 		).run(id);
@@ -12449,14 +12139,10 @@ app.delete("/api/investor-applications/:id", requireRole("Super Admin"), (req, r
 		}
 		const warnings = [];
 		if (signedCount) warnings.push(`${signedCount} signed document${signedCount === 1 ? "" : "s"} stay on file and are unaffected, but are no longer reachable from the applications list.`);
-		if (onboarding && onboarding.status !== "fully_onboarded") warnings.push("Onboarding was still in progress — the investor's existing onboarding link will stop working until this is restored.");
 		if (row?.status === "Accepted") warnings.push("This application was already Accepted; any user account created from it is unaffected and still works.");
 
-		// Named in the audit line because the delete also SUSPENDS a live bearer
-		// credential — a later reader needs to know the investor's onboarding link
-		// stopped working, and why.
 		logAudit(req, "soft_delete_investor_application", "investor_application", id,
-			`Removed ${row?.legal_name || id} (status ${row?.status || "unknown"}) from the list; its onboarding access token no longer authorizes signing or banking changes` +
+			`Removed ${row?.legal_name || id} (status ${row?.status || "unknown"}) from the list` +
 			(signedCount ? `; ${signedCount} signed document(s) retained` : ""));
 		res.json({ success: true, warnings });
 	} catch (err) {
@@ -12465,9 +12151,7 @@ app.delete("/api/investor-applications/:id", requireRole("Super Admin"), (req, r
 	}
 });
 
-// Restore a soft-deleted investor application. The access_token is deliberately
-// NOT regenerated: it was suspended with the record, not revoked from it, so the
-// onboarding link the investor already has starts working again.
+// Restore a soft-deleted investor application to the list.
 app.post("/api/investor-applications/:id/restore", requireRole("Super Admin"), (req, res) => {
 	try {
 		const id = Number(req.params.id);
@@ -12480,7 +12164,7 @@ app.post("/api/investor-applications/:id/restore", requireRole("Super Admin"), (
 			return res.status(404).json({ error: "Application not found" });
 		}
 		logAudit(req, "restore_investor_application", "investor_application", id,
-			`Restored ${row?.legal_name || id} from soft-delete; its onboarding access token authorizes again`);
+			`Restored ${row?.legal_name || id} from soft-delete`);
 		res.json({ success: true });
 	} catch (err) {
 		console.error("investor application restore failed:", err);

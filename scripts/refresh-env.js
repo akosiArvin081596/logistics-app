@@ -788,10 +788,10 @@ async function main() {
 	sigs += setCols("investor_onboarding_documents", { signature_text: "REDACTED", signature_image: "", ...EVIDENCE_REDACTIONS });
 	if (sigs) summary.push(`signatures + signing evidence: ${sigs} redacted`);
 
-	// 3g. Onboarding access tokens are live bearer credentials for the PUBLIC
-	//     /api/public/investor-onboarding/:id/* flow. Regenerating them means a
-	//     leaked copy of this database cannot be replayed against production,
-	//     and a link mailed from production cannot be replayed against staging.
+	// 3g. investor_applications.access_token: no route accepts these tokens since
+	//     the token-gated /api/public/investor-onboarding/:id/* routes were
+	//     removed, but they are regenerated anyway, so a copy of this database
+	//     carries none of production's.
 	if (tableExists("investor_applications") && colsOf("investor_applications").includes("access_token")) {
 		const rows = db.prepare("SELECT id FROM investor_applications WHERE COALESCE(access_token,'') <> ''").all();
 		const upd = db.prepare("UPDATE investor_applications SET access_token = ? WHERE id = ?");
