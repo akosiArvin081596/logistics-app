@@ -9,7 +9,8 @@
 // change at all without an invitation. This runner holds those together:
 //
 //   §1 INVITE_TOKEN_RE accepts exactly a 43-character base64url token
-//   §2 the code → message map is the §15 wording, word for word
+//   §2 the code → message map is the §15 wording, word for word, and so are
+//      the page's security wording and payment answers (§15.5, §15.6)
 //   §3 revisionChanged() fires only on two known, different revisions
 //   §4 refusals, the lookup failure code and the ?invite= reader
 //   §5 the terms card has nothing an applicant can edit; a failed preview is
@@ -122,6 +123,22 @@ ok('the card carries the agreed note', CARD.includes(NOTE))
 ok('§15 lists the card note word for word', S15.includes('`' + NOTE + '`'))
 const PREVIEW_MSG = /const PREVIEW_FAILED_MESSAGE = "([^"]+)"/.exec(read('client/src/views/InvestorApplyView.vue'))
 ok('§15 lists the failed-preview line word for word', !!PREVIEW_MSG && S15.includes('`' + PREVIEW_MSG[1] + '`'))
+// §15.5 / §15.6: the page's security wording and the payment answers, as shipped.
+{
+  const view = read('client/src/views/InvestorApplyView.vue')
+  const kb = JSON.parse(read('client/src/wizard/data/knowledge-base.json')).faqs
+  const note = (/class="bank-security-note"[\s\S]*?<span>([^<]+)<\/span>/.exec(view) || [])[1] || ''
+  const badge = (/class="trust-badge"[\s\S]*?<span>([^<]+)<\/span>/.exec(view) || [])[1] || ''
+  ok('§15 lists the Step 3 banking note word for word', !!note && S15.includes('`' + note + '`'))
+  ok('§15 lists the Step 1 badge word for word', !!badge && S15.includes('`' + badge + '`'))
+  ok('the page no longer claims 256-bit or encrypted storage', !/256-bit|encrypted and stored/i.test(view))
+  for (const id of ['why_address', 'what_is_logisx', 'how_often_paid']) {
+    ok(`§15 lists the ${id} answer word for word`, typeof kb[id]?.a === 'string' && S15.includes('`' + kb[id].a + '`'))
+  }
+  ok('the address answer no longer promises no third-party sharing', !/third part/i.test(kb.why_address.a))
+  const CAVEAT = "That's the standard agreement. If LogisX set different payment terms in your invitation, they're shown on the documents step and in Amendment No. 1 of your agreements."
+  ok('the two profit-share answers end with the invitation caveat', kb.what_is_logisx.a.endsWith(CAVEAT) && kb.how_often_paid.a.endsWith(CAVEAT))
+}
 ok('an unknown code reads as "could not load", never as a verdict on the link',
   inviteErrorMessage('SOMETHING_ELSE') === EXPECTED[INVITE_UNAVAILABLE] && inviteErrorMessage(undefined) === EXPECTED[INVITE_UNAVAILABLE])
 ok('inherited names are not codes (toString, __proto__, constructor)',

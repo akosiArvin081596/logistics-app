@@ -99,7 +99,7 @@
             <p>Tell us about you and your business</p>
             <div class="trust-badge">
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-              <span>256-bit encrypted &amp; secure</span>
+              <span>Encrypted connection (HTTPS)</span>
             </div>
           </div>
 
@@ -337,7 +337,7 @@
 
           <div class="bank-security-note" data-wizard-target="banking-section">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            <span>Your banking information is encrypted and stored securely.</span>
+            <span>Your banking information is sent over an encrypted connection and stored on LogisX's servers; only LogisX administrators can see it.</span>
           </div>
 
           <div class="form-grid">
@@ -1907,6 +1907,8 @@ async function submitOnboarding() {
   background: #f0fdf4; border: 1px solid #d1fae5; border-radius: 10px;
   font-size: 0.78rem; color: #15803d; font-weight: 500;
 }
+/* The note wraps to three lines on a phone; the shield keeps its size. */
+.bank-security-note svg { flex-shrink: 0; }
 
 /* ─── Success ─── */
 .success-wrap {
