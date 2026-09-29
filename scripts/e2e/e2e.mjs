@@ -85,6 +85,15 @@
 //      (I8b); the pre-filled note is labelled "carried over" until it is typed into
 //      (I8h) · I9 the server refuses a bad note or Order #
 //
+// Investor terms section (T0; ONLY=terms, no sign-in, no creds file needed): two
+//   test investors (QA-TEST Investor A / B) fill /invest in fresh anonymous
+//   contexts, open the Master Participation & Management Agreement and the
+//   Commercial Vehicle Lease on the signature page, sign all three documents, and
+//   open both again from the review modal ("Signed — View Document"). Every preview
+//   PDF is read: the default 50/50 terms, no AMENDMENT, and the same §3.3 / §2.01
+//   wording for A and B. The application is NEVER submitted (every write but the
+//   preview route is blocked in the page).
+//
 // Env:
 //   BASE_URL    required — e.g. http://127.0.0.1:3181 (never production)
 //   PHASE       before | after            (default: before) — names the output
@@ -108,7 +117,7 @@
 //   ONLY        a comma-separated list of sections: trucks (1-12, R1-R16), signout
 //               (S1-S7), dispatcher (D1-D3), maintenance (M1), moneypath (P1, E1,
 //               N1, N1b, F1, E2, B1, RC1), names (K1, K2, K3), eldlink (L1-L3),
-//               invoice (I1-I9). Unset = all, in that
+//               invoice (I1-I9), terms (T0). Unset = all, in that
 //               order. ⚠️ The sections together sign in more often than the login
 //               limiter allows one server process (see README), so split a full run.
 //   STEPS       only these cases of the sign-out, money-path and invoice sections,
@@ -142,7 +151,7 @@ const SLOWMO = Number(process.env.SLOWMO ?? (HEADED ? 350 : 0))
 const [DVW, DVH] = String(process.env.DRIVER_VIEWPORT || '430x900').split('x').map(Number)
 // ONLY picks sections, e.g. ONLY=signout or ONLY=trucks,dispatcher. Unset = all.
 const ONLY = String(process.env.ONLY || '').toLowerCase()
-const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypath', 'names', 'eldlink', 'invoice']
+const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypath', 'names', 'eldlink', 'invoice', 'terms']
 // Sign-ins (POST /api/auth/login) each section makes; the limiter allows 20 per 15
 // minutes per server process. The sign-out section's figure is its worst case: S4a's
 // second half runs, and the build sends S7's second sign-in (one fewer for each
@@ -151,8 +160,12 @@ const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypa
 // more when E1 has to file on the driver's behalf.
 // The names section signs the Dispatcher in once (K1 and K3 share the page) and
 // the Super Admin once (K2 reads the dashboard and Financials). The invoice section
-// signs the Super Admin in once; every step shares that page.
-const SIGN_INS = { trucks: 3, signout: 20, dispatcher: 2, maintenance: 3, moneypath: 3, names: 2, eldlink: 1, invoice: 1 }
+// signs the Super Admin in once; every step shares that page. The terms section
+// signs nobody in: /invest is public, and it redirects a signed-in user.
+const SIGN_INS = { trucks: 3, signout: 20, dispatcher: 2, maintenance: 3, moneypath: 3, names: 2, eldlink: 1, invoice: 1, terms: 0 }
+// Sections that need no login at all, so they run without a creds file (e.g. on
+// staging, where no staging logins need to exist for them).
+const NO_LOGIN_SECTIONS = new Set(['terms'])
 
 function die(msg) { console.error(`e2e: ${msg}`); process.exit(2) }
 if (!BASE_URL) die('BASE_URL is required')
@@ -195,8 +208,10 @@ if (fs.existsSync(JOURNAL)) {
   die(`${JOURNAL} exists: a previous run died while a planted value was in the DB. ` +
     'Recreate the scratch DB (node scripts/e2e/setup-db.cjs <db> --force), then delete the journal.')
 }
-if (!fs.existsSync(CREDS_FILE)) die(`no creds file at ${CREDS_FILE} (make one with scripts/e2e/setup-db.cjs, or set CREDS_FILE)`)
-const CREDS = JSON.parse(fs.readFileSync(CREDS_FILE, 'utf8'))
+const NEEDS_CREDS = [...SECTIONS].some((s) => !NO_LOGIN_SECTIONS.has(s))
+if (NEEDS_CREDS && !fs.existsSync(CREDS_FILE)) die(`no creds file at ${CREDS_FILE} (make one with scripts/e2e/setup-db.cjs, or set CREDS_FILE)`)
+// Only the login-free sections (terms) may run without one; they never read it.
+const CREDS = fs.existsSync(CREDS_FILE) ? JSON.parse(fs.readFileSync(CREDS_FILE, 'utf8')) : {}
 fs.mkdirSync(SHOTS, { recursive: true })
 for (const f of fs.readdirSync(SHOTS)) if (f.endsWith('.png')) fs.unlinkSync(path.join(SHOTS, f))
 
@@ -219,6 +234,7 @@ function writeResults(final = false) {
     runs('names') && 'names (K1, K2, K3)',
     runs('eldlink') && 'ELD link (L1-L3)',
     runs('invoice') && 'invoice editor (I1-I9)',
+    runs('terms') && 'investor terms on /invest (T0)',
   ].filter(Boolean).join(' + ')
   const lines = [
     `# ${title} — ${PHASE.toUpperCase()}`,
@@ -665,6 +681,12 @@ async function main() {
     try { await invoiceSection() } catch (e) {
       exitCode = 1
       record({ step: 'I!', title: 'Invoice editor section aborted', expected: '', observed: e.stack?.split('\n').slice(0, 3).join(' ') || String(e), verdict: 'FAIL', shot: '' })
+    }
+  }
+  if (runs('terms')) {
+    try { await termsSection() } catch (e) {
+      exitCode = 1
+      record({ step: 'T!', title: 'Investor terms section aborted', expected: '', observed: e.stack?.split('\n').slice(0, 3).join(' ') || String(e), verdict: 'FAIL', shot: '' })
     }
   }
 }
@@ -5984,6 +6006,414 @@ async function invoiceSection() {
     }
     await ctx.close().catch(() => {})
     if (ownDb && db) { try { db.close() } catch { /* ignore */ } db = null }
+  }
+}
+
+// ---------------------------------------------------------------- investor terms (T0)
+// T0 records what a prospective investor is shown on /invest TODAY, before any
+// change to the payment terms: the Master Participation & Management Agreement and
+// the Commercial Vehicle Lease, both on the signature page (InvestorSignModal.vue)
+// and from the review modal ("Signed — View Document"), for two different test
+// investors. Every document is the stateless preview PDF of
+// POST /api/public/investor-preview-pdf/<docKey>, read with the app's own pdfjs-dist.
+//
+// No sign-in (the page is public and redirects a signed-in user), so each investor
+// gets a FRESH anonymous context. Identities are fake: "QA-TEST Investor A|B <stamp>",
+// a QA-TEST address, an example.com email, all-zero EIN and bank numbers.
+// ⚠️ The application is never submitted. Besides not pressing the button, every
+// request from these pages that is not a GET and not the preview route is aborted
+// in the browser (T0l records any that was attempted).
+//
+// How the PDF is read: the page reads each preview with `res.blob()`, and Chromium
+// keeps no copy of a body read that way, so `Response.body()` answers empty. The
+// preview request is therefore passed through a route: `route.fetch()` sends the
+// page's own request (method, headers, body, cookies) to the server, the harness
+// keeps the bytes, and `route.fulfill()` hands the page that exact response.
+//
+// Budget: the preview route allows 30 renders per 15 minutes per IP. Each investor
+// makes 8 (open ×3, the re-render after each signature ×3, the review ×2), so one
+// run makes 16: a second run against the same server within 15 minutes runs out.
+const TERMS_DOCS = {
+  master_agreement: 'Master Participation & Management Agreement',
+  vehicle_lease: 'Commercial Vehicle Lease Agreement',
+  w9: 'W-9 Tax Form',
+}
+const TERMS_EXPECTED = 'default 50/50 terms, no AMENDMENT, identical for A and B'
+const TERMS_PREVIEW = '/api/public/investor-preview-pdf/'
+const flatText = (pt) => String(pt?.text || '').replace(/\s+/g, ' ').trim()
+// The text between two anchors (the second searched after the first), whitespace
+// collapsed; '' when either is missing.
+function between(flat, from, to) {
+  const i = flat.indexOf(from)
+  if (i < 0) return ''
+  const j = flat.indexOf(to, i + from.length)
+  return j < 0 ? '' : flat.slice(i, j).trim()
+}
+const countOf = (hay, needle) => {
+  if (!needle) return 0
+  let n = 0; let i = hay.indexOf(needle)
+  while (i >= 0) { n++; i = hay.indexOf(needle, i + needle.length) }
+  return n
+}
+// Images painted in a PDF, with the same pdfjs-dist as pdfText (loaded by it). The
+// renderer REPLACES the signer's signature slot with the drawn image, so the typed
+// name is never printed there: a signed copy shows its signature as extra images.
+async function pdfImageCount(b64) {
+  if (!b64 || !pdfjsLib) return null
+  const { OPS } = pdfjsLib
+  const paint = new Set([OPS.paintImageXObject, OPS.paintInlineImageXObject, OPS.paintImageMaskXObject, OPS.paintImageXObjectRepeat].filter((x) => x != null))
+  const task = pdfjsLib.getDocument({ data: new Uint8Array(Buffer.from(b64, 'base64')), isEvalSupported: false, disableFontFace: true, useSystemFonts: false, verbosity: 0 })
+  const doc = await task.promise
+  let n = 0
+  try {
+    for (let i = 1; i <= doc.numPages; i++) {
+      const ops = await (await doc.getPage(i)).getOperatorList()
+      for (const fn of ops.fnArray) if (paint.has(fn)) n++
+    }
+  } finally { await task.destroy().catch(() => {}) }
+  return n
+}
+// What T0 reads off one preview PDF.
+function termsFacts(pt, typedName) {
+  const flat = flatText(pt)
+  const squeezed = flat.replace(/\s+/g, '')
+  return {
+    split5050: flat.includes('distributed according to a 50/50 split'),
+    participant50: flat.includes('Participant Distribution (50%)'),
+    lease5050: flat.includes('50/50 profit participation model'),
+    amendment: flat.includes('AMENDMENT'), // case-sensitive: the boilerplate "amendment(s)" is not it
+    s33: between(flat, '3.3 Revenue Participation', '3.4 Settlement Cycle'),
+    s201: between(flat, '2.01 Lease Payments', '2.02'),
+    nameCount: countOf(squeezed, String(typedName || '').replace(/\s+/g, '')),
+    pages: pt?.pages ?? 0,
+  }
+}
+
+async function termsInvestor(letter, idx) {
+  const out = { letter, name: `QA-TEST Investor ${letter} ${stamp}`, sign: {}, review: {}, keys: [], blocked: [], consoleErrors: [], previews: 0, ok: false, error: '' }
+  const S = (n) => `t0-${letter.toLowerCase()}-${n}`
+  const ctx = await browser.newContext({ viewport: ADMIN_VP })
+  ctx.setDefaultTimeout(30000)
+  const page = await ctx.newPage()
+  // Callers waiting for the next preview of a document (see previewOf below).
+  const waiters = []
+  const settle = (docKey, value) => {
+    const i = waiters.findIndex((w) => w.docKey === docKey)
+    if (i >= 0) waiters.splice(i, 1)[0].resolve(value)
+  }
+  // The safety net: nothing but GETs and the stateless preview route leaves this page.
+  // A preview is passed through, and its bytes kept (see the note at the top of this section).
+  await page.route('**/api/**', async (route) => {
+    const req = route.request()
+    const p = pathOf(req.url())
+    if (req.method() === 'POST' && p.startsWith(TERMS_PREVIEW)) {
+      const docKey = p.slice(TERMS_PREVIEW.length)
+      let resp; let body
+      try {
+        resp = await route.fetch({ timeout: 90000 })
+        body = await resp.body()
+      } catch (e) {
+        settle(docKey, { status: 0, body: null, why: `the request failed: ${e.message.split('\n')[0]}` })
+        return route.abort('failed').catch(() => {})
+      }
+      settle(docKey, { status: resp.status(), body })
+      return route.fulfill({ response: resp, body }).catch(() => {})
+    }
+    if (req.method() === 'GET') return route.continue()
+    out.blocked.push(`${req.method()} ${p}`)
+    return route.abort('blockedbyclient')
+  })
+  page.on('console', (m) => { if (m.type() === 'error') out.consoleErrors.push(`console: ${m.text().slice(0, 240)}`) })
+  page.on('pageerror', (e) => out.consoleErrors.push(`pageerror: ${String(e.message || e).slice(0, 240)}`))
+  page.on('requestfailed', (r) => {
+    const p = pathOf(r.url())
+    if (p.startsWith('/api/') && !out.blocked.some((b) => b.endsWith(p))) out.consoleErrors.push(`requestfailed: ${r.method()} ${p} (${r.failure()?.errorText || '?'})`)
+  })
+  page.on('request', (r) => {
+    if (r.method() !== 'POST' || !pathOf(r.url()).startsWith(TERMS_PREVIEW)) return
+    out.previews++
+    let body = null
+    try { body = r.postDataJSON() } catch { /* not JSON */ }
+    const docKey = pathOf(r.url()).slice(TERMS_PREVIEW.length)
+    out.keys.push({
+      docKey,
+      signed: !!(body && body.signatureText),
+      keys: body ? Object.keys(body).sort() : [],
+      banking: body?.banking && typeof body.banking === 'object' ? Object.keys(body.banking).sort() : [],
+      vehicle: Array.isArray(body?.vehicles) && body.vehicles[0] ? Object.keys(body.vehicles[0]).sort() : [],
+    })
+  })
+  // Resolves with { status, body } of the next preview of `docKey` the page sends.
+  // Call it BEFORE the click that sends it.
+  const previewOf = (docKey) => new Promise((resolve, reject) => {
+    const w = { docKey, resolve }
+    waiters.push(w)
+    setTimeout(() => {
+      const i = waiters.indexOf(w)
+      if (i >= 0) { waiters.splice(i, 1); reject(new Error(`no ${docKey} preview answered within 90 s`)) }
+    }, 95000)
+  })
+  const readPreview = async (r) => {
+    if (r.status !== 200 || !r.body?.length) {
+      return { status: r.status, pt: null, why: r.why || (r.body ? r.body.toString('utf8').slice(0, 160) : '(no body)') }
+    }
+    const b64 = r.body.toString('base64')
+    const pt = await pdfText(b64)
+    return { status: r.status, pt, images: await pdfImageCount(b64), bytes: r.body.length }
+  }
+  const field = (label) => page.locator('.step-panel .field', { has: page.locator('label', { hasText: exactText(label) }) }).locator('input, select').first()
+  const tgt = (name) => page.locator(`[data-wizard-target="${name}"]`)
+  // For the screenshot only: point the page's own PDF viewer (the iframe showing the
+  // blob the page made) at the page that carries the clause, with the viewer's
+  // #page= open parameter. The document is not touched.
+  const CLAUSE = { master_agreement: '3.3 Revenue Participation', vehicle_lease: '2.01 Lease Payments' }
+  const showClause = async (frameSel, pt, docKey) => {
+    const n = pt?.items.find((it) => it.str.includes(CLAUSE[docKey]))?.page
+    if (!n) return 0
+    await page.locator(frameSel).evaluate((el, pg) => {
+      const base = el.src.split('#')[0]
+      el.src = 'about:blank'
+      setTimeout(() => { el.src = `${base}#page=${pg}` }, 50)
+    }, n)
+    await page.waitForTimeout(2500)
+    return n
+  }
+  const pauseBlur = async () => { await page.keyboard.press('Tab'); await page.waitForTimeout(350) }
+
+  try {
+    // ---- the application (step 1 of 3)
+    await page.goto(`${BASE_URL}/invest`)
+    await tgt('legal-name').waitFor({ state: 'visible', timeout: 45000 })
+    await caption(page, `Step T0 — test investor ${letter}: a fresh anonymous browser opens /invest (not signed in)`)
+    // The guided wizard opens itself ~1.2 s after load; close it as a person would.
+    try {
+      const closeGuide = page.locator('.wizard-panel button[aria-label="Close guide"]')
+      await closeGuide.waitFor({ state: 'visible', timeout: 5000 })
+      await closeGuide.click()
+    } catch { /* it did not open: nothing to close */ }
+    await tgt('legal-name').fill(out.name)
+    await tgt('dba').fill(`QA-TEST DBA ${letter}`)
+    await tgt('entity-type').selectOption('LLC')
+    await tgt('address').fill(`${100 + idx} QA-TEST Street, Testville, TX 75001`)
+    await field('Primary Contact Person').fill(out.name)
+    await field('Title').selectOption('Owner')
+    await tgt('phone').fill(`(555) 010-01${String(idx).padStart(2, '0')}`)
+    await tgt('email').fill(`qa-test+${stamp.replace(/\D/g, '')}${letter.toLowerCase()}@example.com`)
+    await field('Years in Operation').fill('3')
+    await field('Industry Experience').selectOption('Yes')
+    await field('Preferred Communication').selectOption('Email')
+    await field('Tax Classification').selectOption('Individual/LLC')
+    await tgt('ein-ssn').fill(`00-000000${idx}`)
+    await field('Monthly Reporting Delivery').selectOption('Digital Portal')
+    await pauseBlur()
+    await caption(page, `Step T0 — ${letter}: the application filled with fake QA-TEST data; Continue`)
+    await shot(page, S('01-application'))
+    await tgt('continue-step0').click()
+
+    // ---- fleet & documents (step 2 of 3)
+    await tgt('fleet-size').waitFor({ state: 'visible' })
+    await tgt('fleet-size').fill('1')
+    await tgt('vehicle-make').selectOption('Freightliner')
+    await tgt('vehicle-model').selectOption('Cascadia')
+    await tgt('vehicle-year').fill('2020')
+    await tgt('vehicle-vin').fill(`QATEST0000000000${letter}`)
+    await field('License Plate').fill(`QA-${letter}01`)
+    await field('Current Mileage').fill('100000')
+    await pauseBlur()
+    await caption(page, `Step T0 — ${letter}: one fake vehicle; now the documents (step 2 of 3)`)
+    await shot(page, S('02-fleet'))
+
+    const signDoc = async (docKey, n) => {
+      const docName = TERMS_DOCS[docKey]
+      const card = page.locator(`.doc-card[data-wizard-target="doc-${docKey}"]`)
+      const [resp] = await Promise.all([previewOf(docKey), card.click()])
+      const pv = await readPreview(resp)
+      await page.locator('.modal-overlay .pdf-frame').waitFor({ state: 'visible', timeout: 30000 }).catch(() => {})
+      await page.waitForTimeout(1200) // let the viewer paint the PDF for the screenshot
+      if (docKey !== 'w9') {
+        const f = pv.pt ? termsFacts(pv.pt, out.name) : null
+        out.sign[docKey] = { ...pv, facts: f && { ...f, images: pv.images } }
+        await caption(page, `Step T0 — ${letter}: ${docName}, the SIGNATURE page preview (${pv.status}) — ` +
+          (f ? (docKey === 'master_agreement'
+            ? `"50/50 split": ${f.split5050}, "Participant Distribution (50%)": ${f.participant50}, AMENDMENT: ${f.amendment}`
+            : `"50/50 profit participation model": ${f.lease5050}, AMENDMENT: ${f.amendment}`) : `no PDF: ${pv.why}`))
+        out.sign[docKey].shot = await shot(page, S(`${n}-sign-${docKey}`))
+        const at = await showClause('.modal-overlay .pdf-frame', pv.pt, docKey)
+        if (at) {
+          await caption(page, `Step T0 — ${letter}: ${docName}, signature page — the viewer on page ${at}, where "${CLAUSE[docKey]}" is`)
+          await shot(page, S(`${n}a-sign-${docKey}-clause`))
+        }
+      } else {
+        await caption(page, `Step T0 — ${letter}: ${docName}, the signature page (${pv.status})`)
+        await shot(page, S(`${n}-sign-${docKey}`))
+      }
+      // Sign it as a person does: consent, typed name, a drawn signature.
+      await page.locator('.modal-overlay .sign-checkbox input[type="checkbox"]').check()
+      await page.locator('.modal-overlay .sign-input').fill(out.name)
+      await pauseBlur() // closes the suggested-names list, which sits over the canvas
+      const box = await page.locator('.modal-overlay .sig-canvas').boundingBox()
+      if (!box) throw new Error(`${docKey}: no signature canvas`)
+      const pts = [[0.12, 0.62], [0.2, 0.3], [0.28, 0.7], [0.36, 0.35], [0.46, 0.66], [0.56, 0.32], [0.66, 0.6], [0.78, 0.4], [0.88, 0.55]]
+      await page.mouse.move(box.x + box.width * pts[0][0], box.y + box.height * pts[0][1])
+      await page.mouse.down()
+      for (const [px, py] of pts.slice(1)) await page.mouse.move(box.x + box.width * px, box.y + box.height * py, { steps: 4 })
+      await page.mouse.up()
+      const signBtn = page.locator('.modal-overlay .sign-btn')
+      if (!(await signBtn.isEnabled())) throw new Error(`${docKey}: Sign Document stayed disabled after consent, name and drawing`)
+      await caption(page, `Step T0 — ${letter}: ${docName} — consent ticked, name typed, signature drawn; Sign Document`)
+      await shot(page, S(`${n}b-signing-${docKey}`))
+      const [resp2] = await Promise.all([previewOf(docKey), signBtn.click()])
+      await page.locator('.modal-overlay .sign-done').waitFor({ state: 'visible', timeout: 15000 })
+      await page.waitForTimeout(1200)
+      await caption(page, `Step T0 — ${letter}: ${docName} signed (the page re-rendered its preview: ${resp2.status})`)
+      await shot(page, S(`${n}c-signed-${docKey}`))
+      await page.locator('.modal-overlay .modal-close').click()
+      await page.locator('.modal-overlay').waitFor({ state: 'hidden', timeout: 10000 })
+    }
+    await signDoc('master_agreement', '03')
+    await signDoc('vehicle_lease', '04')
+    await signDoc('w9', '05')
+    await caption(page, `Step T0 — ${letter}: all three documents signed; Continue to banking`)
+    await shot(page, S('06-all-signed'))
+    await tgt('continue-step1').click()
+
+    // ---- banking (step 3 of 3), then the review modal
+    await tgt('bank-name').waitFor({ state: 'visible' })
+    await tgt('bank-name').fill('QA-TEST Bank')
+    await pauseBlur()
+    await page.locator('.step-panel .field', { has: page.locator('label', { hasText: exactText('Account Type') }) }).locator('select').selectOption('Business Checking')
+    await page.locator('.step-panel .field', { has: page.locator('label', { hasText: exactText('Name on Account') }) }).locator('input').fill(out.name)
+    await pauseBlur()
+    await tgt('routing-number').fill('000000000')
+    await tgt('account-number').fill(`00000000000${idx}`)
+    await pauseBlur()
+    await caption(page, `Step T0 — ${letter}: fake banking (all zeros); Review & Complete opens the review — it does not submit`)
+    await shot(page, S('07-banking'))
+    await tgt('review-open').click()
+    await page.locator('.review-modal').waitFor({ state: 'visible' })
+    await page.locator('.review-modal .doc-view-link').first().scrollIntoViewIfNeeded().catch(() => {})
+    await caption(page, `Step T0 — ${letter}: the REVIEW modal (Documents 3/3 signed). "Confirm & Complete Onboarding" will NOT be pressed`)
+    await shot(page, S('08-review'))
+
+    const reviewDoc = async (docKey, n) => {
+      const docName = TERMS_DOCS[docKey]
+      const link = page.locator('.review-modal .review-item', { has: page.locator('.review-label', { hasText: exactText(docName) }) }).locator('.doc-view-link')
+      const [resp] = await Promise.all([previewOf(docKey), link.click()])
+      const pv = await readPreview(resp)
+      await page.locator('.pdf-viewer-overlay .pdf-viewer-frame').waitFor({ state: 'visible', timeout: 30000 }).catch(() => {})
+      await page.waitForTimeout(1200)
+      const f = pv.pt ? termsFacts(pv.pt, out.name) : null
+      out.review[docKey] = { ...pv, facts: f && { ...f, images: pv.images } }
+      await caption(page, `Step T0 — ${letter}: review → "Signed — View Document": ${docName} (${pv.status}) — ` +
+        (f ? (docKey === 'master_agreement'
+          ? `"50/50 split": ${f.split5050}, "Participant Distribution (50%)": ${f.participant50}, AMENDMENT: ${f.amendment}`
+          : `"50/50 profit participation model": ${f.lease5050}, AMENDMENT: ${f.amendment}`) : `no PDF: ${pv.why}`))
+      out.review[docKey].shot = await shot(page, S(`${n}-review-${docKey}`))
+      const at = await showClause('.pdf-viewer-overlay .pdf-viewer-frame', pv.pt, docKey)
+      if (at) {
+        await caption(page, `Step T0 — ${letter}: ${docName}, review copy — the viewer on page ${at}, where "${CLAUSE[docKey]}" is`)
+        await shot(page, S(`${n}a-review-${docKey}-clause`))
+      }
+      await page.locator('.pdf-viewer-overlay .review-close').click()
+      await page.locator('.pdf-viewer-overlay').waitFor({ state: 'hidden', timeout: 10000 })
+    }
+    await reviewDoc('master_agreement', '09')
+    await reviewDoc('vehicle_lease', '10')
+    await caption(page, `Step T0 — ${letter}: done. The application was NOT submitted (the Confirm button was never pressed); closing this browser`)
+    await shot(page, S('11-not-submitted'))
+    out.ok = true
+  } catch (e) {
+    out.error = e.message.split('\n')[0]
+    await shot(page, S('error'))
+  } finally {
+    await ctx.close().catch(() => {})
+  }
+  return out
+}
+
+async function termsSection() {
+  const facts = (inv, where, docKey) => inv[where][docKey]?.facts || null
+  const docRow = (inv, where, docKey, stepId) => {
+    const d = inv[where][docKey]
+    const f = d?.facts
+    const whereText = where === 'sign' ? 'the signature page (InvestorSignModal) preview' : 'the review modal, "Signed — View Document"'
+    const title = `Test investor ${inv.letter}: ${TERMS_DOCS[docKey]}, ${whereText}`
+    if (!d) {
+      return record({ step: stepId, title, expected: TERMS_EXPECTED, observed: `not reached${inv.error ? `: ${inv.error}` : ''}`, verdict: 'FAIL', shot: '' })
+    }
+    if (!f) {
+      return record({ step: stepId, title, expected: TERMS_EXPECTED, observed: `POST ${TERMS_PREVIEW}${docKey} → ${d.status}${d.why ? ` ${d.why}` : ''}; no PDF to read`, verdict: 'FAIL', shot: d.shot || '' })
+    }
+    const terms = docKey === 'master_agreement' ? (f.split5050 && f.participant50) : f.lease5050
+    let nameOk = true; let nameText = ''
+    if (where === 'review') {
+      // The typed name is the one the investor also gave as legal name and contact,
+      // which is where it prints; the signature slot itself carries the drawn image.
+      const unsigned = facts(inv, 'sign', docKey)
+      const drawn = unsigned?.images != null && f.images != null ? f.images - unsigned.images : null
+      nameOk = f.nameCount > 0 && (drawn == null || drawn > 0)
+      nameText = `; the signer's typed name "${inv.name}" appears ${f.nameCount}× (as the legal name / contact it was also typed as; ` +
+        `the renderer puts the drawn signature, not the typed name, on the signature line: images ${unsigned?.images ?? '?'} unsigned → ${f.images ?? '?'} signed` +
+        `${drawn == null ? '' : `, ${drawn > 0 ? `+${drawn}, the drawn signature is embedded` : 'the drawn signature is NOT embedded'}`})`
+    }
+    const obs = `POST ${TERMS_PREVIEW}${docKey} → 200, ${f.pages} pages; ` +
+      (docKey === 'master_agreement'
+        ? `"distributed according to a 50/50 split": ${f.split5050}; "Participant Distribution (50%)": ${f.participant50}`
+        : `"50/50 profit participation model": ${f.lease5050}`) +
+      `; contains AMENDMENT: ${f.amendment}${nameText}`
+    return record({ step: stepId, title, expected: TERMS_EXPECTED, observed: obs, verdict: verdict(terms && !f.amendment && nameOk), shot: d.shot || '' })
+  }
+
+  const A = await termsInvestor('A', 1)
+  docRow(A, 'sign', 'master_agreement', 'T0a')
+  docRow(A, 'sign', 'vehicle_lease', 'T0b')
+  docRow(A, 'review', 'master_agreement', 'T0c')
+  docRow(A, 'review', 'vehicle_lease', 'T0d')
+  const B = await termsInvestor('B', 2)
+  docRow(B, 'sign', 'master_agreement', 'T0e')
+  docRow(B, 'sign', 'vehicle_lease', 'T0f')
+  docRow(B, 'review', 'master_agreement', 'T0g')
+  docRow(B, 'review', 'vehicle_lease', 'T0h')
+
+  // ---- A vs B: the clause each was shown, on both pages
+  const clauseRow = (stepId, title, key, docKey) => {
+    const seen = []
+    for (const inv of [A, B]) for (const where of ['sign', 'review']) seen.push({ who: `${inv.letter} ${where === 'sign' ? 'signature page' : 'review'}`, text: facts(inv, where, docKey)?.[key] || '' })
+    const found = seen.filter((x) => x.text)
+    const same = found.length === seen.length && found.every((x) => x.text === found[0].text)
+    const obs = `${found.length}/${seen.length} PDFs carry the clause; ${same ? 'all identical' : `DIFFER: ${seen.map((x) => `${x.who} ${x.text.length} chars`).join(', ')}`}` +
+      `${found[0] ? `. Wording (${found[0].who}): "${found[0].text}"` : ''}`
+    record({ step: stepId, title, expected: TERMS_EXPECTED, observed: obs, verdict: verdict(same), shot: A.review[docKey]?.shot || '' })
+  }
+  clauseRow('T0i', 'Master §3.3 ("3.3 Revenue Participation" up to "3.4 Settlement Cycle"), whitespace-normalized: A vs B, signature page and review', 's33', 'master_agreement')
+  clauseRow('T0j', 'Lease §2.01 ("2.01 Lease Payments" up to "2.02"), whitespace-normalized: A vs B, signature page and review', 's201', 'vehicle_lease')
+
+  // ---- the request body the page sends to the preview route (a later regression check needs it)
+  {
+    const shapes = new Map()
+    for (const inv of [A, B]) {
+      for (const k of inv.keys) {
+        const sig = `${k.signed ? 'signed' : 'unsigned'}: [${k.keys.join(', ')}]`
+        if (!shapes.has(sig)) shapes.set(sig, { docs: new Set(), banking: k.banking.join(', '), vehicle: k.vehicle.join(', ') })
+        shapes.get(sig).docs.add(k.docKey)
+      }
+    }
+    const obs = [...shapes.entries()].map(([sig, v]) => `${sig} (docs: ${[...v.docs].join(', ')})`).join(' · ') +
+      (shapes.size ? ` · banking: [${[...shapes.values()][0].banking}] · vehicles[0]: [${[...shapes.values()][0].vehicle}]` : '') +
+      ` · preview POSTs: A ${A.previews}, B ${B.previews}`
+    record({ step: 'T0k', title: 'The JSON body keys /invest sends to POST /api/public/investor-preview-pdf/<docKey> (sorted)', expected: 'Recorded for the later regression check (INFO)', observed: obs || 'no preview request seen', verdict: 'INFO', shot: '' })
+  }
+  // ---- nothing was submitted; what the browser console said
+  {
+    const blocked = [...A.blocked.map((b) => `A ${b}`), ...B.blocked.map((b) => `B ${b}`)]
+    record({
+      step: 'T0l', title: 'Neither test investor submitted anything: no write left the page but the preview route (anything else is aborted in the browser and listed)',
+      expected: 'No attempted write; both walk-throughs completed up to the review without pressing Confirm',
+      observed: `A completed: ${A.ok}${A.error ? ` (${A.error})` : ''}; B completed: ${B.ok}${B.error ? ` (${B.error})` : ''}; attempted writes: ${blocked.length ? blocked.join(', ') : 'none'}`,
+      verdict: verdict(!blocked.length && A.ok && B.ok), shot: '',
+    })
+    const errs = [...A.consoleErrors.map((e) => `A ${e}`), ...B.consoleErrors.map((e) => `B ${e}`)]
+    record({ step: 'T0m', title: 'Browser console errors, page errors and failed API requests on /invest during both walk-throughs', expected: 'None (INFO)', observed: errs.length ? errs.join(' | ') : 'none', verdict: 'INFO', shot: '' })
   }
 }
 

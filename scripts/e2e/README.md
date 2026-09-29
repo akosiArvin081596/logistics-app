@@ -49,6 +49,12 @@ What it covers today, by section (`ONLY` picks them):
   preview sent with no notes key prints it too (I8, I8b, planted, local only); the pre-filled note is labelled as carried
   over until it is typed into (I8h). The server refuses a note over 500 characters, a note that is not text, and an Order # with `<` (I9).
   One sign-in; `ONLY=invoice`. The worktree needs the POD files linked (`E2E_LINK_PODS=1`, see `prep-worktree.sh`).
+- **Investor terms (T0).** What a prospective investor is shown on `/invest` today: two test investors (`QA-TEST
+  Investor A` / `B`) fill the application in fresh anonymous browsers, open the Master Participation & Management
+  Agreement and the Commercial Vehicle Lease on the signature page, sign all three documents, and open both again from
+  the review ("Signed — View Document"). Each preview PDF carries the default 50/50 terms and no `AMENDMENT`, and the
+  master's §3.3 and the lease's §2.01 read the same for A and B. Nothing is submitted. No sign-in and no creds file;
+  local and staging. `ONLY=terms`.
 
 Every "Expected" column states the behaviour **after** the fix. A run on a build without it (a BEFORE baseline) is
 expected to FAIL exactly the fix rows.
@@ -198,7 +204,7 @@ fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
   start while `plant-journal.json` exists.
 
 ⚠️ **Login limiter:** `POST /api/auth/login` allows 20 attempts per 15 minutes per server process, counting every
-attempt. Per section: `trucks` 3, `signout` up to 20, `dispatcher` 2, `maintenance` 3, `names` 2, `eldlink` 1, `invoice` 1 and `moneypath` up to 3 (the
+attempt. Per section: `trucks` 3, `signout` up to 20, `dispatcher` 2, `maintenance` 3, `names` 2, `eldlink` 1, `invoice` 1, `terms` 0 and `moneypath` up to 3 (the
 Super Admin and the driver, plus the Super Admin again when E1 has to file on the driver's behalf). The sign-out figure is its
 worst case: one fewer on a build without S4a's second half, and one fewer where S7 sends one sign-in (so 19 on a build
 with the fixes). It fills a whole window, so run it on a fresh server process, as the recipe does. **All five together
@@ -328,6 +334,8 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
 - **Creds file:** it has `creds.json`'s shape, with staging logins:
   `{"superAdmin": {"username", "password", "userId"}, "driver": {…}, "investor": {…}, "dispatcher": {…}}`.
   `investor` and `dispatcher` are optional. Keep it in the work dir, `0600`.
+- **`ONLY=terms` needs no creds file.** It signs nobody in, so a run of only login-free sections starts without one
+  (point `CREDS_FILE` at a path that does not exist to prove it). It writes nothing on staging: see the terms section.
 - ⚠️ **A full run writes on staging.** It creates, edits and deletes `QA-TEST-*` trucks, and their audit rows stay.
   `ONLY=signout` only signs in and out. `ONLY=moneypath` saves one real driver's pay terms four times and then puts the
   row back as it was read; its `update_driver_pay` audit lines stay (SQLite only).
@@ -339,13 +347,13 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
 | `BASE_URL` | Required by `e2e.mjs`. Refuses `app.logisx.com` (production). |
 | `PHASE` | `before` or `after`. Only names the output; the "Expected" column is always the after-the-fix behaviour. |
 | `OUT_TAG` | Writes `shots/<tag>/` and `results-<tag>.md` instead of `<PHASE>`, so a rehearsal cannot overwrite a baseline. |
-| `ONLY` | A comma-separated list of sections: `trucks` (1–12, R1–R16), `signout` (S1–S7), `dispatcher` (D1–D3), `maintenance` (M1), `moneypath` (P1, E1, N1, N1b, F1, E2, B1, RC1), `names` (K1–K3), `eldlink` (L1–L3), `invoice` (I1–I9). Unset: all eight, in that order, then step 12's clean-up — more sign-ins than one limiter window holds (see above). |
+| `ONLY` | A comma-separated list of sections: `trucks` (1–12, R1–R16), `signout` (S1–S7), `dispatcher` (D1–D3), `maintenance` (M1), `moneypath` (P1, E1, N1, N1b, F1, E2, B1, RC1), `names` (K1–K3), `eldlink` (L1–L3), `invoice` (I1–I9), `terms` (T0). Unset: all nine, in that order, then step 12's clean-up — more sign-ins than one limiter window holds (see above). |
 | `STEPS` | Only these sign-out, money-path or invoice cases, e.g. `STEPS=S5a,S7` (each has its own browser context), `STEPS=P1,F1` or `STEPS=E2,B1,RC1` (`P1` selects P1a and P1b; `N1` selects N1 and N1b), `STEPS=I8,I9` (`I3` selects I3a–c, `I7` selects I7, I7r and I7j, `I8` selects I8, I8b and I8h, `I9` selects I9 and I9a–c; I1 opens the editor whenever any of I1–I7 is picked). The other sections ignore it. |
 | `HEADED=1` | A visible browser. |
 | `DB_PATH` | The copy the server runs on (inside the work dir). It is used **only** to plant stored values for steps 10, 11b–f, R3 and R15, to stage and clean up R16, to plant and read back E1, N1, N1b and E2, to read and delete B1's planted expense, to delete the rows RC1's import writes, to plant P1's own driver, and to plant and delete I8's saved invoice note. Unset: those rows SKIP, and P1 uses a real driver. |
 | `E2E_INVOICE_APPROVE=1` | Lets I7 press Approve on a server that is not on this machine. Off by default: an approve creates a real Gmail draft wherever the server has a mail target. Locally `boot-server.sh` blanks them, so I7 always approves there. |
 | `E2E_LINK_PODS=1` | For `prep-worktree.sh`, not `e2e.mjs`: link the main checkout's POD files into the worktree's `uploads/`, for the invoice section. |
-| `CREDS_FILE` | The logins. Default: `<work dir>/creds.json`. |
+| `CREDS_FILE` | The logins. Default: `<work dir>/creds.json`. Not needed when every section given is login-free (`ONLY=terms`). |
 | `E2E_WORK_DIR` | The work dir. Default: `$TMPDIR/logisx-e2e`. It must be private, outside every checkout, and contain none. |
 | `SOURCE_DB` | `setup-db.cjs`'s source, opened read-only. Default: the main checkout's `app.db`. |
 | `APP_DIR` | The checkout whose `node_modules` (better-sqlite3, bcryptjs, puppeteer, dotenv) and `scripts/` are used. Default: this checkout once it has installs (or `prep-worktree.sh`'s links), else the main checkout. |
@@ -724,6 +732,59 @@ approve there, so no I7r row, and I8h SKIPs (nothing is pre-filled).
 **On a build with Notes but before the follow-ups** (`718e386`): I7r FAILs — the load dialog says "✓ Draft ready in
 Gmail" although the response is `preview: true` and no draft exists — and I8h FAILs (no "carried over" hint). Every
 other row passes.
+
+## The investor terms section (T0)
+
+`ONLY=terms`, local and staging, no sign-in: `/invest` is public, and it sends a signed-in user elsewhere. Each test
+investor gets a **fresh anonymous browser context**. It records what a prospective investor is shown before any change
+to the payment terms, so the Expected column is the same on every row: default 50/50 terms, no `AMENDMENT`, identical
+for A and B.
+
+**The walk-through, per investor** (`InvestorApplyView.vue`, as a person does it; the guided wizard, which opens by
+itself, is closed with its own button):
+
+1. Step 1 of 3: the application, all fake. Legal name and contact `QA-TEST Investor A <timestamp>` (B for the second),
+   `QA-TEST DBA A`, `1xx QA-TEST Street, Testville, TX 75001`, a `(555) 010-01xx` phone, `qa-test+<ts>a@example.com`,
+   EIN `00-000000x`.
+2. Step 2 of 3: one fake vehicle (VIN `QATEST0000000000A`). Then each document card opens the signature page
+   (`InvestorSignModal.vue`), which fetches its preview. The master and the lease are read, and the viewer is pointed
+   at the page carrying the clause for a second screenshot (the iframe's `#page=` open parameter; the document is not
+   touched). Each document is signed as a person signs it: the consent box, the typed name (the same QA-TEST name),
+   strokes drawn on the canvas, **Sign Document**. The page then renders the preview again, with the signature.
+3. Step 3 of 3: fake banking (`QA-TEST Bank`, routing `000000000`), then **Review & Complete**, which only opens the
+   review modal. There, "Signed — View Document" for the master and the lease: both read, as above.
+4. **Confirm & Complete Onboarding is never pressed.** On top of that, every request from these pages that is not a GET
+   and not the preview route is aborted in the browser; T0l lists any that was attempted.
+
+**How a PDF is read.** Every document is the stateless preview, `POST /api/public/investor-preview-pdf/<docKey>`.
+The page reads it with `res.blob()`, and Chromium keeps no copy of a body read that way (Playwright's `Response.body()`
+answers empty). So the preview request is passed through a route: `route.fetch()` sends the page's own request
+(method, headers, body) to the server, the harness keeps the bytes, and `route.fulfill()` hands the page that exact
+response. The text is read with the app's own `pdfjs-dist`, as in the invoice section, whitespace collapsed; images are
+counted from the operator list.
+
+| Step | How it is shown | Expected |
+|---|---|---|
+| T0a / T0e | A / B: the master agreement's preview on the signature page, before signing. | `distributed according to a 50/50 split` and `Participant Distribution (50%)` present; `AMENDMENT` (upper case, so the boilerplate "amendment" of §7.06 does not count) absent |
+| T0b / T0f | A / B: the lease's preview on the signature page, before signing. | `50/50 profit participation model` present; no `AMENDMENT` |
+| T0c / T0g | A / B: the master from the review modal, "Signed — View Document". | As T0a, and the signed copy is the signer's: their typed name is in the text, and the drawn signature is embedded (more images than the unsigned copy) |
+| T0d / T0h | A / B: the lease from the review modal. | As T0b, with the same signer check |
+| T0i | The master's §3.3, from `3.3 Revenue Participation` up to `3.4 Settlement Cycle`, in all four master PDFs (A and B, signature page and review). | Present in all four and identical; the row quotes it |
+| T0j | The lease's §2.01, from `2.01 Lease Payments` up to `2.02`, in all four lease PDFs. | Present in all four and identical; the row quotes it |
+| T0k | The JSON body keys the page sent to the preview route (sorted), unsigned and signed, and those of `banking` and `vehicles[0]`; the preview count per investor. | INFO: recorded for a later regression check |
+| T0l | Every write the pages attempted. | None, and both walk-throughs reached the review |
+| T0m | The browser console's errors, page errors and failed API requests on `/invest`. | INFO |
+
+**Why the typed name is checked the way it is.** The renderer replaces the signer's signature slot ("Participant
+signature", "Lessee signature") with the drawn image, so the typed name is never printed on the signature line. It
+appears because the same name was given as the legal name and the contact, and the signature shows up as images: the
+unsigned copies have none, the signed master three and the signed lease two.
+
+**Budget and writes.** No sign-in. The preview route allows 30 renders per 15 minutes per IP, and each investor makes
+8 (three opens, three re-renders after signing, two from the review), so a run makes 16: a second run against the same
+server within 15 minutes gets 429s. Locally, restart the server between runs. The preview route writes nothing, and the
+application is never submitted, so the section leaves nothing behind locally or on staging. The QA-TEST data lives only
+in the two browser contexts, which are closed at the end.
 
 ## Teardown (once the whole QA cycle is done)
 
