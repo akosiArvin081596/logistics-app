@@ -7043,6 +7043,13 @@ function syncDriverToCarrierSheet(driverName, opts = {}) {
 				console.warn(`[directory-sync] no drivers_directory row added for ${JSON.stringify(name)}: that name is reserved`);
 				return;
 			}
+			// Nor under a name the sheet would store as a formula
+			// (formulaCellRefusal()'s rule, judged as a new cell), for the same
+			// reason: it is reserved, and the check below does not see it.
+			if (formulaCellRefusal([], [], [name])) {
+				console.warn(`[directory-sync] no drivers_directory row added for ${JSON.stringify(name)}: the sheet would store that name as a formula`);
+				return;
+			}
 			// A row whose name differs from this one only in case or spacing is this
 			// driver's row already (findDriverNameClash(), the comparison every
 			// ownership check uses), so there is nothing to add. INSERT OR IGNORE
@@ -7254,6 +7261,15 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (re
 		if (isBuiltInPropertyName(insName)) {
 			return res.status(409).json({ error: `Cannot add the driver "${insName}": that name is reserved.`, code: "DRIVER_NAME_TAKEN" });
 		}
+		// So is a name the sheet would store as a formula (formulaCellRefusal()'s
+		// rule, judged as a new cell): the same 409, for every role.
+		if (formulaCellRefusal([], [], [insName])) {
+			const lead = insName.charAt(0);
+			return res.status(409).json({
+				error: `Cannot add the driver "${insName}": it starts with "${lead}", which the sheet would store as a formula. Enter the name without the leading "${lead}".`,
+				code: "DRIVER_NAME_TAKEN",
+			});
+		}
 		const dirExisting = findDriverNameClash(insName, { users: false });
 		if (dirExisting) {
 			return res.status(409).json({
@@ -7340,15 +7356,30 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 			if (renamed && isBuiltInPropertyName(nextName)) {
 				return res.status(409).json({ error: `Cannot rename the driver to "${nextName}": that name is reserved.`, code: "DRIVER_NAME_TAKEN" });
 			}
+			// So is a new name the sheet would store as a formula
+			// (formulaCellRefusal()'s rule, judged as a new cell).
+			if (renamed && formulaCellRefusal([], [], [nextName])) {
+				const lead = nextName.charAt(0);
+				return res.status(409).json({
+					error: `Cannot rename the driver to "${nextName}": it starts with "${lead}", which the sheet would store as a formula. Enter the name without the leading "${lead}".`,
+					code: "DRIVER_NAME_TAKEN",
+				});
+			}
 			const dirClash = findDriverNameClashes(nextName, { users: false, exceptDirectoryId: id })
 				.find((h) => renamed || String(h.driver_name).toLowerCase() === nextName.toLowerCase());
 			if (dirClash) {
+				// A re-spelling of this row's own name that lands on another row's
+				// spelling differs from the stored name only in spacing or case, so the
+				// message says so and shows each space (describeDriverNameChange()).
+				const change = describeDriverNameChange(String(current.driver_name || ""), nextName);
+				const ownName = change.only ? ` (it differs from this row's name "${change.show(current.driver_name)}" ${change.only})` : "";
 				return res.status(409).json({
-					error: `"${nextName}" is already in use by drivers directory row ${dirClash.id} ("${dirClash.driver_name}") — names that differ only in case or spacing are the same driver. Edit row ${dirClash.id} instead, or choose a different name.`,
+					error: `"${change.show(nextName)}"${ownName} is already in use by drivers directory row ${dirClash.id} ("${change.show(dirClash.driver_name)}") — names that differ only in case or spacing are the same driver. Edit row ${dirClash.id} instead, or choose a different name.`,
 					code: "DRIVER_EXISTS",
 					id: dirClash.id,
 					driverName: dirClash.driver_name,
 					route: `PUT /api/drivers-directory/${dirClash.id}`,
+					nameChange: change.nameChange,
 				});
 			}
 		}
@@ -9474,13 +9505,19 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 			// should keep its own row.
 			const clash = findDriverNameClash(fullName);
 			if (clash) {
-				const matched = clash.source === "reserved" ? "a reserved name"
+				// A name the sheet would store as a formula is a reserved match that
+				// belongs to no one, so the body says why; it names no account.
+				const formula = clash.source === "reserved" && clash.formula ? clash.formula : "";
+				const matched = formula ? "a name the sheet would store as a formula"
+					: clash.source === "reserved" ? "a reserved name"
 					: clash.source === "users" ? `the ${clash.field === "username" ? "username" : "driver name"} of user ${clash.id}`
 					: `drivers_directory row ${clash.id}`;
 				logAudit(req, "accept_application_blocked", "application", appId,
 					`Accepting application ${appId} refused: its name matches ${matched}; nothing was written [DRIVER_NAME_TAKEN]`);
 				return res.status(409).json({
-					error: "Not accepted: this name is already in use by another driver or account. Nothing was changed.",
+					error: formula
+						? `Not accepted: this name starts with "${formula}", which the sheet would store as a formula, so it cannot be a driver name. Nothing was changed.`
+						: "Not accepted: this name is already in use by another driver or account. Nothing was changed.",
 					code: "DRIVER_NAME_TAKEN",
 				});
 			}
@@ -21007,7 +21044,10 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 		if (newDriverName) {
 			const clash = findDriverNameClash(newDriverName, { directory: false });
 			if (clash) {
-				const why = clash.source === "reserved"
+				// A reserved match on a name the sheet would store as a formula says so.
+				const why = clash.source === "reserved" && clash.formula
+					? `it starts with "${clash.formula}", which the sheet would store as a formula. Enter the name without the leading "${clash.formula}".`
+					: clash.source === "reserved"
 					? "that name is reserved."
 					: clash.field === "username"
 						? `it is the username of ${clash.username} (user ${clash.id}), and a driver name must not be another account's username.`
@@ -21724,21 +21764,32 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			if (clash) {
 				// The account it would have merged INTO is named in the row: after the
 				// merge nothing distinguishes the two sets of finance rows, so the only
-				// record of which two identities were involved is this line.
-				const why = clash.source === "reserved"
-					? "that name is reserved."
-					: clash.field === "username"
-						? `it is the username of ${clash.username} (user ${clash.id}), and a driver name must not be another account's username.`
-						: `it already belongs to ${clash.username} (user ${clash.id}). Two accounts sharing a driver name merge their expenses and documents irreversibly.`;
-				const matched = clash.source === "reserved"
-					? "that name is reserved"
-					: `that ${clash.field === "username" ? "is the username of" : "driver name already belongs to"} ${auditText(clash.username, 120)} (user ${clash.id})`;
+				// record of which two identities were involved is this line. A reserved
+				// match on a name the sheet would store as a formula says so.
+				const formula = clash.source === "reserved" && clash.formula ? clash.formula : "";
+				const why = formula
+					? `it starts with "${formula}", which the sheet would store as a formula. Enter the name without the leading "${formula}".`
+					: clash.source === "reserved"
+						? "that name is reserved."
+						: clash.field === "username"
+							? `it is the username of ${clash.username} (user ${clash.id}), and a driver name must not be another account's username.`
+							: `it already belongs to ${clash.username} (user ${clash.id}). Two accounts sharing a driver name merge their expenses and documents irreversibly.`;
+				const matched = formula
+					? `that name starts with "${formula}", which the sheet would store as a formula`
+					: clash.source === "reserved"
+						? "that name is reserved"
+						: `that ${clash.field === "username" ? "is the username of" : "driver name already belongs to"} ${auditText(clash.username, 120)} (user ${clash.id})`;
+				// A re-spelling of this account's own name differs from it only in
+				// spacing or case, so the message says so and shows each space.
+				const change = describeDriverNameChange(user.driver_name || "", nextName);
+				const ownName = change.only ? ` (it differs from this account's name "${change.show(user.driver_name)}" ${change.only})` : "";
 				recordPeriodRefusal({ req, ...userEditAudit,
 					tail: `nothing was written — ${matched}` },
 					"DRIVER_NAME_TAKEN", []);
 				return res.status(409).json({
-					error: `Cannot set the driver name to "${String(driverName).trim()}": ${why}`,
+					error: `Cannot set the driver name to "${change.show(nextName)}"${ownName}: ${why}`,
 					code: "DRIVER_NAME_TAKEN",
+					nameChange: change.nameChange,
 				});
 			}
 		}
@@ -21804,6 +21855,14 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			if (lock.blockers.some((b) => b.code === "TARGET_UNREADABLE")) {
 				remedy.push("A money-bearing table could not be read, so it cannot be confirmed free of finalized-month rows. Fix the database error and retry — this is held rather than guessed.");
 			}
+			// A new name that differs from the stored one only in spacing or case
+			// reads as the same name twice in the details above, which this message
+			// collapses to single spaces. So it says how they differ and shows each
+			// space (describeDriverNameChange()).
+			const change = driverName === undefined ? null : describeDriverNameChange(user.driver_name || "", driverName);
+			const nameNote = change && change.only
+				? ` The new name "${change.show(driverName)}" differs from the old one, "${change.show(user.driver_name)}", ${change.only}.`
+				: "";
 
 			// ⚠️ THE AUDITED CODE IS `code`, THE ONE THE ROUTE ACTUALLY SELECTED — not
 			// a hardcoded PERIOD_FINALIZED. This route's blockers are not all period
@@ -21818,11 +21877,12 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			recordPeriodRefusal({ req, ...userEditAudit, tail: `nothing was written — ${lock.blockers.length} blocker(s): ${lock.blockers.map((b) => b.code).join(",")}` },
 				code, periods);
 			return res.status(409).json({
-				error: `Cannot update ${who}: ${lock.blockers.map((b) => b.detail).join("; ")}. ${cause} ${remedy.join(" ")}`.replace(/\s+/g, " ").trim(),
+				error: `Cannot update ${who}: ${lock.blockers.map((b) => b.detail).join("; ")}.${nameNote} ${cause} ${remedy.join(" ")}`.replace(/\s+/g, " ").trim(),
 				code,
 				periods,
 				unresolved,
 				blockers: lock.blockers,
+				...(change ? { nameChange: change.nameChange } : {}),
 			});
 		}
 
@@ -21847,6 +21907,12 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		// block must stay synchronous. Fails CLOSED: a sheet we cannot read is a
 		// sheet we cannot prove is clean.
 		if (wantsRename) {
+			// How the two refusals below name the rename. A new name that differs
+			// from the stored one only in spacing or case would read as the same
+			// name twice, so the message says how they differ and shows each space
+			// (describeDriverNameChange()); the body carries `nameChange`.
+			const change = describeDriverNameChange(user.driver_name || "", driverName);
+			const renameHere = `Cannot rename "${change.show(user.driver_name)}" to "${change.show(driverName)}" here${change.only ? ` (the names differ ${change.only})` : ""}`;
 			if (sheetRowsUnderOldName === null) {
 				return res.status(409).json({
 					error: "Job Tracking could not be read, so it cannot be confirmed free of the old driver name. A rename that lands only in the database is the partial rename that restates closed months. Try again, or use PUT /api/admin/fix-driver-name.",
@@ -21863,10 +21929,11 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			if (sheetRowsToRename > 0) {
 				const variantNote = sheetRowsToRename > sheetRowsUnderOldName ? ` (${sheetRowsToRename - sheetRowsUnderOldName} of them under another spacing of it)` : "";
 				return res.status(409).json({
-					error: `Cannot rename "${user.driver_name}" to "${driverName.trim()}" here: ${sheetRowsToRename} Job Tracking row${sheetRowsToRename === 1 ? "" : "s"} still carry the old name${variantNote}, and this route does not write the sheet. Renaming only the database is a partial rename — the pay math would resolve those loads to default rates inside months that are already closed. Use PUT /api/admin/fix-driver-name, which renames the sheet and the database together and offers ?dryRun=true first.`,
+					error: `${renameHere}: ${sheetRowsToRename} Job Tracking row${sheetRowsToRename === 1 ? "" : "s"} still carry the old name${variantNote}, and this route does not write the sheet. Renaming only the database is a partial rename — the pay math would resolve those loads to default rates inside months that are already closed. Use PUT /api/admin/fix-driver-name, which renames the sheet and the database together and offers ?dryRun=true first.`,
 					code: "RENAME_REQUIRES_SHEET",
 					sheetRows: sheetRowsToRename,
 					route: "PUT /api/admin/fix-driver-name",
+					nameChange: change.nameChange,
 				});
 			}
 
@@ -21952,11 +22019,12 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			}
 			if (mergeRows > 0) {
 				return res.status(409).json({
-					error: `Cannot rename "${user.driver_name}" to "${driverName.trim()}" here: "${driverName.trim()}" already owns ${mergeRows} row${mergeRows === 1 ? "" : "s"}, so this is a MERGE of two driver identities, not a rename — and it cannot be undone by swapping the names back. Use PUT /api/admin/fix-driver-name?dryRun=true, which detects the merge, shows exactly what it would combine, and records a by-id reversal recipe.`,
+					error: `${renameHere}: "${change.show(driverName)}" already owns ${mergeRows} row${mergeRows === 1 ? "" : "s"}, so this is a MERGE of two driver identities, not a rename — and it cannot be undone by swapping the names back. Use PUT /api/admin/fix-driver-name?dryRun=true, which detects the merge, shows exactly what it would combine, and records a by-id reversal recipe.`,
 					code: "DRIVER_RENAME_IS_MERGE",
 					mergeRows,
 					mergeTargets,
 					route: "PUT /api/admin/fix-driver-name",
+					nameChange: change.nameChange,
 				});
 			}
 		}
@@ -32743,6 +32811,47 @@ function isBuiltInPropertyName(name) {
 	return names.has(key);
 }
 
+// A driver-name change as a refusal describes it: PUT /api/users/:id (409
+// DRIVER_NAME_TAKEN from guard (b), RENAME_REQUIRES_SHEET, DRIVER_RENAME_IS_MERGE
+// and the month-end lock's 409) and PUT /api/drivers-directory/:id (409
+// DRIVER_EXISTS). `from` is the stored name and `to` the name the request asks
+// for, as the route judges it: the users route as sent, the directory route
+// trimmed.
+//
+// `nameChange` is the body field { from, to, differsOnlyIn }. differsOnlyIn says
+// how two names that normalizeDriverName() reads as one name differ:
+// "edge-spaces" (only in leading or trailing whitespace), "case" (only in letter
+// case) or "spacing" (in the whitespace inside the name, or in more than one of
+// these ways). It is null for two different names, or a name sent unchanged.
+//
+// Two such names look alike in a message: a browser collapses a run of spaces
+// and drops leading and trailing ones, so "Shorn  King" and "Shorn King" read as
+// one name. So while differsOnlyIn is set, `only` says how they differ ("only in
+// spacing", ...), with the key to the space sign when a name shows one, and
+// show(name) quotes a name with every space as a visible U+2423 and any other
+// whitespace character as its code point ("[U+00A0]"). Otherwise `only` is ""
+// and show(name) is the name trimmed, as the messages always quoted it.
+function describeDriverNameChange(from, to) {
+	const a = typeof from === "string" ? from : "";
+	const b = typeof to === "string" ? to : "";
+	const key = normalizeDriverName(a);
+	const differsOnlyIn = a === b || key === "" || key !== normalizeDriverName(b) ? null
+		: a.trim() === b.trim() ? "edge-spaces"
+		: a.toLowerCase() === b.toLowerCase() ? "case"
+		: "spacing";
+	const nameChange = { from: a, to: b, differsOnlyIn };
+	if (!differsOnlyIn) return { nameChange, only: "", show: (name) => String(name == null ? "" : name).trim() };
+	const spaceSign = String.fromCharCode(0x2423);
+	const show = (name) => String(name == null ? "" : name).replace(/\s/g,
+		(c) => (c === " " ? spaceSign : `[U+${c.charCodeAt(0).toString(16).toUpperCase().padStart(4, "0")}]`));
+	const collapsed = (s) => s.trim().replace(/\s+/g, " ");
+	const how = differsOnlyIn === "edge-spaces" ? "only in leading or trailing spaces"
+		: differsOnlyIn === "case" ? "only in letter case"
+		: collapsed(a) === collapsed(b) ? "only in spacing" : "only in spacing and letter case";
+	const signKey = a.includes(" ") || b.includes(" ") ? `; each ${spaceSign} is one space` : "";
+	return { nameChange, only: `${how}${signKey}`, show };
+}
+
 // ⚠️ THE ONE ANSWER TO "IS THIS NAME ALREADY IN USE?" — every path that
 // creates or renames a driver identity asks it immediately before its write:
 // accepting a job application, POST /api/users, POST /api/drivers-directory,
@@ -32764,10 +32873,14 @@ function isBuiltInPropertyName(name) {
 // same kind of identifier, so on the `users` side a name is also in use when it
 // equals any account's USERNAME or one of the reserved names below. A name that
 // reads as a built-in property name (isBuiltInPropertyName()) is a reserved
-// name too, so a lifted copy needs that function beside normalizeDriverName().
-// The callers that ask with `users: false` do not see reserved names: POST and
-// PUT /api/drivers-directory and syncDriverToCarrierSheet()'s add branch refuse
-// a built-in property name themselves.
+// name too, and so is one the sheet would store as a formula: one
+// formulaCellRefusal() refuses as a new cell (trimmed, it starts with "=", or
+// with "+" and is not a plain number). A driver's name is written into Job
+// Tracking's Driver column by the dispatch routes, as a formula in that case, so
+// no driver is named that. A lifted copy needs both functions beside
+// normalizeDriverName(). The callers that ask with `users: false` do not see
+// reserved names: POST and PUT /api/drivers-directory and
+// syncDriverToCarrierSheet()'s add branch refuse both kinds themselves.
 //
 // SYNCHRONOUS ON PURPOSE (better-sqlite3), so a caller can sit it right beside
 // its write with no `await` in between — the house check-then-act rule. The one
@@ -32780,6 +32893,8 @@ function isBuiltInPropertyName(name) {
 // rename has to tell a merge (another driver's name) from a refusal (a username
 // or a reserved name), so it reads them all. Each match is one of:
 //     { source: "reserved", name }
+//     { source: "reserved", name, formula }  — `formula` the name's first
+//         character, "=" or "+", for a name the sheet would store as a formula
 //     { source: "users", field: "driver_name" | "username", id, username, driver_name }
 //     { source: "drivers_directory", id, driver_name }
 // Options:
@@ -32788,8 +32903,8 @@ function isBuiltInPropertyName(name) {
 //     Never skips a reserved name.
 //   exceptDirectoryId — skip that one drivers_directory row (a caller editing it).
 //   users / directory — pass false to leave that side out. `users` covers the
-//     reserved names (built-in property names included), every account's
-//     driver name and every username. Both
+//     reserved names (built-in property names and formula-shaped names
+//     included), every account's driver name and every username. Both
 //     sides are checked by default, the wider answer, so a new caller has to
 //     opt OUT of one.
 // A blank name, or a non-string, never clashes: an empty name is not an
@@ -32809,6 +32924,9 @@ function findDriverNameClashes(name, opts = {}) {
 	if (users) {
 		for (const r of RESERVED_NAMES) if (same(r)) hits.push({ source: "reserved", name: r });
 		if (isBuiltInPropertyName(needle)) hits.push({ source: "reserved", name: needle });
+		// The name as sent is judged, as the sheet would receive it: collapsing a
+		// run of whitespace can turn "+" and a spaced-out number into a plain one.
+		if (formulaCellRefusal([], [], [name])) hits.push({ source: "reserved", name: needle, formula: name.trim().charAt(0) });
 		const rows = db.prepare("SELECT id, username, driver_name FROM users ORDER BY id").all();
 		for (const r of rows) {
 			if (skipUsers.has(r.id)) continue;
