@@ -544,6 +544,12 @@ section("5b. Notes — multi-line, sanitized per line, refused over 500");
 	const r501 = parseInvoiceOverrides({ notes: "x".repeat(501) });
 	eq([r501.field, r501.values.notes], ["notes", undefined], "§5b …naming the field, with no truncated 500-char value handed back");
 	rej({ notes: "x".repeat(3000) }, "INVOICE_NOTES_TOO_LONG", "§5b a 3000-char note (past the scan bound) is still refused");
+	// Refused on its RAW length, before any clean-up runs: 2000 tabs and one
+	// letter would strip down to "x", but nothing that long is ever cleaned.
+	rej({ notes: "\t".repeat(2000) + "x" }, "INVOICE_NOTES_TOO_LONG",
+		"§5b a raw note past the scan bound is refused before the clean-up, even if it would strip short");
+	ok(acc({ notes: "\t".repeat(1990) + "x" }, "§5b …while one inside the bound is cleaned and judged").ok,
+		"§5b a raw note inside the scan bound is judged on its cleaned length");
 	// Trailing padding does not count against the limit — it is trimmed first.
 	ok(acc({ notes: "x".repeat(500) + "\n\n   " }, "§5b 500 + trailing blank lines is accepted").ok, "§5b …trim runs before the length check");
 
@@ -559,6 +565,10 @@ section("5b. Notes — multi-line, sanitized per line, refused over 500");
 section("6. safeAttachmentName — a filename built from attacker-supplied text");
 {
 	eq(safeAttachmentName("Bison Transport"), "Bison Transport", "§6 an ordinary name is unchanged");
+	// The wider Order # reaches the file names: its annotations survive, and only
+	// the Windows-reserved separators are neutralised.
+	eq(safeAttachmentName("7101850-$700 ADV", 80), "7101850-$700 ADV", "§6 an annotated Order # keeps its $ in the file name");
+	eq(safeAttachmentName("7101850 (ADV): 50%", 80), "7101850 (ADV) 50%", "§6 …while a : becomes a space");
 	// CRLF: forges MIME headers in the attachment disposition.
 	eq(safeAttachmentName("Acme\r\nContent-Type: text/html"), "Acme Content-Type text html",
 		"§6 CRLF is stripped and the separators neutralised");
@@ -733,12 +743,12 @@ section("7. Wiring — the guarantees that no value can prove");
 	eq((SRC.match(/safeAttachmentName\(orderNumber, 80\)/g) || []).length, 2,
 		"§7 both routes name attachments with safeAttachmentName(orderNumber, 80)");
 	ok(!/safeAttachmentName\(orderNumber, 40\)/.test(SRC), "§7 …and no 40-character Order # file name remains");
-	// Notes: omitted → last approved note on the approve, "" on the preview.
+	// Notes: omitted → the last approved note, on BOTH routes — one rule, so a
+	// caller that omits the key previews exactly what the approve prints.
 	ok(/const derivedNotes = latestDraftNotes\(loadId\);\n\t{3}const notes = ov\.has\.notes \? ov\.values\.notes : derivedNotes;/.test(approveRoute.text),
 		"§7 the approve prints the supplied note, else the last approved one");
-	ok(/const notes = ov\.has\.notes \? ov\.values\.notes : "";/.test(previewRoute.text),
-		"§7 the preview prints the supplied note, else none");
-	ok(!/latestDraftNotes/.test(previewRoute.text), "§7 …and never looks the last note up");
+	ok(/const notes = ov\.has\.notes \? ov\.values\.notes : latestDraftNotes\(loadId\);/.test(previewRoute.text),
+		"§7 the preview prints the supplied note, else the last approved one (same rule as the approve)");
 	ok(/\t{4}\ttotal,\n\t{5}notes,\n\t{4}\}\);\n\t{4}invoicePdf = await renderHtmlToPdf/.test(approveRoute.text),
 		"§7 the approve hands notes to buildInvoiceHtml");
 	ok(/buildInvoiceHtml\(\{\n\t{4}[^\n]*\btotal, notes,\n/.test(previewRoute.text), "§7 the preview hands notes to buildInvoiceHtml");

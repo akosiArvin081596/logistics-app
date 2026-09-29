@@ -40201,6 +40201,14 @@ function parseInvoiceOverrides(body) {
 		if (typeof src.notes !== "string") {
 			return bad("INVOICE_NOTES_INVALID", "notes", "Notes must be text.");
 		}
+		// Refused BEFORE the clean-up, not after: the body limit is 50 MB, and
+		// normalizing, splitting and scanning all of it just to cut it to 2000
+		// blocks the event loop for nothing. A raw note four times the limit is
+		// refused outright even if stripping would have shrunk it — the editor's
+		// box stops at 500, so nothing a person typed ever gets here.
+		if (src.notes.length > INVOICE_NOTES_SCAN_MAX) {
+			return bad("INVOICE_NOTES_TOO_LONG", "notes", `Notes must be ${INVOICE_NOTES_MAX} characters or fewer.`);
+		}
 		const v = sanitizeInvoiceNotes(src.notes, INVOICE_NOTES_SCAN_MAX);
 		// Counted in CODEPOINTS, like every other cap here.
 		if (Array.from(v).length > INVOICE_NOTES_MAX) {
@@ -41207,11 +41215,12 @@ app.post(
 			const orderNumber = ov.has.orderNumber ? ov.values.orderNumber : loadRef;
 			const poNumber = ov.has.poNumber ? ov.values.poNumber : "";
 			const moveNumber = ov.has.moveNumber ? ov.values.moveNumber : "";
-			// Deliberately NO lookup of the last approved note (the approve does
-			// that). The modal always sends `notes`, seeded from the dryRun echo, so
-			// an omitted key only comes from a caller with no Notes box at all — and
-			// that caller should not see a stored note it never showed anyone.
-			const notes = ov.has.notes ? ov.values.notes : "";
+			// The SAME rule as the approve: omitted → the last approved note, "" →
+			// none. The modal always sends `notes`, but a tab still running a bundle
+			// from before Notes existed omits it — and if this route read "omitted"
+			// as "no note" while the approve read it as "the last one", that tab
+			// would preview no note and then print one. One rule, one answer.
+			const notes = ov.has.notes ? ov.values.notes : latestDraftNotes(loadId);
 			const total = brokerInvoice.formatMoney(ov.values.total);
 
 			// ⚠️ PINNED FROM THE dryRun, exactly like moveNumber — never re-derived
