@@ -44,8 +44,10 @@ What it covers today, by section (`ONLY` picks them):
   Email), ORDER # takes any printable character but `<` and `>`, 80 max, and the SUBJECT the server builds carries it as
   typed (I2, I3). An optional NOTES box prints in a labelled "Notes" box beside the totals on the invoice PDF, only when
   it is non-empty, and never in the email body (I4–I6). Approve sends the note and the Order #, and Job Tracking is
-  unchanged (I7). A note saved on the approved draft record pre-fills the next editor and its dryRun PDF, and a preview
-  sent with no notes key prints it too (I8, I8b, planted, local only). The server refuses a note over 500 characters, a note that is not text, and an Order # with `<` (I9).
+  unchanged (I7); on a server with no mail target the load dialog then says no Gmail draft was created, never "Draft
+  ready in Gmail" (I7r). A note saved on the approved draft record pre-fills the next editor and its dryRun PDF, and a
+  preview sent with no notes key prints it too (I8, I8b, planted, local only); the pre-filled note is labelled as carried
+  over until it is typed into (I8h). The server refuses a note over 500 characters, a note that is not text, and an Order # with `<` (I9).
   One sign-in; `ONLY=invoice`. The worktree needs the POD files linked (`E2E_LINK_PODS=1`, see `prep-worktree.sh`).
 
 Every "Expected" column states the behaviour **after** the fix. A run on a build without it (a BEFORE baseline) is
@@ -338,7 +340,7 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
 | `PHASE` | `before` or `after`. Only names the output; the "Expected" column is always the after-the-fix behaviour. |
 | `OUT_TAG` | Writes `shots/<tag>/` and `results-<tag>.md` instead of `<PHASE>`, so a rehearsal cannot overwrite a baseline. |
 | `ONLY` | A comma-separated list of sections: `trucks` (1–12, R1–R16), `signout` (S1–S7), `dispatcher` (D1–D3), `maintenance` (M1), `moneypath` (P1, E1, N1, N1b, F1, E2, B1, RC1), `names` (K1–K3), `eldlink` (L1–L3), `invoice` (I1–I9). Unset: all eight, in that order, then step 12's clean-up — more sign-ins than one limiter window holds (see above). |
-| `STEPS` | Only these sign-out, money-path or invoice cases, e.g. `STEPS=S5a,S7` (each has its own browser context), `STEPS=P1,F1` or `STEPS=E2,B1,RC1` (`P1` selects P1a and P1b; `N1` selects N1 and N1b), `STEPS=I8,I9` (`I3` selects I3a–c, `I7` selects I7, I7r and I7j, `I8` selects I8 and I8b, `I9` selects I9 and I9a–c; I1 opens the editor whenever any of I1–I7 is picked). The other sections ignore it. |
+| `STEPS` | Only these sign-out, money-path or invoice cases, e.g. `STEPS=S5a,S7` (each has its own browser context), `STEPS=P1,F1` or `STEPS=E2,B1,RC1` (`P1` selects P1a and P1b; `N1` selects N1 and N1b), `STEPS=I8,I9` (`I3` selects I3a–c, `I7` selects I7, I7r and I7j, `I8` selects I8, I8b and I8h, `I9` selects I9 and I9a–c; I1 opens the editor whenever any of I1–I7 is picked). The other sections ignore it. |
 | `HEADED=1` | A visible browser. |
 | `DB_PATH` | The copy the server runs on (inside the work dir). It is used **only** to plant stored values for steps 10, 11b–f, R3 and R15, to stage and clean up R16, to plant and read back E1, N1, N1b and E2, to read and delete B1's planted expense, to delete the rows RC1's import writes, to plant P1's own driver, and to plant and delete I8's saved invoice note. Unset: those rows SKIP, and P1 uses a real driver. |
 | `E2E_INVOICE_APPROVE=1` | Lets I7 press Approve on a server that is not on this machine. Off by default: an approve creates a real Gmail draft wherever the server has a mail target. Locally `boot-server.sh` blanks them, so I7 always approves there. |
@@ -685,7 +687,7 @@ dryRun answers 200 is used, trying at most four. A Bison load still works: I1 ti
 
 **Budgets, per server process:** one sign-in; `POST …/draft-invoice` (25 per 15 minutes per user, the `?dryRun=1`
 opens included) three times, plus one per candidate whose dryRun failed; `POST …/invoice-preview` (120 per 15
-minutes) about sixteen times.
+minutes) about seventeen times.
 
 **What it writes:** the approve (I7) mints the next invoice number, in the copy. Locally it creates no mail draft
 and no draft record: `boot-server.sh` blanks Gmail and the n8n invoice webhook, so the route answers 200 with
@@ -704,10 +706,11 @@ for the load under test.
 | I5 | **UI.** Clear NOTES. | No "Notes" label and none of the note's text in the PDF; its text and positions are identical to I2's render (the same fields, no note), so the totals box stands alone with no gap or blank box |
 | I6 | **UI.** Type a note, then **Reset to extracted values**. | NOTES empty with no "edited" badge; the next preview (notes `""`) has no "Notes" section |
 | I7 | **UI.** Type a note and the Order # `7101850-$700 ADV`, then **Approve & Create Draft**, accepting any confirm. The approve request is read. Local only unless `E2E_INVOICE_APPROVE=1`. | The request body carries `notes` exactly as typed and `orderNumber: "7101850-$700 ADV"` |
-| I7r | The approve's response. | INFO. Locally: 200 with `preview: true` and the note "No Gmail/n8n draft target configured"; its own PDF prints the note |
+| I7r | The approve's response, then the message under the load's title in the load dialog (`.draft-result`) once the editor closes. | Scored only when the response has `preview: true` (no mail target — locally always, since `boot-server.sh` blanks Gmail and the n8n webhook): the message does **not** say "Draft ready in Gmail" and says no Gmail draft was created ("Invoice … was generated, but no Gmail draft was created — this server has no mail account configured."). Any other response (a real draft): INFO. The row also lists the response (200, `preview: true`, the server's note "No Gmail/n8n draft target configured"; its own PDF prints the note) |
 | I7j | A page `fetch` of `GET /api/load/<id>` again, compared field by field with I1's read. | Identical: the editor wrote nothing to Job Tracking |
 | I8 | **Planted, local only.** A `load_invoice_drafts` row for the load with a two-line note (and minimal other columns). `GET /api/loads/<id>/invoice-draft` must return it first, which proves `DB_PATH` is the server's file (otherwise it is deleted again and I8 SKIPs). **UI:** reload the page and open the editor again. | NOTES is pre-filled with the saved note exactly; the dryRun echoes it; the dryRun's own PDF prints it under "Notes" |
 | I8b | **Planted, local only**, while I8's note is there: a page `fetch` of `POST /api/loads/<id>/invoice-preview` with an otherwise valid body and **no** `notes` key, as a tab still running a bundle from before Notes sends it. | Its PDF prints the saved note under "Notes": the approve's rule for an omitted key (the last approved note), so that tab previews what it would send |
+| I8h | **Planted, local only**, in I8's editor: the NOTES box is read with the pre-filled note untouched; then **UI:** click into it and type ` (edited)` at the end of the note. | While untouched, "Carried over from this load's last approved invoice — clear it or use Reset if it no longer applies." shows under NOTES; after typing it is gone. SKIPs when I8 had no note to pre-fill |
 | I9, I9a–c | Page `fetch`es of `POST /api/loads/<id>/invoice-preview` with `X-Requested-With`, as `useApi` sends them. The body is otherwise valid (invoice #, invoice date, total, recipient, and an Order #, `7101850`, that every build accepts); I9 is that body as it is, the control. | I9: 200. I9a, notes of 501 characters: 400 `INVOICE_NOTES_TOO_LONG`. I9b, `notes: ["x"]`: 400 `INVOICE_NOTES_INVALID`. I9c, `orderNumber: "a<b"`: 400 `ORDER_NUMBER_INVALID` |
 | Ic | Local only. | The planted row deleted; no plant journal left |
 
@@ -715,7 +718,12 @@ for the load under test.
 `. _ / # -`, 40 max), so I2 and I3a are refused by the form, I3c's field holds 40 characters, and I3b's refusal carries
 the old sentence (a FAIL on the wording: `<` is refused on both builds). The editor has no NOTES box, so I4–I6 FAIL. I7
 finds Approve disabled (the `$` in the Order #). The draft table has no `notes` column, so I8 and I8b FAIL. The server
-ignores `notes`, so I9a and I9b answer 200. I1, I7j, I9 (the control) and I9c pass on both builds.
+ignores `notes`, so I9a and I9b answer 200. I1, I7j, I9 (the control) and I9c pass on both builds. There is no
+approve there, so no I7r row, and I8h SKIPs (nothing is pre-filled).
+
+**On a build with Notes but before the follow-ups** (`718e386`): I7r FAILs — the load dialog says "✓ Draft ready in
+Gmail" although the response is `preview: true` and no draft exists — and I8h FAILs (no "carried over" hint). Every
+other row passes.
 
 ## Teardown (once the whole QA cycle is done)
 

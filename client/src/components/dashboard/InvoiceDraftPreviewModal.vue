@@ -426,18 +426,26 @@
               class="idp-input idp-textarea"
               :class="{ 'is-invalid': !!fieldErrors.notes, 'is-edited': edited.notes }"
               :aria-invalid="!!fieldErrors.notes"
-              aria-describedby="idp-notes-count idp-notes-hint"
+              :aria-describedby="notesCarriedOver ? 'idp-notes-carried idp-notes-count idp-notes-hint' : 'idp-notes-count idp-notes-hint'"
               :disabled="approving"
               @input="onFieldInput"
             ></textarea>
             <div class="idp-notes-foot">
               <p v-if="fieldErrors.notes" class="idp-hint idp-hint-warn">{{ fieldErrors.notes }}</p>
+              <!-- The same count the limit is judged on (lib/invoiceFields.js), so
+                   the counter and the error can never disagree. -->
               <span
                 id="idp-notes-count"
                 class="idp-hint idp-count"
                 :class="{ 'idp-count-near': notesNearLimit }"
-              >{{ form.notes.length }} / {{ NOTES_MAX }}</span>
+              >{{ notesLength(form.notes) }} / {{ NOTES_MAX }}</span>
             </div>
+            <!-- A note pre-filled from the last approved draft looks exactly like
+                 one typed a moment ago, and it prints on the invoice unless it is
+                 cleared. Say where it came from until the dispatcher has touched it. -->
+            <p v-if="notesCarriedOver" id="idp-notes-carried" class="idp-hint idp-hint-warn">
+              Carried over from this load's last approved invoice — clear it or use Reset if it no longer applies.
+            </p>
             <p id="idp-notes-hint" class="idp-hint">
               Printed on the invoice under “Notes”. Invoice only — Job Tracking, revenue, pay and
               payouts are not changed.
@@ -519,7 +527,7 @@ import { computed, reactive, ref, watch, onBeforeUnmount } from 'vue'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import { useApi } from '../../composables/useApi'
 import PdfZoomViewer from '../shared/PdfZoomViewer.vue'
-import { ORDER_NUMBER_MAX, orderNumberError, NOTES_MAX, notesError } from '../../lib/invoiceFields'
+import { ORDER_NUMBER_MAX, orderNumberError, NOTES_MAX, notesError, notesLength } from '../../lib/invoiceFields'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -679,6 +687,10 @@ const edited = computed(() => {
 const anyEdited = computed(
   () => isEdited.value || Object.values(edited.value).some(Boolean) || !!form.notes.trim(),
 )
+// The box still holds the note the dryRun seeded from the last approved draft.
+// Off the moment it is edited or cleared (either is an edit against the seed),
+// and after Reset, which empties the seed as well as the box.
+const notesCarriedOver = computed(() => !!str(seeded.value.notes).trim() && !edited.value.notes)
 
 const fieldErrors = computed(() => {
   const e = {}
@@ -719,7 +731,7 @@ const formValid = computed(() => Object.keys(fieldErrors.value).length === 0)
 // Reported in the order the fields appear, so "the first thing wrong" is the
 // first thing you'd reach scrolling down.
 const FIELD_ORDER = ['recipient', 'billToName', 'brokerName', 'total', 'invoiceId', 'invoiceDate', 'orderNumber', 'poNumber', 'deliveryDate', 'notes']
-const notesNearLimit = computed(() => form.notes.length >= NOTES_WARN_AT)
+const notesNearLimit = computed(() => notesLength(form.notes) >= NOTES_WARN_AT)
 const firstFieldError = computed(() => {
   for (const k of FIELD_ORDER) if (fieldErrors.value[k]) return fieldErrors.value[k]
   return ''
@@ -1188,7 +1200,17 @@ async function approve() {
       body,
       { timeout: APPROVE_TIMEOUT_MS },
     )
-    emit('approved', { invoiceId: r.invoiceId, recipient: recipient.value.trim() || originalTo.value })
+    // ⚠️ A 200 is not proof a draft exists. A server with no mail target answers
+    // 200 with `preview: true` and creates nothing, so pass that on (strictly —
+    // only a real `true`) with its note, and the draft's warnings, which were
+    // dropped here before. The parent decides what to say.
+    emit('approved', {
+      invoiceId: r.invoiceId,
+      recipient: recipient.value.trim() || originalTo.value,
+      preview: r.preview === true,
+      note: str(r.note),
+      warnings: Array.isArray(r.warnings) ? r.warnings.filter(Boolean).map(str) : [],
+    })
     emit('update:open', false)
   } catch (e) {
     // Always true and worth saying: the modal stays open and every field keeps its
