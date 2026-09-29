@@ -22,7 +22,7 @@
 </template>
 
 <script setup>
-import { nextTick, ref, useId, watch } from 'vue'
+import { nextTick, onUpdated, ref, useId, watch } from 'vue'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -60,6 +60,15 @@ function onKeydown(event) {
     first.focus()
   }
 }
+
+// A control removed while it has focus (a preview's Try again, replaced by the
+// loading line) leaves focus on <body>, outside this dialog, where Escape and
+// the Tab trap above no longer hear the keyboard. Focus comes back to the dialog.
+onUpdated(() => {
+  if (!props.open) return
+  const active = document.activeElement
+  if (!active || active === document.body) dialogRef.value?.focus()
+})
 
 watch(
   () => props.open,
