@@ -113,16 +113,20 @@
 //   F4 the investor detail modal survives an investors:changed refresh · F5 a record
 //      with no application says so · F6 an acceptance that would collide (the same
 //      company name, an email already on an account) is refused with a code and the
-//      application is not left Accepted · F7 "Accepted" asks first, and a refused
-//      save puts the select back · F8 a duplicate investor record answers 409 with a
-//      code · F9 a preview of a user id that is no investor answers "not found"
+//      application is not left Accepted · F7 "Accepted" asks first; a refused
+//      acceptance puts the select back and shows the server's reason; a removed
+//      application's status change is refused · F8 a duplicate investor record
+//      answers 409 with a code · F9 a preview of a user id that is no investor
+//      renders a "not found" card, no portal (the API answers 404)
 //   F10 Admin Tools shows the stored global split; the investor's "Your share" note
 //      shows the split the server uses (planted) · F11 the applicant help text makes no
 //      "encrypted at rest" / "update any time from your dashboard" claim · F12 the
 //      account-number eye does not pretend to reveal; "Docs x/N" counts the real
 //      documents (planted); a refused delete shows the server's reason · F13 the
 //      /invest thank-you keeps the name after a reload · F14 the public onboarding
-//      banking route is gone (404) and an accepted application's bank row unchanged
+//      banking route is gone (404 whatever token is sent) and an accepted
+//      application's bank row unchanged · FXc every failing resource, marked as the
+//      run's own probe or the app's
 //
 // Env:
 //   BASE_URL    required — e.g. http://127.0.0.1:3181 (never production)
@@ -468,19 +472,25 @@ async function centerOn(scope, selectors) {
 
 // fetch() from INSIDE the signed-in page (its cookies, its origin), with the
 // header the CSRF rule requires on writes.
+//
+// While `apiProbeTag` is set (only the investor-fixes section sets it: the id of
+// the step, or FX0/FX1/FXz), every such fetch also carries `X-QA-Probe: <tag>`.
+// The server ignores it; the section's response listener reads it, so a failing
+// response the run sent on purpose is told apart from one the app itself sent.
+let apiProbeTag = null
 async function api(page, method, url, body) {
-  return page.evaluate(async ({ method, url, body }) => {
+  return page.evaluate(async ({ method, url, body, tag }) => {
     const res = await fetch(url, {
       method,
       credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...(tag ? { 'X-QA-Probe': tag } : {}) },
       body: body === undefined ? undefined : JSON.stringify(body),
     })
     const text = await res.text()
     let json = null
     try { json = JSON.parse(text) } catch { /* not json */ }
     return { status: res.status, contentType: res.headers.get('content-type') || '', json, text: json ? '' : text.slice(0, 200) }
-  }, { method, url, body })
+  }, { method, url, body, tag: apiProbeTag })
 }
 
 // Navigate the tab itself to a URL and report what the browser received.
@@ -7840,8 +7850,8 @@ async function termsCleanup(S) {
 
 // ---------------------------------------------------------------- investor fixes (F1-F14)
 // ONLY=investorfixes, LOCAL ONLY (DB_PATH): it plants rows (F3, F10b, F12b), reads what
-// an acceptance created (F6), reads an accepted application's access token (F14), and
-// removes the applications again, which the API can only soft-delete.
+// an acceptance created (F6), reads an application's bank row (F14), and removes the
+// applications again, which the API can only soft-delete.
 //
 // ⚠️ TEST ACTORS ONLY. The copy holds real investors. Every investor account, investor
 // record, truck and application this section touches is one it created, named
@@ -7970,8 +7980,27 @@ async function investorFixesSection() {
   const st = { users: {}, inv: {}, apps: {}, truckTA: null, recId: null }
   const emailOf = { P: EMAIL('P'), Q: EMAIL('Q'), C: EMAIL('A'), E: EMAIL('E') }
   const consoleErrs = []
-  const failedApi = []
+  const failed = []
   const contexts = []
+  // A failing request the UI sends because a step makes it on purpose (a pick the
+  // server refuses, a delete of a removed record): its method and path, for the
+  // step's duration. The response listener marks it "probe <step>" rather than "app".
+  let uiProbes = []
+  const uiProbe = (stepId, method, re) => uiProbes.push({ step: stepId, method, re })
+  // A resource as it may be printed: this server's path (numeric segments as :id, an
+  // uploads path cut to its folder, since file names can carry a person's name), or
+  // another origin's host and path. Never a query string, which is where a token goes.
+  const resPath = (u) => {
+    const s = String(u || '')
+    if (!s) return '(no url)'
+    if (/^(data|blob):/i.test(s)) return `(${s.slice(0, s.indexOf(':'))} URL)`
+    if (s.startsWith(BASE_URL)) {
+      let p = pathOf(s).replace(/\/\d+(?=\/|$)/g, '/:id')
+      if (p.startsWith('/uploads/')) p = `${p.split('/').slice(0, 3).join('/')}/…`
+      return p
+    }
+    try { const x = new URL(s); return `${x.host}${x.pathname}` } catch { return '(other origin)' }
+  }
   // Saved screenshots blur every table row that is not QA-TEST data (real applicants,
   // investors, expenses, trucks) for the moment of the shot. A blur, not a mask: a mask
   // box is drawn over a row even where an open dialog covers it, and would hide the dialog.
@@ -7999,26 +8028,46 @@ async function investorFixesSection() {
     await ctx.route(/^https?:\/\/([^/]*\.)?logisx\.com(\/|$)/i, (route) => (route.request().isNavigationRequest()
       ? route.fulfill({ status: 200, contentType: 'text/html', body: '<h1>QA: navigation to logisx.com blocked by the harness</h1>' })
       : route.abort()))
-    page.on('console', (m) => { if (m.type() === 'error') consoleErrs.push({ who, where: pathOf(page.url()), text: m.text() }) })
-    page.on('pageerror', (e) => consoleErrs.push({ who, where: pathOf(page.url()), text: `uncaught: ${e.message}` }))
-    // Failing responses behind the console errors: the path for this server (numeric
-    // segments as :id, an uploads path cut to its folder, since file names can carry a
-    // person's name), the host for anything else.
+    // A console error names the resource it is about (location().url) when it is a
+    // "Failed to load resource" line: kept as a path, like the failures below.
+    page.on('console', (m) => {
+      if (m.type() !== 'error') return
+      let res = ''
+      if (/^Failed to load resource/.test(m.text())) { try { res = resPath(m.location()?.url || '') } catch { /* no location */ } }
+      consoleErrs.push({ who, where: pathOf(page.url()), text: m.text(), res })
+    })
+    page.on('pageerror', (e) => consoleErrs.push({ who, where: pathOf(page.url()), text: `uncaught: ${e.message}`, res: '' }))
+    // Every failing resource: an HTTP 4xx/5xx, or a request that never got an answer.
+    // The request's method and path only (resPath: never a query string, which is
+    // where a token would be), the page it came from, and its source: the run's own
+    // fetch (X-QA-Probe), a request the UI sent because a step made it on purpose
+    // (uiProbe), the harness's logisx.com block, or else the app.
+    const sourceOf = (req, p, blocked = false) => {
+      const tag = req.headers()['x-qa-probe']
+      if (tag) return `probe ${tag} (the run's own fetch)`
+      const hit = uiProbes.find((x) => x.method === req.method() && x.re.test(p))
+      if (hit) return `probe ${hit.step} (sent by the UI on purpose)`
+      if (blocked) return 'harness (logisx.com blocked)'
+      return 'app'
+    }
     page.on('response', (r) => {
       if (r.status() < 400) return
-      const u = r.url()
-      let where = ''
-      if (u.startsWith(BASE_URL)) {
-        where = pathOf(u).replace(/\/\d+(?=\/|$)/g, '/:id')
-        if (where.startsWith('/uploads/')) where = `${where.split('/').slice(0, 3).join('/')}/…`
-      } else { try { where = new URL(u).host } catch { where = '(other origin)' } }
-      failedApi.push({ who, where: pathOf(page.url()), what: `${r.request().method()} ${where} → ${r.status()}` })
+      const p = resPath(r.url())
+      failed.push({ who, where: pathOf(page.url()), method: r.request().method(), path: p, status: String(r.status()), source: sourceOf(r.request(), pathOf(r.url())) })
+    })
+    page.on('requestfailed', (req) => {
+      const p = resPath(req.url())
+      const blocked = /^https?:\/\/([^/]*\.)?logisx\.com(\/|$)/i.test(req.url())
+      failed.push({ who, where: pathOf(page.url()), method: req.method(), path: p, status: `no answer (${req.failure()?.errorText || 'failed'})`, source: sourceOf(req, pathOf(req.url()), blocked) })
     })
     return page
   }
   // One step: its own try/catch, a screenshot, one results row.
+  // Its page fetches carry X-QA-Probe: <id> (see api()); the UI probes it registers
+  // last until it ends.
   const step = async (id, title, expected, page, shotName, fn) => {
     let observed = ''; let v = 'FAIL'; let s = ''
+    apiProbeTag = id
     try {
       await clearEvidence(page)
       const r = await fn()
@@ -8028,6 +8077,9 @@ async function investorFixesSection() {
       observed = e.skip ? e.message : `error: ${e.message}`
       v = e.skip ? 'SKIP' : 'FAIL'
       s = await ifxShot(page, `${shotName}-error`)
+    } finally {
+      apiProbeTag = null
+      uiProbes = uiProbes.filter((x) => x.step !== id)
     }
     record({ step: id, title, expected, observed, verdict: v, shot: s })
   }
@@ -8050,6 +8102,7 @@ async function investorFixesSection() {
     await login(sa, 'FX0 — Super Admin', CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
 
     // ---- FX0: the QA-TEST actors (Super Admin API)
+    apiProbeTag = 'FX0'
     {
       const notes = []
       for (const k of ['A', 'B']) {
@@ -8075,6 +8128,7 @@ async function investorFixesSection() {
       meta.ids.ifxInvestorB = st.users.B.id
       record({ step: 'FX0', title: 'Set-up (Super Admin API): QA-TEST investor accounts A and B, an investor record for each, a truck owned by A', expected: 'Created; DB_PATH is the server\'s database', observed: notes.join('; '), verdict: 'INFO', shot: '' })
     }
+    apiProbeTag = null
     ia = await open('QA-TEST investor A')
     await login(ia, 'FX0 — QA-TEST investor A', UNAME('A'), st.users.A.password, '/investor')
     ib = await open('QA-TEST investor B')
@@ -8317,27 +8371,53 @@ async function investorFixesSection() {
       })
 
     // ---- F9: preview of a user id that is no investor
+    // The page checks the id against GET /api/users before it mounts anything, and for
+    // an id that is no Investor renders an "Investor not found" card: no "Previewing"
+    // banner, no portal (so no fleet numbers), and no request for the portal's data.
+    // The API is asked directly as well.
     await step('F9', 'Super Admin opens /investor-portals, then /investor-portals/99999999 (no such user), and a page fetch of GET /api/investor?as_user_id=99999999',
-      '404 "Investor not found"; the page says so instead of rendering a portal under "Previewing"', sa, 'f9-preview-missing-user', async () => {
+      '404 INVESTOR_NOT_FOUND; the page renders an "Investor not found" card and no portal: no "Previewing" banner, no portal section, no fleet numbers', sa, 'f9-preview-missing-user', async () => {
         if (q1('SELECT id FROM users WHERE id = 99999999')) throw skip('a user 99999999 exists on this copy')
         await sa.goto(`${BASE_URL}/investor-portals`)
         await sa.waitForLoadState('load')
         await sa.waitForTimeout(2000)
-        await sa.goto(`${BASE_URL}/investor-portals/99999999`)
-        const banner = sa.locator('.preview-banner')
-        await banner.waitFor({ state: 'visible', timeout: 30000 })
-        await sa.waitForFunction(() => !document.querySelector('.skeleton-block'), null, { timeout: 120000 }).catch(() => {})
-        await sa.waitForTimeout(2000)
-        const previewing = /Previewing/.test(await banner.innerText())
-        const notFound = await sa.getByText(/investor not found/i).count()
-        const sections = await sa.locator('.section-card, .section').count()
+        // The portal's own data requests (anything under /api/investor that is not
+        // this step's fetch), while the preview page is open.
+        const portalReqs = []
+        const onReq = (r) => {
+          const p = pathOf(r.url())
+          if (!r.headers()['x-qa-probe'] && /^\/api\/investor(\/|$)/.test(p)) portalReqs.push(`${r.method()} ${resPath(r.url())}`)
+        }
+        sa.on('request', onReq)
+        let missingTitle = ''; let missingText = ''; let backLink = 0; let banner = 0; let previewing = 0; let portal = 0; let sections = 0
+        try {
+          await sa.goto(`${BASE_URL}/investor-portals/99999999`)
+          const heading = sa.getByRole('heading', { name: /Investor not found|Could not open this preview/ })
+          // Whichever the page settles on: the not-found card, or (the old build) the banner.
+          await heading.or(sa.locator('.preview-banner')).first().waitFor({ state: 'visible', timeout: 30000 })
+          await sa.waitForFunction(() => !document.querySelector('.skeleton-block'), null, { timeout: 120000 }).catch(() => {})
+          await sa.waitForTimeout(2000)
+          missingTitle = norm(await heading.first().innerText().catch(() => ''))
+          missingText = norm(await sa.getByText(/No investor account has the id/).first().innerText().catch(() => ''))
+          backLink = await sa.getByRole('link', { name: /Back to Investor Portals/ }).count()
+          banner = await sa.locator('.preview-banner').count()
+          previewing = await sa.getByText(/Previewing/).count()
+          portal = await sa.locator('.investor-dashboard').count()
+          sections = await sa.locator('.section-card, .section').count()
+        } finally { sa.off('request', onReq) }
         const r = await api(sa, 'GET', '/api/investor?as_user_id=99999999')
         const own = await api(sa, 'GET', '/api/investor')
         const block = (j) => JSON.stringify(j?.production ?? null)
         const same = r.status === 200 && own.status === 200 && r.json?.production != null && block(r.json) === block(own.json)
-        const observed = `GET /api/investor?as_user_id=99999999 → ${codeOf(r)}${errOf(r)}; its production block ${same ? 'IS IDENTICAL to' : 'differs from'} the Super Admin's own fleet-wide GET /api/investor; page: "Previewing" banner ${previewing ? 'shown' : 'absent'}, ${sections} portal section(s) rendered, "Investor not found" shown: ${notFound > 0}`
-        await caption(sa, `Step F9 — /investor-portals/99999999: ${sections} portal section(s) under the Previewing banner; API → ${r.status}${same ? ' with the fleet-wide numbers' : ''}`)
-        return { observed, verdict: verdict(r.status === 404 && notFound > 0) }
+        const notFound = missingTitle === 'Investor not found' && /\b99999999\b/.test(missingText)
+        const noPortal = !banner && !previewing && !portal && !sections && !portalReqs.length
+        const observed = `page: "${missingTitle || '(no not-found heading)'}"${missingText ? ` — "${missingText}"` : ''}; "Back to Investor Portals" link: ${backLink > 0}; ` +
+          `"Previewing" banner: ${banner || previewing ? 'SHOWN' : 'none'}; portal rendered (fleet numbers): ${portal ? 'YES' : 'no'}, ${sections} portal section(s); ` +
+          `the page's own /api/investor requests: ${portalReqs.length ? [...new Set(portalReqs)].join(', ') : 'none'}; ` +
+          `GET /api/investor?as_user_id=99999999 → ${codeOf(r)}${errOf(r)}${same ? ' — its production block IS IDENTICAL to the Super Admin\'s own fleet-wide GET /api/investor' : ''}`
+        await caption(sa, `Step F9 — /investor-portals/99999999: ${notFound ? '"Investor not found" card' : 'no not-found card'}, ${noPortal ? 'no banner or portal' : 'a portal under "Previewing"'}; API → ${codeOf(r)}`)
+        await evidence(sa, ['F9 — Super Admin, page fetch', `GET /api/investor?as_user_id=99999999 → ${codeOf(r)}${errOf(r)}`])
+        return { observed, verdict: verdict(notFound && noPortal && r.status === 404 && r.json?.code === 'INVESTOR_NOT_FOUND') }
       })
 
     // ---- F8: a duplicate investor record
@@ -8540,6 +8620,7 @@ async function investorFixesSection() {
     })
 
     // ---- FX1: the applications F6, F7, F12 and F14 act on (public API, QA-TEST data)
+    apiProbeTag = 'FX1'
     {
       const notes = []
       try {
@@ -8568,6 +8649,7 @@ async function investorFixesSection() {
       } catch (e) { notes.push(`error: ${e.message}`) }
       record({ step: 'FX1', title: 'Set-up (public API, fake data): QA-TEST applications P and Q with the same company name, and C whose email is QA-TEST account A\'s', expected: '200 each', observed: notes.join('; '), verdict: 'INFO', shot: '' })
     }
+    apiProbeTag = null
 
     // ---- F7a: "Accepted" asks first
     await step('F7a', 'Super Admin on /investor-applications picks "Accepted" in QA-TEST application P\'s status select',
@@ -8662,10 +8744,19 @@ async function investorFixesSection() {
           const row = appRow(sa, EMAIL('E'))
           await row.waitFor({ state: 'visible', timeout: 30000 })
           await row.scrollIntoViewIfNeeded()
-          const cellText = norm(await row.locator('td').nth(4).innerText())
+          // The Docs cell by its column header, not by position (a Terms column now sits
+          // before it). The header cells and the row's cells must line up one to one.
+          const heads = (await sa.locator('table', { has: row }).locator('thead th').allTextContents()).map(norm)
+          const docsAt = heads.findIndex((h) => h.toLowerCase() === 'docs')
+          const cells = await row.locator('td').count()
+          if (docsAt < 0) throw new Error(`the list has no "Docs" column (headers: ${heads.join(' | ')})`)
+          if (cells !== heads.length) throw new Error(`the row has ${cells} cells for ${heads.length} headers (${heads.join(' | ')}): the Docs cell cannot be located by its header`)
+          const cellText = norm(await row.locator('td').nth(docsAt).innerText())
+          // The list API's own figures for E: signed_count and docs_total, the
+          // denominator the cell renders (the client falls back to 3 without it).
           const list = await api(sa, 'GET', '/api/investor-applications')
           const listRow = Array.isArray(list.json) ? list.json.find((a) => Number(a.id) === st.apps.E) : null
-          const docFields = listRow ? Object.keys(listRow).filter((k) => /doc|total/i.test(k)) : []
+          const docsTotal = listRow && 'docs_total' in listRow ? listRow.docs_total : undefined
           await row.getByRole('button', { name: 'View' }).click()
           const dlg = sa.locator('[role="dialog"]').filter({ hasText: 'Documents (' })
           await dlg.waitFor({ state: 'visible', timeout: 20000 })
@@ -8674,18 +8765,78 @@ async function investorFixesSection() {
           const s = await ifxShot(sa, 'f12b-docs-denominator')
           await sa.keyboard.press('Escape').catch(() => {})
           const real = qa("SELECT c, COUNT(*) AS n FROM (SELECT (SELECT COUNT(*) FROM investor_onboarding_documents d WHERE d.application_id = ia.id) AS c FROM investor_applications ia WHERE ia.id <= ? AND ia.status != 'Draft') GROUP BY c", start.investor_applications || 0)
+          const detailOk = new RegExp(`\\(\\d+/${count} signed\\)`, 'i').test(title)
           return {
-            observed: `row "Docs": "${cellText}"; application E has ${count} document rows; detail: "${title}"; list row fields about documents: ${docFields.join(', ') || 'none'} (no total); real applications by document-row count: ${real.map((r) => `${r.c} rows × ${r.n}`).join(', ') || 'none'}`,
-            verdict: verdict(cellText.endsWith(`/${count}`)), shot: s,
+            observed: `"Docs" is column ${docsAt + 1} of ${heads.length}; E's cell: "${cellText}"; application E has ${count} document rows; ` +
+              `GET /api/investor-applications for E: signed_count ${listRow?.signed_count ?? '(none)'}, docs_total ${docsTotal === undefined ? '(field absent)' : docsTotal}; ` +
+              `detail: "${title}"; real applications by document-row count: ${real.map((r) => `${r.c} rows × ${r.n}`).join(', ') || 'none'}`,
+            verdict: verdict(cellText.endsWith(`/${count}`) && Number(docsTotal) === count && detailOk), shot: s,
           }
         } finally {
           ifxRemoveRowsSync((r) => r.table === 'investor_onboarding_documents' && r.id === extraId)
         }
       })
 
-    // ---- F7b: a refused save puts the select back
-    await step('F7b', 'Refused save: QA-TEST application E is removed (API soft delete; the open list is not refreshed), then "Reviewed" is picked in its row',
-      'The server refuses it (409) and the select goes back to the stored status', sa, 'f7b-refused-reverts', async () => {
+    // ---- F7b: a refused save puts the select back (on a row that stays listed)
+    // C's email is QA-TEST account A's, so its acceptance is refused (F6b showed it
+    // through the API, which changes nothing: C is still at its stored status here).
+    // The refusal re-reads the list, and C stays in it, so the select can be read back.
+    const statusOf = (k) => q1('SELECT status FROM investor_applications WHERE id = ?', st.apps[k])?.status
+    // The list's next GET: a refusal re-reads the list, and while it loads the table is
+    // not rendered at all, so a row is read again only after that GET has landed.
+    const nextListLoad = (page) => page.waitForResponse((r) => pathOf(r.url()) === '/api/investor-applications' && r.request().method() === 'GET', { timeout: 15000 }).then(() => true, () => false)
+    const statusAlert = (page, what) => page.locator('[data-test="application-status-error"], [role="alert"]').filter({ hasText: what }).first()
+    await step('F7b', 'Refused save: Super Admin picks "Accepted" in QA-TEST application C\'s row (its email is already QA-TEST account A\'s) and confirms the dialog',
+      'The server refuses it (409 USER_ALREADY_EXISTS); the select goes back to C\'s stored status and the page shows the server\'s message; C\'s row stays listed', sa, 'f7b-refused-reverts', async () => {
+        if (!st.apps.C) throw skip('application C was not created')
+        const stored0 = statusOf('C')
+        if (stored0 === 'Accepted') throw skip('application C is already Accepted (F6b accepted it), so "Accepted" cannot be picked')
+        await sa.goto(`${BASE_URL}/investor-applications`)
+        const row = appRow(sa, emailOf.C)
+        await row.waitFor({ state: 'visible', timeout: 30000 })
+        await row.scrollIntoViewIfNeeded()
+        const select = row.locator('select')
+        const before = await select.inputValue()
+        const statusPath = `/api/investor-applications/${st.apps.C}/status`
+        uiProbe('F7b', 'PUT', new RegExp(`^${statusPath}$`))
+        const respP = sa.waitForResponse((r) => pathOf(r.url()) === statusPath && r.request().method() === 'PUT', { timeout: 30000 })
+        respP.catch(() => {})
+        await caption(sa, 'Step F7b — pick "Accepted" in application C\'s row (C\'s email is already on QA-TEST account A)', false)
+        await select.selectOption('Accepted')
+        const dlg = sa.locator('[role="dialog"], [role="alertdialog"]').filter({ hasText: /Accept application/i }).first()
+        await dlg.waitFor({ state: 'visible', timeout: 10000 })
+        const reloaded = nextListLoad(sa)
+        await dlg.getByRole('button', { name: 'Accept', exact: true }).click()
+        const resp = await respP
+        const j = await resp.json().catch(() => null)
+        const toast = await toastText(sa, 4000)
+        const alert = statusAlert(sa, /was not set to Accepted/)
+        await alert.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {})
+        const alertText = norm(await alert.innerText().catch(() => ''))
+        const listReloaded = await reloaded
+        await sa.waitForTimeout(1000)
+        const stays = await row.isVisible().catch(() => false)
+        const after = stays ? await select.inputValue() : '(row gone)'
+        const stored = statusOf('C')
+        const made = trackApp('C')
+        const msgShown = !!j?.error && alertText.includes(norm(j.error))
+        await row.scrollIntoViewIfNeeded().catch(() => {})
+        await caption(sa, `Step F7b — PUT → ${resp.status()}${j?.code ? ` ${j.code}` : ''}; C's select shows "${after}", the server holds "${stored}"; the server's message shown: ${msgShown}`)
+        const s = await ifxShot(sa, 'f7b-refused-reverts')
+        return {
+          observed: `picked "Accepted" (the select read "${before}"), confirmed the dialog; PUT …/status → ${resp.status()}${j?.code ? ` ${j.code}` : ''}; alert: "${alertText.slice(0, 200)}"; toast: "${toast.slice(0, 120)}"; ` +
+            `the server's message shown: ${msgShown}; the list re-read: ${listReloaded}; C's row still listed after it: ${stays}; its select shows "${after}"; stored status "${stored0}" → "${stored}"; ` +
+            `created for C: ${made.users.length} account(s), ${made.investors.length} investor record(s), ${made.trucks.length} truck(s)`,
+          verdict: verdict(resp.status() === 409 && j?.code === 'USER_ALREADY_EXISTS' && msgShown && stays && after === stored && stored === stored0 && !made.users.length && !made.investors.length && !made.trucks.length),
+          shot: s,
+        }
+      })
+
+    // ---- F7c: a status change on a removed application is refused
+    // E is removed (API soft delete) while the open list still shows it. The refusal
+    // re-reads the list, which no longer has E: its row going away is the expected end.
+    await step('F7c', 'Refused save on a removed application: QA-TEST application E is removed (API soft delete; the open list is not refreshed), then "Reviewed" is picked in its still-listed row',
+      'The server refuses it (409 APPLICATION_DELETED) and the page shows the server\'s message; after the list reloads E\'s row is gone (or, if still listed, its select shows the stored status)', sa, 'f7c-removed-refused', async () => {
         if (!st.apps.E) throw skip('application E (F13) was not created')
         await sa.goto(`${BASE_URL}/investor-applications`)
         const row = appRow(sa, EMAIL('E'))
@@ -8695,21 +8846,37 @@ async function investorFixesSection() {
         const del = await api(sa, 'DELETE', `/api/investor-applications/${st.apps.E}`)
         await sa.waitForTimeout(1500)
         if (!(await row.isVisible())) throw skip(`the list refreshed after the delete (${codeOf(del)}), so there is no stale row to pick in`)
+        const statusPath = `/api/investor-applications/${st.apps.E}/status`
+        uiProbe('F7c', 'PUT', new RegExp(`^${statusPath}$`))
         const onDialog = (d) => d.accept().catch(() => {})
         sa.on('dialog', onDialog)
         try {
-          await caption(sa, `Step F7b — application E removed (DELETE → ${codeOf(del)}); pick "Reviewed" in its still-listed row`)
+          await caption(sa, `Step F7c — application E removed (DELETE → ${codeOf(del)}); pick "Reviewed" in its still-listed row`)
+          const reloaded = nextListLoad(sa)
           const [resp] = await Promise.all([
-            sa.waitForResponse((r) => pathOf(r.url()) === `/api/investor-applications/${st.apps.E}/status`, { timeout: 30000 }),
+            sa.waitForResponse((r) => pathOf(r.url()) === statusPath && r.request().method() === 'PUT', { timeout: 30000 }),
             row.locator('select').selectOption('Reviewed'),
           ])
           const j = await resp.json().catch(() => null)
           const toast = await toastText(sa, 4000)
-          await sa.waitForTimeout(800)
-          const after = await row.locator('select').inputValue()
-          const stored = q1('SELECT status FROM investor_applications WHERE id = ?', st.apps.E)?.status
-          await caption(sa, `Step F7b — PUT → ${resp.status()}${j?.code ? ` ${j.code}` : ''}; the select shows "${after}", the server holds "${stored}"`)
-          return { observed: `DELETE → ${codeOf(del)}; PUT …/status "Reviewed" → ${resp.status()}${j?.code ? ` ${j.code}` : ''}; toast "${toast.slice(0, 120)}"; the select shows "${after}" (was "${before}"); stored status "${stored}"`, verdict: verdict(resp.status() >= 400 && after === stored) }
+          const alert = statusAlert(sa, /was not set to Reviewed/)
+          await alert.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {})
+          const alertText = norm(await alert.innerText().catch(() => ''))
+          const listReloaded = await reloaded
+          await sa.waitForTimeout(1000)
+          const gone = listReloaded && (await row.count()) === 0
+          const after = gone ? '(row gone)' : await row.locator('select').inputValue({ timeout: 5000 }).catch(() => '(unreadable)')
+          const stored = statusOf('E')
+          const deletedAt = !!q1('SELECT deleted_at FROM investor_applications WHERE id = ?', st.apps.E)?.deleted_at
+          const msgShown = !!j?.error && alertText.includes(norm(j.error))
+          await caption(sa, `Step F7c — PUT → ${resp.status()}${j?.code ? ` ${j.code}` : ''}; the server's message shown: ${msgShown}; E's row after the reload: ${gone ? 'gone' : `select "${after}"`}`)
+          const s = await ifxShot(sa, 'f7c-removed-refused')
+          return {
+            observed: `DELETE → ${codeOf(del)} (removed: ${deletedAt}); PUT …/status "Reviewed" → ${resp.status()}${j?.code ? ` ${j.code}` : ''}; alert: "${alertText.slice(0, 220)}"; toast: "${toast.slice(0, 120)}"; ` +
+              `the server's message shown: ${msgShown}; the list re-read: ${listReloaded}; E's row after it: ${gone ? 'gone (the list no longer has the removed application)' : `still listed, select "${after}" (was "${before}")`}; stored status "${stored}"`,
+            verdict: verdict(resp.status() === 409 && j?.code === 'APPLICATION_DELETED' && msgShown && stored === before && (gone || after === stored)),
+            shot: s,
+          }
         } finally { sa.off('dialog', onDialog) }
       })
 
@@ -8738,11 +8905,16 @@ async function investorFixesSection() {
       })
 
     // ---- F14: the public onboarding banking route
-    await step('F14', 'A public page (no session) sends POST /api/public/investor-onboarding/<P>/banking with accepted QA-TEST application P\'s access token (read from the copy, never printed)',
-      '404: the route no longer exists; P\'s bank row unchanged', pub2, 'f14-public-banking', async () => {
+    // New applications get no access token (the token routes were removed, and so was
+    // minting one), so the request carries a well-formed random one, in the shape the
+    // removed routes checked (a UUID, in the query and the body): the route must be gone
+    // whatever token is sent. Never printed.
+    await step('F14', 'A public page (no session) sends POST /api/public/investor-onboarding/<P>/banking for accepted QA-TEST application P, with a well-formed random access token (new applications get none; never printed)',
+      '404: the route no longer exists, whatever token is sent; P\'s bank row unchanged', pub2, 'f14-public-banking', async () => {
         if (!st.apps.P) throw skip('application P was not created')
-        const tok = q1('SELECT access_token FROM investor_applications WHERE id = ?', st.apps.P)?.access_token
-        if (!tok) throw skip('application P has no access token')
+        // The column defaults to '' now that nothing mints a token: '' or NULL is none.
+        const stored = q1('SELECT access_token FROM investor_applications WHERE id = ?', st.apps.P)?.access_token || ''
+        const tok = crypto.randomUUID()
         const bank = () => q1('SELECT bank_name, account_type, routing_number, account_number FROM investor_payment_info WHERE application_id = ?', st.apps.P)
         const before = bank()
         const stBefore = q1('SELECT status FROM investor_applications WHERE id = ?', st.apps.P)?.status
@@ -8750,8 +8922,8 @@ async function investorFixesSection() {
         await pub2.waitForLoadState('load')
         const r = await pub2.evaluate(async ({ id, tok }) => {
           const res = await fetch(`/api/public/investor-onboarding/${id}/banking?token=${encodeURIComponent(tok)}`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-            body: JSON.stringify({ bank_name: 'QA-TEST CHANGED BANK', account_type: 'Savings', routing_number: '999999999', account_number: '000999888777', account_name: 'QA-TEST changed' }),
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-QA-Probe': 'F14' },
+            body: JSON.stringify({ accessToken: tok, bank_name: 'QA-TEST CHANGED BANK', account_type: 'Savings', routing_number: '999999999', account_number: '000999888777', account_name: 'QA-TEST changed' }),
           })
           let json = null
           try { json = await res.json() } catch { /* not json */ }
@@ -8760,9 +8932,9 @@ async function investorFixesSection() {
         const after = bank()
         const changed = JSON.stringify(before) !== JSON.stringify(after)
         const stAfter = q1('SELECT status FROM investor_applications WHERE id = ?', st.apps.P)?.status
-        const observed = `→ ${codeOf(r)}${errOf(r)}; P's bank row ${changed ? `CHANGED (bank name now "${after?.bank_name}")` : 'unchanged'}; application status ${stBefore} → ${stAfter}`
+        const observed = `P's stored access token: ${stored ? 'present (not used, not printed)' : 'none'}; sent a random UUID token → ${codeOf(r)}${errOf(r)}; P's bank row ${changed ? `CHANGED (bank name now "${after?.bank_name}")` : 'unchanged'}; application status ${stBefore} → ${stAfter}`
         await caption(pub2, `Step F14 — ${observed}`)
-        await evidence(pub2, ['F14 — public page, no session, page fetch', `POST /api/public/investor-onboarding/${st.apps.P}/banking?token=<P's token>`, `→ ${codeOf(r)}`, `P's bank row changed: ${changed}`])
+        await evidence(pub2, ['F14 — public page, no session, page fetch', `POST /api/public/investor-onboarding/${st.apps.P}/banking?token=<a random UUID>`, `→ ${codeOf(r)}`, `P's bank row changed: ${changed}`])
         return { observed, verdict: verdict(r.status === 404 && !changed) }
       })
 
@@ -8777,6 +8949,7 @@ async function investorFixesSection() {
         const n = db.prepare('DELETE FROM investors WHERE id = ?').run(st.recId).changes
         ifxForget('investors', st.recId)
         await caption(sa, `Step F12c — ${NAME('REC')} was just removed in the copy; press Remove on its stale row, then Delete`)
+        uiProbe('F12c', 'DELETE', new RegExp(`^/api/investors/${st.recId}$`))
         await row.locator('button.btn-remove').click()
         const dlg = sa.locator('.confirm-dialog', { hasText: 'Delete Investor' })
         await dlg.waitFor({ state: 'visible', timeout: 10000 })
@@ -8791,22 +8964,47 @@ async function investorFixesSection() {
         return { observed: `removed in the copy (${n} row); DELETE → ${resp.status()} "${j?.error || ''}"; toast: "${toast}"`, verdict: verdict(resp.status() >= 400 && !!j?.error && toast.includes(j.error)), shot: s }
       })
   } finally {
-    // ---- FXc: browser console errors on the screens this section opened
+    // ---- FXc: every failing resource and console error on the screens this section opened
+    // Each failing resource with its page, method, path and status, split by source: the
+    // run's own probes (its page fetches carry X-QA-Probe; a UI request a step makes on
+    // purpose is registered by uiProbe) and the harness's logisx.com block, apart from
+    // what the app sent by itself. A "Failed to load resource" console line is matched
+    // to its resource by path; any other console error is listed with its text.
     {
+      const idOf = (p) => String(p).replace(/\/\d+(?=\/|$)/g, '/:id')
+      const tally = (rows) => {
+        const m = new Map()
+        for (const f of rows) {
+          const k = `${f.who} on ${idOf(f.where)}: ${f.method} ${f.path} → ${f.status}${f.source === 'app' ? '' : ` [${f.source}]`}`
+          m.set(k, (m.get(k) || 0) + 1)
+        }
+        return [...m].map(([k, n]) => `${k} ×${n}`).join('; ') || 'none'
+      }
+      const fromApp = failed.filter((f) => f.source === 'app')
+      const fromRun = failed.filter((f) => f.source !== 'app')
+      const lines = [`failing resources the app sent by itself: ${tally(fromApp)}`, `failing resources from the run's own probes: ${tally(fromRun)}`]
+      const resLines = consoleErrs.filter((e) => e.res)
+      const bySource = new Map()
+      const unmatched = new Map()
+      for (const e of resLines) {
+        const hit = failed.find((f) => f.who === e.who && f.path === e.res)
+        const k = hit ? (hit.source === 'app' ? 'the app' : 'the run\'s probes') : `${e.who}: ${e.res}`
+        const into = hit ? bySource : unmatched
+        into.set(k, (into.get(k) || 0) + 1)
+      }
+      lines.push(`console "Failed to load resource" lines: ${resLines.length}${resLines.length ? ` (${[...bySource].map(([k, n]) => `${n} from ${k}`).join(', ') || 'none matched'}${unmatched.size ? `; not matched to a failing response: ${[...unmatched].map(([k, n]) => `${k} ×${n}`).join('; ')}` : ''})` : ''}`)
       const groups = new Map()
-      for (const e of consoleErrs) {
-        const k = `${e.who} ${e.where}`
+      for (const e of consoleErrs.filter((x) => !x.res)) {
+        const k = `${e.who} ${idOf(e.where)}`
         if (!groups.has(k)) groups.set(k, { n: 0, texts: new Set() })
         const gr = groups.get(k); gr.n++
         if (gr.texts.size < 3) gr.texts.add(visible(e.text).replace(/\s+/g, ' ').slice(0, 170))
       }
-      const lines = [...groups].map(([k, gr]) => `${k}: ${gr.n} — ${[...gr.texts].map((t) => `"${t}"`).join(' | ')}`)
-      const fails = new Map()
-      for (const f of failedApi) { const k = `${f.who} on ${f.where.replace(/\/\d+(?=\/|$)/g, '/:id')}: ${f.what}`; fails.set(k, (fails.get(k) || 0) + 1) }
-      if (fails.size) lines.push(`failing responses (4xx/5xx) behind them: ${[...fails].map(([k, n]) => `${k} ×${n}`).join('; ')}`)
-      record({ step: 'FXc', title: 'Browser console errors (console.error and uncaught) on /invest, /investors, /investor-applications, /investor-portals, Admin Tools, Expenses and the QA-TEST investors\' portal', expected: '(recorded, not scored)', observed: lines.join(' · ') || 'none', verdict: 'INFO', shot: '' })
+      lines.push(`other console errors: ${[...groups].map(([k, gr]) => `${k}: ${gr.n} — ${[...gr.texts].map((t) => `"${t}"`).join(' | ')}`).join(' · ') || 'none'}`)
+      record({ step: 'FXc', title: 'Failing resources and browser console errors (console.error and uncaught) on /invest, /investors, /investor-applications, /investor-portals, Admin Tools, Expenses and the QA-TEST investors\' portal, each marked as the run\'s own probe or the app\'s', expected: '(recorded, not scored)', observed: lines.join(' · '), verdict: 'INFO', shot: '' })
     }
     // ---- FXz: remove everything this section made (the API first, then the copy by exact id)
+    apiProbeTag = 'FXz'
     const notes = []
     for (const c of contexts.slice(1)) await c.close().catch(() => {})
     try {
@@ -8885,6 +9083,7 @@ async function investorFixesSection() {
     } catch (e) { ok = false; notes.push(`copy clean-up error: ${e.message}`) }
     record({ step: 'FXz', title: 'Clean-up: every QA-TEST account, investor record, truck, legal document and application this section made, its planted rows and side rows', expected: 'All removed; the global split as it was at the start; no plant journal left', observed: `${notes.join('; ')}; plant journal ${fs.existsSync(JOURNAL) ? 'STILL PRESENT' : 'gone'}`, verdict: verdict(ok && !fs.existsSync(JOURNAL)), shot: '' })
     for (const c of contexts) await c.close().catch(() => {})
+    apiProbeTag = null
     if (ownDb && db) { try { db.close() } catch { /* ignore */ } db = null }
   }
 }
