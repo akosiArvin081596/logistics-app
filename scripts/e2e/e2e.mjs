@@ -85,6 +85,24 @@
 //      (I8b); the pre-filled note is labelled "carried over" until it is typed into
 //      (I8h) · I9 the server refuses a bad note or Order #
 //
+// Investor terms section (T0-T11; ONLY=terms, STEPS picks steps):
+//   T0 (no sign-in, no creds file needed): two test investors (QA-TEST Investor
+//   A / B) fill /invest in fresh anonymous contexts, open the Master Participation
+//   & Management Agreement and the Commercial Vehicle Lease on the signature page,
+//   sign all three documents, and open both again from the review modal ("Signed —
+//   View Document"). Every preview PDF is read: the default 50/50 terms, no
+//   AMENDMENT, and the same §3.3 / §2.01 wording for A and B. The application is
+//   NEVER submitted (every write but the preview route is blocked in the page).
+//   T1-T11 (per-investor payment terms; the Super Admin and one throwaway test
+//   Investor sign in): T1/T2 the Super Admin creates a split and a lease invite on
+//   /investors · T3-T5 an anonymous applicant opens each link: read-only terms,
+//   the amendment in the preview PDFs, the page never sends terms · T6 plain
+//   /invest is today's contract · T7 terms cannot be changed through the API ·
+//   T8 the lease application is submitted and the invite is used (local, or
+//   E2E_TERMS_SUBMIT=1) · T9 a revoke stops a tab mid-flow · T10 the investor
+//   detail modal survives a list refresh · T11 an edit mid-flow clears the
+//   signatures · Tc revokes, deletes and hard-deletes what the run made
+//
 // Env:
 //   BASE_URL    required — e.g. http://127.0.0.1:3181 (never production)
 //   PHASE       before | after            (default: before) — names the output
@@ -93,8 +111,9 @@
 //               stored values for the serve-side cases (steps 10, 11b-f, R3, R15),
 //               to stage and clean up R16, to plant and read back E1, N1, N1b, E2
 //               and B1 (and P1's own driver), to delete the rows RC1's import
-//               writes, and to plant (and delete) I8's saved invoice note. Unset ->
-//               those cases are SKIPPED (P1 then uses a real driver, as on staging).
+//               writes, to plant (and delete) I8's saved invoice note, and to let T8
+//               submit a test application and hard-delete it by id. Unset -> those
+//               cases are SKIPPED (P1 then uses a real driver, as on staging).
 //   CREDS_FILE  logins JSON (default: <work dir>/creds.json, written by setup-db.cjs)
 //   E2E_WORK_DIR  where every output goes (default: $TMPDIR/logisx-e2e; see paths.cjs)
 //   APP_DIR     checkout whose node_modules provides better-sqlite3 and puppeteer
@@ -108,13 +127,18 @@
 //   ONLY        a comma-separated list of sections: trucks (1-12, R1-R16), signout
 //               (S1-S7), dispatcher (D1-D3), maintenance (M1), moneypath (P1, E1,
 //               N1, N1b, F1, E2, B1, RC1), names (K1, K2, K3), eldlink (L1-L3),
-//               invoice (I1-I9). Unset = all, in that
+//               invoice (I1-I9), terms (T0-T11). Unset = all, in that
 //               order. ⚠️ The sections together sign in more often than the login
 //               limiter allows one server process (see README), so split a full run.
-//   STEPS       only these cases of the sign-out, money-path and invoice sections,
-//               e.g. STEPS=S5a,S7 or STEPS=P1,F1 or STEPS=E2,B1,RC1 (P1 selects P1a
-//               and P1b; N1 selects N1 and N1b) or STEPS=I8,I9 (I1 opens the editor
-//               whenever any of I1-I7 is picked)
+//   STEPS       only these cases of the sign-out, money-path, invoice and terms
+//               sections, e.g. STEPS=S5a,S7 or STEPS=P1,F1 or STEPS=E2,B1,RC1 (P1
+//               selects P1a and P1b; N1 selects N1 and N1b) or STEPS=I8,I9 (I1 opens
+//               the editor whenever any of I1-I7 is picked) or STEPS=T0 then
+//               STEPS=T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11 (a terms step also runs the
+//               steps it builds on; T0 and T1-T11 together render more previews
+//               than the preview limiter allows one IP in 15 minutes)
+//   E2E_TERMS_SUBMIT=1  let T8 submit the lease application on a server that is
+//               not local (it writes an application; locally DB_PATH enables it)
 //   E2E_INVOICE_APPROVE=1  let I7 press Approve on a server that is not local (it
 //               would create a real Gmail draft wherever the server has a mail target)
 //   S3_LATENCY_MS, S3_KBPS     the CDP throttle of S3, S6 and S7 (default +2500 ms per
@@ -126,6 +150,7 @@
 // Every "Expected" column states the behaviour AFTER the fixes; a BEFORE run is
 // expected to FAIL the fix rows — that is the baseline.
 import { chromium } from 'playwright-core'
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -142,7 +167,7 @@ const SLOWMO = Number(process.env.SLOWMO ?? (HEADED ? 350 : 0))
 const [DVW, DVH] = String(process.env.DRIVER_VIEWPORT || '430x900').split('x').map(Number)
 // ONLY picks sections, e.g. ONLY=signout or ONLY=trucks,dispatcher. Unset = all.
 const ONLY = String(process.env.ONLY || '').toLowerCase()
-const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypath', 'names', 'eldlink', 'invoice']
+const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypath', 'names', 'eldlink', 'invoice', 'terms']
 // Sign-ins (POST /api/auth/login) each section makes; the limiter allows 20 per 15
 // minutes per server process. The sign-out section's figure is its worst case: S4a's
 // second half runs, and the build sends S7's second sign-in (one fewer for each
@@ -151,8 +176,14 @@ const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypa
 // more when E1 has to file on the driver's behalf.
 // The names section signs the Dispatcher in once (K1 and K3 share the page) and
 // the Super Admin once (K2 reads the dashboard and Financials). The invoice section
-// signs the Super Admin in once; every step shares that page.
-const SIGN_INS = { trucks: 3, signout: 20, dispatcher: 2, maintenance: 3, moneypath: 3, names: 2, eldlink: 1, invoice: 1 }
+// signs the Super Admin in once; every step shares that page. The terms section's T0
+// signs nobody in (/invest is public, and it redirects a signed-in user); T1-T11
+// sign the Super Admin in once and T7's throwaway test Investor once.
+const SIGN_INS = { trucks: 3, signout: 20, dispatcher: 2, maintenance: 3, moneypath: 3, names: 2, eldlink: 1, invoice: 1, terms: 2 }
+// Sections that need no login at all, so they run without a creds file (e.g. on
+// staging, where no staging logins need to exist for them). The terms section is
+// one only while STEPS picks T0 alone (see TERMS_NEEDS_LOGIN).
+const NO_LOGIN_SECTIONS = new Set(['terms'])
 
 function die(msg) { console.error(`e2e: ${msg}`); process.exit(2) }
 if (!BASE_URL) die('BASE_URL is required')
@@ -164,16 +195,46 @@ const runs = (s) => SECTIONS.has(s)
 // timing-sensitive case without spending the login limiter on the rest. Each of
 // those cases has its own browser context, so any subset runs on its own. The
 // money-path section takes it too (e.g. STEPS=P1,F1), and so does the invoice section
-// (e.g. STEPS=I8,I9); the other sections ignore it.
+// (e.g. STEPS=I8,I9), and the terms section (TERMS_PLAN below); the other sections
+// ignore it.
 const STEPS = process.env.STEPS ? new Set(String(process.env.STEPS).split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)) : null
 const wantStep = (id) => !STEPS || STEPS.has(id.toUpperCase())
+// The terms section's steps. A step picked with STEPS also runs the steps it builds
+// on (their rows are recorded too): T3 and T9 use T1's split invite, T4 and T7 T2's
+// lease invite, T5 continues T4's tab and T8 submits T5's application.
+const TERMS_STEP_IDS = ['T0', 'T1', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'T8', 'T9', 'T10', 'T11']
+const TERMS_DEPS = { T3: ['T1'], T9: ['T1'], T4: ['T2'], T5: ['T4'], T7: ['T2'], T8: ['T5'] }
+// Renders of POST /api/public/investor-preview-pdf each step makes; the route allows
+// 30 per 15 minutes per IP. T0: two investors × (3 opens + 3 re-renders after
+// signing + 2 from the review). T4: master and lease, open + sign. T5: the W-9 open +
+// sign, the master from the review. T6: master open + sign, lease open. T11: master
+// open + sign, the lease open, and the re-render the page may send once it has
+// reloaded the edited terms.
+const TERMS_PREVIEWS = { T0: 16, T3: 1, T4: 4, T5: 3, T6: 3, T7: 1, T9: 1, T11: 4 }
+const TERMS_PLAN = (() => {
+  const plan = new Set(TERMS_STEP_IDS.filter((id) => !STEPS || STEPS.has(id)))
+  for (let grew = true; grew;) {
+    grew = false
+    for (const id of [...plan]) for (const dep of TERMS_DEPS[id] || []) if (!plan.has(dep)) { plan.add(dep); grew = true }
+  }
+  return runs('terms') ? plan : new Set()
+})()
+const TERMS_NEEDS_LOGIN = [...TERMS_PLAN].some((id) => id !== 'T0')
 let baseHost = ''
 try { baseHost = new URL(BASE_URL).hostname.replace(/\.+$/, '') } catch { die(`BASE_URL is not a URL: ${BASE_URL}`) }
 if (/(^|\.)app\.logisx\.com$/i.test(baseHost)) die('refusing to run against production')
 // A server on this machine (M1 runs only here: the notice is off on staging).
 const LOCAL = /^(127\.0\.0\.1|localhost|\[?::1\]?)$/i.test(baseHost)
 {
-  const planned = [...SECTIONS].reduce((n, s) => n + SIGN_INS[s], 0)
+  const renders = [...TERMS_PLAN].reduce((n, id) => n + (TERMS_PREVIEWS[id] || 0), 0)
+  if (renders > 30) {
+    console.warn(`e2e: WARNING: the terms steps picked render about ${renders} previews, and POST /api/public/investor-preview-pdf ` +
+      'allows 30 per 15 minutes per IP. Expect 429s late in the run: run STEPS=T0, then STEPS=T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11 ' +
+      'on a fresh server process (on staging, 15 minutes later).')
+  }
+}
+{
+  const planned = [...SECTIONS].reduce((n, s) => n + (s === 'terms' && !TERMS_NEEDS_LOGIN ? 0 : SIGN_INS[s]), 0)
   if (planned > 20) {
     console.warn(`e2e: WARNING: these sections sign in up to ${planned} times, and POST /api/auth/login allows 20 per 15 minutes ` +
       'per server process. Expect 429s late in the run: split it with ONLY and restart the server between the parts.')
@@ -195,8 +256,10 @@ if (fs.existsSync(JOURNAL)) {
   die(`${JOURNAL} exists: a previous run died while a planted value was in the DB. ` +
     'Recreate the scratch DB (node scripts/e2e/setup-db.cjs <db> --force), then delete the journal.')
 }
-if (!fs.existsSync(CREDS_FILE)) die(`no creds file at ${CREDS_FILE} (make one with scripts/e2e/setup-db.cjs, or set CREDS_FILE)`)
-const CREDS = JSON.parse(fs.readFileSync(CREDS_FILE, 'utf8'))
+const NEEDS_CREDS = [...SECTIONS].some((s) => !NO_LOGIN_SECTIONS.has(s)) || TERMS_NEEDS_LOGIN
+if (NEEDS_CREDS && !fs.existsSync(CREDS_FILE)) die(`no creds file at ${CREDS_FILE} (make one with scripts/e2e/setup-db.cjs, or set CREDS_FILE)`)
+// Only the login-free sections (terms with STEPS=T0) may run without one; they never read it.
+const CREDS = fs.existsSync(CREDS_FILE) ? JSON.parse(fs.readFileSync(CREDS_FILE, 'utf8')) : {}
 fs.mkdirSync(SHOTS, { recursive: true })
 for (const f of fs.readdirSync(SHOTS)) if (f.endsWith('.png')) fs.unlinkSync(path.join(SHOTS, f))
 
@@ -219,6 +282,7 @@ function writeResults(final = false) {
     runs('names') && 'names (K1, K2, K3)',
     runs('eldlink') && 'ELD link (L1-L3)',
     runs('invoice') && 'invoice editor (I1-I9)',
+    runs('terms') && `investor terms (${[...TERMS_PLAN].join(', ') || 'no step picked'})`,
   ].filter(Boolean).join(' + ')
   const lines = [
     `# ${title} — ${PHASE.toUpperCase()}`,
@@ -665,6 +729,12 @@ async function main() {
     try { await invoiceSection() } catch (e) {
       exitCode = 1
       record({ step: 'I!', title: 'Invoice editor section aborted', expected: '', observed: e.stack?.split('\n').slice(0, 3).join(' ') || String(e), verdict: 'FAIL', shot: '' })
+    }
+  }
+  if (runs('terms')) {
+    try { await termsSection() } catch (e) {
+      exitCode = 1
+      record({ step: 'T!', title: 'Investor terms section aborted', expected: '', observed: e.stack?.split('\n').slice(0, 3).join(' ') || String(e), verdict: 'FAIL', shot: '' })
     }
   }
 }
@@ -5985,6 +6055,1748 @@ async function invoiceSection() {
     await ctx.close().catch(() => {})
     if (ownDb && db) { try { db.close() } catch { /* ignore */ } db = null }
   }
+}
+
+// ---------------------------------------------------------------- investor terms (T0)
+// T0 records what a prospective investor is shown on /invest TODAY, before any
+// change to the payment terms: the Master Participation & Management Agreement and
+// the Commercial Vehicle Lease, both on the signature page (InvestorSignModal.vue)
+// and from the review modal ("Signed — View Document"), for two different test
+// investors. Every document is the stateless preview PDF of
+// POST /api/public/investor-preview-pdf/<docKey>, read with the app's own pdfjs-dist.
+//
+// No sign-in (the page is public and redirects a signed-in user), so each investor
+// gets a FRESH anonymous context. Identities are fake: "QA-TEST Investor A|B <stamp>",
+// a QA-TEST address, an example.com email, all-zero EIN and bank numbers.
+// ⚠️ The application is never submitted. Besides not pressing the button, every
+// request from these pages that is not a GET and not the preview route is aborted
+// in the browser (T0l records any that was attempted).
+//
+// How the PDF is read: the page reads each preview with `res.blob()`, and Chromium
+// keeps no copy of a body read that way, so `Response.body()` answers empty. The
+// preview request is therefore passed through a route: `route.fetch()` sends the
+// page's own request (method, headers, body, cookies) to the server, the harness
+// keeps the bytes, and `route.fulfill()` hands the page that exact response.
+//
+// Budget: the preview route allows 30 renders per 15 minutes per IP. Each investor
+// makes 8 (open ×3, the re-render after each signature ×3, the review ×2), so one
+// run makes 16: a second run against the same server within 15 minutes runs out.
+const TERMS_DOCS = {
+  master_agreement: 'Master Participation & Management Agreement',
+  vehicle_lease: 'Commercial Vehicle Lease Agreement',
+  w9: 'W-9 Tax Form',
+}
+const TERMS_EXPECTED = 'default 50/50 terms, no AMENDMENT, identical for A and B'
+const TERMS_PREVIEW = '/api/public/investor-preview-pdf/'
+const flatText = (pt) => String(pt?.text || '').replace(/\s+/g, ' ').trim()
+// The text between two anchors (the second searched after the first), whitespace
+// collapsed; '' when either is missing.
+function between(flat, from, to) {
+  const i = flat.indexOf(from)
+  if (i < 0) return ''
+  const j = flat.indexOf(to, i + from.length)
+  return j < 0 ? '' : flat.slice(i, j).trim()
+}
+const countOf = (hay, needle) => {
+  if (!needle) return 0
+  let n = 0; let i = hay.indexOf(needle)
+  while (i >= 0) { n++; i = hay.indexOf(needle, i + needle.length) }
+  return n
+}
+// Images painted in a PDF, with the same pdfjs-dist as pdfText (loaded by it). The
+// renderer REPLACES the signer's signature slot with the drawn image, so the typed
+// name is never printed there: a signed copy shows its signature as extra images.
+async function pdfImageCount(b64) {
+  if (!b64 || !pdfjsLib) return null
+  const { OPS } = pdfjsLib
+  const paint = new Set([OPS.paintImageXObject, OPS.paintInlineImageXObject, OPS.paintImageMaskXObject, OPS.paintImageXObjectRepeat].filter((x) => x != null))
+  const task = pdfjsLib.getDocument({ data: new Uint8Array(Buffer.from(b64, 'base64')), isEvalSupported: false, disableFontFace: true, useSystemFonts: false, verbosity: 0 })
+  const doc = await task.promise
+  let n = 0
+  try {
+    for (let i = 1; i <= doc.numPages; i++) {
+      const ops = await (await doc.getPage(i)).getOperatorList()
+      for (const fn of ops.fnArray) if (paint.has(fn)) n++
+    }
+  } finally { await task.destroy().catch(() => {}) }
+  return n
+}
+// What T0 reads off one preview PDF.
+function termsFacts(pt, typedName) {
+  const flat = flatText(pt)
+  const squeezed = flat.replace(/\s+/g, '')
+  return {
+    split5050: flat.includes('distributed according to a 50/50 split'),
+    participant50: flat.includes('Participant Distribution (50%)'),
+    lease5050: flat.includes('50/50 profit participation model'),
+    amendment: flat.includes('AMENDMENT'), // case-sensitive: the boilerplate "amendment(s)" is not it
+    s33: between(flat, '3.3 Revenue Participation', '3.4 Settlement Cycle'),
+    s201: between(flat, '2.01 Lease Payments', '2.02'),
+    nameCount: countOf(squeezed, String(typedName || '').replace(/\s+/g, '')),
+    pages: pt?.pages ?? 0,
+  }
+}
+
+// The /invest walk-through a person makes (InvestorApplyView.vue), shared by T0 and
+// T3-T11. All data is fake: a QA-TEST name, address and example.com email, all-zero
+// EIN and bank numbers.
+const investTgt = (page, name) => page.locator(`[data-wizard-target="${name}"]`)
+const investField = (page, label) => page.locator('.step-panel .field', { has: page.locator('label', { hasText: exactText(label) }) }).locator('input, select').first()
+const investPauseBlur = async (page) => { await page.keyboard.press('Tab'); await page.waitForTimeout(350) }
+// The guided wizard opens itself ~1.2 s after load; close it as a person would.
+async function closeInvestGuide(page) {
+  try {
+    const closeGuide = page.locator('.wizard-panel button[aria-label="Close guide"]')
+    await closeGuide.waitFor({ state: 'visible', timeout: 5000 })
+    await closeGuide.click()
+  } catch { /* it did not open: nothing to close */ }
+}
+// Step 1 of 3: the application. The name is both the legal name and the contact. A
+// field an invite link pre-filled and locked is left as it is. Returns the legal name
+// the form holds.
+async function fillInvestApplication(page, { name, letter, idx, email }) {
+  const tgt = (n) => investTgt(page, n)
+  const field = (l) => investField(page, l)
+  const put = async (loc, v) => { if (await loc.isEditable()) await loc.fill(v) }
+  const pick = async (loc, v) => { if (await loc.isEnabled()) await loc.selectOption(v) }
+  await put(tgt('legal-name'), name)
+  await put(tgt('dba'), `QA-TEST DBA ${letter}`)
+  await pick(tgt('entity-type'), 'LLC')
+  await put(tgt('address'), `${100 + idx} QA-TEST Street, Testville, TX 75001`)
+  await put(field('Primary Contact Person'), name)
+  await pick(field('Title'), 'Owner')
+  await put(tgt('phone'), `(555) 010-01${String(idx).padStart(2, '0')}`)
+  await put(tgt('email'), email)
+  await put(field('Years in Operation'), '3')
+  await pick(field('Industry Experience'), 'Yes')
+  await pick(field('Preferred Communication'), 'Email')
+  await pick(field('Tax Classification'), 'Individual/LLC')
+  await put(tgt('ein-ssn'), `00-000000${idx % 10}`)
+  await pick(field('Monthly Reporting Delivery'), 'Digital Portal')
+  await investPauseBlur(page)
+  return tgt('legal-name').inputValue()
+}
+// Step 2 of 3: one fake vehicle (the documents are signed separately).
+async function fillInvestFleet(page, letter) {
+  const tgt = (n) => investTgt(page, n)
+  await tgt('fleet-size').waitFor({ state: 'visible' })
+  await tgt('fleet-size').fill('1')
+  await tgt('vehicle-make').selectOption('Freightliner')
+  await tgt('vehicle-model').selectOption('Cascadia')
+  await tgt('vehicle-year').fill('2020')
+  await tgt('vehicle-vin').fill(`QATEST0000000000${letter}`)
+  await investField(page, 'License Plate').fill(`QA-${letter}01`)
+  await investField(page, 'Current Mileage').fill('100000')
+  await investPauseBlur(page)
+}
+// In the open signature page: consent, the typed name and a drawn signature, as a
+// person signs. Returns the Sign Document button, which must then be enabled.
+async function drawInvestSignature(page, docKey, name) {
+  await page.locator('.modal-overlay .sign-checkbox input[type="checkbox"]').check()
+  await page.locator('.modal-overlay .sign-input').fill(name)
+  await investPauseBlur(page) // closes the suggested-names list, which sits over the canvas
+  const canvas = page.locator('.modal-overlay .sig-canvas')
+  await canvas.scrollIntoViewIfNeeded().catch(() => {})
+  const box = await canvas.boundingBox()
+  if (!box) throw new Error(`${docKey}: no signature canvas`)
+  const pts = [[0.12, 0.62], [0.2, 0.3], [0.28, 0.7], [0.36, 0.35], [0.46, 0.66], [0.56, 0.32], [0.66, 0.6], [0.78, 0.4], [0.88, 0.55]]
+  await page.mouse.move(box.x + box.width * pts[0][0], box.y + box.height * pts[0][1])
+  await page.mouse.down()
+  for (const [px, py] of pts.slice(1)) await page.mouse.move(box.x + box.width * px, box.y + box.height * py, { steps: 4 })
+  await page.mouse.up()
+  const signBtn = page.locator('.modal-overlay .sign-btn')
+  if (!(await signBtn.isEnabled())) throw new Error(`${docKey}: Sign Document stayed disabled after consent, name and drawing`)
+  return signBtn
+}
+// Step 3 of 3: fake banking (all zeros).
+async function fillInvestBanking(page, name, idx) {
+  const tgt = (n) => investTgt(page, n)
+  await tgt('bank-name').waitFor({ state: 'visible' })
+  await tgt('bank-name').fill('QA-TEST Bank')
+  await investPauseBlur(page)
+  await page.locator('.step-panel .field', { has: page.locator('label', { hasText: exactText('Account Type') }) }).locator('select').selectOption('Business Checking')
+  await page.locator('.step-panel .field', { has: page.locator('label', { hasText: exactText('Name on Account') }) }).locator('input').fill(name)
+  await investPauseBlur(page)
+  await tgt('routing-number').fill('000000000')
+  await tgt('account-number').fill(`0000000000${String(idx).padStart(2, '0')}`)
+  await investPauseBlur(page)
+}
+
+async function termsInvestor(letter, idx) {
+  const out = { letter, name: `QA-TEST Investor ${letter} ${stamp}`, sign: {}, review: {}, keys: [], blocked: [], consoleErrors: [], previews: 0, ok: false, error: '' }
+  const S = (n) => `t0-${letter.toLowerCase()}-${n}`
+  const ctx = await browser.newContext({ viewport: ADMIN_VP })
+  ctx.setDefaultTimeout(30000)
+  const page = await ctx.newPage()
+  // Callers waiting for the next preview of a document (see previewOf below).
+  const waiters = []
+  const settle = (docKey, value) => {
+    const i = waiters.findIndex((w) => w.docKey === docKey)
+    if (i >= 0) waiters.splice(i, 1)[0].resolve(value)
+  }
+  // The safety net: nothing but GETs and the stateless preview route leaves this page.
+  // A preview is passed through, and its bytes kept (see the note at the top of this section).
+  await page.route('**/api/**', async (route) => {
+    const req = route.request()
+    const p = pathOf(req.url())
+    if (req.method() === 'POST' && p.startsWith(TERMS_PREVIEW)) {
+      const docKey = p.slice(TERMS_PREVIEW.length)
+      let resp; let body
+      try {
+        resp = await route.fetch({ timeout: 90000 })
+        body = await resp.body()
+      } catch (e) {
+        settle(docKey, { status: 0, body: null, why: `the request failed: ${e.message.split('\n')[0]}` })
+        return route.abort('failed').catch(() => {})
+      }
+      settle(docKey, { status: resp.status(), body })
+      return route.fulfill({ response: resp, body }).catch(() => {})
+    }
+    if (req.method() === 'GET') return route.continue()
+    out.blocked.push(`${req.method()} ${p}`)
+    return route.abort('blockedbyclient')
+  })
+  page.on('console', (m) => { if (m.type() === 'error') out.consoleErrors.push(`console: ${m.text().slice(0, 240)}`) })
+  page.on('pageerror', (e) => out.consoleErrors.push(`pageerror: ${String(e.message || e).slice(0, 240)}`))
+  page.on('requestfailed', (r) => {
+    const p = pathOf(r.url())
+    if (p.startsWith('/api/') && !out.blocked.some((b) => b.endsWith(p))) out.consoleErrors.push(`requestfailed: ${r.method()} ${p} (${r.failure()?.errorText || '?'})`)
+  })
+  page.on('request', (r) => {
+    if (r.method() !== 'POST' || !pathOf(r.url()).startsWith(TERMS_PREVIEW)) return
+    out.previews++
+    let body = null
+    try { body = r.postDataJSON() } catch { /* not JSON */ }
+    const docKey = pathOf(r.url()).slice(TERMS_PREVIEW.length)
+    out.keys.push({
+      docKey,
+      signed: !!(body && body.signatureText),
+      keys: body ? Object.keys(body).sort() : [],
+      banking: body?.banking && typeof body.banking === 'object' ? Object.keys(body.banking).sort() : [],
+      vehicle: Array.isArray(body?.vehicles) && body.vehicles[0] ? Object.keys(body.vehicles[0]).sort() : [],
+    })
+  })
+  // Resolves with { status, body } of the next preview of `docKey` the page sends.
+  // Call it BEFORE the click that sends it.
+  const previewOf = (docKey) => new Promise((resolve, reject) => {
+    const w = { docKey, resolve }
+    waiters.push(w)
+    setTimeout(() => {
+      const i = waiters.indexOf(w)
+      if (i >= 0) { waiters.splice(i, 1); reject(new Error(`no ${docKey} preview answered within 90 s`)) }
+    }, 95000)
+  })
+  const readPreview = async (r) => {
+    if (r.status !== 200 || !r.body?.length) {
+      return { status: r.status, pt: null, why: r.why || (r.body ? r.body.toString('utf8').slice(0, 160) : '(no body)') }
+    }
+    const b64 = r.body.toString('base64')
+    const pt = await pdfText(b64)
+    return { status: r.status, pt, images: await pdfImageCount(b64), bytes: r.body.length }
+  }
+  const tgt = (name) => investTgt(page, name)
+  // For the screenshot only: point the page's own PDF viewer (the iframe showing the
+  // blob the page made) at the page that carries the clause, with the viewer's
+  // #page= open parameter. The document is not touched.
+  const CLAUSE = { master_agreement: '3.3 Revenue Participation', vehicle_lease: '2.01 Lease Payments' }
+  const showClause = async (frameSel, pt, docKey) => {
+    const n = pt?.items.find((it) => it.str.includes(CLAUSE[docKey]))?.page
+    if (!n) return 0
+    await page.locator(frameSel).evaluate((el, pg) => {
+      const base = el.src.split('#')[0]
+      el.src = 'about:blank'
+      setTimeout(() => { el.src = `${base}#page=${pg}` }, 50)
+    }, n)
+    await page.waitForTimeout(2500)
+    return n
+  }
+
+  try {
+    // ---- the application (step 1 of 3)
+    await page.goto(`${BASE_URL}/invest`)
+    await tgt('legal-name').waitFor({ state: 'visible', timeout: 45000 })
+    await caption(page, `Step T0 — test investor ${letter}: a fresh anonymous browser opens /invest (not signed in)`)
+    await closeInvestGuide(page)
+    await fillInvestApplication(page, { name: out.name, letter, idx, email: `qa-test+${stamp.replace(/\D/g, '')}${letter.toLowerCase()}@example.com` })
+    await caption(page, `Step T0 — ${letter}: the application filled with fake QA-TEST data; Continue`)
+    await shot(page, S('01-application'))
+    await tgt('continue-step0').click()
+
+    // ---- fleet & documents (step 2 of 3)
+    await fillInvestFleet(page, letter)
+    await caption(page, `Step T0 — ${letter}: one fake vehicle; now the documents (step 2 of 3)`)
+    await shot(page, S('02-fleet'))
+
+    const signDoc = async (docKey, n) => {
+      const docName = TERMS_DOCS[docKey]
+      const card = page.locator(`.doc-card[data-wizard-target="doc-${docKey}"]`)
+      const [resp] = await Promise.all([previewOf(docKey), card.click()])
+      const pv = await readPreview(resp)
+      await page.locator('.modal-overlay .pdf-frame').waitFor({ state: 'visible', timeout: 30000 }).catch(() => {})
+      await page.waitForTimeout(1200) // let the viewer paint the PDF for the screenshot
+      if (docKey !== 'w9') {
+        const f = pv.pt ? termsFacts(pv.pt, out.name) : null
+        out.sign[docKey] = { ...pv, facts: f && { ...f, images: pv.images } }
+        await caption(page, `Step T0 — ${letter}: ${docName}, the SIGNATURE page preview (${pv.status}) — ` +
+          (f ? (docKey === 'master_agreement'
+            ? `"50/50 split": ${f.split5050}, "Participant Distribution (50%)": ${f.participant50}, AMENDMENT: ${f.amendment}`
+            : `"50/50 profit participation model": ${f.lease5050}, AMENDMENT: ${f.amendment}`) : `no PDF: ${pv.why}`))
+        out.sign[docKey].shot = await shot(page, S(`${n}-sign-${docKey}`))
+        const at = await showClause('.modal-overlay .pdf-frame', pv.pt, docKey)
+        if (at) {
+          await caption(page, `Step T0 — ${letter}: ${docName}, signature page — the viewer on page ${at}, where "${CLAUSE[docKey]}" is`)
+          await shot(page, S(`${n}a-sign-${docKey}-clause`))
+        }
+      } else {
+        await caption(page, `Step T0 — ${letter}: ${docName}, the signature page (${pv.status})`)
+        await shot(page, S(`${n}-sign-${docKey}`))
+      }
+      // Sign it as a person does: consent, typed name, a drawn signature.
+      const signBtn = await drawInvestSignature(page, docKey, out.name)
+      await caption(page, `Step T0 — ${letter}: ${docName} — consent ticked, name typed, signature drawn; Sign Document`)
+      await shot(page, S(`${n}b-signing-${docKey}`))
+      const [resp2] = await Promise.all([previewOf(docKey), signBtn.click()])
+      await page.locator('.modal-overlay .sign-done').waitFor({ state: 'visible', timeout: 15000 })
+      await page.waitForTimeout(1200)
+      await caption(page, `Step T0 — ${letter}: ${docName} signed (the page re-rendered its preview: ${resp2.status})`)
+      await shot(page, S(`${n}c-signed-${docKey}`))
+      await page.locator('.modal-overlay .modal-close').click()
+      await page.locator('.modal-overlay').waitFor({ state: 'hidden', timeout: 10000 })
+    }
+    await signDoc('master_agreement', '03')
+    await signDoc('vehicle_lease', '04')
+    await signDoc('w9', '05')
+    await caption(page, `Step T0 — ${letter}: all three documents signed; Continue to banking`)
+    await shot(page, S('06-all-signed'))
+    await tgt('continue-step1').click()
+
+    // ---- banking (step 3 of 3), then the review modal
+    await fillInvestBanking(page, out.name, idx)
+    await caption(page, `Step T0 — ${letter}: fake banking (all zeros); Review & Complete opens the review — it does not submit`)
+    await shot(page, S('07-banking'))
+    await tgt('review-open').click()
+    await page.locator('.review-modal').waitFor({ state: 'visible' })
+    await page.locator('.review-modal .doc-view-link').first().scrollIntoViewIfNeeded().catch(() => {})
+    await caption(page, `Step T0 — ${letter}: the REVIEW modal (Documents 3/3 signed). "Confirm & Complete Onboarding" will NOT be pressed`)
+    await shot(page, S('08-review'))
+
+    const reviewDoc = async (docKey, n) => {
+      const docName = TERMS_DOCS[docKey]
+      const link = page.locator('.review-modal .review-item', { has: page.locator('.review-label', { hasText: exactText(docName) }) }).locator('.doc-view-link')
+      const [resp] = await Promise.all([previewOf(docKey), link.click()])
+      const pv = await readPreview(resp)
+      await page.locator('.pdf-viewer-overlay .pdf-viewer-frame').waitFor({ state: 'visible', timeout: 30000 }).catch(() => {})
+      await page.waitForTimeout(1200)
+      const f = pv.pt ? termsFacts(pv.pt, out.name) : null
+      out.review[docKey] = { ...pv, facts: f && { ...f, images: pv.images } }
+      await caption(page, `Step T0 — ${letter}: review → "Signed — View Document": ${docName} (${pv.status}) — ` +
+        (f ? (docKey === 'master_agreement'
+          ? `"50/50 split": ${f.split5050}, "Participant Distribution (50%)": ${f.participant50}, AMENDMENT: ${f.amendment}`
+          : `"50/50 profit participation model": ${f.lease5050}, AMENDMENT: ${f.amendment}`) : `no PDF: ${pv.why}`))
+      out.review[docKey].shot = await shot(page, S(`${n}-review-${docKey}`))
+      const at = await showClause('.pdf-viewer-overlay .pdf-viewer-frame', pv.pt, docKey)
+      if (at) {
+        await caption(page, `Step T0 — ${letter}: ${docName}, review copy — the viewer on page ${at}, where "${CLAUSE[docKey]}" is`)
+        await shot(page, S(`${n}a-review-${docKey}-clause`))
+      }
+      await page.locator('.pdf-viewer-overlay .review-close').click()
+      await page.locator('.pdf-viewer-overlay').waitFor({ state: 'hidden', timeout: 10000 })
+    }
+    await reviewDoc('master_agreement', '09')
+    await reviewDoc('vehicle_lease', '10')
+    await caption(page, `Step T0 — ${letter}: done. The application was NOT submitted (the Confirm button was never pressed); closing this browser`)
+    await shot(page, S('11-not-submitted'))
+    out.ok = true
+  } catch (e) {
+    out.error = e.message.split('\n')[0]
+    await shot(page, S('error'))
+  } finally {
+    await ctx.close().catch(() => {})
+  }
+  return out
+}
+
+// T0: returns both walk-throughs, whose clauses and body keys T6 compares plain /invest with.
+async function termsT0() {
+  const facts = (inv, where, docKey) => inv[where][docKey]?.facts || null
+  const docRow = (inv, where, docKey, stepId) => {
+    const d = inv[where][docKey]
+    const f = d?.facts
+    const whereText = where === 'sign' ? 'the signature page (InvestorSignModal) preview' : 'the review modal, "Signed — View Document"'
+    const title = `Test investor ${inv.letter}: ${TERMS_DOCS[docKey]}, ${whereText}`
+    if (!d) {
+      return record({ step: stepId, title, expected: TERMS_EXPECTED, observed: `not reached${inv.error ? `: ${inv.error}` : ''}`, verdict: 'FAIL', shot: '' })
+    }
+    if (!f) {
+      return record({ step: stepId, title, expected: TERMS_EXPECTED, observed: `POST ${TERMS_PREVIEW}${docKey} → ${d.status}${d.why ? ` ${d.why}` : ''}; no PDF to read`, verdict: 'FAIL', shot: d.shot || '' })
+    }
+    const terms = docKey === 'master_agreement' ? (f.split5050 && f.participant50) : f.lease5050
+    let nameOk = true; let nameText = ''
+    if (where === 'review') {
+      // The typed name is the one the investor also gave as legal name and contact,
+      // which is where it prints; the signature slot itself carries the drawn image.
+      const unsigned = facts(inv, 'sign', docKey)
+      const drawn = unsigned?.images != null && f.images != null ? f.images - unsigned.images : null
+      nameOk = f.nameCount > 0 && (drawn == null || drawn > 0)
+      nameText = `; the signer's typed name "${inv.name}" appears ${f.nameCount}× (as the legal name / contact it was also typed as; ` +
+        `the renderer puts the drawn signature, not the typed name, on the signature line: images ${unsigned?.images ?? '?'} unsigned → ${f.images ?? '?'} signed` +
+        `${drawn == null ? '' : `, ${drawn > 0 ? `+${drawn}, the drawn signature is embedded` : 'the drawn signature is NOT embedded'}`})`
+    }
+    const obs = `POST ${TERMS_PREVIEW}${docKey} → 200, ${f.pages} pages; ` +
+      (docKey === 'master_agreement'
+        ? `"distributed according to a 50/50 split": ${f.split5050}; "Participant Distribution (50%)": ${f.participant50}`
+        : `"50/50 profit participation model": ${f.lease5050}`) +
+      `; contains AMENDMENT: ${f.amendment}${nameText}`
+    return record({ step: stepId, title, expected: TERMS_EXPECTED, observed: obs, verdict: verdict(terms && !f.amendment && nameOk), shot: d.shot || '' })
+  }
+
+  const A = await termsInvestor('A', 1)
+  docRow(A, 'sign', 'master_agreement', 'T0a')
+  docRow(A, 'sign', 'vehicle_lease', 'T0b')
+  docRow(A, 'review', 'master_agreement', 'T0c')
+  docRow(A, 'review', 'vehicle_lease', 'T0d')
+  const B = await termsInvestor('B', 2)
+  docRow(B, 'sign', 'master_agreement', 'T0e')
+  docRow(B, 'sign', 'vehicle_lease', 'T0f')
+  docRow(B, 'review', 'master_agreement', 'T0g')
+  docRow(B, 'review', 'vehicle_lease', 'T0h')
+
+  // ---- A vs B: the clause each was shown, on both pages
+  const clauseRow = (stepId, title, key, docKey) => {
+    const seen = []
+    for (const inv of [A, B]) for (const where of ['sign', 'review']) seen.push({ who: `${inv.letter} ${where === 'sign' ? 'signature page' : 'review'}`, text: facts(inv, where, docKey)?.[key] || '' })
+    const found = seen.filter((x) => x.text)
+    const same = found.length === seen.length && found.every((x) => x.text === found[0].text)
+    const obs = `${found.length}/${seen.length} PDFs carry the clause; ${same ? 'all identical' : `DIFFER: ${seen.map((x) => `${x.who} ${x.text.length} chars`).join(', ')}`}` +
+      `${found[0] ? `. Wording (${found[0].who}): "${found[0].text}"` : ''}`
+    record({ step: stepId, title, expected: TERMS_EXPECTED, observed: obs, verdict: verdict(same), shot: A.review[docKey]?.shot || '' })
+  }
+  clauseRow('T0i', 'Master §3.3 ("3.3 Revenue Participation" up to "3.4 Settlement Cycle"), whitespace-normalized: A vs B, signature page and review', 's33', 'master_agreement')
+  clauseRow('T0j', 'Lease §2.01 ("2.01 Lease Payments" up to "2.02"), whitespace-normalized: A vs B, signature page and review', 's201', 'vehicle_lease')
+
+  // ---- the request body the page sends to the preview route (a later regression check needs it)
+  {
+    const shapes = new Map()
+    for (const inv of [A, B]) {
+      for (const k of inv.keys) {
+        const sig = `${k.signed ? 'signed' : 'unsigned'}: [${k.keys.join(', ')}]`
+        if (!shapes.has(sig)) shapes.set(sig, { docs: new Set(), banking: k.banking.join(', '), vehicle: k.vehicle.join(', ') })
+        shapes.get(sig).docs.add(k.docKey)
+      }
+    }
+    const obs = [...shapes.entries()].map(([sig, v]) => `${sig} (docs: ${[...v.docs].join(', ')})`).join(' · ') +
+      (shapes.size ? ` · banking: [${[...shapes.values()][0].banking}] · vehicles[0]: [${[...shapes.values()][0].vehicle}]` : '') +
+      ` · preview POSTs: A ${A.previews}, B ${B.previews}`
+    record({ step: 'T0k', title: 'The JSON body keys /invest sends to POST /api/public/investor-preview-pdf/<docKey> (sorted)', expected: 'Recorded for the later regression check (INFO)', observed: obs || 'no preview request seen', verdict: 'INFO', shot: '' })
+  }
+  // ---- nothing was submitted; what the browser console said
+  {
+    const blocked = [...A.blocked.map((b) => `A ${b}`), ...B.blocked.map((b) => `B ${b}`)]
+    record({
+      step: 'T0l', title: 'Neither test investor submitted anything: no write left the page but the preview route (anything else is aborted in the browser and listed)',
+      expected: 'No attempted write; both walk-throughs completed up to the review without pressing Confirm',
+      observed: `A completed: ${A.ok}${A.error ? ` (${A.error})` : ''}; B completed: ${B.ok}${B.error ? ` (${B.error})` : ''}; attempted writes: ${blocked.length ? blocked.join(', ') : 'none'}`,
+      verdict: verdict(!blocked.length && A.ok && B.ok), shot: '',
+    })
+    const errs = [...A.consoleErrors.map((e) => `A ${e}`), ...B.consoleErrors.map((e) => `B ${e}`)]
+    record({ step: 'T0m', title: 'Browser console errors, page errors and failed API requests on /invest during both walk-throughs', expected: 'None (INFO)', observed: errs.length ? errs.join(' | ') : 'none', verdict: 'INFO', shot: '' })
+  }
+  return { A, B }
+}
+
+// ---------------------------------------------------------------- per-investor payment terms (T1-T11)
+// The feature under test (the shared contract): a Super Admin creates a personal
+// invite link on /investors carrying custom payment terms, a 50/50 split with extra
+// details or a fixed monthly lease. The prospective investor who opens it sees the
+// terms read-only and signs contracts carrying them as "AMENDMENT NO. 1". Plain
+// /invest keeps today's contract.
+//
+// Sign-ins: the Super Admin once (every admin step shares that page) and T7's
+// throwaway test Investor once. Applicants are anonymous contexts, like T0's: every
+// write from those pages but the preview route (and T8's one submit) is aborted in
+// the browser, and a successful submit is kept from leaving for logisx.com.
+//
+// What it writes: the invites T1, T2 and T11 create (revoked at the end unless used),
+// T7's throwaway user QA-TEST-INV-<stamp> (deleted), T10's test investor record
+// QA-TEST-INV-<stamp>-REC (deleted), and T8's application, only with DB_PATH (local)
+// or E2E_TERMS_SUBMIT=1: soft-deleted at the end and, locally, hard-deleted by id.
+// An invite token is a credential: the results never print one.
+const TD = (name) => `[data-test="${name}"]`
+const TDV = (name) => `${TD(name)}:visible`
+const INVITES_API = '/api/admin/investor-invites'
+const INVITE_LINK_RE = /\/invest\?invite=([A-Za-z0-9_-]{43})$/
+const TERMS_DIGITS = stamp.replace(/\D/g, '')
+const SPLIT_DETAILS = 'Quarterly review call with owner.'
+// T2's details: two lines, the second typed with a right-to-left override (U+202E)
+// inside it, which the server drops as a format character before saving.
+const LEASE_LINES = ['Fuel card provided by the owner.', 'QA-TEST lease note']
+const LEASE_DETAILS_TYPED = `${LEASE_LINES[0]}\n${LEASE_LINES[1].slice(0, 8)}${String.fromCodePoint(0x202E)}${LEASE_LINES[1].slice(8)}`
+const BIDI_RE = /\p{Bidi_Control}/u
+const TERMS_REVISED_NOTICE = 'LogisX updated the payment terms in your invitation. Please review and sign the agreements again.'
+// What T0 recorded on 3b61d14, before the feature (T0k, T0i, T0j). T6 holds plain
+// /invest to T0's own record when T0 ran in the same run, and to these otherwise.
+const T0_PREVIEW_KEYS = ['address', 'banking', 'bankruptcy_liens', 'contact_person', 'contact_title', 'dba', 'ein_ssn', 'email', 'entity_type',
+  'fleet_size', 'industry_experience', 'legal_name', 'phone', 'preferred_communication', 'reporting_preference', 'tax_classification',
+  'vehicles', 'years_in_operation']
+const T0_PREVIEW_KEYS_SIGNED = [...T0_PREVIEW_KEYS, 'signatureImage', 'signatureText'].sort()
+const T0_S33 = '3.3 Revenue Participation and Method of Payment. Upon the final determination of the monthly NOI, the remaining funds ' +
+  'shall be distributed according to a 50/50 split: Participant Distribution (50%): Remitted to the Participant as a professional ' +
+  'return on the contributed Asset. Managerial Distribution (50%): Retained by the Manager as compensation for comprehensive fleet ' +
+  'administration, scaling, and logistics management. Payment Execution (Schedule A): All disbursements shall be issued to the ' +
+  'Participant via the electronic payment method and banking instructions designated in the attached Schedule A (Payment & Banking ' +
+  'Election Form). The Participant is responsible for maintaining the accuracy of the information in Schedule A to avoid processing delays.'
+const T0_S201 = '2.01 Lease Payments and Remittance Structure. The Lessee agrees to pay the Lessor "Rent" as a derivative of the Net ' +
+  'Operating Income (NOI) generated by the Vehicle, as defined and governed by the Master Participation & Management Agreement. ' +
+  'Variable-Yield Settlement: Disbursements shall be calculated based on the 50/50 profit participation model after all Priority ' +
+  'Expenses (Labor, Fuel, Insurance, and Reserves) have been satisfied. Settlement Cycle (Net-60): In alignment with industry ' +
+  'receivable aging, all lease payments shall be settled and remitted on the last Friday of the calendar month following the month ' +
+  'of production. Method of Payment: Remittance shall be executed via ACH Direct Deposit using the banking coordinates provided by ' +
+  'the Lessor in Schedule A (Payment & Banking Election Form).'
+// Body keys that would carry payment terms. The preview takes the terms from the
+// invite row only, so the page sends the token and none of these.
+const TERMS_BODY_KEY_RE = /pay|lease|amount|detail|term|split|amend|revision/i
+const TERMS_SUBMIT_OK = !!DB_PATH || process.env.E2E_TERMS_SUBMIT === '1'
+// An application this harness made: the applicant's QA-TEST name, or the invitee's
+// when an invite pre-filled and locked the legal name.
+const QA_APPLICATION_RE = /^QA-TEST Investor [A-Z] \d{8}-\d{6}$|^QA-TEST Invite (Split|Lease|T11) \d{8}-\d{6}$/
+const notReached = (why) => Object.assign(new Error(`not reached: ${why}`), { notReached: true })
+const squash = (s, n = 240) => { const t = String(s ?? '').replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n)}…` : t }
+const sameList = (a, b) => a.length === b.length && a.every((x, i) => x === b[i])
+
+// ---- admin side (/investors, the invites panel)
+async function gotoInvestorsPage(page) {
+  await page.goto(`${BASE_URL}/investors`)
+  await page.getByRole('heading', { name: /Investor Database/i }).first().waitFor({ state: 'visible', timeout: 30000 })
+}
+// The invites panel, or null when the page has none. A closed <details> around it is
+// opened by its summary, as a person would.
+async function invitesPanel(page, ms = 15000) {
+  const panel = page.locator(TD('invites-panel')).first()
+  try { await panel.waitFor({ state: 'attached', timeout: ms }) } catch { return null }
+  if (!(await panel.isVisible())) {
+    const summary = panel.locator('xpath=ancestor::details[1]/summary')
+    if (await summary.count()) await summary.first().click().catch(() => {})
+    await panel.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {})
+  }
+  await panel.scrollIntoViewIfNeeded().catch(() => {})
+  return panel
+}
+// The create form (InviteTermsForm). It may sit behind a closed <details> or a
+// "New invite" button; both are tried before the name box is waited for.
+async function openInviteForm(page, panel) {
+  const nameBox = page.locator(TDV('invite-name')).first()
+  if (await nameBox.count()) return
+  const summary = panel.locator('summary').first()
+  if (await summary.count() && await summary.evaluate((s) => s.parentElement?.tagName === 'DETAILS' && !s.parentElement.open)) await summary.click()
+  if (await nameBox.count()) return
+  let opener = panel.getByRole('button', { name: /(new|create|add)\b.*invit|^\s*\+\s*invit/i }).first()
+  if (!(await opener.count())) opener = panel.getByRole('button', { name: /invit/i }).filter({ hasNotText: /revoke|reissue|copy|preview|save/i }).first()
+  if (await opener.count()) await opener.click()
+  try { await nameBox.waitFor({ state: 'visible', timeout: 8000 }) } catch {
+    throw new Error('the invite form did not show: no visible [data-test="invite-name"] after opening the panel (its <details>, then a "New invite"-like button)')
+  }
+}
+// A radio (or checkbox) may be visually hidden behind a styled label: check it as
+// the label would. Anything else is clicked.
+async function chooseControl(loc) {
+  const kind = await loc.evaluate((el) => (el.tagName === 'INPUT' ? el.type : el.tagName.toLowerCase()))
+  if (kind === 'radio' || kind === 'checkbox') return loc.check({ force: true })
+  return loc.click()
+}
+async function fillInviteForm(page, panel, { name, email, type, amount, details }) {
+  await openInviteForm(page, panel)
+  await page.locator(TDV('invite-name')).first().fill(name)
+  await page.locator(TDV('invite-email')).first().fill(email)
+  await chooseControl(page.locator(TD(`invite-type-${type}`)).first())
+  if (type === 'lease') {
+    const amt = page.locator(TD('invite-amount')).first()
+    await amt.waitFor({ state: 'visible', timeout: 5000 })
+    await amt.fill(amount)
+  }
+  await page.locator(TDV('invite-details')).first().fill(details)
+  await investPauseBlur(page)
+}
+// Presses Create and waits for the POST; then reads the link dialog. The token is
+// kept in memory only.
+async function createInviteThroughForm(page) {
+  const create = page.locator(TDV('invite-create')).first()
+  const [resp] = await Promise.all([
+    page.waitForResponse((r) => r.request().method() === 'POST' && pathOf(r.url()) === INVITES_API, { timeout: 20000 }),
+    create.click(),
+  ])
+  let json = null
+  try { json = await resp.json() } catch { /* not json */ }
+  const out = { status: resp.status(), code: json?.code || '', id: json?.invite?.id ?? null, revision: json?.invite?.termsRevision ?? null, linkValue: '', path: '', token: '', readOnly: false, dialogText: '' }
+  const link = page.locator(TDV('invite-link')).first()
+  try { await link.waitFor({ state: 'visible', timeout: 10000 }) } catch { return out }
+  out.linkValue = await link.inputValue().catch(async () => (await link.textContent()) || '')
+  const m = out.linkValue.trim().match(INVITE_LINK_RE)
+  if (m) { out.token = m[1]; out.path = `/invest?invite=${m[1]}` }
+  out.readOnly = await link.evaluate((el) => el.readOnly === true || el.getAttribute('aria-readonly') === 'true')
+  out.dialogText = await link.evaluate((el) => {
+    const box = el.closest('[role="dialog"], .modal, .dialog, [class*="dialog"], [class*="modal"]') || el.parentElement
+    return (box?.innerText || '').replace(/\s+/g, ' ').trim()
+  })
+  return out
+}
+// Closes the link dialog (a Close / Done button, else Escape). True once no link shows.
+async function closeInviteDialog(page) {
+  const link = page.locator(TDV('invite-link')).first()
+  if (!(await link.count())) return true
+  const scope = link.locator('xpath=ancestor::*[@role="dialog" or contains(@class,"modal") or contains(@class,"dialog")][1]')
+  const within = (await scope.count()) ? scope.first() : page
+  const times = String.fromCodePoint(0xD7)
+  const btn = within.getByRole('button', { name: new RegExp(`^\\s*(close|done|got it|ok|${times})\\s*$`, 'i') }).first()
+  if (await btn.count()) await btn.click().catch(() => {})
+  else await page.keyboard.press('Escape')
+  await link.waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {})
+  if (await page.locator(TDV('invite-link')).count()) await page.keyboard.press('Escape')
+  await page.waitForTimeout(300)
+  return !(await page.locator(TDV('invite-link')).count())
+}
+// The panel's row for an invite: the smallest element that holds the needle (its
+// name) and a status word, whatever the markup (a table row or a card).
+function inviteRowText(panel, needle) {
+  return panel.evaluate((root, n) => {
+    const STATUS = /\b(Active|Used|Revoked|Expired)\b/i
+    let best = null
+    for (const el of root.querySelectorAll('*')) {
+      const t = el.innerText || ''
+      if (!t.includes(n) || !STATUS.test(t)) continue
+      if (best === null || t.length < best.length) best = t
+    }
+    return best
+  }, needle).catch(() => null)
+}
+// The row's text once it matches `re` (the list refreshes after a save, over the
+// socket), or its last text after `ms`.
+async function waitInviteRow(panel, needle, re, ms = 6000) {
+  let text = await inviteRowText(panel, needle)
+  for (let waited = 0; !(text && re.test(text)) && waited < ms; waited += 300) {
+    await panel.page().waitForTimeout(300)
+    text = await inviteRowText(panel, needle)
+  }
+  return text
+}
+// GET /api/admin/investor-invites?status=all from the Super Admin's page; null when
+// the build has no such list.
+async function invitesList(page) {
+  const r = await api(page, 'GET', `${INVITES_API}?status=all`)
+  return r.status === 200 && Array.isArray(r.json?.invites) ? r.json.invites : null
+}
+const inviteByEmail = (list, email) => (list || []).find((i) => String(i.inviteeEmail || '').toLowerCase() === email.toLowerCase()) || null
+// The inline errors around the invite form: role="alert", error/invalid classes and
+// aria-invalid on the amount box; visible, non-empty, and never the lease warning.
+async function inviteFormErrors(page) {
+  const amount = page.locator(TD('invite-amount')).first()
+  if (!(await amount.count())) return { texts: [], ariaInvalid: false }
+  return amount.evaluate((el) => {
+    let root = el
+    while (root.parentElement && !root.querySelector('[data-test="invite-create"], [data-test="invite-save"]')) root = root.parentElement
+    const seen = new Set()
+    const texts = []
+    // Red text counts too (an error styled only by a colour class).
+    const red = (n) => {
+      const m = getComputedStyle(n).color.match(/\d+(\.\d+)?/g)
+      return !!m && Number(m[0]) >= 150 && Number(m[1]) <= 110 && Number(m[2]) <= 110
+    }
+    const candidates = new Set(root.querySelectorAll('[role="alert"], .error, .invalid, [class*="error"], [class*="invalid"], [class*="danger"], [class*="destructive"], [data-test$="-error"]'))
+    for (const n of root.querySelectorAll('p, span, div, small, li')) if (!n.children.length && red(n)) candidates.add(n)
+    for (const n of candidates) {
+      const t = (n.innerText || '').replace(/\s+/g, ' ').trim()
+      if (!t || seen.has(t) || !n.getClientRects().length) continue
+      if (/Payouts are still calculated/i.test(t) || /^\*$/.test(t)) continue
+      seen.add(t)
+      texts.push(t.slice(0, 160))
+    }
+    return { texts, ariaInvalid: el.getAttribute('aria-invalid') === 'true' }
+  })
+}
+// Marks the button matching `label` in the row that holds `needle` (the closest
+// ancestor of a matching button that contains the needle) and clicks it.
+async function clickRowButton(page, panel, needle, label) {
+  const marked = await panel.evaluate((root, { n, src }) => {
+    const re = new RegExp(src, 'i')
+    let best = null
+    for (const b of root.querySelectorAll('button, [role="button"], a')) {
+      if (!re.test(b.innerText || b.getAttribute('aria-label') || '')) continue
+      let a = b
+      while (a && a !== root && !(a.innerText || '').includes(n)) a = a.parentElement
+      if (!a || !(a.innerText || '').includes(n)) continue
+      const size = (a.innerText || '').length
+      if (!best || size < best.size) best = { b, size }
+    }
+    if (!best) return false
+    best.b.setAttribute('data-qa-e2e-target', '1')
+    return true
+  }, { n: needle, src: label.source })
+  if (!marked) return false
+  const btn = page.locator('[data-qa-e2e-target="1"]').first()
+  await btn.click()
+  await btn.evaluate((el) => el.removeAttribute('data-qa-e2e-target')).catch(() => {})
+  return true
+}
+// Revokes an invite from its row: the Revoke button, then whatever confirmation the
+// panel asks for (a native confirm is accepted by the page's dialog handler; an
+// in-page one is confirmed, with a reason when it asks for one).
+async function revokeThroughPanel(page, panel, needle) {
+  let settled = null
+  const waiting = page.waitForResponse((r) => r.request().method() === 'POST' && /^\/api\/admin\/investor-invites\/\d+\/revoke$/.test(pathOf(r.url())), { timeout: 20000 })
+    .then((r) => { settled = r; return r }, () => null)
+  if (!(await clickRowButton(page, panel, needle, /\brevoke\b/))) return { clicked: false, status: 0, code: '' }
+  for (let i = 0; i < 12 && !settled; i++) {
+    await page.waitForTimeout(250)
+    const confirmBox = page.locator('[role="dialog"]:visible, [role="alertdialog"]:visible, .confirm-dialog:visible, .modal:visible').last()
+    if (!(await confirmBox.count())) continue
+    const reason = confirmBox.locator('textarea:visible, input[type="text"]:visible').first()
+    if (await reason.count()) await reason.fill('QA-TEST e2e').catch(() => {})
+    const ok = confirmBox.getByRole('button', { name: /^\s*(revoke|confirm|yes)/i }).last()
+    if (await ok.count()) { await ok.click().catch(() => {}); break }
+  }
+  const resp = await waiting
+  let json = null
+  try { json = resp ? await resp.json() : null } catch { /* not json */ }
+  return { clicked: true, status: resp ? resp.status() : 0, code: json?.code || '', invite: json?.invite || null }
+}
+
+// ---- the anonymous applicant's page
+// A fresh context on `urlPath` (/invest, or an invite link) with T0's safety net:
+// GETs pass, a preview is passed through with its bytes kept, T8's submit passes
+// only once allowSubmit is set, and every other write is aborted and listed.
+async function openInvestPortal(tag, urlPath, token = '') {
+  const P = { tag, token, keys: [], blocked: [], errors: [], inviteGets: [], previewLog: [], allowSubmit: false }
+  const ctx = await browser.newContext({ viewport: ADMIN_VP })
+  ctx.setDefaultTimeout(30000)
+  // After a successful submit the page sends itself to logisx.com (the marketing site) 5 s later.
+  await ctx.route((u) => /^(www\.)?logisx\.com$/i.test(u.hostname), (route) => route.fulfill({
+    status: 200, contentType: 'text/html', body: '<!doctype html><title>e2e</title><p>The e2e harness kept this tab off logisx.com.</p>',
+  }))
+  const page = await ctx.newPage()
+  Object.assign(P, { ctx, page })
+  const waiters = []
+  const settle = (docKey, value) => {
+    const i = waiters.findIndex((w) => w.docKey === docKey)
+    if (i >= 0) waiters.splice(i, 1)[0].resolve(value)
+  }
+  await page.route('**/api/**', async (route) => {
+    const req = route.request()
+    const p = pathOf(req.url())
+    if (req.method() === 'POST' && p.startsWith(TERMS_PREVIEW)) {
+      const docKey = p.slice(TERMS_PREVIEW.length)
+      let resp; let body
+      try {
+        resp = await route.fetch({ timeout: 90000 })
+        body = await resp.body()
+      } catch (e) {
+        settle(docKey, { status: 0, body: null, headers: {}, why: `the request failed: ${e.message.split('\n')[0]}` })
+        return route.abort('failed').catch(() => {})
+      }
+      const headers = resp.headers()
+      P.previewLog.push({ docKey, status: resp.status(), revision: headers['x-payment-terms-revision'] ?? null })
+      settle(docKey, { status: resp.status(), body, headers })
+      return route.fulfill({ response: resp, body }).catch(() => {})
+    }
+    if (req.method() === 'GET') return route.continue()
+    if (P.allowSubmit && req.method() === 'POST' && p === '/api/public/investor-apply') return route.continue()
+    P.blocked.push(`${req.method()} ${p}`)
+    return route.abort('blockedbyclient')
+  })
+  page.on('console', (m) => { if (m.type() === 'error') P.errors.push(`console: ${m.text().slice(0, 200)}`) })
+  page.on('pageerror', (e) => P.errors.push(`pageerror: ${String(e.message || e).slice(0, 200)}`))
+  page.on('request', (r) => {
+    const p = pathOf(r.url())
+    if (r.method() === 'GET' && p === '/api/public/investor-invite') {
+      P.inviteGets.push({ header: !!token && r.headers()['x-invite-token'] === token, inUrl: !!token && r.url().includes(token) })
+      return
+    }
+    if (r.method() !== 'POST' || !p.startsWith(TERMS_PREVIEW)) return
+    let body = null
+    try { body = r.postDataJSON() } catch { /* not JSON */ }
+    P.keys.push({
+      docKey: p.slice(TERMS_PREVIEW.length),
+      signed: !!(body && body.signatureText),
+      keys: body ? Object.keys(body).sort() : [],
+      tokenMatches: !!token && body?.invite_token === token,
+    })
+  })
+  // The next preview of `docKey`; call it BEFORE the click that sends it.
+  P.previewOf = (docKey, ms = 90000) => new Promise((resolve, reject) => {
+    const w = { docKey, resolve }
+    waiters.push(w)
+    setTimeout(() => {
+      const i = waiters.indexOf(w)
+      if (i >= 0) { waiters.splice(i, 1); reject(new Error(`no ${docKey} preview answered within ${ms / 1000} s`)) }
+    }, ms)
+  })
+  P.read = async (r) => {
+    const revision = r.headers?.['x-payment-terms-revision'] ?? null
+    if (r.status !== 200 || !r.body?.length) {
+      return { status: r.status, pt: null, flat: '', revision, why: r.why || (r.body ? squash(r.body.toString('utf8'), 160) : '(no body)') }
+    }
+    const b64 = r.body.toString('base64')
+    const pt = await pdfText(b64)
+    return { status: r.status, pt, flat: flatText(pt), images: await pdfImageCount(b64), revision, bytes: r.body.length }
+  }
+  // Opens the page; 'form' when step 1 shows, 'error' when the invite error shows.
+  P.start = async () => {
+    await page.goto(`${BASE_URL}${urlPath}`)
+    const form = investTgt(page, 'legal-name')
+    const err = page.locator(TD('invite-error')).first()
+    const which = await Promise.race([
+      form.waitFor({ state: 'visible', timeout: 45000 }).then(() => 'form', () => ''),
+      err.waitFor({ state: 'visible', timeout: 45000 }).then(() => 'error', () => ''),
+    ])
+    if (which === 'form') await closeInvestGuide(page)
+    return which
+  }
+  // Step 1, then Continue to step 2 (the vehicle is filled separately). Returns the
+  // legal name the form holds (an invite may have pre-filled and locked it).
+  P.fillToDocuments = async (letter, idx, name) => {
+    const held = await fillInvestApplication(page, { name, letter, idx, email: `qa-test+${TERMS_DIGITS}${letter.toLowerCase()}@example.com` })
+    await investTgt(page, 'continue-step0').click()
+    await investTgt(page, 'fleet-size').waitFor({ state: 'visible' })
+    return held
+  }
+  // A document card: opens the signature page and reads the preview it fetches.
+  P.openDoc = async (docKey) => {
+    const card = page.locator(`.doc-card[data-wizard-target="doc-${docKey}"]`)
+    const [resp] = await Promise.all([P.previewOf(docKey), card.click()])
+    const pv = await P.read(resp)
+    await page.locator('.modal-overlay .pdf-frame').waitFor({ state: 'visible', timeout: 15000 }).catch(() => {})
+    await page.waitForTimeout(1000)
+    return pv
+  }
+  P.signOpenDoc = async (docKey, name) => {
+    const signBtn = await drawInvestSignature(page, docKey, name)
+    const [resp] = await Promise.all([P.previewOf(docKey), signBtn.click()])
+    await page.locator('.modal-overlay .sign-done').waitFor({ state: 'visible', timeout: 15000 })
+    await page.waitForTimeout(800)
+    return P.read(resp)
+  }
+  P.closeDoc = async () => {
+    const close = page.locator('.modal-overlay .modal-close')
+    if (await close.count()) await close.click()
+    await page.locator('.modal-overlay').waitFor({ state: 'hidden', timeout: 10000 }).catch(() => {})
+  }
+  P.docSigned = (docKey) => page.locator(`.doc-card[data-wizard-target="doc-${docKey}"]`).evaluate((el) => el.classList.contains('signed')).catch(() => null)
+  // Step 3 and the review modal (Review & Complete only opens it).
+  P.toReview = async (name, idx) => {
+    await investTgt(page, 'continue-step1').click()
+    await fillInvestBanking(page, name, idx)
+    await investTgt(page, 'review-open').click()
+    await page.locator('.review-modal').waitFor({ state: 'visible' })
+  }
+  // "Signed — View Document" in the review modal; the viewer is closed again after.
+  P.reviewDoc = async (docKey) => {
+    const link = page.locator('.review-modal .review-item', { has: page.locator('.review-label', { hasText: exactText(TERMS_DOCS[docKey]) }) }).locator('.doc-view-link')
+    const [resp] = await Promise.all([P.previewOf(docKey), link.click()])
+    const pv = await P.read(resp)
+    await page.locator('.pdf-viewer-overlay .pdf-viewer-frame').waitFor({ state: 'visible', timeout: 15000 }).catch(() => {})
+    await page.waitForTimeout(1000)
+    return pv
+  }
+  P.closeReviewDoc = async () => {
+    await page.locator('.pdf-viewer-overlay .review-close').click().catch(() => {})
+    await page.locator('.pdf-viewer-overlay').waitFor({ state: 'hidden', timeout: 10000 }).catch(() => {})
+  }
+  P.close = () => ctx.close().catch(() => {})
+  return P
+}
+// A read-only terms card (invite-terms-card, sign-terms, review-terms): whether it
+// shows, its text, and how many editable controls it holds.
+async function termsBoxFacts(page, name, ms) {
+  const loc = page.locator(TDV(name)).first()
+  try { await loc.waitFor({ state: 'visible', timeout: ms }) } catch {
+    return { visible: false, present: (await page.locator(TD(name)).count()) > 0, text: '', raw: '', editable: 0 }
+  }
+  return loc.evaluate((el) => ({
+    visible: true,
+    present: true,
+    raw: el.innerText || '',
+    text: (el.innerText || '').replace(/\s+/g, ' ').trim(),
+    editable: el.querySelectorAll('input, select, textarea, [contenteditable]:not([contenteditable="false"])').length + (el.isContentEditable ? 1 : 0),
+  }))
+}
+const boxText = (f) => (f.visible ? `shown, ${f.editable} editable control(s), text "${squash(f.text, 160)}"` : f.present ? 'present but not visible' : 'absent')
+// The keys a preview body carried beyond T0's record, and those that read as terms.
+function bodyKeyFacts(k) {
+  const base = new Set(T0_PREVIEW_KEYS_SIGNED)
+  const extra = (k?.keys || []).filter((x) => !base.has(x))
+  return { extra, termsKeys: extra.filter((x) => x !== 'invite_token' && TERMS_BODY_KEY_RE.test(x)), hasToken: extra.includes('invite_token'), tokenMatches: !!k?.tokenMatches }
+}
+
+// The detail modal on /investors (Teleported to <body>, position fixed) holding
+// `name`, and the read-only terms section inside it.
+function investorDetailProbe(page, name) {
+  return page.evaluate((n) => {
+    const cap = document.getElementById('__qa_caption__')
+    let open = false
+    for (const el of document.body.children) {
+      if (el === cap) continue
+      const cs = getComputedStyle(el)
+      if (cs.position !== 'fixed' || cs.display === 'none' || cs.visibility === 'hidden') continue
+      if ((el.innerText || '').includes(n) && el.getBoundingClientRect().height > 0) { open = true; break }
+    }
+    const t = document.querySelector('[data-test="investor-terms-section"]')
+    const termsVisible = !!t && t.getClientRects().length > 0 && getComputedStyle(t).visibility !== 'hidden'
+    return {
+      open,
+      termsVisible,
+      termsText: t ? (t.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 160) : '',
+      skeleton: !!document.querySelector('.skeleton, [class*="skeleton"]'),
+    }
+  }, name).catch(() => ({ open: false, termsVisible: false, termsText: '', skeleton: false }))
+}
+// The Investor Directory row of `name`, paging through when the list is long.
+async function findInvestorRow(page, name) {
+  const row = page.locator('tr.clickable-row', { has: page.locator('td.name-cell', { hasText: exactText(name) }) }).first()
+  if (await row.count()) return row
+  const size = page.locator('.pagination .page-size-select').first()
+  if (await size.count()) { await size.selectOption('50').catch(() => {}); await page.waitForTimeout(400) }
+  for (let i = 0; i < 20 && !(await row.count()); i++) {
+    const next = page.locator('.pagination-controls button', { hasText: String.fromCodePoint(0x203A) }).first()
+    if (!(await next.count()) || !(await next.isEnabled())) break
+    await next.click()
+    await page.waitForTimeout(300)
+  }
+  return (await row.count()) ? row : null
+}
+// Local only: removes one application this run submitted (and soft-deleted), with its
+// three child rows, by exact id; and the signed PDFs the server wrote for it, each
+// only when the file on disk is the artifact its row recorded (same sha256).
+function hardDeleteTermsApplication(id) {
+  const app = db.prepare('SELECT legal_name, deleted_at FROM investor_applications WHERE id = ?').get(id)
+  if (!app) return `application #${id}: no row in DB_PATH`
+  if (!QA_APPLICATION_RE.test(String(app.legal_name || ''))) return `application #${id}: REFUSED to hard-delete (not a QA-TEST application)`
+  if (!app.deleted_at) return `application #${id}: REFUSED to hard-delete (not soft-deleted first)`
+  const docs = db.prepare('SELECT doc_key, artifact_sha256 FROM investor_onboarding_documents WHERE application_id = ?').all(id)
+  const files = []
+  for (const d of docs) {
+    const f = path.join(paths.REPO, 'uploads', 'investor-onboarding-signed', `${d.doc_key}-inv-${id}-signed.pdf`)
+    if (!d.artifact_sha256 || !fs.existsSync(f) || fs.lstatSync(f).isSymbolicLink()) continue
+    if (crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex') === d.artifact_sha256) { fs.unlinkSync(f); files.push(d.doc_key) }
+  }
+  const n = db.transaction(() => ({
+    documents: db.prepare('DELETE FROM investor_onboarding_documents WHERE application_id = ?').run(id).changes,
+    onboarding: db.prepare('DELETE FROM investor_onboarding WHERE application_id = ?').run(id).changes,
+    banking: db.prepare('DELETE FROM investor_payment_info WHERE application_id = ?').run(id).changes,
+    application: db.prepare('DELETE FROM investor_applications WHERE id = ?').run(id).changes,
+  }))()
+  return `application #${id} hard-deleted from DB_PATH (rows: application ${n.application}, documents ${n.documents}, onboarding ${n.onboarding}, banking ${n.banking}; ` +
+    `signed PDFs removed from this checkout's uploads/: ${files.length ? files.join(', ') : 'none found here'})`
+}
+
+async function termsSection() {
+  const t0 = TERMS_PLAN.has('T0') ? await termsT0() : null
+  if (TERMS_NEEDS_LOGIN) await termsFeature(t0)
+}
+
+async function termsFeature(t0) {
+  const want = (id) => TERMS_PLAN.has(id)
+  const ownDb = !db
+  if (!db && DB_PATH) db = openDb()
+  const S = {
+    admin: null, adminCtx: null, adminErr: '', panelMissing: false,
+    split: null, lease: null, t11: null, // { id, name, email, path, token, revision }
+    splitPortal: null, leasePortal: null, leaseReady: false, leaseMasterImages: null, portals: [],
+    leaseName: `QA-TEST Investor L ${stamp}`,
+    appIds: [], user: null, record: null,
+  }
+  const adminPage = () => S.admin
+  const needAdmin = () => { if (!S.admin) throw notReached(`the Super Admin is not signed in (${S.adminErr})`) }
+  // One row per call: its own try/catch, an error screenshot, and a watchdog.
+  const step = async (id, title, expected, pageOf, shotName, fn, limitMs = 180000) => {
+    let observed = ''; let v = 'FAIL'; let s = ''
+    let timer
+    try {
+      const r = await Promise.race([fn(), new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`the step did not finish within ${limitMs / 1000} s`)), limitMs) })])
+      observed = r.observed; v = r.verdict
+      s = r.shot ?? (pageOf() ? await shot(pageOf(), shotName) : '')
+    } catch (e) {
+      observed = e.skip || e.notReached ? e.message : `error: ${e.message.split('\n')[0]}`
+      v = e.skip ? 'SKIP' : 'FAIL'
+      if (!e.skip && !e.notReached && pageOf()) s = await shot(pageOf(), `${shotName}-error`)
+    } finally { clearTimeout(timer) }
+    record({ step: id, title, expected, observed, verdict: v, shot: s })
+  }
+  // A walk that feeds several rows: it runs once (with a watchdog), then each row is
+  // judged from what it gathered. A walk that never started records ONE row.
+  const walk = async (R, pageOf, shotName, fn, limitMs = 300000) => {
+    if (R.notStarted) return
+    let timer
+    try {
+      await Promise.race([fn(), new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`the walk-through did not finish within ${limitMs / 1000} s`)), limitMs) })])
+    } catch (e) {
+      R.err = e.notReached ? e.message : `error: ${e.message.split('\n')[0]}`
+      if (!e.notReached && pageOf()) R.errShot = await shot(pageOf(), `${shotName}-error`)
+    } finally { clearTimeout(timer) }
+  }
+  const walkRow = (R, id, title, expected, key, judge) => {
+    const x = R[key]
+    if (x === undefined) {
+      return record({ step: id, title, expected, observed: R.err ? `${R.err.startsWith('not reached') ? '' : 'not reached — '}${R.err}` : 'not reached', verdict: 'FAIL', shot: R.errShot || '' })
+    }
+    const { ok, observed, info } = judge(x)
+    record({ step: id, title, expected, observed, verdict: info ? 'INFO' : verdict(ok), shot: x?.shot || '' })
+  }
+  const notStartedRow = (id, title, expected, why) => record({ step: id, title, expected, observed: `not reached: ${why}`, verdict: 'FAIL', shot: '' })
+  const pdfSays = (pv, list) => list.map(([label, s, want]) => `${want ? '' : 'no '}"${label || s}": ${pv.flat.includes(s) === want ? 'yes' : 'NO'}`).join('; ')
+  const pdfOk = (pv, list) => pv.status === 200 && list.every(([, s, want]) => pv.flat.includes(s) === want)
+  const pvHead = (pv, docKey) => `POST ${TERMS_PREVIEW}${docKey} → ${pv.status}${pv.why ? ` ${pv.why}` : ''}${pv.revision != null ? `, X-Payment-Terms-Revision ${pv.revision}` : ''}${pv.pt ? `, ${pv.pt.pages} pages` : ''}`
+
+  if (!CREDS.superAdmin) {
+    S.adminErr = 'the creds file has no superAdmin login'
+  } else {
+    try {
+      const fp = await freshPage(ADMIN_VP)
+      S.adminCtx = fp.ctx
+      fp.ctx.setDefaultTimeout(30000)
+      fp.page.on('dialog', (d) => { (d.type() === 'prompt' ? d.accept('QA-TEST e2e') : d.accept()).catch(() => {}) })
+      await login(fp.page, 'Step T1 — Super Admin', CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
+      S.admin = fp.page
+    } catch (e) { S.adminErr = `sign-in failed: ${e.message.split('\n')[0]}` }
+  }
+
+  try {
+    // ================= T1: the split invite
+    if (want('T1')) {
+      await step('T1', 'Super Admin, /investors: a SPLIT invite through the invites panel (name, email, split, details "Quarterly review call with owner."), Create',
+        'POST 201; a dialog whose invite-link value ends /invest?invite=<43 base64url characters>; the panel lists it as Active with a 50/50 summary',
+        adminPage, 't1-split-invite', async () => {
+          needAdmin()
+          await gotoInvestorsPage(S.admin)
+          const panel = await invitesPanel(S.admin)
+          if (!panel) { S.panelMissing = true; throw new Error('/investors has no invites panel ([data-test="invites-panel"] never appeared in 15 s)') }
+          const name = `QA-TEST Invite Split ${stamp}`
+          const email = `qa-test+${TERMS_DIGITS}@example.com`
+          await caption(S.admin, 'Step T1 — Super Admin: a SPLIT invite with details, through the invites panel')
+          await fillInviteForm(S.admin, panel, { name, email, type: 'split', details: SPLIT_DETAILS })
+          await shot(S.admin, 't1-a-form')
+          const c = await createInviteThroughForm(S.admin)
+          S.split = { id: c.id, name, email, path: c.path, token: c.token, revision: c.revision }
+          await caption(S.admin, `Step T1 — POST → ${c.status}; the link dialog ${c.linkValue ? 'shows the link (the token is not printed in the results)' : 'did NOT show'}`)
+          const dialogShot = await shot(S.admin, 't1-b-link-dialog')
+          const closed = await closeInviteDialog(S.admin)
+          const apiRow = inviteByEmail(await invitesList(S.admin), email)
+          if (apiRow) { S.split.id = S.split.id ?? apiRow.id; S.split.revision = S.split.revision ?? apiRow.termsRevision }
+          const row = await waitInviteRow(panel, name, /\bActive\b/i)
+          await caption(S.admin, `Step T1 — the panel's row: ${squash(row || '(none)', 140)}`)
+          await shot(S.admin, 't1-c-row')
+          const linkOk = INVITE_LINK_RE.test(c.linkValue.trim())
+          return {
+            verdict: verdict(c.status === 201 && linkOk && !!row && /\bActive\b/i.test(row) && /50\/50/.test(row)),
+            shot: dialogShot,
+            observed: `POST ${INVITES_API} → ${c.status}${c.code ? ` ${c.code}` : ''}, invite #${S.split.id ?? '?'}; the link dialog: ` +
+              (c.linkValue ? `its value ${linkOk ? 'ends' : 'does NOT end'} /invest?invite=<43 base64url characters> (token not printed), read-only ${c.readOnly}, says "once": ${/\bonce\b/i.test(c.dialogText)}` : 'no invite-link shown') +
+              `; closed: ${closed}; the panel's row: ${row ? `"${squash(row, 160)}"` : 'none holds the name and a status'}; API status ${apiRow?.status ?? '?'}, summary "${apiRow?.display?.summary ?? '?'}"`,
+          }
+        })
+    }
+
+    // ================= T2: the lease invite ("2,000" refused, then 2000)
+    if (want('T2')) {
+      await step('T2', 'Super Admin: a LEASE invite. "2,000" first; then 2000, with two-line details whose second line carries U+202E',
+        '"2,000": an inline error and nothing saved. Then 201, the link, a row showing Active and $2,000.00; the details saved and shown without any bidirectional control character, both lines kept',
+        adminPage, 't2-lease-invite', async () => {
+          needAdmin()
+          if (S.panelMissing) throw new Error('/investors has no invites panel (see T1)')
+          await gotoInvestorsPage(S.admin)
+          const panel = await invitesPanel(S.admin)
+          if (!panel) { S.panelMissing = true; throw new Error('/investors has no invites panel ([data-test="invites-panel"] never appeared in 15 s)') }
+          const name = `QA-TEST Invite Lease ${stamp}`
+          const email = `qa-test+${TERMS_DIGITS}-lease@example.com`
+          await fillInviteForm(S.admin, panel, { name, email, type: 'lease', amount: '2,000', details: LEASE_DETAILS_TYPED })
+          const posts = []
+          const onReq = (r) => { if (r.method() === 'POST' && pathOf(r.url()) === INVITES_API) posts.push(r) }
+          S.admin.on('request', onReq)
+          const create = S.admin.locator(TDV('invite-create')).first()
+          const enabled = await create.isEnabled().catch(() => false)
+          if (enabled) await create.click()
+          await S.admin.waitForTimeout(2000)
+          S.admin.off('request', onReq)
+          const errs = await inviteFormErrors(S.admin)
+          const firstResp = posts.length ? await posts[0].response().catch(() => null) : null
+          const warning = await S.admin.getByText('Payouts are still calculated from the Split % column', { exact: false }).first().isVisible().catch(() => false)
+          const saved = inviteByEmail(await invitesList(S.admin), email)
+          if (saved) S.lease = { id: saved.id, name, email } // the clean-up revokes it
+          await caption(S.admin, `Step T2 — "2,000": Create ${enabled ? 'pressed' : 'disabled'}; ${posts.length} POST(s); inline error: ${errs.texts.length ? `"${errs.texts[0]}"` : errs.ariaInvalid ? 'aria-invalid' : 'NONE'}`)
+          await shot(S.admin, 't2-a-comma-refused')
+          if (await S.admin.locator(TDV('invite-link')).count()) await closeInviteDialog(S.admin)
+          await fillInviteForm(S.admin, panel, { name, email, type: 'lease', amount: '2000', details: LEASE_DETAILS_TYPED })
+          // What still shows with a valid amount is decoration, not the refusal.
+          const calm = await inviteFormErrors(S.admin)
+          errs.texts = errs.texts.filter((t) => !calm.texts.includes(t))
+          errs.ariaInvalid = errs.ariaInvalid && !calm.ariaInvalid
+          const refusedOk = !saved && (errs.texts.length > 0 || errs.ariaInvalid)
+          const c = await createInviteThroughForm(S.admin)
+          S.lease = { id: c.id ?? S.lease?.id ?? null, name, email, path: c.path, token: c.token, revision: c.revision }
+          await caption(S.admin, `Step T2 — 2000: POST → ${c.status}; the link dialog ${c.linkValue ? 'shows the link' : 'did NOT show'}`)
+          await shot(S.admin, 't2-b-link-dialog')
+          await closeInviteDialog(S.admin)
+          const apiRow = inviteByEmail(await invitesList(S.admin), email)
+          if (apiRow) { S.lease.id = S.lease.id ?? apiRow.id; S.lease.revision = S.lease.revision ?? apiRow.termsRevision }
+          const row = await waitInviteRow(panel, name, /\$2,000\.00/)
+          const panelText = await panel.innerText().catch(() => '')
+          const details = String(apiRow?.paymentTerms?.details ?? '')
+          const detailsOk = !!apiRow && !BIDI_RE.test(details) && details === LEASE_LINES.join('\n')
+          await caption(S.admin, `Step T2 — the panel's row: ${squash(row || '(none)', 140)}`)
+          const s = await shot(S.admin, 't2-c-row')
+          const linkOk = INVITE_LINK_RE.test(c.linkValue.trim())
+          return {
+            verdict: verdict(refusedOk && c.status === 201 && linkOk && !!row && /\bActive\b/i.test(row) && row.includes('$2,000.00') && detailsOk && !BIDI_RE.test(panelText)),
+            shot: s,
+            observed: `"2,000": Create ${enabled ? 'enabled and pressed' : 'disabled'}, ${posts.length} POST${firstResp ? ` → ${firstResp.status()}` : ''}; inline error: ${errs.texts.length ? errs.texts.map((t) => `"${t}"`).join(', ') : 'none'}${errs.ariaInvalid ? ' (amount aria-invalid)' : ''}; saved: ${saved ? `YES, invite #${saved.id}` : 'no'}. ` +
+              `2000: POST → ${c.status}${c.code ? ` ${c.code}` : ''}, invite #${S.lease.id ?? '?'}, link ${linkOk ? 'shown and matching' : 'NOT shown or not matching'}; the lease warning shown: ${warning}; ` +
+              `the panel's row: ${row ? `"${squash(row, 160)}"` : 'none'}; saved details ${apiRow ? `${JSON.stringify(details)} (bidirectional control: ${BIDI_RE.test(details)}; both lines, in order: ${details === LEASE_LINES.join('\n')})` : 'unread (no API row)'}; ` +
+              `the panel's text: bidirectional control ${BIDI_RE.test(panelText)}, second line shown ${panelText.includes(LEASE_LINES[1])}`,
+          }
+        })
+    }
+
+    // ================= T3: the split link, anonymous
+    if (want('T3')) {
+      const R = {}
+      if (!S.split?.path) R.notStarted = 'T1 made no split invite link'
+      await walk(R, () => S.splitPortal?.page, 't3', async () => {
+        const P = await openInvestPortal('t3', S.split.path, S.split.token)
+        S.splitPortal = P
+        S.portals.push(P)
+        const opened = await P.start()
+        if (opened !== 'form') throw new Error(`the split link did not show the application (${opened === 'error' ? `invite-error ${await P.page.locator(TD('invite-error')).first().getAttribute('data-code')}` : 'nothing within 45 s'})`)
+        await caption(P.page, 'Step T3 — anonymous: the SPLIT invite link, in a fresh browser')
+        await P.fillToDocuments('S', 11, `QA-TEST Investor S ${stamp}`)
+        R.card = await termsBoxFacts(P.page, 'invite-terms-card', 8000)
+        R.card.url = new URL(P.page.url()).searchParams.has('invite')
+        R.card.gets = [...P.inviteGets]
+        await P.page.locator(TD('invite-terms-card')).first().scrollIntoViewIfNeeded().catch(() => {})
+        await caption(P.page, `Step T3 — step 2: the terms card is ${boxText(R.card)}`)
+        R.card.shot = await shot(P.page, 't3-a-card')
+        await fillInvestFleet(P.page, 'S')
+        const pv = await P.openDoc('master_agreement')
+        await caption(P.page, `Step T3 — the master agreement preview (${pv.status}): "AMENDMENT NO. 1" ${pv.flat.includes('AMENDMENT NO. 1')}, "50/50 profit split" ${pv.flat.includes('50/50 profit split')}`)
+        R.master = { ...pv, shot: await shot(P.page, 't3-b-master') }
+        R.body = { k: P.keys.find((k) => k.docKey === 'master_agreement') || null, shot: R.master.shot }
+        await P.closeDoc()
+      })
+      if (R.notStarted) notStartedRow('T3', 'Anonymous: the split invite link', 'The terms card, the amendment in the master PDF, a body with the token only', R.notStarted)
+      else {
+        walkRow(R, 'T3a', 'Anonymous, the split link, step 2: the read-only terms card (invite-terms-card)',
+          'Shows "50/50" and the details; no input, select, textarea or contenteditable inside it', 'card', (c) => ({
+            ok: c.visible && c.editable === 0 && c.text.includes('50/50') && c.text.includes(SPLIT_DETAILS),
+            observed: `invite-terms-card ${boxText(c)}; "50/50" ${c.text.includes('50/50')}, the details ${c.text.includes(SPLIT_DETAILS)}; the URL keeps ?invite=: ${c.url}; ` +
+              `GET /api/public/investor-invite ×${c.gets.length}${c.gets.length ? ` (token in X-Invite-Token: ${c.gets.every((g) => g.header)}, in the URL: ${c.gets.some((g) => g.inUrl)})` : ''}`,
+          }))
+        const SPLIT_PDF = [['', 'AMENDMENT NO. 1', true], ['the details', SPLIT_DETAILS, true], ['', '50/50 profit split', true], ['', 'Fixed monthly lease payment', false]]
+        walkRow(R, 'T3b', 'Anonymous, the split link: the master agreement preview on the signature page',
+          'Contains "AMENDMENT NO. 1", the details and "50/50 profit split"; not "Fixed monthly lease payment"', 'master', (pv) => ({
+            ok: pdfOk(pv, SPLIT_PDF),
+            observed: `${pvHead(pv, 'master_agreement')}; ${pv.pt ? pdfSays(pv, SPLIT_PDF) : 'no PDF to read'}`,
+          }))
+        walkRow(R, 'T3c', 'Anonymous, the split link: the body the page sends to the preview route',
+          'Carries invite_token (the link\'s own) and no terms keys (payment type, amount, details, revision)', 'body', ({ k }) => {
+            const f = bodyKeyFacts(k)
+            return {
+              ok: !!k && f.hasToken && f.tokenMatches && !f.termsKeys.length,
+              observed: k ? `keys beyond T0's record: [${f.extra.join(', ')}]; invite_token is the link's: ${f.tokenMatches}; terms keys: ${f.termsKeys.length ? `[${f.termsKeys.join(', ')}]` : 'none'}` : 'no master_agreement preview request seen',
+            }
+          })
+      }
+    }
+
+    // ================= T4 + T5: the lease link, anonymous, signed and reviewed
+    if (want('T4')) {
+      const R = {}
+      if (!S.lease?.path) R.notStarted = 'T2 made no lease invite link'
+      await walk(R, () => S.leasePortal?.page, 't4', async () => {
+        const P = await openInvestPortal('t4', S.lease.path, S.lease.token)
+        S.leasePortal = P
+        S.portals.push(P)
+        const opened = await P.start()
+        if (opened !== 'form') throw new Error(`the lease link did not show the application (${opened === 'error' ? `invite-error ${await P.page.locator(TD('invite-error')).first().getAttribute('data-code')}` : 'nothing within 45 s'})`)
+        await caption(P.page, 'Step T4 — anonymous: the LEASE invite link, in a fresh browser')
+        S.leaseName = (await P.fillToDocuments('L', 12, S.leaseName)) || S.leaseName
+        const card = await termsBoxFacts(P.page, 'invite-terms-card', 8000)
+        await caption(P.page, `Step T4 — step 2: the terms card is ${boxText(card)}`)
+        await shot(P.page, 't4-a-card')
+        await fillInvestFleet(P.page, 'L')
+        const master = await P.openDoc('master_agreement')
+        const signMaster = await termsBoxFacts(P.page, 'sign-terms', 5000)
+        await caption(P.page, `Step T4 — master agreement, signature page (${master.status}): "$2,000.00" ${master.flat.includes('$2,000.00')}; sign-terms ${boxText(signMaster)}`)
+        R.master = { ...master, shot: await shot(P.page, 't4-b-master') }
+        S.leaseMasterImages = master.images ?? null
+        await P.signOpenDoc('master_agreement', S.leaseName)
+        await P.closeDoc()
+        const lease = await P.openDoc('vehicle_lease')
+        const signLease = await termsBoxFacts(P.page, 'sign-terms', 5000)
+        await caption(P.page, `Step T4 — vehicle lease, signature page (${lease.status}): "Fixed Monthly Lease Payment" ${lease.flat.includes('Fixed Monthly Lease Payment')}; sign-terms ${boxText(signLease)}`)
+        R.lease = { ...lease, shot: await shot(P.page, 't4-c-lease') }
+        await P.signOpenDoc('vehicle_lease', S.leaseName)
+        await P.closeDoc()
+        await P.openDoc('w9')
+        const signW9 = await termsBoxFacts(P.page, 'sign-terms', 1500)
+        await P.signOpenDoc('w9', S.leaseName)
+        await P.closeDoc()
+        R.cards = { card, signMaster, signLease, signW9, shot: R.master.shot }
+        if (!want('T5')) return
+        R.signed = { master: await P.docSigned('master_agreement'), lease: await P.docSigned('vehicle_lease'), w9: await P.docSigned('w9') }
+        await P.toReview(S.leaseName, 12)
+        const reviewTerms = await termsBoxFacts(P.page, 'review-terms', 5000)
+        await P.page.locator(TD('review-terms')).first().scrollIntoViewIfNeeded().catch(() => {})
+        await caption(P.page, `Step T5 — the review modal: review-terms ${boxText(reviewTerms)}`)
+        R.review = { ...reviewTerms, signed: R.signed, shot: await shot(P.page, 't5-a-review') }
+        const rm = await P.reviewDoc('master_agreement')
+        await caption(P.page, `Step T5 — review → the signed master agreement (${rm.status}): "$2,000.00" ${rm.flat.includes('$2,000.00')}, images ${rm.images ?? '?'} (unsigned ${S.leaseMasterImages ?? '?'})`)
+        R.reviewMaster = { ...rm, shot: await shot(P.page, 't5-b-review-master') }
+        await P.closeReviewDoc()
+        S.leaseReady = await P.page.locator('.review-modal').isVisible().catch(() => false)
+      })
+      if (R.notStarted) {
+        notStartedRow('T4', 'Anonymous: the lease invite link', 'Read-only terms; $2,000.00 in the master and the lease', R.notStarted)
+        if (want('T5')) notStartedRow('T5', 'Anonymous: the lease application signed and reviewed', 'review-terms read-only; the signed master shows $2,000.00', R.notStarted)
+      } else {
+        walkRow(R, 'T4a', 'Anonymous, the lease link: the terms card on step 2 and sign-terms on the master and lease signature pages',
+          'All read-only (no input, select, textarea or contenteditable) and showing $2,000.00; the card\'s details carry no bidirectional control character; no sign-terms on the W-9', 'cards', (x) => {
+            const ro = (f) => f.visible && f.editable === 0 && f.text.includes('$2,000.00')
+            return {
+              ok: ro(x.card) && !BIDI_RE.test(x.card.raw) && ro(x.signMaster) && ro(x.signLease) && !x.signW9.visible,
+              observed: `invite-terms-card ${boxText(x.card)} (bidirectional control: ${BIDI_RE.test(x.card.raw)}, second details line ${x.card.text.includes(LEASE_LINES[1])}); ` +
+                `sign-terms on the master: ${boxText(x.signMaster)}; on the lease: ${boxText(x.signLease)}; on the W-9: ${boxText(x.signW9)}`,
+            }
+          })
+        const MASTER_LEASE = [['', '$2,000.00', true], ['', 'fixed monthly lease payment', true], ['', 'distributed according to a 50/50 split', false]]
+        walkRow(R, 'T4b', 'Anonymous, the lease link: the master agreement preview on the signature page',
+          'Contains "$2,000.00" and "fixed monthly lease payment"; not "distributed according to a 50/50 split"', 'master', (pv) => ({
+            ok: pdfOk(pv, MASTER_LEASE),
+            observed: `${pvHead(pv, 'master_agreement')}; ${pv.pt ? `${pdfSays(pv, MASTER_LEASE)}; "AMENDMENT NO. 1": ${pv.flat.includes('AMENDMENT NO. 1')}; both details lines: ${LEASE_LINES.every((l) => pv.flat.includes(l))}; bidirectional control: ${BIDI_RE.test(pv.pt.text)}` : 'no PDF to read'}`,
+          }))
+        const LEASE_LEASE = [['', '$2,000.00', true], ['', 'Fixed Monthly Lease Payment', true], ['', 'Disbursements shall be calculated based on the 50/50 profit participation model', false]]
+        walkRow(R, 'T4c', 'Anonymous, the lease link: the vehicle lease preview on the signature page',
+          'Contains "$2,000.00" and "Fixed Monthly Lease Payment"; not "Disbursements shall be calculated based on the 50/50 profit participation model"', 'lease', (pv) => ({
+            ok: pdfOk(pv, LEASE_LEASE),
+            observed: `${pvHead(pv, 'vehicle_lease')}; ${pv.pt ? `${pdfSays(pv, LEASE_LEASE)}; "AMENDMENT NO. 1": ${pv.flat.includes('AMENDMENT NO. 1')}` : 'no PDF to read'}`,
+          }))
+        if (want('T5')) {
+          walkRow(R, 'T5a', 'Anonymous, the lease link: all three documents signed; the review modal\'s terms (review-terms)',
+            '3/3 signed; review-terms shown, read-only, with $2,000.00', 'review', (x) => ({
+              ok: x.signed.master && x.signed.lease && x.signed.w9 && x.visible && x.editable === 0 && x.text.includes('$2,000.00'),
+              observed: `signed: master ${x.signed.master}, lease ${x.signed.lease}, W-9 ${x.signed.w9}; review-terms ${boxText(x)}`,
+            }))
+          walkRow(R, 'T5b', 'Anonymous, the lease link: review → "Signed — View Document", the master agreement',
+            'Contains "$2,000.00" and the drawn signature is embedded (more images than the unsigned copy)', 'reviewMaster', (pv) => {
+              const drawn = pv.images != null && S.leaseMasterImages != null ? pv.images - S.leaseMasterImages : null
+              return {
+                ok: pv.status === 200 && pv.flat.includes('$2,000.00') && drawn != null && drawn > 0,
+                observed: `${pvHead(pv, 'master_agreement')}; "$2,000.00": ${pv.flat.includes('$2,000.00')}; images ${S.leaseMasterImages ?? '?'} unsigned → ${pv.images ?? '?'} signed${drawn == null ? '' : drawn > 0 ? ` (+${drawn}: the drawn signature is embedded)` : ' (the drawn signature is NOT embedded)'}`,
+              }
+            })
+        }
+      }
+    }
+
+    // ================= T6: plain /invest is today's contract
+    if (want('T6')) {
+      const R = {}
+      const ref = {
+        from: t0?.A?.sign?.master_agreement?.facts ? 'T0 in this run' : 'T0 on 3b61d14 (its recorded T0i, T0j, T0k)',
+        s33: t0?.A?.sign?.master_agreement?.facts?.s33 || T0_S33,
+        s201: t0?.A?.sign?.vehicle_lease?.facts?.s201 || T0_S201,
+        unsigned: t0?.A?.keys?.find((k) => !k.signed)?.keys || T0_PREVIEW_KEYS,
+        signed: t0?.A?.keys?.find((k) => k.signed)?.keys || T0_PREVIEW_KEYS_SIGNED,
+      }
+      let P6 = null
+      await walk(R, () => P6?.page, 't6', async () => {
+        P6 = await openInvestPortal('t6', '/invest')
+        S.portals.push(P6)
+        if (await P6.start() !== 'form') throw new Error('/invest did not show the application within 45 s')
+        const name = `QA-TEST Investor N ${stamp}`
+        await caption(P6.page, 'Step T6 — anonymous: plain /invest, no invite')
+        await P6.fillToDocuments('N', 14, name)
+        await fillInvestFleet(P6.page, 'N')
+        await P6.page.waitForTimeout(1500)
+        R.plain = {
+          card: await termsBoxFacts(P6.page, 'invite-terms-card', 300),
+          errors: await P6.page.locator(TD('invite-error')).count(),
+          gets: P6.inviteGets.length,
+        }
+        await caption(P6.page, `Step T6 — step 2 of plain /invest: invite-terms-card ${boxText(R.plain.card)}; GET /api/public/investor-invite ×${R.plain.gets}`)
+        R.plain.shot = await shot(P6.page, 't6-a-plain')
+        const m = await P6.openDoc('master_agreement')
+        await caption(P6.page, `Step T6 — plain /invest, the master agreement (${m.status}): "50/50 split" ${m.flat.includes('distributed according to a 50/50 split')}, AMENDMENT ${m.flat.includes('AMENDMENT')}`)
+        R.master = { ...m, shot: await shot(P6.page, 't6-b-master') }
+        await P6.signOpenDoc('master_agreement', name)
+        await P6.closeDoc()
+        const l = await P6.openDoc('vehicle_lease')
+        await caption(P6.page, `Step T6 — plain /invest, the vehicle lease (${l.status}): "50/50 profit participation model" ${l.flat.includes('50/50 profit participation model')}, AMENDMENT ${l.flat.includes('AMENDMENT')}`)
+        R.lease = { ...l, shot: await shot(P6.page, 't6-c-lease') }
+        await P6.closeDoc()
+        R.keys = { list: [...P6.keys] }
+      })
+      walkRow(R, 'T6a', 'Plain /invest (no invite), step 2: no invite UI and no invite request',
+        'No invite-terms-card, no invite-error, no GET /api/public/investor-invite', 'plain', (x) => ({
+          ok: !x.card.present && !x.errors && !x.gets,
+          observed: `invite-terms-card ${boxText(x.card)}; invite-error elements: ${x.errors}; GET /api/public/investor-invite ×${x.gets}`,
+        }))
+      const PLAIN_MASTER = [['', 'distributed according to a 50/50 split', true], ['', 'Participant Distribution (50%)', true], ['', 'AMENDMENT', false]]
+      walkRow(R, 'T6b', 'Plain /invest: the master agreement preview; §3.3 as T0 recorded it',
+        `Contains "distributed according to a 50/50 split" and "Participant Distribution (50%)"; no "AMENDMENT"; §3.3 ("3.3 Revenue Participation" up to "3.4 Settlement Cycle") equal to ${ref.from}`, 'master', (pv) => {
+          const s33 = between(pv.flat, '3.3 Revenue Participation', '3.4 Settlement Cycle')
+          return {
+            ok: pdfOk(pv, PLAIN_MASTER) && s33 === ref.s33,
+            observed: `${pvHead(pv, 'master_agreement')}; ${pv.pt ? `${pdfSays(pv, PLAIN_MASTER)}; §3.3 ${s33 === ref.s33 ? `equal to ${ref.from} (${s33.length} characters)` : `DIFFERS from ${ref.from}: "${squash(s33, 400)}"`}` : 'no PDF to read'}`,
+          }
+        })
+      const PLAIN_LEASE = [['', '50/50 profit participation model', true], ['', 'AMENDMENT', false]]
+      walkRow(R, 'T6c', 'Plain /invest: the vehicle lease preview; §2.01 as T0 recorded it',
+        `Contains "50/50 profit participation model"; no "AMENDMENT"; §2.01 ("2.01 Lease Payments" up to "2.02") equal to ${ref.from}`, 'lease', (pv) => {
+          const s201 = between(pv.flat, '2.01 Lease Payments', '2.02')
+          return {
+            ok: pdfOk(pv, PLAIN_LEASE) && s201 === ref.s201,
+            observed: `${pvHead(pv, 'vehicle_lease')}; ${pv.pt ? `${pdfSays(pv, PLAIN_LEASE)}; §2.01 ${s201 === ref.s201 ? `equal to ${ref.from} (${s201.length} characters)` : `DIFFERS from ${ref.from}: "${squash(s201, 400)}"`}` : 'no PDF to read'}`,
+          }
+        })
+      walkRow(R, 'T6d', 'Plain /invest: the JSON body keys sent to the preview route (sorted), unsigned and signed',
+        `Exactly ${ref.from}: unsigned [${T0_PREVIEW_KEYS.join(', ')}]; signed the same plus signatureImage, signatureText`, 'keys', ({ list }) => {
+          const unsigned = list.filter((k) => !k.signed)
+          const signed = list.filter((k) => k.signed)
+          const uOk = unsigned.length > 0 && unsigned.every((k) => sameList(k.keys, ref.unsigned))
+          const sOk = signed.length > 0 && signed.every((k) => sameList(k.keys, ref.signed))
+          const diff = (k, want) => {
+            const extra = k.keys.filter((x) => !want.includes(x))
+            const missing = want.filter((x) => !k.keys.includes(x))
+            return `${k.docKey}${k.signed ? ' signed' : ''}: ${extra.length ? `extra [${extra.join(', ')}]` : ''}${missing.length ? ` missing [${missing.join(', ')}]` : ''}`
+          }
+          const bad = [...unsigned.filter((k) => !sameList(k.keys, ref.unsigned)).map((k) => diff(k, ref.unsigned)), ...signed.filter((k) => !sameList(k.keys, ref.signed)).map((k) => diff(k, ref.signed))]
+          return {
+            ok: uOk && sOk,
+            observed: `${unsigned.length} unsigned and ${signed.length} signed preview bodies; ${bad.length ? `DIFFER — ${bad.join('; ')}` : `all equal to ${ref.from}`}`,
+          }
+        })
+      if (P6) await P6.close()
+    }
+
+    // ================= T7: terms cannot be changed through the API
+    if (want('T7')) {
+      const R = {}
+      let invPage = null; let invCtx = null
+      await walk(R, () => invPage, 't7', async () => {
+        needAdmin()
+        const username = `QA-TEST-INV-${stamp}`
+        const password = crypto.randomBytes(18).toString('base64url') // in memory only
+        const cr = await api(S.admin, 'POST', '/api/users', { username, password, role: 'Investor', fullName: username, email: `qa-test+${TERMS_DIGITS}-inv@example.com` })
+        const u = ((await api(S.admin, 'GET', '/api/users')).json?.users || []).find((x) => x.Username === username)
+        if (u) { S.user = { id: u.id, username }; meta.ids.termsUser = u.id }
+        if (cr.status !== 200 || !u) throw new Error(`POST /api/users (a test Investor) → ${cr.status}${u ? '' : '; the account is not listed'}`)
+        const fp = await freshPage(ADMIN_VP)
+        invCtx = fp.ctx
+        invPage = fp.page
+        await login(invPage, 'Step T7 — the throwaway test Investor', username, password, '/investor')
+        await caption(invPage, `Step T7 — signed in as the throwaway test Investor (user #${u.id}); every check below is a page fetch from this session`)
+        const cfg = `/api/investor/config?ownerId=${u.id}`
+        const before = await api(invPage, 'GET', cfg)
+        const put = await api(invPage, 'PUT', cfg, { investor_split_pct: '99' })
+        const after = await api(invPage, 'GET', cfg)
+        R.config = { before, put, after, shot: await shot(invPage, 't7-a-investor') }
+        R.post = await api(invPage, 'POST', INVITES_API, { inviteeName: `QA-TEST Invite T7 ${stamp}`, inviteeEmail: `qa-test+${TERMS_DIGITS}-t7@example.com`, paymentType: 'lease', leaseAmount: '1', details: '' })
+        const target = S.lease?.id ?? S.split?.id ?? null
+        R.put = { target, r: await api(invPage, 'PUT', `${INVITES_API}/${target ?? 1}`, { inviteeName: 'QA-TEST Invite T7', inviteeEmail: `qa-test+${TERMS_DIGITS}-t7@example.com`, paymentType: 'lease', leaseAmount: '1', details: '', expectedRevision: S.lease?.revision ?? 1 }) }
+        if (R.post.status === 201 && R.post.json?.invite?.id) S.t7Stray = R.post.json.invite.id
+        await invCtx.close().catch(() => {})
+        invPage = null
+        // The anonymous preview with terms in its body (a fresh, cookie-less context).
+        if (S.lease?.token) {
+          const anon = await browser.newContext()
+          try {
+            const body = {
+              legal_name: `QA-TEST Investor T ${stamp}`, dba: 'QA-TEST DBA T', entity_type: 'LLC', address: '107 QA-TEST Street, Testville, TX 75001',
+              contact_person: `QA-TEST Investor T ${stamp}`, contact_title: 'Owner', phone: '(555) 010-0107', email: `qa-test+${TERMS_DIGITS}t@example.com`,
+              ein_ssn: '00-0000007', years_in_operation: '3', fleet_size: '1',
+              vehicles: [{ year: '2020', make: 'Freightliner', model: 'Cascadia', vin: 'QATEST0000000000T' }],
+              banking: { bank_name: 'QA-TEST Bank', account_type: 'Business Checking', routing_number: '000000000', account_number: '000000000007', account_name: 'QA-TEST' },
+              invite_token: S.lease.token,
+              payment_type: 'split', lease_amount: '1',
+              paymentType: 'split', leaseAmount: '1', details: 'QA-TEST injected terms', amendment_details: 'QA-TEST injected terms',
+            }
+            const resp = await anon.request.post(`${BASE_URL}${TERMS_PREVIEW}master_agreement`, { data: body, timeout: 90000 })
+            const buf = await resp.body()
+            const headers = resp.headers()
+            const status = resp.status()
+            let pt = null
+            if (status === 200 && /pdf/i.test(headers['content-type'] || '')) pt = await pdfText(buf.toString('base64'))
+            R.anon = { status, revision: headers['x-payment-terms-revision'] ?? null, flat: flatText(pt), pt, why: pt ? '' : squash(buf.toString('utf8'), 160), sent: Object.keys(body).filter((k) => TERMS_BODY_KEY_RE.test(k)) }
+          } finally { await anon.close().catch(() => {}) }
+        }
+        const globals = await api(S.admin, 'GET', '/api/investor/config')
+        // A body that writes nothing new even where the route still accepts it: the
+        // global value as read.
+        const saBody = globals.json && globals.json.investor_split_pct != null ? { investor_split_pct: String(globals.json.investor_split_pct) } : {}
+        R.sa = { r: await api(S.admin, 'PUT', '/api/investor/config', saBody), sent: Object.keys(saBody) }
+        await caption(S.admin, `Step T7 — Super Admin: PUT /api/investor/config with no ownerId → ${R.sa.r.status} ${R.sa.r.json?.code || ''}`)
+        R.sa.shot = await shot(S.admin, 't7-e-super-admin')
+        const del = await api(S.admin, 'DELETE', `/api/users/${u.id}`)
+        if (del.status === 200) S.user.deleted = true
+        R.del = del
+      })
+      if (!R.config && R.err) notStartedRow('T7', 'Terms cannot be changed through the API', 'Refused (403 / 400) and nothing changes', R.err.replace(/^not reached: /, ''))
+      else {
+        walkRow(R, 'T7a', 'A test Investor: PUT /api/investor/config?ownerId=<own id> {"investor_split_pct":"99"}, then GET',
+          '403; the GET before and after agree', 'config', ({ before, put, after }) => ({
+            ok: put.status === 403 && before.status === 200 && after.status === 200 && before.json?.investor_split_pct === after.json?.investor_split_pct,
+            observed: `GET → ${before.status} (investor_split_pct ${JSON.stringify(before.json?.investor_split_pct)}); PUT → ${put.status}${put.json?.code ? ` ${put.json.code}` : ''}; GET → ${after.status} (investor_split_pct ${JSON.stringify(after.json?.investor_split_pct)})`,
+          }))
+        walkRow(R, 'T7b', `A test Investor: POST ${INVITES_API}`, '403', 'post', (r) => ({
+          ok: r.status === 403,
+          observed: `→ ${r.status}${r.json?.code ? ` ${r.json.code}` : ''}${r.status === 201 ? ` (an invite was CREATED: #${r.json?.invite?.id}, revoked at clean-up)` : ''}`,
+        }))
+        walkRow(R, 'T7c', `A test Investor: PUT ${INVITES_API}/<the lease invite>`, '403', 'put', ({ target, r }) => ({
+          ok: r.status === 403,
+          observed: `PUT ${INVITES_API}/${target ?? '1 (no invite was made: T2 FAILed)'} → ${r.status}${r.json?.code ? ` ${r.json.code}` : ''}`,
+        }))
+        if (!S.lease?.token) notStartedRow('T7d', 'Anonymous preview with the lease token and terms in the body', 'The PDF still shows $2,000.00', 'T2 made no lease invite link')
+        else {
+          walkRow(R, 'T7d', 'Anonymous (no cookies): POST the master preview with the lease token plus payment_type "split", lease_amount "1" (and the camelCase spellings, and details)',
+            'The PDF still shows $2,000.00 (the invite\'s terms); nothing of the body\'s terms', 'anon', (x) => ({
+              ok: x.status === 200 && x.flat.includes('$2,000.00') && !x.flat.includes('$1.00') && !x.flat.includes('QA-TEST injected terms') && !x.flat.includes('distributed according to a 50/50 split'),
+              observed: `→ ${x.status}${x.revision != null ? `, X-Payment-Terms-Revision ${x.revision}` : ''}${x.pt ? `; "$2,000.00": ${x.flat.includes('$2,000.00')}; "$1.00": ${x.flat.includes('$1.00')}; the injected details: ${x.flat.includes('QA-TEST injected terms')}; the 50/50 §3.3: ${x.flat.includes('distributed according to a 50/50 split')}` : `; ${x.why || 'no PDF'}`}; terms keys sent: [${x.sent.join(', ')}]`,
+            }))
+        }
+        walkRow(R, 'T7e', 'Super Admin: PUT /api/investor/config with no ownerId', '400 OWNER_ID_REQUIRED', 'sa', ({ r, sent }) => ({
+          ok: r.status === 400 && r.json?.code === 'OWNER_ID_REQUIRED',
+          observed: `→ ${r.status}${r.json?.code ? ` ${r.json.code}` : ''} (body: ${sent.length ? `${sent.join(', ')} at its current global value` : 'empty'})`,
+        }))
+        walkRow(R, 'T7f', 'Super Admin: DELETE /api/users/<the throwaway test Investor>', '200', 'del', (r) => ({
+          ok: r.status === 200,
+          observed: `DELETE /api/users/${S.user?.id} → ${r.status}${r.json?.code ? ` ${r.json.code}` : ''}${r.json?.removed ? `; investor_config rows removed: ${r.json.removed.investor_config ?? 0}` : ''}`,
+        }))
+      }
+      if (invCtx) await invCtx.close().catch(() => {})
+    }
+
+    // ================= T8: the lease application is submitted; the invite is used
+    if (want('T8')) {
+      if (!TERMS_SUBMIT_OK) {
+        record({ step: 'T8', title: 'Submit the lease application; the invite is used', expected: 'Local (DB_PATH) or E2E_TERMS_SUBMIT=1', observed: 'SKIPPED — T8 writes an application: it runs locally with DB_PATH, or with E2E_TERMS_SUBMIT=1', verdict: 'SKIP', shot: '' })
+      } else {
+        const R = {}
+        if (!S.leaseReady || !S.leasePortal) R.notStarted = 'needs T5\'s lease application, all three documents signed, on its review modal'
+        await walk(R, () => S.admin, 't8', async () => {
+          needAdmin()
+          const P = S.leasePortal
+          P.allowSubmit = true
+          let sentBody = null
+          P.page.on('request', (r) => { if (r.method() === 'POST' && pathOf(r.url()) === '/api/public/investor-apply') { try { sentBody = r.postDataJSON() } catch { /* not JSON */ } } })
+          await caption(P.page, 'Step T8 — Confirm & Complete Onboarding (the lease application is submitted)')
+          const [resp] = await Promise.all([
+            P.page.waitForResponse((r) => r.request().method() === 'POST' && pathOf(r.url()) === '/api/public/investor-apply', { timeout: 120000 }),
+            P.page.locator('.review-modal [data-wizard-target="submit-confirm"]').click(),
+          ])
+          let json = null
+          try { json = await resp.json() } catch { /* not json */ }
+          const appId = json?.applicationId ?? null
+          if (appId) { S.appIds.push(Number(appId)); meta.ids.termsApplication = appId }
+          await P.page.locator('.success-wrap').waitFor({ state: 'visible', timeout: 15000 }).catch(() => {})
+          await caption(P.page, `Step T8 — POST /api/public/investor-apply → ${resp.status()}; application #${appId ?? '?'}`)
+          const portalShot = await shot(P.page, 't8-a-submitted')
+          await P.close()
+          await gotoInvestorsPage(S.admin)
+          const panel = await invitesPanel(S.admin)
+          const row = panel ? await waitInviteRow(panel, S.lease.name, /\bUsed\b/i) : null
+          const apiRow = inviteByEmail(await invitesList(S.admin), S.lease.email)
+          await caption(S.admin, `Step T8 — the invites panel: ${squash(row || '(no row)', 140)}`)
+          R.submit = {
+            status: resp.status(), code: json?.code || '', appId, row, apiRow, portalShot,
+            tokenSent: sentBody?.invite_token === S.lease.token, revisionSent: sentBody?.invite_terms_revision,
+            shot: await shot(S.admin, 't8-b-panel-used'),
+          }
+          const P2 = await openInvestPortal('t8', S.lease.path, S.lease.token)
+          S.portals.push(P2)
+          await P2.page.goto(`${BASE_URL}${S.lease.path}`)
+          const err = P2.page.locator(TD('invite-error')).first()
+          const shown = await err.waitFor({ state: 'visible', timeout: 15000 }).then(() => true, () => false)
+          R.reopen = { shown, code: shown ? await err.getAttribute('data-code') : null, form: await investTgt(P2.page, 'legal-name').isVisible().catch(() => false) }
+          await caption(P2.page, `Step T8 — the used lease link opened again: invite-error ${shown ? R.reopen.code : 'NOT shown'}`)
+          R.reopen.shot = await shot(P2.page, 't8-c-reopen')
+          await P2.close()
+          // /investor-applications: the Terms column and the detail's Payment Terms.
+          await S.admin.goto(`${BASE_URL}/investor-applications`)
+          await S.admin.locator('table tbody tr').first().waitFor({ state: 'visible', timeout: 30000 })
+          const tbl = await S.admin.evaluate((n) => {
+            const table = [...document.querySelectorAll('table')].find((t) => t.tHead && /name/i.test(t.tHead.innerText))
+            if (!table) return { heads: [], found: false, terms: null }
+            const heads = [...table.tHead.querySelectorAll('th')].map((th) => th.innerText.trim())
+            const ti = heads.findIndex((h) => /terms/i.test(h))
+            const tr = [...table.tBodies[0].rows].find((r) => (r.cells[0]?.innerText || '').trim() === n)
+            return { heads, found: !!tr, terms: tr && ti >= 0 ? tr.cells[ti].innerText.replace(/\s+/g, ' ').trim() : null }
+          }, S.leaseName)
+          const tr = S.admin.locator('table tbody tr', { has: S.admin.locator('td', { hasText: exactText(S.leaseName) }) }).first()
+          let detail = ''
+          if (await tr.count()) {
+            await tr.scrollIntoViewIfNeeded().catch(() => {})
+            await caption(S.admin, `Step T8 — /investor-applications: the Terms column reads ${tbl.terms == null ? '(no Terms column)' : `"${tbl.terms}"`}`)
+            await shot(S.admin, 't8-d-applications')
+            await tr.click()
+            const dlg = S.admin.locator('[role="dialog"]').filter({ hasText: S.leaseName }).first()
+            await dlg.waitFor({ state: 'visible', timeout: 15000 }).catch(() => {})
+            await S.admin.waitForTimeout(1500)
+            detail = await dlg.innerText().catch(() => '')
+            await dlg.getByText('Payment Terms', { exact: false }).first().scrollIntoViewIfNeeded().catch(() => {})
+          }
+          const listed = ((await api(S.admin, 'GET', '/api/investor-applications')).json || []).find?.((a) => Number(a.id) === Number(appId))
+          const det = appId ? await api(S.admin, 'GET', `/api/investor-applications/${appId}`) : null
+          await caption(S.admin, `Step T8 — the application's detail: "Payment Terms" ${detail.includes('Payment Terms')}, "$2,000.00" ${detail.includes('$2,000.00')}`)
+          R.apps = {
+            ...tbl, detailSection: detail.includes('Payment Terms'), detailAmount: detail.includes('$2,000.00'),
+            listSummary: listed?.payment_terms_summary, view: det?.json?.paymentTerms || null,
+            shot: await shot(S.admin, 't8-e-application-detail'),
+          }
+          await S.admin.keyboard.press('Escape').catch(() => {})
+          R.locked = await api(S.admin, 'PUT', `${INVITES_API}/${S.lease.id}`, { inviteeName: S.lease.name, inviteeEmail: S.lease.email, paymentType: 'lease', leaseAmount: '2500', details: LEASE_LINES.join('\n'), expectedRevision: S.lease.revision ?? 1 })
+        })
+        if (R.notStarted) notStartedRow('T8', 'Submit the lease application; the invite is used', 'Submitted; Used; INVITE_USED; the terms on /investor-applications; INVITE_LOCKED', R.notStarted)
+        else {
+          walkRow(R, 'T8a', 'Anonymous: Confirm & Complete Onboarding on the signed lease application; then the admin invites panel',
+            '200 with an application id; the request carries the token and the terms revision; the panel shows the lease invite as Used', 'submit', (x) => ({
+              ok: x.status === 200 && !!x.appId && x.tokenSent && x.revisionSent != null && !!x.row && /\bUsed\b/i.test(x.row),
+              observed: `POST /api/public/investor-apply → ${x.status}${x.code ? ` ${x.code}` : ''}, application #${x.appId ?? '?'} (recorded for the clean-up); the body's invite_token is the link's: ${x.tokenSent}, invite_terms_revision ${JSON.stringify(x.revisionSent)}; ` +
+                `the panel's row: ${x.row ? `"${squash(x.row, 160)}"` : 'none'}; API status ${x.apiRow?.status ?? '?'}, applicationId ${x.apiRow?.applicationId ?? '?'}`,
+            }))
+          walkRow(R, 'T8b', 'Anonymous: the used lease link opened again', 'invite-error with data-code INVITE_USED; no application form', 'reopen', (x) => ({
+            ok: x.shown && x.code === 'INVITE_USED' && !x.form,
+            observed: `invite-error ${x.shown ? `shown, data-code ${x.code}` : 'NOT shown'}; the application form shown: ${x.form}`,
+          }))
+          walkRow(R, 'T8c', 'Super Admin, /investor-applications: the Terms column and the detail\'s Payment Terms for the lease application',
+            'The Terms column and the detail both show the lease at $2,000.00', 'apps', (x) => ({
+              ok: !!x.terms && x.terms.includes('$2,000.00') && x.detailSection && x.detailAmount,
+              observed: `columns [${x.heads.join(' | ')}]; the row ${x.found ? `found, Terms "${x.terms ?? '(no Terms column)'}"` : 'NOT found'}; the detail: "Payment Terms" ${x.detailSection}, "$2,000.00" ${x.detailAmount}; ` +
+                `API: payment_terms_summary ${JSON.stringify(x.listSummary ?? null)}, paymentTerms ${x.view ? `state ${x.view.state}, type ${x.view.paymentTerms?.type}, leaseAmountCents ${x.view.paymentTerms?.leaseAmountCents}, consistent ${x.view.consistent}` : 'absent'}`,
+            }))
+          walkRow(R, 'T8d', `Super Admin: PUT ${INVITES_API}/<the used lease invite> (amount 2500)`, '409 INVITE_LOCKED', 'locked', (r) => ({
+            ok: r.status === 409 && r.json?.code === 'INVITE_LOCKED',
+            observed: `→ ${r.status}${r.json?.code ? ` ${r.json.code}` : ''}`,
+          }))
+        }
+      }
+    }
+
+    // ================= T9: a revoke stops the tab mid-flow
+    if (want('T9')) {
+      let P9 = S.splitPortal
+      await step('T9', 'Super Admin revokes the split invite in the panel while an anonymous tab is on step 2 of it; the tab then opens a document',
+        'The revoke answers 200; the tab shows invite-error with data-code INVITE_REVOKED', () => P9?.page, 't9-revoked', async () => {
+          needAdmin()
+          if (!S.split?.path) throw notReached('T1 made no split invite link')
+          if (!P9 || P9.page.isClosed()) {
+            P9 = await openInvestPortal('t9', S.split.path, S.split.token)
+            S.portals.push(P9)
+            if (await P9.start() !== 'form') throw new Error('the split link did not show the application')
+            await P9.fillToDocuments('S', 11, `QA-TEST Investor S ${stamp}`)
+          }
+          await caption(P9.page, 'Step T9 — this tab waits on step 2 of the split link while the Super Admin revokes it')
+          await gotoInvestorsPage(S.admin)
+          const panel = await invitesPanel(S.admin)
+          if (!panel) throw new Error('/investors has no invites panel')
+          await caption(S.admin, 'Step T9 — Super Admin: Revoke on the split invite\'s row')
+          const rv = await revokeThroughPanel(S.admin, panel, S.split.name)
+          if (rv.status === 200) S.split.revoked = true
+          const row = await waitInviteRow(panel, S.split.name, /\bRevoked\b/i)
+          await caption(S.admin, `Step T9 — revoke → ${rv.status || 'no request'}; the row: ${squash(row || '(none)', 120)}`)
+          await shot(S.admin, 't9-a-revoked')
+          const err = P9.page.locator(TD('invite-error')).first()
+          // A page that learns of the revoke by itself may already show the error.
+          const early = await err.isVisible().catch(() => false)
+          let pv = null
+          if (!early) {
+            const card = P9.page.locator('.doc-card[data-wizard-target="doc-master_agreement"]')
+            const [resp] = await Promise.all([P9.previewOf('master_agreement', 20000).catch(() => null), card.click({ timeout: 5000 }).catch(() => null)])
+            pv = resp ? await P9.read(resp) : null
+          }
+          const shown = await err.waitFor({ state: 'visible', timeout: 10000 }).then(() => true, () => false)
+          const code = shown ? await err.getAttribute('data-code') : null
+          await caption(P9.page, `Step T9 — the next document open: preview ${pv ? pv.status : 'not sent'}; invite-error ${shown ? code : 'NOT shown'}`)
+          const s = await shot(P9.page, 't9-b-tab')
+          return {
+            verdict: verdict(rv.status === 200 && shown && code === 'INVITE_REVOKED'),
+            shot: s,
+            observed: `the Revoke button ${rv.clicked ? 'found' : 'NOT found'} in the row; POST …/revoke → ${rv.status || 'not sent'}${rv.code ? ` ${rv.code}` : ''}; the row now: ${row ? `"${squash(row, 140)}"` : 'none'}; ` +
+              `the tab's next preview: ${early ? 'not needed (the error showed before any document open)' : pv ? `${pv.status}${pv.why ? ` ${pv.why}` : ''}` : 'not sent'}; invite-error ${shown ? `shown, data-code ${code}` : 'NOT shown'}`,
+          }
+        })
+    }
+
+    // ================= T10: the investor detail modal survives a list refresh
+    if (want('T10')) {
+      await step('T10', 'Super Admin, /investors: a test investor record\'s detail modal while that record is saved elsewhere (PUT /api/investors/<id>, a notes change)',
+        'After the save and 2 s: the detail modal and its investor-terms-section still visible', adminPage, 't10-detail-modal', async () => {
+          needAdmin()
+          await gotoInvestorsPage(S.admin)
+          const name = `QA-TEST-INV-${stamp}-REC`
+          const acc = S.admin.locator('details.form-accordion').filter({ has: S.admin.locator('summary', { hasText: /Add Investor/i }) }).first()
+          const summary = acc.locator('summary').first()
+          await summary.waitFor({ state: 'visible', timeout: 15000 })
+          if (!(await acc.evaluate((d) => d.open))) await summary.click()
+          await field(acc, 'Investor Name *').fill(name)
+          await caption(S.admin, 'Step T10 — Add Investor: a test record')
+          const [resp] = await Promise.all([
+            S.admin.waitForResponse((r) => r.request().method() === 'POST' && pathOf(r.url()) === '/api/investors', { timeout: 15000 }),
+            acc.getByRole('button', { name: /^\s*Add Investor\s*$/i }).click(),
+          ])
+          let id = null
+          try { id = (await resp.json())?.id ?? null } catch { /* not json */ }
+          if (id == null) id = ((await api(S.admin, 'GET', '/api/investors')).json?.investors || []).find((i) => i.fullName === name)?.id ?? null
+          if (id == null) throw new Error(`POST /api/investors → ${resp.status()}, and no record named as the test's is listed`)
+          S.record = { id, name }
+          meta.ids.termsRecord = id
+          await S.admin.waitForTimeout(800)
+          const row = await findInvestorRow(S.admin, name)
+          if (!row) throw new Error(`record #${id} is not in the Investor Directory`)
+          // The name, as a person clicks it: the row's centre is the Split % cell, which
+          // keeps its clicks to itself.
+          await row.locator('td.name-cell').click()
+          await S.admin.waitForTimeout(1200)
+          const before = await investorDetailProbe(S.admin, name)
+          await caption(S.admin, `Step T10 — the detail modal of record #${id}: open ${before.open}, investor-terms-section ${before.termsVisible ? 'shown' : 'absent'}`)
+          await shot(S.admin, 't10-a-open')
+          const put = await api(S.admin, 'PUT', `/api/investors/${id}`, { notes: `QA-TEST T10 notes ${stamp}` })
+          await S.admin.waitForTimeout(2000)
+          const after = await investorDetailProbe(S.admin, name)
+          await caption(S.admin, `Step T10 — 2 s after PUT /api/investors/${id} (${put.status}): modal open ${after.open}, investor-terms-section ${after.termsVisible ? 'shown' : 'NOT shown'}`)
+          const s = await shot(S.admin, 't10-b-after-refresh')
+          await S.admin.keyboard.press('Escape').catch(() => {})
+          const del = await api(S.admin, 'DELETE', `/api/investors/${id}`)
+          if (del.status === 200) S.record.deleted = true
+          return {
+            verdict: verdict(put.status === 200 && before.open && after.open && after.termsVisible),
+            shot: s,
+            observed: `record #${id} added (POST → ${resp.status()}); modal open ${before.open}, terms section ${before.termsVisible ? `"${before.termsText}"` : 'absent'}; ` +
+              `PUT /api/investors/${id} → ${put.status}; 2 s later: modal open ${after.open}, terms section ${after.termsVisible ? 'still shown' : 'NOT shown'}, a skeleton on the page ${after.skeleton}; ` +
+              `DELETE /api/investors/${id} → ${del.status}`,
+          }
+        })
+    }
+
+    // ================= T11: an edit mid-flow clears the signatures
+    if (want('T11')) {
+      let P11 = null
+      await step('T11', 'Super Admin edits a lease invite\'s amount (1500 → 1750) while an anonymous tab has signed its master agreement; the tab opens the lease',
+        'The next preview carries the new revision; the page shows "LogisX updated the payment terms in your invitation. Please review and sign the agreements again." and the master is no longer signed',
+        () => P11?.page, 't11-terms-changed', async () => {
+          needAdmin()
+          const name = `QA-TEST Invite T11 ${stamp}`
+          const email = `qa-test+${TERMS_DIGITS}-t11@example.com`
+          const details = 'QA-TEST T11 terms.'
+          const cr = await api(S.admin, 'POST', INVITES_API, { inviteeName: name, inviteeEmail: email, paymentType: 'lease', leaseAmount: '1500', details })
+          const m = String(cr.json?.invitePath || '').match(INVITE_LINK_RE)
+          if (cr.json?.invite?.id) S.t11 = { id: cr.json.invite.id, name, email }
+          if (cr.status !== 201 || !m) throw new Error(`POST ${INVITES_API} (as the Super Admin) → ${cr.status}${cr.json?.code ? ` ${cr.json.code}` : ''}: no invite to edit mid-flow`)
+          Object.assign(S.t11, { path: `/invest?invite=${m[1]}`, token: m[1], revision: cr.json.invite?.termsRevision ?? 1 })
+          P11 = await openInvestPortal('t11', S.t11.path, S.t11.token)
+          S.portals.push(P11)
+          if (await P11.start() !== 'form') throw new Error('the T11 link did not show the application')
+          const who = `QA-TEST Investor R ${stamp}`
+          await P11.fillToDocuments('R', 13, who)
+          await fillInvestFleet(P11.page, 'R')
+          const first = await P11.openDoc('master_agreement')
+          await P11.signOpenDoc('master_agreement', who)
+          await P11.closeDoc()
+          const signedBefore = await P11.docSigned('master_agreement')
+          await caption(P11.page, `Step T11 — the master agreement signed (preview revision ${first.revision ?? '?'}); now the Super Admin edits the amount`)
+          await shot(P11.page, 't11-a-master-signed')
+          const put = await api(S.admin, 'PUT', `${INVITES_API}/${S.t11.id}`, { inviteeName: name, inviteeEmail: email, paymentType: 'lease', leaseAmount: '1750', details, expectedRevision: S.t11.revision })
+          const newRev = put.json?.invite?.termsRevision ?? null
+          const pv = await P11.openDoc('vehicle_lease')
+          const notice = P11.page.getByText(TERMS_REVISED_NOTICE, { exact: false }).first()
+          const noticeShown = await notice.waitFor({ state: 'visible', timeout: 10000 }).then(() => true, () => false)
+          const signedAfter = await P11.docSigned('master_agreement')
+          await caption(P11.page, `Step T11 — after the edit: the notice ${noticeShown ? 'shown' : 'NOT shown'}; master signed ${signedAfter}`)
+          const s = await shot(P11.page, 't11-b-notice')
+          return {
+            verdict: verdict(put.status === 200 && newRev != null && String(pv.revision) === String(newRev) && noticeShown && signedBefore === true && signedAfter === false),
+            shot: s,
+            observed: `invite #${S.t11.id} (revision ${S.t11.revision}); master signed ${signedBefore}; PUT (1750, expectedRevision ${S.t11.revision}) → ${put.status}${put.json?.code ? ` ${put.json.code}` : ''}, revision ${newRev ?? '?'}; ` +
+              `the lease preview → ${pv.status}, X-Payment-Terms-Revision ${pv.revision ?? 'none'}, "$1,750.00" ${pv.flat.includes('$1,750.00')}; the notice ${noticeShown ? 'shown' : 'NOT shown'}; master signed afterwards ${signedAfter}`,
+          }
+        })
+    }
+
+    // ================= Tm: what the anonymous pages attempted and logged
+    if (S.portals.length) {
+      const blocked = S.portals.flatMap((P) => P.blocked.map((b) => `${P.tag} ${b}`))
+      const errs = S.portals.flatMap((P) => P.errors.map((e) => `${P.tag} ${e}`))
+      const counts = S.portals.map((P) => `${P.tag} ${P.previewLog.length}`).join(', ')
+      record({
+        step: 'Tm', title: 'The anonymous pages of T3-T11: writes aborted in the browser (anything but the preview and T8\'s submit), console errors, preview renders',
+        expected: 'INFO', verdict: 'INFO', shot: '',
+        observed: `aborted writes: ${blocked.length ? blocked.join(', ') : 'none'}; console/page errors: ${errs.length ? squash(errs.join(' | '), 900) : 'none'}; preview renders per page: ${counts}`,
+      })
+    }
+  } finally {
+    await termsCleanup(S)
+    for (const P of S.portals) await P.close()
+    await S.adminCtx?.close().catch(() => {})
+    if (ownDb) { try { db?.close() } catch { /* ignore */ } db = null }
+  }
+}
+
+// Tc — always runs: revoke every invite the run made that is still active (and any
+// earlier run's QA-TEST invite left active), soft-delete every application it made
+// (then hard-delete it by id when local), delete the throwaway user and the test
+// investor record. Ids only.
+async function termsCleanup(S) {
+  const notes = []
+  let ok = true
+  if (!S.admin) {
+    record({ step: 'Tc', title: 'Clean-up: revoke the run\'s invites, delete its application, user and record', expected: 'Everything revoked or deleted', observed: `no Super Admin page (${S.adminErr}): nothing to clean up through the API, and nothing was made`, verdict: S.adminErr.startsWith('sign-in failed') ? 'FAIL' : 'SKIP', shot: '' })
+    return
+  }
+  try {
+    const mine = [S.split, S.lease, S.t11].filter(Boolean)
+    const list = await invitesList(S.admin)
+    if (list) {
+      for (const inv of list) {
+        const ours = mine.some((m) => (m.id != null && m.id === inv.id) || String(inv.inviteeEmail || '').toLowerCase() === m.email.toLowerCase()) || inv.id === S.t7Stray
+        const leftover = !ours && /^QA-TEST Invite /.test(String(inv.inviteeName || '')) && /@example\.com$/i.test(String(inv.inviteeEmail || ''))
+        if (!ours && !leftover) continue
+        if (inv.status !== 'active') { notes.push(`invite #${inv.id} ${inv.status}`); continue }
+        const r = await api(S.admin, 'POST', `${INVITES_API}/${inv.id}/revoke`, { reason: 'QA-TEST e2e clean-up' })
+        notes.push(`invite #${inv.id}${leftover ? ' (an earlier run\'s)' : ''} revoked → ${r.status}`)
+        if (r.status !== 200) ok = false
+      }
+    } else if (mine.some((m) => m.id != null)) {
+      ok = false
+      notes.push('invites were made but the invites list could not be read')
+    } else notes.push('no invites list on this build, and no invite was made')
+    // Applications: this run's, and any QA-TEST application an earlier run left.
+    const apps = await api(S.admin, 'GET', '/api/investor-applications')
+    const leftovers = (Array.isArray(apps.json) ? apps.json : [])
+      .filter((a) => QA_APPLICATION_RE.test(String(a.legal_name || '')) && !S.appIds.includes(Number(a.id)))
+      .map((a) => Number(a.id))
+    for (const id of [...S.appIds, ...leftovers]) {
+      const d = await api(S.admin, 'DELETE', `/api/investor-applications/${id}`)
+      notes.push(`application #${id}${leftovers.includes(id) ? ' (an earlier run\'s)' : ''} soft-deleted → ${d.status}`)
+      if (d.status !== 200) ok = false
+      if (db) {
+        try { notes.push(hardDeleteTermsApplication(id)) } catch (e) { ok = false; notes.push(`application #${id} hard delete error: ${e.message}`) }
+      }
+    }
+    if (S.user && !S.user.deleted) {
+      const d = await api(S.admin, 'DELETE', `/api/users/${S.user.id}`)
+      notes.push(`user #${S.user.id} deleted → ${d.status}`)
+      if (d.status === 200) S.user.deleted = true
+      else ok = false
+    } else if (S.user) notes.push(`user #${S.user.id} already deleted (T7)`)
+    if (S.record && !S.record.deleted) {
+      const d = await api(S.admin, 'DELETE', `/api/investors/${S.record.id}`)
+      notes.push(`investor record #${S.record.id} deleted → ${d.status}`)
+      if (d.status === 200) S.record.deleted = true
+      else ok = false
+    } else if (S.record) notes.push(`investor record #${S.record.id} already deleted (T10)`)
+  } catch (e) {
+    ok = false
+    notes.push(`error: ${e.message.split('\n')[0]}`)
+  }
+  record({
+    step: 'Tc', title: 'Clean-up (always runs): revoke the run\'s active invites, soft-delete (and locally hard-delete) its applications, delete its user and investor record',
+    expected: 'Every step 200; nothing of the run left active', observed: notes.join('; ') || 'nothing to clean up', verdict: verdict(ok), shot: '',
+  })
 }
 
 let exitCode = 0

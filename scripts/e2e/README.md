@@ -49,6 +49,20 @@ What it covers today, by section (`ONLY` picks them):
   preview sent with no notes key prints it too (I8, I8b, planted, local only); the pre-filled note is labelled as carried
   over until it is typed into (I8h). The server refuses a note over 500 characters, a note that is not text, and an Order # with `<` (I9).
   One sign-in; `ONLY=invoice`. The worktree needs the POD files linked (`E2E_LINK_PODS=1`, see `prep-worktree.sh`).
+- **Investor terms (T0).** What a prospective investor is shown on `/invest` today: two test investors (`QA-TEST
+  Investor A` / `B`) fill the application in fresh anonymous browsers, open the Master Participation & Management
+  Agreement and the Commercial Vehicle Lease on the signature page, sign all three documents, and open both again from
+  the review ("Signed — View Document"). Each preview PDF carries the default 50/50 terms and no `AMENDMENT`, and the
+  master's §3.3 and the lease's §2.01 read the same for A and B. Nothing is submitted. No sign-in and no creds file;
+  local and staging. `ONLY=terms STEPS=T0`.
+- **Per-investor payment terms (T1–T11).** The Super Admin creates a split and a lease invite link on `/investors`
+  (T1, T2; "2,000" is refused inline). An anonymous applicant who opens a link sees the terms read-only and the
+  amendment in the preview PDFs, and the page never sends terms itself (T3–T5). Plain `/invest` is still T0's contract
+  (T6). Terms cannot be changed through the API (T7). The lease application is submitted and its invite is used: the
+  link then answers `INVITE_USED`, and `/investor-applications` shows the lease (T8; local, or `E2E_TERMS_SUBMIT=1`). A
+  revoke stops a tab mid-flow (T9). The investor detail modal survives a list refresh (T10). An admin edit mid-flow
+  clears the signatures (T11). Tc cleans up. Two sign-ins (the Super Admin and a throwaway test Investor). Local and
+  staging. `ONLY=terms`, and see "The investor terms section" for why T0 and T1–T11 need two server processes.
 
 Every "Expected" column states the behaviour **after** the fix. A run on a build without it (a BEFORE baseline) is
 expected to FAIL exactly the fix rows.
@@ -181,11 +195,22 @@ fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
 BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-invoice ONLY=invoice DB_PATH="$W/qa.db" \
   fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
 fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
+# Part 6: the investor terms (T0 renders 16 previews, T1-T11 about 17; the preview route allows 30 per 15 minutes
+# per IP, so each half gets a fresh server process). T8 submits a test application: DB_PATH lets it, and Tc
+# soft-deletes it and then hard-deletes it from the copy by id.
+fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
+BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-terms-t0 ONLY=terms STEPS=T0 \
+  fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
+fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
+fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
+BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-terms ONLY=terms STEPS=T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11 DB_PATH="$W/qa.db" \
+  fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
+fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
 ```
 
 - Headless: part 1 takes about 1.5 minutes, part 2 about 2.5 minutes, part 3 about 30 s, part 4 about 2.5 minutes
   (up to 80 s more when F1 has to plant its formula and wait for the server's cached copy of the sheet), part 5 about
-  45 s.
+  45 s, part 6 about 1.5 minutes (T0) and 2–3 minutes (T1–T11).
 - B1 deletes its expense and puts its assignment's spelling back when it runs, so plant again before every boot that
   B1 is to read. A run whose server booted before the plant scores B1 INFO (the boot never saw the row); a copy with
   nothing planted SKIPs it.
@@ -198,7 +223,7 @@ fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
   start while `plant-journal.json` exists.
 
 ⚠️ **Login limiter:** `POST /api/auth/login` allows 20 attempts per 15 minutes per server process, counting every
-attempt. Per section: `trucks` 3, `signout` up to 20, `dispatcher` 2, `maintenance` 3, `names` 2, `eldlink` 1, `invoice` 1 and `moneypath` up to 3 (the
+attempt. Per section: `trucks` 3, `signout` up to 20, `dispatcher` 2, `maintenance` 3, `names` 2, `eldlink` 1, `invoice` 1, `terms` 2 (the Super Admin and T7's throwaway test Investor; 0 with `STEPS=T0`) and `moneypath` up to 3 (the
 Super Admin and the driver, plus the Super Admin again when E1 has to file on the driver's behalf). The sign-out figure is its
 worst case: one fewer on a build without S4a's second half, and one fewer where S7 sends one sign-in (so 19 on a build
 with the fixes). It fills a whole window, so run it on a fresh server process, as the recipe does. **All five together
@@ -328,6 +353,13 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
 - **Creds file:** it has `creds.json`'s shape, with staging logins:
   `{"superAdmin": {"username", "password", "userId"}, "driver": {…}, "investor": {…}, "dispatcher": {…}}`.
   `investor` and `dispatcher` are optional. Keep it in the work dir, `0600`.
+- **`ONLY=terms STEPS=T0` needs no creds file.** It signs nobody in, so a run of only login-free steps starts without
+  one (point `CREDS_FILE` at a path that does not exist to prove it). It writes nothing on staging.
+- **`ONLY=terms` T1–T11 need only `superAdmin`** in the creds file: T7 makes its own throwaway test Investor and deletes
+  it. They write on staging: the invites T1, T2 and T11 create (revoked by Tc unless used), T7's user and T10's
+  investor record (both deleted), and their audit lines (which stay). T8 SKIPs there unless `E2E_TERMS_SUBMIT=1`; with
+  it, T8 submits a real application (which also sends staging's new-application emails wherever it has a mail target),
+  and Tc can only soft-delete it. Run T0 and T1–T11 at least 15 minutes apart (the preview limiter, see the terms section).
 - ⚠️ **A full run writes on staging.** It creates, edits and deletes `QA-TEST-*` trucks, and their audit rows stay.
   `ONLY=signout` only signs in and out. `ONLY=moneypath` saves one real driver's pay terms four times and then puts the
   row back as it was read; its `update_driver_pay` audit lines stay (SQLite only).
@@ -339,13 +371,14 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
 | `BASE_URL` | Required by `e2e.mjs`. Refuses `app.logisx.com` (production). |
 | `PHASE` | `before` or `after`. Only names the output; the "Expected" column is always the after-the-fix behaviour. |
 | `OUT_TAG` | Writes `shots/<tag>/` and `results-<tag>.md` instead of `<PHASE>`, so a rehearsal cannot overwrite a baseline. |
-| `ONLY` | A comma-separated list of sections: `trucks` (1–12, R1–R16), `signout` (S1–S7), `dispatcher` (D1–D3), `maintenance` (M1), `moneypath` (P1, E1, N1, N1b, F1, E2, B1, RC1), `names` (K1–K3), `eldlink` (L1–L3), `invoice` (I1–I9). Unset: all eight, in that order, then step 12's clean-up — more sign-ins than one limiter window holds (see above). |
-| `STEPS` | Only these sign-out, money-path or invoice cases, e.g. `STEPS=S5a,S7` (each has its own browser context), `STEPS=P1,F1` or `STEPS=E2,B1,RC1` (`P1` selects P1a and P1b; `N1` selects N1 and N1b), `STEPS=I8,I9` (`I3` selects I3a–c, `I7` selects I7, I7r and I7j, `I8` selects I8, I8b and I8h, `I9` selects I9 and I9a–c; I1 opens the editor whenever any of I1–I7 is picked). The other sections ignore it. |
+| `ONLY` | A comma-separated list of sections: `trucks` (1–12, R1–R16), `signout` (S1–S7), `dispatcher` (D1–D3), `maintenance` (M1), `moneypath` (P1, E1, N1, N1b, F1, E2, B1, RC1), `names` (K1–K3), `eldlink` (L1–L3), `invoice` (I1–I9), `terms` (T0–T11). Unset: all nine, in that order, then step 12's clean-up — more sign-ins than one limiter window holds (see above). |
+| `STEPS` | Only these sign-out, money-path or invoice cases, e.g. `STEPS=S5a,S7` (each has its own browser context), `STEPS=P1,F1` or `STEPS=E2,B1,RC1` (`P1` selects P1a and P1b; `N1` selects N1 and N1b), `STEPS=I8,I9` (`I3` selects I3a–c, `I7` selects I7, I7r and I7j, `I8` selects I8, I8b and I8h, `I9` selects I9 and I9a–c; I1 opens the editor whenever any of I1–I7 is picked), `STEPS=T0` or `STEPS=T1,T2,…,T11` (a terms step also runs the steps it builds on: T3 and T9 run T1, T4 and T7 run T2, T5 runs T4, T8 runs T5). The other sections ignore it. |
 | `HEADED=1` | A visible browser. |
-| `DB_PATH` | The copy the server runs on (inside the work dir). It is used **only** to plant stored values for steps 10, 11b–f, R3 and R15, to stage and clean up R16, to plant and read back E1, N1, N1b and E2, to read and delete B1's planted expense, to delete the rows RC1's import writes, to plant P1's own driver, and to plant and delete I8's saved invoice note. Unset: those rows SKIP, and P1 uses a real driver. |
+| `DB_PATH` | The copy the server runs on (inside the work dir). It is used **only** to plant stored values for steps 10, 11b–f, R3 and R15, to stage and clean up R16, to plant and read back E1, N1, N1b and E2, to read and delete B1's planted expense, to delete the rows RC1's import writes, to plant P1's own driver, to plant and delete I8's saved invoice note, and to let T8 submit a test application and hard-delete it (by id) after Tc's soft delete. Unset: those rows SKIP, P1 uses a real driver, and T8 SKIPs unless `E2E_TERMS_SUBMIT=1`. |
+| `E2E_TERMS_SUBMIT=1` | Lets T8 submit its test lease application on a server that is not on this machine (it writes an application; Tc soft-deletes it). Locally `DB_PATH` enables T8. |
 | `E2E_INVOICE_APPROVE=1` | Lets I7 press Approve on a server that is not on this machine. Off by default: an approve creates a real Gmail draft wherever the server has a mail target. Locally `boot-server.sh` blanks them, so I7 always approves there. |
 | `E2E_LINK_PODS=1` | For `prep-worktree.sh`, not `e2e.mjs`: link the main checkout's POD files into the worktree's `uploads/`, for the invoice section. |
-| `CREDS_FILE` | The logins. Default: `<work dir>/creds.json`. |
+| `CREDS_FILE` | The logins. Default: `<work dir>/creds.json`. Not needed when every section given is login-free (`ONLY=terms STEPS=T0`). T1–T11 need only its `superAdmin`. |
 | `E2E_WORK_DIR` | The work dir. Default: `$TMPDIR/logisx-e2e`. It must be private, outside every checkout, and contain none. |
 | `SOURCE_DB` | `setup-db.cjs`'s source, opened read-only. Default: the main checkout's `app.db`. |
 | `APP_DIR` | The checkout whose `node_modules` (better-sqlite3, bcryptjs, puppeteer, dotenv) and `scripts/` are used. Default: this checkout once it has installs (or `prep-worktree.sh`'s links), else the main checkout. |
@@ -724,6 +757,171 @@ approve there, so no I7r row, and I8h SKIPs (nothing is pre-filled).
 **On a build with Notes but before the follow-ups** (`718e386`): I7r FAILs — the load dialog says "✓ Draft ready in
 Gmail" although the response is `preview: true` and no draft exists — and I8h FAILs (no "carried over" hint). Every
 other row passes.
+
+## The investor terms section (T0–T11)
+
+### T0: what `/invest` shows today
+
+`ONLY=terms STEPS=T0`, local and staging, no sign-in: `/invest` is public, and it sends a signed-in user elsewhere. Each test
+investor gets a **fresh anonymous browser context**. It records what a prospective investor is shown before any change
+to the payment terms, so the Expected column is the same on every row: default 50/50 terms, no `AMENDMENT`, identical
+for A and B.
+
+**The walk-through, per investor** (`InvestorApplyView.vue`, as a person does it; the guided wizard, which opens by
+itself, is closed with its own button):
+
+1. Step 1 of 3: the application, all fake. Legal name and contact `QA-TEST Investor A <timestamp>` (B for the second),
+   `QA-TEST DBA A`, `1xx QA-TEST Street, Testville, TX 75001`, a `(555) 010-01xx` phone, `qa-test+<ts>a@example.com`,
+   EIN `00-000000x`.
+2. Step 2 of 3: one fake vehicle (VIN `QATEST0000000000A`). Then each document card opens the signature page
+   (`InvestorSignModal.vue`), which fetches its preview. The master and the lease are read, and the viewer is pointed
+   at the page carrying the clause for a second screenshot (the iframe's `#page=` open parameter; the document is not
+   touched). Each document is signed as a person signs it: the consent box, the typed name (the same QA-TEST name),
+   strokes drawn on the canvas, **Sign Document**. The page then renders the preview again, with the signature.
+3. Step 3 of 3: fake banking (`QA-TEST Bank`, routing `000000000`), then **Review & Complete**, which only opens the
+   review modal. There, "Signed — View Document" for the master and the lease: both read, as above.
+4. **Confirm & Complete Onboarding is never pressed.** On top of that, every request from these pages that is not a GET
+   and not the preview route is aborted in the browser; T0l lists any that was attempted.
+
+**How a PDF is read.** Every document is the stateless preview, `POST /api/public/investor-preview-pdf/<docKey>`.
+The page reads it with `res.blob()`, and Chromium keeps no copy of a body read that way (Playwright's `Response.body()`
+answers empty). So the preview request is passed through a route: `route.fetch()` sends the page's own request
+(method, headers, body) to the server, the harness keeps the bytes, and `route.fulfill()` hands the page that exact
+response. The text is read with the app's own `pdfjs-dist`, as in the invoice section, whitespace collapsed; images are
+counted from the operator list.
+
+| Step | How it is shown | Expected |
+|---|---|---|
+| T0a / T0e | A / B: the master agreement's preview on the signature page, before signing. | `distributed according to a 50/50 split` and `Participant Distribution (50%)` present; `AMENDMENT` (upper case, so the boilerplate "amendment" of §7.06 does not count) absent |
+| T0b / T0f | A / B: the lease's preview on the signature page, before signing. | `50/50 profit participation model` present; no `AMENDMENT` |
+| T0c / T0g | A / B: the master from the review modal, "Signed — View Document". | As T0a, and the signed copy is the signer's: their typed name is in the text, and the drawn signature is embedded (more images than the unsigned copy) |
+| T0d / T0h | A / B: the lease from the review modal. | As T0b, with the same signer check |
+| T0i | The master's §3.3, from `3.3 Revenue Participation` up to `3.4 Settlement Cycle`, in all four master PDFs (A and B, signature page and review). | Present in all four and identical; the row quotes it |
+| T0j | The lease's §2.01, from `2.01 Lease Payments` up to `2.02`, in all four lease PDFs. | Present in all four and identical; the row quotes it |
+| T0k | The JSON body keys the page sent to the preview route (sorted), unsigned and signed, and those of `banking` and `vehicles[0]`; the preview count per investor. | INFO: recorded for a later regression check |
+| T0l | Every write the pages attempted. | None, and both walk-throughs reached the review |
+| T0m | The browser console's errors, page errors and failed API requests on `/invest`. | INFO |
+
+**Why the typed name is checked the way it is.** The renderer replaces the signer's signature slot ("Participant
+signature", "Lessee signature") with the drawn image, so the typed name is never printed on the signature line. It
+appears because the same name was given as the legal name and the contact, and the signature shows up as images: the
+unsigned copies have none, the signed master three and the signed lease two.
+
+**Budget and writes.** No sign-in. The preview route allows 30 renders per 15 minutes per IP, and each investor makes
+8 (three opens, three re-renders after signing, two from the review), so a run makes 16: a second run against the same
+server within 15 minutes gets 429s. Locally, restart the server between runs. The preview route writes nothing, and the
+application is never submitted, so the section leaves nothing behind locally or on staging. The QA-TEST data lives only
+in the two browser contexts, which are closed at the end.
+
+### T1–T11: per-investor payment terms
+
+`ONLY=terms STEPS=T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11`, local and staging. The feature (the shared contract): a Super
+Admin creates a personal invite link on `/investors` that carries payment terms, either a 50/50 split with extra details
+or a fixed monthly lease. The applicant who opens it sees them read-only and signs contracts carrying them as
+"AMENDMENT NO. 1". Plain `/invest` keeps T0's contract. The steps address the UI by the contract's `data-test` names
+(`invites-panel`, `invite-name`, `invite-email`, `invite-type-split|lease`, `invite-amount`, `invite-details`,
+`invite-create`, `invite-link`, `invite-terms-card`, `sign-terms`, `review-terms`, `invite-error` with `data-code`,
+`investor-terms-section`).
+
+**Who signs in:** the Super Admin once; every admin step shares that page. T7 signs in once more, as a throwaway test
+Investor (`QA-TEST-INV-<timestamp>`) that it creates through `POST /api/users` with a random password held in memory
+only, and deletes at its end. Applicants are fresh anonymous contexts with T0's safety net: every write but the preview
+route (and T8's one submit) is aborted in the browser, and a successful submit is kept from leaving for `logisx.com`.
+Invite tokens are credentials: the results never print one (the link dialog's screenshot does show it; the invites are
+revoked or used by the end of the run).
+
+| Step | How it is shown | Expected (AFTER) |
+|---|---|---|
+| T1 | **UI.** `/investors` → the invites panel → the form: `QA-TEST Invite Split <ts>`, `qa-test+<ts>@example.com`, split, details "Quarterly review call with owner.", Create. | `POST /api/admin/investor-invites` 201; a dialog whose `invite-link` value matches `/\/invest\?invite=[A-Za-z0-9_-]{43}$/`; the panel's row shows Active and a 50/50 summary |
+| T2 | **UI.** A lease invite: amount "2,000", then Create; then "2000", with details of two lines, the second typed with a U+202E (right-to-left override) inside it. | "2,000": an inline error (one that is gone once the amount is valid, or `aria-invalid`) and no invite with that email in `GET /api/admin/investor-invites?status=all`. "2000": 201, the link, a row showing Active and $2,000.00; the saved details are both lines with no bidirectional control character, and none is shown in the panel |
+| T3a | **Anonymous.** The split link, step 1 filled (`QA-TEST Investor S <ts>`), step 2. | `invite-terms-card` shows "50/50" and the details, with no input, select, textarea or contenteditable in it. Also recorded: the URL keeps `?invite=`, and the token travels in `X-Invite-Token`, not in the URL of `GET /api/public/investor-invite` |
+| T3b | The master agreement card: the preview PDF. | Contains "AMENDMENT NO. 1", the details and "50/50 profit split"; not "Fixed monthly lease payment" |
+| T3c | That preview's request body. | `invite_token` (the link's own) and no key that reads as terms (`pay`, `lease`, `amount`, `detail`, `term`, `split`, `amend`, `revision`) beyond T0's list |
+| T4a | **Anonymous.** The lease link (`QA-TEST Investor L <ts>`): step 2's card, and `sign-terms` on each signature page. | The card, and `sign-terms` on the master and the lease, read-only and showing $2,000.00; the card's details carry no bidirectional control character; no `sign-terms` on the W-9 |
+| T4b | The master agreement's preview. | Contains "$2,000.00" and "fixed monthly lease payment"; not "distributed according to a 50/50 split" |
+| T4c | The vehicle lease's preview. | Contains "$2,000.00" and "Fixed Monthly Lease Payment"; not "Disbursements shall be calculated based on the 50/50 profit participation model" |
+| T5a | All three signed, fake banking, Review & Complete. | 3/3 signed; `review-terms` shown, read-only, with $2,000.00 |
+| T5b | Review → "Signed — View Document", the master agreement. | Contains "$2,000.00"; more images than T4b's unsigned copy (the drawn signature is embedded) |
+| T6a | **Anonymous.** Plain `/invest` (`QA-TEST Investor N <ts>`), step 2. | No `invite-terms-card`, no `invite-error`, no `GET /api/public/investor-invite` |
+| T6b | The master's preview. | "distributed according to a 50/50 split" and "Participant Distribution (50%)"; no "AMENDMENT"; §3.3 equal to T0's |
+| T6c | The lease's preview. | "50/50 profit participation model"; no "AMENDMENT"; §2.01 equal to T0's |
+| T6d | The preview bodies, unsigned (master, lease) and signed (the master re-render). | Exactly T0's keys (T0k); signed adds `signatureImage`, `signatureText` |
+| T7a | **The test Investor**, page fetches: `PUT /api/investor/config?ownerId=<own id>` `{"investor_split_pct":"99"}`, with a GET before and after. | 403; the GETs agree |
+| T7b | `POST /api/admin/investor-invites`. | 403 |
+| T7c | `PUT /api/admin/investor-invites/<the lease invite>`. | 403 |
+| T7d | **Anonymous** (a cookie-less request context): the master preview with the lease token and `payment_type: "split"`, `lease_amount: "1"` (plus `paymentType`, `leaseAmount`, `details`, `amendment_details`). | The PDF still shows $2,000.00; no $1.00, no injected details, no 50/50 §3.3 |
+| T7e | **Super Admin**: `PUT /api/investor/config` with no `ownerId`; the body is the global `investor_split_pct` as read, so a build that still accepts it writes nothing new. | 400 `OWNER_ID_REQUIRED` |
+| T7f | `DELETE /api/users/<the test Investor>`. | 200 |
+| T8a | **Local (`DB_PATH`) or `E2E_TERMS_SUBMIT=1`.** T5's page: Confirm & Complete Onboarding; then the admin panel. | 200 with an application id (recorded in "Discovered ids"); the body carries the token and `invite_terms_revision`; the lease row shows Used |
+| T8b | The lease link, opened again in a fresh context. | `invite-error` with `data-code="INVITE_USED"`; no form |
+| T8c | **UI.** `/investor-applications`: the row's Terms column; the row's detail. | Both show the lease at $2,000.00 (the API's `payment_terms_summary` and `paymentTerms` are recorded too) |
+| T8d | `PUT /api/admin/investor-invites/<the used invite>` (amount 2500). | 409 `INVITE_LOCKED` |
+| T9 | T3's tab, still on step 2 of the split link. **UI:** the Super Admin presses Revoke on its row (a native confirm is accepted; an in-page one is confirmed, with the reason "QA-TEST e2e" when it asks). The tab then opens a document. | The revoke answers 200; the tab shows `invite-error` with `data-code="INVITE_REVOKED"` |
+| T10 | **UI.** Add Investor `QA-TEST-INV-<ts>-REC`, its name clicked in the Investor Directory (the detail modal), then a page fetch `PUT /api/investors/<id>` (a notes change), which refreshes the list over the socket. | 2 s later the modal and its `investor-terms-section` are still visible. The record is deleted at the end |
+| T11 | An API-made lease invite ($1,500). **Anonymous:** its link, the master signed. The Super Admin `PUT`s the amount to 1750 (`expectedRevision`). The tab opens the lease. | The lease preview carries the new `X-Payment-Terms-Revision`; the page shows "LogisX updated the payment terms in your invitation. Please review and sign the agreements again."; the master is no longer signed |
+| Tm | Every anonymous page of T3–T11. | INFO: aborted writes, console errors, renders per page |
+| Tc | **Always runs.** | Every invite the run made that is still active is revoked (and any earlier run's `QA-TEST Invite …` left active). Every application it made (and any earlier run's QA-TEST one) is soft-deleted, then, locally, hard-deleted by id. The test user and record are deleted. Ids only |
+
+**Steps build on each other.** T3 and T9 use T1's split link, T4 and T7d T2's lease link, T5 continues T4's tab, T8
+submits T5's application, and T9 reuses T3's tab (it opens its own when T3 did not run). `STEPS` adds what a picked step
+needs, and those steps record their rows too. A step whose input is missing records one FAIL row, "not reached", naming
+what was missing.
+
+**What it writes, and where it is cleaned up:**
+
+- **Invites:** T1's split, T2's lease (and a second one if the build wrongly saves "2,000"), T11's. Tc revokes each one
+  still active; T8's lease is used, and T9's split is already revoked. Their rows and audit lines stay.
+- **T7's throwaway Investor account:** deleted at T7's end, or by Tc. Its `investor_config` rows go with it (the
+  delete's own cascade; on a build that lets an Investor write its own split, T7a's 99 is one of them).
+- **T8's application** (local, or `E2E_TERMS_SUBMIT=1`): Tc soft-deletes it through `DELETE /api/investor-applications/<id>`.
+  Locally it then deletes it from the copy by exact id, with its `investor_onboarding`, `investor_onboarding_documents` and
+  `investor_payment_info` rows. It deletes only an application with a QA-TEST name that has been soft-deleted. It also
+  deletes the three signed PDFs the server wrote under this checkout's `uploads/investor-onboarding-signed/`, each only
+  when its sha256 equals the artifact hash the row recorded. On staging the soft-deleted row stays.
+- **T10's investor record:** deleted at T10's end, or by Tc.
+- Nothing is planted, so the section needs no `plant-journal.json`. A run that dies mid-way leaves at most these rows,
+  and the next run's Tc revokes and deletes the QA-TEST ones it finds.
+
+**Budget.**
+
+- **Previews:** `POST /api/public/investor-preview-pdf` allows 30 renders per 15 minutes per IP, and refused requests
+  count. T1–T11 make about 17: T3 1, T4 4, T5 3, T6 3, T7d 1, T9 1 (the refused one), and T11 3–4. T0 makes 16.
+  **T0 and T1–T11 together (33) do not fit one window**, and the run warns when the steps picked add up to more than 30.
+  So run them as two parts, each on a fresh server process locally, or 15 minutes apart on staging. The recipe's part 6
+  does this.
+- **Sign-ins:** 2 (the Super Admin and the test Investor). `GET /api/public/investor-invite` (60 per 15 minutes) is
+  called a handful of times.
+
+**Staging.** The creds file needs only `superAdmin`. Everything but T8 runs there as it does locally. T8 SKIPs unless
+`E2E_TERMS_SUBMIT=1`: it writes a real application, which also sends staging's new-application emails wherever staging
+has a mail target, and Tc can only soft-delete it.
+
+**On today's main (the BEFORE baseline):**
+
+- T1 and T2 find no invites panel. T3–T5, T7d, T8 and T9 are not reached.
+- T7a–c answer 200 (the Investor's own split is written) and 404. T7e answers 200.
+- T10's modal is gone after the refresh (the skeleton unmounts the table). T11's `POST` answers 404.
+- T6 PASSes on both builds: it is the regression control, holding plain `/invest` to T0. T7f and Tc PASS.
+
+**What the steps assume about the UI** (not fixed by the contract; check them against the built feature):
+
+- The create form sits in the invites panel. It is either already open, or behind the panel's closed `<details>` or a
+  button whose name reads like "New invite" (T1 tries all three).
+- The type choice may be a radio or a button: a radio is checked (forced, for a styled one), anything else clicked.
+  `invite-amount` shows once "lease" is chosen.
+- The link dialog closes with a Close / Done / OK button, or on Escape.
+- A row in the panel is the smallest element holding the invitee's name and a status word (Active / Used / Revoked /
+  Expired). Its summary carries "50/50" (split) or "$2,000.00" (lease). Revoke is a button in that row.
+- The inline error for "2,000" is an element with `role="alert"`, an error / invalid / danger class, red text, or
+  `aria-invalid="true"` on the amount box.
+- `invite-terms-card` is shown on step 2 of 3 (Fleet & Documents). The cards' text carries "50/50" or "$2,000.00".
+  `sign-terms` shows on the master and lease signature pages only.
+- The revision notice is found by its text.
+- The detail modal on `/investors` is a fixed-position element under `<body>` that holds the record's name.
+- `/investor-applications` has a column whose header reads "Terms", and the detail dialog (`role="dialog"`) has a
+  "Payment Terms" section.
+- An invite link may pre-fill and lock the legal name or email; a locked field is left as it is, and the name the form
+  holds is used.
 
 ## Teardown (once the whole QA cycle is done)
 
