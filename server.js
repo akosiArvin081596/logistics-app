@@ -10775,19 +10775,40 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", taxClassi
 	const entityCheckMap = {
 		"Sole Prop": 0, "C-Corp": 1, "S-Corp": 2, "Corp": 1, "Partnership": 3, "Trust": 4, "Trust/Estate": 4, "LLC": 5, "Other": 6,
 	};
-	// An LLC's box and letter follow the tax classification the applicant chose
-	// on /invest, per the W-9's line 3a instructions: an LLC taxed as a C
-	// corporation, an S corporation or a partnership checks the LLC box and enters
-	// C, S or P; a single-member LLC that is disregarded (the form's
-	// "Individual/LLC") checks its owner's box, Individual/sole proprietor, and
-	// NOT the LLC box. With no classification, or one not listed here, the LLC box
-	// is checked and the letter is left blank rather than guessed.
+	const INDIVIDUAL_BOX = entityCheckMap["Sole Prop"];
+	// The box follows the entity type AND the tax classification chosen on
+	// /invest, per the W-9's line 3a instructions:
+	//   - LLC: taxed as a C corporation, an S corporation or a partnership, the
+	//     LLC box and C, S or P; a single-member LLC that is disregarded (the
+	//     form's "Individual/LLC") checks its owner's box, Individual/sole
+	//     proprietor, and NOT the LLC box.
+	//   - Corp: C corporation or S corporation, as classified.
+	//   - Other: the classification's own box. "Other" is for a classification
+	//     the form does not list, and the four /invest offers are all listed (a
+	//     partnership that is not an LLC, say, checks Partnership).
+	//   - No entity type: only "Individual/LLC" names a single box; each of the
+	//     other three could be an LLC or the named box, so none is checked.
+	//   - Sole Prop: always Individual/sole proprietor.
+	// A classification that is missing, not one of the four, or not one this
+	// entity type can have (a corporation taxed as a partnership) picks nothing:
+	// the entity type's own box stands (Corp: C corporation; LLC: the LLC box,
+	// letter blank; Other: Other; no entity type: none), never a guessed one.
 	const llcTaxLetters = new Map([["C-Corp", "C"], ["S-Corp", "S"], ["Partnership", "P"]]);
+	const classificationBoxes = new Map([
+		["C-Corp", entityCheckMap["C-Corp"]], ["S-Corp", entityCheckMap["S-Corp"]],
+		["Partnership", entityCheckMap.Partnership], ["Individual/LLC", INDIVIDUAL_BOX],
+	]);
 	let cbIdx = entityCheckMap[entityType];
 	let llcLetter = "";
 	if (entityType === "LLC") {
-		if (taxClassification === "Individual/LLC") cbIdx = entityCheckMap["Sole Prop"];
+		if (taxClassification === "Individual/LLC") cbIdx = INDIVIDUAL_BOX;
 		else llcLetter = llcTaxLetters.get(taxClassification) || "";
+	} else if (entityType === "Corp") {
+		if (taxClassification === "S-Corp") cbIdx = entityCheckMap["S-Corp"];
+	} else if (entityType === "Other") {
+		if (classificationBoxes.has(taxClassification)) cbIdx = classificationBoxes.get(taxClassification);
+	} else if (!entityType) {
+		if (taxClassification === "Individual/LLC") cbIdx = INDIVIDUAL_BOX;
 	}
 	if (cbIdx !== undefined) {
 		try { form.getCheckBox(`topmostSubform[0].Page1[0].Boxes3a-b_ReadOrder[0].c1_1[${cbIdx}]`).check(); } catch {}
@@ -10808,21 +10829,32 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", taxClassi
 		}
 	}
 
-	// EIN/SSN — fill the appropriate section based on entity type
+	// Part I: the TIN goes in ONE group, the SSN boxes or the EIN boxes, never
+	// both. Its own shape decides when it is unambiguous: 123-45-6789 is an SSN,
+	// 12-3456789 an EIN. Written any other way (nine bare digits, say), the
+	// filer decides, per the W-9's Part I instructions: an individual, a sole
+	// proprietor or a single-member LLC disregarded into its individual owner
+	// (the Individual/sole proprietor box above) enters an SSN, every other
+	// entity an EIN. With no entity type the filer is taken to be an individual,
+	// unless the classification is one only an entity has (C-Corp, S-Corp,
+	// Partnership: llcTaxLetters' keys).
 	if (einSsn) {
-		const digits = einSsn.replace(/\D/g, "");
-		const looksLikeEin = /^\d{2}-\d{7}$/.test(einSsn.trim());
-		const isIndividual = (!entityType || entityType === "Sole Prop") && !looksLikeEin;
-		if (isIndividual && digits.length === 9) {
-			// SSN fields (3 + 2 + 4) — for individuals/sole props only.
-			// All three must land: a partial TIN is not a lesser version of the
-			// right answer, it is a different (wrong) number on a tax form.
+		const tin = String(einSsn).trim();
+		const digits = tin.replace(/\D/g, "");
+		let tinIsSsn;
+		if (/^\d{3}-\d{2}-\d{4}$/.test(tin)) tinIsSsn = true;
+		else if (/^\d{2}-\d{7}$/.test(tin)) tinIsSsn = false;
+		else tinIsSsn = cbIdx === INDIVIDUAL_BOX || (!entityType && !llcTaxLetters.has(taxClassification));
+		if (digits.length >= 2 && tinIsSsn) {
+			// SSN fields (3 + 2 + 4). All three must land: a partial TIN is not a
+			// lesser version of the right answer, it is a different (wrong)
+			// number on a tax form.
 			const a = setField("topmostSubform[0].Page1[0].f1_11[0]", digits.slice(0, 3));
 			const b = setField("topmostSubform[0].Page1[0].f1_12[0]", digits.slice(3, 5));
 			const c = setField("topmostSubform[0].Page1[0].f1_13[0]", digits.slice(5));
 			tinLanded = a && b && c;
 		} else if (digits.length >= 2) {
-			// EIN fields (2 + remaining) — for LLCs, corps, partnerships, trusts
+			// EIN fields (2 + 7)
 			const a = setField("topmostSubform[0].Page1[0].f1_14[0]", digits.slice(0, 2));
 			const b = digits.length > 2 ? setField("topmostSubform[0].Page1[0].f1_15[0]", digits.slice(2)) : true;
 			tinLanded = a && b;
