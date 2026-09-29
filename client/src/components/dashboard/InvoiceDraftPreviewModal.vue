@@ -971,6 +971,9 @@ function resetToExtracted() {
   // draft: nothing about a note is extracted, so "the extracted values" have none.
   // Sent as "" on the next render and on approve, which the server reads as cleared.
   form.notes = ''
+  // Empty is now the baseline, so the cleared box reads as reset rather than
+  // "edited" and the Reset button disables once nothing else differs.
+  seeded.value = { ...seeded.value, notes: '' }
   previewError.value = ''
   schedulePreview({ immediate: true })
 }

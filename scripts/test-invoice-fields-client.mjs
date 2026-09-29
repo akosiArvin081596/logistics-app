@@ -299,16 +299,22 @@ const RESET_SRC = liftFn(MODAL, 'resetToExtracted')
 function runReset(src) {
   const form = { orderNumber: 'typed', notes: 'typed note' }
   const calls = []
-  const seedForm = () => { form.orderNumber = 'SEEDED'; form.notes = 'Carried over from the last approved draft' }
-  new Function('seedForm', 'form', 'previewError', 'schedulePreview', `${src}\nreturn resetToExtracted;`)(
-    seedForm, form, { value: 'stale error' }, (opts) => calls.push(opts),
+  const seeded = { value: {} }
+  const seedForm = () => {
+    form.orderNumber = 'SEEDED'; form.notes = 'Carried over from the last approved draft'
+    seeded.value = { orderNumber: 'SEEDED', notes: 'Carried over from the last approved draft' }
+  }
+  new Function('seedForm', 'form', 'seeded', 'previewError', 'schedulePreview', `${src}\nreturn resetToExtracted;`)(
+    seedForm, form, seeded, { value: 'stale error' }, (opts) => calls.push(opts),
   )()
-  return { form, calls }
+  return { form, seeded, calls }
 }
 {
-  const { form, calls } = runReset(RESET_SRC)
+  const { form, seeded, calls } = runReset(RESET_SRC)
   eq('Reset puts the other fields back to the seed', form.orderNumber, 'SEEDED')
   eq('Reset empties Notes, not back to the carried-over note', form.notes, '')
+  eq('…and makes empty the Notes baseline, so the box does not read as edited',
+    [seeded.value.notes, seeded.value.orderNumber], ['', 'SEEDED'])
   eq('Reset re-renders at once', calls, [{ immediate: true }])
 }
 
