@@ -10582,7 +10582,7 @@ function resolveOnboardingDocAlert({ scope, ownerId, docKey }) {
 }
 
 // Helper: fill W-9 PDF form fields
-async function fillW9Form({ legalName = "", dba = "", entityType = "", address = "", einSsn = "", signatureText = "", signatureImage, effectiveDate = "" }) {
+async function fillW9Form({ legalName = "", dba = "", entityType = "", taxClassification = "", address = "", einSsn = "", signatureText = "", signatureImage, effectiveDate = "" }) {
 	// Template lives at onboarding-templates/pdf/, NOT under uploads/ — uploads/ is
 	// gitignored, so these TRACKED template PDFs sat inside an ignored tree and were
 	// twice deleted by a routine `rm -rf uploads` cleanup. See
@@ -10647,13 +10647,26 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", address =
 	const entityCheckMap = {
 		"Sole Prop": 0, "C-Corp": 1, "S-Corp": 2, "Corp": 1, "Partnership": 3, "Trust": 4, "Trust/Estate": 4, "LLC": 5, "Other": 6,
 	};
-	const cbIdx = entityCheckMap[entityType];
+	// An LLC's box and letter follow the tax classification the applicant chose
+	// on /invest, per the W-9's line 3a instructions: an LLC taxed as a C
+	// corporation, an S corporation or a partnership checks the LLC box and enters
+	// C, S or P; a single-member LLC that is disregarded (the form's
+	// "Individual/LLC") checks its owner's box, Individual/sole proprietor, and
+	// NOT the LLC box. With no classification, or one not listed here, the LLC box
+	// is checked and the letter is left blank rather than guessed.
+	const llcTaxLetters = new Map([["C-Corp", "C"], ["S-Corp", "S"], ["Partnership", "P"]]);
+	let cbIdx = entityCheckMap[entityType];
+	let llcLetter = "";
+	if (entityType === "LLC") {
+		if (taxClassification === "Individual/LLC") cbIdx = entityCheckMap["Sole Prop"];
+		else llcLetter = llcTaxLetters.get(taxClassification) || "";
+	}
 	if (cbIdx !== undefined) {
 		try { form.getCheckBox(`topmostSubform[0].Page1[0].Boxes3a-b_ReadOrder[0].c1_1[${cbIdx}]`).check(); } catch {}
 	}
 	// LLC tax classification letter
-	if (entityType === "LLC") {
-		setField("topmostSubform[0].Page1[0].Boxes3a-b_ReadOrder[0].f1_03[0]", "P");
+	if (llcLetter) {
+		setField("topmostSubform[0].Page1[0].Boxes3a-b_ReadOrder[0].f1_03[0]", llcLetter);
 	}
 
 	// Line 5: Street address, Line 6: City/State/ZIP
@@ -10823,6 +10836,7 @@ function buildInvestorDocRender({ appId, docKey, signatureText, signatureImage, 
 			return fillW9Form({
 				legalName: application?.legal_name || "", dba: application?.dba || "",
 				entityType: application?.entity_type || "", address: application?.address || "",
+				taxClassification: application?.tax_classification || "",
 				einSsn: application?.ein_ssn || "", signatureText: (signatureText || "").trim(),
 				signatureImage, effectiveDate,
 			});
@@ -11437,7 +11451,7 @@ app.post("/api/public/investor-preview-pdf/:docKey", pdfPreviewLimiter, async (r
 			return res.send(pdfBuffer);
 		}
 		if (docKey === "w9") {
-			const pdfBytes = await fillW9Form(appData);
+			const pdfBytes = await fillW9Form({ ...appData, taxClassification: req.body.tax_classification });
 			if (!pdfBytes) return res.status(404).json({ error: "W-9 template not found" });
 			res.setHeader("Content-Type", "application/pdf");
 			res.setHeader("Content-Disposition", 'inline; filename="W-9 Form.pdf"');
