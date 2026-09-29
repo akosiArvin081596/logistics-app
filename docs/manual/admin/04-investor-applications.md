@@ -8,6 +8,19 @@ The public investor application form lives at `app.logisx.com/invest`. It's a mu
 
 Each submission creates a row in the `investor_applications` table.
 
+## Payment terms invites
+
+Plain `/invest` always produces the standard contract: a 50/50 profit split. When an investor has agreed different terms, send them a **personal invitation link** instead.
+
+- **Create one.** Sidebar → **Investors** → the invitations panel. Enter the investor's name (the email is optional) and choose the payment type: a **50/50 profit split** or a **fixed monthly lease payment** ($1.00 to $100,000.00 a month). **Additional terms** (up to 2,000 characters, 30 lines, Latin script, no emoji) are printed word for word in the contract.
+- **Copy the link when it is shown.** It appears once, in a dialog with a Copy button, and is never shown again. It works for 30 days and for one submission.
+- **What the investor signs.** Their Master Participation & Management Agreement and Commercial Vehicle Lease Agreement print an **Amendment No. 1 — Payment Terms** just above the signatures, with the payment type, the monthly amount for a lease, and the additional terms ("None" when there are none). For a lease, master §3.3 and lease §2.01 name the fixed monthly payment in place of the 50/50 split. A 50/50 split with no additional terms is the standard contract, with no amendment. Use **Preview** to see either document with the invite's terms before sending the link.
+- **Edit before it is used.** Changing the terms moves the invite to a new terms revision. An investor who already has the link open is shown the new terms and must sign the agreements again; one who submits against the old terms is asked to review them first.
+- **Reissue** gives the same invite a new link and a fresh 30 days; the old link stops working at once. **Revoke** withdraws it (an optional reason is recorded). A used invite is locked: it can be neither edited, reissued nor revoked.
+- **After submission.** The Investor Applications list shows each application's terms in its **Terms** column, and the application's detail has a **Payment Terms** section. On the Investors page, an investor's detail shows the terms they signed, read-only: signed contracts never change.
+
+> ⚠️ **These terms change the contract only.** Payouts, statements and the investor dashboard are still calculated from the investor's **Split %** on the Investors page. For an investor on a fixed monthly lease, settle the payment accordingly — the app does not compute it.
+
 ## Opening Investor Applications
 
 Sidebar → **Investor Applications**. List of pending applications with:

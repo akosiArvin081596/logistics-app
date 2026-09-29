@@ -6,7 +6,7 @@ You've invested in the LogisX fleet. The truck(s) you fund are operated by profe
 
 You own one or more trucks. LogisX manages them — finds the loads, hires the drivers, handles dispatch, deals with maintenance, manages compliance. You receive your share of the profit each truck generates.
 
-The split is laid out in your Master Participation & Management Agreement (typically 50/50 of net profit, after expenses). Your dashboard shows exactly how that calculation works for each month and overall.
+The split is laid out in your Master Participation & Management Agreement (typically 50/50 of net profit, after expenses). If you joined through a personal invitation from LogisX, your agreements may carry an **Amendment No. 1 — Payment Terms** that sets different payment terms for you; it is part of what you signed. Your dashboard shows exactly how that calculation works for each month and overall.
 
 You are **not** an employee or a passive lender — you're an asset owner with professional management. That's reflected in:
 

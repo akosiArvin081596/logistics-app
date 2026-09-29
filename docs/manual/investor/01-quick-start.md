@@ -34,6 +34,8 @@ The most-watched section. Shows:
 - **Month selector** — jump between months.
 - **All-time totals strip** — lifetime numbers.
 
+Your agreement's payment terms are the ones you signed: typically 50/50, or the terms in an **Amendment No. 1 — Payment Terms** if you joined through a personal invitation.
+
 ![Investor earnings](screenshots/investor-earnings.png)
 
 ### Fleet Breakdown
