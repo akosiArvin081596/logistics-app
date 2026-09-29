@@ -332,13 +332,19 @@ eq("refuseCrossSite mount count agrees with that list", mountCount("refuseCrossS
 // asserting money left the bank, so on the money-tier reasoning it belongs. It
 // was left out to keep the guard change to the route the period work was scoped
 // to. If it is added, add it here in the same commit.
-eq("refuseCrossOrigin is on exactly the settlement writes and the reconcile pair",
+//
+// The four payment terms invite writes (create, edit, reissue, revoke) are here
+// too: they set the terms printed into an investor's contract and mint the link
+// that carries them, and their only caller is the SPA's Investors page.
+eq("refuseCrossOrigin is on exactly the settlement writes, the reconcile pair and the invite writes",
 	mountedOn("refuseCrossOrigin").join(" "),
 	["/api/periods/:period/finalize", "/api/periods/:period/reopen",
 	 "/api/investor/payouts/:id/status", "/api/investor/payouts/:id/adjust",
 	 "/api/invoices/:id/adjust",
-	 "/api/admin/ratecon-reconcile", "/api/admin/ratecon-reconcile/run"].sort().join(" "));
-eq("refuseCrossOrigin mount count agrees with that list", mountCount("refuseCrossOrigin"), 7);
+	 "/api/admin/ratecon-reconcile", "/api/admin/ratecon-reconcile/run",
+	 "/api/admin/investor-invites", "/api/admin/investor-invites/:id",
+	 "/api/admin/investor-invites/:id/reissue", "/api/admin/investor-invites/:id/revoke"].sort().join(" "));
+eq("refuseCrossOrigin mount count agrees with that list", mountCount("refuseCrossOrigin"), 11);
 eq("refuseCrossOriginStrict is on exactly the full-database export",
 	mountedOn("refuseCrossOriginStrict").join(" "), "/api/db/download");
 eq("...and on nothing else", mountCount("refuseCrossOriginStrict"), 1);

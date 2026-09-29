@@ -60,6 +60,7 @@ const crypto = require("crypto");
 const nodemailer = require("nodemailer");
 const { PDFDocument: PdfLibDocument, rgb, StandardFonts } = require("pdf-lib");
 const { renderPolicy, safeSignatureImage } = require("./lib/policy-renderer");
+const investorPaymentTerms = require("./lib/investor-payment-terms");
 const { renderHtmlToPdf } = require("./lib/pdf-browser");
 const { getStateFromCoords } = require("./lib/ifta-states");
 const routemate = require("./lib/routemate-client");
@@ -4982,6 +4983,11 @@ try { db.exec("ALTER TABLE investor_onboarding_documents ADD COLUMN signature_im
 // vehicle lease are held to the same standard as a driver's contractor agreement.
 try { db.exec("ALTER TABLE investor_onboarding_documents ADD COLUMN signing_error TEXT DEFAULT ''"); } catch { /* exists */ }
 try { db.exec("ALTER TABLE investor_onboarding_documents ADD COLUMN signing_failed_at TEXT DEFAULT ''"); } catch { /* exists */ }
+// The payment terms a master agreement or vehicle lease was signed under,
+// frozen at submission (lib/investor-payment-terms.js snapshotJson()). NULL is
+// the standard 50/50 contract. Regeneration reprints from this column, never
+// from the invitation, and no payout code reads it.
+try { db.exec("ALTER TABLE investor_onboarding_documents ADD COLUMN payment_terms_json TEXT DEFAULT NULL"); } catch { /* exists */ }
 
 // --- Signing evidence (both onboarding document tables) ---
 // #202 proved an artifact EXISTS; #234 proved it says something. Neither
@@ -5068,6 +5074,43 @@ db.exec(`
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)
 `);
+
+// Personal invitation links to /invest that carry per-investor payment terms
+// (the "Payment terms invites" routes below the public preview route). Only
+// the sha256 of the link's token is stored; the link itself is shown to the
+// admin once. `application_id` binds a used invite to the application it
+// produced and deliberately has NO foreign key: investor_applications is only
+// ever soft-deleted, and a key would couple this table to that table's
+// rename-recreate migration. `expired` is derived from `expires_at` in JS,
+// never stored. Contract wording only: no payout code reads this table.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS investor_invites (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		token_sha256 TEXT NOT NULL UNIQUE,
+		invitee_name TEXT NOT NULL DEFAULT '',
+		invitee_email TEXT NOT NULL DEFAULT '',
+		payment_type TEXT NOT NULL CHECK(payment_type IN ('split','lease')),
+		lease_amount_cents INTEGER,
+		amendment_details TEXT NOT NULL DEFAULT '',
+		terms_revision INTEGER NOT NULL DEFAULT 1,
+		status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','used','revoked')),
+		application_id INTEGER UNIQUE,
+		expires_at TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		created_by TEXT NOT NULL DEFAULT '',
+		first_opened_at TEXT,
+		used_at TEXT,
+		revoked_at TEXT,
+		revoked_by TEXT NOT NULL DEFAULT '',
+		revoke_reason TEXT NOT NULL DEFAULT '',
+		CHECK((payment_type = 'lease') = (lease_amount_cents IS NOT NULL)),
+		CHECK(lease_amount_cents IS NULL OR lease_amount_cents BETWEEN 100 AND 10000000),
+		CHECK((status = 'used') = (application_id IS NOT NULL))
+	)
+`);
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_investor_invites_status ON investor_invites(status)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_investor_invites_email ON investor_invites(invitee_email COLLATE NOCASE)"); } catch {}
 
 // Truck ↔ Driver assignment history
 db.exec(`
@@ -9821,6 +9864,7 @@ const PUBLIC_INVESTOR_SCALAR_FIELDS = [
 	"legal_name", "dba", "entity_type", "address", "contact_person", "contact_title", "phone", "email",
 	"years_in_operation", "industry_experience", "fleet_size", "preferred_communication",
 	"tax_classification", "ein_ssn", "bankruptcy_liens", "reporting_preference",
+	"invite_token", "invite_terms_revision",
 ];
 const PUBLIC_BANKING_SCALAR_FIELDS = ["bank_name", "account_type", "routing_number", "account_number", "account_name"];
 
@@ -9830,6 +9874,7 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 		const { legal_name, dba, entity_type, address, contact_person, contact_title, phone, email,
 			years_in_operation, industry_experience, fleet_size, preferred_communication,
 			tax_classification, ein_ssn, bankruptcy_liens, reporting_preference,
+			invite_token, invite_terms_revision,
 			vehicles, banking, signatures } = req.body;
 
 		// Validate required fields
@@ -9839,6 +9884,27 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 		const shape = publicFormInput.checkPublicScalars(req.body, PUBLIC_INVESTOR_SCALAR_FIELDS);
 		if (!shape.ok) {
 			return res.status(400).json({ error: shape.message, code: "INVALID_FIELD", reason: shape.reason, field: shape.field });
+		}
+		// A payment terms invitation, when the applicant came through one. Checked
+		// here, before anything is written, and checked AGAIN inside applyTx()
+		// below, where it is bound. The terms themselves come only from the
+		// invitation row: nothing in the body can set them.
+		let inviteCheck = null;
+		if (invite_token !== undefined && invite_token !== null && invite_token !== "") {
+			const revision = parseInviteRevision(invite_terms_revision);
+			if (revision === null) {
+				return res.status(400).json({ error: "The invitation's terms revision is missing. Reload the invitation and try again.", code: "INVITE_REVISION_REQUIRED" });
+			}
+			const found = resolveInviteToken(invite_token);
+			if (!found.ok) return res.status(found.status).json(found.body);
+			if (found.row.terms_revision !== revision) {
+				return res.status(409).json({
+					error: "LogisX updated the payment terms in your invitation. Please review and sign the agreements again.",
+					code: "INVITE_TERMS_CHANGED",
+					termsRevision: found.row.terms_revision,
+				});
+			}
+			inviteCheck = { id: found.row.id, revision };
 		}
 		// `email` is the recipient of the confirmation below, so it must be ONE
 		// well-formed address. Same check as POST /api/public/apply.
@@ -9896,7 +9962,21 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 		const signedAt = new Date().toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
 
 		// 1. Insert all DB records in a single transaction
+		let boundInvite = null;
 		const applyTx = db.transaction(() => {
+			// The invitation, re-read and re-checked inside the transaction. A
+			// refusal thrown from here rolls back every write below.
+			const invite = inviteCheck ? db.prepare("SELECT * FROM investor_invites WHERE id = ?").get(inviteCheck.id) : null;
+			if (inviteCheck) {
+				const refusal = invite ? inviteUseRefusal(invite) : inviteNotFoundRefusal();
+				if (refusal) throw inviteRefusalError(refusal);
+				if (invite.terms_revision !== inviteCheck.revision) {
+					throw inviteRefusalError(inviteRefusal(409, "INVITE_TERMS_CHANGED",
+						"LogisX updated the payment terms in your invitation. Please review and sign the agreements again.",
+						{ termsRevision: invite.terms_revision }));
+				}
+			}
+
 			// Application record
 			const result = db.prepare(`
 				INSERT INTO investor_applications (legal_name, dba, entity_type, address, contact_person, contact_title, phone, email,
@@ -9908,6 +9988,23 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 				preferred_communication || "", tax_classification || "", ein_ssn, bankruptcy_liens || "", reporting_preference || "", accessToken);
 
 			const appId = result.lastInsertRowid;
+
+			// Single use: the invitation is bound to this application, or nothing
+			// is written at all.
+			let bind = null;
+			if (invite) {
+				const used = db.prepare(`UPDATE investor_invites SET status = 'used', application_id = ?, used_at = ?, updated_at = ?
+					WHERE id = ? AND status = 'active' AND terms_revision = ?`).run(appId, now, now, invite.id, inviteCheck.revision);
+				if (used.changes !== 1) {
+					throw inviteRefusalError(inviteRefusal(410, "INVITE_USED", "This invitation has already been used to submit an application."));
+				}
+				const terms = investorPaymentTerms.effectiveTerms(investorPaymentTerms.termsFromInviteRow(invite));
+				bind = {
+					id: invite.id, termsRevision: invite.terms_revision, terms,
+					summary: investorPaymentTerms.describeTerms(terms).summary,
+					details: terms ? terms.details : "",
+				};
+			}
 
 			// Vehicles
 			if (vehiclesArr.length > 0) {
@@ -9954,10 +10051,26 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 					net.ip, net.ipSource, net.userAgent, consent.agreed, consent.text, effectiveDate, SIGNING_EVIDENCE_VERSION);
 			}
 
+			// What was signed, frozen on the two contracts (never the W-9). The
+			// standard contract stays NULL.
+			if (bind && bind.terms) {
+				const snapshot = investorPaymentTerms.snapshotJson(bind.terms, { inviteId: bind.id, termsRevision: bind.termsRevision, capturedAt: now });
+				const setSnapshot = db.prepare("UPDATE investor_onboarding_documents SET payment_terms_json = ? WHERE application_id = ? AND doc_key = ?");
+				for (const docKey of investorPaymentTerms.TERMS_DOC_KEYS) {
+					if (setSnapshot.run(snapshot, appId, docKey).changes !== 1) throw new Error(`Could not record the payment terms on ${docKey}.`);
+				}
+			}
+
+			boundInvite = bind;
 			return appId;
 		});
 
 		const appId = applyTx();
+		if (boundInvite) {
+			logAudit(req, "bind_investor_invite", "investor_invite", boundInvite.id,
+				auditText(`Payment terms invite #${boundInvite.id} used by investor application #${appId} (terms revision ${boundInvite.termsRevision}): ${boundInvite.summary}`, 500));
+			notifyChange("investor-invites");
+		}
 
 		// 2. Generate signed PDFs (outside transaction — file I/O)
 		const signedDir = path.join(__dirname, "uploads", "investor-onboarding-signed");
@@ -9989,6 +10102,7 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 				appId, docKey: doc.key,
 				signatureText: sig.text, signatureImage: sig.image,
 				effectiveDate, signedAt, vehiclesOverride: vehiclesArr,
+				paymentTerms: boundInvite ? boundInvite.terms : null,
 			});
 			try {
 				const artifact = await writeSignedArtifact({
@@ -10159,10 +10273,22 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 				</div>`
 			: "";
 
+		// The payment terms the applicant signed under, when they came through an
+		// invitation. A block of its own so the adminHtml literal stays as it is;
+		// every value goes through escapeHtml(), the admin-typed terms included.
+		const paymentTermsHtml = boundInvite
+			? `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:700px;margin:0 auto 12px;padding:14px 18px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;color:#1e3a8a">
+					<b>Payment terms invitation #${escapeHtml(boundInvite.id)} (terms revision ${escapeHtml(boundInvite.termsRevision)})</b><br>
+					${escapeHtml(boundInvite.summary)}
+					<div style="margin-top:8px;white-space:pre-wrap">Additional terms: ${escapeHtml(boundInvite.details || "None")}</div>
+					<div style="margin-top:8px;font-size:12px;color:#475569">These terms change the contract only. Payouts are still calculated from the investor's Split %.</div>
+				</div>`
+			: "";
+
 		sendEmail(
 			"info@logisx.com",
 			`${failedDocs.length ? "ACTION NEEDED — " : ""}New Investor Application: ${legal_name}`,
-			docWarningHtml + adminHtml,
+			docWarningHtml + paymentTermsHtml + adminHtml,
 			pdfAttachments,
 		);
 	} catch (err) {
@@ -10173,6 +10299,9 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 			console.error("investor-apply: post-response step failed:", err.message);
 			return;
 		}
+		// An invitation refused inside applyTx(): the transaction has rolled
+		// back, so nothing of this submission was kept.
+		if (err && err.inviteRefusal) return res.status(err.inviteRefusal.status).json(err.inviteRefusal.body);
 		res.status(500).json({ error: err.message });
 	}
 });
@@ -10863,7 +10992,11 @@ app.get("/api/public/investor-onboarding/:id", (req, res) => {
 // produced at signing, and the only way to guarantee that is for both to run
 // this function. `application` and `payInfo` are read at RENDER time, not at
 // closure-construction time, so a vehicle written moments earlier is included.
-function buildInvestorDocRender({ appId, docKey, signatureText, signatureImage, effectiveDate, signedAt, vehiclesOverride }) {
+//
+// `paymentTerms` (lib/investor-payment-terms.js) is passed in by the caller —
+// the invitation's terms at submission, the row's snapshot at regeneration —
+// and never looked up here. null renders the standard contract.
+function buildInvestorDocRender({ appId, docKey, signatureText, signatureImage, effectiveDate, signedAt, vehiclesOverride, paymentTerms = null }) {
 	return () => {
 		const application = db.prepare("SELECT * FROM investor_applications WHERE id = ?").get(appId);
 		if (docKey === "w9") {
@@ -10910,6 +11043,7 @@ function buildInvestorDocRender({ appId, docKey, signatureText, signatureImage, 
 				signatureText: (signatureText || "").trim(),
 				signatureImage,
 				signedAt,
+				paymentTerms,
 			});
 		}
 		// No silent fall-through. The old if/else-if chain had no else, so a
@@ -11307,6 +11441,23 @@ app.post("/api/admin/investor-onboarding/:id/documents/:docKey/regenerate", requ
 			});
 		}
 
+		// The payment terms this document was signed under come from its own
+		// snapshot, never from the invitation, and are read before anything is
+		// archived or rendered. An unreadable snapshot stops here: reprinting the
+		// document on the standard terms would change what was signed.
+		let paymentTerms;
+		try {
+			paymentTerms = investorPaymentTerms.parseSnapshot(docRow.payment_terms_json);
+		} catch {
+			logAudit(req, "regenerate_investor_document", "investor_application", appId,
+				`REFUSED to regenerate "${docKey}": the stored payment terms snapshot could not be read (PAYMENT_TERMS_SNAPSHOT_INVALID)`);
+			return res.status(409).json({
+				error: "This document's stored payment terms could not be read, so it was not regenerated.",
+				code: "PAYMENT_TERMS_SNAPSHOT_INVALID",
+			});
+		}
+		const paymentTermsSummary = investorPaymentTerms.describeTerms(paymentTerms).summary;
+
 		const signedDir = path.join(__dirname, "uploads", "investor-onboarding-signed");
 		if (!fs.existsSync(signedDir)) fs.mkdirSync(signedDir, { recursive: true });
 		const signedFileName = `${docKey}-inv-${appId}-signed.pdf`;
@@ -11378,6 +11529,7 @@ app.post("/api/admin/investor-onboarding/:id/documents/:docKey/regenerate", requ
 			signatureImage: docRow.signature_image || undefined,
 			effectiveDate,
 			signedAt: signedAtLabel,
+			paymentTerms,
 		});
 
 		const nowIso = new Date().toISOString();
@@ -11487,8 +11639,8 @@ app.post("/api/admin/investor-onboarding/:id/documents/:docKey/regenerate", requ
 
 		logAudit(req, "regenerate_investor_document", "investor_application", appId,
 			archived
-				? `SUPERSEDED signed "${docRow.doc_name || docKey}" — original archived as ${archived.file} (sha256 ${archived.sha256.slice(0, 16)}…, ${archived.bytes} bytes), replacement sha256 ${artifact.sha256.slice(0, 16)}…, effective date preserved as ${effectiveDate}. Reason: ${supersedeReason}`
-				: `Regenerated "${docRow.doc_name || docKey}" from the stored signature (effective date ${effectiveDate})`);
+				? `SUPERSEDED signed "${docRow.doc_name || docKey}" — original archived as ${archived.file} (sha256 ${archived.sha256.slice(0, 16)}…, ${archived.bytes} bytes), replacement sha256 ${artifact.sha256.slice(0, 16)}…, effective date preserved as ${effectiveDate}, payment terms: ${paymentTermsSummary}. Reason: ${supersedeReason}`
+				: `Regenerated "${docRow.doc_name || docKey}" from the stored signature (effective date ${effectiveDate}; payment terms: ${paymentTermsSummary})`);
 		res.json({
 			success: true, regenerated: true, signedPdfUrl: artifact.url, onboardingStatus,
 			effectiveDate, effectiveDatePreserved: !!preservedEffectiveDate,
@@ -11666,7 +11818,7 @@ let pdfPreviewInflight = 0;
 app.post("/api/public/investor-preview-pdf/:docKey", pdfPreviewLimiter, async (req, res) => {
 	try {
 		const { docKey } = req.params;
-		const { legal_name, dba, entity_type, address, contact_person, contact_title, phone, email, ein_ssn, years_in_operation, fleet_size, vehicles, banking, signatureText, signatureImage } = req.body;
+		const { legal_name, dba, entity_type, address, contact_person, contact_title, phone, email, ein_ssn, years_in_operation, fleet_size, vehicles, banking, signatureText, signatureImage, invite_token } = req.body;
 
 		// The signature image is decoded when the W-9 renders, so its type,
 		// dimensions and size are checked from the header first
@@ -11694,6 +11846,15 @@ app.post("/api/public/investor-preview-pdf/:docKey", pdfPreviewLimiter, async (r
 			return res.status(400).json({ error: vehicleCheck.message, code: "INVALID_VEHICLES", reason: vehicleCheck.reason });
 		}
 		const vehiclesArr = vehicleCheck.value;
+		// A payment terms invitation's preview. Resolved before the in-flight
+		// cap below, so a bad or spent link costs no render slot; its terms come
+		// only from the invitation row, never from the body.
+		let invite = null;
+		if (invite_token !== undefined && invite_token !== null && invite_token !== "") {
+			const found = resolveInviteToken(invite_token);
+			if (!found.ok) return res.status(found.status).json(found.body);
+			invite = found.row;
+		}
 		const appData = {
 			legalName: legal_name || "",
 			dba: dba || "",
@@ -11727,7 +11888,9 @@ app.post("/api/public/investor-preview-pdf/:docKey", pdfPreviewLimiter, async (r
 			pdfPreviewInflight++;
 			let pdfBuffer;
 			try {
-				pdfBuffer = await renderPolicy(docKey, appData);
+				pdfBuffer = await renderPolicy(docKey, invite
+					? { ...appData, paymentTerms: investorPaymentTerms.effectiveTerms(investorPaymentTerms.termsFromInviteRow(invite)) }
+					: appData);
 			} finally {
 				// finally, not after the await: a render that throws must still
 				// release its slot or the cap leaks to a permanent 503.
@@ -11736,11 +11899,13 @@ app.post("/api/public/investor-preview-pdf/:docKey", pdfPreviewLimiter, async (r
 			res.setHeader("Content-Type", "application/pdf");
 			const filename = docKey === "master_agreement" ? "Master Agreement.pdf" : "Vehicle Lease.pdf";
 			res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
+			if (invite) setInvitePreviewHeaders(res, invite);
 			return res.send(pdfBuffer);
 		}
 		if (docKey === "w9") {
 			const pdfBytes = await fillW9Form(appData);
 			if (!pdfBytes) return res.status(404).json({ error: "W-9 template not found" });
+			if (invite) setInvitePreviewHeaders(res, invite);
 			res.setHeader("Content-Type", "application/pdf");
 			res.setHeader("Content-Disposition", 'inline; filename="W-9 Form.pdf"');
 			return res.send(Buffer.from(pdfBytes));
@@ -11748,6 +11913,440 @@ app.post("/api/public/investor-preview-pdf/:docKey", pdfPreviewLimiter, async (r
 		return res.status(404).json({ error: "Unknown document" });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
+	}
+});
+
+// ============================================================
+// Payment terms invites (per-investor contract terms)
+// ============================================================
+// A Super Admin creates a personal link to /invest that carries payment terms
+// for one investor: the standard 50/50 split with additional terms, or a fixed
+// monthly lease payment. The applicant's master agreement and vehicle lease
+// then print those terms (lib/investor-payment-terms.js, the template slots),
+// and the terms are frozen on both document rows when they submit. Plain
+// /invest is unchanged.
+//
+// ⚠️ CONTRACT WORDING ONLY. No payout, ledger, split or statement code reads
+// investor_invites or payment_terms_json; payouts still come from the Split %.
+// scripts/test-payment-terms-routes.js pins that.
+//
+// The link's token is 32 random bytes shown to the admin once (create and
+// reissue); only its sha256 is stored. The public side reads it from the
+// X-Invite-Token header (GET) or the `invite_token` body field (preview,
+// apply), never a query string. An invite is single use: POST
+// /api/public/investor-apply binds it inside its transaction.
+const INVITE_TTL_DAYS = 30;
+const INVITE_STATUS_FILTERS = ["active", "used", "revoked", "expired", "all"];
+const INVITE_REVOKE_REASON_MAX = 300;
+const INVITE_ADMIN_SELECT = `SELECT ii.*, ia.status AS application_status,
+	(SELECT MIN(inv.id) FROM investors inv WHERE inv.application_id = ii.application_id) AS investor_id
+	FROM investor_invites ii LEFT JOIN investor_applications ia ON ia.id = ii.application_id`;
+
+// 60 lookups / 15 min per IP. The portal reads its invitation once per page
+// load; this caps a guessing loop, which the 256-bit token already makes
+// pointless.
+const investorInviteLookupLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 60,
+	message: { error: "Too many invitation lookups. Try again later." },
+	standardHeaders: true,
+});
+
+function inviteRefusal(status, code, error, extra = {}) {
+	return { ok: false, status, body: { error, code, ...extra } };
+}
+
+function inviteNotFoundRefusal() {
+	return inviteRefusal(404, "INVITE_NOT_FOUND", "This invitation link is not valid. Check the link, or contact LogisX for a new one.");
+}
+
+// A refusal thrown inside a transaction, so every write in it rolls back.
+function inviteRefusalError(refusal) {
+	const e = new Error(refusal.body.error);
+	e.inviteRefusal = refusal;
+	return e;
+}
+
+// `expired` is derived, never stored. An expiry that does not parse counts as
+// expired: the link fails closed.
+function inviteStatusOf(row, nowMs = Date.now()) {
+	if (row.status !== "active") return row.status;
+	const expires = Date.parse(row.expires_at);
+	return Number.isFinite(expires) && expires > nowMs ? "active" : "expired";
+}
+
+function inviteExpiryFrom(nowMs) {
+	return new Date(nowMs + INVITE_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
+}
+
+// null when the invite may still be used, else the public refusal (410).
+function inviteUseRefusal(row, nowMs = Date.now()) {
+	const status = inviteStatusOf(row, nowMs);
+	if (status === "used") return inviteRefusal(410, "INVITE_USED", "This invitation has already been used to submit an application.");
+	if (status === "revoked") return inviteRefusal(410, "INVITE_REVOKED", "This invitation has been withdrawn. Contact LogisX for a new link.");
+	if (status === "expired") return inviteRefusal(410, "INVITE_EXPIRED", "This invitation link has expired. Contact LogisX for a new link.");
+	return null;
+}
+
+// A raw token from the public side → { ok: true, row } for a usable invite,
+// or the refusal. A malformed token is refused before any query runs.
+function resolveInviteToken(token) {
+	if (typeof token !== "string" || !investorPaymentTerms.INVITE_TOKEN_RE.test(token)) return inviteNotFoundRefusal();
+	const row = db.prepare("SELECT * FROM investor_invites WHERE token_sha256 = ?").get(investorPaymentTerms.hashInviteToken(token));
+	if (!row) return inviteNotFoundRefusal();
+	return inviteUseRefusal(row) || { ok: true, row };
+}
+
+function parseInviteRevision(value) {
+	if (typeof value === "number") return Number.isSafeInteger(value) && value >= 1 ? value : null;
+	if (typeof value === "string" && /^\d{1,9}$/.test(value)) {
+		const n = Number(value);
+		return n >= 1 ? n : null;
+	}
+	return null;
+}
+
+function inviteIdParam(value) {
+	if (typeof value !== "string" || !/^\d{1,12}$/.test(value)) return null;
+	const n = Number(value);
+	return n >= 1 ? n : null;
+}
+
+function setInvitePreviewHeaders(res, invite) {
+	res.setHeader("X-Payment-Terms-Revision", String(invite.terms_revision));
+	res.setHeader("Cache-Control", "no-store");
+}
+
+function publicInviteView(row) {
+	const paymentTerms = investorPaymentTerms.termsFromInviteRow(row);
+	const effective = investorPaymentTerms.effectiveTerms(paymentTerms);
+	return {
+		inviteeName: row.invitee_name,
+		inviteeEmail: row.invitee_email,
+		termsRevision: row.terms_revision,
+		expiresAt: row.expires_at,
+		isStandard: effective === null,
+		paymentTerms,
+		display: investorPaymentTerms.describeTerms(effective),
+	};
+}
+
+// An INVITE_ADMIN_SELECT row → AdminInvite. Never carries the token or its hash.
+function adminInviteView(row, nowMs = Date.now()) {
+	const paymentTerms = investorPaymentTerms.termsFromInviteRow(row);
+	const effective = investorPaymentTerms.effectiveTerms(paymentTerms);
+	return {
+		id: row.id,
+		inviteeName: row.invitee_name,
+		inviteeEmail: row.invitee_email,
+		paymentTerms,
+		display: investorPaymentTerms.describeTerms(effective),
+		isStandard: effective === null,
+		termsRevision: row.terms_revision,
+		status: inviteStatusOf(row, nowMs),
+		applicationId: row.application_id ?? null,
+		applicationStatus: row.application_status ?? null,
+		investorId: row.investor_id ?? null,
+		createdAt: row.created_at,
+		updatedAt: row.updated_at,
+		expiresAt: row.expires_at,
+		firstOpenedAt: row.first_opened_at ?? null,
+		usedAt: row.used_at ?? null,
+		revokedAt: row.revoked_at ?? null,
+		createdBy: row.created_by,
+		revokeReason: row.revoke_reason,
+	};
+}
+
+function readAdminInvite(id) {
+	return db.prepare(`${INVITE_ADMIN_SELECT} WHERE ii.id = ?`).get(id);
+}
+
+// The terms as one audit phrase: the summary, plus the additional terms capped.
+function inviteAuditTerms(terms) {
+	const effective = investorPaymentTerms.effectiveTerms(terms);
+	const summary = investorPaymentTerms.describeTerms(effective).summary;
+	return effective && effective.details ? `${summary} (additional terms: "${auditText(effective.details, 200)}")` : summary;
+}
+
+// The create / update body → { name, email, terms }, or the 400 to send.
+function readInviteBody(body) {
+	const src = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+	const shape = publicFormInput.checkPublicScalars(src, ["inviteeName", "inviteeEmail", "paymentType", "leaseAmount", "details"]);
+	if (!shape.ok) return inviteRefusal(400, "INVALID_FIELD", shape.message, { field: shape.field, reason: shape.reason });
+	const name = investorPaymentTerms.normalizeName(src.inviteeName);
+	if (!name.ok || !name.value) {
+		return inviteRefusal(400, "INVALID_FIELD", `Enter the investor's name (at most ${investorPaymentTerms.LIMITS.NAME_MAX} characters).`,
+			{ field: "inviteeName", reason: name.ok ? "required" : name.reason });
+	}
+	let email = "";
+	const rawEmail = typeof src.inviteeEmail === "string" ? src.inviteeEmail.trim() : src.inviteeEmail;
+	if (rawEmail !== undefined && rawEmail !== null && rawEmail !== "") {
+		const check = publicFormInput.checkPublicEmail(rawEmail);
+		if (!check.ok) return inviteRefusal(400, "INVALID_EMAIL", check.message, { field: "inviteeEmail", reason: check.reason });
+		email = check.value;
+	}
+	const terms = investorPaymentTerms.normalizeTermsInput({ paymentType: src.paymentType, leaseAmount: src.leaseAmount, details: src.details });
+	if (!terms.ok) return inviteRefusal(400, "INVALID_PAYMENT_TERMS", terms.message, { field: terms.field, reason: terms.reason });
+	return { ok: true, value: { name: name.value, email, terms: terms.value } };
+}
+
+// What an investor signed, read back from the master agreement's snapshot.
+// Read-only: a signed contract never changes, and nothing here edits one.
+function buildPaymentTermsView(applicationId, investorId) {
+	const application = applicationId ? db.prepare("SELECT id FROM investor_applications WHERE id = ?").get(applicationId) : null;
+	if (!application) {
+		return {
+			investorId, applicationId: applicationId || null, state: "no_application",
+			paymentTerms: null, isDefault: false,
+			display: { typeLabel: "", amountLabel: "", summary: "No investor application on file" },
+			documents: [], consistent: true, invite: null,
+		};
+	}
+	const rows = db.prepare("SELECT doc_key, doc_name, signed, signed_at, payment_terms_json FROM investor_onboarding_documents WHERE application_id = ?").all(application.id);
+	const byKey = new Map(rows.map((r) => [r.doc_key, r]));
+	const documents = INVESTOR_ONBOARDING_DOCS.map((d) => {
+		const r = byKey.get(d.key);
+		return { docKey: d.key, docName: (r && r.doc_name) || d.name, signed: !!(r && r.signed), signedAt: (r && r.signed_at) || null, hasSnapshot: !!(r && r.payment_terms_json) };
+	});
+	const master = byKey.get("master_agreement");
+	const masterJson = (master && master.payment_terms_json) || null;
+	const leaseJson = (byKey.get("vehicle_lease") || {}).payment_terms_json || null;
+	const w9Json = (byKey.get("w9") || {}).payment_terms_json || null;
+	let snapshot = null;
+	let readable = true;
+	try { snapshot = investorPaymentTerms.parseSnapshot(masterJson); } catch { readable = false; }
+	const paymentTerms = snapshot ? { type: snapshot.type, leaseAmountCents: snapshot.leaseAmountCents, details: snapshot.details } : null;
+	const inviteRow = db.prepare("SELECT * FROM investor_invites WHERE application_id = ?").get(application.id);
+	let inviteAgrees = !snapshot;
+	if (inviteRow) {
+		let inviteTerms = null;
+		try { inviteTerms = investorPaymentTerms.effectiveTerms(investorPaymentTerms.termsFromInviteRow(inviteRow)); } catch { inviteTerms = undefined; }
+		inviteAgrees = inviteTerms !== undefined && JSON.stringify(inviteTerms) === JSON.stringify(paymentTerms) &&
+			(!snapshot || (snapshot.inviteId === inviteRow.id && snapshot.termsRevision === inviteRow.terms_revision));
+	}
+	return {
+		investorId,
+		applicationId: application.id,
+		state: master && master.signed ? "signed" : "unsigned",
+		paymentTerms,
+		isDefault: readable && paymentTerms === null,
+		display: readable
+			? investorPaymentTerms.describeTerms(paymentTerms)
+			: { typeLabel: "", amountLabel: "", summary: "The stored payment terms could not be read" },
+		documents,
+		consistent: readable && masterJson === leaseJson && !w9Json && inviteAgrees,
+		invite: inviteRow ? {
+			id: inviteRow.id, status: inviteStatusOf(inviteRow), inviteeName: inviteRow.invitee_name,
+			inviteeEmail: inviteRow.invitee_email, termsRevision: inviteRow.terms_revision, usedAt: inviteRow.used_at || null,
+		} : null,
+	};
+}
+
+// The list column: one line per application, from its master agreement's snapshot.
+function paymentTermsSummaryOf(snapshotJsonText) {
+	try {
+		return investorPaymentTerms.describeTerms(investorPaymentTerms.parseSnapshot(snapshotJsonText)).summary;
+	} catch {
+		return "The stored payment terms could not be read";
+	}
+}
+
+// GET — the invite the /invest portal was opened with. Public: the token is
+// the credential. Stamps first_opened_at once.
+app.get("/api/public/investor-invite", investorInviteLookupLimiter, (req, res) => {
+	try {
+		res.setHeader("Cache-Control", "no-store");
+		res.setHeader("X-Robots-Tag", "noindex");
+		const found = resolveInviteToken(req.get("X-Invite-Token"));
+		if (!found.ok) return res.status(found.status).json(found.body);
+		if (!found.row.first_opened_at) {
+			const opened = db.prepare("UPDATE investor_invites SET first_opened_at = ? WHERE id = ? AND first_opened_at IS NULL")
+				.run(new Date().toISOString(), found.row.id);
+			if (opened.changes) notifyChange("investor-invites");
+		}
+		res.json({ invite: publicInviteView(found.row) });
+	} catch (err) {
+		console.error("Investor invite lookup error:", err.message);
+		res.status(500).json({ error: "The invitation could not be loaded. Try again shortly." });
+	}
+});
+
+// GET — every invite, newest first. ?status=active|used|revoked|expired|all.
+app.get("/api/admin/investor-invites", requireRole("Super Admin"), (req, res) => {
+	try {
+		const filter = req.query.status === undefined ? "all" : req.query.status;
+		if (typeof filter !== "string" || !INVITE_STATUS_FILTERS.includes(filter)) {
+			return res.status(400).json({ error: `status must be one of ${INVITE_STATUS_FILTERS.join(", ")}.`, code: "INVALID_FIELD", field: "status" });
+		}
+		const nowMs = Date.now();
+		const invites = db.prepare(`${INVITE_ADMIN_SELECT} ORDER BY ii.id DESC`).all()
+			.map((row) => adminInviteView(row, nowMs))
+			.filter((invite) => filter === "all" || invite.status === filter);
+		res.setHeader("Cache-Control", "no-store");
+		res.json({ invites });
+	} catch (err) {
+		console.error("Investor invite list error:", err.message);
+		res.status(500).json({ error: "Could not load the invitations." });
+	}
+});
+
+// POST — create an invite. The link is in the response once and never again.
+app.post("/api/admin/investor-invites", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {
+	try {
+		const input = readInviteBody(req.body);
+		if (!input.ok) return res.status(input.status).json(input.body);
+		const { name, email, terms } = input.value;
+		const token = investorPaymentTerms.newInviteToken();
+		const nowMs = Date.now();
+		const nowIso = new Date(nowMs).toISOString();
+		const expiresAt = inviteExpiryFrom(nowMs);
+		const created = db.prepare(`INSERT INTO investor_invites (token_sha256, invitee_name, invitee_email, payment_type, lease_amount_cents,
+			amendment_details, terms_revision, status, expires_at, created_at, updated_at, created_by)
+			VALUES (?, ?, ?, ?, ?, ?, 1, 'active', ?, ?, ?, ?)`)
+			.run(investorPaymentTerms.hashInviteToken(token), name, email, terms.type, terms.leaseAmountCents, terms.details,
+				expiresAt, nowIso, nowIso, req.session?.user?.username || "");
+		const row = readAdminInvite(created.lastInsertRowid);
+		logAudit(req, "create_investor_invite", "investor_invite", row.id,
+			`Created payment terms invite #${row.id} for "${auditText(name, 120)}"${email ? ` <${auditText(email, 254)}>` : ""}: ${inviteAuditTerms(terms)}; link expires ${expiresAt}`);
+		notifyChange("investor-invites");
+		res.status(201).json({ invite: adminInviteView(row), invitePath: `/invest?invite=${token}` });
+	} catch (err) {
+		console.error("Investor invite create error:", err.message);
+		res.status(500).json({ error: "Could not create the invitation." });
+	}
+});
+
+// PUT — edit an unused invite. The terms revision goes up only when the terms
+// change, which is what makes an open portal re-show them before signing.
+app.put("/api/admin/investor-invites/:id", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {
+	try {
+		const id = inviteIdParam(req.params.id);
+		const expected = parseInviteRevision(req.body?.expectedRevision);
+		if (expected === null) {
+			return res.status(400).json({ error: "expectedRevision is required: the terms revision this edit was made against.", code: "REVISION_REQUIRED" });
+		}
+		const row = id ? readAdminInvite(id) : null;
+		if (!row) return res.status(404).json({ error: "Invitation not found.", code: "INVITE_NOT_FOUND" });
+		if (row.status === "used") return res.status(409).json({ error: "This invitation has been used, so its terms are part of a signed application and cannot change.", code: "INVITE_LOCKED" });
+		if (row.status === "revoked") return res.status(409).json({ error: "This invitation has been revoked.", code: "INVITE_REVOKED" });
+		if (row.terms_revision !== expected) {
+			return res.status(409).json({ error: "This invitation was changed since it was loaded. Reload it and try again.", code: "INVITE_REVISION_CONFLICT", termsRevision: row.terms_revision });
+		}
+		const input = readInviteBody(req.body);
+		if (!input.ok) return res.status(input.status).json(input.body);
+		const { name, email, terms } = input.value;
+		const before = investorPaymentTerms.termsFromInviteRow(row);
+		const termsChanged = terms.type !== before.type || terms.leaseAmountCents !== before.leaseAmountCents || terms.details !== before.details;
+		const changes = [];
+		if (name !== row.invitee_name) changes.push(`name "${auditText(row.invitee_name, 120)}" → "${auditText(name, 120)}"`);
+		if (email !== row.invitee_email) changes.push(`email "${auditText(row.invitee_email, 254)}" → "${auditText(email, 254)}"`);
+		if (termsChanged) changes.push(`terms (revision ${row.terms_revision} → ${row.terms_revision + 1}) ${inviteAuditTerms(before)} → ${inviteAuditTerms(terms)}`);
+		if (!changes.length) return res.json({ invite: adminInviteView(row) });
+		const nextRevision = row.terms_revision + (termsChanged ? 1 : 0);
+		const updated = db.prepare(`UPDATE investor_invites SET invitee_name = ?, invitee_email = ?, payment_type = ?, lease_amount_cents = ?,
+			amendment_details = ?, terms_revision = ?, updated_at = ? WHERE id = ? AND status = 'active' AND terms_revision = ?`)
+			.run(name, email, terms.type, terms.leaseAmountCents, terms.details, nextRevision, new Date().toISOString(), id, expected);
+		if (updated.changes !== 1) {
+			return res.status(409).json({ error: "This invitation was changed since it was loaded. Reload it and try again.", code: "INVITE_REVISION_CONFLICT" });
+		}
+		logAudit(req, "update_investor_invite", "investor_invite", id, `Updated payment terms invite #${id}: ${changes.join("; ")}`);
+		notifyChange("investor-invites");
+		res.json({ invite: adminInviteView(readAdminInvite(id)) });
+	} catch (err) {
+		console.error("Investor invite update error:", err.message);
+		res.status(500).json({ error: "Could not update the invitation." });
+	}
+});
+
+// POST — a new link for an unused invite. The old link stops working at once
+// and the new one gets a fresh expiry; the terms and their revision stay.
+app.post("/api/admin/investor-invites/:id/reissue", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {
+	try {
+		const id = inviteIdParam(req.params.id);
+		const row = id ? readAdminInvite(id) : null;
+		if (!row) return res.status(404).json({ error: "Invitation not found.", code: "INVITE_NOT_FOUND" });
+		if (row.status === "used") return res.status(409).json({ error: "This invitation has been used, so it cannot be reissued.", code: "INVITE_LOCKED" });
+		if (row.status === "revoked") return res.status(409).json({ error: "This invitation has been revoked. Create a new one instead.", code: "INVITE_REVOKED" });
+		const token = investorPaymentTerms.newInviteToken();
+		const nowMs = Date.now();
+		const expiresAt = inviteExpiryFrom(nowMs);
+		const reissued = db.prepare(`UPDATE investor_invites SET token_sha256 = ?, expires_at = ?, first_opened_at = NULL, updated_at = ?
+			WHERE id = ? AND status = 'active'`).run(investorPaymentTerms.hashInviteToken(token), expiresAt, new Date(nowMs).toISOString(), id);
+		if (reissued.changes !== 1) return res.status(409).json({ error: "This invitation can no longer be reissued.", code: "INVITE_LOCKED" });
+		logAudit(req, "reissue_investor_invite", "investor_invite", id, `Reissued payment terms invite #${id}: the previous link no longer works; the new link expires ${expiresAt}`);
+		notifyChange("investor-invites");
+		res.json({ invite: adminInviteView(readAdminInvite(id)), invitePath: `/invest?invite=${token}` });
+	} catch (err) {
+		console.error("Investor invite reissue error:", err.message);
+		res.status(500).json({ error: "Could not reissue the invitation." });
+	}
+});
+
+// POST — withdraw an unused invite. Revoking twice is a no-op.
+app.post("/api/admin/investor-invites/:id/revoke", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {
+	try {
+		const id = inviteIdParam(req.params.id);
+		const rawReason = req.body?.reason;
+		if (rawReason !== undefined && rawReason !== null && typeof rawReason !== "string") {
+			return res.status(400).json({ error: "The reason must be text.", code: "INVALID_FIELD", field: "reason", reason: "not_text" });
+		}
+		if (typeof rawReason === "string" && rawReason.length > INVITE_REVOKE_REASON_MAX) {
+			return res.status(400).json({ error: `The reason can be at most ${INVITE_REVOKE_REASON_MAX} characters.`, code: "INVALID_FIELD", field: "reason", reason: "too_long" });
+		}
+		const reason = auditText(rawReason || "", INVITE_REVOKE_REASON_MAX);
+		const row = id ? readAdminInvite(id) : null;
+		if (!row) return res.status(404).json({ error: "Invitation not found.", code: "INVITE_NOT_FOUND" });
+		if (row.status === "used") return res.status(409).json({ error: "This invitation has been used, so it cannot be revoked.", code: "INVITE_LOCKED" });
+		if (row.status === "revoked") return res.json({ invite: adminInviteView(row) });
+		const nowIso = new Date().toISOString();
+		const revoked = db.prepare(`UPDATE investor_invites SET status = 'revoked', revoked_at = ?, revoked_by = ?, revoke_reason = ?, updated_at = ?
+			WHERE id = ? AND status = 'active'`).run(nowIso, req.session?.user?.username || "", reason, nowIso, id);
+		if (revoked.changes !== 1) return res.status(409).json({ error: "This invitation can no longer be revoked.", code: "INVITE_LOCKED" });
+		logAudit(req, "revoke_investor_invite", "investor_invite", id, `Revoked payment terms invite #${id}${reason ? `. Reason: ${reason}` : ""}`);
+		notifyChange("investor-invites");
+		res.json({ invite: adminInviteView(readAdminInvite(id)) });
+	} catch (err) {
+		console.error("Investor invite revoke error:", err.message);
+		res.status(500).json({ error: "Could not revoke the invitation." });
+	}
+});
+
+// POST — the master agreement or vehicle lease exactly as this invite's
+// applicant would see it, for a sample applicant. Any status: a used invite's
+// terms are the ones its applicant signed.
+const INVITE_PREVIEW_SAMPLE = Object.freeze({ legalName: "Sample Investor LLC", vehicles: [] });
+app.post("/api/admin/investor-invites/:id/preview/:docKey", requireRole("Super Admin"), onboardingPreviewLimiter, async (req, res) => {
+	try {
+		const { docKey } = req.params;
+		if (!investorPaymentTerms.TERMS_DOC_KEYS.includes(docKey)) return res.status(404).json({ error: "Unknown document", code: "UNKNOWN_DOC_KEY" });
+		const id = inviteIdParam(req.params.id);
+		const row = id ? db.prepare("SELECT * FROM investor_invites WHERE id = ?").get(id) : null;
+		if (!row) return res.status(404).json({ error: "Invitation not found.", code: "INVITE_NOT_FOUND" });
+		const paymentTerms = investorPaymentTerms.effectiveTerms(investorPaymentTerms.termsFromInviteRow(row));
+		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: EVIDENCE_DATE_TZ });
+		const pdfBuffer = await renderPolicy(docKey, { ...INVITE_PREVIEW_SAMPLE, effectiveDate, paymentTerms });
+		res.setHeader("Content-Type", "application/pdf");
+		res.setHeader("Content-Disposition", `inline; filename="${docKey === "master_agreement" ? "Master Agreement" : "Vehicle Lease"} Preview.pdf"`);
+		setInvitePreviewHeaders(res, row);
+		res.send(pdfBuffer);
+	} catch (err) {
+		console.error("Investor invite preview error:", err.message);
+		if (!res.headersSent) res.status(500).json({ error: "Could not render the preview." });
+	}
+});
+
+// GET — the payment terms an investor signed, read-only.
+app.get("/api/investors/:id/payment-terms", requireRole("Super Admin"), (req, res) => {
+	try {
+		const id = inviteIdParam(req.params.id);
+		const investor = id ? db.prepare("SELECT id, application_id FROM investors WHERE id = ?").get(id) : null;
+		if (!investor) return res.status(404).json({ error: "Investor not found.", code: "INVESTOR_NOT_FOUND" });
+		res.setHeader("Cache-Control", "no-store");
+		res.json(buildPaymentTermsView(investor.application_id || null, investor.id));
+	} catch (err) {
+		console.error("Investor payment terms error:", err.message);
+		res.status(500).json({ error: "Could not load the payment terms." });
 	}
 });
 
@@ -12329,9 +12928,25 @@ app.get("/api/investor-applications", requireRole("Super Admin"), (req, res) => 
 		// POST …/banking — which rewrites where money is sent. Masking the SSN
 		// while publishing that is the same "half a credential redacted" mistake
 		// this change fixes in the admin email.
+		// The Terms column: each application's signed payment terms, read from its
+		// master agreement's snapshot, and the invitation it came through. And
+		// `docs_total`, the document rows the application actually has, which is
+		// what `signed_count` is out of (not every application has three).
+		const termsByApp = new Map(db.prepare("SELECT application_id, payment_terms_json FROM investor_onboarding_documents WHERE doc_key = 'master_agreement'").all()
+			.map((r) => [r.application_id, r.payment_terms_json]));
+		const inviteByApp = new Map(db.prepare("SELECT id, application_id FROM investor_invites WHERE application_id IS NOT NULL").all()
+			.map((r) => [r.application_id, r.id]));
+		const docsTotalByApp = new Map(db.prepare("SELECT application_id, COUNT(*) AS total FROM investor_onboarding_documents GROUP BY application_id").all()
+			.map((r) => [r.application_id, r.total]));
 		res.json(apps.map((a) => {
 			const { access_token, ...safe } = a;
-			return maskingEnabled() ? piiMask.maskFields(safe, { ein_ssn: "taxId" }) : safe;
+			const out = maskingEnabled() ? piiMask.maskFields(safe, { ein_ssn: "taxId" }) : safe;
+			return {
+				...out,
+				payment_terms_summary: paymentTermsSummaryOf(termsByApp.get(a.id)),
+				invite_id: inviteByApp.get(a.id) ?? null,
+				docs_total: docsTotalByApp.get(a.id) ?? 0,
+			};
 		}));
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -12370,7 +12985,9 @@ app.get("/api/investor-applications/:id", requireRole("Super Admin"), (req, res)
 		const outBank = maskingEnabled()
 			? piiMask.maskFields(banking, { routing_number: "routing", account_number: "account" })
 			: banking;
-		res.json({ application: outApp, vehicles, banking: outBank, documents });
+		const investorRow = db.prepare("SELECT MIN(id) AS id FROM investors WHERE application_id = ?").get(appId);
+		const paymentTerms = buildPaymentTermsView(appId, (investorRow && investorRow.id) || null);
+		res.json({ application: outApp, vehicles, banking: outBank, documents, paymentTerms });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}

@@ -436,6 +436,23 @@ ok("…and the route really does serialize those two before binding",
 	/typeof reference_info === 'string' \? reference_info : JSON\.stringify\(reference_info/.test(APPLY));
 ok("PUBLIC_INVESTOR_SCALAR_FIELDS = every field /api/public/investor-apply destructures, less vehicles/banking/signatures",
 	sameSet(investorList, bodyFields(INVEST).filter((f) => !["vehicles", "banking", "signatures"].includes(f))));
+// The payment terms invitation fields: one scalar each, checked before the
+// route reads either of them.
+function inviteFieldsWired(src) {
+	return callsFirst(src, "publicFormInput.checkPublicScalars(req.body, PUBLIC_INVESTOR_SCALAR_FIELDS)",
+		["parseInviteRevision(invite_terms_revision)", "resolveInviteToken(invite_token)"]);
+}
+ok("…and that list carries the two invitation fields, invite_token and invite_terms_revision",
+	!!investorList && investorList.includes("invite_token") && investorList.includes("invite_terms_revision"));
+ok("POST /api/public/investor-apply: the invitation fields are read only after the scalar check",
+	inviteFieldsWired(INVEST) && INVEST.includes("resolveInviteToken(invite_token)"));
+ok("…a token sent as a list is refused as not one scalar",
+	pfi.checkPublicScalars({ invite_token: ["a", "b"], invite_terms_revision: 1 }, investorList || []).field === "invite_token" &&
+	pfi.checkPublicScalars({ invite_token: "a".repeat(43), invite_terms_revision: { n: 1 } }, investorList || []).field === "invite_terms_revision");
+const lateInviteCheck = INVEST.replace("publicFormInput.checkPublicScalars(req.body, PUBLIC_INVESTOR_SCALAR_FIELDS)", "({ ok: true })")
+	.replace("const appId = applyTx();", "const appId = applyTx();\n\t\tpublicFormInput.checkPublicScalars(req.body, PUBLIC_INVESTOR_SCALAR_FIELDS);");
+ok("MUTANT: checking the invitation fields only after they are read is caught",
+	lateInviteCheck !== INVEST && !inviteFieldsWired(lateInviteCheck));
 ok("PUBLIC_BANKING_SCALAR_FIELDS = every field the onboarding banking route destructures",
 	sameSet(bankingList, bodyFields(BANKING)));
 ok("…and every banking field investor-apply binds is in PUBLIC_BANKING_SCALAR_FIELDS",

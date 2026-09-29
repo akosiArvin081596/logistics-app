@@ -711,6 +711,7 @@ async function main() {
 		investors: { email: `id || '.investor@${MAIL_DOMAIN}'`, phone: null },
 		investor_applications: { email: `id || '.investorapp@${MAIL_DOMAIN}'`, phone: null },
 		investor_outreach_log: { email: `id || '.outreach@${MAIL_DOMAIN}'` },
+		investor_invites: { invitee_email: `id || '.invite@${MAIL_DOMAIN}'` },
 		job_applications: { email: `id || '.applicant@${MAIL_DOMAIN}'`, phone: null, cell: null },
 		sheet_job_tracking: { email: `'row@${MAIL_DOMAIN}'`, phone_number: null },
 	})) {
@@ -797,6 +798,16 @@ async function main() {
 		const upd = db.prepare("UPDATE investor_applications SET access_token = ? WHERE id = ?");
 		for (const r of rows) upd.run(crypto.randomBytes(24).toString("hex"), r.id);
 		if (rows.length) summary.push(`investor_applications: ${rows.length} access token(s) regenerated`);
+	}
+	//     Payment terms invitation links, the same way: only a link's sha256 is
+	//     stored, and a random value in its place means no link mailed from
+	//     production opens an invitation on the copy. The copy's admin reissues
+	//     a link to test one.
+	if (tableExists("investor_invites") && colsOf("investor_invites").includes("token_sha256")) {
+		const rows = db.prepare("SELECT id FROM investor_invites").all();
+		const upd = db.prepare("UPDATE investor_invites SET token_sha256 = ? WHERE id = ?");
+		for (const r of rows) upd.run(crypto.randomBytes(32).toString("hex"), r.id);
+		if (rows.length) summary.push(`investor_invites: ${rows.length} invitation link(s) invalidated`);
 	}
 
 	// 3h. FREE TEXT. Everything above is COLUMN-AWARE: it names a table and a
@@ -1152,7 +1163,7 @@ const REDACTED_LITERAL = [
 ];
 const REDIRECTED_EMAIL = [
 	["users", "email"], ["drivers_directory", "email"], ["investors", "email"],
-	["investor_applications", "email"], ["investor_outreach_log", "email"],
+	["investor_applications", "email"], ["investor_outreach_log", "email"], ["investor_invites", "invitee_email"],
 	["job_applications", "email"], ["sheet_job_tracking", "email"],
 ];
 const MUST_BE_EMPTY_TABLES = [
