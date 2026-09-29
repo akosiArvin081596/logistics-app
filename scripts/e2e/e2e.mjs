@@ -7580,9 +7580,10 @@ async function termsFeature(t0) {
           }
           const listed = ((await api(S.admin, 'GET', '/api/investor-applications')).json || []).find?.((a) => Number(a.id) === Number(appId))
           const det = appId ? await api(S.admin, 'GET', `/api/investor-applications/${appId}`) : null
-          await caption(S.admin, `Step T8 — the application's detail: "Payment Terms" ${detail.includes('Payment Terms')}, "$2,000.00" ${detail.includes('$2,000.00')}`)
+          // innerText follows CSS text-transform, and the section titles are upper-cased.
+          await caption(S.admin, `Step T8 — the application's detail: "Payment Terms" ${/payment terms/i.test(detail)}, "$2,000.00" ${detail.includes('$2,000.00')}`)
           R.apps = {
-            ...tbl, detailSection: detail.includes('Payment Terms'), detailAmount: detail.includes('$2,000.00'),
+            ...tbl, detailSection: /payment terms/i.test(detail), detailAmount: detail.includes('$2,000.00'),
             listSummary: listed?.payment_terms_summary, view: det?.json?.paymentTerms || null,
             shot: await shot(S.admin, 't8-e-application-detail'),
           }
