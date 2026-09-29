@@ -104,7 +104,10 @@
             <button v-if="auth.isSuperAdmin" type="button" :disabled="drafting" :style="draftBtnStyle" @click="draftInvoice" title="Preview the invoice, POD, and rate-con and verify the recipient, then approve to save a Gmail draft for you to send.">{{ drafting ? 'Preparing…' : '✉ Draft Invoice Email' }}</button>
           </div>
           <template v-if="auth.isSuperAdmin">
-            <div v-if="draftResult" :style="draftMsgStyle">{{ draftResult.msg }}</div>
+            <div v-if="draftResult" class="draft-result" :style="draftMsgStyle" :role="draftResult.tone === 'error' ? 'alert' : 'status'">
+              {{ draftResult.msg }}
+              <span v-for="w in draftResult.warnings || []" :key="w" style="display:block;margin-top:0.2rem;font-weight:500;">⚠ {{ w }}</span>
+            </div>
             <div v-if="approvedDraft" :style="approvedLineStyle">
               <span>✓ Draft #{{ approvedDraft.invoice_id }} → {{ approvedDraft.recipient }} · {{ fmtDraftDate(approvedDraft.created_at) }}</span>
               <button type="button" :style="reviewLinkStyle" :disabled="drafting" @click="draftInvoice">Review</button>
@@ -641,7 +644,8 @@ const loadIdValue = computed(() => { if (!selectedJob.value) return ''; const c 
 // the "Invoice To" block) is resolved server-side, which stays the authority
 // on whether a given load can actually be invoiced.
 const drafting = ref(false)
-const draftResult = ref(null) // { ok: boolean, msg: string } | null
+// { tone: 'ok' | 'warn' | 'error', msg: string, warnings?: string[] } | null
+const draftResult = ref(null)
 // Review-before-draft: the button now runs a dryRun preview and opens a review
 // modal; the real Gmail draft is only created on "Approve & Create Draft".
 const previewOpen = ref(false)
@@ -692,13 +696,21 @@ const draftBtnStyle = computed(() => ({
   fontFamily: 'inherit', whiteSpace: 'nowrap', cursor: drafting.value ? 'not-allowed' : 'pointer',
   opacity: drafting.value ? 0.85 : 1, transition: 'all 0.15s',
 }))
-const draftMsgStyle = computed(() => ({
-  marginTop: '0.5rem', fontSize: '0.78rem', fontWeight: '600',
-  padding: '0.4rem 0.6rem', borderRadius: '6px',
-  background: draftResult.value && draftResult.value.ok ? '#f0fdf4' : '#fef2f2',
-  color: draftResult.value && draftResult.value.ok ? '#166534' : '#991b1b',
-  border: '1px solid ' + (draftResult.value && draftResult.value.ok ? '#bbf7d0' : '#fecaca'),
-}))
+// Green: a draft is in Gmail. Amber: the invoice was made but something needs a
+// look — no draft was created, or the draft came back with a warning. Red: failed.
+const DRAFT_TONES = {
+  ok: { background: '#f0fdf4', color: '#166534', border: '#bbf7d0' },
+  warn: { background: '#fffbeb', color: '#92400e', border: '#fde68a' },
+  error: { background: '#fef2f2', color: '#991b1b', border: '#fecaca' },
+}
+const draftMsgStyle = computed(() => {
+  const t = DRAFT_TONES[draftResult.value && draftResult.value.tone] || DRAFT_TONES.error
+  return {
+    marginTop: '0.5rem', fontSize: '0.78rem', fontWeight: '600',
+    padding: '0.4rem 0.6rem', borderRadius: '6px',
+    background: t.background, color: t.color, border: '1px solid ' + t.border,
+  }
+})
 // Runs a dryRun (no draft, no invoice number burned) and opens the review modal.
 // Doubles as the "Review" re-open for an already-approved draft.
 async function draftInvoice() {
@@ -726,19 +738,35 @@ async function draftInvoice() {
     const msg = e && e.code === 'INVOICE_TOTAL_UNKNOWN'
       ? 'No invoice total could be derived — this load has no rate on its rate-con and no Payment in Job Tracking. Add the Payment on the load (Active Loads → Edit), then try again.'
       : (e && e.message) || 'Failed to prepare the invoice preview.'
-    draftResult.value = { ok: false, msg }
+    draftResult.value = { tone: 'error', msg }
   } finally {
     drafting.value = false
   }
 }
-// The review modal created the real Gmail draft: surface the success banner,
-// close the preview, and refresh the persistent approved-draft line.
+// The review modal's approve succeeded: say what it produced, close the preview,
+// and refresh the persistent approved-draft line.
+//
+// ⚠️ Success is not always a draft. A server with no mail account configured
+// answers 200 with `preview: true`: the invoice (and its number) was generated,
+// but NO Gmail draft exists and no draft record was written. Telling the
+// dispatcher "Draft ready in Gmail" there sends them to look for an email that
+// was never made. The refresh below still runs and simply finds no new row.
 async function onDraftApproved(payload) {
   previewOpen.value = false
-  draftResult.value = {
-    ok: true,
-    msg: `✓ Draft ready in Gmail (invoice ${payload.invoiceId}). Verify the details, then send.`,
-  }
+  const warnings = Array.isArray(payload.warnings) ? payload.warnings : []
+  draftResult.value = payload.preview === true
+    ? {
+        tone: 'warn',
+        msg: `Invoice ${payload.invoiceId} was generated, but no Gmail draft was created — this server has no mail account configured.`,
+        warnings,
+      }
+    : {
+        // A draft that came back with a warning (e.g. its invoice # is already on
+        // another load's draft) still exists — amber, so the warning is read.
+        tone: warnings.length ? 'warn' : 'ok',
+        msg: `✓ Draft ready in Gmail (invoice ${payload.invoiceId}). Verify the details, then send.`,
+        warnings,
+      }
   const lid = loadIdValue.value
   if (!lid || !auth.isSuperAdmin) return
   try {
