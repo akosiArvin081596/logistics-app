@@ -3788,6 +3788,9 @@ async function routemateSyncTelemetry() {
 		// sitting in Dispatched (exactly what happened to 561151778) would
 		// silently block automation on the load actually being driven.
 		const activeLoadsByDriver = Object.create(null);
+		// The same rows, for a ping whose driver has no active load under today's
+		// key: geofenceCandidatesAcrossSpacing() looks for them across spacing.
+		let spacingSheet = null;
 		try {
 			const jt = await getJobTrackingCached();
 			const headers = jt.headers || [];
@@ -3800,6 +3803,7 @@ async function routemateSyncTelemetry() {
 				// public tracker room and the geofence writes. The shared cache no
 				// longer happens to hide it (see liveJobTrackingView()); skip it here.
 				const deletedIds = getDeletedLoadIds();
+				spacingSheet = { rows: jt.data || [], loadIdCol, statusCol, driverCol, deletedIds };
 				for (const row of (jt.data || [])) {
 					const d = driverNameForTotals((row[driverCol] || "").toString()).trim().toLowerCase();
 					const s = (row[statusCol] || "").toString().trim();
@@ -3823,10 +3827,15 @@ async function routemateSyncTelemetry() {
 			if (!driverName) continue;
 			const driverLower = driverName.trim().toLowerCase();
 			const activeLoadId = loadIdByDriver[driverLower] || "";
+			// The driver's own room, and the name this payload gives the driver,
+			// are the spelling their account holds (findDriverAccountSpelling()):
+			// the driver app keeps only a push naming its own driver, so an
+			// assignment stored with other spacing still reaches that driver.
+			const accountDriver = findDriverAccountSpelling(driverName) || driverName;
 			const timestamp = new Date(t.location_date_ms || Date.now()).toISOString();
 			const headingDeg = parseRoutemateBearing(t.bearing);
 			const locationPayload = {
-				driver: driverName,
+				driver: accountDriver,
 				latitude: t.latitude,
 				longitude: t.longitude,
 				speed: t.speed || 0,
@@ -3843,7 +3852,7 @@ async function routemateSyncTelemetry() {
 			// Load Route Map can update the truck pin live instead of waiting
 			// for the next /api/locations/latest poll cycle. Driver sockets
 			// join their driverRoom() on `register` (see io.on("connection")).
-			if (driverLower) io.to(driverRoom(driverLower)).emit("location-update", locationPayload);
+			if (driverLower) io.to(driverRoom(accountDriver)).emit("location-update", locationPayload);
 			if (activeLoadId) {
 				publicTrack.to("load:" + activeLoadId).emit("tracker-update", {
 					lat: t.latitude,
@@ -3877,10 +3886,18 @@ async function routemateSyncTelemetry() {
 			// two loads cannot both advance off one ping. Ordering only decides
 			// who gets asked first, and it stops early on the first advance so a
 			// single ping never writes two rows.
-			const candidates = orderGeofenceCandidates(
+			let candidates = orderGeofenceCandidates(
 				activeLoadsByDriver[driverName.trim().toLowerCase()] || [],
 				t.latitude, t.longitude,
 			);
+			// None under the ping's own spelling: the loads naming this driver
+			// across spacing whose stamped truck is this vehicle.
+			if (!candidates.length && spacingSheet) {
+				candidates = orderGeofenceCandidates(
+					geofenceCandidatesAcrossSpacing(spacingSheet, driverName, t.routemate_vehicle_id),
+					t.latitude, t.longitude,
+				);
+			}
 			if (!candidates.length) continue;
 			for (const cand of candidates) {
 				try {
@@ -12078,21 +12095,24 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 			// hardware GPS is more reliable than a phone left in the cab.
 			let rmCandidate = null;
 			try {
-				const rmRow = db.prepare(`
+				// The ELD ping comes from the truck the money stamps name for this
+				// load's driver (findTruckForDriverStamp(), with the active-assignment
+				// step), read by that truck's vehicle id, so the driver is matched
+				// across spacing as well as case. Whenever a truck names the driver
+				// case aside it is the truck whose unit the payload shows (read below
+				// without the assignment step). A spacing match counts only while no
+				// other account holds the name under another spelling.
+				const pingTruck = findTruckForDriverStamp(driverNameRaw, { activeAssignment: true });
+				const pingVehicleId = pingTruck ? String(pingTruck.routemate_vehicle_id || "").trim() : "";
+				const rmRow = pingVehicleId ? db.prepare(`
 					SELECT rt.latitude, rt.longitude, rt.speed, rt.location_date_ms
-					FROM truck_assignments ta
-					JOIN trucks t ON t.id = ta.truck_id
-					JOIN routemate_telemetry rt ON rt.routemate_vehicle_id = t.routemate_vehicle_id
-					WHERE ta.end_date = ''
-					  AND COALESCE(t.routemate_vehicle_id, '') <> ''
-					  AND TRIM(LOWER(ta.driver_name)) = ?
-					  AND rt.id = (
+					FROM routemate_telemetry rt
+					WHERE rt.id = (
 						SELECT MAX(rt2.id) FROM routemate_telemetry rt2
-						WHERE rt2.routemate_vehicle_id = t.routemate_vehicle_id
+						WHERE rt2.routemate_vehicle_id = ?
 						  AND rt2.dropped_reason = ''
 					  )
-					LIMIT 1
-				`).get(driverNameKey);
+				`).get(pingVehicleId) : null;
 				// Require a valid GPS fix — an ELD that lost satellites can return
 				// NULL/0 coords, which would otherwise pin the truck at the equator.
 				// Mirrors the rmHasFix check in /api/locations/latest.
@@ -32353,7 +32373,6 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// "Queued" — distinguish them in the fleet pill so dispatchers see the
 		// difference between "Howard is driving" and "Howard has work waiting."
 		const inProgressRe = /^(heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
-		const statusColIdx = jobTracking.headers.findIndex((h) => /status/i.test(h));
 		// A Driver cell that reads as a built-in property name counts toward a
 		// directory driver exactly as a blank one does (driverNameForTotals()) —
 		// the rule driverQueues above already follows.
@@ -32361,10 +32380,13 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			const name = (r[carrierDriverCol] || "").trim();
 			const nameNorm = normalizeDriverName(name);
 			// In-progression load only — excludes Dispatched and Assigned. Used
-			// to decide the "On Load" pill and the CurrentLoad ID surfacing.
-			const inProgressLoad = statusColIdx === -1 ? null : activeJobs.find(
+			// to decide the "On Load" pill and the CurrentLoad ID surfacing. The
+			// rows are objects keyed by header, so the status is read by the
+			// Status header's name (statusCol), as every other read here does; a
+			// numeric column index read nothing, and "On Load" never fired.
+			const inProgressLoad = !statusCol ? null : activeJobs.find(
 				(j) => driverCol && normalizeDriverName(driverNameForTotals(j[driverCol])) === nameNorm
-					&& inProgressRe.test((j[statusColIdx] || "").toString().trim()),
+					&& inProgressRe.test((j[statusCol] || "").toString().trim()),
 			);
 			const phoneCol = findCol(carrierDB.headers, /phone|contact/i);
 			const queue = driverQueues[nameNorm] || [];
@@ -32741,6 +32763,24 @@ function isBuiltInPropertyName(name) {
 	const names = isBuiltInPropertyName.names
 		|| (isBuiltInPropertyName.names = new Set(Object.getOwnPropertyNames(Object.prototype).map((n) => n.toLowerCase())));
 	return names.has(key);
+}
+
+// The spelling a Driver ACCOUNT holds for this name: the account whose driver
+// name matches it case aside, else the one account whose name matches it
+// through normalizeDriverName(). Two accounts matching through spacing, a
+// reserved name, or no match answer null, and the caller keeps its own
+// spelling. Notifications, live-update rooms and load responses are keyed by
+// the account's spelling, so a name typed or stored with other spacing reaches
+// the driver it names.
+function findDriverAccountSpelling(name) {
+	const trimmed = typeof name === "string" ? name.trim() : "";
+	if (!trimmed || isBuiltInPropertyName(trimmed)) return null;
+	const exact = db.prepare("SELECT driver_name FROM users WHERE role = 'Driver' AND LOWER(driver_name) = LOWER(?) ORDER BY id").get(trimmed);
+	if (exact) return exact.driver_name;
+	const key = normalizeDriverName(trimmed);
+	const hits = db.prepare("SELECT driver_name FROM users WHERE role = 'Driver' AND COALESCE(driver_name, '') <> ''").all()
+		.filter((u) => normalizeDriverName(u.driver_name) === key);
+	return hits.length === 1 ? hits[0].driver_name : null;
 }
 
 // ⚠️ THE ONE ANSWER TO "IS THIS NAME ALREADY IN USE?" — every path that
@@ -36073,7 +36113,13 @@ async function ingestLinxupPosition(pos) {
 
 	// Fan out live UI + geofence only for clean, linked fixes (same as the poller).
 	if (!droppedReason && driverName) {
-		const driverLower = driverName.trim().toLowerCase();
+		// The driver's own room, and the name the live payload gives the driver,
+		// are the spelling their account holds (findDriverAccountSpelling()), as on
+		// the Routemate path. The sheet rows are still matched under the ping's own
+		// spelling (pingDriverKey).
+		const accountDriver = findDriverAccountSpelling(driverName) || driverName;
+		const driverLower = accountDriver.trim().toLowerCase();
+		const pingDriverKey = driverName.trim().toLowerCase();
 		let activeLoadId = "";
 		// Every active load for this driver, most-progressed first — same reason
 		// as the Routemate path: queueing is supported, and first-match-by-row
@@ -36093,7 +36139,7 @@ async function ingestLinxupPosition(pos) {
 				// the Routemate path does (see routemateSyncTelemetry()).
 				const deletedIds = getDeletedLoadIds();
 				for (const r of (jt.data || [])) {
-					if ((r[driverCol] || "").toString().trim().toLowerCase() !== driverLower) continue;
+					if ((r[driverCol] || "").toString().trim().toLowerCase() !== pingDriverKey) continue;
 					const s = (r[statusCol] || "").toString().trim();
 					if (!activeRe.test(s)) continue;
 					const lid = (r[loadIdCol] || "").toString().trim();
@@ -36102,12 +36148,19 @@ async function ingestLinxupPosition(pos) {
 					if (!activeLoadId) activeLoadId = lid;
 					driverActiveLoads.push({ loadId: lid, status: s });
 				}
+				// None under the ping's own spelling: the loads naming this driver
+				// across spacing whose stamped truck is this vehicle. Geofence only;
+				// activeLoadId, the payload's and the tracker room's, stays as it was.
+				if (!driverActiveLoads.length) {
+					driverActiveLoads = geofenceCandidatesAcrossSpacing(
+						{ rows: jt.data || [], loadIdCol, statusCol, driverCol, deletedIds }, driverName, vehicleId);
+				}
 				driverActiveLoads = orderGeofenceCandidates(driverActiveLoads, pos.latitude, pos.longitude);
 			}
 		} catch { /* best-effort */ }
 		const headingDeg = parseRoutemateBearing(pos.bearing);
 		const locationPayload = {
-			driver: driverName,
+			driver: accountDriver,
 			latitude: pos.latitude,
 			longitude: pos.longitude,
 			speed: pos.speed || 0,
@@ -42806,6 +42859,46 @@ function orderGeofenceCandidates(candidates, latitude, longitude) {
 	});
 }
 
+// A pinging driver's active loads found ACROSS SPACING, for the geofence only.
+// Both location paths (routemateSyncTelemetry() and ingestLinxupPosition()) ask
+// it only when today's key, the ping's driver name trimmed and lower-cased,
+// finds no active load, so a case-aside match always wins. A row counts when its
+// Driver cell reads as the ping's driver through normalizeDriverName() AND the
+// truck the money stamps name for that cell (findTruckForDriverStamp(), with the
+// active-assignment step) is the vehicle that sent the ping. So a spacing match
+// is taken only while it agrees with the truck: a cell whose stamped truck is
+// another vehicle, or that the stamps give no truck (among them a name another
+// account holds under another spelling), is no candidate. Soft-deleted loads and
+// loads not in an active status are skipped, as the case-aside loops skip them.
+// `sheet` is { rows, loadIdCol, statusCol, driverCol, deletedIds }; the rows are
+// the cached Job Tracking rows and are only read. Returns [{ loadId, status }] in
+// sheet order, for orderGeofenceCandidates(). tryGeofenceAdvance() still decides
+// every transition, so a completion status is never written from here either.
+function geofenceCandidatesAcrossSpacing(sheet, driverName, vehicleId) {
+	const { rows, loadIdCol, statusCol, driverCol, deletedIds } = sheet || {};
+	const key = normalizeDriverName(typeof driverName === "string" ? driverName : "");
+	const vid = String(vehicleId == null ? "" : vehicleId).trim();
+	if (!key || !vid || !loadIdCol || !statusCol || !driverCol) return [];
+	const activeRe = /^(assigned|dispatched|heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
+	const vehicleBySpelling = new Map();   // a Driver cell -> its stamped truck's vehicle id
+	const found = [];
+	for (const sheetRow of rows || []) {
+		const cell = driverNameForTotals((sheetRow[driverCol] || "").toString()).trim();
+		if (!cell || normalizeDriverName(cell) !== key) continue;
+		const status = (sheetRow[statusCol] || "").toString().trim();
+		const lid = (sheetRow[loadIdCol] || "").toString().trim();
+		if (!lid || !activeRe.test(status)) continue;
+		if (deletedIds && deletedIds.has(lid.toLowerCase().replace(/^#/, ""))) continue;
+		if (!vehicleBySpelling.has(cell)) {
+			const truck = findTruckForDriverStamp(cell, { activeAssignment: true });
+			vehicleBySpelling.set(cell, truck ? String(truck.routemate_vehicle_id || "").trim() : "");
+		}
+		if (vehicleBySpelling.get(cell) !== vid) continue;
+		found.push({ loadId: lid, status });
+	}
+	return found;
+}
+
 // Pickup/drop-off coordinates for a load.
 //
 // WHY THIS EXISTS: geofencing was written in full — radius, hysteresis, guards,
@@ -43120,13 +43213,17 @@ async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, rou
 				: trigger === "In Transit"
 					? "Departed the pickup location — you're now in transit"
 					: "You have arrived at the delivery location") + distTxt;
+			// The driver's bell and room are keyed by the spelling their account
+			// holds (findDriverAccountSpelling()), so a ping whose assignment spells
+			// the name with other spacing still notifies the driver it names.
+			const accountDriver = findDriverAccountSpelling(driverName) || driverName;
 			const geoNotif = insertNotification.run(
-				driverName.trim().toLowerCase(), "geofence",
+				accountDriver.trim().toLowerCase(), "geofence",
 				`${trigger} — Load ${loadId}`,
 				geoMsg,
 				JSON.stringify({ loadId, status: trigger, distanceM })
 			);
-			io.to(driverRoom(driverName)).emit("geofence-trigger", {
+			io.to(driverRoom(accountDriver)).emit("geofence-trigger", {
 				loadId, status: trigger, distanceM,
 				notificationId: geoNotif.lastInsertRowid,
 			});
@@ -43186,34 +43283,65 @@ function classifyMovement(loc) {
 // GET /api/locations/latest — Latest position per active driver with ETA
 app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
+		// Every driver-keyed map in this route files an entry under the driver's
+		// name through normalizeDriverName() and, inside that, under the spelling
+		// it was stored with, trimmed and lower-cased (fileByDriver()). A lookup
+		// (readByDriver()) takes the entry stored under the name's own spelling,
+		// else the ONE spelling that reads as the same name, so a driver whose
+		// assignment, ELD truck or sheet rows spell the name with other spacing
+		// still gets their GPS, truck and loads. Two such spellings answer
+		// nothing: a spacing match cannot tell which of them is this driver. Both
+		// levels are null-prototype objects.
+		const spellingOf = (name) => (typeof name === "string" ? name : "").trim().toLowerCase();
+		const fileByDriver = (map, name) => {
+			const key = normalizeDriverName(typeof name === "string" ? name : "");
+			return map[key] || (map[key] = Object.create(null));
+		};
+		const readByDriver = (map, name) => {
+			const spellings = map[normalizeDriverName(typeof name === "string" ? name : "")];
+			if (!spellings) return undefined;
+			const own = spellingOf(name);
+			if (own in spellings) return spellings[own];
+			const others = Object.keys(spellings);
+			return others.length === 1 ? spellings[others[0]] : undefined;
+		};
+
 		// Phone GPS retired 2026-05-13 — locations come exclusively from Routemate
 		// telemetry. Start with one placeholder per carrier driver and let the
-		// overlay below fill in fresh ELD positions.
-		let allDriverNames = [];
+		// overlay below fill in fresh ELD positions. One per driver: directory
+		// rows whose names read as one name through normalizeDriverName() share a
+		// placeholder, named by the oldest row's spelling, trimmed. The list keeps
+		// the order the directory is read in.
+		let dirDrivers = [];
 		try {
-			const dirDrivers = db.prepare("SELECT driver_name FROM drivers_directory").all();
-			for (const d of dirDrivers) {
-				if (d.driver_name) allDriverNames.push(d.driver_name);
-			}
+			dirDrivers = db.prepare("SELECT id, driver_name FROM drivers_directory").all();
 		} catch { /* silent */ }
+		const oldestSpelling = new Map();
+		for (const d of dirDrivers) {
+			const name = typeof d.driver_name === "string" ? d.driver_name.trim() : "";
+			const key = normalizeDriverName(name);
+			if (!key) continue;
+			const had = oldestSpelling.get(key);
+			if (!had || d.id < had.id) oldestSpelling.set(key, { id: d.id, name });
+		}
 
 		const locations = [];
 		const seen = new Set();
-		for (const name of allDriverNames) {
-			if (!seen.has(name.toLowerCase())) {
-				locations.push({
-					driver: name,
-					latitude: null,
-					longitude: null,
-					speed: 0,
-					heading: 0,
-					timestamp: null,
-					loadId: '',
-					fuelPct: null,
-					noGps: true,
-				});
-				seen.add(name.toLowerCase());
-			}
+		for (const d of dirDrivers) {
+			const key = normalizeDriverName(typeof d.driver_name === "string" ? d.driver_name : "");
+			if (!key || seen.has(key)) continue;
+			seen.add(key);
+			locations.push({
+				driver: oldestSpelling.get(key).name,
+				latitude: null,
+				longitude: null,
+				speed: 0,
+				heading: 0,
+				timestamp: null,
+				loadId: '',
+				fuelPct: null,
+				noGps: true,
+			});
 		}
 
 		// Overlay Routemate telemetry. When a driver's currently-assigned truck
@@ -43231,7 +43359,7 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 			const cutoff = Date.now() - STALE_SHOW_MS;
 			const routemateRows = db.prepare(`
 				SELECT
-					LOWER(ta.driver_name) AS driver_lc,
+					ta.driver_name AS driver_name,
 					rt.latitude, rt.longitude, rt.speed, rt.bearing,
 					rt.fuel_pct,
 					rt.location_date_ms,
@@ -43261,15 +43389,16 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 				  )
 				  AND rt.location_date_ms > ?
 			`).all(cutoff);
-			// Driver-keyed maps in this route are null-prototype objects.
+			// Driver-keyed maps in this route are null-prototype objects, filed and
+			// read through fileByDriver() / readByDriver() above.
 			const routemateByDriver = Object.create(null);
 			for (const r of routemateRows) {
-				routemateByDriver[r.driver_lc] = r;
+				if (!spellingOf(r.driver_name)) continue;
+				fileByDriver(routemateByDriver, r.driver_name)[spellingOf(r.driver_name)] = r;
 			}
 			const now = Date.now();
 			for (const loc of locations) {
-				const key = (loc.driver || "").toLowerCase();
-				const rm = routemateByDriver[key];
+				const rm = readByDriver(routemateByDriver, loc.driver);
 				// Only overlay Routemate when telemetry has a valid fix.
 				// A linked truck whose ELD lost GPS sends NULL/0 lat/lng — letting that
 				// through would clobber phone GPS and pin the truck at the equator.
@@ -43322,7 +43451,7 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 		const assignmentByDriver = Object.create(null);
 		try {
 			const assignRows = db.prepare(`
-				SELECT LOWER(ta.driver_name) AS driver_lc,
+				SELECT ta.driver_name AS driver_name,
 				       t.id AS truck_id,
 				       t.unit_number,
 				       CASE WHEN COALESCE(t.routemate_vehicle_id, '') = ''
@@ -43332,7 +43461,8 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 				WHERE ta.end_date = ''
 			`).all();
 			for (const r of assignRows) {
-				assignmentByDriver[r.driver_lc] = {
+				if (!spellingOf(r.driver_name)) continue;
+				fileByDriver(assignmentByDriver, r.driver_name)[spellingOf(r.driver_name)] = {
 					truckId: r.truck_id,
 					unit: r.unit_number || "",
 					hasEld: !!r.has_eld,
@@ -43384,7 +43514,9 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 				// Matches /api/dashboard's activeStatuses so the Tracking panel and Dashboard KPI agree on what counts as active.
 				const workingRe = /^(heading to shipper|in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading)$/i;
 				// A Driver cell that reads as a built-in property name is skipped like a
-				// blank one (driverNameForTotals()); both maps are null-prototype.
+				// blank one (driverNameForTotals()); both maps are null-prototype and
+				// filed by fileByDriver(), so a Driver cell with other spacing than the
+				// directory's still reaches its driver (readByDriver()).
 				const driverActiveLoadMap = Object.create(null);   // driver → first active loadId (for override, includes dispatched)
 				const driverActiveLoadsMap = Object.create(null);  // driver → working loads for panel (matches /api/dashboard activeStatuses)
 				if (statusCol && driverCol && loadIdCol) {
@@ -43395,12 +43527,13 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 						const status = (obj[statusCol] || "").trim();
 						const lid = (obj[loadIdCol] || "").trim().replace(/^#/, "");
 						if (!name || !lid) continue;
-						const key = name.toLowerCase();
+						const spelling = spellingOf(name);
 						if (activeRe.test(status)) {
-							driverActiveLoadMap[key] = lid;
+							fileByDriver(driverActiveLoadMap, name)[spelling] = lid;
 						}
 						if (workingRe.test(status)) {
-							if (!driverActiveLoadsMap[key]) driverActiveLoadsMap[key] = [];
+							const loadsBySpelling = fileByDriver(driverActiveLoadsMap, name);
+							if (!loadsBySpelling[spelling]) loadsBySpelling[spelling] = [];
 							const rawPickup  = pickupAddrCol  ? (obj[pickupAddrCol]  || "") : "";
 							const rawDropoff = dropoffAddrCol ? (obj[dropoffAddrCol] || "") : "";
 								// Two-line address parts for the tracking panel — split once per side.
@@ -43431,7 +43564,7 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 									if (!entry.destLat && lc.dest_lat) { entry.destLat = lc.dest_lat; entry.destLng = lc.dest_lng; }
 								}
 							}
-							driverActiveLoadsMap[key].push(entry);
+							loadsBySpelling[spelling].push(entry);
 						}
 					}
 				}
@@ -43447,11 +43580,10 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					loc.etaMinutes = null;
 					loc.distanceMiles = null;
 
-					const driverKey = (loc.driver || "").toLowerCase();
-					loc.activeLoads = driverActiveLoadsMap[driverKey] || [];
-					loc.assignedTruck = assignmentByDriver[driverKey] || null;
+					loc.activeLoads = readByDriver(driverActiveLoadsMap, loc.driver) || [];
+					loc.assignedTruck = readByDriver(assignmentByDriver, loc.driver) || null;
 
-					const sheetActiveLoad = driverActiveLoadMap[driverKey];
+					const sheetActiveLoad = readByDriver(driverActiveLoadMap, loc.driver);
 					if (sheetActiveLoad && loc.loadId !== sheetActiveLoad && loadMap[sheetActiveLoad]) {
 						loc.loadId = sheetActiveLoad;
 					}
@@ -45560,7 +45692,9 @@ function maybeAlertLowFuel(vehicleId, driverName) {
 
 		const est = reading.fuelSource === "carried" ? " (estimated — fuel sensor not reporting)" : "";
 		const driverMsg = `About ${planning} miles of fuel left${est}. Plan a fuel stop now.`;
-		const key = String(driverName).trim().toLowerCase();
+		// The driver's bell and room: the spelling their account holds
+		// (findDriverAccountSpelling()), else the name the ping carried.
+		const key = String(findDriverAccountSpelling(driverName) || driverName).trim().toLowerCase();
 		const notif = insertNotification.run(
 			key, "fuel-low",
 			`Low fuel — ${truck.unit || "your truck"}`,

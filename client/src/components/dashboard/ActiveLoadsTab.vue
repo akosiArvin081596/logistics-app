@@ -887,7 +887,11 @@ async function openDetail(job) {
   const dc = props.headers.find(h => /driver/i.test(h)); const dn = dc ? (job[dc] || '').trim() : ''
   const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (job[lc] || '').trim() : ''
   const p = []
-  if (dn) p.push(api.get('/api/locations/latest').then(d => { const l = (d.locations||[]).find(x => x.driver.toLowerCase() === dn.toLowerCase() && x.latitude); if (l) selectedDriverPosition.value = { latitude: l.latitude, longitude: l.longitude, source: l.source || '', lastPingAge: l.lastPingAge != null ? l.lastPingAge : null } }).catch(() => {}))
+  // The panel names each driver by the directory's spelling, the sheet's Driver
+  // cell may space or case it otherwise: both are compared as the server's
+  // normalizeDriverName() does.
+  const normDriver = s => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ')
+  if (dn) p.push(api.get('/api/locations/latest').then(d => { const l = (d.locations||[]).find(x => normDriver(x.driver) === normDriver(dn) && x.latitude); if (l) selectedDriverPosition.value = { latitude: l.latitude, longitude: l.longitude, source: l.source || '', lastPingAge: l.lastPingAge != null ? l.lastPingAge : null } }).catch(() => {}))
   if (lid) p.push(api.get(`/api/documents/${encodeURIComponent(lid)}`).then(r => { loadDocs.value = r.documents || [] }).catch(() => {}))
   if (lid) p.push(api.get(`/api/load-ratings/${encodeURIComponent(lid)}`).then(r => { loadRating.value = r.rating || 0 }).catch(() => {}))
   const hasLatCol = props.headers.some(h => /origin.*lat|pickup.*lat|dest.*lat|drop.*lat/i.test(h))
