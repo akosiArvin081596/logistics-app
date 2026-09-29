@@ -13088,8 +13088,9 @@ function registerApplicationVehicles(vehicles, appId, userId) {
 // the record and the trucks, so a refused or failed acceptance leaves the
 // application as it was. An application whose investors record already exists
 // (it was accepted before) is simply marked Accepted again; nothing is created.
-// The username is derived from the legal name, with a number appended while it
-// is taken, so it never collides.
+// The username is derived from the legal name, else the email, else the
+// application id, so it is never empty, with a number appended while it is
+// taken, so it never collides.
 app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const { status } = req.body;
@@ -13162,11 +13163,19 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 				});
 			}
 
-			// Auto-create investor user account
-			let baseUsername = fullName.toLowerCase().replace(/\s+/g, ".").replace(/[^a-z0-9.]/g, "");
+			// Auto-create investor user account. The username is folded to a-z, 0-9
+			// and "." (whitespace becomes ".") from the legal name, else the email's
+			// local part, else investor<application id>: the first that keeps a
+			// letter or a digit. A legal name in another script, or of punctuation
+			// only, keeps none, and used to become "" (which the sign-in form
+			// refuses), then "1", or ".". No "@", so a username never reads as
+			// another account's email at sign-in. A number is appended while it is
+			// taken, compared as POST /api/users compares (trimmed, any case).
+			const foldUsername = (s) => String(s || "").toLowerCase().replace(/\s+/g, ".").replace(/[^a-z0-9.]/g, "");
+			const baseUsername = [fullName, email.split("@")[0]].map(foldUsername).find((u) => /[a-z0-9]/.test(u)) || `investor${appId}`;
 			let username = baseUsername;
 			let suffix = 1;
-			while (db.prepare("SELECT id FROM users WHERE LOWER(username)=LOWER(?)").get(username)) {
+			while (db.prepare("SELECT id FROM users WHERE LOWER(TRIM(username)) = LOWER(?)").get(username)) {
 				username = `${baseUsername}${suffix}`;
 				suffix++;
 			}
