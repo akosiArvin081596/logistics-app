@@ -28757,6 +28757,10 @@ function buildSheetUpdateAudit(payload) {
 		// opened, and the one the row holds ("" for none).
 		...(payload.expectedLoadId != null ? { expectedLoadId: cap(payload.expectedLoadId, 120) } : {}),
 		...(payload.foundLoadId != null ? { foundLoadId: cap(payload.foundLoadId, 120) } : {}),
+		// Where `changed[].from` was read. Absent, as on every record but one: the
+		// row as stored. "baseline": the row as the caller's form opened it, on
+		// that same ROW_MOVED refusal, where the row as stored holds another load.
+		...(payload.fromBasis ? { fromBasis: cap(payload.fromBasis, 20) } : {}),
 		...(droppedForCount > 0 ? { changesOmitted: droppedForCount } : {}),
 		...(payload.periods && payload.periods.length ? { periods: payload.periods } : {}),
 		...(payload.code ? { code: payload.code } : {}),
@@ -28846,13 +28850,14 @@ function sheetRowCellWrites(a1, rowIndex, before, after) {
 // the row as read (`before`), and sheetRowCellWrites() then writes none of it.
 //
 // ⚠️ WHY THE ROW AS READ IS NOT ENOUGH. The Active Loads editor sends every
-// column from a dashboard view that can be ~60 s old (the Job Tracking cache).
-// A cell that changed on the sheet since that view loaded (another user, n8n,
-// or a formula whose shown value moved) differs from the row as read, so the
-// diff alone writes the stale copy back, and over a formula cell that flattens
-// the formula. With a baseline, a cell is written only when the user edited it
-// (sent differs from the baseline) and the sheet does not already hold it (sent
-// differs from the row as read).
+// column from a dashboard view that can be ~60 s old (the Job Tracking cache),
+// and the Data Manager's inline edit keeps the values it opened with through
+// its table's live reloads. A cell that changed on the sheet since then
+// (another user, n8n, or a formula whose shown value moved) differs from the
+// row as read, so the diff alone writes the stale copy back, and over a formula
+// cell that flattens the formula. With a baseline, a cell is written only when
+// the user edited it (sent differs from the baseline) and the sheet does not
+// already hold it (sent differs from the row as read).
 //
 // Compared as sheetRowCellWrites() compares: null and absent read as "",
 // anything else as its String(). Mutates `values`, like
@@ -28865,8 +28870,9 @@ function sheetRowCellWrites(a1, rowIndex, before, after) {
 //
 // ⚠️ IT ALSO SETS THE LOAD ID CELL TO THE ROW AS READ, because the form never
 // edits it, so once it has run nothing can tell that the row number now holds
-// another load. rowMovedRefusal() compares the baseline's Load ID with the row
-// as read, and PUT /api/data/:rowIndex runs it first.
+// another load. On Job Tracking, PUT /api/data/:rowIndex runs rowMovedRefusal()
+// first, which compares the baseline's Load ID with the row as read. On any
+// other tab nothing does: see baselineApplies().
 function restoreUntouchedCells(before, values, baseline) {
 	if (!baselineApplies(values, baseline)) return false;
 	const b = Array.isArray(before) ? before : [];
@@ -28880,8 +28886,17 @@ function restoreUntouchedCells(before, values, baseline) {
 
 // Whether a `baseline` sent beside `values` is used at all: an array of exactly
 // values.length cells. One test for restoreUntouchedCells() and
-// rowMovedRefusal(), so a baseline is never applied without the identity check
-// that has to come with it.
+// rowMovedRefusal(), so the two never disagree about whether a save carries a
+// baseline.
+//
+// ⚠️ A BASELINE IS APPLIED WITHOUT THE IDENTITY CHECK ON EVERY TAB BUT JOB
+// TRACKING. PUT /api/data/:rowIndex runs rowMovedRefusal() only on the tabs the
+// guards cover (Job Tracking), and there it has nothing to compare on a layout
+// with no load-id column. Everywhere else a usable baseline still narrows the
+// write to the cells the form edited, with no check that the row number still
+// holds the row the form opened: after a sort, or a row deleted above, those
+// cells are written onto whichever row now has that number. Without a baseline
+// there, every cell of the form's copy that differs from that row is written.
 function baselineApplies(values, baseline) {
 	return Array.isArray(values) && Array.isArray(baseline) && baseline.length === values.length;
 }
@@ -28893,20 +28908,23 @@ function baselineApplies(values, baseline) {
 //
 // ⚠️ A ROW NUMBER IS A POSITION. The Active Loads editor holds the row number of
 // the view its modal opened from (the Job Tracking cache, up to ~60 s old, for
-// as long as the modal stays open), and sorting the sheet, or deleting a row
-// above, since then points that number at another load. Without a baseline the
-// save sends the opened load's Load ID, which differs from the row as read, so
-// the DUPLICATE_LOAD check judges it as a Load ID change. With one,
-// restoreUntouchedCells() sets that cell to the row as read and no later check
-// can see the difference, so the edited cells would be written onto the other
-// load. This runs before it.
+// as long as the modal stays open), the Data Manager's inline edit holds its
+// row number through the table's live reloads, and sorting the sheet, or
+// deleting a row above, since then points that number at another load. Without
+// a baseline the save sends the opened load's Load ID, which differs from the
+// row as read, so the DUPLICATE_LOAD check judges it as a Load ID change. With
+// one, restoreUntouchedCells() sets that cell to the row as read and no later
+// check can see the difference, so the edited cells would be written onto the
+// other load. This runs before it.
 //
 // Compared with normalizeLoadId(), as the DUPLICATE_LOAD check and
 // deduplicateLoads() compare load ids: "#111" and "111" are one load here, as in
 // every total. Identity is confirmed only by a Load ID present on both sides and
 // equal. Blank on either side, or on both, is refused, because a row without a
 // Load ID cannot be told from another. The dashboard serves no row without a
-// Load ID, so the editor never opens one.
+// Load ID, so the Active Loads editor never opens one. The Data Manager serves
+// every row, so its save of a Job Tracking row with no Load ID is always refused
+// here (an empty `expectedLoadId`), and that page says the row needs a Load ID.
 //
 // Nothing to compare (null; the save is judged as it was before this check): no
 // usable baseline (baselineApplies()), or no load-id column in `headers`. The
@@ -30055,6 +30073,9 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 					code: "ROW_MOVED",
 					expectedLoadId: moved.body.expectedLoadId,
 					foundLoadId: moved.body.foundLoadId,
+					// `changed[].from` is the form's baseline here, not the row as
+					// stored (which holds another load): say so on the record.
+					fromBasis: "baseline",
 				}), "ROW_MOVED"));
 				// The view that sent this row number is out of date, and the cached
 				// Job Tracking rows may be too: drop them, so the next dashboard read

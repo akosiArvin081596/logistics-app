@@ -116,6 +116,7 @@ import { useSheetsStore } from '../stores/sheets'
 import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
 import { useSocket } from '../composables/useSocket'
+import { saveRowEdit } from '../lib/rowEdit'
 import SheetTabs from '../components/data-manager/SheetTabs.vue'
 import DataTable from '../components/data-manager/DataTable.vue'
 import AddRowModal from '../components/data-manager/AddRowModal.vue'
@@ -199,10 +200,16 @@ function handleCancel() {
   store.editingRow = null
 }
 
-async function handleSave(rowIndex, values) {
+// DataTable's Save: the inputs' values, and the baseline and headers the edit
+// opened with (lib/rowEdit.js). A row that changed while its edit was open
+// (409 ROW_MOVED or SHEET_CHANGED, or the sheet's columns) closes the edit and
+// reloads the table, with this page's own message: the server's points at the
+// dashboard.
+async function handleSave(rowIndex, values, baseline, headers) {
   try {
-    await store.saveRow(rowIndex, values)
-    toast('Row updated', 'success')
+    const outcome = await saveRowEdit(store, { rowIndex, values, baseline, headers })
+    if (outcome.saved) toast('Row updated', 'success')
+    else toast(outcome.message, 'error')
   } catch (err) {
     // Same reasoning as confirmDelete below: an edit to a finalized month comes
     // back as 409 PERIOD_FINALIZED naming the month AND the money-bearing column

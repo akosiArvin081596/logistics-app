@@ -3,21 +3,22 @@
     <table>
       <thead>
         <tr>
-          <th v-for="h in headers" :key="h">{{ h }}</th>
+          <!-- Keyed by position: a tab can repeat a header name, blank included. -->
+          <th v-for="(h, i) in headers" :key="i">{{ h }}</th>
           <th>Actions</th>
         </tr>
       </thead>
       <tbody>
         <tr v-for="row in data" :key="row._rowIndex">
-          <!-- Data cells -->
-          <td v-for="h in headers" :key="h">
-            <template v-if="editingRow === row._rowIndex">
+          <!-- Data cells. An input edits its column by position (editValues[i]). -->
+          <td v-for="(h, i) in headers" :key="i">
+            <template v-if="isEditing(row)">
               <!-- Driver column: render select -->
               <select
                 v-if="isDriverField(h) && driverList.length && props.currentSheet !== 'Carrier Database'"
                 :data-header="h"
-                :value="editValues[h]"
-                @input="editValues[h] = $event.target.value"
+                :value="editValues[i]"
+                @input="editValues[i] = $event.target.value"
               >
                 <option value="">Select driver</option>
                 <option v-for="d in driverList" :key="d" :value="d">{{ d }}</option>
@@ -26,8 +27,8 @@
               <input
                 v-else
                 :data-header="h"
-                :value="editValues[h]"
-                @input="editValues[h] = $event.target.value"
+                :value="editValues[i]"
+                @input="editValues[i] = $event.target.value"
               />
             </template>
             <template v-else>{{ displayCell(row[h]) }}</template>
@@ -35,7 +36,7 @@
 
           <!-- Action buttons -->
           <td class="actions">
-            <template v-if="editingRow === row._rowIndex">
+            <template v-if="isEditing(row)">
               <button class="btn btn-primary btn-sm" @click="handleSave(row._rowIndex)">Save</button>
               <button class="btn btn-secondary btn-sm" @click="$emit('cancel')">Cancel</button>
             </template>
@@ -59,7 +60,8 @@
 </template>
 
 <script setup>
-import { reactive, watch } from 'vue'
+import { ref, watch } from 'vue'
+import { openRowEdit, rowEditBody } from '../../lib/rowEdit'
 
 const props = defineProps({
   headers: { type: Array, required: true },
@@ -70,9 +72,25 @@ const props = defineProps({
   userRole: { type: String, default: '' },
 })
 
+// `save` carries (rowIndex, values, baseline, headers): the inputs' values and
+// the row's values as the edit opened them, one per column of `headers`, the
+// columns the edit opened with (lib/rowEdit.js).
 const emit = defineEmits(['edit', 'save', 'cancel', 'delete'])
 
-const editValues = reactive({})
+// The open edit (openRowEdit()): the row number it opened on, the headers, and
+// `baseline`. Taken when the edit opens and kept through the table's live
+// reloads, which can put another row under the same row number; never rebuilt
+// from `data`, where it would be the new row compared with itself.
+const edit = ref(null)
+// The inputs' values, one per column by position, starting as the baseline.
+const editValues = ref([])
+
+// The row this table's edit is open on. A row number set from elsewhere (the
+// duplicates table's Edit) opens no inputs here: they were never filled from
+// that row.
+function isEditing(row) {
+  return props.editingRow === row._rowIndex && !!edit.value && edit.value.rowIndex === row._rowIndex
+}
 
 function isDriverField(headerName) {
   return /^driver$/i.test(headerName.trim())
@@ -89,26 +107,25 @@ function displayCell(val) {
 }
 
 function handleEdit(row) {
-  // Pre-populate edit values from the row data
-  props.headers.forEach((h) => {
-    editValues[h] = row[h] || ''
-  })
+  edit.value = openRowEdit(props.headers, row)
+  editValues.value = edit.value.baseline.slice()
   emit('edit', row._rowIndex)
 }
 
 function handleSave(rowIndex) {
-  const values = props.headers.map((h) => editValues[h] || '')
-  emit('save', rowIndex, values)
+  const body = rowEditBody(edit.value, rowIndex, editValues.value)
+  if (!body) return
+  emit('save', rowIndex, body.values, body.baseline, edit.value.headers.slice())
 }
 
-// Reset edit values when editingRow changes externally (e.g., cancel)
+// The edit ends when the page moves off its row: a save, Cancel, a page, tab
+// or search change (editingRow null), or an Edit elsewhere.
 watch(
   () => props.editingRow,
-  (newVal) => {
-    if (newVal === null) {
-      props.headers.forEach((h) => {
-        editValues[h] = ''
-      })
+  (rowIndex) => {
+    if (edit.value && edit.value.rowIndex !== rowIndex) {
+      edit.value = null
+      editValues.value = []
     }
   }
 )

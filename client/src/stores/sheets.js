@@ -80,14 +80,16 @@ export const useSheetsStore = defineStore('sheets', {
     },
 
     // Returns the server's response. The Data Manager is Super Admin only. It
-    // sends every column, and the server writes only the cells that differ from
-    // the row as it reads it, so a column sent back as shown is not rewritten.
-    // No `baseline` is sent (the Active Loads editor sends one), so a cell that
-    // changed on the sheet since this view loaded is written back as shown here.
-    async saveRow(rowIndex, values) {
+    // sends every column, and `baseline`, the row's values as its edit opened
+    // them, in the same order (lib/rowEdit.js). The server writes only the cells
+    // edited since then, so a cell that changed on the sheet meanwhile is left
+    // as it is, and on Job Tracking it refuses a row that no longer holds the
+    // load the edit opened (409 ROW_MOVED). A save without a baseline is judged
+    // against the row as read, cell by cell.
+    async saveRow(rowIndex, values, baseline) {
       const result = await api.put(
         `/api/data/${rowIndex}?sheet=${encodeURIComponent(this.currentSheet)}`,
-        { values }
+        { values, baseline }
       )
       this.editingRow = null
       await this.loadData()

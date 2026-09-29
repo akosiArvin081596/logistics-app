@@ -14,11 +14,11 @@
 //
 // THE BASELINE. That still wrote a cell the user never touched when the sheet
 // had changed under the editor's view, which can be ~60 s old: the stale copy
-// differs from the row as read. So the Active Loads editor now also sends
-// `baseline`, the row as its modal opened it, and PUT /api/data/:rowIndex sets
-// every cell sent equal to its baseline back to the row as read
-// (restoreUntouchedCells()) before any guard judges the row. A save without a
-// baseline, or with a malformed one, is judged as before.
+// differs from the row as read. So the Active Loads editor and the Data Manager
+// now also send `baseline`, the row as the form opened it, and
+// PUT /api/data/:rowIndex sets every cell sent equal to its baseline back to the
+// row as read (restoreUntouchedCells()) before any guard judges the row. A save
+// without a baseline, or with a malformed one, is judged as before.
 //
 // THE ROW THAT MOVED. A row number is a position: after a sort, or a row
 // deleted above, the editor's row number holds another load. The restore sets
@@ -26,6 +26,9 @@
 // edit would be written onto that other load. So on Job Tracking the baseline's
 // Load ID is compared with the row as read first (rowMovedRefusal()), and a
 // mismatch, or a Load ID blank on either side, is 409 ROW_MOVED, nothing written.
+// Its audit record reads `changed[].from` off the baseline, not the row as
+// stored (which holds another load), and says so with `fromBasis: "baseline"`,
+// which no other record carries (§3b).
 //
 // WHAT RUNS. Both routes are lifted whole out of server.js and run against a
 // fake sheet that behaves as the real one does where it matters here: it stores
@@ -43,11 +46,15 @@
 //      another load: 409 ROW_MOVED with a baseline, DUPLICATE_LOAD without
 //   §2 PUT /api/load/:loadId
 //   §3 sheetRowCellWrites(), restoreUntouchedCells() and rowMovedRefusal() on
-//      their own, where each route calls them, and the Active Loads editor
-//      sending its baseline
+//      their own, where each route calls them, the audit's fromBasis marker,
+//      and the Active Loads editor sending its baseline (the Data Manager's
+//      has its own runner, scripts/test-data-manager-row-edit.mjs)
+//   §3b every audit record §1, §1b and §2 wrote: fromBasis on the ROW_MOVED
+//      refusals alone
 //   §4 MUTANTS: back to a whole-row write (it must fail checks in §1 and in
 //      §2); the baseline ignored (it must fail checks in §1b); the identity
-//      check removed (it must fail checks in §1b).
+//      check removed (it must fail checks in §1b); the ROW_MOVED audit
+//      unmarked (§1b); every audit record marked (§3b).
 //
 // No network, no database, no sheet.
 //   node scripts/test-row-save-cell-writes.js     # exits 1 on any failure
@@ -268,6 +275,9 @@ function fakeSheet(stored, { batchGetFails = false } = {}) {
 	return { getSheets: async () => ({ spreadsheets: { values } }), rows, calls };
 }
 
+// Every audit record a lifted route writes, in order, for the fromBasis sweep
+// (§3b). The run empties it before the mutants.
+const AUDIT_LOG = [];
 // One lifted route over one fake sheet.
 function mount(routeSrc, helpers, stored, { guarded = true, title = "Job Tracking", batchGetFails = false } = {}) {
 	const sheet = fakeSheet(stored, { batchGetFails });
@@ -299,8 +309,8 @@ function mount(routeSrc, helpers, stored, { guarded = true, title = "Job Trackin
 			return null;
 		},
 		sheetAuditWithCode: (d, code) => `${d} [${code}]`,
-		logAudit: (req, action, entity, entityId, details) => { audits.push({ action, entityId, details }); },
-		logAuditRefusal: (req, action, entity, entityId, details) => { audits.push({ action, entityId, details }); },
+		logAudit: (req, action, entity, entityId, details) => { audits.push({ action, entityId, details }); AUDIT_LOG.push({ action, details }); },
+		logAuditRefusal: (req, action, entity, entityId, details) => { audits.push({ action, entityId, details }); AUDIT_LOG.push({ action, details }); },
 		jtCacheInvalidate: () => { invalidations++; },
 		console: { error() {}, log() {}, warn() {} },
 	};
@@ -557,8 +567,10 @@ async function baselineSection(helpers, routeSrc = DATA_PUT_SRC) {
 
 	// The row moved under the view: the editor opened load 111 at row 2, then
 	// the sheet was sorted, so row 2 now holds load 222 and load 111 is on row 3
-	// (SHIFTED()). The user sets the payment to 2500.
-	const SHIFTED = () => [HEADERS.slice(), storedRow({ "Load ID": "222", Details: "Dry van", "Location Link": "" }), storedRow()];
+	// (SHIFTED()). The user sets the payment to 2500. Load 222 has its own
+	// payment, unlike the one the form opened, so an audit's `from` says which
+	// of the two it was read from.
+	const SHIFTED = () => [HEADERS.slice(), storedRow({ "Load ID": "222", Details: "Dry van", "Location Link": "", Payment: "$950.00" }), storedRow()];
 	const payment = (opened = DISPLAYED()) => edit("Payment", "2500", opened);
 	// The refusal's audit details: the JSON before the stubbed " [CODE]" suffix.
 	const auditOf = (app) => {
@@ -581,6 +593,8 @@ async function baselineSection(helpers, routeSrc = DATA_PUT_SRC) {
 		t("§1b ...the audit names both loads and the edit asked for (as the form opened it, and as sent)",
 			d && [d.outcome, d.code, d.expectedLoadId, d.foundLoadId, d.changed.map((c) => [c.column, c.from, c.to]), d.guardedColumns],
 			["blocked", "ROW_MOVED", "111", "222", [["Payment", "$1,800.00", "2500"]], ["Payment"]]);
+		t("§1b ...its `from` is the form's baseline ($1,800.00), not row 2 as stored ($950.00, load 222's), and the record says so: fromBasis \"baseline\"",
+			d && [d.fromBasis, d.changed[0].from, display(app.rows[1][IDX["Payment"]])], ["baseline", "$1,800.00", "$950.00"]);
 		t("§1b ...and the cached Job Tracking rows are dropped, so the next dashboard read shows the rows where they are now",
 			app.invalidations(), 1);
 	}
@@ -589,6 +603,9 @@ async function baselineSection(helpers, routeSrc = DATA_PUT_SRC) {
 		const r = await app.run("Super Admin", P, { values: payment() });
 		t("§1b the same save without a baseline (today's behaviour): 409 DUPLICATE_LOAD, load 111 found on row 3, nothing written",
 			[r.code, (r.body || {}).code, (r.body || {}).conflictRowIndex, app.calls.length, app.rows], [409, "DUPLICATE_LOAD", 3, 0, SHIFTED()]);
+		const d = auditOf(app);
+		t("§1b ...its audit reads `from` off row 2 as stored (load 222's $950.00), and carries no fromBasis",
+			d && [d.code, (d.changed.find((c) => c.column === "Payment") || {}).from, "fromBasis" in d], ["DUPLICATE_LOAD", "$950.00", false]);
 	}
 	{
 		const app = mount(routeSrc, helpers, STORED());
@@ -804,6 +821,25 @@ function helperSection(helpers) {
 				HELPER_SRC.restoreUntouchedCells.includes("if (!baselineApplies(values, baseline)) return false;"),
 				/normalizeLoadId\(baseline\[col\]\)[\s\S]*normalizeLoadId\(b\[col\]\)/.test(HELPER_SRC.rowMovedRefusal)], [true, true, true]);
 	}
+	// buildSheetUpdateAudit() marks a record whose `changed[].from` is not the row
+	// as stored: `fromBasis`, capped like every other field, and absent unless
+	// given. Only PUT /api/data/:rowIndex's ROW_MOVED refusal gives it, so every
+	// other record (create_sheet_row*, update_sheet_row, update_sheet_row_failed,
+	// every other refusal code, PUT /api/load/:loadId's) carries none.
+	{
+		const B = (extra) => JSON.parse(helpers.buildSheetUpdateAudit({ outcome: "blocked", sheet: "Job Tracking", rowIndex: 2, changed: [{ column: "Payment", index: 22, from: "$5", to: "$6", why: "x" }], ...extra }));
+		t("§3 buildSheetUpdateAudit(): fromBasis written when given, absent when not, capped at 20 characters",
+			[B({ fromBasis: "baseline" }).fromBasis, "fromBasis" in B({}), "fromBasis" in B({ fromBasis: "" }), B({ fromBasis: "x".repeat(25) }).fromBasis],
+			["baseline", false, false, `${"x".repeat(20)}…[truncated]`]);
+		const outside = decomment(SRC).replace(decomment(HELPER_SRC.buildSheetUpdateAudit), "");
+		const route = decomment(DATA_PUT_SRC);
+		const from = route.indexOf("const moved = rowMovedRefusal(headers, rowIndex, before, values, baseline);");
+		const to = route.indexOf("return res.status(409).json(moved.body);");
+		const at = route.indexOf('fromBasis: "baseline",');
+		t("§3 server.js: fromBasis is passed at one call only, PUT /api/data/:rowIndex's ROW_MOVED audit",
+			[outside.split(/\bfromBasis\b/).length - 1, route.split(/\bfromBasis\b/).length - 1, from > 0 && from < at && at < to], [1, 1, true]);
+	}
+
 	// The Active Loads editor records the row its modal opened with and sends it
 	// as `baseline`, in the order of `values`: a column it did not edit is sent
 	// as opened in both, so the server leaves it as the sheet holds it.
@@ -838,6 +874,33 @@ function helperSection(helpers) {
 }
 
 // ---------------------------------------------------------------------------
+// §3b Every audit record §1, §1b and §2 wrote, parsed: `fromBasis` is "baseline"
+// on each ROW_MOVED refusal, whose `changed[].from` is the form's baseline, and
+// absent on every other record, whose `from` is the row as stored. The sweep
+// must have seen both kinds, or it proves nothing.
+// ---------------------------------------------------------------------------
+function fromBasisSweep(log) {
+	const { results, t } = collector();
+	const records = log.map((a) => {
+		// A refusal's details are the JSON and a " [CODE]" marker (stubbed as the
+		// real sheetAuditWithCode() writes it); a write's are the JSON alone.
+		const m = /^(\{[\s\S]*\})(?: \[[A-Z_]+\])?$/.exec(a.details);
+		let d = null;
+		try { d = m ? JSON.parse(m[1]) : null; } catch { d = null; }
+		return { action: a.action, d };
+	});
+	t("§3b every audit record parses", records.filter((r) => !r.d).map((r) => r.action), []);
+	const parsed = records.filter((r) => r.d);
+	const moved = parsed.filter((r) => r.d.code === "ROW_MOVED");
+	const others = parsed.filter((r) => r.d.code !== "ROW_MOVED");
+	t("§3b the sweep saw ROW_MOVED refusals, other refusals and writes",
+		[moved.length > 0, others.some((r) => r.action === "update_sheet_row_blocked"), others.some((r) => r.action === "update_sheet_row")], [true, true, true]);
+	t("§3b every ROW_MOVED refusal carries fromBasis \"baseline\"", moved.map((r) => r.d.fromBasis), moved.map(() => "baseline"));
+	t("§3b no other record carries fromBasis", others.filter((r) => "fromBasis" in r.d).map((r) => [r.action, r.d.code || null]), []);
+	return results;
+}
+
+// ---------------------------------------------------------------------------
 // §4 MUTANT — back to a whole-row write: sheetRowCellWrites() answering the
 // whole row as it will be written, from column A, whatever changed (the write
 // both routes made before). Built outside the probe's try, so a mutation
@@ -861,6 +924,16 @@ const NO_BASELINE = buildHelpers({
 const NO_IDENTITY_SRC = mutate(DATA_PUT_SRC,
 	"const moved = rowMovedRefusal(headers, rowIndex, before, values, baseline);",
 	"const moved = null;");
+// §4 MUTANT — the ROW_MOVED audit unmarked: its `from` values are the form's
+// baseline, and the record no longer says so.
+const NO_MARKER_SRC = mutate(DATA_PUT_SRC, 'fromBasis: "baseline",', "");
+// §4 MUTANT — every record marked: buildSheetUpdateAudit() writing fromBasis
+// whether or not it was given.
+const MARK_ALL = buildHelpers({
+	buildSheetUpdateAudit: mutate(HELPER_SRC.buildSheetUpdateAudit,
+		"...(payload.fromBasis ? { fromBasis: cap(payload.fromBasis, 20) } : {}),",
+		'fromBasis: "baseline",'),
+});
 
 (async () => {
 	console.log("§1 PUT /api/data/:rowIndex");
@@ -871,6 +944,8 @@ const NO_IDENTITY_SRC = mutate(DATA_PUT_SRC,
 	record(await loadSection(H));
 	console.log("§3 sheetRowCellWrites(), restoreUntouchedCells() and the wiring");
 	record(helperSection(H));
+	console.log("§3b fromBasis on the audit records §1, §1b and §2 wrote");
+	record(fromBasisSweep(AUDIT_LOG.splice(0)));
 
 	console.log("§4 mutants");
 	{
@@ -911,6 +986,37 @@ const NO_IDENTITY_SRC = mutate(DATA_PUT_SRC,
 		if (caught) pass++;
 		else { fail++; failures.push(`mutant not caught: the identity check removed (§1b failed ${failed.length})${detail}`); }
 		console.log(`  ${caught ? "caught " : "MISSED "} M3 the identity check removed — §1b failed ${failed.length} check(s)` +
+			`${failed[0] ? `, e.g. ✗ ${failed[0].name}` : ""}${detail}`.slice(0, 260));
+	}
+	{
+		let failed = [], detail = "";
+		try {
+			failed = (await baselineSection(H, NO_MARKER_SRC)).filter((r) => !r.ok);
+		} catch (e) {
+			detail = ` — the probe threw: ${e && e.message ? e.message : e}`;
+		}
+		AUDIT_LOG.splice(0);
+		const caught = failed.length > 0;
+		if (caught) pass++;
+		else { fail++; failures.push(`mutant not caught: the ROW_MOVED audit unmarked (§1b failed ${failed.length})${detail}`); }
+		console.log(`  ${caught ? "caught " : "MISSED "} M4 the ROW_MOVED audit unmarked — §1b failed ${failed.length} check(s)` +
+			`${failed[0] ? `, e.g. ✗ ${failed[0].name}` : ""}${detail}`.slice(0, 260));
+	}
+	{
+		let failed = [], detail = "";
+		try {
+			AUDIT_LOG.splice(0);
+			await dataSection(MARK_ALL);
+			await baselineSection(MARK_ALL);
+			await loadSection(MARK_ALL);
+			failed = fromBasisSweep(AUDIT_LOG.splice(0)).filter((r) => !r.ok);
+		} catch (e) {
+			detail = ` — the probe threw: ${e && e.message ? e.message : e}`;
+		}
+		const caught = failed.length > 0;
+		if (caught) pass++;
+		else { fail++; failures.push(`mutant not caught: every record marked (§3b failed ${failed.length})${detail}`); }
+		console.log(`  ${caught ? "caught " : "MISSED "} M5 every audit record marked — §3b failed ${failed.length} check(s)` +
 			`${failed[0] ? `, e.g. ✗ ${failed[0].name}` : ""}${detail}`.slice(0, 260));
 	}
 
