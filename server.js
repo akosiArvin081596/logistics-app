@@ -2064,12 +2064,15 @@ function resolveInvestorSplitPct(config) {
 // Resolve "Super Admin previewing an investor's portal" via ?as_user_id=.
 // When the session user is a Super Admin AND as_user_id points at a real
 // Investor user, we return the target's id/username so downstream endpoints
-// scope data as if the admin were logged in as that investor. Otherwise the
-// helper falls back to the session user — silently, no 403, to keep the
-// JSON contract identical for regular investors and to avoid leaking
-// information about which user IDs exist.
-//   - Returns { effectiveUserId, effectiveUsername, isPreview, sessionUser }
+// scope data as if the admin were logged in as that investor.
+//   - Returns { effectiveUserId, effectiveUsername, isPreview, targetMissing, sessionUser }
 //   - isPreview=true ONLY when conditions are met
+//   - targetMissing=true when a Super Admin sent an as_user_id that is not an
+//     Investor user's id (no such user, another role, not a positive integer).
+//     Every route that honours as_user_id answers that with 404
+//     INVESTOR_NOT_FOUND rather than running its unscoped, fleet-wide branch.
+//   - Any other caller (no as_user_id, or a role other than Super Admin, whose
+//     as_user_id is ignored) gets the session user, exactly as before.
 //   - Endpoints downstream should compute isAdminGlobal = sessionUser.role === 'Super Admin' && !isPreview
 //     and use effectiveUserId / effectiveUsername in place of user.id / user.username.
 // Distinct from the ?investor_id= param used by /api/investor/onboarding-documents
@@ -2081,17 +2084,18 @@ function resolvePreviewUser(req) {
 		effectiveUserId: sessionUser.id,
 		effectiveUsername: sessionUser.username,
 		isPreview: false,
+		targetMissing: false,
 		sessionUser,
 	};
-	if (!raw || sessionUser.role !== "Super Admin") return fallback;
-	const targetId = parseInt(raw, 10);
-	if (!Number.isFinite(targetId) || targetId <= 0) return fallback;
-	const row = db.prepare("SELECT id, username, role FROM users WHERE id = ?").get(targetId);
-	if (!row || row.role !== "Investor") return fallback;
+	if (raw === undefined || raw === "" || sessionUser.role !== "Super Admin") return fallback;
+	const targetId = typeof raw === "string" && /^[1-9]\d{0,14}$/.test(raw) ? Number(raw) : 0;
+	const row = targetId ? db.prepare("SELECT id, username, role FROM users WHERE id = ?").get(targetId) : null;
+	if (!row || row.role !== "Investor") return { ...fallback, targetMissing: true };
 	return {
 		effectiveUserId: row.id,
 		effectiveUsername: row.username,
 		isPreview: true,
+		targetMissing: false,
 		sessionUser,
 	};
 }
@@ -23469,6 +23473,7 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 	// Super Admin previewing an investor's portal: scope to the target's trucks.
 	// Outside preview mode the behavior is unchanged for all roles.
 	const preview = resolvePreviewUser(req);
+	if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 	let rows;
 	// created_at is UTC CURRENT_TIMESTAMP with no zone marker — the trailing
 	// alias re-emits it as ISO-8601 Z, overriding the starred value.
@@ -36718,6 +36723,7 @@ app.get("/api/routemate/fuel/summary", requireRole("Super Admin", "Dispatcher", 
 		// Super Admin previewing an investor's portal: scope to that investor's
 		// trucks so MPG matches what the investor sees on their own dashboard.
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 
 		const trucks = preview.isPreview
 			? db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks WHERE owner_id = ?").all(preview.effectiveUserId)
@@ -36811,6 +36817,7 @@ app.get("/api/routemate/fault-codes/summary", requireRole("Super Admin", "Dispat
 	try {
 		const user = req.session.user;
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const trucks = preview.isPreview
 			? db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks WHERE owner_id = ?").all(preview.effectiveUserId)
 			: (user.role === "Investor")
@@ -37038,6 +37045,7 @@ app.get("/api/investor/messages", requireRole("Super Admin", "Investor"), (req, 
 		// Note: read receipts deliberately do NOT fire in preview mode — the admin
 		// is verifying what the investor sees, not consuming the investor's queue.
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const name = preview.effectiveUsername.trim().toLowerCase();
 		const messages = db.prepare(
 			`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type, asset_ref
@@ -41797,6 +41805,7 @@ app.get("/api/investor/onboarding-documents", requireRole("Super Admin", "Invest
 app.get("/api/investor/documents", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const user = { ...preview.sessionUser, id: preview.effectiveUserId, username: preview.effectiveUsername };
 		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 		let docs;
@@ -41827,6 +41836,7 @@ app.get("/api/investor/documents", requireRole("Super Admin", "Investor"), async
 app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const user = { ...preview.sessionUser, id: preview.effectiveUserId, username: preview.effectiveUsername };
 		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 
@@ -41966,6 +41976,7 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 
 		// Preview ("view as investor") + scoping — mirror /api/investor exactly.
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const user = { ...preview.sessionUser, id: preview.effectiveUserId, username: preview.effectiveUsername };
 		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 		if (preview.isPreview) logAudit(req, "investor_preview_view", "investor", preview.effectiveUserId, "");
@@ -42245,6 +42256,7 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 	try {
 		// Re-use the investor data by making an internal call
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const user = { ...preview.sessionUser, id: preview.effectiveUserId, username: preview.effectiveUsername };
 		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 		if (preview.isPreview) logAudit(req, "investor_preview_report", "investor", preview.effectiveUserId, "");
@@ -48615,6 +48627,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// the endpoint scopes data as if the admin were logged in as that
 		// investor. Outside preview mode the values match the session user.
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const user = {
 			...preview.sessionUser,
 			id: preview.effectiveUserId,
@@ -49908,6 +49921,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 app.get("/api/investor/expenses", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const user = { ...preview.sessionUser, id: preview.effectiveUserId, username: preview.effectiveUsername };
 		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 		const { truck, type, status, from, to } = req.query;
@@ -49974,6 +49988,7 @@ app.get("/api/investor/expenses", requireRole("Super Admin", "Investor"), async 
 app.get("/api/investor/payouts", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const user = { ...preview.sessionUser, id: preview.effectiveUserId, username: preview.effectiveUsername };
 		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 
@@ -50095,6 +50110,7 @@ app.get("/api/investor/payouts/:period/history", requireRole("Super Admin", "Inv
 		// payouts they are reading, so an investor's history can never be served
 		// off an ambiguous session.
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 		if (isSuperAdmin) return res.status(400).json({ error: "Pass ?as_user_id=<investorUserId> to view an investor's payout history." });
 
@@ -50135,6 +50151,7 @@ app.get("/api/investor/payouts/:period/detail", requireRole("Super Admin", "Inve
 		if (!/^\d{4}-\d{2}$/.test(period)) return res.status(400).json({ error: "period must be YYYY-MM" });
 
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 		if (isSuperAdmin) return res.status(400).json({ error: "Pass ?as_user_id=<investorUserId> to view an investor's payout detail." });
 		if (preview.isPreview) logAudit(req, "investor_payout_detail_view", "investor", preview.effectiveUserId, period);
@@ -50352,6 +50369,7 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 		if (!/^\d{4}-\d{2}$/.test(period)) return res.status(400).json({ error: "period must be YYYY-MM" });
 
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 		if (isSuperAdmin) return res.status(400).json({ error: "Pass ?as_user_id=<investorUserId> to download an investor's payout statement." });
 		const ownerId = preview.effectiveUserId;
