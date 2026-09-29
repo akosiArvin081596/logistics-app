@@ -335,16 +335,20 @@ eq("refuseCrossSite mount count agrees with that list", mountCount("refuseCrossS
 //
 // The four payment terms invite writes (create, edit, reissue, revoke) are here
 // too: they set the terms printed into an investor's contract and mint the link
-// that carries them, and their only caller is the SPA's Investors page.
-eq("refuseCrossOrigin is on exactly the settlement writes, the reconcile pair and the invite writes",
+// that carries them, and their only caller is the SPA's Investors page. So is
+// PUT /api/investor/config: it writes the split and the other investor
+// configuration the payout math reads, Super Admin only, and its only callers
+// are the SPA's Investors page and Admin Tools.
+eq("refuseCrossOrigin is on exactly the settlement writes, the reconcile pair, the invite writes and the investor config write",
 	mountedOn("refuseCrossOrigin").join(" "),
 	["/api/periods/:period/finalize", "/api/periods/:period/reopen",
 	 "/api/investor/payouts/:id/status", "/api/investor/payouts/:id/adjust",
 	 "/api/invoices/:id/adjust",
 	 "/api/admin/ratecon-reconcile", "/api/admin/ratecon-reconcile/run",
 	 "/api/admin/investor-invites", "/api/admin/investor-invites/:id",
-	 "/api/admin/investor-invites/:id/reissue", "/api/admin/investor-invites/:id/revoke"].sort().join(" "));
-eq("refuseCrossOrigin mount count agrees with that list", mountCount("refuseCrossOrigin"), 11);
+	 "/api/admin/investor-invites/:id/reissue", "/api/admin/investor-invites/:id/revoke",
+	 "/api/investor/config"].sort().join(" "));
+eq("refuseCrossOrigin mount count agrees with that list", mountCount("refuseCrossOrigin"), 12);
 eq("refuseCrossOriginStrict is on exactly the full-database export",
 	mountedOn("refuseCrossOriginStrict").join(" "), "/api/db/download");
 eq("...and on nothing else", mountCount("refuseCrossOriginStrict"), 1);

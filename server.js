@@ -2065,12 +2065,15 @@ function resolveInvestorSplitPct(config) {
 // Resolve "Super Admin previewing an investor's portal" via ?as_user_id=.
 // When the session user is a Super Admin AND as_user_id points at a real
 // Investor user, we return the target's id/username so downstream endpoints
-// scope data as if the admin were logged in as that investor. Otherwise the
-// helper falls back to the session user — silently, no 403, to keep the
-// JSON contract identical for regular investors and to avoid leaking
-// information about which user IDs exist.
-//   - Returns { effectiveUserId, effectiveUsername, isPreview, sessionUser }
+// scope data as if the admin were logged in as that investor.
+//   - Returns { effectiveUserId, effectiveUsername, isPreview, targetMissing, sessionUser }
 //   - isPreview=true ONLY when conditions are met
+//   - targetMissing=true when a Super Admin sent an as_user_id that is not an
+//     Investor user's id (no such user, another role, not a positive integer).
+//     Every route that honours as_user_id answers that with 404
+//     INVESTOR_NOT_FOUND rather than running its unscoped, fleet-wide branch.
+//   - Any other caller (no as_user_id, or a role other than Super Admin, whose
+//     as_user_id is ignored) gets the session user, exactly as before.
 //   - Endpoints downstream should compute isAdminGlobal = sessionUser.role === 'Super Admin' && !isPreview
 //     and use effectiveUserId / effectiveUsername in place of user.id / user.username.
 // Distinct from the ?investor_id= param used by /api/investor/onboarding-documents
@@ -2082,17 +2085,18 @@ function resolvePreviewUser(req) {
 		effectiveUserId: sessionUser.id,
 		effectiveUsername: sessionUser.username,
 		isPreview: false,
+		targetMissing: false,
 		sessionUser,
 	};
-	if (!raw || sessionUser.role !== "Super Admin") return fallback;
-	const targetId = parseInt(raw, 10);
-	if (!Number.isFinite(targetId) || targetId <= 0) return fallback;
-	const row = db.prepare("SELECT id, username, role FROM users WHERE id = ?").get(targetId);
-	if (!row || row.role !== "Investor") return fallback;
+	if (raw === undefined || raw === "" || sessionUser.role !== "Super Admin") return fallback;
+	const targetId = typeof raw === "string" && /^[1-9]\d{0,14}$/.test(raw) ? Number(raw) : 0;
+	const row = targetId ? db.prepare("SELECT id, username, role FROM users WHERE id = ?").get(targetId) : null;
+	if (!row || row.role !== "Investor") return { ...fallback, targetMissing: true };
 	return {
 		effectiveUserId: row.id,
 		effectiveUsername: row.username,
 		isPreview: true,
+		targetMissing: false,
 		sessionUser,
 	};
 }
@@ -10707,7 +10711,7 @@ function resolveOnboardingDocAlert({ scope, ownerId, docKey }) {
 }
 
 // Helper: fill W-9 PDF form fields
-async function fillW9Form({ legalName = "", dba = "", entityType = "", address = "", einSsn = "", signatureText = "", signatureImage, effectiveDate = "" }) {
+async function fillW9Form({ legalName = "", dba = "", entityType = "", taxClassification = "", address = "", einSsn = "", signatureText = "", signatureImage, effectiveDate = "" }) {
 	// Template lives at onboarding-templates/pdf/, NOT under uploads/ — uploads/ is
 	// gitignored, so these TRACKED template PDFs sat inside an ignored tree and were
 	// twice deleted by a routine `rm -rf uploads` cleanup. See
@@ -10772,13 +10776,26 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", address =
 	const entityCheckMap = {
 		"Sole Prop": 0, "C-Corp": 1, "S-Corp": 2, "Corp": 1, "Partnership": 3, "Trust": 4, "Trust/Estate": 4, "LLC": 5, "Other": 6,
 	};
-	const cbIdx = entityCheckMap[entityType];
+	// An LLC's box and letter follow the tax classification the applicant chose
+	// on /invest, per the W-9's line 3a instructions: an LLC taxed as a C
+	// corporation, an S corporation or a partnership checks the LLC box and enters
+	// C, S or P; a single-member LLC that is disregarded (the form's
+	// "Individual/LLC") checks its owner's box, Individual/sole proprietor, and
+	// NOT the LLC box. With no classification, or one not listed here, the LLC box
+	// is checked and the letter is left blank rather than guessed.
+	const llcTaxLetters = new Map([["C-Corp", "C"], ["S-Corp", "S"], ["Partnership", "P"]]);
+	let cbIdx = entityCheckMap[entityType];
+	let llcLetter = "";
+	if (entityType === "LLC") {
+		if (taxClassification === "Individual/LLC") cbIdx = entityCheckMap["Sole Prop"];
+		else llcLetter = llcTaxLetters.get(taxClassification) || "";
+	}
 	if (cbIdx !== undefined) {
 		try { form.getCheckBox(`topmostSubform[0].Page1[0].Boxes3a-b_ReadOrder[0].c1_1[${cbIdx}]`).check(); } catch {}
 	}
 	// LLC tax classification letter
-	if (entityType === "LLC") {
-		setField("topmostSubform[0].Page1[0].Boxes3a-b_ReadOrder[0].f1_03[0]", "P");
+	if (llcLetter) {
+		setField("topmostSubform[0].Page1[0].Boxes3a-b_ReadOrder[0].f1_03[0]", llcLetter);
 	}
 
 	// Line 5: Street address, Line 6: City/State/ZIP
@@ -10872,24 +10889,19 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", address =
 
 // --- Onboarding render limiters -------------------------------------------
 // PR #214 capped the ANONYMOUS preview route (pdfPreviewLimiter + a
-// process-wide concurrency cap) and fixed the SSRF at the renderer sink, so all
-// four render paths are SSRF-safe. Its three siblings kept spending a full
-// Puppeteer render per request once a credential is known:
-//   - GET  /api/public/investor-onboarding/:id/documents/:docKey/pdf  (token)
-//   - POST /api/public/investor-onboarding/:id/sign/:docKey           (token)
-//   - POST /api/onboarding/:userId/documents/:docKey/sign             (session)
+// process-wide concurrency cap) and fixed the SSRF at the renderer sink, so
+// every render path is SSRF-safe. The signed-in render routes kept spending a
+// full Puppeteer render per request:
+//   - GET  /api/onboarding/documents/:docKey/pdf                        (session)
+//   - POST /api/onboarding/:userId/documents/:docKey/sign               (session)
+//   - POST /api/admin/investor-onboarding/:id/documents/:docKey/regenerate (Super Admin)
 // A render is the single most expensive thing any of them can be made to do,
 // and none of them bounded how often.
 //
-// ⚠️ Keyed on the SESSION USER where there is one, else the IP — deliberately
-// NOT on the application id. Both token routes call verifyInvestorToken()
-// INSIDE the handler, so an anonymous caller reaches the limiter first; an
-// appId key would therefore let anyone lock a specific investor out of their
-// own onboarding by hammering their id unauthenticated. Per-IP, a prober only
-// exhausts their own bucket. On the two authenticated routes the guard
-// (requireAuth / requireRole) is mounted BEFORE the limiter, so a caller with
-// no business there cannot spend the budget on 403s — same ordering as
-// fuelEventsLimiter.
+// ⚠️ Keyed on the SESSION USER where there is one, else the IP, and never on an
+// id from the URL. Every route that uses these mounts its guard (requireAuth /
+// requireRole) BEFORE the limiter, so a caller with no business there cannot
+// spend the budget on 403s — same ordering as fuelEventsLimiter.
 //
 // 30 / 15 min for previews: the post-application twin of pdfPreviewLimiter, so
 // it gets the same number for the same reason — a thorough investor opening,
@@ -10938,52 +10950,6 @@ const onboardingSignLimiter = rateLimit({
 	standardHeaders: true,
 });
 
-// Helper: verify investor access token
-//
-// ⚠️ A SOFT-DELETED APPLICATION'S TOKEN NO LONGER AUTHORIZES ANYTHING. This is
-// the deliberate answer to "does the bearer credential survive the delete?", and
-// it is decided HERE because this is the single choke point every public
-// onboarding route passes through — the alternative is five copies of the rule.
-//
-// The token is not merely disclosive. It is a NON-EXPIRING bearer credential
-// accepted with no session at all, and it authorizes e-signing as that investor
-// and `POST …/banking`, which rewrites where money is sent. Soft-deleting is an
-// admin asserting "this application is spam, or a duplicate, or not real";
-// continuing to honour a write credential attached to it would mean a deleted
-// application could still sign contracts and nominate a bank account. Restoring
-// the row restores the token unchanged, so nothing is lost — the credential is
-// suspended with the record, not revoked from it.
-//
-// ⚠️ REFUSED AS 404, NOT 403, and via the same branch as a non-existent id. A
-// distinct status or message would turn this into an oracle for "an application
-// with this id exists but was removed" against an unauthenticated route. Same
-// rule the signed-document guards follow: a 403 confirms the thing exists.
-function verifyInvestorToken(req, res) {
-	const appId = parseInt(req.params.id);
-	const token = req.query.token || req.body?.accessToken || req.headers["x-access-token"] || "";
-	if (!appId || isNaN(appId)) { res.status(400).json({ error: "Invalid application ID" }); return null; }
-	const app = db.prepare("SELECT id, access_token, deleted_at FROM investor_applications WHERE id = ?").get(appId);
-	if (!app || app.deleted_at) { res.status(404).json({ error: "Application not found" }); return null; }
-	if (!app.access_token || app.access_token !== token) { res.status(403).json({ error: "Invalid access token" }); return null; }
-	return appId;
-}
-
-// GET /api/public/investor-onboarding/:id — Get application + onboarding status (token required)
-app.get("/api/public/investor-onboarding/:id", (req, res) => {
-	try {
-		const appId = verifyInvestorToken(req, res);
-		if (!appId) return;
-		const application = db.prepare("SELECT id, legal_name, dba, entity_type, address, contact_person, email, phone, status FROM investor_applications WHERE id = ?").get(appId);
-		const onboarding = db.prepare("SELECT * FROM investor_onboarding WHERE application_id = ?").get(appId);
-		const documents = stripSigningEvidence(
-			db.prepare("SELECT * FROM investor_onboarding_documents WHERE application_id = ? ORDER BY id").all(appId)
-		);
-		res.json({ application, onboarding, documents, totalDocs: INVESTOR_ONBOARDING_DOCS.length });
-	} catch (err) {
-		res.status(500).json({ error: err.message });
-	}
-});
-
 // Builds the render closure for ONE investor onboarding document.
 //
 // Extracted so the signing route and the admin regenerate route below cannot
@@ -11003,6 +10969,7 @@ function buildInvestorDocRender({ appId, docKey, signatureText, signatureImage, 
 			return fillW9Form({
 				legalName: application?.legal_name || "", dba: application?.dba || "",
 				entityType: application?.entity_type || "", address: application?.address || "",
+				taxClassification: application?.tax_classification || "",
 				einSsn: application?.ein_ssn || "", signatureText: (signatureText || "").trim(),
 				signatureImage, effectiveDate,
 			});
@@ -11078,132 +11045,6 @@ function refreshInvestorOnboardingStatus(appId) {
 	return "banking_pending";
 }
 
-// POST /api/public/investor-onboarding/:id/sign/:docKey — Sign a document (token required)
-app.post("/api/public/investor-onboarding/:id/sign/:docKey", onboardingSignLimiter, async (req, res) => {
-	try {
-		const appId = verifyInvestorToken(req, res);
-		if (!appId) return;
-		const { docKey } = req.params;
-		const { signatureText, signatureImage, vehicleInfo } = req.body;
-		if (typeof signatureText !== "string" || !signatureText.trim()) return res.status(400).json({ error: "Signature required" });
-		const sigShape = publicFormInput.checkPublicScalars(req.body, ["signatureImage"]);
-		if (!sigShape.ok) {
-			return res.status(400).json({ error: sigShape.message, code: "INVALID_FIELD", reason: sigShape.reason, field: sigShape.field });
-		}
-		// Checked before anything reads or renders it (lib/image-size.js).
-		const sigImage = imageLimits.checkSignatureImage(signatureImage);
-		if (!sigImage.ok) {
-			return res.status(sigImage.status).json(imageLimits.refusalBody(sigImage, "signature"));
-		}
-
-		const docRow = db.prepare("SELECT * FROM investor_onboarding_documents WHERE application_id = ? AND doc_key = ?").get(appId, docKey);
-		if (!docRow) return res.status(404).json({ error: "Document not found" });
-		if (docRow.signed) return res.json({ success: true, message: "Already signed" });
-
-		const consent = readTransmittedConsent(req.body, res, { docLabel: docRow.doc_name || docKey });
-		if (!consent) return;
-		const net = signerNetworkEvidence(req);
-
-		// The application row is read inside buildInvestorDocRender(), at render
-		// time, so it reflects any vehicle written just below.
-		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: EVIDENCE_DATE_TZ });
-		const signedDir = path.join(__dirname, "uploads", "investor-onboarding-signed");
-		if (!fs.existsSync(signedDir)) fs.mkdirSync(signedDir, { recursive: true });
-		const signedFileName = `${docKey}-inv-${appId}-signed.pdf`;
-		const signedPath = path.join(signedDir, signedFileName);
-		const publicUrl = `/uploads/investor-onboarding-signed/${signedFileName}`;
-
-		// Save vehicle info if provided (for Exhibit A). A single object is
-		// accepted as a one-vehicle list; either way the entries are checked
-		// before the first one is read.
-		const vehicleCheck = publicFormInput.checkPublicVehicles(
-			Array.isArray(vehicleInfo) ? vehicleInfo : (vehicleInfo ? [vehicleInfo] : [])
-		);
-		if (!vehicleCheck.ok) {
-			return res.status(400).json({ error: vehicleCheck.message, code: "INVALID_VEHICLES", reason: vehicleCheck.reason });
-		}
-		const vehiclesArr = vehicleCheck.value;
-		if (vehiclesArr.length > 0) {
-			const v = vehiclesArr[0];
-			db.prepare(`UPDATE investor_applications SET
-				vehicle_year=?, vehicle_make=?, vehicle_model=?, vehicle_vin=?, vehicle_mileage=?,
-				vehicle_title_state=?, vehicle_liens=?, vehicle_registered_owner=?,
-				vehicles_json=? WHERE id=?`
-			).run(v.year || "", v.make || "", v.model || "",
-				v.vin || "", v.mileage || "", v.titleState || "",
-				v.liens || "", v.registeredOwner || "",
-				JSON.stringify(vehiclesArr), appId);
-		}
-
-		const render = buildInvestorDocRender({
-			appId, docKey,
-			signatureText, signatureImage, effectiveDate,
-			signedAt: new Date().toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" }),
-			vehiclesOverride: vehiclesArr,
-		});
-
-		const now = new Date().toISOString();
-		let artifact;
-		try {
-			artifact = await writeSignedArtifact({
-				render,
-				signedPath,
-				publicUrl,
-				label: docRow.doc_name || docKey,
-			});
-		} catch (genErr) {
-			// Signature kept, claim refused — and because `signed` stays 0 the
-			// signedCount check below cannot flip this investor to fully_onboarded.
-			//
-			// `AND signed = 0` is what stops a LOSING writer clobbering a WINNER.
-			// The client aborts at 20 s (useApi.js) while renderPolicy allows 30 s,
-			// and Express does not abort a handler on client disconnect — so the
-			// signer sees "try again", taps Sign, and the retry can succeed while
-			// the first request is still rendering. Without this guard that first
-			// request's late failure would blank signed_pdf_url on a row that is
-			// genuinely signed, which reads downstream exactly like the bug this
-			// PR fixes (checkAndCompleteOnboarding drops docs with no url) and
-			// would re-open the alert on a document that is fine.
-			//
-			// The evidence goes down on the FAILURE path too — same reasoning as
-			// the signature beside it. The consent was given; only the artifact is
-			// missing, so artifact_sha256 is the one thing left blank.
-			const failWrite = db.prepare("UPDATE investor_onboarding_documents SET signature_text=?, signature_image=?, signed_ip=?, signed_ip_source=?, signed_user_agent=?, consent_agreed=?, consent_text=?, effective_date=?, evidence_version=?, signing_error=?, signing_failed_at=?, signed_pdf_url='' WHERE application_id=? AND doc_key=? AND signed = 0")
-				.run(signatureText.trim(), signatureImage || "", net.ip, net.ipSource, net.userAgent, consent.agreed, consent.text,
-					effectiveDate, SIGNING_EVIDENCE_VERSION, genErr.message, now, appId, docKey);
-			// Only alert for a document that is actually unsigned. 0 changes means
-			// another request already signed it; there is nothing wrong to report.
-			if (failWrite.changes > 0) {
-				alertOnboardingDocFailure({
-					scope: "investor-application", ownerId: appId, docKey,
-					docName: docRow.doc_name, reason: genErr.message,
-				});
-			}
-			return res.status(503).json({
-				error: "We saved your signature but could not generate the signed document. Nothing was lost — please try again in a moment.",
-				code: genErr.code || "DOCUMENT_RENDER_FAILED",
-				retryable: true,
-			});
-		}
-
-		db.prepare(`UPDATE investor_onboarding_documents SET signed=1, signature_text=?, signature_image=?, signed_at=?, signed_pdf_url=?,
-			signed_ip=?, signed_ip_source=?, signed_user_agent=?, consent_agreed=?, consent_text=?, artifact_sha256=?, artifact_bytes=?, effective_date=?, evidence_version=?,
-			signing_error='', signing_failed_at='' WHERE application_id=? AND doc_key=?`)
-			.run(signatureText.trim(), signatureImage || "", now, artifact.url,
-				net.ip, net.ipSource, net.userAgent, consent.agreed, consent.text, artifact.sha256, artifact.bytes, effectiveDate, SIGNING_EVIDENCE_VERSION,
-				appId, docKey);
-		resolveOnboardingDocAlert({ scope: "investor-application", ownerId: appId, docKey });
-
-		// Check if all docs signed → advance status
-		refreshInvestorOnboardingStatus(appId);
-
-		res.json({ success: true });
-	} catch (err) {
-		console.error("Investor sign error:", err.message);
-		res.status(500).json({ error: err.message });
-	}
-});
-
 // ============================================================
 // ADMIN: recover a document that failed to render
 // ============================================================
@@ -11211,14 +11052,12 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", onboardingSignLimit
 // signing_error recorded, an alert raised. It did not make it RECOVERED: for an
 // investor there was no route that could ever finish the job.
 //
-// The per-document public route below is token-gated on
-// investor_applications.access_token, and that token is generated server-side,
-// stored, and NEVER emitted — not in a response body, not in either admin
-// payload (both strip it unconditionally), not in any email. `client/src` has
-// zero references to /api/public/investor-onboarding/ or to the token. The live
-// path is the bulk POST /api/public/investor-apply, which by design does not
-// fail the request. So a document that failed to render parked at
-// documents_pending until somebody hand-edited SQLite.
+// An investor signs every document in one request, the bulk
+// POST /api/public/investor-apply, which by design does not fail when one
+// document's render does, and there is no per-document public signing route
+// (the unused token-gated /api/public/investor-onboarding/:id/* routes were
+// removed). So a document that failed to render parked at documents_pending
+// until somebody hand-edited SQLite.
 //
 // These two routes are that missing path: find the parked documents, then
 // re-render one from the signature already on file.
@@ -11653,133 +11492,6 @@ app.post("/api/admin/investor-onboarding/:id/documents/:docKey/regenerate", requ
 	}
 });
 
-// Serve investor onboarding document PDFs (preview, token required)
-app.get("/api/public/investor-onboarding/:id/documents/:docKey/pdf", onboardingPreviewLimiter, async (req, res) => {
-	try {
-		const appId = verifyInvestorToken(req, res);
-		if (!appId) return;
-		const { docKey } = req.params;
-		const application = db.prepare("SELECT * FROM investor_applications WHERE id = ?").get(appId);
-		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: EVIDENCE_DATE_TZ });
-
-		if (docKey === "master_agreement" || docKey === "vehicle_lease") {
-			let vehicles = [];
-			try { vehicles = JSON.parse(application?.vehicles_json || "[]"); } catch { /* skip */ }
-			if (!vehicles.length && (application?.vehicle_year || application?.vehicle_make)) {
-				vehicles.push({
-					year: application.vehicle_year || "", make: application.vehicle_make || "",
-					model: application.vehicle_model || "", vin: application.vehicle_vin || "",
-					mileage: application.vehicle_mileage || "",
-					titleState: application.vehicle_title_state || "",
-					liens: application.vehicle_liens || "",
-					registeredOwner: application.vehicle_registered_owner || "",
-				});
-			}
-			const payInfo = db.prepare("SELECT * FROM investor_payment_info WHERE application_id = ?").get(appId);
-			const pdfBuffer = await renderPolicy(docKey, {
-				legalName: application?.legal_name || "",
-				dba: application?.dba || "",
-				entityType: application?.entity_type || "",
-				address: application?.address || "",
-				contactPerson: application?.contact_person || "",
-				contactTitle: application?.contact_title || "",
-				phone: application?.phone || "",
-				email: application?.email || "",
-				einSsn: application?.ein_ssn || "",
-				yearsInOperation: application?.years_in_operation || "",
-				fleetSize: application?.fleet_size || "",
-				vehicles,
-				bankName: payInfo?.bank_name || "",
-				bankRouting: payInfo?.routing_number || "",
-				bankAccount: payInfo?.account_number || "",
-				accountType: payInfo?.account_type || "",
-				effectiveDate,
-			});
-			res.setHeader("Content-Type", "application/pdf");
-			const filename = docKey === "master_agreement" ? "Master Agreement Preview.pdf" : "Vehicle Lease Preview.pdf";
-			res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
-			return res.send(pdfBuffer);
-		}
-
-		if (docKey === "w9") {
-			const pdfBytes = await fillW9Form({
-				legalName: application?.legal_name || "", dba: application?.dba || "",
-				entityType: application?.entity_type || "", address: application?.address || "",
-				einSsn: application?.ein_ssn || "", effectiveDate,
-			});
-			if (!pdfBytes) return res.status(404).json({ error: "W-9 template not found" });
-			res.setHeader("Content-Type", "application/pdf");
-			res.setHeader("Content-Disposition", 'inline; filename="W-9 Form Preview.pdf"');
-			return res.send(Buffer.from(pdfBytes));
-		}
-
-		return res.status(404).json({ error: "Unknown document" });
-	} catch (err) {
-		res.status(500).json({ error: err.message });
-	}
-});
-
-// POST /api/public/investor-onboarding/:id/vehicles — Save vehicles JSON (token required)
-app.post("/api/public/investor-onboarding/:id/vehicles", (req, res) => {
-	try {
-		const appId = verifyInvestorToken(req, res);
-		if (!appId) return;
-		const { vehicles } = req.body;
-		const vehicleCheck = publicFormInput.checkPublicVehicles(vehicles);
-		if (!vehicleCheck.ok) {
-			return res.status(400).json({ error: vehicleCheck.message, code: "INVALID_VEHICLES", reason: vehicleCheck.reason });
-		}
-		const vehiclesArr = vehicleCheck.value;
-		db.prepare("UPDATE investor_applications SET vehicles_json=? WHERE id=?")
-			.run(JSON.stringify(vehiclesArr), appId);
-		// Also update the legacy single-vehicle columns from the first vehicle
-		if (vehiclesArr.length > 0) {
-			const v = vehiclesArr[0];
-			db.prepare(`UPDATE investor_applications SET
-				vehicle_year=?, vehicle_make=?, vehicle_model=?, vehicle_vin=?, vehicle_mileage=?,
-				vehicle_title_state=?, vehicle_liens=?, vehicle_registered_owner=? WHERE id=?`
-			).run(v.year || "", v.make || "", v.model || "", v.vin || "",
-				v.mileage || "", v.titleState || "", v.liens || "", v.registeredOwner || "", appId);
-		}
-		res.json({ success: true });
-	} catch (err) {
-		res.status(500).json({ error: err.message });
-	}
-});
-
-// POST /api/public/investor-onboarding/:id/banking — Step 3: Submit banking info (token required)
-app.post("/api/public/investor-onboarding/:id/banking", (req, res) => {
-	try {
-		const appId = verifyInvestorToken(req, res);
-		if (!appId) return;
-		const { bank_name, account_type, routing_number, account_number, account_name } = req.body;
-		if (!bank_name || !routing_number || !account_number) {
-			return res.status(400).json({ error: "Bank name, routing number, and account number are required" });
-		}
-		const bankingShape = publicFormInput.checkPublicScalars(req.body, PUBLIC_BANKING_SCALAR_FIELDS);
-		if (!bankingShape.ok) {
-			return res.status(400).json({ error: bankingShape.message, code: "INVALID_FIELD", reason: bankingShape.reason, field: bankingShape.field });
-		}
-		// Verify all documents are signed before accepting banking info
-		const signedCount = db.prepare("SELECT COUNT(*) AS cnt FROM investor_onboarding_documents WHERE application_id=? AND signed=1").get(appId).cnt;
-		if (signedCount < INVESTOR_ONBOARDING_DOCS.length) {
-			return res.status(400).json({ error: "All documents must be signed before submitting banking info" });
-		}
-		db.prepare(`INSERT OR REPLACE INTO investor_payment_info (application_id, bank_name, account_type, routing_number, account_number, account_name)
-			VALUES (?, ?, ?, ?, ?, ?)`).run(appId, bank_name, account_type || "", routing_number, account_number, account_name || "");
-
-		db.prepare("UPDATE investor_onboarding SET status='fully_onboarded', onboarded_at=? WHERE application_id=?")
-			.run(new Date().toISOString(), appId);
-
-		// Promote from Draft to New — application is now visible to admins
-		db.prepare("UPDATE investor_applications SET status='New' WHERE id=? AND status='Draft'").run(appId);
-
-		res.json({ success: true });
-	} catch (err) {
-		res.status(500).json({ error: err.message });
-	}
-});
-
 // Stateless PDF preview — generates document from posted form data, no DB writes
 // A Puppeteer render is the most expensive thing an anonymous caller can trigger:
 // each call takes a page in the shared Chromium and burns real CPU/RAM on a VPS that
@@ -11903,7 +11615,7 @@ app.post("/api/public/investor-preview-pdf/:docKey", pdfPreviewLimiter, async (r
 			return res.send(pdfBuffer);
 		}
 		if (docKey === "w9") {
-			const pdfBytes = await fillW9Form(appData);
+			const pdfBytes = await fillW9Form({ ...appData, taxClassification: req.body.tax_classification });
 			if (!pdfBytes) return res.status(404).json({ error: "W-9 template not found" });
 			if (invite) setInvitePreviewHeaders(res, invite);
 			res.setHeader("Content-Type", "application/pdf");
@@ -12921,13 +12633,9 @@ app.get("/api/investor-applications", requireRole("Super Admin"), (req, res) => 
 		// and by the same rule as the detail route below.
 		//
 		// ⚠️ access_token is dropped UNCONDITIONALLY — not masked, and not
-		// subject to PII_MASK_ENABLED. `SELECT ia.*` was shipping it beside the
-		// tax id, and it is worse than the tax id: it is a NON-EXPIRING bearer
-		// credential that verifyInvestorToken() accepts with no session at all,
-		// authorizing the signed W-9 PDF, e-signing as that investor, and
-		// POST …/banking — which rewrites where money is sent. Masking the SSN
-		// while publishing that is the same "half a credential redacted" mistake
-		// this change fixes in the admin email.
+		// subject to PII_MASK_ENABLED. No route accepts it any more (the
+		// token-gated /api/public/investor-onboarding/:id/* routes were removed),
+		// but it is still a per-application secret and never leaves the server.
 		// The Terms column: each application's signed payment terms, read from its
 		// master agreement's snapshot, and the invitation it came through. And
 		// `docs_total`, the document rows the application actually has, which is
@@ -13043,17 +12751,13 @@ app.delete("/api/investor-applications/:id", requireRole("Super Admin"), (req, r
 			return res.status(400).json({ error: "Invalid application id" });
 		}
 		const row = db.prepare("SELECT legal_name, status FROM investor_applications WHERE id = ?").get(id);
-		// ⚠️ REPORT WHAT THIS SUSPENDS — do not refuse, and do not stay silent.
-		// Removing an application that is mid-onboarding also stops the
-		// investor's existing link working (see verifyInvestorToken), which is a
-		// support incident nobody would connect back to this click. A refusal is
-		// the wrong answer — a duplicate that was mistakenly Accepted is exactly
-		// what an admin needs to remove — so the caller is told instead, and
-		// restore is one call away.
+		// ⚠️ REPORT WHAT THIS LEAVES BEHIND — do not refuse, and do not stay
+		// silent. A refusal is the wrong answer — a duplicate that was mistakenly
+		// Accepted is exactly what an admin needs to remove — so the caller is told
+		// what stays on file instead, and restore is one call away.
 		const signedCount = db.prepare(
 			"SELECT COUNT(*) AS c FROM investor_onboarding_documents WHERE application_id = ? AND signed = 1"
 		).get(id)?.c || 0;
-		const onboarding = db.prepare("SELECT status FROM investor_onboarding WHERE application_id = ?").get(id);
 		const result = db.prepare(
 			"UPDATE investor_applications SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL"
 		).run(id);
@@ -13062,14 +12766,10 @@ app.delete("/api/investor-applications/:id", requireRole("Super Admin"), (req, r
 		}
 		const warnings = [];
 		if (signedCount) warnings.push(`${signedCount} signed document${signedCount === 1 ? "" : "s"} stay on file and are unaffected, but are no longer reachable from the applications list.`);
-		if (onboarding && onboarding.status !== "fully_onboarded") warnings.push("Onboarding was still in progress — the investor's existing onboarding link will stop working until this is restored.");
 		if (row?.status === "Accepted") warnings.push("This application was already Accepted; any user account created from it is unaffected and still works.");
 
-		// Named in the audit line because the delete also SUSPENDS a live bearer
-		// credential — a later reader needs to know the investor's onboarding link
-		// stopped working, and why.
 		logAudit(req, "soft_delete_investor_application", "investor_application", id,
-			`Removed ${row?.legal_name || id} (status ${row?.status || "unknown"}) from the list; its onboarding access token no longer authorizes signing or banking changes` +
+			`Removed ${row?.legal_name || id} (status ${row?.status || "unknown"}) from the list` +
 			(signedCount ? `; ${signedCount} signed document(s) retained` : ""));
 		res.json({ success: true, warnings });
 	} catch (err) {
@@ -13078,9 +12778,7 @@ app.delete("/api/investor-applications/:id", requireRole("Super Admin"), (req, r
 	}
 });
 
-// Restore a soft-deleted investor application. The access_token is deliberately
-// NOT regenerated: it was suspended with the record, not revoked from it, so the
-// onboarding link the investor already has starts working again.
+// Restore a soft-deleted investor application to the list.
 app.post("/api/investor-applications/:id/restore", requireRole("Super Admin"), (req, res) => {
 	try {
 		const id = Number(req.params.id);
@@ -13093,7 +12791,7 @@ app.post("/api/investor-applications/:id/restore", requireRole("Super Admin"), (
 			return res.status(404).json({ error: "Application not found" });
 		}
 		logAudit(req, "restore_investor_application", "investor_application", id,
-			`Restored ${row?.legal_name || id} from soft-delete; its onboarding access token authorizes again`);
+			`Restored ${row?.legal_name || id} from soft-delete`);
 		res.json({ success: true });
 	} catch (err) {
 		console.error("investor application restore failed:", err);
@@ -13346,6 +13044,21 @@ function registerApplicationVehicles(vehicles, appId, userId) {
 }
 
 // Admin: accept/reject investor application
+//
+// New / Reviewed / Rejected only set the status. Accepted creates the
+// investor's account, their investors record and one truck per vehicle, and
+// every refusal happens BEFORE any of that is written:
+//   - 409 APPLICATION_DELETED: the application was removed.
+//   - 409 USER_ALREADY_EXISTS: an account already has the applicant's email.
+//   - 409 INVESTOR_RECORD_CONFLICT: another investors record already holds the
+//     company name the new record would take (its carrier_name, compared
+//     trimmed and case-insensitively); the message names that record.
+// The status becomes Accepted in the same transaction that writes the account,
+// the record and the trucks, so a refused or failed acceptance leaves the
+// application as it was. An application whose investors record already exists
+// (it was accepted before) is simply marked Accepted again; nothing is created.
+// The username is derived from the legal name, with a number appended while it
+// is taken, so it never collides.
 app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const { status } = req.body;
@@ -13353,6 +13066,14 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			return res.status(400).json({ error: "Invalid status" });
 		}
 		const appId = parseInt(req.params.id);
+
+		// ⚠️ HASHED FIRST, ABOVE EVERY CHECK, AND IT MUST STAY HERE. It is the
+		// handler's only await, so every check below and the transaction that
+		// follows them run synchronously on state read after it — the rule
+		// PUT /api/users/:id and the driver acceptance follow.
+		const tempPassword = crypto.randomBytes(4).toString("hex");
+		const hash = status === "Accepted" ? await bcrypt.hash(tempPassword, 10) : "";
+
 		// ⚠️ CHECKED BEFORE THE UPDATE, and this is the reader where filtering
 		// matters most. `status = 'Accepted'` does not merely set a column: it
 		// CREATES A USER ACCOUNT, mints a temporary password and emails it. A
@@ -13366,17 +13087,51 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 				code: "APPLICATION_DELETED",
 			});
 		}
-		db.prepare("UPDATE investor_applications SET status=? WHERE id=?").run(status, appId);
+		const setStatus = db.prepare("UPDATE investor_applications SET status=? WHERE id=?");
 
 		if (status === "Accepted") {
 			const application = db.prepare("SELECT * FROM investor_applications WHERE id=?").get(appId);
 			if (!application) return res.status(404).json({ error: "Application not found" });
-			// Check if user already exists
-			const existingUser = db.prepare("SELECT id FROM users WHERE LOWER(email)=LOWER(?)").get(application.email);
-			if (existingUser) return res.json({ success: true, message: "Accepted (user already exists)" });
+
+			const previous = db.prepare("SELECT id FROM investors WHERE application_id = ? AND application_id > 0").all(appId);
+			if (previous.length) {
+				setStatus.run(status, appId);
+				notifyChange("investor-applications");
+				return res.json({ success: true, accountCreated: false, message: "Accepted (this application's account already exists)" });
+			}
+
+			const fullName = String(application.legal_name || "").trim();
+			if (!fullName) {
+				return res.status(400).json({
+					error: "Not accepted: this application has no legal name to create the investor account under. Nothing was changed.",
+					code: "INVESTOR_NAME_REQUIRED",
+				});
+			}
+			const carrierName = String(application.dba || "").trim() || fullName;
+
+			const email = String(application.email || "").trim();
+			const emailHolder = email ? db.prepare("SELECT id, username FROM users WHERE LOWER(email) = LOWER(?)").get(email) : null;
+			if (emailHolder) {
+				logAudit(req, "accept_investor_blocked", "investor_application", appId,
+					`Accepting application ${appId} refused: its email is already on user ${emailHolder.id}; nothing was written [USER_ALREADY_EXISTS]`);
+				return res.status(409).json({
+					error: `Not accepted: an account with this applicant's email already exists (username "${emailHolder.username}"). Nothing was changed.`,
+					code: "USER_ALREADY_EXISTS",
+				});
+			}
+			const nameHolder = db.prepare(
+				"SELECT id, full_name, carrier_name FROM investors WHERE LOWER(TRIM(carrier_name)) = LOWER(?) ORDER BY id LIMIT 1"
+			).get(carrierName);
+			if (nameHolder) {
+				logAudit(req, "accept_investor_blocked", "investor_application", appId,
+					`Accepting application ${appId} refused: investors record ${nameHolder.id} already holds its company name; nothing was written [INVESTOR_RECORD_CONFLICT]`);
+				return res.status(409).json({
+					error: `Not accepted: the investor record "${nameHolder.full_name || nameHolder.carrier_name}" already uses the company name "${carrierName}". Nothing was changed.`,
+					code: "INVESTOR_RECORD_CONFLICT",
+				});
+			}
 
 			// Auto-create investor user account
-			const fullName = application.legal_name.trim();
 			let baseUsername = fullName.toLowerCase().replace(/\s+/g, ".").replace(/[^a-z0-9.]/g, "");
 			let username = baseUsername;
 			let suffix = 1;
@@ -13384,32 +13139,38 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 				username = `${baseUsername}${suffix}`;
 				suffix++;
 			}
-			const tempPassword = crypto.randomBytes(4).toString("hex");
-			const hash = await bcrypt.hash(tempPassword, 10);
-			// must_change_password = 1, set exactly as the driver acceptance sets it
-			// (PUT /api/applications/:id/status). The temporary password is emailed
-			// in plaintext below, so until it is changed the account can do nothing
-			// else: requireAuth / requireRole refuse it (FORCED PASSWORD CHANGE) and
-			// the client router sends every role to /account/change-password.
-			const userResult = db.prepare(
-				"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name, must_change_password) VALUES (?, ?, 'Investor', '', ?, ?, ?, 1)"
-			).run(username, hash, application.email || "", fullName, application.dba || fullName);
-			const userId = userResult.lastInsertRowid;
 
-			// Create investor record with full business info from application
-			db.prepare(`INSERT OR IGNORE INTO investors
-				(user_id, full_name, carrier_name, status, application_id, entity_type, address, phone, email, ein_ssn, tax_classification, contact_person, contact_title)
-				VALUES (?, ?, ?, 'Active', ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-				.run(userId, fullName, application.dba || fullName, appId,
-					application.entity_type || "", application.address || "", application.phone || "",
-					application.email || "", application.ein_ssn || "", application.tax_classification || "",
-					application.contact_person || "", application.contact_title || "");
-
-			// Create trucks from application vehicles (owner_id = user ID, consistent with dashboard/reports)
 			let vehicles = [];
 			try { vehicles = JSON.parse(application.vehicles_json || "[]"); } catch { /* skip */ }
 			if (!Array.isArray(vehicles)) vehicles = [];
-			const vehicleCounts = registerApplicationVehicles(vehicles, appId, userId);
+
+			// One transaction: the status, the account, the investors record and the
+			// trucks are written together or not at all.
+			const { userId, vehicleCounts } = db.transaction(() => {
+				setStatus.run(status, appId);
+				// must_change_password = 1, set exactly as the driver acceptance sets it
+				// (PUT /api/applications/:id/status). The temporary password is emailed
+				// in plaintext below, so until it is changed the account can do nothing
+				// else: requireAuth / requireRole refuse it (FORCED PASSWORD CHANGE) and
+				// the client router sends every role to /account/change-password.
+				const userResult = db.prepare(
+					"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name, must_change_password) VALUES (?, ?, 'Investor', '', ?, ?, ?, 1)"
+				).run(username, hash, application.email || "", fullName, application.dba || fullName);
+				const userId = userResult.lastInsertRowid;
+
+				// Create investor record with full business info from application
+				db.prepare(`INSERT INTO investors
+					(user_id, full_name, carrier_name, status, application_id, entity_type, address, phone, email, ein_ssn, tax_classification, contact_person, contact_title)
+					VALUES (?, ?, ?, 'Active', ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+					.run(userId, fullName, carrierName, appId,
+						application.entity_type || "", application.address || "", application.phone || "",
+						application.email || "", application.ein_ssn || "", application.tax_classification || "",
+						application.contact_person || "", application.contact_title || "");
+
+				// Create trucks from application vehicles (owner_id = user ID, consistent with dashboard/reports)
+				const vehicleCounts = registerApplicationVehicles(vehicles, appId, userId);
+				return { userId, vehicleCounts };
+			})();
 			// What the investor's fleet actually holds: trucks written now plus
 			// trucks already on file that this account owns. A truck on file under
 			// another owner is not theirs and is not counted (heldByOther).
@@ -13489,6 +13250,7 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			return;
 		}
 
+		setStatus.run(status, appId);
 		res.json({ success: true });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -23910,36 +23672,141 @@ app.get("/api/investors", requireRole("Super Admin"), (req, res) => {
 	res.json({ investors });
 });
 
+// The text fields an investor record takes from the admin forms: body key,
+// column, the longest value allowed once cleaned, and whether line breaks are
+// kept. Cleaned the house way: sanitizeEvidenceText() turns control,
+// zero-width, text-direction and line-separator characters into a space
+// (NFC first), every other format character is dropped, and notes keep their
+// line breaks through sanitizeInvoiceNotes(). Only fullName is required.
+const INVESTOR_RECORD_TEXT_FIELDS = [
+	["fullName", "full_name", 120, false],
+	["carrierName", "carrier_name", 120, false],
+	["notes", "notes", 2000, true],
+	["entityType", "entity_type", 120, false],
+	["address", "address", 300, false],
+	["phone", "phone", 60, false],
+	["email", "email", 254, false],
+	["einSsn", "ein_ssn", 60, false],
+	["taxClassification", "tax_classification", 120, false],
+	["contactPerson", "contact_person", 120, false],
+	["contactTitle", "contact_title", 120, false],
+];
+const INVESTOR_RECORD_STATUSES = ["Active", "Inactive"];
+
+// Reads a POST / PUT /api/investors body. Returns { ok: true, values }, where a
+// field left out (undefined or null) is absent from `values`, or
+// { ok: false, field, error } for 400 INVALID_FIELD. `creating` makes fullName
+// required; on an edit a SENT fullName must still be non-empty.
+function readInvestorRecordBody(body, { creating }) {
+	const src = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+	const values = {};
+	for (const [key, , max, multiline] of INVESTOR_RECORD_TEXT_FIELDS) {
+		const raw = src[key];
+		if (raw === undefined || raw === null) continue;
+		const bad = { ok: false, field: key, error: `${key} must be text of at most ${max} characters.` };
+		if (typeof raw !== "string" || raw.length > max * 4) return bad;
+		const text = multiline
+			? sanitizeInvoiceNotes(raw, Infinity)
+			: sanitizeEvidenceText(raw, Infinity).replace(/\p{Cf}+/gu, "").trim();
+		if (Array.from(text).length > max) return bad;
+		values[key] = text;
+	}
+	if ((creating || values.fullName !== undefined) && !values.fullName) {
+		return { ok: false, field: "fullName", error: "The investor's name is required." };
+	}
+	if (src.status !== undefined && src.status !== null && src.status !== "") {
+		if (!INVESTOR_RECORD_STATUSES.includes(src.status)) {
+			return { ok: false, field: "status", error: `status must be ${INVESTOR_RECORD_STATUSES.join(" or ")}.` };
+		}
+		values.status = src.status;
+	}
+	if (src.userId !== undefined && src.userId !== null && src.userId !== "" && src.userId !== 0) {
+		const n = typeof src.userId === "number" ? src.userId
+			: (typeof src.userId === "string" && /^\d{1,15}$/.test(src.userId) ? Number(src.userId) : NaN);
+		if (!Number.isSafeInteger(n) || n <= 0) return { ok: false, field: "userId", error: "userId must be a user's id." };
+		values.userId = n;
+	}
+	return { ok: true, values };
+}
+
+// The investors record other than `exceptId` that already holds this carrier
+// name (compared trimmed and case-insensitively), or null.
+function investorCarrierHolder(carrierName, exceptId) {
+	return db.prepare(
+		"SELECT id, full_name, carrier_name FROM investors WHERE LOWER(TRIM(carrier_name)) = LOWER(?) AND id != ? ORDER BY id LIMIT 1"
+	).get(carrierName, exceptId) || null;
+}
+
+// A collision on the UNIQUE index of investors.carrier_name or investors.user_id
+// that the checks in the routes did not see, answered as a 409. False for any
+// other error.
+function investorRecordConflict(err, res) {
+	if (!err || err.code !== "SQLITE_CONSTRAINT_UNIQUE") return false;
+	res.status(409).json(/investors\.user_id/.test(String(err.message))
+		? { error: "That user is already linked to another investor record.", code: "INVESTOR_USER_TAKEN" }
+		: { error: "That carrier name is already used by another investor record.", code: "CARRIER_NAME_TAKEN" });
+	return true;
+}
+
+// The id in /api/investors/:id, or 0 when it is not a positive integer.
+function investorRecordId(raw) {
+	return typeof raw === "string" && /^[1-9]\d{0,14}$/.test(raw) ? Number(raw) : 0;
+}
+
+// POST /api/investors — Super Admin adds an investor record by hand.
+// 400 INVALID_FIELD (field) for a missing or over-long name, a status other
+// than Active / Inactive, notes over 2000 characters, or a text field that is
+// not text; 409 CARRIER_NAME_TAKEN when another record holds the carrier name
+// (which defaults to the name); 409 INVESTOR_USER_TAKEN when the user is
+// already linked to another record. Audited as create_investor.
 app.post("/api/investors", requireRole("Super Admin"), (req, res) => {
-	const { userId, fullName, carrierName, status, notes, entityType, address, phone, email, einSsn, taxClassification, contactPerson, contactTitle } = req.body;
-	if (!fullName || !fullName.trim()) return res.status(400).json({ error: "Full name is required" });
-	// Carrier UI was removed; default carrier_name to the investor's own name so
-	// the UNIQUE index on investors.carrier_name still holds for new rows.
-	const finalCarrier = (carrierName || fullName).trim();
-	const result = db.prepare(`
-		INSERT INTO investors (user_id, full_name, carrier_name, status, notes, entity_type, address, phone, email, ein_ssn, tax_classification, contact_person, contact_title)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`).run(userId || null, fullName.trim(), finalCarrier, status || "Active", (notes || "").trim(),
-		(entityType || "").trim(), (address || "").trim(), (phone || "").trim(), (email || "").trim(),
-		(einSsn || "").trim(), (taxClassification || "").trim(), (contactPerson || "").trim(), (contactTitle || "").trim());
-	notifyChange("investors");
-	res.json({ success: true, id: result.lastInsertRowid });
+	try {
+		const read = readInvestorRecordBody(req.body, { creating: true });
+		if (!read.ok) return res.status(400).json({ error: read.error, code: "INVALID_FIELD", field: read.field });
+		const v = read.values;
+		// Carrier UI was removed; default carrier_name to the investor's own name so
+		// the UNIQUE index on investors.carrier_name still holds for new rows.
+		const finalCarrier = v.carrierName || v.fullName;
+		const holder = investorCarrierHolder(finalCarrier, 0);
+		if (holder) {
+			return res.status(409).json({
+				error: `The carrier name "${finalCarrier}" is already used by the investor record "${holder.full_name || holder.carrier_name}".`,
+				code: "CARRIER_NAME_TAKEN",
+			});
+		}
+		if (v.userId && db.prepare("SELECT 1 AS hit FROM investors WHERE user_id = ?").get(v.userId)) {
+			return res.status(409).json({ error: "That user is already linked to another investor record.", code: "INVESTOR_USER_TAKEN" });
+		}
+		const result = db.prepare(`
+			INSERT INTO investors (user_id, full_name, carrier_name, status, notes, entity_type, address, phone, email, ein_ssn, tax_classification, contact_person, contact_title)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`).run(v.userId || null, v.fullName, finalCarrier, v.status || "Active", v.notes || "",
+			v.entityType || "", v.address || "", v.phone || "", v.email || "",
+			v.einSsn || "", v.taxClassification || "", v.contactPerson || "", v.contactTitle || "");
+		logAudit(req, "create_investor", "investor", result.lastInsertRowid,
+			auditText(`Created investor record "${v.fullName}" (carrier "${finalCarrier}", ${v.status || "Active"})${v.userId ? `, linked to user ${v.userId}` : ""}`, 500));
+		notifyChange("investors");
+		res.json({ success: true, id: result.lastInsertRowid });
+	} catch (err) {
+		if (investorRecordConflict(err, res)) return;
+		console.error("POST /api/investors error:", err.message);
+		res.status(500).json({ error: "Failed to save the investor record" });
+	}
 });
 
+// PUT /api/investors/:id — Super Admin edits an investor record. A field left
+// out keeps its stored value. The same 400 / 409 answers as POST, plus 404
+// INVESTOR_NOT_FOUND. The carrier name is checked against the other records
+// only when it changes. Audited as update_investor, naming each changed field
+// before → after (the tax id by name only).
 app.put("/api/investors/:id", requireRole("Super Admin"), (req, res) => {
-	const { id } = req.params;
-	const existing = db.prepare("SELECT * FROM investors WHERE id = ?").get(id);
-	if (!existing) return res.status(404).json({ error: "Investor not found" });
-	const { userId, fullName, carrierName, status, notes, entityType, address, phone, email, einSsn, taxClassification, contactPerson, contactTitle } = req.body;
-	db.prepare(`
-		UPDATE investors SET user_id=?, full_name=?, carrier_name=?, status=?, notes=?,
-		entity_type=?, address=?, phone=?, email=?, ein_ssn=?, tax_classification=?, contact_person=?, contact_title=?
-		WHERE id=?
-	`).run(
-		userId ?? existing.user_id, (fullName || existing.full_name).trim(), (carrierName || existing.carrier_name).trim(),
-		status || existing.status, (notes ?? existing.notes).trim(),
-		(entityType ?? existing.entity_type).trim(), (address ?? existing.address).trim(),
-		(phone ?? existing.phone).trim(), (email ?? existing.email).trim(),
+	try {
+		const id = investorRecordId(req.params.id);
+		const existing = id ? db.prepare("SELECT * FROM investors WHERE id = ?").get(id) : null;
+		if (!existing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
+		const read = readInvestorRecordBody(req.body, { creating: false });
+		if (!read.ok) return res.status(400).json({ error: read.error, code: "INVALID_FIELD", field: read.field });
+		const v = read.values;
 		// ⚠️ A MASKED VALUE MUST NEVER BE SAVED OVER THE REAL ONE.
 		// Safe today only by accident: GET /api/investors maps to a restricted
 		// shape with no ein_ssn, so nothing round-trips. The moment anyone
@@ -23948,28 +23815,74 @@ app.put("/api/investors/:id", requireRole("Super Admin"), (req, res) => {
 		// "••••1234" over the tax id — silently, and irreversibly.
 		// Enforced here rather than documented as an invariant, so every future
 		// masking decision is safe by construction.
-		(piiMask.isMasked(einSsn) ? existing.ein_ssn : (einSsn ?? existing.ein_ssn)).trim(),
-		(taxClassification ?? existing.tax_classification).trim(),
-		(contactPerson ?? existing.contact_person).trim(), (contactTitle ?? existing.contact_title).trim(), id
-	);
-	notifyChange("investors");
-	res.json({ success: true });
+		if (v.einSsn !== undefined && piiMask.isMasked(v.einSsn)) delete v.einSsn;
+		const next = { user_id: v.userId ?? existing.user_id, status: v.status ?? existing.status };
+		for (const [key, column] of INVESTOR_RECORD_TEXT_FIELDS) {
+			next[column] = v[key] ?? String(existing[column] ?? "").trim();
+		}
+		if (v.carrierName !== undefined && v.carrierName !== existing.carrier_name) {
+			const holder = investorCarrierHolder(next.carrier_name, id);
+			if (holder) {
+				return res.status(409).json({
+					error: `The carrier name "${next.carrier_name}" is already used by the investor record "${holder.full_name || holder.carrier_name}".`,
+					code: "CARRIER_NAME_TAKEN",
+				});
+			}
+		}
+		if (next.user_id && next.user_id !== existing.user_id
+			&& db.prepare("SELECT 1 AS hit FROM investors WHERE user_id = ? AND id != ?").get(next.user_id, id)) {
+			return res.status(409).json({ error: "That user is already linked to another investor record.", code: "INVESTOR_USER_TAKEN" });
+		}
+		db.prepare(`
+			UPDATE investors SET user_id=?, full_name=?, carrier_name=?, status=?, notes=?,
+			entity_type=?, address=?, phone=?, email=?, ein_ssn=?, tax_classification=?, contact_person=?, contact_title=?
+			WHERE id=?
+		`).run(
+			next.user_id, next.full_name, next.carrier_name, next.status, next.notes,
+			next.entity_type, next.address, next.phone, next.email, next.ein_ssn,
+			next.tax_classification, next.contact_person, next.contact_title, id
+		);
+		const changed = ["user_id", "status", ...INVESTOR_RECORD_TEXT_FIELDS.map(([, column]) => column)]
+			.filter((column) => String(next[column] ?? "") !== String(existing[column] ?? ""))
+			.map((column) => (column === "ein_ssn"
+				? "ein_ssn changed"
+				: `${column}: ${auditText(existing[column] ?? "", 120) || "(blank)"} → ${auditText(next[column] ?? "", 120) || "(blank)"}`));
+		if (changed.length) logAudit(req, "update_investor", "investor", id, auditText(changed.join("; "), 2000));
+		notifyChange("investors");
+		res.json({ success: true });
+	} catch (err) {
+		if (investorRecordConflict(err, res)) return;
+		console.error("PUT /api/investors/:id error:", err.message);
+		res.status(500).json({ error: "Failed to save the investor record" });
+	}
 });
 
+// DELETE /api/investors/:id — Super Admin removes an investor record: a hard
+// delete of the row and its profile picture (the linked account, trucks and
+// documents are left as they are). 404 INVESTOR_NOT_FOUND for an id that is not
+// on file. Audited as delete_investor.
 app.delete("/api/investors/:id", requireRole("Super Admin"), (req, res) => {
-	const { id } = req.params;
-	const existing = db.prepare("SELECT * FROM investors WHERE id = ?").get(id);
-	if (!existing) return res.status(404).json({ error: "Investor not found" });
-	// Cascade: unlink the profile picture from disk
-	if (existing.profile_picture_url) {
-		try {
-			const picPath = path.join(__dirname, existing.profile_picture_url);
-			if (fs.existsSync(picPath)) fs.unlinkSync(picPath);
-		} catch (err) { console.error("Failed to unlink investor profile pic on cascade:", err.message); }
+	try {
+		const id = investorRecordId(req.params.id);
+		const existing = id ? db.prepare("SELECT * FROM investors WHERE id = ?").get(id) : null;
+		if (!existing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
+		// Cascade: unlink the profile picture from disk
+		if (existing.profile_picture_url) {
+			try {
+				const picPath = path.join(__dirname, existing.profile_picture_url);
+				if (fs.existsSync(picPath)) fs.unlinkSync(picPath);
+			} catch (err) { console.error("Failed to unlink investor profile pic on cascade:", err.message); }
+		}
+		db.prepare("DELETE FROM investors WHERE id = ?").run(id);
+		logAudit(req, "delete_investor", "investor", id,
+			auditText(`Deleted investor record "${existing.full_name}" (carrier "${existing.carrier_name}")` +
+				`${existing.user_id ? `, linked to user ${existing.user_id}` : ""}${existing.application_id ? `, from application ${existing.application_id}` : ""}`, 500));
+		notifyChange("investors");
+		res.json({ success: true });
+	} catch (err) {
+		console.error("DELETE /api/investors/:id error:", err.message);
+		res.status(500).json({ error: "Failed to delete the investor record" });
 	}
-	db.prepare("DELETE FROM investors WHERE id = ?").run(id);
-	notifyChange("investors");
-	res.json({ success: true });
 });
 
 // Check if a driver has an active load (returns error message or null).
@@ -24022,6 +23935,7 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 	// Super Admin previewing an investor's portal: scope to the target's trucks.
 	// Outside preview mode the behavior is unchanged for all roles.
 	const preview = resolvePreviewUser(req);
+	if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 	let rows;
 	// created_at is UTC CURRENT_TIMESTAMP with no zone marker — the trailing
 	// alias re-emits it as ISO-8601 Z, overriding the starred value.
@@ -37271,6 +37185,7 @@ app.get("/api/routemate/fuel/summary", requireRole("Super Admin", "Dispatcher", 
 		// Super Admin previewing an investor's portal: scope to that investor's
 		// trucks so MPG matches what the investor sees on their own dashboard.
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 
 		const trucks = preview.isPreview
 			? db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks WHERE owner_id = ?").all(preview.effectiveUserId)
@@ -37364,6 +37279,7 @@ app.get("/api/routemate/fault-codes/summary", requireRole("Super Admin", "Dispat
 	try {
 		const user = req.session.user;
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const trucks = preview.isPreview
 			? db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks WHERE owner_id = ?").all(preview.effectiveUserId)
 			: (user.role === "Investor")
@@ -37591,6 +37507,7 @@ app.get("/api/investor/messages", requireRole("Super Admin", "Investor"), (req, 
 		// Note: read receipts deliberately do NOT fire in preview mode — the admin
 		// is verifying what the investor sees, not consuming the investor's queue.
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const name = preview.effectiveUsername.trim().toLowerCase();
 		const messages = db.prepare(
 			`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type, asset_ref
@@ -42034,9 +41951,27 @@ app.get("/api/legal-documents", requireRole("Super Admin", "Investor"), (req, re
 });
 
 // POST /api/legal-documents/upload — Super Admin or Investor uploads a legal doc
+//
+// An Investor files documents only against what is theirs, checked before a
+// byte is written: `investorId`, when sent, must be their own investors record
+// (left out, it is theirs); `truckId`, when sent, must be a truck they own; and
+// `driverId` is refused outright — the Investor portal never sends one, only
+// the admin's driver screens do. Anything else is 403 NOT_OWNER and nothing is
+// stored. A Super Admin files against any of the three.
 app.post("/api/legal-documents/upload", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
 		const { truckId, unitNumber, docType, fileData, fileName, notes, investorId, driverId, visibleToDriver } = req.body;
+		if (req.session.user.role === "Investor") {
+			const own = db.prepare("SELECT id FROM investors WHERE user_id = ?").all(req.session.user.id).map((r) => r.id);
+			const sentInvestor = parseInt(investorId) || 0;
+			const sentTruck = parseInt(truckId) || 0;
+			const refused = (parseInt(driverId) || 0) > 0
+				|| (sentInvestor > 0 && !own.includes(sentInvestor))
+				|| (sentTruck > 0 && !db.prepare("SELECT 1 AS hit FROM trucks WHERE id = ? AND owner_id = ?").get(sentTruck, req.session.user.id));
+			if (refused) {
+				return res.status(403).json({ error: "You can upload documents only to your own profile or trucks.", code: "NOT_OWNER" });
+			}
+		}
 		if (!fileData || !fileName) {
 			return res.status(400).json({ error: "fileData and fileName are required" });
 		}
@@ -42107,12 +42042,28 @@ app.patch("/api/legal-documents/:id/visibility", requireRole("Super Admin"), (re
 	}
 });
 
-// DELETE /api/legal-documents/:id — Super Admin or owner removes a legal doc
+// DELETE /api/legal-documents/:id — a Super Admin removes any legal doc; an
+// Investor removes one only when it is theirs: uploaded under their own account
+// AND still filed against their own investors record or a truck they own (the
+// same scope GET /api/legal-documents lists for them; a driver document never
+// is). Any other document answers 404 DOCUMENT_NOT_FOUND, the same body as a
+// missing id, and nothing is deleted.
 app.delete("/api/legal-documents/:id", requireRole("Super Admin", "Investor"), (req, res) => {
 	try {
 		const id = parseInt(req.params.id);
 		const doc = db.prepare("SELECT * FROM legal_documents WHERE id = ?").get(id);
-		if (!doc) return res.status(404).json({ error: "Document not found" });
+		const notFound = () => res.status(404).json({ error: "Document not found", code: "DOCUMENT_NOT_FOUND" });
+		if (!doc) return notFound();
+		const user = req.session.user;
+		if (user.role !== "Super Admin") {
+			const ownInvestorIds = db.prepare("SELECT id FROM investors WHERE user_id = ?").all(user.id).map((r) => r.id);
+			const inScope = !(doc.driver_id > 0) && (
+				(doc.investor_id > 0 && ownInvestorIds.includes(doc.investor_id))
+				|| (doc.truck_id > 0 && !!db.prepare("SELECT 1 AS hit FROM trucks WHERE id = ? AND owner_id = ?").get(doc.truck_id, user.id))
+			);
+			const uploadedByThem = String(doc.uploaded_by || "").trim().toLowerCase() === String(user.username || "").trim().toLowerCase();
+			if (!inScope || !uploadedByThem) return notFound();
+		}
 		if (doc.file_url) {
 			const filePath = path.join(__dirname, doc.file_url);
 			try { fs.unlinkSync(filePath); } catch { /* file may already be gone */ }
@@ -42316,6 +42267,7 @@ app.get("/api/investor/onboarding-documents", requireRole("Super Admin", "Invest
 app.get("/api/investor/documents", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const user = { ...preview.sessionUser, id: preview.effectiveUserId, username: preview.effectiveUsername };
 		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 		let docs;
@@ -42346,6 +42298,7 @@ app.get("/api/investor/documents", requireRole("Super Admin", "Investor"), async
 app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const user = { ...preview.sessionUser, id: preview.effectiveUserId, username: preview.effectiveUsername };
 		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 
@@ -42485,6 +42438,7 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 
 		// Preview ("view as investor") + scoping — mirror /api/investor exactly.
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const user = { ...preview.sessionUser, id: preview.effectiveUserId, username: preview.effectiveUsername };
 		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 		if (preview.isPreview) logAudit(req, "investor_preview_view", "investor", preview.effectiveUserId, "");
@@ -42764,6 +42718,7 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 	try {
 		// Re-use the investor data by making an internal call
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const user = { ...preview.sessionUser, id: preview.effectiveUserId, username: preview.effectiveUsername };
 		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 		if (preview.isPreview) logAudit(req, "investor_preview_report", "investor", preview.effectiveUserId, "");
@@ -49134,6 +49089,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// the endpoint scopes data as if the admin were logged in as that
 		// investor. Outside preview mode the values match the session user.
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const user = {
 			...preview.sessionUser,
 			id: preview.effectiveUserId,
@@ -50427,6 +50383,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 app.get("/api/investor/expenses", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const user = { ...preview.sessionUser, id: preview.effectiveUserId, username: preview.effectiveUsername };
 		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 		const { truck, type, status, from, to } = req.query;
@@ -50493,6 +50450,7 @@ app.get("/api/investor/expenses", requireRole("Super Admin", "Investor"), async 
 app.get("/api/investor/payouts", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const user = { ...preview.sessionUser, id: preview.effectiveUserId, username: preview.effectiveUsername };
 		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 
@@ -50614,6 +50572,7 @@ app.get("/api/investor/payouts/:period/history", requireRole("Super Admin", "Inv
 		// payouts they are reading, so an investor's history can never be served
 		// off an ambiguous session.
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 		if (isSuperAdmin) return res.status(400).json({ error: "Pass ?as_user_id=<investorUserId> to view an investor's payout history." });
 
@@ -50654,6 +50613,7 @@ app.get("/api/investor/payouts/:period/detail", requireRole("Super Admin", "Inve
 		if (!/^\d{4}-\d{2}$/.test(period)) return res.status(400).json({ error: "period must be YYYY-MM" });
 
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 		if (isSuperAdmin) return res.status(400).json({ error: "Pass ?as_user_id=<investorUserId> to view an investor's payout detail." });
 		if (preview.isPreview) logAudit(req, "investor_payout_detail_view", "investor", preview.effectiveUserId, period);
@@ -50871,6 +50831,7 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 		if (!/^\d{4}-\d{2}$/.test(period)) return res.status(400).json({ error: "period must be YYYY-MM" });
 
 		const preview = resolvePreviewUser(req);
+		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 		if (isSuperAdmin) return res.status(400).json({ error: "Pass ?as_user_id=<investorUserId> to download an investor's payout statement." });
 		const ownerId = preview.effectiveUserId;
@@ -53841,7 +53802,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 // GET /api/investor/config — merged investor config (global owner_id=0 rows
 // overlaid by this investor's own overrides). Super Admin may target a specific
 // investor via ?ownerId=N; an Investor is always scoped to their own id. Mirrors
-// the PUT handler's auth + ownerId resolution and the /api/investor read pattern
+// the /api/investor read pattern
 // (per-investor rows override globals), so e.g. investor_split_pct returns the
 // per-investor value when set, else the seeded global "50".
 app.get("/api/investor/config", requireRole("Super Admin", "Investor"), (req, res) => {
@@ -53864,22 +53825,132 @@ app.get("/api/investor/config", requireRole("Super Admin", "Investor"), (req, re
 	}
 });
 
-// PUT /api/investor/config — Admin: update investor config
-app.put("/api/investor/config", requireRole("Super Admin", "Investor"), (req, res) => {
+// The investor_config keys PUT /api/investor/config may write: every key the
+// seed writes (above) that something reads, plus blue_chip_brokers, which
+// Admin Tools' Fleet Configuration edits. A key outside this map is refused.
+//   - number: read through parsePlainDecimal(), finite, min..max, at most
+//     `decimals` places; stored as its plain decimal text ("45", "800.5").
+//   - text: one line (no control, format or line-separator characters), at
+//     most maxLength characters; stored trimmed.
+//   - globalOnly: a key whose readers take the fleet-wide row alone
+//     (owner_id = 0): the fund and fuel targets on the admin Expenses screens,
+//     the settlement grace window, and the broker list. A per-investor row of
+//     one would be stored and never read, so it is refused.
+const INVESTOR_CONFIG_KEYS = new Map([
+	["investor_split_pct", { kind: "number", min: 0, max: 100, decimals: 2 }],
+	["truck_purchase_price", { kind: "number", min: 0, max: 1_000_000, decimals: 2 }],
+	["depreciation_years", { kind: "number", min: 1, max: 50, decimals: 2 }],
+	["truck_title_status", { kind: "text", maxLength: 40 }],
+	["maintenance_fund_monthly", { kind: "number", min: 0, max: 1_000_000, decimals: 2, globalOnly: true }],
+	["fuel_savings_target_pct", { kind: "number", min: 0, max: 100, decimals: 2, globalOnly: true }],
+	["settlement_grace_days", { kind: "number", min: 0, max: 28, decimals: 0, globalOnly: true }],
+	["blue_chip_brokers", { kind: "text", maxLength: 2000, globalOnly: true }],
+]);
+const INVESTOR_CONFIG_MAX_ENTRIES = 20;
+
+// Whose rows a config write changes, from ?ownerId=: "global" is the
+// fleet-wide rows (owner_id 0) every investor inherits; a positive integer is
+// one investor's own rows, by users.id — a user whose role is Investor, or one
+// an investors record links. Returns { ok, ownerId } or { ok: false, status,
+// code, error }.
+function investorConfigOwner(raw) {
+	if (raw === undefined || raw === "") {
+		return { ok: false, status: 400, code: "OWNER_ID_REQUIRED", error: "Name whose configuration this is: ownerId=global for the fleet-wide values, or ownerId=<the investor's user id>." };
+	}
+	if (raw === "global") return { ok: true, ownerId: 0 };
+	if (typeof raw !== "string" || !/^[1-9]\d{0,14}$/.test(raw)) {
+		return { ok: false, status: 400, code: "INVALID_OWNER_ID", error: "ownerId must be global or an investor's user id." };
+	}
+	const id = Number(raw);
+	const known = db.prepare(
+		"SELECT 1 AS hit FROM users WHERE id = ? AND role = 'Investor' UNION ALL SELECT 1 FROM investors WHERE user_id = ? LIMIT 1"
+	).get(id, id);
+	if (!known) return { ok: false, status: 404, code: "INVESTOR_NOT_FOUND", error: "Investor not found" };
+	return { ok: true, ownerId: id };
+}
+
+// One config value off the wire, as the text investor_config stores for it:
+// { ok: true, value } or { ok: false }.
+function investorConfigValue(spec, raw) {
+	if (spec.kind === "number") {
+		const n = parsePlainDecimal(raw);
+		if (!Number.isFinite(n) || n < spec.min || n > spec.max) return { ok: false };
+		const scale = 10 ** spec.decimals;
+		const scaled = n * scale;
+		if (Math.abs(scaled - Math.round(scaled)) > 1e-6) return { ok: false };
+		return { ok: true, value: String(Math.round(scaled) / scale) };
+	}
+	if (typeof raw !== "string" || raw.length > spec.maxLength * 4) return { ok: false };
+	const text = raw.trim();
+	if (Array.from(text).length > spec.maxLength || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(text)) return { ok: false };
+	return { ok: true, value: text };
+}
+
+// Whether a stored value already says what `value` says. A number is compared
+// as a number, so "15.0" on file and 15 sent is no change.
+function investorConfigSame(spec, stored, value) {
+	if (stored === undefined) return false;
+	if (spec.kind === "number") {
+		const n = parsePlainDecimal(stored);
+		return Number.isFinite(n) && n === Number(value);
+	}
+	return stored === value;
+}
+
+// PUT /api/investor/config — Super Admin: change investor configuration.
+//
+// ?ownerId= is required: "global" or an investor's users.id (see
+// investorConfigOwner()). The body is a plain object of 1..20 keys from
+// INVESTOR_CONFIG_KEYS. Everything is checked before anything is written; then
+// only the keys whose value changes are written, in one transaction, and the
+// change is audited as before → after. A save that changes nothing writes
+// nothing: no row, no audit line, no socket event.
+//
+// Synchronous on purpose — no await between the checks and the write.
+app.put("/api/investor/config", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {
 	try {
-		const user = req.session.user;
-		const targetOwnerId = user.role === "Super Admin"
-			? parseInt(req.query.ownerId) || 0
-			: user.id;
-		const updates = req.body; // { key: value, ... }
-		const stmt = db.prepare(
-			"INSERT OR REPLACE INTO investor_config (owner_id, key, value) VALUES (?, ?, ?)",
-		);
-		const updateMany = db.transaction((entries) => {
-			for (const [k, v] of entries) stmt.run(targetOwnerId, k, String(v));
-		});
-		updateMany(Object.entries(updates));
-		res.json({ success: true });
+		const owner = investorConfigOwner(req.query.ownerId);
+		if (!owner.ok) return res.status(owner.status).json({ error: owner.error, code: owner.code });
+		const ownerId = owner.ownerId;
+
+		const body = req.body;
+		const isPlain = !!body && typeof body === "object" && !Array.isArray(body) && Object.getPrototypeOf(body) === Object.prototype;
+		const entries = isPlain ? Object.entries(body) : [];
+		if (!entries.length || entries.length > INVESTOR_CONFIG_MAX_ENTRIES) {
+			return res.status(400).json({ error: `Send an object of 1 to ${INVESTOR_CONFIG_MAX_ENTRIES} configuration values.`, code: "INVALID_CONFIG_BODY" });
+		}
+		const next = [];
+		for (const [key, raw] of entries) {
+			const spec = INVESTOR_CONFIG_KEYS.get(key);
+			const keyOut = String(key).slice(0, 64);
+			if (!spec) return res.status(400).json({ error: `Unknown configuration key: ${keyOut}`, code: "UNKNOWN_CONFIG_KEY", key: keyOut });
+			if (spec.globalOnly && ownerId !== 0) {
+				return res.status(400).json({ error: `${key} is a fleet-wide setting: save it with ownerId=global.`, code: "CONFIG_KEY_GLOBAL_ONLY", key });
+			}
+			const read = investorConfigValue(spec, raw);
+			if (!read.ok) {
+				const rule = spec.kind === "number"
+					? `a number from ${spec.min} to ${spec.max}${spec.decimals ? ` with at most ${spec.decimals} decimal places` : ", whole"}`
+					: `one line of text, at most ${spec.maxLength} characters`;
+				return res.status(400).json({ error: `${key} must be ${rule}.`, code: "INVALID_CONFIG_VALUE", key });
+			}
+			next.push({ key, spec, value: read.value });
+		}
+
+		const stored = new Map(db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?").all(ownerId).map((r) => [r.key, r.value]));
+		const changes = next.filter((c) => !investorConfigSame(c.spec, stored.get(c.key), c.value));
+		if (changes.length) {
+			const upsert = db.prepare(
+				"INSERT INTO investor_config (owner_id, key, value) VALUES (?, ?, ?) ON CONFLICT(owner_id, key) DO UPDATE SET value = excluded.value"
+			);
+			db.transaction(() => {
+				for (const c of changes) upsert.run(ownerId, c.key, c.value);
+			})();
+			logAudit(req, "update_investor_config", "investor_config", ownerId ? `owner:${ownerId}` : "global",
+				auditText(changes.map((c) => `${c.key}: ${stored.has(c.key) ? auditText(stored.get(c.key), 120) : "unset"} → ${auditText(c.value, 120)}`).join("; "), 2000));
+			notifyChange("investor");
+		}
+		res.json({ success: true, ownerId, changed: changes.map((c) => c.key) });
 	} catch (error) {
 		console.error("Error updating investor config:", error.message);
 		res.status(500).json({ error: error.message });
@@ -54434,8 +54505,10 @@ const fuelAnalyticsLimiter = rateLimit({
 });
 app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher"), fuelAnalyticsLimiter, (req, res) => {
 	try {
+		// The fleet-wide row alone (owner_id = 0): this is an admin screen with no
+		// investor in it, and an investor's own row must never stand in for it.
 		const config = {};
-		db.prepare("SELECT key, value FROM investor_config").all()
+		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all()
 			.forEach((r) => (config[r.key] = r.value));
 		const savingsTarget = parseFloat(config.fuel_savings_target_pct) || 15;
 
@@ -55002,8 +55075,9 @@ app.get("/api/expenses/ai/insights", requireRole("Super Admin", "Dispatcher"), i
 // GET /api/maintenance-fund — Fund balance, contributions, and service history
 app.get("/api/maintenance-fund", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
+		// The fleet-wide row alone (owner_id = 0), as in GET /api/expenses/fuel-analytics.
 		const config = {};
-		db.prepare("SELECT key, value FROM investor_config").all()
+		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all()
 			.forEach((r) => (config[r.key] = r.value));
 		const monthlyTarget = parseFloat(config.maintenance_fund_monthly) || 800;
 

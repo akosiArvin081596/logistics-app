@@ -254,8 +254,9 @@ export const useInvestorStore = defineStore('investor', {
       return data
     },
 
-    // Same `_payoutsToken` scope guard, third sibling. The PUT is scoped by the
-    // session (it takes no as_user_id), but the local write-back is not: without
+    // Same `_payoutsToken` scope guard, third sibling. The PUT names the
+    // fleet-wide config (ownerId=global, no as_user_id), but the local write-back
+    // is not scoped: without
     // the token check a config saved while viewing one investor lands on
     // `this.data.config` AFTER a preview switch has replaced `data` with another
     // investor's payload, so investor B's dashboard renders investor A's view
@@ -269,12 +270,16 @@ export const useInvestorStore = defineStore('investor', {
     // (InvestorView.handleSaveConfig) re-fetches with `load()` immediately
     // after, and a scope change re-fetches on mount, so the cache is refilled
     // from the server either way.
+    //
+    // The reply is { success, ownerId, changed }, not the whole config, so the
+    // saved keys are MERGED into the config already loaded; replacing it would
+    // drop every key the form does not send.
     async updateConfig(config) {
       const token = this._payoutsToken
-      const data = await api.put('/api/investor/config', config)
+      await api.put('/api/investor/config?ownerId=global', config)
       if (token !== this._payoutsToken) return // superseded — don't touch the new scope's data
       if (this.data) {
-        this.data.config = data.config || config
+        this.data.config = { ...(this.data.config || {}), ...config }
       }
     },
 

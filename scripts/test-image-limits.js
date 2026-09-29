@@ -285,10 +285,6 @@ const investApplyBody = routeBody('app.post("/api/public/investor-apply"');
 ok("POST /api/public/investor-apply: signature checked before the transaction + render",
 	guardsBefore(investApplyBody, "imageLimits.checkSignatureImage(sig.image)", ["db.transaction(", "writeSignedArtifact(", "buildInvestorDocRender("]));
 
-const investSignBody = routeBody('app.post("/api/public/investor-onboarding/:id/sign/:docKey"');
-ok("POST investor-onboarding sign: signature checked before the render",
-	guardsBefore(investSignBody, "imageLimits.checkSignatureImage(signatureImage)", ["writeSignedArtifact(", "buildInvestorDocRender("]));
-
 const previewBody = routeBody('app.post("/api/public/investor-preview-pdf/:docKey"');
 ok("POST investor-preview-pdf: signature checked before either renderer",
 	guardsBefore(previewBody, "imageLimits.checkSignatureImage(signatureImage)", ["renderPolicy(", "fillW9Form("]));

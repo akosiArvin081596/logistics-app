@@ -349,7 +349,7 @@ Draft → New → Reviewed → Accepted
                       ↘ Rejected
 ```
 
-- **Draft:** initial state (not used in `/invest` atomic flow — reserved for the token-based split flow at `/api/public/investor-onboarding/:id/*`)
+- **Draft:** initial state (not used in `/invest` atomic flow; the token-based split flow at `/api/public/investor-onboarding/:id/*` that used it was removed on 2026-09-30)
 - **New:** set on insert by `POST /api/public/investor-apply`
 - **Reviewed:** admin marks after initial review
 - **Accepted:** triggers auto-provisioning (see below)
@@ -789,7 +789,7 @@ The `beforeEach` guard in `router/index.js` (around line 160-170) handles these 
 
 ### Token-based onboarding endpoints (alternative flow)
 
-The split flow at `/api/public/investor-onboarding/:id/*` uses an `access_token` UUID stored in `investor_applications.access_token`. These endpoints validate the token against the URL parameter before allowing document signing, vehicle submission, or banking submission. This flow is NOT used by the `/invest` page (which submits atomically in one request) — it exists as a fallback for manual/partial onboarding.
+**Removed on 2026-09-30.** The split flow at `/api/public/investor-onboarding/:id/*` used an `access_token` stored in `investor_applications.access_token`; nothing called it (the `/invest` page submits atomically in one request), and no route accepts that token any more.
 
 ### Investor user provisioning (on approval)
 
@@ -848,11 +848,6 @@ The split flow at `/api/public/investor-onboarding/:id/*` uses an `access_token`
 | Method | Path | Rate limit | Purpose |
 |---|---|---|---|
 | POST | `/api/public/investor-apply` | 10/15min | Atomic submission — insert app + banking + signatures + generate PDFs + emails |
-| GET | `/api/public/investor-onboarding/:id` | none | Get application state (token required) |
-| POST | `/api/public/investor-onboarding/:id/sign/:docKey` | none | Sign a document (token required) |
-| GET | `/api/public/investor-onboarding/:id/documents/:docKey/pdf` | none | Retrieve unsigned preview PDF |
-| POST | `/api/public/investor-onboarding/:id/vehicles` | none | Save vehicles JSON |
-| POST | `/api/public/investor-onboarding/:id/banking` | none | Submit banking + promote Draft → New |
 | POST | `/api/public/investor-preview-pdf/:docKey` | none | Stateless PDF preview for live sign modal |
 | GET | `/api/config/maps-key` | none | Expose Google Maps API key to frontend |
 | POST | `/api/geocode` | none | Reverse geocoding (cached) |
@@ -1183,7 +1178,7 @@ While `status` has a CHECK constraint, `bankruptcy_liens` accepts any string. Si
 
 ### `/invest` does not use the token-based onboarding flow
 
-There's a parallel set of endpoints at `/api/public/investor-onboarding/:id/*` that support a split flow (save partial state, resume later, validate step-by-step). The `/invest` page does NOT use them — it submits atomically in one request. If you see code referencing `access_token`, Draft status, or `documents_pending`/`banking_pending` states, that's the other flow.
+There was a parallel set of endpoints at `/api/public/investor-onboarding/:id/*` for a split flow (save partial state, resume later, validate step-by-step). The `/invest` page never used them, and they were removed on 2026-09-30. `access_token` and the Draft status are leftovers of that flow; `documents_pending`/`banking_pending` now mark only an application whose documents are not all signed, such as one whose render failed at submission (the admin regenerate route recovers it).
 
 ### Authenticated users are kicked out of `/invest`
 
