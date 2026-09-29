@@ -477,7 +477,14 @@
             <div class="review-grid">
               <div v-for="doc in documents" :key="doc.doc_key" class="review-item full">
                 <span class="review-label">{{ doc.doc_name }}</span>
-                <button v-if="doc.signed" type="button" class="review-value text-green doc-view-link" @click="openReviewPdf(doc)">
+                <!-- Named after its document: three buttons share the visible text. -->
+                <button
+                  v-if="doc.signed"
+                  type="button"
+                  class="review-value text-green doc-view-link"
+                  :aria-label="`Signed — View Document: ${doc.doc_name}`"
+                  @click="openReviewPdf(doc)"
+                >
                   Signed &mdash; View Document
                   <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-left:2px"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                 </button>
@@ -501,10 +508,18 @@
                 <span class="review-label">Account Number</span>
                 <span class="review-value" style="display:inline-flex;align-items:center;gap:0.4rem">
                   {{ showAcctNum ? banking.account_number : '••••' + banking.account_number.slice(-4) }}
-                  <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="cursor:pointer;color:#94a3b8;flex-shrink:0" @click="showAcctNum = !showAcctNum">
-                    <path v-if="!showAcctNum" d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle v-if="!showAcctNum" cx="12" cy="12" r="3"/>
-                    <path v-if="showAcctNum" d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line v-if="showAcctNum" x1="1" y1="1" x2="23" y2="23"/>
-                  </svg>
+                  <button
+                    type="button"
+                    class="acct-eye"
+                    :aria-label="showAcctNum ? 'Hide account number' : 'Show account number'"
+                    :aria-pressed="showAcctNum ? 'true' : 'false'"
+                    @click="showAcctNum = !showAcctNum"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path v-if="!showAcctNum" d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle v-if="!showAcctNum" cx="12" cy="12" r="3"/>
+                      <path v-if="showAcctNum" d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line v-if="showAcctNum" x1="1" y1="1" x2="23" y2="23"/>
+                    </svg>
+                  </button>
                 </span>
               </div>
             </div>
@@ -2098,6 +2113,12 @@ async function submitOnboarding() {
 }
 .doc-view-link:hover { color: #15803d; text-decoration: underline; }
 .doc-view-link:focus-visible { outline: 2px solid #3b82f6; outline-offset: 2px; border-radius: 4px; }
+/* The account number's show/hide eye: a button drawn as the bare icon it replaced. */
+.acct-eye {
+  display: inline-flex; flex-shrink: 0; padding: 0; margin: 0; border: none; background: none;
+  color: #94a3b8; cursor: pointer; line-height: 0;
+}
+.acct-eye:focus-visible { outline: 2px solid #3b82f6; outline-offset: 2px; border-radius: 4px; }
 /* The dialogs take focus themselves when they open; their controls show the ring. */
 .review-modal:focus, .pdf-viewer-panel:focus { outline: none; }
 .pdf-viewer-overlay {
