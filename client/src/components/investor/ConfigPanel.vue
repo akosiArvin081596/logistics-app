@@ -33,8 +33,10 @@
 
     <p class="config-note">Per-truck settings (purchase price, title status, maintenance fund, fixed costs) are configured in the Truck Database.</p>
 
+    <!-- Not before the config has loaded: the form still holds placeholder
+         values then, and saving them would overwrite the stored ones. -->
     <div class="config-actions">
-      <button class="btn btn-primary" :disabled="saving" @click="handleSave">
+      <button class="btn btn-primary" :disabled="saving || !config" @click="handleSave">
         {{ saving ? 'Saving...' : 'Save Configuration' }}
       </button>
     </div>
@@ -79,6 +81,7 @@ const ownerTakePct = computed(() => {
 })
 
 async function handleSave() {
+  if (!props.config) return
   saving.value = true
   try {
     emit('save', { ...form })
