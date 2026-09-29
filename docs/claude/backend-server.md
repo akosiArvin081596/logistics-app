@@ -182,7 +182,7 @@ The same formula rule, `formulaCellRefusal()` with an empty stored row where the
 **Investors**:
 - `/api/investors` — CRUD for investor records
 - `/api/investor` — investor dashboard (financial data, reports)
-- `/api/investor/config` — investor view configuration
+- `/api/investor/config` — investor configuration. GET: Super Admin or Investor (merged global + own rows). **PUT is Super Admin only** (`refuseCrossOrigin`; an Investor gets 403) and requires `?ownerId=global` or an investor's `users.id` (400 `OWNER_ID_REQUIRED` / `INVALID_OWNER_ID`, 404 `INVESTOR_NOT_FOUND`). The body is 1–20 keys from `INVESTOR_CONFIG_KEYS` (400 `INVALID_CONFIG_BODY`, `UNKNOWN_CONFIG_KEY`, `INVALID_CONFIG_VALUE` with `key`); a fleet-wide-only key sent for one investor is 400 `CONFIG_KEY_GLOBAL_ONLY`. Only changed keys are written, in one transaction, audited `update_investor_config` as before → after; the reply is `{ success, ownerId, changed }`. `scripts/test-investor-config-write-guard.js`.
 - `/api/investor/documents`, `/api/investor/tax-csv`, `/api/investor/report` — investor documents and reports
 - `/api/investor-outreach/send`, `/api/investor-outreach/log` — email outreach (Super Admin). Each recipient must pass the public forms' `checkPublicEmail()`; one that fails is skipped and listed in the response's `failures`.
 - `/api/legal-documents` — manage legal documents for investor portal

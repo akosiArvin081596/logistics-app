@@ -53224,7 +53224,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 // GET /api/investor/config — merged investor config (global owner_id=0 rows
 // overlaid by this investor's own overrides). Super Admin may target a specific
 // investor via ?ownerId=N; an Investor is always scoped to their own id. Mirrors
-// the PUT handler's auth + ownerId resolution and the /api/investor read pattern
+// the /api/investor read pattern
 // (per-investor rows override globals), so e.g. investor_split_pct returns the
 // per-investor value when set, else the seeded global "50".
 app.get("/api/investor/config", requireRole("Super Admin", "Investor"), (req, res) => {
@@ -53247,22 +53247,132 @@ app.get("/api/investor/config", requireRole("Super Admin", "Investor"), (req, re
 	}
 });
 
-// PUT /api/investor/config — Admin: update investor config
-app.put("/api/investor/config", requireRole("Super Admin", "Investor"), (req, res) => {
+// The investor_config keys PUT /api/investor/config may write: every key the
+// seed writes (above) that something reads, plus blue_chip_brokers, which
+// Admin Tools' Fleet Configuration edits. A key outside this map is refused.
+//   - number: read through parsePlainDecimal(), finite, min..max, at most
+//     `decimals` places; stored as its plain decimal text ("45", "800.5").
+//   - text: one line (no control, format or line-separator characters), at
+//     most maxLength characters; stored trimmed.
+//   - globalOnly: a key whose readers take the fleet-wide row alone
+//     (owner_id = 0): the fund and fuel targets on the admin Expenses screens,
+//     the settlement grace window, and the broker list. A per-investor row of
+//     one would be stored and never read, so it is refused.
+const INVESTOR_CONFIG_KEYS = new Map([
+	["investor_split_pct", { kind: "number", min: 0, max: 100, decimals: 2 }],
+	["truck_purchase_price", { kind: "number", min: 0, max: 1_000_000, decimals: 2 }],
+	["depreciation_years", { kind: "number", min: 1, max: 50, decimals: 2 }],
+	["truck_title_status", { kind: "text", maxLength: 40 }],
+	["maintenance_fund_monthly", { kind: "number", min: 0, max: 1_000_000, decimals: 2, globalOnly: true }],
+	["fuel_savings_target_pct", { kind: "number", min: 0, max: 100, decimals: 2, globalOnly: true }],
+	["settlement_grace_days", { kind: "number", min: 0, max: 28, decimals: 0, globalOnly: true }],
+	["blue_chip_brokers", { kind: "text", maxLength: 2000, globalOnly: true }],
+]);
+const INVESTOR_CONFIG_MAX_ENTRIES = 20;
+
+// Whose rows a config write changes, from ?ownerId=: "global" is the
+// fleet-wide rows (owner_id 0) every investor inherits; a positive integer is
+// one investor's own rows, by users.id — a user whose role is Investor, or one
+// an investors record links. Returns { ok, ownerId } or { ok: false, status,
+// code, error }.
+function investorConfigOwner(raw) {
+	if (raw === undefined || raw === "") {
+		return { ok: false, status: 400, code: "OWNER_ID_REQUIRED", error: "Name whose configuration this is: ownerId=global for the fleet-wide values, or ownerId=<the investor's user id>." };
+	}
+	if (raw === "global") return { ok: true, ownerId: 0 };
+	if (typeof raw !== "string" || !/^[1-9]\d{0,14}$/.test(raw)) {
+		return { ok: false, status: 400, code: "INVALID_OWNER_ID", error: "ownerId must be global or an investor's user id." };
+	}
+	const id = Number(raw);
+	const known = db.prepare(
+		"SELECT 1 AS hit FROM users WHERE id = ? AND role = 'Investor' UNION ALL SELECT 1 FROM investors WHERE user_id = ? LIMIT 1"
+	).get(id, id);
+	if (!known) return { ok: false, status: 404, code: "INVESTOR_NOT_FOUND", error: "Investor not found" };
+	return { ok: true, ownerId: id };
+}
+
+// One config value off the wire, as the text investor_config stores for it:
+// { ok: true, value } or { ok: false }.
+function investorConfigValue(spec, raw) {
+	if (spec.kind === "number") {
+		const n = parsePlainDecimal(raw);
+		if (!Number.isFinite(n) || n < spec.min || n > spec.max) return { ok: false };
+		const scale = 10 ** spec.decimals;
+		const scaled = n * scale;
+		if (Math.abs(scaled - Math.round(scaled)) > 1e-6) return { ok: false };
+		return { ok: true, value: String(Math.round(scaled) / scale) };
+	}
+	if (typeof raw !== "string" || raw.length > spec.maxLength * 4) return { ok: false };
+	const text = raw.trim();
+	if (Array.from(text).length > spec.maxLength || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(text)) return { ok: false };
+	return { ok: true, value: text };
+}
+
+// Whether a stored value already says what `value` says. A number is compared
+// as a number, so "15.0" on file and 15 sent is no change.
+function investorConfigSame(spec, stored, value) {
+	if (stored === undefined) return false;
+	if (spec.kind === "number") {
+		const n = parsePlainDecimal(stored);
+		return Number.isFinite(n) && n === Number(value);
+	}
+	return stored === value;
+}
+
+// PUT /api/investor/config — Super Admin: change investor configuration.
+//
+// ?ownerId= is required: "global" or an investor's users.id (see
+// investorConfigOwner()). The body is a plain object of 1..20 keys from
+// INVESTOR_CONFIG_KEYS. Everything is checked before anything is written; then
+// only the keys whose value changes are written, in one transaction, and the
+// change is audited as before → after. A save that changes nothing writes
+// nothing: no row, no audit line, no socket event.
+//
+// Synchronous on purpose — no await between the checks and the write.
+app.put("/api/investor/config", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {
 	try {
-		const user = req.session.user;
-		const targetOwnerId = user.role === "Super Admin"
-			? parseInt(req.query.ownerId) || 0
-			: user.id;
-		const updates = req.body; // { key: value, ... }
-		const stmt = db.prepare(
-			"INSERT OR REPLACE INTO investor_config (owner_id, key, value) VALUES (?, ?, ?)",
-		);
-		const updateMany = db.transaction((entries) => {
-			for (const [k, v] of entries) stmt.run(targetOwnerId, k, String(v));
-		});
-		updateMany(Object.entries(updates));
-		res.json({ success: true });
+		const owner = investorConfigOwner(req.query.ownerId);
+		if (!owner.ok) return res.status(owner.status).json({ error: owner.error, code: owner.code });
+		const ownerId = owner.ownerId;
+
+		const body = req.body;
+		const isPlain = !!body && typeof body === "object" && !Array.isArray(body) && Object.getPrototypeOf(body) === Object.prototype;
+		const entries = isPlain ? Object.entries(body) : [];
+		if (!entries.length || entries.length > INVESTOR_CONFIG_MAX_ENTRIES) {
+			return res.status(400).json({ error: `Send an object of 1 to ${INVESTOR_CONFIG_MAX_ENTRIES} configuration values.`, code: "INVALID_CONFIG_BODY" });
+		}
+		const next = [];
+		for (const [key, raw] of entries) {
+			const spec = INVESTOR_CONFIG_KEYS.get(key);
+			const keyOut = String(key).slice(0, 64);
+			if (!spec) return res.status(400).json({ error: `Unknown configuration key: ${keyOut}`, code: "UNKNOWN_CONFIG_KEY", key: keyOut });
+			if (spec.globalOnly && ownerId !== 0) {
+				return res.status(400).json({ error: `${key} is a fleet-wide setting: save it with ownerId=global.`, code: "CONFIG_KEY_GLOBAL_ONLY", key });
+			}
+			const read = investorConfigValue(spec, raw);
+			if (!read.ok) {
+				const rule = spec.kind === "number"
+					? `a number from ${spec.min} to ${spec.max}${spec.decimals ? ` with at most ${spec.decimals} decimal places` : ", whole"}`
+					: `one line of text, at most ${spec.maxLength} characters`;
+				return res.status(400).json({ error: `${key} must be ${rule}.`, code: "INVALID_CONFIG_VALUE", key });
+			}
+			next.push({ key, spec, value: read.value });
+		}
+
+		const stored = new Map(db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?").all(ownerId).map((r) => [r.key, r.value]));
+		const changes = next.filter((c) => !investorConfigSame(c.spec, stored.get(c.key), c.value));
+		if (changes.length) {
+			const upsert = db.prepare(
+				"INSERT INTO investor_config (owner_id, key, value) VALUES (?, ?, ?) ON CONFLICT(owner_id, key) DO UPDATE SET value = excluded.value"
+			);
+			db.transaction(() => {
+				for (const c of changes) upsert.run(ownerId, c.key, c.value);
+			})();
+			logAudit(req, "update_investor_config", "investor_config", ownerId ? `owner:${ownerId}` : "global",
+				auditText(changes.map((c) => `${c.key}: ${stored.has(c.key) ? auditText(stored.get(c.key), 120) : "unset"} → ${auditText(c.value, 120)}`).join("; "), 2000));
+			notifyChange("investor");
+		}
+		res.json({ success: true, ownerId, changed: changes.map((c) => c.key) });
 	} catch (error) {
 		console.error("Error updating investor config:", error.message);
 		res.status(500).json({ error: error.message });
