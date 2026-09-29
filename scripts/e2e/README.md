@@ -40,6 +40,13 @@ What it covers today, by section (`ONLY` picks them):
   Tracking loads reach a finalized month is still refused (409 `PERIOD_FINALIZED`), over finalized months only: every
   one of them when a row of that truck has an unreadable date, otherwise just the months its loads reach (L3, local
   only; it writes back any link the refusal failed to protect). One sign-in; `ONLY=eldlink`.
+- **Invoice editor (I1–I9).** In the draft invoice editor (Dashboard → Completed → a delivered load → Draft Invoice
+  Email), ORDER # takes any printable character but `<` and `>`, 80 max, and the SUBJECT the server builds carries it as
+  typed (I2, I3). An optional NOTES box prints in a labelled "Notes" box beside the totals on the invoice PDF, only when
+  it is non-empty, and never in the email body (I4–I6). Approve sends the note and the Order #, and Job Tracking is
+  unchanged (I7). A note saved on the approved draft record pre-fills the next editor and its dryRun PDF, and a preview
+  sent with no notes key prints it too (I8, I8b, planted, local only). The server refuses a note over 500 characters, a note that is not text, and an Order # with `<` (I9).
+  One sign-in; `ONLY=invoice`. The worktree needs the POD files linked (`E2E_LINK_PODS=1`, see `prep-worktree.sh`).
 
 Every "Expected" column states the behaviour **after** the fix. A run on a build without it (a BEFORE baseline) is
 expected to FAIL exactly the fix rows.
@@ -67,10 +74,16 @@ expected to FAIL exactly the fix rows.
   - **The rate-con Drive folder is never reached.** `server.js` reads `RATECON_DRIVE_FOLDER_ID` with a fallback: an
     empty value, or none (the local `.env` sets none), means production's rate-con folder, which is hardcoded there.
     So it cannot be blanked like a key: `boot-server.sh` sets it to `logisx-e2e-no-drive-folder`, a value that names
-    no Drive folder, so a Drive call against it names no real folder. No step makes one. `POST /api/loads/from-ratecon`
+    no Drive folder, so a Drive call against it names no real folder. `POST /api/loads/from-ratecon`
     (RC1) archives a rate-con to disk and mirrors it to Drive only for an attached PDF, and RC1 attaches none. It sends
     no addresses either, so the route makes no geocode or Distance Matrix call, and it never calls the Gemini
     extraction (`POST /api/loads/ratecon/extract`).
+  - **The invoice section's draft calls do ask Drive, and get nothing.** `POST /api/loads/:loadId/draft-invoice` (the
+    `?dryRun=1` opens and I7's approve) looks for the load's rate-con in the Drive folder, by name and then by content.
+    Against `logisx-e2e-no-drive-folder` both lists fail (the server log shows `rate-con Drive list failed: File not
+    found` and `rate-con content scan failed: File not found`), and the draft goes on without a rate-con. The POD is read
+    from disk (the linked files, see `prep-worktree.sh`), so the POD's own Drive fallback is not reached. Gemini is
+    blanked, so nothing is extracted. Each invoice render (Chromium) loads the invoice template's Google Font.
 - **Steps that write the Google Sheet: F1, RC1 and the names section (K1–K3), and only the local non-production one.** Every other step that
   writes changes the SQLite copy only (trucks, drivers, expenses, sessions, audit rows). Both run only against a server
   on this machine, and both resolve the sheet the way `boot-server.sh` does and refuse production's, with the
@@ -110,7 +123,7 @@ npm --prefix scripts/e2e ci      # playwright-core only, pinned; the root and cl
 | `setup-db.cjs` | Makes a fresh private copy of the main checkout's `app.db` in the work dir and sets five logins on the copy. |
 | `plant-before-boot.cjs` | Plants what B1 needs in a copy BEFORE a server boots on it (one expense), or removes it (`--remove`). |
 | `verify-creds.cjs` | Confirms the creds file matches a copy. Prints booleans and ids only. |
-| `prep-worktree.sh` | Makes a worktree bootable: links the main checkout's installs, `.env` and key, then builds `client/dist`. |
+| `prep-worktree.sh` | Makes a worktree bootable: links the main checkout's installs, `.env` and key, then builds `client/dist`. With `E2E_LINK_PODS=1` it also links the main checkout's POD files into `uploads/`, for the invoice section. |
 | `boot-server.sh` / `stop-server.sh` | Start a local server on a copy with every outbound effect off; stop exactly that PID. |
 | `stored-format-audit.cjs` | Read-only tally of the stored truck photos and CDL files: data-URI label vs actual bytes. |
 
@@ -159,10 +172,18 @@ fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
 BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-moneypath ONLY=moneypath DB_PATH="$W/qa.db" \
   fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
 fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
+# Part 5: the invoice editor (1 sign-in). The draft route reads a load's POD from the checkout's uploads/ on disk,
+# so link the main checkout's POD files first (once per worktree; the main checkout has its own).
+E2E_LINK_PODS=1 fnm exec --using=22.23.2 scripts/e2e/prep-worktree.sh
+fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
+BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-invoice ONLY=invoice DB_PATH="$W/qa.db" \
+  fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
+fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
 ```
 
 - Headless: part 1 takes about 1.5 minutes, part 2 about 2.5 minutes, part 3 about 30 s, part 4 about 2.5 minutes
-  (up to 80 s more when F1 has to plant its formula and wait for the server's cached copy of the sheet).
+  (up to 80 s more when F1 has to plant its formula and wait for the server's cached copy of the sheet), part 5 about
+  45 s.
 - B1 deletes its expense and puts its assignment's spelling back when it runs, so plant again before every boot that
   B1 is to read. A run whose server booted before the plant scores B1 INFO (the boot never saw the row); a copy with
   nothing planted SKIPs it.
@@ -175,7 +196,7 @@ fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
   start while `plant-journal.json` exists.
 
 ⚠️ **Login limiter:** `POST /api/auth/login` allows 20 attempts per 15 minutes per server process, counting every
-attempt. Per section: `trucks` 3, `signout` up to 20, `dispatcher` 2, `maintenance` 3, `eldlink` 1 and `moneypath` up to 3 (the
+attempt. Per section: `trucks` 3, `signout` up to 20, `dispatcher` 2, `maintenance` 3, `names` 2, `eldlink` 1, `invoice` 1 and `moneypath` up to 3 (the
 Super Admin and the driver, plus the Super Admin again when E1 has to file on the driver's behalf). The sign-out figure is its
 worst case: one fewer on a build without S4a's second half, and one fewer where S7 sends one sign-in (so 19 on a build
 with the fixes). It fills a whole window, so run it on a fresh server process, as the recipe does. **All five together
@@ -250,6 +271,14 @@ overrides). All four are gitignored, so the worktree stays clean. It then runs `
 ⚠️ If it prints `WARNING: package.json differs`, the branch changed its dependencies and the linked `node_modules` may
 lack a package. Resolve that before reading a boot failure as a code bug.
 
+**`E2E_LINK_PODS=1` (the invoice section).** `POST /api/loads/:loadId/draft-invoice` reads a load's POD from
+`<checkout>/uploads` on disk, which a worktree does not have, so without this every Draft Invoice Email answers 400
+"POD not found for this load". With it, the script makes `uploads/` a real directory in the worktree (the server
+creates one at boot anyway; it is gitignored) and symlinks each top-level `*_POD_*` file of the main checkout's
+`uploads/` into it. They are links, not copies, and nothing else is linked: no receipts, onboarding files or invoices.
+It refuses an `uploads` that is itself a symlink. Remove the links with
+`find <worktree>/uploads -maxdepth 1 -type l -name '*_POD_*' -delete`, before `git worktree remove`.
+
 ### `boot-server.sh <worktree> <port> <db>` and `stop-server.sh <port>`
 
 The boot script refuses:
@@ -286,7 +315,9 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
 - **No `DB_PATH`:** nothing can be planted in a remote database. Steps 10a–e, 11b–f, R3a–b, R15 and R16 SKIP, and so
   does R8 when the creds file has no `investor` entry. M1 SKIPs too (local only: the notice is off on staging), and so
   do E1, N1, N1b, F1, E2, B1 and RC1 (RC1 and F1 because they write the sheet, which only a local run may). P1 runs on
-  a real driver (see the money-path section). Everything else runs unchanged, and the script discovers every id itself.
+  a real driver (see the money-path section). I8 SKIPs (it plants the saved note), and I7 fills the form but SKIPs
+  its Approve unless `E2E_INVOICE_APPROVE=1`: an approve creates a real Gmail draft wherever the server has a mail
+  target. Everything else runs unchanged, and the script discovers every id itself.
 - **Expected differences:** staging's environment refresh strips identity documents. So 11a (the Kit's CDL) FAILs there,
   R10 scores only its truck-photo half, and on a build that still has the driver-files route R12 can only be
   `PASS (vacuous)` (the route answers, with no files to return).
@@ -306,10 +337,12 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
 | `BASE_URL` | Required by `e2e.mjs`. Refuses `app.logisx.com` (production). |
 | `PHASE` | `before` or `after`. Only names the output; the "Expected" column is always the after-the-fix behaviour. |
 | `OUT_TAG` | Writes `shots/<tag>/` and `results-<tag>.md` instead of `<PHASE>`, so a rehearsal cannot overwrite a baseline. |
-| `ONLY` | A comma-separated list of sections: `trucks` (1–12, R1–R16), `signout` (S1–S7), `dispatcher` (D1–D3), `maintenance` (M1), `moneypath` (P1, E1, N1, N1b, F1, E2, B1, RC1), `names` (K1–K3). Unset: all six, in that order, then step 12's clean-up — more sign-ins than one limiter window holds (see above). |
-| `STEPS` | Only these sign-out or money-path cases, e.g. `STEPS=S5a,S7` (each has its own browser context), `STEPS=P1,F1` or `STEPS=E2,B1,RC1` (`P1` selects P1a and P1b; `N1` selects N1 and N1b). The other sections ignore it. |
+| `ONLY` | A comma-separated list of sections: `trucks` (1–12, R1–R16), `signout` (S1–S7), `dispatcher` (D1–D3), `maintenance` (M1), `moneypath` (P1, E1, N1, N1b, F1, E2, B1, RC1), `names` (K1–K3), `eldlink` (L1–L3), `invoice` (I1–I9). Unset: all eight, in that order, then step 12's clean-up — more sign-ins than one limiter window holds (see above). |
+| `STEPS` | Only these sign-out, money-path or invoice cases, e.g. `STEPS=S5a,S7` (each has its own browser context), `STEPS=P1,F1` or `STEPS=E2,B1,RC1` (`P1` selects P1a and P1b; `N1` selects N1 and N1b), `STEPS=I8,I9` (`I3` selects I3a–c, `I7` selects I7, I7r and I7j, `I8` selects I8 and I8b, `I9` selects I9 and I9a–c; I1 opens the editor whenever any of I1–I7 is picked). The other sections ignore it. |
 | `HEADED=1` | A visible browser. |
-| `DB_PATH` | The copy the server runs on (inside the work dir). It is used **only** to plant stored values for steps 10, 11b–f, R3 and R15, to stage and clean up R16, to plant and read back E1, N1, N1b and E2, to read and delete B1's planted expense, to delete the rows RC1's import writes, and to plant P1's own driver. Unset: those rows SKIP, and P1 uses a real driver. |
+| `DB_PATH` | The copy the server runs on (inside the work dir). It is used **only** to plant stored values for steps 10, 11b–f, R3 and R15, to stage and clean up R16, to plant and read back E1, N1, N1b and E2, to read and delete B1's planted expense, to delete the rows RC1's import writes, to plant P1's own driver, and to plant and delete I8's saved invoice note. Unset: those rows SKIP, and P1 uses a real driver. |
+| `E2E_INVOICE_APPROVE=1` | Lets I7 press Approve on a server that is not on this machine. Off by default: an approve creates a real Gmail draft wherever the server has a mail target. Locally `boot-server.sh` blanks them, so I7 always approves there. |
+| `E2E_LINK_PODS=1` | For `prep-worktree.sh`, not `e2e.mjs`: link the main checkout's POD files into the worktree's `uploads/`, for the invoice section. |
 | `CREDS_FILE` | The logins. Default: `<work dir>/creds.json`. |
 | `E2E_WORK_DIR` | The work dir. Default: `$TMPDIR/logisx-e2e`. It must be private, outside every checkout, and contain none. |
 | `SOURCE_DB` | `setup-db.cjs`'s source, opened read-only. Default: the main checkout's `app.db`. |
@@ -632,6 +665,58 @@ real driver names are never printed.
 **Run order.** K1 and K3 run first and K2 last. **After a BEFORE run, stop that server and never reuse it:** a build
 without the fix can be left in a broken state for the rest of that process, so every run gets a fresh server.
 
+## The invoice editor section (I1–I9)
+
+`ONLY=invoice` (`STEPS` picks cases). The Super Admin signs in once and every step shares that page. The editor is
+`InvoiceDraftPreviewModal.vue`: it opens with `POST /api/loads/:loadId/draft-invoice?dryRun=1` and re-renders as you
+type with `POST /api/loads/:loadId/invoice-preview`. The evidence is the page's own requests and responses, the form,
+and the invoice PDF the server rendered: each `invoicePdfBase64` is decoded and its text read in Node with the app's
+own `pdfjs-dist` (`client/node_modules/pdfjs-dist/legacy/build/pdf.mjs`). The "Notes" label prints letter-spaced and
+upper-cased (`N O T E S`), so it is matched with its spaces removed. Only ids, booleans, codes and the typed test
+values are written out: the subject is shown from `Order #` on (`<broker>` stands for the broker's name), and the
+Job Tracking row, the recipient and every amount stay in memory.
+
+**The load** is discovered at run time, from the Super Admin's own `GET /api/dashboard` and `GET /api/documents/<id>`
+(no draft budget spent): a Completed load whose status reads delivered, completed or POD received, with a POD.
+Non-Bison loads come first (a Bison load renders nothing until its Order # and PO # are typed), then loads with a
+Payment (so the dryRun renders a PDF), then loads with no draft yet (no second confirm on Approve). The first whose
+dryRun answers 200 is used, trying at most four. A Bison load still works: I1 ticks "This rate confirmation has no PO
+#", and a load with no derivable total gets 1234.00 typed (Approve then confirms the edited total).
+
+**Budgets, per server process:** one sign-in; `POST …/draft-invoice` (25 per 15 minutes per user, the `?dryRun=1`
+opens included) three times, plus one per candidate whose dryRun failed; `POST …/invoice-preview` (120 per 15
+minutes) about sixteen times.
+
+**What it writes:** the approve (I7) mints the next invoice number, in the copy. Locally it creates no mail draft
+and no draft record: `boot-server.sh` blanks Gmail and the n8n invoice webhook, so the route answers 200 with
+`preview: true`. I8 plants one `load_invoice_drafts` row, recorded in `plant-journal.json` by id, and deletes it at the
+end of I8, at the end of the section, and on Ctrl-C. `Ic` reports the delete. Nothing writes the sheet: I7j proves it
+for the load under test.
+
+| Step | How it is shown | Expected (AFTER) |
+|---|---|---|
+| I1 | **UI.** Dashboard → Completed → the load (searched by number) → **Draft Invoice Email**. A page `fetch` of `GET /api/load/<id>` then reads the load's Job Tracking row, before any edit. | The editor opens (the dryRun answers 200); the row is read (kept in memory) |
+| I2 | **UI.** Type `7101850-$700 ADV` into ORDER #. The invoice-preview response it triggers is read. | No error under the field; the hint "Invoice only — Job Tracking is not changed." shows; the SUBJECT in the response and on the form ends `Order #7101850-$700 ADV`; the PDF prints `Order: #7101850-$700 ADV` |
+| I3a | **UI.** Type `A (ADV): 50% + fee & 'tax' @ dock`. | Accepted; the SUBJECT ends with it, with a literal `&` (never `&amp;`), and so does the PDF |
+| I3b | **UI.** Type `7101850<b>`. | The error "Must start with a letter or number — any characters except < and >, 80 max." under the field; no preview request carries it; Approve disabled |
+| I3c | **UI.** Paste an 81-character value (select all, then text insertion, as a paste); then put back `7101850-$700 ADV`. | The field holds the first 80 characters (`maxlength="80"`); the put-back value renders |
+| I4 | **UI.** Type a three-line note into NOTES: `Advance $700 paid at pickup.` / `Detention 2h — see POD.` / `Ref <ADV-7101850> & thanks`. The viewer is then panned and zoomed onto the totals row for the screenshot. | The counter reads `79 / 500`; the PDF has the "Notes" label followed by the three lines, in order, exactly as typed (`<ADV-7101850>` and `&` literal, no `&amp;`); the preview's email body does not carry the note |
+| I5 | **UI.** Clear NOTES. | No "Notes" label and none of the note's text in the PDF; its text and positions are identical to I2's render (the same fields, no note), so the totals box stands alone with no gap or blank box |
+| I6 | **UI.** Type a note, then **Reset to extracted values**. | NOTES empty with no "edited" badge; the next preview (notes `""`) has no "Notes" section |
+| I7 | **UI.** Type a note and the Order # `7101850-$700 ADV`, then **Approve & Create Draft**, accepting any confirm. The approve request is read. Local only unless `E2E_INVOICE_APPROVE=1`. | The request body carries `notes` exactly as typed and `orderNumber: "7101850-$700 ADV"` |
+| I7r | The approve's response. | INFO. Locally: 200 with `preview: true` and the note "No Gmail/n8n draft target configured"; its own PDF prints the note |
+| I7j | A page `fetch` of `GET /api/load/<id>` again, compared field by field with I1's read. | Identical: the editor wrote nothing to Job Tracking |
+| I8 | **Planted, local only.** A `load_invoice_drafts` row for the load with a two-line note (and minimal other columns). `GET /api/loads/<id>/invoice-draft` must return it first, which proves `DB_PATH` is the server's file (otherwise it is deleted again and I8 SKIPs). **UI:** reload the page and open the editor again. | NOTES is pre-filled with the saved note exactly; the dryRun echoes it; the dryRun's own PDF prints it under "Notes" |
+| I8b | **Planted, local only**, while I8's note is there: a page `fetch` of `POST /api/loads/<id>/invoice-preview` with an otherwise valid body and **no** `notes` key, as a tab still running a bundle from before Notes sends it. | Its PDF prints the saved note under "Notes": the approve's rule for an omitted key (the last approved note), so that tab previews what it would send |
+| I9, I9a–c | Page `fetch`es of `POST /api/loads/<id>/invoice-preview` with `X-Requested-With`, as `useApi` sends them. The body is otherwise valid (invoice #, invoice date, total, recipient, and an Order #, `7101850`, that every build accepts); I9 is that body as it is, the control. | I9: 200. I9a, notes of 501 characters: 400 `INVOICE_NOTES_TOO_LONG`. I9b, `notes: ["x"]`: 400 `INVOICE_NOTES_INVALID`. I9c, `orderNumber: "a<b"`: 400 `ORDER_NUMBER_INVALID` |
+| Ic | Local only. | The planted row deleted; no plant journal left |
+
+**On a build without the feature** (a BEFORE baseline): the Order # keeps its old rule (letters, numbers, spaces and
+`. _ / # -`, 40 max), so I2 and I3a are refused by the form, I3c's field holds 40 characters, and I3b's refusal carries
+the old sentence (a FAIL on the wording: `<` is refused on both builds). The editor has no NOTES box, so I4–I6 FAIL. I7
+finds Approve disabled (the `$` in the Order #). The draft table has no `notes` column, so I8 and I8b FAIL. The server
+ignores `notes`, so I9a and I9b answer 200. I1, I7j, I9 (the control) and I9c pass on both builds.
+
 ## Teardown (once the whole QA cycle is done)
 
 ```bash
@@ -643,4 +728,5 @@ rm -rf -- "$W/shots"   # real data: the dashboard, truck lists, the driver's tru
 ```
 
 The creds file's passwords exist only on the copies. In each worktree, the four symlinks and `client/dist` are gitignored;
-they can stay or go.
+they can stay or go. So are the POD links `E2E_LINK_PODS=1` made; before removing a worktree, delete them
+(`find <worktree>/uploads -maxdepth 1 -type l -name '*_POD_*' -delete`) along with the four symlinks.
