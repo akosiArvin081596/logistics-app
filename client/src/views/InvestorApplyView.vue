@@ -512,7 +512,6 @@
                     type="button"
                     class="acct-eye"
                     :aria-label="showAcctNum ? 'Hide account number' : 'Show account number'"
-                    :aria-pressed="showAcctNum ? 'true' : 'false'"
                     @click="showAcctNum = !showAcctNum"
                   >
                     <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
