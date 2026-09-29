@@ -267,7 +267,7 @@
   "faqs": {
     "what_is_logisx": {
       "q": "What is LogisX?",
-      "a": "LogisX is a trucking logistics company. As an investor, you lease your truck(s) to us. We handle dispatch, loads, insurance, and paperwork. You get paid monthly based on your truck's earnings.",
+      "a": "LogisX is a trucking logistics company. As an investor, you lease your truck(s) to us. We handle dispatch, loads, insurance, and paperwork. You get paid monthly based on your truck's earnings. That's the standard agreement. If LogisX set different payment terms in your invitation, they're shown on the documents step and in Amendment No. 1 of your agreements.",
       "category": "about"
     },
     "how_long_does_this_take": {
@@ -292,7 +292,7 @@
     },
     "why_address": {
       "q": "Why do you need my address?",
-      "a": "We need a principal business address for your tax forms (W-9) and for mailing any physical paperwork. We never share it with third parties.",
+      "a": "We need a principal business address for your tax forms (W-9) and for mailing any physical paperwork. Address suggestions and the map are provided by Google Maps, so what you enter there is sent to Google.",
       "category": "privacy"
     },
     "when_will_i_hear_back": {
@@ -342,7 +342,7 @@
     },
     "how_often_paid": {
       "q": "How often do I get paid?",
-      "a": "Payouts run monthly on Net-60 terms from the load delivery date. You'll see a statement each month with load details and your share.",
+      "a": "Payouts run monthly on Net-60 terms from the load delivery date. You'll see a statement each month with load details and your share. That's the standard agreement. If LogisX set different payment terms in your invitation, they're shown on the documents step and in Amendment No. 1 of your agreements.",
       "category": "banking"
     },
     "where_find_routing": {

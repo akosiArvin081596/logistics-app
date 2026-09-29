@@ -101,11 +101,7 @@ export function useInvestorInvite(tokenGetter) {
     }
     let res
     try {
-      // X-Requested-With is repeated here because useApi() replaces its default
-      // headers with the caller's when a caller passes any.
-      res = await api.get('/api/public/investor-invite', {
-        headers: { 'X-Requested-With': 'XMLHttpRequest', 'X-Invite-Token': token },
-      })
+      res = await api.get('/api/public/investor-invite', { headers: { 'X-Invite-Token': token } })
     } catch (err) {
       if (mine === seq) fail(inviteLookupFailureCode(err.status, err.code))
       return

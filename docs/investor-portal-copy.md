@@ -358,8 +358,8 @@ Error messages are normally left out of this inventory (see **Not listed** above
 
 | Flag | Exact text | Where / when | Status |
 |---|---|---|---|
-| ⚪ | `We couldn't load this document just now.` | In the document pane of the signing window, when the preview fails, for example while the server is busy with other previews. It used to stay on `Loading document...` with no way forward. When the server names the problem instead (say, a signature image it cannot accept), its own message shows here. | **Awaiting approval** |
-| ⚪ | `Try again` | Button under that line. It reloads the same document; the signing panel beside it keeps the ticked box, the typed name and the drawn signature. | **Awaiting approval** |
+| ⚪ | `We couldn't load this document just now.` | In the document pane of the signing window, when the preview fails, for example while the server is busy with other previews. It used to stay on `Loading document...` with no way forward. When the server names the problem instead (say, a signature image it cannot accept), its own message shows here. **Also, since this change, in the document viewer opened from `Signed — View Document` in the Review Your Application window**, which used to do nothing at all when the preview failed: the click looked broken. That viewer now opens at once on the existing `Loading document...` line, then shows the document, or this line. | **Awaiting approval** |
+| ⚪ | `Try again` | Button under that line. In the signing window it reloads the same document, and the signing panel beside it keeps the ticked box, the typed name and the drawn signature. In the review window's viewer it reloads the same signed document. | **Awaiting approval** |
 | ⚪ | `Thank you, <legal name>. Your application and all documents have been submitted successfully.` | Unchanged wording. It now keeps the name when the page is refreshed after submitting; before, a refresh showed `Thank you, .` with no name. | **Awaiting approval** |
 | ⚪ | `Thank you. Your application and all documents have been submitted successfully.` | **New variant**, shown only when the name is not known: someone who submitted before this change and then refreshes the page. | **Awaiting approval** |
 
@@ -405,9 +405,29 @@ The setup guide on `/invest` (`client/src/wizard/data/knowledge-base.json`) said
 
 **Related, left unchanged here** (for you to decide):
 
-- Step 3 of `/invest` itself, above the bank fields: `Your banking information is encrypted and stored securely.` It makes the same encryption claim as the two answers corrected above.
-- FAQ `Why do you need my address?` ends `We never share it with third parties.` The address field suggests matches from Google Maps as it is typed, so what is typed there goes to Google.
-- For an investor on a **fixed monthly lease payment**, three answers still describe a profit share: `What is LogisX?` (`You get paid monthly based on your truck's earnings.`), `How often do I get paid?` (`… your share.`) and the Lease §2.01 lead paragraph kept by the approved draft (`Rent as a derivative of the Net Operating Income (NOI)`). The Amendment says it controls over any conflicting provision, and payouts still follow the Split % column.
+- The Step 3 banking note, the `Why do you need my address?` answer and the two profit-share answers that were listed here are now corrected: see 15.5 and 15.6.
+- For an investor on a **fixed monthly lease payment**, the Lease §2.01 lead paragraph kept by the approved draft still reads `Rent as a derivative of the Net Operating Income (NOI)`. That is contract wording, so it is left to you. The Amendment says it controls over any conflicting provision, and payouts still follow the Split % column.
+
+### 15.5 The `/invest` page's own security wording corrected — old → new
+
+These are on the page itself, and every applicant sees them, with or without an invitation. Each claimed something the app does not do.
+
+| Flag | Old → new | Where | Why | Status |
+|---|---|---|---|---|
+| 🔴 | `Your banking information is encrypted and stored securely.` → `Your banking information is sent over an encrypted connection and stored on LogisX's servers; only LogisX administrators can see it.` | Step 3, the green note above the bank fields | Bank details are encrypted on the way (HTTPS) but **not** in storage: they are saved as plain values in LogisX's database, a choice recorded in `docs/claude/pii-at-rest.md`. The admin screens mask them unless a Super Admin reveals them. They are also printed in full in the signed Master Agreement, which the applicant sees in their dashboard once approved and which LogisX's admin mailbox receives as an attachment. Same correction as the setup-guide answers in 15.4. | **Awaiting approval** |
+| 🔴 | `256-bit encrypted & secure` → `Encrypted connection (HTTPS)` | Step 1, the green badge under the heading | The connection is encrypted, but not at 256 bits for most applicants. `app.logisx.com` uses whichever cipher the browser prefers, and Chrome prefers 128-bit AES. Checked 2026-09-30: a connection offering Chrome's order got `TLS_AES_128_GCM_SHA256`, and Chromium 152 chose the same. `& secure` promised nothing anyone could check. | **Awaiting approval** |
+| 🔴 | `We need a principal business address for your tax forms (W-9) and for mailing any physical paperwork. We never share it with third parties.` → `We need a principal business address for your tax forms (W-9) and for mailing any physical paperwork. Address suggestions and the map are provided by Google Maps, so what you enter there is sent to Google.` | Setup guide FAQ `Why do you need my address?` (`client/src/wizard/data/knowledge-base.json`) | The address field sends what is typed to Google's address suggestions, the map picker is Google Maps, and `Use my current location` looks the position up with Google. The first sentence is unchanged. | **Awaiting approval** |
+
+### 15.6 Payment answers, for an investor invited on different terms — old → new
+
+An investor invited on a fixed monthly lease payment was told, in two setup-guide answers, that they are paid a share of their truck's earnings, while their documents step and Amendment No. 1 say otherwise. Each answer keeps its wording for the standard agreement and adds the same two sentences. Both answers show to every applicant; the second sentence only matters to someone invited with different terms. No other answer states the split or a profit share.
+
+| Flag | Old → new | Where | Status |
+|---|---|---|---|
+| 🔴 | `LogisX is a trucking logistics company. As an investor, you lease your truck(s) to us. We handle dispatch, loads, insurance, and paperwork. You get paid monthly based on your truck's earnings.` → `LogisX is a trucking logistics company. As an investor, you lease your truck(s) to us. We handle dispatch, loads, insurance, and paperwork. You get paid monthly based on your truck's earnings. That's the standard agreement. If LogisX set different payment terms in your invitation, they're shown on the documents step and in Amendment No. 1 of your agreements.` | Setup guide FAQ `What is LogisX?` (linked from the `Welcome to LogisX` card) | **Awaiting approval** |
+| 🔴 | `Payouts run monthly on Net-60 terms from the load delivery date. You'll see a statement each month with load details and your share.` → `Payouts run monthly on Net-60 terms from the load delivery date. You'll see a statement each month with load details and your share. That's the standard agreement. If LogisX set different payment terms in your invitation, they're shown on the documents step and in Amendment No. 1 of your agreements.` | Setup guide FAQ `How often do I get paid?` (linked from the `Your payout account` card on Step 3) | **Awaiting approval** |
+
+⚠️ The caveat says where the invited terms are **shown**, not how payouts are **calculated**: payouts still follow the Split % column for everyone (see the top of §15).
 
 ---
 
@@ -417,4 +437,4 @@ The setup guide on `/invest` (`client/src/wizard/data/knowledge-base.json`) said
 1. **§4 Section 179** — two paragraphs of tax explanation. Does the portal want to be saying this?
 2. **§5 and §8, "the Job Tracking sheet … soft-deleted … load-exclusion filter"** — internal vocabulary in front of an investor, in two places.
 3. **§10 "…and may differ"** — the portal telling an investor two of its own totals disagree.
-4. **§15, a fixed monthly lease on paper, a split in the payouts** — an investor invited on a lease signs for a fixed monthly amount, while payouts are still calculated from the Split % column, and three existing answers still describe a profit share (see "Related, left unchanged here" under §15.4).
+4. **§15, a fixed monthly lease on paper, a split in the payouts** — an investor invited on a lease signs for a fixed monthly amount, while payouts are still calculated from the Split % column. The two setup-guide answers that describe a profit share now say it is the standard agreement (§15.6), but the Lease §2.01 lead paragraph still describes rent as a share of Net Operating Income (see "Related, left unchanged here" under §15.4).
