@@ -53817,8 +53817,10 @@ const fuelAnalyticsLimiter = rateLimit({
 });
 app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher"), fuelAnalyticsLimiter, (req, res) => {
 	try {
+		// The fleet-wide row alone (owner_id = 0): this is an admin screen with no
+		// investor in it, and an investor's own row must never stand in for it.
 		const config = {};
-		db.prepare("SELECT key, value FROM investor_config").all()
+		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all()
 			.forEach((r) => (config[r.key] = r.value));
 		const savingsTarget = parseFloat(config.fuel_savings_target_pct) || 15;
 
@@ -54385,8 +54387,9 @@ app.get("/api/expenses/ai/insights", requireRole("Super Admin", "Dispatcher"), i
 // GET /api/maintenance-fund — Fund balance, contributions, and service history
 app.get("/api/maintenance-fund", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
+		// The fleet-wide row alone (owner_id = 0), as in GET /api/expenses/fuel-analytics.
 		const config = {};
-		db.prepare("SELECT key, value FROM investor_config").all()
+		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all()
 			.forEach((r) => (config[r.key] = r.value));
 		const monthlyTarget = parseFloat(config.maintenance_fund_monthly) || 800;
 

@@ -215,8 +215,8 @@ The same formula rule, `formulaCellRefusal()` with an empty stored row where the
 - `POST /api/expenses/ocr` — receipt JPEG/PNG → Gemini 2.5 Flash vision, returns `{amount, date, vendor, gallons, odometer, suggestedType, confidence}`. Driver ExpenseForm prefills fields before the driver confirms. Role: Driver / Super Admin / Dispatcher. Rate-limited.
 - `GET /api/expenses/all`, `PUT /api/expenses/:id/status` — manage all expenses
 - `GET /api/expenses/:id/receipt-thumbnail` — Super Admin / Dispatcher. A cached 200 px-wide JPEG of a stored receipt, for the expenses list. Only a JPEG or PNG of at most 25 MP (`RECEIPT_OCR_MAX_PIXELS`) is decoded; anything else answers 404, and the row still opens the full receipt.
-- `GET /api/expenses/fuel-analytics` — fuel spend, cost/gallon, monthly + per-driver breakdown
-- `/api/maintenance-fund` — maintenance fund tracking
+- `GET /api/expenses/fuel-analytics` — fuel spend, cost/gallon, monthly + per-driver breakdown; its savings target is the fleet-wide config row (`owner_id = 0`) only
+- `/api/maintenance-fund` — maintenance fund tracking; its monthly target is the fleet-wide config row (`owner_id = 0`) only
 - `/api/compliance/fees`, `/api/compliance/ifta` — compliance fee tracking, IFTA mileage
 
 **Invoices**:
