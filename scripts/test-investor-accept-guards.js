@@ -5,11 +5,14 @@
  *
  * PUT /api/investor-applications/:id/status with "Accepted" creates the
  * investor's account, their investors record and one truck per vehicle. It is
- * refused, with nothing written and the application left as it was, when:
- *   - an account already has the applicant's email → 409 USER_ALREADY_EXISTS;
- *   - another investors record already holds the company name the new record
- *     would take (carrier_name = the DBA, else the legal name; compared trimmed
- *     and case-insensitively) → 409 INVESTOR_RECORD_CONFLICT, naming it.
+ * refused, with nothing written and the application left as it was, when
+ * another investors record already holds the company name the new record would
+ * take (carrier_name = the DBA, else the legal name; compared trimmed and
+ * case-insensitively) → 409 INVESTOR_RECORD_CONFLICT, naming it. When an
+ * account already has the applicant's email, the application is marked
+ * Accepted and nothing else is written or sent: 200 { success: true,
+ * accountCreated: false, existingUserId, message }, the status and its audit
+ * row in one transaction.
  * bcrypt.hash is the handler's only await and runs first; the checks read the
  * state after it, and the status, account, record and trucks are written in
  * one synchronous transaction. The emails are sent after it commits.
@@ -22,18 +25,24 @@
  *   §1 company-name collision: the second of two same-name applications is
  *      409 INVESTOR_RECORD_CONFLICT (naming the record), in any case or
  *      spacing, and against a hand-added record; nothing written, no mail.
- *   §2 email collision: 409 USER_ALREADY_EXISTS in any case; nothing written.
+ *   §2 an email already on an account (in any case): 200, accountCreated
+ *      false, the account's id, a message naming its role and id; the status
+ *      Accepted with an audit row saying so; no account, record or truck
+ *      written and no mail. A status write that fails writes no audit row.
  *   §3 the success path: status, account, investors record and trucks all
  *      written, the audit line and both emails after.
  *   §4 one transaction: a write that fails part-way leaves no account, no
  *      record, no truck and the status as it was, and sends no mail.
- *   §5 the state is read AFTER the await: a colliding account or record that
- *      appears while the password hashes is still refused.
+ *   §5 the state is read AFTER the await: an account with the email that
+ *      appears while the password hashes is found (nothing created), and a
+ *      colliding record that appears then is still refused.
  *   §6 unchanged: re-accepting an application whose record exists, New /
  *      Reviewed / Rejected, a removed application (409) and a missing one (404).
  *   §7 source pins: the only await is bcrypt.hash, above the first read; none
  *      between the re-read and the transaction; the record INSERT is not
- *      OR IGNORE; the emails follow the transaction.
+ *      OR IGNORE; the emails follow the transaction; the existing-account
+ *      branch writes the status and its audit row in one transaction and
+ *      nothing else.
  *   §8 the username: folded to a-z, 0-9 and "." from the legal name, else the
  *      email's local part, else investor<application id>, the first that keeps
  *      a letter or a digit; a number appended while it is taken: an account's
@@ -235,13 +244,31 @@ async function emailSection(routeSrc = ACCEPT_SRC) {
 	const r = [];
 	const t = (cond, name) => r.push({ ok: !!cond, name });
 	const db = makeDb();
-	db.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('inv_a', 'x', 'Investor', '', 'Account.A@Example.test')").run();
+	const holder = Number(db.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('inv_a', 'x', 'Investor', '', 'Account.A@Example.test')").run().lastInsertRowid);
 	const c = addApplication(db, { legal_name: "Different Co", email: "account.a@example.test" });
-	const before = snapshot(db);
+	// Everything but the statuses: what an acceptance must not write here.
+	const written = () => { const s = JSON.parse(snapshot(db)); delete s.statuses; return JSON.stringify(s); };
+	const before = written();
 	const x = await accept(db, c, { routeSrc });
-	t(x.status === 409 && x.body && x.body.code === "USER_ALREADY_EXISTS", `§2 an email already on an account (another case): 409 USER_ALREADY_EXISTS (got ${x.status} ${JSON.stringify(x.body)})`);
-	t(snapshot(db) === before && statusOf(db, c) === "New" && x.mail.length === 0, "§2 ...nothing written, the application still New, no mail");
-	t(x.audits.some((a) => a.action === "accept_investor_blocked" && /\[USER_ALREADY_EXISTS\]/.test(a.details)), "§2 ...and the refusal is audited");
+	t(x.status === 200 && JSON.stringify(x.body) === JSON.stringify({
+		success: true, accountCreated: false, existingUserId: holder,
+		message: `Accepted. An account with this email already exists (Investor #${holder}), so no new account, investor record or trucks were created.`,
+	}), `§2 an email already on an account (another case): 200, accountCreated false, the account named (got ${x.status} ${JSON.stringify(x.body)})`);
+	t(statusOf(db, c) === "Accepted", "§2 ...the application is Accepted");
+	t(written() === before && x.mail.length === 0, "§2 ...no account, investor record or truck written, and no mail");
+	t(x.audits.length === 1 && x.audits[0].action === "accept_investor_existing_account" && x.audits[0].entityId === c
+		&& new RegExp(`already on user ${holder} \\(Investor\\).*no account, investor record or trucks were created and no email was sent \\[USER_ALREADY_EXISTS\\]$`).test(x.audits[0].details),
+	`§2 ...and one audit row says so (got ${JSON.stringify(x.audits)})`);
+
+	// The audit row is written after the status, inside its transaction: a
+	// status write that fails leaves no audit row and the application as it was.
+	const d = makeDb();
+	d.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('inv_b', 'x', 'Driver', 'B Driver', 'b@example.test')").run();
+	const e = addApplication(d, { legal_name: "Other Co", email: "b@example.test" });
+	d.exec("CREATE TRIGGER refuse_status BEFORE UPDATE ON investor_applications BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END;");
+	const y = await accept(d, e, { routeSrc });
+	t(y.status === 500 && y.audits.length === 0 && statusOf(d, e) === "New" && y.mail.length === 0,
+		`§2 a status write that fails: 500, no audit row, the application still New (got ${y.status} ${JSON.stringify(y.audits)})`);
 	return r;
 }
 
@@ -292,9 +319,11 @@ async function raceSection() {
 	{
 		const db = makeDb();
 		const id = addApplication(db, { legal_name: "Late Email Co", email: "late@example.test" });
-		const x = await accept(db, id, { duringHash: (d) => d.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('late', 'x', 'Investor', '', 'late@example.test')").run() });
-		t(x.status === 409 && x.body.code === "USER_ALREADY_EXISTS" && statusOf(db, id) === "New",
-			`§5 an account with the email created while the password hashes: still 409 (got ${x.status} ${JSON.stringify(x.body)})`);
+		let late = null;
+		const x = await accept(db, id, { duringHash: (d) => { late = Number(d.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('late', 'x', 'Investor', '', 'late@example.test')").run().lastInsertRowid); } });
+		t(x.status === 200 && x.body.accountCreated === false && x.body.existingUserId === late && statusOf(db, id) === "Accepted"
+			&& db.prepare("SELECT COUNT(*) AS n FROM users").get().n === 2 && db.prepare("SELECT COUNT(*) AS n FROM investors").get().n === 0 && x.mail.length === 0,
+		`§5 an account with the email created while the password hashes: found, nothing created (got ${x.status} ${JSON.stringify(x.body)})`);
 	}
 	{
 		const db = makeDb();
@@ -346,7 +375,7 @@ function pinSection() {
 	t(awaits.length === 1 && /await bcrypt\.hash\(tempPassword, 10\)/.test(awaits[0]), `§7 the only await is bcrypt.hash (got ${JSON.stringify(awaits)})`);
 	const hashAt = src.indexOf("await bcrypt.hash");
 	const reread = src.indexOf('db.prepare("SELECT id, deleted_at FROM investor_applications WHERE id = ?")');
-	const txAt = src.indexOf("db.transaction(");
+	const txAt = src.indexOf("const { userId, vehicleCounts } = db.transaction(");
 	t(hashAt > 0 && hashAt < src.indexOf("db.prepare("), "§7 the hash runs before the first read");
 	t(reread > hashAt && txAt > reread && !/\bawait\b/.test(src.slice(reread, txAt)), "§7 no await between the re-read and the transaction");
 	const tx = src.slice(txAt, src.indexOf("})();", txAt));
@@ -356,6 +385,13 @@ function pinSection() {
 	t(src.indexOf("sendEmail(") > src.indexOf("})();", txAt), "§7 the emails are sent after the transaction");
 	const beforeTx = src.slice(0, txAt);
 	t(!/setStatus\.run\(/.test(beforeTx.slice(0, beforeTx.indexOf("const previous"))), "§7 no status is written before the checks");
+	const existingAt = src.indexOf("if (emailHolder) {");
+	const existing = existingAt > 0 ? src.slice(existingAt, src.indexOf("\n\t\t\t}\n", existingAt)) : "";
+	const existingTx = existing.slice(existing.indexOf("db.transaction("), existing.indexOf("})();"));
+	t(/^db\.transaction\(\(\) => \{\s*setStatus\.run\(status, appId\);\s*logAudit\(req, "accept_investor_existing_account"/.test(existingTx),
+		"§7 the existing-account branch writes the status, then its audit row, in one transaction");
+	t(existing.length > 0 && !/INSERT|sendEmail\(|registerApplicationVehicles\(/.test(existing) && /return res\.json\(/.test(existing),
+		"§7 ...and writes nothing else, sends nothing, and answers there");
 	return r;
 }
 
