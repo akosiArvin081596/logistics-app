@@ -23361,36 +23361,141 @@ app.get("/api/investors", requireRole("Super Admin"), (req, res) => {
 	res.json({ investors });
 });
 
+// The text fields an investor record takes from the admin forms: body key,
+// column, the longest value allowed once cleaned, and whether line breaks are
+// kept. Cleaned the house way: sanitizeEvidenceText() turns control,
+// zero-width, text-direction and line-separator characters into a space
+// (NFC first), every other format character is dropped, and notes keep their
+// line breaks through sanitizeInvoiceNotes(). Only fullName is required.
+const INVESTOR_RECORD_TEXT_FIELDS = [
+	["fullName", "full_name", 120, false],
+	["carrierName", "carrier_name", 120, false],
+	["notes", "notes", 2000, true],
+	["entityType", "entity_type", 120, false],
+	["address", "address", 300, false],
+	["phone", "phone", 60, false],
+	["email", "email", 254, false],
+	["einSsn", "ein_ssn", 60, false],
+	["taxClassification", "tax_classification", 120, false],
+	["contactPerson", "contact_person", 120, false],
+	["contactTitle", "contact_title", 120, false],
+];
+const INVESTOR_RECORD_STATUSES = ["Active", "Inactive"];
+
+// Reads a POST / PUT /api/investors body. Returns { ok: true, values }, where a
+// field left out (undefined or null) is absent from `values`, or
+// { ok: false, field, error } for 400 INVALID_FIELD. `creating` makes fullName
+// required; on an edit a SENT fullName must still be non-empty.
+function readInvestorRecordBody(body, { creating }) {
+	const src = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+	const values = {};
+	for (const [key, , max, multiline] of INVESTOR_RECORD_TEXT_FIELDS) {
+		const raw = src[key];
+		if (raw === undefined || raw === null) continue;
+		const bad = { ok: false, field: key, error: `${key} must be text of at most ${max} characters.` };
+		if (typeof raw !== "string" || raw.length > max * 4) return bad;
+		const text = multiline
+			? sanitizeInvoiceNotes(raw, Infinity)
+			: sanitizeEvidenceText(raw, Infinity).replace(/\p{Cf}+/gu, "").trim();
+		if (Array.from(text).length > max) return bad;
+		values[key] = text;
+	}
+	if ((creating || values.fullName !== undefined) && !values.fullName) {
+		return { ok: false, field: "fullName", error: "The investor's name is required." };
+	}
+	if (src.status !== undefined && src.status !== null && src.status !== "") {
+		if (!INVESTOR_RECORD_STATUSES.includes(src.status)) {
+			return { ok: false, field: "status", error: `status must be ${INVESTOR_RECORD_STATUSES.join(" or ")}.` };
+		}
+		values.status = src.status;
+	}
+	if (src.userId !== undefined && src.userId !== null && src.userId !== "" && src.userId !== 0) {
+		const n = typeof src.userId === "number" ? src.userId
+			: (typeof src.userId === "string" && /^\d{1,15}$/.test(src.userId) ? Number(src.userId) : NaN);
+		if (!Number.isSafeInteger(n) || n <= 0) return { ok: false, field: "userId", error: "userId must be a user's id." };
+		values.userId = n;
+	}
+	return { ok: true, values };
+}
+
+// The investors record other than `exceptId` that already holds this carrier
+// name (compared trimmed and case-insensitively), or null.
+function investorCarrierHolder(carrierName, exceptId) {
+	return db.prepare(
+		"SELECT id, full_name, carrier_name FROM investors WHERE LOWER(TRIM(carrier_name)) = LOWER(?) AND id != ? ORDER BY id LIMIT 1"
+	).get(carrierName, exceptId) || null;
+}
+
+// A collision on the UNIQUE index of investors.carrier_name or investors.user_id
+// that the checks in the routes did not see, answered as a 409. False for any
+// other error.
+function investorRecordConflict(err, res) {
+	if (!err || err.code !== "SQLITE_CONSTRAINT_UNIQUE") return false;
+	res.status(409).json(/investors\.user_id/.test(String(err.message))
+		? { error: "That user is already linked to another investor record.", code: "INVESTOR_USER_TAKEN" }
+		: { error: "That carrier name is already used by another investor record.", code: "CARRIER_NAME_TAKEN" });
+	return true;
+}
+
+// The id in /api/investors/:id, or 0 when it is not a positive integer.
+function investorRecordId(raw) {
+	return typeof raw === "string" && /^[1-9]\d{0,14}$/.test(raw) ? Number(raw) : 0;
+}
+
+// POST /api/investors — Super Admin adds an investor record by hand.
+// 400 INVALID_FIELD (field) for a missing or over-long name, a status other
+// than Active / Inactive, notes over 2000 characters, or a text field that is
+// not text; 409 CARRIER_NAME_TAKEN when another record holds the carrier name
+// (which defaults to the name); 409 INVESTOR_USER_TAKEN when the user is
+// already linked to another record. Audited as create_investor.
 app.post("/api/investors", requireRole("Super Admin"), (req, res) => {
-	const { userId, fullName, carrierName, status, notes, entityType, address, phone, email, einSsn, taxClassification, contactPerson, contactTitle } = req.body;
-	if (!fullName || !fullName.trim()) return res.status(400).json({ error: "Full name is required" });
-	// Carrier UI was removed; default carrier_name to the investor's own name so
-	// the UNIQUE index on investors.carrier_name still holds for new rows.
-	const finalCarrier = (carrierName || fullName).trim();
-	const result = db.prepare(`
-		INSERT INTO investors (user_id, full_name, carrier_name, status, notes, entity_type, address, phone, email, ein_ssn, tax_classification, contact_person, contact_title)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`).run(userId || null, fullName.trim(), finalCarrier, status || "Active", (notes || "").trim(),
-		(entityType || "").trim(), (address || "").trim(), (phone || "").trim(), (email || "").trim(),
-		(einSsn || "").trim(), (taxClassification || "").trim(), (contactPerson || "").trim(), (contactTitle || "").trim());
-	notifyChange("investors");
-	res.json({ success: true, id: result.lastInsertRowid });
+	try {
+		const read = readInvestorRecordBody(req.body, { creating: true });
+		if (!read.ok) return res.status(400).json({ error: read.error, code: "INVALID_FIELD", field: read.field });
+		const v = read.values;
+		// Carrier UI was removed; default carrier_name to the investor's own name so
+		// the UNIQUE index on investors.carrier_name still holds for new rows.
+		const finalCarrier = v.carrierName || v.fullName;
+		const holder = investorCarrierHolder(finalCarrier, 0);
+		if (holder) {
+			return res.status(409).json({
+				error: `The carrier name "${finalCarrier}" is already used by the investor record "${holder.full_name || holder.carrier_name}".`,
+				code: "CARRIER_NAME_TAKEN",
+			});
+		}
+		if (v.userId && db.prepare("SELECT 1 AS hit FROM investors WHERE user_id = ?").get(v.userId)) {
+			return res.status(409).json({ error: "That user is already linked to another investor record.", code: "INVESTOR_USER_TAKEN" });
+		}
+		const result = db.prepare(`
+			INSERT INTO investors (user_id, full_name, carrier_name, status, notes, entity_type, address, phone, email, ein_ssn, tax_classification, contact_person, contact_title)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`).run(v.userId || null, v.fullName, finalCarrier, v.status || "Active", v.notes || "",
+			v.entityType || "", v.address || "", v.phone || "", v.email || "",
+			v.einSsn || "", v.taxClassification || "", v.contactPerson || "", v.contactTitle || "");
+		logAudit(req, "create_investor", "investor", result.lastInsertRowid,
+			auditText(`Created investor record "${v.fullName}" (carrier "${finalCarrier}", ${v.status || "Active"})${v.userId ? `, linked to user ${v.userId}` : ""}`, 500));
+		notifyChange("investors");
+		res.json({ success: true, id: result.lastInsertRowid });
+	} catch (err) {
+		if (investorRecordConflict(err, res)) return;
+		console.error("POST /api/investors error:", err.message);
+		res.status(500).json({ error: "Failed to save the investor record" });
+	}
 });
 
+// PUT /api/investors/:id — Super Admin edits an investor record. A field left
+// out keeps its stored value. The same 400 / 409 answers as POST, plus 404
+// INVESTOR_NOT_FOUND. The carrier name is checked against the other records
+// only when it changes. Audited as update_investor, naming each changed field
+// before → after (the tax id by name only).
 app.put("/api/investors/:id", requireRole("Super Admin"), (req, res) => {
-	const { id } = req.params;
-	const existing = db.prepare("SELECT * FROM investors WHERE id = ?").get(id);
-	if (!existing) return res.status(404).json({ error: "Investor not found" });
-	const { userId, fullName, carrierName, status, notes, entityType, address, phone, email, einSsn, taxClassification, contactPerson, contactTitle } = req.body;
-	db.prepare(`
-		UPDATE investors SET user_id=?, full_name=?, carrier_name=?, status=?, notes=?,
-		entity_type=?, address=?, phone=?, email=?, ein_ssn=?, tax_classification=?, contact_person=?, contact_title=?
-		WHERE id=?
-	`).run(
-		userId ?? existing.user_id, (fullName || existing.full_name).trim(), (carrierName || existing.carrier_name).trim(),
-		status || existing.status, (notes ?? existing.notes).trim(),
-		(entityType ?? existing.entity_type).trim(), (address ?? existing.address).trim(),
-		(phone ?? existing.phone).trim(), (email ?? existing.email).trim(),
+	try {
+		const id = investorRecordId(req.params.id);
+		const existing = id ? db.prepare("SELECT * FROM investors WHERE id = ?").get(id) : null;
+		if (!existing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
+		const read = readInvestorRecordBody(req.body, { creating: false });
+		if (!read.ok) return res.status(400).json({ error: read.error, code: "INVALID_FIELD", field: read.field });
+		const v = read.values;
 		// ⚠️ A MASKED VALUE MUST NEVER BE SAVED OVER THE REAL ONE.
 		// Safe today only by accident: GET /api/investors maps to a restricted
 		// shape with no ein_ssn, so nothing round-trips. The moment anyone
@@ -23399,28 +23504,74 @@ app.put("/api/investors/:id", requireRole("Super Admin"), (req, res) => {
 		// "••••1234" over the tax id — silently, and irreversibly.
 		// Enforced here rather than documented as an invariant, so every future
 		// masking decision is safe by construction.
-		(piiMask.isMasked(einSsn) ? existing.ein_ssn : (einSsn ?? existing.ein_ssn)).trim(),
-		(taxClassification ?? existing.tax_classification).trim(),
-		(contactPerson ?? existing.contact_person).trim(), (contactTitle ?? existing.contact_title).trim(), id
-	);
-	notifyChange("investors");
-	res.json({ success: true });
+		if (v.einSsn !== undefined && piiMask.isMasked(v.einSsn)) delete v.einSsn;
+		const next = { user_id: v.userId ?? existing.user_id, status: v.status ?? existing.status };
+		for (const [key, column] of INVESTOR_RECORD_TEXT_FIELDS) {
+			next[column] = v[key] ?? String(existing[column] ?? "").trim();
+		}
+		if (v.carrierName !== undefined && v.carrierName !== existing.carrier_name) {
+			const holder = investorCarrierHolder(next.carrier_name, id);
+			if (holder) {
+				return res.status(409).json({
+					error: `The carrier name "${next.carrier_name}" is already used by the investor record "${holder.full_name || holder.carrier_name}".`,
+					code: "CARRIER_NAME_TAKEN",
+				});
+			}
+		}
+		if (next.user_id && next.user_id !== existing.user_id
+			&& db.prepare("SELECT 1 AS hit FROM investors WHERE user_id = ? AND id != ?").get(next.user_id, id)) {
+			return res.status(409).json({ error: "That user is already linked to another investor record.", code: "INVESTOR_USER_TAKEN" });
+		}
+		db.prepare(`
+			UPDATE investors SET user_id=?, full_name=?, carrier_name=?, status=?, notes=?,
+			entity_type=?, address=?, phone=?, email=?, ein_ssn=?, tax_classification=?, contact_person=?, contact_title=?
+			WHERE id=?
+		`).run(
+			next.user_id, next.full_name, next.carrier_name, next.status, next.notes,
+			next.entity_type, next.address, next.phone, next.email, next.ein_ssn,
+			next.tax_classification, next.contact_person, next.contact_title, id
+		);
+		const changed = ["user_id", "status", ...INVESTOR_RECORD_TEXT_FIELDS.map(([, column]) => column)]
+			.filter((column) => String(next[column] ?? "") !== String(existing[column] ?? ""))
+			.map((column) => (column === "ein_ssn"
+				? "ein_ssn changed"
+				: `${column}: ${auditText(existing[column] ?? "", 120) || "(blank)"} → ${auditText(next[column] ?? "", 120) || "(blank)"}`));
+		if (changed.length) logAudit(req, "update_investor", "investor", id, auditText(changed.join("; "), 2000));
+		notifyChange("investors");
+		res.json({ success: true });
+	} catch (err) {
+		if (investorRecordConflict(err, res)) return;
+		console.error("PUT /api/investors/:id error:", err.message);
+		res.status(500).json({ error: "Failed to save the investor record" });
+	}
 });
 
+// DELETE /api/investors/:id — Super Admin removes an investor record: a hard
+// delete of the row and its profile picture (the linked account, trucks and
+// documents are left as they are). 404 INVESTOR_NOT_FOUND for an id that is not
+// on file. Audited as delete_investor.
 app.delete("/api/investors/:id", requireRole("Super Admin"), (req, res) => {
-	const { id } = req.params;
-	const existing = db.prepare("SELECT * FROM investors WHERE id = ?").get(id);
-	if (!existing) return res.status(404).json({ error: "Investor not found" });
-	// Cascade: unlink the profile picture from disk
-	if (existing.profile_picture_url) {
-		try {
-			const picPath = path.join(__dirname, existing.profile_picture_url);
-			if (fs.existsSync(picPath)) fs.unlinkSync(picPath);
-		} catch (err) { console.error("Failed to unlink investor profile pic on cascade:", err.message); }
+	try {
+		const id = investorRecordId(req.params.id);
+		const existing = id ? db.prepare("SELECT * FROM investors WHERE id = ?").get(id) : null;
+		if (!existing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
+		// Cascade: unlink the profile picture from disk
+		if (existing.profile_picture_url) {
+			try {
+				const picPath = path.join(__dirname, existing.profile_picture_url);
+				if (fs.existsSync(picPath)) fs.unlinkSync(picPath);
+			} catch (err) { console.error("Failed to unlink investor profile pic on cascade:", err.message); }
+		}
+		db.prepare("DELETE FROM investors WHERE id = ?").run(id);
+		logAudit(req, "delete_investor", "investor", id,
+			auditText(`Deleted investor record "${existing.full_name}" (carrier "${existing.carrier_name}")` +
+				`${existing.user_id ? `, linked to user ${existing.user_id}` : ""}${existing.application_id ? `, from application ${existing.application_id}` : ""}`, 500));
+		notifyChange("investors");
+		res.json({ success: true });
+	} catch (err) {
+		console.error("DELETE /api/investors/:id error:", err.message);
+		res.status(500).json({ error: "Failed to delete the investor record" });
 	}
-	db.prepare("DELETE FROM investors WHERE id = ?").run(id);
-	notifyChange("investors");
-	res.json({ success: true });
 });
 
 // Check if a driver has an active load (returns error message or null).
