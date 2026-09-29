@@ -47,6 +47,11 @@ const LINE_SEPARATORS_RE = /[\p{Zl}\p{Zp}]/gu
 const INVISIBLE_RE = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Cs}]/gu
 const PICTOGRAPHIC_RE = /\p{Extended_Pictographic}/u
 const OTHER_SCRIPT_RE = /[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}]/u
+// The copyright, registered and trade mark signs are Extended_Pictographic, but
+// in running text they are ordinary symbols, so these three (and no other) are
+// set aside before the emoji test — unless U+FE0F, the emoji presentation
+// selector, follows one and asks for the emoji. Built from code points.
+const TEXT_SYMBOLS_RE = new RegExp(`[${String.fromCodePoint(0xa9, 0xae, 0x2122)}](?!${String.fromCodePoint(0xfe0f)})`, 'gu')
 
 const isBlank = (v) => v === undefined || v === null || v === ''
 
@@ -77,7 +82,8 @@ export function parseLeaseAmountToCents(value) {
 
 // The additional terms as the server stores them: line breaks to LF, tabs to a
 // space, invisible code points dropped (LF kept), NFC, line ends trimmed, at
-// most one blank line in a row, the whole trimmed.
+// most one blank line in a row, the whole trimmed. Emoji and other scripts are
+// refused; the copyright, registered and trade mark signs are not.
 export function normalizeDetails(value) {
   if (value === undefined || value === null) return { ok: true, value: '' }
   if (typeof value !== 'string') return { ok: false, reason: 'details_not_text' }
@@ -97,7 +103,7 @@ export function normalizeDetails(value) {
   const text = kept.join('\n').trim()
   if (text.length > LIMITS.DETAILS_MAX) return { ok: false, reason: 'details_too_long' }
   if (text && text.split('\n').length > LIMITS.DETAILS_MAX_LINES) return { ok: false, reason: 'details_too_many_lines' }
-  if (PICTOGRAPHIC_RE.test(text) || OTHER_SCRIPT_RE.test(text)) return { ok: false, reason: 'unsupported_characters' }
+  if (PICTOGRAPHIC_RE.test(text.replace(TEXT_SYMBOLS_RE, '')) || OTHER_SCRIPT_RE.test(text)) return { ok: false, reason: 'unsupported_characters' }
   return { ok: true, value: text }
 }
 
