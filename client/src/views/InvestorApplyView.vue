@@ -525,14 +525,21 @@
       @close="showMapPicker = false" @confirm="onMapConfirm"
     />
 
-    <!-- Signed PDF Viewer (from review modal) -->
-    <div v-if="reviewPdfUrl" class="pdf-viewer-overlay" @click.self="closeReviewPdf">
-      <div class="pdf-viewer-panel">
+    <!-- Signed PDF Viewer (from review modal). It opens on the click, so the
+         render is visibly under way, and a refused or failed preview says so
+         with a retry, the same way the sign modal's pane does. -->
+    <div v-if="reviewDoc" class="pdf-viewer-overlay" data-test="review-pdf-viewer" @click.self="closeReviewPdf">
+      <div class="pdf-viewer-panel" role="dialog" aria-modal="true" :aria-label="reviewDoc.doc_name">
         <div class="pdf-viewer-header">
-          <span class="pdf-viewer-title">{{ reviewPdfName }}</span>
-          <button class="review-close" @click="closeReviewPdf">&times;</button>
+          <span class="pdf-viewer-title">{{ reviewDoc.doc_name }}</span>
+          <button type="button" class="review-close" aria-label="Close" @click="closeReviewPdf">&times;</button>
         </div>
-        <iframe :src="reviewPdfUrl" class="pdf-viewer-frame" />
+        <iframe v-if="reviewPdfUrl" :src="reviewPdfUrl" class="pdf-viewer-frame" />
+        <div v-else-if="reviewPdfError" class="pdf-viewer-placeholder pdf-viewer-error" role="alert" data-test="review-preview-error">
+          <span>{{ reviewPdfError }}</span>
+          <button type="button" class="pdf-retry" data-test="review-preview-retry" @click="retryReviewPdf">Try again</button>
+        </div>
+        <div v-else class="pdf-viewer-placeholder" role="status" data-test="review-preview-loading">Loading document...</div>
       </div>
     </div>
 
@@ -682,8 +689,11 @@ const showAcctNum = ref(false)
 const previewPdfUrl = ref('')
 // Why the sign modal's preview is not showing, when a fetch failed.
 const previewError = ref('')
+// The review window's document viewer: the document it shows (null = closed),
+// its PDF once loaded, and why it is not showing when the fetch failed.
+const reviewDoc = ref(null)
 const reviewPdfUrl = ref('')
-const reviewPdfName = ref('')
+const reviewPdfError = ref('')
 const bankDropOpen = ref(false)
 const usBanks = [
   'JPMorgan Chase','Bank of America','Wells Fargo','Citibank','U.S. Bank',
@@ -1204,12 +1214,19 @@ function revokePreview() {
   }
 }
 
-// Open signed PDF viewer from review modal
+// The review window's viewer numbers its requests the same way: closing it, or
+// asking again, while a render is in flight must not show that render later.
+let reviewSeq = 0
+
+// Open signed PDF viewer from review modal. A failure used to be dropped
+// silently, so a click refused by the renders-in-flight cap did nothing at all;
+// it now shows the same message and retry as the sign modal's pane.
 async function openReviewPdf(doc) {
   const sig = signatures[doc.doc_key]
   if (!sig) return
-  reviewPdfName.value = doc.doc_name
-  reviewPdfUrl.value = ''
+  revokeReviewPdf()
+  reviewDoc.value = doc
+  const mine = ++reviewSeq
   try {
     const stripped = vehicles.value.map(({ photo, photoName, ...rest }) => rest)
     const payload = { ...form, vehicles: stripped, banking: { ...banking }, signatureText: sig.text, signatureImage: sig.image }
@@ -1219,23 +1236,42 @@ async function openReviewPdf(doc) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     })
-    // Refused, or the terms changed: the review is closed and there is no
-    // signed document to show.
+    // Refused, or the terms changed: the review and this viewer are closed, and
+    // there is no signed document to show.
     if (sent) {
       const outcome = await readInviteOutcome(res, sent)
       if (outcome === 'refused' || outcome === 'changed') return
     }
-    if (res.ok) {
-      const blob = await res.blob()
-      reviewPdfUrl.value = URL.createObjectURL(blob)
+    if (!res.ok) {
+      const message = await previewFailureMessage(res)
+      if (mine === reviewSeq) reviewPdfError.value = message
+      return
     }
-  } catch { /* skip */ }
+    const blob = await res.blob()
+    if (mine === reviewSeq) reviewPdfUrl.value = URL.createObjectURL(blob)
+  } catch {
+    if (mine === reviewSeq) reviewPdfError.value = PREVIEW_FAILED_MESSAGE
+  }
+}
+
+// The viewer's retry: the same signed document again.
+function retryReviewPdf() {
+  const doc = reviewDoc.value
+  if (doc) openReviewPdf(doc)
+}
+
+function revokeReviewPdf() {
+  reviewPdfError.value = ''
+  if (reviewPdfUrl.value) {
+    URL.revokeObjectURL(reviewPdfUrl.value)
+    reviewPdfUrl.value = ''
+  }
 }
 
 function closeReviewPdf() {
-  if (reviewPdfUrl.value) URL.revokeObjectURL(reviewPdfUrl.value)
-  reviewPdfUrl.value = ''
-  reviewPdfName.value = ''
+  reviewSeq++
+  revokeReviewPdf()
+  reviewDoc.value = null
 }
 
 // Capture signature locally, then refresh preview with signature overlay
@@ -1978,6 +2014,19 @@ async function submitOnboarding() {
 }
 .pdf-viewer-title { font-weight: 600; font-size: 0.95rem; color: #0f172a; }
 .pdf-viewer-frame { flex: 1; border: none; width: 100%; }
+/* Loading, or a failed preview with its retry: the sign modal's pane, here. */
+.pdf-viewer-placeholder {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  padding: 1.5rem; background: #f5f5f5; color: #6b7085; font-size: 0.9rem; text-align: center;
+}
+.pdf-viewer-error { flex-direction: column; gap: 0.85rem; }
+.pdf-retry {
+  padding: 0.55rem 1.3rem; background: #0f2847; color: #fff; border: none;
+  border-radius: 10px; font-weight: 700; font-size: 0.85rem; cursor: pointer;
+  font-family: inherit; transition: background 0.15s;
+}
+.pdf-retry:hover { background: #1a3a6b; }
+.pdf-retry:focus-visible { outline: 2px solid #3b82f6; outline-offset: 2px; }
 .review-vehicle {
   margin-bottom: 0.75rem; padding: 0.65rem 0.85rem;
   background: #fafbfd; border-radius: 8px; border: 1px solid #f1f5f9;

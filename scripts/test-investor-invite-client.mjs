@@ -12,7 +12,8 @@
 //   §2 the code → message map is the §15 wording, word for word
 //   §3 revisionChanged() fires only on two known, different revisions
 //   §4 refusals, the lookup failure code and the ?invite= reader
-//   §5 the terms card has nothing an applicant can edit
+//   §5 the terms card has nothing an applicant can edit; a failed preview is
+//      shown with a retry, in the sign modal and in the review window's viewer
 //   §6 without an invitation the payloads are what they always were, and the
 //      token is never written to the draft
 //   §7 DISCRIMINATION — defang the token pattern, require an assertion to flip
@@ -215,6 +216,9 @@ ok('Escape closes the sign dialog, caught before the tour hears it',
   /window\.addEventListener\('keydown', onKeydown, true\)/.test(MODAL) && /e\.key !== 'Escape'/.test(MODAL) && /e\.stopPropagation\(\)/.test(MODAL))
 ok('a failed preview shows why, with a retry, instead of "Loading document..." for good',
   /v-else-if="pdfError"/.test(MODAL) && /\$emit\('retry-preview'\)/.test(MODAL) && /@retry-preview="retryPreview"/.test(VIEW) && /previewError\.value = message/.test(VIEW))
+ok('the review window\'s viewer opens on the click and shows a failed preview with a retry, never silently',
+  /<div v-if="reviewDoc" class="pdf-viewer-overlay"/.test(VIEW) && /v-else-if="reviewPdfError"/.test(VIEW) &&
+  /@click="retryReviewPdf"/.test(VIEW) && /reviewPdfError\.value = message/.test(VIEW) && /reviewPdfError\.value = PREVIEW_FAILED_MESSAGE/.test(VIEW))
 
 // ══ §6 — no invitation, no change; the token never reaches the draft ═══════
 console.log('\n§6  plain /invest is unchanged, and the token stays out of the draft')
