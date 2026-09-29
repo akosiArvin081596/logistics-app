@@ -384,7 +384,7 @@
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
               Back
             </button>
-            <button class="btn-primary" :disabled="!canSubmitBanking || submitting" data-wizard-target="review-open" @click="showReviewModal = true">
+            <button ref="reviewOpenButton" class="btn-primary" :disabled="!canSubmitBanking || submitting" data-wizard-target="review-open" @click="showReviewModal = true">
               {{ 'Review & Complete' }}
             </button>
           </div>
@@ -400,10 +400,18 @@
 
     <!-- Review Modal -->
     <div v-if="showReviewModal" class="review-overlay" @click.self="showReviewModal = false">
-      <div class="review-modal" data-wizard-target="review-modal">
+      <div
+        ref="reviewDialog"
+        class="review-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="review-dialog-title"
+        tabindex="-1"
+        data-wizard-target="review-modal"
+      >
         <div class="review-header">
-          <h3>Review Your Application</h3>
-          <button class="review-close" @click="showReviewModal = false">&times;</button>
+          <h3 id="review-dialog-title">Review Your Application</h3>
+          <button class="review-close" aria-label="Close" @click="showReviewModal = false">&times;</button>
         </div>
         <div class="review-body">
           <!-- Step 1: Application Info -->
@@ -469,10 +477,10 @@
             <div class="review-grid">
               <div v-for="doc in documents" :key="doc.doc_key" class="review-item full">
                 <span class="review-label">{{ doc.doc_name }}</span>
-                <span v-if="doc.signed" class="review-value text-green doc-view-link" @click="openReviewPdf(doc)">
+                <button v-if="doc.signed" type="button" class="review-value text-green doc-view-link" @click="openReviewPdf(doc)">
                   Signed &mdash; View Document
                   <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-left:2px"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-                </span>
+                </button>
                 <span v-else class="review-value text-amber">Pending</span>
               </div>
             </div>
@@ -529,17 +537,20 @@
          render is visibly under way, and a refused or failed preview says so
          with a retry, the same way the sign modal's pane does. -->
     <div v-if="reviewDoc" class="pdf-viewer-overlay" data-test="review-pdf-viewer" @click.self="closeReviewPdf">
-      <div class="pdf-viewer-panel" role="dialog" aria-modal="true" :aria-label="reviewDoc.doc_name">
+      <div ref="reviewViewer" class="pdf-viewer-panel" role="dialog" aria-modal="true" :aria-label="reviewDoc.doc_name" tabindex="-1">
         <div class="pdf-viewer-header">
           <span class="pdf-viewer-title">{{ reviewDoc.doc_name }}</span>
           <button type="button" class="review-close" aria-label="Close" @click="closeReviewPdf">&times;</button>
         </div>
-        <iframe v-if="reviewPdfUrl" :src="reviewPdfUrl" class="pdf-viewer-frame" />
+        <iframe v-if="reviewPdfUrl" :src="reviewPdfUrl" class="pdf-viewer-frame" :title="reviewDoc.doc_name" />
         <div v-else-if="reviewPdfError" class="pdf-viewer-placeholder pdf-viewer-error" role="alert" data-test="review-preview-error">
           <span>{{ reviewPdfError }}</span>
           <button type="button" class="pdf-retry" data-test="review-preview-retry" @click="retryReviewPdf">Try again</button>
         </div>
         <div v-else class="pdf-viewer-placeholder" role="status" data-test="review-preview-loading">Loading document...</div>
+        <!-- Keys pressed inside the PDF never reach this page, so Tab past the
+             PDF's own controls lands here and goes back to the close button. -->
+        <span tabindex="0" class="focus-wrap" @focus="wrapViewerFocus"></span>
       </div>
     </div>
 
@@ -694,6 +705,11 @@ const previewError = ref('')
 const reviewDoc = ref(null)
 const reviewPdfUrl = ref('')
 const reviewPdfError = ref('')
+// The review window, its viewer, and the button that opens the window: where
+// keyboard focus goes as each opens and closes.
+const reviewOpenButton = ref(null)
+const reviewDialog = ref(null)
+const reviewViewer = ref(null)
 const bankDropOpen = ref(false)
 const usBanks = [
   'JPMorgan Chase','Bank of America','Wells Fargo','Citibank','U.S. Bank',
@@ -1254,9 +1270,11 @@ async function openReviewPdf(doc) {
   }
 }
 
-// The viewer's retry: the same signed document again.
+// The viewer's retry: the same signed document again. Focus moves to the viewer
+// first, because the Try again button that has it is about to go.
 function retryReviewPdf() {
   const doc = reviewDoc.value
+  reviewViewer.value?.focus()
   if (doc) openReviewPdf(doc)
 }
 
@@ -1273,6 +1291,78 @@ function closeReviewPdf() {
   revokeReviewPdf()
   reviewDoc.value = null
 }
+
+// The review window and the viewer it opens are modal dialogs, and the keyboard
+// belongs to the one on top: Tab and Shift+Tab cycle inside it, and Escape
+// closes it and nothing under it (the viewer, then the window, then the guided
+// tour: one press each). The same trap as ConfirmModal and InviteModal; it
+// skips the viewer's focus-wrap guard, which only hands focus back to the top.
+const DIALOG_FOCUSABLE =
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), iframe, [tabindex]:not([tabindex="-1"]):not(.focus-wrap)'
+
+function wrapViewerFocus() {
+  reviewViewer.value?.querySelector(DIALOG_FOCUSABLE)?.focus()
+}
+
+function onReviewKeydown(event) {
+  const dialogEl = reviewDoc.value ? reviewViewer.value : reviewDialog.value
+  if (!dialogEl) return
+  const active = document.activeElement
+  const lost = !active || active === document.body
+  // Focus the applicant moved outside with the mouse (the guided tour sits above
+  // this window) keeps that layer's own keys.
+  if (!lost && !dialogEl.contains(active)) return
+  if (event.key === 'Escape') {
+    // Stopped here, on document, before the guided tour's Escape on window
+    // closes the tour as well.
+    event.preventDefault()
+    event.stopPropagation()
+    if (reviewDoc.value) closeReviewPdf()
+    else showReviewModal.value = false
+    return
+  }
+  if (event.key !== 'Tab') return
+  const focusable = Array.from(dialogEl.querySelectorAll(DIALOG_FOCUSABLE))
+  if (!focusable.length) return
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (event.shiftKey && (lost || active === first || active === dialogEl)) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && (lost || active === last)) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
+// After the DOM update ('post'): an opening dialog is then there to take focus,
+// and a close that also changed the step has already removed "Review & Complete"
+// (its ref is null), so focus is never put on a button about to go.
+watch(showReviewModal, (open) => {
+  if (open) {
+    document.addEventListener('keydown', onReviewKeydown)
+    reviewDialog.value?.focus()
+  } else {
+    document.removeEventListener('keydown', onReviewKeydown)
+    reviewOpenButton.value?.focus()
+  }
+}, { flush: 'post' })
+
+// The viewer hands focus back to the View Document that opened it, or to the
+// window when that is gone.
+let viewerReturnFocus = null
+watch(() => reviewDoc.value !== null, (open) => {
+  if (open) {
+    viewerReturnFocus = document.activeElement
+    reviewViewer.value?.focus()
+  } else {
+    const back = viewerReturnFocus?.isConnected ? viewerReturnFocus : reviewDialog.value
+    viewerReturnFocus = null
+    back?.focus()
+  }
+}, { flush: 'post' })
+
+onBeforeUnmount(() => document.removeEventListener('keydown', onReviewKeydown))
 
 // Capture signature locally, then refresh preview with signature overlay
 async function handleSigned({ docKey, text, image, consent }) {
@@ -2000,8 +2090,16 @@ async function submitOnboarding() {
 .review-terms-details { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
 .text-green { color: #16a34a; }
 .text-amber { color: #d97706; }
-.doc-view-link { cursor: pointer; display: inline-flex; align-items: center; gap: 2px; transition: color 0.15s; }
+/* A button that renders exactly as the text it replaced; .review-value sets its size and weight. */
+.doc-view-link {
+  cursor: pointer; display: inline-flex; align-items: center; gap: 2px; transition: color 0.15s;
+  padding: 0; border: none; background: none;
+  font-family: inherit; line-height: inherit; letter-spacing: inherit; text-align: inherit;
+}
 .doc-view-link:hover { color: #15803d; text-decoration: underline; }
+.doc-view-link:focus-visible { outline: 2px solid #3b82f6; outline-offset: 2px; border-radius: 4px; }
+/* The dialogs take focus themselves when they open; their controls show the ring. */
+.review-modal:focus, .pdf-viewer-panel:focus { outline: none; }
 .pdf-viewer-overlay {
   position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,0.6);
   display: flex; align-items: center; justify-content: center; padding: 1.5rem;
