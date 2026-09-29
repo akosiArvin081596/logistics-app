@@ -10,9 +10,11 @@
  * displayed is worse evidence than none: it is a record of an assertion nobody
  * made.
  *
- * The server (`SIGNING_CONSENT_TEXT_DEFAULT` in server.js) holds the same
- * sentence as a fallback for a client that transmits the flag without the text.
- * It does NOT overwrite what is sent — what the signer saw is what gets stored.
+ * The server records the same sentence as `SIGNING_CONSENT_TEXT_EXPECTED` in
+ * server.js, so a reviewer can see what the stored field is expected to say. It
+ * is NOT a fallback: a client that transmits the flag without the text gets ""
+ * stored, never this sentence, and nothing overwrites what is sent — what the
+ * signer saw is what gets stored.
  */
 export const SIGNING_CONSENT_TEXT = 'I have read and agree to the terms of this document'
 
