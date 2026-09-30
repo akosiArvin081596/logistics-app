@@ -46,9 +46,18 @@
 
 <script setup>
 import { computed } from 'vue'
+import { useInvestorStore } from '../../stores/investor'
 
+const store = useInvestorStore()
+
+// A Super Admin previewing an investor must get THAT investor's CSV: without
+// as_user_id the server answers the whole fleet's ("All Investors"). Scoped
+// the same way as InvestorView's downloadReport().
 async function exportCsv() {
-  const res = await fetch('/api/investor/tax-csv', { credentials: 'include' })
+  const params = new URLSearchParams()
+  if (store.isPreview) params.set('as_user_id', String(store.previewUserId))
+  const qs = params.toString()
+  const res = await fetch(`/api/investor/tax-csv${qs ? `?${qs}` : ''}`, { credentials: 'include' })
   if (!res.ok) return
   const blob = await res.blob()
   const url = URL.createObjectURL(blob)

@@ -306,8 +306,10 @@ function bodySection(opts = {}) {
 	for (const v of ["101", "-1", "abc", "0x10", "", "  ", null, true, "50.123", "Infinity", "1e400", [50], "50%"]) {
 		refuse(`investor_split_pct ${JSON.stringify(v)}`, A, { investor_split_pct: v }, "INVALID_CONFIG_VALUE", "investor_split_pct");
 	}
+	refuse("truck_purchase_price, which nothing reads since 2026-09-30", A, { truck_purchase_price: "58000" }, "UNKNOWN_CONFIG_KEY", "truck_purchase_price");
+	refuse("truck_purchase_price fleet-wide", G, { truck_purchase_price: "58000" }, "UNKNOWN_CONFIG_KEY", "truck_purchase_price");
 	for (const v of ["1000000.01", "85,000", "-5", "$800"]) {
-		refuse(`truck_purchase_price ${JSON.stringify(v)}`, A, { truck_purchase_price: v }, "INVALID_CONFIG_VALUE", "truck_purchase_price");
+		refuse(`maintenance_fund_monthly ${JSON.stringify(v)}`, G, { maintenance_fund_monthly: v }, "INVALID_CONFIG_VALUE", "maintenance_fund_monthly");
 	}
 	refuse("settlement_grace_days 7.5", G, { settlement_grace_days: "7.5" }, "INVALID_CONFIG_VALUE", "settlement_grace_days");
 	refuse("settlement_grace_days 29", G, { settlement_grace_days: 29 }, "INVALID_CONFIG_VALUE", "settlement_grace_days");
@@ -321,7 +323,7 @@ function bodySection(opts = {}) {
 		const v = key === "blue_chip_brokers" ? "Pepsi" : "10";
 		refuse(`${key} for one investor`, A, { [key]: v }, "CONFIG_KEY_GLOBAL_ONLY", key);
 	}
-	refuse("a good key followed by a bad one", A, { investor_split_pct: "40", truck_purchase_price: "abc" }, "INVALID_CONFIG_VALUE", "truck_purchase_price");
+	refuse("a good key followed by a bad one", A, { investor_split_pct: "40", depreciation_years: "abc" }, "INVALID_CONFIG_VALUE", "depreciation_years");
 	refuse("a good key followed by an unknown one", A, { investor_split_pct: "40", foo: "1" }, "UNKNOWN_CONFIG_KEY", "foo");
 	t(audits(db).length === 0 && app.events.length === 0, "§3 no refusal wrote an audit row or emitted an event");
 	return r;
@@ -378,8 +380,8 @@ function writeSection(opts = {}) {
 		"§4 ...and no other row moved");
 
 	// Canonical text: a number is stored as its plain decimal.
-	const t3 = app.put(SUPER, { ownerId: "2" }, { truck_purchase_price: "85000.50", depreciation_years: 7, truck_title_status: "  Salvage " });
-	t(t3.status === 200 && cfgRow(db, 2, "truck_purchase_price").value === "85000.5" && cfgRow(db, 2, "depreciation_years").value === "7" && cfgRow(db, 2, "truck_title_status").value === "Salvage",
+	const t3 = app.put(SUPER, { ownerId: "2" }, { investor_split_pct: "42.50", depreciation_years: 7, truck_title_status: "  Salvage " });
+	t(t3.status === 200 && cfgRow(db, 2, "investor_split_pct").value === "42.5" && cfgRow(db, 2, "depreciation_years").value === "7" && cfgRow(db, 2, "truck_title_status").value === "Salvage",
 		`§4 per-investor keys are stored in canonical form (got ${JSON.stringify(t3.body)})`);
 	return r;
 }

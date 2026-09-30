@@ -132,6 +132,23 @@
 //      banking route is gone (404 whatever token is sent) and an accepted
 //      application's bank row unchanged · FXc every failing resource, marked as the
 //      run's own probe or the app's
+// Investor report section (R1-R6, Rx; ONLY=report, STEPS picks steps; its R-numbers
+//   are its own, not the truck section's): the downloadable report and the tax CSV
+//   of one previewed investor (/investor-portals/<id>), against the #405 choices in
+//   lib/investor-report-options.js. The Super Admin signs in once; the investor is
+//   picked through the API (one with a truck, preferably a truck with no recorded
+//   purchase price). The figures are real data: the run prints only booleans, ids and
+//   month keys, and its screenshots are clipped to the report controls.
+//   R3 (run first, before the run's own reads reconcile the ledger) a junk date and a
+//      start after the end answer 400 INVALID_DATE / INVALID_RANGE, and the ledger is
+//      unchanged (local, DB_PATH) · R1 a one-month report's Investor Payout equals
+//      that month's figure on the Payouts page · R2 a mid-month range covers the
+//      whole month (label, note, Gross Revenue) in whole-months mode · R4 the tax CSV
+//      names the previewed investor (the Tax Shield button, and ?as_user_id=) and a
+//      truck with no recorded price reads "Not available", never $0 · R5 the report's
+//      footnote and "Not available" asset figures · R6 the RANGE_HINT under the
+//      portal's date inputs · Rx nothing written but the ledger refresh and the
+//      preview's audit lines
 //
 // Env:
 //   BASE_URL    required — e.g. http://127.0.0.1:3181 (never production)
@@ -158,7 +175,7 @@
 //               (S1-S7), dispatcher (D1-D3), maintenance (M1), moneypath (P1, E1,
 //               N1, N1b, F1, E2, B1, RC1), names (K1, K2, K3), eldlink (L1-L3),
 //               invoice (I1-I9), terms (T0-T11),
-//               investorfixes (F1-F14). Unset = all, in that
+//               investorfixes (F1-F14), report (R1-R6, Rx). Unset = all, in that
 //               order. ⚠️ The sections together sign in more often than the login
 //               limiter allows one server process (see README), so split a full run.
 //   STEPS       only these cases of the sign-out, money-path, invoice and terms
@@ -167,7 +184,10 @@
 //               the editor whenever any of I1-I7 is picked) or STEPS=T0 then
 //               STEPS=T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11 (a terms step also runs the
 //               steps it builds on; T0 and T1-T11 together render more previews
-//               than the preview limiter allows one IP in 15 minutes)
+//               than the preview limiter allows one IP in 15 minutes) or
+//               STEPS=R3,R4 for the report section (R2 also runs R1; Rx always runs)
+//   E2E_REPORT_INVESTOR  the report section's investor (a users.id), instead of the
+//               one it picks
 //   E2E_TERMS_SUBMIT=1  let T8 submit the lease application on a server that is
 //               not local (it writes an application; locally DB_PATH enables it)
 //   E2E_INVOICE_APPROVE=1  let I7 press Approve on a server that is not local (it
@@ -199,7 +219,7 @@ const SLOWMO = Number(process.env.SLOWMO ?? (HEADED ? 350 : 0))
 const [DVW, DVH] = String(process.env.DRIVER_VIEWPORT || '430x900').split('x').map(Number)
 // ONLY picks sections, e.g. ONLY=signout or ONLY=trucks,dispatcher. Unset = all.
 const ONLY = String(process.env.ONLY || '').toLowerCase()
-const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypath', 'names', 'eldlink', 'invoice', 'terms', 'investorfixes']
+const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypath', 'names', 'eldlink', 'invoice', 'terms', 'investorfixes', 'report']
 // Sign-ins (POST /api/auth/login) each section makes; the limiter allows 20 per 15
 // minutes per server process. The sign-out section's figure is its worst case: S4a's
 // second half runs, and the build sends S7's second sign-in (one fewer for each
@@ -211,8 +231,9 @@ const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypa
 // signs the Super Admin in once; every step shares that page. The investor-fixes
 // section signs in the Super Admin and its own two QA-TEST investors, once each. The terms section's T0
 // signs nobody in (/invest is public, and it redirects a signed-in user); T1-T11
-// sign the Super Admin in once and T7's throwaway test Investor once.
-const SIGN_INS = { trucks: 3, signout: 20, dispatcher: 2, maintenance: 3, moneypath: 3, names: 2, eldlink: 1, invoice: 1, terms: 2, investorfixes: 3 }
+// sign the Super Admin in once and T7's throwaway test Investor once. The report
+// section signs the Super Admin in once; every step shares that page.
+const SIGN_INS = { trucks: 3, signout: 20, dispatcher: 2, maintenance: 3, moneypath: 3, names: 2, eldlink: 1, invoice: 1, terms: 2, investorfixes: 3, report: 1 }
 // Sections that need no login at all, so they run without a creds file (e.g. on
 // staging, where no staging logins need to exist for them). The terms section is
 // one only while STEPS picks T0 alone (see TERMS_NEEDS_LOGIN).
@@ -253,6 +274,16 @@ const TERMS_PLAN = (() => {
   return runs('terms') ? plan : new Set()
 })()
 const TERMS_NEEDS_LOGIN = [...TERMS_PLAN].some((id) => id !== 'T0')
+// The report section's steps. R2 compares its Gross Revenue with R1's, so it runs R1.
+// Rx (what the section wrote) runs whenever any other step does.
+const REPORT_STEP_IDS = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6']
+const REPORT_DEPS = { R2: ['R1'] }
+const REPORT_PLAN = (() => {
+  if (!runs('report')) return new Set()
+  const plan = new Set(REPORT_STEP_IDS.filter((id) => !STEPS || STEPS.has(id)))
+  for (const id of [...plan]) for (const dep of REPORT_DEPS[id] || []) plan.add(dep)
+  return plan
+})()
 let baseHost = ''
 try { baseHost = new URL(BASE_URL).hostname.replace(/\.+$/, '') } catch { die(`BASE_URL is not a URL: ${BASE_URL}`) }
 if (/(^|\.)app\.logisx\.com$/i.test(baseHost)) die('refusing to run against production')
@@ -267,7 +298,7 @@ const LOCAL = /^(127\.0\.0\.1|localhost|\[?::1\]?)$/i.test(baseHost)
   }
 }
 {
-  const planned = [...SECTIONS].reduce((n, s) => n + (s === 'terms' && !TERMS_NEEDS_LOGIN ? 0 : SIGN_INS[s]), 0)
+  const planned = [...SECTIONS].reduce((n, s) => n + ((s === 'terms' && !TERMS_NEEDS_LOGIN) || (s === 'report' && !REPORT_PLAN.size) ? 0 : SIGN_INS[s]), 0)
   if (planned > 20) {
     console.warn(`e2e: WARNING: these sections sign in up to ${planned} times, and POST /api/auth/login allows 20 per 15 minutes ` +
       'per server process. Expect 429s late in the run: split it with ONLY and restart the server between the parts.')
@@ -317,6 +348,7 @@ function writeResults(final = false) {
     runs('invoice') && 'invoice editor (I1-I9)',
     runs('terms') && `investor terms (${[...TERMS_PLAN].join(', ') || 'no step picked'})`,
     runs('investorfixes') && 'investor fixes (F1-F14)',
+    runs('report') && `investor report (${[...REPORT_PLAN].sort().join(', ') || 'no step picked'}${REPORT_PLAN.size ? ', Rx' : ''})`,
   ].filter(Boolean).join(' + ')
   const lines = [
     `# ${title} — ${PHASE.toUpperCase()}`,
@@ -788,6 +820,12 @@ async function main() {
     try { await investorFixesSection() } catch (e) {
       exitCode = 1
       record({ step: 'F!', title: 'Investor-fixes section aborted', expected: '', observed: e.stack?.split('\n').slice(0, 3).join(' ') || String(e), verdict: 'FAIL', shot: '' })
+    }
+  }
+  if (runs('report')) {
+    try { await reportSection() } catch (e) {
+      exitCode = 1
+      record({ step: 'R!', title: 'Investor report section aborted', expected: '', observed: e.stack?.split('\n').slice(0, 3).join(' ') || String(e), verdict: 'FAIL', shot: '' })
     }
   }
 }
@@ -9318,6 +9356,614 @@ async function investorFixesSection() {
     apiProbeTag = null
     if (ownDb && db) { try { db.close() } catch { /* ignore */ } db = null }
   }
+}
+
+// ---------------------------------------------------------------- investor report (R1-R6, Rx)
+// ONLY=report (STEPS picks steps). PR #405's three owner-approved choices, as the
+// downloadable report (GET /api/investor/report) and the tax CSV
+// (GET /api/investor/tax-csv) show them to a Super Admin previewing one investor
+// (/investor-portals/<id>): a mid-month range covers whole months, a truck with no
+// recorded purchase price makes the figures that need it "Not available" (never a
+// silent $0), and the portal says so under its date inputs. The switches and texts
+// live in lib/investor-report-options.js; this section reads them from THIS checkout
+// when the file exists, and falls back to the contract's text on a build without it.
+//
+// ⚠️ REAL FIGURES. On a local copy and on staging the report and the CSV carry real
+// per-investor money. The rows print booleans, ids and month keys only. The PDFs and
+// CSVs are read in memory; a file the UI downloads is read and deleted at once. The
+// screenshots are clipped to the report controls (the date inputs, the buttons, the
+// hint): never a PDF page, never a figure.
+//
+// Order: R3 runs first, before this run opens anything that reconciles the payout
+// ledger, so a reconcile it should not have run has something to write. Then R1, R2,
+// R4a, R4b, R5, R6, Rx.
+//
+// Spend per server process: one sign-in; GET /api/investor/report up to five times
+// (R3 three, R1 and R2 one each; R5 reads R1's PDF, or fetches one when R1 did not
+// run); GET /api/investor/tax-csv two or three times (R4a, R4b).
+const REPORT_CONTRACT_TEXT = {
+  RANGE_MODE: 'whole-months',
+  UNPRICED_TRUCKS: 'not-available',
+  RANGE_HINT: 'Reports cover whole months: a date range that starts or ends mid-month includes that whole month, because payouts are settled by month.',
+  UNPRICED_TEXT: {
+    NOT_RECORDED: 'Not recorded',
+    NOT_AVAILABLE: 'Not available',
+    FOOTNOTE: 'Purchase price not recorded for {n} of {total} truck(s). Figures that need it show "Not available" until it is entered in the Truck Database.',
+    CSV_COUNT_LABEL: 'Trucks without a recorded purchase price',
+  },
+}
+// The note sentences R2 looks for (the contract's; NOTE's templates carry {span}).
+const REPORT_WHOLE_NOTE = 'covers the whole of each month'
+const REPORT_EXACT_NOTE = 'Driver Pay, the fixed costs and Investor Payout cover whole months; revenue and trip expenses cover the exact dates you chose.'
+// The price fields, by document. PER_TRUCK: the average over priced trucks, or "Not
+// recorded" when none is priced. NEEDS_ALL: "Not available" while any truck is unpriced.
+const REPORT_CSV_PER_TRUCK = ['Purchase Price (per truck)', 'Section 179 Deduction (100%)', 'Annual Depreciation (Year 1)']
+const REPORT_CSV_NEEDS_ALL = ['Total Fleet Purchase Price', 'At-Risk Capital Remaining']
+const REPORT_PDF_PER_TRUCK = ['Purchase Price (per truck)', 'Section 179 Deduction']
+const REPORT_PDF_NEEDS_ALL = ['Total Purchase Price', 'Current Market Value (80%)', 'Total Investment', 'Payoff Progress']
+// The audit lines a Super Admin's preview of a portal writes, and nothing else.
+const REPORT_AUDIT_OK = /^investor_(preview_view|preview_report|preview_tax_csv|payouts_view|payout_detail_view)$/
+// Tables a sign-in and a preview may grow: the session, the preview's audit lines, and
+// the payout ledger's own refresh (what opening the Payouts page does).
+const REPORT_TABLES_OK = new Set(['sessions', 'audit_trail', 'investor_payouts', 'investor_payout_history'])
+
+async function loadReportOptions() {
+  const out = { source: 'contract', ...REPORT_CONTRACT_TEXT, UNPRICED_TEXT: { ...REPORT_CONTRACT_TEXT.UNPRICED_TEXT } }
+  const file = path.join(paths.REPO, 'lib', 'investor-report-options.js')
+  if (!fs.existsSync(file)) return out
+  try {
+    const m = await import(pathToFileURL(file).href)
+    const o = m.default || m
+    return {
+      source: 'lib',
+      RANGE_MODE: o.RANGE_MODE || out.RANGE_MODE,
+      UNPRICED_TRUCKS: o.UNPRICED_TRUCKS || out.UNPRICED_TRUCKS,
+      RANGE_HINT: o.RANGE_HINT || out.RANGE_HINT,
+      UNPRICED_TEXT: { ...out.UNPRICED_TEXT, ...(o.UNPRICED_TEXT || {}) },
+    }
+  } catch (e) { return { ...out, source: `contract (lib/investor-report-options.js did not load: ${String(e.message).split('\n')[0]})` } }
+}
+
+const rNorm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim()
+// A value as a row may print it: its words, every run of digits (with its commas and
+// points) collapsed to "#". "$58,000" reads "$#", "12.5%" reads "#%": no figure, and no
+// magnitude, leaves memory.
+const valueShape = (v) => (v === undefined ? 'nothing (label not found)' : v === null ? 'no value beside the label' : `"${rNorm(v).replace(/\d[\d,.]*/g, '#').slice(0, 60)}"`)
+// [what, ok, value?] → "what: ok", plus the value's shape when a check with a value fails.
+const checkText = (c) => `${c[0]}: ${c[1]}${c[1] || c.length < 3 ? '' : ` (reads ${valueShape(c[2])})`}`
+// "$12,345" / "$-12,345" / "(12,345)" → a number; anything else → null.
+const rMoney = (s) => {
+  const t = rNorm(s)
+  const m = /^(\()?\$\s*(-?[\d,]+(?:\.\d+)?)\)?$/.exec(t)
+  if (!m) return null
+  const n = Number(m[2].replace(/,/g, ''))
+  return m[1] ? -n : n
+}
+// A P&L line's value: the run on the same baseline, right of the label.
+function pdfLineValue(pt, labelRe) {
+  const lab = pt?.items.find((it) => labelRe.test(rNorm(it.str)))
+  if (!lab) return undefined
+  const same = pt.items.filter((it) => it !== lab && it.page === lab.page && Math.abs(it.y - lab.y) < 2.5 && it.x > lab.x + 60).sort((a, b) => a.x - b.x)
+  return same.length ? rNorm(same[0].str) : null
+}
+// A KPI's value: the report prints the label upper-cased and its value 11 pt below it,
+// at the same x (kpiRow() in server.js).
+function pdfKpiValue(pt, label) {
+  const L = label.toUpperCase()
+  const lab = pt?.items.find((it) => rNorm(it.str) === L)
+  if (!lab) return undefined
+  const below = pt.items.filter((it) => it.page === lab.page && Math.abs(it.x - lab.x) < 4 && it.y < lab.y - 1 && lab.y - it.y < 30).sort((a, b) => b.y - a.y)
+  return below.length ? rNorm(below[0].str) : null
+}
+// "8/1/2026", "2026-08-01" or "August 1, 2026" → "2026-08-01".
+function isoOfLabel(s) {
+  const t = rNorm(s)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t
+  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(t)
+  if (m) return `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`
+  const d = new Date(t)
+  return Number.isNaN(d.getTime()) ? t : d.toLocaleDateString('en-CA')
+}
+// The header's "Period: <from> – <until>" line, as ISO dates.
+function pdfPeriod(pt) {
+  const line = pt?.lines.find((l) => /^Period:/i.test(l)) || (/Period:[^\n]*/.exec(pt?.text || '') || [''])[0]
+  if (!line) return null
+  const parts = rNorm(line).replace(/^Period:\s*/i, '').split(/\s+[–—-]\s+/)
+  return parts.length === 2 ? { from: isoOfLabel(parts[0]), until: isoOfLabel(parts[1]) } : null
+}
+// RFC 4180, as lib/csv.js writes it (every cell quoted, CRLF).
+function parseCsv(text) {
+  const rows = []; let row = []; let c = ''; let q = false
+  const s = String(text ?? '')
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (q) {
+      if (ch === '"') { if (s[i + 1] === '"') { c += '"'; i++ } else q = false } else c += ch
+    } else if (ch === '"') q = true
+    else if (ch === ',') { row.push(c); c = '' }
+    else if (ch === '\r' || ch === '\n') { if (ch === '\r' && s[i + 1] === '\n') i++; row.push(c); rows.push(row); row = []; c = '' }
+    else c += ch
+  }
+  if (c || row.length) { row.push(c); rows.push(row) }
+  return rows
+}
+// A CSV row's value by its label; lib/csv.js's formula guard (a leading ') is undone.
+const csvValue = (rows, label) => {
+  const r = rows.find((x) => rNorm(x[0]) === label)
+  if (!r) return undefined
+  const v = String(r[1] ?? '')
+  return /^'[=+\-@\t]/.test(v) ? v.slice(1) : v
+}
+// A GET from inside the signed-in page, the body as base64 (a PDF, a CSV, or JSON).
+async function fetchBytes(page, url) {
+  const r = await page.evaluate(async (u) => {
+    const res = await fetch(u, { credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+    const buf = new Uint8Array(await res.arrayBuffer())
+    let s = ''
+    for (let i = 0; i < buf.length; i += 0x8000) s += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000))
+    return { status: res.status, ct: res.headers.get('content-type') || '', b64: btoa(s) }
+  }, url)
+  const bytes = Buffer.from(r.b64, 'base64')
+  let json = null
+  if (/json/i.test(r.ct)) { try { json = JSON.parse(bytes.toString('utf8')) } catch { /* not json */ } }
+  return { status: r.status, contentType: r.ct, bytes, json, isPdf: bytes.subarray(0, 5).toString('latin1') === '%PDF-' }
+}
+const codeText = (r) => `${r.status}${r.json?.code ? ` ${r.json.code}` : ''}${r.json?.field ? ` (field ${r.json.field})` : ''}`
+// A screenshot clipped to the union of these elements (the report controls only). When
+// they are far apart, only the first one: the space between could hold a figure.
+async function clipShot(page, name, locators, pad = 10) {
+  const boxes = []
+  for (const l of locators) {
+    try {
+      if (!l || !(await l.count())) continue
+      if (!boxes.length) await l.first().scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {})
+      const b = await l.first().boundingBox()
+      if (b && b.width > 0 && b.height > 0) boxes.push(b)
+    } catch { /* not on the page */ }
+  }
+  if (!boxes.length) return ''
+  let use = boxes
+  const top = Math.min(...boxes.map((b) => b.y)); const bottom = Math.max(...boxes.map((b) => b.y + b.height))
+  if (bottom - top > 320) use = [boxes[0]]
+  const vp = page.viewportSize() || ADMIN_VP
+  const x0 = Math.max(0, Math.min(...use.map((b) => b.x)) - pad)
+  const y0 = Math.max(0, Math.min(...use.map((b) => b.y)) - pad)
+  const x1 = Math.min(vp.width, Math.max(...use.map((b) => b.x + b.width)) + pad)
+  const y1 = Math.min(vp.height, Math.max(...use.map((b) => b.y + b.height)) + pad)
+  if (x1 <= x0 || y1 <= y0) return ''
+  const file = path.join(SHOTS, `${name}.png`)
+  try { await page.screenshot({ path: file, clip: { x: x0, y: y0, width: x1 - x0, height: y1 - y0 } }) } catch (e) { console.log(`  (screenshot ${name} failed: ${e.message})`); return '' }
+  return path.relative(WORK, file)
+}
+// The portal's own Download Report: type the dates, click, read the file, delete it.
+async function reportViaUi(ctx, page, from, until) {
+  const inputs = page.locator('.report-group input[type="date"]')
+  await inputs.nth(0).fill(from)
+  await inputs.nth(1).fill(until)
+  const urls = []
+  const onReq = (r) => { if (pathOf(r.url()) === '/api/investor/report') urls.push(r.url()) }
+  ctx.on('request', onReq)
+  let dl = null
+  try { dl = await clickForDownload(ctx, page, page.locator('.report-group button.btn-report').first(), 120000) } finally { ctx.off('request', onReq) }
+  const url = urls[urls.length - 1] || (dl ? dl.url() : '')
+  let q = null
+  try { q = url && !/^blob:/i.test(url) ? new URL(url, BASE_URL).searchParams : null } catch { /* unreadable */ }
+  let bytes = null
+  if (dl) {
+    const p = await dl.path().catch(() => null)
+    bytes = p ? fs.readFileSync(p) : null
+    await dl.delete().catch(() => {})
+  }
+  let json = null
+  if (bytes && bytes.subarray(0, 5).toString('latin1') !== '%PDF-') { try { json = JSON.parse(bytes.toString('utf8')) } catch { /* not json */ } }
+  return { downloaded: !!dl, bytes, json, isPdf: !!bytes && bytes.subarray(0, 5).toString('latin1') === '%PDF-', q }
+}
+
+async function reportSection() {
+  if (!REPORT_PLAN.size) {
+    record({ step: 'R*', title: 'Investor report section', expected: 'At least one of R1-R6 picked', observed: `SKIPPED — STEPS picks none of ${REPORT_STEP_IDS.join(', ')}`, verdict: 'SKIP', shot: '' })
+    return
+  }
+  const want = (id) => REPORT_PLAN.has(id)
+  const RO = await loadReportOptions()
+  const UT = RO.UNPRICED_TEXT
+  meta.ids.reportText = RO.source === 'lib' ? 'lib/investor-report-options.js' : RO.source
+  const ownDb = !db
+  if (!db && DB_PATH) db = openDb()
+  const skip = (m) => Object.assign(new Error(`SKIPPED — ${m}`), { skip: true })
+  const S = { inv: null, month: null, monthPayout: null, monthVacuous: false, pdf1: null, gross1: null, investor: null, investorStatus: null, payouts: null, mode: undefined }
+  // Every request the browser sends that is not a read, sign-in and socket.io polling
+  // aside. The section's own fetches are all GETs, so anything here is the app's.
+  const writes = []
+  let start = null
+  const { ctx, page } = await freshPage(ADMIN_VP)
+  ctx.on('request', (r) => {
+    const m = r.method()
+    if (m === 'GET' || m === 'HEAD' || m === 'OPTIONS') return
+    const p = pathOf(r.url())
+    if (p === '/api/auth/login' || p.startsWith('/socket.io')) return
+    writes.push(`${m} ${p.replace(/\/\d+(?=\/|$)/g, '/:id')}`)
+  })
+  const step = async (id, title, expected, fn, limitMs = 240000) => {
+    let observed = ''; let v = 'FAIL'; let s = ''; let timer
+    try {
+      const r = await Promise.race([fn(), new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`the step did not finish within ${limitMs / 1000} s`)), limitMs) })])
+      observed = r.observed; v = r.verdict; s = r.shot || ''
+    } catch (e) {
+      observed = e.skip ? e.message : `error: ${String(e.message || e).split('\n')[0]}`
+      v = e.skip ? 'SKIP' : 'FAIL'
+    } finally { clearTimeout(timer) }
+    record({ step: id, title, expected, observed, verdict: v, shot: s })
+  }
+  // The investor's ledger rows and the history table, compared, never printed.
+  const ledgerPrint = (owner) => (db ? {
+    history: db.prepare('SELECT COUNT(*) AS n FROM investor_payout_history').get().n,
+    rows: JSON.stringify(db.prepare('SELECT id, period, amount, status, finalized_at, adjustment FROM investor_payouts WHERE owner_id = ? ORDER BY id').all(owner)),
+  } : null)
+  try {
+    if (!CREDS.superAdmin) {
+      record({ step: 'R!', title: 'Investor report section', expected: 'The Super Admin signs in', observed: 'not reached: the creds file has no superAdmin login', verdict: 'FAIL', shot: '' })
+      return
+    }
+    await login(page, 'Step R — Super Admin', CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
+    if (db) start = ifxMaxRowids()
+
+    // ---- The investor: one with a truck; one with a truck that has no recorded
+    // purchase price first (R4 and R5 then show the "Not available" case).
+    {
+      const users = await api(page, 'GET', '/api/users')
+      const trucks = await api(page, 'GET', '/api/trucks')
+      if (users.status !== 200 || trucks.status !== 200) throw new Error(`GET /api/users → ${users.status}, GET /api/trucks → ${trucks.status}`)
+      const byOwner = new Map()
+      for (const t of trucks.json?.trucks || []) {
+        const o = Number(t.OwnerId) || 0
+        if (!o) continue
+        const e = byOwner.get(o) || { n: 0, priced: 0 }
+        e.n++
+        if (Number(t.PurchasePrice) > 0) e.priced++
+        byOwner.set(o, e)
+      }
+      const cands = (users.json?.users || []).filter((u) => u.Role === 'Investor' && byOwner.has(Number(u.id)))
+        .map((u) => { const e = byOwner.get(Number(u.id)); return { id: Number(u.id), username: u.Username, n: e.n, priced: e.priced, unpriced: e.n - e.priced } })
+        .sort((a, b) => (Number(b.unpriced > 0) - Number(a.unpriced > 0)) || a.id - b.id)
+      const forced = process.env.E2E_REPORT_INVESTOR ? Number(process.env.E2E_REPORT_INVESTOR) : null
+      S.inv = forced ? cands.find((c) => c.id === forced) || null : cands[0] || null
+      if (!S.inv) {
+        record({ step: 'R*', title: 'Investor report section: pick an investor', expected: 'An Investor account that owns at least one truck', observed: `SKIPPED — ${forced ? `E2E_REPORT_INVESTOR=${forced} is not an Investor with a truck` : 'no Investor account owns a truck'}`, verdict: 'SKIP', shot: '' })
+        return
+      }
+      meta.ids.reportInvestor = S.inv.id
+      meta.ids.reportTruckCase = S.inv.unpriced ? 'a truck with no recorded purchase price' : 'every truck priced'
+    }
+    const inv = S.inv
+    const unpricedCase = RO.UNPRICED_TRUCKS === 'not-available' && inv.unpriced > 0
+    const caseText = inv.unpriced ? `investor #${inv.id} has a truck with no recorded purchase price` : `every truck of investor #${inv.id} has a recorded purchase price`
+
+    // ---- R3 (first): refused dates, and no ledger write. The requests go out now,
+    // before this run opens anything that reconciles the ledger; the row is recorded
+    // once the portal's own Payouts read has run, which says whether the ledger had
+    // anything to refresh at all (if not, "unchanged" could not have caught a
+    // reconcile that ran).
+    const R3 = { title: 'Report with a junk date, an impossible date and a start after the end (?as_user_id=), sent before anything else this run does reconciles the ledger',
+      expected: '400 INVALID_DATE naming the field (start=junk; end=YYYY-02-30), 400 INVALID_RANGE (start after end); locally (DB_PATH) the investor\'s ledger rows and the investor_payout_history count are unchanged' }
+    const recordR3 = () => {
+      if (!R3.ran || R3.recorded) return
+      R3.recorded = true
+      if (R3.err) { record({ step: 'R3', title: R3.title, expected: R3.expected, observed: `error: ${String(R3.err.message || R3.err).split('\n')[0]}`, verdict: 'FAIL', shot: '' }); return }
+      let ledgerText = 'the ledger was not read (no DB_PATH)'
+      if (db) {
+        const later = R3.afterView ? (R3.afterView.history !== R3.afterProbes.history || R3.afterView.rows !== R3.afterProbes.rows) : null
+        ledgerText = (R3.ledgerOk ? 'the investor\'s ledger rows and the history count unchanged: true' : `LEDGER WRITTEN: ${R3.ledgerMoved.join('; ')}`) +
+          (later === null ? ' (no Payouts read followed, so whether a reconcile had anything to write is unknown)'
+            : later ? ' (the portal\'s Payouts read that followed did refresh the ledger, so a reconcile here would have shown)'
+              : ' (the portal\'s Payouts read that followed wrote nothing either: the ledger had nothing to refresh, so this half proves little)')
+      }
+      const observed = `${R3.parts.join('; ')}; ${ledgerText}`
+      record({ step: 'R3', title: R3.title, expected: R3.expected, observed, verdict: verdict(R3.ok && R3.ledgerOk), shot: '' })
+    }
+    S.recordR3 = recordR3
+    if (want('R3')) {
+      R3.ran = true
+      try {
+        const pm = prevMonthKey(dayCT().slice(0, 7))
+        const yr = pm.slice(0, 4)
+        const probes = [
+          { label: 'start=junk', q: `start=junk&end=${pm}-20`, code: 'INVALID_DATE', field: 'start' },
+          { label: `end=${yr}-02-30`, q: `start=${yr}-02-01&end=${yr}-02-30`, code: 'INVALID_DATE', field: 'end' },
+          { label: `start ${pm}-20 after end ${pm}-10`, q: `start=${pm}-20&end=${pm}-10`, code: 'INVALID_RANGE' },
+        ]
+        R3.parts = []; R3.ok = true; R3.ledgerOk = true; R3.ledgerMoved = []
+        // Page fetches from the dashboard the sign-in landed on (it reads no payout).
+        await caption(page, `Step R3 — the report route with bad dates for investor #${inv.id} (page fetches, no portal opened yet)`)
+        for (const p of probes) {
+          const before = ledgerPrint(inv.id)
+          const r = await api(page, 'GET', `/api/investor/report?as_user_id=${inv.id}&${p.q}`)
+          const after = ledgerPrint(inv.id)
+          if (!(r.status === 400 && r.json?.code === p.code && (!p.field || r.json?.field === p.field))) R3.ok = false
+          if (before && after && (before.history !== after.history || before.rows !== after.rows)) {
+            R3.ledgerOk = false
+            R3.ledgerMoved.push(`${p.label}: ${after.history - before.history >= 0 ? '+' : ''}${after.history - before.history} history row(s), investor_payouts rows changed: ${before.rows !== after.rows}`)
+          }
+          R3.parts.push(`${p.label} → ${r.status === 200 ? `200 (${/pdf/i.test(r.contentType) ? 'a PDF' : r.contentType || 'no type'})` : codeText(r)}`)
+        }
+        R3.afterProbes = ledgerPrint(inv.id)
+        await caption(page, `Step R3 — ${R3.parts.join('; ')}`)
+      } catch (e) { R3.err = e }
+    }
+
+    // ---- Open the investor's portal as the Super Admin's preview (R5 too: the month
+    // comes from the page's own Payouts read)
+    if (['R1', 'R2', 'R4', 'R5', 'R6'].some(want)) {
+      const onResp = async (r) => {
+        try {
+          const u = new URL(r.url())
+          if (r.request().method() !== 'GET' || u.searchParams.get('as_user_id') !== String(inv.id)) return
+          if (u.pathname === '/api/investor' && S.investorStatus === null) {
+            S.investorStatus = r.status()
+            if (r.status() === 200) S.investor = await r.json().catch(() => null)
+          } else if (u.pathname === '/api/investor/payouts' && !S.payouts && r.status() === 200) {
+            S.payouts = await r.json().catch(() => null)
+          }
+        } catch { /* a response we cannot read */ }
+      }
+      page.on('response', onResp)
+      try {
+        await page.goto(`${BASE_URL}/investor-portals/${inv.id}`)
+        await page.locator('.report-group').waitFor({ state: 'visible', timeout: 60000 })
+        await caption(page, `Step R — previewing investor #${inv.id}'s portal (${caseText})`)
+        for (const t0 = Date.now(); Date.now() - t0 < 90000 && !(S.investorStatus !== null && S.payouts);) await page.waitForTimeout(250)
+        await page.waitForTimeout(1000)
+      } finally { page.off('response', onResp) }
+      if (!S.payouts) {
+        const r = await api(page, 'GET', `/api/investor/payouts?as_user_id=${inv.id}`)
+        if (r.status === 200) S.payouts = r.json
+      }
+      if (R3.afterProbes) R3.afterView = ledgerPrint(inv.id)
+      S.mode = S.investor ? S.investor.reportRangeMode : undefined
+      meta.ids.reportRangeMode = S.mode === undefined ? '(absent)' : S.mode
+      const rows = (S.payouts?.payouts || []).filter((p) => /^\d{4}-\d{2}$/.test(String(p.period)))
+      const nonZero = rows.filter((p) => Math.round(Number(p.effectiveAmount) || 0) !== 0)
+      const pool = nonZero.length ? nonZero : rows
+      const pick = [...pool].sort((a, b) => (Number(b.phase === 'finalized') - Number(a.phase === 'finalized')) || String(b.period).localeCompare(String(a.period)))[0]
+      if (pick) {
+        S.month = pick.period
+        S.monthPayout = Math.round(Number(pick.effectiveAmount) || 0)
+        S.monthVacuous = !nonZero.length
+        meta.ids.reportMonth = `${S.month}${pick.phase ? ` (${pick.phase})` : ''}`
+      }
+    }
+    recordR3()
+
+    // ---- R1: a one-month report's Investor Payout = the Payouts page's figure
+    if (want('R1')) {
+      await step('R1', 'UI: the preview\'s Download Report for one closed month (the 1st to the last day)',
+        'The download is a PDF, the request carries ?as_user_id=<id> and the dates as typed; its "Investor Payout" equals that month\'s effectiveAmount on the Payouts page (GET /api/investor/payouts?as_user_id=)',
+        async () => {
+          if (!S.month) throw skip('the Payouts page lists no month for this investor (GET /api/investor/payouts)')
+          const from = `${S.month}-01`; const until = lastDayOf(S.month)
+          await caption(page, `Step R1 — investor #${inv.id}: Download Report for ${from} to ${until}`)
+          const d = await reportViaUi(ctx, page, from, until)
+          const s = await clipShot(page, 'r1-report-one-month', [page.locator('.report-group')])
+          const reqOk = !!d.q && d.q.get('as_user_id') === String(inv.id) && d.q.get('start') === from && d.q.get('end') === until
+          if (!d.downloaded) return { observed: 'clicking Download Report started no download within 120 s', verdict: 'FAIL', shot: s }
+          if (!d.isPdf) return { observed: `the download is not a PDF${d.json?.code ? ` (JSON ${d.json.code})` : ''}; request carries as_user_id and the dates: ${reqOk}`, verdict: 'FAIL', shot: s }
+          const pt = await pdfText(d.bytes.toString('base64'))
+          S.pdf1 = pt
+          const payout = rMoney(pdfLineValue(pt, /^Investor Payout\b/))
+          S.gross1 = rMoney(pdfLineValue(pt, /^Gross Revenue$/))
+          const same = payout !== null && payout === S.monthPayout
+          const observed = `download a PDF (${pt.pages} page(s)); request carries as_user_id=${inv.id} and start/end as typed: ${reqOk}; ` +
+            `"Investor Payout" ${payout === null ? 'NOT READ from the PDF' : `equals the Payouts page's ${S.month} figure: ${same}`}` +
+            `${S.monthVacuous ? '; every month on this investor\'s Payouts page is $0, so the match proves little (INFO)' : ''}`
+          await caption(page, `Step R1 — ${observed}`)
+          return { observed, verdict: reqOk && same ? (S.monthVacuous ? 'INFO' : 'PASS') : 'FAIL', shot: s }
+        })
+    }
+
+    // ---- R2: a mid-month range
+    if (want('R2')) {
+      await step('R2', 'UI: the same month with a mid-month range (the 10th to the 20th)',
+        'whole-months: the period label reads the 1st to the last day, the note contains "covers the whole of each month", and Gross Revenue equals R1\'s. exact-dates: the label reads the dates typed and the note has the exact-dates sentence',
+        async () => {
+          if (!S.month) throw skip('no month (see R1)')
+          const from = `${S.month}-10`; const until = `${S.month}-20`
+          const exact = S.mode === 'exact-dates'
+          await caption(page, `Step R2 — investor #${inv.id}: Download Report for ${from} to ${until}`)
+          const d = await reportViaUi(ctx, page, from, until)
+          const s = await clipShot(page, 'r2-report-mid-month', [page.locator('.report-group')])
+          const reqOk = !!d.q && d.q.get('as_user_id') === String(inv.id) && d.q.get('start') === from && d.q.get('end') === until
+          if (!d.downloaded) return { observed: 'clicking Download Report started no download within 120 s', verdict: 'FAIL', shot: s }
+          if (!d.isPdf) return { observed: `the download is not a PDF${d.json?.code ? ` (JSON ${d.json.code})` : ''}`, verdict: 'FAIL', shot: s }
+          const pt = await pdfText(d.bytes.toString('base64'))
+          const flat = rNorm(pt.text)
+          const period = pdfPeriod(pt)
+          const wantFrom = exact ? from : `${S.month}-01`
+          const wantUntil = exact ? until : lastDayOf(S.month)
+          const labelOk = !!period && period.from === wantFrom && period.until === wantUntil
+          const noteOk = flat.includes(exact ? REPORT_EXACT_NOTE : REPORT_WHOLE_NOTE)
+          const spanNamed = flat.includes(`date range: ${monthName(S.month)}`)
+          const gross2 = rMoney(pdfLineValue(pt, /^Gross Revenue$/))
+          const grossSame = S.gross1 !== null && gross2 !== null && gross2 === S.gross1
+          const ok = reqOk && labelOk && noteOk && (exact || grossSame)
+          const observed = `judged as ${exact ? 'exact-dates' : 'whole-months'}${S.mode === undefined ? ' (GET /api/investor has no reportRangeMode: the owner\'s choice, whole-months, applies)' : ''}; ` +
+            `request carries as_user_id and the dates: ${reqOk}; the period label reads ${period ? `${period.from} to ${period.until}` : 'nothing readable'} (want ${wantFrom} to ${wantUntil}): ${labelOk}; ` +
+            `the note ${exact ? 'has the exact-dates sentence' : `contains "${REPORT_WHOLE_NOTE}"`}: ${noteOk}${exact ? '' : ` (names ${monthName(S.month)} after "date range:": ${spanNamed})`}; ` +
+            `Gross Revenue equals R1's: ${S.gross1 === null ? 'R1\'s not read' : grossSame}${exact ? ' (not scored in exact-dates mode)' : ''}`
+          await caption(page, `Step R2 — ${observed}`)
+          return { observed, verdict: verdict(ok), shot: s }
+        })
+    }
+
+    // ---- R4: the tax CSV names the previewed investor; unpriced trucks
+    if (want('R4')) {
+      await step('R4a', 'UI: the Tax Shield "Export CSV" in the preview',
+        'The request carries ?as_user_id=<id>, and the CSV\'s "Investor" row names the previewed investor, not "All Investors"',
+        async () => {
+          const btn = page.locator('.section', { has: page.locator('.section-title', { hasText: /Tax Shield/i }) }).locator('button', { hasText: /Export CSV/i })
+          if (!(await btn.count())) {
+            // What TaxShieldSection.exportCsv() sends today, had it been on the page.
+            const bare = await fetchBytes(page, '/api/investor/tax-csv')
+            const label = bare.status === 200 ? csvValue(parseCsv(bare.bytes.toString('utf8')), 'Investor') : undefined
+            throw skip('the preview renders no Tax Shield section with an "Export CSV" button, so there is nothing to click (at PR #405\'s head InvestorView.vue does not mount TaxShieldSection). ' +
+              `A request as TaxShieldSection.exportCsv() sends it (no as_user_id) → ${bare.status}; its "Investor" row reads "All Investors": ${label === 'All Investors'}`)
+          }
+          await btn.first().scrollIntoViewIfNeeded()
+          await caption(page, `Step R4a — investor #${inv.id}: click the Tax Shield Export CSV`)
+          const s = await clipShot(page, 'r4a-tax-shield-button', [btn])
+          const dls = []
+          const onDl = (dl) => dls.push(dl)
+          page.on('download', onDl)
+          let resp
+          try {
+            ;[resp] = await Promise.all([
+              page.waitForResponse((r) => pathOf(r.url()) === '/api/investor/tax-csv', { timeout: 90000 }),
+              btn.first().click(),
+            ])
+            await page.waitForTimeout(1500)
+          } finally {
+            page.off('download', onDl)
+          }
+          const text = resp.status() === 200 ? await resp.text().catch(() => '') : ''
+          for (const dl of dls) await dl.delete().catch(() => {})
+          const carries = new URL(resp.url()).searchParams.get('as_user_id') === String(inv.id)
+          const who = csvValue(parseCsv(text), 'Investor')
+          const named = who === inv.username
+          const observed = `GET /api/investor/tax-csv → ${resp.status()}; the request carries as_user_id=${inv.id}: ${carries}; the "Investor" row names the previewed investor: ${named}` +
+            `${who === 'All Investors' ? ' (it reads "All Investors")' : ''}`
+          await caption(page, `Step R4a — ${observed}`)
+          return { observed, verdict: verdict(resp.status() === 200 && carries && named), shot: s }
+        })
+      await step('R4b', 'The tax CSV for the previewed investor (GET /api/investor/tax-csv?as_user_id=)',
+        `The "Investor" row names the investor. With a truck that has no recorded purchase price (${RO.UNPRICED_TRUCKS} mode): Total Fleet Purchase Price and At-Risk Capital Remaining read "${UT.NOT_AVAILABLE}", the row "${UT.CSV_COUNT_LABEL}" is present with the count, the per-truck fields read the priced trucks' average or "${UT.NOT_RECORDED}", and no price field is "$0". Every truck priced: no count row, no "${UT.NOT_AVAILABLE}"`,
+        async () => {
+          const r = await fetchBytes(page, `/api/investor/tax-csv?as_user_id=${inv.id}`)
+          if (r.status !== 200) return { observed: `GET /api/investor/tax-csv?as_user_id=${inv.id} → ${codeText(r)}`, verdict: 'FAIL' }
+          const rows = parseCsv(r.bytes.toString('utf8'))
+          const v = (label) => csvValue(rows, label)
+          const named = v('Investor') === inv.username
+          const checks = [[`"Investor" names the previewed investor`, named]]
+          const countRow = v(UT.CSV_COUNT_LABEL)
+          if (unpricedCase) {
+            for (const f of REPORT_CSV_NEEDS_ALL) checks.push([`${f} "${UT.NOT_AVAILABLE}"`, v(f) === UT.NOT_AVAILABLE, v(f)])
+            checks.push([`"${UT.CSV_COUNT_LABEL}" row present with the count`, countRow !== undefined && Number(countRow) === inv.unpriced, countRow])
+            for (const f of REPORT_CSV_PER_TRUCK) {
+              checks.push([`${f} ${inv.priced ? 'a priced average' : `"${UT.NOT_RECORDED}"`}`, inv.priced ? (rMoney(v(f)) ?? 0) > 0 : v(f) === UT.NOT_RECORDED, v(f)])
+            }
+            checks.push(['no price field "$0"', [...REPORT_CSV_PER_TRUCK, ...REPORT_CSV_NEEDS_ALL].every((f) => rNorm(v(f)) !== '$0')])
+          } else {
+            checks.push(['no count row', countRow === undefined])
+            checks.push([`no "${UT.NOT_AVAILABLE}"`, [...REPORT_CSV_PER_TRUCK, ...REPORT_CSV_NEEDS_ALL].every((f) => v(f) !== UT.NOT_AVAILABLE)])
+          }
+          const observed = `case: ${caseText}${RO.UNPRICED_TRUCKS === 'not-available' ? '' : ` (UNPRICED_TRUCKS is "${RO.UNPRICED_TRUCKS}": today's figures expected)`}; ` +
+            checks.map(checkText).join('; ')
+          await caption(page, `Step R4b — ${observed}`)
+          return { observed, verdict: verdict(checks.every(([, ok]) => ok)) }
+        })
+    }
+
+    // ---- R5: the report's footnote and "Not available" asset figures
+    if (want('R5')) {
+      await step('R5', 'The report PDF for the same investor: the asset figures',
+        `With a truck that has no recorded purchase price: the footnote "${UT.FOOTNOTE}" (filled in) is present; Total Purchase Price, Current Market Value (80%), Total Investment and Payoff Progress read "${UT.NOT_AVAILABLE}" (Business ROI reads no price and keeps its number); the per-truck figures read the priced trucks' average or "${UT.NOT_RECORDED}". Every truck priced: no footnote`,
+        async () => {
+          let pt = S.pdf1
+          let src = 'R1\'s PDF'
+          if (!pt) {
+            const q = S.month ? `&start=${S.month}-01&end=${lastDayOf(S.month)}` : ''
+            const r = await fetchBytes(page, `/api/investor/report?as_user_id=${inv.id}${q}`)
+            if (r.status !== 200 || !r.isPdf) return { observed: `GET /api/investor/report?as_user_id=${inv.id} → ${codeText(r)}${r.isPdf ? '' : ', not a PDF'}`, verdict: 'FAIL' }
+            pt = await pdfText(r.bytes.toString('base64'))
+            src = 'a page fetch of the report'
+          }
+          const flat = rNorm(pt.text)
+          const foot = rNorm(String(UT.FOOTNOTE).replace(/\{n\}/g, String(inv.unpriced)).replace(/\{total\}/g, String(inv.n)))
+          const footStem = rNorm(String(UT.FOOTNOTE).split(/\{n\}/)[0])
+          const checks = []
+          if (unpricedCase) {
+            checks.push(['footnote present', flat.includes(foot)])
+            for (const k of REPORT_PDF_NEEDS_ALL) checks.push([`${k} "${UT.NOT_AVAILABLE}"`, pdfKpiValue(pt, k) === UT.NOT_AVAILABLE, pdfKpiValue(pt, k)])
+            for (const k of REPORT_PDF_PER_TRUCK) {
+              const val = pdfKpiValue(pt, k)
+              checks.push([`${k} ${inv.priced ? 'a priced average' : `"${UT.NOT_RECORDED}"`}`, inv.priced ? (rMoney(val) ?? 0) > 0 : val === UT.NOT_RECORDED, val])
+            }
+          } else {
+            checks.push(['no footnote', !flat.includes(footStem)])
+            checks.push([`no "${UT.NOT_AVAILABLE}"`, [...REPORT_PDF_NEEDS_ALL, ...REPORT_PDF_PER_TRUCK].every((k) => pdfKpiValue(pt, k) !== UT.NOT_AVAILABLE)])
+          }
+          const unread = [...REPORT_PDF_NEEDS_ALL, ...REPORT_PDF_PER_TRUCK].filter((k) => pdfKpiValue(pt, k) === undefined)
+          const observed = `read ${src}; case: ${caseText}; ${checks.map(checkText).join('; ')}` +
+            `${unread.length ? `; label(s) not found in the PDF: ${unread.join(', ')}` : ''}`
+          await caption(page, `Step R5 — ${observed}`)
+          return { observed, verdict: verdict(checks.every(([, ok]) => ok)) }
+        })
+    }
+
+    // ---- R6: the hint under the date inputs
+    if (want('R6')) {
+      await step('R6', 'The portal\'s report date inputs: the whole-months hint',
+        `GET /api/investor carries reportRangeMode; in "whole-months" mode the hint "${RO.RANGE_HINT}" shows under the date inputs; in "exact-dates" mode it does not`,
+        async () => {
+          const mode = S.mode
+          const hint = page.getByText(RO.RANGE_HINT, { exact: false })
+          const n = await hint.count()
+          let shown = n ? await hint.first().isVisible() : false
+          // The text split across elements (a bold lead-in, say): the rendered text
+          // (innerText leaves out what is not displayed) still carries it.
+          const inText = !n && await page.evaluate((h) => document.body.innerText.replace(/\s+/g, ' ').includes(h), rNorm(RO.RANGE_HINT)).catch(() => false)
+          if (inText) shown = true
+          let below = null
+          if (shown && n) {
+            const hb = await hint.first().boundingBox()
+            const ib = await page.locator('.report-group input[type="date"]').first().boundingBox()
+            below = !!hb && !!ib && hb.y >= ib.y + ib.height - 2
+          }
+          const s = await clipShot(page, 'r6-range-hint', [page.locator('.header-actions-row'), shown && n ? hint : null])
+          const ok = mode === 'whole-months' ? shown : mode === 'exact-dates' ? !shown : false
+          const observed = `GET /api/investor?as_user_id=${inv.id} → ${S.investorStatus ?? 'not seen'}; reportRangeMode: ${mode === undefined ? 'absent' : `"${mode}"`}; ` +
+            `the hint ${shown ? 'is shown' : n ? 'is in the page but not visible' : 'is not in the page'}${below === null ? '' : ` (below the date inputs: ${below})`}` +
+            `${RO.source === 'lib' ? '' : '; the hint text is the contract\'s copy (lib/investor-report-options.js is not in this checkout)'}`
+          await caption(page, `Step R6 — ${observed}`)
+          return { observed, verdict: verdict(ok), shot: s }
+        })
+    }
+  } finally {
+    // Rx only once an investor was picked: before that nothing ran. A failed sign-in
+    // still reaches main()'s "R!" row, since nothing here returns.
+    // R3's row, when the portal never opened and so never recorded it.
+    try { S.recordR3?.() } catch { /* ignore */ }
+    if (S.inv) reportReadOnlyRow({ writes, start })
+    try { await ctx.close() } catch { /* ignore */ }
+    if (ownDb && db) { try { db.close() } catch { /* ignore */ } db = null }
+  }
+}
+
+// ---- Rx: read-only. The browser's non-GET requests, and locally (DB_PATH) what grew
+// in the copy since the sign-in: only the preview's audit lines and the ledger refresh.
+function reportReadOnlyRow({ writes, start }) {
+  const notes = []
+  let ok = true
+  notes.push(`non-GET requests the browser sent (sign-in and socket.io aside): ${writes.length ? writes.join(', ') : 'none'}`)
+  if (writes.length) ok = false
+  if (db && start) {
+    try {
+      const now = ifxMaxRowids()
+      const grew = Object.keys(now).filter((t) => start[t] != null && now[t] > start[t])
+      const fresh = Object.keys(now).filter((t) => start[t] == null)
+      const unexpected = grew.filter((t) => !REPORT_TABLES_OK.has(t))
+      const actions = start.audit_trail != null ? db.prepare('SELECT action, COUNT(*) AS n FROM audit_trail WHERE rowid > ? GROUP BY action ORDER BY action').all(start.audit_trail) : []
+      const badAudit = actions.filter((a) => !REPORT_AUDIT_OK.test(a.action))
+      const ledger = ['investor_payouts', 'investor_payout_history'].filter((t) => grew.includes(t))
+      notes.push(`tables that grew since the sign-in: ${grew.join(', ') || 'none'}${fresh.length ? `; new tables: ${fresh.join(', ')}` : ''}`)
+      notes.push(`audit lines: ${actions.map((a) => `${a.action} x${a.n}`).join(', ') || 'none'}`)
+      notes.push(`the payout ledger ${ledger.length ? `gained rows (${ledger.join(', ')}), as viewing payouts does` : 'gained no row'}`)
+      if (unexpected.length || badAudit.length || fresh.length) {
+        ok = false
+        notes.push(`UNEXPECTED: ${[...unexpected, ...badAudit.map((a) => `audit ${a.action}`), ...fresh].join(', ')}`)
+      }
+    } catch (e) { ok = false; notes.push(`database read error: ${e.message}`) }
+  } else if (!db) notes.push('the database was not read (no DB_PATH): the only writes the section can cause are the ledger refresh and the preview\'s audit lines')
+  notes.push('nothing to delete: the section creates no record; each downloaded PDF and CSV was deleted as soon as it was read')
+  record({ step: 'Rx', title: 'Read-only: what the section wrote', expected: 'No write but a sign-in session, the preview\'s audit lines (investor_preview_*, investor_payouts_view) and the payout ledger\'s own refresh; no plant journal', observed: `${notes.join('; ')}; plant journal ${fs.existsSync(JOURNAL) ? 'PRESENT' : 'none'}`, verdict: verdict(ok && !fs.existsSync(JOURNAL)), shot: '' })
 }
 
 let exitCode = 0

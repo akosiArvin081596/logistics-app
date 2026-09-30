@@ -434,6 +434,69 @@ An investor invited on a fixed monthly lease payment was told, in two setup-guid
 
 ---
 
+## 16. The downloadable report PDF (`GET /api/investor/report`) and tax CSV: payout, date range, truck prices (awaiting your sign-off)
+
+This document **leaves the app**, like the statement (§12). It is the PDF behind **Download Report** (§1), and the tax CSV behind the Section 179 figures' download (§4).
+
+**What changed (2026-09-30).** The report printed `Investor Payout (50%)` and `Owner Earnings (50%)` as half of *revenue minus expenses*, with no driver pay, no rule for a month with no activity, and no loss carried forward. So it showed an investor **more** than their Payouts page for the same month. For a month with no loads it showed a **negative** payout. Both figures now come from the Payouts page: the total of the monthly payouts for the months the report covers. Driver pay is now its own expense line, and a month with no activity is not charged fixed costs, as on the Earnings screen. **Every line below is new and awaiting your approval.**
+
+**Each choice is one setting, and every sentence below is one line of text, all in one file** (`lib/investor-report-options.js`), so a change you ask for is a one-line change.
+
+### 16.1 The payout line
+
+| Flag | Exact text | Where / when | Status |
+|---|---|---|---|
+| ⚪ | `Driver Pay` | New expense row in the Income Statement, under Gross Revenue. Always shown. | **Awaiting approval** |
+| 🔴 | `Investor Payout is the total of your monthly payouts for <first month> – <last month>, the same figures as your Payouts page.` | Small grey line under the Income Statement. Always shown when the report covers at least one month (`for <month>` when it covers one). | **Awaiting approval** |
+| 🔴 | `<month> is still in progress, so its figure is the projected payout if the month closed today.` | Same line, when the report reaches the current month. Built from §11's `Projected payout if the month closed today`. | **Awaiting approval** |
+| 🔴 | `A month that ran at a loss pays nothing; the shortfall is carried against later months rather than billed back to you.` | Same line, when a month in the report ran at a loss or absorbed an earlier one. Built from the statement's caption (§12). | **Awaiting approval** |
+| 🔴 | `Your payout for <month> is the amount that month was settled at. The figures above reflect current records, which have changed since it closed.` | Same line, when a settled month's records have changed since it closed. The Payouts page's own sentence (§11). Plural for several months. | **Awaiting approval** |
+| 🔴 | `The payout for <month> includes a correction shown on your Payouts page.` | Same line, when a month in the report carries a manual correction on the Payouts page. | **Awaiting approval** |
+| ⚪ | `No payout month falls in this report period.` | Same line, when the dates picked contain no month with a payout (e.g. a future range). | **Awaiting approval** |
+
+### 16.2 Dates that start or end mid-month
+
+**The choice (owner, 2026-09-30): whole months.** A payout is settled per month, so a report from July 15 to August 12 now covers **the whole of July and August on every line**: revenue, fuel and other trip expenses, Driver Pay, the fixed costs and the payout. The period under the title prints the whole months (`Period: 7/1/2026 – 8/31/2026`). Before, revenue and trip expenses followed the exact dates while the payout covered whole months, so half of *Net Profit* was not the payout. The other setting, **exact dates**, puts that back and swaps in the second sentence below.
+
+| Flag | Exact text | Where / when | Status |
+|---|---|---|---|
+| 🔴 | `Payouts are settled by month, so this report covers the whole of each month in your date range: <first month> – <last month>.` | First sentence of the grey line under the Income Statement, whenever dates are picked. `<month>` when the range is inside one month; `<month> onward` for a start date only; `through <month>` for an end date only. The Super Admin's fleet report says `the date range` instead of `your date range`. | **Awaiting approval** |
+| 🔴 | `Driver Pay, the fixed costs and Investor Payout cover whole months; revenue and trip expenses cover the exact dates you chose.` | Same place, **only if the setting is switched to exact dates**. Not shown today. | **Awaiting approval** |
+| 🔴 | `Reports cover whole months: a date range that starts or ends mid-month includes that whole month, because payouts are settled by month.` | On the portal, under the report's date inputs (next to **Download Report**, §1), while the setting is whole months. | **Awaiting approval** |
+
+### 16.3 Trucks with no recorded purchase price
+
+**The choice (owner, 2026-09-30): say so, never $0.** A truck whose purchase price was never entered in the Truck Database used to count as **$0**, which quietly lowered every figure built from the price. Now:
+
+- A **per-truck** figure is the average over the trucks that have a price. When none has one, it reads `Not recorded`.
+- A figure that needs **every** truck's price reads `Not available` while any truck lacks one.
+- The PDF adds a footnote and the CSV a count row saying how many trucks lack a price.
+
+The other setting, **zero**, puts the old $0 back with no footnote.
+
+| Flag | Exact text | Where / when | Status |
+|---|---|---|---|
+| ⚪ | `Not recorded` | PDF: Purchase Price (per truck) and Section 179 Deduction. CSV: Purchase Price (per truck), Section 179 Deduction (100%) and Annual Depreciation (Year 1). When none of the investor's trucks has a recorded price. | **Awaiting approval** |
+| ⚪ | `Not available` | PDF: Total Purchase Price, Current Market Value (80%), Total Investment and Payoff Progress. CSV: Total Fleet Purchase Price and At-Risk Capital Remaining. When any of the investor's trucks has no recorded price. | **Awaiting approval** |
+| 🔴 | `Purchase price not recorded for <n> of <total> truck(s). Figures that need it show "Not available" until it is entered in the Truck Database.` | PDF, small grey line under the Asset Security figures, when any truck has no recorded price. | **Awaiting approval** |
+| ⚪ | `Trucks without a recorded purchase price` | CSV, a new row under Total Trucks with the number of such trucks, when there is at least one. | **Awaiting approval** |
+
+*Business ROI* is net profit over revenue and does not use the purchase price, so it always shows its number.
+
+### 16.4 Messages
+
+Error messages are normally not listed here (see "Not listed" at the top). These are new, so here they are.
+
+| Flag | Exact text | Where / when | Status |
+|---|---|---|---|
+| ⚪ | `The start date must be a real date written as YYYY-MM-DD.` (`end` for the end date) | The report, when a date is not a real calendar day. The portal's date picker cannot send one; a hand-edited link can. | **Awaiting approval** |
+| ⚪ | `The start date is after the end date.` | The report, when the start date is later than the end date. | **Awaiting approval** |
+| ⚪ | `Too many report downloads. Try again in a few minutes.` | After 20 report downloads by one person within 15 minutes. | **Awaiting approval** |
+| ⚪ | `Too many tax document downloads. Try again in a few minutes.` | After 20 tax CSV downloads by one person within 15 minutes. | **Awaiting approval** |
+| ⚪ | `Failed to generate tax document` | When the tax CSV fails unexpectedly. The report already said `Failed to generate report`. | **Awaiting approval** |
+
+---
+
 ## The ones I'd raise first
 
 0. **§2 / §12, the loss carry-forward** — the line you actually asked about. Two things to settle: (a) **one wording**, since the same deduction is currently called three different things across the PDF, the Earnings screen and the Payouts table; and (b) whether `Payable` / `Projected payout` is the right name for the figure that lands under it. Everything else in this file can wait — this one is live in August.
@@ -441,3 +504,4 @@ An investor invited on a fixed monthly lease payment was told, in two setup-guid
 2. **§5 and §8, "the Job Tracking sheet … soft-deleted … load-exclusion filter"** — internal vocabulary in front of an investor, in two places.
 3. **§10 "…and may differ"** — the portal telling an investor two of its own totals disagree.
 4. **§15, a fixed monthly lease on paper, a split in the payouts** — an investor invited on a lease signs for a fixed monthly amount, while payouts are still calculated from the Split % column. The two setup-guide answers that describe a profit share now say it is the standard agreement (§15.6), but the Lease §2.01 lead paragraph still describes rent as a share of Net Operating Income (see "Related, left unchanged here" under §15.4).
+5. **§16.2 / §16.3, the report's two choices** — whole months for a mid-month date range, and `Not available` / `Not recorded` instead of $0 for a truck with no recorded purchase price (*Business ROI*, which does not use the price, keeps its number). Each is one setting; the other setting is the report as it was.

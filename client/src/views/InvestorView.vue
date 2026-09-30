@@ -42,16 +42,19 @@
         <a href="mailto:info@logisx.com" class="btn-email" title="Email LogisX Operations (info@logisx.com) about loads, dispatch, or anything operational">Contact Operations</a>
         <a href="mailto:dev@logisx.com" class="btn-email" title="Email LogisX Tech Support (dev@logisx.com) for portal or login issues">Contact Tech Support</a>
         <div class="report-group">
-          <input v-model="reportStart" type="date" class="date-input" title="Start date of the report period" />
-          <input v-model="reportEnd" type="date" class="date-input" title="End date of the report period" />
-          <button
-            class="btn-report"
-            :disabled="reportLoading"
-            :title="reportLoading ? 'Generating PDF...' : 'Download a PDF report of your financials for the selected date range'"
-            @click="downloadReport"
-          >
-            {{ reportLoading ? 'Generating...' : 'Download Report' }}
-          </button>
+          <div class="report-controls">
+            <input v-model="reportStart" type="date" class="date-input" title="Start date of the report period" :max="reportEnd || undefined" :aria-describedby="rangeHint ? 'report-range-hint' : undefined" />
+            <input v-model="reportEnd" type="date" class="date-input" title="End date of the report period" :min="reportStart || undefined" :aria-describedby="rangeHint ? 'report-range-hint' : undefined" />
+            <button
+              class="btn-report"
+              :disabled="reportLoading"
+              :title="reportLoading ? 'Generating PDF...' : 'Download a PDF report of your financials for the selected date range'"
+              @click="downloadReport"
+            >
+              {{ reportLoading ? 'Generating...' : 'Download Report' }}
+            </button>
+          </div>
+          <p v-if="rangeHint" id="report-range-hint" class="report-hint">{{ rangeHint }}</p>
         </div>
         <button
           class="btn-refresh"
@@ -127,6 +130,7 @@ import { useToast } from '../composables/useToast'
 import { useFileDrop } from '../composables/useFileDrop'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
 import { AVATAR_MAX_EDGE, compressImage, isDecodedImage } from '../lib/imageUtils'
+import { rangeHintFor } from '../lib/investorReportText'
 import EarningsSection from '../components/investor/EarningsSection.vue'
 import ProductionSection from '../components/investor/ProductionSection.vue'
 import TrendSection from '../components/investor/TrendSection.vue'
@@ -156,6 +160,10 @@ const trucks = ref([])
 const reportLoading = ref(false)
 const reportStart = ref('')
 const reportEnd = ref('')
+// Why a mid-month range comes back as whole months. Empty (and not rendered)
+// in 'exact-dates' mode, before the data loads, and from a server that does
+// not send reportRangeMode.
+const rangeHint = computed(() => rangeHintFor(store.reportRangeMode))
 const picUploading = ref(false)
 
 const investorRecord = computed(() => store.data?.investor || null)
@@ -293,6 +301,12 @@ function downloadReport() {
   // Direct same-origin download — no fetch/blob, so the saved file can't become a
   // name-less blob UUID (the bug investors hit). The endpoint sends
   // Content-Disposition: attachment and we also set an explicit filename.
+  // The server refuses a start after the end (400), which a plain download link
+  // would save as a broken file, so the page says it here instead.
+  if (reportStart.value && reportEnd.value && reportStart.value > reportEnd.value) {
+    toast('The start date is after the end date.', 'error')
+    return
+  }
   const params = new URLSearchParams()
   if (reportStart.value) params.set('start', reportStart.value)
   if (reportEnd.value) params.set('end', reportEnd.value)
@@ -434,9 +448,11 @@ onMounted(() => {
   margin-top: 0.25rem;
 }
 
+/* flex-start, not center: the range hint makes the report group taller, and
+   the buttons beside it line up with its controls, not its middle. */
 .header-actions-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.75rem;
   margin-top: 0.75rem;
   flex-wrap: wrap;
@@ -458,7 +474,18 @@ onMounted(() => {
 .btn-email:hover { background: rgba(255, 255, 255, 0.15); color: #fff; }
 
 .report-group {
+  display: flex; flex-direction: column; gap: 0.35rem;
+}
+.report-controls {
   display: flex; align-items: center; gap: 0.4rem;
+}
+/* The hero's small print. width 0 + min-width 100% wraps it to the width of
+   the controls above instead of letting the sentence widen the group. */
+.report-hint {
+  width: 0; min-width: 100%;
+  margin: 0;
+  font-size: 0.72rem; line-height: 1.4;
+  color: rgba(255, 255, 255, 0.55);
 }
 .date-input {
   padding: 0.35rem 0.55rem; font-size: 0.73rem; font-family: inherit;
@@ -578,14 +605,15 @@ onMounted(() => {
   .stat-divider { display: none; }
   .stat-item { min-width: 40%; }
   .header-actions-row { flex-wrap: wrap; }
-  .report-group { flex-wrap: wrap; }
+  .report-controls { flex-wrap: wrap; }
 }
 
 @media (max-width: 600px) {
   .inv-header { padding: 1rem; }
   .inv-header h1 { font-size: 1.1rem; }
   .header-actions { flex-wrap: wrap; gap: 0.4rem; }
-  .report-group { flex-wrap: wrap; gap: 0.4rem; width: 100%; }
+  .report-group { width: 100%; }
+  .report-controls { flex-wrap: wrap; gap: 0.4rem; }
   .date-input { width: auto; flex: 1; min-width: 100px; }
   .btn-email, .btn-report, .btn-refresh { font-size: 0.7rem; padding: 0.35rem 0.6rem; }
   .stat-value { font-size: 1rem; }

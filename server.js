@@ -61,6 +61,7 @@ const nodemailer = require("nodemailer");
 const { PDFDocument: PdfLibDocument, rgb, StandardFonts } = require("pdf-lib");
 const { renderPolicy, safeSignatureImage } = require("./lib/policy-renderer");
 const investorPaymentTerms = require("./lib/investor-payment-terms");
+const investorReportOptions = require("./lib/investor-report-options");
 const { renderHtmlToPdf } = require("./lib/pdf-browser");
 const { getStateFromCoords } = require("./lib/ifta-states");
 const routemate = require("./lib/routemate-client");
@@ -1794,6 +1795,34 @@ function getInvestorDriverSet(userId, carrierDBData, driverColName, carrierColNa
 		historical.forEach(h => { if (h.driver_name) set.add(h.driver_name.trim().toLowerCase()); });
 	}
 	return set;
+}
+
+// Does this Job Tracking row belong to this investor? The one answer for the
+// investor documents, GET /api/investor/report, GET /api/investor/tax-csv and
+// GET /api/investor/load-report. Returns a row test, with the columns resolved once.
+//
+// A FILLED-IN Owner ID decides it: the row is the investor's when it names their
+// users.id, and not when it names anyone else, "0" (a company truck) included,
+// whoever drove it. Only a BLANK Owner ID (a row from before the column existed)
+// falls back to the driver, matched against getInvestorDriverSet(). A Driver
+// cell that reads as a built-in property name counts as blank
+// (driverNameForTotals()).
+//
+// ⚠️ This is the rule of GET /api/investor and computeInvestorMonthlyEarnings(),
+// which keep their own copies of it. scripts/test-investor-tax-csv.js runs both
+// copies and this helper over one fixture and fails if any of them disagree.
+function investorJobRowTest(headers, investorOwnerId, investorDriverSet) {
+	const ownerIdCol = findCol(headers, /^owner.?id$/i);
+	const driverCol = findCol(headers, /^driver$/i);
+	return (r) => {
+		if (ownerIdCol) {
+			const raw = r[ownerIdCol];
+			const hasOwnerIdValue = raw !== undefined && raw !== null && String(raw).trim() !== "";
+			if (hasOwnerIdValue) return (parseInt(raw) || 0) === investorOwnerId;
+		}
+		const driver = driverCol ? (driverNameForTotals(r[driverCol]) || "").trim().toLowerCase() : "";
+		return driver !== "" && investorDriverSet.has(driver);
+	};
 }
 
 // The 'YYYY-MM' key a truck_assignments / carrier_driver_history stamp falls in.
@@ -42540,30 +42569,70 @@ app.get("/api/investor/documents", requireRole("Super Admin", "Investor"), async
 	}
 });
 
+// The trucks an investor document's asset figures cover, and the prices recorded
+// on them (trucks.purchase_price). ownerId null = the whole fleet (a Super Admin
+// not previewing). GET /api/investor/report and GET /api/investor/tax-csv both
+// read it, so their purchase prices cannot disagree.
+//   trucks                        every truck in scope
+//   pricedCount / unpricedCount   trucks with / without a recorded price; a price
+//                                 is recorded when purchase_price > 0
+//   totalPurchasePrice            the sum of the recorded prices
+//   purchasePrice                 "per truck": the one truck's price in a one-truck
+//                                 fleet, else the average over the priced trucks,
+//                                 rounded; null when no truck has a price
+// What a document PRINTS for a truck with no price is a choice, UNPRICED_TRUCKS in
+// lib/investor-report-options.js (truckPriceFigures()); it is never decided here.
+function investorTruckPurchase(ownerId) {
+	const trucks = ownerId === null
+		? db.prepare("SELECT * FROM trucks").all()
+		: db.prepare("SELECT * FROM trucks WHERE owner_id = ?").all(ownerId);
+	const prices = trucks.map((t) => Number(t.purchase_price)).filter((p) => Number.isFinite(p) && p > 0);
+	const totalPurchasePrice = prices.reduce((sum, p) => sum + p, 0);
+	const purchasePrice = prices.length === 0
+		? null
+		: (trucks.length === 1 ? prices[0] : Math.round(totalPurchasePrice / prices.length));
+	return { trucks, pricedCount: prices.length, unpricedCount: trucks.length - prices.length, totalPurchasePrice, purchasePrice };
+}
+
+// GET /api/investor/report and GET /api/investor/tax-csv each re-read the sheet
+// and recompute a document (the report also reconciles the payouts ledger), so
+// each is capped per user. Same window and cap as statementLimiter, but
+// keyed on the SESSION USER, not the IP, as expenseOcrLimiter explains: an office
+// behind one address would otherwise share one bucket. One bucket per route.
+// ⚠️ Mounted AFTER requireRole, so a caller without a session spends nothing.
+function investorDocumentLimiter(message) {
+	return rateLimit({
+		windowMs: 15 * 60 * 1000,
+		max: 20,
+		keyGenerator: (req) => {
+			const id = req.session?.user?.id;
+			return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+		},
+		message: { error: message },
+		standardHeaders: true,
+	});
+}
+const investorReportLimiter = investorDocumentLimiter("Too many report downloads. Try again in a few minutes.");
+const investorTaxCsvLimiter = investorDocumentLimiter("Too many tax document downloads. Try again in a few minutes.");
+
 // GET /api/investor/tax-csv — Download tax shield data as CSV
-app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (req, res) => {
+app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), investorTaxCsvLimiter, async (req, res) => {
 	try {
 		const preview = resolvePreviewUser(req);
 		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
+		// A Super Admin's preview download is audited, as the report's is.
+		if (preview.isPreview) logAudit(req, "investor_preview_tax_csv", "investor", preview.effectiveUserId, "");
 		const user = { ...preview.sessionUser, id: preview.effectiveUserId, username: preview.effectiveUsername };
 		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 
-		// Pull investor config for purchase price
-		const globalCfg = db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all();
-		const config = {};
-		globalCfg.forEach(r => (config[r.key] = r.value));
-		if (!isSuperAdmin) {
-			const investorCfg = db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?").all(user.id);
-			investorCfg.forEach(r => (config[r.key] = r.value));
-		}
-		const purchasePrice = parseFloat(config.truck_purchase_price || config.purchase_price) || 58000;
-		const totalTrucks = isSuperAdmin
-			? db.prepare("SELECT COUNT(*) AS cnt FROM trucks").get().cnt
-			: db.prepare("SELECT COUNT(*) AS cnt FROM trucks WHERE owner_id = ?").get(user.id).cnt;
-		const totalPurchasePrice = purchasePrice * totalTrucks;
+		// Each truck's recorded purchase price, as the report reads it. Until
+		// 2026-09-30 every truck here was priced at the investor config's
+		// truck_purchase_price ($58,000 by default), whatever it cost. What a truck
+		// with no price prints is UNPRICED_TRUCKS in lib/investor-report-options.js.
+		const purchase = investorTruckPurchase(isSuperAdmin ? null : user.id);
+		const priced = investorReportOptions.truckPriceFigures(purchase, investorReportOptions.UNPRICED_TRUCKS);
+		const totalTrucks = purchase.trucks.length;
 		const totalStartupExpenses = 5000 * totalTrucks;
-		const section179 = purchasePrice;
-		const annualDepreciation = purchasePrice;
 
 		// Net revenue — must succeed; we refuse to fabricate financial figures
 		let netRevenueToDate = 0;
@@ -42571,32 +42640,39 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (
 			const sheets = await getSheets();
 			const rng = await sheets.spreadsheets.values.batchGet({ spreadsheetId: SPREADSHEET_ID, ranges: ["Job Tracking"] });
 			const jt = parseSheet(rng.data.valueRanges[0]);
-			const cdb = parseSheet(rng.data.valueRanges[1]);
+			// The same two steps, in the same order, as GET /api/investor/report and
+			// /api/investor (getJobTrackingCached() + liveJobTrackingView()): one row
+			// per load id, the most recent copy, then cancelled and soft-deleted loads
+			// out (excludeDroppedLoads()). Until 2026-09-30 this summed the raw rows, so
+			// every older copy of a re-entered load and a soft-deleted load still in a
+			// completed status counted in "Net Revenue to Date" and "At-Risk Capital
+			// Remaining". This object is this request's own read, not the shared cache.
+			jt.data = deduplicateLoads(jt.data, jt.headers);
+			jt.data = excludeDroppedLoads(jt.data, jt.headers);
+			// The drivers directory, as /api/investor and the report read it. This
+			// batchGet requests ONE range, so the valueRanges[1] this read until
+			// 2026-09-30 was always undefined: an empty carrier database, which dropped
+			// getInvestorDriverSet()'s directory leg without a sign.
+			const cdb = getCarrierDBFromSQLite();
 			const cDriverCol = findCol(cdb.headers, /driver/i) || cdb.headers[0];
 			const cCarrierCol = findCol(cdb.headers, /carrier/i);
 			const jtRateCol = findCol(jt.headers, /rate|amount|revenue|pay|charge|price|cost/i);
-			const jtDriverCol = findCol(jt.headers, /driver/i);
 			// Tax revenue counts COMPLETED loads only — match the other
 			// financial endpoints; never inflate with dispatched/in-transit.
 			const jtStatusCol = findCol(jt.headers, /^(job[\s._-]?)?status$/i) || findCol(jt.headers, /status/i);
 			const taxCompletedStatuses = /^(delivered|completed|pod received)$/i;
 			let totalRevenue = 0;
-			let driverSet = null;
-			const taxOwnerId = !isSuperAdmin ? user.id : null;
-			if (!isSuperAdmin) {
-				driverSet = getInvestorDriverSet(user.id, cdb.data, cDriverCol, cCarrierCol);
-			}
-			const taxOwnerIdCol = findCol(jt.headers, /^owner.?id$/i);
+			// The investor's rows by the report's and /api/investor's rule: a
+			// filled-in Owner ID decides, "0" included; only a blank one falls back to
+			// the driver. Until 2026-09-30 this counted a row when its Owner ID matched
+			// OR its driver was one of the investor's, so a load stamped to another
+			// owner, or to a company truck, counted here whenever one of the
+			// investor's drivers ran it.
+			const belongsToInvestor = isSuperAdmin
+				? null
+				: investorJobRowTest(jt.headers, user.id, getInvestorDriverSet(user.id, cdb.data, cDriverCol, cCarrierCol));
 			jt.data.forEach(r => {
-				if (driverSet) {
-					let match = false;
-					if (taxOwnerIdCol && parseInt(r[taxOwnerIdCol]) === taxOwnerId) match = true;
-					if (!match && jtDriverCol) {
-						const d = (r[jtDriverCol] || "").trim().toLowerCase();
-						if (driverSet.has(d)) match = true;
-					}
-					if (!match) return;
-				}
+				if (belongsToInvestor && !belongsToInvestor(r)) return;
 				if (jtStatusCol && !taxCompletedStatuses.test(String(r[jtStatusCol] || "").trim())) return;
 				if (jtRateCol) totalRevenue += parseFloat(String(r[jtRateCol] || "0").replace(/[$,]/g, "")) || 0;
 			});
@@ -42621,25 +42697,32 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (
 			});
 		}
 
-		const atRiskCapital = Math.max(0, (totalPurchasePrice + totalStartupExpenses) - netRevenueToDate);
+		// null = the fleet total is "Not available" (a truck with no price, under
+		// UNPRICED_TRUCKS "not-available"), and so is At-Risk Capital, which reads it.
+		const atRiskCapital = priced.total === null ? null : Math.max(0, (priced.total + totalStartupExpenses) - netRevenueToDate);
 		const today = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
 		const ownerLabel = isSuperAdmin ? "All Investors" : user.username;
 
+		const { NOT_RECORDED, NOT_AVAILABLE, CSV_COUNT_LABEL } = investorReportOptions.UNPRICED_TEXT;
+		const dollars = (n) => `$${n.toLocaleString("en-US")}`;
+		const perTruck = priced.perTruck === null ? NOT_RECORDED : dollars(priced.perTruck);
+		const orNotAvailable = (n) => (n === null ? NOT_AVAILABLE : dollars(n));
 		const rows = [
 			["LogisX Tax Shield Summary"],
 			["Generated", today],
 			["Investor", ownerLabel],
 			[""],
 			["Field", "Value"],
-			["Purchase Price (per truck)", `$${purchasePrice.toLocaleString("en-US")}`],
+			["Purchase Price (per truck)", perTruck],
 			["Total Trucks", totalTrucks],
-			["Total Fleet Purchase Price", `$${totalPurchasePrice.toLocaleString("en-US")}`],
-			["Startup Expenses (est. $5,000/truck)", `$${totalStartupExpenses.toLocaleString("en-US")}`],
-			["Section 179 Deduction (100%)", `$${section179.toLocaleString("en-US")}`],
-			["Annual Depreciation (Year 1)", `$${annualDepreciation.toLocaleString("en-US")}`],
+			...(priced.flagged ? [[CSV_COUNT_LABEL, priced.unpricedCount]] : []),
+			["Total Fleet Purchase Price", orNotAvailable(priced.total)],
+			["Startup Expenses (est. $5,000/truck)", dollars(totalStartupExpenses)],
+			["Section 179 Deduction (100%)", perTruck],
+			["Annual Depreciation (Year 1)", perTruck],
 			["Write-Off Percentage", "100%"],
-			["Net Revenue to Date", `$${netRevenueToDate.toLocaleString("en-US")}`],
-			["At-Risk Capital Remaining", `$${atRiskCapital.toLocaleString("en-US")}`],
+			["Net Revenue to Date", dollars(netRevenueToDate)],
+			["At-Risk Capital Remaining", orNotAvailable(atRiskCapital)],
 			[""],
 			["Note", "Section 179 allows 100% first-year deduction of qualifying business property."],
 			["Disclaimer", "Consult a licensed tax professional before filing."],
@@ -42655,7 +42738,8 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (
 		res.send(csv);
 	} catch (err) {
 		console.error("Tax CSV error:", err.message);
-		res.status(500).json({ error: err.message });
+		// A fixed message, as the report's: the error's own text stays in the log.
+		res.status(500).json({ error: "Failed to generate tax document" });
 	}
 });
 
@@ -42701,7 +42785,6 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 		const investorSplit = resolveInvestorSplitPct(cfg) / 100;
 
 		const driverCol = findCol(headers, /^driver$/i);
-		const ownerIdCol = findCol(headers, /^owner.?id$/i);
 		const loadIdCol = findCol(headers, /load.?id|job.?id/i);
 		const rateCol = findCol(headers, /payment|rate|amount|revenue/i);
 		const dateCol = findCol(headers, /status.*update.*date|completion.*date|assigned.*date/i) || findCol(headers, /date/i);
@@ -42713,15 +42796,13 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 		const destCol = pickAddressColumn(headers, /dest|drop|receiver|delivery/i);
 		const completedStatuses = /^(delivered|completed|pod received)$/i;
 
+		// The investor's rows by the one rule the report, the tax CSV and the portal
+		// share (investorJobRowTest()). Until 2026-09-30 this route kept its own copy,
+		// without the driverNameForTotals() step: a blank-Owner-ID row whose Driver
+		// cell reads as a built-in property name was the investor's here and nobody's
+		// anywhere else. scripts/test-investor-load-report-ownership.js.
 		const filtered = investorDriverSet
-			? data.filter((r) => {
-				if (ownerIdCol) {
-					const raw = r[ownerIdCol];
-					if (raw !== undefined && raw !== null && String(raw).trim() !== "") return (parseInt(raw) || 0) === investorOwnerId;
-				}
-				const d = driverCol ? (r[driverCol] || "").trim().toLowerCase() : "";
-				return d && investorDriverSet.has(d);
-			})
+			? data.filter(investorJobRowTest(headers, investorOwnerId, investorDriverSet))
 			: data;
 
 		const periodsMap = new Map();
@@ -42960,8 +43041,16 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 });
 
 // GET /api/investor/report — Generate PDF performance report
-app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (req, res) => {
+app.get("/api/investor/report", requireRole("Super Admin", "Investor"), investorReportLimiter, async (req, res) => {
 	try {
+		// The date range first, before anything is read or written. Until 2026-09-30
+		// a date that was not a real day answered 500 only AFTER the payouts ledger
+		// reconcile below had run. RANGE_MODE (lib/investor-report-options.js) decides
+		// whether a range that starts or ends mid-month widens to whole months.
+		const dateRange = investorReportOptions.reportDateRange(req.query.start, req.query.end, investorReportOptions.RANGE_MODE);
+		if (!dateRange.ok) {
+			return res.status(dateRange.status).json({ error: dateRange.error, code: dateRange.code, ...(dateRange.field ? { field: dateRange.field } : {}) });
+		}
 		// Re-use the investor data by making an internal call
 		const preview = resolvePreviewUser(req);
 		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
@@ -42977,6 +43066,14 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		});
 		const jobTracking = parseSheet(response.data);
 		jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers);
+		// Cancelled and soft-deleted loads out before any figure is read, by the one
+		// rule /api/investor and the payouts ledger use (excludeDroppedLoads()).
+		// Until 2026-09-30 this report skipped it: a load soft-deleted into
+		// deleted_loads keeps its completed status on the sheet, so it counted in
+		// Gross Revenue, and a cancelled load counted in Total Jobs and, with a
+		// Payment, in the Monthly Revenue table. This object is this request's own read,
+		// not the shared Job Tracking cache, so it may be reassigned.
+		jobTracking.data = excludeDroppedLoads(jobTracking.data, jobTracking.headers);
 		const rptCarrierDB = getCarrierDBFromSQLite();
 		const rptCDriverCol = findCol(rptCarrierDB.headers, /driver/i) || rptCarrierDB.headers[0];
 		const rptCCarrierCol = findCol(rptCarrierDB.headers, /carrier/i);
@@ -42988,34 +43085,43 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		}
 
 		const globalCfg = db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all();
-		const config = {};
-		globalCfg.forEach(r => (config[r.key] = r.value));
+		const globalConfig = {};
+		globalCfg.forEach(r => (globalConfig[r.key] = r.value));
+		const config = { ...globalConfig };
 		if (!isSuperAdmin) {
 			db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?").all(user.id)
 				.forEach(r => (config[r.key] = r.value));
 		}
 
-		// Date range filter (RFD-26)
-		const filterStart = req.query.start ? new Date(req.query.start) : null;
-		const filterEnd = req.query.end ? new Date(req.query.end + 'T23:59:59') : null;
+		// The payout, driver pay and fixed-cost months come from the SAME per-month
+		// figures the payouts ledger settles and the portal shows; this report only
+		// adds up the months its range covers (see investorReportPayoutEntries()).
+		// reportOwnerId is null for a real Super Admin (fleet-wide, no ledger) and the
+		// investor's users.id otherwise, under ?as_user_id= preview included.
+		const reportPayout = summarizeReportPayout(
+			await investorReportPayoutEntries({
+				ownerId: reportOwnerId,
+				sessionUser: preview.sessionUser,
+				carrierDB: rptCarrierDB,
+				globalConfig,
+				config,
+			}),
+			reportRangeMonthKeys(dateRange.from, dateRange.until),
+		);
 
-		const driverCol = findCol(jobTracking.headers, /^driver$/i);
-		const rptOwnerIdCol = findCol(jobTracking.headers, /^owner.?id$/i);
+		// Date range filter (RFD-26), on the checked range: whole months under
+		// RANGE_MODE "whole-months", the dates as given under "exact-dates". Parsed as
+		// before: the start at UTC midnight (the production server's own midnight),
+		// the end at 23:59:59 server time.
+		const filterStart = dateRange.from ? new Date(dateRange.from) : null;
+		const filterEnd = dateRange.until ? new Date(dateRange.until + 'T23:59:59') : null;
+
 		const jtDateColR = findCol(jobTracking.headers, /status.*update.*date|completion.*date|assigned.*date/i) || findCol(jobTracking.headers, /date/i);
 		const filteredJobData = (investorDriverSet
-			? jobTracking.data.filter(r => {
-				// Same rule as /api/investor: an EXPLICIT Owner ID (including "0") is
-				// trusted; only an EMPTY cell falls back to driver-name matching.
-				if (rptOwnerIdCol) {
-					const raw = r[rptOwnerIdCol];
-					const hasOwnerIdValue = raw !== undefined && raw !== null && String(raw).trim() !== "";
-					if (hasOwnerIdValue) {
-						return (parseInt(raw) || 0) === reportOwnerId;
-					}
-				}
-				const d = driverCol ? (r[driverCol] || "").trim().toLowerCase() : "";
-				return d && investorDriverSet.has(d);
-			}) : jobTracking.data
+			// The investor's rows by the rule /api/investor uses: a filled-in Owner ID
+			// decides, "0" included; only a blank one falls back to the driver.
+			? jobTracking.data.filter(investorJobRowTest(jobTracking.headers, reportOwnerId, investorDriverSet))
+			: jobTracking.data
 		).filter(r => {
 			if (!filterStart && !filterEnd) return true;
 			const d = jtDateColR ? new Date(r[jtDateColR]) : null;
@@ -43047,88 +43153,32 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		// Was previously hardcoded to $58,000 via config.truck_purchase_price
 		// fallback, which was wrong once real purchase prices were entered
 		// in the trucks table. Per 2026-04-13 client feedback.
-		const ownedTrucks2 = isSuperAdmin
-			? db.prepare("SELECT * FROM trucks").all()
-			: db.prepare("SELECT * FROM trucks WHERE owner_id = ?").all(user.id);
+		// investorTruckPurchase() is shared with the tax CSV. What a truck with no
+		// recorded price prints is UNPRICED_TRUCKS (lib/investor-report-options.js):
+		// priced.total null = "Not available", and so is every figure computed from it.
+		const purchase = investorTruckPurchase(reportOwnerId);
+		const ownedTrucks2 = purchase.trucks;
+		const priced = investorReportOptions.truckPriceFigures(purchase, investorReportOptions.UNPRICED_TRUCKS);
 		const totalTrucks = ownedTrucks2.length || 1;
-		const totalPurchasePrice = ownedTrucks2.reduce((sum, t) => sum + (t.purchase_price || 0), 0);
-		// "Per truck" shows the single value for a one-truck fleet and the
-		// average for multi-truck fleets (same pattern as /api/investor).
-		const purchasePrice = ownedTrucks2.length === 1
-			? (ownedTrucks2[0].purchase_price || 0)
-			: (totalTrucks > 0 ? Math.round(totalPurchasePrice / totalTrucks) : 0);
 		const totalStartupExpenses = 5000 * totalTrucks;
-		const currentValue = Math.round(totalPurchasePrice * 0.80);
+		const currentValue = priced.total === null ? null : Math.round(priced.total * 0.80);
 
-		// Helper: how many months does this truck appear in the report period?
-		// - With a date range: clamp to the range, bounded by the in-service date
-		// - All-time: from the truck's in-service date to now
-		// - Missing both dates (legacy data): fall back to the fleet-wide
-		//   earliest created_at, or to 1 month as a floor
-		const reportNow = new Date();
-		const fleetEarliestCreated = ownedTrucks2
-			.map(t => (t.created_at ? new Date(t.created_at) : null))
-			.filter(d => d && !isNaN(d))
-			.reduce((min, d) => (min === null || d < min ? d : min), null);
-		function truckMonthsInPeriod(t) {
-			const createdAt = t.created_at ? new Date(t.created_at) : null;
-			// Same precedence and same start MONTH as truckChargeFromMonth
-			// (in_service_date first, else created_at) — but this site clamps
-			// against a caller-supplied date range, so it needs day granularity
-			// and builds a Date instead of consuming the helper's 'YYYY-MM'.
-			// Parsed component-wise on purpose: new Date('2026-08-01') is UTC
-			// midnight = 2026-07-31 19:00 in Houston, which would pull the truck
-			// back into the previous month. See truckChargeFromMonth.
-			const inService = String(t.in_service_date || "").trim();
-			const inServiceDate = /^\d{4}-\d{2}-\d{2}$/.test(inService)
-				? new Date(parseInt(inService.slice(0, 4), 10), parseInt(inService.slice(5, 7), 10) - 1, parseInt(inService.slice(8, 10), 10))
-				: null;
-			const truckStart = inServiceDate || ((createdAt && !isNaN(createdAt))
-				? createdAt
-				: fleetEarliestCreated); // legacy data fallback
-			// The retirement end, built the same component-wise way and for the same
-			// UTC-midnight reason. null = never retired = no upper bound (see
-			// truckChargeUntilMonth: "" must never read as "retired long ago").
-			// ⚠️ This site is the reason retired_at is a DATE rather than a bare
-			// month: it clamps against a caller-supplied range with DAY granularity,
-			// so a month-only column would force an invented day here — and an
-			// unstated "last day of the month" convention is exactly the kind of
-			// thing that drifts away from the month gates.
-			const retired = String(t.retired_at || "").trim();
-			const retiredDate = /^\d{4}-\d{2}-\d{2}$/.test(retired)
-				? new Date(parseInt(retired.slice(0, 4), 10), parseInt(retired.slice(5, 7), 10) - 1, parseInt(retired.slice(8, 10), 10))
-				: null;
-			let start, end;
-			if (filterStart || filterEnd) {
-				start = filterStart || truckStart || reportNow;
-				end = filterEnd || reportNow;
-			} else {
-				start = truckStart || reportNow;
-				end = reportNow;
-			}
-			// If the truck entered service after the period ended, zero months.
-			if (truckStart && filterEnd && truckStart > filterEnd) return 0;
-			// Mirror image: if it was retired before the period began, zero months.
-			if (retiredDate && filterStart && retiredDate < filterStart) return 0;
-			// Clamp start to the truck's service start.
-			if (truckStart && start < truckStart) start = truckStart;
-			// ...and the end to its retirement. Inclusive of the retirement MONTH,
-			// matching truckChargedInMonth — the month arithmetic below counts whole
-			// months, so a truck retired mid-month still bills that month in full.
-			if (retiredDate && end > retiredDate) end = retiredDate;
-			if (end < start) return 0;
-			const months = (end.getFullYear() - start.getFullYear()) * 12
-				+ (end.getMonth() - start.getMonth()) + 1;
-			return Math.max(1, months);
-		}
+		// ⚠️ truckMonthsInPeriod() USED TO LIVE HERE and is gone on purpose
+		// (2026-09-30). It multiplied each truck's monthly fixed cost by the months
+		// between its in-service date and the end of the range, so the report charged
+		// fixed costs in months the payouts ledger never charges: an idle month (no
+		// activity, fixed costs deferred to $0) and every month before the investor's
+		// first load, which the ledger has no figure for at all. The fixed costs
+		// below walk the months the shared computation charged instead.
 
 		let totalExpenses = 0;
 		let fuelExpenses = 0, maintenanceExpenses = 0, complianceExpenses = 0, truckPaymentExpenses = 0, insuranceExpenses = 0, otherExpenses = 0;
 		// Parameterized date filters (avoid string interpolation in SQL)
 		let dateWhere = '';
 		const dateParams = [];
-		if (filterStart) { dateWhere += ' AND date >= ?'; dateParams.push(filterStart.toISOString().slice(0, 10)); }
-		if (filterEnd) { dateWhere += ' AND date <= ?'; dateParams.push(filterEnd.toISOString().slice(0, 10)); }
+		// The checked YYYY-MM-DD strings, bound as they are, so no time zone can move a day.
+		if (dateRange.from) { dateWhere += ' AND date >= ?'; dateParams.push(dateRange.from); }
+		if (dateRange.until) { dateWhere += ' AND date <= ?'; dateParams.push(dateRange.until); }
 
 		// Itemized trip expenses by type — runs for both Super Admin and Investor.
 		// Investor: scoped by the SHARED builder. Super Admin: no scope at all
@@ -43203,8 +43253,9 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		}
 
 		// Compliance / Regulatory = truck fixed costs (ELD + HVUT/12 + IRP/12)
-		// per month, multiplied by the number of months each truck was active
-		// in the report period. PLUS any manually-logged compliance_fees rows.
+		// per month, summed over the months of the report period in which the
+		// payouts ledger charged fixed costs (see below). PLUS any manually-logged
+		// compliance_fees rows.
 		// Per 2026-04-13 client feedback: "Compliance/Regulatory is the ELD,
 		// HVUT, IRP added up and divided by 12 months which is part of the
 		// fixed expenses. On run report period it needs to show this month
@@ -43223,28 +43274,37 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		// exactly ELD + HVUT + IRP, and quietly widening a category they named
 		// is how the next reconciliation argument starts. It gets the same
 		// treatment truck_payment_monthly already got — its own P&L row.
+		//
+		// ⚠️ WHICH MONTHS are charged is the payouts ledger's answer, not this
+		// handler's (2026-09-30): reportPayout.chargedFixedMonths, the months in the
+		// range whose fixed costs the shared computation charged. An idle month is
+		// charged $0 there, and a month before the investor's first load has no figure
+		// at all, so neither is charged here. Per month, the trucks and their cost are
+		// the SAME as getMonthlyFixedCosts() in computeInvestorMonthlyEarnings(): the
+		// Active trucks in scope, truckChargedInMonth(), truckMonthlyFixed(). So each
+		// month's three buckets add up to that month's fixed costs in the ledger.
 		{
 			// Skip inactive trucks for projected fixed-cost accrual.
 			// Asset Security section above still shows them (the investor
 			// owns them); they just don't contribute compliance expense.
-			for (const t of ownedTrucks2) {
-				if (t.status !== "Active") continue;
-				const months = truckMonthsInPeriod(t);
-				// Shared per-truck math, so this statement and the portal can no
-				// longer disagree about what a truck costs per month. The five
-				// parts are then bucketed into the client's named categories.
-				const f = truckMonthlyFixed(t);
-				const truckFixed = (f.eld + f.hvut + f.irp) * months;
-				complianceExpenses += truckFixed;
-				totalExpenses += truckFixed;
-				// Truck loan/lease payment — a fixed monthly cost, shown as its own
-				// P&L line (not lumped into Compliance). Split out of the ELD fee.
-				const truckPay = f.truckPayment * months;
-				truckPaymentExpenses += truckPay;
-				totalExpenses += truckPay;
-				const truckIns = f.insurance * months;
-				insuranceExpenses += truckIns;
-				totalExpenses += truckIns;
+			const activeTrucks = ownedTrucks2.filter(t => t.status === "Active");
+			for (const monthKey of reportPayout.chargedFixedMonths) {
+				for (const t of activeTrucks) {
+					if (!truckChargedInMonth(t, monthKey)) continue;
+					// Shared per-truck math, so this statement and the portal can no
+					// longer disagree about what a truck costs per month. The five
+					// parts are then bucketed into the client's named categories.
+					const f = truckMonthlyFixed(t);
+					const truckFixed = f.eld + f.hvut + f.irp;
+					complianceExpenses += truckFixed;
+					totalExpenses += truckFixed;
+					// Truck loan/lease payment — a fixed monthly cost, shown as its own
+					// P&L line (not lumped into Compliance). Split out of the ELD fee.
+					truckPaymentExpenses += f.truckPayment;
+					totalExpenses += f.truckPayment;
+					insuranceExpenses += f.insurance;
+					totalExpenses += f.insurance;
+				}
 			}
 			const compFees = (investorDriverSet
 				? db.prepare(`SELECT COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck)=LOWER(t.unit_number) WHERE t.owner_id=? AND t.status='Active' AND cf.status='Paid'`).get(user.id)
@@ -43254,16 +43314,22 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 			totalExpenses += compFees;
 		}
 
+		// Driver pay — ABSENT from this report until 2026-09-30, while the portal's
+		// Total Expenses and every payout deduct it. Summed from the same monthly
+		// driver pay the ledger settles on, over the months the range covers.
+		let driverPayExpenses = reportPayout.driverPay;
+
 		// Round category totals AFTER all sources have been summed, then
 		// derive totalExpenses from the ROUNDED categories so the P&L adds
 		// up exactly — otherwise independent rounding can drift by $1-2.
+		driverPayExpenses = Math.round(driverPayExpenses);
 		fuelExpenses = Math.round(fuelExpenses);
 		maintenanceExpenses = Math.round(maintenanceExpenses);
 		complianceExpenses = Math.round(complianceExpenses);
 		truckPaymentExpenses = Math.round(truckPaymentExpenses);
 		insuranceExpenses = Math.round(insuranceExpenses);
 		otherExpenses = Math.round(otherExpenses);
-		totalExpenses = fuelExpenses + maintenanceExpenses + complianceExpenses + truckPaymentExpenses + insuranceExpenses + otherExpenses;
+		totalExpenses = driverPayExpenses + fuelExpenses + maintenanceExpenses + complianceExpenses + truckPaymentExpenses + insuranceExpenses + otherExpenses;
 
 		const netRevenueToDate = Math.round(totalRevenue - totalExpenses);
 		const netCashFlow = totalRevenue - totalExpenses;
@@ -43276,14 +43342,27 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		// it would have gone unnoticed until the first investor on a different split.
 		// `|| 50` matches the portal's own fallback rather than inventing a second.
 		const splitPctLabel = resolveInvestorSplitPct(config);
-		const ownerEarnings = netCashFlow * (splitPctLabel / 100);
+		// ⚠️ NOT a split of netCashFlow (it was, until 2026-09-30, and printed more
+		// than the ledger). The payout is the SUM of the monthly payouts the ledger
+		// and the portal publish for the months this range covers: driver pay, the
+		// idle-month rule, the loss carry-forward and every frozen settled amount
+		// are already in them. Printed as both "Owner Earnings" and "Investor
+		// Payout", with the note under the P&L saying which months it covers.
+		const ownerEarnings = reportPayout.payout;
+		const payoutNote = reportPayoutNote(reportPayout, { fleet: reportOwnerId === null, range: dateRange, rangeMode: investorReportOptions.RANGE_MODE });
 
-		// Monthly revenue from Job Tracking
+		// Monthly revenue from Job Tracking: the loads Gross Revenue counts, by month.
+		// Completed statuses only, by the same column and rule as Gross Revenue above
+		// (and the portal's monthlyData). Until 2026-09-30 this table tested no status,
+		// so a live load At Shipper or At Receiver with a Payment showed here and not in
+		// Gross Revenue, and the months did not add up to it.
 		const monthlyRevenue2 = {};
 		if (jtDateCol2 && jtRateCol2) {
 			filteredJobData.forEach(r => {
 				const amt = parseFloat(String((r[jtRateCol2] || "0")).replace(/[$,]/g, "")) || 0;
 				if (!amt) return;
+				const st = rptStatusCol ? (r[rptStatusCol] || "").trim() : "";
+				if (!rptCompletedStatuses.test(st)) return;
 				const d = new Date(r[jtDateCol2]);
 				if (!isNaN(d)) {
 					const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
@@ -43305,7 +43384,8 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		const chunks = [];
 		doc.on("data", c => chunks.push(c));
 
-		const fmt = n => "$" + Number(n||0).toLocaleString("en-US", { maximumFractionDigits: 0 });
+		// Whole dollars; a negative amount prints as -$1,234 (it printed $-1,234).
+		const fmt = n => { const v = Math.round(Number(n || 0)); return (v < 0 ? "-$" : "$") + Math.abs(v).toLocaleString("en-US"); };
 		const dateStr = new Date().toLocaleDateString("en-US", { weekday:"long", year:"numeric", month:"long", day:"numeric" });
 		const investorName = isSuperAdmin ? "Super Admin" : user.username;
 		const periodStr = filterStart || filterEnd
@@ -43351,20 +43431,34 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		kpiRow("Completed Loads", String(completedJobs), "Total Jobs", String(filteredJobData.length));
 
 		// ── Asset
+		// A price the documents cannot give reads UNPRICED_TEXT, never $0: "Not
+		// recorded" per truck when no truck has a price, "Not available" for a figure
+		// that needs every truck's price while one lacks it.
+		const { NOT_RECORDED, NOT_AVAILABLE, FOOTNOTE } = investorReportOptions.UNPRICED_TEXT;
+		const perTruckText = priced.perTruck === null ? NOT_RECORDED : fmt(priced.perTruck);
+		const orNotAvailable = (v, show) => (v === null ? NOT_AVAILABLE : show(v));
+		const pct = (p) => `${p}%`;
 		sectionHeader("Asset Security");
-		kpiRow("Purchase Price (per truck)", fmt(purchasePrice), "Current Market Value (80%)", fmt(currentValue));
-		kpiRow("Fleet Size", String(totalTrucks), "Total Purchase Price", fmt(totalPurchasePrice));
+		kpiRow("Purchase Price (per truck)", perTruckText, "Current Market Value (80%)", orNotAvailable(currentValue, fmt));
+		kpiRow("Fleet Size", String(totalTrucks), "Total Purchase Price", orNotAvailable(priced.total, fmt));
 		kpiRow("Title Status", config.truck_title_status || "Clean", "Depreciation", "100% Year 1 (Sec. 179)");
+		if (priced.flagged) {
+			const footnote = investorReportOptions.fill(FOOTNOTE, { n: priced.unpricedCount, total: priced.truckCount });
+			doc.font("Helvetica-Oblique").fontSize(8).fillColor("#777777").text(footnote, 50, doc.y, { width: doc.page.width - 100 });
+			doc.fillColor("#000000").font("Helvetica").moveDown(0.5);
+		}
 
 		// ── Cash Flow
 		sectionHeader("Cash Flow & Projections");
 		kpiRow("Net Cash Flow", fmt(netCashFlow), `Owner Earnings (${splitPctLabel}%)`, fmt(ownerEarnings));
 		kpiRow("Total Expenses", fmt(totalExpenses), "Net Revenue To Date", fmt(netRevenueToDate));
-		const totalInv = totalPurchasePrice + totalStartupExpenses;
-		const recPct = totalInv > 0 ? Math.min(100, (netRevenueToDate / totalInv * 100)).toFixed(1) : "0";
-		kpiRow("Total Investment", fmt(totalInv), "Payoff Progress", `${recPct}%`);
+		const totalInv = priced.total === null ? null : priced.total + totalStartupExpenses;
+		const recPct = totalInv === null ? null : (totalInv > 0 ? Math.min(100, (netRevenueToDate / totalInv * 100)).toFixed(1) : "0");
+		kpiRow("Total Investment", orNotAvailable(totalInv, fmt), "Payoff Progress", orNotAvailable(recPct, pct));
+		// Business ROI is net ÷ revenue and reads no purchase price, so a truck with
+		// no recorded price leaves it as it is.
 		const roiPct = totalRevenue > 0 ? (netRevenueToDate / totalRevenue * 100).toFixed(1) : "0";
-		kpiRow("Business ROI", `${roiPct}%`, "Section 179 Deduction", fmt(purchasePrice));
+		kpiRow("Business ROI", pct(roiPct), "Section 179 Deduction", perTruckText);
 
 		// ── P&L Statement (RFD-26)
 		// Helper: add a page break if the next line wouldn't fit above the
@@ -43380,6 +43474,7 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		sectionHeader("Income Statement (Profit & Loss)");
 		const plLines = [
 			{ label: "Gross Revenue", value: fmt(totalRevenue), indent: false, bold: true },
+			{ label: "  Driver Pay", value: `(${fmt(driverPayExpenses)})`, indent: true, bold: false },
 			{ label: "  Fuel Expenses", value: `(${fmt(fuelExpenses)})`, indent: true, bold: false },
 			{ label: "  Maintenance & Repairs", value: `(${fmt(maintenanceExpenses)})`, indent: true, bold: false },
 			{ label: "  Insurance", value: `(${fmt(insuranceExpenses)})`, indent: true, bold: false },
@@ -43411,6 +43506,12 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 			// auto-advance, so ensureSpace() math stays predictable.
 			doc.y = y + plLineHeight;
 		});
+		// Which months "Investor Payout" covers (reportPayoutNote()). Printed after
+		// the rows, not as one, so plLines.length - 3 still lands on Total Expenses.
+		doc.font("Helvetica-Oblique").fontSize(8);
+		ensureSpace(doc.heightOfString(payoutNote, { width: plW }) + 6);
+		doc.fillColor("#777777").text(payoutNote, plX, doc.y + 2, { width: plW });
+		doc.fillColor("#000000").font("Helvetica");
 		doc.moveDown(0.5);
 
 		// ── Monthly Revenue Table
@@ -48322,8 +48423,9 @@ function truckMonthlyFixed(t) {
 // EVERY month and the truck silently books $0 fixed costs forever, ~$1,553/mo
 // straight to the investor. 'not-a-date' behaves the same way. Anything not
 // exactly YYYY-MM-DD therefore falls through to created_at, which is a stale
-// answer but a sane one. This is the same regex truckMonthsInPeriod applies, so
-// the two agree on malformed input instead of diverging.
+// answer but a sane one. (GET /api/investor/report's truckMonthsInPeriod applied
+// the same regex until 2026-09-30; the report now charges fixed costs through
+// truckChargedInMonth() like every other site, so there is no second reader of it.)
 //
 // The created_at branch deliberately keeps new Date(): created_at is
 // 'YYYY-MM-DD HH:MM:SS', which parses as LOCAL time and has no such shift. It is
@@ -49317,6 +49419,191 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 		.reduce((d, [, c]) => d + c.deferred - c.carriedIn, 0);
 
 	return { payouts, currentMonth, totals };
+}
+
+// ---- GET /api/investor/report READS the payout; it never computes one -------
+// The downloadable report used to print "Investor Payout (X%)" as
+// (revenue − expenses) × split over the report period, a formula of its own with
+// no driver pay, no idle-month rule (a month with no activity is not charged its
+// fixed costs) and no loss carry-forward. It printed MORE than the portal and the
+// payouts ledger for the same month, and for an idle month it printed a
+// NEGATIVE payout, which the ledger never does.
+//
+// These helpers make the report a READER of the same per-month figures the
+// ledger settles and the portal shows. Nothing here computes pay, costs, the
+// split or the carry: an investor's months come from reconcileInvestorPayouts()
+// (the ledger, which runs computeInvestorMonthlyEarnings() and
+// computeLossCarryForward()), and the fleet-wide Super Admin report from those
+// two directly, since no ledger exists at fleet scope.
+
+// The month keys a report range covers, from the raw `start` / `end` query
+// strings (the client's <input type="date"> values). Sliced as strings on
+// purpose: new Date('2026-08-01') is UTC midnight, i.e. 2026-07-31 in Houston,
+// which would pull a whole month into the range (see truckChargeFromMonth). ""
+// is UNBOUNDED, like every other month bound in this file; an unreadable value is
+// unbounded too, which is how the report's own date filter has always treated
+// one (an Invalid Date filters nothing).
+function reportRangeMonthKeys(start, end) {
+	const key = (s) => {
+		const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || "").trim());
+		if (!m) return "";
+		const mo = parseInt(m[2], 10);
+		return mo >= 1 && mo <= 12 ? `${m[1]}-${m[2]}` : "";
+	};
+	return { from: key(start), until: key(end) };
+}
+
+// One entry per month the payout figures exist for, oldest first:
+//   { month, payout, driverPay, fixedCosts, inProgress, lossCarriedIn, lossDeferred,
+//     settledDiffers, corrected }
+// `payout` for a completed month is the ledger row's effectiveAmount, exactly the
+// figure the Payouts page lists and the statement prints as the amount paid or
+// payable. A FROZEN row (settled, finalized, or in a closed period) therefore
+// keeps its settled amount (plus any correction recorded on it) and is never
+// restated from a live recompute: the statement's rule, "the settled figure is
+// the one that was paid; it always wins". The open month is
+// currentMonth.payableIfClosedNow, the portal's "projected payout if the month
+// closed today". driverPay / fixedCosts are the LIVE monthly components
+// (breakdown), the basis every other line of the report is on; a row that aged
+// out of the earnings window has no breakdown and contributes 0 to them.
+// settledDiffers: the row's settled `amount` is no longer what current records
+// compute (recomputedAmount), so the live lines above it do not foot to it.
+// corrected: a manual adjustment is part of the payout. The report's note names
+// those months, as the Payouts page does beside each one.
+//
+// ⚠️ reconcileInvestorPayouts() WRITES, idempotently, exactly as opening the
+// Payouts page does: it inserts a row for a completed month that has none and
+// refreshes an `owed` row's amount only while the month is still open. Reading
+// the rows back without it would need a second copy of its refresh guard, and a
+// second copy of a money rule is how two surfaces drift apart.
+async function investorReportPayoutEntries({ ownerId, sessionUser, carrierDB, globalConfig, config }) {
+	if (ownerId !== null) {
+		const { payouts, currentMonth } = await reconcileInvestorPayouts(ownerId, { sessionUser, carrierDB, globalConfig });
+		const entries = payouts.map((p) => ({
+			month: p.period,
+			payout: p.effectiveAmount,
+			driverPay: p.breakdown ? p.breakdown.driverPay : 0,
+			fixedCosts: p.breakdown ? p.breakdown.fixedCosts : 0,
+			inProgress: false,
+			lossCarriedIn: p.lossCarriedIn || 0,
+			lossDeferred: p.lossDeferred || 0,
+			settledDiffers: p.recomputedAmount != null && Math.round(Number(p.amount) || 0) !== Math.round(Number(p.recomputedAmount) || 0),
+			corrected: Number(p.adjustmentApplied) !== 0,
+		}));
+		if (currentMonth && currentMonth.breakdown && !entries.some((e) => e.month === currentMonth.period)) {
+			entries.push({
+				month: currentMonth.period,
+				payout: currentMonth.payableIfClosedNow,
+				driverPay: currentMonth.breakdown.driverPay,
+				fixedCosts: currentMonth.breakdown.fixedCosts,
+				inProgress: true,
+				lossCarriedIn: currentMonth.lossCarriedIn || 0,
+				lossDeferred: currentMonth.lossDeferred || 0,
+				settledDiffers: false,
+				corrected: false,
+			});
+		}
+		return entries.sort((a, b) => a.month.localeCompare(b.month));
+	}
+	// Fleet-wide (a Super Admin not previewing): the same monthly array the
+	// Super Admin's own /api/investor view is built on, and the same carry walk.
+	const { monthlyEarnings, currentMonthKey } = await computeInvestorMonthlyEarnings({
+		user: sessionUser, isSuperAdmin: true, investorDriverSet: null, investorOwnerId: null, config,
+	});
+	// Nothing after Houston's current month. computeInvestorMonthlyEarnings() builds
+	// its months up to the SERVER's month, which on the UTC box is already the next
+	// one from 19:00 CDT (18:00 CST) on the last day of every month; the ledger never
+	// settles that month and the report does not print it.
+	const months = monthlyEarnings.filter((m) => m.month <= currentMonthKey);
+	const carryByPeriod = computeLossCarryForward(months);
+	return months.map((m) => ({
+		month: m.month,
+		payout: carryByPeriod[m.month].payable,
+		driverPay: (m.exact || m).driverPay,
+		fixedCosts: (m.exact || m).fixedCosts,
+		inProgress: m.month === currentMonthKey,
+		lossCarriedIn: carryByPeriod[m.month].carriedIn,
+		lossDeferred: carryByPeriod[m.month].deferred,
+		settledDiffers: false,
+		corrected: false,
+	}));
+}
+
+// Pure. The report's payout over a range is the SUM of the monthly figures in
+// it, never a split of the report's own net profit. A month is in the range when
+// its key falls between the range's months, so a day range that starts or ends
+// mid-month takes that whole month: a payout is settled per month, and half of
+// one does not exist. `chargedFixedMonths` are the months whose fixed costs the
+// shared computation actually charged; the report's fixed-cost lines charge
+// those months and no others (an idle month is charged $0, and a month before
+// the investor's first load has no figure at all).
+function summarizeReportPayout(entries, range) {
+	const from = (range && range.from) || "";
+	const until = (range && range.until) || "";
+	const inRange = (entries || [])
+		.filter((e) => (!from || e.month >= from) && (!until || e.month <= until))
+		.sort((a, b) => a.month.localeCompare(b.month));
+	let payout = 0;
+	let driverPay = 0;
+	for (const e of inRange) {
+		payout += Number(e.payout) || 0;
+		driverPay += Number(e.driverPay) || 0;
+	}
+	const current = inRange.find((e) => e.inProgress);
+	return {
+		payout: Math.round(payout),
+		driverPay,
+		months: inRange.map((e) => e.month),
+		chargedFixedMonths: inRange.filter((e) => Number(e.fixedCosts) > 0).map((e) => e.month),
+		inProgressMonth: current ? current.month : null,
+		carried: inRange.some((e) => Number(e.lossCarriedIn) > 0 || Number(e.lossDeferred) > 0),
+		settledDiffersMonths: inRange.filter((e) => e.settledDiffers).map((e) => e.month),
+		correctedMonths: inRange.filter((e) => e.corrected).map((e) => e.month),
+	};
+}
+
+// Pure. The line printed under the report's P&L: what the report's date range
+// covers, and what "Investor Payout" is. Every sentence is a template in
+// investorReportOptions.NOTE (docs/investor-portal-copy.md §16 lists them for
+// sign-off), filled only from facts in `summary` and the checked `range`
+// (reportDateRange()'s result) under `rangeMode`.
+function reportPayoutNote(summary, { fleet = false, range = null, rangeMode = investorReportOptions.RANGE_MODE } = {}) {
+	const T = investorReportOptions.NOTE;
+	const fill = investorReportOptions.fill;
+	const span = (first, last) => (first === last ? first : fill(T.SPAN, { first, last }));
+	const sentences = [];
+	const from = (range && range.from) || "";
+	const until = (range && range.until) || "";
+	if (from || until) {
+		if (rangeMode === "exact-dates") {
+			sentences.push(T.RANGE_EXACT_DATES);
+		} else {
+			const first = from ? periodLabel(from.slice(0, 7)) : "";
+			const last = until ? periodLabel(until.slice(0, 7)) : "";
+			const covered = !from ? fill(T.SPAN_UNTIL, { last }) : (!until ? fill(T.SPAN_FROM, { first }) : span(first, last));
+			sentences.push(fill(fleet ? T.RANGE_WHOLE_MONTHS_FLEET : T.RANGE_WHOLE_MONTHS, { span: covered }));
+		}
+	}
+	const months = (summary && summary.months) || [];
+	if (!months.length) {
+		sentences.push(T.NO_MONTHS);
+		return sentences.join(" ");
+	}
+	// "June 2026", "June 2026 and July 2026", "May 2025, June 2025 and July 2025".
+	const list = (keys) => {
+		const l = keys.map(periodLabel);
+		return l.length < 2 ? l.join("") : `${l.slice(0, -1).join(", ")} and ${l[l.length - 1]}`;
+	};
+	sentences.push(fill(fleet ? T.FLEET : T.INVESTOR, { span: span(periodLabel(months[0]), periodLabel(months[months.length - 1])) }));
+	if (summary.inProgressMonth) sentences.push(fill(T.IN_PROGRESS, { month: periodLabel(summary.inProgressMonth) }));
+	if (summary.carried) sentences.push(T.CARRIED);
+	// The Payouts page's own sentence for a settled month that differs from current
+	// records (PayoutsSection.vue), in the plural when needed.
+	const differs = summary.settledDiffersMonths || [];
+	if (differs.length) sentences.push(fill(differs.length === 1 ? T.SETTLED_DIFFERS_ONE : T.SETTLED_DIFFERS_MANY, { months: list(differs) }));
+	const corrected = summary.correctedMonths || [];
+	if (corrected.length) sentences.push(fill(T.CORRECTED, { months: list(corrected) }));
+	return sentences.join(" ");
 }
 
 // GET /api/investor — Aggregated financial data for investor view
@@ -50604,6 +50891,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			},
 			myLoads,
 			config,
+			// The report's date-range choice (lib/investor-report-options.js), for the
+			// hint under the report's date inputs. Not a figure.
+			reportRangeMode: investorReportOptions.RANGE_MODE,
 			investor: investorProfile ? {
 				id: investorProfile.id,
 				profilePictureUrl: investorProfile.profile_picture_url || "",
@@ -54074,6 +54364,8 @@ app.get("/api/investor/config", requireRole("Super Admin", "Investor"), (req, re
 // The investor_config keys PUT /api/investor/config may write: every key the
 // seed writes (above) that something reads, plus blue_chip_brokers, which
 // Admin Tools' Fleet Configuration edits. A key outside this map is refused.
+// truck_purchase_price left it on 2026-09-30: its one reader, the tax CSV, now
+// prices each truck from trucks.purchase_price, as the report does.
 //   - number: read through parsePlainDecimal(), finite, min..max, at most
 //     `decimals` places; stored as its plain decimal text ("45", "800.5").
 //   - text: one line (no control, format or line-separator characters), at
@@ -54084,7 +54376,6 @@ app.get("/api/investor/config", requireRole("Super Admin", "Investor"), (req, re
 //     one would be stored and never read, so it is refused.
 const INVESTOR_CONFIG_KEYS = new Map([
 	["investor_split_pct", { kind: "number", min: 0, max: 100, decimals: 2 }],
-	["truck_purchase_price", { kind: "number", min: 0, max: 1_000_000, decimals: 2 }],
 	["depreciation_years", { kind: "number", min: 1, max: 50, decimals: 2 }],
 	["truck_title_status", { kind: "text", maxLength: 40 }],
 	["maintenance_fund_monthly", { kind: "number", min: 0, max: 1_000_000, decimals: 2, globalOnly: true }],
