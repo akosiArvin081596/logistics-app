@@ -64,9 +64,10 @@ What it covers today, by section (`ONLY` picks them):
   clears the signatures (T11). Tc cleans up. Two sign-ins (the Super Admin and a throwaway test Investor). Local and
   staging. `ONLY=terms`, and see "The investor terms section" for why T0 and T1–T11 need two server processes.
 - **Investor fixes (F1–F14).** Investor config writes (F1), legal documents across investors (F2), the admin fund and
-  fuel targets (F3), the investor detail modal (F4, F5), acceptances that would collide (F6), the application status
-  select and its refusals (F7), duplicate investor records (F8), previews of an id that is no investor (F9), the
-  split shown in Admin Tools and in the investor's My Loads note (F10), the `/invest` help text (F11), the
+  fuel targets (F3), the investor detail modal (F4, F5), acceptances that would collide with a record or an account
+  (F6), the application status select, its refusals and its notice for an existing account (F7), duplicate investor
+  records (F8), previews of an id that is no investor (F9), the split shown in Admin Tools and in the investor's My
+  Loads note (F10), the `/invest` help text (F11), the
   account-number eye, the Docs count and a refused delete's message (F12), the `/invest` thank-you after a reload
   (F13), and the public onboarding banking route (F14). FXc lists every failing resource as the run's own probe or
   the app's. Every actor is a `QA-TEST-INV-*` account, record or application the run creates and deletes.
@@ -979,9 +980,11 @@ submitting: the run answers that navigation with a local placeholder page and ab
 | F13 | **UI:** the whole `/invest` flow for application E (three documents signed on the canvas), then a reload | "Thank you, <name>" after the reload |
 | F13n | While F13 signs, a trial click on each sign dialog's × (INFO) | An observation: whether the guided tour covers the × |
 | F7a | **UI:** `/investor-applications`, "Accepted" picked in P's status select; native and in-page dialogs and the `PUT …/status` are watched | A confirmation before anything is sent. (An AFTER build's dialog is confirmed, so P is accepted for what follows.) |
-| F6a, F6b | Page fetch `PUT /api/investor-applications/:id/status` "Accepted" for Q (the same company name as P) and C (A's email); the copy is read for accounts, records and trucks made | 409 with a code; the application not left Accepted; nothing made |
+| F6a | Page fetch `PUT /api/investor-applications/:id/status` "Accepted" for Q (the same company name as P); the copy is read for accounts, records and trucks made | 409 with a code; Q not left Accepted; nothing made |
+| F6b | Page fetch `PUT /api/investor-applications/:id/status` "Accepted" for C (A's email); the copy's whole-table counts of `users`, `investors` and `trucks` are read before and after, and its `audit_trail` | 200 `{ success: true, accountCreated: false, existingUserId: <A's id> }` with the message "Accepted. An account with this email already exists (Investor #<A's id>), so no new account, investor record or trucks were created."; C Accepted; the three counts unchanged; one `accept_investor_existing_account` audit row for C. (Mail is blanked, so "no email" is not observable.) |
 | F12b | **Planted:** a fourth document row on application E. **UI:** the list's cell under the "Docs" header (found by its header text, not its position), then E's detail; the list API's `docs_total` for E | The Docs denominator, the API's `docs_total` and the detail all give the real count (4) |
-| F7b | **UI:** "Accepted" picked in application C's row (C's email is account A's), the confirmation accepted; the list re-reads | 409 `USER_ALREADY_EXISTS`; the select back at C's stored status, the server's message shown, C still listed and nothing created |
+| F7b | **UI:** "Accepted" picked in application Q's row (Q has accepted P's company name), the confirmation accepted; the list re-reads | 409 `INVESTOR_RECORD_CONFLICT`; the select back at Q's stored status, the server's message shown, Q still listed and nothing created (the copy's counts unchanged) |
+| F7d | C put back by page fetch at the status it had before F6b; **UI:** "Accepted" picked in C's row (C's email is account A's), the confirmation accepted; the list re-reads | 200 `accountCreated: false`; the on-page notice `data-test="application-status-notice"` shows the server's "… so no new account, investor record or trucks were created." message (a warning toast is recorded); C's row reads Accepted; no credentials dialog; the copy's counts unchanged; one `accept_investor_existing_account` audit row for C |
 | F7c | E soft-deleted by page fetch (the open list is not refreshed); "Reviewed" picked in its row | 409 `APPLICATION_DELETED` with the server's message shown; after the list re-reads, E's row is gone (or, still listed, shows the stored status) |
 | F12a | **UI:** `/investors`, P's record → Banking → the eye by the account number | A real reveal (the full number) or no toggle |
 | F14 | A public page (no session) fetches `POST /api/public/investor-onboarding/<P>/banking` with a well-formed random token (a UUID, the removed routes' shape; in the query and the body). New applications get no token, and the route must be gone whatever token is sent | 404; P's bank row unchanged |
@@ -989,9 +992,10 @@ submitting: the run answers that navigation with a local placeholder page and ab
 | FXc | Every failing resource (an HTTP 4xx/5xx or a request with no answer: its page, method, path and status; numeric ids as `:id`, uploads cut to their folder, never a query string) on every page the section opened, split into the run's own probes and the app's. A probe is a page fetch of the run (it carries `X-QA-Probe: <step>`), a UI request a step sends on purpose (F7b, F7c, F12c) or the harness's `logisx.com` block. Console "Failed to load resource" lines are matched to their resource; other console errors are listed | Recorded, not scored |
 | FXz | Clean-up (below) | Nothing left; the global split as it was |
 
-**Run order:** FX0, F1, F2, F3, F10, F9, F8, F5, F4, F11, F13 (+F13n), FX1, F7a, F6, F12b, F7b, F7c, F12a, F14, F12c,
-FXc, FXz. F7a accepts P, which F6a, F12a and F14 need. F6b's refused acceptance leaves C as it was, so F7b can pick
-"Accepted" in C's row again. F12b plants on E before F7c removes it.
+**Run order:** FX0, F1, F2, F3, F10, F9, F8, F5, F4, F11, F13 (+F13n), FX1, F7a, F6, F12b, F7b, F7d, F7c, F12a, F14,
+F12c, FXc, FXz. F7a accepts P, which F6a, F7b, F12a and F14 need. F6a's refused acceptance leaves Q as it was, so F7b
+can pick "Accepted" in Q's row. F6b accepts C, so F7d first puts C back at its earlier status by page fetch. F12b
+plants on E before F7c removes it.
 
 **Budgets per server process:** three sign-ins; four public applications (`POST /api/public/investor-apply` allows 10 per
 15 minutes per address); about six `/invest` PDF previews (30 per 15 minutes).
