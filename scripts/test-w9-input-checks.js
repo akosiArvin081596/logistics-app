@@ -86,7 +86,6 @@
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
-const { createRequire } = require("module");
 const { pathToFileURL } = require("url");
 
 const ROOT = path.join(__dirname, "..");
@@ -115,10 +114,8 @@ try {
 const imageLimits = require(path.join(ROOT, "lib", "image-size"));
 const publicFormInput = require(path.join(ROOT, "lib", "public-form-input"));
 
-// A (possibly mutated) copy of the lib, loaded without touching the real
-// module, its requires resolved from lib/ as the real one's are.
-const LIB_REQUIRE = createRequire(LIB_PATH);
-function loadLib(src, req = LIB_REQUIRE) {
+// A (possibly mutated) copy of the lib, loaded without touching the real module.
+function loadLib(src, req = require) {
 	const mod = { exports: {} };
 	new Function("module", "exports", "require", src)(mod, mod.exports, req);
 	return mod.exports;
@@ -131,7 +128,7 @@ function countingLib(src = LIB_SRC) {
 		const real = pdfLib.StandardFontEmbedder.for(font).encoding;
 		return { encoding: { canEncodeUnicodeCodePoint: (cp) => { calls++; return real.canEncodeUnicodeCodePoint(cp); } } };
 	};
-	const req = (name) => (name === "pdf-lib" ? { ...pdfLib, StandardFontEmbedder: { for: counted } } : LIB_REQUIRE(name));
+	const req = (name) => (name === "pdf-lib" ? { ...pdfLib, StandardFontEmbedder: { for: counted } } : require(name));
 	return { lib: loadLib(src, req), calls: () => calls, reset: () => { calls = 0; } };
 }
 const LIB = loadLib(LIB_SRC);
@@ -287,7 +284,9 @@ function printableRows(lib = LIB) {
 function textRows(lib = LIB) {
 	const r = rows();
 	r.t(lib.UNSUPPORTED_CHARACTERS_MESSAGE === TEXT_MESSAGE && lib.INVALID_TIN_MESSAGE === TIN_MESSAGE, "both messages are the agreed words, exactly");
-	r.t(publicFormInput.SCALAR_MESSAGE === SCALAR_MESSAGE, "a value that is not text gets the public forms' own INVALID_FIELD words (lib/public-form-input.js)");
+	r.t(lib.INVALID_VALUE_MESSAGE === SCALAR_MESSAGE && publicFormInput.checkPublicScalars({ v: [] }, ["v"]).message === SCALAR_MESSAGE,
+		"a value that is not text gets the public forms' own INVALID_FIELD words (lib/public-form-input.js's), so the two copies cannot drift");
+	r.t(!/\brequire\("\.{1,2}\//.test(LIB_SRC), "the lib has no relative require (other runners load it with their own require)");
 	r.t(JSON.stringify(lib.W9_TEXT_FIELDS) === JSON.stringify(["legal_name", "dba", "address"]), "the step-1 fields are the legal name, business name and address, in that order");
 	const body = { legal_name: CAFE, dba: "QA-TEST", address: `1 QA Test Way, Testville, TX 77001`, contact_person: JP, contact_title: JP, bankruptcy_liens: JP };
 	r.t(lib.checkW9Text(body).ok === true, "fields the W-9 does not print (contact person, title, liens) are not checked");
@@ -911,7 +910,7 @@ async function mutantRows() {
 		"MUTANT the font is not asked (any text accepted, the old form): caught by §3");
 	r.t(failed(textRows(lib('const W9_TEXT_FIELDS = ["legal_name", "dba", "address"];', 'const W9_TEXT_FIELDS = ["legal_name"];'))),
 		"MUTANT the business name and address left unchecked: caught by §3");
-	const noStringCheck = lib('if (typeof value !== "string") return { ok: false, code: "INVALID_FIELD", field, message: SCALAR_MESSAGE };', "");
+	const noStringCheck = lib('if (typeof value !== "string") return { ok: false, code: "INVALID_FIELD", field, message: INVALID_VALUE_MESSAGE };', "");
 	r.t(failed(await oddInputRows(SRC, noStringCheck)),
 		"MUTANT the text check takes a non-string (a numeric address reaches the fill): caught by §4");
 	r.t(failed(await oddInputRows(swap(SRC, '"signatureText", "entity_type", "tax_classification"];', '"signatureText"];'))),
