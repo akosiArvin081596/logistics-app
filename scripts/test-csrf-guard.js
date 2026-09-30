@@ -338,8 +338,10 @@ eq("refuseCrossSite mount count agrees with that list", mountCount("refuseCrossS
 // that carries them, and their only caller is the SPA's Investors page. So is
 // PUT /api/investor/config: it writes the split and the other investor
 // configuration the payout math reads, Super Admin only, and its only callers
-// are the SPA's Investors page and Admin Tools.
-eq("refuseCrossOrigin is on exactly the settlement writes, the reconcile pair, the invite writes and the investor config write",
+// are the SPA's Investors page and Admin Tools. So is PUT
+// /api/investors/:id/payout-basis: it sets whether an investor is paid the split
+// or a fixed monthly lease, and its only caller is the SPA's Investors page.
+eq("refuseCrossOrigin is on exactly the settlement writes, the reconcile pair, the invite writes, the investor config write and the payout basis write",
 	mountedOn("refuseCrossOrigin").join(" "),
 	["/api/periods/:period/finalize", "/api/periods/:period/reopen",
 	 "/api/investor/payouts/:id/status", "/api/investor/payouts/:id/adjust",
@@ -347,8 +349,8 @@ eq("refuseCrossOrigin is on exactly the settlement writes, the reconcile pair, t
 	 "/api/admin/ratecon-reconcile", "/api/admin/ratecon-reconcile/run",
 	 "/api/admin/investor-invites", "/api/admin/investor-invites/:id",
 	 "/api/admin/investor-invites/:id/reissue", "/api/admin/investor-invites/:id/revoke",
-	 "/api/investor/config"].sort().join(" "));
-eq("refuseCrossOrigin mount count agrees with that list", mountCount("refuseCrossOrigin"), 12);
+	 "/api/investor/config", "/api/investors/:id/payout-basis"].sort().join(" "));
+eq("refuseCrossOrigin mount count agrees with that list", mountCount("refuseCrossOrigin"), 13);
 eq("refuseCrossOriginStrict is on exactly the full-database export",
 	mountedOn("refuseCrossOriginStrict").join(" "), "/api/db/download");
 eq("...and on nothing else", mountCount("refuseCrossOriginStrict"), 1);

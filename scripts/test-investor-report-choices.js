@@ -100,7 +100,7 @@ const HANDLER = SRC.slice(OPEN, balancedFrom(SRC, SRC.indexOf("{", OPEN)));
 
 const NAMES = [
 	"resolvePreviewUser", "parseSheet", "deduplicateLoads", "findCol", "getDeletedLoadIds", "loadKeySet", "excludeDroppedLoads",
-	"reportRangeMonthKeys", "summarizeReportPayout", "reportPayoutNote", "periodLabel",
+	"reportRangeMonthKeys", "summarizeReportPayout", "reportPayoutNote", "reportPayoutLabel", "periodLabel",
 	"investorJobRowTest", "driverNameForTotals", "isBuiltInPropertyName", "normalizeDriverName",
 	"investorTruckPurchase", "resolveInvestorSplitPct", "investorExpenseScopeSql",
 ];

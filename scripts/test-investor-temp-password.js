@@ -167,8 +167,11 @@ async function accept(db, appId, { status = "Accepted", routeSrc = ACCEPT_SRC } 
 	const registerApplicationVehicles = new Function("db", "colLetter", "parseTruckAmount",
 		`${REGISTER_VEHICLES_SRC}\nreturn registerApplicationVehicles;`)(db, colLetter, parseTruckAmount);
 	const findDriverNameClash = new Function("db", `${CLASH_SRC}\nreturn findDriverNameClash;`)(db);
-	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", routeSrc)(
-		app, requireRole, db, fastBcrypt, crypto, () => {}, () => {}, colLetter, escapeHtml, sendEmail, parseTruckAmount, registerApplicationVehicles, findDriverNameClash);
+	// The payout basis the acceptance records is scripts/test-payout-basis-routes.js's
+	// subject; this application signs the standard contract, so none is.
+	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", "recordSignedPayoutBasis", "unrecordedLeaseNote", routeSrc)(
+		app, requireRole, db, fastBcrypt, crypto, () => {}, () => {}, colLetter, escapeHtml, sendEmail, parseTruckAmount, registerApplicationVehicles, findDriverNameClash,
+		() => null, () => "");
 	if (typeof handler !== "function") die("the lifted route did not register a handler");
 	const out = { status: 200, body: null };
 	const res = {

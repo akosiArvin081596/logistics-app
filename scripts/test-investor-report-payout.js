@@ -66,6 +66,7 @@ const fs = require("fs");
 const path = require("path");
 const Database = require("better-sqlite3");
 const investorReportOptions = require("../lib/investor-report-options");
+const investorPayoutBasis = require("../lib/investor-payout-basis");
 
 const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 
@@ -128,13 +129,13 @@ const SOURCES = Object.fromEntries(NAMES.map((n) => [n, extractFn(n)]));
 // is the INPUT (a fixture monthly array); everything that turns it into a payout —
 // the ledger reconcile, the carry walk, the report's reader — is the shipped code.
 function load(deps) {
-	return new Function("deps", `
+	return new Function("deps", "investorPayoutBasis", `
 		const { db, computeInvestorMonthlyEarnings, isLocked, periodWriteLocked, currentMonthKeyCT,
 			recordPayoutChange, getInvestorDriverSet, findCol, settlementGraceDays, periodPhase, graceEndsAt,
 			investorReportOptions } = deps;
 		${NAMES.map((n) => SOURCES[n]).join("\n")}
 		return { ${NAMES.join(", ")} };
-	`)(deps);
+	`)(deps, investorPayoutBasis);
 }
 
 // ------------------------------------------------------------------ fixtures
@@ -465,8 +466,10 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 			return [
 				/const ownerEarnings = reportPayout\.payout;/.test(c),
 				!/netCashFlow \*|\* \(splitPctLabel|splitPctLabel \/ 100/.test(c),
-				/\{ label: `Investor Payout \(\$\{splitPctLabel\}%\)`, value: fmt\(ownerEarnings\)/.test(c),
-				/`Owner Earnings \(\$\{splitPctLabel\}%\)`, fmt\(ownerEarnings\)/.test(c),
+				/const payoutLabel = reportPayoutLabel\(reportPayout, investorReportOptions\.PAYOUT_LABEL, splitPctLabel\);/.test(c),
+				/\{ label: payoutLabel, value: fmt\(ownerEarnings\)/.test(c),
+				/const ownerEarningsLabel = reportPayoutLabel\(reportPayout, investorReportOptions\.OWNER_EARNINGS_LABEL, splitPctLabel\);/.test(c),
+				/kpiRow\("Net Cash Flow", fmt\(netCashFlow\), ownerEarningsLabel, fmt\(ownerEarnings\)\)/.test(c),
 				/\{ label: " {2}Driver Pay", value: `\(\$\{fmt\(driverPayExpenses\)\}\)`/.test(c),
 				/totalExpenses = driverPayExpenses \+/.test(c),
 				/for \(const monthKey of reportPayout\.chargedFixedMonths\)/.test(c),
@@ -543,6 +546,8 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 				truckMonthlyFixed: () => ({ total: 0 }),
 				reconcileInvestorPayouts: async () => { throw new Error("the fleet report reconciles no ledger"); },
 				investorReportOptions,
+				investorPayoutBasis,
+				payoutBasisContext: (ownerId) => { if (ownerId) throw new Error("the fleet report settles no owner"); return null; },
 			};
 			const names = Object.keys(deps);
 			const srcs = ME_NAMES.map((n) => (n === "investorReportPayoutEntries" ? readerSrc : ME[n]));

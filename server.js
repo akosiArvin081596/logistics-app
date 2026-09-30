@@ -62,6 +62,7 @@ const { PDFDocument: PdfLibDocument, rgb, StandardFonts } = require("pdf-lib");
 const { renderPolicy, safeSignatureImage } = require("./lib/policy-renderer");
 const investorPaymentTerms = require("./lib/investor-payment-terms");
 const investorReportOptions = require("./lib/investor-report-options");
+const investorPayoutBasis = require("./lib/investor-payout-basis");
 const { renderHtmlToPdf } = require("./lib/pdf-browser");
 const { getStateFromCoords } = require("./lib/ifta-states");
 const routemate = require("./lib/routemate-client");
@@ -4482,7 +4483,8 @@ try {
 // --- Investor Payouts (settlement layer on top of /api/investor earnings) ---
 // One row per (owner_id, period) = one completed work month's settlement.
 // `amount` is sourced from that month's dashboard investorEarnings (net profit ×
-// investor_split_pct) — see computeInvestorMonthlyEarnings(); it is refreshed
+// investor_split_pct, or the month's lease under a lease payout basis) — see
+// computeInvestorMonthlyEarnings(); it is refreshed
 // while the row is still 'owed' but frozen once an admin advances the status.
 // `due_date` = last Friday of the month FOLLOWING the work month.
 db.exec(`
@@ -4554,6 +4556,65 @@ try { db.exec("ALTER TABLE investor_payouts ADD COLUMN finalized_breakdown TEXT 
 // the adjust / status / reopen routes, and none to forget on a route added
 // later. '' = nothing rendered yet, which is every legacy row.
 try { db.exec("ALTER TABLE investor_payouts ADD COLUMN statement_pdf_file_name TEXT DEFAULT ''"); } catch {}
+
+// --- Investor payout basis: the Split % or a fixed monthly lease -------------
+// What each investor is paid, by month. A row applies from its effective_month
+// until a later row; the row with the latest effective_month on or before a
+// month governs it, and an investor with no row is paid the Split % (every
+// investor before this table). lib/investor-payout-basis.js holds the math:
+// settleInvestorMonths(), which both monthly builders call.
+//   owner_id           users.id, the key investor_payouts settles on
+//   lease_amount_cents a lease's whole dollars × 100; NULL on a split row
+//   source             'signed_terms' (recorded when the application whose master
+//                      agreement is a lease was accepted; application_id set) or
+//                      'admin' (PUT /api/investors/:id/payout-basis)
+// ⚠️ A SETTLED MONTH'S BASIS NEVER CHANGES. The PUT refuses an effective month
+// on or before the latest month with a processing / paid / finalized payout row
+// (409 BASIS_MONTH_CLOSED), so a change moves only the open months. Money ships
+// dormant: with INVESTOR_LEASE_PAYOUTS_ENABLED off the payout math ignores this
+// table entirely, while the acceptance still records rows and admins still see
+// and edit them.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS investor_payout_basis (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		owner_id INTEGER NOT NULL,
+		effective_month TEXT NOT NULL,
+		basis_type TEXT NOT NULL CHECK(basis_type IN ('split','lease')),
+		lease_amount_cents INTEGER,
+		source TEXT NOT NULL CHECK(source IN ('signed_terms','admin')),
+		application_id INTEGER,
+		note TEXT NOT NULL DEFAULT '',
+		created_by TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		updated_by TEXT,
+		updated_at TEXT,
+		UNIQUE(owner_id, effective_month),
+		CHECK((basis_type = 'split' AND lease_amount_cents IS NULL) OR (basis_type = 'lease' AND lease_amount_cents BETWEEN 100 AND 10000000 AND lease_amount_cents % 100 = 0))
+	)
+`);
+
+// MONEY FLAG, default OFF (the shape reads off: only true/1/yes/on turns it on).
+// Off, every payout figure and every portal / payouts response is exactly what it
+// was before the basis table existed.
+const INVESTOR_LEASE_PAYOUTS_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.INVESTOR_LEASE_PAYOUTS_ENABLED ?? "").trim());
+// INVESTOR_LEASE_DOWNTIME / _PRORATE / _RETIREMENT, read once. A value that names
+// no setting falls back to the default with one warning here, at boot.
+const INVESTOR_LEASE_SETTINGS = investorPayoutBasis.readLeaseSettings(process.env, (msg) => console.warn(`[payout-basis] ${msg}`));
+
+// What the payout math needs to settle one owner's months: the flag, the owner's
+// basis rows (oldest first) and the Active trucks the fixed costs are charged on,
+// which decide the days a lease covers. null for the fleet-wide view (no owner).
+// The flag is only carried here; investorPayoutBasis.leaseBasisActive() is the one
+// test of it, so with the flag off the rows read here change nothing.
+function payoutBasisContext(ownerId) {
+	if (!ownerId) return null;
+	return {
+		enabled: INVESTOR_LEASE_PAYOUTS_ENABLED,
+		rows: db.prepare("SELECT effective_month, basis_type, lease_amount_cents FROM investor_payout_basis WHERE owner_id = ? ORDER BY effective_month").all(ownerId),
+		trucks: db.prepare("SELECT in_service_date, created_at, retired_at FROM trucks WHERE owner_id = ? AND status = 'Active'").all(ownerId),
+		settings: INVESTOR_LEASE_SETTINGS,
+	};
+}
 
 // --- Period locks (month-end close) ---------------------------------------
 // One row per CLOSED work month, fleet-wide. Presence of a row is the lock.
@@ -11858,9 +11919,12 @@ app.post("/api/public/investor-preview-pdf/:docKey", pdfPreviewLimiter, async (r
 // and the terms are frozen on both document rows when they submit. Plain
 // /invest is unchanged.
 //
-// ⚠️ CONTRACT WORDING ONLY. No payout, ledger, split or statement code reads
-// investor_invites or payment_terms_json; payouts still come from the Split %.
-// scripts/test-payment-terms-routes.js pins that.
+// ⚠️ THE TERMS REACH PAYOUTS ONLY THROUGH THE PAYOUT BASIS. Accepting an
+// application whose signed master agreement is a whole-dollar lease records an
+// investor_payout_basis row (recordSignedPayoutBasis()), and the payout math
+// reads that table alone. No payout, ledger, split or statement code reads
+// investor_invites or payment_terms_json; scripts/test-payment-terms-routes.js
+// pins that, and scripts/test-payout-basis-routes.js pins the acceptance.
 //
 // The link's token is 32 random bytes shown to the admin once (create and
 // reissue); only its sha256 is stored. The public side reads it from the
@@ -12287,6 +12351,211 @@ app.get("/api/investors/:id/payment-terms", requireRole("Super Admin"), (req, re
 	} catch (err) {
 		console.error("Investor payment terms error:", err.message);
 		res.status(500).json({ error: "Could not load the payment terms." });
+	}
+});
+
+// ============================================================
+// Investor payout basis (the Split % or a fixed monthly lease)
+// ============================================================
+// The table, the flag and the three settings are defined beside
+// investor_payouts; the math is lib/investor-payout-basis.js. These routes let a
+// Super Admin see and change an investor's basis. `:id` is investors.id, like
+// /api/investors/:id/payment-terms; the rows are keyed on the linked users.id.
+// Every route answers with the flag off too: the acceptance still records rows,
+// and admins can still see and edit them before the flag is turned on.
+
+// The month after the latest month this owner has a SETTLED payout (processing,
+// paid, or finalized), or null when there is none. A basis change may start no
+// earlier: a settled month's basis never changes.
+function earliestEditableBasisMonth(ownerId) {
+	const row = db.prepare(
+		"SELECT MAX(period) AS p FROM investor_payouts WHERE owner_id = ? AND (status IN ('processing', 'paid') OR COALESCE(finalized_at, '') != '')"
+	).get(ownerId);
+	return row && investorPayoutBasis.isMonthKey(row.p) ? investorPayoutBasis.addMonths(row.p, 1) : null;
+}
+
+// What the master agreement of an application says the investor is paid, from
+// its frozen snapshot: { type, leaseAmount } (leaseAmount null on a split), or
+// null for the standard contract, no application, or a snapshot that cannot be
+// read. Contract wording, read only here and at acceptance; payouts read the
+// basis rows.
+function signedPaymentTermsOf(applicationId) {
+	if (!applicationId) return null;
+	const master = db.prepare("SELECT payment_terms_json FROM investor_onboarding_documents WHERE application_id = ? AND doc_key = 'master_agreement'").get(applicationId);
+	let terms = null;
+	try { terms = investorPaymentTerms.parseSnapshot(master ? master.payment_terms_json : null); } catch { terms = null; }
+	if (!terms) return null;
+	return { type: terms.type, leaseAmount: terms.type === "lease" ? terms.leaseAmountCents / 100 : null };
+}
+
+// Called INSIDE the acceptance's transaction, once the investor's account and
+// record exist: when the application's signed master agreement is a lease with a
+// whole-dollar amount, record it as the payout basis from the current Houston
+// month (source 'signed_terms'). A lease signed with cents, or a snapshot that
+// cannot be read, records nothing and says why in the audit trail; the investor
+// is then paid the Split % until an admin sets the basis. Returns the
+// acceptance response's `payoutBasis`, or null for the standard contract or a
+// split (nothing to record).
+function recordSignedPayoutBasis(req, { applicationId, ownerId, investorId }) {
+	const master = db.prepare("SELECT payment_terms_json FROM investor_onboarding_documents WHERE application_id = ? AND doc_key = 'master_agreement'").get(applicationId);
+	let terms;
+	try {
+		terms = investorPaymentTerms.parseSnapshot(master ? master.payment_terms_json : null);
+	} catch {
+		logAudit(req, "record_payout_basis_skipped", "investor", investorId,
+			`No payout basis recorded for owner ${ownerId}: the signed payment terms of application ${applicationId} could not be read [PAYMENT_TERMS_SNAPSHOT_INVALID]; the Split % applies until a basis is set`);
+		return { recorded: false, reason: "PAYMENT_TERMS_SNAPSHOT_INVALID" };
+	}
+	if (!terms || terms.type !== "lease") return null;
+	if (terms.leaseAmountCents % 100 !== 0) {
+		logAudit(req, "record_payout_basis_skipped", "investor", investorId,
+			`No payout basis recorded for owner ${ownerId}: the lease signed on application ${applicationId} is ${investorPaymentTerms.formatMoneyCents(terms.leaseAmountCents)} a month, not whole dollars [LEASE_AMOUNT_WHOLE_DOLLARS]; the Split % applies until a basis is set`);
+		return { recorded: false, reason: "LEASE_AMOUNT_WHOLE_DOLLARS" };
+	}
+	const effectiveMonth = currentMonthKeyCT();
+	const leaseAmount = terms.leaseAmountCents / 100;
+	const actor = (req.session && req.session.user && req.session.user.username) || "system";
+	db.prepare(
+		"INSERT INTO investor_payout_basis (owner_id, effective_month, basis_type, lease_amount_cents, source, application_id, note, created_by, created_at) VALUES (?, ?, 'lease', ?, 'signed_terms', ?, '', ?, ?)"
+	).run(ownerId, effectiveMonth, terms.leaseAmountCents, applicationId, actor, new Date().toISOString());
+	logAudit(req, "record_payout_basis", "investor", investorId,
+		`Payout basis for owner ${ownerId}: lease ${investorPayoutBasis.formatLeaseAmount(leaseAmount)} a month from ${effectiveMonth}, as signed on application ${applicationId}`);
+	return { recorded: true, type: "lease", leaseAmount, effectiveMonth };
+}
+
+// The acceptance of an application whose email is already an Investor account's
+// records no payout basis: the account may already have one, and whose account it
+// is needs the same confirmation as the banking. When the signed terms are a
+// lease, the admin's message says so (" Its signed terms are …"), else "".
+function unrecordedLeaseNote(applicationId) {
+	const signed = signedPaymentTermsOf(applicationId);
+	if (!signed || signed.type !== "lease") return "";
+	return ` Its signed terms are a fixed monthly lease of ${investorPaymentTerms.formatMoneyCents(Math.round(signed.leaseAmount * 100))}; no payout basis was recorded, so set it on that investor's payout basis if it applies.`;
+}
+
+function payoutBasisRowView(r) {
+	return {
+		id: r.id,
+		effectiveMonth: r.effective_month,
+		type: r.basis_type,
+		leaseAmount: r.basis_type === "lease" && r.lease_amount_cents != null ? r.lease_amount_cents / 100 : null,
+		source: r.source,
+		note: r.note || "",
+		createdBy: r.created_by,
+		createdAt: r.created_at,
+		updatedBy: r.updated_by || null,
+		updatedAt: r.updated_at || null,
+	};
+}
+
+// The GET / PUT answer for one investors row.
+function buildPayoutBasisView(investor) {
+	const ownerId = investor.user_id || null;
+	const rows = ownerId
+		? db.prepare("SELECT * FROM investor_payout_basis WHERE owner_id = ? ORDER BY effective_month").all(ownerId)
+		: [];
+	const config = {};
+	db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all().forEach((r) => (config[r.key] = r.value));
+	if (ownerId) db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?").all(ownerId).forEach((r) => (config[r.key] = r.value));
+	const governing = investorPayoutBasis.governingBasisRow(rows, currentMonthKeyCT());
+	const current = !governing
+		? { type: "split", splitPct: resolveInvestorSplitPct(config), effectiveMonth: null, source: "default" }
+		: governing.basis_type === "lease"
+			? { type: "lease", leaseAmount: governing.lease_amount_cents / 100, effectiveMonth: governing.effective_month, source: governing.source }
+			: { type: "split", splitPct: resolveInvestorSplitPct(config), effectiveMonth: governing.effective_month, source: governing.source };
+	const history = db.prepare(
+		`SELECT timestamp, username, action, details FROM audit_trail
+		  WHERE entity = 'investor' AND entity_id = ? AND action IN ('update_payout_basis', 'record_payout_basis', 'record_payout_basis_skipped')
+		  ORDER BY timestamp DESC, id DESC LIMIT 50`
+	).all(String(investor.id));
+	return {
+		investorId: investor.id,
+		ownerId,
+		enabled: INVESTOR_LEASE_PAYOUTS_ENABLED,
+		settings: { ...INVESTOR_LEASE_SETTINGS },
+		current,
+		schedule: rows.map(payoutBasisRowView),
+		signedTerms: signedPaymentTermsOf(investor.application_id),
+		earliestEditableMonth: ownerId ? earliestEditableBasisMonth(ownerId) : null,
+		history: history.map((h) => ({ at: h.timestamp, actor: h.username, action: h.action, detail: h.details || "" })),
+	};
+}
+
+// GET — whether lease payouts are on, and the three settings they run under.
+app.get("/api/investor-payout-settings", requireRole("Super Admin"), (req, res) => {
+	res.setHeader("Cache-Control", "no-store");
+	res.json({ enabled: INVESTOR_LEASE_PAYOUTS_ENABLED, settings: { ...INVESTOR_LEASE_SETTINGS } });
+});
+
+// GET — one investor's payout basis: the current month's, the schedule, what
+// they signed, the earliest month a change may start, and the change history.
+app.get("/api/investors/:id/payout-basis", requireRole("Super Admin"), (req, res) => {
+	try {
+		const id = inviteIdParam(req.params.id);
+		const investor = id ? db.prepare("SELECT id, user_id, application_id FROM investors WHERE id = ?").get(id) : null;
+		if (!investor) return res.status(404).json({ error: "Investor not found.", code: "INVESTOR_NOT_FOUND" });
+		res.setHeader("Cache-Control", "no-store");
+		res.json(buildPayoutBasisView(investor));
+	} catch (err) {
+		console.error("Investor payout basis error:", err.message);
+		res.status(500).json({ error: "Could not load the payout basis." });
+	}
+});
+
+// PUT — set the basis from effectiveMonth on: upserts that month's row and
+// removes every later row, so the schedule from that month on is exactly what
+// was sent. Synchronous from the checks to the write, and audited old → new.
+// 400 INVALID_BASIS (`field`), 400 LEASE_AMOUNT_WHOLE_DOLLARS, 409
+// BASIS_MONTH_CLOSED (`earliestEditableMonth`), 404 INVESTOR_NOT_FOUND (also for
+// a record with no account, which has no payouts).
+app.put("/api/investors/:id/payout-basis", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {
+	try {
+		const id = inviteIdParam(req.params.id);
+		const investor = id ? db.prepare("SELECT id, user_id, application_id FROM investors WHERE id = ?").get(id) : null;
+		if (!investor) return res.status(404).json({ error: "Investor not found.", code: "INVESTOR_NOT_FOUND" });
+		if (!investor.user_id) {
+			return res.status(404).json({ error: "This investor record has no account, so it has no payouts to set a basis for.", code: "INVESTOR_NOT_FOUND" });
+		}
+		const ownerId = investor.user_id;
+		const earliestEditableMonth = earliestEditableBasisMonth(ownerId);
+		const read = investorPayoutBasis.readBasisInput(req.body, { currentMonth: currentMonthKeyCT(), earliestEditableMonth });
+		if (!read.ok) {
+			return res.status(read.status).json({
+				error: read.error, code: read.code, field: read.field,
+				...(read.code === "BASIS_MONTH_CLOSED" ? { earliestEditableMonth } : {}),
+			});
+		}
+		const v = read.value;
+		const actor = (req.session && req.session.user && req.session.user.username) || "system";
+		const nowIso = new Date().toISOString();
+		const selectRows = db.prepare("SELECT * FROM investor_payout_basis WHERE owner_id = ? ORDER BY effective_month");
+		const before = selectRows.all(ownerId);
+		const changed = db.transaction(() => {
+			const removed = db.prepare("DELETE FROM investor_payout_basis WHERE owner_id = ? AND effective_month > ?").run(ownerId, v.effectiveMonth).changes;
+			const existing = db.prepare("SELECT * FROM investor_payout_basis WHERE owner_id = ? AND effective_month = ?").get(ownerId, v.effectiveMonth);
+			const same = existing && existing.basis_type === v.type && (existing.lease_amount_cents ?? null) === v.leaseAmountCents && (existing.note || "") === v.note;
+			if (same && !removed) return false;
+			if (existing && !same) {
+				db.prepare(
+					"UPDATE investor_payout_basis SET basis_type = ?, lease_amount_cents = ?, source = 'admin', application_id = NULL, note = ?, updated_by = ?, updated_at = ? WHERE id = ?"
+				).run(v.type, v.leaseAmountCents, v.note, actor, nowIso, existing.id);
+			} else if (!existing) {
+				db.prepare(
+					"INSERT INTO investor_payout_basis (owner_id, effective_month, basis_type, lease_amount_cents, source, application_id, note, created_by, created_at) VALUES (?, ?, ?, ?, 'admin', NULL, ?, ?, ?)"
+				).run(ownerId, v.effectiveMonth, v.type, v.leaseAmountCents, v.note, actor, nowIso);
+			}
+			logAudit(req, "update_payout_basis", "investor", investor.id,
+				auditText(`Payout basis for owner ${ownerId}: ${investorPayoutBasis.describeSchedule(before)} → ${investorPayoutBasis.describeSchedule(selectRows.all(ownerId))}`, 2000));
+			return true;
+		})();
+		if (changed) {
+			notifyChange("investors");
+			notifyChange("investor");
+		}
+		res.json(buildPayoutBasisView(investor));
+	} catch (err) {
+		console.error("Investor payout basis update error:", err.message);
+		res.status(500).json({ error: "Could not save the payout basis." });
 	}
 });
 
@@ -13375,7 +13644,7 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 					success: true,
 					accountCreated: false,
 					existingUserId: emailHolder.id,
-					message: `Accepted. This application's email matches Investor account #${emailHolder.id}, so no new account, investor record or trucks were created. Confirm it is the same person before acting on its banking or vehicle details.`,
+					message: `Accepted. This application's email matches Investor account #${emailHolder.id}, so no new account, investor record or trucks were created. Confirm it is the same person before acting on its banking or vehicle details.${unrecordedLeaseNote(appId)}`,
 				});
 			}
 			const nameHolder = db.prepare(
@@ -13418,9 +13687,9 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			try { vehicles = JSON.parse(application.vehicles_json || "[]"); } catch { /* skip */ }
 			if (!Array.isArray(vehicles)) vehicles = [];
 
-			// One transaction: the status, the account, the investors record and the
-			// trucks are written together or not at all.
-			const { userId, vehicleCounts } = db.transaction(() => {
+			// One transaction: the status, the account, the investors record, the
+			// trucks and the payout basis are written together or not at all.
+			const { userId, vehicleCounts, payoutBasis } = db.transaction(() => {
 				setStatus.run(status, appId);
 				// must_change_password = 1, set exactly as the driver acceptance sets it
 				// (PUT /api/applications/:id/status). The temporary password is emailed
@@ -13433,17 +13702,20 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 				const userId = userResult.lastInsertRowid;
 
 				// Create investor record with full business info from application
-				db.prepare(`INSERT INTO investors
+				const investorId = db.prepare(`INSERT INTO investors
 					(user_id, full_name, carrier_name, status, application_id, entity_type, address, phone, email, ein_ssn, tax_classification, contact_person, contact_title)
 					VALUES (?, ?, ?, 'Active', ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 					.run(userId, fullName, carrierName, appId,
 						application.entity_type || "", application.address || "", application.phone || "",
 						application.email || "", application.ein_ssn || "", application.tax_classification || "",
-						application.contact_person || "", application.contact_title || "");
+						application.contact_person || "", application.contact_title || "").lastInsertRowid;
 
 				// Create trucks from application vehicles (owner_id = user ID, consistent with dashboard/reports)
 				const vehicleCounts = registerApplicationVehicles(vehicles, appId, userId);
-				return { userId, vehicleCounts };
+				// What the signed master agreement says they are paid (a whole-dollar
+				// lease becomes their payout basis), recorded with the account.
+				const payoutBasis = recordSignedPayoutBasis(req, { applicationId: appId, ownerId: userId, investorId });
+				return { userId, vehicleCounts, payoutBasis };
 			})();
 			// What the investor's fleet actually holds: trucks written now plus
 			// trucks already on file that this account owns. A truck on file under
@@ -13452,7 +13724,7 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 
 			logAudit(req, "accept_investor", "investor_application", appId, `Accepted investor "${fullName}", created account "${username}", ${vehicles.length} vehicle(s): ${vehicleCounts.created} created, ${vehicleCounts.existing} already existed, ${vehicleCounts.heldByOther} held by another owner, ${vehicleCounts.failed} failed`);
 			notifyChange("investor-applications"); notifyChange("investors"); notifyChange("users"); notifyChange("trucks");
-			res.json({ success: true, accountCreated: true, credentials: { username, tempPassword, userId, investorName: fullName }, vehicles: vehicleCounts });
+			res.json({ success: true, accountCreated: true, credentials: { username, tempPassword, userId, investorName: fullName }, vehicles: vehicleCounts, ...(payoutBasis ? { payoutBasis } : {}) });
 
 			// Send welcome email to investor (async, non-blocking)
 			// Every interpolated value goes through escapeHtml(), as in the driver
@@ -23930,6 +24202,19 @@ app.get("/api/investors", requireRole("Super Admin"), (req, res) => {
 		LEFT JOIN users u ON u.id = i.user_id
 		ORDER BY i.full_name ASC
 	`).all();
+	// Each investor's payout basis for the current Houston month: the lease, or
+	// null for the split. Shown with the flag off too (see the basis routes).
+	const basisRowsByOwner = new Map();
+	for (const b of db.prepare("SELECT owner_id, effective_month, basis_type, lease_amount_cents FROM investor_payout_basis ORDER BY owner_id, effective_month").all()) {
+		if (!basisRowsByOwner.has(b.owner_id)) basisRowsByOwner.set(b.owner_id, []);
+		basisRowsByOwner.get(b.owner_id).push(b);
+	}
+	const basisMonth = currentMonthKeyCT();
+	const leaseBasisOf = (userId) => {
+		const row = investorPayoutBasis.governingBasisRow(basisRowsByOwner.get(userId) || [], basisMonth);
+		const cents = investorPayoutBasis.leaseCentsOf(row);
+		return cents === null ? null : { type: "lease", leaseAmount: cents / 100, effectiveMonth: row.effective_month };
+	};
 	const investors = rows.map(r => ({
 		id: r.id,
 		userId: r.user_id,
@@ -23942,6 +24227,7 @@ app.get("/api/investors", requireRole("Super Admin"), (req, res) => {
 		applicationId: r.application_id || 0,
 		profilePictureUrl: r.profile_picture_url || "",
 		truckCount: db.prepare("SELECT COUNT(*) as n FROM trucks WHERE owner_id = ?").get(r.user_id).n,
+		payoutBasis: r.user_id ? leaseBasisOf(r.user_id) : null,
 	}));
 	res.json({ investors });
 });
@@ -42916,6 +43202,12 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 			if (/^\d{4}-\d{2}$/.test(k) && Number.isFinite(amt)) netByMonth[k] = amt;
 		});
 		const periodNet = (p) => (Object.prototype.hasOwnProperty.call(netByMonth, p.key) ? netByMonth[p.key] : null);
+		// A month paid as a fixed monthly lease has no per-load share: the lease is
+		// not a share of anything, so the CSV and the PDF print the lease wording
+		// (investorPayoutBasis.LEASE_TEXT.PER_LOAD_SHARE) where a share would go.
+		// Weekly periods carry no share either way.
+		const loadReportBasis = payoutBasisContext(investorOwnerId);
+		const periodIsLease = (p) => period === "monthly" && !!investorPayoutBasis.leaseBasisForMonth(loadReportBasis, p.key);
 		// Allocate a period's net investor earnings across its completed loads,
 		// rate-weighted, as whole dollars that sum EXACTLY to the period net
 		// (largest-remainder method) so the rows reconcile with the stated total.
@@ -42956,10 +43248,12 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 			// (what this used to do) does not stop that.
 			const lines = [["Period", "Start", "End", "Load ID", "Status", "Pickup", "Dropoff", "Truck", "Driver", "Pickup Date", "Drop Date", "Rate", "Completed", "Your Net Result (net)"]];
 			for (const p of periods) {
-				const shares = allocateNet(p.loads, periodNet(p));
+				const lease = periodIsLease(p);
+				const shares = lease ? {} : allocateNet(p.loads, periodNet(p));
 				for (const l of p.loads) {
 					const ns = Object.prototype.hasOwnProperty.call(shares, l.loadId) ? shares[l.loadId] : null;
-					lines.push([p.label, p.start, p.end, l.loadId, l.status, l.pickup, l.dropoff, l.truck, l.driver, l.pickupDate, l.dropDate, l.rate, l.completed ? "Yes" : "No", ns == null ? "" : ns]);
+					const shareCell = lease ? investorPayoutBasis.LEASE_TEXT.PER_LOAD_SHARE : (ns == null ? "" : ns);
+					lines.push([p.label, p.start, p.end, l.loadId, l.status, l.pickup, l.dropoff, l.truck, l.driver, l.pickupDate, l.dropDate, l.rate, l.completed ? "Yes" : "No", shareCell]);
 				}
 			}
 			res.setHeader("Content-Type", "text/csv");
@@ -43009,7 +43303,8 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 		};
 
 		for (const p of periods) {
-			const net = periodNet(p);
+			const lease = periodIsLease(p);
+			const net = lease ? null : periodNet(p);
 			const shares = allocateNet(p.loads, net);
 			if (doc.y + 46 > bottom()) doc.addPage();
 			doc.moveDown(0.5).font("Helvetica-Bold").fontSize(12).fillColor("#0f172a").text(p.label, L);
@@ -43018,6 +43313,7 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 			// In-transit loads are listed in the rows below but earn nothing yet.
 			const transitTxt = p.inTransitCount ? ` (+${p.inTransitCount} in transit)` : "";
 			doc.font("Helvetica").fontSize(9).fillColor("#475569").text(`${p.completedCount} delivered${transitTxt}   ·   Gross ${money(p.grossRevenue)}${shareTxt}`, L);
+			if (lease) doc.fontSize(8).fillColor("#64748b").text(investorPayoutBasis.LEASE_TEXT.PER_LOAD_SHARE, L);
 			doc.moveDown(0.4);
 			row({ load: "LOAD", status: "STATUS", route: "ROUTE", rate: "RATE", share: "YOUR SHARE" }, { color: "#94a3b8", size: 7, bold: true });
 			if (!p.loads.length) { doc.fontSize(8).fillColor("#94a3b8").text("No loads in this period.", L); continue; }
@@ -43350,6 +43646,10 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), investor
 		// Payout", with the note under the P&L saying which months it covers.
 		const ownerEarnings = reportPayout.payout;
 		const payoutNote = reportPayoutNote(reportPayout, { fleet: reportOwnerId === null, range: dateRange, rangeMode: investorReportOptions.RANGE_MODE });
+		// The split % labels only a split payout: a range whose months are paid as a
+		// fixed monthly lease (or both) says so instead (reportPayoutLabel()).
+		const ownerEarningsLabel = reportPayoutLabel(reportPayout, investorReportOptions.OWNER_EARNINGS_LABEL, splitPctLabel);
+		const payoutLabel = reportPayoutLabel(reportPayout, investorReportOptions.PAYOUT_LABEL, splitPctLabel);
 
 		// Monthly revenue from Job Tracking: the loads Gross Revenue counts, by month.
 		// Completed statuses only, by the same column and rule as Gross Revenue above
@@ -43450,7 +43750,7 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), investor
 
 		// ── Cash Flow
 		sectionHeader("Cash Flow & Projections");
-		kpiRow("Net Cash Flow", fmt(netCashFlow), `Owner Earnings (${splitPctLabel}%)`, fmt(ownerEarnings));
+		kpiRow("Net Cash Flow", fmt(netCashFlow), ownerEarningsLabel, fmt(ownerEarnings));
 		kpiRow("Total Expenses", fmt(totalExpenses), "Net Revenue To Date", fmt(netRevenueToDate));
 		const totalInv = priced.total === null ? null : priced.total + totalStartupExpenses;
 		const recPct = totalInv === null ? null : (totalInv > 0 ? Math.min(100, (netRevenueToDate / totalInv * 100)).toFixed(1) : "0");
@@ -43483,7 +43783,7 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), investor
 			{ label: "  Other Expenses", value: `(${fmt(otherExpenses)})`, indent: true, bold: false },
 			{ label: "Total Expenses", value: `(${fmt(totalExpenses)})`, indent: false, bold: false },
 			{ label: "Net Profit", value: fmt(netCashFlow), indent: false, bold: true },
-			{ label: `Investor Payout (${splitPctLabel}%)`, value: fmt(ownerEarnings), indent: false, bold: true },
+			{ label: payoutLabel, value: fmt(ownerEarnings), indent: false, bold: true },
 		];
 		const plLineHeight = 18;
 		const plX = 50, plW = doc.page.width - 100;
@@ -48903,12 +49203,15 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 	}
 
 	// Build the per-month array from earliest month → current month inclusive.
-	const monthlyEarnings = [];
-	const startMonth = earliestDate
+	// A lease basis can start it earlier (firstPayoutMonth()): a lease month with
+	// no activity still exists, and pays as the downtime setting says.
+	const payoutBasis = payoutBasisContext(investorOwnerId);
+	const startMonth = investorPayoutBasis.firstPayoutMonth(earliestDate
 		? `${earliestDate.getFullYear()}-${String(earliestDate.getMonth() + 1).padStart(2, "0")}`
-		: currentMonthKey;
+		: currentMonthKey, payoutBasis);
 	let cursor = new Date(parseInt(startMonth.slice(0, 4)), parseInt(startMonth.slice(5, 7)) - 1, 1);
 	const endDate = new Date(now.getFullYear(), now.getMonth(), 1);
+	const months = [];
 	while (cursor <= endDate) {
 		const mk = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}`;
 		const revenue = monthlyRevenue[mk] || 0;
@@ -48918,39 +49221,43 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 		const maintFundCost = monthlyMaintFund[mk] || 0;
 		const complianceCost = monthlyCompliance[mk] || 0;
 		// Zero-activity grace: defer fixed costs in months with no activity so
-		// onboarding months don't read as losses (matches GET /api/investor,
-		// including its driver-day-count guard for percentage drivers whose pay
-		// nets to $0 but who were still active that month).
+		// onboarding months don't read as losses (the same predicate as GET
+		// /api/investor, including its driver-day-count guard for percentage
+		// drivers whose pay nets to $0 but who were still active that month).
 		const driverCount = Object.values(driverMonthlyDays).filter(m => m[mk] && m[mk].size).length;
-		const isZeroActivity = revenue === 0 && driverPay === 0 && tripExpenses === 0 && maintFundCost === 0 && complianceCost === 0 && driverCount === 0;
+		const isZeroActivity = investorPayoutBasis.isZeroActivityMonth({ revenue, driverPay, tripExpenses, maintFundCost, complianceCost, driverCount });
 		const fixedCosts = isZeroActivity ? 0 : rawFixedCosts;
 		// Keep the fixed-cost drill-down consistent with the (possibly deferred) total.
 		if (detail && mk === detailForMonth && fixedCosts === 0) detail.fixedCostItems = [];
 		const netProfit = revenue - driverPay - fixedCosts - tripExpenses - maintFundCost - complianceCost;
-		// Match GET /api/investor exactly: split is applied to the RAW netProfit
-		// (the rounded netProfit is only what gets surfaced for display).
-		const investorEarnings = Math.round(netProfit * investorSplit);
-		monthlyEarnings.push({
-			month: mk,
-			revenue: Math.round(revenue),
-			driverPay: Math.round(driverPay),
-			fixedCosts,
-			tripExpenses: Math.round(tripExpenses),
-			maintFundCost: Math.round(maintFundCost),
-			complianceCost: Math.round(complianceCost),
-			netProfit: Math.round(netProfit),
-			// Unrounded copies, to the cent. The payout waterfall and its statement
-			// PDF show these so the summary reconciles EXACTLY with the itemized
-			// drill-down (a $3,043.33 truck cost was displaying as $3,043 beside an
-			// itemized list totalling $3,043.33). Purely additive: the rounded fields
-			// above are untouched, so every other consumer — and the settlement math,
-			// which splits the RAW netProfit above — is unchanged.
-			exact: { revenue, driverPay, fixedCosts, tripExpenses, maintFundCost, complianceCost, netProfit },
-			investorEarnings,
-			isCurrentMonth: mk === currentMonthKey,
-		});
+		months.push({ month: mk, netProfit, zeroActivity: isZeroActivity, revenue, driverPay, fixedCosts, tripExpenses, maintFundCost, complianceCost });
 		cursor.setMonth(cursor.getMonth() + 1);
 	}
+	// THE payout function, shared with GET /api/investor: the split applied to the
+	// RAW netProfit (the rounded netProfit is only what gets surfaced for display),
+	// or the lease under a lease basis.
+	const settled = investorPayoutBasis.settleInvestorMonths(months, { splitFraction: investorSplit, basis: payoutBasis });
+	const monthlyEarnings = months.map(({ month: mk, revenue, driverPay, fixedCosts, tripExpenses, maintFundCost, complianceCost, netProfit }) => ({
+		month: mk,
+		revenue: Math.round(revenue),
+		driverPay: Math.round(driverPay),
+		fixedCosts,
+		tripExpenses: Math.round(tripExpenses),
+		maintFundCost: Math.round(maintFundCost),
+		complianceCost: Math.round(complianceCost),
+		netProfit: Math.round(netProfit),
+		// Unrounded copies, to the cent. The payout waterfall and its statement
+		// PDF show these so the summary reconciles EXACTLY with the itemized
+		// drill-down (a $3,043.33 truck cost was displaying as $3,043 beside an
+		// itemized list totalling $3,043.33). Purely additive: the rounded fields
+		// above are untouched, so every other consumer — and the settlement math,
+		// which splits the RAW netProfit above — is unchanged.
+		exact: { revenue, driverPay, fixedCosts, tripExpenses, maintFundCost, complianceCost, netProfit },
+		investorEarnings: settled[mk].investorEarnings,
+		// Only on a lease month, so a split month's entry is exactly what it was.
+		...(settled[mk].payoutBasis ? { payoutBasis: settled[mk].payoutBasis } : {}),
+		isCurrentMonth: mk === currentMonthKey,
+	}));
 	return { monthlyEarnings, currentMonthKey, detail };
 }
 
@@ -48966,37 +49273,24 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 // what later months pay out rather than inverting a single row.
 //
 // Walks oldest → newest (monthlyEarnings is ordered that way), so the result is
-// deterministic and every caller that runs it is idempotent.
+// deterministic and every caller that runs it is idempotent. A lease month
+// (payoutBasis on the entry) pays its lease and leaves the deficit untouched.
 //
 // ⚠️ This lived inline inside reconcileInvestorPayouts, which made the SETTLEMENT
 // the only surface that knew about the carry — GET /api/investor published the
 // full monthly share while the payouts ledger and the statement PDF published the
 // post-carry figure, for the same month, and an investor comparing the two screens
-// saw two different numbers. It is a module-scope helper so the second reader
-// SHARES the walk instead of copying it; a second copy of this rule is how the
-// next drift starts (same lesson as DRIVER_RENAME_TARGETS / investorExpenseScopeSql).
+// saw two different numbers. The walk itself is investorPayoutBasis.carryForward(),
+// the one definition, which settleInvestorMonths() runs for both monthly builders;
+// this is how a reader holding already-settled months (the ledger reconcile, the
+// fleet-wide report) walks them. A second copy of this rule is how the next drift
+// starts (same lesson as DRIVER_RENAME_TARGETS / investorExpenseScopeSql).
 //
 // Pure: no DB, no network, no mutation of the input. Returns
 // { "YYYY-MM": { raw, payable, carriedIn, deferred } } for EVERY month passed in,
 // so a caller may index it without a presence check.
 function computeLossCarryForward(monthlyEarnings) {
-	const carryByPeriod = {};
-	let deficit = 0;
-	for (const m of monthlyEarnings || []) {
-		const raw = Math.round(m.investorEarnings);
-		let payable, carriedIn = 0, deferred = 0;
-		if (raw < 0) {
-			deferred = -raw;      // this month's loss joins the running deficit
-			deficit += deferred;
-			payable = 0;
-		} else {
-			carriedIn = Math.min(deficit, raw); // earlier losses eat into this month
-			payable = raw - carriedIn;
-			deficit -= carriedIn;
-		}
-		carryByPeriod[m.month] = { raw, payable, carriedIn, deferred };
-	}
-	return carryByPeriod;
+	return investorPayoutBasis.carryForward(monthlyEarnings);
 }
 
 // Enumerate every investor that can be settled, as { ownerId, name }. An
@@ -49077,10 +49371,11 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 	const splitPct = Math.round(resolveInvestorSplitPct(config));
 
 	// ---- Loss carry-forward -------------------------------------------------
-	// computeLossCarryForward() (module scope, beside computeInvestorMonthlyEarnings)
-	// is the single definition of this rule — GET /api/investor runs the SAME walk
-	// over its own monthlyEarnings so the Earnings screen and this ledger cannot
-	// publish different figures for one month. Pure and deterministic, so the
+	// computeLossCarryForward() is investorPayoutBasis.carryForward(), the single
+	// definition of this rule — GET /api/investor gets the SAME walk through
+	// settleInvestorMonths(), so the Earnings screen and this ledger cannot
+	// publish different figures for one month. A lease month (payoutBasis on the
+	// entry) pays its lease and carries nothing. Pure and deterministic, so the
 	// reconcile stays idempotent.
 	const carryByPeriod = computeLossCarryForward(monthlyEarnings);
 
@@ -49169,7 +49464,11 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 					// splitPct (line ~18629) is already a whole-number percentage, and
 					// m.exact holds the UNROUNDED components — the same values the
 					// waterfall uses, so the history reconciles to it to the cent.
-					breakdown: m.exact ? { ...m.exact, splitPct } : null,
+					// A lease month records no split: splitPct null and the lease's
+					// own figures (payoutBasis) instead.
+					breakdown: m.exact
+						? (m.payoutBasis ? { ...m.exact, splitPct: null, payoutBasis: m.payoutBasis } : { ...m.exact, splitPct })
+						: null,
 					actor: "system",
 				});
 			}
@@ -49251,6 +49550,10 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 			// settlement used (split applied to the raw netProfit, rounded once) —
 			// rather than re-deriving it from the rounded netProfit, which could land
 			// a dollar off the amount actually settled.
+			// A lease month has no split: splitPct is null, monthShare is the lease
+			// paid (carry.raw), and payoutBasis says how it was reached. That object
+			// is what finalizePeriods() snapshots, so a closed lease month's
+			// statement keeps its lease wording.
 			breakdown: be ? {
 				revenue: (be.exact || be).revenue,
 				driverPay: (be.exact || be).driverPay,
@@ -49259,9 +49562,12 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 				maintFundCost: (be.exact || be).maintFundCost || 0,
 				complianceCost: (be.exact || be).complianceCost || 0,
 				netProfit: (be.exact || be).netProfit,
-				splitPct,
+				splitPct: be.payoutBasis ? null : splitPct,
 				monthShare: carry.raw,
+				...(be.payoutBasis ? { payoutBasis: be.payoutBasis } : {}),
 			} : null,
+			// Only on a lease month; absent means the split, exactly as before.
+			...(be && be.payoutBasis ? { payoutBasis: be.payoutBasis } : {}),
 		};
 	});
 
@@ -49382,14 +49688,18 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 			maintFundCost: (cur.exact || cur).maintFundCost || 0,
 			complianceCost: (cur.exact || cur).complianceCost || 0,
 			netProfit: (cur.exact || cur).netProfit,
-			splitPct,
+			splitPct: cur.payoutBasis ? null : splitPct,
 			// curCarry.raw is Math.round(cur.investorEarnings) — the SAME quantity
 			// amountInProgress publishes, so the two can no longer disagree. Safe
 			// against the `{raw: 0}` fallback on the line above: carryByPeriod is
 			// built from every monthlyEarnings entry, so whenever `cur` is truthy
 			// (the only case this object is emitted at all) the real slot exists.
 			monthShare: curCarry.raw,
+			...(cur.payoutBasis ? { payoutBasis: cur.payoutBasis } : {}),
 		} : null,
+		// A lease open month: amountInProgress and payableIfClosedNow are the lease
+		// it would pay if it closed today (a lease month carries no loss).
+		...(cur && cur.payoutBasis ? { payoutBasis: cur.payoutBasis } : {}),
 	};
 
 	const totals = payouts.reduce((acc, p) => {
@@ -49479,6 +49789,8 @@ function reportRangeMonthKeys(start, end) {
 async function investorReportPayoutEntries({ ownerId, sessionUser, carrierDB, globalConfig, config }) {
 	if (ownerId !== null) {
 		const { payouts, currentMonth } = await reconcileInvestorPayouts(ownerId, { sessionUser, carrierDB, globalConfig });
+		// payoutBasis rides along on a lease month only (the label and the note
+		// under the P&L name the lease); it is never summed or split here.
 		const entries = payouts.map((p) => ({
 			month: p.period,
 			payout: p.effectiveAmount,
@@ -49489,6 +49801,7 @@ async function investorReportPayoutEntries({ ownerId, sessionUser, carrierDB, gl
 			lossDeferred: p.lossDeferred || 0,
 			settledDiffers: p.recomputedAmount != null && Math.round(Number(p.amount) || 0) !== Math.round(Number(p.recomputedAmount) || 0),
 			corrected: Number(p.adjustmentApplied) !== 0,
+			...(p.payoutBasis ? { payoutBasis: p.payoutBasis } : {}),
 		}));
 		if (currentMonth && currentMonth.breakdown && !entries.some((e) => e.month === currentMonth.period)) {
 			entries.push({
@@ -49501,6 +49814,7 @@ async function investorReportPayoutEntries({ ownerId, sessionUser, carrierDB, gl
 				lossDeferred: currentMonth.lossDeferred || 0,
 				settledDiffers: false,
 				corrected: false,
+				...(currentMonth.payoutBasis ? { payoutBasis: currentMonth.payoutBasis } : {}),
 			});
 		}
 		return entries.sort((a, b) => a.month.localeCompare(b.month));
@@ -49550,6 +49864,16 @@ function summarizeReportPayout(entries, range) {
 		driverPay += Number(e.driverPay) || 0;
 	}
 	const current = inRange.find((e) => e.inProgress);
+	// The lease stretches in the range: a new one wherever a lease month follows a
+	// split month or a lease of another amount. Absent when no month in range is
+	// a lease, so a split investor's summary is exactly what it was.
+	const leaseSegments = [];
+	let prevLease = null;
+	for (const e of inRange) {
+		const lease = e.payoutBasis && e.payoutBasis.type === "lease" ? e.payoutBasis.leaseAmount : null;
+		if (lease !== null && lease !== prevLease) leaseSegments.push({ month: e.month, leaseAmount: lease });
+		prevLease = lease;
+	}
 	return {
 		payout: Math.round(payout),
 		driverPay,
@@ -49559,7 +49883,21 @@ function summarizeReportPayout(entries, range) {
 		carried: inRange.some((e) => Number(e.lossCarriedIn) > 0 || Number(e.lossDeferred) > 0),
 		settledDiffersMonths: inRange.filter((e) => e.settledDiffers).map((e) => e.month),
 		correctedMonths: inRange.filter((e) => e.corrected).map((e) => e.month),
+		...(leaseSegments.length ? {
+			lease: { segments: leaseSegments, everyMonth: inRange.every((e) => e.payoutBasis && e.payoutBasis.type === "lease") },
+		} : {}),
 	};
+}
+
+// Pure. A payout label from one of investorReportOptions' label tables
+// (PAYOUT_LABEL for the Income Statement's last row, OWNER_EARNINGS_LABEL for the
+// Cash Flow KPI): SPLIT filled with the split % while no month in the range is a
+// lease, which is the label the report has always printed; LEASE when every
+// month is a lease; MIXED when the range has both.
+function reportPayoutLabel(summary, labels, pct) {
+	const lease = summary && summary.lease;
+	if (!lease) return investorReportOptions.fill(labels.SPLIT, { pct });
+	return lease.everyMonth ? labels.LEASE : labels.MIXED;
 }
 
 // Pure. The line printed under the report's P&L: what the report's date range
@@ -49595,6 +49933,18 @@ function reportPayoutNote(summary, { fleet = false, range = null, rangeMode = in
 		return l.length < 2 ? l.join("") : `${l.slice(0, -1).join(", ")} and ${l[l.length - 1]}`;
 	};
 	sentences.push(fill(fleet ? T.FLEET : T.INVESTOR, { span: span(periodLabel(months[0]), periodLabel(months[months.length - 1])) }));
+	// A lease is not a share of net profit, and the note says so: one sentence
+	// when the whole range is one lease, else one from each month a lease starts.
+	const lease = summary.lease;
+	if (lease) {
+		if (lease.everyMonth && lease.segments.length === 1) {
+			sentences.push(fill(T.LEASE, { amount: investorPayoutBasis.formatLeaseAmount(lease.segments[0].leaseAmount) }));
+		} else {
+			for (const seg of lease.segments) {
+				sentences.push(fill(T.LEASE_FROM, { month: periodLabel(seg.month), amount: investorPayoutBasis.formatLeaseAmount(seg.leaseAmount) }));
+			}
+		}
+	}
 	if (summary.inProgressMonth) sentences.push(fill(T.IN_PROGRESS, { month: periodLabel(summary.inProgressMonth) }));
 	if (summary.carried) sentences.push(T.CARRIED);
 	// The Payouts page's own sentence for a settled month that differs from current
@@ -49658,6 +50008,10 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			const investorConfig = db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?").all(user.id);
 			investorConfig.forEach((r) => (config[r.key] = r.value)); // override globals
 		}
+		// The investor's payout basis (the Split % or a fixed monthly lease), the
+		// same context computeInvestorMonthlyEarnings() settles the ledger with.
+		// null for the fleet-wide view.
+		const payoutBasis = payoutBasisContext(investorOwnerId);
 
 		// Filter sheet data by Owner ID column (primary) or driver name (fallback for old data).
 		// An EMPTY Owner ID cell falls back to driver-name match (legacy rows from before
@@ -50117,11 +50471,12 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// $0 and treated the just-ended one as complete. houstonDay() is the same
 			// Central basis the stamps and the close lifecycle now use.
 			const currentMonthKey = houstonDay(now).slice(0, 7);
-			// Investor take-home = configurable split of net profit (default 50%).
-			// Read from investor_config.investor_split_pct (per-investor override
-			// already merged into `config` above). This is the SAME split the
-			// settlement layer (/api/investor/payouts) applies, so a payout's
-			// amount equals the investorEarnings shown here.
+			// Investor take-home = configurable split of net profit (default 50%),
+			// or the month's lease under a lease payout basis. Read from
+			// investor_config.investor_split_pct (per-investor override already
+			// merged into `config` above). This is the SAME split the settlement
+			// layer (/api/investor/payouts) applies, through the same function, so
+			// a payout's amount equals the investorEarnings shown here.
 			const monthlySplit = resolveInvestorSplitPct(config) / 100;
 
 			// 1. Monthly driver pay — bucketed by each load's ASSIGNED month,
@@ -50308,13 +50663,18 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				return parts;
 			}
 
-			// 4. Build the array for every month from earliest to current
-			const startMonth = earliestDate
+			// 4. Build the array for every month from earliest to current. A lease
+			// basis can start it earlier (firstPayoutMonth()), as in
+			// computeInvestorMonthlyEarnings(): a lease month with no activity still
+			// exists, and pays as the downtime setting says.
+			const activityStartMonth = earliestDate
 				? `${earliestDate.getFullYear()}-${String(earliestDate.getMonth() + 1).padStart(2, "0")}`
 				: currentMonthKey;
+			const startMonth = investorPayoutBasis.firstPayoutMonth(activityStartMonth, payoutBasis);
 			let cursor = new Date(parseInt(startMonth.slice(0, 4)), parseInt(startMonth.slice(5, 7)) - 1, 1);
 			const endDate = new Date(now.getFullYear(), now.getMonth(), 1);
 			let deferredAccrual = 0;
+			const months = [];
 			while (cursor <= endDate) {
 				const mk = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}`;
 				const revenue = monthlyRevenue[mk] || 0;
@@ -50326,12 +50686,43 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				// Investor-facing grace: if the truck did nothing this month
 				// (no revenue, no driver-day records, no trip expenses), defer
 				// the fixed costs so onboarding months don't appear as losses.
-				// /admin/financials still accrues these normally.
+				// /admin/financials still accrues these normally. The same
+				// predicate as computeInvestorMonthlyEarnings().
 				const driverCount = Object.keys(monthlyDriverDetails[mk] || {}).length;
-				const isZeroActivity = revenue === 0 && driverPay === 0 && tripExpenses === 0 && maintFundCost === 0 && complianceCost === 0 && driverCount === 0;
+				const isZeroActivity = investorPayoutBasis.isZeroActivityMonth({ revenue, driverPay, tripExpenses, maintFundCost, complianceCost, driverCount });
 				const fixedCosts = isZeroActivity ? 0 : rawFixedCosts;
-				if (isZeroActivity && rawFixedCosts > 0) deferredAccrual += rawFixedCosts;
+				// Only the months before any lease extension: the all-time fixed-cost
+				// accrual above never counted a month before the first activity, so
+				// there is nothing of those months to take back out of it.
+				if (isZeroActivity && rawFixedCosts > 0 && mk >= activityStartMonth) deferredAccrual += rawFixedCosts;
 				const netProfit = revenue - driverPay - fixedCosts - tripExpenses - maintFundCost - complianceCost;
+				months.push({ month: mk, netProfit, zeroActivity: isZeroActivity, revenue, driverPay, rawFixedCosts, fixedCosts, tripExpenses, maintFundCost, complianceCost });
+				cursor.setMonth(cursor.getMonth() + 1);
+			}
+
+			// ---- The payout, and the loss carry-forward published per month ----
+			// THE payout function the settlement ledger runs too
+			// (investorPayoutBasis.settleInvestorMonths(), called by
+			// computeInvestorMonthlyEarnings()): the split applied to the RAW
+			// netProfit, or the lease under a lease basis, then the one carry walk.
+			// Not a second copy of either rule.
+			//
+			// ⚠️ Without the carry the two screens disagreed about one month. This
+			// array published `investorEarnings` — the FULL share of net profit —
+			// while GET /api/investor/payouts and the statement PDF published the
+			// post-carry figure, so a profitable month that had absorbed an earlier
+			// loss read one number in the Earnings waterfall and a smaller one on
+			// the payout row beside it, with nothing on screen to explain the gap.
+			// Live case: owner 5's 2026-08 runs at −$995, which September will
+			// legitimately absorb.
+			//
+			// `payable` is what the month settles at (raw − carriedIn, and 0 for a
+			// losing month) — the same quantity `amount` freezes to at close and
+			// `payableIfClosedNow` projects for the open month. A lease month pays
+			// its lease: payable = investorEarnings, nothing carried either way.
+			const settled = investorPayoutBasis.settleInvestorMonths(months, { splitFraction: monthlySplit, basis: payoutBasis });
+			for (const { month: mk, revenue, driverPay, rawFixedCosts, fixedCosts, zeroActivity: isZeroActivity, tripExpenses, maintFundCost, complianceCost, netProfit } of months) {
+				const s = settled[mk];
 				monthlyEarnings.push({
 					month: mk,
 					revenue: Math.round(revenue),
@@ -50352,38 +50743,15 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					maintFundCost: Math.round(maintFundCost),
 					complianceCost: Math.round(complianceCost),
 					netProfit: Math.round(netProfit),
-					investorEarnings: Math.round(netProfit * monthlySplit),
-					companyEarnings: Math.round(netProfit - Math.round(netProfit * monthlySplit)),
+					investorEarnings: s.investorEarnings,
+					companyEarnings: s.companyEarnings,
 					isCurrentMonth: mk === currentMonthKey,
+					lossCarriedIn: s.carriedIn,   // earlier losses absorbed by this month
+					lossDeferred: s.deferred,     // this month's own loss pushed forward
+					payable: s.payable,           // what this month actually settles at
+					// Only on a lease month, so a split month's entry is exactly what it was.
+					...(s.payoutBasis ? { payoutBasis: s.payoutBasis } : {}),
 				});
-				cursor.setMonth(cursor.getMonth() + 1);
-			}
-
-			// ---- Loss carry-forward, published per month ----------------------
-			// The SAME walk the settlement ledger runs (computeLossCarryForward —
-			// one definition, two readers), not a second copy of the rule.
-			//
-			// ⚠️ Without this the two screens disagreed about one month. This array
-			// published `investorEarnings` — the FULL share of net profit — while
-			// GET /api/investor/payouts and the statement PDF published the
-			// post-carry figure, so a profitable month that had absorbed an earlier
-			// loss read one number in the Earnings waterfall and a smaller one on
-			// the payout row beside it, with nothing on screen to explain the gap.
-			// Live case: owner 5's 2026-08 runs at −$995, which September will
-			// legitimately absorb.
-			//
-			// `payable` is what the month settles at (raw − carriedIn, and 0 for a
-			// losing month) — the same quantity `amount` freezes to at close and
-			// `payableIfClosedNow` projects for the open month.
-			//
-			// Purely ADDITIVE: every existing key is untouched, so no current
-			// consumer changes shape.
-			const carryByPeriod = computeLossCarryForward(monthlyEarnings);
-			for (const m of monthlyEarnings) {
-				const c = carryByPeriod[m.month];
-				m.lossCarriedIn = c.carriedIn;   // earlier losses absorbed by this month
-				m.lossDeferred = c.deferred;     // this month's own loss pushed forward
-				m.payable = c.payable;           // what this month actually settles at
 			}
 
 			// Reconcile aggregate totalExpenses with the per-month deferral
@@ -50809,6 +51177,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const myPendingRe = /^(dispatched|assigned|heading to shipper)$/i;
 		const myActiveRe = /^(in transit|picked up|at shipper|at receiver|loading|unloading)$/i;
 		const investorSplit = resolveInvestorSplitPct(config) / 100;
+		// The current Houston month's basis. Under a fixed monthly lease no load
+		// carries a share of anything, so `yourShare` is null and the portal says so.
+		const leaseNow = investorPayoutBasis.leaseBasisForMonth(payoutBasis, houstonDay(now).slice(0, 7));
 		const myLoadsOriginCol = pickAddressColumn(jobTracking.headers, /origin|pickup|shipper/i);
 		const myLoadsDestCol = pickAddressColumn(jobTracking.headers, /dest|drop|receiver|delivery/i);
 		function shapeMyLoad(r) {
@@ -50823,7 +51194,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				driver: jtDriverCol ? (r[jtDriverCol] || "").trim() : "",
 				pickupDate: pickupDateCol ? (r[pickupDateCol] || "") : "",
 				dropDate: dropoffDateCol ? (r[dropoffDateCol] || "") : "",
-				yourShare: Math.round(gross * investorSplit),
+				yourShare: leaseNow ? null : Math.round(gross * investorSplit),
 			};
 		}
 		const myLoads = {
@@ -50868,6 +51239,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				perTruckData,
 				monthlyEarnings,
 				fixedCostBreakdown,
+				// Only while the current month is paid as a fixed monthly lease.
+				...(leaseNow ? { payoutBasis: { type: "lease", leaseAmount: leaseNow.leaseAmount, effectiveMonth: leaseNow.effectiveMonth } } : {}),
 			},
 			asset: {
 				purchasePrice,
@@ -51711,6 +52084,12 @@ app.get("/api/payouts", requireRole("Super Admin"), async (req, res) => {
 					amount: p.amount,
 					adjustment: p.adjustment,
 					effectiveAmount: p.effectiveAmount,
+					// The same three the investor's own GET /api/investor/payouts rows
+					// carry, so the console can say why a month paid less than it
+					// earned (a loss carried in, or its own loss deferred).
+					monthEarnings: p.monthEarnings,
+					lossCarriedIn: p.lossCarriedIn,
+					lossDeferred: p.lossDeferred,
 					adjustmentNote: p.adjustmentNote,
 					adjustedBy: p.adjustedBy,
 					adjustedAt: p.adjustedAt,
@@ -51726,6 +52105,8 @@ app.get("/api/payouts", requireRole("Super Admin"), async (req, res) => {
 					phase: p.phase,
 					graceEndsAt: p.graceEndsAt,
 					finalizedAt: p.finalizedAt,
+					// Only on a month paid as a fixed monthly lease.
+					...(p.payoutBasis ? { payoutBasis: p.payoutBasis } : {}),
 				})),
 				currentMonth,
 				totalOwed: totals.totalOwed,

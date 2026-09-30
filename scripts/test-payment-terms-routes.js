@@ -341,7 +341,7 @@ async function scenarioAdmin(srv) {
 	const stale = await call("PUT", "/api/admin/investor-invites/:id", { params: { id: String(created.id) }, body: { ...LEASE_BODY, expectedRevision: 1 }, user: SUPER });
 	check("a stale revision is 409 with the current one", stale.status === 409 && stale.body.code === "INVITE_REVISION_CONFLICT" && stale.body.termsRevision === 2);
 	check("an unknown id is 404", (await call("PUT", "/api/admin/investor-invites/:id", { params: { id: "999" }, body: { ...LEASE_BODY, expectedRevision: 1 }, user: SUPER })).body.code === "INVITE_NOT_FOUND");
-	const noChange = await call("PUT", "/api/admin/investor-invites/:id", { params: { id: String(created.id) }, body: { ...LEASE_BODY, leaseAmount: "$2500.00", expectedRevision: 2 }, user: SUPER });
+	const noChange = await call("PUT", "/api/admin/investor-invites/:id", { params: { id: String(created.id) }, body: { ...LEASE_BODY, leaseAmount: " $2500 ", expectedRevision: 2 }, user: SUPER });
 	check("an edit that changes nothing writes nothing", noChange.status === 200 && audits(db, "update_investor_invite").length === 2);
 
 	// Reissue.
@@ -582,8 +582,12 @@ async function scenarioViews(srv) {
 	// Application list: the terms summary and chip, invite id, docs_total.
 	const splitInvite = await createInvite(srv, SPLIT_BODY);
 	const split = (await call("POST", "/api/public/investor-apply", { body: applyBody({ invite_token: splitInvite.token, invite_terms_revision: 1 }) })).body.applicationId;
-	const bareLease = await createInvite(srv, { ...LEASE_BODY, leaseAmount: "1500.50", details: "" });
-	const leaseOnly = (await call("POST", "/api/public/investor-apply", { body: applyBody({ invite_token: bareLease.token, invite_terms_revision: 1 }) })).body.applicationId;
+	// A lease with cents: an invite written before amounts became whole dollars,
+	// which the admin form refuses now. Its snapshot must still read and print.
+	check("a new invite refuses a lease with cents", (await createInvite(srv, { ...LEASE_BODY, leaseAmount: "1500.50", details: "" })).out.body.reason === "invalid_amount");
+	const bareLease = await createInvite(srv, { ...LEASE_BODY, leaseAmount: "1500", details: "" });
+	db.prepare("UPDATE investor_invites SET lease_amount_cents = 150050 WHERE id = ?").run(bareLease.id);
+	const leaseOnly =(await call("POST", "/api/public/investor-apply", { body: applyBody({ invite_token: bareLease.token, invite_terms_revision: 1 }) })).body.applicationId;
 	const brokenLease = await createInvite(srv, LEASE_BODY);
 	const broken = (await call("POST", "/api/public/investor-apply", { body: applyBody({ invite_token: brokenLease.token, invite_terms_revision: 1 }) })).body.applicationId;
 	db.prepare("UPDATE investor_onboarding_documents SET payment_terms_json = '{\"v\":1,\"type\":\"lease\"}' WHERE application_id = ? AND doc_key = 'master_agreement'").run(broken);

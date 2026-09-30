@@ -273,12 +273,19 @@ const PRIVATE_USE = cp(0xe000);
 const CASES = [
 	// [label, input, expected]
 	["lease, plain dollars", { paymentType: "lease", leaseAmount: "2000" }, { ok: true, value: { type: "lease", leaseAmountCents: 200000, details: "" } }],
-	["lease, $ and cents, padded", { paymentType: "lease", leaseAmount: " $2000.5 " }, { ok: true, value: { type: "lease", leaseAmountCents: 200050, details: "" } }],
-	["lease, a number", { paymentType: "lease", leaseAmount: 1234.56 }, { ok: true, value: { type: "lease", leaseAmountCents: 123456, details: "" } }],
+	["lease, $ and padded", { paymentType: "lease", leaseAmount: " $2000 " }, { ok: true, value: { type: "lease", leaseAmountCents: 200000, details: "" } }],
+	["lease, a whole number", { paymentType: "lease", leaseAmount: 1234 }, { ok: true, value: { type: "lease", leaseAmountCents: 123400, details: "" } }],
 	["lease, the floor", { paymentType: "lease", leaseAmount: "1" }, { ok: true, value: { type: "lease", leaseAmountCents: 100, details: "" } }],
 	["lease, the ceiling", { paymentType: "lease", leaseAmount: "100000.00" }, { ok: true, value: { type: "lease", leaseAmountCents: 10000000, details: "" } }],
-	["lease, below the floor", { paymentType: "lease", leaseAmount: "0.99" }, { ok: false, field: "leaseAmount", reason: "amount_out_of_range", message: pt.MESSAGES.amount_out_of_range }],
-	["lease, above the ceiling", { paymentType: "lease", leaseAmount: "100000.01" }, { ok: false, field: "leaseAmount", reason: "amount_out_of_range", message: pt.MESSAGES.amount_out_of_range }],
+	["lease, below the floor", { paymentType: "lease", leaseAmount: "0" }, { ok: false, field: "leaseAmount", reason: "amount_out_of_range", message: pt.MESSAGES.amount_out_of_range }],
+	["lease, above the ceiling", { paymentType: "lease", leaseAmount: "100001" }, { ok: false, field: "leaseAmount", reason: "amount_out_of_range", message: pt.MESSAGES.amount_out_of_range }],
+	// Whole dollars only: the payout ledger pays a lease in whole dollars. An
+	// amount with cents is refused as the wrong shape, before the range.
+	["lease, $ and cents", { paymentType: "lease", leaseAmount: " $2000.5 " }, { ok: false, field: "leaseAmount", reason: "invalid_amount", message: pt.MESSAGES.invalid_amount }],
+	["lease, a number with cents", { paymentType: "lease", leaseAmount: 1234.56 }, { ok: false, field: "leaseAmount", reason: "invalid_amount", message: pt.MESSAGES.invalid_amount }],
+	["lease, whole dollars written with cents", { paymentType: "lease", leaseAmount: "2000.00" }, { ok: true, value: { type: "lease", leaseAmountCents: 200000, details: "" } }],
+	["lease, cents below the floor", { paymentType: "lease", leaseAmount: "0.99" }, { ok: false, field: "leaseAmount", reason: "invalid_amount", message: pt.MESSAGES.invalid_amount }],
+	["lease, cents above the ceiling", { paymentType: "lease", leaseAmount: "100000.01" }, { ok: false, field: "leaseAmount", reason: "invalid_amount", message: pt.MESSAGES.invalid_amount }],
 	["lease, 2,000", { paymentType: "lease", leaseAmount: "2,000" }, { ok: false, field: "leaseAmount", reason: "invalid_amount", message: pt.MESSAGES.invalid_amount }],
 	["lease, 0x10", { paymentType: "lease", leaseAmount: "0x10" }, { ok: false, field: "leaseAmount", reason: "invalid_amount", message: pt.MESSAGES.invalid_amount }],
 	["lease, 1e3", { paymentType: "lease", leaseAmount: "1e3" }, { ok: false, field: "leaseAmount", reason: "invalid_amount", message: pt.MESSAGES.invalid_amount }],
@@ -370,6 +377,10 @@ eq(JSON.parse(snap), { v: 1, type: "lease", leaseAmountCents: 200000, details: L
 	"§6 snapshotJson() writes the v1 shape");
 eq(pt.parseSnapshot(snap), { type: "lease", leaseAmountCents: 200000, details: LEASE_DETAILS.details, ...META }, "§6 parseSnapshot() reads it back");
 eq(pt.parseSnapshot(pt.snapshotJson(SPLIT_DETAILS, META)).type, "split", "§6 a split with details round-trips");
+// A contract signed while amounts could carry cents never changes: its snapshot
+// still reads, cents and all, though a new invite can no longer be written so.
+eq(pt.parseSnapshot(pt.snapshotJson({ ...LEASE_DETAILS, leaseAmountCents: 200050 }, META)).leaseAmountCents, 200050,
+	"§6 a lease snapshot signed with cents still reads");
 ok(pt.parseSnapshot(null) === null && pt.parseSnapshot("") === null && pt.parseSnapshot(undefined) === null, "§6 NULL / empty is the standard contract");
 const good = JSON.parse(snap);
 const BAD_SNAPSHOTS = [
