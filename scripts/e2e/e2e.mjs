@@ -7663,8 +7663,8 @@ async function termsFeature(t0) {
             observed: `invite-error ${x.shown ? `shown, data-code ${x.code}` : 'NOT shown'}; the application form shown: ${x.form}`,
           }))
           walkRow(R, 'T8c', 'Super Admin, /investor-applications: the terms chip under the lease applicant\'s name, the row\'s Actions, and the detail\'s Payment Terms',
-            'The chip reads "Lease · $2,000.00/mo"; View and the status select are fully visible; the detail shows the lease at $2,000.00', 'apps', (x) => ({
-              ok: x.chips === 1 && x.chip === 'Lease · $2,000.00/mo' && x.actionsVisible && x.detailSection && x.detailAmount,
+            'The chip reads "Lease $2,000/mo"; View and the status select are fully visible; the detail shows the lease at $2,000.00', 'apps', (x) => ({
+              ok: x.chips === 1 && x.chip === 'Lease $2,000/mo' && x.actionsVisible && x.detailSection && x.detailAmount,
               observed: `columns [${x.heads.join(' | ')}]; the row ${x.found ? `found, ${x.chips} chip(s), "${x.chip ?? '(no chip)'}" (tooltip ${JSON.stringify(x.title)}), Actions visible ${x.actionsVisible}` : 'NOT found'}; the detail: "Payment Terms" ${x.detailSection}, "$2,000.00" ${x.detailAmount}; ` +
                 `API: payment_terms_summary ${JSON.stringify(x.listSummary ?? null)}, payment_terms ${JSON.stringify(x.listTerms ?? null)}, paymentTerms ${x.view ? `state ${x.view.state}, type ${x.view.paymentTerms?.type}, leaseAmountCents ${x.view.paymentTerms?.leaseAmountCents}, consistent ${x.view.consistent}` : 'absent'}`,
             }))

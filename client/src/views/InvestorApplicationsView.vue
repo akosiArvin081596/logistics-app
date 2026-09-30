@@ -112,7 +112,7 @@
                   v-if="app.payment_terms"
                   variant="outline"
                   data-test="application-terms"
-                  :class="['mt-1 normal-case tracking-normal', termsChipClass(app.payment_terms)]"
+                  :class="['mt-1 normal-case tracking-normal whitespace-normal leading-tight', termsChipClass(app.payment_terms)]"
                   :title="termsTitle(app)"
                 >{{ termsChipLabel(app.payment_terms) }}</Badge>
               </TableCell>
@@ -380,10 +380,13 @@ function statusBadge(s) {
 // The terms chip under an applicant's name, from the list's payment_terms
 // (null for the standard contract, which shows no chip). A split snapshot
 // always carries additional terms: a plain split is the standard contract.
+// Compact on purpose: the chip sets the Name column's narrowest width, and the
+// table has no spare room at 1400 px. Whole dollars drop their ".00"; the
+// tooltip carries the full summary.
 function termsChipLabel(terms) {
   if (terms.unreadable) return 'Terms unreadable'
-  if (terms.type === 'lease') return `Lease · ${formatMoneyCents(terms.leaseAmountCents)}/mo`
-  return '50/50 · amended'
+  if (terms.type === 'lease') return `Lease ${formatMoneyCents(terms.leaseAmountCents).replace(/\.00$/, '')}/mo`
+  return '50/50 amended'
 }
 
 function termsChipClass(terms) {
