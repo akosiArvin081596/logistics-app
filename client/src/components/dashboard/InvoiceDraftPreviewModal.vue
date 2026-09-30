@@ -300,10 +300,11 @@
                 Invoice date
                 <span v-if="edited.invoiceDate" class="idp-badge idp-badge-blue">edited</span>
               </label>
-              <!-- Bound to the server's *Iso field and sent back as YYYY-MM-DD.
-                   Never reformat a date here: the server's formatDate() loses a
-                   day on any ISO input, so a client-side "tidy-up" ships every
-                   invoice dated one day early. -->
+              <!-- Bound to the server's *Iso field and sent back as YYYY-MM-DD,
+                   which the server turns into MM/DD/YYYY as text. Never reformat
+                   a date here through a Date: `new Date("YYYY-MM-DD")` is UTC
+                   midnight, the day before anywhere west of Greenwich, so a
+                   client-side "tidy-up" ships every invoice dated one day early. -->
               <input
                 id="idp-invoicedate"
                 v-model="form.invoiceDate"

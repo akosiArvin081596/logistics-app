@@ -685,3 +685,25 @@ export function sumSettlements(list) {
   out.earned = out.earnedSettled + out.accruing
   return out
 }
+
+/**
+ * The maintenance fund and the compliance cost charged across `rows`
+ * (`monthlyEarnings` rows; one month is a list of one), as the rows a breakdown
+ * prints: `{ key, label, phrase, value }`, in that order.
+ *
+ * Both come out of every month's netProfit, so a breakdown that walks from
+ * revenue to net profit has to subtract them too, or its sum does not close.
+ * A cost is listed only once it has actually been charged (value > 0), the way
+ * the month's waterfall shows its own two rows: while both are $0, every
+ * breakdown reads exactly as it did without them. The month's dialogs and the
+ * all-time Expenses dialog read the same rows from here, so they cannot name a
+ * cost differently or disagree on when it appears.
+ */
+export function extraCostsOf(rows) {
+  const list = Array.isArray(rows) ? rows : []
+  const total = (field) => list.reduce((s, m) => s + num(m && m[field]), 0)
+  return [
+    { key: 'maintFund', label: 'Maintenance Fund', phrase: 'maintenance fund', value: total('maintFundCost') },
+    { key: 'compliance', label: 'Compliance / IFTA', phrase: 'compliance', value: total('complianceCost') },
+  ].filter((c) => c.value > 0)
+}
