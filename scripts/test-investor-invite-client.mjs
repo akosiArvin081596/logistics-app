@@ -331,6 +331,13 @@ function warningChecks(b) {
   ok('L5: downtime, word for word', reason('downtime', 0) === 'No lease payment is owed for this month: the truck had no activity, and your agreement (section 3.1) owes nothing during downtime.')
   ok('L6: not in service, word for word', reason('not_in_service', 0) === 'No lease payment is owed for this month: no truck was in service under your lease.')
   ok('no reason for a full month, a split row or no basis', reason(null, 2000) === '' && basis.leaseReasonText({ type: 'split', reason: 'downtime' }) === '' && basis.leaseReasonText(undefined) === '')
+  // L1 and L4-L6 have one client copy, lib/leasePayoutText.js: this module takes
+  // them from there and keeps none of its own.
+  const text = await import(pathToFileURL(path.join(ROOT, 'client/src/lib/leasePayoutText.js')).href)
+  ok('L1 and L4-L6 come from lib/leasePayoutText.js', basis.LEASE_LABEL === text.LEASE_LABEL &&
+    /import \{ LEASE_LABEL, leaseReasonLine \} from '\.\.\/\.\.\/lib\/leasePayoutText\.js'/.test(BASIS_SRC))
+  ok('payoutBasis.js keeps no copy of them', !BASIS_SRC.includes(`'${text.LEASE_LABEL}'`) &&
+    !Object.values(text.LEASE_REASON_TEXT).some((t) => BASIS_SRC.includes(t.slice(0, 30))))
   ok('the not-yet-applied status, word for word', basis.STATUS_OFF === 'Recorded, not yet applied: lease payouts are switched off. Payouts still use the Split %.')
   ok('the status says "recorded" only when something is', basis.basisStatus({ enabled: false, schedule: [] }).text !== basis.STATUS_OFF &&
     basis.basisStatus({ enabled: false, schedule: [{ effectiveMonth: '2026-09' }] }).text === basis.STATUS_OFF)

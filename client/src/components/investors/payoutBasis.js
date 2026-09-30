@@ -6,7 +6,8 @@
 // The server decides everything here: GET/PUT /api/investors/:id/payout-basis,
 // the payout rows' payoutBasis and the accept response's payoutBasis. This
 // module only describes what it answered, and checks a form before it is sent.
-// L1 and L4-L6 are the agreed investor-facing lease wording, word for word.
+// L1 and L4-L6, the agreed investor-facing lease wording, come from
+// lib/leasePayoutText.js, the one client copy; this file keeps none.
 //
 // Pure: no Vue, no network, so scripts/test-investor-invite-client.mjs runs it
 // under plain Node.
@@ -14,8 +15,9 @@
 import { monthLabel } from '../../lib/monthLabel.js'
 import { formatCurrency } from '../../utils/format.js'
 import { MESSAGES as TERMS_MESSAGES, TYPE_LABELS, formatMoneyCents, parseLeaseAmountToCents } from '../../lib/paymentTerms.js'
+import { LEASE_LABEL, leaseReasonLine } from '../../lib/leasePayoutText.js'
 
-export const LEASE_LABEL = 'Fixed monthly lease'
+export { LEASE_LABEL }
 
 // Lease payouts are applied only while INVESTOR_LEASE_PAYOUTS_ENABLED is on.
 export const STATUS_OFF = 'Recorded, not yet applied: lease payouts are switched off. Payouts still use the Split %.'
@@ -42,19 +44,10 @@ export function leaseBadgeLabel(amount) {
   return `Lease ${formatLeaseAmount(amount)}/mo`
 }
 
-// Why a lease month pays other than the lease amount (L4-L6), or ''.
+// Why a lease month pays other than the lease amount (L4-L6), or '' for a
+// full month, a split row or no basis.
 export function leaseReasonText(basis) {
-  if (!basis || basis.type !== 'lease') return ''
-  if (basis.reason === 'prorated') {
-    return `The lease covered ${basis.coveredDays} of ${basis.daysInMonth} days this month, so this month pays ${formatLeaseAmount(basis.paidAmount)}.`
-  }
-  if (basis.reason === 'downtime') {
-    return 'No lease payment is owed for this month: the truck had no activity, and your agreement (section 3.1) owes nothing during downtime.'
-  }
-  if (basis.reason === 'not_in_service') {
-    return 'No lease payment is owed for this month: no truck was in service under your lease.'
-  }
-  return ''
+  return basis && basis.type === 'lease' ? leaseReasonLine(basis) : ''
 }
 
 // One basis ({ type, leaseAmount, splitPct, effectiveMonth }) in a phrase:

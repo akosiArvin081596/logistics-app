@@ -9,12 +9,13 @@
  * "carried forward" about an agreement that has none of those.
  *
  * ⚠️ EVERY SENTENCE HERE IS THE AGREED CANONICAL COPY, VERBATIM — the same words
- * the statement PDF and the downloadable report print (their server copies live
- * in lib/payout-statement.js and lib/investor-report-options.js). A reworded
+ * the statement PDF and the load report print, from the server's one home for
+ * them, lib/lease-payout-text.js (the client cannot load that file). A reworded
  * sentence here makes the portal and the documents the investor keeps say two
- * different things about the same payment, so change the copies together or
- * not at all. scripts/test-lease-payout-text.mjs pins each one character for
- * character.
+ * different things about the same payment, so change both together or not at
+ * all. scripts/test-lease-payout-text.mjs pins each one character for
+ * character, and equal to the server's. The report's own sentences (L8, L9)
+ * are printed only by the server and have no copy here.
  *
  * ONE COPY ON THE CLIENT: portal and admin screens import from here rather than
  * keeping their own. A placeholder is written `{name}` and filled by
@@ -37,12 +38,6 @@ export const LEASE_REASON_DOWNTIME = 'No lease payment is owed for this month: t
 export const LEASE_REASON_NOT_IN_SERVICE = 'No lease payment is owed for this month: no truck was in service under your lease.'
 /** L7 — where a split month would explain its loss carry-forward. */
 export const LEASE_LOSS_NOTE = 'A month your truck runs at a loss still pays the full lease. Losses are not carried forward against your lease.'
-/** L8 — the report note (server copy: NOTE.LEASE). {amount}: the monthly lease. */
-export const LEASE_REPORT_NOTE = 'Your payout is a fixed monthly lease of {amount}, not a share of net profit.'
-/** L8b — the report note from a month on (server copy: NOTE.LEASE_FROM). {month}: e.g. "September 2026". */
-export const LEASE_REPORT_NOTE_FROM = 'From {month}, your payout is a fixed monthly lease of {amount}, not a share of net profit.'
-/** L9 — the report's payout label (server copy: PAYOUT_LABEL.LEASE). */
-export const LEASE_REPORT_LABEL = 'Investor Payout (fixed monthly lease)'
 /** L10 — in place of a per-load share. */
 export const LEASE_NO_LOAD_SHARE = 'Paid as a fixed monthly lease, so there is no per-load share.'
 
