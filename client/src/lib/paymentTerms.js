@@ -49,9 +49,13 @@ const PICTOGRAPHIC_RE = /\p{Extended_Pictographic}/u
 const OTHER_SCRIPT_RE = /[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}]/u
 // The copyright, registered and trade mark signs are Extended_Pictographic, but
 // in running text they are ordinary symbols, so these three (and no other) are
-// set aside before the emoji test — unless U+FE0F, the emoji presentation
-// selector, follows one and asks for the emoji. Built from code points.
-const TEXT_SYMBOLS_RE = new RegExp(`[${String.fromCodePoint(0xa9, 0xae, 0x2122)}](?!${String.fromCodePoint(0xfe0f)})`, 'gu')
+// set aside before the emoji test. Followed by U+FE0F they ask for the emoji,
+// which EMOJI_PARTS_RE below refuses. Built from code points.
+const TEXT_SYMBOLS_RE = new RegExp(`[${String.fromCodePoint(0xa9, 0xae, 0x2122)}]`, 'gu')
+// The pieces emoji are assembled from that are not themselves Extended_Pictographic:
+// regional indicators (flags), skin-tone modifiers, the combining keycap and the
+// emoji presentation selector. Built from code points.
+const EMOJI_PARTS_RE = new RegExp(`[\\p{Regional_Indicator}\\p{Emoji_Modifier}${String.fromCodePoint(0x20e3, 0xfe0f)}]`, 'u')
 
 const isBlank = (v) => v === undefined || v === null || v === ''
 
@@ -103,7 +107,7 @@ export function normalizeDetails(value) {
   const text = kept.join('\n').trim()
   if (text.length > LIMITS.DETAILS_MAX) return { ok: false, reason: 'details_too_long' }
   if (text && text.split('\n').length > LIMITS.DETAILS_MAX_LINES) return { ok: false, reason: 'details_too_many_lines' }
-  if (PICTOGRAPHIC_RE.test(text.replace(TEXT_SYMBOLS_RE, '')) || OTHER_SCRIPT_RE.test(text)) return { ok: false, reason: 'unsupported_characters' }
+  if (PICTOGRAPHIC_RE.test(text.replace(TEXT_SYMBOLS_RE, '')) || EMOJI_PARTS_RE.test(text) || OTHER_SCRIPT_RE.test(text)) return { ok: false, reason: 'unsupported_characters' }
   return { ok: true, value: text }
 }
 

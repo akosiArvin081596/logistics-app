@@ -263,6 +263,9 @@ const EMOJI_PRESENTATION = cp(0xfe0f);
 const INFORMATION_SOURCE = cp(0x2139);
 const DOUBLE_EXCLAMATION = cp(0x203c);
 const CYRILLIC_A = cp(0x0430);
+const KEYCAP = cp(0xfe0f, 0x20e3);
+const FLAG_US = cp(0x1f1fa, 0x1f1f8);
+const SKIN_TONE = cp(0x1f3fd);
 const E_ACUTE_NFD = `e${cp(0x0301)}`;
 const E_ACUTE_NFC = cp(0x00e9);
 const LONE_SURROGATE = String.fromCharCode(0xd800);
@@ -306,6 +309,11 @@ const CASES = [
 		{ ok: true, value: { type: "split", leaseAmountCents: null, details: "ABC" } }],
 	["details: only invisible characters is empty", { paymentType: "split", details: `${ZWSP}${RLO}\n\n` }, { ok: true, value: { type: "split", leaseAmountCents: null, details: "" } }],
 	["details: emoji", { paymentType: "split", details: `Great ${EMOJI}` }, { ok: false, field: "details", reason: "unsupported_characters", message: pt.MESSAGES.unsupported_characters }],
+	["details: a keycap emoji (digit, U+FE0F, U+20E3)", { paymentType: "split", details: `Call 1${KEYCAP} now` }, { ok: false, field: "details", reason: "unsupported_characters", message: pt.MESSAGES.unsupported_characters }],
+	["details: a flag (two regional indicators)", { paymentType: "split", details: `Based in ${FLAG_US}` }, { ok: false, field: "details", reason: "unsupported_characters", message: pt.MESSAGES.unsupported_characters }],
+	["details: a lone skin-tone modifier", { paymentType: "split", details: `ok ${SKIN_TONE}` }, { ok: false, field: "details", reason: "unsupported_characters", message: pt.MESSAGES.unsupported_characters }],
+	["details: a bare emoji presentation selector", { paymentType: "split", details: `text${EMOJI_PRESENTATION}` }, { ok: false, field: "details", reason: "unsupported_characters", message: pt.MESSAGES.unsupported_characters }],
+	["details: plain digits and # stay allowed", { paymentType: "split", details: "Call 1 now, press #" }, { ok: true, value: { type: "split", leaseAmountCents: null, details: "Call 1 now, press #" } }],
 	["details: the copyright, registered and trade mark signs", { paymentType: "split", details: `Acme${TRADE_MARK} ${COPYRIGHT}2026 ${REGISTERED}` },
 		{ ok: true, value: { type: "split", leaseAmountCents: null, details: `Acme${TRADE_MARK} ${COPYRIGHT}2026 ${REGISTERED}` } }],
 	["details: all three signs together, then an emoji", { paymentType: "split", details: `${COPYRIGHT}${REGISTERED}${TRADE_MARK} ${EMOJI}` },
