@@ -1,25 +1,32 @@
 #!/usr/bin/env node
 /**
- * The driver application (/apply, POST /api/public/apply) checks its SSN
- * before it is stored.
+ * The driver application (/apply, POST /api/public/apply) checks its SSN and
+ * its required answers before anything is stored.
  *
- * THE BUG. The route stored an SSN of any length (200). A driver's W-9 is
+ * SSN. The route stored an SSN of any length (200). A driver's W-9 is
  * filled as an individual's, so the number goes in Part I's SSN boxes, 3-2-4:
  * ten digits made that driver's own W-9 preview answer 500 (the last box holds
  * four), and eight printed 123-45-678 on a tax form. Neither the server nor the
- * step component checked the length.
- *
- * THE FIX. The route runs checkW9Ssn() (lib/w9-input.js): checkW9Tin(), the
- * investor rule (nine digits, the length cap, one bounded class), restricted to
- * the SSN's own shapes, 123-45-6789 or 123456789, with spaces around it allowed
- * (/apply has stored "123-45-6789 "). Anything else is refused before anything
- * is stored: 400 { error: "Enter a 9-digit Social Security number.",
+ * step component checked the length. The route now runs checkW9Ssn()
+ * (lib/w9-input.js): checkW9Tin(), the investor rule (nine digits, the length
+ * cap, one bounded class), restricted to the SSN's own shapes, 123-45-6789 or
+ * 123456789, with spaces around it allowed (/apply has stored "123-45-6789 ").
+ * Anything else is refused before anything is stored:
+ * 400 { error: "Enter a 9-digit Social Security number.",
  * code: "INVALID_SSN", field: "ssn" }. An SSN that passes is stored and printed
  * exactly as before. Step 1 of /apply shows the same message under the SSN
  * field and will not continue (client copy: client/src/lib/taxId.js).
  *
  * The driver's W-9 preview (GET /api/onboarding/documents/w9/pdf) takes no SSN
  * from its request: it prints the one stored by this route.
+ *
+ * REQUIRED ANSWERS. A request that left out `skills` answered 500: the column
+ * is NOT NULL, and the route's required-field check did not include it. Every
+ * NOT NULL column the route binds is now checked first, and a missing one is
+ * refused the way the route refuses its other missing fields, naming it:
+ * 400 { error: "Please fill in all required fields.", code: "FIELD_REQUIRED",
+ * field }. `skills` only has to be present: the form sends "" when it is left
+ * blank, and that is still stored.
  *
  * WHAT IS ASSERTED.
  *   §1 checkW9Ssn(): the accepted and refused shapes, the code and message, the
@@ -30,7 +37,8 @@
  *      real SQLite job_applications table built from server.js's own DDL: the
  *      400s, nothing stored on a refusal, an accepted SSN stored unchanged, and
  *      the real form's payload (ApplyView.vue's defaultForm and submit payload)
- *      stored as before.
+ *      stored as before; every NOT NULL column (read off the DDL) left out,
+ *      null or empty answers FIELD_REQUIRED naming it, and blank skills pass.
  *   §4 the shipped fillW9Form(), called as the driver's W-9 is: every accepted
  *      shape prints 3-2-4 in the SSN boxes; the two refused examples are the
  *      500 and the short number.
@@ -240,6 +248,9 @@ function applyRoute(src = SRC, lib = LIB) {
 	const app = { post: (p, ...h) => { handlers[p] = h; } };
 	const lifted = [
 		liftConst("PUBLIC_APPLY_SCALAR_FIELDS", src),
+		liftConst("PUBLIC_APPLY_REQUIRED_FIELDS", src),
+		liftConst("PUBLIC_APPLY_PRESENT_FIELDS", src),
+		liftFunction("function publicApplyMissingField(", src),
 		liftConst("PUBLIC_APPLY_ATTACHMENT_FIELDS", src),
 		liftFunction("function applicantAttachmentRefusal(", src),
 		liftFunction("function escapeHtml(", src),
@@ -339,6 +350,54 @@ function realFormRows(src = SRC) {
 		row.full_name === payload.full_name && row.cdl_front === PDF,
 	"…with the SSN, the blank skills answer, the availability and the attachments as sent");
 	r.t(route.mail.length === 2 && route.audits.length === 1, "…and the two emails and the audit row, as before");
+	return r;
+}
+
+// The NOT NULL columns with no default, read off the DDL: each one the INSERT
+// binds as sent. (`status` has a default; `id` is the key.)
+function notNullColumns(src = SRC) {
+	const { create } = tableDdl(src);
+	return [...create.matchAll(/^\s*([a-z_]+) [A-Z]+ NOT NULL,?$/gm)].map((m) => m[1]);
+}
+const listIn = (name, src = SRC) => [...liftConst(name, src).matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+const MISSING_400 = (field) => JSON.stringify({ error: "Please fill in all required fields.", code: "FIELD_REQUIRED", field });
+
+function requiredRows(src = SRC) {
+	const r = rows();
+	const required = listIn("PUBLIC_APPLY_REQUIRED_FIELDS", src);
+	const present = listIn("PUBLIC_APPLY_PRESENT_FIELDS", src);
+	const columns = notNullColumns(src);
+	r.t(columns.length >= 15 && columns.includes("skills"), `the DDL's NOT NULL columns were read (${columns.join(", ")})`);
+	r.t([...required, ...present].sort().join() === [...columns].sort().join() && !required.some((f) => present.includes(f)),
+		"every NOT NULL column is in exactly one list: non-empty, or present (skills)");
+	r.t(JSON.stringify(present) === JSON.stringify(["skills"]), "only skills may be empty (the form sends \"\" when it is left blank)");
+
+	const route = applyRoute(src);
+	for (const field of columns) {
+		const cases = [["left out", undefined], ["null", null]];
+		if (required.includes(field)) cases.push(["empty", ""]);
+		for (const [how, value] of cases) {
+			const body = realForm();
+			if (value === undefined) delete body[field];
+			else body[field] = value;
+			const before = route.count();
+			const got = route.call(body);
+			r.t(got.status === 400 && JSON.stringify(got.body) === MISSING_400(field) && route.count() === before,
+				`${field} ${how}: 400 ${MISSING_400(field)}, nothing stored (got ${got.status} ${JSON.stringify(got.body)})`);
+		}
+	}
+	for (const [how, skills] of [["blank, as the form sends it", ""], ["answered", "QA-TEST forklift"]]) {
+		const got = route.call(realForm({ skills }));
+		const row = got.body && route.db.prepare("SELECT skills FROM job_applications WHERE id = ?").get(got.body.id);
+		r.t(got.status === 200 && row && row.skills === skills, `skills ${how}: 200, stored as sent (got ${got.status} ${JSON.stringify(got.body)})`);
+	}
+	const nothing = route.call({});
+	r.t(nothing.status === 400 && JSON.stringify(nothing.body) === MISSING_400("full_name"), "nothing sent: the first field in the list is named");
+	const code = codeOnly(routeSource("post", "/api/public/apply", src));
+	const at = code.indexOf("const missingField = publicApplyMissingField(req.body);");
+	r.t(at >= 0 && at < code.indexOf("publicFormInput.checkPublicScalars(") && at < code.indexOf("db.prepare(") &&
+		at < code.indexOf("sendEmail(") && at < code.indexOf("logAudit("),
+	"the required fields are checked first, before the first query, audit row or email");
 	return r;
 }
 
@@ -470,6 +529,10 @@ async function mutantRows() {
 		"MUTANT step 1 continues past an invalid SSN: caught by §5");
 	r.t(failed(await stepRows({ step: swap(STEP_SRC, "!!props.form.ssn && !ssnCheck.value.ok && !ssnFocused.value", "false") })),
 		"MUTANT the message under the SSN field never shows: caught by §5");
+	const skillsUnchecked = swap(SRC, 'const PUBLIC_APPLY_PRESENT_FIELDS = ["skills"];', "const PUBLIC_APPLY_PRESENT_FIELDS = [];");
+	r.t(failed(requiredRows(skillsUnchecked)), "MUTANT skills left to the INSERT (the old 500): caught by §3");
+	const shortList = swap(SRC, '"accident_history", "signature",\n];', '"accident_history",\n];');
+	r.t(failed(requiredRows(shortList)), "MUTANT a NOT NULL column missing from the lists: caught by §3");
 	return r;
 }
 
@@ -486,6 +549,7 @@ function record(r) {
 	section("§3 POST /api/public/apply, executed on a real job_applications table");
 	record(routeSsnRows());
 	record(realFormRows());
+	record(requiredRows());
 	section("§4 the driver's W-9, from the shipped fillW9Form()");
 	record(await printRows());
 	section("§5 /apply step 1, executed");
