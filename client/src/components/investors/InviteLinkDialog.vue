@@ -1,5 +1,5 @@
 <template>
-  <InviteModal :open="open" :title="title" :close-on-backdrop="false" @close="$emit('close')">
+  <InviteModal :open="open" :title="title" :close-on-backdrop="false" :close-on-escape="false" @close="$emit('close')">
     <label class="form-label" :for="inputId">Personal invite link</label>
     <div class="link-row">
       <input

@@ -30,6 +30,9 @@ const props = defineProps({
   wide: { type: Boolean, default: false },
   // Off for a form: a stray click beside it must not throw away what was typed.
   closeOnBackdrop: { type: Boolean, default: true },
+  // Off for content that cannot be shown again (a link shown once): only an
+  // explicit Close or Done button closes it.
+  closeOnEscape: { type: Boolean, default: true },
 })
 
 const emit = defineEmits(['close'])
@@ -44,7 +47,7 @@ const FOCUSABLE =
 function onKeydown(event) {
   if (event.key === 'Escape') {
     event.stopPropagation()
-    emit('close')
+    if (props.closeOnEscape) emit('close')
     return
   }
   if (event.key !== 'Tab') return

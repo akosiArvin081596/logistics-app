@@ -277,16 +277,21 @@ function onCreated(data) {
   notice.value = `Invite created for ${data.invite?.inviteeName || 'the investor'}.`
 }
 
+// Saving never renews a link. An expired one stays dead, so nobody part-way
+// through can go on with it; only a new link sends the terms again.
 function onSaved({ invite, previousRevision }) {
   closeForm()
   const who = invite?.inviteeName || 'the investor'
+  const expired = invite?.status === 'expired'
+  let text
   if (invite && invite.termsRevision !== previousRevision) {
-    notice.value = invite.firstOpenedAt
+    text = invite.firstOpenedAt && !expired
       ? `Terms saved for ${who}. Anyone part-way through this application will be asked to review and sign the agreements again.`
       : `Terms saved for ${who}.`
   } else {
-    notice.value = `Invite saved for ${who}. The payment terms did not change.`
+    text = `Invite saved for ${who}. The payment terms did not change.`
   }
+  notice.value = expired ? `${text} This link has expired. Create a new link to send it again.` : text
 }
 
 // ---- New link ------------------------------------------------------------

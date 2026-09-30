@@ -33,8 +33,10 @@
 
     <p class="config-note">Per-truck settings (purchase price, title status, maintenance fund, fixed costs) are configured in the Truck Database.</p>
 
+    <!-- Not before the config has loaded: the form still holds placeholder
+         values then, and saving them would overwrite the stored ones. -->
     <div class="config-actions">
-      <button class="btn btn-primary" :disabled="saving" @click="handleSave">
+      <button class="btn btn-primary" :disabled="saving || !config" @click="handleSave">
         {{ saving ? 'Saving...' : 'Save Configuration' }}
       </button>
     </div>
@@ -58,32 +60,28 @@ const form = reactive({
   blue_chip_brokers: '',
 })
 
-// The stored GLOBAL investor_split_pct, as served. Admin Tools passes the
-// config of the Super Admin's own GET /api/investor, which carries the global
-// (owner_id = 0) rows only. It is kept only when the incoming config has the key:
-// after a save the store writes the saved form back as the whole config, and
-// the form never carries the split, which is set per investor elsewhere.
-const storedSplit = ref(undefined)
-
 watch(() => props.config, (cfg) => {
   if (!cfg) return
   for (const key of Object.keys(form)) {
     if (key in cfg) form[key] = cfg[key]
   }
-  if ('investor_split_pct' in cfg) storedSplit.value = cfg.investor_split_pct
 }, { immediate: true })
 
-// The split the server applies, by the rule of resolveInvestorSplitPct() in
-// server.js: a missing or unparseable value is 50, anything else is clamped to
-// 0..100. Blank until the config has loaded, rather than a guessed 50.
+// The stored GLOBAL investor_split_pct: Admin Tools passes the config of the
+// Super Admin's own GET /api/investor, which carries the global (owner_id = 0)
+// rows only. Shown as the server applies it, by the rule of
+// resolveInvestorSplitPct() in server.js: a missing or unparseable value is 50,
+// anything else is clamped to 0..100. Blank until the config has loaded,
+// rather than a guessed 50.
 const ownerTakePct = computed(() => {
   if (!props.config) return ''
-  const raw = parseFloat(storedSplit.value)
+  const raw = parseFloat(props.config.investor_split_pct)
   if (!Number.isFinite(raw)) return 50
   return Math.min(100, Math.max(0, raw))
 })
 
 async function handleSave() {
+  if (!props.config) return
   saving.value = true
   try {
     emit('save', { ...form })
