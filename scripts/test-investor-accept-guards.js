@@ -5,11 +5,14 @@
  *
  * PUT /api/investor-applications/:id/status with "Accepted" creates the
  * investor's account, their investors record and one truck per vehicle. It is
- * refused, with nothing written and the application left as it was, when:
- *   - an account already has the applicant's email → 409 USER_ALREADY_EXISTS;
- *   - another investors record already holds the company name the new record
- *     would take (carrier_name = the DBA, else the legal name; compared trimmed
- *     and case-insensitively) → 409 INVESTOR_RECORD_CONFLICT, naming it.
+ * refused, with nothing written and the application left as it was, when
+ * another investors record already holds the company name the new record would
+ * take (carrier_name = the DBA, else the legal name; compared trimmed and
+ * case-insensitively) → 409 INVESTOR_RECORD_CONFLICT, naming it. When an
+ * account already has the applicant's email, the application is marked
+ * Accepted and nothing else is written or sent: 200 { success: true,
+ * accountCreated: false, existingUserId, message }, the status and its audit
+ * row in one transaction.
  * bcrypt.hash is the handler's only await and runs first; the checks read the
  * state after it, and the status, account, record and trucks are written in
  * one synchronous transaction. The emails are sent after it commits.
@@ -22,28 +25,38 @@
  *   §1 company-name collision: the second of two same-name applications is
  *      409 INVESTOR_RECORD_CONFLICT (naming the record), in any case or
  *      spacing, and against a hand-added record; nothing written, no mail.
- *   §2 email collision: 409 USER_ALREADY_EXISTS in any case; nothing written.
+ *   §2 an email already on an account (in any case): 200, accountCreated
+ *      false, the account's id, a message naming its role and id; the status
+ *      Accepted with an audit row saying so; no account, record or truck
+ *      written and no mail. A status write that fails writes no audit row.
  *   §3 the success path: status, account, investors record and trucks all
  *      written, the audit line and both emails after.
  *   §4 one transaction: a write that fails part-way leaves no account, no
  *      record, no truck and the status as it was, and sends no mail.
- *   §5 the state is read AFTER the await: a colliding account or record that
- *      appears while the password hashes is still refused.
+ *   §5 the state is read AFTER the await: an account with the email that
+ *      appears while the password hashes is found (nothing created), and a
+ *      colliding record that appears then is still refused.
  *   §6 unchanged: re-accepting an application whose record exists, New /
  *      Reviewed / Rejected, a removed application (409) and a missing one (404).
  *   §7 source pins: the only await is bcrypt.hash, above the first read; none
  *      between the re-read and the transaction; the record INSERT is not
- *      OR IGNORE; the emails follow the transaction.
+ *      OR IGNORE; the emails follow the transaction; the existing-account
+ *      branch writes the status and its audit row in one transaction and
+ *      nothing else.
  *   §8 the username: folded to a-z, 0-9 and "." from the legal name, else the
  *      email's local part, else investor<application id>, the first that keeps
- *      a letter or a digit; a number appended while it is taken (trimmed, any
- *      case). A legal name in another script or of punctuation only used to
- *      give "" (then "1") or ".". Every username made is found by the sign-in
- *      lookup as this account and no other.
+ *      a letter or a digit; a number appended while it is taken: an account's
+ *      username (trimmed, any case), or a name findDriverNameClash() finds — a
+ *      reserved name ("Dispatch", "Investor", a built-in property name, also
+ *      when the legal name only folds to one) or a driver's name (a directory
+ *      row, or a Driver account's driver name). A legal name in another script
+ *      or of punctuation only used to give "" (then "1") or ".". Every username
+ *      made is found by the sign-in lookup as this account and no other.
  *   §9 MUTANTS: the company-name check dropped, the email check dropped, the
  *      status written before the checks; the letter-or-digit test, the email
- *      fallback, the application-id fallback and the trimmed comparison each
- *      dropped.
+ *      fallback, the application-id fallback, the name-clash test and (with the
+ *      name-clash test off, since it compares usernames too) the trimmed
+ *      comparison each dropped.
  *
  * Pure: no server, no app.db, no network, no mail (sendEmail is captured).
  *
@@ -99,6 +112,13 @@ const parseTruckAmount = (() => {
 	return new Function(`${m[0].trim()}\n${liftFunction("function parsePlainDecimal(raw) {")}\n${liftFunction('function parseTruckAmount(raw, label = "Amount", max = TRUCK_AMOUNT_MAX) {')}\nreturn parseTruckAmount;`)();
 })();
 const REGISTER_SRC = liftFunction("function registerApplicationVehicles(vehicles, appId, userId) {");
+// The naming check the username candidates go through, with what it calls.
+const CLASH_SRC = [
+	"function normalizeDriverName(s) {",
+	"function isBuiltInPropertyName(name) {",
+	"function findDriverNameClashes(name, opts = {}) {",
+	"function findDriverNameClash(name, opts = {}) {",
+].map(liftFunction).join("\n");
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 const USERS_DDL = (() => {
@@ -137,6 +157,7 @@ function makeDb() {
 			vin TEXT, license_plate TEXT, status TEXT, owner_id INTEGER, purchase_price REAL,
 			title_status TEXT, title_state TEXT, notes TEXT
 		);
+		CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT NOT NULL UNIQUE COLLATE NOCASE);
 	`);
 	db.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('super_admin', 'x', 'Super Admin', '', 'ops@logisx.example')").run();
 	return db;
@@ -166,6 +187,7 @@ async function accept(db, appId, { status = "Accepted", routeSrc = ACCEPT_SRC, d
 	const audits = [];
 	const registerApplicationVehicles = new Function("db", "colLetter", "parseTruckAmount",
 		`${REGISTER_SRC}\nreturn registerApplicationVehicles;`)(db, colLetter, parseTruckAmount);
+	const findDriverNameClash = new Function("db", `${CLASH_SRC}\nreturn findDriverNameClash;`)(db);
 	const bcrypt = {
 		hash: async (pw) => {
 			await new Promise((done) => setImmediate(done));
@@ -173,10 +195,10 @@ async function accept(db, appId, { status = "Accepted", routeSrc = ACCEPT_SRC, d
 			return `hashed:${pw.length}`;
 		},
 	};
-	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", routeSrc)(
+	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", routeSrc)(
 		{ put: (p, guard, h) => { handler = h; } }, () => (req, res, next) => next(), db, bcrypt, crypto,
 		(req, action, entity, entityId, details) => audits.push({ action, entityId, details }), () => {}, colLetter, escapeHtml,
-		(to, subject) => { mail.push({ to, subject }); return Promise.resolve(true); }, parseTruckAmount, registerApplicationVehicles);
+		(to, subject) => { mail.push({ to, subject }); return Promise.resolve(true); }, parseTruckAmount, registerApplicationVehicles, findDriverNameClash);
 	if (typeof handler !== "function") die("the lifted route did not register a handler");
 	const out = { status: 200, body: null };
 	const e = console.error;
@@ -222,13 +244,31 @@ async function emailSection(routeSrc = ACCEPT_SRC) {
 	const r = [];
 	const t = (cond, name) => r.push({ ok: !!cond, name });
 	const db = makeDb();
-	db.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('inv_a', 'x', 'Investor', '', 'Account.A@Example.test')").run();
+	const holder = Number(db.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('inv_a', 'x', 'Investor', '', 'Account.A@Example.test')").run().lastInsertRowid);
 	const c = addApplication(db, { legal_name: "Different Co", email: "account.a@example.test" });
-	const before = snapshot(db);
+	// Everything but the statuses: what an acceptance must not write here.
+	const written = () => { const s = JSON.parse(snapshot(db)); delete s.statuses; return JSON.stringify(s); };
+	const before = written();
 	const x = await accept(db, c, { routeSrc });
-	t(x.status === 409 && x.body && x.body.code === "USER_ALREADY_EXISTS", `§2 an email already on an account (another case): 409 USER_ALREADY_EXISTS (got ${x.status} ${JSON.stringify(x.body)})`);
-	t(snapshot(db) === before && statusOf(db, c) === "New" && x.mail.length === 0, "§2 ...nothing written, the application still New, no mail");
-	t(x.audits.some((a) => a.action === "accept_investor_blocked" && /\[USER_ALREADY_EXISTS\]/.test(a.details)), "§2 ...and the refusal is audited");
+	t(x.status === 200 && JSON.stringify(x.body) === JSON.stringify({
+		success: true, accountCreated: false, existingUserId: holder,
+		message: `Accepted. An account with this email already exists (Investor #${holder}), so no new account, investor record or trucks were created.`,
+	}), `§2 an email already on an account (another case): 200, accountCreated false, the account named (got ${x.status} ${JSON.stringify(x.body)})`);
+	t(statusOf(db, c) === "Accepted", "§2 ...the application is Accepted");
+	t(written() === before && x.mail.length === 0, "§2 ...no account, investor record or truck written, and no mail");
+	t(x.audits.length === 1 && x.audits[0].action === "accept_investor_existing_account" && x.audits[0].entityId === c
+		&& new RegExp(`already on user ${holder} \\(Investor\\).*no account, investor record or trucks were created and no email was sent \\[USER_ALREADY_EXISTS\\]$`).test(x.audits[0].details),
+	`§2 ...and one audit row says so (got ${JSON.stringify(x.audits)})`);
+
+	// The audit row is written after the status, inside its transaction: a
+	// status write that fails leaves no audit row and the application as it was.
+	const d = makeDb();
+	d.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('inv_b', 'x', 'Driver', 'B Driver', 'b@example.test')").run();
+	const e = addApplication(d, { legal_name: "Other Co", email: "b@example.test" });
+	d.exec("CREATE TRIGGER refuse_status BEFORE UPDATE ON investor_applications BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END;");
+	const y = await accept(d, e, { routeSrc });
+	t(y.status === 500 && y.audits.length === 0 && statusOf(d, e) === "New" && y.mail.length === 0,
+		`§2 a status write that fails: 500, no audit row, the application still New (got ${y.status} ${JSON.stringify(y.audits)})`);
 	return r;
 }
 
@@ -279,9 +319,11 @@ async function raceSection() {
 	{
 		const db = makeDb();
 		const id = addApplication(db, { legal_name: "Late Email Co", email: "late@example.test" });
-		const x = await accept(db, id, { duringHash: (d) => d.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('late', 'x', 'Investor', '', 'late@example.test')").run() });
-		t(x.status === 409 && x.body.code === "USER_ALREADY_EXISTS" && statusOf(db, id) === "New",
-			`§5 an account with the email created while the password hashes: still 409 (got ${x.status} ${JSON.stringify(x.body)})`);
+		let late = null;
+		const x = await accept(db, id, { duringHash: (d) => { late = Number(d.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('late', 'x', 'Investor', '', 'late@example.test')").run().lastInsertRowid); } });
+		t(x.status === 200 && x.body.accountCreated === false && x.body.existingUserId === late && statusOf(db, id) === "Accepted"
+			&& db.prepare("SELECT COUNT(*) AS n FROM users").get().n === 2 && db.prepare("SELECT COUNT(*) AS n FROM investors").get().n === 0 && x.mail.length === 0,
+		`§5 an account with the email created while the password hashes: found, nothing created (got ${x.status} ${JSON.stringify(x.body)})`);
 	}
 	{
 		const db = makeDb();
@@ -333,7 +375,7 @@ function pinSection() {
 	t(awaits.length === 1 && /await bcrypt\.hash\(tempPassword, 10\)/.test(awaits[0]), `§7 the only await is bcrypt.hash (got ${JSON.stringify(awaits)})`);
 	const hashAt = src.indexOf("await bcrypt.hash");
 	const reread = src.indexOf('db.prepare("SELECT id, deleted_at FROM investor_applications WHERE id = ?")');
-	const txAt = src.indexOf("db.transaction(");
+	const txAt = src.indexOf("const { userId, vehicleCounts } = db.transaction(");
 	t(hashAt > 0 && hashAt < src.indexOf("db.prepare("), "§7 the hash runs before the first read");
 	t(reread > hashAt && txAt > reread && !/\bawait\b/.test(src.slice(reread, txAt)), "§7 no await between the re-read and the transaction");
 	const tx = src.slice(txAt, src.indexOf("})();", txAt));
@@ -343,6 +385,13 @@ function pinSection() {
 	t(src.indexOf("sendEmail(") > src.indexOf("})();", txAt), "§7 the emails are sent after the transaction");
 	const beforeTx = src.slice(0, txAt);
 	t(!/setStatus\.run\(/.test(beforeTx.slice(0, beforeTx.indexOf("const previous"))), "§7 no status is written before the checks");
+	const existingAt = src.indexOf("if (emailHolder) {");
+	const existing = existingAt > 0 ? src.slice(existingAt, src.indexOf("\n\t\t\t}\n", existingAt)) : "";
+	const existingTx = existing.slice(existing.indexOf("db.transaction("), existing.indexOf("})();"));
+	t(/^db\.transaction\(\(\) => \{\s*setStatus\.run\(status, appId\);\s*logAudit\(req, "accept_investor_existing_account"/.test(existingTx),
+		"§7 the existing-account branch writes the status, then its audit row, in one transaction");
+	t(existing.length > 0 && !/INSERT|sendEmail\(|registerApplicationVehicles\(/.test(existing) && /return res\.json\(/.test(existing),
+		"§7 ...and writes nothing else, sends nothing, and answers there");
 	return r;
 }
 
@@ -360,6 +409,12 @@ async function usernameSection(routeSrc = ACCEPT_SRC) {
 	// POST /api/users stored it before it trimmed), and one in capitals.
 	db.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES (' trimmed.co ', 'x', 'Investor', '', 'old1@example.test')").run();
 	db.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('Taken.Name.LLC', 'x', 'Investor', '', 'old2@example.test')").run();
+	// Drivers: two one-word names in the directory (the second is the first's
+	// numbered candidate), and a Driver account whose driver name is one word,
+	// stored with spaces around it.
+	db.prepare("INSERT INTO drivers_directory (driver_name) VALUES ('Qatestsolo'), ('Qatestsolo1')").run();
+	db.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('LogisX-0101', 'x', 'Driver', ' Onename ', 'old3@example.test')").run();
+	const TRADE_MARK = String.fromCodePoint(0x2122);
 	const cases = [
 		// [what, legal name, email, the username expected (given the application id), a user to add first]
 		["a non-Latin legal name: the email's local part", "株式会社テスト", "QA.Owner+One@example.test", () => "qa.ownerone"],
@@ -372,6 +427,14 @@ async function usernameSection(routeSrc = ACCEPT_SRC) {
 		["a username held with spaces around it: a number appended", "株式会社トリム", "trimmed.co@example.test", () => "trimmed.co1"],
 		["a username held in another case: a number appended", "Taken Name LLC", "new3@example.test", () => "taken.name.llc1"],
 		["investor<id> already taken: a number appended", "合同会社テスト二", "", (id) => `investor${id}1`, (id) => `investor${id}`],
+		["the reserved name \"Dispatch\" (the dispatch desk): a number appended", "Dispatch", "desk1@example.test", () => "dispatch1"],
+		["\"Dis-patch\", which folds to the reserved name: past dispatch1 too", "Dis-patch", "desk2@example.test", () => "dispatch2"],
+		["\"Dispatch\" and a trade mark sign, which folds to the reserved name", `Dispatch${TRADE_MARK}`, "desk3@example.test", () => "dispatch3"],
+		["an email local part that is the reserved name", "株式会社デスク", "dispatch@example.test", () => "dispatch4"],
+		["the reserved name \"Investor\"", "Investor", "inv@example.test", () => "investor1"],
+		["a built-in property name", "Constructor", "proto@example.test", () => "constructor1"],
+		["a one-word driver name in the directory: past the driver holding its numbered candidate too", "QATESTSOLO", "solo@example.test", () => "qatestsolo2"],
+		["a one-word driver name on a Driver account, stored with spaces around it", "Onename", "one@example.test", () => "onename1"],
 	];
 	for (const [what, legal, email, expected, existing] of cases) {
 		const id = addApplication(db, { legal_name: legal, email, vehicles_json: "[]" });
@@ -406,8 +469,12 @@ async function mutantSection() {
 		"MUTANT the email fallback dropped: caught by §8");
 	t(failed(await usernameSection(swap(ACCEPT_SRC, "|| `investor${appId}`", '|| ""'))),
 		"MUTANT the application-id fallback dropped: caught by §8");
-	t(failed(await usernameSection(swap(ACCEPT_SRC, 'SELECT id FROM users WHERE LOWER(TRIM(username)) = LOWER(?)', 'SELECT id FROM users WHERE LOWER(username) = LOWER(?)'))),
-		"MUTANT the taken-username test not trimmed: caught by §8");
+	const noClash = swap(ACCEPT_SRC, "\n\t\t\t\t|| !!findDriverNameClash(candidate);", ";");
+	t(failed(await usernameSection(noClash)), "MUTANT the name-clash test dropped (reserved names, driver names): caught by §8");
+	// findDriverNameClash() compares usernames too (trimmed, any case), so the
+	// SQL test's trim is only observable with the name-clash test off.
+	t(failed(await usernameSection(swap(noClash, 'SELECT id FROM users WHERE LOWER(TRIM(username)) = LOWER(?)', 'SELECT id FROM users WHERE LOWER(username) = LOWER(?)'))),
+		"MUTANT the taken-username test not trimmed (the name-clash test off): caught by §8");
 	return r;
 }
 

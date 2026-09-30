@@ -11,13 +11,14 @@
 // legitimate invitation; a label that differs shows the investor one wording
 // and the admin another.
 //
-// This runs both over one table of inputs (bidi, zero-width, line-separator
-// and NUL inputs built with String.fromCodePoint) and compares every answer,
-// field, reason and message, plus LIMITS, PAYMENT_TYPES, TYPE_LABELS,
-// MESSAGES, STANDARD_SUMMARY, formatMoneyCents and describeTerms. The sabotage
-// controls prove the comparison can fail: copies of the client module with one
-// limit, one pattern or one dropped character class changed must each be
-// reported.
+// This runs both over one table of inputs (bidi, zero-width, line-separator,
+// NUL, emoji and copyright / registered / trade mark inputs built with
+// String.fromCodePoint) and compares every answer, field, reason and message,
+// plus LIMITS, PAYMENT_TYPES, TYPE_LABELS, MESSAGES, STANDARD_SUMMARY,
+// formatMoneyCents and describeTerms. The sabotage controls prove the
+// comparison can fail: copies of the client module with one limit, one
+// pattern, one dropped character class or one change to the three allowed
+// signs must each be reported.
 //
 // No network, no DB, no server — safe anywhere.
 //   node scripts/test-payment-terms-parity.mjs      # exits 1 on any failure
@@ -48,6 +49,8 @@ const LSEP = cp(0x2028)
 const PSEP = cp(0x2029)
 const NUL = cp(0x0000)
 const EMOJI = cp(0x1f600)
+const SIGNS = cp(0x00a9, 0x00ae, 0x2122)
+const EMOJI_PRESENTATION = cp(0xfe0f)
 
 // One table for every function compared below.
 const TERMS_INPUTS = [
@@ -81,6 +84,11 @@ const TERMS_INPUTS = [
   { paymentType: 'split', details: `Caf${cp(0x65, 0x301)}` },
   { paymentType: 'split', details: `A${String.fromCharCode(0xd800)}B${cp(0xe000)}C` },
   { paymentType: 'split', details: `Great ${EMOJI}` },
+  { paymentType: 'split', details: `Acme${cp(0x2122)} ${cp(0xa9)}2026 ${cp(0xae)}` },
+  { paymentType: 'split', details: `${SIGNS} ${EMOJI}` },
+  { paymentType: 'split', details: `${cp(0xa9)}${EMOJI_PRESENTATION} 2026` },
+  { paymentType: 'split', details: `Acme${cp(0x2122)}${EMOJI_PRESENTATION}` },
+  { paymentType: 'split', details: `See ${cp(0x2139)}` },
   { paymentType: 'split', details: `P${cp(0x430)}yment` },
   { paymentType: 'split', details: 42 },
   { paymentType: 'split', details: 'x'.repeat(2000) },
@@ -135,6 +143,9 @@ const CONTROLS = [
   ['a limit changed', 'DETAILS_MAX: 2000,', 'DETAILS_MAX: 2001,'],
   ['the amount pattern allowing three decimals', "(?:\\.\\d{1,2})?$/", "(?:\\.\\d{1,3})?$/"],
   ['format characters no longer dropped', '\\p{Cc}\\p{Cf}\\p{Co}', '\\p{Cc}\\p{Co}'],
+  ['the copyright, registered and trade mark signs no longer allowed', "text.replace(TEXT_SYMBOLS_RE, '')", 'text'],
+  ['a fourth pictograph allowed', 'String.fromCodePoint(0xa9, 0xae, 0x2122)', 'String.fromCodePoint(0xa9, 0xae, 0x2122, 0x2139)'],
+  ['a sign allowed with U+FE0F after it', '](?!${String.fromCodePoint(0xfe0f)})`', ']`'],
   ['a type label reworded', "lease: 'Fixed monthly lease payment',", "lease: 'Fixed monthly payment',"],
   ['a message reworded', "amount_required: 'Enter the monthly lease amount.',", "amount_required: 'Enter an amount.',"],
   ['the grouping separator changed', "grouped += ','", "grouped += '.'"],

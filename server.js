@@ -13080,7 +13080,6 @@ function registerApplicationVehicles(vehicles, appId, userId) {
 // investor's account, their investors record and one truck per vehicle, and
 // every refusal happens BEFORE any of that is written:
 //   - 409 APPLICATION_DELETED: the application was removed.
-//   - 409 USER_ALREADY_EXISTS: an account already has the applicant's email.
 //   - 409 INVESTOR_RECORD_CONFLICT: another investors record already holds the
 //     company name the new record would take (its carrier_name, compared
 //     trimmed and case-insensitively); the message names that record.
@@ -13088,9 +13087,14 @@ function registerApplicationVehicles(vehicles, appId, userId) {
 // the record and the trucks, so a refused or failed acceptance leaves the
 // application as it was. An application whose investors record already exists
 // (it was accepted before) is simply marked Accepted again; nothing is created.
+// So is one whose email an account already has: 200 { success: true,
+// accountCreated: false, existingUserId, message }, the message naming that
+// account's role and id, with the status and an audit row written together and
+// no email sent.
 // The username is derived from the legal name, else the email, else the
 // application id, so it is never empty, with a number appended while it is
-// taken, so it never collides.
+// taken (an account's username, a reserved name or a driver's name), so it
+// never collides.
 app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const { status } = req.body;
@@ -13141,14 +13145,24 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			}
 			const carrierName = String(application.dba || "").trim() || fullName;
 
+			// An account already has the applicant's email (an investor applying
+			// again for another truck, say): the application is marked Accepted and
+			// nothing else is written or sent. The status and the audit row that
+			// says so are one transaction, and the answer names the account.
 			const email = String(application.email || "").trim();
-			const emailHolder = email ? db.prepare("SELECT id, username FROM users WHERE LOWER(email) = LOWER(?)").get(email) : null;
+			const emailHolder = email ? db.prepare("SELECT id, role FROM users WHERE LOWER(email) = LOWER(?)").get(email) : null;
 			if (emailHolder) {
-				logAudit(req, "accept_investor_blocked", "investor_application", appId,
-					`Accepting application ${appId} refused: its email is already on user ${emailHolder.id}; nothing was written [USER_ALREADY_EXISTS]`);
-				return res.status(409).json({
-					error: `Not accepted: an account with this applicant's email already exists (username "${emailHolder.username}"). Nothing was changed.`,
-					code: "USER_ALREADY_EXISTS",
+				db.transaction(() => {
+					setStatus.run(status, appId);
+					logAudit(req, "accept_investor_existing_account", "investor_application", appId,
+						`Accepted application ${appId}; its email is already on user ${emailHolder.id} (${emailHolder.role}), so no account, investor record or trucks were created and no email was sent [USER_ALREADY_EXISTS]`);
+				})();
+				notifyChange("investor-applications");
+				return res.json({
+					success: true,
+					accountCreated: false,
+					existingUserId: emailHolder.id,
+					message: `Accepted. An account with this email already exists (${emailHolder.role} #${emailHolder.id}), so no new account, investor record or trucks were created.`,
 				});
 			}
 			const nameHolder = db.prepare(
@@ -13169,13 +13183,20 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			// letter or a digit. A legal name in another script, or of punctuation
 			// only, keeps none, and used to become "" (which the sign-in form
 			// refuses), then "1", or ".". No "@", so a username never reads as
-			// another account's email at sign-in. A number is appended while it is
-			// taken, compared as POST /api/users compares (trimmed, any case).
+			// another account's email at sign-in. A number is appended while the
+			// candidate is taken: empty, an account's username (compared as
+			// POST /api/users compares, trimmed, any case), or any name
+			// findDriverNameClash() finds — a reserved name such as the dispatch
+			// desk's "Dispatch", or a driver's name — so an investor's username is
+			// never a name another identity already answers to.
 			const foldUsername = (s) => String(s || "").toLowerCase().replace(/\s+/g, ".").replace(/[^a-z0-9.]/g, "");
 			const baseUsername = [fullName, email.split("@")[0]].map(foldUsername).find((u) => /[a-z0-9]/.test(u)) || `investor${appId}`;
+			const usernameTaken = (candidate) => !candidate
+				|| !!db.prepare("SELECT id FROM users WHERE LOWER(TRIM(username)) = LOWER(?)").get(candidate)
+				|| !!findDriverNameClash(candidate);
 			let username = baseUsername;
 			let suffix = 1;
-			while (db.prepare("SELECT id FROM users WHERE LOWER(TRIM(username)) = LOWER(?)").get(username)) {
+			while (usernameTaken(username)) {
 				username = `${baseUsername}${suffix}`;
 				suffix++;
 			}
@@ -33403,6 +33424,7 @@ function isBuiltInPropertyName(name) {
 // accepting a job application, POST /api/users, POST /api/drivers-directory,
 // PUT /api/users/:id, PUT /api/admin/fix-driver-name, PUT
 // /api/drivers-directory/:id, and syncDriverToCarrierSheet()'s add branch.
+// Accepting an investor application asks it too, for each username candidate.
 //
 // A driver's name is the key every ownership and settlement check matches on
 // (loadBelongsToDriver, driverOwnsInvoice, the expense and document routes), and

@@ -17,9 +17,9 @@
  *      temporary password is the stored credential, and #357's
  *      currentMustChangePassword() reports the account as forced
  *   §2 NOTHING ELSE about acceptance changed: the investors row, the trucks
- *      from the application's vehicles, company_name, the response shape, the
- *      refusal of an email that already has an account (409, nothing created),
- *      and non-Accepted statuses
+ *      from the application's vehicles, company_name, the response shape, an
+ *      email that already has an account (Accepted, nothing created, no mail,
+ *      the account named), and non-Accepted statuses
  *   §3 EVERY route that mints an emailed temporary password sets the flag in
  *      the INSERT that creates the account (today: driver + investor), so a
  *      third such route cannot quietly skip it
@@ -79,6 +79,14 @@ const COL_LETTER_SRC = liftFunction("function colLetter(idx) {");
 // scripts/test-investor-accept-vehicles.js).
 const REGISTER_VEHICLES_SRC = liftFunction("function registerApplicationVehicles(vehicles, appId, userId) {");
 const CURRENT_FLAG_SRC = liftFunction("function currentMustChangePassword(sessionUser) {");
+// The naming check each username candidate goes through (its own subject is
+// scripts/test-investor-accept-guards.js §8).
+const CLASH_SRC = [
+	"function normalizeDriverName(s) {",
+	"function isBuiltInPropertyName(name) {",
+	"function findDriverNameClashes(name, opts = {}) {",
+	"function findDriverNameClash(name, opts = {}) {",
+].map(liftFunction).join("\n");
 // The reader of each vehicle's purchase price, with the ceiling it reads (its
 // own subject is scripts/test-truck-cost-amounts.js §6).
 const PARSE_AMOUNT_SRC = (() => {
@@ -123,6 +131,7 @@ function makeDb() {
 			vin TEXT, license_plate TEXT, status TEXT, owner_id INTEGER, purchase_price REAL,
 			title_status TEXT, title_state TEXT, notes TEXT
 		);
+		CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT NOT NULL UNIQUE COLLATE NOCASE);
 	`);
 	return db;
 }
@@ -155,8 +164,9 @@ async function accept(db, appId, { status = "Accepted", routeSrc = ACCEPT_SRC } 
 	const parseTruckAmount = new Function(`${PARSE_AMOUNT_SRC}\nreturn parseTruckAmount;`)();
 	const registerApplicationVehicles = new Function("db", "colLetter", "parseTruckAmount",
 		`${REGISTER_VEHICLES_SRC}\nreturn registerApplicationVehicles;`)(db, colLetter, parseTruckAmount);
-	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", routeSrc)(
-		app, requireRole, db, fastBcrypt, crypto, () => {}, () => {}, colLetter, escapeHtml, sendEmail, parseTruckAmount, registerApplicationVehicles);
+	const findDriverNameClash = new Function("db", `${CLASH_SRC}\nreturn findDriverNameClash;`)(db);
+	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", routeSrc)(
+		app, requireRole, db, fastBcrypt, crypto, () => {}, () => {}, colLetter, escapeHtml, sendEmail, parseTruckAmount, registerApplicationVehicles, findDriverNameClash);
 	if (typeof handler !== "function") die("the lifted route did not register a handler");
 	const out = { status: 200, body: null };
 	const res = {
@@ -223,16 +233,20 @@ async function sectionUnchanged() {
 	ok(db.prepare("SELECT status FROM investor_applications WHERE id = ?").get(appId).status === "Accepted",
 		"§2 the application must be marked Accepted");
 
-	// A second application from the same email is refused (409
-	// USER_ALREADY_EXISTS; scripts/test-investor-accept-guards.js): no second
-	// account, no mail, and the application is not marked Accepted.
+	// A second application from the same email (an investor applying again for
+	// another truck) is marked Accepted and nothing else happens
+	// (scripts/test-investor-accept-guards.js §2): no second account, no
+	// temporary password, no mail, and the answer names the existing account.
 	const again = addApplication(db, { legal_name: "Acme Hauling Two LLC", dba: "Acme Two" });
 	const r2 = await accept(db, again);
-	ok(r2.status === 409 && r2.body && r2.body.code === "USER_ALREADY_EXISTS" && r2.mail.length === 0,
-		`§2 accepting for an email that already has an account must create nothing and mail nothing (got ${r2.status} ${JSON.stringify(r2.body)})`);
+	ok(r2.status === 200 && r2.body && r2.body.success === true && r2.body.accountCreated === false && r2.body.existingUserId === creds.userId
+		&& !("credentials" in r2.body) && typeof r2.body.message === "string" && r2.body.message.includes(`(Investor #${creds.userId})`) && r2.mail.length === 0,
+	`§2 accepting for an email that already has an account must create nothing, mail nothing and name the account (got ${r2.status} ${JSON.stringify(r2.body)})`);
 	ok(db.prepare("SELECT COUNT(*) AS n FROM users").get().n === 1, "§2 ...and leave exactly one account");
-	ok(db.prepare("SELECT status FROM investor_applications WHERE id = ?").get(again).status === "New",
-		"§2 ...and leave the refused application as it was");
+	ok(db.prepare("SELECT COUNT(*) AS n FROM investors").get().n === 1 && db.prepare("SELECT COUNT(*) AS n FROM trucks").get().n === 2,
+		"§2 ...and no second investors record or trucks");
+	ok(db.prepare("SELECT status FROM investor_applications WHERE id = ?").get(again).status === "Accepted",
+		"§2 ...and mark that application Accepted");
 
 	// Any other status creates no account at all.
 	for (const status of ["Reviewed", "Rejected", "New"]) {

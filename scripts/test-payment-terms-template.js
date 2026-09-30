@@ -8,7 +8,9 @@
  *   §1 the standard render is the template's original bytes: sha256 of
  *      applyPaymentTermsToHtml(file, doc, null) is origin/main's hash of each
  *      template (pinned below; recomputed with `git show origin/main:<file> |
- *      shasum -a 256` when the slots were added)
+ *      shasum -a 256` when the slots were added); each template on disk has
+ *      no \r, and .gitattributes checks them out with LF on every platform
+ *      (a CRLF marker line is refused, §4)
  *   §2 prepareTemplateHtml() / buildRenderFields() with no terms are exactly
  *      what renderPolicy() did before (file bytes + logo; the field map's own
  *      output), for every registered document
@@ -17,9 +19,11 @@
  *      terms labels join requiredText
  *   §4 the template refusals: unbalanced, duplicate, a missing required
  *      variant or slot, a stray marker, a marker in a non-investor template
- *   §5 normalizeTermsInput() over a case table (bidi, zero-width, U+2028 and
- *      NUL built with String.fromCodePoint), and normalizing twice changes
- *      nothing
+ *   §5 normalizeTermsInput() over a case table (bidi, zero-width, U+2028, NUL,
+ *      emoji and the copyright / registered / trade mark signs, all built with
+ *      String.fromCodePoint), and normalizing twice changes nothing. The three
+ *      signs are allowed; a sign with U+FE0F after it, emoji and every other
+ *      pictograph are refused
  *   §6 formatMoneyCents(), snapshotJson() / parseSnapshot()
  *   §7 a 100,000-character adversarial input finishes in under 50 ms
  *
@@ -68,8 +72,14 @@ const STANDARD_SPLIT = { type: "split", leaseAmountCents: null, details: "" };
 
 // ── §1 the standard render is the original bytes ────────────────────────────
 console.log("§1 standard render = origin/main bytes");
+// The markers are matched one LF-separated line at a time, so a CRLF checkout
+// (Windows core.autocrlf) would break every render; .gitattributes pins LF.
+const GITATTRIBUTES = fs.readFileSync(path.join(ROOT, ".gitattributes"), "utf8").split("\n");
+ok(GITATTRIBUTES.includes("onboarding-templates/** text eol=lf"), "§1 .gitattributes checks the templates out with LF line endings on every platform");
+ok(GITATTRIBUTES.includes("onboarding-templates/**/*.pdf binary"), "§1 ...and leaves the PDFs beside them binary");
 for (const doc of Object.keys(FILES)) {
 	const html = raw(doc);
+	ok(!html.includes("\r"), `§1 ${doc}: the template on disk has no \\r (a CRLF checkout breaks every marker)`);
 	ok(html.includes("payment-terms:slot"), `§1 ${doc}: the template carries its payment-terms slots`);
 	ok(sha(pt.applyPaymentTermsToHtml(html, doc, null)) === ORIGIN_MAIN_SHA256[doc],
 		`§1 ${doc}: the standard render must hash to origin/main's ${ORIGIN_MAIN_SHA256[doc].slice(0, 12)}…`);
@@ -246,6 +256,12 @@ const PSEP = cp(0x2029);
 const NUL = cp(0x0000);
 const BOM = cp(0xfeff);
 const EMOJI = cp(0x1f600);
+const COPYRIGHT = cp(0x00a9);
+const REGISTERED = cp(0x00ae);
+const TRADE_MARK = cp(0x2122);
+const EMOJI_PRESENTATION = cp(0xfe0f);
+const INFORMATION_SOURCE = cp(0x2139);
+const DOUBLE_EXCLAMATION = cp(0x203c);
 const CYRILLIC_A = cp(0x0430);
 const E_ACUTE_NFD = `e${cp(0x0301)}`;
 const E_ACUTE_NFC = cp(0x00e9);
@@ -290,6 +306,18 @@ const CASES = [
 		{ ok: true, value: { type: "split", leaseAmountCents: null, details: "ABC" } }],
 	["details: only invisible characters is empty", { paymentType: "split", details: `${ZWSP}${RLO}\n\n` }, { ok: true, value: { type: "split", leaseAmountCents: null, details: "" } }],
 	["details: emoji", { paymentType: "split", details: `Great ${EMOJI}` }, { ok: false, field: "details", reason: "unsupported_characters", message: pt.MESSAGES.unsupported_characters }],
+	["details: the copyright, registered and trade mark signs", { paymentType: "split", details: `Acme${TRADE_MARK} ${COPYRIGHT}2026 ${REGISTERED}` },
+		{ ok: true, value: { type: "split", leaseAmountCents: null, details: `Acme${TRADE_MARK} ${COPYRIGHT}2026 ${REGISTERED}` } }],
+	["details: all three signs together, then an emoji", { paymentType: "split", details: `${COPYRIGHT}${REGISTERED}${TRADE_MARK} ${EMOJI}` },
+		{ ok: false, field: "details", reason: "unsupported_characters", message: pt.MESSAGES.unsupported_characters }],
+	["details: the copyright sign as an emoji (U+FE0F after it)", { paymentType: "split", details: `${COPYRIGHT}${EMOJI_PRESENTATION} 2026` },
+		{ ok: false, field: "details", reason: "unsupported_characters", message: pt.MESSAGES.unsupported_characters }],
+	["details: the trade mark sign as an emoji (U+FE0F after it)", { paymentType: "split", details: `Acme${TRADE_MARK}${EMOJI_PRESENTATION}` },
+		{ ok: false, field: "details", reason: "unsupported_characters", message: pt.MESSAGES.unsupported_characters }],
+	["details: another letterlike pictograph (information source)", { paymentType: "split", details: `See ${INFORMATION_SOURCE}` },
+		{ ok: false, field: "details", reason: "unsupported_characters", message: pt.MESSAGES.unsupported_characters }],
+	["details: another punctuation pictograph (double exclamation)", { paymentType: "split", details: `Note${DOUBLE_EXCLAMATION}` },
+		{ ok: false, field: "details", reason: "unsupported_characters", message: pt.MESSAGES.unsupported_characters }],
 	["details: another script", { paymentType: "split", details: `P${CYRILLIC_A}yment` }, { ok: false, field: "details", reason: "unsupported_characters", message: pt.MESSAGES.unsupported_characters }],
 	["details: not text", { paymentType: "split", details: 42 }, { ok: false, field: "details", reason: "details_not_text", message: pt.MESSAGES.details_not_text }],
 	["details: 2001 characters", { paymentType: "split", details: "x".repeat(2001) }, { ok: false, field: "details", reason: "details_too_long", message: pt.MESSAGES.details_too_long }],
