@@ -107,7 +107,7 @@
               <TableCell class="text-[13px] text-gray-600">{{ app.entity_type || '-' }}</TableCell>
               <TableCell class="text-[13px] text-gray-600">{{ app.email }}</TableCell>
               <TableCell class="text-[13px] text-gray-600">{{ app.phone }}</TableCell>
-              <TableCell class="text-[13px] text-gray-700" data-test="application-terms" :title="app.invite_id ? `Applied through personal invite #${app.invite_id}` : undefined">{{ app.payment_terms_summary || '—' }}</TableCell>
+              <TableCell class="text-[13px] text-gray-700 max-w-[170px]" data-test="application-terms" :title="termsTitle(app)"><span class="line-clamp-2">{{ app.payment_terms_summary || '—' }}</span></TableCell>
               <TableCell class="text-[13px]" data-test="application-docs">{{ app.signed_count || 0 }}/{{ app.docs_total ?? 3 }}</TableCell>
               <TableCell><Badge :class="obBadge(app.onboarding_status)">{{ app.onboarding_status || 'pending' }}</Badge></TableCell>
               <TableCell><Badge :class="statusBadge(app.status)">{{ app.status }}</Badge></TableCell>
@@ -359,6 +359,12 @@ function statusBadge(s) {
   if (s === 'Rejected') return 'bg-red-50 text-red-700 border-red-200'
   if (s === 'Reviewed') return 'bg-blue-50 text-blue-700 border-blue-200'
   return 'bg-gray-50 text-gray-600 border-gray-200'
+}
+
+// The Terms cell shows two lines at most; its tooltip keeps the whole summary.
+function termsTitle(app) {
+  const summary = app.payment_terms_summary || ''
+  return app.invite_id ? `${summary} (applied through personal invite #${app.invite_id})` : summary || undefined
 }
 
 function obBadge(s) {
