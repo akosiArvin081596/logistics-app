@@ -9735,7 +9735,7 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), async (req, res
 		if (app.city || app.state || app.zip) {
 			field("City / State / ZIP", `${[app.city, app.state].filter(Boolean).join(", ")}${app.zip ? " " + app.zip : ""}`);
 		}
-		field("SSN", app.ssn ? "***-**-" + app.ssn.slice(-4) : "N/A");
+		field("SSN", app.ssn ? piiMask.maskSsn(app.ssn) : "N/A");
 		field("Drivers License", app.drivers_license);
 		field("Position", app.position);
 		if (app.dot) field("DOT #", app.dot);
