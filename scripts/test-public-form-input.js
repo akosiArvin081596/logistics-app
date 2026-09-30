@@ -5,9 +5,9 @@
  *     POST /api/public/apply
  *     POST /api/public/investor-apply
  *     POST /api/public/investor-preview-pdf/:docKey
- *     POST /api/public/investor-onboarding/:id/sign/:docKey
- *     POST /api/public/investor-onboarding/:id/vehicles
- *     POST /api/public/investor-onboarding/:id/banking
+ *
+ * (The token-gated /api/public/investor-onboarding/:id/* routes were removed;
+ * §6 asserts none is mounted.)
  *
  * All of them take their input from anyone on the internet. The checks live
  * ONCE, in lib/public-form-input.js, and every route calls them.
@@ -381,9 +381,6 @@ const INVEST_RAW = routeSource("post", "/api/public/investor-apply");
 const APPLY = codeOnly(routeSource("post", "/api/public/apply"));
 const INVEST = codeOnly(INVEST_RAW);
 const PREVIEW = codeOnly(routeSource("post", "/api/public/investor-preview-pdf/:docKey"));
-const SIGN = codeOnly(routeSource("post", "/api/public/investor-onboarding/:id/sign/:docKey"));
-const VEHICLES = codeOnly(routeSource("post", "/api/public/investor-onboarding/:id/vehicles"));
-const BANKING = codeOnly(routeSource("post", "/api/public/investor-onboarding/:id/banking"));
 
 function applyWired(src) {
 	const later = ["db.prepare(", "sendEmail(", "logAudit("];
@@ -410,18 +407,19 @@ ok("POST /api/public/investor-apply: fields, banking, signatures, email and vehi
 ok("POST /api/public/investor-preview-pdf: vehicles checked before either renderer; 400 on refusal",
 	callsFirst(PREVIEW, "publicFormInput.checkPublicVehicles(vehicles)", ["renderPolicy(", "fillW9Form("]) &&
 	refusesWith400(PREVIEW, "vehicleCheck") && PREVIEW.includes("const vehiclesArr = vehicleCheck.value;"));
-ok("POST /api/public/investor-onboarding/:id/sign: signature and vehicles checked before the first query and the render; 400 on refusal",
-	callsFirst(SIGN, 'typeof signatureText !== "string"', ["db.prepare(", "buildInvestorDocRender("]) &&
-	callsFirst(SIGN, 'publicFormInput.checkPublicScalars(req.body, ["signatureImage"])', ["db.prepare(", "buildInvestorDocRender("]) &&
-	callsFirst(SIGN, "publicFormInput.checkPublicVehicles(", ["UPDATE investor_applications SET", "buildInvestorDocRender("]) &&
-	refusesWith400(SIGN, "sigShape") && refusesWith400(SIGN, "vehicleCheck") &&
-	SIGN.includes("const vehiclesArr = vehicleCheck.value;"));
-ok("POST /api/public/investor-onboarding/:id/vehicles: vehicles checked before the first write; 400 on refusal",
-	callsFirst(VEHICLES, "publicFormInput.checkPublicVehicles(vehicles)", ["db.prepare("]) &&
-	refusesWith400(VEHICLES, "vehicleCheck") && VEHICLES.includes("const vehiclesArr = vehicleCheck.value;"));
-ok("POST /api/public/investor-onboarding/:id/banking: fields checked before the first query; 400 on refusal",
-	callsFirst(BANKING, "publicFormInput.checkPublicScalars(req.body, PUBLIC_BANKING_SCALAR_FIELDS)", ["db.prepare("]) &&
-	refusesWith400(BANKING, "bankingShape"));
+ok("POST /api/public/investor-preview-pdf: the contract previews check every field they print is one value, before a render slot is taken; 400 on refusal",
+	callsFirst(PREVIEW, "publicFormInput.checkPublicScalars(req.body, PUBLIC_CONTRACT_PREVIEW_SCALAR_FIELDS)", ["pdfPreviewInflight++", "renderPolicy("]) &&
+	refusesWith400(PREVIEW, "contractShape"));
+ok("POST /api/public/investor-preview-pdf: a render failure answers a fixed message, never the error text",
+	!/res\.status\(500\)\.json\(\{\s*error:\s*err\.message/.test(PREVIEW));
+{
+	const contractList = constList("PUBLIC_CONTRACT_PREVIEW_SCALAR_FIELDS");
+	const printed = ["legal_name", "dba", "entity_type", "address", "contact_person", "contact_title", "phone", "email", "ein_ssn", "years_in_operation", "fleet_size", "signatureText"];
+	ok("PUBLIC_CONTRACT_PREVIEW_SCALAR_FIELDS = every text field the contract previews put in appData",
+		sameSet(contractList, printed) && printed.every((f) => bodyFields(PREVIEW).includes(f)));
+}
+ok("the token-gated /api/public/investor-onboarding/:id/* routes are gone: none is mounted",
+	![...codeOnly(SRC).matchAll(/app\.(?:get|post|put|patch|delete|all|use)\(\s*"([^"]+)"/g)].some(([, p]) => p.startsWith("/api/public/investor-onboarding")));
 
 // Each field list must be exactly what its route binds, or the check quietly
 // stops covering a new field.
@@ -436,15 +434,30 @@ ok("…and the route really does serialize those two before binding",
 	/typeof reference_info === 'string' \? reference_info : JSON\.stringify\(reference_info/.test(APPLY));
 ok("PUBLIC_INVESTOR_SCALAR_FIELDS = every field /api/public/investor-apply destructures, less vehicles/banking/signatures",
 	sameSet(investorList, bodyFields(INVEST).filter((f) => !["vehicles", "banking", "signatures"].includes(f))));
-ok("PUBLIC_BANKING_SCALAR_FIELDS = every field the onboarding banking route destructures",
-	sameSet(bankingList, bodyFields(BANKING)));
-ok("…and every banking field investor-apply binds is in PUBLIC_BANKING_SCALAR_FIELDS",
-	!!bankingList && [...INVEST.matchAll(/banking\.([a-z_]+)/g)].every(([, f]) => bankingList.includes(f)));
+// The payment terms invitation fields: one scalar each, checked before the
+// route reads either of them.
+function inviteFieldsWired(src) {
+	return callsFirst(src, "publicFormInput.checkPublicScalars(req.body, PUBLIC_INVESTOR_SCALAR_FIELDS)",
+		["parseInviteRevision(invite_terms_revision)", "resolveInviteToken(invite_token)"]);
+}
+ok("…and that list carries the two invitation fields, invite_token and invite_terms_revision",
+	!!investorList && investorList.includes("invite_token") && investorList.includes("invite_terms_revision"));
+ok("POST /api/public/investor-apply: the invitation fields are read only after the scalar check",
+	inviteFieldsWired(INVEST) && INVEST.includes("resolveInviteToken(invite_token)"));
+ok("…a token sent as a list is refused as not one scalar",
+	pfi.checkPublicScalars({ invite_token: ["a", "b"], invite_terms_revision: 1 }, investorList || []).field === "invite_token" &&
+	pfi.checkPublicScalars({ invite_token: "a".repeat(43), invite_terms_revision: { n: 1 } }, investorList || []).field === "invite_terms_revision");
+const lateInviteCheck = INVEST.replace("publicFormInput.checkPublicScalars(req.body, PUBLIC_INVESTOR_SCALAR_FIELDS)", "({ ok: true })")
+	.replace("const appId = applyTx();", "const appId = applyTx();\n\t\tpublicFormInput.checkPublicScalars(req.body, PUBLIC_INVESTOR_SCALAR_FIELDS);");
+ok("MUTANT: checking the invitation fields only after they are read is caught",
+	lateInviteCheck !== INVEST && !inviteFieldsWired(lateInviteCheck));
+ok("PUBLIC_BANKING_SCALAR_FIELDS = every banking field /api/public/investor-apply binds",
+	sameSet(bankingList, [...new Set([...INVEST.matchAll(/banking\.([a-z_]+)/g)].map(([, f]) => f))]));
 
 // The general rules, so a NEW public route cannot quietly skip them.
 const PUBLIC_ROUTES = [...SRC.matchAll(/app\.(get|post|put|patch|delete)\("(\/api\/public\/[^"]+)"/g)]
 	.map(([, verb, p]) => ({ label: `${verb.toUpperCase()} ${p}`, src: codeOnly(routeSource(verb, p)) }));
-ok("found the public routes to sweep", PUBLIC_ROUTES.length >= 9);
+ok("found the public routes to sweep", PUBLIC_ROUTES.length >= 4);
 ok("the previous inline email pattern is gone from server.js", !SRC.includes("/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/"));
 ok("no public route runs its own pattern on `email`",
 	!PUBLIC_ROUTES.some(({ src }) => /\.(?:test|match|exec)\((?:String\()?email\b/.test(src)));

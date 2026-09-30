@@ -74,7 +74,7 @@ The renderer treats every key as optional. Add a new field to a template by addi
 | `contractor-agreement.html` | Same pattern | Driver onboarding (heaviest — ~25 fields + banking info + payment method checkboxes). |
 | `service-invoice.html` | `POST /api/invoices/generate` | Weekly driver invoice (fixed-rate driver pay). |
 | `service-invoice-owner-op.html` | Same endpoint, different `pay_type` | Weekly invoice for owner-operators (percentage of revenue, with cloneable loads/expenses tables). |
-| `master-agreement.html` | `GET /api/public/investor-onboarding/:id/documents/master_agreement/pdf` | Investor onboarding (~25 fields, equipment checkboxes, multi-vehicle Exhibit A). |
+| `master-agreement.html` | `POST /api/public/investor-preview-pdf/master_agreement` (preview); signed through `POST /api/public/investor-apply` | Investor onboarding (~25 fields, equipment checkboxes, multi-vehicle Exhibit A). |
 | `vehicle-lease.html` | Same pattern | Investor onboarding (lessee/lessor split, 10-item inspection checklist). |
 
 ## W-9 — a different mechanism

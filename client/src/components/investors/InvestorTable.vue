@@ -110,8 +110,8 @@
                 <input v-bind="inputProps" class="inv-avatar-input" />
               </label>
               <div style="flex:1;min-width:0">
-                <div style="font-size:1.1rem;font-weight:700;color:#0f172a">{{ detail.application?.legal_name || 'Investor' }}</div>
-                <div style="font-size:13px;color:#94a3b8">{{ detail.application?.entity_type }} | {{ detail.application?.email }}</div>
+                <div style="font-size:1.1rem;font-weight:700;color:#0f172a">{{ detail.application?.legal_name || detail.fullName || 'Investor' }}</div>
+                <div v-if="detailSubtitle" style="font-size:13px;color:#94a3b8">{{ detailSubtitle }}</div>
                 <!-- This modal has no toast, so a refused or failed upload has
                      nowhere else to go. One slot: error wins over notice. -->
                 <p
@@ -130,7 +130,8 @@
           <div v-if="detailLoading" style="display:flex;align-items:center;justify-content:center;padding:4rem">
             <span style="font-size:13px;color:#94a3b8">Loading...</span>
           </div>
-          <div v-else-if="detail.application" style="padding:1.25rem 1.5rem;overflow-y:auto;max-height:68vh">
+          <div v-else style="padding:1.25rem 1.5rem;overflow-y:auto;max-height:68vh">
+            <template v-if="detail.application">
             <!-- Company & Business -->
             <div class="detail-section">
               <div class="detail-section-title"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg> Company &amp; Business</div>
@@ -194,22 +195,28 @@
                 <div class="detail-item"><span class="detail-label">Bank Name</span><span class="detail-value">{{ detail.banking.bank_name }}</span></div>
                 <div v-if="detail.banking.account_type" class="detail-item"><span class="detail-label">Account Type</span><span class="detail-value">{{ detail.banking.account_type }}</span></div>
                 <div class="detail-item"><span class="detail-label">Routing Number</span><span class="detail-value">{{ detail.banking.routing_number }}</span></div>
-                <div class="detail-item">
-                  <span class="detail-label">Account Number</span>
-                  <span class="detail-value" style="display:inline-flex;align-items:center;gap:0.4rem">
-                    {{ showAcctNum ? detail.banking.account_number : '••••' + (detail.banking.account_number || '').slice(-4) }}
-                    <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="cursor:pointer;color:#94a3b8;flex-shrink:0" @click="showAcctNum = !showAcctNum">
-                      <path v-if="!showAcctNum" d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle v-if="!showAcctNum" cx="12" cy="12" r="3"/>
-                      <path v-if="showAcctNum" d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line v-if="showAcctNum" x1="1" y1="1" x2="23" y2="23"/>
-                    </svg>
-                  </span>
-                </div>
+                <!-- The server sends this masked, so it is shown masked, with no
+                     reveal control: a toggle here could only ever re-show the mask. -->
+                <div class="detail-item"><span class="detail-label">Account Number</span><span class="detail-value" data-test="investor-account-number">{{ maskedAccount(detail.banking.account_number) }}</span></div>
               </div>
             </div>
-            <!-- No application linked -->
-            <div v-if="!detail.application?.legal_name" style="text-align:center;padding:2rem;color:#94a3b8;font-size:13px">
+            </template>
+            <div v-else-if="detail.error" class="detail-msg detail-msg-error" role="alert">
+              <span>Couldn't load this investor's application ({{ detail.error }}).</span>
+              <button type="button" class="detail-msg-action" @click="retryDetail">Retry</button>
+            </div>
+            <div v-else data-test="investor-no-application" style="text-align:center;padding:2rem;color:#94a3b8;font-size:13px">
               No application data linked to this investor.
             </div>
+
+            <!-- Payment terms: outside the application gate, so an investor
+                 with no application still says whether an agreement is on file. -->
+            <InvestorPaymentTermsSection
+              v-if="selectedInvestorId"
+              :key="selectedInvestorId"
+              :investor-id="selectedInvestorId"
+              style="margin-top:1rem;border-top:1px solid #f1f5f9;padding-top:1rem"
+            />
 
             <!-- Shared Documents -->
             <div v-if="selectedInvestorId" style="margin-top:1rem;border-top:1px solid #f1f5f9;padding-top:1rem">
@@ -232,6 +239,7 @@ import ConfirmModal from '../shared/ConfirmModal.vue'
 import AvatarPlaceholder from '../shared/AvatarPlaceholder.vue'
 import LegalDocumentPortal from '../investor/LegalDocumentPortal.vue'
 import InvestorSplitCell from './InvestorSplitCell.vue'
+import InvestorPaymentTermsSection from './InvestorPaymentTermsSection.vue'
 
 const props = defineProps({
   investors: { type: Array, default: () => [] },
@@ -244,42 +252,60 @@ const showConfirm = ref(false)
 const pendingInv = ref(null)
 const showEdit = ref(false)
 const showDetail = ref(false)
-const showAcctNum = ref(false)
 const selectedInvestorId = ref(0)
 const detailLoading = ref(false)
-const detail = reactive({ application: null, vehicles: [], banking: {}, documents: [], profilePictureUrl: '', fullName: '' })
+const detail = reactive({ application: null, vehicles: [], banking: {}, documents: [], profilePictureUrl: '', fullName: '', error: '' })
 const picUploading = ref(false)
+let detailInvestor = null
+let detailTicket = 0
+
+// Only the last four digits, whatever the server sent.
+function maskedAccount(value) {
+  return value ? `••••${String(value).slice(-4)}` : '—'
+}
+
+const detailSubtitle = computed(() =>
+  [detail.application?.entity_type, detail.application?.email].filter(Boolean).join(' | '),
+)
 
 async function viewDetail(inv) {
+  const ticket = ++detailTicket
+  detailInvestor = inv
   selectedInvestorId.value = inv.id
   // The modal is reused for every investor, so a message left over from the
   // last one would otherwise reappear against the next.
   clearMessages()
   detail.profilePictureUrl = inv.profilePictureUrl || ''
   detail.fullName = inv.fullName || ''
-  if (!inv.applicationId) {
-    showDetail.value = true
-    detailLoading.value = false
-    detail.application = { legal_name: inv.fullName, entity_type: '', email: '' }
-    detail.vehicles = []
-    detail.banking = {}
-    detail.documents = []
-    return
-  }
-  showDetail.value = true
-  detailLoading.value = true
   detail.application = null
   detail.vehicles = []
   detail.banking = {}
   detail.documents = []
+  detail.error = ''
+  showDetail.value = true
+  // No application: the body says so rather than showing empty sections.
+  if (!inv.applicationId) {
+    detailLoading.value = false
+    return
+  }
+  detailLoading.value = true
   try {
     const data = await api.get(`/api/investor-applications/${inv.applicationId}`)
-    detail.application = data.application
+    if (ticket !== detailTicket) return
+    detail.application = data.application || null
     detail.vehicles = data.vehicles || []
     detail.banking = data.banking || {}
     detail.documents = data.documents || []
-  } catch { /* skip */ }
-  finally { detailLoading.value = false }
+  } catch (err) {
+    if (ticket !== detailTicket) return
+    detail.error = err?.message || 'no answer'
+  } finally {
+    if (ticket === detailTicket) detailLoading.value = false
+  }
+}
+
+function retryDetail() {
+  if (detailInvestor) viewDetail(detailInvestor)
 }
 
 // Drag-and-drop + the only real type/size gate on this surface: `accept` on the
@@ -583,4 +609,13 @@ function handleConfirmDelete() {
 .detail-item.full { grid-column: 1 / -1; }
 .detail-label { font-size: 0.7rem; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.04em; }
 .detail-value { font-size: 0.85rem; color: #0f172a; font-weight: 500; }
+.detail-msg {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 0.75rem;
+  padding: 0.6rem 0.75rem; border-radius: 8px; font-size: 0.8rem; line-height: 1.45;
+}
+.detail-msg-error { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; }
+.detail-msg-action {
+  flex-shrink: 0; background: none; border: none; padding: 0;
+  font: inherit; font-weight: 700; color: inherit; text-decoration: underline; cursor: pointer;
+}
 </style>

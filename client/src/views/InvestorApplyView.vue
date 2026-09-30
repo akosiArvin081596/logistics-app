@@ -65,7 +65,8 @@
             <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
           </div>
           <h2>Onboarding Complete</h2>
-          <p>Thank you, <strong>{{ form.legal_name }}</strong>. Your application and all documents have been submitted successfully.</p>
+          <p v-if="completedName">Thank you, <strong>{{ completedName }}</strong>. Your application and all documents have been submitted successfully.</p>
+          <p v-else>Thank you. Your application and all documents have been submitted successfully.</p>
           <div class="next-steps">
             <h4>What happens next</h4>
             <div class="next-step"><span class="ns-num">1</span><span>Our team will review your application within 1-2 business days</span></div>
@@ -75,8 +76,20 @@
         </div>
       </div>
 
+      <!-- Personal invitation (?invite=): the first lookup, then a refusal in place of the form. -->
+      <div v-else-if="invite.state === 'loading'" class="invite-loading" role="status" data-test="invite-loading">
+        <span class="spinner"></span>
+        Loading your invitation...
+      </div>
+      <InviteErrorState
+        v-else-if="invite.state === 'error'"
+        :code="invite.error.code" :message="invite.error.message"
+        @retry="loadInvite"
+      />
+
       <template v-else>
         <div v-if="restoreNotice" class="notice-bar" role="status">{{ restoreNotice }}</div>
+        <div v-if="termsNotice" class="notice-bar" role="status" data-test="invite-terms-notice">{{ termsNotice }}</div>
 
         <!-- STEP 1: Application -->
         <div v-if="step === 0" class="step-panel">
@@ -86,7 +99,7 @@
             <p>Tell us about you and your business</p>
             <div class="trust-badge">
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-              <span>256-bit encrypted &amp; secure</span>
+              <span>Encrypted connection (HTTPS)</span>
             </div>
           </div>
 
@@ -97,11 +110,21 @@
           <div class="form-grid">
             <div class="field full">
               <label>Legal Name (Individual or Entity) <span class="req">*</span></label>
-              <input v-model="form.legal_name" placeholder="e.g. John Doe or Doe Enterprises LLC" data-wizard-target="legal-name" required />
+              <input
+                v-model="form.legal_name" placeholder="e.g. John Doe or Doe Enterprises LLC" data-wizard-target="legal-name" required maxlength="200"
+                :aria-invalid="w9FieldErrors.legal_name ? 'true' : 'false'"
+                :aria-describedby="w9FieldErrors.legal_name ? 'invest-legal-name-error' : undefined"
+              />
+              <p v-if="w9FieldErrors.legal_name" id="invest-legal-name-error" class="field-error" role="alert">{{ w9FieldErrors.legal_name }}</p>
             </div>
             <div class="field">
               <label>DBA <span class="opt">(if applicable)</span></label>
-              <input v-model="form.dba" placeholder="Doing business as..." data-wizard-target="dba" />
+              <input
+                v-model="form.dba" placeholder="Doing business as..." data-wizard-target="dba" maxlength="200"
+                :aria-invalid="w9FieldErrors.dba ? 'true' : 'false'"
+                :aria-describedby="w9FieldErrors.dba ? 'invest-dba-error' : undefined"
+              />
+              <p v-if="w9FieldErrors.dba" id="invest-dba-error" class="field-error" role="alert">{{ w9FieldErrors.dba }}</p>
             </div>
             <div class="field">
               <label>Entity Type</label>
@@ -114,7 +137,11 @@
               <label>Principal Address <span class="req">*</span></label>
               <div class="address-row">
                 <div class="address-input-wrap">
-                  <input ref="addressInput" v-model="form.address" placeholder="Start typing an address..." data-wizard-target="address" required autocomplete="off" />
+                  <input
+                    ref="addressInput" v-model="form.address" placeholder="Start typing an address..." data-wizard-target="address" required autocomplete="off" maxlength="300"
+                    :aria-invalid="w9FieldErrors.address ? 'true' : 'false'"
+                    :aria-describedby="w9FieldErrors.address ? 'invest-address-error' : undefined"
+                  />
                   <button type="button" class="addr-action-btn" :disabled="geolocating" @click="useCurrentLocation" title="Use my current location">
                     <svg v-if="!geolocating" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
                     <span v-else class="spinner"></span>
@@ -124,6 +151,7 @@
                   <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5z"/></svg>
                 </button>
               </div>
+              <p v-if="w9FieldErrors.address" id="invest-address-error" class="field-error" role="alert">{{ w9FieldErrors.address }}</p>
             </div>
             <div class="field"><label>Primary Contact Person</label><input v-model="form.contact_person" placeholder="Full name" /></div>
             <div class="field">
@@ -173,7 +201,16 @@
               <label>Tax Classification</label>
               <select v-model="form.tax_classification"><option value="">Select...</option><option>C-Corp</option><option>S-Corp</option><option>Partnership</option><option>Individual/LLC</option></select>
             </div>
-            <div class="field"><label>EIN or SSN <span class="req">*</span></label><input v-model="form.ein_ssn" placeholder="XX-XXXXXXX" data-wizard-target="ein-ssn" required /></div>
+            <div class="field">
+              <label>EIN or SSN <span class="req">*</span></label>
+              <input
+                v-model="form.ein_ssn" placeholder="XX-XXXXXXX" data-wizard-target="ein-ssn" required
+                :aria-invalid="showTinError ? 'true' : 'false'"
+                :aria-describedby="showTinError ? 'invest-tin-error' : undefined"
+                @focus="tinFocused = true" @blur="tinFocused = false"
+              />
+              <p v-if="showTinError" id="invest-tin-error" class="field-error" role="alert">{{ tinCheck.message }}</p>
+            </div>
             <div class="field">
               <label>Monthly Reporting Delivery</label>
               <select v-model="form.reporting_preference"><option value="">Select...</option><option>Digital Portal</option><option>Email PDF</option></select>
@@ -273,6 +310,8 @@
             </div>
           </details>
 
+          <InvitePaymentTermsCard v-if="inviteTerms" :payment-terms="inviteTerms" />
+
           <!-- Accordion 2: Onboarding Documents -->
           <details class="accordion" open>
             <summary class="accordion-toggle">
@@ -305,7 +344,7 @@
 
           <div class="step-actions">
             <div></div>
-            <button class="btn-primary" :disabled="!allVehiclesValid || signedCount < totalDocs" data-wizard-target="continue-step1" @click="restoreNotice = ''; vehicleInfoDone = true; step = 2; maxStep = Math.max(maxStep, 2)">
+            <button class="btn-primary" :disabled="!allVehiclesValid || signedCount < totalDocs" data-wizard-target="continue-step1" @click="restoreNotice = ''; termsNotice = ''; vehicleInfoDone = true; step = 2; maxStep = Math.max(maxStep, 2)">
               Continue
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
             </button>
@@ -322,7 +361,7 @@
 
           <div class="bank-security-note" data-wizard-target="banking-section">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            <span>Your banking information is encrypted and stored securely.</span>
+            <span>Your banking information is sent over an encrypted connection and stored on LogisX's servers; only LogisX administrators can see it.</span>
           </div>
 
           <div class="form-grid">
@@ -369,7 +408,7 @@
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
               Back
             </button>
-            <button class="btn-primary" :disabled="!canSubmitBanking || submitting" data-wizard-target="review-open" @click="showReviewModal = true">
+            <button ref="reviewOpenButton" class="btn-primary" :disabled="!canSubmitBanking || submitting" data-wizard-target="review-open" @click="showReviewModal = true">
               {{ 'Review & Complete' }}
             </button>
           </div>
@@ -385,10 +424,18 @@
 
     <!-- Review Modal -->
     <div v-if="showReviewModal" class="review-overlay" @click.self="showReviewModal = false">
-      <div class="review-modal" data-wizard-target="review-modal">
+      <div
+        ref="reviewDialog"
+        class="review-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="review-dialog-title"
+        tabindex="-1"
+        data-wizard-target="review-modal"
+      >
         <div class="review-header">
-          <h3>Review Your Application</h3>
-          <button class="review-close" @click="showReviewModal = false">&times;</button>
+          <h3 id="review-dialog-title">Review Your Application</h3>
+          <button class="review-close" aria-label="Close" @click="showReviewModal = false">&times;</button>
         </div>
         <div class="review-body">
           <!-- Step 1: Application Info -->
@@ -432,6 +479,19 @@
             </div>
           </div>
 
+          <!-- Invitation terms: read-only, as they appear in Amendment No. 1 -->
+          <div v-if="inviteTerms" class="review-section" data-test="review-terms">
+            <div class="review-section-title">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+              Payment Terms
+            </div>
+            <div class="review-grid">
+              <div class="review-item"><span class="review-label">Payment type</span><span class="review-value">{{ inviteTerms.typeLabel }}</span></div>
+              <div v-if="inviteTerms.type === 'lease'" class="review-item"><span class="review-label">Monthly amount</span><span class="review-value">{{ inviteTerms.amountLabel }}</span></div>
+              <div class="review-item full"><span class="review-label">Additional terms</span><span class="review-value review-terms-details">{{ inviteTerms.details || 'None' }}</span></div>
+            </div>
+          </div>
+
           <!-- Step 2: Documents -->
           <div class="review-section">
             <div class="review-section-title">
@@ -441,10 +501,17 @@
             <div class="review-grid">
               <div v-for="doc in documents" :key="doc.doc_key" class="review-item full">
                 <span class="review-label">{{ doc.doc_name }}</span>
-                <span v-if="doc.signed" class="review-value text-green doc-view-link" @click="openReviewPdf(doc)">
+                <!-- Named after its document: three buttons share the visible text. -->
+                <button
+                  v-if="doc.signed"
+                  type="button"
+                  class="review-value text-green doc-view-link"
+                  :aria-label="`Signed — View Document: ${doc.doc_name}`"
+                  @click="openReviewPdf(doc)"
+                >
                   Signed &mdash; View Document
                   <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-left:2px"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-                </span>
+                </button>
                 <span v-else class="review-value text-amber">Pending</span>
               </div>
             </div>
@@ -465,10 +532,17 @@
                 <span class="review-label">Account Number</span>
                 <span class="review-value" style="display:inline-flex;align-items:center;gap:0.4rem">
                   {{ showAcctNum ? banking.account_number : '••••' + banking.account_number.slice(-4) }}
-                  <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="cursor:pointer;color:#94a3b8;flex-shrink:0" @click="showAcctNum = !showAcctNum">
-                    <path v-if="!showAcctNum" d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle v-if="!showAcctNum" cx="12" cy="12" r="3"/>
-                    <path v-if="showAcctNum" d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line v-if="showAcctNum" x1="1" y1="1" x2="23" y2="23"/>
-                  </svg>
+                  <button
+                    type="button"
+                    class="acct-eye"
+                    :aria-label="showAcctNum ? 'Hide account number' : 'Show account number'"
+                    @click="showAcctNum = !showAcctNum"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path v-if="!showAcctNum" d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle v-if="!showAcctNum" cx="12" cy="12" r="3"/>
+                      <path v-if="showAcctNum" d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line v-if="showAcctNum" x1="1" y1="1" x2="23" y2="23"/>
+                    </svg>
+                  </button>
                 </span>
               </div>
             </div>
@@ -489,26 +563,38 @@
     <InvestorSignModal
       :show="showSignModal" :doc="selectedDoc" :pdf-url="previewPdfUrl"
       :suggested-names="[form.contact_person, form.legal_name].filter(Boolean)"
-      @close="showSignModal = false; revokePreview()" @signed="handleSigned"
+      :payment-terms="signTerms" :notice="signNotice || termsNotice" :pdf-error="previewError"
+      @close="closeSignModal" @signed="handleSigned" @retry-preview="retryPreview"
     />
     <LocationPickerModal
       :open="showMapPicker" label="Principal Address"
       @close="showMapPicker = false" @confirm="onMapConfirm"
     />
 
-    <!-- Signed PDF Viewer (from review modal) -->
-    <div v-if="reviewPdfUrl" class="pdf-viewer-overlay" @click.self="closeReviewPdf">
-      <div class="pdf-viewer-panel">
+    <!-- Signed PDF Viewer (from review modal). It opens on the click, so the
+         render is visibly under way, and a refused or failed preview says so
+         with a retry, the same way the sign modal's pane does. -->
+    <div v-if="reviewDoc" class="pdf-viewer-overlay" data-test="review-pdf-viewer" @click.self="closeReviewPdf">
+      <div ref="reviewViewer" class="pdf-viewer-panel" role="dialog" aria-modal="true" :aria-label="reviewDoc.doc_name" tabindex="-1">
         <div class="pdf-viewer-header">
-          <span class="pdf-viewer-title">{{ reviewPdfName }}</span>
-          <button class="review-close" @click="closeReviewPdf">&times;</button>
+          <span class="pdf-viewer-title">{{ reviewDoc.doc_name }}</span>
+          <button type="button" class="review-close" aria-label="Close" @click="closeReviewPdf">&times;</button>
         </div>
-        <iframe :src="reviewPdfUrl" class="pdf-viewer-frame" />
+        <iframe v-if="reviewPdfUrl" :src="reviewPdfUrl" class="pdf-viewer-frame" :title="reviewDoc.doc_name" />
+        <div v-else-if="reviewPdfError" class="pdf-viewer-placeholder pdf-viewer-error" role="alert" data-test="review-preview-error">
+          <span>{{ reviewPdfError }}</span>
+          <button type="button" class="pdf-retry" data-test="review-preview-retry" @click="retryReviewPdf">Try again</button>
+        </div>
+        <div v-else class="pdf-viewer-placeholder" role="status" data-test="review-preview-loading">Loading document...</div>
+        <!-- Keys pressed inside the PDF never reach this page, so Tab past the
+             PDF's own controls lands here and goes back to the close button. -->
+        <span tabindex="0" class="focus-wrap" @focus="wrapViewerFocus"></span>
       </div>
     </div>
 
-    <!-- Guided wizard overlay -->
+    <!-- Guided wizard overlay. Not over a refused invitation: there is no form to guide. -->
     <InvestWizardOverlay
+      v-if="invite.state !== 'error'"
       :page-step="step"
       :form="form"
       :vehicles="vehicles"
@@ -521,11 +607,25 @@
 
 <script setup>
 import { ref, computed, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
+import { useInvestorInvite } from '../composables/useInvestorInvite'
 import { createFormDraft } from '../lib/formDraft'
 import { checkEmail } from '../lib/emailAddress'
+import { checkTin } from '../lib/taxId'
+import {
+  PAYMENT_TERMS_REVISION_HEADER,
+  TERMS_DOC_KEYS,
+  inviteErrorMessage,
+  inviteTokenFromQuery,
+  isInviteRefusal,
+  paymentTermsView,
+  revisionChanged,
+} from '../lib/investorInvite'
 import InvestorSignModal from '../components/invest/InvestorSignModal.vue'
+import InvitePaymentTermsCard from '../components/invest/InvitePaymentTermsCard.vue'
+import InviteErrorState from '../components/invest/InviteErrorState.vue'
 import LocationPickerModal from '../components/data-manager/LocationPickerModal.vue'
 import InvestWizardOverlay from '../wizard/components/InvestWizardOverlay.vue'
 
@@ -545,9 +645,27 @@ const step = ref(0)
 const maxStep = ref(0)
 const submitting = ref(false)
 const completed = ref(false)
+// The name the success screen thanks. Its own value because the draft keeps
+// nothing else once the application is in (see saveState), and a reload of the
+// success screen used to read the emptied form: "Thank you, ."
+const completedName = ref('')
 const showSignModal = ref(false)
 const selectedDoc = ref(null)
 const vehicleInfoDone = ref(false)
+
+// ── Personal invitation (`/invest?invite=<token>`) — see lib/investorInvite.js ──
+//
+// The token stays in the URL, so a refresh keeps the invitation, and lives
+// nowhere else: it is not in the draft and never in a browser store. Without
+// `?invite=` none of this runs: no request, no element, no payload key.
+const route = useRoute()
+const invite = useInvestorInvite(() => inviteTokenFromQuery(route.query))
+// The read-only terms, or null (no invitation, or the standard contract).
+const inviteTerms = computed(() => paymentTermsView(invite))
+// The sign modal shows them only beside the two documents they amend.
+const signTerms = computed(() => (TERMS_DOC_KEYS.includes(selectedDoc.value?.doc_key) ? inviteTerms.value : null))
+// Set when LogisX changed the terms after the applicant had loaded them.
+const termsNotice = ref('')
 
 // Local document tracking — no server needed until final submit
 const ONBOARDING_DOCS = [
@@ -619,8 +737,18 @@ const photoPreviewUrl = ref('')
 const showReviewModal = ref(false)
 const showAcctNum = ref(false)
 const previewPdfUrl = ref('')
+// Why the sign modal's preview is not showing, when a fetch failed.
+const previewError = ref('')
+// The review window's document viewer: the document it shows (null = closed),
+// its PDF once loaded, and why it is not showing when the fetch failed.
+const reviewDoc = ref(null)
 const reviewPdfUrl = ref('')
-const reviewPdfName = ref('')
+const reviewPdfError = ref('')
+// The review window, its viewer, and the button that opens the window: where
+// keyboard focus goes as each opens and closes.
+const reviewOpenButton = ref(null)
+const reviewDialog = ref(null)
+const reviewViewer = ref(null)
 const bankDropOpen = ref(false)
 const usBanks = [
   'JPMorgan Chase','Bank of America','Wells Fargo','Citibank','U.S. Bank',
@@ -784,12 +912,15 @@ const draft = createFormDraft({
 const restoreNotice = ref('')
 
 function saveState() {
-  // ⚠️ Once completed, persist the flag and nothing else. `draft.clear()` on
-  // submit is NOT enough on its own: setting `completed` triggers this watcher,
-  // which runs on the next tick — i.e. AFTER the clear — and would put the whole
-  // application straight back.
+  // ⚠️ Once completed, persist the flag and the name the success screen shows,
+  // and nothing else. `draft.clear()` on submit is NOT enough on its own: setting
+  // `completed` triggers this watcher, which runs on the next tick — i.e. AFTER
+  // the clear — and would put the whole application straight back.
+  // `completedName` is the legal name the draft already held while the form was
+  // being filled: not a SENSITIVE_FIELDS key, and no tax id, bank data,
+  // signature or invitation token.
   if (completed.value) {
-    draft.save({ completed: true })
+    draft.save({ completed: true, completedName: completedName.value })
     return
   }
   // Vehicle photos are stripped for SIZE, not privacy — a few base64 truck
@@ -829,6 +960,7 @@ function loadState() {
     }
   }
   if (s.completed) completed.value = s.completed
+  if (typeof s.completedName === 'string') completedName.value = s.completedName
   if (s.vehicleInfoDone != null) vehicleInfoDone.value = s.vehicleInfoDone
   if (s.step != null) step.value = s.step
   if (s.maxStep != null) maxStep.value = s.maxStep
@@ -869,9 +1001,21 @@ function goToStep(i) {
   if (i <= maxStep.value) step.value = i
 }
 
-// Restore state + Google Places autocomplete
+// Look the invitation up, then fill the name and email it was sent to into
+// fields the applicant has not typed in yet.
+async function loadInvite() {
+  await invite.load()
+  if (!invite.active) return
+  if (!form.legal_name && invite.inviteeName) form.legal_name = invite.inviteeName
+  if (!form.email && invite.inviteeEmail) form.email = invite.inviteeEmail
+}
+
+// Restore state + invitation + Google Places autocomplete
 onMounted(async () => {
   loadState()
+  // A finished application skips the lookup: its invitation is used, and the
+  // success screen is what the applicant came back to.
+  if (invite.token && !completed.value) await loadInvite()
   try {
     const { key } = await api.get('/api/config/maps-key')
     if (!key) return
@@ -960,82 +1104,365 @@ const emailCheck = computed(() => checkEmail(form.email))
 const emailFocused = ref(false)
 // Shown once the applicant leaves the field, never while they are still typing.
 const showEmailError = computed(() => !!form.email && !emailCheck.value.ok && !emailFocused.value)
+// The EIN/SSN the same way, with the server's rule (client copy:
+// src/lib/taxId.js): the W-9 prints nine digits.
+const tinCheck = computed(() => checkTin(form.ein_ssn))
+const tinFocused = ref(false)
+const showTinError = computed(() => !!form.ein_ssn && !tinCheck.value.ok && !tinFocused.value)
 const step0FieldsFilled = computed(() => !!(form.legal_name && form.email && form.phone && form.address && form.ein_ssn))
-const canProceedStep1 = computed(() => step0FieldsFilled.value && emailCheck.value.ok)
+const canProceedStep1 = computed(() => step0FieldsFilled.value && emailCheck.value.ok && tinCheck.value.ok)
+
+// The W-9 prints the legal name, business name and address, and its signature,
+// in a font with Latin characters only. Whether it can print what was typed is
+// the server's answer (POST /api/public/investor-w9-check runs the
+// application's own check), asked before the page moves on; a refusal is shown
+// where the value was typed, until that value changes.
+const W9_TEXT_FIELDS = ['legal_name', 'dba', 'address']
+const w9FieldErrors = reactive({})
+for (const field of W9_TEXT_FIELDS) watch(() => form[field], () => { delete w9FieldErrors[field] })
+// Why the sign dialog did not take a W-9 signature.
+const signNotice = ref('')
+let checkingW9 = false
+
+// The refusal ({ field, message }) of a UNSUPPORTED_CHARACTERS or
+// VALUE_TOO_LONG 400, or null. The inputs stop at the server's caps, so a
+// value too long for the W-9 reaches the server only from the signature
+// dialog or a filled-in address.
+const W9_TEXT_REFUSAL_CODES = ['UNSUPPORTED_CHARACTERS', 'VALUE_TOO_LONG']
+function w9TextRefusal(err) {
+  const field = err?.data?.field
+  return err?.status === 400 && W9_TEXT_REFUSAL_CODES.includes(err.code) && typeof field === 'string' ? { field, message: err.message } : null
+}
+
+// null when the W-9 can print `body`'s values, else the refusal. No answer
+// (offline, the rate limit) is null too: the submission's own check still stands.
+async function w9Refusal(body) {
+  try {
+    await api.post('/api/public/investor-w9-check', body)
+    return null
+  } catch (err) {
+    return w9TextRefusal(err)
+  }
+}
 const allVehiclesValid = computed(() => vehicles.value.every(v => v.year && v.make && v.model && v.vin))
 const signedCount = computed(() => documents.value.filter(d => d.signed).length)
 const canSubmitBanking = computed(() => banking.bank_name && banking.routing_number && banking.account_number)
 
-// Step 0 → Step 1: just navigate, no server call
-function submitApplication() {
+// Step 0 → Step 1, once the W-9 can print the step's text.
+async function submitApplication() {
+  if (checkingW9) return
   restoreNotice.value = ''
+  checkingW9 = true
+  const refusal = await w9Refusal({ legal_name: form.legal_name, dba: form.dba, address: form.address })
+  checkingW9 = false
+  if (refusal && W9_TEXT_FIELDS.includes(refusal.field)) {
+    w9FieldErrors[refusal.field] = refusal.message
+    return
+  }
   step.value = 1
   maxStep.value = Math.max(maxStep.value, 1)
 }
+
+// ── Invitation outcomes on a preview or the submit ──
+//
+// With an active invitation the token rides along on every preview; the server
+// renders its terms from the invitation row (never from this page) and answers
+// with the revision it rendered. Returns the revision it was sent under, or null
+// when there is no invitation — and then the payload is exactly what it always was.
+function addInviteToken(payload) {
+  if (!invite.active) return null
+  payload.invite_token = invite.token
+  return { revision: invite.revision }
+}
+
+// The master agreement and the lease were signed under the terms on screen, so
+// when those terms change or end, those two signatures go. The W-9 carries no
+// terms and keeps its signature.
+function clearTermsSignatures() {
+  for (const k of TERMS_DOC_KEYS) delete signatures[k]
+  // The sign modal holds a snapshot of the document it opened; refresh it so it
+  // stops showing "Document Signed".
+  if (selectedDoc.value) {
+    selectedDoc.value = documents.value.find(d => d.doc_key === selectedDoc.value.doc_key) || selectedDoc.value
+  }
+}
+
+// LogisX changed the terms after this page loaded them: take the applicant back
+// to the documents with the new terms and ask for the two signatures again.
+async function onTermsChanged() {
+  clearTermsSignatures()
+  termsNotice.value = inviteErrorMessage('INVITE_TERMS_CHANGED')
+  showReviewModal.value = false
+  closeReviewPdf()
+  if (step.value > 1) step.value = 1
+  maxStep.value = Math.min(maxStep.value, 1)
+  await invite.load()
+  // The reload itself was refused or got no answer: the page now shows why, so
+  // nothing may stay open over it.
+  if (!invite.active) closeSignModal()
+}
+
+// The invitation was refused (not found, used, withdrawn or expired): nothing
+// signed under it stands, and the page shows why in place of the form.
+function onInviteRefused(code) {
+  clearTermsSignatures()
+  closeSignModal()
+  showReviewModal.value = false
+  closeReviewPdf()
+  invite.fail(code)
+}
+
+// 'refused' and 'changed' have been handled here; 'same' and 'other' leave the
+// response to the caller.
+async function readInviteOutcome(res, sent) {
+  if (res.status === 404 || res.status === 410) {
+    let data = {}
+    try { data = await res.json() } catch { data = {} }
+    if (!isInviteRefusal(res.status, data.code)) return 'other'
+    onInviteRefused(data.code)
+    return 'refused'
+  }
+  if (res.ok && revisionChanged(res.headers.get(PAYMENT_TERMS_REVISION_HEADER), sent.revision)) {
+    await onTermsChanged()
+    return 'changed'
+  }
+  return 'same'
+}
+
+// A preview that fails used to leave the pane on "Loading document..." for good:
+// the server refuses a fourth render in flight (503, "busy"), and nothing else
+// was ever shown. A refusal that names the problem (a 4xx other than a timeout or
+// the rate limit) is shown as the server words it; anything else gets this line.
+const PREVIEW_FAILED_MESSAGE = "We couldn't load this document just now."
+async function previewFailureMessage(res) {
+  if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
+    try {
+      const data = await res.json()
+      if (typeof data.error === 'string' && data.error) return data.error
+    } catch { /* not JSON, or already read */ }
+  }
+  return PREVIEW_FAILED_MESSAGE
+}
+
+// Each preview takes a number, and only the latest may fill the pane: opening
+// one document and then another (or closing the dialog) while a render is in
+// flight must not show the first document's PDF, or its failure, under the next.
+let previewSeq = 0
 
 // Fetch PDF preview (with optional signature data for signed docs).
 // Include banking so the master agreement preview renders the investor's bank info.
 async function fetchPreview(docKey, sig) {
   revokePreview()
+  const mine = ++previewSeq
   try {
     const stripped = vehicles.value.map(({ photo, photoName, ...rest }) => rest)
     const payload = { ...form, vehicles: stripped, banking: { ...banking } }
     if (sig) { payload.signatureText = sig.text; payload.signatureImage = sig.image }
+    const sent = addInviteToken(payload)
     const res = await fetch(`/api/public/investor-preview-pdf/${docKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     })
-    if (res.ok) {
-      const blob = await res.blob()
-      previewPdfUrl.value = URL.createObjectURL(blob)
+    if (sent) {
+      const outcome = await readInviteOutcome(res, sent)
+      if (outcome === 'refused' || !invite.active) return
+      // That signature was cleared with the old terms: show the document unsigned,
+      // as long as the applicant is still looking at it.
+      if (outcome === 'changed' && sig && TERMS_DOC_KEYS.includes(docKey)) {
+        if (showSignModal.value && selectedDoc.value?.doc_key === docKey) await fetchPreview(docKey, null)
+        return
+      }
     }
-  } catch { /* preview failed, modal still works */ }
+    if (!res.ok) {
+      const message = await previewFailureMessage(res)
+      if (mine === previewSeq) previewError.value = message
+      return
+    }
+    const blob = await res.blob()
+    if (mine === previewSeq) previewPdfUrl.value = URL.createObjectURL(blob)
+  } catch {
+    if (mine === previewSeq) previewError.value = PREVIEW_FAILED_MESSAGE
+  }
 }
 
 // Open sign modal
 async function openDoc(doc) {
+  signNotice.value = ''
   selectedDoc.value = doc
   previewPdfUrl.value = ''
   showSignModal.value = true
   await fetchPreview(doc.doc_key, signatures[doc.doc_key])
 }
 
+function closeSignModal() {
+  signNotice.value = ''
+  showSignModal.value = false
+  previewSeq++
+  revokePreview()
+}
+
+// The sign modal's retry: the same document, with its signature if it has one.
+// The dialog stays open, so what the signer has entered there is kept.
+function retryPreview() {
+  const doc = selectedDoc.value
+  if (doc) fetchPreview(doc.doc_key, signatures[doc.doc_key])
+}
+
 function revokePreview() {
+  previewError.value = ''
   if (previewPdfUrl.value) {
     URL.revokeObjectURL(previewPdfUrl.value)
     previewPdfUrl.value = ''
   }
 }
 
-// Open signed PDF viewer from review modal
+// The review window's viewer numbers its requests the same way: closing it, or
+// asking again, while a render is in flight must not show that render later.
+let reviewSeq = 0
+
+// Open signed PDF viewer from review modal. A failure used to be dropped
+// silently, so a click refused by the renders-in-flight cap did nothing at all;
+// it now shows the same message and retry as the sign modal's pane.
 async function openReviewPdf(doc) {
   const sig = signatures[doc.doc_key]
   if (!sig) return
-  reviewPdfName.value = doc.doc_name
-  reviewPdfUrl.value = ''
+  revokeReviewPdf()
+  reviewDoc.value = doc
+  const mine = ++reviewSeq
   try {
     const stripped = vehicles.value.map(({ photo, photoName, ...rest }) => rest)
+    const payload = { ...form, vehicles: stripped, banking: { ...banking }, signatureText: sig.text, signatureImage: sig.image }
+    const sent = addInviteToken(payload)
     const res = await fetch(`/api/public/investor-preview-pdf/${doc.doc_key}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...form, vehicles: stripped, banking: { ...banking }, signatureText: sig.text, signatureImage: sig.image }),
+      body: JSON.stringify(payload),
     })
-    if (res.ok) {
-      const blob = await res.blob()
-      reviewPdfUrl.value = URL.createObjectURL(blob)
+    // Refused, or the terms changed: the review and this viewer are closed, and
+    // there is no signed document to show.
+    if (sent) {
+      const outcome = await readInviteOutcome(res, sent)
+      if (outcome === 'refused' || outcome === 'changed') return
     }
-  } catch { /* skip */ }
+    if (!res.ok) {
+      const message = await previewFailureMessage(res)
+      if (mine === reviewSeq) reviewPdfError.value = message
+      return
+    }
+    const blob = await res.blob()
+    if (mine === reviewSeq) reviewPdfUrl.value = URL.createObjectURL(blob)
+  } catch {
+    if (mine === reviewSeq) reviewPdfError.value = PREVIEW_FAILED_MESSAGE
+  }
+}
+
+// The viewer's retry: the same signed document again. Focus moves to the viewer
+// first, because the Try again button that has it is about to go.
+function retryReviewPdf() {
+  const doc = reviewDoc.value
+  reviewViewer.value?.focus()
+  if (doc) openReviewPdf(doc)
+}
+
+function revokeReviewPdf() {
+  reviewPdfError.value = ''
+  if (reviewPdfUrl.value) {
+    URL.revokeObjectURL(reviewPdfUrl.value)
+    reviewPdfUrl.value = ''
+  }
 }
 
 function closeReviewPdf() {
-  if (reviewPdfUrl.value) URL.revokeObjectURL(reviewPdfUrl.value)
-  reviewPdfUrl.value = ''
-  reviewPdfName.value = ''
+  reviewSeq++
+  revokeReviewPdf()
+  reviewDoc.value = null
 }
+
+// The review window and the viewer it opens are modal dialogs, and the keyboard
+// belongs to the one on top: Tab and Shift+Tab cycle inside it, and Escape
+// closes it and nothing under it (the viewer, then the window, then the guided
+// tour: one press each). The same trap as ConfirmModal and InviteModal; it
+// skips the viewer's focus-wrap guard, which only hands focus back to the top.
+const DIALOG_FOCUSABLE =
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), iframe, [tabindex]:not([tabindex="-1"]):not(.focus-wrap)'
+
+function wrapViewerFocus() {
+  reviewViewer.value?.querySelector(DIALOG_FOCUSABLE)?.focus()
+}
+
+function onReviewKeydown(event) {
+  const dialogEl = reviewDoc.value ? reviewViewer.value : reviewDialog.value
+  if (!dialogEl) return
+  const active = document.activeElement
+  const lost = !active || active === document.body
+  // Focus the applicant moved outside with the mouse (the guided tour sits above
+  // this window) keeps that layer's own keys.
+  if (!lost && !dialogEl.contains(active)) return
+  if (event.key === 'Escape') {
+    // Stopped here, on document, before the guided tour's Escape on window
+    // closes the tour as well.
+    event.preventDefault()
+    event.stopPropagation()
+    if (reviewDoc.value) closeReviewPdf()
+    else showReviewModal.value = false
+    return
+  }
+  if (event.key !== 'Tab') return
+  const focusable = Array.from(dialogEl.querySelectorAll(DIALOG_FOCUSABLE))
+  if (!focusable.length) return
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (event.shiftKey && (lost || active === first || active === dialogEl)) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && (lost || active === last)) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
+// After the DOM update ('post'): an opening dialog is then there to take focus,
+// and a close that also changed the step has already removed "Review & Complete"
+// (its ref is null), so focus is never put on a button about to go.
+watch(showReviewModal, (open) => {
+  if (open) {
+    document.addEventListener('keydown', onReviewKeydown)
+    reviewDialog.value?.focus()
+  } else {
+    document.removeEventListener('keydown', onReviewKeydown)
+    reviewOpenButton.value?.focus()
+  }
+}, { flush: 'post' })
+
+// The viewer hands focus back to the View Document that opened it, or to the
+// window when that is gone.
+let viewerReturnFocus = null
+watch(() => reviewDoc.value !== null, (open) => {
+  if (open) {
+    viewerReturnFocus = document.activeElement
+    reviewViewer.value?.focus()
+  } else {
+    const back = viewerReturnFocus?.isConnected ? viewerReturnFocus : reviewDialog.value
+    viewerReturnFocus = null
+    back?.focus()
+  }
+}, { flush: 'post' })
+
+onBeforeUnmount(() => document.removeEventListener('keydown', onReviewKeydown))
 
 // Capture signature locally, then refresh preview with signature overlay
 async function handleSigned({ docKey, text, image, consent }) {
+  // A W-9 signature the form cannot print is not taken: the dialog stays on
+  // the sign form, with what the signer entered, and says why.
+  signNotice.value = ''
+  if (docKey === 'w9') {
+    const refusal = await w9Refusal({ signatureText: text })
+    if (refusal) {
+      signNotice.value = refusal.message
+      return
+    }
+  }
   // `consent` rides along with the signature all the way to
   // POST /api/public/investor-apply, which refuses any document without it
   // (400 CONSENT_REQUIRED). Dropping it here is the exact failure this change
@@ -1044,6 +1471,11 @@ async function handleSigned({ docKey, text, image, consent }) {
   selectedDoc.value = documents.value.find(d => d.doc_key === docKey) || selectedDoc.value
   await fetchPreview(docKey, { text, image })
 }
+
+// The submit renders and stores three signed PDFs before it answers, which can
+// outlast useApi's 20 s default. It is not idempotent, so a timeout that fires
+// while the server is still working invites a second, duplicate application.
+const SUBMIT_TIMEOUT_MS = 90000
 
 // Final single submission — all data in one request
 async function submitOnboarding() {
@@ -1055,8 +1487,10 @@ async function submitOnboarding() {
     step.value = 0
     maxStep.value = Math.max(maxStep.value, 0)
     showReviewModal.value = false
-    // When every field is filled, the email is what failed: say so.
-    toast(step0FieldsFilled.value ? emailCheck.value.message : 'Please complete your business details before submitting.', 'error')
+    // When every field is filled, the email or the EIN/SSN is what failed: say which.
+    const message = !step0FieldsFilled.value ? 'Please complete your business details before submitting.'
+      : !emailCheck.value.ok ? emailCheck.value.message : tinCheck.value.message
+    toast(message, 'error')
     return
   }
   if (signedCount.value < totalDocs) {
@@ -1073,19 +1507,52 @@ async function submitOnboarding() {
     return
   }
   submitting.value = true
+  let sent = null
   try {
     const stripped = vehicles.value.map(({ photo, photoName, ...rest }) => rest)
-    await api.post('/api/public/investor-apply', {
+    const body = {
       ...form,
       vehicles: stripped,
       banking: { ...banking },
       signatures: { ...signatures },
-    })
+    }
+    // The revision is the one the applicant read and signed under; the server
+    // refuses the submit (409 INVITE_TERMS_CHANGED) if LogisX has changed it since.
+    sent = addInviteToken(body)
+    if (sent) body.invite_terms_revision = sent.revision
+    await api.post('/api/public/investor-apply', body, { timeout: SUBMIT_TIMEOUT_MS })
+    completedName.value = form.legal_name
     completed.value = true
     draft.clear()
     toast('Onboarding complete!', 'success')
     setTimeout(() => { window.location.href = 'https://logisx.com/' }, 5000)
   } catch (err) {
+    if (sent && err.status === 409 && err.code === 'INVITE_TERMS_CHANGED') {
+      await onTermsChanged()
+      return
+    }
+    if (sent && isInviteRefusal(err.status, err.code)) {
+      onInviteRefused(err.code)
+      return
+    }
+    // Text the W-9 cannot print, or too long for it: back to where it was
+    // typed. Step 1's fields
+    // show the message under the field; the W-9 signature is taken back, to be
+    // signed again.
+    const refusal = w9TextRefusal(err)
+    if (refusal && W9_TEXT_FIELDS.includes(refusal.field)) {
+      w9FieldErrors[refusal.field] = refusal.message
+      showReviewModal.value = false
+      step.value = 0
+      return
+    }
+    if (refusal && refusal.field === 'signatures.w9.text') {
+      delete signatures.w9
+      showReviewModal.value = false
+      step.value = 1
+      toast(refusal.message, 'error')
+      return
+    }
     toast(err.message || 'Submission failed', 'error')
   } finally {
     submitting.value = false
@@ -1285,6 +1752,13 @@ async function submitOnboarding() {
   flex: 1;
   padding: 2rem 3rem 2rem;
   width: 100%;
+}
+
+/* The first invitation lookup, in place of the form. */
+.invite-loading {
+  flex: 1;
+  display: flex; align-items: center; justify-content: center; gap: 0.6rem;
+  padding: 2rem; font-size: 0.9rem; color: #64748b;
 }
 
 /* Informational, not a failure — the applicant did nothing wrong. */
@@ -1640,6 +2114,8 @@ async function submitOnboarding() {
   background: #f0fdf4; border: 1px solid #d1fae5; border-radius: 10px;
   font-size: 0.78rem; color: #15803d; font-weight: 500;
 }
+/* The note wraps to three lines on a phone; the shield keeps its size. */
+.bank-security-note svg { flex-shrink: 0; }
 
 /* ─── Success ─── */
 .success-wrap {
@@ -1728,10 +2204,25 @@ async function submitOnboarding() {
 .review-item.full { grid-column: 1 / -1; }
 .review-label { font-size: 0.7rem; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.04em; }
 .review-value { font-size: 0.85rem; color: #0f172a; font-weight: 500; }
+.review-terms-details { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
 .text-green { color: #16a34a; }
 .text-amber { color: #d97706; }
-.doc-view-link { cursor: pointer; display: inline-flex; align-items: center; gap: 2px; transition: color 0.15s; }
+/* A button that renders exactly as the text it replaced; .review-value sets its size and weight. */
+.doc-view-link {
+  cursor: pointer; display: inline-flex; align-items: center; gap: 2px; transition: color 0.15s;
+  padding: 0; border: none; background: none;
+  font-family: inherit; line-height: inherit; letter-spacing: inherit; text-align: inherit;
+}
 .doc-view-link:hover { color: #15803d; text-decoration: underline; }
+.doc-view-link:focus-visible { outline: 2px solid #3b82f6; outline-offset: 2px; border-radius: 4px; }
+/* The account number's show/hide eye: a button drawn as the bare icon it replaced. */
+.acct-eye {
+  display: inline-flex; flex-shrink: 0; padding: 0; margin: 0; border: none; background: none;
+  color: #94a3b8; cursor: pointer; line-height: 0;
+}
+.acct-eye:focus-visible { outline: 2px solid #3b82f6; outline-offset: 2px; border-radius: 4px; }
+/* The dialogs take focus themselves when they open; their controls show the ring. */
+.review-modal:focus, .pdf-viewer-panel:focus { outline: none; }
 .pdf-viewer-overlay {
   position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,0.6);
   display: flex; align-items: center; justify-content: center; padding: 1.5rem;
@@ -1746,6 +2237,19 @@ async function submitOnboarding() {
 }
 .pdf-viewer-title { font-weight: 600; font-size: 0.95rem; color: #0f172a; }
 .pdf-viewer-frame { flex: 1; border: none; width: 100%; }
+/* Loading, or a failed preview with its retry: the sign modal's pane, here. */
+.pdf-viewer-placeholder {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  padding: 1.5rem; background: #f5f5f5; color: #6b7085; font-size: 0.9rem; text-align: center;
+}
+.pdf-viewer-error { flex-direction: column; gap: 0.85rem; }
+.pdf-retry {
+  padding: 0.55rem 1.3rem; background: #0f2847; color: #fff; border: none;
+  border-radius: 10px; font-weight: 700; font-size: 0.85rem; cursor: pointer;
+  font-family: inherit; transition: background 0.15s;
+}
+.pdf-retry:hover { background: #1a3a6b; }
+.pdf-retry:focus-visible { outline: 2px solid #3b82f6; outline-offset: 2px; }
 .review-vehicle {
   margin-bottom: 0.75rem; padding: 0.65rem 0.85rem;
   background: #fafbfd; border-radius: 8px; border: 1px solid #f1f5f9;

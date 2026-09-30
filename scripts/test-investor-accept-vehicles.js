@@ -114,6 +114,9 @@ const PARSE_AMOUNT_SRC = (() => {
 	return `${m[0].trim()}\n${liftFunction("parsePlainDecimal")}\n${liftFunction("parseTruckAmount")}`;
 })();
 const ESCAPE_SRC = liftFunction("escapeHtml");
+// The naming check each username candidate goes through (its own subject is
+// scripts/test-investor-accept-guards.js §8).
+const CLASH_SRC = ["normalizeDriverName", "isBuiltInPropertyName", "findDriverNameClashes", "findDriverNameClash"].map(liftFunction).join("\n");
 const ACCEPT_SRC = liftRoute('app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), async (req, res) => {');
 
 const colLetter = new Function(`${COL_LETTER_SRC}\nreturn colLetter;`)();
@@ -269,6 +272,7 @@ const APP_DDL = [
 	`CREATE TABLE investors (
 		id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER UNIQUE, full_name TEXT, carrier_name TEXT, status TEXT, application_id INTEGER,
 		entity_type TEXT, address TEXT, phone TEXT, email TEXT, ein_ssn TEXT, tax_classification TEXT, contact_person TEXT, contact_title TEXT)`,
+	"CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT NOT NULL UNIQUE COLLATE NOCASE)",
 ];
 async function acceptOnce(vehicles, { helperSrc = HELPER_SRC, seed } = {}) {
 	const db = trucksDb();
@@ -281,11 +285,12 @@ async function acceptOnce(vehicles, { helperSrc = HELPER_SRC, seed } = {}) {
 	const audits = [];
 	const mail = [];
 	let handler = null;
+	const findDriverNameClash = new Function("db", `${CLASH_SRC}\nreturn findDriverNameClash;`)(db);
 	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail",
-		"parseTruckAmount", "registerApplicationVehicles", ACCEPT_SRC)(
+		"parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", ACCEPT_SRC)(
 		{ put: (p, guard, h) => { handler = h; } }, () => null, db, { hash: async () => "hashed" }, require("crypto"),
 		(req, action, entity, entityId, details) => audits.push({ action, details }), () => {}, colLetter, escapeHtml,
-		(to, subject, html) => { mail.push({ to, subject, html }); return Promise.resolve(true); }, parseTruckAmount, register);
+		(to, subject, html) => { mail.push({ to, subject, html }); return Promise.resolve(true); }, parseTruckAmount, register, findDriverNameClash);
 	const out = { status: 200, body: null };
 	await handler({ params: { id: "42" }, body: { status: "Accepted" }, session: { user: { id: 1, username: "super_admin", role: "Super Admin" } } },
 		{ status(c) { out.status = c; return this; }, json(b) { out.body = b; return this; } });

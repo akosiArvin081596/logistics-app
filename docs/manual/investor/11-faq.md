@@ -48,7 +48,7 @@ Click into the breakdown to see the underlying loads and expenses. Compare to yo
 ## Earnings and pay
 
 **Q. How is my profit split with LogisX?**
-Typically 50/50 of net profit, per your Master Agreement. Net profit = revenue minus all expenses (driver pay, fixed costs, trip expenses).
+Typically 50/50 of net profit, per your Master Agreement. Net profit = revenue minus all expenses (driver pay, fixed costs, trip expenses). If you joined through a personal invitation, your agreements may carry an **Amendment No. 1 — Payment Terms** with different terms; where it differs from the standard wording, the amendment controls.
 
 **Q. Can the split be different per truck?**
 Theoretically yes if your contract has truck-specific terms. Generally no — same split applies across your fleet.

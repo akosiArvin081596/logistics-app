@@ -46,7 +46,7 @@ git check-ignore -v --no-index <new-path>   # exit 1 / no output = safe
 
 `fw9.pdf` is the only one read at runtime, from `fillW9Form()` in `server.js`. A
 missing template makes that function return `null` — and both call sites (driver
-`/api/onboarding/sign`, investor `/api/public/investor-onboarding/:id/sign`) still
+`/api/onboarding/sign`, investor `/api/public/investor-apply`) still
 mark the document **signed** with an empty `signed_pdf_url`. So the failure mode is
 not an error page: it is a person recorded as having signed a W-9 that does not
 exist. Update the path and generate a document end-to-end before shipping.

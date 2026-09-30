@@ -12,12 +12,15 @@
 //      the same verdict and message for a fixed corpus plus a seeded fuzz
 //   §2 /apply (ApplyView.vue): its step-0 validate() — lifted from the SFC and
 //      executed — refuses what the server refuses, with the server's words
+//      (its SSN check is scripts/test-driver-apply-inputs.js's)
 //   §3 /invest (InvestorApplyView.vue): the step-0 gate — the real computed
 //      definitions, executed — blocks Continue on a bad address and explains
-//      it once the field is left, never while typing
+//      it once the field is left, never while typing; the same for an EIN/SSN
+//      that is not nine digits (client/src/lib/taxId.js, whose parity with the
+//      server is scripts/test-w9-input-checks.js)
 //   §4 DISCRIMINATION — defang each piece, require an assertion to flip
 //
-// No network, no DOM, no database, no Vue runtime (the four computed values
+// No network, no DOM, no database, no Vue runtime (the gate's computed values
 // are evaluated over a minimal stand-in).
 //
 //   node scripts/test-email-address-client.mjs      # exits 1 on any failure
@@ -28,6 +31,7 @@ import { createRequire } from 'module'
 import { fileURLToPath } from 'url'
 
 import { EMAIL_RE, EMAIL_MAX_LENGTH, EMAIL_MESSAGES, checkEmail } from '../client/src/lib/emailAddress.js'
+import { INVALID_TIN_MESSAGE, checkTin, checkSsn } from '../client/src/lib/taxId.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname, '..')
@@ -121,14 +125,14 @@ function liftFn(src, name) {
   throw new Error(`unbalanced braces in ${name}`)
 }
 const VALIDATE_SRC = liftFn(APPLY_VIEW, 'validate')
-const buildValidate = (src) => new Function('form', 'checkEmail', `${src}\nreturn validate;`)
+const buildValidate = (src) => new Function('form', 'checkEmail', 'checkSsn', `${src}\nreturn validate;`)
 // A step-0 form with every required field and upload present.
 const driverForm = (email) => ({
   first_name: 'Jane', last_name: 'Doe', email, phone: '5550100', dob: '1990-01-01', address: '1 Main St',
   city: 'Dallas', state: 'TX', zip: '75201', ssn: '000-00-0000', drivers_license: 'D1', position: 'Driver',
   hazmat: 'No', cdl_front: 'x', cdl_back: 'x', medical_card: 'x',
 })
-const runValidate = (src, email) => buildValidate(src)(driverForm(email), checkEmail)(0)
+const runValidate = (src, email) => buildValidate(src)(driverForm(email), checkEmail, checkSsn)(0)
 ok('ApplyView imports the shared rule', /import \{ checkEmail \} from '\.\.\/lib\/emailAddress'/.test(APPLY_VIEW))
 ok('the previous inline email pattern is gone from ApplyView.vue', !APPLY_VIEW.includes('[^\\s@]+@[^\\s@]+\\.[^\\s@]+'))
 ok('a valid address passes step 0', runValidate(VALIDATE_SRC, 'jane.doe@example.com') === '')
@@ -140,7 +144,7 @@ for (const bad of ['john@gmail', 'a@example.com, b@example.org', 'jos' + ch(0xe9
 // ══ §3 — /invest: InvestorApplyView.vue's step-0 gate ════════════════════════
 console.log('\n§3  /invest — InvestorApplyView.vue step-0 gate, executed')
 const INVEST_VIEW = read('client/src/views/InvestorApplyView.vue')
-// The four definitions, from `const emailCheck = ` to the end of the
+// The gate's definitions, from `const emailCheck = ` to the end of the
 // `const canProceedStep1 = ` line: the real code, not a restatement.
 function liftGate(src) {
   const a = src.indexOf('const emailCheck = ')
@@ -153,10 +157,10 @@ const GATE_SRC = liftGate(INVEST_VIEW)
 const ref = (v) => ({ value: v })
 const computed = (fn) => ({ get value() { return fn() } })
 function buildGate(src, form) {
-  return new Function('form', 'checkEmail', 'ref', 'computed',
-    `${src}\nreturn { emailCheck, emailFocused, showEmailError, canProceedStep1 };`)(form, checkEmail, ref, computed)
+  return new Function('form', 'checkEmail', 'checkTin', 'ref', 'computed',
+    `${src}\nreturn { emailCheck, emailFocused, showEmailError, tinCheck, tinFocused, showTinError, canProceedStep1 };`)(form, checkEmail, checkTin, ref, computed)
 }
-const investForm = (email) => ({ legal_name: 'Example Holdings LLC', email, phone: '5550100', address: '1 Main St', ein_ssn: '12-3456789' })
+const investForm = (email, ein_ssn = '12-3456789') => ({ legal_name: 'Example Holdings LLC', email, phone: '5550100', address: '1 Main St', ein_ssn })
 
 ok('InvestorApplyView imports the shared rule', /import \{ checkEmail \} from '\.\.\/lib\/emailAddress'/.test(INVEST_VIEW))
 {
@@ -179,14 +183,33 @@ ok('InvestorApplyView imports the shared rule', /import \{ checkEmail \} from '\
   const g = buildGate(GATE_SRC, investForm(''))
   ok('an empty field blocks Continue without a message (nothing typed yet)', g.canProceedStep1.value === false && g.showEmailError.value === false)
 }
+{
+  const g = buildGate(GATE_SRC, investForm('jane@example.com', '12-34567890'))
+  ok('a ten-digit EIN/SSN blocks Continue even with every other field filled', g.canProceedStep1.value === false)
+  ok('…and its message shows once the field is left', g.showTinError.value === true && g.tinCheck.value.message === INVALID_TIN_MESSAGE)
+  g.tinFocused.value = true
+  ok('…but never while the applicant is still typing in it', g.showTinError.value === false)
+}
+{
+  const g = buildGate(GATE_SRC, investForm('jane@example.com', '12-345678'))
+  ok('an eight-digit EIN/SSN blocks Continue too', g.canProceedStep1.value === false && g.showTinError.value === true)
+}
+{
+  const g = buildGate(GATE_SRC, investForm('jane@example.com', '123-45-6789'))
+  ok('an SSN written 123-45-6789 lets Continue through, no message', g.canProceedStep1.value === true && g.showTinError.value === false)
+}
 ok('the Continue button is still disabled by canProceedStep1',
   /:disabled="!canProceedStep1 \|\| submitting" data-wizard-target="continue-step0"/.test(INVEST_VIEW))
 ok('the email input tracks focus for the message',
   /@focus="emailFocused = true" @blur="emailFocused = false"/.test(INVEST_VIEW))
 ok('the message element renders the shared message',
   /<p v-if="showEmailError" id="invest-email-error" class="field-error" role="alert">\{\{ emailCheck\.message \}\}<\/p>/.test(INVEST_VIEW))
-ok('the final-submit backstop names the email when it is the only problem',
-  /toast\(step0FieldsFilled\.value \? emailCheck\.value\.message : 'Please complete your business details before submitting\.', 'error'\)/.test(INVEST_VIEW))
+ok('the EIN/SSN input tracks focus for its message',
+  /@focus="tinFocused = true" @blur="tinFocused = false"/.test(INVEST_VIEW))
+ok('the EIN/SSN message element renders the shared message',
+  /<p v-if="showTinError" id="invest-tin-error" class="field-error" role="alert">\{\{ tinCheck\.message \}\}<\/p>/.test(INVEST_VIEW))
+ok('the final-submit backstop names the email or the EIN/SSN when every field is filled',
+  INVEST_VIEW.includes("const message = !step0FieldsFilled.value ? 'Please complete your business details before submitting.'\n      : !emailCheck.value.ok ? emailCheck.value.message : tinCheck.value.message\n    toast(message, 'error')"))
 
 // ══ §4 — DISCRIMINATION ══════════════════════════════════════════════════════
 console.log('\n§4  DISCRIMINATION — defang each piece, require an assertion to flip')
@@ -202,6 +225,9 @@ const OLD_GATE = GATE_SRC.replace(
   'const canProceedStep1 = computed(() => form.legal_name && form.email && form.phone && form.address && form.ein_ssn)')
 ok('MUTANT: the previous presence-only gate lets a mistyped address through step 0',
   OLD_GATE !== GATE_SRC && !!buildGate(OLD_GATE, investForm('john@gmail')).canProceedStep1.value === true)
+const NO_TIN_GATE = GATE_SRC.replace(' && tinCheck.value.ok)', ')')
+ok('MUTANT: a gate without the EIN/SSN check lets a ten-digit TIN through step 0',
+  NO_TIN_GATE !== GATE_SRC && buildGate(NO_TIN_GATE, investForm('jane@example.com', '12-34567890')).canProceedStep1.value === true)
 // One character of drift between the client and server rules.
 const CLIENT_SRC = read('client/src/lib/emailAddress.js')
 const drifted = CLIENT_SRC.replace("const EMAIL_LABEL_CHARS = 'A-Za-z0-9-'", "const EMAIL_LABEL_CHARS = 'A-Za-z0-9_-'")

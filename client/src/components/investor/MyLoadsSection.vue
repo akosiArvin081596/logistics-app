@@ -231,12 +231,14 @@
 
 <script setup>
 import { computed, ref } from 'vue'
+import { useInvestorStore } from '../../stores/investor'
 import MetricInfoDialog from './MetricInfoDialog.vue'
 
 const props = defineProps({
   myLoads: { type: Object, default: () => ({ pending: [], active: [] }) },
-  config: { type: Object, default: () => ({}) },
 })
+
+const store = useInvestorStore()
 
 // Expand by default when the investor actually has loads to look at;
 // stay collapsed when there's nothing to show so the dashboard stays
@@ -248,10 +250,11 @@ const expanded = ref(
 
 const pending = computed(() => props.myLoads?.pending || [])
 const active = computed(() => props.myLoads?.active || [])
-const splitPct = computed(() => {
-  const raw = parseFloat(props.config?.investor_split_pct)
-  return Number.isFinite(raw) ? raw : 50
-})
+// The split the server applied to every `yourShare` below, already clamped by
+// resolveInvestorSplitPct(): production.investorSplitPct from the same
+// GET /api/investor response as myLoads. The Earnings, Production, Trend and
+// Cash Flow sections read this same field, so every split label agrees.
+const splitPct = computed(() => store.production?.investorSplitPct ?? 50)
 
 function fmtMoney(n) {
   const v = Number(n || 0)

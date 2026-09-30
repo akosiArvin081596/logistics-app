@@ -325,9 +325,119 @@ The same field errors also appear as the error pop-up if the application is subm
 
 ---
 
+## 15. Investor onboarding — payment terms (awaiting client sign-off)
+
+**Every line in this section is AWAITING YOUR APPROVAL.** Nothing here has shipped; you review it on staging before it is merged.
+
+**What it is.** An admin creates a personal invitation link on `/investors` with payment terms for one investor: a 50/50 profit split, or a fixed monthly lease payment, plus optional additional terms. The investor opens `/invest?invite=…`. The terms are shown to them **read-only** and printed in the Master Agreement and the Lease they sign. The plain `/invest` page, without an invitation link, is unchanged, and so is its contract. **Payouts are not changed:** they are still calculated from the Split % column, whatever the contract says.
+
+Error messages are normally left out of this inventory (see **Not listed** above); the invitation ones are here because the applicant reads them instead of the whole form. `client/src/lib/investorInvite.js` holds them, and `scripts/test-investor-invite-client.mjs` fails if they differ from this section, so a reword changes both.
+
+### 15.1 On the `/invest` page — only with an invitation link
+
+| Flag | Exact text | Where / when | Status |
+|---|---|---|---|
+| ⚪ | `Loading your invitation...` | In place of the form while the link is checked, when the page first opens. | **Awaiting approval** |
+| ⚪ | `Investor invitation` | Heading of the page shown **instead of the form** when the link can't be used. One of the six lines below sits under it. | **Awaiting approval** |
+| ⚪ | `This invitation link isn't valid. Please ask LogisX for a new link.` | Under that heading: the link is mistyped or unknown, or LogisX has since issued a new link for the same invitation. | **Awaiting approval** |
+| ⚪ | `This invitation has already been used to submit an application. If you just submitted, it was received.` | Same place: the link was already used to submit. The second sentence is for someone whose connection dropped just as they submitted. | **Awaiting approval** |
+| ⚪ | `This invitation was withdrawn. Please contact LogisX.` | Same place: an admin withdrew (revoked) the invitation. | **Awaiting approval** |
+| ⚪ | `This invitation has expired. Please ask LogisX for a new link.` | Same place: 30 days after the link was created or last reissued. | **Awaiting approval** |
+| ⚪ | `We couldn't load your invitation just now. Please check your connection and try again.` | Same place: the check got no answer (offline, too many attempts, a server error). Nothing is wrong with the link, so it offers a retry instead of calling it invalid. **Added by the frontend; not in the original brief.** | **Awaiting approval** |
+| ⚪ | `Try again` | Button, only under the line above. | **Awaiting approval** |
+| ⚪ | `Your payment terms` | Card heading. The card sits on Step 2 just above **Onboarding Documents**, and again at the top of the signing panel for the **Master Agreement** and the **Lease** (never the W-9). Shown only when the invitation's terms differ from the standard contract. | **Awaiting approval** |
+| ⚪ | `Payment type` · `Monthly amount` · `Additional terms` | The card's three labels. `Monthly amount` appears only for a fixed monthly lease payment. | **Awaiting approval** |
+| ⚪ | The payment type, e.g. `Fixed monthly lease payment` / `50/50 profit split` | Card value beside `Payment type`. It is the server's label for the type; it should read exactly like the Amendment's `Payment type:` line in 15.3. Check the two match on staging. | **Awaiting approval** |
+| ⚪ | The amount, e.g. `$2,000.00` | Card value beside `Monthly amount` (lease only), formatted by the server. | **Awaiting approval** |
+| ⚪ | The additional terms, as LogisX typed them, or `None` | Card value beside `Additional terms`, line breaks kept. `None` is the same word the Amendment prints. | **Awaiting approval** |
+| 🔴 | `These terms were set by LogisX for your agreement and appear in Amendment No. 1 of the documents you sign.` | Under the card, wherever the card appears. | **Awaiting approval** |
+| ⚪ | `Payment Terms` | Section title in the **Review Your Application** window, with the same three rows as the card. | **Awaiting approval** |
+| 🔴 | `LogisX updated the payment terms in your invitation. Please review and sign the agreements again.` | Blue notice at the top of Step 2, and at the top of the signing panel, when LogisX edits the terms after the investor opened the link (the page notices on the next document preview, or at submit). The new terms replace the old on screen; the Master Agreement and Lease signatures are cleared and must be given again; the W-9 keeps its signature. | **Awaiting approval** |
+
+### 15.2 Fixes every applicant sees, with or without an invitation
+
+| Flag | Exact text | Where / when | Status |
+|---|---|---|---|
+| ⚪ | `We couldn't load this document just now.` | In the document pane of the signing window, when the preview fails, for example while the server is busy with other previews. It used to stay on `Loading document...` with no way forward. When the server names the problem instead (say, a signature image it cannot accept), its own message shows here. **Also, since this change, in the document viewer opened from `Signed — View Document` in the Review Your Application window**, which used to do nothing at all when the preview failed: the click looked broken. That viewer now opens at once on the existing `Loading document...` line, then shows the document, or this line. | **Awaiting approval** |
+| ⚪ | `Try again` | Button under that line. In the signing window it reloads the same document, and the signing panel beside it keeps the ticked box, the typed name and the drawn signature. In the review window's viewer it reloads the same signed document. | **Awaiting approval** |
+| ⚪ | `Thank you, <legal name>. Your application and all documents have been submitted successfully.` | Unchanged wording. It now keeps the name when the page is refreshed after submitting; before, a refresh showed `Thank you, .` with no name. | **Awaiting approval** |
+| ⚪ | `Thank you. Your application and all documents have been submitted successfully.` | **New variant**, shown only when the name is not known: someone who submitted before this change and then refreshes the page. | **Awaiting approval** |
+| ⚪ | `Enter a 9-digit SSN or EIN.` | **New.** Under the EIN or SSN field on Step 1, once the applicant moves on from it with a number that is not nine digits (hyphens and spaces are fine), and Continue stays grey. The W-9 has nine boxes for it: ten digits used to stop the W-9 being produced, and fewer printed a short number. The server refuses the same number with the same words. | **Awaiting approval** |
+| ⚪ | `Please enter this as it appears on your U.S. tax return, using Latin characters.` | **New.** Under Legal Name, DBA or Principal Address on Step 1, when Continue is clicked with text the W-9 cannot print (Japanese or Cyrillic, say; accented Latin such as `Café` is fine), until that field is changed. Also at the top of the signing panel when the W-9 is signed with such a name, which is then not taken. The W-9 used to fail silently for these applicants after they submitted. | **Awaiting approval** |
+| ⚪ | `This is too long. Please keep it to 200 characters or fewer.` / `This is too long. Please keep it to 300 characters or fewer.` | **New.** Legal Name and DBA now stop at 200 characters, and Principal Address at 300, so a typist never sees these. The 300 line shows under Principal Address when a filled-in address is longer than that and Continue is clicked. The 200 line shows at the top of the signing panel when the W-9 is signed with a name over 200 characters, which is then not taken. | **Awaiting approval** |
+
+### 15.3 The contract wording in the signed PDFs
+
+The approved draft, copied from the shared contract. `[amount]` is the monthly amount, e.g. `$2,000.00`. None of it appears for an invitation with the standard terms, or without an invitation.
+
+| Flag | Exact text, as the investor reads it | Where / when | Status |
+|---|---|---|---|
+| 🔴 | `3.3 Payment Terms and Method of Payment. In place of the 50/50 split, the Participant shall receive a fixed monthly lease payment of [amount], as set out in Amendment No. 1.` | Master Agreement §3.3, **lease only**. It replaces the 50/50 paragraph and its two distribution bullets; the existing **Payment Execution (Schedule A)** bullet follows it word for word. | **Awaiting approval** |
+| 🔴 | `Fixed Monthly Lease Payment: [amount] per month, as set out in Amendment No. 1, in place of the 50/50 profit participation model.` | Lease §2.01, **lease only**. It replaces only the **Variable-Yield Settlement** bullet; the §2.01 lead paragraph and the **Settlement Cycle** and **Method of Payment** bullets stay word for word. | **Awaiting approval** |
+| 🔴 | `AMENDMENT NO. 1 — PAYMENT TERMS` | A block in **both** documents, immediately before the signatures, for either type. | **Awaiting approval** |
+| 🔴 | `These payment terms were agreed for this Participant and control over any conflicting provision of this Agreement.` | First sentence of that block. | **Awaiting approval** |
+| ⚪ | `Payment type:` followed by `50/50 profit split` or `Fixed monthly lease payment` | In the block. | **Awaiting approval** |
+| ⚪ | `Monthly amount:` followed by `[amount]` | In the block, **lease only**. | **Awaiting approval** |
+| ⚪ | `Additional terms:` followed by the text LogisX entered, or `None` | In the block, line breaks kept. | **Awaiting approval** |
+
+Verbatim, as the shared contract words it (its lines, unchanged):
+
+- **Approved wording** (use it verbatim; `[amount]` is `<strong aria-label="Payment terms monthly amount"></strong>`):
+  - **Master §3.3, lease variant:** `<p><span class="section-title">3.3 Payment Terms and Method of Payment.</span> In place of the 50/50 split, the Participant shall receive a fixed monthly lease payment of [amount], as set out in Amendment No. 1.</p>`. Then a `<ul>` holding the existing "Payment Execution (Schedule A)" `<li>`, copied verbatim from `:311`.
+  - **Lease §2.01, lease variant:** the existing §2.01 lead paragraph and the Settlement Cycle and Method of Payment bullets, copied verbatim. Only the Variable-Yield bullet is replaced, by `<li><strong>Fixed Monthly Lease Payment:</strong> [amount] per month, as set out in Amendment No. 1, in place of the 50/50 profit participation model.</li>`.
+  - **Amendment block** (both documents, both variants). Styled inline so the `<head>` CSS stays byte-identical:
+    - Title: `AMENDMENT NO. 1 &mdash; PAYMENT TERMS`.
+    - Sentence: "These payment terms were agreed for this Participant and control over any conflicting provision of this Agreement."
+    - `Payment type:` `<span aria-label="Payment terms type"></span>`, filled with "50/50 profit split" or "Fixed monthly lease payment".
+    - Lease only: `Monthly amount:` `<span aria-label="Payment terms monthly amount"></span>`.
+    - `Additional terms:` `<div aria-label="Payment terms details" style="white-space:pre-wrap;overflow-wrap:anywhere"></div>`, filled with the text, or "None" when empty.
+    - No checkboxes.
+
+### 15.4 Setup-guide answers corrected — old → new
+
+The setup guide on `/invest` (`client/src/wizard/data/knowledge-base.json`) said things that are not true. Each is corrected below. These show to **every** applicant, with or without an invitation.
+
+| Flag | Old → new | Where | Why | Status |
+|---|---|---|---|---|
+| 🔴 | `Yes. It's encrypted in transit and at rest. We use it only to send you ACH payouts. You can update it any time from your investor dashboard after approval.` → `Yes. It's sent over an encrypted (HTTPS) connection, stored securely on LogisX's servers, and only visible to LogisX administrators and in your own signed documents. We use it only to send you ACH payouts. To change it later, contact LogisX.` | FAQ `Is my banking info secure?` | Bank details are not encrypted at rest, and there is no screen where an investor can edit them. The Master Agreement they sign prints them in full. | **Awaiting approval** |
+| 🔴 | `… Your info is encrypted and stored securely.` → `… Your info is sent over an encrypted connection and stored securely.` | Guide card `Your payout account` (Step 3) | Same: encrypted on the way, not in storage. The rest of the card is unchanged. | **Awaiting approval** |
+| 🔴 | `… Your SSN/EIN and banking info are never displayed back in full once you submit.` → `… Your SSN/EIN and banking info are only visible to LogisX administrators and in your own signed documents.` | FAQ `Is my personal info safe?` | The signed W-9 shows the SSN/EIN in full and the Master Agreement shows the bank details in full, and both are in the investor dashboard once approved. The first sentence is unchanged. | **Awaiting approval** |
+| 🔴 | `… You'll get a copy of each signed document emailed to you after submission. …` → `… Once you're approved, your signed documents are available in your investor dashboard. …` | FAQ `Are these documents legally binding?` | The applicant's confirmation email carries no attachments; the signed PDFs go to LogisX only. The dashboard lists them under Signed Onboarding Documents. | **Awaiting approval** |
+| ⚪ | `… You can pause anytime — everything auto-saves.` → `… You can pause while this tab stays open — your progress is kept, except your EIN/SSN, bank numbers and signatures, which are never saved.` | Guide card `Welcome to LogisX` | Progress is kept only in the open tab, for up to 12 hours, and the EIN/SSN, bank numbers and signatures are deliberately never saved. | **Awaiting approval** |
+| ⚪ | `… Your progress auto-saves, so you can pause anytime.` → `… Your progress is kept while this tab stays open, so you can pause — except your EIN/SSN, bank numbers and signatures, which are never saved.` | FAQ `How long will this take?` | Same as above. | **Awaiting approval** |
+
+**Related, left unchanged here** (for you to decide):
+
+- The Step 3 banking note, the `Why do you need my address?` answer and the two profit-share answers that were listed here are now corrected: see 15.5 and 15.6.
+- For an investor on a **fixed monthly lease payment**, the Lease §2.01 lead paragraph kept by the approved draft still reads `Rent as a derivative of the Net Operating Income (NOI)`. That is contract wording, so it is left to you. The Amendment says it controls over any conflicting provision, and payouts still follow the Split % column.
+
+### 15.5 The `/invest` page's own security wording corrected — old → new
+
+These are on the page itself, and every applicant sees them, with or without an invitation. Each claimed something the app does not do.
+
+| Flag | Old → new | Where | Why | Status |
+|---|---|---|---|---|
+| 🔴 | `Your banking information is encrypted and stored securely.` → `Your banking information is sent over an encrypted connection and stored on LogisX's servers; only LogisX administrators can see it.` | Step 3, the green note above the bank fields | Bank details are encrypted on the way (HTTPS) but **not** in storage: they are saved as plain values in LogisX's database, a choice recorded in `docs/claude/pii-at-rest.md`. The admin screens mask them unless a Super Admin reveals them. They are also printed in full in the signed Master Agreement, which the applicant sees in their dashboard once approved and which LogisX's admin mailbox receives as an attachment. Same correction as the setup-guide answers in 15.4. | **Awaiting approval** |
+| 🔴 | `256-bit encrypted & secure` → `Encrypted connection (HTTPS)` | Step 1, the green badge under the heading | The connection is encrypted, but not at 256 bits for most applicants. `app.logisx.com` uses whichever cipher the browser prefers, and Chrome prefers 128-bit AES. Checked 2026-09-30: a connection offering Chrome's order got `TLS_AES_128_GCM_SHA256`, and Chromium 152 chose the same. `& secure` promised nothing anyone could check. | **Awaiting approval** |
+| 🔴 | `We need a principal business address for your tax forms (W-9) and for mailing any physical paperwork. We never share it with third parties.` → `We need a principal business address for your tax forms (W-9) and for mailing any physical paperwork. Address suggestions and the map are provided by Google Maps, so what you enter there is sent to Google.` | Setup guide FAQ `Why do you need my address?` (`client/src/wizard/data/knowledge-base.json`) | The address field sends what is typed to Google's address suggestions, the map picker is Google Maps, and `Use my current location` looks the position up with Google. The first sentence is unchanged. | **Awaiting approval** |
+
+### 15.6 Payment answers, for an investor invited on different terms — old → new
+
+An investor invited on a fixed monthly lease payment was told, in two setup-guide answers, that they are paid a share of their truck's earnings, while their documents step and Amendment No. 1 say otherwise. Each answer keeps its wording for the standard agreement and adds the same two sentences. Both answers show to every applicant; the second sentence only matters to someone invited with different terms. No other answer states the split or a profit share.
+
+| Flag | Old → new | Where | Status |
+|---|---|---|---|
+| 🔴 | `LogisX is a trucking logistics company. As an investor, you lease your truck(s) to us. We handle dispatch, loads, insurance, and paperwork. You get paid monthly based on your truck's earnings.` → `LogisX is a trucking logistics company. As an investor, you lease your truck(s) to us. We handle dispatch, loads, insurance, and paperwork. You get paid monthly based on your truck's earnings. That's the standard agreement. If LogisX set different payment terms in your invitation, they're shown on the documents step and in Amendment No. 1 of your agreements.` | Setup guide FAQ `What is LogisX?` (linked from the `Welcome to LogisX` card) | **Awaiting approval** |
+| 🔴 | `Payouts run monthly on Net-60 terms from the load delivery date. You'll see a statement each month with load details and your share.` → `Payouts run monthly on Net-60 terms from the load delivery date. You'll see a statement each month with load details and your share. That's the standard agreement. If LogisX set different payment terms in your invitation, they're shown on the documents step and in Amendment No. 1 of your agreements.` | Setup guide FAQ `How often do I get paid?` (linked from the `Your payout account` card on Step 3) | **Awaiting approval** |
+
+⚠️ The caveat says where the invited terms are **shown**, not how payouts are **calculated**: payouts still follow the Split % column for everyone (see the top of §15).
+
+---
+
 ## The ones I'd raise first
 
 0. **§2 / §12, the loss carry-forward** — the line you actually asked about. Two things to settle: (a) **one wording**, since the same deduction is currently called three different things across the PDF, the Earnings screen and the Payouts table; and (b) whether `Payable` / `Projected payout` is the right name for the figure that lands under it. Everything else in this file can wait — this one is live in August.
 1. **§4 Section 179** — two paragraphs of tax explanation. Does the portal want to be saying this?
 2. **§5 and §8, "the Job Tracking sheet … soft-deleted … load-exclusion filter"** — internal vocabulary in front of an investor, in two places.
 3. **§10 "…and may differ"** — the portal telling an investor two of its own totals disagree.
+4. **§15, a fixed monthly lease on paper, a split in the payouts** — an investor invited on a lease signs for a fixed monthly amount, while payouts are still calculated from the Split % column. The two setup-guide answers that describe a profit share now say it is the standard agreement (§15.6), but the Lease §2.01 lead paragraph still describes rent as a share of Net Operating Income (see "Related, left unchanged here" under §15.4).

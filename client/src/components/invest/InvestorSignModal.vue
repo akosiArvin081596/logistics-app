@@ -1,10 +1,10 @@
 <template>
   <div v-if="show" class="modal-overlay">
-    <div class="modal-fullscreen">
+    <div class="modal-fullscreen" role="dialog" aria-modal="true" :aria-label="doc?.doc_name || 'Document'">
       <!-- Header bar -->
       <div class="modal-header">
         <div class="modal-title">{{ doc?.doc_name || 'Document' }}</div>
-        <button class="modal-close" @click="$emit('close')">&times;</button>
+        <button type="button" class="modal-close" aria-label="Close" @click="$emit('close')">&times;</button>
       </div>
 
       <!-- Two-panel body -->
@@ -12,12 +12,20 @@
         <!-- Left: PDF viewer -->
         <div class="pdf-panel">
           <iframe v-if="pdfUrl" :src="pdfUrl" class="pdf-frame"></iframe>
+          <!-- A refused or failed preview says so and offers a retry; the sign
+               panel beside it keeps whatever the signer has entered. -->
+          <div v-else-if="pdfError" class="pdf-placeholder pdf-error" role="alert" data-test="preview-error">
+            <span>{{ pdfError }}</span>
+            <button type="button" class="pdf-retry" data-test="preview-retry" @click="$emit('retry-preview')">Try again</button>
+          </div>
           <div v-else class="pdf-placeholder">Loading document...</div>
         </div>
 
         <!-- Right: Sign panel -->
         <div class="sign-panel">
           <div v-if="doc && !doc.signed" class="sign-content">
+            <div v-if="notice" class="sign-notice" role="status" data-test="sign-terms-notice">{{ notice }}</div>
+            <InvitePaymentTermsCard v-if="paymentTerms" :payment-terms="paymentTerms" data-test="sign-terms" />
             <div class="sign-panel-title">
               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
               Sign Document
@@ -72,7 +80,8 @@
             </button>
           </div>
 
-          <div v-else-if="doc?.signed" class="sign-done">
+          <div v-else-if="doc?.signed" class="sign-done" :class="{ 'with-terms': paymentTerms }">
+            <InvitePaymentTermsCard v-if="paymentTerms" :payment-terms="paymentTerms" data-test="sign-terms" />
             <div class="sign-done-icon">
               <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
             </div>
@@ -86,16 +95,25 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, nextTick } from 'vue'
+import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
 import { SIGNING_CONSENT_TEXT, buildConsent } from '../../lib/signingConsent'
+import InvitePaymentTermsCard from './InvitePaymentTermsCard.vue'
 
 const props = defineProps({
   show: { type: Boolean, default: false },
   doc: { type: Object, default: null },
   pdfUrl: { type: String, default: '' },
+  // Why the preview is not showing, when it failed; the pane offers a retry.
+  pdfError: { type: String, default: '' },
   suggestedNames: { type: Array, default: () => [] },
+  // The invitation's terms, read-only, beside the document they amend. The
+  // parent passes them only for the master agreement and the lease, and only
+  // while an invitation with non-standard terms is active; otherwise null.
+  paymentTerms: { type: Object, default: null },
+  // Shown above the terms when they changed while the applicant was signing.
+  notice: { type: String, default: '' },
 })
-const emit = defineEmits(['close', 'signed'])
+const emit = defineEmits(['close', 'signed', 'retry-preview'])
 
 // Template ref only — a DOM handle, not signer state. It stays outside
 // blankState() because <script setup> binds `ref="canvasRef"` by matching the
@@ -152,10 +170,23 @@ const filteredNames = computed(() => {
 // `show` is false, so the callback rebuilds the (already blank) state and returns.
 watch(() => props.show, async (v) => {
   state.value = blankState()
+  if (v) window.addEventListener('keydown', onKeydown, true)
+  else window.removeEventListener('keydown', onKeydown, true)
   if (!v) return
   await nextTick()
   initCanvas()
 }, { immediate: true })
+
+// Escape closes this dialog, and only this dialog. The guided tour on /invest
+// also closes on Escape (a bubbling listener on window); this one listens in the
+// capture phase and stops the key there, so one press closes the layer on top
+// instead of the tour hidden underneath it.
+function onKeydown(e) {
+  if (e.key !== 'Escape') return
+  e.stopPropagation()
+  emit('close')
+}
+onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
 
 // ⚠️ This ran as an inline template expression, `window.setTimeout(...)`, and
 // it THREW on every blur. `window` is not one of the globals Vue allows in a
@@ -256,8 +287,12 @@ function handleSign() {
 
 <style scoped>
 /* ─── Fullscreen overlay ─── */
+/* Above the /invest guided tour, whose layers run from 9997 to 9999
+   (client/src/wizard/components). At 999 the tour's minimized "Guide" tab sat
+   on this dialog's close button, so after signing the x could not be clicked.
+   No tour step points inside this dialog, so nothing it guides is covered. */
 .modal-overlay {
-  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); z-index: 999;
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); z-index: 10000;
   display: flex; align-items: center; justify-content: center;
 }
 .modal-fullscreen {
@@ -294,6 +329,14 @@ function handleSign() {
   display: flex; align-items: center; justify-content: center;
   height: 100%; color: #6b7085; font-size: 0.9rem;
 }
+.pdf-error { flex-direction: column; gap: 0.85rem; padding: 1.5rem; text-align: center; }
+.pdf-retry {
+  padding: 0.55rem 1.3rem; background: #0f2847; color: #fff; border: none;
+  border-radius: 10px; font-weight: 700; font-size: 0.85rem; cursor: pointer;
+  font-family: inherit; transition: background 0.15s;
+}
+.pdf-retry:hover { background: #1a3a6b; }
+.pdf-retry:focus-visible { outline: 2px solid #3b82f6; outline-offset: 2px; }
 /* ─── Right: Sign panel ─── */
 .sign-panel {
   width: 340px; flex-shrink: 0;
@@ -363,12 +406,28 @@ function handleSign() {
 .sign-btn:hover:not(:disabled) { background: #1a3a6b; }
 .sign-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 
+/* ─── Terms-changed notice and terms card ─── */
+.sign-notice {
+  background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px;
+  padding: 0.6rem 0.8rem; font-size: 0.78rem; color: #1d4ed8; line-height: 1.5;
+}
+/* The column's own gap spaces the card here. */
+.sign-content > .terms-card,
+.sign-done > .terms-card { margin-bottom: 0; flex-shrink: 0; }
+
 /* ─── Signed state ─── */
 .sign-done {
   flex: 1; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 0.75rem;
   padding: 2rem; text-align: center;
 }
+/* With the terms card on top the column can outgrow the panel, and a centred
+   column that overflows cannot be scrolled back to its top. */
+.sign-done.with-terms {
+  justify-content: flex-start; align-items: stretch; overflow-y: auto;
+  padding: 1.25rem;
+}
+.sign-done.with-terms .sign-done-icon { align-self: center; }
 .sign-done-icon {
   width: 56px; height: 56px; border-radius: 50%;
   background: #dcfce7; color: #16a34a;

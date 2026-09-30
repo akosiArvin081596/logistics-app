@@ -531,9 +531,10 @@ function formatDate(d) {
   })
 }
 
+// The last four DIGITS, so a stored "123-45-6789 " still shows 6789.
 function maskSSN(ssn) {
-  if (!ssn || ssn.length < 4) return '***-**-****'
-  return '***-**-' + ssn.slice(-4)
+  const digits = String(ssn || '').replace(/\D/g, '')
+  return digits.length >= 4 ? `***-**-${digits.slice(-4)}` : '***-**-****'
 }
 
 function parseAvailability(val) {

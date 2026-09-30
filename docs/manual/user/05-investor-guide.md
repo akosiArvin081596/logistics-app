@@ -32,6 +32,8 @@ Revenue (from completed loads)         $XX,XXX
   ÷ 2 (your half)                       $XX,XXX
 ```
 
+Your agreement's payment terms are the ones you signed: typically 50/50, or the terms in an **Amendment No. 1 — Payment Terms** if you joined through a personal invitation from LogisX.
+
 ![Investor earnings section](screenshots/investor-earnings.png)
 
 Beneath that, an **all-time totals** strip shows lifetime revenue, lifetime expenses, lifetime net profit, and your lifetime earnings.

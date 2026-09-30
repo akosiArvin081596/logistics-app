@@ -1033,6 +1033,7 @@ const ACCEPT_DDL = [
 		id INTEGER PRIMARY KEY AUTOINCREMENT, unit_number TEXT UNIQUE, make TEXT DEFAULT '', model TEXT DEFAULT '', year INTEGER DEFAULT 0,
 		vin TEXT DEFAULT '', license_plate TEXT DEFAULT '', status TEXT DEFAULT 'Active', owner_id INTEGER DEFAULT 0,
 		purchase_price REAL DEFAULT 0, title_status TEXT DEFAULT 'Clean', title_state TEXT DEFAULT '', notes TEXT DEFAULT '')`,
+	"CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT NOT NULL UNIQUE COLLATE NOCASE)",
 ];
 async function acceptanceSection() {
 	section("§6 investor-application acceptance");
@@ -1067,6 +1068,7 @@ async function acceptanceSection() {
 		db,
 		registerApplicationVehicles,
 		parseTruckAmount: m.parseTruckAmount,
+		findDriverNameClash: m.findDriverNameClash,
 		colLetter,
 		crypto: require("crypto"),
 		bcrypt: { hash: async () => "hashed" },

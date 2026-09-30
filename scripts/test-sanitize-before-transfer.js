@@ -148,6 +148,7 @@ const FAKE = {
 	mailC: "chris.applicant@example-mail.test",
 	mailD: "outreach.target@example-list.test",
 	mailE: "broker.desk@example-broker.test",
+	mailF: "pat.invitee@example-invite.test",
 	phone: "512-555-0143",
 	// Home locality. Deliberately NOT email- or SSN-shaped: these exist to prove
 	// the free-text sweep is not a safety net for the column lists.
@@ -161,6 +162,8 @@ const FAKE = {
 	cdlBack: "data:image/jpeg;base64,Q0RMQkFDS1BJWEVMU19NVVNUX05PVF9TVVJWSVZF",
 	medCard: "data:image/jpeg;base64,TUVEQ0FSRFBJWEVMU19NVVNUX05PVF9TVVJWSVZF",
 };
+// The sha256 an invitation link is stored as (investor_invites.token_sha256).
+const INVITE_TOKEN_HASH = "1a2b3c4d".repeat(8);
 
 // ---------------------------------------------------------------------------
 // FREE-TEXT fixtures — the addresses stage 3h is supposed to REWRITE.
@@ -283,7 +286,9 @@ const MUST_NOT_SURVIVE = [
 	SHARED_PUBLISHED_HASH,
 	FAKE.ssnA, FAKE.ssnB, FAKE.einA, FAKE.einB, FAKE.routing,
 	FAKE.accountA, FAKE.accountB, FAKE.licence,
-	FAKE.mailA, FAKE.mailB, FAKE.mailC, FAKE.mailD,
+	FAKE.mailA, FAKE.mailB, FAKE.mailC, FAKE.mailD, FAKE.mailF,
+	// A payment terms invitation link's stored hash: a copy must not open it.
+	INVITE_TOKEN_HASH,
 	// Free text — the 2026-08-13 gap. Present in the snapshot, absent from the
 	// artifact, and NOT because the value was blanked (sections 5-7).
 	FREE.agent, FREE.agentUpper, FREE.ap, FREE.billing, FREE.reference, FREE.prevEmp,
@@ -361,6 +366,7 @@ function seedDatabase(dbPath) {
 		CREATE TABLE investors (id INTEGER PRIMARY KEY, name TEXT, email TEXT, phone TEXT, ein_ssn TEXT, address TEXT, application_id INTEGER DEFAULT 0);
 		CREATE TABLE investor_applications (id INTEGER PRIMARY KEY, email TEXT, phone TEXT, ein_ssn TEXT, address TEXT, access_token TEXT, status TEXT);
 		CREATE TABLE investor_outreach_log (id INTEGER PRIMARY KEY, email TEXT, sent_at TEXT);
+		CREATE TABLE investor_invites (id INTEGER PRIMARY KEY, token_sha256 TEXT NOT NULL UNIQUE, invitee_name TEXT, invitee_email TEXT, status TEXT);
 		CREATE TABLE job_applications (id INTEGER PRIMARY KEY, full_name TEXT, email TEXT, phone TEXT, cell TEXT, ssn TEXT, dob TEXT, drivers_license TEXT, address TEXT, city TEXT, state TEXT, zip TEXT, signature TEXT, reference_info TEXT, cdl_front TEXT, cdl_back TEXT, medical_card TEXT, deleted_at TEXT);
 		CREATE TABLE sheet_job_tracking (id INTEGER PRIMARY KEY, load_id TEXT, email TEXT, phone_number TEXT);
 		CREATE TABLE investor_payment_info (id INTEGER PRIMARY KEY, investor_id INTEGER, routing_number TEXT, account_number TEXT, account_name TEXT, bank_name TEXT);
@@ -403,6 +409,8 @@ function seedDatabase(dbPath) {
 	db.prepare("INSERT INTO investor_applications (id,email,phone,ein_ssn,address,access_token,status) VALUES (?,?,?,?,?,?,?)")
 		.run(1, FAKE.mailB, FAKE.phone, FAKE.einB, "900 Money Ave", "live-bearer-token-must-be-regenerated", "approved");
 	db.prepare("INSERT INTO investor_outreach_log (id,email,sent_at) VALUES (?,?,?)").run(1, FAKE.mailD, "2026-08-01");
+	db.prepare("INSERT INTO investor_invites (id,token_sha256,invitee_name,invitee_email,status) VALUES (?,?,?,?,?)")
+		.run(1, INVITE_TOKEN_HASH, "Pat Invitee", FAKE.mailF, "active");
 
 	// ⚠️ reference_info is seeded on row 1 ONLY. collectLeaks() guards every check
 	// with has_(table, column), so an unpopulated column reports the same green
@@ -992,6 +1000,7 @@ function extractFn(src, name) {
 			`${tokens.length} token occurrence(s), ${new Set(tokens).size} distinct`);
 
 		check("the old bearer token is gone", !raw.includes("live-bearer-token-must-be-regenerated"));
+		check("the invitation link's stored hash is replaced", !raw.includes(INVITE_TOKEN_HASH));
 		check("production password hashes are gone", !raw.includes("productionhashthatmustnotsurvive"));
 
 		// ⚠️ THE OTHER DIRECTION, and it is not padding. A sanitizer graded only on

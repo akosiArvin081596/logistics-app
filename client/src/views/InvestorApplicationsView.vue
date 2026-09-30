@@ -64,6 +64,19 @@
       </div>
     </details>
 
+    <!-- A refused status change stays on screen until dismissed: the toast
+         clears in seconds, and a refused Accept needs the admin's attention. -->
+    <div v-if="statusError" role="alert" data-test="application-status-error" class="flex items-start justify-between gap-3 mb-3 py-2 px-3 bg-red-50 rounded-lg border border-red-200 text-[13px] text-red-800">
+      <span>{{ statusError }}</span>
+      <button type="button" class="font-bold underline shrink-0" @click="statusError = ''">Dismiss</button>
+    </div>
+    <!-- An acceptance that created nothing (the account already exists) stays
+         on screen too: the admin must not read it as a new investor. -->
+    <div v-if="statusNotice" role="status" data-test="application-status-notice" class="flex items-start justify-between gap-3 mb-3 py-2 px-3 bg-amber-50 rounded-lg border border-amber-200 text-[13px] text-amber-800">
+      <span>{{ statusNotice }}</span>
+      <button type="button" class="font-bold underline shrink-0" @click="statusNotice = ''">Dismiss</button>
+    </div>
+
     <Card class="flex flex-col" style="border-radius:14px;border:1px solid #e8edf2;box-shadow:0 1px 4px rgba(0,0,0,0.06);">
       <CardContent style="padding:0;">
         <div v-if="loading" class="flex items-center justify-center py-16">
@@ -84,22 +97,46 @@
               <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Docs</TableHead>
               <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Onboarding</TableHead>
               <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Status</TableHead>
-              <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider text-right">Actions</TableHead>
+              <!-- Pinned from md up, like the Actions cells below: opaque gray-50
+                   with the header's muted/40 laid over it, the colour of the
+                   header cells beside it. -->
+              <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider text-right md:sticky md:right-0 md:bg-gray-50 md:bg-linear-to-b md:from-muted/40 md:to-muted/40">Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            <TableRow v-for="app in filteredApplications" :key="app.id" class="hover:bg-blue-50/30 transition-colors cursor-pointer" @click="viewDetail(app)">
-              <TableCell class="font-semibold text-[13px] text-gray-900">{{ app.legal_name }}</TableCell>
+            <TableRow v-for="app in filteredApplications" :key="app.id" class="group hover:bg-blue-50/30 transition-colors cursor-pointer" @click="viewDetail(app)">
+              <TableCell class="font-semibold text-[13px] text-gray-900">
+                <div data-test="application-name">{{ app.legal_name }}</div>
+                <!-- Signed terms only: the standard contract shows no chip. -->
+                <Badge
+                  v-if="app.payment_terms"
+                  variant="outline"
+                  data-test="application-terms"
+                  :class="['mt-1 normal-case tracking-normal whitespace-normal leading-tight', termsChipClass(app.payment_terms)]"
+                  :title="termsTitle(app)"
+                >{{ termsChipLabel(app.payment_terms) }}</Badge>
+              </TableCell>
               <TableCell class="text-[13px] text-gray-600">{{ app.entity_type || '-' }}</TableCell>
               <TableCell class="text-[13px] text-gray-600">{{ app.email }}</TableCell>
               <TableCell class="text-[13px] text-gray-600">{{ app.phone }}</TableCell>
-              <TableCell class="text-[13px]">{{ app.signed_count || 0 }}/3</TableCell>
+              <TableCell class="text-[13px]" data-test="application-docs">{{ app.signed_count || 0 }}/{{ app.docs_total ?? 3 }}</TableCell>
               <TableCell><Badge :class="obBadge(app.onboarding_status)">{{ app.onboarding_status || 'pending' }}</Badge></TableCell>
               <TableCell><Badge :class="statusBadge(app.status)">{{ app.status }}</Badge></TableCell>
-              <TableCell class="text-right" @click.stop>
+              <!-- From md up, Actions stay pinned at the card's right edge when the
+                   table is wider than the card, and the other columns scroll
+                   beneath them, so the cell is opaque white with the row's
+                   blue-50/30 hover laid over it. -->
+              <TableCell class="text-right transition-colors md:sticky md:right-0 md:bg-white md:group-hover:bg-linear-to-b md:group-hover:from-blue-50/30 md:group-hover:to-blue-50/30" @click.stop>
                 <div class="flex items-center justify-end gap-1.5">
                   <Button size="sm" variant="outline" class="rounded-md border-[#e2e4ea] text-[12px] h-8" @click="viewDetail(app)">View</Button>
-                  <select class="text-[12px] border border-[#e2e4ea] rounded-md px-2 py-1 bg-white" :value="app.status" @change="updateStatus(app.id, $event.target.value)">
+                  <select
+                    class="text-[12px] border border-[#e2e4ea] rounded-md px-2 py-1 bg-white disabled:opacity-60"
+                    data-test="application-status"
+                    :aria-label="`Status of ${app.legal_name || 'this application'}`"
+                    :value="app.status"
+                    :disabled="statusSavingId === app.id"
+                    @change="onStatusChange(app, $event)"
+                  >
                     <option v-for="s in statuses" :key="s" :value="s">{{ s }}</option>
                   </select>
                 </div>
@@ -147,6 +184,18 @@
       </DialogContent>
     </Dialog>
 
+    <!-- Accepting creates an account and emails a password, so it is never sent
+         straight from the select. -->
+    <ConfirmModal
+      :open="!!pendingAccept"
+      title="Accept application"
+      :message="`Accept ${pendingAccept?.app.legal_name || 'this applicant'}? This creates their investor account and emails them a temporary password.`"
+      confirm-text="Accept"
+      cancel-text="Cancel"
+      @confirm="confirmAccept"
+      @cancel="cancelAccept"
+    />
+
     <!-- Detail Dialog -->
     <Dialog v-model:open="showDetail">
       <DialogContent class="sm:max-w-[680px] rounded-[14px] border-[#e8edf2] shadow-[0_8px_32px_rgba(0,0,0,0.12)] p-0 gap-0 overflow-hidden max-h-[90vh]">
@@ -182,6 +231,25 @@
               <div v-if="detail.application.fleet_size" class="detail-item"><span class="detail-label">Fleet Size</span><span class="detail-value">{{ detail.application.fleet_size }}</span></div>
               <div v-if="detail.application.bankruptcy_liens" class="detail-item col-span-2"><span class="detail-label">Bankruptcy/Liens</span><span class="detail-value">{{ detail.application.bankruptcy_liens }}</span></div>
             </div>
+          </div>
+
+          <!-- Payment Terms (read-only: what the applicant signed, or the standard contract) -->
+          <div v-if="detail.paymentTerms" class="detail-section" data-test="application-terms-section">
+            <div class="detail-section-title">
+              <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+              Payment Terms
+            </div>
+            <PaymentTermsSummary
+              :display="detail.paymentTerms.display"
+              :terms="detail.paymentTerms.paymentTerms"
+              :is-default="detail.paymentTerms.isDefault"
+            />
+            <p v-if="detail.paymentTerms.invite" class="text-[12px] text-gray-500 mt-2">
+              Applied through personal invite #{{ detail.paymentTerms.invite.id }}, terms revision {{ detail.paymentTerms.invite.termsRevision }}.
+            </p>
+            <p v-if="detail.paymentTerms.consistent === false" class="text-[12px] text-amber-700 mt-2" role="note">
+              The stored payment terms don't all agree or couldn't be read. Check the signed PDFs.
+            </p>
           </div>
 
           <!-- Fleet -->
@@ -235,16 +303,9 @@
               <div v-if="detail.banking.account_type" class="detail-item"><span class="detail-label">Account Type</span><span class="detail-value">{{ detail.banking.account_type }}</span></div>
               <div v-if="detail.banking.account_name" class="detail-item"><span class="detail-label">Name on Account</span><span class="detail-value">{{ detail.banking.account_name }}</span></div>
               <div class="detail-item"><span class="detail-label">Routing Number</span><span class="detail-value">{{ detail.banking.routing_number }}</span></div>
-              <div class="detail-item">
-                <span class="detail-label">Account Number</span>
-                <span class="detail-value" style="display:inline-flex;align-items:center;gap:0.4rem">
-                  {{ showAcctNum ? detail.banking.account_number : '••••' + (detail.banking.account_number || '').slice(-4) }}
-                  <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="cursor:pointer;color:#94a3b8;flex-shrink:0" @click="showAcctNum = !showAcctNum">
-                    <path v-if="!showAcctNum" d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle v-if="!showAcctNum" cx="12" cy="12" r="3"/>
-                    <path v-if="showAcctNum" d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line v-if="showAcctNum" x1="1" y1="1" x2="23" y2="23"/>
-                  </svg>
-                </span>
-              </div>
+              <!-- The server sends this masked, so it is shown masked, with no
+                   reveal control: a toggle here could only ever re-show the mask. -->
+              <div class="detail-item"><span class="detail-label">Account Number</span><span class="detail-value" data-test="application-account-number">{{ maskedAccount(detail.banking.account_number) }}</span></div>
             </div>
           </div>
         </div>
@@ -255,9 +316,13 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
+import PaymentTermsSummary from '../components/investors/PaymentTermsSummary.vue'
+import { formatMoneyCents } from '../lib/paymentTerms'
+import ConfirmModal from '../components/shared/ConfirmModal.vue'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
@@ -300,8 +365,9 @@ const credentials = ref(null)
 const acceptVehicles = ref(null)
 const showDetail = ref(false)
 const detailLoading = ref(false)
-const showAcctNum = ref(false)
-const detail = reactive({ application: null, vehicles: [], banking: {}, documents: [] })
+const detail = reactive({ application: null, vehicles: [], banking: {}, documents: [], paymentTerms: null })
+// Only the newest detail read fills the dialog.
+let detailTicket = 0
 const statuses = ['New', 'Reviewed', 'Accepted', 'Rejected']
 
 function statusBadge(s) {
@@ -309,6 +375,28 @@ function statusBadge(s) {
   if (s === 'Rejected') return 'bg-red-50 text-red-700 border-red-200'
   if (s === 'Reviewed') return 'bg-blue-50 text-blue-700 border-blue-200'
   return 'bg-gray-50 text-gray-600 border-gray-200'
+}
+
+// The terms chip under an applicant's name, from the list's payment_terms
+// (null for the standard contract, which shows no chip). A split snapshot
+// always carries additional terms: a plain split is the standard contract.
+// Compact on purpose: the chip sets the Name column's narrowest width, and the
+// table has no spare room at 1400 px. Whole dollars drop their ".00"; the
+// tooltip carries the full summary.
+function termsChipLabel(terms) {
+  if (terms.unreadable) return 'Terms unreadable'
+  if (terms.type === 'lease') return `Lease ${formatMoneyCents(terms.leaseAmountCents).replace(/\.00$/, '')}/mo`
+  return '50/50 amended'
+}
+
+function termsChipClass(terms) {
+  return terms.unreadable ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-violet-50 text-violet-700 border-violet-200'
+}
+
+// The chip's tooltip: the whole summary, and the invitation it came through.
+function termsTitle(app) {
+  const summary = app.payment_terms_summary
+  return app.invite_id ? `${summary} (applied through personal invite #${app.invite_id})` : summary
 }
 
 function obBadge(s) {
@@ -328,57 +416,133 @@ async function load() {
   }
 }
 
+// Resolves to the server's answer and rejects with its refusal; saveStatus()
+// shows both.
 async function updateStatus(id, status) {
-  try {
-    const result = await api.put(`/api/investor-applications/${id}/status`, { status })
-    if (result.accountCreated && result.credentials) {
-      credentials.value = result.credentials
-      // A vehicle already on file under another owner is not this investor's,
-      // and one that failed was not written: the dialog says so beside the
-      // credentials (the welcome email counts only created + existing).
-      const v = result.vehicles || null
-      const failed = v?.failed || 0
-      const heldByOther = v?.heldByOther || 0
-      acceptVehicles.value = v
-        ? { registered: (v.created || 0) + (v.existing || 0), heldByOther, failed, unitPrefix: `INV-${id}-` }
-        : null
-      showCredentials.value = true
-      // The toast holds one message, so a vehicle that needs the admin replaces
-      // the success line rather than being overwritten by it.
-      const notes = []
-      if (heldByOther > 0) notes.push(`${heldByOther} vehicle(s) are already on file under another owner — reassign them from the Trucks page`)
-      if (failed > 0) notes.push(`${failed} vehicle(s) could not be added — add them from the Trucks page`)
-      if (notes.length) {
-        toast(`Investor accepted — account created. ${notes.join('; ')}`, 'warning')
-      } else {
-        toast('Investor accepted — account created', 'success')
-      }
+  const result = await api.put(`/api/investor-applications/${id}/status`, { status })
+  if (result.accountCreated && result.credentials) {
+    credentials.value = result.credentials
+    // A vehicle already on file under another owner is not this investor's,
+    // and one that failed was not written: the dialog says so beside the
+    // credentials (the welcome email counts only created + existing).
+    const v = result.vehicles || null
+    const failed = v?.failed || 0
+    const heldByOther = v?.heldByOther || 0
+    acceptVehicles.value = v
+      ? { registered: (v.created || 0) + (v.existing || 0), heldByOther, failed, unitPrefix: `INV-${id}-` }
+      : null
+    showCredentials.value = true
+    // The toast holds one message, so a vehicle that needs the admin replaces
+    // the success line rather than being overwritten by it.
+    const notes = []
+    if (heldByOther > 0) notes.push(`${heldByOther} vehicle(s) are already on file under another owner — reassign them from the Trucks page`)
+    if (failed > 0) notes.push(`${failed} vehicle(s) could not be added — add them from the Trucks page`)
+    if (notes.length) {
+      toast(`Investor accepted — account created. ${notes.join('; ')}`, 'warning')
     } else {
-      toast(`Status updated to ${status}`, 'success')
+      toast('Investor accepted — account created', 'success')
     }
-    await load()
-  } catch (err) {
-    toast(err.message, 'error')
+  } else if (result.accountCreated === false) {
+    // Accepted, and nothing was created: the server's message says why.
+    toast(result.message || 'Accepted — no account was created', 'warning')
+  } else {
+    toast(`Status updated to ${status}`, 'success')
   }
+  await load()
+  return result
 }
 
 async function viewDetail(app) {
+  const ticket = ++detailTicket
   showDetail.value = true
   detailLoading.value = true
   detail.application = null
   detail.vehicles = []
   detail.banking = {}
   detail.documents = []
+  detail.paymentTerms = null
   try {
     const data = await api.get(`/api/investor-applications/${app.id}`)
+    if (ticket !== detailTicket) return
     detail.application = data.application
     detail.vehicles = data.vehicles || []
     detail.banking = data.banking || {}
     detail.documents = data.documents || []
+    detail.paymentTerms = data.paymentTerms || null
   } catch (err) {
-    toast(err.message, 'error')
+    if (ticket === detailTicket) toast(err.message, 'error')
   } finally {
-    detailLoading.value = false
+    if (ticket === detailTicket) detailLoading.value = false
+  }
+}
+
+// "View application" on a used invite (/investors) links here with
+// ?application=<id>: open that application, then drop the query so a reload
+// does not open it again.
+const route = useRoute()
+const router = useRouter()
+function openLinkedApplication() {
+  const id = Number(route.query.application)
+  if (!Number.isSafeInteger(id) || id <= 0) return
+  viewDetail({ id })
+  const query = { ...route.query }
+  delete query.application
+  router.replace({ query })
+}
+
+// A refused status change, with the server's reason; '' otherwise.
+const statusError = ref('')
+// An acceptance that created no account, record or trucks, in the server's
+// words; '' otherwise.
+const statusNotice = ref('')
+// The application whose status change is waiting for the server.
+const statusSavingId = ref(null)
+// An "Accepted" pick waiting for the admin's confirmation: { app, select }.
+const pendingAccept = ref(null)
+
+function onStatusChange(app, event) {
+  const select = event.target
+  const status = select.value
+  statusError.value = ''
+  statusNotice.value = ''
+  if (status === 'Accepted') {
+    pendingAccept.value = { app, select }
+    return
+  }
+  saveStatus(app, status, select)
+}
+
+function cancelAccept() {
+  const pending = pendingAccept.value
+  pendingAccept.value = null
+  if (pending) pending.select.value = pending.app.status
+}
+
+function confirmAccept() {
+  const pending = pendingAccept.value
+  pendingAccept.value = null
+  if (pending) saveStatus(pending.app, 'Accepted', pending.select)
+}
+
+// Sends a status change and shows its outcome. A refusal puts the select back
+// at once, keeps the server's reason on screen, and re-reads the list so the
+// row shows the status the server actually holds (or drops a deleted one). An
+// acceptance that created nothing keeps the server's message on screen.
+async function saveStatus(app, status, select) {
+  statusSavingId.value = app.id
+  try {
+    const result = await updateStatus(app.id, status)
+    if (result?.accountCreated === false) {
+      const message = result.message || 'Accepted. No account, investor record or trucks were created.'
+      statusNotice.value = `${app.legal_name || `Application ${app.id}`}: ${message}`
+    }
+  } catch (err) {
+    if (select) select.value = app.status
+    statusError.value = `${app.legal_name || `Application ${app.id}`} was not set to ${status}: ${err.message}`
+    toast(err.message, 'error')
+    await load()
+  } finally {
+    statusSavingId.value = null
   }
 }
 
@@ -432,6 +596,11 @@ async function loadOutreachLog() {
 
 function openPdf(url) { window.open(url, '_blank') }
 
+// Only the last four digits, whatever the server sent.
+function maskedAccount(value) {
+  return value ? `••••${String(value).slice(-4)}` : '—'
+}
+
 // A bare SQLite CURRENT_TIMESTAMP: "2026-08-04 13:05:07" — UTC, but with no
 // zone marker. Anything else (real ISO, with 'Z' or an offset) falls through.
 const SQLITE_UTC_STAMP_RE = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/
@@ -460,7 +629,7 @@ function formatDate(d) {
   })
 }
 
-onMounted(() => { load(); loadOutreachLog() })
+onMounted(() => { load(); loadOutreachLog(); openLinkedApplication() })
 </script>
 
 <style scoped>

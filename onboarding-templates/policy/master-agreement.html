@@ -304,12 +304,20 @@
     <li><strong>Regulatory Compliance:</strong> Pro-rated assessments for Federal Highway Use Tax (<strong>IRS Form 2290</strong>), IRP apportioned registration, and required state permitting.</li>
   </ul>
 
+<!-- payment-terms:slot master.3.3 -->
   <p><span class="section-title">3.3 Revenue Participation and Method of Payment.</span> Upon the final determination of the monthly NOI, the remaining funds shall be distributed according to a <strong>50/50 split</strong>:</p>
   <ul>
     <li><strong>Participant Distribution (50%):</strong> Remitted to the Participant as a professional return on the contributed Asset.</li>
     <li><strong>Managerial Distribution (50%):</strong> Retained by the Manager as compensation for comprehensive fleet administration, scaling, and logistics management.</li>
     <li><strong>Payment Execution (Schedule A):</strong> All disbursements shall be issued to the Participant via the electronic payment method and banking instructions designated in the attached <strong>Schedule A (Payment &amp; Banking Election Form)</strong>. The Participant is responsible for maintaining the accuracy of the information in <strong>Schedule A</strong> to avoid processing delays.</li>
   </ul>
+<template data-payment-terms="lease">
+  <p><span class="section-title">3.3 Payment Terms and Method of Payment.</span> In place of the 50/50 split, the Participant shall receive a fixed monthly lease payment of <strong aria-label="Payment terms monthly amount"></strong>, as set out in Amendment No. 1.</p>
+  <ul>
+    <li><strong>Payment Execution (Schedule A):</strong> All disbursements shall be issued to the Participant via the electronic payment method and banking instructions designated in the attached <strong>Schedule A (Payment &amp; Banking Election Form)</strong>. The Participant is responsible for maintaining the accuracy of the information in <strong>Schedule A</strong> to avoid processing delays.</li>
+  </ul>
+</template>
+<!-- /payment-terms:slot -->
 
   <p><span class="section-title">3.4 Settlement Cycle (Net-60).</span> Reconciliation and disbursements shall adhere to a <strong>"Net-60"</strong> accounting window to accommodate standard industry receivable aging and the verification of all operational debits. Revenue generated within a specific calendar month shall be settled and paid on the <strong>last Friday of the subsequent calendar month</strong> (e.g., January production is settled and paid on the last Friday of February).</p>
 
@@ -407,6 +415,29 @@
 
   <p><span class="section-title">7.06 Entire Agreement.</span> This Agreement, including <strong>Exhibit A</strong> and <strong>Schedule A</strong>, constitutes the sole and entire agreement of the Parties with respect to the subject matter contained herein, and supersedes all prior and contemporaneous understandings, agreements, representations, and warranties, both written and oral, with respect to such subject matter. No amendment to or modification of this Agreement is effective unless it is in writing and signed by an authorized representative of each Party.</p>
 
+<!-- payment-terms:slot master.amendment -->
+<template data-payment-terms="split">
+  <div style="border:1px solid #000;padding:14px 18px;margin:0 0 24px;page-break-inside:avoid">
+    <p style="margin:0 0 10px;font-weight:700">AMENDMENT NO. 1 &mdash; PAYMENT TERMS</p>
+    <p style="margin:0 0 10px">These payment terms were agreed for this Participant and control over any conflicting provision of this Agreement.</p>
+    <p style="margin:0 0 6px"><strong>Payment type:</strong> <span aria-label="Payment terms type"></span></p>
+    <p style="margin:0 0 4px"><strong>Additional terms:</strong></p>
+    <div aria-label="Payment terms details" style="white-space:pre-wrap;overflow-wrap:anywhere"></div>
+  </div>
+
+</template>
+<template data-payment-terms="lease">
+  <div style="border:1px solid #000;padding:14px 18px;margin:0 0 24px;page-break-inside:avoid">
+    <p style="margin:0 0 10px;font-weight:700">AMENDMENT NO. 1 &mdash; PAYMENT TERMS</p>
+    <p style="margin:0 0 10px">These payment terms were agreed for this Participant and control over any conflicting provision of this Agreement.</p>
+    <p style="margin:0 0 6px"><strong>Payment type:</strong> <span aria-label="Payment terms type"></span></p>
+    <p style="margin:0 0 6px"><strong>Monthly amount:</strong> <span aria-label="Payment terms monthly amount"></span></p>
+    <p style="margin:0 0 4px"><strong>Additional terms:</strong></p>
+    <div aria-label="Payment terms details" style="white-space:pre-wrap;overflow-wrap:anywhere"></div>
+  </div>
+
+</template>
+<!-- /payment-terms:slot -->
   <!-- Signature Box -->
   <div class="sig-box">
     <h3>Signature Execution</h3>

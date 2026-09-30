@@ -711,6 +711,7 @@ async function main() {
 		investors: { email: `id || '.investor@${MAIL_DOMAIN}'`, phone: null },
 		investor_applications: { email: `id || '.investorapp@${MAIL_DOMAIN}'`, phone: null },
 		investor_outreach_log: { email: `id || '.outreach@${MAIL_DOMAIN}'` },
+		investor_invites: { invitee_email: `id || '.invite@${MAIL_DOMAIN}'` },
 		job_applications: { email: `id || '.applicant@${MAIL_DOMAIN}'`, phone: null, cell: null },
 		sheet_job_tracking: { email: `'row@${MAIL_DOMAIN}'`, phone_number: null },
 	})) {
@@ -788,15 +789,25 @@ async function main() {
 	sigs += setCols("investor_onboarding_documents", { signature_text: "REDACTED", signature_image: "", ...EVIDENCE_REDACTIONS });
 	if (sigs) summary.push(`signatures + signing evidence: ${sigs} redacted`);
 
-	// 3g. Onboarding access tokens are live bearer credentials for the PUBLIC
-	//     /api/public/investor-onboarding/:id/* flow. Regenerating them means a
-	//     leaked copy of this database cannot be replayed against production,
-	//     and a link mailed from production cannot be replayed against staging.
+	// 3g. investor_applications.access_token: no route accepts these tokens since
+	//     the token-gated /api/public/investor-onboarding/:id/* routes were
+	//     removed, but they are regenerated anyway, so a copy of this database
+	//     carries none of production's.
 	if (tableExists("investor_applications") && colsOf("investor_applications").includes("access_token")) {
 		const rows = db.prepare("SELECT id FROM investor_applications WHERE COALESCE(access_token,'') <> ''").all();
 		const upd = db.prepare("UPDATE investor_applications SET access_token = ? WHERE id = ?");
 		for (const r of rows) upd.run(crypto.randomBytes(24).toString("hex"), r.id);
 		if (rows.length) summary.push(`investor_applications: ${rows.length} access token(s) regenerated`);
+	}
+	//     Payment terms invitation links, the same way: only a link's sha256 is
+	//     stored, and a random value in its place means no link mailed from
+	//     production opens an invitation on the copy. The copy's admin reissues
+	//     a link to test one.
+	if (tableExists("investor_invites") && colsOf("investor_invites").includes("token_sha256")) {
+		const rows = db.prepare("SELECT id FROM investor_invites").all();
+		const upd = db.prepare("UPDATE investor_invites SET token_sha256 = ? WHERE id = ?");
+		for (const r of rows) upd.run(crypto.randomBytes(32).toString("hex"), r.id);
+		if (rows.length) summary.push(`investor_invites: ${rows.length} invitation link(s) invalidated`);
 	}
 
 	// 3h. FREE TEXT. Everything above is COLUMN-AWARE: it names a table and a
@@ -1152,7 +1163,7 @@ const REDACTED_LITERAL = [
 ];
 const REDIRECTED_EMAIL = [
 	["users", "email"], ["drivers_directory", "email"], ["investors", "email"],
-	["investor_applications", "email"], ["investor_outreach_log", "email"],
+	["investor_applications", "email"], ["investor_outreach_log", "email"], ["investor_invites", "invitee_email"],
 	["job_applications", "email"], ["sheet_job_tracking", "email"],
 ];
 const MUST_BE_EMPTY_TABLES = [

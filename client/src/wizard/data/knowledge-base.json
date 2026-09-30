@@ -1,10 +1,10 @@
 {
   "version": "1.0.0",
-  "lastUpdated": "2026-04-15",
+  "lastUpdated": "2026-09-30",
   "steps": {
     "WELCOME": {
       "title": "Welcome to LogisX",
-      "body": "Hi! I'm your guided assistant. I'll walk you through becoming a LogisX truck investor in about 10 minutes. There are 3 steps: your application, your trucks and documents, then your banking. You can pause anytime — everything auto-saves.",
+      "body": "Hi! I'm your guided assistant. I'll walk you through becoming a LogisX truck investor in about 10 minutes. There are 3 steps: your application, your trucks and documents, then your banking. You can pause while this tab stays open — your progress is kept, except your EIN/SSN, bank numbers and signatures, which are never saved.",
       "target": ".invest-page",
       "action": "info",
       "highlight": "none",
@@ -191,7 +191,7 @@
     },
     "BANKING_INTRO": {
       "title": "Your payout account",
-      "body": "We pay investors via ACH direct deposit, usually Net-60 from the load delivery date. Enter the bank where you want your payouts sent. Your info is encrypted and stored securely.",
+      "body": "We pay investors via ACH direct deposit, usually Net-60 from the load delivery date. Enter the bank where you want your payouts sent. Your info is sent over an encrypted connection and stored securely.",
       "target": "[data-wizard-target='banking-section']",
       "action": "info",
       "highlight": "spotlight",
@@ -267,12 +267,12 @@
   "faqs": {
     "what_is_logisx": {
       "q": "What is LogisX?",
-      "a": "LogisX is a trucking logistics company. As an investor, you lease your truck(s) to us. We handle dispatch, loads, insurance, and paperwork. You get paid monthly based on your truck's earnings.",
+      "a": "LogisX is a trucking logistics company. As an investor, you lease your truck(s) to us. We handle dispatch, loads, insurance, and paperwork. You get paid monthly based on your truck's earnings. That's the standard agreement. If LogisX set different payment terms in your invitation, they're shown on the documents step and in Amendment No. 1 of your agreements.",
       "category": "about"
     },
     "how_long_does_this_take": {
       "q": "How long will this take?",
-      "a": "About 10 minutes if you have your documents handy — your ID or EIN, vehicle VINs, and bank routing/account numbers. Your progress auto-saves, so you can pause anytime.",
+      "a": "About 10 minutes if you have your documents handy — your ID or EIN, vehicle VINs, and bank routing/account numbers. Your progress is kept while this tab stays open, so you can pause — except your EIN/SSN, bank numbers and signatures, which are never saved.",
       "category": "process"
     },
     "individual_vs_entity": {
@@ -292,7 +292,7 @@
     },
     "why_address": {
       "q": "Why do you need my address?",
-      "a": "We need a principal business address for your tax forms (W-9) and for mailing any physical paperwork. We never share it with third parties.",
+      "a": "We need a principal business address for your tax forms (W-9) and for mailing any physical paperwork. Address suggestions and the map are provided by Google Maps, so what you enter there is sent to Google.",
       "category": "privacy"
     },
     "when_will_i_hear_back": {
@@ -302,7 +302,7 @@
     },
     "is_my_data_safe": {
       "q": "Is my personal info safe?",
-      "a": "Yes. All data is transmitted over encrypted HTTPS and stored in a secure database. Your SSN/EIN and banking info are never displayed back in full once you submit.",
+      "a": "Yes. All data is transmitted over encrypted HTTPS and stored in a secure database. Your SSN/EIN and banking info are only visible to LogisX administrators and in your own signed documents.",
       "category": "privacy"
     },
     "continue_grey": {
@@ -332,17 +332,17 @@
     },
     "legally_binding": {
       "q": "Are these documents legally binding?",
-      "a": "Yes. Your electronic signature is legally binding under the ESIGN Act. You'll get a copy of each signed document emailed to you after submission. Read each one carefully before signing.",
+      "a": "Yes. Your electronic signature is legally binding under the ESIGN Act. Once you're approved, your signed documents are available in your investor dashboard. Read each one carefully before signing.",
       "category": "documents"
     },
     "is_banking_secure": {
       "q": "Is my banking info secure?",
-      "a": "Yes. It's encrypted in transit and at rest. We use it only to send you ACH payouts. You can update it any time from your investor dashboard after approval.",
+      "a": "Yes. It's sent over an encrypted (HTTPS) connection, stored securely on LogisX's servers, and only visible to LogisX administrators and in your own signed documents. We use it only to send you ACH payouts. To change it later, contact LogisX.",
       "category": "banking"
     },
     "how_often_paid": {
       "q": "How often do I get paid?",
-      "a": "Payouts run monthly on Net-60 terms from the load delivery date. You'll see a statement each month with load details and your share.",
+      "a": "Payouts run monthly on Net-60 terms from the load delivery date. You'll see a statement each month with load details and your share. That's the standard agreement. If LogisX set different payment terms in your invitation, they're shown on the documents step and in Amendment No. 1 of your agreements.",
       "category": "banking"
     },
     "where_find_routing": {

@@ -6,20 +6,22 @@
  * an address, an email, a vehicle's VIN, a signature) is HTML-escaped with the
  * one existing helper, escapeHtml(), before it is interpolated into an email
  * body, as the driver application and acceptance emails also do. This runner
- * covers these eight templates:
+ * covers these nine templates:
  *
  *   PUT /api/investor-applications/:id/status (Accepted)
  *     welcomeHtml        the investor welcome email (username + temp password)
  *     adminAcceptHtml    the "Investor Accepted" note to info@logisx.com
  *   POST /api/public/investor-apply
  *     vehicleRows, applicantHtml, adminHtml   applicant confirmation + admin note
+ *     paymentTermsHtml   the payment terms invitation block of the admin note
+ *                        (sent as docWarningHtml + paymentTermsHtml + adminHtml)
  *   checkAndCompleteOnboarding()
  *     driverDocsHtml, adminDocsHtml           "Documents Received" to the driver + admin
  *
  * WHAT IS ASSERTED, with a name containing <script> and both quote characters:
  *   §1 the two acceptance emails, captured from the SHIPPED route handler run
  *      end to end against an in-memory SQLite (sendEmail is captured)
- *   §2 the other six templates, each lifted out of server.js as the real
+ *   §2 the other seven templates, each lifted out of server.js as the real
  *      statement and evaluated with hostile values bound to every variable it
  *      reads (unknown fields of an object also come back hostile, so a new
  *      interpolation of one cannot slip past unbound)
@@ -195,6 +197,14 @@ const COL_LETTER_SRC = liftFunction(SRC, "function colLetter(idx) {");
 // The acceptance writes the vehicles through this helper (its own subject is
 // scripts/test-investor-accept-vehicles.js).
 const REGISTER_VEHICLES_SRC = liftFunction(SRC, "function registerApplicationVehicles(vehicles, appId, userId) {");
+// The naming check each username candidate goes through (its own subject is
+// scripts/test-investor-accept-guards.js §8).
+const CLASH_SRC = [
+	"function normalizeDriverName(s) {",
+	"function isBuiltInPropertyName(name) {",
+	"function findDriverNameClashes(name, opts = {}) {",
+	"function findDriverNameClash(name, opts = {}) {",
+].map((head) => liftFunction(SRC, head)).join("\n");
 // The reader of each vehicle's purchase price, with the ceiling it reads (its
 // own subject is scripts/test-truck-cost-amounts.js §6).
 const PARSE_AMOUNT_SRC = (() => {
@@ -240,6 +250,7 @@ async function acceptanceMail(routeSrc, vals = {}) {
 			id INTEGER PRIMARY KEY AUTOINCREMENT, unit_number TEXT UNIQUE, make TEXT, model TEXT, year INTEGER, vin TEXT,
 			license_plate TEXT, status TEXT, owner_id INTEGER, purchase_price REAL, title_status TEXT, title_state TEXT, notes TEXT
 		);
+		CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT NOT NULL UNIQUE COLLATE NOCASE);
 	`);
 	const appId = Number(db.prepare(
 		"INSERT INTO investor_applications (legal_name, dba, entity_type, email, vehicles_json) VALUES (?, ?, ?, ?, ?)",
@@ -251,10 +262,11 @@ async function acceptanceMail(routeSrc, vals = {}) {
 	const parseTruckAmount = new Function(`${PARSE_AMOUNT_SRC}\nreturn parseTruckAmount;`)();
 	const registerApplicationVehicles = new Function("db", "colLetter", "parseTruckAmount",
 		`${REGISTER_VEHICLES_SRC}\nreturn registerApplicationVehicles;`)(db, colLetter, parseTruckAmount);
-	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", routeSrc)(
+	const findDriverNameClash = new Function("db", `${CLASH_SRC}\nreturn findDriverNameClash;`)(db);
+	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", routeSrc)(
 		{ put: (p, guard, h) => { handler = h; } }, () => (req, res, next) => next(), db,
 		{ hash: (pw) => bcrypt.hash(pw, 4) }, crypto, () => {}, () => {}, colLetter, escapeHtml,
-		(to, subject, html) => { mail.push({ to, subject, html }); return Promise.resolve(true); }, parseTruckAmount, registerApplicationVehicles);
+		(to, subject, html) => { mail.push({ to, subject, html }); return Promise.resolve(true); }, parseTruckAmount, registerApplicationVehicles, findDriverNameClash);
 	const out = {};
 	await handler({
 		params: { id: String(appId) }, body: { status: "Accepted" },
@@ -285,6 +297,9 @@ function renderApplyTemplates(applySrc) {
 		vehicleRows,
 		applicantHtml: render(liftConst(applySrc, "applicantHtml"), "applicantHtml", b),
 		adminHtml: render(liftConst(applySrc, "adminHtml"), "adminHtml", { ...b, vehicleRows }),
+		// The payment terms invitation block: its summary and the admin-typed
+		// additional terms are hostile here.
+		paymentTermsHtml: render(liftConst(applySrc, "paymentTermsHtml"), "paymentTermsHtml", { ...b, boundInvite: hostileRecord({ id: 7, termsRevision: 2 }) }),
 	};
 }
 function renderOnboardingTemplates(onboardSrc) {
@@ -333,7 +348,12 @@ function renderApplyPerField(applySrc) {
 	// The "ACTION NEEDED" banner above the admin email, when a document failed.
 	const docWarningHtml = render(liftConst(applySrc, "docWarningHtml"), "docWarningHtml",
 		{ ...b, failedDocs: [marker("failedDoc")] });
-	return { top, vehicleRead, bankingRead, bodies: { applicantHtml, adminHtml: docWarningHtml + adminHtml } };
+	// The payment terms block between them, when the applicant came through an
+	// invitation: every field it reads carries its own marker.
+	const inviteRead = new Set();
+	const paymentTermsHtml = render(liftConst(applySrc, "paymentTermsHtml"), "paymentTermsHtml",
+		{ ...b, boundInvite: markedRecord("invite", inviteRead) });
+	return { top, vehicleRead, bankingRead, inviteRead, bodies: { applicantHtml, adminHtml: docWarningHtml + paymentTermsHtml + adminHtml } };
 }
 // What each email is expected to SHOW, escaped. Every other field must simply
 // never appear raw (masked numbers, and fields the emails leave out).
@@ -341,6 +361,7 @@ const SHOWN_TOP = ["legal_name", "dba", "entity_type", "address", "contact_perso
 	"tax_classification", "years_in_operation", "industry_experience", "bankruptcy_liens"];
 const SHOWN_VEHICLE = ["year", "make", "model", "vin", "licensePlate", "titleState"];
 const SHOWN_BANKING = ["bank_name", "account_type", "account_name"];
+const SHOWN_INVITE = ["id", "termsRevision", "summary", "details"];
 
 async function main() {
 	// §1
@@ -359,6 +380,11 @@ async function main() {
 	checkBody("§2 /invest admin notification", apply.adminHtml, { email: true });
 	ok(apply.adminHtml.includes("••••6789") && apply.adminHtml.includes("••••0021") && !apply.adminHtml.includes("123-45-6789"),
 		"§2 /invest admin notification: the tax id and bank numbers must stay masked");
+	checkBody("§2 /invest admin payment terms block", apply.paymentTermsHtml);
+	ok(render(liftConst(APPLY_SRC, "paymentTermsHtml"), "paymentTermsHtml", { escapeHtml, boundInvite: null }) === "",
+		"§2 /invest admin payment terms block: absent without an invitation");
+	ok(/docWarningHtml \+ paymentTermsHtml \+ adminHtml,/.test(APPLY_SRC),
+		"§2 /invest admin notification: the payment terms block is sent between the warning and the body");
 	const onboard = renderOnboardingTemplates(ONBOARD_SRC);
 	checkBody("§2 driver 'Documents Received' email", onboard.driverDocsHtml);
 	checkBody("§2 admin 'Driver Documents Signed' email", onboard.adminDocsHtml, { email: true });
@@ -367,7 +393,7 @@ async function main() {
 	ok((SRC.match(/\nfunction escapeHtml\(/g) || []).length === 1, "§3 escapeHtml() must be defined exactly once");
 	const scopes = [
 		["welcomeHtml", ACCEPT_SRC], ["adminAcceptHtml", ACCEPT_SRC], ["vehicleRows", APPLY_SRC], ["applicantHtml", APPLY_SRC],
-		["adminHtml", APPLY_SRC], ["driverDocsHtml", ONBOARD_SRC], ["adminDocsHtml", ONBOARD_SRC],
+		["adminHtml", APPLY_SRC], ["paymentTermsHtml", APPLY_SRC], ["driverDocsHtml", ONBOARD_SRC], ["adminDocsHtml", ONBOARD_SRC],
 	];
 	for (const [name, scope] of scopes) {
 		const stmt = liftConst(scope, name);
@@ -394,6 +420,7 @@ async function main() {
 	collect("vehicle rows", applyM.vehicleRows);
 	collect("applicant", applyM.applicantHtml);
 	collect("apply admin", applyM.adminHtml, { email: true });
+	collect("apply payment terms", applyM.paymentTermsHtml);
 	const onboardM = renderOnboardingTemplates(stripEscapes(ONBOARD_SRC));
 	collect("driver docs", onboardM.driverDocsHtml);
 	collect("admin docs", onboardM.adminDocsHtml, { email: true });
@@ -432,6 +459,13 @@ async function main() {
 	// §6 the "ACTION NEEDED" banner names the failed documents, escaped
 	ok(rawFree(marker("failedDoc")) && shown(marker("failedDoc")), "§6 a failed document's name must be shown escaped, never raw");
 
+	// §6 the payment terms block shows the invitation's terms, escaped — the
+	// additional terms are free text an admin typed.
+	for (const k of pf.inviteRead) ok(rawFree(marker(`invite.${k}`)), `§6 payment terms field "${k}" must never appear raw`);
+	for (const k of SHOWN_INVITE) {
+		ok(pf.inviteRead.has(k) && shown(marker(`invite.${k}`)), `§6 payment terms field "${k}" must be shown, escaped as text`);
+	}
+
 	// §5 the acceptance emails, one marker per stored column
 	const accPf = await acceptanceMail(ACCEPT_SRC, { legal_name: marker("legal_name"), dba: marker("dba"), entity_type: marker("entity_type") });
 	const accAll = `${accPf.welcome || ""}\n${accPf.admin || ""}`;
@@ -452,6 +486,7 @@ async function main() {
 		...SHOWN_BANKING.map((k) => marker(`banking.${k}`)),
 		...INVESTOR_ONBOARDING_DOCS.map((d) => marker(`signature.${d.key}`)),
 		marker("failedDoc"),
+		...SHOWN_INVITE.map((k) => marker(`invite.${k}`)),
 	].filter((v) => !allM.includes(v));
 	ok(flipped.length === 0, `§5/§6 MUTANT NOT CAUGHT — with escapeHtml() stripped these would still pass: ${flipped.join(" | ")}`);
 }

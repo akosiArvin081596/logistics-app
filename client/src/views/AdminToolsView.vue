@@ -548,12 +548,30 @@ async function runOrphanScan() {
   }
 }
 
+// Fleet Configuration's fields, by the config key a refused save names.
+const CONFIG_FIELD_LABELS = {
+  fuel_savings_target_pct: 'Fuel Savings Target %',
+  blue_chip_brokers: 'Blue Chip Brokers',
+}
+
+// The server's reason for a refused save. A 400 carries the `key` it refused,
+// and its message opens with that key, which reads as the field's label here.
+function configSaveError(err) {
+  const message = err?.message || 'Failed to save configuration'
+  const key = err?.data?.key
+  if (!key) return `Configuration not saved: ${message}`
+  const label = CONFIG_FIELD_LABELS[key] || key
+  return message.startsWith(key)
+    ? `Configuration not saved: ${label}${message.slice(key.length)}`
+    : `Configuration not saved: ${label}: ${message}`
+}
+
 async function handleSaveConfig(cfg) {
   try {
     await investorStore.updateConfig(cfg)
     toast('Configuration saved')
-  } catch {
-    toast('Failed to save configuration', 'error')
+  } catch (err) {
+    toast(configSaveError(err), 'error')
   }
 }
 
