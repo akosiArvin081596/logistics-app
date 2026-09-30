@@ -80,8 +80,66 @@
                 <div><span class="idp-email-k">To</span> {{ recipient || pv.to || '—' }}</div>
                 <div><span class="idp-email-k">Subject</span> {{ previewSubject || '—' }}</div>
               </div>
-              <!-- Trusted server-rendered HTML (buildInvoiceEmailHtml esc()'s all dynamic fields). -->
-              <div class="idp-email-body" v-html="emailHtml"></div>
+              <!-- The message is the dispatcher's to rewrite; the signature under it
+                   is not. Until they type, the box holds the message the server
+                   generates for the fields on the right and follows every render;
+                   once it differs, no render touches it. The text lives in `form`,
+                   not in this tab's DOM, so it survives a tab switch. -->
+              <div class="idp-email-card">
+                <div class="idp-field">
+                  <label class="idp-label" for="idp-email-body">
+                    Message
+                    <span v-if="edited.emailBody" class="idp-badge idp-badge-blue" data-testid="idp-email-body-edited">edited</span>
+                  </label>
+                  <!-- Grows with its text (.idp-email-grow), so the email reads top
+                       to bottom with no scrollbar of its own. -->
+                  <div class="idp-email-grow" :data-text="form.emailBody">
+                    <textarea
+                      id="idp-email-body"
+                      ref="emailBodyInput"
+                      v-model="form.emailBody"
+                      data-testid="idp-email-body"
+                      rows="6"
+                      class="idp-input idp-email-text"
+                      :class="{ 'is-invalid': !!emailBodyError, 'is-edited': edited.emailBody }"
+                      :aria-invalid="!!emailBodyError"
+                      :aria-describedby="emailBodyDescribedBy"
+                      :disabled="approving"
+                    ></textarea>
+                  </div>
+                  <div class="idp-notes-foot">
+                    <p v-if="emailBodyError" id="idp-email-body-error" data-testid="idp-email-body-error" class="idp-hint idp-hint-warn">{{ emailBodyError }}</p>
+                    <span
+                      id="idp-email-body-count"
+                      class="idp-hint idp-count"
+                      :class="{ 'idp-count-near': emailBodyNearLimit }"
+                    >{{ emailBodyCount.toLocaleString('en-US') }} / {{ INVOICE_EMAIL_BODY_MAX.toLocaleString('en-US') }}</span>
+                  </div>
+                  <!-- The typed text is never overwritten, so once the generated
+                       message moves on (a Bison load's carries the Order #, move #
+                       and PO #) the text can quote a number the PDF and the Subject
+                       no longer show. Say so until it matches again or Reset. -->
+                  <p v-if="emailBodyDefaultChanged" id="idp-email-body-stale" data-testid="idp-email-body-stale" class="idp-hint idp-hint-warn">
+                    The generated message changed after you edited it (e.g. the Order #). Check your message, or use the new one.
+                    <button
+                      type="button"
+                      class="idp-badge idp-badge-blue"
+                      data-testid="idp-email-body-use-default"
+                      :disabled="approving"
+                      @click="useGeneratedMessage"
+                    >Use the new message</button>
+                  </p>
+                  <p v-if="edited.emailBody" id="idp-email-body-hint" class="idp-hint">
+                    Sent as you wrote it. Changes on the right no longer update it — check any numbers in it.
+                  </p>
+                  <p v-else id="idp-email-body-hint" class="idp-hint">
+                    Written from the fields on the right, and updated as they change until you edit it.
+                  </p>
+                </div>
+                <!-- Trusted server HTML: the fixed LogisX signature, logo and
+                     confidentiality notice every invoice email ends with. -->
+                <div class="idp-email-signature" data-testid="idp-email-signature" v-html="emailSignatureHtml"></div>
+              </div>
             </div>
             <div v-else-if="activeTab === 'pod'" class="idp-pod-fallback">
               <template v-if="podUrl">
@@ -501,9 +559,16 @@
       <div class="idp-footer">
         <!-- The note doubles as the disabled-button explanation. A primary action
              that is greyed out with no stated reason reads as a broken app, and
-             "you have edits nobody has rendered yet" is not guessable. -->
-        <span class="idp-foot-note" :class="{ 'idp-hint-warn': !!approveBlockedReason }">
-          {{ approveBlockedReason || 'Saves a Gmail draft — it is never auto-sent.' }}
+             "you have edits nobody has rendered yet" is not guessable. With nothing
+             blocking, it repeats the Email tab's "generated message changed" hint
+             while another tab hides it — a warning only; Approve stays enabled.
+             Keep ONE .idp-foot-note: the e2e harness reads it as a single element. -->
+        <span class="idp-foot-note" :class="{ 'idp-hint-warn': !!approveBlockedReason || emailBodyStaleElsewhere }">
+          <template v-if="approveBlockedReason">{{ approveBlockedReason }}</template>
+          <span v-else-if="emailBodyStaleElsewhere" data-testid="idp-email-body-stale-foot">
+            The generated email message changed after you edited it. Open the Email message tab to check it.
+          </span>
+          <template v-else>Saves a Gmail draft — it is never auto-sent.</template>
         </span>
         <div class="idp-foot-actions">
           <button type="button" class="idp-btn idp-btn-ghost" :disabled="approving" @click="onOpenChange(false)">Cancel</button>
@@ -523,11 +588,14 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref, watch, onBeforeUnmount } from 'vue'
+import { computed, nextTick, reactive, ref, watch, onBeforeUnmount } from 'vue'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import { useApi } from '../../composables/useApi'
 import PdfZoomViewer from '../shared/PdfZoomViewer.vue'
-import { ORDER_NUMBER_MAX, orderNumberError, NOTES_MAX, notesError, notesLength } from '../../lib/invoiceFields'
+import {
+  ORDER_NUMBER_MAX, orderNumberError, NOTES_MAX, notesError, notesLength,
+  INVOICE_EMAIL_BODY_MAX, emailBodyLength, validateInvoiceEmailBody,
+} from '../../lib/invoiceFields'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -562,8 +630,9 @@ const pv = computed(() => props.preview || {})
 // These mirror the server's parseInvoiceOverrides rules. They are a courtesy, not
 // the guard — the server re-validates everything — but they are what stops a
 // doomed body costing a Chromium render, and what lets a field say WHY it's wrong.
-// The Order # rule and the Notes limit live in lib/invoiceFields.js, where
-// scripts/test-invoice-fields-client.mjs pins them to server.js.
+// The Order # rule, the Notes limit and the email message's rule live in
+// lib/invoiceFields.js, where scripts/test-invoice-fields-client.mjs pins them
+// to server.js.
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,39}$/
 // PO # only. Order # has its own, wider rule (ORDER_NUMBER_RE).
 const REF_RE = /^[A-Za-z0-9][A-Za-z0-9 ._/#-]{0,39}$/
@@ -579,6 +648,10 @@ const TOTAL_MIN = 0.01
 const TOTAL_MAX = 1000000
 // The Notes counter turns amber this close to the limit.
 const NOTES_WARN_AT = NOTES_MAX - 50
+// The email message's counter, over the same last tenth of its limit.
+const EMAIL_BODY_WARN_AT = INVOICE_EMAIL_BODY_MAX - 500
+// The server's field refusals of the typed message (400, field "emailBody").
+const EMAIL_BODY_REFUSALS = new Set(['INVOICE_EMAIL_BODY_INVALID', 'INVOICE_EMAIL_BODY_TOO_LONG', 'INVOICE_EMAIL_BODY_EMPTY'])
 
 const str = (v) => (v == null ? '' : String(v))
 // An <input type="date"> silently discards anything that isn't YYYY-MM-DD, so a
@@ -587,6 +660,10 @@ const str = (v) => (v == null ? '' : String(v))
 // the template renders as absent, rather than shipping an unparseable string that
 // buildInvoiceHtml would print verbatim onto the broker's invoice.
 const isoDate = (v) => (ISO_DATE_RE.test(str(v)) ? str(v) : '')
+// A <textarea> hands back every line break as \n, so the generated message is
+// kept that way too: a \r\n baseline would read as "edited" the moment anyone
+// typed a character into the box and deleted it again.
+const emailBodyText = (v) => str(v).replace(/\r\n?/g, '\n')
 function moneyValue(s) {
   const t = str(s).replace(/[$,\s]/g, '')
   if (!t) return null
@@ -613,13 +690,16 @@ const badge = computed(() => {
 })
 
 // --- The editable invoice fields --------------------------------------------
-// One reactive object for the nine overridable fields, plus a frozen snapshot of
-// what the server extracted. The snapshot is what "edited" and "Reset" compare
-// against — not props.preview, which must stay the untouched server response.
+// One reactive object for the nine overridable fields and the email message,
+// plus a frozen snapshot of what the server extracted. The snapshot is what
+// "edited" and "Reset" compare against — not props.preview, which must stay the
+// untouched server response. The one field whose snapshot moves is emailBody:
+// its baseline is the message generated for the fields as they are NOW, so every
+// render replaces it (adoptEmailMessage).
 const EMPTY_FORM = () => ({
   billToName: '', brokerName: '', total: '',
   invoiceId: '', invoiceDate: '', orderNumber: '', poNumber: '', deliveryDate: '',
-  notes: '',
+  notes: '', emailBody: '',
 })
 const form = reactive(EMPTY_FORM())
 const seeded = ref(EMPTY_FORM())
@@ -657,6 +737,9 @@ function seedForm() {
     // PDF on the left was already rendered with it, so seeding the box from it
     // keeps what you see the thing that is sent.
     notes: str(p.notes),
+    // The message generated for exactly these values — which is also why Reset,
+    // putting the fields back to them, puts the message back to this.
+    emailBody: emailBodyText(p.emailBodyDefault),
   }
   Object.assign(form, next)
   seeded.value = { ...next }
@@ -680,6 +763,10 @@ const edited = computed(() => {
     poNumber: form.poNumber.trim() !== str(s.poNumber).trim(),
     deliveryDate: form.deliveryDate !== str(s.deliveryDate),
     notes: form.notes.trim() !== str(s.notes).trim(),
+    // Against the message generated for the CURRENT fields, so this reads
+    // "differs from what the server would write" — the badge, and the one case
+    // approve sends the text.
+    emailBody: str(form.emailBody).trim() !== str(s.emailBody).trim(),
   }
 })
 // A note counts even when it is unedited: one carried over from the last
@@ -737,6 +824,45 @@ const firstFieldError = computed(() => {
   return ''
 })
 
+// The message box, focused when the server refuses what was typed in it.
+const emailBodyInput = ref(null)
+// The server's refusal of exactly this text ({ text, message }), shown until the
+// text changes: sending the same text again would only be refused again.
+const emailBodyRefusal = ref(null)
+const emailBodyCount = computed(() => emailBodyLength(form.emailBody))
+const emailBodyNearLimit = computed(() => emailBodyCount.value >= EMAIL_BODY_WARN_AT)
+// The email message is judged apart from fieldErrors on purpose: formValid is
+// also the gate on every preview render, and previews never carry the message,
+// so an emptied message must block the approve, never the invoice render. Only
+// an EDITED message is judged — an unedited one is not sent at all.
+const emailBodyError = computed(() => {
+  if (!edited.value.emailBody) return ''
+  const own = validateInvoiceEmailBody(form.emailBody)
+  if (own) return own
+  const r = emailBodyRefusal.value
+  return r && r.text === form.emailBody ? r.message : ''
+})
+// The generated message as it stood when the typed text first differed from it,
+// null while the box is unedited. Only typing can make the box differ — every
+// other write sets the text and its baseline together — so this is always the
+// message the dispatcher's editing started from.
+const emailBodyEditBase = ref(null)
+watch(() => edited.value.emailBody, (isEdited) => {
+  emailBodyEditBase.value = isEdited ? str(seeded.value.emailBody) : null
+})
+// The typed text is kept, but the message it was edited from has since been
+// regenerated differently, because a field on the right changed.
+const emailBodyDefaultChanged = computed(
+  () => edited.value.emailBody && emailBodyEditBase.value != null
+    && emailBodyEditBase.value.trim() !== str(seeded.value.emailBody).trim(),
+)
+const emailBodyDescribedBy = computed(() => [
+  emailBodyError.value && 'idp-email-body-error',
+  emailBodyDefaultChanged.value && 'idp-email-body-stale',
+  'idp-email-body-count',
+  'idp-email-body-hint',
+].filter(Boolean).join(' '))
+
 const TOTAL_SOURCE_LABEL = {
   ratecon: 'from the rate-con',
   sheet: "from Job Tracking's Payment column",
@@ -792,15 +918,10 @@ const ratecons = computed(() => {
   if (list.length) return list
   return pv.value.rateconPdfBase64 ? [{ base64: pv.value.rateconPdfBase64, label: 'Rate-con', source: '' }] : []
 })
-// Falls back to the dryRun's copy so the tab can never disappear mid-session
-// (a preview that returned no emailHtml would otherwise remove a tab under the
-// cursor); previewEmailHtml wins as soon as one render has landed.
-const hasEmail = computed(() => !!(previewEmailHtml.value || pv.value.emailHtml))
-// The exact Gmail draft body. Trusted server HTML — buildInvoiceEmailHtml esc()'s
-// every dynamic field — so it's rendered via v-html. It MUST come from the latest
-// preview: it is built from the invoice fields, so once those are editable a
-// dryRun-only copy silently shows a cover note that will not be the one sent.
-const emailHtml = computed(() => previewEmailHtml.value || pv.value.emailHtml || '')
+// The tab shows whenever there is a generated message to start from. Its
+// baseline is only ever replaced by another non-empty message
+// (adoptEmailMessage), so the tab can never disappear under the cursor.
+const hasEmail = computed(() => !!str(seeded.value.emailBody).trim())
 const tabs = computed(() => {
   const t = [{ key: 'invoice', label: 'Invoice' }]
   // One tab per rate-con file; numbered only when there's more than one.
@@ -894,7 +1015,8 @@ const previewPending = ref(false) // edits exist that no render has covered yet
 const previewError = ref('')
 const previewWarnings = ref([])
 const previewSubject = ref('')
-const previewEmailHtml = ref('')
+// The fixed signature block under the email message (trusted server HTML).
+const emailSignatureHtml = ref('')
 let previewSeq = 0
 let previewTimer = null
 let previewAbort = null
@@ -953,7 +1075,7 @@ async function runPreview() {
     if (seq !== previewSeq) return
     previewError.value = ''
     previewSubject.value = str(r.subject)
-    previewEmailHtml.value = str(r.emailHtml)
+    adoptEmailMessage(r)
     previewWarnings.value = Array.isArray(r.warnings) ? r.warnings.filter(Boolean).map(str) : []
     // Adopt the peeked number only if we never had one (an older cached dryRun).
     // Refreshing it per render would make the divergence badge flicker.
@@ -970,6 +1092,28 @@ async function runPreview() {
     // not clear the spinner for the render still running.
     if (previewAbort === ctrl) { previewAbort = null; previewing.value = false }
   }
+}
+
+// A render's cover note and signature. The note is built from the invoice
+// fields, so one from an older render is a note that will not be the one sent:
+// while the box still reads exactly the message generated last, it takes the new
+// one. Once the dispatcher's text differs it is theirs, and no render touches it —
+// but the baseline moves regardless, so "edited" keeps meaning "differs from what
+// the server would write now". A response without a message changes nothing.
+function adoptEmailMessage(r) {
+  if (typeof r.emailSignatureHtml === 'string' && r.emailSignatureHtml) emailSignatureHtml.value = r.emailSignatureHtml
+  if (typeof r.emailBodyDefault !== 'string' || !r.emailBodyDefault.trim()) return
+  const next = emailBodyText(r.emailBodyDefault)
+  if (!edited.value.emailBody) form.emailBody = next
+  seeded.value = { ...seeded.value, emailBody: next }
+}
+
+// "Use the new message": the current generated message replaces the typed one.
+// Only the message changes; every field on the right stays as it is. The button
+// leaves with its hint, so the cursor goes to the box instead of being lost.
+function useGeneratedMessage() {
+  form.emailBody = str(seeded.value.emailBody)
+  nextTick(() => { if (emailBodyInput.value) emailBodyInput.value.focus() })
 }
 
 function onFieldInput() { schedulePreview() }
@@ -1036,6 +1180,12 @@ function buildOverrideBody({ forPreview = false } = {}) {
   // Bison cover letter, so passing it through is what keeps the emailed body the
   // one that was reviewed. Same reasoning as the recipient.
   if (has('moveNumber')) body.moveNumber = str(pv.value.moveNumber)
+  // The typed email message: approve only, and only when it differs from the
+  // generated one. An absent key lets the server write its own, so an unedited
+  // draft is byte-identical to the one this route always made. Previews never
+  // carry it: the tab shows the typed text itself, so it cannot cost a render.
+  // Raw, like notes; the server normalizes it.
+  if (!forPreview && edited.value.emailBody) body.emailBody = form.emailBody
 
   // ⚠️ PREVIEW ONLY — and the asymmetry between the two bodies is the point, not
   // an oversight, so it is the one thing this shared builder branches on.
@@ -1097,10 +1247,18 @@ const orderNumberIsFallback = computed(
 // Never approve a value nobody has seen rendered. A FAILED preview is deliberately
 // not a block, though: a render outage would otherwise make the whole feature
 // unusable, and the failure is surfaced loudly beside the fields instead.
-const canApprove = computed(() => formValid.value && !previewing.value && !previewPending.value && !refsBlocked.value)
+const canApprove = computed(
+  () => formValid.value && !emailBodyError.value && !previewing.value && !previewPending.value && !refsBlocked.value,
+)
 const approveBlockedReason = computed(() => {
   if (approving.value || canApprove.value) return ''
   if (firstFieldError.value) return firstFieldError.value
+  // The message box is on a tab, so from any other tab say where to find it.
+  if (emailBodyError.value) {
+    return activeTab.value === 'email'
+      ? emailBodyError.value
+      : `${emailBodyError.value} Open the Email message tab to fix it.`
+  }
   if (refsBlocked.value) {
     return 'Enter the Order # and PO # from the rate confirmation — they could not be read automatically.'
   }
@@ -1112,6 +1270,10 @@ const approveBlockedReason = computed(() => {
   }
   return ''
 })
+// The Email tab's "generated message changed" hint, for the footer while another
+// tab hides it. Informational: the typed text is the dispatcher's call, so this
+// never blocks the approve.
+const emailBodyStaleElsewhere = computed(() => emailBodyDefaultChanged.value && activeTab.value !== 'email')
 
 // Seed on the CLOSED -> OPEN transition only. The old watcher also fired on any
 // new `props.preview` identity: nothing re-fetches while the modal is open today,
@@ -1129,11 +1291,12 @@ watch(
       // Per-load acknowledgement — it must never carry from one load to the next,
       // or the second load inherits "there is no PO" without anyone saying so.
       noPoOnRatecon.value = false
-      // The dryRun response IS a render of the extracted values, so its subject
-      // and cover note are correct until the first edit — seed from them rather
-      // than blanking and firing a render nobody asked for.
+      // The dryRun response IS a render of the extracted values, so its subject,
+      // cover note (seedForm) and signature are correct until the first edit —
+      // seed from them rather than blanking and firing a render nobody asked for.
       previewSubject.value = str(pv.value.subject)
-      previewEmailHtml.value = str(pv.value.emailHtml)
+      emailSignatureHtml.value = str(pv.value.emailSignatureHtml)
+      emailBodyRefusal.value = null
     } else if (!isOpen) {
       revokeBlobs()
     }
@@ -1213,6 +1376,17 @@ async function approve() {
     })
     emit('update:open', false)
   } catch (e) {
+    // The server's verdict on the typed message belongs under the message box,
+    // like the editor's own: bring its tab up and put the cursor there. The rest
+    // of the form is untouched. Only a message that was sent can be refused; any
+    // other answer with these codes falls through to the general error below.
+    if (e && e.status === 400 && EMAIL_BODY_REFUSALS.has(e.code) && edited.value.emailBody) {
+      emailBodyRefusal.value = { text: form.emailBody, message: e.message }
+      activeTab.value = 'email'
+      // After the render that re-enables the box (approving clears in finally).
+      nextTick(() => { if (emailBodyInput.value) emailBodyInput.value.focus() })
+      return
+    }
     // Always true and worth saying: the modal stays open and every field keeps its
     // value, so a trailer 409 or a validation refusal is a correction, not a redo.
     const msg = (e && e.message) || 'Failed to create the draft.'
@@ -1270,7 +1444,9 @@ async function approve() {
   transition: all 0.15s;
 }
 .idp-tab:hover { background: #e2e8f0; }
-.idp-tab-active {
+/* Two classes, the same weight as .idp-tab:hover, and later: the active tab keeps
+   its colours under the pointer instead of turning white-on-light. */
+.idp-tab.idp-tab-active {
   color: #fff;
   background: #0f2847;
   border-color: #0f2847;
@@ -1323,7 +1499,7 @@ async function approve() {
 }
 .idp-open-link:hover { background: #1d4ed8; }
 
-/* Email-message preview (the exact Gmail draft body). */
+/* Email-message tab: the To/Subject header, then the email itself. */
 .idp-email {
   position: absolute;
   inset: 0;
@@ -1353,16 +1529,57 @@ async function approve() {
   color: #94a3b8;
   margin-right: 0.5rem;
 }
-.idp-email-body {
+.idp-email-card {
   max-width: 720px;
   margin: 0 auto;
-  padding: 1.5rem 1.75rem;
+  padding: 1.25rem 1.5rem 1.5rem;
   background: #fff;
   border: 1px solid #e8edf2;
   border-radius: 10px;
 }
-/* v-html email content is unscoped — keep its embedded logo/images in bounds. */
-.idp-email-body :deep(img) { max-width: 100%; height: auto; }
+/* The message box grows with its text instead of scrolling inside itself: an
+   invisible copy of the text shares its grid cell and sets the height. The copy
+   must wrap exactly as the textarea does (same font, padding and border), or the
+   last line of the message hides. minmax(0, 1fr) stops one long unbroken word in
+   the copy from widening the column past the card. */
+.idp-email-grow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+.idp-email-grow::after {
+  content: attr(data-text) ' ';
+  visibility: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  border: 1px solid transparent;
+}
+/* The draft's own type (buildInvoiceEmailHtml: Arial 14px, black), so the box
+   reads as the email rather than as a form field. Two classes, so it outranks
+   .idp-input's font and padding; .idp-input:disabled still greys it while the
+   draft is being created. */
+.idp-email-grow > .idp-email-text,
+.idp-email-grow::after {
+  grid-area: 1 / 1 / 2 / 2;
+  min-height: 8rem;
+  padding: 0.75rem 0.9rem;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #000;
+}
+.idp-email-text { resize: none; overflow: hidden; }
+/* The signature as a mail client shows it: the app's CSS reset strips the <p>
+   spacing and the link styling the draft has. */
+.idp-email-signature {
+  margin-top: 1.25rem;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 14px;
+  color: #000;
+}
+.idp-email-signature :deep(p) { margin: 0 0 1em; }
+.idp-email-signature :deep(a) { color: #1155cc; text-decoration: underline; }
+/* v-html content is unscoped — keep the logo in bounds. */
+.idp-email-signature :deep(img) { max-width: 100%; height: auto; }
 
 /* Right details column. */
 .idp-meta {
@@ -1436,7 +1653,8 @@ async function approve() {
   letter-spacing: 0;
   color: #94a3b8;
 }
-/* Error on the left, the counter pinned right whether or not there is an error. */
+/* Error on the left, the counter pinned right whether or not there is an error —
+   under Notes and under the email message. */
 .idp-notes-foot { display: flex; align-items: baseline; gap: 0.75rem; }
 .idp-count { margin-left: auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
 /* After .idp-hint on purpose: equal specificity, so the later rule wins. */
@@ -1507,6 +1725,9 @@ button.idp-badge:disabled { opacity: 0.6; cursor: not-allowed; }
   flex-shrink: 0;
 }
 .idp-foot-note { font-size: 0.75rem; color: #64748b; }
+/* A blocked-approve reason or the stale-message note is a warning. The grey above
+   is declared after .idp-hint-warn with the same weight, so it needs two classes. */
+.idp-foot-note.idp-hint-warn { color: #b45309; }
 .idp-foot-actions { display: flex; gap: 0.5rem; margin-left: auto; }
 .idp-btn {
   display: inline-flex;
