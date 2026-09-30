@@ -1,0 +1,8 @@
+# The onboarding templates are checked out with LF line endings everywhere, a
+# Windows core.autocrlf checkout included: the payment-terms slot markers are
+# matched one LF-separated line at a time, and the standard render must be the
+# template's exact bytes (lib/investor-payment-terms.js,
+# scripts/test-payment-terms-template.js).
+onboarding-templates/** text eol=lf
+# The source PDFs beside them are binary and are never converted.
+onboarding-templates/**/*.pdf binary

@@ -8,7 +8,9 @@
  *   §1 the standard render is the template's original bytes: sha256 of
  *      applyPaymentTermsToHtml(file, doc, null) is origin/main's hash of each
  *      template (pinned below; recomputed with `git show origin/main:<file> |
- *      shasum -a 256` when the slots were added)
+ *      shasum -a 256` when the slots were added); each template on disk has
+ *      no \r, and .gitattributes checks them out with LF on every platform
+ *      (a CRLF marker line is refused, §4)
  *   §2 prepareTemplateHtml() / buildRenderFields() with no terms are exactly
  *      what renderPolicy() did before (file bytes + logo; the field map's own
  *      output), for every registered document
@@ -70,8 +72,14 @@ const STANDARD_SPLIT = { type: "split", leaseAmountCents: null, details: "" };
 
 // ── §1 the standard render is the original bytes ────────────────────────────
 console.log("§1 standard render = origin/main bytes");
+// The markers are matched one LF-separated line at a time, so a CRLF checkout
+// (Windows core.autocrlf) would break every render; .gitattributes pins LF.
+const GITATTRIBUTES = fs.readFileSync(path.join(ROOT, ".gitattributes"), "utf8").split("\n");
+ok(GITATTRIBUTES.includes("onboarding-templates/** text eol=lf"), "§1 .gitattributes checks the templates out with LF line endings on every platform");
+ok(GITATTRIBUTES.includes("onboarding-templates/**/*.pdf binary"), "§1 ...and leaves the PDFs beside them binary");
 for (const doc of Object.keys(FILES)) {
 	const html = raw(doc);
+	ok(!html.includes("\r"), `§1 ${doc}: the template on disk has no \\r (a CRLF checkout breaks every marker)`);
 	ok(html.includes("payment-terms:slot"), `§1 ${doc}: the template carries its payment-terms slots`);
 	ok(sha(pt.applyPaymentTermsToHtml(html, doc, null)) === ORIGIN_MAIN_SHA256[doc],
 		`§1 ${doc}: the standard render must hash to origin/main's ${ORIGIN_MAIN_SHA256[doc].slice(0, 12)}…`);
