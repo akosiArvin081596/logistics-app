@@ -24,8 +24,19 @@
         <tr v-for="inv in investors" :key="inv.id" class="clickable-row" @click="viewDetail(inv)">
           <td class="name-cell">{{ inv.fullName }}</td>
           <td class="mono">{{ inv.truckCount }}</td>
-          <td class="split-td" @click.stop>
+          <!-- A lease investor keeps the Split % cell: it still governs the
+               months before the lease starts. v-if/v-else, so a split row
+               renders exactly as it did before the badge existed. -->
+          <td v-if="inv.payoutBasis?.type !== 'lease'" class="split-td" @click.stop>
             <InvestorSplitCell :owner-id="inv.userId || 0" :investor-name="inv.fullName" />
+          </td>
+          <td v-else class="split-td" @click.stop>
+            <InvestorSplitCell :owner-id="inv.userId || 0" :investor-name="inv.fullName" />
+            <span
+              :class="['lease-badge', { 'lease-badge-off': leaseOff }]"
+              data-test="investor-lease-badge"
+              :title="leaseBadgeTitle(inv.payoutBasis)"
+            >{{ leaseBadgeLabel(inv.payoutBasis.leaseAmount) }}<span v-if="leaseOff" class="sr-only">, recorded but not yet applied</span></span>
           </td>
           <td>
             <span :class="['status-badge', inv.status === 'Active' ? 'status-active' : 'status-inactive']">{{ inv.status }}</span>
@@ -218,6 +229,16 @@
               style="margin-top:1rem;border-top:1px solid #f1f5f9;padding-top:1rem"
             />
 
+            <!-- What payouts use, beside the terms it may differ from. -->
+            <PayoutBasisPanel
+              v-if="selectedInvestorId"
+              :key="`basis-${selectedInvestorId}`"
+              :investor-id="selectedInvestorId"
+              :owner-id="selectedOwnerId"
+              style="margin-top:1rem;border-top:1px solid #f1f5f9;padding-top:1rem"
+              @saved="emit('basis-updated')"
+            />
+
             <!-- Shared Documents -->
             <div v-if="selectedInvestorId" style="margin-top:1rem;border-top:1px solid #f1f5f9;padding-top:1rem">
               <LegalDocumentPortal :investor-id="selectedInvestorId" />
@@ -240,12 +261,14 @@ import AvatarPlaceholder from '../shared/AvatarPlaceholder.vue'
 import LegalDocumentPortal from '../investor/LegalDocumentPortal.vue'
 import InvestorSplitCell from './InvestorSplitCell.vue'
 import InvestorPaymentTermsSection from './InvestorPaymentTermsSection.vue'
+import PayoutBasisPanel from './PayoutBasisPanel.vue'
+import { STATUS_OFF, describeBasis, leaseBadgeLabel, leasePayoutsOff } from './payoutBasis'
 
 const props = defineProps({
   investors: { type: Array, default: () => [] },
 })
 
-const emit = defineEmits(['delete', 'update', 'picture-updated'])
+const emit = defineEmits(['delete', 'update', 'picture-updated', 'basis-updated'])
 const api = useApi()
 
 const showConfirm = ref(false)
@@ -253,6 +276,7 @@ const pendingInv = ref(null)
 const showEdit = ref(false)
 const showDetail = ref(false)
 const selectedInvestorId = ref(0)
+const selectedOwnerId = ref(0)
 const detailLoading = ref(false)
 const detail = reactive({ application: null, vehicles: [], banking: {}, documents: [], profilePictureUrl: '', fullName: '', error: '' })
 const picUploading = ref(false)
@@ -268,10 +292,25 @@ const detailSubtitle = computed(() =>
   [detail.application?.entity_type, detail.application?.email].filter(Boolean).join(' | '),
 )
 
+// GET /api/investor-payout-settings, or null while pending or after a failure:
+// until the server says lease payouts are on, a lease badge reads as not applied.
+const payoutSettings = ref(null)
+api.get('/api/investor-payout-settings')
+  .then((data) => { payoutSettings.value = data })
+  .catch(() => { payoutSettings.value = null })
+const leaseOff = computed(() => leasePayoutsOff(payoutSettings.value))
+
+function leaseBadgeTitle(basis) {
+  return leaseOff.value
+    ? `${describeBasis(basis)}. ${STATUS_OFF}`
+    : `${describeBasis(basis)}. The Split % still applies to the months before it.`
+}
+
 async function viewDetail(inv) {
   const ticket = ++detailTicket
   detailInvestor = inv
   selectedInvestorId.value = inv.id
+  selectedOwnerId.value = inv.userId || 0
   // The modal is reused for every investor, so a message left over from the
   // last one would otherwise reappear against the next.
   clearMessages()
@@ -537,6 +576,21 @@ function handleConfirmDelete() {
   color: var(--text-dim);
 }
 .split-td { white-space: nowrap; }
+.lease-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 0.4rem;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid #ddd6fe;
+  border-radius: 12px;
+  background: #f5f3ff;
+  color: #6d28d9;
+  font-size: 0.68rem;
+  font-weight: 600;
+  vertical-align: middle;
+}
+/* Recorded, but payouts still use the Split % (lease payouts switched off). */
+.lease-badge-off { border-style: dashed; background: transparent; color: var(--text-dim); }
 .notes-cell { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); font-size: 0.78rem; }
 
 .status-badge {
