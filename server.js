@@ -51084,12 +51084,16 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				const loadCount = (truckLoadCount !== undefined)
 					? truckLoadCount
 					: (loadsByDriver[driverName] || 0);
-				// Inactive/OOS/Maintenance trucks must not project expected
-				// revenue — only Active units run. Zero their monthly gross +
-				// estimated annual revenue (an inactive truck "is not supposed
-				// to show any data"). The truck still counts as an owned asset
-				// (purchase price etc.) in the asset section above.
-				const truckActive = String(truck.status || "").toLowerCase() === "active";
+				// A truck out of the fleet (Inactive) must not project expected
+				// revenue: zero its monthly gross + estimated annual revenue (an
+				// inactive truck "is not supposed to show any data"). A truck in
+				// Maintenance or OOS is in the shop, not out of the fleet, so it
+				// keeps its figures: the fleet rule its fixed costs follow,
+				// investorPayoutBasis.truckInFleet() (owner's decision,
+				// 2026-10-01). Zeroing it handed its projection to the other
+				// trucks. The truck still counts as an owned asset (purchase
+				// price etc.) in the asset section above.
+				const unitInFleet = investorPayoutBasis.truckInFleet(truck);
 				// ⚠️ THE VARIABLE HALF, PUBLISHED SO THE BREAKDOWN STOPS LYING.
 				// unitTotalExpenses is varExp + maintExp + compExp + fixed + driverPay,
 				// but only the TOTAL was ever sent. FleetBreakdownSection derives
@@ -51102,11 +51106,11 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				// still reconcile to it.
 				const unitTripExpenses = varExp + maintExp + compExp;
 				perTruckData[truck.unit_number] = {
-					unitMonthlyGross: truckActive ? avgMonthlyGross : 0,
-					unitMonthlyExpenses: truckActive ? avgMonthlyExpenses : 0,
-					unitMonthlyTripExpenses: truckActive && truckMonths > 0
+					unitMonthlyGross: unitInFleet ? avgMonthlyGross : 0,
+					unitMonthlyExpenses: unitInFleet ? avgMonthlyExpenses : 0,
+					unitMonthlyTripExpenses: unitInFleet && truckMonths > 0
 						? Math.round(unitTripExpenses / truckMonths) : 0,
-					estAnnualRevenue: truckActive ? Math.round((avgMonthlyGross - avgMonthlyExpenses) * 12) : 0,
+					estAnnualRevenue: unitInFleet ? Math.round((avgMonthlyGross - avgMonthlyExpenses) * 12) : 0,
 					totalMiles,
 					loadCount,
 					status: truck.status || "",
@@ -51174,9 +51178,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			: 0;
 
 		// Annotate every perTruckData entry with the investor-centric numbers the
-		// frontend needs for ROI and break-even. Each ACTIVE truck now takes the
-		// share of the investor's trailing take-home that its OWN revenue earned
-		// over the SAME trailing months.
+		// frontend needs for ROI and break-even. Each truck in the fleet now takes
+		// the share of the investor's trailing take-home that its OWN revenue
+		// earned over the SAME trailing months.
 		//
 		// This replaces an equal split by active-truck count that never consulted a
 		// load: Logisx-#91 (0 loads, 0 miles, in service 2026-08) projected exactly
@@ -51184,13 +51188,17 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// client reasonably asked how a truck that has never moved projects what a
 		// working truck does.
 		{
-			// ACTIVE trucks only — inactive/OOS/maintenance units don't run, so they
-			// must not dilute the active trucks' share, and they keep showing $0
-			// expected take-home / ROI (an inactive truck "is not supposed to show
-			// any data"). That $0 contract is unchanged by this rewrite.
-			const activeUnits = new Set(
+			// Trucks in the fleet only (investorPayoutBasis.truckInFleet(): every
+			// status but Inactive, the rule the fixed costs read). An Inactive truck
+			// is out of the fleet, so it must not dilute the others' share, and it
+			// keeps showing $0 expected take-home / ROI (an inactive truck "is not
+			// supposed to show any data"). A truck in Maintenance or OOS keeps its
+			// share (owner's decision, 2026-10-01): its costs still count in the
+			// take-home being divided, and when this read Active only, a shop visit
+			// handed its whole share to the investor's other trucks.
+			const fleetUnits = new Set(
 				allOwnedTrucks
-					.filter(t => String(t.status || "").toLowerCase() === "active")
+					.filter(investorPayoutBasis.truckInFleet)
 					.map(t => t.unit_number)
 			);
 			// The revenue window MUST be the exact months recentMonths covers, so the
@@ -51279,15 +51287,15 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// $59,988 next to a Fleet Total of $59,992. Match what the page actually
 			// displays, not the mathematically tidier value.
 			const fleetAnnualInvestor = Math.round(trailing3MonthInvestor) * 12;
-			let eligible = Object.keys(perTruckData).filter(u => activeUnits.has(u) && !insufficient[u]);
-			// Guard: if every active truck is too new (e.g. the only earning truck was
+			let eligible = Object.keys(perTruckData).filter(u => fleetUnits.has(u) && !insufficient[u]);
+			// Guard: if every truck in the fleet is too new (e.g. the only earning truck was
 			// just flipped Inactive), allocating to nobody would leave the Fleet Total at
-			// $0 against a non-zero Trend figure. Falling back to all active units keeps
+			// $0 against a non-zero Trend figure. Falling back to every unit in the fleet keeps
 			// the page self-consistent — those rows then carry a real number, so they are
 			// NOT flagged insufficientData (that flag means exactly "this row is null").
-			// With no active trucks at all nothing can hold the invariant, and that was
+			// With no truck in the fleet at all nothing can hold the invariant, and that was
 			// equally true before this change.
-			if (!eligible.length) eligible = Object.keys(perTruckData).filter(u => activeUnits.has(u));
+			if (!eligible.length) eligible = Object.keys(perTruckData).filter(u => fleetUnits.has(u));
 			const basis = Object.create(null);
 			let totalBasis = 0;
 			for (const u of eligible) {
@@ -51330,13 +51338,13 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 
 			for (const unit of Object.keys(perTruckData)) {
 				const price = (allOwnedTrucks.find(t => t.unit_number === unit)?.purchase_price) || 0;
-				const unitActive = activeUnits.has(unit);
-				const tooNew = unitActive && insufficient[unit] && !allocated(unit);
+				const unitInFleet = fleetUnits.has(unit);
+				const tooNew = unitInFleet && insufficient[unit] && !allocated(unit);
 				// null ≠ 0 here, and the difference is the whole point: null means "in
 				// service too briefly to project" (the UI renders "—"), while 0 means
 				// "in service the whole window and genuinely earned nothing". A truck
 				// that ran the full window with no revenue must still read 0.
-				const annual = tooNew ? null : (unitActive ? (alloc[unit] || 0) : 0);
+				const annual = tooNew ? null : (unitInFleet ? (alloc[unit] || 0) : 0);
 				const monthly = annual === null ? null : Math.round(annual / 12);
 				perTruckData[unit].monthlyInvestorEarnings = monthly;
 				perTruckData[unit].estAnnualInvestorRevenue = annual;
@@ -51347,7 +51355,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				// money-visible change).
 				perTruckData[unit].investorROI = annual === null
 					? null
-					: ((unitActive && price > 0) ? Math.round((annual / price) * 1000) / 10 : 0);
+					: ((unitInFleet && price > 0) ? Math.round((annual / price) * 1000) / 10 : 0);
 				perTruckData[unit].breakEvenMonths = (monthly !== null && monthly > 0)
 					? Math.ceil(price / monthly)
 					: null;

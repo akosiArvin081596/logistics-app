@@ -54,6 +54,13 @@
  * agree on real SQLite; and two mutants (the old gate on check (1), the rule
  * back to Active only) are caught.
  *
+ * §11 THE PROJECTIONS (owner's decision, 2026-10-01). GET /api/investor's
+ * per-truck take-home, ROI and break-even read the same fleet rule, so a truck
+ * in Maintenance or OOS keeps its share instead of handing it to the investor's
+ * other trucks. §11 runs the shipped allocation block: the shop statuses give
+ * exactly the all-Active figures, Inactive still drops out, and the block over
+ * Active trucks only (a mutant) is caught.
+ *
  * Fixtures are production-shaped: the 6 real trucks and the 15 real locked
  * periods (2025-05..2026-07), read read-only from production on 2026-08-09.
  *
@@ -238,7 +245,17 @@ section("1. TEXTUAL — every fixed-cost month gate routes through ONE predicate
 	eq((code.match(/status\s*(=|!=|<>)\s*'(Active|Inactive)'/g) || []).length, 0,
 		"no query in server.js filters on a truck status literal of its own");
 	eq((code.match(/\.status\s*[!=]==?\s*"(Active|Inactive)"/g) || []).length, 0,
-		"no code in server.js compares a status with \"Active\" / \"Inactive\" itself (projections compare lower-cased, on purpose)");
+		"no code in server.js compares a status with \"Active\" / \"Inactive\" itself");
+	// The investor projections in GET /api/investor (per-truck take-home, ROI,
+	// break-even) read the same rule since 2026-10-01: they compared the status
+	// lower-cased with "active", so a truck in the shop handed its share to the
+	// investor's other trucks. §11 runs the shipped allocation.
+	eq((code.match(/\.status \|\| ""\)\.toLowerCase\(\) === "active"/g) || []).length, 0,
+		"no truck status is compared lower-cased with \"active\" either");
+	ok(code.includes("const unitInFleet = investorPayoutBasis.truckInFleet(truck);"),
+		"GET /api/investor's per-truck figures (monthly gross, expenses, est. annual revenue) read the fleet rule");
+	ok(code.includes("allOwnedTrucks\n\t\t\t\t\t.filter(investorPayoutBasis.truckInFleet)\n\t\t\t\t\t.map(t => t.unit_number)"),
+		"GET /api/investor's projection shares (take-home, ROI, break-even) read the fleet rule");
 	const fixedWhere = code.match(/`SELECT [^`\n]*insurance_monthly[^`\n]*FROM trucks WHERE [^`\n]*`/g) || [];
 	eq(fixedWhere.filter((q) => !q.includes("${investorPayoutBasis.truckInFleetSql()}")), [],
 		"every filtered fixed-cost SELECT reads the fleet rule");
@@ -658,6 +675,62 @@ section("10. Maintenance and OOS keep the fixed costs; only a change in or out o
 	const activeOnly = (() => { const m = { exports: {} }; new Function("module", "exports", activeOnlySrc)(m, m.exports); return m.exports; })();
 	ok(blockersOf(buildGuard(GUARD_SRC, activeOnly), t33(), { status: "Maintenance" }).length > 0 && !sqlAgrees(activeOnly),
 		"MUTANT the fleet rule as Active only is caught (the shop visit is refused again, and the SQL no longer agrees)");
+}
+
+// ======================================= §11 THE PROJECTIONS KEEP A TRUCK IN THE SHOP
+section("11. The investor projections keep a truck in Maintenance or OOS (owner's decision, 2026-10-01)");
+{
+	// GET /api/investor's allocation block, the shipped text: each truck in the
+	// fleet takes the share of the investor's trailing take-home its own revenue
+	// earned in the window. It read Active only, so LogisX-#33 in Maintenance
+	// projected $0 and Logisx-#91 took the whole fleet's take-home (on the local
+	// copy, 2026-10-01: $740 → $2,236/mo, ROI 32.3% → 97.6%, break-even 38 → 13).
+	const marker = "\t\t// Annotate every perTruckData entry with the investor-centric numbers the";
+	eq(SRC.split(marker).length - 1, 1, "the projection block is found exactly once");
+	const open = SRC.indexOf("\n\t\t{\n", SRC.indexOf(marker)) + 1;
+	let close = -1;
+	for (let j = open, depth = 0; j < SRC.length; j++) {
+		if (SRC[j] === "{") depth++;
+		else if (SRC[j] === "}") { depth--; if (depth === 0) { close = j; break; } }
+	}
+	const BLOCK = SRC.slice(open, close + 1);
+	const FIELDS = ["monthlyInvestorEarnings", "estAnnualInvestorRevenue", "investorROI", "breakEvenMonths", "windowRevenueShare", "insufficientData"];
+	// The two owner-5 trucks as on production, with a revenue window in which both
+	// ran the whole time (#91 in service 2026-08-04), #33 earning two thirds.
+	const PRICE = { "LogisX-#33": 31900, "Logisx-#91": 27500 };
+	const WINDOW = ["2026-08", "2026-09", "2026-10"];
+	const project = (blockSrc, status33) => {
+		const trucks = [PROD[0], PROD[4]].map((t) => ({ ...t, purchase_price: PRICE[t.unit_number], status: t.id === 2 ? status33 : t.status }));
+		const perTruckData = Object.create(null);
+		for (const t of trucks) perTruckData[t.unit_number] = { status: t.status };
+		new Function(
+			"allOwnedTrucks", "recentMonths", "revenueByTruckMonth", "perTruckData", "driverMonthlyRevenue",
+			"normalizeDriverName", "truckChargeFromMonth", "truckChargeUntilMonth", "trailing3MonthInvestor", "investorPayoutBasis",
+			blockSrc,
+		)(
+			trucks, WINDOW.map((month) => ({ month })),
+			{ "logisx-#33": { "2026-08": 20000, "2026-09": 20000 }, "logisx-#91": { "2026-08": 10000, "2026-09": 10000 } },
+			perTruckData, Object.create(null), (s) => String(s || "").toLowerCase(),
+			truckChargeFromMonth, truckChargeUntilMonth, 2236, PAYOUT_BASIS,
+		);
+		return Object.fromEntries(trucks.map((t) => [t.unit_number, Object.fromEntries(FIELDS.map((k) => [k, perTruckData[t.unit_number][k]]))]));
+	};
+	const allActive = project(BLOCK, "Active");
+	eq([allActive["LogisX-#33"].estAnnualInvestorRevenue, allActive["Logisx-#91"].estAnnualInvestorRevenue], [17888, 8944],
+		"every truck Active: the fleet's $26,832/yr split two thirds / one third by window revenue");
+	for (const status of ["Maintenance", "OOS"]) {
+		eq(project(BLOCK, status), allActive, `LogisX-#33 in ${status}: both trucks' take-home, ROI, break-even and share are exactly the all-Active figures`);
+	}
+	const gone = project(BLOCK, "Inactive");
+	eq([gone["LogisX-#33"].estAnnualInvestorRevenue, gone["LogisX-#33"].investorROI, gone["Logisx-#91"].estAnnualInvestorRevenue], [0, 0, 26832],
+		"LogisX-#33 Inactive: out of the fleet, it projects $0 and Logisx-#91 carries the fleet (unchanged)");
+
+	// MUTANT: the projection's truck set back to Active only.
+	const activeOnly = BLOCK.replace(".filter(investorPayoutBasis.truckInFleet)", '.filter(t => String(t.status || "").toLowerCase() === "active")');
+	ok(activeOnly !== BLOCK, "MUTANT (projection set) applies");
+	const mutated = project(activeOnly, "Maintenance");
+	ok(JSON.stringify(mutated) !== JSON.stringify(allActive) && mutated["Logisx-#91"].estAnnualInvestorRevenue === 26832,
+		"MUTANT the projections over Active trucks only is caught (LogisX-#33 in Maintenance hands Logisx-#91 the whole $26,832)");
 }
 
 // -------------------------------------------------------------------- report
