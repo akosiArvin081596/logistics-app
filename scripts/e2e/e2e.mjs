@@ -10388,8 +10388,8 @@ async function leaseSection() {
 
     // ---- LD: the history: in service from the profit month, the basis from it, a profit
     // month (a load on the local sheet), an idle month (nothing), a loss month
-    await step('LD', `History for ${Object.values(LEASE_MONTHS).join(', ')}: the truck in service from ${LEASE_IN_SERVICE} (Trucks → Edit), the lease basis from ${LEASE_MONTHS.profit} (PUT /api/investors/:id/payout-basis), a delivered ${leaseMoney(LEASE_REVENUE)} load ${LOAD_ID} in ${LEASE_MONTHS.profit} (POST /api/data, the local sheet), nothing in ${LEASE_MONTHS.idle}, a ${leaseMoney(LEASE_SERVICE)} maintenance service payment in ${LEASE_MONTHS.loss}`,
-      'Each saved (the Edit form\'s PUT 200, the basis 200 with one lease row from the profit month, POST /api/data 200, POST /api/maintenance-fund 200), and the portal reads the load', async () => {
+    await step('LD', `History for ${Object.values(LEASE_MONTHS).join(', ')}: the truck in service from ${LEASE_IN_SERVICE} (Trucks → Edit), the lease basis from ${LEASE_MONTHS.profit} (PUT /api/investors/:id/payout-basis, which refuses a start before a closed month, then the copy), a delivered ${leaseMoney(LEASE_REVENUE)} load ${LOAD_ID} in ${LEASE_MONTHS.profit} (POST /api/data, the local sheet), nothing in ${LEASE_MONTHS.idle}, a ${leaseMoney(LEASE_SERVICE)} maintenance service payment in ${LEASE_MONTHS.loss}`,
+      'Each saved (the Edit form\'s PUT 200 or its refusal and the copy; the basis PUT 200, or 409 BASIS_MONTH_CLOSED and the copy, leaving one lease row from the profit month; POST /api/data 200, POST /api/maintenance-fund 200), and the portal reads the load', async () => {
         needOwner()
         if (!S.truck) throw new Error('not reached: the acceptance made no truck')
         const notes = []
@@ -10421,14 +10421,27 @@ async function leaseSection() {
         }
         const s1 = await leaseQaShot(page, 'ld-in-service')
         await page.keyboard.press('Escape').catch(() => {})
-        // The basis from the profit month (the build's own API; the signed row, from the
-        // acceptance month, is replaced).
+        // The basis from the profit month (the signed row, from the acceptance month, is
+        // replaced). The build's own API first: it refuses a basis that starts in or
+        // before a closed month (409 BASIS_MONTH_CLOSED), and the copy's months after
+        // the profit month are closed, so, as for the in-service date, the copy then
+        // takes it directly, written as the PUT writes it (the row from the profit
+        // month, every later row removed).
         let basisOk = true
         if (S.feature) {
-          const b = await api(page, 'PUT', `/api/investors/${S.investorId}/payout-basis`, { type: 'lease', leaseAmount: LEASE_AMOUNT, effectiveMonth: LEASE_MONTHS.profit, note: 'QA-LEASE e2e: the lease from the profit month' })
-          const sched = b.json?.schedule || []
-          basisOk = b.status === 200 && sched.length === 1 && sched[0].effectiveMonth === LEASE_MONTHS.profit && sched[0].type === 'lease' && sched[0].leaseAmount === LEASE_AMOUNT
-          notes.push(`PUT payout-basis → ${b.status}${b.json?.code ? ` ${b.json.code}` : ''}; schedule ${sched.map((r) => `${r.effectiveMonth} ${r.type} ${r.leaseAmount ?? ''} (${r.source})`).join(', ') || 'empty'}`)
+          const note = 'QA-LEASE e2e: the lease from the profit month'
+          const b = await api(page, 'PUT', `/api/investors/${S.investorId}/payout-basis`, { type: 'lease', leaseAmount: LEASE_AMOUNT, effectiveMonth: LEASE_MONTHS.profit, note })
+          const refused = b.status === 409 && b.json?.code === 'BASIS_MONTH_CLOSED'
+          notes.push(`PUT payout-basis from ${LEASE_MONTHS.profit} → ${b.status}${b.json?.code ? ` ${b.json.code}` : ''}${refused ? ` (earliest editable ${b.json.earliestEditableMonth})` : ''}`)
+          if (refused) {
+            db.prepare('DELETE FROM investor_payout_basis WHERE owner_id = ? AND effective_month >= ?').run(S.owner, LEASE_MONTHS.profit)
+            db.prepare("INSERT INTO investor_payout_basis (owner_id, effective_month, basis_type, lease_amount_cents, source, application_id, note, created_by, created_at) VALUES (?, ?, 'lease', ?, 'admin', NULL, ?, 'qa-e2e', ?)")
+              .run(S.owner, LEASE_MONTHS.profit, LEASE_AMOUNT * 100, note, new Date().toISOString())
+            notes.push('set in the copy instead')
+          }
+          const sched = (await api(page, 'GET', `/api/investors/${S.investorId}/payout-basis`)).json?.schedule || []
+          basisOk = (b.status === 200 || refused) && sched.length === 1 && sched[0].effectiveMonth === LEASE_MONTHS.profit && sched[0].type === 'lease' && sched[0].leaseAmount === LEASE_AMOUNT
+          notes.push(`schedule ${sched.map((r) => `${r.effectiveMonth} ${r.type} ${r.leaseAmount ?? ''} (${r.source})`).join(', ') || 'empty'}`)
         } else notes.push('no basis to set (no lease payouts in this build)')
         // The profit month's load, through the app's own sheet write (Super Admin only).
         const sheetFrom = leaseSheetCheck(srv)
@@ -10465,10 +10478,12 @@ async function leaseSection() {
       })
 
     // ---- LP: the admin Payout Basis panel, flag as booted (off): an edit through its
-    // form (the same lease, a new note) and the line it adds to Change history
-    await step('LP', `Super Admin, /investors → the QA-LEASE investor → Payout Basis: Edit, the lease kept (${leaseMoney(LEASE_AMOUNT)} from ${LEASE_MONTHS.profit}) with a new note, Save`,
-      `While lease payouts are off the panel says "${LEASE_STATUS_OFF}"; the form's PUT 200; one more Change history line, naming the new note; the schedule still one lease row from ${LEASE_MONTHS.profit}`, async () => {
+    // form (the same lease from the first month it may change, with a note) and the
+    // line it adds to Change history
+    await step('LP', `Super Admin, /investors → the QA-LEASE investor → Payout Basis: Edit, the same ${leaseMoney(LEASE_AMOUNT)} lease from the first editable month with a note, Save`,
+      `While lease payouts are off the panel says "${LEASE_STATUS_OFF}"; the form's PUT 200; one more Change history line, naming the note; the schedule: the lease from ${LEASE_MONTHS.profit}, then the same lease from the first editable month`, async () => {
         needFeature(); needOwner()
+        const firstEditable = (await api(page, 'GET', `/api/investors/${S.investorId}/payout-basis`)).json?.earliestEditableMonth || dayCT().slice(0, 7)
         const panel = await leaseBasisPanel(page, NAME)
         const status = squash(await panel.locator(TD('payout-basis-status')).innerText().catch(() => ''), 160)
         const before = await leaseHistory(panel)
@@ -10477,9 +10492,9 @@ async function leaseSection() {
         await form.waitFor({ state: 'visible' })
         await chooseControl(form.locator(TD('payout-basis-type-lease')))
         await form.locator(TD('payout-basis-amount')).fill(String(LEASE_AMOUNT))
-        await form.locator(TD('payout-basis-month')).fill(LEASE_MONTHS.profit)
+        await form.locator(TD('payout-basis-month')).fill(firstEditable)
         await form.locator(TD('payout-basis-note')).fill(LEASE_PANEL_NOTE)
-        await caption(page, 'Step LP — the Payout Basis panel: Edit, the same lease with a new note, Save')
+        await caption(page, `Step LP — the Payout Basis panel: Edit, the same lease from ${firstEditable} with a note, Save`)
         const [put] = await Promise.all([
           page.waitForResponse((r) => r.request().method() === 'PUT' && pathOf(r.url()) === `/api/investors/${S.investorId}/payout-basis`, { timeout: 20000 }).catch(() => null),
           form.locator(TD('payout-basis-save')).click(),
@@ -10490,7 +10505,9 @@ async function leaseSection() {
         const added = after.filter((t) => !before.includes(t))
         const b = await api(page, 'GET', `/api/investors/${S.investorId}/payout-basis`)
         const sched = b.json?.schedule || []
-        const schedOk = sched.length === 1 && sched[0].effectiveMonth === LEASE_MONTHS.profit && sched[0].type === 'lease' && sched[0].leaseAmount === LEASE_AMOUNT && sched[0].note === LEASE_PANEL_NOTE
+        const last = sched[sched.length - 1]
+        const schedOk = sched.length === 2 && sched[0].effectiveMonth === LEASE_MONTHS.profit && sched[0].type === 'lease' &&
+          last.effectiveMonth === firstEditable && last.type === 'lease' && last.leaseAmount === LEASE_AMOUNT && last.note === LEASE_PANEL_NOTE
         await caption(page, `Step LP — PUT → ${put ? put.status() : 'not sent'}; Change history ${before.length} → ${after.length} line(s)`)
         const s = await leaseQaShot(page, 'lp-payout-basis-panel')
         const statusOk = S.settings.enabled === true || status === LEASE_STATUS_OFF
