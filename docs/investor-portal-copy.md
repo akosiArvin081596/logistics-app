@@ -508,7 +508,7 @@ Error messages are normally not listed here (see "Not listed" at the top). These
 
 **Every line in this section is AWAITING YOUR APPROVAL.** Nothing here has shipped; you review it on staging before it is merged.
 
-**What it is.** An investor who signed a fixed monthly lease payment (Amendment No. 1, §15.3) is paid that lease each month instead of a share of net profit. It sits behind a switch that ships **off** (`INVESTOR_LEASE_PAYOUTS_ENABLED`). While it is off, no investor sees anything below, and §15's *"Payouts are not changed"* still holds. **Investors on the 50/50 split see no change, switch on or off:** every figure and every word in §2–§16 stays exactly as it is.
+**What it is.** An investor who signed a fixed monthly lease payment (Amendment No. 1, §15.3) is paid that lease each month instead of a share of net profit. It sits behind a switch that ships **off** (`INVESTOR_LEASE_PAYOUTS_ENABLED`). Until it is first switched on, no investor sees anything below, and §15's *"Payouts are not changed"* still holds. A lease month that closed while it was on keeps its lease figures and wording even if the switch is turned off again (17.3). **Investors on the 50/50 split see no change, switch on or off:** every figure and every word in §2–§16 stays exactly as it is.
 
 **How the text is written below.** `{amount}` is the monthly lease and `{paid}` what the month pays, both in whole dollars (`$2,000`); `{covered}` and `{days}` are day counts; `{month}` and `{period}` a month (`September 2026`).
 
@@ -570,7 +570,7 @@ Revenue ... − Driver Pay ... − Fixed Costs ... − Trip Expenses ... Net Pro
 
 ### 17.3 Your three settings
 
-Each is one setting, and the default follows the agreements. Changing one changes the months that have not been settled yet; a settled month keeps the amount it was settled at. The same holds for a truck's status: the app reads it as it is today, not as it was in the month, so marking a truck Inactive (or back) changes only the months not yet settled.
+Each is one setting, and the default follows the agreements. Changing one changes only the months that are still open (not yet closed); a closed month keeps exactly what it settled at: its amount, the figures behind it and the sentence that explains it (L4, L5 or L6), on every screen, statement and report. A month closed at $0 for downtime still reads $0 with L5 after Downtime is switched to **paid**, and a month closed at the full lease still reads the full lease after it is switched back to **unpaid**. The same holds for a truck's status and dates: the app reads them as they are today, not as they were in the month, so marking a truck Inactive (or back), retiring it or changing its in-service date changes only the months still open. Switching lease payouts off altogether does not change a closed lease month either: it was settled as the lease, and it keeps reading as the lease.
 
 | Setting | Default | What the default does | Why | The other setting |
 |---|---|---|---|---|

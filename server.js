@@ -4603,27 +4603,51 @@ const INVESTOR_LEASE_PAYOUTS_ENABLED = /^(true|1|yes|on)$/i.test(String(process.
 // no setting falls back to the default with one warning here, at boot.
 const INVESTOR_LEASE_SETTINGS = investorPayoutBasis.readLeaseSettings(process.env, (msg) => console.warn(`[payout-basis] ${msg}`));
 
+// Frozen lease snapshots already reported as not wholly readable, "<owner> <period>":
+// one warning per month per process, not one per page load.
+const LEASE_SNAPSHOT_WARNED = new Set();
+
 // What the payout math needs to settle one owner's months: the flag, the owner's
 // basis rows (oldest first), every truck the owner has with its status, which
-// decide the days a lease covers, and the months already finalized as the split,
+// decide the days a lease covers, the months already finalized as the split,
 // which stay the split (a lease row recorded at acceptance while the flag was off
-// must not relabel them once it is on). null for the fleet-wide view (no owner).
+// must not relabel them once it is on), and the months already finalized as a
+// lease, with the figures each froze. null for the fleet-wide view (no owner).
 // The trucks are NOT the fixed-cost set (status 'Active'): which of them a lease
 // counts (every status but Inactive) is investorPayoutBasis.truckInLeaseFleet(),
 // the one copy of that rule. The flag is only carried here;
 // investorPayoutBasis.leaseBasisActive() is the one test of it, so with the flag
 // off the rows read here change nothing.
+//
+// ⚠️ A MONTH SETTLED AS A LEASE STAYS EXACTLY AS IT SETTLED, flag on or off:
+// settledLeaseMonths carries its frozen payoutBasis, and settleInvestorMonths()
+// pays that, never a live re-explanation under today's settings or trucks. So its
+// earnings, recomputed amount and wording always match the amount it settled at.
+// A figure the snapshot does not hold readably falls back towards that settled
+// amount (readFrozenLeaseBasis()), and is reported once.
 function payoutBasisContext(ownerId) {
 	if (!ownerId) return null;
+	const finalized = db.prepare("SELECT period, amount, finalized_amount, finalized_breakdown FROM investor_payouts WHERE owner_id = ? AND COALESCE(finalized_at, '') != ''").all(ownerId);
+	const settledLeaseMonths = {};
+	for (const r of finalized) {
+		const frozen = investorPayoutBasis.readFrozenLeaseBasis(r.finalized_breakdown, r.period, r.finalized_amount ?? r.amount);
+		if (!frozen) continue;
+		settledLeaseMonths[r.period] = frozen.payoutBasis;
+		const key = `${ownerId} ${r.period}`;
+		if (!frozen.complete && !LEASE_SNAPSHOT_WARNED.has(key)) {
+			LEASE_SNAPSHOT_WARNED.add(key);
+			console.warn(`[payout-basis] owner ${ownerId} ${r.period}: the lease figures frozen at its close are not all readable; it reads as settled, paying $${frozen.payoutBasis.paidAmount}.`);
+		}
+	}
 	return {
 		enabled: INVESTOR_LEASE_PAYOUTS_ENABLED,
 		rows: db.prepare("SELECT effective_month, basis_type, lease_amount_cents FROM investor_payout_basis WHERE owner_id = ? ORDER BY effective_month").all(ownerId),
 		trucks: db.prepare("SELECT status, in_service_date, created_at, retired_at FROM trucks WHERE owner_id = ?").all(ownerId),
 		settings: INVESTOR_LEASE_SETTINGS,
 		settledSplitMonths: INVESTOR_LEASE_PAYOUTS_ENABLED
-			? db.prepare("SELECT period, finalized_breakdown FROM investor_payouts WHERE owner_id = ? AND COALESCE(finalized_at, '') != ''").all(ownerId)
-				.filter((r) => !investorPayoutBasis.frozenBreakdownIsLease(r.finalized_breakdown)).map((r) => r.period)
+			? finalized.filter((r) => !investorPayoutBasis.frozenBreakdownIsLease(r.finalized_breakdown)).map((r) => r.period)
 			: [],
+		settledLeaseMonths,
 	};
 }
 
@@ -43249,10 +43273,11 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 		const periodNet = (p) => (Object.prototype.hasOwnProperty.call(netByMonth, p.key) ? netByMonth[p.key] : null);
 		// A month paid as a fixed monthly lease has no per-load share: the lease is
 		// not a share of anything, so the CSV and the PDF print the lease wording
-		// (leasePayoutText.LEASE_TEXT.PER_LOAD_SHARE) where a share would go.
-		// Weekly periods carry no share either way.
+		// (leasePayoutText.LEASE_TEXT.PER_LOAD_SHARE) where a share would go: a
+		// month settled as a lease, flag on or off, or an open month a lease row
+		// governs. Weekly periods carry no share either way.
 		const loadReportBasis = payoutBasisContext(investorOwnerId);
-		const periodIsLease = (p) => period === "monthly" && !!investorPayoutBasis.leaseBasisForMonth(loadReportBasis, p.key);
+		const periodIsLease = (p) => period === "monthly" && investorPayoutBasis.isLeaseMonth(loadReportBasis, p.key);
 		// Allocate a period's net investor earnings across its completed loads,
 		// rate-weighted, as whole dollars that sum EXACTLY to the period net
 		// (largest-remainder method) so the rows reconcile with the stated total.

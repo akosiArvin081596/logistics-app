@@ -31,6 +31,11 @@
  *   §8  the idle predicate, the first month, the audit line, the dollar format
  *   §9  MUTANTS: the flag gate always open; a lease month joining the carry;
  *       coverage over the fixed-cost set (Active trucks only)
+ *   §10 a month settled as a lease: its frozen snapshot read back exactly, or,
+ *       where a figure cannot be read, towards its settled amount; it pays what
+ *       it froze whatever the flag, the settings, the trucks or the rows say now,
+ *       carries nothing either way, and stays in the month range with the flag
+ *       off. MUTANT: the settled lease months ignored
  *
  * Pure: the module has no requires; nothing here touches a database or a network.
  * Run: node scripts/test-investor-payout-basis.js     # exits 1 on failure
@@ -397,6 +402,65 @@ section("§9 mutants — each must be caught");
 	ok(shopCovers(B), "§9 control: a Maintenance-only month pays the lease under downtime \"paid\"");
 	const activeOnly = loadModule(mutate("return !!t && t.status !== LEASE_FLEET_EXIT_STATUS;", "return !!t && (t.status === undefined || t.status === \"Active\");"));
 	ok(!shopCovers(activeOnly), "§9 MUTANT coverage over the fixed-cost set (Active trucks only) is caught");
+}
+
+// ============================================================ §10 settled as a lease
+section("§10 a month settled as a lease keeps what it settled at");
+{
+	const frozenJson = (pb, extra = {}) => JSON.stringify({ netProfit: 9000, splitPct: null, monthShare: pb.paidAmount, payoutBasis: pb, lossCarriedIn: 0, lossDeferred: 0, ...extra });
+	const JUNE_IDLE = { type: "lease", leaseAmount: 2000, paidAmount: 0, coveredDays: 30, daysInMonth: 30, reason: "downtime" };
+	const JULY_FULL = { type: "lease", leaseAmount: 2000, paidAmount: 2000, coveredDays: 31, daysInMonth: 31, reason: null };
+
+	// Reading the frozen snapshot.
+	eq(B.readFrozenLeaseBasis(frozenJson(JUNE_IDLE), "2026-06", 0), { payoutBasis: JUNE_IDLE, complete: true }, "§10 a frozen lease snapshot reads back exactly, in the settle's shape");
+	eq(["", null, "not json", JSON.stringify({ splitPct: 50, monthShare: 4500 }), "null"].map((j) => B.readFrozenLeaseBasis(j, "2026-06", 4500)),
+		[null, null, null, null, null], "§10 empty, unreadable or split snapshots are not a lease (the split, as before)");
+	eq(B.readFrozenLeaseBasis(frozenJson(JUNE_IDLE), "2026-6", 0), null, "§10 a period that is not a month key reads nothing");
+	const damaged = B.readFrozenLeaseBasis(frozenJson({ type: "lease", leaseAmount: "2000", paidAmount: null, coveredDays: 40, daysInMonth: 31, reason: "later" }), "2026-07", 2000);
+	eq(damaged, { payoutBasis: { type: "lease", leaseAmount: 2000, paidAmount: 2000, coveredDays: 31, daysInMonth: 31, reason: null }, complete: false },
+		"§10 a snapshot whose figures cannot be read falls back to the settled amount (never a live figure), and says it is incomplete");
+	eq(B.readFrozenLeaseBasis(frozenJson({ type: "lease" }), "2026-07", null).payoutBasis.paidAmount, 0, "§10 …with no settled amount either: $0, not a live figure");
+
+	// Settling with it: whatever the flag, the rows, the trucks or the settings say now.
+	const settled = { "2026-06": JUNE_IDLE, "2026-07": JULY_FULL };
+	const months = [month("2026-05", -3000), month("2026-06", 0, true), month("2026-07", -4500), month("2026-08", 6000, false)];
+	const now = (over) => ({ ...basisOf([lease("2026-05", 2000)]), settledLeaseMonths: settled, ...over });
+	const view = (basis) => {
+		const s = B.settleInvestorMonths(months, { splitFraction: 0.5, basis });
+		return months.map(({ month: m }) => [m, s[m].investorEarnings, s[m].payable, s[m].carriedIn, s[m].deferred, s[m].payoutBasis && `${s[m].payoutBasis.paidAmount} ${s[m].payoutBasis.reason}`]);
+	};
+	const want = view(now({}));
+	eq(want.slice(1, 3), [["2026-06", 0, 0, 0, 0, "0 downtime"], ["2026-07", 2000, 2000, 0, 0, "2000 null"]], "§10 June and July pay exactly what they froze");
+	for (const [label, over] of [
+		["downtime \"paid\"", { settings: { ...SETTINGS, downtime: "paid" } }],
+		["prorate \"none\" and retirement \"continue\"", { settings: { ...SETTINGS, prorate: "none", retirement: "continue" } }],
+		["the only truck Inactive", { trucks: [{ ...TRUCK_ALL_YEAR, status: "Inactive" }] }],
+		["the truck retired in May", { trucks: [{ ...TRUCK_ALL_YEAR, retired_at: "2026-05-20" }] }],
+		["a split row governing now", { rows: [lease("2026-05", 2000), split("2026-06")] }],
+		["no basis row at all", { rows: [] }],
+	]) {
+		const got = view(now(over));
+		eq(got.slice(1, 3), want.slice(1, 3), `§10 ${label}: the settled months unchanged`);
+	}
+	const off = view(now({ enabled: false }));
+	eq(off.slice(1, 3), want.slice(1, 3), "§10 the flag off: the settled months still read as the lease they settled as");
+	eq([off[0], off[3]], [["2026-05", -1500, 0, 0, 1500, null], ["2026-08", 3000, 1500, 1500, 0, null]],
+		"§10 …while the open months are the split, the May loss carried past the settled lease months into August");
+	const s = B.settleInvestorMonths(months, { splitFraction: 0.5, basis: now({}) });
+	eq(s["2026-07"].companyEarnings, -6500, "§10 the company's share of a settled lease month: the net profit less the lease it settled at");
+	s["2026-07"].payoutBasis.paidAmount = 1;
+	eq(settled["2026-07"].paidAmount, 2000, "§10 a settled month's payoutBasis is a copy: a caller cannot change the context through it");
+	eq(B.firstPayoutMonth("2026-08", { enabled: false, rows: [], settledLeaseMonths: settled }), "2026-06", "§10 the month range reaches back to a month settled as a lease, flag off");
+	eq(B.firstPayoutMonth("2026-08", { enabled: false, rows: [lease("2026-03", 2000)] }), "2026-08", "§10 …but not to a lease row with the flag off");
+	eq([B.isLeaseMonth(now({ enabled: false }), "2026-07"), B.isLeaseMonth(now({ enabled: false }), "2026-08"), B.isLeaseMonth(now({}), "2026-08"), B.isLeaseMonth(null, "2026-07")],
+		[true, false, true, false], "§10 isLeaseMonth: settled as a lease (any flag), or an open month under an active lease row");
+
+	// MUTANT: the settled lease months ignored.
+	const noFrozen = loadModule(mutate("const frozen = settledLeaseBasis(basis, m.month);", "const frozen = null;"));
+	const viewWith = (M, basis) => { const r = M.settleInvestorMonths(months, { splitFraction: 0.5, basis }); return months.map(({ month: m }) => [r[m].investorEarnings, r[m].payoutBasis]); };
+	const paidNow = now({ settings: { ...SETTINGS, downtime: "paid" } });
+	ok(JSON.stringify(viewWith(B, paidNow)) === JSON.stringify(viewWith(B, now({}))), "§10 control: switching downtime moves no settled month");
+	ok(JSON.stringify(viewWith(noFrozen, paidNow)) !== JSON.stringify(viewWith(noFrozen, now({}))), "§10 MUTANT the settled lease months ignored: switching downtime re-explains June (caught)");
 }
 
 console.log(`\n${failures.length ? "FAIL" : "PASS"} — ${pass} assertions passed, ${failures.length} failed`);

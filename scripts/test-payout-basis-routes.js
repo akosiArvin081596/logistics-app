@@ -39,14 +39,16 @@
  *      branch records nothing and its message names the lease
  *   §7 GET /api/investors: each row's current-month lease, or null; §7b the
  *      load report's CSV prints the lease wording, not a per-load share, in a
- *      lease month (flag on), and every month's shares with the flag off
+ *      lease month (flag on), and every month's shares with the flag off but a
+ *      month settled as a lease, which keeps the lease wording
  *   §8 MUTANTS: the BASIS_MONTH_CLOSED guard removed; the flag carried as
  *      always on; the closed-month bound dropped; the frozen split months
  *      dropped from the context
  *   §9 the payout context: with the flag on, the months finalized as the split
  *      (no payoutBasis in the frozen breakdown) stay the split under a lease
- *      row recorded before them; a month finalized as a lease stays the lease;
- *      with the flag off nothing is read; §9b the context hands over every
+ *      row recorded before them; a month finalized as a lease stays the lease,
+ *      flag on or off, and the context carries the figures it froze; with the
+ *      flag off no month is listed as settled as the split; §9b the context hands over every
  *      truck the owner has with its status, so a Maintenance-only month is
  *      covered (paid under downtime "paid") and an Inactive-only one is not
  *   §10 the ledger (the shipped reconcileInvestorPayouts() and finalizePeriods()):
@@ -57,6 +59,16 @@
  *      or off; a lease row stamped late with the flag off stays the split.
  *      MUTANTS: the late stamp without the lease snapshot; a snapshot on every
  *      late-stamped month
+ *   §11 a month settled as a lease stays exactly as it settled (the same
+ *      ledger, the month-end close): after the close, the downtime setting
+ *      switched either way, the truck retired, set Inactive or put in service
+ *      later, the retirement or prorate setting switched, and the flag turned off
+ *      leave every closed month's row, the totals and the portal's months exactly
+ *      as they settled, while the open month follows each change; a split
+ *      investor keeps the live recompute beside its frozen amounts (the drift
+ *      disclosure), flag on or off, under any lease settings; a snapshot holding
+ *      a figure that cannot be read reads as its settled amount and is reported
+ *      once. MUTANT: the months settled as a lease left out of the context
  *
  * Pure: no server, no app.db, no network, no mail.
  * Run: node scripts/test-payout-basis-routes.js    # exits 1 on failure
@@ -132,7 +144,7 @@ const FUNCTIONS = [
 	"earliestEditableBasisMonth", "signedPaymentTermsOf", "recordSignedPayoutBasis", "unrecordedLeaseNote",
 	"payoutBasisRowView", "buildPayoutBasisView", "payoutBasisContext",
 ].map(liftFunction).join("\n");
-const FLAG_CONSTS = [liftConst("INVESTOR_LEASE_PAYOUTS_ENABLED"), liftConst("INVESTOR_LEASE_SETTINGS")].join("\n");
+const FLAG_CONSTS = [liftConst("INVESTOR_LEASE_PAYOUTS_ENABLED"), liftConst("INVESTOR_LEASE_SETTINGS"), liftConst("LEASE_SNAPSHOT_WARNED")].join("\n");
 
 const DDL = [
 	tableDdl("users"), ...alters("users"),
@@ -162,13 +174,17 @@ const CURRENT_MONTH = "2026-09";
 const SUPER = { id: 1, username: "super_admin", role: "Super Admin" };
 const noop = (req, res, next) => next && next();
 
-function buildServer({ flag = false, env = {}, basisModule = investorPayoutBasis, routes = {}, vehicles = null, locksReadable = true, functions = FUNCTIONS } = {}) {
-	const db = new Database(":memory:");
-	for (const sql of DDL) {
-		try { db.exec(sql); } catch (e) { if (!/duplicate column name/.test(e.message)) throw e; }
+// `db`: another server's database, so a restart with other settings or the flag
+// switched reads exactly what the first one wrote.
+function buildServer({ flag = false, env = {}, basisModule = investorPayoutBasis, routes = {}, vehicles = null, locksReadable = true, functions = FUNCTIONS, db: shared = null } = {}) {
+	const db = shared || new Database(":memory:");
+	if (!shared) {
+		for (const sql of DDL) {
+			try { db.exec(sql); } catch (e) { if (!/duplicate column name/.test(e.message)) throw e; }
+		}
+		db.prepare("INSERT INTO users (id, username, password_hash, role, driver_name, email) VALUES (1, 'super_admin', 'x', 'Super Admin', '', 'ops@example.test')").run();
+		db.prepare("INSERT INTO investor_config (owner_id, key, value) VALUES (0, 'investor_split_pct', '50')").run();
 	}
-	db.prepare("INSERT INTO users (id, username, password_hash, role, driver_name, email) VALUES (1, 'super_admin', 'x', 'Super Admin', '', 'ops@example.test')").run();
-	db.prepare("INSERT INTO investor_config (owner_id, key, value) VALUES (0, 'investor_split_pct', '50')").run();
 	const calls = { notify: [], mail: [], warnings: [], refusals: [] };
 	const handlers = {};
 	const reg = (verb) => (p, ...h) => { handlers[`${verb} ${p}`] = h[h.length - 1]; };
@@ -257,15 +273,15 @@ const ledgerNet = (f) => f.revenue - f.driverPay - (ledgerIdle(f) ? 0 : f.fixedC
 const LEDGER_CTX = { sessionUser: SUPER, carrierDB: { headers: ["Driver", "Carrier"], data: [] }, globalConfig: { investor_split_pct: "50" } };
 const resolveSplit = new Function(`${liftFunction("resolveInvestorSplitPct")}\nreturn resolveInvestorSplitPct;`)();
 const LEDGER_NAMES = ["lastFridayOfFollowingMonth", "periodLabel", "computeLossCarryForward", "payoutRowBreakdown", "frozenPayoutBreakdown", "resolveInvestorSplitPct", "reconcileInvestorPayouts", "finalizePeriods"];
-function ledgerWorld(srv, { reconcile = (s) => s } = {}) {
+function ledgerWorld(srv, { reconcile = (s) => s, fixture = LEDGER_FIXTURE } = {}) {
 	const src = LEDGER_NAMES.map((n) => (n === "reconcileInvestorPayouts" ? reconcile(liftFunction(n)) : liftFunction(n))).join("\n");
 	const locked = (p) => !!srv.db.prepare("SELECT 1 FROM period_locks WHERE period = ? AND status = 'locked'").get(p);
 	const deps = {
 		db: srv.db, investorPayoutBasis,
 		computeInvestorMonthlyEarnings: async ({ investorOwnerId, config }) => {
-			const months = LEDGER_FIXTURE.map((f) => ({ month: f.month, netProfit: ledgerNet(f), zeroActivity: ledgerIdle(f) }));
+			const months = fixture.map((f) => ({ month: f.month, netProfit: ledgerNet(f), zeroActivity: ledgerIdle(f) }));
 			const settled = investorPayoutBasis.settleInvestorMonths(months, { splitFraction: resolveSplit(config) / 100, basis: srv.payoutBasisContext(investorOwnerId) });
-			const monthlyEarnings = LEDGER_FIXTURE.map((f) => {
+			const monthlyEarnings = fixture.map((f) => {
 				const exact = { revenue: f.revenue, driverPay: f.driverPay, fixedCosts: ledgerIdle(f) ? 0 : f.fixedCosts, tripExpenses: f.tripExpenses, maintFundCost: f.maintFundCost, complianceCost: 0, netProfit: ledgerNet(f) };
 				return {
 					month: f.month, ...exact, exact,
@@ -572,7 +588,7 @@ const LEASE_2000 = { type: "lease", leaseAmountCents: 200000, details: "" };
 			{ "Load ID": "802", Driver: "Driver A", "Job Status": "Delivered", "  Payment  ": "1000", "Assigned Date": "2026-08-20", Truck: "T1", "Owner ID": "45" },
 			{ "Load ID": "901", Driver: "Driver A", "Job Status": "Delivered", "  Payment  ": "4000", "Assigned Date": "2026-09-04", Truck: "T1", "Owner ID": "45" },
 		];
-		const csvFor = async (enabled) => {
+		const csvFor = async (enabled, settledLeaseMonths = {}) => {
 			const db = new Database(":memory:");
 			db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, role TEXT)");
 			db.exec("CREATE TABLE investor_config (owner_id INTEGER DEFAULT 0, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(owner_id, key))");
@@ -586,7 +602,7 @@ const LEASE_2000 = { type: "lease", leaseAmountCents: 200000, details: "" };
 				getCarrierDBFromSQLite: () => ({ headers: ["Driver", "Carrier"], data: [] }), getInvestorDriverSet: () => new Set(["driver a"]),
 				logAudit: () => {}, resolveCityState: (r, kind) => kind, getWeekRange: () => { throw new Error("monthly only"); },
 				investorPayoutBasis, leasePayoutText,
-				payoutBasisContext: (ownerId) => ({ enabled, rows: [{ effective_month: "2026-09", basis_type: "lease", lease_amount_cents: 200000 }], trucks: [{ in_service_date: "2026-01-01" }], settings: investorPayoutBasis.DEFAULT_SETTINGS, ownerId }),
+				payoutBasisContext: (ownerId) => ({ enabled, rows: [{ effective_month: "2026-09", basis_type: "lease", lease_amount_cents: 200000 }], trucks: [{ in_service_date: "2026-01-01" }], settings: investorPayoutBasis.DEFAULT_SETTINGS, settledLeaseMonths, ownerId }),
 			};
 			new Function(...Object.keys(deps), `${helpers}\n${route}`)(...Object.values(deps));
 			const out = {};
@@ -600,6 +616,8 @@ const LEASE_2000 = { type: "lease", leaseAmountCents: 200000, details: "" };
 		eq(L10, "Paid as a fixed monthly lease, so there is no per-load share.", "§7b the per-load wording (L10), verbatim");
 		eq(await csvFor(true), [["901", L10], ["802", "250"], ["801", "750"]], "§7b flag on: the lease month prints the lease wording, the split month its shares");
 		eq(await csvFor(false), [["901", "2000"], ["802", "250"], ["801", "750"]], "§7b flag off: every month's shares, as before");
+		const settledAugust = { "2026-08": { type: "lease", leaseAmount: 2000, paidAmount: 2000, coveredDays: 31, daysInMonth: 31, reason: null } };
+		eq(await csvFor(false, settledAugust), [["901", "2000"], ["802", L10], ["801", L10]], "§7b flag off: a month settled as a lease still prints the lease wording; the open month its shares");
 	}
 
 	// ── §8 mutants ────────────────────────────────────────────────────────────
@@ -654,12 +672,16 @@ const LEASE_2000 = { type: "lease", leaseAmountCents: 200000, details: "" };
 		eq([settled["2026-07"].deferred, settled["2026-09"].carriedIn], [500, 0], "§9 …July's loss is still carried as it was settled, and no lease month absorbs it");
 		const ctx = on.payoutBasisContext(49);
 		eq(ctx.settledSplitMonths, ["2026-06", "2026-07"], "§9 the context lists the months finalized as the split");
+		eq(ctx.settledLeaseMonths, { "2026-08": { type: "lease", leaseAmount: 2000, paidAmount: 2000, coveredDays: 31, daysInMonth: 31, reason: null } },
+			"§9 …and each month finalized as a lease, with the figures it froze");
 		eq([investorPayoutBasis.leaseBasisForMonth(ctx, "2026-06"), investorPayoutBasis.leaseBasisForMonth(ctx, "2026-08")],
 			[null, { leaseAmount: 2000, effectiveMonth: "2026-06" }], "§9 leaseBasisForMonth (the load report's month test) agrees");
 		const off = buildServer({ flag: false });
 		const offSettled = frozenCase(off);
-		eq(off.payoutBasisContext(49).settledSplitMonths, [], "§9 flag off: nothing is read");
-		ok(["2026-06", "2026-07", "2026-08", "2026-09"].every((m) => offSettled[m].payoutBasis === null), "§9 flag off: every month is the split, as before");
+		eq(off.payoutBasisContext(49).settledSplitMonths, [], "§9 flag off: no month is listed as settled as the split");
+		eq(["2026-06", "2026-07", "2026-08", "2026-09"].map((m) => [offSettled[m].investorEarnings, offSettled[m].payoutBasis ? "lease" : "split"]),
+			[[4500, "split"], [-500, "split"], [2000, "lease"], [4500, "split"]],
+			"§9 flag off: August, finalized as a lease, still reads as the lease it settled as; every other month is the split");
 	}
 
 	// ── §9b the trucks a lease counts: every status but Inactive ────────────────
@@ -777,6 +799,128 @@ const LEASE_2000 = { type: "lease", leaseAmountCents: 200000, details: "" };
 		every.db.prepare("INSERT INTO trucks (unit_number, owner_id, in_service_date) VALUES ('S61', 61, '2026-01-01')").run();
 		await view(ledgerWorld(every, { reconcile: (src) => src.replace(anchor, "const leaseSnapshot = true || m.payoutBasis") }), 61);
 		ok(stored(every, 61).some((r) => r.finalized_breakdown !== ""), "§10 MUTANT a snapshot on every late-stamped month: a split row gains one (caught)");
+	}
+
+	// ── §11 a month settled as a lease stays exactly as it settled ───────────────
+	section("§11 a closed lease month keeps what it settled at, whatever the settings, the trucks or the flag say now");
+	{
+		const OWNER = 70;
+		const view = (w) => w.fns.reconcileInvestorPayouts(OWNER, LEDGER_CTX);
+		// September, the open month, idle: the downtime setting decides it.
+		const IDLE_OPEN = LEDGER_FIXTURE.map((f) => (f.month === LEDGER_CURRENT ? { ...f, revenue: 0, driverPay: 0 } : f));
+		const portalOf = (srv, fixture, owner = OWNER) => investorPayoutBasis.settleInvestorMonths(
+			fixture.map((f) => ({ month: f.month, netProfit: ledgerNet(f), zeroActivity: ledgerIdle(f) })),
+			{ splitFraction: resolveSplit({ investor_split_pct: "50" }) / 100, basis: srv.payoutBasisContext(owner) });
+		const read = async (srv, fixture) => ({ ledger: await view(ledgerWorld(srv, { fixture })), portal: portalOf(srv, fixture) });
+		// Everything a closed month publishes: its ledger row (every field), the ledger
+		// totals and the portal's month.
+		const closedOf = (r) => ({
+			rows: r.ledger.payouts.filter((p) => LEDGER_CLOSED.includes(p.period)),
+			totals: r.ledger.totals,
+			portal: LEDGER_CLOSED.map((p) => r.portal[p]),
+		});
+		const brief = (r) => LEDGER_CLOSED.map((p) => {
+			const row = r.ledger.payouts.find((x) => x.period === p);
+			return [p, row.amount, row.monthEarnings, row.recomputedAmount, row.payoutBasis ? `lease ${row.payoutBasis.paidAmount} ${row.payoutBasis.reason}` : "split"];
+		});
+		const open = (r) => {
+			const c = r.ledger.currentMonth;
+			return [c.amountInProgress, c.payoutBasis ? `lease ${c.payoutBasis.reason}` : "split", r.portal[LEDGER_CURRENT].payable];
+		};
+		// A $2,000 lease from May, its truck in service all year; May to August read
+		// while open, then closed by the month-end close under the settings `env`.
+		const closeUnder = async (env, fixture) => {
+			const srv = buildServer({ flag: true, env });
+			srv.db.prepare("INSERT INTO trucks (unit_number, owner_id, in_service_date) VALUES ('L70', ?, '2026-01-01')").run(OWNER);
+			srv.db.prepare("INSERT INTO investor_payout_basis (owner_id, effective_month, basis_type, lease_amount_cents, source, created_by, created_at) VALUES (?, '2026-05', 'lease', 200000, 'admin', 'x', '2026-05-01T00:00:00Z')").run(OWNER);
+			const w = ledgerWorld(srv, { fixture });
+			await view(w);
+			await w.fns.finalizePeriods(LEDGER_CLOSED, "qa");
+			const r = await read(srv, fixture);
+			return { srv, r, closed: closedOf(r) };
+		};
+		// The same database, read by the server restarted with `flag` and `env`.
+		const restart = (base, { flag = true, env = {} } = {}) => buildServer({ flag, env, db: base.srv.db });
+		const truck = (base, set) => base.srv.db.prepare(`UPDATE trucks SET ${set} WHERE owner_id = ?`).run(OWNER);
+
+		// (a) closed under downtime "unpaid", read under "paid".
+		const unpaid = await closeUnder({ INVESTOR_LEASE_DOWNTIME: "unpaid" }, IDLE_OPEN);
+		eq(brief(unpaid.r), [["2026-05", 2000, 2000, 2000, "lease 2000 null"], ["2026-06", 0, 0, 0, "lease 0 downtime"], ["2026-07", 2000, 2000, 2000, "lease 2000 null"], ["2026-08", 2000, 2000, 2000, "lease 2000 null"]],
+			"§11 closed under downtime \"unpaid\": the idle June settles at $0 (downtime), the others at the lease");
+		eq(open(unpaid.r), [0, "lease downtime", 0], "§11 …and the idle open September pays nothing yet");
+		const toPaid = await read(restart(unpaid, { env: { INVESTOR_LEASE_DOWNTIME: "paid" } }), IDLE_OPEN);
+		eq(brief(toPaid)[1], ["2026-06", 0, 0, 0, "lease 0 downtime"], "§11 downtime switched to \"paid\": June still settled at $0 for downtime (its earnings, recompute and basis, not re-explained as $2,000)");
+		eq(closedOf(toPaid), unpaid.closed, "§11 …every closed month's row, the totals and the portal's months exactly as they settled");
+		eq(open(toPaid), [2000, "lease null", 2000], "§11 …while the open September follows the setting: the lease");
+
+		// (b) closed under "paid", read under "unpaid".
+		const paid = await closeUnder({ INVESTOR_LEASE_DOWNTIME: "paid" }, IDLE_OPEN);
+		eq(brief(paid.r)[1], ["2026-06", 2000, 2000, 2000, "lease 2000 null"], "§11 closed under downtime \"paid\": the idle June settles at the lease");
+		const toUnpaid = await read(restart(paid, { env: { INVESTOR_LEASE_DOWNTIME: "unpaid" } }), IDLE_OPEN);
+		eq(closedOf(toUnpaid), paid.closed, "§11 downtime switched to \"unpaid\": every closed month exactly as it settled (June still $2,000)");
+		eq(open(toUnpaid), [0, "lease downtime", 0], "§11 …while the open September follows the setting: nothing for downtime");
+
+		// (c) the truck changed after the close (September active, so it pays the lease).
+		const base = await closeUnder({}, LEDGER_FIXTURE);
+		eq(open(base.r), [2000, "lease null", 2000], "§11 control: the open September pays the lease");
+		const changes = [
+			["retired on 2026-06-15", "retired_at = '2026-06-15'", [0, "lease not_in_service", 0]],
+			["set Inactive", "retired_at = '', status = 'Inactive'", [0, "lease not_in_service", 0]],
+			["in service from 2026-09-11", "status = 'Active', in_service_date = '2026-09-11'", [1333, "lease prorated", 1333]],
+			["retired on 2026-09-20 under retirement \"continue\"", "in_service_date = '2026-01-01', retired_at = '2026-09-20'", null],
+		];
+		for (const [what, set, want] of changes) {
+			truck(base, set);
+			const r = await read(want ? base.srv : restart(base, { env: { INVESTOR_LEASE_RETIREMENT: "continue" } }), LEDGER_FIXTURE);
+			eq(closedOf(r), base.closed, `§11 the truck ${what}: every closed month exactly as it settled`);
+			eq(open(r), want || [2000, "lease null", 2000], `§11 …while the open September follows the truck`);
+		}
+		truck(base, "retired_at = ''");
+
+		// (d) the flag switched off after the close.
+		const off = await read(restart(base, { flag: false }), LEDGER_FIXTURE);
+		eq(closedOf(off), base.closed, "§11 the flag switched off: every closed lease month still reads as the lease it settled as");
+		eq(open(off), [250, "split", 250], "§11 …while the open September is the split (half of its $500)");
+		truck(base, "status = 'Inactive', in_service_date = '2026-08-20'");
+		const all = await read(restart(base, { flag: false, env: { INVESTOR_LEASE_DOWNTIME: "paid", INVESTOR_LEASE_PRORATE: "none" } }), LEDGER_FIXTURE);
+		eq(closedOf(all), base.closed, "§11 the flag off, every setting switched and the truck Inactive from a later day: the closed months unchanged");
+		truck(base, "status = 'Active', in_service_date = '2026-01-01'");
+
+		// (e) a split investor keeps today's behaviour: the live recompute beside the
+		// frozen amount (the drift disclosure), flag on or off, whatever the settings.
+		const splitSrv = buildServer({ flag: true });
+		splitSrv.db.prepare("INSERT INTO trucks (unit_number, owner_id, in_service_date) VALUES ('S71', 71, '2026-01-01')").run();
+		const splitView = (srv) => ledgerWorld(srv).fns.reconcileInvestorPayouts(71, LEDGER_CTX);
+		const S = ledgerWorld(splitSrv);
+		await S.fns.reconcileInvestorPayouts(71, LEDGER_CTX);
+		await S.fns.finalizePeriods(LEDGER_CLOSED, "qa");
+		splitSrv.db.prepare("INSERT INTO investor_config (owner_id, key, value) VALUES (71, 'investor_split_pct', '60')").run();
+		const s1 = await splitView(splitSrv);
+		const splitBrief = LEDGER_CLOSED.map((p) => { const x = s1.payouts.find((y) => y.period === p); return [p, x.amount, x.monthEarnings, x.recomputedAmount, x.breakdown.splitPct, "payoutBasis" in x]; });
+		eq(splitBrief, [["2026-05", 2500, 3000, 3000, 60, false], ["2026-06", 0, 0, 0, 60, false], ["2026-07", 0, -2700, 0, 60, false], ["2026-08", 750, 3600, 900, 60, false]],
+			"§11 a split investor whose Split % changed after the close: the frozen amounts beside the live recompute, as before");
+		eq(await splitView(buildServer({ flag: false, db: splitSrv.db })), s1, "§11 …the same answer with the flag off");
+		eq(await splitView(buildServer({ flag: true, env: { INVESTOR_LEASE_DOWNTIME: "paid", INVESTOR_LEASE_RETIREMENT: "continue" }, db: splitSrv.db })), s1, "§11 …and under other lease settings");
+
+		// (f) a frozen lease snapshot holding a figure that cannot be read: the month
+		// reads as its settled amount, never as a live re-explanation, and says so once.
+		const bad = await closeUnder({}, LEDGER_FIXTURE);
+		const july = JSON.parse(bad.srv.db.prepare("SELECT finalized_breakdown AS b FROM investor_payouts WHERE owner_id = ? AND period = '2026-07'").get(OWNER).b);
+		bad.srv.db.prepare("UPDATE investor_payouts SET finalized_breakdown = ? WHERE owner_id = ? AND period = '2026-07'")
+			.run(JSON.stringify({ ...july, payoutBasis: { ...july.payoutBasis, paidAmount: "2000", reason: "unknown" } }), OWNER);
+		truck(bad, "status = 'Inactive'");
+		const later = restart(bad, { env: { INVESTOR_LEASE_DOWNTIME: "paid" } });
+		const r1 = await read(later, LEDGER_FIXTURE);
+		eq(closedOf(r1), bad.closed, "§11 July's snapshot with an unreadable paid amount and reason: it reads as its settled $2,000, not as the Inactive truck's $0");
+		eq(closedOf(await read(later, LEDGER_FIXTURE)), bad.closed, "§11 …on every read");
+		eq(later.calls.warnings.filter((w) => w.startsWith(`[payout-basis] owner ${OWNER} 2026-07:`)).length, 1, "§11 …and it is reported once, not on every read");
+
+		// MUTANT: the context without the months settled as a lease.
+		const anchor = "settledLeaseMonths[r.period] = frozen.payoutBasis;";
+		if (count(anchor) !== 1) die("the settled lease months moved");
+		const noSettled = buildServer({ flag: true, env: { INVESTOR_LEASE_DOWNTIME: "paid" }, db: unpaid.srv.db, functions: FUNCTIONS.replace(anchor, "void frozen;") });
+		ok(JSON.stringify(brief(await read(noSettled, IDLE_OPEN))) !== JSON.stringify(brief(unpaid.r)),
+			"§11 MUTANT the months settled as a lease left out of the context: June, closed at $0 for downtime, is re-explained under \"paid\" (caught)");
 	}
 
 	console.log(`\n${failures.length ? "FAIL" : "PASS"} — ${pass} assertions passed, ${failures.length} failed`);
