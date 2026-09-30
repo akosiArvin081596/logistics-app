@@ -151,7 +151,7 @@ const INVITE_FUNCTIONS = [
 const PIECES = {
 	evidence: liftConst("const SIGNING_EVIDENCE_VERSION = 1;", "\n}\n"),
 	docs: liftConst("const INVESTOR_ONBOARDING_DOCS = [", "\n];"),
-	fields: [liftConst("const PUBLIC_INVESTOR_SCALAR_FIELDS = [", "\n];"), liftConst("const PUBLIC_BANKING_SCALAR_FIELDS = "), liftConst("const PUBLIC_W9_PREVIEW_SCALAR_FIELDS = ")].join("\n"),
+	fields: [liftConst("const PUBLIC_INVESTOR_SCALAR_FIELDS = [", "\n];"), liftConst("const PUBLIC_BANKING_SCALAR_FIELDS = "), liftConst("const PUBLIC_W9_PREVIEW_SCALAR_FIELDS = "), liftConst("const PUBLIC_CONTRACT_PREVIEW_SCALAR_FIELDS = ")].join("\n"),
 	inflight: [liftConst("const PDF_PREVIEW_MAX_INFLIGHT = "), liftConst("let pdfPreviewInflight = ")].join("\n"),
 	inviteConsts: [
 		liftConst("const INVITE_TTL_DAYS = "), liftConst("const INVITE_STATUS_FILTERS = "), liftConst("const INVITE_REVOKE_REASON_MAX = "),

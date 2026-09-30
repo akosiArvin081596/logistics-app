@@ -407,6 +407,17 @@ ok("POST /api/public/investor-apply: fields, banking, signatures, email and vehi
 ok("POST /api/public/investor-preview-pdf: vehicles checked before either renderer; 400 on refusal",
 	callsFirst(PREVIEW, "publicFormInput.checkPublicVehicles(vehicles)", ["renderPolicy(", "fillW9Form("]) &&
 	refusesWith400(PREVIEW, "vehicleCheck") && PREVIEW.includes("const vehiclesArr = vehicleCheck.value;"));
+ok("POST /api/public/investor-preview-pdf: the contract previews check every field they print is one value, before a render slot is taken; 400 on refusal",
+	callsFirst(PREVIEW, "publicFormInput.checkPublicScalars(req.body, PUBLIC_CONTRACT_PREVIEW_SCALAR_FIELDS)", ["pdfPreviewInflight++", "renderPolicy("]) &&
+	refusesWith400(PREVIEW, "contractShape"));
+ok("POST /api/public/investor-preview-pdf: a render failure answers a fixed message, never the error text",
+	!/res\.status\(500\)\.json\(\{\s*error:\s*err\.message/.test(PREVIEW));
+{
+	const contractList = constList("PUBLIC_CONTRACT_PREVIEW_SCALAR_FIELDS");
+	const printed = ["legal_name", "dba", "entity_type", "address", "contact_person", "contact_title", "phone", "email", "ein_ssn", "years_in_operation", "fleet_size", "signatureText"];
+	ok("PUBLIC_CONTRACT_PREVIEW_SCALAR_FIELDS = every text field the contract previews put in appData",
+		sameSet(contractList, printed) && printed.every((f) => bodyFields(PREVIEW).includes(f)));
+}
 ok("the token-gated /api/public/investor-onboarding/:id/* routes are gone: none is mounted",
 	![...codeOnly(SRC).matchAll(/app\.(?:get|post|put|patch|delete|all|use)\(\s*"([^"]+)"/g)].some(([, p]) => p.startsWith("/api/public/investor-onboarding")));
 

@@ -9913,6 +9913,9 @@ const PUBLIC_BANKING_SCALAR_FIELDS = ["bank_name", "account_type", "routing_numb
 // The fields the W-9 preview prints or reads (fillW9Form), each ONE scalar:
 // entity_type and tax_classification pick its line 3a box.
 const PUBLIC_W9_PREVIEW_SCALAR_FIELDS = ["legal_name", "dba", "address", "ein_ssn", "signatureText", "entity_type", "tax_classification"];
+// The fields the master agreement and vehicle lease previews print. An object
+// or list here used to reach the renderer (a 500, or the list printed as text).
+const PUBLIC_CONTRACT_PREVIEW_SCALAR_FIELDS = ["legal_name", "dba", "entity_type", "address", "contact_person", "contact_title", "phone", "email", "ein_ssn", "years_in_operation", "fleet_size", "signatureText"];
 // The fields POST /api/public/investor-w9-check reads.
 const PUBLIC_W9_CHECK_SCALAR_FIELDS = ["legal_name", "dba", "address", "signatureText"];
 
@@ -11757,6 +11760,10 @@ app.post("/api/public/investor-preview-pdf/:docKey", pdfPreviewLimiter, async (r
 		};
 
 		if (docKey === "master_agreement" || docKey === "vehicle_lease") {
+			const contractShape = publicFormInput.checkPublicScalars(req.body, PUBLIC_CONTRACT_PREVIEW_SCALAR_FIELDS);
+			if (!contractShape.ok) {
+				return res.status(400).json({ error: contractShape.message, code: "INVALID_FIELD", reason: contractShape.reason, field: contractShape.field });
+			}
 			// Only the Puppeteer branch is capped. The w9 branch below is pdf-lib
 			// (no browser, milliseconds) and stays available under load.
 			if (pdfPreviewInflight >= PDF_PREVIEW_MAX_INFLIGHT) {
@@ -11806,7 +11813,9 @@ app.post("/api/public/investor-preview-pdf/:docKey", pdfPreviewLimiter, async (r
 		}
 		return res.status(404).json({ error: "Unknown document" });
 	} catch (err) {
-		res.status(500).json({ error: err.message });
+		// An anonymous route: the reason stays in the server log, not the reply.
+		console.error("investor-preview-pdf failed:", err.message);
+		res.status(500).json({ error: "This document could not be shown. Please try again." });
 	}
 });
 
