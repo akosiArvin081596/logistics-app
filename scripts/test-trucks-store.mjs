@@ -18,6 +18,8 @@
 // the page was opened again is ignored; and a failed load keeps its reason for
 // the page to show with a Retry. Section 3 runs the store scenarios against
 // mutants, each a plausible regression, and every one must fail a scenario.
+// Section 1 also pins the fixed-cost badge's tooltip: the instruction to add the
+// costs via Edit goes only to a user who can edit trucks, not to an investor.
 //
 // No DOM, no server. Section 2 loads Pinia from client/node_modules (installed by
 // `npm ci` at the repo root) and stubs fetch; nothing waits on a real timer.
@@ -230,6 +232,19 @@ for (const file of ['components/trucks/AddTruckForm.vue', 'components/trucks/Tru
   const src = fs.readFileSync(path.join(CLIENT_SRC, file), 'utf8')
   eq(`${file}: no literal max on an input`, src.match(/<input\b[^>]*\smax="[^"]*"[^>]*>/g) || [], [])
   ok(`${file}: the capped boxes bind AMOUNT_CAPS`, ['fuelTankGallons', 'avgMpg', 'driverPayDaily', 'adminFeePct'].every((k) => src.includes(`:max="AMOUNT_CAPS.${k}"`)))
+}
+
+// The "No fixed costs configured" badge's tooltip: an investor sees this table
+// too (My Trucks) and has no Edit, so only a user who can edit trucks (canEdit)
+// is told to add the costs via Edit; everyone reads what the badge means.
+{
+  const src = fs.readFileSync(path.join(CLIENT_SRC, 'components/trucks/TruckTable.vue'), 'utf8')
+  const at = src.indexOf('const fixedCostSetupHint = computed(')
+  const hint = at < 0 ? '' : src.slice(at, src.indexOf('\n\n', at))
+  ok('TruckTable.vue: the badge tooltip is fixedCostSetupHint', src.includes(':title="fixedCostSetupHint"'))
+  ok('TruckTable.vue: the Edit instruction is added only for canEdit',
+    /props\.canEdit\s*\?\s*`\$\{FIXED_COST_SETUP_MEANING\} Add them via Edit → Business Configuration\.`\s*:\s*FIXED_COST_SETUP_MEANING\)/.test(hint))
+  eq('TruckTable.vue: "Add them via Edit → Business Configuration" appears once', (src.match(/Add them via Edit → Business Configuration/g) || []).length, 1)
 }
 
 // ══ 2. The store, end to end ══════════════════════════════════════════════════

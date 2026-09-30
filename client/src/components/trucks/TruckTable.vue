@@ -80,7 +80,7 @@
             <div v-if="needsFixedCostSetup(truck)" style="margin-top:0.3rem;">
               <span
                 class="cost-warning-badge"
-                title="No insurance, ELD, truck payment, HVUT, or IRP is configured for this truck — its fixed costs show as $0 in the investor P&amp;L. Add them via Edit → Business Configuration."
+                :title="fixedCostSetupHint"
               >No fixed costs configured</span>
             </div>
           </td>
@@ -836,6 +836,14 @@ function needsFixedCostSetup(truck) {
     !truck.HvutAnnual &&
     !truck.IrpAnnual
 }
+
+// The badge's tooltip. Everyone on this page reads what the badge means, an
+// investor included (their My Trucks); only a user who can edit trucks is told
+// where to add the costs, since the page offers an investor no Edit.
+const FIXED_COST_SETUP_MEANING = 'No insurance, ELD, truck payment, HVUT, or IRP is configured for this truck — its fixed costs show as $0 in the investor P&L.'
+const fixedCostSetupHint = computed(() => (props.canEdit
+  ? `${FIXED_COST_SETUP_MEANING} Add them via Edit → Business Configuration.`
+  : FIXED_COST_SETUP_MEANING))
 
 function confirmDelete(truck) {
   pendingTruck.value = truck
