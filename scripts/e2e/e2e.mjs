@@ -8904,8 +8904,9 @@ async function investorFixesSection() {
           const row = appRow(sa, EMAIL('E'))
           await row.waitFor({ state: 'visible', timeout: 30000 })
           await row.scrollIntoViewIfNeeded()
-          // The Docs cell by its column header, not by position (a Terms column now sits
-          // before it). The header cells and the row's cells must line up one to one.
+          // The Docs cell by its column header, not by position, so a column added or
+          // removed elsewhere cannot move it. The header cells and the row's cells must
+          // line up one to one.
           const heads = (await sa.locator('table', { has: row }).locator('thead th').allTextContents()).map(norm)
           const docsAt = heads.findIndex((h) => h.toLowerCase() === 'docs')
           const cells = await row.locator('td').count()
