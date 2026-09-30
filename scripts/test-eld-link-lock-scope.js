@@ -108,6 +108,8 @@ const stubs = {
   getDriverPayStructures: () => ({}),
   // The amount-field checks never fire here (no amount column in `changed`).
   TRUCK_AMOUNT_FIELDS: [],
+  // The fleet rule the guard reads (any status but Inactive), the real module.
+  investorPayoutBasis: require("../lib/investor-payout-basis"),
   eldLinkLoadMonths: async () => {
     S.sheetCalls++;
     await Promise.resolve();

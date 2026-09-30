@@ -165,9 +165,9 @@ const PHOTO_CHECK = new Function("imageLimits",
 
 const TODAY = "2026-09-25";
 function buildModule(db) {
-	return new Function("db", "todayKeyCT", "periodLocksReadable",
+	return new Function("db", "todayKeyCT", "periodLocksReadable", "investorPayoutBasis",
 		`"use strict";\n${CONSTS}\n${FUNCTIONS.map((n) => FN_SRC[n]).join("\n")}\nreturn { ${FUNCTIONS.join(", ")}, TRUCK_AMOUNT_FIELDS };`
-	)(db, () => TODAY, () => true);
+	)(db, () => TODAY, () => true, require("../lib/investor-payout-basis"));
 }
 
 // ── fixtures: production's shape ────────────────────────────────────────────
@@ -530,6 +530,16 @@ function guardSection() {
 		"§3 (h) back-dated with an annual HVUT that rounds to $0.00/mo: refused — the fleet accruals divide it unrounded");
 	eq(summary(run(noDriver({ in_service_date: "2026-06-01", insurance_monthly: 1000, status: "Inactive" }))), [],
 		"§3 (h) the same truck added Inactive: no blocker (it books nothing)");
+	// Maintenance and OOS are in the fleet (the owner's decision, 2026-09-30): a
+	// truck in the shop still owes its insurance, payment and ELD, so it books
+	// its fixed costs exactly as an Active one does.
+	for (const status of ["Maintenance", "OOS"]) {
+		const res = run(noDriver({ in_service_date: "2026-06-01", insurance_monthly: 1000, status }));
+		eq(summary(res), [{ field: "in_service_date", effect: null, periods: BACK }],
+			`§3 (h) the same truck added ${status}: refused for 2026-06..2026-08, like Active (it books its fixed costs)`);
+		ok(((res.blockers[0] || {}).detail || "") === `creating LogisX-#24 (${status}) from 2026-06 books $1,000.00/mo of fixed costs into 3 finalized months ($3,000.00) — insurance $1,000.00/mo`,
+			`§3 (h) ...naming its status and the figure (got ${JSON.stringify((res.blockers[0] || {}).detail)})`);
+	}
 	eq(summary(run(noDriver({ in_service_date: "", insurance_monthly: 1000 }))), [],
 		"§3 (h) in-service date blank: bills from created_at, the open month — no blocker");
 	eq(summary(run(noDriver({ in_service_date: "2026-06-01" }))), [],

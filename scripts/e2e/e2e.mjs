@@ -183,8 +183,10 @@
 //   downtime "unpaid"; LFu: the page shows it as the lease) · LW flag ON: no invite
 //   warning, the panel applied · LG a split investor's
 //   Payouts unchanged, flag ON · LH downtime "paid": the idle month pays $2,000 · LS
-//   the truck in Maintenance still pays the lease, Inactive pays $0 (not in service),
-//   the closed months unchanged after each · LY the months LV closed under "unpaid",
+//   the truck in Maintenance (saved by the Trucks form) still pays the lease, Inactive
+//   (refused by the form, naming LV's service payment in a finalized month, so the
+//   copy takes it) pays $0 (not in service), the closed months unchanged after each ·
+//   LY the months LV closed under "unpaid",
 //   read under "paid" and then with the flag off: exactly as they settled, in figures
 //   and wording (ledger, portal, console, Payouts page, statement, report), while the
 //   open idle month follows the setting · LX every row and the sheet row removed, the
@@ -11736,8 +11738,24 @@ async function leaseSection() {
       })
 
     // ---- LS: flag ON, downtime paid: which truck statuses a lease counts. Every
-    // status but Inactive: a truck in Maintenance is still under its lease.
+    // status but Inactive: a truck in Maintenance is still under its lease, and still
+    // bills its fixed costs, so the Trucks form saves a change between Active,
+    // Maintenance and OOS (it moves no finalized month's figure). A change in or out
+    // of Inactive takes the truck's service payments in finalized months (LV plants
+    // one) out of those months or puts them back, so the form refuses it with 409
+    // PERIOD_FINALIZED naming them, and the copy takes it directly: allowed on the
+    // private copy only. With no such payment the form saves it too.
+    const lockedService = () => db.prepare(
+      "SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS t FROM maintenance_fund WHERE LOWER(TRIM(truck)) = LOWER(?) AND type = 'service' " +
+      "AND strftime('%Y-%m', COALESCE(NULLIF(date, ''), strftime('%Y-%m-%d', created_at))) IN (SELECT period FROM period_locks WHERE status = 'locked')"
+    ).get(S.truck.unit_number)
     const leaseTruckStatus = async (status) => {
+      const storedStatus = () => db.prepare('SELECT status FROM trucks WHERE id = ?').get(S.truck.id)?.status
+      const was = storedStatus()
+      const svc = lockedService()
+      const refusal = (was === 'Inactive') !== (status === 'Inactive') && svc.n
+        ? `${svc.n} maintenance/compliance row${svc.n === 1 ? '' : 's'} worth $${Number(svc.t).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+        : ''
       await page.goto(`${BASE_URL}/trucks`)
       await page.locator('table.truck-table').waitFor({ state: 'visible', timeout: 30000 })
       const trow = rowOf(page, S.truck.unit_number)
@@ -11752,20 +11770,18 @@ async function leaseSection() {
         page.waitForResponse((r) => r.request().method() === 'PUT' && pathOf(r.url()) === `/api/trucks/${S.truck.id}`, { timeout: 20000 }).catch(() => null),
         dlg.locator('.confirm-actions button', { hasText: /^\s*Save\s*$/ }).click(),
       ])
-      const putCode = put ? (await put.json().catch(() => null))?.code : ''
+      const body = put ? await put.json().catch(() => null) : null
       await page.keyboard.press('Escape').catch(() => {})
-      const storedStatus = () => db.prepare('SELECT status FROM trucks WHERE id = ?').get(S.truck.id)?.status
-      let note = `${status}: Edit → PUT ${put ? put.status() : 'not sent'}${putCode ? ` ${putCode}` : ''}`
-      if (storedStatus() !== status) {
-        // The form refuses a change that would move a finalized month's figures (as it
-        // does for any truck), so the copy takes it directly: allowed on the private copy only.
-        db.prepare('UPDATE trucks SET status = ? WHERE id = ? AND owner_id = ?').run(status, S.truck.id, S.owner)
-        note += `; set in the copy instead: ${storedStatus() === status}`
-      }
-      return { ok: storedStatus() === status, note }
+      let note = `${was} → ${status}: Edit → PUT ${put ? put.status() : 'not sent'}${body?.code ? ` ${body.code}` : ''}`
+      if (!refusal) return { ok: put?.status() === 200 && storedStatus() === status, note: `${note}; saved: ${storedStatus() === status}` }
+      const refusedOk = put?.status() === 409 && body?.code === 'PERIOD_FINALIZED' && String(body?.error || '').includes(refusal) && storedStatus() === was
+      note += `; refused naming "${refusal}": ${refusedOk}`
+      db.prepare('UPDATE trucks SET status = ? WHERE id = ? AND owner_id = ?').run(status, S.truck.id, S.owner)
+      note += `; set in the copy instead: ${storedStatus() === status}`
+      return { ok: refusedOk && storedStatus() === status, note }
     }
-    await step('LS', `Flag ON, downtime paid: the QA-LEASE truck set to Maintenance, then Inactive, then Active again (Trucks → Edit → Status; the copy takes it when the form refuses); the three months read after each`,
-      `Maintenance: all three months still pay ${leaseMoney(LEASE_AMOUNT)} (reason null); Inactive: all three pay $0 (reason "not_in_service"), and the profit month's row on the Payouts page shows L6; Active again: ${leaseMoney(LEASE_AMOUNT)} each; after each change, the months LV closed read exactly as they settled`, async () => {
+    await step('LS', `Flag ON, downtime paid: the QA-LEASE truck set to Maintenance, then Inactive, then Active again (Trucks → Edit → Status); the three months read after each`,
+      `Maintenance: the form saves it (200) and all three months still pay ${leaseMoney(LEASE_AMOUNT)} (reason null); Inactive: the form refuses it with 409 PERIOD_FINALIZED naming the truck's service payment in a finalized month, and the copy takes it (the form saves it when there is none), and all three pay $0 (reason "not_in_service"), and the profit month's row on the Payouts page shows L6; Active again: refused and taken the same way, ${leaseMoney(LEASE_AMOUNT)} each; after each change, the months LV closed read exactly as they settled`, async () => {
         needFeature(); needOwner()
         if (!S.truck) throw new Error('not reached: the acceptance made no truck')
         const st = await settings()

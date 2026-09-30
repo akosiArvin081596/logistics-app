@@ -834,10 +834,11 @@ try { db.exec("ALTER TABLE trucks ADD COLUMN in_service_date TEXT DEFAULT ''"); 
 // in_service_date gave a truck a first billed month; nothing gave it a last, so a
 // truck that left the fleet kept accruing insurance/ELD/payment/HVUT/IRP into
 // every open month forever. The obvious workaround — flipping `status` to
-// Inactive — is refused by truckEditLockBlockers() check (1), and correctly so:
-// `status` has no time dimension, so it removes the truck from EVERY month
-// including the finalized ones it was legitimately billed in. That left no
-// correct way to remove a truck from the fleet at all.
+// Inactive — is refused by truckEditLockBlockers() check (1) whenever the truck
+// carries costs in a finalized month, and correctly so: `status` has no time
+// dimension, so it removes the truck from EVERY month including the finalized
+// ones it was legitimately billed in. That left no correct way to remove a truck
+// from the fleet at all.
 //
 // ⚠️ INCLUSIVE, exactly like in_service_date. The retirement month IS billed, in
 // full, with no proration — a truck in service 2026-04-15 is billed all of April,
@@ -3258,7 +3259,7 @@ async function alertEldFeedSilence(verdict) {
 				? `<p>This device is pushing telemetry that is filed under no truck. Link it under <b>Trucks → ELD device</b>, or have the provider deactivate it if it is not ours.</p>`
 				: v.state === "never_reported"
 					? `<p>This truck has an ELD device id saved but has never produced a single fix. Check the id is the right one, and that the device is installed and powered.</p>`
-					: `<p>Check the device is powered and in coverage. If the truck is genuinely out of service, set it Inactive or record its retirement date — both stop this alert at the source.</p>`) +
+					: `<p>Check the device is powered and in coverage. If the truck is genuinely out of service, set its status to OOS or Maintenance, or record its retirement date — either stops this alert at the source.</p>`) +
 			`<p style="color:#888;font-size:12px;">Reported once per feed. Reported again only after it recovers and goes silent a second time, and no sooner than a day after this report.</p>`;
 
 		let emailed = false;
@@ -4613,9 +4614,9 @@ const LEASE_SNAPSHOT_WARNED = new Set();
 // which stay the split (a lease row recorded at acceptance while the flag was off
 // must not relabel them once it is on), and the months already finalized as a
 // lease, with the figures each froze. null for the fleet-wide view (no owner).
-// The trucks are NOT the fixed-cost set (status 'Active'): which of them a lease
-// counts (every status but Inactive) is investorPayoutBasis.truckInLeaseFleet(),
-// the one copy of that rule. The flag is only carried here;
+// Which of them a lease counts (every status but Inactive) is
+// investorPayoutBasis.truckInFleet(), the one copy of that rule, which the
+// fixed-cost set reads too (truckInFleetSql()). The flag is only carried here;
 // investorPayoutBasis.leaseBasisActive() is the one test of it, so with the flag
 // off the rows read here change nothing.
 //
@@ -25700,28 +25701,60 @@ function truckEditLockBlockers(truck, changed, opts = {}) {
 		return monthlyAfter * added + monthly * (moved.length - added);
 	};
 
-	// Does this truck's fixed cost reach a month's P&L at all? Both queries that
-	// build it filter `status = 'Active'`, so a truck that is Inactive before AND
-	// after the edit contributes $0 to every month and none of the amount fields
-	// can restate anything — that edit is genuinely safe and is allowed through.
-	// Either side being Active is enough to matter: the flip itself is what adds
-	// or removes the whole ~$3k/mo from every closed month.
+	// Does this truck's fixed cost reach a month's P&L at all? Every query that
+	// builds it, and the maintenance/compliance joins, count a truck in any status
+	// but Inactive (investorPayoutBasis.truckInFleet(), the one copy of the rule),
+	// so a truck that is Inactive before AND after the edit contributes $0 to every
+	// month and none of the amount fields can restate anything — that edit is
+	// genuinely safe and is allowed through. Either side in the fleet is enough to
+	// matter: a change in or out of Inactive is what adds or removes the whole
+	// ~$3k/mo from every closed month.
 	const nextStatus = has("status") ? changed.status : truck.status;
-	const chargesFixed = truck.status === "Active" || nextStatus === "Active";
+	const inFleetBefore = investorPayoutBasis.truckInFleet(truck);
+	const inFleetAfter = investorPayoutBasis.truckInFleet({ ...truck, status: nextStatus });
+	const chargesFixed = inFleetBefore || inFleetAfter;
+	// Does a truck carry any fixed cost at all? Each of the five is tested on its
+	// own, not their sum, for the reasons truckCreateLockBlockers() gives: the
+	// drill-down itemizes the parts, and the fleet accruals divide the annual lines
+	// by 12 unrounded, so a line that rounds to $0.00/mo still moves them.
+	const carriesFixed = (t) => TRUCK_AMOUNT_FIELDS.some((f) => f.fixed && (Number(t[f.col]) || 0) !== 0);
+	const feeRowsOf = (unit) => { const f = truckFeeLockedRows(unit, locked); return [...f.maintenance, ...f.compliance]; };
+	const feeText = (rows) => `${rows.length} maintenance/compliance row${rows.length === 1 ? "" : "s"} worth ${money(rows.reduce((s, r) => s + (r.amount || 0), 0))}`;
+	const monthsText = (n) => `${n} finalized month${n === 1 ? "" : "s"}`;
 
-	// (1) status — the on/off switch for the entire fixed-cost row, and the field
-	// behind the original incident. Also gates the maintenance/compliance joins
-	// (`t.status = 'Active'`), so flipping it moves those rows too.
-	if (has("status") && chargesFixed) {
-		const fees = truckFeeLockedRows(truck.unit_number, locked);
-		const feeRows = [...fees.maintenance, ...fees.compliance];
-		const months = [...fixedMonths, ...feeRows.map((r) => r.m)];
+	// (1) status — the in/out switch for the entire fixed-cost row, and the field
+	// behind the original incident. Also gates the maintenance/compliance joins,
+	// so a change in or out of Inactive moves those rows too.
+	//
+	// The status has no date, so it applies to every month at once. But Active,
+	// Maintenance and OOS are all in the fleet (the owner's decision, 2026-09-30:
+	// a truck in the shop still owes its insurance, payment and ELD), so a change
+	// between them leaves every month's figure as it was and is never refused.
+	// Until then the fixed-cost set was Active only, and any status change on a
+	// truck billed into a closed month was refused, a $0/mo truck included.
+	//
+	// A change in or out of Inactive is priced month by month, the way the date
+	// checks below price theirs: the months it brings into the charge at the
+	// amounts AFTER the save (a truck coming back can have its costs entered in
+	// the same save), the months it takes out at the amounts BEFORE it. Refused
+	// only when a closed month's figure actually moves: the truck carries a fixed
+	// cost, or it has maintenance/compliance rows booked to a closed month.
+	if (has("status") && inFleetBefore !== inFleetAfter) {
+		const leaving = inFleetBefore;
+		const priced = leaving ? truck : { ...truck, ...changed };
+		const costMonths = carriesFixed(priced) ? truckFixedCostLockedMonths(priced, locked) : [];
+		const perMonth = leaving ? monthly : monthlyAfter;
+		// The rows the joins match: the unit before the save for rows it detaches,
+		// after it for rows it attaches (a rename in the same save is check (5)'s).
+		const feeRows = feeRowsOf(leaving || !has("unit_number") ? truck.unit_number : changed.unit_number);
+		const months = [...costMonths, ...feeRows.map((r) => r.m)];
 		if (months.length) blockers.push({
 			field: "status", from: truck.status, to: changed.status,
 			periods: [...new Set(months)].sort(),
-			detail: `${truck.status} → ${changed.status} moves ${money(monthly)}/mo of fixed costs` +
-				(feeRows.length ? ` and ${feeRows.length} maintenance/compliance row${feeRows.length === 1 ? "" : "s"}` : "") +
-				` in or out of ${fixedMonths.length} finalized month${fixedMonths.length === 1 ? "" : "s"} (${money(monthly * fixedMonths.length)})`,
+			detail: `${truck.status} → ${changed.status} ${leaving ? "removes" : "adds"} ` + [
+				costMonths.length ? `${money(perMonth * costMonths.length)} of fixed costs (${money(perMonth)}/mo) ${leaving ? "from" : "to"} ${monthsText(costMonths.length)}` : "",
+				feeRows.length ? `${feeText(feeRows)} booked to finalized months` : "",
+			].filter(Boolean).join(" and "),
 		});
 	}
 
@@ -25730,13 +25763,29 @@ function truckEditLockBlockers(truck, changed, opts = {}) {
 	// it moves money between two settled ledgers, which is worse, not better.
 	const ownerLabel = (oid) => (oid ? `owner ${oid}` : "(fleet / no owner)");
 
-	// (2a) fixed costs. Correctly gated on `chargesFixed` and on the months the
-	// truck's own costs reach.
-	if (has("owner_id") && chargesFixed && fixedMonths.length) {
-		blockers.push({
+	// (2a) fixed costs, and the maintenance/compliance rows, which the investor
+	// queries join on the truck's owner_id. The old owner loses the charge of every
+	// closed month the truck is billed in before the save, at the amounts before
+	// it; the new owner gains the charge of every closed month it is billed in
+	// after the save, at the amounts after it. Refused only when one of those moves
+	// a figure: until 2026-09-30 this refused every closed month the truck was
+	// billed in, so a $0/mo truck could not change owner either.
+	if (has("owner_id") && chargesFixed) {
+		const next = { ...truck, ...changed };
+		const outMonths = inFleetBefore && carriesFixed(truck) ? fixedMonths : [];
+		const inMonths = inFleetAfter && carriesFixed(next) ? truckFixedCostLockedMonths(next, locked) : [];
+		const feeRows = feeRowsOf(truck.unit_number);
+		const months = [...new Set([...outMonths, ...inMonths, ...feeRows.map((r) => r.m)])].sort();
+		const outAmount = monthly * outMonths.length, inAmount = monthlyAfter * inMonths.length;
+		const from = ownerLabel(truck.owner_id), to = ownerLabel(changed.owner_id);
+		const costs = !outMonths.length && !inMonths.length ? ""
+			: outAmount === inAmount ? `moves ${money(outAmount)} of fixed costs between investors`
+			: `takes ${money(outAmount)} of fixed costs from ${from} and books ${money(inAmount)} to ${to}`;
+		if (months.length) blockers.push({
 			field: "owner_id", from: truck.owner_id, to: changed.owner_id,
-			periods: fixedMonths.slice().sort(),
-			detail: `${ownerLabel(truck.owner_id)} → ${ownerLabel(changed.owner_id)} moves ${money(monthly * fixedMonths.length)} of fixed costs between investors across ${fixedMonths.length} finalized month${fixedMonths.length === 1 ? "" : "s"}`,
+			periods: months,
+			detail: `${from} → ${to} ` + [costs, feeRows.length ? `moves ${feeText(feeRows)} between investors` : ""].filter(Boolean).join(" and ") +
+				` across ${monthsText(months.filter(Boolean).length)}`,
 		});
 	}
 
@@ -25977,7 +26026,9 @@ function truckDeleteLockBlockers(truck) {
 
 	const blockers = [];
 	const money = (n) => `$${(Math.round(n * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-	const fixedMonths = truck.status === "Active" ? truckFixedCostLockedMonths(truck, locked) : [];
+	// A truck charges fixed costs while it is in the fleet: any status but
+	// Inactive (investorPayoutBasis.truckInFleet(), the rule the money math reads).
+	const fixedMonths = investorPayoutBasis.truckInFleet(truck) ? truckFixedCostLockedMonths(truck, locked) : [];
 	const monthly = truckMonthlyFixed(truck).total;
 
 	// (1) the trucks row itself. It carries no period — it is an INPUT to every
@@ -26557,8 +26608,9 @@ function directoryDeleteLockBlockers(row) {
 // The everyday create stays 200 by construction: with in_service_date blank the
 // charge-from month is the CURRENT month, and the current month is never
 // locked, so fixedMonths is empty. What is refused is a create that back-dates
-// an Active truck's in-service date into a closed month while it carries fixed
-// costs, or that reprices or re-parents a driver with history in one.
+// the in-service date of a truck in the fleet (any status but Inactive) into a
+// closed month while it carries fixed costs, or that reprices or re-parents a
+// driver with history in one.
 //
 // `history` is driverHistoryFloorMonth() for truck.assigned_driver, handed to
 // both driver checks so that they size the driver's exposure off everything the
@@ -26574,7 +26626,10 @@ function truckCreateLockBlockers(truck, history) {
 
 	const blockers = [];
 	const money = (n) => `$${(Math.round(n * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-	const chargesFixed = truck.status === "Active";
+	// A truck charges fixed costs while it is in the fleet: any status but
+	// Inactive (investorPayoutBasis.truckInFleet(), the rule the money math reads),
+	// so a truck added in Maintenance or OOS books them as an Active one does.
+	const chargesFixed = investorPayoutBasis.truckInFleet(truck);
 	const fixedMonths = chargesFixed ? truckFixedCostLockedMonths(truck, locked) : [];
 	const monthly = truckMonthlyFixed(truck).total;
 
@@ -26602,15 +26657,16 @@ function truckCreateLockBlockers(truck, history) {
 		blockers.push({
 			field: "in_service_date", from: "(new truck)", to: String(truck.in_service_date || "") || "(unset — bills from created_at)",
 			periods: fixedMonths.slice().sort(),
-			detail: `creating ${truck.unit_number} Active from ${truckChargeFromMonth(truck) || "its creation month"} books ` +
+			detail: `creating ${truck.unit_number} (${truck.status}) from ${truckChargeFromMonth(truck) || "its creation month"} books ` +
 				`${money(monthly)}/mo of fixed costs into ${fixedMonths.length} finalized month${fixedMonths.length === 1 ? "" : "s"} (${money(monthly * fixedMonths.length)})` +
 				` — ${carried.map(([col, label, per]) => `${label} ${money(Number(truck[col]))}${per}`).join(", ")}`,
 		});
 	}
 
 	// (1b) maintenance/compliance rows the UNIT NUMBER would adopt. Both fee
-	// tables join on LOWER(truck) = LOWER(unit_number) and both are gated on
-	// `t.status = 'Active'`, so creating an Active truck whose unit string
+	// tables join on LOWER(truck) = LOWER(unit_number) and both count a truck in
+	// the fleet (investorPayoutBasis.truckInFleetSql(): any status but Inactive),
+	// so creating a truck in the fleet whose unit string
 	// already appears in them pulls those dollars into whatever months they are
 	// dated to. Both tables are empty in production today (0 rows, re-verified
 	// 2026-08-08), which is precisely why the check is cheap to be right about
@@ -26624,7 +26680,7 @@ function truckCreateLockBlockers(truck, history) {
 				field: "unit_number", from: "(new truck)", to: truck.unit_number,
 				periods: [...new Set(feeRows.map((r) => r.m))].sort(),
 				detail: `unit ${truck.unit_number} already has ${feeRows.length} maintenance/compliance row${feeRows.length === 1 ? "" : "s"} ` +
-					`worth ${money(feeRows.reduce((s, r) => s + (r.amount || 0), 0))} booked to finalized months; creating an Active truck with this ` +
+					`worth ${money(feeRows.reduce((s, r) => s + (r.amount || 0), 0))} booked to finalized months; creating a truck in the fleet (${truck.status}) with this ` +
 					`unit number attaches them to it`,
 			});
 		}
@@ -26888,8 +26944,8 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 			in_service_date: inServiceCreate,
 			created_at: createStamp,
 			// The five fixed-cost amounts the INSERT below stores — the same object
-			// — so an Active truck back-dated into a finalized month while carrying
-			// costs is refused by check (1), and one carrying none still is not.
+			// — so a truck in the fleet back-dated into a finalized month while
+			// carrying costs is refused by check (1), and one carrying none still is not.
 			...createCosts,
 			routemate_vehicle_id: "",
 		}, history);
@@ -27326,7 +27382,7 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			logAudit(req, "update_driver_pay", "truck", String(id),
 				`Driver daily pay for ${unitLabel}: ${fmtRate(truck.driver_pay_daily || 0)} → ${fmtRate(driverPayParsed.value)}`);
 		}
-		// Audit status changes for the same reason: Active/Inactive is what decides
+		// Audit status changes for the same reason: Inactive or not is what decides
 		// whether a truck's ~$3k/mo of fixed costs hits the P&L at all, and it used
 		// to be written with no trail of who flipped it or when.
 		if (newStatus && newStatus !== truck.status) {
@@ -27498,19 +27554,16 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	if (lock.unreadable) return periodLockUnreadableResponse(req, res, "Deleting a truck", truckDelAudit);
 	if (lock.blockers.length) {
 		// ⚠️ The remedy deliberately does NOT say "set it Inactive instead". That is
-		// the obvious advice and it is wrong: the fixed-cost queries select
-		// `WHERE status = 'Active'`, with no month dimension, so flipping a truck
-		// Inactive strips its costs out of EVERY closed month it ran in — the same
-		// restatement this refusal exists to stop, which is why the edit guard
-		// refuses that flip too. Telling an operator to do something the sibling
-		// guard then blocks is how a guard earns a reputation for being broken.
-		//
-		// KNOWN GAP, stated rather than papered over: there is today no way to
-		// retire a truck without restating its history. `in_service_date` gives a
-		// truck a first billed month; nothing gives it a LAST one. The fix is the
-		// mirror column — a retired-from month fed through truckChargeFromMonth's
-		// companion at the four fixed-cost gates — after which retiring a truck
-		// becomes an open-month edit and this refusal stops being a dead end.
+		// the obvious advice and it is wrong: the fixed-cost queries count every
+		// truck but an Inactive one (investorPayoutBasis.truckInFleetSql()), with no
+		// month dimension, so flipping a truck Inactive strips its costs out of
+		// EVERY closed month it ran in — the same restatement this refusal exists
+		// to stop, which is why the edit guard refuses that flip too whenever it
+		// moves a closed month's figure. Telling an operator to do something the
+		// sibling guard then blocks is how a guard earns a reputation for being
+		// broken. The way to take a truck out of the fleet without restating its
+		// history is a retirement date (`retired_at`, the last billed month,
+		// inclusive), which the edit guard allows effective any open month.
 		return periodBlockedResponse(req, res,
 			`Cannot delete ${truck.unit_number || `truck #${id}`}`,
 			lock.blockers,
@@ -41068,12 +41121,12 @@ function rememberRateConMatch(loadKey, file, verdict, req) {
 
 // MM/DD/YYYY out of a bare `YYYY-MM-DD`, by STRING SURGERY.
 //
-// ⚠️ NEVER `new Date(iso)` and never brokerInvoice.formatDate() on an ISO
-// string. Both lose a day, measured: formatDate("2026-08-14") returns
-// "08/13/2026", because its final fallback is `new Date(raw)` (UTC midnight)
-// rendered through mdy() in America/Chicago. `<input type="date">` emits
-// exactly this shape, so passing it through would date EVERY edited invoice one
-// day early — on the document that drives the broker's aging terms.
+// ⚠️ NEVER `new Date(iso)`. It is UTC midnight, and rendered in America/Chicago
+// it prints the day BEFORE: formatDate(new Date("2026-08-14")) returns
+// "08/13/2026". `<input type="date">` emits exactly this shape, so building a
+// Date from it would date EVERY edited invoice one day early — on the document
+// that drives the broker's aging terms. brokerInvoice.formatDate() reads the
+// same shape as text; scripts/test-invoice-overrides.js §3 pins the two agreeing.
 function isoToMdy(iso) {
 	const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso == null ? "" : iso).trim());
 	return m ? `${m[2]}/${m[3]}/${m[1]}` : "";
@@ -41333,7 +41386,7 @@ function parseInvoiceOverrides(body) {
 		}
 		has[key] = true;
 		// Stored PRINT-READY. buildInvoiceHtml runs formatDate() over whatever it
-		// is handed, and only the M/D/Y branch of that function is day-accurate.
+		// is handed, and an MM/DD/YYYY passes through it unchanged.
 		values[key] = isoToMdy(v);
 		values[key + "Iso"] = v;
 	}
@@ -41956,7 +42009,7 @@ app.post(
 			}
 
 			// 6b) Invoice identifiers + dates. invoiceId/invoiceDate use the
-			//    button-click date (today, server local). deliveryDate is the
+			//    button-click date (today, printed as the Houston date). deliveryDate is the
 			//    load's ACTUAL delivery/completion date from the sheet — never
 			//    today, never the rate-con scheduled date.
 			const today = new Date();
@@ -43716,13 +43769,14 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), investor
 		}
 
 		// Maintenance fund disbursements (truck-level service payments) —
-		// joined to trucks so inactive-truck disbursements drop out.
+		// joined to trucks so an Inactive truck's disbursements drop out (the
+		// fleet rule, investorPayoutBasis.truckInFleetSql()).
 		// Super-Admin path uses NOT IN so orphan rows (where `truck` doesn't
 		// match any truck) still appear in the global total.
 		{
 			const maintTotal = (investorDriverSet
-				? db.prepare(`SELECT COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck)=LOWER(t.unit_number) WHERE t.owner_id=? AND t.status='Active' AND mf.type='service'`).get(user.id)
-				: db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM maintenance_fund WHERE type='service' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active')`).get()
+				? db.prepare(`SELECT COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck)=LOWER(t.unit_number) WHERE t.owner_id=? AND ${investorPayoutBasis.truckInFleetSql("t")} AND mf.type='service'`).get(user.id)
+				: db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM maintenance_fund WHERE type='service' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE NOT (${investorPayoutBasis.truckInFleetSql()}))`).get()
 			).t;
 			maintenanceExpenses += maintTotal;
 			totalExpenses += maintTotal;
@@ -43757,15 +43811,17 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), investor
 		// charged $0 there, and a month before the investor's first load has no figure
 		// at all, so neither is charged here. Per month, the trucks and their cost are
 		// the SAME as getMonthlyFixedCosts() in computeInvestorMonthlyEarnings(): the
-		// Active trucks in scope, truckChargedInMonth(), truckMonthlyFixed(). So each
-		// month's three buckets add up to that month's fixed costs in the ledger.
+		// trucks in the fleet in scope, truckChargedInMonth(), truckMonthlyFixed(). So
+		// each month's three buckets add up to that month's fixed costs in the ledger.
 		{
-			// Skip inactive trucks for projected fixed-cost accrual.
-			// Asset Security section above still shows them (the investor
-			// owns them); they just don't contribute compliance expense.
-			const activeTrucks = ownedTrucks2.filter(t => t.status === "Active");
+			// Skip Inactive trucks for fixed-cost accrual (a truck in Maintenance or
+			// OOS still costs its insurance, payment and ELD:
+			// investorPayoutBasis.truckInFleet()). Asset Security section above still
+			// shows them (the investor owns them); they just don't contribute
+			// compliance expense.
+			const fleetTrucks = ownedTrucks2.filter(investorPayoutBasis.truckInFleet);
 			for (const monthKey of reportPayout.chargedFixedMonths) {
-				for (const t of activeTrucks) {
+				for (const t of fleetTrucks) {
 					if (!truckChargedInMonth(t, monthKey)) continue;
 					// Shared per-truck math, so this statement and the portal can no
 					// longer disagree about what a truck costs per month. The five
@@ -43783,8 +43839,8 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), investor
 				}
 			}
 			const compFees = (investorDriverSet
-				? db.prepare(`SELECT COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck)=LOWER(t.unit_number) WHERE t.owner_id=? AND t.status='Active' AND cf.status='Paid'`).get(user.id)
-				: db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM compliance_fees WHERE status='Paid' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active')`).get()
+				? db.prepare(`SELECT COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck)=LOWER(t.unit_number) WHERE t.owner_id=? AND ${investorPayoutBasis.truckInFleetSql("t")} AND cf.status='Paid'`).get(user.id)
+				: db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM compliance_fees WHERE status='Paid' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE NOT (${investorPayoutBasis.truckInFleetSql()}))`).get()
 			).t;
 			complianceExpenses += compFees;
 			totalExpenses += compFees;
@@ -48849,7 +48905,7 @@ function periodLabel(period) {
 // then × investor_split_pct), using the same module-level primitives
 // (getJobTrackingCached, getInvestorDriverSet, getDriverPayStructures,
 // getDeductibleExpensesByDriverMonth, getEldTravelDaysByVehicle, ELD-intersected
-// active days, admin day overrides, completed-status + Active-truck rules, the
+// active days, admin day overrides, completed-status + in-the-fleet truck rules, the
 // zero-activity fixed-cost deferral). The settlement layer
 // (GET /api/investor/payouts) calls this so a payout's `amount` equals the
 // dashboard's investorEarnings to the cent — no second formula.
@@ -49336,25 +49392,27 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 	const monthlyCompliance = {};
 	if (investorOwnerId) {
 		db.prepare(
-			`SELECT strftime('%Y-%m', COALESCE(NULLIF(mf.date, ''), strftime('%Y-%m-%d', mf.created_at))) AS m, COALESCE(SUM(mf.amount), 0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND t.status = 'Active' AND mf.type = 'service' GROUP BY m`
+			`SELECT strftime('%Y-%m', COALESCE(NULLIF(mf.date, ''), strftime('%Y-%m-%d', mf.created_at))) AS m, COALESCE(SUM(mf.amount), 0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND ${investorPayoutBasis.truckInFleetSql("t")} AND mf.type = 'service' GROUP BY m`
 		).all(investorOwnerId).forEach(r => { if (r.m) monthlyMaintFund[r.m] = r.t; });
 		db.prepare(
-			`SELECT strftime('%Y-%m', COALESCE(NULLIF(cf.paid_date, ''), NULLIF(cf.due_date, ''), strftime('%Y-%m-%d', cf.created_at))) AS m, COALESCE(SUM(cf.amount), 0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND t.status = 'Active' AND cf.status = 'Paid' GROUP BY m`
+			`SELECT strftime('%Y-%m', COALESCE(NULLIF(cf.paid_date, ''), NULLIF(cf.due_date, ''), strftime('%Y-%m-%d', cf.created_at))) AS m, COALESCE(SUM(cf.amount), 0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND ${investorPayoutBasis.truckInFleetSql("t")} AND cf.status = 'Paid' GROUP BY m`
 		).all(investorOwnerId).forEach(r => { if (r.m) monthlyCompliance[r.m] = r.t; });
 	} else if (isSuperAdmin) {
 		db.prepare(
-			`SELECT strftime('%Y-%m', COALESCE(NULLIF(date, ''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM maintenance_fund WHERE type = 'service' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active') GROUP BY m`
+			`SELECT strftime('%Y-%m', COALESCE(NULLIF(date, ''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM maintenance_fund WHERE type = 'service' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE NOT (${investorPayoutBasis.truckInFleetSql()})) GROUP BY m`
 		).all().forEach(r => { if (r.m) monthlyMaintFund[r.m] = r.t; });
 		db.prepare(
-			`SELECT strftime('%Y-%m', COALESCE(NULLIF(paid_date, ''), NULLIF(due_date, ''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM compliance_fees WHERE status = 'Paid' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active') GROUP BY m`
+			`SELECT strftime('%Y-%m', COALESCE(NULLIF(paid_date, ''), NULLIF(due_date, ''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM compliance_fees WHERE status = 'Paid' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE NOT (${investorPayoutBasis.truckInFleetSql()})) GROUP BY m`
 		).all().forEach(r => { if (r.m) monthlyCompliance[r.m] = r.t; });
 	}
 
-	// Monthly fixed costs — Active trucks only, charged from the truck's
-	// in-service month (truckChargeFromMonth: in_service_date, else created_at).
+	// Monthly fixed costs — every truck in the fleet (any status but Inactive: a
+	// truck in Maintenance or OOS still owes its insurance, payment and ELD;
+	// investorPayoutBasis.truckInFleetSql()), charged from the truck's in-service
+	// month (truckChargeFromMonth: in_service_date, else created_at).
 	const truckFixedQuery = investorDriverSet
-		? "SELECT unit_number, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE owner_id = ? AND status = 'Active'"
-		: "SELECT unit_number, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE status = 'Active'";
+		? `SELECT unit_number, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE owner_id = ? AND ${investorPayoutBasis.truckInFleetSql()}`
+		: `SELECT unit_number, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE ${investorPayoutBasis.truckInFleetSql()}`;
 	const fixedTrucks = db.prepare(truckFixedQuery).all(...(investorDriverSet ? [user.id] : []));
 	const getMonthlyFixedCosts = (monthKey) => {
 		let total = 0;
@@ -50609,18 +50667,20 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		}
 		// Truck-level costs (maintenance fund DISBURSEMENTS, compliance fees)
 		// NOTE: maintenance_fund table = actual service payments. SEPARATE from trucks.maintenance_fund_monthly (budget).
-		// Inactive trucks are excluded — once a truck is flipped off Active,
-		// its associated costs drop out of the investor bottom-line. Orphan
+		// Inactive trucks are excluded — once a truck is set Inactive, its
+		// associated costs drop out of the investor bottom-line. A truck in
+		// Maintenance or OOS is still in the fleet and keeps them
+		// (investorPayoutBasis.truckInFleetSql()). Orphan
 		// rows whose `truck` field doesn't match any truck still flow through
 		// the Super-Admin branch via the NOT IN subquery.
 		if (investorOwnerId) {
-			const maintSum = db.prepare(`SELECT COALESCE(SUM(mf.amount), 0) AS total FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND t.status = 'Active' AND mf.type = 'service'`).get(user.id);
+			const maintSum = db.prepare(`SELECT COALESCE(SUM(mf.amount), 0) AS total FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND ${investorPayoutBasis.truckInFleetSql("t")} AND mf.type = 'service'`).get(user.id);
 			totalExpenses += maintSum.total;
-			const compSum = db.prepare(`SELECT COALESCE(SUM(cf.amount), 0) AS total FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND t.status = 'Active' AND cf.status = 'Paid'`).get(user.id);
+			const compSum = db.prepare(`SELECT COALESCE(SUM(cf.amount), 0) AS total FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND ${investorPayoutBasis.truckInFleetSql("t")} AND cf.status = 'Paid'`).get(user.id);
 			totalExpenses += compSum.total;
 		} else if (isSuperAdmin) {
-			totalExpenses += db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM maintenance_fund WHERE type = 'service' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active')`).get().total;
-			totalExpenses += db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM compliance_fees WHERE status = 'Paid' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active')`).get().total;
+			totalExpenses += db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM maintenance_fund WHERE type = 'service' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE NOT (${investorPayoutBasis.truckInFleetSql()}))`).get().total;
+			totalExpenses += db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM compliance_fees WHERE status = 'Paid' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE NOT (${investorPayoutBasis.truckInFleetSql()}))`).get().total;
 		}
 
 		// ---- Driver Pay (branches on each driver's pay_type) ----
@@ -50673,12 +50733,13 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// elsewhere in this handler. Including the reserve here would
 		// double-count maintenance. Same fix as /api/financials.
 		{
-			// Inactive trucks don't contribute projected fixed costs — once a
-			// truck is flipped off Active in the Trucks UI, its IRP/HVUT/ELD/
-			// insurance stops accruing on the investor bottom-line.
+			// Inactive trucks don't contribute fixed costs — once a truck is set
+			// Inactive in the Trucks UI, its IRP/HVUT/ELD/insurance stops accruing
+			// on the investor bottom-line. Maintenance and OOS keep accruing: the
+			// truck is still in the fleet (investorPayoutBasis.truckInFleetSql()).
 			const truckQuery = investorDriverSet
-				? "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE owner_id = ? AND status = 'Active'"
-				: "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE status = 'Active'";
+				? `SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE owner_id = ? AND ${investorPayoutBasis.truckInFleetSql()}`
+				: `SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE ${investorPayoutBasis.truckInFleetSql()}`;
 			const truckArgs = investorDriverSet ? [user.id] : [];
 			const fleetTrucks = db.prepare(truckQuery).all(...truckArgs);
 			for (const t of fleetTrucks) {
@@ -50836,27 +50897,28 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			const monthlyCompliance = {};
 			if (investorOwnerId) {
 				db.prepare(
-					`SELECT strftime('%Y-%m', COALESCE(NULLIF(mf.date, ''), strftime('%Y-%m-%d', mf.created_at))) AS m, COALESCE(SUM(mf.amount), 0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND t.status = 'Active' AND mf.type = 'service' GROUP BY m`
+					`SELECT strftime('%Y-%m', COALESCE(NULLIF(mf.date, ''), strftime('%Y-%m-%d', mf.created_at))) AS m, COALESCE(SUM(mf.amount), 0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND ${investorPayoutBasis.truckInFleetSql("t")} AND mf.type = 'service' GROUP BY m`
 				).all(user.id).forEach(r => { if (r.m) monthlyMaintFund[r.m] = r.t; });
 				db.prepare(
-					`SELECT strftime('%Y-%m', COALESCE(NULLIF(cf.paid_date, ''), NULLIF(cf.due_date, ''), strftime('%Y-%m-%d', cf.created_at))) AS m, COALESCE(SUM(cf.amount), 0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND t.status = 'Active' AND cf.status = 'Paid' GROUP BY m`
+					`SELECT strftime('%Y-%m', COALESCE(NULLIF(cf.paid_date, ''), NULLIF(cf.due_date, ''), strftime('%Y-%m-%d', cf.created_at))) AS m, COALESCE(SUM(cf.amount), 0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND ${investorPayoutBasis.truckInFleetSql("t")} AND cf.status = 'Paid' GROUP BY m`
 				).all(user.id).forEach(r => { if (r.m) monthlyCompliance[r.m] = r.t; });
 			} else if (isSuperAdmin) {
 				db.prepare(
-					`SELECT strftime('%Y-%m', COALESCE(NULLIF(date, ''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM maintenance_fund WHERE type = 'service' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active') GROUP BY m`
+					`SELECT strftime('%Y-%m', COALESCE(NULLIF(date, ''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM maintenance_fund WHERE type = 'service' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE NOT (${investorPayoutBasis.truckInFleetSql()})) GROUP BY m`
 				).all().forEach(r => { if (r.m) monthlyMaintFund[r.m] = r.t; });
 				db.prepare(
-					`SELECT strftime('%Y-%m', COALESCE(NULLIF(paid_date, ''), NULLIF(due_date, ''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM compliance_fees WHERE status = 'Paid' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active') GROUP BY m`
+					`SELECT strftime('%Y-%m', COALESCE(NULLIF(paid_date, ''), NULLIF(due_date, ''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM compliance_fees WHERE status = 'Paid' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE NOT (${investorPayoutBasis.truckInFleetSql()})) GROUP BY m`
 				).all().forEach(r => { if (r.m) monthlyCompliance[r.m] = r.t; });
 			}
 
-			// 3. Monthly fixed costs — constant per month per truck (only months truck existed).
+			// 3. Monthly fixed costs — constant per month per truck (only months truck existed),
+			// for every truck in the fleet (investorPayoutBasis.truckInFleetSql()).
 			// maintenance_fund_monthly omitted on purpose — see fleet-totals
 			// fix above. Reserve budget ≠ actual cost; actual maintenance
 			// flows through monthlyTripExp / maintByTruck.
 			const truckFixedQuery = investorDriverSet
-				? "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE owner_id = ? AND status = 'Active'"
-				: "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE status = 'Active'";
+				? `SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE owner_id = ? AND ${investorPayoutBasis.truckInFleetSql()}`
+				: `SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE ${investorPayoutBasis.truckInFleetSql()}`;
 			const truckFixedArgs = investorDriverSet ? [user.id] : [];
 			const fixedTrucks = db.prepare(truckFixedQuery).all(...truckFixedArgs);
 			// Same shared per-truck math AND the same start-month gate as
@@ -51132,12 +51194,16 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				const loadCount = (truckLoadCount !== undefined)
 					? truckLoadCount
 					: (loadsByDriver[driverName] || 0);
-				// Inactive/OOS/Maintenance trucks must not project expected
-				// revenue — only Active units run. Zero their monthly gross +
-				// estimated annual revenue (an inactive truck "is not supposed
-				// to show any data"). The truck still counts as an owned asset
-				// (purchase price etc.) in the asset section above.
-				const truckActive = String(truck.status || "").toLowerCase() === "active";
+				// A truck out of the fleet (Inactive) must not project expected
+				// revenue: zero its monthly gross + estimated annual revenue (an
+				// inactive truck "is not supposed to show any data"). A truck in
+				// Maintenance or OOS is in the shop, not out of the fleet, so it
+				// keeps its figures: the fleet rule its fixed costs follow,
+				// investorPayoutBasis.truckInFleet() (owner's decision,
+				// 2026-10-01). Zeroing it handed its projection to the other
+				// trucks. The truck still counts as an owned asset (purchase
+				// price etc.) in the asset section above.
+				const unitInFleet = investorPayoutBasis.truckInFleet(truck);
 				// ⚠️ THE VARIABLE HALF, PUBLISHED SO THE BREAKDOWN STOPS LYING.
 				// unitTotalExpenses is varExp + maintExp + compExp + fixed + driverPay,
 				// but only the TOTAL was ever sent. FleetBreakdownSection derives
@@ -51150,11 +51216,11 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				// still reconcile to it.
 				const unitTripExpenses = varExp + maintExp + compExp;
 				perTruckData[truck.unit_number] = {
-					unitMonthlyGross: truckActive ? avgMonthlyGross : 0,
-					unitMonthlyExpenses: truckActive ? avgMonthlyExpenses : 0,
-					unitMonthlyTripExpenses: truckActive && truckMonths > 0
+					unitMonthlyGross: unitInFleet ? avgMonthlyGross : 0,
+					unitMonthlyExpenses: unitInFleet ? avgMonthlyExpenses : 0,
+					unitMonthlyTripExpenses: unitInFleet && truckMonths > 0
 						? Math.round(unitTripExpenses / truckMonths) : 0,
-					estAnnualRevenue: truckActive ? Math.round((avgMonthlyGross - avgMonthlyExpenses) * 12) : 0,
+					estAnnualRevenue: unitInFleet ? Math.round((avgMonthlyGross - avgMonthlyExpenses) * 12) : 0,
 					totalMiles,
 					loadCount,
 					status: truck.status || "",
@@ -51222,9 +51288,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			: 0;
 
 		// Annotate every perTruckData entry with the investor-centric numbers the
-		// frontend needs for ROI and break-even. Each ACTIVE truck now takes the
-		// share of the investor's trailing take-home that its OWN revenue earned
-		// over the SAME trailing months.
+		// frontend needs for ROI and break-even. Each truck in the fleet now takes
+		// the share of the investor's trailing take-home that its OWN revenue
+		// earned over the SAME trailing months.
 		//
 		// This replaces an equal split by active-truck count that never consulted a
 		// load: Logisx-#91 (0 loads, 0 miles, in service 2026-08) projected exactly
@@ -51232,13 +51298,17 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// client reasonably asked how a truck that has never moved projects what a
 		// working truck does.
 		{
-			// ACTIVE trucks only — inactive/OOS/maintenance units don't run, so they
-			// must not dilute the active trucks' share, and they keep showing $0
-			// expected take-home / ROI (an inactive truck "is not supposed to show
-			// any data"). That $0 contract is unchanged by this rewrite.
-			const activeUnits = new Set(
+			// Trucks in the fleet only (investorPayoutBasis.truckInFleet(): every
+			// status but Inactive, the rule the fixed costs read). An Inactive truck
+			// is out of the fleet, so it must not dilute the others' share, and it
+			// keeps showing $0 expected take-home / ROI (an inactive truck "is not
+			// supposed to show any data"). A truck in Maintenance or OOS keeps its
+			// share (owner's decision, 2026-10-01): its costs still count in the
+			// take-home being divided, and when this read Active only, a shop visit
+			// handed its whole share to the investor's other trucks.
+			const fleetUnits = new Set(
 				allOwnedTrucks
-					.filter(t => String(t.status || "").toLowerCase() === "active")
+					.filter(investorPayoutBasis.truckInFleet)
 					.map(t => t.unit_number)
 			);
 			// The revenue window MUST be the exact months recentMonths covers, so the
@@ -51327,15 +51397,15 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// $59,988 next to a Fleet Total of $59,992. Match what the page actually
 			// displays, not the mathematically tidier value.
 			const fleetAnnualInvestor = Math.round(trailing3MonthInvestor) * 12;
-			let eligible = Object.keys(perTruckData).filter(u => activeUnits.has(u) && !insufficient[u]);
-			// Guard: if every active truck is too new (e.g. the only earning truck was
+			let eligible = Object.keys(perTruckData).filter(u => fleetUnits.has(u) && !insufficient[u]);
+			// Guard: if every truck in the fleet is too new (e.g. the only earning truck was
 			// just flipped Inactive), allocating to nobody would leave the Fleet Total at
-			// $0 against a non-zero Trend figure. Falling back to all active units keeps
+			// $0 against a non-zero Trend figure. Falling back to every unit in the fleet keeps
 			// the page self-consistent — those rows then carry a real number, so they are
 			// NOT flagged insufficientData (that flag means exactly "this row is null").
-			// With no active trucks at all nothing can hold the invariant, and that was
+			// With no truck in the fleet at all nothing can hold the invariant, and that was
 			// equally true before this change.
-			if (!eligible.length) eligible = Object.keys(perTruckData).filter(u => activeUnits.has(u));
+			if (!eligible.length) eligible = Object.keys(perTruckData).filter(u => fleetUnits.has(u));
 			const basis = Object.create(null);
 			let totalBasis = 0;
 			for (const u of eligible) {
@@ -51378,13 +51448,13 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 
 			for (const unit of Object.keys(perTruckData)) {
 				const price = (allOwnedTrucks.find(t => t.unit_number === unit)?.purchase_price) || 0;
-				const unitActive = activeUnits.has(unit);
-				const tooNew = unitActive && insufficient[unit] && !allocated(unit);
+				const unitInFleet = fleetUnits.has(unit);
+				const tooNew = unitInFleet && insufficient[unit] && !allocated(unit);
 				// null ≠ 0 here, and the difference is the whole point: null means "in
 				// service too briefly to project" (the UI renders "—"), while 0 means
 				// "in service the whole window and genuinely earned nothing". A truck
 				// that ran the full window with no revenue must still read 0.
-				const annual = tooNew ? null : (unitActive ? (alloc[unit] || 0) : 0);
+				const annual = tooNew ? null : (unitInFleet ? (alloc[unit] || 0) : 0);
 				const monthly = annual === null ? null : Math.round(annual / 12);
 				perTruckData[unit].monthlyInvestorEarnings = monthly;
 				perTruckData[unit].estAnnualInvestorRevenue = annual;
@@ -51395,7 +51465,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				// money-visible change).
 				perTruckData[unit].investorROI = annual === null
 					? null
-					: ((unitActive && price > 0) ? Math.round((annual / price) * 1000) / 10 : 0);
+					: ((unitInFleet && price > 0) ? Math.round((annual / price) * 1000) / 10 : 0);
 				perTruckData[unit].breakEvenMonths = (monthly !== null && monthly > 0)
 					? Math.ceil(price / monthly)
 					: null;
@@ -52150,7 +52220,7 @@ app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "I
 		// Prefer the composition SNAPSHOT taken when the period was finalized over a
 		// live recompute. This is what actually retires the drift disclosure: a
 		// historical month's recompute keeps moving underneath it (getMonthlyFixedCosts
-		// reads trucks.status='Active', splitPct reads the CURRENT config), so a
+		// reads the trucks' CURRENT status, splitPct reads the CURRENT config), so a
 		// statement re-downloaded months later used to show a composition that no
 		// longer added up to the figure printed beside it. The snapshot is what the
 		// investor was shown at close. Legacy/baseline rows have no snapshot and fall
@@ -54201,11 +54271,12 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		const expensesByMonth = Object.values(expensesByMonthMap);
 
 		// Maintenance fund + compliance fees (truck-level) roll into totalExpenses.
-		// Exclude rows tied to non-Active trucks (Inactive / Maintenance / OOS)
-		// via NOT IN, which preserves orphan rows whose `truck` cell doesn't
-		// match any truck (existing behavior) while dropping inactive ones.
-		const maintSum = db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM maintenance_fund WHERE type='service' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active')`).get().t;
-		const compSum = db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM compliance_fees WHERE status='Paid' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active')`).get().t;
+		// Exclude rows tied to an Inactive truck (a truck in Maintenance or OOS is
+		// still in the fleet: investorPayoutBasis.truckInFleetSql()) via NOT IN,
+		// which preserves orphan rows whose `truck` cell doesn't match any truck
+		// (existing behavior) while dropping inactive ones.
+		const maintSum = db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM maintenance_fund WHERE type='service' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE NOT (${investorPayoutBasis.truckInFleetSql()}))`).get().t;
+		const compSum = db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM compliance_fees WHERE status='Paid' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE NOT (${investorPayoutBasis.truckInFleetSql()}))`).get().t;
 
 		// ---- Driver pay (branches on each driver's pay_type) ----
 		// Fixed drivers: activeDays × per-truck dailyRate (legacy logic).
@@ -54254,9 +54325,11 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// fleet months only when the truck has no recorded loads. Keeps the
 		// fleet KPI reconciled with sum(perTruck.fixedTotal).
 		// Inactive trucks drop out of the fleet P&L — they don't accrue
-		// projected fixed costs and they don't appear in the per-truck
-		// performance table further down (both consume `allTrucks`).
-		const allTrucks = db.prepare("SELECT * FROM trucks WHERE status = 'Active'").all();
+		// fixed costs and they don't appear in the per-truck performance table
+		// further down (both consume `allTrucks`). A truck in Maintenance or OOS
+		// stays in both: it still owes its insurance, payment and ELD
+		// (investorPayoutBasis.truckInFleetSql()).
+		const allTrucks = db.prepare(`SELECT * FROM trucks WHERE ${investorPayoutBasis.truckInFleetSql()}`).all();
 		let totalFixedCosts = 0;
 		for (const t of allTrucks) {
 			const perMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0) + (t.truck_payment_monthly || 0)
@@ -54584,13 +54657,14 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 					+ (m.toll || 0) + (m.food || 0) + (m.other || 0);
 			}
 
-			// Fixed costs per month — constant per Active truck for every month
+			// Fixed costs per month — constant per truck in the fleet (any status
+			// but Inactive) for every month
 			// from its in-service month onward (maintenance-fund reserve omitted,
 			// same as the fleet totals). Whole dollars here, unlike the investor
 			// drill-down's cents — that rounding is this chart's own convention and
 			// is left alone.
 			const fixedTrucks = db.prepare(
-				"SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE status = 'Active'"
+				`SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE ${investorPayoutBasis.truckInFleetSql()}`
 			).all();
 			const monthlyFixedCosts = (mk) => {
 				let total = 0;
@@ -56506,12 +56580,13 @@ app.put("/api/compliance/fees/:id", requireRole("Super Admin", "Dispatcher"), (r
 		if (!periodLocksReadable()) return periodLockUnreadableResponse(req, res, "Marking a compliance fee paid", feePayAudit);
 
 		// Does this fee reach a month's total at all? The investor branch INNER
-		// JOINs `t.status = 'Active'`; the fleet branch is `LOWER(truck) NOT IN
-		// (inactive unit numbers)`, which INCLUDES orphan rows whose `truck` string
-		// matches no truck. So the only rows that count in neither are those keyed
-		// to a truck that exists and is not Active — for those, no month moves.
+		// JOINs the trucks in the fleet (investorPayoutBasis.truckInFleetSql(): any
+		// status but Inactive); the fleet branch is `LOWER(truck) NOT IN (Inactive
+		// unit numbers)`, which INCLUDES orphan rows whose `truck` string matches no
+		// truck. So the only rows that count in neither are those keyed to a truck
+		// that exists and is Inactive — for those, no month moves.
 		const parked = String(fee.truck || "").trim()
-			? db.prepare("SELECT 1 FROM trucks WHERE LOWER(unit_number) = LOWER(?) AND status != 'Active'").get(String(fee.truck).trim())
+			? db.prepare(`SELECT 1 FROM trucks WHERE LOWER(unit_number) = LOWER(?) AND NOT (${investorPayoutBasis.truckInFleetSql()})`).get(String(fee.truck).trim())
 			: null;
 		if (!parked) {
 			// Where it books today (only if it is already counted, i.e. Paid) and

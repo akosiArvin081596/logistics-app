@@ -248,6 +248,8 @@ function runSection(segment, { session, query = {}, rangeMode = "whole-months" }
 		resolveInvestorSplitPct: () => 50,
 		truckChargedInMonth: () => true,
 		truckMonthlyFixed: () => ({ eld: 0, hvut: 0, irp: 0, truckPayment: 0, insurance: 0, total: 0 }),
+		// The fleet rule the fixed-cost lines and fee queries read, the real module.
+		investorPayoutBasis: require("../lib/investor-payout-basis"),
 		logAudit: () => {},
 		investorReportOptions: { ...investorReportOptions, RANGE_MODE: rangeMode },
 	};

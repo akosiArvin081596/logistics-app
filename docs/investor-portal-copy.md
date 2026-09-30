@@ -651,6 +651,17 @@ The owner approved all three on 2026-09-30. They change what a split (50/50) inv
 
 ---
 
+## 19. The truck list (`/trucks`, the sidebar's **My Trucks**)
+
+An investor sees their own trucks here, in the same table and cards the office uses. A truck in Maintenance or OOS now keeps counting its fixed costs (insurance, ELD, truck payment, HVUT, IRP); only Inactive or a retirement date stops them. Two things on this page follow that.
+
+| Flag | Exact text | Where / when | Status |
+|---|---|---|---|
+| 🔴 | `No insurance, ELD, truck payment, HVUT, or IRP is configured for this truck — its fixed costs show as $0 in the investor P&L.` | Tooltip on the `No fixed costs configured` badge under a truck's status. The badge now shows on any truck that is not Inactive and has none of those five costs entered (it used to show on Active trucks only). An investor reads this sentence alone: they cannot edit a truck, so the instruction the office reads after it, `Add them via Edit → Business Configuration.`, is shown only to a Super Admin or Dispatcher. Was, for everyone: `Active truck with no insurance, ELD, truck payment, HVUT, or IRP configured — its fixed costs show as $0 in the investor P&L. Add them via Edit → Business Configuration.` | **Changed 2026-10-01 — awaiting client approval** |
+| ⚪ | `In Maintenance` / `Out of service` | The card above the table. Wording unchanged; its count now includes trucks marked OOS (it counted Maintenance only, so an OOS truck was missing from it). | **Changed 2026-10-01 — awaiting client approval** |
+
+---
+
 ## The ones I'd raise first
 
 0. **§2 / §12, the loss carry-forward** — the line you actually asked about. Two things to settle: (a) **one wording**, since the same deduction is currently called three different things across the PDF, the Earnings screen and the Payouts table; and (b) whether `Payable` / `Projected payout` is the right name for the figure that lands under it. Everything else in this file can wait — this one is live in August.
