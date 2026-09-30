@@ -92,7 +92,8 @@
 //   sign all three documents, and open both again from the review modal ("Signed —
 //   View Document"). Every preview PDF is read: the default 50/50 terms, no
 //   AMENDMENT, and the same §3.3 / §2.01 wording for A and B. The application is
-//   NEVER submitted (every write but the preview route is blocked in the page).
+//   NEVER submitted (every write but the preview route is blocked in the page; the
+//   read-only POST /api/public/investor-w9-check passes and is listed as a non-write).
 //   T1-T11 (per-investor payment terms; the Super Admin and one throwaway test
 //   Investor sign in): T1/T2 the Super Admin creates a split and a lease invite on
 //   /investors · T3-T5 an anonymous applicant opens each link: read-only terms,
@@ -113,8 +114,10 @@
 //   F4 the investor detail modal survives an investors:changed refresh · F5 a record
 //      with no application says so · F6 an acceptance that would take another
 //      record's company name is refused with a code and the application is not left
-//      Accepted; one whose email is already an account's is Accepted and creates
-//      nothing (200 accountCreated:false, audited) · F7 "Accepted" asks first; a
+//      Accepted; one whose email is already an Investor account's is Accepted and
+//      creates nothing (200 accountCreated:false, audited); one whose email is another
+//      role's account (a throwaway QA-TEST Driver) is refused 409 USER_ALREADY_EXISTS
+//      and writes nothing · F7 "Accepted" asks first; a
 //      refused acceptance puts the select back and shows the server's reason; a
 //      removed application's status change is refused; an acceptance over an
 //      existing account shows the server's message on the page · F8 a duplicate investor record
@@ -6119,8 +6122,9 @@ async function invoiceSection() {
 // gets a FRESH anonymous context. Identities are fake: "QA-TEST Investor A|B <stamp>",
 // a QA-TEST address, an example.com email, all-zero EIN and bank numbers.
 // ⚠️ The application is never submitted. Besides not pressing the button, every
-// request from these pages that is not a GET and not the preview route is aborted
-// in the browser (T0l records any that was attempted).
+// request from these pages that is not a GET, the preview route or the read-only
+// W-9 check (TERMS_READ_ONLY_POSTS) is aborted in the browser (T0l records any that
+// was attempted, and lists the read-only checks apart as non-writes).
 //
 // How the PDF is read: the page reads each preview with `res.blob()`, and Chromium
 // keeps no copy of a body read that way, so `Response.body()` answers empty. The
@@ -6138,6 +6142,34 @@ const TERMS_DOCS = {
 }
 const TERMS_EXPECTED = 'default 50/50 terms, no AMENDMENT, identical for A and B'
 const TERMS_PREVIEW = '/api/public/investor-preview-pdf/'
+// The POSTs /invest sends that write nothing, so the anonymous pages let them through
+// and list them apart from the writes they abort. POST /api/public/investor-w9-check:
+// step 1's Continue and each W-9 signature ask whether the W-9 can print the typed
+// text (the application's own lib/w9-input.js check); it stores, renders and sends
+// nothing, and answers 200 { ok: true } or the 400 the application would get.
+const TERMS_READ_ONLY_POSTS = new Set(['/api/public/investor-w9-check'])
+const isReadOnlyPost = (req, p) => req.method() === 'POST' && TERMS_READ_ONLY_POSTS.has(p)
+// Records the answer to each read-only POST a page sends, into `into`
+// ({ what, status }), for T0l and Tm.
+function watchReadOnlyPosts(page, into) {
+  page.on('response', (r) => {
+    const p = pathOf(r.url())
+    if (isReadOnlyPost(r.request(), p)) into.push({ what: `${r.request().method()} ${p}`, status: String(r.status()) })
+  })
+  page.on('requestfailed', (r) => {
+    const p = pathOf(r.url())
+    if (isReadOnlyPost(r, p)) into.push({ what: `${r.method()} ${p}`, status: `no answer (${r.failure()?.errorText || 'failed'})` })
+  })
+}
+// "POST /api/public/investor-w9-check → 200 ×2", per page tag.
+function readOnlyTally(entries) {
+  const m = new Map()
+  for (const { who, what, status } of entries) {
+    const k = `${who} ${what} → ${status}`
+    m.set(k, (m.get(k) || 0) + 1)
+  }
+  return [...m].map(([k, n]) => `${k} ×${n}`).join(', ')
+}
 const flatText = (pt) => String(pt?.text || '').replace(/\s+/g, ' ').trim()
 // The text between two anchors (the second searched after the first), whitespace
 // collapsed; '' when either is missing.
@@ -6273,7 +6305,7 @@ async function fillInvestBanking(page, name, idx) {
 }
 
 async function termsInvestor(letter, idx) {
-  const out = { letter, name: `QA-TEST Investor ${letter} ${stamp}`, sign: {}, review: {}, keys: [], blocked: [], consoleErrors: [], previews: 0, ok: false, error: '' }
+  const out = { letter, name: `QA-TEST Investor ${letter} ${stamp}`, sign: {}, review: {}, keys: [], blocked: [], checks: [], consoleErrors: [], previews: 0, ok: false, error: '' }
   const S = (n) => `t0-${letter.toLowerCase()}-${n}`
   const ctx = await browser.newContext({ viewport: ADMIN_VP })
   ctx.setDefaultTimeout(30000)
@@ -6284,8 +6316,9 @@ async function termsInvestor(letter, idx) {
     const i = waiters.findIndex((w) => w.docKey === docKey)
     if (i >= 0) waiters.splice(i, 1)[0].resolve(value)
   }
-  // The safety net: nothing but GETs and the stateless preview route leaves this page.
-  // A preview is passed through, and its bytes kept (see the note at the top of this section).
+  // The safety net: nothing but GETs, the stateless preview route and the read-only
+  // W-9 check leaves this page. A preview is passed through, and its bytes kept (see
+  // the note at the top of this section).
   await page.route('**/api/**', async (route) => {
     const req = route.request()
     const p = pathOf(req.url())
@@ -6302,10 +6335,11 @@ async function termsInvestor(letter, idx) {
       settle(docKey, { status: resp.status(), body })
       return route.fulfill({ response: resp, body }).catch(() => {})
     }
-    if (req.method() === 'GET') return route.continue()
+    if (req.method() === 'GET' || isReadOnlyPost(req, p)) return route.continue()
     out.blocked.push(`${req.method()} ${p}`)
     return route.abort('blockedbyclient')
   })
+  watchReadOnlyPosts(page, out.checks)
   page.on('console', (m) => { if (m.type() === 'error') out.consoleErrors.push(`console: ${m.text().slice(0, 240)}`) })
   page.on('pageerror', (e) => out.consoleErrors.push(`pageerror: ${String(e.message || e).slice(0, 240)}`))
   page.on('requestfailed', (r) => {
@@ -6540,12 +6574,16 @@ async function termsT0() {
     record({ step: 'T0k', title: 'The JSON body keys /invest sends to POST /api/public/investor-preview-pdf/<docKey> (sorted)', expected: 'Recorded for the later regression check (INFO)', observed: obs || 'no preview request seen', verdict: 'INFO', shot: '' })
   }
   // ---- nothing was submitted; what the browser console said
+  // The read-only W-9 check (TERMS_READ_ONLY_POSTS) is let through and listed on its
+  // own: it writes nothing, so it is not an attempted write.
   {
     const blocked = [...A.blocked.map((b) => `A ${b}`), ...B.blocked.map((b) => `B ${b}`)]
+    const checks = readOnlyTally([...A.checks.map((c) => ({ who: 'A', ...c })), ...B.checks.map((c) => ({ who: 'B', ...c }))])
     record({
-      step: 'T0l', title: 'Neither test investor submitted anything: no write left the page but the preview route (anything else is aborted in the browser and listed)',
+      step: 'T0l', title: 'Neither test investor submitted anything: no write left the page but the preview route (the read-only POST /api/public/investor-w9-check is let through and listed as a non-write; anything else is aborted in the browser and listed)',
       expected: 'No attempted write; both walk-throughs completed up to the review without pressing Confirm',
-      observed: `A completed: ${A.ok}${A.error ? ` (${A.error})` : ''}; B completed: ${B.ok}${B.error ? ` (${B.error})` : ''}; attempted writes: ${blocked.length ? blocked.join(', ') : 'none'}`,
+      observed: `A completed: ${A.ok}${A.error ? ` (${A.error})` : ''}; B completed: ${B.ok}${B.error ? ` (${B.error})` : ''}; attempted writes: ${blocked.length ? blocked.join(', ') : 'none'}; ` +
+        `read-only checks let through (not writes): ${checks || 'none'}`,
       verdict: verdict(!blocked.length && A.ok && B.ok), shot: '',
     })
     const errs = [...A.consoleErrors.map((e) => `A ${e}`), ...B.consoleErrors.map((e) => `B ${e}`)]
@@ -6811,10 +6849,11 @@ async function revokeThroughPanel(page, panel, needle) {
 
 // ---- the anonymous applicant's page
 // A fresh context on `urlPath` (/invest, or an invite link) with T0's safety net:
-// GETs pass, a preview is passed through with its bytes kept, T8's submit passes
-// only once allowSubmit is set, and every other write is aborted and listed.
+// GETs and the read-only W-9 check pass (the check listed apart, as a non-write), a
+// preview is passed through with its bytes kept, T8's submit passes only once
+// allowSubmit is set, and every other write is aborted and listed.
 async function openInvestPortal(tag, urlPath, token = '') {
-  const P = { tag, token, keys: [], blocked: [], errors: [], inviteGets: [], previewLog: [], allowSubmit: false }
+  const P = { tag, token, keys: [], blocked: [], checks: [], errors: [], inviteGets: [], previewLog: [], allowSubmit: false }
   const ctx = await browser.newContext({ viewport: ADMIN_VP })
   ctx.setDefaultTimeout(30000)
   // After a successful submit the page sends itself to logisx.com (the marketing site) 5 s later.
@@ -6846,11 +6885,12 @@ async function openInvestPortal(tag, urlPath, token = '') {
       settle(docKey, { status: resp.status(), body, headers })
       return route.fulfill({ response: resp, body }).catch(() => {})
     }
-    if (req.method() === 'GET') return route.continue()
+    if (req.method() === 'GET' || isReadOnlyPost(req, p)) return route.continue()
     if (P.allowSubmit && req.method() === 'POST' && p === '/api/public/investor-apply') return route.continue()
     P.blocked.push(`${req.method()} ${p}`)
     return route.abort('blockedbyclient')
   })
+  watchReadOnlyPosts(page, P.checks)
   page.on('console', (m) => { if (m.type() === 'error') P.errors.push(`console: ${m.text().slice(0, 200)}`) })
   page.on('pageerror', (e) => P.errors.push(`pageerror: ${String(e.message || e).slice(0, 200)}`))
   page.on('request', (r) => {
@@ -7769,14 +7809,17 @@ async function termsFeature(t0) {
     }
 
     // ================= Tm: what the anonymous pages attempted and logged
+    // The read-only W-9 check is let through and listed apart: it is not a write.
     if (S.portals.length) {
       const blocked = S.portals.flatMap((P) => P.blocked.map((b) => `${P.tag} ${b}`))
+      const checks = readOnlyTally(S.portals.flatMap((P) => P.checks.map((c) => ({ who: P.tag, ...c }))))
       const errs = S.portals.flatMap((P) => P.errors.map((e) => `${P.tag} ${e}`))
       const counts = S.portals.map((P) => `${P.tag} ${P.previewLog.length}`).join(', ')
       record({
-        step: 'Tm', title: 'The anonymous pages of T3-T11: writes aborted in the browser (anything but the preview and T8\'s submit), console errors, preview renders',
+        step: 'Tm', title: 'The anonymous pages of T3-T11: writes aborted in the browser (anything but the preview, the read-only W-9 check and T8\'s submit), read-only checks let through, console errors, preview renders',
         expected: 'INFO', verdict: 'INFO', shot: '',
-        observed: `aborted writes: ${blocked.length ? blocked.join(', ') : 'none'}; console/page errors: ${errs.length ? squash(errs.join(' | '), 900) : 'none'}; preview renders per page: ${counts}`,
+        observed: `aborted writes: ${blocked.length ? blocked.join(', ') : 'none'}; read-only checks let through (not writes): ${checks || 'none'}; ` +
+          `console/page errors: ${errs.length ? squash(errs.join(' | '), 900) : 'none'}; preview renders per page: ${counts}`,
       })
     }
   } finally {
@@ -7867,7 +7910,7 @@ async function termsCleanup(S) {
 // fetch where a step has no UI), and reads of the copy (ids, statuses and counts only).
 //
 // Spend per server process: three sign-ins (the Super Admin, QA-TEST investors A and B);
-// four public applications (publicFormLimiter allows 10 per 15 minutes); six PDF
+// five public applications (publicFormLimiter allows 10 per 15 minutes); six PDF
 // previews on /invest (30 per 15 minutes).
 const IFX_TABLES = new Set(['users', 'investors', 'trucks', 'legal_documents', 'investor_applications', 'investor_onboarding_documents', 'investor_config'])
 const IFX_ORDER = ['investor_config', 'legal_documents', 'investor_onboarding_documents', 'trucks', 'investors', 'users', 'investor_applications']
@@ -7974,13 +8017,19 @@ async function investorFixesSection() {
   const errOf = (r) => (r.json?.error ? ` "${String(r.json.error).slice(0, 160)}"` : '')
   const skip = (m) => Object.assign(new Error(`SKIPPED — ${m}`), { skip: true })
   const globalOf = (key) => q1('SELECT value FROM investor_config WHERE owner_id = 0 AND key = ?', key)?.value
-  const invRow = (page, name) => page.locator('table.inv-table tbody tr', { has: page.locator('td.name-cell', { hasText: exactText(name) }) })
+  // The Investor Directory's table. The Personal Invite Links panel above it reuses the
+  // inv-table class whenever it lists an invite (a revoked one an earlier terms run left
+  // is enough), so the class alone matches two tables: the directory is the one whose
+  // header has "Investor Name".
+  const invDirectory = (page) => page.locator('table.inv-table', { has: page.locator('thead th', { hasText: exactText('Investor Name') }) })
+  const invRow = (page, name) => invDirectory(page).locator('tbody tr', { has: page.locator('td.name-cell', { hasText: exactText(name) }) })
   const detailModal = (page) => page.locator('.inv-avatar-wrap').locator('xpath=ancestor::div[contains(@style,"z-index")][1]')
   const appRow = (page, email) => page.locator('tbody tr', { hasText: email })
   const start = ifxMaxRowids()
   const splitAtStart = q1("SELECT value FROM investor_config WHERE owner_id = 0 AND key = 'investor_split_pct'")?.value
   const st = { users: {}, inv: {}, apps: {}, truckTA: null, recId: null }
-  const emailOf = { P: EMAIL('P'), Q: EMAIL('Q'), C: EMAIL('A'), E: EMAIL('E') }
+  // C carries QA-TEST investor account A's email; D the throwaway QA-TEST Driver's (F6c).
+  const emailOf = { P: EMAIL('P'), Q: EMAIL('Q'), C: EMAIL('A'), E: EMAIL('E'), D: EMAIL('DRV') }
   const consoleErrs = []
   const failed = []
   const contexts = []
@@ -8099,6 +8148,28 @@ async function investorFixesSection() {
     return { users, investors, trucks }
   }
   let sa = null; let ia = null; let ib = null; let pub1 = null; let pub2 = null
+  // The body of a QA-TEST application for POST /api/public/investor-apply (FX1, F6c):
+  // fake data throughout, and one canvas-drawn signature made once on the public page.
+  let appSig = null
+  const appBody = async (k, legal, email) => {
+    if (!appSig) {
+      appSig = await pub2.evaluate(() => {
+        const c = document.createElement('canvas'); c.width = 300; c.height = 80
+        const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, 300, 80)
+        g.strokeStyle = '#111'; g.lineWidth = 3; g.beginPath(); g.moveTo(12, 60); g.bezierCurveTo(80, 0, 160, 90, 288, 18); g.stroke()
+        return c.toDataURL('image/png')
+      })
+    }
+    const consent = { agreed: true, text: 'I have read and agree to the terms of this document' }
+    return {
+      legal_name: legal, dba: '', entity_type: 'LLC', address: '1 QA Test Way, Testville, TX 77001', contact_person: 'QA Tester', contact_title: 'Owner',
+      phone: '555-010-0100', email, years_in_operation: '1', industry_experience: 'No', fleet_size: '1', preferred_communication: 'Email',
+      tax_classification: 'Individual/LLC', ein_ssn: '00-0000001', bankruptcy_liens: '', reporting_preference: 'Digital Portal',
+      vehicles: [{ year: '2020', make: 'Freightliner', model: 'Cascadia', vin: `QATESTVIN${k}${TU}`.slice(0, 17), licensePlate: '', mileage: '', titleState: '' }],
+      banking: { bank_name: 'QA Test Bank', account_type: 'Business Checking', routing_number: '000000000', account_number: `000111222${k.charCodeAt(0)}`, account_name: legal },
+      signatures: Object.fromEntries(['master_agreement', 'vehicle_lease', 'w9'].map((d) => [d, { text: 'QA Tester', image: appSig, consent }])),
+    }
+  }
   try {
     sa = await open('Super Admin')
     await login(sa, 'FX0 — Super Admin', CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
@@ -8445,7 +8516,7 @@ async function investorFixesSection() {
     await step('F5', `Super Admin adds a record on /investors (+ Add Investor: ${NAME('REC')}, no application) and opens its detail modal`,
       'The modal says "No application data linked" (not an empty application body)', sa, 'f5-no-application', async () => {
         await sa.goto(`${BASE_URL}/investors`)
-        await sa.locator('table.inv-table').waitFor({ state: 'visible', timeout: 60000 })
+        await invDirectory(sa).waitFor({ state: 'visible', timeout: 60000 })
         await sa.locator('summary.form-toggle').click()
         const form = sa.locator('details.form-accordion')
         await field(form, 'Investor Name *').fill(NAME('REC'))
@@ -8461,7 +8532,7 @@ async function investorFixesSection() {
         // The add reloads the list, and so does the investors:changed event it emits:
         // let both land first, or the second reload closes the modal (that is F4).
         await sa.waitForTimeout(3500)
-        await sa.locator('table.inv-table').waitFor({ state: 'visible', timeout: 30000 })
+        await invDirectory(sa).waitFor({ state: 'visible', timeout: 30000 })
         const row = invRow(sa, NAME('REC'))
         await row.waitFor({ state: 'visible', timeout: 30000 })
         await row.scrollIntoViewIfNeeded()
@@ -8622,28 +8693,14 @@ async function investorFixesSection() {
     })
 
     // ---- FX1: the applications F6, F7, F12 and F14 act on (public API, QA-TEST data)
+    // (F6c submits its own application D the same way.)
     apiProbeTag = 'FX1'
     {
       const notes = []
       try {
         if (!pub2.url().startsWith(BASE_URL)) await pub2.goto(`${BASE_URL}/invest`)
-        const sig = await pub2.evaluate(() => {
-          const c = document.createElement('canvas'); c.width = 300; c.height = 80
-          const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, 300, 80)
-          g.strokeStyle = '#111'; g.lineWidth = 3; g.beginPath(); g.moveTo(12, 60); g.bezierCurveTo(80, 0, 160, 90, 288, 18); g.stroke()
-          return c.toDataURL('image/png')
-        })
-        const consent = { agreed: true, text: 'I have read and agree to the terms of this document' }
-        const body = (k, legal, email) => ({
-          legal_name: legal, dba: '', entity_type: 'LLC', address: '1 QA Test Way, Testville, TX 77001', contact_person: 'QA Tester', contact_title: 'Owner',
-          phone: '555-010-0100', email, years_in_operation: '1', industry_experience: 'No', fleet_size: '1', preferred_communication: 'Email',
-          tax_classification: 'Individual/LLC', ein_ssn: '00-0000001', bankruptcy_liens: '', reporting_preference: 'Digital Portal',
-          vehicles: [{ year: '2020', make: 'Freightliner', model: 'Cascadia', vin: `QATESTVIN${k}${TU}`.slice(0, 17), licensePlate: '', mileage: '', titleState: '' }],
-          banking: { bank_name: 'QA Test Bank', account_type: 'Business Checking', routing_number: '000000000', account_number: `000111222${k.charCodeAt(0)}`, account_name: legal },
-          signatures: Object.fromEntries(['master_agreement', 'vehicle_lease', 'w9'].map((d) => [d, { text: 'QA Tester', image: sig, consent }])),
-        })
         for (const [k, legal] of [['P', NAME('SAME')], ['Q', NAME('SAME')], ['C', NAME('C')]]) {
-          const r = await api(pub2, 'POST', '/api/public/investor-apply', body(k, legal, emailOf[k]))
+          const r = await api(pub2, 'POST', '/api/public/investor-apply', await appBody(k, legal, emailOf[k]))
           const id = Number(r.json?.applicationId) || null
           if (id) { st.apps[k] = id; ifxNote({ table: 'investor_applications', id }) }
           notes.push(`${k} (${legal}${k === 'C' ? ', email = QA-TEST account A\'s' : ''}) → ${codeOf(r)}${id ? ` #${id}, ${r.json?.documentsSigned}/${r.json?.documentsTotal} documents signed` : errOf(r)}`)
@@ -8735,13 +8792,16 @@ async function investorFixesSection() {
     const sameCounts = (a, b) => a.users === b.users && a.investors === b.investors && a.trucks === b.trucks
     const auditMark = () => q1('SELECT COALESCE(MAX(id), 0) AS m FROM audit_trail').m
     const auditRowsFor = (k, since, action) => qa('SELECT id FROM audit_trail WHERE id > ? AND action = ? AND entity = ? AND entity_id = ?', since, action, 'investor_application', String(st.apps[k]))
-    // The server's own words for an acceptance over an existing account.
-    const existingAccountMsg = (userId) => new RegExp(`^Accepted\\. An account with this email already exists \\(Investor #${userId}\\), so no new account, investor record or trucks were created\\.$`)
+    // The server's own words, exactly, for an acceptance whose email is already an
+    // account's: an Investor account is accepted over (200, nothing created); any
+    // other role is refused (409 USER_ALREADY_EXISTS, nothing written).
+    const existingInvestorMsg = (userId) => `Accepted. This application's email matches Investor account #${userId}, so no new account, investor record or trucks were created. Confirm it is the same person before acting on its banking or vehicle details.`
+    const otherRoleAccountErr = (role, userId) => `An account with this email already exists (${role} #${userId}) and it is not an investor account, so this application can't be accepted with that email.`
     // F6b / F7d: C is the application whose email is QA-TEST account A's. Its
     // acceptance answers 200 accountCreated:false and creates nothing; F7d puts C back
     // at the status it had before F6b so the UI can pick "Accepted" again.
     await step('F6b', 'Super Admin accepts QA-TEST application C, whose applicant email is QA-TEST account A\'s (PUT …/status, page fetch)',
-      '200 { success: true, accountCreated: false, existingUserId: A\'s id } with the server\'s "no new account … were created" message; C Accepted; no user, investors row or truck created (whole-table counts in the copy unchanged); one accept_investor_existing_account audit row for C', sa, 'f6b-accept-email-taken', async () => {
+      `200 { success: true, accountCreated: false, existingUserId: A's id } with the message "${existingInvestorMsg('<A\'s id>')}"; C Accepted; no user, investors row or truck created (whole-table counts in the copy unchanged); one accept_investor_existing_account audit row for C`, sa, 'f6b-accept-email-taken', async () => {
         if (!st.apps.C) throw skip('application C was not created')
         st.cStatus0 = statusOf('C')
         const before = madeCounts()
@@ -8753,7 +8813,7 @@ async function investorFixesSection() {
         const audits = auditRowsFor('C', mark, 'accept_investor_existing_account')
         const aId = st.users.A?.id
         const msg = String(r.json?.message || '')
-        const msgOk = existingAccountMsg(aId).test(msg)
+        const msgOk = msg === existingInvestorMsg(aId)
         await caption(sa, `Step F6 — accept application C (its email is QA-TEST account A's): ${codeOf(r)}; accountCreated ${r.json?.accountCreated}; C now ${status}; counts ${sameCounts(before, after) ? 'unchanged' : 'CHANGED'}`)
         await sa.goto(`${BASE_URL}/investor-applications`)
         await appRow(sa, EMAIL('P')).waitFor({ state: 'visible', timeout: 30000 })
@@ -8763,12 +8823,63 @@ async function investorFixesSection() {
           `message: "${msg}"`, `copy: ${countsText(before)} → ${countsText(after)}`, `accept_investor_existing_account rows for C: ${audits.length}`,
           'application statuses in the copy', ...['P', 'Q', 'C'].map((k) => `${k}: ${statusOf(k)}`)])
         return {
-          observed: `→ ${codeOf(r)}${r.status !== 200 ? errOf(r) : ''}; success: ${r.json?.success}; accountCreated: ${r.json?.accountCreated}; existingUserId: ${r.json?.existingUserId} (account A is #${aId}); message: "${msg.slice(0, 200)}" (the expected wording: ${msgOk}); ` +
+          observed: `→ ${codeOf(r)}${r.status !== 200 ? errOf(r) : ''}; success: ${r.json?.success}; accountCreated: ${r.json?.accountCreated}; existingUserId: ${r.json?.existingUserId} (account A is #${aId}); message: "${msg.slice(0, 320)}" (the expected wording: ${msgOk}); ` +
             `application C "${st.cStatus0}" → "${status}"; the copy: ${countsText(before)} before, ${countsText(after)} after; ` +
             `created for C: ${made.users.length} account(s), ${made.investors.length} investor record(s), ${made.trucks.length} truck(s); accept_investor_existing_account audit rows for C: ${audits.length}. ` +
             '(Mail is blanked on this server, so "no email" is not observable here.)',
           verdict: verdict(r.status === 200 && r.json?.success === true && r.json?.accountCreated === false && Number(r.json?.existingUserId) === aId && msgOk &&
             status === 'Accepted' && sameCounts(before, after) && !made.users.length && !made.investors.length && !made.trucks.length && audits.length === 1),
+        }
+      })
+    // F6c: an application whose email is a NON-investor account's is refused. The
+    // account is a throwaway QA-TEST Driver made here through the admin API with no
+    // driver name, so nothing is synced to the Carrier Database sheet on its create or
+    // its delete, and no finance row matches its cascade name. Application D (public
+    // API, fake data) carries its email. The acceptance must answer 409
+    // USER_ALREADY_EXISTS with the server's exact error and write nothing: D keeps its
+    // status, and no account, investor record or truck is made (whole-table counts in
+    // the copy). Audit rows written for D are recorded, not scored. FXz removes the
+    // driver account (API delete) and D (soft delete, then by id in the copy).
+    await step('F6c', 'A throwaway QA-TEST Driver account (admin API, no driver name) and QA-TEST application D with its email (public API); the Super Admin accepts D (PUT …/status, page fetch)',
+      `409 { code: "USER_ALREADY_EXISTS", error: "${otherRoleAccountErr('Driver', '<its id>')}" }; D keeps its status (not Accepted); no user, investors row or truck created (whole-table counts in the copy unchanged)`, sa, 'f6c-accept-other-role', async () => {
+        if (!pub2) throw skip('no public page to submit application D from')
+        const password = randomBytes(18).toString('base64url')
+        const cu = await api(sa, 'POST', '/api/users', { username: UNAME('DRV'), password, role: 'Driver', email: EMAIL('DRV'), fullName: NAME('DRV') })
+        const drow = q1('SELECT id, role, driver_name FROM users WHERE username = ?', UNAME('DRV'))
+        if (drow) { ifxNote({ table: 'users', id: drow.id }); st.users.DRV = { id: drow.id } }
+        if (cu.status !== 200 || !drow) throw new Error(`POST /api/users (a QA-TEST Driver) → ${codeOf(cu)}${errOf(cu)}`)
+        if (drow.role !== 'Driver' || String(drow.driver_name || '') !== '') throw new Error(`the QA-TEST account #${drow.id} is stored as role "${drow.role}" with a driver name set: not the throwaway Driver F6c needs`)
+        if (!pub2.url().startsWith(BASE_URL)) await pub2.goto(`${BASE_URL}/invest`)
+        const ar = await api(pub2, 'POST', '/api/public/investor-apply', await appBody('D', NAME('D'), emailOf.D))
+        const appId = Number(ar.json?.applicationId) || null
+        if (appId) { st.apps.D = appId; ifxNote({ table: 'investor_applications', id: appId }) }
+        if (ar.status !== 200 || !appId) throw new Error(`POST /api/public/investor-apply (D) → ${codeOf(ar)}${errOf(ar)}`)
+        const stored0 = statusOf('D')
+        const before = madeCounts()
+        const mark = auditMark()
+        const r = await api(sa, 'PUT', `/api/investor-applications/${appId}/status`, { status: 'Accepted' })
+        const after = madeCounts()
+        const made = trackApp('D')
+        const status = statusOf('D')
+        const audits = qa('SELECT action FROM audit_trail WHERE id > ? AND entity = ? AND entity_id = ?', mark, 'investor_application', String(appId)).map((a) => a.action)
+        const err = String(r.json?.error || '')
+        const want = otherRoleAccountErr('Driver', drow.id)
+        const errOk = err === want
+        await caption(sa, `Step F6c — accept application D (its email is QA-TEST Driver #${drow.id}'s): ${codeOf(r)}; D "${stored0}" → "${status}"; counts ${sameCounts(before, after) ? 'unchanged' : 'CHANGED'}`)
+        await sa.goto(`${BASE_URL}/investor-applications`)
+        await appRow(sa, emailOf.D).waitFor({ state: 'visible', timeout: 30000 }).catch(() => {})
+        await appRow(sa, emailOf.D).scrollIntoViewIfNeeded().catch(() => {})
+        await evidence(sa, [`F6c — Super Admin, page fetch: PUT /api/investor-applications/${appId}/status {"status":"Accepted"}`,
+          `(application D's email is QA-TEST Driver account #${drow.id}'s)`,
+          `→ ${codeOf(r)}`, err ? `error: "${err}"` : `message: "${String(r.json?.message || '')}"`, `D: "${stored0}" → "${status}"`, `copy: ${countsText(before)} → ${countsText(after)}`])
+        return {
+          observed: `QA-TEST Driver account #${drow.id} (POST /api/users → ${codeOf(cu)}, no driver name); application D #${appId} (POST /api/public/investor-apply → ${codeOf(ar)}); ` +
+            `PUT …/status "Accepted" → ${codeOf(r)}; error: "${err.slice(0, 320)}" (the expected wording: ${errOk})${r.json?.message ? `; message: "${String(r.json.message).slice(0, 320)}"` : ''}` +
+            `${r.json?.accountCreated !== undefined ? `; accountCreated: ${r.json.accountCreated}` : ''}${r.json?.existingUserId !== undefined ? `; existingUserId: ${r.json.existingUserId}` : ''}; ` +
+            `application D "${stored0}" → "${status}"; the copy: ${countsText(before)} before, ${countsText(after)} after; ` +
+            `created for D: ${made.users.length} account(s), ${made.investors.length} investor record(s), ${made.trucks.length} truck(s); audit rows for D: ${audits.length ? audits.join(', ') : 'none'} (recorded, not scored)`,
+          verdict: verdict(r.status === 409 && r.json?.code === 'USER_ALREADY_EXISTS' && errOk && status === stored0 && status !== 'Accepted' &&
+            sameCounts(before, after) && !made.users.length && !made.investors.length && !made.trucks.length),
         }
       })
 
@@ -8883,7 +8994,7 @@ async function investorFixesSection() {
     // The server answers 200 accountCreated:false and creates nothing; the page shows its
     // message in the on-page notice (and a warning toast), and the row reads Accepted.
     await step('F7d', 'Super Admin picks "Accepted" in QA-TEST application C\'s row (its email is already QA-TEST account A\'s) and confirms the dialog',
-      '200 accountCreated:false; the on-page notice (data-test="application-status-notice") shows the server\'s "no new account … were created" message; C\'s row reads Accepted; no credentials dialog; nothing created; an accept_investor_existing_account audit row for C', sa, 'f7d-accept-existing-account', async () => {
+      `200 accountCreated:false with the message "${existingInvestorMsg('<A\'s id>')}"; the on-page notice (data-test="application-status-notice") shows it; C's row reads Accepted; no credentials dialog; nothing created; an accept_investor_existing_account audit row for C`, sa, 'f7d-accept-existing-account', async () => {
         if (!st.apps.C) throw skip('application C was not created')
         const resetTo = st.cStatus0 && st.cStatus0 !== 'Accepted' ? st.cStatus0 : 'New'
         let resetNote = `C was "${statusOf('C')}"`
@@ -8928,14 +9039,14 @@ async function investorFixesSection() {
         const counts1 = madeCounts()
         const audits = auditRowsFor('C', mark, 'accept_investor_existing_account')
         const msg = String(j?.message || '')
-        const msgOk = existingAccountMsg(st.users.A?.id).test(msg)
+        const msgOk = msg === existingInvestorMsg(st.users.A?.id)
         const noticeShows = !!msg && noticeText.includes(norm(msg))
         await notice.scrollIntoViewIfNeeded().catch(() => {})
         await caption(sa, `Step F7d — PUT → ${resp.status()}; accountCreated ${j?.accountCreated}; the notice shows the server's message: ${noticeShows}; C's select "${after}", stored "${stored}"`)
         const s = await ifxShot(sa, 'f7d-accept-existing-account')
         return {
           observed: `${resetNote}; picked "Accepted" (the select read "${before}"), confirmed the dialog; PUT …/status → ${resp.status()}${j?.code ? ` ${j.code}` : ''}; accountCreated: ${j?.accountCreated}; existingUserId: ${j?.existingUserId} (account A is #${st.users.A?.id}); ` +
-            `message: "${msg.slice(0, 200)}" (the expected wording: ${msgOk}); notice: "${noticeText.slice(0, 240)}" (shows the server's message: ${noticeShows}); toast${toastWarning ? ' (warning)' : ''}: "${toast.slice(0, 160)}"; ` +
+            `message: "${msg.slice(0, 320)}" (the expected wording: ${msgOk}); notice: "${noticeText.slice(0, 360)}" (shows the server's message: ${noticeShows}); toast${toastWarning ? ' (warning)' : ''}: "${toast.slice(0, 160)}"; ` +
             `the list re-read: ${listReloaded}; C's row listed: ${stays}, its select "${after}"; stored status "${stored0}" → "${stored}"; credentials dialog shown: ${credsShown}; ` +
             `created for C: ${made.users.length} account(s), ${made.investors.length} investor record(s), ${made.trucks.length} truck(s); the copy: ${countsText(counts0)} → ${countsText(counts1)}; accept_investor_existing_account audit rows for C: ${audits.length}`,
           verdict: verdict(resp.status() === 200 && j?.accountCreated === false && msgOk && noticeShows && stays && after === 'Accepted' && stored === 'Accepted' &&
