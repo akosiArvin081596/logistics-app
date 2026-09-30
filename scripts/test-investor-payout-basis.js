@@ -17,7 +17,10 @@
  *       in-service day; a last month under retirement "stop" (prorated to the
  *       retirement day, inclusive) and "continue"; no truck in service
  *       (not_in_service, ahead of downtime); prorate "none"; the created_at
- *       fallback; two trucks' days as a union
+ *       fallback; two trucks' days as a union; which trucks count: every
+ *       status but Inactive (a truck in Maintenance or OOS covers, and its
+ *       idle month is downtime, paid under downtime "paid"; an Inactive truck
+ *       covers no day)
  *   §5  transitions: split → lease → split, the deficit waiting across the lease
  *   §6  THE SPLIT IS THE OLD ARITHMETIC: thousands of random months (split % from
  *       0 to 100, .5 boundaries, -0) through settleInvestorMonths() with no lease
@@ -26,7 +29,8 @@
  *   §7  the admin write's input rules: 400 INVALID_BASIS naming the field, 400
  *       LEASE_AMOUNT_WHOLE_DOLLARS, 409 BASIS_MONTH_CLOSED, the 12-month horizon
  *   §8  the idle predicate, the first month, the audit line, the dollar format
- *   §9  MUTANTS: the flag gate always open; a lease month joining the carry
+ *   §9  MUTANTS: the flag gate always open; a lease month joining the carry;
+ *       coverage over the fixed-cost set (Active trucks only)
  *
  * Pure: the module has no requires; nothing here touches a database or a network.
  * Run: node scripts/test-investor-payout-basis.js     # exits 1 on failure
@@ -172,6 +176,24 @@ section("§4 a lease month");
 	const union = pay(month("2026-06", 500), { trucks: [{ in_service_date: "2026-06-21" }, { in_service_date: "2026-01-01", retired_at: "2026-06-05" }] });
 	eq(union.payoutBasis.coveredDays, 15, "§4 two trucks: the days either is in the fleet (1–5 and 21–30)");
 	eq(B.leaseCoverage({ monthKey: "2028-02", effectiveMonth: "2028-02", trucks: [{}], retirement: "stop" }), { coveredDays: 29, daysInMonth: 29 }, "§4 a leap February");
+
+	// Which trucks count: every status but Inactive, not the fixed-cost set.
+	eq(["Active", "Maintenance", "OOS", "Inactive", undefined].map((status) => B.truckInLeaseFleet({ ...TRUCK_ALL_YEAR, status })), [true, true, true, false, true],
+		"§4 a lease counts a truck in every status but Inactive");
+	const withStatus = (status) => [{ ...TRUCK_ALL_YEAR, status }];
+	const shop = pay(month("2026-04", 500), { trucks: withStatus("Maintenance") });
+	eq([shop.payoutBasis.paidAmount, shop.payoutBasis.coveredDays, shop.payoutBasis.reason], [2000, 30, null], "§4 a truck in Maintenance still covers the month");
+	const oos = pay(month("2026-04", 500), { trucks: withStatus("OOS") });
+	eq([oos.payoutBasis.paidAmount, oos.payoutBasis.coveredDays], [2000, 30], "§4 a truck Out of Service (OOS) still covers the month");
+	const gone = pay(month("2026-04", 500), { trucks: withStatus("Inactive") });
+	eq([gone.payoutBasis.paidAmount, gone.payoutBasis.coveredDays, gone.payoutBasis.reason], [0, 0, "not_in_service"], "§4 an Inactive truck covers no day: not_in_service");
+	const mixed = pay(month("2026-06", 500), { trucks: [{ in_service_date: "2026-06-21", status: "Active" }, { in_service_date: "2026-01-01", status: "Inactive" }] });
+	eq(mixed.payoutBasis.coveredDays, 10, "§4 an Inactive truck adds no day to another truck's");
+	const shopIdle = pay(month("2026-04", 0, true), { trucks: withStatus("Maintenance") });
+	eq([shopIdle.payoutBasis.paidAmount, shopIdle.payoutBasis.reason], [0, "downtime"], "§4 a Maintenance-only idle month under downtime \"unpaid\": downtime, not not_in_service");
+	const shopIdlePaid = pay(month("2026-04", 0, true), { trucks: withStatus("Maintenance"), settings: { downtime: "paid" } });
+	eq([shopIdlePaid.payoutBasis.paidAmount, shopIdlePaid.payoutBasis.coveredDays, shopIdlePaid.payoutBasis.reason], [2000, 30, null],
+		"§4 downtime \"paid\": a Maintenance-only idle month pays the lease");
 }
 
 // ============================================================ §5 transitions
@@ -368,6 +390,13 @@ section("§9 mutants — each must be caught");
 	ok(deficitWaits(B), "§9 control: the lease month leaves the deficit for the split month");
 	const leaseAbsorbs = loadModule(mutate("if (m.payoutBasis && m.payoutBasis.type === \"lease\") {", "if (false) {"));
 	ok(!deficitWaits(leaseAbsorbs), "§9 MUTANT a lease month joining the carry walk is caught");
+
+	const shopCovers = (M) => M.settleInvestorMonths([month("2026-04", 0, true)], {
+		splitFraction: 0.5, basis: basisOf([lease("2026-01", 2000)], [{ ...TRUCK_ALL_YEAR, status: "Maintenance" }], { ...SETTINGS, downtime: "paid" }),
+	})["2026-04"].payable === 2000;
+	ok(shopCovers(B), "§9 control: a Maintenance-only month pays the lease under downtime \"paid\"");
+	const activeOnly = loadModule(mutate("return !!t && t.status !== LEASE_FLEET_EXIT_STATUS;", "return !!t && (t.status === undefined || t.status === \"Active\");"));
+	ok(!shopCovers(activeOnly), "§9 MUTANT coverage over the fixed-cost set (Active trucks only) is caught");
 }
 
 console.log(`\n${failures.length ? "FAIL" : "PASS"} — ${pass} assertions passed, ${failures.length} failed`);

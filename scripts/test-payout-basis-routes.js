@@ -46,7 +46,9 @@
  *   §9 the payout context: with the flag on, the months finalized as the split
  *      (no payoutBasis in the frozen breakdown) stay the split under a lease
  *      row recorded before them; a month finalized as a lease stays the lease;
- *      with the flag off nothing is read
+ *      with the flag off nothing is read; §9b the context hands over every
+ *      truck the owner has with its status, so a Maintenance-only month is
+ *      covered (paid under downtime "paid") and an Inactive-only one is not
  *
  * Pure: no server, no app.db, no network, no mail.
  * Run: node scripts/test-payout-basis-routes.js    # exits 1 on failure
@@ -595,6 +597,25 @@ const LEASE_2000 = { type: "lease", leaseAmountCents: 200000, details: "" };
 		const offSettled = frozenCase(off);
 		eq(off.payoutBasisContext(49).settledSplitMonths, [], "§9 flag off: nothing is read");
 		ok(["2026-06", "2026-07", "2026-08", "2026-09"].every((m) => offSettled[m].payoutBasis === null), "§9 flag off: every month is the split, as before");
+	}
+
+	// ── §9b the trucks a lease counts: every status but Inactive ────────────────
+	section("§9b the payout context's trucks: a Maintenance truck covers, an Inactive one does not");
+	{
+		const srv = buildServer({ flag: true, env: { INVESTOR_LEASE_DOWNTIME: "paid" } });
+		const truck = srv.db.prepare("INSERT INTO trucks (unit_number, owner_id, status, in_service_date) VALUES (?, ?, ?, '2026-01-01')");
+		const leaseRow = srv.db.prepare("INSERT INTO investor_payout_basis (owner_id, effective_month, basis_type, lease_amount_cents, source, created_by, created_at) VALUES (?, '2026-09', 'lease', 200000, 'admin', 'x', '2026-09-01T00:00:00Z')");
+		truck.run("M1", 52, "Maintenance");
+		truck.run("I1", 53, "Inactive");
+		leaseRow.run(52);
+		leaseRow.run(53);
+		const idleSeptember = (ownerId) => investorPayoutBasis.settleInvestorMonths([{ month: "2026-09", netProfit: 0, zeroActivity: true }],
+			{ splitFraction: 0.5, basis: srv.payoutBasisContext(ownerId) })["2026-09"].payoutBasis;
+		eq(srv.payoutBasisContext(52).trucks.map((t) => t.status), ["Maintenance"], "§9b the context carries each truck's status");
+		eq(idleSeptember(52), { type: "lease", leaseAmount: 2000, paidAmount: 2000, coveredDays: 30, daysInMonth: 30, reason: null },
+			"§9b downtime \"paid\": a month whose only truck is in Maintenance pays the lease");
+		eq(idleSeptember(53), { type: "lease", leaseAmount: 2000, paidAmount: 0, coveredDays: 0, daysInMonth: 30, reason: "not_in_service" },
+			"§9b a month whose only truck is Inactive: not_in_service");
 	}
 
 	console.log(`\n${failures.length ? "FAIL" : "PASS"} — ${pass} assertions passed, ${failures.length} failed`);

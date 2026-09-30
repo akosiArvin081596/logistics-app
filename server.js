@@ -4604,18 +4604,21 @@ const INVESTOR_LEASE_PAYOUTS_ENABLED = /^(true|1|yes|on)$/i.test(String(process.
 const INVESTOR_LEASE_SETTINGS = investorPayoutBasis.readLeaseSettings(process.env, (msg) => console.warn(`[payout-basis] ${msg}`));
 
 // What the payout math needs to settle one owner's months: the flag, the owner's
-// basis rows (oldest first), the Active trucks the fixed costs are charged on,
-// which decide the days a lease covers, and the months already finalized as the
-// split, which stay the split (a lease row recorded at acceptance while the flag
-// was off must not relabel them once it is on). null for the fleet-wide view (no
-// owner). The flag is only carried here; investorPayoutBasis.leaseBasisActive()
-// is the one test of it, so with the flag off the rows read here change nothing.
+// basis rows (oldest first), every truck the owner has with its status, which
+// decide the days a lease covers, and the months already finalized as the split,
+// which stay the split (a lease row recorded at acceptance while the flag was off
+// must not relabel them once it is on). null for the fleet-wide view (no owner).
+// The trucks are NOT the fixed-cost set (status 'Active'): which of them a lease
+// counts (every status but Inactive) is investorPayoutBasis.truckInLeaseFleet(),
+// the one copy of that rule. The flag is only carried here;
+// investorPayoutBasis.leaseBasisActive() is the one test of it, so with the flag
+// off the rows read here change nothing.
 function payoutBasisContext(ownerId) {
 	if (!ownerId) return null;
 	return {
 		enabled: INVESTOR_LEASE_PAYOUTS_ENABLED,
 		rows: db.prepare("SELECT effective_month, basis_type, lease_amount_cents FROM investor_payout_basis WHERE owner_id = ? ORDER BY effective_month").all(ownerId),
-		trucks: db.prepare("SELECT in_service_date, created_at, retired_at FROM trucks WHERE owner_id = ? AND status = 'Active'").all(ownerId),
+		trucks: db.prepare("SELECT status, in_service_date, created_at, retired_at FROM trucks WHERE owner_id = ?").all(ownerId),
 		settings: INVESTOR_LEASE_SETTINGS,
 		settledSplitMonths: INVESTOR_LEASE_PAYOUTS_ENABLED
 			? db.prepare("SELECT period, finalized_breakdown FROM investor_payouts WHERE owner_id = ? AND COALESCE(finalized_at, '') != ''").all(ownerId)
