@@ -212,7 +212,7 @@
           >
             <span class="alltime-label">Expenses</span>
             <span class="alltime-value" style="color: var(--danger)">{{ fmt(allTimeExpenses) }}</span>
-            <span class="alltime-formula">= driverPay + fixedCosts + tripExp</span>
+            <span class="alltime-formula">{{ allTimeExpensesFormula }}</span>
           </div>
           <div
             class="alltime-item clickable"
@@ -687,7 +687,7 @@
         <template v-if="detailType === 'allExpenses'">
           <div class="modal-breakdown">
             <div class="modal-explain">
-              This is the total cost of operating your fleet since day one. Expenses fall into three categories:
+              This is the total cost of operating your fleet since day one. Expenses fall into {{ allTimeExpenseCategories }} categories:
             </div>
 
             <div class="step-label">1. Driver Pay</div>
@@ -711,12 +711,21 @@
               <span class="val danger">{{ fmt(allTimeTripExpenses) }}</span>
             </div>
 
+            <!-- The maintenance fund and compliance cost, once either has been charged (allTimeExtraCosts). -->
+            <template v-for="(c, i) in allTimeExtraCosts" :key="c.key">
+              <div class="step-label">{{ 4 + i }}. {{ c.label }}</div>
+              <div class="modal-row">
+                <span>{{ c.label }}</span>
+                <span class="val danger">{{ fmt(c.value) }}</span>
+              </div>
+            </template>
+
             <div class="modal-divider"></div>
             <div class="modal-row bold result">
               <span>Total Expenses</span>
-              <span class="val danger">{{ fmt(allTimeDriverPay + allTimeFixedCosts + allTimeTripExpenses) }}</span>
+              <span class="val danger">{{ fmt(allTimeExpenses) }}</span>
             </div>
-            <div class="modal-math">{{ fmt(allTimeDriverPay) }} + {{ fmt(allTimeFixedCosts) }} + {{ fmt(allTimeTripExpenses) }} = {{ fmt(allTimeDriverPay + allTimeFixedCosts + allTimeTripExpenses) }}</div>
+            <div class="modal-math">{{ fmt(allTimeDriverPay) }} + {{ fmt(allTimeFixedCosts) }} + {{ fmt(allTimeTripExpenses) }}<template v-for="c in allTimeExtraCosts" :key="c.key"> + {{ fmt(c.value) }}</template> = {{ fmt(allTimeExpenses) }}</div>
           </div>
         </template>
 
@@ -739,7 +748,7 @@
               <span>- All-Time Expenses</span>
               <span class="val danger">-{{ fmt(allTimeExpenses) }}</span>
             </div>
-            <div class="modal-explain-sm">Driver pay + fixed costs + trip expenses combined.</div>
+            <div class="modal-explain-sm">{{ allTimeExpensesPhrase }} combined.</div>
             <div class="modal-divider"></div>
             <div class="modal-row bold result">
               <span>Net Profit</span>
@@ -949,7 +958,22 @@ const allTimeRevenue = computed(() => months.value.reduce((s, m) => s + (m.reven
 const allTimeDriverPay = computed(() => months.value.reduce((s, m) => s + (m.driverPay || 0), 0))
 const allTimeFixedCosts = computed(() => months.value.reduce((s, m) => s + (m.fixedCosts || 0), 0))
 const allTimeTripExpenses = computed(() => months.value.reduce((s, m) => s + (m.tripExpenses || 0), 0))
-const allTimeExpenses = computed(() => allTimeDriverPay.value + allTimeFixedCosts.value + allTimeTripExpenses.value)
+// The maintenance fund and compliance cost come out of each month's netProfit, so
+// they are expenses here too — or the all-time Net overstates the months it sums.
+// Like the monthly breakdown, a line joins only once it has actually been
+// charged; while both are 0 every all-time figure and sentence reads as before.
+const allTimeExtraCosts = computed(() => [
+  { key: 'maintFund', label: 'Maintenance Fund', phrase: 'maintenance fund', value: months.value.reduce((s, m) => s + (m.maintFundCost || 0), 0) },
+  { key: 'compliance', label: 'Compliance / IFTA', phrase: 'compliance', value: months.value.reduce((s, m) => s + (m.complianceCost || 0), 0) },
+].filter((c) => c.value > 0))
+const allTimeExpenses = computed(() => allTimeExtraCosts.value.reduce(
+  (s, c) => s + c.value,
+  allTimeDriverPay.value + allTimeFixedCosts.value + allTimeTripExpenses.value,
+))
+const EXPENSE_CATEGORY_COUNT = { 3: 'three', 4: 'four', 5: 'five' }
+const allTimeExpenseCategories = computed(() => EXPENSE_CATEGORY_COUNT[3 + allTimeExtraCosts.value.length])
+const allTimeExpensesFormula = computed(() => `= driverPay + fixedCosts + tripExp${allTimeExtraCosts.value.map((c) => ` + ${c.key}`).join('')}`)
+const allTimeExpensesPhrase = computed(() => ['Driver pay', 'fixed costs', 'trip expenses', ...allTimeExtraCosts.value.map((c) => c.phrase)].join(' + '))
 const allTimeNet = computed(() => allTimeRevenue.value - allTimeExpenses.value)
 // Investor's share of net profit, driven by the configured split (server returns
 // investorSplitPct on the production payload). Defaults to 50 when absent.
