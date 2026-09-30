@@ -53,8 +53,9 @@ What it covers today, by section (`ONLY` picks them):
   Investor A` / `B`) fill the application in fresh anonymous browsers, open the Master Participation & Management
   Agreement and the Commercial Vehicle Lease on the signature page, sign all three documents, and open both again from
   the review ("Signed — View Document"). Each preview PDF carries the default 50/50 terms and no `AMENDMENT`, and the
-  master's §3.3 and the lease's §2.01 read the same for A and B. Nothing is submitted. No sign-in and no creds file;
-  local and staging. `ONLY=terms STEPS=T0`.
+  master's §3.3 and the lease's §2.01 read the same for A and B. Nothing is submitted (the read-only W-9 check,
+  `POST /api/public/investor-w9-check`, is let through as a non-write). No sign-in and no creds file; local and staging.
+  `ONLY=terms STEPS=T0`.
 - **Per-investor payment terms (T1–T11).** The Super Admin creates a split and a lease invite link on `/investors`
   (T1, T2; "2,000" is refused inline). An anonymous applicant who opens a link sees the terms read-only and the
   amendment in the preview PDFs, and the page never sends terms itself (T3–T5). Plain `/invest` is still T0's contract
@@ -64,13 +65,15 @@ What it covers today, by section (`ONLY` picks them):
   clears the signatures (T11). Tc cleans up. Two sign-ins (the Super Admin and a throwaway test Investor). Local and
   staging. `ONLY=terms`, and see "The investor terms section" for why T0 and T1–T11 need two server processes.
 - **Investor fixes (F1–F14).** Investor config writes (F1), legal documents across investors (F2), the admin fund and
-  fuel targets (F3), the investor detail modal (F4, F5), acceptances that would collide with a record or an account
-  (F6), the application status select, its refusals and its notice for an existing account (F7), duplicate investor
+  fuel targets (F3), the investor detail modal (F4, F5), acceptances that would collide with a record or an account:
+  an Investor account's email is accepted over, any other role's is refused (F6), the application status select, its
+  refusals and its notice for an existing account (F7), duplicate investor
   records (F8), previews of an id that is no investor (F9), the split shown in Admin Tools and in the investor's My
   Loads note (F10), the `/invest` help text (F11), the
   account-number eye, the Docs count and a refused delete's message (F12), the `/invest` thank-you after a reload
   (F13), and the public onboarding banking route (F14). FXc lists every failing resource as the run's own probe or
-  the app's. Every actor is a `QA-TEST-INV-*` account, record or application the run creates and deletes.
+  the app's. Every actor is a `QA-TEST-INV-*` account, record or application the run creates and deletes (F6c's
+  throwaway Driver account included).
   Local only (`DB_PATH`); three sign-ins; `ONLY=investorfixes`. Its F-numbers are its own: the money path's F1 is a
   different step.
 
@@ -216,7 +219,7 @@ fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
 BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-terms ONLY=terms STEPS=T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11 DB_PATH="$W/qa.db" \
   fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
 fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
-# Part 7: the investor fixes (3 sign-ins, 4 public applications), on a fresh server process
+# Part 7: the investor fixes (3 sign-ins, 5 public applications), on a fresh server process
 fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
 BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-investorfixes ONLY=investorfixes DB_PATH="$W/qa.db" \
   fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
@@ -797,8 +800,16 @@ itself, is closed with its own button):
    strokes drawn on the canvas, **Sign Document**. The page then renders the preview again, with the signature.
 3. Step 3 of 3: fake banking (`QA-TEST Bank`, routing `000000000`), then **Review & Complete**, which only opens the
    review modal. There, "Signed — View Document" for the master and the lease: both read, as above.
-4. **Confirm & Complete Onboarding is never pressed.** On top of that, every request from these pages that is not a GET
-   and not the preview route is aborted in the browser; T0l lists any that was attempted.
+4. **Confirm & Complete Onboarding is never pressed.** On top of that, every request from these pages that is not a GET,
+   the preview route or the read-only W-9 check is aborted in the browser; T0l lists any that was attempted.
+
+**The read-only W-9 check.** Step 1's Continue, and each W-9 signature, send `POST /api/public/investor-w9-check`: it
+asks whether the W-9 can print the typed legal name, business name, address and signature name (the application's own
+`lib/w9-input.js` check), and answers 200 `{ ok: true }` or the 400 the application would get. It stores, renders and
+sends nothing, so the pages let it through (`TERMS_READ_ONLY_POSTS` in `e2e.mjs`). T0l and Tm list it, with its
+status, apart from the writes, and it never counts as one. Everything else that is not a GET or the preview, above all
+`POST /api/public/investor-apply`, is still aborted. T0 sends it four times (twice per investor), under its own limiter
+(60 per 15 minutes per IP).
 
 **How a PDF is read.** Every document is the stateless preview, `POST /api/public/investor-preview-pdf/<docKey>`.
 The page reads it with `res.blob()`, and Chromium keeps no copy of a body read that way (Playwright's `Response.body()`
@@ -816,7 +827,7 @@ counted from the operator list.
 | T0i | The master's §3.3, from `3.3 Revenue Participation` up to `3.4 Settlement Cycle`, in all four master PDFs (A and B, signature page and review). | Present in all four and identical; the row quotes it |
 | T0j | The lease's §2.01, from `2.01 Lease Payments` up to `2.02`, in all four lease PDFs. | Present in all four and identical; the row quotes it |
 | T0k | The JSON body keys the page sent to the preview route (sorted), unsigned and signed, and those of `banking` and `vehicles[0]`; the preview count per investor. | INFO: recorded for a later regression check |
-| T0l | Every write the pages attempted. | None, and both walk-throughs reached the review |
+| T0l | Every write the pages attempted; the read-only `POST /api/public/investor-w9-check` calls are let through and listed apart, with their status, as non-writes. | No attempted write (the W-9 check is not one), and both walk-throughs reached the review |
 | T0m | The browser console's errors, page errors and failed API requests on `/invest`. | INFO |
 
 **Why the typed name is checked the way it is.** The renderer replaces the signer's signature slot ("Participant
@@ -843,7 +854,8 @@ or a fixed monthly lease. The applicant who opens it sees them read-only and sig
 **Who signs in:** the Super Admin once; every admin step shares that page. T7 signs in once more, as a throwaway test
 Investor (`QA-TEST-INV-<timestamp>`) that it creates through `POST /api/users` with a random password held in memory
 only, and deletes at its end. Applicants are fresh anonymous contexts with T0's safety net: every write but the preview
-route (and T8's one submit) is aborted in the browser, and a successful submit is kept from leaving for `logisx.com`.
+route, the read-only W-9 check (let through and listed as a non-write) and T8's one submit is aborted in the browser,
+and a successful submit is kept from leaving for `logisx.com`.
 Invite tokens are credentials: the results never print one (the link dialog's screenshot does show it; the invites are
 revoked or used by the end of the run).
 
@@ -876,7 +888,7 @@ revoked or used by the end of the run).
 | T9 | T3's tab, still on step 2 of the split link. **UI:** the Super Admin presses Revoke on its row (a native confirm is accepted; an in-page one is confirmed, with the reason "QA-TEST e2e" when it asks). The tab then opens a document. | The revoke answers 200; the tab shows `invite-error` with `data-code="INVITE_REVOKED"` |
 | T10 | **UI.** Add Investor `QA-TEST-INV-<ts>-REC`, its name clicked in the Investor Directory (the detail modal), then a page fetch `PUT /api/investors/<id>` (a notes change), which refreshes the list over the socket. | 2 s later the modal and its `investor-terms-section` are still visible. The record is deleted at the end |
 | T11 | An API-made lease invite ($1,500). **Anonymous:** its link, the master signed. The Super Admin `PUT`s the amount to 1750 (`expectedRevision`). The tab opens the lease. | The lease preview carries the new `X-Payment-Terms-Revision`; the page shows "LogisX updated the payment terms in your invitation. Please review and sign the agreements again."; the master is no longer signed |
-| Tm | Every anonymous page of T3–T11. | INFO: aborted writes, console errors, renders per page |
+| Tm | Every anonymous page of T3–T11. | INFO: aborted writes (the read-only `POST /api/public/investor-w9-check` is not one: it is let through and listed apart, with its status), console errors, renders per page |
 | Tc | **Always runs.** | Every invite the run made that is still active is revoked (and any earlier run's `QA-TEST Invite …` left active). Every application it made (and any earlier run's QA-TEST one) is soft-deleted, then, locally, hard-deleted by id. The test user and record are deleted. Ids only |
 
 **Steps build on each other.** T3 and T9 use T1's split link, T4 and T7d T2's lease link, T5 continues T4's tab, T8
@@ -907,7 +919,7 @@ what was missing.
   So run them as two parts, each on a fresh server process locally, or 15 minutes apart on staging. The recipe's part 6
   does this.
 - **Sign-ins:** 2 (the Super Admin and the test Investor). `GET /api/public/investor-invite` (60 per 15 minutes) is
-  called a handful of times.
+  called a handful of times, and so is the read-only `POST /api/public/investor-w9-check` (60 per 15 minutes).
 
 **Staging.** The creds file needs only `superAdmin`. Everything but T8 runs there as it does locally. T8 SKIPs unless
 `E2E_TERMS_SUBMIT=1`: it writes a real application, which also sends staging's new-application emails wherever staging
@@ -950,6 +962,9 @@ the section touches is one it creates, named `QA-TEST-INV-<stamp>-…` with emai
   file by finding account A in it under the id the API lists.
 - **FX1** (the public `POST /api/public/investor-apply`, fake data): applications P and Q with the same company name,
   and C whose email is account A's. F13 makes application E through the `/invest` UI.
+- **F6c** (Super Admin API, then the public API): a throwaway Driver account (`qa-test-inv-<stamp>-drv`, a random
+  password in memory only, and **no driver name**, so neither its create nor its delete syncs the Carrier Database
+  sheet, and no finance row matches its cascade name), and application D with its email.
 
 No real investor is signed in as, edited, uploaded for or accepted, and the creds file's investor logins are not used.
 An acceptance's temporary password is never written out; in the screenshot of the credentials dialog it is masked.
@@ -974,17 +989,18 @@ submitting: the run answers that navigation with a local placeholder page and ab
 | F10b | **Planted:** A's own split stored as `"150"`. **UI:** A's portal, My Loads expanded (the note renders with no loads) | The "Your Share" note shows the split the server applies (100) |
 | F9 | **UI:** `/investor-portals`, then `/investor-portals/99999999`; the page's own requests under `/api/investor` are watched. Page fetch `GET /api/investor?as_user_id=99999999`, compared with the Super Admin's own `GET /api/investor` | 404 `INVESTOR_NOT_FOUND`; the page renders the "Investor not found" card (naming the id, with "Back to Investor Portals") and no portal: no "Previewing" banner, no portal section, no fleet numbers, no portal data request |
 | F8 | Page fetch: `POST /api/investors` twice with one name and carrier name | The second 409 with a code; one record |
-| F5 | **UI:** `/investors` → + Add Investor (a record with no application) → its detail modal | "No application data linked" |
+| F5 | **UI:** `/investors` → + Add Investor (a record with no application) → its detail modal. The Investor Directory is the `table.inv-table` whose header has "Investor Name" (see below) | "No application data linked" |
 | F4 | With that modal open, a page fetch `PUT /api/investors/<id>` (notes); the server emits `investors:changed`; 2 s | The modal still open |
 | F11 | **UI:** `/invest`, the guided tour resumed at its banking card, its FAQ link "Is my banking info secure?" | No "encrypted … at rest" claim, and none that bank details can be updated any time from the dashboard |
 | F13 | **UI:** the whole `/invest` flow for application E (three documents signed on the canvas), then a reload | "Thank you, <name>" after the reload |
 | F13n | While F13 signs, a trial click on each sign dialog's × (INFO) | An observation: whether the guided tour covers the × |
 | F7a | **UI:** `/investor-applications`, "Accepted" picked in P's status select; native and in-page dialogs and the `PUT …/status` are watched | A confirmation before anything is sent. (An AFTER build's dialog is confirmed, so P is accepted for what follows.) |
 | F6a | Page fetch `PUT /api/investor-applications/:id/status` "Accepted" for Q (the same company name as P); the copy is read for accounts, records and trucks made | 409 with a code; Q not left Accepted; nothing made |
-| F6b | Page fetch `PUT /api/investor-applications/:id/status` "Accepted" for C (A's email); the copy's whole-table counts of `users`, `investors` and `trucks` are read before and after, and its `audit_trail` | 200 `{ success: true, accountCreated: false, existingUserId: <A's id> }` with the message "Accepted. An account with this email already exists (Investor #<A's id>), so no new account, investor record or trucks were created."; C Accepted; the three counts unchanged; one `accept_investor_existing_account` audit row for C. (Mail is blanked, so "no email" is not observable.) |
+| F6b | Page fetch `PUT /api/investor-applications/:id/status` "Accepted" for C (A's email); the copy's whole-table counts of `users`, `investors` and `trucks` are read before and after, and its `audit_trail` | 200 `{ success: true, accountCreated: false, existingUserId: <A's id> }` with the message, exactly, "Accepted. This application's email matches Investor account #<A's id>, so no new account, investor record or trucks were created. Confirm it is the same person before acting on its banking or vehicle details."; C Accepted; the three counts unchanged; one `accept_investor_existing_account` audit row for C. (Mail is blanked, so "no email" is not observable.) |
+| F6c | A throwaway QA-TEST **Driver** account (`POST /api/users`, no driver name) and application D with its email (`POST /api/public/investor-apply`, fake data); page fetch `PUT /api/investor-applications/:id/status` "Accepted" for D; the copy's whole-table counts of `users`, `investors` and `trucks` before and after, and the `audit_trail` rows for D (recorded, not scored) | 409 `{ code: "USER_ALREADY_EXISTS", error }` with the error, exactly, "An account with this email already exists (Driver #<its id>) and it is not an investor account, so this application can't be accepted with that email."; D keeps its status (not Accepted); the three counts unchanged; nothing created for D. FXz deletes the Driver account (API) and D (soft delete, then by id in the copy) |
 | F12b | **Planted:** a fourth document row on application E. **UI:** the list's cell under the "Docs" header (found by its header text, not its position), then E's detail; the list API's `docs_total` for E | The Docs denominator, the API's `docs_total` and the detail all give the real count (4) |
 | F7b | **UI:** "Accepted" picked in application Q's row (Q has accepted P's company name), the confirmation accepted; the list re-reads | 409 `INVESTOR_RECORD_CONFLICT`; the select back at Q's stored status, the server's message shown, Q still listed and nothing created (the copy's counts unchanged) |
-| F7d | C put back by page fetch at the status it had before F6b; **UI:** "Accepted" picked in C's row (C's email is account A's), the confirmation accepted; the list re-reads | 200 `accountCreated: false`; the on-page notice `data-test="application-status-notice"` shows the server's "… so no new account, investor record or trucks were created." message (a warning toast is recorded); C's row reads Accepted; no credentials dialog; the copy's counts unchanged; one `accept_investor_existing_account` audit row for C |
+| F7d | C put back by page fetch at the status it had before F6b; **UI:** "Accepted" picked in C's row (C's email is account A's), the confirmation accepted; the list re-reads | 200 `accountCreated: false` with F6b's exact message ("Accepted. This application's email matches Investor account #<A's id>, …"); the on-page notice `data-test="application-status-notice"` shows it (a warning toast is recorded); C's row reads Accepted; no credentials dialog; the copy's counts unchanged; one `accept_investor_existing_account` audit row for C |
 | F7c | E soft-deleted by page fetch (the open list is not refreshed); "Reviewed" picked in its row | 409 `APPLICATION_DELETED` with the server's message shown; after the list re-reads, E's row is gone (or, still listed, shows the stored status) |
 | F12a | **UI:** `/investors`, P's record → Banking → the eye by the account number | A real reveal (the full number) or no toggle |
 | F14 | A public page (no session) fetches `POST /api/public/investor-onboarding/<P>/banking` with a well-formed random token (a UUID, the removed routes' shape; in the query and the body). New applications get no token, and the route must be gone whatever token is sent | 404; P's bank row unchanged |
@@ -992,12 +1008,25 @@ submitting: the run answers that navigation with a local placeholder page and ab
 | FXc | Every failing resource (an HTTP 4xx/5xx or a request with no answer: its page, method, path and status; numeric ids as `:id`, uploads cut to their folder, never a query string) on every page the section opened, split into the run's own probes and the app's. A probe is a page fetch of the run (it carries `X-QA-Probe: <step>`), a UI request a step sends on purpose (F7b, F7c, F12c) or the harness's `logisx.com` block. Console "Failed to load resource" lines are matched to their resource; other console errors are listed | Recorded, not scored |
 | FXz | Clean-up (below) | Nothing left; the global split as it was |
 
-**Run order:** FX0, F1, F2, F3, F10, F9, F8, F5, F4, F11, F13 (+F13n), FX1, F7a, F6, F12b, F7b, F7d, F7c, F12a, F14,
-F12c, FXc, FXz. F7a accepts P, which F6a, F7b, F12a and F14 need. F6a's refused acceptance leaves Q as it was, so F7b
-can pick "Accepted" in Q's row. F6b accepts C, so F7d first puts C back at its earlier status by page fetch. F12b
-plants on E before F7c removes it.
+**Run order:** FX0, F1, F2, F3, F10, F9, F8, F5, F4, F11, F13 (+F13n), FX1, F7a, F6 (F6a, F6b, F6c), F12b, F7b, F7d,
+F7c, F12a, F14, F12c, FXc, FXz. F7a accepts P, which F6a, F7b, F12a and F14 need. F6a's refused acceptance leaves Q as
+it was, so F7b can pick "Accepted" in Q's row. F6b accepts C, so F7d first puts C back at its earlier status by page
+fetch. F12b plants on E before F7c removes it.
 
-**Budgets per server process:** three sign-ins; four public applications (`POST /api/public/investor-apply` allows 10 per
+**On a build without the exact acceptance wording** (the server change that names an Investor account's match and
+refuses any other role's): F6b and F7d FAIL on the message alone (everything else about them holds), and F6c FAILs
+outright, because that build accepts D over the Driver's email with 200 and marks it Accepted. Its steps still run to
+the end and FXz removes the account and D.
+
+**The Investor Directory's table, and the invites panel's.** `/investors` has two `table.inv-table` elements whenever
+the Personal Invite Links panel lists an invite: the panel reuses the class, and its default filter is "all", so one
+revoked invite an earlier terms run left is enough. `locator('table.inv-table')` then matches both, and Playwright's
+strict mode fails the step (F5 did, and F4 and F12c, which need F5's record, SKIPped). The section addresses the
+directory as the `table.inv-table` whose header has "Investor Name", and every directory row (F1c, F5, F12a, F12c)
+through it. The panel's rows carry no `td.name-cell` (its name is a `div.name-cell`) and no `tr.clickable-row`, so the
+terms section's `findInvestorRow()` (T10) matches the directory only.
+
+**Budgets per server process:** three sign-ins; five public applications (`POST /api/public/investor-apply` allows 10 per
 15 minutes per address); about six `/invest` PDF previews (30 per 15 minutes).
 
 **Clean-up (FXz), in the `finally`:** the API first (legal documents, trucks, investor records, accounts, then the
