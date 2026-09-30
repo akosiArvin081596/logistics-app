@@ -118,7 +118,9 @@
                   <!-- The typed text is never overwritten, so once the generated
                        message moves on (a Bison load's carries the Order #, move #
                        and PO #) the text can quote a number the PDF and the Subject
-                       no longer show. Say so until it matches again or Reset. -->
+                       no longer show. Approve waits until the dispatcher takes the
+                       new message or keeps theirs; the text matching it again, or
+                       Reset, clears it too. -->
                   <p v-if="emailBodyDefaultChanged" id="idp-email-body-stale" data-testid="idp-email-body-stale" class="idp-hint idp-hint-warn">
                     The generated message changed after you edited it (e.g. the Order #). Check your message, or use the new one.
                     <button
@@ -128,6 +130,13 @@
                       :disabled="approving"
                       @click="useGeneratedMessage"
                     >Use the new message</button>
+                    <button
+                      type="button"
+                      class="idp-badge idp-badge-blue"
+                      data-testid="idp-email-body-keep"
+                      :disabled="approving"
+                      @click="keepMyMessage"
+                    >Keep my message</button>
                   </p>
                   <p v-if="edited.emailBody" id="idp-email-body-hint" class="idp-hint">
                     Sent as you wrote it. Changes on the right no longer update it — check any numbers in it.
@@ -559,16 +568,13 @@
       <div class="idp-footer">
         <!-- The note doubles as the disabled-button explanation. A primary action
              that is greyed out with no stated reason reads as a broken app, and
-             "you have edits nobody has rendered yet" is not guessable. With nothing
-             blocking, it repeats the Email tab's "generated message changed" hint
-             while another tab hides it — a warning only; Approve stays enabled.
+             "you have edits nobody has rendered yet" is not guessable. The stale
+             email message is one of those reasons, the last in line, and the only
+             one with a test id of its own.
              Keep ONE .idp-foot-note: the e2e harness reads it as a single element. -->
-        <span class="idp-foot-note" :class="{ 'idp-hint-warn': !!approveBlockedReason || emailBodyStaleElsewhere }">
-          <template v-if="approveBlockedReason">{{ approveBlockedReason }}</template>
-          <span v-else-if="emailBodyStaleElsewhere" data-testid="idp-email-body-stale-foot">
-            The generated email message changed after you edited it. Open the Email message tab to check it.
-          </span>
-          <template v-else>Saves a Gmail draft — it is never auto-sent.</template>
+        <span class="idp-foot-note" :class="{ 'idp-hint-warn': !!approveBlockedReason }">
+          <span v-if="approveHeldForMessage" data-testid="idp-email-body-stale-foot">{{ approveBlockedReason }}</span>
+          <template v-else>{{ approveBlockedReason || 'Saves a Gmail draft — it is never auto-sent.' }}</template>
         </span>
         <div class="idp-foot-actions">
           <button type="button" class="idp-btn idp-btn-ghost" :disabled="approving" @click="onOpenChange(false)">Cancel</button>
@@ -842,16 +848,19 @@ const emailBodyError = computed(() => {
   const r = emailBodyRefusal.value
   return r && r.text === form.emailBody ? r.message : ''
 })
-// The generated message as it stood when the typed text first differed from it,
-// null while the box is unedited. Only typing can make the box differ — every
-// other write sets the text and its baseline together — so this is always the
-// message the dispatcher's editing started from.
+// The generated message the typed text is judged against: the one standing when
+// the text first differed from it, null while the box is unedited. Only typing
+// can make the box differ — every other write sets the text and its baseline
+// together — so this is the message the dispatcher's editing started from, until
+// "Keep my message" moves it on (keepMyMessage).
 const emailBodyEditBase = ref(null)
-watch(() => edited.value.emailBody, (isEdited) => {
+function trackEmailBodyEditBase(isEdited) {
   emailBodyEditBase.value = isEdited ? str(seeded.value.emailBody) : null
-})
+}
+watch(() => edited.value.emailBody, trackEmailBodyEditBase)
 // The typed text is kept, but the message it was edited from has since been
-// regenerated differently, because a field on the right changed.
+// regenerated differently, because a field on the right changed. Approve waits
+// until the dispatcher says which one goes out.
 const emailBodyDefaultChanged = computed(
   () => edited.value.emailBody && emailBodyEditBase.value != null
     && emailBodyEditBase.value.trim() !== str(seeded.value.emailBody).trim(),
@@ -1116,6 +1125,15 @@ function useGeneratedMessage() {
   nextTick(() => { if (emailBodyInput.value) emailBodyInput.value.focus() })
 }
 
+// "Keep my message": the dispatcher has seen the new generated message and keeps
+// their own. The text and its "edited" badge stay; only the baseline moves to the
+// current message, which clears the hint and unblocks Approve — until a field
+// change regenerates the message again.
+function keepMyMessage() {
+  emailBodyEditBase.value = str(seeded.value.emailBody)
+  nextTick(() => { if (emailBodyInput.value) emailBodyInput.value.focus() })
+}
+
 function onFieldInput() { schedulePreview() }
 // Dates commit in one gesture rather than character by character, so debouncing
 // them just adds lag; `blur` covers a keyboard-typed date that never fires change.
@@ -1168,13 +1186,19 @@ function buildOverrideBody({ forPreview = false } = {}) {
   }
   if (has('billToName') || edited.value.billToName) body.billToName = form.billToName.trim()
   if (has('brokerName') || edited.value.brokerName) body.brokerName = form.brokerName.trim()
-  // ⚠️ NO `has('poNumber')` ARM. The dryRun echoes poNumber, so has() is ALWAYS
-  // true — which sent the key on every request and made the server's
-  // omitted-vs-empty rule meaningless: `ov.has.poNumber` was permanently set, so
-  // needsPoNumber could never fire and the `|| noPoOnRatecon` clause below was
-  // dead code contradicting its own comment. Send it only when a human has
-  // actually answered: typed a value, or ticked "this rate-con has no PO #".
-  if (edited.value.poNumber || noPoOnRatecon.value) body.poNumber = form.poNumber.trim()
+  // ⚠️ The APPROVE has no `has('poNumber')` arm. The dryRun echoes poNumber, so
+  // has() is ALWAYS true — which sent the key on every approve and made the
+  // server's omitted-vs-empty rule meaningless: `ov.has.poNumber` was permanently
+  // set, so needsPoNumber could never fire and the `|| noPoOnRatecon` clause was
+  // dead code contradicting its own comment. The approve sends it only when a
+  // human has actually answered: typed a value, or ticked "this rate-con has no
+  // PO #". Left out, the approve derives the PO # again itself.
+  //
+  // A PREVIEW sends whatever the form holds. It reads no sheet, so a PO # it is
+  // not given renders as none: gone from the PDF's PO line, and from a Bison
+  // cover note's "& PO #" — which an untouched message box then adopted, so an
+  // edit made after that sent the draft without its PO #.
+  if (edited.value.poNumber || noPoOnRatecon.value || (forPreview && has('poNumber'))) body.poNumber = form.poNumber.trim()
   if (has('deliveryDateIso') || edited.value.deliveryDate) body.deliveryDate = form.deliveryDate
   // A non-UI pinned field: moveNumber has no input but IS printed in the
   // Bison cover letter, so passing it through is what keeps the emailed body the
@@ -1246,10 +1270,14 @@ const orderNumberIsFallback = computed(
 
 // Never approve a value nobody has seen rendered. A FAILED preview is deliberately
 // not a block, though: a render outage would otherwise make the whole feature
-// unusable, and the failure is surfaced loudly beside the fields instead.
+// unusable, and the failure is surfaced loudly beside the fields instead. Nor an
+// edited email message whose generated original has changed since: it may quote
+// an Order # or PO # the invoice no longer carries, so the dispatcher chooses first.
 const canApprove = computed(
-  () => formValid.value && !emailBodyError.value && !previewing.value && !previewPending.value && !refsBlocked.value,
+  () => formValid.value && !emailBodyError.value && !previewing.value && !previewPending.value && !refsBlocked.value
+    && !emailBodyDefaultChanged.value,
 )
+const EMAIL_BODY_STALE_REASON = 'The generated email message changed after you edited it. Open the Email message tab and choose Use the new message or Keep my message.'
 const approveBlockedReason = computed(() => {
   if (approving.value || canApprove.value) return ''
   if (firstFieldError.value) return firstFieldError.value
@@ -1268,12 +1296,12 @@ const approveBlockedReason = computed(() => {
       ? 'Rendering your changes — approve once the preview updates.'
       : 'Open the Invoice tab to render your edits — the draft is only built from values you have seen.'
   }
+  // Last: not a fault to fix but a choice to make, so every real reason outranks it.
+  if (emailBodyDefaultChanged.value) return EMAIL_BODY_STALE_REASON
   return ''
 })
-// The Email tab's "generated message changed" hint, for the footer while another
-// tab hides it. Informational: the typed text is the dispatcher's call, so this
-// never blocks the approve.
-const emailBodyStaleElsewhere = computed(() => emailBodyDefaultChanged.value && activeTab.value !== 'email')
+// The footer gives that last reason its own test id.
+const approveHeldForMessage = computed(() => approveBlockedReason.value === EMAIL_BODY_STALE_REASON)
 
 // Seed on the CLOSED -> OPEN transition only. The old watcher also fired on any
 // new `props.preview` identity: nothing re-fetches while the modal is open today,
