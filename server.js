@@ -337,6 +337,18 @@ app.use((req, res, next) => {
 	next();
 });
 app.use(compression());
+// POST /api/public/investor-w9-check reads four short text fields, so its body
+// is parsed here with a 16 KB limit, before the 50 MB parser below: body-parser
+// skips a body that has already been parsed, so that parser never reads this
+// one. A larger body is refused 413 BODY_TOO_LARGE before it is read (by its
+// Content-Length) or as soon as it passes 16 KB; any other parse failure goes
+// on to the JSON error handler at the end of the file.
+app.use("/api/public/investor-w9-check", express.json({ limit: "16kb" }), (err, req, res, next) => {
+	if (err && err.type === "entity.too.large") {
+		return res.status(413).json({ error: "Too much was sent to check. Please shorten what you entered and try again.", code: "BODY_TOO_LARGE" });
+	}
+	next(err);
+});
 // 50 MB body limit — covers driver application payloads that bundle
 // 3 high-res iPhone photos (CDL front + back + medical card) as base64.
 // nginx client_max_body_size is set slightly above this so rejections
@@ -9885,8 +9897,11 @@ const PUBLIC_W9_CHECK_SCALAR_FIELDS = ["legal_name", "dba", "address", "signatur
 // { ok: true }, or the 400 the application would get. The TIN is not sent
 // here; the page checks it with its copy of the rule (client/src/lib/taxId.js).
 //
-// 60 / 15 min per IP: one call per Continue on step 1 and per W-9 signature,
-// and each is a few string comparisons.
+// 60 / 15 min per IP: one call per Continue on step 1 and per W-9 signature.
+// Each is bounded: the body is parsed with a 16 KB limit (413 BODY_TOO_LARGE,
+// mounted above the global parser), and a value over its length cap is
+// refused (400 VALUE_TOO_LONG) before the font looks at one character of it,
+// so the per-character check never walks more than 300 characters a field.
 const investorTaxFormCheckLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
 	max: 60,
@@ -9923,7 +9938,8 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 			return res.status(400).json({ error: shape.message, code: "INVALID_FIELD", reason: shape.reason, field: shape.field });
 		}
 		// The W-9 prints the TIN in nine boxes, and the name, business name and
-		// address in a font with Latin characters only (lib/w9-input.js).
+		// address, each within its length cap, in a font with Latin characters
+		// only (lib/w9-input.js).
 		// Refused here, before the first write, or the application is stored
 		// with a W-9 that cannot be produced.
 		const tinCheck = w9Input.checkW9Tin(ein_ssn);
