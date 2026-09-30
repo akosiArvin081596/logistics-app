@@ -20,7 +20,8 @@
 //   §7 DISCRIMINATION — defang the token pattern, require an assertion to flip
 //   §8 the admin side: the invite form's "contract only" warning stays up
 //      until the server says lease payouts are on; the payout basis words
-//      (L1, L4-L6), the month bounds and the accept line; two sabotages
+//      (L1, L4-L6), the month bounds, the accept line and the Payouts
+//      history's lease change lines; two sabotages
 //
 // No network, no DOM, no Vue runtime.
 //
@@ -369,6 +370,28 @@ function warningChecks(b) {
   ok('accept: not recorded says why and where', basis.acceptBasisLine({ recorded: false, reason: 'LEASE_AMOUNT_WHOLE_DOLLARS' }) ===
     'No payout basis was recorded: the signed lease amount is not a whole number of dollars. Set it in the Payout Basis panel on the Investors page')
   ok('accept: no payoutBasis, no line', basis.acceptBasisLine(undefined) === '' && basis.acceptBasisLine(null) === '' && basis.acceptBasisLine({}) === '')
+}
+{
+  // The Payouts console's "Changes to this amount": each kind of lease change reads differently.
+  const lease = (leaseAmount, paidAmount, reason = null, coveredDays = 30) => ({ netProfit: 900, payoutBasis: { type: 'lease', leaseAmount, paidAmount, coveredDays, daysInMonth: 30, reason } })
+  const split = { netProfit: 900, splitPct: 50, revenue: 5000 }
+  const d = basis.describeLeaseChange
+  ok('history: two split snapshots are not a lease change (the revenue-and-cost reading stays)', d(split, { ...split, revenue: 4000 }) === null && d(split, undefined) === null)
+  ok('history: the first entry reads as the month\'s reason, or L1', d(lease(2000, 2000), undefined) === 'Fixed monthly lease' &&
+    d(lease(2000, 0, 'downtime'), undefined) === basis.leaseReasonText(lease(2000, 0, 'downtime').payoutBasis))
+  ok('history: the amount changed', d(lease(2500, 2500), lease(2000, 2000)) === 'Monthly lease $2,000 → $2,500')
+  ok('history: what the month pays changed', d(lease(2000, 0, 'downtime'), lease(2000, 2000)) === basis.leaseReasonText(lease(2000, 0, 'downtime').payoutBasis) &&
+    d(lease(2000, 2000), lease(2000, 1333, 'prorated', 20)) === 'Now pays the full lease of $2,000' &&
+    d(lease(2000, 1400, 'prorated', 21), lease(2000, 1333, 'prorated', 20)) === 'The lease covered 21 of 30 days this month, so this month pays $1,400.')
+  ok('history: both at once', d(lease(2500, 0, 'not_in_service', 0), lease(2000, 2000)) === `Monthly lease $2,000 → $2,500 · ${basis.leaseReasonText(lease(2500, 0, 'not_in_service', 0).payoutBasis)}`)
+  ok('history: the basis switched, each way', d(lease(2000, 2000), split) === 'Switched to a fixed monthly lease of $2,000' &&
+    d(lease(2000, 1333, 'prorated', 20), split) === 'Switched to a fixed monthly lease of $2,000 · The lease covered 20 of 30 days this month, so this month pays $1,333.' &&
+    d(split, lease(2000, 2000)) === 'Switched from the fixed monthly lease to the Split %')
+  ok('history: the four kinds are four different lines', new Set([d(lease(2500, 2500), lease(2000, 2000)), d(lease(2000, 0, 'downtime'), lease(2000, 2000)),
+    d(lease(2000, 2000), split), d(split, lease(2000, 2000))]).size === 4)
+  ok('history: a lease entry that changed none of them reads as the month\'s reason, or L1', d(lease(2000, 2000), lease(2000, 2000)) === 'Fixed monthly lease')
+  const VIEW = read('client/src/views/PayoutsView.vue')
+  ok('the Payouts console reads a lease change first, else the split movement', /return describeLeaseChange\(now, prev\) \?\? describeMove\(now, prev\)/.test(VIEW))
 }
 {
   const flipped = warningChecks(await basisWith('return settings?.enabled !== true', 'return !!settings && settings.enabled !== true'))

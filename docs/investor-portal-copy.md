@@ -638,6 +638,16 @@ Today this shows on the loss months and the months that paid them off: August 20
 
 The all-time Net Profit now subtracts the maintenance fund and compliance cost too, as each month's net profit already does; both are $0 for every investor today, so no figure moves.
 
+### 18.3 Proposed corrections, NOT applied — awaiting owner/client decision
+
+These three would change what a split (50/50) investor sees today, so **nothing below has shipped**: each is described as it is now, with the change we propose. Say which to make.
+
+| | What it does today | Proposed | Status |
+|---|---|---|---|
+| (a) | Earnings, the all-time **Your Earnings**: the all-time net profit × your split, rounded once, with the formula line `= net × 50%`. Cash Flow's **Your Earnings (to date)** and the payouts ledger add up each month's own rounded share instead, so the two can differ by $1: one investor sees **$7,644** on Earnings and **$7,645** on Cash Flow today. | Show the ledger's sum (the Cash Flow figure) on Earnings too, and change the formula line to `= sum of each month's share`. | **Awaiting decision** |
+| (b) | Fleet, the **Est. Your Revenue** dialog's steps for a split investor: `1. Take the last 3 months of revenue from the loads that truck hauled.` `2. Subtract driver pay, fixed costs and trip expenses, then apply your profit split.` `3. Multiply that monthly take-home by 12.` The figure is not worked out that way: the server takes the fleet's take-home over those months and divides it across the trucks in proportion to the revenue each truck's loads earned. | `1. Take your take-home over the last 3 months.` `2. Divide it across your trucks in proportion to the revenue from the loads each truck hauled in those months.` `3. Multiply that monthly take-home by 12.` (the lease steps in §17.5, which already describe the real calculation). | **Awaiting decision** |
+| (c) | Earnings, a month's **How Your Earnings Are Calculated** and **Net Profit** dialogs list three cost rows (Driver Pay, Fixed Costs, Trip Expenses), and their `Revenue − … = Net Profit` line subtracts only those three, while the month's net profit also subtracts the maintenance fund and compliance cost. Both are $0 for every investor today, so every line still adds up. | Add a `Maintenance Fund` and a `Compliance / IFTA` row (and the two terms in the line) for a month that has either cost, as the all-time Expenses dialog does since §18.2. | **Awaiting decision** |
+
 ---
 
 ## The ones I'd raise first
@@ -650,3 +660,4 @@ The all-time Net Profit now subtracts the maintenance fund and compliance cost t
 5. **§16.2 / §16.3, the report's two choices** — whole months for a mid-month date range, and `Not available` / `Not recorded` instead of $0 for a truck with no recorded purchase price (*Business ROI*, which does not use the price, keeps its number). Each is one setting; the other setting is the report as it was.
 6. **§17, paying the lease itself** — the answer to item 4, behind a switch that ships off. Three settings to confirm (downtime unpaid, daily proration, retirement stops the lease), and one gap: downtime inside an otherwise active month is still paid.
 7. **§18.1, the Payouts breakdown of a loss month** — the one change a 50/50 investor sees today: the carry rows between the share and the settled $0, and no more "records have changed" note when nothing changed.
+8. **§18.3, three corrections NOT applied** — the $1 gap between the two all-time earnings figures, the Fleet dialog's description of the split projection, and the two costs missing from the month's Net Profit dialogs. Each waits for your decision.

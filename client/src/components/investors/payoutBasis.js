@@ -50,6 +50,29 @@ export function leaseReasonText(basis) {
   return basis && basis.type === 'lease' ? leaseReasonLine(basis) : ''
 }
 
+// Why one history entry of a month differs from the one before it, when either
+// snapshot is a lease month (it carries payoutBasis), or null when neither is:
+// a split month keeps its revenue-and-cost reading. Each kind of change reads
+// differently: the basis switched, the lease amount changed, or what the month
+// pays changed (its days, downtime, no truck in service, the full lease). The
+// first entry (no previous one) and an entry that changed none of these read
+// as the month's reason, or L1.
+export function describeLeaseChange(now, prev) {
+  const a = now?.payoutBasis?.type === 'lease' ? now.payoutBasis : null
+  const b = prev?.payoutBasis?.type === 'lease' ? prev.payoutBasis : null
+  if (!a && !b) return null
+  if (!a) return 'Switched from the fixed monthly lease to the Split %'
+  const standing = leaseReasonText(a) || LEASE_LABEL
+  if (!prev) return standing
+  if (!b) return [`Switched to a fixed monthly lease of ${formatLeaseAmount(a.leaseAmount)}`, leaseReasonText(a)].filter(Boolean).join(' · ')
+  const parts = []
+  if (a.leaseAmount !== b.leaseAmount) parts.push(`Monthly lease ${formatLeaseAmount(b.leaseAmount)} → ${formatLeaseAmount(a.leaseAmount)}`)
+  if (a.reason !== b.reason || a.coveredDays !== b.coveredDays || a.daysInMonth !== b.daysInMonth) {
+    parts.push(leaseReasonText(a) || `Now pays the full lease of ${formatLeaseAmount(a.leaseAmount)}`)
+  }
+  return parts.length ? parts.join(' · ') : standing
+}
+
 // One basis ({ type, leaseAmount, splitPct, effectiveMonth }) in a phrase:
 // "Fixed monthly lease of $2,000 from September 2026", "Split at 50% of net profit".
 export function describeBasis(basis) {

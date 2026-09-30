@@ -472,9 +472,13 @@ const LEASE_2000 = { type: "lease", leaseAmountCents: 200000, details: "" };
 
 		const repeat = addApplication(srv.db, { name: "Repeat Hauling LLC", email: "lease@example.test", terms: LEASE_2000 });
 		const rr = await accept(srv, repeat);
-		ok(rr.status === 200 && rr.body.accountCreated === false && /fixed monthly lease of \$2,000\.00/.test(rr.body.message) && /no payout basis was recorded/.test(rr.body.message),
-			"§6 an application for an existing account: its message names the lease");
+		ok(rr.status === 200 && rr.body.accountCreated === false && /fixed monthly lease of \$2,000; no payout basis was recorded/.test(rr.body.message),
+			"§6 an application for an existing account: its message names the lease, in whole dollars");
 		eq(basisRows(srv.db, rr.body.existingUserId).length, 1, "§6 …and records nothing more for that account");
+		const repeatCents = addApplication(srv.db, { name: "Repeat Cents LLC", email: "lease@example.test", terms: { type: "lease", leaseAmountCents: 200050, details: "" } });
+		const rrc = await accept(srv, repeatCents);
+		ok(rrc.status === 200 && /fixed monthly lease of \$2,000\.50; no payout basis was recorded/.test(rrc.body.message),
+			"§6 …a lease signed with cents keeps its cents");
 	}
 
 	// ── §7 GET /api/investors ─────────────────────────────────────────────────

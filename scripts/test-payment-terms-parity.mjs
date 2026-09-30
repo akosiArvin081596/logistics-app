@@ -163,6 +163,8 @@ for (const input of ['2000.50', '2000.01', 2000.5, '0.50', '0.99', '1234.56']) {
     client.normalizeTermsInput({ paymentType: 'lease', leaseAmount: input }).message === WHOLE_DOLLARS)
 }
 ok('out of range in whole dollars is still out of range', client.parseLeaseAmountToCents('100001').reason === 'amount_out_of_range' && client.parseLeaseAmountToCents('0').reason === 'amount_out_of_range')
+const OUT_OF_RANGE = 'The monthly lease amount must be between $1 and $100,000.'
+ok('the range message is in whole dollars, like every lease amount, on both sides', client.MESSAGES.amount_out_of_range === OUT_OF_RANGE && lib.MESSAGES.amount_out_of_range === OUT_OF_RANGE)
 
 // ══ Sabotage controls ═════════════════════════════════════════════════════════
 async function sabotaged(from, to) {

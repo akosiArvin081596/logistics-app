@@ -700,7 +700,7 @@ import { useApi } from '../composables/useApi'
 import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
 import { fmtYmd, fmtTimestamp, parseYmdLocal } from '../utils/datetime'
-import { LEASE_LABEL, leaseReasonText } from '../components/investors/payoutBasis'
+import { LEASE_LABEL, leaseReasonText, describeLeaseChange } from '../components/investors/payoutBasis'
 import { hasAmountDue, showsNothingDue, nothingDueReason } from '../lib/payoutDue'
 
 const api = useApi()
@@ -756,9 +756,11 @@ function describeMove(now, prev) {
 function leaseReason(row) {
   return leaseReasonText(row?.payoutBasis)
 }
+// A history entry where either side is a lease month says which change it was
+// (the basis switched, the lease amount, or what the month pays); two split
+// snapshots read as their revenue and cost movements, as before.
 function describeEntry(now, prev) {
-  if (now?.payoutBasis) return leaseReasonText(now.payoutBasis) || LEASE_LABEL
-  return describeMove(now, prev)
+  return describeLeaseChange(now, prev) ?? describeMove(now, prev)
 }
 
 async function toggleHistory(ownerId, p) {

@@ -12447,11 +12447,15 @@ function recordSignedPayoutBasis(req, { applicationId, ownerId, investorId }) {
 // The acceptance of an application whose email is already an Investor account's
 // records no payout basis: the account may already have one, and whose account it
 // is needs the same confirmation as the banking. When the signed terms are a
-// lease, the admin's message says so (" Its signed terms are …"), else "".
+// lease, the admin's message says so (" Its signed terms are …"), else "". The
+// amount is whole dollars ("$2,000") like every other lease amount; a lease
+// signed with cents before amounts became whole dollars prints its cents.
 function unrecordedLeaseNote(applicationId) {
 	const signed = signedPaymentTermsOf(applicationId);
 	if (!signed || signed.type !== "lease") return "";
-	return ` Its signed terms are a fixed monthly lease of ${investorPaymentTerms.formatMoneyCents(Math.round(signed.leaseAmount * 100))}; no payout basis was recorded, so set it on that investor's payout basis if it applies.`;
+	const cents = Math.round(signed.leaseAmount * 100);
+	const amount = cents % 100 === 0 ? investorPayoutBasis.formatLeaseAmount(cents / 100) : investorPaymentTerms.formatMoneyCents(cents);
+	return ` Its signed terms are a fixed monthly lease of ${amount}; no payout basis was recorded, so set it on that investor's payout basis if it applies.`;
 }
 
 function payoutBasisRowView(r) {
