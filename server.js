@@ -91,6 +91,7 @@ const { csvRows } = require("./lib/csv");
 const piiMask = require("./lib/pii-mask");
 // Boundary checks shared by every unauthenticated form route (email, vehicles).
 const publicFormInput = require("./lib/public-form-input");
+const w9Input = require("./lib/w9-input");
 
 // ---------------------------------------------------------------------------
 // PII_MASK_ENABLED — deliberately defaults ON, unlike every other flag here.
@@ -9871,6 +9872,38 @@ const PUBLIC_INVESTOR_SCALAR_FIELDS = [
 	"invite_token", "invite_terms_revision",
 ];
 const PUBLIC_BANKING_SCALAR_FIELDS = ["bank_name", "account_type", "routing_number", "account_number", "account_name"];
+// The fields the W-9 preview prints (fillW9Form), each ONE scalar.
+const PUBLIC_W9_PREVIEW_SCALAR_FIELDS = ["legal_name", "dba", "address", "ein_ssn", "signatureText"];
+// The fields POST /api/public/investor-w9-check reads.
+const PUBLIC_W9_CHECK_SCALAR_FIELDS = ["legal_name", "dba", "address", "signatureText"];
+
+// POST /api/public/investor-w9-check — /invest asks, before it moves on,
+// whether the W-9 can print what was typed: the legal name, business name and
+// address on step 1, and the name a W-9 signature is signed with. It runs the
+// application's own check (lib/w9-input.js checkW9Text), so the page needs no
+// character list of its own. Nothing is stored, rendered or sent: 200
+// { ok: true }, or the 400 the application would get. The TIN is not sent
+// here; the page checks it with its copy of the rule (client/src/lib/taxId.js).
+//
+// 60 / 15 min per IP: one call per Continue on step 1 and per W-9 signature,
+// and each is a few string comparisons.
+const investorTaxFormCheckLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 60,
+	message: { error: "Too many requests. Try again later." },
+	standardHeaders: true,
+});
+app.post("/api/public/investor-w9-check", investorTaxFormCheckLimiter, (req, res) => {
+	const shape = publicFormInput.checkPublicScalars(req.body, PUBLIC_W9_CHECK_SCALAR_FIELDS);
+	if (!shape.ok) {
+		return res.status(400).json({ error: shape.message, code: "INVALID_FIELD", reason: shape.reason, field: shape.field });
+	}
+	const w9Text = w9Input.checkW9Text(req.body, { signature: "signatureText" });
+	if (!w9Text.ok) {
+		return res.status(400).json({ error: w9Text.message, code: w9Text.code, field: w9Text.field });
+	}
+	return res.json({ ok: true });
+});
 
 // POST /api/public/investor-apply — Single atomic submission: form + vehicles + banking + signatures
 app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
@@ -9888,6 +9921,18 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 		const shape = publicFormInput.checkPublicScalars(req.body, PUBLIC_INVESTOR_SCALAR_FIELDS);
 		if (!shape.ok) {
 			return res.status(400).json({ error: shape.message, code: "INVALID_FIELD", reason: shape.reason, field: shape.field });
+		}
+		// The W-9 prints the TIN in nine boxes, and the name, business name and
+		// address in a font with Latin characters only (lib/w9-input.js).
+		// Refused here, before the first write, or the application is stored
+		// with a W-9 that cannot be produced.
+		const tinCheck = w9Input.checkW9Tin(ein_ssn);
+		if (!tinCheck.ok) {
+			return res.status(400).json({ error: tinCheck.message, code: tinCheck.code, field: "ein_ssn" });
+		}
+		const w9Text = w9Input.checkW9Text(req.body);
+		if (!w9Text.ok) {
+			return res.status(400).json({ error: w9Text.message, code: w9Text.code, field: w9Text.field });
 		}
 		// A payment terms invitation, when the applicant came through one. Checked
 		// here, before anything is written, and checked AGAIN inside applyTx()
@@ -9956,6 +10001,13 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 			const consent = readTransmittedConsent(sig, res, { docLabel: doc.name });
 			if (!consent) return;
 			consentByDoc[doc.key] = consent;
+		}
+		// The W-9 prints its signature too, in Helvetica Bold (fillW9Form). Only
+		// the W-9's: the two contracts are rendered by Chromium, and theirs are
+		// not restricted.
+		const w9Signature = w9Input.checkW9Printable([{ field: "signatures.w9.text", value: signatures.w9.text, font: "signature" }]);
+		if (!w9Signature.ok) {
+			return res.status(400).json({ error: w9Signature.message, code: w9Signature.code, field: w9Signature.field });
 		}
 		const net = signerNetworkEvidence(req);
 
@@ -10748,11 +10800,28 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", taxClassi
 	//
 	// It now REPORTS instead, and the caller asserts on the two fields that make
 	// this a tax document rather than a blank form.
+	//
+	// It reports the CAUSE, because the failure message is the alert ops acts
+	// on, and "the template changed" sends them after the wrong thing when the
+	// value was the problem. pdf-lib's own limits are asked before the value is
+	// set:
+	//   - unfilledFields: the template has no such text field, or the value did
+	//     not read back -- the AcroForm no longer matches this code;
+	//   - unprintableLines: the form's font (Helvetica, whose characters are
+	//     Latin) cannot encode the value -- the input, not the template;
+	//   - overlongLines: the value is longer than the field's own maximum
+	//     (Part I's boxes) -- the input, not the template.
 	const unfilledFields = [];
-	const setField = (name, value) => {
+	const unprintableLines = [];
+	const overlongLines = [];
+	const encodes = (pdfFont, text) => { try { pdfFont.encodeText(text); return true; } catch { return false; } };
+	const setField = (name, value, line) => {
 		const want = value == null ? "" : String(value);
 		try {
 			const f = form.getTextField(name);
+			if (!encodes(font, want)) { unprintableLines.push(line); return false; }
+			const max = f.getMaxLength();
+			if (max !== undefined && want.length > max) { overlongLines.push(line); return false; }
 			f.setText(want);
 			f.updateAppearances(font);
 			// Read it straight back off the AcroForm — "setText did not throw" is a
@@ -10767,9 +10836,9 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", taxClassi
 	let tinLanded = false;
 
 	// Line 1: Name
-	if (legalName) nameLanded = setField("topmostSubform[0].Page1[0].f1_01[0]", legalName);
+	if (legalName) nameLanded = setField("topmostSubform[0].Page1[0].f1_01[0]", legalName, "Line 1 (name)");
 	// Line 2: DBA
-	if (dba) setField("topmostSubform[0].Page1[0].f1_02[0]", dba);
+	if (dba) setField("topmostSubform[0].Page1[0].f1_02[0]", dba, "Line 2 (business name)");
 
 	// Line 3a: Entity type checkboxes
 	const entityCheckMap = {
@@ -10815,17 +10884,17 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", taxClassi
 	}
 	// LLC tax classification letter
 	if (llcLetter) {
-		setField("topmostSubform[0].Page1[0].Boxes3a-b_ReadOrder[0].f1_03[0]", llcLetter);
+		setField("topmostSubform[0].Page1[0].Boxes3a-b_ReadOrder[0].f1_03[0]", llcLetter, "Line 3a (LLC classification)");
 	}
 
 	// Line 5: Street address, Line 6: City/State/ZIP
 	if (address) {
 		const parts = address.split(",").map(s => s.trim());
 		// Line 5 — street address
-		setField("topmostSubform[0].Page1[0].Address_ReadOrder[0].f1_07[0]", parts[0] || address);
+		setField("topmostSubform[0].Page1[0].Address_ReadOrder[0].f1_07[0]", parts[0] || address, "Line 5 (address)");
 		// Line 6 — city, state, ZIP (f1_08 is Line 6; f1_09 is "Requester's name" — wrong box)
 		if (parts.length > 1) {
-			setField("topmostSubform[0].Page1[0].Address_ReadOrder[0].f1_08[0]", parts.slice(1).join(", "));
+			setField("topmostSubform[0].Page1[0].Address_ReadOrder[0].f1_08[0]", parts.slice(1).join(", "), "Line 6 (city, state, ZIP)");
 		}
 	}
 
@@ -10849,14 +10918,14 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", taxClassi
 			// SSN fields (3 + 2 + 4). All three must land: a partial TIN is not a
 			// lesser version of the right answer, it is a different (wrong)
 			// number on a tax form.
-			const a = setField("topmostSubform[0].Page1[0].f1_11[0]", digits.slice(0, 3));
-			const b = setField("topmostSubform[0].Page1[0].f1_12[0]", digits.slice(3, 5));
-			const c = setField("topmostSubform[0].Page1[0].f1_13[0]", digits.slice(5));
+			const a = setField("topmostSubform[0].Page1[0].f1_11[0]", digits.slice(0, 3), "Part I (TIN)");
+			const b = setField("topmostSubform[0].Page1[0].f1_12[0]", digits.slice(3, 5), "Part I (TIN)");
+			const c = setField("topmostSubform[0].Page1[0].f1_13[0]", digits.slice(5), "Part I (TIN)");
 			tinLanded = a && b && c;
 		} else if (digits.length >= 2) {
 			// EIN fields (2 + 7)
-			const a = setField("topmostSubform[0].Page1[0].f1_14[0]", digits.slice(0, 2));
-			const b = digits.length > 2 ? setField("topmostSubform[0].Page1[0].f1_15[0]", digits.slice(2)) : true;
+			const a = setField("topmostSubform[0].Page1[0].f1_14[0]", digits.slice(0, 2), "Part I (TIN)");
+			const b = digits.length > 2 ? setField("topmostSubform[0].Page1[0].f1_15[0]", digits.slice(2), "Part I (TIN)") : true;
 			tinLanded = a && b;
 		}
 	}
@@ -10871,6 +10940,28 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", taxClassi
 	// ⚠️ The message names FIELDS, never values. It is persisted to
 	// onboarding_documents.signing_error / investor_onboarding_documents and is
 	// emailed by alertOnboardingDocFailure() — an SSN or EIN must never reach it.
+	//
+	// A value the form cannot hold refuses the W-9 on whichever line it is: a
+	// W-9 without what was typed is not produced. Checked first, so the
+	// template-mismatch message below is only ever about the template.
+	const lines = (list) => [...new Set(list)].join(" and ");
+	const unprintable = (list) => {
+		const e = new Error(
+			`W-9 cannot print ${lines(list)}: the text has characters the form's font (Helvetica, Latin characters only) ` +
+			"cannot encode. Refusing to produce a W-9 without it.",
+		);
+		e.code = "DOCUMENT_TEXT_UNPRINTABLE";
+		return e;
+	};
+	if (unprintableLines.length) throw unprintable(unprintableLines);
+	if (overlongLines.length) {
+		const e = new Error(
+			`W-9 cannot print ${lines(overlongLines)}: the value is longer than its boxes on the form. ` +
+			"Refusing to produce a W-9 without it.",
+		);
+		e.code = "DOCUMENT_VALUE_TOO_LONG";
+		throw e;
+	}
 	const w9Missing = [];
 	if (legalName && !nameLanded) w9Missing.push("Line 1 (name)");
 	if (einSsn && !tinLanded) w9Missing.push("Part I (TIN)");
@@ -10892,6 +10983,7 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", taxClassi
 		const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
 		const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
 		const blue = rgb(0.1, 0.34, 0.86);
+		if (!encodes(fontBold, signatureText)) throw unprintable(["the signature"]);
 		// "Sign Here" line on page 1 — "Signature of U.S. person" field
 		const sigY = 195;
 		page1.drawText(signatureText, { x: 120, y: sigY, size: 10, font: fontBold, color: blue });
@@ -11646,6 +11738,22 @@ app.post("/api/public/investor-preview-pdf/:docKey", pdfPreviewLimiter, async (r
 			return res.send(pdfBuffer);
 		}
 		if (docKey === "w9") {
+			// The same checks as POST /api/public/investor-apply, so the preview
+			// never shows a W-9 the submission would refuse, and never answers 500
+			// for text the form's font cannot print. A preview with no TIN prints
+			// none. Only the W-9: the two contracts above are rendered by Chromium.
+			const w9Shape = publicFormInput.checkPublicScalars(req.body, PUBLIC_W9_PREVIEW_SCALAR_FIELDS);
+			if (!w9Shape.ok) {
+				return res.status(400).json({ error: w9Shape.message, code: "INVALID_FIELD", reason: w9Shape.reason, field: w9Shape.field });
+			}
+			const tinCheck = w9Input.checkW9Tin(ein_ssn);
+			if (!tinCheck.ok) {
+				return res.status(400).json({ error: tinCheck.message, code: tinCheck.code, field: "ein_ssn" });
+			}
+			const w9Text = w9Input.checkW9Text(req.body, { signature: "signatureText" });
+			if (!w9Text.ok) {
+				return res.status(400).json({ error: w9Text.message, code: w9Text.code, field: w9Text.field });
+			}
 			const pdfBytes = await fillW9Form({ ...appData, taxClassification: req.body.tax_classification });
 			if (!pdfBytes) return res.status(404).json({ error: "W-9 template not found" });
 			if (invite) setInvitePreviewHeaders(res, invite);

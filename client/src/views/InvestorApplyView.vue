@@ -110,11 +110,21 @@
           <div class="form-grid">
             <div class="field full">
               <label>Legal Name (Individual or Entity) <span class="req">*</span></label>
-              <input v-model="form.legal_name" placeholder="e.g. John Doe or Doe Enterprises LLC" data-wizard-target="legal-name" required />
+              <input
+                v-model="form.legal_name" placeholder="e.g. John Doe or Doe Enterprises LLC" data-wizard-target="legal-name" required
+                :aria-invalid="w9FieldErrors.legal_name ? 'true' : 'false'"
+                :aria-describedby="w9FieldErrors.legal_name ? 'invest-legal-name-error' : undefined"
+              />
+              <p v-if="w9FieldErrors.legal_name" id="invest-legal-name-error" class="field-error" role="alert">{{ w9FieldErrors.legal_name }}</p>
             </div>
             <div class="field">
               <label>DBA <span class="opt">(if applicable)</span></label>
-              <input v-model="form.dba" placeholder="Doing business as..." data-wizard-target="dba" />
+              <input
+                v-model="form.dba" placeholder="Doing business as..." data-wizard-target="dba"
+                :aria-invalid="w9FieldErrors.dba ? 'true' : 'false'"
+                :aria-describedby="w9FieldErrors.dba ? 'invest-dba-error' : undefined"
+              />
+              <p v-if="w9FieldErrors.dba" id="invest-dba-error" class="field-error" role="alert">{{ w9FieldErrors.dba }}</p>
             </div>
             <div class="field">
               <label>Entity Type</label>
@@ -127,7 +137,11 @@
               <label>Principal Address <span class="req">*</span></label>
               <div class="address-row">
                 <div class="address-input-wrap">
-                  <input ref="addressInput" v-model="form.address" placeholder="Start typing an address..." data-wizard-target="address" required autocomplete="off" />
+                  <input
+                    ref="addressInput" v-model="form.address" placeholder="Start typing an address..." data-wizard-target="address" required autocomplete="off"
+                    :aria-invalid="w9FieldErrors.address ? 'true' : 'false'"
+                    :aria-describedby="w9FieldErrors.address ? 'invest-address-error' : undefined"
+                  />
                   <button type="button" class="addr-action-btn" :disabled="geolocating" @click="useCurrentLocation" title="Use my current location">
                     <svg v-if="!geolocating" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
                     <span v-else class="spinner"></span>
@@ -137,6 +151,7 @@
                   <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5z"/></svg>
                 </button>
               </div>
+              <p v-if="w9FieldErrors.address" id="invest-address-error" class="field-error" role="alert">{{ w9FieldErrors.address }}</p>
             </div>
             <div class="field"><label>Primary Contact Person</label><input v-model="form.contact_person" placeholder="Full name" /></div>
             <div class="field">
@@ -186,7 +201,16 @@
               <label>Tax Classification</label>
               <select v-model="form.tax_classification"><option value="">Select...</option><option>C-Corp</option><option>S-Corp</option><option>Partnership</option><option>Individual/LLC</option></select>
             </div>
-            <div class="field"><label>EIN or SSN <span class="req">*</span></label><input v-model="form.ein_ssn" placeholder="XX-XXXXXXX" data-wizard-target="ein-ssn" required /></div>
+            <div class="field">
+              <label>EIN or SSN <span class="req">*</span></label>
+              <input
+                v-model="form.ein_ssn" placeholder="XX-XXXXXXX" data-wizard-target="ein-ssn" required
+                :aria-invalid="showTinError ? 'true' : 'false'"
+                :aria-describedby="showTinError ? 'invest-tin-error' : undefined"
+                @focus="tinFocused = true" @blur="tinFocused = false"
+              />
+              <p v-if="showTinError" id="invest-tin-error" class="field-error" role="alert">{{ tinCheck.message }}</p>
+            </div>
             <div class="field">
               <label>Monthly Reporting Delivery</label>
               <select v-model="form.reporting_preference"><option value="">Select...</option><option>Digital Portal</option><option>Email PDF</option></select>
@@ -539,7 +563,7 @@
     <InvestorSignModal
       :show="showSignModal" :doc="selectedDoc" :pdf-url="previewPdfUrl"
       :suggested-names="[form.contact_person, form.legal_name].filter(Boolean)"
-      :payment-terms="signTerms" :notice="termsNotice" :pdf-error="previewError"
+      :payment-terms="signTerms" :notice="signNotice || termsNotice" :pdf-error="previewError"
       @close="closeSignModal" @signed="handleSigned" @retry-preview="retryPreview"
     />
     <LocationPickerModal
@@ -589,6 +613,7 @@ import { useToast } from '../composables/useToast'
 import { useInvestorInvite } from '../composables/useInvestorInvite'
 import { createFormDraft } from '../lib/formDraft'
 import { checkEmail } from '../lib/emailAddress'
+import { checkTin } from '../lib/taxId'
 import {
   PAYMENT_TERMS_REVISION_HEADER,
   TERMS_DOC_KEYS,
@@ -1079,15 +1104,57 @@ const emailCheck = computed(() => checkEmail(form.email))
 const emailFocused = ref(false)
 // Shown once the applicant leaves the field, never while they are still typing.
 const showEmailError = computed(() => !!form.email && !emailCheck.value.ok && !emailFocused.value)
+// The EIN/SSN the same way, with the server's rule (client copy:
+// src/lib/taxId.js): the W-9 prints nine digits.
+const tinCheck = computed(() => checkTin(form.ein_ssn))
+const tinFocused = ref(false)
+const showTinError = computed(() => !!form.ein_ssn && !tinCheck.value.ok && !tinFocused.value)
 const step0FieldsFilled = computed(() => !!(form.legal_name && form.email && form.phone && form.address && form.ein_ssn))
-const canProceedStep1 = computed(() => step0FieldsFilled.value && emailCheck.value.ok)
+const canProceedStep1 = computed(() => step0FieldsFilled.value && emailCheck.value.ok && tinCheck.value.ok)
+
+// The W-9 prints the legal name, business name and address, and its signature,
+// in a font with Latin characters only. Whether it can print what was typed is
+// the server's answer (POST /api/public/investor-w9-check runs the
+// application's own check), asked before the page moves on; a refusal is shown
+// where the value was typed, until that value changes.
+const W9_TEXT_FIELDS = ['legal_name', 'dba', 'address']
+const w9FieldErrors = reactive({})
+for (const field of W9_TEXT_FIELDS) watch(() => form[field], () => { delete w9FieldErrors[field] })
+// Why the sign dialog did not take a W-9 signature.
+const signNotice = ref('')
+let checkingW9 = false
+
+// The refusal ({ field, message }) of a UNSUPPORTED_CHARACTERS 400, or null.
+function w9TextRefusal(err) {
+  const field = err?.data?.field
+  return err?.status === 400 && err.code === 'UNSUPPORTED_CHARACTERS' && typeof field === 'string' ? { field, message: err.message } : null
+}
+
+// null when the W-9 can print `body`'s values, else the refusal. No answer
+// (offline, the rate limit) is null too: the submission's own check still stands.
+async function w9Refusal(body) {
+  try {
+    await api.post('/api/public/investor-w9-check', body)
+    return null
+  } catch (err) {
+    return w9TextRefusal(err)
+  }
+}
 const allVehiclesValid = computed(() => vehicles.value.every(v => v.year && v.make && v.model && v.vin))
 const signedCount = computed(() => documents.value.filter(d => d.signed).length)
 const canSubmitBanking = computed(() => banking.bank_name && banking.routing_number && banking.account_number)
 
-// Step 0 → Step 1: just navigate, no server call
-function submitApplication() {
+// Step 0 → Step 1, once the W-9 can print the step's text.
+async function submitApplication() {
+  if (checkingW9) return
   restoreNotice.value = ''
+  checkingW9 = true
+  const refusal = await w9Refusal({ legal_name: form.legal_name, dba: form.dba, address: form.address })
+  checkingW9 = false
+  if (refusal && W9_TEXT_FIELDS.includes(refusal.field)) {
+    w9FieldErrors[refusal.field] = refusal.message
+    return
+  }
   step.value = 1
   maxStep.value = Math.max(maxStep.value, 1)
 }
@@ -1217,6 +1284,7 @@ async function fetchPreview(docKey, sig) {
 
 // Open sign modal
 async function openDoc(doc) {
+  signNotice.value = ''
   selectedDoc.value = doc
   previewPdfUrl.value = ''
   showSignModal.value = true
@@ -1224,6 +1292,7 @@ async function openDoc(doc) {
 }
 
 function closeSignModal() {
+  signNotice.value = ''
   showSignModal.value = false
   previewSeq++
   revokePreview()
@@ -1380,6 +1449,16 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onReviewKeydown))
 
 // Capture signature locally, then refresh preview with signature overlay
 async function handleSigned({ docKey, text, image, consent }) {
+  // A W-9 signature the form cannot print is not taken: the dialog stays on
+  // the sign form, with what the signer entered, and says why.
+  signNotice.value = ''
+  if (docKey === 'w9') {
+    const refusal = await w9Refusal({ signatureText: text })
+    if (refusal) {
+      signNotice.value = refusal.message
+      return
+    }
+  }
   // `consent` rides along with the signature all the way to
   // POST /api/public/investor-apply, which refuses any document without it
   // (400 CONSENT_REQUIRED). Dropping it here is the exact failure this change
@@ -1404,8 +1483,10 @@ async function submitOnboarding() {
     step.value = 0
     maxStep.value = Math.max(maxStep.value, 0)
     showReviewModal.value = false
-    // When every field is filled, the email is what failed: say so.
-    toast(step0FieldsFilled.value ? emailCheck.value.message : 'Please complete your business details before submitting.', 'error')
+    // When every field is filled, the email or the EIN/SSN is what failed: say which.
+    const message = !step0FieldsFilled.value ? 'Please complete your business details before submitting.'
+      : !emailCheck.value.ok ? emailCheck.value.message : tinCheck.value.message
+    toast(message, 'error')
     return
   }
   if (signedCount.value < totalDocs) {
@@ -1448,6 +1529,23 @@ async function submitOnboarding() {
     }
     if (sent && isInviteRefusal(err.status, err.code)) {
       onInviteRefused(err.code)
+      return
+    }
+    // Text the W-9 cannot print: back to where it was typed. Step 1's fields
+    // show the message under the field; the W-9 signature is taken back, to be
+    // signed again.
+    const refusal = w9TextRefusal(err)
+    if (refusal && W9_TEXT_FIELDS.includes(refusal.field)) {
+      w9FieldErrors[refusal.field] = refusal.message
+      showReviewModal.value = false
+      step.value = 0
+      return
+    }
+    if (refusal && refusal.field === 'signatures.w9.text') {
+      delete signatures.w9
+      showReviewModal.value = false
+      step.value = 1
+      toast(refusal.message, 'error')
       return
     }
     toast(err.message || 'Submission failed', 'error')

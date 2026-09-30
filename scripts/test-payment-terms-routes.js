@@ -66,6 +66,7 @@ try {
 }
 const investorPaymentTerms = require(path.join(ROOT, "lib", "investor-payment-terms.js"));
 const publicFormInput = require(path.join(ROOT, "lib", "public-form-input.js"));
+const w9Input = require(path.join(ROOT, "lib", "w9-input.js"));
 const imageLimits = require(path.join(ROOT, "lib", "image-size.js"));
 const piiMask = require(path.join(ROOT, "lib", "pii-mask.js"));
 const { safeSignatureImage } = require(path.join(ROOT, "lib", "policy-renderer.js"));
@@ -150,7 +151,7 @@ const INVITE_FUNCTIONS = [
 const PIECES = {
 	evidence: liftConst("const SIGNING_EVIDENCE_VERSION = 1;", "\n}\n"),
 	docs: liftConst("const INVESTOR_ONBOARDING_DOCS = [", "\n];"),
-	fields: [liftConst("const PUBLIC_INVESTOR_SCALAR_FIELDS = [", "\n];"), liftConst("const PUBLIC_BANKING_SCALAR_FIELDS = ")].join("\n"),
+	fields: [liftConst("const PUBLIC_INVESTOR_SCALAR_FIELDS = [", "\n];"), liftConst("const PUBLIC_BANKING_SCALAR_FIELDS = "), liftConst("const PUBLIC_W9_PREVIEW_SCALAR_FIELDS = ")].join("\n"),
 	inflight: [liftConst("const PDF_PREVIEW_MAX_INFLIGHT = "), liftConst("let pdfPreviewInflight = ")].join("\n"),
 	inviteConsts: [
 		liftConst("const INVITE_TTL_DAYS = "), liftConst("const INVITE_STATUS_FILTERS = "), liftConst("const INVITE_REVOKE_REASON_MAX = "),
@@ -182,7 +183,7 @@ function buildServer({ routes = {}, hooks = {} } = {}) {
 		db, crypto, path, fs, __dirname: TMP,
 		requireRole: () => noop, refuseCrossOrigin: noop, publicFormLimiter: noop, pdfPreviewLimiter: noop,
 		onboardingSignLimiter: noop, onboardingPreviewLimiter: noop, investorInviteLookupLimiter: noop,
-		publicFormInput, imageLimits, safeSignatureImage, piiMask, investorPaymentTerms,
+		publicFormInput, w9Input, imageLimits, safeSignatureImage, piiMask, investorPaymentTerms,
 		maskingEnabled: () => true,
 		readTransmittedConsent: (sig, res) => {
 			if (sig && sig.consent && sig.consent.agreed === true) return { agreed: 1, text: "I have read and agree." };
