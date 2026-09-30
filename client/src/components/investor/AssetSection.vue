@@ -139,7 +139,12 @@
             <span>Cost / Mile</span>
             <span class="val danger">{{ asset.costPerMile ? '$' + asset.costPerMile.toFixed(2) : '—' }}</span>
           </div>
-          <div class="modal-callout info">
+          <!-- A lease investor has no profit split, so the margin is the truck's,
+               and the callout says what the lease pays instead. -->
+          <div v-if="currentLease" class="modal-callout info">
+            For the truck to be profitable, Revenue / Mile must exceed Cost / Mile. The gap between the two is the truck's gross margin per mile. {{ leaseExplain(currentLease) }}
+          </div>
+          <div v-else class="modal-callout info">
             <!-- "your profit split" rather than a percentage: the split lives on the
                  production payload, and this component receives `asset` + `config`
                  only. Threading `production` through InvestorView.vue to interpolate
@@ -175,11 +180,19 @@
 <script setup>
 import { ref, computed } from 'vue'
 import MetricInfoDialog from './MetricInfoDialog.vue'
+import { leaseBasisOf } from '../../lib/payoutPeriod'
+import { leaseExplain } from '../../lib/leasePayoutText'
 
 const props = defineProps({
   asset: { type: Object, required: true },
   config: { type: Object, default: null },
+  // `production.payoutBasis` — the current month's basis, present only on a
+  // lease. Just this one object rather than the whole production payload, for
+  // the reason given beside the Cost / Mile callout.
+  payoutBasis: { type: Object, default: null },
 })
+
+const currentLease = computed(() => leaseBasisOf({ payoutBasis: props.payoutBasis }))
 
 const detailType = ref('')
 function openDetail(type) { detailType.value = type }

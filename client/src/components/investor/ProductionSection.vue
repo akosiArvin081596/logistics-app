@@ -46,10 +46,19 @@
           </div>
 
           <template v-if="selectedMonthEarnings">
-            <div class="step-label">Your Share for This Month</div>
-            <div class="modal-explain-sm">
-              How your portion of this month's revenue breaks down after operating costs and the {{ investorSplitPct }}%/{{ 100 - investorSplitPct }}% split.
-            </div>
+            <!-- A lease month is paid a fixed amount, not a portion of this
+                 revenue: it names the lease and says the costs below are shown
+                 for information only. -->
+            <template v-if="selectedMonthLease">
+              <div class="step-label">{{ LEASE_LABEL }}</div>
+              <div v-for="(line, i) in leaseNotes(selectedMonthLease, { netProfit: selectedMonthEarnings.netProfit })" :key="i" class="modal-explain-sm">{{ line }}</div>
+            </template>
+            <template v-else>
+              <div class="step-label">Your Share for This Month</div>
+              <div class="modal-explain-sm">
+                How your portion of this month's revenue breaks down after operating costs and the {{ investorSplitPct }}%/{{ 100 - investorSplitPct }}% split.
+              </div>
+            </template>
             <div class="modal-row deduct">
               <span>- Driver Pay</span>
               <span class="val danger">-{{ fmt(selectedMonthEarnings.driverPay) }}</span>
@@ -75,7 +84,7 @@
               <span>Net Profit</span>
               <span class="val" :class="(selectedMonthEarnings.netProfit || 0) >= 0 ? 'accent' : 'danger'">{{ fmt(selectedMonthEarnings.netProfit) }}</span>
             </div>
-            <div class="modal-row split-row">
+            <div v-if="!selectedMonthLease" class="modal-row split-row">
               <span>&times; {{ investorSplitPct }}%</span>
               <span></span>
             </div>
@@ -104,6 +113,8 @@
 import { ref, computed } from 'vue'
 import { formatCurrency as fmt } from '../../utils/format'
 import MetricInfoDialog from './MetricInfoDialog.vue'
+import { leaseBasisOf, leaseNotes } from '../../lib/payoutPeriod'
+import { LEASE_LABEL } from '../../lib/leasePayoutText'
 
 const props = defineProps({
   production: { type: Object, required: true },
@@ -159,6 +170,9 @@ const selectedMonthEarnings = computed(() => {
   if (!selectedMonth.value) return null
   return monthlyEarnings.value.find(me => me.month === selectedMonth.value.key) || null
 })
+// That month's lease basis — per month, since an agreement can change between
+// two months on this chart.
+const selectedMonthLease = computed(() => leaseBasisOf(selectedMonthEarnings.value))
 
 const comparisons = computed(() => {
   if (!selectedMonth.value) return []
