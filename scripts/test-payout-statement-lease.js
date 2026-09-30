@@ -5,10 +5,12 @@
  *
  * WHAT IS PROVED HERE
  *   §1  a SPLIT statement (no breakdown.payoutBasis) is byte-identical to the one
- *       61406a1 printed: eight representative rows (carry in, loss deferred, a
- *       correction after payment, drift, no breakdown, maintenance and compliance
- *       costs, an empty appendix) hashed against pins computed from that commit's
- *       module, and a one-word change to the split wording moves a pin
+ *       61406a1 printed under the Houston clock: eight representative rows (carry
+ *       in, loss deferred, a correction after payment, drift, no breakdown,
+ *       maintenance and compliance costs, an empty appendix) hashed against pins
+ *       computed from that commit's module, and a one-word change to the split
+ *       wording moves a pin. The one exception is the month that ran at a loss,
+ *       which no longer prints a change note beside its settled $0 (§7)
  *   §2  a lease month (breakdown.payoutBasis): "How your payment is calculated",
  *       the monthly lease, the reason line for a prorated, downtime or
  *       not-in-service month, what the month pays, the shared settled-amount and
@@ -20,17 +22,31 @@
  *   §4  LEASE_TEXT: the shared wording verbatim, each template's placeholders,
  *       plain text, and every text listed in docs/investor-portal-copy.md §17
  *   §5  MUTANTS, each caught: payoutBasis ignored, a lease composed as share
- *       minus carry, the loss-month note beside a proration, and a one-word
- *       change to the split page
+ *       minus carry, the loss-month note beside a proration, a one-word change
+ *       to the split page, a bare date parsed at local midnight, an instant
+ *       printed as the calendar date of its UTC text, a loss month composed
+ *       without the loss it carried forward, and the change note silenced on
+ *       every loss month
+ *   §6  every date prints the same under any server clock (UTC, Houston, Manila
+ *       and both ends of the offset range, each in its own process): a bare
+ *       YYYY-MM-DD as that very date, an instant as its Houston date; the split
+ *       pins and a lease page hold under every clock
+ *   §7  a split month that ran at a loss (the August 2026 row QA captured on
+ *       staging) composes to the $0 it settled at: share, less an earlier loss
+ *       applied, plus the loss carried forward. No change note, and the page
+ *       foots; the pinned loss page is 61406a1's less exactly that note, every
+ *       page with no loss carried forward is unchanged, and a real change after
+ *       close is still disclosed in the same words
  *
  * Run: node scripts/test-payout-statement-lease.js
  */
 "use strict";
 
-// Bare YYYY-MM-DD dates are parsed as local time by the module, so the pins are
-// taken under one clock: the production server's.
+// The in-process renders run under the production server's clock; §6 renders
+// under others, each in a process of its own (TZ is read when a process starts).
 process.env.TZ = "UTC";
 
+const { spawnSync } = require("child_process");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
@@ -154,19 +170,93 @@ const SPLIT_ROWS = {
 
 // ⚠️ THE ORACLE. Each pin is pageHash() of the row above rendered by
 // lib/payout-statement.js at 61406a1, the module before lease statements
-// existed, under TZ=UTC. A split statement must keep printing exactly this.
-// Change a pin only for a split wording or layout change the client has
-// signed off, never to make a lease change pass.
+// existed, under TZ=America/Chicago: the one clock under which that module
+// printed a bare YYYY-MM-DD as its own date. Under the production server's UTC
+// it printed each of them a day early (the due date, the appendix's load and
+// expense dates, a bare correction date), until 2026-09-30; this module prints
+// the Houston-clock page under every clock (§6). A split statement must keep
+// printing exactly this. Change a pin only for a split wording or layout
+// change the client has signed off, never to make a lease change pass.
 const ORIGIN_MAIN_SHA256 = {
-	"paid, nothing carried, no adjustment": "7580374f542faaba15c4c7f174a60c6f9870bd73614920fe95080b85d125c564",
-	"paid, an earlier loss applied": "dd83f0103cd5a12073b450b8195483da58bc2aa4c5ce7cc2c2243fc0b12806ee",
-	"final, a losing month carried forward": "0592b21bba0f9b9bcc7c2d1f6ee42ae7ead84d63a8c7f7d78a29593a883f7ad0",
-	"paid, corrected after payment, text to escape": "01a803ea1ca98e9ee03307f664aa19543b2bcfdf1122e2de6abe93522734854c",
-	"paid, the composition drifted from the settled amount": "c2737022b5122ba044a8051274d32a6530d96c271df047c83afae36a6a24a476",
+	"paid, nothing carried, no adjustment": "e3b50d628857686778f6798980b2ec04fe78805c5c9dd8de337bbd0b2a6121f6",
+	"paid, an earlier loss applied": "0579aa845c3419eeafd789c510e427c809e7c92768df88368f9b3985e7bbbbbf",
+	"final, a losing month carried forward": "4964b3bba7a97896319988ecba1e1e643a80aef3dfc5443e4380b503fc192658",
+	"paid, corrected after payment, text to escape": "f39c09ea6e0c2140ea1ea69aee474c321dabc3c10e3ddd9738a6815d2d55d2b9",
+	"paid, the composition drifted from the settled amount": "b4705f34d1bf9af1c7e40ce3ccf5baa4e349b6d637fa581fd98adca145f7a7e2",
 	"paid, no breakdown (aged out)": "cebb9f3913a7c65d40b9470602d89dfcd4de4ae98a7ce876e0df5d98d1474758",
-	"final, maintenance and compliance, 55% split, a positive adjustment": "c71ddfa40f6a0604e747883b9ff956d1e7a5bd44de4412bfef59818023fa8af1",
+	"final, maintenance and compliance, 55% split, a positive adjustment": "08377bdc606c2a8fe820f45da808159a181f425bdd62bcc80e3429002b9d8788",
 	"paid, nothing itemized against the headline": "d78471ccf16704421dfab1e15cddf50e49a96582afcb03dc059c85e981db4c22",
 };
+// What a split statement prints now: 61406a1's page for every row but the month
+// that ran at a loss, which no longer prints the change note ("…now computes to
+// −$970.00…") beside its settled $0.00, because nothing had changed (2026-09-30).
+// §7 proves that note is the whole difference from 61406a1's page.
+const SPLIT_PIN = {
+	...ORIGIN_MAIN_SHA256,
+	"final, a losing month carried forward": "0ee882fec0a18cb82c421272030f4ddae57cc320c8fdf1443587a9112adc0cb9",
+};
+
+// Every date the statement prints is one of two kinds. A bare YYYY-MM-DD (the
+// due date, a load's or an expense's date, a correction date stored without a
+// time) is a calendar date and prints as itself. An instant (paid_at,
+// finalized_at, adjusted_at, the issue date) prints its Houston date, so an
+// instant in the Houston evening prints the day BEFORE its UTC date. The days
+// straddle the year's ends and both clock changes; the instants fall in summer
+// (UTC-5) and in winter (UTC-6).
+const DATE_DETAIL = {
+	revenueLoads: [
+		{ loadId: "700000001", date: "2026-03-08", driver: "Driver One", truck: "91", pickup: "Laredo, TX", dropoff: "Irving, TX", amount: 1000 },
+		{ loadId: "700000002", date: "2026-11-01", driver: "Driver One", truck: "91", pickup: "Houston, TX", dropoff: "Dallas, TX", amount: 1000 },
+	],
+	tripExpenseItems: [
+		{ date: "2026-01-01", type: "Fuel", description: "Diesel", amount: 100 },
+		{ date: "2026-12-31", type: "Tolls", description: "Toll", amount: 50 },
+	],
+};
+const DATE_ROWS = {
+	"dates: final": {
+		...BASE, generatedAt: new Date("2026-08-15T03:00:00.000Z"),
+		status: "owed", finalizedAt: "2026-07-08T04:59:00.000Z", dueDate: "2026-07-31",
+		breakdown: FROZEN, lossCarriedIn: 0, lossDeferred: 0, adjustment: 0, amount: 8790, effectiveAmount: 8790, detail: DATE_DETAIL,
+	},
+	"dates: paid, corrected, instants": {
+		...BASE, period: "2025-11", periodLabel: "November 2025",
+		status: "paid", paidAt: "2026-01-01T05:30:00.000Z", paidBy: "super_admin",
+		adjustment: -100, adjustmentNote: "Toll", adjustedAfterPaid: true, adjustedAt: "2026-08-10T03:00:00.000Z",
+		breakdown: FROZEN, lossCarriedIn: 0, lossDeferred: 0, amount: 8790, effectiveAmount: 8690, detail: {},
+	},
+	"dates: paid, corrected, bare dates": {
+		...BASE, status: "paid", paidAt: "2026-07-31", paidBy: "super_admin",
+		adjustment: -100, adjustmentNote: "Toll", adjustedAfterPaid: true, adjustedAt: "2026-08-10",
+		breakdown: FROZEN, lossCarriedIn: 0, lossDeferred: 0, amount: 8790, effectiveAmount: 8690, detail: {},
+	},
+};
+// [what, where it prints, what every clock must print there]
+const DATE_EXPECT = {
+	"dates: final": [
+		["issued, an instant at 03:00Z (the evening before in Houston)", /Issued: <strong>([^<]*)</, "08/14/2026"],
+		["finalized, an instant at 04:59Z in summer (23:59 CDT the day before)", /Finalized<\/span><span class="v">([^<]*)/, "07/07/2026"],
+		["payment due, a bare date, in the band", /Payment due<\/span><span class="v">([^<]*)/, "07/31/2026"],
+		["payment due, a bare date, under the amount", /Payment due (\d\d\/\d\d\/\d{4})\./, "07/31/2026"],
+		["a load dated on the spring clock change", /<td class="mono">700000001<\/td>\s*<td>([^<]*)/, "03/08/2026"],
+		["a load dated on the autumn clock change", /<td class="mono">700000002<\/td>\s*<td>([^<]*)/, "11/01/2026"],
+		["an expense dated the first day of the year", /<td>([^<]*)<\/td>\s*<td>Fuel<\/td>/, "01/01/2026"],
+		["an expense dated the last day of the year", /<td>([^<]*)<\/td>\s*<td>Tolls<\/td>/, "12/31/2026"],
+	],
+	"dates: paid, corrected, instants": [
+		["paid on, an instant at 05:30Z in winter (23:30 CST the day before), in the band", /Paid on<\/span><span class="v">([^<]*)/, "12/31/2025"],
+		["paid on, the same instant, under the amount", /paid on (\d\d\/\d\d\/\d{4}) &middot;/, "12/31/2025"],
+		["correction recorded, an instant at 03:00Z", /correction recorded (\d\d\/\d\d\/\d{4})/, "08/09/2026"],
+	],
+	"dates: paid, corrected, bare dates": [
+		["paid on, a bare date, in the band", /Paid on<\/span><span class="v">([^<]*)/, "07/31/2026"],
+		["correction recorded, a bare date", /correction recorded (\d\d\/\d\d\/\d{4})/, "08/10/2026"],
+	],
+};
+function printedDate(html, re) {
+	const m = html.match(re);
+	return m ? m[1] : null;
+}
 
 // A lease month as server.js hands it over: payoutBasis on the breakdown,
 // splitPct null, monthShare = the amount paid, nothing carried.
@@ -185,6 +275,34 @@ function leaseRow({ paid = 2000, covered = 30, days = 30, reason = null, bd = {}
 		...rest,
 	};
 }
+
+// The August 2026 row QA captured on staging on 2026-09-30 (payout #29): a split
+// month that ran at a loss, net profit −$500 × 50% = −$250, settled at $0 with
+// the $250 carried forward. The route issues its statement only once a correction
+// lifts it above $0 (409 PAYOUT_NOT_SETTLEABLE otherwise), so it is rendered both
+// as captured and with a +$100 correction.
+const AUGUST = {
+	investorName: "QA Lease One", period: "2026-08", periodLabel: "August 2026", statementNo: "202608-29",
+	status: "owed", paidAt: null, finalizedAt: "2026-09-30T07:55:14.658Z", dueDate: "2026-09-25",
+	breakdown: {
+		revenue: 500, driverPay: 0, fixedCosts: 1000, tripExpenses: 0,
+		maintFundCost: 0, complianceCost: 0, netProfit: -500, splitPct: 50, monthShare: -250,
+	},
+	lossCarriedIn: 0, lossDeferred: 250, adjustment: 0, adjustmentNote: "", amount: 0, effectiveAmount: 0,
+	detail: {
+		revenueLoads: [{ loadId: "QA-LEASE-1-AUG", date: "2026-08-14", truck: "INV-537-A", amount: 500 }],
+		fixedCostItems: [{ truck: "INV-537-A", insurance: 1000, eld: 0, truckPayment: 0, irp: 0, hvut: 0, total: 1000 }],
+	},
+	generatedAt: new Date("2026-09-30T08:00:00Z"),
+};
+const AUGUST_CORRECTED = { ...AUGUST, adjustment: 100, adjustmentNote: "Goodwill", effectiveAmount: 100 };
+// The same month settled at $300 before its records showed the loss: a real
+// change after close, which the change note must still disclose.
+const AUGUST_SETTLED_300 = { ...AUGUST, amount: 300, effectiveAmount: 300 };
+// The split composition as the module writes it, and as it was written until
+// 2026-09-30, when it left out a loss month's carried-forward loss.
+const COMPOSED_WITH_CARRY = "? Math.round(num(b.monthShare) - lossCarriedIn + (lossDeferred > 0 ? lossDeferred : 0)) : null;";
+const COMPOSED_BEFORE_2026_09_30 = "? Math.round(num(b.monthShare) - lossCarriedIn) : null;";
 
 // The module's escape, for comparing against the page's markup.
 function escHtml(s) {
@@ -206,15 +324,17 @@ const SPLIT_WORDS = ["How your share is calculated", "investor split", "Your sha
 	"Loss carried forward", "Your trip expenses are deducted before the split, so the share above is already net of them."];
 
 // ---------------------------------------------------------------- §1
-section("§1 a split statement is byte-identical to 61406a1");
+section("§1 a split statement is byte-identical to 61406a1 under the Houston clock, but for a loss month's change note");
 {
 	for (const [name, row] of Object.entries(SPLIT_ROWS)) {
-		eq(pageHash(S.buildPayoutStatementHtml(row)), ORIGIN_MAIN_SHA256[name], `split: ${name}`);
+		eq(pageHash(S.buildPayoutStatementHtml(row)), SPLIT_PIN[name], `split: ${name}`);
 	}
+	eq(Object.keys(SPLIT_ROWS).filter((name) => SPLIT_PIN[name] !== ORIGIN_MAIN_SHA256[name]), ["final, a losing month carried forward"],
+		"split: the loss month is the only page that differs from 61406a1's");
 	// A payoutBasis that is not an object is no lease: the split page, unchanged.
 	const nonObject = { ...SPLIT_ROWS["paid, nothing carried, no adjustment"] };
 	nonObject.breakdown = { ...FROZEN, payoutBasis: "lease" };
-	eq(pageHash(S.buildPayoutStatementHtml(nonObject)), ORIGIN_MAIN_SHA256["paid, nothing carried, no adjustment"],
+	eq(pageHash(S.buildPayoutStatementHtml(nonObject)), SPLIT_PIN["paid, nothing carried, no adjustment"],
 		"split: a payoutBasis that is not an object leaves the split page as it was");
 }
 
@@ -353,7 +473,27 @@ section("§5 MUTANTS — each must be caught");
 		{
 			name: "a one-word change to the split page (the §1 pins must see it)",
 			src: mutate("% investor split</td>", "% investor share</td>"),
-			caught: (M) => pageHash(M.buildPayoutStatementHtml(SPLIT_ROWS["paid, nothing carried, no adjustment"])) !== ORIGIN_MAIN_SHA256["paid, nothing carried, no adjustment"],
+			caught: (M) => pageHash(M.buildPayoutStatementHtml(SPLIT_ROWS["paid, nothing carried, no adjustment"])) !== SPLIT_PIN["paid, nothing carried, no adjustment"],
+		},
+		{
+			name: "a loss month composed without the loss it carried forward (the change note on August 2026)",
+			src: mutate(COMPOSED_WITH_CARRY, COMPOSED_BEFORE_2026_09_30),
+			caught: (M) => /now computes to/.test(M.buildPayoutStatementHtml(AUGUST_CORRECTED)),
+		},
+		{
+			name: "the change note silenced on every loss month (a real change after close goes unsaid)",
+			src: mutate("const drifted = composed != null && Math.abs(", "const drifted = composed != null && !(lossDeferred > 0) && Math.abs("),
+			caught: (M) => !/now computes to/.test(M.buildPayoutStatementHtml(AUGUST_SETTLED_300)),
+		},
+		{
+			name: "a bare date parsed at local midnight (the due date a day early on this UTC clock)",
+			src: mutate("new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12))", "new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))"),
+			caught: (M) => printedDate(M.buildPayoutStatementHtml(DATE_ROWS["dates: final"]), DATE_EXPECT["dates: final"][2][1]) !== "07/31/2026",
+		},
+		{
+			name: "an instant printed as the calendar date of its UTC text",
+			src: mutate("match(/^(\\d{4})-(\\d{2})-(\\d{2})$/)", "match(/^(\\d{4})-(\\d{2})-(\\d{2})/)"),
+			caught: (M) => printedDate(M.buildPayoutStatementHtml(DATE_ROWS["dates: paid, corrected, instants"]), DATE_EXPECT["dates: paid, corrected, instants"][0][1]) !== "12/31/2025",
 		},
 	];
 	for (const c of cases) {
@@ -365,6 +505,85 @@ section("§5 MUTANTS — each must be caught");
 		ok(caught, `MUTANT caught: ${c.name}`);
 		if (caught) mutantsCaught++;
 	}
+}
+
+// ---------------------------------------------------------------- §6
+section("§6 every date prints the same under any server clock");
+{
+	// Houston itself, the production server's UTC, a developer's Manila, and the
+	// two ends of the offset range (UTC+14, UTC-11).
+	const CLOCKS = ["UTC", "America/Chicago", "Asia/Manila", "Pacific/Kiritimati", "Pacific/Pago_Pago"];
+	const LEASE_NAME = "lease: a full month";
+	const rows = { ...SPLIT_ROWS, ...DATE_ROWS, [LEASE_NAME]: leaseRow() };
+	// Rows cross to the child as JSON; generatedAt goes back to the Date the route passes.
+	const CHILD = `"use strict";
+const S = require(${JSON.stringify(MODULE_PATH)});
+const rows = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const pages = {};
+for (const [name, row] of Object.entries(rows)) pages[name] = S.buildPayoutStatementHtml({ ...row, generatedAt: new Date(row.generatedAt) });
+process.stdout.write(JSON.stringify({ zone: Intl.DateTimeFormat().resolvedOptions().timeZone, offset: new Date(2026, 6, 31).getTimezoneOffset(), pages }));`;
+	const leaseHere = S.buildPayoutStatementHtml(leaseRow());
+	const offsets = new Set();
+	for (const clock of CLOCKS) {
+		const run = spawnSync(process.execPath, ["-e", CHILD], {
+			input: JSON.stringify(rows), env: { ...process.env, TZ: clock }, encoding: "utf8", maxBuffer: 64 * 1024 * 1024,
+		});
+		if (run.status !== 0) { ok(false, `${clock}: the render ran (exit ${run.status}: ${String(run.stderr).trim().split("\n")[0]})`); continue; }
+		const { zone, offset, pages } = JSON.parse(run.stdout);
+		eq(zone, clock, `${clock}: the render ran under that clock`);
+		offsets.add(offset);
+		for (const name of Object.keys(SPLIT_ROWS)) eq(pageHash(pages[name]), SPLIT_PIN[name], `${clock}: split: ${name}`);
+		ok(pages[LEASE_NAME] === leaseHere, `${clock}: the lease page is the one this process renders`);
+		for (const [name, expected] of Object.entries(DATE_EXPECT)) {
+			for (const [what, re, want] of expected) eq(printedDate(pages[name], re), want, `${clock}: ${what}`);
+		}
+	}
+	eq(offsets.size, CLOCKS.length, "the clocks were five different offsets, not one clock five times");
+}
+
+// ---------------------------------------------------------------- §7
+section("§7 a split month that ran at a loss composes to the $0 it settled at");
+{
+	for (const [name, row] of [["as captured", AUGUST], ["with a +$100 correction", AUGUST_CORRECTED]]) {
+		const html = S.buildPayoutStatementHtml(row);
+		ok(!/now computes to/.test(html), `August 2026, ${name}: no change note, nothing changed after it closed`);
+		ok(/Your share of net profit<\/td><td class="num">−\$250\.00<\/td>/.test(html)
+			&& /Loss carried forward<div class="cap">This month ran at a loss, so nothing is payable\. The shortfall is carried against later months rather than billed back to you\.<\/div><\/td><td class="num">\+\$250\.00<\/td>/.test(html)
+			&& /Settled amount for August 2026<\/td><td class="num strong">\$0\.00<\/td>/.test(html),
+		`August 2026, ${name}: the page foots, share −$250.00 + loss carried forward $250.00 = settled $0.00`);
+	}
+
+	// The page as the module printed it before this change: the same source with
+	// the composition as it was, which prints 61406a1's page for every split row.
+	const before = loadFrom(mutate(COMPOSED_WITH_CARRY, COMPOSED_BEFORE_2026_09_30));
+	for (const [name, row] of Object.entries(SPLIT_ROWS)) {
+		eq(pageHash(before.buildPayoutStatementHtml(row)), ORIGIN_MAIN_SHA256[name], `before this change: ${name} is 61406a1's page`);
+	}
+	ok(/now computes to −\$250\.00; the settled amount is the amount payable\./.test(before.buildPayoutStatementHtml(AUGUST_CORRECTED)),
+		"before this change: August 2026 printed \"now computes to −$250.00\" beside its settled $0.00 (the staging repro)");
+
+	// The whole difference on the pinned loss page is that one note.
+	const NOTE_970 = '<div class="cap">Recorded on the ledger when this period was settled. The composition above reflects our records as of 08/14/2026 and now computes to −$970.00; the settled amount is the amount payable.</div>';
+	const lossBefore = before.buildPayoutStatementHtml(SPLIT_ROWS["final, a losing month carried forward"]);
+	const lossNow = S.buildPayoutStatementHtml(SPLIT_ROWS["final, a losing month carried forward"]);
+	ok(lossBefore.split(NOTE_970).length === 2 && lossBefore.replace(NOTE_970, "") === lossNow,
+		"the pinned loss month: the new page is 61406a1's page less exactly the change note, nothing else");
+	for (const [name, row] of Object.entries(SPLIT_ROWS)) {
+		if (row.lossDeferred > 0) continue;
+		ok(S.buildPayoutStatementHtml(row) === before.buildPayoutStatementHtml(row), `no loss carried forward, unchanged: ${name}`);
+	}
+
+	// A real change after close is still disclosed, in the same words; only the
+	// figure it names is now what the month would settle at, $0.
+	const moved = S.buildPayoutStatementHtml(AUGUST_SETTLED_300);
+	ok(/Settled amount for August 2026<div class="cap">Recorded on the ledger when this period was settled\. The composition above reflects our records as of 09\/30\/2026 and now computes to \$0\.00; the settled amount is the amount payable\.<\/div><\/td><td class="num strong">\$300\.00<\/td>/.test(moved),
+		"settled at $300, the records now show the loss: the change note names $0.00, and the settled $300.00 stands");
+	ok(!/now computes to/.test(S.buildPayoutStatementHtml({ ...AUGUST, amount: 1, effectiveAmount: 1 })),
+		"within a dollar of the settled amount: no change note, as before");
+	const profitNow = { ...AUGUST_CORRECTED, breakdown: { ...AUGUST.breakdown, revenue: 1800, netProfit: 800, monthShare: 400 }, lossDeferred: 0 };
+	const profitHtml = S.buildPayoutStatementHtml(profitNow);
+	ok(/now computes to \$400\.00; the settled amount is the amount payable\./.test(profitHtml) && profitHtml === before.buildPayoutStatementHtml(profitNow),
+		"settled at $0, the records now show a profit: disclosed exactly as before");
 }
 
 console.log(`\n${"=".repeat(64)}`);
