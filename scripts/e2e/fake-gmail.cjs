@@ -25,11 +25,12 @@
 //     not seen; nothing in server.js, lib/ or nodemailer opens one that way.
 //   It refuses to load (throws, so node exits) unless E2E_FAKE_GMAIL_DIR is an
 //   absolute path to an existing directory outside every git checkout, owned by
-//   this user and closed to group and other (the rule paths.cjs holds the work
-//   dir to). A draft is built from the scratch DB, a copy of real data: keep the
-//   directory inside the harness's private work dir. Every file is created
-//   exclusively and 0600, never over or through anything already at its name: a
-//   temporary sidecar file found already there makes the APPEND answer NO.
+//   this user and closed to group and other (paths.assertPrivateDir(), the rule
+//   the work dir is held to). A draft is built from the scratch DB, a copy of
+//   real data: keep the directory inside the harness's private work dir. Every
+//   file is created exclusively and 0600, never over or through anything already
+//   at its name: a temporary sidecar file found already there makes the APPEND
+//   answer NO.
 //
 // MODULE, in the harness:
 //   const { readCapturedDrafts } = require("<abs>/scripts/e2e/fake-gmail.cjs");
@@ -46,12 +47,14 @@
 // install only in the first case, so a harness that requires this file never
 // patches its own sockets, whatever its environment holds.
 //
-// Built-in modules only.
+// Built-in modules only, and paths.cjs beside it, which is built-in only too.
 "use strict";
 const fs = require("fs");
 const net = require("net");
 const path = require("path");
 const tls = require("tls");
+// Inert when required (see its header), so it is safe to load during the preload.
+const paths = require("./paths.cjs");
 
 const TAG = "fake-gmail";
 const IMAP_HOST = "imap.gmail.com";
@@ -285,8 +288,8 @@ function readCapturedDrafts(dir) {
 
 // The directory E2E_FAKE_GMAIL_DIR names, or a refusal: an absolute path to an
 // existing directory with no .git at or above it, owned by this user and closed
-// to group and other. The last two are the rule scripts/e2e/paths.cjs holds the
-// work dir to (it exports no helper for them); keep the two in step.
+// to group and other. The last two are paths.assertPrivateDir(), the rule the
+// work dir is held to, in its one copy.
 function captureDir() {
 	const refuse = (why) => {
 		throw new Error(`${TAG}: refusing to load: ${why}`);
@@ -308,12 +311,10 @@ function captureDir() {
 		}
 		if (path.dirname(d) === d) break;
 	}
-	if (typeof process.getuid === "function" && st.uid !== process.getuid()) {
-		refuse(`E2E_FAKE_GMAIL_DIR ${real} belongs to another user`);
-	}
-	if (st.mode & 0o077) {
-		refuse(`E2E_FAKE_GMAIL_DIR ${real} is open to other users (mode ${(st.mode & 0o777).toString(8)}); ` +
-			"chmod 700 it, or point E2E_FAKE_GMAIL_DIR at a private directory");
+	try {
+		paths.assertPrivateDir(real, "E2E_FAKE_GMAIL_DIR", "E2E_FAKE_GMAIL_DIR");
+	} catch (e) {
+		refuse(e.message);
 	}
 	return real;
 }

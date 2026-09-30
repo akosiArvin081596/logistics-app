@@ -194,7 +194,7 @@ npm --prefix scripts/e2e ci      # playwright-core only, pinned; the root and cl
 | File | What it is |
 |---|---|
 | `e2e.mjs` | The run. Captions every step on screen, screenshots it, and writes `results-<tag>.md`. |
-| `paths.cjs` | Where everything is: this checkout, the main checkout, the installs, the work dir. Every other script resolves through it. `node scripts/e2e/paths.cjs work-dir` prints the work dir. |
+| `paths.cjs` | Where everything is: this checkout, the main checkout, the installs, the work dir. Every other script resolves through it. `node scripts/e2e/paths.cjs work-dir` prints the work dir. It also holds the one copy of the private-directory rule (`assertPrivateDir()`: owned by this user, closed to group and other), which the work dir and the fake Gmail's capture folder are both held to. Requiring it has no effect, so the fake can load it while it is preloaded. |
 | `setup-db.cjs` | Makes a fresh private copy of the main checkout's `app.db` in the work dir and sets five logins on the copy. |
 | `plant-before-boot.cjs` | Plants what B1 needs in a copy BEFORE a server boots on it (one expense), or removes it (`--remove`). |
 | `verify-creds.cjs` | Confirms the creds file matches a copy. Prints booleans and ids only. |
