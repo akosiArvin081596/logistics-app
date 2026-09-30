@@ -40,7 +40,7 @@ What it covers today, by section (`ONLY` picks them):
   Tracking loads reach a finalized month is still refused (409 `PERIOD_FINALIZED`), over finalized months only: every
   one of them when a row of that truck has an unreadable date, otherwise just the months its loads reach (L3, local
   only; it writes back any link the refusal failed to protect). One sign-in; `ONLY=eldlink`.
-- **Invoice editor (I1–I9).** In the draft invoice editor (Dashboard → Completed → a delivered load → Draft Invoice
+- **Invoice editor (I1–I14b).** In the draft invoice editor (Dashboard → Completed → a delivered load → Draft Invoice
   Email), ORDER # takes any printable character but `<` and `>`, 80 max, and the SUBJECT the server builds carries it as
   typed (I2, I3). An optional NOTES box prints in a labelled "Notes" box beside the totals on the invoice PDF, only when
   it is non-empty, and never in the email body (I4–I6). Approve sends the note and the Order #, and Job Tracking is
@@ -48,6 +48,13 @@ What it covers today, by section (`ONLY` picks them):
   ready in Gmail" (I7r). A note saved on the approved draft record pre-fills the next editor and its dryRun PDF, and a
   preview sent with no notes key prints it too (I8, I8b, planted, local only); the pre-filled note is labelled as carried
   over until it is typed into (I8h). The server refuses a note over 500 characters, a note that is not text, and an Order # with `<` (I9).
+  The Email message tab holds the message in an editable box, pre-filled with the generated text, above the read-only
+  signature, logo and confidentiality notice, with To and Subject as before (I10); an untouched box follows each
+  re-render (I10b), a typed one survives a tab switch and a re-render (I11), an empty one is refused on the form (I11b),
+  and Reset brings the generated text back (I12). The server refuses an empty, too long or non-text message (I13). With
+  the fake Gmail (`E2E_FAKE_GMAIL=1`, local only), the Gmail draft carries the typed message exactly, line breaks
+  included, above the unchanged signature, and is created read (`\Seen`), so the unread-mail poll that ingests rate-cons
+  never takes it for one (I14); an unedited approve carries the generated message, also read (I14b).
   One sign-in; `ONLY=invoice`. The worktree needs the POD files linked (`E2E_LINK_PODS=1`, see `prep-worktree.sh`).
 - **Investor terms (T0).** What a prospective investor is shown on `/invest` today: two test investors (`QA-TEST
   Investor A` / `B`) fill the application in fresh anonymous browsers, open the Master Participation & Management
@@ -123,6 +130,17 @@ expected to FAIL exactly the fix rows.
     found` and `rate-con content scan failed: File not found`), and the draft goes on without a rate-con. The POD is read
     from disk (the linked files, see `prep-worktree.sh`), so the POD's own Drive fallback is not reached. Gemini is
     blanked, so nothing is extracted. Each invoice render (Chromium) loads the invoice template's Google Font.
+  - **The email's logo is answered locally.** The email HTML names production's logo
+    (`https://app.logisx.com/logo.avif`), which the Email message tab (I10–I14b) and the harness's own rendering of a
+    captured draft would load. The invoice section's browser answers that one URL with the local server's `/logo.avif`
+    and aborts anything else to that host, so the browser sends nothing to production.
+  - **The fake Gmail (`E2E_FAKE_GMAIL=1`, I14 and I14b).** `boot-server.sh` gives the server obviously fake Gmail
+    credentials (`e2e-fake@logisx.invalid`) and preloads `fake-gmail.cjs` into it. Every IMAP APPEND (a Gmail draft) is
+    captured in `<work dir>/fake-gmail/`, in the server's own process, and every SMTP connection is refused before it
+    opens: nothing reaches Gmail. The one thing a send would still put on the network is nodemailer's own DNS lookup of
+    `smtp.gmail.com`, and nothing in the invoice section sends mail. The boot is refused when `fake-gmail.cjs` is
+    missing, and the server is stopped when its log does not show the fake in place, because those credentials would
+    otherwise be tried against the real Gmail.
 - **Steps that write the Google Sheet: F1, RC1 and the names section (K1–K3), and only the local non-production one.** Every other step that
   writes changes the SQLite copy only (trucks, drivers, expenses, sessions, audit rows). Both run only against a server
   on this machine, and both resolve the sheet the way `boot-server.sh` does and refuse production's, with the
@@ -164,6 +182,7 @@ npm --prefix scripts/e2e ci      # playwright-core only, pinned; the root and cl
 | `verify-creds.cjs` | Confirms the creds file matches a copy. Prints booleans and ids only. |
 | `prep-worktree.sh` | Makes a worktree bootable: links the main checkout's installs, `.env` and key, then builds `client/dist`. With `E2E_LINK_PODS=1` it also links the main checkout's POD files into `uploads/`, for the invoice section. |
 | `boot-server.sh` / `stop-server.sh` | Start a local server on a copy with every outbound effect off; stop exactly that PID. |
+| `fake-gmail.cjs` | A stand-in for Gmail, preloaded into a server booted with `E2E_FAKE_GMAIL=1`: it captures each IMAP APPEND in the work dir and refuses SMTP. Its `readCapturedDrafts(dir)` reads the captures back (I14, I14b). |
 | `stored-format-audit.cjs` | Read-only tally of the stored truck photos and CDL files: data-URI label vs actual bytes. |
 
 **The work dir** (`E2E_WORK_DIR`, default `$TMPDIR/logisx-e2e`, or `/tmp/logisx-e2e` without `TMPDIR`) holds everything
@@ -177,6 +196,7 @@ directory outside every checkout.
 | `creds.json` (`0600`) | The five logins: Super Admin, Driver, two Investors (`investor`, `investor2`), Dispatcher. **Never print or paste it.** |
 | `shots/<tag>/`, `results-<tag>.md` | A run's screenshots and verdict table. The screenshots show real data. |
 | `server-<port>.log`, `server-<port>.pid` | The server's output, and the PID `stop-server.sh` stops. |
+| `fake-gmail/` (`0700`) | The drafts the fake Gmail captured (`E2E_FAKE_GMAIL=1`): each holds a real recipient, and the real invoice and POD PDFs of the load under test. |
 | `plant-journal.json` | Exists only while a planted value, a row the money path created, F1's planted sheet cell or RC1's sheet rows are live (see "Planting"). |
 
 ## Local run
@@ -218,6 +238,12 @@ fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
 BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-invoice ONLY=invoice DB_PATH="$W/qa.db" \
   fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
 fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
+# Part 5b: the Gmail draft itself (I14, I14b; 1 sign-in), on a server whose Gmail is the fake: each draft is
+# captured in $W/fake-gmail and nothing is sent. The variable goes to both commands.
+E2E_FAKE_GMAIL=1 fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
+E2E_FAKE_GMAIL=1 BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-invoice-gmail ONLY=invoice STEPS=I14 \
+  DB_PATH="$W/qa.db" fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
+fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
 # Part 6: the investor terms (T0 renders 16 previews, T1-T11 about 17; the preview route allows 30 per 15 minutes
 # per IP, so each half gets a fresh server process). T8 submits a test application: DB_PATH lets it, and Tc
 # soft-deletes it and then hard-deletes it from the copy by id.
@@ -244,8 +270,10 @@ fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
 
 - Headless: part 1 takes about 1.5 minutes, part 2 about 2.5 minutes, part 3 about 30 s, part 4 about 2.5 minutes
   (up to 80 s more when F1 has to plant its formula and wait for the server's cached copy of the sheet), part 5 about
-  45 s, part 6 about 1.5 minutes (T0) and 2–3 minutes (T1–T11), part 7 about 1.5 minutes (headed about 2.5
-  minutes), part 8 about 10 s (headed about 30 s).
+  1 minute (headed about 2.5 minutes), part 5b well under a minute, part 6 about 1.5 minutes (T0) and 2–3 minutes
+  (T1–T11), part 7 about 1.5 minutes (headed about 2.5 minutes), part 8 about 10 s (headed about 30 s).
+- Parts 5 and 5b can be one run on the fake-Gmail server (both commands with `E2E_FAKE_GMAIL=1`, no `STEPS`). I7's
+  approve is then captured too, and I7r, which is scored only on a server with no mail target, reads INFO.
 - B1 deletes its expense and puts its assignment's spelling back when it runs, so plant again before every boot that
   B1 is to read. A run whose server booted before the plant scores B1 INFO (the boot never saw the row); a copy with
   nothing planted SKIPs it.
@@ -349,13 +377,15 @@ The boot script refuses:
 - a DB outside the work dir, or a symlink;
 - a worktree without `client/dist`, `node_modules`, the key or `.env`;
 - a `SPREADSHEET_ID` that is unset, empty or production's. It checks the value the server will really use: the
-  environment's, else the worktree's `.env` read with the app's own dotenv. It then passes that value explicitly.
+  environment's, else the worktree's `.env` read with the app's own dotenv. It then passes that value explicitly;
+- with `E2E_FAKE_GMAIL=1`: a missing `fake-gmail.cjs`, a capture directory that is a symlink, or a server whose log
+  does not show the fake in place (it is stopped).
 
 It binds to 127.0.0.1, runs `NODE_ENV=development`, and logs to `<work dir>/server-<port>.log`. It forces these on the
 command line (dotenv never overrides a set variable):
 
-- **Credentials and keys blanked:** Gmail, n8n invoice webhook, Gemini, Google Maps (server and browser), Routemate,
-  ScanKit and Linxup.
+- **Credentials and keys blanked:** Gmail (unless `E2E_FAKE_GMAIL=1`, below), n8n invoice webhook, Gemini, Google Maps
+  (server and browser), Routemate, ScanKit and Linxup.
 - **The rate-con Drive folder named away:** `RATECON_DRIVE_FOLDER_ID=logisx-e2e-no-drive-folder`. An empty value would
   not do: `server.js` falls back to production's folder (see "What leaves the machine").
 - **Feature flags off:** `ROUTEMATE/LINXUP/SCANKIT/INVOICE_AUTOGEN/PERIOD_FINALIZE/FUEL_GALLONS_RECOVERY/RATECON_RECONCILE/RATECON_INDEX_APPLY/FUEL_EVENTS/CHAT_ORPHAN_SWEEP_ENABLED=false`.
@@ -363,6 +393,14 @@ command line (dotenv never overrides a set variable):
 - **The maintenance notice:** off (`MAINTENANCE_NOTICE_ENABLED=false`) unless the script is run with
   `E2E_MAINTENANCE_NOTICE=1`, which turns it on for M1 (`MAINTENANCE_NOTICE_ENABLED=true`). The audience is pinned to
   `investor` either way. The notice only shows a popup and a banner; it sends nothing.
+- **Gmail:** blanked, unless the script is run with `E2E_FAKE_GMAIL=1` (I14, I14b). Then the server gets
+  `GMAIL_USER=e2e-fake@logisx.invalid` and a fake app password, `E2E_FAKE_GMAIL_DIR=<work dir>/fake-gmail` (made `0700`),
+  and `NODE_OPTIONS=--require "<this checkout>/scripts/e2e/fake-gmail.cjs"`, set for the server alone (the script runs
+  no other node after it). The fake captures each IMAP APPEND there and refuses SMTP. The script refuses to boot when
+  `fake-gmail.cjs` is missing, or when the capture directory is a symlink, and it calls the server ready only once the
+  server's log shows the fake's hooks in place (`fake-gmail: imap.gmail.com goes to a fake IMAP server …`, printed
+  with the boot output); otherwise it stops the server. Every other rail above still holds: the n8n invoice webhook
+  stays blanked, so the fake is the only mail target.
 
 `stop-server.sh <port>` reads `<work dir>/server-<port>.pid`. It sends SIGTERM only if that PID is still a `server.js`
 whose working directory is the worktree it was booted from. Otherwise it kills nothing.
@@ -379,8 +417,9 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
   do E1, N1, N1b, F1, E2, B1 and RC1 (RC1 and F1 because they write the sheet, which only a local run may). P1 runs on
   a real driver (see the money-path section). I8 SKIPs (it plants the saved note), and I7 fills the form but SKIPs
   its Approve unless `E2E_INVOICE_APPROVE=1`: an approve creates a real Gmail draft wherever the server has a mail
-  target. The investor-fixes section SKIPs as a whole (local only). Everything else runs unchanged, and the script
-  discovers every id itself.
+  target. I10–I13 run there (the editor, and dryRun and preview page fetches, which create nothing); I14 and I14b SKIP
+  (they need the local fake Gmail). The investor-fixes section SKIPs as a whole (local only). Everything else runs
+  unchanged, and the script discovers every id itself.
 - **Expected differences:** staging's environment refresh strips identity documents. So 11a (the Kit's CDL) FAILs there,
   R10 scores only its truck-photo half, and on a build that still has the driver-files route R12 can only be
   `PASS (vacuous)` (the route answers, with no files to return).
@@ -410,14 +449,16 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
 | `BASE_URL` | Required by `e2e.mjs`. Refuses `app.logisx.com` (production). |
 | `PHASE` | `before` or `after`. Only names the output; the "Expected" column is always the after-the-fix behaviour. |
 | `OUT_TAG` | Writes `shots/<tag>/` and `results-<tag>.md` instead of `<PHASE>`, so a rehearsal cannot overwrite a baseline. |
-| `ONLY` | A comma-separated list of sections: `trucks` (1–12, R1–R16), `signout` (S1–S7), `dispatcher` (D1–D3), `maintenance` (M1), `moneypath` (P1, E1, N1, N1b, F1, E2, B1, RC1), `names` (K1–K3), `eldlink` (L1–L3), `invoice` (I1–I9), `terms` (T0–T11), `investorfixes` (F1–F14), `report` (R1–R6, Rx). Unset: all eleven, in that order, then step 12's clean-up — more sign-ins than one limiter window holds (see above). |
-| `STEPS` | Only these sign-out, money-path or invoice cases, e.g. `STEPS=S5a,S7` (each has its own browser context), `STEPS=P1,F1` or `STEPS=E2,B1,RC1` (`P1` selects P1a and P1b; `N1` selects N1 and N1b), `STEPS=I8,I9` (`I3` selects I3a–c, `I7` selects I7, I7r and I7j, `I8` selects I8, I8b and I8h, `I9` selects I9 and I9a–c; I1 opens the editor whenever any of I1–I7 is picked), `STEPS=T0` or `STEPS=T1,T2,…,T11` (a terms step also runs the steps it builds on: T3 and T9 run T1, T4 and T7 run T2, T5 runs T4, T8 runs T5), `STEPS=R3,R4` for the report section (`R4` selects R4a and R4b; R2 runs R1; Rx runs whenever any other report step does). The other sections ignore it, the truck section's R1–R16 included. |
+| `ONLY` | A comma-separated list of sections: `trucks` (1–12, R1–R16), `signout` (S1–S7), `dispatcher` (D1–D3), `maintenance` (M1), `moneypath` (P1, E1, N1, N1b, F1, E2, B1, RC1), `names` (K1–K3), `eldlink` (L1–L3), `invoice` (I1–I14b), `terms` (T0–T11), `investorfixes` (F1–F14), `report` (R1–R6, Rx). Unset: all eleven, in that order, then step 12's clean-up — more sign-ins than one limiter window holds (see above). |
+| `STEPS` | Only these sign-out, money-path or invoice cases, e.g. `STEPS=S5a,S7` (each has its own browser context), `STEPS=P1,F1` or `STEPS=E2,B1,RC1` (`P1` selects P1a and P1b; `N1` selects N1 and N1b), `STEPS=I8,I9` (`I3` selects I3a–c, `I7` selects I7, I7r and I7j, `I8` selects I8, I8b and I8h, `I9` selects I9 and I9a–c, `I10` selects I10 and I10b, `I11` selects I11 and I11b, `I13` selects I13 and I13a–e, `I14` selects I14 and I14b, and `I14B` runs I14b alone; I1 opens the editor whenever any of I1–I7 or I10–I12 is picked), `STEPS=T0` or `STEPS=T1,T2,…,T11` (a terms step also runs the steps it builds on: T3 and T9 run T1, T4 and T7 run T2, T5 runs T4, T8 runs T5), `STEPS=R3,R4` for the report section (`R4` selects R4a and R4b; R2 runs R1; Rx runs whenever any other report step does). The other sections ignore it, the truck section's R1–R16 included. |
 | `HEADED=1` | A visible browser. |
-| `DB_PATH` | The copy the server runs on (inside the work dir). It is used **only** to plant stored values for steps 10, 11b–f, R3 and R15, to stage and clean up R16, to plant and read back E1, N1, N1b and E2, to read and delete B1's planted expense, to delete the rows RC1's import writes, to plant P1's own driver, to plant and delete I8's saved invoice note, to let T8 submit a test application and hard-delete it (by id) after Tc's soft delete, and for the investor-fixes section (see there). The report section only reads it: R3's ledger check and Rx's row counts. Unset: those rows SKIP, P1 uses a real driver, T8 SKIPs unless `E2E_TERMS_SUBMIT=1`, the investor-fixes section SKIPs, and R3 and Rx score without the database. |
+| `DB_PATH` | The copy the server runs on (inside the work dir). It is used **only** to plant stored values for steps 10, 11b–f, R3 and R15, to stage and clean up R16, to plant and read back E1, N1, N1b and E2, to read and delete B1's planted expense, to delete the rows RC1's import writes, to plant P1's own driver, to plant and delete I8's saved invoice note, to delete the draft records an approve writes with the fake Gmail (I7, I14, I14b), to let T8 submit a test application and hard-delete it (by id) after Tc's soft delete, and for the investor-fixes section (see there). The report section only reads it: R3's ledger check and Rx's row counts. Unset: those rows SKIP, P1 uses a real driver, T8 SKIPs unless `E2E_TERMS_SUBMIT=1`, the investor-fixes section SKIPs, and R3 and Rx score without the database. |
 | `E2E_REPORT_INVESTOR` | The report section's investor, a `users.id`, instead of the one it picks. It must be an Investor who owns a truck. |
 | `E2E_TERMS_SUBMIT=1` | Lets T8 submit its test lease application on a server that is not on this machine (it writes an application; Tc soft-deletes it). Locally `DB_PATH` enables T8. |
 | `E2E_INVOICE_APPROVE=1` | Lets I7 press Approve on a server that is not on this machine. Off by default: an approve creates a real Gmail draft wherever the server has a mail target. Locally `boot-server.sh` blanks them, so I7 always approves there. |
 | `E2E_LINK_PODS=1` | For `prep-worktree.sh`, not `e2e.mjs`: link the main checkout's POD files into the worktree's `uploads/`, for the invoice section. |
+| `E2E_FAKE_GMAIL=1` | For `boot-server.sh` **and** `e2e.mjs`: boot the server with the fake Gmail, and let I14 and I14b run against it (local only, with `DB_PATH`). Unset: they SKIP. |
+| `E2E_FAKE_GMAIL_DIR` | For `e2e.mjs`: where the fake's captures are read. Default: `<work dir>/fake-gmail`, where `boot-server.sh` points the server. It must be inside the work dir. |
 | `CREDS_FILE` | The logins. Default: `<work dir>/creds.json`. Not needed when every section given is login-free (`ONLY=terms STEPS=T0`). T1–T11 need only its `superAdmin`. |
 | `E2E_WORK_DIR` | The work dir. Default: `$TMPDIR/logisx-e2e`. It must be private, outside every checkout, and contain none. |
 | `SOURCE_DB` | `setup-db.cjs`'s source, opened read-only. Default: the main checkout's `app.db`. |
@@ -740,12 +781,13 @@ real driver names are never printed.
 **Run order.** K1 and K3 run first and K2 last. **After a BEFORE run, stop that server and never reuse it:** a build
 without the fix can be left in a broken state for the rest of that process, so every run gets a fresh server.
 
-## The invoice editor section (I1–I9)
+## The invoice editor section (I1–I14b)
 
 `ONLY=invoice` (`STEPS` picks cases). The Super Admin signs in once and every step shares that page. The editor is
 `InvoiceDraftPreviewModal.vue`: it opens with `POST /api/loads/:loadId/draft-invoice?dryRun=1` and re-renders as you
 type with `POST /api/loads/:loadId/invoice-preview`. The evidence is the page's own requests and responses, the form,
-and the invoice PDF the server rendered: each `invoicePdfBase64` is decoded and its text read in Node with the app's
+the Gmail draft the fake captured (I14, I14b), and the invoice PDF the server rendered: each `invoicePdfBase64` is
+decoded and its text read in Node with the app's
 own `pdfjs-dist` (`client/node_modules/pdfjs-dist/legacy/build/pdf.mjs`). The "Notes" label prints letter-spaced and
 upper-cased (`N O T E S`), so it is matched with its spaces removed. Only ids, booleans, codes and the typed test
 values are written out: the subject is shown from `Order #` on (`<broker>` stands for the broker's name), and the
@@ -759,14 +801,19 @@ dryRun answers 200 is used, trying at most four. A Bison load still works: I1 ti
 #", and a load with no derivable total gets 1234.00 typed (Approve then confirms the edited total).
 
 **Budgets, per server process:** one sign-in; `POST …/draft-invoice` (25 per 15 minutes per user, the `?dryRun=1`
-opens included) three times, plus one per candidate whose dryRun failed; `POST …/invoice-preview` (120 per 15
-minutes) about seventeen times.
+opens included) about eleven times (I1, I7's approve, I8's reopen, I13a–d, and one open and one approve each in I14
+and I14b), plus one per candidate whose dryRun failed; `POST …/invoice-preview` (120 per 15 minutes) about thirty
+times. A second full run inside 15 minutes can run out of draft requests: restart the server between runs.
 
 **What it writes:** the approve (I7) mints the next invoice number, in the copy. Locally it creates no mail draft
 and no draft record: `boot-server.sh` blanks Gmail and the n8n invoice webhook, so the route answers 200 with
 `preview: true`. I8 plants one `load_invoice_drafts` row, recorded in `plant-journal.json` by id, and deletes it at the
 end of I8, at the end of the section, and on Ctrl-C. `Ic` reports the delete. Nothing writes the sheet: I7j proves it
-for the load under test.
+for the load under test. On a server booted with `E2E_FAKE_GMAIL=1`, every approve (I7, I14, I14b) also mints a
+number, is captured in `<work dir>/fake-gmail/` (nothing is sent), and writes a draft record in the copy. The run
+records each such record in `plant-journal.json` and deletes it by id once its step has read the capture: left in
+place, its note would pre-fill the next editor as carried over, and change I2's render on the next run. The
+records' `invoice_draft_created` audit lines stay, as the harness's other audit lines do.
 
 | Step | How it is shown | Expected (AFTER) |
 |---|---|---|
@@ -785,7 +832,41 @@ for the load under test.
 | I8b | **Planted, local only**, while I8's note is there: a page `fetch` of `POST /api/loads/<id>/invoice-preview` with an otherwise valid body and **no** `notes` key, as a tab still running a bundle from before Notes sends it. | Its PDF prints the saved note under "Notes": the approve's rule for an omitted key (the last approved note), so that tab previews what it would send |
 | I8h | **Planted, local only**, in I8's editor: the NOTES box is read with the pre-filled note untouched; then **UI:** click into it and type ` (edited)` at the end of the note. | While untouched, "Carried over from this load's last approved invoice — clear it or use Reset if it no longer applies." shows under NOTES; after typing it is gone. SKIPs when I8 had no note to pre-fill |
 | I9, I9a–c | Page `fetch`es of `POST /api/loads/<id>/invoice-preview` with `X-Requested-With`, as `useApi` sends them. The body is otherwise valid (invoice #, invoice date, total, recipient, and an Order #, `7101850`, that every build accepts); I9 is that body as it is, the control. | I9: 200. I9a, notes of 501 characters: 400 `INVOICE_NOTES_TOO_LONG`. I9b, `notes: ["x"]`: 400 `INVOICE_NOTES_INVALID`. I9c, `orderNumber: "a<b"`: 400 `ORDER_NUMBER_INVALID` |
-| Ic | Local only. | The planted row deleted; no plant journal left |
+| I10 | **UI.** The "Email message" tab, in I1's editor. The latest render's email HTML is also rendered the way a mail client shows it (see below), for the message the untouched draft carries. | A `<textarea data-testid="idp-email-body">` that takes typing, holding the generated message from the greeting to "Thank you,": the response's `emailBodyDefault`, the text the untouched draft renders above its signature, and for a load that is not Bison's the harness's own copy of the generated text. Below it, `[data-testid="idp-email-signature"]` shows the signature, the logo and the confidentiality notice with nothing editable, and the response's `emailSignatureHtml` is byte-identical to the signature before the fix. The To and Subject lines as before (read-only: the recipient and the form's SUBJECT). The box is the tab's only editable element |
+| I10b | **UI.** The box untouched, `7101851` typed into ORDER #, and its render. | The render's `emailBodyDefault` in the box, and no "edited" badge |
+| I11 | **UI.** A six-line message typed into the box (a blank line, `<b>not bold</b>`, `&`, quotes); the Invoice tab and back; then a note typed into NOTES, and its render. | The "edited" badge (`[data-testid="idp-email-body-edited"]`) and no error; the text as typed, line breaks included, after the tab switch and after the render; the badge stays. Whether the render's request carried the message is recorded, not scored: an edit may travel on the approve alone |
+| I11b | **UI.** The box emptied, then left with blanks and line breaks only. | The inline error (`[data-testid="idp-email-body-error"]`) each time, and Approve disabled |
+| I12 | **UI.** **Reset to extracted values** (for a Bison load the Order # is typed again first, as in I6). | The generated message back in the box (the render's `emailBodyDefault`; for a load that is not Bison's, the harness's copy), no badge and no error |
+| I13 | A page fetch of `POST …/invoice-preview` with I9's body and a message of exactly 5,000 characters (the control). | 200. `PASS (vacuous)` when the response has no `emailBodyDefault` (a build that ignores the field) |
+| I13a–d | Page fetches of `POST …/draft-invoice?dryRun=1` (a query parameter: nothing is created) with the body the editor opens with, `{}`, plus `emailBody`: `""`, blanks and line breaks only, 5,001 characters, and `42`. | 400 `INVOICE_EMAIL_BODY_EMPTY` (a, b), `INVOICE_EMAIL_BODY_TOO_LONG` (c), `INVOICE_EMAIL_BODY_INVALID` (d) |
+| I13e | The same four messages on `POST …/invoice-preview`, with I9's body. | The same four refusals |
+| I14 | **Local, fake Gmail** (`E2E_FAKE_GMAIL=1`, `DB_PATH`). The page reloaded and the editor opened afresh; a six-line message typed into the box; **Approve & Create Draft**. The draft the fake captured is read back and rendered (below). | One draft captured, with the IMAP flags `\Draft` and `\Seen`. The message above the signature reads exactly as typed: the lines in order, each line break a break, the blank line visible, `<b>not bold</b>` as text. Then the signature, logo and notice, byte-identical to before, and nothing after them. To and Subject as the tab and the form showed them; the invoice PDF and every POD the dryRun listed attached |
+| I14b | **Local, fake Gmail.** The editor opened afresh, nothing typed, **Approve & Create Draft**. | One draft captured, with `\Draft` and `\Seen`; the message above the signature is the one the tab showed, and the generated text; the signature, To, Subject and attachments as in I14. Whether the draft's HTML is byte-identical to the email HTML the editor rendered is recorded |
+| Ic | Local only. | The planted row, and the draft records the approves wrote with the fake Gmail, deleted; no plant journal left |
+
+**Run order:** I1–I6, then I10–I12 (in I1's editor, before I7's approve closes it), I7 (I7r, I7j), I8 (I8b, I8h),
+I9, I13, I14, I14b, and Ic.
+
+**How a captured draft is read (I14, I14b).** The fake's `readCapturedDrafts(dir)` runs in a child process, so
+nothing that module loads can touch the run's own connections; the drafts that appeared since the click are the
+approve's. Their HTML is rendered in a blank page of the run's browser with none of the app's CSS, so a paragraph keeps
+its margins as in a mail client, and nothing is fetched but the logo (answered locally). The text a reader sees is that
+page's `innerText`, and the message is what comes above the signature's `--` line: a blank line typed must read as a
+blank line, and a single line break as a single one. The screenshots `i14-captured-draft.png` and
+`i14b-captured-draft.png` show that rendering under a header naming the capture's flags, To, Subject and attachments;
+`i14-edited-body.png` and `i14b-generated-body.png` show the editor just before Approve.
+
+**The signature the harness holds the fix to.** `INV_SIGNATURE_HTML` in `e2e.mjs` is the signature, logo and
+confidentiality notice exactly as `lib/broker-invoice.js` wrote them at `61406a1`, and I10, I14 and I14b require those
+bytes. The generated message of a load that is not Bison's is held the same way (`invGeneratedText()`: four paragraphs,
+a blank line between each). A deliberate change to either must update the harness with it.
+
+**On the build without the editable message** (`61406a1`, the BEFORE baseline): I1–I9 PASS. I10 FAILs: the Email
+message tab has no editable element, its message is a read-only preview of the whole email (message, signature, logo
+and notice in one block), and typing into it changes nothing. I10b, I11, I11b and I12 FAIL (no box). I13 is
+`PASS (vacuous)`, and I13a–e FAIL: the server ignores `emailBody` and answers 200. On a server with the fake Gmail,
+I14 FAILs without sending an approve (no box to type into), and I14b FAILs on `\Seen` alone: the draft is created
+unread, with the flag `\Draft` only, while its message, signature, To, Subject and attachments already hold.
 
 **On a build without the feature** (a BEFORE baseline): the Order # keeps its old rule (letters, numbers, spaces and
 `. _ / # -`, 40 max), so I2 and I3a are refused by the form, I3c's field holds 40 characters, and I3b's refusal carries
@@ -1135,6 +1216,7 @@ W="$(node scripts/e2e/paths.cjs work-dir)" && echo "$W"
 find "$W" -maxdepth 1 -type f \( -name '*.db' -o -name '*.db-*' -o -name 'creds*.json' -o -name 'results-*.md' \
   -o -name 'server-*.log' -o -name 'plant-journal.json' \) -print -delete
 rm -rf -- "$W/shots"   # real data: the dashboard, truck lists, the driver's truck photo, the Kit page (identity documents masked)
+rm -rf -- "$W/fake-gmail"   # the drafts the fake Gmail captured: a real recipient, and the load's invoice and POD PDFs
 ```
 
 The creds file's passwords exist only on the copies. In each worktree, the four symlinks and `client/dist` are gitignored;
