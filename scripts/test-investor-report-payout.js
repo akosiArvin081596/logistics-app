@@ -367,14 +367,14 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 		}
 		throw new Error("§6 unbalanced braces around the fixed-cost block");
 	}
-	function runFixedBlock(block, reportPayout) {
-		const f = new Function("ownedTrucks2", "reportPayout", "investorDriverSet", "user", "db", "truckChargedInMonth", "truckMonthlyFixed", `
+	function runFixedBlock(block, reportPayout, trucks = TRUCKS) {
+		const f = new Function("ownedTrucks2", "reportPayout", "investorDriverSet", "user", "db", "truckChargedInMonth", "truckMonthlyFixed", "investorPayoutBasis", `
 			let complianceExpenses = 0, truckPaymentExpenses = 0, insuranceExpenses = 0, totalExpenses = 0;
 			${block}
 			return { complianceExpenses, truckPaymentExpenses, insuranceExpenses, totalExpenses };
 		`);
 		const db = { prepare: () => ({ get: () => ({ t: 0 }) }) };
-		return f(TRUCKS, reportPayout, new Set(), { id: 5 }, db, W.fns.truckChargedInMonth, W.fns.truckMonthlyFixed);
+		return f(trucks, reportPayout, new Set(), { id: 5 }, db, W.fns.truckChargedInMonth, W.fns.truckMonthlyFixed, require("../lib/investor-payout-basis"));
 	}
 	const FIXED_BLOCK = fixedBlockOf(HANDLER);
 	{
@@ -388,6 +388,12 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 		eq(got.totalExpenses, ledgerFixed, "the P&L's fixed costs === the ledger's fixed costs over the range (11,100)");
 		const apr = runFixedBlock(FIXED_BLOCK, W.fns.summarizeReportPayout(entries, { from: "2026-06", until: "2026-06" }));
 		eq(apr.totalExpenses, 0, "an idle month charges no fixed costs (the old loop charged truck A's 1,900)");
+		// Maintenance and OOS are in the fleet (2026-09-30): a truck in the shop still
+		// owes its costs. C stays Inactive and stays out.
+		for (const status of ["Maintenance", "OOS"]) {
+			const shop = TRUCKS.map((t) => (t.unit_number === "A" ? { ...t, status } : t));
+			eq(runFixedBlock(FIXED_BLOCK, all, shop), got, `truck A in ${status}: every bucket as with it Active (C, Inactive, still excluded)`);
+		}
 	}
 
 	// ============================================================ §7 note

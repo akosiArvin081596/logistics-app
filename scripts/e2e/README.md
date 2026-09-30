@@ -90,7 +90,9 @@ What it covers today, by section (`ONLY` picks them):
   applicant's `/invest` walk-through, the acceptance), given a profit, an idle and a loss month. With
   `INVESTOR_LEASE_PAYOUTS_ENABLED` off the split pays; on, the lease pays ($2,000 in the profit and loss months, $0 in the
   idle month under `INVESTOR_LEASE_DOWNTIME=unpaid`, $2,000 under `paid`, still $2,000 with the truck in Maintenance and
-  $0 with it Inactive); a split investor's Payouts are unchanged. A closed month is read twice with the flag on (LV):
+  $0 with it Inactive); a split investor's Payouts are unchanged. LS sets the status on the Trucks page: the form saves
+  Maintenance, and refuses Inactive (409 `PERIOD_FINALIZED`, naming the truck's service payment in the finalized month
+  LV closed), so the copy takes that one. A closed month is read twice with the flag on (LV):
   its row, created and finalized by the first read, still reads as the lease on the second, with no carried loss and
   lease wording on the Payouts page, the statement and the report. The months LV closed then keep exactly what they
   settled at through every later switch: the flag off (LE), the truck's status (LS), and downtime `paid` followed by the

@@ -80,7 +80,7 @@
             <div v-if="needsFixedCostSetup(truck)" style="margin-top:0.3rem;">
               <span
                 class="cost-warning-badge"
-                title="Active truck with no insurance, ELD, truck payment, HVUT, or IRP configured — its fixed costs show as $0 in the investor P&amp;L. Add them via Edit → Business Configuration."
+                :title="fixedCostSetupHint"
               >No fixed costs configured</span>
             </div>
           </td>
@@ -822,18 +822,28 @@ function statusClass(status) {
   return 'status-maintenance'
 }
 
-// Flags an Active truck that has no fixed-cost fields configured — insurance,
-// ELD, truck payment, HVUT, and IRP all falsy/0. Such a truck contributes $0
-// fixed costs to the investor P&L, which is almost always a data-entry gap.
+// Flags a truck in the fleet (any status but Inactive: the server counts a
+// truck in Maintenance or OOS in the fixed costs too) that has no fixed-cost
+// fields configured — insurance, ELD, truck payment, HVUT, and IRP all
+// falsy/0. Such a truck contributes $0 fixed costs to the investor P&L, which
+// is almost always a data-entry gap.
 // Field names are PascalCase to match the serialized truck objects.
 function needsFixedCostSetup(truck) {
-  return truck.Status === 'Active' &&
+  return truck.Status !== 'Inactive' &&
     !truck.InsuranceMonthly &&
     !truck.EldMonthly &&
     !truck.TruckPaymentMonthly &&
     !truck.HvutAnnual &&
     !truck.IrpAnnual
 }
+
+// The badge's tooltip. Everyone on this page reads what the badge means, an
+// investor included (their My Trucks); only a user who can edit trucks is told
+// where to add the costs, since the page offers an investor no Edit.
+const FIXED_COST_SETUP_MEANING = 'No insurance, ELD, truck payment, HVUT, or IRP is configured for this truck — its fixed costs show as $0 in the investor P&L.'
+const fixedCostSetupHint = computed(() => (props.canEdit
+  ? `${FIXED_COST_SETUP_MEANING} Add them via Edit → Business Configuration.`
+  : FIXED_COST_SETUP_MEANING))
 
 function confirmDelete(truck) {
   pendingTruck.value = truck

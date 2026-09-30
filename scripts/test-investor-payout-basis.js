@@ -30,7 +30,7 @@
  *       LEASE_AMOUNT_WHOLE_DOLLARS, 409 BASIS_MONTH_CLOSED, the 12-month horizon
  *   §8  the idle predicate, the first month, the audit line, the dollar format
  *   §9  MUTANTS: the flag gate always open; a lease month joining the carry;
- *       coverage over the fixed-cost set (Active trucks only)
+ *       coverage over the Active trucks only
  *   §10 a month settled as a lease: its frozen snapshot read back exactly, or,
  *       where a figure cannot be read, towards its settled amount; it pays what
  *       it froze whatever the flag, the settings, the trucks or the rows say now,
@@ -182,8 +182,8 @@ section("§4 a lease month");
 	eq(union.payoutBasis.coveredDays, 15, "§4 two trucks: the days either is in the fleet (1–5 and 21–30)");
 	eq(B.leaseCoverage({ monthKey: "2028-02", effectiveMonth: "2028-02", trucks: [{}], retirement: "stop" }), { coveredDays: 29, daysInMonth: 29 }, "§4 a leap February");
 
-	// Which trucks count: every status but Inactive, not the fixed-cost set.
-	eq(["Active", "Maintenance", "OOS", "Inactive", undefined].map((status) => B.truckInLeaseFleet({ ...TRUCK_ALL_YEAR, status })), [true, true, true, false, true],
+	// Which trucks count: every status but Inactive, the same set the fixed costs count.
+	eq(["Active", "Maintenance", "OOS", "Inactive", undefined].map((status) => B.truckInFleet({ ...TRUCK_ALL_YEAR, status })), [true, true, true, false, true],
 		"§4 a lease counts a truck in every status but Inactive");
 	const withStatus = (status) => [{ ...TRUCK_ALL_YEAR, status }];
 	const shop = pay(month("2026-04", 500), { trucks: withStatus("Maintenance") });
@@ -400,8 +400,8 @@ section("§9 mutants — each must be caught");
 		splitFraction: 0.5, basis: basisOf([lease("2026-01", 2000)], [{ ...TRUCK_ALL_YEAR, status: "Maintenance" }], { ...SETTINGS, downtime: "paid" }),
 	})["2026-04"].payable === 2000;
 	ok(shopCovers(B), "§9 control: a Maintenance-only month pays the lease under downtime \"paid\"");
-	const activeOnly = loadModule(mutate("return !!t && t.status !== LEASE_FLEET_EXIT_STATUS;", "return !!t && (t.status === undefined || t.status === \"Active\");"));
-	ok(!shopCovers(activeOnly), "§9 MUTANT coverage over the fixed-cost set (Active trucks only) is caught");
+	const activeOnly = loadModule(mutate("return !!t && t.status !== FLEET_EXIT_STATUS;", "return !!t && (t.status === undefined || t.status === \"Active\");"));
+	ok(!shopCovers(activeOnly), "§9 MUTANT coverage over the Active trucks only (the fixed-cost set before 2026-09-30) is caught");
 }
 
 // ============================================================ §10 settled as a lease

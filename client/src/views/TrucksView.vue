@@ -113,7 +113,9 @@ watch(totalPages, (tp) => { if (page.value > tp) goTo(tp) })
 const kpiCards = computed(() => {
   const trucks = store.trucks
   const active = trucks.filter(t => t.Status === 'Active').length
-  const maintenance = trucks.filter(t => t.Status === 'Maintenance' || t.Status === 'Out of Service').length
+  // A truck's statuses are Active, Maintenance, OOS and Inactive ('Out of
+  // Service' is a trailer status), so OOS is the second half of this count.
+  const maintenance = trucks.filter(t => t.Status === 'Maintenance' || t.Status === 'OOS').length
   const assigned = trucks.filter(t => (t.AssignedDriver || '').trim() !== '').length
   // A dash until a load succeeds, not a row of zeros that read as an empty
   // fleet (a failed first load included).
