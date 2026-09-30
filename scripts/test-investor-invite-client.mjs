@@ -18,6 +18,9 @@
 //   §6 without an invitation the payloads are what they always were, and the
 //      token is never written to the draft
 //   §7 DISCRIMINATION — defang the token pattern, require an assertion to flip
+//   §8 the admin side: the invite form's "contract only" warning stays up
+//      until the server says lease payouts are on; the payout basis words
+//      (L1, L4-L6), the month bounds and the accept line; two sabotages
 //
 // No network, no DOM, no Vue runtime.
 //
@@ -26,7 +29,7 @@
 import crypto from 'crypto'
 import fs from 'fs'
 import path from 'path'
-import { fileURLToPath } from 'url'
+import { fileURLToPath, pathToFileURL } from 'url'
 
 import {
   INVITE_TOKEN_RE,
@@ -281,6 +284,90 @@ console.log('\n§7  DISCRIMINATION')
 {
   const t = tokenChecks(/[A-Za-z0-9_-]{43}/)
   ok('an unanchored token pattern is caught (44 characters or a newline tail would pass it)', !(t.long && t.trailingNewline))
+}
+
+// ══ §8 — the admin side of a lease invitation ══════════════════════════════
+// A lease in an invitation is recorded as the investor's payout basis when the
+// application is accepted, and payouts use it only while lease payouts are
+// switched on. The admin invite form says "contract only" until the server
+// says they are on (a pending or failed answer keeps the warning), and the
+// admin screens name a lease month in the agreed words.
+console.log('\n§8  the admin invite form\'s lease warning, and the payout basis words')
+const BASIS_PATH = path.join(ROOT, 'client/src/components/investors/payoutBasis.js')
+const BASIS_SRC = fs.readFileSync(BASIS_PATH, 'utf8')
+const basis = await import(pathToFileURL(BASIS_PATH).href)
+// A copy of payoutBasis.js with one change, its relative imports made absolute
+// so it loads from a data: URL.
+async function basisWith(from, to) {
+  if (!BASIS_SRC.includes(from)) throw new Error(`sabotage anchor not found: ${from}`)
+  const src = BASIS_SRC.replace(from, to).replace(/from '\.\.\/\.\.\/(lib|utils)\//g, (_, dir) => `from '${pathToFileURL(path.join(ROOT, 'client/src', dir)).href}/`)
+  return import(`data:text/javascript,${encodeURIComponent(src)}`)
+}
+function warningChecks(b) {
+  return {
+    pending: b.leasePayoutsOff(null) === true,
+    missing: b.leasePayoutsOff(undefined) === true,
+    off: b.leasePayoutsOff({ enabled: false }) === true,
+    notABoolean: b.leasePayoutsOff({ enabled: 'true' }) === true,
+    on: b.leasePayoutsOff({ enabled: true }) === false,
+  }
+}
+{
+  const w = warningChecks(basis)
+  ok('the warning shows while the settings are pending or failed (null)', w.pending && w.missing)
+  ok('the warning shows while lease payouts are off', w.off)
+  ok('only enabled === true hides it (a string "true" does not)', w.notABoolean && w.on)
+  const FORM = read('client/src/components/investors/InviteTermsForm.vue')
+  ok('the form gates the warning on leasePayoutsOff(payoutSettings)',
+    /<p v-if="leasePayoutsOff\(payoutSettings\)" class="itf-msg itf-msg-warn" role="note" data-test="invite-lease-warning">This changes the contract only\. Payouts are still calculated from the Split % column\.<\/p>/.test(FORM))
+  ok('the settings start unknown and a failed read leaves them unknown',
+    /const payoutSettings = ref\(null\)/.test(FORM) && /api\.get\('\/api\/investor-payout-settings'\)/.test(FORM) && /\.catch\(\(\) => \{ payoutSettings\.value = null \}\)/.test(FORM))
+  ok('the amount field asks for whole dollars', /placeholder="2000"/.test(FORM) && /inputmode="numeric"/.test(FORM) && /Whole dollars between/.test(FORM))
+}
+{
+  ok('L1: "Fixed monthly lease"', basis.LEASE_LABEL === 'Fixed monthly lease')
+  const reason = (r, paidAmount, coveredDays = 30, daysInMonth = 30) => basis.leaseReasonText({ type: 'lease', leaseAmount: 2000, paidAmount, coveredDays, daysInMonth, reason: r })
+  ok('L4: prorated, word for word', reason('prorated', 1097, 17, 31) === 'The lease covered 17 of 31 days this month, so this month pays $1,097.')
+  ok('L5: downtime, word for word', reason('downtime', 0) === 'No lease payment is owed for this month: the truck had no activity, and your agreement (section 3.1) owes nothing during downtime.')
+  ok('L6: not in service, word for word', reason('not_in_service', 0) === 'No lease payment is owed for this month: no truck was in service under your lease.')
+  ok('no reason for a full month, a split row or no basis', reason(null, 2000) === '' && basis.leaseReasonText({ type: 'split', reason: 'downtime' }) === '' && basis.leaseReasonText(undefined) === '')
+  ok('the not-yet-applied status, word for word', basis.STATUS_OFF === 'Recorded, not yet applied: lease payouts are switched off. Payouts still use the Split %.')
+  ok('the status says "recorded" only when something is', basis.basisStatus({ enabled: false, schedule: [] }).text !== basis.STATUS_OFF &&
+    basis.basisStatus({ enabled: false, schedule: [{ effectiveMonth: '2026-09' }] }).text === basis.STATUS_OFF)
+  ok('switched on: applied from the earliest scheduled month',
+    basis.basisStatus({ enabled: true, schedule: [{ effectiveMonth: '2026-11' }, { effectiveMonth: '2026-09' }] }).text === 'Applied to payouts from September 2026')
+  ok('the badge and the amounts', basis.leaseBadgeLabel(2000) === 'Lease $2,000/mo' && basis.formatLeaseAmount(2000.5) === '$2,000.50' && basis.formatLeaseAmount(-1) === '')
+  ok('a lease basis, and a split one, in words',
+    basis.describeBasis({ type: 'lease', leaseAmount: 2000, effectiveMonth: '2026-09' }) === 'Fixed monthly lease of $2,000 from September 2026' &&
+    basis.currentBasisText({ type: 'split', splitPct: 50, effectiveMonth: null, source: 'default' }) === 'Split at 50% of net profit (default)')
+}
+{
+  const b = basis.monthBounds('2026-09-30', '2026-09')
+  ok('month bounds: the first editable month to this month + 12', b.min === '2026-09' && b.max === '2027-09' && b.start === '2026-09')
+  ok('no settled month: no lower bound', basis.monthBounds('2026-09-30', null).min === '')
+  ok('a first editable month later than this one is where the form starts', basis.monthBounds('2026-09-30', '2026-11').start === '2026-11')
+  ok('December rolls into the next year', basis.monthBounds('2026-12-05', null).max === '2027-12' && basis.addMonths('2026-12', 1) === '2027-01')
+  const bounds = { min: '2026-09', max: '2027-09' }
+  const v = (f) => basis.validateBasisForm({ note: '', ...f }, bounds)
+  ok('a whole-dollar lease becomes the PUT body', JSON.stringify(v({ type: 'lease', amount: '2000', month: '2026-10' }).body) === JSON.stringify({ type: 'lease', effectiveMonth: '2026-10', note: '', leaseAmount: 2000 }))
+  ok('a split sends no amount', JSON.stringify(v({ type: 'split', amount: '2000', month: '2026-10' }).body) === JSON.stringify({ type: 'split', effectiveMonth: '2026-10', note: '' }))
+  ok('cents are refused with the invite form\'s whole-dollar message', v({ type: 'lease', amount: '2000.50', month: '2026-10' }).errors?.amount === 'Enter the monthly lease amount in whole dollars, for example 2000.')
+  ok('a settled month is refused', /is the earliest month that can change/.test(v({ type: 'lease', amount: '2000', month: '2026-08' }).errors?.month || ''))
+  ok('a month past the upper bound is refused', /no later than September 2027/.test(v({ type: 'lease', amount: '2000', month: '2027-10' }).errors?.month || ''))
+  ok('a malformed month is refused', !!v({ type: 'split', month: '2026-13' }).errors?.month && !!v({ type: 'split', month: '2026-9' }).errors?.month)
+  ok('a note over 300 characters is refused', !!v({ type: 'split', month: '2026-10', note: 'x'.repeat(301) }).errors?.note && v({ type: 'split', month: '2026-10', note: 'x'.repeat(300) }).ok)
+}
+{
+  ok('accept: a recorded lease in one line', basis.acceptBasisLine({ recorded: true, type: 'lease', leaseAmount: 2000, effectiveMonth: '2026-09' }) === 'Payout basis recorded: fixed monthly lease of $2,000 from September 2026')
+  ok('accept: not recorded says why and where', basis.acceptBasisLine({ recorded: false, reason: 'LEASE_AMOUNT_WHOLE_DOLLARS' }) ===
+    'No payout basis was recorded: the signed lease amount is not a whole number of dollars. Set it in the Payout Basis panel on the Investors page')
+  ok('accept: no payoutBasis, no line', basis.acceptBasisLine(undefined) === '' && basis.acceptBasisLine(null) === '' && basis.acceptBasisLine({}) === '')
+}
+{
+  const flipped = warningChecks(await basisWith('return settings?.enabled !== true', 'return !!settings && settings.enabled !== true'))
+  ok('SABOTAGE: a warning that hides while the settings are unknown is caught', !(flipped.pending && flipped.missing))
+  const unbounded = await basisWith("const min = MONTH_RE.test(earliestEditableMonth || '') ? earliestEditableMonth : ''", "const min = ''")
+  ok('SABOTAGE: a month form that ignores the settled months is caught', unbounded.monthBounds('2026-09-30', '2026-09').min !== '2026-09')
 }
 
 console.log(failed ? `\n${failed} FAILED` : '\nall passed')

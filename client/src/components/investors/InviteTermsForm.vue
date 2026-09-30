@@ -75,17 +75,19 @@
             class="form-input"
             data-test="invite-amount"
             type="text"
-            inputmode="decimal"
+            inputmode="numeric"
             autocomplete="off"
-            placeholder="2000.00"
+            placeholder="2000"
             :maxlength="LIMITS.AMOUNT_RAW_MAX"
             :aria-invalid="!!errors.amount"
             :aria-describedby="`${ids.amountHint}${errors.amount ? ` ${ids.amountError}` : ''}`"
           />
         </div>
-        <p :id="ids.amountHint" class="field-hint">Between {{ minAmount }} and {{ maxAmount }} a month, with no commas.</p>
+        <p :id="ids.amountHint" class="field-hint">Whole dollars between {{ minAmount }} and {{ maxAmount }} a month, with no commas.</p>
         <p v-if="errors.amount" :id="ids.amountError" class="field-error">{{ errors.amount }}</p>
-        <p class="itf-msg itf-msg-warn" role="note" data-test="invite-lease-warning">This changes the contract only. Payouts are still calculated from the Split % column.</p>
+        <!-- Until the server says lease payouts are on (and while it has not
+             answered, or could not), payouts ignore the lease: say so. -->
+        <p v-if="leasePayoutsOff(payoutSettings)" class="itf-msg itf-msg-warn" role="note" data-test="invite-lease-warning">This changes the contract only. Payouts are still calculated from the Split % column.</p>
       </div>
 
       <div class="form-group">
@@ -133,7 +135,9 @@
 <script setup>
 import { computed, nextTick, reactive, ref, useId, watch } from 'vue'
 import { useInvestorInvitesStore } from '../../stores/investorInvites'
-import { LIMITS, formatMoneyCents, normalizeTermsInput } from '../../lib/paymentTerms'
+import { useApi } from '../../composables/useApi'
+import { LIMITS, normalizeTermsInput } from '../../lib/paymentTerms'
+import { formatLeaseAmount, leasePayoutsOff } from './payoutBasis'
 import { checkEmail } from '../../lib/emailAddress'
 import { replyLost } from '../../lib/saveOutcome'
 import { fmtTimestamp } from '../../utils/datetime'
@@ -147,6 +151,14 @@ const props = defineProps({
 const emit = defineEmits(['created', 'saved', 'cancel'])
 
 const store = useInvestorInvitesStore()
+const api = useApi()
+
+// GET /api/investor-payout-settings, or null while pending or after a failure
+// (both keep the lease warning up).
+const payoutSettings = ref(null)
+api.get('/api/investor-payout-settings')
+  .then((data) => { payoutSettings.value = data })
+  .catch(() => { payoutSettings.value = null })
 
 const uid = useId()
 const ids = {
@@ -185,8 +197,8 @@ const lockedByServer = ref('')
 const baseRevision = ref(null)
 
 const isEdit = computed(() => !!props.invite)
-const minAmount = formatMoneyCents(LIMITS.LEASE_MIN_CENTS)
-const maxAmount = formatMoneyCents(LIMITS.LEASE_MAX_CENTS)
+const minAmount = formatLeaseAmount(LIMITS.LEASE_MIN_CENTS / 100)
+const maxAmount = formatLeaseAmount(LIMITS.LEASE_MAX_CENTS / 100)
 
 const readOnly = computed(() =>
   isEdit.value && (props.invite.status === 'used' || props.invite.status === 'revoked' || !!lockedByServer.value),
@@ -203,9 +215,12 @@ const detailsHint = computed(() => {
   return form.type === 'split' ? `${base} Leave it empty for the standard contract with no amendment.` : base
 })
 
+// Whole dollars as typed ("2000"). An older invite's amount with cents keeps
+// them, so the form shows it and refuses it until it is corrected.
 function centsToInput(cents) {
   if (!Number.isSafeInteger(cents)) return ''
-  return `${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, '0')}`
+  const dollars = Math.floor(cents / 100)
+  return cents % 100 ? `${dollars}.${String(cents % 100).padStart(2, '0')}` : String(dollars)
 }
 
 function fillFrom(invite) {

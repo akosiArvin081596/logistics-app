@@ -8,8 +8,9 @@
 // runs both over one table of inputs and fails on any difference, in LIMITS,
 // the labels, the messages or a single answer.
 //
-// Contract wording only: these terms change what the agreements say, never
-// how a payout is computed (payouts come from the investor's Split %).
+// These terms change what the agreements say. Accepting an application whose
+// terms are a lease records it as the investor's payout basis, which payouts
+// use only while lease payouts are switched on; until then they use the Split %.
 
 export const PAYMENT_TYPES = Object.freeze(['split', 'lease'])
 
@@ -33,7 +34,7 @@ export const STANDARD_SUMMARY = '50/50 profit split — standard contract terms'
 export const MESSAGES = Object.freeze({
   invalid_type: 'Choose a payment type: a 50/50 profit split or a fixed monthly lease payment.',
   amount_required: 'Enter the monthly lease amount.',
-  invalid_amount: 'Enter the monthly lease amount in dollars and cents, for example 2000 or 2000.50.',
+  invalid_amount: 'Enter the monthly lease amount in whole dollars, for example 2000.',
   amount_out_of_range: 'The monthly lease amount must be between $1.00 and $100,000.00.',
   amount_not_allowed: 'A 50/50 profit split has no monthly amount.',
   details_not_text: 'Additional terms must be text.',
@@ -59,9 +60,10 @@ const EMOJI_PARTS_RE = new RegExp(`[\\p{Regional_Indicator}\\p{Emoji_Modifier}${
 
 const isBlank = (v) => v === undefined || v === null || v === ''
 
-// Dollars → whole cents, from the digits (never floating point). A number, or
+// Whole dollars → cents, from the digits (never floating point). A number, or
 // text that after trim and at most one leading "$" is up to 9 digits with at
-// most two decimals; the length is checked before the pattern runs.
+// most two decimals, all of them zero ("2000" or "2000.00"); the length is
+// checked before the pattern runs. Cents are refused before the range.
 export function parseLeaseAmountToCents(value) {
   if (isBlank(value)) return { ok: false, reason: 'amount_required' }
   let text
@@ -80,6 +82,7 @@ export function parseLeaseAmountToCents(value) {
   if (!AMOUNT_RE.test(text)) return { ok: false, reason: 'invalid_amount' }
   const [whole, frac = ''] = text.split('.')
   const cents = Number(whole) * 100 + Number(frac.padEnd(2, '0'))
+  if (cents % 100 !== 0) return { ok: false, reason: 'invalid_amount' }
   if (cents < LIMITS.LEASE_MIN_CENTS || cents > LIMITS.LEASE_MAX_CENTS) return { ok: false, reason: 'amount_out_of_range' }
   return { ok: true, value: cents }
 }
