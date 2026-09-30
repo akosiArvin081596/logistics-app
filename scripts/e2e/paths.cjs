@@ -20,6 +20,14 @@
 //                   checkout (and contain none: it is the harness's own).
 //   workFile(p)     p made canonical, refused unless it is a real file (not a
 //                   symlink) inside the work dir
+//   assertPrivateDir(dir, label, envVar)
+//                   the private-directory rule, the one copy of it: dir belongs
+//                   to this user and is closed to group and other. workDir() and
+//                   fake-gmail.cjs's capture folder both call it
+//
+// Requiring this file does nothing but define these (built-in modules only, no
+// file, process or network effect), so fake-gmail.cjs can require it while it is
+// preloaded into the server.
 //
 // Command line (for the shell scripts):
 //   node paths.cjs work-dir           print the work dir (created if missing)
@@ -101,6 +109,21 @@ function plannedPath(p) {
   return path.join(realOrSelf(head), ...rest)
 }
 
+// A directory the harness keeps real data in must belong to this user and be
+// closed to group and other. `dir` is an existing, symlink-resolved path, `label`
+// names it in the message and `envVar` is the setting that points at it. Throws
+// an Error saying why; each caller words its own refusal around the message.
+function assertPrivateDir(dir, label, envVar) {
+  const st = fs.statSync(dir)
+  if (typeof process.getuid === 'function' && st.uid !== process.getuid()) {
+    throw new Error(`${label} ${dir} belongs to another user`)
+  }
+  if (st.mode & 0o077) {
+    throw new Error(`${label} ${dir} is open to other users (mode ${(st.mode & 0o777).toString(8)}). ` +
+      `chmod 700 it, or point ${envVar} at a private directory.`)
+  }
+}
+
 let workCache = null
 function workDir() {
   if (workCache) return workCache
@@ -118,14 +141,11 @@ function workDir() {
   }
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
   const real = fs.realpathSync(dir)
-  const st = fs.statSync(real)
-  if (!st.isDirectory()) throw new Error(`refusing: the work dir ${real} is not a directory`)
-  if (typeof process.getuid === 'function' && st.uid !== process.getuid()) {
-    throw new Error(`refusing: the work dir ${real} belongs to another user`)
-  }
-  if (st.mode & 0o077) {
-    throw new Error(`refusing: the work dir ${real} is open to other users (mode ${(st.mode & 0o777).toString(8)}). ` +
-      'chmod 700 it, or point E2E_WORK_DIR at a private directory.')
+  if (!fs.statSync(real).isDirectory()) throw new Error(`refusing: the work dir ${real} is not a directory`)
+  try {
+    assertPrivateDir(real, 'the work dir', 'E2E_WORK_DIR')
+  } catch (e) {
+    throw new Error(`refusing: ${e.message}`)
   }
   return (workCache = real)
 }
@@ -167,7 +187,7 @@ async function chromePath() {
   return exe
 }
 
-module.exports = { REPO, mainCheckout, appDir, appRequire, wantedNode, warnNodeVersion, workDir, workFile, chromePath }
+module.exports = { REPO, mainCheckout, appDir, appRequire, wantedNode, warnNodeVersion, workDir, workFile, assertPrivateDir, chromePath }
 
 if (require.main === module) {
   const [cmd, arg] = process.argv.slice(2)

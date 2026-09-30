@@ -10580,7 +10580,22 @@ const USER_AGENT_MAX = 512;
 // equal.
 const EVIDENCE_TEXT_STRIP = /[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]+/g;
 function sanitizeEvidenceText(v, max) {
-	const s = String(v == null ? "" : v).normalize("NFC").replace(EVIDENCE_TEXT_STRIP, " ").trim();
+	// Only `max` characters are kept, so the raw value is cut to 4 × max BEFORE
+	// it is normalized, and the work stays proportional to the kept length.
+	// Four units a character leaves room for astral characters, decomposed
+	// accents and the stripped characters below: real text cleans exactly as it
+	// did, and only a value padded so heavily that its first `max` characters
+	// lie past the cut comes out differently. The cut never leaves half a
+	// surrogate pair. ⚠️ Self-contained on purpose (runners lift this function
+	// alone), so safeAttachmentName() carries the same cut, and
+	// scripts/test-text-cleanup-bound.js pins the two copies identical.
+	let raw = String(v == null ? "" : v);
+	if (raw.length > max * 4) {
+		raw = raw.slice(0, max * 4);
+		const last = raw.charCodeAt(raw.length - 1);
+		if (last >= 0xd800 && last <= 0xdbff) raw = raw.slice(0, -1);
+	}
+	const s = raw.normalize("NFC").replace(EVIDENCE_TEXT_STRIP, " ").trim();
 	// Array.from, not slice: cutting at a UTF-16 boundary can split a surrogate
 	// pair and store a lone surrogate, which SQLite renders as U+FFFD. Cosmetic
 	// anywhere else; this is an evidence field.
@@ -41155,7 +41170,15 @@ function isRealCalendarDate(y, mo, d) {
 // legitimately EMPTY (the non-Bison filename reads "Invoice Order #…" with no
 // prefix) — defaulting that to "Invoice" would print "Invoice Invoice Order #…".
 function safeAttachmentName(value, max = 80, fallback = "Invoice") {
-	let s = String(value == null ? "" : value).normalize("NFC").replace(EVIDENCE_TEXT_STRIP, " ");
+	// Cut to 4 × max before normalizing — the same cut, for the same reason, as
+	// in sanitizeEvidenceText().
+	let raw = String(value == null ? "" : value);
+	if (raw.length > max * 4) {
+		raw = raw.slice(0, max * 4);
+		const last = raw.charCodeAt(raw.length - 1);
+		if (last >= 0xd800 && last <= 0xdbff) raw = raw.slice(0, -1);
+	}
+	let s = raw.normalize("NFC").replace(EVIDENCE_TEXT_STRIP, " ");
 	s = s.replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim();
 	// ⚠️ `[.\s]+`, not `\.+`, and it must run AFTER the separator replacement.
 	// Replacing separators MANUFACTURES new leading dot-runs: "../../etc/passwd"
@@ -41233,6 +41256,16 @@ const INVOICE_FIELD_SCAN_MAX = 200;
 const INVOICE_NOTES_MAX = 500;
 const INVOICE_NOTES_SCAN_MAX = 2000;
 
+// The invoice EMAIL's message — the cover text above the signature, which the
+// editor lets the dispatcher rewrite before the Gmail draft is written (the
+// signature itself is fixed). The notes' discipline: over the limit is
+// REFUSED, never cut. The raw bound is 2× the limit, not the notes' 4×: room
+// for a message its clean-up shortens (a CRLF becomes one \n, a decomposed
+// accent one character), while the clean-up before the count only ever runs
+// on text of about the allowed length.
+const INVOICE_EMAIL_BODY_MAX = 5000;
+const INVOICE_EMAIL_BODY_SCAN_MAX = 10000;
+
 // sanitizeEvidenceText() for text that is ALLOWED to be multi-line.
 //
 // The one difference is the line break: sanitizeEvidenceText turns \n into a
@@ -41268,11 +41301,11 @@ function sanitizeInvoiceNotes(v, max) {
 	return Array.from(s).slice(0, max).join("");
 }
 
-// The nine editable fields, the optional `notes`, and `moveNumber`, which has
-// no UI: it is printed in the Bison cover letter, so leaving it un-pinned would
-// let a nondeterministic Gemini re-run on the commit change a body the
-// dispatcher already reviewed — the same reasoning already written for the
-// recipient below.
+// The nine editable fields, the optional `notes` and `emailBody`, and
+// `moveNumber`, which has no UI: it is printed in the Bison cover letter, so
+// leaving it un-pinned would let a nondeterministic Gemini re-run on the commit
+// change a body the dispatcher already reviewed — the same reasoning already
+// written for the recipient below.
 //
 // Returns { ok, error, code, field, has, values }. `has[k]` is true only when
 // the CLIENT SENT the key: undefined/null mean "not supplied → derive it
@@ -41444,6 +41477,31 @@ function parseInvoiceOverrides(body) {
 		}
 		has.notes = true;
 		values.notes = v;
+	}
+
+	// --- emailBody ------------------------------------------------------------
+	// The email's message as edited: everything above the signature, greeting
+	// and sign-off included. Omitted (or null) → the generated message. The
+	// notes branch above in every step — a non-string refused, not coerced; the
+	// raw length refused before the clean-up; the SAME sanitizeInvoiceNotes() —
+	// except that "" is REFUSED here: an invoice email with no message is not a
+	// choice, where a cleared note is.
+	if (supplied("emailBody")) {
+		if (typeof src.emailBody !== "string") {
+			return bad("INVOICE_EMAIL_BODY_INVALID", "emailBody", "The email message must be text.");
+		}
+		const tooLong = `The email message must be ${INVOICE_EMAIL_BODY_MAX.toLocaleString("en-US")} characters or fewer.`;
+		if (src.emailBody.length > INVOICE_EMAIL_BODY_SCAN_MAX) {
+			return bad("INVOICE_EMAIL_BODY_TOO_LONG", "emailBody", tooLong);
+		}
+		const v = sanitizeInvoiceNotes(src.emailBody, INVOICE_EMAIL_BODY_SCAN_MAX);
+		// Counted in CODEPOINTS, like every other cap here.
+		if (Array.from(v).length > INVOICE_EMAIL_BODY_MAX) {
+			return bad("INVOICE_EMAIL_BODY_TOO_LONG", "emailBody", tooLong);
+		}
+		if (!v) return bad("INVOICE_EMAIL_BODY_EMPTY", "emailBody", "The email message can't be empty.");
+		has.emailBody = true;
+		values.emailBody = v;
 	}
 
 	return { ok: true, error: "", code: "", field: "", has, values };
@@ -42014,15 +42072,27 @@ app.post(
 			//     "Bison Transport", so the subject renders exactly as before.
 			//     One builder for this route and the preview — see
 			//     buildInvoiceSubject() for why it is plain text, never esc()'d.
+			//     The message is the dispatcher's edit when one was sent, else the
+			//     generated one; emailBodyDefault is that generated one, which the
+			//     editor shows until somebody types and the audit judges an edit
+			//     against. The signature is never editable.
+			//     ⚠️ Its Order # is BLANKED exactly as the dryRun's `orderNumber` seed
+			//     is (step 6a), for the same reason: with the refs unreadable,
+			//     orderNumber is our load id, and the message the editor starts from
+			//     must not offer it as Bison's Order #. Only a dryRun reaches here
+			//     with needsOrderNumber set — the approve refused above.
 			const draftSubject = brokerInvoice.buildInvoiceSubject({ brokerName: effBrokerName, orderNumber });
-			const draftHtml = brokerInvoice.buildInvoiceEmailHtml({
+			const emailFields = {
 				brokerName: effBrokerName,
 				isBison,
 				loadNumber: loadRef,
-				orderNumber,
+				orderNumber: needsOrderNumber ? "" : orderNumber,
 				moveNumber,
 				poNumber,
-			});
+			};
+			const emailBodyDefault = brokerInvoice.buildInvoiceEmailBodyText(emailFields);
+			const emailBody = ov.has.emailBody ? ov.values.emailBody : emailBodyDefault;
+			const draftHtml = brokerInvoice.buildInvoiceEmailHtml({ ...emailFields, bodyText: emailBody });
 			// Bison's attachment name is left byte-identical; other brokers get
 			// their own name (a broker filing "Bison Invoice ..." would be odd).
 			//
@@ -42147,7 +42217,16 @@ app.post(
 					documentsEmailSource: recipientSource,
 					invoicePdfBase64,
 					rateconPdfBase64: rateconBuffer && rateconBuffer.length ? Buffer.from(rateconBuffer).toString("base64") : "",
-					emailHtml: draftHtml, // exact Gmail draft body so the reviewer can read the cover note before approving
+					// The whole email the approve would write, the edited message when
+					// one was sent. The editor does not render it — it shows the two
+					// parts below instead — and it stays for the runners and the e2e
+					// harness, which check the built email itself.
+					emailHtml: draftHtml,
+					// The editor's message box, in two parts: the generated message as
+					// plain text for the fields above (what the box shows while
+					// unedited), and the fixed signature it shows read-only beneath.
+					emailBodyDefault,
+					emailSignatureHtml: brokerInvoice.buildInvoiceEmailSignatureHtml(),
 					ratecons: (rateconCandidates || []).map((c) => ({ base64: Buffer.from(c.buffer).toString("base64"), label: c.label || "Rate-con", source: c.source || "" })), // EVERY rate-con file for this load so the reviewer can see all of them, not just the primary
 				});
 			}
@@ -42191,6 +42270,7 @@ app.post(
 				["deliveryDate", derivedDeliveryDate, deliveryDate],
 				["moveNumber", derivedMoveNumber, moveNumber],
 				["total", derivedTotal, totalAmount],
+				["emailBody", emailBodyDefault, emailBody],
 				// LAST on purpose: the audit detail is capped at 1000 characters, and a
 				// long note must be what the cap trims, never the money line above.
 				["notes", derivedNotes, notes],
@@ -42199,11 +42279,19 @@ app.post(
 			// Names the divergence explicitly, and names the RULE with it — an
 			// auditor reading this row months later must not have to go and check
 			// whether the sheet moved too. It did not, and that is owner decision #2.
-			const editDetail = `${invoiceId} load ${loadId} — ` + editDiffs.map(([f, from, to]) =>
+			// The email message is the one field logged WITHOUT its text: only that
+			// it was edited, its length, and — when the n8n fallback wrote the draft
+			// with the generated message instead — that the edit was not applied.
+			// An applied edit's words are in the Gmail draft itself.
+			const describeEdits = (emailApplied) => `${invoiceId} load ${loadId} — ` + editDiffs.map(([f, from, to]) =>
 				f === "total"
 					? `total: sheet ${fmtMoney(sheetTotal)} / ratecon ${fmtMoney(rcTotal)} → invoiced ${fmtMoney(to)} (INVOICE ONLY — Job Tracking Payment unchanged)`
-					: `${f}: "${from}" → "${to}"`,
+					: f === "emailBody"
+						? `emailBody: edited (${Array.from(to).length} chars)` + (emailApplied ? "" : ", NOT APPLIED (the fallback service used the generated message)")
+						: `${f}: "${from}" → "${to}"`,
 			).join("; ");
+			// Replaced on the n8n path only, before recordDraft() logs it.
+			let editDetail = describeEdits(true);
 
 			// Persist that an official draft was created for this load so the load
 			// modal can show "approved draft → recipient / invoice #". Best-effort —
@@ -42217,7 +42305,9 @@ app.post(
 						(req.session.user && req.session.user.username) || "",
 						editedFields.length ? 1 : 0,
 						editedFields.join(","),
-						editedFields.length ? JSON.stringify(ov.values) : "",
+						// Without the email message, by the audit line's rule: edited_fields
+						// records that it changed, and the text is not kept here.
+						editedFields.length ? JSON.stringify({ ...ov.values, emailBody: undefined }) : "",
 						totalSource,
 						sheetTotal > 0 ? fmtMoney(sheetTotal) : "",
 						rcTotal > 0 ? fmtMoney(rcTotal) : "",
@@ -42265,6 +42355,14 @@ app.post(
 			const webhookUrl = process.env.N8N_INVOICE_WEBHOOK_URL;
 			const webhookSecret = process.env.N8N_WEBHOOK_SECRET;
 			if (webhookUrl && webhookSecret) {
+				// ⚠️ The workflow does not use emailHtml (below): this path's draft
+				// carries the GENERATED message. An edited one must not vanish
+				// silently, so the answer warns and the audit line records the edit
+				// as not applied. Drop both once the workflow sends emailHtml.
+				if (editedFields.includes("emailBody")) {
+					draftWarnings.push("Your edited email message was not applied: the draft was created by the fallback service, which uses the generated message.");
+					editDetail = describeEdits(false);
+				}
 				// The EFFECTIVE values, not the extracted ones — the fallback must
 				// mail what the dispatcher reviewed, or the two send paths diverge on
 				// exactly the fields this feature exists to correct.
@@ -42277,6 +42375,10 @@ app.post(
 					// Already printed inside invoicePdfBase64; carried as text too so
 					// the workflow sees the same reviewed values as the IMAP path.
 					notes,
+					// The email body exactly as the IMAP path writes it, an edited
+					// message included. The workflow lives outside this repo and does
+					// not use it yet — see the warning above.
+					emailHtml: draftHtml,
 					to: invoiceTo.email,
 					invoicePdfBase64,
 					invoiceFileName,
@@ -42489,13 +42591,19 @@ app.post(
 			const invoicePdf = await renderHtmlToPdf(invoiceHtml);
 
 			// Return the DERIVED STRINGS too, so the client never re-implements a
-			// server template. emailHtml especially: the modal's Email tab renders
-			// the cover note built from the ORIGINAL values, so once those are
-			// editable it would silently show a body that will not be sent.
+			// server template. The Email tab shows a message box and, read-only
+			// beneath it, emailSignatureHtml. The box follows emailBodyDefault —
+			// the generated message for THESE values — until somebody types there;
+			// a box seeded once from the dryRun would keep the message built from
+			// the ORIGINAL values, which is not the one sent once they are edited.
+			// emailHtml is the whole email, built the way the approve builds it
+			// (the edited message when one was sent). The editor no longer renders
+			// it; it stays for the runners and the e2e harness.
 			const subject = brokerInvoice.buildInvoiceSubject({ brokerName, orderNumber });
-			const emailHtml = brokerInvoice.buildInvoiceEmailHtml({
-				brokerName, isBison, loadNumber: loadRef, orderNumber, moveNumber, poNumber,
-			});
+			const emailFields = { brokerName, isBison, loadNumber: loadRef, orderNumber, moveNumber, poNumber };
+			const emailBodyDefault = brokerInvoice.buildInvoiceEmailBodyText(emailFields);
+			const emailBody = ov.has.emailBody ? ov.values.emailBody : emailBodyDefault;
+			const emailHtml = brokerInvoice.buildInvoiceEmailHtml({ ...emailFields, bodyText: emailBody });
 			// 80 for the Order # half — the same bound as the approve route above.
 			const safeName = safeAttachmentName(brokerName, 40, "");
 			const safeOrderNumber = safeAttachmentName(orderNumber, 80);
@@ -42515,6 +42623,8 @@ app.post(
 				invoicePdfBase64: Buffer.from(invoicePdf).toString("base64"),
 				subject,
 				emailHtml,
+				emailBodyDefault,
+				emailSignatureHtml: brokerInvoice.buildInvoiceEmailSignatureHtml(),
 				invoiceFileName,
 				peekedInvoiceId,
 				warnings,

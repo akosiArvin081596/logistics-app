@@ -70,7 +70,7 @@
 //      finalized month is still refused (409 PERIOD_FINALIZED), naming only the
 //      finalized months those loads reach
 //
-// Invoice editor section (I1-I9; ONLY=invoice): the draft invoice editor
+// Invoice editor section (I1-I14b; ONLY=invoice): the draft invoice editor
 // (Dashboard → Completed → a delivered load → Draft Invoice Email)
 //   I1 the editor opens; the load's Job Tracking row is read before any edit
 //   I2-I3 ORDER # takes any printable character but < and >, 80 max, and the
@@ -84,6 +84,23 @@
 //      next editor and its dryRun PDF, and a preview sent with no notes key prints it
 //      (I8b); the pre-filled note is labelled "carried over" until it is typed into
 //      (I8h) · I9 the server refuses a bad note or Order #
+//   I10 the Email message tab holds the message in an editable box, pre-filled with
+//      the generated text, above the read-only signature, logo and notice; To and
+//      Subject as before
+//   I11 a typed edit is badged and survives a tab switch and a field's re-render ·
+//      I11b an empty message is refused on the form · I12 Reset brings back the
+//      generated text · I13 the server refuses an empty, too long or non-text body
+//   IB (local) the editor of a Bison load (E2E_BISON_LOAD, default 30080873), whose
+//      message names the Order #, Move # and PO #, its dryRun handed a synthetic
+//      Bison rate-con · I10c the untouched message keeps its PO # sentence through
+//      the render of a field it does not name · I10b it follows an Order # change ·
+//      I11c a typed message the Order # change left stale: the hint, Approve held,
+//      Keep my message, Use the new message · I13f a Bison load whose Order # could
+//      not be read: the generated message does not name our load id as the Order #
+//   I14 (local, a server booted with E2E_FAKE_GMAIL=1) the Gmail draft carries the
+//      edited message exactly, line breaks included, above the unchanged signature,
+//      and is created read (\Seen) · I14b an unedited approve carries the generated
+//      message, also read
 //
 // Investor terms section (T0-T11; ONLY=terms, STEPS picks steps):
 //   T0 (no sign-in, no creds file needed): two test investors (QA-TEST Investor
@@ -199,7 +216,7 @@
 //   ONLY        a comma-separated list of sections: trucks (1-12, R1-R16), signout
 //               (S1-S7), dispatcher (D1-D3), maintenance (M1), moneypath (P1, E1,
 //               N1, N1b, F1, E2, B1, RC1), names (K1, K2, K3), eldlink (L1-L3),
-//               invoice (I1-I9), terms (T0-T11),
+//               invoice (I1-I14b), terms (T0-T11),
 //               investorfixes (F1-F14), report (R1-R6, Rx), lease (LA-LH, LP, LS, LV, LW, LX, LY).
 //               Unset = all, in that
 //               order. ⚠️ The sections together sign in more often than the login
@@ -207,7 +224,11 @@
 //   STEPS       only these cases of the sign-out, money-path, invoice and terms
 //               sections, e.g. STEPS=S5a,S7 or STEPS=P1,F1 or STEPS=E2,B1,RC1 (P1
 //               selects P1a and P1b; N1 selects N1 and N1b) or STEPS=I8,I9 (I1 opens
-//               the editor whenever any of I1-I7 is picked) or STEPS=T0 then
+//               the editor whenever any of I1-I7 or I10-I12 is picked, and IB the
+//               Bison load's whenever I10b, I10c or I11c is; I10 selects I10, I10b
+//               and I10c, I11 selects I11, I11b and I11c, I13 selects I13 and
+//               I13a-f, I14 selects I14 and I14b; STEPS=I10B, I10C, I11C, I13F or
+//               I14B runs that one alone) or STEPS=T0 then
 //               STEPS=T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11 (a terms step also runs the
 //               steps it builds on; T0 and T1-T11 together render more previews
 //               than the preview limiter allows one IP in 15 minutes) or
@@ -218,6 +239,13 @@
 //               not local (it writes an application; locally DB_PATH enables it)
 //   E2E_INVOICE_APPROVE=1  let I7 press Approve on a server that is not local (it
 //               would create a real Gmail draft wherever the server has a mail target)
+//   E2E_FAKE_GMAIL=1  run I14 and I14b: the local server was booted with the same
+//               variable (boot-server.sh), so its Gmail is scripts/e2e/fake-gmail.cjs,
+//               which captures each draft in the work dir and sends nothing
+//   E2E_FAKE_GMAIL_DIR  where the fake's captures are read (default:
+//               <work dir>/fake-gmail, where boot-server.sh points the server)
+//   E2E_BISON_LOAD  the Bison steps' load (IB, I10b, I10c, I11c, I13f), a delivered
+//               Bison load with a POD (default: 30080873)
 //   S3_LATENCY_MS, S3_KBPS     the CDP throttle of S3, S6 and S7 (default +2500 ms per
 //               request, 24 KB/s)
 //
@@ -227,10 +255,10 @@
 // Every "Expected" column states the behaviour AFTER the fixes; a BEFORE run is
 // expected to FAIL the fix rows — that is the baseline.
 import { chromium } from 'playwright-core'
+import { execFileSync, spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { spawn } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import paths from './paths.cjs'
@@ -373,7 +401,7 @@ function writeResults(final = false) {
     runs('moneypath') && 'money path (P1, E1, N1, N1b, F1, E2, B1, RC1)',
     runs('names') && 'names (K1, K2, K3)',
     runs('eldlink') && 'ELD link (L1-L3)',
-    runs('invoice') && 'invoice editor (I1-I9)',
+    runs('invoice') && 'invoice editor (I1-I14b)',
     runs('terms') && `investor terms (${[...TERMS_PLAN].join(', ') || 'no step picked'})`,
     runs('investorfixes') && 'investor fixes (F1-F14)',
     runs('report') && `investor report (${[...REPORT_PLAN].sort().join(', ') || 'no step picked'}${REPORT_PLAN.size ? ', Rx' : ''})`,
@@ -407,13 +435,13 @@ const b64 = (s) => Buffer.from(s).toString('base64')
 const HTML_DOC = '<h1>not an image</h1>'
 const SVG_DOC = '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="60"><text x="10" y="38" font-size="24">not a photo</text></svg>'
 
-function makePdf() {
-  // Minimal, valid one-page PDF (correct xref offsets), inert text only.
-  const content = 'BT /F1 18 Tf 20 45 Td (QA PDF) Tj ET'
+// Minimal, valid one-page PDF (correct xref offsets), inert text only: `content` is
+// its one uncompressed content stream (ASCII), `mediaBox` its page size.
+function makePdf(content = 'BT /F1 18 Tf 20 45 Td (QA PDF) Tj ET', mediaBox = '0 0 200 100') {
   const objs = [
     '<< /Type /Catalog /Pages 2 0 R >>',
     '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+    `<< /Type /Page /Parent 2 0 R /MediaBox [${mediaBox}] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>`,
     `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
     '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
   ]
@@ -5444,7 +5472,7 @@ async function eldLinkSection() {
   }
 }
 
-// ---------------------------------------------------------------- invoice editor (I1-I9)
+// ---------------------------------------------------------------- invoice editor (I1-I14b)
 // ONLY=invoice. The draft invoice editor (InvoiceDraftPreviewModal.vue), opened from
 // Dashboard → Completed → a delivered load → Draft Invoice Email with
 // POST /api/loads/:loadId/draft-invoice?dryRun=1, and re-rendered as you type by
@@ -5457,19 +5485,37 @@ async function eldLinkSection() {
 //     labelled as carried over until the dispatcher types into it.
 //   - An approve on a server with no mail target says so in the load dialog, never
 //     "Draft ready in Gmail".
+//   - The Email message tab keeps its To and Subject lines, and holds the message
+//     (greeting to "Thank you,") in an editable box, pre-filled with the generated
+//     text, above the signature, logo and confidentiality notice, which stay
+//     read-only and unchanged. An untouched box follows each re-render; once typed
+//     in, nothing but Reset replaces it. The server takes it as `emailBody` (400
+//     INVOICE_EMAIL_BODY_EMPTY / _TOO_LONG over 5,000 / _INVALID), and the Gmail
+//     draft carries it exactly, line breaks included, and is created read (\Seen),
+//     so the unread-mail poll that ingests rate-cons never picks it up.
+//   - A Bison message names the Order #, the Move # and the PO #. Untouched, it keeps
+//     its PO # sentence through the render of a field it does not name, and follows
+//     an Order # change. A typed message such a change leaves stale is flagged, holds
+//     Approve, and offers "Keep my message" and "Use the new message". When the Order #
+//     could not be read off the rate-con, the generated message never names our load
+//     id in its place.
 //   - Nothing writes Job Tracking.
 // Evidence: the page's own requests and responses (page.on), the PDF the server
-// rendered (its text, read with the app's pdfjs-dist in Node), and the form.
+// rendered (its text, read with the app's pdfjs-dist in Node), the form, and (I14)
+// the draft the fake Gmail captured, rendered the way a mail client shows it.
 //
 // Spend per server process: one sign-in; POST …/draft-invoice (25 per 15 min per
-// user, the ?dryRun=1 opens included) three times (I1, I7's approve, I8's reopen)
-// plus one per candidate load whose dryRun failed; POST …/invoice-preview (120 per
-// 15 min) about seventeen times.
+// user, the ?dryRun=1 opens included) about thirteen times (I1, I7's approve, I8's
+// reopen, IB's open, I13's four refusals, I13f, and I14 and I14b one open and one
+// approve each) plus one per candidate load whose dryRun failed; POST
+// …/invoice-preview (120 per 15 min) about thirty-five times.
 //
 // ⚠️ The approve (I7) creates a real Gmail draft wherever the server has a mail
 // target. boot-server.sh blanks Gmail and the n8n invoice webhook, so locally the
 // route answers preview:true and records nothing. On any other server it is SKIPPED
-// unless E2E_INVOICE_APPROVE=1.
+// unless E2E_INVOICE_APPROVE=1. With E2E_FAKE_GMAIL=1 the local server's Gmail is
+// the fake: every approve (I7's too) is captured in the work dir and sends nothing,
+// and the draft records those approves write in the copy are deleted by id.
 //
 // ⚠️ The draft route reads a load's POD from <checkout>/uploads on disk, which a
 // worktree lacks: prep it with E2E_LINK_PODS=1 scripts/e2e/prep-worktree.sh.
@@ -5482,6 +5528,52 @@ const INV_ORDER_HINT = `Must start with a letter or number ${EM_DASH} any charac
 const INV_ORDER_EDITED = `Invoice only ${EM_DASH} Job Tracking is not changed.`
 const INV_NOTE3 = ['Advance $700 paid at pickup.', `Detention 2h ${EM_DASH} see POD.`, 'Ref <ADV-7101850> & thanks']
 const INV_NOTES_MAX = 500
+const INV_EMAIL_BODY_MAX = 5000
+// The Bison steps (IB, I10c, I10b, I11c, I13f) use this load: a delivered Bison load
+// with a POD on the local copy. Its message carries the Order #, the Move # and the
+// PO #, where a load that is not Bison's carries only its own load number.
+const INV_BISON_LOAD = String(process.env.E2E_BISON_LOAD || '30080873').replace(/^#/, '').trim()
+// Locally that load's rate-con is out of reach (it lives in the production Drive
+// folder boot-server.sh names away), so IB hands the editor's own dryRun this
+// synthetic one, as an upload in the request body (one of the route's own rate-con
+// sources): only the "Billing Information" block lib/broker-invoice.js's
+// deterministic scan reads, with test numbers, and no trailer, total or address.
+const INV_BISON_RC = { order: '7101852', po: '4455667', move: '8899001' }
+const bisonRateconPdf = () => makePdf(`BT /F1 11 Tf 40 760 Td 14 TL ${[
+  'QA-TEST synthetic rate confirmation', 'Billing Information', `Order #: ${INV_BISON_RC.order}`, 'LEG #:',
+  `PO #: ${INV_BISON_RC.po}`, `Move #: ${INV_BISON_RC.move}`,
+].map((l) => `(${l}) Tj T*`).join(' ')} ET`, '0 0 612 792')
+// The Order #s the Bison steps type: I10b, then I11c's two changes.
+const INV_BISON_ORDERS = ['7101853', '7101854', '7101855']
+// The signature, logo and confidentiality notice every draft carries, exactly as
+// lib/broker-invoice.js wrote them before the message became editable (61406a1). They
+// must stay byte-identical, so the harness keeps its own copy to hold the fix to.
+const INV_SIGNATURE_HTML =
+  '<p>--<br>LogisX Inc.<br>321*848*3437<br><a href="https://www.LogisX.com">www.LogisX.com</a></p>' +
+  '<p><img src="https://app.logisx.com/logo.avif" alt="LogisX" style="height:32px"></p>' +
+  '<p style="font-size:10px;color:#8a8a8a;line-height:1.5">CONFIDENTIALITY/PRIVILEGE: This communication is intended only for the named recipient(s). ' +
+  'It may contain legally privileged or otherwise protectible information. The sender accepts no liability, including, without limitation, ' +
+  'liability for negligence, in respect of any information in this communication. If you receive this e-mail in error, please notify the ' +
+  'sender and delete it. Thank you for your cooperation.</p>'
+const INV_LOGO_URL = 'https://app.logisx.com/logo.avif'
+// The message the server generates for a load that is not Bison's, as a reader sees
+// it: its four paragraphs, a blank line between each (lib/broker-invoice.js, 61406a1).
+const invGeneratedText = (load) => [
+  'Hello,',
+  `Please see the attached documents for load number ${load}: the rate confirmation, the signed POD, and the invoice.`,
+  'Please contact us if there is any issue.',
+  'Thank you,',
+].join('\n\n')
+// A typed message: a blank line, a single line break, markup that must print as
+// text, an ampersand and quotes. Test text only, so the results may quote it.
+const invBodyEdit = (tag) => [
+  'Hello QA team,',
+  '',
+  `QA-${tag} ${stamp}: the invoice and the signed POD are attached.`,
+  'Shown as typed: <b>not bold</b> & "quoted"',
+  '',
+  'Thank you,',
+].join('\n')
 const wantInv = (id) => !STEPS || STEPS.has(id)
 const invPath = (id, tail) => `/api/loads/${encodeURIComponent(id)}/${tail}`
 const isPostTo = (r, p) => r.request().method() === 'POST' && pathOf(r.url()) === p
@@ -5593,6 +5685,171 @@ async function typeNotes(page, id, value, also = () => true) {
   return preview
 }
 
+// ---- the Email message tab (I10-I14b)
+const emailTab = (page) => page.getByRole('tab', { name: 'Email message' })
+const invoiceTab = (page) => page.getByRole('tab', { name: 'Invoice', exact: true })
+const emailBodyBox = (page) => page.locator('[data-testid="idp-email-body"]')
+const emailBodyBadge = (page) => page.locator('[data-testid="idp-email-body-edited"]')
+const emailBodyError = (page) => page.locator('[data-testid="idp-email-body-error"]')
+const emailSignature = (page) => page.locator('[data-testid="idp-email-signature"]')
+// The typed message went stale (a field it names changed): the hint and its two
+// choices on the Email message tab, and the footer's copy on the other tabs (I11c).
+const emailBodyStale = (page) => page.locator('[data-testid="idp-email-body-stale"]')
+const emailBodyKeep = (page) => page.locator('[data-testid="idp-email-body-keep"]')
+const emailBodyUseDefault = (page) => page.locator('[data-testid="idp-email-body-use-default"]')
+const emailBodyStaleFoot = (page) => page.locator('[data-testid="idp-email-body-stale-foot"]')
+const shown = (loc) => loc.first().isVisible().catch(() => false)
+const EDITABLE_SEL = 'input, textarea, select, [contenteditable]:not([contenteditable="false"])'
+// What the signature block must show, in this order of reading.
+const INV_SIGNATURE_PARTS = ['--', 'LogisX Inc.', '321*848*3437', 'www.LogisX.com', 'CONFIDENTIALITY/PRIVILEGE:', 'Thank you for your cooperation.']
+async function openEmailTab(page) {
+  await emailTab(page).click()
+  await page.locator('.idp-stage .idp-email, [data-testid="idp-email-body"]').first().waitFor({ state: 'visible', timeout: 15000 })
+  await page.waitForTimeout(400)
+}
+// The tab as a reader finds it: the To and Subject lines (.idp-email-head, each
+// value after its label), every editable element in the pane, and the message box.
+async function readEmailTab(page) {
+  return page.locator('.idp-stage').evaluate((stage, sel) => {
+    const head = stage.querySelector('.idp-email-head')
+    const line = (k) => {
+      const row = head && [...head.children].find((c) => (c.querySelector('.idp-email-k')?.textContent || '').trim() === k)
+      return row ? row.textContent.replace(row.querySelector('.idp-email-k').textContent, '').trim() : null
+    }
+    const box = stage.querySelector('[data-testid="idp-email-body"]')
+    const body = stage.querySelector('.idp-email-body')
+    return {
+      head: !!head, to: line('To'), subject: line('Subject'),
+      headEditables: head ? head.querySelectorAll(sel).length : 0,
+      editables: stage.querySelectorAll(sel).length,
+      box: box ? { tag: box.tagName.toLowerCase(), readOnly: !!box.readOnly, disabled: !!box.disabled, bottom: box.getBoundingClientRect().bottom } : null,
+      preview: body ? { tag: body.tagName.toLowerCase(), editable: body.isContentEditable } : null,
+    }
+  }, EDITABLE_SEL)
+}
+async function readSignature(page) {
+  if (!(await emailSignature(page).count())) return null
+  return emailSignature(page).first().evaluate((el, sel) => ({
+    text: el.innerText.replace(/\s+/g, ' ').trim(),
+    editables: el.querySelectorAll(sel).length + (el.isContentEditable ? 1 : 0),
+    imgs: [...el.querySelectorAll('img')].map((i) => i.getAttribute('src') || ''),
+    top: el.getBoundingClientRect().top,
+    visible: !!(el.offsetWidth || el.offsetHeight),
+  }), EDITABLE_SEL)
+}
+// The parts of the signature block that are missing or out of order ([] when all there).
+function signatureGaps(text) {
+  const gaps = []
+  let at = 0
+  for (const part of INV_SIGNATURE_PARTS) {
+    const i = text.indexOf(part, at)
+    if (i < 0) gaps.push(part)
+    else at = i + part.length
+  }
+  return gaps
+}
+// Text as a reader compares it: LF line ends, no blanks at the end of a line or of the text.
+const normText = (s) => String(s ?? '').replace(/\r\n?/g, '\n').split('\n').map((l) => l.replace(/\s+$/, '')).join('\n').replace(/\n+$/, '')
+// The message a reader sees above the signature: the text before its "--" line.
+function messageOf(text) {
+  const t = normText(text)
+  const m = /(^|\n)--\n/.exec(t)
+  return m ? t.slice(0, m.index).replace(/\n+$/, '') : t
+}
+const htmlEsc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+const loadRefOf = (id) => String(id ?? '').replace(/^#/, '').trim()
+// The local server's own logo, which answers every request for the production logo
+// the email HTML names (the Email message tab and renderMail): nothing goes to
+// production for it. Null when the server has none; the request is then aborted.
+let invLogo = null
+async function loadInvLogo() {
+  try {
+    const r = await fetch(`${BASE_URL}/logo.avif`)
+    invLogo = r.ok ? Buffer.from(await r.arrayBuffer()) : null
+  } catch { invLogo = null }
+}
+const answerLogo = (route) => (route.request().url() === INV_LOGO_URL && invLogo
+  ? route.fulfill({ status: 200, contentType: 'image/avif', body: invLogo })
+  : route.abort())
+// An email's HTML as a mail client shows it: a blank page with none of the app's CSS
+// (a paragraph keeps its margins), where nothing is fetched but the logo. Returns the
+// text a reader sees, how many elements the typed "<b>not bold</b>" became, and the
+// images' sources; with `shotName`, a screenshot of the rendering under `head`.
+async function renderMail(ctx, html, { head = '', shotName = '', text = '' } = {}) {
+  const p = await ctx.newPage()
+  try {
+    await p.route('**/*', answerLogo)
+    await p.setContent('<!doctype html><html><head><meta charset="utf-8"><title>QA rendering</title></head>' +
+      `<body style="margin:0;background:#fff">${head}<div id="qa-mail" style="padding:14px 24px">${html}</div></body></html>`)
+    await p.waitForTimeout(300)
+    const r = await p.locator('#qa-mail').evaluate((m) => ({
+      text: m.innerText,
+      boldTyped: [...m.querySelectorAll('b, strong')].filter((e) => /not bold/.test(e.textContent)).length,
+      imgs: [...m.querySelectorAll('img')].map((i) => i.getAttribute('src') || ''),
+    }))
+    if (text) await caption(p, text)
+    return { ...r, shot: shotName ? await shot(p, shotName, { fullPage: true }) : '' }
+  } finally { await p.close().catch(() => {}) }
+}
+
+// ---- the fake Gmail (I14, I14b). A local server booted with E2E_FAKE_GMAIL=1 preloads
+// scripts/e2e/fake-gmail.cjs: each IMAP APPEND (a Gmail draft) is captured in the work
+// dir and SMTP is refused, so nothing leaves the machine. The captures are read back
+// with its readCapturedDrafts(dir), in a child process, so nothing that module loads
+// can touch this process's own connections.
+const FAKE_GMAIL = process.env.E2E_FAKE_GMAIL === '1'
+const FAKE_GMAIL_MODULE = path.join(paths.REPO, 'scripts', 'e2e', 'fake-gmail.cjs')
+function fakeGmailDir() {
+  const dir = path.resolve(process.env.E2E_FAKE_GMAIL_DIR || path.join(WORK, 'fake-gmail'))
+  if (!fs.existsSync(FAKE_GMAIL_MODULE)) return { why: `${FAKE_GMAIL_MODULE} is missing` }
+  let real
+  try { real = fs.realpathSync(dir) } catch { return { why: `there is no capture directory ${dir} (boot-server.sh makes it with E2E_FAKE_GMAIL=1)` } }
+  if (!real.startsWith(WORK + path.sep)) return { why: `the capture directory ${real} is not inside the work dir` }
+  if (!fs.statSync(real).isDirectory()) return { why: `${real} is not a directory` }
+  return { dir: real }
+}
+function readFakeDrafts(dir) {
+  const code = 'const [m, d] = process.argv.slice(1); Promise.resolve(require(m).readCapturedDrafts(d))' +
+    '.then((r) => process.stdout.write(JSON.stringify(r || [])), (e) => { console.error(e && e.message); process.exit(1) })'
+  const out = execFileSync(process.execPath, ['-e', code, FAKE_GMAIL_MODULE, dir],
+    { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, env: { ...process.env, NODE_OPTIONS: '' } })
+  const list = JSON.parse(out || '[]')
+  return Array.isArray(list) ? list : []
+}
+// IMAP flags as a list, whatever shape the capture gives them ("(\Draft \Seen)" or a list).
+const flagsOf = (d) => (Array.isArray(d?.flags) ? d.flags.map(String) : (String(d?.flags ?? '').match(/\\?[A-Za-z]+/g) || []))
+const hasFlag = (flags, f) => flags.some((x) => x.replace(/^\\/, '').toLowerCase() === f.toLowerCase())
+const emailsIn = (s) => (String(s ?? '').toLowerCase().match(/[^\s<>"',;()]+@[^\s<>"',;()]+/g) || []).sort().join(',')
+// One captured draft against what the editor showed before Approve: its flags, To,
+// Subject, attachments and signature, and the message a reader sees (rendered, with a
+// screenshot of the rendering under a header naming the capture).
+async function judgeCapture(ctx, d, { shownTo, shownSubject, expectAttach, shotName, label }) {
+  const flags = flagsOf(d)
+  const html = String(d.html ?? '')
+  const atts = Array.isArray(d.attachments) ? d.attachments : []
+  const names = atts.map((a) => String(a.filename ?? ''))
+  const sigAt = html.indexOf(INV_SIGNATURE_HTML)
+  const head = '<div style="font:13px/1.5 system-ui,sans-serif;background:#f1f5f9;border-bottom:1px solid #cbd5e1;padding:10px 24px">' +
+    `<div><b>Captured by the fake Gmail</b> · mailbox ${htmlEsc(d.mailbox)} · IMAP flags <b>${htmlEsc(flags.join(' ') || '(none)')}</b></div>` +
+    `<div>To: ${htmlEsc(d.to)} · Subject: ${htmlEsc(d.subject)}</div><div>Attachments: ${htmlEsc(names.join(', ') || 'none')}</div></div>`
+  const r = await renderMail(ctx, html, { head, shotName, text: `${label} — the captured Gmail draft, rendered with none of the app's CSS (as a mail client shows it)` })
+  return {
+    flags, draft: hasFlag(flags, 'Draft'), seen: hasFlag(flags, 'Seen'),
+    toOk: !!shownTo && emailsIn(d.to) === emailsIn(shownTo),
+    subjectOk: !!shownSubject && String(d.subject ?? '').trim() === shownSubject.trim(),
+    names, missing: expectAttach.filter((n) => !names.includes(n)),
+    notPdf: atts.filter((a) => !/pdf/i.test(String(a.contentType ?? '')) || !(Number(a.size) > 0)).length,
+    // Byte-identical, and nothing after it but closing tags.
+    sigOk: sigAt >= 0 && /^(\s*<\/[a-z]+>)*\s*$/i.test(html.slice(sigAt + INV_SIGNATURE_HTML.length)),
+    messageHtml: sigAt >= 0 ? html.slice(0, sigAt) : html,
+    message: messageOf(r.text), boldTyped: r.boldTyped, logo: r.imgs.includes(INV_LOGO_URL), html, shot: r.shot,
+  }
+}
+const captureSummary = (c) => `IMAP flags "${c.flags.join(' ') || '(none)'}" (\\Draft ${c.draft}, \\Seen ${c.seen}); ` +
+  `the signature, logo and notice byte-identical and last: ${c.sigOk} (logo shown: ${c.logo}); To as the editor showed: ${c.toOk}; ` +
+  `Subject as the editor showed: ${c.subjectOk}; attachments ${JSON.stringify(c.names)}` +
+  `${c.missing.length ? ` (MISSING ${JSON.stringify(c.missing)})` : ' (the invoice and every POD present)'}${c.notPdf ? `; ${c.notPdf} not a non-empty PDF` : ''}`
+
 // Centre the invoice viewer on a point of the rendered page and zoom in a little,
 // the way a person would: a drag to pan, then the wheel over the point.
 async function zoomInvoiceOn(page, target) {
@@ -5627,7 +5884,9 @@ async function zoomInvoiceOn(page, target) {
 // load needs its Order # and PO # typed before anything renders), then loads with a
 // Payment (so the dryRun renders a PDF), then loads with no draft yet (no second
 // confirm on approve). Values stay in memory: ids and booleans only.
-async function invoiceCandidates(page) {
+// The Super Admin dashboard's completed loads, as the invoice steps read them: the
+// id, and whether the load is delivered, Bison's (by its broker email) and paid.
+async function completedLoads(page) {
   const d = (await api(page, 'GET', '/api/dashboard')).json || {}
   const jobs = d.completedJobs || []
   const hs = d.completedHeaders || d.jobTrackingHeaders || Object.keys(jobs[0] || {})
@@ -5636,7 +5895,7 @@ async function invoiceCandidates(page) {
   const stCol = pick(/^status$/i, /status/i)
   const emCol = pick(/^email$/i, /broker.*email|email/i)
   const payCol = pick(/^payment$/i, /payment/i)
-  if (!idCol || !stCol) return { list: [], why: 'the dashboard payload has no load-id or status column' }
+  if (!idCol || !stCol) return { all: [], why: 'the dashboard payload has no load-id or status column' }
   const all = jobs
     .map((j) => ({
       id: String(j[idCol] ?? '').trim(), raw: String(j[idCol] ?? ''),
@@ -5644,7 +5903,28 @@ async function invoiceCandidates(page) {
       bison: /bisontransport\.com$/i.test(String(emCol ? j[emCol] ?? '' : '').trim().toLowerCase()),
       paid: payCol ? parseMoney(j[payCol]) > 0 : false,
     }))
-    .filter((c) => c.id && c.delivered)
+    .filter((c) => c.id)
+  return { all, why: '' }
+}
+const hasPod = async (page, id) => ((await api(page, 'GET', `/api/documents/${encodeURIComponent(id)}`)).json?.documents || [])
+  .some((x) => String(x.type || '').toUpperCase() === 'POD')
+// The Bison steps' load (INV_BISON_LOAD), when it is a delivered Bison load with a
+// POD: { cand }, else { why }.
+async function bisonCandidate(page) {
+  const { all, why } = await completedLoads(page)
+  if (why) return { why }
+  const c = all.find((x) => loadRefOf(x.id) === INV_BISON_LOAD)
+  if (!c) return { why: `load ${INV_BISON_LOAD} is not among the dashboard's completed loads (E2E_BISON_LOAD picks another)` }
+  if (!c.bison) return { why: `load ${INV_BISON_LOAD} is not a Bison load (E2E_BISON_LOAD picks another)` }
+  if (!c.delivered) return { why: `load ${INV_BISON_LOAD} is not delivered` }
+  if (!(await hasPod(page, c.id))) return { why: `load ${INV_BISON_LOAD} has no POD` }
+  return { cand: c }
+}
+
+async function invoiceCandidates(page) {
+  const listed = await completedLoads(page)
+  if (listed.why) return { list: [], why: listed.why }
+  const all = listed.all.filter((c) => c.delivered)
   const rank = (c) => (c.bison ? 4 : 0) + (c.paid ? 0 : 2) + (c.drafted ? 1 : 0)
   const order = all.map((c, i) => ({ c, i })).sort((a, b) => rank(a.c) - rank(b.c) || a.i - b.i).map((x) => x.c)
   const out = []
@@ -5652,8 +5932,7 @@ async function invoiceCandidates(page) {
   for (const c of order) {
     if (out.length >= 4 || checked >= 60) break
     checked++
-    const docs = await api(page, 'GET', `/api/documents/${encodeURIComponent(c.id)}`)
-    if (!(docs.json?.documents || []).some((x) => String(x.type || '').toUpperCase() === 'POD')) continue
+    if (!(await hasPod(page, c.id))) continue
     const dr = await api(page, 'GET', invPath(c.id, 'invoice-draft'))
     c.drafted = !!dr.json?.draft
     out.push(c)
@@ -5700,6 +5979,25 @@ async function openInvoiceEditor(page, cand, label, nav = 'goto') {
   return { ok: true, json }
 }
 
+// What a freshly opened editor needs before anything renders or approves, when the
+// dryRun says so (a Bison load, or one with no derivable total): the "no PO #" box
+// ticked, and 1234.00 typed as the total. Returns what was done, for the results.
+async function prepareEditor(page, loadId, dry) {
+  const extra = []
+  if (dry.needsPoNumber) {
+    await page.locator('.idp-field', { has: page.locator('#idp-po') }).locator('input[type="checkbox"]').check()
+    extra.push('PO # required: "This rate confirmation has no PO #" ticked')
+  }
+  if (dry.needsTotal) {
+    const pv = expectPreview(page, loadId, (b) => b.total === '1234.00')
+    await page.locator('#idp-total').fill('1234.00')
+    await page.waitForTimeout(1200)
+    if (!(await orderBlocks(page))) { await pv; await previewSettled(page) }
+    extra.push('no total could be derived, so 1234.00 was typed (the approve confirms it)')
+  }
+  return extra
+}
+
 async function invoiceSection() {
   const ownDb = !db
   if (!db && DB_PATH) db = openDb()
@@ -5714,11 +6012,84 @@ async function invoiceSection() {
     d.accept().catch(() => {})
   })
   const S = { cand: null, open: false, dry: null, jtBefore: null, pdfI2: null, list: [] }
-  const editorWanted = ['I1', 'I2', 'I3', 'I4', 'I5', 'I6', 'I7'].some(wantInv)
+  const editorWanted = ['I1', 'I2', 'I3', 'I4', 'I5', 'I6', 'I7', 'I10', 'I11', 'I12'].some(wantInv)
+  const i14Wanted = wantInv('I14') || wantInv('I14B')
+  // The Bison steps, in IB's editor: I10 also selects I10b and I10c, I11 also I11c,
+  // and STEPS=I10B, I10C or I11C picks one alone. I13 also selects I13f.
+  const wantI10b = wantInv('I10') || wantInv('I10B')
+  const wantI10c = wantInv('I10') || wantInv('I10C')
+  const wantI11c = wantInv('I11') || wantInv('I11C')
+  const bisonWanted = wantI10b || wantI10c || wantI11c
+  const wantI13f = wantInv('I13') || wantInv('I13F')
+  const B = { cand: null, open: false, dry: null }
+  const needBison = () => { if (!B.open) throw invSkip('the Bison load\'s editor did not open (see IB)') }
   const id = () => S.cand?.id
   const needEditor = () => { if (!S.open) throw invSkip('the editor did not open (see I1)') }
   const needNotesBox = async () => {
     if (!(await notesBox(page).count())) throw Object.assign(new Error('this build\'s editor has no NOTES box'), { noNotes: true })
+  }
+  const needBox = async () => {
+    if (!(await emailBodyBox(page).count())) {
+      throw Object.assign(new Error('this build\'s Email message tab has no message box ([data-testid="idp-email-body"])'), { noNotes: true })
+    }
+  }
+  // The Email message tab renders the server's email HTML, whose logo is the
+  // production URL: the local server's copy answers it, and nothing else of that host.
+  await loadInvLogo()
+  await ctx.route(/^https:\/\/app\.logisx\.com\//i, answerLogo)
+  // The newest render the editor adopted: the dryRun that opened it, or the last
+  // invoice-preview the page itself sent since (the run's own page fetches aside).
+  let lastPreview = null
+  let ownFetches = 0
+  page.on('response', (r) => {
+    if (!S.cand || ownFetches || r.status() !== 200 || !isPostTo(r, invPath(S.cand.id, 'invoice-preview'))) return
+    r.json().then((j) => { if (j) lastPreview = j }).catch(() => {})
+  })
+  const latestRender = () => lastPreview || S.dry
+  // A page fetch the render tracker ignores (I9, I13).
+  const ownApi = async (...a) => { ownFetches++; try { return await api(page, ...a) } finally { ownFetches-- } }
+  // Reload, open the editor again, and make it ready to approve (I14, I14b).
+  const freshEditor = async (cand, label) => {
+    lastPreview = null
+    // With I1 not run (STEPS=I14), this is the load under test: the render tracker keys on it.
+    S.cand = S.cand || cand
+    meta.ids.invoiceLoad = meta.ids.invoiceLoad || cand.id
+    const o = await openInvoiceEditor(page, cand, label, 'reload')
+    if (!o.ok) throw new Error(`the dryRun answered ${o.err}`)
+    S.open = true; S.dry = o.json
+    const extra = await prepareEditor(page, cand.id, o.json)
+    if (await orderBlocks(page)) {
+      await typeOrder(page, cand.id, INV_ORDER)
+      extra.push(`Order # "${INV_ORDER}" typed (none could be read off the rate-con)`)
+    }
+    return { dry: o.json, extra }
+  }
+  // Approve & Create Draft with the fake Gmail behind the server: the approve's
+  // request body and response, the draft records it wrote in the copy (noted, so
+  // removeCreated() deletes them), and the drafts captured since.
+  const approveToFake = async (cand, dir) => {
+    const btn = approveButton(page)
+    let enabled = false
+    for (let i = 0; i < 40 && !(enabled = await btn.isEnabled().catch(() => false)); i++) await page.waitForTimeout(500)
+    if (!enabled) return { disabled: (await page.locator('.idp-foot-note').innerText().catch(() => '')).trim() }
+    const seen = new Set(readFakeDrafts(dir).map((d) => d.file))
+    const maxId = db.prepare('SELECT COALESCE(MAX(id), 0) AS m FROM load_invoice_drafts').get().m
+    const dp = invPath(cand.id, 'draft-invoice')
+    const isApprove = (u) => pathOf(u) === dp && !new URL(u).searchParams.has('dryRun')
+    const reqP = page.waitForRequest((r) => r.method() === 'POST' && isApprove(r.url()), { timeout: 30000 })
+    const respP = page.waitForResponse((r) => r.request().method() === 'POST' && isApprove(r.url()), { timeout: 150000 })
+    await btn.click()
+    const body = bodyOf(await reqP) || {}
+    const resp = await respP
+    const json = await resp.json().catch(() => null)
+    const rowIds = db.prepare('SELECT id FROM load_invoice_drafts WHERE id > ? ORDER BY id').all(maxId).map((x) => x.id)
+    for (const rid of rowIds) noteCreated('load_invoice_drafts', rid)
+    let fresh = []
+    for (let i = 0; i < 12 && !fresh.length; i++) {
+      fresh = readFakeDrafts(dir).filter((d) => !seen.has(d.file))
+      if (!fresh.length) await page.waitForTimeout(250)
+    }
+    return { body, status: resp.status(), json, rowIds, fresh }
   }
   // One step: its own try/catch, an error screenshot, one results row.
   const step = async (stepId, title, expected, shotName, fn) => {
@@ -5739,7 +6110,7 @@ async function invoiceSection() {
 
     // ---- I1: the editor opens on a delivered load with a POD
     let discovery = ''
-    if (editorWanted || wantInv('I8')) {
+    if (editorWanted || wantInv('I8') || wantInv('I13') || i14Wanted) {
       const found = await invoiceCandidates(page)
       S.list = found.list
       discovery = found.why
@@ -5759,18 +6130,7 @@ async function invoiceSection() {
           const jt = await api(page, 'GET', `/api/load/${encodeURIComponent(S.cand.raw)}`)
           S.jtBefore = jt.status === 200 && jt.json?.load ? jt.json.load : null
           const dry = S.dry
-          const extra = []
-          if (dry.needsPoNumber) {
-            await page.locator('.idp-field', { has: page.locator('#idp-po') }).locator('input[type="checkbox"]').check()
-            extra.push('PO # required: "This rate confirmation has no PO #" ticked')
-          }
-          if (dry.needsTotal) {
-            const pv = expectPreview(page, id(), (b) => b.total === '1234.00')
-            await page.locator('#idp-total').fill('1234.00')
-            await page.waitForTimeout(1200)
-            if (!(await orderBlocks(page))) { await pv; await previewSettled(page) }
-            extra.push('no total could be derived, so 1234.00 was typed (the approve confirms it)')
-          }
+          const extra = await prepareEditor(page, id(), dry)
           const hasNotesBox = (await notesBox(page).count()) > 0
           await caption(page, `Step I1 — the editor is open for load ${id()} (Bison: ${!!dry.isBison}; NOTES box: ${hasNotesBox})`)
           return {
@@ -5951,6 +6311,176 @@ async function invoiceSection() {
         })
     }
 
+    // ---- I10: the Email message tab: an editable message above a read-only signature
+    // (they run here, in I1's editor, before I7's approve closes it)
+    if (wantInv('I10')) {
+      await step('I10', 'Email message tab: the message box, the signature below it, and the To and Subject lines',
+        'A <textarea data-testid="idp-email-body"> you can type in, holding the generated message from the greeting to "Thank you," ' +
+        '(the response\'s emailBodyDefault, and the text the untouched draft renders above its signature); below it ' +
+        '[data-testid="idp-email-signature"] shows the signature, the logo and the confidentiality notice with nothing editable, and the ' +
+        'response\'s emailSignatureHtml is the signature as it was; the To and Subject lines as before (read-only: the recipient and the ' +
+        'form\'s SUBJECT); the box is the only editable element on the tab', 'i10-email-box', async () => {
+          needEditor()
+          await caption(page, 'Step I10 — open the "Email message" tab')
+          await openEmailTab(page)
+          const t = await readEmailTab(page)
+          const render = latestRender() || {}
+          const drafted = render.emailHtml ? messageOf((await renderMail(ctx, render.emailHtml)).text) : null
+          const pinned = S.dry?.isBison ? null : invGeneratedText(loadRefOf(id()))
+          const recipient = (await page.locator('#idp-recipient').inputValue().catch(() => '')).trim()
+          const formSubject = await page.locator('#idp-subject').inputValue().catch(() => '')
+          const headOk = t.head && t.to === recipient && t.subject === formSubject && t.headEditables === 0
+          const headObs = t.head
+            ? `the To line is the recipient: ${t.to === recipient}, the Subject line is the form's SUBJECT: ${t.subject === formSubject}, editable elements in them: ${t.headEditables}`
+            : 'NO To/Subject lines (.idp-email-head)'
+          const draftedObs = 'the message the untouched draft carries (its email HTML, rendered) is the generated text: ' +
+            `${drafted === null ? 'no email HTML' : pinned === null ? `(Bison) starts "Hello,": ${drafted.startsWith('Hello,')}` : drafted === pinned}`
+          if (!t.box) {
+            // Edit the message as a person would try to: click into its first line and
+            // type, only while no form field has the focus, so nothing else can change.
+            let typed = 'not tried (no message in the pane)'
+            const firstLine = page.locator('.idp-stage .idp-email-body p').first()
+            if (await firstLine.count()) {
+              await firstLine.click()
+              const focus = await page.evaluate((sel) => {
+                const a = document.activeElement
+                return { tag: a ? a.tagName.toLowerCase() : 'none', field: !!a && (a.matches(sel) || a.isContentEditable) }
+              }, EDITABLE_SEL)
+              if (focus.field) typed = `not tried (the click focused a <${focus.tag}> form field)`
+              else {
+                await page.keyboard.type(' QA-I10 typed')
+                await page.waitForTimeout(600)
+                const landed = await page.evaluate(() => document.body.innerText.includes('QA-I10 typed'))
+                typed = `clicked into its first line and typed " QA-I10 typed": ${landed ? 'the text APPEARED' : 'nothing changed on the page'} (the focus on a <${focus.tag}>)`
+              }
+            }
+            const observed = `NO message box ([data-testid="idp-email-body"]): the tab has ${t.editables} editable element(s), and its message is a read-only preview` +
+              `${t.preview ? ` (a <${t.preview.tag}>, contentEditable ${t.preview.editable})` : ''} showing the greeting, the text, the signature, the logo and the notice as one block; ` +
+              `${typed}; ${headObs}; ${draftedObs}`
+            await caption(page, `Step I10 — FAIL: no message box; the tab has ${t.editables} editable element(s), and typing into the message changed nothing`)
+            return { verdict: 'FAIL', observed }
+          }
+          const val = normText(await emailBodyBox(page).inputValue())
+          const def = typeof render.emailBodyDefault === 'string' ? normText(render.emailBodyDefault) : null
+          const sig = await readSignature(page)
+          const gaps = sig ? signatureGaps(sig.text) : INV_SIGNATURE_PARTS
+          const below = !!sig && sig.top >= t.box.bottom - 2
+          const sigOk = !!sig && sig.visible && sig.editables === 0 && !gaps.length && sig.imgs.includes(INV_LOGO_URL) && below
+          const sigHtml = render.emailSignatureHtml === undefined ? 'NO emailSignatureHtml in the response' : `the response's emailSignatureHtml is the signature as it was: ${render.emailSignatureHtml === INV_SIGNATURE_HTML}`
+          const editable = t.box.tag === 'textarea' && !t.box.readOnly && !t.box.disabled
+          const sigInBox = /LogisX Inc\.|CONFIDENTIALITY/.test(val)
+          const ok = editable && def !== null && val === def && val === drafted && (pinned === null || val === pinned) && !sigInBox &&
+            sigOk && render.emailSignatureHtml === INV_SIGNATURE_HTML && headOk && t.editables === 1
+          const observed = `the message box: a <${t.box.tag}>${editable ? ', editable' : ` (readOnly ${t.box.readOnly}, disabled ${t.box.disabled})`}; ` +
+            `it holds the response's emailBodyDefault: ${def === null ? 'NO emailBodyDefault in the response' : val === def}; ` +
+            `${pinned === null ? `(Bison) starts "Hello,": ${val.startsWith('Hello,')}` : `the generated text: ${val === pinned}`}; ` +
+            `the text the untouched draft renders: ${val === drafted}; signature text inside the box: ${sigInBox}; ` +
+            `the signature block: ${sig ? `shown ${sig.visible}, below the box ${below}, editable elements ${sig.editables}, ` +
+              `${gaps.length ? `MISSING ${JSON.stringify(gaps)}` : 'the signature, phone, site and notice in order'}, the logo ${sig.imgs.includes(INV_LOGO_URL)}` : 'NONE ([data-testid="idp-email-signature"])'}; ` +
+            `${sigHtml}; ${headObs}; editable elements on the tab: ${t.editables}` +
+            `${def !== null && val !== def && val.length < 600 ? `; the box holds ${JSON.stringify(val)}` : ''}`
+          await caption(page, `Step I10 — ${verdict(ok)}: the message box ${editable ? 'is editable' : 'is NOT editable'} and holds the generated text: ${val === def}; the signature below it, read-only: ${sigOk}`)
+          return { verdict: verdict(ok), observed }
+        })
+    }
+
+    // ---- I11: a typed message is kept through a tab switch and a field's re-render
+    if (wantInv('I11')) {
+      const typed = invBodyEdit('I11')
+      await step('I11', 'Type a multi-line message (a blank line, <b>not bold</b>, &) into the box; switch to the Invoice tab and back; then change NOTES and let the preview re-render',
+        'The "edited" badge shows once typed, with no error; the typed text, line breaks included, is still in the box after the tab switch and after the re-render, and the badge stays',
+        'i11-box-kept', async () => {
+          needEditor(); await openEmailTab(page); await needBox()
+          const want = normText(typed)
+          await caption(page, 'Step I11 — type a multi-line message into the box')
+          await emailBodyBox(page).fill(typed)
+          await page.waitForTimeout(900)
+          const badge1 = await shown(emailBodyBadge(page))
+          const err1 = await shown(emailBodyError(page))
+          await caption(page, `Step I11 — typed; the "edited" badge ${badge1 ? 'shows' : 'does NOT show'}. Now the Invoice tab, then back`)
+          await invoiceTab(page).click()
+          await page.waitForTimeout(1000)
+          await openEmailTab(page)
+          const afterTabs = normText(await emailBodyBox(page).inputValue())
+          const badge2 = await shown(emailBodyBadge(page))
+          const note = `QA-I11 note ${stamp}`
+          await caption(page, `Step I11 — after the tab switch the text is as typed: ${afterTabs === want}. Now type "${note}" into NOTES`)
+          const pv = await typeNotes(page, id(), note)
+          const afterRender = normText(await emailBodyBox(page).inputValue())
+          const badge3 = await shown(emailBodyBadge(page))
+          const sent = !pv?.body ? 'no render' : Object.prototype.hasOwnProperty.call(pv.body, 'emailBody')
+            ? (pv.body.emailBody === typed ? 'carried the typed message' : 'carried ANOTHER message') : 'carried no emailBody'
+          const ok = badge1 && !err1 && afterTabs === want && badge2 && pv?.status === 200 && afterRender === want && badge3
+          const observed = `after typing: "edited" badge ${badge1}, error ${err1}; after Invoice → Email message: the text as typed ${afterTabs === want}, the badge ${badge2}; ` +
+            `NOTES typed, invoice-preview → ${pv?.status ?? 'no response'} (its request ${sent}); after the re-render: the text as typed ${afterRender === want}, the badge ${badge3}` +
+            `${afterRender !== want ? `; the box holds ${JSON.stringify(afterRender.slice(0, 300))}` : ''}`
+          await caption(page, `Step I11 — ${verdict(ok)}: ${observed}`)
+          return { verdict: verdict(ok), observed }
+        })
+      await step('I11b', 'Empty the message box, then leave only blanks and line breaks in it',
+        'An inline error ([data-testid="idp-email-body-error"]) each time, and Approve disabled', 'i11b-box-empty', async () => {
+          needEditor(); await openEmailTab(page); await needBox()
+          let sentEmpty = 0
+          const pp = invPath(id(), 'invoice-preview')
+          const onReq = (r) => {
+            if (r.method() !== 'POST' || pathOf(r.url()) !== pp) return
+            const b = bodyOf(r)
+            if (b && typeof b.emailBody === 'string' && !b.emailBody.trim()) sentEmpty++
+          }
+          page.on('request', onReq)
+          const res = []
+          try {
+            for (const [label, value] of [['empty', ''], ['blanks and line breaks only', ' \n \n ']]) {
+              await caption(page, `Step I11b — make the message ${label}`)
+              await emailBodyBox(page).fill(value)
+              await page.waitForTimeout(1500)
+              const err = await shown(emailBodyError(page))
+              const text = err ? (await emailBodyError(page).first().innerText().catch(() => '')).trim() : ''
+              res.push({ label, err, text, disabled: await approveButton(page).isDisabled() })
+            }
+          } finally { page.off('request', onReq) }
+          const ok = res.every((x) => x.err && x.disabled)
+          const observed = res.map((x) => `${x.label}: error ${x.err ? `"${x.text.slice(0, 120)}"` : 'NONE'}, Approve disabled ${x.disabled}`).join('; ') +
+            `; previews sent with an empty message: ${sentEmpty}`
+          await caption(page, `Step I11b — ${verdict(ok)}: ${observed}`)
+          return { verdict: verdict(ok), observed }
+        })
+    }
+
+    // ---- I12: Reset brings back the generated message
+    if (wantInv('I12')) {
+      await step('I12', 'Reset to extracted values',
+        'The box holds the generated message again (the render\'s emailBodyDefault; for a load that is not Bison\'s, the generated text), with no "edited" badge and no error',
+        'i12-box-reset', async () => {
+          needEditor(); await openEmailTab(page); await needBox()
+          if (!(await shown(emailBodyBadge(page)))) { // I11 did not run: type a message to reset
+            await emailBodyBox(page).fill(invBodyEdit('I12'))
+            await page.waitForTimeout(900)
+          }
+          const pv = expectPreview(page, id(), (b) => b.notes === '')
+          await caption(page, 'Step I12 — Reset to extracted values')
+          await page.getByRole('button', { name: 'Reset to extracted values' }).click()
+          await page.waitForTimeout(1200)
+          // A load whose Order # is not seeded (Bison) renders nothing after a Reset
+          // until one is typed, as in I6.
+          if (await orderBlocks(page)) await orderInput(page).fill(INV_ORDER)
+          const p = await pv
+          await previewSettled(page)
+          const val = normText(await emailBodyBox(page).inputValue())
+          const def = p?.json?.emailBodyDefault ?? latestRender()?.emailBodyDefault
+          const pinned = S.dry?.isBison ? null : invGeneratedText(loadRefOf(id()))
+          const badge = await shown(emailBodyBadge(page))
+          const err = await shown(emailBodyError(page))
+          const holds = typeof def === 'string' && val === normText(def)
+          const ok = holds && (pinned === null || val === pinned) && !badge && !err
+          const observed = `invoice-preview after the Reset → ${p?.status ?? 'no response'}; the box holds the render's emailBodyDefault: ${typeof def === 'string' ? holds : 'NO emailBodyDefault'}; ` +
+            `${pinned === null ? `(Bison) starts "Hello,": ${val.startsWith('Hello,')}` : `the generated text: ${val === pinned}`}; "edited" badge ${badge}; error ${err}` +
+            `${!holds && val.length < 600 ? `; the box holds ${JSON.stringify(val)}` : ''}`
+          await caption(page, `Step I12 — ${verdict(ok)}: ${observed}`)
+          return { verdict: verdict(ok), observed }
+        })
+    }
+
     // ---- I7: approve carries the note and the Order #; Job Tracking is unchanged
     if (wantInv('I7')) {
       const note7 = `QA-I7 note ${stamp}`
@@ -5981,10 +6511,17 @@ async function invoiceSection() {
           const reqP = page.waitForRequest((r) => r.method() === 'POST' && isApprove(r.url()), { timeout: 30000 })
           const respP = page.waitForResponse((r) => r.request().method() === 'POST' && isApprove(r.url()), { timeout: 150000 })
           await caption(page, 'Step I7 — Approve & Create Draft (locally the server has no mail target: it answers preview only and records nothing)')
+          // With the fake Gmail behind the server the approve creates a draft, and its
+          // draft record in the copy: noted, and deleted after I7j, so the next editor
+          // pre-fills no note from it.
+          const draftMax = db ? db.prepare('SELECT COALESCE(MAX(id), 0) AS m FROM load_invoice_drafts').get().m : null
           await btn.click()
           const body = bodyOf(await reqP) || {}
           const resp = await respP
           const rj = await resp.json().catch(() => null)
+          if (draftMax !== null) {
+            for (const r of db.prepare('SELECT id FROM load_invoice_drafts WHERE id > ? ORDER BY id').all(draftMax)) noteCreated('load_invoice_drafts', r.id)
+          }
           const hasKey = Object.prototype.hasOwnProperty.call(body, 'notes')
           const ok = hasKey && body.notes === note7 && body.orderNumber === INV_ORDER
           const pt = rj?.invoicePdfBase64 ? await pdfText(rj.invoicePdfBase64) : null
@@ -6039,6 +6576,7 @@ async function invoiceSection() {
           await caption(page, `Step I7 — ${verdict(ok)}: ${observed}`)
           return { verdict: verdict(ok), observed }
         })
+      if (db) cleanNotes.push(...removeCreated().map((n) => `I7 ${n}`))
     }
 
     // ---- I8: a note saved on the approved draft record pre-fills the next editor
@@ -6093,7 +6631,7 @@ async function invoiceSection() {
           // with NO notes key (a tab on a bundle from before Notes sends none) is the
           // approve's rule, the last approved note.
           try {
-            const r = await api(page, 'POST', invPath(cand.id, 'invoice-preview'),
+            const r = await ownApi('POST', invPath(cand.id, 'invoice-preview'),
               { invoiceId: `QA-I8-${stamp.slice(-6)}`, invoiceDate: dayCT(), total: '100.00', recipientEmail: 'qa-e2e@example.com', orderNumber: '7101850' })
             const p8 = r.json?.invoicePdfBase64 ? await pdfText(r.json.invoicePdfBase64) : null
             const n8 = p8 ? notesAfterLabel(p8, want.length) : null
@@ -6163,7 +6701,7 @@ async function invoiceSection() {
       for (const c of cases) {
         let observed = ''; let v = 'FAIL'
         try {
-          const r = await api(page, 'POST', invPath(lid, 'invoice-preview'), c.body)
+          const r = await ownApi('POST', invPath(lid, 'invoice-preview'), c.body)
           v = verdict(r.status === c.want.status && (!c.want.code || r.json?.code === c.want.code))
           observed = `→ ${r.status}${r.json?.code ? ` ${r.json.code}` : ''}${r.json?.field ? ` (field ${r.json.field})` : ''}` +
             `${r.status !== 200 && r.json?.error ? ` "${String(r.json.error).slice(0, 160)}"` : ''}${r.status === 200 ? `; PDF rendered: ${!!r.json?.invoicePdfBase64}` : ''}`
@@ -6175,12 +6713,357 @@ async function invoiceSection() {
       rows[rows.length - 1].shot = await shot(page, 'i9-api-refusals')
       writeResults()
     }
+
+    // ---- IB, I10c, I10b, I11c: a Bison load, whose message names the Order #, the Move #
+    // and the PO # (local only: IB hands the editor's own dryRun INV_BISON_RC's
+    // synthetic rate-con, see there). They run after I9: IB reloads the page.
+    if (bisonWanted) {
+      await step('IB', `Bison load ${INV_BISON_LOAD}: Completed Loads → the load → Draft Invoice Email, its dryRun handed the synthetic Bison rate-con`,
+        `The editor opens (the dryRun answers 200) with the rate-con's Order # ${INV_BISON_RC.order}, PO # ${INV_BISON_RC.po} and Move # ${INV_BISON_RC.move} ` +
+        `(source "upload"), the form shows the Order # and the PO #, and the generated message names all three ("Order # ${INV_BISON_RC.order}. …` +
+        ` ${INV_BISON_RC.move} & PO #${INV_BISON_RC.po}")`, 'ib-bison-editor', async () => {
+          if (!LOCAL) throw invSkip('local only: it hands the dryRun a synthetic rate-con, and a server that reaches the real one would read that one first')
+          const found = await bisonCandidate(page)
+          if (!found.cand) throw invSkip(found.why)
+          B.cand = found.cand
+          meta.ids.bisonLoad = B.cand.id
+          const rc = bisonRateconPdf().toString('base64')
+          const dp = invPath(B.cand.id, 'draft-invoice')
+          const handOver = (route) => {
+            const r = route.request()
+            if (r.method() !== 'POST' || pathOf(r.url()) !== dp || new URL(r.url()).searchParams.get('dryRun') !== '1') return route.fallback()
+            return route.continue({ postData: JSON.stringify({ ...(bodyOf(r) || {}), rateconPdfBase64: rc }) })
+          }
+          await page.route('**/api/loads/**', handOver)
+          let o
+          try { o = await openInvoiceEditor(page, B.cand, 'Step IB', 'reload') } finally { await page.unroute('**/api/loads/**', handOver) }
+          if (!o.ok) throw new Error(`the dryRun answered ${o.err}`)
+          B.dry = o.json; B.open = true
+          const d = o.json
+          const formOrder = (await orderInput(page).inputValue()).trim()
+          const formPo = (await page.locator('#idp-po').inputValue().catch(() => '')).trim()
+          const msg = typeof d.emailBodyDefault === 'string' ? normText(d.emailBodyDefault) : d.emailHtml ? messageOf((await renderMail(ctx, d.emailHtml)).text) : ''
+          const names = msg.includes(`Order # ${INV_BISON_RC.order}.`) && msg.includes(`${INV_BISON_RC.move} & PO #${INV_BISON_RC.po}`)
+          const ok = d.isBison === true && d.rateconSource === 'upload' && d.orderNumber === INV_BISON_RC.order && d.poNumber === INV_BISON_RC.po &&
+            d.moveNumber === INV_BISON_RC.move && formOrder === INV_BISON_RC.order && formPo === INV_BISON_RC.po && names
+          await openEmailTab(page)
+          const observed = `load ${B.cand.id}: dryRun 200; Bison ${d.isBison === true}; rate-con source "${d.rateconSource}"; Order # ${JSON.stringify(d.orderNumber)} (from ${d.orderNumberSource}), ` +
+            `PO # ${JSON.stringify(d.poNumber)}, Move # ${JSON.stringify(d.moveNumber)}; the form's ORDER # ${JSON.stringify(formOrder)} and PO # ${JSON.stringify(formPo)}; ` +
+            `the generated message names all three: ${names}${names ? '' : ` (it reads ${JSON.stringify(msg.slice(0, 300))})`}`
+          await caption(page, `Step IB — ${verdict(ok)}: the Bison editor is open; its message names Order # ${INV_BISON_RC.order}, Move # ${INV_BISON_RC.move} and PO # ${INV_BISON_RC.po}: ${names}`)
+          return { verdict: verdict(ok), observed }
+        })
+      const po = `& PO #${INV_BISON_RC.po}`
+      if (wantI10c) {
+        const note = `QA-I10c note ${stamp}`
+        await step('I10c', 'Bison, the message untouched: type a note into NOTES (a field the message does not name) and let the preview re-render',
+          `The box still holds the dryRun's generated message exactly, the PO # sentence ("${po}") included, and no "edited" badge`,
+          'i10c-bison-po-kept', async () => {
+            needBison(); await openEmailTab(page); await needBox()
+            const want = normText(B.dry.emailBodyDefault)
+            const before = normText(await emailBodyBox(page).inputValue())
+            await caption(page, `Step I10c — the untouched message carries "${po}"; type "${note}" into NOTES`)
+            const pv = await typeNotes(page, B.cand.id, note)
+            const after = normText(await emailBodyBox(page).inputValue())
+            const badge = await shown(emailBodyBadge(page))
+            const rendered = typeof pv?.json?.emailBodyDefault === 'string' ? normText(pv.json.emailBodyDefault).includes(po) : 'no emailBodyDefault'
+            const sentPo = !pv?.body ? 'no render' : Object.prototype.hasOwnProperty.call(pv.body, 'poNumber') ? `poNumber ${JSON.stringify(pv.body.poNumber)}` : 'no poNumber'
+            const ok = before === want && pv?.status === 200 && after === want && after.includes(po) && !badge
+            const observed = `before: the box is the dryRun's message ${before === want}, carrying "${po}": ${before.includes(po)}; NOTES typed, invoice-preview → ` +
+              `${pv?.status ?? 'no response'} (its request sent ${sentPo}); the render's emailBodyDefault carries "${po}": ${rendered}; after: the box is the dryRun's ` +
+              `message ${after === want}, carrying "${po}": ${after.includes(po)}, "edited" badge ${badge}${after !== want ? `; the box reads ${JSON.stringify(after.slice(0, 300))}` : ''}`
+            await caption(page, `Step I10c — ${verdict(ok)}: after the NOTES render the untouched message ${after.includes(po) ? 'still carries' : 'LOST'} "${po}"`)
+            return { verdict: verdict(ok), observed }
+          })
+      }
+      if (wantI10b) {
+        const next = INV_BISON_ORDERS[0]
+        await step('I10b', `Bison, the message untouched: type "${next}" into ORDER # (a number the message names) and let the preview re-render`,
+          `The box follows the render: it holds the render's emailBodyDefault, which names Order # ${next} where the message named the Order # before it, and no "edited" badge`,
+          'i10b-bison-order-follows', async () => {
+            needBison(); await openEmailTab(page); await needBox()
+            const badgeBefore = await shown(emailBodyBadge(page))
+            const before = normText(await emailBodyBox(page).inputValue())
+            const prev = (await orderInput(page).inputValue()).trim()
+            await caption(page, `Step I10b — the untouched message names Order # ${prev}; type "${next}" into ORDER #`)
+            const t = await typeOrder(page, B.cand.id, next)
+            const after = normText(await emailBodyBox(page).inputValue())
+            const def = t.preview?.json?.emailBodyDefault
+            const holds = typeof def === 'string' && after === normText(def)
+            const moved = before.includes(`Order # ${prev}.`) && after.includes(`Order # ${next}.`) && !after.includes(`Order # ${prev}.`)
+            const badge = await shown(emailBodyBadge(page))
+            const ok = !badgeBefore && !t.refused && t.preview?.status === 200 && holds && moved && !badge
+            const observed = `"edited" badge before: ${badgeBefore}; the message named Order # ${prev}: ${before.includes(`Order # ${prev}.`)}; ORDER # "${next}" ` +
+              `${t.refused ? 'REFUSED by the form' : `accepted, invoice-preview → ${t.preview?.status ?? 'no response'}`}; the box holds the render's emailBodyDefault: ` +
+              `${typeof def === 'string' ? holds : 'NO emailBodyDefault'}; it now names Order # ${next} and no longer ${prev}: ${moved}; "edited" badge after: ${badge}` +
+              `${!holds && after.length < 600 ? `; the box reads ${JSON.stringify(after)}` : ''}`
+            await caption(page, `Step I10b — ${verdict(ok)}: the untouched message now names Order # ${next}: ${moved}`)
+            return { verdict: verdict(ok), observed }
+          })
+      }
+      if (wantI11c) {
+        const typed = invBodyEdit('I11c')
+        const [o1, o2] = [INV_BISON_ORDERS[1], INV_BISON_ORDERS[2]]
+        await step('I11c', `Bison: type a message, then change ORDER # to "${o1}"; look from the Invoice tab; Keep my message; then change ORDER # to "${o2}" and Use the new message`,
+          'After the change, [data-testid="idp-email-body-stale"] shows with "Keep my message" ([data-testid="idp-email-body-keep"]) and "Use the new message" ' +
+          '([data-testid="idp-email-body-use-default"]); from the Invoice tab the footer\'s [data-testid="idp-email-body-stale-foot"] shows and Approve is disabled. ' +
+          'Keep my message: the hint clears, Approve is enabled, the typed text is unchanged and the "edited" badge stays. After the second change, Use the ' +
+          'new message: the box holds the new render\'s emailBodyDefault, and the badge is gone', 'i11c-bison-stale', async () => {
+            needBison(); await openEmailTab(page); await needBox()
+            const want = normText(typed)
+            const staleShows = () => emailBodyStale(page).first().waitFor({ state: 'visible', timeout: 5000 }).then(() => true, () => false)
+            await caption(page, 'Step I11c — type a message into the box')
+            await emailBodyBox(page).fill(typed)
+            await page.waitForTimeout(900)
+            const badge0 = await shown(emailBodyBadge(page))
+            await caption(page, `Step I11c — change ORDER # to "${o1}" (the message the server writes names the Order #)`)
+            const t1 = await typeOrder(page, B.cand.id, o1)
+            const s1 = { hint: await staleShows(), keep: await shown(emailBodyKeep(page)), use: await shown(emailBodyUseDefault(page)),
+              text: normText(await emailBodyBox(page).inputValue()) === want }
+            await caption(page, `Step I11c — the stale-message hint ${s1.hint ? 'shows' : 'does NOT show'} (Keep my message: ${s1.keep}; Use the new message: ${s1.use})`)
+            await shot(page, 'i11c-1-stale-hint')
+            await invoiceTab(page).click()
+            await page.waitForTimeout(1000)
+            const s2 = { foot: await shown(emailBodyStaleFoot(page)), disabled: await approveButton(page).isDisabled(),
+              note: (await page.locator('.idp-foot-note').innerText().catch(() => '')).trim() }
+            await caption(page, `Step I11c — on the Invoice tab: the footer's stale note ${s2.foot ? 'shows' : 'does NOT show'}; Approve disabled: ${s2.disabled}`)
+            await shot(page, 'i11c-2-stale-footer')
+            await openEmailTab(page)
+            let s3 = { pressed: false }
+            if (await shown(emailBodyKeep(page))) {
+              await caption(page, 'Step I11c — Keep my message')
+              await emailBodyKeep(page).first().click()
+              await page.waitForTimeout(900)
+              let enabled = false
+              for (let i = 0; i < 20 && !(enabled = await approveButton(page).isEnabled().catch(() => false)); i++) await page.waitForTimeout(500)
+              s3 = { pressed: true, hint: await shown(emailBodyStale(page)), enabled, text: normText(await emailBodyBox(page).inputValue()) === want,
+                badge: await shown(emailBodyBadge(page)) }
+              await shot(page, 'i11c-3-kept')
+            }
+            await caption(page, `Step I11c — change ORDER # to "${o2}"`)
+            const t2 = await typeOrder(page, B.cand.id, o2)
+            const hint2 = await staleShows()
+            let s4 = { pressed: false }
+            if (await shown(emailBodyUseDefault(page))) {
+              await caption(page, 'Step I11c — Use the new message')
+              await emailBodyUseDefault(page).first().click()
+              await page.waitForTimeout(900)
+              const val = normText(await emailBodyBox(page).inputValue())
+              const def = t2.preview?.json?.emailBodyDefault
+              s4 = { pressed: true, holds: typeof def === 'string' && val === normText(def) && val.includes(`Order # ${o2}.`),
+                badge: await shown(emailBodyBadge(page)), hint: await shown(emailBodyStale(page)) }
+            }
+            const render = (t) => (t.refused ? 'REFUSED by the form' : `invoice-preview → ${t.preview?.status ?? 'no response'}`)
+            const ok = badge0 && !t1.refused && t1.preview?.status === 200 && s1.hint && s1.keep && s1.use && s1.text && s2.foot && s2.disabled &&
+              s3.pressed && !s3.hint && s3.enabled && s3.text && s3.badge && !t2.refused && hint2 && s4.pressed && s4.holds && !s4.badge && !s4.hint
+            const observed = `typed: "edited" badge ${badge0}; ORDER # "${o1}", ${render(t1)}: the hint ${s1.hint}, Keep my message ${s1.keep}, Use the new message ` +
+              `${s1.use}, the typed text kept ${s1.text}; on the Invoice tab: the footer's stale note ${s2.foot}, Approve disabled ${s2.disabled} ("${s2.note.slice(0, 120)}"); ` +
+              `${s3.pressed ? `Keep my message: the hint ${s3.hint ? 'STILL shown' : 'gone'}, Approve enabled ${s3.enabled}, the typed text unchanged ${s3.text}, the badge ${s3.badge}` : 'no Keep my message to press'}; ` +
+              `ORDER # "${o2}", ${render(t2)}: the hint ${hint2}; ` +
+              `${s4.pressed ? `Use the new message: the box holds the render's emailBodyDefault, naming Order # ${o2}: ${s4.holds}, the badge ${s4.badge}, the hint ${s4.hint}` : 'no Use the new message to press'}; ` +
+              'screenshots i11c-1-stale-hint, i11c-2-stale-footer, i11c-3-kept'
+            await caption(page, `Step I11c — ${verdict(ok)}: the hint ${s1.hint}, the footer note ${s2.foot}, Approve held ${s2.disabled}; Keep ${s3.pressed && !s3.hint}; Use the new message ${s4.pressed && s4.holds}`)
+            return { verdict: verdict(ok), observed }
+          })
+      }
+    }
+
+    // ---- I13: the server refuses a bad message (page fetches, as useApi sends them).
+    // The refusals go to the approve route's own dryRun: ?dryRun=1 is a QUERY param,
+    // so nothing is created.
+    if (wantInv('I13')) {
+      const lid = id() || S.list[0]?.id || 'QA-I13'
+      const base = { invoiceId: `QA-I13-${stamp.slice(-6)}`, invoiceDate: dayCT(), total: '100.00', recipientEmail: 'qa-e2e@example.com', orderNumber: '7101850', notes: '' }
+      const bad = [
+        { step: 'I13a', what: 'emailBody "" (empty)', value: '', code: 'INVOICE_EMAIL_BODY_EMPTY' },
+        { step: 'I13b', what: 'an emailBody of blanks and line breaks only', value: ' \n\t \n ', code: 'INVOICE_EMAIL_BODY_EMPTY' },
+        { step: 'I13c', what: `an emailBody of ${INV_EMAIL_BODY_MAX + 1} characters`, value: 'x'.repeat(INV_EMAIL_BODY_MAX + 1), code: 'INVOICE_EMAIL_BODY_TOO_LONG' },
+        { step: 'I13d', what: 'emailBody: 42 (not text)', value: 42, code: 'INVOICE_EMAIL_BODY_INVALID' },
+      ]
+      const fmt = (r) => `${r.status}${r.json?.code ? ` ${r.json.code}` : ''}${r.json?.field ? ` (field ${r.json.field})` : ''}` +
+        `${r.status !== 200 && r.json?.error ? ` "${String(r.json.error).slice(0, 140)}"` : ''}`
+      const summary = []
+      {
+        let observed = ''; let v = 'FAIL'
+        try {
+          const longest = 'x'.repeat(INV_EMAIL_BODY_MAX)
+          const r = await ownApi('POST', invPath(lid, 'invoice-preview'), { ...base, emailBody: longest })
+          const knows = !!r.json && Object.prototype.hasOwnProperty.call(r.json, 'emailBodyDefault')
+          v = r.status !== 200 ? 'FAIL' : knows ? 'PASS' : 'PASS (vacuous)'
+          observed = `→ ${fmt(r)}; its email HTML carries the ${INV_EMAIL_BODY_MAX} characters: ${String(r.json?.emailHtml ?? '').includes(longest)}` +
+            `${knows ? '' : '; the response has no emailBodyDefault (this build ignores emailBody)'}`
+        } catch (e) { observed = `error: ${e.message}` }
+        summary.push(`I13 ${observed.split(';')[0]}`)
+        record({ step: 'I13', title: `POST invoice-preview with an emailBody of exactly ${INV_EMAIL_BODY_MAX} characters (the control)`, expected: '200: the longest message is accepted', observed: `load ${lid}: ${observed}`, verdict: v, shot: '' })
+      }
+      for (const c of bad) {
+        let observed = ''; let v = 'FAIL'
+        try {
+          const r = await ownApi('POST', `${invPath(lid, 'draft-invoice')}?dryRun=1`, { emailBody: c.value })
+          v = verdict(r.status === 400 && r.json?.code === c.code)
+          observed = `→ ${fmt(r)}${r.status === 200 ? `; the dryRun answered as if no message had been sent (dryRun ${r.json?.dryRun === true})` : ''}`
+        } catch (e) { observed = `error: ${e.message}` }
+        summary.push(`${c.step} ${observed.split(';')[0]}`)
+        record({ step: c.step, title: `POST draft-invoice?dryRun=1 with ${c.what}`, expected: `400 ${c.code}`, observed: `load ${lid}: ${observed}`, verdict: v, shot: '' })
+      }
+      {
+        const res = []
+        for (const c of bad) {
+          try {
+            const r = await ownApi('POST', invPath(lid, 'invoice-preview'), { ...base, emailBody: c.value })
+            res.push({ c, ok: r.status === 400 && r.json?.code === c.code, got: fmt(r) })
+          } catch (e) { res.push({ c, ok: false, got: `error: ${e.message}` }) }
+        }
+        summary.push(`I13e ${res.filter((x) => x.ok).length}/${res.length} refused`)
+        record({
+          step: 'I13e', title: `POST invoice-preview with the same four bodies (empty, blanks, ${INV_EMAIL_BODY_MAX + 1} characters, 42)`,
+          expected: bad.map((c) => `400 ${c.code}`).join(', '),
+          observed: `load ${lid}: ${res.map((x) => `${x.c.what} → ${x.got}`).join('; ')}`, verdict: verdict(res.every((x) => x.ok)), shot: '',
+        })
+      }
+      await caption(page, `Step I13 — the server's answers to a bad message (page fetches): ${summary.join(' · ')}`)
+      rows[rows.length - 1].shot = await shot(page, 'i13-api-refusals')
+      writeResults()
+    }
+
+    // ---- I13f: a Bison load whose Order # could not be read. The dryRun blanks the
+    // Order # it would fall back to (our load id), and the message it generates must
+    // not print it either. A page fetch with the body the editor opens with, {}.
+    if (wantI13f) {
+      let observed = ''; let v = 'FAIL'; let s = ''
+      try {
+        const found = B.cand ? { cand: B.cand } : await bisonCandidate(page)
+        if (!found.cand) throw invSkip(found.why)
+        const ref = loadRefOf(found.cand.id)
+        const r = await ownApi('POST', `${invPath(found.cand.id, 'draft-invoice')}?dryRun=1`, {})
+        const j = r.json || {}
+        // Staging keeps POD records but not their files (the environment refresh copies the
+        // database, not uploads/), so the Bison load's draft cannot open there at all.
+        if (r.status === 400 && /POD not found/i.test(String(j.error || ''))) {
+          throw invSkip(`load ${ref}: dryRun → 400 "${j.error}": this server has the POD record but not its file, so the draft cannot open here`)
+        }
+        if (r.status !== 200) observed = `load ${ref}: dryRun → ${r.status}${j.code ? ` ${j.code}` : ''}${j.error ? ` "${String(j.error).slice(0, 120)}"` : ''}`
+        else if (!j.needsOrderNumber && j.orderNumberSource !== 'load-id-fallback') {
+          throw invSkip(`load ${ref}'s Order # was read off its rate-con (source "${j.orderNumberSource}"): no Bison load here has an unreadable Order #`)
+        } else {
+          const def = typeof j.emailBodyDefault === 'string' ? j.emailBodyDefault : ''
+          const asOrder = new RegExp(`Order\\s*#\\s*${escRe(ref)}(?!\\d)`).test(def)
+          v = verdict(!!def.trim() && !asOrder)
+          observed = `load ${ref}: dryRun (no rate-con to read) → 200; needsOrderNumber ${j.needsOrderNumber === true}, orderNumberSource "${j.orderNumberSource}", ` +
+            `the echoed Order # ${JSON.stringify(j.orderNumber)}; emailBodyDefault names our load id as the Order #: ${asOrder}; it reads ${JSON.stringify(def)}`
+        }
+        await caption(page, `Step I13f — ${v}: ${observed.slice(0, 220)}`)
+        s = await shot(page, 'i13f-bison-unread-order')
+      } catch (e) {
+        if (e.skip) { v = 'SKIP'; observed = e.message } else observed = `error: ${e.message}`
+      }
+      record({
+        step: 'I13f', title: `POST draft-invoice?dryRun=1 on Bison load ${INV_BISON_LOAD} with nothing but its own documents (its Order # could not be read)`,
+        expected: 'The generated message (emailBodyDefault) does not name our load id as the Order #: it is not the Bison Order #', observed, verdict: v, shot: s,
+      })
+    }
+
+    // ---- I14 / I14b: the Gmail draft itself, as the fake Gmail captured it (local only)
+    if (i14Wanted) {
+      const fake = LOCAL && FAKE_GMAIL && DB_PATH ? fakeGmailDir() : null
+      const why = !LOCAL ? 'local only: the draft is read back from the fake Gmail a local server is booted with'
+        : !FAKE_GMAIL ? 'needs E2E_FAKE_GMAIL=1, for this run and for boot-server.sh, so each draft is captured on this machine and nothing is sent'
+          : !DB_PATH ? 'needs DB_PATH (the draft record each approve writes in the copy is deleted by id)'
+            : fake.why || ''
+      const cand = S.cand || S.list[0]
+      // The invoice (named by the newest render) and every POD the dryRun listed.
+      const expectedAttachments = (f) => [(lastPreview || f.dry)?.invoiceFileName, ...(f.dry.podFileNames || [])].filter(Boolean)
+      const approveHead = (a) => `approve → ${a.status}${a.json?.code ? ` ${a.json.code}` : ''} via ${a.json?.via ?? '—'}` +
+        `${a.json?.preview ? ' (preview:true: the server has no mail target; was it booted with E2E_FAKE_GMAIL=1?)' : ''}; ` +
+        `drafts captured: ${a.fresh.length}; draft records written in the copy: ${a.rowIds.map((x) => `#${x}`).join(', ') || 'none'}`
+      if (wantInv('I14')) {
+        const typed = invBodyEdit('I14')
+        await step('I14', 'Fake Gmail: a fresh editor, a multi-line message typed into the box (a blank line, <b>not bold</b>, &), then Approve & Create Draft',
+          'One draft captured, with the IMAP flags \\Draft and \\Seen; its HTML shows the typed message exactly (the lines in order, each line break a break, the ' +
+          'blank line visible, <b>not bold</b> as text), then the signature, logo and confidentiality notice unchanged; To and Subject as the editor showed them; ' +
+          'the invoice and the POD attached', 'i14-edited-draft', async () => {
+            if (why) throw invSkip(why)
+            if (!cand) throw invSkip('no delivered/completed load with a POD to open')
+            const f = await freshEditor(cand, 'Step I14')
+            await openEmailTab(page)
+            if (!(await emailBodyBox(page).count())) {
+              const t = await readEmailTab(page)
+              await caption(page, 'Step I14 — FAIL: no message box to type into (see I10), so nothing is approved')
+              return { verdict: 'FAIL', observed: `NO message box ([data-testid="idp-email-body"]) on the Email message tab (${t.editables} editable element(s) on it): nothing to type the message into, so no approve was sent` }
+            }
+            await caption(page, 'Step I14 — type a multi-line message into the box')
+            await emailBodyBox(page).fill(typed)
+            await page.waitForTimeout(1000)
+            const t = await readEmailTab(page)
+            const shownSubject = await page.locator('#idp-subject').inputValue()
+            await caption(page, 'Step I14 — the typed message; now Approve & Create Draft (the fake Gmail captures the draft)')
+            await shot(page, 'i14-edited-body')
+            const a = await approveToFake(cand, fake.dir)
+            if (a.disabled !== undefined) return { verdict: 'FAIL', observed: `Approve stayed disabled ("${a.disabled}"); nothing was sent` }
+            const sent = Object.prototype.hasOwnProperty.call(a.body, 'emailBody') ? (a.body.emailBody === typed ? 'exactly as typed' : 'a DIFFERENT message') : 'ABSENT'
+            const head = `${approveHead(a)}; the approve request's emailBody: ${sent}${f.extra.length ? `; ${f.extra.join('; ')}` : ''}`
+            if (a.fresh.length !== 1) {
+              cleanNotes.push(...removeCreated().map((n) => `I14 ${n}`))
+              return { verdict: 'FAIL', observed: head }
+            }
+            const c = await judgeCapture(ctx, a.fresh[0], { shownTo: t.to, shownSubject, expectAttach: expectedAttachments(f), shotName: 'i14-captured-draft', label: 'Step I14' })
+            cleanNotes.push(...removeCreated().map((n) => `I14 ${n}`))
+            const msgOk = c.message === normText(typed)
+            const asText = c.boldTyped === 0 && c.message.includes('<b>not bold</b>')
+            const ok = a.status === 200 && a.json?.via === 'imap' && c.draft && c.seen && msgOk && asText && c.sigOk && c.logo && c.toOk && c.subjectOk && !c.missing.length && !c.notPdf
+            const observed = `${head}; ${captureSummary(c)}; the message above the signature, as a reader sees it, is the typed text exactly: ${msgOk}` +
+              `${msgOk ? '' : ` (it reads ${JSON.stringify(c.message.slice(0, 400))})`}; <b>not bold</b> shown as text: ${asText}; ` +
+              `the message's HTML: ${JSON.stringify(c.messageHtml.slice(0, 400))}; the editor before Approve: i14-edited-body.png`
+            await caption(page, `Step I14 — ${verdict(ok)}: flags "${c.flags.join(' ')}"; the typed message exactly: ${msgOk}; the signature unchanged: ${c.sigOk}`)
+            return { verdict: verdict(ok), observed, shot: c.shot }
+          })
+      }
+      await step('I14b', 'Fake Gmail: a fresh editor, the message left as generated, then Approve & Create Draft',
+        'One draft captured, with the IMAP flags \\Draft and \\Seen; its HTML shows the generated message unchanged, as the Email message tab showed it (for a ' +
+        'load that is not Bison\'s, "Hello," … "Thank you," with a blank line between its paragraphs), then the signature, logo and notice unchanged; To, ' +
+        'Subject and attachments as in I14', 'i14b-generated-draft', async () => {
+          if (why) throw invSkip(why)
+          if (!cand) throw invSkip('no delivered/completed load with a POD to open')
+          const f = await freshEditor(cand, 'Step I14b')
+          await openEmailTab(page)
+          const t = await readEmailTab(page)
+          const render = lastPreview || f.dry
+          const box = t.box ? normText(await emailBodyBox(page).inputValue()) : null
+          // The message the tab showed: the box, or on a build without one, the message
+          // of the email HTML it previewed.
+          const shownMsg = box ?? (render.emailHtml ? messageOf((await renderMail(ctx, render.emailHtml)).text) : null)
+          const pinned = f.dry.isBison ? null : invGeneratedText(loadRefOf(cand.id))
+          const shownSubject = await page.locator('#idp-subject').inputValue()
+          await caption(page, 'Step I14b — the message as generated (nothing typed); Approve & Create Draft (the fake Gmail captures the draft)')
+          await shot(page, 'i14b-generated-body')
+          const a = await approveToFake(cand, fake.dir)
+          if (a.disabled !== undefined) return { verdict: 'FAIL', observed: `Approve stayed disabled ("${a.disabled}"); nothing was sent` }
+          const sent = !Object.prototype.hasOwnProperty.call(a.body, 'emailBody') ? 'ABSENT'
+            : normText(a.body.emailBody) === shownMsg ? 'the message as shown' : 'a DIFFERENT message'
+          const head = `${approveHead(a)}; the approve request's emailBody: ${sent}${f.extra.length ? `; ${f.extra.join('; ')}` : ''}`
+          if (a.fresh.length !== 1) {
+            cleanNotes.push(...removeCreated().map((n) => `I14b ${n}`))
+            return { verdict: 'FAIL', observed: head }
+          }
+          const c = await judgeCapture(ctx, a.fresh[0], { shownTo: t.to, shownSubject, expectAttach: expectedAttachments(f), shotName: 'i14b-captured-draft', label: 'Step I14b' })
+          cleanNotes.push(...removeCreated().map((n) => `I14b ${n}`))
+          const asShown = shownMsg !== null && c.message === shownMsg
+          const generated = pinned === null ? c.message.startsWith('Hello,') && c.message.endsWith('Best regards,') : c.message === pinned
+          const ok = a.status === 200 && a.json?.via === 'imap' && c.draft && c.seen && asShown && generated && c.sigOk && c.logo && c.toOk && c.subjectOk && !c.missing.length && !c.notPdf
+          const observed = `${head}; ${captureSummary(c)}; the message above the signature is the one the tab showed: ${asShown}; ` +
+            `${pinned === null ? `(Bison) "Hello," … "Best regards,": ${generated}` : `the generated text: ${generated}`}` +
+            `${asShown && generated ? '' : ` (it reads ${JSON.stringify(c.message.slice(0, 400))})`}; the draft's HTML byte-identical to the email HTML the editor ` +
+            `rendered: ${render.emailHtml ? c.html === render.emailHtml : 'no email HTML to compare'}; the tab showed a message box: ${!!t.box}`
+          await caption(page, `Step I14b — ${verdict(ok)}: flags "${c.flags.join(' ')}"; the generated message unchanged: ${asShown && generated}`)
+          return { verdict: verdict(ok), observed, shot: c.shot }
+        })
+    }
   } finally {
     try { if (db) cleanNotes.push(...removeCreated().map((n) => `I ${n}`)) } catch (e) { cleanNotes.push(`delete error: ${e.message}`) }
     if (DB_PATH) {
       const left = fs.existsSync(JOURNAL)
       record({
-        step: 'Ic', title: 'Invoice editor: delete the planted draft record',
+        step: 'Ic', title: 'Invoice editor: delete the planted draft record, and the draft records the approves wrote with the fake Gmail',
         expected: 'Deleted; no plant journal left',
         observed: [...cleanNotes, left ? 'plant journal still present!' : 'no plant journal left'].join('; '),
         verdict: verdict(!left && !cleanNotes.some((n) => /error|LEFT BEHIND/.test(n))), shot: '',

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// The invoice draft editor's Order # rule and Notes limit — the CLIENT's copy.
+// The invoice draft editor's Order # rule, Notes limit and email message — the
+// CLIENT's copy.
 //
 // WHY THIS EXISTS. parseInvoiceOverrides() in server.js judges every body the
 // invoice editor sends. InvoiceDraftPreviewModal.vue checks the same fields
@@ -16,9 +17,16 @@
 //      editor lets through, the server's own clean-up + pattern accepts
 //   §3 notesError(): the 500-character ceiling, counted on the NFC form, and
 //      never looser than the server's own count
+//   §3b the email message limit: INVOICE_EMAIL_BODY_MAX is the same number in
+//      server.js and the editor (5,000), and both refusal sentences are the same
+//      words on both sides
 //   §4 the modal's wiring — Order # uses the shared rule and PO # keeps its own;
 //      the request body ALWAYS carries `notes`; Reset empties them; a note
-//      carried over from the last approved draft says so until it is touched
+//      carried over from the last approved draft says so until it is touched.
+//      The approve carries the typed email message only when it was edited, a
+//      preview never; a preview carries the PO # the form holds. The message box
+//      follows every render until it is typed into; a message regenerated after
+//      that holds Approve until "Keep my message" or "Use the new message"
 //   §5 the approve's outcome — the modal passes `preview` on, and the load
 //      dialog never says "Draft ready in Gmail" when no draft was created
 //   §6 DISCRIMINATION — defang each piece, require an assertion to flip
@@ -40,6 +48,7 @@ const LIB_PATH = path.join(ROOT, 'client', 'src', 'lib', 'invoiceFields.js')
 const {
   ORDER_NUMBER_RE, ORDER_NUMBER_MAX, ORDER_NUMBER_HINT, ORDER_NUMBER_HIDDEN_CHAR, orderNumberError,
   NOTES_MAX, notesError, notesLength,
+  INVOICE_EMAIL_BODY_MAX, validateInvoiceEmailBody,
 } = await import(pathToFileURL(LIB_PATH).href)
 
 let pass = 0
@@ -179,10 +188,10 @@ const SERVER_SRC = read('server.js')
 // A one-line `const NAME = …;`, anchored on a newline and counted, so a mention
 // in a comment cannot be taken for the definition and a second copy fails the
 // run instead of lifting either.
-function liftConstLine(src, head) {
+function liftConstLine(src, head, rel = 'server.js') {
   const needle = `\n${head}`
   const hits = src.split(needle).length - 1
-  if (hits !== 1) throw new Error(`expected exactly 1 line starting ${JSON.stringify(head)} in server.js, found ${hits}`)
+  if (hits !== 1) throw new Error(`expected exactly 1 line starting ${JSON.stringify(head)} in ${rel}, found ${hits}`)
   const a = src.indexOf(needle) + 1
   return src.slice(a, src.indexOf('\n', a))
 }
@@ -298,6 +307,50 @@ if (serverAcceptsNotes) {
     notesCorpus.some((v) => notesError(v) === '') && notesCorpus.some((v) => notesError(v) !== ''))
 }
 
+// ══ §3b — the email message limit ══════════════════════════════════════════════
+// The editor caps its message box with the client copy; parseInvoiceOverrides()
+// refuses over the server's. Two numbers for one limit, held together here.
+console.log('\n§3b INVOICE_EMAIL_BODY_MAX — the email message limit')
+let SERVER_EMAIL_BODY_MAX = null
+try {
+  SERVER_EMAIL_BODY_MAX = new Function(`"use strict";\n${liftConstLine(SERVER_SRC, 'const INVOICE_EMAIL_BODY_MAX = ')}\nreturn INVOICE_EMAIL_BODY_MAX;`)()
+} catch (e) {
+  console.error(`      ${e.message} — the server half of this limit is not on this branch`)
+}
+eq('server.js INVOICE_EMAIL_BODY_MAX is the agreed 5,000', SERVER_EMAIL_BODY_MAX, 5000)
+eq('client/src/lib/invoiceFields.js exports the same INVOICE_EMAIL_BODY_MAX as server.js', INVOICE_EMAIL_BODY_MAX, SERVER_EMAIL_BODY_MAX)
+
+// The two sentences under the message box. The editor shows its own copy before
+// approve and the server's arrives with a 400 — one rule must read as one sentence.
+const EMAIL_EMPTY_MSG = "The email message can't be empty."
+const EMAIL_TOO_LONG_MSG = 'The email message must be 5,000 characters or fewer.'
+eq('empty → the agreed sentence', validateInvoiceEmailBody(''), EMAIL_EMPTY_MSG)
+eq('only whitespace → the same sentence (trimmed first)', validateInvoiceEmailBody(' ' + cp(0x0a) + TAB + ' '), EMAIL_EMPTY_MSG)
+eq('null / undefined → the same sentence', [validateInvoiceEmailBody(null), validateInvoiceEmailBody(undefined)], [EMAIL_EMPTY_MSG, EMAIL_EMPTY_MSG])
+eq('5,000 characters are fine', validateInvoiceEmailBody('m'.repeat(5000)), '')
+eq('5,001 characters → the agreed sentence', validateInvoiceEmailBody('m'.repeat(5001)), EMAIL_TOO_LONG_MSG)
+let SERVER_EMAIL_EMPTY = null
+let SERVER_EMAIL_TOO_LONG = null
+try {
+  // The one string literal server.js refuses INVOICE_EMAIL_BODY_EMPTY with.
+  const empties = [...SERVER_SRC.matchAll(/bad\("INVOICE_EMAIL_BODY_EMPTY", "emailBody", ("(?:[^"\\\n]|\\.)*")\)/g)]
+  if (empties.length !== 1) throw new Error(`expected exactly 1 INVOICE_EMAIL_BODY_EMPTY refusal in server.js, found ${empties.length}`)
+  SERVER_EMAIL_EMPTY = JSON.parse(empties[0][1])
+  // The `tooLong` sentence, evaluated with the server's own ceiling.
+  const lines = [...SERVER_SRC.matchAll(/\n[ \t]*(const tooLong = `The email message[^`\n]*`;)\n/g)]
+  if (lines.length !== 1) throw new Error(`expected exactly 1 email-message tooLong line in server.js, found ${lines.length}`)
+  SERVER_EMAIL_TOO_LONG = new Function(`"use strict";\n${liftConstLine(SERVER_SRC, 'const INVOICE_EMAIL_BODY_MAX = ')}\n${lines[0][1]}\nreturn tooLong;`)()
+} catch (e) {
+  console.error(`      ${e.message} — the server's email message sentences are not on this branch`)
+}
+eq('server.js refuses an empty message with the editor\'s sentence', SERVER_EMAIL_EMPTY, validateInvoiceEmailBody(''))
+eq('server.js refuses a long message with the editor\'s sentence', SERVER_EMAIL_TOO_LONG, validateInvoiceEmailBody('m'.repeat(5001)))
+{
+  const tooLongRefusals = SERVER_SRC.match(/bad\("INVOICE_EMAIL_BODY_TOO_LONG", "emailBody", [^)]*\)/g) || []
+  ok('…and every INVOICE_EMAIL_BODY_TOO_LONG refusal in server.js sends that sentence',
+    tooLongRefusals.length > 0 && tooLongRefusals.every((s) => s.endsWith(', tooLong)')))
+}
+
 // ══ §4 — the modal's wiring ════════════════════════════════════════════════════
 console.log('\n§4  InvoiceDraftPreviewModal.vue')
 const MODAL_REL = 'client/src/components/dashboard/InvoiceDraftPreviewModal.vue'
@@ -373,14 +426,15 @@ ok('…and turns amber on the same count', MODAL.includes('const notesNearLimit 
 
 // buildOverrideBody(), lifted with has() and run over stand-ins.
 const BODY_SRC = `${liftFn(MODAL, 'has')}\n${liftFn(MODAL, 'buildOverrideBody')}`
-function bodyBuilder(src, notes, dryRunKeys = {}) {
+// `over` sets form values, edited flags and the "no PO #" tick for one case.
+function bodyBuilder(src, notes, dryRunKeys = {}, over = {}) {
   const form = {
     invoiceId: 'INV-1', invoiceDate: '2026-09-29', orderNumber: '7101850-$700 ADV', total: '3000.00',
-    billToName: '', brokerName: '', poNumber: '', deliveryDate: '', notes,
+    billToName: '', brokerName: '', poNumber: '', deliveryDate: '', notes, emailBody: '', ...over.form,
   }
-  const edited = { billToName: false, brokerName: false, poNumber: false, deliveryDate: false, notes: false }
+  const edited = { billToName: false, brokerName: false, poNumber: false, deliveryDate: false, notes: false, ...over.edited }
   return new Function('pv', 'form', 'recipient', 'edited', 'noPoOnRatecon', 'pinnedIsBison', 'str', `${src}\nreturn buildOverrideBody;`)(
-    { value: dryRunKeys }, form, { value: 'ap@example.com' }, { value: edited }, { value: false }, { value: null },
+    { value: dryRunKeys }, form, { value: 'ap@example.com' }, { value: edited }, { value: !!over.noPo }, { value: null },
     (v) => (v == null ? '' : String(v)),
   )
 }
@@ -394,6 +448,38 @@ for (const forPreview of [true, false]) {
   eq(`the ${which} body carries the note raw (the server normalizes it)`, multi.notes, MULTI)
   eq(`the ${which} body carries the Order # trimmed, unchanged otherwise`,
     bodyBuilder(BODY_SRC, '')({ forPreview }).orderNumber, '7101850-$700 ADV')
+}
+
+// The typed email message: the approve carries it only when it was edited, raw;
+// an unedited one is left out so the server writes its own. A preview never
+// carries it, edited or not.
+const TYPED_MESSAGE = 'Hello,' + cp(0x0a, 0x0a) + 'Order # 7101850 is attached.  '
+for (const emailEdited of [true, false]) {
+  const over = { form: { emailBody: TYPED_MESSAGE }, edited: { emailBody: emailEdited } }
+  const approveBody = bodyBuilder(BODY_SRC, '', {}, over)({ forPreview: false })
+  if (emailEdited) eq('an edited message: the approve carries emailBody exactly as typed', approveBody.emailBody, TYPED_MESSAGE)
+  else ok('an unedited message: the approve has no emailBody key', !hasOwn(approveBody, 'emailBody'))
+  ok(`a preview never carries emailBody (${emailEdited ? 'edited' : 'unedited'})`,
+    !hasOwn(bodyBuilder(BODY_SRC, '', {}, over)({ forPreview: true }), 'emailBody'))
+}
+
+// The PO # on a Bison dryRun, which echoes poNumber. A preview reads no sheet,
+// so it carries what the form holds — the cover note's "& PO #" and the PDF's PO
+// line come from it. The approve keeps the omitted-vs-empty rule: untouched, the
+// key stays out and the server derives the PO # itself.
+const BISON_DRYRUN = { isBison: true, orderNumber: '', poNumber: 'PO-5521', moveNumber: '88-1' }
+{
+  const untouched = { form: { poNumber: 'PO-5521' } }
+  eq('Bison, PO # untouched: the preview carries it', bodyBuilder(BODY_SRC, '', BISON_DRYRUN, untouched)({ forPreview: true }).poNumber, 'PO-5521')
+  ok('…and the approve still leaves it out', !hasOwn(bodyBuilder(BODY_SRC, '', BISON_DRYRUN, untouched)({ forPreview: false }), 'poNumber'))
+  const typed = { form: { poNumber: ' PO-9 ' }, edited: { poNumber: true } }
+  eq('a typed PO # goes out trimmed on both',
+    [true, false].map((forPreview) => bodyBuilder(BODY_SRC, '', BISON_DRYRUN, typed)({ forPreview }).poNumber), ['PO-9', 'PO-9'])
+  const none = { form: { poNumber: '' }, noPo: true }
+  eq('"no PO #" ticked: both send it empty',
+    [true, false].map((forPreview) => bodyBuilder(BODY_SRC, '', BISON_DRYRUN, none)({ forPreview }).poNumber), ['', ''])
+  ok('a dryRun without the key has nothing to pin: the preview leaves it out too',
+    !hasOwn(bodyBuilder(BODY_SRC, '', {}, untouched)({ forPreview: true }), 'poNumber'))
 }
 
 // resetToExtracted(), run with a seed that carries a note from the last draft.
@@ -486,6 +572,144 @@ eq('…never shows when nothing was carried over',
   // Reset, run for real above: it empties the seed as well, so the hint stays gone.
   const { form, seeded } = runReset(RESET_SRC)
   eq('…and is gone after Reset', carriedOver(CARRIED_SRC, form.notes, seeded.value.notes), false)
+}
+
+// The email message box, run the way the modal runs it: seedForm() when the
+// editor opens and on Reset, adoptEmailMessage() on every render, the two
+// buttons, and the approve gate over stand-ins for everything else it reads.
+// The modal's watch(() => edited.value.emailBody, trackEmailBodyEditBase) is the
+// one piece done by hand here (no Vue runtime): settle() calls it on each flip.
+const modalLine = (head) => liftConstLine(MODAL, head, MODAL_REL)
+const MESSAGE_SRC = [
+  modalLine('const ISO_DATE_RE = '), modalLine('const str = '), modalLine('const isoDate = '), modalLine('const emailBodyText = '),
+  liftFn(MODAL, 'seedForm'), EDITED_SRC,
+  liftComputed(MODAL, 'emailBodyDefaultChanged'), liftFn(MODAL, 'trackEmailBodyEditBase'),
+  liftFn(MODAL, 'adoptEmailMessage'), liftFn(MODAL, 'useGeneratedMessage'), liftFn(MODAL, 'keepMyMessage'),
+  liftComputed(MODAL, 'canApprove'), modalLine('const EMAIL_BODY_STALE_REASON = '),
+  liftComputed(MODAL, 'approveBlockedReason'), liftComputed(MODAL, 'approveHeldForMessage'),
+].join('\n')
+ok('the modal runs trackEmailBodyEditBase on every change of edited.emailBody',
+  MODAL.includes('\nwatch(() => edited.value.emailBody, trackEmailBodyEditBase)\n'))
+function messageBox(src = MESSAGE_SRC) {
+  const pv = { value: {} }
+  const form = {}
+  const seeded = { value: {} }
+  const emailBodyEditBase = { value: null }
+  const emailSignatureHtml = { value: '' }
+  let focused = 0
+  const gate = {
+    approving: { value: false }, formValid: { value: true }, emailBodyError: { value: '' }, previewing: { value: false },
+    previewPending: { value: false }, refsBlocked: { value: false }, firstFieldError: { value: '' },
+    activeTab: { value: 'invoice' }, previewTabActive: { value: true },
+  }
+  const env = {
+    computed, pv, form, seeded, recipient: { value: '' }, originalTo: { value: '' }, peekedInvoiceId: { value: '' },
+    pinnedIsBison: { value: null }, moneyValue: (v) => (v ? Number(v) : null), emailBodyEditBase, emailSignatureHtml,
+    nextTick: (fn) => fn(), emailBodyInput: { value: { focus: () => { focused++ } } }, ...gate,
+  }
+  const api = new Function(...Object.keys(env), `${src}
+return { seedForm, edited, emailBodyDefaultChanged, trackEmailBodyEditBase, adoptEmailMessage, useGeneratedMessage,
+  keepMyMessage, canApprove, EMAIL_BODY_STALE_REASON, approveBlockedReason, approveHeldForMessage };`)(...Object.values(env))
+  let seen = false
+  const settle = () => {
+    const now = api.edited.value.emailBody
+    if (now !== seen) { seen = now; api.trackEmailBodyEditBase(now) }
+  }
+  return {
+    api, form, seeded, gate, emailSignatureHtml, base: emailBodyEditBase, focused: () => focused,
+    open(message) { pv.value = { emailBodyDefault: message }; api.seedForm(); settle() }, // the editor opens, or Reset
+    type(text) { form.emailBody = text; settle() },
+    render(r) { api.adoptEmailMessage(r); settle() },
+    keep() { api.keepMyMessage(); settle() },
+    use() { api.useGeneratedMessage(); settle() },
+  }
+}
+const STALE_REASON = 'The generated email message changed after you edited it. Open the Email message tab and choose Use the new message or Keep my message.'
+const BISON_MESSAGE = (order) => `Hello,${cp(0x0a, 0x0a)}Please find the attached invoice and supporting documentation for ` +
+  `Bison Transport Order # ${order}. The driver ID number for pickup is 88-1 & PO #PO-5521${cp(0x0a, 0x0a)}Best regards,`
+const [M1, M2, M3] = ['A-1', 'A-2', 'A-3'].map(BISON_MESSAGE)
+{
+  const m = messageBox()
+  eq('the stale reason is the agreed sentence', m.api.EMAIL_BODY_STALE_REASON, STALE_REASON)
+  m.open(M1)
+  eq('open: the box holds the generated message; nothing edited or recorded', [m.form.emailBody, m.api.edited.value.emailBody, m.base.value], [M1, false, null])
+  m.render({ emailBodyDefault: M2, emailSignatureHtml: '<p>--</p>' })
+  eq('untouched: a render replaces the text and the baseline, and brings the signature',
+    [m.form.emailBody, m.seeded.value.emailBody, m.emailSignatureHtml.value], [M2, M2, '<p>--</p>'])
+  eq('…still not edited, not stale, Approve open', [m.api.edited.value.emailBody, m.api.emailBodyDefaultChanged.value, m.api.canApprove.value], [false, false, true])
+  m.render({})
+  m.render({ emailBodyDefault: '  ' })
+  eq('a render without a message changes nothing', [m.form.emailBody, m.seeded.value.emailBody], [M2, M2])
+  m.render({ emailBodyDefault: 'a' + cp(0x0d, 0x0a) + 'b' })
+  eq('a message with CRLF breaks is kept with LF, as the textarea hands text back', [m.form.emailBody, m.api.edited.value.emailBody], ['a' + cp(0x0a) + 'b', false])
+  m.render({ emailBodyDefault: M2 })
+
+  const typed = M2 + cp(0x0a, 0x0a) + 'P.S. Call before delivery.'
+  m.type(typed)
+  eq('typed: edited, and the baseline recorded is the message the edit started from', [m.api.edited.value.emailBody, m.base.value], [true, M2])
+  eq('…not stale, Approve open (an edit alone blocks nothing)', [m.api.emailBodyDefaultChanged.value, m.api.canApprove.value], [false, true])
+
+  m.render({ emailBodyDefault: M3 })
+  eq('a render after the edit never overwrites the text, but the baseline moves', [m.form.emailBody, m.seeded.value.emailBody], [typed, M3])
+  eq('…the message it was edited from changed: stale, Approve disabled, the footer gives the stale reason',
+    [m.api.emailBodyDefaultChanged.value, m.api.canApprove.value, m.api.approveBlockedReason.value, m.api.approveHeldForMessage.value],
+    [true, false, STALE_REASON, true])
+  m.gate.formValid.value = false
+  m.gate.firstFieldError.value = REQUIRED_MSG
+  eq('…a real blocking reason outranks it in the footer', [m.api.approveBlockedReason.value, m.api.approveHeldForMessage.value], [REQUIRED_MSG, false])
+  m.gate.formValid.value = true
+  m.gate.firstFieldError.value = ''
+
+  const focusedBefore = m.focused()
+  m.keep()
+  eq('Keep my message: the text and its edited badge stay; the baseline is the current message',
+    [m.form.emailBody, m.api.edited.value.emailBody, m.base.value], [typed, true, M3])
+  eq('…not stale, Approve open, no footer reason, the cursor back in the box',
+    [m.api.emailBodyDefaultChanged.value, m.api.canApprove.value, m.api.approveBlockedReason.value, m.focused() > focusedBefore],
+    [false, true, '', true])
+  m.render({ emailBodyDefault: M1 })
+  eq('a later regeneration is stale again', [m.api.emailBodyDefaultChanged.value, m.api.canApprove.value], [true, false])
+
+  m.use()
+  eq('Use the new message: the current message replaces the text; not edited, nothing recorded, Approve open',
+    [m.form.emailBody, m.api.edited.value.emailBody, m.base.value, m.api.emailBodyDefaultChanged.value, m.api.canApprove.value],
+    [M1, false, null, false, true])
+}
+{
+  const m = messageBox()
+  m.open(M1)
+  m.type(M1 + ' x')
+  m.render({ emailBodyDefault: M2 })
+  ok('(set-up) stale', m.api.emailBodyDefaultChanged.value === true)
+  m.type(M2)
+  eq('typed back to the current message: not edited, nothing recorded, not stale',
+    [m.api.edited.value.emailBody, m.base.value, m.api.emailBodyDefaultChanged.value], [false, null, false])
+  m.type(M2 + ' y')
+  eq('typing again starts from the message standing now: not stale', [m.base.value, m.api.emailBodyDefaultChanged.value], [M2, false])
+}
+{
+  const m = messageBox()
+  m.open(M1)
+  m.type(M1 + ' x')
+  m.render({ emailBodyDefault: M2 })
+  m.open(M1)
+  eq('Reset (seedForm): the extracted message back; not edited, nothing recorded, not stale, Approve open',
+    [m.form.emailBody, m.api.edited.value.emailBody, m.base.value, m.api.emailBodyDefaultChanged.value, m.api.canApprove.value],
+    [M1, false, null, false, true])
+}
+{
+  const keepTag = tagWith(MODAL, 'button', 'data-testid="idp-email-body-keep"')
+  const useTag = tagWith(MODAL, 'button', 'data-testid="idp-email-body-use-default"')
+  ok('the stale hint offers both buttons, wired to keepMyMessage and useGeneratedMessage, disabled while approving',
+    keepTag.includes('@click="keepMyMessage"') && useTag.includes('@click="useGeneratedMessage"') &&
+    keepTag.includes(':disabled="approving"') && useTag.includes(':disabled="approving"'))
+  const hint = tagWith(MODAL, 'p', 'id="idp-email-body-stale"')
+  const at = MODAL.indexOf(hint)
+  ok('…inside the hint that shows while the message is stale',
+    /\sv-if="emailBodyDefaultChanged"/.test(hint) && at < MODAL.indexOf(useTag) && MODAL.indexOf(keepTag) < MODAL.indexOf('</p>', at))
+  ok('the footer gives the stale reason its test id, and keeps ONE .idp-foot-note',
+    MODAL.includes('<span v-if="approveHeldForMessage" data-testid="idp-email-body-stale-foot">{{ approveBlockedReason }}</span>') &&
+    MODAL.split('class="idp-foot-note"').length - 1 === 1)
 }
 
 // ══ §5 — the approve's outcome ═════════════════════════════════════════════════
@@ -630,6 +854,61 @@ console.log('\n§6  DISCRIMINATION — defang each piece, require an assertion t
   const MUT = CARRIED_SRC.replace(' && !edited.value.notes', '')
   ok('MUTANT: a carried-over hint that stays after the note is edited is caught by §4',
     MUT !== CARRIED_SRC && carriedOver(MUT, `${SAVED} x`, SAVED) === true)
+}
+{
+  const MUT = BODY_SRC.replace(" || (forPreview && has('poNumber'))", '')
+  ok('MUTANT: a preview that drops an untouched Bison PO # is caught by §4',
+    MUT !== BODY_SRC && !hasOwn(bodyBuilder(MUT, '', BISON_DRYRUN, { form: { poNumber: 'PO-5521' } })({ forPreview: true }), 'poNumber'))
+}
+{
+  const edited = { form: { emailBody: TYPED_MESSAGE }, edited: { emailBody: true } }
+  const MUT = BODY_SRC.replace('if (!forPreview && edited.value.emailBody)', 'if (edited.value.emailBody)')
+  ok('MUTANT: a preview that carries the typed message is caught by §4',
+    MUT !== BODY_SRC && hasOwn(bodyBuilder(MUT, '', {}, edited)({ forPreview: true }), 'emailBody'))
+  const MUT2 = BODY_SRC.replace('if (!forPreview && edited.value.emailBody)', 'if (!forPreview)')
+  ok('MUTANT: an approve that sends an unedited message is caught by §4',
+    MUT2 !== BODY_SRC && hasOwn(bodyBuilder(MUT2, '', {}, { form: { emailBody: TYPED_MESSAGE } })({ forPreview: false }), 'emailBody'))
+}
+// The §4 message-box scenario over a defanged copy: type, a render regenerates
+// the message, then Keep my message.
+function staleScenario(src) {
+  const m = messageBox(src)
+  m.open(M1)
+  const typed = M1 + ' x'
+  m.type(typed)
+  m.render({ emailBodyDefault: M2 })
+  const afterRender = { text: m.form.emailBody, stale: m.api.emailBodyDefaultChanged.value, canApprove: m.api.canApprove.value }
+  m.keep()
+  return { typed, afterRender, afterKeep: { stale: m.api.emailBodyDefaultChanged.value, canApprove: m.api.canApprove.value } }
+}
+{
+  const MUT = MESSAGE_SRC.replace('if (!edited.value.emailBody) form.emailBody = next', 'form.emailBody = next')
+  const r = staleScenario(MUT)
+  ok('MUTANT: a render that overwrites an edited message is caught by §4', MUT !== MESSAGE_SRC && r.afterRender.text !== r.typed)
+}
+{
+  const MUT = MESSAGE_SRC.replace(
+    'if (!edited.value.emailBody) form.emailBody = next\n  seeded.value = { ...seeded.value, emailBody: next }',
+    'if (!edited.value.emailBody) { form.emailBody = next; seeded.value = { ...seeded.value, emailBody: next } }')
+  ok('MUTANT: a render that leaves an edited message\'s baseline behind (never stale) is caught by §4',
+    MUT !== MESSAGE_SRC && staleScenario(MUT).afterRender.stale === false)
+}
+{
+  const MUT = MESSAGE_SRC.replace('\n    && !emailBodyDefaultChanged.value,', ',')
+  ok('MUTANT: an Approve left open over a stale message is caught by §4',
+    MUT !== MESSAGE_SRC && staleScenario(MUT).afterRender.canApprove === true)
+}
+{
+  const MUT = MESSAGE_SRC.replace('  emailBodyEditBase.value = str(seeded.value.emailBody)\n  nextTick', '  nextTick')
+  ok('MUTANT: a Keep my message that leaves the baseline where it was is caught by §4',
+    MUT !== MESSAGE_SRC && staleScenario(MUT).afterKeep.stale === true && staleScenario(MUT).afterKeep.canApprove === false)
+}
+{
+  const LIB_SRC = fs.readFileSync(LIB_PATH, 'utf8')
+  const drifted = LIB_SRC.replace("The email message can't be empty.", 'The email message cannot be empty.')
+  const mod = await import('data:text/javascript,' + encodeURIComponent(drifted))
+  ok('MUTANT: an editor sentence that drifts from server.js is caught by §3b',
+    drifted !== LIB_SRC && !!SERVER_EMAIL_EMPTY && mod.validateInvoiceEmailBody('') !== SERVER_EMAIL_EMPTY)
 }
 
 console.log(`\ninvoice-fields-client: ${pass} passed, ${fail} failed`)

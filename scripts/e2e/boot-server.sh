@@ -16,6 +16,12 @@
 #   E2E_MAINTENANCE_NOTICE=1  boot with the investor maintenance notice ON
 #                 (MAINTENANCE_NOTICE_ENABLED=true, audience investor), for the
 #                 E2E's M1. Anything else, or unset: the notice stays off.
+#   E2E_FAKE_GMAIL=1  boot with a stand-in for Gmail, for the invoice section's I14
+#                 and I14b: obviously fake Gmail credentials, and the server alone
+#                 preloads scripts/e2e/fake-gmail.cjs (NODE_OPTIONS), which captures
+#                 each IMAP APPEND (a Gmail draft) in <work dir>/fake-gmail (0700)
+#                 and refuses SMTP, so nothing reaches Gmail. Refused when
+#                 fake-gmail.cjs is missing. Anything else, or unset: Gmail blanked.
 #   INVESTOR_LEASE_PAYOUTS_ENABLED  the lease payout flag, passed to the server as
 #                 given; unset or empty boots it OFF, whatever .env says (the E2E's
 #                 lease section and payout-parity.mjs set it explicitly).
@@ -102,12 +108,36 @@ echo "lease payouts: INVESTOR_LEASE_PAYOUTS_ENABLED=$LEASE"
 NO_DRIVE_FOLDER=logisx-e2e-no-drive-folder
 echo "rate-con Drive folder: RATECON_DRIVE_FOLDER_ID=$NO_DRIVE_FOLDER (names no folder; an empty value would mean production's)"
 
+# Gmail: blanked, unless E2E_FAKE_GMAIL=1 asks for the fake. Its credentials are
+# obviously fake (.invalid is a reserved name), and fake-gmail.cjs, preloaded into
+# the server alone, answers every IMAP APPEND by capturing the draft in the work dir
+# and refuses SMTP. Without the module those credentials would be tried against the
+# real Gmail, so a missing module refuses the boot.
+G_USER=; G_PASS=; FAKE_DIR=; FAKE_MOD=
+if [ "${E2E_FAKE_GMAIL:-}" = "1" ]; then
+  FAKE_MOD="$HERE/fake-gmail.cjs"
+  [ -f "$FAKE_MOD" ] || refuse "E2E_FAKE_GMAIL=1, but $FAKE_MOD is missing"
+  case "$FAKE_MOD" in *'"'*|*'\'*) refuse "the path $FAKE_MOD cannot be passed in NODE_OPTIONS";; esac
+  FAKE_DIR="$WORK/fake-gmail"
+  [ ! -L "$FAKE_DIR" ] || refuse "$FAKE_DIR is a symlink"
+  mkdir -p "$FAKE_DIR"
+  chmod 700 "$FAKE_DIR"
+  G_USER=e2e-fake@logisx.invalid
+  G_PASS=e2e-fake-app-password
+  echo "gmail: FAKE (GMAIL_USER=$G_USER; the server preloads $FAKE_MOD, which captures each draft in $FAKE_DIR and refuses SMTP)"
+else
+  echo "gmail: blanked (no mail target: an approve answers preview only)"
+fi
+
 cd "$WT"
+# The fake is preloaded into the server alone: nothing below this line but the
+# server runs node.
+if [ -n "$FAKE_MOD" ]; then export NODE_OPTIONS="--require \"$FAKE_MOD\""; fi
 # dotenv never overrides a variable that is already set, so every value below,
 # including the empty ones, wins over .env.
 env PORT="$PORT" BIND_HOST=127.0.0.1 DATABASE_PATH="$DB" NODE_ENV=development \
   SPREADSHEET_ID="$SHEET" \
-  GMAIL_USER= GMAIL_APP_PASSWORD= \
+  GMAIL_USER="$G_USER" GMAIL_APP_PASSWORD="$G_PASS" E2E_FAKE_GMAIL_DIR="$FAKE_DIR" \
   N8N_INVOICE_WEBHOOK_URL= GEMINI_API_KEY= \
   RATECON_DRIVE_FOLDER_ID="$NO_DRIVE_FOLDER" \
   GOOGLE_MAPS_API_KEY= GOOGLE_MAPS_BROWSER_KEY= \
@@ -129,7 +159,16 @@ echo "started pid $PID on 127.0.0.1:$PORT from $WT (log: $LOG)"
 for i in $(seq 1 90); do
   if ! kill -0 "$PID" 2>/dev/null; then echo "server exited; see $LOG" >&2; tail -20 "$LOG" >&2; exit 1; fi
   code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/auth/session" || true)"
-  if [ "$code" = "200" ]; then echo "ready after ${i}s"; exit 0; fi
+  if [ "$code" = "200" ]; then
+    # With the fake credentials, the server must also show the fake's hooks in
+    # place; otherwise an approve would try the real Gmail. It is stopped instead.
+    if [ -n "$FAKE_MOD" ] && ! grep -qF 'fake-gmail: imap.gmail.com goes to a fake IMAP server' "$LOG"; then
+      kill "$PID"; rm -f "$PIDFILE"
+      refuse "the server answers, but its log does not show fake-gmail.cjs in place; it was stopped (see $LOG)"
+    fi
+    [ -z "$FAKE_MOD" ] || grep -F 'fake-gmail: imap.gmail.com goes to a fake IMAP server' "$LOG" | head -1
+    echo "ready after ${i}s"; exit 0
+  fi
   sleep 1
 done
 echo "not ready after 90s; see $LOG. It is still running: stop it with stop-server.sh $PORT" >&2
