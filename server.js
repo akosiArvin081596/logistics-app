@@ -13208,13 +13208,16 @@ function registerApplicationVehicles(vehicles, appId, userId) {
 //   - 409 INVESTOR_RECORD_CONFLICT: another investors record already holds the
 //     company name the new record would take (its carrier_name, compared
 //     trimmed and case-insensitively); the message names that record.
+//   - 409 USER_ALREADY_EXISTS: an account that is not an Investor (a Driver,
+//     a Dispatcher, a Super Admin) has the applicant's email; the message
+//     names its role and id.
 // The status becomes Accepted in the same transaction that writes the account,
 // the record and the trucks, so a refused or failed acceptance leaves the
 // application as it was. An application whose investors record already exists
 // (it was accepted before) is simply marked Accepted again; nothing is created.
-// So is one whose email an account already has: 200 { success: true,
+// So is one whose email only Investor accounts have: 200 { success: true,
 // accountCreated: false, existingUserId, message }, the message naming that
-// account's role and id, with the status and an audit row written together and
+// Investor account's id, with the status and an audit row written together and
 // no email sent.
 // The username is derived from the legal name, else the email, else the
 // application id, so it is never empty, with a number appended while it is
@@ -13270,12 +13273,25 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			}
 			const carrierName = String(application.dba || "").trim() || fullName;
 
-			// An account already has the applicant's email (an investor applying
-			// again for another truck, say): the application is marked Accepted and
-			// nothing else is written or sent. The status and the audit row that
-			// says so are one transaction, and the answer names the account.
+			// Accounts that already have the applicant's email. users.email is not
+			// unique, so every one of them is read (a membership test, not one
+			// row): if any is not an Investor, the acceptance is refused with
+			// nothing written, because accepting would file this application's
+			// banking and vehicles under someone who is not an investor.
 			const email = String(application.email || "").trim();
-			const emailHolder = email ? db.prepare("SELECT id, role FROM users WHERE LOWER(email) = LOWER(?)").get(email) : null;
+			const emailHolders = email ? db.prepare("SELECT id, role FROM users WHERE LOWER(email) = LOWER(?) ORDER BY id").all(email) : [];
+			const otherRole = emailHolders.find((u) => u.role !== "Investor");
+			if (otherRole) {
+				return res.status(409).json({
+					error: `An account with this email already exists (${otherRole.role} #${otherRole.id}) and it is not an investor account, so this application can't be accepted with that email.`,
+					code: "USER_ALREADY_EXISTS",
+				});
+			}
+			// Only Investor accounts have it (an investor applying again for
+			// another truck, say): the application is marked Accepted and nothing
+			// else is written or sent. The status and the audit row that says so
+			// are one transaction, and the answer names the account.
+			const emailHolder = emailHolders[0] || null;
 			if (emailHolder) {
 				db.transaction(() => {
 					setStatus.run(status, appId);
@@ -13287,7 +13303,7 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 					success: true,
 					accountCreated: false,
 					existingUserId: emailHolder.id,
-					message: `Accepted. An account with this email already exists (${emailHolder.role} #${emailHolder.id}), so no new account, investor record or trucks were created.`,
+					message: `Accepted. This application's email matches Investor account #${emailHolder.id}, so no new account, investor record or trucks were created. Confirm it is the same person before acting on its banking or vehicle details.`,
 				});
 			}
 			const nameHolder = db.prepare(
