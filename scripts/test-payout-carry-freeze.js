@@ -89,8 +89,12 @@ const CODE = SRC
 	.replace(/\/\*[\s\S]*?\*\//g, "")
 	.split("\n").map((l) => l.replace(/(^|[^:"'`\\])\/\/.*$/, "$1")).join("\n");
 
+// The walk itself lives in lib/investor-payout-basis.js (carryForward());
+// computeLossCarryForward() is how server.js reads it, run here as it ships.
+const investorPayoutBasis = require("../lib/investor-payout-basis");
+const BASIS_SRC = fs.readFileSync(path.join(__dirname, "..", "lib", "investor-payout-basis.js"), "utf8");
 const carrySrc = extractFn("computeLossCarryForward");
-const computeLossCarryForward = new Function(`${carrySrc}; return computeLossCarryForward;`)();
+const computeLossCarryForward = new Function("investorPayoutBasis", `${carrySrc}; return computeLossCarryForward;`)(investorPayoutBasis);
 
 // ============================================================ §1 ONE definition
 console.log("\n§1 the rule has exactly one definition, and every reader shares it");
@@ -98,14 +102,23 @@ console.log("\n§1 the rule has exactly one definition, and every reader shares 
 	eq(SRC.split("\nfunction computeLossCarryForward(").length - 1, 1,
 		"computeLossCarryForward defined exactly once");
 
-	// The walk's running accumulator. If a second `let deficit = 0` appears, some
-	// caller has copied the rule instead of calling it — which is the whole
-	// failure mode this refactor removes.
-	eq((CODE.match(/let deficit = 0;/g) || []).length, 1,
-		"exactly one running deficit accumulator in server.js (no second copy of the walk)");
-
-	const callSites = (CODE.match(/computeLossCarryForward\(monthlyEarnings\)/g) || []).length;
-	ok(callSites >= 2, `at least two call sites share the walk (found ${callSites})`);
+	// The walk's running accumulator. It lives in lib/investor-payout-basis.js,
+	// once; if one appears in server.js, some caller has copied the rule instead of
+	// calling it — which is the whole failure mode this refactor removes.
+	eq((CODE.match(/let deficit = 0;/g) || []).length, 0,
+		"no running deficit accumulator in server.js (no second copy of the walk)");
+	eq((BASIS_SRC.match(/let deficit = 0;/g) || []).length, 1,
+		"exactly one running deficit accumulator in lib/investor-payout-basis.js");
+	ok(/function computeLossCarryForward\(monthlyEarnings\) \{\s*return investorPayoutBasis\.carryForward\(monthlyEarnings\);\s*\}/.test(carrySrc),
+		"computeLossCarryForward() is the module's walk and nothing else");
+	ok(/const carry = carryForward\(entries\);/.test(BASIS_SRC),
+		"settleInvestorMonths() runs the same walk");
+	// Sliced to its closing brace at column 0: its parameter list is a
+	// destructuring pattern, so the first `{` is not the body's.
+	const cimeAt = SRC.indexOf("\nasync function computeInvestorMonthlyEarnings(");
+	const cime = cimeAt >= 0 ? SRC.slice(cimeAt, SRC.indexOf("\n}\n", cimeAt)) : "";
+	ok(/investorPayoutBasis\.settleInvestorMonths\(months, \{ splitFraction: investorSplit, basis: payoutBasis \}\)/.test(cime),
+		"computeInvestorMonthlyEarnings() settles its months with the shared payout function");
 
 	// Both readers must be the real ones: the settlement reconcile and the
 	// investor dashboard. A grep for the call alone would pass if someone pointed
@@ -118,10 +131,10 @@ console.log("\n§1 the rule has exactly one definition, and every reader shares 
 
 	const investorRoute = SRC.slice(SRC.indexOf('app.get("/api/investor",'));
 	const investorHandler = investorRoute.slice(0, investorRoute.indexOf('\napp.get("/api/investor/'));
-	ok(/computeLossCarryForward\(monthlyEarnings\)/.test(investorHandler),
-		"GET /api/investor calls the shared walk");
-	for (const k of ["lossCarriedIn", "lossDeferred", "payable"]) {
-		ok(new RegExp(`m\\.${k} = c\\.`).test(investorHandler),
+	ok(/investorPayoutBasis\.settleInvestorMonths\(months, \{ splitFraction: monthlySplit, basis: payoutBasis \}\)/.test(investorHandler),
+		"GET /api/investor settles its months with the shared payout function (the same walk)");
+	for (const [k, slot] of [["lossCarriedIn", "carriedIn"], ["lossDeferred", "deferred"], ["payable", "payable"]]) {
+		ok(new RegExp(`${k}: s\\.${slot},`).test(investorHandler),
 			`GET /api/investor publishes monthlyEarnings[].${k}`);
 	}
 }
@@ -238,8 +251,9 @@ console.log("\n§4 the statement's two halves are frozen together");
 {
 	// The real June row: frozen share $8,790, frozen settled amount $8,703, so the
 	// carry applied at close was $87. `drifted` in lib/payout-statement.js is
-	// computed as monthShare − lossCarriedIn vs amount, so it is the page's own
-	// does-this-add-up test and the right thing to assert on.
+	// computed as monthShare − lossCarriedIn + lossDeferred (a loss month's own
+	// loss carried forward) vs amount, so it is the page's own does-this-add-up
+	// test and the right thing to assert on.
 	const frozen = {
 		revenue: 35161.76, driverPay: 9000, fixedCosts: 6149.16, tripExpenses: 2431.72,
 		maintFundCost: 0, complianceCost: 0, netProfit: 17580.88, splitPct: 50, monthShare: 8790,
@@ -329,8 +343,10 @@ console.log("\n§5 frozen-vs-live resolution — `??`, never `||`");
 // ============================ §6 what finalizePeriods actually snapshots
 console.log("\n§6 the snapshot carries the carry — but never invents a composition");
 {
-	const finalize = extractFn("finalizePeriods");
-	const m = finalize.match(/const breakdown = JSON\.stringify\(([\s\S]*?)\n\t\t\t\);/);
+	// The snapshot is frozenPayoutBreakdown(), which finalizePeriods() calls and
+	// the reconcile's late stamp of a lease month calls too.
+	ok(/const breakdown = frozenPayoutBreakdown\(p\);/.test(extractFn("finalizePeriods")), "§6 finalizePeriods() snapshots through frozenPayoutBreakdown()");
+	const m = extractFn("frozenPayoutBreakdown").match(/return JSON\.stringify\(([\s\S]*?)\n\t\);/);
 	ok(!!m, "§6 the finalized_breakdown snapshot expression is where it is expected");
 	const snapshot = new Function("p", `return JSON.stringify(${m[1]});`);
 
@@ -457,17 +473,18 @@ console.log("\n§8 mutants — each must be caught");
 		return new Function("frozenBreakdown", "p", `return [${expr("lossCarriedIn")}, ${expr("lossDeferred")}];`);
 	};
 
-	// Rebuilds finalizePeriods' snapshot expression out of a (possibly mutated) source.
+	// Rebuilds the snapshot expression (frozenPayoutBreakdown(), which
+	// finalizePeriods() calls) out of a (possibly mutated) source.
 	const snapshotFrom = (src) => {
-		const needle = "\nasync function finalizePeriods(";
+		const needle = "\nfunction frozenPayoutBreakdown(";
 		const start = src.indexOf(needle) + 1;
 		let depth = 0, body = "";
 		for (let j = src.indexOf("{", start); j < src.length; j++) {
 			if (src[j] === "{") depth++;
 			else if (src[j] === "}") { depth--; if (depth === 0) { body = src.slice(start, j + 1); break; } }
 		}
-		const m = body.match(/const breakdown = JSON\.stringify\(([\s\S]*?)\n\t\t\t\);/)
-			|| body.match(/const breakdown = JSON\.stringify\(([^;]*?)\);/);
+		const m = body.match(/return JSON\.stringify\(([\s\S]*?)\n\t\);/)
+			|| body.match(/return JSON\.stringify\(([^;]*?)\);/);
 		if (!m) throw new Error("no snapshot expression");
 		return new Function("p", `return JSON.stringify(${m[1]});`);
 	};
@@ -500,8 +517,8 @@ console.log("\n§8 mutants — each must be caught");
 		{
 			name: "M3 finalizePeriods stops snapshotting the carry (the other half of bug 1)",
 			mutate: (s) => s.replace(
-				/const breakdown = JSON\.stringify\(\n\t\t\t\tp\.breakdown[\s\S]*?\n\t\t\t\);/,
-				"const breakdown = JSON.stringify(p.breakdown || null);"),
+				/return JSON\.stringify\(\n\t\tp\.breakdown[\s\S]*?\n\t\);/,
+				"return JSON.stringify(p.breakdown || null);"),
 			caught: (s) => {
 				const out = JSON.parse(snapshotFrom(s)(P));
 				return out.lossCarriedIn === undefined || out.lossDeferred === undefined;
@@ -510,8 +527,8 @@ console.log("\n§8 mutants — each must be caught");
 		{
 			name: "M4 snapshot drops the null guard — an aged-out month gets a carry-only object",
 			mutate: (s) => s.replace(
-				/const breakdown = JSON\.stringify\(\n\t\t\t\tp\.breakdown[\s\S]*?\n\t\t\t\);/,
-				"const breakdown = JSON.stringify({ ...p.breakdown, lossCarriedIn: p.lossCarriedIn, lossDeferred: p.lossDeferred });"),
+				/return JSON\.stringify\(\n\t\tp\.breakdown[\s\S]*?\n\t\);/,
+				"return JSON.stringify({ ...p.breakdown, lossCarriedIn: p.lossCarriedIn, lossDeferred: p.lossDeferred });"),
 			// A truthy stand-in defeats the statement's `breakdown ? … : null` branch,
 			// so the PDF renders an all-zero waterfall instead of its honest note.
 			caught: (s) => {
@@ -530,15 +547,15 @@ console.log("\n§8 mutants — each must be caught");
 			mutate: (s) => s.replace(
 				"const carryByPeriod = computeLossCarryForward(monthlyEarnings);\n\n\t// Reconcile completed PAST months",
 				"const carryByPeriod = {};\n\t{ let deficit = 0; for (const m of monthlyEarnings) { const raw = Math.round(m.investorEarnings); carryByPeriod[m.month] = { raw, payable: Math.max(0, raw), carriedIn: 0, deferred: 0 }; } }\n\n\t// Reconcile completed PAST months"),
-			caught: (s) => (stripComments(s).match(/let deficit = 0;/g) || []).length !== 1,
+			caught: (s) => (stripComments(s).match(/let deficit = 0;/g) || []).length !== 0,
 		},
 		{
 			name: "M6 GET /api/investor stops publishing the carry (bug 2)",
 			mutate: (s) => s
-				.replace("m.lossCarriedIn = c.carriedIn;", "")
-				.replace("m.lossDeferred = c.deferred;", "")
-				.replace("m.payable = c.payable;", ""),
-			caught: (s) => !/m\.payable = c\./.test(stripComments(s)),
+				.replace("lossCarriedIn: s.carriedIn,", "")
+				.replace("lossDeferred: s.deferred,", "")
+				.replace("payable: s.payable,", ""),
+			caught: (s) => !/payable: s\.payable,/.test(stripComments(s)),
 		},
 	];
 

@@ -464,5 +464,148 @@ check('an unknown status is counted nowhere (not silently as owed)',
 check('a null payouts array does not throw',
   selectPeriodSettlement({ periodType: 'monthly', periodKey: '2026-07', payouts: null, currentMonth: null }).basis, 'none')
 
+// ===========================================================================
+// 7. FIXED MONTHLY LEASE — which rows are lease months, and what closes them.
+//
+//    An investor on a lease is paid a fixed amount, not a share of net profit,
+//    and the server marks each such month with `payoutBasis`. Two ways to get
+//    this wrong, each paired below: lease wording on a SPLIT month (tells an
+//    investor their agreement is something it is not), and split wording — a
+//    percentage, a carry-forward — on a LEASE month. The sentences themselves
+//    live in client/src/lib/leasePayoutText.js and are pinned verbatim by
+//    scripts/test-lease-payout-text.mjs; this section pins the row logic.
+// ===========================================================================
+const { leaseBasisOf, hasLeaseMonth, leaseNotes, earningsCarryTerms } = mod
+const TEXT_PATH = path.join(__dirname, '..', 'client', 'src', 'lib', 'leasePayoutText.js')
+const { LEASE_LOSS_NOTE, leaseExplain, leaseReasonLine } = await import(pathToFileURL(TEXT_PATH).href)
+
+const FULL = { type: 'lease', leaseAmount: 2000, paidAmount: 2000, coveredDays: 30, daysInMonth: 30, reason: null }
+const PRORATED = { type: 'lease', leaseAmount: 2000, paidAmount: 800, coveredDays: 12, daysInMonth: 30, reason: 'prorated' }
+const DOWNTIME = { type: 'lease', leaseAmount: 2000, paidAmount: 0, coveredDays: 31, daysInMonth: 31, reason: 'downtime' }
+const NOT_IN_SERVICE = { type: 'lease', leaseAmount: 2000, paidAmount: 0, coveredDays: 0, daysInMonth: 31, reason: 'not_in_service' }
+
+// --- 7b. Which rows are lease rows ------------------------------------------
+check('a monthlyEarnings row with payoutBasis is a lease row',
+  leaseBasisOf({ month: '2026-09', investorEarnings: 2000, payoutBasis: FULL }), FULL)
+check('a payout row whose basis rides on its breakdown is a lease row',
+  leaseBasisOf({ period: '2026-09', breakdown: { splitPct: null, monthShare: 2000, payoutBasis: FULL } }), FULL)
+check('production carries the current basis', leaseBasisOf({ investorSplitPct: 50, payoutBasis: { type: 'lease', leaseAmount: 2000, effectiveMonth: '2026-09' } }).leaseAmount, 2000)
+// PAIRED — every split shape must stay a split row, or split investors would
+// read lease wording about an agreement they never signed.
+check('a split row (no payoutBasis) is not a lease row', leaseBasisOf(PAYOUTS[0]), null)
+check('a split month row is not a lease row', leaseBasisOf({ month: '2026-07', investorEarnings: 7554 }), null)
+check('a basis of any other type is not a lease', leaseBasisOf({ payoutBasis: { type: 'split', splitPct: 50 } }), null)
+check('no row at all is not a lease', leaseBasisOf(null), null)
+check('hasLeaseMonth: a split history has none', hasLeaseMonth(PAYOUTS), false)
+check('hasLeaseMonth: one lease month is enough',
+  hasLeaseMonth([{ month: '2026-08', investorEarnings: -995 }, { month: '2026-09', investorEarnings: 2000, payoutBasis: FULL }]), true)
+check('hasLeaseMonth: not a list', hasLeaseMonth(undefined), false)
+
+// --- 7c. The prose that closes a lease month --------------------------------
+check('notes: a full profitable month is the explanation alone',
+  leaseNotes(FULL, { netProfit: 3200 }), [leaseExplain(FULL)])
+check('notes: a prorated month adds its reason',
+  leaseNotes(PRORATED, { netProfit: 900 }), [leaseExplain(PRORATED), leaseReasonLine(PRORATED)])
+check('notes: a downtime month (no activity, P&L 0) adds L5 and no loss line',
+  leaseNotes(DOWNTIME, { netProfit: 0 }), [leaseExplain(DOWNTIME), leaseReasonLine(DOWNTIME)])
+check('notes: a month with no truck in service adds L6',
+  leaseNotes(NOT_IN_SERVICE, { netProfit: 0 }), [leaseExplain(NOT_IN_SERVICE), leaseReasonLine(NOT_IN_SERVICE)])
+// L7 stands where a split month explains its carry-forward.
+check('notes: a LOSS month under a full lease says the loss is not carried',
+  leaseNotes(FULL, { netProfit: -995 }), [leaseExplain(FULL), LEASE_LOSS_NOTE])
+// PAIRED: beside a reason the month did not pay the full lease, so L7 ("still
+// pays the full lease") would contradict it; the statement PDF leaves it out too.
+check('notes: a prorated loss month gives its reason and no L7',
+  leaseNotes(PRORATED, { netProfit: -120 }), [leaseExplain(PRORATED), leaseReasonLine(PRORATED)])
+check('notes: a not-in-service month at a loss gives its reason and no L7',
+  leaseNotes(NOT_IN_SERVICE, { netProfit: -300 }), [leaseExplain(NOT_IN_SERVICE), leaseReasonLine(NOT_IN_SERVICE)])
+// PAIRED: a month whose P&L this does not have is not claimed as a loss.
+check('notes: no netProfit, no loss line', leaseNotes(FULL), [leaseExplain(FULL)])
+check('notes: a non-numeric netProfit, no loss line', leaseNotes(FULL, { netProfit: 'x' }), [leaseExplain(FULL)])
+check('notes: a split month has none', leaseNotes(null, { netProfit: -995 }), [])
+
+// --- 7d. No carry-forward wording on a lease month --------------------------
+// The server publishes lossCarriedIn / lossDeferred as 0 on a lease month; the
+// waterfall must not grow a carry tail even if a payload says otherwise.
+check('earnings carry tail: a lease month has none, whatever the payload says',
+  earningsCarryTerms({ month: '2026-09', investorEarnings: 2000, lossCarriedIn: 500, lossDeferred: 0, payable: 1500, payoutBasis: FULL }), [])
+// PAIRED: the same carry on a split month still renders — the lease guard must
+// not swallow the split tail.
+check('earnings carry tail: the same carry on a split month still renders',
+  earningsCarryTerms({ month: '2026-09', investorEarnings: 2000, lossCarriedIn: 500, lossDeferred: 0, payable: 1500 }).map((r) => r.key),
+  ['lossCarriedIn', 'payable'])
+
+// --- 7e. A lease row settles through the same ledger arithmetic -------------
+// A lease payout row is an ordinary settled row whose earned figure is the lease
+// payment: no carry, and the card's sum still closes.
+const leaseRow = {
+  id: 9, period: '2026-09', periodLabel: 'September 2026',
+  monthEarnings: 800, lossCarriedIn: 0, lossDeferred: 0,
+  amount: 800, adjustment: 0, adjustmentApplied: 0, effectiveAmount: 800,
+  status: 'owed', phase: 'finalized', dueDate: '2026-10-30', paidAt: null,
+  payoutBasis: PRORATED,
+  breakdown: { splitPct: null, monthShare: 800, netProfit: -120, payoutBasis: PRORATED },
+}
+const leaseSettled = decomposeSettled(leaseRow)
+check('lease row: earned is the lease payment, nothing carried',
+  { earned: leaseSettled.earned, carriedLoss: leaseSettled.carriedLoss, payout: leaseSettled.payout },
+  { earned: 800, carriedLoss: 0, payout: 800 })
+check('lease row: identity holds', settlementIdentity(leaseSettled).ok, true)
+check('lease row: rendered terms foot', termsFoot(leaseSettled).ok, true)
+const downtimeRow = { ...leaseRow, id: 10, period: '2026-10', monthEarnings: 0, amount: 0, effectiveAmount: 0, payoutBasis: DOWNTIME }
+check('a $0 downtime lease month reads as nothing due, not as money awaited',
+  payoutHeadline(decomposeSettled(downtimeRow)), 'Nothing due for this month')
+
+// ===========================================================================
+// 8. THE PAYOUTS BREAKDOWN'S CARRY TERMS — settledCarryTerms().
+//
+//    PayoutsSection's past-month breakdown compared the month's bare share with
+//    the settled amount and, when they differed, said "The figures above reflect
+//    current records, which have changed since it closed." A loss month settles
+//    at $0 against a negative share, and a month that absorbed an earlier loss
+//    settles below its share, so that note appeared on every such month although
+//    nothing had changed (staging, investor user 561, August 2026: share −$250,
+//    settled $0). The comparison has to include the carry; a real change after
+//    the close must still be caught. Figures are real rows from GET
+//    /api/investor/payouts (staging 561, and the local copy's investors 42 and 5).
+// ===========================================================================
+const { settledCarryTerms } = mod
+const carryOf = (share, row) => settledCarryTerms({ splitPct: 50, monthShare: share }, row)
+
+// --- 8a. The rows that used to carry the false note -------------------------
+const staging561Aug = carryOf(-250, { amount: 0, lossCarriedIn: 0, lossDeferred: 250 })
+check('loss month (staging 561, 2026-08): share − 0 + $250 carried = the settled $0, no change note',
+  staging561Aug, { share: -250, carriedIn: 0, deferred: 250, composed: 0, drifted: false })
+check('absorbed an earlier loss in part (42, 2026-04): $1,733 − $162 = the settled $1,571',
+  carryOf(1733, { amount: 1571, lossCarriedIn: 162, lossDeferred: 0 }),
+  { share: 1733, carriedIn: 162, deferred: 0, composed: 1571, drifted: false })
+check('absorbed an earlier loss in full (42, 2025-11): $780 − $780 = the settled $0',
+  carryOf(780, { amount: 0, lossCarriedIn: 780, lossDeferred: 0 }).drifted, false)
+
+// --- 8b. A real change after the close is still disclosed -------------------
+// PAIRED with 8a: the carry must not swallow genuine drift.
+check('no carry, the share moved after the close (5, 2026-06: $8,565 vs settled $8,703): note stays',
+  carryOf(8565, { amount: 8703, lossCarriedIn: 0, lossDeferred: 0 }).drifted, true)
+check('carry AND a change after the close ($1,733 − $162 = $1,571 vs settled $1,500): note stays',
+  carryOf(1733, { amount: 1500, lossCarriedIn: 162, lossDeferred: 0 }).drifted, true)
+check('a loss month whose loss changed after the close (−$300 + $250 vs settled $0): note stays',
+  carryOf(-300, { amount: 0, lossCarriedIn: 0, lossDeferred: 250 }).drifted, true)
+check('no carry, share equals the settled amount: no note, exactly as before',
+  carryOf(4500, { amount: 4500, lossCarriedIn: 0, lossDeferred: 0 }), { share: 4500, carriedIn: 0, deferred: 0, composed: 4500, drifted: false })
+check('compared in whole cents: floating-point noise is not a change',
+  carryOf(1733.001, { amount: 1571, lossCarriedIn: 162, lossDeferred: 0 }).drifted, false)
+
+// --- 8c. A lease month never carries -----------------------------------------
+check('lease month: no carry whatever the payload says, composes to the lease paid',
+  settledCarryTerms({ splitPct: null, monthShare: 2000, payoutBasis: FULL }, { amount: 2000, lossCarriedIn: 500, lossDeferred: 90 }),
+  { share: 2000, carriedIn: 0, deferred: 0, composed: 2000, drifted: false })
+// PAIRED: the same carry on a split month still counts.
+check('the same carry on a split month still counts',
+  carryOf(2000, { amount: 1500, lossCarriedIn: 500, lossDeferred: 0 }), { share: 2000, carriedIn: 500, deferred: 0, composed: 1500, drifted: false })
+
+// --- 8d. Junk -----------------------------------------------------------------
+check('a negative carry figure is not a carry', carryOf(900, { amount: 900, lossCarriedIn: -50, lossDeferred: -20 }).composed, 900)
+check('no breakdown, no row: finite zeros, no throw', settledCarryTerms(undefined, undefined), { share: 0, carriedIn: 0, deferred: 0, composed: 0, drifted: false })
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

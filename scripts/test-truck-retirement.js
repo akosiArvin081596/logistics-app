@@ -39,6 +39,11 @@
  * guard reading that "" as "retired long ago" would report zero exposure for the
  * ENTIRE fleet. §4 pins both directions.
  *
+ * §9 runs the SHIPPED truckEditLockBlockers() on the real month math and pins
+ * the dollar figure a date refusal names when the same save changes an amount:
+ * a month the date brings in is priced at the amounts after the save, a month
+ * it takes out at the amounts before it.
+ *
  * Fixtures are production-shaped: the 6 real trucks and the 15 real locked
  * periods (2025-05..2026-07), read read-only from production on 2026-08-09.
  *
@@ -440,6 +445,61 @@ section("8. REGRESSION — with retired_at unset, behaviour is byte-identical");
 	eq(exposure(PROD[1]), 7487.32, "LogisX-#2372 locked-month exposure unchanged ($7,487.32)");
 	eq(exposure(PROD[2]), 6080.00, "LogisX-#302 locked-month exposure unchanged ($6,080.00)");
 	eq(exposure(PROD[4]), 0, "Logisx-#91 still carries no locked-month exposure");
+}
+
+// ======================================== §9 THE GUARD'S FIGURE, ONE SAVE, TWO FIELDS
+section("9. A date refusal prices the months it moves at the amounts the same save leaves");
+{
+	// The shipped guard on the real month math. Stubbed: the lock table (LOCKED),
+	// and the fee-row and driver-history reads, which no field below reaches.
+	const amountFieldsSrc = (() => {
+		const s = SRC.indexOf("\nconst TRUCK_AMOUNT_FIELDS = [");
+		if (s === -1 || SRC.indexOf("\nconst TRUCK_AMOUNT_FIELDS = [", s + 1) !== -1) throw new Error("expected exactly 1 TRUCK_AMOUNT_FIELDS");
+		return SRC.slice(s + 1, SRC.indexOf("\n];\n", s) + 4);
+	})();
+	const guard = new Function(
+		"todayKeyCT", "IN_SERVICE_MAX_MONTHS_AHEAD", "periodLocksReadable", "lockedPeriodsDesc",
+		"truckFeeLockedRows", "driverPayLockedMonths",
+		// Its template strings hold unbalanced braces, so it is cut at the
+		// function's own closing line rather than by counting braces.
+		`${amountFieldsSrc}\n${REAL.map(extract).join("\n")}\n${(() => {
+			const s = SRC.indexOf("\nfunction truckEditLockBlockers(");
+			if (s === -1 || SRC.indexOf("\nfunction truckEditLockBlockers(", s + 1) !== -1) throw new Error("expected exactly 1 truckEditLockBlockers()");
+			return SRC.slice(s + 1, SRC.indexOf("\n}\n", s) + 3);
+		})()}\nreturn truckEditLockBlockers;`
+	)(todayKeyCT, IN_SERVICE_MAX_MONTHS_AHEAD, () => true, () => LOCKED.slice(),
+		() => ({ maintenance: [], compliance: [] }), () => []);
+	const detailOf = (truck, changed, field) => {
+		const b = guard(truck, changed).blockers.find((x) => x.field === field);
+		return b ? b.detail : null;
+	};
+	// A truck added in the open month at $0/mo (the acceptance creates exactly this).
+	const fresh = { id: 45, unit_number: "INV-537-A", status: "Active", owner_id: 561, created_at: "2026-08-02 07:54:21",
+		in_service_date: "", retired_at: "", insurance_monthly: 0, eld_monthly: 0, truck_payment_monthly: 0, hvut_annual: 0, irp_annual: 0 };
+
+	// The staging repro: insurance $1,000/mo and in service 2026-05-01, one save.
+	eq(detailOf(fresh, { insurance_monthly: 1000, in_service_date: "2026-05-01" }, "in_service_date"),
+		"in-service date unset → 2026-05-01 adds $3,000.00 of fixed costs to 3 finalized months",
+		"backdating while setting insurance names the months at the NEW amount ($1,000 x 3), not $0.00");
+	eq(detailOf(fresh, { in_service_date: "2026-05-01" }, "in_service_date"),
+		"in-service date unset → 2026-05-01 adds $0.00 of fixed costs to 3 finalized months",
+		"backdating alone on a $0/mo truck still names $0.00 (nothing is priced)");
+	// Moving it forward takes months OUT: they lose the amounts BEFORE the save.
+	const billed = { ...fresh, in_service_date: "2026-05-01", insurance_monthly: 1000 };
+	eq(detailOf(billed, { insurance_monthly: 2500, in_service_date: "2026-07-01" }, "in_service_date"),
+		"in-service date 2026-05-01 → 2026-07-01 removes $2,000.00 of fixed costs from 2 finalized months",
+		"months a date takes out are priced at the amounts before the save ($1,000 x 2)");
+	eq(detailOf(billed, { in_service_date: "2026-07-01" }, "in_service_date"),
+		"in-service date 2026-05-01 → 2026-07-01 removes $2,000.00 of fixed costs from 2 finalized months",
+		"a date-only save is priced exactly as before the fix");
+	// The retirement mirror: un-retiring adds months at the amounts after the save.
+	const retired = { ...billed, retired_at: "2026-05-31" };
+	eq(detailOf(retired, { insurance_monthly: 1500, retired_at: "" }, "retired_at"),
+		"retirement date 2026-05-31 → unset adds $3,000.00 of fixed costs to 2 finalized months",
+		"clearing retired_at while raising insurance names the months at the new $1,500");
+	eq(detailOf(t33(), { retired_at: "2026-04-30" }, "retired_at"),
+		"retirement date unset → 2026-04-30 removes $9,129.99 of fixed costs from 3 finalized months",
+		"retiring LogisX-#33 early still names the §7 figure");
 }
 
 // -------------------------------------------------------------------- report

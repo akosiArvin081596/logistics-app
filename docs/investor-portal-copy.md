@@ -280,7 +280,7 @@ Nothing below renders on an ordinary month. A month with no carry looks exactly 
 
 ## 12. The statement PDF (`lib/payout-statement.js`)
 
-This one **leaves the app** — it is a document the investor keeps.
+This one **leaves the app** — it is a document the investor keeps. A month paid as a fixed monthly lease prints different wording: see §17.2.
 
 | Flag | Exact text |
 |---|---|
@@ -288,12 +288,17 @@ This one **leaves the app** — it is a document the investor keeps.
 | 🔴 | `A shortfall from an earlier month absorbed by this one.` — the caption under that label |
 | 🔴 | `Loss carried forward` — the row label on a loss month |
 | 🔴 | `This month ran at a loss, so nothing is payable. The shortfall is carried against later months rather than billed back to you.` — the caption under **that** label. **Now also shown on the Earnings screen** (§2, Step 5 of the explainer dialog), word for word, so the screen and the document you hand over say the same thing |
+| 🔴 | `Recorded on the ledger when this period was settled. The composition above reflects our records as of <date> and now computes to <amount>; the settled amount is what was paid.` (`… is the amount payable.` on a Final statement) — the small grey note under **Settled amount for <month>**, only when the lines above it no longer add up to the settled amount because records changed after the month closed. Existing wording, listed here for the first time; see *Loss months* below |
 | 🔴 | `This period predates the current earnings window, so its itemized composition is no longer available to re-derive. The amount shown is the settled figure recorded on the payout ledger.` |
 | 🔴 | `Your trip expenses are deducted before the split, so the share above is already net of them.` |
 | ⚪ | `Every figure in the summary, itemized. Each section totals the rows listed below it.` |
 | ⚪ | `This statement reflects the settled payout recorded on the LogisX investor ledger for the period shown.` |
 | ⚪ | Heading is `Final Amount` (finalized, unpaid), `Amount Paid` (paid), or `Net Settled` (adjusted after payment) |
 | 🔴 | `Figures as of <date>; the portal shows current records.` — **NEW, you approved this on 2026-08-17.** Small grey italic line under the settled figure, on **both** the Final and the Paid version. `<date>` is the same "Issued" date already printed in the header. **Why it was added:** statements are now rendered once and stored, so the PDF is a snapshot of the day it was built. Two parts of the page are re-derived live at that moment — the itemized appendix, and the page-1 composition on older months — so a statement built while everything agreed stays that way and will never later grow the `The figures above reflect current records, which have changed since it closed.` caveat (§11) the *screen* would show. The alternative was to re-render on every click, which is the ~4-second delay you asked us to remove. This line is how the document stays honest instead. **The settled amount itself is frozen either way and is not affected.** |
+
+**Dates corrected (2026-09-30).** Because the app's server keeps UTC time, the statement printed the *Payment due* date and the trip-expense dates in its itemized pages **one day early** (a payment due July 31, 2026 printed as `07/30/2026`), and a load's date too when the sheet records it year first. Every statement, split or lease, now prints the date on record. No wording and no amount changed, and the *Issued*, *Finalized*, *Paid on* and correction dates were already right. The next download of any statement prints the corrected dates; a copy an investor saved earlier keeps the old ones.
+
+**Loss months: no false change note (2026-09-30).** On a month that ran at a loss, the note above printed under the settled $0.00 with the month's negative share as `<amount>` (for example `now computes to −$250.00`), although nothing had changed since the month closed. It compared the settled amount with the share alone and left out the `Loss carried forward` line printed directly above it. The page now adds up the lines it prints (your share, less `− Earlier loss applied`, plus `Loss carried forward`), the same way the payout ledger settles the month, so a loss month's lines add up to its settled $0.00 and the note no longer appears. It still appears, in the same words, when a month's records really did change after it closed; on a loss month the amount it names is now what the month would settle at ($0.00), not the negative share. No amount changed and no wording changed. Every other statement is unchanged. A loss month only has a statement when a correction lifts it above $0.
 
 ---
 
@@ -454,6 +459,8 @@ This document **leaves the app**, like the statement (§12). It is the PDF behin
 | 🔴 | `The payout for <month> includes a correction shown on your Payouts page.` | Same line, when a month in the report carries a manual correction on the Payouts page. | **Awaiting approval** |
 | ⚪ | `No payout month falls in this report period.` | Same line, when the dates picked contain no month with a payout (e.g. a future range). | **Awaiting approval** |
 
+For an investor paid a fixed monthly lease, the payout row's label and one more sentence on this line are in §17.1 (L8, L8b, L9).
+
 ### 16.2 Dates that start or end mid-month
 
 **The choice (owner, 2026-09-30): whole months.** A payout is settled per month, so a report from July 15 to August 12 now covers **the whole of July and August on every line**: revenue, fuel and other trip expenses, Driver Pay, the fixed costs and the payout. The period under the title prints the whole months (`Period: 7/1/2026 – 8/31/2026`). Before, revenue and trip expenses followed the exact dates while the payout covered whole months, so half of *Net Profit* was not the payout. The other setting, **exact dates**, puts that back and swaps in the second sentence below.
@@ -497,6 +504,152 @@ Error messages are normally not listed here (see "Not listed" at the top). These
 
 ---
 
+## 17. Lease investor payouts — wording awaiting client sign-off
+
+**Every line in this section is AWAITING YOUR APPROVAL.** Nothing here has shipped; you review it on staging before it is merged.
+
+**What it is.** An investor who signed a fixed monthly lease payment (Amendment No. 1, §15.3) is paid that lease each month instead of a share of net profit. It sits behind a switch that ships **off** (`INVESTOR_LEASE_PAYOUTS_ENABLED`). Until it is first switched on, no investor sees anything below, and §15's *"Payouts are not changed"* still holds. A lease month that closed while it was on keeps its lease figures and wording even if the switch is turned off again (17.3). **Investors on the 50/50 split see no change, switch on or off:** every figure and every word in §2–§16 stays exactly as it is.
+
+**How the text is written below.** `{amount}` is the monthly lease and `{paid}` what the month pays, both in whole dollars (`$2,000`); `{covered}` and `{days}` are day counts; `{month}` and `{period}` a month (`September 2026`).
+
+### 17.1 The shared wording, and where each line appears
+
+The same sentence is used on every surface that says the same thing, so the portal, the statement and the report cannot disagree. The portal build places the portal lines; check each placement on staging. In the code, L1–L10 have one home on the server (`lib/lease-payout-text.js`) and one on the portal (`client/src/lib/leasePayoutText.js`); the report's copies of L8–L9 and the portal's copy are checked against it on every build, so a reworded line has to change in all of them.
+
+| # | Flag | Exact text | Where / when | Status |
+|---|---|---|---|---|
+| L1 | ⚪ | `Fixed monthly lease` | Portal, on a lease month: Earnings, Payouts, Cash Flow and Assets, in place of the split percentage (`× 50%`, `50% of net profit`, `before your profit split`) wherever it shows today. | **Awaiting approval** |
+| L2 | ⚪ | `Fixed monthly lease payment of {amount}` | Portal: the line under the month's figure on Earnings (in place of `50% of net profit (…)`), and on the Payouts current-month card. | **Awaiting approval** |
+| L3 | 🔴 | `Under your agreement you are paid a fixed monthly lease of {amount}, not a share of net profit. Your truck's revenue and costs are shown for your information and do not change this payment.` | Portal: Earnings and Payouts, where a split month explains its share (the `Apply the 50% Split` step, `Your expenses are already subtracted here before the split.`). Statement PDF: under the amount paid, as the caption of the truck's revenue and costs (17.2). | **Awaiting approval** |
+| L4 | 🔴 | `The lease covered {covered} of {days} days this month, so this month pays {paid}.` | Portal (Earnings, Payouts) and statement PDF, on a month the lease covers only part of: the month a truck enters service or is retired, or the month the lease starts. See the Proration setting in 17.3. | **Awaiting approval** |
+| L5 | 🔴 | `No lease payment is owed for this month: the truck had no activity, and your agreement (section 3.1) owes nothing during downtime.` | Same places, on a month with no activity at all. See the Downtime setting in 17.3. | **Awaiting approval** |
+| L6 | 🔴 | `No lease payment is owed for this month: no truck was in service under your lease.` | Same places, on a month no truck of the investor's was in service, e.g. every truck retired, marked Inactive or not yet delivered. | **Awaiting approval** |
+| L7 | 🔴 | `A month your truck runs at a loss still pays the full lease. Losses are not carried forward against your lease.` | Portal (Earnings, Payouts) and statement PDF: a lease month that ran at a loss and paid the full lease; on the portal where a split month shows its loss carry-forward rows (§2, §9, §11), on the statement under the truck's net profit. Never next to a proration or a $0 month, where "still pays the full lease" would contradict the line above it. | **Awaiting approval** |
+| L8 | 🔴 | `Your payout is a fixed monthly lease of {amount}, not a share of net profit.` | Report PDF: the grey line under the Income Statement (§16.1), when every month in the report is paid as a lease. | **Awaiting approval** |
+| L8b | 🔴 | `From {month}, your payout is a fixed monthly lease of {amount}, not a share of net profit.` | Same line, when the lease starts partway through the report and runs to its end; `{month}` is its first lease month. | **Awaiting approval** |
+| L8c | 🔴 | `For {span}, your payout is a fixed monthly lease of {amount}, not a share of net profit.` | Same line, for lease months that split months follow in the report, so the sentence does not read as if the lease ran on; `{span}` is those months (`June 2026` or `June 2026 – July 2026`). | **Awaiting approval** |
+| L9 | ⚪ | `Investor Payout (fixed monthly lease)` | Report PDF: the payout row of the Income Statement (today `Investor Payout (50%)`), when every month in the report is paid as a lease. | **Awaiting approval** |
+| — | ⚪ | `Investor Payout` | Same row, when the report covers split months and lease months. | **Awaiting approval** |
+| — | ⚪ | `Owner Earnings (fixed monthly lease)` | Report PDF: the same figure's label beside Net Cash Flow under Cash Flow & Projections (today `Owner Earnings (50%)`), when every month in the report is paid as a lease. | **Awaiting approval** |
+| — | ⚪ | `Owner Earnings` | Same label, when the report covers split months and lease months. | **Awaiting approval** |
+| L10 | 🔴 | `Paid as a fixed monthly lease, so there is no per-load share.` | Portal My Loads (the `Your Share` figure and the load's detail window) and the Load Reports download (its CSV share column and its PDF, printed by the server), for a lease month, in place of the per-load share. | **Awaiting approval** |
+
+### 17.2 The statement PDF for a lease month (`lib/payout-statement.js`)
+
+Same document as §12. A split month's statement is unchanged, word for word; only its dates are corrected (§12, *Dates corrected*).
+
+| Flag | Exact text | Where / when | Status |
+|---|---|---|---|
+| ⚪ | `How your payment is calculated` | Heading of the table on page 1, in place of `How your share is calculated`. | **Awaiting approval** |
+| ⚪ | `Fixed monthly lease payment` | Its first row, with the monthly lease, e.g. `$2,000.00`. | **Awaiting approval** |
+| 🔴 | L4, L5 or L6 (17.1) | A small grey line under that row, when the month pays other than the full lease. | **Awaiting approval** |
+| ⚪ | `Lease payment for {period}` | The next row: what the month pays, e.g. `Lease payment for September 2026` `$1,333.00`. | **Awaiting approval** |
+| ⚪ | `Settled amount for <month>`, `+ Adjustment` / `− Adjustment` | Unchanged from §12, including the note when records changed after the month closed. | **Awaiting approval** |
+| 🔴 | L3 (17.1) | Under the amount paid, in place of `Your trip expenses are deducted before the split, so the share above is already net of them.` | **Awaiting approval** |
+| ⚪ | `Your truck's revenue and costs` | Heading of a second table under L3: Revenue, Driver Pay, Fixed Costs, Trip Expenses (Maintenance Fund and Compliance / IFTA when not zero) and Net Profit, the same lines as the split statement. Your agreement (master §3.5) asks for an itemized statement, so they stay, for information. | **Awaiting approval** |
+| 🔴 | L7 (17.1) | Under that table, on a loss month that paid the full lease. | **Awaiting approval** |
+
+**Not on a lease statement:** `× 50% investor split`, `Your share of net profit`, `− Earlier loss applied`, `Loss carried forward` and the note about expenses before the split. The supporting detail pages are unchanged.
+
+Example: a $2,000 lease whose truck entered service on September 11, 2026, with the settings as shipped. Page 1 reads:
+
+```
+HOW YOUR PAYMENT IS CALCULATED                                  AMOUNT
+Fixed monthly lease payment                                  $2,000.00
+  The lease covered 20 of 30 days this month, so this month pays $1,333.
+Lease payment for September 2026                             $1,333.00
+Settled amount for September 2026                            $1,333.00
+                                             AMOUNT PAID     $1,333.00
+
+Under your agreement you are paid a fixed monthly lease of $2,000, not a share of net profit.
+Your truck's revenue and costs are shown for your information and do not change this payment.
+
+YOUR TRUCK'S REVENUE AND COSTS                                  AMOUNT
+Revenue ... − Driver Pay ... − Fixed Costs ... − Trip Expenses ... Net Profit
+```
+
+### 17.3 Your three settings
+
+Each is one setting, and the default follows the agreements. Changing one changes only the months that are still open (not yet closed); a closed month keeps exactly what it settled at: its amount, the figures behind it and the sentence that explains it (L4, L5 or L6), on every screen, statement and report. A month closed at $0 for downtime still reads $0 with L5 after Downtime is switched to **paid**, and a month closed at the full lease still reads the full lease after it is switched back to **unpaid**. The same holds for a truck's status and dates: the app reads them as they are today, not as they were in the month, so marking a truck Inactive (or back), retiring it or changing its in-service date changes only the months still open. Switching lease payouts off altogether does not change a closed lease month either: it was settled as the lease, and it keeps reading as the lease.
+
+| Setting | Default | What the default does | Why | The other setting |
+|---|---|---|---|---|
+| Downtime | **unpaid** | A month in which the truck did nothing at all (no loads, no driver pay, no trip expenses, no maintenance or compliance cost, no driver days) pays no lease, and shows L5. This is the same test that already holds back a truck's fixed costs for an idle month. | Master §3.1: nothing is owed during Operational Downtime. | **paid**: such a month pays the lease anyway. |
+| Proration | **daily** | A month the lease covers only part of pays for the days it covers: $2,000 × 20 ÷ 30 = $1,333, rounded to the nearest dollar, and shows L4. A day counts when the lease has started and at least one of the investor's trucks is in the fleet that day: from its in-service date, through its retirement date. A truck marked Maintenance or Out of Service is still in the fleet (whether an idle month pays is the Downtime setting's call); a truck marked Inactive is not. | Lease §1.02: the lease starts when the truck is delivered. Master §4.03: the investor is paid up to the day the truck leaves the fleet. | **none**: any month with at least one covered day pays the full lease. |
+| Retirement | **stop** | The lease stops after the day a truck is retired; that day is still paid. When every truck is retired, the month pays nothing and shows L6. | Master §4.03 and lease §9.01 (termination). | **continue**: retiring a truck does not end its lease payment. |
+
+⚠️ **Downtime inside an active month is still paid.** The app can only see a month with no activity at all, so a truck that is down for two weeks of an otherwise busy month pays the full lease. Master §3.1 speaks of *periods* of downtime; tell us if you want a shorter period to count.
+
+### 17.4 Whole dollars
+
+Lease amounts are **whole dollars**, like every payout and adjustment on the payouts ledger, and a prorated month is rounded to the nearest dollar. An invitation's lease amount must now be whole dollars; the admin invitation form says `Enter the monthly lease amount in whole dollars, for example 2000.` An investor who already signed for an amount with cents (say `$2,000.50`) is not switched to lease payouts on acceptance; an admin sets their monthly lease by hand.
+
+### 17.5 The rest of the portal on a lease month
+
+Where a split month explains its share, a lease month says what the lease pays instead. Most places print L3 (17.1) after a shorter lead-in; the lead-in is today's sentence with the split part taken out. A split month reads exactly as today.
+
+| Flag | Exact text | Where / when | Status |
+|---|---|---|---|
+| ⚪ | `your take-home per day` | Trend: the line under the per-day figure, in place of `your 50% share per day`. | **Awaiting approval** |
+| 🔴 | `This is your take-home averaged into a per-day figure.` then L3 | Trend: the per-day dialog, in place of `This is your investor share (50% of net profit) averaged into a per-day figure. It uses the trailing 3 months of actual take-home and divides it across the number of days.` | **Awaiting approval** |
+| ⚪ | `Your take-home, spread across recent days` | Trend: that dialog's subtitle, in place of `Your share of net profit, spread across recent days`. | **Awaiting approval** |
+| 🔴 | `Take the last 3 months of your take-home and spread that across the days in those months.` | Trend: that dialog's calculation step. | **Awaiting approval** |
+| 🔴 | `This is the truck's gross figure — before driver pay, fixed costs, or trip expenses.` then L3 | Trend: the gross-per-day dialog, in place of the sentence about your take-home being roughly half of net. | **Awaiting approval** |
+| 🔴 | `Net Cash Flow is the bottom-line number at the fleet level — total revenue minus every dollar spent on operating the fleet.` | Cash Flow: the Net Cash Flow dialog, without today's sentence that it is calculated before the split. Its callout is L3, in place of `Your share is 50% of this number after each month is split. …` | **Awaiting approval** |
+| ⚪ | `Fleet-level revenue minus expenses` | Cash Flow: that dialog's subtitle, without `(pre-split)`. | **Awaiting approval** |
+| 🔴 | `This is the cumulative take-home you have earned across every month since the truck started operating.` then L3 | Cash Flow: the Your Earnings (to date) dialog, in place of the sentence about each month's investor share times your split. Earnings: the all-time earnings dialog leads with the same sentence, then the month-by-month list. | **Awaiting approval** |
+| ⚪ | `Cumulative take-home, summed across every month` / `= sum(monthly investor earnings)` | Earnings: the all-time earnings dialog's subtitle and the formula under the all-time figure, once any month is a lease (in place of `= net × 50%`). | **Awaiting approval** |
+| 🔴 | `For the truck to be profitable, Revenue / Mile must exceed Cost / Mile. The gap between the two is the truck's gross margin per mile.` then L3 | Assets: the per-mile dialog's callout, without today's sentence about the profit split. | **Awaiting approval** |
+| 🔴 | `Revenue minus all costs above.` | Earnings: step 3 of the month's dialog, in place of `Revenue minus all costs above = the profit before splitting.` | **Awaiting approval** |
+| 🔴 | `Net profit is what remains after all operating costs are subtracted from your truck's revenue.` then L3 | Earnings: the Net Profit dialog of a lease month. | **Awaiting approval** |
+| 🔴 | `Est. Your Revenue = that truck's own trailing 3-month take-home × 12.` then L3, then today's note from `Each truck is projected from its own loads, …` | Fleet: the note under the per-truck table, without today's words about your share of the net profit. | **Awaiting approval** |
+| 🔴 | `Est. Your Revenue is a forward-looking projection of what each truck will pay you over the next 12 months, annualised from its trailing 3-month average.` then L3 | Fleet: the Est. Your Revenue dialog. | **Awaiting approval** |
+| 🔴 | `1. Take your take-home over the last 3 months.` `2. Divide it across your trucks in proportion to the revenue from the loads each truck hauled in those months.` `3. Multiply that monthly take-home by 12.` | Fleet: that dialog's three steps on a lease, in place of the split's steps (which apply your profit split). | **Awaiting approval** |
+
+L10 is also printed by the server: the Load Reports download's CSV puts it in the share column of a lease month, and its PDF under that month's loads.
+
+---
+
+## 18. Split investors: the payout breakdown of a loss month, and lines that appear only with a new cost
+
+**Every line here is AWAITING YOUR APPROVAL.** These change what a split (50/50) investor sees, so they are listed apart from §17.
+
+### 18.1 The Payouts breakdown of a month that ran at a loss, or paid off an earlier one (shows today)
+
+The expanded row on Payouts used to jump from the month's share (for example `−$250`) straight to the settled `$0`, and then said `Your payout is the amount this month was settled at. The figures above reflect current records, which have changed since it closed.` although nothing had changed. The breakdown now prints the carry rows between them, in the words the Earnings card already uses (§2), and the note shows only when records really changed after the month closed. The statement PDF does the same (§12).
+
+| Flag | Exact text | Where / when | Status |
+|---|---|---|---|
+| ⚪ | `− Applied to an earlier month’s loss` | Payouts breakdown, a month whose earnings paid off an earlier loss, under its share. | **Awaiting approval** |
+| ⚪ | `Loss carried to later months` | Payouts breakdown, a month that ran at a loss, under its share. | **Awaiting approval** |
+| ⚪ | `Payable` | The next row: what the month settled at. With an adjustment: `Payable`, `Adjustment`, then `Payout`. | **Awaiting approval** |
+
+Today this shows on the loss months and the months that paid them off: August 2026 for one investor; August 2026, April 2026, November, October, August and July 2025 for another.
+
+### 18.2 Lines that appear only once a figure exists (none shows for any investor today)
+
+| Flag | Exact text | Where / when | Status |
+|---|---|---|---|
+| 🔴 | `Your take-home is roughly {N}% of net, not {N}% of this number.` | Trend: the gross-per-day dialog, for an investor whose split is not 50%. At 50% it still reads `roughly half of net, not half of this number`. | **Awaiting approval** |
+| ⚪ | ` + maintFund`, ` + compliance` | Earnings: the all-time Expenses formula, once a maintenance fund or compliance cost has been charged (today `= driverPay + fixedCosts + tripExp`). | **Awaiting approval** |
+| ⚪ | `Expenses fall into four categories:` / `Expenses fall into five categories:` | Earnings: the all-time Expenses dialog, with one or both of those costs (today `three`). | **Awaiting approval** |
+| ⚪ | `4. Maintenance Fund`, `5. Compliance / IFTA` (or `4. Compliance / IFTA` alone) | That dialog's extra steps. | **Awaiting approval** |
+| ⚪ | `Driver pay + fixed costs + trip expenses + maintenance fund + compliance combined.` | That dialog's last line, naming only the costs charged. | **Awaiting approval** |
+
+The all-time Net Profit now subtracts the maintenance fund and compliance cost too, as each month's net profit already does; both are $0 for every investor today, so no figure moves.
+
+### 18.3 Proposed corrections, NOT applied — awaiting owner/client decision
+
+These three would change what a split (50/50) investor sees today, so **nothing below has shipped**: each is described as it is now, with the change we propose. Say which to make.
+
+| | What it does today | Proposed | Status |
+|---|---|---|---|
+| (a) | Earnings, the all-time **Your Earnings**: the all-time net profit × your split, rounded once, with the formula line `= net × 50%`. Cash Flow's **Your Earnings (to date)** and the payouts ledger add up each month's own rounded share instead, so the two can differ by $1: one investor sees **$7,644** on Earnings and **$7,645** on Cash Flow today. | Show the ledger's sum (the Cash Flow figure) on Earnings too, and change the formula line to `= sum of each month's share`. | **Awaiting decision** |
+| (b) | Fleet, the **Est. Your Revenue** dialog's steps for a split investor: `1. Take the last 3 months of revenue from the loads that truck hauled.` `2. Subtract driver pay, fixed costs and trip expenses, then apply your profit split.` `3. Multiply that monthly take-home by 12.` The figure is not worked out that way: the server takes the fleet's take-home over those months and divides it across the trucks in proportion to the revenue each truck's loads earned. | `1. Take your take-home over the last 3 months.` `2. Divide it across your trucks in proportion to the revenue from the loads each truck hauled in those months.` `3. Multiply that monthly take-home by 12.` (the lease steps in §17.5, which already describe the real calculation). | **Awaiting decision** |
+| (c) | Earnings, a month's **How Your Earnings Are Calculated** and **Net Profit** dialogs list three cost rows (Driver Pay, Fixed Costs, Trip Expenses), and their `Revenue − … = Net Profit` line subtracts only those three, while the month's net profit also subtracts the maintenance fund and compliance cost. Both are $0 for every investor today, so every line still adds up. | Add a `Maintenance Fund` and a `Compliance / IFTA` row (and the two terms in the line) for a month that has either cost, as the all-time Expenses dialog does since §18.2. | **Awaiting decision** |
+
+---
+
 ## The ones I'd raise first
 
 0. **§2 / §12, the loss carry-forward** — the line you actually asked about. Two things to settle: (a) **one wording**, since the same deduction is currently called three different things across the PDF, the Earnings screen and the Payouts table; and (b) whether `Payable` / `Projected payout` is the right name for the figure that lands under it. Everything else in this file can wait — this one is live in August.
@@ -505,3 +658,6 @@ Error messages are normally not listed here (see "Not listed" at the top). These
 3. **§10 "…and may differ"** — the portal telling an investor two of its own totals disagree.
 4. **§15, a fixed monthly lease on paper, a split in the payouts** — an investor invited on a lease signs for a fixed monthly amount, while payouts are still calculated from the Split % column. The two setup-guide answers that describe a profit share now say it is the standard agreement (§15.6), but the Lease §2.01 lead paragraph still describes rent as a share of Net Operating Income (see "Related, left unchanged here" under §15.4).
 5. **§16.2 / §16.3, the report's two choices** — whole months for a mid-month date range, and `Not available` / `Not recorded` instead of $0 for a truck with no recorded purchase price (*Business ROI*, which does not use the price, keeps its number). Each is one setting; the other setting is the report as it was.
+6. **§17, paying the lease itself** — the answer to item 4, behind a switch that ships off. Three settings to confirm (downtime unpaid, daily proration, retirement stops the lease), and one gap: downtime inside an otherwise active month is still paid.
+7. **§18.1, the Payouts breakdown of a loss month** — the one change a 50/50 investor sees today: the carry rows between the share and the settled $0, and no more "records have changed" note when nothing changed.
+8. **§18.3, three corrections NOT applied** — the $1 gap between the two all-time earnings figures, the Fleet dialog's description of the split projection, and the two costs missing from the month's Net Profit dialogs. Each waits for your decision.

@@ -34,6 +34,7 @@ A Playwright (`playwright-core`) harness that drives the real UI in Chrome for T
   4. `boot-server.sh <worktree> <port> <db>` starts the server on the copy.
   5. `BASE_URL=http://127.0.0.1:<port> PHASE=after DB_PATH=<db> node scripts/e2e/e2e.mjs` runs the harness.
   6. `stop-server.sh <port>` stops that server.
+- **Payout parity between two builds:** `REF_A=main REF_B=<branch> FLAG=off|on node scripts/e2e/payout-parity.mjs` (`DIR_B=<worktree>` for uncommitted work) boots each build on its own private DB copy, API only, and diffs every investor's payout figures and statements; it exits 0 only when they are identical. Run it with the flag off and on for any change that touches payout math. See the README.
 - **Staging:** `BASE_URL=https://staging-app.logisx.com` plus `CREDS_FILE=<staging logins>`, and no `DB_PATH`. The planted steps SKIP. ⚠️ A full run creates, edits and deletes `QA-TEST-*` trucks there; `ONLY=signout` only signs in and out.
 - **Safety rails:**
   - It refuses `app.logisx.com`.

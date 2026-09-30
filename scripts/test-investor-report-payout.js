@@ -66,6 +66,7 @@ const fs = require("fs");
 const path = require("path");
 const Database = require("better-sqlite3");
 const investorReportOptions = require("../lib/investor-report-options");
+const investorPayoutBasis = require("../lib/investor-payout-basis");
 
 const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 
@@ -118,7 +119,7 @@ const HANDLER = SRC.slice(REPORT_START, REPORT_END > REPORT_START ? REPORT_END :
 
 const NAMES = [
 	"resolveInvestorSplitPct", "lastFridayOfFollowingMonth", "periodLabel", "computeLossCarryForward",
-	"reconcileInvestorPayouts", "reportRangeMonthKeys", "investorReportPayoutEntries",
+	"payoutRowBreakdown", "frozenPayoutBreakdown", "reconcileInvestorPayouts", "reportRangeMonthKeys", "investorReportPayoutEntries",
 	"summarizeReportPayout", "reportPayoutNote",
 	"truckMonthlyFixed", "truckChargeFromMonth", "truckChargeUntilMonth", "truckChargedInMonth",
 ];
@@ -128,13 +129,13 @@ const SOURCES = Object.fromEntries(NAMES.map((n) => [n, extractFn(n)]));
 // is the INPUT (a fixture monthly array); everything that turns it into a payout —
 // the ledger reconcile, the carry walk, the report's reader — is the shipped code.
 function load(deps) {
-	return new Function("deps", `
+	return new Function("deps", "investorPayoutBasis", `
 		const { db, computeInvestorMonthlyEarnings, isLocked, periodWriteLocked, currentMonthKeyCT,
 			recordPayoutChange, getInvestorDriverSet, findCol, settlementGraceDays, periodPhase, graceEndsAt,
 			investorReportOptions } = deps;
 		${NAMES.map((n) => SOURCES[n]).join("\n")}
 		return { ${NAMES.join(", ")} };
-	`)(deps);
+	`)(deps, investorPayoutBasis);
 }
 
 // ------------------------------------------------------------------ fixtures
@@ -405,6 +406,26 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 		const fleet = N(S({ from: "2026-05", until: "2026-05" }), { fleet: true });
 		ok(fleet.includes("fleet-wide monthly investor shares for May 2026") && !fleet.includes("Payouts page"), "the fleet note does not point at an investor's Payouts page");
 
+		// A lease sentence per stretch of lease months. A stretch a split month
+		// follows names its months, so it does not read as running on.
+		const lease = (amount) => ({ type: "lease", leaseAmount: amount });
+		const basisNote = (bases) => {
+			const es = bases.map((b, i) => ({ month: `2026-0${i + 5}`, payout: 0, driverPay: 0, fixedCosts: 0, ...(b ? { payoutBasis: b } : {}) }));
+			return N(W.fns.summarizeReportPayout(es, { from: "", until: "" })).replace(/^Investor Payout is the total[^.]*\. ?/, "");
+		};
+		eq(basisNote([null, null]), "", "no lease month: no lease sentence (a split investor's note is unchanged)");
+		eq(basisNote([lease(2000), lease(2000)]), "Your payout is a fixed monthly lease of $2,000, not a share of net profit.", "every month one lease: NOTE.LEASE");
+		eq(basisNote([null, lease(2000), lease(2000)]), "From June 2026, your payout is a fixed monthly lease of $2,000, not a share of net profit.",
+			"split, then a lease to the end of the range: NOTE.LEASE_FROM");
+		eq(basisNote([lease(2000), lease(2000), null]), "For May 2026 – June 2026, your payout is a fixed monthly lease of $2,000, not a share of net profit.",
+			"a lease, then back to split: NOTE.LEASE_DURING names the lease months");
+		eq(basisNote([null, lease(2000), null, lease(2500)]),
+			"For June 2026, your payout is a fixed monthly lease of $2,000, not a share of net profit. From August 2026, your payout is a fixed monthly lease of $2,500, not a share of net profit.",
+			"one lease month between splits names that month, and a later lease runs from its start");
+		eq(basisNote([lease(2000), lease(2500)]),
+			"From May 2026, your payout is a fixed monthly lease of $2,000, not a share of net profit. From June 2026, your payout is a fixed monthly lease of $2,500, not a share of net profit.",
+			"a lease followed by a new amount keeps NOTE.LEASE_FROM for each");
+
 		// The sentences from before 2026-09-30 moved into NOTE word for word: the
 		// text below is what reportPayoutNote() printed at d8a4a64, typed out.
 		const T = investorReportOptions.NOTE;
@@ -465,8 +486,10 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 			return [
 				/const ownerEarnings = reportPayout\.payout;/.test(c),
 				!/netCashFlow \*|\* \(splitPctLabel|splitPctLabel \/ 100/.test(c),
-				/\{ label: `Investor Payout \(\$\{splitPctLabel\}%\)`, value: fmt\(ownerEarnings\)/.test(c),
-				/`Owner Earnings \(\$\{splitPctLabel\}%\)`, fmt\(ownerEarnings\)/.test(c),
+				/const payoutLabel = reportPayoutLabel\(reportPayout, investorReportOptions\.PAYOUT_LABEL, splitPctLabel\);/.test(c),
+				/\{ label: payoutLabel, value: fmt\(ownerEarnings\)/.test(c),
+				/const ownerEarningsLabel = reportPayoutLabel\(reportPayout, investorReportOptions\.OWNER_EARNINGS_LABEL, splitPctLabel\);/.test(c),
+				/kpiRow\("Net Cash Flow", fmt\(netCashFlow\), ownerEarningsLabel, fmt\(ownerEarnings\)\)/.test(c),
 				/\{ label: " {2}Driver Pay", value: `\(\$\{fmt\(driverPayExpenses\)\}\)`/.test(c),
 				/totalExpenses = driverPayExpenses \+/.test(c),
 				/for \(const monthKey of reportPayout\.chargedFixedMonths\)/.test(c),
@@ -543,6 +566,8 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 				truckMonthlyFixed: () => ({ total: 0 }),
 				reconcileInvestorPayouts: async () => { throw new Error("the fleet report reconciles no ledger"); },
 				investorReportOptions,
+				investorPayoutBasis,
+				payoutBasisContext: (ownerId) => { if (ownerId) throw new Error("the fleet report settles no owner"); return null; },
 			};
 			const names = Object.keys(deps);
 			const srcs = ME_NAMES.map((n) => (n === "investorReportPayoutEntries" ? readerSrc : ME[n]));

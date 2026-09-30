@@ -78,6 +78,7 @@ const geolib = require("geolib");
 const fuelModel = require("../lib/fuel-model");
 const { normalizeLoadId } = require("../lib/ratecon-load");
 const investorReportOptions = require("../lib/investor-report-options");
+const investorPayoutBasis = require("../lib/investor-payout-basis");
 
 const SHIPPED = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 
@@ -428,6 +429,10 @@ function buildWorld(variant, { src = SHIPPED, twins = false } = {}) {
 		fuelTankCalibrationWire: () => null,
 		// GET /api/investor answers reportRangeMode from it (not a figure).
 		investorReportOptions,
+		// The payout math. No basis context: every month settles on the split, as
+		// every investor did before the payout basis existed.
+		investorPayoutBasis,
+		payoutBasisContext: () => null,
 		console: { log: () => {}, warn: () => {}, error: (...a) => errors.push(a.map(String).join(" ")) },
 	};
 	const fns = new Function(...Object.keys(deps), liftedFor(src))(...Object.values(deps));

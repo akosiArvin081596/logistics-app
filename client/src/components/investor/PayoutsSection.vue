@@ -52,6 +52,13 @@
              which is the same "I wasn't told" failure the carry-forward feature
              was built to fix. -->
         <p v-if="carryNote" class="current-carry">{{ carryNote }}</p>
+        <!-- A lease month carries no loss either way, so the same slot names
+             what the month pays instead — and, when it pays less than the full
+             lease, why. -->
+        <div v-else-if="currentLease" class="current-lease">
+          <p class="current-lease-line">{{ leaseSubLine(currentLease) }}</p>
+          <p v-if="leaseReasonLine(currentLease)" class="current-lease-line">{{ leaseReasonLine(currentLease) }}</p>
+        </div>
 
         <!-- Same earnings waterfall as the past-months rows, so the in-progress
              figure is explained too: expenses come out before the split. -->
@@ -69,7 +76,8 @@
             {{ currentOpen ? 'Hide breakdown' : 'Show breakdown' }}
           </button>
           <div v-if="currentOpen" id="breakdown-current" class="breakdown-panel" role="group" aria-label="Earnings breakdown">
-            <div class="bd-caption">How this month&rsquo;s share is calculated</div>
+            <div v-if="currentLease" class="bd-caption">{{ LEASE_LABEL }}</div>
+            <div v-else class="bd-caption">How this month&rsquo;s share is calculated</div>
             <dl class="bd-list">
               <div
                 v-for="(row, i) in waterfall(currentMonth.breakdown)"
@@ -93,7 +101,10 @@
                 <dd class="bd-value mono-sm">{{ row.display }}</dd>
               </div>
             </dl>
-            <p class="bd-help">Your expenses are already subtracted here before the split.</p>
+            <template v-if="currentLease">
+              <p v-for="(line, i) in leaseNotes(currentLease, { netProfit: currentMonth.breakdown.netProfit })" :key="i" class="bd-help">{{ line }}</p>
+            </template>
+            <p v-else class="bd-help">Your expenses are already subtracted here before the split.</p>
           </div>
         </div>
       </div>
@@ -199,8 +210,17 @@
             <td class="mono-sm num">
               <div>{{ fmt(p.amount) }}</div>
               <!-- Explain a month that pays out less than it earned, so a reduced
-                   figure never looks like money went missing. -->
-              <div v-if="p.lossDeferred" class="inv-carry">
+                   figure never looks like money went missing.
+
+                   A lease row comes FIRST in the chain and never reaches the
+                   carry wording: a lease neither absorbs nor defers a loss, so
+                   it names its basis and, when it pays less than the full
+                   lease, the reason. -->
+              <template v-if="leaseBasisOf(p)">
+                <div class="inv-carry inv-lease">{{ leaseSubLine(leaseBasisOf(p)) }}</div>
+                <div v-if="leaseReasonLine(leaseBasisOf(p))" class="inv-carry">{{ leaseReasonLine(leaseBasisOf(p)) }}</div>
+              </template>
+              <div v-else-if="p.lossDeferred" class="inv-carry">
                 {{ fmt(p.lossDeferred) }} loss carried to later months
               </div>
               <div v-else-if="p.lossCarriedIn" class="inv-carry">
@@ -312,10 +332,11 @@
           <tr v-if="p.breakdown && expandedId === p.id" class="breakdown-tr">
             <td :colspan="colCount" class="breakdown-cell">
               <div :id="`breakdown-${p.id}`" class="breakdown-panel" role="group" aria-label="Earnings breakdown">
-                <div class="bd-caption">How your share is calculated</div>
+                <div v-if="leaseBasisOf(p)" class="bd-caption">{{ LEASE_LABEL }}</div>
+                <div v-else class="bd-caption">How your share is calculated</div>
                 <dl class="bd-list">
                   <div
-                    v-for="(row, i) in waterfall(p.breakdown, { amount: p.amount, adjustment: applied(p), payout: effective(p) })"
+                    v-for="(row, i) in waterfall(p.breakdown, { amount: p.amount, adjustment: applied(p), payout: effective(p), lossCarriedIn: p.lossCarriedIn, lossDeferred: p.lossDeferred })"
                     :key="i"
                     class="bd-row"
                     :class="[`bd-${row.kind}`, { 'bd-highlight': row.highlight, 'bd-clickable': !!row.detailKey }]"
@@ -337,7 +358,10 @@
                     <dd v-if="row.kind !== 'drift'" class="bd-value mono-sm">{{ row.display }}</dd>
                   </div>
                 </dl>
-                <p class="bd-help">Your expenses are already subtracted here before the split.</p>
+                <template v-if="leaseBasisOf(p)">
+                  <p v-for="(line, i) in leaseNotes(leaseBasisOf(p), { netProfit: p.breakdown.netProfit })" :key="i" class="bd-help">{{ line }}</p>
+                </template>
+                <p v-else class="bd-help">Your expenses are already subtracted here before the split.</p>
 
                 <!-- Movement log. The waterfall above says what the figure IS; this
                      says what it DID. Loaded lazily with the panel, so a collapsed
@@ -543,6 +567,8 @@ import MetricInfoDialog from './MetricInfoDialog.vue'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../ui/dialog'
 import PdfZoomViewer from '../shared/PdfZoomViewer.vue'
 import { fmtYmd, fmtTimestamp } from '../../utils/datetime'
+import { CARRY_LABELS, leaseBasisOf, leaseNotes, settledCarryTerms } from '../../lib/payoutPeriod'
+import { LEASE_LABEL, leaseSubLine, leaseReasonLine } from '../../lib/leasePayoutText'
 import MaintenanceDisclaimer from '../shared/MaintenanceDisclaimer.vue'
 
 const props = defineProps({
@@ -607,6 +633,11 @@ const projectedPayable = computed(() => {
 })
 const hasProjection = computed(() => projectedPayable.value !== null)
 
+// The open month's lease basis, or null when it is a split month. The figure
+// above is the same `payableIfClosedNow` either way; only the words around it
+// change.
+const currentLease = computed(() => leaseBasisOf(currentMonth.value))
+
 // The sentence that keeps the clamp honest. Same precedence as the settled
 // rows in the table below (deferred wins over carriedIn) so a month reads the
 // same way before and after it settles — only the mood changes, because
@@ -620,6 +651,8 @@ const hasProjection = computed(() => projectedPayable.value !== null)
 // Gated on hasProjection: with no projection there is no $0 on screen to explain.
 const carryNote = computed(() => {
   if (!hasProjection.value) return ''
+  // No loss moves under a lease; the lease slot below explains the figure.
+  if (currentLease.value) return ''
   const cm = currentMonth.value || {}
   const deferred = Number(cm.lossDeferred) || 0
   const carriedIn = Number(cm.lossCarriedIn) || 0
@@ -768,8 +801,9 @@ function ldSum(arr, key) {
 // are actually charged (> 0). Returns [] when breakdown is null/absent, so callers
 // that still render the panel simply get nothing — but they also v-if on breakdown.
 // This is the ONE place the earnings math is described; both surfaces read it.
-// `settled` is { amount, adjustment, payout } for a settled month — the earnings
-// share it was frozen at, any manual correction, and what actually gets paid — or
+// `settled` is { amount, adjustment, payout, lossCarriedIn, lossDeferred } for a
+// settled month — the earnings share it was frozen at, any manual correction,
+// what actually gets paid, and the loss carry-forward that moved the share — or
 // null for the in-progress month, which has none of those yet. The waterfall is a LIVE
 // recompute from today's records, so once a month is settled the two can drift
 // apart — a receipt corrected or a duplicate removed after settlement moves the
@@ -797,41 +831,67 @@ function waterfall(b, settled = null) {
   if (Number(b.maintFundCost || 0) > 0) add('− Maintenance Fund', b.maintFundCost, 'deduct')
   if (Number(b.complianceCost || 0) > 0) add('− Compliance / IFTA', b.complianceCost, 'deduct')
   add('Net Profit', b.netProfit, 'subtotal')
-  if (b.splitPct != null) rows.push({ label: `× ${b.splitPct}%`, kind: 'split', display: '' })
+  // A lease month is not a share of the Net Profit above it: no "× N%" row, and
+  // the figure is named as the lease payment rather than "Your Share". The
+  // server sends `splitPct: null` on those rows; the basis is checked too, so a
+  // lease month can never print a percentage whatever else the payload carries.
+  const lease = !!leaseBasisOf(b)
+  if (b.splitPct != null && !lease) rows.push({ label: `× ${b.splitPct}%`, kind: 'split', display: '' })
+  const shareLabel = lease ? 'Fixed monthly lease payment' : 'Your Share'
 
-  // Settled months show the SETTLED figure as Your Share — never a second,
-  // competing number. Showing the live recompute alongside it (client, 2026-08-01)
-  // just raised "why are there two amounts?", which is the confusion this panel
-  // exists to prevent. Compared in whole cents so floating-point noise never
-  // triggers the settled branch spuriously.
+  // Settled months close on the SETTLED figure — never a second, competing
+  // number. Showing the live recompute alongside it (client, 2026-08-01) just
+  // raised "why are there two amounts?", which is the confusion this panel exists
+  // to prevent. A month the loss carry-forward moved is the one exception: its
+  // share is printed above the carry terms that turn it into the settled figure.
   const live = Number(b.monthShare) || 0
   // In-progress month: nothing settled, nothing adjusted — the live share IS the
   // answer and the panel ends there, exactly as it always has.
   if (!settled) {
-    add('Your Share', live, 'share')
+    add(shareLabel, live, 'share')
     return rows
   }
 
   const base = Number(settled.amount) || 0
   const adj = Number(settled.adjustment) || 0
   const payout = Number(settled.payout) || 0
+  // The loss carry-forward that moved this month's share, and whether the settled
+  // amount still matches share − earlier loss applied + loss carried forward.
+  // A month with no carry (every lease month among them) has neither term and
+  // renders exactly as it always has.
+  const carry = settledCarryTerms(b, settled)
 
-  // A manual adjustment is applied AFTER the earnings split, so it was invisible
-  // here: the panel jumped from "× %" straight to the final figure, and a −$661
-  // correction had nothing on screen explaining it (client, 2026-08-01). Show it
-  // as its own line so Share + Adjustment = Payout is legible end to end.
-  if (adj !== 0) {
-    add('Your Share', base, 'subtotal')
+  if (carry.carriedIn > 0 || carry.deferred > 0) {
+    // A month that absorbed an earlier loss, or carried its own forward, did not
+    // settle at its share, so the share is printed as it stands and each carry
+    // term under it, in the Earnings card's words: the rows add up to the settled
+    // figure instead of jumping from a −$250 share straight to $0.
+    add(shareLabel, live, 'subtotal')
+    if (carry.carriedIn > 0) add(`− ${CARRY_LABELS.appliedToEarlierLoss}`, carry.carriedIn, 'deduct')
+    if (carry.deferred > 0) rows.push({ label: CARRY_LABELS.carriedToLaterMonths, kind: 'carry', display: `+${fmtCents(carry.deferred)}` })
+    if (adj !== 0) {
+      add(CARRY_LABELS.payable, base, 'subtotal')
+      add('Adjustment', adj, adj < 0 ? 'deduct' : 'add')
+      add('Payout', payout, 'share')
+    } else {
+      add(CARRY_LABELS.payable, payout, 'share')
+    }
+  } else if (adj !== 0) {
+    // A manual adjustment is applied AFTER the earnings split, so it was invisible
+    // here: the panel jumped from "× %" straight to the final figure, and a −$661
+    // correction had nothing on screen explaining it (client, 2026-08-01). Show it
+    // as its own line so Share + Adjustment = Payout is legible end to end.
+    add(shareLabel, base, 'subtotal')
     add('Adjustment', adj, adj < 0 ? 'deduct' : 'add')
     add('Payout', payout, 'share')
   } else {
-    add('Your Share', payout, 'share')
+    add(shareLabel, payout, 'share')
   }
 
   // The rows above are a live recompute, so on a settled month they may no longer
   // foot to the settled share. One line of prose, deliberately carrying no second
   // figure — an extra number here is what confused the client last time.
-  if (Math.round(live * 100) !== Math.round(base * 100)) {
+  if (carry.drifted) {
     rows.push({
       kind: 'drift',
       label: 'Your payout is the amount this month was settled at. The figures above reflect current records, which have changed since it closed.',
@@ -947,9 +1007,12 @@ function settleable(p) {
 // Rows that ARE $0 because a loss was carried stay visible — otherwise a later
 // month paying less than it earned has no visible explanation. Nothing is
 // deleted; the admin console still lists every row.
+//
+// A lease row always stays: a lease month that pays $0 (downtime, no truck in
+// service) is exactly the month whose reason the investor needs to read.
 const visiblePayouts = computed(() =>
   payouts.value.filter(
-    (p) => effective(p) !== 0 || p.lossDeferred || p.lossCarriedIn || p.adjustment
+    (p) => effective(p) !== 0 || p.lossDeferred || p.lossCarriedIn || p.adjustment || leaseBasisOf(p)
   )
 )
 
@@ -1282,6 +1345,21 @@ onMounted(loadPayouts)
   line-height: 1.45;
   color: #92400e;
 }
+/* The lease basis of the open month. Same left-rule annotation as the carry
+   note it replaces, but slate rather than amber: a lease payment is not a
+   figure that is still moving. */
+.current-lease {
+  margin: 0.6rem 0 0;
+  padding-left: 0.6rem;
+  border-left: 2px solid #cbd5e1;
+}
+.current-lease-line {
+  margin: 0;
+  font-size: 0.74rem;
+  line-height: 1.45;
+  color: #475569;
+}
+.current-lease-line + .current-lease-line { margin-top: 0.2rem; }
 
 /* Totals */
 .totals-grid {
@@ -1371,6 +1449,10 @@ onMounted(loadPayouts)
 .data-table th, .data-table td { white-space: nowrap; }
 .data-table .inv-carry, .data-table .inv-adj-note { white-space: normal; }
 .inv-carry { font-size: 0.7rem; color: #64748b; margin-top: 0.1rem; font-family: inherit; font-style: italic; }
+/* The lease basis line stays on one line, so the Amount column is at least its
+   width instead of squeezing it to a word per line; the reason under it (a
+   plain .inv-carry) then wraps within that width. */
+.data-table .inv-lease { white-space: nowrap; }
 /* Carries ONE line since the lifetime manual-adjustment note was removed (see
    the template). The column layout + gap are kept rather than flattened to a
    block: gap contributes nothing at one child, so this renders identically

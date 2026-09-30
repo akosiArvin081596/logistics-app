@@ -151,7 +151,7 @@ function callSites(name) {
 // the shape that passes. AUDITED_UPSTREAM is spelled out at the call site so a
 // deliberate skip is legible as one.
 const AUDITED = (args) => /\baction:\s*["'`a-zA-Z]/.test(args) || /AUDITED_UPSTREAM/.test(args)
-	|| /\b(dirAudit|dirDelAudit|createAudit|truckEditAudit|truckDelAudit|linkAudit|unlinkAudit|maintAudit|feeAudit|feePayAudit|loadDelAudit|invoiceAdjustAudit|invoicePaidAudit|invoiceRevertAudit)\b/.test(args);
+	|| /\b(dirAudit|dirDelAudit|createAudit|truckEditAudit|truckDelAudit|linkAudit|unlinkAudit|maintAudit|feeAudit|feePayAudit|loadDelAudit|invoiceAdjustAudit|invoicePaidAudit|invoiceRevertAudit|basisAudit)\b/.test(args);
 
 let totalSites = 0;
 for (const h of HELPERS) {
@@ -587,6 +587,9 @@ const MUST_NOT_BE_PURGEABLE = [
 	// un-assert a payment in a settled month is at least as much settlement evidence
 	// as an attempt to assert one.
 	"adjust_invoice_blocked", "pay_invoice_blocked", "revert_invoice_blocked",
+	// A payout basis change refused over a settled or closed month: the same
+	// settlement evidence, so kept forever too.
+	"update_payout_basis_blocked",
 ];
 check("every new period-refusal action exists in server.js",
 	MUST_NOT_BE_PURGEABLE.filter((a) => !SRC.includes(`"${a}"`)), []);

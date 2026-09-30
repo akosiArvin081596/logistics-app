@@ -314,9 +314,13 @@
           </div>
           <div class="current-meta">
             <span class="status-pill st-progress">in progress</span>
+            <!-- A lease month pays the lease (or less, for a reason the server
+                 names), never a share of net profit: say which. -->
+            <span v-if="inv.currentMonth.payoutBasis" class="basis-tag" data-test="payout-basis-tag">{{ LEASE_LABEL }}</span>
             <span class="current-note">
               Accruing this month &mdash; not yet payable until the period closes<template v-if="inv.currentMonth?.graceEndsAt">, with receipts accepted through {{ fmtDate(inv.currentMonth.graceEndsAt) }}</template>.
             </span>
+            <span v-if="leaseReason(inv.currentMonth)" class="current-note basis-reason">{{ leaseReason(inv.currentMonth) }}</span>
           </div>
         </div>
 
@@ -364,13 +368,27 @@
                 <span v-else class="dim">&mdash;</span>
               </td>
               <td class="num"><span class="amt-main">{{ fmt(effective(p)) }}</span></td>
-              <td class="dim">{{ fmtDate(p.dueDate) }}</td>
+              <td class="dim">{{ showsNothingDue(p) ? '—' : fmtDate(p.dueDate) }}</td>
               <td>
-                <span :class="['status-pill', statusClass(p.status)]">{{ p.status }}</span>
+                <!-- A month that pays $0 (idle, a loss carried forward, a lease
+                     month the lease does not pay) reads "nothing due", as it does
+                     on the investor's own Payouts page, not "owed" with a due
+                     date. The server refuses to mark such a row processing or
+                     paid; see lib/payoutDue.js. -->
+                <span
+                  v-if="showsNothingDue(p)"
+                  class="status-pill st-none"
+                  title="This month pays $0, so there is nothing to mark processing or paid. The row stays as the month's record."
+                  data-test="payout-nothing-due"
+                >nothing due</span>
+                <span v-else :class="['status-pill', statusClass(p.status)]">{{ p.status }}</span>
                 <!-- A row walked back out of a settled state reads identically to
                      one that was never advanced. Mark it so the correction is
                      visible without digging through the audit trail. -->
                 <span v-if="p.reopenedAt" class="reopened-flag" :title="reopenTitle(p)">reopened</span>
+                <!-- A lease month pays the lease (or less, for the reason below),
+                     never a share of net profit: say which. -->
+                <span v-if="p.payoutBasis" class="basis-tag basis-tag-row" data-test="payout-basis-tag">{{ LEASE_LABEL }}</span>
                 <!-- Month is over but the books are still open for straggler
                      receipts. The figure is still moving, so nothing can be
                      settled yet — say why, and say until when.
@@ -380,6 +398,8 @@
                 <div v-if="p.phase === 'pending'" class="phase-note">
                   in final settlement &middot; open through {{ fmtDate(p.graceEndsAt) }}
                 </div>
+                <div v-if="leaseReason(p)" class="basis-reason" data-test="payout-basis-reason">{{ leaseReason(p) }}</div>
+                <div v-else-if="nothingDueReason(p)" class="due-reason" data-test="payout-nothing-due-reason">{{ nothingDueReason(p) }}</div>
               </td>
               <td class="action-cell">
                 <!-- Settling is blocked until the period closes. This is the whole
@@ -399,16 +419,21 @@
                   <span class="await-note">Nothing to do &mdash; settles when the month closes</span>
                 </template>
                 <template v-else>
+                  <!-- Mark Processing / Mark Paid only where there is money to
+                       pay: the server answers a $0 row with 409 ("Nothing to
+                       settle"), so on one they would be dead ends that invite
+                       booking $0 as paid. Reopen and Adjust below stay. -->
                   <button
-                    v-if="p.status === 'owed'"
+                    v-if="p.status === 'owed' && hasAmountDue(p)"
                     type="button"
                     class="action-btn act-processing"
                     :disabled="busyId === p.id"
                     title="Move this payout from owed to processing"
                     @click="advance(p, 'processing')"
                   >Mark Processing</button>
+                  <span v-else-if="!hasAmountDue(p)" class="await-note" data-test="payout-nothing-to-settle">Nothing to settle</span>
                   <button
-                    v-if="p.status !== 'paid'"
+                    v-if="p.status !== 'paid' && hasAmountDue(p)"
                     type="button"
                     class="action-btn act-paid"
                     :disabled="busyId === p.id"
@@ -628,7 +653,8 @@
         <div class="adj-modal-title">Adjust payout</div>
         <div class="adj-modal-sub">
           {{ adjustTarget.investorName }} · {{ adjustTarget.payout.periodLabel }}
-          <span :class="['status-pill', statusClass(adjustTarget.payout.status)]">{{ adjustTarget.payout.status }}</span>
+          <span v-if="showsNothingDue(adjustTarget.payout)" class="status-pill st-none">nothing due</span>
+          <span v-else :class="['status-pill', statusClass(adjustTarget.payout.status)]">{{ adjustTarget.payout.status }}</span>
         </div>
 
         <div class="adj-facts">
@@ -639,8 +665,8 @@
           </div>
         </div>
         <p v-if="hasGap" class="adj-hint">
-          This period now recomputes {{ gapDelta < 0 ? 'lower' : 'higher' }} than what was settled — likely the late
-          receipts. Use the suggested adjustment to bring the record in line.
+          This period now recomputes {{ gapDelta < 0 ? 'lower' : 'higher' }} than what was settled<template v-if="!adjustTarget.payout.payoutBasis"> — likely the late
+          receipts</template>. Use the suggested adjustment to bring the record in line.
           <button type="button" class="adj-suggest" @click="applySuggestion">Use {{ gapDelta > 0 ? '+' : '−' }}{{ fmt(Math.abs(gapDelta)) }}</button>
         </p>
 
@@ -674,6 +700,8 @@ import { useApi } from '../composables/useApi'
 import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
 import { fmtYmd, fmtTimestamp, parseYmdLocal } from '../utils/datetime'
+import { LEASE_LABEL, leaseReasonText, describeLeaseChange } from '../components/investors/payoutBasis'
+import { hasAmountDue, showsNothingDue, nothingDueReason } from '../lib/payoutDue'
 
 const api = useApi()
 // Pulled in for parity with the other admin pages; auth gating is enforced by
@@ -722,6 +750,19 @@ function describeMove(now, prev) {
     .join(' · ')
 }
 
+// A lease month (a row, or a snapshot, carrying payoutBasis) pays the lease, so
+// revenue and cost movements never explain it: the server's reason does, when
+// it pays less. Rows without payoutBasis are split months and read as before.
+function leaseReason(row) {
+  return leaseReasonText(row?.payoutBasis)
+}
+// A history entry where either side is a lease month says which change it was
+// (the basis switched, the lease amount, or what the month pays); two split
+// snapshots read as their revenue and cost movements, as before.
+function describeEntry(now, prev) {
+  return describeLeaseChange(now, prev) ?? describeMove(now, prev)
+}
+
 async function toggleHistory(ownerId, p) {
   if (expandedId.value === p.id) { expandedId.value = null; return }
   expandedId.value = p.id
@@ -731,7 +772,7 @@ async function toggleHistory(ownerId, p) {
     // as_user_id is REQUIRED here: the endpoint refuses an unscoped Super Admin
     // session rather than guessing whose payouts are being read.
     const r = await api.get(`/api/investor/payouts/${encodeURIComponent(p.period)}/history?as_user_id=${encodeURIComponent(ownerId)}`)
-    histEntries.value = (r?.entries || []).map((e, i, all) => ({ ...e, why: describeMove(e.breakdown, all[i + 1]?.breakdown) }))
+    histEntries.value = (r?.entries || []).map((e, i, all) => ({ ...e, why: describeEntry(e.breakdown, all[i + 1]?.breakdown) }))
   } catch {
     histEntries.value = []
   } finally {
@@ -1366,6 +1407,7 @@ onMounted(refreshAll)
 .status-pill.st-processing { background: #dbeafe; color: #1e40af; }
 .status-pill.st-paid { background: #dcfce7; color: #166534; }
 .status-pill.st-progress { background: #dbeafe; color: #1e40af; }
+.status-pill.st-none { background: #f1f5f9; color: #64748b; }
 
 /* Row actions */
 .action-cell {
@@ -1407,6 +1449,31 @@ onMounted(refreshAll)
   color: var(--amber);
   white-space: nowrap;
 }
+/* A lease month: the basis beside the status, and why it pays less. A month
+   with nothing due says why in the same place and the same type. */
+.basis-tag {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  font-size: 0.66rem;
+  font-weight: 600;
+  border-radius: 5px;
+  background: #f5f3ff;
+  color: #6d28d9;
+  white-space: nowrap;
+}
+.basis-tag-row { margin-left: 0.4rem; }
+.basis-reason,
+.due-reason {
+  margin-top: 0.25rem;
+  font-size: 0.7rem;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+/* In a row it wraps to the width the Status column already has, rather than
+   widening the column and squeezing the dates beside it. */
+td .basis-reason,
+td .due-reason { width: 0; min-width: 100%; }
+.current-meta .basis-reason { flex-basis: 100%; margin-top: 0; }
 .await-note {
   font-size: 0.68rem;
   color: var(--text-dim, #64748b);

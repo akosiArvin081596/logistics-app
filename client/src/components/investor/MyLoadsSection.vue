@@ -64,7 +64,9 @@
             <span class="meta-truck" v-if="l.truck">Truck {{ l.truck }}</span>
             <span class="meta-driver" v-if="l.driver">{{ l.driver }}</span>
             <span :class="['status-pill', 'pill-amber']">{{ l.status }}</span>
+            <span v-if="currentLease" class="share-none">{{ LEASE_NO_LOAD_SHARE }}</span>
             <span
+              v-else
               class="share mono clickable-share"
               role="button" tabindex="0"
               :title="`Your share at ${splitPct}% split — click for the math`"
@@ -109,7 +111,9 @@
             <span class="meta-truck" v-if="l.truck">Truck {{ l.truck }}</span>
             <span class="meta-driver" v-if="l.driver">{{ l.driver }}</span>
             <span :class="['status-pill', 'pill-green']">{{ l.status }}</span>
+            <span v-if="currentLease" class="share-none">{{ LEASE_NO_LOAD_SHARE }}</span>
             <span
+              v-else
               class="share mono clickable-share"
               role="button" tabindex="0"
               :title="`Your share at ${splitPct}% split — click for the math`"
@@ -132,7 +136,10 @@
       </ul>
     </div>
 
-    <p class="footnote">
+    <!-- Under a lease no load carries a share, so the note says what the
+         investor is paid instead of how a per-load estimate is made. -->
+    <p v-if="currentLease" class="footnote">{{ leaseExplain(currentLease) }}</p>
+    <p v-else class="footnote">
       "Your Share" is an estimate based on the configured investor split
       (gross &times; {{ splitPct }}%). Final take-home is reconciled in the monthly
       earnings breakdown after driver pay and expenses are deducted.
@@ -233,6 +240,8 @@
 import { computed, ref } from 'vue'
 import { useInvestorStore } from '../../stores/investor'
 import MetricInfoDialog from './MetricInfoDialog.vue'
+import { leaseBasisOf } from '../../lib/payoutPeriod'
+import { LEASE_NO_LOAD_SHARE, leaseExplain } from '../../lib/leasePayoutText'
 
 const props = defineProps({
   myLoads: { type: Object, default: () => ({ pending: [], active: [] }) },
@@ -255,6 +264,10 @@ const active = computed(() => props.myLoads?.active || [])
 // GET /api/investor response as myLoads. The Earnings, Production, Trend and
 // Cash Flow sections read this same field, so every split label agrees.
 const splitPct = computed(() => store.production?.investorSplitPct ?? 50)
+// The current month's lease basis. The server sends `yourShare: null` on every
+// load while it is set, because a lease pays a fixed amount and no load carries
+// a share of it — so there is no figure to show and no per-load math to open.
+const currentLease = computed(() => leaseBasisOf(store.production))
 
 function fmtMoney(n) {
   const v = Number(n || 0)
@@ -285,6 +298,9 @@ const modalSubtitle = computed(() => MODAL_CONFIG[detailType.value]?.subtitle ||
 function impliedLoadGross(load) {
   if (!load) return 0
   if (load.loadGross) return load.loadGross
+  // Backing the gross out of `yourShare ÷ split %` is only meaningful when the
+  // share WAS gross × split %. Under a lease it is not, so nothing is derived.
+  if (currentLease.value) return 0
   if (load.yourShare && splitPct.value > 0) {
     return Math.round((load.yourShare * 100) / splitPct.value)
   }
@@ -389,6 +405,12 @@ function openTrackingPage(loadId) {
   font-size: 0.72rem; color: var(--text-dim);
 }
 .share { font-size: 0.88rem; font-weight: 700; color: var(--accent); }
+/* Lease: a sentence where the per-load figure would be. Wraps within the row
+   rather than widening it, and is plain text — there is no math to open. */
+.share-none {
+  font-size: 0.7rem; color: var(--text-dim); font-style: italic;
+  max-width: 22ch; white-space: normal; text-align: right; line-height: 1.3;
+}
 .track-btn {
   display: inline-flex; align-items: center; gap: 0.3rem;
   font: inherit; font-size: 0.7rem; font-weight: 600;

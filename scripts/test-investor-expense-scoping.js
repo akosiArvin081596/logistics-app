@@ -567,7 +567,9 @@ function monthlyTripExp(ownerId, lib = S) {
 	// The page-break rule keys on plLines.length - 3 to keep the last three bold
 	// rows together. Adding a row shifts every absolute index, so pin that the
 	// separator still lands on Total Expenses rather than mid-table.
-	const labels = [...handler.matchAll(/\{ label: [`"]([^`"]*)[`"]/g)].map(m => m[1].trim());
+	// A row's label is a string literal, or a variable (the payout row's label,
+	// which names a lease when the range has one): both are rows.
+	const labels = [...handler.matchAll(/\{ label: (?:[`"]([^`"]*)[`"]|([A-Za-z_]\w*),)/g)].map(m => (m[1] !== undefined ? m[1] : m[2]).trim());
 	const pl = labels.slice(labels.indexOf("Gross Revenue"));
 	eq(pl[pl.length - 3], "Total Expenses", "§8 the page-break separator still lands on Total Expenses after the new row");
 
