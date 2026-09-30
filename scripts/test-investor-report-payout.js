@@ -119,7 +119,7 @@ const HANDLER = SRC.slice(REPORT_START, REPORT_END > REPORT_START ? REPORT_END :
 
 const NAMES = [
 	"resolveInvestorSplitPct", "lastFridayOfFollowingMonth", "periodLabel", "computeLossCarryForward",
-	"reconcileInvestorPayouts", "reportRangeMonthKeys", "investorReportPayoutEntries",
+	"payoutRowBreakdown", "frozenPayoutBreakdown", "reconcileInvestorPayouts", "reportRangeMonthKeys", "investorReportPayoutEntries",
 	"summarizeReportPayout", "reportPayoutNote",
 	"truckMonthlyFixed", "truckChargeFromMonth", "truckChargeUntilMonth", "truckChargedInMonth",
 ];

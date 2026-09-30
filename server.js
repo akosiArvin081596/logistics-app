@@ -49372,6 +49372,55 @@ function listSettlableInvestors() {
 	);
 }
 
+// A payout row's composition: the month's P&L and the investor's share of it.
+// Display-only — it never feeds amount / effectiveAmount / totals. `be` is the
+// month's monthlyEarnings entry, `monthShare` its carry.raw (the split applied to
+// the raw netProfit, rounded once: the same number the settlement used), and
+// `splitPct` the whole-number Split %. A lease month has no split: splitPct is
+// null, monthShare is the lease paid, and payoutBasis says how it was reached.
+// One copy, because the ledger's rows publish it and both snapshots of it
+// (finalizePeriods() and the reconcile's late stamp) must freeze the same object.
+function payoutRowBreakdown(be, monthShare, splitPct) {
+	return {
+		revenue: (be.exact || be).revenue,
+		driverPay: (be.exact || be).driverPay,
+		fixedCosts: (be.exact || be).fixedCosts,
+		tripExpenses: (be.exact || be).tripExpenses,
+		maintFundCost: (be.exact || be).maintFundCost || 0,
+		complianceCost: (be.exact || be).complianceCost || 0,
+		netProfit: (be.exact || be).netProfit,
+		splitPct: be.payoutBasis ? null : splitPct,
+		monthShare,
+		...(be.payoutBasis ? { payoutBasis: be.payoutBasis } : {}),
+	};
+}
+
+// finalized_breakdown: the JSON snapshot of a payout row `p` ({ breakdown,
+// lossCarriedIn, lossDeferred }) taken when its month is finalized.
+//
+// ⚠️ THE CARRY-FORWARD TERMS ARE PART OF THE SNAPSHOT, and leaving them
+// out is what made a finalized statement print arithmetic that did not
+// foot. The PDF composed a FROZEN top half (`finalized_breakdown`) with a
+// LIVE `lossCarriedIn` recomputed months later — and the carry chain moves
+// whenever any earlier month's recompute moves, so a June statement showed
+// clean frozen figures (Net Profit $17,580.88 → share $8,790.00) with a
+// live "− Earlier loss applied −$1,563.00" line under it that no longer
+// corresponded to anything on the page. Freeze both halves together or the
+// document is internally inconsistent by construction.
+//
+// Only ever attached to a real breakdown object: when the month has aged
+// out of the live earnings window `p.breakdown` is null, and the statement
+// deliberately prints "composition no longer available to re-derive"
+// rather than a waterfall of blanks. A bare {lossCarriedIn, lossDeferred}
+// would defeat that null check and render an all-zero waterfall.
+function frozenPayoutBreakdown(p) {
+	return JSON.stringify(
+		p.breakdown
+			? { ...p.breakdown, lossCarriedIn: p.lossCarriedIn, lossDeferred: p.lossDeferred }
+			: null
+	);
+}
+
 // Shared settlement reconcile for ONE investor — the single source of truth for
 // both GET /api/investor/payouts (one owner) and GET /api/payouts (all owners).
 // For every COMPLETED PAST work month (current/in-progress excluded) it
@@ -49438,8 +49487,18 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 	// are already frozen by the lock, so recording the current figure is correct.
 	// Guarded on finalized_at = '' so it is idempotent (this runs on every GET,
 	// and GET /api/payouts loops it per investor).
+	//
+	// ⚠️ A LEASE MONTH FREEZES ITS COMPOSITION HERE TOO, exactly as
+	// finalizePeriods() does (payoutRowBreakdown() + frozenPayoutBreakdown()).
+	// payoutBasisContext() reads a finalized row whose snapshot carries no
+	// payoutBasis as a month settled as the split, so a lease month stamped here
+	// with no snapshot was re-explained as the split on every later read: the
+	// Split % applied to its net profit, its loss carried forward, and split
+	// wording on its statement and report, beside the lease amount it settled at.
+	// A split month still stamps no snapshot: the NULL leaves finalized_breakdown
+	// as it is, so its stored row and its statement are exactly what they were.
 	const stampLateRow = db.prepare(
-		"UPDATE investor_payouts SET finalized_at = ?, finalized_amount = ? WHERE owner_id = ? AND period = ? AND COALESCE(finalized_at,'') = ''"
+		"UPDATE investor_payouts SET finalized_at = ?, finalized_amount = ?, finalized_breakdown = COALESCE(?, finalized_breakdown) WHERE owner_id = ? AND period = ? AND COALESCE(finalized_at,'') = ''"
 	);
 	// A month is "completed" only if BOTH clocks agree it is. currentMonthKey is
 	// server-local (computeInvestorMonthlyEarnings), while the close lifecycle
@@ -49457,7 +49516,11 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 			if (!existing) {
 				insertRow.run(ownerId, m.month, amount, lastFridayOfFollowingMonth(m.month));
 				if (isLocked(m.month)) {
-					stampLateRow.run(new Date().toISOString(), amount, ownerId, m.month);
+					const carry = carryByPeriod[m.month];
+					const leaseSnapshot = m.payoutBasis
+						? frozenPayoutBreakdown({ breakdown: payoutRowBreakdown(m, carry.raw, splitPct), lossCarriedIn: carry.carriedIn, lossDeferred: carry.deferred })
+						: null;
+					stampLateRow.run(new Date().toISOString(), amount, leaseSnapshot, ownerId, m.month);
 					console.warn(`[period-close] ${m.month} was already finalized when owner ${ownerId}'s row was created — stamped at $${amount}`);
 				}
 			} else if (
@@ -49597,20 +49660,9 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 			// a dollar off the amount actually settled.
 			// A lease month has no split: splitPct is null, monthShare is the lease
 			// paid (carry.raw), and payoutBasis says how it was reached. That object
-			// is what finalizePeriods() snapshots, so a closed lease month's
-			// statement keeps its lease wording.
-			breakdown: be ? {
-				revenue: (be.exact || be).revenue,
-				driverPay: (be.exact || be).driverPay,
-				fixedCosts: (be.exact || be).fixedCosts,
-				tripExpenses: (be.exact || be).tripExpenses,
-				maintFundCost: (be.exact || be).maintFundCost || 0,
-				complianceCost: (be.exact || be).complianceCost || 0,
-				netProfit: (be.exact || be).netProfit,
-				splitPct: be.payoutBasis ? null : splitPct,
-				monthShare: carry.raw,
-				...(be.payoutBasis ? { payoutBasis: be.payoutBasis } : {}),
-			} : null,
+			// is what finalizePeriods() snapshots (the late stamp above builds the
+			// same one), so a closed lease month's statement keeps its lease wording.
+			breakdown: be ? payoutRowBreakdown(be, carry.raw, splitPct) : null,
 			// Only on a lease month; absent means the split, exactly as before.
 			...(be && be.payoutBasis ? { payoutBasis: be.payoutBasis } : {}),
 		};
@@ -53442,26 +53494,10 @@ async function finalizePeriods(periods, actor) {
 		for (const period of list) {
 			const p = payouts.find((x) => x.period === period);
 			if (!p) continue;
-			// ⚠️ THE CARRY-FORWARD TERMS ARE PART OF THE SNAPSHOT, and leaving them
-			// out is what made a finalized statement print arithmetic that did not
-			// foot. The PDF composed a FROZEN top half (`finalized_breakdown`) with a
-			// LIVE `lossCarriedIn` recomputed months later — and the carry chain moves
-			// whenever any earlier month's recompute moves, so a June statement showed
-			// clean frozen figures (Net Profit $17,580.88 → share $8,790.00) with a
-			// live "− Earlier loss applied −$1,563.00" line under it that no longer
-			// corresponded to anything on the page. Freeze both halves together or the
-			// document is internally inconsistent by construction.
-			//
-			// Only ever attached to a real breakdown object: when the month has aged
-			// out of the live earnings window `p.breakdown` is null, and the statement
-			// deliberately prints "composition no longer available to re-derive"
-			// rather than a waterfall of blanks. A bare {lossCarriedIn, lossDeferred}
-			// would defeat that null check and render an all-zero waterfall.
-			const breakdown = JSON.stringify(
-				p.breakdown
-					? { ...p.breakdown, lossCarriedIn: p.lossCarriedIn, lossDeferred: p.lossDeferred }
-					: null
-			);
+			// The composition and its carry terms, frozen together
+			// (frozenPayoutBreakdown(); the reconcile's late stamp freezes a lease
+			// month with the same function).
+			const breakdown = frozenPayoutBreakdown(p);
 			const live = p.recomputedAmount != null ? p.recomputedAmount : p.amount;
 			const n = stampOwed.run(live, nowIso, live, breakdown, ownerId, period).changes
 				+ stampSettled.run(nowIso, breakdown, ownerId, period).changes;

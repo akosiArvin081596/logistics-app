@@ -343,8 +343,10 @@ console.log("\n§5 frozen-vs-live resolution — `??`, never `||`");
 // ============================ §6 what finalizePeriods actually snapshots
 console.log("\n§6 the snapshot carries the carry — but never invents a composition");
 {
-	const finalize = extractFn("finalizePeriods");
-	const m = finalize.match(/const breakdown = JSON\.stringify\(([\s\S]*?)\n\t\t\t\);/);
+	// The snapshot is frozenPayoutBreakdown(), which finalizePeriods() calls and
+	// the reconcile's late stamp of a lease month calls too.
+	ok(/const breakdown = frozenPayoutBreakdown\(p\);/.test(extractFn("finalizePeriods")), "§6 finalizePeriods() snapshots through frozenPayoutBreakdown()");
+	const m = extractFn("frozenPayoutBreakdown").match(/return JSON\.stringify\(([\s\S]*?)\n\t\);/);
 	ok(!!m, "§6 the finalized_breakdown snapshot expression is where it is expected");
 	const snapshot = new Function("p", `return JSON.stringify(${m[1]});`);
 
@@ -471,17 +473,18 @@ console.log("\n§8 mutants — each must be caught");
 		return new Function("frozenBreakdown", "p", `return [${expr("lossCarriedIn")}, ${expr("lossDeferred")}];`);
 	};
 
-	// Rebuilds finalizePeriods' snapshot expression out of a (possibly mutated) source.
+	// Rebuilds the snapshot expression (frozenPayoutBreakdown(), which
+	// finalizePeriods() calls) out of a (possibly mutated) source.
 	const snapshotFrom = (src) => {
-		const needle = "\nasync function finalizePeriods(";
+		const needle = "\nfunction frozenPayoutBreakdown(";
 		const start = src.indexOf(needle) + 1;
 		let depth = 0, body = "";
 		for (let j = src.indexOf("{", start); j < src.length; j++) {
 			if (src[j] === "{") depth++;
 			else if (src[j] === "}") { depth--; if (depth === 0) { body = src.slice(start, j + 1); break; } }
 		}
-		const m = body.match(/const breakdown = JSON\.stringify\(([\s\S]*?)\n\t\t\t\);/)
-			|| body.match(/const breakdown = JSON\.stringify\(([^;]*?)\);/);
+		const m = body.match(/return JSON\.stringify\(([\s\S]*?)\n\t\);/)
+			|| body.match(/return JSON\.stringify\(([^;]*?)\);/);
 		if (!m) throw new Error("no snapshot expression");
 		return new Function("p", `return JSON.stringify(${m[1]});`);
 	};
@@ -514,8 +517,8 @@ console.log("\n§8 mutants — each must be caught");
 		{
 			name: "M3 finalizePeriods stops snapshotting the carry (the other half of bug 1)",
 			mutate: (s) => s.replace(
-				/const breakdown = JSON\.stringify\(\n\t\t\t\tp\.breakdown[\s\S]*?\n\t\t\t\);/,
-				"const breakdown = JSON.stringify(p.breakdown || null);"),
+				/return JSON\.stringify\(\n\t\tp\.breakdown[\s\S]*?\n\t\);/,
+				"return JSON.stringify(p.breakdown || null);"),
 			caught: (s) => {
 				const out = JSON.parse(snapshotFrom(s)(P));
 				return out.lossCarriedIn === undefined || out.lossDeferred === undefined;
@@ -524,8 +527,8 @@ console.log("\n§8 mutants — each must be caught");
 		{
 			name: "M4 snapshot drops the null guard — an aged-out month gets a carry-only object",
 			mutate: (s) => s.replace(
-				/const breakdown = JSON\.stringify\(\n\t\t\t\tp\.breakdown[\s\S]*?\n\t\t\t\);/,
-				"const breakdown = JSON.stringify({ ...p.breakdown, lossCarriedIn: p.lossCarriedIn, lossDeferred: p.lossDeferred });"),
+				/return JSON\.stringify\(\n\t\tp\.breakdown[\s\S]*?\n\t\);/,
+				"return JSON.stringify({ ...p.breakdown, lossCarriedIn: p.lossCarriedIn, lossDeferred: p.lossDeferred });"),
 			// A truthy stand-in defeats the statement's `breakdown ? … : null` branch,
 			// so the PDF renders an all-zero waterfall instead of its honest note.
 			caught: (s) => {
