@@ -9,7 +9,8 @@
  *       in, loss deferred, a correction after payment, drift, no breakdown,
  *       maintenance and compliance costs, an empty appendix) hashed against pins
  *       computed from that commit's module, and a one-word change to the split
- *       wording moves a pin
+ *       wording moves a pin. The one exception is the month that ran at a loss,
+ *       which no longer prints a change note beside its settled $0 (§7)
  *   §2  a lease month (breakdown.payoutBasis): "How your payment is calculated",
  *       the monthly lease, the reason line for a prorated, downtime or
  *       not-in-service month, what the month pays, the shared settled-amount and
@@ -22,12 +23,20 @@
  *       plain text, and every text listed in docs/investor-portal-copy.md §17
  *   §5  MUTANTS, each caught: payoutBasis ignored, a lease composed as share
  *       minus carry, the loss-month note beside a proration, a one-word change
- *       to the split page, a bare date parsed at local midnight, and an instant
- *       printed as the calendar date of its UTC text
+ *       to the split page, a bare date parsed at local midnight, an instant
+ *       printed as the calendar date of its UTC text, a loss month composed
+ *       without the loss it carried forward, and the change note silenced on
+ *       every loss month
  *   §6  every date prints the same under any server clock (UTC, Houston, Manila
  *       and both ends of the offset range, each in its own process): a bare
  *       YYYY-MM-DD as that very date, an instant as its Houston date; the split
  *       pins and a lease page hold under every clock
+ *   §7  a split month that ran at a loss (the August 2026 row QA captured on
+ *       staging) composes to the $0 it settled at: share, less an earlier loss
+ *       applied, plus the loss carried forward. No change note, and the page
+ *       foots; the pinned loss page is 61406a1's less exactly that note, every
+ *       page with no loss carried forward is unchanged, and a real change after
+ *       close is still disclosed in the same words
  *
  * Run: node scripts/test-payout-statement-lease.js
  */
@@ -178,6 +187,14 @@ const ORIGIN_MAIN_SHA256 = {
 	"final, maintenance and compliance, 55% split, a positive adjustment": "08377bdc606c2a8fe820f45da808159a181f425bdd62bcc80e3429002b9d8788",
 	"paid, nothing itemized against the headline": "d78471ccf16704421dfab1e15cddf50e49a96582afcb03dc059c85e981db4c22",
 };
+// What a split statement prints now: 61406a1's page for every row but the month
+// that ran at a loss, which no longer prints the change note ("…now computes to
+// −$970.00…") beside its settled $0.00, because nothing had changed (2026-09-30).
+// §7 proves that note is the whole difference from 61406a1's page.
+const SPLIT_PIN = {
+	...ORIGIN_MAIN_SHA256,
+	"final, a losing month carried forward": "0ee882fec0a18cb82c421272030f4ddae57cc320c8fdf1443587a9112adc0cb9",
+};
 
 // Every date the statement prints is one of two kinds. A bare YYYY-MM-DD (the
 // due date, a load's or an expense's date, a correction date stored without a
@@ -259,6 +276,34 @@ function leaseRow({ paid = 2000, covered = 30, days = 30, reason = null, bd = {}
 	};
 }
 
+// The August 2026 row QA captured on staging on 2026-09-30 (payout #29): a split
+// month that ran at a loss, net profit −$500 × 50% = −$250, settled at $0 with
+// the $250 carried forward. The route issues its statement only once a correction
+// lifts it above $0 (409 PAYOUT_NOT_SETTLEABLE otherwise), so it is rendered both
+// as captured and with a +$100 correction.
+const AUGUST = {
+	investorName: "QA Lease One", period: "2026-08", periodLabel: "August 2026", statementNo: "202608-29",
+	status: "owed", paidAt: null, finalizedAt: "2026-09-30T07:55:14.658Z", dueDate: "2026-09-25",
+	breakdown: {
+		revenue: 500, driverPay: 0, fixedCosts: 1000, tripExpenses: 0,
+		maintFundCost: 0, complianceCost: 0, netProfit: -500, splitPct: 50, monthShare: -250,
+	},
+	lossCarriedIn: 0, lossDeferred: 250, adjustment: 0, adjustmentNote: "", amount: 0, effectiveAmount: 0,
+	detail: {
+		revenueLoads: [{ loadId: "QA-LEASE-1-AUG", date: "2026-08-14", truck: "INV-537-A", amount: 500 }],
+		fixedCostItems: [{ truck: "INV-537-A", insurance: 1000, eld: 0, truckPayment: 0, irp: 0, hvut: 0, total: 1000 }],
+	},
+	generatedAt: new Date("2026-09-30T08:00:00Z"),
+};
+const AUGUST_CORRECTED = { ...AUGUST, adjustment: 100, adjustmentNote: "Goodwill", effectiveAmount: 100 };
+// The same month settled at $300 before its records showed the loss: a real
+// change after close, which the change note must still disclose.
+const AUGUST_SETTLED_300 = { ...AUGUST, amount: 300, effectiveAmount: 300 };
+// The split composition as the module writes it, and as it was written until
+// 2026-09-30, when it left out a loss month's carried-forward loss.
+const COMPOSED_WITH_CARRY = "? Math.round(num(b.monthShare) - lossCarriedIn + (lossDeferred > 0 ? lossDeferred : 0)) : null;";
+const COMPOSED_BEFORE_2026_09_30 = "? Math.round(num(b.monthShare) - lossCarriedIn) : null;";
+
 // The module's escape, for comparing against the page's markup.
 function escHtml(s) {
 	return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -279,15 +324,17 @@ const SPLIT_WORDS = ["How your share is calculated", "investor split", "Your sha
 	"Loss carried forward", "Your trip expenses are deducted before the split, so the share above is already net of them."];
 
 // ---------------------------------------------------------------- §1
-section("§1 a split statement is byte-identical to 61406a1 under the Houston clock");
+section("§1 a split statement is byte-identical to 61406a1 under the Houston clock, but for a loss month's change note");
 {
 	for (const [name, row] of Object.entries(SPLIT_ROWS)) {
-		eq(pageHash(S.buildPayoutStatementHtml(row)), ORIGIN_MAIN_SHA256[name], `split: ${name}`);
+		eq(pageHash(S.buildPayoutStatementHtml(row)), SPLIT_PIN[name], `split: ${name}`);
 	}
+	eq(Object.keys(SPLIT_ROWS).filter((name) => SPLIT_PIN[name] !== ORIGIN_MAIN_SHA256[name]), ["final, a losing month carried forward"],
+		"split: the loss month is the only page that differs from 61406a1's");
 	// A payoutBasis that is not an object is no lease: the split page, unchanged.
 	const nonObject = { ...SPLIT_ROWS["paid, nothing carried, no adjustment"] };
 	nonObject.breakdown = { ...FROZEN, payoutBasis: "lease" };
-	eq(pageHash(S.buildPayoutStatementHtml(nonObject)), ORIGIN_MAIN_SHA256["paid, nothing carried, no adjustment"],
+	eq(pageHash(S.buildPayoutStatementHtml(nonObject)), SPLIT_PIN["paid, nothing carried, no adjustment"],
 		"split: a payoutBasis that is not an object leaves the split page as it was");
 }
 
@@ -426,7 +473,17 @@ section("§5 MUTANTS — each must be caught");
 		{
 			name: "a one-word change to the split page (the §1 pins must see it)",
 			src: mutate("% investor split</td>", "% investor share</td>"),
-			caught: (M) => pageHash(M.buildPayoutStatementHtml(SPLIT_ROWS["paid, nothing carried, no adjustment"])) !== ORIGIN_MAIN_SHA256["paid, nothing carried, no adjustment"],
+			caught: (M) => pageHash(M.buildPayoutStatementHtml(SPLIT_ROWS["paid, nothing carried, no adjustment"])) !== SPLIT_PIN["paid, nothing carried, no adjustment"],
+		},
+		{
+			name: "a loss month composed without the loss it carried forward (the change note on August 2026)",
+			src: mutate(COMPOSED_WITH_CARRY, COMPOSED_BEFORE_2026_09_30),
+			caught: (M) => /now computes to/.test(M.buildPayoutStatementHtml(AUGUST_CORRECTED)),
+		},
+		{
+			name: "the change note silenced on every loss month (a real change after close goes unsaid)",
+			src: mutate("const drifted = composed != null && Math.abs(", "const drifted = composed != null && !(lossDeferred > 0) && Math.abs("),
+			caught: (M) => !/now computes to/.test(M.buildPayoutStatementHtml(AUGUST_SETTLED_300)),
 		},
 		{
 			name: "a bare date parsed at local midnight (the due date a day early on this UTC clock)",
@@ -475,13 +532,58 @@ process.stdout.write(JSON.stringify({ zone: Intl.DateTimeFormat().resolvedOption
 		const { zone, offset, pages } = JSON.parse(run.stdout);
 		eq(zone, clock, `${clock}: the render ran under that clock`);
 		offsets.add(offset);
-		for (const name of Object.keys(SPLIT_ROWS)) eq(pageHash(pages[name]), ORIGIN_MAIN_SHA256[name], `${clock}: split: ${name}`);
+		for (const name of Object.keys(SPLIT_ROWS)) eq(pageHash(pages[name]), SPLIT_PIN[name], `${clock}: split: ${name}`);
 		ok(pages[LEASE_NAME] === leaseHere, `${clock}: the lease page is the one this process renders`);
 		for (const [name, expected] of Object.entries(DATE_EXPECT)) {
 			for (const [what, re, want] of expected) eq(printedDate(pages[name], re), want, `${clock}: ${what}`);
 		}
 	}
 	eq(offsets.size, CLOCKS.length, "the clocks were five different offsets, not one clock five times");
+}
+
+// ---------------------------------------------------------------- §7
+section("§7 a split month that ran at a loss composes to the $0 it settled at");
+{
+	for (const [name, row] of [["as captured", AUGUST], ["with a +$100 correction", AUGUST_CORRECTED]]) {
+		const html = S.buildPayoutStatementHtml(row);
+		ok(!/now computes to/.test(html), `August 2026, ${name}: no change note, nothing changed after it closed`);
+		ok(/Your share of net profit<\/td><td class="num">−\$250\.00<\/td>/.test(html)
+			&& /Loss carried forward<div class="cap">This month ran at a loss, so nothing is payable\. The shortfall is carried against later months rather than billed back to you\.<\/div><\/td><td class="num">\+\$250\.00<\/td>/.test(html)
+			&& /Settled amount for August 2026<\/td><td class="num strong">\$0\.00<\/td>/.test(html),
+		`August 2026, ${name}: the page foots, share −$250.00 + loss carried forward $250.00 = settled $0.00`);
+	}
+
+	// The page as the module printed it before this change: the same source with
+	// the composition as it was, which prints 61406a1's page for every split row.
+	const before = loadFrom(mutate(COMPOSED_WITH_CARRY, COMPOSED_BEFORE_2026_09_30));
+	for (const [name, row] of Object.entries(SPLIT_ROWS)) {
+		eq(pageHash(before.buildPayoutStatementHtml(row)), ORIGIN_MAIN_SHA256[name], `before this change: ${name} is 61406a1's page`);
+	}
+	ok(/now computes to −\$250\.00; the settled amount is the amount payable\./.test(before.buildPayoutStatementHtml(AUGUST_CORRECTED)),
+		"before this change: August 2026 printed \"now computes to −$250.00\" beside its settled $0.00 (the staging repro)");
+
+	// The whole difference on the pinned loss page is that one note.
+	const NOTE_970 = '<div class="cap">Recorded on the ledger when this period was settled. The composition above reflects our records as of 08/14/2026 and now computes to −$970.00; the settled amount is the amount payable.</div>';
+	const lossBefore = before.buildPayoutStatementHtml(SPLIT_ROWS["final, a losing month carried forward"]);
+	const lossNow = S.buildPayoutStatementHtml(SPLIT_ROWS["final, a losing month carried forward"]);
+	ok(lossBefore.split(NOTE_970).length === 2 && lossBefore.replace(NOTE_970, "") === lossNow,
+		"the pinned loss month: the new page is 61406a1's page less exactly the change note, nothing else");
+	for (const [name, row] of Object.entries(SPLIT_ROWS)) {
+		if (row.lossDeferred > 0) continue;
+		ok(S.buildPayoutStatementHtml(row) === before.buildPayoutStatementHtml(row), `no loss carried forward, unchanged: ${name}`);
+	}
+
+	// A real change after close is still disclosed, in the same words; only the
+	// figure it names is now what the month would settle at, $0.
+	const moved = S.buildPayoutStatementHtml(AUGUST_SETTLED_300);
+	ok(/Settled amount for August 2026<div class="cap">Recorded on the ledger when this period was settled\. The composition above reflects our records as of 09\/30\/2026 and now computes to \$0\.00; the settled amount is the amount payable\.<\/div><\/td><td class="num strong">\$300\.00<\/td>/.test(moved),
+		"settled at $300, the records now show the loss: the change note names $0.00, and the settled $300.00 stands");
+	ok(!/now computes to/.test(S.buildPayoutStatementHtml({ ...AUGUST, amount: 1, effectiveAmount: 1 })),
+		"within a dollar of the settled amount: no change note, as before");
+	const profitNow = { ...AUGUST_CORRECTED, breakdown: { ...AUGUST.breakdown, revenue: 1800, netProfit: 800, monthShare: 400 }, lossDeferred: 0 };
+	const profitHtml = S.buildPayoutStatementHtml(profitNow);
+	ok(/now computes to \$400\.00; the settled amount is the amount payable\./.test(profitHtml) && profitHtml === before.buildPayoutStatementHtml(profitNow),
+		"settled at $0, the records now show a profit: disclosed exactly as before");
 }
 
 console.log(`\n${"=".repeat(64)}`);
