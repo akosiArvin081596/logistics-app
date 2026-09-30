@@ -86,6 +86,15 @@ What it covers today, by section (`ONLY` picks them):
   under its date inputs (R6). Nothing is written but the preview's audit lines and the ledger's own refresh (Rx).
   Local and staging; one sign-in; `ONLY=report`. Its R-numbers are its own: the truck section's R1–R16 are different
   steps.
+- **Lease payouts (LA–LH, LX).** A QA-LEASE investor made through the real flows (a $2,000 lease invite, the
+  applicant's `/invest` walk-through, the acceptance), given a profit, an idle and a loss month. With
+  `INVESTOR_LEASE_PAYOUTS_ENABLED` off the split pays; on, the lease pays ($2,000 in the profit and loss months, $0 in the
+  idle month under `INVESTOR_LEASE_DOWNTIME=unpaid`, $2,000 under `paid`); a split investor's Payouts are unchanged.
+  The section restarts the server itself to switch the flag. Local only (`DB_PATH`); one sign-in; `ONLY=lease`. Its
+  L-numbers are its own: the ELD-link section's L1–L3 are different steps.
+
+Beside the browser run, `payout-parity.mjs` compares every investor's payout figures between two builds, to the cent and
+to the word (see "The payout parity check").
 
 Every "Expected" column states the behaviour **after** the fix. A run on a build without it (a BEFORE baseline) is
 expected to FAIL exactly the fix rows.
@@ -123,7 +132,8 @@ expected to FAIL exactly the fix rows.
     found` and `rate-con content scan failed: File not found`), and the draft goes on without a rate-con. The POD is read
     from disk (the linked files, see `prep-worktree.sh`), so the POD's own Drive fallback is not reached. Gemini is
     blanked, so nothing is extracted. Each invoice render (Chromium) loads the invoice template's Google Font.
-- **Steps that write the Google Sheet: F1, RC1 and the names section (K1–K3), and only the local non-production one.** Every other step that
+- **Steps that write the Google Sheet: F1, RC1, the names section (K1–K3) and the lease section's LD (one `QA-LEASE-`
+  row, through the app's own `POST /api/data`, which LX deletes by its load id), and only the local non-production one.** Every other step that
   writes changes the SQLite copy only (trucks, drivers, expenses, sessions, audit rows). Both run only against a server
   on this machine, and both resolve the sheet the way `boot-server.sh` does and refuse production's, with the
   service-account key of the main checkout.
@@ -165,6 +175,7 @@ npm --prefix scripts/e2e ci      # playwright-core only, pinned; the root and cl
 | `prep-worktree.sh` | Makes a worktree bootable: links the main checkout's installs, `.env` and key, then builds `client/dist`. With `E2E_LINK_PODS=1` it also links the main checkout's POD files into `uploads/`, for the invoice section. |
 | `boot-server.sh` / `stop-server.sh` | Start a local server on a copy with every outbound effect off; stop exactly that PID. |
 | `stored-format-audit.cjs` | Read-only tally of the stored truck photos and CDL files: data-URI label vs actual bytes. |
+| `payout-parity.mjs` | Not a browser run: boots two builds on two identical private copies and compares every investor's payout answers between them (see "The payout parity check"). |
 
 **The work dir** (`E2E_WORK_DIR`, default `$TMPDIR/logisx-e2e`, or `/tmp/logisx-e2e` without `TMPDIR`) holds everything
 a run produces. None of it belongs in the repo. As a second guard, the root `.gitignore` covers these names under
@@ -240,12 +251,22 @@ fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
 BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-report ONLY=report DB_PATH="$W/qa.db" \
   fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
 fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
+# Part 9: the lease payouts (1 sign-in). Boot it with boot-server.sh: the section restarts that server by its pid file
+# (flag on, downtime unpaid, then paid) and leaves it booted with the flag off.
+fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
+BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-lease ONLY=lease DB_PATH="$W/qa.db" \
+  fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
+fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
+# The payout parity check (no browser, no server of yours: it boots its own two)
+REF_A=main REF_B=HEAD FLAG=off fnm exec --using=22.23.2 node scripts/e2e/payout-parity.mjs
+REF_A=main REF_B=HEAD FLAG=on fnm exec --using=22.23.2 node scripts/e2e/payout-parity.mjs
 ```
 
 - Headless: part 1 takes about 1.5 minutes, part 2 about 2.5 minutes, part 3 about 30 s, part 4 about 2.5 minutes
   (up to 80 s more when F1 has to plant its formula and wait for the server's cached copy of the sheet), part 5 about
   45 s, part 6 about 1.5 minutes (T0) and 2–3 minutes (T1–T11), part 7 about 1.5 minutes (headed about 2.5
-  minutes), part 8 about 10 s (headed about 30 s).
+  minutes), part 8 about 10 s (headed about 30 s), part 9 about 1.5 minutes (up to 90 s more while the server's
+  cached copy of the sheet catches up with the load LD adds). The parity check takes about 30 s per flag setting.
 - B1 deletes its expense and puts its assignment's spelling back when it runs, so plant again before every boot that
   B1 is to read. A run whose server booted before the plant scores B1 INFO (the boot never saw the row); a copy with
   nothing planted SKIPs it.
@@ -258,7 +279,7 @@ fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
   start while `plant-journal.json` exists.
 
 ⚠️ **Login limiter:** `POST /api/auth/login` allows 20 attempts per 15 minutes per server process, counting every
-attempt. Per section: `trucks` 3, `signout` up to 20, `dispatcher` 2, `maintenance` 3, `names` 2, `eldlink` 1, `invoice` 1, `terms` 2 (the Super Admin and T7's throwaway test Investor; 0 with `STEPS=T0`), `investorfixes` 3, `report` 1 and `moneypath` up to 3 (the
+attempt. Per section: `trucks` 3, `signout` up to 20, `dispatcher` 2, `maintenance` 3, `names` 2, `eldlink` 1, `invoice` 1, `terms` 2 (the Super Admin and T7's throwaway test Investor; 0 with `STEPS=T0`), `investorfixes` 3, `report` 1, `lease` 1 (its restarts keep the session) and `moneypath` up to 3 (the
 Super Admin and the driver, plus the Super Admin again when E1 has to file on the driver's behalf). The sign-out figure is its
 worst case: one fewer on a build without S4a's second half, and one fewer where S7 sends one sign-in (so 19 on a build
 with the fixes). It fills a whole window, so run it on a fresh server process, as the recipe does. **All five together
@@ -363,6 +384,11 @@ command line (dotenv never overrides a set variable):
 - **The maintenance notice:** off (`MAINTENANCE_NOTICE_ENABLED=false`) unless the script is run with
   `E2E_MAINTENANCE_NOTICE=1`, which turns it on for M1 (`MAINTENANCE_NOTICE_ENABLED=true`). The audience is pinned to
   `investor` either way. The notice only shows a popup and a banner; it sends nothing.
+- **The lease payout flag:** `INVESTOR_LEASE_PAYOUTS_ENABLED` is passed as the caller set it, and is `false` when unset
+  or empty, whatever `.env` says. The lease section and `payout-parity.mjs` set it explicitly. The lease settings
+  (`INVESTOR_LEASE_DOWNTIME`, `_PRORATE`, `_RETIREMENT`) pass through from the caller's environment, else `.env`.
+
+`E2E_NO_CLIENT=1` boots without `client/dist`, for an API-only run (`payout-parity.mjs`, which never asks for a page).
 
 `stop-server.sh <port>` reads `<work dir>/server-<port>.pid`. It sends SIGTERM only if that PID is still a `server.js`
 whose working directory is the worktree it was booted from. Otherwise it kills nothing.
@@ -1127,13 +1153,150 @@ FAILs on the `$` prices and the missing count row; its "Investor" row already na
 `?as_user_id=`. R5 FAILs (no footnote, `$` figures), R6 FAILs (no `reportRangeMode`, no hint), and Rx PASSes. With an
 investor whose trucks are all priced (`E2E_REPORT_INVESTOR`), R4b and R5 pass on that build too.
 
+## The lease payouts section (LA–LH, LX)
+
+`ONLY=lease`, **local only** (`DB_PATH`, and a server `boot-server.sh` started). It tests the shared contract's lease
+payouts: `INVESTOR_LEASE_PAYOUTS_ENABLED` (a money flag that ships off) and `INVESTOR_LEASE_DOWNTIME` (`unpaid`, the
+default, or `paid`). The flag is read at boot, so **the section restarts the server itself**: it reads
+`<work dir>/server-<port>.pid` for BASE_URL's port (the worktree it runs from) and calls `stop-server.sh` and
+`boot-server.sh` with the same worktree, port and `DB_PATH`. It restarts only after LC has proved `DB_PATH` is that
+server's database (the account the server reports is in the file). The session survives each restart (the session
+store is the database). LX leaves the server booted with the flag off, `boot-server.sh`'s default. On a build without
+the feature (`GET /api/investor-payout-settings` is not there) LA–LE still run, as today's baseline, and LF, LFu, LG and
+LH SKIP.
+
+**The test investor** is `QA-LEASE Investor <stamp>` (`qa-test+<digits>-lease-payouts@example.com`, a fake VIN
+`QALEASE<digits>`), made the way a real one is: LA creates the invite in the invites panel, LB fills and signs the
+application as an anonymous applicant, LC accepts it on `/investor-applications`. **The months** are 2025-02 (profit),
+2025-03 (idle) and 2025-04 (loss): before the copy's first finalized month, so their ledger rows stay open (owed) and
+follow the flag. A finalized month's row is settled the first time it is written, so it would keep its flag-off amount.
+LA refuses a copy where any of the three is finalized.
+
+| Step | How it is shown | Expected |
+|---|---|---|
+| LA | Checks: the sheet the server reads is not production's (the environment's `SPREADSHEET_ID`, else the server worktree's `.env`); the three months are open in the copy. **UI:** `/investors` → invites panel → a lease invite, 2000, Create | 201 and the link dialog |
+| LB | **Anonymous**, the invite link: step 1 (QA-LEASE data), one vehicle, the master agreement, the lease and the W-9 signed on the canvas, fake banking, Confirm & Complete Onboarding | `POST /api/public/investor-apply` 200 with an application id |
+| LC | **UI:** `/investor-applications`, "Accepted" picked in the row's status select, the confirmation accepted (the temporary password is masked in the shot). With the feature: `GET /api/investors/:id/payout-basis` | 200 `accountCreated`, a truck made; the response's `payoutBasis` `{ recorded: true, type: "lease", leaseAmount: 2000 }`; the basis `current` a lease of 2000 from `signed_terms`, `signedTerms` the same |
+| LD | The truck in service from 2025-02-01 (**UI:** Trucks → Edit; the form refuses a date inside a finalized month, as it does for any truck, with 409 `PERIOD_FINALIZED`, so the copy takes it directly and the row says so). With the feature, `PUT /api/investors/:id/payout-basis` a lease of 2000 from 2025-02. A delivered $5,000 load `QA-LEASE-<digits>-P` on 2025-02-14 with the account's Owner ID, through `POST /api/data` (the columns found by the app's own header patterns). A $3,000 maintenance service payment on the truck on 2025-04-10 (`POST /api/maintenance-fund`) | Each saved; the basis schedule is one lease row from 2025-02; the portal reads the load (the server caches the sheet for 60 s, so this polls up to 90 s) |
+| LE | Flag off (restarted off first if the server was booted with it on). `GET /api/investor/payouts` and `GET /api/investor` for the account. A split investor (the lowest-id other investor with ledger rows) recorded: its answer and its Payouts section's text | Profit month: the split share (above $0, not $2,000), `owed`; idle $0; loss $0 with the loss deferred; no `payoutBasis` key anywhere; the portal's `payable` equals the ledger |
+| LEu | **UI:** the account's Payouts in the portal preview (`/investor-portals/<id>`), the profit month's row expanded | The row shows the split amount; no "Fixed monthly lease" in the section |
+| LF | Restarted with the flag on and `INVESTOR_LEASE_DOWNTIME=unpaid`; `GET /api/investor-payout-settings`; the same two answers | Enabled, downtime unpaid; profit and loss months pay 2000 (`payoutBasis` lease, reason null, `breakdown.splitPct` null, `monthShare` 2000, nothing carried or deferred); the idle month pays 0 (reason `downtime`); the portal's month carries the same basis and payable |
+| LFu | **UI:** as LEu | The row shows $2,000; "Fixed monthly lease" (L1) in the section |
+| LG | The split investor again, flag on | Its answer identical to LE's (values, keys, key order: paths only if not) and its Payouts section's text identical (compared by hash; its screenshots are blurred) |
+| LH | Restarted with the flag on and `INVESTOR_LEASE_DOWNTIME=paid` | Downtime paid; all three months pay 2000, the idle month included (reason null); the split investor's answer still identical to LE's |
+| LX | **Always runs.** The server restarted as booted (flag off); the sheet row deleted through `DELETE /api/data/<row>` after finding it by its load id and re-reading that row right before the delete (row numbers shift under other writes); the application soft-deleted by the API; then, from the copy by exact id: the account's ledger, history, basis and config rows, the maintenance entry, the truck, the investor record, the application with its documents, onboarding and banking rows (and the signed PDFs the server wrote, each only when its hash matches), the invite, the account | Each removed; no plant journal left |
+
+**What leaves the machine.** Nothing beyond the other sections: mail is blanked, so the application's and the
+acceptance's emails go nowhere, and the one sheet write is to the local sheet. While the section's rows exist,
+`plant-journal.json` lists them (ids, and the sheet row's load id); Ctrl-C deletes the copy's rows, and a sheet row left
+by a run that died is deleted by hand by that load id.
+
+**Screenshots.** The investors, applications and trucks pages list real people beside the QA-LEASE ones: every table
+row that is not QA data is blurred for the moment of the shot, and the split investor's Payouts section is blurred as a
+whole. The verdicts come from the API and the page text, never from pixels.
+
+**Budgets per server process:** one sign-in (each restart starts fresh windows anyway); about eight `/invest` previews;
+one public application.
+
+## The payout parity check (`payout-parity.mjs`)
+
+Proves that every existing investor's payout figures stay identical, to the cent and to the word, between two builds:
+typically `main` and the branch that changes the payout math. No browser: it drives the API.
+
+```bash
+# from the checkout under test; defaults: REF_A=main, REF_B=HEAD, FLAG=off
+REF_A=main REF_B=HEAD FLAG=off fnm exec --using=22.23.2 node scripts/e2e/payout-parity.mjs
+REF_A=main REF_B=HEAD FLAG=on  fnm exec --using=22.23.2 node scripts/e2e/payout-parity.mjs
+# a working tree as it stands, uncommitted edits included
+REF_A=main DIR_B=/path/to/worktree fnm exec --using=22.23.2 node scripts/e2e/payout-parity.mjs
+# a throwaway mutation of one side (a unified diff, -p1), to prove the check catches it
+REF_A=main REF_B=main PATCH_B=/path/to/change.patch fnm exec --using=22.23.2 node scripts/e2e/payout-parity.mjs
+```
+
+**How it runs.**
+
+1. Each side is exported into `<work dir>/parity-<stamp>-flag-<off|on>/`: `git archive` of `REF_A` / `REF_B` (committed
+   content only), or, with `DIR_A` / `DIR_B`, that checkout's tracked and untracked, non-ignored files as they stand
+   (symlinks skipped). `PATCH_A` / `PATCH_B` apply to that export only. Each export links the main checkout's
+   `node_modules`, `client/node_modules`, `.env` and key; nothing is installed and no client is built (`E2E_NO_CLIENT=1`).
+   It warns when a side's package manifests differ from the main checkout's.
+2. **One** read-only `.backup()` of `SOURCE_DB` (default: the main checkout's `app.db`) becomes side A's copy; the
+   repo's `reset-super-admin-password.js` sets a random password on it (from this process's memory, through
+   `NEW_PASSWORD`, never printed) and clears `must_change_password`; that copy is then backed up once more for side B.
+   The two databases start byte-for-byte equal.
+3. It refuses to go on unless `SPREADSHEET_ID` (the environment's, else the main checkout's `.env`, which both exports
+   link) is set and is not production's. Both servers boot through `boot-server.sh`, so every integration, mail, alert,
+   autogen, period-close and ELD job is off exactly as for the browser run. Ports are random and free (never 3000, 3003
+   or 5173; `PORT_A` / `PORT_B` pick them). `FLAG=on` boots B with `INVESTOR_LEASE_PAYOUTS_ENABLED=true`; A always runs
+   with it off. The lease settings pass through to both.
+4. The Super Admin signs in on each. The investors are every `ownerId` of `GET /api/payouts` and every account with role
+   Investor (`GET /api/users`), from both servers.
+5. Every request goes to both servers at once, in the same order, so each copy's reconcile writes the same rows:
+   - `GET /api/payouts` (first, and again after every investor's reconcile)
+   - per investor (`?as_user_id=`): `GET /api/investor`, `GET /api/investor/payouts`,
+     `GET /api/investor/payouts/:period/detail` for each ledger period and the current month, `GET
+     /api/investor/load-report` (monthly and weekly JSON, monthly CSV and PDF, `limit=53`), `GET /api/investor/tax-csv`,
+     `GET /api/investor/report` (no dates: the whole history)
+   - last, `GET /api/investor/payouts/:period/statement` for every ledger row (a Chromium render each; a month that is
+     not printable answers the same 409 on both, which is compared too). The exports have no statement cache, so every
+     statement is rendered, never served from a file an earlier run left.
+6. **Compared:** status, content type and content disposition; JSON deeply (every value and type, every key, and the key
+   order, so a new field or a moved one is a difference); CSV line by line; PDFs by their text (the app's `pdfjs-dist`),
+   page by page, word by word. A difference prints its path (`.payouts[3].recomputedAmount: value differs`), or for a
+   document the page and the word or line span that differs, never the values.
+7. **Portal against ledger, on each server alone:** for every month of `production.monthlyEarnings` in `GET /api/investor`:
+   `payable` must equal the ledger row's `recomputedAmount`; an open (`owed`, not finalized) row's `amount` must equal it
+   too; the current month's `payableIfClosedNow` must equal it; a completed month must have a ledger row. A settled row
+   whose amount differs from today's recompute is listed "for information": a settled figure is frozen on purpose (see
+   CLAUDE.md, "Money tables that outlive their inputs"). A disagreement found here is a finding to report, not something
+   the run fixes.
+8. **Clean-up, whatever happened** (Ctrl-C too): both servers stopped by their recorded PIDs, the links unlinked, then
+   the run directory (both exports, both database copies) and both server logs deleted. Only `<work dir>/parity-<tag>.md`
+   stays: counts, owner ids, month keys and paths.
+
+**The only normalisations:**
+
+| | Where | What | Why |
+|---|---|---|---|
+| N1 | JSON | An ISO-8601 date-time at or after the run's start (1 s of slack) becomes `<written during this run>` | A ledger row the reconcile creates during the run is stamped with the moment it was written, which differs by milliseconds between the two servers. A timestamp from before the run is compared as it is |
+| N2 | PDF text, CSV, content disposition | The run's own day(s), in the process's zone and in Houston's, as `Weekday, Month D, YYYY`, `Month D, YYYY`, `MM/DD/YYYY`, `M/D/YYYY` and `YYYY-MM-DD`, becomes `<run date>` | The generation date the documents print: the statement's "Issued" and "Figures as of", the report's header date and file name, the tax CSV's date and file name. Only matters for a run that crosses midnight |
+
+Nothing else is normalised: no key is skipped and no figure is rounded.
+
+**Output and exit code.** Counts (investors, investor-months read in detail, statements, request pairs, per endpoint
+with every status and body type seen on both sides, e.g. `200 PDF x24, 409 JSON PAYOUT_NOT_SETTLEABLE x28`), the
+difference paths, the portal-against-ledger findings, and the number of errors each server logged. The logged lines
+themselves (emails masked, Google Maps refusals left out) are printed only when they explain a difference: a server
+error, or one side logging more than the other. A 5xx's own `error` text is shown beside its path. Exit 0: identical;
+1: a difference (or nothing compared); 2: refused or could not set up.
+
+**Limiters.** Statements allow 20 per 15 minutes per IP, the report and the tax CSV 20 per signed-in user, per server
+process. Before a window would run out, both servers are restarted on the same copies (the session is in the
+database), so the run never meets a 429; a 429 is reported as a difference if it ever appears.
+
+**Caveats.**
+
+- Both servers read the same local sheet, each through its own 60 s cache. A write to that sheet during the run (another
+  local run's rows) can show up as a difference; rerun before chasing it.
+- A run that crosses midnight in Houston sees the current month change between requests; N2 covers the documents'
+  dates, but not a month rolling over. Do not run it then.
+- The copies are unsanitized production data. Everything lives in the work dir and is deleted by the run.
+
+**Validated (2026-09-30, on `61406a1` against itself, a prod-mirror copy: 3 investors, 26 ledger rows):** 81 request
+pairs, all identical, `FLAG=off` and `FLAG=on`, about 30 s each. A 1-dollar mutation (`PATCH_B` changing
+`Math.round(netProfit * investorSplit)` to `Math.floor(…)` in `computeInvestorMonthlyEarnings()`) was caught in 13
+pairs (the ledger's `recomputedAmount`, `monthEarnings`, `monthShare` and the current month in `GET /api/payouts` and
+`GET /api/investor/payouts`, six detail reads, two reports, one statement), and B's own portal-against-ledger check
+flagged 5 months where the unchanged portal copy of the rule now disagreed with the ledger's. On every run, one settled
+row (owner 5, 2026-06, paid and finalized) differs from today's recompute: a frozen figure, listed for information.
+
 ## Teardown (once the whole QA cycle is done)
 
 ```bash
 fnm exec --using=22.23.2 scripts/e2e/stop-server.sh <port>
 W="$(node scripts/e2e/paths.cjs work-dir)" && echo "$W"
 find "$W" -maxdepth 1 -type f \( -name '*.db' -o -name '*.db-*' -o -name 'creds*.json' -o -name 'results-*.md' \
-  -o -name 'server-*.log' -o -name 'plant-journal.json' \) -print -delete
+  -o -name 'parity-*.md' -o -name 'server-*.log' -o -name 'plant-journal.json' \) -print -delete
 rm -rf -- "$W/shots"   # real data: the dashboard, truck lists, the driver's truck photo, the Kit page (identity documents masked)
 ```
 

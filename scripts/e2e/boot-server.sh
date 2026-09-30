@@ -16,6 +16,11 @@
 #   E2E_MAINTENANCE_NOTICE=1  boot with the investor maintenance notice ON
 #                 (MAINTENANCE_NOTICE_ENABLED=true, audience investor), for the
 #                 E2E's M1. Anything else, or unset: the notice stays off.
+#   INVESTOR_LEASE_PAYOUTS_ENABLED  the lease payout flag, passed to the server as
+#                 given; unset or empty boots it OFF, whatever .env says (the E2E's
+#                 lease section and payout-parity.mjs set it explicitly).
+#   E2E_NO_CLIENT=1  boot without client/dist: for an API-only run
+#                 (payout-parity.mjs), which never requests a page.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -48,7 +53,11 @@ LOG="$WORK/server-$PORT.log"
 PIDFILE="$WORK/server-$PORT.pid"
 
 [ -f "$WT/server.js" ] || refuse "no server.js in $WT"
-[ -d "$WT/client/dist" ] || refuse "no client/dist in $WT (run prep-worktree.sh, which builds it)"
+if [ "${E2E_NO_CLIENT:-}" = "1" ]; then
+  echo "client: not required (E2E_NO_CLIENT=1, an API-only run)"
+else
+  [ -d "$WT/client/dist" ] || refuse "no client/dist in $WT (run prep-worktree.sh, which builds it)"
+fi
 [ -e "$WT/node_modules" ] || refuse "no node_modules in $WT (run prep-worktree.sh, which links it)"
 [ -e "$WT/service-account-key.json" ] || refuse "no service-account-key.json in $WT (run prep-worktree.sh, which links it)"
 [ -e "$WT/.env" ] || refuse "no .env in $WT (run prep-worktree.sh, which links it)"
@@ -81,6 +90,10 @@ NOTICE=false
 if [ "${E2E_MAINTENANCE_NOTICE:-}" = "1" ]; then NOTICE=true; fi
 echo "maintenance notice: $([ "$NOTICE" = true ] && echo 'ON (investor audience)' || echo off)"
 
+# The lease payout flag (a money flag that ships off): as the caller set it, else off.
+LEASE="${INVESTOR_LEASE_PAYOUTS_ENABLED:-false}"
+echo "lease payouts: INVESTOR_LEASE_PAYOUTS_ENABLED=$LEASE"
+
 # The rate-con Drive folder. server.js reads RATECON_DRIVE_FOLDER_ID with a
 # fallback: an EMPTY value (or none) means production's rate-con folder, which is
 # hardcoded there. So it cannot be blanked like the keys below: it is set to a
@@ -105,6 +118,7 @@ env PORT="$PORT" BIND_HOST=127.0.0.1 DATABASE_PATH="$DB" NODE_ENV=development \
   ELD_STALE_ALERT_ENABLED=false FUEL_LOW_ALERT_ENABLED=false EXPENSE_DUPLICATE_ALERT_ENABLED=false \
   INVOICE_UNDATED_ALERT_ENABLED=false RATECON_EXTRACT_ALERT_ENABLED=false \
   MAINTENANCE_NOTICE_ENABLED="$NOTICE" MAINTENANCE_NOTICE_AUDIENCE=investor \
+  INVESTOR_LEASE_PAYOUTS_ENABLED="$LEASE" \
   nohup "$NODE_BIN" server.js >"$LOG" 2>&1 &
 PID=$!
 # Line 1: the PID. Line 2: the worktree it runs from (stop-server.sh checks both).
