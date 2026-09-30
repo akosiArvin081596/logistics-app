@@ -559,9 +559,16 @@
       <div class="idp-footer">
         <!-- The note doubles as the disabled-button explanation. A primary action
              that is greyed out with no stated reason reads as a broken app, and
-             "you have edits nobody has rendered yet" is not guessable. -->
-        <span class="idp-foot-note" :class="{ 'idp-hint-warn': !!approveBlockedReason }">
-          {{ approveBlockedReason || 'Saves a Gmail draft — it is never auto-sent.' }}
+             "you have edits nobody has rendered yet" is not guessable. With nothing
+             blocking, it repeats the Email tab's "generated message changed" hint
+             while another tab hides it — a warning only; Approve stays enabled.
+             Keep ONE .idp-foot-note: the e2e harness reads it as a single element. -->
+        <span class="idp-foot-note" :class="{ 'idp-hint-warn': !!approveBlockedReason || emailBodyStaleElsewhere }">
+          <template v-if="approveBlockedReason">{{ approveBlockedReason }}</template>
+          <span v-else-if="emailBodyStaleElsewhere" data-testid="idp-email-body-stale-foot">
+            The generated email message changed after you edited it. Open the Email message tab to check it.
+          </span>
+          <template v-else>Saves a Gmail draft — it is never auto-sent.</template>
         </span>
         <div class="idp-foot-actions">
           <button type="button" class="idp-btn idp-btn-ghost" :disabled="approving" @click="onOpenChange(false)">Cancel</button>
@@ -1263,6 +1270,10 @@ const approveBlockedReason = computed(() => {
   }
   return ''
 })
+// The Email tab's "generated message changed" hint, for the footer while another
+// tab hides it. Informational: the typed text is the dispatcher's call, so this
+// never blocks the approve.
+const emailBodyStaleElsewhere = computed(() => emailBodyDefaultChanged.value && activeTab.value !== 'email')
 
 // Seed on the CLOSED -> OPEN transition only. The old watcher also fired on any
 // new `props.preview` identity: nothing re-fetches while the modal is open today,
@@ -1433,7 +1444,9 @@ async function approve() {
   transition: all 0.15s;
 }
 .idp-tab:hover { background: #e2e8f0; }
-.idp-tab-active {
+/* Two classes, the same weight as .idp-tab:hover, and later: the active tab keeps
+   its colours under the pointer instead of turning white-on-light. */
+.idp-tab.idp-tab-active {
   color: #fff;
   background: #0f2847;
   border-color: #0f2847;
@@ -1712,6 +1725,9 @@ button.idp-badge:disabled { opacity: 0.6; cursor: not-allowed; }
   flex-shrink: 0;
 }
 .idp-foot-note { font-size: 0.75rem; color: #64748b; }
+/* A blocked-approve reason or the stale-message note is a warning. The grey above
+   is declared after .idp-hint-warn with the same weight, so it needs two classes. */
+.idp-foot-note.idp-hint-warn { color: #b45309; }
 .idp-foot-actions { display: flex; gap: 0.5rem; margin-left: auto; }
 .idp-btn {
   display: inline-flex;
