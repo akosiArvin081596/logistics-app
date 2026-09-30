@@ -16,6 +16,8 @@
 //      editor lets through, the server's own clean-up + pattern accepts
 //   §3 notesError(): the 500-character ceiling, counted on the NFC form, and
 //      never looser than the server's own count
+//   §3b the email message limit: INVOICE_EMAIL_BODY_MAX is the same number in
+//      server.js and the editor (5,000)
 //   §4 the modal's wiring — Order # uses the shared rule and PO # keeps its own;
 //      the request body ALWAYS carries `notes`; Reset empties them; a note
 //      carried over from the last approved draft says so until it is touched
@@ -40,6 +42,7 @@ const LIB_PATH = path.join(ROOT, 'client', 'src', 'lib', 'invoiceFields.js')
 const {
   ORDER_NUMBER_RE, ORDER_NUMBER_MAX, ORDER_NUMBER_HINT, ORDER_NUMBER_HIDDEN_CHAR, orderNumberError,
   NOTES_MAX, notesError, notesLength,
+  INVOICE_EMAIL_BODY_MAX,
 } = await import(pathToFileURL(LIB_PATH).href)
 
 let pass = 0
@@ -297,6 +300,19 @@ if (serverAcceptsNotes) {
   ok('(control) the corpus holds notes the editor accepts AND notes it refuses',
     notesCorpus.some((v) => notesError(v) === '') && notesCorpus.some((v) => notesError(v) !== ''))
 }
+
+// ══ §3b — the email message limit ══════════════════════════════════════════════
+// The editor caps its message box with the client copy; parseInvoiceOverrides()
+// refuses over the server's. Two numbers for one limit, held together here.
+console.log('\n§3b INVOICE_EMAIL_BODY_MAX — the email message limit')
+let SERVER_EMAIL_BODY_MAX = null
+try {
+  SERVER_EMAIL_BODY_MAX = new Function(`"use strict";\n${liftConstLine(SERVER_SRC, 'const INVOICE_EMAIL_BODY_MAX = ')}\nreturn INVOICE_EMAIL_BODY_MAX;`)()
+} catch (e) {
+  console.error(`      ${e.message} — the server half of this limit is not on this branch`)
+}
+eq('server.js INVOICE_EMAIL_BODY_MAX is the agreed 5,000', SERVER_EMAIL_BODY_MAX, 5000)
+eq('client/src/lib/invoiceFields.js exports the same INVOICE_EMAIL_BODY_MAX as server.js', INVOICE_EMAIL_BODY_MAX, SERVER_EMAIL_BODY_MAX)
 
 // ══ §4 — the modal's wiring ════════════════════════════════════════════════════
 console.log('\n§4  InvoiceDraftPreviewModal.vue')
