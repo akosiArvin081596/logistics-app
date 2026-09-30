@@ -236,8 +236,7 @@
           >
             <span class="alltime-label">Your Earnings</span>
             <span class="alltime-value" :style="{ color: allTimeEarnings >= 0 ? 'var(--accent)' : 'var(--danger)' }">{{ fmt(allTimeEarnings) }}</span>
-            <span v-if="anyLeaseMonth" class="alltime-formula">= sum(monthly investor earnings)</span>
-            <span v-else class="alltime-formula">= net × {{ investorSplitPct }}%</span>
+            <span class="alltime-formula">= sum(monthly investor earnings)</span>
           </div>
         </div>
       </div>
@@ -285,6 +284,11 @@
               <span class="val danger">-{{ fmt(selected.tripExpenses) }}</span>
             </div>
             <div class="modal-hint">Fuel, tolls, repairs, and other costs incurred on the road this month.</div>
+            <!-- The maintenance fund and compliance cost, only in a month charged one (extraCostsOf). -->
+            <div v-for="c in selectedExtraCosts" :key="c.key" class="modal-row deduct">
+              <span>{{ c.label }}</span>
+              <span class="val danger">-{{ fmt(c.value) }}</span>
+            </div>
 
             <div class="step-label">Step 3: Calculate Net Profit</div>
             <div v-if="selectedLease" class="modal-explain-sm">Revenue minus all costs above.</div>
@@ -294,7 +298,7 @@
               <span>Net Profit</span>
               <span class="val" :class="selected.netProfit >= 0 ? 'accent' : 'danger'">{{ fmt(selected.netProfit) }}</span>
             </div>
-            <div class="modal-math">{{ fmt(selected.revenue) }} - {{ fmt(selected.driverPay) }} - {{ fmt(selected.fixedCosts) }} - {{ fmt(selected.tripExpenses) }} = {{ fmt(selected.netProfit) }}</div>
+            <div class="modal-math">{{ fmt(selected.revenue) }} - {{ fmt(selected.driverPay) }} - {{ fmt(selected.fixedCosts) }} - {{ fmt(selected.tripExpenses) }}<template v-for="c in selectedExtraCosts" :key="c.key"> - {{ fmt(c.value) }}</template> = {{ fmt(selected.netProfit) }}</div>
 
             <!-- A lease month has no split to apply: step 4 states the lease and
                  ends on the same figure as the headline and the waterfall. -->
@@ -644,12 +648,16 @@
               <span>- Trip Expenses</span>
               <span class="val danger">-{{ fmt(selected.tripExpenses) }}</span>
             </div>
+            <div v-for="c in selectedExtraCosts" :key="c.key" class="modal-row deduct">
+              <span>- {{ c.label }}</span>
+              <span class="val danger">-{{ fmt(c.value) }}</span>
+            </div>
             <div class="modal-divider"></div>
             <div class="modal-row bold result">
               <span>Net Profit</span>
               <span class="val" :class="selected.netProfit >= 0 ? 'accent' : 'danger'">{{ fmt(selected.netProfit) }}</span>
             </div>
-            <div class="modal-math">{{ fmt(selected.revenue) }} - {{ fmt(selected.driverPay) }} - {{ fmt(selected.fixedCosts) }} - {{ fmt(selected.tripExpenses) }} = {{ fmt(selected.netProfit) }}</div>
+            <div class="modal-math">{{ fmt(selected.revenue) }} - {{ fmt(selected.driverPay) }} - {{ fmt(selected.fixedCosts) }} - {{ fmt(selected.tripExpenses) }}<template v-for="c in selectedExtraCosts" :key="c.key"> - {{ fmt(c.value) }}</template> = {{ fmt(selected.netProfit) }}</div>
 
             <div v-if="selected.netProfit < 0" class="modal-callout warning">
               A negative net profit means operating costs exceeded revenue this month. This can happen during the first month, slow freight periods, or when major maintenance occurs.
@@ -711,7 +719,7 @@
               <span class="val danger">{{ fmt(allTimeTripExpenses) }}</span>
             </div>
 
-            <!-- The maintenance fund and compliance cost, once either has been charged (allTimeExtraCosts). -->
+            <!-- The maintenance fund and compliance cost, once either has been charged (extraCostsOf). -->
             <template v-for="(c, i) in allTimeExtraCosts" :key="c.key">
               <div class="step-label">{{ 4 + i }}. {{ c.label }}</div>
               <div class="modal-row">
@@ -763,59 +771,33 @@
         <!-- ======================== -->
         <template v-if="detailType === 'allEarnings'">
           <div class="modal-breakdown">
-            <!-- ANY lease month turns the all-time figure into the server's own
-                 sum of each month's earnings: "all-time net × split %" would
-                 price every lease month as a share of profit it never was. The
-                 month list is that sum's terms, so it leads here. -->
+            <!-- The all-time figure is the sum of each month's own earnings
+                 (allTimeEarnings), so the month list is that sum's terms and
+                 leads for every investor. Only the opening sentence depends on
+                 the basis: ANY lease month rules out "your N% share", since a
+                 lease month was never a share of profit. -->
             <template v-if="anyLeaseMonth">
               <div class="modal-explain">
                 This is the cumulative take-home you have earned across every month since the truck started operating.
               </div>
               <div v-if="currentLease" class="modal-explain-sm">{{ leaseExplain(currentLease) }}</div>
-
-              <div class="step-label">Month-by-Month History</div>
-              <div class="modal-monthly-list" v-if="months.length">
-                <div class="modal-row" v-for="m in months" :key="m.month">
-                  <span>{{ monthLabel(m.month) || m.month }}{{ m.isCurrentMonth ? ' *' : '' }}<span v-if="leaseBasisOf(m)" class="modal-tag">{{ LEASE_LABEL }}</span></span>
-                  <span class="val" :class="m.investorEarnings >= 0 ? 'accent' : 'danger'">{{ fmt(m.investorEarnings) }}</span>
-                </div>
-              </div>
-              <div class="modal-divider"></div>
-              <div class="modal-row bold result">
-                <span>Your All-Time Earnings</span>
-                <span class="val" :class="allTimeEarnings >= 0 ? 'accent' : 'danger'">{{ fmt(allTimeEarnings) }}</span>
-              </div>
             </template>
-            <template v-else>
-              <div class="modal-explain">
-                This is your cumulative {{ investorSplitPct }}% share of all profits since your first load. Per your agreement with LogisX, net profit is split {{ investorSplitPct }}% to you and {{ 100 - investorSplitPct }}% to the company.
-              </div>
+            <div v-else class="modal-explain">
+              This is your cumulative {{ investorSplitPct }}% share of all profits since your first load. Per your agreement with LogisX, net profit is split {{ investorSplitPct }}% to you and {{ 100 - investorSplitPct }}% to the company.
+            </div>
 
-              <div class="step-label">The Calculation</div>
-              <div class="modal-row highlight">
-                <span>All-Time Net Profit</span>
-                <span class="val" :class="allTimeNet >= 0 ? 'accent' : 'danger'">{{ fmt(allTimeNet) }}</span>
+            <div class="step-label">Month-by-Month History</div>
+            <div class="modal-monthly-list" v-if="months.length">
+              <div class="modal-row" v-for="m in months" :key="m.month">
+                <span>{{ monthLabel(m.month) || m.month }}{{ m.isCurrentMonth ? ' *' : '' }}<span v-if="leaseBasisOf(m)" class="modal-tag">{{ LEASE_LABEL }}</span></span>
+                <span class="val" :class="m.investorEarnings >= 0 ? 'accent' : 'danger'">{{ fmt(m.investorEarnings) }}</span>
               </div>
-              <div class="modal-explain-sm">Revenue ({{ fmt(allTimeRevenue) }}) minus all expenses ({{ fmt(allTimeExpenses) }}).</div>
-              <div class="modal-row split-row">
-                <span>× {{ investorSplitPct }}% (your share)</span>
-                <span></span>
-              </div>
-              <div class="modal-divider"></div>
-              <div class="modal-row bold result">
-                <span>Your All-Time Earnings</span>
-                <span class="val" :class="allTimeEarnings >= 0 ? 'accent' : 'danger'">{{ fmt(allTimeEarnings) }}</span>
-              </div>
-              <div class="modal-math">{{ fmt(allTimeNet) }} × {{ investorSplitPct }}% = {{ fmt(allTimeEarnings) }}</div>
-
-              <div class="step-label" style="margin-top:1rem;">Month-by-Month History</div>
-              <div class="modal-monthly-list" v-if="months.length">
-                <div class="modal-row" v-for="m in months" :key="m.month">
-                  <span>{{ monthLabel(m.month) || m.month }}{{ m.isCurrentMonth ? ' *' : '' }}</span>
-                  <span class="val" :class="m.investorEarnings >= 0 ? 'accent' : 'danger'">{{ fmt(m.investorEarnings) }}</span>
-                </div>
-              </div>
-            </template>
+            </div>
+            <div class="modal-divider"></div>
+            <div class="modal-row bold result">
+              <span>Your All-Time Earnings</span>
+              <span class="val" :class="allTimeEarnings >= 0 ? 'accent' : 'danger'">{{ fmt(allTimeEarnings) }}</span>
+            </div>
           </div>
         </template>
 
@@ -827,7 +809,7 @@
 import { ref, computed, watch } from 'vue'
 import { formatCurrency as fmt } from '../../utils/format'
 import { monthLabel } from '../../lib/monthLabel'
-import { earningsCarryTerms, CARRY_EXPLAIN, leaseBasisOf, hasLeaseMonth, leaseNotes } from '../../lib/payoutPeriod'
+import { earningsCarryTerms, CARRY_EXPLAIN, leaseBasisOf, hasLeaseMonth, leaseNotes, extraCostsOf } from '../../lib/payoutPeriod'
 import { LEASE_LABEL, leaseSubLine, leaseExplain } from '../../lib/leasePayoutText'
 import MetricInfoDialog from './MetricInfoDialog.vue'
 import { useApi } from '../../composables/useApi'
@@ -872,6 +854,9 @@ const selected = computed(() => months.value[selectedIdx.value] || null)
 // month is worded by the basis the server paid it on.
 const selectedLease = computed(() => leaseBasisOf(selected.value))
 const selectedLeaseNotes = computed(() => leaseNotes(selectedLease.value, { netProfit: selected.value?.netProfit }))
+// The selected month's maintenance fund and compliance cost, only once charged:
+// its netProfit subtracts them, so its dialogs list them beside the other costs.
+const selectedExtraCosts = computed(() => extraCostsOf([selected.value]))
 // The current month's basis (`production.payoutBasis`) — what the all-time
 // dialog says the agreement is today.
 const currentLease = computed(() => leaseBasisOf(props.production))
@@ -962,10 +947,7 @@ const allTimeTripExpenses = computed(() => months.value.reduce((s, m) => s + (m.
 // they are expenses here too — or the all-time Net overstates the months it sums.
 // Like the monthly breakdown, a line joins only once it has actually been
 // charged; while both are 0 every all-time figure and sentence reads as before.
-const allTimeExtraCosts = computed(() => [
-  { key: 'maintFund', label: 'Maintenance Fund', phrase: 'maintenance fund', value: months.value.reduce((s, m) => s + (m.maintFundCost || 0), 0) },
-  { key: 'compliance', label: 'Compliance / IFTA', phrase: 'compliance', value: months.value.reduce((s, m) => s + (m.complianceCost || 0), 0) },
-].filter((c) => c.value > 0))
+const allTimeExtraCosts = computed(() => extraCostsOf(months.value))
 const allTimeExpenses = computed(() => allTimeExtraCosts.value.reduce(
   (s, c) => s + c.value,
   allTimeDriverPay.value + allTimeFixedCosts.value + allTimeTripExpenses.value,
@@ -978,13 +960,14 @@ const allTimeNet = computed(() => allTimeRevenue.value - allTimeExpenses.value)
 // Investor's share of net profit, driven by the configured split (server returns
 // investorSplitPct on the production payload). Defaults to 50 when absent.
 const investorSplitPct = computed(() => props.production?.investorSplitPct ?? 50)
-// With any lease month in the history, the all-time figure is the server's own
-// `investorNetToDate` — the sum of every month's earnings, each on the basis it
-// was paid — because `allTimeNet × split %` prices a lease month as a share of
-// profit it never was. A history with no lease month keeps the split figure.
-const allTimeEarnings = computed(() => (anyLeaseMonth.value
-  ? Math.round(Number(props.production?.investorNetToDate) || 0)
-  : Math.round(allTimeNet.value * (investorSplitPct.value / 100))))
+// The all-time figure is the server's own `investorNetToDate`: the sum of every
+// month's earnings, each on the basis it was paid — the figure Cash Flow's
+// "Your Earnings (to date)" shows and the payouts ledger adds up. It is never
+// `allTimeNet × split %`: that rounds once where each month's share is rounded
+// on its own, so the two sat a dollar apart on one page ($7,644 on this tile,
+// $7,645 on Cash Flow), and it would price a lease month as a share of profit it
+// never was.
+const allTimeEarnings = computed(() => Math.round(Number(props.production?.investorNetToDate) || 0))
 
 // Render the right formula label for the selected month's Driver Pay row.
 // Server returns payType / payPercentage per driver in driverDetails — branch
