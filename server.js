@@ -9198,6 +9198,13 @@ app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 		if (!shape.ok) {
 			return res.status(400).json({ error: shape.message, code: "INVALID_FIELD", reason: shape.reason, field: shape.field });
 		}
+		// The driver's W-9 prints this SSN in Part I's nine SSN boxes
+		// (lib/w9-input.js). Refused here, before it is stored, or the W-9 is
+		// refused later, or printed short.
+		const ssnCheck = w9Input.checkW9Ssn(ssn);
+		if (!ssnCheck.ok) {
+			return res.status(400).json({ error: ssnCheck.message, code: ssnCheck.code, field: "ssn" });
+		}
 		// Shared with POST /api/public/investor-apply: one address, length-capped
 		// before any pattern runs. See lib/public-form-input.js.
 		const emailCheck = publicFormInput.checkPublicEmail(email);
