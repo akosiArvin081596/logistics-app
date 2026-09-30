@@ -9884,8 +9884,9 @@ const PUBLIC_INVESTOR_SCALAR_FIELDS = [
 	"invite_token", "invite_terms_revision",
 ];
 const PUBLIC_BANKING_SCALAR_FIELDS = ["bank_name", "account_type", "routing_number", "account_number", "account_name"];
-// The fields the W-9 preview prints (fillW9Form), each ONE scalar.
-const PUBLIC_W9_PREVIEW_SCALAR_FIELDS = ["legal_name", "dba", "address", "ein_ssn", "signatureText"];
+// The fields the W-9 preview prints or reads (fillW9Form), each ONE scalar:
+// entity_type and tax_classification pick its line 3a box.
+const PUBLIC_W9_PREVIEW_SCALAR_FIELDS = ["legal_name", "dba", "address", "ein_ssn", "signatureText", "entity_type", "tax_classification"];
 // The fields POST /api/public/investor-w9-check reads.
 const PUBLIC_W9_CHECK_SCALAR_FIELDS = ["legal_name", "dba", "address", "signatureText"];
 
