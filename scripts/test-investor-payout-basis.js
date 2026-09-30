@@ -314,7 +314,11 @@ section("§7 PUT /api/investors/:id/payout-basis input rules");
 	ok(read({ type: "lease", leaseAmount: 2000, effectiveMonth: "2026-08" }, "2026-08").ok, "§7 earliestEditableMonth itself is open");
 	eq(refusal(read({ type: "lease", leaseAmount: 2000.5, effectiveMonth: "2026-07" }, "2026-08")), "400 LEASE_AMOUNT_WHOLE_DOLLARS leaseAmount",
 		"§7 a malformed body is 400 before the month is judged");
-	ok(read({ type: "split", effectiveMonth: "1999-01" }, null).ok, "§7 no settled month: no lower bound");
+	ok(read({ type: "split", effectiveMonth: B.EFFECTIVE_MONTH_MIN }, null).ok, "§7 no settled or closed month: back to the floor");
+	eq(B.EFFECTIVE_MONTH_MIN, "2020-01", "§7 the floor is 2020-01");
+	eq(refusal(read({ type: "lease", leaseAmount: 2000, effectiveMonth: "2019-12" }, null)), "400 INVALID_BASIS effectiveMonth",
+		"§7 a month before the floor (a mistyped year, say): 400, whatever earliestEditableMonth says");
+	eq(refusal(read({ type: "lease", leaseAmount: 2000, effectiveMonth: "1026-09" }, null)), "400 INVALID_BASIS effectiveMonth", "§7 …1026-09 too");
 }
 
 // ============================================================ §8 small pieces
@@ -333,6 +337,16 @@ section("§8 the idle predicate, the first month, the audit line, the dollars");
 	eq([B.formatLeaseAmount(2000), B.formatLeaseAmount(100000), B.formatLeaseAmount(1), B.formatLeaseAmount(1234567)], ["$2,000", "$100,000", "$1", "$1,234,567"], "§8 whole dollars, grouped");
 	eq([B.addMonths("2026-11", 2), B.addMonths("2026-01", -1), B.daysInMonth("2026-02"), B.daysInMonth("2026-12")], ["2027-01", "2025-12", 28, 31], "§8 month arithmetic");
 	ok(!Object.prototype.hasOwnProperty.call(B, "LEASE_TEXT"), "§8 no investor-facing wording here: lib/lease-payout-text.js is its one home");
+	// A settled month keeps the basis it was settled under.
+	eq(["", null, "not json", "{}", JSON.stringify({ splitPct: 50 }), JSON.stringify({ payoutBasis: { type: "lease" } })].map(B.frozenBreakdownIsLease),
+		[false, false, false, false, false, true], "§8 a frozen breakdown is a lease only when it says so; empty, unreadable or split is the split");
+	const frozen = { ...basisOf([lease("2026-01", 2000)]), settledSplitMonths: ["2026-02"] };
+	const fm = B.settleInvestorMonths([{ month: "2026-02", netProfit: -800, zeroActivity: false }, { month: "2026-03", netProfit: 9000, zeroActivity: false }],
+		{ splitFraction: 0.5, basis: frozen });
+	eq([fm["2026-02"].payoutBasis, fm["2026-02"].investorEarnings, fm["2026-02"].deferred, fm["2026-03"].payoutBasis && fm["2026-03"].payoutBasis.paidAmount],
+		[null, -400, 400, 2000], "§8 a month finalized as the split stays the split (and defers its loss) under a lease row; the next open month is the lease");
+	eq([B.leaseBasisForMonth(frozen, "2026-02"), B.leaseBasisForMonth(frozen, "2026-03")], [null, { leaseAmount: 2000, effectiveMonth: "2026-01" }],
+		"§8 leaseBasisForMonth agrees");
 }
 
 // ============================================================ §9 mutants

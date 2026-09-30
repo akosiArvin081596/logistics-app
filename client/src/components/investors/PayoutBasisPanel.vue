@@ -265,7 +265,7 @@ const bounds = computed(() => monthBounds(houstonToday(), view.value?.earliestEd
 const monthHint = computed(() => {
   const last = monthLabel(bounds.value.max)
   return bounds.value.min
-    ? `From ${monthLabel(bounds.value.min)} to ${last}. Earlier months are settled.`
+    ? `From ${monthLabel(bounds.value.min)} to ${last}. Earlier months are settled or closed.`
     : `Up to ${last}.`
 })
 

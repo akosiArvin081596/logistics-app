@@ -148,7 +148,7 @@ export function validateBasisForm({ type, amount, month, note }, { min, max }) {
   }
   const m = String(month || '').trim()
   if (!MONTH_RE.test(m)) errors.month = 'Enter the month as YYYY-MM, for example 2026-10.'
-  else if (min && m < min) errors.month = `${monthLabel(min)} is the earliest month that can change. Every earlier month is settled for this investor.`
+  else if (min && m < min) errors.month = `${monthLabel(min)} is the earliest month that can change. Every earlier month is settled or closed.`
   else if (max && m > max) errors.month = `Pick a month no later than ${monthLabel(max)}.`
   const text = String(note ?? '').trim()
   if (text.length > NOTE_MAX) errors.note = `The note can be at most ${NOTE_MAX} characters.`

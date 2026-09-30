@@ -9,7 +9,9 @@
  * investor_onboarding_documents), with server.js's own helpers (the basis view,
  * the acceptance's recorder, logAudit / auditText) and the real
  * lib/investor-payout-basis.js and lib/investor-payment-terms.js. Only mail,
- * sockets, the vehicle writer and the name-clash lookup are stubbed.
+ * sockets, the vehicle writer, the name-clash lookup and the period-lock
+ * helpers (read from a period_locks table built from server.js's DDL; the
+ * refusal helpers record what they were asked) are stubbed.
  *
  * WHAT IS ASSERTED
  *   §1 source pins: the three routes are Super Admin only, the PUT is
@@ -27,7 +29,9 @@
  *      with no account is 404
  *   §5 409 BASIS_MONTH_CLOSED with earliestEditableMonth: a paid, a processing
  *      and a finalized month close their month and every earlier one; an owed
- *      one does not
+ *      one does not; §5b a closed month (period_locks) closes it too for an
+ *      owner with no row there, the refusal is recorded, and an unreadable lock
+ *      table is 409 PERIOD_LOCK_UNREADABLE with nothing written
  *   §6 the acceptance: a whole-dollar lease is recorded (current Houston month,
  *      signed_terms, the application, the actor) and audited; cents, the
  *      standard contract and an unreadable snapshot record nothing; a failing
@@ -37,7 +41,12 @@
  *      load report's CSV prints the lease wording, not a per-load share, in a
  *      lease month (flag on), and every month's shares with the flag off
  *   §8 MUTANTS: the BASIS_MONTH_CLOSED guard removed; the flag carried as
- *      always on
+ *      always on; the closed-month bound dropped; the frozen split months
+ *      dropped from the context
+ *   §9 the payout context: with the flag on, the months finalized as the split
+ *      (no payoutBasis in the frozen breakdown) stay the split under a lease
+ *      row recorded before them; a month finalized as a lease stays the lease;
+ *      with the flag off nothing is read
  *
  * Pure: no server, no app.db, no network, no mail.
  * Run: node scripts/test-payout-basis-routes.js    # exits 1 on failure
@@ -123,6 +132,7 @@ const DDL = [
 	tableDdl("investor_onboarding_documents"), ...alters("investor_onboarding_documents"),
 	tableDdl("investor_payouts"), ...alters("investor_payouts"),
 	tableDdl("investor_payout_basis"),
+	tableDdl("period_locks"),
 	`CREATE TABLE investor_applications (
 		id INTEGER PRIMARY KEY AUTOINCREMENT, legal_name TEXT NOT NULL, dba TEXT DEFAULT '', entity_type TEXT DEFAULT '',
 		address TEXT DEFAULT '', contact_person TEXT DEFAULT '', contact_title TEXT DEFAULT '', phone TEXT DEFAULT '',
@@ -142,14 +152,14 @@ const CURRENT_MONTH = "2026-09";
 const SUPER = { id: 1, username: "super_admin", role: "Super Admin" };
 const noop = (req, res, next) => next && next();
 
-function buildServer({ flag = false, env = {}, basisModule = investorPayoutBasis, routes = {}, vehicles = null } = {}) {
+function buildServer({ flag = false, env = {}, basisModule = investorPayoutBasis, routes = {}, vehicles = null, locksReadable = true, functions = FUNCTIONS } = {}) {
 	const db = new Database(":memory:");
 	for (const sql of DDL) {
 		try { db.exec(sql); } catch (e) { if (!/duplicate column name/.test(e.message)) throw e; }
 	}
 	db.prepare("INSERT INTO users (id, username, password_hash, role, driver_name, email) VALUES (1, 'super_admin', 'x', 'Super Admin', '', 'ops@example.test')").run();
 	db.prepare("INSERT INTO investor_config (owner_id, key, value) VALUES (0, 'investor_split_pct', '50')").run();
-	const calls = { notify: [], mail: [], warnings: [] };
+	const calls = { notify: [], mail: [], warnings: [], refusals: [] };
 	const handlers = {};
 	const reg = (verb) => (p, ...h) => { handlers[`${verb} ${p}`] = h[h.length - 1]; };
 	const deps = {
@@ -163,10 +173,17 @@ function buildServer({ flag = false, env = {}, basisModule = investorPayoutBasis
 		bcrypt: { hash: async () => "hashed" },
 		registerApplicationVehicles: vehicles || (() => ({ created: 0, existing: 0, heldByOther: 0, failed: 0 })),
 		findDriverNameClash: () => null,
+		periodLocksReadable: () => locksReadable,
+		lockedPeriodsDesc: () => db.prepare("SELECT period FROM period_locks WHERE status = 'locked' ORDER BY period DESC").all().map((r) => r.period),
+		periodLockUnreadableResponse: (req, res, what, audit) => {
+			calls.refusals.push({ code: "PERIOD_LOCK_UNREADABLE", action: audit && audit.action, entityId: audit && audit.entityId });
+			return res.status(409).json({ error: `The period lock table could not be read. ${what} is held until that is fixed.`, code: "PERIOD_LOCK_UNREADABLE" });
+		},
+		logAuditRefusal: (req, action, entity, entityId, details, code) => calls.refusals.push({ code, action, entity, entityId, details }),
 		process: { env: { INVESTOR_LEASE_PAYOUTS_ENABLED: flag ? "true" : "", ...env } },
 		console: { warn: (m) => calls.warnings.push(m), error() {}, log() {} },
 	};
-	const body = [FLAG_CONSTS, FUNCTIONS, ...Object.values({ ...ROUTES, ...routes }), "return { payoutBasisContext };"].join("\n");
+	const body = [FLAG_CONSTS, functions, ...Object.values({ ...ROUTES, ...routes }), "return { payoutBasisContext };"].join("\n");
 	const api = new Function(...Object.keys(deps), `"use strict";\n${body}`)(...Object.values(deps));
 	async function call(verb, p, { body: reqBody = {}, params = {}, user = SUPER } = {}) {
 		const h = handlers[`${verb} ${p}`];
@@ -194,6 +211,20 @@ const audits = (db, action) => db.prepare("SELECT * FROM audit_trail WHERE actio
 const put = (srv, id, body) => srv.call("PUT", "/api/investors/:id/payout-basis", { params: { id: String(id) }, body });
 const get = (srv, id) => srv.call("GET", "/api/investors/:id/payout-basis", { params: { id: String(id) } });
 const ISO_Z = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
+// Owner 49: a signed lease row from June, June finalized as the split (flag off
+// then), July finalized with no snapshot, August finalized as a lease, September
+// open. Settles June to September through the real function and the context.
+function frozenCase(srv) {
+	srv.db.prepare("INSERT INTO trucks (unit_number, owner_id, in_service_date) VALUES ('T9', 49, '2026-01-01')").run();
+	srv.db.prepare("INSERT INTO investor_payout_basis (owner_id, effective_month, basis_type, lease_amount_cents, source, created_by, created_at) VALUES (49, '2026-06', 'lease', 200000, 'signed_terms', 'x', '2026-06-01T00:00:00Z')").run();
+	const pay = srv.db.prepare("INSERT INTO investor_payouts (owner_id, period, amount, due_date, status, finalized_at, finalized_breakdown) VALUES (49, ?, ?, '2026-01-01', 'owed', ?, ?)");
+	pay.run("2026-06", 4500, "2026-07-08T00:00:00Z", JSON.stringify({ netProfit: 9000, splitPct: 50, monthShare: 4500 }));
+	pay.run("2026-07", 0, "2026-08-08T00:00:00Z", "");
+	pay.run("2026-08", 2000, "2026-09-08T00:00:00Z", JSON.stringify({ netProfit: 9000, splitPct: null, monthShare: 2000,
+		payoutBasis: { type: "lease", leaseAmount: 2000, paidAmount: 2000, coveredDays: 31, daysInMonth: 31, reason: null } }));
+	const months = ["2026-06", "2026-07", "2026-08", "2026-09"].map((month) => ({ month, netProfit: month === "2026-07" ? -1000 : 9000, zeroActivity: false }));
+	return investorPayoutBasis.settleInvestorMonths(months, { splitFraction: 0.5, basis: srv.payoutBasisContext(49) });
+}
 
 function addApplication(db, { name, email, terms }) {
 	const appId = Number(db.prepare("INSERT INTO investor_applications (legal_name, email) VALUES (?, ?)").run(name, email).lastInsertRowid);
@@ -357,6 +388,39 @@ const LEASE_2000 = { type: "lease", leaseAmountCents: 200000, details: "" };
 		eq((await get(srv, other)).body.earliestEditableMonth, null, "§5 another owner's settled months close nothing here");
 	}
 
+	// ── §5b the month close ─────────────────────────────────────────────────────
+	section("§5b the month close bounds it too");
+	const lockedCase = async (srv) => {
+		const id = addInvestor(srv.db, { userId: 47, name: "No Rows Yet" });
+		const lock = srv.db.prepare("INSERT INTO period_locks (period, status, finalized_at) VALUES (?, 'locked', '2026-09-08T00:00:00Z')");
+		lock.run("2026-07");
+		lock.run("2026-08");
+		return { id, r: await put(srv, id, { type: "lease", leaseAmount: 2000, effectiveMonth: "2026-08" }) };
+	};
+	{
+		const srv = buildServer();
+		const { id, r } = await lockedCase(srv);
+		eq([r.status, r.body.code, r.body.field, r.body.earliestEditableMonth], [409, "BASIS_MONTH_CLOSED", "effectiveMonth", "2026-09"],
+			"§5b no payout row at all, August closed: a lease from August is 409, earliest September");
+		ok(/settled or closed/.test(r.body.error || ""), "§5b …the message says settled or closed");
+		eq(basisRows(srv.db, 47), [], "§5b …nothing is written");
+		eq(srv.calls.refusals.map((x) => [x.action, x.entity, x.entityId, x.code]), [["update_payout_basis_blocked", "investor", String(id), "BASIS_MONTH_CLOSED"]],
+			"§5b …and the refusal is recorded under update_payout_basis_blocked");
+		eq((await get(srv, id)).body.earliestEditableMonth, "2026-09", "§5b the GET names the same month");
+		eq((await put(srv, id, { type: "lease", leaseAmount: 2000, effectiveMonth: "2026-09" })).status, 200, "§5b September, open: 200");
+		srv.db.prepare("UPDATE period_locks SET status = 'reopened' WHERE period = '2026-08'").run();
+		eq((await get(srv, id)).body.earliestEditableMonth, "2026-08", "§5b August reopened: open again (a reopened row is no lock)");
+	}
+	{
+		const srv = buildServer({ locksReadable: false });
+		const id = addInvestor(srv.db, { userId: 48, name: "Lock Unknown" });
+		const r = await put(srv, id, { type: "lease", leaseAmount: 2000, effectiveMonth: "2026-10" });
+		eq([r.status, r.body.code], [409, "PERIOD_LOCK_UNREADABLE"], "§5b an unreadable lock table: 409 PERIOD_LOCK_UNREADABLE, even for a future month");
+		eq(basisRows(srv.db, 48), [], "§5b …nothing is written");
+		eq(srv.calls.refusals.map((x) => [x.action, x.code]), [["update_payout_basis_blocked", "PERIOD_LOCK_UNREADABLE"]], "§5b …and the refusal is recorded");
+		eq((await get(srv, id)).body.earliestEditableMonth, CURRENT_MONTH, "§5b the GET names no month before the current one");
+	}
+
 	// ── §6 the acceptance ───────────────────────────────────────────────────────
 	section("§6 the acceptance records a signed whole-dollar lease");
 	{
@@ -495,10 +559,42 @@ const LEASE_2000 = { type: "lease", leaseAmountCents: 200000, details: "" };
 		eq([settles(buildServer({ flag: false })), settles(buildServer({ flag: true }))], [4500, 2000], "§8 control: flag off pays the split, flag on the lease");
 		const openSrc = liftFunction("payoutBasisContext").replace("enabled: INVESTOR_LEASE_PAYOUTS_ENABLED,", "enabled: true,");
 		if (openSrc === liftFunction("payoutBasisContext")) die("the flag mutant did not apply");
-		const opened = new Function("db", "INVESTOR_LEASE_SETTINGS", `${openSrc}\nreturn payoutBasisContext;`);
+		const opened = new Function("db", "INVESTOR_LEASE_SETTINGS", "INVESTOR_LEASE_PAYOUTS_ENABLED", "investorPayoutBasis", `${openSrc}\nreturn payoutBasisContext;`);
 		const srvOff = buildServer({ flag: false });
-		srvOff.payoutBasisContext = opened(srvOff.db, investorPayoutBasis.DEFAULT_SETTINGS);
+		srvOff.payoutBasisContext = opened(srvOff.db, investorPayoutBasis.DEFAULT_SETTINGS, false, investorPayoutBasis);
 		ok(settles(srvOff) !== 4500, "§8 MUTANT the flag carried as always on: the lease pays with the flag off (caught)");
+
+		// The closed-month bound: without it a lease is dated into a closed month.
+		const closedAnchor = 'const closed = lockedPeriodsDesc().find((p) => investorPayoutBasis.isMonthKey(p)) || "";';
+		if (count(closedAnchor) !== 1) die("the closed-month bound moved");
+		const { r: unbound } = await lockedCase(buildServer({ functions: FUNCTIONS.replace(closedAnchor, 'const closed = "";') }));
+		ok(unbound.status === 200, "§8 MUTANT the closed-month bound dropped: a lease from a closed month is written (caught)");
+
+		// The frozen split months: without them a lease row relabels a month
+		// finalized as the split.
+		const frozenAnchor = "settledSplitMonths: INVESTOR_LEASE_PAYOUTS_ENABLED";
+		if (count(frozenAnchor) !== 1) die("the frozen split months moved");
+		const noFrozen = buildServer({ flag: true, functions: FUNCTIONS.replace(frozenAnchor, "settledSplitMonths: false && INVESTOR_LEASE_PAYOUTS_ENABLED") });
+		ok(frozenCase(noFrozen)["2026-06"].payoutBasis !== null, "§8 MUTANT the frozen split months dropped: June, finalized as the split, reads as the lease (caught)");
+	}
+
+	// ── §9 a month finalized as the split stays the split ───────────────────────
+	section("§9 the payout context: a settled month keeps the basis it was settled under");
+	{
+		const on = buildServer({ flag: true });
+		const settled = frozenCase(on);
+		const view = (m) => [settled[m].investorEarnings, settled[m].payoutBasis ? "lease" : "split"];
+		eq(["2026-06", "2026-07", "2026-08", "2026-09"].map(view), [[4500, "split"], [-500, "split"], [2000, "lease"], [2000, "lease"]],
+			"§9 flag on: June (finalized as the split) and July (finalized with no snapshot) stay the split under a lease row from June; August (finalized as a lease) and September (open) are the lease");
+		eq([settled["2026-07"].deferred, settled["2026-09"].carriedIn], [500, 0], "§9 …July's loss is still carried as it was settled, and no lease month absorbs it");
+		const ctx = on.payoutBasisContext(49);
+		eq(ctx.settledSplitMonths, ["2026-06", "2026-07"], "§9 the context lists the months finalized as the split");
+		eq([investorPayoutBasis.leaseBasisForMonth(ctx, "2026-06"), investorPayoutBasis.leaseBasisForMonth(ctx, "2026-08")],
+			[null, { leaseAmount: 2000, effectiveMonth: "2026-06" }], "§9 leaseBasisForMonth (the load report's month test) agrees");
+		const off = buildServer({ flag: false });
+		const offSettled = frozenCase(off);
+		eq(off.payoutBasisContext(49).settledSplitMonths, [], "§9 flag off: nothing is read");
+		ok(["2026-06", "2026-07", "2026-08", "2026-09"].every((m) => offSettled[m].payoutBasis === null), "§9 flag off: every month is the split, as before");
 	}
 
 	console.log(`\n${failures.length ? "FAIL" : "PASS"} — ${pass} assertions passed, ${failures.length} failed`);

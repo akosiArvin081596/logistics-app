@@ -1179,7 +1179,8 @@ function logAuditRefusal(req, action, entity, entityId, details, code) {
 //     `delete_sheet_row_blocked`, `routemate_link_blocked`,
 //     `routemate_unlink_blocked`, `maintenance_fund_blocked`,
 //     `create_compliance_fee_blocked`, `pay_compliance_fee_blocked`,
-//     `adjust_invoice_blocked`, `pay_invoice_blocked` and the
+//     `adjust_invoice_blocked`, `pay_invoice_blocked`,
+//     `update_payout_basis_blocked` and the
 //     catch-all `period_refusal_blocked` are all absent, deliberately, for the
 //     three reasons the four settlement refusals fixed before them were:
 //       (i) THEY CANNOT FLOOD. Every one needs a locked month (or an unreadable
@@ -4603,10 +4604,12 @@ const INVESTOR_LEASE_PAYOUTS_ENABLED = /^(true|1|yes|on)$/i.test(String(process.
 const INVESTOR_LEASE_SETTINGS = investorPayoutBasis.readLeaseSettings(process.env, (msg) => console.warn(`[payout-basis] ${msg}`));
 
 // What the payout math needs to settle one owner's months: the flag, the owner's
-// basis rows (oldest first) and the Active trucks the fixed costs are charged on,
-// which decide the days a lease covers. null for the fleet-wide view (no owner).
-// The flag is only carried here; investorPayoutBasis.leaseBasisActive() is the one
-// test of it, so with the flag off the rows read here change nothing.
+// basis rows (oldest first), the Active trucks the fixed costs are charged on,
+// which decide the days a lease covers, and the months already finalized as the
+// split, which stay the split (a lease row recorded at acceptance while the flag
+// was off must not relabel them once it is on). null for the fleet-wide view (no
+// owner). The flag is only carried here; investorPayoutBasis.leaseBasisActive()
+// is the one test of it, so with the flag off the rows read here change nothing.
 function payoutBasisContext(ownerId) {
 	if (!ownerId) return null;
 	return {
@@ -4614,6 +4617,10 @@ function payoutBasisContext(ownerId) {
 		rows: db.prepare("SELECT effective_month, basis_type, lease_amount_cents FROM investor_payout_basis WHERE owner_id = ? ORDER BY effective_month").all(ownerId),
 		trucks: db.prepare("SELECT in_service_date, created_at, retired_at FROM trucks WHERE owner_id = ? AND status = 'Active'").all(ownerId),
 		settings: INVESTOR_LEASE_SETTINGS,
+		settledSplitMonths: INVESTOR_LEASE_PAYOUTS_ENABLED
+			? db.prepare("SELECT period, finalized_breakdown FROM investor_payouts WHERE owner_id = ? AND COALESCE(finalized_at, '') != ''").all(ownerId)
+				.filter((r) => !investorPayoutBasis.frozenBreakdownIsLease(r.finalized_breakdown)).map((r) => r.period)
+			: [],
 	};
 }
 
@@ -12365,14 +12372,24 @@ app.get("/api/investors/:id/payment-terms", requireRole("Super Admin"), (req, re
 // Every route answers with the flag off too: the acceptance still records rows,
 // and admins can still see and edit them before the flag is turned on.
 
-// The month after the latest month this owner has a SETTLED payout (processing,
-// paid, or finalized), or null when there is none. A basis change may start no
-// earlier: a settled month's basis never changes.
+// The month after the later of two: the latest month this owner has a SETTLED
+// payout (processing, paid, or finalized), and the latest CLOSED month
+// (period_locks). Null when there is neither. A basis change may start no
+// earlier. A settled month's basis never changes, and neither may a closed
+// month's: a basis reaches every month from its start on, and the ledger gives a
+// closed month with no row for this owner one at the next build, settled on the
+// spot, so a basis starting in or before a closed month would publish a new
+// figure for it. While the lock table cannot be read no month can be confirmed
+// open, so this answers the current month (the PUT refuses first).
 function earliestEditableBasisMonth(ownerId) {
 	const row = db.prepare(
 		"SELECT MAX(period) AS p FROM investor_payouts WHERE owner_id = ? AND (status IN ('processing', 'paid') OR COALESCE(finalized_at, '') != '')"
 	).get(ownerId);
-	return row && investorPayoutBasis.isMonthKey(row.p) ? investorPayoutBasis.addMonths(row.p, 1) : null;
+	if (!periodLocksReadable()) return currentMonthKeyCT();
+	const settled = row && investorPayoutBasis.isMonthKey(row.p) ? row.p : "";
+	const closed = lockedPeriodsDesc().find((p) => investorPayoutBasis.isMonthKey(p)) || "";
+	const last = settled > closed ? settled : closed;
+	return last ? investorPayoutBasis.addMonths(last, 1) : null;
 }
 
 // What the master agreement of an application says the investor is paid, from
@@ -12507,8 +12524,9 @@ app.get("/api/investors/:id/payout-basis", requireRole("Super Admin"), (req, res
 // removes every later row, so the schedule from that month on is exactly what
 // was sent. Synchronous from the checks to the write, and audited old → new.
 // 400 INVALID_BASIS (`field`), 400 LEASE_AMOUNT_WHOLE_DOLLARS, 409
-// BASIS_MONTH_CLOSED (`earliestEditableMonth`), 404 INVESTOR_NOT_FOUND (also for
-// a record with no account, which has no payouts).
+// BASIS_MONTH_CLOSED (`earliestEditableMonth`: after this owner's settled months
+// and the closed ones), 409 PERIOD_LOCK_UNREADABLE, 404 INVESTOR_NOT_FOUND (also
+// for a record with no account, which has no payouts).
 app.put("/api/investors/:id/payout-basis", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {
 	try {
 		const id = inviteIdParam(req.params.id);
@@ -12518,9 +12536,17 @@ app.put("/api/investors/:id/payout-basis", requireRole("Super Admin"), refuseCro
 			return res.status(404).json({ error: "This investor record has no account, so it has no payouts to set a basis for.", code: "INVESTOR_NOT_FOUND" });
 		}
 		const ownerId = investor.user_id;
+		// A refusal over a settled or closed month is recorded, like every period
+		// guard's. Fail CLOSED on an unreadable lock table, as they all do.
+		const basisAudit = { action: "update_payout_basis_blocked", entity: "investor", entityId: String(investor.id), subject: `payout basis for owner ${ownerId}` };
+		if (!periodLocksReadable()) return periodLockUnreadableResponse(req, res, "Changing a payout basis", basisAudit);
 		const earliestEditableMonth = earliestEditableBasisMonth(ownerId);
 		const read = investorPayoutBasis.readBasisInput(req.body, { currentMonth: currentMonthKeyCT(), earliestEditableMonth });
 		if (!read.ok) {
+			if (read.code === "BASIS_MONTH_CLOSED") {
+				logAuditRefusal(req, basisAudit.action, basisAudit.entity, basisAudit.entityId,
+					auditText(`${basisAudit.subject}: from ${req.body.effectiveMonth} refused, earliest editable ${earliestEditableMonth}`, 500), read.code);
+			}
 			return res.status(read.status).json({
 				error: read.error, code: read.code, field: read.field,
 				...(read.code === "BASIS_MONTH_CLOSED" ? { earliestEditableMonth } : {}),
