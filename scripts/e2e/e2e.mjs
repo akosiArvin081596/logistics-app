@@ -86,10 +86,17 @@
 //      (I8h) · I9 the server refuses a bad note or Order #
 //   I10 the Email message tab holds the message in an editable box, pre-filled with
 //      the generated text, above the read-only signature, logo and notice; To and
-//      Subject as before · I10b an untouched box follows a preview refresh
+//      Subject as before
 //   I11 a typed edit is badged and survives a tab switch and a field's re-render ·
 //      I11b an empty message is refused on the form · I12 Reset brings back the
 //      generated text · I13 the server refuses an empty, too long or non-text body
+//   IB (local) the editor of a Bison load (E2E_BISON_LOAD, default 30080873), whose
+//      message names the Order #, Move # and PO #, its dryRun handed a synthetic
+//      Bison rate-con · I10c the untouched message keeps its PO # sentence through
+//      the render of a field it does not name · I10b it follows an Order # change ·
+//      I11c a typed message the Order # change left stale: the hint, Approve held,
+//      Keep my message, Use the new message · I13f a Bison load whose Order # could
+//      not be read: the generated message does not name our load id as the Order #
 //   I14 (local, a server booted with E2E_FAKE_GMAIL=1) the Gmail draft carries the
 //      edited message exactly, line breaks included, above the unchanged signature,
 //      and is created read (\Seen) · I14b an unedited approve carries the generated
@@ -215,8 +222,11 @@
 //   STEPS       only these cases of the sign-out, money-path, invoice and terms
 //               sections, e.g. STEPS=S5a,S7 or STEPS=P1,F1 or STEPS=E2,B1,RC1 (P1
 //               selects P1a and P1b; N1 selects N1 and N1b) or STEPS=I8,I9 (I1 opens
-//               the editor whenever any of I1-I7 or I10-I12 is picked; I14 selects
-//               I14 and I14b, STEPS=I14B runs I14b alone) or STEPS=T0 then
+//               the editor whenever any of I1-I7 or I10-I12 is picked, and IB the
+//               Bison load's whenever I10b, I10c or I11c is; I10 selects I10, I10b
+//               and I10c, I11 selects I11, I11b and I11c, I13 selects I13 and
+//               I13a-f, I14 selects I14 and I14b; STEPS=I10B, I10C, I11C, I13F or
+//               I14B runs that one alone) or STEPS=T0 then
 //               STEPS=T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11 (a terms step also runs the
 //               steps it builds on; T0 and T1-T11 together render more previews
 //               than the preview limiter allows one IP in 15 minutes) or
@@ -232,6 +242,8 @@
 //               which captures each draft in the work dir and sends nothing
 //   E2E_FAKE_GMAIL_DIR  where the fake's captures are read (default:
 //               <work dir>/fake-gmail, where boot-server.sh points the server)
+//   E2E_BISON_LOAD  the Bison steps' load (IB, I10b, I10c, I11c, I13f), a delivered
+//               Bison load with a POD (default: 30080873)
 //   S3_LATENCY_MS, S3_KBPS     the CDP throttle of S3, S6 and S7 (default +2500 ms per
 //               request, 24 KB/s)
 //
@@ -241,11 +253,10 @@
 // Every "Expected" column states the behaviour AFTER the fixes; a BEFORE run is
 // expected to FAIL the fix rows — that is the baseline.
 import { chromium } from 'playwright-core'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { spawn } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import paths from './paths.cjs'
@@ -422,13 +433,13 @@ const b64 = (s) => Buffer.from(s).toString('base64')
 const HTML_DOC = '<h1>not an image</h1>'
 const SVG_DOC = '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="60"><text x="10" y="38" font-size="24">not a photo</text></svg>'
 
-function makePdf() {
-  // Minimal, valid one-page PDF (correct xref offsets), inert text only.
-  const content = 'BT /F1 18 Tf 20 45 Td (QA PDF) Tj ET'
+// Minimal, valid one-page PDF (correct xref offsets), inert text only: `content` is
+// its one uncompressed content stream (ASCII), `mediaBox` its page size.
+function makePdf(content = 'BT /F1 18 Tf 20 45 Td (QA PDF) Tj ET', mediaBox = '0 0 200 100') {
   const objs = [
     '<< /Type /Catalog /Pages 2 0 R >>',
     '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+    `<< /Type /Page /Parent 2 0 R /MediaBox [${mediaBox}] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>`,
     `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
     '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
   ]
@@ -5480,16 +5491,22 @@ async function eldLinkSection() {
 //     INVOICE_EMAIL_BODY_EMPTY / _TOO_LONG over 5,000 / _INVALID), and the Gmail
 //     draft carries it exactly, line breaks included, and is created read (\Seen),
 //     so the unread-mail poll that ingests rate-cons never picks it up.
+//   - A Bison message names the Order #, the Move # and the PO #. Untouched, it keeps
+//     its PO # sentence through the render of a field it does not name, and follows
+//     an Order # change. A typed message such a change leaves stale is flagged, holds
+//     Approve, and offers "Keep my message" and "Use the new message". When the Order #
+//     could not be read off the rate-con, the generated message never names our load
+//     id in its place.
 //   - Nothing writes Job Tracking.
 // Evidence: the page's own requests and responses (page.on), the PDF the server
 // rendered (its text, read with the app's pdfjs-dist in Node), the form, and (I14)
 // the draft the fake Gmail captured, rendered the way a mail client shows it.
 //
 // Spend per server process: one sign-in; POST …/draft-invoice (25 per 15 min per
-// user, the ?dryRun=1 opens included) about eleven times (I1, I7's approve, I8's
-// reopen, I13's four refusals, and I14 and I14b one open and one approve each) plus
-// one per candidate load whose dryRun failed; POST …/invoice-preview (120 per 15 min)
-// about thirty times.
+// user, the ?dryRun=1 opens included) about thirteen times (I1, I7's approve, I8's
+// reopen, IB's open, I13's four refusals, I13f, and I14 and I14b one open and one
+// approve each) plus one per candidate load whose dryRun failed; POST
+// …/invoice-preview (120 per 15 min) about thirty-five times.
 //
 // ⚠️ The approve (I7) creates a real Gmail draft wherever the server has a mail
 // target. boot-server.sh blanks Gmail and the n8n invoice webhook, so locally the
@@ -5509,8 +5526,23 @@ const INV_ORDER_HINT = `Must start with a letter or number ${EM_DASH} any charac
 const INV_ORDER_EDITED = `Invoice only ${EM_DASH} Job Tracking is not changed.`
 const INV_NOTE3 = ['Advance $700 paid at pickup.', `Detention 2h ${EM_DASH} see POD.`, 'Ref <ADV-7101850> & thanks']
 const INV_NOTES_MAX = 500
-const INV_ORDER_I10 = '7101851' // I10b: a second Order #, so the untouched message box re-renders
 const INV_EMAIL_BODY_MAX = 5000
+// The Bison steps (IB, I10c, I10b, I11c, I13f) use this load: a delivered Bison load
+// with a POD on the local copy. Its message carries the Order #, the Move # and the
+// PO #, where a load that is not Bison's carries only its own load number.
+const INV_BISON_LOAD = String(process.env.E2E_BISON_LOAD || '30080873').replace(/^#/, '').trim()
+// Locally that load's rate-con is out of reach (it lives in the production Drive
+// folder boot-server.sh names away), so IB hands the editor's own dryRun this
+// synthetic one, as an upload in the request body (one of the route's own rate-con
+// sources): only the "Billing Information" block lib/broker-invoice.js's
+// deterministic scan reads, with test numbers, and no trailer, total or address.
+const INV_BISON_RC = { order: '7101852', po: '4455667', move: '8899001' }
+const bisonRateconPdf = () => makePdf(`BT /F1 11 Tf 40 760 Td 14 TL ${[
+  'QA-TEST synthetic rate confirmation', 'Billing Information', `Order #: ${INV_BISON_RC.order}`, 'LEG #:',
+  `PO #: ${INV_BISON_RC.po}`, `Move #: ${INV_BISON_RC.move}`,
+].map((l) => `(${l}) Tj T*`).join(' ')} ET`, '0 0 612 792')
+// The Order #s the Bison steps type: I10b, then I11c's two changes.
+const INV_BISON_ORDERS = ['7101853', '7101854', '7101855']
 // The signature, logo and confidentiality notice every draft carries, exactly as
 // lib/broker-invoice.js wrote them before the message became editable (61406a1). They
 // must stay byte-identical, so the harness keeps its own copy to hold the fix to.
@@ -5658,6 +5690,12 @@ const emailBodyBox = (page) => page.locator('[data-testid="idp-email-body"]')
 const emailBodyBadge = (page) => page.locator('[data-testid="idp-email-body-edited"]')
 const emailBodyError = (page) => page.locator('[data-testid="idp-email-body-error"]')
 const emailSignature = (page) => page.locator('[data-testid="idp-email-signature"]')
+// The typed message went stale (a field it names changed): the hint and its two
+// choices on the Email message tab, and the footer's copy on the other tabs (I11c).
+const emailBodyStale = (page) => page.locator('[data-testid="idp-email-body-stale"]')
+const emailBodyKeep = (page) => page.locator('[data-testid="idp-email-body-keep"]')
+const emailBodyUseDefault = (page) => page.locator('[data-testid="idp-email-body-use-default"]')
+const emailBodyStaleFoot = (page) => page.locator('[data-testid="idp-email-body-stale-foot"]')
 const shown = (loc) => loc.first().isVisible().catch(() => false)
 const EDITABLE_SEL = 'input, textarea, select, [contenteditable]:not([contenteditable="false"])'
 // What the signature block must show, in this order of reading.
@@ -5844,7 +5882,9 @@ async function zoomInvoiceOn(page, target) {
 // load needs its Order # and PO # typed before anything renders), then loads with a
 // Payment (so the dryRun renders a PDF), then loads with no draft yet (no second
 // confirm on approve). Values stay in memory: ids and booleans only.
-async function invoiceCandidates(page) {
+// The Super Admin dashboard's completed loads, as the invoice steps read them: the
+// id, and whether the load is delivered, Bison's (by its broker email) and paid.
+async function completedLoads(page) {
   const d = (await api(page, 'GET', '/api/dashboard')).json || {}
   const jobs = d.completedJobs || []
   const hs = d.completedHeaders || d.jobTrackingHeaders || Object.keys(jobs[0] || {})
@@ -5853,7 +5893,7 @@ async function invoiceCandidates(page) {
   const stCol = pick(/^status$/i, /status/i)
   const emCol = pick(/^email$/i, /broker.*email|email/i)
   const payCol = pick(/^payment$/i, /payment/i)
-  if (!idCol || !stCol) return { list: [], why: 'the dashboard payload has no load-id or status column' }
+  if (!idCol || !stCol) return { all: [], why: 'the dashboard payload has no load-id or status column' }
   const all = jobs
     .map((j) => ({
       id: String(j[idCol] ?? '').trim(), raw: String(j[idCol] ?? ''),
@@ -5861,7 +5901,28 @@ async function invoiceCandidates(page) {
       bison: /bisontransport\.com$/i.test(String(emCol ? j[emCol] ?? '' : '').trim().toLowerCase()),
       paid: payCol ? parseMoney(j[payCol]) > 0 : false,
     }))
-    .filter((c) => c.id && c.delivered)
+    .filter((c) => c.id)
+  return { all, why: '' }
+}
+const hasPod = async (page, id) => ((await api(page, 'GET', `/api/documents/${encodeURIComponent(id)}`)).json?.documents || [])
+  .some((x) => String(x.type || '').toUpperCase() === 'POD')
+// The Bison steps' load (INV_BISON_LOAD), when it is a delivered Bison load with a
+// POD: { cand }, else { why }.
+async function bisonCandidate(page) {
+  const { all, why } = await completedLoads(page)
+  if (why) return { why }
+  const c = all.find((x) => loadRefOf(x.id) === INV_BISON_LOAD)
+  if (!c) return { why: `load ${INV_BISON_LOAD} is not among the dashboard's completed loads (E2E_BISON_LOAD picks another)` }
+  if (!c.bison) return { why: `load ${INV_BISON_LOAD} is not a Bison load (E2E_BISON_LOAD picks another)` }
+  if (!c.delivered) return { why: `load ${INV_BISON_LOAD} is not delivered` }
+  if (!(await hasPod(page, c.id))) return { why: `load ${INV_BISON_LOAD} has no POD` }
+  return { cand: c }
+}
+
+async function invoiceCandidates(page) {
+  const listed = await completedLoads(page)
+  if (listed.why) return { list: [], why: listed.why }
+  const all = listed.all.filter((c) => c.delivered)
   const rank = (c) => (c.bison ? 4 : 0) + (c.paid ? 0 : 2) + (c.drafted ? 1 : 0)
   const order = all.map((c, i) => ({ c, i })).sort((a, b) => rank(a.c) - rank(b.c) || a.i - b.i).map((x) => x.c)
   const out = []
@@ -5869,8 +5930,7 @@ async function invoiceCandidates(page) {
   for (const c of order) {
     if (out.length >= 4 || checked >= 60) break
     checked++
-    const docs = await api(page, 'GET', `/api/documents/${encodeURIComponent(c.id)}`)
-    if (!(docs.json?.documents || []).some((x) => String(x.type || '').toUpperCase() === 'POD')) continue
+    if (!(await hasPod(page, c.id))) continue
     const dr = await api(page, 'GET', invPath(c.id, 'invoice-draft'))
     c.drafted = !!dr.json?.draft
     out.push(c)
@@ -5952,6 +6012,15 @@ async function invoiceSection() {
   const S = { cand: null, open: false, dry: null, jtBefore: null, pdfI2: null, list: [] }
   const editorWanted = ['I1', 'I2', 'I3', 'I4', 'I5', 'I6', 'I7', 'I10', 'I11', 'I12'].some(wantInv)
   const i14Wanted = wantInv('I14') || wantInv('I14B')
+  // The Bison steps, in IB's editor: I10 also selects I10b and I10c, I11 also I11c,
+  // and STEPS=I10B, I10C or I11C picks one alone. I13 also selects I13f.
+  const wantI10b = wantInv('I10') || wantInv('I10B')
+  const wantI10c = wantInv('I10') || wantInv('I10C')
+  const wantI11c = wantInv('I11') || wantInv('I11C')
+  const bisonWanted = wantI10b || wantI10c || wantI11c
+  const wantI13f = wantInv('I13') || wantInv('I13F')
+  const B = { cand: null, open: false, dry: null }
+  const needBison = () => { if (!B.open) throw invSkip('the Bison load\'s editor did not open (see IB)') }
   const id = () => S.cand?.id
   const needEditor = () => { if (!S.open) throw invSkip('the editor did not open (see I1)') }
   const needNotesBox = async () => {
@@ -6311,22 +6380,6 @@ async function invoiceSection() {
           await caption(page, `Step I10 — ${verdict(ok)}: the message box ${editable ? 'is editable' : 'is NOT editable'} and holds the generated text: ${val === def}; the signature below it, read-only: ${sigOk}`)
           return { verdict: verdict(ok), observed }
         })
-      await step('I10b', `The box untouched: type "${INV_ORDER_I10}" into ORDER # and let the preview re-render`,
-        'The box is still untouched (no "edited" badge) and holds the new render\'s emailBodyDefault', 'i10b-box-follows', async () => {
-          needEditor(); await openEmailTab(page); await needBox()
-          const badgeBefore = await shown(emailBodyBadge(page))
-          await caption(page, `Step I10b — type "${INV_ORDER_I10}" into ORDER # (the message box untouched)`)
-          const t = await typeOrder(page, id(), INV_ORDER_I10)
-          const val = normText(await emailBodyBox(page).inputValue())
-          const def = t.preview?.json?.emailBodyDefault
-          const holds = typeof def === 'string' && val === normText(def)
-          const badge = await shown(emailBodyBadge(page))
-          const ok = !badgeBefore && !t.refused && t.preview?.status === 200 && holds && !badge
-          const observed = `"edited" badge before: ${badgeBefore}; ORDER # ${t.refused ? 'REFUSED by the form' : `accepted, invoice-preview → ${t.preview?.status ?? 'no response'}`}; ` +
-            `the render's emailBodyDefault: ${typeof def === 'string' ? 'present' : 'ABSENT'}; the box holds it: ${holds}; "edited" badge after: ${badge}`
-          await caption(page, `Step I10b — ${verdict(ok)}: ${observed}`)
-          return { verdict: verdict(ok), observed }
-        })
     }
 
     // ---- I11: a typed message is kept through a tab switch and a field's re-render
@@ -6659,6 +6712,160 @@ async function invoiceSection() {
       writeResults()
     }
 
+    // ---- IB, I10c, I10b, I11c: a Bison load, whose message names the Order #, the Move #
+    // and the PO # (local only: IB hands the editor's own dryRun INV_BISON_RC's
+    // synthetic rate-con, see there). They run after I9: IB reloads the page.
+    if (bisonWanted) {
+      await step('IB', `Bison load ${INV_BISON_LOAD}: Completed Loads → the load → Draft Invoice Email, its dryRun handed the synthetic Bison rate-con`,
+        `The editor opens (the dryRun answers 200) with the rate-con's Order # ${INV_BISON_RC.order}, PO # ${INV_BISON_RC.po} and Move # ${INV_BISON_RC.move} ` +
+        `(source "upload"), the form shows the Order # and the PO #, and the generated message names all three ("Order # ${INV_BISON_RC.order}. …` +
+        ` ${INV_BISON_RC.move} & PO #${INV_BISON_RC.po}")`, 'ib-bison-editor', async () => {
+          if (!LOCAL) throw invSkip('local only: it hands the dryRun a synthetic rate-con, and a server that reaches the real one would read that one first')
+          const found = await bisonCandidate(page)
+          if (!found.cand) throw invSkip(found.why)
+          B.cand = found.cand
+          meta.ids.bisonLoad = B.cand.id
+          const rc = bisonRateconPdf().toString('base64')
+          const dp = invPath(B.cand.id, 'draft-invoice')
+          const handOver = (route) => {
+            const r = route.request()
+            if (r.method() !== 'POST' || pathOf(r.url()) !== dp || new URL(r.url()).searchParams.get('dryRun') !== '1') return route.fallback()
+            return route.continue({ postData: JSON.stringify({ ...(bodyOf(r) || {}), rateconPdfBase64: rc }) })
+          }
+          await page.route('**/api/loads/**', handOver)
+          let o
+          try { o = await openInvoiceEditor(page, B.cand, 'Step IB', 'reload') } finally { await page.unroute('**/api/loads/**', handOver) }
+          if (!o.ok) throw new Error(`the dryRun answered ${o.err}`)
+          B.dry = o.json; B.open = true
+          const d = o.json
+          const formOrder = (await orderInput(page).inputValue()).trim()
+          const formPo = (await page.locator('#idp-po').inputValue().catch(() => '')).trim()
+          const msg = typeof d.emailBodyDefault === 'string' ? normText(d.emailBodyDefault) : d.emailHtml ? messageOf((await renderMail(ctx, d.emailHtml)).text) : ''
+          const names = msg.includes(`Order # ${INV_BISON_RC.order}.`) && msg.includes(`${INV_BISON_RC.move} & PO #${INV_BISON_RC.po}`)
+          const ok = d.isBison === true && d.rateconSource === 'upload' && d.orderNumber === INV_BISON_RC.order && d.poNumber === INV_BISON_RC.po &&
+            d.moveNumber === INV_BISON_RC.move && formOrder === INV_BISON_RC.order && formPo === INV_BISON_RC.po && names
+          await openEmailTab(page)
+          const observed = `load ${B.cand.id}: dryRun 200; Bison ${d.isBison === true}; rate-con source "${d.rateconSource}"; Order # ${JSON.stringify(d.orderNumber)} (from ${d.orderNumberSource}), ` +
+            `PO # ${JSON.stringify(d.poNumber)}, Move # ${JSON.stringify(d.moveNumber)}; the form's ORDER # ${JSON.stringify(formOrder)} and PO # ${JSON.stringify(formPo)}; ` +
+            `the generated message names all three: ${names}${names ? '' : ` (it reads ${JSON.stringify(msg.slice(0, 300))})`}`
+          await caption(page, `Step IB — ${verdict(ok)}: the Bison editor is open; its message names Order # ${INV_BISON_RC.order}, Move # ${INV_BISON_RC.move} and PO # ${INV_BISON_RC.po}: ${names}`)
+          return { verdict: verdict(ok), observed }
+        })
+      const po = `& PO #${INV_BISON_RC.po}`
+      if (wantI10c) {
+        const note = `QA-I10c note ${stamp}`
+        await step('I10c', 'Bison, the message untouched: type a note into NOTES (a field the message does not name) and let the preview re-render',
+          `The box still holds the dryRun's generated message exactly, the PO # sentence ("${po}") included, and no "edited" badge`,
+          'i10c-bison-po-kept', async () => {
+            needBison(); await openEmailTab(page); await needBox()
+            const want = normText(B.dry.emailBodyDefault)
+            const before = normText(await emailBodyBox(page).inputValue())
+            await caption(page, `Step I10c — the untouched message carries "${po}"; type "${note}" into NOTES`)
+            const pv = await typeNotes(page, B.cand.id, note)
+            const after = normText(await emailBodyBox(page).inputValue())
+            const badge = await shown(emailBodyBadge(page))
+            const rendered = typeof pv?.json?.emailBodyDefault === 'string' ? normText(pv.json.emailBodyDefault).includes(po) : 'no emailBodyDefault'
+            const sentPo = !pv?.body ? 'no render' : Object.prototype.hasOwnProperty.call(pv.body, 'poNumber') ? `poNumber ${JSON.stringify(pv.body.poNumber)}` : 'no poNumber'
+            const ok = before === want && pv?.status === 200 && after === want && after.includes(po) && !badge
+            const observed = `before: the box is the dryRun's message ${before === want}, carrying "${po}": ${before.includes(po)}; NOTES typed, invoice-preview → ` +
+              `${pv?.status ?? 'no response'} (its request sent ${sentPo}); the render's emailBodyDefault carries "${po}": ${rendered}; after: the box is the dryRun's ` +
+              `message ${after === want}, carrying "${po}": ${after.includes(po)}, "edited" badge ${badge}${after !== want ? `; the box reads ${JSON.stringify(after.slice(0, 300))}` : ''}`
+            await caption(page, `Step I10c — ${verdict(ok)}: after the NOTES render the untouched message ${after.includes(po) ? 'still carries' : 'LOST'} "${po}"`)
+            return { verdict: verdict(ok), observed }
+          })
+      }
+      if (wantI10b) {
+        const next = INV_BISON_ORDERS[0]
+        await step('I10b', `Bison, the message untouched: type "${next}" into ORDER # (a number the message names) and let the preview re-render`,
+          `The box follows the render: it holds the render's emailBodyDefault, which names Order # ${next} where the message named the Order # before it, and no "edited" badge`,
+          'i10b-bison-order-follows', async () => {
+            needBison(); await openEmailTab(page); await needBox()
+            const badgeBefore = await shown(emailBodyBadge(page))
+            const before = normText(await emailBodyBox(page).inputValue())
+            const prev = (await orderInput(page).inputValue()).trim()
+            await caption(page, `Step I10b — the untouched message names Order # ${prev}; type "${next}" into ORDER #`)
+            const t = await typeOrder(page, B.cand.id, next)
+            const after = normText(await emailBodyBox(page).inputValue())
+            const def = t.preview?.json?.emailBodyDefault
+            const holds = typeof def === 'string' && after === normText(def)
+            const moved = before.includes(`Order # ${prev}.`) && after.includes(`Order # ${next}.`) && !after.includes(`Order # ${prev}.`)
+            const badge = await shown(emailBodyBadge(page))
+            const ok = !badgeBefore && !t.refused && t.preview?.status === 200 && holds && moved && !badge
+            const observed = `"edited" badge before: ${badgeBefore}; the message named Order # ${prev}: ${before.includes(`Order # ${prev}.`)}; ORDER # "${next}" ` +
+              `${t.refused ? 'REFUSED by the form' : `accepted, invoice-preview → ${t.preview?.status ?? 'no response'}`}; the box holds the render's emailBodyDefault: ` +
+              `${typeof def === 'string' ? holds : 'NO emailBodyDefault'}; it now names Order # ${next} and no longer ${prev}: ${moved}; "edited" badge after: ${badge}` +
+              `${!holds && after.length < 600 ? `; the box reads ${JSON.stringify(after)}` : ''}`
+            await caption(page, `Step I10b — ${verdict(ok)}: the untouched message now names Order # ${next}: ${moved}`)
+            return { verdict: verdict(ok), observed }
+          })
+      }
+      if (wantI11c) {
+        const typed = invBodyEdit('I11c')
+        const [o1, o2] = [INV_BISON_ORDERS[1], INV_BISON_ORDERS[2]]
+        await step('I11c', `Bison: type a message, then change ORDER # to "${o1}"; look from the Invoice tab; Keep my message; then change ORDER # to "${o2}" and Use the new message`,
+          'After the change, [data-testid="idp-email-body-stale"] shows with "Keep my message" ([data-testid="idp-email-body-keep"]) and "Use the new message" ' +
+          '([data-testid="idp-email-body-use-default"]); from the Invoice tab the footer\'s [data-testid="idp-email-body-stale-foot"] shows and Approve is disabled. ' +
+          'Keep my message: the hint clears, Approve is enabled, the typed text is unchanged and the "edited" badge stays. After the second change, Use the ' +
+          'new message: the box holds the new render\'s emailBodyDefault, and the badge is gone', 'i11c-bison-stale', async () => {
+            needBison(); await openEmailTab(page); await needBox()
+            const want = normText(typed)
+            const staleShows = () => emailBodyStale(page).first().waitFor({ state: 'visible', timeout: 5000 }).then(() => true, () => false)
+            await caption(page, 'Step I11c — type a message into the box')
+            await emailBodyBox(page).fill(typed)
+            await page.waitForTimeout(900)
+            const badge0 = await shown(emailBodyBadge(page))
+            await caption(page, `Step I11c — change ORDER # to "${o1}" (the message the server writes names the Order #)`)
+            const t1 = await typeOrder(page, B.cand.id, o1)
+            const s1 = { hint: await staleShows(), keep: await shown(emailBodyKeep(page)), use: await shown(emailBodyUseDefault(page)),
+              text: normText(await emailBodyBox(page).inputValue()) === want }
+            await caption(page, `Step I11c — the stale-message hint ${s1.hint ? 'shows' : 'does NOT show'} (Keep my message: ${s1.keep}; Use the new message: ${s1.use})`)
+            await shot(page, 'i11c-1-stale-hint')
+            await invoiceTab(page).click()
+            await page.waitForTimeout(1000)
+            const s2 = { foot: await shown(emailBodyStaleFoot(page)), disabled: await approveButton(page).isDisabled(),
+              note: (await page.locator('.idp-foot-note').innerText().catch(() => '')).trim() }
+            await caption(page, `Step I11c — on the Invoice tab: the footer's stale note ${s2.foot ? 'shows' : 'does NOT show'}; Approve disabled: ${s2.disabled}`)
+            await shot(page, 'i11c-2-stale-footer')
+            await openEmailTab(page)
+            let s3 = { pressed: false }
+            if (await shown(emailBodyKeep(page))) {
+              await caption(page, 'Step I11c — Keep my message')
+              await emailBodyKeep(page).first().click()
+              await page.waitForTimeout(900)
+              let enabled = false
+              for (let i = 0; i < 20 && !(enabled = await approveButton(page).isEnabled().catch(() => false)); i++) await page.waitForTimeout(500)
+              s3 = { pressed: true, hint: await shown(emailBodyStale(page)), enabled, text: normText(await emailBodyBox(page).inputValue()) === want,
+                badge: await shown(emailBodyBadge(page)) }
+              await shot(page, 'i11c-3-kept')
+            }
+            await caption(page, `Step I11c — change ORDER # to "${o2}"`)
+            const t2 = await typeOrder(page, B.cand.id, o2)
+            const hint2 = await staleShows()
+            let s4 = { pressed: false }
+            if (await shown(emailBodyUseDefault(page))) {
+              await caption(page, 'Step I11c — Use the new message')
+              await emailBodyUseDefault(page).first().click()
+              await page.waitForTimeout(900)
+              const val = normText(await emailBodyBox(page).inputValue())
+              const def = t2.preview?.json?.emailBodyDefault
+              s4 = { pressed: true, holds: typeof def === 'string' && val === normText(def) && val.includes(`Order # ${o2}.`),
+                badge: await shown(emailBodyBadge(page)), hint: await shown(emailBodyStale(page)) }
+            }
+            const render = (t) => (t.refused ? 'REFUSED by the form' : `invoice-preview → ${t.preview?.status ?? 'no response'}`)
+            const ok = badge0 && !t1.refused && t1.preview?.status === 200 && s1.hint && s1.keep && s1.use && s1.text && s2.foot && s2.disabled &&
+              s3.pressed && !s3.hint && s3.enabled && s3.text && s3.badge && !t2.refused && hint2 && s4.pressed && s4.holds && !s4.badge && !s4.hint
+            const observed = `typed: "edited" badge ${badge0}; ORDER # "${o1}", ${render(t1)}: the hint ${s1.hint}, Keep my message ${s1.keep}, Use the new message ` +
+              `${s1.use}, the typed text kept ${s1.text}; on the Invoice tab: the footer's stale note ${s2.foot}, Approve disabled ${s2.disabled} ("${s2.note.slice(0, 120)}"); ` +
+              `${s3.pressed ? `Keep my message: the hint ${s3.hint ? 'STILL shown' : 'gone'}, Approve enabled ${s3.enabled}, the typed text unchanged ${s3.text}, the badge ${s3.badge}` : 'no Keep my message to press'}; ` +
+              `ORDER # "${o2}", ${render(t2)}: the hint ${hint2}; ` +
+              `${s4.pressed ? `Use the new message: the box holds the render's emailBodyDefault, naming Order # ${o2}: ${s4.holds}, the badge ${s4.badge}, the hint ${s4.hint}` : 'no Use the new message to press'}; ` +
+              'screenshots i11c-1-stale-hint, i11c-2-stale-footer, i11c-3-kept'
+            await caption(page, `Step I11c — ${verdict(ok)}: the hint ${s1.hint}, the footer note ${s2.foot}, Approve held ${s2.disabled}; Keep ${s3.pressed && !s3.hint}; Use the new message ${s4.pressed && s4.holds}`)
+            return { verdict: verdict(ok), observed }
+          })
+      }
+    }
+
     // ---- I13: the server refuses a bad message (page fetches, as useApi sends them).
     // The refusals go to the approve route's own dryRun: ?dryRun=1 is a QUERY param,
     // so nothing is created.
@@ -6715,6 +6922,38 @@ async function invoiceSection() {
       await caption(page, `Step I13 — the server's answers to a bad message (page fetches): ${summary.join(' · ')}`)
       rows[rows.length - 1].shot = await shot(page, 'i13-api-refusals')
       writeResults()
+    }
+
+    // ---- I13f: a Bison load whose Order # could not be read. The dryRun blanks the
+    // Order # it would fall back to (our load id), and the message it generates must
+    // not print it either. A page fetch with the body the editor opens with, {}.
+    if (wantI13f) {
+      let observed = ''; let v = 'FAIL'; let s = ''
+      try {
+        const found = B.cand ? { cand: B.cand } : await bisonCandidate(page)
+        if (!found.cand) throw invSkip(found.why)
+        const ref = loadRefOf(found.cand.id)
+        const r = await ownApi('POST', `${invPath(found.cand.id, 'draft-invoice')}?dryRun=1`, {})
+        const j = r.json || {}
+        if (r.status !== 200) observed = `load ${ref}: dryRun → ${r.status}${j.code ? ` ${j.code}` : ''}`
+        else if (!j.needsOrderNumber && j.orderNumberSource !== 'load-id-fallback') {
+          throw invSkip(`load ${ref}'s Order # was read off its rate-con (source "${j.orderNumberSource}"): no Bison load here has an unreadable Order #`)
+        } else {
+          const def = typeof j.emailBodyDefault === 'string' ? j.emailBodyDefault : ''
+          const asOrder = new RegExp(`Order\\s*#\\s*${escRe(ref)}(?!\\d)`).test(def)
+          v = verdict(!!def.trim() && !asOrder)
+          observed = `load ${ref}: dryRun (no rate-con to read) → 200; needsOrderNumber ${j.needsOrderNumber === true}, orderNumberSource "${j.orderNumberSource}", ` +
+            `the echoed Order # ${JSON.stringify(j.orderNumber)}; emailBodyDefault names our load id as the Order #: ${asOrder}; it reads ${JSON.stringify(def)}`
+        }
+        await caption(page, `Step I13f — ${v}: ${observed.slice(0, 220)}`)
+        s = await shot(page, 'i13f-bison-unread-order')
+      } catch (e) {
+        if (e.skip) { v = 'SKIP'; observed = e.message } else observed = `error: ${e.message}`
+      }
+      record({
+        step: 'I13f', title: `POST draft-invoice?dryRun=1 on Bison load ${INV_BISON_LOAD} with nothing but its own documents (its Order # could not be read)`,
+        expected: 'The generated message (emailBodyDefault) does not name our load id as the Order #: it is not the Bison Order #', observed, verdict: v, shot: s,
+      })
     }
 
     // ---- I14 / I14b: the Gmail draft itself, as the fake Gmail captured it (local only)
