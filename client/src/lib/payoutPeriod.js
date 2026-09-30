@@ -554,6 +554,44 @@ export function earningsCarryTerms(month, opts = {}) {
 }
 
 /**
+ * THE PAYOUTS BREAKDOWN'S CARRY TERMS — for a settled month in PayoutsSection.vue:
+ * the month's own share, the carry that moved it, what those compose to, and
+ * whether the settled amount still matches that.
+ *
+ * A split month settles at `share − lossCarriedIn + lossDeferred`
+ * (computeLossCarryForward() in server.js; the statement PDF composes the same
+ * three terms, and decomposeSettled() above measures drift against the same
+ * sum). So a month that ran at a loss composes to the $0 it settled at, and a
+ * month that absorbed an earlier loss to the reduced figure it paid. The panel
+ * used to compare the bare share with the settled amount, which told the
+ * investor "the records have changed since it closed" on every such month
+ * although nothing had — and left the rows jumping from a negative share
+ * straight to $0.
+ *
+ * `breakdown` is the row's `breakdown` (its `monthShare` is the month's signed
+ * share, the same number the settlement used); `settled` carries the row's
+ * `amount` (the FROZEN settled figure) and its `lossCarriedIn` / `lossDeferred`.
+ * A lease month neither absorbs nor defers a loss, so its carry is 0 whatever
+ * the payload says. `drifted` compares in whole cents, so floating-point noise
+ * never reads as a change; a month with no carry compares its share with the
+ * settled amount exactly as before.
+ */
+export function settledCarryTerms(breakdown, settled) {
+  const lease = !!leaseBasisOf(breakdown)
+  const share = num(breakdown && breakdown.monthShare)
+  const carriedIn = lease ? 0 : Math.max(0, num(settled && settled.lossCarriedIn))
+  const deferred = lease ? 0 : Math.max(0, num(settled && settled.lossDeferred))
+  const composed = share - carriedIn + deferred
+  return {
+    share,
+    carriedIn,
+    deferred,
+    composed,
+    drifted: Math.round(composed * 100) !== Math.round(num(settled && settled.amount) * 100),
+  }
+}
+
+/**
  * THE FIXED MONTHLY LEASE — which rows are lease months, and the prose that
  * closes a lease month's breakdown.
  *

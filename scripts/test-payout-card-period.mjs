@@ -552,5 +552,56 @@ const downtimeRow = { ...leaseRow, id: 10, period: '2026-10', monthEarnings: 0, 
 check('a $0 downtime lease month reads as nothing due, not as money awaited',
   payoutHeadline(decomposeSettled(downtimeRow)), 'Nothing due for this month')
 
+// ===========================================================================
+// 8. THE PAYOUTS BREAKDOWN'S CARRY TERMS — settledCarryTerms().
+//
+//    PayoutsSection's past-month breakdown compared the month's bare share with
+//    the settled amount and, when they differed, said "The figures above reflect
+//    current records, which have changed since it closed." A loss month settles
+//    at $0 against a negative share, and a month that absorbed an earlier loss
+//    settles below its share, so that note appeared on every such month although
+//    nothing had changed (staging, investor user 561, August 2026: share −$250,
+//    settled $0). The comparison has to include the carry; a real change after
+//    the close must still be caught. Figures are real rows from GET
+//    /api/investor/payouts (staging 561, and the local copy's investors 42 and 5).
+// ===========================================================================
+const { settledCarryTerms } = mod
+const carryOf = (share, row) => settledCarryTerms({ splitPct: 50, monthShare: share }, row)
+
+// --- 8a. The rows that used to carry the false note -------------------------
+const staging561Aug = carryOf(-250, { amount: 0, lossCarriedIn: 0, lossDeferred: 250 })
+check('loss month (staging 561, 2026-08): share − 0 + $250 carried = the settled $0, no change note',
+  staging561Aug, { share: -250, carriedIn: 0, deferred: 250, composed: 0, drifted: false })
+check('absorbed an earlier loss in part (42, 2026-04): $1,733 − $162 = the settled $1,571',
+  carryOf(1733, { amount: 1571, lossCarriedIn: 162, lossDeferred: 0 }),
+  { share: 1733, carriedIn: 162, deferred: 0, composed: 1571, drifted: false })
+check('absorbed an earlier loss in full (42, 2025-11): $780 − $780 = the settled $0',
+  carryOf(780, { amount: 0, lossCarriedIn: 780, lossDeferred: 0 }).drifted, false)
+
+// --- 8b. A real change after the close is still disclosed -------------------
+// PAIRED with 8a: the carry must not swallow genuine drift.
+check('no carry, the share moved after the close (5, 2026-06: $8,565 vs settled $8,703): note stays',
+  carryOf(8565, { amount: 8703, lossCarriedIn: 0, lossDeferred: 0 }).drifted, true)
+check('carry AND a change after the close ($1,733 − $162 = $1,571 vs settled $1,500): note stays',
+  carryOf(1733, { amount: 1500, lossCarriedIn: 162, lossDeferred: 0 }).drifted, true)
+check('a loss month whose loss changed after the close (−$300 + $250 vs settled $0): note stays',
+  carryOf(-300, { amount: 0, lossCarriedIn: 0, lossDeferred: 250 }).drifted, true)
+check('no carry, share equals the settled amount: no note, exactly as before',
+  carryOf(4500, { amount: 4500, lossCarriedIn: 0, lossDeferred: 0 }), { share: 4500, carriedIn: 0, deferred: 0, composed: 4500, drifted: false })
+check('compared in whole cents: floating-point noise is not a change',
+  carryOf(1733.001, { amount: 1571, lossCarriedIn: 162, lossDeferred: 0 }).drifted, false)
+
+// --- 8c. A lease month never carries -----------------------------------------
+check('lease month: no carry whatever the payload says, composes to the lease paid',
+  settledCarryTerms({ splitPct: null, monthShare: 2000, payoutBasis: FULL }, { amount: 2000, lossCarriedIn: 500, lossDeferred: 90 }),
+  { share: 2000, carriedIn: 0, deferred: 0, composed: 2000, drifted: false })
+// PAIRED: the same carry on a split month still counts.
+check('the same carry on a split month still counts',
+  carryOf(2000, { amount: 1500, lossCarriedIn: 500, lossDeferred: 0 }), { share: 2000, carriedIn: 500, deferred: 0, composed: 1500, drifted: false })
+
+// --- 8d. Junk -----------------------------------------------------------------
+check('a negative carry figure is not a carry', carryOf(900, { amount: 900, lossCarriedIn: -50, lossDeferred: -20 }).composed, 900)
+check('no breakdown, no row: finite zeros, no throw', settledCarryTerms(undefined, undefined), { share: 0, carriedIn: 0, deferred: 0, composed: 0, drifted: false })
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)
