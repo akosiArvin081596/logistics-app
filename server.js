@@ -10579,7 +10579,22 @@ const USER_AGENT_MAX = 512;
 // equal.
 const EVIDENCE_TEXT_STRIP = /[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]+/g;
 function sanitizeEvidenceText(v, max) {
-	const s = String(v == null ? "" : v).normalize("NFC").replace(EVIDENCE_TEXT_STRIP, " ").trim();
+	// Only `max` characters are kept, so the raw value is cut to 4 × max BEFORE
+	// it is normalized, and the work stays proportional to the kept length.
+	// Four units a character leaves room for astral characters, decomposed
+	// accents and the stripped characters below: real text cleans exactly as it
+	// did, and only a value padded so heavily that its first `max` characters
+	// lie past the cut comes out differently. The cut never leaves half a
+	// surrogate pair. ⚠️ Self-contained on purpose (runners lift this function
+	// alone), so safeAttachmentName() carries the same cut, and
+	// scripts/test-text-cleanup-bound.js pins the two copies identical.
+	let raw = String(v == null ? "" : v);
+	if (raw.length > max * 4) {
+		raw = raw.slice(0, max * 4);
+		const last = raw.charCodeAt(raw.length - 1);
+		if (last >= 0xd800 && last <= 0xdbff) raw = raw.slice(0, -1);
+	}
+	const s = raw.normalize("NFC").replace(EVIDENCE_TEXT_STRIP, " ").trim();
 	// Array.from, not slice: cutting at a UTF-16 boundary can split a surrogate
 	// pair and store a lone surrogate, which SQLite renders as U+FFFD. Cosmetic
 	// anywhere else; this is an evidence field.
@@ -41102,7 +41117,15 @@ function isRealCalendarDate(y, mo, d) {
 // legitimately EMPTY (the non-Bison filename reads "Invoice Order #…" with no
 // prefix) — defaulting that to "Invoice" would print "Invoice Invoice Order #…".
 function safeAttachmentName(value, max = 80, fallback = "Invoice") {
-	let s = String(value == null ? "" : value).normalize("NFC").replace(EVIDENCE_TEXT_STRIP, " ");
+	// Cut to 4 × max before normalizing — the same cut, for the same reason, as
+	// in sanitizeEvidenceText().
+	let raw = String(value == null ? "" : value);
+	if (raw.length > max * 4) {
+		raw = raw.slice(0, max * 4);
+		const last = raw.charCodeAt(raw.length - 1);
+		if (last >= 0xd800 && last <= 0xdbff) raw = raw.slice(0, -1);
+	}
+	let s = raw.normalize("NFC").replace(EVIDENCE_TEXT_STRIP, " ");
 	s = s.replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim();
 	// ⚠️ `[.\s]+`, not `\.+`, and it must run AFTER the separator replacement.
 	// Replacing separators MANUFACTURES new leading dot-runs: "../../etc/passwd"
