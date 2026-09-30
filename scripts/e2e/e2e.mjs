@@ -7566,22 +7566,30 @@ async function termsFeature(t0) {
           await caption(P2.page, `Step T8 — the used lease link opened again: invite-error ${shown ? R.reopen.code : 'NOT shown'}`)
           R.reopen.shot = await shot(P2.page, 't8-c-reopen')
           await P2.close()
-          // /investor-applications: the Terms column and the detail's Payment Terms.
+          // /investor-applications: the terms chip under the lease applicant's name, the
+          // row's Actions inside the table's visible box, and the detail's Payment Terms.
           await S.admin.goto(`${BASE_URL}/investor-applications`)
           await S.admin.locator('table tbody tr').first().waitFor({ state: 'visible', timeout: 30000 })
-          const tbl = await S.admin.evaluate((n) => {
-            const table = [...document.querySelectorAll('table')].find((t) => t.tHead && /name/i.test(t.tHead.innerText))
-            if (!table) return { heads: [], found: false, terms: null }
-            const heads = [...table.tHead.querySelectorAll('th')].map((th) => th.innerText.trim())
-            const ti = heads.findIndex((h) => /terms/i.test(h))
-            const tr = [...table.tBodies[0].rows].find((r) => (r.cells[0]?.innerText || '').trim() === n)
-            return { heads, found: !!tr, terms: tr && ti >= 0 ? tr.cells[ti].innerText.replace(/\s+/g, ' ').trim() : null }
-          }, S.leaseName)
-          const tr = S.admin.locator('table tbody tr', { has: S.admin.locator('td', { hasText: exactText(S.leaseName) }) }).first()
+          const tr = S.admin.locator('table tbody tr', { has: S.admin.locator('[data-test="application-name"]', { hasText: exactText(S.leaseName) }) }).first()
+          const tbl = { heads: (await S.admin.locator('table thead th').allInnerTexts()).map((h) => squash(h)), found: await tr.count() > 0, chips: 0, chip: null, title: null, actionsVisible: false }
           let detail = ''
-          if (await tr.count()) {
+          if (tbl.found) {
             await tr.scrollIntoViewIfNeeded().catch(() => {})
-            await caption(S.admin, `Step T8 — /investor-applications: the Terms column reads ${tbl.terms == null ? '(no Terms column)' : `"${tbl.terms}"`}`)
+            const chip = tr.locator('[data-test="application-terms"]')
+            tbl.chips = await chip.count()
+            if (tbl.chips) {
+              tbl.chip = squash(await chip.first().innerText())
+              tbl.title = await chip.first().getAttribute('title')
+            }
+            // View and the status select, both inside the table's scroll box (1400×900).
+            tbl.actionsVisible = await tr.evaluate((row) => {
+              const box = row.closest('table').parentElement.getBoundingClientRect()
+              const select = row.querySelector('[data-test="application-status"]')
+              const view = [...row.querySelectorAll('button')].find((b) => /^view$/i.test(b.innerText.trim()))
+              if (!select || !view) return false
+              return view.getBoundingClientRect().left >= box.left && select.getBoundingClientRect().right <= box.right + 0.5
+            })
+            await caption(S.admin, `Step T8 — /investor-applications: the chip under the name reads ${tbl.chip == null ? '(no chip)' : `"${tbl.chip}"`}; Actions visible: ${tbl.actionsVisible}`)
             await shot(S.admin, 't8-d-applications')
             await tr.click()
             const dlg = S.admin.locator('[role="dialog"]').filter({ hasText: S.leaseName }).first()
@@ -7596,7 +7604,7 @@ async function termsFeature(t0) {
           await caption(S.admin, `Step T8 — the application's detail: "Payment Terms" ${/payment terms/i.test(detail)}, "$2,000.00" ${detail.includes('$2,000.00')}`)
           R.apps = {
             ...tbl, detailSection: /payment terms/i.test(detail), detailAmount: detail.includes('$2,000.00'),
-            listSummary: listed?.payment_terms_summary, view: det?.json?.paymentTerms || null,
+            listSummary: listed?.payment_terms_summary, listTerms: listed?.payment_terms, view: det?.json?.paymentTerms || null,
             shot: await shot(S.admin, 't8-e-application-detail'),
           }
           await S.admin.keyboard.press('Escape').catch(() => {})
@@ -7614,11 +7622,11 @@ async function termsFeature(t0) {
             ok: x.shown && x.code === 'INVITE_USED' && !x.form,
             observed: `invite-error ${x.shown ? `shown, data-code ${x.code}` : 'NOT shown'}; the application form shown: ${x.form}`,
           }))
-          walkRow(R, 'T8c', 'Super Admin, /investor-applications: the Terms column and the detail\'s Payment Terms for the lease application',
-            'The Terms column and the detail both show the lease at $2,000.00', 'apps', (x) => ({
-              ok: !!x.terms && x.terms.includes('$2,000.00') && x.detailSection && x.detailAmount,
-              observed: `columns [${x.heads.join(' | ')}]; the row ${x.found ? `found, Terms "${x.terms ?? '(no Terms column)'}"` : 'NOT found'}; the detail: "Payment Terms" ${x.detailSection}, "$2,000.00" ${x.detailAmount}; ` +
-                `API: payment_terms_summary ${JSON.stringify(x.listSummary ?? null)}, paymentTerms ${x.view ? `state ${x.view.state}, type ${x.view.paymentTerms?.type}, leaseAmountCents ${x.view.paymentTerms?.leaseAmountCents}, consistent ${x.view.consistent}` : 'absent'}`,
+          walkRow(R, 'T8c', 'Super Admin, /investor-applications: the terms chip under the lease applicant\'s name, the row\'s Actions, and the detail\'s Payment Terms',
+            'The chip reads "Lease · $2,000.00/mo"; View and the status select are fully visible; the detail shows the lease at $2,000.00', 'apps', (x) => ({
+              ok: x.chips === 1 && x.chip === 'Lease · $2,000.00/mo' && x.actionsVisible && x.detailSection && x.detailAmount,
+              observed: `columns [${x.heads.join(' | ')}]; the row ${x.found ? `found, ${x.chips} chip(s), "${x.chip ?? '(no chip)'}" (tooltip ${JSON.stringify(x.title)}), Actions visible ${x.actionsVisible}` : 'NOT found'}; the detail: "Payment Terms" ${x.detailSection}, "$2,000.00" ${x.detailAmount}; ` +
+                `API: payment_terms_summary ${JSON.stringify(x.listSummary ?? null)}, payment_terms ${JSON.stringify(x.listTerms ?? null)}, paymentTerms ${x.view ? `state ${x.view.state}, type ${x.view.paymentTerms?.type}, leaseAmountCents ${x.view.paymentTerms?.leaseAmountCents}, consistent ${x.view.consistent}` : 'absent'}`,
             }))
           walkRow(R, 'T8d', `Super Admin: PUT ${INVITES_API}/<the used lease invite> (amount 2500)`, '409 INVITE_LOCKED', 'locked', (r) => ({
             ok: r.status === 409 && r.json?.code === 'INVITE_LOCKED',

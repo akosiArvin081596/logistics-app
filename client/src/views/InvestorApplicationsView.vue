@@ -94,24 +94,39 @@
               <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Entity</TableHead>
               <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Email</TableHead>
               <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Phone</TableHead>
-              <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Terms</TableHead>
               <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Docs</TableHead>
               <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Onboarding</TableHead>
               <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Status</TableHead>
-              <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider text-right">Actions</TableHead>
+              <!-- Pinned from md up, like the Actions cells below: opaque gray-50
+                   with the header's muted/40 laid over it, the colour of the
+                   header cells beside it. -->
+              <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider text-right md:sticky md:right-0 md:bg-gray-50 md:bg-linear-to-b md:from-muted/40 md:to-muted/40">Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            <TableRow v-for="app in filteredApplications" :key="app.id" class="hover:bg-blue-50/30 transition-colors cursor-pointer" @click="viewDetail(app)">
-              <TableCell class="font-semibold text-[13px] text-gray-900">{{ app.legal_name }}</TableCell>
+            <TableRow v-for="app in filteredApplications" :key="app.id" class="group hover:bg-blue-50/30 transition-colors cursor-pointer" @click="viewDetail(app)">
+              <TableCell class="font-semibold text-[13px] text-gray-900">
+                <div data-test="application-name">{{ app.legal_name }}</div>
+                <!-- Signed terms only: the standard contract shows no chip. -->
+                <Badge
+                  v-if="app.payment_terms"
+                  variant="outline"
+                  data-test="application-terms"
+                  :class="['mt-1 normal-case tracking-normal', termsChipClass(app.payment_terms)]"
+                  :title="termsTitle(app)"
+                >{{ termsChipLabel(app.payment_terms) }}</Badge>
+              </TableCell>
               <TableCell class="text-[13px] text-gray-600">{{ app.entity_type || '-' }}</TableCell>
               <TableCell class="text-[13px] text-gray-600">{{ app.email }}</TableCell>
               <TableCell class="text-[13px] text-gray-600">{{ app.phone }}</TableCell>
-              <TableCell class="text-[13px] text-gray-700 max-w-[170px]" data-test="application-terms" :title="termsTitle(app)"><span class="line-clamp-2">{{ app.payment_terms_summary || '—' }}</span></TableCell>
               <TableCell class="text-[13px]" data-test="application-docs">{{ app.signed_count || 0 }}/{{ app.docs_total ?? 3 }}</TableCell>
               <TableCell><Badge :class="obBadge(app.onboarding_status)">{{ app.onboarding_status || 'pending' }}</Badge></TableCell>
               <TableCell><Badge :class="statusBadge(app.status)">{{ app.status }}</Badge></TableCell>
-              <TableCell class="text-right" @click.stop>
+              <!-- From md up, Actions stay pinned at the card's right edge when the
+                   table is wider than the card, and the other columns scroll
+                   beneath them, so the cell is opaque white with the row's
+                   blue-50/30 hover laid over it. -->
+              <TableCell class="text-right transition-colors md:sticky md:right-0 md:bg-white md:group-hover:bg-linear-to-b md:group-hover:from-blue-50/30 md:group-hover:to-blue-50/30" @click.stop>
                 <div class="flex items-center justify-end gap-1.5">
                   <Button size="sm" variant="outline" class="rounded-md border-[#e2e4ea] text-[12px] h-8" @click="viewDetail(app)">View</Button>
                   <select
@@ -306,6 +321,7 @@ import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
 import PaymentTermsSummary from '../components/investors/PaymentTermsSummary.vue'
+import { formatMoneyCents } from '../lib/paymentTerms'
 import ConfirmModal from '../components/shared/ConfirmModal.vue'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -361,10 +377,23 @@ function statusBadge(s) {
   return 'bg-gray-50 text-gray-600 border-gray-200'
 }
 
-// The Terms cell shows two lines at most; its tooltip keeps the whole summary.
+// The terms chip under an applicant's name, from the list's payment_terms
+// (null for the standard contract, which shows no chip). A split snapshot
+// always carries additional terms: a plain split is the standard contract.
+function termsChipLabel(terms) {
+  if (terms.unreadable) return 'Terms unreadable'
+  if (terms.type === 'lease') return `Lease · ${formatMoneyCents(terms.leaseAmountCents)}/mo`
+  return '50/50 · amended'
+}
+
+function termsChipClass(terms) {
+  return terms.unreadable ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-violet-50 text-violet-700 border-violet-200'
+}
+
+// The chip's tooltip: the whole summary, and the invitation it came through.
 function termsTitle(app) {
-  const summary = app.payment_terms_summary || ''
-  return app.invite_id ? `${summary} (applied through personal invite #${app.invite_id})` : summary || undefined
+  const summary = app.payment_terms_summary
+  return app.invite_id ? `${summary} (applied through personal invite #${app.invite_id})` : summary
 }
 
 function obBadge(s) {
