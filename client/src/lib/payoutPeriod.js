@@ -13,9 +13,9 @@
  *
  * Everything here is PURE — no Vue, no store, no network — so the arithmetic can
  * be locked by scripts/test-payout-card-period.mjs. Same shape and reasoning as
- * lib/address.js. The single import is the shared month formatter, itself pure
- * and importable by bare Node; the specifier carries its '.js' for exactly that
- * reason, or the lock cannot load this file at all.
+ * lib/address.js. The two imports — the shared month formatter and the lease
+ * wording — are themselves pure and importable by bare Node; each specifier
+ * carries its '.js' for exactly that reason, or the lock cannot load this file.
  *
  * ---------------------------------------------------------------------------
  * THE THREE CASES, AND WHY EACH ONE IS A SEPARATE BASIS
@@ -71,6 +71,7 @@
 // periodKeyLabel() below for what this module adds on top of it, and why that
 // one rule cannot be folded into the shared formatter.
 import { monthLabel as formatMonth } from './monthLabel.js'
+import { LEASE_LOSS_NOTE, leaseExplain, leaseReasonLine } from './leasePayoutText.js'
 
 const MONTH_KEY_RE = /^\d{4}-\d{2}$/
 const YMD_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -490,6 +491,10 @@ export function settlementTerms(s) {
  */
 export function earningsCarryTerms(month, opts = {}) {
   if (!month) return []
+  // A lease month neither absorbs nor defers a loss (the server publishes both
+  // as 0 there), so it has no carry tail even against a payload that says
+  // otherwise — the lease is paid in full or per its stated reason.
+  if (leaseBasisOf(month)) return []
   const carriedIn = whole(month.lossCarriedIn)
   const deferred = whole(month.lossDeferred)
   if (carriedIn <= 0 && deferred <= 0) return []
@@ -546,6 +551,58 @@ export function earningsCarryTerms(month, opts = {}) {
     kind: 'total',
   })
   return rows
+}
+
+/**
+ * THE FIXED MONTHLY LEASE — which rows are lease months, and the prose that
+ * closes a lease month's breakdown.
+ *
+ * An investor can sign either a profit split or a fixed monthly lease. Every
+ * figure the portal publishes for a lease month is still the one the server
+ * computed; only the sentences around it change, and those sentences live in
+ * lib/leasePayoutText.js (the one client copy of the canonical wording). The
+ * server marks a lease month with a `payoutBasis` object; no `payoutBasis` means
+ * a split month, rendered exactly as before.
+ */
+
+/**
+ * The lease basis a row carries, or null for a split row. Reads the row's own
+ * `payoutBasis` first and then its `breakdown`'s, so one call serves a
+ * monthlyEarnings row, a payout row, `currentMonth` and `production`.
+ *
+ * `type === 'lease'` is the whole test. A basis object of any other type — or a
+ * row with none — is a split row, which is the only safe default: rendering
+ * lease wording over a split month would tell an investor their agreement is
+ * something it is not.
+ */
+export function leaseBasisOf(row) {
+  if (!row) return null
+  const b = row.payoutBasis || (row.breakdown && row.breakdown.payoutBasis) || null
+  return b && b.type === 'lease' ? b : null
+}
+
+/** Whether any month in a list is a lease month. */
+export function hasLeaseMonth(rows) {
+  return (Array.isArray(rows) ? rows : []).some((r) => !!leaseBasisOf(r))
+}
+
+/**
+ * The prose that closes a lease month's breakdown, in reading order: what the
+ * lease is, why this month pays what it pays, and — for a month whose truck ran
+ * at a loss — that the loss is not carried against the lease. That last line
+ * stands where a split month explains its carry-forward.
+ *
+ * `netProfit` is the month's own signed P&L; absent or non-numeric means "not a
+ * loss", so no loss line is claimed for a month whose figure this does not have.
+ */
+export function leaseNotes(basis, opts = {}) {
+  if (!basis) return []
+  const lines = [leaseExplain(basis)]
+  const reason = leaseReasonLine(basis)
+  if (reason) lines.push(reason)
+  const net = Number(opts.netProfit)
+  if (Number.isFinite(net) && net < 0) lines.push(LEASE_LOSS_NOTE)
+  return lines
 }
 
 /**

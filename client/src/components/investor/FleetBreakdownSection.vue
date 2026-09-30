@@ -202,7 +202,12 @@
         </tr>
       </tfoot>
     </table>
-    <div class="fleet-note">
+    <!-- Under a lease the take-home being projected is the lease payment, so the
+         note states the lease instead of "your share of the net profit". -->
+    <div v-if="currentLease" class="fleet-note">
+      Est. Your Revenue = that truck's own trailing 3-month take-home × 12. {{ leaseExplain(currentLease) }} Each truck is projected from its own loads, so trucks in the same fleet will differ. ROI = Est. Your Revenue / Purchase Price × 100. A &ldquo;&mdash;&rdquo; means the truck hasn't been in service a full 3 months yet, so there's nothing to average from — it isn't a $0 forecast, and it's left out of the Fleet Total. Based on {{ monthsLabel }} of data — projections become more accurate over time.
+    </div>
+    <div v-else class="fleet-note">
       Est. Your Revenue = that truck's own trailing 3-month take-home × 12 — your share of the net profit its loads produced, after driver pay, fixed costs and trip expenses. Each truck is projected from its own loads, so trucks in the same fleet will differ. ROI = Est. Your Revenue / Purchase Price × 100. A &ldquo;&mdash;&rdquo; means the truck hasn't been in service a full 3 months yet, so there's nothing to average from — it isn't a $0 forecast, and it's left out of the Fleet Total. Based on {{ monthsLabel }} of data — projections become more accurate over time.
     </div>
 
@@ -260,15 +265,31 @@
       <!-- Est. Your Revenue -->
       <template v-if="detailType === 'estRevenue'">
         <div class="modal-breakdown">
-          <div class="modal-explain">
-            <strong>Est. Your Revenue</strong> is a forward-looking projection of what each truck will pay you over the next 12 months &mdash; your share of the net profit that truck's own loads produced, annualised from its trailing 3-month average.
-          </div>
-          <div class="step-label">The Calculation (per truck)</div>
-          <div class="modal-explain-sm">
-            1. Take the last 3 months of revenue from the loads <strong>that truck</strong> hauled.<br>
-            2. Subtract driver pay, fixed costs and trip expenses, then apply your profit split.<br>
-            3. Multiply that monthly take-home by 12.
-          </div>
+          <!-- Lease: the fleet's lease take-home over the trailing window is
+               divided across the trucks by the revenue each one's loads produced
+               in it — the allocation the server runs — with no split applied. -->
+          <template v-if="currentLease">
+            <div class="modal-explain">
+              <strong>Est. Your Revenue</strong> is a forward-looking projection of what each truck will pay you over the next 12 months, annualised from its trailing 3-month average. {{ leaseExplain(currentLease) }}
+            </div>
+            <div class="step-label">The Calculation (per truck)</div>
+            <div class="modal-explain-sm">
+              1. Take your take-home over the last 3 months.<br>
+              2. Divide it across your trucks in proportion to the revenue from the loads <strong>each truck</strong> hauled in those months.<br>
+              3. Multiply that monthly take-home by 12.
+            </div>
+          </template>
+          <template v-else>
+            <div class="modal-explain">
+              <strong>Est. Your Revenue</strong> is a forward-looking projection of what each truck will pay you over the next 12 months &mdash; your share of the net profit that truck's own loads produced, annualised from its trailing 3-month average.
+            </div>
+            <div class="step-label">The Calculation (per truck)</div>
+            <div class="modal-explain-sm">
+              1. Take the last 3 months of revenue from the loads <strong>that truck</strong> hauled.<br>
+              2. Subtract driver pay, fixed costs and trip expenses, then apply your profit split.<br>
+              3. Multiply that monthly take-home by 12.
+            </div>
+          </template>
           <div class="modal-hint">
             Each truck is measured on its own loads, so two trucks in one fleet won't show the same number. Where a load doesn't name a truck, its assigned driver's loads are used instead.
           </div>
@@ -334,12 +355,17 @@ import { ref, computed } from 'vue'
 import { formatCurrency as fmt } from '../../utils/format'
 import MetricInfoDialog from './MetricInfoDialog.vue'
 import ZoomableImage from '../shared/ZoomableImage.vue'
+import { leaseBasisOf } from '../../lib/payoutPeriod'
+import { leaseExplain } from '../../lib/leasePayoutText'
 
 const props = defineProps({
   trucks: { type: Array, default: () => [] },
   asset: { type: Object, default: () => ({}) },
   production: { type: Object, default: () => ({}) },
 })
+
+// The current month's lease basis (`production.payoutBasis`), or null on a split.
+const currentLease = computed(() => leaseBasisOf(props.production))
 
 const expandedUnit = ref(null)
 function toggleDetail(unit) { expandedUnit.value = expandedUnit.value === unit ? null : unit }

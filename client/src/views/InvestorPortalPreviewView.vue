@@ -45,7 +45,10 @@
             <div class="banner-title">
               Previewing <strong>{{ targetName || 'investor' }}</strong>'s portal
             </div>
-            <div class="banner-sub">Read-only replica &middot; the investor is not affected by anything you do here</div>
+            <!-- The basis the portal below is worded on, so an admin reading a
+                 lease investor's screens knows why none of them mention a split. -->
+            <div v-if="previewLease" class="banner-sub">Read-only replica &middot; the investor is not affected by anything you do here &middot; {{ leaseSubLine(previewLease) }}</div>
+            <div v-else class="banner-sub">Read-only replica &middot; the investor is not affected by anything you do here</div>
           </div>
         </div>
         <button class="banner-exit" @click="exit">&larr; Exit Preview</button>
@@ -65,6 +68,8 @@ import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
 import { useInvestorStore } from '../stores/investor'
 import { useApi } from '../composables/useApi'
 import InvestorView from './InvestorView.vue'
+import { leaseBasisOf } from '../lib/payoutPeriod'
+import { leaseSubLine } from '../lib/leasePayoutText'
 
 const route = useRoute()
 const router = useRouter()
@@ -72,6 +77,8 @@ const store = useInvestorStore()
 const api = useApi()
 
 const targetName = computed(() => store.data?.investor?.fullName || store.data?.investor?.username || '')
+// The previewed investor's current basis (`production.payoutBasis`), or null on a split.
+const previewLease = computed(() => leaseBasisOf(store.production))
 
 // 'checking' | 'found' | 'not-found' | 'error'. InvestorView mounts only on
 // 'found', so a link to anyone but an investor loads no portal section at all.

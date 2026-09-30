@@ -143,7 +143,8 @@
         <span class="lr-owed-label">Earned to date</span>
         <span class="lr-owed-value">{{ fmtMoney(earnedToDate) }}</span>
       </div>
-      <span class="lr-owed-context">Net investor share across every month</span>
+      <span v-if="anyLeaseMonth" class="lr-owed-context">Cumulative take-home, summed across every month</span>
+      <span v-else class="lr-owed-context">Net investor share across every month</span>
     </div>
     <!-- CLOSED MONTHS ONLY — `showSettlementCard` keeps the open month and the
          lifetime view off the page entirely, and holds the card back until the
@@ -176,7 +177,14 @@
 
       <!-- Settlement drift only, now that the loss prose has gone with the open
            month. Never green: this is an explanation, not money received. -->
-      <span class="lr-owed-accruing" v-if="noteText">{{ noteText }}</span>
+      <!-- A closed lease month names its basis, and the reason when it paid
+           less than the full lease — a $0 "Nothing due" needs its why. -->
+      <template v-if="settlementLease">
+        <span class="lr-owed-accruing">{{ leaseSubLine(settlementLease) }}</span>
+        <span v-if="leaseReasonLine(settlementLease)" class="lr-owed-accruing">{{ leaseReasonLine(settlementLease) }}</span>
+        <span v-if="noteText" class="lr-owed-accruing">{{ noteText }}</span>
+      </template>
+      <span class="lr-owed-accruing" v-else-if="noteText">{{ noteText }}</span>
     </div>
 
     <div v-if="loading" class="lr-msg">Loading load reports…</div>
@@ -214,9 +222,13 @@
         </div>
       </div>
 
-      <p v-if="period === 'weekly'" class="lr-note">
+      <!-- Under a lease no load carries a share, in either view: the note says
+           so rather than pointing at a Monthly view that has none either. -->
+      <p v-if="period === 'weekly' && currentLease" class="lr-note">{{ LEASE_NO_LOAD_SHARE }}</p>
+      <p v-else-if="period === 'weekly'" class="lr-note">
         Net investor share is reconciled monthly — switch to Monthly to see your share.
       </p>
+      <p v-else-if="selectedMonthLease" class="lr-note">{{ LEASE_NO_LOAD_SHARE }}</p>
 
       <div class="lr-table-wrap" v-if="sel">
         <table class="lr-table">
@@ -261,7 +273,10 @@ import {
   exportFileName,
   monthLabel,
   isMonthKey,
+  leaseBasisOf,
+  hasLeaseMonth,
 } from '../../lib/payoutPeriod'
+import { LEASE_NO_LOAD_SHARE, leaseSubLine, leaseReasonLine } from '../../lib/leasePayoutText'
 
 const props = defineProps({
   production: { type: Object, default: () => ({}) },
@@ -361,6 +376,14 @@ const stateNote = computed(() => {
   return s.status === 'processing' ? `Payment in progress${due}.` : `Awaiting payment${due}.`
 })
 
+// The selected closed month's lease basis, read off its ledger row (the frozen
+// breakdown carries it too, so a closed lease month keeps its wording).
+const settlementLease = computed(() => {
+  const s = settlement.value
+  if (!s || s.basis !== 'settled') return null
+  return leaseBasisOf((investorStore.payouts || []).find((p) => p && String(p.period) === s.period))
+})
+
 // Extra prose, only where a figure would otherwise be inexplicable. Just the one
 // case now that the open month is gone: a settled month whose current records no
 // longer match what it was settled at, where the two figures on screen genuinely
@@ -385,10 +408,25 @@ const inTransitCount = computed(() => {
   if (!s) return 0
   return s.inTransitCount ?? s.loads.filter((l) => !l.completed).length
 })
+// The current month's basis (`production.payoutBasis`) and whether any month
+// was paid as a lease — for the notes that are not about one selected month.
+const currentLease = computed(() => leaseBasisOf(props.production))
+const anyLeaseMonth = computed(() => hasLeaseMonth(props.production?.monthlyEarnings))
+// The selected month's lease basis (monthly view only).
+const selectedMonthLease = computed(() => {
+  if (period.value !== 'monthly' || !sel.value) return null
+  return leaseBasisOf((props.production?.monthlyEarnings || []).find((x) => x.month === sel.value.key))
+})
+
 // Authoritative monthly net share, reused from the dashboard's monthlyEarnings
 // so this section reconciles with EarningsSection / the rest of the portal.
+//
+// null for a LEASE month: its `investorEarnings` is the lease payment, not the
+// month's performance, so there is no "Your Net Result" to show and nothing to
+// allocate across its loads — the note under the table says why instead.
 const monthlyNet = computed(() => {
   if (period.value !== 'monthly' || !sel.value) return null
+  if (selectedMonthLease.value) return null
   const m = (props.production?.monthlyEarnings || []).find((x) => x.month === sel.value.key)
   return m ? (m.investorEarnings || 0) : null
 })
@@ -434,9 +472,11 @@ function shareOf(l) {
 
 // Authoritative net per month from the dashboard, handed to the export so the
 // PDF/CSV reconcile with the portal. Server matches by YYYY-MM; weekly ignores it.
+// A lease month is left out: the export would otherwise spread the lease payment
+// across that month's loads as a per-load share, which a lease does not have.
 function netParam() {
   return (props.production?.monthlyEarnings || [])
-    .filter((m) => m && m.month)
+    .filter((m) => m && m.month && !leaseBasisOf(m))
     .map((m) => `${m.month}:${Math.round(m.investorEarnings || 0)}`)
     .join(',')
 }
