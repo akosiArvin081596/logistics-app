@@ -38,6 +38,8 @@ const fs = require("fs");
 const path = require("path");
 const Database = require("better-sqlite3");
 const { csvRows } = require("../lib/csv");
+const investorPayoutBasis = require("../lib/investor-payout-basis");
+const leasePayoutText = require("../lib/lease-payout-text");
 
 const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 
@@ -134,6 +136,11 @@ async function runHandler(handlerSrc, { session, rows, query = {} }) {
 		logAudit: () => {},
 		resolveCityState: () => "City, ST",
 		getWeekRange: () => { throw new Error("the monthly view reads no week"); },
+		// These investors are paid the split: no payout basis (the lease month is
+		// scripts/test-payout-basis-routes.js's subject).
+		investorPayoutBasis,
+		leasePayoutText,
+		payoutBasisContext: () => null,
 	};
 	const names = Object.keys(deps);
 	const handler = new Function(...names, `

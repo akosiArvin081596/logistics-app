@@ -15,10 +15,12 @@
 // NUL, emoji and copyright / registered / trade mark inputs built with
 // String.fromCodePoint) and compares every answer, field, reason and message,
 // plus LIMITS, PAYMENT_TYPES, TYPE_LABELS, MESSAGES, STANDARD_SUMMARY,
-// formatMoneyCents and describeTerms. The sabotage controls prove the
-// comparison can fail: copies of the client module with one limit, one
-// pattern, one dropped character class or one change to the three allowed
-// signs must each be reported.
+// formatMoneyCents and describeTerms. A lease amount is whole dollars (a lease
+// is paid in whole dollars), refused with one agreed message when it has
+// cents. The sabotage controls prove the comparison can fail: copies of the
+// client module with one limit, one pattern, one dropped character class, one
+// change to the three allowed signs or the cents allowed again must each be
+// reported.
 //
 // No network, no DB, no server — safe anywhere.
 //   node scripts/test-payment-terms-parity.mjs      # exits 1 on any failure
@@ -69,6 +71,17 @@ const TERMS_INPUTS = [
   { paymentType: 'lease', leaseAmount: Infinity },
   { paymentType: 'lease', leaseAmount: NaN },
   { paymentType: 'lease', leaseAmount: '2000.123' },
+  { paymentType: 'lease', leaseAmount: '2000.000' },
+  { paymentType: 'lease', leaseAmount: '2000.00' },
+  { paymentType: 'lease', leaseAmount: '2000.0' },
+  { paymentType: 'lease', leaseAmount: '2000.50' },
+  { paymentType: 'lease', leaseAmount: '2000.01' },
+  { paymentType: 'lease', leaseAmount: 2000.5 },
+  { paymentType: 'lease', leaseAmount: 2000 },
+  { paymentType: 'lease', leaseAmount: '$1' },
+  { paymentType: 'lease', leaseAmount: '0.50' },
+  { paymentType: 'lease', leaseAmount: '100000.00' },
+  { paymentType: 'lease', leaseAmount: '100001' },
   { paymentType: 'lease', leaseAmount: '$$5' },
   { paymentType: 'lease', leaseAmount: '0000000000002000.' },
   { paymentType: 'lease', leaseAmount: ['2000'] },
@@ -136,6 +149,23 @@ ok('the table exercises every refusal reason', ['invalid_type', 'amount_required
   .every((reason) => TERMS_INPUTS.some((i) => lib.normalizeTermsInput(i).reason === reason)))
 ok('the client module is pure (no imports)', !/^\s*import\s/m.test(CLIENT_SRC))
 
+// ══ Whole dollars ═════════════════════════════════════════════════════════════
+// A lease is paid in whole dollars, so an invite's amount is whole dollars too:
+// cents are refused on both sides with one message, before the range.
+const WHOLE_DOLLARS = 'Enter the monthly lease amount in whole dollars, for example 2000.'
+ok('the whole-dollar message is the agreed wording, on both sides', client.MESSAGES.invalid_amount === WHOLE_DOLLARS && lib.MESSAGES.invalid_amount === WHOLE_DOLLARS)
+for (const [input, cents] of [['2000', 200000], [2000, 200000], ['$1', 100], ['2000.00', 200000], ['100000', 10000000]]) {
+  const got = client.parseLeaseAmountToCents(input)
+  ok(`whole dollars ${j(input)} → ${cents} cents`, got.ok && got.value === cents)
+}
+for (const input of ['2000.50', '2000.01', 2000.5, '0.50', '0.99', '1234.56']) {
+  ok(`cents ${j(input)} refused as not whole dollars`, client.parseLeaseAmountToCents(input).reason === 'invalid_amount' &&
+    client.normalizeTermsInput({ paymentType: 'lease', leaseAmount: input }).message === WHOLE_DOLLARS)
+}
+ok('out of range in whole dollars is still out of range', client.parseLeaseAmountToCents('100001').reason === 'amount_out_of_range' && client.parseLeaseAmountToCents('0').reason === 'amount_out_of_range')
+const OUT_OF_RANGE = 'The monthly lease amount must be between $1 and $100,000.'
+ok('the range message is in whole dollars, like every lease amount, on both sides', client.MESSAGES.amount_out_of_range === OUT_OF_RANGE && lib.MESSAGES.amount_out_of_range === OUT_OF_RANGE)
+
 // ══ Sabotage controls ═════════════════════════════════════════════════════════
 async function sabotaged(from, to) {
   if (!CLIENT_SRC.includes(from)) throw new Error(`sabotage anchor not found: ${from}`)
@@ -151,6 +181,8 @@ const CONTROLS = [
   ['emoji parts no longer refused', ' || EMOJI_PARTS_RE.test(text)', ''],
   ['a type label reworded', "lease: 'Fixed monthly lease payment',", "lease: 'Fixed monthly payment',"],
   ['a message reworded', "amount_required: 'Enter the monthly lease amount.',", "amount_required: 'Enter an amount.',"],
+  ['cents allowed again', "  if (cents % 100 !== 0) return { ok: false, reason: 'invalid_amount' }\n", ''],
+  ['the whole-dollar message reworded', 'in whole dollars, for example 2000.', 'in whole dollars.'],
   ['the grouping separator changed', "grouped += ','", "grouped += '.'"],
 ]
 for (const [label, from, to] of CONTROLS) {

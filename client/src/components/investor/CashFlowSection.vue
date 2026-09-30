@@ -103,7 +103,10 @@
       <!-- Net Cash Flow -->
       <template v-if="detailType === 'netCashFlow'">
         <div class="modal-breakdown">
-          <div class="modal-explain">
+          <div v-if="currentLease" class="modal-explain">
+            Net Cash Flow is the bottom-line number at the fleet level &mdash; total revenue minus every dollar spent on operating the fleet.
+          </div>
+          <div v-else class="modal-explain">
             Net Cash Flow is the bottom-line number at the fleet level &mdash; total revenue minus every dollar spent on operating the fleet. This is calculated <strong>before</strong> the {{ investorSplitPct }}%/{{ 100 - investorSplitPct }}% investor/LogisX split.
           </div>
           <div class="step-label">The Calculation</div>
@@ -121,7 +124,12 @@
             <span class="val" :class="netCashFlow >= 0 ? 'accent' : 'danger'">{{ fmt(netCashFlow) }}</span>
           </div>
           <div class="modal-math">{{ fmt(totalRevenue) }} - {{ fmt(totalExpenses) }} = {{ fmt(netCashFlow) }}</div>
-          <div class="modal-callout info">
+          <!-- Under a lease this number does not set the investor's payment at
+               all, which is the one thing the callout must not imply. -->
+          <div v-if="currentLease" class="modal-callout info">
+            {{ leaseExplain(currentLease) }}
+          </div>
+          <div v-else class="modal-callout info">
             Your share is {{ investorSplitPct }}% of this number after each month is split. See "Your Earnings (to date)" for the cumulative investor figure.
           </div>
         </div>
@@ -130,7 +138,10 @@
       <!-- Investor Net To Date -->
       <template v-if="detailType === 'investorNetToDate'">
         <div class="modal-breakdown">
-          <div class="modal-explain">
+          <div v-if="currentLease" class="modal-explain">
+            This is the cumulative take-home you have earned across every month since the truck started operating. {{ leaseExplain(currentLease) }}
+          </div>
+          <div v-else class="modal-explain">
             This is the cumulative take-home you have earned across every month since the truck started operating. It is the sum of each month's investor share (after driver pay, fixed costs, and trip expenses, times your {{ investorSplitPct }}% share).
           </div>
           <template v-if="monthlyEarnings.length">
@@ -256,6 +267,8 @@ import { ref, computed } from 'vue'
 import { formatCurrency as fmt } from '../../utils/format'
 import { monthLabel } from '../../lib/monthLabel'
 import MetricInfoDialog from './MetricInfoDialog.vue'
+import { leaseBasisOf } from '../../lib/payoutPeriod'
+import { leaseExplain } from '../../lib/leasePayoutText'
 
 const props = defineProps({
   production: { type: Object, default: () => ({}) },
@@ -272,6 +285,10 @@ const monthlyEarnings = computed(() => props.production?.monthlyEarnings || [])
 // Investor's share of net profit, driven by the configured split (server returns
 // investorSplitPct on the production payload). Defaults to 50 when absent.
 const investorSplitPct = computed(() => props.production?.investorSplitPct ?? 50)
+// The current month's lease basis (`production.payoutBasis`), or null on a
+// split. A lease investor is paid a fixed amount, so none of this section's
+// "your share of this number" sentences apply to them.
+const currentLease = computed(() => leaseBasisOf(props.production))
 
 const netCashFlow = computed(() => totalRevenue.value - totalExpenses.value)
 
@@ -309,16 +326,19 @@ const breakEvenDate = computed(() => {
 const detailType = ref('')
 function openDetail(type) { detailType.value = type }
 
-const MODAL_CONFIG = {
-  netCashFlow: { title: 'Net Cash Flow', subtitle: 'Fleet-level revenue minus expenses (pre-split)' },
+const MODAL_CONFIG = computed(() => ({
+  netCashFlow: {
+    title: 'Net Cash Flow',
+    subtitle: currentLease.value ? 'Fleet-level revenue minus expenses' : 'Fleet-level revenue minus expenses (pre-split)',
+  },
   investorNetToDate: { title: 'Your Earnings to Date', subtitle: 'Cumulative take-home, summed across every month' },
   breakEven: { title: 'Break-Even', subtitle: 'When the truck pays for itself' },
   roi: { title: 'Your ROI', subtitle: 'Annual take-home as a percentage of investment' },
   payoff: { title: 'Truck Payoff Timeline', subtitle: 'How much of your investment is already recovered' },
-}
+}))
 
-const modalTitle = computed(() => MODAL_CONFIG[detailType.value]?.title || '')
-const modalSubtitle = computed(() => MODAL_CONFIG[detailType.value]?.subtitle || '')
+const modalTitle = computed(() => MODAL_CONFIG.value[detailType.value]?.title || '')
+const modalSubtitle = computed(() => MODAL_CONFIG.value[detailType.value]?.subtitle || '')
 </script>
 
 <style scoped>

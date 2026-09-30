@@ -204,10 +204,13 @@ async function accept(db, appId, { status = "Accepted", routeSrc = ACCEPT_SRC, d
 			return `hashed:${pw.length}`;
 		},
 	};
-	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", routeSrc)(
+	// The payout basis the acceptance records is scripts/test-payout-basis-routes.js's
+	// subject; here these applications sign the standard contract, so none is.
+	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", "recordSignedPayoutBasis", "unrecordedLeaseNote", routeSrc)(
 		{ put: (p, guard, h) => { handler = h; } }, () => (req, res, next) => next(), db, bcrypt, crypto,
 		(req, action, entity, entityId, details) => audits.push({ action, entityId, details }), () => {}, colLetter, escapeHtml,
-		(to, subject) => { mail.push({ to, subject }); return Promise.resolve(true); }, parseTruckAmount, registerApplicationVehicles, findDriverNameClash);
+		(to, subject) => { mail.push({ to, subject }); return Promise.resolve(true); }, parseTruckAmount, registerApplicationVehicles, findDriverNameClash,
+		() => null, () => "");
 	if (typeof handler !== "function") die("the lifted route did not register a handler");
 	const out = { status: 200, body: null };
 	const e = console.error;
@@ -430,12 +433,13 @@ function pinSection() {
 	t(awaits.length === 1 && /await bcrypt\.hash\(tempPassword, 10\)/.test(awaits[0]), `§7 the only await is bcrypt.hash (got ${JSON.stringify(awaits)})`);
 	const hashAt = src.indexOf("await bcrypt.hash");
 	const reread = src.indexOf('db.prepare("SELECT id, deleted_at FROM investor_applications WHERE id = ?")');
-	const txAt = src.indexOf("const { userId, vehicleCounts } = db.transaction(");
+	const txAt = src.indexOf("const { userId, vehicleCounts, payoutBasis } = db.transaction(");
 	t(hashAt > 0 && hashAt < src.indexOf("db.prepare("), "§7 the hash runs before the first read");
 	t(reread > hashAt && txAt > reread && !/\bawait\b/.test(src.slice(reread, txAt)), "§7 no await between the re-read and the transaction");
 	const tx = src.slice(txAt, src.indexOf("})();", txAt));
-	t(/setStatus\.run\(status, appId\)/.test(tx) && /INSERT INTO users/.test(tx) && /INSERT INTO investors/.test(tx) && /registerApplicationVehicles\(vehicles, appId, userId\)/.test(tx),
-		"§7 the status, the account, the record and the trucks are written inside the transaction");
+	t(/setStatus\.run\(status, appId\)/.test(tx) && /INSERT INTO users/.test(tx) && /INSERT INTO investors/.test(tx) && /registerApplicationVehicles\(vehicles, appId, userId\)/.test(tx)
+		&& /recordSignedPayoutBasis\(req, \{ applicationId: appId, ownerId: userId, investorId \}\)/.test(tx),
+		"§7 the status, the account, the record, the trucks and the payout basis are written inside the transaction");
 	t(!/INSERT OR IGNORE INTO investors/.test(src), "§7 the record INSERT is not OR IGNORE (a collision must not be skipped silently)");
 	t(src.indexOf("sendEmail(") > src.indexOf("})();", txAt), "§7 the emails are sent after the transaction");
 	const beforeTx = src.slice(0, txAt);

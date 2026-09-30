@@ -13,9 +13,9 @@
  *
  * Everything here is PURE — no Vue, no store, no network — so the arithmetic can
  * be locked by scripts/test-payout-card-period.mjs. Same shape and reasoning as
- * lib/address.js. The single import is the shared month formatter, itself pure
- * and importable by bare Node; the specifier carries its '.js' for exactly that
- * reason, or the lock cannot load this file at all.
+ * lib/address.js. The two imports — the shared month formatter and the lease
+ * wording — are themselves pure and importable by bare Node; each specifier
+ * carries its '.js' for exactly that reason, or the lock cannot load this file.
  *
  * ---------------------------------------------------------------------------
  * THE THREE CASES, AND WHY EACH ONE IS A SEPARATE BASIS
@@ -71,6 +71,7 @@
 // periodKeyLabel() below for what this module adds on top of it, and why that
 // one rule cannot be folded into the shared formatter.
 import { monthLabel as formatMonth } from './monthLabel.js'
+import { LEASE_LOSS_NOTE, leaseExplain, leaseReasonLine } from './leasePayoutText.js'
 
 const MONTH_KEY_RE = /^\d{4}-\d{2}$/
 const YMD_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -490,6 +491,10 @@ export function settlementTerms(s) {
  */
 export function earningsCarryTerms(month, opts = {}) {
   if (!month) return []
+  // A lease month neither absorbs nor defers a loss (the server publishes both
+  // as 0 there), so it has no carry tail even against a payload that says
+  // otherwise — the lease is paid in full or per its stated reason.
+  if (leaseBasisOf(month)) return []
   const carriedIn = whole(month.lossCarriedIn)
   const deferred = whole(month.lossDeferred)
   if (carriedIn <= 0 && deferred <= 0) return []
@@ -546,6 +551,99 @@ export function earningsCarryTerms(month, opts = {}) {
     kind: 'total',
   })
   return rows
+}
+
+/**
+ * THE PAYOUTS BREAKDOWN'S CARRY TERMS — for a settled month in PayoutsSection.vue:
+ * the month's own share, the carry that moved it, what those compose to, and
+ * whether the settled amount still matches that.
+ *
+ * A split month settles at `share − lossCarriedIn + lossDeferred`
+ * (computeLossCarryForward() in server.js; the statement PDF composes the same
+ * three terms, and decomposeSettled() above measures drift against the same
+ * sum). So a month that ran at a loss composes to the $0 it settled at, and a
+ * month that absorbed an earlier loss to the reduced figure it paid. The panel
+ * used to compare the bare share with the settled amount, which told the
+ * investor "the records have changed since it closed" on every such month
+ * although nothing had — and left the rows jumping from a negative share
+ * straight to $0.
+ *
+ * `breakdown` is the row's `breakdown` (its `monthShare` is the month's signed
+ * share, the same number the settlement used); `settled` carries the row's
+ * `amount` (the FROZEN settled figure) and its `lossCarriedIn` / `lossDeferred`.
+ * A lease month neither absorbs nor defers a loss, so its carry is 0 whatever
+ * the payload says. `drifted` compares in whole cents, so floating-point noise
+ * never reads as a change; a month with no carry compares its share with the
+ * settled amount exactly as before.
+ */
+export function settledCarryTerms(breakdown, settled) {
+  const lease = !!leaseBasisOf(breakdown)
+  const share = num(breakdown && breakdown.monthShare)
+  const carriedIn = lease ? 0 : Math.max(0, num(settled && settled.lossCarriedIn))
+  const deferred = lease ? 0 : Math.max(0, num(settled && settled.lossDeferred))
+  const composed = share - carriedIn + deferred
+  return {
+    share,
+    carriedIn,
+    deferred,
+    composed,
+    drifted: Math.round(composed * 100) !== Math.round(num(settled && settled.amount) * 100),
+  }
+}
+
+/**
+ * THE FIXED MONTHLY LEASE — which rows are lease months, and the prose that
+ * closes a lease month's breakdown.
+ *
+ * An investor can sign either a profit split or a fixed monthly lease. Every
+ * figure the portal publishes for a lease month is still the one the server
+ * computed; only the sentences around it change, and those sentences live in
+ * lib/leasePayoutText.js (the one client copy of the canonical wording). The
+ * server marks a lease month with a `payoutBasis` object; no `payoutBasis` means
+ * a split month, rendered exactly as before.
+ */
+
+/**
+ * The lease basis a row carries, or null for a split row. Reads the row's own
+ * `payoutBasis` first and then its `breakdown`'s, so one call serves a
+ * monthlyEarnings row, a payout row, `currentMonth` and `production`.
+ *
+ * `type === 'lease'` is the whole test. A basis object of any other type — or a
+ * row with none — is a split row, which is the only safe default: rendering
+ * lease wording over a split month would tell an investor their agreement is
+ * something it is not.
+ */
+export function leaseBasisOf(row) {
+  if (!row) return null
+  const b = row.payoutBasis || (row.breakdown && row.breakdown.payoutBasis) || null
+  return b && b.type === 'lease' ? b : null
+}
+
+/** Whether any month in a list is a lease month. */
+export function hasLeaseMonth(rows) {
+  return (Array.isArray(rows) ? rows : []).some((r) => !!leaseBasisOf(r))
+}
+
+/**
+ * The prose that closes a lease month's breakdown, in reading order: what the
+ * lease is, why this month pays what it pays, and — for a month whose truck ran
+ * at a loss and that paid the full lease — that the loss is not carried against
+ * the lease. That last line stands where a split month explains its
+ * carry-forward. Beside a reason (a prorated, downtime or not-in-service month)
+ * "still pays the full lease" would contradict the line above it, so it is left
+ * out there, as the statement PDF leaves it out.
+ *
+ * `netProfit` is the month's own signed P&L; absent or non-numeric means "not a
+ * loss", so no loss line is claimed for a month whose figure this does not have.
+ */
+export function leaseNotes(basis, opts = {}) {
+  if (!basis) return []
+  const lines = [leaseExplain(basis)]
+  const reason = leaseReasonLine(basis)
+  if (reason) lines.push(reason)
+  const net = Number(opts.netProfit)
+  if (!reason && Number.isFinite(net) && net < 0) lines.push(LEASE_LOSS_NOTE)
+  return lines
 }
 
 /**

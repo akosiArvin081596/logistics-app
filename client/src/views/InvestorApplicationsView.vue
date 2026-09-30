@@ -180,6 +180,14 @@
           <div v-if="acceptVehicles && acceptVehicles.failed > 0" role="alert" class="py-2 px-3 bg-red-50 rounded-lg border border-red-200 text-[13px] text-red-800" data-test="accept-failed">
             {{ acceptVehicles.failed }} vehicle(s) could not be added — add them from the Trucks page.
           </div>
+          <!-- What the acceptance recorded as the payout basis, when the server
+               says (a lease in the signed terms), and why not when it could not. -->
+          <div
+            v-if="acceptBasis"
+            :role="acceptBasis.recorded ? 'status' : 'alert'"
+            data-test="accept-payout-basis"
+            :class="['py-2 px-3 rounded-lg border text-[13px]', acceptBasis.recorded ? 'bg-violet-50 border-violet-200 text-violet-800' : 'bg-amber-50 border-amber-200 text-amber-800']"
+          >{{ acceptBasis.text }}.</div>
         </div>
       </DialogContent>
     </Dialog>
@@ -321,6 +329,7 @@ import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
 import PaymentTermsSummary from '../components/investors/PaymentTermsSummary.vue'
+import { acceptBasisLine } from '../components/investors/payoutBasis'
 import { formatMoneyCents } from '../lib/paymentTerms'
 import ConfirmModal from '../components/shared/ConfirmModal.vue'
 import { Card, CardContent } from '@/components/ui/card'
@@ -363,6 +372,9 @@ const credentials = ref(null)
 // failed }) as the credentials dialog shows them; null when the response
 // carries none.
 const acceptVehicles = ref(null)
+// The accept response's payoutBasis in one line ({ text, recorded }); null when
+// the response carries none.
+const acceptBasis = ref(null)
 const showDetail = ref(false)
 const detailLoading = ref(false)
 const detail = reactive({ application: null, vehicles: [], banking: {}, documents: [], paymentTerms: null })
@@ -530,8 +542,15 @@ function confirmAccept() {
 // acceptance that created nothing keeps the server's message on screen.
 async function saveStatus(app, status, select) {
   statusSavingId.value = app.id
+  acceptBasis.value = null
   try {
     const result = await updateStatus(app.id, status)
+    if (result?.accountCreated && result.credentials) {
+      // What the acceptance recorded as the payout basis, in the credentials
+      // dialog, which stays on screen; nothing when the answer carries none.
+      const text = acceptBasisLine(result.payoutBasis)
+      acceptBasis.value = text ? { text, recorded: result.payoutBasis.recorded === true } : null
+    }
     if (result?.accountCreated === false) {
       const message = result.message || 'Accepted. No account, investor record or trucks were created.'
       statusNotice.value = `${app.legal_name || `Application ${app.id}`}: ${message}`

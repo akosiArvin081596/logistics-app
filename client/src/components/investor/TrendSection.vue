@@ -60,7 +60,8 @@
       >
         <div class="kpi-label">Your Take-Home / Day</div>
         <div class="kpi-value">{{ fmt(avgDailyTakeHome) }}</div>
-        <div class="kpi-sub">your {{ investorSplitPct }}% share per day</div>
+        <div v-if="currentLease" class="kpi-sub">your take-home per day</div>
+        <div v-else class="kpi-sub">your {{ investorSplitPct }}% share per day</div>
         <div class="kpi-formula">= trailing 3mo take-home / days</div>
       </div>
       <div
@@ -189,8 +190,11 @@
             <span>Truck Gross / Day</span>
             <span class="val accent">{{ fmt(avgDailyGross) }}</span>
           </div>
-          <div class="modal-callout info">
-            This is the truck's gross figure &mdash; before driver pay, fixed costs, or trip expenses. Your take-home is roughly half of net, not half of this number.
+          <div v-if="currentLease" class="modal-callout info">
+            This is the truck's gross figure &mdash; before driver pay, fixed costs, or trip expenses. {{ leaseExplain(currentLease) }}
+          </div>
+          <div v-else class="modal-callout info">
+            This is the truck's gross figure &mdash; before driver pay, fixed costs, or trip expenses. Your take-home is roughly {{ shareOfNet }} of net, not {{ shareOfNet }} of this number.
           </div>
         </div>
       </template>
@@ -198,13 +202,26 @@
       <!-- Your Take-Home per Day -->
       <template v-if="detailType === 'avgDailyTakeHome'">
         <div class="modal-breakdown">
-          <div class="modal-explain">
-            This is your investor share ({{ investorSplitPct }}% of net profit) averaged into a per-day figure. It uses the trailing 3 months of actual take-home and divides it across the number of days.
-          </div>
-          <div class="step-label">The Calculation</div>
-          <div class="modal-explain-sm">
-            Take the last 3 months of your share (after driver pay, fixed costs, and trip expenses are deducted, then multiplied by your {{ investorSplitPct }}% share), and spread that across the days in those months.
-          </div>
+          <!-- Under a lease the take-home is the lease payment, not a share of
+               net profit, so neither sentence may name a split. -->
+          <template v-if="currentLease">
+            <div class="modal-explain">
+              This is your take-home averaged into a per-day figure. {{ leaseExplain(currentLease) }}
+            </div>
+            <div class="step-label">The Calculation</div>
+            <div class="modal-explain-sm">
+              Take the last 3 months of your take-home and spread that across the days in those months.
+            </div>
+          </template>
+          <template v-else>
+            <div class="modal-explain">
+              This is your investor share ({{ investorSplitPct }}% of net profit) averaged into a per-day figure. It uses the trailing 3 months of actual take-home and divides it across the number of days.
+            </div>
+            <div class="step-label">The Calculation</div>
+            <div class="modal-explain-sm">
+              Take the last 3 months of your share (after driver pay, fixed costs, and trip expenses are deducted, then multiplied by your {{ investorSplitPct }}% share), and spread that across the days in those months.
+            </div>
+          </template>
           <div class="modal-divider"></div>
           <div class="modal-row bold result">
             <span>Your Take-Home / Day</span>
@@ -276,6 +293,8 @@
 import { ref, computed } from 'vue'
 import { formatCurrency as fmt } from '../../utils/format'
 import MetricInfoDialog from './MetricInfoDialog.vue'
+import { leaseBasisOf } from '../../lib/payoutPeriod'
+import { leaseExplain } from '../../lib/leasePayoutText'
 
 const props = defineProps({
   production: { type: Object, required: true },
@@ -289,6 +308,13 @@ const props = defineProps({
 // fallback. Every investor is on 50 today, but hardcoding it means the portal
 // silently misstates the agreement the day anyone signs at a different rate.
 const investorSplitPct = computed(() => props.production?.investorSplitPct ?? 50)
+// The split as the gross-per-day note words it: "half" at 50%, as it always has,
+// and the percentage itself at any other split.
+const shareOfNet = computed(() => (Number(investorSplitPct.value) === 50 ? 'half' : `${investorSplitPct.value}%`))
+// The current month's lease basis (`production.payoutBasis`), or null on a
+// split. A lease investor's take-home is the lease payment, so the sentences
+// that describe it as "N% of net profit" give way to the lease's own.
+const currentLease = computed(() => leaseBasisOf(props.production))
 
 const months = computed(() => props.production?.monthlyData || [])
 
@@ -350,21 +376,23 @@ function shortMonth(month) {
 const detailType = ref('')
 function openDetail(type) { detailType.value = type }
 
-const MODAL_CONFIG = {
+const MODAL_CONFIG = computed(() => ({
   momGrowth: { title: 'Month-over-Month Growth', subtitle: 'How current revenue compares to the prior month' },
   bestMonth: { title: 'Best Month', subtitle: 'Your highest revenue month so far' },
   avgDailyGross: { title: 'Truck Gross per Day', subtitle: 'Gross revenue averaged across the last 30 days' },
-  // Worded without the percentage on purpose: MODAL_CONFIG is a static
-  // module-scope object, so it cannot interpolate investorSplitPct without
-  // becoming a computed. Not worth that for one word in a subtitle — the modal
-  // body it opens states the actual percentage.
-  avgDailyTakeHome: { title: 'Your Take-Home per Day', subtitle: 'Your share of net profit, spread across recent days' },
+  // Worded without the percentage on purpose — the modal body it opens states
+  // the actual percentage. A lease has none to state, and no share of net
+  // profit either.
+  avgDailyTakeHome: {
+    title: 'Your Take-Home per Day',
+    subtitle: currentLease.value ? 'Your take-home, spread across recent days' : 'Your share of net profit, spread across recent days',
+  },
   avgMonthly: { title: 'Average Monthly Revenue', subtitle: 'Gross revenue averaged across every month with data' },
   projectedAnnualTakeHome: { title: 'Projected Annual Take-Home', subtitle: 'Trailing 3-month take-home extrapolated forward' },
-}
+}))
 
-const modalTitle = computed(() => MODAL_CONFIG[detailType.value]?.title || '')
-const modalSubtitle = computed(() => MODAL_CONFIG[detailType.value]?.subtitle || '')
+const modalTitle = computed(() => MODAL_CONFIG.value[detailType.value]?.title || '')
+const modalSubtitle = computed(() => MODAL_CONFIG.value[detailType.value]?.subtitle || '')
 </script>
 
 <style scoped>

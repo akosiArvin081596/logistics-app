@@ -159,6 +159,29 @@
 //      footnote and "Not available" asset figures · R6 the RANGE_HINT under the
 //      portal's date inputs · Rx nothing written but the ledger refresh and the
 //      preview's audit lines
+// Lease payouts section (LA-LH, LP, LS, LV, LW, LX, LY; ONLY=lease, local only: DB_PATH and a server
+//   boot-server.sh started, which the section restarts by its pid file to switch
+//   INVESTOR_LEASE_PAYOUTS_ENABLED and INVESTOR_LEASE_DOWNTIME, and leaves booted
+//   with the flag off): a QA-LEASE investor made through the real flows (a $2,000
+//   lease invite on /investors, the applicant's /invest walk-through, the acceptance
+//   on /investor-applications), with a profit month (a QA-LEASE- load on the LOCAL
+//   sheet), an idle month and a loss month (a maintenance service payment). LA-LD
+//   set it up (LA: the invite form's lease warning shows while the flag is off) · LP
+//   the admin Payout Basis panel: an edit and its Change history line · LV flag ON:
+//   the latest closed month, its row created and finalized by the first ledger read,
+//   read again after its statement, report and Payouts page: still the lease, no
+//   carried loss · LE flag OFF: the split pays the open months (LEu: the Payouts page),
+//   and the months LV closed still read as the lease they settled as · LF flag ON: the
+//   lease pays ($2,000 in the profit and loss months, $0 in the idle month under
+//   downtime "unpaid"; LFu: the page shows it as the lease) · LW flag ON: no invite
+//   warning, the panel applied · LG a split investor's
+//   Payouts unchanged, flag ON · LH downtime "paid": the idle month pays $2,000 · LS
+//   the truck in Maintenance still pays the lease, Inactive pays $0 (not in service),
+//   the closed months unchanged after each · LY the months LV closed under "unpaid",
+//   read under "paid" and then with the flag off: exactly as they settled, in figures
+//   and wording (ledger, portal, console, Payouts page, statement, report), while the
+//   open idle month follows the setting · LX every row and the sheet row removed, the
+//   server booted with the flag off
 //
 // Env:
 //   BASE_URL    required — e.g. http://127.0.0.1:3181 (never production)
@@ -185,7 +208,8 @@
 //               (S1-S7), dispatcher (D1-D3), maintenance (M1), moneypath (P1, E1,
 //               N1, N1b, F1, E2, B1, RC1), names (K1, K2, K3), eldlink (L1-L3),
 //               invoice (I1-I14b), terms (T0-T11),
-//               investorfixes (F1-F14), report (R1-R6, Rx). Unset = all, in that
+//               investorfixes (F1-F14), report (R1-R6, Rx), lease (LA-LH, LP, LS, LV, LW, LX, LY).
+//               Unset = all, in that
 //               order. ⚠️ The sections together sign in more often than the login
 //               limiter allows one server process (see README), so split a full run.
 //   STEPS       only these cases of the sign-out, money-path, invoice and terms
@@ -221,7 +245,8 @@ import { execFileSync } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { spawn } from 'node:child_process'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import paths from './paths.cjs'
 
@@ -236,7 +261,7 @@ const SLOWMO = Number(process.env.SLOWMO ?? (HEADED ? 350 : 0))
 const [DVW, DVH] = String(process.env.DRIVER_VIEWPORT || '430x900').split('x').map(Number)
 // ONLY picks sections, e.g. ONLY=signout or ONLY=trucks,dispatcher. Unset = all.
 const ONLY = String(process.env.ONLY || '').toLowerCase()
-const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypath', 'names', 'eldlink', 'invoice', 'terms', 'investorfixes', 'report']
+const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypath', 'names', 'eldlink', 'invoice', 'terms', 'investorfixes', 'report', 'lease']
 // Sign-ins (POST /api/auth/login) each section makes; the limiter allows 20 per 15
 // minutes per server process. The sign-out section's figure is its worst case: S4a's
 // second half runs, and the build sends S7's second sign-in (one fewer for each
@@ -249,8 +274,9 @@ const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypa
 // section signs in the Super Admin and its own two QA-TEST investors, once each. The terms section's T0
 // signs nobody in (/invest is public, and it redirects a signed-in user); T1-T11
 // sign the Super Admin in once and T7's throwaway test Investor once. The report
-// section signs the Super Admin in once; every step shares that page.
-const SIGN_INS = { trucks: 3, signout: 20, dispatcher: 2, maintenance: 3, moneypath: 3, names: 2, eldlink: 1, invoice: 1, terms: 2, investorfixes: 3, report: 1 }
+// section signs the Super Admin in once; every step shares that page. So does the
+// lease section: its server restarts keep the session (the store is the database).
+const SIGN_INS = { trucks: 3, signout: 20, dispatcher: 2, maintenance: 3, moneypath: 3, names: 2, eldlink: 1, invoice: 1, terms: 2, investorfixes: 3, report: 1, lease: 1 }
 // Sections that need no login at all, so they run without a creds file (e.g. on
 // staging, where no staging logins need to exist for them). The terms section is
 // one only while STEPS picks T0 alone (see TERMS_NEEDS_LOGIN).
@@ -366,6 +392,7 @@ function writeResults(final = false) {
     runs('terms') && `investor terms (${[...TERMS_PLAN].join(', ') || 'no step picked'})`,
     runs('investorfixes') && 'investor fixes (F1-F14)',
     runs('report') && `investor report (${[...REPORT_PLAN].sort().join(', ') || 'no step picked'}${REPORT_PLAN.size ? ', Rx' : ''})`,
+    runs('lease') && 'lease payouts (LA-LH, LP, LS, LV, LW, LX, LY)',
   ].filter(Boolean).join(' + ')
   const lines = [
     `# ${title} — ${PHASE.toUpperCase()}`,
@@ -670,8 +697,13 @@ const sheetPlants = []
 // by table and id (investor_config by owner and key). Ids only, never values.
 const ifxRows = []
 const ifxUserIds = new Set() // every QA-TEST account id the section recorded, kept after its row is gone
+// The lease section's own rows (its QA-LEASE account, investor record, truck,
+// application, invite, maintenance entry and ledger rows) by table and id, and the
+// load id of the Job Tracking row it appended to the local sheet. Ids only.
+const leaseRows = []
+let leaseSheetLoad = ''
 function writeJournal() {
-  if (!originals.size && !createdRows.length && !sheetPlants.length && !ifxRows.length) {
+  if (!originals.size && !createdRows.length && !sheetPlants.length && !ifxRows.length && !leaseRows.length && !leaseSheetLoad) {
     if (fs.existsSync(JOURNAL)) fs.unlinkSync(JOURNAL)
     return
   }
@@ -680,6 +712,8 @@ function writeJournal() {
     ...createdRows.map(({ table, id }) => ({ table, id, created: true })),
     ...sheetPlants.map(({ range, what }) => ({ sheet: range, planted: what || 'formula (clear this cell by hand if the run died)' })),
     ...ifxRows.map(({ table, id, owner, key }) => ({ table, ...(id != null ? { id } : { owner, key }), created: true, section: 'investorfixes' })),
+    ...leaseRows.map(({ table, id, owner }) => ({ table, ...(id != null ? { id } : { owner }), created: true, section: 'lease' })),
+    ...(leaseSheetLoad ? [{ sheet: 'Job Tracking', loadId: leaseSheetLoad, planted: 'a QA-LEASE row: delete the row holding this load id by hand if the run died' }] : []),
   ], null, 2))
 }
 function plant(table, col, id, value) {
@@ -758,6 +792,7 @@ process.on('SIGINT', () => {
   try { if (db) restoreAll() } catch { /* ignore */ }
   try { if (db) removeCreated() } catch { /* ignore */ }
   try { if (db && ifxRows.length) ifxRemoveRowsSync() } catch { /* ignore */ }
+  try { if (db && leaseRows.length) leaseRemoveRowsSync() } catch { /* ignore */ }
   // A planted sheet cell cannot be put back synchronously: the journal keeps its address.
   process.exit(130)
 })
@@ -843,6 +878,12 @@ async function main() {
     try { await reportSection() } catch (e) {
       exitCode = 1
       record({ step: 'R!', title: 'Investor report section aborted', expected: '', observed: e.stack?.split('\n').slice(0, 3).join(' ') || String(e), verdict: 'FAIL', shot: '' })
+    }
+  }
+  if (runs('lease')) {
+    try { await leaseSection() } catch (e) {
+      exitCode = 1
+      record({ step: 'L!', title: 'Lease payouts section aborted', expected: '', observed: e.stack?.split('\n').slice(0, 3).join(' ') || String(e), verdict: 'FAIL', shot: '' })
     }
   }
 }
@@ -10603,6 +10644,1027 @@ function reportReadOnlyRow({ writes, start }) {
   } else if (!db) notes.push('the database was not read (no DB_PATH): the only writes the section can cause are the ledger refresh and the preview\'s audit lines')
   notes.push('nothing to delete: the section creates no record; each downloaded PDF and CSV was deleted as soon as it was read')
   record({ step: 'Rx', title: 'Read-only: what the section wrote', expected: 'No write but a sign-in session, the preview\'s audit lines (investor_preview_*, investor_payouts_view) and the payout ledger\'s own refresh; no plant journal', observed: `${notes.join('; ')}; plant journal ${fs.existsSync(JOURNAL) ? 'PRESENT' : 'none'}`, verdict: verdict(ok && !fs.existsSync(JOURNAL)), shot: '' })
+}
+
+// ---------------------------------------------------------------- lease payouts (LA-LH, LP, LS, LV, LW, LX, LY)
+// The shared contract's lease payouts: INVESTOR_LEASE_PAYOUTS_ENABLED, a money flag
+// that ships off, and INVESTOR_LEASE_DOWNTIME (unpaid, the default, or paid). Local
+// only: the section writes the copy (DB_PATH) and one row of the LOCAL sheet, and it
+// restarts the server (by the pid file boot-server.sh wrote for BASE_URL's port) to
+// switch the flag and the downtime setting. The session survives each restart: the
+// session store is the database.
+const LEASE_AMOUNT = 2000
+// Before the copy's first finalized month, so the three months' ledger rows stay open
+// (owed) and follow the flag. A month already finalized is settled the first time its
+// row is written.
+const LEASE_MONTHS = { profit: '2025-02', idle: '2025-03', loss: '2025-04' }
+const LEASE_IN_SERVICE = '2025-02-01'
+const LEASE_REVENUE = 5000 // the profit month's load
+const LEASE_SERVICE = 3000 // the loss month's maintenance service payment
+const LEASE_L1 = 'Fixed monthly lease'
+const LEASE_L5 = 'No lease payment is owed for this month: the truck had no activity, and your agreement (section 3.1) owes nothing during downtime.'
+const LEASE_L6 = 'No lease payment is owed for this month: no truck was in service under your lease.'
+const LEASE_L7 = 'A month your truck runs at a loss still pays the full lease. Losses are not carried forward against your lease.'
+const LEASE_L9 = 'Investor Payout (fixed monthly lease)'
+// LV: a lease month's statement block (lib/payout-statement.js LEASE_TEXT; the line is
+// the Payouts page's label too), and the split, carry and "records changed" wording that
+// a lease month's statement, report and Payouts page must not print.
+const LEASE_STATEMENT_HEADING = 'How your payment is calculated'
+const LEASE_STATEMENT_LINE = 'Fixed monthly lease payment'
+const LEASE_SPLIT_STATEMENT = ['investor split', 'Your share of net profit', 'Loss carried forward', 'now computes to']
+const LEASE_SPLIT_REPORT = ['the shortfall is carried against later months', 'which have changed since']
+const LEASE_SPLIT_PORTAL = ['Your Share', 'How your share is calculated', 'loss carried to later months', 'is still carried against future months', 'applied to an earlier loss', 'which have changed since it closed']
+// The Payout Basis panel's status while lease payouts are off (payoutBasis.js STATUS_OFF),
+// and the note LP saves through the panel's form.
+const LEASE_STATUS_OFF = 'Recorded, not yet applied: lease payouts are switched off. Payouts still use the Split %.'
+const LEASE_PANEL_NOTE = 'QA-LEASE e2e: edited in the Payout Basis panel'
+const LEASE_NAME_RE = /^QA-LEASE Investor \d{8}-\d{6}$/
+const E2E_DIR = path.dirname(fileURLToPath(import.meta.url))
+const LEASE_TABLES = new Set(['users', 'investors', 'trucks', 'investor_applications', 'investor_invites', 'maintenance_fund'])
+let leaseServerWt = ''
+
+function leaseNote(table, id) {
+  if (!LEASE_TABLES.has(table)) throw new Error('table not allowed')
+  if (id == null || leaseRows.some((r) => r.table === table && r.id === Number(id))) return
+  leaseRows.push({ table, id: Number(id) })
+  writeJournal()
+}
+// Deletes, from the copy and by exact id, every row leaseNote() recorded, with the
+// ledger, basis and config rows of the recorded QA-LEASE account and the recorded
+// application's children (and its signed PDFs, by their recorded hash).
+function leaseRemoveRowsSync() {
+  const out = []
+  const has = (t) => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(t)
+  const ids = (t) => leaseRows.filter((r) => r.table === t).map((r) => r.id)
+  const del = (label, sql, ...a) => { const n = db.prepare(sql).run(...a).changes; if (n) out.push(`${label} ${n}`) }
+  const files = []
+  db.transaction(() => {
+    for (const uid of ids('users')) {
+      for (const t of ['investor_payout_history', 'investor_payouts', 'investor_payout_basis', 'investor_config']) {
+        if (has(t)) del(`${t} (owner ${uid})`, `DELETE FROM ${t} WHERE owner_id = ?`, uid)
+      }
+    }
+    for (const id of ids('maintenance_fund')) del(`maintenance_fund#${id}`, 'DELETE FROM maintenance_fund WHERE id = ?', id)
+    for (const id of ids('trucks')) del(`trucks#${id}`, 'DELETE FROM trucks WHERE id = ?', id)
+    for (const id of ids('investors')) del(`investors#${id}`, 'DELETE FROM investors WHERE id = ?', id)
+    for (const id of ids('investor_applications')) {
+      for (const d of db.prepare('SELECT doc_key, artifact_sha256 FROM investor_onboarding_documents WHERE application_id = ?').all(id)) {
+        const f = path.join(leaseServerWt || paths.REPO, 'uploads', 'investor-onboarding-signed', `${d.doc_key}-inv-${id}-signed.pdf`)
+        if (d.artifact_sha256 && fs.existsSync(f) && !fs.lstatSync(f).isSymbolicLink() &&
+          crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex') === d.artifact_sha256) files.push(f)
+      }
+      del(`investor_onboarding_documents (application ${id})`, 'DELETE FROM investor_onboarding_documents WHERE application_id = ?', id)
+      del(`investor_onboarding (application ${id})`, 'DELETE FROM investor_onboarding WHERE application_id = ?', id)
+      del(`investor_payment_info (application ${id})`, 'DELETE FROM investor_payment_info WHERE application_id = ?', id)
+      del(`investor_applications#${id}`, 'DELETE FROM investor_applications WHERE id = ?', id)
+    }
+    for (const id of ids('investor_invites')) del(`investor_invites#${id}`, 'DELETE FROM investor_invites WHERE id = ?', id)
+    for (const id of ids('users')) del(`users#${id}`, 'DELETE FROM users WHERE id = ?', id)
+  })()
+  for (const f of files) { fs.unlinkSync(f); out.push(`signed PDF ${path.basename(f)}`) }
+  leaseRows.length = 0
+  writeJournal()
+  return out
+}
+
+// The server BASE_URL names, from the pid file boot-server.sh wrote: its port and the
+// worktree it runs from. Null when there is none (a server this harness cannot restart).
+function leaseServer() {
+  let port = ''
+  try { port = new URL(BASE_URL).port } catch { /* not a URL */ }
+  const pidFile = port ? path.join(WORK, `server-${port}.pid`) : ''
+  if (!pidFile || !fs.existsSync(pidFile)) return null
+  const [pid, wt] = fs.readFileSync(pidFile, 'utf8').split('\n').map((s) => s.trim())
+  return pid && wt ? { port, wt } : null
+}
+// The sheet that server reads: the environment's SPREADSHEET_ID when set (boot-server.sh
+// passes it on), else its worktree's .env. Refused unless set and not production's.
+function leaseSheetCheck(srv) {
+  let id = process.env.SPREADSHEET_ID
+  let from = 'the environment'
+  if (id === undefined) {
+    const envFile = path.join(srv.wt, '.env')
+    id = fs.existsSync(envFile) ? paths.appRequire('dotenv').parse(fs.readFileSync(envFile)).SPREADSHEET_ID : ''
+    from = envFile
+  }
+  id = String(id ?? '').trim()
+  if (!id) throw new Error(`SPREADSHEET_ID is unset or empty in ${from}`)
+  if (id === PROD_SHEET) throw new Error(`SPREADSHEET_ID in ${from} is PRODUCTION's sheet`)
+  return from
+}
+function runScript(file, args, env) {
+  return new Promise((resolve) => {
+    const child = spawn(file, args, { env, stdio: ['ignore', 'pipe', 'pipe'] })
+    let out = ''
+    child.stdout.on('data', (d) => { out += d })
+    child.stderr.on('data', (d) => { out += d })
+    child.on('close', (code) => resolve({ code, out }))
+  })
+}
+// Stops the server by its recorded PID and boots it again on DB_PATH, from the same
+// worktree and port, with `flags` (unset = boot-server.sh's defaults: the flag off,
+// the downtime setting .env's or the server's default).
+async function leaseReboot(srv, flags) {
+  const env = { ...process.env, NODE_BIN: process.execPath, E2E_WORK_DIR: WORK }
+  delete env.INVESTOR_LEASE_PAYOUTS_ENABLED
+  delete env.INVESTOR_LEASE_DOWNTIME
+  Object.assign(env, flags)
+  const stop = await runScript(path.join(E2E_DIR, 'stop-server.sh'), [srv.port], env)
+  if (stop.code !== 0) throw new Error(`stop-server.sh ${srv.port}: ${stop.out.trim().split('\n').pop()}`)
+  const boot = await runScript(path.join(E2E_DIR, 'boot-server.sh'), [srv.wt, srv.port, DB_PATH], env)
+  if (boot.code !== 0) throw new Error(`boot-server.sh: ${boot.out.trim().split('\n').slice(-3).join(' | ')}`)
+  return boot.out.split('\n').filter((l) => /^(lease payouts|ready)/.test(l)).join('; ')
+}
+
+const leaseMoney = (n) => `$${Math.abs(Number(n) || 0).toLocaleString('en-US', { maximumFractionDigits: 0 })}`
+const leaseLabel = (mk) => `${MONTH_NAMES[Number(mk.slice(5, 7)) - 1]} ${mk.slice(0, 4)}`
+const leaseRowOf = (payouts, mk) => (payouts?.payouts || []).find((p) => p.period === mk) || null
+const leasePortalMonth = (inv, mk) => (inv?.production?.monthlyEarnings || []).find((m) => m.month === mk) || null
+// Every key named payoutBasis anywhere in a response (a flag-OFF answer must carry none).
+function basisKeys(v, p = '', out = []) {
+  if (Array.isArray(v)) v.forEach((x, i) => basisKeys(x, `${p}[${i}]`, out))
+  else if (v && typeof v === 'object') for (const k of Object.keys(v)) { if (k === 'payoutBasis') out.push(`${p}.${k}`); basisKeys(v[k], `${p}.${k}`, out) }
+  return out
+}
+// Where two answers differ: paths only (a real investor's figures are never printed).
+function leaseDiffPaths(a, b, p = '', out = []) {
+  if (out.length > 20) return out
+  const ka = Array.isArray(a) ? 'array' : a === null ? 'null' : typeof a
+  const kb = Array.isArray(b) ? 'array' : b === null ? 'null' : typeof b
+  if (ka !== kb) out.push(`${p || '(root)'}: ${ka} vs ${kb}`)
+  else if (ka === 'array') {
+    if (a.length !== b.length) out.push(`${p}: length ${a.length} vs ${b.length}`)
+    for (let i = 0; i < Math.min(a.length, b.length); i++) leaseDiffPaths(a[i], b[i], `${p}[${i}]`, out)
+  } else if (ka === 'object') {
+    const keys = [...new Set([...Object.keys(a), ...Object.keys(b)])]
+    if (Object.keys(a).join('|') !== Object.keys(b).join('|')) out.push(`${p || '(root)'}: keys or key order differ`)
+    for (const k of keys) if (k in a && k in b) leaseDiffPaths(a[k], b[k], `${p}.${k}`, out)
+  } else if (a !== b) out.push(`${p || '(root)'}: value differs`)
+  return out
+}
+// The portal preview's Payouts section (PayoutsSection.vue), once its data is in.
+async function leasePayoutsSection(page, ownerId) {
+  await page.goto(`${BASE_URL}/investor-portals/${ownerId}`)
+  const sec = page.locator('.section', { has: page.locator('.section-sub', { hasText: 'monthly investor settlements' }) }).first()
+  await sec.waitFor({ state: 'visible', timeout: 60000 })
+  await sec.locator('.skeleton').first().waitFor({ state: 'detached', timeout: 60000 }).catch(() => {})
+  await page.waitForTimeout(500)
+  return sec
+}
+// A month's row in that section, expanded when it has a breakdown; its text.
+async function leaseMonthRowText(page, sec, mk) {
+  const row = sec.locator('tr', { has: page.locator('td', { hasText: exactText(leaseLabel(mk)) }) }).first()
+  if (!(await row.count())) return null
+  await row.scrollIntoViewIfNeeded().catch(() => {})
+  const btn = row.locator('button.expand-btn')
+  if (await btn.count() && (await btn.getAttribute('aria-expanded')) !== 'true') await btn.click().catch(() => {})
+  await page.waitForTimeout(400)
+  const text = await row.innerText().catch(() => '')
+  const breakdown = await row.locator('xpath=following-sibling::tr[1][contains(@class,"breakdown-tr")]').innerText().catch(() => '')
+  return `${text} ${breakdown}`.replace(/\s+/g, ' ').trim()
+}
+// These pages list real investors, applicants and trucks beside the QA-LEASE ones:
+// every table row that is not QA data is blurred for the moment of the screenshot.
+async function leaseQaShot(page, name, opts = {}) {
+  if (!MASK_PII) return shot(page, name, opts)
+  await page.evaluate(() => {
+    for (const tr of document.querySelectorAll('table tbody tr')) {
+      if (/qa-(lease|test)/i.test(tr.textContent || '')) continue
+      tr.dataset.qaBlur = tr.style.filter || '-'
+      tr.style.filter = 'blur(6px)'
+    }
+  }).catch(() => {})
+  try { return await shot(page, name, opts) } finally {
+    await page.evaluate(() => {
+      for (const tr of document.querySelectorAll('tr[data-qa-blur]')) { tr.style.filter = tr.dataset.qaBlur === '-' ? '' : tr.dataset.qaBlur; delete tr.dataset.qaBlur }
+    }).catch(() => {})
+  }
+}
+// The invite form's lease warning (InviteTermsForm): shown while lease payouts are off.
+const LEASE_INVITE_WARNING = 'This changes the contract only. Payouts are still calculated from the Split % column.'
+async function leaseInviteWarning(page) {
+  const w = page.locator(TD('invite-lease-warning')).first()
+  await page.waitForTimeout(600)
+  const shown = await w.isVisible().catch(() => false)
+  return { shown, text: shown ? squash(await w.innerText().catch(() => ''), 120) : '' }
+}
+// The Payout Basis panel of one investor: /investors, the investor's name opens the
+// detail window, which holds the panel. The name cell is clicked, not the row: the
+// row's middle is the Split % cell, which keeps its clicks to itself. Waits until the
+// panel has loaded.
+async function leaseBasisPanel(page, name) {
+  await gotoInvestorsPage(page)
+  const cell = page.locator('tr.clickable-row td.name-cell', { hasText: exactText(name) }).first()
+  await cell.waitFor({ state: 'visible', timeout: 30000 })
+  await cell.scrollIntoViewIfNeeded().catch(() => {})
+  await cell.click()
+  const panel = page.locator(TD('payout-basis-panel')).first()
+  await panel.waitFor({ state: 'visible', timeout: 30000 })
+  await panel.locator(TD('payout-basis-current')).waitFor({ state: 'visible', timeout: 30000 })
+  await panel.scrollIntoViewIfNeeded().catch(() => {})
+  return panel
+}
+const leaseHistory = async (panel) => panel.locator(`${TD('payout-basis-history')} li`).allInnerTexts().catch(() => [])
+// A real investor's section is blurred for the moment of its screenshot (the verdict
+// comes from its text, compared, never printed).
+async function leaseBlurredShot(page, sec, name) {
+  await sec.evaluate((el) => { for (const c of el.children) if (!c.classList.contains('section-title')) { c.dataset.qaBlur = c.style.filter || '-'; c.style.filter = 'blur(7px)' } }).catch(() => {})
+  try { await sec.scrollIntoViewIfNeeded().catch(() => {}); return await shot(page, name) } finally {
+    await sec.evaluate((el) => { for (const c of el.querySelectorAll('[data-qa-blur]')) { c.style.filter = c.dataset.qaBlur === '-' ? '' : c.dataset.qaBlur; delete c.dataset.qaBlur } }).catch(() => {})
+  }
+}
+// What a closed month publishes about its payout, and nothing live beside it: the
+// ledger row's settled figures, its earnings, recomputed amount, carry and basis, and
+// the portal's month. (The P&L lines stay live: a truck's status moves them.)
+const leaseSettledRow = (r) => (r ? {
+  amount: r.amount, effectiveAmount: r.effectiveAmount, status: r.status, monthEarnings: r.monthEarnings, recomputedAmount: r.recomputedAmount,
+  lossCarriedIn: r.lossCarriedIn, lossDeferred: r.lossDeferred, payoutBasis: r.payoutBasis ?? null,
+  splitPct: r.breakdown?.splitPct ?? null, monthShare: r.breakdown?.monthShare ?? null, breakdownBasis: r.breakdown?.payoutBasis ?? null,
+} : null)
+const leaseSettledMonth = (m) => (m ? { investorEarnings: m.investorEarnings, payable: m.payable, lossCarriedIn: m.lossCarriedIn, lossDeferred: m.lossDeferred, payoutBasis: m.payoutBasis ?? null } : null)
+const leaseClosedSnap = (months, pay, inv) => Object.fromEntries(months.map((mk) => [mk, { row: leaseSettledRow(leaseRowOf(pay, mk)), portal: leaseSettledMonth(leasePortalMonth(inv, mk)) }]))
+// The Payouts console (/payouts): the QA-LEASE investor's section, and one month's row.
+async function leaseConsoleSection(page, name) {
+  await page.goto(`${BASE_URL}/payouts`)
+  const sec = page.locator('section.investor-section', { hasText: name }).first()
+  await sec.waitFor({ state: 'visible', timeout: 120000 })
+  await page.waitForTimeout(500)
+  return sec
+}
+async function leaseConsoleRowText(page, sec, mk) {
+  const row = sec.locator('tr', { has: page.locator('td.mono', { hasText: new RegExp(`^\\s*${escRe(leaseLabel(mk))}(\\s+\\d+)?\\s*$`) }) }).first()
+  return (await row.count()) ? rNorm(await row.innerText().catch(() => '')) : ''
+}
+// The console lists every investor: everything outside the QA-LEASE investor's section
+// is blurred for the moment of the screenshot.
+async function leaseConsoleShot(page, sec, name) {
+  await sec.evaluate((keep) => {
+    for (const el of document.querySelectorAll('section.section, table')) {
+      if (el === keep || keep.contains(el) || el.contains(keep)) continue
+      el.dataset.qaBlur = el.style.filter || '-'
+      el.style.filter = 'blur(7px)'
+    }
+  }).catch(() => {})
+  try { await sec.scrollIntoViewIfNeeded().catch(() => {}); return await shot(page, name) } finally {
+    await page.evaluate(() => { for (const c of document.querySelectorAll('[data-qa-blur]')) { c.style.filter = c.dataset.qaBlur === '-' ? '' : c.dataset.qaBlur; delete c.dataset.qaBlur } }).catch(() => {})
+  }
+}
+
+async function leaseSection() {
+  const skipAll = (why) => record({ step: 'L*', title: 'Lease payouts section', expected: 'A local server boot-server.sh started, and DB_PATH', observed: `SKIPPED — ${why}`, verdict: 'SKIP', shot: '' })
+  if (!LOCAL || !DB_PATH) { skipAll('local only: it writes the copy and the local sheet, and restarts the server'); return }
+  const srv = leaseServer()
+  if (!srv) { skipAll(`no pid file for this port in ${WORK}: boot the server with scripts/e2e/boot-server.sh, which the section needs to restart it`); return }
+  leaseServerWt = srv.wt
+  const ownDb = !db
+  if (!db) db = openDb()
+  const LEASE_STAMP = stamp
+  const NAME = `QA-LEASE Investor ${LEASE_STAMP}`
+  const EMAIL = `qa-test+${LEASE_STAMP.replace(/\D/g, '')}-lease-payouts@example.com`
+  const LOAD_ID = `QA-LEASE-${LEASE_STAMP.replace(/\D/g, '')}-P`
+  const VIN = `QALEASE${LEASE_STAMP.replace(/\D/g, '').slice(-10)}`
+  const S = { feature: null, settings: null, owner: null, investorId: null, truck: null, appId: null, invite: null, rebooted: false, split: null, snap: {}, ui: {} }
+  const { ctx, page } = await freshPage(ADMIN_VP)
+  ctx.setDefaultTimeout(30000)
+  const step = async (id, title, expected, fn) => {
+    let observed = ''; let v = 'FAIL'; let s = ''
+    try {
+      const r = await fn()
+      observed = r.observed; v = r.verdict; s = r.shot || ''
+    } catch (e) {
+      observed = e.skip ? e.message : `error: ${String(e.message || e).split('\n')[0]}`
+      v = e.skip ? 'SKIP' : 'FAIL'
+    }
+    record({ step: id, title, expected, observed, verdict: v, shot: s })
+    return v
+  }
+  const skip = (m) => Object.assign(new Error(`SKIPPED — ${m}`), { skip: true })
+  const needFeature = () => { if (!S.feature) throw skip('this build has no lease payouts (GET /api/investor-payout-settings answered no settings)') }
+  const needOwner = () => { if (!S.owner) throw skip('LC made no QA-LEASE investor') }
+  const settings = async () => {
+    const r = await api(page, 'GET', '/api/investor-payout-settings')
+    return r.status === 200 && typeof r.json?.enabled === 'boolean' ? r.json : null
+  }
+  const ledger = async (owner) => (await api(page, 'GET', `/api/investor/payouts?as_user_id=${owner}`)).json
+  const portal = async (owner) => (await api(page, 'GET', `/api/investor?as_user_id=${owner}`)).json
+  try {
+    if (!CREDS.superAdmin) { skipAll('the creds file has no superAdmin login'); return }
+    await login(page, 'Step LA — Super Admin', CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
+    S.settings = await settings()
+    S.feature = !!S.settings
+    meta.ids.leaseFeature = S.feature ? 'present' : 'absent'
+
+    // ---- LA: set-up checks, then a $2,000 lease invite through the invites panel
+    await step('LA', 'Set-up checks (the copy, the local sheet, the months), then Super Admin, /investors: a LEASE invite for $2,000 through the invites panel',
+      `The sheet the server reads is not production's; ${Object.values(LEASE_MONTHS).join(', ')} are not finalized in the copy; with lease payouts off, the form's "${LEASE_INVITE_WARNING}" shows for a lease; POST /api/admin/investor-invites 201 and the link dialog`, async () => {
+        const sheetFrom = leaseSheetCheck(srv)
+        const months = Object.values(LEASE_MONTHS)
+        const locked = db.prepare(`SELECT period FROM period_locks WHERE status = 'locked' AND period IN (${months.map(() => '?').join(',')})`).all(...months).map((r) => r.period)
+        if (locked.length) throw new Error(`the copy has ${locked.join(', ')} finalized: their ledger rows would be settled at first sight and never follow the flag`)
+        await gotoInvestorsPage(page)
+        const panel = await invitesPanel(page)
+        if (!panel) throw new Error('/investors has no invites panel ([data-test="invites-panel"])')
+        await fillInviteForm(page, panel, { name: NAME, email: EMAIL, type: 'lease', amount: String(LEASE_AMOUNT), details: 'QA-LEASE e2e: lease payouts' })
+        const warning = await leaseInviteWarning(page)
+        const warningOk = !S.feature || warning.shown === (S.settings.enabled !== true)
+        await caption(page, `Step LA — a lease invite for ${leaseMoney(LEASE_AMOUNT)} a month (QA-LEASE data); the "contract only" warning ${warning.shown ? 'shows' : 'is hidden'}`)
+        const c = await createInviteThroughForm(page)
+        leaseNote('investor_invites', c.id)
+        S.invite = c
+        await caption(page, `Step LA — POST ${INVITES_API} → ${c.status}; the link ${c.path ? 'shown' : 'NOT shown'}`)
+        const s = await leaseQaShot(page, 'la-lease-invite')
+        await closeInviteDialog(page)
+        return {
+          verdict: verdict(c.status === 201 && !!c.path && warningOk),
+          observed: `sheet: SPREADSHEET_ID from ${sheetFrom} is set and not production's; months ${months.join(', ')} open in the copy; lease payouts in this build: ${S.feature ? `yes (enabled ${S.settings.enabled}, downtime ${S.settings.settings?.downtime})` : 'NO (LF-LH will SKIP)'}; ` +
+            `the form's lease warning ${warning.shown ? `shows ("${warning.text}")` : 'is hidden'}; POST → ${c.status}${c.code ? ` ${c.code}` : ''}, invite #${c.id ?? '?'}, link ${c.path ? 'shown' : 'NOT shown'}`,
+          shot: s,
+        }
+      })
+
+    // ---- LB: the applicant, anonymous: the link, the application, three signatures, submit
+    await step('LB', 'Anonymous, the lease invite link: the application (QA-LEASE data, one vehicle), the master agreement, the lease and the W-9 signed, fake banking, Confirm & Complete Onboarding',
+      'POST /api/public/investor-apply 200 with an application id', async () => {
+        if (!S.invite?.path) throw new Error('not reached: LA made no invite link')
+        const P = await openInvestPortal('lb', S.invite.path, S.invite.token)
+        try {
+          if ((await P.start()) !== 'form') throw new Error('the invite link did not show the application')
+          await caption(P.page, 'Step LB — anonymous: the lease invite link, in a fresh browser')
+          const held = await fillInvestApplication(P.page, { name: NAME, letter: 'L', idx: 41, email: EMAIL })
+          await investTgt(P.page, 'continue-step0').click()
+          const tgt = (n) => investTgt(P.page, n)
+          await tgt('fleet-size').waitFor({ state: 'visible' })
+          await tgt('fleet-size').fill('1')
+          await tgt('vehicle-make').selectOption('Freightliner')
+          await tgt('vehicle-model').selectOption('Cascadia')
+          await tgt('vehicle-year').fill('2020')
+          await tgt('vehicle-vin').fill(VIN)
+          await investField(P.page, 'License Plate').fill('QA-LS01')
+          await investField(P.page, 'Current Mileage').fill('100000')
+          await investPauseBlur(P.page)
+          for (const docKey of ['master_agreement', 'vehicle_lease', 'w9']) {
+            await P.openDoc(docKey)
+            await P.signOpenDoc(docKey, held || NAME)
+            await P.closeDoc()
+          }
+          await P.toReview(held || NAME, 41)
+          await caption(P.page, 'Step LB — review: Confirm & Complete Onboarding (the application is submitted)')
+          P.allowSubmit = true
+          const [resp] = await Promise.all([
+            P.page.waitForResponse((r) => r.request().method() === 'POST' && pathOf(r.url()) === '/api/public/investor-apply', { timeout: 120000 }),
+            P.page.locator('.review-modal [data-wizard-target="submit-confirm"]').click(),
+          ])
+          const j = await resp.json().catch(() => null)
+          S.appId = Number(j?.applicationId) || null
+          leaseNote('investor_applications', S.appId)
+          if (S.appId) meta.ids.leaseApplication = S.appId
+          await P.page.locator('.success-wrap').waitFor({ state: 'visible', timeout: 15000 }).catch(() => {})
+          await caption(P.page, `Step LB — POST /api/public/investor-apply → ${resp.status()}; application #${S.appId ?? '?'}`)
+          const s = await shot(P.page, 'lb-submitted')
+          return { verdict: verdict(resp.status() === 200 && !!S.appId), observed: `the form holds the name ${held === NAME ? 'as typed' : 'the invite set'}; 3 documents signed; POST → ${resp.status()}, application #${S.appId ?? '?'}`, shot: s }
+        } finally { await P.close() }
+      })
+
+    // ---- LC: the acceptance, on /investor-applications
+    await step('LC', 'Super Admin, /investor-applications: "Accepted" picked in the QA-LEASE application\'s status select, the confirmation accepted',
+      `200 accountCreated with an account; ${'the response\'s payoutBasis'} records the signed lease ({ recorded: true, type: "lease", leaseAmount: ${LEASE_AMOUNT} }) and GET /api/investors/:id/payout-basis shows it (source signed_terms) — the basis parts only where the build has lease payouts`, async () => {
+        if (!S.appId) throw new Error('not reached: LB submitted no application')
+        await page.goto(`${BASE_URL}/investor-applications`)
+        const row = page.locator('tbody tr', { hasText: EMAIL }).first()
+        await row.waitFor({ state: 'visible', timeout: 30000 })
+        await row.scrollIntoViewIfNeeded()
+        const onDialog = (d) => d.accept().catch(() => {})
+        page.on('dialog', onDialog)
+        let resp = null
+        try {
+          await caption(page, 'Step LC — pick "Accepted" in the QA-LEASE application\'s status select')
+          const respP = page.waitForResponse((r) => pathOf(r.url()) === `/api/investor-applications/${S.appId}/status` && r.request().method() === 'PUT', { timeout: 30000 }).catch(() => null)
+          await row.locator('select').selectOption('Accepted')
+          await page.waitForTimeout(1200)
+          const dlg = page.locator('[role="dialog"], [role="alertdialog"], .confirm-dialog').filter({ hasText: /accept/i }).first()
+          if (await dlg.isVisible().catch(() => false)) await dlg.getByRole('button', { name: /accept|confirm|yes/i }).last().click().catch(() => {})
+          resp = await respP
+        } finally { page.off('dialog', onDialog) }
+        const j = resp ? await resp.json().catch(() => null) : null
+        const creds = page.locator('[role="dialog"]', { hasText: 'Investor Account Created' })
+        await creds.waitFor({ state: 'visible', timeout: 8000 }).catch(() => {})
+        await caption(page, `Step LC — PUT …/${S.appId}/status → ${resp ? resp.status() : 'not sent'}; account #${j?.credentials?.userId ?? '?'} (the temporary password is masked in the shot)`)
+        const s = await leaseQaShot(page, 'lc-accepted', { mask: [page.locator('[role="dialog"] .font-mono')] })
+        if (await creds.isVisible().catch(() => false)) await page.keyboard.press('Escape').catch(() => {})
+        const uid = Number(j?.credentials?.userId) || null
+        const u = uid ? db.prepare('SELECT id, full_name FROM users WHERE id = ? AND role = \'Investor\'').get(uid) : null
+        if (!u) throw new Error(`the account #${uid ?? '?'} the server reports is not in DB_PATH: DB_PATH is not this server's database, so nothing will be restarted or planted`)
+        if (!LEASE_NAME_RE.test(String(u.full_name || ''))) throw new Error(`account #${uid} is not the QA-LEASE account (its name does not match)`)
+        S.owner = uid
+        leaseNote('users', uid)
+        meta.ids.leaseOwner = uid
+        const inv = db.prepare('SELECT id FROM investors WHERE user_id = ?').get(uid)
+        S.investorId = inv?.id ?? null
+        leaseNote('investors', S.investorId)
+        const trucks = db.prepare('SELECT id, unit_number FROM trucks WHERE owner_id = ?').all(uid)
+        for (const t of trucks) leaseNote('trucks', t.id)
+        S.truck = trucks[0] || null
+        const recorded = j?.payoutBasis
+        let basisText = 'not checked (no lease payouts in this build)'
+        let basisOk = true
+        if (S.feature) {
+          const b = S.investorId ? await api(page, 'GET', `/api/investors/${S.investorId}/payout-basis`) : null
+          const cur = b?.json?.current
+          basisOk = recorded?.recorded === true && recorded?.type === 'lease' && recorded?.leaseAmount === LEASE_AMOUNT &&
+            b?.status === 200 && cur?.type === 'lease' && cur?.leaseAmount === LEASE_AMOUNT && cur?.source === 'signed_terms' &&
+            b.json?.signedTerms?.type === 'lease' && b.json?.signedTerms?.leaseAmount === LEASE_AMOUNT
+          basisText = `response payoutBasis ${JSON.stringify(recorded ?? null)}; GET payout-basis → ${b?.status ?? 'not sent'}: current ${cur ? `${cur.type} ${cur.leaseAmount ?? ''} from ${cur.effectiveMonth} (${cur.source})` : 'none'}, signedTerms ${JSON.stringify(b?.json?.signedTerms ?? null)}, enabled ${b?.json?.enabled}`
+        }
+        return {
+          verdict: verdict(resp?.status() === 200 && j?.accountCreated === true && !!S.truck && basisOk),
+          observed: `PUT → ${resp ? resp.status() : 'not sent'}, accountCreated ${j?.accountCreated}; account #${uid}, investor record #${S.investorId ?? '?'}, truck(s) ${trucks.map((t) => `#${t.id}`).join(', ') || 'NONE'}; ${basisText}`,
+          shot: s,
+        }
+      })
+
+    // ---- LD: the history: in service from the profit month, the basis from it, a profit
+    // month (a load on the local sheet), an idle month (nothing), a loss month
+    await step('LD', `History for ${Object.values(LEASE_MONTHS).join(', ')}: the truck in service from ${LEASE_IN_SERVICE} (Trucks → Edit), the lease basis from ${LEASE_MONTHS.profit} (PUT /api/investors/:id/payout-basis, which refuses a start before a closed month, then the copy), a delivered ${leaseMoney(LEASE_REVENUE)} load ${LOAD_ID} in ${LEASE_MONTHS.profit} (POST /api/data, the local sheet), nothing in ${LEASE_MONTHS.idle}, a ${leaseMoney(LEASE_SERVICE)} maintenance service payment in ${LEASE_MONTHS.loss}`,
+      'Each saved (the Edit form\'s PUT 200 or its refusal and the copy; the basis PUT 200, or 409 BASIS_MONTH_CLOSED and the copy, leaving one lease row from the profit month; POST /api/data 200, POST /api/maintenance-fund 200), and the portal reads the load', async () => {
+        needOwner()
+        if (!S.truck) throw new Error('not reached: the acceptance made no truck')
+        const notes = []
+        // The in-service date, through the Trucks page's Edit form.
+        await page.goto(`${BASE_URL}/trucks`)
+        await page.locator('table.truck-table').waitFor({ state: 'visible', timeout: 30000 })
+        const trow = rowOf(page, S.truck.unit_number)
+        await trow.waitFor({ state: 'visible', timeout: 30000 })
+        await trow.scrollIntoViewIfNeeded()
+        await trow.locator('button.btn-edit').click()
+        const dlg = page.locator('.confirm-overlay .edit-dialog')
+        await dlg.waitFor({ state: 'visible' })
+        await dlg.locator('#edit-truck-in-service-date').fill(LEASE_IN_SERVICE)
+        await caption(page, `Step LD — ${S.truck.unit_number}: In Service ${LEASE_IN_SERVICE}, Save`)
+        const [put] = await Promise.all([
+          page.waitForResponse((r) => r.request().method() === 'PUT' && pathOf(r.url()) === `/api/trucks/${S.truck.id}`, { timeout: 20000 }).catch(() => null),
+          dlg.locator('.confirm-actions button', { hasText: /^\s*Save\s*$/ }).click(),
+        ])
+        const putCode = put ? (await put.json().catch(() => null))?.code : ''
+        const stored = db.prepare('SELECT in_service_date AS d FROM trucks WHERE id = ?').get(S.truck.id)?.d
+        let inServiceOk = stored === LEASE_IN_SERVICE
+        notes.push(`Edit → PUT ${put ? put.status() : 'not sent'}${putCode ? ` ${putCode}` : ''}; stored in-service date ${inServiceOk ? LEASE_IN_SERVICE : `"${stored ?? ''}"`}`)
+        if (!inServiceOk) {
+          // The form refuses a date inside a finalized month (as it does for any truck),
+          // so the copy takes it directly: allowed on the private copy only.
+          db.prepare('UPDATE trucks SET in_service_date = ? WHERE id = ? AND owner_id = ?').run(LEASE_IN_SERVICE, S.truck.id, S.owner)
+          inServiceOk = db.prepare('SELECT in_service_date AS d FROM trucks WHERE id = ?').get(S.truck.id)?.d === LEASE_IN_SERVICE
+          notes.push(`set in the copy instead: ${inServiceOk}`)
+        }
+        const s1 = await leaseQaShot(page, 'ld-in-service')
+        await page.keyboard.press('Escape').catch(() => {})
+        // The basis from the profit month (the signed row, from the acceptance month, is
+        // replaced). The build's own API first: it refuses a basis that starts in or
+        // before a closed month (409 BASIS_MONTH_CLOSED), and the copy's months after
+        // the profit month are closed, so, as for the in-service date, the copy then
+        // takes it directly, written as the PUT writes it (the row from the profit
+        // month, every later row removed).
+        let basisOk = true
+        if (S.feature) {
+          const note = 'QA-LEASE e2e: the lease from the profit month'
+          const b = await api(page, 'PUT', `/api/investors/${S.investorId}/payout-basis`, { type: 'lease', leaseAmount: LEASE_AMOUNT, effectiveMonth: LEASE_MONTHS.profit, note })
+          const refused = b.status === 409 && b.json?.code === 'BASIS_MONTH_CLOSED'
+          notes.push(`PUT payout-basis from ${LEASE_MONTHS.profit} → ${b.status}${b.json?.code ? ` ${b.json.code}` : ''}${refused ? ` (earliest editable ${b.json.earliestEditableMonth})` : ''}`)
+          if (refused) {
+            db.prepare('DELETE FROM investor_payout_basis WHERE owner_id = ? AND effective_month >= ?').run(S.owner, LEASE_MONTHS.profit)
+            db.prepare("INSERT INTO investor_payout_basis (owner_id, effective_month, basis_type, lease_amount_cents, source, application_id, note, created_by, created_at) VALUES (?, ?, 'lease', ?, 'admin', NULL, ?, 'qa-e2e', ?)")
+              .run(S.owner, LEASE_MONTHS.profit, LEASE_AMOUNT * 100, note, new Date().toISOString())
+            notes.push('set in the copy instead')
+          }
+          const sched = (await api(page, 'GET', `/api/investors/${S.investorId}/payout-basis`)).json?.schedule || []
+          basisOk = (b.status === 200 || refused) && sched.length === 1 && sched[0].effectiveMonth === LEASE_MONTHS.profit && sched[0].type === 'lease' && sched[0].leaseAmount === LEASE_AMOUNT
+          notes.push(`schedule ${sched.map((r) => `${r.effectiveMonth} ${r.type} ${r.leaseAmount ?? ''} (${r.source})`).join(', ') || 'empty'}`)
+        } else notes.push('no basis to set (no lease payouts in this build)')
+        // The profit month's load, through the app's own sheet write (Super Admin only).
+        const sheetFrom = leaseSheetCheck(srv)
+        const head = await api(page, 'GET', `/api/data?sheet=${encodeURIComponent('Job Tracking')}&limit=5`)
+        const headers = head.json?.headers || []
+        const col = (re) => headers.find((h) => re.test(h))
+        const cols = {
+          id: col(/load.?id|job.?id/i), status: col(/status/i), rate: col(/payment|rate|amount|revenue/i),
+          date: col(/status.*update.*date|completion.*date|assigned.*date/i) || col(/date/i), owner: col(/^owner.?id$/i),
+        }
+        if (!cols.id || !cols.status || !cols.rate || !cols.date || !cols.owner) throw new Error(`the Job Tracking headers lack a column the load needs (${Object.entries(cols).filter(([, v]) => !v).map(([k]) => k).join(', ')})`)
+        const sample = (head.json?.data || []).map((r) => r[cols.date]).find((v) => v) || ''
+        const day = `${LEASE_MONTHS.profit}-14`
+        const dateText = /^\d{1,2}\/\d{1,2}\/\d{4}/.test(sample) ? `${Number(day.slice(5, 7))}/${Number(day.slice(8, 10))}/${day.slice(0, 4)}` : day
+        const values = headers.map((h) => (h === cols.id ? LOAD_ID : h === cols.status ? 'Delivered' : h === cols.rate ? String(LEASE_REVENUE) : h === cols.date ? dateText : h === cols.owner ? String(S.owner) : ''))
+        leaseSheetLoad = LOAD_ID
+        writeJournal()
+        const add = await api(page, 'POST', `/api/data?sheet=${encodeURIComponent('Job Tracking')}`, { values })
+        notes.push(`POST /api/data (the sheet from ${sheetFrom}) → ${add.status}${add.json?.error ? ` "${squash(add.json.error, 120)}"` : ''}: ${LOAD_ID}, "${cols.status}" Delivered, "${cols.rate}" ${LEASE_REVENUE}, "${cols.date}" ${dateText}, "${cols.owner}" ${S.owner}`)
+        // The loss month: a maintenance service payment on the truck.
+        const mf = await api(page, 'POST', '/api/maintenance-fund', { type: 'service', amount: LEASE_SERVICE, truck: S.truck.unit_number, date: `${LEASE_MONTHS.loss}-10`, description: 'QA-LEASE e2e: the loss month' })
+        leaseNote('maintenance_fund', mf.json?.id)
+        notes.push(`POST /api/maintenance-fund → ${mf.status}, entry #${mf.json?.id ?? '?'}`)
+        // The server caches the sheet for 60 s: wait until the portal reads the load.
+        let seen = null
+        for (let waited = 0; waited <= 90000; waited += 5000) {
+          seen = leasePortalMonth(await portal(S.owner), LEASE_MONTHS.profit)
+          if (seen && seen.revenue >= LEASE_REVENUE) break
+          await page.waitForTimeout(5000)
+        }
+        const loadSeen = !!seen && seen.revenue >= LEASE_REVENUE
+        notes.push(`the portal reads the load in ${LEASE_MONTHS.profit}: ${loadSeen}`)
+        return { verdict: verdict(inServiceOk && basisOk && add.status === 200 && mf.status === 200 && loadSeen), observed: notes.join('; '), shot: s1 }
+      })
+
+    // ---- LP: the admin Payout Basis panel, flag as booted (off): an edit through its
+    // form (the same lease from the first month it may change, with a note) and the
+    // line it adds to Change history
+    await step('LP', `Super Admin, /investors → the QA-LEASE investor → Payout Basis: Edit, the same ${leaseMoney(LEASE_AMOUNT)} lease from the first editable month with a note, Save`,
+      `While lease payouts are off the panel says "${LEASE_STATUS_OFF}"; the form's PUT 200; one more Change history line, naming the note; the schedule: the lease from ${LEASE_MONTHS.profit}, then the same lease from the first editable month`, async () => {
+        needFeature(); needOwner()
+        const firstEditable = (await api(page, 'GET', `/api/investors/${S.investorId}/payout-basis`)).json?.earliestEditableMonth || dayCT().slice(0, 7)
+        const panel = await leaseBasisPanel(page, NAME)
+        const status = squash(await panel.locator(TD('payout-basis-status')).innerText().catch(() => ''), 160)
+        const before = await leaseHistory(panel)
+        await panel.locator(TD('payout-basis-edit')).click()
+        const form = panel.locator(TD('payout-basis-form'))
+        await form.waitFor({ state: 'visible' })
+        await chooseControl(form.locator(TD('payout-basis-type-lease')))
+        await form.locator(TD('payout-basis-amount')).fill(String(LEASE_AMOUNT))
+        await form.locator(TD('payout-basis-month')).fill(firstEditable)
+        await form.locator(TD('payout-basis-note')).fill(LEASE_PANEL_NOTE)
+        await caption(page, `Step LP — the Payout Basis panel: Edit, the same lease from ${firstEditable} with a note, Save`)
+        const [put] = await Promise.all([
+          page.waitForResponse((r) => r.request().method() === 'PUT' && pathOf(r.url()) === `/api/investors/${S.investorId}/payout-basis`, { timeout: 20000 }).catch(() => null),
+          form.locator(TD('payout-basis-save')).click(),
+        ])
+        await panel.locator(TD('payout-basis-saved')).waitFor({ state: 'visible', timeout: 10000 }).catch(() => {})
+        await page.waitForTimeout(600)
+        const after = await leaseHistory(panel)
+        const added = after.filter((t) => !before.includes(t))
+        const b = await api(page, 'GET', `/api/investors/${S.investorId}/payout-basis`)
+        const sched = b.json?.schedule || []
+        const last = sched[sched.length - 1]
+        const schedOk = sched.length === 2 && sched[0].effectiveMonth === LEASE_MONTHS.profit && sched[0].type === 'lease' &&
+          last.effectiveMonth === firstEditable && last.type === 'lease' && last.leaseAmount === LEASE_AMOUNT && last.note === LEASE_PANEL_NOTE
+        await caption(page, `Step LP — PUT → ${put ? put.status() : 'not sent'}; Change history ${before.length} → ${after.length} line(s)`)
+        const s = await leaseQaShot(page, 'lp-payout-basis-panel')
+        const statusOk = S.settings.enabled === true || status === LEASE_STATUS_OFF
+        return {
+          verdict: verdict(put?.status() === 200 && after.length === before.length + 1 && added.some((t) => t.includes(LEASE_PANEL_NOTE)) && schedOk && statusOk),
+          observed: `status "${status}"; PUT → ${put ? put.status() : 'not sent'}; Change history ${before.length} → ${after.length} line(s), the new one ${added.length ? `"${squash(added[0], 200)}"` : 'MISSING'}; ` +
+            `schedule ${sched.map((r) => `${r.effectiveMonth} ${r.type} ${r.leaseAmount ?? ''} (${r.source}) note "${r.note}"`).join(', ') || 'empty'}`,
+          shot: s,
+        }
+      })
+
+    // The split investor LG compares: the lowest-id other investor with ledger rows.
+    const pickSplit = async () => {
+      const all = await api(page, 'GET', '/api/payouts')
+      const cand = (all.json?.investors || []).filter((i) => Number(i.ownerId) !== S.owner && (i.payouts || []).length).map((i) => Number(i.ownerId)).sort((a, b) => a - b)
+      return cand[0] ?? null
+    }
+    const splitSnapshot = async (tag) => {
+      if (!S.split) return null
+      const pay = await ledger(S.split)
+      const sec = await leasePayoutsSection(page, S.split)
+      const text = (await sec.innerText()).replace(/\s+/g, ' ').trim()
+      await caption(page, `Step ${tag} — a split investor's Payouts (#${S.split}; blurred in the shot: real figures)`)
+      return { pay, textHash: crypto.createHash('sha256').update(text).digest('hex').slice(0, 16), shot: await leaseBlurredShot(page, sec, `${tag.toLowerCase()}-split-investor`) }
+    }
+    // The three months, as the ledger and the portal answer them.
+    const leaseRead = async () => {
+      const pay = await ledger(S.owner)
+      const inv = await portal(S.owner)
+      const m = {}
+      for (const [k, mk] of Object.entries(LEASE_MONTHS)) m[k] = { row: leaseRowOf(pay, mk), portal: leasePortalMonth(inv, mk) }
+      return { pay, inv, m }
+    }
+    const rowText = (r) => (r ? `${r.period} amount ${r.amount} (monthEarnings ${r.monthEarnings}, carried in ${r.lossCarriedIn}, deferred ${r.lossDeferred}, ${r.status}${r.finalizedAt ? ', FINALIZED' : ''}${r.payoutBasis ? `, basis ${r.payoutBasis.type} paid ${r.payoutBasis.paidAmount} reason ${r.payoutBasis.reason}` : ''})` : 'no ledger row')
+    const monthText = (x) => (x.row ? `${rowText(x.row)}; portal payable ${x.portal?.payable ?? '?'}` : 'no ledger row')
+    // The QA-LEASE investor's Payouts in the portal preview: the profit month's row.
+    const leaseUi = async (tag, expectAmount, expectLabel) => {
+      const sec = await leasePayoutsSection(page, S.owner)
+      const t = await leaseMonthRowText(page, sec, LEASE_MONTHS.profit)
+      const sectionText = await sec.innerText().catch(() => '')
+      await caption(page, `Step ${tag} — the QA-LEASE investor's Payouts: ${leaseLabel(LEASE_MONTHS.profit)} reads ${t ? `"${squash(t, 120)}"` : '(no row)'}`)
+      const s = await shot(page, `${tag.toLowerCase()}-qa-lease-payouts`)
+      const amountShown = !!t && t.includes(leaseMoney(expectAmount))
+      // The profit month's own row: the months LV closed keep their lease label, flag on or off.
+      const labelShown = !!t && t.includes(LEASE_L1)
+      S.ui[tag] = { ok: amountShown && labelShown === expectLabel, text: `the portal preview's ${leaseLabel(LEASE_MONTHS.profit)} row shows ${leaseMoney(expectAmount)}: ${amountShown}; "${LEASE_L1}" in that row: ${labelShown}; in the Payouts section: ${sectionText.includes(LEASE_L1)}`, shot: s }
+      return S.ui[tag]
+    }
+    // The page's own row for a step (LEu, LFu), apart from its API row: the page is
+    // built by another part of the feature, and either can fail alone.
+    const uiRow = (tag, title, expected) => {
+      const u = S.ui[tag]
+      record(u ? { step: `${tag}u`, title, expected, observed: u.text, verdict: verdict(u.ok), shot: u.shot }
+        : { step: `${tag}u`, title, expected, observed: `not reached: ${tag} did not open the Payouts page`, verdict: S.feature || tag === 'LE' ? 'FAIL' : 'SKIP', shot: '' })
+    }
+    const leaseRowPaid = (row, paid, reason) => {
+      const b = row?.payoutBasis || null
+      return !!row && row.amount === paid && row.monthEarnings === paid && row.lossCarriedIn === 0 && row.lossDeferred === 0 &&
+        !!b && b.type === 'lease' && b.leaseAmount === LEASE_AMOUNT && b.paidAmount === paid && b.reason === reason &&
+        row.breakdown?.splitPct === null && row.breakdown?.monthShare === paid
+    }
+    const leasePaid = (x, paid, reason) => {
+      const pb = x.portal?.payoutBasis || null
+      return leaseRowPaid(x.row, paid, reason) && !!x.portal && x.portal.payable === paid && !!pb && pb.paidAmount === paid && pb.reason === reason
+    }
+    // The months LV closed, read now against how LV read them (diff paths only).
+    const leaseClosedNow = async () => {
+      if (!S.closed) return { ok: false, text: 'LV recorded no closed months' }
+      const pay = await ledger(S.owner)
+      const inv = await portal(S.owner)
+      const diffs = leaseDiffPaths(S.closed.snap, leaseClosedSnap(S.closed.months, pay, inv))
+      return { ok: !diffs.length, pay, inv, text: `the ${S.closed.months.length} month(s) LV closed ${diffs.length ? `DIFFER from how they settled at ${diffs.slice(0, 6).join(', ')}` : 'read exactly as they settled'}` }
+    }
+    // A ledger answer and a portal answer without the months LV closed.
+    const leaseOpenParts = (pay, inv) => {
+      const closedSet = new Set(S.closed?.months || [])
+      return [
+        { ...pay, payouts: (pay?.payouts || []).filter((p) => !closedSet.has(p.period)) },
+        { ...inv, production: { ...(inv?.production || {}), monthlyEarnings: (inv?.production?.monthlyEarnings || []).filter((m) => !closedSet.has(m.month)) } },
+      ]
+    }
+
+    // ---- LV: flag ON, a CLOSED lease month, read twice. This is the account's first
+    // ledger read, so the reconcile creates the closed month's row and stamps it
+    // finalized there and then (a month nobody opened between its month end and its
+    // close). Every later read must still answer the lease: the same figures, no carried
+    // loss, and the lease wording on the portal, the statement and the report. It runs
+    // before LE: LE's flag-off read would settle the closed months as the split first.
+    await step('LV', 'Flag ON, INVESTOR_LEASE_DOWNTIME=unpaid (restarted): the latest closed month given a cost, then the QA-LEASE investor\'s ledger read twice, with its statement, its report and its Payouts page read between the two',
+      `The first read creates the closed month's row already finalized, paying ${leaseMoney(LEASE_AMOUNT)} as the lease (reason null, nothing carried or deferred), and the copy's frozen breakdown of it is the lease; the second read answers exactly as the first; the portal's month agrees; the statement prints the lease block (and the loss-month sentence L7), no split and no carried loss; the report prints "${LEASE_L9}" and L8, no carry or "records have changed" sentence; the Payouts page shows ${leaseMoney(LEASE_AMOUNT)} as the lease, no carried loss`, async () => {
+        needFeature(); needOwner()
+        if (!S.truck) throw new Error('not reached: the acceptance made no truck')
+        const cur = dayCT().slice(0, 7)
+        const closed = db.prepare("SELECT period FROM period_locks WHERE status = 'locked' AND period >= ? AND period < ? ORDER BY period DESC LIMIT 1").get(LEASE_MONTHS.profit, cur)?.period
+        if (!closed) throw skip(`the copy has no finalized month from ${LEASE_MONTHS.profit} to before ${cur}`)
+        const earlier = db.prepare('SELECT COUNT(*) AS n FROM investor_payouts WHERE owner_id = ?').get(S.owner).n
+        if (earlier) throw new Error(`the account already has ${earlier} ledger row(s), so this is not its first ledger read`)
+        const notes = []
+        // A cost in the closed month, so it is a month with activity that ran at a loss:
+        // the lease pays it in full, and read as the split it would carry the loss.
+        // POST /api/maintenance-fund refuses a date in a finalized month, so the copy
+        // takes the payment directly: allowed on the private copy only.
+        const mfId = Number(db.prepare("INSERT INTO maintenance_fund (type, amount, description, truck, date) VALUES ('service', ?, ?, ?, ?)")
+          .run(LEASE_SERVICE, 'QA-LEASE e2e: a cost in a closed month', S.truck.unit_number, `${closed}-10`).lastInsertRowid)
+        leaseNote('maintenance_fund', mfId)
+        notes.push(`closed month ${closed}: a ${leaseMoney(LEASE_SERVICE)} maintenance service payment, entry #${mfId}, set in the copy (the route refuses a finalized month)`)
+        const bootText = await leaseReboot(srv, { INVESTOR_LEASE_PAYOUTS_ENABLED: 'true', INVESTOR_LEASE_DOWNTIME: 'unpaid' })
+        S.rebooted = true
+        const st = await settings()
+        notes.push(bootText)
+        await caption(page, `Step LV — restarted: ${bootText}`)
+
+        // The first read: the ledger creates and stamps the closed month's row.
+        const first = await ledger(S.owner)
+        const row1 = leaseRowOf(first, closed)
+        const stored = db.prepare('SELECT finalized_at AS at, finalized_breakdown AS b FROM investor_payouts WHERE owner_id = ? AND period = ?').get(S.owner, closed)
+        let frozen = null
+        try { frozen = JSON.parse(stored?.b || 'null') } catch { frozen = null }
+        const firstOk = !!row1?.finalizedAt && leaseRowPaid(row1, LEASE_AMOUNT, null) && first?.totals?.carriedLossOutstanding === 0
+        const frozenOk = !!stored?.at && frozen?.payoutBasis?.type === 'lease' && frozen.payoutBasis.paidAmount === LEASE_AMOUNT &&
+          frozen.splitPct === null && frozen.monthShare === LEASE_AMOUNT && frozen.lossCarriedIn === 0 && frozen.lossDeferred === 0
+        notes.push(`first read: ${rowText(row1)}; carried loss outstanding ${first?.totals?.carriedLossOutstanding}; the copy's frozen breakdown: ${frozen ? `basis ${frozen.payoutBasis ? `${frozen.payoutBasis.type} paid ${frozen.payoutBasis.paidAmount}` : 'NONE (reads as the split)'}, splitPct ${frozen.splitPct}, monthShare ${frozen.monthShare}, carried in ${frozen.lossCarriedIn}, deferred ${frozen.lossDeferred}` : `none ("${String(stored?.b ?? '')}")`}`)
+
+        // The statement for the closed month.
+        const stmt = await fetchBytes(page, `/api/investor/payouts/${closed}/statement?as_user_id=${S.owner}`)
+        const sText = stmt.status === 200 && stmt.isPdf ? rNorm((await pdfText(stmt.bytes.toString('base64'))).text) : ''
+        const sWant = [LEASE_STATEMENT_HEADING, LEASE_STATEMENT_LINE, `Lease payment for ${leaseLabel(closed)}`, LEASE_L7, leaseMoney(LEASE_AMOUNT)]
+        // Compared without case or spaces: the table headings print upper-case and
+        // letter-spaced.
+        const compact = (t) => t.replace(/\s+/g, '').toUpperCase()
+        const sMissing = sWant.filter((t) => !compact(sText).includes(compact(t)))
+        const sSplit = LEASE_SPLIT_STATEMENT.filter((t) => compact(sText).includes(compact(t)))
+        const stmtOk = !!sText && !sMissing.length && !sSplit.length
+        notes.push(`statement ${closed} → ${codeText(stmt)}${stmt.isPdf ? ' (a PDF)' : ''}: lease wording ${sMissing.length ? `MISSING ${sMissing.map((t) => `"${squash(t, 40)}"`).join(', ')}` : 'present'}; split or carry wording ${sSplit.length ? `PRINTED ${sSplit.map((t) => `"${t}"`).join(', ')}` : 'none'}`)
+
+        // The report over the closed month.
+        const rep = await fetchBytes(page, `/api/investor/report?as_user_id=${S.owner}&start=${closed}-01&end=${lastDayOf(closed)}`)
+        const rText = rep.status === 200 && rep.isPdf ? rNorm((await pdfText(rep.bytes.toString('base64'))).text) : ''
+        const l8 = `Your payout is a fixed monthly lease of ${leaseMoney(LEASE_AMOUNT)}, not a share of net profit.`
+        const rMissing = [LEASE_L9, l8].filter((t) => !rText.includes(t))
+        const rSplit = [...LEASE_SPLIT_REPORT.filter((t) => rText.includes(t)), ...(/Investor Payout \(\d+%\)/.test(rText) ? ['Investor Payout (<n>%)'] : [])]
+        const reportOk = !!rText && !rMissing.length && !rSplit.length
+        notes.push(`report ${closed} → ${codeText(rep)}${rep.isPdf ? ' (a PDF)' : ''}: lease wording ${rMissing.length ? `MISSING ${rMissing.map((t) => `"${squash(t, 40)}"`).join(', ')}` : 'present'}; split, carry or change wording ${rSplit.length ? `PRINTED ${rSplit.map((t) => `"${squash(t, 50)}"`).join(', ')}` : 'none'}`)
+
+        // The Payouts page (the portal preview): the closed month's row, expanded.
+        const sec = await leasePayoutsSection(page, S.owner)
+        const uiText = await leaseMonthRowText(page, sec, closed) || ''
+        const secText = rNorm(await sec.innerText().catch(() => ''))
+        const uiSplit = LEASE_SPLIT_PORTAL.filter((t) => secText.includes(t) || uiText.includes(t))
+        const uiOk = uiText.includes(leaseMoney(LEASE_AMOUNT)) && uiText.includes(LEASE_STATEMENT_LINE) && secText.includes(LEASE_L1) && !uiSplit.length
+        await caption(page, `Step LV — the Payouts page, ${leaseLabel(closed)} (closed, read again): ${uiText ? `"${squash(uiText, 140)}"` : '(no row)'}`)
+        const s = await shot(page, 'lv-closed-lease-month')
+        notes.push(`the Payouts page's ${leaseLabel(closed)} row shows ${leaseMoney(LEASE_AMOUNT)} as "${LEASE_STATEMENT_LINE}": ${uiText.includes(leaseMoney(LEASE_AMOUNT)) && uiText.includes(LEASE_STATEMENT_LINE)}; "${LEASE_L1}" in the section: ${secText.includes(LEASE_L1)}; split, carry or change wording ${uiSplit.length ? `SHOWN ${uiSplit.map((t) => `"${t}"`).join(', ')}` : 'none'}`)
+
+        // The second read, after every reader above.
+        const second = await ledger(S.owner)
+        const inv = await portal(S.owner)
+        const diffs = leaseDiffPaths(first, second)
+        const x2 = { row: leaseRowOf(second, closed), portal: leasePortalMonth(inv, closed) }
+        const secondOk = !diffs.length && leasePaid(x2, LEASE_AMOUNT, null) && x2.portal.lossCarriedIn === 0 && x2.portal.lossDeferred === 0 &&
+          second?.totals?.carriedLossOutstanding === 0
+        notes.push(`second read: ${diffs.length ? `DIFFERS from the first at ${diffs.slice(0, 8).join(', ')}` : 'identical to the first'}; ${monthText(x2)}; portal carried in ${x2.portal?.lossCarriedIn ?? '?'}, deferred ${x2.portal?.lossDeferred ?? '?'}; carried loss outstanding ${second?.totals?.carriedLossOutstanding}`)
+        // Every month this read closed, as it settled: LE, LS and LY read them again
+        // after each later switch, and each must still read exactly this way.
+        const closedMonths = (second?.payouts || []).filter((p) => p.finalizedAt).map((p) => p.period).sort()
+        S.closed = {
+          months: closedMonths,
+          latest: closed,
+          idle: [...closedMonths].reverse().find((mk) => mk < closed && leaseRowOf(second, mk)?.payoutBasis?.reason === 'downtime') || null,
+          snap: leaseClosedSnap(closedMonths, second, inv),
+          statement: sText,
+        }
+        notes.push(`recorded for LE, LS and LY: ${closedMonths.length} closed month(s) (${closedMonths[0] ?? '-'} to ${closedMonths[closedMonths.length - 1] ?? '-'}), the idle one read closely ${S.closed.idle ?? 'NONE'}`)
+        return {
+          verdict: verdict(st?.enabled === true && st?.settings?.downtime === 'unpaid' && firstOk && frozenOk && stmtOk && reportOk && uiOk && secondOk),
+          observed: notes.join('; '),
+          shot: s,
+        }
+      })
+
+    // ---- LE: flag OFF, the split pays
+    await step('LE', 'Flag OFF (the server as booted, or restarted with it off): the QA-LEASE investor\'s ledger and portal for the three months and the months LV closed; a split investor\'s Payouts recorded for LG',
+      `Profit month: the split share (> $0, not ${leaseMoney(LEASE_AMOUNT)}), open (owed); idle month $0; loss month $0 with the loss deferred; no payoutBasis on any month still open, nor on the current month, in either answer; the portal's payable equals the ledger; the months LV closed as the lease still read exactly as they settled (a month settled as a lease stays the lease, flag off)`, async () => {
+        needOwner()
+        const notes = []
+        if (S.feature && (await settings())?.enabled) {
+          notes.push(`the server was booted with the flag on: restarted with it off (${await leaseReboot(srv, {})})`)
+          S.rebooted = true
+        }
+        const r = await leaseRead()
+        const { profit: P, idle: I, loss: L } = r.m
+        const keys = leaseOpenParts(r.pay, r.inv).flatMap((x) => basisKeys(x))
+        const closedNow = await leaseClosedNow()
+        const open = (x) => x.row && x.row.status === 'owed' && !x.row.finalizedAt
+        const agree = Object.values(r.m).every((x) => x.row && x.portal && x.row.amount === x.portal.payable)
+        const ok = open(P) && open(I) && open(L) && P.row.amount > 0 && P.row.amount !== LEASE_AMOUNT && P.row.amount === P.row.monthEarnings &&
+          I.row.amount === 0 && L.row.amount === 0 && L.row.lossDeferred > 0 && !keys.length && agree && (!S.closed || closedNow.ok)
+        const ui = await leaseUi('LE', P.row?.amount ?? 0, false)
+        S.split = await pickSplit()
+        S.snap.off = await splitSnapshot('LE')
+        notes.push(`profit ${monthText(P)}; idle ${monthText(I)}; loss ${monthText(L)}; payoutBasis keys outside the closed months: ${keys.length ? keys.slice(0, 5).join(', ') : 'none'}; portal = ledger: ${agree}; ${S.closed ? closedNow.text : 'no closed months recorded (LV did not run)'}; split investor #${S.split ?? 'none'} recorded`)
+        return { verdict: verdict(ok), observed: notes.join('; '), shot: ui.shot }
+      })
+    uiRow('LE', 'Flag OFF, UI: the QA-LEASE investor\'s Payouts in the portal preview (/investor-portals/<id>), the profit month\'s row expanded',
+      `The row shows the split amount (LE's ledger figure) and no "${LEASE_L1}"`)
+
+    // ---- LF: flag ON, downtime unpaid
+    const leaseOn = async (tag, downtime) => {
+      needFeature(); needOwner()
+      const bootText = await leaseReboot(srv, { INVESTOR_LEASE_PAYOUTS_ENABLED: 'true', INVESTOR_LEASE_DOWNTIME: downtime })
+      S.rebooted = true
+      const st = await settings()
+      await caption(page, `Step ${tag} — restarted: ${bootText}`)
+      return { bootText, st, r: await leaseRead() }
+    }
+    await step('LF', 'Flag ON, INVESTOR_LEASE_DOWNTIME=unpaid (restarted): the QA-LEASE investor\'s ledger and portal for the three months',
+      `GET /api/investor-payout-settings enabled, downtime unpaid; profit and loss months pay ${leaseMoney(LEASE_AMOUNT)} (payoutBasis lease, reason null, splitPct null, nothing carried or deferred); the idle month pays $0 (reason "downtime"); the portal agrees`, async () => {
+        const { bootText, st, r } = await leaseOn('LF', 'unpaid')
+        const { profit: P, idle: I, loss: L } = r.m
+        const ok = st?.enabled === true && st?.settings?.downtime === 'unpaid' &&
+          leasePaid(P, LEASE_AMOUNT, null) && leasePaid(I, 0, 'downtime') && leasePaid(L, LEASE_AMOUNT, null)
+        const ui = await leaseUi('LF', LEASE_AMOUNT, true)
+        S.snap.on = await splitSnapshot('LF')
+        return {
+          verdict: verdict(ok),
+          observed: `${bootText}; settings ${JSON.stringify(st)}; profit ${monthText(P)}; idle ${monthText(I)}; loss ${monthText(L)}`,
+          shot: ui.shot,
+        }
+      })
+    uiRow('LF', 'Flag ON, UI: the QA-LEASE investor\'s Payouts in the portal preview, the profit month\'s row expanded',
+      `The row shows ${leaseMoney(LEASE_AMOUNT)} and "${LEASE_L1}" (the lease label, L1)`)
+
+    // ---- LW: flag ON, the admin screens: the invite form's warning gone, the panel applied
+    await step('LW', 'Flag ON, Super Admin, /investors: the invite form with a lease picked (nothing created), then the QA-LEASE investor\'s Payout Basis panel',
+      `No "contract only" warning on the form; the panel says "Applied to payouts from ${leaseLabel(LEASE_MONTHS.profit)}"`, async () => {
+        needFeature(); needOwner()
+        await gotoInvestorsPage(page)
+        const invites = await invitesPanel(page)
+        if (!invites) throw new Error('/investors has no invites panel ([data-test="invites-panel"])')
+        await openInviteForm(page, invites)
+        await chooseControl(page.locator(TD('invite-type-lease')).first())
+        const warning = await leaseInviteWarning(page)
+        await caption(page, `Step LW — lease payouts on: the invite form's warning ${warning.shown ? 'SHOWS' : 'is hidden'}`)
+        await leaseQaShot(page, 'lw-invite-form')
+        const panel = await leaseBasisPanel(page, NAME)
+        const status = squash(await panel.locator(TD('payout-basis-status')).innerText().catch(() => ''), 160)
+        await caption(page, `Step LW — the Payout Basis panel: "${status}"`)
+        const s = await leaseQaShot(page, 'lw-payout-basis-panel')
+        const want = `Applied to payouts from ${leaseLabel(LEASE_MONTHS.profit)}`
+        return {
+          verdict: verdict(!warning.shown && status === want),
+          observed: `the invite form's lease warning ${warning.shown ? `SHOWS ("${warning.text}")` : 'hidden'}; the panel's status "${status}"`,
+          shot: s,
+        }
+      })
+
+    // ---- LG: the split investor, flag ON, against LE
+    await step('LG', 'Flag ON: a split investor\'s Payouts (GET /api/investor/payouts?as_user_id= and the portal preview\'s Payouts section) against LE\'s, flag OFF',
+      'Identical: every value, key and key order of the answer, and the section\'s text (compared by hash; the figures are never printed)', async () => {
+        needFeature()
+        if (!S.split) throw skip('no other investor with ledger rows on the copy')
+        if (!S.snap.off || !S.snap.on) throw new Error('not reached: LE or LF did not record the split investor')
+        const diffs = leaseDiffPaths(S.snap.off.pay, S.snap.on.pay)
+        const same = diffs.length === 0 && S.snap.off.textHash === S.snap.on.textHash
+        return { verdict: verdict(same), observed: `investor #${S.split}: the answer ${diffs.length ? `DIFFERS at ${diffs.join(', ')}` : 'identical'}; the Payouts section's text ${S.snap.off.textHash === S.snap.on.textHash ? 'identical' : 'DIFFERS'}`, shot: S.snap.on.shot }
+      })
+
+    // ---- LH: flag ON, downtime paid
+    await step('LH', 'Flag ON, INVESTOR_LEASE_DOWNTIME=paid (restarted): the three months',
+      `Settings downtime paid; all three months pay ${leaseMoney(LEASE_AMOUNT)} (reason null), the idle month included; a split investor's answer still identical to LE's`, async () => {
+        const { bootText, st, r } = await leaseOn('LH', 'paid')
+        const { profit: P, idle: I, loss: L } = r.m
+        const splitNow = S.split ? await ledger(S.split) : null
+        const splitDiffs = S.snap.off && splitNow ? leaseDiffPaths(S.snap.off.pay, splitNow) : []
+        const ok = st?.enabled === true && st?.settings?.downtime === 'paid' &&
+          leasePaid(P, LEASE_AMOUNT, null) && leasePaid(I, LEASE_AMOUNT, null) && leasePaid(L, LEASE_AMOUNT, null) && !splitDiffs.length
+        const sec = await leasePayoutsSection(page, S.owner)
+        const idleText = await leaseMonthRowText(page, sec, LEASE_MONTHS.idle)
+        await caption(page, `Step LH — ${leaseLabel(LEASE_MONTHS.idle)} reads ${idleText ? `"${squash(idleText, 120)}"` : '(no row)'}`)
+        const s = await shot(page, 'lh-qa-lease-payouts')
+        return {
+          verdict: verdict(ok),
+          observed: `${bootText}; settings ${JSON.stringify(st)}; profit ${monthText(P)}; idle ${monthText(I)}; loss ${monthText(L)}; the idle month's row on the Payouts page ${idleText ? `shows ${leaseMoney(LEASE_AMOUNT)}: ${idleText.includes(leaseMoney(LEASE_AMOUNT))}` : 'not shown'}; split investor #${S.split ?? '-'}: ${splitDiffs.length ? `DIFFERS at ${splitDiffs.join(', ')}` : 'identical to LE'}`,
+          shot: s,
+        }
+      })
+
+    // ---- LS: flag ON, downtime paid: which truck statuses a lease counts. Every
+    // status but Inactive: a truck in Maintenance is still under its lease.
+    const leaseTruckStatus = async (status) => {
+      await page.goto(`${BASE_URL}/trucks`)
+      await page.locator('table.truck-table').waitFor({ state: 'visible', timeout: 30000 })
+      const trow = rowOf(page, S.truck.unit_number)
+      await trow.waitFor({ state: 'visible', timeout: 30000 })
+      await trow.scrollIntoViewIfNeeded()
+      await trow.locator('button.btn-edit').click()
+      const dlg = page.locator('.confirm-overlay .edit-dialog')
+      await dlg.waitFor({ state: 'visible' })
+      await dlg.locator('.edit-field', { has: page.locator('label', { hasText: /^\s*Status\s*$/ }) }).locator('select').selectOption(status)
+      await caption(page, `Step LS — ${S.truck.unit_number}: Status ${status}, Save`)
+      const [put] = await Promise.all([
+        page.waitForResponse((r) => r.request().method() === 'PUT' && pathOf(r.url()) === `/api/trucks/${S.truck.id}`, { timeout: 20000 }).catch(() => null),
+        dlg.locator('.confirm-actions button', { hasText: /^\s*Save\s*$/ }).click(),
+      ])
+      const putCode = put ? (await put.json().catch(() => null))?.code : ''
+      await page.keyboard.press('Escape').catch(() => {})
+      const storedStatus = () => db.prepare('SELECT status FROM trucks WHERE id = ?').get(S.truck.id)?.status
+      let note = `${status}: Edit → PUT ${put ? put.status() : 'not sent'}${putCode ? ` ${putCode}` : ''}`
+      if (storedStatus() !== status) {
+        // The form refuses a change that would move a finalized month's figures (as it
+        // does for any truck), so the copy takes it directly: allowed on the private copy only.
+        db.prepare('UPDATE trucks SET status = ? WHERE id = ? AND owner_id = ?').run(status, S.truck.id, S.owner)
+        note += `; set in the copy instead: ${storedStatus() === status}`
+      }
+      return { ok: storedStatus() === status, note }
+    }
+    await step('LS', `Flag ON, downtime paid: the QA-LEASE truck set to Maintenance, then Inactive, then Active again (Trucks → Edit → Status; the copy takes it when the form refuses); the three months read after each`,
+      `Maintenance: all three months still pay ${leaseMoney(LEASE_AMOUNT)} (reason null); Inactive: all three pay $0 (reason "not_in_service"), and the profit month's row on the Payouts page shows L6; Active again: ${leaseMoney(LEASE_AMOUNT)} each; after each change, the months LV closed read exactly as they settled`, async () => {
+        needFeature(); needOwner()
+        if (!S.truck) throw new Error('not reached: the acceptance made no truck')
+        const st = await settings()
+        if (st?.enabled !== true || st?.settings?.downtime !== 'paid') throw new Error('not reached: the server is not running with the flag on and downtime paid (LH)')
+        const notes = []
+        const monthsPay = async (label, paid, reason) => {
+          const r = await leaseRead()
+          const closedNow = await leaseClosedNow()
+          notes.push(`${label}: ${Object.values(r.m).map(monthText).join(' | ')}; ${S.closed ? closedNow.text : 'no closed months recorded'}`)
+          return Object.values(r.m).every((x) => leasePaid(x, paid, reason)) && (!S.closed || closedNow.ok)
+        }
+        const shop = await leaseTruckStatus('Maintenance')
+        notes.push(shop.note)
+        const shopOk = shop.ok && await monthsPay('Maintenance', LEASE_AMOUNT, null)
+        const gone = await leaseTruckStatus('Inactive')
+        notes.push(gone.note)
+        const goneOk = gone.ok && await monthsPay('Inactive', 0, 'not_in_service')
+        const sec = await leasePayoutsSection(page, S.owner)
+        const profitText = await leaseMonthRowText(page, sec, LEASE_MONTHS.profit)
+        const l6Shown = !!profitText && profitText.includes(LEASE_L6)
+        await caption(page, `Step LS — the truck Inactive: ${leaseLabel(LEASE_MONTHS.profit)} reads ${profitText ? `"${squash(profitText, 160)}"` : '(no row)'}`)
+        const s = await shot(page, 'ls-qa-lease-inactive')
+        const back = await leaseTruckStatus('Active')
+        notes.push(back.note)
+        const backOk = back.ok && await monthsPay('Active again', LEASE_AMOUNT, null)
+        notes.push(`the profit month's row with the truck Inactive shows L6: ${l6Shown}`)
+        return { verdict: verdict(shopOk && goneOk && l6Shown && backOk), observed: notes.join('; '), shot: s }
+      })
+
+    // ---- LY: the months LV closed, after the switches. LV closed them under downtime
+    // "unpaid": the latest at the lease, the idle ones at $0 for downtime. Under "paid"
+    // (as LH and LS left the server), then with the flag off, each must still read
+    // exactly as it settled, in figures and in wording, on every surface, while the
+    // open idle month follows the setting.
+    await step('LY', 'Flag ON with downtime "paid" (as LH and LS left it), then flag OFF (restarted): the months LV closed as the lease, read again on the ledger and portal, the Payouts console, the Payouts page, the statement and the report',
+      `Both times every month LV closed reads exactly as it settled (amount, earnings, recomputed amount, carry, basis and reason; the portal's month too): an idle closed month still $0 for downtime with L5 on the console and the Payouts page, the latest still ${leaseMoney(LEASE_AMOUNT)} as "${LEASE_STATEMENT_LINE}" without L5, no "changed since it closed" note; the statement the same text as LV's; the report "${LEASE_L9}" and L8, no change or carry sentence; the open idle month ${leaseMoney(LEASE_AMOUNT)} under "paid", the split's $0 with the flag off`, async () => {
+        needFeature(); needOwner()
+        if (!S.closed) throw new Error('not reached: LV recorded no closed months')
+        const { idle, latest } = S.closed
+        if (!idle) throw new Error(`LV closed no idle month before ${latest} (reason "downtime")`)
+        const st = await settings()
+        if (st?.enabled !== true || st?.settings?.downtime !== 'paid') throw new Error('not reached: the server is not running with the flag on and downtime paid (LH, LS)')
+        const drift = 'which have changed since it closed'
+        const consolePick = (p) => (p ? { amount: p.amount, monthEarnings: p.monthEarnings, recomputedAmount: p.recomputedAmount, lossCarriedIn: p.lossCarriedIn, lossDeferred: p.lossDeferred, payoutBasis: p.payoutBasis ?? null } : null)
+        const shots = []
+        // Every surface once; `mode` names the server's state, `openIdleOk` what the open
+        // idle month must pay in it.
+        const pass = async (mode, openIdleOk) => {
+          const closedNow = await leaseClosedNow()
+          const iRow = leaseRowOf(closedNow.pay, idle)
+          const iPortal = leasePortalMonth(closedNow.inv, idle)
+          const idleOk = leaseRowPaid(iRow, 0, 'downtime') && iPortal?.payable === 0 && iPortal?.payoutBasis?.reason === 'downtime'
+          const open = (await leaseRead()).m.idle
+          const openOk = openIdleOk(open)
+          // The console: its API rows, then its page.
+          const cons = ((await api(page, 'GET', '/api/payouts')).json?.investors || []).find((i) => Number(i.ownerId) === S.owner)
+          const consApiOk = [idle, latest].every((mk) => JSON.stringify(consolePick((cons?.payouts || []).find((p) => p.period === mk))) === JSON.stringify(consolePick(S.closed.snap[mk].row)))
+          const csec = await leaseConsoleSection(page, NAME)
+          const cIdle = await leaseConsoleRowText(page, csec, idle)
+          const cLatest = await leaseConsoleRowText(page, csec, latest)
+          const consUiOk = cIdle.includes(LEASE_L5) && /nothing due/i.test(cIdle) && cLatest.includes(leaseMoney(LEASE_AMOUNT)) && !cLatest.includes(LEASE_L5)
+          await caption(page, `Step LY (${mode}) — the Payouts console: ${leaseLabel(idle)} reads "${squash(cIdle, 120)}"`)
+          shots.push(await leaseConsoleShot(page, csec, `ly-${mode}-console`))
+          // The investor's Payouts page (the portal preview).
+          const psec = await leasePayoutsSection(page, S.owner)
+          const pIdle = await leaseMonthRowText(page, psec, idle) || ''
+          const pLatest = await leaseMonthRowText(page, psec, latest) || ''
+          const pageOk = pIdle.includes(LEASE_L5) && !pIdle.includes(drift) &&
+            pLatest.includes(leaseMoney(LEASE_AMOUNT)) && pLatest.includes(LEASE_STATEMENT_LINE) && !pLatest.includes(drift) && !pLatest.includes(LEASE_L5)
+          await caption(page, `Step LY (${mode}) — the Payouts page: ${leaseLabel(idle)} reads "${squash(pIdle, 120)}"`)
+          shots.push(await shot(page, `ly-${mode}-payouts`))
+          // The latest closed month's statement, and the report over the idle month to it.
+          const stmt = await fetchBytes(page, `/api/investor/payouts/${latest}/statement?as_user_id=${S.owner}`)
+          const sText = stmt.status === 200 && stmt.isPdf ? rNorm((await pdfText(stmt.bytes.toString('base64'))).text) : ''
+          const stmtOk = !!sText && sText === S.closed.statement
+          const rep = await fetchBytes(page, `/api/investor/report?as_user_id=${S.owner}&start=${idle}-01&end=${lastDayOf(latest)}`)
+          const rText = rep.status === 200 && rep.isPdf ? rNorm((await pdfText(rep.bytes.toString('base64'))).text) : ''
+          const rMissing = [LEASE_L9, `Your payout is a fixed monthly lease of ${leaseMoney(LEASE_AMOUNT)}, not a share of net profit.`].filter((t) => !rText.includes(t))
+          const rSplit = [...LEASE_SPLIT_REPORT.filter((t) => rText.includes(t)), ...(/Investor Payout \(\d+%\)/.test(rText) ? ['Investor Payout (<n>%)'] : [])]
+          const reportOk = !!rText && !rMissing.length && !rSplit.length
+          return {
+            ok: closedNow.ok && idleOk && openOk && consApiOk && consUiOk && pageOk && stmtOk && reportOk,
+            text: `${closedNow.text}; ${leaseLabel(idle)} (closed, idle): ${rowText(iRow)}, portal payable ${iPortal?.payable ?? '?'} reason ${iPortal?.payoutBasis?.reason ?? '-'}; ` +
+              `the open idle month ${monthText({ row: open.row, portal: open.portal })} ${openOk ? 'follows the setting' : 'does NOT follow the setting'}; ` +
+              `console API ${consApiOk ? 'as settled' : 'DIFFERS'}; console page: ${leaseLabel(idle)} L5 ${cIdle.includes(LEASE_L5)}, "nothing due" ${/nothing due/i.test(cIdle)}; ${leaseLabel(latest)} ${leaseMoney(LEASE_AMOUNT)} ${cLatest.includes(leaseMoney(LEASE_AMOUNT))}, L5 ${cLatest.includes(LEASE_L5)}; ` +
+              `Payouts page: ${leaseLabel(idle)} L5 ${pIdle.includes(LEASE_L5)}; ${leaseLabel(latest)} "${LEASE_STATEMENT_LINE}" ${leaseMoney(LEASE_AMOUNT)} ${pLatest.includes(leaseMoney(LEASE_AMOUNT)) && pLatest.includes(LEASE_STATEMENT_LINE)}; change note ${pIdle.includes(drift) || pLatest.includes(drift) ? 'SHOWN' : 'none'}; ` +
+              `statement ${latest} → ${codeText(stmt)}, ${stmtOk ? 'the same text as LV\'s' : 'NOT the text LV read'}; report ${idle} to ${latest} → ${codeText(rep)}: lease wording ${rMissing.length ? `MISSING ${rMissing.length}` : 'present'}, change or carry wording ${rSplit.length ? `PRINTED ${rSplit.map((t) => `"${squash(t, 40)}"`).join(', ')}` : 'none'}`,
+          }
+        }
+        const paid = await pass('paid', (x) => leasePaid(x, LEASE_AMOUNT, null))
+        const bootText = await leaseReboot(srv, {})
+        S.rebooted = true
+        const stOff = await settings()
+        await caption(page, `Step LY — restarted: ${bootText}`)
+        const off = await pass('off', (x) => !!x.row && x.row.amount === 0 && !x.row.payoutBasis && !!x.portal && x.portal.payable === 0 && !x.portal.payoutBasis)
+        return {
+          verdict: verdict(paid.ok && stOff?.enabled === false && off.ok),
+          observed: `downtime "paid": ${paid.text}; restarted with the flag off (${bootText}; enabled ${stOff?.enabled}): ${off.text}`,
+          shot: shots[shots.length - 1] || '',
+        }
+      })
+  } finally {
+    // ---- LX: everything the section made, removed; the server as it was found
+    const notes = []
+    let ok = true
+    try {
+      if (S.rebooted) notes.push(`the server restarted with the flag off, as booted: ${await leaseReboot(srv, {})}`)
+    } catch (e) { ok = false; notes.push(`restart error: ${e.message}`) }
+    try {
+      if (leaseSheetLoad) {
+        const find = await api(page, 'GET', `/api/data?sheet=${encodeURIComponent('Job Tracking')}&search=${encodeURIComponent(leaseSheetLoad)}&limit=10`)
+        const idCol = (find.json?.headers || []).find((h) => /load.?id|job.?id/i.test(h))
+        const hits = (find.json?.data || []).filter((r) => idCol && String(r[idCol]).trim() === leaseSheetLoad)
+        for (const h of hits.sort((a, b) => b._rowIndex - a._rowIndex)) {
+          // Re-read that one row right before deleting it: row numbers shift under other writes.
+          const again = await api(page, 'GET', `/api/data?sheet=${encodeURIComponent('Job Tracking')}&search=${encodeURIComponent(leaseSheetLoad)}&limit=10`)
+          const still = (again.json?.data || []).find((r) => r._rowIndex === h._rowIndex && String(r[idCol]).trim() === leaseSheetLoad)
+          if (!still) { notes.push(`sheet row ${h._rowIndex} moved before its delete; not deleted`); ok = false; continue }
+          const d = await api(page, 'DELETE', `/api/data/${h._rowIndex}?sheet=${encodeURIComponent('Job Tracking')}`, { reason: 'QA-LEASE e2e clean-up' })
+          notes.push(`sheet row ${h._rowIndex} (${leaseSheetLoad}) DELETE → ${d.status}${d.json?.code ? ` ${d.json.code}` : ''}`)
+        }
+        const left = await api(page, 'GET', `/api/data?sheet=${encodeURIComponent('Job Tracking')}&search=${encodeURIComponent(leaseSheetLoad)}&limit=10`)
+        const remaining = (left.json?.data || []).filter((r) => idCol && String(r[idCol]).trim() === leaseSheetLoad).length
+        if (left.status === 200 && remaining === 0) { notes.push(`${leaseSheetLoad} gone from the sheet`); leaseSheetLoad = ''; writeJournal() } else { ok = false; notes.push(`${leaseSheetLoad} still on the sheet (${remaining}); the plant journal keeps it`) }
+      }
+    } catch (e) { ok = false; notes.push(`sheet clean-up error: ${e.message}`) }
+    try {
+      if (S.appId) {
+        const d = await api(page, 'DELETE', `/api/investor-applications/${S.appId}`)
+        notes.push(`DELETE /api/investor-applications/${S.appId} → ${d.status}`)
+      }
+      if (db && leaseRows.length) notes.push(`removed from the copy: ${leaseRemoveRowsSync().join(', ') || 'nothing'}`)
+      if (db && S.owner) {
+        const left = ['users', 'investors'].map((t) => db.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE ${t === 'users' ? 'id' : 'user_id'} = ?`).get(S.owner).n).reduce((a, b) => a + b, 0) +
+          db.prepare('SELECT COUNT(*) AS n FROM trucks WHERE owner_id = ?').get(S.owner).n + db.prepare('SELECT COUNT(*) AS n FROM investor_payouts WHERE owner_id = ?').get(S.owner).n
+        if (left) { ok = false; notes.push(`${left} row(s) of the QA-LEASE account still in the copy`) } else notes.push('no row of the QA-LEASE account left in the copy')
+      }
+    } catch (e) { ok = false; notes.push(`copy clean-up error: ${e.message}`) }
+    record({ step: 'LX', title: 'Clean-up: the server as it was booted; the QA-LEASE sheet row (found by its load id, re-read before the delete); the application (soft delete, then by id), account, record, truck, invite, maintenance entry, ledger and basis rows in the copy',
+      expected: 'Each removed; no plant journal left by this section', observed: `${notes.join('; ') || 'nothing to remove'}; plant journal ${fs.existsSync(JOURNAL) ? 'PRESENT' : 'none'}`, verdict: verdict(ok && !fs.existsSync(JOURNAL)), shot: '' })
+    try { await ctx.close() } catch { /* ignore */ }
+    if (ownDb && db) { try { db.close() } catch { /* ignore */ } db = null }
+  }
 }
 
 let exitCode = 0

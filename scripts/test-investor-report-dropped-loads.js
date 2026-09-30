@@ -131,7 +131,7 @@ const TABLE_CLOSE = "const monthlyData2 =";
 const NAMES = [
 	"resolvePreviewUser", "parseSheet", "deduplicateLoads", "findCol",
 	"getDeletedLoadIds", "loadKeySet", "excludeDroppedLoads",
-	"reportRangeMonthKeys", "summarizeReportPayout",
+	"reportRangeMonthKeys", "summarizeReportPayout", "reportPayoutLabel",
 	"investorJobRowTest", "driverNameForTotals", "isBuiltInPropertyName", "normalizeDriverName",
 	"investorTruckPurchase",
 ];

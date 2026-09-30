@@ -286,11 +286,14 @@ async function acceptOnce(vehicles, { helperSrc = HELPER_SRC, seed } = {}) {
 	const mail = [];
 	let handler = null;
 	const findDriverNameClash = new Function("db", `${CLASH_SRC}\nreturn findDriverNameClash;`)(db);
+	// The payout basis the acceptance records is scripts/test-payout-basis-routes.js's
+	// subject; this application signs the standard contract, so none is.
 	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail",
-		"parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", ACCEPT_SRC)(
+		"parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", "recordSignedPayoutBasis", "unrecordedLeaseNote", ACCEPT_SRC)(
 		{ put: (p, guard, h) => { handler = h; } }, () => null, db, { hash: async () => "hashed" }, require("crypto"),
 		(req, action, entity, entityId, details) => audits.push({ action, details }), () => {}, colLetter, escapeHtml,
-		(to, subject, html) => { mail.push({ to, subject, html }); return Promise.resolve(true); }, parseTruckAmount, register, findDriverNameClash);
+		(to, subject, html) => { mail.push({ to, subject, html }); return Promise.resolve(true); }, parseTruckAmount, register, findDriverNameClash,
+		() => null, () => "");
 	const out = { status: 200, body: null };
 	await handler({ params: { id: "42" }, body: { status: "Accepted" }, session: { user: { id: 1, username: "super_admin", role: "Super Admin" } } },
 		{ status(c) { out.status = c; return this; }, json(b) { out.body = b; return this; } });

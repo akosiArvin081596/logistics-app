@@ -1076,6 +1076,10 @@ async function acceptanceSection() {
 		notifyChange: () => {},
 		escapeHtml: (s) => String(s ?? ""),
 		sendEmail: (to) => { mail.push(to); },
+		// The payout basis the acceptance records is scripts/test-payout-basis-routes.js's
+		// subject; this application signs the standard contract, so none is.
+		recordSignedPayoutBasis: () => null,
+		unrecordedLeaseNote: () => "",
 	});
 	const r = await quiet(() => accept({ session: { user: SUPER }, params: { id: "42" }, body: { status: "Accepted" } }));
 	const b = r.body || {};

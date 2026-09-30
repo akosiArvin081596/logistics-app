@@ -46,6 +46,7 @@
         @delete="handleDelete"
         @update="handleUpdate"
         @picture-updated="store.refresh()"
+        @basis-updated="store.refresh()"
       />
     </template>
   </div>
