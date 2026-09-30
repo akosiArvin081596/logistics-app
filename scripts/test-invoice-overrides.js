@@ -29,13 +29,16 @@
  *      because a test that only checks "12abc34 is rejected" would pass against
  *      a gate applied to the already-mangled value.
  *
- *   §4 THE OFF-BY-ONE. brokerInvoice.formatDate("2026-08-14") returns
- *      "08/13/2026" — its last resort is `new Date(raw)` (UTC midnight)
- *      rendered through mdy() in America/Chicago. `<input type="date">` emits
- *      exactly that shape, so reusing formatDate would date EVERY edited
- *      invoice one day early. §4 pins isoToMdy against the trap by asserting the
- *      two DISAGREE on the same input — a bare `=== "08/14/2026"` would still
- *      pass on a day when the trap happened to be harmless.
+ *   §3 THE OFF-BY-ONE. `new Date("2026-08-14")` is UTC midnight, and rendered
+ *      through mdy() in America/Chicago it prints "08/13/2026".
+ *      brokerInvoice.formatDate() used to fall back to exactly that, so the
+ *      `<input type="date">` shape — and Job Tracking's Status Update Date on a
+ *      load created by drag-and-drop or the New Job form — printed one day
+ *      early. Both isoToMdy and formatDate now read a day as TEXT. §3 pins the
+ *      two AGREEING on the same input, and both DISAGREEING with a Date built
+ *      from it — a bare `=== "08/14/2026"` would still pass on a day when the
+ *      trap happened to be harmless. Mutant M3 builds the Date; L1/L2 undo the
+ *      text read inside the library itself.
  *
  *   §5 OMITTED vs EMPTY. undefined/null mean "the client didn't send the key →
  *      derive it"; "" means "the dispatcher CLEARED it". Conflating them
@@ -239,8 +242,13 @@ section("0. The landmines are real (control assertions against lib/broker-invoic
 	eq(brokerInvoice.parseMoney("1e9"), 19, "§0 parseMoney reads '1e9' as 19");
 	eq(brokerInvoice.formatMoney(0.001), "$0.00",
 		"§0 formatMoney renders 0.001 as $0.00 — positive, yet prints zero (why the floor is 0.01, not > 0)");
-	eq(brokerInvoice.formatDate("2026-08-14"), "08/13/2026",
-		"§0 formatDate LOSES A DAY on an ISO date (the <input type=\"date\"> shape)");
+	// The date trap lives one layer down now: formatDate reads an ISO day as
+	// text, but a Date built from one is still UTC midnight — 7 PM the day before
+	// in Houston. That is the landmine isoToMdy and formatDate both step around.
+	eq(brokerInvoice.formatDate(new Date("2026-08-14")), "08/13/2026",
+		"§0 a Date built from an ISO day LOSES A DAY once rendered in Houston");
+	eq(brokerInvoice.formatDate("2026-08-14"), "08/14/2026",
+		"§0 formatDate reads the same ISO day as TEXT (the <input type=\"date\"> / Status Update Date shape)");
 }
 
 // ============================================== §1 MONEY — THE GATE RUNS FIRST
@@ -302,13 +310,55 @@ section("2. Money bounds — floor $0.01, ceiling $1,000,000");
 // ================================================== §3 DATES — STRING SURGERY
 section("3. Dates — string surgery, never new Date()");
 {
-	// THE REGRESSION. Both halves are required: the value, and the fact that it
-	// DISAGREES with the trap on the same input.
+	// THE REGRESSION. All three are required: the value, the two readers AGREEING
+	// on it, and both DISAGREEING with a Date built from the same input.
 	eq(isoToMdy("2026-08-14"), "08/14/2026", "§3 isoToMdy('2026-08-14') === '08/14/2026'");
-	ok(isoToMdy("2026-08-14") !== brokerInvoice.formatDate("2026-08-14"),
-		"§3 isoToMdy DISAGREES with brokerInvoice.formatDate on the same ISO string (the off-by-one)");
+	eq(brokerInvoice.formatDate("2026-08-14"), isoToMdy("2026-08-14"),
+		"§3 brokerInvoice.formatDate AGREES with isoToMdy on the same ISO string (both read it as text)");
+	ok(isoToMdy("2026-08-14") !== brokerInvoice.formatDate(new Date("2026-08-14")),
+		"§3 …and both DISAGREE with a Date built from it (the off-by-one)");
 	eq(brokerInvoice.formatDate(isoToMdy("2026-08-14")), "08/14/2026",
 		"§3 the MM/DD/YYYY we hand buildInvoiceHtml survives its own formatDate() re-run");
+
+	// formatDate on the shapes a Job Tracking date cell actually holds. A DAY
+	// (no zone) is read as written; an INSTANT (Z, an offset, an RFC-2822 zone,
+	// a Date) is still rendered on the Houston day it fell on.
+	for (const v of ["2026-01-01", "2026-12-31", "2026-03-08", "2026-11-01", "2024-02-29"]) {
+		eq(brokerInvoice.formatDate(v), isoToMdy(v), `§3 formatDate agrees with isoToMdy on the boundary day ${v}`);
+	}
+	eq(brokerInvoice.formatDate("2026-01-01"), "01/01/2026", "§3 formatDate: Jan 1 does not fall into the previous year");
+	eq(brokerInvoice.formatDate("2026-12-31"), "12/31/2026", "§3 formatDate: Dec 31 stays in its year");
+	eq(brokerInvoice.formatDate("2026-03-08"), "03/08/2026", "§3 formatDate: a US DST-transition day (spring forward) is unaffected");
+	eq(brokerInvoice.formatDate("2026-11-01"), "11/01/2026", "§3 formatDate: a US DST-transition day (fall back) is unaffected");
+	eq(brokerInvoice.formatDate("2024-02-29"), "02/29/2024", "§3 formatDate: a leap day survives");
+	// A day that does not exist is blank, never rolled forward into March (which
+	// is what `new Date` does with it).
+	for (const v of ["2025-02-29", "2026-02-31", "2026-04-31", "2026-13-01", "2026-00-10", "2026-01-00"]) {
+		eq(brokerInvoice.formatDate(v), "", `§3 formatDate: the non-day ${v} is blank, not rolled forward`);
+	}
+	// A date-time with NO zone names a wall-clock time on that day, not an instant.
+	eq(brokerInvoice.formatDate("2026-08-14T00:00:00"), "08/14/2026", "§3 formatDate: a no-offset date-time at midnight keeps its day");
+	eq(brokerInvoice.formatDate("2026-08-14T23:59:59"), "08/14/2026", "§3 formatDate: a no-offset date-time before midnight keeps its day");
+	eq(brokerInvoice.formatDate("2026-08-14T00:00:00.000"), "08/14/2026", "§3 formatDate: fractional seconds, no offset");
+	eq(brokerInvoice.formatDate("2026-08-14 00:30"), "08/14/2026", "§3 formatDate: a space-separated no-offset date-time");
+	eq(brokerInvoice.formatDate("  2026-08-14  "), "08/14/2026", "§3 formatDate: surrounding whitespace is trimmed");
+	// Instants keep the Houston conversion — each pair straddles Houston midnight.
+	eq(brokerInvoice.formatDate("2026-08-14T02:00:00Z"), "08/13/2026",
+		"§3 formatDate: 02:00 UTC is still the PREVIOUS Houston day (a real instant)");
+	eq(brokerInvoice.formatDate("2026-08-14T04:30:00+00:00"), "08/13/2026",
+		"§3 formatDate: a +00:00 offset is an instant, converted to Houston");
+	eq(brokerInvoice.formatDate("2026-08-14T00:30:00-05:00"), "08/14/2026",
+		"§3 formatDate: a -05:00 offset (Houston's own in August) keeps its day");
+	eq(brokerInvoice.formatDate("Date: Fri, 14 Aug 2026 00:30:00 -0500"), "08/14/2026",
+		"§3 formatDate: an RFC-2822 'Date: … -0500' header is converted, and lands on the 14th");
+	eq(brokerInvoice.formatDate("Fri, 14 Aug 2026 00:30:00 +0000"), "08/13/2026",
+		"§3 formatDate: an RFC-2822 '+0000' is still converted — the 13th in Houston");
+	eq(brokerInvoice.formatDate(new Date("2026-08-01T01:30:00Z")), "07/31/2026",
+		"§3 formatDate: a Date is still rendered on its Houston day (the Invoice Date rule)");
+	// MM/DD/YYYY input is unchanged, time of day or not.
+	eq(brokerInvoice.formatDate("08/14/2026 0:15:00"), "08/14/2026", "§3 formatDate: 'MM/DD/YYYY H:MM:SS' keeps its day");
+	eq(brokerInvoice.formatDate("8/4/2026 23:59:59"), "08/04/2026", "§3 formatDate: 'M/D/YYYY H:MM:SS' is zero-padded, day kept");
+	eq(brokerInvoice.formatDate(""), "", "§3 formatDate('') === ''");
 
 	// Day boundaries, where a Date-based conversion goes wrong first.
 	eq(isoToMdy("2026-01-01"), "01/01/2026", "§3 Jan 1 does not fall into the previous year");
@@ -879,10 +929,10 @@ const MUTANTS = [
 			|| m.parseInvoiceOverrides({ total: "1e9" }).ok,
 	},
 	{
-		name: "M3 isoToMdy delegates to brokerInvoice.formatDate (the off-by-one)",
+		name: "M3 isoToMdy builds a Date and formats that (the off-by-one)",
 		mutate: (s) => s.replace(
 			"\treturn m ? `${m[2]}/${m[3]}/${m[1]}` : \"\";",
-			"\treturn m ? brokerInvoice.formatDate(String(iso)) : \"\";"),
+			"\treturn m ? brokerInvoice.formatDate(new Date(String(iso))) : \"\";"),
 		expect: (m) => m.isoToMdy("2026-08-14") !== "08/14/2026",
 	},
 	{
@@ -1023,6 +1073,45 @@ for (const mut of MUTANTS) {
 	ok(caught, `§8 mutant NOT caught: ${mut.name}`);
 }
 
+// The day-vs-instant rule inside lib/broker-invoice.js itself. §3's formatDate
+// assertions are all that stands between these and a broker invoice dated one
+// day early (L1), or an instant printed on its UTC day rather than its Houston
+// one (L2). The library is loaded from its own source with its own `require`, so
+// every module-scope line runs exactly as it ships.
+const LIB = path.join(__dirname, "..", "lib", "broker-invoice.js");
+const LIB_SRC = fs.readFileSync(LIB, "utf8");
+function loadLib(mutate) {
+	const mod = { exports: {} };
+	new Function("require", "module", "exports", "__dirname", "__filename", mutate(LIB_SRC))(
+		require("module").createRequire(LIB), mod, mod.exports, path.dirname(LIB), LIB);
+	return mod.exports;
+}
+// CONTROL. The loop below counts a mutant that throws as caught, so a loader
+// that cannot load the unmutated library would report every mutant as caught.
+eq(loadLib((s) => s).formatDate("2026-08-14"), "08/14/2026", "§8 (control) the unmutated library loads and reads the day");
+const LIB_MUTANTS = [
+	{
+		name: "L1 formatDate's ISO-day branch is removed (a bare YYYY-MM-DD reaches new Date)",
+		mutate: (s) => s.replace("const iso = ISO_DAY_RE.exec(raw);", "const iso = null;"),
+		expect: (m) => m.formatDate("2026-08-14") !== "08/14/2026",
+	},
+	{
+		name: "L2 the ISO-day pattern loses its end anchor (a Z instant is read as a day)",
+		mutate: (s) => s.replace("(?:\\.\\d{1,9})?)?)?$/;", "(?:\\.\\d{1,9})?)?)?/;"),
+		expect: (m) => m.formatDate("2026-08-14T02:00:00Z") !== "08/13/2026",
+	},
+];
+for (const mut of LIB_MUTANTS) {
+	ok(mut.mutate(LIB_SRC) !== LIB_SRC, `§8 mutant needle is STALE (mutated nothing): ${mut.name}`);
+	let caught = false;
+	try {
+		caught = !!mut.expect(loadLib(mut.mutate));
+	} catch {
+		caught = true; // a mutant that cannot even load is caught
+	}
+	ok(caught, `§8 mutant NOT caught: ${mut.name}`);
+}
+
 // ============================ §9 THE TEXTUAL ASSERTIONS ARE LOAD-BEARING
 // §7's route-level claims are NEGATIVE ("this handler issues no Sheets write",
 // "the decrement is inside a finally"). A negative passes just as happily when
@@ -1136,4 +1225,4 @@ if (failures.length) {
 	console.log(`\n${pass} passed, ${failures.length} failed`);
 	process.exit(1);
 }
-console.log(`✓ ${pass} assertions passed (${MUTANTS.length} mutants caught)`);
+console.log(`✓ ${pass} assertions passed (${MUTANTS.length + LIB_MUTANTS.length} mutants caught)`);
