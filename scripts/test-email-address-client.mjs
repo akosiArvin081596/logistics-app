@@ -12,6 +12,7 @@
 //      the same verdict and message for a fixed corpus plus a seeded fuzz
 //   §2 /apply (ApplyView.vue): its step-0 validate() — lifted from the SFC and
 //      executed — refuses what the server refuses, with the server's words
+//      (its SSN check is scripts/test-driver-apply-inputs.js's)
 //   §3 /invest (InvestorApplyView.vue): the step-0 gate — the real computed
 //      definitions, executed — blocks Continue on a bad address and explains
 //      it once the field is left, never while typing; the same for an EIN/SSN
@@ -30,7 +31,7 @@ import { createRequire } from 'module'
 import { fileURLToPath } from 'url'
 
 import { EMAIL_RE, EMAIL_MAX_LENGTH, EMAIL_MESSAGES, checkEmail } from '../client/src/lib/emailAddress.js'
-import { INVALID_TIN_MESSAGE, checkTin } from '../client/src/lib/taxId.js'
+import { INVALID_TIN_MESSAGE, checkTin, checkSsn } from '../client/src/lib/taxId.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname, '..')
@@ -124,14 +125,14 @@ function liftFn(src, name) {
   throw new Error(`unbalanced braces in ${name}`)
 }
 const VALIDATE_SRC = liftFn(APPLY_VIEW, 'validate')
-const buildValidate = (src) => new Function('form', 'checkEmail', `${src}\nreturn validate;`)
+const buildValidate = (src) => new Function('form', 'checkEmail', 'checkSsn', `${src}\nreturn validate;`)
 // A step-0 form with every required field and upload present.
 const driverForm = (email) => ({
   first_name: 'Jane', last_name: 'Doe', email, phone: '5550100', dob: '1990-01-01', address: '1 Main St',
   city: 'Dallas', state: 'TX', zip: '75201', ssn: '000-00-0000', drivers_license: 'D1', position: 'Driver',
   hazmat: 'No', cdl_front: 'x', cdl_back: 'x', medical_card: 'x',
 })
-const runValidate = (src, email) => buildValidate(src)(driverForm(email), checkEmail)(0)
+const runValidate = (src, email) => buildValidate(src)(driverForm(email), checkEmail, checkSsn)(0)
 ok('ApplyView imports the shared rule', /import \{ checkEmail \} from '\.\.\/lib\/emailAddress'/.test(APPLY_VIEW))
 ok('the previous inline email pattern is gone from ApplyView.vue', !APPLY_VIEW.includes('[^\\s@]+@[^\\s@]+\\.[^\\s@]+'))
 ok('a valid address passes step 0', runValidate(VALIDATE_SRC, 'jane.doe@example.com') === '')

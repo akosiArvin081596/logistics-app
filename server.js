@@ -9166,6 +9166,24 @@ const PUBLIC_APPLY_SCALAR_FIELDS = [
 	"signature", "signature_date", "cdl_front", "cdl_back", "medical_card", "city", "state", "zip",
 	"cell", "dot", "mc", "hazmat",
 ];
+// What POST /api/public/apply cannot store without: the NOT NULL columns of
+// job_applications that the route binds as sent. Each must be non-empty, except
+// `skills`, which the form sends as "" when the applicant leaves it blank, so it
+// only has to be there. A missing one is refused with the field it names,
+// before anything is stored; left to the INSERT, it answered 500.
+// scripts/test-driver-apply-inputs.js pins both lists to the table.
+const PUBLIC_APPLY_REQUIRED_FIELDS = [
+	"full_name", "email", "phone", "dob", "address", "ssn", "drivers_license", "position", "experience",
+	"has_cdl", "work_authorized", "felony_convicted", "accident_history", "signature",
+];
+const PUBLIC_APPLY_PRESENT_FIELDS = ["skills"];
+// The first of those fields `body` lacks, or null.
+function publicApplyMissingField(body) {
+	const obj = body !== null && typeof body === "object" ? body : {};
+	const required = PUBLIC_APPLY_REQUIRED_FIELDS.find((field) => !obj[field]);
+	if (required) return required;
+	return PUBLIC_APPLY_PRESENT_FIELDS.find((field) => obj[field] === undefined || obj[field] === null) || null;
+}
 // Header-only image checks and the limits every in-process image decode is held
 // to. Used from here to the end of the file: the application intake and PDF,
 // signatures, receipts and document uploads. See lib/image-size.js.
@@ -9191,12 +9209,20 @@ function applicantAttachmentRefusal(value) {
 app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 	try {
 		const { full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation, accident_history, accident_description, traffic_citations, certifications, availability, skills, reference_info, additional_info, signature, signature_date, cdl_front, cdl_back, medical_card, city, state, zip, cell, dot, mc, hazmat } = req.body;
-		if (!full_name || !email || !phone || !dob || !address || !ssn || !drivers_license || !position || !experience || !has_cdl || !work_authorized || !felony_convicted || !accident_history || !signature) {
-			return res.status(400).json({ error: "Please fill in all required fields." });
+		const missingField = publicApplyMissingField(req.body);
+		if (missingField) {
+			return res.status(400).json({ error: "Please fill in all required fields.", code: "FIELD_REQUIRED", field: missingField });
 		}
 		const shape = publicFormInput.checkPublicScalars(req.body, PUBLIC_APPLY_SCALAR_FIELDS);
 		if (!shape.ok) {
 			return res.status(400).json({ error: shape.message, code: "INVALID_FIELD", reason: shape.reason, field: shape.field });
+		}
+		// The driver's W-9 prints this SSN in Part I's nine SSN boxes
+		// (lib/w9-input.js). Refused here, before it is stored, or the W-9 is
+		// refused later, or printed short.
+		const ssnCheck = w9Input.checkW9Ssn(ssn);
+		if (!ssnCheck.ok) {
+			return res.status(400).json({ error: ssnCheck.message, code: ssnCheck.code, field: "ssn" });
 		}
 		// Shared with POST /api/public/investor-apply: one address, length-capped
 		// before any pattern runs. See lib/public-form-input.js.

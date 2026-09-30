@@ -257,6 +257,7 @@
 import { ref, reactive, watch, onMounted } from 'vue'
 import { createFormDraft, deleteIndexedDb } from '../lib/formDraft'
 import { checkEmail } from '../lib/emailAddress'
+import { checkSsn } from '../lib/taxId'
 import LocationPickerModal from '../components/data-manager/LocationPickerModal.vue'
 import StepPersonalInfo from '../components/apply/StepPersonalInfo.vue'
 import StepExperience from '../components/apply/StepExperience.vue'
@@ -411,6 +412,10 @@ function validate(s) {
     // Same rule as the server (client copy: src/lib/emailAddress.js), so a bad address is caught here.
     const email = checkEmail(form.email)
     if (!email.ok) return email.message
+    // The SSN the driver's W-9 prints, with the server's rule (client copy:
+    // src/lib/taxId.js). StepPersonalInfo shows the same message under the field.
+    const ssn = checkSsn(form.ssn)
+    if (!ssn.ok) return ssn.message
     if (!form.cdl_front || !form.cdl_back || !form.medical_card) return 'Please upload CDL (front and back) and medical card images.'
   }
   if (s === 1) {

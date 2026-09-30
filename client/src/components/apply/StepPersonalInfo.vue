@@ -38,7 +38,18 @@
       <div class="field"><label class="field-label">ZIP <span class="req">*</span></label><div class="input-wrap"><input v-model="form.zip" placeholder="12345" required /></div></div>
     </div>
     <div class="grid grid-cols-2 gap-4">
-      <div class="field"><label class="field-label">Social Security Number (SSN) <span class="req">*</span></label><div class="input-wrap"><input v-model="form.ssn" placeholder="XXX-XX-XXXX" required /></div></div>
+      <div class="field">
+        <label class="field-label">Social Security Number (SSN) <span class="req">*</span></label>
+        <div class="input-wrap" :class="{ 'is-invalid': showSsnError }">
+          <input
+            v-model="form.ssn" placeholder="XXX-XX-XXXX" required
+            :aria-invalid="showSsnError ? 'true' : 'false'"
+            :aria-describedby="showSsnError ? 'apply-ssn-error' : undefined"
+            @focus="ssnFocused = true" @blur="ssnFocused = false"
+          />
+        </div>
+        <p v-if="showSsnError" id="apply-ssn-error" class="field-error" role="alert">{{ ssnCheck.message }}</p>
+      </div>
       <div class="field"><label class="field-label">Drivers License Number <span class="req">*</span></label><div class="input-wrap"><input v-model="form.drivers_license" placeholder="License number" required /></div></div>
     </div>
     <div class="grid grid-cols-2 gap-4">
@@ -150,8 +161,16 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useFileDrop } from '../../composables/useFileDrop'
 import { compressImage, isDecodedImage, readFileAsDataURL } from '../../lib/imageUtils'
+import { checkSsn } from '../../lib/taxId'
 
 const props = defineProps({ form: { type: Object, required: true } })
+// The SSN with the server's rule (client copy: src/lib/taxId.js): the driver's
+// W-9 prints nine digits in its SSN boxes. Shown once the applicant leaves the
+// field, never while they are still typing; ApplyView's step check will not
+// continue past it.
+const ssnCheck = computed(() => checkSsn(props.form.ssn))
+const ssnFocused = ref(false)
+const showSsnError = computed(() => !!props.form.ssn && !ssnCheck.value.ok && !ssnFocused.value)
 const emit = defineEmits(['open-map'])
 const positions = ['Company Driver', 'Owner Operator', 'Other']
 const hazmatOpts = ['Yes', 'No']
@@ -399,6 +418,8 @@ function initAutocomplete() {
 .grid-cols-3 { grid-template-columns: 1fr 1fr 1fr; }
 .field-hint { font-size: 0.72rem; color: #9ca3af; margin: 0.35rem 0 0; }
 .opt { font-weight: 400; color: #9ca3af; font-size: 0.72rem; margin-left: 0.25rem; }
+.input-wrap.is-invalid { border-color: #fca5a5; }
+.field-error { margin: 0.35rem 0 0; font-size: 0.72rem; color: #dc2626; }
 .upload-section { margin-bottom: 1.1rem; }
 .upload-hint { font-size: 0.78rem; color: #9ca3af; margin: 0.25rem 0 0.25rem; }
 .upload-tip { font-size: 0.72rem; color: #64748b; margin: 0 0 0.75rem; line-height: 1.4; font-style: italic; }
