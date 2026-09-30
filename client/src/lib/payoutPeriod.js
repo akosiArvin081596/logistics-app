@@ -627,8 +627,11 @@ export function hasLeaseMonth(rows) {
 /**
  * The prose that closes a lease month's breakdown, in reading order: what the
  * lease is, why this month pays what it pays, and — for a month whose truck ran
- * at a loss — that the loss is not carried against the lease. That last line
- * stands where a split month explains its carry-forward.
+ * at a loss and that paid the full lease — that the loss is not carried against
+ * the lease. That last line stands where a split month explains its
+ * carry-forward. Beside a reason (a prorated, downtime or not-in-service month)
+ * "still pays the full lease" would contradict the line above it, so it is left
+ * out there, as the statement PDF leaves it out.
  *
  * `netProfit` is the month's own signed P&L; absent or non-numeric means "not a
  * loss", so no loss line is claimed for a month whose figure this does not have.
@@ -639,7 +642,7 @@ export function leaseNotes(basis, opts = {}) {
   const reason = leaseReasonLine(basis)
   if (reason) lines.push(reason)
   const net = Number(opts.netProfit)
-  if (Number.isFinite(net) && net < 0) lines.push(LEASE_LOSS_NOTE)
+  if (!reason && Number.isFinite(net) && net < 0) lines.push(LEASE_LOSS_NOTE)
   return lines
 }
 

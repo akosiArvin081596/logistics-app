@@ -513,8 +513,12 @@ check('notes: a month with no truck in service adds L6',
 // L7 stands where a split month explains its carry-forward.
 check('notes: a LOSS month under a full lease says the loss is not carried',
   leaseNotes(FULL, { netProfit: -995 }), [leaseExplain(FULL), LEASE_LOSS_NOTE])
-check('notes: a prorated loss month carries both lines, reason first',
-  leaseNotes(PRORATED, { netProfit: -120 }), [leaseExplain(PRORATED), leaseReasonLine(PRORATED), LEASE_LOSS_NOTE])
+// PAIRED: beside a reason the month did not pay the full lease, so L7 ("still
+// pays the full lease") would contradict it; the statement PDF leaves it out too.
+check('notes: a prorated loss month gives its reason and no L7',
+  leaseNotes(PRORATED, { netProfit: -120 }), [leaseExplain(PRORATED), leaseReasonLine(PRORATED)])
+check('notes: a not-in-service month at a loss gives its reason and no L7',
+  leaseNotes(NOT_IN_SERVICE, { netProfit: -300 }), [leaseExplain(NOT_IN_SERVICE), leaseReasonLine(NOT_IN_SERVICE)])
 // PAIRED: a month whose P&L this does not have is not claimed as a loss.
 check('notes: no netProfit, no loss line', leaseNotes(FULL), [leaseExplain(FULL)])
 check('notes: a non-numeric netProfit, no loss line', leaseNotes(FULL, { netProfit: 'x' }), [leaseExplain(FULL)])
