@@ -194,7 +194,7 @@
             This is the truck's gross figure &mdash; before driver pay, fixed costs, or trip expenses. {{ leaseExplain(currentLease) }}
           </div>
           <div v-else class="modal-callout info">
-            This is the truck's gross figure &mdash; before driver pay, fixed costs, or trip expenses. Your take-home is roughly half of net, not half of this number.
+            This is the truck's gross figure &mdash; before driver pay, fixed costs, or trip expenses. Your take-home is roughly {{ shareOfNet }} of net, not {{ shareOfNet }} of this number.
           </div>
         </div>
       </template>
@@ -308,6 +308,9 @@ const props = defineProps({
 // fallback. Every investor is on 50 today, but hardcoding it means the portal
 // silently misstates the agreement the day anyone signs at a different rate.
 const investorSplitPct = computed(() => props.production?.investorSplitPct ?? 50)
+// The split as the gross-per-day note words it: "half" at 50%, as it always has,
+// and the percentage itself at any other split.
+const shareOfNet = computed(() => (Number(investorSplitPct.value) === 50 ? 'half' : `${investorSplitPct.value}%`))
 // The current month's lease basis (`production.payoutBasis`), or null on a
 // split. A lease investor's take-home is the lease payment, so the sentences
 // that describe it as "N% of net profit" give way to the lease's own.
