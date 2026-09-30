@@ -41106,12 +41106,12 @@ function rememberRateConMatch(loadKey, file, verdict, req) {
 
 // MM/DD/YYYY out of a bare `YYYY-MM-DD`, by STRING SURGERY.
 //
-// ⚠️ NEVER `new Date(iso)` and never brokerInvoice.formatDate() on an ISO
-// string. Both lose a day, measured: formatDate("2026-08-14") returns
-// "08/13/2026", because its final fallback is `new Date(raw)` (UTC midnight)
-// rendered through mdy() in America/Chicago. `<input type="date">` emits
-// exactly this shape, so passing it through would date EVERY edited invoice one
-// day early — on the document that drives the broker's aging terms.
+// ⚠️ NEVER `new Date(iso)`. It is UTC midnight, and rendered in America/Chicago
+// it prints the day BEFORE: formatDate(new Date("2026-08-14")) returns
+// "08/13/2026". `<input type="date">` emits exactly this shape, so building a
+// Date from it would date EVERY edited invoice one day early — on the document
+// that drives the broker's aging terms. brokerInvoice.formatDate() reads the
+// same shape as text; scripts/test-invoice-overrides.js §3 pins the two agreeing.
 function isoToMdy(iso) {
 	const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso == null ? "" : iso).trim());
 	return m ? `${m[2]}/${m[3]}/${m[1]}` : "";
@@ -41353,7 +41353,7 @@ function parseInvoiceOverrides(body) {
 		}
 		has[key] = true;
 		// Stored PRINT-READY. buildInvoiceHtml runs formatDate() over whatever it
-		// is handed, and only the M/D/Y branch of that function is day-accurate.
+		// is handed, and an MM/DD/YYYY passes through it unchanged.
 		values[key] = isoToMdy(v);
 		values[key + "Iso"] = v;
 	}
@@ -41951,7 +41951,7 @@ app.post(
 			}
 
 			// 6b) Invoice identifiers + dates. invoiceId/invoiceDate use the
-			//    button-click date (today, server local). deliveryDate is the
+			//    button-click date (today, printed as the Houston date). deliveryDate is the
 			//    load's ACTUAL delivery/completion date from the sheet — never
 			//    today, never the rate-con scheduled date.
 			const today = new Date();
