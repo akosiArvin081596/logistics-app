@@ -5,10 +5,11 @@
  *
  * WHAT IS PROVED HERE
  *   §1  a SPLIT statement (no breakdown.payoutBasis) is byte-identical to the one
- *       61406a1 printed: eight representative rows (carry in, loss deferred, a
- *       correction after payment, drift, no breakdown, maintenance and compliance
- *       costs, an empty appendix) hashed against pins computed from that commit's
- *       module, and a one-word change to the split wording moves a pin
+ *       61406a1 printed under the Houston clock: eight representative rows (carry
+ *       in, loss deferred, a correction after payment, drift, no breakdown,
+ *       maintenance and compliance costs, an empty appendix) hashed against pins
+ *       computed from that commit's module, and a one-word change to the split
+ *       wording moves a pin
  *   §2  a lease month (breakdown.payoutBasis): "How your payment is calculated",
  *       the monthly lease, the reason line for a prorated, downtime or
  *       not-in-service month, what the month pays, the shared settled-amount and
@@ -20,17 +21,23 @@
  *   §4  LEASE_TEXT: the shared wording verbatim, each template's placeholders,
  *       plain text, and every text listed in docs/investor-portal-copy.md §17
  *   §5  MUTANTS, each caught: payoutBasis ignored, a lease composed as share
- *       minus carry, the loss-month note beside a proration, and a one-word
- *       change to the split page
+ *       minus carry, the loss-month note beside a proration, a one-word change
+ *       to the split page, a bare date parsed at local midnight, and an instant
+ *       printed as the calendar date of its UTC text
+ *   §6  every date prints the same under any server clock (UTC, Houston, Manila
+ *       and both ends of the offset range, each in its own process): a bare
+ *       YYYY-MM-DD as that very date, an instant as its Houston date; the split
+ *       pins and a lease page hold under every clock
  *
  * Run: node scripts/test-payout-statement-lease.js
  */
 "use strict";
 
-// Bare YYYY-MM-DD dates are parsed as local time by the module, so the pins are
-// taken under one clock: the production server's.
+// The in-process renders run under the production server's clock; §6 renders
+// under others, each in a process of its own (TZ is read when a process starts).
 process.env.TZ = "UTC";
 
+const { spawnSync } = require("child_process");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
@@ -154,19 +161,85 @@ const SPLIT_ROWS = {
 
 // ⚠️ THE ORACLE. Each pin is pageHash() of the row above rendered by
 // lib/payout-statement.js at 61406a1, the module before lease statements
-// existed, under TZ=UTC. A split statement must keep printing exactly this.
-// Change a pin only for a split wording or layout change the client has
-// signed off, never to make a lease change pass.
+// existed, under TZ=America/Chicago: the one clock under which that module
+// printed a bare YYYY-MM-DD as its own date. Under the production server's UTC
+// it printed each of them a day early (the due date, the appendix's load and
+// expense dates, a bare correction date), until 2026-09-30; this module prints
+// the Houston-clock page under every clock (§6). A split statement must keep
+// printing exactly this. Change a pin only for a split wording or layout
+// change the client has signed off, never to make a lease change pass.
 const ORIGIN_MAIN_SHA256 = {
-	"paid, nothing carried, no adjustment": "7580374f542faaba15c4c7f174a60c6f9870bd73614920fe95080b85d125c564",
-	"paid, an earlier loss applied": "dd83f0103cd5a12073b450b8195483da58bc2aa4c5ce7cc2c2243fc0b12806ee",
-	"final, a losing month carried forward": "0592b21bba0f9b9bcc7c2d1f6ee42ae7ead84d63a8c7f7d78a29593a883f7ad0",
-	"paid, corrected after payment, text to escape": "01a803ea1ca98e9ee03307f664aa19543b2bcfdf1122e2de6abe93522734854c",
-	"paid, the composition drifted from the settled amount": "c2737022b5122ba044a8051274d32a6530d96c271df047c83afae36a6a24a476",
+	"paid, nothing carried, no adjustment": "e3b50d628857686778f6798980b2ec04fe78805c5c9dd8de337bbd0b2a6121f6",
+	"paid, an earlier loss applied": "0579aa845c3419eeafd789c510e427c809e7c92768df88368f9b3985e7bbbbbf",
+	"final, a losing month carried forward": "4964b3bba7a97896319988ecba1e1e643a80aef3dfc5443e4380b503fc192658",
+	"paid, corrected after payment, text to escape": "f39c09ea6e0c2140ea1ea69aee474c321dabc3c10e3ddd9738a6815d2d55d2b9",
+	"paid, the composition drifted from the settled amount": "b4705f34d1bf9af1c7e40ce3ccf5baa4e349b6d637fa581fd98adca145f7a7e2",
 	"paid, no breakdown (aged out)": "cebb9f3913a7c65d40b9470602d89dfcd4de4ae98a7ce876e0df5d98d1474758",
-	"final, maintenance and compliance, 55% split, a positive adjustment": "c71ddfa40f6a0604e747883b9ff956d1e7a5bd44de4412bfef59818023fa8af1",
+	"final, maintenance and compliance, 55% split, a positive adjustment": "08377bdc606c2a8fe820f45da808159a181f425bdd62bcc80e3429002b9d8788",
 	"paid, nothing itemized against the headline": "d78471ccf16704421dfab1e15cddf50e49a96582afcb03dc059c85e981db4c22",
 };
+
+// Every date the statement prints is one of two kinds. A bare YYYY-MM-DD (the
+// due date, a load's or an expense's date, a correction date stored without a
+// time) is a calendar date and prints as itself. An instant (paid_at,
+// finalized_at, adjusted_at, the issue date) prints its Houston date, so an
+// instant in the Houston evening prints the day BEFORE its UTC date. The days
+// straddle the year's ends and both clock changes; the instants fall in summer
+// (UTC-5) and in winter (UTC-6).
+const DATE_DETAIL = {
+	revenueLoads: [
+		{ loadId: "700000001", date: "2026-03-08", driver: "Driver One", truck: "91", pickup: "Laredo, TX", dropoff: "Irving, TX", amount: 1000 },
+		{ loadId: "700000002", date: "2026-11-01", driver: "Driver One", truck: "91", pickup: "Houston, TX", dropoff: "Dallas, TX", amount: 1000 },
+	],
+	tripExpenseItems: [
+		{ date: "2026-01-01", type: "Fuel", description: "Diesel", amount: 100 },
+		{ date: "2026-12-31", type: "Tolls", description: "Toll", amount: 50 },
+	],
+};
+const DATE_ROWS = {
+	"dates: final": {
+		...BASE, generatedAt: new Date("2026-08-15T03:00:00.000Z"),
+		status: "owed", finalizedAt: "2026-07-08T04:59:00.000Z", dueDate: "2026-07-31",
+		breakdown: FROZEN, lossCarriedIn: 0, lossDeferred: 0, adjustment: 0, amount: 8790, effectiveAmount: 8790, detail: DATE_DETAIL,
+	},
+	"dates: paid, corrected, instants": {
+		...BASE, period: "2025-11", periodLabel: "November 2025",
+		status: "paid", paidAt: "2026-01-01T05:30:00.000Z", paidBy: "super_admin",
+		adjustment: -100, adjustmentNote: "Toll", adjustedAfterPaid: true, adjustedAt: "2026-08-10T03:00:00.000Z",
+		breakdown: FROZEN, lossCarriedIn: 0, lossDeferred: 0, amount: 8790, effectiveAmount: 8690, detail: {},
+	},
+	"dates: paid, corrected, bare dates": {
+		...BASE, status: "paid", paidAt: "2026-07-31", paidBy: "super_admin",
+		adjustment: -100, adjustmentNote: "Toll", adjustedAfterPaid: true, adjustedAt: "2026-08-10",
+		breakdown: FROZEN, lossCarriedIn: 0, lossDeferred: 0, amount: 8790, effectiveAmount: 8690, detail: {},
+	},
+};
+// [what, where it prints, what every clock must print there]
+const DATE_EXPECT = {
+	"dates: final": [
+		["issued, an instant at 03:00Z (the evening before in Houston)", /Issued: <strong>([^<]*)</, "08/14/2026"],
+		["finalized, an instant at 04:59Z in summer (23:59 CDT the day before)", /Finalized<\/span><span class="v">([^<]*)/, "07/07/2026"],
+		["payment due, a bare date, in the band", /Payment due<\/span><span class="v">([^<]*)/, "07/31/2026"],
+		["payment due, a bare date, under the amount", /Payment due (\d\d\/\d\d\/\d{4})\./, "07/31/2026"],
+		["a load dated on the spring clock change", /<td class="mono">700000001<\/td>\s*<td>([^<]*)/, "03/08/2026"],
+		["a load dated on the autumn clock change", /<td class="mono">700000002<\/td>\s*<td>([^<]*)/, "11/01/2026"],
+		["an expense dated the first day of the year", /<td>([^<]*)<\/td>\s*<td>Fuel<\/td>/, "01/01/2026"],
+		["an expense dated the last day of the year", /<td>([^<]*)<\/td>\s*<td>Tolls<\/td>/, "12/31/2026"],
+	],
+	"dates: paid, corrected, instants": [
+		["paid on, an instant at 05:30Z in winter (23:30 CST the day before), in the band", /Paid on<\/span><span class="v">([^<]*)/, "12/31/2025"],
+		["paid on, the same instant, under the amount", /paid on (\d\d\/\d\d\/\d{4}) &middot;/, "12/31/2025"],
+		["correction recorded, an instant at 03:00Z", /correction recorded (\d\d\/\d\d\/\d{4})/, "08/09/2026"],
+	],
+	"dates: paid, corrected, bare dates": [
+		["paid on, a bare date, in the band", /Paid on<\/span><span class="v">([^<]*)/, "07/31/2026"],
+		["correction recorded, a bare date", /correction recorded (\d\d\/\d\d\/\d{4})/, "08/10/2026"],
+	],
+};
+function printedDate(html, re) {
+	const m = html.match(re);
+	return m ? m[1] : null;
+}
 
 // A lease month as server.js hands it over: payoutBasis on the breakdown,
 // splitPct null, monthShare = the amount paid, nothing carried.
@@ -206,7 +279,7 @@ const SPLIT_WORDS = ["How your share is calculated", "investor split", "Your sha
 	"Loss carried forward", "Your trip expenses are deducted before the split, so the share above is already net of them."];
 
 // ---------------------------------------------------------------- §1
-section("§1 a split statement is byte-identical to 61406a1");
+section("§1 a split statement is byte-identical to 61406a1 under the Houston clock");
 {
 	for (const [name, row] of Object.entries(SPLIT_ROWS)) {
 		eq(pageHash(S.buildPayoutStatementHtml(row)), ORIGIN_MAIN_SHA256[name], `split: ${name}`);
@@ -355,6 +428,16 @@ section("§5 MUTANTS — each must be caught");
 			src: mutate("% investor split</td>", "% investor share</td>"),
 			caught: (M) => pageHash(M.buildPayoutStatementHtml(SPLIT_ROWS["paid, nothing carried, no adjustment"])) !== ORIGIN_MAIN_SHA256["paid, nothing carried, no adjustment"],
 		},
+		{
+			name: "a bare date parsed at local midnight (the due date a day early on this UTC clock)",
+			src: mutate("new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12))", "new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))"),
+			caught: (M) => printedDate(M.buildPayoutStatementHtml(DATE_ROWS["dates: final"]), DATE_EXPECT["dates: final"][2][1]) !== "07/31/2026",
+		},
+		{
+			name: "an instant printed as the calendar date of its UTC text",
+			src: mutate("match(/^(\\d{4})-(\\d{2})-(\\d{2})$/)", "match(/^(\\d{4})-(\\d{2})-(\\d{2})/)"),
+			caught: (M) => printedDate(M.buildPayoutStatementHtml(DATE_ROWS["dates: paid, corrected, instants"]), DATE_EXPECT["dates: paid, corrected, instants"][0][1]) !== "12/31/2025",
+		},
 	];
 	for (const c of cases) {
 		ok(c.src !== MODULE_SRC, `the mutant applied: ${c.name}`);
@@ -365,6 +448,40 @@ section("§5 MUTANTS — each must be caught");
 		ok(caught, `MUTANT caught: ${c.name}`);
 		if (caught) mutantsCaught++;
 	}
+}
+
+// ---------------------------------------------------------------- §6
+section("§6 every date prints the same under any server clock");
+{
+	// Houston itself, the production server's UTC, a developer's Manila, and the
+	// two ends of the offset range (UTC+14, UTC-11).
+	const CLOCKS = ["UTC", "America/Chicago", "Asia/Manila", "Pacific/Kiritimati", "Pacific/Pago_Pago"];
+	const LEASE_NAME = "lease: a full month";
+	const rows = { ...SPLIT_ROWS, ...DATE_ROWS, [LEASE_NAME]: leaseRow() };
+	// Rows cross to the child as JSON; generatedAt goes back to the Date the route passes.
+	const CHILD = `"use strict";
+const S = require(${JSON.stringify(MODULE_PATH)});
+const rows = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const pages = {};
+for (const [name, row] of Object.entries(rows)) pages[name] = S.buildPayoutStatementHtml({ ...row, generatedAt: new Date(row.generatedAt) });
+process.stdout.write(JSON.stringify({ zone: Intl.DateTimeFormat().resolvedOptions().timeZone, offset: new Date(2026, 6, 31).getTimezoneOffset(), pages }));`;
+	const leaseHere = S.buildPayoutStatementHtml(leaseRow());
+	const offsets = new Set();
+	for (const clock of CLOCKS) {
+		const run = spawnSync(process.execPath, ["-e", CHILD], {
+			input: JSON.stringify(rows), env: { ...process.env, TZ: clock }, encoding: "utf8", maxBuffer: 64 * 1024 * 1024,
+		});
+		if (run.status !== 0) { ok(false, `${clock}: the render ran (exit ${run.status}: ${String(run.stderr).trim().split("\n")[0]})`); continue; }
+		const { zone, offset, pages } = JSON.parse(run.stdout);
+		eq(zone, clock, `${clock}: the render ran under that clock`);
+		offsets.add(offset);
+		for (const name of Object.keys(SPLIT_ROWS)) eq(pageHash(pages[name]), ORIGIN_MAIN_SHA256[name], `${clock}: split: ${name}`);
+		ok(pages[LEASE_NAME] === leaseHere, `${clock}: the lease page is the one this process renders`);
+		for (const [name, expected] of Object.entries(DATE_EXPECT)) {
+			for (const [what, re, want] of expected) eq(printedDate(pages[name], re), want, `${clock}: ${what}`);
+		}
+	}
+	eq(offsets.size, CLOCKS.length, "the clocks were five different offsets, not one clock five times");
 }
 
 console.log(`\n${"=".repeat(64)}`);
