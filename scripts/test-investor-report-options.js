@@ -19,9 +19,10 @@
  *       ("Not recorded"), a null total ("Not available") while any truck lacks a
  *       price, and the flag, never a $0 for a missing price
  *   §4  fill(), the texts (every template's placeholders, the hint), the payout
- *       row's labels (PAYOUT_LABEL.SPLIT is the report's split label, character
- *       for character; LEASE and the NOTE lease sentences are the shared lease
- *       wording, listed in docs/investor-portal-copy.md §17), and how the server
+ *       row's labels and the Owner Earnings labels (each SPLIT is the report's
+ *       split label, character for character; PAYOUT_LABEL.LEASE and the NOTE
+ *       lease sentences are the shared lease wording; every lease label is listed
+ *       in docs/investor-portal-copy.md §17), and how the server
  *       reads the module: one require, each switch passed explicitly, and
  *       GET /api/investor's reportRangeMode
  *   §5  MUTANTS, one per guard, each built from the module's own source and each
@@ -212,6 +213,19 @@ section("§4 texts, fill(), and how the server reads the module");
 	eq(O.fill(O.PAYOUT_LABEL.SPLIT, { pct: 50 }), "Investor Payout (50%)", "SPLIT at 50 prints today's exact label");
 	eq(O.fill(O.PAYOUT_LABEL.SPLIT, { pct: 55 }), "Investor Payout (55%)", "…and at 55, the investor's own split");
 	eq([O.PAYOUT_LABEL.LEASE, O.PAYOUT_LABEL.MIXED], ["Investor Payout (fixed monthly lease)", "Investor Payout"], "LEASE (the shared wording L9) and MIXED");
+	// The same figure beside Net Cash Flow. SPLIT is the label the report printed at
+	// 61406a1 (server.js: `Owner Earnings (${splitPctLabel}%)`), typed out as the oracle.
+	eq(Object.keys(O.OWNER_EARNINGS_LABEL).sort(), ["LEASE", "MIXED", "SPLIT"], "OWNER_EARNINGS_LABEL holds exactly SPLIT, LEASE and MIXED");
+	eq([placeholders(O.OWNER_EARNINGS_LABEL.SPLIT), placeholders(O.OWNER_EARNINGS_LABEL.LEASE), placeholders(O.OWNER_EARNINGS_LABEL.MIXED)], [["pct"], [], []],
+		"OWNER_EARNINGS_LABEL.SPLIT takes {pct}; LEASE and MIXED take no value");
+	eq(O.OWNER_EARNINGS_LABEL.SPLIT.replace("{pct}", "${splitPctLabel}"), "Owner Earnings (${splitPctLabel}%)", "OWNER_EARNINGS_LABEL.SPLIT is the report's split label, character for character");
+	// fill() converts with String(), as the template literal did: the same text for
+	// every split % resolveInvestorSplitPct() can answer, a fraction included.
+	for (const pct of [50, 55, 37.5, 100]) {
+		eq(O.fill(O.OWNER_EARNINGS_LABEL.SPLIT, { pct }), `Owner Earnings (${pct}%)`, `OWNER_EARNINGS_LABEL.SPLIT at ${pct} prints today's exact label`);
+	}
+	eq([O.OWNER_EARNINGS_LABEL.LEASE, O.OWNER_EARNINGS_LABEL.MIXED], ["Owner Earnings (fixed monthly lease)", "Owner Earnings"], "OWNER_EARNINGS_LABEL.LEASE and MIXED");
+	eq(Object.keys(O.OWNER_EARNINGS_LABEL), Object.keys(O.PAYOUT_LABEL), "…the same keys as PAYOUT_LABEL, so one choice picks both labels");
 	eq([O.NOTE.LEASE, O.NOTE.LEASE_FROM], [
 		"Your payout is a fixed monthly lease of {amount}, not a share of net profit.",
 		"From {month}, your payout is a fixed monthly lease of {amount}, not a share of net profit.",
@@ -220,7 +234,11 @@ section("§4 texts, fill(), and how the server reads the module");
 		"From September 2026, your payout is a fixed monthly lease of $2,000, not a share of net profit.", "NOTE.LEASE_FROM, filled");
 	const DOC = fs.readFileSync(path.join(__dirname, "..", "docs", "investor-portal-copy.md"), "utf8");
 	const s17 = DOC.slice(DOC.indexOf("\n## 17. "), DOC.indexOf("\n## ", DOC.indexOf("\n## 17. ") + 5));
-	for (const [k, v] of Object.entries({ "PAYOUT_LABEL.LEASE": O.PAYOUT_LABEL.LEASE, "PAYOUT_LABEL.MIXED": O.PAYOUT_LABEL.MIXED, "NOTE.LEASE": O.NOTE.LEASE, "NOTE.LEASE_FROM": O.NOTE.LEASE_FROM })) {
+	for (const [k, v] of Object.entries({
+		"PAYOUT_LABEL.LEASE": O.PAYOUT_LABEL.LEASE, "PAYOUT_LABEL.MIXED": O.PAYOUT_LABEL.MIXED,
+		"OWNER_EARNINGS_LABEL.LEASE": O.OWNER_EARNINGS_LABEL.LEASE, "OWNER_EARNINGS_LABEL.MIXED": O.OWNER_EARNINGS_LABEL.MIXED,
+		"NOTE.LEASE": O.NOTE.LEASE, "NOTE.LEASE_FROM": O.NOTE.LEASE_FROM,
+	})) {
 		ok(s17.length > 100 && s17.includes("`" + v + "`"), `docs/investor-portal-copy.md §17 lists ${k} verbatim`);
 	}
 	eq(placeholders(O.UNPRICED_TEXT.FOOTNOTE), ["n", "total"], "UNPRICED_TEXT.FOOTNOTE takes {n} and {total}");
@@ -239,12 +257,16 @@ section("§4 texts, fill(), and how the server reads the module");
 		.map(([a, b]) => `${hex(a)}-${hex(b)}`).join("") + "]");
 	ok([0x00, 0x1f, 0x85, 0xad, 0x200b, 0x2028, 0x202e, 0x2066, 0xfeff].every((c) => INVISIBLE.test(`a${String.fromCodePoint(c)}b`)) && !INVISIBLE.test("a – b"),
 		"control: the scan sees each invisible character and passes the en dash");
-	const labels = Object.fromEntries(Object.entries(O.PAYOUT_LABEL).map(([k, v]) => [`PAYOUT_LABEL.${k}`, v]));
+	const labels = Object.fromEntries([
+		...Object.entries(O.PAYOUT_LABEL).map(([k, v]) => [`PAYOUT_LABEL.${k}`, v]),
+		...Object.entries(O.OWNER_EARNINGS_LABEL).map(([k, v]) => [`OWNER_EARNINGS_LABEL.${k}`, v]),
+	]);
 	for (const [k, v] of Object.entries({ ...O.NOTE, ...O.UNPRICED_TEXT, RANGE_HINT: O.RANGE_HINT, ...O.DATE_ERRORS, ...labels })) {
 		ok(typeof v === "string" && v === v.trim() && !/\s{2}/.test(v) && !INVISIBLE.test(v),
 			`${k}: plain printable text, no doubled or edge spaces`);
 	}
-	ok(Object.isFrozen(O.NOTE) && Object.isFrozen(O.UNPRICED_TEXT) && Object.isFrozen(O.DATE_ERRORS) && Object.isFrozen(O.PAYOUT_LABEL), "the text tables are frozen");
+	ok(Object.isFrozen(O.NOTE) && Object.isFrozen(O.UNPRICED_TEXT) && Object.isFrozen(O.DATE_ERRORS) && Object.isFrozen(O.PAYOUT_LABEL)
+		&& Object.isFrozen(O.OWNER_EARNINGS_LABEL), "the text tables are frozen");
 
 	// The server: one require, each switch passed explicitly (so a runner can hand a
 	// handler either setting), and the range mode on GET /api/investor.
