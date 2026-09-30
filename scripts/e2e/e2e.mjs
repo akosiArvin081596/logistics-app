@@ -6935,7 +6935,12 @@ async function invoiceSection() {
         const ref = loadRefOf(found.cand.id)
         const r = await ownApi('POST', `${invPath(found.cand.id, 'draft-invoice')}?dryRun=1`, {})
         const j = r.json || {}
-        if (r.status !== 200) observed = `load ${ref}: dryRun → ${r.status}${j.code ? ` ${j.code}` : ''}`
+        // Staging keeps POD records but not their files (the environment refresh copies the
+        // database, not uploads/), so the Bison load's draft cannot open there at all.
+        if (r.status === 400 && /POD not found/i.test(String(j.error || ''))) {
+          throw invSkip(`load ${ref}: dryRun → 400 "${j.error}": this server has the POD record but not its file, so the draft cannot open here`)
+        }
+        if (r.status !== 200) observed = `load ${ref}: dryRun → ${r.status}${j.code ? ` ${j.code}` : ''}${j.error ? ` "${String(j.error).slice(0, 120)}"` : ''}`
         else if (!j.needsOrderNumber && j.orderNumberSource !== 'load-id-fallback') {
           throw invSkip(`load ${ref}'s Order # was read off its rate-con (source "${j.orderNumberSource}"): no Bison load here has an unreadable Order #`)
         } else {
