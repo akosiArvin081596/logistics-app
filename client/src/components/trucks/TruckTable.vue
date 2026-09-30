@@ -80,7 +80,7 @@
             <div v-if="needsFixedCostSetup(truck)" style="margin-top:0.3rem;">
               <span
                 class="cost-warning-badge"
-                title="Active truck with no insurance, ELD, truck payment, HVUT, or IRP configured — its fixed costs show as $0 in the investor P&amp;L. Add them via Edit → Business Configuration."
+                title="No insurance, ELD, truck payment, HVUT, or IRP is configured for this truck — its fixed costs show as $0 in the investor P&amp;L. Add them via Edit → Business Configuration."
               >No fixed costs configured</span>
             </div>
           </td>
@@ -822,12 +822,14 @@ function statusClass(status) {
   return 'status-maintenance'
 }
 
-// Flags an Active truck that has no fixed-cost fields configured — insurance,
-// ELD, truck payment, HVUT, and IRP all falsy/0. Such a truck contributes $0
-// fixed costs to the investor P&L, which is almost always a data-entry gap.
+// Flags a truck in the fleet (any status but Inactive: the server counts a
+// truck in Maintenance or OOS in the fixed costs too) that has no fixed-cost
+// fields configured — insurance, ELD, truck payment, HVUT, and IRP all
+// falsy/0. Such a truck contributes $0 fixed costs to the investor P&L, which
+// is almost always a data-entry gap.
 // Field names are PascalCase to match the serialized truck objects.
 function needsFixedCostSetup(truck) {
-  return truck.Status === 'Active' &&
+  return truck.Status !== 'Inactive' &&
     !truck.InsuranceMonthly &&
     !truck.EldMonthly &&
     !truck.TruckPaymentMonthly &&

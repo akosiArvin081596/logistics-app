@@ -44,6 +44,16 @@
  * a month the date brings in is priced at the amounts after the save, a month
  * it takes out at the amounts before it.
  *
+ * §10 THE FLEET RULE (owner's decision, 2026-09-30). A truck in Maintenance or
+ * OOS keeps its fixed costs; only Inactive (or a retirement date) stops them.
+ * One rule, lib/investor-payout-basis.js truckInFleet() / truckInFleetSql(),
+ * which the lease coverage reads too; §1 pins every site to it. §10 runs the
+ * shipped guard: Active, Maintenance and OOS change freely (a $0/mo truck and
+ * one with costs), a change in or out of Inactive is refused only when a
+ * finalized month's figure moves, naming it; the SQL fragment and the JS rule
+ * agree on real SQLite; and two mutants (the old gate on check (1), the rule
+ * back to Active only) are caught.
+ *
  * Fixtures are production-shaped: the 6 real trucks and the 15 real locked
  * periods (2025-05..2026-07), read read-only from production on 2026-08-09.
  *
@@ -211,10 +221,40 @@ section("1. TEXTUAL — every fixed-cost month gate routes through ONE predicate
 
 	// Every fixed-cost SELECT list must carry retired_at, or the bound silently
 	// never fires — undefined column => truckChargeUntilMonth returns "".
-	const fixedSelects = SRC.match(/SELECT [^"]*insurance_monthly[^"]*FROM trucks/g) || [];
+	// One line, one string: the lists are "…" or `…` literals, so neither quote
+	// nor a line break may fall inside a match.
+	const fixedSelects = SRC.match(/SELECT [^"`\n]*insurance_monthly[^"`\n]*FROM trucks/g) || [];
 	const missing = fixedSelects.filter((q) => !/retired_at/.test(q) && !/SELECT \*/.test(q));
 	eq(missing, [], "every explicit fixed-cost SELECT list includes retired_at");
 	ok(fixedSelects.length >= 7, `found ${fixedSelects.length} explicit fixed-cost SELECT lists (>=7)`);
+
+	// THE FLEET RULE (2026-09-30): which trucks' fixed costs, maintenance-fund and
+	// compliance-fee rows count is ONE rule, investorPayoutBasis.truckInFleet() in
+	// code and truckInFleetSql() in a query (any status but Inactive), the rule the
+	// lease coverage reads too. No site may spell a status of its own: that is how
+	// the fixed-cost set came to be "Active only" while the lease counted a truck
+	// in the shop.
+	const code = SRC.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+	eq((code.match(/status\s*(=|!=|<>)\s*'(Active|Inactive)'/g) || []).length, 0,
+		"no query in server.js filters on a truck status literal of its own");
+	eq((code.match(/\.status\s*[!=]==?\s*"(Active|Inactive)"/g) || []).length, 0,
+		"no code in server.js compares a status with \"Active\" / \"Inactive\" itself (projections compare lower-cased, on purpose)");
+	const fixedWhere = code.match(/`SELECT [^`\n]*insurance_monthly[^`\n]*FROM trucks WHERE [^`\n]*`/g) || [];
+	eq(fixedWhere.filter((q) => !q.includes("${investorPayoutBasis.truckInFleetSql()}")), [],
+		"every filtered fixed-cost SELECT reads the fleet rule");
+	eq(fixedWhere.length, 7, "…all seven of them (computeInvestorMonthlyEarnings x2, /api/investor x4, /api/financials x1)");
+	ok(code.includes("db.prepare(`SELECT * FROM trucks WHERE ${investorPayoutBasis.truckInFleetSql()}`)"),
+		"/api/financials' fleet P&L and per-truck table read the fleet rule");
+	eq((code.match(/truckInFleetSql\("t"\)/g) || []).length, 8,
+		"the eight maintenance/compliance JOINs on an owner's trucks read the fleet rule");
+	eq((code.match(/NOT \(\$\{investorPayoutBasis\.truckInFleetSql\(\)\}\)/g) || []).length, 11,
+		"the ten fleet-wide NOT IN subqueries and the compliance-fee guard read its complement");
+	ok(code.includes("ownedTrucks2.filter(investorPayoutBasis.truckInFleet)"),
+		"GET /api/investor/report's fixed-cost lines read the fleet rule");
+	for (const fn of ["truckEditLockBlockers", "truckDeleteLockBlockers", "truckCreateLockBlockers"]) {
+		const s = SRC.indexOf(`\nfunction ${fn}(`);
+		ok(s !== -1 && SRC.slice(s, SRC.indexOf("\n}\n", s)).includes("investorPayoutBasis.truckInFleet("), `${fn}() reads the fleet rule`);
+	}
 }
 
 // =============================================== §2 GUARD vs MATH vs ORACLE
@@ -447,28 +487,38 @@ section("8. REGRESSION — with retired_at unset, behaviour is byte-identical");
 	eq(exposure(PROD[4]), 0, "Logisx-#91 still carries no locked-month exposure");
 }
 
+// ================================================ THE SHIPPED EDIT GUARD (§9, §10)
+// truckEditLockBlockers() on the real month math and the real fleet rule.
+// Stubbed: the lock table (LOCKED), the driver-history read (no driver below
+// reaches it), and the fee-row read, which answers FEES so a case can plant rows.
+const PAYOUT_BASIS_PATH = path.join(__dirname, "..", "lib", "investor-payout-basis.js");
+const PAYOUT_BASIS = require(PAYOUT_BASIS_PATH);
+const AMOUNT_FIELDS_SRC = (() => {
+	const s = SRC.indexOf("\nconst TRUCK_AMOUNT_FIELDS = [");
+	if (s === -1 || SRC.indexOf("\nconst TRUCK_AMOUNT_FIELDS = [", s + 1) !== -1) throw new Error("expected exactly 1 TRUCK_AMOUNT_FIELDS");
+	return SRC.slice(s + 1, SRC.indexOf("\n];\n", s) + 4);
+})();
+// Its template strings hold unbalanced braces, so it is cut at the function's
+// own closing line rather than by counting braces.
+const GUARD_SRC = (() => {
+	const s = SRC.indexOf("\nfunction truckEditLockBlockers(");
+	if (s === -1 || SRC.indexOf("\nfunction truckEditLockBlockers(", s + 1) !== -1) throw new Error("expected exactly 1 truckEditLockBlockers()");
+	return SRC.slice(s + 1, SRC.indexOf("\n}\n", s) + 3);
+})();
+const NO_FEES = { maintenance: [], compliance: [] };
+let FEES = NO_FEES;
+function buildGuard(guardSrc = GUARD_SRC, basis = PAYOUT_BASIS) {
+	return new Function(
+		"todayKeyCT", "IN_SERVICE_MAX_MONTHS_AHEAD", "periodLocksReadable", "lockedPeriodsDesc",
+		"truckFeeLockedRows", "driverPayLockedMonths", "investorPayoutBasis",
+		`${AMOUNT_FIELDS_SRC}\n${REAL.map(extract).join("\n")}\n${guardSrc}\nreturn truckEditLockBlockers;`
+	)(todayKeyCT, IN_SERVICE_MAX_MONTHS_AHEAD, () => true, () => LOCKED.slice(), () => FEES, () => [], basis);
+}
+
 // ======================================== §9 THE GUARD'S FIGURE, ONE SAVE, TWO FIELDS
 section("9. A date refusal prices the months it moves at the amounts the same save leaves");
 {
-	// The shipped guard on the real month math. Stubbed: the lock table (LOCKED),
-	// and the fee-row and driver-history reads, which no field below reaches.
-	const amountFieldsSrc = (() => {
-		const s = SRC.indexOf("\nconst TRUCK_AMOUNT_FIELDS = [");
-		if (s === -1 || SRC.indexOf("\nconst TRUCK_AMOUNT_FIELDS = [", s + 1) !== -1) throw new Error("expected exactly 1 TRUCK_AMOUNT_FIELDS");
-		return SRC.slice(s + 1, SRC.indexOf("\n];\n", s) + 4);
-	})();
-	const guard = new Function(
-		"todayKeyCT", "IN_SERVICE_MAX_MONTHS_AHEAD", "periodLocksReadable", "lockedPeriodsDesc",
-		"truckFeeLockedRows", "driverPayLockedMonths",
-		// Its template strings hold unbalanced braces, so it is cut at the
-		// function's own closing line rather than by counting braces.
-		`${amountFieldsSrc}\n${REAL.map(extract).join("\n")}\n${(() => {
-			const s = SRC.indexOf("\nfunction truckEditLockBlockers(");
-			if (s === -1 || SRC.indexOf("\nfunction truckEditLockBlockers(", s + 1) !== -1) throw new Error("expected exactly 1 truckEditLockBlockers()");
-			return SRC.slice(s + 1, SRC.indexOf("\n}\n", s) + 3);
-		})()}\nreturn truckEditLockBlockers;`
-	)(todayKeyCT, IN_SERVICE_MAX_MONTHS_AHEAD, () => true, () => LOCKED.slice(),
-		() => ({ maintenance: [], compliance: [] }), () => []);
+	const guard = buildGuard();
 	const detailOf = (truck, changed, field) => {
 		const b = guard(truck, changed).blockers.find((x) => x.field === field);
 		return b ? b.detail : null;
@@ -500,6 +550,114 @@ section("9. A date refusal prices the months it moves at the amounts the same sa
 	eq(detailOf(t33(), { retired_at: "2026-04-30" }, "retired_at"),
 		"retirement date unset → 2026-04-30 removes $9,129.99 of fixed costs from 3 finalized months",
 		"retiring LogisX-#33 early still names the §7 figure");
+}
+
+// ============================================================ §10 THE FLEET RULE
+section("10. Maintenance and OOS keep the fixed costs; only a change in or out of Inactive moves them");
+{
+	const guard = buildGuard();
+	const blockersOf = (g, truck, changed) => g(truck, changed).blockers;
+	const briefOf = (g, truck, changed) => blockersOf(g, truck, changed).map((b) => [b.field, b.periods, b.detail]);
+	const inv24 = () => ({ ...PROD[3] }); // $0/mo, billed from 2026-04 (created 2026-04-20)
+	const BILLED = ["2026-04", "2026-05", "2026-06", "2026-07"]; // the finalized months LogisX-#33 and INV-24-A are billed in
+
+	// A $0/mo truck changes status freely, Inactive included: no month moves.
+	for (const [from, to] of [["Active", "Maintenance"], ["Active", "OOS"], ["Active", "Inactive"], ["Inactive", "Active"], ["OOS", "Inactive"]]) {
+		eq(blockersOf(guard, { ...inv24(), status: from }, { status: to }), [], `INV-24-A ($0/mo, billed into 4 finalized months): ${from} → ${to} is allowed`);
+	}
+	// A truck with costs moves between the statuses in the fleet freely...
+	for (const [from, to] of [["Active", "Maintenance"], ["Active", "OOS"], ["Maintenance", "OOS"], ["OOS", "Maintenance"], ["Maintenance", "Active"], ["OOS", "Active"]]) {
+		eq(blockersOf(guard, { ...t33(), status: from }, { status: to }), [], `LogisX-#33 ($3,043.33/mo): ${from} → ${to} is allowed`);
+	}
+	// ...and that moves $0: with the truck in the shop, every month's fleet fixed
+	// cost is what it was. The shared rule and the shared month gate, which is
+	// what every fixed-cost query reads (§1 pins them, the SQL agreement below).
+	const fleetFixed = (trucks, mk) => Math.round(trucks.filter(PAYOUT_BASIS.truckInFleet)
+		.filter((t) => truckChargedInMonth(t, mk)).reduce((s, t) => s + truckMonthlyFixed(t).total, 0) * 100) / 100;
+	for (const status of ["Maintenance", "OOS"]) {
+		const shop = PROD.map((t) => (t.id === 2 ? { ...t, status } : t));
+		eq(ALL_MONTHS.filter((mk) => fleetFixed(shop, mk) !== fleetFixed(PROD, mk)), [], `LogisX-#33 in ${status}: the fleet's fixed costs are unchanged in all ${ALL_MONTHS.length} months`);
+	}
+	const gone = PROD.map((t) => (t.id === 2 ? { ...t, status: "Inactive" } : t));
+	eq(fleetFixed(PROD, "2026-05") - fleetFixed(gone, "2026-05"), 3043.33, "…while LogisX-#33 Inactive takes its $3,043.33 out of a month");
+
+	// In or out of Inactive with costs: refused, naming the real figure.
+	eq(briefOf(guard, t33(), { status: "Inactive" }), [["status", BILLED, "Active → Inactive removes $12,173.32 of fixed costs ($3,043.33/mo) from 4 finalized months"]],
+		"LogisX-#33 Active → Inactive: refused over its 4 billed finalized months, naming $12,173.32");
+	eq(briefOf(guard, { ...t33(), status: "OOS" }, { status: "Inactive" }), [["status", BILLED, "OOS → Inactive removes $12,173.32 of fixed costs ($3,043.33/mo) from 4 finalized months"]],
+		"LogisX-#33 OOS → Inactive: refused the same way (a truck in the shop still bills)");
+	eq(briefOf(guard, { ...t33(), status: "Inactive" }, { status: "Active" }), [["status", BILLED, "Inactive → Active adds $12,173.32 of fixed costs ($3,043.33/mo) to 4 finalized months"]],
+		"LogisX-#33 Inactive → Active: refused, naming the months it brings back");
+	// A truck coming back with its costs entered in the same save: the months come
+	// back at the amounts AFTER the save (the date checks' pricing, §9).
+	eq(briefOf(guard, { ...inv24(), status: "Inactive" }, { status: "Maintenance", insurance_monthly: 1000 }).filter((b) => b[0] === "status"),
+		[["status", BILLED, "Inactive → Maintenance adds $4,000.00 of fixed costs ($1,000.00/mo) to 4 finalized months"]],
+		"INV-24-A Inactive → Maintenance with insurance $1,000/mo in the same save: priced at the new $1,000");
+	// A retirement date bounds it: a truck retired before the finalized months moves none of them.
+	eq(blockersOf(guard, { ...t33(), retired_at: "2025-12-31", in_service_date: "2025-10-01" }, { status: "Inactive" }).length, 1,
+		"a truck billed 2025-10..2025-12 is still refused (those months are finalized)");
+	eq(blockersOf(guard, { ...t33(), in_service_date: "2026-08-03" }, { status: "Inactive" }), [],
+		"a truck first billed in the open month changes to Inactive freely");
+
+	// Maintenance/compliance rows booked to a finalized month move with the truck.
+	FEES = { maintenance: [{ id: 7, amount: 250, m: "2026-05" }], compliance: [] };
+	eq(briefOf(guard, inv24(), { status: "Inactive" }), [["status", ["2026-05"], "Active → Inactive removes 1 maintenance/compliance row worth $250.00 booked to finalized months"]],
+		"a $0/mo truck with a $250 service row in 2026-05: → Inactive refused, naming the row");
+	eq(blockersOf(guard, inv24(), { status: "OOS" }), [], "…→ OOS still moves nothing");
+	eq(briefOf(guard, inv24(), { owner_id: 41 }), [["owner_id", ["2026-05"], "owner 42 → owner 41 moves 1 maintenance/compliance row worth $250.00 between investors across 1 finalized month"]],
+		"…and a new owner is refused: the investor queries join the rows on the truck's owner");
+	FEES = NO_FEES;
+
+	// (2a) owner change: refused only when a figure moves.
+	eq(blockersOf(guard, inv24(), { owner_id: 41 }), [], "INV-24-A ($0/mo, no rows): a new owner is allowed");
+	eq(briefOf(guard, t33(), { owner_id: 41 }), [["owner_id", BILLED, "owner 5 → owner 41 moves $12,173.32 of fixed costs between investors across 4 finalized months"]],
+		"LogisX-#33: a new owner is refused, naming $12,173.32");
+	eq(briefOf(guard, { ...t33(), status: "Maintenance" }, { owner_id: 41 }).length, 1, "…in Maintenance too (its costs count)");
+	eq(blockersOf(guard, { ...t33(), status: "Inactive" }, { owner_id: 41 }), [], "…and an Inactive truck changes owner freely (it counts in no month)");
+	eq(briefOf(guard, t33(), { owner_id: 41, insurance_monthly: 1730 }).filter((b) => b[0] === "owner_id"),
+		[["owner_id", BILLED, "owner 5 → owner 41 takes $12,173.32 of fixed costs from owner 5 and books $12,573.32 to owner 41 across 4 finalized months"]],
+		"a new owner and a new amount in one save: each side priced at its own amounts");
+
+	// (3) amounts: a truck in the shop is restated like an Active one; an Inactive one is not.
+	eq(blockersOf(guard, { ...t33(), status: "Maintenance" }, { insurance_monthly: 1730 }).map((b) => b.field), ["insurance_monthly"],
+		"LogisX-#33 in Maintenance: an insurance change is refused like an Active truck's");
+	eq(blockersOf(guard, { ...t33(), status: "Inactive" }, { insurance_monthly: 1730 }), [], "LogisX-#33 Inactive: an insurance change moves nothing");
+
+	// The SQL fragment and the JS rule agree on real SQLite, and NOT (…) is its exact
+	// complement (COALESCE: a NULL status would otherwise fall in neither set).
+	let Database;
+	try { Database = require("better-sqlite3"); } catch (e) { throw new Error(`better-sqlite3 did not load (${e.message}); run under the .nvmrc Node`); }
+	const sqlAgrees = (basis) => {
+		const mem = new Database(":memory:");
+		try {
+			mem.exec("CREATE TABLE trucks (id INTEGER PRIMARY KEY, status TEXT)");
+			const STATUSES = ["Active", "Maintenance", "OOS", "Inactive", null, "", "inactive"];
+			STATUSES.forEach((s, i) => mem.prepare("INSERT INTO trucks (id, status) VALUES (?, ?)").run(i + 1, s));
+			const ids = (sql) => mem.prepare(sql).all().map((r) => r.id).sort((a, b) => a - b);
+			const js = STATUSES.map((s, i) => (basis.truckInFleet({ status: s }) ? i + 1 : 0)).filter(Boolean);
+			const bare = ids(`SELECT id FROM trucks WHERE ${basis.truckInFleetSql()}`);
+			const aliased = ids(`SELECT t.id FROM trucks t WHERE ${basis.truckInFleetSql("t")}`);
+			const outside = ids(`SELECT id FROM trucks WHERE NOT (${basis.truckInFleetSql()})`);
+			return JSON.stringify(bare) === JSON.stringify(js) && JSON.stringify(aliased) === JSON.stringify(js)
+				&& JSON.stringify([...bare, ...outside].sort((a, b) => a - b)) === JSON.stringify(STATUSES.map((_, i) => i + 1));
+		} finally { mem.close(); }
+	};
+	ok(sqlAgrees(PAYOUT_BASIS), "truckInFleetSql() selects exactly the trucks truckInFleet() counts, and NOT (…) exactly the rest");
+
+	// MUTANT (the guard): check (1) gated on "either side in the fleet", the shape
+	// that refused every shop visit before 2026-09-30.
+	const oldGate = GUARD_SRC.replace('if (has("status") && inFleetBefore !== inFleetAfter) {', 'if (has("status") && chargesFixed) {');
+	ok(oldGate !== GUARD_SRC, "MUTANT (guard) applies");
+	ok(blockersOf(buildGuard(oldGate), t33(), { status: "Maintenance" }).length > 0,
+		"MUTANT check (1) refusing a change between statuses in the fleet is caught (LogisX-#33 → Maintenance refused)");
+
+	// MUTANT (the shared rule): the fleet back to Active only.
+	const libSrc = fs.readFileSync(PAYOUT_BASIS_PATH, "utf8");
+	const activeOnlySrc = libSrc.replace("return !!t && t.status !== FLEET_EXIT_STATUS;", "return !!t && t.status === \"Active\";");
+	ok(activeOnlySrc !== libSrc, "MUTANT (rule) applies");
+	const activeOnly = (() => { const m = { exports: {} }; new Function("module", "exports", activeOnlySrc)(m, m.exports); return m.exports; })();
+	ok(blockersOf(buildGuard(GUARD_SRC, activeOnly), t33(), { status: "Maintenance" }).length > 0 && !sqlAgrees(activeOnly),
+		"MUTANT the fleet rule as Active only is caught (the shop visit is refused again, and the SQL no longer agrees)");
 }
 
 // -------------------------------------------------------------------- report

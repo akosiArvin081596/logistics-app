@@ -75,7 +75,7 @@ check("columns were actually extracted (the scan still matches)", written.size >
 // plans against. Everything else is descriptive and is listed as cosmetic below,
 // so the two sets together must cover every column the route writes.
 const MUST_AUDIT = {
-	status: "decides whether ~$3k/mo of fixed costs hits the P&L at all",
+	status: "Inactive or not decides whether ~$3k/mo of fixed costs hits the P&L at all",
 	in_service_date: "re-books fixed costs across whole months",
 	retired_at: "removes or restores whole months from an investor's ledger",
 	owner_id: "moves a truck's whole fixed-cost history between investors",

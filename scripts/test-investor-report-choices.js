@@ -190,6 +190,8 @@ async function runReport(handlerSrc, { session, query = {}, rangeMode = "whole-m
 		investorReportPayoutEntries: async () => ENTRIES.map((x) => ({ ...x })),
 		truckChargedInMonth: () => false,
 		truckMonthlyFixed: () => ({ eld: 0, hvut: 0, irp: 0, truckPayment: 0, insurance: 0, total: 0 }),
+		// The fleet rule the fixed-cost lines and fee queries read, the real module.
+		investorPayoutBasis: require("../lib/investor-payout-basis"),
 		logAudit: () => {},
 		investorReportOptions: { ...investorReportOptions, RANGE_MODE: rangeMode, UNPRICED_TRUCKS: unpriced },
 		require: (m) => { if (m !== "pdfkit") throw new Error(`unexpected require(${m})`); return pdf.Doc; },
