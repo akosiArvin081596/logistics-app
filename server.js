@@ -41182,10 +41182,13 @@ const INVOICE_NOTES_SCAN_MAX = 2000;
 
 // The invoice EMAIL's message — the cover text above the signature, which the
 // editor lets the dispatcher rewrite before the Gmail draft is written (the
-// signature itself is fixed). The notes' discipline and the notes' 4× scan
-// bound: over the limit is REFUSED, never cut.
+// signature itself is fixed). The notes' discipline: over the limit is
+// REFUSED, never cut. The raw bound is 2× the limit, not the notes' 4×: room
+// for a message its clean-up shortens (a CRLF becomes one \n, a decomposed
+// accent one character), while the clean-up before the count only ever runs
+// on text of about the allowed length.
 const INVOICE_EMAIL_BODY_MAX = 5000;
-const INVOICE_EMAIL_BODY_SCAN_MAX = 20000;
+const INVOICE_EMAIL_BODY_SCAN_MAX = 10000;
 
 // sanitizeEvidenceText() for text that is ALLOWED to be multi-line.
 //
@@ -41997,8 +42000,20 @@ app.post(
 			//     generated one; emailBodyDefault is that generated one, which the
 			//     editor shows until somebody types and the audit judges an edit
 			//     against. The signature is never editable.
+			//     ⚠️ Its Order # is BLANKED exactly as the dryRun's `orderNumber` seed
+			//     is (step 6a), for the same reason: with the refs unreadable,
+			//     orderNumber is our load id, and the message the editor starts from
+			//     must not offer it as Bison's Order #. Only a dryRun reaches here
+			//     with needsOrderNumber set — the approve refused above.
 			const draftSubject = brokerInvoice.buildInvoiceSubject({ brokerName: effBrokerName, orderNumber });
-			const emailFields = { brokerName: effBrokerName, isBison, loadNumber: loadRef, orderNumber, moveNumber, poNumber };
+			const emailFields = {
+				brokerName: effBrokerName,
+				isBison,
+				loadNumber: loadRef,
+				orderNumber: needsOrderNumber ? "" : orderNumber,
+				moveNumber,
+				poNumber,
+			};
 			const emailBodyDefault = brokerInvoice.buildInvoiceEmailBodyText(emailFields);
 			const emailBody = ov.has.emailBody ? ov.values.emailBody : emailBodyDefault;
 			const draftHtml = brokerInvoice.buildInvoiceEmailHtml({ ...emailFields, bodyText: emailBody });
@@ -42126,7 +42141,11 @@ app.post(
 					documentsEmailSource: recipientSource,
 					invoicePdfBase64,
 					rateconPdfBase64: rateconBuffer && rateconBuffer.length ? Buffer.from(rateconBuffer).toString("base64") : "",
-					emailHtml: draftHtml, // exact Gmail draft body so the reviewer can read the cover note before approving
+					// The whole email the approve would write, the edited message when
+					// one was sent. The editor does not render it — it shows the two
+					// parts below instead — and it stays for the runners and the e2e
+					// harness, which check the built email itself.
+					emailHtml: draftHtml,
 					// The editor's message box, in two parts: the generated message as
 					// plain text for the fields above (what the box shows while
 					// unedited), and the fixed signature it shows read-only beneath.
@@ -42185,14 +42204,18 @@ app.post(
 			// auditor reading this row months later must not have to go and check
 			// whether the sheet moved too. It did not, and that is owner decision #2.
 			// The email message is the one field logged WITHOUT its text: only that
-			// it was edited, and its length. The draft itself holds the words.
-			const editDetail = `${invoiceId} load ${loadId} — ` + editDiffs.map(([f, from, to]) =>
+			// it was edited, its length, and — when the n8n fallback wrote the draft
+			// with the generated message instead — that the edit was not applied.
+			// An applied edit's words are in the Gmail draft itself.
+			const describeEdits = (emailApplied) => `${invoiceId} load ${loadId} — ` + editDiffs.map(([f, from, to]) =>
 				f === "total"
 					? `total: sheet ${fmtMoney(sheetTotal)} / ratecon ${fmtMoney(rcTotal)} → invoiced ${fmtMoney(to)} (INVOICE ONLY — Job Tracking Payment unchanged)`
 					: f === "emailBody"
-						? `emailBody: edited (${Array.from(to).length} chars)`
+						? `emailBody: edited (${Array.from(to).length} chars)` + (emailApplied ? "" : ", NOT APPLIED (the fallback service used the generated message)")
 						: `${f}: "${from}" → "${to}"`,
 			).join("; ");
+			// Replaced on the n8n path only, before recordDraft() logs it.
+			let editDetail = describeEdits(true);
 
 			// Persist that an official draft was created for this load so the load
 			// modal can show "approved draft → recipient / invoice #". Best-effort —
@@ -42256,6 +42279,14 @@ app.post(
 			const webhookUrl = process.env.N8N_INVOICE_WEBHOOK_URL;
 			const webhookSecret = process.env.N8N_WEBHOOK_SECRET;
 			if (webhookUrl && webhookSecret) {
+				// ⚠️ The workflow does not use emailHtml (below): this path's draft
+				// carries the GENERATED message. An edited one must not vanish
+				// silently, so the answer warns and the audit line records the edit
+				// as not applied. Drop both once the workflow sends emailHtml.
+				if (editedFields.includes("emailBody")) {
+					draftWarnings.push("Your edited email message was not applied: the draft was created by the fallback service, which uses the generated message.");
+					editDetail = describeEdits(false);
+				}
 				// The EFFECTIVE values, not the extracted ones — the fallback must
 				// mail what the dispatcher reviewed, or the two send paths diverge on
 				// exactly the fields this feature exists to correct.
@@ -42269,9 +42300,8 @@ app.post(
 					// the workflow sees the same reviewed values as the IMAP path.
 					notes,
 					// The email body exactly as the IMAP path writes it, an edited
-					// message included. The workflow lives outside this repo and was
-					// never sent a body before, so an edited message reaches its draft
-					// only once the workflow uses this field.
+					// message included. The workflow lives outside this repo and does
+					// not use it yet — see the warning above.
 					emailHtml: draftHtml,
 					to: invoiceTo.email,
 					invoicePdfBase64,
@@ -42485,13 +42515,14 @@ app.post(
 			const invoicePdf = await renderHtmlToPdf(invoiceHtml);
 
 			// Return the DERIVED STRINGS too, so the client never re-implements a
-			// server template. emailHtml especially: the modal's Email tab renders
-			// the cover note built from the ORIGINAL values, so once those are
-			// editable it would silently show a body that will not be sent. Same
-			// for the message: emailBodyDefault is the generated one for THESE
-			// values, which the editor's box follows until somebody types there,
-			// and emailHtml carries the edited one when it was sent — built the
-			// way the approve builds it.
+			// server template. The Email tab shows a message box and, read-only
+			// beneath it, emailSignatureHtml. The box follows emailBodyDefault —
+			// the generated message for THESE values — until somebody types there;
+			// a box seeded once from the dryRun would keep the message built from
+			// the ORIGINAL values, which is not the one sent once they are edited.
+			// emailHtml is the whole email, built the way the approve builds it
+			// (the edited message when one was sent). The editor no longer renders
+			// it; it stays for the runners and the e2e harness.
 			const subject = brokerInvoice.buildInvoiceSubject({ brokerName, orderNumber });
 			const emailFields = { brokerName, isBison, loadNumber: loadRef, orderNumber, moveNumber, poNumber };
 			const emailBodyDefault = brokerInvoice.buildInvoiceEmailBodyText(emailFields);

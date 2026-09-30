@@ -9,7 +9,7 @@
  *
  *   §1 PARSING. parseInvoiceOverrides(): an omitted or null emailBody means "the
  *      generated message"; anything but a string is 400
- *      INVOICE_EMAIL_BODY_INVALID; a raw body over 20,000 UTF-16 units is 400
+ *      INVOICE_EMAIL_BODY_INVALID; a raw body over 10,000 UTF-16 units is 400
  *      INVOICE_EMAIL_BODY_TOO_LONG before any clean-up; the clean-up is the one
  *      sanitizeInvoiceNotes() (CRLF/CR → \n, control/BIDI → space, format
  *      characters deleted, NFC, trim); over 5,000 code points is TOO_LONG, and
@@ -25,10 +25,13 @@
  *      lossless round trip and for spaces a browser would collapse.
  *   §5 THE ROUTES, RUN. Both registrations are lifted from server.js and run
  *      with stubbed Sheets, Drive, Chromium and Gmail over an in-memory SQLite:
- *      the dryRun and the preview answer emailBodyDefault + emailSignatureHtml;
- *      the approve hands the edited HTML to appendGmailDraft and to the n8n
- *      fallback, audits "emailBody: edited (N chars)" and never the text, and
- *      keeps the text out of overrides_json; each 400 answers before any spend.
+ *      the dryRun and the preview answer emailBodyDefault + emailSignatureHtml,
+ *      and a Bison dryRun with no readable Order # builds the message with
+ *      that Order # blank; the approve hands the edited HTML to
+ *      appendGmailDraft, audits "emailBody: edited (N chars)" and never the
+ *      text, and keeps the text out of overrides_json; the n8n fallback, whose
+ *      draft carries the generated message, warns and audits an edit as not
+ *      applied; each 400 answers before any spend.
  *   §6 MUTANTS. Each guard above is broken in turn, and an assertion must flip.
  *
  * WHY server.js IS READ AS TEXT: it opens SQLite, reads a service-account key
@@ -189,7 +192,7 @@ function parsingSection() {
 		return r.ok ? { ok: true, value: r.values.emailBody } : { ok: false, code: r.code, field: r.field, error: r.error };
 	};
 
-	eq([M.INVOICE_EMAIL_BODY_MAX, M.INVOICE_EMAIL_BODY_SCAN_MAX], [5000, 20000], "§1 the limits: 5,000 code points stored, 20,000 raw");
+	eq([M.INVOICE_EMAIL_BODY_MAX, M.INVOICE_EMAIL_BODY_SCAN_MAX], [5000, 10000], "§1 the limits: 5,000 code points stored, 10,000 raw");
 	for (const [label, body] of [["omitted", {}], ["undefined", { emailBody: undefined }], ["null", { emailBody: null }]]) {
 		const r = M.parseInvoiceOverrides(body);
 		eq([r.ok, r.has.emailBody, r.values.emailBody], [true, undefined, undefined], `§1 ${label} → no override (the generated message is sent)`);
@@ -199,18 +202,21 @@ function parsingSection() {
 			`§1 ${JSON.stringify(v)} → 400 INVOICE_EMAIL_BODY_INVALID (refused, never coerced)`);
 	}
 
-	// The raw bound is judged BEFORE the clean-up: 20,001 spaces would clean to
+	// The raw bound is judged BEFORE the clean-up: 10,001 spaces would clean to
 	// nothing, and still answer TOO_LONG, not EMPTY.
-	eq(verdict({ emailBody: " ".repeat(20001) }), refusal("INVOICE_EMAIL_BODY_TOO_LONG", TOO_LONG_MSG),
-		"§1 20,001 raw spaces → TOO_LONG, judged before the clean-up");
-	eq(verdict({ emailBody: " ".repeat(20000) }).code, "INVOICE_EMAIL_BODY_EMPTY", "§1 …while 20,000 pass that gate and are EMPTY after it");
-	eq(verdict({ emailBody: "a".repeat(20001) }), refusal("INVOICE_EMAIL_BODY_TOO_LONG", TOO_LONG_MSG), "§1 20,001 raw characters → TOO_LONG");
+	eq(verdict({ emailBody: " ".repeat(10001) }), refusal("INVOICE_EMAIL_BODY_TOO_LONG", TOO_LONG_MSG),
+		"§1 10,001 raw spaces → TOO_LONG, judged before the clean-up");
+	eq(verdict({ emailBody: " ".repeat(10000) }).code, "INVOICE_EMAIL_BODY_EMPTY", "§1 …while 10,000 pass that gate and are EMPTY after it");
+	eq(verdict({ emailBody: "a".repeat(10001) }), refusal("INVOICE_EMAIL_BODY_TOO_LONG", TOO_LONG_MSG), "§1 10,001 raw characters → TOO_LONG");
 	eq(verdict({ emailBody: "a".repeat(5000) }), { ok: true, value: "a".repeat(5000) }, "§1 exactly 5,000 characters are accepted");
 	eq(verdict({ emailBody: "a".repeat(5001) }), refusal("INVOICE_EMAIL_BODY_TOO_LONG", TOO_LONG_MSG), "§1 5,001 → TOO_LONG, never cut to 5,000");
-	eq(verdict({ emailBody: TRUCK.repeat(5000) }).ok, true, "§1 5,000 astral characters (10,000 UTF-16 units) are 5,000 code points → accepted");
-	eq(verdict({ emailBody: TRUCK.repeat(5001) }).code, "INVOICE_EMAIL_BODY_TOO_LONG", "§1 …5,001 of them → TOO_LONG");
+	eq(verdict({ emailBody: TRUCK.repeat(5000) }).ok, true,
+		"§1 5,000 astral characters — 10,000 UTF-16 units, exactly the raw bound — are 5,000 code points → accepted");
+	eq(verdict({ emailBody: TRUCK.repeat(5001) }).code, "INVOICE_EMAIL_BODY_TOO_LONG", "§1 …5,001 of them (10,002 units) → TOO_LONG");
 	eq(verdict({ emailBody: E_ACUTE_DECOMPOSED.repeat(5000) }), { ok: true, value: E_ACUTE.repeat(5000) },
-		"§1 NFC first: 10,000 raw units of decomposed accents are 5,000 characters → accepted, stored composed");
+		"§1 NFC first: 10,000 raw units of decomposed accents (the raw bound) are 5,000 characters → accepted, stored composed");
+	eq(verdict({ emailBody: "abc\r\n".repeat(1250) }).ok, true,
+		"§1 a message typed with CRLFs — 6,250 raw units, 4,999 characters once cleaned — is accepted: the raw bound leaves room for the clean-up");
 	eq(verdict({ emailBody: QA.repeat(2500) }).ok, true, "§1 2,500 × U+0958 (5,000 after NFC) → accepted");
 	eq(verdict({ emailBody: QA.repeat(2501) }).code, "INVOICE_EMAIL_BODY_TOO_LONG", "§1 2,501 × U+0958 (5,002 after NFC) → TOO_LONG — counted as stored");
 
@@ -424,8 +430,9 @@ function liftRoutes(src) {
 // Both handlers over a fresh in-memory database. Sheets, Drive, Gemini,
 // Chromium, Gmail and n8n are stubs that record what they were handed; the
 // validator, the sheet parsing, the draft record and the email builders are
-// the shipped code.
-function harness(L, env = {}) {
+// the shipped code. `imapFails` makes the Gmail APPEND throw, so a configured
+// n8n fallback takes over.
+function harness(L, env = {}, { imapFails = false } = {}) {
 	const db = new Database(":memory:");
 	db.exec(L.createSql);
 	for (const a of L.alters) db.exec(a);
@@ -463,7 +470,10 @@ function harness(L, env = {}) {
 		safeAttachmentName: S.safeAttachmentName,
 		logAudit: (req, action, entity, id, detail) => seen.audits.push({ action, detail }),
 		sanitizeEvidenceText: S.sanitizeEvidenceText,
-		appendGmailDraft: async (msg) => { seen.drafts.push(msg); },
+		appendGmailDraft: async (msg) => {
+			if (imapFails) throw new Error("IMAP APPEND refused");
+			seen.drafts.push(msg);
+		},
 		sentIfRendererBusy: () => false,
 		process: { env: { ...env } },
 		fetch: async (url, init) => {
@@ -512,6 +522,12 @@ const TYPED_ROUTE =
 	"  - rate con\r\n  - signed POD\r\n\r\nThank you,\r\nLogisX billing";
 const TYPED_ROUTE_CLEAN = TYPED_ROUTE.split("\r\n").join("\n");
 const TYPED_ROUTE_CHARS = Array.from(TYPED_ROUTE_CLEAN).length;
+// The Bison load with no readable rate-con, as its dryRun builds the email:
+// the Order # blank, no Move # or PO #.
+const FIXTURES_BISON_NO_REFS = Object.freeze({ isBison: true, brokerName: "Bison Transport", loadNumber: "30080873", orderNumber: "", moveNumber: "", poNumber: "" });
+const BISON_NO_REFS_TEXT = "Hello,\n\nPlease find the attached invoice and supporting documentation for Bison Transport Order # .\n\nBest regards,";
+const NOT_APPLIED_WARNING =
+	"Your edited email message was not applied: the draft was created by the fallback service, which uses the generated message.";
 const editedNonBison = () => brokerInvoice.buildInvoiceEmailHtml({ ...FIXTURES.nonBison, bodyText: TYPED_ROUTE_CLEAN });
 const defaultNonBison = () => brokerInvoice.buildInvoiceEmailHtml(FIXTURES.nonBison);
 
@@ -577,6 +593,26 @@ async function routesSection() {
 		eq([(bison.body || {}).emailBodyDefault, (bison.body || {}).emailHtml],
 			[BISON_MOVE_PO_TEXT, brokerInvoice.buildInvoiceEmailHtml(FIXTURES.bisonMovePo)],
 			withErrors("§5 dryRun, Bison: the generated text and the default Bison email", bison));
+
+		// A Bison load whose Order # could not be read: the message the editor
+		// starts from carries the Order # BLANK, as the orderNumber seed does —
+		// never our load id offered as Bison's Order #.
+		const noRefs = await harness(L, GMAIL_ENV).dryRun({ loadId: "30080873" });
+		const nb = noRefs.body || {};
+		eq([noRefs.status, nb.needsOrderNumber, nb.orderNumber], [200, true, ""],
+			withErrors("§5 dryRun, Bison with no readable Order #: needsOrderNumber, and the orderNumber seed is blank", noRefs));
+		eq(nb.emailBodyDefault, BISON_NO_REFS_TEXT, "§5 …emailBodyDefault carries the Order # blank");
+		eq(nb.emailHtml, brokerInvoice.buildInvoiceEmailHtml(FIXTURES_BISON_NO_REFS), "§5 …and so does emailHtml");
+		ok(!String(nb.emailBodyDefault).includes("30080873") && !String(nb.emailHtml).includes("30080873"),
+			"§5 …neither offers our load id as Bison's Order #");
+		eq(nb.subject, "Bison Transport Order #30080873", "§5 …while the Subject still shows the fallback the banner warns about (unchanged)");
+		const noRefsEdited = await harness(L, GMAIL_ENV).dryRun({ loadId: "30080873", body: { emailBody: TYPED_ROUTE } });
+		eq((noRefsEdited.body || {}).emailHtml, brokerInvoice.buildInvoiceEmailHtml({ ...FIXTURES_BISON_NO_REFS, bodyText: TYPED_ROUTE_CLEAN }),
+			"§5 …an edited message there is printed as typed");
+		const refused = harness(L, GMAIL_ENV);
+		const rr = await refused.approve({ loadId: "30080873" });
+		eq([rr.status, (rr.body || {}).code, refused.seen.drafts.length], [422, "INVOICE_REFS_REQUIRED", 0],
+			"§5 …and the approve still refuses until the refs are typed (unchanged)");
 	}
 
 	// ── the approve, IMAP ────────────────────────────────────────────────────
@@ -593,6 +629,7 @@ async function routesSection() {
 	const d1 = edited.seen.drafts[0] || {};
 	eq([er.status, (er.body || {}).via, edited.seen.drafts.length], [200, "imap", 1], withErrors("§5 approve with an edited message → one IMAP draft", er));
 	eq(d1.html, EDITED, "§5 appendGmailDraft gets the edited email: the typed text, then the unchanged signature");
+	eq((er.body || {}).warnings, [], "§5 …and the answer carries no warning: the edit was applied");
 	eq(Object.keys(d1).sort(), Object.keys(d0).sort(), "§5 …the same draft fields as an unedited approve");
 	eq([d1.from, d1.to, d1.subject], [d0.from, d0.to, d0.subject], "§5 …the same From, To and Subject");
 	eq((d1.attachments || []).map((a) => [a.filename, a.contentType, a.content.length]),
@@ -620,13 +657,27 @@ async function routesSection() {
 	eq((both.row() || {}).overrides_json, '{"total":3100}', "§5 …and overrides_json keeps the total, not the message");
 
 	// ── the approve, n8n fallback ────────────────────────────────────────────
+	// The workflow does not use emailHtml, so that path's draft carries the
+	// GENERATED message: an edit is warned about and audited as not applied.
 	const n8n = harness(L, N8N_ENV);
 	const nr = await n8n.approve({ loadId: "563367203", body: { emailBody: TYPED_ROUTE } });
 	eq([nr.status, (nr.body || {}).via, n8n.seen.posts.length], [200, "n8n", 1], withErrors("§5 approve with no IMAP → the n8n fallback", nr));
 	eq(((n8n.seen.posts[0] || {}).payload || {}).emailHtml, EDITED, "§5 the n8n payload carries the edited email as emailHtml");
+	eq((nr.body || {}).warnings, [NOT_APPLIED_WARNING], "§5 n8n + an edited message: the answer warns that the edit was not applied");
+	eq((n8n.seen.audits.find((a) => a.action === "invoice_draft_edited") || {}).detail,
+		`${INVOICE_ID} load 563367203 — emailBody: edited (${TYPED_ROUTE_CHARS} chars), NOT APPLIED (the fallback service used the generated message)`,
+		"§5 …and the audit line records the edit as not applied");
+	eq([(n8n.row() || {}).edited_fields, (n8n.row() || {}).overrides_json], ["emailBody", "{}"],
+		"§5 …the draft record still names the edit, without its text");
 	const n8nPlain = harness(L, N8N_ENV);
-	await n8nPlain.approve({ loadId: "563367203" });
+	const np = await n8nPlain.approve({ loadId: "563367203" });
 	eq(((n8nPlain.seen.posts[0] || {}).payload || {}).emailHtml, DEFAULT, "§5 …and the default email when nothing was edited");
+	eq([(np.body || {}).warnings, n8nPlain.seen.audits.map((a) => a.action)], [[], ["invoice_draft_created"]],
+		"§5 …with no warning and no edit audit");
+	const fellBack = harness(L, { ...GMAIL_ENV, ...N8N_ENV }, { imapFails: true });
+	const fb = await fellBack.approve({ loadId: "563367203", body: { emailBody: TYPED_ROUTE } });
+	eq([fb.status, (fb.body || {}).via, (fb.body || {}).warnings], [200, "n8n", [NOT_APPLIED_WARNING]],
+		withErrors("§5 an IMAP failure that falls over to n8n with an edited message: the same warning", fb));
 
 	// One email builder, three surfaces: what the preview shows is what the
 	// dryRun shows is what reaches Gmail.
@@ -639,7 +690,7 @@ async function routesSection() {
 	const TOO_LONG_MSG = "The email message must be 5,000 characters or fewer.";
 	const BAD = [
 		[42, "INVOICE_EMAIL_BODY_INVALID", "The email message must be text."],
-		["x".repeat(20001), "INVOICE_EMAIL_BODY_TOO_LONG", TOO_LONG_MSG],
+		["x".repeat(10001), "INVOICE_EMAIL_BODY_TOO_LONG", TOO_LONG_MSG],
 		["x".repeat(5001), "INVOICE_EMAIL_BODY_TOO_LONG", TOO_LONG_MSG],
 		[" \r\n ", "INVOICE_EMAIL_BODY_EMPTY", "The email message can't be empty."],
 	];
@@ -704,7 +755,7 @@ async function mutantsSection() {
 		{
 			name: "SM1 the raw length is not checked before the clean-up",
 			from: "if (src.emailBody.length > INVOICE_EMAIL_BODY_SCAN_MAX) {", to: "if (false) {",
-			caught: (S) => S.parseInvoiceOverrides({ emailBody: " ".repeat(20001) }).code !== "INVOICE_EMAIL_BODY_TOO_LONG",
+			caught: (S) => S.parseInvoiceOverrides({ emailBody: " ".repeat(10001) }).code === "INVOICE_EMAIL_BODY_EMPTY",
 		},
 		{
 			name: "SM2 a non-string is coerced instead of refused",
@@ -718,43 +769,61 @@ async function mutantsSection() {
 		ok(caught, `§6 caught: ${m.name}`);
 	}
 
-	// The route mutants re-run the edited IMAP approve (and the preview) on the
-	// mutated server.js.
+	// The route mutants lift both routes from the mutated server.js and replay
+	// the one scenario each guard is about. Every predicate asks for the WRONG
+	// output itself, so a harness that failed outright cannot pass as a catch.
+	const editedImap = async (L) => {
+		const h = harness(L, GMAIL_ENV);
+		await h.approve({ loadId: "563367203", body: { emailBody: TYPED_ROUTE } });
+		return h;
+	};
 	const routeMutants = [
 		{
 			name: "SM3 the audit line logs the message text",
 			from: "? `emailBody: edited (${Array.from(to).length} chars)`", to: '? `emailBody: "${from}" → "${to}"`',
-			caught: (r) => /Acme team/.test(JSON.stringify(r.seen.audits)),
+			caught: async (L) => /Acme team/.test(JSON.stringify((await editedImap(L)).seen.audits)),
 		},
 		{
 			name: "SM4 overrides_json keeps the message text",
 			from: "JSON.stringify({ ...ov.values, emailBody: undefined })", to: "JSON.stringify(ov.values)",
-			caught: (r) => /Acme team/.test((r.row() || {}).overrides_json || ""),
+			caught: async (L) => /Acme team/.test(((await editedImap(L)).row() || {}).overrides_json || ""),
 		},
 		{
 			name: "SM5 the approve mails the generated message instead of the edit",
 			from: "const draftHtml = brokerInvoice.buildInvoiceEmailHtml({ ...emailFields, bodyText: emailBody });",
 			to: "const draftHtml = brokerInvoice.buildInvoiceEmailHtml({ ...emailFields, bodyText: emailBodyDefault });",
-			caught: (r) => (r.seen.drafts[0] || {}).html === defaultNonBison(),
+			caught: async (L) => ((await editedImap(L)).seen.drafts[0] || {}).html === defaultNonBison(),
 		},
 		{
 			name: "SM6 the preview ignores the edit",
 			from: "const emailHtml = brokerInvoice.buildInvoiceEmailHtml({ ...emailFields, bodyText: emailBody });",
 			to: "const emailHtml = brokerInvoice.buildInvoiceEmailHtml(emailFields);",
-			caught: (r, pv) => ((pv && pv.body) || {}).emailHtml === defaultNonBison(),
+			caught: async (L) => {
+				const pv = await harness(L).preview({
+					loadId: "563367203", body: { total: "3000", brokerName: "Acme Freight", isBison: false, emailBody: TYPED_ROUTE },
+				});
+				return (pv.body || {}).emailHtml === defaultNonBison();
+			},
+		},
+		{
+			name: "SM7 the dryRun seeds a Bison message with our load id as the Order #",
+			from: 'loadNumber: loadRef,\n\t\t\t\torderNumber: needsOrderNumber ? "" : orderNumber,', to: "loadNumber: loadRef,\n\t\t\t\torderNumber,",
+			caught: async (L) => String(((await harness(L, GMAIL_ENV).dryRun({ loadId: "30080873" })).body || {}).emailBodyDefault).includes("Order # 30080873."),
+		},
+		{
+			name: "SM8 the n8n fallback drops an edited message silently",
+			from: 'if (editedFields.includes("emailBody")) {', to: "if (false) {",
+			caught: async (L) => {
+				const h = harness(L, N8N_ENV);
+				const r = await h.approve({ loadId: "563367203", body: { emailBody: TYPED_ROUTE } });
+				const detail = (h.seen.audits.find((a) => a.action === "invoice_draft_edited") || {}).detail || "";
+				return (r.body || {}).via === "n8n" && !((r.body || {}).warnings || []).length && !/NOT APPLIED/.test(detail);
+			},
 		},
 	];
 	for (const m of routeMutants) {
 		let caught = false;
-		try {
-			const L = liftRoutes(mutate(SRC, m.from, m.to, m.name));
-			const h = harness(L, GMAIL_ENV);
-			await h.approve({ loadId: "563367203", body: { emailBody: TYPED_ROUTE } });
-			const pv = await harness(L).preview({
-				loadId: "563367203", body: { total: "3000", brokerName: "Acme Freight", isBison: false, emailBody: TYPED_ROUTE },
-			});
-			caught = !!m.caught(h, pv);
-		} catch (e) { failures.push(`${m.name}: ${e.message}`); continue; }
+		try { caught = !!(await m.caught(liftRoutes(mutate(SRC, m.from, m.to, m.name)))); } catch (e) { failures.push(`${m.name}: ${e.message}`); continue; }
 		ok(caught, `§6 caught: ${m.name}`);
 	}
 }
