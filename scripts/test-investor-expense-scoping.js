@@ -659,9 +659,10 @@ let sectionMutants = 0;
 				"§11 dateWhere still reads plain `date` — the report's range is an OPERATIONAL question and must not move to the settlement basis"],
 			[!/dateWhere \+= [^\n]*EXPENSE_PERIOD_EXPR/.test(hCode),
 				"§11 ...and specifically was not 'helpfully' switched to EXPENSE_PERIOD_EXPR"],
-			// Surgical: the revenue and driver-pay legs still use the driver set, so a
-			// blanket deletion of getInvestorDriverSet from this handler fails here.
-			[/getInvestorDriverSet\(user\.id/.test(hCode) && /investorDriverSet\.has\(/.test(hCode),
+			// Surgical: the revenue leg still uses the driver set (through the shared
+			// row test, investorJobRowTest(), since 2026-09-30), so a blanket deletion
+			// of getInvestorDriverSet from this handler fails here.
+			[/getInvestorDriverSet\(user\.id/.test(hCode) && /investorJobRowTest\([^)]*\binvestorDriverSet\)/.test(hCode),
 				"§11 the REVENUE leg still uses getInvestorDriverSet — the fix is scoped to expenses, not a blanket removal"],
 		];
 	}

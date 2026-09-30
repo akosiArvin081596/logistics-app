@@ -76,6 +76,16 @@ What it covers today, by section (`ONLY` picks them):
   throwaway Driver account included).
   Local only (`DB_PATH`); three sign-ins; `ONLY=investorfixes`. Its F-numbers are its own: the money path's F1 is a
   different step.
+- **Investor report (R1–R6, Rx).** The downloadable report and the tax CSV of one investor, as a Super Admin previewing
+  their portal gets them, against PR #405's three choices (`lib/investor-report-options.js`). A junk date and a start
+  after the end are refused with 400 `INVALID_DATE` / `INVALID_RANGE` before the ledger reconcile runs (R3). A
+  one-month report's Investor Payout equals that month on the Payouts page (R1). A mid-month range covers the whole
+  month: the period label, the note and Gross Revenue (R2). The tax CSV names the previewed investor, from the Tax
+  Shield button and from `?as_user_id=` (R4a, R4b). A truck with no recorded purchase price makes the figures that
+  need it "Not available", never `$0`, in the CSV (R4b) and the report (R5). The portal shows the whole-months hint
+  under its date inputs (R6). Nothing is written but the preview's audit lines and the ledger's own refresh (Rx).
+  Local and staging; one sign-in; `ONLY=report`. Its R-numbers are its own: the truck section's R1–R16 are different
+  steps.
 
 Every "Expected" column states the behaviour **after** the fix. A run on a build without it (a BEFORE baseline) is
 expected to FAIL exactly the fix rows.
@@ -224,12 +234,18 @@ fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
 BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-investorfixes ONLY=investorfixes DB_PATH="$W/qa.db" \
   fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
 fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
+# Part 8: the investor report (1 sign-in, up to 5 report and 3 tax-CSV requests); it fits beside any part but the
+# sign-out section on one server process
+fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
+BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-report ONLY=report DB_PATH="$W/qa.db" \
+  fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
+fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
 ```
 
 - Headless: part 1 takes about 1.5 minutes, part 2 about 2.5 minutes, part 3 about 30 s, part 4 about 2.5 minutes
   (up to 80 s more when F1 has to plant its formula and wait for the server's cached copy of the sheet), part 5 about
   45 s, part 6 about 1.5 minutes (T0) and 2–3 minutes (T1–T11), part 7 about 1.5 minutes (headed about 2.5
-  minutes).
+  minutes), part 8 about 10 s (headed about 30 s).
 - B1 deletes its expense and puts its assignment's spelling back when it runs, so plant again before every boot that
   B1 is to read. A run whose server booted before the plant scores B1 INFO (the boot never saw the row); a copy with
   nothing planted SKIPs it.
@@ -242,7 +258,7 @@ fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
   start while `plant-journal.json` exists.
 
 ⚠️ **Login limiter:** `POST /api/auth/login` allows 20 attempts per 15 minutes per server process, counting every
-attempt. Per section: `trucks` 3, `signout` up to 20, `dispatcher` 2, `maintenance` 3, `names` 2, `eldlink` 1, `invoice` 1, `terms` 2 (the Super Admin and T7's throwaway test Investor; 0 with `STEPS=T0`), `investorfixes` 3 and `moneypath` up to 3 (the
+attempt. Per section: `trucks` 3, `signout` up to 20, `dispatcher` 2, `maintenance` 3, `names` 2, `eldlink` 1, `invoice` 1, `terms` 2 (the Super Admin and T7's throwaway test Investor; 0 with `STEPS=T0`), `investorfixes` 3, `report` 1 and `moneypath` up to 3 (the
 Super Admin and the driver, plus the Super Admin again when E1 has to file on the driver's behalf). The sign-out figure is its
 worst case: one fewer on a build without S4a's second half, and one fewer where S7 sends one sign-in (so 19 on a build
 with the fixes). It fills a whole window, so run it on a fresh server process, as the recipe does. **All five together
@@ -380,6 +396,9 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
   investor record (both deleted), and their audit lines (which stay). T8 SKIPs there unless `E2E_TERMS_SUBMIT=1`; with
   it, T8 submits a real application (which also sends staging's new-application emails wherever it has a mail target),
   and Tc can only soft-delete it. Run T0 and T1–T11 at least 15 minutes apart (the preview limiter, see the terms section).
+- **`ONLY=report` needs only `superAdmin`** in the creds file. Without `DB_PATH`, R3 scores its status codes only and
+  Rx the browser's requests only (see the report section). It creates nothing on staging: it writes the preview's
+  audit lines and whatever the payout ledger's own refresh writes when its Payouts page is opened.
 - ⚠️ **A full run writes on staging.** It creates, edits and deletes `QA-TEST-*` trucks, and their audit rows stay.
   `ONLY=signout` only signs in and out. `ONLY=moneypath` saves one real driver's pay terms four times and then puts the
   row back as it was read; its `update_driver_pay` audit lines stay (SQLite only).
@@ -391,10 +410,11 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
 | `BASE_URL` | Required by `e2e.mjs`. Refuses `app.logisx.com` (production). |
 | `PHASE` | `before` or `after`. Only names the output; the "Expected" column is always the after-the-fix behaviour. |
 | `OUT_TAG` | Writes `shots/<tag>/` and `results-<tag>.md` instead of `<PHASE>`, so a rehearsal cannot overwrite a baseline. |
-| `ONLY` | A comma-separated list of sections: `trucks` (1–12, R1–R16), `signout` (S1–S7), `dispatcher` (D1–D3), `maintenance` (M1), `moneypath` (P1, E1, N1, N1b, F1, E2, B1, RC1), `names` (K1–K3), `eldlink` (L1–L3), `invoice` (I1–I9), `terms` (T0–T11), `investorfixes` (F1–F14). Unset: all ten, in that order, then step 12's clean-up — more sign-ins than one limiter window holds (see above). |
-| `STEPS` | Only these sign-out, money-path or invoice cases, e.g. `STEPS=S5a,S7` (each has its own browser context), `STEPS=P1,F1` or `STEPS=E2,B1,RC1` (`P1` selects P1a and P1b; `N1` selects N1 and N1b), `STEPS=I8,I9` (`I3` selects I3a–c, `I7` selects I7, I7r and I7j, `I8` selects I8, I8b and I8h, `I9` selects I9 and I9a–c; I1 opens the editor whenever any of I1–I7 is picked), `STEPS=T0` or `STEPS=T1,T2,…,T11` (a terms step also runs the steps it builds on: T3 and T9 run T1, T4 and T7 run T2, T5 runs T4, T8 runs T5). The other sections ignore it. |
+| `ONLY` | A comma-separated list of sections: `trucks` (1–12, R1–R16), `signout` (S1–S7), `dispatcher` (D1–D3), `maintenance` (M1), `moneypath` (P1, E1, N1, N1b, F1, E2, B1, RC1), `names` (K1–K3), `eldlink` (L1–L3), `invoice` (I1–I9), `terms` (T0–T11), `investorfixes` (F1–F14), `report` (R1–R6, Rx). Unset: all eleven, in that order, then step 12's clean-up — more sign-ins than one limiter window holds (see above). |
+| `STEPS` | Only these sign-out, money-path or invoice cases, e.g. `STEPS=S5a,S7` (each has its own browser context), `STEPS=P1,F1` or `STEPS=E2,B1,RC1` (`P1` selects P1a and P1b; `N1` selects N1 and N1b), `STEPS=I8,I9` (`I3` selects I3a–c, `I7` selects I7, I7r and I7j, `I8` selects I8, I8b and I8h, `I9` selects I9 and I9a–c; I1 opens the editor whenever any of I1–I7 is picked), `STEPS=T0` or `STEPS=T1,T2,…,T11` (a terms step also runs the steps it builds on: T3 and T9 run T1, T4 and T7 run T2, T5 runs T4, T8 runs T5), `STEPS=R3,R4` for the report section (`R4` selects R4a and R4b; R2 runs R1; Rx runs whenever any other report step does). The other sections ignore it, the truck section's R1–R16 included. |
 | `HEADED=1` | A visible browser. |
-| `DB_PATH` | The copy the server runs on (inside the work dir). It is used **only** to plant stored values for steps 10, 11b–f, R3 and R15, to stage and clean up R16, to plant and read back E1, N1, N1b and E2, to read and delete B1's planted expense, to delete the rows RC1's import writes, to plant P1's own driver, to plant and delete I8's saved invoice note, to let T8 submit a test application and hard-delete it (by id) after Tc's soft delete, and for the investor-fixes section (see there). Unset: those rows SKIP, P1 uses a real driver, T8 SKIPs unless `E2E_TERMS_SUBMIT=1`, and the investor-fixes section SKIPs. |
+| `DB_PATH` | The copy the server runs on (inside the work dir). It is used **only** to plant stored values for steps 10, 11b–f, R3 and R15, to stage and clean up R16, to plant and read back E1, N1, N1b and E2, to read and delete B1's planted expense, to delete the rows RC1's import writes, to plant P1's own driver, to plant and delete I8's saved invoice note, to let T8 submit a test application and hard-delete it (by id) after Tc's soft delete, and for the investor-fixes section (see there). The report section only reads it: R3's ledger check and Rx's row counts. Unset: those rows SKIP, P1 uses a real driver, T8 SKIPs unless `E2E_TERMS_SUBMIT=1`, the investor-fixes section SKIPs, and R3 and Rx score without the database. |
+| `E2E_REPORT_INVESTOR` | The report section's investor, a `users.id`, instead of the one it picks. It must be an Investor who owns a truck. |
 | `E2E_TERMS_SUBMIT=1` | Lets T8 submit its test lease application on a server that is not on this machine (it writes an application; Tc soft-deletes it). Locally `DB_PATH` enables T8. |
 | `E2E_INVOICE_APPROVE=1` | Lets I7 press Approve on a server that is not on this machine. Off by default: an approve creates a real Gmail draft wherever the server has a mail target. Locally `boot-server.sh` blanks them, so I7 always approves there. |
 | `E2E_LINK_PODS=1` | For `prep-worktree.sh`, not `e2e.mjs`: link the main checkout's POD files into the worktree's `uploads/`, for the invoice section. |
@@ -1037,6 +1057,75 @@ accounts' `investor_config`, `investor_payouts` and `investor_payout_history` ro
 above the start mark, table by table: a login session is expected, and so is the global split's row when F10a's `PUT`
 re-wrote it with its own value. The section's rows are listed in `plant-journal.json` (ids only) while they exist, and
 Ctrl-C deletes them from the copy.
+
+## The investor report section (R1–R6, Rx)
+
+`ONLY=report` (`STEPS` picks steps), local and staging. The Super Admin signs in once and every step shares that page.
+It covers PR #405 and its three owner-approved choices: a mid-month date range covers whole months, a truck with no
+recorded purchase price makes the figures that need it "Not available" (never a silent `$0`), and the portal says so
+under its date inputs. The choices live in `lib/investor-report-options.js`, the one file the owner or client edits.
+
+**Where the expected text comes from.** The hint, the footnote, "Not available", "Not recorded", the CSV count label
+and the `UNPRICED_TRUCKS` switch are read from `lib/investor-report-options.js` in the checkout the run starts from.
+A build without the file gets the contract's text instead; the results header says which (`reportText`). The two note
+sentences R2 looks for ("covers the whole of each month", and the exact-dates sentence) are the section's own copy.
+The range mode is the server's: `reportRangeMode` in the preview's own `GET /api/investor` response. A build without
+that field is judged as `whole-months`, the owner's choice. ⚠️ On staging the text still comes from the local
+checkout, so run from the commit staging runs.
+
+**The investor** is picked through the API (`GET /api/users`, `GET /api/trucks`): an Investor who owns at least one
+truck. One with a truck whose purchase price is not recorded (0 or empty) comes first, then the lowest id.
+`E2E_REPORT_INVESTOR=<users.id>` overrides the pick. The header records `reportInvestor` and the case that applied
+(`reportTruckCase`).
+
+**The month** comes from the preview's own `GET /api/investor/payouts`: the most recent month with a non-zero payout,
+a finalized one first (`reportMonth`). If every month is `$0`, R1 scores INFO.
+
+**Real figures.** The report and the CSV carry real per-investor money, on a local copy and on staging. The rows print
+booleans, ids and month keys only. The PDFs and CSVs are read in memory, and a file the UI downloads is read and
+deleted at once. A failing check prints only the value's shape, with every run of digits collapsed to `#` (`"$#"`,
+`"#%"`, `"Not available"`). The screenshots are clipped to the report controls: `r1`/`r2` show the date inputs and
+Download Report, `r4a` the Export CSV button, and `r6` the header's buttons and the hint. None shows a PDF page or a
+figure.
+
+**How the documents are read.** The PDF text comes from the app's own `pdfjs-dist` (`pdfText()`). A P&L line's value is
+the text on the label's baseline, to its right. A KPI's value is the text 11 pt below its upper-cased label, at the
+same x (`kpiRow()` in `server.js`). The period comes from the header's `Period:` line (M/D/YYYY, ISO or a long date).
+The CSV is parsed as `lib/csv.js` writes it, and its formula guard (a leading `'`) is undone.
+
+| Step | How it is shown | Expected (AFTER) |
+|---|---|---|
+| R3 | Runs first, before anything in the run reconciles the ledger. Page fetches of `GET /api/investor/report?as_user_id=<id>` with `start=junk`, with `end=<year>-02-30`, and with a start (the 20th of last month) after the end (the 10th). Locally, the investor's `investor_payouts` rows and the `investor_payout_history` count are read before and after each request. The row is recorded after the portal's Payouts read, and says whether that read refreshed the ledger. | 400 `INVALID_DATE` (field `start`), 400 `INVALID_DATE` (field `end`), 400 `INVALID_RANGE`; the ledger unchanged |
+| R1 | **UI.** Open `/investor-portals/<id>`, type the month's 1st and last day into the report's date inputs, and click **Download Report**. | The download is a PDF, and its request carries `as_user_id=<id>` and the dates as typed. "Investor Payout" equals that month's `effectiveAmount` in `GET /api/investor/payouts?as_user_id=` (the Payouts page's figure) |
+| R2 | **UI.** The same month, from the 10th to the 20th. | `whole-months`: the header's period reads the 1st to the last day; the note contains "covers the whole of each month"; Gross Revenue equals R1's. `exact-dates`: the period reads the typed dates, and the note has "Driver Pay, the fixed costs and Investor Payout cover whole months; revenue and trip expenses cover the exact dates you chose." |
+| R4a | **UI.** The Tax Shield section's **Export CSV** in the preview. The response is read, and any download deleted. | The request carries `as_user_id=<id>`, and the CSV's "Investor" row is the investor's username, not "All Investors". SKIP when the preview renders no such button; the row then says what a request without `as_user_id` (the component's request today) answers |
+| R4b | A page fetch of `GET /api/investor/tax-csv?as_user_id=<id>`. | "Investor" names the investor. With an unpriced truck (`not-available`): Total Fleet Purchase Price and At-Risk Capital Remaining read "Not available"; the row "Trucks without a recorded purchase price" holds the count; Purchase Price (per truck), Section 179 Deduction (100%) and Annual Depreciation (Year 1) read the priced trucks' average, or "Not recorded" when none is priced; no price field reads `$0`. Every truck priced, or `UNPRICED_TRUCKS = 'zero'`: no count row and no "Not available" |
+| R5 | R1's PDF (a page fetch of the same report when R1 did not run). | With an unpriced truck: the footnote, filled in with the counts, is present; Total Purchase Price, Current Market Value (80%), Total Investment and Payoff Progress read "Not available" (Business ROI reads no price and keeps its number); Purchase Price (per truck) and Section 179 Deduction as in R4b. Every truck priced: no footnote and no "Not available" |
+| R6 | The preview's header, after R2. | `whole-months`: the `RANGE_HINT` text shows (whether it sits below the date inputs is reported, not scored). `exact-dates`: no hint. No `reportRangeMode` in the response: FAIL |
+| Rx | The browser's non-GET requests (sign-in and socket.io polling aside), and locally the tables that grew in the copy since the sign-in. | No non-GET request. Only `sessions`, `audit_trail` (`investor_preview_view`, `investor_preview_report`, `investor_payouts_view`, `investor_payout_detail_view`) and the two ledger tables grew; no plant journal |
+
+**What it writes.** It creates nothing and plants nothing; `DB_PATH` is only read. The app writes, as it does for a
+person previewing the portal: a session, the preview's audit lines (`investor_preview_view` for each
+`GET /api/investor`, `investor_preview_report` for each report request, `investor_payouts_view`), and whatever the
+ledger's own reconcile writes when the Payouts page is read (a row for a completed month that has none, or an owed
+amount refreshed in an open month, with its history row). Locally all of it lands in the copy. Nothing touches the sheet.
+
+**Budgets per server process:** one sign-in; up to five `GET /api/investor/report` (R3 three, R1 and R2 one each);
+two or three `GET /api/investor/tax-csv`. #405 gives both routes a per-user limiter shaped like the statement limiter
+(20 per 15 minutes), so two full runs fit in one window even if the routes share it.
+
+**R3's ledger half can be vacuous.** When the ledger is already up to date, a reconcile writes nothing, so an unchanged
+ledger cannot show whether one ran. The row then says the Payouts read that followed wrote nothing either, and the
+status codes are the evidence.
+
+**On PR #405's head before these choices** (`d8a4a64`, the BEFORE baseline, on a local copy with an investor who owns
+an unpriced truck): R3 FAILs (`start=junk` answers 500; the impossible date and the reversed range answer 200 with a
+PDF). R1 PASSes (the payout already reads the ledger). R2 FAILs: the period reads the typed dates, the note has no
+whole-months sentence, and Gross Revenue differs from R1's there. R4a SKIPs: `InvestorView.vue` does not mount
+`TaxShieldSection` at that head, so there is no button; a request without `as_user_id` answers "All Investors". R4b
+FAILs on the `$` prices and the missing count row; its "Investor" row already names the investor, through
+`?as_user_id=`. R5 FAILs (no footnote, `$` figures), R6 FAILs (no `reportRangeMode`, no hint), and Rx PASSes. With an
+investor whose trucks are all priced (`E2E_REPORT_INVESTOR`), R4b and R5 pass on that build too.
 
 ## Teardown (once the whole QA cycle is done)
 

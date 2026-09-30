@@ -98,6 +98,10 @@ export const useInvestorStore = defineStore('investor', {
     recessionProof: (s) => s.data?.recessionProof || null,
     config: (s) => s.data?.config || null,
     myLoads: (s) => s.data?.myLoads || { pending: [], active: [] },
+    // How the downloadable report treats a date range ('whole-months' or
+    // 'exact-dates', lib/investor-report-options.js). null until loaded, and
+    // from a server that does not send it.
+    reportRangeMode: (s) => s.data?.reportRangeMode || null,
     isPreview: (s) => s.previewUserId != null,
     previewQuery: (s) => (s.previewUserId != null ? `as_user_id=${s.previewUserId}` : ''),
     // What is accruing in the still-open month — reported separately from owed

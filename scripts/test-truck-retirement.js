@@ -165,10 +165,26 @@ section("1. TEXTUAL — every fixed-cost month gate routes through ONE predicate
 	// one to satisfy a stale count would reintroduce exactly that bug.
 	//
 	// A bare count is a weak pin, but it is the one that catches the thing that
-	// matters: a SIXTH gate appearing that does not route through the shared
+	// matters: a new gate appearing that does not route through the shared
 	// predicate. If it trips, read the new call site before touching this number.
+	//
+	// SIX since 2026-09-30, and the sixth is correct: GET /api/investor/report
+	// used to count a truck's months itself (truckMonthsInPeriod, day granularity)
+	// and charged fixed costs in months the payouts ledger never charges. It now
+	// walks the months the ledger charged and gates each truck with this predicate,
+	// the same loop as getMonthlyFixedCosts(). The report site is pinned by name
+	// below so the count cannot be satisfied by a different sixth gate.
 	const gateCalls = (SRC.match(/if \(!truckChargedInMonth\(/g) || []).length;
-	eq(gateCalls, 5, "five money month-gates call truckChargedInMonth() directly");
+	eq(gateCalls, 6, "six money month-gates call truckChargedInMonth() directly");
+	{
+		const rs = SRC.indexOf('app.get("/api/investor/report"');
+		const re = SRC.indexOf("\napp.", rs + 10);
+		const reportHandler = SRC.slice(rs, re > rs ? re : SRC.length);
+		ok(/if \(!truckChargedInMonth\(t, monthKey\)\) continue;/.test(reportHandler),
+			"GET /api/investor/report gates its fixed costs with truckChargedInMonth() (the sixth gate)");
+		ok(!/truckMonthsInPeriod\(/.test(reportHandler.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n")),
+			"GET /api/investor/report no longer counts months itself (truckMonthsInPeriod is gone)");
+	}
 
 	// The guard delegates to it too, via truckFixedCostLockedMonths.
 	const guardSrc = extract("truckFixedCostLockedMonths");

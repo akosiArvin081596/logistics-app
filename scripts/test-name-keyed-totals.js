@@ -77,6 +77,7 @@ const Database = require("better-sqlite3");
 const geolib = require("geolib");
 const fuelModel = require("../lib/fuel-model");
 const { normalizeLoadId } = require("../lib/ratecon-load");
+const investorReportOptions = require("../lib/investor-report-options");
 
 const SHIPPED = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 
@@ -425,6 +426,8 @@ function buildWorld(variant, { src = SHIPPED, twins = false } = {}) {
 		duplicateReceiptGroups: () => ({ groups: [], summary: { groups: 0 } }),
 		fuelReconciliationSnapshot: () => null,
 		fuelTankCalibrationWire: () => null,
+		// GET /api/investor answers reportRangeMode from it (not a figure).
+		investorReportOptions,
 		console: { log: () => {}, warn: () => {}, error: (...a) => errors.push(a.map(String).join(" ")) },
 	};
 	const fns = new Function(...Object.keys(deps), liftedFor(src))(...Object.values(deps));
