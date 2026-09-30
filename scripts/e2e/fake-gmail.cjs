@@ -24,9 +24,12 @@
 //     Sheets API. A socket built with new net.Socket() and connected directly is
 //     not seen; nothing in server.js, lib/ or nodemailer opens one that way.
 //   It refuses to load (throws, so node exits) unless E2E_FAKE_GMAIL_DIR is an
-//   absolute path to an existing directory outside every git checkout. A draft
-//   is built from the scratch DB, a copy of real data: keep the directory inside
-//   the harness's private work dir (paths.cjs). Files are written 0600.
+//   absolute path to an existing directory outside every git checkout, owned by
+//   this user and closed to group and other (the rule paths.cjs holds the work
+//   dir to). A draft is built from the scratch DB, a copy of real data: keep the
+//   directory inside the harness's private work dir. Every file is created
+//   exclusively and 0600, never over or through anything already at its name: a
+//   temporary sidecar file found already there makes the APPEND answer NO.
 //
 // MODULE, in the harness:
 //   const { readCapturedDrafts } = require("<abs>/scripts/e2e/fake-gmail.cjs");
@@ -281,7 +284,9 @@ function readCapturedDrafts(dir) {
 // -------------------------------------------------------------------- hooks
 
 // The directory E2E_FAKE_GMAIL_DIR names, or a refusal: an absolute path to an
-// existing directory with no .git at or above it.
+// existing directory with no .git at or above it, owned by this user and closed
+// to group and other. The last two are the rule scripts/e2e/paths.cjs holds the
+// work dir to (it exports no helper for them); keep the two in step.
 function captureDir() {
 	const refuse = (why) => {
 		throw new Error(`${TAG}: refusing to load: ${why}`);
@@ -295,12 +300,20 @@ function captureDir() {
 	} catch {
 		refuse(`E2E_FAKE_GMAIL_DIR does not exist: ${dir}`);
 	}
-	if (!fs.statSync(real).isDirectory()) refuse(`E2E_FAKE_GMAIL_DIR is not a directory: ${real}`);
+	const st = fs.statSync(real);
+	if (!st.isDirectory()) refuse(`E2E_FAKE_GMAIL_DIR is not a directory: ${real}`);
 	for (let d = real; ; d = path.dirname(d)) {
 		if (fs.existsSync(path.join(d, ".git"))) {
 			refuse(`E2E_FAKE_GMAIL_DIR ${real} is inside the git checkout ${d}; use a directory outside every checkout`);
 		}
 		if (path.dirname(d) === d) break;
+	}
+	if (typeof process.getuid === "function" && st.uid !== process.getuid()) {
+		refuse(`E2E_FAKE_GMAIL_DIR ${real} belongs to another user`);
+	}
+	if (st.mode & 0o077) {
+		refuse(`E2E_FAKE_GMAIL_DIR ${real} is open to other users (mode ${(st.mode & 0o777).toString(8)}); ` +
+			"chmod 700 it, or point E2E_FAKE_GMAIL_DIR at a private directory");
 	}
 	return real;
 }
@@ -345,20 +358,30 @@ function refused(t, via) {
 	return sock;
 }
 
-// Saves one APPEND: the .eml first (never over an existing file), then its
-// .json through a rename, so a reader never sees a partial sidecar.
+// Saves one APPEND: the .eml, then its .json through a temporary file and a
+// rename, so a reader never sees a partial sidecar. Both files are created
+// exclusively (O_EXCL), so nothing already at their names, a symlink included,
+// is written over or through. An .eml name already taken moves on to the next
+// name; a temporary file already there was put there by something else, so the
+// APPEND is refused and its .eml removed.
 let saved = 0;
 function saveAppend(dir, literal, meta) {
 	for (;;) {
 		const base = `append-${Date.now()}-${++saved}`;
+		const eml = path.join(dir, `${base}.eml`);
 		try {
-			fs.writeFileSync(path.join(dir, `${base}.eml`), literal, { flag: "wx", mode: 0o600 });
+			fs.writeFileSync(eml, literal, { flag: "wx", mode: 0o600 });
 		} catch (e) {
 			if (e.code === "EEXIST") continue;
 			throw e;
 		}
 		const tmp = path.join(dir, `.${base}.json.tmp`);
-		fs.writeFileSync(tmp, JSON.stringify(meta, null, 2) + "\n", { mode: 0o600 });
+		try {
+			fs.writeFileSync(tmp, JSON.stringify(meta, null, 2) + "\n", { flag: "wx", mode: 0o600 });
+		} catch (e) {
+			fs.rmSync(eml, { force: true });
+			throw e.code === "EEXIST" ? new Error(`refusing to write ${tmp}: something is already there`) : e;
+		}
 		fs.renameSync(tmp, path.join(dir, `${base}.json`));
 		return base;
 	}
