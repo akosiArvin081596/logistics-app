@@ -25615,6 +25615,17 @@ function truckEditLockBlockers(truck, changed, opts = {}) {
 	const fixedMonths = truckFixedCostLockedMonths(truck, locked);
 	const monthly = truckMonthlyFixed(truck).total;
 	const money = (n) => `$${(Math.round(n * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+	// What the months a DATE edit moves are worth. One save can change the
+	// amounts and a date together (the Trucks form sends both), so a month the
+	// date brings into the charge is billed at the amounts AFTER the save, and a
+	// month it takes out loses the amounts BEFORE it. Pricing both at the stored
+	// amounts told an admin who set insurance to $1,000/mo and backdated the
+	// in-service date in one save that it added "$0.00".
+	const monthlyAfter = truckMonthlyFixed({ ...truck, ...changed }).total;
+	const datedMonthsAmount = (moved, afterSet) => {
+		const added = moved.filter((p) => afterSet.has(p)).length;
+		return monthlyAfter * added + monthly * (moved.length - added);
+	};
 
 	// Does this truck's fixed cost reach a month's P&L at all? Both queries that
 	// build it filter `status = 'Active'`, so a truck that is Inactive before AND
@@ -25716,7 +25727,7 @@ function truckEditLockBlockers(truck, changed, opts = {}) {
 			from: String(truck.in_service_date || "") || "(unset — bills from created_at)",
 			to: changed.in_service_date || "(unset — bills from created_at)",
 			periods: moved,
-			detail: `in-service date ${String(truck.in_service_date || "") || "unset"} → ${changed.in_service_date || "unset"} ${afterSet.size < beforeSet.size ? "removes" : "adds"} ${money(monthly * moved.length)} of fixed costs ${afterSet.size < beforeSet.size ? "from" : "to"} ${moved.length} finalized month${moved.length === 1 ? "" : "s"}`,
+			detail: `in-service date ${String(truck.in_service_date || "") || "unset"} → ${changed.in_service_date || "unset"} ${afterSet.size < beforeSet.size ? "removes" : "adds"} ${money(datedMonthsAmount(moved, afterSet))} of fixed costs ${afterSet.size < beforeSet.size ? "from" : "to"} ${moved.length} finalized month${moved.length === 1 ? "" : "s"}`,
 		});
 	}
 
@@ -25746,7 +25757,7 @@ function truckEditLockBlockers(truck, changed, opts = {}) {
 			from: String(truck.retired_at || "") || "(not retired)",
 			to: changed.retired_at || "(not retired)",
 			periods: moved,
-			detail: `retirement date ${String(truck.retired_at || "") || "unset"} → ${changed.retired_at || "unset"} ${afterSet.size < beforeSet.size ? "removes" : "adds"} ${money(monthly * moved.length)} of fixed costs ${afterSet.size < beforeSet.size ? "from" : "to"} ${moved.length} finalized month${moved.length === 1 ? "" : "s"}`,
+			detail: `retirement date ${String(truck.retired_at || "") || "unset"} → ${changed.retired_at || "unset"} ${afterSet.size < beforeSet.size ? "removes" : "adds"} ${money(datedMonthsAmount(moved, afterSet))} of fixed costs ${afterSet.size < beforeSet.size ? "from" : "to"} ${moved.length} finalized month${moved.length === 1 ? "" : "s"}`,
 		});
 	}
 
