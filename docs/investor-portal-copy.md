@@ -295,6 +295,8 @@ This one **leaves the app** — it is a document the investor keeps. A month pai
 | ⚪ | Heading is `Final Amount` (finalized, unpaid), `Amount Paid` (paid), or `Net Settled` (adjusted after payment) |
 | 🔴 | `Figures as of <date>; the portal shows current records.` — **NEW, you approved this on 2026-08-17.** Small grey italic line under the settled figure, on **both** the Final and the Paid version. `<date>` is the same "Issued" date already printed in the header. **Why it was added:** statements are now rendered once and stored, so the PDF is a snapshot of the day it was built. Two parts of the page are re-derived live at that moment — the itemized appendix, and the page-1 composition on older months — so a statement built while everything agreed stays that way and will never later grow the `The figures above reflect current records, which have changed since it closed.` caveat (§11) the *screen* would show. The alternative was to re-render on every click, which is the ~4-second delay you asked us to remove. This line is how the document stays honest instead. **The settled amount itself is frozen either way and is not affected.** |
 
+**Dates corrected (2026-09-30).** Because the app's server keeps UTC time, the statement printed the *Payment due* date and the trip-expense dates in its itemized pages **one day early** (a payment due July 31, 2026 printed as `07/30/2026`), and a load's date too when the sheet records it year first. Every statement, split or lease, now prints the date on record. No wording and no amount changed, and the *Issued*, *Finalized*, *Paid on* and correction dates were already right. The next download of any statement prints the corrected dates; a copy an investor saved earlier keeps the old ones.
+
 ---
 
 ## 13. Maintenance notice (only when switched on — currently **on** in production)
@@ -524,11 +526,13 @@ The same sentence is used on every surface that says the same thing, so the port
 | L8b | 🔴 | `From {month}, your payout is a fixed monthly lease of {amount}, not a share of net profit.` | Same line, when the lease starts partway through the report; `{month}` is its first lease month. | **Awaiting approval** |
 | L9 | ⚪ | `Investor Payout (fixed monthly lease)` | Report PDF: the payout row of the Income Statement (today `Investor Payout (50%)`), when every month in the report is paid as a lease. | **Awaiting approval** |
 | — | ⚪ | `Investor Payout` | Same row, when the report covers split months and lease months. | **Awaiting approval** |
+| — | ⚪ | `Owner Earnings (fixed monthly lease)` | Report PDF: the same figure's label beside Net Cash Flow under Cash Flow & Projections (today `Owner Earnings (50%)`), when every month in the report is paid as a lease. | **Awaiting approval** |
+| — | ⚪ | `Owner Earnings` | Same label, when the report covers split months and lease months. | **Awaiting approval** |
 | L10 | 🔴 | `Paid as a fixed monthly lease, so there is no per-load share.` | Portal My Loads (the `Your Share` figure and the load's detail window) and the Load Reports download, for a lease month, in place of the per-load share. | **Awaiting approval** |
 
 ### 17.2 The statement PDF for a lease month (`lib/payout-statement.js`)
 
-Same document as §12. A split month's statement is unchanged, word for word.
+Same document as §12. A split month's statement is unchanged, word for word; only its dates are corrected (§12, *Dates corrected*).
 
 | Flag | Exact text | Where / when | Status |
 |---|---|---|---|
