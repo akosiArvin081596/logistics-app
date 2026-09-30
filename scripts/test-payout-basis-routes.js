@@ -68,6 +68,7 @@ try {
 }
 const investorPaymentTerms = require(path.join(ROOT, "lib", "investor-payment-terms.js"));
 const investorPayoutBasis = require(BASIS_PATH);
+const leasePayoutText = require(path.join(ROOT, "lib", "lease-payout-text.js"));
 
 // ── lifting ─────────────────────────────────────────────────────────────────
 const count = (needle, src = SRC) => src.split(needle).length - 1;
@@ -455,7 +456,7 @@ const LEASE_2000 = { type: "lease", leaseAmountCents: 200000, details: "" };
 				getJobTrackingCached: async () => ({ headers: HEADERS, data: ROWS }), excludeDroppedLoads: (d) => d,
 				getCarrierDBFromSQLite: () => ({ headers: ["Driver", "Carrier"], data: [] }), getInvestorDriverSet: () => new Set(["driver a"]),
 				logAudit: () => {}, resolveCityState: (r, kind) => kind, getWeekRange: () => { throw new Error("monthly only"); },
-				investorPayoutBasis,
+				investorPayoutBasis, leasePayoutText,
 				payoutBasisContext: (ownerId) => ({ enabled, rows: [{ effective_month: "2026-09", basis_type: "lease", lease_amount_cents: 200000 }], trucks: [{ in_service_date: "2026-01-01" }], settings: investorPayoutBasis.DEFAULT_SETTINGS, ownerId }),
 			};
 			new Function(...Object.keys(deps), `${helpers}\n${route}`)(...Object.values(deps));
@@ -466,7 +467,8 @@ const LEASE_2000 = { type: "lease", leaseAmountCents: 200000, details: "" };
 			const cells = (line) => [...line.matchAll(/"((?:[^"]|"")*)"/g)].map((m) => m[1].replace(/""/g, "\""));
 			return out.csv.trim().split("\r\n").slice(1).map(cells).map((c) => [c[3], c[c.length - 1]]);
 		};
-		const L10 = investorPayoutBasis.LEASE_TEXT.PER_LOAD_SHARE;
+		const L10 = leasePayoutText.LEASE_TEXT.PER_LOAD_SHARE;
+		eq(L10, "Paid as a fixed monthly lease, so there is no per-load share.", "§7b the per-load wording (L10), verbatim");
 		eq(await csvFor(true), [["901", L10], ["802", "250"], ["801", "750"]], "§7b flag on: the lease month prints the lease wording, the split month its shares");
 		eq(await csvFor(false), [["901", "2000"], ["802", "250"], ["801", "750"]], "§7b flag off: every month's shares, as before");
 	}

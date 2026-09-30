@@ -63,6 +63,7 @@ const { renderPolicy, safeSignatureImage } = require("./lib/policy-renderer");
 const investorPaymentTerms = require("./lib/investor-payment-terms");
 const investorReportOptions = require("./lib/investor-report-options");
 const investorPayoutBasis = require("./lib/investor-payout-basis");
+const leasePayoutText = require("./lib/lease-payout-text");
 const { renderHtmlToPdf } = require("./lib/pdf-browser");
 const { getStateFromCoords } = require("./lib/ifta-states");
 const routemate = require("./lib/routemate-client");
@@ -43215,7 +43216,7 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 		const periodNet = (p) => (Object.prototype.hasOwnProperty.call(netByMonth, p.key) ? netByMonth[p.key] : null);
 		// A month paid as a fixed monthly lease has no per-load share: the lease is
 		// not a share of anything, so the CSV and the PDF print the lease wording
-		// (investorPayoutBasis.LEASE_TEXT.PER_LOAD_SHARE) where a share would go.
+		// (leasePayoutText.LEASE_TEXT.PER_LOAD_SHARE) where a share would go.
 		// Weekly periods carry no share either way.
 		const loadReportBasis = payoutBasisContext(investorOwnerId);
 		const periodIsLease = (p) => period === "monthly" && !!investorPayoutBasis.leaseBasisForMonth(loadReportBasis, p.key);
@@ -43263,7 +43264,7 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 				const shares = lease ? {} : allocateNet(p.loads, periodNet(p));
 				for (const l of p.loads) {
 					const ns = Object.prototype.hasOwnProperty.call(shares, l.loadId) ? shares[l.loadId] : null;
-					const shareCell = lease ? investorPayoutBasis.LEASE_TEXT.PER_LOAD_SHARE : (ns == null ? "" : ns);
+					const shareCell = lease ? leasePayoutText.LEASE_TEXT.PER_LOAD_SHARE : (ns == null ? "" : ns);
 					lines.push([p.label, p.start, p.end, l.loadId, l.status, l.pickup, l.dropoff, l.truck, l.driver, l.pickupDate, l.dropDate, l.rate, l.completed ? "Yes" : "No", shareCell]);
 				}
 			}
@@ -43324,7 +43325,7 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 			// In-transit loads are listed in the rows below but earn nothing yet.
 			const transitTxt = p.inTransitCount ? ` (+${p.inTransitCount} in transit)` : "";
 			doc.font("Helvetica").fontSize(9).fillColor("#475569").text(`${p.completedCount} delivered${transitTxt}   ·   Gross ${money(p.grossRevenue)}${shareTxt}`, L);
-			if (lease) doc.fontSize(8).fillColor("#64748b").text(investorPayoutBasis.LEASE_TEXT.PER_LOAD_SHARE, L);
+			if (lease) doc.fontSize(8).fillColor("#64748b").text(leasePayoutText.LEASE_TEXT.PER_LOAD_SHARE, L);
 			doc.moveDown(0.4);
 			row({ load: "LOAD", status: "STATUS", route: "ROUTE", rate: "RATE", share: "YOUR SHARE" }, { color: "#94a3b8", size: 7, bold: true });
 			if (!p.loads.length) { doc.fontSize(8).fillColor("#94a3b8").text("No loads in this period.", L); continue; }
@@ -49876,14 +49877,19 @@ function summarizeReportPayout(entries, range) {
 	}
 	const current = inRange.find((e) => e.inProgress);
 	// The lease stretches in the range: a new one wherever a lease month follows a
-	// split month or a lease of another amount. Absent when no month in range is
-	// a lease, so a split investor's summary is exactly what it was.
+	// split month or a lease of another amount. A stretch that a split month ends
+	// records its last month (`untilMonth`), so the note does not read as if the
+	// lease ran on. Absent when no month in range is a lease, so a split
+	// investor's summary is exactly what it was.
 	const leaseSegments = [];
 	let prevLease = null;
+	let prevMonth = null;
 	for (const e of inRange) {
 		const lease = e.payoutBasis && e.payoutBasis.type === "lease" ? e.payoutBasis.leaseAmount : null;
 		if (lease !== null && lease !== prevLease) leaseSegments.push({ month: e.month, leaseAmount: lease });
+		if (lease === null && prevLease !== null) leaseSegments[leaseSegments.length - 1].untilMonth = prevMonth;
 		prevLease = lease;
+		prevMonth = e.month;
 	}
 	return {
 		payout: Math.round(payout),
@@ -49945,14 +49951,18 @@ function reportPayoutNote(summary, { fleet = false, range = null, rangeMode = in
 	};
 	sentences.push(fill(fleet ? T.FLEET : T.INVESTOR, { span: span(periodLabel(months[0]), periodLabel(months[months.length - 1])) }));
 	// A lease is not a share of net profit, and the note says so: one sentence
-	// when the whole range is one lease, else one from each month a lease starts.
+	// when the whole range is one lease, else one for each stretch of lease months:
+	// from the month it starts, or over its months when a split month ends it.
 	const lease = summary.lease;
 	if (lease) {
 		if (lease.everyMonth && lease.segments.length === 1) {
 			sentences.push(fill(T.LEASE, { amount: investorPayoutBasis.formatLeaseAmount(lease.segments[0].leaseAmount) }));
 		} else {
 			for (const seg of lease.segments) {
-				sentences.push(fill(T.LEASE_FROM, { month: periodLabel(seg.month), amount: investorPayoutBasis.formatLeaseAmount(seg.leaseAmount) }));
+				const amount = investorPayoutBasis.formatLeaseAmount(seg.leaseAmount);
+				sentences.push(seg.untilMonth
+					? fill(T.LEASE_DURING, { span: span(periodLabel(seg.month), periodLabel(seg.untilMonth)), amount })
+					: fill(T.LEASE_FROM, { month: periodLabel(seg.month), amount }));
 			}
 		}
 	}
@@ -51586,9 +51596,11 @@ app.get("/api/investor/payouts/:period/detail", requireRole("Super Admin", "Inve
 //     preferCSSPageSize, the fonts.ready wait, and the Chromium launch args
 //     (--font-render-hinting, and the darwin --disable-gpu branch). Every one
 //     of those changes the rendered bytes, so rendering counts as template.
+//   • lib/lease-payout-text.js — the lease sentences a lease month's statement
+//     prints, which payout-statement.js takes from there.
 //
 // ⚠️ WHAT THIS HASH CANNOT SEE, which is what STATEMENT_TEMPLATE_VERSION is
-// still for: anything outside these three files. A Puppeteer/Chromium upgrade
+// still for: anything outside these four files. A Puppeteer/Chromium upgrade
 // re-rasterizes glyphs with no diff in lib/; a Google Fonts change upstream
 // arrives with no diff anywhere; a bad batch needs a forced re-render for
 // operational reasons. Hashing package-lock.json was considered and REJECTED —
@@ -51599,6 +51611,7 @@ const STATEMENT_TEMPLATE_FILES = [
 	"./lib/payout-statement.js",
 	"./lib/broker-invoice.js",
 	"./lib/pdf-browser.js",
+	"./lib/lease-payout-text.js",
 ];
 
 // Computed ONCE, here, at module load — never per request. require.resolve so a

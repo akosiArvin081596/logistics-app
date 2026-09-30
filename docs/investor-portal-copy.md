@@ -514,7 +514,7 @@ Error messages are normally not listed here (see "Not listed" at the top). These
 
 ### 17.1 The shared wording, and where each line appears
 
-The same sentence is used on every surface that says the same thing, so the portal, the statement and the report cannot disagree. The portal build places the portal lines; check each placement on staging.
+The same sentence is used on every surface that says the same thing, so the portal, the statement and the report cannot disagree. The portal build places the portal lines; check each placement on staging. In the code, L1–L10 have one home on the server (`lib/lease-payout-text.js`) and one on the portal (`client/src/lib/leasePayoutText.js`); the report's copies of L8–L9 and the portal's copy are checked against it on every build, so a reworded line has to change in all of them.
 
 | # | Flag | Exact text | Where / when | Status |
 |---|---|---|---|---|
@@ -526,12 +526,13 @@ The same sentence is used on every surface that says the same thing, so the port
 | L6 | 🔴 | `No lease payment is owed for this month: no truck was in service under your lease.` | Same places, on a month no truck of the investor's was in service, e.g. every truck retired or not yet delivered. | **Awaiting approval** |
 | L7 | 🔴 | `A month your truck runs at a loss still pays the full lease. Losses are not carried forward against your lease.` | Portal (Earnings, Payouts): a lease month that ran at a loss, where a split month shows its loss carry-forward rows (§2, §9, §11). Statement PDF: under the truck's net profit, only on a loss month that paid the full lease; next to a proration or a $0 month, "still pays the full lease" would contradict the line above it. | **Awaiting approval** |
 | L8 | 🔴 | `Your payout is a fixed monthly lease of {amount}, not a share of net profit.` | Report PDF: the grey line under the Income Statement (§16.1), when every month in the report is paid as a lease. | **Awaiting approval** |
-| L8b | 🔴 | `From {month}, your payout is a fixed monthly lease of {amount}, not a share of net profit.` | Same line, when the lease starts partway through the report; `{month}` is its first lease month. | **Awaiting approval** |
+| L8b | 🔴 | `From {month}, your payout is a fixed monthly lease of {amount}, not a share of net profit.` | Same line, when the lease starts partway through the report and runs to its end; `{month}` is its first lease month. | **Awaiting approval** |
+| L8c | 🔴 | `For {span}, your payout is a fixed monthly lease of {amount}, not a share of net profit.` | Same line, for lease months that split months follow in the report, so the sentence does not read as if the lease ran on; `{span}` is those months (`June 2026` or `June 2026 – July 2026`). | **Awaiting approval** |
 | L9 | ⚪ | `Investor Payout (fixed monthly lease)` | Report PDF: the payout row of the Income Statement (today `Investor Payout (50%)`), when every month in the report is paid as a lease. | **Awaiting approval** |
 | — | ⚪ | `Investor Payout` | Same row, when the report covers split months and lease months. | **Awaiting approval** |
 | — | ⚪ | `Owner Earnings (fixed monthly lease)` | Report PDF: the same figure's label beside Net Cash Flow under Cash Flow & Projections (today `Owner Earnings (50%)`), when every month in the report is paid as a lease. | **Awaiting approval** |
 | — | ⚪ | `Owner Earnings` | Same label, when the report covers split months and lease months. | **Awaiting approval** |
-| L10 | 🔴 | `Paid as a fixed monthly lease, so there is no per-load share.` | Portal My Loads (the `Your Share` figure and the load's detail window) and the Load Reports download, for a lease month, in place of the per-load share. | **Awaiting approval** |
+| L10 | 🔴 | `Paid as a fixed monthly lease, so there is no per-load share.` | Portal My Loads (the `Your Share` figure and the load's detail window) and the Load Reports download (its CSV share column and its PDF, printed by the server), for a lease month, in place of the per-load share. | **Awaiting approval** |
 
 ### 17.2 The statement PDF for a lease month (`lib/payout-statement.js`)
 

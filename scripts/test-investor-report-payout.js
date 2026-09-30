@@ -406,6 +406,26 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 		const fleet = N(S({ from: "2026-05", until: "2026-05" }), { fleet: true });
 		ok(fleet.includes("fleet-wide monthly investor shares for May 2026") && !fleet.includes("Payouts page"), "the fleet note does not point at an investor's Payouts page");
 
+		// A lease sentence per stretch of lease months. A stretch a split month
+		// follows names its months, so it does not read as running on.
+		const lease = (amount) => ({ type: "lease", leaseAmount: amount });
+		const basisNote = (bases) => {
+			const es = bases.map((b, i) => ({ month: `2026-0${i + 5}`, payout: 0, driverPay: 0, fixedCosts: 0, ...(b ? { payoutBasis: b } : {}) }));
+			return N(W.fns.summarizeReportPayout(es, { from: "", until: "" })).replace(/^Investor Payout is the total[^.]*\. ?/, "");
+		};
+		eq(basisNote([null, null]), "", "no lease month: no lease sentence (a split investor's note is unchanged)");
+		eq(basisNote([lease(2000), lease(2000)]), "Your payout is a fixed monthly lease of $2,000, not a share of net profit.", "every month one lease: NOTE.LEASE");
+		eq(basisNote([null, lease(2000), lease(2000)]), "From June 2026, your payout is a fixed monthly lease of $2,000, not a share of net profit.",
+			"split, then a lease to the end of the range: NOTE.LEASE_FROM");
+		eq(basisNote([lease(2000), lease(2000), null]), "For May 2026 – June 2026, your payout is a fixed monthly lease of $2,000, not a share of net profit.",
+			"a lease, then back to split: NOTE.LEASE_DURING names the lease months");
+		eq(basisNote([null, lease(2000), null, lease(2500)]),
+			"For June 2026, your payout is a fixed monthly lease of $2,000, not a share of net profit. From August 2026, your payout is a fixed monthly lease of $2,500, not a share of net profit.",
+			"one lease month between splits names that month, and a later lease runs from its start");
+		eq(basisNote([lease(2000), lease(2500)]),
+			"From May 2026, your payout is a fixed monthly lease of $2,000, not a share of net profit. From June 2026, your payout is a fixed monthly lease of $2,500, not a share of net profit.",
+			"a lease followed by a new amount keeps NOTE.LEASE_FROM for each");
+
 		// The sentences from before 2026-09-30 moved into NOTE word for word: the
 		// text below is what reportPayoutNote() printed at d8a4a64, typed out.
 		const T = investorReportOptions.NOTE;

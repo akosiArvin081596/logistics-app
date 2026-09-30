@@ -251,8 +251,9 @@ console.log("\n§4 the statement's two halves are frozen together");
 {
 	// The real June row: frozen share $8,790, frozen settled amount $8,703, so the
 	// carry applied at close was $87. `drifted` in lib/payout-statement.js is
-	// computed as monthShare − lossCarriedIn vs amount, so it is the page's own
-	// does-this-add-up test and the right thing to assert on.
+	// computed as monthShare − lossCarriedIn + lossDeferred (a loss month's own
+	// loss carried forward) vs amount, so it is the page's own does-this-add-up
+	// test and the right thing to assert on.
 	const frozen = {
 		revenue: 35161.76, driverPay: 9000, fixedCosts: 6149.16, tripExpenses: 2431.72,
 		maintFundCost: 0, complianceCost: 0, netProfit: 17580.88, splitPct: 50, monthShare: 8790,

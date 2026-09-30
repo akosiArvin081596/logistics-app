@@ -421,6 +421,11 @@ section("§4 the lease texts");
 	const T = S.LEASE_TEXT;
 	eq([T.EXPLAIN, T.REASON.prorated, T.REASON.downtime, T.REASON.not_in_service, T.LOSS_MONTH],
 		[CANONICAL.L3, CANONICAL.L4, CANONICAL.L5, CANONICAL.L6, CANONICAL.L7], "L3–L7 are the shared wording, verbatim");
+	// …taken from their one home, lib/lease-payout-text.js, not typed out again here.
+	const SHARED = require(path.join(__dirname, "..", "lib", "lease-payout-text.js")).LEASE_TEXT;
+	ok(T.REASON === SHARED.REASON && T.EXPLAIN === SHARED.EXPLAIN && T.LOSS_MONTH === SHARED.LOSS_MONTH,
+		"L3–L7 are lib/lease-payout-text.js's own texts");
+	ok(Object.values(CANONICAL).every((t) => !MODULE_SRC.includes(t)), "payout-statement.js keeps no copy of L3–L7");
 	eq([T.HEADING, T.LEASE_LINE, T.PAID_LINE, T.RESULT_HEADING],
 		["How your payment is calculated", "Fixed monthly lease payment", "Lease payment for {period}", "Your truck's revenue and costs"], "the statement's own lease labels");
 	const placeholders = (t) => [...t.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort();

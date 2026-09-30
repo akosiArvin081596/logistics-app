@@ -332,7 +332,7 @@ section("§8 the idle predicate, the first month, the audit line, the dollars");
 	eq(B.describeSchedule([]), "no basis rows (split at the Split %)", "§8 the audit line with no rows");
 	eq([B.formatLeaseAmount(2000), B.formatLeaseAmount(100000), B.formatLeaseAmount(1), B.formatLeaseAmount(1234567)], ["$2,000", "$100,000", "$1", "$1,234,567"], "§8 whole dollars, grouped");
 	eq([B.addMonths("2026-11", 2), B.addMonths("2026-01", -1), B.daysInMonth("2026-02"), B.daysInMonth("2026-12")], ["2027-01", "2025-12", 28, 31], "§8 month arithmetic");
-	eq(B.LEASE_TEXT.PER_LOAD_SHARE, "Paid as a fixed monthly lease, so there is no per-load share.", "§8 the per-load wording, verbatim");
+	ok(!Object.prototype.hasOwnProperty.call(B, "LEASE_TEXT"), "§8 no investor-facing wording here: lib/lease-payout-text.js is its one home");
 }
 
 // ============================================================ §9 mutants

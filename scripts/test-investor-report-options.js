@@ -200,7 +200,7 @@ section("§4 texts, fill(), and how the server reads the module");
 		RANGE_WHOLE_MONTHS: ["span"], RANGE_WHOLE_MONTHS_FLEET: ["span"], RANGE_EXACT_DATES: [], NO_MONTHS: [],
 		INVESTOR: ["span"], FLEET: ["span"], IN_PROGRESS: ["month"], CARRIED: [], SETTLED_DIFFERS_ONE: ["months"],
 		SETTLED_DIFFERS_MANY: ["months"], CORRECTED: ["months"], SPAN: ["first", "last"], SPAN_FROM: ["first"], SPAN_UNTIL: ["last"],
-		LEASE: ["amount"], LEASE_FROM: ["amount", "month"],
+		LEASE: ["amount"], LEASE_FROM: ["amount", "month"], LEASE_DURING: ["amount", "span"],
 	};
 	eq(Object.keys(O.NOTE).sort(), Object.keys(WANT).sort(), "NOTE holds exactly the note's templates");
 	for (const [k, want] of Object.entries(WANT)) eq(placeholders(O.NOTE[k]), want, `NOTE.${k} takes ${want.length ? want.join(", ") : "no value"}`);
@@ -226,18 +226,26 @@ section("§4 texts, fill(), and how the server reads the module");
 	}
 	eq([O.OWNER_EARNINGS_LABEL.LEASE, O.OWNER_EARNINGS_LABEL.MIXED], ["Owner Earnings (fixed monthly lease)", "Owner Earnings"], "OWNER_EARNINGS_LABEL.LEASE and MIXED");
 	eq(Object.keys(O.OWNER_EARNINGS_LABEL), Object.keys(O.PAYOUT_LABEL), "…the same keys as PAYOUT_LABEL, so one choice picks both labels");
-	eq([O.NOTE.LEASE, O.NOTE.LEASE_FROM], [
+	eq([O.NOTE.LEASE, O.NOTE.LEASE_FROM, O.NOTE.LEASE_DURING], [
 		"Your payout is a fixed monthly lease of {amount}, not a share of net profit.",
 		"From {month}, your payout is a fixed monthly lease of {amount}, not a share of net profit.",
-	], "NOTE.LEASE and NOTE.LEASE_FROM are the shared wording L8 and L8b, verbatim");
+		"For {span}, your payout is a fixed monthly lease of {amount}, not a share of net profit.",
+	], "NOTE.LEASE, LEASE_FROM and LEASE_DURING are the shared wording L8, L8b and L8c, verbatim");
 	eq(O.fill(O.NOTE.LEASE_FROM, { month: "September 2026", amount: "$2,000" }),
 		"From September 2026, your payout is a fixed monthly lease of $2,000, not a share of net profit.", "NOTE.LEASE_FROM, filled");
+	// This module loads nothing, so it keeps copies of the shared lease wording;
+	// lib/lease-payout-text.js is their one home, and they must not drift from it.
+	const SHARED = require(path.join(__dirname, "..", "lib", "lease-payout-text.js")).LEASE_TEXT;
+	eq([O.PAYOUT_LABEL.LEASE, O.NOTE.LEASE, O.NOTE.LEASE_FROM, O.NOTE.LEASE_DURING],
+		[SHARED.REPORT_LABEL, SHARED.REPORT_NOTE, SHARED.REPORT_NOTE_FROM, SHARED.REPORT_NOTE_DURING],
+		"PAYOUT_LABEL.LEASE and the NOTE lease sentences equal lib/lease-payout-text.js, character for character");
+	ok(!/\brequire\(/.test(MODULE_SRC.replace(/^\s*\/\/.*$/gm, "")), "the module still loads nothing (so it keeps copies)");
 	const DOC = fs.readFileSync(path.join(__dirname, "..", "docs", "investor-portal-copy.md"), "utf8");
 	const s17 = DOC.slice(DOC.indexOf("\n## 17. "), DOC.indexOf("\n## ", DOC.indexOf("\n## 17. ") + 5));
 	for (const [k, v] of Object.entries({
 		"PAYOUT_LABEL.LEASE": O.PAYOUT_LABEL.LEASE, "PAYOUT_LABEL.MIXED": O.PAYOUT_LABEL.MIXED,
 		"OWNER_EARNINGS_LABEL.LEASE": O.OWNER_EARNINGS_LABEL.LEASE, "OWNER_EARNINGS_LABEL.MIXED": O.OWNER_EARNINGS_LABEL.MIXED,
-		"NOTE.LEASE": O.NOTE.LEASE, "NOTE.LEASE_FROM": O.NOTE.LEASE_FROM,
+		"NOTE.LEASE": O.NOTE.LEASE, "NOTE.LEASE_FROM": O.NOTE.LEASE_FROM, "NOTE.LEASE_DURING": O.NOTE.LEASE_DURING,
 	})) {
 		ok(s17.length > 100 && s17.includes("`" + v + "`"), `docs/investor-portal-copy.md §17 lists ${k} verbatim`);
 	}
