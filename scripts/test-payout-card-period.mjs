@@ -37,6 +37,7 @@
 //
 //   node scripts/test-payout-card-period.mjs      # exits 1 on any failure
 
+import fs from 'fs'
 import path from 'path'
 import { fileURLToPath, pathToFileURL } from 'url'
 
@@ -606,6 +607,74 @@ check('the same carry on a split month still counts',
 // --- 8d. Junk -----------------------------------------------------------------
 check('a negative carry figure is not a carry', carryOf(900, { amount: 900, lossCarriedIn: -50, lossDeferred: -20 }).composed, 900)
 check('no breakdown, no row: finite zeros, no throw', settledCarryTerms(undefined, undefined), { share: 0, carriedIn: 0, deferred: 0, composed: 0, drifted: false })
+
+// ===========================================================================
+// 9. THE MAINTENANCE FUND AND COMPLIANCE COST — extraCostsOf().
+//
+//    Both come out of every month's netProfit. A month's "How Your Earnings Are
+//    Calculated" and "Net Profit Explained" dialogs listed only driver pay, fixed
+//    costs and trip expenses, so a month charged either cost printed a
+//    `Revenue − … = Net Profit` line that did not add up. The rows appear only
+//    once a cost has been charged: while both are $0 (every investor today)
+//    each dialog reads exactly as before, which is the paired case. The month's
+//    dialogs pass a list of one; the all-time Expenses dialog passes every month.
+// ===========================================================================
+const { extraCostsOf } = mod
+const MAINT = { key: 'maintFund', label: 'Maintenance Fund', phrase: 'maintenance fund' }
+const COMPLIANCE = { key: 'compliance', label: 'Compliance / IFTA', phrase: 'compliance' }
+
+check('no months: nothing listed', extraCostsOf([]), [])
+check('not a list: nothing listed, no throw', extraCostsOf(undefined), [])
+check('no month selected (a list of one null): nothing listed, no throw', extraCostsOf([null]), [])
+// PAIRED: the case every investor is in today.
+check('both costs $0: nothing listed, so every dialog reads as before',
+  extraCostsOf([{ maintFundCost: 0, complianceCost: 0 }, {}]), [])
+check('a month charged a maintenance fund only: that row alone',
+  extraCostsOf([{ maintFundCost: 120, complianceCost: 0 }]), [{ ...MAINT, value: 120 }])
+check('a month charged a compliance cost only: that row alone',
+  extraCostsOf([{ complianceCost: 45 }]), [{ ...COMPLIANCE, value: 45 }])
+check('both: the maintenance fund first, then compliance, as the waterfall prints them',
+  extraCostsOf([{ maintFundCost: 120, complianceCost: 45 }]), [{ ...MAINT, value: 120 }, { ...COMPLIANCE, value: 45 }])
+check('all-time: each cost summed across the months',
+  extraCostsOf([{ maintFundCost: 100 }, { maintFundCost: 20, complianceCost: 45 }, {}]).map((c) => [c.key, c.value]),
+  [['maintFund', 120], ['compliance', 45]])
+check('junk figures count as $0, never NaN',
+  extraCostsOf([{ maintFundCost: 'abc', complianceCost: NaN }, { maintFundCost: '30' }]).map((c) => [c.key, c.value]),
+  [['maintFund', 30]])
+
+// What the rows are for: the printed line closes on the month's own netProfit.
+const CHARGED = { revenue: 4715, driverPay: 1250, fixedCosts: 0, tripExpenses: 0, maintFundCost: 120, complianceCost: 45, netProfit: 3300 }
+const printedNet = (m, extras) => extras.reduce((s, c) => s - c.value, m.revenue - m.driverPay - m.fixedCosts - m.tripExpenses)
+check('a month charged both: revenue − every listed cost = its Net Profit', printedNet(CHARGED, extraCostsOf([CHARGED])), CHARGED.netProfit)
+check('(control) the three-cost line the dialogs printed reads $3,465, not the month\'s $3,300',
+  printedNet(CHARGED, []), 3465)
+
+// ===========================================================================
+// 10. ALL-TIME "YOUR EARNINGS" IS THE SUM OF THE MONTHS, NEVER NET × SPLIT.
+//
+//    Each month's share is rounded on its own (Math.round(netProfit × split),
+//    lib/investor-payout-basis.js), and investorNetToDate adds those up (§5):
+//    Cash Flow's "Your Earnings (to date)" and the payouts ledger show that sum.
+//    The Earnings tile multiplied the all-time net by the split and rounded
+//    once, so the two sat a dollar apart on one page ($7,644 vs $7,645). The
+//    figures below are that difference in miniature; the source checks pin
+//    which figure the tile and its dialog read (EarningsSection.vue).
+// ===========================================================================
+const NETS = [1001, 1001, 1001]
+check('each month\'s 50% share rounded on its own, then summed: $1,503',
+  NETS.map((n) => Math.round(n * 0.5)).reduce((s, x) => s + x, 0), 1503)
+check('(control) the all-time net × 50%, rounded once: $1,502, a dollar apart',
+  Math.round(NETS.reduce((s, x) => s + x, 0) * 0.5), 1502)
+
+const SFC = fs.readFileSync(path.join(__dirname, '..', 'client', 'src', 'components', 'investor', 'EarningsSection.vue'), 'utf8')
+const allTimeExpr = (SFC.match(/const allTimeEarnings = computed\(\(\) => ([^\n]+)/) || [])[1] || ''
+check('the all-time figure is findable', allTimeExpr !== '', true)
+check('the all-time figure reads investorNetToDate', /production\?\.investorNetToDate/.test(allTimeExpr), true)
+check('the all-time figure never multiplies the all-time net by the split', /allTimeNet|investorSplitPct/.test(allTimeExpr), false)
+check('the tile\'s formula line names the sum, as Cash Flow\'s does',
+  SFC.includes('<span class="alltime-formula">= sum(monthly investor earnings)</span>'), true)
+check('no "= net × N%" formula line survives under the tile', /alltime-formula">= net ×/.test(SFC), false)
+check('the all-time dialog prints no net × split sum', SFC.includes('fmt(allTimeNet) }} × {{ investorSplitPct }}%'), false)
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)
