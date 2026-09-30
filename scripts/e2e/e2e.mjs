@@ -111,11 +111,13 @@
 //      against an investor or truck, only by its owner · F3 the admin fund and fuel
 //      targets read the global config, not an investor's own row (planted)
 //   F4 the investor detail modal survives an investors:changed refresh · F5 a record
-//      with no application says so · F6 an acceptance that would collide (the same
-//      company name, an email already on an account) is refused with a code and the
-//      application is not left Accepted · F7 "Accepted" asks first; a refused
-//      acceptance puts the select back and shows the server's reason; a removed
-//      application's status change is refused · F8 a duplicate investor record
+//      with no application says so · F6 an acceptance that would take another
+//      record's company name is refused with a code and the application is not left
+//      Accepted; one whose email is already an account's is Accepted and creates
+//      nothing (200 accountCreated:false, audited) · F7 "Accepted" asks first; a
+//      refused acceptance puts the select back and shows the server's reason; a
+//      removed application's status change is refused; an acceptance over an
+//      existing account shows the server's message on the page · F8 a duplicate investor record
 //      answers 409 with a code · F9 a preview of a user id that is no investor
 //      renders a "not found" card, no portal (the API answers 404)
 //   F10 Admin Tools shows the stored global split; the investor's "Your share" note
@@ -8705,6 +8707,7 @@ async function investorFixesSection() {
       })
 
     // ---- F6: acceptances that collide
+    const statusOf = (k) => q1('SELECT status FROM investor_applications WHERE id = ?', st.apps[k])?.status
     const acceptCase = async (k, what) => {
       if (!st.apps[k]) throw skip(`application ${k} was not created`)
       const r = await api(sa, 'PUT', `/api/investor-applications/${st.apps[k]}/status`, { status: 'Accepted' })
@@ -8721,14 +8724,52 @@ async function investorFixesSection() {
     }
     await step('F6a', 'Super Admin accepts QA-TEST application Q, whose company name is the same as the already accepted P (PUT …/status, page fetch)',
       '409 with a code; Q not left Accepted; no account, investor record or truck made for it', sa, 'f6a-accept-same-name', () => acceptCase('Q', 'same company name as P'))
+    // What an acceptance may create, counted whole-table in the copy (this private server
+    // has no other writer), and the audit rows written for application k since a mark.
+    const madeCounts = () => ({
+      users: q1('SELECT COUNT(*) AS n FROM users').n,
+      investors: q1('SELECT COUNT(*) AS n FROM investors').n,
+      trucks: q1('SELECT COUNT(*) AS n FROM trucks').n,
+    })
+    const countsText = (c) => `${c.users} users, ${c.investors} investors rows, ${c.trucks} trucks`
+    const sameCounts = (a, b) => a.users === b.users && a.investors === b.investors && a.trucks === b.trucks
+    const auditMark = () => q1('SELECT COALESCE(MAX(id), 0) AS m FROM audit_trail').m
+    const auditRowsFor = (k, since, action) => qa('SELECT id FROM audit_trail WHERE id > ? AND action = ? AND entity = ? AND entity_id = ?', since, action, 'investor_application', String(st.apps[k]))
+    // The server's own words for an acceptance over an existing account.
+    const existingAccountMsg = (userId) => new RegExp(`^Accepted\\. An account with this email already exists \\(Investor #${userId}\\), so no new account, investor record or trucks were created\\.$`)
+    // F6b / F7d: C is the application whose email is QA-TEST account A's. Its
+    // acceptance answers 200 accountCreated:false and creates nothing; F7d puts C back
+    // at the status it had before F6b so the UI can pick "Accepted" again.
     await step('F6b', 'Super Admin accepts QA-TEST application C, whose applicant email is QA-TEST account A\'s (PUT …/status, page fetch)',
-      '409 with a code; C not left Accepted', sa, 'f6b-accept-email-taken', async () => {
-        const r = await acceptCase('C', 'email already on an account')
+      '200 { success: true, accountCreated: false, existingUserId: A\'s id } with the server\'s "no new account … were created" message; C Accepted; no user, investors row or truck created (whole-table counts in the copy unchanged); one accept_investor_existing_account audit row for C', sa, 'f6b-accept-email-taken', async () => {
+        if (!st.apps.C) throw skip('application C was not created')
+        st.cStatus0 = statusOf('C')
+        const before = madeCounts()
+        const mark = auditMark()
+        const r = await api(sa, 'PUT', `/api/investor-applications/${st.apps.C}/status`, { status: 'Accepted' })
+        const after = madeCounts()
+        const made = trackApp('C')
+        const status = statusOf('C')
+        const audits = auditRowsFor('C', mark, 'accept_investor_existing_account')
+        const aId = st.users.A?.id
+        const msg = String(r.json?.message || '')
+        const msgOk = existingAccountMsg(aId).test(msg)
+        await caption(sa, `Step F6 — accept application C (its email is QA-TEST account A's): ${codeOf(r)}; accountCreated ${r.json?.accountCreated}; C now ${status}; counts ${sameCounts(before, after) ? 'unchanged' : 'CHANGED'}`)
         await sa.goto(`${BASE_URL}/investor-applications`)
         await appRow(sa, EMAIL('P')).waitFor({ state: 'visible', timeout: 30000 })
         await caption(sa, 'Step F6 — /investor-applications after the three acceptances (P, Q, C)')
-        await evidence(sa, ['F6 — application statuses in the copy', ...['P', 'Q', 'C'].map((k) => `${k}: ${q1('SELECT status FROM investor_applications WHERE id = ?', st.apps[k])?.status}`)])
-        return r
+        await evidence(sa, [`F6b — Super Admin, page fetch: PUT /api/investor-applications/${st.apps.C}/status {"status":"Accepted"}`,
+          `→ ${codeOf(r)} accountCreated: ${r.json?.accountCreated}; existingUserId: ${r.json?.existingUserId} (A is #${aId})`,
+          `message: "${msg}"`, `copy: ${countsText(before)} → ${countsText(after)}`, `accept_investor_existing_account rows for C: ${audits.length}`,
+          'application statuses in the copy', ...['P', 'Q', 'C'].map((k) => `${k}: ${statusOf(k)}`)])
+        return {
+          observed: `→ ${codeOf(r)}${r.status !== 200 ? errOf(r) : ''}; success: ${r.json?.success}; accountCreated: ${r.json?.accountCreated}; existingUserId: ${r.json?.existingUserId} (account A is #${aId}); message: "${msg.slice(0, 200)}" (the expected wording: ${msgOk}); ` +
+            `application C "${st.cStatus0}" → "${status}"; the copy: ${countsText(before)} before, ${countsText(after)} after; ` +
+            `created for C: ${made.users.length} account(s), ${made.investors.length} investor record(s), ${made.trucks.length} truck(s); accept_investor_existing_account audit rows for C: ${audits.length}. ` +
+            '(Mail is blanked on this server, so "no email" is not observable here.)',
+          verdict: verdict(r.status === 200 && r.json?.success === true && r.json?.accountCreated === false && Number(r.json?.existingUserId) === aId && msgOk &&
+            status === 'Accepted' && sameCounts(before, after) && !made.users.length && !made.investors.length && !made.trucks.length && audits.length === 1),
+        }
       })
 
     // ---- F12b: "Docs x/3"
@@ -8778,30 +8819,32 @@ async function investorFixesSection() {
       })
 
     // ---- F7b: a refused save puts the select back (on a row that stays listed)
-    // C's email is QA-TEST account A's, so its acceptance is refused (F6b showed it
-    // through the API, which changes nothing: C is still at its stored status here).
-    // The refusal re-reads the list, and C stays in it, so the select can be read back.
-    const statusOf = (k) => q1('SELECT status FROM investor_applications WHERE id = ?', st.apps[k])?.status
+    // Q has P's company name, so once P is accepted Q's acceptance is refused 409
+    // INVESTOR_RECORD_CONFLICT (F6a showed it through the API, which changes nothing: Q
+    // is still at its stored status here). The refusal re-reads the list, and Q stays in
+    // it, so the select can be read back.
     // The list's next GET: a refusal re-reads the list, and while it loads the table is
     // not rendered at all, so a row is read again only after that GET has landed.
     const nextListLoad = (page) => page.waitForResponse((r) => pathOf(r.url()) === '/api/investor-applications' && r.request().method() === 'GET', { timeout: 15000 }).then(() => true, () => false)
     const statusAlert = (page, what) => page.locator('[data-test="application-status-error"], [role="alert"]').filter({ hasText: what }).first()
-    await step('F7b', 'Refused save: Super Admin picks "Accepted" in QA-TEST application C\'s row (its email is already QA-TEST account A\'s) and confirms the dialog',
-      'The server refuses it (409 USER_ALREADY_EXISTS); the select goes back to C\'s stored status and the page shows the server\'s message; C\'s row stays listed', sa, 'f7b-refused-reverts', async () => {
-        if (!st.apps.C) throw skip('application C was not created')
-        const stored0 = statusOf('C')
-        if (stored0 === 'Accepted') throw skip('application C is already Accepted (F6b accepted it), so "Accepted" cannot be picked')
+    await step('F7b', 'Refused save: Super Admin picks "Accepted" in QA-TEST application Q\'s row (its company name is already accepted P\'s) and confirms the dialog',
+      'The server refuses it (409 INVESTOR_RECORD_CONFLICT); the select goes back to Q\'s stored status and the page shows the server\'s message; Q\'s row stays listed and nothing is created', sa, 'f7b-refused-reverts', async () => {
+        if (!st.apps.Q) throw skip('application Q was not created')
+        if (!st.apps.P || !q1('SELECT id FROM investors WHERE application_id = ?', st.apps.P)) throw skip('application P has no investor record, so Q\'s company name is not taken')
+        const stored0 = statusOf('Q')
+        if (stored0 === 'Accepted') throw skip('application Q is already Accepted (F6a accepted it), so "Accepted" cannot be picked')
+        const counts0 = madeCounts()
         await sa.goto(`${BASE_URL}/investor-applications`)
-        const row = appRow(sa, emailOf.C)
+        const row = appRow(sa, emailOf.Q)
         await row.waitFor({ state: 'visible', timeout: 30000 })
         await row.scrollIntoViewIfNeeded()
         const select = row.locator('select')
         const before = await select.inputValue()
-        const statusPath = `/api/investor-applications/${st.apps.C}/status`
+        const statusPath = `/api/investor-applications/${st.apps.Q}/status`
         uiProbe('F7b', 'PUT', new RegExp(`^${statusPath}$`))
         const respP = sa.waitForResponse((r) => pathOf(r.url()) === statusPath && r.request().method() === 'PUT', { timeout: 30000 })
         respP.catch(() => {})
-        await caption(sa, 'Step F7b — pick "Accepted" in application C\'s row (C\'s email is already on QA-TEST account A)', false)
+        await caption(sa, 'Step F7b — pick "Accepted" in application Q\'s row (Q\'s company name is already accepted P\'s)', false)
         await select.selectOption('Accepted')
         const dlg = sa.locator('[role="dialog"], [role="alertdialog"]').filter({ hasText: /Accept application/i }).first()
         await dlg.waitFor({ state: 'visible', timeout: 10000 })
@@ -8817,17 +8860,86 @@ async function investorFixesSection() {
         await sa.waitForTimeout(1000)
         const stays = await row.isVisible().catch(() => false)
         const after = stays ? await select.inputValue() : '(row gone)'
-        const stored = statusOf('C')
-        const made = trackApp('C')
+        const stored = statusOf('Q')
+        const made = trackApp('Q')
+        const counts1 = madeCounts()
         const msgShown = !!j?.error && alertText.includes(norm(j.error))
         await row.scrollIntoViewIfNeeded().catch(() => {})
-        await caption(sa, `Step F7b — PUT → ${resp.status()}${j?.code ? ` ${j.code}` : ''}; C's select shows "${after}", the server holds "${stored}"; the server's message shown: ${msgShown}`)
+        await caption(sa, `Step F7b — PUT → ${resp.status()}${j?.code ? ` ${j.code}` : ''}; Q's select shows "${after}", the server holds "${stored}"; the server's message shown: ${msgShown}`)
         const s = await ifxShot(sa, 'f7b-refused-reverts')
         return {
-          observed: `picked "Accepted" (the select read "${before}"), confirmed the dialog; PUT …/status → ${resp.status()}${j?.code ? ` ${j.code}` : ''}; alert: "${alertText.slice(0, 200)}"; toast: "${toast.slice(0, 120)}"; ` +
-            `the server's message shown: ${msgShown}; the list re-read: ${listReloaded}; C's row still listed after it: ${stays}; its select shows "${after}"; stored status "${stored0}" → "${stored}"; ` +
-            `created for C: ${made.users.length} account(s), ${made.investors.length} investor record(s), ${made.trucks.length} truck(s)`,
-          verdict: verdict(resp.status() === 409 && j?.code === 'USER_ALREADY_EXISTS' && msgShown && stays && after === stored && stored === stored0 && !made.users.length && !made.investors.length && !made.trucks.length),
+          observed: `picked "Accepted" (the select read "${before}"), confirmed the dialog; PUT …/status → ${resp.status()}${j?.code ? ` ${j.code}` : ''}; alert: "${alertText.slice(0, 220)}"; toast: "${toast.slice(0, 120)}"; ` +
+            `the server's message shown: ${msgShown}; the list re-read: ${listReloaded}; Q's row still listed after it: ${stays}; its select shows "${after}"; stored status "${stored0}" → "${stored}"; ` +
+            `created for Q: ${made.users.length} account(s), ${made.investors.length} investor record(s), ${made.trucks.length} truck(s); the copy: ${countsText(counts0)} → ${countsText(counts1)}`,
+          verdict: verdict(resp.status() === 409 && j?.code === 'INVESTOR_RECORD_CONFLICT' && msgShown && stays && after === stored && stored === stored0 &&
+            !made.users.length && !made.investors.length && !made.trucks.length && sameCounts(counts0, counts1)),
+          shot: s,
+        }
+      })
+
+    // ---- F7d: an acceptance over an existing account says so on the page
+    // C's email is QA-TEST account A's. F6b accepted C through the API; C is put back at
+    // the status it had before F6b (page fetch), so "Accepted" can be picked in its row.
+    // The server answers 200 accountCreated:false and creates nothing; the page shows its
+    // message in the on-page notice (and a warning toast), and the row reads Accepted.
+    await step('F7d', 'Super Admin picks "Accepted" in QA-TEST application C\'s row (its email is already QA-TEST account A\'s) and confirms the dialog',
+      '200 accountCreated:false; the on-page notice (data-test="application-status-notice") shows the server\'s "no new account … were created" message; C\'s row reads Accepted; no credentials dialog; nothing created; an accept_investor_existing_account audit row for C', sa, 'f7d-accept-existing-account', async () => {
+        if (!st.apps.C) throw skip('application C was not created')
+        const resetTo = st.cStatus0 && st.cStatus0 !== 'Accepted' ? st.cStatus0 : 'New'
+        let resetNote = `C was "${statusOf('C')}"`
+        if (statusOf('C') === 'Accepted') {
+          const r0 = await api(sa, 'PUT', `/api/investor-applications/${st.apps.C}/status`, { status: resetTo })
+          resetNote += `; put back to "${resetTo}" by page fetch → ${codeOf(r0)}`
+          if (r0.status !== 200 || statusOf('C') !== resetTo) throw new Error(`${resetNote}${errOf(r0)}: C could not be put back, so "Accepted" cannot be picked`)
+        }
+        const stored0 = statusOf('C')
+        const counts0 = madeCounts()
+        const mark = auditMark()
+        await sa.goto(`${BASE_URL}/investor-applications`)
+        const row = appRow(sa, emailOf.C)
+        await row.waitFor({ state: 'visible', timeout: 30000 })
+        await row.scrollIntoViewIfNeeded()
+        const select = row.locator('select')
+        const before = await select.inputValue()
+        const statusPath = `/api/investor-applications/${st.apps.C}/status`
+        const respP = sa.waitForResponse((r) => pathOf(r.url()) === statusPath && r.request().method() === 'PUT', { timeout: 30000 })
+        respP.catch(() => {})
+        await caption(sa, 'Step F7d — pick "Accepted" in application C\'s row (C\'s email is already on QA-TEST account A)', false)
+        await select.selectOption('Accepted')
+        const dlg = sa.locator('[role="dialog"], [role="alertdialog"]').filter({ hasText: /Accept application/i }).first()
+        await dlg.waitFor({ state: 'visible', timeout: 10000 })
+        const reloaded = nextListLoad(sa)
+        await dlg.getByRole('button', { name: 'Accept', exact: true }).click()
+        const resp = await respP
+        const j = await resp.json().catch(() => null)
+        const toastEl = sa.locator('.toast-container .toast.show')
+        const toast = await toastText(sa, 4000)
+        const toastWarning = toast ? await toastEl.evaluate((el) => el.classList.contains('warning')).catch(() => false) : false
+        const listReloaded = await reloaded
+        const notice = sa.locator('[data-test="application-status-notice"]')
+        await notice.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {})
+        const noticeText = norm(await notice.innerText().catch(() => ''))
+        await sa.waitForTimeout(800)
+        const stays = await row.isVisible().catch(() => false)
+        const after = stays ? await select.inputValue() : '(row gone)'
+        const credsShown = await sa.locator('[role="dialog"]', { hasText: 'Investor Account Created' }).isVisible().catch(() => false)
+        const stored = statusOf('C')
+        const made = trackApp('C')
+        const counts1 = madeCounts()
+        const audits = auditRowsFor('C', mark, 'accept_investor_existing_account')
+        const msg = String(j?.message || '')
+        const msgOk = existingAccountMsg(st.users.A?.id).test(msg)
+        const noticeShows = !!msg && noticeText.includes(norm(msg))
+        await notice.scrollIntoViewIfNeeded().catch(() => {})
+        await caption(sa, `Step F7d — PUT → ${resp.status()}; accountCreated ${j?.accountCreated}; the notice shows the server's message: ${noticeShows}; C's select "${after}", stored "${stored}"`)
+        const s = await ifxShot(sa, 'f7d-accept-existing-account')
+        return {
+          observed: `${resetNote}; picked "Accepted" (the select read "${before}"), confirmed the dialog; PUT …/status → ${resp.status()}${j?.code ? ` ${j.code}` : ''}; accountCreated: ${j?.accountCreated}; existingUserId: ${j?.existingUserId} (account A is #${st.users.A?.id}); ` +
+            `message: "${msg.slice(0, 200)}" (the expected wording: ${msgOk}); notice: "${noticeText.slice(0, 240)}" (shows the server's message: ${noticeShows}); toast${toastWarning ? ' (warning)' : ''}: "${toast.slice(0, 160)}"; ` +
+            `the list re-read: ${listReloaded}; C's row listed: ${stays}, its select "${after}"; stored status "${stored0}" → "${stored}"; credentials dialog shown: ${credsShown}; ` +
+            `created for C: ${made.users.length} account(s), ${made.investors.length} investor record(s), ${made.trucks.length} truck(s); the copy: ${countsText(counts0)} → ${countsText(counts1)}; accept_investor_existing_account audit rows for C: ${audits.length}`,
+          verdict: verdict(resp.status() === 200 && j?.accountCreated === false && msgOk && noticeShows && stays && after === 'Accepted' && stored === 'Accepted' &&
+            !credsShown && !made.users.length && !made.investors.length && !made.trucks.length && sameCounts(counts0, counts1) && audits.length === 1),
           shot: s,
         }
       })
