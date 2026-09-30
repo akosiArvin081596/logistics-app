@@ -27,8 +27,8 @@
  *      data is today's shape and no new header
  *   §4 regenerate reprints from the snapshot even after the invite row
  *      changes; an unreadable snapshot is 409 before the archive step
- *   §5 the read-only payment terms view, the application list (Terms,
- *      invite id, docs_total) and detail
+ *   §5 the read-only payment terms view, the application list (the terms
+ *      summary, the chip's payment_terms, invite id, docs_total) and detail
  *   §6 source pins: no payout code references the invite table, the snapshot
  *      column or the module; the invite check sits before the transaction
  *      with no await between them
@@ -146,7 +146,7 @@ const ROUTES = Object.fromEntries(Object.entries(HEADS).map(([k, h]) => [k, lift
 const INVITE_FUNCTIONS = [
 	"inviteRefusal", "inviteNotFoundRefusal", "inviteRefusalError", "inviteStatusOf", "inviteExpiryFrom", "inviteUseRefusal",
 	"resolveInviteToken", "parseInviteRevision", "inviteIdParam", "setInvitePreviewHeaders", "publicInviteView", "adminInviteView",
-	"readAdminInvite", "inviteAuditTerms", "readInviteBody", "buildPaymentTermsView", "paymentTermsSummaryOf",
+	"readAdminInvite", "inviteAuditTerms", "readInviteBody", "buildPaymentTermsView", "paymentTermsListFieldsOf",
 ];
 const PIECES = {
 	evidence: liftConst("const SIGNING_EVIDENCE_VERSION = 1;", "\n}\n"),
@@ -579,7 +579,14 @@ async function scenarioViews(srv) {
 	db.prepare("UPDATE investor_onboarding_documents SET payment_terms_json = NULL WHERE application_id = ? AND doc_key = 'vehicle_lease'").run(invited);
 	check("a lease that disagrees with the master is flagged", (await call("GET", "/api/investors/:id/payment-terms", { params: { id: String(invInvited) }, user: SUPER })).body.consistent === false);
 
-	// Application list: Terms column, invite id, docs_total.
+	// Application list: the terms summary and chip, invite id, docs_total.
+	const splitInvite = await createInvite(srv, SPLIT_BODY);
+	const split = (await call("POST", "/api/public/investor-apply", { body: applyBody({ invite_token: splitInvite.token, invite_terms_revision: 1 }) })).body.applicationId;
+	const bareLease = await createInvite(srv, { ...LEASE_BODY, leaseAmount: "1500.50", details: "" });
+	const leaseOnly = (await call("POST", "/api/public/investor-apply", { body: applyBody({ invite_token: bareLease.token, invite_terms_revision: 1 }) })).body.applicationId;
+	const brokenLease = await createInvite(srv, LEASE_BODY);
+	const broken = (await call("POST", "/api/public/investor-apply", { body: applyBody({ invite_token: brokenLease.token, invite_terms_revision: 1 }) })).body.applicationId;
+	db.prepare("UPDATE investor_onboarding_documents SET payment_terms_json = '{\"v\":1,\"type\":\"lease\"}' WHERE application_id = ? AND doc_key = 'master_agreement'").run(broken);
 	const insApp = db.prepare("INSERT INTO investor_applications (legal_name, email, status, access_token) VALUES (?, 'x@example.com', 'New', 'secret-token')");
 	const twoDocs = insApp.run("Two Docs LLC").lastInsertRowid;
 	const addDoc = db.prepare("INSERT INTO investor_onboarding_documents (application_id, doc_key, doc_name) VALUES (?, ?, ?)");
@@ -588,8 +595,19 @@ async function scenarioViews(srv) {
 	const noDocs = insApp.run("No Docs LLC").lastInsertRowid;
 	const list = (await call("GET", "/api/investor-applications", { query: {}, user: SUPER })).body;
 	const byId = new Map(list.map((a) => [a.id, a]));
-	check("the list's Terms column", byId.get(invited).payment_terms_summary === "Fixed monthly lease payment — $2,000.00 per month — with additional terms" &&
-		byId.get(plain).payment_terms_summary === "50/50 profit split — standard contract terms");
+	check("the list's terms summary", byId.get(invited).payment_terms_summary === "Fixed monthly lease payment — $2,000.00 per month — with additional terms" &&
+		byId.get(plain).payment_terms_summary === "50/50 profit split — standard contract terms" &&
+		byId.get(split).payment_terms_summary === "50/50 profit split — with additional terms" &&
+		byId.get(leaseOnly).payment_terms_summary === "Fixed monthly lease payment — $1,500.50 per month" &&
+		byId.get(broken).payment_terms_summary === "The stored payment terms could not be read");
+	check("the chip's payment_terms for signed terms", same(byId.get(invited).payment_terms, { type: "lease", leaseAmountCents: 200000, hasDetails: true }) &&
+		same(byId.get(split).payment_terms, { type: "split", leaseAmountCents: null, hasDetails: true }) &&
+		same(byId.get(leaseOnly).payment_terms, { type: "lease", leaseAmountCents: 150050, hasDetails: false }));
+	check("the chip's payment_terms is null for the standard contract", byId.get(plain).payment_terms === null &&
+		byId.get(twoDocs).payment_terms === null && byId.get(noDocs).payment_terms === null && "payment_terms" in byId.get(noDocs));
+	check("the chip's payment_terms marks an unreadable snapshot", same(byId.get(broken).payment_terms, { unreadable: true }));
+	check("the chip's payment_terms never carries the additional terms' text", !JSON.stringify(list.map((a) => a.payment_terms)).includes("Paid on the 5th.") &&
+		!JSON.stringify(list.map((a) => a.payment_terms)).includes("Reviewed after 12 months."));
 	check("the list's invite id", byId.get(invited).invite_id === lease.id && byId.get(plain).invite_id === null);
 	check("the list's docs_total", byId.get(invited).docs_total === 3 && byId.get(twoDocs).docs_total === 2 && byId.get(noDocs).docs_total === 0);
 	check("the list still drops the access token", list.every((a) => !("access_token" in a)) && !JSON.stringify(list).includes("secret-token"));

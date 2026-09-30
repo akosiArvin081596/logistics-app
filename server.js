@@ -12046,12 +12046,20 @@ function buildPaymentTermsView(applicationId, investorId) {
 	};
 }
 
-// The list column: one line per application, from its master agreement's snapshot.
-function paymentTermsSummaryOf(snapshotJsonText) {
+// The application list's terms fields, from the master agreement's snapshot:
+// the one-line summary, and `payment_terms`, what the Name cell's chip is
+// built from. `payment_terms` is null for the standard contract (no
+// snapshot), { type, leaseAmountCents, hasDetails } for signed terms, and
+// { unreadable: true } for a snapshot that cannot be read.
+function paymentTermsListFieldsOf(snapshotJsonText) {
 	try {
-		return investorPaymentTerms.describeTerms(investorPaymentTerms.parseSnapshot(snapshotJsonText)).summary;
+		const snapshot = investorPaymentTerms.parseSnapshot(snapshotJsonText);
+		return {
+			payment_terms_summary: investorPaymentTerms.describeTerms(snapshot).summary,
+			payment_terms: snapshot ? { type: snapshot.type, leaseAmountCents: snapshot.leaseAmountCents, hasDetails: !!snapshot.details } : null,
+		};
 	} catch {
-		return "The stored payment terms could not be read";
+		return { payment_terms_summary: "The stored payment terms could not be read", payment_terms: { unreadable: true } };
 	}
 }
 
@@ -12827,7 +12835,7 @@ app.get("/api/investor-applications", requireRole("Super Admin"), (req, res) => 
 		// subject to PII_MASK_ENABLED. No route accepts it any more (the
 		// token-gated /api/public/investor-onboarding/:id/* routes were removed),
 		// but it is still a per-application secret and never leaves the server.
-		// The Terms column: each application's signed payment terms, read from its
+		// The terms chip: each application's signed payment terms, read from its
 		// master agreement's snapshot, and the invitation it came through. And
 		// `docs_total`, the document rows the application actually has, which is
 		// what `signed_count` is out of (not every application has three).
@@ -12842,7 +12850,7 @@ app.get("/api/investor-applications", requireRole("Super Admin"), (req, res) => 
 			const out = maskingEnabled() ? piiMask.maskFields(safe, { ein_ssn: "taxId" }) : safe;
 			return {
 				...out,
-				payment_terms_summary: paymentTermsSummaryOf(termsByApp.get(a.id)),
+				...paymentTermsListFieldsOf(termsByApp.get(a.id)),
 				invite_id: inviteByApp.get(a.id) ?? null,
 				docs_total: docsTotalByApp.get(a.id) ?? 0,
 			};
