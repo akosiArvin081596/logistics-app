@@ -49,9 +49,13 @@ What it covers today, by section (`ONLY` picks them):
   preview sent with no notes key prints it too (I8, I8b, planted, local only); the pre-filled note is labelled as carried
   over until it is typed into (I8h). The server refuses a note over 500 characters, a note that is not text, and an Order # with `<` (I9).
   The Email message tab holds the message in an editable box, pre-filled with the generated text, above the read-only
-  signature, logo and confidentiality notice, with To and Subject as before (I10); an untouched box follows each
-  re-render (I10b), a typed one survives a tab switch and a re-render (I11), an empty one is refused on the form (I11b),
-  and Reset brings the generated text back (I12). The server refuses an empty, too long or non-text message (I13). With
+  signature, logo and confidentiality notice, with To and Subject as before (I10); a typed one survives a tab switch and
+  a re-render (I11), an empty one is refused on the form (I11b), and Reset brings the generated text back (I12). On a
+  Bison load, whose message names the Order #, the Move # and the PO # (IB, local): the untouched message keeps its PO #
+  sentence through the render of a field it does not name (I10c) and follows an Order # change (I10b), and a typed
+  message that change leaves stale is flagged, holds Approve, and offers "Keep my message" and "Use the new message"
+  (I11c). The server refuses an empty, too long or non-text message (I13), and the message it generates for a Bison load
+  whose Order # could not be read does not name our load id as the Order # (I13f). With
   the fake Gmail (`E2E_FAKE_GMAIL=1`, local only), the Gmail draft carries the typed message exactly, line breaks
   included, above the unchanged signature, and is created read (`\Seen`), so the unread-mail poll that ingests rate-cons
   never takes it for one (I14); an unedited approve carries the generated message, also read (I14b).
@@ -194,7 +198,7 @@ npm --prefix scripts/e2e ci      # playwright-core only, pinned; the root and cl
 | File | What it is |
 |---|---|
 | `e2e.mjs` | The run. Captions every step on screen, screenshots it, and writes `results-<tag>.md`. |
-| `paths.cjs` | Where everything is: this checkout, the main checkout, the installs, the work dir. Every other script resolves through it. `node scripts/e2e/paths.cjs work-dir` prints the work dir. |
+| `paths.cjs` | Where everything is: this checkout, the main checkout, the installs, the work dir. Every other script resolves through it. `node scripts/e2e/paths.cjs work-dir` prints the work dir. It also holds the one copy of the private-directory rule (`assertPrivateDir()`: owned by this user, closed to group and other), which the work dir and the fake Gmail's capture folder are both held to. Requiring it has no effect, so the fake can load it while it is preloaded. |
 | `setup-db.cjs` | Makes a fresh private copy of the main checkout's `app.db` in the work dir and sets five logins on the copy. |
 | `plant-before-boot.cjs` | Plants what B1 needs in a copy BEFORE a server boots on it (one expense), or removes it (`--remove`). |
 | `verify-creds.cjs` | Confirms the creds file matches a copy. Prints booleans and ids only. |
@@ -298,7 +302,7 @@ REF_A=main REF_B=HEAD FLAG=on fnm exec --using=22.23.2 node scripts/e2e/payout-p
 
 - Headless: part 1 takes about 1.5 minutes, part 2 about 2.5 minutes, part 3 about 30 s, part 4 about 2.5 minutes
   (up to 80 s more when F1 has to plant its formula and wait for the server's cached copy of the sheet), part 5 about
-  1 minute (headed about 2.5 minutes), part 5b well under a minute, part 6 about 1.5 minutes (T0) and 2–3 minutes
+  1.5 minutes (headed about 3.5 minutes), part 5b well under a minute, part 6 about 1.5 minutes (T0) and 2–3 minutes
   (T1–T11), part 7 about 1.5 minutes (headed about 2.5 minutes), part 8 about 10 s (headed about 30 s), part 9 about
   1.5 minutes (up to 90 s more while the server's cached copy of the sheet catches up with the load LD adds). The
   parity check takes about 30 s per flag setting.
@@ -452,7 +456,9 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
   do E1, N1, N1b, F1, E2, B1 and RC1 (RC1 and F1 because they write the sheet, which only a local run may). P1 runs on
   a real driver (see the money-path section). I8 SKIPs (it plants the saved note), and I7 fills the form but SKIPs
   its Approve unless `E2E_INVOICE_APPROVE=1`: an approve creates a real Gmail draft wherever the server has a mail
-  target. I10–I13 run there (the editor, and dryRun and preview page fetches, which create nothing); I14 and I14b SKIP
+  target. I10–I12 and I13–I13e run there (the editor, and dryRun and preview page fetches, which create nothing). IB
+  SKIPs (local only: it hands the dryRun a synthetic rate-con), and so do I10b, I10c and I11c, which run in its editor;
+  I13f runs when staging lists the Bison load and could not read its Order #, and SKIPs otherwise. I14 and I14b SKIP
   (they need the local fake Gmail). The investor-fixes section SKIPs as a whole (local only). Everything else runs
   unchanged, and the script discovers every id itself.
 - **Expected differences:** staging's environment refresh strips identity documents. So 11a (the Kit's CDL) FAILs there,
@@ -485,7 +491,7 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
 | `PHASE` | `before` or `after`. Only names the output; the "Expected" column is always the after-the-fix behaviour. |
 | `OUT_TAG` | Writes `shots/<tag>/` and `results-<tag>.md` instead of `<PHASE>`, so a rehearsal cannot overwrite a baseline. |
 | `ONLY` | A comma-separated list of sections: `trucks` (1–12, R1–R16), `signout` (S1–S7), `dispatcher` (D1–D3), `maintenance` (M1), `moneypath` (P1, E1, N1, N1b, F1, E2, B1, RC1), `names` (K1–K3), `eldlink` (L1–L3), `invoice` (I1–I14b), `terms` (T0–T11), `investorfixes` (F1–F14), `report` (R1–R6, Rx). Unset: all eleven, in that order, then step 12's clean-up — more sign-ins than one limiter window holds (see above). |
-| `STEPS` | Only these sign-out, money-path or invoice cases, e.g. `STEPS=S5a,S7` (each has its own browser context), `STEPS=P1,F1` or `STEPS=E2,B1,RC1` (`P1` selects P1a and P1b; `N1` selects N1 and N1b), `STEPS=I8,I9` (`I3` selects I3a–c, `I7` selects I7, I7r and I7j, `I8` selects I8, I8b and I8h, `I9` selects I9 and I9a–c, `I10` selects I10 and I10b, `I11` selects I11 and I11b, `I13` selects I13 and I13a–e, `I14` selects I14 and I14b, and `I14B` runs I14b alone; I1 opens the editor whenever any of I1–I7 or I10–I12 is picked), `STEPS=T0` or `STEPS=T1,T2,…,T11` (a terms step also runs the steps it builds on: T3 and T9 run T1, T4 and T7 run T2, T5 runs T4, T8 runs T5), `STEPS=R3,R4` for the report section (`R4` selects R4a and R4b; R2 runs R1; Rx runs whenever any other report step does). The other sections ignore it, the truck section's R1–R16 included. |
+| `STEPS` | Only these sign-out, money-path or invoice cases, e.g. `STEPS=S5a,S7` (each has its own browser context), `STEPS=P1,F1` or `STEPS=E2,B1,RC1` (`P1` selects P1a and P1b; `N1` selects N1 and N1b), `STEPS=I8,I9` (`I3` selects I3a–c, `I7` selects I7, I7r and I7j, `I8` selects I8, I8b and I8h, `I9` selects I9 and I9a–c, `I10` selects I10, I10b and I10c, `I11` selects I11, I11b and I11c, `I13` selects I13 and I13a–f, `I14` selects I14 and I14b, and `I10B`, `I10C`, `I11C`, `I13F` or `I14B` runs that step alone; I1 opens the editor whenever any of I1–I7 or I10–I12 is picked, and IB the Bison load's whenever I10b, I10c or I11c is), `STEPS=T0` or `STEPS=T1,T2,…,T11` (a terms step also runs the steps it builds on: T3 and T9 run T1, T4 and T7 run T2, T5 runs T4, T8 runs T5), `STEPS=R3,R4` for the report section (`R4` selects R4a and R4b; R2 runs R1; Rx runs whenever any other report step does). The other sections ignore it, the truck section's R1–R16 included. |
 | `HEADED=1` | A visible browser. |
 | `DB_PATH` | The copy the server runs on (inside the work dir). It is used **only** to plant stored values for steps 10, 11b–f, R3 and R15, to stage and clean up R16, to plant and read back E1, N1, N1b and E2, to read and delete B1's planted expense, to delete the rows RC1's import writes, to plant P1's own driver, to plant and delete I8's saved invoice note, to delete the draft records an approve writes with the fake Gmail (I7, I14, I14b), to let T8 submit a test application and hard-delete it (by id) after Tc's soft delete, and for the investor-fixes section (see there). The report section only reads it: R3's ledger check and Rx's row counts. Unset: those rows SKIP, P1 uses a real driver, T8 SKIPs unless `E2E_TERMS_SUBMIT=1`, the investor-fixes section SKIPs, and R3 and Rx score without the database. |
 | `E2E_REPORT_INVESTOR` | The report section's investor, a `users.id`, instead of the one it picks. It must be an Investor who owns a truck. |
@@ -494,6 +500,7 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
 | `E2E_LINK_PODS=1` | For `prep-worktree.sh`, not `e2e.mjs`: link the main checkout's POD files into the worktree's `uploads/`, for the invoice section. |
 | `E2E_FAKE_GMAIL=1` | For `boot-server.sh` **and** `e2e.mjs`: boot the server with the fake Gmail, and let I14 and I14b run against it (local only, with `DB_PATH`). Unset: they SKIP. |
 | `E2E_FAKE_GMAIL_DIR` | For `e2e.mjs`: where the fake's captures are read. Default: `<work dir>/fake-gmail`, where `boot-server.sh` points the server. It must be inside the work dir. |
+| `E2E_BISON_LOAD` | The Bison steps' load (IB, I10b, I10c, I11c, I13f): a delivered Bison load with a POD. Default: `30080873`. |
 | `CREDS_FILE` | The logins. Default: `<work dir>/creds.json`. Not needed when every section given is login-free (`ONLY=terms STEPS=T0`). T1–T11 need only its `superAdmin`. |
 | `E2E_WORK_DIR` | The work dir. Default: `$TMPDIR/logisx-e2e`. It must be private, outside every checkout, and contain none. |
 | `SOURCE_DB` | `setup-db.cjs`'s source, opened read-only. Default: the main checkout's `app.db`. |
@@ -836,9 +843,10 @@ dryRun answers 200 is used, trying at most four. A Bison load still works: I1 ti
 #", and a load with no derivable total gets 1234.00 typed (Approve then confirms the edited total).
 
 **Budgets, per server process:** one sign-in; `POST …/draft-invoice` (25 per 15 minutes per user, the `?dryRun=1`
-opens included) about eleven times (I1, I7's approve, I8's reopen, I13a–d, and one open and one approve each in I14
-and I14b), plus one per candidate whose dryRun failed; `POST …/invoice-preview` (120 per 15 minutes) about thirty
-times. A second full run inside 15 minutes can run out of draft requests: restart the server between runs.
+opens included) about thirteen times (I1, I7's approve, I8's reopen, IB's open, I13a–d, I13f, and one open and one
+approve each in I14 and I14b), plus one per candidate whose dryRun failed; `POST …/invoice-preview` (120 per 15
+minutes) about thirty-five times. A second full run inside 15 minutes can run out of draft requests: restart the server
+between runs.
 
 **What it writes:** the approve (I7) mints the next invoice number, in the copy. Locally it creates no mail draft
 and no draft record: `boot-server.sh` blanks Gmail and the n8n invoice webhook, so the route answers 200 with
@@ -868,19 +876,37 @@ records' `invoice_draft_created` audit lines stay, as the harness's other audit 
 | I8h | **Planted, local only**, in I8's editor: the NOTES box is read with the pre-filled note untouched; then **UI:** click into it and type ` (edited)` at the end of the note. | While untouched, "Carried over from this load's last approved invoice — clear it or use Reset if it no longer applies." shows under NOTES; after typing it is gone. SKIPs when I8 had no note to pre-fill |
 | I9, I9a–c | Page `fetch`es of `POST /api/loads/<id>/invoice-preview` with `X-Requested-With`, as `useApi` sends them. The body is otherwise valid (invoice #, invoice date, total, recipient, and an Order #, `7101850`, that every build accepts); I9 is that body as it is, the control. | I9: 200. I9a, notes of 501 characters: 400 `INVOICE_NOTES_TOO_LONG`. I9b, `notes: ["x"]`: 400 `INVOICE_NOTES_INVALID`. I9c, `orderNumber: "a<b"`: 400 `ORDER_NUMBER_INVALID` |
 | I10 | **UI.** The "Email message" tab, in I1's editor. The latest render's email HTML is also rendered the way a mail client shows it (see below), for the message the untouched draft carries. | A `<textarea data-testid="idp-email-body">` that takes typing, holding the generated message from the greeting to "Thank you,": the response's `emailBodyDefault`, the text the untouched draft renders above its signature, and for a load that is not Bison's the harness's own copy of the generated text. Below it, `[data-testid="idp-email-signature"]` shows the signature, the logo and the confidentiality notice with nothing editable, and the response's `emailSignatureHtml` is byte-identical to the signature before the fix. The To and Subject lines as before (read-only: the recipient and the form's SUBJECT). The box is the tab's only editable element |
-| I10b | **UI.** The box untouched, `7101851` typed into ORDER #, and its render. | The render's `emailBodyDefault` in the box, and no "edited" badge |
 | I11 | **UI.** A six-line message typed into the box (a blank line, `<b>not bold</b>`, `&`, quotes); the Invoice tab and back; then a note typed into NOTES, and its render. | The "edited" badge (`[data-testid="idp-email-body-edited"]`) and no error; the text as typed, line breaks included, after the tab switch and after the render; the badge stays. Whether the render's request carried the message is recorded, not scored: an edit may travel on the approve alone |
 | I11b | **UI.** The box emptied, then left with blanks and line breaks only. | The inline error (`[data-testid="idp-email-body-error"]`) each time, and Approve disabled |
 | I12 | **UI.** **Reset to extracted values** (for a Bison load the Order # is typed again first, as in I6). | The generated message back in the box (the render's `emailBodyDefault`; for a load that is not Bison's, the harness's copy), no badge and no error |
+| IB | **Local.** The Bison load (below): the page reloaded, Completed Loads → the load → **Draft Invoice Email**, the editor's own dryRun handed the synthetic Bison rate-con; then the Email message tab. | The dryRun answers 200 with the rate-con's Order # `7101852`, PO # `4455667` and Move # `8899001` (source `upload`); the form's ORDER # and PO # show them; the generated message names all three (`Order # 7101852.` … `8899001 & PO #4455667`) |
+| I10c | **UI**, in IB's editor, the message untouched: a note typed into NOTES (a field the message does not name), and its render. | The box still holds the dryRun's generated message exactly, its PO # sentence (`& PO #4455667`) included, and no "edited" badge. The render's request is recorded: whether it sent the PO # |
+| I10b | **UI**, the message still untouched: `7101853` typed into ORDER # (a number the message names), and its render. | The box follows the render: it holds the render's `emailBodyDefault`, which names `Order # 7101853.` where it named the Order # before, and no "edited" badge |
+| I11c | **UI.** A message typed into the box; ORDER # changed to `7101854`; the Invoice tab; back, **Keep my message**; ORDER # changed to `7101855`; **Use the new message**. Screenshots `i11c-1-stale-hint`, `i11c-2-stale-footer`, `i11c-3-kept`, then the row's own. | After the first change: `[data-testid="idp-email-body-stale"]` shows, with "Keep my message" (`idp-email-body-keep`) and "Use the new message" (`idp-email-body-use-default`), and the typed text is kept. From the Invoice tab: the footer's `[data-testid="idp-email-body-stale-foot"]` shows and Approve is disabled. Keep my message: the hint clears, Approve is enabled, the typed text is unchanged and the "edited" badge stays. After the second change, Use the new message: the box holds the new render's `emailBodyDefault` (naming `Order # 7101855.`), no badge, no hint |
 | I13 | A page fetch of `POST …/invoice-preview` with I9's body and a message of exactly 5,000 characters (the control). | 200. `PASS (vacuous)` when the response has no `emailBodyDefault` (a build that ignores the field) |
 | I13a–d | Page fetches of `POST …/draft-invoice?dryRun=1` (a query parameter: nothing is created) with the body the editor opens with, `{}`, plus `emailBody`: `""`, blanks and line breaks only, 5,001 characters, and `42`. | 400 `INVOICE_EMAIL_BODY_EMPTY` (a, b), `INVOICE_EMAIL_BODY_TOO_LONG` (c), `INVOICE_EMAIL_BODY_INVALID` (d) |
 | I13e | The same four messages on `POST …/invoice-preview`, with I9's body. | The same four refusals |
+| I13f | A page fetch of `POST …/draft-invoice?dryRun=1` on the Bison load with the body the editor opens with, `{}`: no rate-con to read, so its Order # could not be read (`needsOrderNumber`, `orderNumberSource: "load-id-fallback"`). When the Order # was read (a server that reaches the rate-con), SKIP. | `emailBodyDefault` does not name our load id as the Order # (`Order # 30080873`): it is not Bison's Order # |
 | I14 | **Local, fake Gmail** (`E2E_FAKE_GMAIL=1`, `DB_PATH`). The page reloaded and the editor opened afresh; a six-line message typed into the box; **Approve & Create Draft**. The draft the fake captured is read back and rendered (below). | One draft captured, with the IMAP flags `\Draft` and `\Seen`. The message above the signature reads exactly as typed: the lines in order, each line break a break, the blank line visible, `<b>not bold</b>` as text. Then the signature, logo and notice, byte-identical to before, and nothing after them. To and Subject as the tab and the form showed them; the invoice PDF and every POD the dryRun listed attached |
 | I14b | **Local, fake Gmail.** The editor opened afresh, nothing typed, **Approve & Create Draft**. | One draft captured, with `\Draft` and `\Seen`; the message above the signature is the one the tab showed, and the generated text; the signature, To, Subject and attachments as in I14. Whether the draft's HTML is byte-identical to the email HTML the editor rendered is recorded |
 | Ic | Local only. | The planted row, and the draft records the approves wrote with the fake Gmail, deleted; no plant journal left |
 
-**Run order:** I1–I6, then I10–I12 (in I1's editor, before I7's approve closes it), I7 (I7r, I7j), I8 (I8b, I8h),
-I9, I13, I14, I14b, and Ic.
+**Run order:** I1–I6, then I10, I11, I11b and I12 (in I1's editor, before I7's approve closes it), I7 (I7r, I7j), I8
+(I8b, I8h), I9, then IB, I10c, I10b and I11c (IB reloads the page onto the Bison load's editor), I13 (I13a–e), I13f,
+I14, I14b, and Ic.
+
+**The Bison load (IB, I10c, I10b, I11c, I13f).** A Bison message names the load's Order #, Move # and PO #, where a
+message for any other broker names only our load number, so a field change can only move a Bison message. The load is
+`30080873`, a delivered Bison load with a POD on the local copy (`E2E_BISON_LOAD` picks another; the steps SKIP, with the
+reason, when it is not a delivered Bison load with a POD). Locally its rate-con is out of reach: it lives in the
+production Drive folder `boot-server.sh` names away, and no local document row holds a rate-con file. So its own dryRun
+cannot read an Order #, which is exactly I13f's case. For the editor steps, IB hands the editor's own dryRun request a
+synthetic Bison rate-con (`page.route` adds `rateconPdfBase64` to the request's body, `{}`: an upload, one of the
+route's own rate-con sources). The PDF carries only the "Billing Information" block that `lib/broker-invoice.js`'s
+deterministic scan reads (`Order #: 7101852`, `LEG #:`, `PO #: 4455667`, `Move #: 8899001`), with no trailer, total or
+address, so the trailer check, the total and the recipient stay the load's own. The editor then holds what production's
+does when the rate-con is found. Only that one request is changed, and the dryRun creates nothing. It is local only: a
+server that reaches the real rate-con would read that one first.
 
 **How a captured draft is read (I14, I14b).** The fake's `readCapturedDrafts(dir)` runs in a child process, so
 nothing that module loads can touch the run's own connections; the drafts that appeared since the click are the
@@ -898,10 +924,18 @@ a blank line between each). A deliberate change to either must update the harnes
 
 **On the build without the editable message** (`61406a1`, the BEFORE baseline): I1–I9 PASS. I10 FAILs: the Email
 message tab has no editable element, its message is a read-only preview of the whole email (message, signature, logo
-and notice in one block), and typing into it changes nothing. I10b, I11, I11b and I12 FAIL (no box). I13 is
+and notice in one block), and typing into it changes nothing. I11, I11b and I12 FAIL (no box). I13 is
 `PASS (vacuous)`, and I13a–e FAIL: the server ignores `emailBody` and answers 200. On a server with the fake Gmail,
 I14 FAILs without sending an approve (no box to type into), and I14b FAILs on `\Seen` alone: the draft is created
-unread, with the flag `\Draft` only, while its message, signature, To, Subject and attachments already hold.
+unread, with the flag `\Draft` only, while its message, signature, To, Subject and attachments already hold. (That
+baseline predates the Bison steps: IB, I10b, I10c, I11c and I13f were added in the next round.)
+
+**On the build with the editable message, before the review follow-ups** (`bae837e`): every earlier row passes, I14
+and I14b included (with the fake), IB opens the Bison editor, and I10b passes (the untouched box already follows the
+Order #). I10c FAILs: the render of a NOTES change is sent no PO # the dispatcher did not type, so the untouched Bison
+message loses its PO # sentence ("… The driver ID number for pickup is 8899001."). I11c FAILs: the stale hint and the
+footer's note show and "Use the new message" works, but there is no "Keep my message", and Approve stays enabled on the
+Invoice tab. I13f FAILs: the generated message reads "… for Bison Transport Order # 30080873.", our load id.
 
 **On a build without the feature** (a BEFORE baseline): the Order # keeps its old rule (letters, numbers, spaces and
 `. _ / # -`, 40 max), so I2 and I3a are refused by the form, I3c's field holds 40 characters, and I3b's refusal carries
