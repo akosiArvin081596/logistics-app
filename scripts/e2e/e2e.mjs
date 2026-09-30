@@ -149,16 +149,18 @@
 //      footnote and "Not available" asset figures · R6 the RANGE_HINT under the
 //      portal's date inputs · Rx nothing written but the ledger refresh and the
 //      preview's audit lines
-// Lease payouts section (LA-LH, LX; ONLY=lease, local only: DB_PATH and a server
+// Lease payouts section (LA-LH, LP, LW, LX; ONLY=lease, local only: DB_PATH and a server
 //   boot-server.sh started, which the section restarts by its pid file to switch
 //   INVESTOR_LEASE_PAYOUTS_ENABLED and INVESTOR_LEASE_DOWNTIME, and leaves booted
 //   with the flag off): a QA-LEASE investor made through the real flows (a $2,000
 //   lease invite on /investors, the applicant's /invest walk-through, the acceptance
 //   on /investor-applications), with a profit month (a QA-LEASE- load on the LOCAL
 //   sheet), an idle month and a loss month (a maintenance service payment). LA-LD
-//   set it up · LE flag OFF: the split pays (LEu: the Payouts page) · LF flag ON: the
+//   set it up (LA: the invite form's lease warning shows while the flag is off) · LP
+//   the admin Payout Basis panel: an edit and its Change history line · LE flag OFF: the split pays (LEu: the Payouts page) · LF flag ON: the
 //   lease pays ($2,000 in the profit and loss months, $0 in the idle month under
-//   downtime "unpaid"; LFu: the page shows it as the lease) · LG a split investor's
+//   downtime "unpaid"; LFu: the page shows it as the lease) · LW flag ON: no invite
+//   warning, the panel applied · LG a split investor's
 //   Payouts unchanged, flag ON · LH downtime "paid": the idle month pays $2,000 · LX
 //   every row and the sheet row removed, the server booted with the flag off
 //
@@ -187,7 +189,7 @@
 //               (S1-S7), dispatcher (D1-D3), maintenance (M1), moneypath (P1, E1,
 //               N1, N1b, F1, E2, B1, RC1), names (K1, K2, K3), eldlink (L1-L3),
 //               invoice (I1-I9), terms (T0-T11),
-//               investorfixes (F1-F14), report (R1-R6, Rx), lease (LA-LH, LX).
+//               investorfixes (F1-F14), report (R1-R6, Rx), lease (LA-LH, LP, LW, LX).
 //               Unset = all, in that
 //               order. ⚠️ The sections together sign in more often than the login
 //               limiter allows one server process (see README), so split a full run.
@@ -364,7 +366,7 @@ function writeResults(final = false) {
     runs('terms') && `investor terms (${[...TERMS_PLAN].join(', ') || 'no step picked'})`,
     runs('investorfixes') && 'investor fixes (F1-F14)',
     runs('report') && `investor report (${[...REPORT_PLAN].sort().join(', ') || 'no step picked'}${REPORT_PLAN.size ? ', Rx' : ''})`,
-    runs('lease') && 'lease payouts (LA-LH, LX)',
+    runs('lease') && 'lease payouts (LA-LH, LP, LW, LX)',
   ].filter(Boolean).join(' + ')
   const lines = [
     `# ${title} — ${PHASE.toUpperCase()}`,
@@ -9996,7 +9998,7 @@ function reportReadOnlyRow({ writes, start }) {
   record({ step: 'Rx', title: 'Read-only: what the section wrote', expected: 'No write but a sign-in session, the preview\'s audit lines (investor_preview_*, investor_payouts_view) and the payout ledger\'s own refresh; no plant journal', observed: `${notes.join('; ')}; plant journal ${fs.existsSync(JOURNAL) ? 'PRESENT' : 'none'}`, verdict: verdict(ok && !fs.existsSync(JOURNAL)), shot: '' })
 }
 
-// ---------------------------------------------------------------- lease payouts (LA-LH, LX)
+// ---------------------------------------------------------------- lease payouts (LA-LH, LP, LW, LX)
 // The shared contract's lease payouts: INVESTOR_LEASE_PAYOUTS_ENABLED, a money flag
 // that ships off, and INVESTOR_LEASE_DOWNTIME (unpaid, the default, or paid). Local
 // only: the section writes the copy (DB_PATH) and one row of the LOCAL sheet, and it
@@ -10012,6 +10014,10 @@ const LEASE_IN_SERVICE = '2025-02-01'
 const LEASE_REVENUE = 5000 // the profit month's load
 const LEASE_SERVICE = 3000 // the loss month's maintenance service payment
 const LEASE_L1 = 'Fixed monthly lease'
+// The Payout Basis panel's status while lease payouts are off (payoutBasis.js STATUS_OFF),
+// and the note LP saves through the panel's form.
+const LEASE_STATUS_OFF = 'Recorded, not yet applied: lease payouts are switched off. Payouts still use the Split %.'
+const LEASE_PANEL_NOTE = 'QA-LEASE e2e: edited in the Payout Basis panel'
 const LEASE_NAME_RE = /^QA-LEASE Investor \d{8}-\d{6}$/
 const E2E_DIR = path.dirname(fileURLToPath(import.meta.url))
 const LEASE_TABLES = new Set(['users', 'investors', 'trucks', 'investor_applications', 'investor_invites', 'maintenance_fund'])
@@ -10174,6 +10180,31 @@ async function leaseQaShot(page, name, opts = {}) {
     }).catch(() => {})
   }
 }
+// The invite form's lease warning (InviteTermsForm): shown while lease payouts are off.
+const LEASE_INVITE_WARNING = 'This changes the contract only. Payouts are still calculated from the Split % column.'
+async function leaseInviteWarning(page) {
+  const w = page.locator(TD('invite-lease-warning')).first()
+  await page.waitForTimeout(600)
+  const shown = await w.isVisible().catch(() => false)
+  return { shown, text: shown ? squash(await w.innerText().catch(() => ''), 120) : '' }
+}
+// The Payout Basis panel of one investor: /investors, the investor's name opens the
+// detail window, which holds the panel. The name cell is clicked, not the row: the
+// row's middle is the Split % cell, which keeps its clicks to itself. Waits until the
+// panel has loaded.
+async function leaseBasisPanel(page, name) {
+  await gotoInvestorsPage(page)
+  const cell = page.locator('tr.clickable-row td.name-cell', { hasText: exactText(name) }).first()
+  await cell.waitFor({ state: 'visible', timeout: 30000 })
+  await cell.scrollIntoViewIfNeeded().catch(() => {})
+  await cell.click()
+  const panel = page.locator(TD('payout-basis-panel')).first()
+  await panel.waitFor({ state: 'visible', timeout: 30000 })
+  await panel.locator(TD('payout-basis-current')).waitFor({ state: 'visible', timeout: 30000 })
+  await panel.scrollIntoViewIfNeeded().catch(() => {})
+  return panel
+}
+const leaseHistory = async (panel) => panel.locator(`${TD('payout-basis-history')} li`).allInnerTexts().catch(() => [])
 // A real investor's section is blurred for the moment of its screenshot (the verdict
 // comes from its text, compared, never printed).
 async function leaseBlurredShot(page, sec, name) {
@@ -10229,7 +10260,7 @@ async function leaseSection() {
 
     // ---- LA: set-up checks, then a $2,000 lease invite through the invites panel
     await step('LA', 'Set-up checks (the copy, the local sheet, the months), then Super Admin, /investors: a LEASE invite for $2,000 through the invites panel',
-      `The sheet the server reads is not production's; ${Object.values(LEASE_MONTHS).join(', ')} are not finalized in the copy; POST /api/admin/investor-invites 201 and the link dialog`, async () => {
+      `The sheet the server reads is not production's; ${Object.values(LEASE_MONTHS).join(', ')} are not finalized in the copy; with lease payouts off, the form's "${LEASE_INVITE_WARNING}" shows for a lease; POST /api/admin/investor-invites 201 and the link dialog`, async () => {
         const sheetFrom = leaseSheetCheck(srv)
         const months = Object.values(LEASE_MONTHS)
         const locked = db.prepare(`SELECT period FROM period_locks WHERE status = 'locked' AND period IN (${months.map(() => '?').join(',')})`).all(...months).map((r) => r.period)
@@ -10238,7 +10269,9 @@ async function leaseSection() {
         const panel = await invitesPanel(page)
         if (!panel) throw new Error('/investors has no invites panel ([data-test="invites-panel"])')
         await fillInviteForm(page, panel, { name: NAME, email: EMAIL, type: 'lease', amount: String(LEASE_AMOUNT), details: 'QA-LEASE e2e: lease payouts' })
-        await caption(page, `Step LA — a lease invite for ${leaseMoney(LEASE_AMOUNT)} a month (QA-LEASE data)`)
+        const warning = await leaseInviteWarning(page)
+        const warningOk = !S.feature || warning.shown === (S.settings.enabled !== true)
+        await caption(page, `Step LA — a lease invite for ${leaseMoney(LEASE_AMOUNT)} a month (QA-LEASE data); the "contract only" warning ${warning.shown ? 'shows' : 'is hidden'}`)
         const c = await createInviteThroughForm(page)
         leaseNote('investor_invites', c.id)
         S.invite = c
@@ -10246,9 +10279,9 @@ async function leaseSection() {
         const s = await leaseQaShot(page, 'la-lease-invite')
         await closeInviteDialog(page)
         return {
-          verdict: verdict(c.status === 201 && !!c.path),
+          verdict: verdict(c.status === 201 && !!c.path && warningOk),
           observed: `sheet: SPREADSHEET_ID from ${sheetFrom} is set and not production's; months ${months.join(', ')} open in the copy; lease payouts in this build: ${S.feature ? `yes (enabled ${S.settings.enabled}, downtime ${S.settings.settings?.downtime})` : 'NO (LF-LH will SKIP)'}; ` +
-            `POST → ${c.status}${c.code ? ` ${c.code}` : ''}, invite #${c.id ?? '?'}, link ${c.path ? 'shown' : 'NOT shown'}`,
+            `the form's lease warning ${warning.shown ? `shows ("${warning.text}")` : 'is hidden'}; POST → ${c.status}${c.code ? ` ${c.code}` : ''}, invite #${c.id ?? '?'}, link ${c.path ? 'shown' : 'NOT shown'}`,
           shot: s,
         }
       })
@@ -10431,6 +10464,44 @@ async function leaseSection() {
         return { verdict: verdict(inServiceOk && basisOk && add.status === 200 && mf.status === 200 && loadSeen), observed: notes.join('; '), shot: s1 }
       })
 
+    // ---- LP: the admin Payout Basis panel, flag as booted (off): an edit through its
+    // form (the same lease, a new note) and the line it adds to Change history
+    await step('LP', `Super Admin, /investors → the QA-LEASE investor → Payout Basis: Edit, the lease kept (${leaseMoney(LEASE_AMOUNT)} from ${LEASE_MONTHS.profit}) with a new note, Save`,
+      `While lease payouts are off the panel says "${LEASE_STATUS_OFF}"; the form's PUT 200; one more Change history line, naming the new note; the schedule still one lease row from ${LEASE_MONTHS.profit}`, async () => {
+        needFeature(); needOwner()
+        const panel = await leaseBasisPanel(page, NAME)
+        const status = squash(await panel.locator(TD('payout-basis-status')).innerText().catch(() => ''), 160)
+        const before = await leaseHistory(panel)
+        await panel.locator(TD('payout-basis-edit')).click()
+        const form = panel.locator(TD('payout-basis-form'))
+        await form.waitFor({ state: 'visible' })
+        await chooseControl(form.locator(TD('payout-basis-type-lease')))
+        await form.locator(TD('payout-basis-amount')).fill(String(LEASE_AMOUNT))
+        await form.locator(TD('payout-basis-month')).fill(LEASE_MONTHS.profit)
+        await form.locator(TD('payout-basis-note')).fill(LEASE_PANEL_NOTE)
+        await caption(page, 'Step LP — the Payout Basis panel: Edit, the same lease with a new note, Save')
+        const [put] = await Promise.all([
+          page.waitForResponse((r) => r.request().method() === 'PUT' && pathOf(r.url()) === `/api/investors/${S.investorId}/payout-basis`, { timeout: 20000 }).catch(() => null),
+          form.locator(TD('payout-basis-save')).click(),
+        ])
+        await panel.locator(TD('payout-basis-saved')).waitFor({ state: 'visible', timeout: 10000 }).catch(() => {})
+        await page.waitForTimeout(600)
+        const after = await leaseHistory(panel)
+        const added = after.filter((t) => !before.includes(t))
+        const b = await api(page, 'GET', `/api/investors/${S.investorId}/payout-basis`)
+        const sched = b.json?.schedule || []
+        const schedOk = sched.length === 1 && sched[0].effectiveMonth === LEASE_MONTHS.profit && sched[0].type === 'lease' && sched[0].leaseAmount === LEASE_AMOUNT && sched[0].note === LEASE_PANEL_NOTE
+        await caption(page, `Step LP — PUT → ${put ? put.status() : 'not sent'}; Change history ${before.length} → ${after.length} line(s)`)
+        const s = await leaseQaShot(page, 'lp-payout-basis-panel')
+        const statusOk = S.settings.enabled === true || status === LEASE_STATUS_OFF
+        return {
+          verdict: verdict(put?.status() === 200 && after.length === before.length + 1 && added.some((t) => t.includes(LEASE_PANEL_NOTE)) && schedOk && statusOk),
+          observed: `status "${status}"; PUT → ${put ? put.status() : 'not sent'}; Change history ${before.length} → ${after.length} line(s), the new one ${added.length ? `"${squash(added[0], 200)}"` : 'MISSING'}; ` +
+            `schedule ${sched.map((r) => `${r.effectiveMonth} ${r.type} ${r.leaseAmount ?? ''} (${r.source}) note "${r.note}"`).join(', ') || 'empty'}`,
+          shot: s,
+        }
+      })
+
     // The split investor LG compares: the lowest-id other investor with ledger rows.
     const pickSplit = async () => {
       const all = await api(page, 'GET', '/api/payouts')
@@ -10533,6 +10604,30 @@ async function leaseSection() {
       })
     uiRow('LF', 'Flag ON, UI: the QA-LEASE investor\'s Payouts in the portal preview, the profit month\'s row expanded',
       `The row shows ${leaseMoney(LEASE_AMOUNT)}; "${LEASE_L1}" in the section (the lease label, L1)`)
+
+    // ---- LW: flag ON, the admin screens: the invite form's warning gone, the panel applied
+    await step('LW', 'Flag ON, Super Admin, /investors: the invite form with a lease picked (nothing created), then the QA-LEASE investor\'s Payout Basis panel',
+      `No "contract only" warning on the form; the panel says "Applied to payouts from ${leaseLabel(LEASE_MONTHS.profit)}"`, async () => {
+        needFeature(); needOwner()
+        await gotoInvestorsPage(page)
+        const invites = await invitesPanel(page)
+        if (!invites) throw new Error('/investors has no invites panel ([data-test="invites-panel"])')
+        await openInviteForm(page, invites)
+        await chooseControl(page.locator(TD('invite-type-lease')).first())
+        const warning = await leaseInviteWarning(page)
+        await caption(page, `Step LW — lease payouts on: the invite form's warning ${warning.shown ? 'SHOWS' : 'is hidden'}`)
+        await leaseQaShot(page, 'lw-invite-form')
+        const panel = await leaseBasisPanel(page, NAME)
+        const status = squash(await panel.locator(TD('payout-basis-status')).innerText().catch(() => ''), 160)
+        await caption(page, `Step LW — the Payout Basis panel: "${status}"`)
+        const s = await leaseQaShot(page, 'lw-payout-basis-panel')
+        const want = `Applied to payouts from ${leaseLabel(LEASE_MONTHS.profit)}`
+        return {
+          verdict: verdict(!warning.shown && status === want),
+          observed: `the invite form's lease warning ${warning.shown ? `SHOWS ("${warning.text}")` : 'hidden'}; the panel's status "${status}"`,
+          shot: s,
+        }
+      })
 
     // ---- LG: the split investor, flag ON, against LE
     await step('LG', 'Flag ON: a split investor\'s Payouts (GET /api/investor/payouts?as_user_id= and the portal preview\'s Payouts section) against LE\'s, flag OFF',
