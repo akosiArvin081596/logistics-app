@@ -149,7 +149,7 @@
 //      footnote and "Not available" asset figures · R6 the RANGE_HINT under the
 //      portal's date inputs · Rx nothing written but the ledger refresh and the
 //      preview's audit lines
-// Lease payouts section (LA-LH, LP, LS, LW, LX; ONLY=lease, local only: DB_PATH and a server
+// Lease payouts section (LA-LH, LP, LS, LV, LW, LX; ONLY=lease, local only: DB_PATH and a server
 //   boot-server.sh started, which the section restarts by its pid file to switch
 //   INVESTOR_LEASE_PAYOUTS_ENABLED and INVESTOR_LEASE_DOWNTIME, and leaves booted
 //   with the flag off): a QA-LEASE investor made through the real flows (a $2,000
@@ -157,7 +157,10 @@
 //   on /investor-applications), with a profit month (a QA-LEASE- load on the LOCAL
 //   sheet), an idle month and a loss month (a maintenance service payment). LA-LD
 //   set it up (LA: the invite form's lease warning shows while the flag is off) · LP
-//   the admin Payout Basis panel: an edit and its Change history line · LE flag OFF: the split pays (LEu: the Payouts page) · LF flag ON: the
+//   the admin Payout Basis panel: an edit and its Change history line · LV flag ON:
+//   the latest closed month, its row created and finalized by the first ledger read,
+//   read again after its statement, report and Payouts page: still the lease, no
+//   carried loss · LE flag OFF: the split pays (LEu: the Payouts page) · LF flag ON: the
 //   lease pays ($2,000 in the profit and loss months, $0 in the idle month under
 //   downtime "unpaid"; LFu: the page shows it as the lease) · LW flag ON: no invite
 //   warning, the panel applied · LG a split investor's
@@ -190,7 +193,7 @@
 //               (S1-S7), dispatcher (D1-D3), maintenance (M1), moneypath (P1, E1,
 //               N1, N1b, F1, E2, B1, RC1), names (K1, K2, K3), eldlink (L1-L3),
 //               invoice (I1-I9), terms (T0-T11),
-//               investorfixes (F1-F14), report (R1-R6, Rx), lease (LA-LH, LP, LS, LW, LX).
+//               investorfixes (F1-F14), report (R1-R6, Rx), lease (LA-LH, LP, LS, LV, LW, LX).
 //               Unset = all, in that
 //               order. ⚠️ The sections together sign in more often than the login
 //               limiter allows one server process (see README), so split a full run.
@@ -367,7 +370,7 @@ function writeResults(final = false) {
     runs('terms') && `investor terms (${[...TERMS_PLAN].join(', ') || 'no step picked'})`,
     runs('investorfixes') && 'investor fixes (F1-F14)',
     runs('report') && `investor report (${[...REPORT_PLAN].sort().join(', ') || 'no step picked'}${REPORT_PLAN.size ? ', Rx' : ''})`,
-    runs('lease') && 'lease payouts (LA-LH, LP, LS, LW, LX)',
+    runs('lease') && 'lease payouts (LA-LH, LP, LS, LV, LW, LX)',
   ].filter(Boolean).join(' + ')
   const lines = [
     `# ${title} — ${PHASE.toUpperCase()}`,
@@ -9999,7 +10002,7 @@ function reportReadOnlyRow({ writes, start }) {
   record({ step: 'Rx', title: 'Read-only: what the section wrote', expected: 'No write but a sign-in session, the preview\'s audit lines (investor_preview_*, investor_payouts_view) and the payout ledger\'s own refresh; no plant journal', observed: `${notes.join('; ')}; plant journal ${fs.existsSync(JOURNAL) ? 'PRESENT' : 'none'}`, verdict: verdict(ok && !fs.existsSync(JOURNAL)), shot: '' })
 }
 
-// ---------------------------------------------------------------- lease payouts (LA-LH, LP, LS, LW, LX)
+// ---------------------------------------------------------------- lease payouts (LA-LH, LP, LS, LV, LW, LX)
 // The shared contract's lease payouts: INVESTOR_LEASE_PAYOUTS_ENABLED, a money flag
 // that ships off, and INVESTOR_LEASE_DOWNTIME (unpaid, the default, or paid). Local
 // only: the section writes the copy (DB_PATH) and one row of the LOCAL sheet, and it
@@ -10016,6 +10019,16 @@ const LEASE_REVENUE = 5000 // the profit month's load
 const LEASE_SERVICE = 3000 // the loss month's maintenance service payment
 const LEASE_L1 = 'Fixed monthly lease'
 const LEASE_L6 = 'No lease payment is owed for this month: no truck was in service under your lease.'
+const LEASE_L7 = 'A month your truck runs at a loss still pays the full lease. Losses are not carried forward against your lease.'
+const LEASE_L9 = 'Investor Payout (fixed monthly lease)'
+// LV: a lease month's statement block (lib/payout-statement.js LEASE_TEXT; the line is
+// the Payouts page's label too), and the split, carry and "records changed" wording that
+// a lease month's statement, report and Payouts page must not print.
+const LEASE_STATEMENT_HEADING = 'How your payment is calculated'
+const LEASE_STATEMENT_LINE = 'Fixed monthly lease payment'
+const LEASE_SPLIT_STATEMENT = ['investor split', 'Your share of net profit', 'Loss carried forward', 'now computes to']
+const LEASE_SPLIT_REPORT = ['the shortfall is carried against later months', 'which have changed since']
+const LEASE_SPLIT_PORTAL = ['Your Share', 'How your share is calculated', 'loss carried to later months', 'is still carried against future months', 'applied to an earlier loss', 'which have changed since it closed']
 // The Payout Basis panel's status while lease payouts are off (payoutBasis.js STATUS_OFF),
 // and the note LP saves through the panel's form.
 const LEASE_STATUS_OFF = 'Recorded, not yet applied: lease payouts are switched off. Payouts still use the Split %.'
@@ -10543,7 +10556,8 @@ async function leaseSection() {
       for (const [k, mk] of Object.entries(LEASE_MONTHS)) m[k] = { row: leaseRowOf(pay, mk), portal: leasePortalMonth(inv, mk) }
       return { pay, inv, m }
     }
-    const monthText = (x) => (x.row ? `${x.row.period} amount ${x.row.amount} (monthEarnings ${x.row.monthEarnings}, carried in ${x.row.lossCarriedIn}, deferred ${x.row.lossDeferred}, ${x.row.status}${x.row.finalizedAt ? ', FINALIZED' : ''}${x.row.payoutBasis ? `, basis ${x.row.payoutBasis.type} paid ${x.row.payoutBasis.paidAmount} reason ${x.row.payoutBasis.reason}` : ''}); portal payable ${x.portal?.payable ?? '?'}` : 'no ledger row')
+    const rowText = (r) => (r ? `${r.period} amount ${r.amount} (monthEarnings ${r.monthEarnings}, carried in ${r.lossCarriedIn}, deferred ${r.lossDeferred}, ${r.status}${r.finalizedAt ? ', FINALIZED' : ''}${r.payoutBasis ? `, basis ${r.payoutBasis.type} paid ${r.payoutBasis.paidAmount} reason ${r.payoutBasis.reason}` : ''})` : 'no ledger row')
+    const monthText = (x) => (x.row ? `${rowText(x.row)}; portal payable ${x.portal?.payable ?? '?'}` : 'no ledger row')
     // The QA-LEASE investor's Payouts in the portal preview: the profit month's row.
     const leaseUi = async (tag, expectAmount, expectLabel) => {
       const sec = await leasePayoutsSection(page, S.owner)
@@ -10563,6 +10577,103 @@ async function leaseSection() {
       record(u ? { step: `${tag}u`, title, expected, observed: u.text, verdict: verdict(u.ok), shot: u.shot }
         : { step: `${tag}u`, title, expected, observed: `not reached: ${tag} did not open the Payouts page`, verdict: S.feature || tag === 'LE' ? 'FAIL' : 'SKIP', shot: '' })
     }
+    const leaseRowPaid = (row, paid, reason) => {
+      const b = row?.payoutBasis || null
+      return !!row && row.amount === paid && row.monthEarnings === paid && row.lossCarriedIn === 0 && row.lossDeferred === 0 &&
+        !!b && b.type === 'lease' && b.leaseAmount === LEASE_AMOUNT && b.paidAmount === paid && b.reason === reason &&
+        row.breakdown?.splitPct === null && row.breakdown?.monthShare === paid
+    }
+    const leasePaid = (x, paid, reason) => {
+      const pb = x.portal?.payoutBasis || null
+      return leaseRowPaid(x.row, paid, reason) && !!x.portal && x.portal.payable === paid && !!pb && pb.paidAmount === paid && pb.reason === reason
+    }
+
+    // ---- LV: flag ON, a CLOSED lease month, read twice. This is the account's first
+    // ledger read, so the reconcile creates the closed month's row and stamps it
+    // finalized there and then (a month nobody opened between its month end and its
+    // close). Every later read must still answer the lease: the same figures, no carried
+    // loss, and the lease wording on the portal, the statement and the report. It runs
+    // before LE: LE's flag-off read would settle the closed months as the split first.
+    await step('LV', 'Flag ON, INVESTOR_LEASE_DOWNTIME=unpaid (restarted): the latest closed month given a cost, then the QA-LEASE investor\'s ledger read twice, with its statement, its report and its Payouts page read between the two',
+      `The first read creates the closed month's row already finalized, paying ${leaseMoney(LEASE_AMOUNT)} as the lease (reason null, nothing carried or deferred), and the copy's frozen breakdown of it is the lease; the second read answers exactly as the first; the portal's month agrees; the statement prints the lease block (and the loss-month sentence L7), no split and no carried loss; the report prints "${LEASE_L9}" and L8, no carry or "records have changed" sentence; the Payouts page shows ${leaseMoney(LEASE_AMOUNT)} as the lease, no carried loss`, async () => {
+        needFeature(); needOwner()
+        if (!S.truck) throw new Error('not reached: the acceptance made no truck')
+        const cur = dayCT().slice(0, 7)
+        const closed = db.prepare("SELECT period FROM period_locks WHERE status = 'locked' AND period >= ? AND period < ? ORDER BY period DESC LIMIT 1").get(LEASE_MONTHS.profit, cur)?.period
+        if (!closed) throw skip(`the copy has no finalized month from ${LEASE_MONTHS.profit} to before ${cur}`)
+        const earlier = db.prepare('SELECT COUNT(*) AS n FROM investor_payouts WHERE owner_id = ?').get(S.owner).n
+        if (earlier) throw new Error(`the account already has ${earlier} ledger row(s), so this is not its first ledger read`)
+        const notes = []
+        // A cost in the closed month, so it is a month with activity that ran at a loss:
+        // the lease pays it in full, and read as the split it would carry the loss.
+        // POST /api/maintenance-fund refuses a date in a finalized month, so the copy
+        // takes the payment directly: allowed on the private copy only.
+        const mfId = Number(db.prepare("INSERT INTO maintenance_fund (type, amount, description, truck, date) VALUES ('service', ?, ?, ?, ?)")
+          .run(LEASE_SERVICE, 'QA-LEASE e2e: a cost in a closed month', S.truck.unit_number, `${closed}-10`).lastInsertRowid)
+        leaseNote('maintenance_fund', mfId)
+        notes.push(`closed month ${closed}: a ${leaseMoney(LEASE_SERVICE)} maintenance service payment, entry #${mfId}, set in the copy (the route refuses a finalized month)`)
+        const bootText = await leaseReboot(srv, { INVESTOR_LEASE_PAYOUTS_ENABLED: 'true', INVESTOR_LEASE_DOWNTIME: 'unpaid' })
+        S.rebooted = true
+        const st = await settings()
+        notes.push(bootText)
+        await caption(page, `Step LV — restarted: ${bootText}`)
+
+        // The first read: the ledger creates and stamps the closed month's row.
+        const first = await ledger(S.owner)
+        const row1 = leaseRowOf(first, closed)
+        const stored = db.prepare('SELECT finalized_at AS at, finalized_breakdown AS b FROM investor_payouts WHERE owner_id = ? AND period = ?').get(S.owner, closed)
+        let frozen = null
+        try { frozen = JSON.parse(stored?.b || 'null') } catch { frozen = null }
+        const firstOk = !!row1?.finalizedAt && leaseRowPaid(row1, LEASE_AMOUNT, null) && first?.totals?.carriedLossOutstanding === 0
+        const frozenOk = !!stored?.at && frozen?.payoutBasis?.type === 'lease' && frozen.payoutBasis.paidAmount === LEASE_AMOUNT &&
+          frozen.splitPct === null && frozen.monthShare === LEASE_AMOUNT && frozen.lossCarriedIn === 0 && frozen.lossDeferred === 0
+        notes.push(`first read: ${rowText(row1)}; carried loss outstanding ${first?.totals?.carriedLossOutstanding}; the copy's frozen breakdown: ${frozen ? `basis ${frozen.payoutBasis ? `${frozen.payoutBasis.type} paid ${frozen.payoutBasis.paidAmount}` : 'NONE (reads as the split)'}, splitPct ${frozen.splitPct}, monthShare ${frozen.monthShare}, carried in ${frozen.lossCarriedIn}, deferred ${frozen.lossDeferred}` : `none ("${String(stored?.b ?? '')}")`}`)
+
+        // The statement for the closed month.
+        const stmt = await fetchBytes(page, `/api/investor/payouts/${closed}/statement?as_user_id=${S.owner}`)
+        const sText = stmt.status === 200 && stmt.isPdf ? rNorm((await pdfText(stmt.bytes.toString('base64'))).text) : ''
+        const sWant = [LEASE_STATEMENT_HEADING, LEASE_STATEMENT_LINE, `Lease payment for ${leaseLabel(closed)}`, LEASE_L7, leaseMoney(LEASE_AMOUNT)]
+        // Compared without case or spaces: the table headings print upper-case and
+        // letter-spaced.
+        const compact = (t) => t.replace(/\s+/g, '').toUpperCase()
+        const sMissing = sWant.filter((t) => !compact(sText).includes(compact(t)))
+        const sSplit = LEASE_SPLIT_STATEMENT.filter((t) => compact(sText).includes(compact(t)))
+        const stmtOk = !!sText && !sMissing.length && !sSplit.length
+        notes.push(`statement ${closed} → ${codeText(stmt)}${stmt.isPdf ? ' (a PDF)' : ''}: lease wording ${sMissing.length ? `MISSING ${sMissing.map((t) => `"${squash(t, 40)}"`).join(', ')}` : 'present'}; split or carry wording ${sSplit.length ? `PRINTED ${sSplit.map((t) => `"${t}"`).join(', ')}` : 'none'}`)
+
+        // The report over the closed month.
+        const rep = await fetchBytes(page, `/api/investor/report?as_user_id=${S.owner}&start=${closed}-01&end=${lastDayOf(closed)}`)
+        const rText = rep.status === 200 && rep.isPdf ? rNorm((await pdfText(rep.bytes.toString('base64'))).text) : ''
+        const l8 = `Your payout is a fixed monthly lease of ${leaseMoney(LEASE_AMOUNT)}, not a share of net profit.`
+        const rMissing = [LEASE_L9, l8].filter((t) => !rText.includes(t))
+        const rSplit = [...LEASE_SPLIT_REPORT.filter((t) => rText.includes(t)), ...(/Investor Payout \(\d+%\)/.test(rText) ? ['Investor Payout (<n>%)'] : [])]
+        const reportOk = !!rText && !rMissing.length && !rSplit.length
+        notes.push(`report ${closed} → ${codeText(rep)}${rep.isPdf ? ' (a PDF)' : ''}: lease wording ${rMissing.length ? `MISSING ${rMissing.map((t) => `"${squash(t, 40)}"`).join(', ')}` : 'present'}; split, carry or change wording ${rSplit.length ? `PRINTED ${rSplit.map((t) => `"${squash(t, 50)}"`).join(', ')}` : 'none'}`)
+
+        // The Payouts page (the portal preview): the closed month's row, expanded.
+        const sec = await leasePayoutsSection(page, S.owner)
+        const uiText = await leaseMonthRowText(page, sec, closed) || ''
+        const secText = rNorm(await sec.innerText().catch(() => ''))
+        const uiSplit = LEASE_SPLIT_PORTAL.filter((t) => secText.includes(t) || uiText.includes(t))
+        const uiOk = uiText.includes(leaseMoney(LEASE_AMOUNT)) && uiText.includes(LEASE_STATEMENT_LINE) && secText.includes(LEASE_L1) && !uiSplit.length
+        await caption(page, `Step LV — the Payouts page, ${leaseLabel(closed)} (closed, read again): ${uiText ? `"${squash(uiText, 140)}"` : '(no row)'}`)
+        const s = await shot(page, 'lv-closed-lease-month')
+        notes.push(`the Payouts page's ${leaseLabel(closed)} row shows ${leaseMoney(LEASE_AMOUNT)} as "${LEASE_STATEMENT_LINE}": ${uiText.includes(leaseMoney(LEASE_AMOUNT)) && uiText.includes(LEASE_STATEMENT_LINE)}; "${LEASE_L1}" in the section: ${secText.includes(LEASE_L1)}; split, carry or change wording ${uiSplit.length ? `SHOWN ${uiSplit.map((t) => `"${t}"`).join(', ')}` : 'none'}`)
+
+        // The second read, after every reader above.
+        const second = await ledger(S.owner)
+        const inv = await portal(S.owner)
+        const diffs = leaseDiffPaths(first, second)
+        const x2 = { row: leaseRowOf(second, closed), portal: leasePortalMonth(inv, closed) }
+        const secondOk = !diffs.length && leasePaid(x2, LEASE_AMOUNT, null) && x2.portal.lossCarriedIn === 0 && x2.portal.lossDeferred === 0 &&
+          second?.totals?.carriedLossOutstanding === 0
+        notes.push(`second read: ${diffs.length ? `DIFFERS from the first at ${diffs.slice(0, 8).join(', ')}` : 'identical to the first'}; ${monthText(x2)}; portal carried in ${x2.portal?.lossCarriedIn ?? '?'}, deferred ${x2.portal?.lossDeferred ?? '?'}; carried loss outstanding ${second?.totals?.carriedLossOutstanding}`)
+        return {
+          verdict: verdict(st?.enabled === true && st?.settings?.downtime === 'unpaid' && firstOk && frozenOk && stmtOk && reportOk && uiOk && secondOk),
+          observed: notes.join('; '),
+          shot: s,
+        }
+      })
 
     // ---- LE: flag OFF, the split pays
     await step('LE', 'Flag OFF (the server as booted, or restarted with it off): the QA-LEASE investor\'s ledger and portal for the three months; a split investor\'s Payouts recorded for LG',
@@ -10597,15 +10708,6 @@ async function leaseSection() {
       const st = await settings()
       await caption(page, `Step ${tag} — restarted: ${bootText}`)
       return { bootText, st, r: await leaseRead() }
-    }
-    const basisOf = (x) => x.row?.payoutBasis || null
-    const leasePaid = (x, paid, reason) => {
-      const b = basisOf(x)
-      const pb = x.portal?.payoutBasis || null
-      return !!x.row && x.row.amount === paid && x.row.monthEarnings === paid && x.row.lossCarriedIn === 0 && x.row.lossDeferred === 0 &&
-        !!b && b.type === 'lease' && b.leaseAmount === LEASE_AMOUNT && b.paidAmount === paid && b.reason === reason &&
-        x.row.breakdown?.splitPct === null && x.row.breakdown?.monthShare === paid &&
-        !!x.portal && x.portal.payable === paid && !!pb && pb.paidAmount === paid && pb.reason === reason
     }
     await step('LF', 'Flag ON, INVESTOR_LEASE_DOWNTIME=unpaid (restarted): the QA-LEASE investor\'s ledger and portal for the three months',
       `GET /api/investor-payout-settings enabled, downtime unpaid; profit and loss months pay ${leaseMoney(LEASE_AMOUNT)} (payoutBasis lease, reason null, splitPct null, nothing carried or deferred); the idle month pays $0 (reason "downtime"); the portal agrees`, async () => {

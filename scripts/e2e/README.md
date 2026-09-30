@@ -86,11 +86,13 @@ What it covers today, by section (`ONLY` picks them):
   under its date inputs (R6). Nothing is written but the preview's audit lines and the ledger's own refresh (Rx).
   Local and staging; one sign-in; `ONLY=report`. Its R-numbers are its own: the truck section's R1–R16 are different
   steps.
-- **Lease payouts (LA–LH, LP, LS, LW, LX).** A QA-LEASE investor made through the real flows (a $2,000 lease invite, the
+- **Lease payouts (LA–LH, LP, LS, LV, LW, LX).** A QA-LEASE investor made through the real flows (a $2,000 lease invite, the
   applicant's `/invest` walk-through, the acceptance), given a profit, an idle and a loss month. With
   `INVESTOR_LEASE_PAYOUTS_ENABLED` off the split pays; on, the lease pays ($2,000 in the profit and loss months, $0 in the
   idle month under `INVESTOR_LEASE_DOWNTIME=unpaid`, $2,000 under `paid`, still $2,000 with the truck in Maintenance and
-  $0 with it Inactive); a split investor's Payouts are unchanged.
+  $0 with it Inactive); a split investor's Payouts are unchanged. A closed month is read twice with the flag on (LV):
+  its row, created and finalized by the first read, still reads as the lease on the second, with no carried loss and
+  lease wording on the Payouts page, the statement and the report.
   The admin side too: the invite form's lease warning (shown with the flag off, gone with it on) and an edit through
   the Payout Basis panel with its Change history line.
   The section restarts the server itself to switch the flag. Local only (`DB_PATH`); one sign-in; `ONLY=lease`. Its
@@ -255,7 +257,7 @@ BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-report ONLY=report DB_P
   fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
 fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
 # Part 9: the lease payouts (1 sign-in). Boot it with boot-server.sh: the section restarts that server by its pid file
-# (flag on, downtime unpaid, then paid) and leaves it booted with the flag off.
+# (flag on for LV, off for LE, on with downtime unpaid, then paid) and leaves it booted with the flag off.
 fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
 BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-lease ONLY=lease DB_PATH="$W/qa.db" \
   fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
@@ -1156,7 +1158,7 @@ FAILs on the `$` prices and the missing count row; its "Investor" row already na
 `?as_user_id=`. R5 FAILs (no footnote, `$` figures), R6 FAILs (no `reportRangeMode`, no hint), and Rx PASSes. With an
 investor whose trucks are all priced (`E2E_REPORT_INVESTOR`), R4b and R5 pass on that build too.
 
-## The lease payouts section (LA–LH, LP, LS, LW, LX)
+## The lease payouts section (LA–LH, LP, LS, LV, LW, LX)
 
 `ONLY=lease`, **local only** (`DB_PATH`, and a server `boot-server.sh` started). It tests the shared contract's lease
 payouts: `INVESTOR_LEASE_PAYOUTS_ENABLED` (a money flag that ships off) and `INVESTOR_LEASE_DOWNTIME` (`unpaid`, the
@@ -1165,8 +1167,8 @@ default, or `paid`). The flag is read at boot, so **the section restarts the ser
 `boot-server.sh` with the same worktree, port and `DB_PATH`. It restarts only after LC has proved `DB_PATH` is that
 server's database (the account the server reports is in the file). The session survives each restart (the session
 store is the database). LX leaves the server booted with the flag off, `boot-server.sh`'s default. On a build without
-the feature (`GET /api/investor-payout-settings` is not there) LA–LE still run, as today's baseline, and LF, LFu, LG,
-LH and LS SKIP.
+the feature (`GET /api/investor-payout-settings` is not there) LA–LE still run, as today's baseline, and LV, LF, LFu,
+LG, LH and LS SKIP.
 
 **The test investor** is `QA-LEASE Investor <stamp>` (`qa-test+<digits>-lease-payouts@example.com`, a fake VIN
 `QALEASE<digits>`), made the way a real one is: LA creates the invite in the invites panel, LB fills and signs the
@@ -1175,6 +1177,17 @@ application as an anonymous applicant, LC accepts it on `/investor-applications`
 follow the flag. A finalized month's row is settled the first time it is written, so it would keep its flag-off amount.
 LA refuses a copy where any of the three is finalized.
 
+**The closed month (LV)** is the copy's latest finalized month before the current one. Those three months never
+exercised a closed one, and LE, which read the account's ledger first, did so with the flag off, so every closed month
+was settled as the split before the flag was ever on. That is how a late-stamped lease month's second read (the Split %
+re-applied, its loss carried, split wording on the statement and report) went unseen here until staging showed it on
+2026-09-30. So LV runs before LE and makes the account's first ledger read, with the flag on: the closed month is given
+a maintenance service payment first (the route refuses a date in a finalized month, so the copy takes it directly and
+the row says so), which makes it a month with activity that ran at a loss, and so one the split would carry. Then the
+ledger is read (the row is created and finalized there and then), the statement, the report and the Payouts page are
+read, and the ledger once more: the two ledger answers must be identical. LV SKIPs when the copy has no finalized month
+from the profit month on, and FAILs when the account already has ledger rows (it would not be the first read).
+
 | Step | How it is shown | Expected |
 |---|---|---|
 | LA | Checks: the sheet the server reads is not production's (the environment's `SPREADSHEET_ID`, else the server worktree's `.env`); the three months are open in the copy. **UI:** `/investors` → invites panel → a lease invite, 2000, Create | The form shows `This changes the contract only. Payouts are still calculated from the Split % column.` while lease payouts are off (hidden when the server was booted with them on); 201 and the link dialog |
@@ -1182,6 +1195,7 @@ LA refuses a copy where any of the three is finalized.
 | LC | **UI:** `/investor-applications`, "Accepted" picked in the row's status select, the confirmation accepted (the temporary password is masked in the shot). With the feature: `GET /api/investors/:id/payout-basis` | 200 `accountCreated`, a truck made; the response's `payoutBasis` `{ recorded: true, type: "lease", leaseAmount: 2000 }`; the basis `current` a lease of 2000 from `signed_terms`, `signedTerms` the same |
 | LD | The truck in service from 2025-02-01 (**UI:** Trucks → Edit; the form refuses a date inside a finalized month, as it does for any truck, with 409 `PERIOD_FINALIZED`, so the copy takes it directly and the row says so). With the feature, `PUT /api/investors/:id/payout-basis` a lease of 2000 from 2025-02: it refuses a start before a closed month (409 `BASIS_MONTH_CLOSED`, and the copy's months from 2025-05 are closed), so the copy then takes the row directly, written as the PUT writes it, and the row says so. A delivered $5,000 load `QA-LEASE-<digits>-P` on 2025-02-14 with the account's Owner ID, through `POST /api/data` (the columns found by the app's own header patterns). A $3,000 maintenance service payment on the truck on 2025-04-10 (`POST /api/maintenance-fund`) | Each saved; the basis schedule is one lease row from 2025-02; the portal reads the load (the server caches the sheet for 60 s, so this polls up to 90 s) |
 | LP | **UI:** `/investors` → the QA-LEASE investor's name → its Payout Basis panel: Edit, the same lease (2000) from the first month it may change (`earliestEditableMonth`) with a note, Save | The panel's status is `Recorded, not yet applied: lease payouts are switched off. Payouts still use the Split %.` (flag off); the form's PUT 200; one more Change history line, naming the note; the schedule: the lease from 2025-02, then the same lease from that month |
+| LV | Restarted with the flag on and `INVESTOR_LEASE_DOWNTIME=unpaid`. The closed month (above) given a $3,000 maintenance service payment in the copy. `GET /api/investor/payouts` (the account's first ledger read); the copy's `finalized_breakdown` for that month; its statement (`GET /api/investor/payouts/<month>/statement`) and the report over it, both as text; **UI:** the Payouts page (`/investor-portals/<id>`), that month's row expanded; then `GET /api/investor/payouts` again and `GET /api/investor` | First read: the row finalized, paying $2,000 as the lease (reason null, `splitPct` null, `monthShare` 2000, nothing carried or deferred, `carriedLossOutstanding` 0), and the frozen breakdown the lease; the statement prints "How your payment is calculated", "Fixed monthly lease payment", "Lease payment for <month>", L7 and $2,000, and none of "investor split", "Your share of net profit", "Loss carried forward", "now computes to"; the report prints L9 and L8, no `Investor Payout (<n>%)`, no carry or "which have changed since" sentence; the page's row shows $2,000 as "Fixed monthly lease payment", L1 in the section, and no "Your Share", carried-loss or "records changed" text; the second read identical to the first, and the portal's month the lease with nothing carried |
 | LE | Flag off (restarted off first if the server was booted with it on). `GET /api/investor/payouts` and `GET /api/investor` for the account. A split investor (the lowest-id other investor with ledger rows) recorded: its answer and its Payouts section's text | Profit month: the split share (above $0, not $2,000), `owed`; idle $0; loss $0 with the loss deferred; no `payoutBasis` key anywhere; the portal's `payable` equals the ledger |
 | LEu | **UI:** the account's Payouts in the portal preview (`/investor-portals/<id>`), the profit month's row expanded | The row shows the split amount; no "Fixed monthly lease" in the section |
 | LF | Restarted with the flag on and `INVESTOR_LEASE_DOWNTIME=unpaid`; `GET /api/investor-payout-settings`; the same two answers | Enabled, downtime unpaid; profit and loss months pay 2000 (`payoutBasis` lease, reason null, `breakdown.splitPct` null, `monthShare` 2000, nothing carried or deferred); the idle month pays 0 (reason `downtime`); the portal's month carries the same basis and payable |
