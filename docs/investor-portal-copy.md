@@ -280,7 +280,7 @@ Nothing below renders on an ordinary month. A month with no carry looks exactly 
 
 ## 12. The statement PDF (`lib/payout-statement.js`)
 
-This one **leaves the app** — it is a document the investor keeps.
+This one **leaves the app** — it is a document the investor keeps. A month paid as a fixed monthly lease prints different wording: see §17.2.
 
 | Flag | Exact text |
 |---|---|
@@ -454,6 +454,8 @@ This document **leaves the app**, like the statement (§12). It is the PDF behin
 | 🔴 | `The payout for <month> includes a correction shown on your Payouts page.` | Same line, when a month in the report carries a manual correction on the Payouts page. | **Awaiting approval** |
 | ⚪ | `No payout month falls in this report period.` | Same line, when the dates picked contain no month with a payout (e.g. a future range). | **Awaiting approval** |
 
+For an investor paid a fixed monthly lease, the payout row's label and one more sentence on this line are in §17.1 (L8, L8b, L9).
+
 ### 16.2 Dates that start or end mid-month
 
 **The choice (owner, 2026-09-30): whole months.** A payout is settled per month, so a report from July 15 to August 12 now covers **the whole of July and August on every line**: revenue, fuel and other trip expenses, Driver Pay, the fixed costs and the payout. The period under the title prints the whole months (`Period: 7/1/2026 – 8/31/2026`). Before, revenue and trip expenses followed the exact dates while the payout covered whole months, so half of *Net Profit* was not the payout. The other setting, **exact dates**, puts that back and swaps in the second sentence below.
@@ -497,6 +499,85 @@ Error messages are normally not listed here (see "Not listed" at the top). These
 
 ---
 
+## 17. Lease investor payouts — wording awaiting client sign-off
+
+**Every line in this section is AWAITING YOUR APPROVAL.** Nothing here has shipped; you review it on staging before it is merged.
+
+**What it is.** An investor who signed a fixed monthly lease payment (Amendment No. 1, §15.3) is paid that lease each month instead of a share of net profit. It sits behind a switch that ships **off** (`INVESTOR_LEASE_PAYOUTS_ENABLED`). While it is off, no investor sees anything below, and §15's *"Payouts are not changed"* still holds. **Investors on the 50/50 split see no change, switch on or off:** every figure and every word in §2–§16 stays exactly as it is.
+
+**How the text is written below.** `{amount}` is the monthly lease and `{paid}` what the month pays, both in whole dollars (`$2,000`); `{covered}` and `{days}` are day counts; `{month}` and `{period}` a month (`September 2026`).
+
+### 17.1 The shared wording, and where each line appears
+
+The same sentence is used on every surface that says the same thing, so the portal, the statement and the report cannot disagree. The portal build places the portal lines; check each placement on staging.
+
+| # | Flag | Exact text | Where / when | Status |
+|---|---|---|---|---|
+| L1 | ⚪ | `Fixed monthly lease` | Portal, on a lease month: Earnings, Payouts, Cash Flow and Assets, in place of the split percentage (`× 50%`, `50% of net profit`, `before your profit split`) wherever it shows today. | **Awaiting approval** |
+| L2 | ⚪ | `Fixed monthly lease payment of {amount}` | Portal: the line under the month's figure on Earnings (in place of `50% of net profit (…)`), and on the Payouts current-month card. | **Awaiting approval** |
+| L3 | 🔴 | `Under your agreement you are paid a fixed monthly lease of {amount}, not a share of net profit. Your truck's revenue and costs are shown for your information and do not change this payment.` | Portal: Earnings and Payouts, where a split month explains its share (the `Apply the 50% Split` step, `Your expenses are already subtracted here before the split.`). Statement PDF: under the amount paid, as the caption of the truck's revenue and costs (17.2). | **Awaiting approval** |
+| L4 | 🔴 | `The lease covered {covered} of {days} days this month, so this month pays {paid}.` | Portal (Earnings, Payouts) and statement PDF, on a month the lease covers only part of: the month a truck enters service or is retired, or the month the lease starts. See the Proration setting in 17.3. | **Awaiting approval** |
+| L5 | 🔴 | `No lease payment is owed for this month: the truck had no activity, and your agreement (section 3.1) owes nothing during downtime.` | Same places, on a month with no activity at all. See the Downtime setting in 17.3. | **Awaiting approval** |
+| L6 | 🔴 | `No lease payment is owed for this month: no truck was in service under your lease.` | Same places, on a month no truck of the investor's was in service, e.g. every truck retired or not yet delivered. | **Awaiting approval** |
+| L7 | 🔴 | `A month your truck runs at a loss still pays the full lease. Losses are not carried forward against your lease.` | Portal (Earnings, Payouts): a lease month that ran at a loss, where a split month shows its loss carry-forward rows (§2, §9, §11). Statement PDF: under the truck's net profit, only on a loss month that paid the full lease; next to a proration or a $0 month, "still pays the full lease" would contradict the line above it. | **Awaiting approval** |
+| L8 | 🔴 | `Your payout is a fixed monthly lease of {amount}, not a share of net profit.` | Report PDF: the grey line under the Income Statement (§16.1), when every month in the report is paid as a lease. | **Awaiting approval** |
+| L8b | 🔴 | `From {month}, your payout is a fixed monthly lease of {amount}, not a share of net profit.` | Same line, when the lease starts partway through the report; `{month}` is its first lease month. | **Awaiting approval** |
+| L9 | ⚪ | `Investor Payout (fixed monthly lease)` | Report PDF: the payout row of the Income Statement (today `Investor Payout (50%)`), when every month in the report is paid as a lease. | **Awaiting approval** |
+| — | ⚪ | `Investor Payout` | Same row, when the report covers split months and lease months. | **Awaiting approval** |
+| L10 | 🔴 | `Paid as a fixed monthly lease, so there is no per-load share.` | Portal My Loads (the `Your Share` figure and the load's detail window) and the Load Reports download, for a lease month, in place of the per-load share. | **Awaiting approval** |
+
+### 17.2 The statement PDF for a lease month (`lib/payout-statement.js`)
+
+Same document as §12. A split month's statement is unchanged, word for word.
+
+| Flag | Exact text | Where / when | Status |
+|---|---|---|---|
+| ⚪ | `How your payment is calculated` | Heading of the table on page 1, in place of `How your share is calculated`. | **Awaiting approval** |
+| ⚪ | `Fixed monthly lease payment` | Its first row, with the monthly lease, e.g. `$2,000.00`. | **Awaiting approval** |
+| 🔴 | L4, L5 or L6 (17.1) | A small grey line under that row, when the month pays other than the full lease. | **Awaiting approval** |
+| ⚪ | `Lease payment for {period}` | The next row: what the month pays, e.g. `Lease payment for September 2026` `$1,333.00`. | **Awaiting approval** |
+| ⚪ | `Settled amount for <month>`, `+ Adjustment` / `− Adjustment` | Unchanged from §12, including the note when records changed after the month closed. | **Awaiting approval** |
+| 🔴 | L3 (17.1) | Under the amount paid, in place of `Your trip expenses are deducted before the split, so the share above is already net of them.` | **Awaiting approval** |
+| ⚪ | `Your truck's revenue and costs` | Heading of a second table under L3: Revenue, Driver Pay, Fixed Costs, Trip Expenses (Maintenance Fund and Compliance / IFTA when not zero) and Net Profit, the same lines as the split statement. Your agreement (master §3.5) asks for an itemized statement, so they stay, for information. | **Awaiting approval** |
+| 🔴 | L7 (17.1) | Under that table, on a loss month that paid the full lease. | **Awaiting approval** |
+
+**Not on a lease statement:** `× 50% investor split`, `Your share of net profit`, `− Earlier loss applied`, `Loss carried forward` and the note about expenses before the split. The supporting detail pages are unchanged.
+
+Example: a $2,000 lease whose truck entered service on September 11, 2026, with the settings as shipped. Page 1 reads:
+
+```
+HOW YOUR PAYMENT IS CALCULATED                                  AMOUNT
+Fixed monthly lease payment                                  $2,000.00
+  The lease covered 20 of 30 days this month, so this month pays $1,333.
+Lease payment for September 2026                             $1,333.00
+Settled amount for September 2026                            $1,333.00
+                                             AMOUNT PAID     $1,333.00
+
+Under your agreement you are paid a fixed monthly lease of $2,000, not a share of net profit.
+Your truck's revenue and costs are shown for your information and do not change this payment.
+
+YOUR TRUCK'S REVENUE AND COSTS                                  AMOUNT
+Revenue ... − Driver Pay ... − Fixed Costs ... − Trip Expenses ... Net Profit
+```
+
+### 17.3 Your three settings
+
+Each is one setting, and the default follows the agreements. Changing one changes the months that have not been settled yet; a settled month keeps the amount it was settled at.
+
+| Setting | Default | What the default does | Why | The other setting |
+|---|---|---|---|---|
+| Downtime | **unpaid** | A month in which the truck did nothing at all (no loads, no driver pay, no trip expenses, no maintenance or compliance cost, no driver days) pays no lease, and shows L5. This is the same test that already holds back a truck's fixed costs for an idle month. | Master §3.1: nothing is owed during Operational Downtime. | **paid**: such a month pays the lease anyway. |
+| Proration | **daily** | A month the lease covers only part of pays for the days it covers: $2,000 × 20 ÷ 30 = $1,333, rounded to the nearest dollar, and shows L4. A day counts when the lease has started and at least one of the investor's trucks is in the fleet that day: from its in-service date, through its retirement date. | Lease §1.02: the lease starts when the truck is delivered. Master §4.03: the investor is paid up to the day the truck leaves the fleet. | **none**: any month with at least one covered day pays the full lease. |
+| Retirement | **stop** | The lease stops after the day a truck is retired; that day is still paid. When every truck is retired, the month pays nothing and shows L6. | Master §4.03 and lease §9.01 (termination). | **continue**: retiring a truck does not end its lease payment. |
+
+⚠️ **Downtime inside an active month is still paid.** The app can only see a month with no activity at all, so a truck that is down for two weeks of an otherwise busy month pays the full lease. Master §3.1 speaks of *periods* of downtime; tell us if you want a shorter period to count.
+
+### 17.4 Whole dollars
+
+Lease amounts are **whole dollars**, like every payout and adjustment on the payouts ledger, and a prorated month is rounded to the nearest dollar. An invitation's lease amount must now be whole dollars; the admin invitation form says `Enter the monthly lease amount in whole dollars, for example 2000.` An investor who already signed for an amount with cents (say `$2,000.50`) is not switched to lease payouts on acceptance; an admin sets their monthly lease by hand.
+
+---
+
 ## The ones I'd raise first
 
 0. **§2 / §12, the loss carry-forward** — the line you actually asked about. Two things to settle: (a) **one wording**, since the same deduction is currently called three different things across the PDF, the Earnings screen and the Payouts table; and (b) whether `Payable` / `Projected payout` is the right name for the figure that lands under it. Everything else in this file can wait — this one is live in August.
@@ -505,3 +586,4 @@ Error messages are normally not listed here (see "Not listed" at the top). These
 3. **§10 "…and may differ"** — the portal telling an investor two of its own totals disagree.
 4. **§15, a fixed monthly lease on paper, a split in the payouts** — an investor invited on a lease signs for a fixed monthly amount, while payouts are still calculated from the Split % column. The two setup-guide answers that describe a profit share now say it is the standard agreement (§15.6), but the Lease §2.01 lead paragraph still describes rent as a share of Net Operating Income (see "Related, left unchanged here" under §15.4).
 5. **§16.2 / §16.3, the report's two choices** — whole months for a mid-month date range, and `Not available` / `Not recorded` instead of $0 for a truck with no recorded purchase price (*Business ROI*, which does not use the price, keeps its number). Each is one setting; the other setting is the report as it was.
+6. **§17, paying the lease itself** — the answer to item 4, behind a switch that ships off. Three settings to confirm (downtime unpaid, daily proration, retirement stops the lease), and one gap: downtime inside an otherwise active month is still paid.
