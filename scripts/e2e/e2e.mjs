@@ -149,7 +149,7 @@
 //      footnote and "Not available" asset figures · R6 the RANGE_HINT under the
 //      portal's date inputs · Rx nothing written but the ledger refresh and the
 //      preview's audit lines
-// Lease payouts section (LA-LH, LP, LW, LX; ONLY=lease, local only: DB_PATH and a server
+// Lease payouts section (LA-LH, LP, LS, LW, LX; ONLY=lease, local only: DB_PATH and a server
 //   boot-server.sh started, which the section restarts by its pid file to switch
 //   INVESTOR_LEASE_PAYOUTS_ENABLED and INVESTOR_LEASE_DOWNTIME, and leaves booted
 //   with the flag off): a QA-LEASE investor made through the real flows (a $2,000
@@ -161,8 +161,9 @@
 //   lease pays ($2,000 in the profit and loss months, $0 in the idle month under
 //   downtime "unpaid"; LFu: the page shows it as the lease) · LW flag ON: no invite
 //   warning, the panel applied · LG a split investor's
-//   Payouts unchanged, flag ON · LH downtime "paid": the idle month pays $2,000 · LX
-//   every row and the sheet row removed, the server booted with the flag off
+//   Payouts unchanged, flag ON · LH downtime "paid": the idle month pays $2,000 · LS
+//   the truck in Maintenance still pays the lease, Inactive pays $0 (not in service) ·
+//   LX every row and the sheet row removed, the server booted with the flag off
 //
 // Env:
 //   BASE_URL    required — e.g. http://127.0.0.1:3181 (never production)
@@ -189,7 +190,7 @@
 //               (S1-S7), dispatcher (D1-D3), maintenance (M1), moneypath (P1, E1,
 //               N1, N1b, F1, E2, B1, RC1), names (K1, K2, K3), eldlink (L1-L3),
 //               invoice (I1-I9), terms (T0-T11),
-//               investorfixes (F1-F14), report (R1-R6, Rx), lease (LA-LH, LP, LW, LX).
+//               investorfixes (F1-F14), report (R1-R6, Rx), lease (LA-LH, LP, LS, LW, LX).
 //               Unset = all, in that
 //               order. ⚠️ The sections together sign in more often than the login
 //               limiter allows one server process (see README), so split a full run.
@@ -366,7 +367,7 @@ function writeResults(final = false) {
     runs('terms') && `investor terms (${[...TERMS_PLAN].join(', ') || 'no step picked'})`,
     runs('investorfixes') && 'investor fixes (F1-F14)',
     runs('report') && `investor report (${[...REPORT_PLAN].sort().join(', ') || 'no step picked'}${REPORT_PLAN.size ? ', Rx' : ''})`,
-    runs('lease') && 'lease payouts (LA-LH, LP, LW, LX)',
+    runs('lease') && 'lease payouts (LA-LH, LP, LS, LW, LX)',
   ].filter(Boolean).join(' + ')
   const lines = [
     `# ${title} — ${PHASE.toUpperCase()}`,
@@ -9998,7 +9999,7 @@ function reportReadOnlyRow({ writes, start }) {
   record({ step: 'Rx', title: 'Read-only: what the section wrote', expected: 'No write but a sign-in session, the preview\'s audit lines (investor_preview_*, investor_payouts_view) and the payout ledger\'s own refresh; no plant journal', observed: `${notes.join('; ')}; plant journal ${fs.existsSync(JOURNAL) ? 'PRESENT' : 'none'}`, verdict: verdict(ok && !fs.existsSync(JOURNAL)), shot: '' })
 }
 
-// ---------------------------------------------------------------- lease payouts (LA-LH, LP, LW, LX)
+// ---------------------------------------------------------------- lease payouts (LA-LH, LP, LS, LW, LX)
 // The shared contract's lease payouts: INVESTOR_LEASE_PAYOUTS_ENABLED, a money flag
 // that ships off, and INVESTOR_LEASE_DOWNTIME (unpaid, the default, or paid). Local
 // only: the section writes the copy (DB_PATH) and one row of the LOCAL sheet, and it
@@ -10014,6 +10015,7 @@ const LEASE_IN_SERVICE = '2025-02-01'
 const LEASE_REVENUE = 5000 // the profit month's load
 const LEASE_SERVICE = 3000 // the loss month's maintenance service payment
 const LEASE_L1 = 'Fixed monthly lease'
+const LEASE_L6 = 'No lease payment is owed for this month: no truck was in service under your lease.'
 // The Payout Basis panel's status while lease payouts are off (payoutBasis.js STATUS_OFF),
 // and the note LP saves through the panel's form.
 const LEASE_STATUS_OFF = 'Recorded, not yet applied: lease payouts are switched off. Payouts still use the Split %.'
@@ -10675,6 +10677,65 @@ async function leaseSection() {
           observed: `${bootText}; settings ${JSON.stringify(st)}; profit ${monthText(P)}; idle ${monthText(I)}; loss ${monthText(L)}; the idle month's row on the Payouts page ${idleText ? `shows ${leaseMoney(LEASE_AMOUNT)}: ${idleText.includes(leaseMoney(LEASE_AMOUNT))}` : 'not shown'}; split investor #${S.split ?? '-'}: ${splitDiffs.length ? `DIFFERS at ${splitDiffs.join(', ')}` : 'identical to LE'}`,
           shot: s,
         }
+      })
+
+    // ---- LS: flag ON, downtime paid: which truck statuses a lease counts. Every
+    // status but Inactive: a truck in Maintenance is still under its lease.
+    const leaseTruckStatus = async (status) => {
+      await page.goto(`${BASE_URL}/trucks`)
+      await page.locator('table.truck-table').waitFor({ state: 'visible', timeout: 30000 })
+      const trow = rowOf(page, S.truck.unit_number)
+      await trow.waitFor({ state: 'visible', timeout: 30000 })
+      await trow.scrollIntoViewIfNeeded()
+      await trow.locator('button.btn-edit').click()
+      const dlg = page.locator('.confirm-overlay .edit-dialog')
+      await dlg.waitFor({ state: 'visible' })
+      await dlg.locator('.edit-field', { has: page.locator('label', { hasText: /^\s*Status\s*$/ }) }).locator('select').selectOption(status)
+      await caption(page, `Step LS — ${S.truck.unit_number}: Status ${status}, Save`)
+      const [put] = await Promise.all([
+        page.waitForResponse((r) => r.request().method() === 'PUT' && pathOf(r.url()) === `/api/trucks/${S.truck.id}`, { timeout: 20000 }).catch(() => null),
+        dlg.locator('.confirm-actions button', { hasText: /^\s*Save\s*$/ }).click(),
+      ])
+      const putCode = put ? (await put.json().catch(() => null))?.code : ''
+      await page.keyboard.press('Escape').catch(() => {})
+      const storedStatus = () => db.prepare('SELECT status FROM trucks WHERE id = ?').get(S.truck.id)?.status
+      let note = `${status}: Edit → PUT ${put ? put.status() : 'not sent'}${putCode ? ` ${putCode}` : ''}`
+      if (storedStatus() !== status) {
+        // The form refuses a change that would move a finalized month's figures (as it
+        // does for any truck), so the copy takes it directly: allowed on the private copy only.
+        db.prepare('UPDATE trucks SET status = ? WHERE id = ? AND owner_id = ?').run(status, S.truck.id, S.owner)
+        note += `; set in the copy instead: ${storedStatus() === status}`
+      }
+      return { ok: storedStatus() === status, note }
+    }
+    await step('LS', `Flag ON, downtime paid: the QA-LEASE truck set to Maintenance, then Inactive, then Active again (Trucks → Edit → Status; the copy takes it when the form refuses); the three months read after each`,
+      `Maintenance: all three months still pay ${leaseMoney(LEASE_AMOUNT)} (reason null); Inactive: all three pay $0 (reason "not_in_service"), and the profit month's row on the Payouts page shows L6; Active again: ${leaseMoney(LEASE_AMOUNT)} each`, async () => {
+        needFeature(); needOwner()
+        if (!S.truck) throw new Error('not reached: the acceptance made no truck')
+        const st = await settings()
+        if (st?.enabled !== true || st?.settings?.downtime !== 'paid') throw new Error('not reached: the server is not running with the flag on and downtime paid (LH)')
+        const notes = []
+        const monthsPay = async (label, paid, reason) => {
+          const r = await leaseRead()
+          notes.push(`${label}: ${Object.values(r.m).map(monthText).join(' | ')}`)
+          return Object.values(r.m).every((x) => leasePaid(x, paid, reason))
+        }
+        const shop = await leaseTruckStatus('Maintenance')
+        notes.push(shop.note)
+        const shopOk = shop.ok && await monthsPay('Maintenance', LEASE_AMOUNT, null)
+        const gone = await leaseTruckStatus('Inactive')
+        notes.push(gone.note)
+        const goneOk = gone.ok && await monthsPay('Inactive', 0, 'not_in_service')
+        const sec = await leasePayoutsSection(page, S.owner)
+        const profitText = await leaseMonthRowText(page, sec, LEASE_MONTHS.profit)
+        const l6Shown = !!profitText && profitText.includes(LEASE_L6)
+        await caption(page, `Step LS — the truck Inactive: ${leaseLabel(LEASE_MONTHS.profit)} reads ${profitText ? `"${squash(profitText, 160)}"` : '(no row)'}`)
+        const s = await shot(page, 'ls-qa-lease-inactive')
+        const back = await leaseTruckStatus('Active')
+        notes.push(back.note)
+        const backOk = back.ok && await monthsPay('Active again', LEASE_AMOUNT, null)
+        notes.push(`the profit month's row with the truck Inactive shows L6: ${l6Shown}`)
+        return { verdict: verdict(shopOk && goneOk && l6Shown && backOk), observed: notes.join('; '), shot: s }
       })
   } finally {
     // ---- LX: everything the section made, removed; the server as it was found

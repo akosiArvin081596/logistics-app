@@ -86,10 +86,11 @@ What it covers today, by section (`ONLY` picks them):
   under its date inputs (R6). Nothing is written but the preview's audit lines and the ledger's own refresh (Rx).
   Local and staging; one sign-in; `ONLY=report`. Its R-numbers are its own: the truck section's R1–R16 are different
   steps.
-- **Lease payouts (LA–LH, LP, LW, LX).** A QA-LEASE investor made through the real flows (a $2,000 lease invite, the
+- **Lease payouts (LA–LH, LP, LS, LW, LX).** A QA-LEASE investor made through the real flows (a $2,000 lease invite, the
   applicant's `/invest` walk-through, the acceptance), given a profit, an idle and a loss month. With
   `INVESTOR_LEASE_PAYOUTS_ENABLED` off the split pays; on, the lease pays ($2,000 in the profit and loss months, $0 in the
-  idle month under `INVESTOR_LEASE_DOWNTIME=unpaid`, $2,000 under `paid`); a split investor's Payouts are unchanged.
+  idle month under `INVESTOR_LEASE_DOWNTIME=unpaid`, $2,000 under `paid`, still $2,000 with the truck in Maintenance and
+  $0 with it Inactive); a split investor's Payouts are unchanged.
   The admin side too: the invite form's lease warning (shown with the flag off, gone with it on) and an edit through
   the Payout Basis panel with its Change history line.
   The section restarts the server itself to switch the flag. Local only (`DB_PATH`); one sign-in; `ONLY=lease`. Its
@@ -1155,7 +1156,7 @@ FAILs on the `$` prices and the missing count row; its "Investor" row already na
 `?as_user_id=`. R5 FAILs (no footnote, `$` figures), R6 FAILs (no `reportRangeMode`, no hint), and Rx PASSes. With an
 investor whose trucks are all priced (`E2E_REPORT_INVESTOR`), R4b and R5 pass on that build too.
 
-## The lease payouts section (LA–LH, LP, LW, LX)
+## The lease payouts section (LA–LH, LP, LS, LW, LX)
 
 `ONLY=lease`, **local only** (`DB_PATH`, and a server `boot-server.sh` started). It tests the shared contract's lease
 payouts: `INVESTOR_LEASE_PAYOUTS_ENABLED` (a money flag that ships off) and `INVESTOR_LEASE_DOWNTIME` (`unpaid`, the
@@ -1164,8 +1165,8 @@ default, or `paid`). The flag is read at boot, so **the section restarts the ser
 `boot-server.sh` with the same worktree, port and `DB_PATH`. It restarts only after LC has proved `DB_PATH` is that
 server's database (the account the server reports is in the file). The session survives each restart (the session
 store is the database). LX leaves the server booted with the flag off, `boot-server.sh`'s default. On a build without
-the feature (`GET /api/investor-payout-settings` is not there) LA–LE still run, as today's baseline, and LF, LFu, LG and
-LH SKIP.
+the feature (`GET /api/investor-payout-settings` is not there) LA–LE still run, as today's baseline, and LF, LFu, LG,
+LH and LS SKIP.
 
 **The test investor** is `QA-LEASE Investor <stamp>` (`qa-test+<digits>-lease-payouts@example.com`, a fake VIN
 `QALEASE<digits>`), made the way a real one is: LA creates the invite in the invites panel, LB fills and signs the
@@ -1188,6 +1189,7 @@ LA refuses a copy where any of the three is finalized.
 | LW | Flag on. **UI:** `/investors` → invites panel → the create form with a lease picked (nothing is created); then the QA-LEASE investor's Payout Basis panel | No lease warning on the form; the panel's status `Applied to payouts from February 2025` |
 | LG | The split investor again, flag on | Its answer identical to LE's (values, keys, key order: paths only if not) and its Payouts section's text identical (compared by hash; its screenshots are blurred) |
 | LH | Restarted with the flag on and `INVESTOR_LEASE_DOWNTIME=paid` | Downtime paid; all three months pay 2000, the idle month included (reason null); the split investor's answer still identical to LE's |
+| LS | Flag on, downtime paid. **UI:** Trucks → Edit → Status: the truck set to `Maintenance`, then `Inactive`, then `Active` again (the copy takes the status directly when the form refuses, and the row says so); the three months read after each, and the portal preview's Payouts with the truck Inactive | Maintenance: all three months still pay 2000 (reason null: a truck in the shop is still under its lease); Inactive: all three pay 0 (reason `not_in_service`), the profit month's row shows L6; Active again: 2000 each |
 | LX | **Always runs.** The server restarted as booted (flag off); the sheet row deleted through `DELETE /api/data/<row>` after finding it by its load id and re-reading that row right before the delete (row numbers shift under other writes); the application soft-deleted by the API; then, from the copy by exact id: the account's ledger, history, basis and config rows, the maintenance entry, the truck, the investor record, the application with its documents, onboarding and banking rows (and the signed PDFs the server wrote, each only when its hash matches), the invite, the account | Each removed; no plant journal left |
 
 **What leaves the machine.** Nothing beyond the other sections: mail is blanked, so the application's and the
