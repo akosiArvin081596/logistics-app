@@ -149,7 +149,7 @@
 //      footnote and "Not available" asset figures · R6 the RANGE_HINT under the
 //      portal's date inputs · Rx nothing written but the ledger refresh and the
 //      preview's audit lines
-// Lease payouts section (LA-LH, LP, LS, LV, LW, LX; ONLY=lease, local only: DB_PATH and a server
+// Lease payouts section (LA-LH, LP, LS, LV, LW, LX, LY; ONLY=lease, local only: DB_PATH and a server
 //   boot-server.sh started, which the section restarts by its pid file to switch
 //   INVESTOR_LEASE_PAYOUTS_ENABLED and INVESTOR_LEASE_DOWNTIME, and leaves booted
 //   with the flag off): a QA-LEASE investor made through the real flows (a $2,000
@@ -160,13 +160,18 @@
 //   the admin Payout Basis panel: an edit and its Change history line · LV flag ON:
 //   the latest closed month, its row created and finalized by the first ledger read,
 //   read again after its statement, report and Payouts page: still the lease, no
-//   carried loss · LE flag OFF: the split pays (LEu: the Payouts page) · LF flag ON: the
+//   carried loss · LE flag OFF: the split pays the open months (LEu: the Payouts page),
+//   and the months LV closed still read as the lease they settled as · LF flag ON: the
 //   lease pays ($2,000 in the profit and loss months, $0 in the idle month under
 //   downtime "unpaid"; LFu: the page shows it as the lease) · LW flag ON: no invite
 //   warning, the panel applied · LG a split investor's
 //   Payouts unchanged, flag ON · LH downtime "paid": the idle month pays $2,000 · LS
-//   the truck in Maintenance still pays the lease, Inactive pays $0 (not in service) ·
-//   LX every row and the sheet row removed, the server booted with the flag off
+//   the truck in Maintenance still pays the lease, Inactive pays $0 (not in service),
+//   the closed months unchanged after each · LY the months LV closed under "unpaid",
+//   read under "paid" and then with the flag off: exactly as they settled, in figures
+//   and wording (ledger, portal, console, Payouts page, statement, report), while the
+//   open idle month follows the setting · LX every row and the sheet row removed, the
+//   server booted with the flag off
 //
 // Env:
 //   BASE_URL    required — e.g. http://127.0.0.1:3181 (never production)
@@ -193,7 +198,7 @@
 //               (S1-S7), dispatcher (D1-D3), maintenance (M1), moneypath (P1, E1,
 //               N1, N1b, F1, E2, B1, RC1), names (K1, K2, K3), eldlink (L1-L3),
 //               invoice (I1-I9), terms (T0-T11),
-//               investorfixes (F1-F14), report (R1-R6, Rx), lease (LA-LH, LP, LS, LV, LW, LX).
+//               investorfixes (F1-F14), report (R1-R6, Rx), lease (LA-LH, LP, LS, LV, LW, LX, LY).
 //               Unset = all, in that
 //               order. ⚠️ The sections together sign in more often than the login
 //               limiter allows one server process (see README), so split a full run.
@@ -370,7 +375,7 @@ function writeResults(final = false) {
     runs('terms') && `investor terms (${[...TERMS_PLAN].join(', ') || 'no step picked'})`,
     runs('investorfixes') && 'investor fixes (F1-F14)',
     runs('report') && `investor report (${[...REPORT_PLAN].sort().join(', ') || 'no step picked'}${REPORT_PLAN.size ? ', Rx' : ''})`,
-    runs('lease') && 'lease payouts (LA-LH, LP, LS, LV, LW, LX)',
+    runs('lease') && 'lease payouts (LA-LH, LP, LS, LV, LW, LX, LY)',
   ].filter(Boolean).join(' + ')
   const lines = [
     `# ${title} — ${PHASE.toUpperCase()}`,
@@ -10002,7 +10007,7 @@ function reportReadOnlyRow({ writes, start }) {
   record({ step: 'Rx', title: 'Read-only: what the section wrote', expected: 'No write but a sign-in session, the preview\'s audit lines (investor_preview_*, investor_payouts_view) and the payout ledger\'s own refresh; no plant journal', observed: `${notes.join('; ')}; plant journal ${fs.existsSync(JOURNAL) ? 'PRESENT' : 'none'}`, verdict: verdict(ok && !fs.existsSync(JOURNAL)), shot: '' })
 }
 
-// ---------------------------------------------------------------- lease payouts (LA-LH, LP, LS, LV, LW, LX)
+// ---------------------------------------------------------------- lease payouts (LA-LH, LP, LS, LV, LW, LX, LY)
 // The shared contract's lease payouts: INVESTOR_LEASE_PAYOUTS_ENABLED, a money flag
 // that ships off, and INVESTOR_LEASE_DOWNTIME (unpaid, the default, or paid). Local
 // only: the section writes the copy (DB_PATH) and one row of the LOCAL sheet, and it
@@ -10018,6 +10023,7 @@ const LEASE_IN_SERVICE = '2025-02-01'
 const LEASE_REVENUE = 5000 // the profit month's load
 const LEASE_SERVICE = 3000 // the loss month's maintenance service payment
 const LEASE_L1 = 'Fixed monthly lease'
+const LEASE_L5 = 'No lease payment is owed for this month: the truck had no activity, and your agreement (section 3.1) owes nothing during downtime.'
 const LEASE_L6 = 'No lease payment is owed for this month: no truck was in service under your lease.'
 const LEASE_L7 = 'A month your truck runs at a loss still pays the full lease. Losses are not carried forward against your lease.'
 const LEASE_L9 = 'Investor Payout (fixed monthly lease)'
@@ -10226,6 +10232,42 @@ async function leaseBlurredShot(page, sec, name) {
   await sec.evaluate((el) => { for (const c of el.children) if (!c.classList.contains('section-title')) { c.dataset.qaBlur = c.style.filter || '-'; c.style.filter = 'blur(7px)' } }).catch(() => {})
   try { await sec.scrollIntoViewIfNeeded().catch(() => {}); return await shot(page, name) } finally {
     await sec.evaluate((el) => { for (const c of el.querySelectorAll('[data-qa-blur]')) { c.style.filter = c.dataset.qaBlur === '-' ? '' : c.dataset.qaBlur; delete c.dataset.qaBlur } }).catch(() => {})
+  }
+}
+// What a closed month publishes about its payout, and nothing live beside it: the
+// ledger row's settled figures, its earnings, recomputed amount, carry and basis, and
+// the portal's month. (The P&L lines stay live: a truck's status moves them.)
+const leaseSettledRow = (r) => (r ? {
+  amount: r.amount, effectiveAmount: r.effectiveAmount, status: r.status, monthEarnings: r.monthEarnings, recomputedAmount: r.recomputedAmount,
+  lossCarriedIn: r.lossCarriedIn, lossDeferred: r.lossDeferred, payoutBasis: r.payoutBasis ?? null,
+  splitPct: r.breakdown?.splitPct ?? null, monthShare: r.breakdown?.monthShare ?? null, breakdownBasis: r.breakdown?.payoutBasis ?? null,
+} : null)
+const leaseSettledMonth = (m) => (m ? { investorEarnings: m.investorEarnings, payable: m.payable, lossCarriedIn: m.lossCarriedIn, lossDeferred: m.lossDeferred, payoutBasis: m.payoutBasis ?? null } : null)
+const leaseClosedSnap = (months, pay, inv) => Object.fromEntries(months.map((mk) => [mk, { row: leaseSettledRow(leaseRowOf(pay, mk)), portal: leaseSettledMonth(leasePortalMonth(inv, mk)) }]))
+// The Payouts console (/payouts): the QA-LEASE investor's section, and one month's row.
+async function leaseConsoleSection(page, name) {
+  await page.goto(`${BASE_URL}/payouts`)
+  const sec = page.locator('section.investor-section', { hasText: name }).first()
+  await sec.waitFor({ state: 'visible', timeout: 120000 })
+  await page.waitForTimeout(500)
+  return sec
+}
+async function leaseConsoleRowText(page, sec, mk) {
+  const row = sec.locator('tr', { has: page.locator('td.mono', { hasText: new RegExp(`^\\s*${escRe(leaseLabel(mk))}(\\s+\\d+)?\\s*$`) }) }).first()
+  return (await row.count()) ? rNorm(await row.innerText().catch(() => '')) : ''
+}
+// The console lists every investor: everything outside the QA-LEASE investor's section
+// is blurred for the moment of the screenshot.
+async function leaseConsoleShot(page, sec, name) {
+  await sec.evaluate((keep) => {
+    for (const el of document.querySelectorAll('section.section, table')) {
+      if (el === keep || keep.contains(el) || el.contains(keep)) continue
+      el.dataset.qaBlur = el.style.filter || '-'
+      el.style.filter = 'blur(7px)'
+    }
+  }).catch(() => {})
+  try { await sec.scrollIntoViewIfNeeded().catch(() => {}); return await shot(page, name) } finally {
+    await page.evaluate(() => { for (const c of document.querySelectorAll('[data-qa-blur]')) { c.style.filter = c.dataset.qaBlur === '-' ? '' : c.dataset.qaBlur; delete c.dataset.qaBlur } }).catch(() => {})
   }
 }
 
@@ -10566,8 +10608,9 @@ async function leaseSection() {
       await caption(page, `Step ${tag} — the QA-LEASE investor's Payouts: ${leaseLabel(LEASE_MONTHS.profit)} reads ${t ? `"${squash(t, 120)}"` : '(no row)'}`)
       const s = await shot(page, `${tag.toLowerCase()}-qa-lease-payouts`)
       const amountShown = !!t && t.includes(leaseMoney(expectAmount))
-      const labelShown = sectionText.includes(LEASE_L1)
-      S.ui[tag] = { ok: amountShown && labelShown === expectLabel, text: `the portal preview's ${leaseLabel(LEASE_MONTHS.profit)} row shows ${leaseMoney(expectAmount)}: ${amountShown}; "${LEASE_L1}" in the Payouts section: ${labelShown}`, shot: s }
+      // The profit month's own row: the months LV closed keep their lease label, flag on or off.
+      const labelShown = !!t && t.includes(LEASE_L1)
+      S.ui[tag] = { ok: amountShown && labelShown === expectLabel, text: `the portal preview's ${leaseLabel(LEASE_MONTHS.profit)} row shows ${leaseMoney(expectAmount)}: ${amountShown}; "${LEASE_L1}" in that row: ${labelShown}; in the Payouts section: ${sectionText.includes(LEASE_L1)}`, shot: s }
       return S.ui[tag]
     }
     // The page's own row for a step (LEu, LFu), apart from its API row: the page is
@@ -10586,6 +10629,22 @@ async function leaseSection() {
     const leasePaid = (x, paid, reason) => {
       const pb = x.portal?.payoutBasis || null
       return leaseRowPaid(x.row, paid, reason) && !!x.portal && x.portal.payable === paid && !!pb && pb.paidAmount === paid && pb.reason === reason
+    }
+    // The months LV closed, read now against how LV read them (diff paths only).
+    const leaseClosedNow = async () => {
+      if (!S.closed) return { ok: false, text: 'LV recorded no closed months' }
+      const pay = await ledger(S.owner)
+      const inv = await portal(S.owner)
+      const diffs = leaseDiffPaths(S.closed.snap, leaseClosedSnap(S.closed.months, pay, inv))
+      return { ok: !diffs.length, pay, inv, text: `the ${S.closed.months.length} month(s) LV closed ${diffs.length ? `DIFFER from how they settled at ${diffs.slice(0, 6).join(', ')}` : 'read exactly as they settled'}` }
+    }
+    // A ledger answer and a portal answer without the months LV closed.
+    const leaseOpenParts = (pay, inv) => {
+      const closedSet = new Set(S.closed?.months || [])
+      return [
+        { ...pay, payouts: (pay?.payouts || []).filter((p) => !closedSet.has(p.period)) },
+        { ...inv, production: { ...(inv?.production || {}), monthlyEarnings: (inv?.production?.monthlyEarnings || []).filter((m) => !closedSet.has(m.month)) } },
+      ]
     }
 
     // ---- LV: flag ON, a CLOSED lease month, read twice. This is the account's first
@@ -10668,6 +10727,17 @@ async function leaseSection() {
         const secondOk = !diffs.length && leasePaid(x2, LEASE_AMOUNT, null) && x2.portal.lossCarriedIn === 0 && x2.portal.lossDeferred === 0 &&
           second?.totals?.carriedLossOutstanding === 0
         notes.push(`second read: ${diffs.length ? `DIFFERS from the first at ${diffs.slice(0, 8).join(', ')}` : 'identical to the first'}; ${monthText(x2)}; portal carried in ${x2.portal?.lossCarriedIn ?? '?'}, deferred ${x2.portal?.lossDeferred ?? '?'}; carried loss outstanding ${second?.totals?.carriedLossOutstanding}`)
+        // Every month this read closed, as it settled: LE, LS and LY read them again
+        // after each later switch, and each must still read exactly this way.
+        const closedMonths = (second?.payouts || []).filter((p) => p.finalizedAt).map((p) => p.period).sort()
+        S.closed = {
+          months: closedMonths,
+          latest: closed,
+          idle: [...closedMonths].reverse().find((mk) => mk < closed && leaseRowOf(second, mk)?.payoutBasis?.reason === 'downtime') || null,
+          snap: leaseClosedSnap(closedMonths, second, inv),
+          statement: sText,
+        }
+        notes.push(`recorded for LE, LS and LY: ${closedMonths.length} closed month(s) (${closedMonths[0] ?? '-'} to ${closedMonths[closedMonths.length - 1] ?? '-'}), the idle one read closely ${S.closed.idle ?? 'NONE'}`)
         return {
           verdict: verdict(st?.enabled === true && st?.settings?.downtime === 'unpaid' && firstOk && frozenOk && stmtOk && reportOk && uiOk && secondOk),
           observed: notes.join('; '),
@@ -10676,8 +10746,8 @@ async function leaseSection() {
       })
 
     // ---- LE: flag OFF, the split pays
-    await step('LE', 'Flag OFF (the server as booted, or restarted with it off): the QA-LEASE investor\'s ledger and portal for the three months; a split investor\'s Payouts recorded for LG',
-      `Profit month: the split share (> $0, not ${leaseMoney(LEASE_AMOUNT)}), open (owed); idle month $0; loss month $0 with the loss deferred; no payoutBasis anywhere in either answer; the portal's payable equals the ledger`, async () => {
+    await step('LE', 'Flag OFF (the server as booted, or restarted with it off): the QA-LEASE investor\'s ledger and portal for the three months and the months LV closed; a split investor\'s Payouts recorded for LG',
+      `Profit month: the split share (> $0, not ${leaseMoney(LEASE_AMOUNT)}), open (owed); idle month $0; loss month $0 with the loss deferred; no payoutBasis on any month still open, nor on the current month, in either answer; the portal's payable equals the ledger; the months LV closed as the lease still read exactly as they settled (a month settled as a lease stays the lease, flag off)`, async () => {
         needOwner()
         const notes = []
         if (S.feature && (await settings())?.enabled) {
@@ -10686,19 +10756,20 @@ async function leaseSection() {
         }
         const r = await leaseRead()
         const { profit: P, idle: I, loss: L } = r.m
-        const keys = [...basisKeys(r.pay), ...basisKeys(r.inv)]
+        const keys = leaseOpenParts(r.pay, r.inv).flatMap((x) => basisKeys(x))
+        const closedNow = await leaseClosedNow()
         const open = (x) => x.row && x.row.status === 'owed' && !x.row.finalizedAt
         const agree = Object.values(r.m).every((x) => x.row && x.portal && x.row.amount === x.portal.payable)
         const ok = open(P) && open(I) && open(L) && P.row.amount > 0 && P.row.amount !== LEASE_AMOUNT && P.row.amount === P.row.monthEarnings &&
-          I.row.amount === 0 && L.row.amount === 0 && L.row.lossDeferred > 0 && !keys.length && agree
+          I.row.amount === 0 && L.row.amount === 0 && L.row.lossDeferred > 0 && !keys.length && agree && (!S.closed || closedNow.ok)
         const ui = await leaseUi('LE', P.row?.amount ?? 0, false)
         S.split = await pickSplit()
         S.snap.off = await splitSnapshot('LE')
-        notes.push(`profit ${monthText(P)}; idle ${monthText(I)}; loss ${monthText(L)}; payoutBasis keys: ${keys.length ? keys.slice(0, 5).join(', ') : 'none'}; portal = ledger: ${agree}; split investor #${S.split ?? 'none'} recorded`)
+        notes.push(`profit ${monthText(P)}; idle ${monthText(I)}; loss ${monthText(L)}; payoutBasis keys outside the closed months: ${keys.length ? keys.slice(0, 5).join(', ') : 'none'}; portal = ledger: ${agree}; ${S.closed ? closedNow.text : 'no closed months recorded (LV did not run)'}; split investor #${S.split ?? 'none'} recorded`)
         return { verdict: verdict(ok), observed: notes.join('; '), shot: ui.shot }
       })
     uiRow('LE', 'Flag OFF, UI: the QA-LEASE investor\'s Payouts in the portal preview (/investor-portals/<id>), the profit month\'s row expanded',
-      `The row shows the split amount (LE's ledger figure); no "${LEASE_L1}" anywhere in the section`)
+      `The row shows the split amount (LE's ledger figure) and no "${LEASE_L1}"`)
 
     // ---- LF: flag ON, downtime unpaid
     const leaseOn = async (tag, downtime) => {
@@ -10724,7 +10795,7 @@ async function leaseSection() {
         }
       })
     uiRow('LF', 'Flag ON, UI: the QA-LEASE investor\'s Payouts in the portal preview, the profit month\'s row expanded',
-      `The row shows ${leaseMoney(LEASE_AMOUNT)}; "${LEASE_L1}" in the section (the lease label, L1)`)
+      `The row shows ${leaseMoney(LEASE_AMOUNT)} and "${LEASE_L1}" (the lease label, L1)`)
 
     // ---- LW: flag ON, the admin screens: the invite form's warning gone, the panel applied
     await step('LW', 'Flag ON, Super Admin, /investors: the invite form with a lease picked (nothing created), then the QA-LEASE investor\'s Payout Basis panel',
@@ -10811,7 +10882,7 @@ async function leaseSection() {
       return { ok: storedStatus() === status, note }
     }
     await step('LS', `Flag ON, downtime paid: the QA-LEASE truck set to Maintenance, then Inactive, then Active again (Trucks → Edit → Status; the copy takes it when the form refuses); the three months read after each`,
-      `Maintenance: all three months still pay ${leaseMoney(LEASE_AMOUNT)} (reason null); Inactive: all three pay $0 (reason "not_in_service"), and the profit month's row on the Payouts page shows L6; Active again: ${leaseMoney(LEASE_AMOUNT)} each`, async () => {
+      `Maintenance: all three months still pay ${leaseMoney(LEASE_AMOUNT)} (reason null); Inactive: all three pay $0 (reason "not_in_service"), and the profit month's row on the Payouts page shows L6; Active again: ${leaseMoney(LEASE_AMOUNT)} each; after each change, the months LV closed read exactly as they settled`, async () => {
         needFeature(); needOwner()
         if (!S.truck) throw new Error('not reached: the acceptance made no truck')
         const st = await settings()
@@ -10819,8 +10890,9 @@ async function leaseSection() {
         const notes = []
         const monthsPay = async (label, paid, reason) => {
           const r = await leaseRead()
-          notes.push(`${label}: ${Object.values(r.m).map(monthText).join(' | ')}`)
-          return Object.values(r.m).every((x) => leasePaid(x, paid, reason))
+          const closedNow = await leaseClosedNow()
+          notes.push(`${label}: ${Object.values(r.m).map(monthText).join(' | ')}; ${S.closed ? closedNow.text : 'no closed months recorded'}`)
+          return Object.values(r.m).every((x) => leasePaid(x, paid, reason)) && (!S.closed || closedNow.ok)
         }
         const shop = await leaseTruckStatus('Maintenance')
         notes.push(shop.note)
@@ -10838,6 +10910,79 @@ async function leaseSection() {
         const backOk = back.ok && await monthsPay('Active again', LEASE_AMOUNT, null)
         notes.push(`the profit month's row with the truck Inactive shows L6: ${l6Shown}`)
         return { verdict: verdict(shopOk && goneOk && l6Shown && backOk), observed: notes.join('; '), shot: s }
+      })
+
+    // ---- LY: the months LV closed, after the switches. LV closed them under downtime
+    // "unpaid": the latest at the lease, the idle ones at $0 for downtime. Under "paid"
+    // (as LH and LS left the server), then with the flag off, each must still read
+    // exactly as it settled, in figures and in wording, on every surface, while the
+    // open idle month follows the setting.
+    await step('LY', 'Flag ON with downtime "paid" (as LH and LS left it), then flag OFF (restarted): the months LV closed as the lease, read again on the ledger and portal, the Payouts console, the Payouts page, the statement and the report',
+      `Both times every month LV closed reads exactly as it settled (amount, earnings, recomputed amount, carry, basis and reason; the portal's month too): an idle closed month still $0 for downtime with L5 on the console and the Payouts page, the latest still ${leaseMoney(LEASE_AMOUNT)} as "${LEASE_STATEMENT_LINE}" without L5, no "changed since it closed" note; the statement the same text as LV's; the report "${LEASE_L9}" and L8, no change or carry sentence; the open idle month ${leaseMoney(LEASE_AMOUNT)} under "paid", the split's $0 with the flag off`, async () => {
+        needFeature(); needOwner()
+        if (!S.closed) throw new Error('not reached: LV recorded no closed months')
+        const { idle, latest } = S.closed
+        if (!idle) throw new Error(`LV closed no idle month before ${latest} (reason "downtime")`)
+        const st = await settings()
+        if (st?.enabled !== true || st?.settings?.downtime !== 'paid') throw new Error('not reached: the server is not running with the flag on and downtime paid (LH, LS)')
+        const drift = 'which have changed since it closed'
+        const consolePick = (p) => (p ? { amount: p.amount, monthEarnings: p.monthEarnings, recomputedAmount: p.recomputedAmount, lossCarriedIn: p.lossCarriedIn, lossDeferred: p.lossDeferred, payoutBasis: p.payoutBasis ?? null } : null)
+        const shots = []
+        // Every surface once; `mode` names the server's state, `openIdleOk` what the open
+        // idle month must pay in it.
+        const pass = async (mode, openIdleOk) => {
+          const closedNow = await leaseClosedNow()
+          const iRow = leaseRowOf(closedNow.pay, idle)
+          const iPortal = leasePortalMonth(closedNow.inv, idle)
+          const idleOk = leaseRowPaid(iRow, 0, 'downtime') && iPortal?.payable === 0 && iPortal?.payoutBasis?.reason === 'downtime'
+          const open = (await leaseRead()).m.idle
+          const openOk = openIdleOk(open)
+          // The console: its API rows, then its page.
+          const cons = ((await api(page, 'GET', '/api/payouts')).json?.investors || []).find((i) => Number(i.ownerId) === S.owner)
+          const consApiOk = [idle, latest].every((mk) => JSON.stringify(consolePick((cons?.payouts || []).find((p) => p.period === mk))) === JSON.stringify(consolePick(S.closed.snap[mk].row)))
+          const csec = await leaseConsoleSection(page, NAME)
+          const cIdle = await leaseConsoleRowText(page, csec, idle)
+          const cLatest = await leaseConsoleRowText(page, csec, latest)
+          const consUiOk = cIdle.includes(LEASE_L5) && /nothing due/i.test(cIdle) && cLatest.includes(leaseMoney(LEASE_AMOUNT)) && !cLatest.includes(LEASE_L5)
+          await caption(page, `Step LY (${mode}) — the Payouts console: ${leaseLabel(idle)} reads "${squash(cIdle, 120)}"`)
+          shots.push(await leaseConsoleShot(page, csec, `ly-${mode}-console`))
+          // The investor's Payouts page (the portal preview).
+          const psec = await leasePayoutsSection(page, S.owner)
+          const pIdle = await leaseMonthRowText(page, psec, idle) || ''
+          const pLatest = await leaseMonthRowText(page, psec, latest) || ''
+          const pageOk = pIdle.includes(LEASE_L5) && !pIdle.includes(drift) &&
+            pLatest.includes(leaseMoney(LEASE_AMOUNT)) && pLatest.includes(LEASE_STATEMENT_LINE) && !pLatest.includes(drift) && !pLatest.includes(LEASE_L5)
+          await caption(page, `Step LY (${mode}) — the Payouts page: ${leaseLabel(idle)} reads "${squash(pIdle, 120)}"`)
+          shots.push(await shot(page, `ly-${mode}-payouts`))
+          // The latest closed month's statement, and the report over the idle month to it.
+          const stmt = await fetchBytes(page, `/api/investor/payouts/${latest}/statement?as_user_id=${S.owner}`)
+          const sText = stmt.status === 200 && stmt.isPdf ? rNorm((await pdfText(stmt.bytes.toString('base64'))).text) : ''
+          const stmtOk = !!sText && sText === S.closed.statement
+          const rep = await fetchBytes(page, `/api/investor/report?as_user_id=${S.owner}&start=${idle}-01&end=${lastDayOf(latest)}`)
+          const rText = rep.status === 200 && rep.isPdf ? rNorm((await pdfText(rep.bytes.toString('base64'))).text) : ''
+          const rMissing = [LEASE_L9, `Your payout is a fixed monthly lease of ${leaseMoney(LEASE_AMOUNT)}, not a share of net profit.`].filter((t) => !rText.includes(t))
+          const rSplit = [...LEASE_SPLIT_REPORT.filter((t) => rText.includes(t)), ...(/Investor Payout \(\d+%\)/.test(rText) ? ['Investor Payout (<n>%)'] : [])]
+          const reportOk = !!rText && !rMissing.length && !rSplit.length
+          return {
+            ok: closedNow.ok && idleOk && openOk && consApiOk && consUiOk && pageOk && stmtOk && reportOk,
+            text: `${closedNow.text}; ${leaseLabel(idle)} (closed, idle): ${rowText(iRow)}, portal payable ${iPortal?.payable ?? '?'} reason ${iPortal?.payoutBasis?.reason ?? '-'}; ` +
+              `the open idle month ${monthText({ row: open.row, portal: open.portal })} ${openOk ? 'follows the setting' : 'does NOT follow the setting'}; ` +
+              `console API ${consApiOk ? 'as settled' : 'DIFFERS'}; console page: ${leaseLabel(idle)} L5 ${cIdle.includes(LEASE_L5)}, "nothing due" ${/nothing due/i.test(cIdle)}; ${leaseLabel(latest)} ${leaseMoney(LEASE_AMOUNT)} ${cLatest.includes(leaseMoney(LEASE_AMOUNT))}, L5 ${cLatest.includes(LEASE_L5)}; ` +
+              `Payouts page: ${leaseLabel(idle)} L5 ${pIdle.includes(LEASE_L5)}; ${leaseLabel(latest)} "${LEASE_STATEMENT_LINE}" ${leaseMoney(LEASE_AMOUNT)} ${pLatest.includes(leaseMoney(LEASE_AMOUNT)) && pLatest.includes(LEASE_STATEMENT_LINE)}; change note ${pIdle.includes(drift) || pLatest.includes(drift) ? 'SHOWN' : 'none'}; ` +
+              `statement ${latest} → ${codeText(stmt)}, ${stmtOk ? 'the same text as LV\'s' : 'NOT the text LV read'}; report ${idle} to ${latest} → ${codeText(rep)}: lease wording ${rMissing.length ? `MISSING ${rMissing.length}` : 'present'}, change or carry wording ${rSplit.length ? `PRINTED ${rSplit.map((t) => `"${squash(t, 40)}"`).join(', ')}` : 'none'}`,
+          }
+        }
+        const paid = await pass('paid', (x) => leasePaid(x, LEASE_AMOUNT, null))
+        const bootText = await leaseReboot(srv, {})
+        S.rebooted = true
+        const stOff = await settings()
+        await caption(page, `Step LY — restarted: ${bootText}`)
+        const off = await pass('off', (x) => !!x.row && x.row.amount === 0 && !x.row.payoutBasis && !!x.portal && x.portal.payable === 0 && !x.portal.payoutBasis)
+        return {
+          verdict: verdict(paid.ok && stOff?.enabled === false && off.ok),
+          observed: `downtime "paid": ${paid.text}; restarted with the flag off (${bootText}; enabled ${stOff?.enabled}): ${off.text}`,
+          shot: shots[shots.length - 1] || '',
+        }
       })
   } finally {
     // ---- LX: everything the section made, removed; the server as it was found
