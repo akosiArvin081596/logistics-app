@@ -1,8 +1,10 @@
-// The invoice draft editor's Order # rule and Notes limit — the client's copy.
+// The invoice draft editor's Order # rule, Notes limit and email-message rule —
+// the client's copy.
 //
 // THE SERVER DECIDES. parseInvoiceOverrides() in server.js judges every body
 // sent to POST /api/loads/:loadId/draft-invoice and /invoice-preview, and this
-// file mirrors its Order # pattern (INVOICE_ORDER_RE) and its Notes ceiling.
+// file mirrors its Order # pattern (INVOICE_ORDER_RE), its Notes ceiling and
+// its email-message ceiling.
 // It is a courtesy, not the guard: it lets the field say WHY a value is wrong
 // before a Chromium render is spent on a body the server would refuse.
 //
@@ -70,4 +72,27 @@ export function notesLength(value) {
 
 export function notesError(value) {
   return notesLength(value) > NOTES_MAX ? `Notes must be ${NOTES_MAX} characters or fewer.` : ''
+}
+
+// The Email message tab: the dispatcher's own wording for the cover note above
+// the fixed signature. Sent only when it differs from the message the server
+// generates, and then refused when empty or over this ceiling.
+export const INVOICE_EMAIL_BODY_MAX = 5000
+
+// The length the email message's limit is judged on: code points of the NFC
+// form, the unit the server counts in — so an emoji is one character here, as
+// it is there. The counter shows this same number, so the counter and the
+// error can never disagree.
+export function emailBodyLength(value) {
+  return Array.from((value == null ? '' : String(value)).normalize('NFC')).length
+}
+
+// '' when the message can be sent, otherwise the sentence to show under it.
+export function validateInvoiceEmailBody(value) {
+  const v = value == null ? '' : String(value)
+  if (!v.trim()) return "The email message can't be empty."
+  if (emailBodyLength(v) > INVOICE_EMAIL_BODY_MAX) {
+    return `The email message must be ${INVOICE_EMAIL_BODY_MAX.toLocaleString('en-US')} characters or fewer.`
+  }
+  return ''
 }
