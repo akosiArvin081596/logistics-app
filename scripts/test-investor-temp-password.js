@@ -18,8 +18,10 @@
  *      currentMustChangePassword() reports the account as forced
  *   §2 NOTHING ELSE about acceptance changed: the investors row, the trucks
  *      from the application's vehicles, company_name, the response shape, an
- *      email that already has an account (Accepted, nothing created, no mail,
- *      the account named), and non-Accepted statuses
+ *      email that already has an Investor account (Accepted, nothing created,
+ *      no mail, the account named), an email a Driver account has (409
+ *      USER_ALREADY_EXISTS, no temporary password, nothing written), and
+ *      non-Accepted statuses
  *   §3 EVERY route that mints an emailed temporary password sets the flag in
  *      the INSERT that creates the account (today: driver + investor), so a
  *      third such route cannot quietly skip it
@@ -240,13 +242,27 @@ async function sectionUnchanged() {
 	const again = addApplication(db, { legal_name: "Acme Hauling Two LLC", dba: "Acme Two" });
 	const r2 = await accept(db, again);
 	ok(r2.status === 200 && r2.body && r2.body.success === true && r2.body.accountCreated === false && r2.body.existingUserId === creds.userId
-		&& !("credentials" in r2.body) && typeof r2.body.message === "string" && r2.body.message.includes(`(Investor #${creds.userId})`) && r2.mail.length === 0,
-	`§2 accepting for an email that already has an account must create nothing, mail nothing and name the account (got ${r2.status} ${JSON.stringify(r2.body)})`);
+		&& !("credentials" in r2.body) && r2.body.message === `Accepted. This application's email matches Investor account #${creds.userId}, so no new account, investor record or trucks were created. Confirm it is the same person before acting on its banking or vehicle details.`
+		&& r2.mail.length === 0,
+	`§2 accepting for an email that already has an Investor account must create nothing, mail nothing and name the account (got ${r2.status} ${JSON.stringify(r2.body)})`);
 	ok(db.prepare("SELECT COUNT(*) AS n FROM users").get().n === 1, "§2 ...and leave exactly one account");
 	ok(db.prepare("SELECT COUNT(*) AS n FROM investors").get().n === 1 && db.prepare("SELECT COUNT(*) AS n FROM trucks").get().n === 2,
 		"§2 ...and no second investors record or trucks");
 	ok(db.prepare("SELECT status FROM investor_applications WHERE id = ?").get(again).status === "Accepted",
 		"§2 ...and mark that application Accepted");
+
+	// The same email on an account that is not an Investor mints no temporary
+	// password either: the acceptance is refused and nothing is written.
+	const d = makeDb();
+	const driverId = Number(d.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('qa_driver', 'x', 'Driver', 'QA Test Driver', 'owner@acme.example.test')").run().lastInsertRowid);
+	const refusedId = addApplication(d);
+	const r3 = await accept(d, refusedId);
+	ok(r3.status === 409 && r3.body && r3.body.code === "USER_ALREADY_EXISTS" && !("credentials" in r3.body)
+		&& r3.body.error === `An account with this email already exists (Driver #${driverId}) and it is not an investor account, so this application can't be accepted with that email.`,
+	`§2 accepting for an email that a Driver account has must be refused (got ${r3.status} ${JSON.stringify(r3.body)})`);
+	ok(d.prepare("SELECT COUNT(*) AS n FROM users").get().n === 1 && d.prepare("SELECT COUNT(*) AS n FROM investors").get().n === 0 && r3.mail.length === 0
+		&& d.prepare("SELECT status FROM investor_applications WHERE id = ?").get(refusedId).status === "New",
+	"§2 ...with no account, no investors record, no mail, and the application left New");
 
 	// Any other status creates no account at all.
 	for (const status of ["Reviewed", "Rejected", "New"]) {

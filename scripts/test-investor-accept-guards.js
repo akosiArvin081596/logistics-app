@@ -8,8 +8,10 @@
  * refused, with nothing written and the application left as it was, when
  * another investors record already holds the company name the new record would
  * take (carrier_name = the DBA, else the legal name; compared trimmed and
- * case-insensitively) → 409 INVESTOR_RECORD_CONFLICT, naming it. When an
- * account already has the applicant's email, the application is marked
+ * case-insensitively) → 409 INVESTOR_RECORD_CONFLICT, naming it; and when an
+ * account that is not an Investor (a Driver, a Dispatcher, a Super Admin) has
+ * the applicant's email → 409 USER_ALREADY_EXISTS, naming its role and id.
+ * When only Investor accounts have the email, the application is marked
  * Accepted and nothing else is written or sent: 200 { success: true,
  * accountCreated: false, existingUserId, message }, the status and its audit
  * row in one transaction.
@@ -25,17 +27,23 @@
  *   §1 company-name collision: the second of two same-name applications is
  *      409 INVESTOR_RECORD_CONFLICT (naming the record), in any case or
  *      spacing, and against a hand-added record; nothing written, no mail.
- *   §2 an email already on an account (in any case): 200, accountCreated
- *      false, the account's id, a message naming its role and id; the status
- *      Accepted with an audit row saying so; no account, record or truck
- *      written and no mail. A status write that fails writes no audit row.
+ *   §2 an email already on an Investor account (in any case): 200,
+ *      accountCreated false, the account's id, the agreed message naming it;
+ *      the status Accepted with an audit row saying so; no account, record or
+ *      truck written and no mail. A status write that fails writes no audit
+ *      row. The same email on a Driver, Dispatcher or Super Admin account, or
+ *      on an Investor AND a Driver account: 409 USER_ALREADY_EXISTS with the
+ *      agreed words naming the non-investor account; nothing written (the
+ *      status stays, no audit row), no mail. Two Investor accounts: the
+ *      lowest id is named.
  *   §3 the success path: status, account, investors record and trucks all
  *      written, the audit line and both emails after.
  *   §4 one transaction: a write that fails part-way leaves no account, no
  *      record, no truck and the status as it was, and sends no mail.
  *   §5 the state is read AFTER the await: an account with the email that
- *      appears while the password hashes is found (nothing created), and a
- *      colliding record that appears then is still refused.
+ *      appears while the password hashes is found (nothing created; a Driver
+ *      account refused), and a colliding record that appears then is still
+ *      refused.
  *   §6 unchanged: re-accepting an application whose record exists, New /
  *      Reviewed / Rejected, a removed application (409) and a missing one (404).
  *   §7 source pins: the only await is bcrypt.hash, above the first read; none
@@ -53,6 +61,7 @@
  *      or of punctuation only used to give "" (then "1") or ".". Every username
  *      made is found by the sign-in lookup as this account and no other.
  *   §9 MUTANTS: the company-name check dropped, the email check dropped, the
+ *      role check dropped (any account's email accepted, the old form), the
  *      status written before the checks; the letter-or-digit test, the email
  *      fallback, the application-id fallback, the name-clash test and (with the
  *      name-clash test off, since it compares usernames too) the trimmed
@@ -252,8 +261,8 @@ async function emailSection(routeSrc = ACCEPT_SRC) {
 	const x = await accept(db, c, { routeSrc });
 	t(x.status === 200 && JSON.stringify(x.body) === JSON.stringify({
 		success: true, accountCreated: false, existingUserId: holder,
-		message: `Accepted. An account with this email already exists (Investor #${holder}), so no new account, investor record or trucks were created.`,
-	}), `§2 an email already on an account (another case): 200, accountCreated false, the account named (got ${x.status} ${JSON.stringify(x.body)})`);
+		message: EXISTING_INVESTOR_MESSAGE(holder),
+	}), `§2 an email already on an Investor account (another case): 200, accountCreated false, the account named (got ${x.status} ${JSON.stringify(x.body)})`);
 	t(statusOf(db, c) === "Accepted", "§2 ...the application is Accepted");
 	t(written() === before && x.mail.length === 0, "§2 ...no account, investor record or truck written, and no mail");
 	t(x.audits.length === 1 && x.audits[0].action === "accept_investor_existing_account" && x.audits[0].entityId === c
@@ -263,14 +272,51 @@ async function emailSection(routeSrc = ACCEPT_SRC) {
 	// The audit row is written after the status, inside its transaction: a
 	// status write that fails leaves no audit row and the application as it was.
 	const d = makeDb();
-	d.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('inv_b', 'x', 'Driver', 'B Driver', 'b@example.test')").run();
+	d.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('inv_b', 'x', 'Investor', '', 'b@example.test')").run();
 	const e = addApplication(d, { legal_name: "Other Co", email: "b@example.test" });
 	d.exec("CREATE TRIGGER refuse_status BEFORE UPDATE ON investor_applications BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END;");
 	const y = await accept(d, e, { routeSrc });
 	t(y.status === 500 && y.audits.length === 0 && statusOf(d, e) === "New" && y.mail.length === 0,
 		`§2 a status write that fails: 500, no audit row, the application still New (got ${y.status} ${JSON.stringify(y.audits)})`);
+
+	// The email on an account that is not an Investor: refused, nothing written.
+	const cases = [
+		// [what, the accounts holding the email (role, driver name), the one named]
+		["a Driver account", [["Driver", "QA Test Driver"]], 0],
+		["a Dispatcher account", [["Dispatcher", ""]], 0],
+		["an Investor account and a Driver account", [["Investor", ""], ["Driver", "QA Test Driver Two"]], 1],
+	];
+	for (const [what, holders, named] of cases) {
+		const f = makeDb();
+		const ids = holders.map(([role, driverName], i) => Number(f.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES (?, 'x', ?, ?, ?)")
+			.run(`qa_holder_${i}`, role, driverName, i ? "shared@example.test" : "Shared@Example.test").lastInsertRowid));
+		const g = addApplication(f, { legal_name: "Shared Email Co", email: "shared@example.test" });
+		const all = snapshot(f);
+		const z = await accept(f, g, { routeSrc });
+		const [role] = holders[named];
+		t(z.status === 409 && JSON.stringify(z.body) === JSON.stringify({ error: NOT_INVESTOR_ERROR(role, ids[named]), code: "USER_ALREADY_EXISTS" }),
+			`§2 the email on ${what}: 409 USER_ALREADY_EXISTS naming ${role} #${ids[named]} (got ${z.status} ${JSON.stringify(z.body)})`);
+		t(snapshot(f) === all && statusOf(f, g) === "New" && z.audits.length === 0 && z.mail.length === 0,
+			`§2 ...nothing written for ${what}: the application still New, no account, record, truck or audit row, and no mail`);
+	}
+	// The fixture's own Super Admin (user 1) holds ops@logisx.example.
+	const s = makeDb();
+	const sa = addApplication(s, { legal_name: "Admin Email Co", email: "OPS@logisx.example" });
+	const sx = await accept(s, sa, { routeSrc });
+	t(sx.status === 409 && sx.body.code === "USER_ALREADY_EXISTS" && sx.body.error === NOT_INVESTOR_ERROR("Super Admin", 1) && statusOf(s, sa) === "New",
+		`§2 the email on the Super Admin account: 409 naming Super Admin #1 (got ${sx.status} ${JSON.stringify(sx.body)})`);
+	// Two Investor accounts with the email: the lowest id is named.
+	const w = makeDb();
+	const first = Number(w.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('inv_w1', 'x', 'Investor', '', 'w@example.test')").run().lastInsertRowid);
+	w.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('inv_w2', 'x', 'Investor', '', 'W@example.test')").run();
+	const wa = addApplication(w, { legal_name: "Twice Co", email: "w@example.test" });
+	const wx = await accept(w, wa, { routeSrc });
+	t(wx.status === 200 && wx.body.existingUserId === first && wx.body.message === EXISTING_INVESTOR_MESSAGE(first),
+		`§2 two Investor accounts with the email: 200 naming the lowest id, #${first} (got ${wx.status} ${JSON.stringify(wx.body)})`);
 	return r;
 }
+const EXISTING_INVESTOR_MESSAGE = (id) => `Accepted. This application's email matches Investor account #${id}, so no new account, investor record or trucks were created. Confirm it is the same person before acting on its banking or vehicle details.`;
+const NOT_INVESTOR_ERROR = (role, id) => `An account with this email already exists (${role} #${id}) and it is not an investor account, so this application can't be accepted with that email.`;
 
 // ─────────────────────────────────────────────────────── §3 success
 async function successSection() {
@@ -324,6 +370,15 @@ async function raceSection() {
 		t(x.status === 200 && x.body.accountCreated === false && x.body.existingUserId === late && statusOf(db, id) === "Accepted"
 			&& db.prepare("SELECT COUNT(*) AS n FROM users").get().n === 2 && db.prepare("SELECT COUNT(*) AS n FROM investors").get().n === 0 && x.mail.length === 0,
 		`§5 an account with the email created while the password hashes: found, nothing created (got ${x.status} ${JSON.stringify(x.body)})`);
+	}
+	{
+		const db = makeDb();
+		const id = addApplication(db, { legal_name: "Late Driver Co", email: "late3@example.test" });
+		let late = null;
+		const x = await accept(db, id, { duringHash: (d) => { late = Number(d.prepare("INSERT INTO users (username, password_hash, role, driver_name, email) VALUES ('late3', 'x', 'Driver', 'Late Driver', 'late3@example.test')").run().lastInsertRowid); } });
+		t(x.status === 409 && x.body.code === "USER_ALREADY_EXISTS" && x.body.error.includes(`(Driver #${late})`) && statusOf(db, id) === "New"
+			&& db.prepare("SELECT COUNT(*) AS n FROM investors").get().n === 0,
+		`§5 a Driver account with the email created while the password hashes: still refused (got ${x.status} ${JSON.stringify(x.body)})`);
 	}
 	{
 		const db = makeDb();
@@ -460,6 +515,8 @@ async function mutantSection() {
 	const swap = (src, from, to) => { if (!src.includes(from)) die(`mutant anchor not found: ${from}`); return src.replace(from, to); };
 	t(failed(await nameSection(swap(ACCEPT_SRC, "if (nameHolder) {", "if (false) {"))), "MUTANT the company-name check dropped: caught by §1");
 	t(failed(await emailSection(swap(ACCEPT_SRC, "if (emailHolder) {", "if (false) {"))), "MUTANT the email check dropped: caught by §2");
+	t(failed(await emailSection(swap(ACCEPT_SRC, 'const otherRole = emailHolders.find((u) => u.role !== "Investor");', "const otherRole = null;"))),
+		"MUTANT the role check dropped (any account's email accepted, the old form): caught by §2");
 	const early = swap(ACCEPT_SRC, 'const setStatus = db.prepare("UPDATE investor_applications SET status=? WHERE id=?");',
 		'const setStatus = db.prepare("UPDATE investor_applications SET status=? WHERE id=?");\n\t\tsetStatus.run(status, appId);');
 	t(failed(await nameSection(early)), "MUTANT the status written before the checks: caught by §1");

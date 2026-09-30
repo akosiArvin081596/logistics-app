@@ -111,7 +111,7 @@
             <div class="field full">
               <label>Legal Name (Individual or Entity) <span class="req">*</span></label>
               <input
-                v-model="form.legal_name" placeholder="e.g. John Doe or Doe Enterprises LLC" data-wizard-target="legal-name" required
+                v-model="form.legal_name" placeholder="e.g. John Doe or Doe Enterprises LLC" data-wizard-target="legal-name" required maxlength="200"
                 :aria-invalid="w9FieldErrors.legal_name ? 'true' : 'false'"
                 :aria-describedby="w9FieldErrors.legal_name ? 'invest-legal-name-error' : undefined"
               />
@@ -120,7 +120,7 @@
             <div class="field">
               <label>DBA <span class="opt">(if applicable)</span></label>
               <input
-                v-model="form.dba" placeholder="Doing business as..." data-wizard-target="dba"
+                v-model="form.dba" placeholder="Doing business as..." data-wizard-target="dba" maxlength="200"
                 :aria-invalid="w9FieldErrors.dba ? 'true' : 'false'"
                 :aria-describedby="w9FieldErrors.dba ? 'invest-dba-error' : undefined"
               />
@@ -138,7 +138,7 @@
               <div class="address-row">
                 <div class="address-input-wrap">
                   <input
-                    ref="addressInput" v-model="form.address" placeholder="Start typing an address..." data-wizard-target="address" required autocomplete="off"
+                    ref="addressInput" v-model="form.address" placeholder="Start typing an address..." data-wizard-target="address" required autocomplete="off" maxlength="300"
                     :aria-invalid="w9FieldErrors.address ? 'true' : 'false'"
                     :aria-describedby="w9FieldErrors.address ? 'invest-address-error' : undefined"
                   />
@@ -1124,10 +1124,14 @@ for (const field of W9_TEXT_FIELDS) watch(() => form[field], () => { delete w9Fi
 const signNotice = ref('')
 let checkingW9 = false
 
-// The refusal ({ field, message }) of a UNSUPPORTED_CHARACTERS 400, or null.
+// The refusal ({ field, message }) of a UNSUPPORTED_CHARACTERS or
+// VALUE_TOO_LONG 400, or null. The inputs stop at the server's caps, so a
+// value too long for the W-9 reaches the server only from the signature
+// dialog or a filled-in address.
+const W9_TEXT_REFUSAL_CODES = ['UNSUPPORTED_CHARACTERS', 'VALUE_TOO_LONG']
 function w9TextRefusal(err) {
   const field = err?.data?.field
-  return err?.status === 400 && err.code === 'UNSUPPORTED_CHARACTERS' && typeof field === 'string' ? { field, message: err.message } : null
+  return err?.status === 400 && W9_TEXT_REFUSAL_CODES.includes(err.code) && typeof field === 'string' ? { field, message: err.message } : null
 }
 
 // null when the W-9 can print `body`'s values, else the refusal. No answer
@@ -1531,7 +1535,8 @@ async function submitOnboarding() {
       onInviteRefused(err.code)
       return
     }
-    // Text the W-9 cannot print: back to where it was typed. Step 1's fields
+    // Text the W-9 cannot print, or too long for it: back to where it was
+    // typed. Step 1's fields
     // show the message under the field; the W-9 signature is taken back, to be
     // signed again.
     const refusal = w9TextRefusal(err)

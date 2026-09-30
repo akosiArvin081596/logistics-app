@@ -22,6 +22,24 @@
  * ("Café Ñandú LLC") passes. The two contracts, rendered by Chromium, are not
  * restricted.
  *
+ * LENGTH. The font check walked the whole value, however long, and the fill
+ * walked it again: one very long legal name held the server for seconds. The
+ * legal name, business name and W-9 signature are now capped at 200
+ * characters and the address at 300, checked by one comparison before any
+ * character is looked at: 400 { code: "VALUE_TOO_LONG", field, error: "This is
+ * too long. Please keep it to <cap> characters or fewer." } on all three
+ * routes, so apply stores within the caps. The check route's body is parsed
+ * with a 16 KB limit, mounted above the global 50 MB parser: 413
+ * { code: "BODY_TOO_LARGE" }. /invest's three inputs carry the caps as
+ * maxlength, and the page shows a VALUE_TOO_LONG where the value was typed.
+ *
+ * ODD INPUT. A numeric address or W-9 signature passed the check route, and
+ * the preview answered 500 (the fill splits the address and draws the
+ * signature as text); an object entity type or tax classification reached the
+ * fill unchecked. checkW9Printable() now takes strings only (anything else is
+ * 400 INVALID_FIELD, naming the field), and the preview's scalar list holds
+ * entity_type and tax_classification too.
+ *
  * THE CAUSE. fillW9Form() reported every field that did not take its value as
  * "its AcroForm field names no longer match", which is what ops read in the
  * alert. A value longer than its boxes, and text the font cannot encode, now
@@ -36,10 +54,20 @@
  *      the answer IS the fill's font's: every code point of the Basic
  *      Multilingual Plane (and astral samples) gets the verdict pdf-lib's
  *      embedded Helvetica and Helvetica Bold give, and the shipped fillW9Form()
- *      renders exactly the examples the check passes.
+ *      renders exactly the examples the check passes. The length caps: at the
+ *      cap passes, one over is VALUE_TOO_LONG naming the field, and a 10 MB
+ *      value is refused without the font being asked about one character.
  *   §4 wiring: apply and the W-9 preview run the checks before anything is
  *      stored or rendered, and answer the 400s above; the preview checks only
  *      on the W-9; the check route, executed, answers them and nothing else.
+ *      The W-9 preview, executed with the shipped fillW9Form(), and the check
+ *      route agree on a number where text belongs (400 INVALID_FIELD, never
+ *      500), and the preview refuses an object or list entity type or tax
+ *      classification before the fill.
+ *      The check route's 16 KB parser, executed in a loopback Express app
+ *      with the shipped global parser and JSON error handler: 413 for a large
+ *      body (with or without a Content-Length), the global parser skips a body
+ *      it already parsed, and other routes keep the 50 MB limit.
  *   §5 the cause, from the shipped fillW9Form() run with pdf-lib on the real
  *      template: a too-long TIN, text the font cannot encode on each line and
  *      in the signature, and a template field that is missing.
@@ -48,13 +76,15 @@
  *      above, show the refusal where the value was typed and stop there.
  *   §7 MUTANTS, one per guard, each caught.
  *
- * Test TINs and QA-TEST names only. Pure: no server, no app.db, no network.
+ * Test TINs and QA-TEST names only. No app.db and no network: the only server
+ * is §4's Express app, on an ephemeral 127.0.0.1 port, closed before exit.
  *
  * Run: node scripts/test-w9-input-checks.js    # exits 1 on failure
  */
 "use strict";
 
 const fs = require("fs");
+const http = require("http");
 const path = require("path");
 const { pathToFileURL } = require("url");
 
@@ -74,8 +104,10 @@ function section(title) { console.log(`\n${title}`); }
 const cp = (...points) => String.fromCodePoint(...points);
 
 let pdfLib;
+let express;
 try {
 	pdfLib = require("pdf-lib");
+	express = require("express");
 } catch (e) {
 	die(`a server dependency did not load (${e.message}); run npm ci under the .nvmrc Node`);
 }
@@ -83,10 +115,21 @@ const imageLimits = require(path.join(ROOT, "lib", "image-size"));
 const publicFormInput = require(path.join(ROOT, "lib", "public-form-input"));
 
 // A (possibly mutated) copy of the lib, loaded without touching the real module.
-function loadLib(src) {
+function loadLib(src, req = require) {
 	const mod = { exports: {} };
-	new Function("module", "exports", "require", src)(mod, mod.exports, require);
+	new Function("module", "exports", "require", src)(mod, mod.exports, req);
 	return mod.exports;
+}
+// The lib with pdf-lib's font lookups counted: how many characters the font
+// was asked about.
+function countingLib(src = LIB_SRC) {
+	let calls = 0;
+	const counted = (font) => {
+		const real = pdfLib.StandardFontEmbedder.for(font).encoding;
+		return { encoding: { canEncodeUnicodeCodePoint: (cp) => { calls++; return real.canEncodeUnicodeCodePoint(cp); } } };
+	};
+	const req = (name) => (name === "pdf-lib" ? { ...pdfLib, StandardFontEmbedder: { for: counted } } : require(name));
+	return { lib: loadLib(src, req), calls: () => calls, reset: () => { calls = 0; } };
 }
 const LIB = loadLib(LIB_SRC);
 // A (possibly mutated) copy of the client file: its exports become returns.
@@ -192,6 +235,7 @@ async function clientTinSection(src = CLIENT_SRC) {
 // §3 text the W-9's font can print
 // ===========================================================================
 const TEXT_MESSAGE = "Please enter this as it appears on your U.S. tax return, using Latin characters.";
+const SCALAR_MESSAGE = "Some of the submitted details are invalid. Please review the form and try again.";
 const CAFE = `Caf${cp(0xe9)} ${cp(0xd1)}and${cp(0xfa)} LLC`;
 const JP = cp(0x682a, 0x5f0f, 0x4f1a, 0x793e, 0x30c6, 0x30b9, 0x30c8);
 const PRINTABLE = [
@@ -240,6 +284,9 @@ function printableRows(lib = LIB) {
 function textRows(lib = LIB) {
 	const r = rows();
 	r.t(lib.UNSUPPORTED_CHARACTERS_MESSAGE === TEXT_MESSAGE && lib.INVALID_TIN_MESSAGE === TIN_MESSAGE, "both messages are the agreed words, exactly");
+	r.t(lib.INVALID_VALUE_MESSAGE === SCALAR_MESSAGE && publicFormInput.checkPublicScalars({ v: [] }, ["v"]).message === SCALAR_MESSAGE,
+		"a value that is not text gets the public forms' own INVALID_FIELD words (lib/public-form-input.js's), so the two copies cannot drift");
+	r.t(!/\brequire\("\.{1,2}\//.test(LIB_SRC), "the lib has no relative require (other runners load it with their own require)");
 	r.t(JSON.stringify(lib.W9_TEXT_FIELDS) === JSON.stringify(["legal_name", "dba", "address"]), "the step-1 fields are the legal name, business name and address, in that order");
 	const body = { legal_name: CAFE, dba: "QA-TEST", address: `1 QA Test Way, Testville, TX 77001`, contact_person: JP, contact_title: JP, bankruptcy_liens: JP };
 	r.t(lib.checkW9Text(body).ok === true, "fields the W-9 does not print (contact person, title, liens) are not checked");
@@ -253,15 +300,56 @@ function textRows(lib = LIB) {
 	r.t(sig.ok === false && sig.field === "signatureText", "the named signature field is checked, and named");
 	r.t(lib.checkW9Text({}).ok === true && lib.checkW9Text(undefined).ok === true && lib.checkW9Text(null).ok === true &&
 		lib.checkW9Text({ legal_name: "", dba: null }).ok === true, "empty and absent values print nothing and pass");
-	r.t(lib.checkW9Text({ address: 12345 }).ok === true, "a number is printed as its digits and passes");
-	for (const [label, value] of [["a list", ["x"]], ["an object", { a: 1 }], ["true", true], ["NaN", NaN]]) {
-		let v;
-		try { v = lib.checkW9Text({ legal_name: value }); } catch (e) { v = { threw: e.message }; }
-		r.t(v.ok === false && v.field === "legal_name", `${label} is refused, never thrown on (got ${JSON.stringify(v)})`);
+	const NOT_TEXT = [["a number", 12345], ["zero", 0], ["NaN", NaN], ["a list", ["x"]], ["an object", { a: 1 }], ["an object with a toString key", { toString: 1 }], ["true", true], ["false", false]];
+	for (const [field, font] of [["legal_name", "field"], ["dba", "field"], ["address", "field"], ["signatureText", "signature"]]) {
+		for (const [label, value] of NOT_TEXT) {
+			let v;
+			try { v = lib.checkW9Printable([{ field, value, font }]); } catch (e) { v = { threw: e.message }; }
+			r.t(v.ok === false && v.code === "INVALID_FIELD" && v.field === field && v.message === SCALAR_MESSAGE,
+				`${field}: ${label} is refused as INVALID_FIELD, naming the field, never thrown on (got ${JSON.stringify(v)})`);
+		}
 	}
+	r.t(lib.checkW9Text({ address: 12345 }).code === "INVALID_FIELD", "checkW9Text: a numeric address is refused (the fill splits it as text)");
 	let v;
 	try { v = lib.checkW9Printable([{ field: "f", value: "QA", font: "__proto__" }]); } catch (e) { v = { threw: e.message }; }
 	r.t(v.ok === false, "a font name that is not one of the two is refused, never thrown on");
+	return r;
+}
+
+// The length caps, checked before any character is.
+const TOO_LONG_MESSAGE = (max) => `This is too long. Please keep it to ${max} characters or fewer.`;
+function lengthRows(src = LIB_SRC) {
+	const r = rows();
+	const { lib, calls, reset } = countingLib(src);
+	r.t(JSON.stringify(lib.W9_TEXT_MAX_LENGTH) === JSON.stringify({ legal_name: 200, dba: 200, address: 300 }) && lib.W9_SIGNATURE_MAX_LENGTH === 200,
+		"the caps: 200 for the legal name and business name, 300 for the address, 200 for the W-9 signature");
+	const caps = [
+		// [field, cap, font]
+		["legal_name", 200, "field"], ["dba", 200, "field"], ["address", 300, "field"],
+		["signatureText", 200, "signature"], ["signatures.w9.text", 200, "signature"], ["a field with no cap of its own", 200, "field"],
+	];
+	for (const [field, max, font] of caps) {
+		const at = lib.checkW9Printable([{ field, value: `QA-TEST ${"q".repeat(max - 8)}`, font }]);
+		const over = lib.checkW9Printable([{ field, value: `QA-TEST ${"q".repeat(max - 7)}`, font }]);
+		r.t(at.ok === true, `${field}: ${max} characters pass (got ${JSON.stringify(at)})`);
+		r.t(over.ok === false && over.code === "VALUE_TOO_LONG" && over.field === field && over.message === TOO_LONG_MESSAGE(max),
+			`${field}: ${max + 1} characters are refused as VALUE_TOO_LONG, naming the field (got ${JSON.stringify(over)})`);
+	}
+	const body = { legal_name: "QA-TEST Holdings LLC", dba: "", address: "1 QA Test Way, Testville, TX 77001" };
+	for (const [field, max] of [["legal_name", 200], ["dba", 200], ["address", 300]]) {
+		const v = lib.checkW9Text({ ...body, [field]: "Q".repeat(max + 1) });
+		r.t(v.ok === false && v.code === "VALUE_TOO_LONG" && v.field === field, `checkW9Text: a ${max + 1}-character ${field} is VALUE_TOO_LONG (got ${JSON.stringify(v)})`);
+	}
+	const sig = lib.checkW9Text({ ...body, signatureText: "Q".repeat(201) }, { signature: "signatureText" });
+	r.t(sig.ok === false && sig.code === "VALUE_TOO_LONG" && sig.field === "signatureText", "checkW9Text: a 201-character W-9 signature is VALUE_TOO_LONG");
+	const longJp = lib.checkW9Text({ legal_name: JP.repeat(40) });
+	r.t(longJp.code === "VALUE_TOO_LONG", `the length is checked first: 280 characters the font cannot print are too long, not unsupported (got ${longJp.code})`);
+	reset();
+	const huge = lib.checkW9Printable([{ field: "legal_name", value: "Q".repeat(10 * 1024 * 1024) }]);
+	r.t(huge.code === "VALUE_TOO_LONG" && calls() === 0, `a 10 MB legal name is refused without the font being asked about one character (asked ${calls()} times)`);
+	reset();
+	lib.checkW9Printable([{ field: "legal_name", value: "Q".repeat(200) }]);
+	r.t(calls() === 200, `...while a value within the cap is asked about character by character (${calls()} of 200; the counter works)`);
 	return r;
 }
 
@@ -415,13 +503,41 @@ function previewWired(src, what) {
 
 // POST /api/public/investor-w9-check, executed: its handler as registered.
 const LIMITER = () => {};
-function checkRoute(src = SRC) {
+function checkRoute(src = SRC, lib = LIB) {
 	const handlers = {};
 	const app = { post: (p, ...h) => { handlers[p] = h; } };
 	new Function("app", "investorTaxFormCheckLimiter", "publicFormInput", "w9Input", "PUBLIC_W9_CHECK_SCALAR_FIELDS",
 		`"use strict";\n${routeSource("post", "/api/public/investor-w9-check", src)};`)(
-		app, LIMITER, publicFormInput, LIB, constList("PUBLIC_W9_CHECK_SCALAR_FIELDS", src));
+		app, LIMITER, publicFormInput, lib, constList("PUBLIC_W9_CHECK_SCALAR_FIELDS", src));
 	return handlers["/api/public/investor-w9-check"];
+}
+// POST /api/public/investor-preview-pdf/:docKey, executed on the W-9 with the
+// shipped fillW9Form() on the real template. There is no invitation and no
+// contract render here.
+function previewRoute(src = SRC, lib = LIB) {
+	const handlers = {};
+	const app = { post: (p, ...h) => { handlers[p] = h; } };
+	const names = ["app", "pdfPreviewLimiter", "imageLimits", "safeSignatureImage", "EVIDENCE_DATE_TZ", "publicFormInput", "resolveInviteToken",
+		"renderPolicy", "investorPaymentTerms", "setInvitePreviewHeaders", "w9Input", "PUBLIC_W9_PREVIEW_SCALAR_FIELDS", "fillW9Form",
+		"PDF_PREVIEW_MAX_INFLIGHT", "pdfPreviewInflight"];
+	const noContract = async () => { throw new Error("no contract is rendered in this runner"); };
+	new Function(...names, `"use strict";\n${routeSource("post", "/api/public/investor-preview-pdf/:docKey", src)};`)(
+		app, LIMITER, imageLimits, () => false, "UTC", publicFormInput, () => ({ ok: false, status: 404, body: {} }),
+		noContract, {}, () => {}, lib, constList("PUBLIC_W9_PREVIEW_SCALAR_FIELDS", src), build(), 3, 0);
+	return handlers["/api/public/investor-preview-pdf/:docKey"][1];
+}
+async function callPreview(handler, body) {
+	const out = { status: 200, body: undefined };
+	const res = {
+		status(c) { out.status = c; return this; }, json(b) { out.body = b; return this; },
+		send(b) { out.body = b; return this; }, setHeader() {},
+	};
+	const warn = console.warn;
+	console.warn = () => {};
+	try {
+		await handler({ params: { docKey: "w9" }, body }, res);
+	} finally { console.warn = warn; }
+	return out;
 }
 function callRoute(handler, body) {
 	const out = { status: 200, body: undefined };
@@ -430,6 +546,7 @@ function callRoute(handler, body) {
 	return out;
 }
 const TEXT_400 = (field) => JSON.stringify({ error: TEXT_MESSAGE, code: "UNSUPPORTED_CHARACTERS", field });
+const TOO_LONG_400 = (field, max) => JSON.stringify({ error: TOO_LONG_MESSAGE(max), code: "VALUE_TOO_LONG", field });
 
 function checkRouteRows(src = SRC) {
 	const r = rows();
@@ -447,6 +564,11 @@ function checkRouteRows(src = SRC) {
 		["a Japanese business name", { ...good, dba: JP }, 400, TEXT_400("dba")],
 		["a Japanese street", { ...good, address: `${JP}, Testville, TX 77001` }, 400, TEXT_400("address")],
 		["a Japanese W-9 signature", { signatureText: JP }, 400, TEXT_400("signatureText")],
+		["a 300-character address", { ...good, address: `1 QA Test Way, ${"q".repeat(285)}` }, 200, JSON.stringify({ ok: true })],
+		["a 201-character legal name", { ...good, legal_name: "Q".repeat(201) }, 400, TOO_LONG_400("legal_name", 200)],
+		["a 201-character business name", { ...good, dba: "Q".repeat(201) }, 400, TOO_LONG_400("dba", 200)],
+		["a 301-character address", { ...good, address: "Q".repeat(301) }, 400, TOO_LONG_400("address", 300)],
+		["a 201-character W-9 signature", { signatureText: "Q".repeat(201) }, 400, TOO_LONG_400("signatureText", 200)],
 	];
 	for (const [label, body, status, json] of cases) {
 		const got = callRoute(handler, body);
@@ -460,6 +582,99 @@ function checkRouteRows(src = SRC) {
 	return r;
 }
 
+// The check route and the W-9 preview agree on odd input, and the preview
+// answers 400, never 500.
+async function oddInputRows(src = SRC, lib = LIB) {
+	const r = rows();
+	const check = checkRoute(src, lib)[1];
+	const preview = previewRoute(src, lib);
+	const good = { legal_name: "QA-TEST Holdings LLC", dba: "", address: "1 QA Test Way, Testville, TX 77001", entity_type: "LLC", tax_classification: "C-Corp" };
+	const control = await callPreview(preview, good);
+	if (!r.t(control.status === 200 && Buffer.isBuffer(control.body) && control.body.length > 1000, `a valid W-9 preview renders (got ${control.status} ${JSON.stringify(control.body && !Buffer.isBuffer(control.body) ? control.body : "")})`)) return r;
+	const INVALID = (field) => JSON.stringify({ error: SCALAR_MESSAGE, code: "INVALID_FIELD", field });
+	for (const [label, field, value] of [["a numeric address", "address", 12345], ["a numeric W-9 signature", "signatureText", 12345], ["a numeric legal name", "legal_name", 7]]) {
+		const body = { ...good, [field]: value };
+		let p;
+		try { p = await callPreview(preview, body); } catch (e) { p = { status: "threw", body: e.message }; }
+		let c;
+		try { c = callRoute(check, field === "signatureText" ? { signatureText: value } : body); } catch (e) { c = { status: "threw", body: { error: e.message } }; }
+		r.t(p.status === 400 && JSON.stringify(p.body) === INVALID(field), `W-9 preview, ${label}: 400 INVALID_FIELD naming ${field}, not 500 (got ${p.status} ${JSON.stringify(p.body)})`);
+		r.t(c.status === 400 && c.body.code === "INVALID_FIELD" && c.body.field === field, `w9-check, ${label}: 400 INVALID_FIELD too, so the two agree (got ${c.status} ${JSON.stringify(c.body)})`);
+	}
+	for (const [label, field, value] of [["an object entity type", "entity_type", { toString: 1 }], ["an object tax classification", "tax_classification", { toString: 1 }],
+		["a list entity type", "entity_type", ["LLC"]], ["a list tax classification", "tax_classification", ["C-Corp"]]]) {
+		let p;
+		try { p = await callPreview(preview, { ...good, [field]: value }); } catch (e) { p = { status: "threw", body: e.message }; }
+		r.t(p.status === 400 && p.body && p.body.code === "INVALID_FIELD" && p.body.field === field && p.body.reason === "not_scalar",
+			`W-9 preview, ${label}: 400 INVALID_FIELD naming ${field}, before fillW9Form() (got ${p.status} ${JSON.stringify(p.body)})`);
+	}
+	return r;
+}
+
+// The check route's own body parser, executed: the shipped mount, the shipped
+// global parser and the shipped JSON error handler, in server.js's order, in
+// an Express app on an ephemeral loopback port.
+const W9_CHECK_PARSER = 'app.use("/api/public/investor-w9-check", express.json({ limit: "16kb" }), (err, req, res, next) => {';
+const GLOBAL_PARSER = 'app.use(express.json({ limit: "50mb" }));';
+const JSON_ERROR_HANDLER = "// JSON payload too large error handler\napp.use((err, req, res, next) => {";
+function post(port, route, text, { chunked = false } = {}) {
+	return new Promise((resolve) => {
+		const data = Buffer.from(text);
+		const headers = { "Content-Type": "application/json" };
+		if (!chunked) headers["Content-Length"] = data.length;
+		const req = http.request({ host: "127.0.0.1", port, path: route, method: "POST", headers, timeout: 5000 }, (res) => {
+			const chunks = [];
+			res.on("data", (c) => chunks.push(c));
+			res.on("end", () => {
+				let json = null;
+				try { json = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { json = null; }
+				resolve({ status: res.statusCode, json });
+			});
+		});
+		req.on("timeout", () => req.destroy(new Error("no answer in 5 s")));
+		req.on("error", (e) => resolve({ status: 0, json: { error: e.message } }));
+		for (let i = 0; i < data.length; i += 4096) req.write(data.subarray(i, i + 4096));
+		req.end();
+	});
+}
+async function bodyLimitRows(src = SRC) {
+	const r = rows();
+	const mountAt = src.indexOf(W9_CHECK_PARSER);
+	const globalAt = src.indexOf(GLOBAL_PARSER);
+	const handlerAt = src.indexOf(JSON_ERROR_HANDLER);
+	if (!r.t(mountAt > 0 && globalAt > mountAt && handlerAt > globalAt,
+		"the check route's 16 KB parser is mounted above the global 50 MB parser, and both above the JSON error handler")) return r;
+	const mount = src.slice(mountAt, src.indexOf("\n});\n", mountAt) + 4);
+	const errorHandler = src.slice(handlerAt, src.indexOf("\n});\n", handlerAt) + 4);
+	const app = express();
+	new Function("app", "express", `"use strict";\n${mount}\n${GLOBAL_PARSER}`)(app, express);
+	app.post("/api/public/investor-w9-check", checkRoute(src)[1]);
+	app.post("/api/other", (req, res) => res.json({ received: JSON.stringify(req.body).length }));
+	new Function("app", `"use strict";\n${errorHandler}`)(app);
+	const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
+	const { port } = server.address();
+	try {
+		const large = JSON.stringify({ legal_name: "Q".repeat(20 * 1024) });
+		const TOO_LARGE = JSON.stringify({ error: "Too much was sent to check. Please shorten what you entered and try again.", code: "BODY_TOO_LARGE" });
+		for (const [label, chunked] of [["with a Content-Length", false], ["sent chunked, with none", true]]) {
+			const x = await post(port, "/api/public/investor-w9-check", large, { chunked });
+			r.t(x.status === 413 && JSON.stringify(x.json) === TOO_LARGE, `a 20 KB body ${label}: 413 BODY_TOO_LARGE (got ${x.status} ${JSON.stringify(x.json)})`);
+		}
+		const small = await post(port, "/api/public/investor-w9-check", JSON.stringify({ legal_name: "QA-TEST Holdings LLC", address: "1 QA Test Way, Testville, TX 77001" }));
+		r.t(small.status === 200 && JSON.stringify(small.json) === JSON.stringify({ ok: true }),
+			`a small body is parsed once and checked: 200 (the global parser skipped it; got ${small.status} ${JSON.stringify(small.json)})`);
+		const long = await post(port, "/api/public/investor-w9-check", JSON.stringify({ legal_name: "Q".repeat(201) }));
+		r.t(long.status === 400 && long.json && long.json.code === "VALUE_TOO_LONG", `a body within 16 KB with a value over its cap: 400 VALUE_TOO_LONG (got ${long.status})`);
+		const broken = await post(port, "/api/public/investor-w9-check", "{\"legal_name\":");
+		r.t(broken.status === 400 && broken.json && broken.json.error === "Invalid request. Please try again.", `malformed JSON goes on to the JSON error handler: 400 (got ${broken.status} ${JSON.stringify(broken.json)})`);
+		const other = await post(port, "/api/other", JSON.stringify({ blob: "Q".repeat(100 * 1024) }));
+		r.t(other.status === 200 && other.json && other.json.received > 100 * 1024, `another route still takes a 100 KB body (the 50 MB limit is unchanged; got ${other.status})`);
+	} finally {
+		await new Promise((resolve) => server.close(resolve));
+	}
+	return r;
+}
+
 function wiringRows(src = SRC) {
 	const r = rows();
 	r.t(/\nconst w9Input = require\("\.\/lib\/w9-input"\);\n/.test(src), "server.js loads lib/w9-input.js");
@@ -468,8 +683,8 @@ function wiringRows(src = SRC) {
 	r.t(applySignatureWired(src), "apply: the W-9's signature (only the W-9's) is checked after the signature loop and before anything is written; 400 naming signatures.w9.text");
 	r.t(previewWired(src, "shape") && previewWired(src, "tin") && previewWired(src, "text"),
 		"W-9 preview: one scalar each, the TIN, then the text and signature, all before fillW9Form() and in the W-9 branch only (the Master Agreement and Lease renders are not restricted)");
-	r.t(JSON.stringify(constList("PUBLIC_W9_PREVIEW_SCALAR_FIELDS", src)) === JSON.stringify(["legal_name", "dba", "address", "ein_ssn", "signatureText"]),
-		"the preview's scalar list is exactly what the W-9 prints from its body");
+	r.t(JSON.stringify(constList("PUBLIC_W9_PREVIEW_SCALAR_FIELDS", src)) === JSON.stringify(["legal_name", "dba", "address", "ein_ssn", "signatureText", "entity_type", "tax_classification"]),
+		"the preview's scalar list is exactly what the W-9 prints or reads from its body (the entity type and tax classification pick its line 3a box)");
 	return r;
 }
 
@@ -629,6 +844,16 @@ async function viewRows(src = viewCode(VIEW_SRC)) {
 			"a Latin W-9 signature is taken, the notice cleared and the signed preview fetched");
 	}
 	{
+		const v = buildView(src, apiOver(handler));
+		await v.handleSigned(SIGN("w9", "Q".repeat(201)));
+		r.t(v.signatures.w9 === undefined && v.signNotice.value === TOO_LONG_MESSAGE(200) && v.previews.length === 0,
+			"a 201-character W-9 signature is not taken: the dialog says it is too long");
+		v.set("address", "Q".repeat(301));
+		await v.submitApplication();
+		r.t(v.step.value === 0 && v.w9FieldErrors.address === TOO_LONG_MESSAGE(300),
+			"a 301-character address (filled in, past the input's maxlength): the message under Principal Address, and step 1 stays");
+	}
+	{
 		const api = apiOver(handler);
 		const v = buildView(src, api);
 		await v.handleSigned(SIGN("master_agreement", JP));
@@ -648,9 +873,16 @@ function viewTemplateRows() {
 		`${field}: the input names its message, and the message renders under it`);
 	}
 	r.t(VIEW_SRC.includes(':notice="signNotice || termsNotice"'), "the sign dialog shows the W-9 signature's refusal");
+	for (const field of ["legal_name", "dba", "address"]) {
+		const at = VIEW_SRC.indexOf(`v-model="form.${field}"`);
+		const tag = at < 0 ? "" : VIEW_SRC.slice(VIEW_SRC.lastIndexOf("<input", at), VIEW_SRC.indexOf("/>", at));
+		const max = (tag.match(/\smaxlength="(\d+)"/) || [])[1];
+		r.t(Number(max) === LIB.W9_TEXT_MAX_LENGTH[field], `${field}: the input's maxlength is the server's cap (${max} vs ${LIB.W9_TEXT_MAX_LENGTH[field]})`);
+	}
 	const copy = fs.readFileSync(path.join(ROOT, "docs", "investor-portal-copy.md"), "utf8");
-	r.t(copy.includes(`\`${TIN_MESSAGE}\``) && copy.includes(`\`${TEXT_MESSAGE}\``),
-		"docs/investor-portal-copy.md lists both messages word for word, for the client's sign-off");
+	r.t(copy.includes(`\`${TIN_MESSAGE}\``) && copy.includes(`\`${TEXT_MESSAGE}\``) &&
+		copy.includes(`\`${TOO_LONG_MESSAGE(200)}\``) && copy.includes(`\`${TOO_LONG_MESSAGE(300)}\``),
+	"docs/investor-portal-copy.md lists every message word for word, for the client's sign-off");
 	const submit = codeOnly(liftFn(VIEW_SRC, "async function submitOnboarding("));
 	r.t(/const refusal = w9TextRefusal\(err\)\n\s*if \(refusal && W9_TEXT_FIELDS\.includes\(refusal\.field\)\) \{\n\s*w9FieldErrors\[refusal\.field\] = refusal\.message\n\s*showReviewModal\.value = false\n\s*step\.value = 0\n\s*return/.test(submit),
 		"a submission refused for a step-1 field goes back to step 1 with the message under the field");
@@ -678,6 +910,15 @@ async function mutantRows() {
 		"MUTANT the font is not asked (any text accepted, the old form): caught by §3");
 	r.t(failed(textRows(lib('const W9_TEXT_FIELDS = ["legal_name", "dba", "address"];', 'const W9_TEXT_FIELDS = ["legal_name"];'))),
 		"MUTANT the business name and address left unchecked: caught by §3");
+	const noStringCheck = lib('if (typeof value !== "string") return { ok: false, code: "INVALID_FIELD", field, message: INVALID_VALUE_MESSAGE };', "");
+	r.t(failed(await oddInputRows(SRC, noStringCheck)),
+		"MUTANT the text check takes a non-string (a numeric address reaches the fill): caught by §4");
+	r.t(failed(await oddInputRows(swap(SRC, '"signatureText", "entity_type", "tax_classification"];', '"signatureText"];'))),
+		"MUTANT the preview's scalar list without the entity type and tax classification: caught by §4");
+	r.t(failed(lengthRows(swap(LIB_SRC, 'if (value.length > max) return { ok: false, code: "VALUE_TOO_LONG", field, message: tooLongMessage(max) };', ""))),
+		"MUTANT the length cap dropped (any length walked by the font, the old form): caught by §3");
+	r.t(failed(await bodyLimitRows(swap(SRC, W9_CHECK_PARSER, W9_CHECK_PARSER.replace('limit: "16kb"', 'limit: "50mb"')))),
+		"MUTANT the check route parsed with the 50 MB limit: caught by §4");
 	const noApplyTin = swap(SRC, "const tinCheck = w9Input.checkW9Tin(ein_ssn);\n\t\tif (!tinCheck.ok) {", "const tinCheck = { ok: true };\n\t\tif (!tinCheck.ok) {");
 	r.t(failed(wiringRows(noApplyTin)), "MUTANT the apply route's TIN check removed: caught by §4");
 	const noPreviewTin = swap(SRC, "const tinCheck = w9Input.checkW9Tin(ein_ssn);\n\t\t\tif (!tinCheck.ok) {", "const tinCheck = { ok: true };\n\t\t\tif (!tinCheck.ok) {");
@@ -719,11 +960,14 @@ function record(r) {
 	section("§3 text the W-9's font can print, asked of the font");
 	record(printableRows());
 	record(textRows());
+	record(lengthRows());
 	record(await fontParityRows());
 	record(await fillParityRows());
 	section("§4 wiring: apply, the W-9 preview and the check route");
 	record(wiringRows());
 	record(checkRouteRows());
+	record(await oddInputRows());
+	record(await bodyLimitRows());
 	section("§5 fillW9Form() records the cause");
 	record(await causeRows());
 	section("§6 /invest step 1 and the W-9 signature, executed");
