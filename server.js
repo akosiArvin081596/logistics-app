@@ -45166,18 +45166,25 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 		// else the ONE spelling that reads as the same name, so a driver whose
 		// assignment, ELD truck or sheet rows spell the name with other spacing
 		// still gets their GPS, truck and loads. Two such spellings answer
-		// nothing: a spacing match cannot tell which of them is this driver. Both
-		// levels are null-prototype objects.
+		// nothing: a spacing match cannot tell which of them is this driver. The
+		// same holds when the DIRECTORY itself holds two spellings of one name
+		// (a legacy row beside the real one): each keeps its own entry and reads
+		// only its own spelling, the rule driverNameHeldByOtherSpelling() applies
+		// everywhere else. Both levels are null-prototype objects.
 		const spellingOf = (name) => (typeof name === "string" ? name : "").trim().toLowerCase();
 		const fileByDriver = (map, name) => {
 			const key = normalizeDriverName(typeof name === "string" ? name : "");
 			return map[key] || (map[key] = Object.create(null));
 		};
+		const dirSpellings = new Map();
+		const heldByTwoDirectoryRows = (key) => (dirSpellings.get(key) || new Set()).size > 1;
 		const readByDriver = (map, name) => {
-			const spellings = map[normalizeDriverName(typeof name === "string" ? name : "")];
+			const key = normalizeDriverName(typeof name === "string" ? name : "");
+			const spellings = map[key];
 			if (!spellings) return undefined;
 			const own = spellingOf(name);
 			if (own in spellings) return spellings[own];
+			if (heldByTwoDirectoryRows(key)) return undefined;
 			const others = Object.keys(spellings);
 			return others.length === 1 ? spellings[others[0]] : undefined;
 		};
@@ -45186,29 +45193,42 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 		// telemetry. Start with one placeholder per carrier driver and let the
 		// overlay below fill in fresh ELD positions. One per driver: directory
 		// rows whose names read as one name through normalizeDriverName() share a
-		// placeholder, named by the oldest row's spelling, trimmed. The list keeps
-		// the order the directory is read in.
+		// placeholder, named by the oldest row's spelling, trimmed — unless they
+		// spell it differently, when each spelling gets its own (see above). The
+		// list keeps the order the directory is read in.
 		let dirDrivers = [];
 		try {
 			dirDrivers = db.prepare("SELECT id, driver_name FROM drivers_directory").all();
 		} catch { /* silent */ }
+		for (const d of dirDrivers) {
+			const name = typeof d.driver_name === "string" ? d.driver_name : "";
+			const key = normalizeDriverName(name);
+			if (!key) continue;
+			if (!dirSpellings.has(key)) dirSpellings.set(key, new Set());
+			dirSpellings.get(key).add(spellingOf(name));
+		}
+		const placeholderId = (name) => {
+			const key = normalizeDriverName(name);
+			if (!key) return "";
+			return heldByTwoDirectoryRows(key) ? JSON.stringify([key, spellingOf(name)]) : key;
+		};
 		const oldestSpelling = new Map();
 		for (const d of dirDrivers) {
 			const name = typeof d.driver_name === "string" ? d.driver_name.trim() : "";
-			const key = normalizeDriverName(name);
-			if (!key) continue;
-			const had = oldestSpelling.get(key);
-			if (!had || d.id < had.id) oldestSpelling.set(key, { id: d.id, name });
+			const id = placeholderId(name);
+			if (!id) continue;
+			const had = oldestSpelling.get(id);
+			if (!had || d.id < had.id) oldestSpelling.set(id, { id: d.id, name });
 		}
 
 		const locations = [];
 		const seen = new Set();
 		for (const d of dirDrivers) {
-			const key = normalizeDriverName(typeof d.driver_name === "string" ? d.driver_name : "");
-			if (!key || seen.has(key)) continue;
-			seen.add(key);
+			const id = placeholderId(typeof d.driver_name === "string" ? d.driver_name : "");
+			if (!id || seen.has(id)) continue;
+			seen.add(id);
 			locations.push({
-				driver: oldestSpelling.get(key).name,
+				driver: oldestSpelling.get(id).name,
 				latitude: null,
 				longitude: null,
 				speed: 0,
