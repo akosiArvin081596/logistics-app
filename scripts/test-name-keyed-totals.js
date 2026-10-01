@@ -79,6 +79,7 @@ const fuelModel = require("../lib/fuel-model");
 const { normalizeLoadId } = require("../lib/ratecon-load");
 const investorReportOptions = require("../lib/investor-report-options");
 const investorPayoutBasis = require("../lib/investor-payout-basis");
+const eldFeedHealth = require("../lib/eld-feed-health");
 
 const SHIPPED = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 
@@ -121,7 +122,9 @@ const CONSTS = ["EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE
 	"BROKER_WITHHELD_RE", "MOVEMENT_MOVING_MPS", "MOVEMENT_ACTIVE_MS",
 	// The fuel-gallons recovery's thresholds (§3b).
 	"FUEL_EVENTS_MATCH_DAYS", "FUEL_MATCH_MIN_GAL_PER_100PCT", "FUEL_MATCH_MAX_GAL_PER_100PCT", "FUEL_MATCH_MIN_GALLONS",
-	"FUEL_MATCH_MAX_KM", "FUEL_MATCH_AMBIGUITY_MARGIN", "FUEL_CALIB_MIN_RISE_PCT", "FUEL_ODOMETER_CONFLICT_MI"];
+	"FUEL_MATCH_MAX_KM", "FUEL_MATCH_AMBIGUITY_MARGIN", "FUEL_CALIB_MIN_RISE_PCT", "FUEL_ODOMETER_CONFLICT_MI",
+	// GET /api/trucks' ELD status (eldDeviceStatus()).
+	"ELD_STALE_HOURS"];
 const LETS = ["lastPayStructShadowWarnMs"];
 const FNS = [
 	// Under test.
@@ -139,6 +142,8 @@ const FNS = [
 	// The fuel-gallons recovery (§3b), run with persist: false, so nothing it
 	// would write is reached.
 	"matchFuelEventsToReceipts", "shiftDayKey", "fuelMatchDistanceKm", "isDefReceipt",
+	// GET /api/trucks' ELD status, and the dashboard fleet's assigned truck, shipped as is.
+	"eldLatestCleanFixByVehicle", "eldDeviceStatus", "findTruckForDriver",
 ];
 const ROUTES = {
 	investor: 'app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res) => {',
@@ -285,7 +290,7 @@ const DDL = `
 	CREATE TABLE load_responses (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT, driver_name TEXT, response TEXT, responded_at TEXT);
 	CREATE TABLE notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT, type TEXT, metadata TEXT, created_at TEXT);
 	CREATE TABLE load_ratings (load_id TEXT PRIMARY KEY, driver_name TEXT, rating INTEGER, rated_by INTEGER, updated_at TEXT);
-	CREATE TABLE routemate_telemetry (id INTEGER PRIMARY KEY AUTOINCREMENT, routemate_vehicle_id TEXT, latitude REAL, longitude REAL, speed REAL, bearing TEXT, fuel_pct REAL, location_date_ms INTEGER, dropped_reason TEXT DEFAULT '', odometer REAL DEFAULT 0);
+	CREATE TABLE routemate_telemetry (id INTEGER PRIMARY KEY AUTOINCREMENT, routemate_vehicle_id TEXT, latitude REAL, longitude REAL, speed REAL, bearing TEXT, fuel_pct REAL, location_date_ms INTEGER, dropped_reason TEXT DEFAULT '', odometer REAL DEFAULT 0, engine_hours REAL DEFAULT 0, geocoded_location TEXT DEFAULT '', source TEXT DEFAULT '');
 `;
 
 // NAMED keeps a named row as it is, BLANK blanks its driver name, NONE drops it.
@@ -432,6 +437,7 @@ function buildWorld(variant, { src = SHIPPED, twins = false } = {}) {
 		// The payout math. No basis context: every month settles on the split, as
 		// every investor did before the payout basis existed.
 		investorPayoutBasis,
+		eldFeedHealth,
 		payoutBasisContext: () => null,
 		console: { log: () => {}, warn: () => {}, error: (...a) => errors.push(a.map(String).join(" ")) },
 	};

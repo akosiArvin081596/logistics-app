@@ -428,8 +428,11 @@ section("§1 textual — the shipped source says what this test assumes");
 		(CODE.match(/MAX\(id\) AS max_id/g) || []).length, 1);
 	eq("§1.29 eldLatestCleanFixByVehicle defined once",
 		(CODE.match(/function eldLatestCleanFixByVehicle\(/g) || []).length, 1);
-	eq("§1.30 fleet-health calls the shared helper (2 call sites total)",
-		(CODE.match(/eldLatestCleanFixByVehicle\(/g) || []).length, 3); // 1 def + 2 calls
+	// 1 def + 7 calls: the snapshot, fleet-health, GET /api/trucks, the ELD
+	// picker, the link route and the feed alert's context (twice) — every one
+	// the shared helper, none a copy.
+	eq("§1.30 every last-fix reader calls the shared helper (7 call sites total)",
+		(CODE.match(/eldLatestCleanFixByVehicle\(/g) || []).length, 8);
 	ok("§1.31 last-fix ignores dropped rows", /MAX\(id\) AS max_id[\s\S]{0,200}dropped_reason = ''/.test(CODE));
 	// ⚠️ THE TWO CLOCKS. MAX(id) is RECEIVE ORDER; MAX(location_date_ms) is the
 	// newest moment the device reported. They agree only while rows arrive in
