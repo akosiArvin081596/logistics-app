@@ -13,6 +13,7 @@
 <script setup>
 import { ref, computed, watch, nextTick, onMounted } from 'vue'
 import { useGoogleMaps, createDotPin } from '../../composables/useGoogleMaps'
+import { normDriver } from '../../lib/driverName'
 
 const props = defineProps({
   loads: { type: Array, required: true },
@@ -56,7 +57,7 @@ const mappedLoads = computed(() => {
     const driver = driverCol.value ? job[driverCol.value] || '' : ''
     let driverPos = null
     if (driver && props.driverLocations.length) {
-      const loc = props.driverLocations.find(l => l.driver && l.driver.toLowerCase() === driver.toLowerCase() && l.latitude)
+      const loc = props.driverLocations.find(l => l.driver && normDriver(l.driver) === normDriver(driver) && l.latitude)
       if (loc) driverPos = { lat: loc.latitude, lng: loc.longitude }
     }
     results.push({ rowIndex: job._rowIndex, origin, dest, loadId, status, driver, driverPos })

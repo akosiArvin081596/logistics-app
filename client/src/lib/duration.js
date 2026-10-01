@@ -23,3 +23,18 @@ export function formatClockMs(ms) {
   if (ms == null || !Number.isFinite(n)) return null
   return formatMinutes(n / 60000)
 }
+
+// How long ago something last happened, compactly: "<1 min", "3 min", "5 h",
+// "16 d". Each unit floors, so a device last heard from on Sep 15 reads "16 d"
+// on Oct 1 and never rounds up into a day it has not reached. A small negative
+// age (the other clock running a little ahead) reads "<1 min"; null/NaN → null.
+export function formatAgeMs(ms) {
+  const n = Number(ms)
+  if (ms == null || !Number.isFinite(n)) return null
+  const min = Math.floor(Math.max(0, n) / 60000)
+  if (min < 1) return '<1 min'
+  if (min < 60) return `${min} min`
+  const h = Math.floor(min / 60)
+  if (h < 24) return `${h} h`
+  return `${Math.floor(h / 24)} d`
+}

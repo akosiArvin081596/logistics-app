@@ -2867,7 +2867,7 @@ db.exec(`
 `);
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_eld_feed_alerts_open ON eld_feed_alerts(resolved_at, alert_key)`); } catch {}
 
-// THE per-vehicle last-clean-fix query. Lifted verbatim out of
+// THE per-vehicle last-clean-fix query. Lifted out of
 // GET /api/admin/fleet-health so the panel a dispatcher reads and the sweep that
 // pages someone at 2 a.m. can never disagree about what "last fix" means —
 // DRIVER_RENAME_TARGETS / truckChargedInMonth lesson, applied before the second
@@ -2896,31 +2896,78 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_eld_feed_alerts_open ON eld_feed_a
 // fixture, the two disagreed by 4 hours. The sweep therefore reads last_fix_ms;
 // fleet-health keeps reading location_date_ms, whose meaning is unchanged.
 //
-// Both come out of the SAME grouped subquery, so this is still one query and the
-// two callers still cannot drift apart about what "clean" means.
+// Both come out of the SAME query, so this is still one query and the callers
+// still cannot drift apart about what "clean" means.
+//
+// It is also THE answer to "which provider is this device, and has it gone
+// silent" — the Trucks list, the ELD picker, the link route and the feed alert
+// read provider (eldFeedHealth.deviceProvider() over this row's source /
+// engine_hours / geocoded_location) and silence (last_fix_ms) from here, so a
+// device cannot read as live in one place and dark in another.
+//
+// ⚠️ TWO SCALAR MAXes PER ID, NOT ONE GROUP BY. Each MAX is a single seek on an
+// index that leads with the vehicle id and is filtered to clean rows — MAX(id)
+// on idx_rm_tel_clean, MAX(location_date_ms) on the partial idx_rm_tel_odo_walk.
+// The grouped form this replaced read the same answer by walking every clean
+// row of every vehicle asked for: measured on a ~970k-row copy, 42 ms per call
+// against 0.16 ms, identical rows. That mattered once GET /api/trucks called it
+// on every page load.
 //
 // Empty input returns {} without touching the database — every caller must keep
 // working on a fleet with nothing linked.
 function eldLatestCleanFixByVehicle(vehicleIds) {
-	const ids = (Array.isArray(vehicleIds) ? vehicleIds : []).filter(Boolean);
+	const ids = [...new Set((Array.isArray(vehicleIds) ? vehicleIds : []).filter(Boolean))];
 	const out = {};
 	if (ids.length === 0) return out;
-	const placeholders = ids.map(() => "?").join(",");
+	const values = ids.map(() => "(?)").join(",");
 	const rows = db.prepare(`
+		WITH ids(vid) AS (VALUES ${values}),
+		latest AS (
+			SELECT ids.vid AS routemate_vehicle_id,
+			       (SELECT MAX(id) AS max_id FROM routemate_telemetry
+			         WHERE routemate_vehicle_id = ids.vid AND dropped_reason = '') AS max_id,
+			       (SELECT MAX(location_date_ms) AS last_fix_ms FROM routemate_telemetry
+			         WHERE routemate_vehicle_id = ids.vid AND dropped_reason = '') AS last_fix_ms
+			FROM ids
+		)
 		SELECT rt.routemate_vehicle_id, rt.latitude, rt.longitude, rt.speed,
 		       rt.fuel_pct, rt.odometer, rt.engine_hours, rt.geocoded_location,
 		       rt.location_date_ms, rt.source, latest.last_fix_ms
-		FROM routemate_telemetry rt
-		INNER JOIN (
-			SELECT routemate_vehicle_id, MAX(id) AS max_id, MAX(location_date_ms) AS last_fix_ms
-			FROM routemate_telemetry
-			WHERE routemate_vehicle_id IN (${placeholders})
-			  AND dropped_reason = ''
-			GROUP BY routemate_vehicle_id
-		) latest ON rt.id = latest.max_id
+		FROM latest
+		INNER JOIN routemate_telemetry rt ON rt.id = latest.max_id
 	`).all(...ids);
 	for (const r of rows) out[r.routemate_vehicle_id] = r;
 	return out;
+}
+
+// One device's ELD status in the shape the Trucks list, the picker and the link
+// route all serve: `provider` ('routemate' | 'linxup' | ''), `last_fix_ms`
+// (null when the device has never produced a clean fix) and `silent`, judged on
+// the feed sweep's own ELD_STALE_HOURS so the picker cannot call live a device
+// the sweep is alerting on. `tel` is the device's eldLatestCleanFixByVehicle()
+// row, or undefined.
+function eldDeviceStatus(tel, nowMs) {
+	const lastFixMs = tel && Number(tel.last_fix_ms) > 0 ? Number(tel.last_fix_ms) : null;
+	return {
+		provider: eldFeedHealth.deviceProvider(tel || null),
+		last_fix_ms: lastFixMs,
+		silent: eldFeedHealth.isDeviceSilent(lastFixMs, nowMs, ELD_STALE_HOURS),
+	};
+}
+
+// "last reported a GPS fix on 2026-09-15 UTC, 16 days ago", or "has never
+// reported a GPS fix" — the one wording the link refusal and the feed alert use
+// for a device's last fix.
+function eldLastFixPhrase(lastFixMs, nowMs) {
+	const ms = Number(lastFixMs);
+	if (!Number.isFinite(ms) || ms <= 0) return "has never reported a GPS fix";
+	const ageMs = Math.max(0, Number(nowMs) - ms);
+	const days = Math.floor(ageMs / (24 * 60 * 60 * 1000));
+	const hours = Math.floor(ageMs / (60 * 60 * 1000));
+	const ago = days >= 1 ? `${days} day${days === 1 ? "" : "s"} ago`
+		: hours >= 1 ? `${hours} h ago`
+			: "less than an hour ago";
+	return `last reported a GPS fix on ${new Date(ms).toISOString().slice(0, 10)} UTC, ${ago}`;
 }
 
 // Distinct clean fixes per vehicle inside a rolling window. COUNT(DISTINCT
@@ -3152,6 +3199,52 @@ function recordEldAlertSend(nowMs) {
 		.run(ELD_ALERT_SEND_LOG_KEY, JSON.stringify(sends));
 }
 
+// Which device a feed alert is about, and the other half of a likely mis-link.
+// The bare id named nothing a reader could act on ("_PxLRDo4…" is vehicle 356),
+// and the two alerts a wrong link raises — the truck's device is stale, the
+// truck's real device is an orphan — never pointed at each other:
+//
+//   orphan       `unitMatch` — the ONE non-retired truck whose unit number
+//                matches the device's vehicle number (unitNumberToken()), with
+//                the device it is linked to now and that device's last fix.
+//   linked feed  `liveMatchLabel` — the unlinked device suggestRoutemateVehicleForTruck()
+//                offers for this truck, only when that device is NOT silent.
+//
+// Reads only. Every label here comes from eldFeedHealth.describeEldDevice(),
+// which is already one line; the unit number is returned raw and the caller
+// one-lines and escapes it with everything else.
+function eldFeedAlertContext(v, nowMs) {
+	const vid = String(v.vehicleId || "").trim();
+	const mirrorRow = (id) => db.prepare(
+		"SELECT routemate_vehicle_id, vehicle_id, make, model, year FROM routemate_vehicles WHERE routemate_vehicle_id = ?"
+	).get(id) || { routemate_vehicle_id: id };
+	const out = { deviceLabel: eldFeedHealth.describeEldDevice(mirrorRow(vid)), unitMatch: null, liveMatchLabel: "" };
+	if (v.state === "orphan") {
+		const token = String(mirrorRow(vid).vehicle_id || "").trim();
+		if (!token) return out;
+		const today = todayKeyCT();
+		const matches = db.prepare("SELECT unit_number, routemate_vehicle_id, retired_at FROM trucks").all()
+			.filter((t) => !eldFeedHealth.isRetiredOn(t.retired_at, today) && unitNumberToken(t.unit_number) === token);
+		if (matches.length !== 1) return out;
+		const linked = String(matches[0].routemate_vehicle_id || "").trim();
+		const linkedFix = linked ? eldLatestCleanFixByVehicle([linked])[linked] : null;
+		out.unitMatch = {
+			unitNumber: matches[0].unit_number,
+			linkedLabel: linked ? eldFeedHealth.describeEldDevice(mirrorRow(linked)) : "",
+			linkedLastFix: linked ? eldLastFixPhrase(linkedFix && linkedFix.last_fix_ms, nowMs) : "",
+		};
+		return out;
+	}
+	const suggested = suggestRoutemateVehicleForTruck({ unit_number: v.unitNumber });
+	if (suggested) {
+		const sid = suggested.routemate_vehicle_id;
+		if (!eldDeviceStatus(eldLatestCleanFixByVehicle([sid])[sid], nowMs).silent) {
+			out.liveMatchLabel = eldFeedHealth.describeEldDevice(suggested);
+		}
+	}
+	return out;
+}
+
 // Fire-and-forget. NEVER throws and never rejects — its caller is a timer, and
 // the sweep must survive one unmailable feed to reach the rest.
 async function alertEldFeedSilence(verdict) {
@@ -3233,14 +3326,26 @@ async function alertEldFeedSilence(verdict) {
 		// CR/LF from a Subject, but relying on a dependency for that is not a
 		// control we own.
 		const oneLine = (s) => String(s == null ? "" : s).replace(/[\r\n]+/g, " ").slice(0, 60);
-		const who = oneLine(v.unitNumber || `device ${v.vehicleId}`) || "unknown truck";
+		// The device's name and the mis-link hint are an aid, never a gate: a read
+		// that fails here leaves the alert worded as it was before they existed.
+		let ctx = null;
+		try { ctx = eldFeedAlertContext(v, Date.now()); } catch (e) { console.error("[eld-feed] alert context unavailable:", e.message); }
+		const deviceLabel = oneLine(ctx ? ctx.deviceLabel : `device ${v.vehicleId}`);
+		const who = oneLine(v.unitNumber) || deviceLabel || "unknown truck";
 		const lastFix = v.lastFixMs ? new Date(Number(v.lastFixMs)).toISOString().replace("T", " ").slice(0, 16) + " UTC" : "never";
 		const silent = v.silentHours === null || v.silentHours === undefined
 			? "n/a"
 			: `${Math.floor(Number(v.silentHours) / 24)}d ${Math.floor(Number(v.silentHours) % 24)}h`;
+		const hint = ctx && ctx.unitMatch
+			? `Truck ${oneLine(ctx.unitMatch.unitNumber)} has the matching unit number and is linked to ` +
+				(ctx.unitMatch.linkedLabel ? `${ctx.unitMatch.linkedLabel}, which ${ctx.unitMatch.linkedLastFix}` : "no device") +
+				". If this is its ELD, re-point it under Trucks → Change."
+			: ctx && ctx.liveMatchLabel
+				? `${ctx.liveMatchLabel} is reporting live, is linked to no truck, and matches this truck's unit number — it may be this truck's ELD; re-point under Trucks → Change.`
+				: "";
 
 		const subject = v.state === "orphan"
-			? `⚠️ ELD device ${oneLine(v.vehicleId)} is reporting to no truck`
+			? `⚠️ ELD ${deviceLabel} is reporting to no truck`
 			: `⚠️ ELD feed silent — ${who} (${silent})`;
 		const html =
 			`<p><b>${escHtml(who)}</b> — ${escHtml(String(v.reason || "ELD feed problem"))}.</p>` +
@@ -3252,6 +3357,7 @@ async function alertEldFeedSilence(verdict) {
 			`<tr><td style="padding:6px 10px;border:1px solid #ddd;">Silent for</td><td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(silent)}</td></tr>` +
 			`<tr><td style="padding:6px 10px;border:1px solid #ddd;">Fixes in last 24 h</td><td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(String(v.fixes24h))}</td></tr>` +
 			`</table>` +
+			(hint ? `<p style="margin-top:14px;"><b>Possible wrong link.</b> ${escHtml(hint)}</p>` : "") +
 			`<p style="margin-top:14px;"><b>Why this matters for pay.</b> Driver "active days" are counted from ELD travel, and a load window with no pings falls back to the full scheduled window — ` +
 			`so while this feed is dark, loads on this truck settle on the <i>estimated</i> basis: more driver days than were worked, and less investor profit. ` +
 			`The longer it stays dark, the more months close on an estimate.</p>` +
@@ -3270,9 +3376,9 @@ async function alertEldFeedSilence(verdict) {
 		let notified = false;
 		try {
 			const title = v.state === "orphan"
-				? `ELD device ${oneLine(v.vehicleId)} is linked to no truck`
+				? `ELD ${deviceLabel} is linked to no truck`
 				: `ELD feed silent — ${who}`;
-			const body = `${v.reason || "ELD feed problem"} · last clean fix ${lastFix}`;
+			const body = `${v.reason || "ELD feed problem"} · last clean fix ${lastFix}${hint ? ` · ${hint}` : ""}`;
 			// ⚠️ NO loadId in metadata, deliberately. NotificationsView routes a tap
 			// to /dashboard?load=<id> when metadata carries one; a feed alert is not
 			// about any single load, and inventing one would send a dispatcher to an
@@ -3843,6 +3949,9 @@ async function routemateSyncTelemetry() {
 		// sitting in Dispatched (exactly what happened to 561151778) would
 		// silently block automation on the load actually being driven.
 		const activeLoadsByDriver = Object.create(null);
+		// The same rows, for a ping whose driver has no active load under today's
+		// key: geofenceCandidatesAcrossSpacing() looks for them across spacing.
+		let spacingSheet = null;
 		try {
 			const jt = await getJobTrackingCached();
 			const headers = jt.headers || [];
@@ -3855,6 +3964,7 @@ async function routemateSyncTelemetry() {
 				// public tracker room and the geofence writes. The shared cache no
 				// longer happens to hide it (see liveJobTrackingView()); skip it here.
 				const deletedIds = getDeletedLoadIds();
+				spacingSheet = { rows: jt.data || [], loadIdCol, statusCol, driverCol, deletedIds };
 				for (const row of (jt.data || [])) {
 					const d = driverNameForTotals((row[driverCol] || "").toString()).trim().toLowerCase();
 					const s = (row[statusCol] || "").toString().trim();
@@ -3878,10 +3988,15 @@ async function routemateSyncTelemetry() {
 			if (!driverName) continue;
 			const driverLower = driverName.trim().toLowerCase();
 			const activeLoadId = loadIdByDriver[driverLower] || "";
+			// The driver's own room, and the name this payload gives the driver,
+			// are the spelling their account holds (findDriverAccountSpelling()):
+			// the driver app keeps only a push naming its own driver, so an
+			// assignment stored with other spacing still reaches that driver.
+			const accountDriver = findDriverAccountSpelling(driverName) || driverName;
 			const timestamp = new Date(t.location_date_ms || Date.now()).toISOString();
 			const headingDeg = parseRoutemateBearing(t.bearing);
 			const locationPayload = {
-				driver: driverName,
+				driver: accountDriver,
 				latitude: t.latitude,
 				longitude: t.longitude,
 				speed: t.speed || 0,
@@ -3898,7 +4013,7 @@ async function routemateSyncTelemetry() {
 			// Load Route Map can update the truck pin live instead of waiting
 			// for the next /api/locations/latest poll cycle. Driver sockets
 			// join their driverRoom() on `register` (see io.on("connection")).
-			if (driverLower) io.to(driverRoom(driverLower)).emit("location-update", locationPayload);
+			if (driverLower) io.to(driverRoom(accountDriver)).emit("location-update", locationPayload);
 			if (activeLoadId) {
 				publicTrack.to("load:" + activeLoadId).emit("tracker-update", {
 					lat: t.latitude,
@@ -3932,10 +4047,18 @@ async function routemateSyncTelemetry() {
 			// two loads cannot both advance off one ping. Ordering only decides
 			// who gets asked first, and it stops early on the first advance so a
 			// single ping never writes two rows.
-			const candidates = orderGeofenceCandidates(
+			let candidates = orderGeofenceCandidates(
 				activeLoadsByDriver[driverName.trim().toLowerCase()] || [],
 				t.latitude, t.longitude,
 			);
+			// None under the ping's own spelling: the loads naming this driver
+			// across spacing whose stamped truck is this vehicle.
+			if (!candidates.length && spacingSheet) {
+				candidates = orderGeofenceCandidates(
+					geofenceCandidatesAcrossSpacing(spacingSheet, driverName, t.routemate_vehicle_id),
+					t.latitude, t.longitude,
+				);
+			}
 			if (!candidates.length) continue;
 			for (const cand of candidates) {
 				try {
@@ -12964,21 +13087,24 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 			// hardware GPS is more reliable than a phone left in the cab.
 			let rmCandidate = null;
 			try {
-				const rmRow = db.prepare(`
+				// The ELD ping comes from the truck the money stamps name for this
+				// load's driver (findTruckForDriverStamp(), with the active-assignment
+				// step), read by that truck's vehicle id, so the driver is matched
+				// across spacing as well as case. Whenever a truck names the driver
+				// case aside it is the truck whose unit the payload shows (read below
+				// without the assignment step). A spacing match counts only while no
+				// other account holds the name under another spelling.
+				const pingTruck = findTruckForDriverStamp(driverNameRaw, { activeAssignment: true });
+				const pingVehicleId = pingTruck ? String(pingTruck.routemate_vehicle_id || "").trim() : "";
+				const rmRow = pingVehicleId ? db.prepare(`
 					SELECT rt.latitude, rt.longitude, rt.speed, rt.location_date_ms
-					FROM truck_assignments ta
-					JOIN trucks t ON t.id = ta.truck_id
-					JOIN routemate_telemetry rt ON rt.routemate_vehicle_id = t.routemate_vehicle_id
-					WHERE ta.end_date = ''
-					  AND COALESCE(t.routemate_vehicle_id, '') <> ''
-					  AND TRIM(LOWER(ta.driver_name)) = ?
-					  AND rt.id = (
+					FROM routemate_telemetry rt
+					WHERE rt.id = (
 						SELECT MAX(rt2.id) FROM routemate_telemetry rt2
-						WHERE rt2.routemate_vehicle_id = t.routemate_vehicle_id
+						WHERE rt2.routemate_vehicle_id = ?
 						  AND rt2.dropped_reason = ''
 					  )
-					LIMIT 1
-				`).get(driverNameKey);
+				`).get(pingVehicleId) : null;
 				// Require a valid GPS fix — an ELD that lost satellites can return
 				// NULL/0 coords, which would otherwise pin the truck at the equator.
 				// Mirrors the rmHasFix check in /api/locations/latest.
@@ -24630,10 +24756,35 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 		try { odoByVid[vid] = odoStmt.get(vid) || null; } catch { odoByVid[vid] = null; }
 	}
 
+	// Each linked device's provider, last fix and silence, in ONE lookup for the
+	// fleet — the same reading the ELD picker and the feed sweep use, so a truck
+	// cannot show "ELD live" here while the sweep is alerting on its device —
+	// plus its vehicle number off the mirror (the "356" a person knows it by,
+	// where the link itself holds an opaque device id), in one more. A failed
+	// read leaves every truck's ELD status unknown (null / "" / false) rather
+	// than calling every device silent.
+	const eldNow = Date.now();
+	const eldVids = [...new Set(rows.map((t) => String(t.routemate_vehicle_id || "").trim()).filter(Boolean))];
+	let eldFixByVid = null;
+	const eldNumberByVid = Object.create(null);
+	try {
+		eldFixByVid = eldLatestCleanFixByVehicle(eldVids);
+		if (eldVids.length) {
+			for (const r of db.prepare(
+				`SELECT routemate_vehicle_id, TRIM(vehicle_id) AS vehicle_number FROM routemate_vehicles WHERE routemate_vehicle_id IN (${eldVids.map(() => "?").join(",")})`
+			).all(...eldVids)) eldNumberByVid[r.routemate_vehicle_id] = r.vehicle_number || "";
+		}
+	} catch (err) {
+		eldFixByVid = null;
+		console.error("/api/trucks: ELD last-fix read failed:", err.message);
+	}
+
 	const trucks = rows.map((t) => {
 		const unitLower = (t.unit_number || "").toLowerCase();
 		const driverLower = normalizeDriverName(t.assigned_driver);
 		const odo = t.routemate_vehicle_id ? odoByVid[t.routemate_vehicle_id] : null;
+		const eldVid = String(t.routemate_vehicle_id || "").trim();
+		const eld = eldVid && eldFixByVid ? eldDeviceStatus(eldFixByVid[eldVid], eldNow) : null;
 		const directCount = loadsByTruck[unitLower];
 		const loadCount = (directCount !== undefined)
 			? directCount
@@ -24679,6 +24830,15 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 			// null (not 0) when the truck has no ELD link or no fix yet — see above.
 			Odometer: odo && odo.odometer > 0 ? Math.round(odo.odometer) : null,
 			OdometerAt: odo && odo.location_date_ms ? new Date(odo.location_date_ms).toISOString() : null,
+			// The linked device's status (eldDeviceStatus()); null / "" / false
+			// when the truck has no ELD link. EldSilent is the feed sweep's rule:
+			// no clean fix within ELD_STALE_HOURS, or never one at all.
+			// EldVehicleNumber is the device's TRIM(vehicle_id) on the mirror, ""
+			// when unlinked or the mirror has none (a Linxup device it knows by id).
+			EldLastFixMs: eld ? eld.last_fix_ms : null,
+			EldProvider: eld ? eld.provider : '',
+			EldSilent: eld ? eld.silent : false,
+			EldVehicleNumber: eld ? (eldNumberByVid[eldVid] || '') : '',
 		};
 	});
 	res.json({ trucks });
@@ -33665,7 +33825,6 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// "Queued" — distinguish them in the fleet pill so dispatchers see the
 		// difference between "Howard is driving" and "Howard has work waiting."
 		const inProgressRe = /^(heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
-		const statusColIdx = jobTracking.headers.findIndex((h) => /status/i.test(h));
 		// A Driver cell that reads as a built-in property name counts toward a
 		// directory driver exactly as a blank one does (driverNameForTotals()) —
 		// the rule driverQueues above already follows.
@@ -33673,10 +33832,13 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			const name = (r[carrierDriverCol] || "").trim();
 			const nameNorm = normalizeDriverName(name);
 			// In-progression load only — excludes Dispatched and Assigned. Used
-			// to decide the "On Load" pill and the CurrentLoad ID surfacing.
-			const inProgressLoad = statusColIdx === -1 ? null : activeJobs.find(
+			// to decide the "On Load" pill and the CurrentLoad ID surfacing. The
+			// rows are objects keyed by header, so the status is read by the
+			// Status header's name (statusCol), as every other read here does; a
+			// numeric column index read nothing, and "On Load" never fired.
+			const inProgressLoad = !statusCol ? null : activeJobs.find(
 				(j) => driverCol && normalizeDriverName(driverNameForTotals(j[driverCol])) === nameNorm
-					&& inProgressRe.test((j[statusColIdx] || "").toString().trim()),
+					&& inProgressRe.test((j[statusCol] || "").toString().trim()),
 			);
 			const phoneCol = findCol(carrierDB.headers, /phone|contact/i);
 			const queue = driverQueues[nameNorm] || [];
@@ -33688,9 +33850,16 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			if (inProgressLoad) status = "On Load";
 			else if (queue.length > 0) status = "Queued";
 			else status = "Available";
+			// The truck the driver is assigned (findTruckForDriver(), any case or
+			// spacing of the name) — the record syncDriverToCarrierSheet() copies
+			// into the directory's `trucks` — and only without one, that stored
+			// copy. The copy is refreshed only when the directory row is synced, so
+			// a truck assigned since read "No truck assigned" here. Read only: this
+			// path does not repair the copy.
+			const assignedTruck = findTruckForDriver(name);
 			return {
 				Driver: name,
-				Truck: truckCol ? r[truckCol] || "" : "",
+				Truck: assignedTruck ? assignedTruck.unit_number : truckCol ? r[truckCol] || "" : "",
 				Phone: phoneCol ? r[phoneCol] || "" : "",
 				Status: status,
 				CurrentLoad: inProgressLoad
@@ -34053,6 +34222,24 @@ function isBuiltInPropertyName(name) {
 	const names = isBuiltInPropertyName.names
 		|| (isBuiltInPropertyName.names = new Set(Object.getOwnPropertyNames(Object.prototype).map((n) => n.toLowerCase())));
 	return names.has(key);
+}
+
+// The spelling a Driver ACCOUNT holds for this name: the account whose driver
+// name matches it case aside, else the one account whose name matches it
+// through normalizeDriverName(). Two accounts matching through spacing, a
+// reserved name, or no match answer null, and the caller keeps its own
+// spelling. Notifications, live-update rooms and load responses are keyed by
+// the account's spelling, so a name typed or stored with other spacing reaches
+// the driver it names.
+function findDriverAccountSpelling(name) {
+	const trimmed = typeof name === "string" ? name.trim() : "";
+	if (!trimmed || isBuiltInPropertyName(trimmed)) return null;
+	const exact = db.prepare("SELECT driver_name FROM users WHERE role = 'Driver' AND LOWER(driver_name) = LOWER(?) ORDER BY id").get(trimmed);
+	if (exact) return exact.driver_name;
+	const key = normalizeDriverName(trimmed);
+	const hits = db.prepare("SELECT driver_name FROM users WHERE role = 'Driver' AND COALESCE(driver_name, '') <> ''").all()
+		.filter((u) => normalizeDriverName(u.driver_name) === key);
+	return hits.length === 1 ? hits[0].driver_name : null;
 }
 
 // ⚠️ THE ONE ANSWER TO "IS THIS NAME ALREADY IN USE?" — every path that
@@ -35043,7 +35230,8 @@ app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver
 		// fallback. idx_rm_tel_clean covers (routemate_vehicle_id, dropped_reason,
 		// id DESC) exactly, so this is two index reads.
 		const rows = db.prepare(
-			`SELECT latitude, longitude, speed, bearing, fuel_pct, location_date_ms
+			`SELECT latitude, longitude, speed, bearing, fuel_pct, location_date_ms,
+			        source, engine_hours, geocoded_location
 			   FROM routemate_telemetry
 			  WHERE routemate_vehicle_id = ? AND dropped_reason = ''
 			  ORDER BY id DESC LIMIT 2`
@@ -35102,7 +35290,10 @@ app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver
 				heading: heading == null ? null : heading,
 				timestamp: new Date(rm.location_date_ms).toISOString(),
 				lastPingAge,
-				source: "routemate",
+				// The provider that wrote this fix, by the rule /api/locations/latest
+				// uses — every Linxup fix used to be served as 'routemate'. The driver
+				// app reads any source but 'phone' as the truck's device.
+				source: eldFeedHealth.deviceProvider(rm) || "eld",
 				fuelPct: Number.isFinite(rm.fuel_pct) ? rm.fuel_pct : null,
 				// Same three-state classifier the tracking panel uses, computed here
 				// so the driver and the dispatcher cannot disagree about whether the
@@ -37386,7 +37577,13 @@ async function ingestLinxupPosition(pos) {
 
 	// Fan out live UI + geofence only for clean, linked fixes (same as the poller).
 	if (!droppedReason && driverName) {
-		const driverLower = driverName.trim().toLowerCase();
+		// The driver's own room, and the name the live payload gives the driver,
+		// are the spelling their account holds (findDriverAccountSpelling()), as on
+		// the Routemate path. The sheet rows are still matched under the ping's own
+		// spelling (pingDriverKey).
+		const accountDriver = findDriverAccountSpelling(driverName) || driverName;
+		const driverLower = accountDriver.trim().toLowerCase();
+		const pingDriverKey = driverName.trim().toLowerCase();
 		let activeLoadId = "";
 		// Every active load for this driver, most-progressed first — same reason
 		// as the Routemate path: queueing is supported, and first-match-by-row
@@ -37406,7 +37603,7 @@ async function ingestLinxupPosition(pos) {
 				// the Routemate path does (see routemateSyncTelemetry()).
 				const deletedIds = getDeletedLoadIds();
 				for (const r of (jt.data || [])) {
-					if ((r[driverCol] || "").toString().trim().toLowerCase() !== driverLower) continue;
+					if ((r[driverCol] || "").toString().trim().toLowerCase() !== pingDriverKey) continue;
 					const s = (r[statusCol] || "").toString().trim();
 					if (!activeRe.test(s)) continue;
 					const lid = (r[loadIdCol] || "").toString().trim();
@@ -37415,12 +37612,19 @@ async function ingestLinxupPosition(pos) {
 					if (!activeLoadId) activeLoadId = lid;
 					driverActiveLoads.push({ loadId: lid, status: s });
 				}
+				// None under the ping's own spelling: the loads naming this driver
+				// across spacing whose stamped truck is this vehicle. Geofence only;
+				// activeLoadId, the payload's and the tracker room's, stays as it was.
+				if (!driverActiveLoads.length) {
+					driverActiveLoads = geofenceCandidatesAcrossSpacing(
+						{ rows: jt.data || [], loadIdCol, statusCol, driverCol, deletedIds }, driverName, vehicleId);
+				}
 				driverActiveLoads = orderGeofenceCandidates(driverActiveLoads, pos.latitude, pos.longitude);
 			}
 		} catch { /* best-effort */ }
 		const headingDeg = parseRoutemateBearing(pos.bearing);
 		const locationPayload = {
-			driver: driverName,
+			driver: accountDriver,
 			latitude: pos.latitude,
 			longitude: pos.longitude,
 			speed: pos.speed || 0,
@@ -37601,6 +37805,12 @@ function suggestRoutemateVehicleForTruck(truck) {
 // unchanged and callers that omit truckId see the exact same body as before.
 // The rule lives here rather than in the client so it cannot drift from the
 // auto-match branch of POST /link-routemate, which consults the same helper.
+//
+// Every device (and `suggested`) carries `provider`, `last_fix_ms` and `silent`
+// (eldDeviceStatus()), and the list is ordered by eldFeedHealth.comparePickerDevices:
+// reporting devices first, newest fix first. It used to sort on VIN, which put
+// the blank-VIN rows — a Linxup device the mirror only knows by id — at the top,
+// so a device that had been dark for two weeks was the first choice offered.
 app.get("/api/routemate/vehicles/unlinked", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const rows = db.prepare(`
@@ -37610,16 +37820,20 @@ app.get("/api/routemate/vehicles/unlinked", requireRole("Super Admin", "Dispatch
 			WHERE rv.routemate_vehicle_id NOT IN (
 				SELECT routemate_vehicle_id FROM trucks WHERE COALESCE(routemate_vehicle_id, '') <> ''
 			)
-			ORDER BY rv.vin, rv.routemate_vehicle_id
 		`).all();
+		const now = Date.now();
+		const fixes = eldLatestCleanFixByVehicle(rows.map((r) => r.routemate_vehicle_id));
+		const withStatus = (r) => ({ ...r, ...eldDeviceStatus(fixes[r.routemate_vehicle_id], now) });
 
-		const body = { vehicles: rows };
+		const body = { vehicles: rows.map(withStatus).sort(eldFeedHealth.comparePickerDevices) };
 		const truckId = parseInt(req.query.truckId, 10);
 		if (truckId) {
 			const truck = db.prepare("SELECT id, unit_number, vin FROM trucks WHERE id = ?").get(truckId);
 			if (truck) {
+				// Always one of `rows` (both read "unlinked" in this same tick), so
+				// its status comes out of the same lookup.
 				const suggested = suggestRoutemateVehicleForTruck(truck);
-				if (suggested) body.suggested = suggested;
+				if (suggested) body.suggested = withStatus(suggested);
 			}
 		}
 		res.json(body);
@@ -37697,7 +37911,9 @@ app.post("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), asyn
 		if (!target) return res.status(400).json({ error: "routemateVehicleId or {auto:true} required" });
 
 		// Verify the target exists and isn't already linked to a different truck.
-		const rv = db.prepare("SELECT routemate_vehicle_id FROM routemate_vehicles WHERE routemate_vehicle_id = ?").get(target);
+		const rv = db.prepare(
+			"SELECT routemate_vehicle_id, vehicle_id, make, model, year FROM routemate_vehicles WHERE routemate_vehicle_id = ?"
+		).get(target);
 		if (!rv) return res.status(404).json({ error: "Routemate vehicle not found in mirror — run sync-now first" });
 		const otherTruck = db.prepare(
 			"SELECT id, unit_number FROM trucks WHERE routemate_vehicle_id = ? AND id <> ?"
@@ -37706,11 +37922,37 @@ app.post("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), asyn
 			return res.status(409).json({ error: `Already linked to truck ${otherTruck.unit_number} (#${otherTruck.id}). Unlink first.` });
 		}
 
+		const changing = String(truck.routemate_vehicle_id || "").trim() !== String(target).trim();
+
+		// A device that is not reporting is asked about before it is linked
+		// (409 ELD_DEVICE_SILENT; the client re-sends with confirmSilent: true).
+		// LogisX-#356 was linked (2026-09-28) to a Linxup device whose last fix was
+		// 2026-09-15 while its real ELD reported, unlinked, beside it — and from
+		// then on the truck read "ELD offline" with nothing saying the link was why.
+		// Same staleness rule as the feed sweep (eldDeviceStatus()). Synchronous,
+		// like everything after eldLinkPreflight(), so nothing moves between this
+		// read and the write. Above the period guard: the question is whether the
+		// admin means this device at all, and it applies to the {auto:true} match
+		// as much as to a picked one.
+		const targetStatus = changing ? eldDeviceStatus(eldLatestCleanFixByVehicle([target])[target], Date.now()) : null;
+		const confirmedSilent = !!(targetStatus && targetStatus.silent && req.body && req.body.confirmSilent === true);
+		if (targetStatus && targetStatus.silent && !confirmedSilent) {
+			return res.status(409).json({
+				code: "ELD_DEVICE_SILENT",
+				error: `ELD ${eldFeedHealth.describeEldDevice(rv)} ${eldLastFixPhrase(targetStatus.last_fix_ms, Date.now())}.`
+					+ ` Linking it leaves ${truck.unit_number || `truck #${truckId}`} with no live position.`
+					+ ` Confirm to link it anyway.`,
+				routemateVehicleId: target,
+				provider: targetStatus.provider,
+				lastFixMs: targetStatus.last_fix_ms,
+			});
+		}
+
 		// The ELD link is a driver-pay input, not a piece of configuration: it is the
 		// map historical loads resolve through to get their travel days. Same guard
 		// the truck PUT runs, so re-pointing a device cannot do what editing the
 		// unit number is refused for. See check (5b).
-		if (String(truck.routemate_vehicle_id || "").trim() !== String(target).trim()) {
+		if (changing) {
 			const lock = truckEditLockBlockers(truck, { routemate_vehicle_id: target }, { eldLinkMonths });
 			// Mirrors the `routemate_link` success line. BOTH device ids are recorded:
 			// the link is the map historical loads resolve through to get their travel
@@ -37732,7 +37974,8 @@ app.post("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), asyn
 		}
 
 		db.prepare("UPDATE trucks SET routemate_vehicle_id = ? WHERE id = ?").run(target, truckId);
-		logAudit(req, 'routemate_link', 'truck', String(truckId), `Linked truck ${auditText(truck.unit_number, 100)} → Routemate ${target}`);
+		logAudit(req, 'routemate_link', 'truck', String(truckId), `Linked truck ${auditText(truck.unit_number, 100)} → Routemate ${target}`
+			+ (confirmedSilent ? ` (confirmed silent device: ${eldLastFixPhrase(targetStatus.last_fix_ms, Date.now())})` : ""));
 		res.json({ success: true, truckId, routemateVehicleId: target });
 	} catch (err) {
 		console.error("routemate link error:", err.message);
@@ -44492,6 +44735,46 @@ function orderGeofenceCandidates(candidates, latitude, longitude) {
 	});
 }
 
+// A pinging driver's active loads found ACROSS SPACING, for the geofence only.
+// Both location paths (routemateSyncTelemetry() and ingestLinxupPosition()) ask
+// it only when today's key, the ping's driver name trimmed and lower-cased,
+// finds no active load, so a case-aside match always wins. A row counts when its
+// Driver cell reads as the ping's driver through normalizeDriverName() AND the
+// truck the money stamps name for that cell (findTruckForDriverStamp(), with the
+// active-assignment step) is the vehicle that sent the ping. So a spacing match
+// is taken only while it agrees with the truck: a cell whose stamped truck is
+// another vehicle, or that the stamps give no truck (among them a name another
+// account holds under another spelling), is no candidate. Soft-deleted loads and
+// loads not in an active status are skipped, as the case-aside loops skip them.
+// `sheet` is { rows, loadIdCol, statusCol, driverCol, deletedIds }; the rows are
+// the cached Job Tracking rows and are only read. Returns [{ loadId, status }] in
+// sheet order, for orderGeofenceCandidates(). tryGeofenceAdvance() still decides
+// every transition, so a completion status is never written from here either.
+function geofenceCandidatesAcrossSpacing(sheet, driverName, vehicleId) {
+	const { rows, loadIdCol, statusCol, driverCol, deletedIds } = sheet || {};
+	const key = normalizeDriverName(typeof driverName === "string" ? driverName : "");
+	const vid = String(vehicleId == null ? "" : vehicleId).trim();
+	if (!key || !vid || !loadIdCol || !statusCol || !driverCol) return [];
+	const activeRe = /^(assigned|dispatched|heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
+	const vehicleBySpelling = new Map();   // a Driver cell -> its stamped truck's vehicle id
+	const found = [];
+	for (const sheetRow of rows || []) {
+		const cell = driverNameForTotals((sheetRow[driverCol] || "").toString()).trim();
+		if (!cell || normalizeDriverName(cell) !== key) continue;
+		const status = (sheetRow[statusCol] || "").toString().trim();
+		const lid = (sheetRow[loadIdCol] || "").toString().trim();
+		if (!lid || !activeRe.test(status)) continue;
+		if (deletedIds && deletedIds.has(lid.toLowerCase().replace(/^#/, ""))) continue;
+		if (!vehicleBySpelling.has(cell)) {
+			const truck = findTruckForDriverStamp(cell, { activeAssignment: true });
+			vehicleBySpelling.set(cell, truck ? String(truck.routemate_vehicle_id || "").trim() : "");
+		}
+		if (vehicleBySpelling.get(cell) !== vid) continue;
+		found.push({ loadId: lid, status });
+	}
+	return found;
+}
+
 // Pickup/drop-off coordinates for a load.
 //
 // WHY THIS EXISTS: geofencing was written in full — radius, hysteresis, guards,
@@ -44806,13 +45089,17 @@ async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, rou
 				: trigger === "In Transit"
 					? "Departed the pickup location — you're now in transit"
 					: "You have arrived at the delivery location") + distTxt;
+			// The driver's bell and room are keyed by the spelling their account
+			// holds (findDriverAccountSpelling()), so a ping whose assignment spells
+			// the name with other spacing still notifies the driver it names.
+			const accountDriver = findDriverAccountSpelling(driverName) || driverName;
 			const geoNotif = insertNotification.run(
-				driverName.trim().toLowerCase(), "geofence",
+				accountDriver.trim().toLowerCase(), "geofence",
 				`${trigger} — Load ${loadId}`,
 				geoMsg,
 				JSON.stringify({ loadId, status: trigger, distanceM })
 			);
-			io.to(driverRoom(driverName)).emit("geofence-trigger", {
+			io.to(driverRoom(accountDriver)).emit("geofence-trigger", {
 				loadId, status: trigger, distanceM,
 				notificationId: geoNotif.lastInsertRowid,
 			});
@@ -44872,34 +45159,85 @@ function classifyMovement(loc) {
 // GET /api/locations/latest — Latest position per active driver with ETA
 app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
+		// Every driver-keyed map in this route files an entry under the driver's
+		// name through normalizeDriverName() and, inside that, under the spelling
+		// it was stored with, trimmed and lower-cased (fileByDriver()). A lookup
+		// (readByDriver()) takes the entry stored under the name's own spelling,
+		// else the ONE spelling that reads as the same name, so a driver whose
+		// assignment, ELD truck or sheet rows spell the name with other spacing
+		// still gets their GPS, truck and loads. Two such spellings answer
+		// nothing: a spacing match cannot tell which of them is this driver. The
+		// same holds when the DIRECTORY itself holds two spellings of one name
+		// (a legacy row beside the real one): each keeps its own entry and reads
+		// only its own spelling, the rule driverNameHeldByOtherSpelling() applies
+		// everywhere else. Both levels are null-prototype objects.
+		const spellingOf = (name) => (typeof name === "string" ? name : "").trim().toLowerCase();
+		const fileByDriver = (map, name) => {
+			const key = normalizeDriverName(typeof name === "string" ? name : "");
+			return map[key] || (map[key] = Object.create(null));
+		};
+		const dirSpellings = new Map();
+		const heldByTwoDirectoryRows = (key) => (dirSpellings.get(key) || new Set()).size > 1;
+		const readByDriver = (map, name) => {
+			const key = normalizeDriverName(typeof name === "string" ? name : "");
+			const spellings = map[key];
+			if (!spellings) return undefined;
+			const own = spellingOf(name);
+			if (own in spellings) return spellings[own];
+			if (heldByTwoDirectoryRows(key)) return undefined;
+			const others = Object.keys(spellings);
+			return others.length === 1 ? spellings[others[0]] : undefined;
+		};
+
 		// Phone GPS retired 2026-05-13 — locations come exclusively from Routemate
 		// telemetry. Start with one placeholder per carrier driver and let the
-		// overlay below fill in fresh ELD positions.
-		let allDriverNames = [];
+		// overlay below fill in fresh ELD positions. One per driver: directory
+		// rows whose names read as one name through normalizeDriverName() share a
+		// placeholder, named by the oldest row's spelling, trimmed — unless they
+		// spell it differently, when each spelling gets its own (see above). The
+		// list keeps the order the directory is read in.
+		let dirDrivers = [];
 		try {
-			const dirDrivers = db.prepare("SELECT driver_name FROM drivers_directory").all();
-			for (const d of dirDrivers) {
-				if (d.driver_name) allDriverNames.push(d.driver_name);
-			}
+			dirDrivers = db.prepare("SELECT id, driver_name FROM drivers_directory").all();
 		} catch { /* silent */ }
+		for (const d of dirDrivers) {
+			const name = typeof d.driver_name === "string" ? d.driver_name : "";
+			const key = normalizeDriverName(name);
+			if (!key) continue;
+			if (!dirSpellings.has(key)) dirSpellings.set(key, new Set());
+			dirSpellings.get(key).add(spellingOf(name));
+		}
+		const placeholderId = (name) => {
+			const key = normalizeDriverName(name);
+			if (!key) return "";
+			return heldByTwoDirectoryRows(key) ? JSON.stringify([key, spellingOf(name)]) : key;
+		};
+		const oldestSpelling = new Map();
+		for (const d of dirDrivers) {
+			const name = typeof d.driver_name === "string" ? d.driver_name.trim() : "";
+			const id = placeholderId(name);
+			if (!id) continue;
+			const had = oldestSpelling.get(id);
+			if (!had || d.id < had.id) oldestSpelling.set(id, { id: d.id, name });
+		}
 
 		const locations = [];
 		const seen = new Set();
-		for (const name of allDriverNames) {
-			if (!seen.has(name.toLowerCase())) {
-				locations.push({
-					driver: name,
-					latitude: null,
-					longitude: null,
-					speed: 0,
-					heading: 0,
-					timestamp: null,
-					loadId: '',
-					fuelPct: null,
-					noGps: true,
-				});
-				seen.add(name.toLowerCase());
-			}
+		for (const d of dirDrivers) {
+			const id = placeholderId(typeof d.driver_name === "string" ? d.driver_name : "");
+			if (!id || seen.has(id)) continue;
+			seen.add(id);
+			locations.push({
+				driver: oldestSpelling.get(id).name,
+				latitude: null,
+				longitude: null,
+				speed: 0,
+				heading: 0,
+				timestamp: null,
+				loadId: '',
+				fuelPct: null,
+				noGps: true,
+			});
 		}
 
 		// Overlay Routemate telemetry. When a driver's currently-assigned truck
@@ -44917,10 +45255,11 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 			const cutoff = Date.now() - STALE_SHOW_MS;
 			const routemateRows = db.prepare(`
 				SELECT
-					LOWER(ta.driver_name) AS driver_lc,
+					ta.driver_name AS driver_name,
 					rt.latitude, rt.longitude, rt.speed, rt.bearing,
 					rt.fuel_pct,
 					rt.location_date_ms,
+					rt.source, rt.engine_hours, rt.geocoded_location,
 					-- Prior telemetry row's coords, used as a fallback heading source
 					-- when rt.bearing is missing or non-numeric. Index idx_rm_tel_vid_date
 					-- covers (routemate_vehicle_id, location_date_ms DESC) so this stays cheap.
@@ -44947,15 +45286,16 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 				  )
 				  AND rt.location_date_ms > ?
 			`).all(cutoff);
-			// Driver-keyed maps in this route are null-prototype objects.
+			// Driver-keyed maps in this route are null-prototype objects, filed and
+			// read through fileByDriver() / readByDriver() above.
 			const routemateByDriver = Object.create(null);
 			for (const r of routemateRows) {
-				routemateByDriver[r.driver_lc] = r;
+				if (!spellingOf(r.driver_name)) continue;
+				fileByDriver(routemateByDriver, r.driver_name)[spellingOf(r.driver_name)] = r;
 			}
 			const now = Date.now();
 			for (const loc of locations) {
-				const key = (loc.driver || "").toLowerCase();
-				const rm = routemateByDriver[key];
+				const rm = readByDriver(routemateByDriver, loc.driver);
 				// Only overlay Routemate when telemetry has a valid fix.
 				// A linked truck whose ELD lost GPS sends NULL/0 lat/lng — letting that
 				// through would clobber phone GPS and pin the truck at the equator.
@@ -44968,7 +45308,11 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					loc.longitude = rm.longitude;
 					loc.speed = rm.speed || 0;
 					loc.timestamp = new Date(rm.location_date_ms).toISOString();
-					loc.source = "routemate";
+					// The provider that wrote this fix ('routemate' | 'linxup'), as the
+					// live socket pushes already say — every Linxup fix used to be
+					// served as 'routemate'. The client reads all three ELD values,
+					// 'eld' included, as "position from the truck's device".
+					loc.source = eldFeedHealth.deviceProvider(rm) || "eld";
 					loc.lastPingAge = now - rm.location_date_ms;
 					// Latest ELD fuel level (0-100). Same convention as
 					// /api/admin/fleet-health: fuelPct, null when the device
@@ -45008,7 +45352,7 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 		const assignmentByDriver = Object.create(null);
 		try {
 			const assignRows = db.prepare(`
-				SELECT LOWER(ta.driver_name) AS driver_lc,
+				SELECT ta.driver_name AS driver_name,
 				       t.id AS truck_id,
 				       t.unit_number,
 				       CASE WHEN COALESCE(t.routemate_vehicle_id, '') = ''
@@ -45018,7 +45362,8 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 				WHERE ta.end_date = ''
 			`).all();
 			for (const r of assignRows) {
-				assignmentByDriver[r.driver_lc] = {
+				if (!spellingOf(r.driver_name)) continue;
+				fileByDriver(assignmentByDriver, r.driver_name)[spellingOf(r.driver_name)] = {
 					truckId: r.truck_id,
 					unit: r.unit_number || "",
 					hasEld: !!r.has_eld,
@@ -45050,13 +45395,17 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 			const deliveryTimeCol = headers.find((h) => /delivery.*time|drop.*time|delivery.*date|drop.*date/i.test(h));
 
 			if (loadIdCol) {
-				// Build load lookup (keyed by the sheet's Load ID cell: null-prototype)
+				// Build load lookup, null-prototype, filed and read through
+				// normalizeLoadId() only (loadById()). It was keyed by the raw Load ID
+				// cell but read with the trimmed, "#"-stripped id below, so a load whose
+				// cell carried a "#" or a stray space got no ETA or distance.
 				const loadMap = Object.create(null);
+				const loadById = (id) => loadMap[normalizeLoadId(id)];
 				for (let i = 1; i < rows.length; i++) {
 					const obj = {};
 					headers.forEach((h, idx) => { obj[h] = rows[i][idx] || ""; });
-					const lid = obj[loadIdCol];
-					if (lid) loadMap[lid] = obj;
+					const key = normalizeLoadId(obj[loadIdCol]);
+					if (key) loadMap[key] = obj;
 				}
 
 				// Build map of each driver's active loads from the sheet
@@ -45070,7 +45419,9 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 				// Matches /api/dashboard's activeStatuses so the Tracking panel and Dashboard KPI agree on what counts as active.
 				const workingRe = /^(heading to shipper|in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading)$/i;
 				// A Driver cell that reads as a built-in property name is skipped like a
-				// blank one (driverNameForTotals()); both maps are null-prototype.
+				// blank one (driverNameForTotals()); both maps are null-prototype and
+				// filed by fileByDriver(), so a Driver cell with other spacing than the
+				// directory's still reaches its driver (readByDriver()).
 				const driverActiveLoadMap = Object.create(null);   // driver → first active loadId (for override, includes dispatched)
 				const driverActiveLoadsMap = Object.create(null);  // driver → working loads for panel (matches /api/dashboard activeStatuses)
 				if (statusCol && driverCol && loadIdCol) {
@@ -45081,12 +45432,13 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 						const status = (obj[statusCol] || "").trim();
 						const lid = (obj[loadIdCol] || "").trim().replace(/^#/, "");
 						if (!name || !lid) continue;
-						const key = name.toLowerCase();
+						const spelling = spellingOf(name);
 						if (activeRe.test(status)) {
-							driverActiveLoadMap[key] = lid;
+							fileByDriver(driverActiveLoadMap, name)[spelling] = lid;
 						}
 						if (workingRe.test(status)) {
-							if (!driverActiveLoadsMap[key]) driverActiveLoadsMap[key] = [];
+							const loadsBySpelling = fileByDriver(driverActiveLoadsMap, name);
+							if (!loadsBySpelling[spelling]) loadsBySpelling[spelling] = [];
 							const rawPickup  = pickupAddrCol  ? (obj[pickupAddrCol]  || "") : "";
 							const rawDropoff = dropoffAddrCol ? (obj[dropoffAddrCol] || "") : "";
 								// Two-line address parts for the tracking panel — split once per side.
@@ -45117,7 +45469,7 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 									if (!entry.destLat && lc.dest_lat) { entry.destLat = lc.dest_lat; entry.destLng = lc.dest_lng; }
 								}
 							}
-							driverActiveLoadsMap[key].push(entry);
+							loadsBySpelling[spelling].push(entry);
 						}
 					}
 				}
@@ -45133,17 +45485,16 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					loc.etaMinutes = null;
 					loc.distanceMiles = null;
 
-					const driverKey = (loc.driver || "").toLowerCase();
-					loc.activeLoads = driverActiveLoadsMap[driverKey] || [];
-					loc.assignedTruck = assignmentByDriver[driverKey] || null;
+					loc.activeLoads = readByDriver(driverActiveLoadsMap, loc.driver) || [];
+					loc.assignedTruck = readByDriver(assignmentByDriver, loc.driver) || null;
 
-					const sheetActiveLoad = driverActiveLoadMap[driverKey];
-					if (sheetActiveLoad && loc.loadId !== sheetActiveLoad && loadMap[sheetActiveLoad]) {
+					const sheetActiveLoad = readByDriver(driverActiveLoadMap, loc.driver);
+					if (sheetActiveLoad && loc.loadId !== sheetActiveLoad && loadById(sheetActiveLoad)) {
 						loc.loadId = sheetActiveLoad;
 					}
 
-					if (!loc.loadId || !loadMap[loc.loadId]) continue;
-					const load = loadMap[loc.loadId];
+					const load = loc.loadId ? loadById(loc.loadId) : undefined;
+					if (!load) continue;
 
 					let oLat = NaN, oLng = NaN, dLat = NaN, dLng = NaN;
 					if (originLatCol && originLngCol) {
@@ -47246,7 +47597,9 @@ function maybeAlertLowFuel(vehicleId, driverName) {
 
 		const est = reading.fuelSource === "carried" ? " (estimated — fuel sensor not reporting)" : "";
 		const driverMsg = `About ${planning} miles of fuel left${est}. Plan a fuel stop now.`;
-		const key = String(driverName).trim().toLowerCase();
+		// The driver's bell and room: the spelling their account holds
+		// (findDriverAccountSpelling()), else the name the ping carried.
+		const key = String(findDriverAccountSpelling(driverName) || driverName).trim().toLowerCase();
 		const notif = insertNotification.run(
 			key, "fuel-low",
 			`Low fuel — ${truck.unit || "your truck"}`,

@@ -66,69 +66,107 @@
         </tr>
       </thead>
       <tbody>
-        <tr v-for="truck in trucks" :key="truck.id" class="clickable-row" @click="viewTruck = truck">
-          <td class="unit-number">{{ truck.UnitNumber }}</td>
-          <td>{{ vehicleLabel(truck) }}</td>
-          <!-- Last 6, full VIN on hover + in the row's detail modal. Same short-VIN
-               convention the investor MyTrucks table already uses, and it is what
-               actually pays for the Tank column: the full 17 chars are worth
-               ~76px in a grid already ~200px past its budget at 1440. -->
-          <td class="vin-cell" :title="truck.VIN || ''">{{ shortVin(truck.VIN) }}</td>
-          <td>{{ truck.LicensePlate || '\u2014' }}</td>
-          <td>
-            <span :class="['status-badge', statusClass(truck.Status)]">{{ truck.Status }}</span>
-            <div v-if="needsFixedCostSetup(truck)" style="margin-top:0.3rem;">
+        <template v-for="truck in trucks" :key="truck.id">
+          <tr class="clickable-row" @click="viewTruck = truck">
+            <td class="unit-number">{{ truck.UnitNumber }}</td>
+            <td>{{ vehicleLabel(truck) }}</td>
+            <!-- Last 6, full VIN on hover + in the row's detail modal. Same short-VIN
+                 convention the investor MyTrucks table already uses, and it is what
+                 actually pays for the Tank column: the full 17 chars are worth
+                 ~76px in a grid already ~200px past its budget at 1440. -->
+            <td class="vin-cell" :title="truck.VIN || ''">{{ shortVin(truck.VIN) }}</td>
+            <td>{{ truck.LicensePlate || '\u2014' }}</td>
+            <td>
+              <span :class="['status-badge', statusClass(truck.Status)]">{{ truck.Status }}</span>
+              <div v-if="needsFixedCostSetup(truck)" style="margin-top:0.3rem;">
+                <span
+                  class="cost-warning-badge"
+                  :title="fixedCostSetupHint"
+                >No fixed costs configured</span>
+              </div>
+            </td>
+            <td :style="{ color: truck.AssignedDriver ? 'var(--text)' : 'var(--text-dim)' }">
+              {{ truck.AssignedDriver || '\u2014' }}
+            </td>
+            <td class="mono">
+              <span v-if="truck.DriverPayDaily > 0">${{ truck.DriverPayDaily }}/day</span>
+              <span v-else class="pay-default" title="No custom rate set; pay calculations use the $250/day default">$250/day default</span>
+            </td>
+            <td class="mono">
+              <span v-if="tankGallons(truck)">{{ tankGallons(truck) }} gal</span>
               <span
-                class="cost-warning-badge"
-                :title="fixedCostSetupHint"
-              >No fixed costs configured</span>
-            </div>
-          </td>
-          <td :style="{ color: truck.AssignedDriver ? 'var(--text)' : 'var(--text-dim)' }">
-            {{ truck.AssignedDriver || '\u2014' }}
-          </td>
-          <td class="mono">
-            <span v-if="truck.DriverPayDaily > 0">${{ truck.DriverPayDaily }}/day</span>
-            <span v-else class="pay-default" title="No custom rate set; pay calculations use the $250/day default">$250/day default</span>
-          </td>
-          <td class="mono">
-            <span v-if="tankGallons(truck)">{{ tankGallons(truck) }} gal</span>
-            <span
-              v-else
-              class="tank-default"
-              title="No tank size recorded — the fuel-range estimate falls back to 200 gal, which overstates a driver's remaining miles on any smaller tank. Set the real capacity via Edit → Fuel Tank, MPG &amp; Business Configuration."
-            >200 gal (default)</span>
-          </td>
-          <td class="mono">{{ truck.LoadCount ?? 0 }}</td>
-          <td>
-            <span
-              v-if="truck.RoutemateVehicleId"
-              class="rm-linked"
-              :title="`Routemate vehicle ID: ${truck.RoutemateVehicleId}`"
-            ><span class="rm-dot"></span>Linked</span>
-            <button
-              v-else-if="canEdit"
-              class="btn-link-rm"
-              @click.stop="openLinkModal(truck)"
-            >Link</button>
-            <span v-else class="rm-unlinked">&mdash;</span>
-            <button
-              v-if="truck.RoutemateVehicleId && canEdit"
-              class="btn-unlink-rm"
-              title="Clear the Routemate device link"
-              @click.stop="handleUnlink(truck)"
-            >&times;</button>
-          </td>
-          <td v-if="showOwner" :style="{ color: truck.OwnerId ? 'var(--text)' : 'var(--text-dim)' }">
-            {{ ownerName(truck.OwnerId) }}
-          </td>
-          <td v-if="canEdit" style="text-align: right;">
-            <div class="action-btns">
-              <button class="btn-edit" @click.stop="openEdit(truck)">Edit</button>
-              <button class="btn-remove" @click.stop="confirmDelete(truck)">Remove</button>
-            </div>
-          </td>
-        </tr>
+                v-else
+                class="tank-default"
+                title="No tank size recorded — the fuel-range estimate falls back to 200 gal, which overstates a driver's remaining miles on any smaller tank. Set the real capacity via Edit → Fuel Tank, MPG &amp; Business Configuration."
+              >200 gal (default)</span>
+            </td>
+            <td class="mono">{{ truck.LoadCount ?? 0 }}</td>
+            <td>
+              <span
+                v-if="truck.RoutemateVehicleId"
+                class="rm-linked"
+                :title="linkedTitle(truck)"
+              ><span :class="['rm-dot', { 'rm-dot-silent': truck.EldSilent }]"></span>Linked</span>
+              <button
+                v-else-if="canEdit"
+                class="btn-link-rm"
+                @click.stop="openLinkModal(truck)"
+              >Link</button>
+              <span v-else class="rm-unlinked">&mdash;</span>
+              <button
+                v-if="truck.RoutemateVehicleId && canEdit"
+                class="btn-unlink-rm"
+                title="Clear the Routemate device link"
+                :aria-label="`Unlink the ELD device from ${truck.UnitNumber || 'this truck'}`"
+                @click.stop="handleUnlink(truck)"
+              >&times;</button>
+              <!-- A link to a device that has stopped reporting looks exactly like
+                   a working one without this: the chip below says how long it has
+                   been quiet, and Change re-points the link without unlinking
+                   first. The server decides "silent" (EldSilent); nothing here
+                   re-derives the threshold. -->
+              <div v-if="truck.RoutemateVehicleId && (truck.EldSilent || canEdit)" class="rm-cell-extra">
+                <span
+                  v-if="truck.EldSilent"
+                  class="rm-silent-badge"
+                  :title="silentTitle(truck.EldLastFixMs)"
+                >{{ silentChipText(truck.EldLastFixMs) }}</span>
+                <button
+                  v-if="canEdit"
+                  class="btn-change-rm"
+                  :aria-label="`Change the ELD device linked to ${truck.UnitNumber || 'this truck'}`"
+                  @click.stop="openLinkModal(truck)"
+                >Change</button>
+              </div>
+            </td>
+            <td v-if="showOwner" :style="{ color: truck.OwnerId ? 'var(--text)' : 'var(--text-dim)' }">
+              {{ ownerName(truck.OwnerId) }}
+            </td>
+            <td v-if="canEdit" style="text-align: right;">
+              <div class="action-btns">
+                <button class="btn-edit" @click.stop="openEdit(truck)">Edit</button>
+                <button class="btn-remove" @click.stop="confirmDelete(truck)">Remove</button>
+              </div>
+            </td>
+          </tr>
+          <!-- A refused unlink (409 PERIOD_FINALIZED when a finalized month
+               carries this truck's loads, or any other failure) in the server's
+               own words, directly under the row whose × was clicked. It used to
+               reach only the console, so the × looked like it did nothing. -->
+          <tr v-if="unlinkError && unlinkError.truckId === truck.id" class="rm-error-row">
+            <td :colspan="columnCount">
+              <div class="rm-pick-error rm-unlink-error" role="alert">
+                <span>{{ unlinkError.message }}</span>
+                <button
+                  type="button"
+                  class="rm-error-dismiss"
+                  aria-label="Dismiss this message"
+                  @click="unlinkError = null"
+                >&times;</button>
+              </div>
+            </td>
+          </tr>
+        </template>
       </tbody>
     </table>
 
@@ -138,11 +176,28 @@
     <Teleport to="body">
       <div v-if="showLinkRm" class="confirm-overlay" @click.self="closeLinkModal">
         <div class="confirm-dialog" style="max-width:560px;">
-          <h3>Link Truck {{ linkTruck?.UnitNumber || '' }} to a Routemate device</h3>
+          <h3 v-if="repointing">Change ELD device for {{ linkTruck.UnitNumber || 'this truck' }}</h3>
+          <h3 v-else>Link Truck {{ linkTruck?.UnitNumber || '' }} to an ELD device</h3>
           <p style="font-size:0.78rem;color:var(--text-dim);margin-bottom:0.85rem;">
-            Pick a Routemate vehicle from the company inventory. After linking, live GPS,
+            Pick a device from the company inventory. After linking, live GPS,
             fault codes, and fuel data flow against this truck.
           </p>
+
+          <div v-if="repointing" class="rm-current">
+            <div class="rm-current-label">Current device</div>
+            <div class="rm-pick-line1">
+              <span class="rm-pick-id">{{ eldVehicleNumber(linkTruck) || linkTruck.RoutemateVehicleId }}</span>
+              <span
+                v-if="providerLabel(linkTruck.EldProvider)"
+                :class="['rm-provider', providerClass(linkTruck.EldProvider)]"
+              >{{ providerLabel(linkTruck.EldProvider) }}</span>
+            </div>
+            <div
+              v-if="fixLine(linkTruck.EldLastFixMs, linkTruck.EldSilent)"
+              :class="['rm-pick-fix', { warn: linkTruck.EldSilent }]"
+            >{{ fixLine(linkTruck.EldLastFixMs, linkTruck.EldSilent) }}</div>
+            <div class="rm-current-note">Linking another device replaces this one.</div>
+          </div>
 
           <div v-if="linkTruck && linkTruck.VIN" style="margin-bottom:0.75rem;">
             <button
@@ -168,28 +223,70 @@
           <div v-else-if="unlinkedVehicles.length === 0" class="rm-pick-empty">
             No unlinked Routemate vehicles available. Run sync from Admin Tools to refresh.
           </div>
-          <div v-else class="rm-pick-list">
-            <div
+          <!-- Served order, never re-sorted here: the server puts devices that
+               are reporting first, newest fix first, so a dead device cannot
+               sit at the top of the list looking like any other. One choice
+               from many, so each item is a label over a visually hidden radio:
+               Tab reaches the group, the arrow keys move the pick. Spans
+               inside, as a label may only hold phrasing content. -->
+          <div v-else class="rm-pick-list" role="radiogroup" aria-label="Devices">
+            <label
               v-for="rv in unlinkedVehicles"
               :key="rv.routemate_vehicle_id"
               :class="['rm-pick-item', {
                 selected: pickedRoutemateId === rv.routemate_vehicle_id,
                 suggested: suggestedId === rv.routemate_vehicle_id,
+                silent: rv.silent,
               }]"
-              @click="pickedRoutemateId = rv.routemate_vehicle_id"
             >
-              <div class="rm-pick-line1">
+              <input
+                type="radio"
+                name="rm-pick"
+                class="rm-pick-radio"
+                :value="rv.routemate_vehicle_id"
+                :checked="pickedRoutemateId === rv.routemate_vehicle_id"
+                @change="pickDevice(rv.routemate_vehicle_id)"
+              />
+              <span class="rm-pick-line1">
                 <span class="rm-pick-id">{{ rv.vehicle_id || rv.routemate_vehicle_id }}</span>
+                <span
+                  v-if="providerLabel(rv.provider)"
+                  :class="['rm-provider', providerClass(rv.provider)]"
+                >{{ providerLabel(rv.provider) }}</span>
                 <span v-if="rv.vin" class="rm-pick-vin">VIN {{ rv.vin }}</span>
-              </div>
-              <div class="rm-pick-line2">
+              </span>
+              <span class="rm-pick-line2">
                 {{ [rv.year, rv.make, rv.model].filter(Boolean).join(' ') || '\u2014' }}
                 <span v-if="rv.eld_id" class="rm-pick-eld">ELD {{ rv.eld_id }}</span>
-              </div>
-              <div v-if="suggestedId === rv.routemate_vehicle_id" class="rm-pick-suggest">
+              </span>
+              <span
+                v-if="fixLine(rv.last_fix_ms, rv.silent)"
+                :class="['rm-pick-fix', { warn: rv.silent }]"
+              >{{ fixLine(rv.last_fix_ms, rv.silent) }}</span>
+              <span v-if="suggestedId === rv.routemate_vehicle_id" class="rm-pick-suggest">
                 Likely match for {{ linkTruck?.UnitNumber || 'this truck' }} &mdash; confirm with Link Selected
-              </div>
-            </div>
+              </span>
+            </label>
+          </div>
+
+          <!-- The server refuses a device that has stopped reporting until the
+               admin says so (409 ELD_DEVICE_SILENT); its own words go here, with
+               the one button that resends the same request confirmed. Focused
+               when it appears, not its button, so a second Enter cannot link. -->
+          <div
+            v-if="silentPrompt"
+            ref="silentPromptEl"
+            class="rm-silent-prompt"
+            role="alert"
+            tabindex="-1"
+          >
+            <div>{{ silentPrompt.error }}</div>
+            <button
+              type="button"
+              class="btn-link-anyway"
+              :disabled="linkBusy"
+              @click="handleLinkAnyway"
+            >{{ linkBusy ? 'Linking...' : 'Link anyway' }}</button>
           </div>
 
           <div class="confirm-actions">
@@ -499,7 +596,8 @@ import { compressImage, DEFAULT_MAX_EDGE, isDecodedImage, dataUrlHasImageBytes }
 import { amountError, AMOUNT_CAPS } from '../../lib/truckAmounts'
 import { formFromTruck, changedFields, bodyForFields, changedUnderneath, inServiceDate, retiredAt } from '../../lib/truckEdit'
 import { fmtOdometer } from '../../lib/fuelReview'
-import { fmtTimestamp } from '../../utils/datetime'
+import { formatAgeMs } from '../../lib/duration'
+import { fmtTimestamp, fmtYmd } from '../../utils/datetime'
 
 const api = useApi()
 
@@ -873,6 +971,90 @@ const linkLoading = ref(false)
 const linkError = ref('')
 const autoError = ref('')
 const suggestedId = ref('')
+// A 409 ELD_DEVICE_SILENT, kept with the request body that drew it so "Link
+// anyway" resends exactly that request with confirmSilent. Any other pick
+// clears it, since it would then be about a device no longer chosen.
+const silentPrompt = ref(null)
+const silentPromptEl = ref(null)
+
+// The modal opened from a linked truck's Change button: same list and the same
+// POST, which re-points the link, so a wrong link is fixed without unlinking.
+const repointing = computed(() => !!linkTruck.value?.RoutemateVehicleId)
+
+const PROVIDER_LABELS = { routemate: 'Routemate', linxup: 'Linxup' }
+
+function providerKey(p) {
+  return String(p || '').trim().toLowerCase()
+}
+
+// '' when the server names no provider, so no badge renders at all.
+function providerLabel(p) {
+  const key = providerKey(p)
+  if (!key) return ''
+  return PROVIDER_LABELS[key] || key.charAt(0).toUpperCase() + key.slice(1)
+}
+
+function providerClass(p) {
+  const key = providerKey(p)
+  return PROVIDER_LABELS[key] ? `rm-provider-${key}` : ''
+}
+
+// The linked device's vehicle number as the provider knows it ("356"), the same
+// name the pick list leads with; '' when it has none, and callers fall back to
+// the device id.
+function eldVehicleNumber(truck) {
+  return String(truck?.EldVehicleNumber || '').trim()
+}
+
+// The device's last GPS fix (epoch ms) as an ISO-Z instant, so the datetime
+// helpers render it in Houston time; '' when there is none.
+function fixIso(ms) {
+  if (ms == null || ms === '') return ''
+  const d = new Date(Number(ms))
+  return isNaN(d.getTime()) ? '' : d.toISOString()
+}
+
+function fixAge(ms) {
+  return formatAgeMs(Date.now() - Number(ms))
+}
+
+// One line under each device: how recently it reported. Whether that counts as
+// silent is the server's call (`silent` / EldSilent), never re-derived here.
+// '' only when the server sent neither a fix nor a silent flag.
+function fixLine(ms, silent) {
+  if (!fixIso(ms)) return silent ? 'Never reported' : ''
+  return silent
+    ? `No GPS fix since ${fmtYmd(fixIso(ms))} (${fixAge(ms)})`
+    : `Last fix ${fixAge(ms)} ago`
+}
+
+function silentChipText(ms) {
+  return fixIso(ms) ? `Silent ${fixAge(ms)}` : 'Never reported'
+}
+
+function silentTitle(ms) {
+  const iso = fixIso(ms)
+  const what = iso ? `No GPS fix since ${fmtTimestamp(iso)}` : 'This device has never sent a GPS fix'
+  return `${what} — the device may be unplugged, or linked to the wrong truck.`
+}
+
+// The "Linked" chip's hover text: which device, from which provider, and when
+// it last reported. The clock time rides along because the age is worked out
+// when the row renders, and a page left open for hours would otherwise go on
+// showing an age that has stopped counting.
+function linkedTitle(truck) {
+  const label = providerLabel(truck.EldProvider) || 'ELD'
+  const number = eldVehicleNumber(truck)
+  const device = number ? `${label} vehicle ${number}` : `${label} device ${truck.RoutemateVehicleId}`
+  const iso = fixIso(truck.EldLastFixMs)
+  if (iso) return `${device} — last GPS fix ${fixAge(truck.EldLastFixMs)} ago (${fmtTimestamp(iso)})`
+  return truck.EldSilent ? `${device} — has never sent a GPS fix` : device
+}
+
+function pickDevice(id) {
+  if (silentPrompt.value && silentPrompt.value.body.routemateVehicleId !== id) silentPrompt.value = null
+  pickedRoutemateId.value = id
+}
 
 // True when the mirror carries no VIN for any offered device — in that state
 // "Auto-match by VIN" cannot succeed for any truck, so say so up front rather
@@ -882,11 +1064,15 @@ const noVinData = computed(() =>
 )
 
 async function openLinkModal(truck) {
+  // The dialog reports its own refusals; a stale unlink message would only
+  // outlive whatever this dialog changes.
+  unlinkError.value = null
   linkTruck.value = truck
   pickedRoutemateId.value = ''
   suggestedId.value = ''
   linkError.value = ''
   autoError.value = ''
+  silentPrompt.value = null
   showLinkRm.value = true
   linkLoading.value = true
   try {
@@ -918,61 +1104,86 @@ function closeLinkModal() {
   suggestedId.value = ''
   linkError.value = ''
   autoError.value = ''
+  silentPrompt.value = null
 }
 
-async function handleLink() {
-  if (!linkTruck.value || !pickedRoutemateId.value) return
+// One POST for every way of linking: Link Selected ({ routemateVehicleId }),
+// Auto-match ({ auto: true }) and Link anyway (either, plus confirmSilent).
+// On a linked truck the same POST re-points the link.
+async function submitLink(body) {
+  if (!linkTruck.value) return
+  const auto = body.auto === true
   linkBusy.value = true
-  linkError.value = ''
+  // Auto-match clears autoError only — clearing linkError too would wrongly
+  // imply the vehicle list had recovered.
+  if (!auto) linkError.value = ''
   autoError.value = ''
+  // Link anyway keeps its prompt on screen, reading "Linking...", until the
+  // answer arrives.
+  if (!body.confirmSilent) silentPrompt.value = null
   try {
-    await api.post(`/api/trucks/${linkTruck.value.id}/link-routemate`, {
-      routemateVehicleId: pickedRoutemateId.value,
-    })
+    await api.post(`/api/trucks/${linkTruck.value.id}/link-routemate`, body)
     showLinkRm.value = false
     // Reload-only signal: the parent should refetch trucks so the row's
     // RoutemateVehicleId flips to "Linked". Distinct from `saveHandler` (the
     // PUT to /api/trucks behind the Edit dialog's field edits).
     emit('linkage-changed', { id: linkTruck.value.id })
   } catch (err) {
-    linkError.value = err?.message || 'Failed to link Routemate vehicle.'
-  } finally {
-    linkBusy.value = false
-  }
-}
-
-async function handleAutoLink() {
-  if (!linkTruck.value || !linkTruck.value.VIN) return
-  linkBusy.value = true
-  // Note: autoError only — clearing linkError here would wrongly imply the
-  // vehicle list had recovered.
-  autoError.value = ''
-  try {
-    await api.post(`/api/trucks/${linkTruck.value.id}/link-routemate`, { auto: true })
-    showLinkRm.value = false
-    emit('linkage-changed', { id: linkTruck.value.id })
-  } catch (err) {
-    autoError.value = err?.message || 'No Routemate vehicle matches this VIN.'
-    // The server offers a fallback candidate matched on unit number. Surface it
-    // as a pre-selection so a failed auto-match is a one-click recovery rather
-    // than a dead end.
-    const suggested = err?.data?.suggestion?.routemate_vehicle_id
-    if (suggested) {
-      suggestedId.value = suggested
-      pickedRoutemateId.value = suggested
+    silentPrompt.value = null
+    if (err?.code === 'ELD_DEVICE_SILENT' && !body.confirmSilent) {
+      silentPrompt.value = { body, error: err.message }
+      await nextTick()
+      silentPromptEl.value?.focus()
+    } else if (auto) {
+      autoError.value = err?.message || 'No Routemate vehicle matches this VIN.'
+      // The server offers a fallback candidate matched on unit number. Surface it
+      // as a pre-selection so a failed auto-match is a one-click recovery rather
+      // than a dead end.
+      const suggested = err?.data?.suggestion?.routemate_vehicle_id
+      if (suggested) {
+        suggestedId.value = suggested
+        pickedRoutemateId.value = suggested
+      }
+    } else {
+      linkError.value = err?.message || 'Failed to link Routemate vehicle.'
     }
   } finally {
     linkBusy.value = false
   }
 }
 
+function handleLink() {
+  if (!pickedRoutemateId.value) return
+  return submitLink({ routemateVehicleId: pickedRoutemateId.value })
+}
+
+function handleAutoLink() {
+  if (!linkTruck.value?.VIN) return
+  return submitLink({ auto: true })
+}
+
+function handleLinkAnyway() {
+  if (!silentPrompt.value) return
+  return submitLink({ ...silentPrompt.value.body, confirmSilent: true })
+}
+
+// A refused unlink, shown in a row under its truck: { truckId, message }.
+const unlinkError = ref(null)
+
+// Every column the header renders, so the error row spans the whole table.
+const columnCount = computed(() => 10 + (props.showOwner ? 1 : 0) + (props.canEdit ? 1 : 0))
+
 async function handleUnlink(truck) {
   // No confirm modal — unlink is reversible (admin can re-link any time).
+  unlinkError.value = null
   try {
     await api.del(`/api/trucks/${truck.id}/link-routemate`)
     emit('linkage-changed', { id: truck.id })
   } catch (err) {
-    console.error('Routemate unlink failed:', err)
+    unlinkError.value = {
+      truckId: truck.id,
+      message: err?.message || `Could not unlink the ELD device from ${truck.UnitNumber || 'this truck'}.`,
+    }
   }
 }
 </script>
@@ -1161,6 +1372,28 @@ async function handleUnlink(truck) {
   font-size: 0.85rem; padding: 0;
 }
 .btn-unlink-rm:hover { background: var(--danger-dim); color: var(--danger); border-color: var(--danger-dim); }
+/* Linked, but the device has stopped reporting: the dot stops claiming "live". */
+.rm-dot-silent { background: #d97706; }
+.rm-cell-extra {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem;
+  margin-top: 0.3rem;
+}
+/* Same amber callout as .cost-warning-badge, and free to wrap like it: this
+   column has almost no width to spare (see COLUMN BUDGET above). */
+.rm-silent-badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem; border-radius: 10px;
+  font-size: 0.62rem; font-weight: 600; line-height: 1.3;
+  background: #fef3c7; color: #92400e; border: 1px solid #fde68a;
+  cursor: help;
+}
+.btn-change-rm {
+  padding: 0.15rem 0.5rem; font-size: 0.66rem; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--surface);
+  cursor: pointer; font-family: inherit; font-weight: 600;
+  color: var(--text-dim); transition: all 0.15s;
+}
+.btn-change-rm:hover { background: var(--blue-dim); color: var(--blue); border-color: var(--blue-dim); }
 
 /* Pick list inside the link modal */
 .rm-pick-list {
@@ -1169,26 +1402,89 @@ async function handleUnlink(truck) {
   margin-bottom: 0.75rem;
 }
 .rm-pick-item {
+  display: block; position: relative;
   padding: 0.6rem 0.75rem; cursor: pointer;
   border-bottom: 1px solid var(--bg);
   transition: background 0.1s;
 }
 .rm-pick-item:last-child { border-bottom: none; }
 .rm-pick-item:hover { background: var(--bg); }
-.rm-pick-item.selected { background: #eff6ff; border-left: 3px solid #3b82f6; padding-left: calc(0.75rem - 3px); }
-.rm-pick-line1 {
-  display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.15rem;
+.rm-pick-item:has(.rm-pick-radio:focus-visible) { outline: 2px solid #3b82f6; outline-offset: -2px; }
+/* Visually hidden, still focusable and announced; the whole label is the target. */
+.rm-pick-radio {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
 }
-.rm-pick-id { font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 0.78rem; }
-.rm-pick-vin { font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; color: var(--text-dim); }
-.rm-pick-line2 { font-size: 0.72rem; color: var(--text-dim); display: flex; gap: 0.6rem; }
+.rm-pick-item.selected { background: #eff6ff; border-left: 3px solid #3b82f6; padding-left: calc(0.75rem - 3px); }
+/* A device that has stopped reporting: its details recede, its warning line
+   (.rm-pick-fix.warn) stays at full strength. */
+.rm-pick-item.silent .rm-pick-line1,
+.rm-pick-item.silent .rm-pick-line2 { opacity: 0.55; }
+.rm-pick-line1 {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.6rem; margin-bottom: 0.15rem;
+}
+.rm-pick-id { font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 0.78rem; overflow-wrap: anywhere; }
+.rm-pick-vin { font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; color: var(--text-dim); overflow-wrap: anywhere; }
+.rm-pick-line2 { font-size: 0.72rem; color: var(--text-dim); display: flex; flex-wrap: wrap; gap: 0.2rem 0.6rem; }
 .rm-pick-eld { font-family: 'JetBrains Mono', monospace; }
+.rm-provider {
+  display: inline-block;
+  padding: 0.05rem 0.45rem; border-radius: 10px;
+  font-size: 0.62rem; font-weight: 600; line-height: 1.4;
+  background: var(--bg); color: var(--text-dim); border: 1px solid var(--border);
+}
+.rm-provider-routemate { background: #eff6ff; color: #1e40af; border-color: #bfdbfe; }
+.rm-provider-linxup { background: #f5f3ff; color: #5b21b6; border-color: #ddd6fe; }
+.rm-pick-fix { display: block; margin-top: 0.2rem; font-size: 0.7rem; color: var(--text-dim); }
+.rm-pick-fix.warn { color: #92400e; font-weight: 600; }
+/* Re-point mode: the device the truck is linked to now, above the list. */
+.rm-current {
+  padding: 0.55rem 0.75rem; margin-bottom: 0.75rem;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
+}
+.rm-current-label {
+  font-size: 0.66rem; font-weight: 600; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.2rem;
+}
+.rm-current-note { margin-top: 0.3rem; font-size: 0.7rem; color: var(--text-dim); }
+/* 409 ELD_DEVICE_SILENT: the server's words plus the one way past it. Same
+   amber as .rm-auto-note — a decision to make, not a failure. */
+.rm-silent-prompt {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem;
+  padding: 0.55rem 0.7rem; font-size: 0.75rem; line-height: 1.4;
+  background: #fffbeb; color: #92400e;
+  border: 1px solid #fde68a; border-radius: 6px;
+}
+.rm-silent-prompt > div { flex: 1 1 14rem; min-width: 0; overflow-wrap: anywhere; }
+.rm-silent-prompt:focus { outline: 2px solid #f59e0b; outline-offset: 1px; }
+.btn-link-anyway {
+  padding: 0.3rem 0.65rem; font-size: 0.72rem; border-radius: 6px;
+  border: 1px solid #f59e0b; background: #fef3c7;
+  cursor: pointer; font-family: inherit; font-weight: 600; color: #92400e;
+}
+.btn-link-anyway:hover { background: #fde68a; }
+.btn-link-anyway:disabled { opacity: 0.5; cursor: not-allowed; }
 .rm-pick-empty { padding: 1rem; font-size: 0.82rem; color: var(--text-dim); text-align: center; }
 .rm-pick-error {
   padding: 0.6rem 0.75rem; font-size: 0.78rem;
   background: #fef2f2; color: #991b1b;
   border: 1px solid #fecaca; border-radius: 6px; margin-bottom: 0.75rem;
 }
+/* A refused unlink, in the row under its truck: the .rm-pick-error callout,
+   with room for a dismiss button. */
+.truck-table tbody tr.rm-error-row:hover { background: transparent; }
+.rm-error-row td { padding-top: 0; }
+.rm-unlink-error {
+  display: flex; align-items: flex-start; gap: 0.5rem;
+  margin-bottom: 0; line-height: 1.4; overflow-wrap: anywhere;
+}
+.rm-unlink-error > span { flex: 1; min-width: 0; }
+.rm-error-dismiss {
+  flex: none; width: 20px; height: 20px; padding: 0; line-height: 1;
+  border: 1px solid #fecaca; border-radius: 50%; background: #fff;
+  color: #991b1b; font-size: 0.85rem; cursor: pointer;
+}
+.rm-error-dismiss:hover { background: #fee2e2; }
 /* Auto-match feedback sits under its own button, not in the picker's slot, so
    the device list stays on screen when auto-match fails. */
 .rm-auto-error {
@@ -1204,6 +1500,7 @@ async function handleUnlink(truck) {
 .rm-pick-item.suggested { background: #f0fdf4; }
 .rm-pick-item.suggested.selected { background: #eff6ff; }
 .rm-pick-suggest {
+  display: block;
   margin-top: 0.3rem; font-size: 0.68rem; font-weight: 600; color: #15803d;
 }
 </style>

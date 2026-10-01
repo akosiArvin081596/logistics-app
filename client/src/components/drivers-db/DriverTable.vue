@@ -334,6 +334,7 @@ import { useApi } from '../../composables/useApi'
 import { useFileDrop } from '../../composables/useFileDrop'
 import { AVATAR_MAX_EDGE, compressImage, isDecodedImage } from '../../lib/imageUtils'
 import { directoryPayCells, directoryPayType } from '../../lib/driverPay'
+import { normDriver } from '../../lib/driverName'
 import { fmtTimestamp } from '../../utils/datetime'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
@@ -354,9 +355,9 @@ const props = defineProps({
 
 function getAssignedTruck(driver) {
   const driverCol = props.headers.find(h => /driver/i.test(h)) || props.headers[0]
-  const name = (driver[driverCol] || '').trim().toLowerCase()
+  const name = normDriver(driver[driverCol])
   if (!name) return '\u2014'
-  const assignment = props.truckAssignments.find(a => (a.driver_name || '').toLowerCase() === name)
+  const assignment = props.truckAssignments.find(a => normDriver(a.driver_name) === name)
   if (!assignment) return '\u2014'
   return `${assignment.unit_number} (${assignment.year || ''} ${assignment.make || ''} ${assignment.model || ''})`.trim()
 }

@@ -62,6 +62,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
 import { useAuthStore } from '../stores/auth'
+import { normDriver } from '../lib/driverName'
 import KpiGrid from '../components/dashboard/KpiGrid.vue'
 import RevenueGrid from '../components/dashboard/RevenueGrid.vue'
 import JobBoardTab from '../components/dashboard/JobBoardTab.vue'
@@ -112,7 +113,7 @@ const busyDrivers = computed(() => {
   if (!dc) return []
   const seen = new Set()
   for (const j of store.activeJobs) {
-    const n = (j[dc] || '').trim().toLowerCase().replace(/\s+/g, ' ')
+    const n = normDriver(j[dc])
     if (n) seen.add(n)
   }
   return [...seen]
