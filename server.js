@@ -2867,7 +2867,7 @@ db.exec(`
 `);
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_eld_feed_alerts_open ON eld_feed_alerts(resolved_at, alert_key)`); } catch {}
 
-// THE per-vehicle last-clean-fix query. Lifted verbatim out of
+// THE per-vehicle last-clean-fix query. Lifted out of
 // GET /api/admin/fleet-health so the panel a dispatcher reads and the sweep that
 // pages someone at 2 a.m. can never disagree about what "last fix" means —
 // DRIVER_RENAME_TARGETS / truckChargedInMonth lesson, applied before the second
@@ -2896,31 +2896,78 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_eld_feed_alerts_open ON eld_feed_a
 // fixture, the two disagreed by 4 hours. The sweep therefore reads last_fix_ms;
 // fleet-health keeps reading location_date_ms, whose meaning is unchanged.
 //
-// Both come out of the SAME grouped subquery, so this is still one query and the
-// two callers still cannot drift apart about what "clean" means.
+// Both come out of the SAME query, so this is still one query and the callers
+// still cannot drift apart about what "clean" means.
+//
+// It is also THE answer to "which provider is this device, and has it gone
+// silent" — the Trucks list, the ELD picker, the link route and the feed alert
+// read provider (eldFeedHealth.deviceProvider() over this row's source /
+// engine_hours / geocoded_location) and silence (last_fix_ms) from here, so a
+// device cannot read as live in one place and dark in another.
+//
+// ⚠️ TWO SCALAR MAXes PER ID, NOT ONE GROUP BY. Each MAX is a single seek on an
+// index that leads with the vehicle id and is filtered to clean rows — MAX(id)
+// on idx_rm_tel_clean, MAX(location_date_ms) on the partial idx_rm_tel_odo_walk.
+// The grouped form this replaced read the same answer by walking every clean
+// row of every vehicle asked for: measured on a ~970k-row copy, 42 ms per call
+// against 0.16 ms, identical rows. That mattered once GET /api/trucks called it
+// on every page load.
 //
 // Empty input returns {} without touching the database — every caller must keep
 // working on a fleet with nothing linked.
 function eldLatestCleanFixByVehicle(vehicleIds) {
-	const ids = (Array.isArray(vehicleIds) ? vehicleIds : []).filter(Boolean);
+	const ids = [...new Set((Array.isArray(vehicleIds) ? vehicleIds : []).filter(Boolean))];
 	const out = {};
 	if (ids.length === 0) return out;
-	const placeholders = ids.map(() => "?").join(",");
+	const values = ids.map(() => "(?)").join(",");
 	const rows = db.prepare(`
+		WITH ids(vid) AS (VALUES ${values}),
+		latest AS (
+			SELECT ids.vid AS routemate_vehicle_id,
+			       (SELECT MAX(id) AS max_id FROM routemate_telemetry
+			         WHERE routemate_vehicle_id = ids.vid AND dropped_reason = '') AS max_id,
+			       (SELECT MAX(location_date_ms) AS last_fix_ms FROM routemate_telemetry
+			         WHERE routemate_vehicle_id = ids.vid AND dropped_reason = '') AS last_fix_ms
+			FROM ids
+		)
 		SELECT rt.routemate_vehicle_id, rt.latitude, rt.longitude, rt.speed,
 		       rt.fuel_pct, rt.odometer, rt.engine_hours, rt.geocoded_location,
 		       rt.location_date_ms, rt.source, latest.last_fix_ms
-		FROM routemate_telemetry rt
-		INNER JOIN (
-			SELECT routemate_vehicle_id, MAX(id) AS max_id, MAX(location_date_ms) AS last_fix_ms
-			FROM routemate_telemetry
-			WHERE routemate_vehicle_id IN (${placeholders})
-			  AND dropped_reason = ''
-			GROUP BY routemate_vehicle_id
-		) latest ON rt.id = latest.max_id
+		FROM latest
+		INNER JOIN routemate_telemetry rt ON rt.id = latest.max_id
 	`).all(...ids);
 	for (const r of rows) out[r.routemate_vehicle_id] = r;
 	return out;
+}
+
+// One device's ELD status in the shape the Trucks list, the picker and the link
+// route all serve: `provider` ('routemate' | 'linxup' | ''), `last_fix_ms`
+// (null when the device has never produced a clean fix) and `silent`, judged on
+// the feed sweep's own ELD_STALE_HOURS so the picker cannot call live a device
+// the sweep is alerting on. `tel` is the device's eldLatestCleanFixByVehicle()
+// row, or undefined.
+function eldDeviceStatus(tel, nowMs) {
+	const lastFixMs = tel && Number(tel.last_fix_ms) > 0 ? Number(tel.last_fix_ms) : null;
+	return {
+		provider: eldFeedHealth.deviceProvider(tel || null),
+		last_fix_ms: lastFixMs,
+		silent: eldFeedHealth.isDeviceSilent(lastFixMs, nowMs, ELD_STALE_HOURS),
+	};
+}
+
+// "last reported a GPS fix on 2026-09-15 UTC, 16 days ago", or "has never
+// reported a GPS fix" — the one wording the link refusal and the feed alert use
+// for a device's last fix.
+function eldLastFixPhrase(lastFixMs, nowMs) {
+	const ms = Number(lastFixMs);
+	if (!Number.isFinite(ms) || ms <= 0) return "has never reported a GPS fix";
+	const ageMs = Math.max(0, Number(nowMs) - ms);
+	const days = Math.floor(ageMs / (24 * 60 * 60 * 1000));
+	const hours = Math.floor(ageMs / (60 * 60 * 1000));
+	const ago = days >= 1 ? `${days} day${days === 1 ? "" : "s"} ago`
+		: hours >= 1 ? `${hours} h ago`
+			: "less than an hour ago";
+	return `last reported a GPS fix on ${new Date(ms).toISOString().slice(0, 10)} UTC, ${ago}`;
 }
 
 // Distinct clean fixes per vehicle inside a rolling window. COUNT(DISTINCT
@@ -3152,6 +3199,52 @@ function recordEldAlertSend(nowMs) {
 		.run(ELD_ALERT_SEND_LOG_KEY, JSON.stringify(sends));
 }
 
+// Which device a feed alert is about, and the other half of a likely mis-link.
+// The bare id named nothing a reader could act on ("_PxLRDo4…" is vehicle 356),
+// and the two alerts a wrong link raises — the truck's device is stale, the
+// truck's real device is an orphan — never pointed at each other:
+//
+//   orphan       `unitMatch` — the ONE non-retired truck whose unit number
+//                matches the device's vehicle number (unitNumberToken()), with
+//                the device it is linked to now and that device's last fix.
+//   linked feed  `liveMatchLabel` — the unlinked device suggestRoutemateVehicleForTruck()
+//                offers for this truck, only when that device is NOT silent.
+//
+// Reads only. Every label here comes from eldFeedHealth.describeEldDevice(),
+// which is already one line; the unit number is returned raw and the caller
+// one-lines and escapes it with everything else.
+function eldFeedAlertContext(v, nowMs) {
+	const vid = String(v.vehicleId || "").trim();
+	const mirrorRow = (id) => db.prepare(
+		"SELECT routemate_vehicle_id, vehicle_id, make, model, year FROM routemate_vehicles WHERE routemate_vehicle_id = ?"
+	).get(id) || { routemate_vehicle_id: id };
+	const out = { deviceLabel: eldFeedHealth.describeEldDevice(mirrorRow(vid)), unitMatch: null, liveMatchLabel: "" };
+	if (v.state === "orphan") {
+		const token = String(mirrorRow(vid).vehicle_id || "").trim();
+		if (!token) return out;
+		const today = todayKeyCT();
+		const matches = db.prepare("SELECT unit_number, routemate_vehicle_id, retired_at FROM trucks").all()
+			.filter((t) => !eldFeedHealth.isRetiredOn(t.retired_at, today) && unitNumberToken(t.unit_number) === token);
+		if (matches.length !== 1) return out;
+		const linked = String(matches[0].routemate_vehicle_id || "").trim();
+		const linkedFix = linked ? eldLatestCleanFixByVehicle([linked])[linked] : null;
+		out.unitMatch = {
+			unitNumber: matches[0].unit_number,
+			linkedLabel: linked ? eldFeedHealth.describeEldDevice(mirrorRow(linked)) : "",
+			linkedLastFix: linked ? eldLastFixPhrase(linkedFix && linkedFix.last_fix_ms, nowMs) : "",
+		};
+		return out;
+	}
+	const suggested = suggestRoutemateVehicleForTruck({ unit_number: v.unitNumber });
+	if (suggested) {
+		const sid = suggested.routemate_vehicle_id;
+		if (!eldDeviceStatus(eldLatestCleanFixByVehicle([sid])[sid], nowMs).silent) {
+			out.liveMatchLabel = eldFeedHealth.describeEldDevice(suggested);
+		}
+	}
+	return out;
+}
+
 // Fire-and-forget. NEVER throws and never rejects — its caller is a timer, and
 // the sweep must survive one unmailable feed to reach the rest.
 async function alertEldFeedSilence(verdict) {
@@ -3233,14 +3326,26 @@ async function alertEldFeedSilence(verdict) {
 		// CR/LF from a Subject, but relying on a dependency for that is not a
 		// control we own.
 		const oneLine = (s) => String(s == null ? "" : s).replace(/[\r\n]+/g, " ").slice(0, 60);
-		const who = oneLine(v.unitNumber || `device ${v.vehicleId}`) || "unknown truck";
+		// The device's name and the mis-link hint are an aid, never a gate: a read
+		// that fails here leaves the alert worded as it was before they existed.
+		let ctx = null;
+		try { ctx = eldFeedAlertContext(v, Date.now()); } catch (e) { console.error("[eld-feed] alert context unavailable:", e.message); }
+		const deviceLabel = oneLine(ctx ? ctx.deviceLabel : `device ${v.vehicleId}`);
+		const who = oneLine(v.unitNumber) || deviceLabel || "unknown truck";
 		const lastFix = v.lastFixMs ? new Date(Number(v.lastFixMs)).toISOString().replace("T", " ").slice(0, 16) + " UTC" : "never";
 		const silent = v.silentHours === null || v.silentHours === undefined
 			? "n/a"
 			: `${Math.floor(Number(v.silentHours) / 24)}d ${Math.floor(Number(v.silentHours) % 24)}h`;
+		const hint = ctx && ctx.unitMatch
+			? `Truck ${oneLine(ctx.unitMatch.unitNumber)} has the matching unit number and is linked to ` +
+				(ctx.unitMatch.linkedLabel ? `${ctx.unitMatch.linkedLabel}, which ${ctx.unitMatch.linkedLastFix}` : "no device") +
+				". If this is its ELD, re-point it under Trucks → Change."
+			: ctx && ctx.liveMatchLabel
+				? `${ctx.liveMatchLabel} is reporting live, is linked to no truck, and matches this truck's unit number — it may be this truck's ELD; re-point under Trucks → Change.`
+				: "";
 
 		const subject = v.state === "orphan"
-			? `⚠️ ELD device ${oneLine(v.vehicleId)} is reporting to no truck`
+			? `⚠️ ELD ${deviceLabel} is reporting to no truck`
 			: `⚠️ ELD feed silent — ${who} (${silent})`;
 		const html =
 			`<p><b>${escHtml(who)}</b> — ${escHtml(String(v.reason || "ELD feed problem"))}.</p>` +
@@ -3252,6 +3357,7 @@ async function alertEldFeedSilence(verdict) {
 			`<tr><td style="padding:6px 10px;border:1px solid #ddd;">Silent for</td><td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(silent)}</td></tr>` +
 			`<tr><td style="padding:6px 10px;border:1px solid #ddd;">Fixes in last 24 h</td><td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(String(v.fixes24h))}</td></tr>` +
 			`</table>` +
+			(hint ? `<p style="margin-top:14px;"><b>Possible wrong link.</b> ${escHtml(hint)}</p>` : "") +
 			`<p style="margin-top:14px;"><b>Why this matters for pay.</b> Driver "active days" are counted from ELD travel, and a load window with no pings falls back to the full scheduled window — ` +
 			`so while this feed is dark, loads on this truck settle on the <i>estimated</i> basis: more driver days than were worked, and less investor profit. ` +
 			`The longer it stays dark, the more months close on an estimate.</p>` +
@@ -3270,9 +3376,9 @@ async function alertEldFeedSilence(verdict) {
 		let notified = false;
 		try {
 			const title = v.state === "orphan"
-				? `ELD device ${oneLine(v.vehicleId)} is linked to no truck`
+				? `ELD ${deviceLabel} is linked to no truck`
 				: `ELD feed silent — ${who}`;
-			const body = `${v.reason || "ELD feed problem"} · last clean fix ${lastFix}`;
+			const body = `${v.reason || "ELD feed problem"} · last clean fix ${lastFix}${hint ? ` · ${hint}` : ""}`;
 			// ⚠️ NO loadId in metadata, deliberately. NotificationsView routes a tap
 			// to /dashboard?load=<id> when metadata carries one; a feed alert is not
 			// about any single load, and inventing one would send a dispatcher to an
@@ -24650,10 +24756,35 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 		try { odoByVid[vid] = odoStmt.get(vid) || null; } catch { odoByVid[vid] = null; }
 	}
 
+	// Each linked device's provider, last fix and silence, in ONE lookup for the
+	// fleet — the same reading the ELD picker and the feed sweep use, so a truck
+	// cannot show "ELD live" here while the sweep is alerting on its device —
+	// plus its vehicle number off the mirror (the "356" a person knows it by,
+	// where the link itself holds an opaque device id), in one more. A failed
+	// read leaves every truck's ELD status unknown (null / "" / false) rather
+	// than calling every device silent.
+	const eldNow = Date.now();
+	const eldVids = [...new Set(rows.map((t) => String(t.routemate_vehicle_id || "").trim()).filter(Boolean))];
+	let eldFixByVid = null;
+	const eldNumberByVid = Object.create(null);
+	try {
+		eldFixByVid = eldLatestCleanFixByVehicle(eldVids);
+		if (eldVids.length) {
+			for (const r of db.prepare(
+				`SELECT routemate_vehicle_id, TRIM(vehicle_id) AS vehicle_number FROM routemate_vehicles WHERE routemate_vehicle_id IN (${eldVids.map(() => "?").join(",")})`
+			).all(...eldVids)) eldNumberByVid[r.routemate_vehicle_id] = r.vehicle_number || "";
+		}
+	} catch (err) {
+		eldFixByVid = null;
+		console.error("/api/trucks: ELD last-fix read failed:", err.message);
+	}
+
 	const trucks = rows.map((t) => {
 		const unitLower = (t.unit_number || "").toLowerCase();
 		const driverLower = normalizeDriverName(t.assigned_driver);
 		const odo = t.routemate_vehicle_id ? odoByVid[t.routemate_vehicle_id] : null;
+		const eldVid = String(t.routemate_vehicle_id || "").trim();
+		const eld = eldVid && eldFixByVid ? eldDeviceStatus(eldFixByVid[eldVid], eldNow) : null;
 		const directCount = loadsByTruck[unitLower];
 		const loadCount = (directCount !== undefined)
 			? directCount
@@ -24699,6 +24830,15 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 			// null (not 0) when the truck has no ELD link or no fix yet — see above.
 			Odometer: odo && odo.odometer > 0 ? Math.round(odo.odometer) : null,
 			OdometerAt: odo && odo.location_date_ms ? new Date(odo.location_date_ms).toISOString() : null,
+			// The linked device's status (eldDeviceStatus()); null / "" / false
+			// when the truck has no ELD link. EldSilent is the feed sweep's rule:
+			// no clean fix within ELD_STALE_HOURS, or never one at all.
+			// EldVehicleNumber is the device's TRIM(vehicle_id) on the mirror, ""
+			// when unlinked or the mirror has none (a Linxup device it knows by id).
+			EldLastFixMs: eld ? eld.last_fix_ms : null,
+			EldProvider: eld ? eld.provider : '',
+			EldSilent: eld ? eld.silent : false,
+			EldVehicleNumber: eld ? (eldNumberByVid[eldVid] || '') : '',
 		};
 	});
 	res.json({ trucks });
@@ -33710,9 +33850,16 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			if (inProgressLoad) status = "On Load";
 			else if (queue.length > 0) status = "Queued";
 			else status = "Available";
+			// The truck the driver is assigned (findTruckForDriver(), any case or
+			// spacing of the name) — the record syncDriverToCarrierSheet() copies
+			// into the directory's `trucks` — and only without one, that stored
+			// copy. The copy is refreshed only when the directory row is synced, so
+			// a truck assigned since read "No truck assigned" here. Read only: this
+			// path does not repair the copy.
+			const assignedTruck = findTruckForDriver(name);
 			return {
 				Driver: name,
-				Truck: truckCol ? r[truckCol] || "" : "",
+				Truck: assignedTruck ? assignedTruck.unit_number : truckCol ? r[truckCol] || "" : "",
 				Phone: phoneCol ? r[phoneCol] || "" : "",
 				Status: status,
 				CurrentLoad: inProgressLoad
@@ -37654,6 +37801,12 @@ function suggestRoutemateVehicleForTruck(truck) {
 // unchanged and callers that omit truckId see the exact same body as before.
 // The rule lives here rather than in the client so it cannot drift from the
 // auto-match branch of POST /link-routemate, which consults the same helper.
+//
+// Every device (and `suggested`) carries `provider`, `last_fix_ms` and `silent`
+// (eldDeviceStatus()), and the list is ordered by eldFeedHealth.comparePickerDevices:
+// reporting devices first, newest fix first. It used to sort on VIN, which put
+// the blank-VIN rows — a Linxup device the mirror only knows by id — at the top,
+// so a device that had been dark for two weeks was the first choice offered.
 app.get("/api/routemate/vehicles/unlinked", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const rows = db.prepare(`
@@ -37663,16 +37816,20 @@ app.get("/api/routemate/vehicles/unlinked", requireRole("Super Admin", "Dispatch
 			WHERE rv.routemate_vehicle_id NOT IN (
 				SELECT routemate_vehicle_id FROM trucks WHERE COALESCE(routemate_vehicle_id, '') <> ''
 			)
-			ORDER BY rv.vin, rv.routemate_vehicle_id
 		`).all();
+		const now = Date.now();
+		const fixes = eldLatestCleanFixByVehicle(rows.map((r) => r.routemate_vehicle_id));
+		const withStatus = (r) => ({ ...r, ...eldDeviceStatus(fixes[r.routemate_vehicle_id], now) });
 
-		const body = { vehicles: rows };
+		const body = { vehicles: rows.map(withStatus).sort(eldFeedHealth.comparePickerDevices) };
 		const truckId = parseInt(req.query.truckId, 10);
 		if (truckId) {
 			const truck = db.prepare("SELECT id, unit_number, vin FROM trucks WHERE id = ?").get(truckId);
 			if (truck) {
+				// Always one of `rows` (both read "unlinked" in this same tick), so
+				// its status comes out of the same lookup.
 				const suggested = suggestRoutemateVehicleForTruck(truck);
-				if (suggested) body.suggested = suggested;
+				if (suggested) body.suggested = withStatus(suggested);
 			}
 		}
 		res.json(body);
@@ -37750,7 +37907,9 @@ app.post("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), asyn
 		if (!target) return res.status(400).json({ error: "routemateVehicleId or {auto:true} required" });
 
 		// Verify the target exists and isn't already linked to a different truck.
-		const rv = db.prepare("SELECT routemate_vehicle_id FROM routemate_vehicles WHERE routemate_vehicle_id = ?").get(target);
+		const rv = db.prepare(
+			"SELECT routemate_vehicle_id, vehicle_id, make, model, year FROM routemate_vehicles WHERE routemate_vehicle_id = ?"
+		).get(target);
 		if (!rv) return res.status(404).json({ error: "Routemate vehicle not found in mirror — run sync-now first" });
 		const otherTruck = db.prepare(
 			"SELECT id, unit_number FROM trucks WHERE routemate_vehicle_id = ? AND id <> ?"
@@ -37759,11 +37918,37 @@ app.post("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), asyn
 			return res.status(409).json({ error: `Already linked to truck ${otherTruck.unit_number} (#${otherTruck.id}). Unlink first.` });
 		}
 
+		const changing = String(truck.routemate_vehicle_id || "").trim() !== String(target).trim();
+
+		// A device that is not reporting is asked about before it is linked
+		// (409 ELD_DEVICE_SILENT; the client re-sends with confirmSilent: true).
+		// LogisX-#356 was linked (2026-09-28) to a Linxup device whose last fix was
+		// 2026-09-15 while its real ELD reported, unlinked, beside it — and from
+		// then on the truck read "ELD offline" with nothing saying the link was why.
+		// Same staleness rule as the feed sweep (eldDeviceStatus()). Synchronous,
+		// like everything after eldLinkPreflight(), so nothing moves between this
+		// read and the write. Above the period guard: the question is whether the
+		// admin means this device at all, and it applies to the {auto:true} match
+		// as much as to a picked one.
+		const targetStatus = changing ? eldDeviceStatus(eldLatestCleanFixByVehicle([target])[target], Date.now()) : null;
+		const confirmedSilent = !!(targetStatus && targetStatus.silent && req.body && req.body.confirmSilent === true);
+		if (targetStatus && targetStatus.silent && !confirmedSilent) {
+			return res.status(409).json({
+				code: "ELD_DEVICE_SILENT",
+				error: `ELD ${eldFeedHealth.describeEldDevice(rv)} ${eldLastFixPhrase(targetStatus.last_fix_ms, Date.now())}.`
+					+ ` Linking it leaves ${truck.unit_number || `truck #${truckId}`} with no live position.`
+					+ ` Confirm to link it anyway.`,
+				routemateVehicleId: target,
+				provider: targetStatus.provider,
+				lastFixMs: targetStatus.last_fix_ms,
+			});
+		}
+
 		// The ELD link is a driver-pay input, not a piece of configuration: it is the
 		// map historical loads resolve through to get their travel days. Same guard
 		// the truck PUT runs, so re-pointing a device cannot do what editing the
 		// unit number is refused for. See check (5b).
-		if (String(truck.routemate_vehicle_id || "").trim() !== String(target).trim()) {
+		if (changing) {
 			const lock = truckEditLockBlockers(truck, { routemate_vehicle_id: target }, { eldLinkMonths });
 			// Mirrors the `routemate_link` success line. BOTH device ids are recorded:
 			// the link is the map historical loads resolve through to get their travel
@@ -37785,7 +37970,8 @@ app.post("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), asyn
 		}
 
 		db.prepare("UPDATE trucks SET routemate_vehicle_id = ? WHERE id = ?").run(target, truckId);
-		logAudit(req, 'routemate_link', 'truck', String(truckId), `Linked truck ${auditText(truck.unit_number, 100)} → Routemate ${target}`);
+		logAudit(req, 'routemate_link', 'truck', String(truckId), `Linked truck ${auditText(truck.unit_number, 100)} → Routemate ${target}`
+			+ (confirmedSilent ? ` (confirmed silent device: ${eldLastFixPhrase(targetStatus.last_fix_ms, Date.now())})` : ""));
 		res.json({ success: true, truckId, routemateVehicleId: target });
 	} catch (err) {
 		console.error("routemate link error:", err.message);
@@ -45049,6 +45235,7 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					rt.latitude, rt.longitude, rt.speed, rt.bearing,
 					rt.fuel_pct,
 					rt.location_date_ms,
+					rt.source, rt.engine_hours, rt.geocoded_location,
 					-- Prior telemetry row's coords, used as a fallback heading source
 					-- when rt.bearing is missing or non-numeric. Index idx_rm_tel_vid_date
 					-- covers (routemate_vehicle_id, location_date_ms DESC) so this stays cheap.
@@ -45097,7 +45284,11 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					loc.longitude = rm.longitude;
 					loc.speed = rm.speed || 0;
 					loc.timestamp = new Date(rm.location_date_ms).toISOString();
-					loc.source = "routemate";
+					// The provider that wrote this fix ('routemate' | 'linxup'), as the
+					// live socket pushes already say — every Linxup fix used to be
+					// served as 'routemate'. The client reads all three ELD values,
+					// 'eld' included, as "position from the truck's device".
+					loc.source = eldFeedHealth.deviceProvider(rm) || "eld";
 					loc.lastPingAge = now - rm.location_date_ms;
 					// Latest ELD fuel level (0-100). Same convention as
 					// /api/admin/fleet-health: fuelPct, null when the device
@@ -45180,13 +45371,17 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 			const deliveryTimeCol = headers.find((h) => /delivery.*time|drop.*time|delivery.*date|drop.*date/i.test(h));
 
 			if (loadIdCol) {
-				// Build load lookup (keyed by the sheet's Load ID cell: null-prototype)
+				// Build load lookup, null-prototype, filed and read through
+				// normalizeLoadId() only (loadById()). It was keyed by the raw Load ID
+				// cell but read with the trimmed, "#"-stripped id below, so a load whose
+				// cell carried a "#" or a stray space got no ETA or distance.
 				const loadMap = Object.create(null);
+				const loadById = (id) => loadMap[normalizeLoadId(id)];
 				for (let i = 1; i < rows.length; i++) {
 					const obj = {};
 					headers.forEach((h, idx) => { obj[h] = rows[i][idx] || ""; });
-					const lid = obj[loadIdCol];
-					if (lid) loadMap[lid] = obj;
+					const key = normalizeLoadId(obj[loadIdCol]);
+					if (key) loadMap[key] = obj;
 				}
 
 				// Build map of each driver's active loads from the sheet
@@ -45270,12 +45465,12 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					loc.assignedTruck = readByDriver(assignmentByDriver, loc.driver) || null;
 
 					const sheetActiveLoad = readByDriver(driverActiveLoadMap, loc.driver);
-					if (sheetActiveLoad && loc.loadId !== sheetActiveLoad && loadMap[sheetActiveLoad]) {
+					if (sheetActiveLoad && loc.loadId !== sheetActiveLoad && loadById(sheetActiveLoad)) {
 						loc.loadId = sheetActiveLoad;
 					}
 
-					if (!loc.loadId || !loadMap[loc.loadId]) continue;
-					const load = loadMap[loc.loadId];
+					const load = loc.loadId ? loadById(loc.loadId) : undefined;
+					if (!load) continue;
 
 					let oLat = NaN, oLng = NaN, dLat = NaN, dLng = NaN;
 					if (originLatCol && originLngCol) {
