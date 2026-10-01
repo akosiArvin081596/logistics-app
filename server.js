@@ -35230,7 +35230,8 @@ app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver
 		// fallback. idx_rm_tel_clean covers (routemate_vehicle_id, dropped_reason,
 		// id DESC) exactly, so this is two index reads.
 		const rows = db.prepare(
-			`SELECT latitude, longitude, speed, bearing, fuel_pct, location_date_ms
+			`SELECT latitude, longitude, speed, bearing, fuel_pct, location_date_ms,
+			        source, engine_hours, geocoded_location
 			   FROM routemate_telemetry
 			  WHERE routemate_vehicle_id = ? AND dropped_reason = ''
 			  ORDER BY id DESC LIMIT 2`
@@ -35289,7 +35290,10 @@ app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver
 				heading: heading == null ? null : heading,
 				timestamp: new Date(rm.location_date_ms).toISOString(),
 				lastPingAge,
-				source: "routemate",
+				// The provider that wrote this fix, by the rule /api/locations/latest
+				// uses — every Linxup fix used to be served as 'routemate'. The driver
+				// app reads any source but 'phone' as the truck's device.
+				source: eldFeedHealth.deviceProvider(rm) || "eld",
 				fuelPct: Number.isFinite(rm.fuel_pct) ? rm.fuel_pct : null,
 				// Same three-state classifier the tracking panel uses, computed here
 				// so the driver and the dispatcher cannot disagree about whether the

@@ -17,10 +17,12 @@
  *   §6 The feed alert names the device and joins the two halves of a wrong link.
  *   §7 /api/locations/latest: one Load ID normalization; the real provider.
  *   §8 GET /api/dashboard: the Fleet card's truck is the assigned one.
+ *   §9 GET /api/driver/position: the real provider, by the same rule as §7.
  *
  * ⚠️ THE CODE UNDER TEST IS EXTRACTED FROM server.js SOURCE, not copied here;
  * every extraction asserts its definition is found EXACTLY ONCE. Only I/O
- * outside SQLite (sheet, mail, sockets, audit) and the period guard are stubbed.
+ * outside SQLite (sheet, mail, sockets, audit), the period guard and §9's
+ * driver-to-truck lookup are stubbed.
  * The tables are in memory, with the shipped indexes lifted from server.js.
  *
  * Run: node scripts/test-eld-link-device-status.js
@@ -58,8 +60,10 @@ function extractConst(name) {
 	if (hits.length !== 1) throw new Error(`expected exactly 1 const ${name}, found ${hits.length}`);
 	return hits[0][0];
 }
+// `route` is a path, or the array of paths a route is mounted on.
 function routeBody(verb, route) {
-	const needle = `app.${verb}("${route}"`;
+	const paths = Array.isArray(route) ? `[${route.map((r) => `"${r}"`).join(", ")}]` : `"${route}"`;
+	const needle = `app.${verb}(${paths}`;
 	const start = src.indexOf(needle);
 	if (start === -1 || src.indexOf(needle, start + 1) !== -1) throw new Error(`expected exactly 1 ${needle}`);
 	return src.slice(start, src.indexOf("\n});\n", start) + 5);
@@ -426,6 +430,39 @@ function routeWorld(db, verb, route, deps = {}) {
 		ok(/Truck: assignedTruck \? assignedTruck\.unit_number : truckCol \? r\[truckCol\] \|\| "" : "",/.test(fleet),
 			"§8.2 the assigned truck first, the stored copy only without one");
 		ok(!/drivers_directory/.test(fleet.slice(0, fleet.indexOf("});"))), "§8.3 the read path writes nothing back");
+	}
+
+	// ------------------------------------------------------------------ §9
+	// §7's blanket label on the driver's own map: every ELD fix was served as
+	// 'routemate', a Linxup truck's included.
+	console.log("§9 GET /api/driver/position");
+	{
+		const LINXUP_LIVE = "18000507600";
+		const ODD_SOURCE = "unknown-provider-device";
+		const db = freshDb();
+		const tel = db.prepare(`INSERT INTO routemate_telemetry
+			(routemate_vehicle_id, latitude, longitude, engine_hours, geocoded_location, location_date_ms, source)
+			VALUES (?,?,?,?,?,?,?)`);
+		tel.run(LINXUP_LIVE, 29.9, -95.5, 0, "", NOW - 5 * 60 * 1000, "linxup");
+		tel.run(ODD_SOURCE, 29.6, -95.2, 0, "", NOW - 5 * 60 * 1000, "samsara");
+		const lifted = build(null, [
+			extractConst("MOVEMENT_MOVING_MPS"), extractConst("MOVEMENT_ACTIVE_MS"),
+			extractFunction("classifyMovement"), extractFunction("parseRoutemateBearing"),
+		], { expose: ["classifyMovement", "parseRoutemateBearing"] });
+		const route = ["/api/driver/position", "/api/driver/me/position"];
+		const sourceFor = async (vid) => {
+			const get = routeWorld(db, "get", route, {
+				...lifted, geolib: require("geolib"), driverPositionLimiter: null,
+				resolveTruckForDriverName: () => ({ unit: "LogisX-#21", routemate_vehicle_id: vid }),
+			});
+			const res = await get({ session: { user: { role: "Driver", driverName: "Test Driver" } } });
+			return res.body.position && res.body.position.source;
+		};
+		eq(await sourceFor(LINXUP_LIVE), "linxup", "§9.1 a Linxup device's fix is served as 'linxup'");
+		eq(await sourceFor(RM_356), "routemate", "§9.2 a Routemate device's fix stays 'routemate'");
+		eq(await sourceFor(ODD_SOURCE), "eld", "§9.3 a provider the label does not know is served as 'eld', never guessed");
+		const code = routeBody("get", route).replace(/^\s*\/\/.*$/gm, "");
+		ok(/source: eldFeedHealth\.deviceProvider\(rm\) \|\| "eld",/.test(code), "§9.4 the same rule as §7.4, not a copy");
 	}
 
 	console.log(`\n${pass} passed, ${failures.length} failed`);
