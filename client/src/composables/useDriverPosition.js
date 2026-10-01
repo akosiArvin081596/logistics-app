@@ -34,6 +34,7 @@
  */
 import { ref, computed } from 'vue'
 import { useApi } from './useApi'
+import { normDriver } from '../lib/driverName'
 
 // A fix older than this is not good enough to steer by. 15 s at 65 mph is
 // ~440 m — already past most city maneuvers, so anything staler must fall back
@@ -276,12 +277,12 @@ async function refreshEld() {
     // untouched on the way past — nulling it here would discard a good fix if
     // the legacy call then failed too.
   }
-  if (!name) return
+  const dn = normDriver(name)
+  if (!dn) return
   try {
     const data = await api.get('/api/locations/latest')
-    const dn = name.toLowerCase()
     const l = (data?.locations || []).find(
-      (x) => (x.driver || '').toLowerCase() === dn && x.latitude != null,
+      (x) => normDriver(x.driver) === dn && x.latitude != null,
     )
     const fix = normalizeFix(l, 'routemate')
     if (fix) {

@@ -253,6 +253,7 @@ import DriverRouteMap from '../driver/DriverRouteMap.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import InvoiceDraftPreviewModal from './InvoiceDraftPreviewModal.vue'
 import { needsReview, countNeedsReview } from '../../lib/loadReview'
+import { normDriver } from '../../lib/driverName'
 import { fmtSheetMoment, sheetSortKey, fmtTimestamp } from '@/utils/datetime'
 
 const api = useApi()
@@ -275,10 +276,9 @@ const driverFilter = ref('') // normalised driver key, '' = all
 const fromDate = ref('')     // 'YYYY-MM-DD' from <input type="date">
 const toDate = ref('')
 const driverCol = computed(() => props.headers.find(h => /driver/i.test(h)) || '')
-// The server's own key rule: trim → lowercase → collapse internal whitespace.
-// Without the collapse, sheet drift renders "Rodney Brown" and "Rodney  Brown"
+// Drivers are keyed through normDriver(), the server's own rule. Without its
+// whitespace collapse, sheet drift renders "Rodney Brown" and "Rodney  Brown"
 // as two separate drivers, each holding half the history.
-const normDriver = (s) => (s || '').toString().trim().toLowerCase().replace(/\s+/g, ' ')
 // Distinct drivers present in the completed loads, keyed on the normalised form
 // and labelled with the first spelling seen (original casing preserved).
 const driverOptions = computed(() => {
