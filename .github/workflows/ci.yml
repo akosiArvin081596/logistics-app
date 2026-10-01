@@ -112,7 +112,7 @@ jobs:
           # fired on every run and CI was red 100% of the time. A tripwire that
           # always fires is indistinguishable from a broken build.
           if cat .github/workflows/*.yml | sed 's/#.*$//' | grep -q 'test-suite'; then
-            echo "::error::A workflow invokes the root HTTP suite. That harness WRITES (test 46 logs an expense), defaults to port 3000 which is PRODUCTION on the VPS, and with no SPREADSHEET_ID override writes to the live Dispatch Management sheet. See CLAUDE.md."
+            echo "::error::A workflow invokes the root HTTP suite. That harness WRITES (test 46 logs an expense), defaults to port 3000 which is PRODUCTION on the VPS, and with no SPREADSHEET_ID override writes to the live Dispatch Management sheet. See README.md, Tests."
             exit 1
           fi
           echo "ok: no workflow invokes the root HTTP suite"

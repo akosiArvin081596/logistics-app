@@ -67,9 +67,38 @@ attachments/
 *.bak2
 scripts/.wf-backup-*.json
 
-# Claude
+# AI coding-assistant files — instructions, memory, settings, chat exports.
+# Local only, never committed. App code that CALLS an AI service (the Gemini
+# OCR modules, the n8n agent patch scripts) is product code and stays tracked.
+# Claude Code
 .claude/
 .claude*
+CLAUDE.md
+CLAUDE.local.md
+docs/claude/
+claude-*.md
+.mcp.json
+# Other assistants (Codex, Gemini, Cursor, Windsurf, Copilot, Aider, Continue,
+# Cline, Roo, Kiro, Junie, SpecStory, Codeium)
+AGENTS.md
+GEMINI.md
+.gemini/
+.cursor/
+.cursorrules
+.windsurf/
+.windsurfrules
+.github/copilot-instructions.md
+.github/instructions/
+.github/prompts/
+.aider*
+.continue/
+.codex/
+.clinerules
+.roo/
+.kiro/
+.junie/
+.specstory/
+.codeium/
 
 # Personal daily-timeline / invoice artifacts (billing records, not code)
 docs/*timeline*.docx

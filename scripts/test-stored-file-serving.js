@@ -940,7 +940,7 @@ function kindSection() {
 	// (200, index.html) rather than a 404, so the absence is pinned in source.
 	ok(!SRC.includes("/api/trucks/:id/driver-files") && !/\bdriverFilesLimiter\b/.test(SRC),
 		"§8 GET /api/trucks/:id/driver-files and driverFilesLimiter are gone from server.js");
-	for (const doc of ["docs/claude/backend-server.md", "docs/manual/technical/01-backend.md"]) {
+	for (const doc of ["docs/manual/technical/01-backend.md"]) {
 		const rows = fs.readFileSync(path.join(__dirname, "..", doc), "utf8").split("\n").filter((l) => l.startsWith("|") && /driver-files|driverFilesLimiter/.test(l));
 		ok(rows.length === 0, `§8 ${doc} has no table row for the driver-files route or its limiter (got ${JSON.stringify(rows)})`);
 	}
