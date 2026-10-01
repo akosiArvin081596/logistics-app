@@ -66,88 +66,107 @@
         </tr>
       </thead>
       <tbody>
-        <tr v-for="truck in trucks" :key="truck.id" class="clickable-row" @click="viewTruck = truck">
-          <td class="unit-number">{{ truck.UnitNumber }}</td>
-          <td>{{ vehicleLabel(truck) }}</td>
-          <!-- Last 6, full VIN on hover + in the row's detail modal. Same short-VIN
-               convention the investor MyTrucks table already uses, and it is what
-               actually pays for the Tank column: the full 17 chars are worth
-               ~76px in a grid already ~200px past its budget at 1440. -->
-          <td class="vin-cell" :title="truck.VIN || ''">{{ shortVin(truck.VIN) }}</td>
-          <td>{{ truck.LicensePlate || '\u2014' }}</td>
-          <td>
-            <span :class="['status-badge', statusClass(truck.Status)]">{{ truck.Status }}</span>
-            <div v-if="needsFixedCostSetup(truck)" style="margin-top:0.3rem;">
+        <template v-for="truck in trucks" :key="truck.id">
+          <tr class="clickable-row" @click="viewTruck = truck">
+            <td class="unit-number">{{ truck.UnitNumber }}</td>
+            <td>{{ vehicleLabel(truck) }}</td>
+            <!-- Last 6, full VIN on hover + in the row's detail modal. Same short-VIN
+                 convention the investor MyTrucks table already uses, and it is what
+                 actually pays for the Tank column: the full 17 chars are worth
+                 ~76px in a grid already ~200px past its budget at 1440. -->
+            <td class="vin-cell" :title="truck.VIN || ''">{{ shortVin(truck.VIN) }}</td>
+            <td>{{ truck.LicensePlate || '\u2014' }}</td>
+            <td>
+              <span :class="['status-badge', statusClass(truck.Status)]">{{ truck.Status }}</span>
+              <div v-if="needsFixedCostSetup(truck)" style="margin-top:0.3rem;">
+                <span
+                  class="cost-warning-badge"
+                  :title="fixedCostSetupHint"
+                >No fixed costs configured</span>
+              </div>
+            </td>
+            <td :style="{ color: truck.AssignedDriver ? 'var(--text)' : 'var(--text-dim)' }">
+              {{ truck.AssignedDriver || '\u2014' }}
+            </td>
+            <td class="mono">
+              <span v-if="truck.DriverPayDaily > 0">${{ truck.DriverPayDaily }}/day</span>
+              <span v-else class="pay-default" title="No custom rate set; pay calculations use the $250/day default">$250/day default</span>
+            </td>
+            <td class="mono">
+              <span v-if="tankGallons(truck)">{{ tankGallons(truck) }} gal</span>
               <span
-                class="cost-warning-badge"
-                :title="fixedCostSetupHint"
-              >No fixed costs configured</span>
-            </div>
-          </td>
-          <td :style="{ color: truck.AssignedDriver ? 'var(--text)' : 'var(--text-dim)' }">
-            {{ truck.AssignedDriver || '\u2014' }}
-          </td>
-          <td class="mono">
-            <span v-if="truck.DriverPayDaily > 0">${{ truck.DriverPayDaily }}/day</span>
-            <span v-else class="pay-default" title="No custom rate set; pay calculations use the $250/day default">$250/day default</span>
-          </td>
-          <td class="mono">
-            <span v-if="tankGallons(truck)">{{ tankGallons(truck) }} gal</span>
-            <span
-              v-else
-              class="tank-default"
-              title="No tank size recorded — the fuel-range estimate falls back to 200 gal, which overstates a driver's remaining miles on any smaller tank. Set the real capacity via Edit → Fuel Tank, MPG &amp; Business Configuration."
-            >200 gal (default)</span>
-          </td>
-          <td class="mono">{{ truck.LoadCount ?? 0 }}</td>
-          <td>
-            <span
-              v-if="truck.RoutemateVehicleId"
-              class="rm-linked"
-              :title="linkedTitle(truck)"
-            ><span :class="['rm-dot', { 'rm-dot-silent': truck.EldSilent }]"></span>Linked</span>
-            <button
-              v-else-if="canEdit"
-              class="btn-link-rm"
-              @click.stop="openLinkModal(truck)"
-            >Link</button>
-            <span v-else class="rm-unlinked">&mdash;</span>
-            <button
-              v-if="truck.RoutemateVehicleId && canEdit"
-              class="btn-unlink-rm"
-              title="Clear the Routemate device link"
-              :aria-label="`Unlink the ELD device from ${truck.UnitNumber || 'this truck'}`"
-              @click.stop="handleUnlink(truck)"
-            >&times;</button>
-            <!-- A link to a device that has stopped reporting looks exactly like
-                 a working one without this: the chip below says how long it has
-                 been quiet, and Change re-points the link without unlinking
-                 first. The server decides "silent" (EldSilent); nothing here
-                 re-derives the threshold. -->
-            <div v-if="truck.RoutemateVehicleId && (truck.EldSilent || canEdit)" class="rm-cell-extra">
+                v-else
+                class="tank-default"
+                title="No tank size recorded — the fuel-range estimate falls back to 200 gal, which overstates a driver's remaining miles on any smaller tank. Set the real capacity via Edit → Fuel Tank, MPG &amp; Business Configuration."
+              >200 gal (default)</span>
+            </td>
+            <td class="mono">{{ truck.LoadCount ?? 0 }}</td>
+            <td>
               <span
-                v-if="truck.EldSilent"
-                class="rm-silent-badge"
-                :title="silentTitle(truck.EldLastFixMs)"
-              >{{ silentChipText(truck.EldLastFixMs) }}</span>
+                v-if="truck.RoutemateVehicleId"
+                class="rm-linked"
+                :title="linkedTitle(truck)"
+              ><span :class="['rm-dot', { 'rm-dot-silent': truck.EldSilent }]"></span>Linked</span>
               <button
-                v-if="canEdit"
-                class="btn-change-rm"
-                :aria-label="`Change the ELD device linked to ${truck.UnitNumber || 'this truck'}`"
+                v-else-if="canEdit"
+                class="btn-link-rm"
                 @click.stop="openLinkModal(truck)"
-              >Change</button>
-            </div>
-          </td>
-          <td v-if="showOwner" :style="{ color: truck.OwnerId ? 'var(--text)' : 'var(--text-dim)' }">
-            {{ ownerName(truck.OwnerId) }}
-          </td>
-          <td v-if="canEdit" style="text-align: right;">
-            <div class="action-btns">
-              <button class="btn-edit" @click.stop="openEdit(truck)">Edit</button>
-              <button class="btn-remove" @click.stop="confirmDelete(truck)">Remove</button>
-            </div>
-          </td>
-        </tr>
+              >Link</button>
+              <span v-else class="rm-unlinked">&mdash;</span>
+              <button
+                v-if="truck.RoutemateVehicleId && canEdit"
+                class="btn-unlink-rm"
+                title="Clear the Routemate device link"
+                :aria-label="`Unlink the ELD device from ${truck.UnitNumber || 'this truck'}`"
+                @click.stop="handleUnlink(truck)"
+              >&times;</button>
+              <!-- A link to a device that has stopped reporting looks exactly like
+                   a working one without this: the chip below says how long it has
+                   been quiet, and Change re-points the link without unlinking
+                   first. The server decides "silent" (EldSilent); nothing here
+                   re-derives the threshold. -->
+              <div v-if="truck.RoutemateVehicleId && (truck.EldSilent || canEdit)" class="rm-cell-extra">
+                <span
+                  v-if="truck.EldSilent"
+                  class="rm-silent-badge"
+                  :title="silentTitle(truck.EldLastFixMs)"
+                >{{ silentChipText(truck.EldLastFixMs) }}</span>
+                <button
+                  v-if="canEdit"
+                  class="btn-change-rm"
+                  :aria-label="`Change the ELD device linked to ${truck.UnitNumber || 'this truck'}`"
+                  @click.stop="openLinkModal(truck)"
+                >Change</button>
+              </div>
+            </td>
+            <td v-if="showOwner" :style="{ color: truck.OwnerId ? 'var(--text)' : 'var(--text-dim)' }">
+              {{ ownerName(truck.OwnerId) }}
+            </td>
+            <td v-if="canEdit" style="text-align: right;">
+              <div class="action-btns">
+                <button class="btn-edit" @click.stop="openEdit(truck)">Edit</button>
+                <button class="btn-remove" @click.stop="confirmDelete(truck)">Remove</button>
+              </div>
+            </td>
+          </tr>
+          <!-- A refused unlink (409 PERIOD_FINALIZED when a finalized month
+               carries this truck's loads, or any other failure) in the server's
+               own words, directly under the row whose × was clicked. It used to
+               reach only the console, so the × looked like it did nothing. -->
+          <tr v-if="unlinkError && unlinkError.truckId === truck.id" class="rm-error-row">
+            <td :colspan="columnCount">
+              <div class="rm-pick-error rm-unlink-error" role="alert">
+                <span>{{ unlinkError.message }}</span>
+                <button
+                  type="button"
+                  class="rm-error-dismiss"
+                  aria-label="Dismiss this message"
+                  @click="unlinkError = null"
+                >&times;</button>
+              </div>
+            </td>
+          </tr>
+        </template>
       </tbody>
     </table>
 
@@ -167,7 +186,7 @@
           <div v-if="repointing" class="rm-current">
             <div class="rm-current-label">Current device</div>
             <div class="rm-pick-line1">
-              <span class="rm-pick-id">{{ linkTruck.RoutemateVehicleId }}</span>
+              <span class="rm-pick-id">{{ eldVehicleNumber(linkTruck) || linkTruck.RoutemateVehicleId }}</span>
               <span
                 v-if="providerLabel(linkTruck.EldProvider)"
                 :class="['rm-provider', providerClass(linkTruck.EldProvider)]"
@@ -980,6 +999,13 @@ function providerClass(p) {
   return PROVIDER_LABELS[key] ? `rm-provider-${key}` : ''
 }
 
+// The linked device's vehicle number as the provider knows it ("356"), the same
+// name the pick list leads with; '' when it has none, and callers fall back to
+// the device id.
+function eldVehicleNumber(truck) {
+  return String(truck?.EldVehicleNumber || '').trim()
+}
+
 // The device's last GPS fix (epoch ms) as an ISO-Z instant, so the datetime
 // helpers render it in Houston time; '' when there is none.
 function fixIso(ms) {
@@ -1017,8 +1043,9 @@ function silentTitle(ms) {
 // when the row renders, and a page left open for hours would otherwise go on
 // showing an age that has stopped counting.
 function linkedTitle(truck) {
-  const label = providerLabel(truck.EldProvider)
-  const device = `${label ? `${label} device` : 'ELD device'} ${truck.RoutemateVehicleId}`
+  const label = providerLabel(truck.EldProvider) || 'ELD'
+  const number = eldVehicleNumber(truck)
+  const device = number ? `${label} vehicle ${number}` : `${label} device ${truck.RoutemateVehicleId}`
   const iso = fixIso(truck.EldLastFixMs)
   if (iso) return `${device} — last GPS fix ${fixAge(truck.EldLastFixMs)} ago (${fmtTimestamp(iso)})`
   return truck.EldSilent ? `${device} — has never sent a GPS fix` : device
@@ -1037,6 +1064,9 @@ const noVinData = computed(() =>
 )
 
 async function openLinkModal(truck) {
+  // The dialog reports its own refusals; a stale unlink message would only
+  // outlive whatever this dialog changes.
+  unlinkError.value = null
   linkTruck.value = truck
   pickedRoutemateId.value = ''
   suggestedId.value = ''
@@ -1137,13 +1167,23 @@ function handleLinkAnyway() {
   return submitLink({ ...silentPrompt.value.body, confirmSilent: true })
 }
 
+// A refused unlink, shown in a row under its truck: { truckId, message }.
+const unlinkError = ref(null)
+
+// Every column the header renders, so the error row spans the whole table.
+const columnCount = computed(() => 10 + (props.showOwner ? 1 : 0) + (props.canEdit ? 1 : 0))
+
 async function handleUnlink(truck) {
   // No confirm modal — unlink is reversible (admin can re-link any time).
+  unlinkError.value = null
   try {
     await api.del(`/api/trucks/${truck.id}/link-routemate`)
     emit('linkage-changed', { id: truck.id })
   } catch (err) {
-    console.error('Routemate unlink failed:', err)
+    unlinkError.value = {
+      truckId: truck.id,
+      message: err?.message || `Could not unlink the ELD device from ${truck.UnitNumber || 'this truck'}.`,
+    }
   }
 }
 </script>
@@ -1430,6 +1470,21 @@ async function handleUnlink(truck) {
   background: #fef2f2; color: #991b1b;
   border: 1px solid #fecaca; border-radius: 6px; margin-bottom: 0.75rem;
 }
+/* A refused unlink, in the row under its truck: the .rm-pick-error callout,
+   with room for a dismiss button. */
+.truck-table tbody tr.rm-error-row:hover { background: transparent; }
+.rm-error-row td { padding-top: 0; }
+.rm-unlink-error {
+  display: flex; align-items: flex-start; gap: 0.5rem;
+  margin-bottom: 0; line-height: 1.4; overflow-wrap: anywhere;
+}
+.rm-unlink-error > span { flex: 1; min-width: 0; }
+.rm-error-dismiss {
+  flex: none; width: 20px; height: 20px; padding: 0; line-height: 1;
+  border: 1px solid #fecaca; border-radius: 50%; background: #fff;
+  color: #991b1b; font-size: 0.85rem; cursor: pointer;
+}
+.rm-error-dismiss:hover { background: #fee2e2; }
 /* Auto-match feedback sits under its own button, not in the picker's slot, so
    the device list stays on screen when auto-match fails. */
 .rm-auto-error {
