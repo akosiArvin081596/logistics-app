@@ -483,6 +483,7 @@ import DriverRouteMap from '../driver/DriverRouteMap.vue'
 import LoadHaulSection from './LoadHaulSection.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import { needsReview, countNeedsReview } from '../../lib/loadReview'
+import { normDriver } from '../../lib/driverName'
 import { fmtTimestamp } from '../../utils/datetime'
 
 import { useAuthStore } from '../../stores/auth'
@@ -675,7 +676,7 @@ function formatPingAge(ms) {
   const h = Math.round(m / 60)
   return `${h}h`
 }
-function isBusy(d) { return props.busyDrivers.includes((d || '').trim().toLowerCase().replace(/\s+/g, ' ')) }
+function isBusy(d) { return props.busyDrivers.includes(normDriver(d)) }
 // Per Deshorn King (client request): a dispatcher can queue a load onto a driver
 // who's already busy — the new load sits behind their active work and starts
 // when they finish. Mirrors JobBoardTab's queue-confirm flow. We only have the
@@ -683,11 +684,10 @@ function isBusy(d) { return props.busyDrivers.includes((d || '').trim().toLowerC
 const pendingReassign = ref(null)
 function confirmReassign(j) {
   const d = reassignSelections[j._rowIndex]; if (!d) return
-  const norm = s => (s || '').trim().toLowerCase().replace(/\s+/g, ' ')
   // Reassigning onto a different, already-busy driver queues the load instead of
   // replacing their active one — confirm before posting. Skip when the target is
   // the driver already on this load (a no-op move shouldn't open the modal).
-  if (norm(d) !== norm(getCurrentDriver(j)) && isBusy(d)) {
+  if (normDriver(d) !== normDriver(getCurrentDriver(j)) && isBusy(d)) {
     pendingReassign.value = { job: j, driver: d }; return
   }
   if (confirm(`Reassign to ${d}?`)) { emit('reassign', { rowIndex: j._rowIndex, newDriver: d, job: j }); reassignSelections[j._rowIndex] = '' }
@@ -889,8 +889,7 @@ async function openDetail(job) {
   const p = []
   // The panel names each driver by the directory's spelling, the sheet's Driver
   // cell may space or case it otherwise: both are compared as the server's
-  // normalizeDriverName() does.
-  const normDriver = s => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ')
+  // normalizeDriverName() does (normDriver()).
   if (dn) p.push(api.get('/api/locations/latest').then(d => { const l = (d.locations||[]).find(x => normDriver(x.driver) === normDriver(dn) && x.latitude); if (l) selectedDriverPosition.value = { latitude: l.latitude, longitude: l.longitude, source: l.source || '', lastPingAge: l.lastPingAge != null ? l.lastPingAge : null } }).catch(() => {}))
   if (lid) p.push(api.get(`/api/documents/${encodeURIComponent(lid)}`).then(r => { loadDocs.value = r.documents || [] }).catch(() => {}))
   if (lid) p.push(api.get(`/api/load-ratings/${encodeURIComponent(lid)}`).then(r => { loadRating.value = r.rating || 0 }).catch(() => {}))
