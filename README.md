@@ -6,10 +6,6 @@ fuel, invoicing, driver/investor onboarding, and an investor payout ledger.
 
 Runs in production at **app.logisx.com**.
 
-> **Working on this codebase?** Read [`CLAUDE.md`](CLAUDE.md) first — it is the
-> real documentation, and it leads with the hazards that are expensive to
-> rediscover. The long-form reasoning lives in [`docs/claude/`](docs/claude/).
-
 ## Stack
 
 | Layer | What |
@@ -71,9 +67,23 @@ npm run ci         # check + test:unit + build:client — the same gate CI runs
 runners it found and names each one, so no count is kept here.
 
 `test-suite.js` at the repo root is a **separate, manual** HTTP harness. It needs
-a running server, it **writes**, and it is deliberately excluded from CI — see
-[`docs/claude/testing.md`](docs/claude/testing.md) for its fixture and
-sheet-override procedure before running it.
+a running server, it **writes** (it logs an expense, among other things), and it
+is deliberately excluded from CI. Before running it:
+
+- **Point the server at a non-production sheet.** Start it with an explicit
+  `SPREADSHEET_ID` for a copy — without one it writes to the live book (see
+  Configuration above).
+- **Mind the port.** The suite defaults to `3000`, which is production on the
+  VPS; set `TEST_PORT` (and the server's `PORT`) to run anywhere else.
+- **Prepare fixtures first** with `node scripts/prepare-test-fixtures.js --yes-local-db`
+  (local database only). It sets a test password on one account per role and
+  prints the `test-suite.js` command with those usernames filled in; without
+  it nearly every test fails at login.
+- **Don't run it twice inside 15 minutes** — it exhausts its own rate limiters,
+  and the second run's 429s look like regressions.
+
+Browser end-to-end tests (Playwright, local and staging) live in
+[`scripts/e2e/`](scripts/e2e/README.md) — also outside CI.
 
 ## CI/CD
 
@@ -90,7 +100,5 @@ Setup, the safety reasoning, and the rollback design: [`.github/workflows/README
 
 ## Docs
 
-- [`CLAUDE.md`](CLAUDE.md) — architecture, conventions, and the hazards
-- [`docs/claude/`](docs/claude/) — long-form reasoning per subsystem
 - [`docs/manual/`](docs/manual/) — user guides and technical documentation
   (the markdown source for the PDFs in [`docs/pdf/`](docs/pdf/))

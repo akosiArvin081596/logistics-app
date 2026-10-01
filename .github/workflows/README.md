@@ -50,7 +50,7 @@ grep 76.13.22.110 ~/.ssh/known_hosts | ssh-keygen -lf -
 
 ### 3. `VPS_HOST` → `76.13.22.110`  ·  4. `VPS_USER` → `root`
 
-Both already appear in this repo's `CLAUDE.md` and it is public, so these are secrets for tidiness, not concealment. Keeping them out of the workflow file means moving the box later is a settings change, not a commit.
+Both are already in this public repo's history, so these are secrets for tidiness, not concealment. Keeping them out of the workflow file means moving the box later is a settings change, not a commit.
 
 ### 5. Environments
 
@@ -124,7 +124,7 @@ The box checks that SHA out detached, rebuilds and restarts. It also writes main
 
 **`test-suite.js`.** It needs a live server, it **writes** (test 46 logs an expense), it defaults to **port 3000 — production on the VPS** — and with no `SPREADSHEET_ID` override `server.js` falls through to the **live Dispatch Management sheet**. Running it from CI would write to the client's real books.
 
-A step in `ci.yml` greps the workflows and fails the build if anything ever invokes it. It stays a manual, deliberate, local-only harness — see [`docs/claude/testing.md`](../../docs/claude/testing.md) for the fixture and sheet-override procedure.
+A step in `ci.yml` greps the workflows and fails the build if anything ever invokes it. It stays a manual, deliberate, local-only harness — see the Tests section of the root [`README.md`](../../README.md#tests) for the fixture and sheet-override procedure.
 
 **And one runner is skipped on CI: `scripts/test-pdf-cold-start.js`.** It deliberately induces an event-loop stall and asserts that the PDF renderer's retry caught it — which is a race by construction. Measured on an 8-core Mac it passes **6/6 idle but only 3/6 at load average ~11**, and a GitHub-hosted runner is **two shared cores**. Left in, CI would be red a third of the time for reasons unrelated to the change under review, and a pipeline nobody trusts is worse than none.
 
