@@ -6239,6 +6239,21 @@ function rateconRetryBudgetRelease() {
 	if (rateconRetryInFlight > 0) rateconRetryInFlight--;
 }
 
+// What normalizeRateConFields() anchors the two appointment years to: the time of
+// ingestion, with the PDF's own /CreationDate and /ModDate as the only reason to
+// keep a printed year far from it (anchorAppointmentYear() in
+// lib/ratecon-normalize.js). Both ingestion paths call this, once per request, so
+// a first pass and its retry are anchored to the same moment.
+function rateConNormalizeOptions(base64) {
+	let documentDates = [];
+	try {
+		documentDates = rateconNormalize.pdfDocumentDates(Buffer.from(base64, "base64"));
+	} catch (_e) {
+		// no dates of its own: the printed year must sit near the time of ingestion
+	}
+	return { now: Date.now(), documentDates };
+}
+
 app.post("/api/n8n/extract-pdf-via-gemini", pdfOcrLimiter, async (req, res) => {
 	// Accepts EITHER the shared n8n secret OR an extract-only secret.
 	//
@@ -6291,7 +6306,8 @@ app.post("/api/n8n/extract-pdf-via-gemini", pdfOcrLimiter, async (req, res) => {
 			// that recovers a drop-off address the first pass missed — the exact
 			// failure behind load 550303758 — and the unattended path, which has no
 			// dispatcher looking at a review modal, was the half that did not have it.
-			let fields = rateconNormalize.normalizeRateConFields(await runRateConGemini(base64));
+			const normalizeOpts = rateConNormalizeOptions(base64);
+			let fields = rateconNormalize.normalizeRateConFields(await runRateConGemini(base64), normalizeOpts);
 
 			// ⚠️ BUDGETED, unlike the drag-and-drop route's identical retry. The
 			// caller is n8n's `Extract via LogisX` node with a hard 120 s timeout, and
@@ -6324,7 +6340,7 @@ app.post("/api/n8n/extract-pdf-via-gemini", pdfOcrLimiter, async (req, res) => {
 				let budgetTimer = null;
 				try {
 					const retry = await Promise.race([
-						runRateConGemini(base64).then(rateconNormalize.normalizeRateConFields),
+						runRateConGemini(base64).then((f) => rateconNormalize.normalizeRateConFields(f, normalizeOpts)),
 						new Promise((_r, reject) => {
 							budgetTimer = setTimeout(() => reject(new Error("retry_budget_exhausted")), remainingMs);
 						}),
@@ -40149,13 +40165,14 @@ app.post("/api/loads/ratecon/extract", requireRole("Super Admin", "Dispatcher"),
 			// Normalize Gemini's raw output (money → "$X,XXX.XX", multi-line addresses
 			// collapsed, phones tidied, "None"/"" → null) so warnings run on clean data
 			// and the review modal shows consistent values across broker layouts.
-			let fields = rateconNormalize.normalizeRateConFields(await runRateConGemini(base64));
+			const normalizeOpts = rateConNormalizeOptions(base64);
+			let fields = rateconNormalize.normalizeRateConFields(await runRateConGemini(base64), normalizeOpts);
 			// Second-pass nudge: if a critical field (Load #, Rate, pickup/drop address)
 			// is still missing, re-run once and fill the gaps — some broker formats need
 			// a second look. One extra Gemini call, only when something important is blank.
 			if (rateconNormalize.missingCriticalFields(fields).length) {
 				try {
-					const retry = rateconNormalize.normalizeRateConFields(await runRateConGemini(base64));
+					const retry = rateconNormalize.normalizeRateConFields(await runRateConGemini(base64), normalizeOpts);
 					fields = rateconNormalize.mergeExtractions(fields, retry);
 				} catch { /* keep the first-pass fields if the retry fails */ }
 			}
