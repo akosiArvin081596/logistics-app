@@ -301,6 +301,8 @@ function ledgerWorld(srv, { reconcile = (s) => s, fixture = LEDGER_FIXTURE } = {
 		// The close's own mechanics (the fingerprint, an unreadable lock table) are
 		// test-closed-month-no-write.js's; here the lock table always reads.
 		periodLocksReadable: () => true, closingFingerprint: () => "",
+		// Financials' frozen line items are test-financials-ledger-parity.js's.
+		closingLedgerItems: async () => new Map(), writeLedgerFreeze: () => {},
 		insertDispatchNotification: { run() {} },
 		console: { warn() {}, log() {}, error() {} },
 	};
@@ -341,12 +343,19 @@ const LEASE_2000 = { type: "lease", leaseAmountCents: 200000, details: "" };
 		const ctx = liftFunction("payoutBasisContext");
 		ok(/enabled: INVESTOR_LEASE_PAYOUTS_ENABLED,/.test(ctx) && !/if \(!INVESTOR_LEASE_PAYOUTS_ENABLED/.test(ctx),
 			"§1 payoutBasisContext() carries the flag; the one gate is the module's");
-		const cimeAt = SRC.indexOf("\nasync function computeInvestorMonthlyEarnings(");
-		const cime = stripComments(SRC.slice(cimeAt, SRC.indexOf("\n}\n", cimeAt)));
+		// The payout ledger is computeInvestorMonthlyEarnings() with the facts it
+		// gathers (gatherLedgerScopeFacts()) and the month math it runs
+		// (lib/financials-calc.js, which takes the idle-month predicate as a fact).
+		const sliceFn = (head) => { const at = SRC.indexOf(head); return stripComments(SRC.slice(at, SRC.indexOf("\n}\n", at))); };
+		const cime = sliceFn("\nasync function computeInvestorMonthlyEarnings(") + "\n" + sliceFn("\nasync function gatherLedgerScopeFacts(");
+		const calcSrc = stripComments(fs.readFileSync(path.join(__dirname, "..", "lib", "financials-calc.js"), "utf8"));
+		ok(/isZeroActivityMonth: investorPayoutBasis\.isZeroActivityMonth,/.test(cime) && /const isZeroActivity = isZeroActivityMonth\(\{/.test(calcSrc),
+			"§1 the ledger judges an idle month with the shared isZeroActivityMonth() (handed to lib/financials-calc.js)");
+		ok(!/investor_payout_basis|Math\.round\(netProfit \* /.test(calcSrc), "§1 lib/financials-calc.js reads no basis and applies no split");
 		const investorRoute = stripComments(liftRoute('app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res) => {'));
 		for (const [label, src] of [["computeInvestorMonthlyEarnings()", cime], ["GET /api/investor", investorRoute]]) {
 			ok(/payoutBasisContext\(investorOwnerId\)/.test(src) && !/investor_payout_basis/.test(src), `§1 ${label} reads the basis through payoutBasisContext() alone`);
-			ok(/investorPayoutBasis\.settleInvestorMonths\(months, /.test(src) && /investorPayoutBasis\.firstPayoutMonth\(/.test(src) && /investorPayoutBasis\.isZeroActivityMonth\(/.test(src),
+			ok(/investorPayoutBasis\.settleInvestorMonths\(months, /.test(src) && /investorPayoutBasis\.firstPayoutMonth\(/.test(src) && /investorPayoutBasis\.isZeroActivityMonth\b/.test(src),
 				`§1 ${label} settles, starts its months and judges an idle month with the shared functions`);
 			ok(!/Math\.round\(netProfit \* /.test(src), `§1 ${label} applies no split of its own`);
 		}

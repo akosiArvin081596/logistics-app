@@ -79,6 +79,7 @@ const fuelModel = require("../lib/fuel-model");
 const { normalizeLoadId } = require("../lib/ratecon-load");
 const investorReportOptions = require("../lib/investor-report-options");
 const investorPayoutBasis = require("../lib/investor-payout-basis");
+const financialsCalc = require(path.join(__dirname, "..", "lib", "financials-calc.js"));
 const eldFeedHealth = require("../lib/eld-feed-health");
 // The per-load miles index both handlers read (scripts/test-load-miles.js covers it).
 const loadMilesLib = require("../lib/load-miles");
@@ -120,7 +121,7 @@ function liftDecl(src, kind, name) {
 	return src.slice(start, end);
 }
 
-const CONSTS = ["EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS",
+const CONSTS = ["LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS",
 	"BROKER_WITHHELD_RE", "MOVEMENT_MOVING_MPS", "MOVEMENT_ACTIVE_MS",
 	// The fuel-gallons recovery's thresholds (§3b).
 	"FUEL_EVENTS_MATCH_DAYS", "FUEL_MATCH_MIN_GAL_PER_100PCT", "FUEL_MATCH_MAX_GAL_PER_100PCT", "FUEL_MATCH_MIN_GALLONS",
@@ -133,6 +134,10 @@ const FNS = [
 	"normalizeDriverName", "isBuiltInPropertyName", "driverNameForTotals",
 	"getDriverPayStructures", "getAllExcludedDriverDays", "expenseDriverKey", "foldExpenseTotalsByDriver",
 	"getDeductibleExpensesByDriverMonth", "computeDriverQueues", "computeInvestorMonthlyEarnings",
+	"gatherLedgerScopeFacts", "ledgerLoadRows",
+	// Financials' books (GET /api/financials reads them).
+	"buildFinancialsLedger", "computeFleetLedger", "settledMonthItems", "ambiguousBlankOwnerLoads", "buildHeldTruckIndex", "buildHaulTruckResolver", "frozenPeriodSet", "settledPayoutRows", "ledgerItemFromRow",
+	"listSettlableInvestors",
 	// What the totals call, shipped as is.
 	"findCol", "pickAddressColumn", "loadKeySet", "excludeDroppedLoads", "liveJobTrackingView", "moneySheetDate",
 	"houstonDay", "getWeekRange", "resolveDailyRate", "resolveInvestorSplitPct", "resolvePreviewUser",
@@ -296,6 +301,10 @@ const DDL = `
 	CREATE TABLE load_responses (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT, driver_name TEXT, response TEXT, responded_at TEXT);
 	CREATE TABLE notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT, type TEXT, metadata TEXT, created_at TEXT);
 	CREATE TABLE load_ratings (load_id TEXT PRIMARY KEY, driver_name TEXT, rating INTEGER, rated_by INTEGER, updated_at TEXT);
+	CREATE TABLE investor_payouts (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id INTEGER, period TEXT, amount REAL, finalized_breakdown TEXT DEFAULT '');
+	CREATE TABLE period_locks (period TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'locked', finalized_at TEXT DEFAULT '');
+	CREATE TABLE financials_ledger_freezes (freeze_id TEXT PRIMARY KEY, period TEXT, source TEXT, frozen_at TEXT, frozen_by TEXT DEFAULT 'system', item_count INTEGER DEFAULT 0, summary TEXT DEFAULT '', settings TEXT DEFAULT '', released_at TEXT NOT NULL DEFAULT '');
+	CREATE TABLE financials_ledger_items (id INTEGER PRIMARY KEY AUTOINCREMENT, period TEXT, owner_id INTEGER, kind TEXT, adjusts TEXT DEFAULT '', day TEXT DEFAULT '', cents INTEGER, load_id TEXT DEFAULT '', driver TEXT DEFAULT '', truck TEXT DEFAULT '', expense_id INTEGER, source_id INTEGER, expense_type TEXT DEFAULT '', pay_type TEXT DEFAULT '', pickup_state TEXT DEFAULT '', delivery_state TEXT DEFAULT '', freeze_id TEXT, frozen_at TEXT);
 	CREATE TABLE routemate_telemetry (id INTEGER PRIMARY KEY AUTOINCREMENT, routemate_vehicle_id TEXT, latitude REAL, longitude REAL, speed REAL, bearing TEXT, fuel_pct REAL, location_date_ms INTEGER, dropped_reason TEXT DEFAULT '', odometer REAL DEFAULT 0, engine_hours REAL DEFAULT 0, geocoded_location TEXT DEFAULT '', source TEXT DEFAULT '');
 `;
 
@@ -443,6 +452,11 @@ function buildWorld(variant, { src = SHIPPED, twins = false } = {}) {
 		// The payout math. No basis context: every month settles on the split, as
 		// every investor did before the payout basis existed.
 		investorPayoutBasis,
+		financialsCalc,
+		// The dated truck assignments the books read for a closed month's
+		// blank-Owner-ID loads; this fixture closes no month.
+		loadHaul: require("../lib/load-haul"),
+		haulAssignmentsStmt: { all: () => [] },
 		eldFeedHealth,
 		payoutBasisContext: () => null,
 		console: { log: () => {}, warn: () => {}, error: (...a) => errors.push(a.map(String).join(" ")) },
@@ -657,7 +671,8 @@ const SURFACES = [
 				investorDriverSet: w.getInvestorDriverSet(5, carrier.data, "Driver", "Carrier Name"), detailForMonth: "2026-08",
 			});
 		}),
-		echoes: (b) => blankEchoes(b.detail && b.detail.tripExpenseItems, "driver"),
+		// The receipt line items echo the receipt's Driver text, like the drill-down's.
+		echoes: (b) => { blankEchoes(b.detail && b.detail.tripExpenseItems, "driver"); blankEchoes((b.items || []).filter((i) => i.kind === "trip"), "driver"); },
 		own: (b) => [b.detail.driverPayRows, b.monthlyEarnings.map((m) => [m.month, m.exact.driverPay])],
 	},
 	{
@@ -666,7 +681,8 @@ const SURFACES = [
 			user: { ...SUPER }, isSuperAdmin: true, investorOwnerId: null, config: { investor_split_pct: "50" },
 			investorDriverSet: null, detailForMonth: "2026-07",
 		})),
-		echoes: (b) => blankEchoes(b.detail && b.detail.tripExpenseItems, "driver"),
+		// The receipt line items echo the receipt's Driver text, like the drill-down's.
+		echoes: (b) => { blankEchoes(b.detail && b.detail.tripExpenseItems, "driver"); blankEchoes((b.items || []).filter((i) => i.kind === "trip"), "driver"); },
 		own: (b) => [b.detail.driverPayRows, b.monthlyEarnings.map((m) => [m.month, m.exact.driverPay])],
 	},
 	{
@@ -994,8 +1010,9 @@ const PINNED = [
 	["foldExpenseTotalsByDriver()", "foldExpenseTotalsByDriver", ["out"]],
 	["getDeductibleExpensesByDriverMonth()", "getDeductibleExpensesByDriverMonth", ["out"]],
 	["computeDriverQueues()", "computeDriverQueues", ["byDriver"]],
-	["computeInvestorMonthlyEarnings()", "computeInvestorMonthlyEarnings",
-		["unitToVid", "driverDaySets", "driverMonthlyDays", "driverMonthlyRevenue", "trucksByDriver"]],
+	// The payout ledger: its facts (gatherLedgerScopeFacts()) here, its month math
+	// in lib/financials-calc.js (pinned below).
+	["gatherLedgerScopeFacts()", "gatherLedgerScopeFacts", ["unitToVid", "trucksByDriver"]],
 	["GET /api/investor", ROUTES.investor,
 		["milesByLoadId", "grossByDriver", "milesByDriver", "milesByTruck", "loadsByDriver", "loadsByTruck", "revenueByTruckMonth",
 			"driverDaySets", "driverMonthlyDays", "driverMonthlyDayLoads", "driverDisplayName", "driverMonthlyRevenue", "unitToVid",
@@ -1041,6 +1058,15 @@ function battery4(src) {
 		t("§4 GET /api/investor: whether a unit was given a share is an own-property test, never `in`",
 			[/\bin alloc\b/.test(inv), inv.includes("const allocated = (u) => Object.prototype.hasOwnProperty.call(alloc, u);"),
 				(inv.match(/allocated\(unit\)/g) || []).length], [false, true, 2]);
+	}
+	{
+		const calc = fs.readFileSync(path.join(__dirname, "..", "lib", "financials-calc.js"), "utf8");
+		const names = ["driverMonthlyDays", "driverDayLoad", "driverMonthlyRevenue"];
+		t(`§4 lib/financials-calc.js computeLedgerScope(): ${names.join(", ")} — each declared Object.create(null), at every declaration`,
+			names.filter((n) => {
+				const found = declarations(calc, n);
+				return found.length === 0 || found.some((d) => !d.startsWith("Object.create(null);"));
+			}), []);
 	}
 	t("§4 routemateSyncTelemetry(): the Driver cell is read through driverNameForTotals()",
 		/const d = driverNameForTotals\(\(row\[driverCol\] \|\| ""\)\.toString\(\)\)/.test(liftFn(src, "routemateSyncTelemetry")), true);

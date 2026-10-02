@@ -63,6 +63,7 @@ const { renderPolicy, safeSignatureImage } = require("./lib/policy-renderer");
 const investorPaymentTerms = require("./lib/investor-payment-terms");
 const investorReportOptions = require("./lib/investor-report-options");
 const investorPayoutBasis = require("./lib/investor-payout-basis");
+const financialsCalc = require("./lib/financials-calc");
 const leasePayoutText = require("./lib/lease-payout-text");
 const { renderHtmlToPdf } = require("./lib/pdf-browser");
 const { getStateFromCoords } = require("./lib/ifta-states");
@@ -5260,6 +5261,62 @@ db.exec(`
 	)
 `);
 
+// The line items of a closed month, frozen when it closes (finalizePeriods) or,
+// for a month closed before this table existed, by the one-time freeze
+// (POST /api/admin/financials/freeze-closed-months). Financials reads a closed
+// month from here and never recomputes it. One row per item of
+// lib/financials-calc.js, in integer cents, every scope of the fleet: each
+// investor (owner_id) and the company (owner_id 0). kind 'settlement_adjustment'
+// is the "Settlement adjustment" line that brings an investor-month's items to
+// the figures it settled at (`adjusts` names the figure).
+//
+// freeze_id groups one freeze of one period. The triggers below allow a locked
+// period's items to be written only by the freeze that writes them all at once,
+// and never changed or removed while it is locked; reopening the month (the one
+// door) deletes them, and the next close freezes it again.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS financials_ledger_items (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		period TEXT NOT NULL,
+		owner_id INTEGER NOT NULL DEFAULT 0,
+		kind TEXT NOT NULL,
+		adjusts TEXT NOT NULL DEFAULT '',
+		day TEXT NOT NULL DEFAULT '',
+		cents INTEGER NOT NULL,
+		load_id TEXT NOT NULL DEFAULT '',
+		driver TEXT NOT NULL DEFAULT '',
+		truck TEXT NOT NULL DEFAULT '',
+		expense_id INTEGER,
+		source_id INTEGER,
+		expense_type TEXT NOT NULL DEFAULT '',
+		pay_type TEXT NOT NULL DEFAULT '',
+		pickup_state TEXT NOT NULL DEFAULT '',
+		delivery_state TEXT NOT NULL DEFAULT '',
+		freeze_id TEXT NOT NULL,
+		frozen_at TEXT NOT NULL
+	)
+`);
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_fin_ledger_items_period ON financials_ledger_items(period, owner_id)"); } catch {}
+// One row per freeze: when, by whom, how (the close or the one-time freeze), the
+// totals it wrote, and the Financials cost settings in force for the month. A
+// month is frozen while it has a row here with released_at '' (a month can be
+// frozen with no items at all); reopening the month sets released_at.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS financials_ledger_freezes (
+		freeze_id TEXT PRIMARY KEY,
+		period TEXT NOT NULL,
+		source TEXT NOT NULL,
+		frozen_at TEXT NOT NULL,
+		frozen_by TEXT NOT NULL DEFAULT 'system',
+		item_count INTEGER NOT NULL DEFAULT 0,
+		summary TEXT NOT NULL DEFAULT '',
+		settings TEXT NOT NULL DEFAULT '',
+		released_at TEXT NOT NULL DEFAULT ''
+	)
+`);
+
+try { db.exec("ALTER TABLE financials_ledger_freezes ADD COLUMN released_at TEXT NOT NULL DEFAULT ''"); } catch {}
+
 // A closed month's payout rows cannot be written by anything, at the database.
 // The route and reconcile guards stay; these triggers are the floor under them,
 // so a code path in this server that forgets its guard aborts instead of
@@ -5285,12 +5342,26 @@ db.exec(`
 function installPeriodLockTriggers(database) {
 	const locked = (periodExpr) => `EXISTS (SELECT 1 FROM main.period_locks WHERE main.period_locks.period = ${periodExpr} AND main.period_locks.status = 'locked')`;
 	const refuse = "SELECT RAISE(ABORT, 'PERIOD_FINALIZED: the month is closed; reopen it to change its figures');";
-	const names = ["investor_payouts_locked_insert", "investor_payouts_locked_update", "investor_payouts_locked_delete"];
+	const names = ["investor_payouts_locked_insert", "investor_payouts_locked_update", "investor_payouts_locked_delete",
+		"financials_ledger_items_locked_insert", "financials_ledger_items_locked_update", "financials_ledger_items_locked_delete"];
 	database.transaction(() => {
 		for (const t of names) {
 			database.exec(`DROP TRIGGER IF EXISTS main.${t}`);
 			database.exec(`DROP TRIGGER IF EXISTS temp.${t}`);
 		}
+		// Frozen items: a locked period takes items only from its one active
+		// freeze (financials_ledger_freezes), and they never change or go while it
+		// is locked.
+		database.exec(`CREATE TEMP TRIGGER financials_ledger_items_locked_insert BEFORE INSERT ON main.financials_ledger_items
+			WHEN ${locked("NEW.period")}
+				AND EXISTS (SELECT 1 FROM main.financials_ledger_freezes f WHERE f.period = NEW.period AND f.released_at = '' AND f.freeze_id != NEW.freeze_id)
+			BEGIN ${refuse} END`);
+		database.exec(`CREATE TEMP TRIGGER financials_ledger_items_locked_update BEFORE UPDATE ON main.financials_ledger_items
+			WHEN (${locked("OLD.period")} OR ${locked("NEW.period")})
+			BEGIN ${refuse} END`);
+		database.exec(`CREATE TEMP TRIGGER financials_ledger_items_locked_delete BEFORE DELETE ON main.financials_ledger_items
+			WHEN ${locked("OLD.period")}
+			BEGIN ${refuse} END`);
 		database.exec(`CREATE TEMP TRIGGER investor_payouts_locked_insert BEFORE INSERT ON main.investor_payouts
 			WHEN ${locked("NEW.period")}
 			BEGIN ${refuse} END`);
@@ -5306,7 +5377,18 @@ function installPeriodLockTriggers(database) {
 			BEGIN ${refuse} END`);
 	})();
 }
-try { installPeriodLockTriggers(db); } catch (e) { console.error("[period-close] closed-month triggers not installed:", e.message); }
+try {
+	installPeriodLockTriggers(db);
+} catch (e) {
+	// The route and reconcile guards still hold; the database floor under them
+	// is missing until the next boot installs it, so say so where it is read.
+	console.error("[period-close] closed-month triggers not installed:", e.message);
+	try {
+		insertDispatchNotification.run("period-close", "ACTION NEEDED — closed-month database guard not installed",
+			`The database triggers that refuse writes into closed months could not be installed at startup (${e.message}). The application's own checks still apply. Restart the server once the cause is fixed.`,
+			JSON.stringify({ stage: "boot", error: e.message }));
+	} catch {}
+}
 
 // --- Driver Onboarding ---
 db.exec(`
@@ -47562,6 +47644,23 @@ function buildHaulTruckResolver() {
 	return loadHaul.buildTruckAtResolver(rows, normalizeDriverName);
 }
 
+// Which truck a driver held on a day, and its owner, from the dated
+// truck_assignments (buildHaulTruckResolver()): null when no assignment covered
+// the day. Noon Central stands for the day.
+function buildHeldTruckIndex() {
+	const held = buildHaulTruckResolver();
+	const trucks = new Map(db.prepare("SELECT id, owner_id, driver_pay_daily FROM trucks").all().map((t) => [t.id, t]));
+	const truckAt = (driver, day) => {
+		if (!driver || !day) return null;
+		const h = held.forDriverAt(driver, Date.parse(`${day}T17:00:00Z`));
+		return h ? trucks.get(h.truck_id) || null : null;
+	};
+	return {
+		truckAt,
+		ownerAt(driver, day) { const t = truckAt(driver, day); return t ? (Number(t.owner_id) || 0) : null; },
+	};
+}
+
 // Load -> truck. Sheet column first, driver-at-the-time second.
 function haulResolveTruck(row, headers, resolver, atMs) {
 	if (!row) return null;
@@ -50233,37 +50332,23 @@ function truckBilledMonthCount(t, now) {
 	return Math.max(0, (ey - sy) * 12 + (em - sm) + 1);
 }
 
-// returns: { monthlyEarnings: [...], currentMonthKey }
-async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriverSet, investorOwnerId, config, detailForMonth = null }) {
-	const jobTracking = await getJobTrackingCached();
+// The ledger's Job Tracking rows for one scope, read once into the shape
+// lib/financials-calc.js takes. Investor-scoped by the Owner ID column
+// (primary) or the driver set (fallback); unscoped when investorDriverSet is
+// null (the fleet).
+//
+// ⚠️ Every date goes through the shared moneySheetDate(). A strict ISO+US-only
+// parser left inline in a money path is how this class of defect keeps coming
+// back: the next date read reaches for the nearest helper, gets a parser
+// narrower than the sheet, and silently drops or mis-dates the rows it cannot
+// read (PR #215 assigned dates, PR #237 IFTA rows and the drop-off end, then the
+// pickup end). The pickup and drop-off results are passed through as they come
+// back, an unreadable Date included: an unreadable pickup is NOT a blank one
+// (the window must not fall back to the Assigned date for it), and an
+// unreadable drop-off yields no days, exactly as before.
+function ledgerLoadRows(jobTracking, { investorDriverSet, investorOwnerId }) {
 	const data = excludeDroppedLoads(jobTracking.data, jobTracking.headers);
 	const headers = jobTracking.headers;
-	const investorSplit = resolveInvestorSplitPct(config) / 100;
-
-	// Local date helpers — identical to the ones inside GET /api/investor.
-	//
-	// ⚠️ THE LOCAL `parseSheetDate` IS DELETED, NOT MERELY UNUSED. Every date read
-	// in this function now goes through the shared moneySheetDate(). A strict
-	// ISO+US-only parser left sitting inline in a money handler is precisely how
-	// this whole class of defect keeps coming back: the next date read reaches for
-	// the nearest helper, gets a parser narrower than the sheet, and silently drops
-	// or mis-dates the rows it cannot read (PR #215 assigned dates, PR #237 IFTA
-	// rows and the drop-off end, this one the pickup end). Do not reintroduce it —
-	// call moneySheetDate().
-	const fmtDate = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-	const expandDateRange = (start, end) => {
-		const dates = [];
-		const s = new Date(start); s.setHours(12, 0, 0, 0);
-		const e = end ? new Date(end) : new Date(start);
-		e.setHours(12, 0, 0, 0);
-		if (e < s) return [fmtDate(s)];
-		const MAX_SPAN = 31 * 24 * 3600 * 1000;
-		if (e - s > MAX_SPAN) e.setTime(s.getTime() + MAX_SPAN);
-		const cur = new Date(s);
-		while (cur <= e) { dates.push(fmtDate(cur)); cur.setDate(cur.getDate() + 1); }
-		return dates;
-	};
-
 	// Column resolution — same regexes as GET /api/investor.
 	const jtRateCol = findCol(headers, /payment|rate|amount|revenue/i);
 	const jtDateCol = findCol(headers, /status.*update.*date|completion.*date|assigned.*date/i) || findCol(headers, /date/i);
@@ -50275,20 +50360,10 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 	const ownerIdCol = findCol(headers, /^owner.?id$/i);
 	const driverCol = findCol(headers, /^driver$/i);
 	const completedStatuses = /^(delivered|completed|pod received)$/i;
-
-	// Optional per-month line-item detail (drill-down). Collected ONLY for
-	// `detailForMonth`, purely additive — it never affects any total computed below.
 	// Match the rest of the codebase (NOT contract.?id): Job Tracking's column A is
-	// "Contract ID" and is blank for email-ingested loads, so including it here binds
-	// to the empty column and the drill-down "Load #" renders "—" on every row.
+	// "Contract ID" and is blank for email-ingested loads.
 	const jtLoadIdCol = findCol(headers, /load.?id|job.?id/i);
-	// Reuse the dashboard's address-column picker (skips lat/lng/date/appt columns)
-	// so the drill-down route text never grabs a coordinate instead of a city.
-	const jtPickupCol = pickAddressColumn(headers, /origin|pickup|shipper/i);
-	const jtDropCol = pickAddressColumn(headers, /dest|drop|receiver|delivery/i);
-	const detail = detailForMonth ? { revenueLoads: [], driverPayRows: [], fixedCostItems: [], tripExpenseItems: [] } : null;
 
-	// Investor-scope the rows: Owner ID column (primary) or driver-set (fallback).
 	// A Driver cell that reads as a built-in property name falls back like a
 	// blank one (driverNameForTotals()) — the same rule as GET /api/investor.
 	const filteredJobData = investorDriverSet
@@ -50302,6 +50377,46 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 			return driver && investorDriverSet.has(driver);
 		})
 		: data;
+
+	const rows = [];
+	for (const r of filteredJobData) {
+		const st = statusCol ? (r[statusCol] || "").trim() : "";
+		let assignedDate = null;
+		if (jtDateCol && r[jtDateCol]) {
+			const d = moneySheetDate(r[jtDateCol]);
+			if (d && !isNaN(d)) assignedDate = d;
+		}
+		const rawOwner = ownerIdCol ? r[ownerIdCol] : "";
+		rows.push({
+			loadId: jtLoadIdCol ? String(r[jtLoadIdCol] || "").trim() : "",
+			driver: jtDriverCol ? normalizeDriverName(driverNameForTotals(r[jtDriverCol])) : "",
+			truckUnit: jtTruckCol ? (r[jtTruckCol] || "").trim().toLowerCase() : "",
+			truckLabel: jtTruckCol ? String(r[jtTruckCol] || "").trim() : "",
+			assignedDate,
+			assignedText: jtDateCol ? String(r[jtDateCol] || "").trim() : "",
+			pickupDate: moneySheetDate(pickupDateCol ? r[pickupDateCol] : null),
+			dropoffDate: moneySheetDate(dropoffDateCol ? r[dropoffDateCol] : null),
+			completed: completedStatuses.test(st),
+			amount: parseFloat(String((jtRateCol ? r[jtRateCol] : "0")).replace(/[$,]/g, "")) || 0,
+			ownerCell: rawOwner === undefined || rawOwner === null ? "" : String(rawOwner).trim(),
+			rowIndex: r._rowIndex,
+			source: r,
+		});
+	}
+	return { rows, headers };
+}
+
+// Everything computeLedgerScope() needs for one scope, read the way the payout
+// ledger has always read it. investorDriverSet null = the fleet (Super Admin);
+// otherwise the investor `investorOwnerId` (whose trucks are `user.id`'s).
+async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, investorOwnerId, detailForMonth = null, jobTracking: snapshot = null }) {
+	let jobTracking = snapshot;
+	if (!jobTracking) jobTracking = await getJobTrackingCached();
+	const { rows, headers } = ledgerLoadRows(jobTracking, { investorDriverSet, investorOwnerId });
+	// Reuse the dashboard's address-column picker (skips lat/lng/date/appt
+	// columns) so the drill-down route text never grabs a coordinate.
+	const jtPickupCol = pickAddressColumn(headers, /origin|pickup|shipper/i);
+	const jtDropCol = pickAddressColumn(headers, /dest|drop|receiver|delivery/i);
 
 	const now = new Date();
 	// Houston month, not server-local: on the UTC VPS a plain getMonth() flips at
@@ -50321,147 +50436,7 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 		db.prepare(vidQuery).all(...(investorDriverSet ? [user.id] : [])).forEach(t => { unitToVid[t.u] = t.vid; });
 	}
 	const eldByVid = getEldTravelDaysByVehicleCached(Object.values(unitToVid), 0, Date.now() + 86400000);
-	const driverDayOverrides = getAllExcludedDriverDays();
 
-	// Pass: monthly revenue, per-driver active days (ELD-intersected), earliest date.
-	// The driver-keyed maps are null-prototype objects, and a Driver cell that
-	// reads as a built-in property name is unassigned (driverNameForTotals()):
-	// its revenue counts, no driver is paid for it — as for a blank cell.
-	const monthlyRevenue = {};
-	const driverDaySets = Object.create(null);
-	const driverMonthlyDays = Object.create(null);        // { driver: { mk: Set<day> } }
-	const driverMonthlyRevenue = Object.create(null);     // { driver: { mk: revenue } }
-	let earliestDate = null;
-	filteredJobData.forEach((r) => {
-		const st = statusCol ? (r[statusCol] || "").trim() : "";
-		const driver = jtDriverCol ? normalizeDriverName(driverNameForTotals(r[jtDriverCol])) : "";
-		const truckUnit = jtTruckCol ? (r[jtTruckCol] || "").trim().toLowerCase() : "";
-		let assignedMonthKey = null;
-		if (jtDateCol && r[jtDateCol]) {
-			const d = moneySheetDate(r[jtDateCol]);
-			if (d && !isNaN(d)) assignedMonthKey = fmtDate(d).slice(0, 7);
-		}
-		if (completedStatuses.test(st)) {
-			const amt = parseFloat(String((jtRateCol ? r[jtRateCol] : "0")).replace(/[$,]/g, "")) || 0;
-			if (amt && assignedMonthKey) {
-				monthlyRevenue[assignedMonthKey] = (monthlyRevenue[assignedMonthKey] || 0) + amt;
-				if (detail && assignedMonthKey === detailForMonth) {
-					// ⚠️ CITY LEVEL ONLY — these two fields reach an INVESTOR, on the
-					// payout statement PDF (lib/payout-statement.js routeText) and in the
-					// on-screen revenue drill-down, and the street belongs to the BROKER'S
-					// CUSTOMER, not to us. The raw sheet cell was being passed straight
-					// through, so a statement printed e.g. "3311 EAST LINCOLN WAY AMES, IA
-					// 50010 → 2930 114TH STREET GRAND PRAIRIE,TX 75050" — every shipper and
-					// receiver's door, handed to an outside party. resolveCityState() is the
-					// same reduction /api/investor's My Loads already uses; reduce at the
-					// PUSH SITE so both consumers of revenueLoads inherit it and neither can
-					// drift back to the raw string.
-					const lid = jtLoadIdCol ? String(r[jtLoadIdCol] || "").trim() : "";
-					detail.revenueLoads.push({
-						loadId: lid,
-						driver: driver || "",
-						truck: jtTruckCol ? String(r[jtTruckCol] || "").trim() : "",
-						date: jtDateCol ? String(r[jtDateCol] || "").trim() : "",
-						pickup: resolveCityState(r, "pickup", lid, jtPickupCol ? r[jtPickupCol] : ""),
-						dropoff: resolveCityState(r, "drop", lid, jtDropCol ? r[jtDropCol] : ""),
-						amount: Math.round(amt * 100) / 100,
-					});
-				}
-				if (driver) {
-					if (!driverMonthlyRevenue[driver]) driverMonthlyRevenue[driver] = {};
-					driverMonthlyRevenue[driver][assignedMonthKey] = (driverMonthlyRevenue[driver][assignedMonthKey] || 0) + amt;
-				}
-			}
-		}
-		if (completedStatuses.test(st) && driver) {
-			// ⚠️ BOTH ENDS RESOLVE THROUGH moneySheetDate(), and the pickup end is the
-			// half that was left behind by the drop-off fix. It used to call the strict
-			// local parseSheetDate(), whose null is indistinguishable from a blank cell —
-			// so the fallback on the line below fired on a cell that was present and
-			// merely unreadable, silently starting the window at the ASSIGNED date (when
-			// the rate-con email arrived) instead of at the pickup. That fallback's own
-			// comment says "blank", which is what the code was documented to do and not
-			// what it did.
-			//
-			// Unlike the drop-off this is a SHIFT, not a widening, so it was measured on
-			// its own before shipping (see the union note at loadWindowDays for the guard
-			// half). Production 2026-08-09, all 275 live rows: of 252 non-empty Pickup
-			// Appointment cells exactly 2 are unreadable by the strict parser, and 1
-			// resolves — load 529227269, "2025/09/23 23:59", whose window moves
-			// [09-22, 09-23, 09-24] -> [09-23, 09-24], i.e. it LOSES 2025-09-22. The
-			// per-period driver-pay delta is nevertheless $0.00 on EVERY period, on the
-			// Super-Admin fleet scope and on all three investor scopes, because the
-			// driver-month day set is a UNION and 2025-09-22 is independently supplied by
-			// load 529231436 (pickup "9/22/25 16:00-18:00"). 2025-09 is locked and its
-			// payout is unchanged. The other unreadable cell, "14:00" on 557861739, stays
-			// null under both parsers — it is a time, not a date.
-			//
-			// It also ends a live disagreement inside the trio CLAUDE.md requires to
-			// reconcile: POST /api/invoices/generate already reads that same cell as
-			// 2025-09-23 (its parseInvoiceDate has a native-Date fallback), while this
-			// function and GET /api/financials read 2025-09-22. Same load, same column,
-			// two different pay windows.
-			let pickup = moneySheetDate(pickupDateCol ? r[pickupDateCol] : null);
-			// ⚠️ Drop-off resolves through moneySheetDate(), like the pickup fallback
-			// on the next line. The local parseSheetDate() reads only ISO and US
-			// M/D/Y, so a drop-off in any other shape returned null and collapsed
-			// this load's window to the single pickup day — silently shortening the
-			// driver's active-day window, which is driver pay, which is deducted
-			// from the investor payout this function computes. Kept in lockstep with
-			// the two twin sites in GET /api/investor and GET /api/financials.
-			// Measured read-only on production 2026-08-09: of 251 non-empty drop-off
-			// cells exactly 2 were unreadable; 1 resolves ("2025/09/24 23:59" on load
-			// 529227269) and 1 correctly stays null ("9:00" is a time, not a date —
-			// the new Date() tail branch rejects it rather than inventing a day). The
-			// resolving row's own window goes 1 day -> 3, but the driver-month day set
-			// is a UNION and those days already came from loads 529231436 / 528174081,
-			// so the per-period driver-pay delta is $0.00 on every period and the
-			// locked 2025-09 payout is untouched.
-			const dropoff = moneySheetDate(dropoffDateCol ? r[dropoffDateCol] : null);
-			if (!pickup && jtDateCol && r[jtDateCol]) pickup = moneySheetDate(r[jtDateCol]);
-			if (pickup && !isNaN(pickup)) {
-				const windowDays = expandDateRange(pickup, dropoff || pickup);
-				const vid = truckUnit ? unitToVid[truckUnit] : null;
-				const eld = vid ? eldByVid[vid] : null;
-				const covered = eld && windowDays.some(d => eld.coverage.has(d));
-				const eldCounted = covered ? windowDays.filter(d => eld.travel.has(d)) : windowDays;
-				const ovr = driverDayOverrides[driver] || null;
-				const skipSet = ovr ? ovr.remove : null;
-				const counted = skipSet && skipSet.size ? eldCounted.filter(d => !skipSet.has(d)) : eldCounted;
-				if (!driverDaySets[driver]) driverDaySets[driver] = new Set();
-				counted.forEach(d => driverDaySets[driver].add(d));
-				if (!driverMonthlyDays[driver]) driverMonthlyDays[driver] = {};
-				counted.forEach(d => {
-					const bucket = assignedMonthKey || d.slice(0, 7);
-					if (!driverMonthlyDays[driver][bucket]) driverMonthlyDays[driver][bucket] = new Set();
-					driverMonthlyDays[driver][bucket].add(d);
-				});
-			}
-		}
-		if (jtDateCol && r[jtDateCol]) {
-			const d = moneySheetDate(r[jtDateCol]);
-			if (d && !isNaN(d) && (!earliestDate || d < earliestDate)) earliestDate = d;
-		}
-	});
-
-	// Admin-added days (ELD missed) — same bucketing as GET /api/investor.
-	for (const [drv, ovr] of Object.entries(driverDayOverrides)) {
-		if (!ovr.add || !ovr.add.size) continue;
-		if (investorDriverSet && !investorDriverSet.has(drv)) continue;
-		if (!driverDaySets[drv]) driverDaySets[drv] = new Set();
-		if (!driverMonthlyDays[drv]) driverMonthlyDays[drv] = {};
-		for (const d of ovr.add) {
-			driverDaySets[drv].add(d);
-			const bucket = d.slice(0, 7);
-			if (!driverMonthlyDays[drv][bucket]) driverMonthlyDays[drv][bucket] = new Set();
-			driverMonthlyDays[drv][bucket].add(d);
-		}
-	}
-
-	// Per-month driver pay — fixed: activeDays × dailyRate; percentage:
-	// max(0, monthRevenue − monthDeductible) × pct. Same as GET /api/investor.
-	const payStructures = getDriverPayStructures();
-	const expensesByDriverMonth = getDeductibleExpensesByDriverMonth();
 	const trucksByDriver = Object.create(null);
 	{
 		const truckQuery = investorDriverSet
@@ -50472,160 +50447,148 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 			if (d) trucksByDriver[d] = t.driver_pay_daily || 250;
 		});
 	}
-	const monthlyDriverPay = {};
-	for (const [driver, monthsMap] of Object.entries(driverMonthlyDays)) {
-		const struct = payStructures[driver] || { payType: "fixed", payPercentage: 0 };
-		const fixedRate = resolveDailyRate(struct.payDaily, trucksByDriver[driver]);
-		for (const [mk, daySet] of Object.entries(monthsMap)) {
-			const activeDays = daySet.size;
-			const monthRev = (driverMonthlyRevenue[driver] || {})[mk] || 0;
-			const monthExp = (expensesByDriverMonth[driver] || {})[mk] || 0;
-			const net = Math.max(0, monthRev - monthExp);
-			let pay;
-			if (struct.payType === "percentage") {
-				pay = Math.round((net * struct.payPercentage / 100) * 100) / 100;
-			} else {
-				pay = activeDays * fixedRate;
-			}
-			monthlyDriverPay[mk] = (monthlyDriverPay[mk] || 0) + pay;
-			if (detail && mk === detailForMonth) {
-				detail.driverPayRows.push({
-					driver,
-					activeDays,
-					dailyRate: fixedRate,
-					payType: struct.payType,
-					payPercentage: struct.payPercentage,
-					pay: Math.round(pay * 100) / 100,
-				});
-			}
-		}
-	}
 
 	// Monthly trip expenses (P&L filter, owner_id OR month-bounded driver leg),
 	// grouped by month. investorExpenseScopeSql is shared with GET /api/investor —
 	// this function and that handler are documented as producing the identical
 	// array, and the payouts ledger reads one while the portal reads the other, so
-	// a second copy of this predicate is how they come to disagree.
-	const monthlyTripExp = {};
+	// a second copy of this predicate is how they come to disagree. The totals
+	// stay SQL SUMs (the settlement figure is the SUM as SQLite adds it); the
+	// receipts beside them are the same rows, for the line items.
+	const tripByMonth = {};
+	const receiptCols = `id, ${EXPENSE_PERIOD_EXPR} AS month, COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at)) AS day, amount, type, truck_unit AS truck, driver, load_id AS loadId, status`;
+	let receipts = [];
 	const investorExpenseWindows = investorOwnerId ? getInvestorDriverMonthWindows(investorOwnerId) : null;
 	if (investorOwnerId) {
 		const scope = investorExpenseScopeSql(investorOwnerId, investorExpenseWindows, EXPENSE_PERIOD_EXPR);
 		db.prepare(
 			`SELECT ${EXPENSE_PERIOD_EXPR} AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} GROUP BY m`
-		).all(...scope.params).forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
+		).all(...scope.params).forEach(r => { if (r.m) tripByMonth[r.m] = r.t; });
+		receipts = db.prepare(`SELECT ${receiptCols} FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} ORDER BY id`).all(...scope.params);
 	} else if (isSuperAdmin) {
 		db.prepare(`SELECT ${EXPENSE_PERIOD_EXPR} AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m`)
-			.all().forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
+			.all().forEach(r => { if (r.m) tripByMonth[r.m] = r.t; });
+		receipts = db.prepare(`SELECT ${receiptCols} FROM expenses WHERE ${EXPENSE_PNL_FILTER} ORDER BY id`).all();
 	}
+	receipts = receipts.filter((x) => x.month);
 
 	// Per-expense line items for the drill-down month — SAME scope, P&L filter AND
-	// period basis as the SUM above, so they reconcile to
-	// monthlyTripExp[detailForMonth]. The displayed `date` stays the true purchase
-	// date, so a receipt posted here from an earlier closed month shows its real
-	// date while counting in this month — which is what makes the drill-down able
-	// to explain itself ("Mar 14 fuel, posted to May").
-	if (detail) {
+	// period basis as the SUM above, so they reconcile to tripByMonth[detailForMonth].
+	// The displayed `date` stays the true purchase date, so a receipt posted here
+	// from an earlier closed month shows its real date while counting in this
+	// month ("Mar 14 fuel, posted to May").
+	let tripExpenseItems = [];
+	if (detailForMonth) {
 		const expCols = "COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at)) AS date, type, description, amount, driver, truck_unit AS truck, location_city AS city, location_state AS state, posted_period AS postedPeriod";
 		const monthExpr = EXPENSE_PERIOD_EXPR;
 		if (investorOwnerId) {
 			const scope = investorExpenseScopeSql(investorOwnerId, investorExpenseWindows, monthExpr);
-			detail.tripExpenseItems = db.prepare(`SELECT ${expCols} FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} AND ${monthExpr} = ? ORDER BY 1`).all(...scope.params, detailForMonth);
+			tripExpenseItems = db.prepare(`SELECT ${expCols} FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} AND ${monthExpr} = ? ORDER BY 1`).all(...scope.params, detailForMonth);
 		} else if (isSuperAdmin) {
-			detail.tripExpenseItems = db.prepare(`SELECT ${expCols} FROM expenses WHERE ${EXPENSE_PNL_FILTER} AND ${monthExpr} = ? ORDER BY 1`).all(detailForMonth);
+			tripExpenseItems = db.prepare(`SELECT ${expCols} FROM expenses WHERE ${EXPENSE_PNL_FILTER} AND ${monthExpr} = ? ORDER BY 1`).all(detailForMonth);
 		}
 	}
 
 	// Monthly maintenance-fund service disbursements + paid compliance fees,
 	// grouped by month — same owner/super-admin scoping as the all-time
-	// truck-level block in GET /api/investor. Puts per-month netProfit on the
+	// truck-level block in GET /api/investor, so per-month netProfit is on the
 	// SAME expense basis as the aggregate (and therefore the payout ledger).
-	// Both tables are empty in prod today, so this is $0 — it unifies the basis.
-	const monthlyMaintFund = {};
-	const monthlyCompliance = {};
+	const maintByMonth = {};
+	const complianceByMonth = {};
+	let maintRows = [];
+	let complianceRows = [];
+	const mfDay = "COALESCE(NULLIF(mf.date, ''), strftime('%Y-%m-%d', mf.created_at))";
+	const cfDay = "COALESCE(NULLIF(cf.paid_date, ''), NULLIF(cf.due_date, ''), strftime('%Y-%m-%d', cf.created_at))";
 	if (investorOwnerId) {
 		db.prepare(
-			`SELECT strftime('%Y-%m', COALESCE(NULLIF(mf.date, ''), strftime('%Y-%m-%d', mf.created_at))) AS m, COALESCE(SUM(mf.amount), 0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND ${investorPayoutBasis.truckInFleetSql("t")} AND mf.type = 'service' GROUP BY m`
-		).all(investorOwnerId).forEach(r => { if (r.m) monthlyMaintFund[r.m] = r.t; });
+			`SELECT strftime('%Y-%m', ${mfDay}) AS m, COALESCE(SUM(mf.amount), 0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND ${investorPayoutBasis.truckInFleetSql("t")} AND mf.type = 'service' GROUP BY m`
+		).all(investorOwnerId).forEach(r => { if (r.m) maintByMonth[r.m] = r.t; });
 		db.prepare(
-			`SELECT strftime('%Y-%m', COALESCE(NULLIF(cf.paid_date, ''), NULLIF(cf.due_date, ''), strftime('%Y-%m-%d', cf.created_at))) AS m, COALESCE(SUM(cf.amount), 0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND ${investorPayoutBasis.truckInFleetSql("t")} AND cf.status = 'Paid' GROUP BY m`
-		).all(investorOwnerId).forEach(r => { if (r.m) monthlyCompliance[r.m] = r.t; });
+			`SELECT strftime('%Y-%m', ${cfDay}) AS m, COALESCE(SUM(cf.amount), 0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND ${investorPayoutBasis.truckInFleetSql("t")} AND cf.status = 'Paid' GROUP BY m`
+		).all(investorOwnerId).forEach(r => { if (r.m) complianceByMonth[r.m] = r.t; });
+		maintRows = db.prepare(
+			`SELECT mf.id, strftime('%Y-%m', ${mfDay}) AS month, ${mfDay} AS day, mf.amount, mf.truck FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND ${investorPayoutBasis.truckInFleetSql("t")} AND mf.type = 'service' ORDER BY mf.id`
+		).all(investorOwnerId);
+		complianceRows = db.prepare(
+			`SELECT cf.id, strftime('%Y-%m', ${cfDay}) AS month, ${cfDay} AS day, cf.amount, cf.truck FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND ${investorPayoutBasis.truckInFleetSql("t")} AND cf.status = 'Paid' ORDER BY cf.id`
+		).all(investorOwnerId);
 	} else if (isSuperAdmin) {
+		const notRetired = `LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE NOT (${investorPayoutBasis.truckInFleetSql()}))`;
+		const mfDayBare = "COALESCE(NULLIF(date, ''), strftime('%Y-%m-%d', created_at))";
+		const cfDayBare = "COALESCE(NULLIF(paid_date, ''), NULLIF(due_date, ''), strftime('%Y-%m-%d', created_at))";
 		db.prepare(
-			`SELECT strftime('%Y-%m', COALESCE(NULLIF(date, ''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM maintenance_fund WHERE type = 'service' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE NOT (${investorPayoutBasis.truckInFleetSql()})) GROUP BY m`
-		).all().forEach(r => { if (r.m) monthlyMaintFund[r.m] = r.t; });
+			`SELECT strftime('%Y-%m', ${mfDayBare}) AS m, COALESCE(SUM(amount), 0) AS t FROM maintenance_fund WHERE type = 'service' AND ${notRetired} GROUP BY m`
+		).all().forEach(r => { if (r.m) maintByMonth[r.m] = r.t; });
 		db.prepare(
-			`SELECT strftime('%Y-%m', COALESCE(NULLIF(paid_date, ''), NULLIF(due_date, ''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM compliance_fees WHERE status = 'Paid' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE NOT (${investorPayoutBasis.truckInFleetSql()})) GROUP BY m`
-		).all().forEach(r => { if (r.m) monthlyCompliance[r.m] = r.t; });
+			`SELECT strftime('%Y-%m', ${cfDayBare}) AS m, COALESCE(SUM(amount), 0) AS t FROM compliance_fees WHERE status = 'Paid' AND ${notRetired} GROUP BY m`
+		).all().forEach(r => { if (r.m) complianceByMonth[r.m] = r.t; });
+		maintRows = db.prepare(`SELECT id, strftime('%Y-%m', ${mfDayBare}) AS month, ${mfDayBare} AS day, amount, truck FROM maintenance_fund WHERE type = 'service' AND ${notRetired} ORDER BY id`).all();
+		complianceRows = db.prepare(`SELECT id, strftime('%Y-%m', ${cfDayBare}) AS month, ${cfDayBare} AS day, amount, truck FROM compliance_fees WHERE status = 'Paid' AND ${notRetired} ORDER BY id`).all();
 	}
+	maintRows = maintRows.filter((x) => x.month);
+	complianceRows = complianceRows.filter((x) => x.month);
 
 	// Monthly fixed costs — every truck in the fleet (any status but Inactive: a
 	// truck in Maintenance or OOS still owes its insurance, payment and ELD;
 	// investorPayoutBasis.truckInFleetSql()), charged from the truck's in-service
-	// month (truckChargeFromMonth: in_service_date, else created_at).
+	// month (truckChargeFromMonth: in_service_date, else created_at) until it
+	// retires. truckChargedInMonth is the single predicate all four month gates
+	// share, so the settlement figure, its drill-down, /api/investor,
+	// /api/financials and the truckFixedCostLockedMonths GUARD cannot disagree.
 	const truckFixedQuery = investorDriverSet
-		? `SELECT unit_number, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE owner_id = ? AND ${investorPayoutBasis.truckInFleetSql()}`
-		: `SELECT unit_number, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE ${investorPayoutBasis.truckInFleetSql()}`;
+		? `SELECT unit_number, owner_id, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE owner_id = ? AND ${investorPayoutBasis.truckInFleetSql()}`
+		: `SELECT unit_number, owner_id, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE ${investorPayoutBasis.truckInFleetSql()}`;
 	const fixedTrucks = db.prepare(truckFixedQuery).all(...(investorDriverSet ? [user.id] : []));
-	const getMonthlyFixedCosts = (monthKey) => {
-		let total = 0;
-		for (const t of fixedTrucks) {
-			// In service by this month AND not yet retired. truckChargedInMonth is
-			// the single predicate all four month gates share, so the settlement
-			// figure, its drill-down, /api/investor, /api/financials and the
-			// truckFixedCostLockedMonths GUARD cannot disagree about the interval.
-			if (!truckChargedInMonth(t, monthKey)) continue;
-			total += truckMonthlyFixed(t).total;
-		}
-		// Cents, not whole dollars — this figure is shown beside its own itemized
-		// per-truck list, and the two have to agree.
-		return Math.round(total * 100) / 100;
-	};
 
-	// Fixed-cost line items for the drill-down month (same in-service inclusion
-	// guard as getMonthlyFixedCosts — if these two ever diverge the drill-down
-	// contradicts the headline it is supposed to explain). Cleared below if the
-	// month is zero-activity.
-	if (detail) {
-		for (const t of fixedTrucks) {
-			if (!truckChargedInMonth(t, detailForMonth)) continue;
-			detail.fixedCostItems.push({ truck: t.unit_number || "", ...truckMonthlyFixed(t) });
-		}
-	}
-
-	// Build the per-month array from earliest month → current month inclusive.
-	// A lease basis can start it earlier (firstPayoutMonth()): a lease month with
-	// no activity still exists, and pays as the downtime setting says.
 	const payoutBasis = payoutBasisContext(investorOwnerId);
-	const startMonth = investorPayoutBasis.firstPayoutMonth(earliestDate
-		? `${earliestDate.getFullYear()}-${String(earliestDate.getMonth() + 1).padStart(2, "0")}`
-		: currentMonthKey, payoutBasis);
-	let cursor = new Date(parseInt(startMonth.slice(0, 4)), parseInt(startMonth.slice(5, 7)) - 1, 1);
-	const endDate = new Date(now.getFullYear(), now.getMonth(), 1);
-	const months = [];
-	while (cursor <= endDate) {
-		const mk = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}`;
-		const revenue = monthlyRevenue[mk] || 0;
-		const driverPay = monthlyDriverPay[mk] || 0;
-		const rawFixedCosts = getMonthlyFixedCosts(mk);
-		const tripExpenses = monthlyTripExp[mk] || 0;
-		const maintFundCost = monthlyMaintFund[mk] || 0;
-		const complianceCost = monthlyCompliance[mk] || 0;
-		// Zero-activity grace: defer fixed costs in months with no activity so
-		// onboarding months don't read as losses (the same predicate as GET
-		// /api/investor, including its driver-day-count guard for percentage
-		// drivers whose pay nets to $0 but who were still active that month).
-		const driverCount = Object.values(driverMonthlyDays).filter(m => m[mk] && m[mk].size).length;
-		const isZeroActivity = investorPayoutBasis.isZeroActivityMonth({ revenue, driverPay, tripExpenses, maintFundCost, complianceCost, driverCount });
-		const fixedCosts = isZeroActivity ? 0 : rawFixedCosts;
-		// Keep the fixed-cost drill-down consistent with the (possibly deferred) total.
-		if (detail && mk === detailForMonth && fixedCosts === 0) detail.fixedCostItems = [];
-		const netProfit = revenue - driverPay - fixedCosts - tripExpenses - maintFundCost - complianceCost;
-		months.push({ month: mk, netProfit, zeroActivity: isZeroActivity, revenue, driverPay, fixedCosts, tripExpenses, maintFundCost, complianceCost });
-		cursor.setMonth(cursor.getMonth() + 1);
-	}
+	return {
+		rows,
+		unitToVid,
+		eldByVid,
+		driverDayOverrides: getAllExcludedDriverDays(),
+		addDaysFor: (drv) => !investorDriverSet || investorDriverSet.has(drv),
+		payStructures: getDriverPayStructures(),
+		expensesByDriverMonth: getDeductibleExpensesByDriverMonth(),
+		rateFor: (driver, struct) => resolveDailyRate(struct.payDaily, trucksByDriver[driver]),
+		tripByMonth, maintByMonth, complianceByMonth, receipts, maintRows, complianceRows, tripExpenseItems,
+		fixedTrucks, truckChargedInMonth, truckMonthlyFixed,
+		isZeroActivityMonth: investorPayoutBasis.isZeroActivityMonth,
+		// A lease basis can start the ledger earlier (firstPayoutMonth()): a lease
+		// month with no activity still exists, and pays as the downtime setting says.
+		startMonthFor: (earliestKey) => investorPayoutBasis.firstPayoutMonth(earliestKey || currentMonthKey, payoutBasis),
+		currentMonthKey,
+		endDate: new Date(now.getFullYear(), now.getMonth(), 1),
+		ownerId: investorOwnerId || 0,
+		payoutBasis,
+		detailForMonth,
+		// ⚠️ CITY LEVEL ONLY — these two fields reach an INVESTOR, on the payout
+		// statement PDF (lib/payout-statement.js routeText) and in the on-screen
+		// revenue drill-down, and the street belongs to the BROKER'S CUSTOMER, not
+		// to us. resolveCityState() is the same reduction /api/investor's My Loads
+		// uses; reduce here so both consumers of revenueLoads inherit it.
+		describeLoad: (r, lid) => ({
+			pickup: resolveCityState(r, "pickup", lid, jtPickupCol ? r[jtPickupCol] : ""),
+			dropoff: resolveCityState(r, "drop", lid, jtDropCol ? r[jtDropCol] : ""),
+		}),
+	};
+}
+
+// returns: { monthlyEarnings: [...], currentMonthKey, detail, items }
+//
+// The payout ledger's months for one investor (or the fleet, for Super Admin).
+// The math is lib/financials-calc.js computeLedgerScope(); this gathers its
+// facts and settles the months it returns. `items` are the dated line items
+// behind those months (see the module), for Financials and its groupings.
+async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriverSet, investorOwnerId, config, detailForMonth = null }) {
+	const investorSplit = resolveInvestorSplitPct(config) / 100;
+	const facts = await gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, investorOwnerId, detailForMonth });
+	const { months, items, detail } = financialsCalc.computeLedgerScope(facts);
+	if (detail) detail.tripExpenseItems = facts.tripExpenseItems;
+
 	// THE payout function, shared with GET /api/investor: the split applied to the
 	// RAW netProfit (the rounded netProfit is only what gets surfaced for display),
 	// or the lease under a lease basis.
+	const payoutBasis = facts.payoutBasis;
 	const settled = investorPayoutBasis.settleInvestorMonths(months, { splitFraction: investorSplit, basis: payoutBasis });
 	const monthlyEarnings = months.map(({ month: mk, revenue, driverPay, fixedCosts, tripExpenses, maintFundCost, complianceCost, netProfit }) => ({
 		month: mk,
@@ -50646,9 +50609,9 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 		investorEarnings: settled[mk].investorEarnings,
 		// Only on a lease month, so a split month's entry is exactly what it was.
 		...(settled[mk].payoutBasis ? { payoutBasis: settled[mk].payoutBasis } : {}),
-		isCurrentMonth: mk === currentMonthKey,
+		isCurrentMonth: mk === facts.currentMonthKey,
 	}));
-	return { monthlyEarnings, currentMonthKey, detail };
+	return { monthlyEarnings, currentMonthKey: facts.currentMonthKey, detail, items };
 }
 
 // ---- Loss carry-forward — ONE definition, every reader ---------------------
@@ -50679,6 +50642,218 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 // Pure: no DB, no network, no mutation of the input. Returns
 // { "YYYY-MM": { raw, payable, carriedIn, deferred } } for EVERY month passed in,
 // so a caller may index it without a presence check.
+// The fleet's months and line items: one scope per settlable investor plus the
+// company (owner 0), each computed by the payout ledger's own math
+// (gatherLedgerScopeFacts() + computeLedgerScope()). An investor's scope is
+// exactly what its payout ledger reads, so its figures here are its ledger's to
+// the cent. The company scope is everything no investor scope claims: the loads,
+// receipts, maintenance and compliance rows left over, and the fleet trucks no
+// settlable investor owns. The fleet is the sum of its scopes.
+//
+// `overlaps` lists anything two investor scopes both claim (a blank-Owner-ID
+// load whose driver is in two investors' driver sets, a receipt inside two
+// expense scopes). Each of those investors' ledgers counts it, so the fleet does
+// too; it is reported, not split.
+async function computeFleetLedger() {
+	// One Job Tracking snapshot for every scope, so they all read the same sheet.
+	const jobTracking = await getJobTrackingCached();
+	const carrierDB = getCarrierDBFromSQLite();
+	const carrierDriverCol = findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
+	const carrierCarrierCol = findCol(carrierDB.headers, /carrier/i);
+	const investors = listSettlableInvestors();
+	const claimed = { load: new Map(), receipt: new Map(), maintenance: new Map(), compliance: new Map() };
+	const claim = (map, key, ownerId) => { const a = map.get(key) || []; a.push(ownerId); map.set(key, a); };
+	const investorDrivers = new Set();
+	const scopes = [];
+	for (const inv of investors) {
+		const investorDriverSet = getInvestorDriverSet(inv.ownerId, carrierDB.data, carrierDriverCol, carrierCarrierCol);
+		for (const d of investorDriverSet) investorDrivers.add(d);
+		const facts = await gatherLedgerScopeFacts({ user: { id: inv.ownerId }, isSuperAdmin: false, investorDriverSet, investorOwnerId: inv.ownerId, jobTracking });
+		for (const r of facts.rows) claim(claimed.load, r.source._rowIndex, inv.ownerId);
+		for (const x of facts.receipts) claim(claimed.receipt, x.id, inv.ownerId);
+		for (const x of facts.maintRows) claim(claimed.maintenance, x.id, inv.ownerId);
+		for (const x of facts.complianceRows) claim(claimed.compliance, x.id, inv.ownerId);
+		const { months, items } = financialsCalc.computeLedgerScope(facts);
+		scopes.push({ ownerId: inv.ownerId, name: inv.name, months, items });
+	}
+	const fleet = await gatherLedgerScopeFacts({ user: { id: 0 }, isSuperAdmin: true, investorDriverSet: null, investorOwnerId: null, jobTracking });
+	const investorIds = new Set(investors.map((i) => i.ownerId));
+	const byMonth = (list) => { const o = {}; for (const x of list) o[x.month] = (o[x.month] || 0) + Number(x.amount || 0); return o; };
+	const receipts = fleet.receipts.filter((x) => !claimed.receipt.has(x.id));
+	const maintRows = fleet.maintRows.filter((x) => !claimed.maintenance.has(x.id));
+	const complianceRows = fleet.complianceRows.filter((x) => !claimed.compliance.has(x.id));
+	const company = financialsCalc.computeLedgerScope({
+		...fleet,
+		rows: fleet.rows.filter((r) => !claimed.load.has(r.source._rowIndex)),
+		addDaysFor: (drv) => !investorDrivers.has(drv),
+		receipts, maintRows, complianceRows,
+		tripByMonth: byMonth(receipts), maintByMonth: byMonth(maintRows), complianceByMonth: byMonth(complianceRows),
+		fixedTrucks: fleet.fixedTrucks.filter((t) => !investorIds.has(Number(t.owner_id) || 0)),
+		ownerId: 0,
+		detailForMonth: null,
+		startMonthFor: (earliestKey) => earliestKey || fleet.currentMonthKey,
+	});
+	scopes.push({ ownerId: 0, name: "Company", months: company.months, items: company.items });
+
+	// Each load's pickup and delivery state, on its revenue item: the two-letter
+	// state of the city-level address (resolveCityState(), the reduction investors
+	// see), "" when the address names none. Once per load.
+	{
+		const jt = jobTracking;
+		const pickupCol = pickAddressColumn(jt.headers, /origin|pickup|shipper/i);
+		const dropCol = pickAddressColumn(jt.headers, /dest|drop|receiver|delivery/i);
+		const rowsByIndex = new Map((jt.data || []).map((r) => [r._rowIndex, r]));
+		const stateOf = (cityStateZip) => {
+			const m = String(cityStateZip || "").match(/,\s*([A-Za-z]{2})(?:\s+\d{5}(?:-\d{4})?)?\s*$/);
+			return m ? m[1].toUpperCase() : "";
+		};
+		const states = new Map();
+		for (const scope of scopes) {
+			for (const it of scope.items) {
+				if (it.kind !== "revenue") continue;
+				if (!states.has(it.rowIndex)) {
+					const r = rowsByIndex.get(it.rowIndex);
+					states.set(it.rowIndex, r ? {
+						pickup: stateOf(resolveCityState(r, "pickup", it.loadId, pickupCol ? r[pickupCol] : "")),
+						delivery: stateOf(resolveCityState(r, "drop", it.loadId, dropCol ? r[dropCol] : "")),
+					} : { pickup: "", delivery: "" });
+				}
+				const st = states.get(it.rowIndex);
+				it.pickupState = st.pickup;
+				it.deliveryState = st.delivery;
+			}
+		}
+	}
+	const overlaps = [];
+	for (const [kind, map] of Object.entries(claimed)) {
+		for (const [key, owners] of map) if (owners.length > 1) overlaps.push({ kind, key, owners });
+	}
+	return { scopes, overlaps, currentMonthKey: fleet.currentMonthKey };
+}
+
+// The items a closed month is frozen with, across every scope of the fleet,
+// attributed exactly as the payout ledger attributes them (the same scopes), so
+// a month frozen at its close matches what was paid for it.
+// `settledFor(ownerId)` answers an investor's payout row for the month: null
+// when there is none, else { breakdown } (the figures it settled at, or null
+// when the row was settled before breakdowns were recorded).
+//   - The company's items as they stand.
+//   - An investor with no payout row for the month settled nothing for it, so
+//     its items there are the company's.
+//   - An investor's items, plus a "Settlement adjustment" per figure that
+//     differs from the breakdown it settled at, so the month's frozen figures
+//     are what was settled, to the cent (none when they already agree).
+function settledMonthItems(fleet, period, settledFor) {
+	const out = [];
+	for (const scope of fleet.scopes) {
+		const its = scope.items.filter((i) => i.month === period);
+		if (!scope.ownerId) { out.push(...its); continue; }
+		const settled = settledFor(scope.ownerId);
+		if (!settled) { out.push(...its.map((i) => ({ ...i, ownerId: 0 }))); continue; }
+		out.push(...its);
+		if (settled.breakdown) out.push(...financialsCalc.settlementAdjustments(its, period, settled.breakdown, scope.ownerId));
+	}
+	return out;
+}
+
+// Loads a closed month cannot attribute with certainty: a blank-Owner-ID load
+// that a scope claims today through its driver set while its driver held another
+// owner's truck on the load's date. Today's driver sets are not necessarily the
+// ones the month closed with, so the one-time freeze lists these for review
+// before it writes their month.
+function ambiguousBlankOwnerLoads(fleet, period) {
+	const held = buildHeldTruckIndex();
+	const out = [];
+	for (const scope of fleet.scopes) {
+		for (const it of scope.items) {
+			if (it.month !== period || it.kind !== "revenue" || !it.blankOwner) continue;
+			const heldOwner = held.ownerAt(it.driver, it.workDay || it.day) || 0;
+			if (heldOwner === (scope.ownerId || 0)) continue;
+			out.push({ loadId: it.loadId, driver: it.driver, day: it.workDay || it.day, amount: it.cents / 100, countedFor: scope.ownerId || 0, truckHeldBy: heldOwner });
+		}
+	}
+	return out;
+}
+
+// Payout rows by owner and month, with their frozen breakdown parsed.
+function settledPayoutRows() {
+	const map = new Map();
+	for (const r of db.prepare("SELECT owner_id, period, finalized_breakdown FROM investor_payouts").all()) {
+		let breakdown = null;
+		try { breakdown = JSON.parse(r.finalized_breakdown || "null"); } catch { breakdown = null; }
+		map.set(`${r.owner_id}:${r.period}`, { breakdown: breakdown && typeof breakdown === "object" ? breakdown : null });
+	}
+	return (period) => (ownerId) => map.get(`${ownerId}:${period}`) || null;
+}
+
+// The months frozen now (an active freeze, released_at ''), items or none.
+function frozenPeriodSet() {
+	return new Set(db.prepare("SELECT DISTINCT period FROM financials_ledger_freezes WHERE released_at = ''").all().map((r) => r.period));
+}
+
+const LEDGER_ITEM_COLS = ["period", "owner_id", "kind", "adjusts", "day", "cents", "load_id", "driver", "truck", "expense_id", "source_id", "expense_type", "pay_type", "pickup_state", "delivery_state"];
+function ledgerItemFromRow(r) {
+	return {
+		kind: r.kind, adjusts: r.adjusts || undefined, month: r.period, day: r.day || null, cents: r.cents, ownerId: r.owner_id,
+		loadId: r.load_id, driver: r.driver, truck: r.truck, expenseId: r.expense_id, sourceId: r.source_id,
+		expenseType: r.expense_type, payType: r.pay_type, pickupState: r.pickup_state, deliveryState: r.delivery_state,
+	};
+}
+
+// Write one closed month's items as one freeze. Runs inside the caller's
+// transaction: the close (before it takes the lock) or the one-time freeze.
+function writeLedgerFreeze(period, items, { source, actor, frozenAt }) {
+	const n = db.prepare("SELECT COUNT(*) AS n FROM financials_ledger_freezes WHERE period = ?").get(period).n;
+	const freezeId = `${period}:${source}:${frozenAt}:${n + 1}`;
+	const figures = financialsCalc.monthFiguresFromItems(items)[period] || {};
+	// The freeze row first: it is what makes the month frozen, items or none,
+	// and the only freeze its items may come from.
+	db.prepare("INSERT INTO financials_ledger_freezes (freeze_id, period, source, frozen_at, frozen_by, item_count, summary) VALUES (?, ?, ?, ?, ?, ?, ?)")
+		.run(freezeId, period, source, frozenAt, actor || "system", items.length, JSON.stringify(figures));
+	const ins = db.prepare(`INSERT INTO financials_ledger_items (${LEDGER_ITEM_COLS.join(", ")}, freeze_id, frozen_at) VALUES (${LEDGER_ITEM_COLS.map(() => "?").join(", ")}, ?, ?)`);
+	for (const i of items) {
+		ins.run(period, i.ownerId || 0, i.kind, i.adjusts || "", i.day || "", i.cents, i.loadId || "", i.driver || "", i.truck || "",
+			i.expenseId == null ? null : i.expenseId, i.sourceId == null ? null : i.sourceId, i.expenseType || "", i.payType || "",
+			i.pickupState || "", i.deliveryState || "", freezeId, frozenAt);
+	}
+	return { freezeId, figures };
+}
+
+// Financials' books: open months live from computeFleetLedger(), closed months
+// as settled. A closed month reads its frozen items when it has them; until then
+// (a month closed before freezing existed) it reads exactly what the one-time
+// freeze would write for it (settledMonthItems()). Every item carries
+// basis 'live' or 'settled'.
+async function buildFinancialsLedger() {
+	const fleet = await computeFleetLedger();
+	const locked = new Set(db.prepare("SELECT period FROM period_locks WHERE period_locks.status = 'locked'").all().map((r) => r.period));
+	const frozen = new Map([...frozenPeriodSet()].map((p) => [p, []]));
+	for (const r of db.prepare("SELECT * FROM financials_ledger_items ORDER BY id").all()) {
+		if (frozen.has(r.period)) frozen.get(r.period).push(ledgerItemFromRow(r));
+	}
+	const settledFor = settledPayoutRows();
+	const items = [];
+	const months = new Set();
+	for (const scope of fleet.scopes) {
+		for (const m of scope.months) months.add(m.month);
+		for (const it of scope.items) if (!locked.has(it.month)) items.push({ ...it, basis: "live" });
+	}
+	for (const period of locked) {
+		const its = frozen.has(period) ? frozen.get(period) : settledMonthItems(fleet, period, settledFor(period));
+		for (const it of its) items.push({ ...it, basis: "settled" });
+	}
+	// Every month an item counts in, so the monthly table and the totals agree.
+	for (const it of items) months.add(it.month);
+	return {
+		items,
+		months: [...months].sort(),
+		lockedPeriods: locked,
+		frozenPeriods: new Set(frozen.keys()),
+		overlaps: fleet.overlaps,
+		currentMonthKey: fleet.currentMonthKey,
+	};
+}
+
 function computeLossCarryForward(monthlyEarnings) {
 	return investorPayoutBasis.carryForward(monthlyEarnings);
 }
@@ -54311,6 +54486,117 @@ app.post("/api/periods/:period/finalize", requireRole("Super Admin"), refuseCros
 	}
 });
 
+// The plan of the one-time freeze: every closed month with no frozen items yet,
+// and the items each would be frozen with (settledMonthItems(), exactly what
+// Financials shows for it now). `fingerprint` identifies the plan; apply takes
+// it back, so what is written is what was previewed.
+async function closedMonthFreezePlan() {
+	const fleet = await computeFleetLedger();
+	const frozen = frozenPeriodSet();
+	const locked = db.prepare("SELECT period FROM period_locks WHERE period_locks.status = 'locked' ORDER BY period").all().map((r) => r.period);
+	const settledFor = settledPayoutRows();
+	const periods = [];
+	const payoutRowsByPeriod = new Map();
+	for (const r of db.prepare("SELECT owner_id, period, amount, adjustment, finalized_breakdown FROM investor_payouts").all()) {
+		if (!payoutRowsByPeriod.has(r.period)) payoutRowsByPeriod.set(r.period, []);
+		payoutRowsByPeriod.get(r.period).push(r);
+	}
+	for (const period of locked) {
+		if (frozen.has(period)) continue;
+		const settled = settledFor(period);
+		const items = settledMonthItems(fleet, period, settled);
+		const figures = financialsCalc.monthFiguresFromItems(items)[period]
+			|| { revenue: 0, driverPay: 0, fixedCosts: 0, tripExpenses: 0, maintFundCost: 0, complianceCost: 0, netProfit: 0 };
+		const adjustments = items.filter((i) => i.kind === "settlement_adjustment")
+			.map((i) => ({ ownerId: i.ownerId, adjusts: i.adjusts, amount: i.cents / 100 }));
+		// Uncertain: an investor-month settled before breakdowns were recorded has
+		// no figures to settle its items against, only its payout amount. Listed,
+		// with that amount, and left out of the apply unless the owner includes it
+		// (owner decision D1 freezes closed months as they stand).
+		const unverified = (payoutRowsByPeriod.get(period) || [])
+			.filter((r) => { const st = settled(r.owner_id); return st && !st.breakdown; })
+			.map((r) => ({ ownerId: r.owner_id, settledPayout: Math.max(0, Math.round(((Number(r.amount) || 0) + (Number(r.adjustment) || 0)) * 100) / 100) }));
+		const toCompany = fleet.scopes.filter((sc) => sc.ownerId && !settled(sc.ownerId) && sc.items.some((i) => i.month === period))
+			.map((sc) => sc.ownerId);
+		periods.push({
+			period, items, itemCount: items.length, figures, adjustments, unverifiedOwners: unverified, ownersWithoutPayoutRow: toCompany,
+			ambiguousLoads: ambiguousBlankOwnerLoads(fleet, period),
+		});
+	}
+	const fingerprint = crypto.createHash("sha256")
+		.update(JSON.stringify(periods.map((p) => [p.period, p.items.map((i) => [i.kind, i.adjusts || "", i.ownerId || 0, i.day || "", i.cents, i.loadId || "", i.expenseId || 0, i.sourceId || 0, i.driver || "", i.truck || ""])])))
+		.digest("hex");
+	return { periods, fingerprint, overlaps: fleet.overlaps };
+}
+
+// POST /api/admin/financials/freeze-closed-months — the one-time freeze of the
+// months closed before Financials froze its line items at close (owner decision
+// D1/D2, 2026-10-02). A data fix: a dry run unless the body says
+// { apply: true, fingerprint } with the dry run's fingerprint; idempotent (a
+// month already frozen is never written again, and the triggers refuse a second
+// freeze); each month written is logged in the audit log as a system change. A
+// month the freeze is unsure of (an investor-month settled before breakdowns
+// were recorded, or a blank-Owner-ID load counted for a different owner than
+// the one whose truck its driver held then) is listed and left out unless the
+// body also says includeUnverified: true. Writes Financials' line items only: no
+// payout row, settled amount or receipt changes.
+app.post("/api/admin/financials/freeze-closed-months", requireRole("Super Admin"), refuseCrossOrigin, async (req, res) => {
+	try {
+		const plan = await closedMonthFreezePlan();
+		const summary = plan.periods.map((p) => ({
+			period: p.period, itemCount: p.itemCount, figures: p.figures, adjustments: p.adjustments,
+			unverifiedOwners: p.unverifiedOwners, ownersWithoutPayoutRow: p.ownersWithoutPayoutRow, ambiguousLoads: p.ambiguousLoads,
+		}));
+		if (req.body?.apply !== true) {
+			return res.json({ dryRun: true, fingerprint: plan.fingerprint, periods: summary, overlaps: plan.overlaps });
+		}
+		if (typeof req.body.fingerprint !== "string" || req.body.fingerprint !== plan.fingerprint) {
+			return res.status(409).json({
+				error: "The figures changed since the dry run, so nothing was frozen. Run the dry run again and apply its fingerprint.",
+				code: "FREEZE_PLAN_CHANGED",
+				fingerprint: plan.fingerprint,
+			});
+		}
+		const actor = req.session.user.username || "admin";
+		const frozenAt = new Date().toISOString();
+		const includeUnverified = req.body.includeUnverified === true;
+		const needsReview = (p) => p.unverifiedOwners.length > 0 || p.ambiguousLoads.length > 0;
+		const written = [];
+		db.transaction(() => {
+			for (const p of plan.periods) {
+				// A month the freeze is unsure of is frozen only when the owner
+				// includes those months on purpose.
+				if (needsReview(p) && !includeUnverified) continue;
+				// Re-read inside the transaction: a close or another freeze may have
+				// frozen it meanwhile.
+				if (frozenPeriodSet().has(p.period)) continue;
+				writeLedgerFreeze(p.period, p.items, { source: "one-time", actor, frozenAt });
+				written.push(p);
+			}
+		})();
+		for (const p of written) {
+			const f = p.figures;
+			const usd = (v) => `$${Number(v || 0).toFixed(2)}`;
+			logAudit({}, "financials_freeze", "period", p.period,
+				`froze ${p.itemCount} Financials item(s) for ${p.period} at the request of ${actor}: revenue ${usd(f.revenue)}, driver pay ${usd(f.driverPay)}, ` +
+				`fixed ${usd(f.fixedCosts)}, trip ${usd(f.tripExpenses)}, maintenance fund ${usd(f.maintFundCost)}, compliance ${usd(f.complianceCost)}; ` +
+				`${p.adjustments.length} settlement adjustment(s)` +
+				(p.unverifiedOwners.length ? `; settled without a breakdown (frozen as recomputed, included on purpose): owner ${p.unverifiedOwners.map((u) => u.ownerId).join(", ")}` : "") +
+				(p.ambiguousLoads.length ? `; blank-Owner-ID load(s) counted as they stand today (included on purpose): ${p.ambiguousLoads.map((l) => l.loadId).join(", ")}` : "") +
+				(p.ownersWithoutPayoutRow.length ? `; no payout row, items booked to the company: owner ${p.ownersWithoutPayoutRow.join(", ")}` : ""));
+		}
+		res.json({
+			applied: true,
+			frozenPeriods: written.map((p) => p.period),
+			skipped: plan.periods.length - written.length,
+			leftForReview: includeUnverified ? [] : plan.periods.filter(needsReview).map((p) => p.period),
+		});
+	} catch (err) {
+		console.error("POST /api/admin/financials/freeze-closed-months error:", err.message);
+		res.status(500).json({ error: "Failed to freeze closed months" });
+	}
+});
+
 // POST /api/periods/:period/reopen — walk a finalized month back open. Requires a
 // reason, exactly like reopening a settled payout: this un-freezes figures that
 // may already be on a delivered statement.
@@ -54369,14 +54655,19 @@ app.post("/api/periods/:period/reopen", requireRole("Super Admin"), refuseCrossO
 			// Re-link ONLY still-owed rows to live earnings. A processing/paid row
 			// keeps its snapshot: its money moved against a document that was already
 			// issued, and unfinalizing must not retroactively rewrite that statement.
-			return db.prepare(
+			// Financials reads the month live again; the next close freezes it anew.
+			// The earlier freeze's row stays as history, marked released.
+			const unfrozen = db.prepare("DELETE FROM financials_ledger_items WHERE period = ?").run(period).changes;
+			db.prepare("UPDATE financials_ledger_freezes SET released_at = ? WHERE period = ? AND released_at = ''").run(nowIso, period);
+			const relinkedRows = db.prepare(
 				"UPDATE investor_payouts SET finalized_at = '', finalized_amount = NULL, finalized_breakdown = '' WHERE period = ? AND status = 'owed'"
 			).run(period).changes;
+			return { relinkedRows, unfrozen };
 		});
-		const relinked = reopenTx();
+		const { relinkedRows: relinked, unfrozen } = reopenTx();
 
 		logAudit(req, "period_reopen", "period", period,
-			`REOPENED ${period} (${relinked} owed row(s) re-linked to live earnings; ${diverted.c} redirected receipt(s) left in place): ${reason}`);
+			`REOPENED ${period} (${relinked} owed row(s) re-linked to live earnings; ${unfrozen} frozen Financials item(s) released; ${diverted.c} redirected receipt(s) left in place): ${reason}`);
 
 		res.json({
 			success: true,
@@ -54765,6 +55056,31 @@ function closingFingerprint(periods) {
 	]);
 }
 
+// The items each closing month freezes with: the fleet's items for it, settled
+// against the breakdown each investor's row is about to be stamped with
+// (`ledgers`: the reconcile results of the close's compute phase), or the one it
+// already carries.
+async function closingLedgerItems(periods, ledgers) {
+	const fleet = await computeFleetLedger();
+	const byOwner = new Map(ledgers.map((l) => [l.ownerId, l.payouts]));
+	const stored = settledPayoutRows();
+	const out = new Map();
+	for (const period of periods) {
+		out.set(period, settledMonthItems(fleet, period, (ownerId) => {
+			const p = (byOwner.get(ownerId) || []).find((x) => x.period === period);
+			if (!p) return null;
+			// A row that keeps an earlier stamp (a paid or processing row, which a
+			// reopen leaves as it was) settled at that stamp's breakdown, not today's.
+			if (p.finalizedAt) {
+				const s = stored(period)(ownerId);
+				if (s && s.breakdown) return s;
+			}
+			return { breakdown: p.breakdown || null };
+		}));
+	}
+	return out;
+}
+
 // Close a set of periods: freeze each investor's figure, then take the lock.
 //
 // Two phases, and only the second writes anything a closed month keeps:
@@ -54776,6 +55092,7 @@ function closingFingerprint(periods) {
 //               live figure. This needs the Job Tracking sheet; if it throws,
 //               nothing has been stamped or locked and the month is still open.
 //   2. FREEZE (one synchronous transaction) — stamp every row of these months,
+//               write their Financials line items (financials_ledger_items),
 //               then take the locks. No await inside, so nothing interleaves
 //               between the stamp and the lock, and the two land together or
 //               not at all. The closed-month triggers
@@ -54845,6 +55162,18 @@ async function finalizePeriods(periods, actor) {
 		}
 	}
 
+	// The month's line items, for Financials, frozen in the same transaction. A
+	// failure here never holds up the payout close: the month closes, and its
+	// Financials figures can be frozen afterwards by the one-time freeze.
+	let freezeItems = null;
+	let freezeError = "";
+	try {
+		freezeItems = await closingLedgerItems(toClose, ledgers);
+	} catch (e) {
+		freezeError = e.message;
+		console.error(`[period-close] Financials items for ${toClose.join(", ")} not computed: ${e.message}`);
+	}
+
 	// Freeze a still-owed row at the live recompute. The reconcile above has just
 	// refreshed `amount` to it while the month was open; `recomputedAmount` is the
 	// same figure and is preferred so the stamp never depends on that refresh.
@@ -54865,11 +55194,9 @@ async function finalizePeriods(periods, actor) {
 	);
 	const storedRow = db.prepare("SELECT amount, adjustment FROM investor_payouts WHERE owner_id = ? AND period = ?");
 
-	const stampLeftover = db.prepare(
-		`UPDATE investor_payouts SET finalized_at = ?, finalized_amount = amount
-		  WHERE period = ? AND COALESCE(finalized_at,'') = ''`
-	);
-	const outcome = db.transaction(() => {
+	// Thrown inside the freeze to roll it back whole and retry on the next pass.
+	class CloseRetry extends Error {}
+	const freeze = db.transaction(() => {
 		if (toClose.some((p) => isLocked(p))) return { retry: true, reason: "closed" };
 		if (closingFingerprint(toClose) !== before) return { retry: true, reason: "changed" };
 		const nowIso = new Date().toISOString();
@@ -54913,16 +55240,35 @@ async function finalizePeriods(periods, actor) {
 				}
 			}
 		}
-		// A row created for an owner outside this close's reconcile (one no
-		// settlable investor owns) is stamped at its own amount, so no row is left
-		// in a locked month without a stamp; the triggers would refuse it later.
-		for (const p of toClose) stamped += stampLeftover.run(nowIso, p).changes;
+		// A row this close's reconcile did not cover (created meanwhile, or for an
+		// owner no settlable investor is) would be locked without its snapshot,
+		// and the triggers refuse to stamp it later. So the close does not freeze
+		// around it: nothing is written and the next pass, which reconciles that
+		// row's owner too, closes the month.
+		if (db.prepare(`SELECT 1 FROM investor_payouts WHERE period IN (${ph}) AND COALESCE(finalized_at,'') = '' LIMIT 1`).get(...toClose)) {
+			throw new CloseRetry();
+		}
+		if (freezeItems) for (const p of toClose) writeLedgerFreeze(p, freezeItems.get(p) || [], { source: "close", actor, frozenAt: nowIso });
 		for (const p of toClose) takeLock.run(p, nowIso, actor || "system");
 		return { retry: false, stamped, overAdjusted };
-	})();
+	});
+	let outcome;
+	try {
+		outcome = freeze();
+	} catch (e) {
+		if (!(e instanceof CloseRetry)) throw e;
+		outcome = { retry: true, reason: "changed" };
+	}
 	if (outcome.retry) {
 		console.warn(`[period-close] ${toClose.join(", ")} not closed: ${outcome.reason === "closed" ? "another close locked one of them first" : "their figures changed while they were being computed; the next pass recomputes"}.`);
 		return { stamped: 0, investors: owners.length, periods: [], retry: true, reason: outcome.reason };
+	}
+	if (!freezeItems) {
+		try {
+			insertDispatchNotification.run("period-close", "ACTION NEEDED — Financials figures not frozen at close",
+				`${toClose.map(periodLabel).join(", ")} closed and their payouts are frozen, but their Financials line items could not be computed (${freezeError}). Freeze them with the one-time freeze (POST /api/admin/financials/freeze-closed-months).`,
+				JSON.stringify({ periods: toClose, stage: "financials-freeze" }));
+		} catch {}
 	}
 	for (const o of outcome.overAdjusted) {
 		const unapplied = -(o.amount + o.adjustment);
@@ -55024,7 +55370,7 @@ async function maybeCloseFinishedPeriods() {
 		// one behind, and a month locked by the baseline seed is final as recorded:
 		// stamping it now would recompute a closed month's figure.
 		const work = [...new Set(due)];
-		if (!work.length) { periodCloseFailStreak = 0; return; }
+		if (!work.length) { periodCloseFailStreak = 0; periodCloseRetryStreak = 0; return; }
 
 		stage = "finalize";
 		// One batched pass: each investor is reconciled ONCE, then every due
@@ -55792,116 +56138,75 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		reconciledExpenses.fixed_costs = Math.round(totalFixedCosts);
 		reconciledExpenses.compliance = Math.round((expByCategory.compliance || 0) + compSum);
 
-		// ---- Monthly performance breakdown (revenue / expenses / net per
-		// calendar month, oldest → current incl. month-to-date) ----
-		// Mirrors /api/investor's monthlyEarnings so the two views reconcile:
-		// revenue by assigned month; fixed pay = month active-days × daily rate;
-		// percentage pay = max(0, monthRevenue − monthDeductible) × pct; plus
-		// per-month trip expenses (expenses table) and truck fixed costs.
-		// Monthly expenses exclude the maintenance-fund and compliance buckets
-		// (not date-bucketed here), so the annual KPIs remain authoritative.
-		// Also exposes the per-month intermediates (driver pay / trip expenses /
-		// fixed costs) so the optional ?month= drill-down below reuses the exact
-		// same numbers as the table rows instead of forking the math.
-		const { monthlyPerformance, monthlyDriverPay, monthlyTripExp, monthlyFixedCosts } = (() => {
-			const pad = (n) => String(n).padStart(2, "0");
-			// Houston month, not server-local: on the UTC VPS a plain getMonth() flips at
-			// 19:00 (CDT) / 18:00 (CST) Houston on the last day of the month, so for the
-			// final 5-6 hours of every month the portal showed the NEXT month accruing at
-			// $0 and treated the just-ended one as complete. houstonDay() is the same
-			// Central basis the stamps and the close lifecycle now use.
-			const currentMonthKey = houstonDay(now).slice(0, 7);
-
-			// Driver pay per month.
-			const monthlyDriverPay = {};
-			const payDrivers = new Set([
-				...Object.keys(driverMonthlyDays),
-				...Object.keys(driverMonthlyRevenue),
-			]);
-			for (const driver of payDrivers) {
-				const struct = payStructures[driver] || { payType: "fixed", payPercentage: 0 };
-				if (struct.payType === "percentage") {
-					const revByMonth = driverMonthlyRevenue[driver] || {};
-					const expByMonth = expensesByDriverMonth[driver] || {};
-					for (const [mk, monthRev] of Object.entries(revByMonth)) {
-						const net = Math.max(0, monthRev - (expByMonth[mk] || 0));
-						monthlyDriverPay[mk] = (monthlyDriverPay[mk] || 0)
-							+ Math.round((net * struct.payPercentage / 100) * 100) / 100;
-					}
-				} else {
-					const rate = resolveDailyRate(struct.payDaily, trucksByDriver[driver]);
-					for (const [mk, daySet] of Object.entries(driverMonthlyDays[driver] || {})) {
-						monthlyDriverPay[mk] = (monthlyDriverPay[mk] || 0) + daySet.size * rate;
-					}
-				}
-			}
-
-			// Trip expenses per month (expenses table — same source as the
-			// Expense Categories chart's trip rows).
-			const monthlyTripExp = {};
-			for (const m of expensesByMonth) {
-				monthlyTripExp[m.month] = (m.fuel || 0) + (m.maintenance || 0) + (m.repair || 0)
-					+ (m.toll || 0) + (m.food || 0) + (m.other || 0);
-			}
-
-			// Fixed costs per month — constant per truck in the fleet (any status
-			// but Inactive) for every month
-			// from its in-service month onward (maintenance-fund reserve omitted,
-			// same as the fleet totals). Whole dollars here, unlike the investor
-			// drill-down's cents — that rounding is this chart's own convention and
-			// is left alone.
-			const fixedTrucks = db.prepare(
-				`SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE ${investorPayoutBasis.truckInFleetSql()}`
-			).all();
-			const monthlyFixedCosts = (mk) => {
-				let total = 0;
-				for (const t of fixedTrucks) {
-					// Not in service yet, or already retired — shared predicate.
-					if (!truckChargedInMonth(t, mk)) continue;
-					total += (t.insurance_monthly || 0) + (t.eld_monthly || 0) + (t.truck_payment_monthly || 0)
-						+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12);
-				}
-				return Math.round(total);
+		// ---- The books: monthly performance and the headline money figures ----
+		// One calculation with the payout ledger (buildFinancialsLedger(), over
+		// lib/financials-calc.js): revenue in the Assigned month, receipts in their
+		// posted period, a load's driver days in its Assigned month, $0 fixed costs
+		// in an idle month, cents throughout. Open months are live; a closed month
+		// is exactly what it settled at, frozen with the month or, before its
+		// freeze, its live items plus the "Settlement adjustment" lines that bring
+		// each settled investor-month to its breakdown. The maintenance-fund and
+		// compliance lines are in every month, as in the payout ledger.
+		const books = await buildFinancialsLedger();
+		const bookFigures = financialsCalc.monthFiguresFromItems(books.items);
+		const money = (v) => Math.round(Number(v || 0) * 100) / 100;
+		const finCurrentMonthKey = houstonDay(now).slice(0, 7);
+		const monthFigures = (mk) => bookFigures[mk]
+			|| { revenue: 0, driverPay: 0, fixedCosts: 0, tripExpenses: 0, maintFundCost: 0, complianceCost: 0, netProfit: 0 };
+		const monthRow = (mk) => {
+			const f = monthFigures(mk);
+			const totalExp = f.driverPay + f.tripExpenses + f.fixedCosts + f.maintFundCost + f.complianceCost;
+			return {
+				month: mk,
+				revenue: money(f.revenue),
+				driverPay: money(f.driverPay),
+				tripExpenses: money(f.tripExpenses),
+				fixedCosts: money(f.fixedCosts),
+				maintFundCost: money(f.maintFundCost),
+				complianceCost: money(f.complianceCost),
+				totalExpenses: money(totalExp),
+				netProfit: money(f.revenue - totalExp),
+				isCurrentMonth: mk === finCurrentMonthKey,
+				basis: books.lockedPeriods.has(mk) ? "settled" : "live",
 			};
-
-			// Walk every month from the earliest load month to the current month.
-			const startKey = earliestDate
-				? `${earliestDate.getFullYear()}-${pad(earliestDate.getMonth() + 1)}`
-				: currentMonthKey;
-			const out = [];
-			let cursor = new Date(parseInt(startKey.slice(0, 4), 10), parseInt(startKey.slice(5, 7), 10) - 1, 1);
-			const endDate = new Date(now.getFullYear(), now.getMonth(), 1);
-			let guard = 0;
-			while (cursor <= endDate && guard++ < 600) {
-				const mk = `${cursor.getFullYear()}-${pad(cursor.getMonth() + 1)}`;
-				const revenue = monthlyRevenue[mk] || 0;
-				const driverPay = monthlyDriverPay[mk] || 0;
-				const tripExpenses = monthlyTripExp[mk] || 0;
-				const fixedCosts = monthlyFixedCosts(mk);
-				const totalExp = driverPay + tripExpenses + fixedCosts;
-				out.push({
-					month: mk,
-					revenue: Math.round(revenue),
-					driverPay: Math.round(driverPay),
-					tripExpenses: Math.round(tripExpenses),
-					fixedCosts,
-					totalExpenses: Math.round(totalExp),
-					netProfit: Math.round(revenue - totalExp),
-					isCurrentMonth: mk === currentMonthKey,
-				});
-				cursor.setMonth(cursor.getMonth() + 1);
+		};
+		const monthlyPerformance = books.months.map(monthRow);
+		// All-time totals and the expense categories, from the same items. Also
+		// each category's share of the costs, so no page divides money itself.
+		const KIND_CATEGORY = { driver_pay: "driver_pay", fixed: "fixed_costs", maint_fund: "maintenance", compliance: "compliance", trip: "other" };
+		const categoriesOf = (items) => {
+			const categories = { fuel: 0, maintenance: 0, repair: 0, toll: 0, food: 0, other: 0, driver_pay: 0, fixed_costs: 0, compliance: 0 };
+			const trip = { fuel: 0, maintenance: 0, repair: 0, toll: 0, food: 0, other: 0 };
+			let revenueCents = 0;
+			for (const it of items) {
+				const kind = it.kind === "settlement_adjustment" ? it.adjusts : it.kind;
+				if (kind === "revenue") { revenueCents += it.cents; continue; }
+				if (it.kind === "trip") {
+					const t = String(it.expenseType || "").trim().toLowerCase();
+					const cat = Object.prototype.hasOwnProperty.call(trip, t) ? t : "other";
+					categories[cat] += it.cents / 100;
+					trip[cat] += it.cents / 100;
+				} else if (KIND_CATEGORY[kind]) {
+					categories[KIND_CATEGORY[kind]] += it.cents / 100;
+				}
 			}
-			return { monthlyPerformance: out, monthlyDriverPay, monthlyTripExp, monthlyFixedCosts };
-		})();
+			const positive = Object.values(categories).filter((v) => v > 0).reduce((sum, v) => sum + v, 0);
+			const shares = {};
+			for (const [k, v] of Object.entries(categories)) shares[k] = positive > 0 && v > 0 ? Math.round((v / positive) * 1000) / 10 : 0;
+			return { categories, trip, revenueCents, total: Object.values(categories).reduce((sum, v) => sum + v, 0), shares };
+		};
+		const allTime = categoriesOf(books.items);
+		const bookCategories = allTime.categories;
+		const tripCategories = allTime.trip;
+		const bookRevenueCents = allTime.revenueCents;
+		const bookTotalExpenses = allTime.total;
+
 
 		// ---- Month drill-down (?month=YYYY-MM) ----
-		// Built from the SAME aggregates that feed monthlyPerformance (revenue
-		// by assigned month, driverMonthlyDays for active-day pay, strftime
-		// month-bucketed trip expenses with EXPENSE_PNL_FILTER), so the modal
-		// reconciles with the row the admin clicked by construction. Like the
-		// monthly table, it excludes the maintenance-fund and compliance
-		// buckets (not month-bucketed in this P&L) — the annual KPIs remain
-		// authoritative for those.
+		// Built from the same books items as the monthlyPerformance row the admin
+		// clicked (buildFinancialsLedger()), so the modal reconciles with it: a
+		// closed month as settled, an open month live. The fuel analytics are the
+		// one part read by receipt date (they measure the world, not the books).
 		let monthDetail = null;
 		if (monthParam) {
 			const pad2 = (n) => String(n).padStart(2, "0");
@@ -55922,46 +56227,26 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			const elapsedDays = isCurrentMonth ? Math.max(1, now.getDate()) : daysInMonth;
 			const weeksElapsed = elapsedDays / 7;
 
-			// Same formula as the monthlyPerformance rows — keep in lockstep.
-			const summarizeMonth = (mk) => {
-				const revenue = monthlyRevenue[mk] || 0;
-				const driverPay = monthlyDriverPay[mk] || 0;
-				const tripExpenses = monthlyTripExp[mk] || 0;
-				const fixedCosts = monthlyFixedCosts(mk);
-				const totalExpenses = driverPay + tripExpenses + fixedCosts;
-				return {
-					month: mk,
-					revenue: Math.round(revenue),
-					driverPay: Math.round(driverPay),
-					tripExpenses: Math.round(tripExpenses),
-					fixedCosts,
-					totalExpenses: Math.round(totalExpenses),
-					netProfit: Math.round(revenue - totalExpenses),
-				};
-			};
+			// Same figures as the monthlyPerformance row the admin clicked.
+			const summarizeMonth = (mk) => monthRow(mk);
 			const cur = summarizeMonth(monthParam);
 			const prev = summarizeMonth(prevMk);
 			const prevHasData = prev.revenue !== 0 || prev.totalExpenses !== 0;
 
 			// Expense split for the month: trip categories (same strftime
 			// bucketing as expensesByMonth) plus the two P&L-level buckets.
-			const catRow = expensesByMonthMap[monthParam]
-				|| { fuel: 0, maintenance: 0, repair: 0, toll: 0, food: 0, other: 0 };
-			const expenseCategories = {
-				fuel: Math.round(catRow.fuel || 0),
-				maintenance: Math.round(catRow.maintenance || 0),
-				repair: Math.round(catRow.repair || 0),
-				toll: Math.round(catRow.toll || 0),
-				food: Math.round(catRow.food || 0),
-				other: Math.round(catRow.other || 0),
-				driver_pay: cur.driverPay,
-				fixed_costs: cur.fixedCosts,
-			};
+			// Everything below except the fuel analytics comes from the same books
+			// items as the headline, so the drill-down reconciles with it: a closed
+			// month as settled, an open month live.
+			const monthItems = books.items.filter((i) => i.month === monthParam);
+			const monthBooks = categoriesOf(monthItems);
+			const expenseCategories = Object.fromEntries(Object.entries(monthBooks.categories).map(([k, v]) => [k, money(v)]));
+			const expenseCategoryShares = monthBooks.shares;
 
 			// Fuel analytics for the month — same source/filters as
-			// /api/expenses/fuel-analytics (LOWER(type)='fuel', Rejected
-			// excluded) with the same strftime month bucket as the category
-			// rows, so fuel.spend === expenseCategories.fuel.
+			// /api/expenses/fuel-analytics (LOWER(type)='fuel', Rejected excluded),
+			// by the receipt's own date: they measure the world, while
+			// expenseCategories are the books (a receipt's posted period).
 			const fuelTotals = db.prepare(
 				`SELECT COALESCE(SUM(amount),0) AS spend, COALESCE(SUM(gallons),0) AS gallons, COUNT(*) AS fills
 				 FROM expenses WHERE LOWER(type)='fuel' AND strftime('%Y-%m', date)=? AND ${EXPENSE_PNL_FILTER}`
@@ -55998,39 +56283,20 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 
 			// Loads assigned to this month (revenue-bearing completed loads —
 			// the same rows monthlyRevenue counted).
-			const monthLoads = completedLoads.filter((l) => l.monthKey === monthParam);
-			const monthLoadsSorted = [...monthLoads].sort((a, b) => b.amount - a.amount);
-			const monthLoadRevenue = monthLoads.reduce((s, l) => s + l.amount, 0);
-			const briefLoad = (l) => l
-				? { loadId: l.loadId, driver: l.driver, amount: Math.round(l.amount), date: l.date }
-				: null;
+			// Loads: the month's revenue items (each load in its Assigned month).
+			const revenueItems = monthItems.filter((i) => i.kind === "revenue");
+			const loadsSorted = [...revenueItems].sort((x, y) => y.cents - x.cents);
+			const monthLoadRevenue = revenueItems.reduce((sum, i) => sum + i.cents, 0) / 100;
+			const briefLoad = (i) => (i ? { loadId: i.loadId, driver: driverDisplayNames[i.driver] || i.driver, amount: Math.round(i.cents / 100), date: i.day } : null);
 			const loads = {
-				count: monthLoads.length,
-				avgRevenuePerLoad: monthLoads.length
-					? Math.round(monthLoadRevenue / monthLoads.length) : 0,
-				avgLoadsPerDay: Math.round((monthLoads.length / elapsedDays) * 100) / 100,
+				count: revenueItems.length,
+				avgRevenuePerLoad: revenueItems.length ? Math.round(monthLoadRevenue / revenueItems.length) : 0,
+				avgLoadsPerDay: Math.round((revenueItems.length / elapsedDays) * 100) / 100,
 				avgRevenuePerDay: Math.round(monthLoadRevenue / elapsedDays),
-				highest: briefLoad(monthLoadsSorted[0] || null),
-				lowest: briefLoad(monthLoadsSorted.length
-					? monthLoadsSorted[monthLoadsSorted.length - 1] : null),
+				highest: briefLoad(loadsSorted[0] || null),
+				lowest: briefLoad(loadsSorted.length ? loadsSorted[loadsSorted.length - 1] : null),
 			};
 
-			// Invoices whose Sat–Fri billing week OVERLAPS this month. Weekly
-			// invoices straddle month boundaries, so this is the closest faithful
-			// mapping to "this month's invoices" — the UI footnotes it. Rejected
-			// invoices never count. `adjustment` carries admin deductions (−) /
-			// bonuses (+), so invoiced = total_earnings + adjustment.
-			//
-			// ⚠️ `deleted_at = ''` IS NOT OPTIONAL, and its absence was a live money
-			// bug. DELETE /api/invoices/:id is a SOFT delete — the row keeps its
-			// `total_earnings` and `adjustment` and simply disappears from every list
-			// — so without this predicate a deleted invoice still contributed to this
-			// drill-down's `invoiced` and `adjustments` totals, and to the per-driver
-			// rows built from them. Every other reader of this table filters it
-			// (`GET /api/invoices`, buildPaymentReport(), the rename cascade's counts,
-			// the restore clash probe, the weekly duplicate guard); this one did not,
-			// so the Financials month detail was the single surface where a deleted
-			// invoice still showed as billed.
 			const monthStartStr = `${monthParam}-01`;
 			const monthEndStr = `${monthParam}-${pad2(daysInMonth)}`;
 			// Null-prototype, and an invoice whose driver reads as a built-in
@@ -56048,83 +56314,81 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				invByDriver[k].adjustments += r.adj;
 			});
 
-			// Per-driver pay detail for the month. Same branch math as the
-			// monthlyDriverPay loop above (fixed: month active days × per-truck
-			// daily rate; percentage: max(0, month revenue − deductible) × pct),
-			// so the rows sum back to summary.driverPay.
-			const monthDriverRows = [];
-			const monthDriverKeys = new Set([
-				...Object.keys(driverMonthlyDays),
-				...Object.keys(driverMonthlyRevenue),
-				...Object.keys(invByDriver),
-			]);
-			for (const drv of monthDriverKeys) {
-				const struct = payStructures[drv] || { payType: "fixed", payPercentage: 0 };
-				const activeDays = driverMonthlyDays[drv]?.[monthParam]?.size || 0;
-				const revenue = (driverMonthlyRevenue[drv] || {})[monthParam] || 0;
-				let pay, dailyRate;
-				if (struct.payType === "percentage") {
-					const deductible = (expensesByDriverMonth[drv] || {})[monthParam] || 0;
-					pay = Math.round((Math.max(0, revenue - deductible) * struct.payPercentage / 100) * 100) / 100;
-					dailyRate = 0;
-				} else {
-					dailyRate = resolveDailyRate(struct.payDaily, trucksByDriver[drv]);
-					pay = activeDays * dailyRate;
+			// Drivers: the month's driver-pay and revenue items, per driver. A
+			// Settlement adjustment belongs to no driver: it is in the headline only.
+			const byDriver = new Map();
+			const driverEntry = (k) => {
+				if (!byDriver.has(k)) byDriver.set(k, { payCents: 0, revenueCents: 0, days: new Set(), percentage: false });
+				return byDriver.get(k);
+			};
+			for (const it of monthItems) {
+				if (!it.driver) continue;
+				if (it.kind === "driver_pay") {
+					const e = driverEntry(it.driver);
+					e.payCents += it.cents;
+					if (it.payType === "percentage") e.percentage = true;
+					else if (it.day) e.days.add(it.day);
+				} else if (it.kind === "revenue") {
+					driverEntry(it.driver).revenueCents += it.cents;
 				}
+			}
+			for (const k of Object.keys(invByDriver)) driverEntry(k);
+			const monthDriverRows = [];
+			for (const [drv, e] of byDriver) {
+				const struct = payStructures[drv] || { payType: "fixed", payPercentage: 0 };
 				const inv = invByDriver[drv] || null;
-				if (!activeDays && !revenue && !pay && !inv) continue;
+				const activeDays = e.days.size;
+				const pay = e.payCents / 100;
+				if (!activeDays && !e.revenueCents && !e.payCents && !inv) continue;
 				monthDriverRows.push({
 					name: driverDisplayNames[drv] || drv,
-					payType: struct.payType,
-					payPercentage: struct.payType === "percentage" ? struct.payPercentage : 0,
+					payType: e.percentage ? "percentage" : struct.payType,
+					payPercentage: e.percentage || struct.payType === "percentage" ? struct.payPercentage : 0,
 					activeDays,
-					dailyRate,
+					dailyRate: !e.percentage && activeDays ? Math.round((pay / activeDays) * 100) / 100 : 0,
 					pay: Math.round(pay),
-					revenue: Math.round(revenue),
-					// Revenue the driver generated minus their pay — the driver's
-					// contribution margin for the month.
-					margin: Math.round(revenue - pay),
+					revenue: Math.round(e.revenueCents / 100),
+					margin: Math.round((e.revenueCents - e.payCents) / 100),
 					invoiceCount: inv ? inv.count : 0,
 					invoicedTotal: inv ? Math.round(inv.invoiced) : 0,
 					adjustments: inv ? Math.round(inv.adjustments) : 0,
-					// Invoiced (incl. adjustments) − computed pay. Positive = the
-					// driver has invoiced MORE than the active-day estimate for the
-					// month (overage); negative = under. null when no invoice's
-					// billing week overlaps this month.
 					variance: inv ? Math.round(inv.invoiced - pay) : null,
 				});
 			}
-			monthDriverRows.sort((a, b) => b.pay - a.pay);
+			monthDriverRows.sort((x, y) => y.pay - x.pay);
 
-			// Per-truck daily rates + activity for the month. truckDaySets is the
-			// same completed-loads ∩ ELD-travel basis the annual per-truck pay
-			// uses, partitioned to this calendar month.
+			// Trucks: the days paid on each truck this month and that pay.
+			const byTruck = new Map();
+			for (const it of monthItems) {
+				if (it.kind !== "driver_pay" || !it.truck || !it.day) continue;
+				const k = String(it.truck).trim().toLowerCase();
+				if (!byTruck.has(k)) byTruck.set(k, { days: new Set(), payCents: 0 });
+				const e = byTruck.get(k);
+				e.days.add(it.day);
+				e.payCents += it.cents;
+			}
 			const perTruckMonth = [];
 			for (const t of allTrucks) {
-				const unitLower = (t.unit_number || "").toLowerCase();
-				const daySet = truckDaySets[unitLower];
-				let activeDays = 0;
-				if (daySet) for (const d of daySet) { if (d.startsWith(monthParam)) activeDays++; }
-				if (!activeDays) continue; // only trucks that worked this month
+				const e = byTruck.get((t.unit_number || "").toLowerCase());
+				if (!e || !e.days.size) continue; // only trucks that worked this month
 				const driverKey = normalizeDriverName(t.assigned_driver);
 				const struct = (driverKey && payStructures[driverKey]) || { payType: "fixed", payPercentage: 0 };
 				const driverDaily = Number(struct.payDaily) || 0;
 				const dailyRateRaw = t.driver_pay_daily || 0;
-				const dailyRate = resolveDailyRate(driverDaily, dailyRateRaw);
 				perTruckMonth.push({
 					unitNumber: t.unit_number,
 					assignedDriver: t.assigned_driver || "—",
-					activeDays,
-					dailyRate,
+					activeDays: e.days.size,
+					dailyRate: Math.round((e.payCents / 100 / e.days.size) * 100) / 100,
 					dailyRateIsDefault: driverDaily === 0 && dailyRateRaw === 0,
 					driverPayType: struct.payType,
-					estDriverPay: struct.payType === "percentage" ? null : activeDays * dailyRate,
+					estDriverPay: Math.round(e.payCents / 100),
 				});
 			}
-			perTruckMonth.sort((a, b) => b.activeDays - a.activeDays);
+			perTruckMonth.sort((x, y) => y.activeDays - x.activeDays);
 			const ratedTrucks = perTruckMonth.filter((t) => t.driverPayType !== "percentage");
 			const avgDailyRatePerTruck = ratedTrucks.length
-				? Math.round(ratedTrucks.reduce((s, t) => s + t.dailyRate, 0) / ratedTrucks.length)
+				? Math.round(ratedTrucks.reduce((sum, t) => sum + t.dailyRate, 0) / ratedTrucks.length)
 				: 0;
 
 			const pctDelta = (curV, prevV) =>
@@ -56149,6 +56413,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 					fuelSpend: fuel.spend - fuel.prevMonthSpend,
 				},
 				expenseCategories,
+				expenseCategoryShares,
 				fuel,
 				loads,
 				drivers: monthDriverRows,
@@ -56159,10 +56424,19 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 
 		res.json({
 			summary: {
-				totalRevenue: Math.round(totalRevenue),
-				totalExpenses: Math.round(totalExpenses),
-				netProfit: Math.round(netProfit),
-				biggestExpenseCategory: biggest,
+				totalRevenue: money(bookRevenueCents / 100),
+				totalExpenses: money(bookTotalExpenses),
+				netProfit: money(bookRevenueCents / 100 - bookTotalExpenses),
+				biggestExpenseCategory: (() => {
+					let top = { name: "—", amount: 0 };
+					for (const [cat, amt] of Object.entries(tripCategories)) {
+						if (amt > top.amount) top = { name: catLabels[cat] || cat, amount: Math.round(amt) };
+					}
+					return top;
+				})(),
+				// Closed months are as settled; open months are live.
+				closedMonths: [...books.lockedPeriods].sort(),
+				overlaps: books.overlaps.length,
 				avgRatePerMile,
 				totalMiles: fleetTotalMilesRounded,
 				monthsOfOperation,
@@ -56191,7 +56465,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				idleTruckCount,
 				idleOverhead: Math.round(idleOverhead),
 			},
-			expensesByCategory: reconciledExpenses,
+			expensesByCategory: Object.fromEntries(Object.entries(bookCategories).map(([k, v]) => [k, money(v)])),
 			expensesByMonth,
 			monthlyPerformance,
 			perTruck,

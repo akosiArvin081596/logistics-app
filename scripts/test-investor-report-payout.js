@@ -529,7 +529,7 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 	// ============================================= §9 fleet report at month end
 	section("§9 the fleet report at month end stops at Houston's month (the real monthly computation, a stubbed clock)");
 	{
-		const ME_NAMES = ["computeInvestorMonthlyEarnings", "computeLossCarryForward", "investorReportPayoutEntries",
+		const ME_NAMES = ["computeInvestorMonthlyEarnings", "gatherLedgerScopeFacts", "ledgerLoadRows", "computeLossCarryForward", "investorReportPayoutEntries",
 			"summarizeReportPayout", "reportPayoutNote", "periodLabel", "findCol", "pickAddressColumn", "moneySheetDate",
 			"houstonDay", "normalizeDriverName", "driverNameForTotals", "isBuiltInPropertyName", "resolveInvestorSplitPct"];
 		const ME = Object.fromEntries(ME_NAMES.map((n) => [n, extractFn(n)]));
@@ -573,6 +573,7 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 				reconcileInvestorPayouts: async () => { throw new Error("the fleet report reconciles no ledger"); },
 				investorReportOptions,
 				investorPayoutBasis,
+				financialsCalc: require("../lib/financials-calc"),
 				payoutBasisContext: (ownerId) => { if (ownerId) throw new Error("the fleet report settles no owner"); return null; },
 			};
 			const names = Object.keys(deps);

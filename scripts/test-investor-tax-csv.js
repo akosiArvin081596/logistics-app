@@ -397,8 +397,9 @@ async function allThree(src, sources) {
 }
 
 // ------------------------------------------------ the portal's copies (§4)
-// Each copy is the arrow GET /api/investor and computeInvestorMonthlyEarnings()
-// pass to filter(), lifted as it ships, with the columns it resolves.
+// Each copy is the arrow GET /api/investor and the payout ledger's row read
+// (ledgerLoadRows(), behind computeInvestorMonthlyEarnings()) pass to filter(),
+// lifted as it ships, with the columns it resolves.
 function portalCopy(src, what) {
 	const at = once(src, "const filteredJobData = investorDriverSet", `${what}'s filteredJobData`);
 	const arrow = src.indexOf(".filter(r => {", at);
@@ -414,7 +415,7 @@ function portalCopy(src, what) {
 }
 const PORTAL_COPIES = [
 	portalCopy(routeHandler('app.get("/api/investor", requireRole("Super Admin", "Investor"), '), "GET /api/investor"),
-	portalCopy(extractFn("computeInvestorMonthlyEarnings"), "computeInvestorMonthlyEarnings()"),
+	portalCopy(extractFn("ledgerLoadRows"), "ledgerLoadRows() (computeInvestorMonthlyEarnings())"),
 ];
 const regexOf = (literal) => new Function(`return ${literal};`)();
 const helperCol = (name) => {
