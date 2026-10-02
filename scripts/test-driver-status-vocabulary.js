@@ -364,9 +364,17 @@ check("CANCEL_REASON_REQUIRED survives untouched", CANCEL.includes("CANCEL_REASO
 
 // ⚠️ #211's carve-out. Cancelling a load a broker called off is ordinary business
 // in any month, and a guard that refuses ordinary work gets switched off — then it
-// protects nothing. This PR adds row validation ONLY.
-check("no period guard was smuggled into cancel (#211's deliberate carve-out)",
-	/dispatchWriteBlocker|statusOverrideBlocker|periodLocksReadable|sendPeriodRefusal|sendDispatchRefusal|isLocked\(/.test(CANCEL_CODE), false);
+// protects nothing. The one period check cancel carries is narrower: a COMPLETED
+// load in a closed month (its figures are settled). No broad period guard, and
+// the one check sits behind the completed-status test.
+check("no broad period guard in cancel (#211's deliberate carve-out)",
+	/dispatchWriteBlocker|statusOverrideBlocker|sendPeriodRefusal|sendDispatchRefusal|isLocked\(/.test(CANCEL_CODE), false);
+{
+	const completedTest = CANCEL_CODE.indexOf("/^(delivered|completed|pod received)$/i.test(boundStatus)");
+	const lockRead = CANCEL_CODE.indexOf("periodLocksReadable()");
+	check("cancel's only period check is behind the completed-status test",
+		completedTest > -1 && lockRead > completedTest && CANCEL_CODE.split("periodLocksReadable()").length === 2, true);
+}
 
 // All five caller-supplied row indexes in the family now answer identically.
 check("every route taking a caller rowIndex uses the one helper",

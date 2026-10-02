@@ -8,6 +8,11 @@
  * for every investor-linked driver, so that safety net never fires. This
  * script seeds the carrier_name only when currently empty — never overwrites.
  *
+ * carrier_name has no date, so this changes which investor a blank-Owner-ID
+ * load is attributed to in OPEN months only: a closed month gains no payout row
+ * from it (the reconcile records the item for review instead). The script
+ * refuses to write anything if period_locks cannot be read.
+ *
  * Usage:   node scripts/backfill-driver-carrier.js
  *   --dry  Print the SQL that would run, change nothing
  *
@@ -20,6 +25,13 @@ const Database = require("better-sqlite3");
 const DRY = process.argv.includes("--dry");
 const dbPath = path.join(__dirname, "..", "app.db");
 const db = new Database(dbPath);
+
+try {
+	db.prepare("SELECT period FROM period_locks WHERE period_locks.status = 'locked' LIMIT 1").all();
+} catch (e) {
+	console.error(`period_locks could not be read (${e.message}); nothing was written.`);
+	process.exit(2);
+}
 
 const rows = db.prepare(`
 	SELECT t.id           AS truck_id,

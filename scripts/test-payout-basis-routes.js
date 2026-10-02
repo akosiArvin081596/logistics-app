@@ -52,13 +52,13 @@
  *      truck the owner has with its status, so a Maintenance-only month is
  *      covered (paid under downtime "paid") and an Inactive-only one is not
  *   §10 the ledger (the shipped reconcileInvestorPayouts() and finalizePeriods()):
- *      a closed month whose row the first read creates is stamped finalized with
- *      the lease frozen, exactly as the month-end close freezes it, so the second
- *      read answers as the first (no split, no carried loss); a split investor's
- *      late stamp keeps no snapshot and stays the split with its carry, flag on
- *      or off; a lease row stamped late with the flag off stays the split.
- *      MUTANTS: the late stamp without the lease snapshot; a snapshot on every
- *      late-stamped month
+ *      a read after a month closed creates no row in it and records each closed
+ *      month with activity once (late_item_closed_month); the month-end close
+ *      freezes a lease month with the lease in its snapshot, so later reads
+ *      answer as the first (no split, no carried loss); a split investor closed
+ *      by it stays the split with its carry, flag on or off; a lease investor
+ *      closed with the flag off stays the split.
+ *      MUTANT: the reconcile without its closed-month guard
  *   §11 a month settled as a lease stays exactly as it settled (the same
  *      ledger, the month-end close): after the close, the downtime setting
  *      switched either way, the truck retired, set Inactive or put in service
@@ -272,7 +272,7 @@ const ledgerIdle = (f) => investorPayoutBasis.isZeroActivityMonth({ ...f, compli
 const ledgerNet = (f) => f.revenue - f.driverPay - (ledgerIdle(f) ? 0 : f.fixedCosts) - f.tripExpenses - f.maintFundCost;
 const LEDGER_CTX = { sessionUser: SUPER, carrierDB: { headers: ["Driver", "Carrier"], data: [] }, globalConfig: { investor_split_pct: "50" } };
 const resolveSplit = new Function(`${liftFunction("resolveInvestorSplitPct")}\nreturn resolveInvestorSplitPct;`)();
-const LEDGER_NAMES = ["lastFridayOfFollowingMonth", "periodLabel", "computeLossCarryForward", "payoutRowBreakdown", "frozenPayoutBreakdown", "resolveInvestorSplitPct", "reconcileInvestorPayouts", "finalizePeriods"];
+const LEDGER_NAMES = ["lastFridayOfFollowingMonth", "periodLabel", "computeLossCarryForward", "payoutRowBreakdown", "frozenPayoutBreakdown", "resolveInvestorSplitPct", "logAudit", "noteLateItemInClosedMonth", "reconcileInvestorPayouts", "finalizePeriods"];
 function ledgerWorld(srv, { reconcile = (s) => s, fixture = LEDGER_FIXTURE } = {}) {
 	const src = LEDGER_NAMES.map((n) => (n === "reconcileInvestorPayouts" ? reconcile(liftFunction(n)) : liftFunction(n))).join("\n");
 	const locked = (p) => !!srv.db.prepare("SELECT 1 FROM period_locks WHERE period = ? AND status = 'locked'").get(p);
@@ -297,6 +297,7 @@ function ledgerWorld(srv, { reconcile = (s) => s, fixture = LEDGER_FIXTURE } = {
 		settlementGraceDays: () => 7, periodPhase: () => "", graceEndsAt: () => "",
 		isPlausibleLockPeriod: (p) => investorPayoutBasis.isMonthKey(p),
 		getJobTrackingCached: async () => ({}), getCarrierDBFromSQLite: () => LEDGER_CTX.carrierDB,
+		listSettlableInvestors: () => [],
 		console: { warn() {}, log() {}, error() {} },
 	};
 	const fns = new Function(...Object.keys(deps), `"use strict";\n${src}\nreturn { reconcileInvestorPayouts, finalizePeriods };`)(...Object.values(deps));
@@ -703,102 +704,102 @@ const LEASE_2000 = { type: "lease", leaseAmountCents: 200000, details: "" };
 			"§9b a month whose only truck is Inactive: not_in_service");
 	}
 
-	// ── §10 a month created and finalized at once keeps its basis ────────────────
-	section("§10 the ledger: a month whose row is created after its close keeps its basis on every later read");
+	// ── §10 a closed month gains no row; the close freezes each month's basis ────
+	section("§10 the ledger: a closed month gains no row on a later read; the close freezes each month's basis");
 	{
 		const view = (w, owner) => w.fns.reconcileInvestorPayouts(owner, LEDGER_CTX);
 		const stored = (w, owner) => w.db.prepare("SELECT period, finalized_at, finalized_amount, finalized_breakdown FROM investor_payouts WHERE owner_id = ? ORDER BY period").all(owner);
+		const closedRows = (w, owner) => stored(w, owner).filter((r) => LEDGER_CLOSED.includes(r.period));
+		const lateAudits = (srv) => srv.db.prepare("SELECT entity_id FROM audit_trail WHERE action = 'late_item_closed_month' ORDER BY id").all().map((r) => r.entity_id);
 		const leaseOwner = (srv, owner) => {
 			srv.db.prepare("INSERT INTO trucks (unit_number, owner_id, in_service_date) VALUES (?, ?, '2026-01-01')").run(`L${owner}`, owner);
 			srv.db.prepare("INSERT INTO investor_payout_basis (owner_id, effective_month, basis_type, lease_amount_cents, source, created_by, created_at) VALUES (?, '2026-05', 'lease', 200000, 'admin', 'x', '2026-05-01T00:00:00Z')").run(owner);
 		};
 		const lockAll = (srv) => { for (const p of LEDGER_CLOSED) srv.db.prepare("INSERT INTO period_locks (period, status, finalized_at) VALUES (?, 'locked', '2026-09-08T00:00:00Z')").run(p); };
+		const row = (v, p) => v.payouts.find((x) => x.period === p);
 
 		// Flag on, a lease from May, every month through August closed before
-		// anybody opened this investor's payouts.
+		// anybody opened this investor's payouts: the months stay as settled (no
+		// row), and each one with activity is recorded once for review.
 		const on = buildServer({ flag: true });
 		leaseOwner(on, 60);
 		lockAll(on);
 		const A = ledgerWorld(on);
 		const first = await view(A, 60);
-		const row = (v, p) => v.payouts.find((x) => x.period === p);
-		eq(LEDGER_CLOSED.map((p) => [p, !!row(first, p).finalizedAt, row(first, p).amount, row(first, p).payoutBasis && row(first, p).payoutBasis.reason]),
-			[["2026-05", true, 2000, null], ["2026-06", true, 0, "downtime"], ["2026-07", true, 2000, null], ["2026-08", true, 2000, null]],
-			"§10 the first read creates each closed month's row finalized, as the lease (the idle June pays nothing under downtime \"unpaid\")");
-		const snaps = stored(A, 60).map((r) => ({ period: r.period, b: JSON.parse(r.finalized_breakdown || "null") }));
-		ok(snaps.every((s) => s.b && s.b.payoutBasis && s.b.payoutBasis.type === "lease" && s.b.splitPct === null && s.b.lossCarriedIn === 0 && s.b.lossDeferred === 0),
-			"§10 …and each row's frozen breakdown is the lease: payoutBasis, splitPct null, nothing carried in or deferred");
-		eq(snaps.find((s) => s.period === "2026-07").b, {
-			revenue: 1000, driverPay: 500, fixedCosts: 2000, tripExpenses: 0, maintFundCost: 3000, complianceCost: 0, netProfit: -4500,
-			splitPct: null, monthShare: 2000, payoutBasis: { type: "lease", leaseAmount: 2000, paidAmount: 2000, coveredDays: 31, daysInMonth: 31, reason: null },
-			lossCarriedIn: 0, lossDeferred: 0,
-		}, "§10 July (a loss month) is frozen whole: the P&L, the lease it paid, no carry");
-		eq(on.payoutBasisContext(60).settledSplitMonths, [], "§10 …so the context lists no month as settled as the split");
+		eq(closedRows(A, 60), [], "§10 a read after the close creates no row in any closed month");
+		eq(lateAudits(on), ["60:2026-05", "60:2026-07", "60:2026-08"],
+			"§10 …each closed month with activity is recorded for review (late_item_closed_month); the idle June has nothing to record");
 		const second = await view(A, 60);
-		eq(second, first, "§10 the second read answers exactly as the first (no month re-read as the split)");
-		eq(second.totals.carriedLossOutstanding, 0, "§10 …and no loss is carried");
-		const portal = investorPayoutBasis.settleInvestorMonths(LEDGER_FIXTURE.map((f) => ({ month: f.month, netProfit: ledgerNet(f), zeroActivity: ledgerIdle(f) })),
-			{ splitFraction: 0.5, basis: on.payoutBasisContext(60) });
-		eq(LEDGER_CLOSED.map((p) => [portal[p].investorEarnings, portal[p].deferred]), [[2000, 0], [0, 0], [2000, 0], [2000, 0]],
-			"§10 the portal's months (the same settle, the same context) are the lease too");
+		eq(second, first, "§10 the second read answers exactly as the first");
+		eq(lateAudits(on).length, 3, "§10 …and records nothing new");
 
-		// The month-end close freezes the same thing: the same months, their rows
-		// created while open and then closed by finalizePeriods().
+		// The month-end close: the same months, their rows created while open and
+		// then frozen by finalizePeriods().
 		const closeSrv = buildServer({ flag: true });
 		leaseOwner(closeSrv, 60);
 		const B = ledgerWorld(closeSrv);
 		await view(B, 60);
 		ok(stored(B, 60).every((r) => !r.finalized_at), "§10 control: read while open, the rows are not finalized");
 		await B.fns.finalizePeriods(LEDGER_CLOSED, "qa");
-		eq(stored(A, 60).map((r) => [r.period, r.finalized_amount, r.finalized_breakdown]), stored(B, 60).map((r) => [r.period, r.finalized_amount, r.finalized_breakdown]),
-			"§10 the late stamp freezes each lease month exactly as the month-end close does (the same amount, the same snapshot)");
+		const closedB = await view(B, 60);
+		eq(LEDGER_CLOSED.map((p) => [p, !!row(closedB, p).finalizedAt, row(closedB, p).amount, row(closedB, p).payoutBasis && row(closedB, p).payoutBasis.reason]),
+			[["2026-05", true, 2000, null], ["2026-06", true, 0, "downtime"], ["2026-07", true, 2000, null], ["2026-08", true, 2000, null]],
+			"§10 the close freezes each month as the lease (the idle June pays nothing under downtime \"unpaid\")");
+		const snaps = closedRows(B, 60).map((r) => ({ period: r.period, b: JSON.parse(r.finalized_breakdown || "null") }));
+		ok(snaps.every((x) => x.b && x.b.payoutBasis && x.b.payoutBasis.type === "lease" && x.b.splitPct === null && x.b.lossCarriedIn === 0 && x.b.lossDeferred === 0),
+			"§10 …and each row's frozen breakdown is the lease: payoutBasis, splitPct null, nothing carried in or deferred");
+		eq(snaps.find((x) => x.period === "2026-07").b, {
+			revenue: 1000, driverPay: 500, fixedCosts: 2000, tripExpenses: 0, maintFundCost: 3000, complianceCost: 0, netProfit: -4500,
+			splitPct: null, monthShare: 2000, payoutBasis: { type: "lease", leaseAmount: 2000, paidAmount: 2000, coveredDays: 31, daysInMonth: 31, reason: null },
+			lossCarriedIn: 0, lossDeferred: 0,
+		}, "§10 July (a loss month) is frozen whole: the P&L, the lease it paid, no carry");
+		eq(closeSrv.payoutBasisContext(60).settledSplitMonths, [], "§10 …so the context lists no month as settled as the split");
+		const again = await view(B, 60);
+		eq(again, closedB, "§10 a later read answers exactly as the first after the close (no month re-read as the split)");
+		eq(again.totals.carriedLossOutstanding, 0, "§10 …and no loss is carried");
+		const portal = investorPayoutBasis.settleInvestorMonths(LEDGER_FIXTURE.map((f) => ({ month: f.month, netProfit: ledgerNet(f), zeroActivity: ledgerIdle(f) })),
+			{ splitFraction: 0.5, basis: closeSrv.payoutBasisContext(60) });
+		eq(LEDGER_CLOSED.map((p) => [portal[p].investorEarnings, portal[p].deferred]), [[2000, 0], [0, 0], [2000, 0], [2000, 0]],
+			"§10 the portal's months (the same settle, the same context) are the lease too");
 
-		// A split investor stamped late: no snapshot, exactly as before, and still the
-		// split (with its carry) on the second read.
-		const split = buildServer({ flag: true });
-		lockAll(split);
-		split.db.prepare("INSERT INTO trucks (unit_number, owner_id, in_service_date) VALUES ('S61', 61, '2026-01-01')").run();
-		const S = ledgerWorld(split);
-		const s1 = await view(S, 61);
-		eq(stored(S, 61).map((r) => [r.period, !!r.finalized_at, r.finalized_breakdown]), LEDGER_CLOSED.map((p) => [p, true, ""]),
-			"§10 a split investor's late-stamped rows keep no snapshot (finalized_breakdown '' as before)");
-		eq(LEDGER_CLOSED.map((p) => [row(s1, p).amount, row(s1, p).lossDeferred, row(s1, p).lossCarriedIn, "payoutBasis" in row(s1, p)]),
-			[[2500, 0, 0, false], [0, 0, 0, false], [0, 2250, 0, false], [750, 0, 2250, false]], "§10 …settled as the split, the July loss carried into August");
-		eq(split.payoutBasisContext(61).settledSplitMonths, LEDGER_CLOSED, "§10 …and read as settled as the split");
-		eq(await view(S, 61), s1, "§10 …the second read answers exactly as the first");
-		const splitOff = buildServer({ flag: false });
-		lockAll(splitOff);
-		splitOff.db.prepare("INSERT INTO trucks (unit_number, owner_id, in_service_date) VALUES ('S61', 61, '2026-01-01')").run();
+		// A split investor closed by the month-end close: the split, with its carry,
+		// on every later read, and the same answer with the flag off.
+		const closeSplit = async (flag) => {
+			const srv = buildServer({ flag });
+			srv.db.prepare("INSERT INTO trucks (unit_number, owner_id, in_service_date) VALUES ('S61', 61, '2026-01-01')").run();
+			const w = ledgerWorld(srv);
+			await view(w, 61);
+			await w.fns.finalizePeriods(LEDGER_CLOSED, "qa");
+			return { srv, w, v: await view(w, 61) };
+		};
+		const split = await closeSplit(true);
+		eq(LEDGER_CLOSED.map((p) => [row(split.v, p).amount, row(split.v, p).lossDeferred, row(split.v, p).lossCarriedIn, "payoutBasis" in row(split.v, p)]),
+			[[2500, 0, 0, false], [0, 0, 0, false], [0, 2250, 0, false], [750, 0, 2250, false]], "§10 a split investor: settled as the split, the July loss carried into August");
+		eq(split.srv.payoutBasisContext(61).settledSplitMonths, LEDGER_CLOSED, "§10 …and read as settled as the split");
+		eq(await view(split.w, 61), split.v, "§10 …the second read answers exactly as the first");
 		const unstamped = (v) => JSON.parse(JSON.stringify(v), (k, x) => (k === "finalizedAt" ? undefined : x));
-		eq(unstamped(await view(ledgerWorld(splitOff), 61)), unstamped(s1), "§10 …and the same answer as with the flag off (the stamp times aside)");
+		eq(unstamped((await closeSplit(false)).v), unstamped(split.v), "§10 …and the same answer as with the flag off (the stamp times aside)");
 
-		// A lease row stamped late while the flag was off is settled as the split, and
-		// stays the split once the flag is on.
+		// A lease investor closed while the flag was off is settled as the split,
+		// and stays the split once the flag is on.
 		const off = buildServer({ flag: false });
 		leaseOwner(off, 62);
-		lockAll(off);
-		await view(ledgerWorld(off), 62);
-		eq(stored(off, 62).map((r) => r.finalized_breakdown), LEDGER_CLOSED.map(() => ""), "§10 flag off: a lease investor's late stamp writes no snapshot (the split was paid)");
+		const O = ledgerWorld(off);
+		await view(O, 62);
+		await O.fns.finalizePeriods(LEDGER_CLOSED, "qa");
+		ok(closedRows(O, 62).every((r) => { const b = JSON.parse(r.finalized_breakdown || "null"); return b && !b.payoutBasis && b.splitPct === 50; }),
+			"§10 flag off: a lease investor's close freezes the split it paid (no lease basis in the snapshot)");
 		const onCtx = new Function("db", "INVESTOR_LEASE_SETTINGS", "INVESTOR_LEASE_PAYOUTS_ENABLED", "investorPayoutBasis", `${liftFunction("payoutBasisContext")}\nreturn payoutBasisContext;`)(off.db, investorPayoutBasis.DEFAULT_SETTINGS, true, investorPayoutBasis);
 		eq(onCtx(62).settledSplitMonths, LEDGER_CLOSED, "§10 …and once the flag is on those months stay the split");
 
-		// MUTANTS: the late stamp without the lease snapshot (the bug), and with a
-		// snapshot on every month.
-		const anchor = "const leaseSnapshot = m.payoutBasis";
-		if (count(anchor) !== 1) die("the late stamp's lease snapshot moved");
+		// MUTANT: the reconcile without its closed-month guard creates the rows.
+		const anchor = "if (periodWriteLocked(m.month)) {\n\t\t\t\t\tnoteLateItemInClosedMonth(";
+		if (count(anchor) !== 1) die("the reconcile's closed-month guard moved");
 		const bug = buildServer({ flag: true });
 		leaseOwner(bug, 60);
 		lockAll(bug);
-		const M = ledgerWorld(bug, { reconcile: (src) => src.replace(anchor, "const leaseSnapshot = false && m.payoutBasis") });
-		const m1 = await view(M, 60);
-		const m2 = await view(M, 60);
-		ok(JSON.stringify(m2) !== JSON.stringify(m1) && row(m2, "2026-07").lossDeferred > 0 && !row(m2, "2026-07").payoutBasis,
-			"§10 MUTANT the late stamp writes no lease snapshot: the second read re-explains July as the split and carries its loss (caught)");
-		const every = buildServer({ flag: true });
-		lockAll(every);
-		every.db.prepare("INSERT INTO trucks (unit_number, owner_id, in_service_date) VALUES ('S61', 61, '2026-01-01')").run();
-		await view(ledgerWorld(every, { reconcile: (src) => src.replace(anchor, "const leaseSnapshot = true || m.payoutBasis") }), 61);
-		ok(stored(every, 61).some((r) => r.finalized_breakdown !== ""), "§10 MUTANT a snapshot on every late-stamped month: a split row gains one (caught)");
+		await view(ledgerWorld(bug, { reconcile: (src) => src.replace("if (periodWriteLocked(m.month)) {", "if (false && periodWriteLocked(m.month)) {") }), 60);
+		ok(closedRows({ db: bug.db }, 60).length > 0, "§10 MUTANT the reconcile without its closed-month guard creates closed-month rows (caught)");
 	}
 
 	// ── §11 a month settled as a lease stays exactly as it settled ───────────────
