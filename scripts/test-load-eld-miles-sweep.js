@@ -68,6 +68,9 @@ const lifted = [
 	liftOnce(/\nconst normLoadKey = [^\n]*\n/g, "normLoadKey"),
 	liftOnce(/\nfunction findCol\([\s\S]*?\n}\n/g, "findCol"),
 	liftOnce(/\nfunction haulWindowFromPhases\([\s\S]*?\n}\n/g, "haulWindowFromPhases"),
+	// The sheet's completion signal (scripts/test-load-sheet-closeout.js covers it).
+	liftOnce(/\nfunction haulSheetCloseOut\([\s\S]*?\n}\n/g, "haulSheetCloseOut"),
+	liftOnce(/\nfunction haulLoadWindow\([\s\S]*?\n}\n/g, "haulLoadWindow"),
 	liftOnce(/\nconst LOAD_ELD_MILES_SWEEP_MAX_AGE_MS = [^\n]*\n/g, "max age"),
 	liftOnce(/\nlet loadEldMilesSweepRunning = [^\n]*\n/g, "running flag"),
 	liftOnce(/\nlet loadEldMilesSweepLogged = [^\n]*\n/g, "logged flag"),
@@ -90,6 +93,8 @@ function world({ enabled = true, rows, stored = {}, phases = {}, results = {} })
 		// The real one runs excludeDroppedLoads; Cancelled is enough to stand for it.
 		liveJobTrackingView: (jt) => ({ ...jt, data: jt.data.filter((r) => r.Status !== "Cancelled") }),
 		buildHaulTruckResolver: () => ({ forDriverAt: () => null }),
+		buildEldDeviceResolver: () => ({ vehicleForTruckAt: () => "" }),
+		loadHaul: require("../lib/load-haul"),
 		loadEldMilesGetStmt: { get: (k) => stored[k] },
 		computeStatusPhases: (id) => phases[String(id).replace(/^#/, "")] || [],
 		getLoadCoordsFull: () => ({ origin_lat: 1, origin_lng: 2, dest_lat: 3, dest_lng: 4 }),
