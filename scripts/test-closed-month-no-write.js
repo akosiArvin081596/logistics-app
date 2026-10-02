@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * A closed month gets no new payout row (PLAN STEP: fails until the fix lands).
+ * A closed month gets no new payout row, and nothing else writes into it.
  *
  * WHAT IT REPRODUCES: "the January row created in August". Owner 5 has been
  * settled every month from March to July 2026, and the month-end close has
