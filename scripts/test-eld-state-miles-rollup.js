@@ -42,6 +42,12 @@ function liftOnce(re, label) {
 	return all[0][0];
 }
 const lifted = [
+	// Which truck a device was on each day (scripts/test-eld-device-history.js
+	// covers it). No history is recorded in this world, so it answers with the
+	// current links, as the rollup did before the history existed.
+	liftOnce(/\nconst ELD_DEVICE_HISTORY_START_KEY = [^\n]*\n/g, "history start key"),
+	liftOnce(/\nfunction eldDeviceHistoryStartMs\([\s\S]*?\n}\n/g, "eldDeviceHistoryStartMs"),
+	liftOnce(/\nfunction buildEldDeviceResolver\([\s\S]*?\n}\n/g, "buildEldDeviceResolver"),
 	liftOnce(/\nconst ELD_STATE_MILES_BACKFILL_KEY = [^\n]*\n/g, "backfill key"),
 	liftOnce(/\nconst ELD_STATE_MILES_LAST_RUN_KEY = [^\n]*\n/g, "last-run key"),
 	liftOnce(/\nconst ELD_STATE_MILES_MAX_DAYS = [^\n]*\n/g, "max days"),
@@ -52,6 +58,7 @@ const lifted = [
 ].join("");
 const tableDdl = liftOnce(/CREATE TABLE IF NOT EXISTS eld_state_miles_daily \([\s\S]*?\n\t\)/g, "table DDL");
 const stateDdl = liftOnce(/CREATE TABLE IF NOT EXISTS server_state \([\s\S]*?\n\t\)/g, "server_state DDL");
+const historyDdl = liftOnce(/CREATE TABLE IF NOT EXISTS eld_device_assignments \([\s\S]*?\n\t\)/g, "eld_device_assignments DDL");
 
 // --- A world with a controllable clock -----------------------------------------
 const DAY = 86400000;
@@ -66,6 +73,7 @@ const quietConsole = { log: (s) => logs.push(String(s)), error: (s, e) => logs.p
 const db = new Database(":memory:");
 db.exec(tableDdl);
 db.exec(stateDdl);
+db.exec(historyDdl);
 db.exec(`CREATE TABLE trucks (id INTEGER PRIMARY KEY, routemate_vehicle_id TEXT)`);
 db.exec(`CREATE TABLE routemate_telemetry (
 	id INTEGER PRIMARY KEY AUTOINCREMENT, routemate_vehicle_id TEXT NOT NULL,

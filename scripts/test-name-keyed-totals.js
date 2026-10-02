@@ -80,6 +80,8 @@ const { normalizeLoadId } = require("../lib/ratecon-load");
 const investorReportOptions = require("../lib/investor-report-options");
 const investorPayoutBasis = require("../lib/investor-payout-basis");
 const eldFeedHealth = require("../lib/eld-feed-health");
+// The per-load miles index both handlers read (scripts/test-load-miles.js covers it).
+const loadMilesLib = require("../lib/load-miles");
 
 const SHIPPED = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 
@@ -144,6 +146,8 @@ const FNS = [
 	"matchFuelEventsToReceipts", "shiftDayKey", "fuelMatchDistanceKm", "isDefReceipt",
 	// GET /api/trucks' ELD status, and the dashboard fleet's assigned truck, shipped as is.
 	"eldLatestCleanFixByVehicle", "eldDeviceStatus", "findTruckForDriver",
+	// The per-load miles both handlers read, shipped as is.
+	"getLoadMilesIndex",
 ];
 const ROUTES = {
 	investor: 'app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res) => {',
@@ -286,6 +290,8 @@ const DDL = `
 	CREATE TABLE maintenance_fund (id INTEGER PRIMARY KEY AUTOINCREMENT, truck TEXT, amount REAL, date TEXT DEFAULT '', created_at TEXT DEFAULT '2026-09-01 00:00:00', type TEXT DEFAULT 'service');
 	CREATE TABLE compliance_fees (id INTEGER PRIMARY KEY AUTOINCREMENT, truck TEXT, amount REAL, paid_date TEXT DEFAULT '', due_date TEXT DEFAULT '', created_at TEXT DEFAULT '2026-09-01 00:00:00', status TEXT DEFAULT 'Paid');
 	CREATE TABLE load_coordinates (load_id TEXT PRIMARY KEY, origin_lat REAL, origin_lng REAL, dest_lat REAL, dest_lng REAL, distance_miles REAL);
+	CREATE TABLE load_eld_miles (load_id TEXT PRIMARY KEY, loaded_miles REAL, deadhead_miles REAL, loaded_basis TEXT DEFAULT 'no-data', in_progress INTEGER DEFAULT 0);
+	CREATE TABLE load_ratecon_miles (load_id TEXT PRIMARY KEY, miles REAL NOT NULL, match TEXT NOT NULL DEFAULT '');
 	CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT NOT NULL, week_start TEXT, week_end TEXT, total_earnings REAL DEFAULT 0, adjustment REAL DEFAULT 0, status TEXT DEFAULT 'Draft', deleted_at TEXT DEFAULT '');
 	CREATE TABLE load_responses (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT, driver_name TEXT, response TEXT, responded_at TEXT);
 	CREATE TABLE notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT, type TEXT, metadata TEXT, created_at TEXT);
@@ -417,7 +423,7 @@ function buildWorld(variant, { src = SHIPPED, twins = false } = {}) {
 	const errors = [];
 	const passthrough = (req, res, next) => (next ? next() : undefined);
 	const deps = {
-		db, app, geolib, fuelModel, normalizeLoadId, Date: FixedDate,
+		db, app, geolib, fuelModel, normalizeLoadId, loadMilesLib, Date: FixedDate,
 		requireRole: () => passthrough, requireAuth: passthrough, fuelAnalyticsLimiter: passthrough,
 		getJobTrackingCached: async () => ({ headers: [...HEADERS], data: rows.map((r, i) => ({ _rowIndex: i + 2, ...r })) }),
 		getDeletedLoadIds: () => new Set(),

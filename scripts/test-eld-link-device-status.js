@@ -94,6 +94,9 @@ const IDX = [
 ].map((re, i) => shippedSql(re, `routemate_telemetry index #${i + 1}`));
 const LEDGER_DDL = shippedSql(/CREATE TABLE IF NOT EXISTS eld_feed_alerts \([\s\S]*?\n\t\)/g, "eld_feed_alerts DDL");
 const SERVER_STATE_DDL = shippedSql(/CREATE TABLE IF NOT EXISTS server_state \([\s\S]*?\n\t\)/g, "server_state DDL");
+// The dated link history the link routes write beside the trucks column
+// (scripts/test-eld-device-history.js covers it).
+const HISTORY_DDL = shippedSql(/CREATE TABLE IF NOT EXISTS eld_device_assignments \([\s\S]*?\n\t\)/g, "eld_device_assignments DDL");
 
 // The incident, as of 2026-10-01. `link356` is the device LogisX-#356 holds.
 function freshDb({ link356 = "", unit356 = "LogisX-#356", rm356FixMs = NOW - 10 * 60 * 1000, extraTrucks = [] } = {}) {
@@ -116,7 +119,7 @@ function freshDb({ link356 = "", unit356 = "LogisX-#356", rm356FixMs = NOW - 10 
 			status TEXT DEFAULT 'Active', routemate_vehicle_id TEXT DEFAULT '', retired_at TEXT DEFAULT '',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 	`);
-	for (const sql of [...IDX, LEDGER_DDL, SERVER_STATE_DDL]) db.exec(sql);
+	for (const sql of [...IDX, LEDGER_DDL, SERVER_STATE_DDL, HISTORY_DDL]) db.exec(sql);
 	// Inserted dark-first, so neither row order nor the old ORDER BY vin can
 	// pass for the picker's order by accident.
 	const rv = db.prepare("INSERT INTO routemate_vehicles (routemate_vehicle_id, vehicle_id, vin, make, model, year) VALUES (?,?,?,?,?,?)");
@@ -162,7 +165,9 @@ function mockRes() {
 function routeWorld(db, verb, route, deps = {}) {
 	const routes = {};
 	const app = { [verb]: (p, ...h) => { routes[p] = h[h.length - 1]; } };
-	build(db, [...FIX_FNS, extractFunction("unitNumberToken"), extractFunction("suggestRoutemateVehicleForTruck"), routeBody(verb, route)], {
+	const HISTORY_FNS = [extractConst("ELD_DEVICE_HISTORY_START_KEY"),
+		...["eldDeviceHistoryStartMs", "recordEldDeviceAssignment", "ensureEldDeviceHistorySeeded"].map((n) => extractFunction(n))];
+	build(db, [...FIX_FNS, ...HISTORY_FNS, extractFunction("unitNumberToken"), extractFunction("suggestRoutemateVehicleForTruck"), routeBody(verb, route)], {
 		deps: { app, requireRole: () => null, ...deps },
 	});
 	return async (req) => { const res = mockRes(); await routes[route]({ query: {}, params: {}, body: {}, ...req }, res); return res; };
@@ -245,7 +250,10 @@ function routeWorld(db, verb, route, deps = {}) {
 			logAudit: (req, action, entity, id, subject) => audits.push({ action, subject }),
 		});
 		const res = await post({ params: { truckId: "13" }, body });
-		return { res, audits, guardCalls, linked: db.prepare("SELECT routemate_vehicle_id FROM trucks WHERE id = 13").get().routemate_vehicle_id };
+		const history = db.prepare(
+			"SELECT routemate_vehicle_id AS vid, assigned_until AS until FROM eld_device_assignments WHERE truck_id = 13 ORDER BY id"
+		).all().map((r) => `${r.vid}${r.until ? " (closed)" : ""}`);
+		return { res, audits, guardCalls, history, linked: db.prepare("SELECT routemate_vehicle_id FROM trucks WHERE id = 13").get().routemate_vehicle_id };
 	}
 	{
 		const a = await link({ routemateVehicleId: DEAD_LINXUP });
@@ -263,8 +271,14 @@ function routeWorld(db, verb, route, deps = {}) {
 		const c = await link({ routemateVehicleId: DEAD_LINXUP, confirmSilent: "true" });
 		eq([c.res.statusCode, c.linked], [409, ""], "§4.7 only the boolean true confirms");
 
+		eq([a.history, c.history], [[], []], "§4.7a a refused link records no device history");
+		eq(b.history, [DEAD_LINXUP], "§4.7b a link opens the truck's dated device record");
+
 		const d = await link({ routemateVehicleId: RM_356 });
 		eq([d.res.statusCode, d.linked], [200, RM_356], "§4.8 a reporting device links with no question");
+		const re = await link({ routemateVehicleId: RM_356 }, { link356: DEAD_LINXUP });
+		eq([re.res.statusCode, re.history], [200, [`${DEAD_LINXUP} (closed)`, RM_356]],
+			"§4.8a re-pointing closes the old device's record and opens the new one");
 		ok(!/confirmed silent/.test(d.audits[0].subject), "§4.9 ...and its audit line says nothing of silence");
 
 		const e = await link({ routemateVehicleId: DEAD_LINXUP }, { link356: DEAD_LINXUP });
