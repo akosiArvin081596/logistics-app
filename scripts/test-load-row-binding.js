@@ -344,12 +344,18 @@ check("all five read the sheet through the one snapshot helper",
 // a broker calling off a July load in August is ordinary business, and a guard
 // that refuses ordinary work gets switched off. The binding is a different
 // question ("is this the load you named?"), which has one right answer in every
-// month — so it must not have dragged a period check in with it.
+// month — so it must not have dragged a period check in with it. The one period
+// check cancel makes is completedLoadCancelRefusal() (a COMPLETED load in a
+// closed month), outside the route.
 const CANCEL_CODE = routeBody('app.post("/api/dispatch/cancel"')
 	.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
-check("still no period guard in cancel (#211, re-pinned)",
-	/dispatchWriteBlocker|statusOverrideBlocker|periodLocksReadable|sendPeriodRefusal|sendDispatchRefusal|isLocked\(/.test(CANCEL_CODE),
+check("still no period guard of its own in cancel (#211, re-pinned)",
+	/dispatchWriteBlocker|statusOverrideBlocker|periodLocksReadable|periodWriteLocked|loadRowAccountingMonths|sendPeriodRefusal|sendDispatchRefusal|isLocked\(/.test(CANCEL_CODE),
 	false);
+check("cancel's one period check (completedLoadCancelRefusal) runs after the binding, before the first write",
+	CANCEL_CODE.indexOf("resolveLoadBinding(") < CANCEL_CODE.indexOf("completedLoadCancelRefusal(")
+		&& CANCEL_CODE.indexOf("completedLoadCancelRefusal(") < CANCEL_CODE.indexOf("spreadsheets.values.update"),
+	true);
 check("cancel still requires a reason", CANCEL_CODE.includes("CANCEL_REASON_REQUIRED"), true);
 check("cancel still validates the row number through the shared helper",
 	/const rowIndex = resolveSheetDataRow\(res, rawRowIndex\)/.test(CANCEL_CODE), true);

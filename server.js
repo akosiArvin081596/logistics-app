@@ -5260,6 +5260,54 @@ db.exec(`
 	)
 `);
 
+// A closed month's payout rows cannot be written by anything, at the database.
+// The route and reconcile guards stay; these triggers are the floor under them,
+// so a code path in this server that forgets its guard aborts instead of
+// restating a settled month.
+//   - INSERT into a locked period aborts.
+//   - UPDATE that changes a figure (amount, adjustment, the finalized_* stamp)
+//     or moves a row into or out of a locked period aborts. Status moves
+//     (owed -> processing -> paid) and statement file names stay writable:
+//     paying a closed month is settlement, not a change of its figures.
+//   - DELETE of a locked period's row aborts.
+// "Locked" is period_locks.status = 'locked'. A reopen flips that status first,
+// in the same transaction as its own writes, so reopening is the one door.
+// A trigger that cannot read period_locks errors, which aborts the write: the
+// same fail-closed direction as periodWriteLocked().
+//
+// TEMP triggers, on this server's own connection: they exist while this code
+// runs and vanish with the process. A deploy or rollback to code from before
+// them therefore never meets them (older code writes into closed months in ways
+// they would refuse). The cost is that another connection to app.db, such as a
+// hand-run script, is not covered by them; the scripts that write money tables
+// carry their own closed-month checks. Any trigger of the same name stored in
+// the database file is dropped first, so only this definition is ever in force.
+function installPeriodLockTriggers(database) {
+	const locked = (periodExpr) => `EXISTS (SELECT 1 FROM main.period_locks WHERE main.period_locks.period = ${periodExpr} AND main.period_locks.status = 'locked')`;
+	const refuse = "SELECT RAISE(ABORT, 'PERIOD_FINALIZED: the month is closed; reopen it to change its figures');";
+	const names = ["investor_payouts_locked_insert", "investor_payouts_locked_update", "investor_payouts_locked_delete"];
+	database.transaction(() => {
+		for (const t of names) {
+			database.exec(`DROP TRIGGER IF EXISTS main.${t}`);
+			database.exec(`DROP TRIGGER IF EXISTS temp.${t}`);
+		}
+		database.exec(`CREATE TEMP TRIGGER investor_payouts_locked_insert BEFORE INSERT ON main.investor_payouts
+			WHEN ${locked("NEW.period")}
+			BEGIN ${refuse} END`);
+		database.exec(`CREATE TEMP TRIGGER investor_payouts_locked_update BEFORE UPDATE ON main.investor_payouts
+			WHEN (${locked("OLD.period")} OR ${locked("NEW.period")})
+				AND (OLD.amount IS NOT NEW.amount OR OLD.adjustment IS NOT NEW.adjustment
+					OR OLD.finalized_at IS NOT NEW.finalized_at OR OLD.finalized_amount IS NOT NEW.finalized_amount
+					OR OLD.finalized_breakdown IS NOT NEW.finalized_breakdown
+					OR OLD.period IS NOT NEW.period OR OLD.owner_id IS NOT NEW.owner_id)
+			BEGIN ${refuse} END`);
+		database.exec(`CREATE TEMP TRIGGER investor_payouts_locked_delete BEFORE DELETE ON main.investor_payouts
+			WHEN ${locked("OLD.period")}
+			BEGIN ${refuse} END`);
+	})();
+}
+try { installPeriodLockTriggers(db); } catch (e) { console.error("[period-close] closed-month triggers not installed:", e.message); }
+
 // --- Driver Onboarding ---
 db.exec(`
 	CREATE TABLE IF NOT EXISTS driver_onboarding (
@@ -30427,6 +30475,39 @@ function sheetRowDeleteBlocker(guarded, headers, row) {
 	};
 }
 
+// Cancelling a load drops it from every figure. A COMPLETED load is in the
+// settled figures of the months it books into (its revenue and its driver
+// days), so cancelling one whose months include a closed month would restate
+// that month: refused (409 PERIOD_FINALIZED), reopen the month first. A load
+// that is not completed contributes nothing to any month, so cancelling it, the
+// ordinary case of a broker calling a load off late (#211), is never refused.
+// Same rungs as sheetRowDeleteBlocker(): an unreadable lock table or an
+// unresolvable date refuses rather than guesses. `row` is the sheet row as an
+// array, `statusColIdx` the column the cancel writes its status to.
+function completedLoadCancelRefusal(headers, row, statusColIdx) {
+	const status = statusColIdx === -1 ? "" : String((row || [])[statusColIdx] || "").trim();
+	if (!/^(delivered|completed|pod received)$/i.test(status)) return null;
+	if (!periodLocksReadable()) {
+		return {
+			http: 409, code: "PERIOD_LOCK_UNREADABLE",
+			error: "The period lock table could not be read, so this completed load cannot be shown to sit outside a closed month. Nothing was changed.",
+		};
+	}
+	const months = loadRowAccountingMonths(headers, row);
+	if (!months || !months.length) {
+		return {
+			http: 409, code: "PERIOD_UNRESOLVED",
+			error: "This completed load carries no date the server can resolve to a month, so it cannot be shown to sit outside a closed month. Nothing was changed.",
+		};
+	}
+	const locked = months.filter((mk) => periodWriteLocked(mk));
+	if (!locked.length) return null;
+	return {
+		http: 409, code: "PERIOD_FINALIZED",
+		error: `This load is completed and its figures belong to ${locked.map(periodLabel).join(", ")}, which ${locked.length === 1 ? "is" : "are"} closed. Cancelling it would restate a settled month. Reopen the month first (POST /api/periods/:period/reopen, which records a reason). Nothing was changed.`,
+	};
+}
+
 // ============================================================
 // PUT /api/data/:rowIndex — the same accounting event as the delete above
 // ============================================================
@@ -33161,12 +33242,11 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) =>
 		// down is what stops the row being some OTHER live load — see
 		// resolveLoadBinding().
 		//
-		// ⚠️ NO PERIOD GUARD HERE, DELIBERATELY, AND STILL NONE. #211 left cancel
-		// unguarded because a broker calling off a July load in August is ordinary
-		// business, and a guard that refuses ordinary work gets switched off. The
-		// binding below is a different question — "is this the load you named?",
-		// which has one right answer in every month — so it is not a period check
-		// in disguise. Do not fold one in.
+		// Cancelling an open load is ordinary business in any month (#211): a
+		// broker calling off a July load in August. The one period check is
+		// narrower, below the binding: a COMPLETED load in a closed month. The
+		// binding itself is a different question — "is this the load you named?",
+		// which has one right answer in every month.
 		const rowIndex = resolveSheetDataRow(res, rawRowIndex);
 		if (rowIndex === null) return; // 400 already sent
 
@@ -33241,6 +33321,15 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) =>
 		// `.trim()`-on-a-non-string throw the body value carried. An unassigned load
 		// yields "" and notifies nobody, exactly as an absent body field used to.
 		const boundDriver = driverColIdx === -1 ? "" : String((snapshot.row || [])[driverColIdx] || "").trim();
+
+		// A completed load in a closed month is the one cancel that is refused
+		// (completedLoadCancelRefusal()); every other cancel goes ahead in any month.
+		{
+			const refusal = completedLoadCancelRefusal(headers, snapshot.row, statusColIdx);
+			if (refusal) {
+				return sendLoadBindRefusal(req, res, refusal, "cancel_blocked", loadId, `cancelling completed load on row ${rowIndex}`);
+			}
+		}
 
 		// Clear driver (no point keeping a driver on a cancelled load) and set
 		// status to Cancelled so the load is excluded from every KPI loop.
@@ -50634,8 +50723,8 @@ function listSettlableInvestors() {
 // the raw netProfit, rounded once: the same number the settlement used), and
 // `splitPct` the whole-number Split %. A lease month has no split: splitPct is
 // null, monthShare is the lease paid, and payoutBasis says how it was reached.
-// One copy, because the ledger's rows publish it and both snapshots of it
-// (finalizePeriods() and the reconcile's late stamp) must freeze the same object.
+// One copy, because the ledger's rows publish it and finalizePeriods() freezes
+// that same object as the month's snapshot.
 function payoutRowBreakdown(be, monthShare, splitPct) {
 	return {
 		revenue: (be.exact || be).revenue,
@@ -50677,12 +50766,45 @@ function frozenPayoutBreakdown(p) {
 	);
 }
 
+// A recompute found activity for an owner in a closed month that has no payout
+// row for them. Nothing is written to the month; one system audit row records
+// what the recompute found, so it can be reviewed (and settled by reopening the
+// month if it is real). The reconcile runs on every payouts read, so the row is
+// written once per distinct finding: the same owner, month and figures again
+// is the same finding.
+function noteLateItemInClosedMonth(ownerId, m, payable) {
+	const figures = ["revenue", "driverPay", "fixedCosts", "tripExpenses", "maintFundCost", "complianceCost"];
+	const exact = m.exact || m;
+	if (!payable && figures.every((k) => !Number(exact[k]))) return;
+	const usd = (v) => `$${(Math.round(Number(v || 0) * 100) / 100).toFixed(2)}`;
+	const details = `owner ${ownerId} ${m.month} is closed and has no payout row for this owner; a recompute now finds ` +
+		`revenue ${usd(exact.revenue)}, driver pay ${usd(exact.driverPay)}, fixed ${usd(exact.fixedCosts)}, ` +
+		`trip ${usd(exact.tripExpenses)}, maintenance fund ${usd(exact.maintFundCost)}, compliance ${usd(exact.complianceCost)}, ` +
+		`payable ${usd(payable)}. Nothing was written; the month stays as settled. Reopen ${m.month} to settle it.`;
+	const entityId = `${ownerId}:${m.month}`;
+	const seen = db.prepare(
+		"SELECT 1 FROM audit_trail WHERE entity = 'investor_payout' AND entity_id = ? AND action = 'late_item_closed_month' AND details = ? LIMIT 1"
+	).get(entityId, details);
+	if (seen) return;
+	logAudit({}, "late_item_closed_month", "investor_payout", entityId, details);
+	// Said once, where the month-close notices are read, so the finding reaches
+	// someone instead of waiting in the audit trail. The notice carries no
+	// figures: Dispatchers read these notices, and investor money is Super Admin
+	// and Investor only. The figures are in the audit row (Super Admin only).
+	try {
+		insertDispatchNotification.run("period-close", `${periodLabel(m.month)}: activity found after it closed`,
+			`A recompute found activity for an investor in ${periodLabel(m.month)}, which is closed. Nothing was changed. The details are in the audit trail (late_item_closed_month).`,
+			JSON.stringify({ period: m.month }));
+	} catch {}
+}
+
 // Shared settlement reconcile for ONE investor — the single source of truth for
 // both GET /api/investor/payouts (one owner) and GET /api/payouts (all owners).
 // For every COMPLETED PAST work month (current/in-progress excluded) it
-// idempotently UPSERTs one investor_payouts row: INSERT if missing (amount =
-// that month's investorEarnings, due = lastFridayOfFollowingMonth, status
-// 'owed'); refresh `amount` ONLY while still 'owed'; never touch
+// idempotently UPSERTs one investor_payouts row: INSERT if missing and the month
+// is open (amount = that month's investorEarnings, due =
+// lastFridayOfFollowingMonth, status 'owed'; a closed month gets an audit row
+// instead, see noteLateItemInClosedMonth); refresh `amount` ONLY while still 'owed'; never touch
 // processing/paid. amount === the dashboard's investorEarnings to the cent
 // (via computeInvestorMonthlyEarnings — no second formula here).
 //
@@ -50737,25 +50859,6 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 	const refreshAmount = db.prepare(
 		"UPDATE investor_payouts SET amount = ? WHERE owner_id = ? AND period = ?"
 	);
-	// Stamps a row that was created AFTER its period had already been finalized —
-	// an investor onboarded late, or a month that only became payable once older
-	// data landed. There was no earlier value to prefer, and the period's inputs
-	// are already frozen by the lock, so recording the current figure is correct.
-	// Guarded on finalized_at = '' so it is idempotent (this runs on every GET,
-	// and GET /api/payouts loops it per investor).
-	//
-	// ⚠️ A LEASE MONTH FREEZES ITS COMPOSITION HERE TOO, exactly as
-	// finalizePeriods() does (payoutRowBreakdown() + frozenPayoutBreakdown()).
-	// payoutBasisContext() reads a finalized row whose snapshot carries no
-	// payoutBasis as a month settled as the split, so a lease month stamped here
-	// with no snapshot was re-explained as the split on every later read: the
-	// Split % applied to its net profit, its loss carried forward, and split
-	// wording on its statement and report, beside the lease amount it settled at.
-	// A split month still stamps no snapshot: the NULL leaves finalized_breakdown
-	// as it is, so its stored row and its statement are exactly what they were.
-	const stampLateRow = db.prepare(
-		"UPDATE investor_payouts SET finalized_at = ?, finalized_amount = ?, finalized_breakdown = COALESCE(?, finalized_breakdown) WHERE owner_id = ? AND period = ? AND COALESCE(finalized_at,'') = ''"
-	);
 	// A month is "completed" only if BOTH clocks agree it is. currentMonthKey is
 	// server-local (computeInvestorMonthlyEarnings), while the close lifecycle
 	// runs on America/Chicago — so on a UTC server they disagree for the first
@@ -50770,15 +50873,20 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 			const amount = carryByPeriod[m.month].payable;
 			const existing = findRow.get(ownerId, m.month);
 			if (!existing) {
-				insertRow.run(ownerId, m.month, amount, lastFridayOfFollowingMonth(m.month));
-				if (isLocked(m.month)) {
-					const carry = carryByPeriod[m.month];
-					const leaseSnapshot = m.payoutBasis
-						? frozenPayoutBreakdown({ breakdown: payoutRowBreakdown(m, carry.raw, splitPct), lossCarriedIn: carry.carriedIn, lossDeferred: carry.deferred })
-						: null;
-					stampLateRow.run(new Date().toISOString(), amount, leaseSnapshot, ownerId, m.month);
-					console.warn(`[period-close] ${m.month} was already finalized when owner ${ownerId}'s row was created — stamped at $${amount}`);
+				// A closed month never gains a row. The close reconciles every
+				// investor before it locks (finalizePeriods), so a row missing from a
+				// closed month means something changed after the close: a load's
+				// Owner ID, a driver moved onto this owner's truck, a backdated edit.
+				// The month stays exactly as settled; the item is recorded for review,
+				// and reopening the month is the way to settle it.
+				// periodWriteLocked, so an unreadable lock table writes nothing.
+				if (periodWriteLocked(m.month)) {
+					// Only a month the table says is closed is reported as closed; an
+					// unreadable lock table withholds the row without a note.
+					if (periodLocksReadable()) noteLateItemInClosedMonth(ownerId, m, amount);
+					continue;
 				}
+				insertRow.run(ownerId, m.month, amount, lastFridayOfFollowingMonth(m.month));
 			} else if (
 				existing.status === "owed" &&
 				!existing.finalized_at &&        // per-row: a month already settled on a published statement stays settled
@@ -50792,12 +50900,6 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 				// every finalized month to drift, on a page GET, with no log. Failing
 				// closed instead leaves the stored amount exactly where it is, which
 				// is the same thing a working lock does.
-				//
-				// The sibling stamp above deliberately still uses isLocked(): fail-
-				// closed there would stamp finalized_at on rows in months that may be
-				// open, freezing payouts that should still be moving. It does not need
-				// the change either — with this refresh guard closed, an unstamped row
-				// cannot drift anyway.
 				// Refresh amount ONLY while the month is genuinely still open:
 				// still 'owed' AND not finalized. This is what lets a straggler
 				// receipt land in the prior month by itself during the grace window
@@ -50916,8 +51018,8 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 			// a dollar off the amount actually settled.
 			// A lease month has no split: splitPct is null, monthShare is the lease
 			// paid (carry.raw), and payoutBasis says how it was reached. That object
-			// is what finalizePeriods() snapshots (the late stamp above builds the
-			// same one), so a closed lease month's statement keeps its lease wording.
+			// is what finalizePeriods() snapshots, so a closed lease month's
+			// statement keeps its lease wording.
 			breakdown: be ? payoutRowBreakdown(be, carry.raw, splitPct) : null,
 			// Only on a lease month; absent means the split, exactly as before.
 			...(be && be.payoutBasis ? { payoutBasis: be.payoutBasis } : {}),
@@ -53758,12 +53860,11 @@ app.post("/api/investor/payouts/:id/status", requireRole("Super Admin"), refuseC
 });
 
 // PUT /api/investor/payouts/:id/adjust — Super Admin records a signed correction
-// on ANY payout period, including one already processing/paid. The canonical use
-// case: receipts uploaded AFTER the month settled that should have reduced the
-// investor's share (a negative adjustment claws it back on the record); a
-// positive adjustment credits the investor. Effective payout = amount +
-// adjustment. The reconcile only ever writes `amount`, so this manual delta
-// persists across live recomputes. Mirrors PUT /api/invoices/:id/adjust.
+// on an OPEN payout period. A closed month takes none (409 PERIOD_FINALIZED): a
+// correction to it, such as a receipt that arrived after it settled, posts here
+// on an open month's row instead (a negative adjustment claws back, a positive
+// one credits). Effective payout = amount + adjustment. The reconcile only ever
+// writes `amount`, so this manual delta persists across live recomputes.
 app.put("/api/investor/payouts/:id/adjust", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {
 	try {
 		const id = parseInt(req.params.id, 10);
@@ -53773,90 +53874,47 @@ app.put("/api/investor/payouts/:id/adjust", requireRole("Super Admin"), refuseCr
 		const payout = db.prepare("SELECT * FROM investor_payouts WHERE id = ?").get(id);
 		if (!payout) return res.status(404).json({ error: "Payout not found" });
 
-		// An adjustment is only meaningful once the underlying figure has stopped
-		// moving. On a period that is still open, `amount` is refreshed from live
-		// earnings on every read — so a manual delta layered on top gets counted
-		// twice and drifts again on the next reconcile.
+		// A closed month's payout is final as settled, so it takes no adjustment.
+		// A correction to it posts into an open month instead: an adjustment on
+		// one of this investor's open rows (a month inside its grace window, or
+		// any unlocked month while the close is off). Reopening the month
+		// (POST /api/periods/:period/reopen, reason required, audited) stays the
+		// only way to change the closed month itself. The closed-month triggers
+		// refuse the column write as well; this guard is the one that explains it.
 		//
-		// Until now this rule lived only in the UI (PayoutsView hid the button for
-		// 'owed' rows); the server accepted the write. Anchoring it to the PERIOD
-		// rather than the row's status both closes that hole and loosens the case
-		// that matters: a finalized-but-not-yet-paid row IS adjustable, which is
-		// exactly the finalize -> correct -> pay flow the close window is for.
-		//
-		// ⚠️ FAILS CLOSED VIA THE SAME DOUBLE NEGATIVE as the settle guard in
-		// POST /api/investor/payouts/:id/status — see the long note there before
-		// touching either. Short version: isPending() is true when period_locks
-		// cannot be read (because isLocked() swallows the error and answers false),
-		// so an unreadable table blocks the adjustment. That is the safe direction,
-		// and rewriting this in terms of periodPhase() would reverse it.
-		if (isPending(payout.period)) {
-			// See the settle guard for why the unreadable case gets its own sentence:
-			// the old copy named a date the admin could wait for, which is a false
-			// statement about a month whose lock state is simply unknown.
+		// periodWriteLocked fails closed: an unreadable lock table blocks the
+		// adjustment, under its own cause code so a broken period_locks stays
+		// searchable in audit_trail.
+		if (periodWriteLocked(payout.period)) {
 			const lockUnreadable = !periodLocksReadable();
-			// ⚠️ THE REFUSAL IS AUDITED, AND IT WAS THE LAST OUTCOME OF THIS ROUTE
-			// THAT WAS NOT. This is the one verb in the app that restates a SETTLED
-			// month directly — a signed correction of up to ±$10,000 applied to a
-			// payout that may already be marked paid — and the only logAudit on it was
-			// on the success path. A blocked correction therefore left no trace at
-			// all, so audit_trail could not tell "nobody tried to claw back May" from
-			// "someone tried repeatedly and the close window refused them", which is
-			// the entire signal a refusal row exists to keep. Same gap and same fix as
-			// its two siblings: POST /api/investor/payouts/:id/status (the settle
-			// route, which shares this exact guard) and PUT /api/expenses/:id/status.
+			// ⚠️ THE REFUSAL IS AUDITED. A blocked correction must leave a trace, or
+			// audit_trail cannot tell "nobody tried to change May" from "someone
+			// tried repeatedly and the guard refused them", which is the entire
+			// signal a refusal row exists to keep. Same as its siblings: POST
+			// /api/investor/payouts/:id/status and PUT /api/expenses/:id/status.
 			//
-			// THE CAUSE CODE IS NOT THE WIRE CODE, DELIBERATELY — the same call the
-			// settle route makes. The response says PERIOD_NOT_FINALIZED in both
-			// branches (an existing client shape, not changed here), but the two
-			// causes are different things with different remedies: one is a normal
-			// window that clears on a date, the other is a database fault that never
-			// will. Auditing both under one code would hide PERIOD_LOCK_UNREADABLE
-			// from the cross-route search for it, which is how a broken period_locks
-			// gets noticed at all — every other guard in this file records that
-			// condition under that name. The wire code is not lost; the period and the
-			// transition below identify the request.
-			//
-			// logAuditRefusal, not logAudit: both codes are already in
+			// logAuditRefusal, not logAudit: both codes are in
 			// UNCOALESCED_REFUSAL_CODES (asserted at boot by
 			// assertUncoalescedRefusalContract, which also keeps the `PERIOD_…`
 			// naming that exempts these rows from purgeOldAuditRefusals' detail
 			// filter), so this is byte-identical to logAudit today while stating the
-			// intent — and a future non-period refusal audited on this action inherits
-			// the coalescing window without anyone having to remember. If either code
-			// were dropped from that set, a second operator refused inside the same
-			// 60s window would write NOTHING and this bug would be back: the coalesce
-			// key is the ACCOUNT, and `super_admin` is a SHARED login, so "a different
-			// person" does not produce a different key.
+			// intent. If either code were dropped from that set, a second operator
+			// refused inside the same 60s window would write NOTHING: the coalesce
+			// key is the ACCOUNT, and `super_admin` is a SHARED login.
 			//
-			// ⚠️ NOT added to PURGEABLE_REFUSAL_ACTIONS, and of the three siblings
-			// this is the one with the least excuse for being there. It satisfies that
-			// list's stated invariant — the 409 returns before the UPDATE, so this is
-			// a wholesale refusal — but the purge's own comment makes the argument
-			// better than this one could: settlement disputes surface on a quarterly
-			// or annual cadence, i.e. reliably AFTER 90 days, so purging by action
-			// would delete the evidence exactly when it is first wanted while the
-			// corresponding successful corrections are kept forever. It also cannot
-			// flood — Super Admin only, behind refuseCrossOrigin, and it needs a
-			// past-but-unlocked month to fire at all. Adding it would purge nothing
-			// today anyway (every row here carries a `[PERIOD_` code, which the detail
-			// filter exempts) while reading as a decision that these rows are
-			// disposable. They are the opposite.
+			// ⚠️ NOT added to PURGEABLE_REFUSAL_ACTIONS: settlement disputes surface
+			// on a quarterly or annual cadence, reliably AFTER 90 days, so purging by
+			// action would delete the evidence exactly when it is first wanted.
 			//
 			// ⚠️ THE AMOUNT RECORDED IS THE ATTEMPT, NOT A FIGURE THAT WOULD HAVE BEEN
 			// WRITTEN. This guard runs BEFORE the finite check, the ±$10,000 cap and
 			// the never-invert rule, so the request may have been invalid on its own
-			// terms and this row must not be read as "this correction would otherwise
-			// have landed". It is parsed with the SAME Number() expression the
-			// validator below uses, so the audit can never disagree with the route
-			// about what the caller sent — note that null/""/[] are 0 to both, and an
-			// absent or unparseable value is recorded as such rather than silently
-			// becoming $0.00.
+			// terms. It is parsed with the SAME Number() expression the validator
+			// below uses, so the audit can never disagree with the route about what
+			// the caller sent.
 			//
 			// entity/entity_id are the payout id, matching the success line below.
-			// `super_admin` is a shared login, so this identifies the account and
-			// session, never an individual.
-			const refusalCode = lockUnreadable ? "PERIOD_LOCK_UNREADABLE" : "PERIOD_NOT_FINALIZED";
+			const refusalCode = lockUnreadable ? "PERIOD_LOCK_UNREADABLE" : "PERIOD_FINALIZED";
 			// Explicit sign on both sides: a claw-back and a credit are opposite
 			// events and `-` alone is easy to lose in a line of prose.
 			const signedUsd = (n) => `${n < 0 ? "-" : "+"}$${Math.abs(n).toFixed(2)}`;
@@ -53888,13 +53946,19 @@ app.put("/api/investor/payouts/:id/adjust", requireRole("Super Admin"), refuseCr
 				(blockedNote ? ` — reason: ${blockedNote}` : ""),
 				refusalCode
 			);
+			// The newest open row this investor has, where the correction can go.
+			const openRow = lockUnreadable ? null : db.prepare(
+				`SELECT id, period FROM investor_payouts WHERE owner_id = ?
+				   AND period NOT IN (SELECT period FROM period_locks WHERE period_locks.status = 'locked')
+				 ORDER BY period DESC LIMIT 1`
+			).get(payout.owner_id);
 			return res.status(409).json({
 				error: lockUnreadable
-					? `${periodLabel(payout.period)} cannot be confirmed finalized — the period lock table could not be read, so adjustments are blocked until it can be. Log the receipt as normal; this is a database fault, not the close window.`
-					: `${periodLabel(payout.period)} is still open until ${graceEndsAt(payout.period, settlementGraceDays())} — log the receipt and it will be counted automatically. Adjustments apply once the period is finalized.`,
-				code: "PERIOD_NOT_FINALIZED",
+					? `${periodLabel(payout.period)} cannot be confirmed open — the period lock table could not be read, so adjustments are blocked until it can be. This is a database fault, not the close window.`
+					: `${periodLabel(payout.period)} is closed, so its payout stays as settled. Post the correction as an adjustment on an open month${openRow ? ` (${periodLabel(openRow.period)})` : " once the current month ends"}, or reopen ${periodLabel(payout.period)} to change it.`,
+				code: refusalCode,
 				period: payout.period,
-				graceEndsAt: graceEndsAt(payout.period, settlementGraceDays()),
+				...(openRow ? { openPeriod: openRow.period, openPayoutId: openRow.id } : {}),
 				...(lockUnreadable ? { periodLockUnreadable: true } : {}),
 			});
 		}
@@ -54230,6 +54294,14 @@ app.post("/api/periods/:period/finalize", requireRole("Super Admin"), refuseCros
 		}
 
 		const result = await finalizePeriod(period, req.session.user.username || "admin");
+		if (result.retry) {
+			return result.reason === "closed"
+				? res.status(409).json({ error: `${periodLabel(period)} is already finalized.`, code: "ALREADY_FINALIZED" })
+				: res.status(409).json({
+					error: `${periodLabel(period)}'s figures changed while it was being closed, so nothing was closed. Try again.`,
+					code: "PERIOD_CLOSE_RETRY",
+				});
+		}
 		logAudit(req, "period_finalize", "period", period,
 			`Finalized ${period} early (${result.stamped} payout row(s) frozen)`);
 		res.json({ success: true, period, ...result });
@@ -54655,26 +54727,75 @@ app.get("/api/admin/period-lock-issues", requireRole("Super Admin"), periodIssue
 	}
 });
 
-// Close ONE period: take the lock, then freeze each investor's figure for it.
+// Everything a closing month's settled figures are computed from, as one string:
+// the receipts booked into the months (each one's figure and attribution), the
+// maintenance-fund and compliance rows and override days in them, the trucks,
+// assignments, pay settings, pairings, investor accounts, payout bases and split
+// config the attribution and the math read, and the in-process Job Tracking
+// write counter (_jtEpoch, bumped by jtCacheInvalidate()). ELD telemetry is not
+// in it: the close reads travel days through the same cached index as every
+// other read. The close
+// takes it before it computes and again inside the freeze; if they differ,
+// something changed while the figures were being computed and nothing closes
+// (the next pass recomputes and tries again). Direct edits in the Google Sheet
+// itself are read through the 60 s cache like every other read.
+function closingFingerprint(periods) {
+	const ph = periods.map(() => "?").join(",");
+	const one = (sql, ...params) => db.prepare(sql).get(...params);
+	const ordered = (cols, table) => one(`SELECT COUNT(*) AS n, COALESCE(group_concat(r, '|'), '') AS v FROM (SELECT ${cols} AS r FROM ${table} ORDER BY 1)`);
+	return JSON.stringify([
+		one(`SELECT COUNT(*) AS n, COALESCE(group_concat(r, '|'), '') AS v FROM (
+			SELECT id || ',' || COALESCE(amount,'') || ',' || COALESCE(status,'') || ',' || COALESCE(driver,'') || ',' || COALESCE(truck_unit,'')
+				|| ',' || COALESCE(owner_id,'') || ',' || COALESCE(type,'') || ',' || COALESCE(posted_period,'') || ',' || COALESCE(date,'') AS r
+			FROM expenses WHERE ${EXPENSE_PERIOD_EXPR} IN (${ph}) ORDER BY id)`, ...periods),
+		one(`SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS m, COALESCE(SUM(amount), 0) AS s FROM maintenance_fund
+			WHERE strftime('%Y-%m', COALESCE(NULLIF(date, ''), strftime('%Y-%m-%d', created_at))) IN (${ph})`, ...periods),
+		one(`SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS m, COALESCE(SUM(amount), 0) AS s,
+			COALESCE(SUM(CASE WHEN status = 'Paid' THEN amount ELSE 0 END), 0) AS paid FROM compliance_fees
+			WHERE strftime('%Y-%m', COALESCE(NULLIF(paid_date, ''), NULLIF(due_date, ''), strftime('%Y-%m-%d', created_at))) IN (${ph})`, ...periods),
+		one(`SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS m FROM excluded_driver_days WHERE substr(excluded_date, 1, 7) IN (${ph})`, ...periods),
+		ordered("id || ',' || COALESCE(owner_id,'') || ',' || COALESCE(status,'') || ',' || COALESCE(assigned_driver,'') || ',' || COALESCE(driver_pay_daily,'') || ',' || COALESCE(routemate_vehicle_id,'') || ',' || COALESCE(insurance_monthly,'') || ',' || COALESCE(eld_monthly,'') || ',' || COALESCE(truck_payment_monthly,'') || ',' || COALESCE(hvut_annual,'') || ',' || COALESCE(irp_annual,'') || ',' || COALESCE(in_service_date,'') || ',' || COALESCE(retired_at,'') || ',' || COALESCE(unit_number,'')", "trucks"),
+		ordered("id || ',' || COALESCE(truck_id,'') || ',' || COALESCE(driver_name,'') || ',' || COALESCE(start_date,'') || ',' || COALESCE(end_date,'')", "truck_assignments"),
+		ordered("id || ',' || COALESCE(driver_name,'') || ',' || COALESCE(carrier_name,'') || ',' || COALESCE(pay_type,'') || ',' || COALESCE(pay_percentage,'') || ',' || COALESCE(pay_daily,'')", "drivers_directory"),
+		ordered("id || ',' || COALESCE(carrier_name,'') || ',' || COALESCE(driver_name,'') || ',' || COALESCE(started_at,'') || ',' || COALESCE(ended_at,'')", "carrier_driver_history"),
+		ordered("owner_id || ',' || key || ',' || value", "investor_config"),
+		ordered("id || ',' || COALESCE(role,'') || ',' || COALESCE(company_name,'')", "users"),
+		ordered("id || ',' || COALESCE(owner_id,'') || ',' || COALESCE(effective_month,'') || ',' || COALESCE(basis_type,'') || ',' || COALESCE(lease_amount_cents,'')", "investor_payout_basis"),
+		_jtEpoch,
+	]);
+}
+
+// Close a set of periods: freeze each investor's figure, then take the lock.
 //
-// Split deliberately into two steps that fail differently:
+// Two phases, and only the second writes anything a closed month keeps:
 //
-//   1. LOCK   — pure clock arithmetic + one INSERT. No Sheets, no network,
-//               effectively cannot fail. This is the step that matters: once the
-//               lock exists, the reconcile stops refreshing amounts and new
-//               receipts dated into this month get redirected. The period stops
-//               moving.
-//   2. STAMP  — needs the Job Tracking sheet to recompute earnings. If Sheets is
-//               down this throws AFTER the lock is already in place, so the month
-//               is still frozen at its last known figure; only the statement
-//               snapshot is missing, and the statement falls back to the live
-//               recompute path (which carries its own drift disclosure). The
-//               sweep retries the stamp on the next tick.
+//   1. COMPUTE (async) — reconcile EVERY settlable investor, plus any owner
+//               already holding an unstamped row in these months. The months
+//               are still open here, so the reconcile inserts a row for an
+//               investor who has none yet and refreshes owed amounts to the
+//               live figure. This needs the Job Tracking sheet; if it throws,
+//               nothing has been stamped or locked and the month is still open.
+//   2. FREEZE (one synchronous transaction) — stamp every row of these months,
+//               then take the locks. No await inside, so nothing interleaves
+//               between the stamp and the lock, and the two land together or
+//               not at all. The closed-month triggers
+//               (installPeriodLockTriggers) refuse any write to a locked month,
+//               which is why the stamp has to come first.
 //
-// Fails in the safe direction: never "half open", at worst "closed but not yet
-// documented". Idempotent — re-running only touches rows with no stamp yet.
+// The months stay open while phase 1 computes (seconds), so a receipt or edit
+// landing then would book into a month whose figure was computed without it.
+// closingFingerprint() is taken before phase 1 and checked again inside phase 2:
+// if anything moved, or another close locked one of the months meanwhile,
+// nothing is written and the result says `retry` (the sweep tries again on its
+// next pass; the route answers 409).
+//
+// Reconciling every investor, not only those that already have a row, is what
+// lets the reconcile refuse to create a row in a closed month: every investor
+// with activity in the month has a row before the lock is taken.
+//
+// A period that is already locked is skipped: it is closed, and its rows are
+// final as recorded. Idempotent: re-running a closed period changes nothing.
 async function finalizePeriods(periods, actor) {
-	const nowIso = new Date().toISOString();
 	// EVERY lock write that is not the baseline seed funnels through here — the
 	// finalize route AND the per-minute sweep — so this is the one place that can
 	// state "nothing implausible reaches period_locks" without depending on which
@@ -54691,44 +54812,45 @@ async function finalizePeriods(periods, actor) {
 		console.warn(`[period-close] REFUSED to lock ${refused.length} implausible period key(s): ${refused.join(", ")} — not a settlement month, nothing written to period_locks`);
 	}
 	if (!list.length) return { stamped: 0, investors: 0, periods: [] };
+	// An unreadable lock table closes nothing, and says so: the sweep counts the
+	// throw as a failure and raises its ACTION NEEDED notice.
+	if (!periodLocksReadable()) throw new Error("period_locks could not be read; no month was closed");
+	const toClose = list.filter((p) => !isLocked(p));
+	if (!toClose.length) return { stamped: 0, investors: 0, periods: [] };
+	const before = closingFingerprint(toClose);
 
-	const takeLock = db.prepare(
-		`INSERT INTO period_locks (period, status, finalized_at, finalized_by) VALUES (?, 'locked', ?, ?)
-		 ON CONFLICT(period) DO UPDATE SET status = 'locked', finalized_at = excluded.finalized_at, finalized_by = excluded.finalized_by`
-	);
-	db.transaction(() => { for (const p of list) takeLock.run(p, nowIso, actor || "system"); })();
-
-	// Owners with at least one unstamped row in any of these periods. Guarded on
-	// finalized_at so a retry after a partial run never re-times what succeeded.
-	const ph = list.map(() => "?").join(",");
+	const ph = toClose.map(() => "?").join(",");
 	const owners = db.prepare(
 		`SELECT DISTINCT owner_id FROM investor_payouts WHERE period IN (${ph}) AND COALESCE(finalized_at,'') = ''`
-	).all(...list).map((r) => r.owner_id);
-	if (!owners.length) return { stamped: 0, investors: 0, periods: list };
+	).all(...toClose).map((r) => r.owner_id);
+	for (const { ownerId } of listSettlableInvestors()) {
+		if (!owners.includes(ownerId)) owners.push(ownerId);
+	}
 
-	await getJobTrackingCached();
-	const globalConfig = {};
-	db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all().forEach((r) => (globalConfig[r.key] = r.value));
-	const ctx = {
-		sessionUser: { role: "Super Admin", username: actor || "period-close" },
-		carrierDB: getCarrierDBFromSQLite(),
-		globalConfig,
-	};
+	const ledgers = [];
+	if (owners.length) {
+		await getJobTrackingCached();
+		const globalConfig = {};
+		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all().forEach((r) => (globalConfig[r.key] = r.value));
+		const ctx = {
+			sessionUser: { role: "Super Admin", username: actor || "period-close" },
+			carrierDB: getCarrierDBFromSQLite(),
+			globalConfig,
+		};
+		// ONE reconcile per owner covers every period at once — it already returns
+		// the owner's whole ledger.
+		for (const ownerId of owners) {
+			const { payouts } = await reconcileInvestorPayouts(ownerId, ctx);
+			ledgers.push({ ownerId, payouts });
+		}
+	}
 
-	// Freeze a still-owed row at the LIVE recompute, not at whatever `amount`
-	// happens to hold.
-	//
-	// This is the subtle one. `amount` is only refreshed when someone loads the
-	// payouts screen, so if nobody looked between day 3 and day 7 it is stale —
-	// and because the lock is already taken above, the reconcile inside can no
-	// longer refresh it. Stamping `amount` would therefore freeze a figure that
-	// predates the very receipts the grace window existed to collect.
-	// `recomputedAmount` is computed from live earnings on every reconcile
-	// regardless of lock state, so it is the true closing figure.
-	//
+	// Freeze a still-owed row at the live recompute. The reconcile above has just
+	// refreshed `amount` to it while the month was open; `recomputedAmount` is the
+	// same figure and is preferred so the stamp never depends on that refresh.
 	// A row already processing/paid keeps its own `amount` untouched — that money
-	// moved against a settled figure, and the long-standing invariant is that the
-	// reconcile never rewrites a settled amount.
+	// moved against a settled figure, and the reconcile never rewrites a settled
+	// amount.
 	const stampOwed = db.prepare(
 		`UPDATE investor_payouts SET amount = ?, finalized_at = ?, finalized_amount = ?, finalized_breakdown = ?
 		  WHERE owner_id = ? AND period = ? AND status = 'owed' AND COALESCE(finalized_at,'') = ''`
@@ -54737,46 +54859,83 @@ async function finalizePeriods(periods, actor) {
 		`UPDATE investor_payouts SET finalized_at = ?, finalized_amount = amount, finalized_breakdown = ?
 		  WHERE owner_id = ? AND period = ? AND status != 'owed' AND COALESCE(finalized_at,'') = ''`
 	);
+	const takeLock = db.prepare(
+		`INSERT INTO period_locks (period, status, finalized_at, finalized_by) VALUES (?, 'locked', ?, ?)
+		 ON CONFLICT(period) DO UPDATE SET status = 'locked', finalized_at = excluded.finalized_at, finalized_by = excluded.finalized_by`
+	);
+	const storedRow = db.prepare("SELECT amount, adjustment FROM investor_payouts WHERE owner_id = ? AND period = ?");
 
-	let stamped = 0;
-	for (const ownerId of owners) {
-		// ONE reconcile per owner covers every period at once — it already returns
-		// the owner's whole ledger. Reconciling per (owner, period) would re-run the
-		// full monthly earnings computation N times for no extra information, which
-		// matters on first enable when the baseline leaves a backlog to stamp.
-		const { payouts } = await reconcileInvestorPayouts(ownerId, ctx);
-		for (const period of list) {
-			const p = payouts.find((x) => x.period === period);
-			if (!p) continue;
-			// The composition and its carry terms, frozen together
-			// (frozenPayoutBreakdown(); the reconcile's late stamp freezes a lease
-			// month with the same function).
-			const breakdown = frozenPayoutBreakdown(p);
-			const live = p.recomputedAmount != null ? p.recomputedAmount : p.amount;
-			const n = stampOwed.run(live, nowIso, live, breakdown, ownerId, period).changes
-				+ stampSettled.run(nowIso, breakdown, ownerId, period).changes;
-			stamped += n;
-			// Closing a month is the last moment its figure can move, and stampOwed
-			// writes `live` — which is the RECOMPUTED amount, not necessarily the one
-			// stored. So the close itself can shift the number, and this is the only
-			// record that it did. Guarded on n so a period that stamped nothing (the
-			// idempotent re-run case) logs nothing.
-			if (n > 0) {
-				recordPayoutChange({
-					payoutId: p.id,
-					ownerId,
-					period,
-					kind: "finalize",
-					oldAmount: p.amount,
-					newAmount: live,
-					detail: `period closed and frozen${actor ? ` by ${actor}` : ""}`,
-					breakdown: p.breakdown || null,
-					actor: actor || "period-close",
-				});
+	const stampLeftover = db.prepare(
+		`UPDATE investor_payouts SET finalized_at = ?, finalized_amount = amount
+		  WHERE period = ? AND COALESCE(finalized_at,'') = ''`
+	);
+	const outcome = db.transaction(() => {
+		if (toClose.some((p) => isLocked(p))) return { retry: true, reason: "closed" };
+		if (closingFingerprint(toClose) !== before) return { retry: true, reason: "changed" };
+		const nowIso = new Date().toISOString();
+		let stamped = 0;
+		const overAdjusted = [];
+		for (const { ownerId, payouts } of ledgers) {
+			for (const period of toClose) {
+				const p = payouts.find((x) => x.period === period);
+				if (!p) continue;
+				const stored = storedRow.get(ownerId, period);
+				// The composition and its carry terms, frozen together
+				// (frozenPayoutBreakdown()).
+				const breakdown = frozenPayoutBreakdown(p);
+				const live = p.recomputedAmount != null ? p.recomputedAmount : p.amount;
+				const n = stampOwed.run(live, nowIso, live, breakdown, ownerId, period).changes
+					+ stampSettled.run(nowIso, breakdown, ownerId, period).changes;
+				stamped += n;
+				// The record that the close froze this figure. Guarded on n so a
+				// period that stamped nothing logs nothing.
+				if (n > 0) {
+					recordPayoutChange({
+						payoutId: p.id,
+						ownerId,
+						period,
+						kind: "finalize",
+						oldAmount: stored ? stored.amount : p.amount,
+						newAmount: live,
+						detail: `period closed and frozen${actor ? ` by ${actor}` : ""}`,
+						breakdown: p.breakdown || null,
+						actor: actor || "period-close",
+					});
+				}
+				// An adjustment posted on this month while it was open (a correction
+				// to an earlier closed month) can exceed what the month finally pays:
+				// the effective payout floors at $0, so part of the correction is not
+				// applied. Reported below; nothing is changed.
+				const after = storedRow.get(ownerId, period);
+				const adj = Number(after && after.adjustment) || 0;
+				if (after && adj < 0 && (Number(after.amount) || 0) + adj < 0) {
+					overAdjusted.push({ ownerId, period, amount: Number(after.amount) || 0, adjustment: adj });
+				}
 			}
 		}
+		// A row created for an owner outside this close's reconcile (one no
+		// settlable investor owns) is stamped at its own amount, so no row is left
+		// in a locked month without a stamp; the triggers would refuse it later.
+		for (const p of toClose) stamped += stampLeftover.run(nowIso, p).changes;
+		for (const p of toClose) takeLock.run(p, nowIso, actor || "system");
+		return { retry: false, stamped, overAdjusted };
+	})();
+	if (outcome.retry) {
+		console.warn(`[period-close] ${toClose.join(", ")} not closed: ${outcome.reason === "closed" ? "another close locked one of them first" : "their figures changed while they were being computed; the next pass recomputes"}.`);
+		return { stamped: 0, investors: owners.length, periods: [], retry: true, reason: outcome.reason };
 	}
-	return { stamped, investors: owners.length, periods: list };
+	for (const o of outcome.overAdjusted) {
+		const unapplied = -(o.amount + o.adjustment);
+		const text = `owner ${o.ownerId} ${o.period} closed with an adjustment of -$${(-o.adjustment).toFixed(2)} against a payout of $${o.amount.toFixed(2)}: $${unapplied.toFixed(2)} of the correction was not applied (the payout floors at $0). Nothing was changed.`;
+		logAudit({}, "payout_adjustment_unapplied", "investor_payout", `${o.ownerId}:${o.period}`, text);
+		// No figures in the notice (Dispatchers read these); they are in the audit row.
+		try {
+			insertDispatchNotification.run("period-close", `${periodLabel(o.period)}: part of a correction was not applied`,
+				`An adjustment on ${periodLabel(o.period)} was larger than what the month finally pays, so part of it was not applied. Nothing was changed. The details are in the audit trail (payout_adjustment_unapplied).`,
+				JSON.stringify({ period: o.period }));
+		} catch {}
+	}
+	return { stamped: outcome.stamped, investors: owners.length, periods: toClose };
 }
 
 // Single-period convenience for the manual "close it now" route. A function
@@ -54809,6 +54968,11 @@ const PERIOD_CLOSE_RETRY_MS = 15 * 60 * 1000;
 let periodCloseRunning = false;
 let periodCloseLastAttempt = 0;
 let periodCloseFailStreak = 0;
+// Consecutive passes that computed a close and then found its figures moved.
+// Not failures (nothing is wrong), but a month that can never close should not
+// go unnoticed: a notice is sent once the streak reaches PERIOD_CLOSE_MAX_RETRIES.
+let periodCloseRetryStreak = 0;
+const PERIOD_CLOSE_MAX_RETRIES = 10;
 
 // Every completed month that is past its grace window and has no lock row yet.
 // Bounded to periods we actually have payout rows for, so this can't wander back
@@ -54821,12 +54985,9 @@ function periodsDueForClose() {
 	).all()
 		.map((r) => r.period)
 		// isPlausibleLockPeriod is the same predicate the finalize route enforces.
-		// Applied HERE as well as inside finalizePeriods so this leg of the sweep
-		// never proposes a junk key — otherwise a single unlockable row in
+		// Applied HERE as well as inside finalizePeriods so the sweep never
+		// proposes a junk key — otherwise a single unlockable row in
 		// investor_payouts stays "due" forever and warns once a minute, for good.
-		// ⚠️ This covers the `due` leg ONLY. The sweep's other input — the
-		// `unstamped` retry, which reads period_locks directly — carries its own
-		// copy of this filter for the same reason; see maybeCloseFinishedPeriods().
 		// investor_payouts.period is NOT independently validated: it is built from a
 		// Date cursor whose start comes from moneySheetDate() over the sheet, so one
 		// mistyped year in `Assigned Date` seeds real-shaped but absurd months.
@@ -54841,60 +55002,55 @@ async function maybeCloseFinishedPeriods() {
 	// SELECT per tick.
 	if (periodCloseFailStreak > 0 && Date.now() - periodCloseLastAttempt < PERIOD_CLOSE_RETRY_MS) return;
 
-	// EVERYTHING that can throw lives inside the try, including the two SELECTs
-	// that decide what to work on. They used to sit above it, and both read
-	// `period_locks` — periodsDueForClose() through a NOT IN subquery, the
-	// unstamped retry through a JOIN — so the single failure this whole apparatus
+	// EVERYTHING that can throw lives inside the try, including the SELECT that
+	// decides what to work on. It used to sit above it, and it reads
+	// `period_locks` (periodsDueForClose() through a NOT IN subquery), so the
+	// single failure this whole apparatus
 	// exists to survive (an unreadable lock table) escaped as a rejected promise
 	// before the streak counter, the log line, or the ACTION-NEEDED notification
 	// could fire. Verified by QA: a broken server ran past two ticks in total
 	// silence. A scheduled job that cannot report its own failure is worse than no
 	// job, because the absence of an alert reads as success.
 	//
-	// `stage` is carried so the failure copy can tell the truth about what state
-	// the books are in. The two are genuinely different situations and the old
-	// wording only described one of them.
+	// `stage` is carried so the failure copy can say where it stopped.
 	periodCloseRunning = true;
 	periodCloseLastAttempt = Date.now();
 	let stage = "scan";
 	let due = [];
 	try {
 		due = periodsDueForClose();
-		// Also retry the stamp for periods locked earlier whose snapshot never landed
-		// (step 2 failed on a previous pass — see finalizePeriod).
-		//
-		// ⚠️ FILTERED TOO, and this leg is the one that actually needs it. Unlike
-		// `due` (which reads investor_payouts), this reads period_locks itself — so
-		// it surfaces a junk row that a PRE-VALIDATION build already wrote, which is
-		// exactly the database state the reopen carve-out exists for. Unfiltered, such
-		// a row makes `work` permanently non-empty, finalizePeriods refuses it and
-		// stamps nothing, nothing changes, and the same row comes back on the next
-		// tick — a per-minute WARN loop, forever, burying every real close failure.
-		// The operator's remedy is POST /api/periods/:period/reopen, which flips the
-		// status and drops the row out of both this JOIN and periodsDueForClose's
-		// NOT IN.
-		const unstamped = db.prepare(
-			`SELECT DISTINCT p.period FROM investor_payouts p
-			   JOIN period_locks l ON l.period = p.period AND l.status = 'locked'
-			  WHERE COALESCE(p.finalized_at,'') = '' ORDER BY p.period ASC`
-		).all().map((r) => r.period).filter(isPlausibleLockPeriod);
-
-		const work = [...new Set([...due, ...unstamped])];
+		// There is no retry leg for "locked but never stamped" months. The close
+		// stamps and locks in one transaction (finalizePeriods), so it cannot leave
+		// one behind, and a month locked by the baseline seed is final as recorded:
+		// stamping it now would recompute a closed month's figure.
+		const work = [...new Set(due)];
 		if (!work.length) { periodCloseFailStreak = 0; return; }
 
 		stage = "finalize";
-		// One batched pass: locks are taken for every due period up front, then
-		// each investor is reconciled ONCE and stamped across all of them.
+		// One batched pass: each investor is reconciled ONCE, then every due
+		// period is stamped and locked together.
 		const result = await finalizePeriods(work, "system");
 		// ⚠️ Report what was CLOSED (result.periods), not what was PROPOSED (work).
 		// finalizePeriods refuses implausible keys, so logging `work` would announce a
 		// close that never happened — the log line is the only place anyone looks when
-		// asking "did the month close?", and it must not be able to lie.
-		console.log(`[period-close] finalized ${result.periods.join(", ") || "(nothing)"} — ${result.stamped} payout row(s) frozen across ${result.investors} investor(s)`);
+		// asking "did the month close?", and it must not be able to lie. A `retry`
+		// (figures moved mid-close) has already said so and closed nothing.
+		if (!result.retry) {
+			periodCloseRetryStreak = 0;
+			console.log(`[period-close] finalized ${result.periods.join(", ") || "(nothing)"} — ${result.stamped} payout row(s) frozen across ${result.investors} investor(s)`);
+		} else if (result.reason === "changed" && ++periodCloseRetryStreak === PERIOD_CLOSE_MAX_RETRIES) {
+			try {
+				insertDispatchNotification.run(
+					"period-close",
+					"ACTION NEEDED — month close keeps retrying",
+					`The month-end close for ${work.map(periodLabel).join(", ")} has been retried ${PERIOD_CLOSE_MAX_RETRIES} times in a row because its figures kept changing while they were computed (receipts, loads or settings being edited). Nothing was closed; it keeps trying every minute.`,
+					JSON.stringify({ periods: work, retries: PERIOD_CLOSE_MAX_RETRIES }),
+				);
+			} catch {}
+		}
 
-		// Notify only for periods that actually crossed their window on this pass;
-		// `unstamped` retries of an already-announced month must not re-announce it.
-		for (const period of due) {
+		// Notify only for periods this pass actually closed.
+		for (const period of result.periods) {
 			try {
 				insertDispatchNotification.run(
 					"period-close",
@@ -54906,14 +55062,10 @@ async function maybeCloseFinishedPeriods() {
 		}
 		periodCloseFailStreak = 0;
 	} catch (e) {
-		// Two failure shapes, and they leave the books in different places:
-		//   stage 'finalize' — locks are already in place for anything we got to, so
-		//     the figures are frozen and only the snapshot is outstanding;
-		//   stage 'scan' — we never got as far as taking a lock, so NOTHING closed
-		//     this pass and a month past its window is still accruing.
-		// The second is the more urgent of the two and used to be reported as the
-		// first, which would send someone looking for a snapshot rather than for the
-		// reason no month is closing at all.
+		// Either stage leaves the month open: the close stamps and locks in one
+		// transaction, so a failure before or inside it closes nothing. 'scan'
+		// means the candidates could not even be read (usually period_locks);
+		// 'finalize' means the recompute or the freeze failed (usually Sheets).
 		periodCloseFailStreak++;
 		console.error(`[period-close] close failed at ${stage} (streak ${periodCloseFailStreak}):`, e.message);
 		if (periodCloseFailStreak === PERIOD_CLOSE_MAX_ATTEMPTS) {
@@ -54923,7 +55075,7 @@ async function maybeCloseFinishedPeriods() {
 					"ACTION NEEDED — month close incomplete",
 					stage === "scan"
 						? `The month-close sweep has failed ${PERIOD_CLOSE_MAX_ATTEMPTS} times before it could take a single lock (${e.message}). NO period has been closed on those passes, so any month past its ${settlementGraceDays()}-day window is still open and its figure can still move. This usually means period_locks is unreadable — check the database, not the Sheets connection.`
-						: `Finalizing a period has failed ${PERIOD_CLOSE_MAX_ATTEMPTS} times (${e.message}). Affected months ARE locked, so their figures are frozen and no new receipt can move them — but the statement snapshot is missing, so statements fall back to a live recompute with a drift note. Check the Sheets connection.`,
+						: `Finalizing a period has failed ${PERIOD_CLOSE_MAX_ATTEMPTS} times (${e.message}). Nothing was locked on those passes, so the months past their window are still open and their figures can still move. Check the server log: usually the Sheets connection, otherwise the investor whose figures could not be computed.`,
 					JSON.stringify({ attempts: PERIOD_CLOSE_MAX_ATTEMPTS, stage, error: e.message }),
 				);
 			} catch {}

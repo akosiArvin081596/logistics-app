@@ -10,6 +10,11 @@
  * Open rows (no ended_at) are created for currently-active assignments;
  * closed rows mirror the end_date from truck_assignments.
  *
+ * Closed months: a pairing that lies entirely inside closed months (every
+ * month from its start to its end has a period_locks row with status 'locked')
+ * is skipped. It could only change attribution in months that are final as
+ * settled. The script refuses to write anything if period_locks cannot be read.
+ *
  * Usage:   node scripts/backfill-driver-history.js
  *   --dry  Print what would happen, change nothing
  *
@@ -22,6 +27,28 @@ const Database = require("better-sqlite3");
 const DRY = process.argv.includes("--dry");
 const dbPath = path.join(__dirname, "..", "app.db");
 const db = new Database(dbPath);
+
+let lockedMonths;
+try {
+	lockedMonths = new Set(db.prepare("SELECT period FROM period_locks WHERE period_locks.status = 'locked'").all().map((r) => r.period));
+} catch (e) {
+	console.error(`period_locks could not be read (${e.message}); nothing was written.`);
+	process.exit(2);
+}
+// Every month a pairing covers, from its start to its end (or to now when open).
+function monthsCovered(start, end) {
+	const first = String(start || "").slice(0, 7);
+	const last = String(end || new Date().toISOString()).slice(0, 7);
+	if (!/^\d{4}-\d{2}$/.test(first) || !/^\d{4}-\d{2}$/.test(last) || last < first) return null;
+	const out = [];
+	let [y, m] = first.split("-").map(Number);
+	while (`${y}-${String(m).padStart(2, "0")}` <= last && out.length < 600) {
+		out.push(`${y}-${String(m).padStart(2, "0")}`);
+		m++;
+		if (m > 12) { m = 1; y++; }
+	}
+	return out;
+}
 
 const assignments = db.prepare(`
 	SELECT ta.driver_name    AS driver_name,
@@ -39,6 +66,7 @@ const assignments = db.prepare(`
 
 let inserted = 0;
 let skipped = 0;
+let skippedClosed = 0;
 
 const findExact = db.prepare(`
 	SELECT id FROM carrier_driver_history
@@ -66,6 +94,13 @@ for (const a of assignments) {
 		skipped++;
 		continue;
 	}
+	// A pairing with no readable start covers open months too, so it is written.
+	const covered = monthsCovered(started, ended);
+	if (covered && covered.length && covered.every((mk) => lockedMonths.has(mk))) {
+		console.log(`[SKIP] ${JSON.stringify(carrier)} <- ${JSON.stringify(driver)} (${started}..${ended}) lies entirely in closed months; they stay as settled`);
+		skippedClosed++;
+		continue;
+	}
 	if (DRY) {
 		console.log(`[DRY]  would INSERT carrier_driver_history (${JSON.stringify(carrier)}, ${JSON.stringify(driver)}, started_at=${started}, ended_at=${ended})`);
 	} else {
@@ -76,4 +111,4 @@ for (const a of assignments) {
 }
 
 console.log("");
-console.log(`Done. inserted=${inserted} skipped=${skipped}${DRY ? " (DRY RUN)" : ""}`);
+console.log(`Done. inserted=${inserted} skipped=${skipped} skipped_closed_months=${skippedClosed}${DRY ? " (DRY RUN)" : ""}`);

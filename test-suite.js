@@ -631,13 +631,14 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
 
   // 56. A deduction cannot exceed the payout it comes off. Kept inside the
   //     pre-existing $10,000 magnitude cap, or that older guard fires first and
-  //     this ceiling is never reached. Also skips periods still in their grace
-  //     window — adjustments are refused there (the amount is still moving), so
-  //     the over-deduction ceiling would never be reached.
+  //     this ceiling is never reached. Uses an OPEN month: a closed month refuses
+  //     every adjustment first (409 PERIOD_FINALIZED, test 114), so the
+  //     over-deduction ceiling would never be reached there. Refused, so nothing
+  //     is written.
   const payableRow = rows.find(r =>
-    Number(r.effectiveAmount) > 0 && Number(r.amount) < 10000 && r.phase !== "pending");
+    Number(r.effectiveAmount) > 0 && Number(r.amount) < 10000 && r.phase !== "finalized");
   if (!payableRow) {
-    skip("56. Cannot over-deduct a payout (400)", "no finalized payable row under the $10k cap in seeded data");
+    skip("56. Cannot over-deduct a payout (400)", "no open payable row under the $10k cap in seeded data");
   } else {
     const over = -(Math.round(payableRow.amount) + 1);
     const s56 = await req("PUT", `/api/investor/payouts/${payableRow.id}/adjust`,
@@ -1510,17 +1511,20 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
       s113.status === 409 && s113.body?.code === "PERIOD_NOT_FINALIZED");
   }
 
-  // 114. Same period refuses a manual adjustment — its amount is still refreshed
-  //      from live earnings on every read, so a manual delta would be counted
-  //      twice. Closes a hole the UI has been faking client-side.
-  if (!pendingRow) {
-    skip("114. Cannot adjust a period still in its grace window (409)",
-      closeOn ? "no payable pending row right now" : "period close disabled on this server");
+  // 114. A CLOSED month refuses a manual adjustment: it is final as settled, and
+  //      a correction to it is posted on an open month instead (the 409 names
+  //      one when the investor has it). Refused, so nothing is written; an open
+  //      month taking an adjustment is not exercised here, because that writes
+  //      to a real payout row.
+  const closedRow = rows.find(r => r.phase === "finalized");
+  if (!closedRow) {
+    skip("114. Cannot adjust a closed month (409 PERIOD_FINALIZED)",
+      closeOn ? "no finalized row right now" : "period close disabled on this server");
   } else {
-    const s114 = await req("PUT", `/api/investor/payouts/${pendingRow.id}/adjust`,
+    const s114 = await req("PUT", `/api/investor/payouts/${closedRow.id}/adjust`,
       { adjustment: -1, adjustmentNote: "test-suite: must be rejected" }, ac);
-    test("114. Cannot adjust a period still in its grace window (409)",
-      s114.status === 409 && s114.body?.code === "PERIOD_NOT_FINALIZED");
+    test("114. Cannot adjust a closed month (409 PERIOD_FINALIZED)",
+      s114.status === 409 && s114.body?.code === "PERIOD_FINALIZED");
   }
 
   // 115. ...and refuses to publish a statement, for the same reason: the number
@@ -2007,10 +2011,10 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
   // BEFORE the table is broken, so the controls are 137-138 and the refusals are
   // 139-142 rather than being grouped per route.
   const lockFaultNames = [
-    "137. Settle and adjust are ALLOWED while period_locks is readable (positive control)",
+    "137. Settle is ALLOWED and adjust refused as closed (409 PERIOD_FINALIZED) while period_locks is readable (positive control)",
     "138. Statement gets PAST the lock guard while period_locks is readable (positive control)",
     "139. Settle is REFUSED when period_locks cannot be read (409 PERIOD_NOT_FINALIZED)",
-    "140. Adjust is REFUSED when period_locks cannot be read (409 PERIOD_NOT_FINALIZED)",
+    "140. Adjust is REFUSED when period_locks cannot be read (409 PERIOD_LOCK_UNREADABLE)",
     "141. Statement is REFUSED when period_locks cannot be read (409 PERIOD_NOT_FINALIZED)",
     "142. A PAID period still issues its statement when period_locks cannot be read",
   ];
@@ -2159,7 +2163,9 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
       const ALL_PERIODS = [CONTROL_PERIOD, FAULT_PERIOD, STMT_CONTROL_PERIOD, STMT_FAULT_PERIOD, STMT_PAID_PERIOD];
       const insLock = sdb.prepare("INSERT OR REPLACE INTO period_locks (period, status, finalized_at, finalized_by) VALUES (?, 'locked', ?, 'test-suite')");
       const insPayout = sdb.prepare("INSERT INTO investor_payouts (owner_id, period, amount, due_date, status) VALUES (?, ?, 1000, ?, 'owed')");
-      ALL_PERIODS.forEach(p => insLock.run(p, stamp));
+      // The rows are written first and the months locked last: the closed-month
+      // triggers refuse any row, adjustment or status-paid stamp written into a
+      // month that is already locked (installPeriodLockTriggers()).
       const controlId = insPayout.run(ownerId, CONTROL_PERIOD, CONTROL_PERIOD + "-15").lastInsertRowid;
       const faultId = insPayout.run(ownerId, FAULT_PERIOD, FAULT_PERIOD + "-15").lastInsertRowid;
 
@@ -2179,16 +2185,19 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
       [stmtControlId, stmtFaultId, stmtPaidId].forEach(id => zeroOut.run(id));
       sdb.prepare("UPDATE investor_payouts SET status = 'paid', paid_at = ?, paid_by = 'test-suite' WHERE id = ?")
         .run(stamp, stmtPaidId);
+      ALL_PERIODS.forEach(p => insLock.run(p, stamp));
 
       // 137. POSITIVE CONTROL, and it is not decoration: without it, tests 138
       //      and 139 would still pass on a server where the flag was off, the
       //      seed had failed, or every payout write 409s for some unrelated
-      //      reason. This pins "these rows are settleable and adjustable right
-      //      now" before anything is broken.
+      //      reason. This pins "these rows are settleable right now, and their
+      //      closed month refuses an adjustment for being closed (not for an
+      //      unreadable table)" before anything is broken.
       const cAdj = await req("PUT", `/api/investor/payouts/${controlId}/adjust`,
-        { adjustment: -1, adjustmentNote: "test-suite: control, must be accepted" }, sc, scratchPort);
+        { adjustment: -1, adjustmentNote: "test-suite: control, must be refused as closed" }, sc, scratchPort);
       const cSet = await req("POST", `/api/investor/payouts/${controlId}/status`, { status: "paid" }, sc, scratchPort);
-      test(lockFaultNames[0], cAdj.status === 200 && cSet.status === 200);
+      test(lockFaultNames[0], cAdj.status === 409 && cAdj.body?.code === "PERIOD_FINALIZED"
+        && !cAdj.body?.periodLockUnreadable && cSet.status === 200);
 
       // 138. The statement route's own positive control. Same period shape as the
       //      one the fault is aimed at — past, LOCKED, unpaid — so the lock guard
@@ -2230,14 +2239,14 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
         && afterSet.status === "owed"
         && !afterSet.paid_at);
 
-      // 140. Same for the adjust guard, which fails closed by the same double
-      //      negative and would invert with the same refactor.
+      // 140. Same for the adjust guard, which fails closed through
+      //      periodWriteLocked() and says so under its own code.
       const fAdj = await req("PUT", `/api/investor/payouts/${faultId}/adjust`,
         { adjustment: -500, adjustmentNote: "test-suite: must be rejected" }, sc, scratchPort);
       const afterAdj = sdb.prepare("SELECT adjustment FROM investor_payouts WHERE id = ?").get(faultId);
       test(lockFaultNames[3],
         fAdj.status === 409
-        && fAdj.body?.code === "PERIOD_NOT_FINALIZED"
+        && fAdj.body?.code === "PERIOD_LOCK_UNREADABLE"
         && fAdj.body?.periodLockUnreadable === true
         && Number(afterAdj.adjustment) === 0);
 

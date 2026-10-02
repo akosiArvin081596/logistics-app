@@ -1118,16 +1118,13 @@ ok(/const list = proposed\.filter\(isPlausibleLockPeriod\);/.test(extractFnAny("
 	"⚠️ finalizePeriods() filters — the choke point the finalize ROUTE and the SWEEP both pass through");
 ok(/isPlausibleLockPeriod/.test(extractFnAny("periodsDueForClose")),
 	"periodsDueForClose() filters, so the sweep's `due` leg never proposes a junk key");
-// ⚠️ THE SWEEP HAS TWO INPUTS AND THE SECOND IS THE DANGEROUS ONE. `unstamped`
-// reads period_locks DIRECTLY, so it surfaces a junk row a pre-validation build
-// already wrote — the exact state the reopen carve-out exists for. Unfiltered,
-// finalizePeriods refuses it, stamps nothing, nothing changes, and the identical
-// row returns next tick: a per-minute warn loop forever, burying real failures.
-// Found by security review (M-1); the filter is invisible in any single-tick test,
-// so it is pinned structurally.
+// ⚠️ THE SWEEP HAS ONE INPUT. It used to have a second, an `unstamped` retry
+// that read period_locks directly (and had to carry its own copy of this filter,
+// M-1). That leg is gone: the close stamps and locks in one transaction, and a
+// locked month is final as recorded. Pinned so it does not come back unfiltered.
 const SWEEP_SRC = extractFnAny("maybeCloseFinishedPeriods");
-ok(/\.all\(\)\.map\(\(r\) => r\.period\)\.filter\(isPlausibleLockPeriod\)/.test(SWEEP_SRC),
-	"⚠️ the sweep's `unstamped` retry leg is filtered too — not just `due`");
+ok(/const work = \[\.\.\.new Set\(due\)\];/.test(SWEEP_SRC) && !/(FROM|JOIN) period_locks/.test(SWEEP_SRC),
+	"⚠️ the sweep works only from periodsDueForClose() (filtered); no leg reads period_locks directly");
 // …and the close log must report what CLOSED, not what was PROPOSED. Logging
 // `work` announces a close that finalizePeriods refused.
 ok(/finalized \$\{result\.periods\.join/.test(SWEEP_SRC),

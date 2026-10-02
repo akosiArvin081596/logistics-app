@@ -416,7 +416,18 @@
                      home is the Month-Close Calendar above, which additionally
                      covers months that have no payout row at all. -->
                 <template v-if="p.phase === 'pending'">
-                  <span class="await-note">Nothing to do &mdash; settles when the month closes</span>
+                  <span class="await-note">Settles when the month closes</span>
+                  <!-- A pending month is open, so it takes adjustments: this is
+                       where a correction to an already-closed month is posted.
+                       The server refuses an adjustment on a closed month
+                       (409 PERIOD_FINALIZED). -->
+                  <button
+                    type="button"
+                    class="action-btn act-adjust"
+                    :disabled="busyId === p.id"
+                    title="Add or edit an adjustment on this open month (for example a correction to a month that has already closed)"
+                    @click="openAdjust(inv, p)"
+                  >{{ p.adjustment ? 'Edit Adj.' : 'Adjust' }}</button>
                 </template>
                 <template v-else>
                   <!-- Mark Processing / Mark Paid only where there is money to
@@ -451,19 +462,16 @@
                     title="Move this payout back — it was advanced by mistake"
                     @click="openReopen(inv, p)"
                   >Reopen</button>
-                  <!-- Adjust once the figure has stopped moving. Until the period
-                       is finalized, `amount` is refreshed from live earnings on
-                       every read, so a manual delta on top would be counted twice
-                       and drift again on the next reconcile. Keyed on the PERIOD
-                       (not the row's status) to match the server guard, which also
-                       means a finalized-but-unpaid row IS adjustable — the
-                       finalize -> correct -> pay flow. -->
+                  <!-- A closed (finalized) month is final as settled and takes no
+                       adjustment; its corrections post on an open month's row.
+                       Keyed on the PERIOD to match the server guard
+                       (409 PERIOD_FINALIZED). -->
                   <button
-                    v-if="p.phase === 'finalized' || p.status !== 'owed'"
+                    v-if="p.phase !== 'finalized'"
                     type="button"
                     class="action-btn act-adjust"
                     :disabled="busyId === p.id"
-                    title="Add or edit a settlement adjustment (e.g. receipts that arrived after this month closed)"
+                    title="Add or edit an adjustment on this open month"
                     @click="openAdjust(inv, p)"
                   >{{ p.adjustment ? 'Edit Adj.' : 'Adjust' }}</button>
                   <!-- "Reopen Month" USED TO RENDER HERE and was removed with
@@ -658,7 +666,7 @@
         </div>
 
         <div class="adj-facts">
-          <div class="adj-fact"><span>Settled amount</span><span class="mono">{{ fmt(adjustTarget.payout.amount) }}</span></div>
+          <div class="adj-fact"><span>Current amount</span><span class="mono">{{ fmt(adjustTarget.payout.amount) }}</span></div>
           <div v-if="hasGap" class="adj-fact gap">
             <span>Recomputed now</span>
             <span class="mono">{{ fmt(adjustTarget.payout.recomputedAmount) }} <em>(gap {{ gapDelta > 0 ? '+' : '−' }}{{ fmt(Math.abs(gapDelta)) }})</em></span>
@@ -670,11 +678,16 @@
           <button type="button" class="adj-suggest" @click="applySuggestion">Use {{ gapDelta > 0 ? '+' : '−' }}{{ fmt(Math.abs(gapDelta)) }}</button>
         </p>
 
+        <p class="adj-hint">
+          This month is still open: its amount follows its loads and receipts until it closes, and the
+          adjustment stays as entered. A correction to a month that has already closed is posted here.
+        </p>
+
         <label class="adj-label">Adjustment (+ credits investor, − claws back)</label>
         <input v-model="adjustAmount" type="number" step="0.01" class="adj-input" placeholder="0.00" />
 
         <label class="adj-label">Reason (shown to the investor)</label>
-        <textarea v-model="adjustNote" class="adj-textarea" rows="2" maxlength="500" placeholder="e.g. Late June fuel receipts uploaded after settlement"></textarea>
+        <textarea v-model="adjustNote" class="adj-textarea" rows="2" maxlength="500" placeholder="e.g. June fuel receipt found after June closed"></textarea>
 
         <div class="adj-preview">
           New effective payout: <strong class="mono" :class="{ 'adj-over': overDeducted }">{{ fmt(previewEffective) }}</strong>
@@ -1115,7 +1128,7 @@ async function saveReopen() {
   }
 }
 
-// --- Settlement adjustments (e.g. receipts uploaded after a month settled) ---
+// --- Adjustments on an open month (e.g. a correction to a month that has closed) ---
 const adjustTarget = ref(null)   // { investorName, payout }
 const adjustAmount = ref('')
 const adjustNote = ref('')
