@@ -1201,11 +1201,15 @@ function mutate(find, replace, label) {
 					deduction.includes("WHERE type IN ('Fuel', 'Maintenance') AND ${EXPENSE_PNL_FILTER}"),
 					deduction.includes("GROUP BY LOWER(driver), month")],
 				[true, true, true, true]],
+			// The payout ledger's call and its driver key live in gatherLedgerScopeFacts()
+			// and ledgerLoadRows(); the other two are inline.
 			["§7 the P&L's three callers read that one map, each by a normalizeDriverName() key",
 				[(SRC.match(/= getDeductibleExpensesByDriverMonth\(\);/g) || []).length,
+					(SRC.match(/expensesByDriverMonth: getDeductibleExpensesByDriverMonth\(\),/g) || []).length,
 					(SRC.match(/const driver = jtDriverCol \? normalizeDriverName\(driverNameForTotals\(r\[jtDriverCol\]\)\) : "";/g) || []).length,
+					(SRC.match(/driver: jtDriverCol \? normalizeDriverName\(driverNameForTotals\(r\[jtDriverCol\]\)\) : "",/g) || []).length,
 					SRC.includes("const driverLc = normalizeDriverName(driver);")],
-				[3, 2, true]],
+				[2, 1, 1, 1, true]],
 			["§7 both per-truck expense maps are folded, and read by normalizeDriverName(truck.assigned_driver)",
 				[(SRC.match(/= foldExpenseTotalsByDriver\(/g) || []).length, SRC.includes(".map(r => [r.d, r.t])"),
 					(SRC.match(/const driverName = normalizeDriverName\(truck\.assigned_driver\);/g) || []).length,

@@ -1,0 +1,786 @@
+{
+	"owner5": {
+		"monthlyEarnings": [
+			{
+				"month": "2026-03",
+				"revenue": 9201,
+				"driverPay": 2560,
+				"fixedCosts": 2700,
+				"tripExpenses": 400,
+				"maintFundCost": 0,
+				"complianceCost": 120,
+				"netProfit": 3420,
+				"exact": {
+					"revenue": 9200.5,
+					"driverPay": 2560,
+					"fixedCosts": 2700,
+					"tripExpenses": 400.1,
+					"maintFundCost": 0,
+					"complianceCost": 120,
+					"netProfit": 3420.4
+				},
+				"investorEarnings": 1710,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-04",
+				"revenue": 0,
+				"driverPay": 0,
+				"fixedCosts": 2700,
+				"tripExpenses": 250,
+				"maintFundCost": 0,
+				"complianceCost": 0,
+				"netProfit": -2950,
+				"exact": {
+					"revenue": 0,
+					"driverPay": 0,
+					"fixedCosts": 2700,
+					"tripExpenses": 250.05,
+					"maintFundCost": 0,
+					"complianceCost": 0,
+					"netProfit": -2950.05
+				},
+				"investorEarnings": -1475,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-05",
+				"revenue": 1800,
+				"driverPay": 250,
+				"fixedCosts": 3591.16,
+				"tripExpenses": 0,
+				"maintFundCost": 300,
+				"complianceCost": 0,
+				"netProfit": -2341,
+				"exact": {
+					"revenue": 1800.25,
+					"driverPay": 250,
+					"fixedCosts": 3591.16,
+					"tripExpenses": 0,
+					"maintFundCost": 300,
+					"complianceCost": 0,
+					"netProfit": -2340.91
+				},
+				"investorEarnings": -1170,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-06",
+				"revenue": 2000,
+				"driverPay": 250,
+				"fixedCosts": 3591.16,
+				"tripExpenses": 0,
+				"maintFundCost": 0,
+				"complianceCost": 0,
+				"netProfit": -1841,
+				"exact": {
+					"revenue": 2000,
+					"driverPay": 250,
+					"fixedCosts": 3591.16,
+					"tripExpenses": 0,
+					"maintFundCost": 0,
+					"complianceCost": 0,
+					"netProfit": -1841.1599999999999
+				},
+				"investorEarnings": -921,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-07",
+				"revenue": 1000,
+				"driverPay": 500,
+				"fixedCosts": 3591.16,
+				"tripExpenses": 33,
+				"maintFundCost": 0,
+				"complianceCost": 0,
+				"netProfit": -3124,
+				"exact": {
+					"revenue": 1000,
+					"driverPay": 500,
+					"fixedCosts": 3591.16,
+					"tripExpenses": 33.33,
+					"maintFundCost": 0,
+					"complianceCost": 0,
+					"netProfit": -3124.49
+				},
+				"investorEarnings": -1562,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-08",
+				"revenue": 0,
+				"driverPay": 0,
+				"fixedCosts": 0,
+				"tripExpenses": 0,
+				"maintFundCost": 0,
+				"complianceCost": 0,
+				"netProfit": 0,
+				"exact": {
+					"revenue": 0,
+					"driverPay": 0,
+					"fixedCosts": 0,
+					"tripExpenses": 0,
+					"maintFundCost": 0,
+					"complianceCost": 0,
+					"netProfit": 0
+				},
+				"investorEarnings": 0,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-09",
+				"revenue": 3457,
+				"driverPay": 640,
+				"fixedCosts": 2700,
+				"tripExpenses": 0,
+				"maintFundCost": 0,
+				"complianceCost": 0,
+				"netProfit": 117,
+				"exact": {
+					"revenue": 3456.78,
+					"driverPay": 640,
+					"fixedCosts": 2700,
+					"tripExpenses": 0,
+					"maintFundCost": 0,
+					"complianceCost": 0,
+					"netProfit": 116.7800000000002
+				},
+				"investorEarnings": 58,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-10",
+				"revenue": 2500,
+				"driverPay": 640,
+				"fixedCosts": 2700,
+				"tripExpenses": 0,
+				"maintFundCost": 0,
+				"complianceCost": 0,
+				"netProfit": -840,
+				"exact": {
+					"revenue": 2500,
+					"driverPay": 640,
+					"fixedCosts": 2700,
+					"tripExpenses": 0,
+					"maintFundCost": 0,
+					"complianceCost": 0,
+					"netProfit": -840
+				},
+				"investorEarnings": -420,
+				"isCurrentMonth": true
+			}
+		],
+		"currentMonthKey": "2026-10",
+		"detail": {
+			"revenueLoads": [
+				{
+					"loadId": "L4",
+					"driver": "bob bravo",
+					"truck": "T5B",
+					"date": "6/3/2026",
+					"pickup": "pickup:L4",
+					"dropoff": "drop:L4",
+					"amount": 2000
+				}
+			],
+			"driverPayRows": [
+				{
+					"driver": "bob bravo",
+					"activeDays": 1,
+					"dailyRate": 250,
+					"payType": "fixed",
+					"payPercentage": 0,
+					"pay": 250
+				}
+			],
+			"fixedCostItems": [
+				{
+					"truck": "T5A",
+					"insurance": 1000,
+					"eld": 50,
+					"truckPayment": 1500,
+					"hvut": 50,
+					"irp": 100,
+					"total": 2700
+				},
+				{
+					"truck": "T5B",
+					"insurance": 800.33,
+					"eld": 45,
+					"truckPayment": 0,
+					"hvut": 45.83,
+					"irp": 0,
+					"total": 891.16
+				}
+			],
+			"tripExpenseItems": []
+		}
+	},
+	"owner6": {
+		"monthlyEarnings": [
+			{
+				"month": "2026-02",
+				"revenue": 1500,
+				"driverPay": 500,
+				"fixedCosts": 0,
+				"tripExpenses": 46,
+				"maintFundCost": 0,
+				"complianceCost": 0,
+				"netProfit": 955,
+				"exact": {
+					"revenue": 1500,
+					"driverPay": 500,
+					"fixedCosts": 0,
+					"tripExpenses": 45.5,
+					"maintFundCost": 0,
+					"complianceCost": 0,
+					"netProfit": 954.5
+				},
+				"investorEarnings": 573,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-03",
+				"revenue": 0,
+				"driverPay": 0,
+				"fixedCosts": 0,
+				"tripExpenses": 0,
+				"maintFundCost": 0,
+				"complianceCost": 0,
+				"netProfit": 0,
+				"exact": {
+					"revenue": 0,
+					"driverPay": 0,
+					"fixedCosts": 0,
+					"tripExpenses": 0,
+					"maintFundCost": 0,
+					"complianceCost": 0,
+					"netProfit": 0
+				},
+				"investorEarnings": 0,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-04",
+				"revenue": 6000,
+				"driverPay": 1375,
+				"fixedCosts": 2225,
+				"tripExpenses": 500,
+				"maintFundCost": 150,
+				"complianceCost": 0,
+				"netProfit": 1750,
+				"exact": {
+					"revenue": 6000,
+					"driverPay": 1375,
+					"fixedCosts": 2225,
+					"tripExpenses": 500,
+					"maintFundCost": 150,
+					"complianceCost": 0,
+					"netProfit": 1750
+				},
+				"investorEarnings": 1050,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-05",
+				"revenue": 0,
+				"driverPay": 0,
+				"fixedCosts": 0,
+				"tripExpenses": 0,
+				"maintFundCost": 0,
+				"complianceCost": 0,
+				"netProfit": 0,
+				"exact": {
+					"revenue": 0,
+					"driverPay": 0,
+					"fixedCosts": 0,
+					"tripExpenses": 0,
+					"maintFundCost": 0,
+					"complianceCost": 0,
+					"netProfit": 0
+				},
+				"investorEarnings": 0,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-06",
+				"revenue": 0,
+				"driverPay": 0,
+				"fixedCosts": 0,
+				"tripExpenses": 0,
+				"maintFundCost": 0,
+				"complianceCost": 0,
+				"netProfit": 0,
+				"exact": {
+					"revenue": 0,
+					"driverPay": 0,
+					"fixedCosts": 0,
+					"tripExpenses": 0,
+					"maintFundCost": 0,
+					"complianceCost": 0,
+					"netProfit": 0
+				},
+				"investorEarnings": 0,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-07",
+				"revenue": 0,
+				"driverPay": 0,
+				"fixedCosts": 0,
+				"tripExpenses": 0,
+				"maintFundCost": 0,
+				"complianceCost": 0,
+				"netProfit": 0,
+				"exact": {
+					"revenue": 0,
+					"driverPay": 0,
+					"fixedCosts": 0,
+					"tripExpenses": 0,
+					"maintFundCost": 0,
+					"complianceCost": 0,
+					"netProfit": 0
+				},
+				"investorEarnings": 0,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-08",
+				"revenue": 0,
+				"driverPay": 0,
+				"fixedCosts": 0,
+				"tripExpenses": 0,
+				"maintFundCost": 0,
+				"complianceCost": 0,
+				"netProfit": 0,
+				"exact": {
+					"revenue": 0,
+					"driverPay": 0,
+					"fixedCosts": 0,
+					"tripExpenses": 0,
+					"maintFundCost": 0,
+					"complianceCost": 0,
+					"netProfit": 0
+				},
+				"investorEarnings": 0,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-09",
+				"revenue": 4000,
+				"driverPay": 947,
+				"fixedCosts": 2225,
+				"tripExpenses": 210,
+				"maintFundCost": 0,
+				"complianceCost": 0,
+				"netProfit": 617,
+				"exact": {
+					"revenue": 4000,
+					"driverPay": 947.4,
+					"fixedCosts": 2225,
+					"tripExpenses": 210.4,
+					"maintFundCost": 0,
+					"complianceCost": 0,
+					"netProfit": 617.1999999999999
+				},
+				"investorEarnings": 370,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-10",
+				"revenue": 0,
+				"driverPay": 0,
+				"fixedCosts": 0,
+				"tripExpenses": 0,
+				"maintFundCost": 0,
+				"complianceCost": 0,
+				"netProfit": 0,
+				"exact": {
+					"revenue": 0,
+					"driverPay": 0,
+					"fixedCosts": 0,
+					"tripExpenses": 0,
+					"maintFundCost": 0,
+					"complianceCost": 0,
+					"netProfit": 0
+				},
+				"investorEarnings": 0,
+				"isCurrentMonth": true
+			}
+		],
+		"currentMonthKey": "2026-10",
+		"detail": {
+			"revenueLoads": [
+				{
+					"loadId": "L6",
+					"driver": "cat charlie",
+					"truck": "T6",
+					"date": "4/5/2026",
+					"pickup": "pickup:L6",
+					"dropoff": "drop:L6",
+					"amount": 3300
+				},
+				{
+					"loadId": "L7",
+					"driver": "cat charlie",
+					"truck": "T6",
+					"date": "4/20/2026",
+					"pickup": "pickup:L7",
+					"dropoff": "drop:L7",
+					"amount": 2700
+				}
+			],
+			"driverPayRows": [
+				{
+					"driver": "cat charlie",
+					"activeDays": 5,
+					"dailyRate": 280,
+					"payType": "percentage",
+					"payPercentage": 25,
+					"pay": 1375
+				}
+			],
+			"fixedCostItems": [
+				{
+					"truck": "T6",
+					"insurance": 900,
+					"eld": 50,
+					"truckPayment": 1200,
+					"hvut": 0,
+					"irp": 75,
+					"total": 2225
+				}
+			],
+			"tripExpenseItems": [
+				{
+					"date": "2026-04-07",
+					"type": "Fuel",
+					"description": "",
+					"amount": 500,
+					"driver": "Cat Charlie",
+					"truck": "T6",
+					"city": "",
+					"state": "",
+					"postedPeriod": ""
+				}
+			]
+		}
+	},
+	"fleet": {
+		"monthlyEarnings": [
+			{
+				"month": "2026-01",
+				"revenue": 1200,
+				"driverPay": 520,
+				"fixedCosts": 650,
+				"tripExpenses": 0,
+				"maintFundCost": 0,
+				"complianceCost": 0,
+				"netProfit": 30,
+				"exact": {
+					"revenue": 1200,
+					"driverPay": 520,
+					"fixedCosts": 650,
+					"tripExpenses": 0,
+					"maintFundCost": 0,
+					"complianceCost": 0,
+					"netProfit": 30
+				},
+				"investorEarnings": 15,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-02",
+				"revenue": 1500,
+				"driverPay": 500,
+				"fixedCosts": 650,
+				"tripExpenses": 46,
+				"maintFundCost": 0,
+				"complianceCost": 0,
+				"netProfit": 305,
+				"exact": {
+					"revenue": 1500,
+					"driverPay": 500,
+					"fixedCosts": 650,
+					"tripExpenses": 45.5,
+					"maintFundCost": 0,
+					"complianceCost": 0,
+					"netProfit": 304.5
+				},
+				"investorEarnings": 152,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-03",
+				"revenue": 9201,
+				"driverPay": 2560,
+				"fixedCosts": 3350,
+				"tripExpenses": 400,
+				"maintFundCost": 0,
+				"complianceCost": 120,
+				"netProfit": 2770,
+				"exact": {
+					"revenue": 9200.5,
+					"driverPay": 2560,
+					"fixedCosts": 3350,
+					"tripExpenses": 400.1,
+					"maintFundCost": 0,
+					"complianceCost": 120,
+					"netProfit": 2770.4
+				},
+				"investorEarnings": 1385,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-04",
+				"revenue": 6000,
+				"driverPay": 1375,
+				"fixedCosts": 5575,
+				"tripExpenses": 750,
+				"maintFundCost": 150,
+				"complianceCost": 0,
+				"netProfit": -1850,
+				"exact": {
+					"revenue": 6000,
+					"driverPay": 1375,
+					"fixedCosts": 5575,
+					"tripExpenses": 750.05,
+					"maintFundCost": 150,
+					"complianceCost": 0,
+					"netProfit": -1850.05
+				},
+				"investorEarnings": -925,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-05",
+				"revenue": 1800,
+				"driverPay": 250,
+				"fixedCosts": 6466.16,
+				"tripExpenses": 0,
+				"maintFundCost": 300,
+				"complianceCost": 0,
+				"netProfit": -5216,
+				"exact": {
+					"revenue": 1800.25,
+					"driverPay": 250,
+					"fixedCosts": 6466.16,
+					"tripExpenses": 0,
+					"maintFundCost": 300,
+					"complianceCost": 0,
+					"netProfit": -5215.91
+				},
+				"investorEarnings": -2608,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-06",
+				"revenue": 2000,
+				"driverPay": 500,
+				"fixedCosts": 6466.16,
+				"tripExpenses": 0,
+				"maintFundCost": 0,
+				"complianceCost": 0,
+				"netProfit": -4966,
+				"exact": {
+					"revenue": 2000,
+					"driverPay": 500,
+					"fixedCosts": 6466.16,
+					"tripExpenses": 0,
+					"maintFundCost": 0,
+					"complianceCost": 0,
+					"netProfit": -4966.16
+				},
+				"investorEarnings": -2483,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-07",
+				"revenue": 3222,
+				"driverPay": 1280,
+				"fixedCosts": 6466.16,
+				"tripExpenses": 153,
+				"maintFundCost": 0,
+				"complianceCost": 0,
+				"netProfit": -4677,
+				"exact": {
+					"revenue": 3222.22,
+					"driverPay": 1280,
+					"fixedCosts": 6466.16,
+					"tripExpenses": 153.32999999999998,
+					"maintFundCost": 0,
+					"complianceCost": 0,
+					"netProfit": -4677.27
+				},
+				"investorEarnings": -2339,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-08",
+				"revenue": 0,
+				"driverPay": 0,
+				"fixedCosts": 0,
+				"tripExpenses": 0,
+				"maintFundCost": 0,
+				"complianceCost": 0,
+				"netProfit": 0,
+				"exact": {
+					"revenue": 0,
+					"driverPay": 0,
+					"fixedCosts": 0,
+					"tripExpenses": 0,
+					"maintFundCost": 0,
+					"complianceCost": 0,
+					"netProfit": 0
+				},
+				"investorEarnings": 0,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-09",
+				"revenue": 7457,
+				"driverPay": 1587,
+				"fixedCosts": 5575,
+				"tripExpenses": 210,
+				"maintFundCost": 0,
+				"complianceCost": 0,
+				"netProfit": 84,
+				"exact": {
+					"revenue": 7456.780000000001,
+					"driverPay": 1587.4,
+					"fixedCosts": 5575,
+					"tripExpenses": 210.4,
+					"maintFundCost": 0,
+					"complianceCost": 0,
+					"netProfit": 83.98000000000101
+				},
+				"investorEarnings": 42,
+				"isCurrentMonth": false
+			},
+			{
+				"month": "2026-10",
+				"revenue": 2500,
+				"driverPay": 640,
+				"fixedCosts": 5575,
+				"tripExpenses": 0,
+				"maintFundCost": 0,
+				"complianceCost": 0,
+				"netProfit": -3715,
+				"exact": {
+					"revenue": 2500,
+					"driverPay": 640,
+					"fixedCosts": 5575,
+					"tripExpenses": 0,
+					"maintFundCost": 0,
+					"complianceCost": 0,
+					"netProfit": -3715
+				},
+				"investorEarnings": -1857,
+				"isCurrentMonth": true
+			}
+		],
+		"currentMonthKey": "2026-10",
+		"detail": {
+			"revenueLoads": [
+				{
+					"loadId": "L10",
+					"driver": "dan delta",
+					"truck": "C1",
+					"date": "7/7/2026",
+					"pickup": "pickup:L10",
+					"dropoff": "drop:L10",
+					"amount": 2222.22
+				},
+				{
+					"loadId": "L13",
+					"driver": "bob bravo",
+					"truck": "T5B",
+					"date": "7/1/2026",
+					"pickup": "pickup:L13",
+					"dropoff": "drop:L13",
+					"amount": 1000
+				}
+			],
+			"driverPayRows": [
+				{
+					"driver": "bob bravo",
+					"activeDays": 2,
+					"dailyRate": 250,
+					"payType": "fixed",
+					"payPercentage": 0,
+					"pay": 500
+				},
+				{
+					"driver": "dan delta",
+					"activeDays": 3,
+					"dailyRate": 260,
+					"payType": "fixed",
+					"payPercentage": 0,
+					"pay": 780
+				}
+			],
+			"fixedCostItems": [
+				{
+					"truck": "T5A",
+					"insurance": 1000,
+					"eld": 50,
+					"truckPayment": 1500,
+					"hvut": 50,
+					"irp": 100,
+					"total": 2700
+				},
+				{
+					"truck": "T5B",
+					"insurance": 800.33,
+					"eld": 45,
+					"truckPayment": 0,
+					"hvut": 45.83,
+					"irp": 0,
+					"total": 891.16
+				},
+				{
+					"truck": "T6",
+					"insurance": 900,
+					"eld": 50,
+					"truckPayment": 1200,
+					"hvut": 0,
+					"irp": 75,
+					"total": 2225
+				},
+				{
+					"truck": "C1",
+					"insurance": 600,
+					"eld": 50,
+					"truckPayment": 0,
+					"hvut": 0,
+					"irp": 0,
+					"total": 650
+				}
+			],
+			"tripExpenseItems": [
+				{
+					"date": "2026-06-28",
+					"type": "Toll",
+					"description": "",
+					"amount": 33.33,
+					"driver": "Bob Bravo",
+					"truck": "T5B",
+					"city": "",
+					"state": "",
+					"postedPeriod": "2026-07"
+				},
+				{
+					"date": "2026-07-09",
+					"type": "Fuel",
+					"description": "",
+					"amount": 120,
+					"driver": "Dan Delta",
+					"truck": "C1",
+					"city": "",
+					"state": "",
+					"postedPeriod": ""
+				}
+			]
+		}
+	}
+}

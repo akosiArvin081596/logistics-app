@@ -196,8 +196,19 @@ section("1. TEXTUAL — every fixed-cost month gate routes through ONE predicate
 	// walks the months the ledger charged and gates each truck with this predicate,
 	// the same loop as getMonthlyFixedCosts(). The report site is pinned by name
 	// below so the count cannot be satisfied by a different sixth gate.
+	//
+	// The ledger's month math moved to lib/financials-calc.js (its two gates, the
+	// month total and the detail month, moved with it), plus a third there: its
+	// per-truck fixed-cost line items, which re-walk THE SAME gated loop as the
+	// month total so they sum to it by construction, the lesson of the
+	// getMonthlyFixedCostParts() pair above. GET /api/financials' own monthly
+	// fixed-cost loop is gone: its months are the ledger's (buildFinancialsLedger()).
+	// SIX, counted across server.js and the lib.
+	const CALC_SRC = fs.readFileSync(path.join(__dirname, "..", "lib", "financials-calc.js"), "utf8");
 	const gateCalls = (SRC.match(/if \(!truckChargedInMonth\(/g) || []).length;
-	eq(gateCalls, 6, "six money month-gates call truckChargedInMonth() directly");
+	const calcGates = (CALC_SRC.match(/if \(!truckChargedInMonth\(/g) || []).length;
+	eq(calcGates, 3, "lib/financials-calc.js: the month total, its detail month and its line items gate with truckChargedInMonth()");
+	eq(gateCalls + calcGates, 6, "six money month-gates call truckChargedInMonth() directly");
 	{
 		const rs = SRC.indexOf('app.get("/api/investor/report"');
 		const re = SRC.indexOf("\napp.", rs + 10);
@@ -233,7 +244,7 @@ section("1. TEXTUAL — every fixed-cost month gate routes through ONE predicate
 	const fixedSelects = SRC.match(/SELECT [^"`\n]*insurance_monthly[^"`\n]*FROM trucks/g) || [];
 	const missing = fixedSelects.filter((q) => !/retired_at/.test(q) && !/SELECT \*/.test(q));
 	eq(missing, [], "every explicit fixed-cost SELECT list includes retired_at");
-	ok(fixedSelects.length >= 7, `found ${fixedSelects.length} explicit fixed-cost SELECT lists (>=7)`);
+	ok(fixedSelects.length >= 6, `found ${fixedSelects.length} explicit fixed-cost SELECT lists (>=6)`);
 
 	// THE FLEET RULE (2026-09-30): which trucks' fixed costs, maintenance-fund and
 	// compliance-fee rows count is ONE rule, investorPayoutBasis.truckInFleet() in
@@ -259,13 +270,22 @@ section("1. TEXTUAL — every fixed-cost month gate routes through ONE predicate
 	const fixedWhere = code.match(/`SELECT [^`\n]*insurance_monthly[^`\n]*FROM trucks WHERE [^`\n]*`/g) || [];
 	eq(fixedWhere.filter((q) => !q.includes("${investorPayoutBasis.truckInFleetSql()}")), [],
 		"every filtered fixed-cost SELECT reads the fleet rule");
-	eq(fixedWhere.length, 7, "…all seven of them (computeInvestorMonthlyEarnings x2, /api/investor x4, /api/financials x1)");
+	eq(fixedWhere.length, 6, "…all six of them (gatherLedgerScopeFacts x2, /api/investor x4)");
 	ok(code.includes("db.prepare(`SELECT * FROM trucks WHERE ${investorPayoutBasis.truckInFleetSql()}`)"),
 		"/api/financials' fleet P&L and per-truck table read the fleet rule");
-	eq((code.match(/truckInFleetSql\("t"\)/g) || []).length, 8,
-		"the eight maintenance/compliance JOINs on an owner's trucks read the fleet rule");
-	eq((code.match(/NOT \(\$\{investorPayoutBasis\.truckInFleetSql\(\)\}\)/g) || []).length, 11,
-		"the ten fleet-wide NOT IN subqueries and the compliance-fee guard read its complement");
+	// Ten JOINs: the payout ledger reads its maintenance and compliance rows twice
+	// for an owner (the month totals and the line items behind them).
+	eq((code.match(/truckInFleetSql\("t"\)/g) || []).length, 10,
+		"the ten maintenance/compliance JOINs on an owner's trucks read the fleet rule");
+	// The ledger's four fleet-wide reads (two month totals, two line-item reads)
+	// share one copy of the subquery (`notRetired` in gatherLedgerScopeFacts()).
+	eq((code.match(/NOT \(\$\{investorPayoutBasis\.truckInFleetSql\(\)\}\)/g) || []).length, 10,
+		"the fleet-wide NOT IN subqueries and the compliance-fee guard read its complement");
+	{
+		const g = SRC.indexOf("\nasync function gatherLedgerScopeFacts(");
+		const gather = SRC.slice(g, SRC.indexOf("\n}\n", g));
+		eq((gather.match(/\$\{notRetired\}/g) || []).length, 4, "…the ledger's four fleet-wide maintenance/compliance reads all use it");
+	}
 	ok(code.includes("ownedTrucks2.filter(investorPayoutBasis.truckInFleet)"),
 		"GET /api/investor/report's fixed-cost lines read the fleet rule");
 	for (const fn of ["truckEditLockBlockers", "truckDeleteLockBlockers", "truckCreateLockBlockers"]) {

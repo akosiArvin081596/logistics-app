@@ -177,17 +177,21 @@ ok(/const sheetToIso = \(val\) => \{[\s\S]{0,200}?moneySheetDate\(val\)/.test(SR
 ok(!/sheetToIso[\s\S]{0,300}?\\d\{1,2\}\)\[\/-\]/.test(IFTA_SRC),
 	"the IFTA helper carries no date regex of its own");
 
-// All four drop-off reads must go through the shared resolver.
+// All four drop-off reads must go through the shared resolver: three inline
+// `const dropoff = …(` sites, and the payout ledger's row read in ledgerLoadRows().
 const dropReads = [...SRC.matchAll(/const dropoff = (\w+)\(/g)].map((m) => m[1]);
-eq(dropReads.length, 4, "exactly 4 `const dropoff = …(` sites exist");
+eq(dropReads.length, 3, "exactly 3 inline `const dropoff = …(` sites exist");
 eq([...new Set(dropReads)], ["moneySheetDate"],
-	"every drop-off read resolves via moneySheetDate()");
+	"every inline drop-off read resolves via moneySheetDate()");
+eq((SRC.match(/dropoffDate: (\w+)\(dropoffDateCol/g) || []), ["dropoffDate: moneySheetDate(dropoffDateCol"],
+	"…and the ledger's drop-off read (ledgerLoadRows) is the fourth, via moneySheetDate()");
 ok(!/const dropoff = (jtP|p)arseSheetDate\(/.test(SRC),
 	"no drop-off read still uses the strict parser");
 
-// The three active-day sites must keep the pickup fallback beside it.
-eq((SRC.match(/if \(!pickup && jtDateCol && r\[jtDateCol\]\) pickup = moneySheetDate\(r\[jtDateCol\]\);/g) || []).length, 3,
-	"all 3 active-day sites keep the shared pickup fallback");
+// The three active-day sites must keep the pickup fallback beside it: two inline,
+// and the ledger's in lib/financials-calc.js (pinned in section 6).
+eq((SRC.match(/if \(!pickup && jtDateCol && r\[jtDateCol\]\) pickup = moneySheetDate\(r\[jtDateCol\]\);/g) || []).length, 2,
+	"both inline active-day sites keep the shared pickup fallback");
 
 // -------------------------------------------------- 2. loadWindowDays (guard)
 console.log("\n2. loadWindowDays — the window the period-lock guard reasons over");
@@ -328,11 +332,25 @@ eq(controlsHeld, CONTROLS.length, `all ${CONTROLS.length} controls pass on BOTH 
 // ------------------------------------ 6. structural — the money sites and only them
 console.log("\n6. structural — the pickup end reads the shared resolver at the 3 MONEY sites");
 
-const PICKUP_STMT = extractStmt(/let pickup = \w+\(pickupDateCol \? r\[pickupDateCol\] : null\);/g, 3, "money-site pickup read");
-const MONEY_DROP_STMT = extractStmt(/const dropoff = \w+\(dropoffDateCol \? r\[dropoffDateCol\] : null\);/g, 3, "money-site drop-off read");
-const MONEY_FALLBACK_STMT = extractStmt(/if \(!pickup && jtDateCol && r\[jtDateCol\]\) pickup = \w+\(r\[jtDateCol\]\);/g, 3, "money-site assigned-date fallback");
+// Two money sites are inline statements (GET /api/investor, GET /api/financials);
+// the third, the payout ledger, reads its rows in ledgerLoadRows() and applies the
+// assigned-date fallback in lib/financials-calc.js. Section 7 runs the same rows
+// through both shapes and requires the same answers.
+const PICKUP_STMT = extractStmt(/let pickup = \w+\(pickupDateCol \? r\[pickupDateCol\] : null\);/g, 2, "inline money-site pickup read");
+const MONEY_DROP_STMT = extractStmt(/const dropoff = \w+\(dropoffDateCol \? r\[dropoffDateCol\] : null\);/g, 2, "inline money-site drop-off read");
+const MONEY_FALLBACK_STMT = extractStmt(/if \(!pickup && jtDateCol && r\[jtDateCol\]\) pickup = \w+\(r\[jtDateCol\]\);/g, 2, "inline money-site assigned-date fallback");
 
-ok(/let pickup = moneySheetDate\(/.test(PICKUP_STMT), "all 3 money sites read the pickup via moneySheetDate()");
+ok(/let pickup = moneySheetDate\(/.test(PICKUP_STMT), "both inline money sites read the pickup via moneySheetDate()");
+const LEDGER_ROWS_SRC = extractFn("ledgerLoadRows");
+const CALC_SRC = fs.readFileSync(path.join(__dirname, "..", "lib", "financials-calc.js"), "utf8");
+ok(/pickupDate: moneySheetDate\(pickupDateCol \? r\[pickupDateCol\] : null\),/.test(LEDGER_ROWS_SRC),
+	"the ledger site reads the pickup via moneySheetDate(), unreadable results passed through");
+ok(/dropoffDate: moneySheetDate\(dropoffDateCol \? r\[dropoffDateCol\] : null\),/.test(LEDGER_ROWS_SRC),
+	"the ledger site reads the drop-off via moneySheetDate()");
+ok(/const d = moneySheetDate\(r\[jtDateCol\]\);\s*if \(d && !isNaN\(d\)\) assignedDate = d;/.test(LEDGER_ROWS_SRC),
+	"the ledger site reads the assigned date via moneySheetDate(), unreadable as none");
+ok((CALC_SRC.match(/if \(!pickup && r\.assignedDate\) pickup = r\.assignedDate;/g) || []).length === 1,
+	"the ledger falls back to the assigned date only for a missing pickup (lib/financials-calc.js)");
 ok(!/let pickup = parseSheetDate\(/.test(SRC), "no money site still reads the pickup with the local strict parser");
 ok(!/const parseSheetDate = \(val\) => \{/.test(SRC),
 	"computeInvestorMonthlyEarnings' local parseSheetDate copy is DELETED, not merely unused");
@@ -382,6 +400,35 @@ function buildMoneyWindow(pickupStmt) {
 const MONEY_NEW = buildMoneyWindow(PICKUP_STMT);
 const mrow = (pickup, dropoff, assigned) => ({ P: pickup, D: dropoff, A: assigned });
 const moneyRead = (fn, p, d, a) => fn(mrow(p, d, a), "P", "D", "A");
+// The ledger site, from the statements pinned in section 6.
+const LEDGER_WINDOW = new Function("RFC2822_MONTHS", `
+	${extractFn("moneySheetDate")}
+	${extractFn("jtFmtDate")}
+	return function (r, pickupDateCol, dropoffDateCol, jtDateCol) {
+		let assignedDate = null;
+		if (jtDateCol && r[jtDateCol]) {
+			const d = moneySheetDate(r[jtDateCol]);
+			if (d && !isNaN(d)) assignedDate = d;
+		}
+		let pickup = moneySheetDate(pickupDateCol ? r[pickupDateCol] : null);
+		const dropoff = moneySheetDate(dropoffDateCol ? r[dropoffDateCol] : null);
+		if (!pickup && assignedDate) pickup = assignedDate;
+		return { pickup: pickup && !isNaN(pickup) ? jtFmtDate(pickup) : null,
+		         dropoff: dropoff && !isNaN(dropoff) ? jtFmtDate(dropoff) : null };
+	};`)(RFC2822_MONTHS);
+{
+	const shapes = ["", "9/23/2025", "2025/09/23 23:59", "Date: 9/23/2025", "14:00", "07:00 Appt.", "2025-09-23",
+		"9/23/25 06:00-18:00 Appt.", "TBD", "Date: Tue, 23 Sep 2025 08:00:00 -0500"];
+	const differ = [];
+	for (const p of shapes) for (const d of ["", "9/25/2025", "2025/09/24 23:59", "9:00"]) {
+		for (const a of ["9/20/2025", "Date: Mon, 22 Sep 2025 08:45:51 -0500", "6/23/2026, 7:11:25 PM", "TBD", ""]) {
+			const x = JSON.stringify(moneyRead(MONEY_NEW, p, d, a));
+			const y = JSON.stringify(moneyRead(LEDGER_WINDOW, p, d, a));
+			if (x !== y) differ.push(`${JSON.stringify([p, d, a])}: inline ${x} ledger ${y}`);
+		}
+	}
+	eq(differ, [], "the ledger site reads every pickup / drop-off / assigned shape exactly as the inline money sites do");
+}
 
 // THE PRODUCTION ROW. Load 529227269: the pickup cell is unreadable by the strict
 // parser, so pay used to start the window at the ASSIGNED date (2025-09-22, when the

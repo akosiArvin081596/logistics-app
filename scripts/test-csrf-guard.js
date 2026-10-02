@@ -340,17 +340,19 @@ eq("refuseCrossSite mount count agrees with that list", mountCount("refuseCrossS
 // configuration the payout math reads, Super Admin only, and its only callers
 // are the SPA's Investors page and Admin Tools. So is PUT
 // /api/investors/:id/payout-basis: it sets whether an investor is paid the split
-// or a fixed monthly lease, and its only caller is the SPA's Investors page.
-eq("refuseCrossOrigin is on exactly the settlement writes, the reconcile pair, the invite writes, the investor config write and the payout basis write",
+// or a fixed monthly lease, and its only caller is the SPA's Investors page. So is
+// POST /api/admin/financials/freeze-closed-months: it freezes closed months'
+// Financials figures for good, Super Admin only, from the SPA.
+eq("refuseCrossOrigin is on exactly the settlement writes, the reconcile pair, the invite writes, the investor config write, the payout basis write and the closed-month freeze",
 	mountedOn("refuseCrossOrigin").join(" "),
-	["/api/periods/:period/finalize", "/api/periods/:period/reopen",
+	["/api/periods/:period/finalize", "/api/periods/:period/reopen", "/api/admin/financials/freeze-closed-months",
 	 "/api/investor/payouts/:id/status", "/api/investor/payouts/:id/adjust",
 	 "/api/invoices/:id/adjust",
 	 "/api/admin/ratecon-reconcile", "/api/admin/ratecon-reconcile/run",
 	 "/api/admin/investor-invites", "/api/admin/investor-invites/:id",
 	 "/api/admin/investor-invites/:id/reissue", "/api/admin/investor-invites/:id/revoke",
 	 "/api/investor/config", "/api/investors/:id/payout-basis"].sort().join(" "));
-eq("refuseCrossOrigin mount count agrees with that list", mountCount("refuseCrossOrigin"), 13);
+eq("refuseCrossOrigin mount count agrees with that list", mountCount("refuseCrossOrigin"), 14);
 eq("refuseCrossOriginStrict is on exactly the full-database export",
 	mountedOn("refuseCrossOriginStrict").join(" "), "/api/db/download");
 eq("...and on nothing else", mountCount("refuseCrossOriginStrict"), 1);

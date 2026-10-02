@@ -56,6 +56,7 @@ function die(msg) { console.error(`SETUP FAILED: ${msg}`); process.exit(1); }
 let Database;
 try { Database = require("better-sqlite3"); } catch (e) { die(`better-sqlite3 did not load (${e.message}); run npm ci under the .nvmrc Node`); }
 const investorPayoutBasis = require(path.join(ROOT, "lib", "investor-payout-basis.js"));
+const financialsCalc = require(path.join(ROOT, "lib", "financials-calc.js"));
 const { normalizeLoadId } = require(path.join(ROOT, "lib", "ratecon-load.js"));
 
 let pass = 0;
@@ -98,13 +99,13 @@ function trucksDdl() {
 }
 const alters = (table) => SRC.match(new RegExp(`ALTER TABLE ${table} ADD COLUMN [^"\`]*`, "g")) || [];
 
-const CONSTS = ["EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS", "PERIOD_FINALIZE_ENABLED",
+const CONSTS = ["haulAssignmentsStmt", "LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS", "PERIOD_FINALIZE_ENABLED",
 	"INVESTOR_LEASE_PAYOUTS_ENABLED", "INVESTOR_LEASE_SETTINGS", "LEASE_SNAPSHOT_WARNED", "LOCKABLE_MONTH_KEY",
 	"LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR", "insertPayoutHistory"];
 const LETS = ["lastPayStructShadowWarnMs", "_jtEpoch"];
 const FNS = [
 	// Under test.
-	"reconcileInvestorPayouts", "computeInvestorMonthlyEarnings", "getInvestorDriverSet", "assignDriverToTruck",
+	"reconcileInvestorPayouts", "computeInvestorMonthlyEarnings", "gatherLedgerScopeFacts", "ledgerLoadRows", "getInvestorDriverSet", "assignDriverToTruck",
 	"syncOpenCarrierPairing", "finalizePeriods",
 	// What they call, shipped as is.
 	"driverNameHeldByOtherSpelling", "driverNameHeldByOtherAccount", "findDriverNameClashes", "normalizeDriverName",
@@ -118,7 +119,7 @@ const FNS = [
 	"periodLocksReadable", "periodWriteLocked", "todayKeyCT", "currentMonthKeyCT", "settlementGraceDays",
 	"graceEndsAt", "periodPhase", "isPlausibleLockPeriod", "getCarrierDBFromSQLite", "recordPayoutChange",
 	"noteLateItemInClosedMonth", "logAudit", "listSettlableInvestors", "installPeriodLockTriggers",
-	"closingFingerprint", "completedLoadCancelRefusal", "loadRowAccountingMonths", "sheetCellMonths", "sheetCellDate",
+	"closingFingerprint", "closingLedgerItems", "computeFleetLedger", "settledMonthItems", "ambiguousBlankOwnerLoads", "buildHeldTruckIndex", "buildHaulTruckResolver", "frozenPeriodSet", "settledPayoutRows", "writeLedgerFreeze", "ledgerItemFromRow", "buildFinancialsLedger", "completedLoadCancelRefusal", "loadRowAccountingMonths", "sheetCellMonths", "sheetCellDate",
 ];
 const REOPEN_HEAD = 'app.post("/api/periods/:period/reopen", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {';
 const ADJUST_HEAD = 'app.put("/api/investor/payouts/:id/adjust", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {';
@@ -144,6 +145,7 @@ const DDL = [
 	tableDdl("maintenance_fund"), tableDdl("compliance_fees"), tableDdl("deleted_loads"),
 	tableDdl("investor_payouts"), ...alters("investor_payouts"),
 	tableDdl("investor_payout_history"), tableDdl("investor_payout_basis"), tableDdl("period_locks"),
+	tableDdl("financials_ledger_items"), tableDdl("financials_ledger_freezes"),
 	// The migrated shape (the CREATE is the pre-owner one; a migration rebuilds it).
 	"CREATE TABLE investor_config (owner_id INTEGER DEFAULT 0, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(owner_id, key))",
 ];
@@ -194,7 +196,7 @@ function buildWorld({ onSheetRead = null } = {}) {
 	const refusals = [];
 	const notices = [];
 	const deps = {
-		db, investorPayoutBasis, normalizeLoadId, Date: Clock,
+		db, investorPayoutBasis, normalizeLoadId, financialsCalc, loadHaul: require(path.join(__dirname, "..", "lib", "load-haul.js")), Date: Clock,
 		app: {
 			post: (p, ...h) => { routes[`POST ${p}`] = h[h.length - 1]; },
 			put: (p, ...h) => { routes[`PUT ${p}`] = h[h.length - 1]; },
@@ -310,7 +312,9 @@ const ROW_COLS = "period, amount, status, finalized_at, finalized_amount, finali
 	// ── the triggers: nothing writes a figure into a locked month ────────────
 	const storedTriggers = db.prepare("SELECT COUNT(*) AS n FROM main.sqlite_master WHERE type = 'trigger'").get().n;
 	const tempTriggers = db.prepare("SELECT name FROM temp.sqlite_master WHERE type = 'trigger' ORDER BY name").all().map((r) => r.name);
-	check(storedTriggers === 0 && tempTriggers.length === 3,
+	check(storedTriggers === 0 && JSON.stringify(tempTriggers) === JSON.stringify([
+		"financials_ledger_items_locked_delete", "financials_ledger_items_locked_insert", "financials_ledger_items_locked_update",
+		"investor_payouts_locked_delete", "investor_payouts_locked_insert", "investor_payouts_locked_update"]),
 		"the triggers are TEMP: on this connection only, none stored in the database file (a rollback to older code never meets them)",
 		`stored ${storedTriggers}, temp ${JSON.stringify(tempTriggers)}`);
 	const refused = (fn) => { try { fn(); return ""; } catch (e) { return e.message; } };
@@ -448,6 +452,16 @@ const ROW_COLS = "period, amount, status, finalized_at, finalized_amount, finali
 			`audit ${JSON.stringify(unapplied)}, notices ${JSON.stringify(B.notices.map((n) => n.title))}`);
 		check(B.notices.every((n) => !/\$\s?\d/.test(`${n.title} ${n.body}`)) && /\$/.test(unapplied[0].details),
 			"close: the notice carries no money figures; the audit row does", JSON.stringify(B.notices.map((n) => n.body)));
+
+		// A payout row that appears while the figures are computed, for an owner the
+		// close did not reconcile: nothing closes (it would be locked without its
+		// snapshot); the next pass reconciles that owner too and closes the month.
+		sheetHook = (bdb) => bdb.prepare("INSERT INTO investor_payouts (owner_id, period, amount, due_date, status) VALUES (99, '2026-01', 0, '2026-02-27', 'owed')").run();
+		const leftover = await B.api.finalizePeriods(["2026-01"], "system");
+		check(leftover.retry === true && !lockB("2026-01"), "close: a row the close did not reconcile makes it close nothing (retry)", JSON.stringify(leftover));
+		await B.api.finalizePeriods(["2026-01"], "system");
+		const row99 = B.db.prepare("SELECT finalized_at FROM investor_payouts WHERE owner_id = 99 AND period = '2026-01'").get();
+		check(lockB("2026-01") && lockB("2026-01").status === "locked" && !!row99.finalized_at, "close: …the next pass reconciles that owner too, stamps the row and closes the month", JSON.stringify(row99));
 
 		// Two closes of one month at once: one closes it, the other closes nothing.
 		const raceResults = await Promise.all([B.api.finalizePeriods(["2026-02"], "system"), B.api.finalizePeriods(["2026-02"], "super_admin")]);
