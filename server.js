@@ -64,6 +64,7 @@ const investorPaymentTerms = require("./lib/investor-payment-terms");
 const investorReportOptions = require("./lib/investor-report-options");
 const investorPayoutBasis = require("./lib/investor-payout-basis");
 const financialsCalc = require("./lib/financials-calc");
+const financialsReport = require("./lib/financials-report");
 const leasePayoutText = require("./lib/lease-payout-text");
 const { renderHtmlToPdf } = require("./lib/pdf-browser");
 const { getStateFromCoords } = require("./lib/ifta-states");
@@ -5316,6 +5317,18 @@ db.exec(`
 `);
 
 try { db.exec("ALTER TABLE financials_ledger_freezes ADD COLUMN released_at TEXT NOT NULL DEFAULT ''"); } catch {}
+// Small key/value settings an admin sets in the app. `financials.settings` is
+// the Financials cost lines that count in margin, the monthly overhead and the
+// depreciation years (lib/financials-report.js normalizeSettings()); Financials
+// only, never payouts (owner decision D7).
+db.exec(`
+	CREATE TABLE IF NOT EXISTS app_settings (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL,
+		updated_at TEXT NOT NULL DEFAULT '',
+		updated_by TEXT NOT NULL DEFAULT ''
+	)
+`);
 
 // A closed month's payout rows cannot be written by anything, at the database.
 // The route and reconcile guards stay; these triggers are the floor under them,
@@ -50802,14 +50815,14 @@ function ledgerItemFromRow(r) {
 
 // Write one closed month's items as one freeze. Runs inside the caller's
 // transaction: the close (before it takes the lock) or the one-time freeze.
-function writeLedgerFreeze(period, items, { source, actor, frozenAt }) {
+function writeLedgerFreeze(period, items, { source, actor, frozenAt, settings = null }) {
 	const n = db.prepare("SELECT COUNT(*) AS n FROM financials_ledger_freezes WHERE period = ?").get(period).n;
 	const freezeId = `${period}:${source}:${frozenAt}:${n + 1}`;
 	const figures = financialsCalc.monthFiguresFromItems(items)[period] || {};
 	// The freeze row first: it is what makes the month frozen, items or none,
 	// and the only freeze its items may come from.
-	db.prepare("INSERT INTO financials_ledger_freezes (freeze_id, period, source, frozen_at, frozen_by, item_count, summary) VALUES (?, ?, ?, ?, ?, ?, ?)")
-		.run(freezeId, period, source, frozenAt, actor || "system", items.length, JSON.stringify(figures));
+	db.prepare("INSERT INTO financials_ledger_freezes (freeze_id, period, source, frozen_at, frozen_by, item_count, summary, settings) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+		.run(freezeId, period, source, frozenAt, actor || "system", items.length, JSON.stringify(figures), settings ? JSON.stringify(settings) : "");
 	const ins = db.prepare(`INSERT INTO financials_ledger_items (${LEDGER_ITEM_COLS.join(", ")}, freeze_id, frozen_at) VALUES (${LEDGER_ITEM_COLS.map(() => "?").join(", ")}, ?, ?)`);
 	for (const i of items) {
 		ins.run(period, i.ownerId || 0, i.kind, i.adjusts || "", i.day || "", i.cents, i.loadId || "", i.driver || "", i.truck || "",
@@ -50851,6 +50864,211 @@ async function buildFinancialsLedger() {
 		frozenPeriods: new Set(frozen.keys()),
 		overlaps: fleet.overlaps,
 		currentMonthKey: fleet.currentMonthKey,
+	};
+}
+
+// The Financials settings in force now (lib/financials-report.js shape).
+function financialsSettings() {
+	let raw = null;
+	try {
+		const row = db.prepare("SELECT value FROM app_settings WHERE key = 'financials.settings'").get();
+		raw = row ? JSON.parse(row.value) : null;
+	} catch { raw = null; }
+	return financialsReport.normalizeSettings(raw);
+}
+
+// The settings each closed month closed with: the freeze recorded them. A month
+// frozen before settings were recorded closed under the defaults (the payout
+// ledger's lines), which is what it showed.
+function closedMonthSettings() {
+	const out = new Map();
+	for (const r of db.prepare("SELECT period, settings FROM financials_ledger_freezes WHERE released_at = '' ORDER BY frozen_at").all()) {
+		let parsed = null;
+		try { parsed = r.settings ? JSON.parse(r.settings) : null; } catch { parsed = null; }
+		out.set(r.period, financialsReport.normalizeSettings(parsed));
+	}
+	return out;
+}
+
+// Financials' own cost lines for the given months, beside the payout ledger's:
+// a truck's monthly maintenance reserve and straight-line depreciation (purchase
+// price over the depreciation years) for every month it is charged in, the
+// monthly overhead, and the investor payouts on the ledger. `which` limits them
+// (the close freezes only the lines switched on).
+function financialsExtraItems(months, settings, which = { reserve: true, depreciation: true, overhead: true, investorPayouts: true }) {
+	const items = [];
+	const trucks = db.prepare(
+		`SELECT unit_number, owner_id, maintenance_fund_monthly, purchase_price, created_at, in_service_date, retired_at FROM trucks WHERE ${investorPayoutBasis.truckInFleetSql()}`
+	).all();
+	// Straight-line from the month the truck is first charged, over the
+	// depreciation years in whole months: the months charged add up to the price.
+	const depMonths = Math.max(1, Math.round(settings.depreciationYears * 12));
+	const monthNo = (mk) => Number(mk.slice(0, 4)) * 12 + Number(mk.slice(5, 7));
+	const depreciatesIn = (t, mk) => {
+		const start = truckChargeFromMonth(t);
+		return !start || monthNo(mk) - monthNo(start) < depMonths;
+	};
+	// A truck's lines go where the ledger puts its fixed costs: its owner when
+	// that owner is a settlable investor, else the company.
+	const investorIds = new Set(listSettlableInvestors().map((i) => i.ownerId));
+	for (const mk of months) {
+		for (const t of trucks) {
+			if (!truckChargedInMonth(t, mk)) continue;
+			const owner = investorIds.has(Number(t.owner_id) || 0) ? Number(t.owner_id) : 0;
+			const reserve = Number(t.maintenance_fund_monthly) || 0;
+			if (which.reserve && reserve > 0) items.push({ kind: "maint_reserve", month: mk, day: null, cents: Math.round(reserve * 100), truck: t.unit_number || "", ownerId: owner });
+			const price = Number(t.purchase_price) || 0;
+			if (which.depreciation && price > 0 && depreciatesIn(t, mk)) items.push({ kind: "depreciation", month: mk, day: null, cents: Math.round((price / depMonths) * 100), truck: t.unit_number || "", ownerId: owner });
+		}
+		if (which.overhead && settings.overheadMonthly > 0) items.push({ kind: "overhead", month: mk, day: null, cents: Math.round(settings.overheadMonthly * 100), ownerId: 0 });
+	}
+	if (which.investorPayouts && months.length) {
+		const ph = months.map(() => "?").join(",");
+		for (const r of db.prepare(`SELECT owner_id, period, amount, adjustment FROM investor_payouts WHERE period IN (${ph})`).all(...months)) {
+			const effective = Math.max(0, Math.round((Number(r.amount) || 0) + (Number(r.adjustment) || 0)));
+			if (effective) items.push({ kind: "investor_payout", month: r.period, day: null, cents: effective * 100, ownerId: r.owner_id });
+		}
+	}
+	return items;
+}
+
+// GET /api/financials/report and its CSV: query → the report.
+const FINANCIALS_GRANULARITIES = new Set(["day", "week", "month", "quarter", "year"]);
+const FINANCIALS_GROUPINGS = new Set(["fleet", "truck", "driver", "load", "pickupState", "deliveryState", "owner"]);
+function financialsReportQuery(q) {
+	const today = houstonDay(new Date());
+	// A real calendar day (2026-02-31 is refused) in the years the app handles.
+	const isDay = (v) => {
+		if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+		const y = Number(v.slice(0, 4));
+		if (y < LOCK_PERIOD_MIN_YEAR || y > LOCK_PERIOD_MAX_YEAR) return false;
+		const ms = Date.parse(`${v}T12:00:00Z`);
+		return !isNaN(ms) && new Date(ms).toISOString().slice(0, 10) === v;
+	};
+	const defaultFrom = (() => {
+		const d = new Date(Date.parse(`${today.slice(0, 7)}-01T12:00:00Z`));
+		d.setUTCMonth(d.getUTCMonth() - 11);
+		return d.toISOString().slice(0, 10);
+	})();
+	const from = q.from === undefined ? defaultFrom : q.from;
+	const to = q.to === undefined ? today : q.to;
+	if (!isDay(from) || !isDay(to) || from > to) {
+		return { error: `from and to must be real YYYY-MM-DD dates from ${LOCK_PERIOD_MIN_YEAR} to ${LOCK_PERIOD_MAX_YEAR}, from on or before to.` };
+	}
+	if (Date.parse(`${to}T12:00:00Z`) - Date.parse(`${from}T12:00:00Z`) > 3700 * 86400000) return { error: "The range can be at most ten years." };
+	const granularity = q.granularity === undefined ? "month" : String(q.granularity);
+	if (!FINANCIALS_GRANULARITIES.has(granularity)) return { error: "granularity must be day, week, month, quarter or year." };
+	if (granularity === "day" && Date.parse(`${to}T12:00:00Z`) - Date.parse(`${from}T12:00:00Z`) > 400 * 86400000) {
+		return { error: "A daily report can cover at most 400 days." };
+	}
+	const groupBy = q.groupBy === undefined ? "fleet" : String(q.groupBy);
+	if (!FINANCIALS_GROUPINGS.has(groupBy)) return { error: "groupBy must be fleet, truck, driver, load, pickupState, deliveryState or owner." };
+	return { from, to, granularity, groupBy };
+}
+
+async function buildFinancialsReport({ from, to, granularity, groupBy }) {
+	const books = await buildFinancialsLedger();
+	const settings = financialsSettings();
+	const closedSettings = closedMonthSettings();
+	const settingsFor = (mk) => (books.lockedPeriods.has(mk)
+		? (closedSettings.get(mk) || financialsReport.DEFAULT_SETTINGS)
+		: settings);
+
+	// The months the range touches; Financials' own lines are live for open
+	// months up to this one (a future month has no costs yet), and come frozen
+	// with a closed month (none when it closed with them off).
+	const months = [];
+	const monthNo = (day) => Number(day.slice(0, 4)) * 12 + Number(day.slice(5, 7)) - 1;
+	for (let n = monthNo(from); n <= monthNo(to) && months.length < 1300; n++) {
+		months.push(`${Math.floor(n / 12)}-${String((n % 12) + 1).padStart(2, "0")}`);
+	}
+	// Financials' own lines run from the books' first month to this one: no
+	// overhead before there are books, and none for months still to come.
+	const thisMonth = houstonDay(new Date()).slice(0, 7);
+	const firstMonth = books.months.length ? books.months[0] : thisMonth;
+	const openMonths = months.filter((mk) => !books.lockedPeriods.has(mk) && mk >= firstMonth && mk <= thisMonth);
+	const extras = [
+		...financialsExtraItems(openMonths, settings, { reserve: true, depreciation: true, overhead: true, investorPayouts: true }),
+		...financialsExtraItems(months.filter((mk) => books.lockedPeriods.has(mk)), settings, { reserve: false, depreciation: false, overhead: false, investorPayouts: true }),
+	].map((i) => ({ ...i, basis: books.lockedPeriods.has(i.month) ? "settled" : "live" }));
+	const items = books.items.filter((i) => i.month >= months[0] && i.month <= months[months.length - 1]).concat(extras);
+
+	// Labels and the per-load facts the groupings read.
+	const unitByLower = new Map(db.prepare("SELECT unit_number FROM trucks").all().map((t) => [String(t.unit_number || "").trim().toLowerCase(), t.unit_number]));
+	const truckLabel = (t) => unitByLower.get(String(t).trim().toLowerCase()) || String(t).trim();
+	const displayNames = new Map();
+	for (const r of db.prepare("SELECT driver_name FROM drivers_directory ORDER BY id").all()) {
+		const k = normalizeDriverName(r.driver_name);
+		if (k && !displayNames.has(k)) displayNames.set(k, String(r.driver_name).trim());
+	}
+	const ownerNames = new Map(listSettlableInvestors().map((i) => [i.ownerId, i.name]));
+	const heldTruck = buildHaulTruckResolver();
+	const truckOf = (item) => {
+		const t = String(item.truck || "").trim();
+		if (t) return truckLabel(t);
+		if (item.driver && item.day) {
+			const held = heldTruck.forDriverAt(item.driver, Date.parse(`${item.day}T17:00:00Z`));
+			if (held && held.unit) return held.unit;
+		}
+		return "";
+	};
+	// Every load's facts, from all of the books: a cost in the range can belong
+	// to a load assigned before it.
+	const loads = new Map();
+	for (const it of books.items) {
+		if (it.kind !== "revenue" || !it.loadId) continue;
+		const lk = loadMilesLib.loadMilesKey(it.loadId);
+		if (lk && !loads.has(lk)) {
+			loads.set(lk, {
+				state: { pickup: it.pickupState || "", delivery: it.deliveryState || "" },
+				truck: truckOf(it), driver: it.driver || "", assignedDate: it.day || "",
+			});
+		}
+	}
+	const milesIndex = getLoadMilesIndex();
+	const report = financialsReport.buildReport({
+		items, from, to, granularity, groupBy, settingsFor,
+		milesOf: (lk) => milesIndex.get(lk) || null,
+		ctx: {
+			truckOf,
+			truckLabel,
+			loadKey: (id) => loadMilesLib.loadMilesKey(id),
+			loadOf: (lk) => loads.get(lk) || null,
+			driverKey: (name) => normalizeDriverName(name),
+			driverLabel: (k) => displayNames.get(k) || k,
+			ownerLabel: (id) => (id ? (ownerNames.get(id) || `Owner #${id}`) : "Company"),
+		},
+	});
+
+	// Receipts still Pending review that count in this range: in its months, on
+	// a day the report places inside from–to. They count in every figure (owner
+	// decision D12), and are shown on their own line.
+	const ph = months.map(() => "?").join(",");
+	const pending = { n: 0, t: 0, oldestMs: NaN };
+	for (const r of db.prepare(
+		`SELECT ${EXPENSE_PERIOD_EXPR} AS month, date, amount, COALESCE(NULLIF(timestamp, ''), created_at) AS submitted
+		 FROM expenses WHERE status = 'Pending' AND ${EXPENSE_PERIOD_EXPR} IN (${ph})`
+	).all(...months)) {
+		const day = financialsReport.placements({ month: r.month, day: String(r.date || "").slice(0, 10), cents: 1 })[0].day;
+		if (day < from || day > to) continue;
+		pending.n += 1;
+		pending.t += Number(r.amount) || 0;
+		const ms = r.submitted ? Date.parse(String(r.submitted).includes("T") ? r.submitted : `${String(r.submitted).replace(" ", "T")}Z`) : NaN;
+		if (Number.isFinite(ms) && !(ms >= pending.oldestMs)) pending.oldestMs = ms;
+	}
+	const oldestMs = pending.oldestMs;
+	return {
+		from, to, granularity, groupBy,
+		...report,
+		settings,
+		closedMonths: months.filter((mk) => books.lockedPeriods.has(mk)),
+		pendingReceipts: {
+			count: pending.n,
+			amount: Math.round(pending.t * 100) / 100,
+			oldestDays: Number.isFinite(oldestMs) ? Math.max(0, Math.floor((Date.now() - oldestMs) / 86400000)) : null,
+		},
+		overlaps: books.overlaps.length,
+		generatedAt: new Date().toISOString(),
 	};
 }
 
@@ -54477,9 +54695,10 @@ app.post("/api/periods/:period/finalize", requireRole("Super Admin"), refuseCros
 					code: "PERIOD_CLOSE_RETRY",
 				});
 		}
+		const pending = pendingReceiptsInPeriod(period);
 		logAudit(req, "period_finalize", "period", period,
-			`Finalized ${period} early (${result.stamped} payout row(s) frozen)`);
-		res.json({ success: true, period, ...result });
+			`Finalized ${period} early (${result.stamped} payout row(s) frozen; ${pending.length} receipt(s) still Pending review: ${receiptIdList(pending) || "none"})`);
+		res.json({ success: true, period, ...result, pendingReceipts: pending });
 	} catch (err) {
 		console.error("POST /api/periods/:period/finalize error:", err.message);
 		res.status(500).json({ error: "Failed to finalize period" });
@@ -54495,6 +54714,9 @@ async function closedMonthFreezePlan() {
 	const frozen = frozenPeriodSet();
 	const locked = db.prepare("SELECT period FROM period_locks WHERE period_locks.status = 'locked' ORDER BY period").all().map((r) => r.period);
 	const settledFor = settledPayoutRows();
+	// Months closed before freezing existed showed the payout ledger's lines only,
+	// so they freeze with the default settings and none of Financials' own lines.
+	const settings = financialsReport.DEFAULT_SETTINGS;
 	const periods = [];
 	const payoutRowsByPeriod = new Map();
 	for (const r of db.prepare("SELECT owner_id, period, amount, adjustment, finalized_breakdown FROM investor_payouts").all()) {
@@ -54526,7 +54748,7 @@ async function closedMonthFreezePlan() {
 	const fingerprint = crypto.createHash("sha256")
 		.update(JSON.stringify(periods.map((p) => [p.period, p.items.map((i) => [i.kind, i.adjusts || "", i.ownerId || 0, i.day || "", i.cents, i.loadId || "", i.expenseId || 0, i.sourceId || 0, i.driver || "", i.truck || ""])])))
 		.digest("hex");
-	return { periods, fingerprint, overlaps: fleet.overlaps };
+	return { periods, fingerprint, overlaps: fleet.overlaps, settings };
 }
 
 // POST /api/admin/financials/freeze-closed-months — the one-time freeze of the
@@ -54570,7 +54792,7 @@ app.post("/api/admin/financials/freeze-closed-months", requireRole("Super Admin"
 				// Re-read inside the transaction: a close or another freeze may have
 				// frozen it meanwhile.
 				if (frozenPeriodSet().has(p.period)) continue;
-				writeLedgerFreeze(p.period, p.items, { source: "one-time", actor, frozenAt });
+				writeLedgerFreeze(p.period, p.items, { source: "one-time", actor, frozenAt, settings: plan.settings });
 				written.push(p);
 			}
 		})();
@@ -55059,14 +55281,16 @@ function closingFingerprint(periods) {
 // The items each closing month freezes with: the fleet's items for it, settled
 // against the breakdown each investor's row is about to be stamped with
 // (`ledgers`: the reconcile results of the close's compute phase), or the one it
-// already carries.
-async function closingLedgerItems(periods, ledgers) {
+// already carries, plus Financials' own lines (reserve, depreciation, overhead)
+// that `settings` has switched on, so the month keeps showing them as it closed.
+async function closingLedgerItems(periods, ledgers, settings) {
 	const fleet = await computeFleetLedger();
 	const byOwner = new Map(ledgers.map((l) => [l.ownerId, l.payouts]));
 	const stored = settledPayoutRows();
+	const which = { reserve: settings.costs.maintenanceReserve, depreciation: settings.costs.depreciation, overhead: settings.costs.overhead, investorPayouts: false };
 	const out = new Map();
 	for (const period of periods) {
-		out.set(period, settledMonthItems(fleet, period, (ownerId) => {
+		const settledFor = (ownerId) => {
 			const p = (byOwner.get(ownerId) || []).find((x) => x.period === period);
 			if (!p) return null;
 			// A row that keeps an earlier stamp (a paid or processing row, which a
@@ -55076,9 +55300,31 @@ async function closingLedgerItems(periods, ledgers) {
 				if (s && s.breakdown) return s;
 			}
 			return { breakdown: p.breakdown || null };
-		}));
+		};
+		// Financials' own lines follow their truck's items: an investor with no
+		// payout row for the month has its items booked to the company.
+		const extras = financialsExtraItems([period], settings, which)
+			.map((i) => (i.ownerId && !settledFor(i.ownerId) ? { ...i, ownerId: 0 } : i));
+		out.set(period, settledMonthItems(fleet, period, settledFor).concat(extras));
 	}
 	return out;
+}
+
+// The receipts booked into a month that are still Pending review. They count in
+// the month's figures (owner decision D12); the close lists them so they are
+// reviewed before or right after the month freezes.
+// "#12, #15, … and N more": a receipt list short enough for an audit row or a
+// notice, however many receipts a month holds.
+function receiptIdList(receipts, max = 20) {
+	const shown = receipts.slice(0, max).map((x) => `#${x.id}`).join(", ");
+	return receipts.length > max ? `${shown} and ${receipts.length - max} more` : shown;
+}
+
+function pendingReceiptsInPeriod(period) {
+	return db.prepare(
+		`SELECT id, date, amount, driver, truck_unit AS truck, type FROM expenses
+		 WHERE status = 'Pending' AND ${EXPENSE_PERIOD_EXPR} = ? ORDER BY id`
+	).all(period);
 }
 
 // Close a set of periods: freeze each investor's figure, then take the lock.
@@ -55162,13 +55408,15 @@ async function finalizePeriods(periods, actor) {
 		}
 	}
 
-	// The month's line items, for Financials, frozen in the same transaction. A
-	// failure here never holds up the payout close: the month closes, and its
-	// Financials figures can be frozen afterwards by the one-time freeze.
+	// The month's line items, for Financials, frozen in the same transaction with
+	// the Financials settings it closes under. A failure here never holds up the
+	// payout close: the month closes, and its Financials figures can be frozen
+	// afterwards by the one-time freeze.
+	const closingSettings = financialsSettings();
 	let freezeItems = null;
 	let freezeError = "";
 	try {
-		freezeItems = await closingLedgerItems(toClose, ledgers);
+		freezeItems = await closingLedgerItems(toClose, ledgers, closingSettings);
 	} catch (e) {
 		freezeError = e.message;
 		console.error(`[period-close] Financials items for ${toClose.join(", ")} not computed: ${e.message}`);
@@ -55248,7 +55496,7 @@ async function finalizePeriods(periods, actor) {
 		if (db.prepare(`SELECT 1 FROM investor_payouts WHERE period IN (${ph}) AND COALESCE(finalized_at,'') = '' LIMIT 1`).get(...toClose)) {
 			throw new CloseRetry();
 		}
-		if (freezeItems) for (const p of toClose) writeLedgerFreeze(p, freezeItems.get(p) || [], { source: "close", actor, frozenAt: nowIso });
+		if (freezeItems) for (const p of toClose) writeLedgerFreeze(p, freezeItems.get(p) || [], { source: "close", actor, frozenAt: nowIso, settings: closingSettings });
 		for (const p of toClose) takeLock.run(p, nowIso, actor || "system");
 		return { retry: false, stamped, overAdjusted };
 	});
@@ -55398,11 +55646,13 @@ async function maybeCloseFinishedPeriods() {
 		// Notify only for periods this pass actually closed.
 		for (const period of result.periods) {
 			try {
+				const pending = pendingReceiptsInPeriod(period);
 				insertDispatchNotification.run(
 					"period-close",
 					`${periodLabel(period)} is closed`,
-					`Final settlement complete. Investor payouts for ${periodLabel(period)} are frozen at their final figure — statements are now available and payouts can be marked paid. Receipts dated in ${periodLabel(period)} that arrive from now on will be booked to the current open month.`,
-					JSON.stringify({ period, stamped: result.stamped, investors: result.investors }),
+					`Final settlement complete. Investor payouts for ${periodLabel(period)} are frozen at their final figure — statements are now available and payouts can be marked paid. Receipts dated in ${periodLabel(period)} that arrive from now on will be booked to the current open month.` +
+						(pending.length ? ` ${pending.length} receipt(s) booked to ${periodLabel(period)} were still Pending review when it closed; they count in its figures (receipt ${receiptIdList(pending)}).` : ""),
+					JSON.stringify({ period, stamped: result.stamped, investors: result.investors, pendingReceiptIds: pending.map((x) => x.id) }),
 				);
 			} catch {}
 		}
@@ -55484,6 +55734,98 @@ if (PERIOD_FINALIZE_ENABLED) {
 	setTimeout(periodCloseTick, 95 * 1000);
 	console.log(`[period-close] enabled — months finalize ${settlementGraceDays()} day(s) after they end (America/Chicago)`);
 }
+
+// GET /api/financials/report — Financials for any range, by day, week (Saturday
+// to Friday), month, quarter or year, grouped by the fleet, truck, driver, load,
+// pickup or delivery state, or owner. Every figure comes from the same books as
+// the payout ledger: open months live, closed months as settled.
+app.get("/api/financials/report", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const q = financialsReportQuery(req.query || {});
+		if (q.error) return res.status(400).json({ error: q.error, code: "INVALID_REPORT_QUERY" });
+		res.json(await buildFinancialsReport(q));
+	} catch (err) {
+		console.error("GET /api/financials/report error:", err.message);
+		res.status(500).json({ error: "Failed to build the financials report" });
+	}
+});
+
+// GET /api/financials/report.csv — the same report, one row per group and
+// period plus totals.
+app.get("/api/financials/report.csv", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const q = financialsReportQuery(req.query || {});
+		if (q.error) return res.status(400).json({ error: q.error, code: "INVALID_REPORT_QUERY" });
+		const report = await buildFinancialsReport(q);
+		const groupLabel = { fleet: "Fleet", truck: "Truck", driver: "Driver", load: "Load", pickupState: "Pickup state", deliveryState: "Delivery state", owner: "Owner" }[q.groupBy];
+		const rows = financialsReport.reportRows(report, { groupLabel });
+		res.setHeader("Content-Type", "text/csv");
+		res.setHeader("Content-Disposition", `attachment; filename="financials-${q.groupBy}-${q.granularity}-${q.from}-to-${q.to}.csv"`);
+		res.send(csvRows(rows));
+	} catch (err) {
+		console.error("GET /api/financials/report.csv error:", err.message);
+		res.status(500).json({ error: "Failed to build the financials export" });
+	}
+});
+
+// GET / PUT /api/financials/settings — which cost lines count in Financials'
+// margin, the monthly overhead and the depreciation years. Financials only:
+// payouts never read these (owner decision D7). A closed month keeps the
+// settings it closed with; a change applies to open months.
+app.get("/api/financials/settings", requireRole("Super Admin"), (req, res) => {
+	res.json({ settings: financialsSettings(), defaults: financialsReport.DEFAULT_SETTINGS, lines: financialsReport.COST_LINES });
+});
+
+app.put("/api/financials/settings", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {
+	try {
+		const body = req.body;
+		if (!body || typeof body !== "object" || Array.isArray(body)) {
+			return res.status(400).json({ error: "Send the settings as an object.", code: "INVALID_SETTINGS" });
+		}
+		const costs = body.costs;
+		if (costs !== undefined) {
+			if (!costs || typeof costs !== "object" || Array.isArray(costs)) return res.status(400).json({ error: "costs must be an object.", code: "INVALID_SETTINGS" });
+			for (const [k, v] of Object.entries(costs)) {
+				if (!financialsReport.COST_KEYS.includes(k)) return res.status(400).json({ error: `Unknown cost line: ${String(k).slice(0, 40)}`, code: "INVALID_SETTINGS" });
+				if (typeof v !== "boolean") return res.status(400).json({ error: `${k} must be true or false.`, code: "INVALID_SETTINGS" });
+			}
+		}
+		if (body.overheadMonthly !== undefined) {
+			const v = Number(body.overheadMonthly);
+			if (typeof body.overheadMonthly !== "number" || !Number.isFinite(v) || v < 0 || v > 10000000) {
+				return res.status(400).json({ error: "overheadMonthly must be a number from 0 to 10,000,000.", code: "INVALID_SETTINGS" });
+			}
+		}
+		if (body.depreciationYears !== undefined) {
+			const v = Number(body.depreciationYears);
+			if (typeof body.depreciationYears !== "number" || !Number.isFinite(v) || v < 1 || v > 40) {
+				return res.status(400).json({ error: "depreciationYears must be a number from 1 to 40.", code: "INVALID_SETTINGS" });
+			}
+		}
+		const before = financialsSettings();
+		const next = financialsReport.normalizeSettings({
+			costs: { ...before.costs, ...(costs || {}) },
+			overheadMonthly: body.overheadMonthly === undefined ? before.overheadMonthly : body.overheadMonthly,
+			depreciationYears: body.depreciationYears === undefined ? before.depreciationYears : body.depreciationYears,
+		});
+		const changes = [];
+		for (const k of financialsReport.COST_KEYS) if (before.costs[k] !== next.costs[k]) changes.push(`${k}: ${before.costs[k] ? "on" : "off"} → ${next.costs[k] ? "on" : "off"}`);
+		if (before.overheadMonthly !== next.overheadMonthly) changes.push(`overheadMonthly: ${before.overheadMonthly} → ${next.overheadMonthly}`);
+		if (before.depreciationYears !== next.depreciationYears) changes.push(`depreciationYears: ${before.depreciationYears} → ${next.depreciationYears}`);
+		if (changes.length) {
+			db.prepare(
+				`INSERT INTO app_settings (key, value, updated_at, updated_by) VALUES ('financials.settings', ?, ?, ?)
+				 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, updated_by = excluded.updated_by`
+			).run(JSON.stringify(next), new Date().toISOString(), req.session.user.username || "");
+			logAudit(req, "update_financials_settings", "app_settings", "financials.settings", auditText(changes.join("; "), 2000));
+			notifyChange("financials");
+		}
+		res.json({ settings: next, changed: changes.length });
+	} catch (err) {
+		console.error("PUT /api/financials/settings error:", err.message);
+		res.status(500).json({ error: "Failed to save the financials settings" });
+	}
+});
 
 // GET /api/financials — Super Admin financials dashboard (P1-1 from 2026-04-12 meeting)
 // Deshorn asked for a financial overview tab showing expense categories, highest/lowest

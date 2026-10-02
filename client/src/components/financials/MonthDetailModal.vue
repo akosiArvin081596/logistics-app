@@ -8,7 +8,7 @@
               {{ monthTitle }}
               <span v-if="detail?.isCurrentMonth" class="mtd-badge">MTD</span>
             </h3>
-            <div class="modal-sub">Month P&amp;L drill-down — reconciles with the Monthly Performance row</div>
+            <div class="modal-sub">Month P&amp;L drill-down — the whole month, on the payout ledger's lines</div>
           </div>
           <button class="modal-close" aria-label="Close" @click="$emit('close')">&times;</button>
         </div>
@@ -268,9 +268,9 @@
             </div>
 
             <div class="footnote bottom-note">
-              Same basis as the Monthly Performance table: revenue counts in the month the load was assigned
-              (completed loads only, canceled/deleted excluded); maintenance-fund service and compliance fees
-              are annual buckets and are not included in monthly totals.
+              The whole calendar month on the payout ledger's basis: revenue counts in the month the load was assigned
+              (completed loads only, canceled/deleted excluded). It shows the ledger's own lines only, so it can differ
+              from a report column when optional cost lines are switched on or the range covers part of the month.
               <template v-if="detail.isCurrentMonth"> Current month is to-date ({{ detail.elapsedDays }} of {{ detail.daysInMonth }} days); weekly/daily averages use elapsed days.</template>
             </div>
           </template>

@@ -303,6 +303,7 @@ function ledgerWorld(srv, { reconcile = (s) => s, fixture = LEDGER_FIXTURE } = {
 		periodLocksReadable: () => true, closingFingerprint: () => "",
 		// Financials' frozen line items are test-financials-ledger-parity.js's.
 		closingLedgerItems: async () => new Map(), writeLedgerFreeze: () => {},
+		financialsSettings: () => require("../lib/financials-report").DEFAULT_SETTINGS,
 		insertDispatchNotification: { run() {} },
 		console: { warn() {}, log() {}, error() {} },
 	};

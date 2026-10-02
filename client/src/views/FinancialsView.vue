@@ -2,316 +2,145 @@
   <div class="financials-page admin-page">
     <div class="page-header">
       <h2>Financials</h2>
-      <div class="page-sub">Full-fleet P&amp;L, expense breakdown, and per-truck performance.</div>
+      <div class="page-sub">
+        Profit and loss for any range, by period and by truck, driver, load, state or owner. Open months are live;
+        closed months are shown exactly as they settled.
+      </div>
     </div>
 
-    <div v-if="store.isLoading && !store.summary" class="loading-state">
-      <div class="skeleton skeleton-card" v-for="i in 6" :key="i"></div>
+    <FinancialsToolbar
+      :selection="selection"
+      :export-href="exportHref"
+      @update="updateSelection"
+      @open-settings="settingsOpen = true"
+    />
+
+    <div v-if="selectionErr" class="data-warning" role="alert">
+      <div class="data-warning-title">Check the dates</div>
+      <div class="data-warning-msg">{{ selectionErr }}</div>
     </div>
 
-    <div v-else-if="store.lastError" class="error-state">
+    <div v-else-if="store.lastError" class="error-state" role="alert">
       <div class="error-title">Could not load financials</div>
       <div class="error-msg">{{ store.lastError }}</div>
-      <button class="btn btn-primary" @click="store.load()">Retry</button>
+      <button type="button" class="btn btn-primary" @click="store.reload()">Retry</button>
     </div>
 
-    <template v-else-if="store.summary">
-      <!-- Data-quality warning: loads with no driver attribution -->
-      <div v-if="store.summary.unassignedRevenue > 0" class="data-warning">
-        <div class="data-warning-title">&#9888; Unassigned Revenue Detected</div>
-        <div class="data-warning-msg">
-          <strong>{{ fmt(store.summary.unassignedRevenue) }}</strong> across
-          <strong>{{ store.summary.unassignedLoadCount }}</strong> completed load{{ store.summary.unassignedLoadCount !== 1 ? 's' : '' }}
-          have no driver assigned in the Job Tracking sheet. These loads are
-          counted in Total Revenue but cannot be attributed on the leaderboard.
-          Review the sheet and fill in the Driver column to fix.
-        </div>
+    <div v-else-if="!report" class="loading-state" aria-busy="true" aria-label="Loading financials">
+      <div class="skeleton skeleton-card" v-for="i in 3" :key="i"></div>
+    </div>
+
+    <div v-else class="report" :class="{ stale: store.isLoading }" :aria-busy="store.isLoading ? 'true' : 'false'">
+      <div v-if="store.isLoading" class="updating" role="status">
+        <span class="spinner" aria-hidden="true"></span> Updating…
       </div>
 
-      <!-- Idle-asset notice: onboarded trucks accruing fixed costs with no loads -->
-      <div v-if="store.summary.idleTruckCount > 0" class="data-warning idle-warning">
-        <div class="data-warning-title">&#128679; {{ store.summary.idleTruckCount }} Idle Truck{{ store.summary.idleTruckCount !== 1 ? 's' : '' }}</div>
-        <div class="data-warning-msg">
-          <strong>{{ fmt(store.summary.idleOverhead) }}</strong> in fixed costs has accrued on
-          <strong>{{ store.summary.idleTruckCount }}</strong> truck{{ store.summary.idleTruckCount !== 1 ? 's' : '' }}
-          with no completed loads since onboarding. This is idle-asset overhead (insurance + ELD on a parked
-          truck), <strong>not an operating loss</strong> — the negative Net on those rows below is just that overhead.
-          Dispatch a load or review the asset.
-        </div>
-      </div>
+      <FinancialsKpis :report="report" />
 
-      <!-- 1. Summary KPI row -->
-      <section class="section">
+      <section class="section" aria-labelledby="fin-table-title">
         <div class="section-title">
-          <div class="section-icon" style="background: var(--accent-dim); color: var(--accent);">$</div>
-          Fleet Summary
-          <span class="section-sub">Based on {{ store.summary.monthsOfOperation }} month{{ store.summary.monthsOfOperation !== 1 ? 's' : '' }} of data</span>
+          <div class="section-icon" style="background: var(--blue-dim); color: var(--blue);" aria-hidden="true">
+            <Table2 class="icon" />
+          </div>
+          <h3 id="fin-table-title" class="section-heading">{{ tableTitle }}</h3>
+          <span class="section-sub">{{ countedNote }}</span>
         </div>
-        <div class="kpi-grid">
-          <div class="kpi-card">
-            <div class="kpi-label">Total Revenue</div>
-            <div class="kpi-value">{{ fmt(store.summary.totalRevenue) }}</div>
-            <div class="kpi-sub">{{ store.summary.completedLoadCount }} completed loads</div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-label">Total Expenses</div>
-            <div class="kpi-value">{{ fmt(store.summary.totalExpenses) }}</div>
-            <div class="kpi-sub">All categories + driver pay + fixed costs</div>
-          </div>
-          <div class="kpi-card" :class="store.summary.netProfit >= 0 ? 'kpi-pos' : 'kpi-neg'">
-            <div class="kpi-label">Net Profit</div>
-            <div class="kpi-value">{{ fmt(store.summary.netProfit) }}</div>
-            <div class="kpi-sub">Before investor split</div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-label">Biggest Trip Expense</div>
-            <div class="kpi-value">{{ store.summary.biggestExpenseCategory?.name || '—' }}</div>
-            <div class="kpi-sub">{{ fmt(store.summary.biggestExpenseCategory?.amount || 0) }}</div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-label">Avg Rate/Mile</div>
-            <div class="kpi-value">${{ store.summary.avgRatePerMile?.toFixed(2) || '0.00' }}</div>
-            <div class="kpi-sub">Revenue per route mile</div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-label">Total Miles</div>
-            <div class="kpi-value">{{ (store.summary.totalMiles || 0).toLocaleString() }}</div>
-            <div class="kpi-sub">From load route coordinates</div>
-          </div>
-        </div>
-      </section>
 
-      <!-- 2. Monthly Performance -->
-      <section class="section">
-        <div class="section-title">
-          <div class="section-icon" style="background: var(--accent-dim); color: var(--accent);">&#128197;</div>
-          Monthly Performance
-          <span class="section-sub">Click a month for the full breakdown &mdash; current month is to-date</span>
+        <div v-if="isEmpty" class="empty-msg">
+          Nothing recorded from {{ fmtYmd(report.from) }} to {{ fmtYmd(report.to) }}. Try a longer range.
         </div>
-        <div v-if="!monthsDesc.length" class="empty-msg">No monthly data yet.</div>
-        <template v-else>
-          <!-- Revenue trend (last 12 months) -->
-          <div class="month-chart">
-            <div
-              v-for="m in chartMonths"
-              :key="m.month"
-              class="month-bar-col month-clickable"
-              :title="`${monthKeyLabel(m.month)} — Revenue ${fmt(m.revenue)} · Net ${fmt(m.netProfit)} — click for details`"
-              @click="openMonth(m.month)"
-            >
-              <div class="month-bar-track">
-                <div
-                  class="month-bar-fill"
-                  :class="{ 'is-current': m.isCurrentMonth }"
-                  :style="{ height: barHeight(m.revenue) }"
-                ></div>
-              </div>
-              <!-- '?' rather than a silent gap: an unlabeled bar under a real
-                   revenue figure looks like a rendering glitch, and the title
-                   above still names the period. -->
-              <div class="month-bar-label">{{ shortMonth(m.month) || '?' }}</div>
-            </div>
-          </div>
-          <!-- Month-by-month table (newest first); each row opens the drill-down -->
-          <table class="data-table compact monthly-table">
-            <thead>
-              <tr>
-                <th>Month</th>
-                <th class="num">Revenue</th>
-                <th class="num">Expenses</th>
-                <th class="num">Net Profit</th>
-                <th class="chevron-col"></th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="m in monthsDesc"
-                :key="m.month"
-                class="row-click"
-                :class="{ 'row-current': m.isCurrentMonth }"
-                :title="`Open ${monthKeyLabel(m.month)} breakdown`"
-                @click="openMonth(m.month)"
-              >
-                <td class="mono">
-                  {{ monthKeyLabel(m.month) }}
-                  <span v-if="m.isCurrentMonth" class="mtd-badge">MTD</span>
-                </td>
-                <td class="num pos">{{ fmt(m.revenue) }}</td>
-                <td class="num dim">{{ fmt(m.totalExpenses) }}</td>
-                <td class="num" :class="m.netProfit >= 0 ? 'pos' : 'neg'">{{ fmt(m.netProfit) }}</td>
-                <td class="chevron-col"><span class="row-chevron">&rsaquo;</span></td>
-              </tr>
-            </tbody>
-          </table>
-        </template>
+        <FleetPnlTable v-else-if="report.groupBy === 'fleet'" :report="report" @open-month="openMonth" />
+        <GroupReportTable v-else :report="report" />
       </section>
+    </div>
 
-      <!-- 3. Expense Categories -->
-      <section class="section">
-        <div class="section-title">
-          <div class="section-icon" style="background: var(--amber-dim); color: var(--amber);">&#128202;</div>
-          Expense Categories
-          <span class="section-sub">All buckets &mdash; reconciles to Total Expenses</span>
-        </div>
-        <div v-if="!categoryBars.length" class="empty-msg">No expense data yet.</div>
-        <div v-else class="bar-list">
-          <div v-for="row in categoryBars" :key="row.key" class="bar-row">
-            <div class="bar-label">
-              <span>{{ row.label }}</span>
-              <span class="bar-val">{{ fmt(row.amount) }} <span class="bar-pct">({{ row.pct.toFixed(1) }}%)</span></span>
-            </div>
-            <div class="bar-track">
-              <div class="bar-fill" :style="{ width: row.pct + '%', background: row.color }"></div>
-            </div>
-          </div>
-        </div>
-      </section>
+    <CostSettingsDialog v-model:open="settingsOpen" @saved="onSettingsSaved" />
 
-      <!-- 4. Per-Truck Performance -->
-      <section class="section">
-        <div class="section-title">
-          <div class="section-icon" style="background: var(--blue-dim, #dbeafe); color: var(--blue, #2563eb);">&#128665;</div>
-          Per-Truck Performance
-          <span class="section-sub">Click a column header to sort</span>
-        </div>
-        <div v-if="!store.perTruck.length" class="empty-msg">No trucks in database yet.</div>
-        <table v-else class="data-table">
-          <thead>
-            <tr>
-              <th class="sortable" @click="sortBy('unitNumber')">Unit #{{ sortIcon('unitNumber') }}</th>
-              <th class="sortable" @click="sortBy('assignedDriver')">Current Driver{{ sortIcon('assignedDriver') }}</th>
-              <th class="sortable num" @click="sortBy('loadCount')">Loads{{ sortIcon('loadCount') }}</th>
-              <th class="sortable num" @click="sortBy('gross')">Gross{{ sortIcon('gross') }}</th>
-              <th class="sortable num" @click="sortBy('expenses')">Expenses{{ sortIcon('expenses') }}</th>
-              <th class="sortable num" @click="sortBy('net')">Net{{ sortIcon('net') }}</th>
-              <th class="sortable num" @click="sortBy('totalMiles')">Miles{{ sortIcon('totalMiles') }}</th>
-              <th class="sortable num" @click="sortBy('ratePerMile')">$/Mile{{ sortIcon('ratePerMile') }}</th>
-              <th class="sortable num" @click="sortBy('monthlyCost')">Monthly Cost{{ sortIcon('monthlyCost') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="t in sortedTrucks" :key="t.unitNumber" :class="{ 'row-idle': t.idle }">
-              <td class="mono">
-                {{ t.unitNumber }}
-                <span v-if="t.idle" class="idle-badge" :title="idleTitle(t)">IDLE</span>
-              </td>
-              <td>{{ t.assignedDriver }}</td>
-              <td class="num">{{ t.loadCount }}</td>
-              <td class="num">{{ fmt(t.gross) }}</td>
-              <td class="num dim">{{ fmt(t.expenses) }}</td>
-              <td class="num" :class="t.net >= 0 ? 'pos' : 'neg'" :title="t.idle ? idleTitle(t) : null">{{ fmt(t.net) }}</td>
-              <td class="num">{{ (t.totalMiles || 0).toLocaleString() }}</td>
-              <td class="num">${{ (t.ratePerMile || 0).toFixed(2) }}</td>
-              <td class="num dim">{{ fmt(t.monthlyCost) }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </section>
-
-      <!-- 5. Highest & Lowest Loads -->
-      <section class="section two-col">
-        <div class="col">
-          <div class="section-title">
-            <div class="section-icon" style="background: var(--accent-dim); color: var(--accent);">&#8599;</div>
-            Top 5 Highest Paying Loads
-          </div>
-          <div v-if="!store.loads.highest.length" class="empty-msg">No completed loads yet.</div>
-          <table v-else class="data-table compact">
-            <thead>
-              <tr>
-                <th>Load ID</th>
-                <th>Driver</th>
-                <th class="num">Amount</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="l in store.loads.highest" :key="'h-' + l.loadId">
-                <td class="mono">{{ l.loadId }}</td>
-                <td>{{ l.driver }}</td>
-                <td class="num pos">{{ fmt(l.amount) }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div class="col">
-          <div class="section-title">
-            <div class="section-icon" style="background: var(--danger-dim, #fee2e2); color: var(--danger, #dc2626);">&#8600;</div>
-            Bottom 5 Lowest Paying Loads
-          </div>
-          <div v-if="!store.loads.lowest.length" class="empty-msg">No completed loads yet.</div>
-          <table v-else class="data-table compact">
-            <thead>
-              <tr>
-                <th>Load ID</th>
-                <th>Driver</th>
-                <th class="num">Amount</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="l in store.loads.lowest" :key="'l-' + l.loadId">
-                <td class="mono">{{ l.loadId }}</td>
-                <td>{{ l.driver }}</td>
-                <td class="num neg">{{ fmt(l.amount) }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <!-- 6. Driver Earnings Leaderboard -->
-      <section class="section">
-        <div class="section-title">
-          <div class="section-icon" style="background: var(--accent-dim); color: var(--accent);">&#127942;</div>
-          Driver Earnings Leaderboard
-          <span class="section-sub">Ranked by revenue generated</span>
-        </div>
-        <div v-if="!store.drivers.length" class="empty-msg">No driver activity yet.</div>
-        <table v-else class="data-table">
-          <thead>
-            <tr>
-              <th class="num">Rank</th>
-              <th>Driver</th>
-              <th class="num">Revenue Generated</th>
-              <th class="num">Driver Pay</th>
-              <th class="num">Loads</th>
-              <th class="num">Miles</th>
-              <th class="num">$/Mile</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="(d, i) in store.drivers" :key="d.name" :class="{ 'row-unassigned': d.isUnassigned }">
-              <td class="num">
-                <span v-if="!d.isUnassigned" class="rank-badge" :class="'rank-' + Math.min(i + 1, 4)">{{ i + 1 }}</span>
-                <span v-else class="unassigned-mark">&#9888;</span>
-              </td>
-              <td>{{ d.name }}</td>
-              <td class="num pos">{{ fmt(d.grossRevenue) }}</td>
-              <td class="num dim">{{ d.isUnassigned ? '—' : fmt(d.totalEarnings) }}</td>
-              <td class="num">{{ d.loadCount }}</td>
-              <td class="num">{{ d.isUnassigned ? '—' : (d.totalMiles || 0).toLocaleString() }}</td>
-              <td class="num">{{ d.isUnassigned ? '—' : '$' + (d.avgRatePerMile || 0).toFixed(2) }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </section>
-    </template>
-
-    <!-- Month drill-down modal -->
+    <!-- Month drill-down, from a month's heading in the Fleet P&L -->
     <MonthDetailModal :open="!!selectedMonth" :month="selectedMonth || ''" @close="closeMonth" />
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { Table2 } from 'lucide-vue-next'
 import { useFinancialsStore } from '../stores/financials'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
-import { formatCurrency as fmt } from '../utils/format'
-import { monthLabel as fullMonthLabel } from '../lib/monthLabel'
+import { useToast } from '../composables/useToast'
+import { houstonToday, fmtYmd } from '../utils/datetime'
+import {
+  GRANULARITIES, GROUPINGS,
+  readSelection, reportSearch, selectionError, selectionQuery,
+} from '../lib/financialsView'
+import FinancialsToolbar from '../components/financials/FinancialsToolbar.vue'
+import FinancialsKpis from '../components/financials/FinancialsKpis.vue'
+import FleetPnlTable from '../components/financials/FleetPnlTable.vue'
+import GroupReportTable from '../components/financials/GroupReportTable.vue'
+import CostSettingsDialog from '../components/financials/CostSettingsDialog.vue'
 import MonthDetailModal from '../components/financials/MonthDetailModal.vue'
 
-const store = useFinancialsStore()
+// Financials: GET /api/financials/report for the range, granularity and
+// grouping in the URL. The server is the source of every figure; this page and
+// its components only display them (no sums, differences or ratios here).
 
-// Month drill-down state
+const store = useFinancialsStore()
+const route = useRoute()
+const router = useRouter()
+const toast = useToast()
+
+// The selection lives in the URL query so a view can be shared or reloaded.
+// Presets ("Last month") are read against the carrier's day, like the server.
+const ownRoute = route.name
+const selection = computed(() => readSelection(route.query, houstonToday()))
+const selectionErr = computed(() => selectionError(selection.value))
+const search = computed(() => (selectionErr.value ? '' : reportSearch(selection.value)))
+const exportHref = computed(() => (search.value ? `/api/financials/report.csv?${search.value}` : ''))
+
+function updateSelection(patch) {
+  const next = { ...selection.value, ...patch }
+  router.replace({ query: selectionQuery(next) })
+}
+
+watch(search, (s) => {
+  // Leaving the page changes the route before this view unmounts.
+  if (route.name !== ownRoute || !s) return
+  store.request(s)
+}, { immediate: true })
+
+const report = computed(() => store.report)
+const isEmpty = computed(() => !report.value?.groups?.length)
+
+const tableTitle = computed(() => {
+  const r = report.value
+  const grouping = GROUPINGS.find((g) => g.key === r?.groupBy)
+  const gran = GRANULARITIES.find((g) => g.key === r?.granularity)
+  if (!grouping) return ''
+  return gran ? `${grouping.title} · by ${gran.label.toLowerCase()}${gran.hint ? ` (${gran.hint})` : ''}` : grouping.title
+})
+
+// Which lines the CURRENT settings count; closed months keep their own.
+const countedNote = computed(() => {
+  const r = report.value
+  const lines = r?.lines || []
+  const costs = r?.settings?.costs || {}
+  const off = lines.filter((l) => costs[l.key] === false).map((l) => l.label)
+  const base = off.length ? `Not counted in total costs: ${off.join(', ')}.` : 'Every cost line is counted.'
+  return `${base} Closed months keep the settings they closed with.`
+})
+
+// Cost settings
+const settingsOpen = ref(false)
+function onSettingsSaved(result) {
+  if (result?.changed) {
+    toast.show('Cost settings saved')
+    store.reload()
+  } else {
+    toast.show('No changes to save')
+  }
+}
+
+// Month drill-down
 const selectedMonth = ref(null)
 function openMonth(mk) {
   selectedMonth.value = mk
@@ -322,119 +151,9 @@ function closeMonth() {
   store.clearMonth()
 }
 
-const sortKey = ref('net')
-const sortDir = ref('desc')
-
-const sortedTrucks = computed(() => {
-  const arr = [...store.perTruck]
-  const k = sortKey.value
-  const dir = sortDir.value === 'asc' ? 1 : -1
-  return arr.sort((a, b) => {
-    const av = a[k]
-    const bv = b[k]
-    // Treat null/undefined as zero for numeric cols so they don't fall into
-    // the string-compare branch and scatter alphabetically.
-    const aNum = typeof av === 'number' ? av : (av == null ? 0 : NaN)
-    const bNum = typeof bv === 'number' ? bv : (bv == null ? 0 : NaN)
-    if (!Number.isNaN(aNum) && !Number.isNaN(bNum) && (typeof av === 'number' || typeof bv === 'number' || av == null || bv == null)) {
-      return (aNum - bNum) * dir
-    }
-    return String(av ?? '').localeCompare(String(bv ?? '')) * dir
-  })
-})
-
-function sortBy(key) {
-  if (sortKey.value === key) {
-    sortDir.value = sortDir.value === 'asc' ? 'desc' : 'asc'
-  } else {
-    sortKey.value = key
-    sortDir.value = 'desc'
-  }
-}
-
-function sortIcon(key) {
-  if (sortKey.value !== key) return ''
-  return sortDir.value === 'asc' ? ' \u2191' : ' \u2193'
-}
-
-// Tooltip for idle trucks \u2014 explains the negative Net is overhead, not a loss.
-function idleTitle(t) {
-  const since = t.idleSince ? new Date(t.idleSince).toLocaleDateString() : 'onboarding'
-  return `Idle since ${since} \u2014 no completed loads. Net (${fmt(t.net)}) is accrued fixed-cost overhead (insurance + ELD), not an operating loss.`
-}
-
-// Category bars, sorted descending by amount
-const CATEGORY_META = {
-  driver_pay: { label: 'Driver Pay', color: '#0d9488' },
-  fuel: { label: 'Fuel', color: '#f59e0b' },
-  fixed_costs: { label: 'Fixed Costs', color: '#64748b' },
-  maintenance: { label: 'Maintenance', color: '#3b82f6' },
-  repair: { label: 'Repair', color: '#ef4444' },
-  toll: { label: 'Tolls', color: '#8b5cf6' },
-  compliance: { label: 'Compliance', color: '#d946ef' },
-  food: { label: 'Food', color: '#10b981' },
-  other: { label: 'Other', color: '#6b7280' },
-}
-const categoryBars = computed(() => {
-  const entries = Object.entries(store.expensesByCategory || {})
-  const total = entries.reduce((s, [, v]) => s + v, 0)
-  if (!total) return []
-  return entries
-    .map(([key, amount]) => ({
-      key,
-      label: CATEGORY_META[key]?.label || key,
-      color: CATEGORY_META[key]?.color || '#6b7280',
-      amount,
-      pct: (amount / total) * 100,
-    }))
-    .filter(r => r.amount > 0)
-    .sort((a, b) => b.amount - a.amount)
-})
-
-// Monthly performance — backend returns oldest → newest, incl. the current
-// (month-to-date) month flagged isCurrentMonth.
-const monthsAsc = computed(() => store.monthlyPerformance || [])
-const monthsDesc = computed(() => [...monthsAsc.value].reverse())
-const chartMonths = computed(() => monthsAsc.value.slice(-12))
-const maxMonthRevenue = computed(() =>
-  Math.max(1, ...chartMonths.value.map(m => m.revenue || 0))
-)
-function barHeight(rev) {
-  // Floor at 2% so a non-zero month is always a visible sliver.
-  return Math.max(2, ((rev || 0) / maxMonthRevenue.value) * 100) + '%'
-}
-// Both of these ABBREVIATE lib/monthLabel.js rather than re-deriving a month
-// from a key. That module owns which keys are readable and what the twelve
-// months are called; these only shorten its answer for a 12-bar chart axis and a
-// narrow `mono` table column, where "September 2026" would not fit.
-//
-// ⚠️ They used to be `new Date(y, (m || 1) - 1, 1).toLocaleDateString(...)`,
-// which SILENTLY ROLLS OVER: '2026-13' rendered "Jan 2027" and '2026-00'
-// rendered "Dec 2025" — a plausible month, off by a year, in a P&L table. The
-// delegation is what removes that; do not reintroduce a Date here.
-//
-// Short form is the first three letters of the shared name, which is exactly
-// what `toLocaleDateString('en-US', { month: 'short' })` produces for all
-// twelve, so nothing on screen moves for a readable key. '' propagates.
-function shortMonth(mk) {
-  return fullMonthLabel(mk).slice(0, 3)
-}
-function monthLabel(mk) {
-  const full = fullMonthLabel(mk)
-  return full ? `${full.slice(0, 3)} ${full.slice(full.indexOf(' ') + 1)}` : ''
-}
-// For the three places that need a NON-EMPTY token: the table cell that IS the
-// row's identity, and the two tooltips built around it. '' would leave a
-// nameless row sitting next to real revenue and net-profit figures, and a
-// tooltip reading "Open  breakdown". The raw key names the period that is
-// actually on screen without dressing it up as a month we parsed.
-function monthKeyLabel(mk) {
-  return monthLabel(mk) || String(mk ?? '') || 'Unknown month'
-}
-
-onMounted(() => store.load())
-useSocketRefresh('expenses:changed', () => store.load())
-useSocketRefresh('invoices:changed', () => store.load())
+useSocketRefresh('expenses:changed', () => store.reload())
+useSocketRefresh('invoices:changed', () => store.reload())
+useSocketRefresh('financials:changed', () => store.reload())
 </script>
 
 <style scoped>
@@ -446,16 +165,17 @@ useSocketRefresh('invoices:changed', () => store.load())
   padding-bottom: 2rem;
 }
 .page-header h2 { font-size: 1.4rem; margin: 0; }
-.page-sub { font-size: 0.82rem; color: var(--text-dim); margin-top: 0.2rem; }
+.page-sub { font-size: 0.82rem; color: var(--text-dim); margin-top: 0.2rem; max-width: 60rem; }
 
 .loading-state { display: flex; flex-direction: column; gap: 0.75rem; }
 .skeleton-card {
-  height: 100px;
-  background: var(--bg);
-  border-radius: 10px;
+  height: 120px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
   animation: pulse 1.4s ease-in-out infinite;
 }
-@keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 0.7; } }
+@keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 0.8; } }
 
 .error-state {
   background: var(--danger-dim, #fef2f2);
@@ -467,225 +187,6 @@ useSocketRefresh('invoices:changed', () => store.load())
 .error-title { font-weight: 700; font-size: 0.95rem; }
 .error-msg { font-size: 0.8rem; margin: 0.35rem 0 0.75rem; }
 
-.section {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 1.25rem;
-}
-.section-title {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  font-weight: 700;
-  font-size: 0.95rem;
-  margin-bottom: 1rem;
-}
-.section-icon {
-  width: 28px; height: 28px; border-radius: 8px;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 0.85rem; font-weight: 700;
-}
-.section-sub {
-  margin-left: auto;
-  font-size: 0.72rem;
-  font-weight: 500;
-  color: var(--text-dim);
-}
-
-/* KPI Grid */
-.kpi-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 0.75rem;
-}
-.kpi-card {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 0.9rem 1rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-}
-.kpi-card.kpi-pos { border-left: 3px solid var(--accent); }
-.kpi-card.kpi-neg { border-left: 3px solid var(--danger, #dc2626); }
-.kpi-label {
-  font-size: 0.68rem; font-weight: 600;
-  color: var(--text-dim); text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-.kpi-value {
-  font-size: 1.3rem; font-weight: 700;
-  font-family: 'JetBrains Mono', monospace;
-}
-.kpi-card.kpi-pos .kpi-value { color: var(--accent); }
-.kpi-card.kpi-neg .kpi-value { color: var(--danger, #dc2626); }
-.kpi-sub { font-size: 0.7rem; color: var(--text-dim); }
-
-/* Bar chart */
-.bar-list { display: flex; flex-direction: column; gap: 0.65rem; }
-.bar-row {}
-.bar-label {
-  display: flex; justify-content: space-between;
-  font-size: 0.78rem; font-weight: 600;
-  margin-bottom: 0.3rem;
-}
-.bar-val { font-family: 'JetBrains Mono', monospace; font-weight: 700; }
-.bar-pct { font-weight: 500; color: var(--text-dim); }
-.bar-track {
-  height: 10px; background: var(--bg);
-  border-radius: 6px; overflow: hidden;
-}
-.bar-fill {
-  height: 100%; border-radius: 6px;
-  transition: width 0.5s ease;
-}
-
-/* Monthly performance */
-.month-chart {
-  display: flex;
-  align-items: flex-end;
-  gap: 0.4rem;
-  height: 160px;
-  margin-bottom: 1.25rem;
-  padding-top: 0.5rem;
-}
-.month-bar-col {
-  flex: 1 1 0;
-  min-width: 0;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.35rem;
-}
-.month-bar-track {
-  flex: 1;
-  width: 100%;
-  max-width: 46px;
-  display: flex;
-  align-items: flex-end;
-}
-.month-bar-fill {
-  width: 100%;
-  min-height: 2px;
-  background: linear-gradient(180deg, var(--accent), #0ea5e9);
-  border-radius: 5px 5px 0 0;
-  transition: height 0.5s ease;
-}
-.month-bar-fill.is-current {
-  background: linear-gradient(180deg, #10b981, #059669);
-}
-.month-bar-label {
-  font-size: 0.62rem;
-  color: var(--text-dim);
-  white-space: nowrap;
-}
-.monthly-table .row-current {
-  background: rgba(16, 185, 129, 0.08);
-  font-weight: 600;
-}
-.monthly-table .row-current:hover { background: rgba(16, 185, 129, 0.14); }
-/* Clickable months (drill-down) */
-.month-clickable { cursor: pointer; }
-.month-clickable:hover .month-bar-fill { filter: brightness(1.12); }
-.monthly-table .row-click { cursor: pointer; }
-.monthly-table .chevron-col { width: 28px; text-align: right; }
-.row-chevron {
-  color: var(--text-dim);
-  font-size: 1.05rem;
-  font-weight: 700;
-  line-height: 1;
-}
-.monthly-table .row-click:hover .row-chevron { color: var(--text); }
-.mtd-badge {
-  display: inline-block;
-  margin-left: 0.4rem;
-  padding: 0.05rem 0.4rem;
-  font-size: 0.6rem;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  color: #065f46;
-  background: #d1fae5;
-  border-radius: 999px;
-  vertical-align: middle;
-}
-
-/* Tables */
-.data-table {
-  width: 100%;
-  border-collapse: separate;
-  border-spacing: 0;
-  font-size: 0.82rem;
-}
-.data-table th {
-  text-align: left;
-  padding: 0.5rem 0.5rem;
-  font-weight: 600;
-  color: var(--text-dim);
-  border-bottom: 2px solid var(--border);
-  font-size: 0.68rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  user-select: none;
-}
-.data-table th.num { text-align: right; }
-.data-table th.sortable { cursor: pointer; }
-.data-table th.sortable:hover { color: var(--text); }
-.data-table td {
-  padding: 0.6rem 0.5rem;
-  border-bottom: 1px solid var(--bg);
-}
-.data-table tbody tr:hover { background: var(--bg); }
-.data-table td.num {
-  text-align: right;
-  font-family: 'JetBrains Mono', monospace;
-}
-.data-table td.mono {
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 600;
-}
-.data-table td.dim { color: var(--text-dim); }
-.data-table td.pos { color: var(--accent); font-weight: 600; }
-.data-table td.neg { color: var(--danger, #dc2626); font-weight: 600; }
-.data-table.compact td, .data-table.compact th {
-  padding: 0.45rem 0.5rem;
-  font-size: 0.78rem;
-}
-
-.two-col {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 1rem;
-}
-.two-col .col { background: transparent; }
-@media (max-width: 900px) {
-  .two-col { grid-template-columns: 1fr; }
-}
-
-.rank-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px; height: 24px;
-  border-radius: 50%;
-  font-size: 0.72rem;
-  font-weight: 700;
-  background: var(--bg);
-  color: var(--text-dim);
-}
-.rank-badge.rank-1 { background: #fde68a; color: #92400e; }
-.rank-badge.rank-2 { background: #e5e7eb; color: #374151; }
-.rank-badge.rank-3 { background: #fecaca; color: #991b1b; }
-
-.empty-msg {
-  text-align: center;
-  color: var(--text-dim);
-  font-size: 0.85rem;
-  padding: 1.5rem 0;
-}
-
 .data-warning {
   background: #fef3c7;
   border: 1px solid #fcd34d;
@@ -694,49 +195,84 @@ useSocketRefresh('invoices:changed', () => store.load())
   padding: 0.85rem 1rem;
   color: #78350f;
 }
-.data-warning-title {
-  font-weight: 700;
-  font-size: 0.85rem;
-  margin-bottom: 0.35rem;
+.data-warning-title { font-weight: 700; font-size: 0.85rem; margin-bottom: 0.35rem; }
+.data-warning-msg { font-size: 0.78rem; line-height: 1.5; }
+
+.report {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
 }
-.data-warning-msg {
-  font-size: 0.78rem;
-  line-height: 1.5;
-}
-.row-unassigned {
-  background: rgba(251, 191, 36, 0.08);
-  font-style: italic;
-}
-.row-unassigned:hover { background: rgba(251, 191, 36, 0.14); }
-.unassigned-mark {
+.report.stale > :not(.updating) { opacity: 0.55; transition: opacity 0.2s; pointer-events: none; }
+.updating {
+  position: sticky;
+  top: 0.5rem;
+  z-index: 5;
+  align-self: center;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 24px; height: 24px;
-  font-size: 0.95rem;
-  color: #f59e0b;
+  gap: 0.45rem;
+  padding: 0.35rem 0.85rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: var(--shadow-card);
+}
+.spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.25rem;
+  min-width: 0;
+}
+.section-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+}
+.section-heading { font-weight: 700; font-size: 0.95rem; margin: 0; }
+.section-icon {
+  width: 28px; height: 28px; border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+}
+.section-icon .icon { width: 15px; height: 15px; }
+.section-sub {
+  margin-left: auto;
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--text-dim);
+  max-width: 34rem;
+  text-align: right;
+}
+.empty-msg {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  padding: 1.5rem 0;
 }
 
-/* Idle assets: neutral slate styling — informational, not an error/warning. */
-.idle-warning {
-  background: #f1f5f9;
-  border-color: #cbd5e1;
-  border-left-color: #64748b;
-  color: #334155;
+@media (max-width: 767px) {
+  .section { padding: 1rem; }
+  .section-sub { margin-left: 0; text-align: left; max-width: none; }
 }
-.row-idle { background: rgba(148, 163, 184, 0.10); }
-.row-idle:hover { background: rgba(148, 163, 184, 0.18); }
-.idle-badge {
-  display: inline-block;
-  margin-left: 0.4rem;
-  padding: 0.05rem 0.4rem;
-  font-size: 0.6rem;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  color: #475569;
-  background: #e2e8f0;
-  border-radius: 999px;
-  vertical-align: middle;
-  cursor: help;
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-card, .spinner { animation: none; }
 }
 </style>

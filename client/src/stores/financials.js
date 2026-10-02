@@ -3,60 +3,114 @@ import { useApi } from '../composables/useApi'
 
 const api = useApi()
 
+// The report builds the whole ledger on a cold cache (seconds on a big range),
+// so it gets more than useApi()'s 20 s default.
+const REPORT_TIMEOUT_MS = 60000
+
+// Financials page state. Every figure is the server's
+// (GET /api/financials/report); the page only displays it.
 export const useFinancialsStore = defineStore('financials', {
   state: () => ({
-    summary: null,
-    expensesByCategory: {},
-    monthlyPerformance: [],
-    perTruck: [],
-    loads: { highest: [], lowest: [] },
-    drivers: [],
+    // GET /api/financials/report for `reportSearch` (lib/financialsView.js)
+    report: null,
+    reportSearch: '',
     isLoading: false,
     lastError: '',
-    lastFetched: 0,
-    // Month drill-down (?month=YYYY-MM on the same endpoint)
+    lastErrorCode: '',
+    // GET / PUT /api/financials/settings
+    settings: null,
+    settingsDefaults: null,
+    settingsLines: [],
+    settingsLoading: false,
+    settingsError: '',
+    settingsSaving: false,
+    // Month drill-down (GET /api/financials?month=YYYY-MM), for MonthDetailModal
     monthDetail: null,
     monthLoading: false,
     monthError: '',
   }),
 
   actions: {
-    applyPayload(data) {
-      this.summary = data.summary || null
-      this.expensesByCategory = data.expensesByCategory || {}
-      this.monthlyPerformance = data.monthlyPerformance || []
-      this.perTruck = data.perTruck || []
-      this.loads = data.loads || { highest: [], lowest: [] }
-      this.drivers = data.drivers || []
-      this.lastFetched = Date.now()
-    },
-
-    async load() {
+    // Load the report for a query string. A newer call supersedes an older
+    // one: the older request is aborted and its answer, if any, dropped.
+    async loadReport(search) {
+      const reqId = (this._reportReqId = (this._reportReqId || 0) + 1)
+      if (this._reportAbort) this._reportAbort.abort()
+      const controller = new AbortController()
+      this._reportAbort = controller
       this.isLoading = true
       this.lastError = ''
+      this.lastErrorCode = ''
       try {
-        const data = await api.get('/api/financials')
-        this.applyPayload(data)
+        const data = await api.get(`/api/financials/report?${search}`, {
+          timeout: REPORT_TIMEOUT_MS,
+          signal: controller.signal,
+        })
+        if (reqId !== this._reportReqId) return
+        this.report = data
+        this.reportSearch = search
       } catch (err) {
-        this.lastError = err?.message || 'Failed to load financials'
+        if (reqId !== this._reportReqId) return
+        this.lastError = err?.message || 'Failed to load the financials report'
+        this.lastErrorCode = err?.code || ''
       } finally {
-        this.isLoading = false
+        if (reqId === this._reportReqId) {
+          this.isLoading = false
+          this._reportAbort = null
+        }
       }
     },
 
-    // Fetch the drill-down for one month. The endpoint returns the full
-    // payload plus `monthDetail`, so the main view refreshes for free and the
-    // modal numbers always reconcile with the table row that was clicked.
-    // A request token drops stale responses when months are clicked rapidly.
+    // Re-run the last requested report (socket refresh, after a settings save).
+    reload() {
+      if (this._lastSearch) return this.loadReport(this._lastSearch)
+    },
+
+    // The page asks through here so reload() knows what to repeat.
+    request(search) {
+      this._lastSearch = search
+      return this.loadReport(search)
+    },
+
+    async loadSettings() {
+      this.settingsLoading = true
+      this.settingsError = ''
+      try {
+        const data = await api.get('/api/financials/settings')
+        this.settings = data.settings || null
+        this.settingsDefaults = data.defaults || null
+        this.settingsLines = Array.isArray(data.lines) ? data.lines : []
+      } catch (err) {
+        this.settingsError = err?.message || 'Failed to load the cost settings'
+      } finally {
+        this.settingsLoading = false
+      }
+    },
+
+    // PUT the settings. Resolves to the server's { settings, changed }; throws
+    // the API error (400 INVALID_SETTINGS carries a readable message) so the
+    // dialog can show it beside the form.
+    async saveSettings(body) {
+      this.settingsSaving = true
+      try {
+        const data = await api.put('/api/financials/settings', body)
+        this.settings = data.settings || this.settings
+        return data
+      } finally {
+        this.settingsSaving = false
+      }
+    },
+
+    // Fetch the drill-down for one month. A request token drops stale
+    // responses when months are clicked rapidly.
     async loadMonth(month) {
       const reqId = (this._monthReqId = (this._monthReqId || 0) + 1)
       this.monthLoading = true
       this.monthError = ''
       this.monthDetail = null
       try {
-        const data = await api.get(`/api/financials?month=${encodeURIComponent(month)}`)
+        const data = await api.get(`/api/financials?month=${encodeURIComponent(month)}`, { timeout: REPORT_TIMEOUT_MS })
         if (reqId !== this._monthReqId) return // a newer request superseded this one
-        this.applyPayload(data)
         this.monthDetail = data.monthDetail || null
         if (!this.monthDetail) this.monthError = 'No detail returned for this month'
       } catch (err) {
@@ -68,8 +122,10 @@ export const useFinancialsStore = defineStore('financials', {
     },
 
     clearMonth() {
+      this._monthReqId = (this._monthReqId || 0) + 1
       this.monthDetail = null
       this.monthError = ''
+      this.monthLoading = false
     },
   },
 })
