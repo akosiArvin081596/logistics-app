@@ -304,8 +304,15 @@ const ROW_COLS = "period, amount, status, finalized_at, finalized_amount, finali
 	check(lateRows().length === 1, "a second reconcile records nothing new", `got ${lateRows().length} rows`);
 	check(notices.filter((n) => /activity found after it closed/.test(n.title)).length === 1,
 		"…and the finding is sent once as a month-close notice", JSON.stringify(notices.map((n) => n.title)));
+	check(notices.every((n) => !/\$\s?\d/.test(`${n.title} ${n.body}`)), "…which carries no money figures (Dispatchers read these notices)",
+		JSON.stringify(notices.map((n) => n.body)));
 
 	// ── the triggers: nothing writes a figure into a locked month ────────────
+	const storedTriggers = db.prepare("SELECT COUNT(*) AS n FROM main.sqlite_master WHERE type = 'trigger'").get().n;
+	const tempTriggers = db.prepare("SELECT name FROM temp.sqlite_master WHERE type = 'trigger' ORDER BY name").all().map((r) => r.name);
+	check(storedTriggers === 0 && tempTriggers.length === 3,
+		"the triggers are TEMP: on this connection only, none stored in the database file (a rollback to older code never meets them)",
+		`stored ${storedTriggers}, temp ${JSON.stringify(tempTriggers)}`);
 	const refused = (fn) => { try { fn(); return ""; } catch (e) { return e.message; } };
 	let msg = refused(() => db.prepare("INSERT INTO investor_payouts (owner_id, period, amount, due_date, status) VALUES (5, '2026-02', 10, '2026-03-27', 'owed')").run());
 	check(/PERIOD_FINALIZED/.test(msg), "a direct INSERT into locked 2026-02 is refused by the trigger", `got ${JSON.stringify(msg)}`);
@@ -439,6 +446,23 @@ const ROW_COLS = "period, amount, status, finalized_at, finalized_amount, finali
 		check(unapplied.length === 1 && unapplied[0].entity_id === "5:2026-07" && B.notices.some((n) => /part of a correction was not applied/.test(n.title)),
 			"close: an adjustment larger than the month finally pays is reported (audit row and notice), nothing changed",
 			`audit ${JSON.stringify(unapplied)}, notices ${JSON.stringify(B.notices.map((n) => n.title))}`);
+		check(B.notices.every((n) => !/\$\s?\d/.test(`${n.title} ${n.body}`)) && /\$/.test(unapplied[0].details),
+			"close: the notice carries no money figures; the audit row does", JSON.stringify(B.notices.map((n) => n.body)));
+
+		// Two closes of one month at once: one closes it, the other closes nothing.
+		const raceResults = await Promise.all([B.api.finalizePeriods(["2026-02"], "system"), B.api.finalizePeriods(["2026-02"], "super_admin")]);
+		const closedBy = raceResults.filter((r) => r.periods.includes("2026-02")).length;
+		const other = raceResults.find((r) => !r.periods.includes("2026-02"));
+		check(closedBy === 1 && other && other.retry === true && other.reason === "closed" && lockB("2026-02").status === "locked",
+			"close: two closes of one month at once — one closes it, the other closes nothing (another close got there first)", JSON.stringify(raceResults));
+
+		// An unreadable lock table closes nothing, and says so by throwing.
+		B.db.exec("ALTER TABLE period_locks RENAME TO period_locks_saved; CREATE TABLE period_locks (period TEXT PRIMARY KEY, finalized_at TEXT)");
+		let unreadable = "";
+		try { await B.api.finalizePeriods(["2026-09"], "system"); } catch (e) { unreadable = e.message; }
+		check(/period_locks could not be read/.test(unreadable) && !B.db.prepare("SELECT 1 FROM period_locks WHERE period = '2026-09'").get(),
+			"close: an unreadable lock table closes nothing and throws (the sweep counts it as a failure)", JSON.stringify(unreadable));
+		B.db.exec("DROP TABLE period_locks; ALTER TABLE period_locks_saved RENAME TO period_locks");
 
 		// The cancel check.
 		const rowArr = (o) => HEADERS.map((h) => o[h]);

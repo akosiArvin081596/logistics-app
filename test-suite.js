@@ -631,13 +631,14 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
 
   // 56. A deduction cannot exceed the payout it comes off. Kept inside the
   //     pre-existing $10,000 magnitude cap, or that older guard fires first and
-  //     this ceiling is never reached. Also skips periods still in their grace
-  //     window — adjustments are refused there (the amount is still moving), so
-  //     the over-deduction ceiling would never be reached.
+  //     this ceiling is never reached. Uses an OPEN month: a closed month refuses
+  //     every adjustment first (409 PERIOD_FINALIZED, test 114), so the
+  //     over-deduction ceiling would never be reached there. Refused, so nothing
+  //     is written.
   const payableRow = rows.find(r =>
-    Number(r.effectiveAmount) > 0 && Number(r.amount) < 10000 && r.phase !== "pending");
+    Number(r.effectiveAmount) > 0 && Number(r.amount) < 10000 && r.phase !== "finalized");
   if (!payableRow) {
-    skip("56. Cannot over-deduct a payout (400)", "no finalized payable row under the $10k cap in seeded data");
+    skip("56. Cannot over-deduct a payout (400)", "no open payable row under the $10k cap in seeded data");
   } else {
     const over = -(Math.round(payableRow.amount) + 1);
     const s56 = await req("PUT", `/api/investor/payouts/${payableRow.id}/adjust`,
@@ -1510,17 +1511,20 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
       s113.status === 409 && s113.body?.code === "PERIOD_NOT_FINALIZED");
   }
 
-  // 114. Same period refuses a manual adjustment — its amount is still refreshed
-  //      from live earnings on every read, so a manual delta would be counted
-  //      twice. Closes a hole the UI has been faking client-side.
-  if (!pendingRow) {
-    skip("114. Cannot adjust a period still in its grace window (409)",
-      closeOn ? "no payable pending row right now" : "period close disabled on this server");
+  // 114. A CLOSED month refuses a manual adjustment: it is final as settled, and
+  //      a correction to it is posted on an open month instead (the 409 names
+  //      one when the investor has it). Refused, so nothing is written; an open
+  //      month taking an adjustment is not exercised here, because that writes
+  //      to a real payout row.
+  const closedRow = rows.find(r => r.phase === "finalized");
+  if (!closedRow) {
+    skip("114. Cannot adjust a closed month (409 PERIOD_FINALIZED)",
+      closeOn ? "no finalized row right now" : "period close disabled on this server");
   } else {
-    const s114 = await req("PUT", `/api/investor/payouts/${pendingRow.id}/adjust`,
+    const s114 = await req("PUT", `/api/investor/payouts/${closedRow.id}/adjust`,
       { adjustment: -1, adjustmentNote: "test-suite: must be rejected" }, ac);
-    test("114. Cannot adjust a period still in its grace window (409)",
-      s114.status === 409 && s114.body?.code === "PERIOD_NOT_FINALIZED");
+    test("114. Cannot adjust a closed month (409 PERIOD_FINALIZED)",
+      s114.status === 409 && s114.body?.code === "PERIOD_FINALIZED");
   }
 
   // 115. ...and refuses to publish a statement, for the same reason: the number

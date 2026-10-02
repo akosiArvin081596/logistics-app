@@ -797,8 +797,8 @@ const LEASE_2000 = { type: "lease", leaseAmountCents: 200000, details: "" };
 		eq(onCtx(62).settledSplitMonths, LEDGER_CLOSED, "§10 …and once the flag is on those months stay the split");
 
 		// MUTANT: the reconcile without its closed-month guard creates the rows.
-		const anchor = "if (periodWriteLocked(m.month)) {\n\t\t\t\t\tnoteLateItemInClosedMonth(";
-		if (count(anchor) !== 1) die("the reconcile's closed-month guard moved");
+		const anchor = "if (periodLocksReadable()) noteLateItemInClosedMonth(ownerId, m, amount);";
+		if (count(anchor) !== 1 || count("if (periodWriteLocked(m.month)) {") !== 1) die("the reconcile's closed-month guard moved");
 		const bug = buildServer({ flag: true });
 		leaseOwner(bug, 60);
 		lockAll(bug);
