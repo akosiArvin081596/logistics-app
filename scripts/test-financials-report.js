@@ -107,6 +107,7 @@ const FREEZE_HEAD = 'app.post("/api/admin/financials/freeze-closed-months", requ
 const REPORT_HEAD = 'app.get("/api/financials/report", requireRole("Super Admin"), async (req, res) => {';
 const CSV_HEAD = 'app.get("/api/financials/report.csv", requireRole("Super Admin"), async (req, res) => {';
 const SETTINGS_PUT_HEAD = 'app.put("/api/financials/settings", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {';
+const STATE_MILES_HEAD = 'app.get("/api/financials/state-miles", requireRole("Super Admin"), (req, res) => {';
 const ADJUST_HEAD = 'app.put("/api/investor/payouts/:id/adjust", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {';
 const BODY = [
 	...CONSTS.map((c) => liftDecl("const", c)),
@@ -118,6 +119,7 @@ const BODY = [
 	liftRoute(REPORT_HEAD),
 	liftRoute(CSV_HEAD),
 	liftRoute(SETTINGS_PUT_HEAD),
+	liftRoute(STATE_MILES_HEAD),
 	"return { reconcileInvestorPayouts, computeInvestorMonthlyEarnings, getInvestorDriverSet, assignDriverToTruck, finalizePeriods, getCarrierDBFromSQLite, installPeriodLockTriggers, computeFleetLedger, buildFinancialsLedger, pendingReceiptsInPeriod };",
 ].join("\n");
 
@@ -135,7 +137,7 @@ const DDL = [
 	tableDdl("investor_payouts"), ...alters("investor_payouts"),
 	tableDdl("investor_payout_history"), tableDdl("investor_payout_basis"), tableDdl("period_locks"),
 	tableDdl("financials_ledger_items"), tableDdl("financials_ledger_freezes"), tableDdl("app_settings"),
-	tableDdl("load_coordinates"), ...alters("load_coordinates"), tableDdl("load_eld_miles"), tableDdl("load_ratecon_miles"),
+	tableDdl("load_coordinates"), ...alters("load_coordinates"), tableDdl("load_eld_miles"), tableDdl("load_ratecon_miles"), tableDdl("eld_state_miles_daily"),
 	// The migrated shape (the CREATE is the pre-owner one; a migration rebuilds it).
 	"CREATE TABLE investor_config (owner_id INTEGER DEFAULT 0, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(owner_id, key))",
 ];
@@ -445,6 +447,19 @@ const R = financialsReport;
 		const r = await report(q);
 		check(r.status === 400 && r.body.code === "INVALID_REPORT_QUERY", `report: ${why} answers 400`, `${r.status}`);
 	}
+	// Miles by state, as the ELD measured them, for the report's range and periods.
+	const sm = db.prepare("INSERT INTO eld_state_miles_daily (routemate_vehicle_id, truck_id, local_day, state, miles) VALUES (?, ?, ?, ?, ?)");
+	sm.run("rv1", 1, "2026-06-03", "TX", 300.4);
+	sm.run("rv1", 1, "2026-06-03", "OK", 100.2);
+	sm.run("rv2", 3, "2026-06-20", "TX", 200);
+	sm.run("rv1", 1, "2026-07-02", "TX", 999);
+	const miles = await call("GET /api/financials/state-miles", { query: { from: "2026-06-01", to: "2026-06-30", granularity: "week" }, session: { user: SUPER } });
+	const tx = (miles.body.states || []).find((s) => s.state === "TX");
+	check(miles.status === 200 && miles.body.total === 600 && tx && tx.total === 500 && tx.share === 83.3 && tx.byTruck.T5 === 300 && tx.byTruck.C1 === 200
+		&& tx.byPeriod["2026-05-30"] === 300 && tx.byPeriod["2026-06-20"] === 200 && miles.body.states[0].state === "TX",
+		"state miles: each state's ELD miles in the range, by Saturday week and by truck, with its share (July left out); the total is the rows' sum", JSON.stringify(miles.body).slice(0, 400));
+	const badMiles = await call("GET /api/financials/state-miles", { query: { from: "9999-01-01", to: "9999-12-31" }, session: { user: SUPER } });
+	check(badMiles.status === 400 && badMiles.body.code === "INVALID_REPORT_QUERY", "state miles: a bad range answers 400", `${badMiles.status}`);
 	check(W.errors.length === 0, "the lifted code logged no error", W.errors.join(" | "));
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);

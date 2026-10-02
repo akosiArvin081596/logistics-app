@@ -375,18 +375,19 @@ const CATEGORY_META = {
   toll: { label: 'Tolls', color: '#8b5cf6' },
   food: { label: 'Food', color: '#10b981' },
   other: { label: 'Other', color: '#6b7280' },
+  compliance: { label: 'Compliance', color: '#a16207' },
 }
+// Each category's amount and share come from the server (expenseCategoryShares).
 const categoryBars = computed(() => {
-  const entries = Object.entries(detail.value?.expenseCategories || {})
-  const total = entries.reduce((s, [, v]) => s + v, 0)
-  if (!total) return []
-  return entries
+  const amounts = detail.value?.expenseCategories || {}
+  const shares = detail.value?.expenseCategoryShares || {}
+  return Object.entries(amounts)
     .map(([key, amount]) => ({
       key,
       label: CATEGORY_META[key]?.label || key,
       color: CATEGORY_META[key]?.color || '#6b7280',
       amount,
-      pct: (amount / total) * 100,
+      pct: shares[key] || 0,
     }))
     .filter((r) => r.amount > 0)
     .sort((a, b) => b.amount - a.amount)
