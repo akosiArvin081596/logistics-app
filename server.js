@@ -78,6 +78,7 @@ const { EXPENSE_TYPES, resolveRegionToStates, normalizeVendor, normalizeVendorDe
 const expenseAi = require("./lib/expense-ai");
 const fuelModel = require("./lib/fuel-model");
 const eldMiles = require("./lib/eld-miles");
+const usStates = require("./lib/us-states");
 const loadHaul = require("./lib/load-haul");
 const poiFuelStops = require("./lib/poi-fuel-stops");
 const rateconNormalize = require("./lib/ratecon-normalize");
@@ -1484,6 +1485,36 @@ db.exec(`
 // on rows where it's still NULL.
 try { db.exec("ALTER TABLE load_coordinates ADD COLUMN distance_miles REAL"); } catch {}
 
+// THE ONE WRITE into load_coordinates. Every writer (the boot sync, POST
+// /api/data, from-ratecon, the geofence's on-demand geocode, GET
+// /api/geocode/load) goes through it.
+//
+// ⚠️ NEVER `INSERT OR REPLACE` HERE. REPLACE deletes the row and inserts a new
+// one, so every column the statement does not name (distance_miles, created_at)
+// falls back to its default. The boot sync rewrites every sheet load on every
+// pm2 restart, which is how distance_miles came to be empty on all 385
+// production rows (2026-10-02). The upsert keeps distance_miles while the lane is
+// unchanged and clears it when either end moves, because it measured the old
+// lane. Pinned by scripts/test-load-coordinates-keep-distance.js.
+const upsertLoadCoordsStmt = db.prepare(
+	`INSERT INTO load_coordinates
+	 (load_id, origin_lat, origin_lng, dest_lat, dest_lng, pickup_address, dropoff_address)
+	 VALUES (?, ?, ?, ?, ?, ?, ?)
+	 ON CONFLICT(load_id) DO UPDATE SET
+		distance_miles = CASE
+			WHEN load_coordinates.origin_lat IS excluded.origin_lat
+			 AND load_coordinates.origin_lng IS excluded.origin_lng
+			 AND load_coordinates.dest_lat IS excluded.dest_lat
+			 AND load_coordinates.dest_lng IS excluded.dest_lng
+			THEN load_coordinates.distance_miles ELSE NULL END,
+		origin_lat = excluded.origin_lat,
+		origin_lng = excluded.origin_lng,
+		dest_lat = excluded.dest_lat,
+		dest_lng = excluded.dest_lng,
+		pickup_address = excluded.pickup_address,
+		dropoff_address = excluded.dropoff_address`
+);
+
 // Drivers directory (replaces Carrier Database Google Sheet)
 db.exec(`
 	CREATE TABLE IF NOT EXISTS drivers_directory (
@@ -2564,6 +2595,41 @@ db.exec(`
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_eld_miles_day ON eld_miles_daily(local_day)`); } catch {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_eld_miles_driver_day ON eld_miles_daily(driver_key, local_day)`); } catch {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_eld_miles_vid_day ON eld_miles_daily(routemate_vehicle_id, local_day)`); } catch {}
+
+// --- Miles per STATE per truck per day (2026-10-02) -------------------------
+// The same odometer walk as eld_miles_daily, bucketed by the state each mile
+// was driven in (lib/us-states.js, the real state borders). Written by
+// rollupEldStateMilesRange(). Feeds miles-by-state reporting and, later, IFTA.
+//
+// ⚠️ WHY THIS IS PERSISTED. /api/compliance/ifta computes state miles on demand
+// from routemate_telemetry, which purges at 90 days, so a state's miles for
+// anything older were simply gone. The derivation outlives the pings, for the
+// same reason eld_miles_daily and load_eld_miles exist.
+//
+// ⚠️ local_day IS THE TRUCK-LOCAL DAY and each delta lands in its later ping's
+// day, exactly as in eld_miles_daily, so one truck-day's state rows SUM to
+// that truck-day's eld_miles_daily miles. If the two ever disagree, one of the
+// walks has drifted (scripts/test-eld-state-miles.js pins them equal).
+//
+// ⚠️ state is a USPS code or 'OTHER' (outside every state, e.g. Mexico), never
+// NULL or '': SQLite treats NULLs as distinct in a UNIQUE index, so a NULL
+// state would let the upsert insert a duplicate row on every run.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS eld_state_miles_daily (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		routemate_vehicle_id TEXT NOT NULL,
+		truck_id INTEGER DEFAULT 0,
+		local_day TEXT NOT NULL,
+		state TEXT NOT NULL,
+		miles REAL DEFAULT 0,
+		dropped_miles REAL DEFAULT 0,
+		samples INTEGER DEFAULT 0,
+		computed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE (routemate_vehicle_id, local_day, state)
+	)
+`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_eld_state_miles_day ON eld_state_miles_daily(local_day)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_eld_state_miles_truck_day ON eld_state_miles_daily(truck_id, local_day)`); } catch {}
 
 // --- Per-LOAD driven miles (2026-08-29) -------------------------------------
 // One row per load: how far the truck actually drove for it, split into the
@@ -4382,6 +4448,151 @@ function rollupEldMilesDaily(daysBack = 3) {
 // rollup above: it reads the shared telemetry table, which Linxup also fills.
 setTimeout(() => rollupEldMilesDaily(3), 6 * 60 * 1000);
 setInterval(() => rollupEldMilesDaily(3), 6 * 60 * 60 * 1000);
+
+// --- Miles per state per truck per day: rollup and one-time backfill ---------
+// Fills eld_state_miles_daily (see its table comment). One function serves both:
+//   • the FIRST run after deploy (no ELD_STATE_MILES_BACKFILL_KEY marker yet)
+//     walks the whole retained telemetry window, so the approved deploy
+//     recovers every day the 90-day purge has not yet taken; nothing has to be
+//     run by hand on the box;
+//   • every later run re-derives the days since the last successful run (at
+//     least 3, the same overlap as rollupEldMilesDaily), so a server that was
+//     down for a week catches up instead of leaving a hole.
+//
+// ⚠️ THE UPSERT REFUSES TO LOWER A ROW (WHERE excluded.samples >= samples), the
+// same fail-closed guard as eld_miles_daily: a recomputation over a partly
+// purged window sees fewer samples, and must not replace a complete figure.
+//
+// ⚠️ THE PURGE-BOUNDARY DAY IS NEVER WRITTEN. When a vehicle's oldest retained
+// ping is about to age out, its first local day is already partly purged, and
+// a first-ever row for it would be a confident undercount the guard could
+// never correct. A truck that simply started reporting mid-day (newly linked)
+// is not at the boundary, so its first day is kept.
+//
+// Reads in 7-day chunks per truck with a day of lead-in on each side (so a
+// delta spanning midnight is judged against its true neighbour) and writes only
+// the chunk's own days, so each local day is written exactly once per run. It
+// yields to the event loop between chunks: the first run reads ~90 days of
+// pings on a box shared with other tenants.
+const ELD_STATE_MILES_BACKFILL_KEY = "eld_state_miles_backfill_v1";
+const ELD_STATE_MILES_LAST_RUN_KEY = "eld_state_miles_last_run";
+const ELD_STATE_MILES_MAX_DAYS = 95; // the weekly purge leaves up to ~97 days
+const ELD_STATE_MILES_BOUNDARY_MS = 89 * 86400000;
+let eldStateMilesRunning = false;
+
+async function rollupEldStateMilesRange(fromMs, toMs, nowMs) {
+	const DAY = 86400000;
+	const isoDay = (ms) => new Date(ms).toISOString().slice(0, 10);
+	const trucks = db.prepare(
+		`SELECT id, routemate_vehicle_id FROM trucks
+		 WHERE COALESCE(routemate_vehicle_id,'') <> ''`
+	).all();
+	const selectRange = db.prepare(`
+		SELECT location_date_ms AS ms, MAX(odometer) AS odo, MAX(longitude) AS lng, MAX(latitude) AS lat
+		FROM routemate_telemetry
+		WHERE routemate_vehicle_id = ?
+		  AND location_date_ms >= ? AND location_date_ms < ?
+		  AND dropped_reason = '' AND odometer > 0
+		GROUP BY location_date_ms ORDER BY ms ASC
+	`);
+	const selectOldest = db.prepare(`
+		SELECT location_date_ms AS ms, longitude AS lng FROM routemate_telemetry
+		WHERE routemate_vehicle_id = ? AND dropped_reason = '' AND odometer > 0
+		ORDER BY location_date_ms ASC LIMIT 1
+	`);
+	const upsert = db.prepare(`
+		INSERT INTO eld_state_miles_daily
+			(routemate_vehicle_id, truck_id, local_day, state, miles, dropped_miles, samples, computed_at)
+		VALUES (@vid, @truck_id, @local_day, @state, @miles, @dropped_miles, @samples, CURRENT_TIMESTAMP)
+		ON CONFLICT(routemate_vehicle_id, local_day, state) DO UPDATE SET
+			truck_id = excluded.truck_id,
+			miles = excluded.miles,
+			dropped_miles = excluded.dropped_miles,
+			samples = excluded.samples,
+			computed_at = CURRENT_TIMESTAMP
+		WHERE excluded.samples >= eld_state_miles_daily.samples
+	`);
+	const dayOf = (ms, lng) => eldMiles.localDayInTz(ms, eldMiles.usTzForLongitude(lng));
+
+	const fromDay = isoDay(fromMs);
+	const toDay = isoDay(toMs);
+	const truckDays = new Set();
+	let rows = 0;
+	for (const t of trucks) {
+		const oldest = selectOldest.get(t.routemate_vehicle_id);
+		if (!oldest) continue;
+		const boundaryDay = oldest.ms < nowMs - ELD_STATE_MILES_BOUNDARY_MS ? dayOf(oldest.ms, oldest.lng) : "";
+		for (let chunk = Date.parse(`${fromDay}T00:00:00Z`); isoDay(chunk) <= toDay; chunk += 7 * DAY) {
+			const keepFrom = isoDay(chunk) < fromDay ? fromDay : isoDay(chunk);
+			const keepTo = isoDay(chunk + 6 * DAY) > toDay ? toDay : isoDay(chunk + 6 * DAY);
+			const pings = selectRange.all(t.routemate_vehicle_id, chunk - DAY, chunk + 8 * DAY);
+			if (pings.length >= 2) {
+				const buckets = eldMiles.splitDeltasByDayAndState(pings, { dayOf, stateOf: usStates.stateAt });
+				db.transaction(() => {
+					for (const b of buckets.values()) {
+						if (!b.localDay || b.localDay < keepFrom || b.localDay > keepTo) continue;
+						if (boundaryDay && b.localDay <= boundaryDay) continue;
+						upsert.run({
+							vid: t.routemate_vehicle_id,
+							truck_id: t.id,
+							local_day: b.localDay,
+							state: b.state || usStates.OTHER,
+							miles: b.miles,
+							dropped_miles: b.droppedMiles,
+							samples: b.samples,
+						});
+						rows += 1;
+						truckDays.add(`${t.routemate_vehicle_id}|${b.localDay}`);
+					}
+				})();
+			}
+			await new Promise((resolve) => setImmediate(resolve));
+		}
+	}
+	const days = [...truckDays].map((k) => k.split("|")[1]).sort();
+	return { rows, truckDays: truckDays.size, firstDay: days[0] || "", lastDay: days[days.length - 1] || "" };
+}
+
+async function runEldStateMilesRollup() {
+	if (eldStateMilesRunning) return { skipped: "busy" };
+	eldStateMilesRunning = true;
+	try {
+		const getState = (key) => {
+			const row = db.prepare("SELECT value FROM server_state WHERE key = ?").get(key);
+			if (!row) return null;
+			try { return JSON.parse(row.value); } catch { return {}; }
+		};
+		const setState = (key, value) =>
+			db.prepare("INSERT OR REPLACE INTO server_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)")
+				.run(key, JSON.stringify(value));
+		const nowMs = Date.now();
+		const backfilled = getState(ELD_STATE_MILES_BACKFILL_KEY);
+		const last = getState(ELD_STATE_MILES_LAST_RUN_KEY);
+		let daysBack = ELD_STATE_MILES_MAX_DAYS;
+		if (backfilled && last && Number.isFinite(last.atMs)) {
+			const sinceLast = Math.ceil((nowMs - last.atMs) / 86400000) + 1;
+			daysBack = Math.min(ELD_STATE_MILES_MAX_DAYS, Math.max(3, sinceLast));
+		}
+		const result = await rollupEldStateMilesRange(nowMs - daysBack * 86400000, nowMs + 86400000, nowMs);
+		setState(ELD_STATE_MILES_LAST_RUN_KEY, { at: new Date(nowMs).toISOString(), atMs: nowMs, daysBack, ...result });
+		if (!backfilled) {
+			setState(ELD_STATE_MILES_BACKFILL_KEY, { at: new Date(nowMs).toISOString(), ...result });
+			console.log(`[eld-state-miles] backfill: ${result.truckDays} truck-days, ${result.firstDay}..${result.lastDay}`);
+		}
+		return result;
+	} catch (err) {
+		console.error("[eld-state-miles] rollup failed:", err.message);
+		return { error: err.message };
+	} finally {
+		eldStateMilesRunning = false;
+	}
+}
+
+// Not gated on ROUTEMATE_ENABLED, for the reason given at rollupEldMilesDaily:
+// it reads the shared telemetry table, which Linxup also fills. Staggered after
+// the 6-minute miles rollup. runEldStateMilesRollup() never rejects.
+setTimeout(() => { runEldStateMilesRollup(); }, 9 * 60 * 1000);
+setInterval(() => { runEldStateMilesRollup(); }, 6 * 60 * 60 * 1000);
 
 // --- Phase 5: fault codes (DTC) + DVIR sync ---
 // Routemate's /dtc/{vehicleId} returns {code, status} pairs per vehicle.
@@ -31406,7 +31617,7 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 				// itself so the guard cannot be separated from the write by a later edit.
 				const pu = boundAddressForStorage(coordinates.pickupAddress);
 				const dz = boundAddressForStorage(coordinates.dropoffAddress);
-				db.prepare(`INSERT OR REPLACE INTO load_coordinates (load_id, origin_lat, origin_lng, dest_lat, dest_lng, pickup_address, dropoff_address) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+				upsertLoadCoordsStmt
 					.run(lid, coordinates.originLat || null, coordinates.originLng || null, coordinates.destLat || null, coordinates.destLng || null, pu.value, dz.value);
 			} catch { /* non-critical */ }
 		}
@@ -40671,7 +40882,7 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 						" Check the pickup/drop-off addresses on the load.",
 					);
 				}
-				db.prepare(`INSERT OR REPLACE INTO load_coordinates (load_id, origin_lat, origin_lng, dest_lat, dest_lng, pickup_address, dropoff_address) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+				upsertLoadCoordsStmt
 					.run(
 						loadKey,
 						pickupCoords ? pickupCoords.lat : null,
@@ -44858,12 +45069,6 @@ function getLoadCoordsFull(loadId) {
 	} catch { return null; }
 }
 
-const upsertLoadCoordsStmt = db.prepare(
-	`INSERT OR REPLACE INTO load_coordinates
-	 (load_id, origin_lat, origin_lng, dest_lat, dest_lng, pickup_address, dropoff_address)
-	 VALUES (?, ?, ?, ?, ?, ?, ?)`
-);
-
 // Geofencing is a silent no-op for any load with no coordinates, and
 // load_coordinates is populated only opportunistically — at rate-con ingestion,
 // or when someone opens the load's map. n8n-ingested loads (the majority) get
@@ -47202,6 +47407,194 @@ function haulDrivenEmpty(reason) {
 	};
 }
 
+// The ELD half of GET /api/loads/:loadId/haul, shared with sweepLoadEldMiles()
+// so the modal and the background sweep measure a load the same way and write
+// load_eld_miles through the same guarded upsert.
+//
+// ⚠️ NO GOOGLE CALL MAY LIVE IN HERE. The route's lane half calls getRoute() (a
+// billed Routes request); the sweep runs this for every recent load four times a
+// day. Pinned by scripts/test-load-eld-miles-sweep.js.
+//
+// Synchronous on purpose: no await may separate the stored-row read from the
+// upsert below.
+function measureLoadEldMiles(rawId, { coords, jt, nowMs, truckResolver }) {
+	const loadKey = normLoadKey(rawId);
+	const originLat = coords ? Number(coords.origin_lat) : NaN;
+	const originLng = coords ? Number(coords.origin_lng) : NaN;
+	const destLat = coords ? Number(coords.dest_lat) : NaN;
+	const destLng = coords ? Number(coords.dest_lng) : NaN;
+	const hasOrigin = Number.isFinite(originLat) && Number.isFinite(originLng);
+	const hasDest = Number.isFinite(destLat) && Number.isFinite(destLng);
+	const headers = jt ? (jt.headers || []) : [];
+	const rows = jt ? (jt.data || []) : [];
+	const loadCol = findCol(headers, /load.?id|job.?id/i);
+	const row = loadCol ? rows.find((r) => normLoadKey(r[loadCol]) === loadKey) : null;
+
+	const phases = computeStatusPhases(rawId);
+	const win = haulWindowFromPhases(phases, nowMs);
+
+	// Resolve the truck AT THE TIME OF THE LOAD, not today. win.endMs is the
+	// load's last status change (or now, while it is running), which is inside
+	// the assignment that actually ran it.
+	const truck = haulResolveTruck(row, headers, truckResolver, win.endMs);
+	const truckUnit = truck ? truck.unit : "";
+	const vid = truck ? truck.vid : "";
+
+	let driven;
+	if (!LOAD_HAUL_ELD_ENABLED) {
+		driven = haulDrivenEmpty("disabled");
+	} else if (!hasOrigin || !hasDest) {
+		driven = haulDrivenEmpty("no_coordinates");
+	} else if (!row) {
+		// The load id resolved coordinates but no Job Tracking row — a sheet
+		// that has moved on, or a cache read that failed. Distinct from
+		// "no truck assigned", which is a real operational state a dispatcher
+		// can act on; this one is not about the truck at all.
+		driven = haulDrivenEmpty("load_not_on_sheet");
+	} else if (!truckUnit) {
+		driven = haulDrivenEmpty("no_truck_assigned");
+	} else if (!vid) {
+		driven = haulDrivenEmpty("no_eld_device");
+	} else {
+		const stored = loadEldMilesGetStmt.get(loadKey) || null;
+		// A closed-out load already measured is final. Recomputing could only
+		// make it worse: the pings behind it age out, and the upsert guard
+		// would refuse the truncated result anyway.
+		if (stored && win.terminal && !stored.in_progress) {
+			driven = haulDrivenFromRow(stored);
+		} else {
+			const anchor = win.dispatchMs != null ? Math.min(win.dispatchMs, win.endMs) : win.endMs;
+			const outerFrom = anchor - HAUL_LOOKBACK_MS;
+			const outerTo = win.endMs + HAUL_LOOKAHEAD_MS;
+			let samples = [];
+			try { samples = haulSamplesStmt.all(vid, outerFrom, outerTo); } catch { samples = []; }
+
+			const legOpts = {
+				origin: { lat: originLat, lng: originLng },
+				dest: { lat: destLat, lng: destLng },
+				radiusM: HAUL_REPLAY_RADIUS_M,
+				terminal: win.terminal,
+			};
+			// Two passes, because the deadhead floor depends on a physical
+			// fact the first pass is what discovers: when the truck actually
+			// reached this shipper. Cheap — pure JS over rows already in
+			// memory; the SQL above is the only I/O.
+			const probe = loadHaul.resolveHaulWindow(samples, { ...legOpts, dispatchMs: win.dispatchMs });
+			const otherSpans = haulSameTruckSpans(rows, headers, loadKey, truck.truck_id, truckResolver);
+			const deadheadStart = loadHaul.deadheadFloorMs(otherSpans, probe.pickupArriveMs, win.dispatchMs);
+			const computed = loadHaul.computeHaulMiles(samples, { ...legOpts, dispatchMs: deadheadStart });
+			if (computed.samples > 0) {
+				const overlaps = otherSpans
+					.filter((sp) => loadHaul.windowsOverlap(
+						computed.windowStartMs, computed.windowEndMs, sp.startMs, sp.endMs))
+					.map((sp) => sp.key);
+				driven = { ...computed, overlapLoadIds: overlaps, stored: false };
+				try {
+					loadEldMilesUpsertStmt.run({
+						load_id: loadKey,
+						routemate_vehicle_id: vid,
+						truck_id: truck ? truck.truck_id : 0,
+						loaded_miles: computed.loadedMiles,
+						deadhead_miles: computed.deadheadMiles,
+						total_miles: computed.totalMiles,
+						basis: computed.basis,
+						loaded_basis: computed.loadedBasis,
+						deadhead_basis: computed.deadheadBasis,
+						reason: computed.reason || "",
+						radius_m: computed.radiusM || 0,
+						pickup_arrive_ms: computed.pickupArriveMs || 0,
+						pickup_depart_ms: computed.pickupDepartMs || 0,
+						dest_arrive_ms: computed.destArriveMs || 0,
+						window_start_ms: computed.windowStartMs || 0,
+						window_end_ms: computed.windowEndMs || 0,
+						samples: computed.samples,
+						rejected_deltas: computed.rejectedDeltas,
+						max_gap_ms: computed.maxGapMs,
+						dropped_miles: computed.droppedMiles,
+						overlap_load_ids: overlaps.join(","),
+						in_progress: computed.inProgress ? 1 : 0,
+					});
+				} catch (e) { console.error("load_eld_miles upsert failed:", e.message); }
+			} else if (stored) {
+				// No pings left in the window — the 90-day purge has eaten them.
+				// The stored derivation outlives them; that is why it is stored.
+				driven = haulDrivenFromRow(stored);
+			} else {
+				driven = haulDrivenEmpty(computed.reason || "no_samples");
+			}
+		}
+	}
+
+	return { driven, truckUnit, vid };
+}
+
+// --- Every load's driven miles, measured in the background (2026-10-02) -----
+// load_eld_miles used to be filled only when someone opened a load's haul
+// modal (32 of 345 loads in production), so every other load became
+// unmeasurable once its pings aged past the 90-day purge. This sweep runs
+// measureLoadEldMiles() for every live, closed-out load that has no final row
+// yet and whose window is still inside the retained telemetry. The first run
+// after a deploy is therefore the backfill.
+//
+// Same rules as the modal, by construction (one function). A load with no
+// terminal status in load_status_history (typed straight into the sheet) is
+// skipped, just as the modal treats it as still running.
+//
+// No await separates a load's stored-row check from its upsert; the only await
+// is the yield BETWEEN loads, after which the next load is read fresh.
+const LOAD_ELD_MILES_SWEEP_MAX_AGE_MS = 90 * 86400000; // purgeOldRoutemateTelemetry's cutoff
+let loadEldMilesSweepRunning = false;
+let loadEldMilesSweepLogged = false;
+
+async function sweepLoadEldMiles() {
+	if (!LOAD_HAUL_ELD_ENABLED) return { skipped: "disabled" };
+	if (loadEldMilesSweepRunning) return { skipped: "busy" };
+	loadEldMilesSweepRunning = true;
+	const counts = {};
+	const bump = (k) => { counts[k] = (counts[k] || 0) + 1; };
+	try {
+		const jt = await getJobTrackingCached();
+		const live = liveJobTrackingView(jt);
+		const loadCol = findCol(live.headers, /load.?id|job.?id/i);
+		if (!loadCol) return { skipped: "no_load_column" };
+		const nowMs = Date.now();
+		const truckResolver = buildHaulTruckResolver();
+		const seen = new Set();
+		for (const r of live.data) {
+			const rawId = String(r[loadCol] || "").trim();
+			const key = normLoadKey(rawId);
+			if (!key || seen.has(key)) continue;
+			seen.add(key);
+			const stored = loadEldMilesGetStmt.get(key);
+			if (stored && !stored.in_progress) { bump("already_final"); continue; }
+			const win = haulWindowFromPhases(computeStatusPhases(rawId), nowMs);
+			if (!win.terminal) { bump("not_closed_out"); continue; }
+			if (win.endMs < nowMs - LOAD_ELD_MILES_SWEEP_MAX_AGE_MS) { bump("telemetry_purged"); continue; }
+			const { driven } = measureLoadEldMiles(rawId, {
+				coords: getLoadCoordsFull(rawId), jt, nowMs, truckResolver,
+			});
+			if (driven.stored) bump("kept_stored");
+			else if (driven.loadedMiles != null) bump("measured");
+			else bump(driven.reason || "no_samples");
+			await new Promise((resolve) => setImmediate(resolve));
+		}
+		if (counts.measured || !loadEldMilesSweepLogged) {
+			console.log(`[load-eld-miles] sweep: ${JSON.stringify(counts)}`);
+			loadEldMilesSweepLogged = true;
+		}
+		return counts;
+	} catch (err) {
+		console.error("[load-eld-miles] sweep failed:", err.message);
+		return { error: err.message };
+	} finally {
+		loadEldMilesSweepRunning = false;
+	}
+}
+
+// Staggered after the state-miles rollup (+9 min). sweepLoadEldMiles() never rejects.
+setTimeout(() => { sweepLoadEldMiles(); }, 10 * 60 * 1000);
+setInterval(() => { sweepLoadEldMiles(); }, 6 * 60 * 60 * 1000);
+
 const haulLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
 	// A cache MISS on the lane costs one billed Routes call; every repeat for the
@@ -47244,7 +47637,6 @@ app.get("/api/loads/:loadId/haul", requireAuth, haulLimiter, async (req, res) =>
 			return res.status(403).json({ error: "Forbidden" });
 		}
 
-		const loadKey = normLoadKey(rawId);
 		const coords = getLoadCoordsFull(rawId);
 		const originLat = coords ? Number(coords.origin_lat) : NaN;
 		const originLng = coords ? Number(coords.origin_lng) : NaN;
@@ -47284,109 +47676,11 @@ app.get("/api/loads/:loadId/haul", requireAuth, haulLimiter, async (req, res) =>
 		// modal. Read it; never write it.
 
 		// ── The miles actually driven ───────────────────────────────────────
-		const nowMs = Date.now();
 		let jt = null;
 		try { jt = await getJobTrackingCached(); } catch { /* the lane still renders */ }
-		const headers = jt ? (jt.headers || []) : [];
-		const rows = jt ? (jt.data || []) : [];
-		const loadCol = findCol(headers, /load.?id|job.?id/i);
-		const row = loadCol ? rows.find((r) => normLoadKey(r[loadCol]) === loadKey) : null;
-
-		const phases = computeStatusPhases(rawId);
-		const win = haulWindowFromPhases(phases, nowMs);
-
-		// Resolve the truck AT THE TIME OF THE LOAD, not today. win.endMs is the
-		// load's last status change (or now, while it is running), which is inside
-		// the assignment that actually ran it.
-		const truckResolver = buildHaulTruckResolver();
-		const truck = haulResolveTruck(row, headers, truckResolver, win.endMs);
-		const truckUnit = truck ? truck.unit : "";
-		const vid = truck ? truck.vid : "";
-
-		let driven;
-		if (!LOAD_HAUL_ELD_ENABLED) {
-			driven = haulDrivenEmpty("disabled");
-		} else if (!hasOrigin || !hasDest) {
-			driven = haulDrivenEmpty("no_coordinates");
-		} else if (!row) {
-			// The load id resolved coordinates but no Job Tracking row — a sheet
-			// that has moved on, or a cache read that failed. Distinct from
-			// "no truck assigned", which is a real operational state a dispatcher
-			// can act on; this one is not about the truck at all.
-			driven = haulDrivenEmpty("load_not_on_sheet");
-		} else if (!truckUnit) {
-			driven = haulDrivenEmpty("no_truck_assigned");
-		} else if (!vid) {
-			driven = haulDrivenEmpty("no_eld_device");
-		} else {
-			const stored = loadEldMilesGetStmt.get(loadKey) || null;
-			// A closed-out load already measured is final. Recomputing could only
-			// make it worse: the pings behind it age out, and the upsert guard
-			// would refuse the truncated result anyway.
-			if (stored && win.terminal && !stored.in_progress) {
-				driven = haulDrivenFromRow(stored);
-			} else {
-				const anchor = win.dispatchMs != null ? Math.min(win.dispatchMs, win.endMs) : win.endMs;
-				const outerFrom = anchor - HAUL_LOOKBACK_MS;
-				const outerTo = win.endMs + HAUL_LOOKAHEAD_MS;
-				let samples = [];
-				try { samples = haulSamplesStmt.all(vid, outerFrom, outerTo); } catch { samples = []; }
-
-				const legOpts = {
-					origin: { lat: originLat, lng: originLng },
-					dest: { lat: destLat, lng: destLng },
-					radiusM: HAUL_REPLAY_RADIUS_M,
-					terminal: win.terminal,
-				};
-				// Two passes, because the deadhead floor depends on a physical
-				// fact the first pass is what discovers: when the truck actually
-				// reached this shipper. Cheap — pure JS over rows already in
-				// memory; the SQL above is the only I/O.
-				const probe = loadHaul.resolveHaulWindow(samples, { ...legOpts, dispatchMs: win.dispatchMs });
-				const otherSpans = haulSameTruckSpans(rows, headers, loadKey, truck.truck_id, truckResolver);
-				const deadheadStart = loadHaul.deadheadFloorMs(otherSpans, probe.pickupArriveMs, win.dispatchMs);
-				const computed = loadHaul.computeHaulMiles(samples, { ...legOpts, dispatchMs: deadheadStart });
-				if (computed.samples > 0) {
-					const overlaps = otherSpans
-						.filter((sp) => loadHaul.windowsOverlap(
-							computed.windowStartMs, computed.windowEndMs, sp.startMs, sp.endMs))
-						.map((sp) => sp.key);
-					driven = { ...computed, overlapLoadIds: overlaps, stored: false };
-					try {
-						loadEldMilesUpsertStmt.run({
-							load_id: loadKey,
-							routemate_vehicle_id: vid,
-							truck_id: truck ? truck.truck_id : 0,
-							loaded_miles: computed.loadedMiles,
-							deadhead_miles: computed.deadheadMiles,
-							total_miles: computed.totalMiles,
-							basis: computed.basis,
-							loaded_basis: computed.loadedBasis,
-							deadhead_basis: computed.deadheadBasis,
-							reason: computed.reason || "",
-							radius_m: computed.radiusM || 0,
-							pickup_arrive_ms: computed.pickupArriveMs || 0,
-							pickup_depart_ms: computed.pickupDepartMs || 0,
-							dest_arrive_ms: computed.destArriveMs || 0,
-							window_start_ms: computed.windowStartMs || 0,
-							window_end_ms: computed.windowEndMs || 0,
-							samples: computed.samples,
-							rejected_deltas: computed.rejectedDeltas,
-							max_gap_ms: computed.maxGapMs,
-							dropped_miles: computed.droppedMiles,
-							overlap_load_ids: overlaps.join(","),
-							in_progress: computed.inProgress ? 1 : 0,
-						});
-					} catch (e) { console.error("load_eld_miles upsert failed:", e.message); }
-				} else if (stored) {
-					// No pings left in the window — the 90-day purge has eaten them.
-					// The stored derivation outlives them; that is why it is stored.
-					driven = haulDrivenFromRow(stored);
-				} else {
-					driven = haulDrivenEmpty(computed.reason || "no_samples");
-				}
-			}
-		}
+		const { driven, truckUnit, vid } = measureLoadEldMiles(rawId, {
+			coords, jt, nowMs: Date.now(), truckResolver: buildHaulTruckResolver(),
+		});
 
 		res.json({
 			loadId: rawId,
@@ -49085,7 +49379,7 @@ app.get("/api/geocode/load/:loadId", requireAuth, async (req, res) => {
 								pickupAddr ? geocodeAddress(pickupAddr) : Promise.resolve(null),
 								dropoffAddr ? geocodeAddress(dropoffAddr) : Promise.resolve(null),
 							]);
-							db.prepare(`INSERT OR REPLACE INTO load_coordinates (load_id, origin_lat, origin_lng, dest_lat, dest_lng, pickup_address, dropoff_address) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+							upsertLoadCoordsStmt
 								.run(
 									loadId,
 									origin ? origin.lat : (row && row.origin_lat) || null,
@@ -58144,10 +58438,11 @@ server.listen(PORT, BIND_HOST, async () => {
 				if (geocoded) console.log(`Auto-geocoded ${geocoded} addresses on startup`);
 
 				// Populate load_coordinates from sheet + geocode_cache
-				const existingCoords = db.prepare("SELECT COUNT(*) AS c FROM load_coordinates").get().c;
 				const lidIdx2 = hdr.findIndex(h => /load.?id|job.?id/i.test(h));
 				if (lidIdx2 !== -1) {
-					const ins = db.prepare(`INSERT OR REPLACE INTO load_coordinates (load_id, origin_lat, origin_lng, dest_lat, dest_lng, pickup_address, dropoff_address) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+					// upsertLoadCoordsStmt, never REPLACE: this runs on every boot, and a
+					// REPLACE here is what wiped distance_miles on every deploy.
+					const ins = upsertLoadCoordsStmt;
 					let coordCount = 0;
 					// Iterate bottom-up to get the most recent row per load ID
 					const seenLids = new Set();
