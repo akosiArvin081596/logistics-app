@@ -2007,10 +2007,10 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
   // BEFORE the table is broken, so the controls are 137-138 and the refusals are
   // 139-142 rather than being grouped per route.
   const lockFaultNames = [
-    "137. Settle and adjust are ALLOWED while period_locks is readable (positive control)",
+    "137. Settle is ALLOWED and adjust refused as closed (409 PERIOD_FINALIZED) while period_locks is readable (positive control)",
     "138. Statement gets PAST the lock guard while period_locks is readable (positive control)",
     "139. Settle is REFUSED when period_locks cannot be read (409 PERIOD_NOT_FINALIZED)",
-    "140. Adjust is REFUSED when period_locks cannot be read (409 PERIOD_NOT_FINALIZED)",
+    "140. Adjust is REFUSED when period_locks cannot be read (409 PERIOD_LOCK_UNREADABLE)",
     "141. Statement is REFUSED when period_locks cannot be read (409 PERIOD_NOT_FINALIZED)",
     "142. A PAID period still issues its statement when period_locks cannot be read",
   ];
@@ -2159,7 +2159,9 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
       const ALL_PERIODS = [CONTROL_PERIOD, FAULT_PERIOD, STMT_CONTROL_PERIOD, STMT_FAULT_PERIOD, STMT_PAID_PERIOD];
       const insLock = sdb.prepare("INSERT OR REPLACE INTO period_locks (period, status, finalized_at, finalized_by) VALUES (?, 'locked', ?, 'test-suite')");
       const insPayout = sdb.prepare("INSERT INTO investor_payouts (owner_id, period, amount, due_date, status) VALUES (?, ?, 1000, ?, 'owed')");
-      ALL_PERIODS.forEach(p => insLock.run(p, stamp));
+      // The rows are written first and the months locked last: the closed-month
+      // triggers refuse any row, adjustment or status-paid stamp written into a
+      // month that is already locked (installPeriodLockTriggers()).
       const controlId = insPayout.run(ownerId, CONTROL_PERIOD, CONTROL_PERIOD + "-15").lastInsertRowid;
       const faultId = insPayout.run(ownerId, FAULT_PERIOD, FAULT_PERIOD + "-15").lastInsertRowid;
 
@@ -2179,16 +2181,19 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
       [stmtControlId, stmtFaultId, stmtPaidId].forEach(id => zeroOut.run(id));
       sdb.prepare("UPDATE investor_payouts SET status = 'paid', paid_at = ?, paid_by = 'test-suite' WHERE id = ?")
         .run(stamp, stmtPaidId);
+      ALL_PERIODS.forEach(p => insLock.run(p, stamp));
 
       // 137. POSITIVE CONTROL, and it is not decoration: without it, tests 138
       //      and 139 would still pass on a server where the flag was off, the
       //      seed had failed, or every payout write 409s for some unrelated
-      //      reason. This pins "these rows are settleable and adjustable right
-      //      now" before anything is broken.
+      //      reason. This pins "these rows are settleable right now, and their
+      //      closed month refuses an adjustment for being closed (not for an
+      //      unreadable table)" before anything is broken.
       const cAdj = await req("PUT", `/api/investor/payouts/${controlId}/adjust`,
-        { adjustment: -1, adjustmentNote: "test-suite: control, must be accepted" }, sc, scratchPort);
+        { adjustment: -1, adjustmentNote: "test-suite: control, must be refused as closed" }, sc, scratchPort);
       const cSet = await req("POST", `/api/investor/payouts/${controlId}/status`, { status: "paid" }, sc, scratchPort);
-      test(lockFaultNames[0], cAdj.status === 200 && cSet.status === 200);
+      test(lockFaultNames[0], cAdj.status === 409 && cAdj.body?.code === "PERIOD_FINALIZED"
+        && !cAdj.body?.periodLockUnreadable && cSet.status === 200);
 
       // 138. The statement route's own positive control. Same period shape as the
       //      one the fault is aimed at — past, LOCKED, unpaid — so the lock guard
@@ -2230,14 +2235,14 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
         && afterSet.status === "owed"
         && !afterSet.paid_at);
 
-      // 140. Same for the adjust guard, which fails closed by the same double
-      //      negative and would invert with the same refactor.
+      // 140. Same for the adjust guard, which fails closed through
+      //      periodWriteLocked() and says so under its own code.
       const fAdj = await req("PUT", `/api/investor/payouts/${faultId}/adjust`,
         { adjustment: -500, adjustmentNote: "test-suite: must be rejected" }, sc, scratchPort);
       const afterAdj = sdb.prepare("SELECT adjustment FROM investor_payouts WHERE id = ?").get(faultId);
       test(lockFaultNames[3],
         fAdj.status === 409
-        && fAdj.body?.code === "PERIOD_NOT_FINALIZED"
+        && fAdj.body?.code === "PERIOD_LOCK_UNREADABLE"
         && fAdj.body?.periodLockUnreadable === true
         && Number(afterAdj.adjustment) === 0);
 

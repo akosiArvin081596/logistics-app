@@ -666,7 +666,7 @@
         </div>
 
         <div class="adj-facts">
-          <div class="adj-fact"><span>Settled amount</span><span class="mono">{{ fmt(adjustTarget.payout.amount) }}</span></div>
+          <div class="adj-fact"><span>Current amount</span><span class="mono">{{ fmt(adjustTarget.payout.amount) }}</span></div>
           <div v-if="hasGap" class="adj-fact gap">
             <span>Recomputed now</span>
             <span class="mono">{{ fmt(adjustTarget.payout.recomputedAmount) }} <em>(gap {{ gapDelta > 0 ? '+' : '−' }}{{ fmt(Math.abs(gapDelta)) }})</em></span>
@@ -678,11 +678,16 @@
           <button type="button" class="adj-suggest" @click="applySuggestion">Use {{ gapDelta > 0 ? '+' : '−' }}{{ fmt(Math.abs(gapDelta)) }}</button>
         </p>
 
+        <p class="adj-hint">
+          This month is still open: its amount follows its loads and receipts until it closes, and the
+          adjustment stays as entered. A correction to a month that has already closed is posted here.
+        </p>
+
         <label class="adj-label">Adjustment (+ credits investor, − claws back)</label>
         <input v-model="adjustAmount" type="number" step="0.01" class="adj-input" placeholder="0.00" />
 
         <label class="adj-label">Reason (shown to the investor)</label>
-        <textarea v-model="adjustNote" class="adj-textarea" rows="2" maxlength="500" placeholder="e.g. Late June fuel receipts uploaded after settlement"></textarea>
+        <textarea v-model="adjustNote" class="adj-textarea" rows="2" maxlength="500" placeholder="e.g. June fuel receipt found after June closed"></textarea>
 
         <div class="adj-preview">
           New effective payout: <strong class="mono" :class="{ 'adj-over': overDeducted }">{{ fmt(previewEffective) }}</strong>
@@ -1123,7 +1128,7 @@ async function saveReopen() {
   }
 }
 
-// --- Settlement adjustments (e.g. receipts uploaded after a month settled) ---
+// --- Adjustments on an open month (e.g. a correction to a month that has closed) ---
 const adjustTarget = ref(null)   // { investorName, payout }
 const adjustAmount = ref('')
 const adjustNote = ref('')

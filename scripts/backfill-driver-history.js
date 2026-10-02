@@ -94,6 +94,7 @@ for (const a of assignments) {
 		skipped++;
 		continue;
 	}
+	// A pairing with no readable start covers open months too, so it is written.
 	const covered = monthsCovered(started, ended);
 	if (covered && covered.length && covered.every((mk) => lockedMonths.has(mk))) {
 		console.log(`[SKIP] ${JSON.stringify(carrier)} <- ${JSON.stringify(driver)} (${started}..${ended}) lies entirely in closed months; they stay as settled`);

@@ -364,16 +364,20 @@ check("CANCEL_REASON_REQUIRED survives untouched", CANCEL.includes("CANCEL_REASO
 
 // ⚠️ #211's carve-out. Cancelling a load a broker called off is ordinary business
 // in any month, and a guard that refuses ordinary work gets switched off — then it
-// protects nothing. The one period check cancel carries is narrower: a COMPLETED
-// load in a closed month (its figures are settled). No broad period guard, and
-// the one check sits behind the completed-status test.
-check("no broad period guard in cancel (#211's deliberate carve-out)",
-	/dispatchWriteBlocker|statusOverrideBlocker|sendPeriodRefusal|sendDispatchRefusal|isLocked\(/.test(CANCEL_CODE), false);
+// protects nothing. The route carries no period guard of its own; its one period
+// check is completedLoadCancelRefusal() (a COMPLETED load in a closed month),
+// whose first act is to let every non-completed load through.
+check("no period guard of its own in cancel (#211's deliberate carve-out)",
+	/dispatchWriteBlocker|statusOverrideBlocker|periodLocksReadable|periodWriteLocked|loadRowAccountingMonths|sendPeriodRefusal|sendDispatchRefusal|isLocked\(/.test(CANCEL_CODE), false);
+check("cancel's one period check is completedLoadCancelRefusal(), called once before the first sheet write",
+	CANCEL_CODE.split("completedLoadCancelRefusal(headers, snapshot.row, statusColIdx)").length === 2
+		&& CANCEL_CODE.indexOf("completedLoadCancelRefusal(") < CANCEL_CODE.indexOf("spreadsheets.values.update"), true);
 {
-	const completedTest = CANCEL_CODE.indexOf("/^(delivered|completed|pod received)$/i.test(boundStatus)");
-	const lockRead = CANCEL_CODE.indexOf("periodLocksReadable()");
-	check("cancel's only period check is behind the completed-status test",
-		completedTest > -1 && lockRead > completedTest && CANCEL_CODE.split("periodLocksReadable()").length === 2, true);
+	const at = SRC.indexOf("\nfunction completedLoadCancelRefusal(");
+	const fn = SRC.slice(at, SRC.indexOf("\n}\n", at));
+	check("completedLoadCancelRefusal() returns before any period read for a load that is not completed",
+		/if \(!\/\^\(delivered\|completed\|pod received\)\$\/i\.test\(status\)\) return null;/.test(fn)
+			&& fn.indexOf("return null;") < fn.indexOf("periodLocksReadable()"), true);
 }
 
 // All five caller-supplied row indexes in the family now answer identically.

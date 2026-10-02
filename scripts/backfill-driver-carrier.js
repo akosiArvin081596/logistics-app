@@ -9,9 +9,10 @@
  * script seeds the carrier_name only when currently empty — never overwrites.
  *
  * carrier_name has no date, so this changes which investor a blank-Owner-ID
- * load is attributed to in OPEN months only: a closed month gains no payout row
- * from it (the reconcile records the item for review instead). The script
- * refuses to write anything if period_locks cannot be read.
+ * load is attributed to. Payouts move in open months only: a closed month's
+ * payout rows stay as settled and it gains no row (the reconcile records the
+ * item for review instead). The script refuses to write anything if
+ * period_locks cannot be read.
  *
  * Usage:   node scripts/backfill-driver-carrier.js
  *   --dry  Print the SQL that would run, change nothing

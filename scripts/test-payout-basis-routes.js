@@ -298,6 +298,10 @@ function ledgerWorld(srv, { reconcile = (s) => s, fixture = LEDGER_FIXTURE } = {
 		isPlausibleLockPeriod: (p) => investorPayoutBasis.isMonthKey(p),
 		getJobTrackingCached: async () => ({}), getCarrierDBFromSQLite: () => LEDGER_CTX.carrierDB,
 		listSettlableInvestors: () => [],
+		// The close's own mechanics (the fingerprint, an unreadable lock table) are
+		// test-closed-month-no-write.js's; here the lock table always reads.
+		periodLocksReadable: () => true, closingFingerprint: () => "",
+		insertDispatchNotification: { run() {} },
 		console: { warn() {}, log() {}, error() {} },
 	};
 	const fns = new Function(...Object.keys(deps), `"use strict";\n${src}\nreturn { reconcileInvestorPayouts, finalizePeriods };`)(...Object.values(deps));

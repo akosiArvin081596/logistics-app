@@ -22,6 +22,14 @@
  * (409 PERIOD_FINALIZED, audited) and names the open month to post it on; an
  * adjustment on that open month goes through.
  *
+ * The close itself, on a second database: it creates and stamps the row of an
+ * investor nobody reconciled before it; a failed compute locks nothing; an
+ * already-closed month in the batch is skipped; a receipt that lands while the
+ * figures are being computed makes it close nothing (the next pass closes it,
+ * receipt included); a correction larger than the month finally pays is reported
+ * at close; a late item notifies once. And the cancel check: a completed load in
+ * a closed month is refused, an open one or a load not yet completed is not.
+ *
  * The shipped code runs, lifted out of server.js: reconcileInvestorPayouts(),
  * computeInvestorMonthlyEarnings(), getInvestorDriverSet(), assignDriverToTruck()
  * (with syncOpenCarrierPairing()), finalizePeriods(), the reopen route,
@@ -93,7 +101,7 @@ const alters = (table) => SRC.match(new RegExp(`ALTER TABLE ${table} ADD COLUMN 
 const CONSTS = ["EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS", "PERIOD_FINALIZE_ENABLED",
 	"INVESTOR_LEASE_PAYOUTS_ENABLED", "INVESTOR_LEASE_SETTINGS", "LEASE_SNAPSHOT_WARNED", "LOCKABLE_MONTH_KEY",
 	"LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR", "insertPayoutHistory"];
-const LETS = ["lastPayStructShadowWarnMs"];
+const LETS = ["lastPayStructShadowWarnMs", "_jtEpoch"];
 const FNS = [
 	// Under test.
 	"reconcileInvestorPayouts", "computeInvestorMonthlyEarnings", "getInvestorDriverSet", "assignDriverToTruck",
@@ -110,6 +118,7 @@ const FNS = [
 	"periodLocksReadable", "periodWriteLocked", "todayKeyCT", "currentMonthKeyCT", "settlementGraceDays",
 	"graceEndsAt", "periodPhase", "isPlausibleLockPeriod", "getCarrierDBFromSQLite", "recordPayoutChange",
 	"noteLateItemInClosedMonth", "logAudit", "listSettlableInvestors", "installPeriodLockTriggers",
+	"closingFingerprint", "completedLoadCancelRefusal", "loadRowAccountingMonths", "sheetCellMonths", "sheetCellDate",
 ];
 const REOPEN_HEAD = 'app.post("/api/periods/:period/reopen", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {';
 const ADJUST_HEAD = 'app.put("/api/investor/payouts/:id/adjust", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {';
@@ -119,7 +128,7 @@ const BODY = [
 	...FNS.map(liftFn),
 	liftRoute(REOPEN_HEAD),
 	liftRoute(ADJUST_HEAD),
-	"return { reconcileInvestorPayouts, getInvestorDriverSet, assignDriverToTruck, finalizePeriods, getCarrierDBFromSQLite, installPeriodLockTriggers };",
+	"return { reconcileInvestorPayouts, getInvestorDriverSet, assignDriverToTruck, finalizePeriods, getCarrierDBFromSQLite, installPeriodLockTriggers, completedLoadCancelRefusal };",
 ].join("\n");
 
 const DDL = [
@@ -174,7 +183,7 @@ const SHEET = [
 	load("7105", E, "7/13/2026", "7/14/2026 8:00", "7/15/2026 10:00", "$6,000.00", "T5", "5"),
 ];
 
-function buildWorld() {
+function buildWorld({ onSheetRead = null } = {}) {
 	const db = new Database(":memory:");
 	for (const sql of DDL) {
 		try { db.exec(sql); } catch (e) { if (!/duplicate column name/.test(e.message)) die(`DDL failed: ${e.message}\n${sql.slice(0, 120)}`); }
@@ -183,6 +192,7 @@ function buildWorld() {
 	const errors = [];
 	const routes = {};
 	const refusals = [];
+	const notices = [];
 	const deps = {
 		db, investorPayoutBasis, normalizeLoadId, Date: Clock,
 		app: {
@@ -192,9 +202,13 @@ function buildWorld() {
 		logAuditRefusal: (req, action, entity, entityId, details, code) => refusals.push({ action, entityId: String(entityId), code }),
 		requireRole: () => (req, res, next) => next && next(),
 		refuseCrossOrigin: (req, res, next) => next && next(),
-		getJobTrackingCached: async () => ({ headers: [...HEADERS], data: SHEET.map((r, i) => ({ _rowIndex: i + 2, ...r })) }),
+		getJobTrackingCached: async () => {
+			if (onSheetRead) onSheetRead(db);
+			return { headers: [...HEADERS], data: SHEET.map((r, i) => ({ _rowIndex: i + 2, ...r })) };
+		},
 		getEldTravelDaysByVehicleCached: () => Object.create(null),
 		resolveCityState: () => "",
+		insertDispatchNotification: { run: (type, title, body) => notices.push({ type, title, body }) },
 		process: { env: {} },
 		console: { log() {}, warn: (m) => warnings.push(String(m)), error: (...a) => errors.push(a.map(String).join(" ")) },
 	};
@@ -209,7 +223,7 @@ function buildWorld() {
 		await routes[route](req, res);
 		return out;
 	}
-	return { db, api, warnings, errors, call, refusals };
+	return { db, api, warnings, errors, call, refusals, notices };
 }
 
 const SUPER = { id: 1, username: "super_admin", role: "Super Admin" };
@@ -217,7 +231,7 @@ const LOCKED = ["2026-01", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06"
 const ROW_COLS = "period, amount, status, finalized_at, finalized_amount, finalized_breakdown";
 
 (async () => {
-	const { db, api, warnings, errors, call, refusals } = buildWorld();
+	const { db, api, warnings, errors, call, refusals, notices } = buildWorld();
 	const rows = () => db.prepare(`SELECT ${ROW_COLS} FROM investor_payouts WHERE owner_id = 5 ORDER BY period`).all();
 	const ctx = () => ({ sessionUser: SUPER, carrierDB: api.getCarrierDBFromSQLite(), globalConfig: { investor_split_pct: "50" } });
 	const ownerSet = () => {
@@ -288,6 +302,8 @@ const ROW_COLS = "period, amount, status, finalized_at, finalized_amount, finali
 		`got ${JSON.stringify(late)}`);
 	await api.reconcileInvestorPayouts(5, ctx());
 	check(lateRows().length === 1, "a second reconcile records nothing new", `got ${lateRows().length} rows`);
+	check(notices.filter((n) => /activity found after it closed/.test(n.title)).length === 1,
+		"…and the finding is sent once as a month-close notice", JSON.stringify(notices.map((n) => n.title)));
 
 	// ── the triggers: nothing writes a figure into a locked month ────────────
 	const refused = (fn) => { try { fn(); return ""; } catch (e) { return e.message; } };
@@ -356,6 +372,88 @@ const ROW_COLS = "period, amount, status, finalized_at, finalized_amount, finali
 	const openAdj = await adjust(aug.id, 100);
 	check(openAdj.status === 200 && Number(rowOf("2026-08").adjustment) === 100,
 		"a correction posted on open August goes through (a $100 credit)", `got ${openAdj.status} ${JSON.stringify(openAdj.body)}, row ${JSON.stringify(rowOf("2026-08"))}`);
+
+	// ── the close itself, on a second database ──────────────────────────────
+	{
+		let sheetHook = null;
+		const B = buildWorld({ onSheetRead: (bdb) => { if (sheetHook) { const h = sheetHook; sheetHook = null; h(bdb); } } });
+		const user = B.db.prepare("INSERT INTO users (id, username, password_hash, role, company_name) VALUES (?, ?, 'x', ?, ?)");
+		user.run(1, "super_admin", "Super Admin", "");
+		user.run(5, "inv5", "Investor", "Acme Carrier");
+		user.run(6, "inv6", "Investor", "Beta Haul");
+		B.db.prepare("INSERT INTO investor_config (owner_id, key, value) VALUES (0, 'investor_split_pct', '50')").run();
+		const truck = B.db.prepare(`INSERT INTO trucks (id, unit_number, owner_id, status, in_service_date, created_at, insurance_monthly,
+			eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, driver_pay_daily) VALUES (?, ?, ?, 'Active', ?, ?, ?, ?, ?, ?, ?, 250)`);
+		truck.run(1, "T5", 5, "2026-03-01", "2026-03-01 00:00:00", 1000, 50, 1500, 600, 1200);
+		truck.run(3, "T6", 6, "2026-03-01", "2026-03-01 00:00:00", 500, 0, 0, 0, 0);
+		const dirB = B.db.prepare("INSERT INTO drivers_directory (driver_name, carrier_name, pay_type, pay_daily) VALUES (?, ?, 'fixed', 0)");
+		dirB.run(E, "Acme Carrier");
+		dirB.run("Fay Fox", "Beta Haul");
+		setClock("2026-03-01T17:00:00Z");
+		B.api.assignDriverToTruck(1, E);
+		B.api.assignDriverToTruck(3, "Fay Fox");
+		SHEET.push(load("7301", "Fay Fox", "4/6/2026", "4/7/2026 8:00", "4/8/2026 10:00", "$3,000.00", "T6", "6"));
+		const rowB = (owner, period) => B.db.prepare("SELECT amount, adjustment, finalized_at, finalized_amount FROM investor_payouts WHERE owner_id = ? AND period = ?").get(owner, period);
+		const lockB = (period) => B.db.prepare("SELECT status, finalized_at FROM period_locks WHERE period = ?").get(period);
+		setClock("2026-09-10T17:00:00Z");
+
+		// A failed compute locks nothing.
+		sheetHook = () => { throw new Error("Sheets unavailable"); };
+		let threw = "";
+		try { await B.api.finalizePeriods(["2026-03"], "system"); } catch (e) { threw = e.message; }
+		check(/Sheets unavailable/.test(threw) && !lockB("2026-03") && !rowB(5, "2026-03"),
+			"close: a compute that fails locks nothing and stamps nothing", `threw ${JSON.stringify(threw)}, lock ${JSON.stringify(lockB("2026-03"))}`);
+
+		// An investor nobody reconciled before the close gets a row, stamped.
+		check(!rowB(6, "2026-04"), "setup: owner 6 has no April row before the close", JSON.stringify(rowB(6, "2026-04")));
+		const r34 = await B.api.finalizePeriods(["2026-03", "2026-04"], "system");
+		const six = rowB(6, "2026-04");
+		check(JSON.stringify(r34.periods) === JSON.stringify(["2026-03", "2026-04"]) && six && !!six.finalized_at && Math.round(six.finalized_amount * 100) === Math.round(six.amount * 100) && six.amount > 0,
+			"close: an investor never reconciled before it gets their row created and stamped (owner 6, April)", `result ${JSON.stringify(r34)}, row ${JSON.stringify(six)}`);
+
+		// A month already closed in the batch is skipped; the others close.
+		const marchLock = lockB("2026-03");
+		const r45 = await B.api.finalizePeriods(["2026-03", "2026-05"], "system");
+		check(JSON.stringify(r45.periods) === JSON.stringify(["2026-05"]) && JSON.stringify(lockB("2026-03")) === JSON.stringify(marchLock),
+			"close: a month already closed in the batch is skipped, untouched; the rest close", `result ${JSON.stringify(r45)}, march ${JSON.stringify(lockB("2026-03"))}`);
+
+		// A receipt that lands while the figures are computed: nothing closes; the
+		// next pass closes the month with the receipt in it.
+		const juneBefore = (await B.api.reconcileInvestorPayouts(5, { sessionUser: SUPER, carrierDB: B.api.getCarrierDBFromSQLite(), globalConfig: { investor_split_pct: "50" } }))
+			.payouts.find((p) => p.period === "2026-06").amount;
+		sheetHook = (bdb) => bdb.prepare("INSERT INTO expenses (timestamp, driver, type, amount, date, status, owner_id, truck_unit) VALUES ('2026-09-10T17:00:00.000Z', ?, 'Repair', 400, '2026-06-20', 'Approved', 5, 'T5')").run(E);
+		const raced = await B.api.finalizePeriods(["2026-06"], "system");
+		check(raced.retry === true && raced.periods.length === 0 && !lockB("2026-06") && !rowB(5, "2026-06").finalized_at,
+			"close: a receipt landing while the figures are computed makes it close nothing (retry)", `result ${JSON.stringify(raced)}, lock ${JSON.stringify(lockB("2026-06"))}`);
+		await B.api.finalizePeriods(["2026-06"], "system");
+		const june = rowB(5, "2026-06");
+		check(lockB("2026-06") && lockB("2026-06").status === "locked" && Math.round(june.finalized_amount * 100) === Math.round((juneBefore - 200) * 100),
+			"close: the next pass closes it with the receipt counted ($400 receipt, $200 less at 50%)", `before ${juneBefore}, row ${JSON.stringify(june)}`);
+
+		// A correction bigger than the month finally pays is reported at close.
+		const julyId = B.db.prepare("SELECT id, amount FROM investor_payouts WHERE owner_id = 5 AND period = '2026-07'").get();
+		B.db.prepare("UPDATE investor_payouts SET adjustment = ? WHERE id = ?").run(-Math.round(julyId.amount), julyId.id);
+		B.db.prepare("INSERT INTO expenses (timestamp, driver, type, amount, date, status, owner_id, truck_unit) VALUES ('2026-09-10T17:00:00.000Z', ?, 'Repair', 1000, '2026-07-20', 'Approved', 5, 'T5')").run(E);
+		await B.api.finalizePeriods(["2026-07"], "system");
+		const unapplied = B.db.prepare("SELECT entity_id, details FROM audit_trail WHERE action = 'payout_adjustment_unapplied'").all();
+		check(unapplied.length === 1 && unapplied[0].entity_id === "5:2026-07" && B.notices.some((n) => /part of a correction was not applied/.test(n.title)),
+			"close: an adjustment larger than the month finally pays is reported (audit row and notice), nothing changed",
+			`audit ${JSON.stringify(unapplied)}, notices ${JSON.stringify(B.notices.map((n) => n.title))}`);
+
+		// The cancel check.
+		const rowArr = (o) => HEADERS.map((h) => o[h]);
+		const idx = HEADERS.indexOf("Job Status");
+		const may = load("7401", E, "5/11/2026", "5/12/2026 8:00", "5/13/2026 10:00", "$1.00", "T5", "5");
+		const aug = load("7402", E, "8/11/2026", "8/12/2026 8:00", "8/13/2026 10:00", "$1.00", "T5", "5");
+		const transit = { ...may, "Job Status": "In Transit" };
+		const undated = { ...may, "Assigned Date": "", "Pickup Appointment": "", "Drop-off Appointment": "" };
+		const refusal = (o) => { const x = B.api.completedLoadCancelRefusal([...HEADERS], rowArr(o), idx); return x ? x.code : null; };
+		check(refusal(may) === "PERIOD_FINALIZED", "cancel: a completed load in closed May is refused (PERIOD_FINALIZED)", String(refusal(may)));
+		check(refusal(aug) === null, "cancel: a completed load in open August goes ahead", String(refusal(aug)));
+		check(refusal(transit) === null, "cancel: a load not yet completed goes ahead in closed May (#211)", String(refusal(transit)));
+		check(refusal(undated) === "PERIOD_UNRESOLVED", "cancel: a completed load with no readable date is refused (PERIOD_UNRESOLVED)", String(refusal(undated)));
+		check(B.errors.length === 0, "the second database's lifted code logged no error", B.errors.join(" | "));
+	}
 
 	check(errors.length === 0, "the lifted code logged no error", errors.join(" | "));
 
