@@ -361,6 +361,7 @@ function mountUsersPut(db, { routeSrc = ROUTES.usersPut, moduleSrc = {}, realLoc
 		purgeUserSessions: () => 0,
 		logAudit: (req, action, entity, entityId, details) => log.audits.push({ action, details }),
 		notifyChange: () => {},
+		recordPayRateChanges: () => {},
 		refreshOwnSession: () => true,
 		normalizeDriverName: m.normalizeDriverName,
 		findDriverNameClash: m.findDriverNameClash,
@@ -418,6 +419,7 @@ function mountDirectoryPut(db, { routeSrc = ROUTES.dirPut, moduleSrc = {} } = {}
 		syncCarrierDriverHistory: (rows) => log.history.push(rows),
 		logAudit: () => {},
 		notifyChange: () => {},
+		recordPayRateChanges: () => {},
 		normalizeDriverName: m.normalizeDriverName,
 		isBuiltInPropertyName: m.isBuiltInPropertyName,
 		findDriverNameClash: m.findDriverNameClash,
@@ -464,6 +466,7 @@ function mountTrucks(db, { putSrc = ROUTES.truckPut, postSrc = ROUTES.truckPost,
 		// The success lines name the truck through it.
 		auditText: m.auditText,
 		notifyChange: () => {},
+		recordPayRateChanges: () => {},
 		canonicalDriverName: m.canonicalDriverName,
 		normalizeDriverName: m.normalizeDriverName,
 		reservedDriverNameRefusal: m.reservedDriverNameRefusal,
@@ -1222,6 +1225,7 @@ function mountUsersDelete(db, { moduleSrc = {} } = {}) {
 		findTruckForDriverAccount: m.findTruckForDriverAccount,
 		normalizeDriverName: m.normalizeDriverName,
 		notifyChange: () => {},
+		recordPayRateChanges: () => {},
 	});
 	return { del: (id) => quiet(() => call({ params: { id: String(id) } })) };
 }

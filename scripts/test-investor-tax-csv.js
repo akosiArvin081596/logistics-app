@@ -450,8 +450,10 @@ function agreement(sources) {
 		for (const ownerId of [5, 41]) {
 			const helper = investorJobRowTest(headers, ownerId, SETS[ownerId]);
 			for (const copy of PORTAL_COPIES) {
-				const test = new Function("ownerIdCol", "driverCol", "investorOwnerId", "investorDriverSet", "driverNameForTotals",
-					`return (${copy.body});`)(findCol(headers, regexOf(copy.ownerRe)), findCol(headers, regexOf(copy.driverRe)), ownerId, SETS[ownerId], driverNameForTotals);
+				// ownerOfBlankRow is the ledger's datedAttribution payout rule; off here,
+				// as it ships, so the ledger copy decides a blank Owner ID by the driver set.
+				const test = new Function("ownerIdCol", "driverCol", "investorOwnerId", "investorDriverSet", "driverNameForTotals", "ownerOfBlankRow",
+					`return (${copy.body});`)(findCol(headers, regexOf(copy.ownerRe)), findCol(headers, regexOf(copy.driverRe)), ownerId, SETS[ownerId], driverNameForTotals, null);
 				for (const r of rows) {
 					checked++;
 					if (Boolean(helper(r)) !== Boolean(test(r))) disagreements.push(`${copy.what}, owner ${ownerId}, ${JSON.stringify(r)}`);

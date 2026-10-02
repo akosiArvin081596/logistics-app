@@ -380,6 +380,7 @@ function mountAccept(db, { routeSrc = ACCEPT_SRC, docs = ONBOARDING_DOCS, clashS
 		logAudit: (req, action, entity, entityId, details) => log.audits.push({ action, entity, entityId, details }),
 		auditText,
 		notifyChange: (domain) => log.notified.push(domain),
+		recordPayRateChanges: () => {},
 		ONBOARDING_DOCS: docs,
 		escapeHtml,
 		sendEmail: (to, subject) => { log.mail.push({ to, subject }); return Promise.resolve(true); },
@@ -604,6 +605,7 @@ function mountPost(routeSrc, db, clashSrc = CLASH_SRC) {
 		syncCarrierDriverHistory: () => {},
 		logAudit: () => {},
 		notifyChange: () => {},
+		recordPayRateChanges: () => {},
 	};
 	const names = Object.keys(env);
 	new Function(...names, routeSrc)(...names.map((k) => env[k]));

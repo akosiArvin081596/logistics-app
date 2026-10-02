@@ -84,7 +84,7 @@ function trucksDdl() {
 }
 const alters = (table) => SRC.match(new RegExp(`ALTER TABLE ${table} ADD COLUMN [^"\`]*`, "g")) || [];
 
-const CONSTS = ["EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS",
+const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS",
 	"INVESTOR_LEASE_PAYOUTS_ENABLED", "INVESTOR_LEASE_SETTINGS", "LEASE_SNAPSHOT_WARNED"];
 const LETS = ["lastPayStructShadowWarnMs"];
 const FNS = [
@@ -98,7 +98,7 @@ const FNS = [
 	"intersectMonthWindow", "truckChargeFromMonth", "truckChargeUntilMonth", "truckChargedInMonth",
 	"truckMonthlyFixed", "resolveInvestorSplitPct", "payoutBasisContext", "getCarrierDBFromSQLite",
 	// The ledger's own helpers once it moved onto lib/financials-calc.js.
-	...["gatherLedgerScopeFacts", "ledgerLoadRows"].filter(defined),
+	...["gatherLedgerScopeFacts", "payoutRules", "ledgerLoadRows"].filter(defined),
 ];
 const BODY = [
 	...CONSTS.map((c) => liftDecl("const", c)),

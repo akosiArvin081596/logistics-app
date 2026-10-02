@@ -301,6 +301,7 @@ function ledgerWorld(srv, { reconcile = (s) => s, fixture = LEDGER_FIXTURE } = {
 		// The close's own mechanics (the fingerprint, an unreadable lock table) are
 		// test-closed-month-no-write.js's; here the lock table always reads.
 		periodLocksReadable: () => true, closingFingerprint: () => "",
+		payoutRules: () => ({ datedAttribution: false, datedRates: false, futureReceipts: false, frozenCarry: false }),
 		// Financials' frozen line items are test-financials-ledger-parity.js's.
 		closingLedgerItems: async () => new Map(), writeLedgerFreeze: () => {},
 		financialsSettings: () => require("../lib/financials-report").DEFAULT_SETTINGS,

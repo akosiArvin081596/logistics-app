@@ -278,6 +278,7 @@ function mountAll(db, routes = {}) {
 		periodLockUnreadableResponse: (req, res) => res.status(409).json({ code: "PERIOD_LOCK_UNREADABLE" }),
 		syncCarrierDriverHistory: () => {},
 		notifyChange: () => {},
+		recordPayRateChanges: () => {},
 		console: { error() {}, log() {}, warn() {} },
 	};
 	const post = mountRoute(r.dirPost, env);

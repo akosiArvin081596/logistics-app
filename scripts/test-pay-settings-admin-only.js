@@ -408,6 +408,7 @@ function mountAll(db, { routes = {}, moduleSrc = {}, locked = false, duringActiv
 		syncCarrierDriverHistory: () => {},
 		fuelModel: { DEFAULT_TANK_GALLONS: 200 },
 		notifyChange: () => {},
+		recordPayRateChanges: () => {},
 	};
 	const call = Object.fromEntries(["dirPost", "dirPut", "truckPost", "truckPut"].map((k) => [k, mountRoute(r[k], env)]));
 	const as = (user) => ({ session: { user } });
