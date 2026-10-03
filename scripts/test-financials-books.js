@@ -587,6 +587,21 @@ const show = (f) => (f ? FIGS.map((k) => `${k} ${c(f[k])}`).join(", ") : "none")
 		"drill-down: revenue with no driver is an \"(Unassigned)\" row, and the rows add up to the month's revenue",
 		JSON.stringify(julMd.drivers.map((d) => [d.name, d.revenue])));
 
+	// Cents: the drill-down's rows carry them, so they add up to the headline to
+	// the cent (whole-dollar rows left it up to $0.50 a row off).
+	SHEET.push(load("8011", D, "7/8/2026", "7/9/2026 8:00", "7/9/2026 18:00", "$640.45", "C1", "0"));
+	SHEET.push(load("8012", D, "7/9/2026", "7/10/2026 8:00", "7/10/2026 18:00", "$100.35", "C1", "0"));
+	SHEET.push(load("8013", "", "7/9/2026", "7/10/2026 8:00", "7/10/2026 18:00", "$10.45", "C1", "0"));
+	const julCents = (await fin({ month: "2026-07" })).body.monthDetail;
+	SHEET.pop(); SHEET.pop(); SHEET.pop();
+	const hasCents = (v) => c(v) % 100 !== 0;
+	const daveCents = julCents.drivers.find((d) => d.name === D) || {};
+	const unassignedCents = julCents.drivers.find((d) => d.isUnassigned) || {};
+	check(sumC(julCents.drivers, "revenue") === c(julCents.summary.revenue) && sumC(julCents.drivers, "pay") === c(julCents.summary.driverPay)
+		&& hasCents(daveCents.revenue) && hasCents(daveCents.margin) && c(unassignedCents.revenue) === 1045,
+		"drill-down: rows carry cents and add up to the month's revenue and driver pay to the cent",
+		JSON.stringify({ revenue: julCents.summary.revenue, rows: julCents.drivers.map((d) => [d.name, d.revenue, d.pay, d.margin]) }));
+
 	check(W.errors.length === 0, "the lifted code logged no error", W.errors.join(" | "));
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);

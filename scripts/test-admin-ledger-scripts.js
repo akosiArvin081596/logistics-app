@@ -398,6 +398,25 @@ const backups = () => fs.readdirSync(TMP).filter((f) => f.startsWith("app.db.pre
 	const atRoot = withTmp("/", () => ledger.dbScope(DB, ROOT).scope);
 	const aboveApp = withTmp(path.dirname(ROOT), () => ledger.dbScope(path.join(ROOT, "scripts", "x.db"), ROOT).scope);
 	check(/refusing/.test(atRoot) && /refusing/.test(aboveApp), "no copy when the temp directory is / or holds the app directory", `${atRoot} | ${aboveApp}`);
+	// Two deployments side by side (…/www/staging, …/www/prod): with the temp
+	// directory set to the other one, its database is not a copy.
+	const www = path.join(TMP, "www");
+	fs.mkdirSync(path.join(www, "staging"), { recursive: true });
+	fs.mkdirSync(path.join(www, "prod"), { recursive: true });
+	fs.writeFileSync(path.join(www, "prod", "app.db"), "");
+	const sibling = withTmp(path.join(www, "prod"), () => ledger.dbScope(path.join(www, "prod", "app.db"), path.join(www, "staging")).scope);
+	// A folder that holds a server.js or a .env is an app directory, not a copy.
+	const appLike = path.join(TMP, "app-like");
+	fs.mkdirSync(appLike);
+	fs.writeFileSync(path.join(appLike, "app.db"), "");
+	fs.writeFileSync(path.join(appLike, "server.js"), "");
+	const appLikeScope = (() => { try { return ledger.dbScope(path.join(appLike, "app.db"), ROOT).scope; } catch (e) { return e.message; } })();
+	fs.unlinkSync(path.join(appLike, "server.js"));
+	fs.writeFileSync(path.join(appLike, ".env"), "");
+	const envLikeScope = (() => { try { return ledger.dbScope(path.join(appLike, "app.db"), ROOT).scope; } catch (e) { return e.message; } })();
+	check(/refusing/.test(sibling) && /refusing/.test(appLikeScope) && /refusing/.test(envLikeScope),
+		"no copy when the temp directory sits beside the app directory, or the copy's folder holds a server.js or a .env",
+		`${sibling} | ${appLikeScope} | ${envLikeScope}`);
 	const noSheet = run("freeze-closed-months.js", [`--db=${DB}`, `--env-file=${ENV}`]);
 	const noSheetPr = run("payout-rules-dry-run.js", [`--db=${DB}`, `--env-file=${ENV}`]);
 	check(noSheet.code !== 0 && noSheetPr.code !== 0 && /no default sheet/.test(noSheet.stderr) && /no default sheet/.test(noSheetPr.stderr),

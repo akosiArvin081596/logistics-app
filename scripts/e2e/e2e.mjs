@@ -103,7 +103,7 @@
 //      message, also read
 //
 // Investor terms section (T0-T11; ONLY=terms, STEPS picks steps):
-//   T0 (no sign-in, no creds file needed): two test investors (QA-TEST Investor
+//   T0 (no sign-in, no logins file needed): two test investors (QA-TEST Investor
 //   A / B) fill /invest in fresh anonymous contexts, open the Master Participation
 //   & Management Agreement and the Commercial Vehicle Lease on the signature page,
 //   sign all three documents, and open both again from the review modal ("Signed —
@@ -203,7 +203,9 @@
 //               writes, to plant (and delete) I8's saved invoice note, and to let T8
 //               submit a test application and hard-delete it by id. Unset -> those
 //               cases are SKIPPED (P1 then uses a real driver, as on staging).
-//   CREDS_FILE  logins JSON (default: <work dir>/creds.json, written by setup-db.cjs)
+//   LOGINS_FILE logins JSON, names and ids only (default: <work dir>/logins.json,
+//               written by setup-db.cjs); the passwords are read from the macOS
+//               Keychain when the run starts (keychain.cjs), never from a file
 //   E2E_WORK_DIR  where every output goes (default: $TMPDIR/logisx-e2e; see paths.cjs)
 //   APP_DIR     checkout whose node_modules provides better-sqlite3 and puppeteer
 //               (default: this checkout once it has installs, else the main checkout)
@@ -262,6 +264,7 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import paths from './paths.cjs'
+import keychain from './keychain.cjs'
 
 const BASE_URL = String(process.env.BASE_URL || '').replace(/\/+$/, '')
 const PHASE = String(process.env.PHASE || 'before').toLowerCase()
@@ -290,7 +293,7 @@ const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypa
 // section signs the Super Admin in once; every step shares that page. So does the
 // lease section: its server restarts keep the session (the store is the database).
 const SIGN_INS = { trucks: 3, signout: 20, dispatcher: 2, maintenance: 3, moneypath: 3, names: 2, eldlink: 1, invoice: 1, terms: 2, investorfixes: 3, report: 1, lease: 1 }
-// Sections that need no login at all, so they run without a creds file (e.g. on
+// Sections that need no login at all, so they run without a logins file (e.g. on
 // staging, where no staging logins need to exist for them). The terms section is
 // one only while STEPS picks T0 alone (see TERMS_NEEDS_LOGIN).
 const NO_LOGIN_SECTIONS = new Set(['terms'])
@@ -368,7 +371,7 @@ try {
   CHROME = await paths.chromePath()
 } catch (e) { die(e.message) }
 if (DB_PATH) paths.warnNodeVersion('e2e')
-const CREDS_FILE = process.env.CREDS_FILE || path.join(WORK, 'creds.json')
+const LOGINS_FILE = keychain.loginsFile(WORK)
 const SHOTS = path.join(WORK, 'shots', OUT_TAG)
 const RESULTS = path.join(WORK, `results-${OUT_TAG}.md`)
 const JOURNAL = path.join(WORK, 'plant-journal.json')
@@ -377,9 +380,13 @@ if (fs.existsSync(JOURNAL)) {
     'Recreate the scratch DB (node scripts/e2e/setup-db.cjs <db> --force), then delete the journal.')
 }
 const NEEDS_CREDS = [...SECTIONS].some((s) => !NO_LOGIN_SECTIONS.has(s)) || TERMS_NEEDS_LOGIN
-if (NEEDS_CREDS && !fs.existsSync(CREDS_FILE)) die(`no creds file at ${CREDS_FILE} (make one with scripts/e2e/setup-db.cjs, or set CREDS_FILE)`)
+if (NEEDS_CREDS && !fs.existsSync(LOGINS_FILE)) die(`no logins file at ${LOGINS_FILE} (make one with scripts/e2e/setup-db.cjs, or set LOGINS_FILE)`)
 // Only the login-free sections (terms with STEPS=T0) may run without one; they never read it.
-const CREDS = fs.existsSync(CREDS_FILE) ? JSON.parse(fs.readFileSync(CREDS_FILE, 'utf8')) : {}
+// The passwords come from the Keychain now, into memory only (keychain.cjs).
+let CREDS = {}
+if (fs.existsSync(LOGINS_FILE)) {
+  try { CREDS = keychain.loadLogins(LOGINS_FILE) } catch (e) { die(e.message) }
+}
 fs.mkdirSync(SHOTS, { recursive: true })
 for (const f of fs.readdirSync(SHOTS)) if (f.endsWith('.png')) fs.unlinkSync(path.join(SHOTS, f))
 
@@ -1874,7 +1881,7 @@ async function truckSteps() {
 
   // ============ R8 — an Investor's add ignores the fuel pair (third browser context)
   if (!CREDS.investor) {
-    record({ step: 'R8', title: 'Investor POST /api/trucks with fuel_tank_gallons 400', expected: 'Created with FuelTankGallons 0', observed: 'SKIPPED — no investor login in the creds file', verdict: 'SKIP', shot: '' })
+    record({ step: 'R8', title: 'Investor POST /api/trucks with fuel_tank_gallons 400', expected: 'Created with FuelTankGallons 0', observed: 'SKIPPED — no investor login in the logins file', verdict: 'SKIP', shot: '' })
   } else {
     let observed; let ok = false; let s
     let inv = null
@@ -2825,7 +2832,7 @@ async function offlineSignOutCase() {
     if (!first) {
       notes.push('the Dispatcher sign-in was not run: there is no in-app login form on this page to sign in on')
     } else if (!CREDS.dispatcher) {
-      notes.push('the Dispatcher sign-in was not run: the creds file has no dispatcher login')
+      notes.push('the Dispatcher sign-in was not run: the logins file has no dispatcher login')
       second = true
     } else {
       await page.waitForTimeout(500)
@@ -3369,7 +3376,7 @@ async function signoutSection() {
   meta.ids.superAdminUser = CREDS.superAdmin.userId
   meta.ids.driverUser = CREDS.driver.userId
   if (CREDS.dispatcher) meta.ids.dispatcherUser = CREDS.dispatcher.userId
-  const skip = (step, title) => record({ step, title, expected: '—', observed: 'SKIPPED — creds.json has no dispatcher login (run setup-db.cjs)', verdict: 'SKIP', shot: '' })
+  const skip = (step, title) => record({ step, title, expected: '—', observed: 'SKIPPED — logins.json has no dispatcher login (run setup-db.cjs)', verdict: 'SKIP', shot: '' })
 
   if (wantStep('S1a')) {
     await signOutCase({
@@ -3426,7 +3433,7 @@ async function dispatcherSection() {
   if (!CREDS.dispatcher) {
     for (const [step, title] of [['D1', 'The Dispatcher\'s GET /api/dashboard: broker/contact cells'], ['D2', 'The Dispatcher\'s GET /api/load/<id>: broker/contact fields'],
       ['D3a', 'The Dispatcher\'s GET /api/data?sheet=Job Tracking'], ['D3b', 'The Dispatcher\'s GET /api/data?sheet=Job Tracking!A2:ZZ'], ['D3c', 'The Dispatcher\'s GET /api/data?sheet=Payments Table']]) {
-      record({ step, title, expected: '—', observed: 'SKIPPED — the creds file has no dispatcher login (run setup-db.cjs)', verdict: 'SKIP', shot: '' })
+      record({ step, title, expected: '—', observed: 'SKIPPED — the logins file has no dispatcher login (run setup-db.cjs)', verdict: 'SKIP', shot: '' })
     }
     return
   }
@@ -3608,7 +3615,7 @@ async function maintenanceSection() {
     record({ step: 'M1b', title: titleB, expected: expectedB, observed: `SKIPPED — ${why}`, verdict: 'SKIP', shot: '' })
   }
   if (!LOCAL) return skipBoth('local only (the notice is off on staging)')
-  if (!CREDS.investor || !CREDS.investor2) return skipBoth('the creds file needs two investor logins (investor, investor2): run setup-db.cjs')
+  if (!CREDS.investor || !CREDS.investor2) return skipBoth('the logins file needs two investor logins (investor, investor2): run setup-db.cjs')
   meta.ids.investorUser = CREDS.investor.userId
   meta.ids.investor2User = CREDS.investor2.userId
   const { ctx, page } = await freshPage(ADMIN_VP)
@@ -3869,7 +3876,7 @@ async function payRateCase(page) {
 
 // ---- E1: a new expense is stamped with the truck whose assigned_driver is a
 // spacing variant of the driver's name. Local, planted: the harness driver's own
-// truck (creds.json's truckId) gets the variant; the driver files the expense from
+// truck (logins.json's truckId) gets the variant; the driver files the expense from
 // their own page, the smallest body the route takes (no receipt).
 async function expenseStampCase() {
   const title = 'The driver\'s truck has assigned_driver = a spacing variant of their name (planted); the driver files an expense for one of their own loads (a page fetch of POST /api/expenses, as the app does)'
@@ -4393,7 +4400,7 @@ async function openMonth(page, month) {
 }
 async function payDeductionSpacingCase(page) {
   const title = 'Financials → the current month (else the previous one, while open) → Driver Pay: a percentage-paid driver\'s Pay, before and after a Fuel expense is planted under their name with its space doubled'
-  const expected = 'Their Pay drops by the planted amount × their percentage (±$1: the page shows whole dollars); the month\'s Fuel Spend rises by the planted amount (the control: the receipt counts in the month)'
+  const expected = 'Their Pay drops by the planted amount × their percentage (±$1); the month\'s Fuel Spend rises by the planted amount (the control: the receipt counts in the month)'
   if (!db) return record({ step: 'E2', title, expected, observed: skipWhy(), verdict: 'SKIP', shot: '' })
   // The current month, and the previous one while it is not finalized (early in a
   // month, no driver may have revenue in it yet).
@@ -5217,8 +5224,8 @@ async function namesSection() {
       await waitDashboardHealthy(dispCtx.page, 'before K3') // clear K1's dispatch poison; K3 opens a load from the dashboard
       await formulaCellSaveCase(dispCtx.page, S, cols, active)
     } else {
-      record({ step: 'K1', title: 'Dispatcher dispatches a real load to a reserved driver name', expected: '—', observed: 'SKIPPED — the creds file has no dispatcher login (run setup-db.cjs)', verdict: 'SKIP', shot: '' })
-      record({ step: 'K3', title: 'Dispatcher edits a load and saves a formula-looking cell', expected: '—', observed: 'SKIPPED — the creds file has no dispatcher login (run setup-db.cjs)', verdict: 'SKIP', shot: '' })
+      record({ step: 'K1', title: 'Dispatcher dispatches a real load to a reserved driver name', expected: '—', observed: 'SKIPPED — the logins file has no dispatcher login (run setup-db.cjs)', verdict: 'SKIP', shot: '' })
+      record({ step: 'K3', title: 'Dispatcher edits a load and saves a formula-looking cell', expected: '—', observed: 'SKIPPED — the logins file has no dispatcher login (run setup-db.cjs)', verdict: 'SKIP', shot: '' })
     }
 
     if (!monthOpen) {
@@ -8099,7 +8106,7 @@ async function termsFeature(t0) {
   const pvHead = (pv, docKey) => `POST ${TERMS_PREVIEW}${docKey} → ${pv.status}${pv.why ? ` ${pv.why}` : ''}${pv.revision != null ? `, X-Payment-Terms-Revision ${pv.revision}` : ''}${pv.pt ? `, ${pv.pt.pages} pages` : ''}`
 
   if (!CREDS.superAdmin) {
-    S.adminErr = 'the creds file has no superAdmin login'
+    S.adminErr = 'the logins file has no superAdmin login'
   } else {
     try {
       const fp = await freshPage(ADMIN_VP)
@@ -8873,7 +8880,7 @@ async function termsCleanup(S) {
 // ⚠️ TEST ACTORS ONLY. The copy holds real investors. Every investor account, investor
 // record, truck and application this section touches is one it created, named
 // QA-TEST-INV-<stamp>-… (emails qa-test+<stamp>-…@example.com). No real investor is
-// signed in as, edited, uploaded for or accepted; the creds file's investor logins are
+// signed in as, edited, uploaded for or accepted; the logins file's investor logins are
 // not used. Passwords live in memory only; an acceptance's temporary password is never
 // written out and is masked in the saved screenshot.
 //
@@ -10528,7 +10535,7 @@ async function reportSection() {
   } : null)
   try {
     if (!CREDS.superAdmin) {
-      record({ step: 'R!', title: 'Investor report section', expected: 'The Super Admin signs in', observed: 'not reached: the creds file has no superAdmin login', verdict: 'FAIL', shot: '' })
+      record({ step: 'R!', title: 'Investor report section', expected: 'The Super Admin signs in', observed: 'not reached: the logins file has no superAdmin login', verdict: 'FAIL', shot: '' })
       return
     }
     await login(page, 'Step R — Super Admin', CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
@@ -11194,7 +11201,7 @@ async function leaseSection() {
   const ledger = async (owner) => (await api(page, 'GET', `/api/investor/payouts?as_user_id=${owner}`)).json
   const portal = async (owner) => (await api(page, 'GET', `/api/investor?as_user_id=${owner}`)).json
   try {
-    if (!CREDS.superAdmin) { skipAll('the creds file has no superAdmin login'); return }
+    if (!CREDS.superAdmin) { skipAll('the logins file has no superAdmin login'); return }
     await login(page, 'Step LA — Super Admin', CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
     S.settings = await settings()
     S.feature = !!S.settings

@@ -659,6 +659,7 @@ async function main() {
 	//     assertion below that none of them survived.
 	let priorHashes = null;
 	let operatorUser = null;
+	let carriedAccounts = [];
 	if (tableExists("users")) {
 		const userCols = new Set(colsOf("users"));
 		if (userCols.has("password_hash")) {
@@ -701,6 +702,13 @@ async function main() {
 		const granted = grantOperatorAccess(db);
 		operatorUser = granted.username;
 		summary.push(granted.line);
+	}
+	// The automation login, from the database this refresh replaces (see
+	// AUTOMATION_ACCOUNTS), after every password above was replaced.
+	if (INSTALLS && dstPath) {
+		const carry = carryAutomationAccounts(db, dstPath);
+		carriedAccounts = carry.names;
+		summary.push(...carry.lines);
 	}
 
 	// 3d. Every other address/phone the app could actually send to. These are
@@ -1025,7 +1033,7 @@ async function main() {
 	for (const sfx of ["-wal", "-shm"]) { try { fs.unlinkSync(`${workPath}${sfx}`); } catch {} }
 	log(`installed ${dstPath}`);
 	log("");
-	signInNote(operatorUser);
+	signInNote(operatorUser, carriedAccounts);
 	log("Start the server with an explicit non-production SPREADSHEET_ID:");
 	log(`  SPREADSHEET_ID=${effectiveSheet} PORT=<non-3000> npm start`);
 }
@@ -1502,11 +1510,76 @@ function grantOperatorAccess(db) {
 	};
 }
 
+// ===========================================================================
+// AUTOMATION ACCOUNTS — kept across a refresh of the copy they live on.
+//
+// A browser-automation login (scripts/ensure-automation-user.js; its password
+// is in the operator's Keychain) exists only on the non-production copy it was
+// made on. Production never has it, so a refresh, which rebuilds the copy from
+// a production snapshot, would drop it. The one-pass install (refresh-staging.sh's)
+// carries each name below over from the database it replaces, password hash and
+// all: no password is generated, set or changed for it here. Only when it is a
+// Super Admin there with a bcrypt hash, and the snapshot has no account of
+// that name (that account keeps the refresh's random password); anything else
+// is skipped with a warning. The leak checks below then run on the result as
+// on any other: the kept hash is no production hash, no published password's,
+// and no other account's.
+// Returns { names, lines } — names carried, and the summary's lines.
+// ===========================================================================
+const AUTOMATION_ACCOUNTS = ["e2e_playwright"];
+
+function carryAutomationAccounts(db, prevPath) {
+	const names = [];
+	const lines = [];
+	if (!fs.existsSync(prevPath)) return { names, lines };
+	const colsIn = (d) => { try { return new Set(d.prepare('PRAGMA table_info("users")').all().map((c) => c.name)); } catch { return new Set(); } };
+	let prev;
+	try {
+		prev = new Database(prevPath, { readonly: true, fileMustExist: true });
+	} catch (e) {
+		warn(`the database being replaced could not be read (${e.message}); no automation account was kept.`);
+		return { names, lines };
+	}
+	try {
+		const prevCols = colsIn(prev);
+		const cols = colsIn(db);
+		if (!["username", "password_hash", "role"].every((c) => prevCols.has(c) && cols.has(c))) return { names, lines };
+		for (const name of AUTOMATION_ACCOUNTS) {
+			const was = prev.prepare("SELECT username, password_hash, role FROM users WHERE username = ?").get(name);
+			if (!was) continue;
+			if (was.role !== "Super Admin") {
+				warn(`'${name}' is a ${was.role} in the database being replaced, not a Super Admin — not kept.`);
+				continue;
+			}
+			if (typeof was.password_hash !== "string" || !/^\$2[aby]\$\d\d\$/.test(was.password_hash)) {
+				warn(`'${name}' in the database being replaced has no bcrypt password hash — not kept.`);
+				continue;
+			}
+			// Any case or spacing of the name: sign-in matches it that way.
+			if (db.prepare("SELECT 1 FROM users WHERE LOWER(TRIM(username)) = LOWER(?)").get(name)) {
+				warn(`the snapshot has an account named '${name}'; it keeps the refresh's random password — the automation account was not kept.`);
+				continue;
+			}
+			const set = { username: name, password_hash: was.password_hash, role: "Super Admin" };
+			if (cols.has("must_change_password")) set.must_change_password = 0;
+			if (cols.has("full_name")) set.full_name = "Browser automation";
+			const keys = Object.keys(set);
+			db.prepare(`INSERT INTO users (${keys.join(", ")}) VALUES (${keys.map(() => "?").join(", ")})`).run(...keys.map((k) => set[k]));
+			names.push(name);
+			lines.push(`users: '${name}' (Super Admin, browser automation) carried over from the database being replaced, password unchanged`);
+		}
+	} finally {
+		prev.close();
+	}
+	return { names, lines };
+}
+
 // What an operator is told once a database is installed. Never a password.
-function signInNote(operatorUser) {
+function signInNote(operatorUser, carried = []) {
+	if (carried.length) log(`Kept from the database replaced, password unchanged: ${carried.map((n) => `'${n}'`).join(", ")} (browser automation).`);
 	if (operatorUser) {
 		log(`Sign in as '${operatorUser}' with the password from REFRESH_OPERATOR_PASSWORD.`);
-		log("Every other account has a random password that nobody knows.");
+		log(`Every other account${carried.length ? " (but the one kept)" : ""} has a random password that nobody knows.`);
 		return;
 	}
 	log("Every account has a random password that nobody knows; none was printed or stored. To sign in:");

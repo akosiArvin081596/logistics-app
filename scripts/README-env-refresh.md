@@ -187,7 +187,8 @@ see above).
 ## Signing in to a refreshed copy
 
 Every account on a refreshed copy gets its own random secret, hashed and then discarded, so
-**nothing signs in until you choose a way in.** There are two, for two different jobs.
+**nothing signs in until you choose a way in.** There are two, for two different jobs; on staging,
+the browser-automation login is also kept (below).
 
 ### One Super Admin, local or staging — `REFRESH_OPERATOR_PASSWORD`
 
@@ -241,6 +242,17 @@ unset REFRESH_OPERATOR_PASSWORD
   on any copy afterwards, from `NEW_PASSWORD` in the environment, under the same rules — load it
   with `read -rs` the same way and pass it as `NEW_PASSWORD="$NEW_PASSWORD"`, never exported: a
   prefix holding the typed value itself would be saved in shell history.
+
+### The browser-automation login is kept — `e2e_playwright`
+
+Staging's Playwright account (`e2e_playwright`, Super Admin, password in the operator's Keychain,
+made with `scripts/ensure-automation-user.js`) exists only on staging, so the production snapshot
+never has it. The one-pass install (what `refresh-staging.sh` runs) carries it over from the
+database it replaces, **password hash unchanged**, so the Keychain password keeps working after a
+refresh. No password is generated, set or changed for it. It is kept only when it is a Super Admin
+with a bcrypt hash in the database being replaced and the snapshot has no account of that name;
+otherwise the refresh warns and goes on without it (then run `ensure-automation-user.js` again).
+The leak checks run on the result as usual. `--from-sanitized` (the local flow) keeps nothing.
 
 ### `test-suite.js` on a LOCAL copy — `prepare-test-fixtures.js`
 
