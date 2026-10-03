@@ -4552,7 +4552,8 @@ tr:hover td { background: var(--surface-hover); }
 .st-pending { background: var(--amber-dim); color: var(--amber); }
 .st-approved { background: var(--accent-dim); color: var(--accent); }
 .st-rejected { background: var(--danger-dim); color: var(--danger); }
-.st-finalized { background: var(--blue-dim); color: var(--blue); }
+/* Two lines in the table's narrow Status column, not one word per line. */
+.st-finalized { background: var(--blue-dim); color: var(--blue); min-width: 10rem; }
 
 .receipt-thumb {
   width: 80px; height: 60px; object-fit: cover; border-radius: 4px;
@@ -5396,7 +5397,14 @@ tr:hover td { background: var(--surface-hover); }
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    flex-shrink: 0;
+    flex-shrink: 1;
+    min-width: 0;
+  }
+  /* "Included: September 2026 finalized" wraps inside the card instead of
+     running past its edge. */
+  .mobile-exp-bottom-right .st-finalized {
+    min-width: 0;
+    text-align: right;
   }
   .mobile-exp-amount {
     font-size: 1.15rem;
