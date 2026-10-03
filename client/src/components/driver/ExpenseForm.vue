@@ -229,6 +229,26 @@
       </div>
     </van-cell-group>
 
+    <!-- A far-off date (lib/receiptDate.js), asked about before anything is
+         sent. Nothing is lost either way: the entry stays as typed. -->
+    <div
+      v-if="dateQuestion"
+      ref="dateQuestionEl"
+      class="form-alert form-alert-warn form-alert-outer"
+      role="alert"
+    >
+      <div class="form-alert-title">Is the date right?</div>
+      <div class="form-alert-body form-alert-lines">{{ dateQuestionText }}</div>
+      <div class="form-alert-actions">
+        <van-button round block size="small" type="warning" native-type="button" :disabled="submitting" @click="confirmDate">
+          Yes &mdash; save with this date
+        </van-button>
+        <van-button round block size="small" native-type="button" :disabled="submitting" @click="fixDate">
+          No &mdash; fix the date
+        </van-button>
+      </div>
+    </div>
+
     <!-- Submit failed. The server's own words, because it knows things this form
          cannot (a duplicate receipt, a closed month, a size cap). The heading is
          the part that matters at 2am: everything typed above is still there.
@@ -387,6 +407,7 @@ import { expenseLoadIds } from '../../lib/expenseWindow'
 // OPPOSITE failure behaviour. This one returns '' when it cannot read the key,
 // which is what notePostedPeriod()'s `if (!posted) return` depends on.
 import { monthLabel } from '../../lib/monthLabel'
+import { receiptDateVerdict, receiptDateQuestion } from '../../lib/receiptDate'
 
 const props = defineProps({
   loads: { type: Array, default: () => [] },
@@ -455,10 +476,18 @@ const loadField = ref(null)
 // failure mode that kept this check opt-in in the first place.
 const duplicateWarning = ref(null) // { message, existingId, existing, keepLoadId }
 const alreadyLogged = ref(null)    // { message, existingId, keepLoadId }
+// A date lib/receiptDate.js questions is asked about once before it is sent:
+// the note beside the field was on screen when two scale tickets from
+// 2026-09-28 were filed as 2023 and 2025. `dateQuestion` is the date being
+// asked about; `dateConfirmed` the one the driver kept, for this entry only.
+const dateQuestion = ref('')
+const dateConfirmed = ref('')
+const dateQuestionText = computed(() => receiptDateQuestion(dateQuestion.value))
 // A decision the driver owns is on screen. Suppresses the main submit button so
 // the only ways forward are the explicit answers.
-const decisionPending = computed(() => !!duplicateWarning.value || !!alreadyLogged.value)
+const decisionPending = computed(() => !!duplicateWarning.value || !!alreadyLogged.value || !!dateQuestion.value)
 const decisionEl = ref(null)
+const dateQuestionEl = ref(null)
 
 // The expense was saved, but booked into a different month than its date implies
 // (its own month is already closed). { heading, body }, or null.
@@ -589,19 +618,29 @@ onBeforeUnmount(() => document.removeEventListener('visibilitychange', onVisibil
 // ⚠️ ASYMMETRIC, not ±120 days, and deliberately so: a receipt cannot be from
 // tomorrow (1 day of slack covers a timezone edge), but it can legitimately be
 // four months old. Warns and never blocks.
-const DATE_STALE_DAYS = 120
+// The rule itself is lib/receiptDate.js, shared with the admin forms.
 const dateSuspect = computed(() => {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(form.date || '')
-  if (!m) return ''
-  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
-  if (isNaN(d)) return ''
-  const days = (Date.now() - d.getTime()) / 86400000
-  if (days < -1) return 'This is dated in the future — check the date.'
-  if (days <= DATE_STALE_DAYS) return ''
-  return Number(m[1]) === new Date().getFullYear()
-    ? 'This is over 4 months old — check the date.'
-    : `This is dated ${m[1]} — check the year before saving.`
+  const verdict = receiptDateVerdict(form.date)
+  if (verdict === 'future') return 'This is dated in the future — check the date.'
+  if (verdict === 'old') return 'This is over 4 months old — check the date.'
+  if (verdict === 'year') return `This is dated ${form.date.slice(0, 4)} — check the year before saving.`
+  return ''
 })
+watch(() => form.date, () => { dateQuestion.value = '' })
+
+// "Yes — save with this date." Kept for this date on this entry only.
+function confirmDate() {
+  if (!dateQuestion.value || submitting.value) return
+  dateConfirmed.value = dateQuestion.value
+  dateQuestion.value = ''
+  handleSubmit()
+}
+
+// "No — fix the date." Back to the field.
+function fixDate() {
+  dateQuestion.value = ''
+  revealField('date')
+}
 
 const typeColumns = [
   { text: 'Fuel', value: 'Fuel' },
@@ -977,6 +1016,11 @@ async function handleSubmit() {
     photoErrorEl.value?.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
     return
   }
+  if (receiptDateVerdict(form.date) && dateConfirmed.value !== form.date) {
+    dateQuestion.value = form.date
+    nextTick(() => dateQuestionEl.value?.scrollIntoView?.({ block: 'center', behavior: 'smooth' }))
+    return
+  }
 
   const payload = buildPayload()
 
@@ -1217,6 +1261,7 @@ function resetAfterSubmit(keepLoadId) {
   defaultedDate.value = houstonToday()
   form.date = defaultedDate.value
   dateTouched.value = false
+  dateConfirmed.value = ''
   form.vendor = ''
   form.description = ''
   form.city = ''
@@ -1465,6 +1510,9 @@ function failureText(err) {
   flex-direction: column;
   gap: 0.5rem;
   margin-top: 0.7rem;
+}
+.form-alert-lines {
+  white-space: pre-line;
 }
 .form-alert-body {
   line-height: 1.45;

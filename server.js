@@ -57076,7 +57076,21 @@ app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res
 		}
 		if (conditions.length) sql += " WHERE " + conditions.join(" AND ");
 		sql += " ORDER BY id DESC";
-		const expenses = db.prepare(sql).all(...params).map((e) => ({ ...e, receipt_details: parseReceiptDetails(e.receipt_details) }));
+		// finalized_period: the month a receipt counts in, when that month is
+		// finalized; '' otherwise. It is the month PUT /api/expenses/:id/status
+		// checks (expensePostedPeriod), so the screen can say the receipt is
+		// already included and stop offering a status change that route refuses
+		// with 409 PERIOD_FINALIZED. It reports what period_locks says, like
+		// isLocked(): an unreadable table claims nothing, and the status route
+		// still refuses with PERIOD_LOCK_UNREADABLE, which the screen shows.
+		let finalized = new Set();
+		try {
+			finalized = new Set(db.prepare("SELECT period FROM period_locks WHERE status = 'locked'").all().map((r) => r.period));
+		} catch { finalized = new Set(); }
+		const expenses = db.prepare(sql).all(...params).map((e) => {
+			const period = expensePostedPeriod(e);
+			return { ...e, receipt_details: parseReceiptDetails(e.receipt_details), finalized_period: finalized.has(period) ? period : "" };
+		});
 		res.json({ expenses });
 	} catch (err) {
 		console.error("Error fetching all expenses:", err.message);

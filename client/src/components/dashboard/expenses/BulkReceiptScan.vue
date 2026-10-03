@@ -364,6 +364,18 @@
     <div v-if="previewImg" class="bulk-preview-overlay" @click="previewImg = null">
       <img :src="previewImg" class="bulk-preview-img" alt="Receipt preview" />
     </div>
+
+    <!-- Far-off receipt dates, asked about at Save All (askAboutDates). Cancel
+         keeps initial focus: the safe answer is to go back and check. -->
+    <ConfirmModal
+      :open="!!datePrompt"
+      title="Check the receipt dates"
+      :message="datePrompt"
+      confirm-text="Save with these dates"
+      cancel-text="Fix the dates"
+      @confirm="settleDatePrompt(true)"
+      @cancel="settleDatePrompt(false)"
+    />
   </div>
 </template>
 
@@ -389,7 +401,9 @@ import { fmtYmd } from '../../../utils/datetime'
 // receipt landed in. The shared formatter returns '' for both, and the guard at
 // the saveOne() call site turns that into silence, not a half-written sentence.
 import { monthLabel } from '../../../lib/monthLabel'
+import { receiptDateVerdict } from '../../../lib/receiptDate'
 import FileDropZone from '../../shared/FileDropZone.vue'
+import ConfirmModal from '../../shared/ConfirmModal.vue'
 
 const props = defineProps({
   drivers: { type: Array, default: () => [] },
@@ -479,22 +493,43 @@ const pendingPlaceholder = (row, normal) => (scanFinished(row) ? normal : 'readi
 // a fuel receipt was copied faithfully from a store printer whose clock said 2005.
 // Both landed the expense in a year that isn't in the books, so it vanished from
 // the month it belonged to and quietly inflated the investor payout.
-// Flag, never block — a genuinely old receipt can still be logged deliberately.
-const DATE_STALE_DAYS = 120
+// Flag, never block — a genuinely old receipt can still be logged deliberately,
+// once Save All has asked (askAboutDates). The rule is lib/receiptDate.js,
+// shared with the Log Expense form and the driver app.
 function dateSuspect(row) {
   if (!row.date || !scanFinished(row)) return ''
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(row.date)
-  if (!m) return ''
-  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
-  if (isNaN(d)) return ''
-  const days = (Date.now() - d.getTime()) / 86400000
-  if (days < -1) return 'dated in the future — check it'
-  if (days <= DATE_STALE_DAYS) return ''
+  const verdict = receiptDateVerdict(row.date)
+  if (verdict === 'future') return 'dated in the future — check it'
   // A wrong YEAR is the dangerous case (it hides the expense in a month that
   // isn't in the books). Merely-old-but-this-year is worth a look, not an alarm.
-  return Number(m[1]) === new Date().getFullYear()
-    ? 'over 4 months old — check the date'
-    : `dated ${m[1]} — check the year`
+  if (verdict === 'old') return 'over 4 months old — check the date'
+  if (verdict === 'year') return `dated ${row.date.slice(0, 4)} — check the year`
+  return ''
+}
+
+// Save All asks once about the rows whose dates the rule questions, naming
+// each, before any is sent. A promise bridge like ExpensesTab's duplicate
+// question, settled on confirm, cancel and unmount.
+const datePrompt = ref('')
+let dateDecision = null
+function askAboutDates(list) {
+  const lines = list.map((r) => [r.driver, r.vendor || 'Receipt', fmtYmd(r.date)].filter(Boolean).join(' · '))
+  return new Promise((resolve) => {
+    datePrompt.value = [
+      `${list.length === 1 ? 'This receipt is' : `These ${list.length} receipts are`} dated far from today:`,
+      '',
+      ...lines,
+      '',
+      'Save with these dates only if that is what the receipts say.',
+    ].join('\n')
+    dateDecision = resolve
+  })
+}
+function settleDatePrompt(answer) {
+  datePrompt.value = ''
+  const resolve = dateDecision
+  dateDecision = null
+  if (resolve) resolve(answer)
 }
 
 // A Fuel receipt with no gallons still saves, but it contributes nothing to
@@ -1312,6 +1347,12 @@ async function saveAll() {
     toast(invalid ? 'Fix the highlighted rows first' : 'Nothing to save', 'error')
     return
   }
+  const farOff = ready.filter(r => receiptDateVerdict(r.date))
+  if (farOff.length) {
+    saving.value = true
+    const ok = await askAboutDates(farOff).finally(() => { saving.value = false })
+    if (!ok) { toast('Nothing saved — check the dates', 'info'); return }
+  }
   saving.value = true
   try {
     await runPool(ready, saveOne, 3)
@@ -1406,6 +1447,8 @@ onMounted(async () => {
 onUnmounted(() => {
   // Flush a pending debounced save so nothing is lost when navigating away.
   if (draftTimer) { clearTimeout(draftTimer); draftTimer = null; saveDraft() }
+  // An open date question answers "no": nothing is sent that nobody confirmed.
+  settleDatePrompt(false)
 })
 </script>
 
