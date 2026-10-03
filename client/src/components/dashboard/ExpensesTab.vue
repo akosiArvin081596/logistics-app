@@ -1865,20 +1865,16 @@ async function approveCurrent() {
   if (!exp || approveLoading.value) return
   approveLoading.value = true
   try {
-    await setStatus(exp.id, 'Approved')
-    advanceToNextPending()
-  } catch { /* setStatus already toasted */ }
-  finally { approveLoading.value = false }
+    if (await setStatus(exp.id, 'Approved')) advanceToNextPending()
+  } finally { approveLoading.value = false }
 }
 async function rejectCurrent() {
   const exp = selectedExpense.value
   if (!exp || approveLoading.value) return
   approveLoading.value = true
   try {
-    await setStatus(exp.id, 'Rejected')
-    advanceToNextPending()
-  } catch { /* setStatus already toasted */ }
-  finally { approveLoading.value = false }
+    if (await setStatus(exp.id, 'Rejected')) advanceToNextPending()
+  } finally { approveLoading.value = false }
 }
 async function undoCurrent() {
   const exp = selectedExpense.value
@@ -1886,8 +1882,7 @@ async function undoCurrent() {
   approveLoading.value = true
   try {
     await setStatus(exp.id, 'Pending')
-  } catch { /* setStatus already toasted */ }
-  finally { approveLoading.value = false }
+  } finally { approveLoading.value = false }
 }
 function isFuelExpense(e) {
   return e && (e.type || '').toLowerCase() === 'fuel' && Number(e.gallons) > 0
@@ -2607,12 +2602,16 @@ async function quietReload() {
   } catch { /* empty — leave existing data in place */ }
 }
 
+// Resolves true once the change is saved, false when it was refused. It never
+// rejects: the row buttons call it straight from @click, where a rethrown
+// refusal had no handler and reached the console as an uncaught error.
 async function setStatus(id, status) {
   try {
     await api.put(`/api/expenses/${id}/status`, { status })
     const exp = allExpenses.value.find(e => e.id === id)
     if (exp) exp.status = status
     toast(status === 'Approved' ? 'Expense approved' : status === 'Rejected' ? 'Expense rejected' : 'Status reset', 'success')
+    return true
   } catch (err) {
     // The server's reason (a finalized month, an unreadable lock table, a
     // missing expense), not a fixed sentence that hides which one it was.
@@ -2621,7 +2620,7 @@ async function setStatus(id, status) {
     // reload would, instead of offering the same refused buttons again.
     const exp = allExpenses.value.find(e => e.id === id)
     if (exp && err?.code === 'PERIOD_FINALIZED' && err?.data?.period) exp.finalized_period = err.data.period
-    throw err
+    return false
   }
 }
 

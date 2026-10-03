@@ -26904,7 +26904,10 @@ function truckEditLockBlockers(truck, changed, opts = {}) {
 	// (6) driver_pay_daily — activeDays × THIS rate, for every month the driver
 	// worked. `resolveDailyRate` lets the driver's own drivers_directory rate win,
 	// so a truck rate that is already being overridden changes nothing and is
-	// allowed through.
+	// allowed through. A percentage-paid driver is paid a share of net revenue
+	// and no figure reads a daily rate for them, so the rate changes nothing for
+	// them either. Switching them to a day rate is guarded by the directory
+	// edit's own pay-structure check.
 	//
 	// ⚠️ Resolved against the driver this edit LEAVES on the truck, and blocked
 	// even when that is nobody. Reading `truck.assigned_driver` alone made the
@@ -26922,7 +26925,7 @@ function truckEditLockBlockers(truck, changed, opts = {}) {
 		const before = resolveDailyRate(struct && struct.payDaily, truck.driver_pay_daily);
 		const after = resolveDailyRate(struct && struct.payDaily, changed.driver_pay_daily);
 		let months = [];
-		if (before !== after) {
+		if (before !== after && !(struct && struct.payType === "percentage")) {
 			months = driverPayLockedMonths(nextDriver, locked);
 			if (!months.length && !driver) {
 				const everAssigned = db.prepare("SELECT COUNT(*) n FROM truck_assignments WHERE truck_id = ?").get(truck.id).n;
