@@ -64,8 +64,9 @@ async function main() {
 	// The .env of the app whose database this is (a database outside this app
 	// directory is refused, so another deployment's can never pass this check).
 	let env;
+	let dbFile;
 	try {
-		env = envFor({ root: ROOT, dbPath: args.db, envFile: typeof args["env-file"] === "string" ? args["env-file"] : null });
+		({ env, file: dbFile } = envFor({ root: ROOT, dbPath: args.db, envFile: typeof args["env-file"] === "string" ? args["env-file"] : null }));
 	} catch (err) {
 		refuse(err.message);
 	}
@@ -78,7 +79,7 @@ async function main() {
 	if (!password) refuse("no password on stdin");
 
 	const Database = appRequire("better-sqlite3");
-	const db = new Database(args.db, { fileMustExist: true });
+	const db = new Database(dbFile, { fileMustExist: true });
 	db.pragma("busy_timeout = 10000");
 	const find = () => db.prepare("SELECT id, username, role FROM users WHERE LOWER(TRIM(username)) = LOWER(?)").get(username);
 	const existing = find();

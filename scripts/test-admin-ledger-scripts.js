@@ -145,7 +145,7 @@ console.log("§1 lib/server-lift.js");
 		"over server.js: each one-line function is indexed as its own line", `${oneLineInServer.length}`);
 
 	const ledger = require("./lib/ledger-world");
-	check(ledger.dbScope(path.join(ROOT, "app.db"), ROOT) === "app" && ledger.dbScope(path.join(os.tmpdir(), "x.db"), ROOT) === "copy",
+	check(ledger.dbScope(path.join(ROOT, "app.db"), ROOT).scope === "app" && ledger.dbScope(path.join(os.tmpdir(), "x.db"), ROOT).scope === "copy",
 		"a script's database: the app directory's own, or a copy under the temp directory", "");
 	let outside = "", envForApp = "";
 	try { ledger.dbScope(path.join(ROOT, "scripts", "app.db"), ROOT); } catch (e) { outside = e.message; }
@@ -319,7 +319,8 @@ const backups = () => fs.readdirSync(TMP).filter((f) => f.startsWith("app.db.pre
 	check(bk.length === 1 && mode === 0o600, "apply: the backup is owner-only, with no -wal/-shm beside it", `${JSON.stringify(bk)} mode ${mode.toString(8)}`);
 	check(a.auditRowsComplete === true, "apply: the script confirms its audit rows were written", JSON.stringify(a.auditRowsComplete));
 	let backupOk = false;
-	if (bk.length === 1 && a.backup === path.join(TMP, bk[0])) {
+	// The script names the backup by its resolved path (macOS: /var is /private/var).
+	if (bk.length === 1 && a.backup === fs.realpathSync(path.join(TMP, bk[0]))) {
 		const copy = new Database(a.backup, { readonly: true });
 		backupOk = copy.pragma("integrity_check", { simple: true }) === "ok"
 			&& copy.pragma("journal_mode", { simple: true }) === "delete"
@@ -374,9 +375,29 @@ const backups = () => fs.readdirSync(TMP).filter((f) => f.startsWith("app.db.pre
 	const outFreeze = runFrom("freeze-closed-months.js", common);
 	const outPayout = runFrom("payout-rules-dry-run.js", common);
 	const outUser = runFrom("ensure-automation-user.js", [`--db=${DB}`, "--username=e2e_playwright", `--env-file=${ENV}`], "x\n");
-	check(outFreeze.status === 2 && /refusing/.test(outFreeze.stderr) && outPayout.status !== 0 && /refusing/.test(outPayout.stderr)
+	check(outFreeze.status === 2 && /refusing/.test(outFreeze.stderr) && outPayout.status === 2 && /refusing/.test(outPayout.stderr)
 		&& outUser.status === 2 && /refusing/.test(outUser.stderr),
 		"a database outside the app directory and the temp directory is refused by every script", `${outFreeze.status} ${outPayout.status} ${outUser.status} ${outUser.stderr.slice(0, 120)}`);
+	// A link inside the temp directory to a database outside it is that database.
+	const link = path.join(elsewhere, "link.db");
+	fs.symlinkSync(DB, link);
+	const viaLink = runFrom("ensure-automation-user.js", [`--db=${link}`, "--username=e2e_playwright", `--env-file=${ENV}`], "x\n");
+	check(viaLink.status === 2 && /refusing/.test(viaLink.stderr), "…including through a symbolic link that sits in the temp directory", `${viaLink.status} ${viaLink.stderr.slice(0, 120)}`);
+	const ledger = require("./lib/ledger-world");
+	const hard = path.join(TMP, "hard.db");
+	fs.linkSync(DB, hard);
+	let hardRefused = "";
+	try { ledger.dbScope(hard, ROOT); } catch (e) { hardRefused = e.message; }
+	fs.unlinkSync(hard);
+	check(/more than one hard link/.test(hardRefused), "a database file with another hard link is refused", hardRefused);
+	const withTmp = (dir, fn) => {
+		const saved = process.env.TMPDIR;
+		process.env.TMPDIR = dir;
+		try { return fn(); } catch (e) { return e.message; } finally { if (saved === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = saved; }
+	};
+	const atRoot = withTmp("/", () => ledger.dbScope(DB, ROOT).scope);
+	const aboveApp = withTmp(path.dirname(ROOT), () => ledger.dbScope(path.join(ROOT, "scripts", "x.db"), ROOT).scope);
+	check(/refusing/.test(atRoot) && /refusing/.test(aboveApp), "no copy when the temp directory is / or holds the app directory", `${atRoot} | ${aboveApp}`);
 	const noSheet = run("freeze-closed-months.js", [`--db=${DB}`, `--env-file=${ENV}`]);
 	const noSheetPr = run("payout-rules-dry-run.js", [`--db=${DB}`, `--env-file=${ENV}`]);
 	check(noSheet.code !== 0 && noSheetPr.code !== 0 && /no default sheet/.test(noSheet.stderr) && /no default sheet/.test(noSheetPr.stderr),

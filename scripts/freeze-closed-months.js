@@ -110,6 +110,9 @@ async function backupNextTo(dbPath, db) {
 	const size = fs.statSync(dbPath).size + (fs.existsSync(`${dbPath}-wal`) ? fs.statSync(`${dbPath}-wal`).size : 0);
 	const free = (() => { const s = fs.statfsSync(path.dirname(path.resolve(dbPath))); return s.bavail * s.bsize; })();
 	if (free < size * 2) refuse(`not enough free disk for the backup (${free} bytes free, the database is ${size})`);
+	let taken = true;
+	try { fs.lstatSync(target); } catch (err) { if (err.code === "ENOENT") taken = false; else throw err; }
+	if (taken) refuse(`${target} already exists; nothing was frozen`);
 	await db.backup(target, { progress: () => 0x7fffffff });
 	fs.chmodSync(target, 0o600);
 	const Database = require("better-sqlite3");
@@ -155,7 +158,7 @@ async function main() {
 	const periods = plan.periods.map((p) => p.period);
 	const before = payoutRowsHash(db, periods);
 	const auditFrom = db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM audit_trail").get().id;
-	const backup = await backupNextTo(args.db, db);
+	const backup = await backupNextTo(world.dbFile, db);
 	api.installPeriodLockTriggers(db);
 	const res = await call("POST /api/admin/financials/freeze-closed-months", {
 		body: { apply: true, fingerprint: args.fingerprint, includeUnverified: true },

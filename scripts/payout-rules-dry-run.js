@@ -17,12 +17,12 @@
 //                          only: read the flags from this file
 // The database is this checkout's own app.db or a copy under the temp
 // directory; any other is refused (it may be another deployment's).
-// There is no default sheet. Exit codes: 0 done, 1 error.
+// There is no default sheet. Exit codes: 0 done, 1 error, 2 refused.
 
 "use strict";
 
 const path = require("path");
-const { buildLedgerWorld, parseArgs, sheetFor } = require("./lib/ledger-world");
+const { buildLedgerWorld, parseArgs, sheetFor, envFor } = require("./lib/ledger-world");
 
 const ROOT = path.join(__dirname, "..");
 
@@ -30,6 +30,12 @@ async function main() {
 	const args = parseArgs(process.argv.slice(2));
 	if (!args.db || args.db === true) throw new Error("--db is required");
 	const envFile = typeof args["env-file"] === "string" ? args["env-file"] : null;
+	try {
+		envFor({ root: ROOT, dbPath: args.db, envFile });
+	} catch (err) {
+		console.error(`REFUSED: ${err.message}`);
+		process.exit(2);
+	}
 	const sheetData = await sheetFor(args, ROOT);
 	const { db, api } = buildLedgerWorld({ root: ROOT, dbPath: args.db, readonly: true, sheetData, envFile });
 	const result = await api.payoutRulesDryRun();

@@ -38,24 +38,43 @@ const LIFTED_REQUIRE_OK = (m) => m === "crypto" || /^\.\/lib\/[\w.-]+$/.test(m);
 //   - "app": the app directory's own app.db (or another file directly in it);
 //     its .env is the one the server runs with, so --env-file is refused;
 //   - "copy": a file under the system temp directory (a test fixture or a copy
-//     made for a rehearsal); the app directory's .env, or --env-file.
+//     made for a rehearsal); the app directory's .env, or --env-file. Refused
+//     when the temp directory is "/" or holds the app directory.
 // Anything else is refused: a database in another directory may belong to
-// another deployment, whose flags and code are not this checkout's.
+// another deployment, whose flags and code are not this checkout's. The file
+// itself is resolved (links followed) and a file with more than one hard link
+// is refused, so a name in the right place cannot stand for a database
+// elsewhere. Returns the resolved file, which is the one a script opens.
 function dbScope(dbPath, root) {
 	const real = (p) => fs.realpathSync(p);
-	const dir = real(path.dirname(path.resolve(dbPath)));
-	if (dir === real(root)) return "app";
+	const given = path.resolve(dbPath);
+	let file;
+	try {
+		file = real(given);
+	} catch (err) {
+		if (err.code !== "ENOENT") throw err;
+		// No such file (opening it then fails); a link to nothing is refused.
+		let link = false;
+		try { link = fs.lstatSync(given).isSymbolicLink(); } catch { link = false; }
+		if (link) throw new Error(`refusing ${dbPath}: it is a link to nothing`);
+		file = path.join(real(path.dirname(given)), path.basename(given));
+	}
+	if (fs.existsSync(file) && fs.statSync(file).nlink > 1) throw new Error(`refusing ${dbPath}: the file has more than one hard link`);
+	const dir = path.dirname(file);
+	const appDir = real(root);
+	if (dir === appDir) return { scope: "app", file };
 	const tmp = real(require("os").tmpdir());
-	if (dir === tmp || dir.startsWith(`${tmp}${path.sep}`)) return "copy";
-	throw new Error(`refusing ${dbPath}: a script opens its own app directory's database (${root}) or a copy under ${tmp}, nothing else`);
+	const holdsApp = tmp === path.parse(tmp).root || appDir === tmp || appDir.startsWith(`${tmp}${path.sep}`);
+	if (!holdsApp && (dir === tmp || dir.startsWith(`${tmp}${path.sep}`))) return { scope: "copy", file };
+	throw new Error(`refusing ${dbPath}: a script opens its own app directory's database (${root}) or a copy under the temp directory, nothing else`);
 }
 
-// The .env that applies to `dbPath` (see dbScope()).
+// The .env that applies to `dbPath` (see dbScope()), and the resolved file.
 function envFor({ root, dbPath, envFile = null }) {
 	const appRequire = createRequire(path.join(root, "server.js"));
-	const scope = dbScope(dbPath, root);
+	const { scope, file } = dbScope(dbPath, root);
 	if (envFile && scope !== "copy") throw new Error("--env-file is only for a copy of the database under the temp directory; the app's own database runs with the app's .env");
-	return envFile ? appRequire("dotenv").parse(fs.readFileSync(envFile)) : readEnv(root, appRequire);
+	return { env: envFile ? appRequire("dotenv").parse(fs.readFileSync(envFile)) : readEnv(root, appRequire), file };
 }
 
 // The Job Tracking tab as values.get returns it: { values: [[header…], [row…]] }.
@@ -81,9 +100,9 @@ function readEnv(root, appRequire) {
 function buildLedgerWorld({ root, dbPath, readonly, sheetData, envFile = null }) {
 	const SRC = fs.readFileSync(path.join(root, "server.js"), "utf8");
 	const appRequire = createRequire(path.join(root, "server.js"));
-	const fileEnv = envFor({ root, dbPath, envFile });
+	const { env: fileEnv, file: dbFile } = envFor({ root, dbPath, envFile });
 	const Database = appRequire("better-sqlite3");
-	const db = new Database(dbPath, { readonly, fileMustExist: true });
+	const db = new Database(dbFile, { readonly, fileMustExist: true });
 	if (readonly && !db.readonly) throw new Error("refusing: the dry run's SQLite handle is not read-only");
 	db.pragma("busy_timeout = 10000");
 
@@ -121,7 +140,7 @@ function buildLedgerWorld({ root, dbPath, readonly, sheetData, envFile = null })
 		await routes[route](req, res);
 		return out;
 	};
-	return { db, api, call, liftedNames: lifted.names };
+	return { db, dbFile, api, call, liftedNames: lifted.names };
 }
 
 // --flag=value / --flag value / --flag, for the scripts.
@@ -150,7 +169,7 @@ async function sheetFor(args, root) {
 	let sheetId = args["sheet-id"];
 	if (sheetId === "env") {
 		const envFile = typeof args["env-file"] === "string" ? args["env-file"] : null;
-		sheetId = (typeof args.db === "string" ? envFor({ root, dbPath: args.db, envFile }) : readEnv(root, appRequire)).SPREADSHEET_ID || "";
+		sheetId = (typeof args.db === "string" ? envFor({ root, dbPath: args.db, envFile }).env : readEnv(root, appRequire)).SPREADSHEET_ID || "";
 		if (!sheetId) throw new Error("--sheet-id=env: the app's .env sets no SPREADSHEET_ID; name the sheet");
 	}
 	const keyFile = args.key || path.join(root, "service-account-key.json");
