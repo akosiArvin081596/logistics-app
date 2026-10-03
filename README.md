@@ -98,6 +98,23 @@ either check fails.
 
 Setup, the safety reasoning, and the rollback design: [`.github/workflows/README.md`](.github/workflows/README.md).
 
+## Admin scripts (run on the server, no login)
+
+Run from the app directory with the Node pm2 runs the app with. Each script's header
+has its full usage; none has a default sheet.
+
+- `scripts/payout-rules-dry-run.js --db=app.db --sheet-id=<id>`: the payout-rules dry
+  run (`GET /api/admin/payout-rules/dry-run`), read-only.
+- `scripts/freeze-closed-months.js --db=app.db --sheet-id=<id>`: the closed-month
+  freeze's plan and fingerprint, read-only. `--apply --fingerprint=<it>
+  --include-unverified` backs `app.db` up next to itself, then freezes, with an
+  audit row naming the script.
+- `scripts/ensure-automation-user.js --db=app.db --username=<name>`: creates a
+  non-production browser-automation Super Admin from a password piped on stdin;
+  refuses on production and never changes an existing account.
+
+Tests: `node scripts/test-admin-ledger-scripts.js`.
+
 ## Docs
 
 - [`docs/manual/`](docs/manual/) — user guides and technical documentation
