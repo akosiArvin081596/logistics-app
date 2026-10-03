@@ -29,10 +29,13 @@ name: Deploy drift
 # GitHub has been observed firing it every 2.5–6 h, 8–26 min late.
 #
 # ⚠️ Invariants. Keep all five:
-#   1. SERIALIZED WITH DEPLOYS. The same concurrency group as deploy.yml
-#      (queue: max): a drift run waits for any in-flight deploy and reads the
-#      box after it, and a re-run it asks for waits for it. remote-deploy.sh
-#      also holds a box-level flock, whatever started it.
+#   1. SERIALIZED WITH PRODUCTION DEPLOYS. The same concurrency group as
+#      deploy.yml's production job (queue: max): a drift run waits for any
+#      in-flight production deploy and reads the box after it, and a re-run's
+#      production job waits for it. A Deploy run's staging job has its own
+#      queue, so the gate may see a run still in progress: it reads that as
+#      pending, never as a verdict. remote-deploy.sh also holds a box-level
+#      flock per app directory, whatever started it.
 #   2. STAGING GATE. A heal deploys only a commit whose own staging job passed.
 #      scripts/deploy/drift-gate.js asks GitHub, because the box cannot see it.
 #   3. ROLLBACK. The heal runs .github/actions/vps-deploy with
@@ -54,7 +57,8 @@ on:
     - cron: "*/30 * * * *"
   workflow_dispatch:
 
-# ⚠️ SAME literal group as deploy.yml, on purpose. See the note there.
+# ⚠️ SAME literal group as deploy.yml's production job, on purpose. See the note
+# there. Staging deploys have their own queue and do not wait for a drift run.
 concurrency:
   group: deploy-refs/heads/main
   cancel-in-progress: false

@@ -10,10 +10,11 @@ name: Deploy
 # approved: this workflow's production job (a manual dispatch or rollback too)
 # and deploy-drift.yml's heal. The gate lives in the environment's settings, so
 # nothing in this file changed with it. Agreed flow: test locally -> merge ->
-# test staging -> approve production. A run waiting for approval holds the
-# deploy queue (concurrency, below), so reject a stale one rather than leave it
-# pending. From 2026-08-25 until then there was no gate and production
-# auto-deployed. Approval gates the start only — nobody watches a deploy finish
+# test staging -> approve production. Staging and production have separate
+# queues (concurrency, below), so a production job waiting for approval holds
+# only the production queue: later merges still deploy staging at once. Reject
+# a stale production job rather than leave it pending. From 2026-08-25 until
+# 2026-09-25 there was no gate and production auto-deployed. Approval gates the start only — nobody watches a deploy finish
 # — so three things still carry the safety:
 #
 #   1. staging is a hard prerequisite (`needs:`) — same box, same pm2, same Node
@@ -48,27 +49,31 @@ on:
         default: main
         type: string
 
+# ⚠️ TWO QUEUES, ONE PER ENVIRONMENT (since 2026-10-03): each job carries its
+# own concurrency group, and the workflow has none. A production job waiting for
+# approval used to hold one workflow-wide queue, so every later merge waited to
+# deploy even staging. Now:
+#   - `deploy-staging` queues the staging jobs. Each merge deploys staging as
+#     soon as the staging job before it has finished.
+#   - `deploy-refs/heads/main` queues the production jobs, and deploy-drift.yml
+#     uses the SAME literal group (workflow-level there). Concurrency groups are
+#     repository-wide, so a drift heal still waits for an in-flight production
+#     deploy, and a production deploy for a heal. The heal only ever deploys
+#     production's directory.
+# A staging and a production deploy may now run at the same time. They touch
+# different directories and pm2 processes, and the box lock is per directory
+# (scripts/deploy/remote-deploy.sh), so they never contend.
+#
 # ⚠️ cancel-in-progress is FALSE on purpose. Cancelling mid-flight can leave the
 # box between `git pull` and `pm2 restart`. Queue instead; a deploy is <1 min.
 #
-# ⚠️ The group is a LITERAL, and deploy-drift.yml uses the SAME one. Concurrency
-# groups are repository-wide, so this is what makes a drift heal wait for an
-# in-flight deploy (and a deploy wait for a heal) instead of running a second
-# deploy in the same directory. It was `deploy-${{ github.ref }}`, which is this
-# exact value for every push to main, so nothing changes for main. A dispatch
-# from another branch now queues too, since it touches the same box.
-#
-# ⚠️ `queue: max` (GitHub, 2026-05) keeps up to 100 runs waiting in FIFO order.
-# The default holds ONE pending run and CANCELS it when another arrives, which
-# in a group shared with deploy-drift.yml could cancel a queued deploy. The
+# ⚠️ `queue: max` (GitHub, 2026-05) keeps up to 100 jobs waiting in FIFO order.
+# The default holds ONE pending job and CANCELS it when another arrives, which
+# in the group shared with deploy-drift.yml could cancel a queued deploy. The
 # trade-off: a burst of merges deploys every commit in turn rather than only the
 # last one.
 # actionlint 1.7.12 predates the key and reports it as unexpected; GitHub
 # accepts it.
-concurrency:
-  group: deploy-refs/heads/main
-  cancel-in-progress: false
-  queue: max
 
 permissions:
   contents: read
@@ -83,6 +88,11 @@ jobs:
     if: github.event_name == 'push' || github.event.inputs.target == 'staging'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Staging's own queue (see the note above `permissions`).
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
+      queue: max
     environment:
       name: staging
     steps:
@@ -114,6 +124,12 @@ jobs:
       )
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Production's queue, shared with deploy-drift.yml (see the note above
+    # `permissions`).
+    concurrency:
+      group: deploy-refs/heads/main
+      cancel-in-progress: false
+      queue: max
     environment:
       name: production
       url: https://app.logisx.com
