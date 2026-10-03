@@ -188,8 +188,9 @@ function stagingVerdict(runs, jobsByRun, sha, annotationsByJob) {
 	// its PREVIOUS attempt's jobs, finished and maybe failed, and reading
 	// those as its verdict would alarm on (or re-run, or heal) a run that is
 	// about to answer for itself. While a drift run executes it holds the
-	// shared concurrency group, so any Deploy run it sees is either completed
-	// or queued behind it, and a queued one is on its way.
+	// concurrency group it shares with deploy.yml's production job, so a Deploy
+	// run it sees is completed, queued, or still in its staging job (staging
+	// has its own queue); any of those not completed is on its way.
 	// Never key this on the staging JOB's run_attempt instead: after a re-run
 	// of production alone, staging keeps attempt 1 in a run on attempt 2, and
 	// its pass must still count (the heal).

@@ -796,18 +796,33 @@ function sourcePins() {
 	}
 	ok(gate.actionFor("verified-record-inconsistent") === "alarm", "§7 an inconsistent verified-deploy record alarms; it never heals");
 
-	const conc = (s) => {
-		const m = /\nconcurrency:\n((?: {2}.*\n)+)/.exec(noComments(s));
-		const block = m ? m[1] : "";
+	// A workflow-level concurrency block (indent 0), or a job's (indent 4).
+	const concBlock = (block) => {
 		const g = /group:\s*(\S+)/.exec(block);
 		return { group: g && g[1], queueMax: /\bqueue:\s*max\b/.test(block), noCancel: /cancel-in-progress:\s*false/.test(block) };
 	};
-	const cd = conc(deploy);
+	const conc = (s) => {
+		const m = /\nconcurrency:\n((?: {2}.*\n)+)/.exec(noComments(s));
+		return m ? concBlock(m[1]) : { group: null, queueMax: false, noCancel: false };
+	};
+	const jobConc = (s, job) => {
+		const jm = new RegExp(`\\n {2}${job}:\\n((?: {4,}.*\\n|\\s*\\n)+)`).exec(noComments(s));
+		const m = jm && /\n {4}concurrency:\n((?: {6}.*\n)+)/.exec(`\n${jm[1]}`);
+		return m ? concBlock(m[1]) : { group: null, queueMax: false, noCancel: false };
+	};
+	// Staging and production have separate queues, so a production job waiting
+	// for approval never holds a staging deploy back. Production's queue is the
+	// one the drift heal shares.
+	const cdWorkflow = conc(deploy);
+	const cd = jobConc(deploy, "production");
+	const cs = jobConc(deploy, "staging");
 	const cr = conc(drift);
-	ok(cd.group && cd.group === cr.group, `§7 deploy.yml and deploy-drift.yml must share ONE concurrency group (got ${cd.group} vs ${cr.group})`);
+	ok(cdWorkflow.group === null, `§7 deploy.yml has no workflow-level concurrency: one queue there makes a production job waiting for approval hold every later staging deploy (got ${cdWorkflow.group})`);
+	ok(cd.group && cd.group === cr.group, `§7 deploy.yml's production job and deploy-drift.yml must share ONE concurrency group (got ${cd.group} vs ${cr.group})`);
 	ok(cd.group && !/\$\{\{/.test(cd.group), "§7 the shared group is a literal, not an expression that could resolve differently per workflow");
-	ok(cd.queueMax && cr.queueMax, "§7 both workflows set queue: max — the default cancels a pending run, so a drift tick could cancel a queued deploy");
-	ok(cd.noCancel && cr.noCancel, "§7 neither workflow may cancel an in-progress deploy");
+	ok(cs.group && !/\$\{\{/.test(cs.group) && cs.group !== cd.group, `§7 deploy.yml's staging job has its own literal queue, not production's (got ${cs.group}; production ${cd.group})`);
+	ok(cd.queueMax && cs.queueMax && cr.queueMax, "§7 both deploy jobs and the drift workflow set queue: max — the default cancels a pending job, so a drift tick could cancel a queued deploy");
+	ok(cd.noCancel && cs.noCancel && cr.noCancel, "§7 nothing may cancel an in-progress deploy");
 
 	const d = noComments(drift);
 	ok(/node scripts\/deploy\/drift-gate\.js/.test(d), "§7 deploy-drift.yml runs the gate");
