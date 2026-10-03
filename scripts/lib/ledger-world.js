@@ -39,7 +39,8 @@ const LIFTED_REQUIRE_OK = (m) => m === "crypto" || /^\.\/lib\/[\w.-]+$/.test(m);
 //     its .env is the one the server runs with, so --env-file is refused;
 //   - "copy": a file under the system temp directory (a test fixture or a copy
 //     made for a rehearsal); the app directory's .env, or --env-file. Refused
-//     when the temp directory is "/" or holds the app directory.
+//     when the temp directory is "/", holds the app directory or sits beside it,
+//     and when the copy's folder holds a server.js or a .env.
 // Anything else is refused: a database in another directory may belong to
 // another deployment, whose flags and code are not this checkout's. The file
 // itself is resolved (links followed) and a file with more than one hard link
@@ -64,8 +65,13 @@ function dbScope(dbPath, root) {
 	const appDir = real(root);
 	if (dir === appDir) return { scope: "app", file };
 	const tmp = real(require("os").tmpdir());
-	const holdsApp = tmp === path.parse(tmp).root || appDir === tmp || appDir.startsWith(`${tmp}${path.sep}`);
-	if (!holdsApp && (dir === tmp || dir.startsWith(`${tmp}${path.sep}`))) return { scope: "copy", file };
+	const under = (p, base) => p === base || p.startsWith(`${base}${path.sep}`);
+	// A temp directory that is "/", holds the app directory, or sits beside it
+	// (where other deployments live) makes nothing a copy; nor is a folder that
+	// holds a server.js or a .env, which is an app directory.
+	const tmpUnusable = tmp === path.parse(tmp).root || under(appDir, tmp) || under(tmp, path.dirname(appDir));
+	const appLike = fs.existsSync(path.join(dir, "server.js")) || fs.existsSync(path.join(dir, ".env"));
+	if (!tmpUnusable && !appLike && under(dir, tmp)) return { scope: "copy", file };
 	throw new Error(`refusing ${dbPath}: a script opens its own app directory's database (${root}) or a copy under the temp directory, nothing else`);
 }
 

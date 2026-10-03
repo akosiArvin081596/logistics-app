@@ -56689,6 +56689,10 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				}
 			}
 			for (const k of Object.keys(invByDriver)) driverEntry(k);
+			// The rows' money to the cent, so they add up to the headline exactly.
+			// The invoice variance stays in whole dollars: under a dollar reads
+			// "matched", as before.
+			const toCent = (dollars) => Math.round(Number(dollars || 0) * 100) / 100;
 			const monthDriverRows = [];
 			for (const [drv, e] of byDriver) {
 				const struct = payStructures[drv] || { payType: "fixed", payPercentage: 0 };
@@ -56702,12 +56706,12 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 					payPercentage: e.percentage || struct.payType === "percentage" ? struct.payPercentage : 0,
 					activeDays,
 					dailyRate: !e.percentage && activeDays ? Math.round((pay / activeDays) * 100) / 100 : 0,
-					pay: Math.round(pay),
-					revenue: Math.round(e.revenueCents / 100),
-					margin: Math.round((e.revenueCents - e.payCents) / 100),
+					pay,
+					revenue: e.revenueCents / 100,
+					margin: (e.revenueCents - e.payCents) / 100,
 					invoiceCount: inv ? inv.count : 0,
-					invoicedTotal: inv ? Math.round(inv.invoiced) : 0,
-					adjustments: inv ? Math.round(inv.adjustments) : 0,
+					invoicedTotal: inv ? toCent(inv.invoiced) : 0,
+					adjustments: inv ? toCent(inv.adjustments) : 0,
 					variance: inv ? Math.round(inv.invoiced - pay) : null,
 				});
 			}
@@ -56721,8 +56725,8 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 					isUnassigned: true,
 					payType: "", payPercentage: 0, activeDays: 0, dailyRate: 0,
 					pay: 0,
-					revenue: Math.round(unassignedRevenueCents / 100),
-					margin: Math.round(unassignedRevenueCents / 100),
+					revenue: unassignedRevenueCents / 100,
+					margin: unassignedRevenueCents / 100,
 					invoiceCount: 0, invoicedTotal: 0, adjustments: 0, variance: null,
 				});
 			}
@@ -56731,9 +56735,9 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 					name: "Settlement adjustment",
 					isSettlementAdjustment: true,
 					payType: "", payPercentage: 0, activeDays: 0, dailyRate: 0,
-					pay: Math.round(settlementAdjustment.byFigure.driverPay),
-					revenue: Math.round(settlementAdjustment.revenue),
-					margin: Math.round(settlementAdjustment.revenue - settlementAdjustment.byFigure.driverPay),
+					pay: toCent(settlementAdjustment.byFigure.driverPay),
+					revenue: toCent(settlementAdjustment.revenue),
+					margin: toCent(settlementAdjustment.revenue - settlementAdjustment.byFigure.driverPay),
 					invoiceCount: 0, invoicedTotal: 0, adjustments: 0, variance: null,
 				});
 			}

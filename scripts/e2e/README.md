@@ -65,7 +65,7 @@ What it covers today, by section (`ONLY` picks them):
   Agreement and the Commercial Vehicle Lease on the signature page, sign all three documents, and open both again from
   the review ("Signed — View Document"). Each preview PDF carries the default 50/50 terms and no `AMENDMENT`, and the
   master's §3.3 and the lease's §2.01 read the same for A and B. Nothing is submitted (the read-only W-9 check,
-  `POST /api/public/investor-w9-check`, is let through as a non-write). No sign-in and no creds file; local and staging.
+  `POST /api/public/investor-w9-check`, is let through as a non-write). No sign-in and no logins file; local and staging.
   `ONLY=terms STEPS=T0`.
 - **Per-investor payment terms (T1–T11).** The Super Admin creates a split and a lease invite link on `/investors`
   (T1, T2; "2,000" is refused inline). An anonymous applicant who opens a link sees the terms read-only and the
@@ -176,7 +176,9 @@ expected to FAIL exactly the fix rows.
     Table, of Job Tracking and of Job Details. It plants a Payments Table row for a synthetic load (`QA-RC1-<timestamp>`)
     and checks that the server lists it. After the import it puts each of those rows back from its snapshot, when the
     row holds that load, and re-reads it (see the money-path section).
-- **Logins are never printed.** The creds file (`0600`) is read, never echoed. The scripts print ids and booleans only.
+- **Passwords are never printed or written to a file.** They live in the macOS Keychain (service `logisx-e2e-local`,
+  one account per login; `keychain.cjs`) and are read into memory when a run starts. The logins file (`0600`) holds
+  names and ids only. The scripts print ids and booleans only.
 - **Identity documents are masked** in saved screenshots (`MASK_PII`, on by default). The live headed page is not masked.
 - **Stop by PID only.** `stop-server.sh` kills the one process `boot-server.sh` recorded. It does so only while that process
   is still a `server.js` running from the worktree it was booted from. Never `pkill`: other worktrees run servers too.
@@ -203,7 +205,7 @@ npm --prefix scripts/e2e ci      # playwright-core only, pinned; the root and cl
 | `paths.cjs` | Where everything is: this checkout, the main checkout, the installs, the work dir. Every other script resolves through it. `node scripts/e2e/paths.cjs work-dir` prints the work dir. It also holds the one copy of the private-directory rule (`assertPrivateDir()`: owned by this user, closed to group and other), which the work dir and the fake Gmail's capture folder are both held to. Requiring it has no effect, so the fake can load it while it is preloaded. |
 | `setup-db.cjs` | Makes a fresh private copy of the main checkout's `app.db` in the work dir and sets five logins on the copy. |
 | `plant-before-boot.cjs` | Plants what B1 needs in a copy BEFORE a server boots on it (one expense), or removes it (`--remove`). |
-| `verify-creds.cjs` | Confirms the creds file matches a copy. Prints booleans and ids only. |
+| `verify-creds.cjs` | Confirms the logins file matches a copy. Prints booleans and ids only. |
 | `prep-worktree.sh` | Makes a worktree bootable: links the main checkout's installs, `.env` and key, then builds `client/dist`. With `E2E_LINK_PODS=1` it also links the main checkout's POD files into `uploads/`, for the invoice section. |
 | `boot-server.sh` / `stop-server.sh` | Start a local server on a copy with every outbound effect off; stop exactly that PID. |
 | `fake-gmail.cjs` | A stand-in for Gmail, preloaded into a server booted with `E2E_FAKE_GMAIL=1`: it captures each IMAP APPEND in the work dir and refuses SMTP. Its `readCapturedDrafts(dir)` reads the captures back (I14, I14b). |
@@ -218,7 +220,7 @@ directory outside every checkout.
 | In the work dir | What it is |
 |---|---|
 | `*.db` (+ `-wal`, `-shm`) | **Private copies of an unsanitized production database, PII included.** Never copy them elsewhere. |
-| `creds.json` (`0600`) | The five logins: Super Admin, Driver, two Investors (`investor`, `investor2`), Dispatcher. **Never print or paste it.** |
+| `logins.json` (`0600`) | The five logins' names and ids: Super Admin, Driver, two Investors (`investor`, `investor2`), Dispatcher. No passwords: those are in the Keychain. |
 | `shots/<tag>/`, `results-<tag>.md` | A run's screenshots and verdict table. The screenshots show real data. |
 | `server-<port>.log`, `server-<port>.pid` | The server's output, and the PID `stop-server.sh` stops. |
 | `fake-gmail/` (`0700`) | The drafts the fake Gmail captured (`E2E_FAKE_GMAIL=1`): each holds a real recipient, and the real invoice and POD PDFs of the load under test. |
@@ -317,8 +319,8 @@ REF_A=main REF_B=HEAD FLAG=on fnm exec --using=22.23.2 node scripts/e2e/payout-p
   caption (none on the timing-critical ones), 1400×900 admin and investor windows, and a 430×900 driver window.
 - A BEFORE baseline is the same run on the build without the fix, with `PHASE=before`. Use a second copy from
   `setup-db.cjs`, so both phases start from the same data.
-- The parts can run side by side on different ports, each on its own copy (`setup-db.cjs` reuses the creds file's
-  passwords, so one creds file serves every copy). Start the part that plants values (part 1) last: a run refuses to
+- The parts can run side by side on different ports, each on its own copy (`setup-db.cjs` reuses the Keychain's
+  passwords, so one set of logins serves every copy). Start the part that plants values (part 1) last: a run refuses to
   start while `plant-journal.json` exists.
 
 ⚠️ **Login limiter:** `POST /api/auth/login` allows 20 attempts per 15 minutes per server process, counting every
@@ -343,16 +345,16 @@ planted cases SKIP. They are never silently mis-tested.
 - Super Admin: `scripts/reset-super-admin-password.js` runs on the copy. It also clears the copy's sessions.
 - Driver: a Driver whose `driver_name` matches (case-insensitively) the `assigned_driver` of exactly one truck with an
   image photo. The Driver must be `fully_onboarded` (or have no onboarding status), so the Kit tab renders, and their
-  application's `cdl_front` must be an image. The creds file's existing driver is kept while they still qualify;
+  application's `cdl_front` must be an image. The logins file's existing driver is kept while they still qualify;
   otherwise the lowest user id wins.
-- Investor: the `Investor` with the lowest id. With none, the creds file has no `investor` entry and R8 SKIPs.
+- Investor: the `Investor` with the lowest id. With none, the logins file has no `investor` entry and R8 SKIPs.
 - Second Investor (`investor2`): the `Investor` with the next-lowest id. With fewer than two, there is no `investor2`
   entry and M1 SKIPs.
 - Dispatcher: the `Dispatcher` with the lowest id. With none, there is no `dispatcher` entry, and S2a, S3, S5b, S5c, S7
   and D1–D3 SKIP.
 - The Driver, both Investors and the Dispatcher each get a random password (a bcryptjs hash,
   `must_change_password = 0`) on the copy only.
-- An existing creds file's passwords are reused, so one creds file works for every copy. The script prints the ids it
+- The Keychain's passwords are reused, so one set of logins works for every copy. The script prints the ids it
   picked, never a password.
 
 ### `plant-before-boot.cjs <db> [--force | --remove]`
@@ -361,7 +363,7 @@ B1 shows the startup expense backfill, which runs once, as the server starts, so
 the boot. The script plants the case the backfill's spacing step exists for: a receipt filed under a driver's own
 account spelling, while the truck assignment covering its date stores the name with a different spacing.
 
-- **Driver:** a Driver account whose name has two words. The creds file's driver is preferred, else the lowest-id
+- **Driver:** a Driver account whose name has two words. The logins file's driver is preferred, else the lowest-id
   Driver account that qualifies. No other account's name reads as the same driver, and no account, directory row or
   assignment holds the name with its space doubled. The account has a truck assignment stored under exactly its own
   spelling that covers today.
@@ -449,12 +451,12 @@ whose working directory is the worktree it was booted from. Otherwise it kills n
 ## Staging
 
 ```bash
-BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE=after OUT_TAG=staging \
+BASE_URL=https://staging-app.logisx.com LOGINS_FILE="$W/logins-staging.json" PHASE=after OUT_TAG=staging \
   fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
 ```
 
 - **No `DB_PATH`:** nothing can be planted in a remote database. Steps 10a–e, 11b–f, R3a–b, R15 and R16 SKIP, and so
-  does R8 when the creds file has no `investor` entry. M1 SKIPs too (local only: the notice is off on staging), and so
+  does R8 when the logins file has no `investor` entry. M1 SKIPs too (local only: the notice is off on staging), and so
   do E1, N1, N1b, F1, E2, B1 and RC1 (RC1 and F1 because they write the sheet, which only a local run may). P1 runs on
   a real driver (see the money-path section). I8 SKIPs (it plants the saved note), and I7 fills the form but SKIPs
   its Approve unless `E2E_INVOICE_APPROVE=1`: an approve creates a real Gmail draft wherever the server has a mail
@@ -468,17 +470,18 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
   `PASS (vacuous)` (the route answers, with no files to return).
 - **Safe there:** R12 and D1–D3 only read; the sign-out section only signs in and out. R13 and R14 edit and delete
   `QA-TEST-*` trucks, like the rest of the truck section.
-- **Creds file:** it has `creds.json`'s shape, with staging logins:
-  `{"superAdmin": {"username", "password", "userId"}, "driver": {…}, "investor": {…}, "dispatcher": {…}}`.
-  `investor` and `dispatcher` are optional. Keep it in the work dir, `0600`.
-- **`ONLY=terms STEPS=T0` needs no creds file.** It signs nobody in, so a run of only login-free steps starts without
-  one (point `CREDS_FILE` at a path that does not exist to prove it). It writes nothing on staging.
-- **`ONLY=terms` T1–T11 need only `superAdmin`** in the creds file: T7 makes its own throwaway test Investor and deletes
+- **Logins file:** `logins.json`'s shape, with staging names, and each entry naming its Keychain item, for example
+  `{"superAdmin": {"username": "e2e_playwright", "keychain": {"service": "logisx-staging"}}}` (the staging
+  automation account). No passwords: `e2e.mjs` reads each from the Keychain when it starts. `driver`, `investor` and
+  `dispatcher` are optional. Keep it in the work dir, `0600`.
+- **`ONLY=terms STEPS=T0` needs no logins file.** It signs nobody in, so a run of only login-free steps starts without
+  one (point `LOGINS_FILE` at a path that does not exist to prove it). It writes nothing on staging.
+- **`ONLY=terms` T1–T11 need only `superAdmin`** in the logins file: T7 makes its own throwaway test Investor and deletes
   it. They write on staging: the invites T1, T2 and T11 create (revoked by Tc unless used), T7's user and T10's
   investor record (both deleted), and their audit lines (which stay). T8 SKIPs there unless `E2E_TERMS_SUBMIT=1`; with
   it, T8 submits a real application (which also sends staging's new-application emails wherever it has a mail target),
   and Tc can only soft-delete it. Run T0 and T1–T11 at least 15 minutes apart (the preview limiter, see the terms section).
-- **`ONLY=report` needs only `superAdmin`** in the creds file. Without `DB_PATH`, R3 scores its status codes only and
+- **`ONLY=report` needs only `superAdmin`** in the logins file. Without `DB_PATH`, R3 scores its status codes only and
   Rx the browser's requests only (see the report section). It creates nothing on staging: it writes the preview's
   audit lines and whatever the payout ledger's own refresh writes when its Payouts page is opened.
 - ⚠️ **A full run writes on staging.** It creates, edits and deletes `QA-TEST-*` trucks, and their audit rows stay.
@@ -503,7 +506,8 @@ BASE_URL=https://staging-app.logisx.com CREDS_FILE="$W/creds-staging.json" PHASE
 | `E2E_FAKE_GMAIL=1` | For `boot-server.sh` **and** `e2e.mjs`: boot the server with the fake Gmail, and let I14 and I14b run against it (local only, with `DB_PATH`). Unset: they SKIP. |
 | `E2E_FAKE_GMAIL_DIR` | For `e2e.mjs`: where the fake's captures are read. Default: `<work dir>/fake-gmail`, where `boot-server.sh` points the server. It must be inside the work dir. |
 | `E2E_BISON_LOAD` | The Bison steps' load (IB, I10b, I10c, I11c, I13f): a delivered Bison load with a POD. Default: `30080873`. |
-| `CREDS_FILE` | The logins. Default: `<work dir>/creds.json`. Not needed when every section given is login-free (`ONLY=terms STEPS=T0`). T1–T11 need only its `superAdmin`. |
+| `LOGINS_FILE` | The logins' names and ids (no passwords). Default: `<work dir>/logins.json`. Not needed when every section given is login-free (`ONLY=terms STEPS=T0`). T1–T11 need only its `superAdmin`. |
+| `E2E_KEYCHAIN_SERVICE` | The Keychain service `setup-db.cjs` stores the local logins' passwords under, and `e2e.mjs` reads them from. Default: `logisx-e2e-local`. An entry's own `keychain` item wins. |
 | `E2E_WORK_DIR` | The work dir. Default: `$TMPDIR/logisx-e2e`. It must be private, outside every checkout, and contain none. |
 | `SOURCE_DB` | `setup-db.cjs`'s source, opened read-only. Default: the main checkout's `app.db`. |
 | `APP_DIR` | The checkout whose `node_modules` (better-sqlite3, bcryptjs, puppeteer, dotenv) and `scripts/` are used. Default: this checkout once it has installs (or `prep-worktree.sh`'s links), else the main checkout. |
@@ -720,7 +724,7 @@ email count is the sharper signal. Everything here is read-only, and safe on sta
 ## The maintenance notice section (M1)
 
 `ONLY=maintenance`, local only, on a server booted with `E2E_MAINTENANCE_NOTICE=1`. It SKIPs when the notice is off
-(`GET /api/config/maintenance`), when its audience has no investors, or without the creds file's `investor2`.
+(`GET /api/config/maintenance`), when its audience has no investors, or without the logins file's `investor2`.
 
 | Step | How it is shown | Expected (AFTER) |
 |---|---|---|
@@ -1093,7 +1097,7 @@ what was missing.
 - **Sign-ins:** 2 (the Super Admin and the test Investor). `GET /api/public/investor-invite` (60 per 15 minutes) is
   called a handful of times, and so is the read-only `POST /api/public/investor-w9-check` (60 per 15 minutes).
 
-**Staging.** The creds file needs only `superAdmin`. Everything but T8 runs there as it does locally. T8 SKIPs unless
+**Staging.** The logins file needs only `superAdmin`. Everything but T8 runs there as it does locally. T8 SKIPs unless
 `E2E_TERMS_SUBMIT=1`: it writes a real application, which also sends staging's new-application emails wherever staging
 has a mail target, and Tc can only soft-delete it.
 
@@ -1138,7 +1142,7 @@ the section touches is one it creates, named `QA-TEST-INV-<stamp>-…` with emai
   password in memory only, and **no driver name**, so neither its create nor its delete syncs the Carrier Database
   sheet, and no finance row matches its cascade name), and application D with its email.
 
-No real investor is signed in as, edited, uploaded for or accepted, and the creds file's investor logins are not used.
+No real investor is signed in as, edited, uploaded for or accepted, and the logins file's investor logins are not used.
 An acceptance's temporary password is never written out; in the screenshot of the credentials dialog it is masked.
 Saved screenshots also blur, for the moment of the shot, every table row that is not QA-TEST data. A blur rather than
 a mask, because a mask box is drawn over a row even where an open dialog covers it.
@@ -1437,12 +1441,13 @@ row (owner 5, 2026-06, paid and finalized) differs from today's recompute: a fro
 ```bash
 fnm exec --using=22.23.2 scripts/e2e/stop-server.sh <port>
 W="$(node scripts/e2e/paths.cjs work-dir)" && echo "$W"
-find "$W" -maxdepth 1 -type f \( -name '*.db' -o -name '*.db-*' -o -name 'creds*.json' -o -name 'results-*.md' \
+find "$W" -maxdepth 1 -type f \( -name '*.db' -o -name '*.db-*' -o -name 'creds*.json' -o -name 'logins*.json' -o -name 'results-*.md' \
   -o -name 'parity-*.md' -o -name 'server-*.log' -o -name 'plant-journal.json' \) -print -delete
 rm -rf -- "$W/shots"   # real data: the dashboard, truck lists, the driver's truck photo, the Kit page (identity documents masked)
 rm -rf -- "$W/fake-gmail"   # the drafts the fake Gmail captured: a real recipient, and the load's invoice and POD PDFs
 ```
 
-The creds file's passwords exist only on the copies. In each worktree, the four symlinks and `client/dist` are gitignored;
+The local logins' passwords exist only on the copies and in the Keychain; remove them there with
+`for a in superAdmin driver investor investor2 dispatcher; do security delete-generic-password -s logisx-e2e-local -a "$a"; done`. In each worktree, the four symlinks and `client/dist` are gitignored;
 they can stay or go. So are the POD links `E2E_LINK_PODS=1` made; before removing a worktree, delete them
 (`find <worktree>/uploads -maxdepth 1 -type l -name '*_POD_*' -delete`) along with the four symlinks.

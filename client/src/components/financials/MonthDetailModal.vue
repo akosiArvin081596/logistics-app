@@ -37,28 +37,28 @@
             <div class="kpi-grid">
               <div class="kpi-card">
                 <div class="kpi-label">Revenue</div>
-                <div class="kpi-value">{{ fmt(detail.summary.revenue) }}</div>
+                <div class="kpi-value">{{ fmtCents(detail.summary.revenue) }}</div>
                 <div class="kpi-delta" :class="deltaClass(detail.deltas.revenue, false)">
                   {{ deltaText(detail.deltas.revenue, detail.deltas.revenuePct) }}
                 </div>
               </div>
               <div class="kpi-card">
                 <div class="kpi-label">Total Expenses</div>
-                <div class="kpi-value">{{ fmt(detail.summary.totalExpenses) }}</div>
+                <div class="kpi-value">{{ fmtCents(detail.summary.totalExpenses) }}</div>
                 <div class="kpi-delta" :class="deltaClass(detail.deltas.totalExpenses, true)">
                   {{ deltaText(detail.deltas.totalExpenses, detail.deltas.totalExpensesPct) }}
                 </div>
               </div>
               <div class="kpi-card">
                 <div class="kpi-label">Driver Pay</div>
-                <div class="kpi-value">{{ fmt(detail.summary.driverPay) }}</div>
+                <div class="kpi-value">{{ fmtCents(detail.summary.driverPay) }}</div>
                 <div class="kpi-delta" :class="deltaClass(detail.deltas.driverPay, true)">
                   {{ deltaText(detail.deltas.driverPay, null) }}
                 </div>
               </div>
               <div class="kpi-card" :class="detail.summary.netProfit >= 0 ? 'kpi-pos' : 'kpi-neg'">
                 <div class="kpi-label">Net Profit</div>
-                <div class="kpi-value">{{ fmt(detail.summary.netProfit) }}</div>
+                <div class="kpi-value">{{ fmtCents(detail.summary.netProfit) }}</div>
                 <div class="kpi-delta" :class="deltaClass(detail.deltas.netProfit, false)">
                   {{ deltaText(detail.deltas.netProfit, null) }}
                 </div>
@@ -214,14 +214,14 @@
                     </td>
                     <td class="num">{{ d.payType === 'percentage' || isSummaryRow(d) ? '—' : d.activeDays }}</td>
                     <td class="num dim">{{ d.payType === 'percentage' || isSummaryRow(d) ? '—' : '$' + d.dailyRate + '/day' }}</td>
-                    <td class="num">{{ fmt(d.pay) }}</td>
-                    <td class="num pos">{{ fmt(d.revenue) }}</td>
-                    <td class="num" :class="d.margin >= 0 ? 'pos' : 'neg'">{{ fmt(d.margin) }}</td>
+                    <td class="num">{{ fmtCents(d.pay) }}</td>
+                    <td class="num pos">{{ fmtCents(d.revenue) }}</td>
+                    <td class="num" :class="d.margin >= 0 ? 'pos' : 'neg'">{{ fmtCents(d.margin) }}</td>
                     <td class="num dim">
                       <template v-if="d.invoiceCount">
-                        {{ fmt(d.invoicedTotal) }}
+                        {{ fmtCents(d.invoicedTotal) }}
                         <span v-if="d.adjustments" class="adj-note" :class="d.adjustments < 0 ? 'neg' : 'pos'">
-                          ({{ signedFmt(d.adjustments) }} adj)
+                          ({{ signedCents(d.adjustments) }} adj)
                         </span>
                       </template>
                       <template v-else>—</template>
@@ -292,7 +292,7 @@
 <script setup>
 import { computed, watch, onBeforeUnmount } from 'vue'
 import { useFinancialsStore } from '../../stores/financials'
-import { formatCurrency as fmt } from '../../utils/format'
+import { formatCurrency as fmt, formatCurrencyCents as fmtCents } from '../../utils/format'
 import { monthLabel } from '../../lib/monthLabel'
 
 const props = defineProps({
@@ -363,6 +363,10 @@ const trend = computed(() => {
 function signedFmt(n) {
   const v = Number(n || 0)
   return (v >= 0 ? '+' : '') + fmt(v)
+}
+function signedCents(n) {
+  const v = Number(n || 0)
+  return (v >= 0 ? '+' : '') + fmtCents(v)
 }
 function deltaText(abs, pct) {
   const base = `${signedFmt(abs)} vs ${prevShort.value}`

@@ -19,13 +19,17 @@
 //    the maintenance notice section), a random password the same way (on the COPY).
 // 5. Gives the lowest-id Dispatcher a random password the same way (on the COPY);
 //    the E2E's sign-out section (ONLY=signout) signs in as them.
-// 6. Writes the logins to CREDS_FILE (chmod 600). Passwords are never printed.
-//    An existing creds file's passwords (and driver, when it still qualifies) are
-//    reused, so one creds file serves every copy.
+// 6. Stores each password in the macOS Keychain (keychain.cjs: service
+//    logisx-e2e-local, one account per login) and writes the names and ids to
+//    the logins file (chmod 600, no passwords). Passwords are never printed or
+//    written to a file. The Keychain's passwords (and the logins file's driver,
+//    when they still qualify) are reused, so one set of logins serves every
+//    copy. An old creds.json, which held the passwords themselves, is deleted.
 //
 // Env:
 //   SOURCE_DB     source database, opened read-only (default: <main checkout>/app.db)
-//   CREDS_FILE    where to write the logins (default: <work dir>/creds.json)
+//   LOGINS_FILE   where to write the logins (default: <work dir>/logins.json)
+//   E2E_KEYCHAIN_SERVICE  the Keychain service (default: logisx-e2e-local)
 //   E2E_WORK_DIR  the work dir (default: $TMPDIR/logisx-e2e)
 //   APP_DIR       checkout whose node_modules + scripts/ are used (see paths.cjs)
 "use strict";
@@ -34,6 +38,7 @@ const fs = require("fs");
 const crypto = require("crypto");
 const { execFileSync } = require("child_process");
 const paths = require("./paths.cjs");
+const keychain = require("./keychain.cjs");
 
 function fail(msg, code = 2) {
 	console.error(`setup-db: ${msg}`);
@@ -53,25 +58,32 @@ try {
 	SRC_DB = fs.realpathSync(process.env.SOURCE_DB || path.join(paths.mainCheckout(), "app.db"));
 	Database = paths.appRequire("better-sqlite3");
 	bcrypt = paths.appRequire("bcryptjs");
+	keychain.requireSecurity();
 } catch (e) {
 	fail(e.message);
 }
 const APP_DIR = paths.appDir();
-const CREDS_FILE = process.env.CREDS_FILE || path.join(WORK, "creds.json");
+const LOGINS_FILE = keychain.loginsFile(WORK);
 if (SRC_DB === destAbs) fail("refusing: the destination is the source database");
 console.log(`work dir: ${WORK}`);
+for (const f of keychain.removeLegacyCreds(WORK)) console.log(`deleted ${f} (it held passwords; they live in the Keychain now)`);
 
 function randomPassword() {
 	// 24 url-safe chars, >= 16 as the reset script requires.
 	return crypto.randomBytes(18).toString("base64url");
 }
 
-// Reuse the logins of an existing creds file, so one file serves every scratch
-// copy. Passwords are never printed.
+// Reuse the logins of an existing logins file, with their Keychain passwords,
+// so one set of logins serves every scratch copy. Passwords are never printed.
 let previous = null;
 try {
-	previous = JSON.parse(fs.readFileSync(CREDS_FILE, "utf8"));
+	previous = JSON.parse(fs.readFileSync(LOGINS_FILE, "utf8"));
 } catch { /* first run */ }
+// The Keychain password of `key` when the logins file's entry is the same user.
+const reuse = (key, userId) => {
+	if (!previous?.[key] || (userId !== undefined && previous[key].userId !== userId)) return null;
+	return keychain.readPassword(keychain.itemFor(key, null));
+};
 
 (async () => {
 	for (const suffix of ["", "-wal", "-shm"]) {
@@ -90,7 +102,7 @@ try {
 	console.log(`backup: ok (source opened read-only) -> ${destAbs}`);
 
 	// ---- 2. super_admin password via the repo script (on the COPY) ----
-	const superPassword = previous?.superAdmin?.password || randomPassword();
+	const superPassword = reuse("superAdmin") || randomPassword();
 	const out = execFileSync(process.execPath, [path.join(APP_DIR, "scripts", "reset-super-admin-password.js"), destAbs], {
 		env: { ...process.env, NEW_PASSWORD: superPassword },
 		encoding: "utf8",
@@ -133,7 +145,7 @@ try {
 	const pick = good.find((c) => c.user_id === previous?.driver?.userId) || good[0];
 
 	// ---- 4. driver password (on the COPY) ----
-	const driverPassword = (previous?.driver?.userId === pick.user_id && previous?.driver?.password) || randomPassword();
+	const driverPassword = reuse("driver", pick.user_id) || randomPassword();
 	const hash = bcrypt.hashSync(driverPassword, 10);
 	if (!bcrypt.compareSync(driverPassword, hash)) throw new Error("bcrypt self-check failed");
 	const r = db.prepare("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ? AND role = 'Driver'").run(hash, pick.user_id);
@@ -144,11 +156,11 @@ try {
 	// notice section, M1, needs two people taking turns in one tab). Same
 	// treatment as the driver: a bcryptjs hash of a random password and
 	// must_change_password = 0, on the copy only. No Investor at all →
-	// creds.investor is omitted and the E2E's R8 SKIPs; fewer than two →
-	// creds.investor2 is omitted and M1 SKIPs.
+	// logins.investor is omitted and the E2E's R8 SKIPs; fewer than two →
+	// logins.investor2 is omitted and M1 SKIPs.
 	const invRows = db.prepare("SELECT id, username FROM users WHERE role = 'Investor' ORDER BY id LIMIT 2").all();
 	const investorLogin = (row, key) => {
-		const pw = (previous?.[key]?.userId === row.id && previous?.[key]?.password) || randomPassword();
+		const pw = reuse(key, row.id) || randomPassword();
 		const h = bcrypt.hashSync(pw, 10);
 		if (!bcrypt.compareSync(pw, h)) throw new Error(`bcrypt self-check failed (${key})`);
 		const ri = db.prepare("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ? AND role = 'Investor'").run(h, row.id);
@@ -158,24 +170,24 @@ try {
 	let investor = null;
 	let investor2 = null;
 	if (!invRows.length) {
-		console.log("investor: no user with role 'Investor' — creds.investor omitted (R8 and M1 will SKIP)");
+		console.log("investor: no user with role 'Investor' — logins.investor omitted (R8 and M1 will SKIP)");
 	} else {
 		investor = investorLogin(invRows[0], "investor");
 		if (invRows[1]) investor2 = investorLogin(invRows[1], "investor2");
-		else console.log("investor2: only one user with role 'Investor' — creds.investor2 omitted (M1 will SKIP)");
+		else console.log("investor2: only one user with role 'Investor' — logins.investor2 omitted (M1 will SKIP)");
 	}
 
 	// ---- 6. dispatcher login (on the COPY) ----
 	// The Dispatcher with the lowest id, treated exactly like the Investor: a
 	// bcryptjs hash of a random password and must_change_password = 0, on the copy
-	// only. No Dispatcher → creds.dispatcher is omitted and the sign-out section's
+	// only. No Dispatcher → logins.dispatcher is omitted and the sign-out section's
 	// Dispatcher steps (S2a, S3, S5b, S7, D1-D3) SKIP.
 	const disp = db.prepare("SELECT id, username FROM users WHERE role = 'Dispatcher' ORDER BY id LIMIT 1").get();
 	let dispatcher = null;
 	if (!disp) {
-		console.log("dispatcher: no user with role 'Dispatcher' — creds.dispatcher omitted (S2a, S3, S5b, S7 and D1-D3 will SKIP)");
+		console.log("dispatcher: no user with role 'Dispatcher' — logins.dispatcher omitted (S2a, S3, S5b, S7 and D1-D3 will SKIP)");
 	} else {
-		const dispPassword = (previous?.dispatcher?.userId === disp.id && previous?.dispatcher?.password) || randomPassword();
+		const dispPassword = reuse("dispatcher", disp.id) || randomPassword();
 		const dispHash = bcrypt.hashSync(dispPassword, 10);
 		if (!bcrypt.compareSync(dispPassword, dispHash)) throw new Error("bcrypt self-check failed (dispatcher)");
 		const rd = db.prepare("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ? AND role = 'Dispatcher'").run(dispHash, disp.id);
@@ -184,28 +196,31 @@ try {
 	}
 	db.close();
 
-	const creds = {
-		createdAt: new Date().toISOString(),
-		dbs: [...new Set([...(previous?.dbs || (previous?.db ? [previous.db] : [])), destAbs])],
-		superAdmin: { username: "super_admin", password: superPassword, userId: sa ? sa.id : null },
-		driver: {
-			username: pick.username,
-			password: driverPassword,
-			userId: pick.user_id,
-			truckId: pick.truck_id,
-			applicationId: pick.application_id,
-		},
-		...(investor ? { investor } : {}),
-		...(investor2 ? { investor2 } : {}),
-		...(dispatcher ? { dispatcher } : {}),
+	// Passwords to the Keychain (each read back), then the names and ids to the
+	// logins file, so the file never names a login the Keychain cannot answer.
+	const withPassword = {
+		superAdmin: [{ username: "super_admin", userId: sa ? sa.id : null }, superPassword],
+		driver: [{ username: pick.username, userId: pick.user_id, truckId: pick.truck_id, applicationId: pick.application_id }, driverPassword],
+		...(investor ? { investor: [{ username: investor.username, userId: investor.userId }, investor.password] } : {}),
+		...(investor2 ? { investor2: [{ username: investor2.username, userId: investor2.userId }, investor2.password] } : {}),
+		...(dispatcher ? { dispatcher: [{ username: dispatcher.username, userId: dispatcher.userId }, dispatcher.password] } : {}),
 	};
-	fs.writeFileSync(CREDS_FILE, JSON.stringify(creds, null, 2) + "\n", { mode: 0o600 });
-	fs.chmodSync(CREDS_FILE, 0o600);
+	const logins = {
+		createdAt: new Date().toISOString(),
+		dbs: [...new Set([...(previous?.dbs || []), destAbs])],
+	};
+	for (const [key, [entry, pw]] of Object.entries(withPassword)) {
+		keychain.storePassword(keychain.itemFor(key, null), pw);
+		logins[key] = entry;
+	}
+	fs.writeFileSync(LOGINS_FILE, JSON.stringify(logins, null, 2) + "\n", { mode: 0o600 });
+	fs.chmodSync(LOGINS_FILE, 0o600);
 	console.log(`driver chosen: user id ${pick.user_id}, truck id ${pick.truck_id}, application id ${pick.application_id}`);
 	if (investor) console.log(`investor chosen: user id ${investor.userId} (lowest-id Investor)`);
 	if (investor2) console.log(`investor2 chosen: user id ${investor2.userId} (next-lowest-id Investor)`);
 	if (dispatcher) console.log(`dispatcher chosen: user id ${dispatcher.userId} (lowest-id Dispatcher)`);
-	console.log(`creds written (0600): ${CREDS_FILE}`);
+	console.log(`passwords stored in the Keychain (service ${keychain.DEFAULT_SERVICE()}, ${Object.keys(withPassword).join(", ")})`);
+	console.log(`logins written (0600, no passwords): ${LOGINS_FILE}`);
 })().catch((err) => {
 	console.error("setup-db: setup failed:", err.message);
 	process.exit(1);

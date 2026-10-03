@@ -25,7 +25,7 @@
 //   - b1-plant.json (0600, in the work dir) records the expense, assignment and
 //     account ids, never a name. The run's B1 step, --remove and --force put the
 //     assignment's spelling back from the account's own name.
-// The harness driver (creds.json) is preferred; otherwise the lowest-id Driver
+// The harness driver (logins.json) is preferred; otherwise the lowest-id Driver
 // account that qualifies. The run (ONLY=moneypath, STEPS=B1) finds the row by its
 // load_id and description, reads what the boot made of it, shows it on the
 // Expenses page and deletes it. Nothing else is written, and nothing is printed
@@ -132,7 +132,7 @@ function run() {
 	if (lock && String(lock.status) === "locked") return { code: 2, msg: `refusing: ${month} is finalized (period_locks), and the backfill leaves finalized months alone` };
 
 	let creds = null;
-	try { creds = JSON.parse(fs.readFileSync(process.env.CREDS_FILE || path.join(WORK, "creds.json"), "utf8")); } catch { /* no creds: any Driver */ }
+	try { creds = JSON.parse(fs.readFileSync(process.env.LOGINS_FILE || path.join(WORK, "logins.json"), "utf8")); } catch { /* no logins file: any Driver */ }
 	const users = db.prepare("SELECT id, driver_name FROM users WHERE role = 'Driver' AND COALESCE(driver_name, '') != '' ORDER BY id").all();
 	const preferred = creds?.driver?.userId;
 	users.sort((a, b) => (a.id === preferred ? -1 : b.id === preferred ? 1 : a.id - b.id));
