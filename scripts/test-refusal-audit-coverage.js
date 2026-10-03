@@ -567,7 +567,7 @@ const PURGE = (() => {
 	return (body.match(/"[a-z_]+"/g) || []).map((s) => s.slice(1, -1));
 })();
 const MUST_NOT_BE_PURGEABLE = [
-	"update_driver_pay_blocked", "delete_driver_blocked",
+	"update_driver_pay_blocked", "create_driver_pay_blocked", "delete_driver_blocked",
 	"update_user_blocked", "delete_user_blocked",
 	"create_truck_blocked", "update_truck_blocked", "delete_truck_blocked",
 	"driver_rename_blocked", "delete_sheet_rows_blocked", "delete_load_blocked",

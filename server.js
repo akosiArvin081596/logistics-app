@@ -1175,7 +1175,8 @@ function logAuditRefusal(req, action, entity, entityId, details, code) {
 //   • every `*_failed` action — those record a write that already started.
 //   • every success action — the entire rest of the table.
 //   • ⚠️ EVERY PERIOD-GUARD REFUSAL ACTION, and this was decided per action, not
-//     as a batch. `update_driver_pay_blocked`, `delete_driver_blocked`,
+//     as a batch. `update_driver_pay_blocked`, `create_driver_pay_blocked`,
+//     `delete_driver_blocked`,
 //     `update_user_blocked`, `delete_user_blocked`, `create_truck_blocked`,
 //     `update_truck_blocked`, `delete_truck_blocked`, `driver_rename_blocked`,
 //     `delete_sheet_rows_blocked`, `delete_load_blocked`,
@@ -8154,7 +8155,7 @@ app.get("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (req
 });
 
 // POST /api/drivers-directory — add driver (manual adds default to active)
-app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const { values, headers } = req.body;
 		if (!values || !headers) return res.status(400).json({ error: "values and headers required" });
@@ -8184,8 +8185,8 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (re
 		}
 		// ⚠️ PAY SETTINGS ARE SUPER ADMIN ONLY — see PAY_EDIT_ADMIN_ONLY. A row
 		// added by anyone else takes the column defaults (fixed, 0 %, $0 — the
-		// truck's rate applies); asking for anything else is refused before the
-		// INSERT, and this handler has no await.
+		// truck's rate applies); asking for anything else is refused here, before
+		// the handler's one await.
 		if (req.session.user.role !== "Super Admin") {
 			const payChanges = directoryPayChanges(null, { pay_type: insPayType, pay_percentage: insPayPct, pay_daily: insPayDaily });
 			if (payChanges.length) {
@@ -8244,6 +8245,20 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (re
 		if (isBuiltInPropertyName(insName)) {
 			return res.status(409).json({ error: `Cannot add the driver "${insName}": that name is reserved.`, code: "DRIVER_NAME_TAKEN" });
 		}
+		// The month-end lock (directoryCreateLockBlockers()) sizes the driver's
+		// history off Job Tracking, so a row that sets terms or a carrier reads it
+		// here, the handler's one await: the name check, the lock and the INSERT
+		// below run with none between them. A row at the defaults reads nothing.
+		const createRow = {
+			driver_name: insName, carrier_name: obj["Carrier Name"] || "",
+			pay_type: insPayType, pay_percentage: insPayPct, pay_daily: insPayDaily,
+		};
+		const atDefaults = !Object.keys(directoryChangedColumns(directoryDefaultRow(insName), createRow)).length;
+		let history;
+		if (!atDefaults) {
+			const jt = await getJobTrackingCached();
+			history = driverHistoryFloorMonth(insName, jt);
+		}
 		const dirExisting = findDriverNameClash(insName, { users: false });
 		if (dirExisting) {
 			return res.status(409).json({
@@ -8255,6 +8270,27 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (re
 				driverName: dirExisting.driver_name,
 				route: `PUT /api/drivers-directory/${dirExisting.id}`,
 			});
+		}
+
+		// A first row restates the finalized months this driver worked when it
+		// sets anything but the defaults; see directoryCreateLockBlockers(). The
+		// refusal is audited under `create_driver_pay_blocked`, beside the PUT's
+		// `update_driver_pay_blocked`.
+		if (!atDefaults) {
+			const createLock = directoryCreateLockBlockers(createRow, history);
+			const createAudit = {
+				action: "create_driver_pay_blocked", entity: "driver", entityId: auditText(insName, 100),
+				subject: `add ${auditText(insName, 100)}: pay_type ${insPayType}, pay_percentage ${insPayPct}, ` +
+					`pay_daily ${insPayDaily}, carrier ${JSON.stringify(auditText(createRow.carrier_name, 100))}`,
+			};
+			if (createLock.unreadable) return periodLockUnreadableResponse(req, res, "Adding a driver", createAudit);
+			if (createLock.blockers.length) {
+				return periodBlockedResponse(req, res,
+					`Cannot add ${insName}`,
+					createLock.blockers,
+					"A driver's pay structure has no per-month history, so these terms would reach the finalized months they worked. Reopen the affected periods first (POST /api/periods/:period/reopen records a reason).",
+					createAudit);
+			}
 		}
 
 		db.prepare(`INSERT INTO drivers_directory (driver_name, carrier_name, state, city, zip, address, phone, cell, email, dot, mc, trucks, hazmat, rating, status, pay_type, pay_percentage, pay_daily)
@@ -26999,13 +27035,17 @@ function truckDeleteLockBlockers(truck) {
 	}
 
 	// (2) driver pay — the rate lives on the truck, so deleting it drops the
-	// driver back to their own rate, or to the legacy $250 default.
+	// driver back to their own rate, or to the legacy $250 default. A
+	// percentage-paid driver is paid a share of net revenue and no figure reads
+	// a daily rate for them, as in truckEditLockBlockers() check (6), so the
+	// rate leaving with the truck changes nothing for them.
 	{
 		const driver = normalizeDriverName(truck.assigned_driver);
 		const struct = driver ? (getDriverPayStructures()[driver] || null) : null;
 		const before = resolveDailyRate(struct && struct.payDaily, truck.driver_pay_daily);
 		const after = resolveDailyRate(struct && struct.payDaily, 0);
-		const months = before === after ? [] : driverPayLockedMonths(truck.assigned_driver, locked);
+		const months = before === after || (struct && struct.payType === "percentage")
+			? [] : driverPayLockedMonths(truck.assigned_driver, locked);
 		if (months.length) blockers.push({
 			table: "trucks.driver_pay_daily", rows: 1, periods: months,
 			detail: `${truck.assigned_driver}'s pay reverts ${money(before)} → ${money(after)}/day across ${months.length} finalized month${months.length === 1 ? "" : "s"}`,
@@ -27393,7 +27433,11 @@ const DIRECTORY_LOCK_REMEDY =
 //                                              filters on status, so it gates
 //                                              no figure.
 //     profile_picture_url                      not written by this route.
-function directoryEditLockBlockers(row, changed) {
+//
+// `opts.history` — OPTIONAL, driverHistoryFloorMonth()'s answer for the driver,
+// handed to driverPayLockedMonths() to size their exposure. Only
+// directoryCreateLockBlockers() passes it; every other caller is unchanged.
+function directoryEditLockBlockers(row, changed, opts = {}) {
 	// Fail CLOSED — isLocked() swallows its errors and answers "not locked", so
 	// an unreadable period_locks would silently turn this guard off.
 	if (!periodLocksReadable()) return { unreadable: true, blockers: [] };
@@ -27413,7 +27457,7 @@ function directoryEditLockBlockers(row, changed) {
 	// the two cannot disagree about a driver's exposure — including its
 	// deliberate over-reporting (every month from the FIRST assignment onward,
 	// and every locked month for a driver with no assignment history at all).
-	const monthsNow = driverPayLockedMonths(nameNow, locked);
+	const monthsNow = driverPayLockedMonths(nameNow, locked, opts.history);
 
 	// (1) pay_type — the formula switch.
 	if (before.payType !== after.payType && monthsNow.length) {
@@ -27544,6 +27588,36 @@ function directoryDeleteLockBlockers(row) {
 	return res;
 }
 
+// The row the money math reads for a driver with NO drivers_directory row:
+// DIRECTORY_DEFAULT_STRUCT, and no carrier link.
+function directoryDefaultRow(driverName) {
+	return {
+		driver_name: driverName, carrier_name: "",
+		pay_type: DIRECTORY_DEFAULT_STRUCT.payType,
+		pay_percentage: DIRECTORY_DEFAULT_STRUCT.payPercentage,
+		pay_daily: DIRECTORY_DEFAULT_STRUCT.payDaily,
+	};
+}
+
+// A driver's FIRST drivers_directory row is the delete reversed: until it
+// exists the money math prices them at the defaults, so a first row that sets
+// a percentage, a day rate or a carrier restates every finalized month they
+// worked, exactly as an edit away from the defaults would. Judged by the
+// edit's own predicate, as the delete is. `history` is
+// driverHistoryFloorMonth() for the driver, as truckCreateLockBlockers()
+// takes it: a new hire has no truck_assignments row yet, and on that table
+// alone would read as working every finalized month. A row at the defaults
+// moves nothing and is not judged.
+function directoryCreateLockBlockers(row, history) {
+	const defaults = directoryDefaultRow(row.driver_name);
+	const changed = directoryChangedColumns(defaults, row);
+	if (!Object.keys(changed).length) return { unreadable: false, blockers: [] };
+	const res = directoryEditLockBlockers(defaults, changed, { history });
+	const who = String(row.driver_name || "").trim() || "this driver";
+	for (const b of res.blockers) b.detail = `adding ${who}: ${b.detail}`;
+	return res;
+}
+
 // Everything POST /api/trucks would restate inside a finalized month by
 // CREATING a row. The mirror of truckEditLockBlockers, and it exists because a
 // create can manufacture exactly the state the edit refuses to reach.
@@ -27648,11 +27722,13 @@ function truckCreateLockBlockers(truck, history) {
 	// Allowed when the driver's own drivers_directory.pay_daily already overrides
 	// the truck rate, since then the truck number never reaches the pay. A driver
 	// who drives no truck yet is priced at the $250 default (resolveDailyRate's
-	// fallback), so that is the rate the new truck's would replace.
+	// fallback), so that is the rate the new truck's would replace. Allowed too
+	// when the driver is percentage-paid: no figure reads a daily rate for them,
+	// as in truckEditLockBlockers() check (6).
 	const driverName = String(truck.assigned_driver || "").trim();
 	if (driverName) {
 		const struct = getDriverPayStructures()[normalizeDriverName(driverName)] || null;
-		const beforeRates = truckDailyRateCandidates(driverName);
+		const beforeRates = struct && struct.payType === "percentage" ? [] : truckDailyRateCandidates(driverName);
 		const drivesNoTruck = beforeRates.length === 1 && beforeRates[0] === undefined;
 		let worst = null;
 		for (const r of beforeRates) {
@@ -53398,7 +53474,12 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				// the rival is gone rather than reconciled. Nothing rendered it.
 				investorNetToDate,
 				totalDriverPay: Math.round(totalDriverPay),
-				driverPayDetails: Object.fromEntries(Object.entries(driverPayDetails).map(([k, v]) => [k, { activeDays: v.activeDays, dailyRate: v.dailyRate, totalPay: v.totalPay }])),
+				// payType and payPercentage let the Fleet Breakdown say how a
+				// percentage-paid driver's totalPay was reached; their dailyRate is 0.
+				driverPayDetails: Object.fromEntries(Object.entries(driverPayDetails).map(([k, v]) => [k, {
+					activeDays: v.activeDays, dailyRate: v.dailyRate, totalPay: v.totalPay,
+					payType: v.payType, payPercentage: v.payPercentage,
+				}])),
 				netRevenueToDate,
 				totalPurchasePrice,
 				totalStartupExpenses,

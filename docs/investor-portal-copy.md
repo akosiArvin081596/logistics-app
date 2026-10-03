@@ -161,6 +161,8 @@ Nothing below renders on an ordinary month. A month with no carry looks exactly 
 | 🟡 | `This is an estimate, not a guarantee. Freight market swings, maintenance, or a driver change can shift it quickly.` | Est. Your Revenue |
 | 🟡 | `Est. Your Revenue = that truck's own trailing 3-month take-home × 12. Each truck is projected from its own loads, so trucks in the same fleet will differ. ROI = Est. Your Revenue / Purchase Price × 100. A "—" means the truck hasn't been in service a full 3 months yet, so there's nothing to average from — it isn't a $0 forecast, and it's left out of the Fleet Total. Based on N months of data — projections become more accurate over time.` | Footnote under the table. **Changed 2026-09-30 (§18.3 (b)):** the first sentence no longer goes on `— your share of the net profit its loads produced, after driver pay, fixed costs and trip expenses.`, since no cost is taken per truck. A lease investor reads the same note with L3 after the first sentence (§17.5). |
 | ⚪ | `Not yet in service a full 3 months` | Cell value |
+| 🔴 | `(N days x $R)` | A truck's breakdown, beside Driver Pay, when its driver is paid by the day |
+| 🔴 | `(P% of revenue after deductible trip expenses)` | Same place, when its driver is paid a percentage. **Changed 2026-10-03 (your request):** it read `(N days x $250)` for them, a day rate they are not paid; the Driver Pay figure itself was already their percentage pay. |
 
 ---
 

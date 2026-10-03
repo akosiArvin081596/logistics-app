@@ -101,7 +101,7 @@ function mutate(src, from, to) {
 
 const HEADS = {
 	dirGet: 'app.get("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (req, res) => {',
-	dirPost: 'app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (req, res) => {',
+	dirPost: 'app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), async (req, res) => {',
 	dirPut: 'app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), (req, res) => {',
 };
 const ROUTES = Object.fromEntries(Object.entries(HEADS).map(([k, h]) => [k, liftRoute(h)]));
@@ -148,6 +148,8 @@ const MODULE_SRC = [
 	liftFunction("truckDailyRateCandidates"),
 	liftFunction("resolveDailyRate"),
 	liftFunction("directoryEditLockBlockers"),
+	liftFunction("directoryDefaultRow"),
+	liftFunction("directoryCreateLockBlockers"),
 	// what the pay paths read
 	liftConst("let lastPayStructShadowWarnMs = "),
 	liftFunction("getDriverPayStructures"),
@@ -156,7 +158,7 @@ const MODULE_EXPORTS = [
 	"logAudit", "logAuditRefusal", "auditText", "PAY_EDIT_ADMIN_ONLY", "directoryPayStruct", "directoryPayChanges",
 	"refusePayEdit", "directoryPayValue", "DRIVER_PAY_DAILY_MAX", "directoryChangedColumns", "normalizeDriverName",
 	"isBuiltInPropertyName", "findDriverNameClashes", "findDriverNameClash", "DIRECTORY_LOCK_REMEDY", "directoryEditLockBlockers",
-	"resolveDailyRate", "getDriverPayStructures",
+	"resolveDailyRate", "getDriverPayStructures", "directoryDefaultRow", "directoryCreateLockBlockers",
 ];
 function buildModule(db) {
 	return new Function("db", "todayKeyCT", "periodLocksReadable", "investorsHoldingDriver",
@@ -259,8 +261,9 @@ function mountRoute(routeSrc, env) {
 	return (req) => {
 		const out = { status: 200, body: null };
 		const res = { status(c) { out.status = c; return this; }, json(b) { out.body = b; return this; } };
-		handler({ params: {}, query: {}, body: {}, ...req }, res);
-		return out;
+		// The POST is async (it may read Job Tracking); the PUT answers at once.
+		const done = handler({ params: {}, query: {}, body: {}, ...req }, res);
+		return done && typeof done.then === "function" ? done.then(() => out) : out;
 	};
 }
 function mountAll(db, routes = {}) {
@@ -277,6 +280,10 @@ function mountAll(db, routes = {}) {
 		},
 		periodLockUnreadableResponse: (req, res) => res.status(409).json({ code: "PERIOD_LOCK_UNREADABLE" }),
 		syncCarrierDriverHistory: () => {},
+		// A new driver has no history anywhere; the floor itself is
+		// scripts/test-truck-create-new-driver.js's subject.
+		getJobTrackingCached: async () => ({ headers: ["Load ID", "Driver", "Assigned Date"], data: [] }),
+		driverHistoryFloorMonth: () => ({ floor: "", unbounded: false }),
 		notifyChange: () => {},
 		recordPayRateChanges: () => {},
 		console: { error() {}, log() {}, warn() {} },
@@ -291,7 +298,7 @@ function mountAll(db, routes = {}) {
 }
 
 // ── the sections ────────────────────────────────────────────────────────────
-function sections({ directoryPayCells, directoryPayType }, routes = {}) {
+async function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 	const out = { s1: [], s2: [], s3: [], s4: [], s5: [] };
 	const t = (s, name, cond) => out[s].push({ name, ok: !!cond });
 	const dialogOpenRow = dialogOpen(directoryPayType);
@@ -463,7 +470,7 @@ function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 		const cells = directoryPayCells({ canEditPay, ...form });
 		const v = { Driver: "NEW DRIVER", State: "TX", City: "WACO", PhoneNumber: "555-0400", Hazmat: "NO", Rating: "Not Rated" };
 		const body = { headers: DIR_HEADERS, values: [...DIR_HEADERS.slice(0, -3).map((h) => (v[h] === undefined ? "" : v[h])), ...cells] };
-		const r = app.dirPost(user, body);
+		const r = await app.dirPost(user, body);
 		const made = db.prepare("SELECT * FROM drivers_directory WHERE driver_name = 'NEW DRIVER'").get();
 		t("s5", `§5 Add Driver, ${label}: ${JSON.stringify(cells)} creates ${JSON.stringify(want)} (got ${r.status} ${(r.body || {}).code || ""}, ${made ? JSON.stringify(terms(made)) : "no row"})`,
 			r.status === 200 && made && JSON.stringify(terms(made)) === JSON.stringify(want));
@@ -473,7 +480,7 @@ function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 
 (async () => {
 	const lib = await import(pathToFileURL(path.join(__dirname, "..", "client", "src", "lib", "driverPay.js")).href);
-	const res = sections(lib);
+	const res = await sections(lib);
 	for (const [key, title] of [["s1", "§1 \"0\" clears"], ["s2", "§2 a numeric 0 is not sent"], ["s3", "§3 the type not in use is untouched"],
 		["s4", "§4 the month-end lock"], ["s5", "§5 POST"]]) {
 		console.log(title);
@@ -485,7 +492,7 @@ function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 	console.log("§6 mutant");
 	const HONOUR_ZERO = mutate(ROUTES.dirPut, 'headers.forEach((h, i) => { obj[h] = values[i] || ""; });',
 		'headers.forEach((h, i) => { obj[h] = values[i] ?? ""; });');
-	const m = sections(lib, { dirPut: HONOUR_ZERO });
+	const m = await sections(lib, { dirPut: HONOUR_ZERO });
 	const s2 = m.s2.filter((r) => !r.ok), s3 = m.s3.filter((r) => !r.ok);
 	const caught = s2.length > 0 && s3.length > 0;
 	if (caught) pass++;

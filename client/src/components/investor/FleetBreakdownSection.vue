@@ -128,7 +128,7 @@
                   </div>
                   <div class="bd-row deduct">
                     <span>- Driver Pay</span>
-                    <span class="bd-val">{{ fmt(-(driverPay(t))) }}<span class="bd-hint"> ({{ driverDays(t) }} days x ${{ driverRate(t) }})</span></span>
+                    <span class="bd-val">{{ fmt(-(driverPay(t))) }}<span class="bd-hint"> ({{ driverBasis(t) }})</span></span>
                   </div>
                   <div class="bd-row deduct">
                     <span>- Fixed Costs</span>
@@ -345,6 +345,7 @@ import MetricInfoDialog from './MetricInfoDialog.vue'
 import ZoomableImage from '../shared/ZoomableImage.vue'
 import { leaseBasisOf } from '../../lib/payoutPeriod'
 import { leaseExplain } from '../../lib/leasePayoutText'
+import { driverPayBasis } from '../../lib/driverPay'
 
 const props = defineProps({
   trucks: { type: Array, default: () => [] },
@@ -416,13 +417,9 @@ function driverPay(t) {
   const driver = (t.AssignedDriver || t.assigned_driver || '').trim().toLowerCase()
   return (props.production?.driverPayDetails || {})[driver]?.totalPay || 0
 }
-function driverDays(t) {
+function driverBasis(t) {
   const driver = (t.AssignedDriver || t.assigned_driver || '').trim().toLowerCase()
-  return (props.production?.driverPayDetails || {})[driver]?.activeDays || 0
-}
-function driverRate(t) {
-  const driver = (t.AssignedDriver || t.assigned_driver || '').trim().toLowerCase()
-  return (props.production?.driverPayDetails || {})[driver]?.dailyRate || 250
+  return driverPayBasis((props.production?.driverPayDetails || {})[driver])
 }
 function fixedCosts(t) {
   const pu = perUnit(t)

@@ -58,3 +58,17 @@ export function directoryPayCells({ canEditPay, payType, payPercentage, payDaily
 export function directoryPayType(stored) {
   return String(stored || 'fixed').toLowerCase()
 }
+
+// How a driver's pay was worked out, shown beside the Driver Pay figure in the
+// investor's Fleet Breakdown. `details` is one entry of the server's
+// production.driverPayDetails. A percentage-paid driver is paid a share of
+// revenue after deductible trip expenses, and the server sends them a daily
+// rate of 0, so the day-rate wording read "N days x $250" for them. Text only:
+// the figure beside it is the server's totalPay.
+export function driverPayBasis(details) {
+  const d = details || {}
+  if (d.payType === 'percentage') {
+    return `${Number(d.payPercentage) || 0}% of revenue after deductible trip expenses`
+  }
+  return `${d.activeDays || 0} days x $${d.dailyRate || 250}`
+}

@@ -107,6 +107,14 @@ function liftRoute(head) {
 	if (end < 0) die(`no column-0 "});" after ${head}`);
 	return SRC.slice(a, end + "\n});".length);
 }
+// A one-statement module constant, e.g. `const X = [...];`.
+function liftConst(head) {
+	const needle = `\n${head}`;
+	const hits = SRC.split(needle).length - 1;
+	if (hits !== 1) die(`expected exactly 1 statement starting ${JSON.stringify(head)}, found ${hits}`);
+	const a = SRC.indexOf(needle) + 1;
+	return SRC.slice(a, SRC.indexOf(";\n", a) + 1);
+}
 
 const NORM_SRC = liftFunction("normalizeDriverName");
 // The built-in property names the helper reserves; lifted on its own so the
@@ -118,7 +126,14 @@ const OWNS_SRC = liftFunction("driverOwnsInvoice");
 const ESCAPE_SRC = liftFunction("escapeHtml");
 const ACCEPT_SRC = liftRoute('app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, res) => {');
 const USERS_SRC = liftRoute('app.post("/api/users", requireRole("Super Admin"), async (req, res) => {');
-const DIRECTORY_SRC = liftRoute('app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (req, res) => {');
+const DIRECTORY_SRC = liftRoute('app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), async (req, res) => {');
+// What that route asks of a new row before its month-end lock: does it differ
+// from the defaults? The rows below carry a name only, so the lock is not reached.
+const { directoryChangedColumns, directoryDefaultRow } = new Function([
+	liftConst("const DIRECTORY_PERIOD_COLUMNS = "), liftFunction("directoryChangedColumns"),
+	liftConst("const DIRECTORY_DEFAULT_STRUCT = "), liftFunction("directoryDefaultRow"),
+	"return { directoryChangedColumns, directoryDefaultRow };",
+].join("\n"))();
 const ONBOARDING_DOCS = (() => {
 	const m = SRC.match(/\nconst ONBOARDING_DOCS = (\[[\s\S]*?\n\]);/);
 	if (!m) die("could not locate ONBOARDING_DOCS");
@@ -606,6 +621,8 @@ function mountPost(routeSrc, db, clashSrc = CLASH_SRC) {
 		logAudit: () => {},
 		notifyChange: () => {},
 		recordPayRateChanges: () => {},
+		directoryChangedColumns,
+		directoryDefaultRow,
 	};
 	const names = Object.keys(env);
 	new Function(...names, routeSrc)(...names.map((k) => env[k]));
@@ -713,11 +730,13 @@ function sourcePins() {
 	ok(!/\basync\b|\bawait\b|\.then\(/.test(CLASH_SRC), "§5 findDriverNameClash() must be synchronous: no async, await or .then");
 	ok(/normalizeDriverName\(/.test(CLASH_SRC), "§5 findDriverNameClash() must compare through normalizeDriverName()");
 
-	for (const [label, src, insertMarker] of [
+	for (const [label, routeSrc, insertMarker] of [
 		["PUT /api/applications/:id/status", ACCEPT_SRC, '"INSERT INTO users ('],
 		["POST /api/users", USERS_SRC, '"INSERT INTO users ('],
 		["POST /api/drivers-directory", DIRECTORY_SRC, "INSERT INTO drivers_directory ("],
 	]) {
+		// Code lines only: a comment that names the helper is not the call.
+		const src = routeSrc.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
 		const askAt = src.indexOf("findDriverNameClash(");
 		const insertAt = src.indexOf(insertMarker);
 		ok(askAt > 0, `§5 ${label} must ask findDriverNameClash()`);
