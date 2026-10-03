@@ -100,6 +100,7 @@ check('an old date is asked about', /months old/.test(receiptDateQuestion('2026-
 const tab = read('client/src/components/dashboard/ExpensesTab.vue')
 check('ExpensesTab: setStatus toasts the server reason', /toast\(statusChangeFailureMessage\(err\), 'error'\)/.test(tab), true)
 check('ExpensesTab: no fixed "Failed to update status" toast left', /toast\('Failed to update status'/.test(tab), false)
+check('ExpensesTab: a PERIOD_FINALIZED refusal marks the row finalized', /err\?\.code === 'PERIOD_FINALIZED' && err\?\.data\?\.period\) exp\.finalized_period = err\.data\.period/.test(tab), true)
 check('ExpensesTab: list, cards and modal label the status through the helper', (tab.match(/expenseStatusLabel\(/g) || []).length >= 3, true)
 check('ExpensesTab: list, cards and modal gate the buttons on the server flag', (tab.match(/expenseStatusChangeable\(/g) || []).length >= 3, true)
 check('ExpensesTab: Log Expense asks before saving a far-off date', /askAboutDate\(/.test(tab) && /receiptDateQuestion\(/.test(tab), true)

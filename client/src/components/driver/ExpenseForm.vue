@@ -240,7 +240,7 @@
       <div class="form-alert-title">Is the date right?</div>
       <div class="form-alert-body form-alert-lines">{{ dateQuestionText }}</div>
       <div class="form-alert-actions">
-        <van-button round block size="small" type="warning" native-type="button" :loading="submitting" @click="confirmDate">
+        <van-button round block size="small" type="warning" native-type="button" :disabled="submitting" @click="confirmDate">
           Yes &mdash; save with this date
         </van-button>
         <van-button round block size="small" native-type="button" :disabled="submitting" @click="fixDate">

@@ -2617,6 +2617,10 @@ async function setStatus(id, status) {
     // The server's reason (a finalized month, an unreadable lock table, a
     // missing expense), not a fixed sentence that hides which one it was.
     toast(statusChangeFailureMessage(err), 'error')
+    // The month closed after the list loaded: the row now says so, as a
+    // reload would, instead of offering the same refused buttons again.
+    const exp = allExpenses.value.find(e => e.id === id)
+    if (exp && err?.code === 'PERIOD_FINALIZED' && err?.data?.period) exp.finalized_period = err.data.period
     throw err
   }
 }
