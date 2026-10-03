@@ -32,6 +32,9 @@ app.db.pre-refresh*
 # The full-database backup scripts/freeze-closed-months.js --apply takes next to
 # app.db before it writes.
 app.db.pre-freeze*
+# Every other backup a script or data fix takes next to app.db before it writes
+# (app.db.pre-datafix-<ts> on the server), so none shows in the server's git status.
+app.db.pre-*
 logisxdb.db
 # Temp copies written by GET /api/db/download. These are FULL database dumps —
 # every SSN, routing and account number — and the name does not start with
