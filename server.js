@@ -5409,7 +5409,8 @@ function installPeriodLockTriggers(database) {
 		// is locked.
 		database.exec(`CREATE TEMP TRIGGER financials_ledger_items_locked_insert BEFORE INSERT ON main.financials_ledger_items
 			WHEN ${locked("NEW.period")}
-				AND EXISTS (SELECT 1 FROM main.financials_ledger_freezes f WHERE f.period = NEW.period AND f.released_at = '' AND f.freeze_id != NEW.freeze_id)
+				AND (NOT EXISTS (SELECT 1 FROM main.financials_ledger_freezes f WHERE f.period = NEW.period AND f.released_at = '' AND f.freeze_id = NEW.freeze_id)
+					OR EXISTS (SELECT 1 FROM main.financials_ledger_freezes f WHERE f.period = NEW.period AND f.released_at = '' AND f.freeze_id != NEW.freeze_id))
 			BEGIN ${refuse} END`);
 		database.exec(`CREATE TEMP TRIGGER financials_ledger_items_locked_update BEFORE UPDATE ON main.financials_ledger_items
 			WHEN (${locked("OLD.period")} OR ${locked("NEW.period")})
@@ -51024,19 +51025,27 @@ function settledMonthItems(fleet, period, settledFor) {
 }
 
 // Loads a closed month cannot attribute with certainty: a blank-Owner-ID load
-// that a scope claims today through its driver set while its driver held another
-// owner's truck on the load's date. Today's driver sets are not necessarily the
-// ones the month closed with, so the one-time freeze lists these for review
-// before it writes their month.
-function ambiguousBlankOwnerLoads(fleet, period) {
+// that the freeze books (settledMonthItems(), through today's driver sets) to
+// another owner than the one it would book to the truck its driver held on the
+// load's date. Today's driver sets are not necessarily the ones the month closed
+// with, so the one-time freeze lists these for review before it writes their
+// month. Both sides are booked the same way: an owner that is not a settlable
+// investor, or has no payout row for the month, is the company (0). A day with
+// no truck assignment on record tells nothing either way and is not listed.
+function ambiguousBlankOwnerLoads(fleet, period, settledFor) {
 	const held = buildHeldTruckIndex();
+	const investorIds = new Set(fleet.scopes.map((sc) => sc.ownerId).filter(Boolean));
+	const bookedTo = (ownerId) => (ownerId && investorIds.has(ownerId) && settledFor(ownerId) ? ownerId : 0);
 	const out = [];
 	for (const scope of fleet.scopes) {
 		for (const it of scope.items) {
 			if (it.month !== period || it.kind !== "revenue" || !it.blankOwner) continue;
-			const heldOwner = held.ownerAt(it.driver, it.workDay || it.day) || 0;
-			if (heldOwner === (scope.ownerId || 0)) continue;
-			out.push({ loadId: it.loadId, driver: it.driver, day: it.workDay || it.day, amount: it.cents / 100, countedFor: scope.ownerId || 0, truckHeldBy: heldOwner });
+			const day = it.workDay || it.day;
+			const heldOwner = held.ownerAt(it.driver, day);
+			if (heldOwner == null) continue;
+			const counted = bookedTo(scope.ownerId);
+			if (bookedTo(heldOwner) === counted) continue;
+			out.push({ loadId: it.loadId, driver: it.driver, day, amount: it.cents / 100, countedFor: counted, truckHeldBy: heldOwner });
 		}
 	}
 	return out;
@@ -55098,11 +55107,18 @@ async function closedMonthFreezePlan() {
 			.map((sc) => sc.ownerId);
 		periods.push({
 			period, items, itemCount: items.length, figures, adjustments, unverifiedOwners: unverified, ownersWithoutPayoutRow: toCompany,
-			ambiguousLoads: ambiguousBlankOwnerLoads(fleet, period),
+			ambiguousLoads: ambiguousBlankOwnerLoads(fleet, period, settled),
 		});
 	}
+	// The fingerprint covers what the dry run showed for review too, so a month
+	// that becomes uncertain after the dry run is never applied unseen.
 	const fingerprint = crypto.createHash("sha256")
-		.update(JSON.stringify(periods.map((p) => [p.period, p.items.map((i) => [i.kind, i.adjusts || "", i.ownerId || 0, i.day || "", i.cents, i.loadId || "", i.expenseId || 0, i.sourceId || 0, i.driver || "", i.truck || ""])])))
+		.update(JSON.stringify(periods.map((p) => [
+			p.period,
+			p.items.map((i) => [i.kind, i.adjusts || "", i.ownerId || 0, i.day || "", i.cents, i.loadId || "", i.expenseId || 0, i.sourceId || 0, i.driver || "", i.truck || ""]),
+			p.unverifiedOwners,
+			p.ambiguousLoads,
+		])))
 		.digest("hex");
 	return { periods, fingerprint, overlaps: fleet.overlaps, settings };
 }
@@ -55115,9 +55131,10 @@ async function closedMonthFreezePlan() {
 // freeze); each month written is logged in the audit log as a system change. A
 // month the freeze is unsure of (an investor-month settled before breakdowns
 // were recorded, or a blank-Owner-ID load counted for a different owner than
-// the one whose truck its driver held then) is listed and left out unless the
-// body also says includeUnverified: true. Writes Financials' line items only: no
-// payout row, settled amount or receipt changes.
+// the one whose truck its driver held then) is listed, left out and logged,
+// unless the body includes it on purpose: includePeriods: ["YYYY-MM", ...], or
+// includeUnverified: true for all of them. Writes Financials' line items only:
+// no payout row, settled amount or receipt changes.
 app.post("/api/admin/financials/freeze-closed-months", requireRole("Super Admin"), refuseCrossOrigin, async (req, res) => {
 	try {
 		const plan = await closedMonthFreezePlan();
@@ -55133,18 +55150,21 @@ app.post("/api/admin/financials/freeze-closed-months", requireRole("Super Admin"
 				error: "The figures changed since the dry run, so nothing was frozen. Run the dry run again and apply its fingerprint.",
 				code: "FREEZE_PLAN_CHANGED",
 				fingerprint: plan.fingerprint,
+				periods: summary,
 			});
 		}
 		const actor = req.session.user.username || "admin";
 		const frozenAt = new Date().toISOString();
-		const includeUnverified = req.body.includeUnverified === true;
+		const includePeriods = new Set(Array.isArray(req.body.includePeriods) ? req.body.includePeriods.map(String) : []);
+		const included = (p) => req.body.includeUnverified === true || includePeriods.has(p.period);
 		const needsReview = (p) => p.unverifiedOwners.length > 0 || p.ambiguousLoads.length > 0;
+		const leftForReview = plan.periods.filter((p) => needsReview(p) && !included(p));
 		const written = [];
 		db.transaction(() => {
 			for (const p of plan.periods) {
 				// A month the freeze is unsure of is frozen only when the owner
-				// includes those months on purpose.
-				if (needsReview(p) && !includeUnverified) continue;
+				// includes it on purpose.
+				if (needsReview(p) && !included(p)) continue;
 				// Re-read inside the transaction: a close or another freeze may have
 				// frozen it meanwhile.
 				if (frozenPeriodSet().has(p.period)) continue;
@@ -55163,11 +55183,17 @@ app.post("/api/admin/financials/freeze-closed-months", requireRole("Super Admin"
 				(p.ambiguousLoads.length ? `; blank-Owner-ID load(s) counted as they stand today (included on purpose): ${p.ambiguousLoads.map((l) => l.loadId).join(", ")}` : "") +
 				(p.ownersWithoutPayoutRow.length ? `; no payout row, items booked to the company: owner ${p.ownersWithoutPayoutRow.join(", ")}` : ""));
 		}
+		for (const p of leftForReview) {
+			logAudit({}, "financials_freeze_skipped", "period", p.period,
+				`left ${p.period} unfrozen for review at the request of ${actor}` +
+				(p.unverifiedOwners.length ? `; settled without a breakdown: owner ${p.unverifiedOwners.map((u) => u.ownerId).join(", ")}` : "") +
+				(p.ambiguousLoads.length ? `; blank-Owner-ID load(s) whose owner is uncertain: ${p.ambiguousLoads.map((l) => l.loadId).join(", ")}` : ""));
+		}
 		res.json({
 			applied: true,
 			frozenPeriods: written.map((p) => p.period),
 			skipped: plan.periods.length - written.length,
-			leftForReview: includeUnverified ? [] : plan.periods.filter(needsReview).map((p) => p.period),
+			leftForReview: leftForReview.map((p) => p.period),
 		});
 	} catch (err) {
 		console.error("POST /api/admin/financials/freeze-closed-months error:", err.message);
@@ -55852,7 +55878,22 @@ async function finalizePeriods(periods, actor) {
 		if (db.prepare(`SELECT 1 FROM investor_payouts WHERE period IN (${ph}) AND COALESCE(finalized_at,'') = '' LIMIT 1`).get(...toClose)) {
 			throw new CloseRetry();
 		}
-		if (freezeItems) for (const p of toClose) writeLedgerFreeze(p, freezeItems.get(p) || [], { source: "close", actor, frozenAt: nowIso, settings: closingSettings });
+		// Financials' freeze in a savepoint of its own: a failed write is undone
+		// alone, and the payout close goes ahead (the notice below says so).
+		if (freezeItems) {
+			try {
+				db.transaction(() => {
+					for (const p of toClose) writeLedgerFreeze(p, freezeItems.get(p) || [], { source: "close", actor, frozenAt: nowIso, settings: closingSettings });
+				})();
+			} catch (e) {
+				// Only the savepoint may have been undone: an error that ended the
+				// whole transaction stops the close here, before any lock.
+				if (!db.inTransaction) throw e;
+				freezeError = e.message;
+				freezeItems = null;
+				console.error(`[period-close] Financials items for ${toClose.join(", ")} not frozen: ${e.message}`);
+			}
+		}
 		const bookedReceipts = payoutRules().futureReceipts ? stampFutureReceipts(toClose) : [];
 		for (const p of toClose) takeLock.run(p, nowIso, actor || "system");
 		return { retry: false, stamped, overAdjusted, bookedReceipts };
@@ -55871,7 +55912,7 @@ async function finalizePeriods(periods, actor) {
 	if (!freezeItems) {
 		try {
 			insertDispatchNotification.run("period-close", "ACTION NEEDED — Financials figures not frozen at close",
-				`${toClose.map(periodLabel).join(", ")} closed and their payouts are frozen, but their Financials line items could not be computed (${freezeError}). Freeze them with the one-time freeze (POST /api/admin/financials/freeze-closed-months).`,
+				`${toClose.map(periodLabel).join(", ")} closed and their payouts are frozen, but their Financials line items could not be computed or written (${freezeError}). Freeze them with the one-time freeze (POST /api/admin/financials/freeze-closed-months).`,
 				JSON.stringify({ periods: toClose, stage: "financials-freeze" }));
 		} catch {}
 	}

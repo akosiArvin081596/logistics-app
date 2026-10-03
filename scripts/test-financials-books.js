@@ -317,6 +317,18 @@ const show = (f) => (f ? FIGS.map((k) => `${k} ${c(f[k])}`).join(", ") : "none")
 	check(ambiguous.length === 1 && ambiguous[0].loadId === "8005" && ambiguous[0].countedFor === 5 && ambiguous[0].truckHeldBy === 0 && ambiguous[0].amount === 1500,
 		"freeze: a closed month's blank-Owner-ID load that today's driver sets count for another owner than the truck its driver held then is listed for review",
 		JSON.stringify(ambiguous));
+	// Only the assignment history changes now (D held T5 on May 21, backdated):
+	// the items stay as they are, the review list does not, and so does the
+	// fingerprint, so the earlier dry run's fingerprint no longer applies.
+	db.prepare("UPDATE truck_assignments SET end_date = '2026-05-01T05:00:00.000Z' WHERE truck_id = 3 AND LOWER(driver_name) = LOWER(?)").run(D);
+	db.prepare("UPDATE truck_assignments SET start_date = '2026-05-01T05:00:00.000Z' WHERE truck_id = 1 AND LOWER(driver_name) = LOWER(?) AND end_date = ''").run(D);
+	const backdated = await call("POST /api/admin/financials/freeze-closed-months", { body: {}, session: { user: SUPER } });
+	const backdatedMay = (backdated.body.periods || []).find((p) => p.period === "2026-05");
+	const stale = await call("POST /api/admin/financials/freeze-closed-months", { body: { apply: true, fingerprint: movedDry.body.fingerprint }, session: { user: SUPER } });
+	check(backdatedMay && backdatedMay.itemCount === movedMay.itemCount && backdatedMay.ambiguousLoads.length === 0 && backdated.body.fingerprint !== movedDry.body.fingerprint
+		&& stale.status === 409 && stale.body.code === "FREEZE_PLAN_CHANGED" && Array.isArray(stale.body.periods),
+		"freeze: when only the review list changes, so does the fingerprint, and the earlier one is refused (409, with the current plan)",
+		JSON.stringify({ items: [movedMay.itemCount, backdatedMay && backdatedMay.itemCount], ambiguous: backdatedMay && backdatedMay.ambiguousLoads, status: stale.status }));
 	db.exec("ROLLBACK TO driver_moved; RELEASE driver_moved");
 
 	// After the close: April's load corrected in the sheet, a receipt for April logged.
@@ -343,6 +355,8 @@ const show = (f) => (f ? FIGS.map((k) => `${k} ${c(f[k])}`).join(", ") : "none")
 	// ── the one-time freeze ───────────────────────────────────────────────────
 	const freeze = (body) => call("POST /api/admin/financials/freeze-closed-months", { body, session: { user: SUPER } });
 	const itemsCount = () => db.prepare("SELECT COUNT(*) AS n FROM financials_ledger_items").get().n;
+	check(/PERIOD_FINALIZED/.test((() => { try { db.prepare("INSERT INTO financials_ledger_items (period, owner_id, kind, cents, freeze_id, frozen_at) VALUES ('2026-04', 0, 'revenue', 100, 'made-up', 'x')").run(); return ""; } catch (e) { return e.message; } })()),
+		"closed, not yet frozen: an item that comes from no active freeze of the month is refused", "");
 	const dry = await freeze({});
 	const plannedMay = (dry.body.periods || []).find((p) => p.period === "2026-05");
 	check(dry.status === 200 && dry.body.dryRun === true && JSON.stringify(dry.body.periods.map((p) => p.period)) === JSON.stringify(["2026-03", "2026-04", "2026-05"]) && itemsCount() === 0,
@@ -355,10 +369,16 @@ const show = (f) => (f ? FIGS.map((k) => `${k} ${c(f[k])}`).join(", ") : "none")
 	const applied = await freeze({ apply: true, fingerprint: dry.body.fingerprint });
 	check(applied.status === 200 && JSON.stringify(applied.body.frozenPeriods) === JSON.stringify(["2026-03", "2026-04"]) && JSON.stringify(applied.body.leftForReview) === JSON.stringify(["2026-05"]),
 		"freeze: the fingerprint freezes March and April; May (no breakdown for owner 6) is left for review", `${applied.status} ${JSON.stringify(applied.body)}`);
+	const skippedAudit = db.prepare("SELECT username, entity_id, details FROM audit_trail WHERE action = 'financials_freeze_skipped'").all();
+	check(skippedAudit.length === 1 && skippedAudit[0].entity_id === "2026-05" && skippedAudit[0].username === "system" && /owner 6/.test(skippedAudit[0].details),
+		"freeze: the month left for review is logged in the audit log, with why", JSON.stringify(skippedAudit));
 	const dryMay = await freeze({});
-	const appliedMay = await freeze({ apply: true, fingerprint: dryMay.body.fingerprint, includeUnverified: true });
+	const otherMonth = await freeze({ apply: true, fingerprint: dryMay.body.fingerprint, includePeriods: ["2026-06"] });
+	check(otherMonth.body.frozenPeriods.length === 0 && JSON.stringify(otherMonth.body.leftForReview) === JSON.stringify(["2026-05"]),
+		"freeze: including another month does not include May", JSON.stringify(otherMonth.body));
+	const appliedMay = await freeze({ apply: true, fingerprint: dryMay.body.fingerprint, includePeriods: ["2026-05"] });
 	check(JSON.stringify(dryMay.body.periods.map((p) => p.period)) === JSON.stringify(["2026-05"]) && JSON.stringify(appliedMay.body.frozenPeriods) === JSON.stringify(["2026-05"]),
-		"freeze: included on purpose, May freezes", `${JSON.stringify(dryMay.body.periods.map((p) => p.period))} ${JSON.stringify(appliedMay.body)}`);
+		"freeze: included on purpose (includePeriods), May freezes", `${JSON.stringify(dryMay.body.periods.map((p) => p.period))} ${JSON.stringify(appliedMay.body)}`);
 	const after = await books();
 	const moved = ["2026-04", "2026-05"].filter((mk) => !sameFigures(after.figures[mk], before.figures[mk]));
 	check(moved.length === 0, "freeze: Financials shows exactly what it showed before the freeze", moved.map((mk) => `${mk}: ${show(before.figures[mk])} -> ${show(after.figures[mk])}`).join(" | "));
@@ -428,6 +448,43 @@ const show = (f) => (f ? FIGS.map((k) => `${k} ${c(f[k])}`).join(", ") : "none")
 		&& W.notices.some((n) => /Financials figures not frozen at close/.test(n.title)),
 		"close: when Financials' items cannot be computed the month still closes, unfrozen, with a notice", JSON.stringify(closedAnyway));
 	W.errors.splice(0, W.errors.length, ...W.errors.filter((e) => !/Financials items for 2026-01 not computed/.test(e)));
+
+	// A freeze that fails partway is undone whole, and the payout close of both
+	// months still goes ahead: May and June reopened, then closed together with
+	// June's freeze write failing after May's was written.
+	for (const period of ["2026-05", "2026-06"]) {
+		await call("POST /api/periods/:period/reopen", { params: { period }, body: { reason: "re-close test" }, session: { user: SUPER } });
+	}
+	const juneFreezes = db.prepare("SELECT COUNT(*) AS n FROM financials_ledger_freezes WHERE period = '2026-06'").get().n;
+	db.prepare("INSERT INTO financials_ledger_freezes (freeze_id, period, source, frozen_at, frozen_by, item_count, summary) VALUES (?, '1999-02', 'test', 'x', 'test', 0, '{}')")
+		.run(`2026-06:close:${new Date(NOW_MS).toISOString()}:${juneFreezes + 1}`);
+	const pairNotices = W.notices.length;
+	const pair = await api.finalizePeriods(["2026-05", "2026-06"], "system");
+	db.prepare("DELETE FROM financials_ledger_freezes WHERE period = '1999-02'").run();
+	const activeFreeze = (p) => db.prepare("SELECT 1 FROM financials_ledger_freezes WHERE period = ? AND released_at = ''").get(p);
+	const unstamped = db.prepare("SELECT COUNT(*) AS n FROM investor_payouts WHERE period IN ('2026-05', '2026-06') AND COALESCE(finalized_at, '') = ''").get().n;
+	const pairLocked = db.prepare("SELECT COUNT(*) AS n FROM period_locks WHERE period IN ('2026-05', '2026-06') AND status = 'locked'").get().n;
+	check(JSON.stringify(pair.periods) === JSON.stringify(["2026-05", "2026-06"]) && pairLocked === 2 && unstamped === 0
+		&& !activeFreeze("2026-05") && !activeFreeze("2026-06")
+		&& !db.prepare("SELECT 1 FROM financials_ledger_items WHERE period IN ('2026-05', '2026-06')").get()
+		&& W.notices.slice(pairNotices).some((n) => /Financials figures not frozen at close/.test(n.title)),
+		"close: a Financials freeze that fails partway is undone whole (May's too); both months close with every payout row stamped, and a notice",
+		JSON.stringify({ periods: pair.periods, pairLocked, unstamped, may: !!activeFreeze("2026-05"), june: !!activeFreeze("2026-06") }));
+	W.errors.splice(0, W.errors.length, ...W.errors.filter((e) => !/Financials items for 2026-05, 2026-06 not frozen/.test(e)));
+
+	// A failed freeze write is undone alone: the payout close still goes ahead.
+	const febFreezeId = `2026-02:close:${new Date(NOW_MS).toISOString()}:1`;
+	db.prepare("INSERT INTO financials_ledger_freezes (freeze_id, period, source, frozen_at, frozen_by, item_count, summary) VALUES (?, '1999-01', 'test', 'x', 'test', 0, '{}')").run(febFreezeId);
+	const noticesBefore = W.notices.length;
+	const febClosed = await api.finalizePeriods(["2026-02"], "system");
+	db.prepare("DELETE FROM financials_ledger_freezes WHERE period = '1999-01'").run();
+	const febLock = db.prepare("SELECT status FROM period_locks WHERE period = '2026-02'").get();
+	check(JSON.stringify(febClosed.periods) === JSON.stringify(["2026-02"]) && febLock && febLock.status === "locked"
+		&& !db.prepare("SELECT 1 FROM financials_ledger_freezes WHERE period = '2026-02'").get()
+		&& !db.prepare("SELECT 1 FROM financials_ledger_items WHERE period = '2026-02'").get()
+		&& W.notices.slice(noticesBefore).some((n) => /Financials figures not frozen at close/.test(n.title)),
+		"close: when writing Financials' items fails the month still closes, unfrozen, with a notice", JSON.stringify(febClosed));
+	W.errors.splice(0, W.errors.length, ...W.errors.filter((e) => !/Financials items for 2026-02 not frozen/.test(e)));
 
 	check(W.errors.length === 0, "the lifted code logged no error", W.errors.join(" | "));
 	console.log(`\n${pass} passed, ${fail} failed`);
