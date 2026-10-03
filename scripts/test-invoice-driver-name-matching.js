@@ -142,15 +142,15 @@ const ROUTES = [
 // The driver app's own invoice list is one statement inside GET
 // /api/driver/:driverName; it is lifted and run on its own.
 const DRIVER_APP_LIST_ANCHOR = "const driverInvoices = db.prepare(";
-// The P&L's truck-rate map, lifted from GET /api/financials (the fleet-wide P&L).
-const PNL_TRUCKS_ANCHOR = 'const trucksByDriver = Object.create(null);\n\t\tdb.prepare("SELECT assigned_driver, driver_pay_daily FROM trucks").all().forEach(t => {';
-// The two per-truck expense maps, each read as expByDriver[normalizeDriverName(
-// truck.assigned_driver)]: GET /api/investor's (one investor's receipts) and
-// GET /api/financials' driver-keyed fallback (every receipt).
+// The P&L's truck-rate map: the fleet-wide P&L (GET /api/financials) is the
+// payout ledger's own calculation, so its map is gatherLedgerScopeFacts()'s,
+// read fleet-wide (no investor driver set).
+const PNL_TRUCKS_ANCHOR = 'const trucksByDriver = Object.create(null);\n\t{\n\t\tconst truckQuery = investorDriverSet';
+// GET /api/investor's per-truck expense map, read as expByDriver[normalizeDriverName(
+// truck.assigned_driver)] (one investor's receipts). GET /api/financials keeps no
+// such map: its per-truck receipts are the books' items.
 const INVESTOR_TRUCK_EXP_ANCHOR = "const expByDriver = foldExpenseTotalsByDriver(\n";
 const INVESTOR_TRUCK_EXP_END = "\n\t\t\t);";
-const FINANCIALS_TRUCK_EXP_ANCHOR = "const expByDriverRows = db.prepare(";
-const FINANCIALS_TRUCK_EXP_END = "const expByDriver = foldExpenseTotalsByDriver(expByDriverRows);";
 
 // The one-per-driver-week index, exactly as the migration builds it.
 const INDEX_COLS = new Function(`${liftConst(SRC, "INVOICE_WEEK_IDX_COLS")}\nreturn INVOICE_WEEK_IDX_COLS;`)();
@@ -270,11 +270,9 @@ function liftedFor(src) {
 		driverAppList: new Function("db", "normalizeDriverName", "driverNameNorm", "driverName",
 			`${liftFragment(src, DRIVER_APP_LIST_ANCHOR, ";\n", "the driver app's invoice list")}\nreturn driverInvoices;`),
 		pnlTrucks: new Function("db", "normalizeDriverName",
-			`${liftFragment(src, PNL_TRUCKS_ANCHOR, "\n\t\t});", "the P&L's trucksByDriver block")}\nreturn trucksByDriver;`),
+			`const investorDriverSet = null;\nconst user = { id: 0 };\n${liftFragment(src, PNL_TRUCKS_ANCHOR, "\n\t}", "the P&L's trucksByDriver block")}\nreturn trucksByDriver;`),
 		investorTruckExp: new Function("db", "foldExpenseTotalsByDriver", "EXPENSE_PNL_FILTER", "user",
 			`${liftFragment(src, INVESTOR_TRUCK_EXP_ANCHOR, INVESTOR_TRUCK_EXP_END, "GET /api/investor's per-truck expense map")}\nreturn expByDriver;`),
-		financialsTruckExp: new Function("db", "foldExpenseTotalsByDriver", "EXPENSE_PNL_FILTER",
-			`${liftFragment(src, FINANCIALS_TRUCK_EXP_ANCHOR, FINANCIALS_TRUCK_EXP_END, "GET /api/financials' per-truck expense map")}\nreturn expByDriver;`),
 	};
 	LIFT_CACHE.set(src, lifted);
 	return lifted;
@@ -357,7 +355,6 @@ function buildWorld(opts = {}) {
 		// OLD_perTruckExpenseMap runs origin/main's construction over the same query.
 		investorTruckExp: (ownerId, fold = w.foldExpenseTotalsByDriver) =>
 			lifted.investorTruckExp(db, fold, w.EXPENSE_PNL_FILTER, { id: ownerId }),
-		financialsTruckExp: (fold = w.foldExpenseTotalsByDriver) => lifted.financialsTruckExp(db, fold, w.EXPENSE_PNL_FILTER),
 	});
 }
 
@@ -951,22 +948,19 @@ async function batteryPay(src) {
 		const read = (map, assignedDriver) => map[w.normalizeDriverName(assignedDriver)] || 0;
 		const inv = w.investorTruckExp(INVESTOR);
 		const invOld = w.investorTruckExp(INVESTOR, OLD_perTruckExpenseMap);
-		const fleet = w.financialsTruckExp();
-		const fleetOld = w.financialsTruckExp(OLD_perTruckExpenseMap);
-		t("§4 premise: origin/main's per-truck maps found only \"PAT LEE\" for the investor ($7.25) and $9.75 fleet-wide",
-			[read(invOld, "Pat Lee"), read(fleetOld, "Pat Lee")], [7.25, 9.75]);
+		t("§4 premise: origin/main's per-truck map found only \"PAT LEE\" for the investor ($7.25)",
+			read(invOld, "Pat Lee"), 7.25);
 		t("§4 (e) GET /api/investor's per-truck map charges Pat's truck his receipts in every spelling and type; Rejected and the other investor's left out",
 			read(inv, "Pat Lee"), 748.25);
 		t("§4 (e) …the other investor's map holds only its own receipt", read(w.investorTruckExp(OTHER_INVESTOR), "Pat Lee"), 2.5);
-		t("§4 (e) GET /api/financials' driver-keyed fallback charges every spelling, fleet-wide", read(fleet, "Pat Lee"), 750.75);
-		t("§4 (e) …whichever spelling the truck names its driver by", [read(inv, " pat  LEE "), read(fleet, "PAT  LEE")], [748.25, 750.75]);
+		t("§4 (e) …whichever spelling the truck names its driver by", read(inv, " pat  LEE "), 748.25);
 		for (const assigned of ["", null]) {
 			t(`§4 (f) a truck whose driver is ${JSON.stringify(assigned)} reads what it read on origin/main`,
-				[read(inv, assigned), read(fleet, assigned)], [read(invOld, assigned), read(fleetOld, assigned)]);
+				read(inv, assigned), read(invOld, assigned));
 		}
-		t("§4 (f) …the $13 stored as '' and nothing else", [read(inv, ""), read(fleet, "")], [13, 13]);
+		t("§4 (f) …the $13 stored as '' and nothing else", read(inv, ""), 13);
 		for (const k of ["   ", TAB, "null"]) {
-			t(`§4 (f) the per-truck maps key ${JSON.stringify(k)} exactly as origin/main did`, [inv[k], fleet[k]], [invOld[k], fleetOld[k]]);
+			t(`§4 (f) the per-truck map keys ${JSON.stringify(k)} exactly as origin/main did`, inv[k], invOld[k]);
 		}
 	}
 	return out;
@@ -1203,20 +1197,19 @@ function mutate(find, replace, label) {
 					deduction.includes("GROUP BY LOWER(driver), month")],
 				[true, true, true, true, true]],
 			// The payout ledger's call and its driver key live in gatherLedgerScopeFacts()
-			// and ledgerLoadRows(); the other two are inline.
-			["§7 the P&L's three callers read that one map, each by a normalizeDriverName() key",
+			// and ledgerLoadRows() (GET /api/financials reads the ledger); GET
+			// /api/investor's is inline.
+			["§7 the P&L's two callers read that one map, each by a normalizeDriverName() key",
 				[(SRC.match(/= getDeductibleExpensesByDriverMonth\(\);/g) || []).length,
 					(SRC.match(/expensesByDriverMonth: getDeductibleExpensesByDriverMonth\(periodExpr\),/g) || []).length,
 					(SRC.match(/const driver = jtDriverCol \? normalizeDriverName\(driverNameForTotals\(r\[jtDriverCol\]\)\) : "";/g) || []).length,
-					(SRC.match(/driver: jtDriverCol \? normalizeDriverName\(driverNameForTotals\(r\[jtDriverCol\]\)\) : "",/g) || []).length,
-					SRC.includes("const driverLc = normalizeDriverName(driver);")],
-				[2, 1, 1, 1, true]],
-			["§7 both per-truck expense maps are folded, and read by normalizeDriverName(truck.assigned_driver)",
+					(SRC.match(/driver: jtDriverCol \? normalizeDriverName\(driverNameForTotals\(r\[jtDriverCol\]\)\) : "",/g) || []).length],
+				[1, 1, 1, 1]],
+			["§7 GET /api/investor's per-truck expense map is folded, and read by normalizeDriverName(truck.assigned_driver)",
 				[(SRC.match(/= foldExpenseTotalsByDriver\(/g) || []).length, SRC.includes(".map(r => [r.d, r.t])"),
 					(SRC.match(/const driverName = normalizeDriverName\(truck\.assigned_driver\);/g) || []).length,
-					SRC.includes("const varExp = expByDriver[driverName] || 0;"),
-					SRC.includes(": (fleetHasTruckExpenses ? 0 : (expByDriver[driverName] || 0));")],
-				[2, false, 2, true, true]],
+					SRC.includes("const varExp = expByDriver[driverName] || 0;")],
+				[1, false, 1, true]],
 		];
 		report(pins);
 

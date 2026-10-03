@@ -5320,6 +5320,8 @@ db.exec(`
 	)
 `);
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_fin_ledger_items_period ON financials_ledger_items(period, owner_id)"); } catch {}
+// The closed-month insert trigger counts a freeze's items (installPeriodLockTriggers()).
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_fin_ledger_items_freeze ON financials_ledger_items(freeze_id)"); } catch {}
 // One row per freeze: when, by whom, how (the close or the one-time freeze), the
 // totals it wrote, and the Financials cost settings in force for the month. A
 // month is frozen while it has a row here with released_at '' (a month can be
@@ -5398,19 +5400,36 @@ function installPeriodLockTriggers(database) {
 	const locked = (periodExpr) => `EXISTS (SELECT 1 FROM main.period_locks WHERE main.period_locks.period = ${periodExpr} AND main.period_locks.status = 'locked')`;
 	const refuse = "SELECT RAISE(ABORT, 'PERIOD_FINALIZED: the month is closed; reopen it to change its figures');";
 	const names = ["investor_payouts_locked_insert", "investor_payouts_locked_update", "investor_payouts_locked_delete",
-		"financials_ledger_items_locked_insert", "financials_ledger_items_locked_update", "financials_ledger_items_locked_delete"];
+		"financials_ledger_items_locked_insert", "financials_ledger_items_locked_update", "financials_ledger_items_locked_delete",
+		"financials_ledger_freezes_locked_insert", "financials_ledger_freezes_locked_update", "financials_ledger_freezes_locked_delete"];
 	database.transaction(() => {
 		for (const t of names) {
 			database.exec(`DROP TRIGGER IF EXISTS main.${t}`);
 			database.exec(`DROP TRIGGER IF EXISTS temp.${t}`);
 		}
 		// Frozen items: a locked period takes items only from its one active
-		// freeze (financials_ledger_freezes), and they never change or go while it
-		// is locked.
+		// freeze (financials_ledger_freezes), and only until that freeze holds
+		// the items it was written with (its item_count); they never change or go
+		// while it is locked.
 		database.exec(`CREATE TEMP TRIGGER financials_ledger_items_locked_insert BEFORE INSERT ON main.financials_ledger_items
 			WHEN ${locked("NEW.period")}
 				AND (NOT EXISTS (SELECT 1 FROM main.financials_ledger_freezes f WHERE f.period = NEW.period AND f.released_at = '' AND f.freeze_id = NEW.freeze_id)
-					OR EXISTS (SELECT 1 FROM main.financials_ledger_freezes f WHERE f.period = NEW.period AND f.released_at = '' AND f.freeze_id != NEW.freeze_id))
+					OR EXISTS (SELECT 1 FROM main.financials_ledger_freezes f WHERE f.period = NEW.period AND f.released_at = '' AND f.freeze_id != NEW.freeze_id)
+					OR (SELECT COUNT(*) FROM main.financials_ledger_items i WHERE i.freeze_id = NEW.freeze_id)
+						>= (SELECT f.item_count FROM main.financials_ledger_freezes f WHERE f.freeze_id = NEW.freeze_id))
+			BEGIN ${refuse} END`);
+		// The rows that mark a month frozen: while it is locked, no second active
+		// freeze, and its freeze rows are never changed or removed. Reopen flips
+		// the lock first, then releases them.
+		database.exec(`CREATE TEMP TRIGGER financials_ledger_freezes_locked_insert BEFORE INSERT ON main.financials_ledger_freezes
+			WHEN ${locked("NEW.period")}
+				AND EXISTS (SELECT 1 FROM main.financials_ledger_freezes f WHERE f.period = NEW.period AND f.released_at = '')
+			BEGIN ${refuse} END`);
+		database.exec(`CREATE TEMP TRIGGER financials_ledger_freezes_locked_update BEFORE UPDATE ON main.financials_ledger_freezes
+			WHEN (${locked("OLD.period")} OR ${locked("NEW.period")})
+			BEGIN ${refuse} END`);
+		database.exec(`CREATE TEMP TRIGGER financials_ledger_freezes_locked_delete BEFORE DELETE ON main.financials_ledger_freezes
+			WHEN ${locked("OLD.period")}
 			BEGIN ${refuse} END`);
 		database.exec(`CREATE TEMP TRIGGER financials_ledger_items_locked_update BEFORE UPDATE ON main.financials_ledger_items
 			WHEN (${locked("OLD.period")} OR ${locked("NEW.period")})
@@ -51100,6 +51119,12 @@ function writeLedgerFreeze(period, items, { source, actor, frozenAt, settings = 
 // (a month closed before freezing existed) it reads exactly what the one-time
 // freeze would write for it (settledMonthItems()). Every item carries
 // basis 'live' or 'settled'.
+//
+// The books' months are the closed months and every month from the first one a
+// scope reads to this one. An item dated outside them (a receipt typed with a
+// year in the future or long before the fleet's first load) creates no month
+// row and counts in no total, as in the payout ledger, whose months are the
+// same; it is listed in `outOfRange` instead.
 async function buildFinancialsLedger() {
 	const fleet = await computeFleetLedger();
 	const locked = new Set(db.prepare("SELECT period FROM period_locks WHERE period_locks.status = 'locked'").all().map((r) => r.period));
@@ -51108,11 +51133,19 @@ async function buildFinancialsLedger() {
 		if (frozen.has(r.period)) frozen.get(r.period).push(ledgerItemFromRow(r));
 	}
 	const settledFor = settledPayoutRows();
+	const months = new Set(locked);
+	for (const scope of fleet.scopes) for (const m of scope.months) months.add(m.month);
+	const open = [...months].filter((mk) => !locked.has(mk)).sort();
+	const firstOpen = open.length ? open[0] : fleet.currentMonthKey;
+	const inBooks = (mk) => locked.has(mk) || (mk >= firstOpen && mk <= fleet.currentMonthKey);
 	const items = [];
-	const months = new Set();
+	const outOfRange = [];
 	for (const scope of fleet.scopes) {
-		for (const m of scope.months) months.add(m.month);
-		for (const it of scope.items) if (!locked.has(it.month)) items.push({ ...it, basis: "live" });
+		for (const it of scope.items) {
+			if (locked.has(it.month)) continue;
+			if (inBooks(it.month)) items.push({ ...it, basis: "live" });
+			else outOfRange.push({ ...it, basis: "live" });
+		}
 	}
 	for (const period of locked) {
 		const its = frozen.has(period) ? frozen.get(period) : settledMonthItems(fleet, period, settledFor(period));
@@ -51122,6 +51155,7 @@ async function buildFinancialsLedger() {
 	for (const it of items) months.add(it.month);
 	return {
 		items,
+		outOfRange,
 		months: [...months].sort(),
 		lockedPeriods: locked,
 		frozenPeriods: new Set(frozen.keys()),
@@ -51229,13 +51263,19 @@ function financialsReportQuery(q) {
 	return { from, to, granularity, groupBy };
 }
 
-async function buildFinancialsReport({ from, to, granularity, groupBy }) {
-	const books = await buildFinancialsLedger();
+// `books`: buildFinancialsLedger()'s result when the caller already has it.
+// `ledgerOnly`: the payout ledger's own lines, each counted (the default
+// settings), and none of Financials' own (reserve, depreciation, overhead,
+// investor payouts), whatever the cost settings say: GET /api/financials reads
+// the report this way, so every figure it returns is on the books' one basis.
+async function buildFinancialsReport({ from, to, granularity, groupBy, books: given = null, ledgerOnly = false }) {
+	const books = given || await buildFinancialsLedger();
 	const settings = financialsSettings();
 	const closedSettings = closedMonthSettings();
-	const settingsFor = (mk) => (books.lockedPeriods.has(mk)
-		? (closedSettings.get(mk) || financialsReport.DEFAULT_SETTINGS)
-		: settings);
+	const settingsFor = ledgerOnly
+		? () => financialsReport.DEFAULT_SETTINGS
+		: (mk) => (books.lockedPeriods.has(mk) ? (closedSettings.get(mk) || financialsReport.DEFAULT_SETTINGS) : settings);
+	const ledgerLine = (i) => i.kind === "settlement_adjustment" || Object.prototype.hasOwnProperty.call(financialsCalc.FIGURE_OF_KIND, i.kind);
 
 	// The months the range touches; Financials' own lines are live for open
 	// months up to this one (a future month has no costs yet), and come frozen
@@ -51250,11 +51290,13 @@ async function buildFinancialsReport({ from, to, granularity, groupBy }) {
 	const thisMonth = houstonDay(new Date()).slice(0, 7);
 	const firstMonth = books.months.length ? books.months[0] : thisMonth;
 	const openMonths = months.filter((mk) => !books.lockedPeriods.has(mk) && mk >= firstMonth && mk <= thisMonth);
-	const extras = [
+	const extras = ledgerOnly ? [] : [
 		...financialsExtraItems(openMonths, settings, { reserve: true, depreciation: true, overhead: true, investorPayouts: true }),
 		...financialsExtraItems(months.filter((mk) => books.lockedPeriods.has(mk)), settings, { reserve: false, depreciation: false, overhead: false, investorPayouts: true }),
 	].map((i) => ({ ...i, basis: books.lockedPeriods.has(i.month) ? "settled" : "live" }));
-	const items = books.items.filter((i) => i.month >= months[0] && i.month <= months[months.length - 1]).concat(extras);
+	const items = books.items
+		.filter((i) => i.month >= months[0] && i.month <= months[months.length - 1] && (!ledgerOnly || ledgerLine(i)))
+		.concat(extras);
 
 	// Labels and the per-load facts the groupings read.
 	const unitByLower = new Map(db.prepare("SELECT unit_number FROM trucks").all().map((t) => [String(t.unit_number || "").trim().toLowerCase(), t.unit_number]));
@@ -51297,7 +51339,9 @@ async function buildFinancialsReport({ from, to, granularity, groupBy }) {
 			truckLabel,
 			loadKey: (id) => loadMilesLib.loadMilesKey(id),
 			loadOf: (lk) => loads.get(lk) || null,
-			driverKey: (name) => normalizeDriverName(name),
+			// A name that reads as a built-in property name is no driver's
+			// (driverNameForTotals()), as everywhere money is totalled by driver.
+			driverKey: (name) => normalizeDriverName(driverNameForTotals(name)),
 			driverLabel: (k) => displayNames.get(k) || k,
 			ownerLabel: (id) => (id ? (ownerNames.get(id) || `Owner #${id}`) : "Company"),
 		},
@@ -55665,7 +55709,10 @@ function closingFingerprint(periods) {
 // (`ledgers`: the reconcile results of the close's compute phase), or the one it
 // already carries, plus Financials' own lines (reserve, depreciation, overhead)
 // that `settings` has switched on, so the month keeps showing them as it closed.
-async function closingLedgerItems(periods, ledgers, settings) {
+// `frozenLive` (a Set, optional) collects "ownerId:period" for each row that
+// keeps an earlier stamp but has no breakdown recorded: its items are frozen at
+// today's figures, and the close says so.
+async function closingLedgerItems(periods, ledgers, settings, frozenLive = null) {
 	const fleet = await computeFleetLedger();
 	const byOwner = new Map(ledgers.map((l) => [l.ownerId, l.payouts]));
 	const stored = settledPayoutRows();
@@ -55680,6 +55727,7 @@ async function closingLedgerItems(periods, ledgers, settings) {
 			if (p.finalizedAt) {
 				const s = stored(period)(ownerId);
 				if (s && s.breakdown) return s;
+				if (frozenLive) frozenLive.add(`${ownerId}:${period}`);
 			}
 			return { breakdown: p.breakdown || null };
 		};
@@ -55797,8 +55845,9 @@ async function finalizePeriods(periods, actor) {
 	const closingSettings = financialsSettings();
 	let freezeItems = null;
 	let freezeError = "";
+	const frozenLive = new Set();
 	try {
-		freezeItems = await closingLedgerItems(toClose, ledgers, closingSettings);
+		freezeItems = await closingLedgerItems(toClose, ledgers, closingSettings, frozenLive);
 	} catch (e) {
 		freezeError = e.message;
 		console.error(`[period-close] Financials items for ${toClose.join(", ")} not computed: ${e.message}`);
@@ -55914,6 +55963,20 @@ async function finalizePeriods(periods, actor) {
 			insertDispatchNotification.run("period-close", "ACTION NEEDED — Financials figures not frozen at close",
 				`${toClose.map(periodLabel).join(", ")} closed and their payouts are frozen, but their Financials line items could not be computed or written (${freezeError}). Freeze them with the one-time freeze (POST /api/admin/financials/freeze-closed-months).`,
 				JSON.stringify({ periods: toClose, stage: "financials-freeze" }));
+		} catch {}
+	} else if (frozenLive.size) {
+		// A paid or processing row a reopen left as it was, with no breakdown on
+		// record: Financials froze that investor-month at today's figures, not at
+		// what it settled. Owners in the audit row; the notice has no figures
+		// (Dispatchers read these).
+		const pairs = [...frozenLive].sort();
+		const months = [...new Set(pairs.map((k) => k.split(":")[1]))];
+		logAudit({}, "financials_freeze_unsettled", "period", months.join(","),
+			`closed ${months.join(", ")}: a paid or processing payout with no recorded breakdown had its Financials items frozen at the figures as they stand now, not as settled: ${pairs.map((k) => `owner ${k.split(":")[0]} ${k.split(":")[1]}`).join("; ")}`);
+		try {
+			insertDispatchNotification.run("period-close", `${months.map(periodLabel).join(", ")}: Financials frozen as it stands`,
+				`A paid or processing payout in ${months.map(periodLabel).join(", ")} had no recorded breakdown, so its Financials figures were frozen as they stand now rather than as it was settled. The payout itself is unchanged. The details are in the audit trail (financials_freeze_unsettled).`,
+				JSON.stringify({ periods: months, stage: "financials-freeze-unsettled" }));
 		} catch {}
 	}
 	for (const p of toClose) {
@@ -56276,672 +56339,190 @@ app.put("/api/financials/settings", requireRole("Super Admin"), refuseCrossOrigi
 	}
 });
 
-// GET /api/financials — Super Admin financials dashboard (P1-1 from 2026-04-12 meeting)
-// Deshorn asked for a financial overview tab showing expense categories, highest/lowest
-// loads, per-truck macro view, rate-per-mile, and a driver earnings leaderboard. Reuses
-// the job-tracking cache + the same aggregation primitives as /api/investor but without
-// the investor-owner filter (Super Admin sees the whole fleet).
+// GET /api/financials — the Financials summary, per-truck table, driver
+// leaderboard, monthly table and month drill-down. Every figure comes from the
+// books (buildFinancialsLedger(), one calculation with the payout ledger): open
+// months live, closed months exactly as settled. The summary, the per-truck
+// table, the leaderboard, the categories and the highest/lowest loads cover the
+// selected period: ?month=YYYY-MM, else ?from=&to= (as GET /api/financials/report
+// takes them), else every month the books hold. The monthly table always lists
+// every month.
 app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 	try {
-		// Optional month drill-down (?month=YYYY-MM). Validated up front so a
-		// bad param fails fast before any Sheets/DB work. When absent the
-		// response is unchanged apart from `monthDetail: null`, so existing
-		// consumers are unaffected.
 		const monthParam = typeof req.query.month === "string" ? req.query.month.trim() : "";
 		if (monthParam && !/^\d{4}-(0[1-9]|1[0-2])$/.test(monthParam)) {
 			return res.status(400).json({ error: "month must be in YYYY-MM format" });
 		}
-
-		// Drop soft-deleted + cancelled loads before any aggregation so the P&L
-		// numbers match the dashboard KPIs exactly — on a request-local copy, never
-		// the shared cache (see liveJobTrackingView()).
-		const jobTracking = liveJobTrackingView(await getJobTrackingCached());
-
-		// Column resolution (same regex as investor endpoint)
-		const jtRateCol = findCol(jobTracking.headers, /payment|rate|amount|revenue/i);
-		const jtDateCol = findCol(jobTracking.headers, /status.*update.*date|completion.*date|assigned.*date/i)
-			|| findCol(jobTracking.headers, /date/i);
-		const jtDriverCol = findCol(jobTracking.headers, /^driver$/i);
-		const jtTruckCol = findCol(jobTracking.headers, /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i);
-		// Intentionally stricter than /api/investor's /status/i so we never
-		// accidentally match "Status Update Date". Production sheet uses
-		// "Job Status" as the actual header, which is handled here. Same
-		// fix pattern as the P0-8 invoice endpoint regex.
-		const statusCol = findCol(jobTracking.headers, /^(job[\s._-]?)?status$/i);
-		const pickupDateCol = findCol(jobTracking.headers, /pickup.*appo|pickup.*date/i);
-		const dropoffDateCol = findCol(jobTracking.headers, /drop.?off.*appo|drop.?off.*date|delivery.*date/i);
-		const loadIdCol = findCol(jobTracking.headers, /load.?id|job.?id/i);
-		const completedStatuses = /^(delivered|completed|pod received)$/i;
-
-		// ⚠️ The local `parseSheetDate` is DELETED, not merely unused — every date
-		// read in this handler now goes through the shared moneySheetDate(). See the
-		// note at the top of computeInvestorMonthlyEarnings() for why leaving a
-		// narrower parser inline in a money handler is the defect, not a convenience.
-		function fmtDate(d) {
-			return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-		}
-		function expandDateRange(start, end) {
-			const dates = [];
-			const s = new Date(start); s.setHours(12, 0, 0, 0);
-			const e = end ? new Date(end) : new Date(start);
-			e.setHours(12, 0, 0, 0);
-			if (e < s) return [fmtDate(s)];
-			const MAX_SPAN = 31 * 24 * 3600 * 1000;
-			if (e - s > MAX_SPAN) e.setTime(s.getTime() + MAX_SPAN);
-			const cur = new Date(s);
-			while (cur <= e) {
-				dates.push(fmtDate(cur));
-				cur.setDate(cur.getDate() + 1);
-			}
-			return dates;
+		const pad2 = (n) => String(n).padStart(2, "0");
+		const lastDayOf = (mk) => `${mk}-${pad2(new Date(Date.UTC(Number(mk.slice(0, 4)), Number(mk.slice(5, 7)), 0)).getUTCDate())}`;
+		let range = null;
+		if (monthParam) {
+			range = { from: `${monthParam}-01`, to: lastDayOf(monthParam) };
+		} else if (req.query.from !== undefined || req.query.to !== undefined) {
+			const q = financialsReportQuery({ from: req.query.from, to: req.query.to });
+			if (q.error) return res.status(400).json({ error: q.error, code: "INVALID_REPORT_QUERY" });
+			range = { from: q.from, to: q.to };
 		}
 
-		// ---- Miles source: getLoadMilesIndex() ----
-		// One figure per load from the best source on file: ELD-measured loaded
-		// miles, the rate-con's stored road miles, the cached road distance, then
-		// straight-line (lib/load-miles.js). Same index as /api/investor. Old
-		// odometer-based miles were always $0 because drivers rarely filled the
-		// odometer field. Read by the sheet's Load ID cell, so a null-prototype
-		// object; it answers "#123" and "123" alike.
-		const milesByLoadId = Object.create(null);
-		const loadMilesIndex = getLoadMilesIndex();
-		loadMilesLib.fillMilesLookup(milesByLoadId, loadMilesIndex);
-		// milesSource below: measured (ELD, rate-con or cached road) vs straight-line.
-		const milesBySource = loadMilesLib.milesSourceCounts(loadMilesIndex);
-		const roadMilesCount = milesBySource.eld + milesBySource.ratecon + milesBySource.road;
-		const haversineMilesCount = milesBySource.straight_line;
-
-		// ---- Single-pass aggregation across all loads ----
-		let totalRevenue = 0;
-		let earliestDate = null;
-		let latestDate = null;
-		let completedRowCount = 0;       // row-level count — matches /api/investor.completedJobs
-		// Unassigned revenue: completed loads where the Driver column is blank.
-		// Tracked separately so the leaderboard sum reconciles with totalRevenue
-		// AND so Deshorn can see a data-quality signal (loads that never got
-		// attributed to a real driver).
-		let unassignedGross = 0;
-		let unassignedLoadCount = 0;
-		let unassignedMiles = 0;
-		const completedLoadIds = new Set();  // unique load IDs — used for expense matching
-		// Every map below keyed by a driver or by the sheet's Truck cell is a
-		// null-prototype object, and a Driver cell that reads as a built-in
-		// property name is unassigned (driverNameForTotals()): it lands in
-		// unassignedGross and no driver is paid for it — as for a blank cell.
-		const grossByDriver = Object.create(null);
-		const grossByTruck = Object.create(null);         // sum revenue per truck (truck-column attribution)
-		const milesByDriver = Object.create(null);        // sum of haversine miles per driver
-		const milesByTruck = Object.create(null);         // sum of haversine miles per truck
-		let fleetTotalMiles = 0;
-		let loadsWithCoords = 0;         // data-quality signal
-		const loadsByDriver = Object.create(null);
-		const loadsByTruck = Object.create(null);
-		const driverDaySets = Object.create(null);
-		const truckDaySets = Object.create(null);         // active days per truck (per-truck driver pay)
-		const truckLoadDates = Object.create(null);       // {first, last} per truck — accurate operating window
-		const completedLoads = []; // for highest/lowest — store minimal fields
-		// Per-driver per-month REVENUE (completed loads only). Used by the
-		// percentage-pay branch so owner-op pay = (monthRevenue − monthDeductible) × pct.
-		const driverMonthlyRevenue = Object.create(null); // { driver_lc: { "YYYY-MM": revenue } }
-		// Fleet-wide completed revenue per assigned month (incl. unassigned
-		// loads) — drives the monthly performance breakdown. Keyed "YYYY-MM".
-		const monthlyRevenue = {};
-		// Mirror the admin overrides from /api/investor so the company P&L
-		// and investor view honor the same adjustments (CLAUDE.md consistency
-		// rule). `remove` filters days out; `add` credits ELD-missed days.
-		const driverDayOverrides = getAllExcludedDriverDays();
 		const now = new Date();
+		const today = houstonDay(now);
+		const books = await buildFinancialsLedger();
+		if (!range) {
+			const first = books.months.length ? books.months[0] : today.slice(0, 7);
+			const last = books.months.length ? books.months[books.months.length - 1] : today.slice(0, 7);
+			range = { from: `${first}-01`, to: lastDayOf(last) };
+		}
+		// The ledger's own lines, whatever the Financials cost settings: one basis
+		// for every figure below (the report page is where the settings apply).
+		const report = (groupBy) => buildFinancialsReport({ from: range.from, to: range.to, granularity: "month", groupBy, books, ledgerOnly: true });
+		const fleetReport = await report("fleet");
+		const truckReport = await report("truck");
+		const driverReport = await report("driver");
+		const money = (v) => Math.round(Number(v || 0) * 100) / 100;
 
-		// ---- ELD travel-day index (per linked vehicle), fleet-wide ----
-		// Same rationale as /api/investor: a COMPLETED load's pickup→delivery
-		// window is intersected with the days that truck actually traveled per
-		// ELD, so driver/truck active days reflect real working days. Trucks with
-		// no ELD link fall back to the full window. Keeps this P&L reconciled with
-		// the investor view (the CLAUDE.md consistency invariant).
-		const unitToVid = Object.create(null);
-		db.prepare("SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''").all()
-			.forEach(t => { unitToVid[t.u] = t.vid; });
-		const eldByVid = getEldTravelDaysByVehicleCached(Object.values(unitToVid), 0, Date.now() + 86400000);
-
-		jobTracking.data.forEach((r) => {
-			const st = statusCol ? (r[statusCol] || "").trim() : "";
-			const driver = jtDriverCol ? (driverNameForTotals(r[jtDriverCol]) || "").trim() : "";
-			const driverLc = normalizeDriverName(driver);
-			const truckUnit = jtTruckCol ? (r[jtTruckCol] || "").trim().toLowerCase() : "";
-
-			// Operating period
-			if (jtDateCol && r[jtDateCol]) {
-				const d = moneySheetDate(r[jtDateCol]);
-				if (d && !isNaN(d)) {
-					if (!earliestDate || d < earliestDate) earliestDate = d;
-					if (!latestDate || d > latestDate) latestDate = d;
-				}
-			}
-
-			// Revenue + completed-load list
-			if (completedStatuses.test(st)) {
-				completedRowCount++;
-				if (driverLc) loadsByDriver[driverLc] = (loadsByDriver[driverLc] || 0) + 1;
-				if (truckUnit) loadsByTruck[truckUnit] = (loadsByTruck[truckUnit] || 0) + 1;
-				const amt = parseFloat(String((jtRateCol ? r[jtRateCol] : "0")).replace(/[$,]/g, "")) || 0;
-				if (amt) {
-					const lid = loadIdCol ? (r[loadIdCol] || "").trim() : "";
-					if (lid) completedLoadIds.add(lid);
-					totalRevenue += amt;
-					if (driverLc) {
-						grossByDriver[driverLc] = (grossByDriver[driverLc] || 0) + amt;
-					} else {
-						unassignedGross += amt;
-						unassignedLoadCount += 1;
-					}
-					if (truckUnit) {
-						grossByTruck[truckUnit] = (grossByTruck[truckUnit] || 0) + amt;
-						// First/last load date per truck — used to bound the
-						// fixed-cost accrual window so a truck idle for half
-						// the year doesn't get charged 12 months of insurance.
-						if (jtDateCol && r[jtDateCol]) {
-							const d = moneySheetDate(r[jtDateCol]);
-							if (d && !isNaN(d)) {
-								if (!truckLoadDates[truckUnit]) truckLoadDates[truckUnit] = { first: d, last: d };
-								else {
-									if (d < truckLoadDates[truckUnit].first) truckLoadDates[truckUnit].first = d;
-									if (d > truckLoadDates[truckUnit].last) truckLoadDates[truckUnit].last = d;
-								}
-							}
-						}
-					}
-					// Miles for this load (straight-line from load_coordinates).
-					// Loads without coordinates contribute 0 — counted separately
-					// as loadsWithCoords so the frontend can show coverage %.
-					const loadMiles = milesByLoadId[lid.toLowerCase()] || 0;
-					if (loadMiles > 0) {
-						loadsWithCoords++;
-						fleetTotalMiles += loadMiles;
-						if (driverLc) {
-							milesByDriver[driverLc] = (milesByDriver[driverLc] || 0) + loadMiles;
-						} else {
-							unassignedMiles += loadMiles;
-						}
-						if (truckUnit) milesByTruck[truckUnit] = (milesByTruck[truckUnit] || 0) + loadMiles;
-					}
-					// Capture for highest/lowest. Use display name for driver (not lowercase).
-					// monthKey (assigned-month bucket) is filled in below when the date
-					// parses; the month drill-down filters completedLoads on it so the
-					// month's load list reconciles with monthlyRevenue by construction.
-					const dateStr = jtDateCol && r[jtDateCol] ? String(r[jtDateCol]) : "";
-					const loadEntry = {
-						loadId: lid || `#${completedLoads.length + 1}`,
-						driver: driver || "(unknown)",
-						amount: amt,
-						date: dateStr,
-						monthKey: "",
-					};
-					completedLoads.push(loadEntry);
-					// Per-month revenue: fleet-wide (incl. unassigned) for the
-					// monthly performance view, plus per-driver for the
-					// percentage-pay branch. Bucketed by the load's assigned month.
-					if (jtDateCol && r[jtDateCol]) {
-						const d = moneySheetDate(r[jtDateCol]);
-						if (d && !isNaN(d)) {
-							const mk = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-							loadEntry.monthKey = mk;
-							monthlyRevenue[mk] = (monthlyRevenue[mk] || 0) + amt;
-							if (driverLc) {
-								if (!driverMonthlyRevenue[driverLc]) driverMonthlyRevenue[driverLc] = {};
-								driverMonthlyRevenue[driverLc][mk] = (driverMonthlyRevenue[driverLc][mk] || 0) + amt;
-							}
-						}
-					}
-				}
-			}
-
-			// Active-day sets for driver pay (per-driver and per-truck).
-			// COMPLETED loads only, intersected with the days the truck actually
-			// traveled per ELD. Per-truck days × that truck's `driver_pay_daily`
-			// is the authoritative per-row driver pay; per-driver days remain the
-			// fallback when the sheet has no truck-column attribution. Trucks with
-			// no ELD link fall back to the full pickup→delivery window.
-			if (completedStatuses.test(st)) {
-				// BOTH ends resolve through the shared moneySheetDate(), matching the
-				// fallback below and the twin sites in computeInvestorMonthlyEarnings()
-				// and GET /api/investor — see the full rationale and production
-				// measurement at the first of those. These three MUST stay in lockstep
-				// or the P&L, the investor portal and the weekly invoice stop
-				// reconciling; the pickup end is the half that was still diverging from
-				// POST /api/invoices/generate.
-				let pickup = moneySheetDate(pickupDateCol ? r[pickupDateCol] : null);
-				const dropoff = moneySheetDate(dropoffDateCol ? r[dropoffDateCol] : null);
-				// Unreadable or blank pickup → fall back to the assigned date. Now
-				// genuinely the last resort; see the note at the first site.
-				if (!pickup && jtDateCol && r[jtDateCol]) pickup = moneySheetDate(r[jtDateCol]);
-				if (pickup && !isNaN(pickup)) {
-					const windowDays = expandDateRange(pickup, dropoff || pickup);
-					const vid = truckUnit ? unitToVid[truckUnit] : null;
-					const eld = vid ? eldByVid[vid] : null;
-					// Intersect with real travel days only when the ELD covered this
-					// window (≥1 ping); otherwise fall back to the full window (see
-					// /api/investor for rationale).
-					const covered = eld && windowDays.some(d => eld.coverage.has(d));
-					const eldCounted = covered ? windowDays.filter(d => eld.travel.has(d)) : windowDays;
-					// Strip admin-removed days here; admin-added days are applied
-					// after the loop so they don't require a load row to exist.
-					const ovr = driverLc ? (driverDayOverrides[driverLc] || null) : null;
-					const skipSet = ovr ? ovr.remove : null;
-					const counted = skipSet && skipSet.size ? eldCounted.filter(d => !skipSet.has(d)) : eldCounted;
-					if (driverLc) {
-						if (!driverDaySets[driverLc]) driverDaySets[driverLc] = new Set();
-						counted.forEach(d => driverDaySets[driverLc].add(d));
-					}
-					// truckDaySets intentionally left unfiltered — truck-level days
-					// aren't user-visible, and the driver-keyed exclusion gets
-					// ambiguous when a truck has multiple drivers in a window.
-					if (truckUnit) {
-						if (!truckDaySets[truckUnit]) truckDaySets[truckUnit] = new Set();
-						eldCounted.forEach(d => truckDaySets[truckUnit].add(d));
-					}
-				}
-			}
-		});
-
-		// Apply admin-added days fleet-wide. Same as /api/investor: credits a
-		// day the ELD missed (truck offline, vehicle not linked, feed gap) to
-		// the driver's all-time active-day set. Per-truck day sets are not
-		// touched — added days are driver-keyed, and the per-truck breakdown
-		// uses unfiltered ELD travel anyway.
-		for (const [drv, ovr] of Object.entries(driverDayOverrides)) {
-			if (!ovr.add || !ovr.add.size) continue;
-			if (!driverDaySets[drv]) driverDaySets[drv] = new Set();
-			for (const d of ovr.add) driverDaySets[drv].add(d);
+		// Each item's part inside the period, placed on its days as the report
+		// places it (an undated cost spread over its month).
+		const periodItems = [];
+		for (const it of books.items) {
+			let cents = 0;
+			for (const p of financialsReport.placements(it)) if (p.day >= range.from && p.day <= range.to) cents += p.cents;
+			if (cents) periodItems.push(cents === it.cents ? it : { ...it, cents });
 		}
 
-		// Partition each driver's final active-day set by calendar month for the
-		// monthly performance breakdown. An exact partition of driverDaySets, so
-		// per-month fixed-driver pay sums back to the annual total computed below.
-		const driverMonthlyDays = Object.create(null); // { driver_lc: { "YYYY-MM": Set<"YYYY-MM-DD"> } }
-		for (const [drv, daySet] of Object.entries(driverDaySets)) {
-			const buckets = (driverMonthlyDays[drv] = {});
-			for (const d of daySet) {
-				const mk = d.slice(0, 7);
-				(buckets[mk] || (buckets[mk] = new Set())).add(d);
-			}
-		}
-
-		let monthsOfOperation = 1;
-		if (earliestDate && latestDate) {
-			monthsOfOperation = Math.max(1,
-				(latestDate.getFullYear() - earliestDate.getFullYear()) * 12
-				+ (latestDate.getMonth() - earliestDate.getMonth()) + 1
-			);
-		}
-
-		// ---- Expense totals (entire fleet, no filter) ----
-		const expByCategory = Object.fromEntries(
-			db.prepare(`SELECT LOWER(type) AS cat, COALESCE(SUM(amount),0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY LOWER(type)`).all().map(r => [r.cat || "other", r.t])
-		);
-		const totalTripExpenses = Object.values(expByCategory).reduce((s, v) => s + v, 0);
-
-		// Monthly expenses by category
-		const monthlyCategoryRows = db.prepare(
-			`SELECT strftime('%Y-%m', date) AS m, LOWER(type) AS cat, COALESCE(SUM(amount),0) AS t
-			 FROM expenses WHERE date IS NOT NULL AND date != '' AND ${EXPENSE_PNL_FILTER} GROUP BY m, LOWER(type) ORDER BY m ASC`
-		).all();
-		const expensesByMonthMap = {};
-		monthlyCategoryRows.forEach(r => {
-			if (!r.m) return;
-			if (!expensesByMonthMap[r.m]) expensesByMonthMap[r.m] = { month: r.m, fuel: 0, maintenance: 0, repair: 0, toll: 0, food: 0, other: 0 };
-			const key = (r.cat in expensesByMonthMap[r.m]) ? r.cat : "other";
-			expensesByMonthMap[r.m][key] += r.t;
-		});
-		const expensesByMonth = Object.values(expensesByMonthMap);
-
-		// Maintenance fund + compliance fees (truck-level) roll into totalExpenses.
-		// Exclude rows tied to an Inactive truck (a truck in Maintenance or OOS is
-		// still in the fleet: investorPayoutBasis.truckInFleetSql()) via NOT IN,
-		// which preserves orphan rows whose `truck` cell doesn't match any truck
-		// (existing behavior) while dropping inactive ones.
-		const maintSum = db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM maintenance_fund WHERE type='service' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE NOT (${investorPayoutBasis.truckInFleetSql()}))`).get().t;
-		const compSum = db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM compliance_fees WHERE status='Paid' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE NOT (${investorPayoutBasis.truckInFleetSql()}))`).get().t;
-
-		// ---- Driver pay (branches on each driver's pay_type) ----
-		// Fixed drivers: activeDays × per-truck dailyRate (legacy logic).
-		// Percentage drivers: max(0, completed-load revenue − Fuel & Maintenance) × pct.
-		// Same formula their invoice uses, so /admin/financials matches reality.
-		const payStructures = getDriverPayStructures();
-		const expensesByDriverMonth = getDeductibleExpensesByDriverMonth();
-		const trucksByDriver = Object.create(null);
-		db.prepare("SELECT assigned_driver, driver_pay_daily FROM trucks").all().forEach(t => {
-			const d = normalizeDriverName(t.assigned_driver);
-			if (d) trucksByDriver[d] = t.driver_pay_daily || 250;
-		});
-		const driverPayDetails = Object.create(null);
-		let totalDriverPay = 0;
-		for (const [driver, daySet] of Object.entries(driverDaySets)) {
-			const struct = payStructures[driver] || { payType: "fixed", payPercentage: 0 };
-			const activeDays = daySet.size;
-			let pay, dailyRate;
-			if (struct.payType === "percentage") {
-				const totalRev = Object.values(driverMonthlyRevenue[driver] || {}).reduce((s, v) => s + v, 0);
-				const totalExp = (expensesByDriverMonth[driver] || {})._total || 0;
-				const net = Math.max(0, totalRev - totalExp);
-				pay = Math.round((net * struct.payPercentage / 100) * 100) / 100;
-				dailyRate = 0;
-			} else {
-				dailyRate = resolveDailyRate(struct.payDaily, trucksByDriver[driver]);
-				pay = activeDays * dailyRate;
-			}
-			totalDriverPay += pay;
-			driverPayDetails[driver] = {
-				activeDays, dailyRate, totalPay: pay,
-				payType: struct.payType,
-				payPercentage: struct.payType === "percentage" ? struct.payPercentage : 0,
-				source: "estimate",
-			};
-		}
-
-		// ---- Truck fixed costs ----
-		// `maintenance_fund_monthly` is intentionally OMITTED. It's a budget
-		// reserve allocation (see comment at line ~11134), not a real cost.
-		// Real maintenance spend already flows through `maintSum` (actual
-		// service payments from the maintenance_fund table). Including the
-		// reserve here would double-count maintenance for the whole fleet.
-		// Operating-window rule mirrors the per-truck loop below: prefer the
-		// truck's first→last load date range, fall back to created_at-capped
-		// fleet months only when the truck has no recorded loads. Keeps the
-		// fleet KPI reconciled with sum(perTruck.fixedTotal).
-		// Inactive trucks drop out of the fleet P&L — they don't accrue
-		// fixed costs and they don't appear in the per-truck performance table
-		// further down (both consume `allTrucks`). A truck in Maintenance or OOS
-		// stays in both: it still owes its insurance, payment and ELD
-		// (investorPayoutBasis.truckInFleetSql()).
-		const allTrucks = db.prepare(`SELECT * FROM trucks WHERE ${investorPayoutBasis.truckInFleetSql()}`).all();
-		let totalFixedCosts = 0;
-		for (const t of allTrucks) {
-			const perMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0) + (t.truck_payment_monthly || 0)
-				+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12);
-			const unitLower = (t.unit_number || "").toLowerCase();
-			let truckMonths = monthsOfOperation;
-			if (truckLoadDates[unitLower]) {
-				const { first, last } = truckLoadDates[unitLower];
-				truckMonths = Math.max(1,
-					(last.getFullYear() - first.getFullYear()) * 12
-					+ (last.getMonth() - first.getMonth()) + 1
-				);
-			} else {
-				// No loads: accrue from the in-service month (in_service_date, else
-				// created_at) to the retirement month, rather than from the day the
-				// row was entered in the UI to today. Floor 0 so a forward-dated truck
-				// accrues nothing yet, matching the $0 its monthly rows show.
-				//
-				// ⚠️ The truckLoadDates branch above is deliberately NOT retirement-
-				// clamped. It spans first load → last load, so it is already bounded by
-				// the truck's real activity and a retired truck's last load is in the
-				// past by construction. Clamping it too would double-count the bound
-				// and could shorten a span the truck genuinely worked.
-				const billed = truckBilledMonthCount(t, now);
-				if (billed !== null) truckMonths = Math.min(billed, monthsOfOperation);
-			}
-			totalFixedCosts += perMonth * truckMonths;
-		}
-
-		const totalExpenses = totalTripExpenses + maintSum + compSum + totalDriverPay + totalFixedCosts;
-		const netProfit = totalRevenue - totalExpenses;
-
-		// ---- Biggest expense category (compared across fuel/maint/repair/tolls/other) ----
-		const catLabels = { fuel: "Fuel", maintenance: "Maintenance", repair: "Repair", toll: "Tolls", food: "Food", other: "Other" };
-		let biggest = { name: "—", amount: 0 };
-		for (const [cat, amt] of Object.entries(expByCategory)) {
-			if (amt > biggest.amount) biggest = { name: catLabels[cat] || cat, amount: Math.round(amt) };
-		}
-
-		// ---- Per-Truck Performance ----
-		// Attribution rule: every per-truck term must use the truck's
-		// unit_number as the key. Driver-keyed maps are only used as a
-		// fallback when the entire fleet has no truck-column attribution
-		// (legacy single-driver fleet). Partial fallback would let one
-		// truck inherit another truck's revenue/expenses when a single
-		// load is missing its truck column — that was the source of the
-		// negative-Net rows reported by Deshorn on /admin/financials.
-		// The driver-keyed fallback below reads expByDriver[normalizeDriverName(
-		// truck.assigned_driver)], so the map is keyed that way
-		// (foldExpenseTotalsByDriver()), and a receipt stored under a spacing
-		// variant of the driver's name is not lost from it. The query is unchanged.
-		const expByDriverRows = db.prepare(`SELECT LOWER(driver) AS d, COALESCE(SUM(amount),0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY LOWER(driver)`).all();
-		const expByDriver = foldExpenseTotalsByDriver(expByDriverRows);
-		// The three unit-keyed maps are null-prototype objects (see
-		// driverNameForTotals()), so a unit with no row reads as undefined.
-		const expByTruck = Object.create(null);
-		for (const r of db.prepare(`SELECT LOWER(truck_unit) AS u, COALESCE(SUM(amount),0) AS t FROM expenses WHERE truck_unit IS NOT NULL AND truck_unit != '' AND ${EXPENSE_PNL_FILTER} GROUP BY LOWER(truck_unit)`).all()) {
-			expByTruck[r.u] = r.t;
-		}
-		const maintByTruck = Object.create(null);
-		for (const r of db.prepare(`SELECT LOWER(truck) AS u, COALESCE(SUM(amount),0) AS t FROM maintenance_fund WHERE type='service' GROUP BY LOWER(truck)`).all()) {
-			maintByTruck[r.u] = r.t;
-		}
-		const compByTruck = Object.create(null);
-		for (const r of db.prepare(`SELECT LOWER(truck) AS u, COALESCE(SUM(amount),0) AS t FROM compliance_fees WHERE status='Paid' GROUP BY LOWER(truck)`).all()) {
-			compByTruck[r.u] = r.t;
-		}
-
-		// Fleet-wide attribution flags: decide whether to fall back to
-		// driver-keyed maps for trucks that have zero truck-attributed data.
-		const fleetHasTruckRevenue = Object.keys(grossByTruck).length > 0;
-		const fleetHasTruckExpenses = Object.keys(expByTruck).length > 0;
-		const fleetHasTruckDays = Object.keys(truckDaySets).length > 0;
-
-		const perTruck = allTrucks.map((truck) => {
-			const driverName = normalizeDriverName(truck.assigned_driver);
-			const unitLower = (truck.unit_number || "").toLowerCase();
-
-			// Revenue: truck-first, with safe fallback only when no truck
-			// in the fleet has any truck-attributed gross. Avoids the
-			// "blank/mismatched assigned_driver → $0 gross + thousands in
-			// expenses → big negative Net" failure mode.
-			const gross = grossByTruck[unitLower] !== undefined
-				? grossByTruck[unitLower]
-				: (fleetHasTruckRevenue ? 0 : (grossByDriver[driverName] || 0));
-
-			// Variable expenses: truck-first via expenses.truck_unit.
-			const varExp = expByTruck[unitLower] !== undefined
-				? expByTruck[unitLower]
-				: (fleetHasTruckExpenses ? 0 : (expByDriver[driverName] || 0));
-
-			const maintExp = maintByTruck[unitLower] || 0;
-			const compExp = compByTruck[unitLower] || 0;
-
-			// Fixed costs: drop maintenance_fund_monthly (reserve budget,
-			// already counted via maintExp service rows). Same rationale
-			// as the fleet totalFixedCosts loop above — keeps fleet and
-			// per-truck consistent.
-			const fixedPerMonth = (truck.insurance_monthly || 0) + (truck.eld_monthly || 0) + (truck.truck_payment_monthly || 0)
-				+ ((truck.hvut_annual || 0) / 12) + ((truck.irp_annual || 0) / 12);
-
-			// Operating window: prefer the actual range of load dates for
-			// THIS truck. Falls back to in-service-capped fleet months only
-			// when the truck has no recorded loads (then it's all overhead
-			// and Net should be negative — that's accurate, not a bug).
-			// MUST stay identical to the fleet totalFixedCosts loop above:
-			// that KPI is documented as reconciling to sum(perTruck.fixedTotal),
-			// so moving one start month without the other silently breaks it.
-			let truckMonths = monthsOfOperation;
-			if (truckLoadDates[unitLower]) {
-				const { first, last } = truckLoadDates[unitLower];
-				truckMonths = Math.max(1,
-					(last.getFullYear() - first.getFullYear()) * 12
-					+ (last.getMonth() - first.getMonth()) + 1
-				);
-			} else {
-				// Floor 0 and retirement-bounded, same as the fleet loop — these two
-				// must not diverge, because the fleet KPI is documented as reconciling
-				// to sum(perTruck.fixedTotal).
-				const billed = truckBilledMonthCount(truck, now);
-				if (billed !== null) truckMonths = Math.min(billed, monthsOfOperation);
-			}
-
-			// Driver pay: per-truck active days × this truck's daily rate.
-			// dailyRate=0 silently defaults to $250/day (preserved for
-			// backwards compat); flagged via driverPayUsedDefault so the
-			// UI can warn.
-			// Percentage drivers (e.g. Rodney) bypass the daily-rate path and
-			// use the per-driver totalPay computed above, pro-rated by this
-			// truck's share of the driver's total active days so multi-truck
-			// drivers don't double-count.
-			const truckDays = truckDaySets[unitLower]?.size || 0;
-			const driverStruct = (driverName && payStructures[driverName]) || { payType: "fixed", payPercentage: 0 };
-			const dailyRateRaw = truck.driver_pay_daily || 0;
-			const dailyRate = resolveDailyRate(driverStruct.payDaily, dailyRateRaw);
-			let driverPay;
-			let driverPayUsedDefault;
-			if (driverStruct.payType === "percentage") {
-				const driverTotalPay = driverPayDetails[driverName]?.totalPay || 0;
-				if (truckDays > 0) {
-					const driverDays = driverDaySets[driverName]?.size || 0;
-					const share = driverDays > 0 ? Math.min(1, truckDays / driverDays) : 1;
-					driverPay = driverTotalPay * share;
-				} else if (fleetHasTruckDays) {
-					driverPay = 0;
-				} else {
-					driverPay = driverTotalPay;
-				}
-				driverPayUsedDefault = false;
-			} else {
-				driverPayUsedDefault = dailyRateRaw === 0;
-				driverPay = truckDays > 0
-					? truckDays * dailyRate
-					: (fleetHasTruckDays ? 0 : (driverPayDetails[driverName]?.totalPay || 0));
-			}
-
-			const fixedTotal = fixedPerMonth * truckMonths;
-			const expenses = varExp + maintExp + compExp + fixedTotal + driverPay;
-			const net = gross - expenses;
-
-			// Miles: same truck-first rule (already in place pre-patch).
-			// Compute $/mile from the unrounded mile count so small-fleet
-			// rates don't drift (e.g. 1.4 mi rounds to 1, halving the rate).
-			const truckMiles = milesByTruck[unitLower];
-			const rawMiles = truckMiles !== undefined ? truckMiles : (milesByDriver[driverName] || 0);
-			const totalMiles = Math.round(rawMiles);
-			const ratePerMile = rawMiles > 0 ? Math.round((gross / rawMiles) * 100) / 100 : 0;
-			const truckLoadCount = loadsByTruck[unitLower];
-			const loadCount = (truckLoadCount !== undefined) ? truckLoadCount : (loadsByDriver[driverName] || 0);
-
-			return {
-				unitNumber: truck.unit_number,
-				assignedDriver: truck.assigned_driver || "—",
-				loadCount,
-				gross: Math.round(gross),
-				expenses: Math.round(expenses),
-				net: Math.round(net),
-				totalMiles,
-				ratePerMile,
-				monthlyCost: Math.round(fixedPerMonth),
-				// Data-quality flags so the UI can explain surprising rows.
-				operatingMonths: truckMonths,
-				driverPayUsedDefault,
-				driverPayType: driverStruct.payType,
-				driverPayPercentage: driverStruct.payType === "percentage" ? driverStruct.payPercentage : 0,
-				attributionMode: grossByTruck[unitLower] !== undefined
-					? "truck"
-					: (fleetHasTruckRevenue ? "no-data" : "driver-fallback"),
-				// Idle asset: a truck that's been onboarded (and is accruing fixed
-				// costs) but has never carried a completed load. Its negative Net is
-				// pure overhead, not an operating loss — flag it so the UI can label
-				// the row instead of showing a confusing red number.
-				idle: loadCount === 0 && gross === 0,
-				idleSince: (loadCount === 0 && gross === 0) ? (truck.created_at || null) : null,
-			};
-		});
-
-		// ---- Idle assets: onboarded trucks with zero completed loads ----
-		// Their fixed costs drag fleet net, but it's idle overhead (insurance +
-		// ELD on a parked truck), not a freight loss. Summarized so /admin/
-		// financials can warn up front rather than leaving Deshorn to puzzle
-		// over a negative-net row (e.g. Rodney Brown / INV-38-A).
-		const idleTrucksList = perTruck.filter(t => t.idle);
-		const idleTruckCount = idleTrucksList.length;
-		const idleOverhead = idleTrucksList.reduce((s, t) => s + (t.expenses || 0), 0);
-
-		// ---- Highest + lowest paying loads ----
-		// Guard against fewer than 10 completed loads: sliceStart below ensures
-		// the "lowest" window never overlaps the "highest" window so a single
-		// load never appears in both lists when the fleet is young.
-		const sortedLoads = [...completedLoads].sort((a, b) => b.amount - a.amount);
-		const highest = sortedLoads.slice(0, 5).map(l => ({ loadId: l.loadId, driver: l.driver, amount: Math.round(l.amount), date: l.date }));
-		const lowestStart = Math.max(5, sortedLoads.length - 5);
-		const lowest = sortedLoads.slice(lowestStart).reverse().map(l => ({ loadId: l.loadId, driver: l.driver, amount: Math.round(l.amount), date: l.date }));
-
-		// ---- Driver earnings leaderboard ----
-		// Use the driver's display name from the first row they appear in rather than lowercase
+		// Display names: the first spelling the sheet or the drivers directory gives.
 		const driverDisplayNames = Object.create(null);
-		jobTracking.data.forEach(r => {
-			const d = jtDriverCol ? (driverNameForTotals(r[jtDriverCol]) || "").trim() : "";
-			const k = normalizeDriverName(d);
-			if (d && k && !driverDisplayNames[k]) driverDisplayNames[k] = d;
-		});
-		const drivers = Object.entries(grossByDriver).map(([lcName, gross]) => {
-			const rawMiles = milesByDriver[lcName] || 0;
-			const totalMiles = Math.round(rawMiles);
-			const pay = driverPayDetails[lcName]?.totalPay || 0;
+		{
+			const jobTracking = liveJobTrackingView(await getJobTrackingCached());
+			const jtDriverCol = findCol(jobTracking.headers, /^driver$/i);
+			for (const r of jobTracking.data) {
+				const d = jtDriverCol ? (driverNameForTotals(r[jtDriverCol]) || "").trim() : "";
+				const k = normalizeDriverName(d);
+				if (d && k && !driverDisplayNames[k]) driverDisplayNames[k] = d;
+			}
+			for (const r of db.prepare("SELECT driver_name FROM drivers_directory ORDER BY id").all()) {
+				const k = normalizeDriverName(r.driver_name);
+				if (k && !driverDisplayNames[k]) driverDisplayNames[k] = String(r.driver_name).trim();
+			}
+		}
+
+		// ---- Per-truck table and driver leaderboard: the report's groups ----
+		// Rows that are no truck (costs tied to none, and a closed month's
+		// Settlement adjustment) come after the trucks, so the table adds up to
+		// the period's totals.
+		const truckRow = (g) => {
+			const f = g.total;
 			return {
-				name: driverDisplayNames[lcName] || lcName,
-				totalEarnings: Math.round(pay), // what the driver earned (their take)
-				grossRevenue: Math.round(gross), // revenue the driver generated
-				loadCount: loadsByDriver[lcName] || 0,
-				totalMiles,
-				avgRatePerMile: rawMiles > 0 ? Math.round((gross / rawMiles) * 100) / 100 : 0,
+				unitNumber: g.key === "truck:" ? "(no truck)" : g.label,
+				...(g.key === "truck:" ? { noTruck: true } : {}),
+				...(g.key === "settlement_adjustment" ? { isSettlementAdjustment: true } : {}),
+				loadCount: f.loads,
+				gross: money(f.revenue),
+				driverPay: money(f.costs.driverPay),
+				fixedCosts: money(f.costs.fixedCosts),
+				expenses: money(f.totalCosts),
+				net: money(f.margin),
+				totalMiles: f.miles,
+				ratePerMile: f.revenuePerMile || 0,
+				basis: f.basis,
+				// Idle: costs in the period and no load. Its negative net is parked-
+				// truck overhead, not a freight loss.
+				idle: g.key.startsWith("truck:") && g.key !== "truck:" && f.loads === 0 && f.revenue === 0 && f.totalCosts > 0,
 			};
-		}).sort((a, b) => b.grossRevenue - a.grossRevenue);
-		// Reconcile the leaderboard with totalRevenue: any completed revenue
-		// from rows with a blank Driver column is surfaced as a single
-		// "(Unassigned)" row at the bottom. Without this, sum(drivers) is
-		// quietly less than totalRevenue whenever the sheet has data-quality
-		// gaps — and the investor reading the dashboard has no way to tell.
-		if (unassignedGross > 0) {
-			const uMiles = Math.round(unassignedMiles);
+		};
+		const isTruckGroup = (g) => g.key.startsWith("truck:") && g.key !== "truck:";
+		const perTruck = truckReport.groups.filter(isTruckGroup).map(truckRow).sort((x, y) => y.gross - x.gross)
+			.concat(truckReport.groups.filter((g) => g.key === "truck:" || g.key === "settlement_adjustment").map(truckRow));
+		const unassigned = driverReport.groups.find((g) => g.key === "driver:") || null;
+		const driverAdjustment = driverReport.groups.find((g) => g.key === "settlement_adjustment") || null;
+		const drivers = driverReport.groups.filter((g) => g.key.startsWith("driver:") && g.key !== "driver:").map((g) => {
+			const f = g.total;
+			const k = g.key.slice("driver:".length);
+			return {
+				name: driverDisplayNames[k] || g.label,
+				totalEarnings: money(f.costs.driverPay), // what the driver earned (their pay)
+				grossRevenue: money(f.revenue), // revenue the driver's loads brought in
+				loadCount: f.loads,
+				totalMiles: f.miles,
+				avgRatePerMile: f.revenuePerMile || 0,
+			};
+		}).sort((x, y) => y.grossRevenue - x.grossRevenue);
+		// Revenue from loads with no driver, so the leaderboard adds up to the
+		// period's revenue.
+		if (unassigned && unassigned.total.revenue) {
 			drivers.push({
 				name: "(Unassigned)",
 				totalEarnings: 0,
-				grossRevenue: Math.round(unassignedGross),
-				loadCount: unassignedLoadCount,
-				totalMiles: uMiles,
-				avgRatePerMile: unassignedMiles > 0 ? Math.round((unassignedGross / unassignedMiles) * 100) / 100 : 0,
-				isUnassigned: true, // flag for frontend styling
+				grossRevenue: money(unassigned.total.revenue),
+				loadCount: unassigned.total.loads,
+				totalMiles: unassigned.total.miles,
+				avgRatePerMile: unassigned.total.revenuePerMile || 0,
+				isUnassigned: true,
 			});
 		}
+		// A closed month's Settlement adjustment belongs to no driver: its own row.
+		if (driverAdjustment && (driverAdjustment.total.revenue || driverAdjustment.total.costs.driverPay)) {
+			drivers.push({
+				name: "Settlement adjustment",
+				totalEarnings: money(driverAdjustment.total.costs.driverPay),
+				grossRevenue: money(driverAdjustment.total.revenue),
+				loadCount: 0,
+				totalMiles: 0,
+				avgRatePerMile: 0,
+				isSettlementAdjustment: true,
+			});
+		}
+		const idleTrucks = perTruck.filter((t) => t.idle);
 
-		// Fleet-wide avg rate/mile — divides by the unrounded mile count to
-		// avoid drift on tiny mile totals; the rounded value is only used
-		// for the totalMiles summary display.
-		const fleetTotalMilesRounded = Math.round(fleetTotalMiles);
-		const avgRatePerMile = fleetTotalMiles > 0
-			? Math.round((totalRevenue / fleetTotalMiles) * 100) / 100
-			: 0;
+		// ---- Expense categories ----
+		// A receipt's own category (Wear & Tear its own); the ledger's other lines
+		// by kind. Settlement adjustments are no category: they are reported on
+		// their own line, so each category reads as recorded and the adjustment
+		// says how the month was brought to what it settled at.
+		const TRIP_CATEGORIES = ["fuel", "maintenance", "repair", "wear_tear", "toll", "food", "other"];
+		const tripCategoryOf = (type) => {
+			const t = String(type || "").trim().toLowerCase();
+			if (/^wear\s*(?:&|and)\s*tear$/.test(t)) return "wear_tear";
+			return TRIP_CATEGORIES.includes(t) ? t : "other";
+		};
+		const KIND_CATEGORY = { driver_pay: "driver_pay", fixed: "fixed_costs", maint_fund: "maintenance", compliance: "compliance" };
+		const ADJUSTED_FIGURE = { revenue: "revenue", driver_pay: "driverPay", fixed: "fixedCosts", trip: "tripExpenses", maint_fund: "maintFundCost", compliance: "complianceCost" };
+		const categoriesOf = (items) => {
+			const categories = { fuel: 0, maintenance: 0, repair: 0, wear_tear: 0, toll: 0, food: 0, other: 0, driver_pay: 0, fixed_costs: 0, compliance: 0 };
+			const trip = { fuel: 0, maintenance: 0, repair: 0, wear_tear: 0, toll: 0, food: 0, other: 0 };
+			const adjustment = { revenue: 0, driverPay: 0, fixedCosts: 0, tripExpenses: 0, maintFundCost: 0, complianceCost: 0 };
+			let adjustmentCostCents = 0;
+			for (const it of items) {
+				if (it.kind === "settlement_adjustment") {
+					const fig = ADJUSTED_FIGURE[it.adjusts];
+					if (fig) adjustment[fig] += it.cents / 100;
+					if (it.adjusts !== "revenue") adjustmentCostCents += it.cents;
+					continue;
+				}
+				if (it.kind === "trip") {
+					const cat = tripCategoryOf(it.expenseType);
+					categories[cat] += it.cents / 100;
+					trip[cat] += it.cents / 100;
+				} else if (KIND_CATEGORY[it.kind]) {
+					categories[KIND_CATEGORY[it.kind]] += it.cents / 100;
+				}
+			}
+			const positive = Object.values(categories).filter((v) => v > 0).reduce((sum, v) => sum + v, 0);
+			const shares = {};
+			for (const [k, v] of Object.entries(categories)) shares[k] = positive > 0 && v > 0 ? Math.round((v / positive) * 1000) / 10 : 0;
+			for (const k of Object.keys(adjustment)) adjustment[k] = money(adjustment[k]);
+			return { categories, trip, shares, adjustment, adjustmentCosts: money(adjustmentCostCents / 100) };
+		};
+		const catLabels = { fuel: "Fuel", maintenance: "Maintenance", repair: "Repair", wear_tear: "Wear & Tear", toll: "Tolls", food: "Food", other: "Other" };
+		const biggestOf = (trip) => {
+			let top = { name: "—", amount: 0 };
+			for (const [cat, amt] of Object.entries(trip)) if (amt > top.amount) top = { name: catLabels[cat] || cat, amount: Math.round(amt) };
+			return top;
+		};
+		const period = categoriesOf(periodItems);
 
-		// Reconciled expense breakdown for the Expense Categories chart: trip
-		// categories + driver pay + truck fixed costs + maintenance-fund service
-		// + compliance, so the bars sum to totalExpenses (the KPI). The "Biggest
-		// Trip Expense" KPI (`biggest`, above) intentionally stays trip-only.
-		// Maintenance-fund service folds into the single "maintenance" bar.
-		const reconciledExpenses = Object.fromEntries(
-			Object.entries(expByCategory).map(([k, v]) => [k, Math.round(v)])
-		);
-		reconciledExpenses.maintenance = Math.round((expByCategory.maintenance || 0) + maintSum);
-		reconciledExpenses.driver_pay = Math.round(totalDriverPay);
-		reconciledExpenses.fixed_costs = Math.round(totalFixedCosts);
-		reconciledExpenses.compliance = Math.round((expByCategory.compliance || 0) + compSum);
-
-		// ---- The books: monthly performance and the headline money figures ----
-		// One calculation with the payout ledger (buildFinancialsLedger(), over
-		// lib/financials-calc.js): revenue in the Assigned month, receipts in their
-		// posted period, a load's driver days in its Assigned month, $0 fixed costs
-		// in an idle month, cents throughout. Open months are live; a closed month
-		// is exactly what it settled at, frozen with the month or, before its
-		// freeze, its live items plus the "Settlement adjustment" lines that bring
-		// each settled investor-month to its breakdown. The maintenance-fund and
-		// compliance lines are in every month, as in the payout ledger.
-		const books = await buildFinancialsLedger();
+		// ---- Monthly table (every month of the books) ----
 		const bookFigures = financialsCalc.monthFiguresFromItems(books.items);
-		const money = (v) => Math.round(Number(v || 0) * 100) / 100;
-		const finCurrentMonthKey = houstonDay(now).slice(0, 7);
+		const finCurrentMonthKey = today.slice(0, 7);
 		const monthFigures = (mk) => bookFigures[mk]
 			|| { revenue: 0, driverPay: 0, fixedCosts: 0, tripExpenses: 0, maintFundCost: 0, complianceCost: 0, netProfit: 0 };
 		const monthRow = (mk) => {
@@ -56962,51 +56543,35 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			};
 		};
 		const monthlyPerformance = books.months.map(monthRow);
-		// All-time totals and the expense categories, from the same items. Also
-		// each category's share of the costs, so no page divides money itself.
-		const KIND_CATEGORY = { driver_pay: "driver_pay", fixed: "fixed_costs", maint_fund: "maintenance", compliance: "compliance", trip: "other" };
-		const categoriesOf = (items) => {
-			const categories = { fuel: 0, maintenance: 0, repair: 0, toll: 0, food: 0, other: 0, driver_pay: 0, fixed_costs: 0, compliance: 0 };
-			const trip = { fuel: 0, maintenance: 0, repair: 0, toll: 0, food: 0, other: 0 };
-			let revenueCents = 0;
-			for (const it of items) {
-				const kind = it.kind === "settlement_adjustment" ? it.adjusts : it.kind;
-				if (kind === "revenue") { revenueCents += it.cents; continue; }
-				if (it.kind === "trip") {
-					const t = String(it.expenseType || "").trim().toLowerCase();
-					const cat = Object.prototype.hasOwnProperty.call(trip, t) ? t : "other";
-					categories[cat] += it.cents / 100;
-					trip[cat] += it.cents / 100;
-				} else if (KIND_CATEGORY[kind]) {
-					categories[KIND_CATEGORY[kind]] += it.cents / 100;
-				}
-			}
-			const positive = Object.values(categories).filter((v) => v > 0).reduce((sum, v) => sum + v, 0);
-			const shares = {};
-			for (const [k, v] of Object.entries(categories)) shares[k] = positive > 0 && v > 0 ? Math.round((v / positive) * 1000) / 10 : 0;
-			return { categories, trip, revenueCents, total: Object.values(categories).reduce((sum, v) => sum + v, 0), shares };
-		};
-		const allTime = categoriesOf(books.items);
-		const bookCategories = allTime.categories;
-		const tripCategories = allTime.trip;
-		const bookRevenueCents = allTime.revenueCents;
-		const bookTotalExpenses = allTime.total;
+		// Receipts by category for each month of the period, in their posted
+		// period (the books).
+		const expensesByMonth = books.months.filter((mk) => mk >= range.from.slice(0, 7) && mk <= range.to.slice(0, 7)).map((mk) => {
+			const t = categoriesOf(books.items.filter((i) => i.month === mk)).trip;
+			return { month: mk, ...Object.fromEntries(Object.entries(t).map(([k, v]) => [k, money(v)])) };
+		});
 
+		// ---- Highest and lowest paying loads in the period ----
+		const brief = (i) => ({ loadId: i.loadId || "(no load id)", driver: driverDisplayNames[i.driver] || i.driver || "(unknown)", amount: Math.round(i.cents / 100), date: i.day });
+		const periodLoads = periodItems.filter((i) => i.kind === "revenue").sort((x, y) => y.cents - x.cents);
+		const highest = periodLoads.slice(0, 5).map(brief);
+		const lowest = periodLoads.slice(Math.max(5, periodLoads.length - 5)).reverse().map(brief);
+
+		const payStructures = getDriverPayStructures();
+		const allTrucks = db.prepare(`SELECT * FROM trucks WHERE ${investorPayoutBasis.truckInFleetSql()}`).all();
 
 		// ---- Month drill-down (?month=YYYY-MM) ----
 		// Built from the same books items as the monthlyPerformance row the admin
-		// clicked (buildFinancialsLedger()), so the modal reconciles with it: a
-		// closed month as settled, an open month live. The fuel analytics are the
-		// one part read by receipt date (they measure the world, not the books).
+		// clicked, so the modal reconciles with it: a closed month as settled, an
+		// open month live. The fuel analytics are the one part read by receipt
+		// date (they measure the world, not the books).
 		let monthDetail = null;
 		if (monthParam) {
-			const pad2 = (n) => String(n).padStart(2, "0");
 			// Houston month, not server-local: on the UTC VPS a plain getMonth() flips at
 			// 19:00 (CDT) / 18:00 (CST) Houston on the last day of the month, so for the
 			// final 5-6 hours of every month the portal showed the NEXT month accruing at
 			// $0 and treated the just-ended one as complete. houstonDay() is the same
 			// Central basis the stamps and the close lifecycle now use.
-			const currentMonthKey = houstonDay(now).slice(0, 7);
+			const currentMonthKey = finCurrentMonthKey;
 			const yearN = parseInt(monthParam.slice(0, 4), 10);
 			const monthN = parseInt(monthParam.slice(5, 7), 10);
 			const prevDate = new Date(yearN, monthN - 2, 1);
@@ -57015,24 +56580,24 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			const isCurrentMonth = monthParam === currentMonthKey;
 			// For the in-progress month, per-day/per-week averages use elapsed
 			// days so they aren't diluted by days that haven't happened yet.
-			const elapsedDays = isCurrentMonth ? Math.max(1, now.getDate()) : daysInMonth;
+			const elapsedDays = isCurrentMonth ? Math.max(1, Number(today.slice(8, 10))) : daysInMonth;
 			const weeksElapsed = elapsedDays / 7;
 
-			// Same figures as the monthlyPerformance row the admin clicked.
-			const summarizeMonth = (mk) => monthRow(mk);
-			const cur = summarizeMonth(monthParam);
-			const prev = summarizeMonth(prevMk);
+			const cur = monthRow(monthParam);
+			const prev = monthRow(prevMk);
 			const prevHasData = prev.revenue !== 0 || prev.totalExpenses !== 0;
 
-			// Expense split for the month: trip categories (same strftime
-			// bucketing as expensesByMonth) plus the two P&L-level buckets.
-			// Everything below except the fuel analytics comes from the same books
-			// items as the headline, so the drill-down reconciles with it: a closed
-			// month as settled, an open month live.
 			const monthItems = books.items.filter((i) => i.month === monthParam);
 			const monthBooks = categoriesOf(monthItems);
 			const expenseCategories = Object.fromEntries(Object.entries(monthBooks.categories).map(([k, v]) => [k, money(v)]));
 			const expenseCategoryShares = monthBooks.shares;
+			// The month's Settlement adjustment line: what brought each settled
+			// investor-month to its breakdown, by figure. Zero for an open month.
+			const settlementAdjustment = {
+				revenue: monthBooks.adjustment.revenue,
+				costs: monthBooks.adjustmentCosts,
+				byFigure: monthBooks.adjustment,
+			};
 
 			// Fuel analytics for the month — same source/filters as
 			// /api/expenses/fuel-analytics (LOWER(type)='fuel', Rejected excluded),
@@ -57072,20 +56637,17 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				})),
 			};
 
-			// Loads assigned to this month (revenue-bearing completed loads —
-			// the same rows monthlyRevenue counted).
 			// Loads: the month's revenue items (each load in its Assigned month).
 			const revenueItems = monthItems.filter((i) => i.kind === "revenue");
 			const loadsSorted = [...revenueItems].sort((x, y) => y.cents - x.cents);
 			const monthLoadRevenue = revenueItems.reduce((sum, i) => sum + i.cents, 0) / 100;
-			const briefLoad = (i) => (i ? { loadId: i.loadId, driver: driverDisplayNames[i.driver] || i.driver, amount: Math.round(i.cents / 100), date: i.day } : null);
 			const loads = {
 				count: revenueItems.length,
 				avgRevenuePerLoad: revenueItems.length ? Math.round(monthLoadRevenue / revenueItems.length) : 0,
 				avgLoadsPerDay: Math.round((revenueItems.length / elapsedDays) * 100) / 100,
 				avgRevenuePerDay: Math.round(monthLoadRevenue / elapsedDays),
-				highest: briefLoad(loadsSorted[0] || null),
-				lowest: briefLoad(loadsSorted.length ? loadsSorted[loadsSorted.length - 1] : null),
+				highest: loadsSorted[0] ? brief(loadsSorted[0]) : null,
+				lowest: loadsSorted.length ? brief(loadsSorted[loadsSorted.length - 1]) : null,
 			};
 
 			const monthStartStr = `${monthParam}-01`;
@@ -57105,15 +56667,18 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				invByDriver[k].adjustments += r.adj;
 			});
 
-			// Drivers: the month's driver-pay and revenue items, per driver. A
-			// Settlement adjustment belongs to no driver: it is in the headline only.
+			// Drivers: the month's driver-pay and revenue items, per driver.
 			const byDriver = new Map();
 			const driverEntry = (k) => {
 				if (!byDriver.has(k)) byDriver.set(k, { payCents: 0, revenueCents: 0, days: new Set(), percentage: false });
 				return byDriver.get(k);
 			};
+			let unassignedRevenueCents = 0;
 			for (const it of monthItems) {
-				if (!it.driver) continue;
+				if (!it.driver) {
+					if (it.kind === "revenue") unassignedRevenueCents += it.cents;
+					continue;
+				}
 				if (it.kind === "driver_pay") {
 					const e = driverEntry(it.driver);
 					e.payCents += it.cents;
@@ -57147,8 +56712,35 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				});
 			}
 			monthDriverRows.sort((x, y) => y.pay - x.pay);
+			// Revenue from loads with no driver, and the Settlement adjustment's
+			// driver pay and revenue, belong to no driver: a row each, so the rows
+			// add up to the month's headline revenue and driver pay.
+			if (unassignedRevenueCents) {
+				monthDriverRows.push({
+					name: "(Unassigned)",
+					isUnassigned: true,
+					payType: "", payPercentage: 0, activeDays: 0, dailyRate: 0,
+					pay: 0,
+					revenue: Math.round(unassignedRevenueCents / 100),
+					margin: Math.round(unassignedRevenueCents / 100),
+					invoiceCount: 0, invoicedTotal: 0, adjustments: 0, variance: null,
+				});
+			}
+			if (settlementAdjustment.byFigure.driverPay || settlementAdjustment.revenue) {
+				monthDriverRows.push({
+					name: "Settlement adjustment",
+					isSettlementAdjustment: true,
+					payType: "", payPercentage: 0, activeDays: 0, dailyRate: 0,
+					pay: Math.round(settlementAdjustment.byFigure.driverPay),
+					revenue: Math.round(settlementAdjustment.revenue),
+					margin: Math.round(settlementAdjustment.revenue - settlementAdjustment.byFigure.driverPay),
+					invoiceCount: 0, invoicedTotal: 0, adjustments: 0, variance: null,
+				});
+			}
 
-			// Trucks: the days paid on each truck this month and that pay.
+			// Trucks: the days paid on each truck this month and that pay. Only
+			// day-rate pay is tied to a truck and a day; a percentage driver's pay
+			// is one monthly item tied to neither, so it is in the driver rows only.
 			const byTruck = new Map();
 			for (const it of monthItems) {
 				if (it.kind !== "driver_pay" || !it.truck || !it.day) continue;
@@ -57164,22 +56756,21 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				if (!e || !e.days.size) continue; // only trucks that worked this month
 				const driverKey = normalizeDriverName(t.assigned_driver);
 				const struct = (driverKey && payStructures[driverKey]) || { payType: "fixed", payPercentage: 0 };
-				const driverDaily = Number(struct.payDaily) || 0;
-				const dailyRateRaw = t.driver_pay_daily || 0;
 				perTruckMonth.push({
 					unitNumber: t.unit_number,
 					assignedDriver: t.assigned_driver || "—",
 					activeDays: e.days.size,
 					dailyRate: Math.round((e.payCents / 100 / e.days.size) * 100) / 100,
-					dailyRateIsDefault: driverDaily === 0 && dailyRateRaw === 0,
-					driverPayType: struct.payType,
+					// A data-quality badge about the truck as set up today: no daily
+					// rate on it or its driver, so the $250 default applies.
+					dailyRateIsDefault: (Number(struct.payDaily) || 0) === 0 && (t.driver_pay_daily || 0) === 0,
+					// Day-rate pay, from the month's own pay items (see above).
 					estDriverPay: Math.round(e.payCents / 100),
 				});
 			}
 			perTruckMonth.sort((x, y) => y.activeDays - x.activeDays);
-			const ratedTrucks = perTruckMonth.filter((t) => t.driverPayType !== "percentage");
-			const avgDailyRatePerTruck = ratedTrucks.length
-				? Math.round(ratedTrucks.reduce((sum, t) => sum + t.dailyRate, 0) / ratedTrucks.length)
+			const avgDailyRatePerTruck = perTruckMonth.length
+				? Math.round(perTruckMonth.reduce((sum, t) => sum + t.dailyRate, 0) / perTruckMonth.length)
 				: 0;
 
 			const pctDelta = (curV, prevV) =>
@@ -57189,6 +56780,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				isCurrentMonth,
 				daysInMonth,
 				elapsedDays,
+				basis: cur.basis,
 				summary: cur,
 				prevMonth: { ...prev, hasData: prevHasData },
 				// Month-over-month deltas — the "winning / scaling / losing /
@@ -57205,6 +56797,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				},
 				expenseCategories,
 				expenseCategoryShares,
+				settlementAdjustment,
 				fuel,
 				loads,
 				drivers: monthDriverRows,
@@ -57213,50 +56806,45 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			};
 		}
 
+		const milesBySource = loadMilesLib.milesSourceCounts(getLoadMilesIndex());
+		const roadMilesCount = milesBySource.eld + milesBySource.ratecon + milesBySource.road;
+		const haversineMilesCount = milesBySource.straight_line;
+		const fleet = fleetReport.total;
 		res.json({
 			summary: {
-				totalRevenue: money(bookRevenueCents / 100),
-				totalExpenses: money(bookTotalExpenses),
-				netProfit: money(bookRevenueCents / 100 - bookTotalExpenses),
-				biggestExpenseCategory: (() => {
-					let top = { name: "—", amount: 0 };
-					for (const [cat, amt] of Object.entries(tripCategories)) {
-						if (amt > top.amount) top = { name: catLabels[cat] || cat, amount: Math.round(amt) };
-					}
-					return top;
-				})(),
+				from: range.from,
+				to: range.to,
+				totalRevenue: money(fleet.revenue),
+				totalExpenses: money(fleet.totalCosts),
+				netProfit: money(fleet.margin),
+				settlementAdjustment: money(fleet.settlementAdjustment),
+				biggestExpenseCategory: biggestOf(period.trip),
 				// Closed months are as settled; open months are live.
 				closedMonths: [...books.lockedPeriods].sort(),
 				overlaps: books.overlaps.length,
-				avgRatePerMile,
-				totalMiles: fleetTotalMilesRounded,
-				monthsOfOperation,
-				// Row count (not unique load IDs) — consistent with totalRevenue
-				// which also sums per-row, and matches /api/investor.completedJobs.
-				completedLoadCount: completedRowCount,
-				// Miles source breakdown: "road" if every coord row has a
-				// cached Google Routes distance, "haversine" if none do,
-				// "mixed" if some do. loadsWithCoords / completedRowCount =
-				// coverage — non-100% means some completed loads have no
-				// geocoded pickup/dropoff yet.
+				// Rows dated outside the books' months: in no month and no total.
+				outOfRange: books.outOfRange.length,
+				avgRatePerMile: fleet.revenuePerMile || 0,
+				totalMiles: fleet.miles,
+				monthsOfOperation: books.months.filter((mk) => mk >= range.from.slice(0, 7) && mk <= range.to.slice(0, 7)).length,
+				completedLoadCount: fleet.loads,
+				// Miles source breakdown across the per-load miles index.
 				milesSource: roadMilesCount > 0 && haversineMilesCount === 0
 					? "road"
 					: roadMilesCount === 0 ? "haversine" : "mixed",
 				roadMilesLoadCount: roadMilesCount,
 				haversineLoadCount: haversineMilesCount,
-				loadsWithCoords,
-				// Data-quality signal: completed revenue from rows with no
-				// assigned driver. Non-zero means the sheet has attribution
-				// gaps the investor should know about.
-				unassignedRevenue: Math.round(unassignedGross),
-				unassignedLoadCount,
-				// Idle assets: onboarded trucks with zero completed loads. Their
-				// fixed costs reduce netProfit, but it's parked-truck overhead, not
-				// a freight loss — surfaced so the UI can explain the drag.
-				idleTruckCount,
-				idleOverhead: Math.round(idleOverhead),
+				loadsWithCoords: fleet.loadsWithMiles,
+				// Data-quality signal: revenue from loads with no driver.
+				unassignedRevenue: unassigned ? money(unassigned.total.revenue) : 0,
+				unassignedLoadCount: unassigned ? unassigned.total.loads : 0,
+				// Trucks with costs and no load in the period: parked-truck
+				// overhead, not a freight loss.
+				idleTruckCount: idleTrucks.length,
+				idleOverhead: money(idleTrucks.reduce((sum, t) => sum + t.expenses, 0)),
 			},
-			expensesByCategory: Object.fromEntries(Object.entries(bookCategories).map(([k, v]) => [k, money(v)])),
+			expensesByCategory: Object.fromEntries(Object.entries(period.categories).map(([k, v]) => [k, money(v)])),
+			settlementAdjustment: { revenue: period.adjustment.revenue, costs: period.adjustmentCosts, byFigure: period.adjustment },
 			expensesByMonth,
 			monthlyPerformance,
 			perTruck,

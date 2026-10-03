@@ -184,7 +184,18 @@ function seededDb() {
 }
 const getLoadMilesIndexSrc = lift(/\nfunction getLoadMilesIndex\([\s\S]*?\n}\n/g, "getLoadMilesIndex");
 const CELLS = ["#123", "123", "#456", "456", "321", "#321", "#789", "789", "555"];
-for (const [label, route] of [["GET /api/investor", "/api/investor"], ["GET /api/financials", "/api/financials"]]) {
+// GET /api/financials reads its per-load miles through the report (the books'
+// revenue items, keyed by loadMilesKey() into getLoadMilesIndex()), so it has no
+// per-row lookup of its own.
+{
+	const fin = handlerBody("/api/financials");
+	const report = lift(/\nasync function buildFinancialsReport\([\s\S]*?\n}\n/g, "buildFinancialsReport") || "";
+	check("§2 GET /api/financials: miles come from the report, not a per-row lookup",
+		[/milesByLoadId/.test(fin), /buildFinancialsReport\(/.test(fin), /getLoadMilesIndex\(\)/.test(fin)], [false, true, true]);
+	check("§2 buildFinancialsReport: each load's miles from getLoadMilesIndex(), keyed by loadMilesKey()",
+		[/getLoadMilesIndex\(\)/.test(report), /loadMilesLib\.loadMilesKey\(/.test(report)], [true, true]);
+}
+for (const [label, route] of [["GET /api/investor", "/api/investor"]]) {
 	const body = handlerBody(route);
 	const from = body.indexOf("// ---- Miles source:");
 	const to = body.indexOf("// ---- Single-pass", from);

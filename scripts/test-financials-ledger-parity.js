@@ -98,7 +98,7 @@ const alters = (table) => SRC.match(new RegExp(`ALTER TABLE ${table} ADD COLUMN 
 const FINANCIALS_HEAD = 'app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {';
 const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "haulAssignmentsStmt", "LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS", "PERIOD_FINALIZE_ENABLED",
 	"INVESTOR_LEASE_PAYOUTS_ENABLED", "INVESTOR_LEASE_SETTINGS", "LEASE_SNAPSHOT_WARNED", "LOCKABLE_MONTH_KEY",
-	"LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR", "insertPayoutHistory"];
+	"LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR", "insertPayoutHistory", "FINANCIALS_GRANULARITIES", "FINANCIALS_GROUPINGS"];
 const LETS = ["lastPayStructShadowWarnMs", "_jtEpoch"];
 const FNS = [
 	// Under test.
@@ -117,6 +117,7 @@ const FNS = [
 	"currentMonthKeyCT", "settlementGraceDays", "graceEndsAt", "periodPhase", "isPlausibleLockPeriod",
 	"getCarrierDBFromSQLite", "recordPayoutChange", "listSettlableInvestors",
 	"closingFingerprint", "closingLedgerItems", "financialsSettings", "financialsExtraItems", "closedMonthSettings", "computeFleetLedger", "settledMonthItems", "ambiguousBlankOwnerLoads", "buildHeldTruckIndex", "buildHaulTruckResolver", "frozenPeriodSet", "settledPayoutRows", "writeLedgerFreeze", "ledgerItemFromRow", "buildFinancialsLedger", "noteLateItemInClosedMonth", "logAudit", "installPeriodLockTriggers",
+	"financialsReportQuery", "buildFinancialsReport", "getLoadMilesIndex",
 ];
 const BODY = [
 	...CONSTS.map((c) => liftDecl("const", c)),
@@ -136,7 +137,7 @@ const DDL = [
 	tableDdl("expenses"), ...alters("expenses"),
 	tableDdl("excluded_driver_days"), ...alters("excluded_driver_days"),
 	tableDdl("maintenance_fund"), tableDdl("compliance_fees"), tableDdl("deleted_loads"),
-	tableDdl("load_coordinates"), ...alters("load_coordinates"),
+	tableDdl("load_coordinates"), ...alters("load_coordinates"), tableDdl("load_eld_miles"), tableDdl("load_ratecon_miles"),
 	tableDdl("invoices"), ...alters("invoices"),
 	tableDdl("investor_payouts"), ...alters("investor_payouts"),
 	tableDdl("investor_payout_history"), tableDdl("investor_payout_basis"), tableDdl("period_locks"),

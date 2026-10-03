@@ -239,10 +239,11 @@ section("1. TEXTUAL — every fixed-cost month gate routes through ONE predicate
 	const oldGateMk = (SRC.match(/truckKey && mk < truckKey/g) || []).length;
 	eq(oldGateMk, 0, "no hand-rolled `truckKey && mk < truckKey` gate survives");
 
-	// All-time totals: the four month-COUNT sites must use the shared counter.
+	// All-time totals: the two month-COUNT sites must use the shared counter
+	// (GET /api/financials reads the books, which have no all-time count).
 	const countCalls = (SRC.match(/truckBilledMonthCount\(/g) || []).length;
-	// 1 definition + 4 call sites
-	eq(countCalls, 5, "truckBilledMonthCount: 1 definition + 4 all-time-total call sites");
+	// 1 definition + 2 call sites
+	eq(countCalls, 3, "truckBilledMonthCount: 1 definition + 2 all-time-total call sites");
 
 	// Every fixed-cost SELECT list must carry retired_at, or the bound silently
 	// never fires — undefined column => truckChargeUntilMonth returns "".
@@ -286,7 +287,7 @@ section("1. TEXTUAL — every fixed-cost month gate routes through ONE predicate
 		"the ten maintenance/compliance JOINs on an owner's trucks read the fleet rule");
 	// The ledger's four fleet-wide reads (two month totals, two line-item reads)
 	// share one copy of the subquery (`notRetired` in gatherLedgerScopeFacts()).
-	eq((code.match(/NOT \(\$\{investorPayoutBasis\.truckInFleetSql\(\)\}\)/g) || []).length, 10,
+	eq((code.match(/NOT \(\$\{investorPayoutBasis\.truckInFleetSql\(\)\}\)/g) || []).length, 8,
 		"the fleet-wide NOT IN subqueries and the compliance-fee guard read its complement");
 	{
 		const g = SRC.indexOf("\nasync function gatherLedgerScopeFacts(");

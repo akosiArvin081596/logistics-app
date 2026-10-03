@@ -127,7 +127,9 @@ const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "LEDGER_ITEM_COLS
 	"FUEL_EVENTS_MATCH_DAYS", "FUEL_MATCH_MIN_GAL_PER_100PCT", "FUEL_MATCH_MAX_GAL_PER_100PCT", "FUEL_MATCH_MIN_GALLONS",
 	"FUEL_MATCH_MAX_KM", "FUEL_MATCH_AMBIGUITY_MARGIN", "FUEL_CALIB_MIN_RISE_PCT", "FUEL_ODOMETER_CONFLICT_MI",
 	// GET /api/trucks' ELD status (eldDeviceStatus()).
-	"ELD_STALE_HOURS"];
+	"ELD_STALE_HOURS",
+	// GET /api/financials reads the report (buildFinancialsReport()).
+	"FINANCIALS_GRANULARITIES", "FINANCIALS_GROUPINGS", "LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR"];
 const LETS = ["lastPayStructShadowWarnMs"];
 const FNS = [
 	// Under test.
@@ -137,6 +139,7 @@ const FNS = [
 	"gatherLedgerScopeFacts", "payoutRules", "ledgerLoadRows",
 	// Financials' books (GET /api/financials reads them).
 	"buildFinancialsLedger", "computeFleetLedger", "settledMonthItems", "ambiguousBlankOwnerLoads", "buildHeldTruckIndex", "buildHaulTruckResolver", "frozenPeriodSet", "settledPayoutRows", "ledgerItemFromRow",
+	"buildFinancialsReport", "financialsReportQuery", "financialsSettings", "closedMonthSettings", "financialsExtraItems",
 	"listSettlableInvestors",
 	// What the totals call, shipped as is.
 	"findCol", "pickAddressColumn", "loadKeySet", "excludeDroppedLoads", "liveJobTrackingView", "moneySheetDate",
@@ -290,7 +293,7 @@ const DDL = `
 	CREATE TABLE trucks (id INTEGER PRIMARY KEY AUTOINCREMENT, unit_number TEXT UNIQUE, make TEXT DEFAULT '', model TEXT DEFAULT '', year TEXT DEFAULT '', vin TEXT DEFAULT '', license_plate TEXT DEFAULT '', status TEXT DEFAULT 'Active', assigned_driver TEXT DEFAULT '', owner_id INTEGER DEFAULT 0, notes TEXT DEFAULT '', created_at TEXT DEFAULT '2026-06-01 00:00:00', in_service_date TEXT DEFAULT '', retired_at TEXT DEFAULT '', photo TEXT DEFAULT '', insurance_monthly REAL DEFAULT 0, eld_monthly REAL DEFAULT 0, truck_payment_monthly REAL DEFAULT 0, hvut_annual REAL DEFAULT 0, irp_annual REAL DEFAULT 0, admin_fee_pct REAL, driver_pay_daily REAL DEFAULT 0, purchase_price REAL DEFAULT 0, title_status TEXT DEFAULT 'Clean', title_state TEXT DEFAULT '', maintenance_fund_monthly REAL DEFAULT 0, fuel_tank_gallons REAL DEFAULT 0, avg_mpg REAL DEFAULT 0, routemate_vehicle_id TEXT DEFAULT '');
 	CREATE TABLE truck_assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER, driver_name TEXT DEFAULT '', start_date TEXT DEFAULT '', end_date TEXT DEFAULT '');
 	CREATE TABLE carrier_driver_history (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT, carrier_name TEXT, started_at TEXT DEFAULT '', ended_at TEXT DEFAULT '');
-	CREATE TABLE expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT NOT NULL DEFAULT '', load_id TEXT DEFAULT '', type TEXT, amount REAL, description TEXT DEFAULT '', date TEXT DEFAULT '', gallons REAL DEFAULT 0, odometer REAL DEFAULT 0, odometer_source TEXT DEFAULT '', gallons_source TEXT DEFAULT '', status TEXT DEFAULT '', owner_id INTEGER DEFAULT 0, truck_unit TEXT DEFAULT '', posted_period TEXT DEFAULT '', created_at TEXT DEFAULT '2026-09-01 00:00:00', location_city TEXT DEFAULT '', location_state TEXT DEFAULT '', vendor TEXT DEFAULT '', location_lat REAL, location_lng REAL, receipt_details TEXT DEFAULT '');
+	CREATE TABLE expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT NOT NULL DEFAULT '', load_id TEXT DEFAULT '', type TEXT, amount REAL, description TEXT DEFAULT '', date TEXT DEFAULT '', gallons REAL DEFAULT 0, odometer REAL DEFAULT 0, odometer_source TEXT DEFAULT '', gallons_source TEXT DEFAULT '', status TEXT DEFAULT '', owner_id INTEGER DEFAULT 0, truck_unit TEXT DEFAULT '', posted_period TEXT DEFAULT '', created_at TEXT DEFAULT '2026-09-01 00:00:00', location_city TEXT DEFAULT '', location_state TEXT DEFAULT '', vendor TEXT DEFAULT '', location_lat REAL, location_lng REAL, receipt_details TEXT DEFAULT '', timestamp TEXT DEFAULT '');
 	CREATE TABLE excluded_driver_days (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT, excluded_date TEXT, reason TEXT DEFAULT '', excluded_by TEXT DEFAULT '', excluded_at TEXT DEFAULT '2026-09-01 00:00:00', action TEXT DEFAULT 'remove');
 	CREATE TABLE maintenance_fund (id INTEGER PRIMARY KEY AUTOINCREMENT, truck TEXT, amount REAL, date TEXT DEFAULT '', created_at TEXT DEFAULT '2026-09-01 00:00:00', type TEXT DEFAULT 'service');
 	CREATE TABLE compliance_fees (id INTEGER PRIMARY KEY AUTOINCREMENT, truck TEXT, amount REAL, paid_date TEXT DEFAULT '', due_date TEXT DEFAULT '', created_at TEXT DEFAULT '2026-09-01 00:00:00', status TEXT DEFAULT 'Paid');
@@ -301,8 +304,9 @@ const DDL = `
 	CREATE TABLE load_responses (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT, driver_name TEXT, response TEXT, responded_at TEXT);
 	CREATE TABLE notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT, type TEXT, metadata TEXT, created_at TEXT);
 	CREATE TABLE load_ratings (load_id TEXT PRIMARY KEY, driver_name TEXT, rating INTEGER, rated_by INTEGER, updated_at TEXT);
-	CREATE TABLE investor_payouts (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id INTEGER, period TEXT, amount REAL, finalized_breakdown TEXT DEFAULT '');
+	CREATE TABLE investor_payouts (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id INTEGER, period TEXT, amount REAL, adjustment REAL DEFAULT 0, finalized_breakdown TEXT DEFAULT '');
 	CREATE TABLE period_locks (period TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'locked', finalized_at TEXT DEFAULT '');
+	CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '', updated_by TEXT NOT NULL DEFAULT '');
 	CREATE TABLE financials_ledger_freezes (freeze_id TEXT PRIMARY KEY, period TEXT, source TEXT, frozen_at TEXT, frozen_by TEXT DEFAULT 'system', item_count INTEGER DEFAULT 0, summary TEXT DEFAULT '', settings TEXT DEFAULT '', released_at TEXT NOT NULL DEFAULT '');
 	CREATE TABLE financials_ledger_items (id INTEGER PRIMARY KEY AUTOINCREMENT, period TEXT, owner_id INTEGER, kind TEXT, adjusts TEXT DEFAULT '', day TEXT DEFAULT '', cents INTEGER, load_id TEXT DEFAULT '', driver TEXT DEFAULT '', truck TEXT DEFAULT '', expense_id INTEGER, source_id INTEGER, expense_type TEXT DEFAULT '', pay_type TEXT DEFAULT '', pickup_state TEXT DEFAULT '', delivery_state TEXT DEFAULT '', freeze_id TEXT, frozen_at TEXT);
 	CREATE TABLE routemate_telemetry (id INTEGER PRIMARY KEY AUTOINCREMENT, routemate_vehicle_id TEXT, latitude REAL, longitude REAL, speed REAL, bearing TEXT, fuel_pct REAL, location_date_ms INTEGER, dropped_reason TEXT DEFAULT '', odometer REAL DEFAULT 0, engine_hours REAL DEFAULT 0, geocoded_location TEXT DEFAULT '', source TEXT DEFAULT '');
@@ -432,7 +436,7 @@ function buildWorld(variant, { src = SHIPPED, twins = false } = {}) {
 	const errors = [];
 	const passthrough = (req, res, next) => (next ? next() : undefined);
 	const deps = {
-		db, app, geolib, fuelModel, normalizeLoadId, loadMilesLib, Date: FixedDate,
+		db, app, geolib, fuelModel, normalizeLoadId, loadMilesLib, financialsReport: require("../lib/financials-report"), Date: FixedDate,
 		requireRole: () => passthrough, requireAuth: passthrough, fuelAnalyticsLimiter: passthrough,
 		getJobTrackingCached: async () => ({ headers: [...HEADERS], data: rows.map((r, i) => ({ _rowIndex: i + 2, ...r })) }),
 		getDeletedLoadIds: () => new Set(),
@@ -707,9 +711,11 @@ const SURFACES = [
 		name: "GET /api/financials with the 2026-08 drill-down",
 		run: (w) => call(w, "GET /api/financials", { query: { month: "2026-08" } }),
 		echoes: () => {},
-		own: (b) => [b.drivers.filter((d) => !d.isUnassigned), b.expensesByCategory.driver_pay,
-			b.perTruck.filter((x) => !readsAsBuiltIn(x.unitNumber)),
-			b.monthlyPerformance.map((m) => [m.month, m.driverPay]), b.monthDetail.drivers,
+		// The trucks' and drivers' own rows: not "(no truck)", "(Unassigned)" or
+		// a Settlement adjustment, which no driver owns.
+		own: (b) => [b.drivers.filter((d) => !d.isUnassigned && !d.isSettlementAdjustment), b.expensesByCategory.driver_pay,
+			b.perTruck.filter((x) => !readsAsBuiltIn(x.unitNumber) && !x.noTruck && !x.isSettlementAdjustment),
+			b.monthlyPerformance.map((m) => [m.month, m.driverPay]), b.monthDetail.drivers.filter((d) => !d.isUnassigned && !d.isSettlementAdjustment),
 			b.monthDetail.trucks.filter((x) => !readsAsBuiltIn(x.unitNumber))],
 	},
 	{
@@ -777,8 +783,9 @@ async function battery3(src) {
 		// failed assertion, never a crash of the run.
 		const read = (fn) => { try { return fn(); } catch (err) { return `unreadable: ${err.message}`; } };
 		const body = async (v, route, opts) => (await call(worlds[v], route, opts)).body || {};
-		const fin = await body(NAMED, "GET /api/financials", { query: { month: "2026-08" } });
-		const finNone = await body(NONE, "GET /api/financials", { query: { month: "2026-08" } });
+		// Every month the books hold (no ?month), as the old all-time summary read.
+		const fin = await body(NAMED, "GET /api/financials", { query: {} });
+		const finNone = await body(NONE, "GET /api/financials", { query: {} });
 		t("§3 GET /api/financials: the named rows' revenue is unassigned — $700 blank + $500 + $450 + $300",
 			read(() => [fin.summary.unassignedRevenue, fin.summary.unassignedLoadCount]), [1950, 4]);
 		t("§3 …and fleet revenue is NONE's plus exactly that $1,250",
@@ -818,8 +825,8 @@ const INVESTOR_TRUCK_FIELDS = {
 	projection: ["monthlyInvestorEarnings", "estAnnualInvestorRevenue", "investorROI"], numberOrNull: ["breakEvenMonths"],
 };
 const FINANCIALS_TRUCK_FIELDS = {
-	number: ["loadCount", "gross", "expenses", "net", "totalMiles", "ratePerMile", "monthlyCost", "operatingMonths", "driverPayPercentage"],
-	string: ["unitNumber", "assignedDriver", "driverPayType", "attributionMode"], boolean: ["driverPayUsedDefault", "idle"],
+	number: ["loadCount", "gross", "driverPay", "fixedCosts", "expenses", "net", "totalMiles", "ratePerMile"],
+	string: ["unitNumber", "basis"], boolean: ["idle"],
 	projection: [], numberOrNull: [],
 };
 // The fields of an entry that are missing or of the wrong kind: [] when it is
@@ -879,11 +886,16 @@ async function battery3b(src) {
 	}
 	// GET /api/financials: the active trucks' rows, and the month's.
 	{
-		const a = await call(named, "GET /api/financials", { query: { month: "2026-08" } });
-		const b = await call(twins, "GET /api/financials", { query: { month: "2026-08" } });
+		// perTruck over every month the books hold; the month's rows from the drill-down.
+		const a = await call(named, "GET /api/financials", { query: {} });
+		const b = await call(twins, "GET /api/financials", { query: {} });
+		const am = await call(named, "GET /api/financials", { query: { month: "2026-08" } });
+		const bm = await call(twins, "GET /api/financials", { query: { month: "2026-08" } });
 		t("§3b GET /api/financials: answers 200 with nothing thrown or logged, built-ins unchanged",
-			[a.status, a.threw, a.logged, a.builtins], [200, null, [], []]);
-		const listed = read(() => a.body.perTruck.map((x) => x.unitNumber).sort());
+			[a.status, a.threw, a.logged, a.builtins, am.status, am.threw, am.logged, am.builtins], [200, null, [], [], 200, null, [], []]);
+		// The trucks' rows (the table also closes with a "(no truck)" row when
+		// costs are tied to none).
+		const listed = read(() => a.body.perTruck.filter((x) => !x.noTruck && !x.isSettlementAdjustment).map((x) => x.unitNumber).sort());
 		t("§3b …perTruck lists every active truck, those named like built-ins included", listed,
 			["101", "102", "103", "104", "__proto__", "constructor"]);
 		for (const [unit, twin] of BUILTIN_UNITS.filter(([u]) => u !== "valueOf")) {
@@ -892,8 +904,8 @@ async function battery3b(src) {
 			t(`§3b …the truck "${unit}": exactly the row it gets as "${twin}"`,
 				canon(read(() => entryFor(a.body.perTruck, "unitNumber", unit, twin))), canon(read(() => entryFor(b.body.perTruck, "unitNumber", twin))));
 			t(`§3b …the truck "${unit}": the same month row as "${twin}"`,
-				canon(read(() => entryFor(a.body.monthDetail.trucks, "unitNumber", unit, twin))),
-				canon(read(() => entryFor(b.body.monthDetail.trucks, "unitNumber", twin))));
+				canon(read(() => entryFor(am.body.monthDetail.trucks, "unitNumber", unit, twin))),
+				canon(read(() => entryFor(bm.body.monthDetail.trucks, "unitNumber", twin))));
 		}
 		t("§3b …the other trucks' rows are unchanged",
 			canon(read(() => ORDINARY_UNITS.map((u) => entryFor(a.body.perTruck, "unitNumber", u)))),
@@ -902,8 +914,8 @@ async function battery3b(src) {
 			canon(read(() => [a.body.summary, a.body.expensesByCategory])), canon(read(() => [b.body.summary, b.body.expensesByCategory])));
 		t("§3b …\"__proto__\" and \"constructor\" each earn their load by their Truck cell ($500, $450)",
 			read(() => { const p = entryFor(a.body.perTruck, "unitNumber", "__proto__"); const c = entryFor(a.body.perTruck, "unitNumber", "constructor");
-				return [p.attributionMode, p.gross, p.loadCount, c.attributionMode, c.gross, c.loadCount]; }),
-			["truck", 500, 1, "truck", 450, 1]);
+				return [p.gross, p.loadCount, c.gross, c.loadCount]; }),
+			[500, 1, 450, 1]);
 	}
 	// GET /api/trucks lists all seven.
 	{
@@ -1019,12 +1031,9 @@ const PINNED = [
 			"driverDaySource", "driverPayDetails", "trucksByDriver",
 			// keyed by unit number
 			"perTruckData", "maintByTruck", "compByTruck", "windowRevenue", "modeByUnit", "insufficient", "basis", "alloc"]],
-	["GET /api/financials", ROUTES.financials,
-		["milesByLoadId", "grossByDriver", "grossByTruck", "milesByDriver", "milesByTruck", "loadsByDriver", "loadsByTruck",
-			"driverDaySets", "truckDaySets", "truckLoadDates", "driverMonthlyRevenue", "unitToVid", "driverMonthlyDays",
-			"trucksByDriver", "driverPayDetails", "driverDisplayNames", "invByDriver",
-			// keyed by unit number
-			"expByTruck", "maintByTruck", "compByTruck"]],
+	// Its per-truck and per-driver figures are the report's groups (Maps); the
+	// two name-keyed objects it still builds itself:
+	["GET /api/financials", ROUTES.financials, ["driverDisplayNames", "invByDriver"]],
 	["matchFuelEventsToReceipts()", "matchFuelEventsToReceipts", ["seed", "refImplied"]],
 	["GET /api/admin/scan-duplicates", ROUTES.scanDuplicates, ["byId"]],
 	["GET /api/expenses/fuel-analytics", ROUTES.fuel, ["readingsByTruck", "byDriver"]],
@@ -1095,8 +1104,8 @@ const MUTANTS = [
 	["M7 GET /api/investor's share map a plain {} again, asked with `in`", `\n${ROUTES.investor}`,
 		"const alloc = Object.create(null);\n\t\t\tconst allocated = (u) => Object.prototype.hasOwnProperty.call(alloc, u);",
 		"const alloc = {};\n\t\t\tconst allocated = (u) => u in alloc;"],
-	["M8 a plain {} for GET /api/financials' per-truck receipt map", `\n${ROUTES.financials}`,
-		"const expByTruck = Object.create(null);", "const expByTruck = {};"],
+	["M8 the Financials report keys a driver named like a built-in as a driver of its own", "\nasync function buildFinancialsReport(",
+		"driverKey: (name) => normalizeDriverName(driverNameForTotals(name)),", "driverKey: (name) => normalizeDriverName(name),"],
 	["M9 a plain {} for the fuel-gallons recovery's per-truck samples", "\nfunction matchFuelEventsToReceipts(",
 		"const seed = Object.create(null);", "const seed = {};"],
 	["M10 a plain {} for GET /api/admin/scan-duplicates' Load ID map", `\n${ROUTES.scanDuplicates}`,
