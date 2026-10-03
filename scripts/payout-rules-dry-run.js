@@ -11,8 +11,12 @@
 //
 // Usage (on the server, from the app directory, with the Node pm2 runs it with):
 //   node scripts/payout-rules-dry-run.js --db=app.db --sheet-id=<id> [--key=service-account-key.json] [--names]
+//   --sheet-id=env         the SPREADSHEET_ID the .env sets (refused when it sets none)
 //   --values-json=<file>   a saved values.get of Job Tracking, in place of --sheet-id
-//   --env-file=<file>      read the flags from this file, not the app directory's .env
+//   --env-file=<file>      with a copy of the database under the temp directory
+//                          only: read the flags from this file
+// The database is this checkout's own app.db or a copy under the temp
+// directory; any other is refused (it may be another deployment's).
 // There is no default sheet. Exit codes: 0 done, 1 error.
 
 "use strict";
@@ -24,9 +28,10 @@ const ROOT = path.join(__dirname, "..");
 
 async function main() {
 	const args = parseArgs(process.argv.slice(2));
-	if (!args.db) throw new Error("--db is required");
+	if (!args.db || args.db === true) throw new Error("--db is required");
+	const envFile = typeof args["env-file"] === "string" ? args["env-file"] : null;
 	const sheetData = await sheetFor(args, ROOT);
-	const { db, api } = buildLedgerWorld({ root: ROOT, dbPath: args.db, readonly: true, sheetData, envFile: args["env-file"] || null });
+	const { db, api } = buildLedgerWorld({ root: ROOT, dbPath: args.db, readonly: true, sheetData, envFile });
 	const result = await api.payoutRulesDryRun();
 	if (args.names !== true) {
 		for (const c of result.changes) delete c.investor;

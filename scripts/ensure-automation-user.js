@@ -9,7 +9,10 @@
 //
 // - Refuses on production: an app whose .env names no SPREADSHEET_ID, or names
 //   the production sheet (server.js's default), writes to production's books,
-//   and an automation Super Admin must never exist there.
+//   and an automation Super Admin must never exist there. The .env is the one
+//   of the app directory --db is in; a database anywhere else is refused (a
+//   copy under the temp directory, for tests, may name its .env with
+//   --env-file).
 // - Refuses when stdin is a terminal or empty (a password is piped, never typed).
 // - The account exists (any case or spacing of the name): changes nothing — not
 //   its password, not its role — and says so; a role other than Super Admin is
@@ -26,7 +29,7 @@
 const fs = require("fs");
 const path = require("path");
 const { createRequire } = require("module");
-const { parseArgs } = require("./lib/ledger-world");
+const { parseArgs, envFor } = require("./lib/ledger-world");
 
 const ROOT = path.join(__dirname, "..");
 const ACTOR = "script:ensure-automation-user";
@@ -58,8 +61,14 @@ async function main() {
 	const username = typeof args.username === "string" ? args.username.trim() : "";
 	if (!username) refuse("--username is required");
 
-	const envFile = typeof args["env-file"] === "string" ? args["env-file"] : path.join(ROOT, ".env");
-	const env = fs.existsSync(envFile) ? appRequire("dotenv").parse(fs.readFileSync(envFile)) : {};
+	// The .env of the app whose database this is (a database outside this app
+	// directory is refused, so another deployment's can never pass this check).
+	let env;
+	try {
+		env = envFor({ root: ROOT, dbPath: args.db, envFile: typeof args["env-file"] === "string" ? args["env-file"] : null });
+	} catch (err) {
+		refuse(err.message);
+	}
 	if (!env.SPREADSHEET_ID || env.SPREADSHEET_ID === productionSheetId()) {
 		refuse("this app writes to the production sheet (its .env names no other SPREADSHEET_ID); automation accounts are for staging and local only");
 	}

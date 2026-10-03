@@ -29,6 +29,9 @@ app.db.prod-capture*
 # way to get production-shaped data locally — so this is a routine artifact, not
 # an exotic one. Found 2026-08-13 while shipping the refusal-audit batch.
 app.db.pre-refresh*
+# The full-database backup scripts/freeze-closed-months.js --apply takes next to
+# app.db before it writes.
+app.db.pre-freeze*
 logisxdb.db
 # Temp copies written by GET /api/db/download. These are FULL database dumps —
 # every SSN, routing and account number — and the name does not start with

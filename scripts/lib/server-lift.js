@@ -8,8 +8,9 @@
 //
 // What "top-level declaration" means here: a line at column 0 that starts with
 // `function NAME(`, `async function NAME(`, `const NAME =`, `let NAME =`, or
-// `const { A, B: C } =` (each name it binds). A function runs to the first
-// "\n}\n" after it (server.js's own shape); a const or let runs to the line
+// `const { A, B: C } =` (each name it binds). A function whose first line
+// parses on its own is that line; any other runs to the first "\n}\n" after it
+// (server.js's own shape); a const or let runs to the line
 // before the next one that starts a new top-level statement at column 0 (a
 // closer such as "];" or "});" belongs to the declaration). Every piece is
 // checked by the JS parser before it is used. DECL_START_RE is every line that
@@ -94,6 +95,16 @@ function codeIdentifiers(text) {
 	return out;
 }
 
+function parsesAlone(text) {
+	try {
+		// A syntax check only (compiled, never called).
+		new Function(text);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 function indexDeclarations(src) {
 	const lines = src.split("\n");
 	const offsets = [];
@@ -112,7 +123,10 @@ function indexDeclarations(src) {
 		const kind = m[2] ? "function" : (m[3] || m[5]);
 		const start = offsets[i];
 		let end;
-		if (kind === "function") {
+		if (kind === "function" && parsesAlone(lines[i])) {
+			// A one-line function ends on its own line.
+			end = offsets[i] + lines[i].length;
+		} else if (kind === "function") {
 			end = src.indexOf("\n}\n", start);
 			if (end === -1) throw new Error(`function ${name}() never closes`);
 			end += 2;
@@ -180,6 +194,11 @@ function closure(src, { roots = [], routes = [], provided = [], denied = [] }) {
 		} catch (err) {
 			throw new Error(`lifted ${p.kind} ${p.name} does not parse on its own: ${err.message}`);
 		}
+		// A piece is one declaration: after its first line, only a closer may sit
+		// at column 0. Anything else is the next top-level statement swallowed
+		// (a timer, a route), which a script must never run.
+		const stray = p.text.split("\n").slice(1).find((l) => /^\S/.test(l) && !/^[\]})`]/.test(l));
+		if (stray !== undefined) throw new Error(`lifted ${p.kind} ${p.name} runs into another top-level statement: ${JSON.stringify(stray.slice(0, 60))}`);
 	}
 	return { names: pieces.flatMap((p) => p.name.split(", ").filter((n) => want.has(n))), text: [...pieces.map((p) => p.text), ...routeTexts].join("\n") };
 }

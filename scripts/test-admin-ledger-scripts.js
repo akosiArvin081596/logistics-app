@@ -4,8 +4,11 @@
  *
  *   §1 lib/server-lift.js — the closure reads code, not comments, strings or
  *      regex literals; follows dependencies in source order; refuses a denied
- *      name; and, over the real server.js, lifts what the tools need and none of
- *      the server's HTTP server, sockets, Sheets writer or sheet ID.
+ *      name; ends a one-line function on its line and refuses a piece that runs
+ *      into another top-level statement; and, over the real server.js, indexes
+ *      every top-level declaration and lifts what the tools need and none of
+ *      the server's HTTP server, sockets, Sheets writer or sheet ID. A script's
+ *      database is its app directory's own or a copy under the temp directory.
  *   §2 scripts/freeze-closed-months.js, end to end on a file database seeded
  *      through the server's own reconcile (two closed months, stamped; a load
  *      corrected after the close):
@@ -16,13 +19,14 @@
  *          fingerprint that is not the plan's, writing nothing and taking no
  *          backup;
  *        - --apply with the plan's fingerprint backs the database up next to it
- *          (integrity-checked), freezes every planned month, writes the
- *          endpoint's audit row per month plus one naming the script as the
- *          actor, and changes no payout row;
+ *          (owner-only, no -wal/-shm, integrity-checked), freezes every planned
+ *          month, writes the endpoint's audit row per month plus one naming the
+ *          script as the actor (and confirms them), and changes no payout row;
  *        - a second dry run plans nothing.
  *   §3 scripts/payout-rules-dry-run.js: read-only; prints the dry run by owner
  *      id (no names unless --names).
- *   §4 both scripts refuse to run with no sheet named.
+ *   §4 every script refuses a database outside its app directory and the temp
+ *      directory; both ledger scripts refuse to run with no sheet named.
  *   §5 scripts/ensure-automation-user.js: refused where the app writes to the
  *      production sheet and with nothing on stdin; creates the Super Admin from
  *      the piped password with an audit row naming the script, never printing
@@ -107,6 +111,22 @@ console.log("§1 lib/server-lift.js");
 	try { closure(toy, { roots: ["bad"], denied: ["secretThing"] }); } catch (e) { refused = e.message; }
 	check(/secretThing/.test(refused), "a denied name the closure reaches is refused", refused);
 
+	const oneLiners = [
+		"function one() { return 1; }",
+		"setInterval(() => {}, 1000);",
+		"function two() {",
+		"\treturn one();",
+		"}",
+		"",
+	].join("\n");
+	const ol = closure(oneLiners, { roots: ["one"] });
+	check(ol.text === "function one() { return 1; }", "a one-line function is its own line (nothing after it is swallowed)", JSON.stringify(ol.text));
+	let stray = "";
+	try {
+		closure(["function leaky() {", "\treturn 1;", "setInterval(() => {}, 1000);", "}", ""].join("\n"), { roots: ["leaky"] });
+	} catch (e) { stray = e.message; }
+	check(/runs into another top-level statement/.test(stray), "a piece with another top-level statement inside it is refused", stray);
+
 	// Every line of server.js that starts a top-level declaration is one the index
 	// reads, so no dependency can go missing (a top-level `const { x } = require(…)`
 	// once did, and failed only when the code ran).
@@ -120,7 +140,18 @@ console.log("§1 lib/server-lift.js");
 	}
 	check(missed.length === 0, "over server.js: every top-level declaration line is indexed", missed.slice(0, 5).join(" | "));
 
+	const oneLineInServer = SRC.split("\n").filter((l) => /^(async\s+)?function\s+\w+\s*\(/.test(l) && /\}\s*$/.test(l));
+	check(oneLineInServer.length > 0 && oneLineInServer.every((l) => real0.decls.get(l.match(/function\s+(\w+)/)[1]).text === l),
+		"over server.js: each one-line function is indexed as its own line", `${oneLineInServer.length}`);
+
 	const ledger = require("./lib/ledger-world");
+	check(ledger.dbScope(path.join(ROOT, "app.db"), ROOT) === "app" && ledger.dbScope(path.join(os.tmpdir(), "x.db"), ROOT) === "copy",
+		"a script's database: the app directory's own, or a copy under the temp directory", "");
+	let outside = "", envForApp = "";
+	try { ledger.dbScope(path.join(ROOT, "scripts", "app.db"), ROOT); } catch (e) { outside = e.message; }
+	try { ledger.envFor({ root: ROOT, dbPath: path.join(ROOT, "app.db"), envFile: "/dev/null" }); } catch (e) { envForApp = e.message; }
+	check(/refusing/.test(outside) && /--env-file is only for a copy/.test(envForApp),
+		"…any other is refused, and the app's own database never takes another .env", `${outside} | ${envForApp}`);
 	const roots = ["payoutRulesDryRun", "closedMonthFreezePlan", "buildFinancialsLedger", "installPeriodLockTriggers", "parseSheet", "deduplicateLoads"];
 	const real = closure(SRC, {
 		roots, routes: [ledger.FREEZE_HEAD],
@@ -159,6 +190,8 @@ const TABLES = ["users", "investors", "audit_trail", "truck_assignments", "carri
 	"load_coordinates", "routemate_telemetry", "pay_rate_history", "dispatch_notifications"];
 {
 	const db = new Database(DB);
+	// WAL, as the server runs it.
+	db.pragma("journal_mode = WAL");
 	const ddl = [trucksDdl(), ...alters("trucks"),
 		...TABLES.flatMap((t) => [tableDdl(t), ...alters(t)]),
 		"CREATE TABLE investor_config (owner_id INTEGER DEFAULT 0, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(owner_id, key))"];
@@ -282,15 +315,35 @@ const backups = () => fs.readdirSync(TMP).filter((f) => f.startsWith("app.db.pre
 	const after = counts();
 	check(after.freezes === 2 && after.items > 0 && after.payouts === before.payouts, "apply: both months frozen with their items; the payout rows are byte-identical", JSON.stringify(after));
 	const bk = backups();
+	const mode = bk.length === 1 ? (fs.statSync(path.join(TMP, bk[0])).mode & 0o777) : -1;
+	check(bk.length === 1 && mode === 0o600, "apply: the backup is owner-only, with no -wal/-shm beside it", `${JSON.stringify(bk)} mode ${mode.toString(8)}`);
+	check(a.auditRowsComplete === true, "apply: the script confirms its audit rows were written", JSON.stringify(a.auditRowsComplete));
 	let backupOk = false;
 	if (bk.length === 1 && a.backup === path.join(TMP, bk[0])) {
 		const copy = new Database(a.backup, { readonly: true });
 		backupOk = copy.pragma("integrity_check", { simple: true }) === "ok"
+			&& copy.pragma("journal_mode", { simple: true }) === "delete"
 			&& copy.prepare("SELECT COUNT(*) AS n FROM financials_ledger_freezes").get().n === 0
 			&& crypto.createHash("sha256").update(JSON.stringify(copy.prepare("SELECT * FROM investor_payouts ORDER BY id").all())).digest("hex") === before.payouts;
 		copy.close();
 	}
-	check(backupOk, "apply: the database was backed up next to it first (integrity ok, the state before the freeze)", `${JSON.stringify(bk)} ${a.backup}`);
+	check(backupOk, "apply: the database was backed up next to it first (self-contained, integrity ok, the state before the freeze)", `${JSON.stringify(bk)} ${a.backup}`);
+
+	// The same apply on copies of the backup whose audit table refuses one row
+	// (a month's, then the script's): logAudit() swallows the failure, the
+	// script must not.
+	const refusals = { "a month's": "NEW.action = 'financials_freeze' AND NEW.entity_id = '2026-05'", "the script's": "NEW.action = 'financials_freeze_script'" };
+	for (const [which, when] of Object.entries(refusals)) {
+		if (bk.length !== 1) break;
+		const DB2 = path.join(TMP, `audit-refused-${which.length}.db`);
+		fs.copyFileSync(path.join(TMP, bk[0]), DB2);
+		const d2 = new Database(DB2);
+		d2.exec(`CREATE TRIGGER refuse_audit BEFORE INSERT ON audit_trail WHEN ${when} BEGIN SELECT RAISE(ABORT, 'refused'); END`);
+		d2.close();
+		const r2 = run("freeze-closed-months.js", [`--db=${DB2}`, `--values-json=${VALUES}`, `--env-file=${ENV}`, "--apply", `--fingerprint=${plan.fingerprint}`, "--include-unverified"]);
+		check(r2.code === 1 && r2.json && r2.json.auditRowsComplete === false && /audit rows are not all there/.test(r2.stderr),
+			`apply: ${which} audit row missing is reported and exits 1`, `${r2.code} ${r2.stderr.slice(0, 200)}`);
+	}
 	const db = new Database(DB, { readonly: true });
 	const audits = db.prepare("SELECT username, action, entity_id, details FROM audit_trail WHERE action LIKE 'financials_freeze%' ORDER BY id").all();
 	db.close();
@@ -311,7 +364,19 @@ const backups = () => fs.readdirSync(TMP).filter((f) => f.startsWith("app.db.pre
 	check(r.changes && r.changes.every((x) => !("investor" in x)), "…by owner id only (no names without --names)", "");
 	check(JSON.stringify(counts()) === JSON.stringify(pre), "…and writes nothing", "");
 
-	console.log("§4 no sheet named");
+	console.log("§4 refusals before anything is read");
+	// The same file, seen from a temp directory it is not under: neither the
+	// app directory's database nor a copy, so all three scripts refuse it.
+	const elsewhere = path.join(TMP, "elsewhere");
+	fs.mkdirSync(elsewhere);
+	const runFrom = (script, args, input) => spawnSync(process.execPath, [path.join(ROOT, "scripts", script), ...args],
+		{ encoding: "utf8", input, env: { ...process.env, TZ: "UTC", TMPDIR: elsewhere } });
+	const outFreeze = runFrom("freeze-closed-months.js", common);
+	const outPayout = runFrom("payout-rules-dry-run.js", common);
+	const outUser = runFrom("ensure-automation-user.js", [`--db=${DB}`, "--username=e2e_playwright", `--env-file=${ENV}`], "x\n");
+	check(outFreeze.status === 2 && /refusing/.test(outFreeze.stderr) && outPayout.status !== 0 && /refusing/.test(outPayout.stderr)
+		&& outUser.status === 2 && /refusing/.test(outUser.stderr),
+		"a database outside the app directory and the temp directory is refused by every script", `${outFreeze.status} ${outPayout.status} ${outUser.status} ${outUser.stderr.slice(0, 120)}`);
 	const noSheet = run("freeze-closed-months.js", [`--db=${DB}`, `--env-file=${ENV}`]);
 	const noSheetPr = run("payout-rules-dry-run.js", [`--db=${DB}`, `--env-file=${ENV}`]);
 	check(noSheet.code !== 0 && noSheetPr.code !== 0 && /no default sheet/.test(noSheet.stderr) && /no default sheet/.test(noSheetPr.stderr),

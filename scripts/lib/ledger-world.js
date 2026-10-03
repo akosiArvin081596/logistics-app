@@ -14,9 +14,11 @@
 //   - process.env: the app directory's .env, as the server loads it;
 //   - app / requireRole / refuseCrossOrigin: enough to register the freeze
 //     route so its handler runs as written;
-//   - notifyChange: nothing (a script has no sockets).
-// The server's HTTP server, sockets, Sheets writer and sheet ID are never
-// lifted (lib/server-lift.js refuses).
+//   - notifyChange: nothing (a script has no sockets);
+//   - require: crypto and the app's lib/ only; fetch: refuses.
+// The server's HTTP server, sockets, Sheets writer, mailer and sheet ID are
+// never lifted (lib/server-lift.js refuses). The database must be the app
+// directory's own or a copy under the temp directory (dbScope()).
 
 "use strict";
 
@@ -27,8 +29,34 @@ const { closure } = require("./server-lift");
 
 const FREEZE_HEAD = 'app.post("/api/admin/financials/freeze-closed-months", requireRole("Super Admin"), refuseCrossOrigin, async (req, res) => {';
 const ROOTS = ["payoutRulesDryRun", "closedMonthFreezePlan", "buildFinancialsLedger", "installPeriodLockTriggers", "parseSheet", "deduplicateLoads"];
-const PROVIDED = ["db", "require", "console", "process", "__dirname", "app", "requireRole", "refuseCrossOrigin", "notifyChange", "getJobTrackingCached"];
-const DENIED = ["getSheets", "sheets", "SPREADSHEET_ID", "KEY_FILE", "server", "io", "jtCacheInvalidate"];
+const PROVIDED = ["db", "require", "console", "process", "__dirname", "app", "requireRole", "refuseCrossOrigin", "notifyChange", "getJobTrackingCached", "fetch"];
+const DENIED = ["getSheets", "sheets", "SPREADSHEET_ID", "KEY_FILE", "server", "io", "jtCacheInvalidate", "sendEmail", "transporter", "getDrive"];
+// What the lifted code may require: Node's crypto and the app's own lib/.
+const LIFTED_REQUIRE_OK = (m) => m === "crypto" || /^\.\/lib\/[\w.-]+$/.test(m);
+
+// Which database a script may open, and so whose .env applies:
+//   - "app": the app directory's own app.db (or another file directly in it);
+//     its .env is the one the server runs with, so --env-file is refused;
+//   - "copy": a file under the system temp directory (a test fixture or a copy
+//     made for a rehearsal); the app directory's .env, or --env-file.
+// Anything else is refused: a database in another directory may belong to
+// another deployment, whose flags and code are not this checkout's.
+function dbScope(dbPath, root) {
+	const real = (p) => fs.realpathSync(p);
+	const dir = real(path.dirname(path.resolve(dbPath)));
+	if (dir === real(root)) return "app";
+	const tmp = real(require("os").tmpdir());
+	if (dir === tmp || dir.startsWith(`${tmp}${path.sep}`)) return "copy";
+	throw new Error(`refusing ${dbPath}: a script opens its own app directory's database (${root}) or a copy under ${tmp}, nothing else`);
+}
+
+// The .env that applies to `dbPath` (see dbScope()).
+function envFor({ root, dbPath, envFile = null }) {
+	const appRequire = createRequire(path.join(root, "server.js"));
+	const scope = dbScope(dbPath, root);
+	if (envFile && scope !== "copy") throw new Error("--env-file is only for a copy of the database under the temp directory; the app's own database runs with the app's .env");
+	return envFile ? appRequire("dotenv").parse(fs.readFileSync(envFile)) : readEnv(root, appRequire);
+}
 
 // The Job Tracking tab as values.get returns it: { values: [[header…], [row…]] }.
 async function readJobTracking({ sheetId, keyFile, appRequire }) {
@@ -47,11 +75,13 @@ function readEnv(root, appRequire) {
 	return appRequire("dotenv").parse(fs.readFileSync(file));
 }
 
-// `envFile`: the .env to read in place of the app directory's (tests pass an
-// empty one, so a developer's flags never reach them).
-function buildLedgerWorld({ root, dbPath, readonly, sheetData, env = null, envFile = null }) {
+// `envFile`: the .env to read in place of the app directory's, for a copy of
+// the database only (tests pass an empty one, so a developer's flags never
+// reach them).
+function buildLedgerWorld({ root, dbPath, readonly, sheetData, envFile = null }) {
 	const SRC = fs.readFileSync(path.join(root, "server.js"), "utf8");
 	const appRequire = createRequire(path.join(root, "server.js"));
+	const fileEnv = envFor({ root, dbPath, envFile });
 	const Database = appRequire("better-sqlite3");
 	const db = new Database(dbPath, { readonly, fileMustExist: true });
 	if (readonly && !db.readonly) throw new Error("refusing: the dry run's SQLite handle is not read-only");
@@ -62,8 +92,12 @@ function buildLedgerWorld({ root, dbPath, readonly, sheetData, env = null, envFi
 	const register = (method) => (p, ...h) => { routes[`${method} ${p}`] = h[h.length - 1]; };
 	const app = { get: register("GET"), post: register("POST"), put: register("PUT"), delete: register("DELETE") };
 	const pass = () => (req, res, next) => next && next();
-	const fileEnv = envFile ? appRequire("dotenv").parse(fs.readFileSync(envFile)) : readEnv(root, appRequire);
-	const scriptProcess = { env: { ...(env || fileEnv) }, argv: [], exit: () => { throw new Error("lifted code called process.exit()"); } };
+	const scriptProcess = { env: { ...fileEnv }, argv: [], exit: () => { throw new Error("lifted code called process.exit()"); } };
+	const liftedRequire = (m) => {
+		if (!LIFTED_REQUIRE_OK(m)) throw new Error(`lifted code required ${m}, which a script does not load`);
+		return appRequire(m);
+	};
+	const noFetch = () => { throw new Error("lifted code called fetch(); a script makes no network calls"); };
 	const body = [
 		'"use strict";',
 		lifted.text,
@@ -78,8 +112,8 @@ function buildLedgerWorld({ root, dbPath, readonly, sheetData, env = null, envFi
 		"}",
 		"return { payoutRulesDryRun, closedMonthFreezePlan, buildFinancialsLedger, installPeriodLockTriggers, logAudit, financialsCalc };",
 	].join("\n");
-	const api = new Function("db", "require", "console", "process", "__dirname", "app", "requireRole", "refuseCrossOrigin", "notifyChange", "__sheetData", body)(
-		db, appRequire, console, scriptProcess, root, app, pass, pass(), () => {}, sheetData,
+	const api = new Function("db", "require", "console", "process", "__dirname", "app", "requireRole", "refuseCrossOrigin", "notifyChange", "fetch", "__sheetData", body)(
+		db, liftedRequire, console, scriptProcess, root, app, pass, pass(), () => {}, noFetch, sheetData,
 	);
 	const call = async (route, req) => {
 		const out = { status: 200, body: null };
@@ -115,11 +149,12 @@ async function sheetFor(args, root) {
 	const appRequire = createRequire(path.join(root, "server.js"));
 	let sheetId = args["sheet-id"];
 	if (sheetId === "env") {
-		sheetId = readEnv(root, appRequire).SPREADSHEET_ID || "";
+		const envFile = typeof args["env-file"] === "string" ? args["env-file"] : null;
+		sheetId = (typeof args.db === "string" ? envFor({ root, dbPath: args.db, envFile }) : readEnv(root, appRequire)).SPREADSHEET_ID || "";
 		if (!sheetId) throw new Error("--sheet-id=env: the app's .env sets no SPREADSHEET_ID; name the sheet");
 	}
 	const keyFile = args.key || path.join(root, "service-account-key.json");
 	return readJobTracking({ sheetId, keyFile, appRequire });
 }
 
-module.exports = { buildLedgerWorld, parseArgs, sheetFor, FREEZE_HEAD };
+module.exports = { buildLedgerWorld, parseArgs, sheetFor, envFor, dbScope, FREEZE_HEAD };
