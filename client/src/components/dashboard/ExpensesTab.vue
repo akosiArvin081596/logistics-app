@@ -331,10 +331,12 @@
               <div class="mobile-exp-bottom-right">
                 <a v-if="isPdfReceipt(e.photo_data)" class="receipt-pdf-chip" :href="e.photo_data" target="_blank" rel="noopener" @click.stop>PDF</a>
                 <img v-else-if="e.photo_data" :src="`/api/expenses/${e.id}/receipt-thumbnail`" loading="lazy" decoding="async" class="receipt-thumb mobile-exp-thumb" @click.stop="previewImg = e.photo_data" alt="Receipt" />
-                <span :class="['status-pill', 'st-' + (e.status || 'Pending').toLowerCase()]">{{ e.status || 'Pending' }}</span>
+                <span :class="['status-pill', expenseStatusClass(e)]" :title="finalizedTitle(e)">{{ expenseStatusLabel(e) }}</span>
               </div>
             </div>
-            <div class="mobile-exp-actions" @click.stop>
+            <!-- No status change on a receipt in a finalized month: the server
+                 refuses it, and the receipt is already in that month's figures. -->
+            <div v-if="expenseStatusChangeable(e)" class="mobile-exp-actions" @click.stop>
               <template v-if="(e.status || 'Pending') === 'Pending'">
                 <button class="btn-approve mobile-exp-btn" @click="setStatus(e.id, 'Approved')">Approve</button>
                 <button class="btn-reject mobile-exp-btn" @click="setStatus(e.id, 'Rejected')">Reject</button>
@@ -429,14 +431,16 @@
                 <span v-else class="dim">&mdash;</span>
               </td>
               <td>
-                <span :class="['status-pill', 'st-' + (e.status || 'Pending').toLowerCase()]">{{ e.status || 'Pending' }}</span>
+                <span :class="['status-pill', expenseStatusClass(e)]" :title="finalizedTitle(e)">{{ expenseStatusLabel(e) }}</span>
               </td>
               <td class="action-cell" @click.stop>
-                <template v-if="(e.status || 'Pending') === 'Pending'">
-                  <button class="btn-approve" @click="setStatus(e.id, 'Approved')">Approve</button>
-                  <button class="btn-reject" @click="setStatus(e.id, 'Rejected')">Reject</button>
+                <template v-if="expenseStatusChangeable(e)">
+                  <template v-if="(e.status || 'Pending') === 'Pending'">
+                    <button class="btn-approve" @click="setStatus(e.id, 'Approved')">Approve</button>
+                    <button class="btn-reject" @click="setStatus(e.id, 'Rejected')">Reject</button>
+                  </template>
+                  <button v-else-if="e.status !== 'Pending'" class="btn-undo" @click="setStatus(e.id, 'Pending')">Undo</button>
                 </template>
-                <button v-else-if="e.status !== 'Pending'" class="btn-undo" @click="setStatus(e.id, 'Pending')">Undo</button>
               </td>
             </tr>
           </tbody>
@@ -474,7 +478,7 @@
                   <button class="exp-nav-btn" :disabled="!canGoPrev" @click="goPrev" aria-label="Previous pending expense" title="Previous pending (←)">&larr; Prev</button>
                   <span class="exp-nav-counter">
                     <template v-if="isCurrentPending">Pending {{ pendingPos + 1 }} of {{ pendingIndices.length }}</template>
-                    <template v-else-if="pendingIndices.length > 0">Viewing {{ (selectedExpense?.status || 'Pending').toLowerCase() }} · {{ pendingIndices.length }} pending remain</template>
+                    <template v-else-if="pendingIndices.length > 0">Viewing {{ viewingLabel }} · {{ pendingIndices.length }} pending remain</template>
                     <template v-else>No pending expenses</template>
                   </span>
                   <button class="exp-nav-btn" :disabled="!canGoNext" @click="goNext" aria-label="Next pending expense" title="Next pending (→)">Next &rarr;</button>
@@ -507,7 +511,7 @@
                     <div class="exp-stat">
                       <span class="exp-stat-label">Status</span>
                       <span class="exp-stat-value">
-                        <span :class="['status-pill', 'st-' + (selectedExpense.status || 'Pending').toLowerCase()]">{{ selectedExpense.status || 'Pending' }}</span>
+                        <span :class="['status-pill', expenseStatusClass(selectedExpense)]" :title="finalizedTitle(selectedExpense)">{{ expenseStatusLabel(selectedExpense) }}</span>
                       </span>
                     </div>
                     <div v-if="selectedExpense.load_id" class="exp-stat">
@@ -602,7 +606,7 @@
                     </div>
                   </div>
                 </div>
-                <div class="exp-actions">
+                <div v-if="expenseStatusChangeable(selectedExpense)" class="exp-actions">
                   <template v-if="(selectedExpense.status || 'Pending') === 'Pending'">
                     <button class="exp-btn-approve" :disabled="approveLoading" @click="approveCurrent">{{ approveLoading ? '…' : 'Approve' }}</button>
                     <button class="exp-btn-reject" :disabled="approveLoading" @click="rejectCurrent">{{ approveLoading ? '…' : 'Reject' }}</button>
@@ -1588,6 +1592,18 @@
       @cancel="settleDuplicatePrompt(false)"
     />
 
+    <!-- Far-off receipt date confirm for the Log Expense form (askAboutDate).
+         Cancel keeps initial focus: the safe answer is to go back and check. -->
+    <ConfirmModal
+      :open="!!datePrompt"
+      title="Check the receipt date"
+      :message="datePrompt"
+      confirm-text="Save with this date"
+      cancel-text="Fix the date"
+      @confirm="settleDatePrompt(true)"
+      @cancel="settleDatePrompt(false)"
+    />
+
     <!-- Bulk Approve / Reject confirm.
          Opens ONLY when the action would take a receipt out of a settled state
          (see requestBulkStatus) — the everyday gestures, approving a queue of
@@ -1637,6 +1653,8 @@ import { fmtTimestamp, fmtYmd, houstonToday, parseYmdLocal } from '../../utils/d
 // month, off by a year, in the one message that says where their money landed.
 // The shared module is string arithmetic and answers '' instead.
 import { monthLabel } from '../../lib/monthLabel'
+import { expenseStatusLabel, expenseStatusClass, expenseStatusChangeable, statusChangeFailureMessage } from '../../lib/expenseStatus'
+import { receiptDateVerdict, receiptDateQuestion } from '../../lib/receiptDate'
 import {
   fmtOdometer, odometerSource, isSuspectOdometer, asList,
   isReviewAvailable, isQueueAvailable, reviewClearPhrases, queueCounts,
@@ -1733,20 +1751,34 @@ const selectedIndex = computed(() =>
     ? -1
     : allExpenses.value.findIndex(e => e.id === selectedId.value)
 )
-// Indices in allExpenses whose status is Pending — Prev/Next walks this
+// A receipt still waiting for Approve / Reject. A Pending one in a finalized
+// month is not: it is already counted, and the server refuses any change.
+const awaitingApproval = (e) => (e.status || 'Pending') === 'Pending' && expenseStatusChangeable(e)
+// Indices in allExpenses awaiting approval — Prev/Next walks this
 // list (not the raw array) so admin only cycles through pending approvals,
 // matching the CEO's wording.
 const pendingIndices = computed(() => {
   const out = []
   const list = allExpenses.value
   for (let i = 0; i < list.length; i++) {
-    if ((list[i].status || 'Pending') === 'Pending') out.push(i)
+    if (awaitingApproval(list[i])) out.push(i)
   }
   return out
 })
 const isCurrentPending = computed(() =>
-  selectedExpense.value && (selectedExpense.value.status || 'Pending') === 'Pending'
+  !!selectedExpense.value && awaitingApproval(selectedExpense.value)
 )
+// "approved", "rejected", or the finalized label as written.
+const viewingLabel = computed(() => {
+  const e = selectedExpense.value
+  if (!e) return ''
+  return expenseStatusClass(e) === 'st-finalized' ? expenseStatusLabel(e) : (e.status || 'Pending').toLowerCase()
+})
+// Hover text on a status in a finalized month: why there are no buttons.
+function finalizedTitle(e) {
+  const month = monthLabel(e?.finalized_period)
+  return month ? `${month} is finalized. This receipt's status can no longer change.` : ''
+}
 const pendingPos = computed(() => {
   const idx = selectedIndex.value
   if (idx < 0) return -1
@@ -1815,13 +1847,13 @@ function advanceToNextPending() {
   const idx = selectedIndex.value
   if (idx < 0) return
   for (let i = idx + 1; i < list.length; i++) {
-    if ((list[i].status || 'Pending') === 'Pending') {
+    if (awaitingApproval(list[i])) {
       selectedId.value = list[i].id
       return
     }
   }
   for (let i = 0; i < idx; i++) {
-    if ((list[i].status || 'Pending') === 'Pending') {
+    if (awaitingApproval(list[i])) {
       selectedId.value = list[i].id
       return
     }
@@ -1869,19 +1901,15 @@ function pricePerGallon(e) {
 const expenseTypes = ['Fuel', 'Repair', 'Maintenance', 'Wear & Tear', 'Toll', 'Food', 'Other']
 // Receipt dates far from today are almost always a misread year — a handwritten
 // year that ran off the page, or a store printer with a wrong clock. Both have
-// dropped real expenses out of the month they belonged to.
-const ADD_DATE_STALE_DAYS = 120
+// dropped real expenses out of the month they belonged to. The rule is
+// lib/receiptDate.js, shared with the driver form and the bulk scan; saving
+// such a date asks first (askAboutDate).
 const addDateSuspect = computed(() => {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(addForm.date || '')
-  if (!m) return ''
-  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
-  if (isNaN(d)) return ''
-  const days = (Date.now() - d.getTime()) / 86400000
-  if (days < -1) return 'This is dated in the future — check the date.'
-  if (days <= ADD_DATE_STALE_DAYS) return ''
-  return Number(m[1]) === new Date().getFullYear()
-    ? 'This is over 4 months old — check the date.'
-    : `This is dated ${m[1]} — check the year before saving.`
+  const verdict = receiptDateVerdict(addForm.date)
+  if (verdict === 'future') return 'This is dated in the future — check the date.'
+  if (verdict === 'old') return 'This is over 4 months old — check the date.'
+  if (verdict === 'year') return `This is dated ${addForm.date.slice(0, 4)} — check the year before saving.`
+  return ''
 })
 const allFilter = reactive({ driver: '', type: '', status: '', truck: '', state: '', from: '', to: '' })
 // Text search across vendor/description/city — debounced 300ms so we don't
@@ -2043,6 +2071,7 @@ onBeforeUnmount(() => {
   // but its `finally` never runs, so nothing is logged and nothing is reported.
   // "No" is the only safe default: the alternative books money nobody confirmed.
   settleDuplicatePrompt(false)
+  settleDatePrompt(false)
 })
 
 // Add Expense form (Super Admin / Dispatcher only)
@@ -2386,6 +2415,28 @@ const duplicateMessage = computed(() => {
   return lines.join('\n')
 })
 
+// ── Far-off date confirm ───────────────────────────────────────────────────
+// The warning beside the date did not stop a wrong year being saved, so a date
+// lib/receiptDate.js questions is asked about once, before anything is sent.
+// Same promise bridge as the duplicate question, settled on every exit path
+// (confirm, cancel, unmount) for the same reason.
+const datePrompt = ref('')
+let dateDecision = null
+
+function askAboutDate(ymd) {
+  return new Promise((resolve) => {
+    datePrompt.value = `${receiptDateQuestion(ymd)}\n\nSave it with this date only if that is what the receipt says.`
+    dateDecision = resolve
+  })
+}
+
+function settleDatePrompt(answer) {
+  datePrompt.value = ''
+  const resolve = dateDecision
+  dateDecision = null
+  if (resolve) resolve(answer)
+}
+
 // Money for prose (the confirm above), matching how amounts render in the list.
 // Falls back to the raw value rather than printing "$NaN" if the server ever
 // sends something unparseable.
@@ -2406,6 +2457,10 @@ async function submitExpense() {
   }
   addLoading.value = true
   try {
+    if (receiptDateVerdict(addForm.date) && !(await askAboutDate(addForm.date))) {
+      toast('Not logged — check the date', 'info')
+      return
+    }
     const payload = {
       driver: addForm.driver,
       type: addForm.type,
@@ -2559,7 +2614,9 @@ async function setStatus(id, status) {
     if (exp) exp.status = status
     toast(status === 'Approved' ? 'Expense approved' : status === 'Rejected' ? 'Expense rejected' : 'Status reset', 'success')
   } catch (err) {
-    toast('Failed to update status', 'error')
+    // The server's reason (a finalized month, an unreadable lock table, a
+    // missing expense), not a fixed sentence that hides which one it was.
+    toast(statusChangeFailureMessage(err), 'error')
     throw err
   }
 }
@@ -4495,6 +4552,7 @@ tr:hover td { background: var(--surface-hover); }
 .st-pending { background: var(--amber-dim); color: var(--amber); }
 .st-approved { background: var(--accent-dim); color: var(--accent); }
 .st-rejected { background: var(--danger-dim); color: var(--danger); }
+.st-finalized { background: var(--blue-dim); color: var(--blue); }
 
 .receipt-thumb {
   width: 80px; height: 60px; object-fit: cover; border-radius: 4px;
