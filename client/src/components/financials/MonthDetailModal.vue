@@ -86,6 +86,17 @@
                   </div>
                 </div>
               </div>
+              <div v-if="hasSettlementAdjustment" class="settlement-line" data-testid="settlement-adjustment">
+                <div class="bar-label">
+                  <span>Settlement adjustment</span>
+                  <span class="bar-val">
+                    <template v-if="detail.settlementAdjustment.costs">{{ signedFmt(detail.settlementAdjustment.costs) }} costs</template>
+                    <template v-if="detail.settlementAdjustment.costs && detail.settlementAdjustment.revenue"> · </template>
+                    <template v-if="detail.settlementAdjustment.revenue">{{ signedFmt(detail.settlementAdjustment.revenue) }} revenue</template>
+                  </span>
+                </div>
+                <div class="footnote">Brings this closed month to the figures each investor was settled at.</div>
+              </div>
             </div>
 
             <!-- Fuel / diesel -->
@@ -196,13 +207,13 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="d in detail.drivers" :key="d.name">
+                  <tr v-for="d in detail.drivers" :key="d.name" :class="{ 'adjustment-row': d.isSettlementAdjustment || d.isUnassigned }">
                     <td>
                       {{ d.name }}
                       <span v-if="d.payType === 'percentage'" class="pct-badge">{{ d.payPercentage }}%</span>
                     </td>
-                    <td class="num">{{ d.payType === 'percentage' ? '—' : d.activeDays }}</td>
-                    <td class="num dim">{{ d.payType === 'percentage' ? '—' : '$' + d.dailyRate + '/day' }}</td>
+                    <td class="num">{{ d.payType === 'percentage' || isSummaryRow(d) ? '—' : d.activeDays }}</td>
+                    <td class="num dim">{{ d.payType === 'percentage' || isSummaryRow(d) ? '—' : '$' + d.dailyRate + '/day' }}</td>
                     <td class="num">{{ fmt(d.pay) }}</td>
                     <td class="num pos">{{ fmt(d.revenue) }}</td>
                     <td class="num" :class="d.margin >= 0 ? 'pos' : 'neg'">{{ fmt(d.margin) }}</td>
@@ -216,7 +227,8 @@
                       <template v-else>—</template>
                     </td>
                     <td class="num">
-                      <span v-if="d.variance === null" class="dim">no invoice</span>
+                      <span v-if="isSummaryRow(d)" class="dim">—</span>
+                      <span v-else-if="d.variance === null" class="dim">no invoice</span>
                       <span v-else-if="d.variance === 0" class="dim">matched</span>
                       <span v-else-if="d.variance > 0" class="neg">{{ signedFmt(d.variance) }} over</span>
                       <span v-else class="warn">{{ signedFmt(d.variance) }} under</span>
@@ -255,11 +267,8 @@
                     <td>{{ t.assignedDriver }}</td>
                     <td class="num">{{ t.activeDays }}</td>
                     <td class="num">
-                      <template v-if="t.driverPayType === 'percentage'">% pay</template>
-                      <template v-else>
-                        ${{ t.dailyRate }}
-                        <span v-if="t.dailyRateIsDefault" class="default-badge" title="No daily rate set on this truck — using the $250 default">default</span>
-                      </template>
+                      ${{ t.dailyRate }}
+                      <span v-if="t.dailyRateIsDefault" class="default-badge" title="No daily rate set on this truck — using the $250 default">default</span>
                     </td>
                     <td class="num dim">{{ t.estDriverPay === null ? '—' : fmt(t.estDriverPay) }}</td>
                   </tr>
@@ -372,6 +381,7 @@ const CATEGORY_META = {
   fixed_costs: { label: 'Fixed Costs', color: '#64748b' },
   maintenance: { label: 'Maintenance', color: '#3b82f6' },
   repair: { label: 'Repair', color: '#ef4444' },
+  wear_tear: { label: 'Wear & Tear', color: '#db2777' },
   toll: { label: 'Tolls', color: '#8b5cf6' },
   food: { label: 'Food', color: '#10b981' },
   other: { label: 'Other', color: '#6b7280' },
@@ -391,6 +401,14 @@ const categoryBars = computed(() => {
     }))
     .filter((r) => r.amount > 0)
     .sort((a, b) => b.amount - a.amount)
+})
+// The drivers table's rows that are no driver: "(Unassigned)" revenue and the
+// Settlement adjustment. They have no days, rate or invoice.
+const isSummaryRow = (d) => !!(d.isSettlementAdjustment || d.isUnassigned)
+// A closed month's Settlement adjustment (server figures), shown on its own line.
+const hasSettlementAdjustment = computed(() => {
+  const a = detail.value?.settlementAdjustment
+  return !!a && (a.costs !== 0 || a.revenue !== 0)
 })
 
 // Close on Escape while open.
@@ -587,6 +605,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
 /* Bars */
 .bar-list { display: flex; flex-direction: column; gap: 0.6rem; }
+.settlement-line { margin-top: 0.75rem; padding-top: 0.6rem; border-top: 1px dashed var(--border); }
+.adjustment-row td { font-style: italic; color: var(--text-dim); }
 .bar-label {
   display: flex; justify-content: space-between;
   font-size: 0.76rem; font-weight: 600;

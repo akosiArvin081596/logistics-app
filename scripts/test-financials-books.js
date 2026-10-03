@@ -98,7 +98,7 @@ const alters = (table) => SRC.match(new RegExp(`ALTER TABLE ${table} ADD COLUMN 
 
 const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "haulAssignmentsStmt", "LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS", "PERIOD_FINALIZE_ENABLED",
 	"INVESTOR_LEASE_PAYOUTS_ENABLED", "INVESTOR_LEASE_SETTINGS", "LEASE_SNAPSHOT_WARNED", "LOCKABLE_MONTH_KEY",
-	"LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR", "insertPayoutHistory"];
+	"LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR", "insertPayoutHistory", "FINANCIALS_GRANULARITIES", "FINANCIALS_GROUPINGS"];
 const LETS = ["lastPayStructShadowWarnMs", "_jtEpoch"];
 const FNS = [
 	// Under test.
@@ -117,10 +117,13 @@ const FNS = [
 	"graceEndsAt", "periodPhase", "isPlausibleLockPeriod", "getCarrierDBFromSQLite", "recordPayoutChange",
 	"noteLateItemInClosedMonth", "logAudit", "listSettlableInvestors", "installPeriodLockTriggers",
 	"closingFingerprint", "closedMonthFreezePlan", "closingLedgerItems", "financialsSettings", "financialsExtraItems", "closedMonthSettings", "computeFleetLedger", "settledMonthItems", "ambiguousBlankOwnerLoads", "buildHeldTruckIndex", "buildHaulTruckResolver", "frozenPeriodSet", "settledPayoutRows", "writeLedgerFreeze", "ledgerItemFromRow", "buildFinancialsLedger", "completedLoadCancelRefusal", "loadRowAccountingMonths", "sheetCellMonths", "sheetCellDate",
+	// GET /api/financials and the report it reads.
+	"financialsReportQuery", "buildFinancialsReport", "getLoadMilesIndex", "liveJobTrackingView",
 ];
 const REOPEN_HEAD = 'app.post("/api/periods/:period/reopen", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {';
 const FREEZE_HEAD = 'app.post("/api/admin/financials/freeze-closed-months", requireRole("Super Admin"), refuseCrossOrigin, async (req, res) => {';
 const ADJUST_HEAD = 'app.put("/api/investor/payouts/:id/adjust", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {';
+const FINANCIALS_HEAD = 'app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {';
 const BODY = [
 	...CONSTS.map((c) => liftDecl("const", c)),
 	...LETS.map((c) => liftDecl("let", c)),
@@ -128,6 +131,7 @@ const BODY = [
 	liftRoute(REOPEN_HEAD),
 	liftRoute(ADJUST_HEAD),
 	liftRoute(FREEZE_HEAD),
+	liftRoute(FINANCIALS_HEAD),
 	"return { reconcileInvestorPayouts, computeInvestorMonthlyEarnings, getInvestorDriverSet, assignDriverToTruck, finalizePeriods, getCarrierDBFromSQLite, installPeriodLockTriggers, computeFleetLedger, buildFinancialsLedger };",
 ].join("\n");
 
@@ -145,6 +149,8 @@ const DDL = [
 	tableDdl("investor_payouts"), ...alters("investor_payouts"),
 	tableDdl("investor_payout_history"), tableDdl("investor_payout_basis"), tableDdl("period_locks"),
 	tableDdl("financials_ledger_items"), tableDdl("financials_ledger_freezes"), tableDdl("app_settings"),
+	tableDdl("load_coordinates"), ...alters("load_coordinates"), tableDdl("load_eld_miles"), tableDdl("load_ratecon_miles"),
+	tableDdl("invoices"), ...alters("invoices"),
 	// The migrated shape (the CREATE is the pre-owner one; a migration rebuilds it).
 	"CREATE TABLE investor_config (owner_id INTEGER DEFAULT 0, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(owner_id, key))",
 ];
@@ -197,7 +203,9 @@ function buildWorld({ onSheetRead = null } = {}) {
 		app: {
 			post: (p, ...h) => { routes[`POST ${p}`] = h[h.length - 1]; },
 			put: (p, ...h) => { routes[`PUT ${p}`] = h[h.length - 1]; },
+			get: (p, ...h) => { routes[`GET ${p}`] = h[h.length - 1]; },
 		},
+		loadMilesLib: require(path.join(__dirname, "..", "lib", "load-miles.js")),
 		logAuditRefusal: (req, action, entity, entityId, details, code) => refusals.push({ action, entityId: String(entityId), code }),
 		requireRole: () => (req, res, next) => next && next(),
 		refuseCrossOrigin: (req, res, next) => next && next(),
@@ -349,6 +357,51 @@ const show = (f) => (f ? FIGS.map((k) => `${k} ${c(f[k])}`).join(", ") : "none")
 	check(adj.length === 2 && adj.some((i) => i.ownerId === 5 && i.adjusts === "revenue" && i.cents === -50000) && adj.some((i) => i.ownerId === 5 && i.adjusts === "trip" && i.cents === -20000),
 		"…through Settlement adjustment lines (revenue −$500, trip −$200 for owner 5)", JSON.stringify(adj));
 	check(before.items.filter((i) => i.month === "2026-04").every((i) => i.basis === "settled"), "…every April item is labelled settled", "");
+
+	// ── GET /api/financials: the per-truck table, the leaderboard and the drill-
+	// down come from the books, for the selected period ───────────────────────
+	const fin = async (query) => call("GET /api/financials", { query, session: { user: SUPER } });
+	const sumC = (rows, k) => rows.reduce((a, r) => a + c(r[k]), 0);
+	const aprBooks = before.figures["2026-04"];
+	const aprFin = (await fin({ month: "2026-04" })).body;
+	check(aprFin.summary.from === "2026-04-01" && aprFin.summary.to === "2026-04-30" && c(aprFin.summary.totalRevenue) === c(aprBooks.revenue)
+		&& sumC(aprFin.perTruck, "gross") === c(aprBooks.revenue) && sumC(aprFin.drivers, "grossRevenue") === c(aprBooks.revenue)
+		&& aprFin.perTruck.some((r) => r.isSettlementAdjustment && c(r.gross) === -50000),
+		"financials: April's per-truck table and leaderboard are the books for April, each adding up to its revenue (the Settlement adjustment as its own row)",
+		JSON.stringify({ summary: aprFin.summary.totalRevenue, books: aprBooks.revenue, trucks: aprFin.perTruck.map((r) => [r.unitNumber, r.gross]), drivers: aprFin.drivers.map((r) => [r.name, r.grossRevenue]) }));
+	const aprMay = (await fin({ from: "2026-04-01", to: "2026-05-31" })).body;
+	check(c(aprMay.summary.totalRevenue) === c(aprBooks.revenue) + c(before.figures["2026-05"].revenue) && sumC(aprMay.perTruck, "gross") === c(aprMay.summary.totalRevenue),
+		"financials: a from–to period covers its months (April and May)", JSON.stringify(aprMay.summary));
+	const allFin = (await fin({})).body;
+	const lastBooksMonth = before.months[before.months.length - 1];
+	const lastBooksDay = `${lastBooksMonth}-${String(new Date(Date.UTC(Number(lastBooksMonth.slice(0, 4)), Number(lastBooksMonth.slice(5, 7)), 0)).getUTCDate()).padStart(2, "0")}`;
+	check(allFin.summary.from === `${before.months[0]}-01` && allFin.summary.to === lastBooksDay
+		&& c(allFin.summary.totalRevenue) === before.months.reduce((a, mk) => a + c((before.figures[mk] || {}).revenue), 0)
+		&& c(allFin.summary.totalExpenses) === allFin.monthlyPerformance.reduce((a, m) => a + c(m.totalExpenses), 0),
+		"financials: with no period, every month the books hold, whole (revenue and costs add up to the monthly rows)",
+		JSON.stringify([allFin.summary.from, allFin.summary.to, allFin.summary.totalRevenue, allFin.summary.totalExpenses]));
+	// The Financials cost settings (overhead on, fuel off) belong to the report
+	// page; this endpoint stays on the ledger's lines.
+	const shape = (b) => JSON.stringify([b.summary, b.perTruck, b.drivers, b.expensesByCategory]);
+	const plain = { june: (await fin({ month: "2026-06" })).body, all: (await fin({})).body };
+	db.prepare("INSERT INTO app_settings (key, value) VALUES ('financials.settings', ?)").run(JSON.stringify({ costs: { overhead: true, fuel: false }, overheadMonthly: 2000 }));
+	const withSettings = { june: (await fin({ month: "2026-06" })).body, all: (await fin({})).body };
+	db.prepare("DELETE FROM app_settings WHERE key = 'financials.settings'").run();
+	check(shape(withSettings.june) === shape(plain.june) && shape(withSettings.all) === shape(plain.all),
+		"financials: the cost settings (overhead on, fuel off) do not move it, open June or the whole books (one basis, the books')",
+		JSON.stringify({ june: [plain.june.summary.totalExpenses, withSettings.june.summary.totalExpenses], all: [plain.all.summary.totalExpenses, withSettings.all.summary.totalExpenses] }));
+	const badFin = await fin({ from: "2026-05-01", to: "2026-04-01" });
+	check(badFin.status === 400 && badFin.body.code === "INVALID_REPORT_QUERY", "financials: a bad period answers 400", `${badFin.status}`);
+	const md = aprFin.monthDetail;
+	const catSum = Object.values(md.expenseCategories).reduce((a, v) => a + c(v), 0);
+	check(c(md.settlementAdjustment.revenue) === -50000 && c(md.settlementAdjustment.costs) === -20000 && c(md.settlementAdjustment.byFigure.tripExpenses) === -20000
+		&& catSum + c(md.settlementAdjustment.costs) === c(md.summary.totalExpenses) && md.basis === "settled",
+		"drill-down: closed April shows its Settlement adjustment line (revenue −$500, receipts −$200); the categories plus that line are its expenses",
+		JSON.stringify({ adj: md.settlementAdjustment, catSum, total: md.summary.totalExpenses }));
+	check(sumC(md.drivers, "pay") === c(md.summary.driverPay) && sumC(md.drivers, "revenue") === c(md.summary.revenue)
+		&& md.drivers.some((d) => d.isSettlementAdjustment && c(d.revenue) === -50000),
+		"drill-down: the driver rows, with a Settlement adjustment row, add up to the month's revenue and driver pay",
+		JSON.stringify(md.drivers.map((d) => [d.name, d.pay, d.revenue])));
 	const companyAprilBefore = financialsCalc.monthFiguresFromItems(before.items.filter((i) => i.ownerId === 0))["2026-04"];
 	check(sameFigures(companyAprilBefore, companyApril), "…and the company's April lines as they stand", `${show(companyAprilBefore)} vs ${show(companyApril)}`);
 
@@ -406,6 +459,15 @@ const show = (f) => (f ? FIGS.map((k) => `${k} ${c(f[k])}`).join(", ") : "none")
 	check(/PERIOD_FINALIZED/.test(refused(() => db.prepare("DELETE FROM financials_ledger_items WHERE period = '2026-04'").run())), "frozen: a DELETE of a closed month's items is refused", "");
 	check(/PERIOD_FINALIZED/.test(refused(() => db.prepare("INSERT INTO financials_ledger_items (period, owner_id, kind, cents, freeze_id, frozen_at) VALUES ('2026-04', 0, 'revenue', 1, 'another', 'x')").run())),
 		"frozen: a second freeze of a closed month is refused", "");
+	const aprFreezeId = db.prepare("SELECT freeze_id FROM financials_ledger_freezes WHERE period = '2026-04' AND released_at = ''").get().freeze_id;
+	check(/PERIOD_FINALIZED/.test(refused(() => db.prepare("INSERT INTO financials_ledger_items (period, owner_id, kind, cents, freeze_id, frozen_at) VALUES ('2026-04', 0, 'revenue', 1, ?, 'x')").run(aprFreezeId))),
+		"frozen: an item added under the month's own freeze once it holds all its items is refused", "");
+	check(/PERIOD_FINALIZED/.test(refused(() => db.prepare("UPDATE financials_ledger_freezes SET released_at = 'x' WHERE period = '2026-04'").run())),
+		"frozen: the row that marks a closed month frozen cannot be released outside a reopen", "");
+	check(/PERIOD_FINALIZED/.test(refused(() => db.prepare("DELETE FROM financials_ledger_freezes WHERE period = '2026-04'").run())),
+		"frozen: …or deleted", "");
+	check(/PERIOD_FINALIZED/.test(refused(() => db.prepare("INSERT INTO financials_ledger_freezes (freeze_id, period, source, frozen_at, frozen_by, item_count, summary) VALUES ('another', '2026-04', 'test', 'x', 'test', 0, '{}')").run())),
+		"frozen: …and a second freeze row for it is refused", "");
 
 	// ── reopen releases, the next close freezes again ─────────────────────────
 	const reopen = await call("POST /api/periods/:period/reopen", { params: { period: "2026-05" }, body: { reason: "corrected load 8004" }, session: { user: SUPER } });
@@ -485,6 +547,45 @@ const show = (f) => (f ? FIGS.map((k) => `${k} ${c(f[k])}`).join(", ") : "none")
 		&& W.notices.slice(noticesBefore).some((n) => /Financials figures not frozen at close/.test(n.title)),
 		"close: when writing Financials' items fails the month still closes, unfrozen, with a notice", JSON.stringify(febClosed));
 	W.errors.splice(0, W.errors.length, ...W.errors.filter((e) => !/Financials items for 2026-02 not frozen/.test(e)));
+
+	// A paid row re-closed after a reopen with no breakdown on record: its month
+	// freezes as it stands, and the close says so.
+	await call("POST /api/periods/:period/reopen", { params: { period: "2026-06" }, body: { reason: "no breakdown test" }, session: { user: SUPER } });
+	db.prepare("UPDATE investor_payouts SET finalized_breakdown = '' WHERE owner_id = 6 AND period = '2026-06'").run();
+	const unsettledNotices = W.notices.length;
+	await api.finalizePeriods(["2026-06"], "system");
+	const unsettledAudit = db.prepare("SELECT username, entity_id, details FROM audit_trail WHERE action = 'financials_freeze_unsettled'").all();
+	check(W.notices.slice(unsettledNotices).some((n) => /Financials frozen as it stands/.test(n.title) && !/\$/.test(n.body))
+		&& unsettledAudit.length === 1 && unsettledAudit[0].entity_id === "2026-06" && /owner 6 2026-06/.test(unsettledAudit[0].details),
+		"re-close: a paid row with no recorded breakdown freezes as it stands, with a notice (no figures) and an audit row", JSON.stringify({ unsettledAudit, notices: W.notices.slice(unsettledNotices).map((n) => n.title) }));
+
+	// Wear & Tear is its own category; a receipt dated outside the books' months
+	// (a typo of a year) makes no month row and counts in no total.
+	const finBefore = (await fin({})).body;
+	const julBefore = (await fin({ month: "2026-07" })).body.monthDetail.expenseCategories;
+	expense.run("2026-07-10T17:00:00.000Z", D, "Wear & Tear", 75, "2026-07-03", 0, "C1", "", "");
+	expense.run("2026-07-10T17:00:00.000Z", D, "Fuel", 40, "2031-01-15", 0, "C1", "", "");
+	expense.run("2026-07-10T17:00:00.000Z", D, "Fuel", 30, "2017-07-15", 0, "C1", "", "");
+	const julAfter = (await fin({ month: "2026-07" })).body.monthDetail.expenseCategories;
+	check(c(julAfter.wear_tear) === c(julBefore.wear_tear) + 7500 && c(julAfter.other) === c(julBefore.other),
+		"categories: a Wear & Tear receipt is its own category, not Other", JSON.stringify({ julBefore, julAfter }));
+	const finAfter = (await fin({})).body;
+	const receipts = (cats) => ["fuel", "maintenance", "repair", "wear_tear", "toll", "food", "other"].reduce((sum, k) => sum + c(cats[k]), 0);
+	check(!finAfter.monthlyPerformance.some((m) => m.month === "2031-01" || m.month === "2017-07") && finAfter.summary.outOfRange === 2
+		&& c(finAfter.expensesByCategory.fuel) === c(finBefore.expensesByCategory.fuel)
+		&& receipts(finAfter.expensesByCategory) === receipts(finBefore.expensesByCategory) + 7500,
+		"books: receipts dated 2031 and 2017 make no month row and count in no total; they are reported as out of range",
+		JSON.stringify({ months: finAfter.monthlyPerformance.map((m) => m.month), outOfRange: finAfter.summary.outOfRange, before: finBefore.expensesByCategory, after: finAfter.expensesByCategory }));
+
+	// A load with no driver: the drill-down's "(Unassigned)" row keeps its rows
+	// adding up to the month's revenue.
+	SHEET.push(load("8010", "", "7/6/2026", "7/7/2026 8:00", "7/7/2026 18:00", "$640.00", "C1", "0"));
+	const julMd = (await fin({ month: "2026-07" })).body.monthDetail;
+	SHEET.pop();
+	const julUnassigned = julMd.drivers.find((d) => d.isUnassigned);
+	check(julUnassigned && c(julUnassigned.revenue) === 64000 && sumC(julMd.drivers, "revenue") === c(julMd.summary.revenue),
+		"drill-down: revenue with no driver is an \"(Unassigned)\" row, and the rows add up to the month's revenue",
+		JSON.stringify(julMd.drivers.map((d) => [d.name, d.revenue])));
 
 	check(W.errors.length === 0, "the lifted code logged no error", W.errors.join(" | "));
 	console.log(`\n${pass} passed, ${fail} failed`);

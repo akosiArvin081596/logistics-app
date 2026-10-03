@@ -314,6 +314,7 @@ const ROW_COLS = "period, amount, status, finalized_at, finalized_amount, finali
 	const storedTriggers = db.prepare("SELECT COUNT(*) AS n FROM main.sqlite_master WHERE type = 'trigger'").get().n;
 	const tempTriggers = db.prepare("SELECT name FROM temp.sqlite_master WHERE type = 'trigger' ORDER BY name").all().map((r) => r.name);
 	check(storedTriggers === 0 && JSON.stringify(tempTriggers) === JSON.stringify([
+		"financials_ledger_freezes_locked_delete", "financials_ledger_freezes_locked_insert", "financials_ledger_freezes_locked_update",
 		"financials_ledger_items_locked_delete", "financials_ledger_items_locked_insert", "financials_ledger_items_locked_update",
 		"investor_payouts_locked_delete", "investor_payouts_locked_insert", "investor_payouts_locked_update"]),
 		"the triggers are TEMP: on this connection only, none stored in the database file (a rollback to older code never meets them)",
