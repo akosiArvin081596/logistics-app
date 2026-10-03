@@ -9,12 +9,13 @@
 //                 { "service": "logisx-staging" }); otherwise it is service
 //                 logisx-e2e-local (E2E_KEYCHAIN_SERVICE overrides), account = the
 //                 entry's key.
-//   Keychain      read with `security find-generic-password -w` when a run starts,
-//                 kept in memory only; written with `security -i`, whose commands
-//                 arrive on stdin, so a password is never in any process's argv.
+//   Keychain      read with `/usr/bin/security find-generic-password -w` when a run
+//                 starts, kept in memory only; written with `security -i`, whose
+//                 commands arrive on stdin, so a password is never in any
+//                 process's argv. Only logisx-… services are read or written.
 //
 // creds.json, the old file that held the passwords themselves, is deleted by
-// setup-db.cjs wherever it finds one.
+// setup-db.cjs when it finds one in the work dir (removeLegacyCreds()).
 "use strict";
 const fs = require("fs");
 const path = require("path");
@@ -22,7 +23,11 @@ const { execFileSync, spawnSync } = require("child_process");
 
 const ROLES = ["superAdmin", "driver", "investor", "investor2", "dispatcher"];
 const DEFAULT_SERVICE = () => process.env.E2E_KEYCHAIN_SERVICE || "logisx-e2e-local";
-const LEGACY_CREDS = "creds.json";
+// The harness reads and writes only this project's items.
+const SERVICE_RE = /^logisx-[a-z0-9-]+$/;
+// The system's own tool, never whichever `security` is first on PATH.
+// E2E_SECURITY_BIN is for the harness's tests (a stand-in that keeps no secrets).
+const securityBin = () => process.env.E2E_SECURITY_BIN || "/usr/bin/security";
 
 function loginsFile(work) {
 	return process.env.LOGINS_FILE || path.join(work, "logins.json");
@@ -30,20 +35,21 @@ function loginsFile(work) {
 
 function itemFor(key, entry) {
 	const k = (entry && entry.keychain) || {};
-	if (k.service) return { service: String(k.service), account: k.account ? String(k.account) : null };
-	return { service: DEFAULT_SERVICE(), account: key };
+	const item = k.service ? { service: String(k.service), account: k.account ? String(k.account) : null } : { service: DEFAULT_SERVICE(), account: key };
+	if (!SERVICE_RE.test(item.service)) throw new Error(`refusing the Keychain service "${item.service}": the harness uses only logisx-… items`);
+	return item;
 }
 
 function requireSecurity() {
-	const r = spawnSync("security", ["help"], { stdio: "ignore" });
-	if (r.error) throw new Error("the macOS `security` tool is not available: the harness keeps its passwords in the Keychain");
+	const r = spawnSync(securityBin(), ["help"], { stdio: "ignore" });
+	if (r.error) throw new Error(`the macOS \`security\` tool (${securityBin()}) is not available: the harness keeps its passwords in the Keychain`);
 }
 
 // The password of a Keychain item, or null when there is none.
 function readPassword({ service, account }) {
 	const args = ["find-generic-password", "-s", service, ...(account ? ["-a", account] : []), "-w"];
 	try {
-		return execFileSync("security", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).replace(/\n$/, "") || null;
+		return execFileSync(securityBin(), args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).replace(/\n$/, "") || null;
 	} catch {
 		return null;
 	}
@@ -55,7 +61,8 @@ function storePassword({ service, account }, password) {
 	for (const [name, v] of [["service", service], ["account", account], ["password", password]]) {
 		if (!/^[A-Za-z0-9._-]+$/.test(String(v || ""))) throw new Error(`refusing to store a Keychain item: its ${name} has characters the harness does not use`);
 	}
-	const r = spawnSync("security", ["-i"], { input: `add-generic-password -U -s "${service}" -a "${account}" -w "${password}"\n`, encoding: "utf8" });
+	if (!SERVICE_RE.test(service)) throw new Error(`refusing the Keychain service "${service}": the harness uses only logisx-… items`);
+	const r = spawnSync(securityBin(), ["-i"], { input: `add-generic-password -U -s "${service}" -a "${account}" -w "${password}"\n`, encoding: "utf8" });
 	if (r.status !== 0) throw new Error(`security add-generic-password failed for ${service}/${account}`);
 	if (readPassword({ service, account }) !== password) throw new Error(`the Keychain item ${service}/${account} did not read back`);
 }
@@ -77,13 +84,31 @@ function loadLogins(file) {
 	return logins;
 }
 
-// Delete the old password file(s): <work dir>/creds.json and $CREDS_FILE.
+// Delete the harness's old password files: a creds*.json in the work dir, or
+// the file $CREDS_FILE names, each only when it is inside the work dir and has
+// the old file's shape (a superAdmin entry with a password). Anything else is
+// left where it is and reported. Returns { removed, left }.
 function removeLegacyCreds(work) {
 	const removed = [];
-	for (const f of [path.join(work, LEGACY_CREDS), process.env.CREDS_FILE].filter(Boolean)) {
-		if (fs.existsSync(f)) { fs.unlinkSync(f); removed.push(f); }
+	const left = [];
+	const legacyShape = (f) => {
+		try {
+			const j = JSON.parse(fs.readFileSync(f, "utf8"));
+			return !!(j && j.superAdmin && typeof j.superAdmin.password === "string");
+		} catch {
+			return false;
+		}
+	};
+	const inWork = (f) => {
+		try { return path.dirname(fs.realpathSync(f)) === work && !fs.lstatSync(f).isSymbolicLink(); } catch { return false; }
+	};
+	const candidates = new Set(fs.readdirSync(work).filter((n) => /^creds.*\.json$/.test(n)).map((n) => path.join(work, n)));
+	if (process.env.CREDS_FILE) candidates.add(path.resolve(process.env.CREDS_FILE));
+	for (const f of candidates) {
+		if (!fs.existsSync(f)) continue;
+		if (inWork(f) && legacyShape(f)) { fs.unlinkSync(f); removed.push(f); } else left.push(f);
 	}
-	return removed;
+	return { removed, left };
 }
 
 module.exports = { ROLES, loginsFile, itemFor, readPassword, storePassword, loadLogins, removeLegacyCreds, requireSecurity, DEFAULT_SERVICE };

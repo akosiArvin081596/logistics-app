@@ -3,19 +3,21 @@
  * The browser E2E harness keeps its passwords in the macOS Keychain, never in a
  * file (scripts/e2e/keychain.cjs, setup-db.cjs, verify-creds.cjs, e2e.mjs):
  *
- *   §1 setup-db.cjs on a small synthetic database: deletes an old creds.json;
- *      stores the five logins' passwords in the Keychain (sent on stdin, never
+ *   §1 setup-db.cjs on a small synthetic database: deletes the old creds files
+ *      in the work dir, and leaves alone a file of another tool's that a stray
+ *      CREDS_FILE names; stores the five logins' passwords in the Keychain (sent on stdin, never
  *      in any command's arguments) and writes logins.json (0600) with names and
  *      ids only; prints no password; verify-creds.cjs then signs every login
  *      against the copy from the Keychain.
  *   §2 a second copy reuses the same passwords.
  *   §3 loadLogins(): passwords in memory only (not serialized); a logins file
  *      that holds a password is refused; a missing Keychain item is named, not
- *      guessed; an entry may name its own item (a staging login, by service).
+ *      guessed; an entry may name its own item (a staging login, by service);
+ *      only logisx-… items are read or written.
  *
- * Hermetic: a mkdtemp sandbox, and a fake `security` first on PATH that keeps
- * its items in a sandbox file and logs every command's arguments. No real
- * Keychain, no network, no server.
+ * Hermetic: a mkdtemp sandbox, and a stand-in `security` (E2E_SECURITY_BIN)
+ * that keeps its items in a sandbox file and logs every command's arguments.
+ * No real Keychain, no network, no server.
  * Run: node scripts/test-e2e-keychain-logins.js    # exits 1 on failure
  */
 "use strict";
@@ -75,18 +77,22 @@ if (process.argv[2] === "-i") {
 process.exit(run(process.argv.slice(2)));
 `, { mode: 0o755 });
 
+// A file of some other tool's, outside the work dir, that a stray CREDS_FILE names.
+const OTHER = path.join(SANDBOX, "other-tool-credentials.json");
+fs.writeFileSync(OTHER, JSON.stringify({ hostinger: { token: "not-the-harness" } }));
 const ENV = {
 	...process.env,
-	PATH: `${BIN}${path.delimiter}${process.env.PATH}`,
+	E2E_SECURITY_BIN: path.join(BIN, "security"),
 	FAKE_KEYCHAIN: STORE,
 	FAKE_KEYCHAIN_LOG: ARGV_LOG,
 	E2E_WORK_DIR: WORK,
 	APP_DIR: ROOT,
 	MAIN_CHECKOUT: ROOT,
 	SOURCE_DB: path.join(SANDBOX, "source.db"),
+	CREDS_FILE: OTHER,
 };
-for (const k of ["LOGINS_FILE", "CREDS_FILE", "E2E_KEYCHAIN_SERVICE"]) delete ENV[k];
-Object.assign(process.env, { PATH: ENV.PATH, FAKE_KEYCHAIN: STORE, FAKE_KEYCHAIN_LOG: ARGV_LOG });
+for (const k of ["LOGINS_FILE", "E2E_KEYCHAIN_SERVICE"]) delete ENV[k];
+Object.assign(process.env, { E2E_SECURITY_BIN: ENV.E2E_SECURITY_BIN, FAKE_KEYCHAIN: STORE, FAKE_KEYCHAIN_LOG: ARGV_LOG });
 for (const k of ["LOGINS_FILE", "CREDS_FILE", "E2E_KEYCHAIN_SERVICE"]) delete process.env[k];
 
 const Database = require("better-sqlite3");
@@ -119,10 +125,17 @@ const ROLES = ["superAdmin", "driver", "investor", "investor2", "dispatcher"];
 
 console.log("§1 setup-db.cjs");
 const legacy = path.join(WORK, "creds.json");
+const legacyStaging = path.join(WORK, "creds-staging.json");
+const notHarness = path.join(WORK, "creds-notes.json");
 fs.writeFileSync(legacy, JSON.stringify({ superAdmin: { username: "super_admin", password: "old-file-password-123456" } }), { mode: 0o600 });
+fs.writeFileSync(legacyStaging, JSON.stringify({ superAdmin: { username: "e2e_playwright", password: "old-staging-password-1234" } }), { mode: 0o600 });
+fs.writeFileSync(notHarness, JSON.stringify({ note: "not a login file" }));
 const s1 = node("setup-db.cjs", [path.join(WORK, "qa.db")]);
 check(s1.status === 0, "setup-db.cjs makes a copy", `${s1.status} ${(s1.stderr || "").slice(0, 300)}`);
-check(!fs.existsSync(legacy) && /deleted .*creds\.json/.test(s1.stdout), "…deleting the old creds.json, which held passwords", s1.stdout.slice(0, 200));
+check(!fs.existsSync(legacy) && !fs.existsSync(legacyStaging) && /deleted .*creds\.json/.test(s1.stdout) && /deleted .*creds-staging\.json/.test(s1.stdout),
+	"…deleting the old creds files in the work dir, which held passwords", s1.stdout.slice(0, 300));
+check(fs.existsSync(OTHER) && fs.existsSync(notHarness) && /left in place: .*other-tool-credentials\.json/.test(s1.stdout),
+	"…and leaving alone what is not one: a file of another tool's that CREDS_FILE names, a creds*.json without a login", s1.stdout.slice(0, 300));
 const items = store().filter((x) => x.s === "logisx-e2e-local");
 const passwords = items.map((x) => x.w);
 check(JSON.stringify(items.map((x) => x.a).sort()) === JSON.stringify([...ROLES].sort()) && passwords.every((p) => /^[A-Za-z0-9_-]{24}$/.test(p)),
@@ -167,6 +180,12 @@ keychain.storePassword({ service: "logisx-staging", account: "e2e_playwright" },
 const staging = path.join(WORK, "logins-staging.json");
 fs.writeFileSync(staging, JSON.stringify({ superAdmin: { username: "e2e_playwright", keychain: { service: "logisx-staging" } } }));
 check(keychain.loadLogins(staging).superAdmin.password === "StagingPw-abcdefghijklmnop", "an entry may name its own Keychain item by service (a staging login)", "");
+const foreign = path.join(WORK, "logins-foreign.json");
+fs.writeFileSync(foreign, JSON.stringify({ superAdmin: { username: "x", keychain: { service: "some-other-app" } } }));
+let foreignMsg = "", foreignStore = "";
+try { keychain.loadLogins(foreign); } catch (e) { foreignMsg = e.message; }
+try { keychain.storePassword({ service: "some-other-app", account: "x" }, "abcdefghijklmnopqrstuvwx"); } catch (e) { foreignStore = e.message; }
+check(/only logisx-/.test(foreignMsg) && /only logisx-/.test(foreignStore), "the harness reads and writes only logisx-… Keychain items", `${foreignMsg} | ${foreignStore}`);
 
 fs.rmSync(SANDBOX, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);

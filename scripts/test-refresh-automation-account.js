@@ -134,6 +134,13 @@ console.log("§2 not carried");
 		r.code === 0 && !!got && got.password_hash !== HASH && got.password_hash !== priorHash("prodname") && /WARNING: .*e2e_playwright/.test(r.out),
 		r.code === 0 ? "" : r.out.slice(-300));
 
+	const prodWithVariant = path.join(ROOT, "snapshot-with-variant.db");
+	makeDb(prodWithVariant, [...PROD, [9, " E2E_Playwright", "Super Admin", priorHash("prodvariant")]]);
+	const dirV = target("snapshot-has-variant", [[588, NAME, "Super Admin", HASH, 0]]);
+	const rV = refresh(dirV, prodWithVariant);
+	check("…in any case or spacing (sign-in matches the name that way)",
+		rV.code === 0 && row(path.join(dirV, "app.db"), NAME) === null && /WARNING: .*e2e_playwright/.test(rV.out), rV.code === 0 ? "" : rV.out.slice(-300));
+
 	const dir2 = target("not-admin", [[588, NAME, "Driver", HASH, 0]]);
 	const r2 = refresh(dir2, snapshot);
 	check("when it is not a Super Admin in the database being replaced, it is not carried, and the refresh says so",

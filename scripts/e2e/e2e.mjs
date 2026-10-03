@@ -4400,7 +4400,7 @@ async function openMonth(page, month) {
 }
 async function payDeductionSpacingCase(page) {
   const title = 'Financials → the current month (else the previous one, while open) → Driver Pay: a percentage-paid driver\'s Pay, before and after a Fuel expense is planted under their name with its space doubled'
-  const expected = 'Their Pay drops by the planted amount × their percentage (±$1: the page shows whole dollars); the month\'s Fuel Spend rises by the planted amount (the control: the receipt counts in the month)'
+  const expected = 'Their Pay drops by the planted amount × their percentage (±$1); the month\'s Fuel Spend rises by the planted amount (the control: the receipt counts in the month)'
   if (!db) return record({ step: 'E2', title, expected, observed: skipWhy(), verdict: 'SKIP', shot: '' })
   // The current month, and the previous one while it is not finalized (early in a
   // month, no driver may have revenue in it yet).

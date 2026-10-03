@@ -66,7 +66,11 @@ const APP_DIR = paths.appDir();
 const LOGINS_FILE = keychain.loginsFile(WORK);
 if (SRC_DB === destAbs) fail("refusing: the destination is the source database");
 console.log(`work dir: ${WORK}`);
-for (const f of keychain.removeLegacyCreds(WORK)) console.log(`deleted ${f} (it held passwords; they live in the Keychain now)`);
+{
+	const legacy = keychain.removeLegacyCreds(WORK);
+	for (const f of legacy.removed) console.log(`deleted ${f} (it held passwords; they live in the Keychain now)`);
+	for (const f of legacy.left) console.log(`left in place: ${f} (not the harness's old creds file in the work dir)`);
+}
 
 function randomPassword() {
 	// 24 url-safe chars, >= 16 as the reset script requires.

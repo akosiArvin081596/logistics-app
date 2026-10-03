@@ -35,7 +35,7 @@
 // has open (a server booted on it plants nothing: stop it first), and a DB that
 // already holds B1's row (--force replaces it; --remove deletes it).
 //
-// Env: E2E_WORK_DIR, CREDS_FILE, APP_DIR (see paths.cjs and setup-db.cjs).
+// Env: E2E_WORK_DIR, LOGINS_FILE, APP_DIR (see paths.cjs and setup-db.cjs).
 "use strict";
 const path = require("path");
 const fs = require("fs");

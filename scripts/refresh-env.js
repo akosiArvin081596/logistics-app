@@ -1555,7 +1555,8 @@ function carryAutomationAccounts(db, prevPath) {
 				warn(`'${name}' in the database being replaced has no bcrypt password hash — not kept.`);
 				continue;
 			}
-			if (db.prepare("SELECT 1 FROM users WHERE username = ?").get(name)) {
+			// Any case or spacing of the name: sign-in matches it that way.
+			if (db.prepare("SELECT 1 FROM users WHERE LOWER(TRIM(username)) = LOWER(?)").get(name)) {
 				warn(`the snapshot has an account named '${name}'; it keeps the refresh's random password — the automation account was not kept.`);
 				continue;
 			}
