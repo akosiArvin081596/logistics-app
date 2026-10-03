@@ -52,6 +52,10 @@
  *      job; test-deploy-live.js §14 runs that), and the rollback fails. §7
  *      pins the shared restart block byte-identical, with nothing marked
  *      started before its gate.
+ *   §16 THE INSTALL LEAVES THE LOCKFILES ALONE. The deploy and the rollback
+ *      each install once, with npm_config_save=false, and that line, run for
+ *      real (offline), leaves a nested client lockfile as committed while the
+ *      bare command rewrites it.
  *
  * The verified-deploy record is tested by scripts/test-deploy-record.js (§12),
  * and the started mark, the LIVE commit and the vps-deploy action by
@@ -448,6 +452,43 @@ function probePins() {
 	}
 	ok(REAL.deploy.split(DB_PROBE).length - 1 === 2 && REAL.rollback.split(DB_PROBE).length - 1 === 1,
 		"§9 the deploy probes before and after its rebuild, the rollback once — all with the same text the mutants swap");
+}
+
+// ─────────────────────────────── §16 the install leaves the lockfiles alone
+// The root install's postinstall runs `npm install` in client/, and the box's
+// npm rewrote client/package-lock.json on every deploy, leaving the server
+// checkouts modified. Each script's install line is run for real with the npm
+// on PATH, offline, in a root + client/ layout whose client lockfile is valid
+// but not in npm's own layout, so any write to it shows. The bare command is
+// the control: it must rewrite the file, or this check proves nothing.
+function installPins() {
+	const INSTALL = /^\s*(?:npm_config_\w+=\S+\s+)*npm\s+(?:install|i|ci)\b/;
+	const lockAfter = (cmd) => {
+		const d = fs.mkdtempSync(path.join(T, "install-"));
+		fs.mkdirSync(path.join(d, "client"));
+		fs.writeFileSync(path.join(d, "package.json"),
+			JSON.stringify({ name: "root", version: "1.0.0", scripts: { postinstall: "cd client && npm install --no-audit --no-fund" } }));
+		fs.writeFileSync(path.join(d, "client", "package.json"), JSON.stringify({ name: "client", version: "1.0.0" }));
+		const lock = JSON.stringify({ name: "client", version: "1.0.0", lockfileVersion: 3, requires: true, packages: { "": { name: "client", version: "1.0.0" } } });
+		fs.writeFileSync(path.join(d, "client", "package-lock.json"), lock);
+		const r = spawnSync("sh", ["-c", cmd.replace(/\s*\|\|.*$/, "")], {
+			cwd: d, encoding: "utf8", timeout: 60000,
+			env: { ...process.env, npm_config_offline: "true", npm_config_update_notifier: "false" },
+		});
+		return { code: r.status, rewritten: fs.readFileSync(path.join(d, "client", "package-lock.json"), "utf8") !== lock };
+	};
+	const control = lockAfter("npm install --silent --no-audit --no-fund");
+	ok(control.code === 0 && control.rewritten,
+		`§16 control: a bare npm install rewrites the client lockfile through the postinstall (code ${control.code}, rewritten ${control.rewritten})`);
+	for (const [name, text] of [["remote-deploy.sh", REAL.deploy], ["remote-rollback.sh", REAL.rollback]]) {
+		const installs = text.split("\n").filter((l) => !/^\s*#/.test(l) && INSTALL.test(l));
+		ok(installs.length === 1 && /^\s*npm_config_save=false npm install\b/.test(installs[0]),
+			`§16 ${name} installs once, with npm_config_save=false (got ${JSON.stringify(installs.map((l) => l.trim()))})`);
+		if (installs.length !== 1) continue;
+		const run = lockAfter(installs[0].trim());
+		ok(run.code === 0 && !run.rewritten,
+			`§16 ${name}'s install line leaves the client lockfile as committed (code ${run.code}, rewritten ${run.rewritten})`);
+	}
 }
 
 // ───────────────────────────────────────── §6 runner-side ssh helpers
@@ -853,6 +894,7 @@ function exitScannerSelfCheck() {
 	sshScenarios();
 	sourcePins();
 	probePins();
+	installPins();
 	record(smokeLogPins(SMOKE));
 	smokeStaticPins();
 	exitScannerSelfCheck();

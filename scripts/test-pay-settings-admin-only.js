@@ -133,7 +133,7 @@ function liftConst(head, close = null) {
 
 const HEADS = {
 	dirGet: 'app.get("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (req, res) => {',
-	dirPost: 'app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (req, res) => {',
+	dirPost: 'app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), async (req, res) => {',
 	dirPut: 'app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), (req, res) => {',
 	truckPost: 'app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), async (req, res) => {',
 	truckPut: 'app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req, res) => {',
@@ -188,7 +188,10 @@ const PIECES = {
 		liftFunction("assignDriverToTruck"),
 		liftFunction("syncOpenCarrierPairing"),
 	].join("\n"),
-	directory: [liftConst("const DIRECTORY_PERIOD_COLUMNS = "), liftFunction("directoryChangedColumns")].join("\n"),
+	directory: [
+		liftConst("const DIRECTORY_PERIOD_COLUMNS = "), liftFunction("directoryChangedColumns"),
+		liftConst("const DIRECTORY_DEFAULT_STRUCT = "), liftFunction("directoryDefaultRow"),
+	].join("\n"),
 	// The pay fields both directory routes read (§1c).
 	directoryPay: liftFunction("directoryPayValue"),
 	truckParse: [
@@ -220,7 +223,7 @@ const MODULE_EXPORTS = [
 	"syncDriverToCarrierSheet", "assignDriverToTruck",
 	"directoryChangedColumns", "DRIVER_PAY_DAILY_MAX", "parseDriverPayDaily", "parseInServiceDate", "parseRetiredAt",
 	"parseAdminFeePct", "truckMonthlyFixed", "TRUCK_AMOUNT_FIELDS", "parseTruckAmounts", "parseUnitNumber", "isUnitNumberTaken",
-	"directoryPayValue",
+	"directoryPayValue", "directoryDefaultRow",
 ];
 function buildModule(db, src = {}) {
 	const s = { ...PIECES, ...src };
@@ -389,6 +392,7 @@ function mountAll(db, { routes = {}, moduleSrc = {}, locked = false, duringActiv
 		...m,
 		...PHOTO_CHECK,
 		directoryEditLockBlockers: (rowBefore, changed) => blocked(changed),
+		directoryCreateLockBlockers: (row) => blocked(m.directoryChangedColumns(m.directoryDefaultRow(row.driver_name), row)),
 		truckEditLockBlockers: (truck, changed) => blocked(changed),
 		truckCreateLockBlockers: (truck) => { createLockSeen.push({ ...truck }); return { unreadable: false, blockers: [] }; },
 		// The create lock is stubbed, so the driver history it would be handed is
@@ -978,7 +982,11 @@ function sourcePins() {
 			`§6 ${label} /api/drivers-directory holds a sent daily rate to DRIVER_PAY_DAILY_MAX before the pay check`);
 	}
 
-	ok(!/\bawait\b/.test(dpo), "§6 POST /api/drivers-directory never awaits");
+	// One await (Job Tracking, for the month-end lock's driver history): after
+	// the pay check, and before the name check, the lock and the INSERT.
+	ok((dpo.match(/\bawait\b/g) || []).length === 1 && before(dpo, "refusePayEdit(", "await ") &&
+		["findDriverNameClash(insName", "directoryCreateLockBlockers(", "INSERT INTO drivers_directory"].every((s) => before(dpo, "await ", s)),
+		"§6 POST /api/drivers-directory awaits once, after its pay check and before its name check, month-end lock and INSERT");
 	ok(before(dpo, "refusePayEdit(", "INSERT INTO drivers_directory"), "§6 ...and refuses non-default terms before its INSERT");
 
 	const tp = code(ROUTES.truckPut);

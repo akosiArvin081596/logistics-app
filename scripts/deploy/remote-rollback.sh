@@ -119,7 +119,8 @@ export PATH
 # that serves beats none. But only a clean install and build may be recorded
 # as VERIFIED below, so every step's outcome is kept.
 BUILD_OK=1
-npm install --silent --no-audit --no-fund || BUILD_OK=0
+# Without writing the lockfiles back, as remote-deploy.sh installs.
+npm_config_save=false npm install --silent --no-audit --no-fund || BUILD_OK=0
 # ⚠️ OPEN a database: require() alone passes under an ABI-mismatched Node (the
 # native binding loads lazily). Same probe as remote-deploy.sh.
 node -e "new (require('better-sqlite3'))(':memory:').close()" >/dev/null 2>&1 || npm rebuild better-sqlite3 || BUILD_OK=0

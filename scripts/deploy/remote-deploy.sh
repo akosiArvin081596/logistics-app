@@ -199,13 +199,15 @@ fi
 
 # ── The load-bearing lockfile reset ──────────────────────────────────────────
 # The box's npm strips the `"libc": [...]` field a newer npm writes onto
-# optional platform deps, so EVERY install here leaves the lockfile modified.
+# optional platform deps, so a plain `npm install` leaves the lockfile modified.
 # `git pull --ff-only` refuses to overwrite a modified tracked file, so without
 # this the first PR touching it aborts the deploy.
 #
 # ⚠️ Moving the build to Node 22 did NOT fix this — it still happens under
 # npm 10.9.8, and got larger (15 deletions 2026-08-17 -> 81 on 2026-08-25).
-# Safe to discard: npm regenerates it below and nothing reads it at runtime.
+# Since 2026-10-03 the install below no longer writes the lockfiles
+# (npm_config_save=false), so this only clears drift a hand-run install or an
+# older deploy left behind. Safe to discard: nothing reads it at runtime.
 for f in client/package-lock.json package-lock.json; do
 	if ! git diff --quiet -- "$f" 2>/dev/null; then
 		echo "resetting npm-skew drift on $f"
@@ -368,7 +370,15 @@ echo "building with:   $(command -v node) $(node --version) / npm $(npm --versio
 echo "::endgroup::"
 
 echo "::group::install + build"
-npm install --silent --no-audit --no-fund
+# npm_config_save=false installs from the lockfiles without writing them back,
+# so the checkout stays clean. The root install's postinstall runs
+# `npm install` in client/, which rewrote client/package-lock.json on every
+# deploy (the libc drift above); the variable reaches that nested install
+# through the environment. `npm ci` would not stop it, because its postinstall
+# runs the same nested install, and it would delete node_modules under the
+# running process. scripts/test-deploy-scripts.js §16 pins this line in both
+# scripts.
+npm_config_save=false npm install --silent --no-audit --no-fund
 # npm tracks package VERSIONS, not ABI — it reports "up to date" and skips the
 # rebuild when only the Node major changed. Probe, then rebuild only on failure.
 #

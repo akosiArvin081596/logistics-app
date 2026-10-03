@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Unit assertions for check (6) of truckEditLockBlockers(): a truck's daily
+ * Unit assertions for check (6) of truckEditLockBlockers(), and check (2) of
+ * truckCreateLockBlockers() and truckDeleteLockBlockers(): a truck's daily
  * driver rate is guarded across finalized months only when the driver it prices
  * is paid by the day.
  *
@@ -119,6 +120,49 @@ S.everAssigned = 1;
 eq(rateBlock(truck("", 250), { driver_pay_daily: 900 }).map((b) => b.periods), [LOCKED], "a driverless truck that has carried a driver is still guarded");
 eq(rateBlock(truck("Pat Percent", 20), { driver_pay_daily: 900, assigned_driver: "" }).map((b) => b.periods), [LOCKED],
   "clearing a percentage-paid driver and changing the rate in one edit is still guarded");
+
+// ---------------------------------------------------------------------------
+// Truck create, check (2), and truck delete, check (2): the same rule
+// ---------------------------------------------------------------------------
+// A new truck's rate replaces the rate of the truck the driver held, and a
+// deleted truck's rate falls back to the driver's own, else $250. Both compared
+// the daily rates without looking at the pay type, as check (6) did.
+console.log("Truck create and truck delete — the daily rate against the driver's pay type");
+const cdHarness = [
+  extractFunction("resolveDailyRate"),
+  extractFunction("truckCreateLockBlockers"),
+  extractFunction("truckDeleteLockBlockers"),
+].join("\n") + "\nreturn { truckCreateLockBlockers, truckDeleteLockBlockers };";
+S.truckRates = {};  // normalized driver → the daily rates of the trucks naming them
+const cdStubs = {
+  ...stubs,
+  truckChargeFromMonth: () => "",
+  truckDailyRateCandidates: (name) => S.truckRates[norm(name)] || [undefined],
+  // No investor owns these trucks, so the driver-set checks find nothing to move.
+  investorsHoldingDriver: () => new Set(),
+  db: { prepare: () => ({ all: () => [] }) },
+};
+const cdNames = Object.keys(cdStubs);
+const CD = new Function(...cdNames, cdHarness)(...cdNames.map((n) => cdStubs[n]));
+S.truckRates = { "pat percent": [20], "fay fixed": [250], "owen own-rate": [250] };
+const NO_HISTORY_BOUND = undefined;
+const created = (driver, rate) => CD.truckCreateLockBlockers({
+  id: 0, unit_number: "LogisX-#400", status: "Active", owner_id: 0, assigned_driver: driver,
+  driver_pay_daily: rate, in_service_date: "", created_at: "2026-10-03 09:00:00",
+}, NO_HISTORY_BOUND).blockers.filter((b) => b.field === "driver_pay_daily");
+const deleted = (driver, rate) => CD.truckDeleteLockBlockers({ ...truck(driver, rate), owner_id: 0 })
+  .blockers.filter((b) => b.table === "trucks.driver_pay_daily");
+
+eq(created("Pat Percent", 300), [], "create: a new truck at $300/day for a percentage-paid driver is allowed");
+const createdFixed = created("Fay Fixed", 300);
+eq(createdFixed.map((b) => b.periods), [LOCKED], "create: the same truck for a fixed-pay driver is still refused over every finalized month they worked");
+ok(createdFixed[0] && /assigning Fay Fixed to a new truck at \$300\.00\/day replaces the \$250\.00\/day/.test(createdFixed[0].detail), "create: and its message is unchanged");
+eq(created("Owen Own-Rate", 300), [], "create: a driver whose own rate overrides the truck's is still let through");
+eq(deleted("Pat Percent", 20), [], "delete: deleting a percentage-paid driver's truck is allowed (its rate reached none of their pay)");
+const deletedFixed = deleted("Fay Fixed", 300);
+eq(deletedFixed.map((b) => b.periods), [LOCKED], "delete: deleting a fixed-pay driver's $300 truck is still refused (their pay reverts to $250)");
+ok(deletedFixed[0] && /Fay Fixed's pay reverts \$300\.00 → \$250\.00\/day/.test(deletedFixed[0].detail), "delete: and its message is unchanged");
+eq(deleted("Nora No-Row", 300).map((b) => b.periods), [LOCKED], "delete: a driver with no directory row is paid by the day, so still guarded");
 
 // ---------------------------------------------------------------------------
 // The two facts the skip rests on
