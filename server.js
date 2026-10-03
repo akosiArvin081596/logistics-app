@@ -26907,7 +26907,8 @@ function truckEditLockBlockers(truck, changed, opts = {}) {
 	// allowed through. A percentage-paid driver is paid a share of net revenue
 	// and no figure reads a daily rate for them, so the rate changes nothing for
 	// them either. Switching them to a day rate is guarded by the directory
-	// edit's own pay-structure check.
+	// edit's own pay-structure check. Moving a day-rate driver onto the truck
+	// afterwards is the unguarded assigned_driver change noted at the end.
 	//
 	// ⚠️ Resolved against the driver this edit LEAVES on the truck, and blocked
 	// even when that is nobody. Reading `truck.assigned_driver` alone made the

@@ -120,5 +120,48 @@ eq(rateBlock(truck("", 250), { driver_pay_daily: 900 }).map((b) => b.periods), [
 eq(rateBlock(truck("Pat Percent", 20), { driver_pay_daily: 900, assigned_driver: "" }).map((b) => b.periods), [LOCKED],
   "clearing a percentage-paid driver and changing the rate in one edit is still guarded");
 
+// ---------------------------------------------------------------------------
+// The two facts the skip rests on
+// ---------------------------------------------------------------------------
+console.log("Premise 1 — percentage pay never reads a daily rate (lib/financials-calc.js)");
+const { computeLedgerScope } = require("../lib/financials-calc");
+const ledgerPay = (rateFor, rateForDay) => computeLedgerScope({
+  rows: [{
+    loadId: "L1", driver: "pat percent", truckUnit: "logisx-#302", truckLabel: "LogisX-#302",
+    assignedDate: new Date(2026, 6, 6, 12), pickupDate: new Date(2026, 6, 6, 12), dropoffDate: new Date(2026, 6, 8, 12),
+    completed: true, amount: 3000, ownerId: 7, ownerCell: "7", rowIndex: 2,
+  }],
+  unitToVid: {}, eldByVid: {}, driverDayOverrides: {}, addDaysFor: () => false,
+  payStructures: { "pat percent": { payType: "percentage", payPercentage: 20, payDaily: 0 } },
+  expensesByDriverMonth: { "pat percent": { "2026-07": 500 } },
+  rateFor, rateForDay,
+  tripByMonth: {}, maintByMonth: {}, complianceByMonth: {}, receipts: [], maintRows: [], complianceRows: [],
+  fixedTrucks: [], truckChargedInMonth: () => false, truckMonthlyFixed: () => ({ total: 0 }),
+  isZeroActivityMonth: () => false, startMonthFor: (m) => m || "2026-07",
+  currentMonthKey: "2026-08", endDate: new Date(2026, 7, 1), ownerId: 7,
+}).items.filter((i) => i.kind === "driver_pay");
+const pay20 = ledgerPay(() => 20, null);
+eq(pay20.map((i) => [i.month, i.cents, i.payType]), [["2026-07", 50000, "percentage"]], "a percentage driver is paid 20% of net revenue ($3,000 − $500)");
+eq(ledgerPay(() => 900, null), pay20, "a different daily rate pays them exactly the same");
+eq(ledgerPay(() => 900, () => 900), pay20, "so does a different rate for each day (the dated-rates rule)");
+
+console.log("Premise 2 — switching them to a day rate is still guarded (directoryEditLockBlockers)");
+const dirHarness = [extractFunction("directoryPayStruct"), extractFunction("resolveDailyRate"), extractFunction("directoryEditLockBlockers")].join("\n") +
+  "\nreturn { directoryEditLockBlockers };";
+const dirStubs = {
+  periodLocksReadable: () => true,
+  lockedPeriodsDesc: () => LOCKED.slice().reverse(),
+  driverPayLockedMonths: stubs.driverPayLockedMonths,
+  normalizeDriverName: norm,
+  truckDailyRateCandidates: () => [250],
+  investorsHoldingDriver: () => [],
+  syncCarrierDriverHistory: () => {},
+};
+const dirNames = Object.keys(dirStubs);
+const D = new Function(...dirNames, dirHarness)(...dirNames.map((n) => dirStubs[n]));
+const patRow = { id: 1, driver_name: "Pat Percent", pay_type: "percentage", pay_percentage: 20, pay_daily: 0 };
+const toFixed = D.directoryEditLockBlockers(patRow, { pay_type: "fixed" }).blockers.filter((b) => b.field === "pay_type");
+eq(toFixed.map((b) => [b.from, b.to, b.periods]), [["percentage", "fixed", LOCKED]], "percentage → fixed is refused over every finalized month they worked");
+
 console.log(`\n${pass} passed, ${failures.length} failed`);
 if (failures.length) process.exit(1);
