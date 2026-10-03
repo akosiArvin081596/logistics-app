@@ -1175,7 +1175,8 @@ function logAuditRefusal(req, action, entity, entityId, details, code) {
 //   • every `*_failed` action — those record a write that already started.
 //   • every success action — the entire rest of the table.
 //   • ⚠️ EVERY PERIOD-GUARD REFUSAL ACTION, and this was decided per action, not
-//     as a batch. `update_driver_pay_blocked`, `delete_driver_blocked`,
+//     as a batch. `update_driver_pay_blocked`, `create_driver_pay_blocked`,
+//     `delete_driver_blocked`,
 //     `update_user_blocked`, `delete_user_blocked`, `create_truck_blocked`,
 //     `update_truck_blocked`, `delete_truck_blocked`, `driver_rename_blocked`,
 //     `delete_sheet_rows_blocked`, `delete_load_blocked`,
@@ -8287,7 +8288,7 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), asy
 				return periodBlockedResponse(req, res,
 					`Cannot add ${insName}`,
 					createLock.blockers,
-					"Add the driver on the default terms (fixed, the truck's rate) with no carrier, and set their terms once the affected periods are open — or reopen them first (POST /api/periods/:period/reopen records a reason).",
+					"A driver's pay structure has no per-month history, so these terms would reach the finalized months they worked. Reopen the affected periods first (POST /api/periods/:period/reopen records a reason).",
 					createAudit);
 			}
 		}
