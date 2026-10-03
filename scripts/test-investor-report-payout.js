@@ -132,7 +132,7 @@ function load(deps) {
 	return new Function("deps", "investorPayoutBasis", `
 		const { db, computeInvestorMonthlyEarnings, isLocked, periodWriteLocked, currentMonthKeyCT,
 			recordPayoutChange, getInvestorDriverSet, findCol, settlementGraceDays, periodPhase, graceEndsAt,
-			investorReportOptions } = deps;
+			investorReportOptions, payoutRules } = deps;
 		${NAMES.map((n) => SOURCES[n]).join("\n")}
 		return { ${NAMES.join(", ")} };
 	`)(deps, investorPayoutBasis);
@@ -209,6 +209,8 @@ function world({ locked = [] } = {}) {
 		periodPhase: () => "",
 		graceEndsAt: () => "",
 		investorReportOptions,
+		// The 2026-10 payout rules, as they ship: off.
+		payoutRules: () => ({ datedAttribution: false, datedRates: false, futureReceipts: false, frozenCarry: false }),
 	});
 	return { db, fns, calls, history };
 }
@@ -529,7 +531,7 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 	// ============================================= §9 fleet report at month end
 	section("§9 the fleet report at month end stops at Houston's month (the real monthly computation, a stubbed clock)");
 	{
-		const ME_NAMES = ["computeInvestorMonthlyEarnings", "gatherLedgerScopeFacts", "ledgerLoadRows", "computeLossCarryForward", "investorReportPayoutEntries",
+		const ME_NAMES = ["computeInvestorMonthlyEarnings", "gatherLedgerScopeFacts", "payoutRules", "ledgerLoadRows", "computeLossCarryForward", "investorReportPayoutEntries",
 			"summarizeReportPayout", "reportPayoutNote", "periodLabel", "findCol", "pickAddressColumn", "moneySheetDate",
 			"houstonDay", "normalizeDriverName", "driverNameForTotals", "isBuiltInPropertyName", "resolveInvestorSplitPct"];
 		const ME = Object.fromEntries(ME_NAMES.map((n) => [n, extractFn(n)]));
@@ -574,6 +576,8 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 				investorReportOptions,
 				investorPayoutBasis,
 				financialsCalc: require("../lib/financials-calc"),
+				PAYOUT_RULES_V2_ENABLED: false,
+				PAYOUT_RULE_KEYS: ["datedAttribution", "datedRates", "futureReceipts", "frozenCarry"],
 				payoutBasisContext: (ownerId) => { if (ownerId) throw new Error("the fleet report settles no owner"); return null; },
 			};
 			const names = Object.keys(deps);

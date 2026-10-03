@@ -5181,6 +5181,28 @@ db.exec(`
 // Off, every payout figure and every portal / payouts response is exactly what it
 // was before the basis table existed.
 const INVESTOR_LEASE_PAYOUTS_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.INVESTOR_LEASE_PAYOUTS_ENABLED ?? "").trim());
+// The 2026-10 payout rules, dormant until the owner approves them (product
+// decision: new payout logic ships behind a flag that is off in production).
+// Read through payoutRules(), the one place they are switched:
+//   datedAttribution  a blank-Owner-ID load belongs to the owner of the truck its
+//                     driver held on the load's date, not to whichever investor
+//                     the driver is paired with today (ended pairings included);
+//   datedRates        a day of driver pay is priced at the rates in effect that
+//                     day (pay_rate_history; the truck the driver held that day);
+//   futureReceipts    a receipt dated after the day it was submitted counts in
+//                     the month it was submitted, and that month's close books
+//                     it there (futureAwarePeriodExpr(), stampFutureReceipts());
+//   frozenCarry       the loss carried into an open month reads each closed month
+//                     at what it settled, never a recompute.
+// Off by default; `PAYOUT_RULES_V2_ENABLED=true` turns all four on. The dry run
+// (GET /api/admin/payout-rules/dry-run) compares them with every rule off.
+const PAYOUT_RULES_V2_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.PAYOUT_RULES_V2_ENABLED ?? "").trim());
+const PAYOUT_RULE_KEYS = ["datedAttribution", "datedRates", "futureReceipts", "frozenCarry"];
+function payoutRules(overrides = null) {
+	const out = {};
+	for (const k of PAYOUT_RULE_KEYS) out[k] = overrides && typeof overrides[k] === "boolean" ? overrides[k] : PAYOUT_RULES_V2_ENABLED;
+	return out;
+}
 // INVESTOR_LEASE_DOWNTIME / _PRORATE / _RETIREMENT, read once. A value that names
 // no setting falls back to the default with one warning here, at boot.
 const INVESTOR_LEASE_SETTINGS = investorPayoutBasis.readLeaseSettings(process.env, (msg) => console.warn(`[payout-basis] ${msg}`));
@@ -5317,6 +5339,26 @@ db.exec(`
 `);
 
 try { db.exec("ALTER TABLE financials_ledger_freezes ADD COLUMN released_at TEXT NOT NULL DEFAULT ''"); } catch {}
+// Driver pay rates as they were on each date, recorded from 2026-10 on. A
+// truck's daily driver rate (trucks.driver_pay_daily) and a driver's own rate
+// (drivers_directory.pay_daily) each get a row whenever they change
+// (recordPayRateChanges()), and one seed row, dated when recording began, for
+// every rate already set then. payRateAt() answers the rate in effect on a day;
+// for a day before recording began it is the seed (the rate in force when
+// recording started), the best that is known. Read only by the dated-rate payout
+// rule (payoutRules().datedRates), which ships switched off.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS pay_rate_history (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		subject TEXT NOT NULL CHECK(subject IN ('truck','driver')),
+		subject_key TEXT NOT NULL,
+		rate REAL NOT NULL,
+		effective_from TEXT NOT NULL,
+		source TEXT NOT NULL DEFAULT 'change'
+	)
+`);
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_pay_rate_history_subject ON pay_rate_history(subject, subject_key, effective_from)"); } catch {}
+
 // Small key/value settings an admin sets in the app. `financials.settings` is
 // the Financials cost lines that count in margin, the monthly overhead and the
 // depreciation years (lib/financials-report.js normalizeSettings()); Financials
@@ -8201,6 +8243,7 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (re
 				obj.Address || "", obj.PhoneNumber || "", obj.CellNumber || "", obj.Email || "",
 				obj.DOT || "", obj.MC || "", obj.Trucks || "", obj.Hazmat || "", obj.Rating || "",
 				obj.Status || "active", insPayType, insPayPct, insPayDaily);
+		recordPayRateChanges();
 		// Sync carrier-driver history on write (not on read). Fed the TRIMMED name,
 		// so the history row (getInvestorDriverSet leg 3) carries the same string
 		// the directory row does rather than the raw body value.
@@ -8386,6 +8429,7 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 				obj.Address || "", obj.PhoneNumber || "", obj.CellNumber || "", obj.Email || "",
 				obj.DOT || "", obj.MC || "", obj.Trucks || "", obj.Hazmat || "", obj.Rating || "",
 				nextStatus, writePay.pay_type, writePay.pay_percentage, writePay.pay_daily, id);
+		recordPayRateChanges();
 		// Sync carrier-driver history on write (not on read), under the name the
 		// row now carries.
 		if (writeName && nextCarrier) {
@@ -15730,6 +15774,118 @@ function getDriverPayStructures() {
 	return out;
 }
 
+// The pay rates as they stand: [subject, key, rate] for every truck, and for
+// each driver name its first directory row (the one pay reads,
+// getDriverPayStructures()).
+function currentPayRates() {
+	const out = [];
+	for (const t of db.prepare("SELECT id, driver_pay_daily AS rate FROM trucks").all()) out.push(["truck", String(t.id), Number(t.rate) || 0]);
+	const seen = new Set();
+	for (const d of db.prepare("SELECT driver_name, pay_daily AS rate FROM drivers_directory ORDER BY id").all()) {
+		const k = normalizeDriverName(d.driver_name);
+		if (!k || seen.has(k)) continue;
+		seen.add(k);
+		out.push(["driver", k, Math.max(0, Number(d.rate) || 0)]);
+	}
+	return out;
+}
+
+// Append a pay_rate_history row for every truck and driver rate that is new or
+// differs from its latest row (see the table). Cheap: two small tables. Called
+// right after each write that can set a rate (the truck and driver-directory
+// create and edit routes), so a change is dated the moment it is saved, and once
+// at boot to seed the history.
+function recordPayRateChanges() {
+	try {
+		const now = new Date().toISOString();
+		const latest = new Map();
+		for (const r of db.prepare("SELECT subject, subject_key, rate FROM pay_rate_history ORDER BY effective_from, id").all()) {
+			latest.set(`${r.subject}:${r.subject_key}`, Number(r.rate));
+		}
+		const ins = db.prepare("INSERT INTO pay_rate_history (subject, subject_key, rate, effective_from, source) VALUES (?, ?, ?, ?, ?)");
+		db.transaction(() => {
+			for (const [subject, key, rate] of currentPayRates()) {
+				const prev = latest.get(`${subject}:${key}`);
+				if (prev === undefined) ins.run(subject, key, rate, now, "seed");
+				else if (prev !== rate) ins.run(subject, key, rate, now, "change");
+			}
+		})();
+	} catch (e) { console.error("[pay-rate-history] not recorded:", e.message); }
+}
+
+// The rates in effect on a day: { at(subject, key, day) } → the latest rate whose
+// Houston day is on or before `day`; a day before recording began reads the
+// earliest row (the rate in force when recording started). Read-only: a rate
+// with no history yet counts for every day, and one that differs from its latest
+// row (saved by a path that did not record it) counts from today, both in memory.
+function loadPayRateIndex() {
+	const idx = new Map();
+	const latest = new Map();
+	for (const r of db.prepare("SELECT subject, subject_key, rate, effective_from FROM pay_rate_history ORDER BY effective_from, id").all()) {
+		const k = `${r.subject}:${r.subject_key}`;
+		if (!idx.has(k)) idx.set(k, []);
+		const d = new Date(r.effective_from);
+		idx.get(k).push({ day: isNaN(d) ? "" : houstonDay(d), rate: Number(r.rate) || 0 });
+		latest.set(k, Number(r.rate) || 0);
+	}
+	const today = houstonDay(new Date());
+	for (const [subject, key, rate] of currentPayRates()) {
+		const k = `${subject}:${key}`;
+		if (!idx.has(k)) idx.set(k, [{ day: "", rate }]);
+		else if (latest.get(k) !== rate) idx.get(k).push({ day: today, rate });
+	}
+	return {
+		at(subject, key, day) {
+			const list = idx.get(`${subject}:${key}`);
+			if (!list || !list.length) return null;
+			let rate = list[0].rate;
+			for (const x of list) { if (x.day && x.day <= day) rate = x.rate; else break; }
+			return rate;
+		},
+	};
+}
+
+// The month a receipt counts in under the futureReceipts rule: posted_period
+// when set; a receipt dated after the day it was submitted counts in the month
+// it was submitted while that month is open and its date's month is not closed;
+// otherwise its date's month (EXPENSE_PERIOD_EXPR). When a month closes under
+// the rule, its close books each receipt it counted this way
+// (stampFutureReceipts() sets posted_period). So a closed submission month
+// without that stamp settled the receipt by its date, and a closed date month
+// settled it there: either way the receipt stays where it settled, and a
+// reopened submission month never pulls it back.
+function futureAwarePeriodExpr() {
+	const submitted = "strftime('%Y-%m-%d', COALESCE(NULLIF(timestamp, ''), created_at))";
+	const closed = "(SELECT period FROM period_locks WHERE period_locks.status = 'locked')";
+	return `(CASE WHEN COALESCE(posted_period, '') != '' THEN posted_period
+		WHEN strftime('%Y-%m-%d', date) > ${submitted}
+			AND substr(${submitted}, 1, 7) NOT IN ${closed}
+			AND strftime('%Y-%m', date) NOT IN ${closed} THEN substr(${submitted}, 1, 7)
+		ELSE strftime('%Y-%m', COALESCE(NULLIF(date, ''), strftime('%Y-%m-%d', created_at))) END)`;
+}
+
+// Under the futureReceipts rule, a close books each receipt it counted in a
+// closing month for being dated after the day it was submitted: posted_period
+// is set to that month, so the receipt stays where it settled once the month
+// is closed. Runs inside the close's transaction, before the lock. Returns the
+// receipts booked, { id, period }.
+function stampFutureReceipts(periods) {
+	if (!periods.length) return [];
+	const submitted = "strftime('%Y-%m-%d', COALESCE(NULLIF(timestamp, ''), created_at))";
+	const ph = periods.map(() => "?").join(",");
+	// The receipts the rule's own expression counts in a closing month for
+	// being dated after their submission day (not those booked by date).
+	const rows = db.prepare(
+		`SELECT id, substr(${submitted}, 1, 7) AS period FROM expenses
+		 WHERE COALESCE(posted_period, '') = '' AND ${EXPENSE_PNL_FILTER}
+		   AND strftime('%Y-%m-%d', date) > ${submitted} AND ${futureAwarePeriodExpr()} IN (${ph})
+		   AND substr(${submitted}, 1, 7) = ${futureAwarePeriodExpr()}`
+	).all(...periods);
+	const book = db.prepare("UPDATE expenses SET posted_period = ? WHERE id = ? AND COALESCE(posted_period, '') = ''");
+	for (const r of rows) book.run(r.period, r.id);
+	return rows;
+}
+
 // Resolve a fixed-pay driver's daily rate: per-driver override > per-truck rate
 // > $250 default. drivers_directory.pay_daily wins when set; else the assigned
 // truck's trucks.driver_pay_daily; else the legacy $250. Keep every pay path
@@ -16039,9 +16195,9 @@ function foldExpenseTotalsByDriver(rows) {
 // old substr(date,1,7) had no COALESCE to created_at, so a blank-date Fuel
 // receipt counted as a company trip expense but never reduced a percentage
 // driver's pay.
-function getDeductibleExpensesByDriverMonth() {
+function getDeductibleExpensesByDriverMonth(periodExpr = EXPENSE_PERIOD_EXPR) {
 	const rows = db.prepare(`
-		SELECT LOWER(driver) AS name_lc, ${EXPENSE_PERIOD_EXPR} AS month, SUM(amount) AS total
+		SELECT LOWER(driver) AS name_lc, ${periodExpr} AS month, SUM(amount) AS total
 		FROM expenses
 		WHERE type IN ('Fuel', 'Maintenance') AND ${EXPENSE_PNL_FILTER}
 		GROUP BY LOWER(driver), month
@@ -27781,6 +27937,7 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		logAudit(req, "create_truck", "truck", String(result.lastInsertRowid),
 			`Created truck ${auditText(unit, 100)} (${validStatus}), in-service date: ${inServiceCreate || "unset (falls back to created_at)"}, ` +
 			`fixed costs: ${createMonthlyFixed}${createFuel}`);
+		recordPayRateChanges();
 		notifyChange("trucks");
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {
@@ -28142,6 +28299,7 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 				if (nextAssignedDriver !== undefined) assignDriverToTruck(id, nextAssignedDriver);
 				db.prepare(`UPDATE trucks SET ${updates.join(", ")} WHERE id = ?`).run(...params);
 			})();
+			recordPayRateChanges();
 		} catch (err) {
 			if (isUnitNumberTaken(err)) return res.status(400).json({ error: "Unit number already exists" });
 			throw err;
@@ -39973,7 +40131,13 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		const naturalPeriod = String(date || "").slice(0, 7);
 		const openPeriod = currentMonthKeyCT();
 		const lockUnreadable = !periodLocksReadable();
-		const postedPeriod = naturalPeriod && naturalPeriod !== openPeriod && periodWriteLocked(naturalPeriod) ? openPeriod : "";
+		// The futureReceipts payout rule (payoutRules(), off unless switched on): a
+		// receipt dated after today books to the month it is submitted in, this
+		// open month, and is recorded for review. Its `date` stays as entered.
+		const futureDated = payoutRules().futureReceipts && /^\d{4}-\d{2}-\d{2}/.test(String(date || "")) && String(date).slice(0, 10) > todayKeyCT();
+		const postedPeriod = futureDated
+			? openPeriod
+			: (naturalPeriod && naturalPeriod !== openPeriod && periodWriteLocked(naturalPeriod) ? openPeriod : "");
 
 		// ⚠️ THE CONSTRAINT IS THE GUARD; THE SELECT ABOVE IS ONLY THE NICE MESSAGE.
 		// idx_expenses_receipt_hash is UNIQUE over receipt_hash <> '' (see the
@@ -40057,7 +40221,10 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		// Tell the caller when a receipt was redirected, so the UI can say
 		// "March is closed — booked to August" rather than silently moving money
 		// between months. Also on the audit trail: this is a settlement decision.
-		if (postedPeriod) {
+		if (futureDated) {
+			logAudit(req, "receipt_future_dated", "expense", String(result.lastInsertRowid),
+				`Receipt dated ${date}, after the day it was submitted (${todayKeyCT()}): booked to ${postedPeriod}; for review ($${parsedAmount}, ${driver})`);
+		} else if (postedPeriod) {
 			logAudit(req, "expense_posted_to_open_period", "expense", String(result.lastInsertRowid),
 				`Receipt dated ${date} — ${naturalPeriod} ${lockUnreadable
 					// Never say "finalized" about a month we could not look up. The
@@ -40079,7 +40246,8 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 			// unreadable case reports the redirect without the claim; the client's
 			// `periodClosed && postedPeriod` test then falls through to its plain
 			// confirmation rather than printing something false.
-			...(postedPeriod ? { postedPeriod, naturalPeriod, periodClosed: !lockUnreadable, periodLockUnreadable: lockUnreadable } : {}),
+			...(postedPeriod ? { postedPeriod, naturalPeriod, periodClosed: !futureDated && !lockUnreadable, periodLockUnreadable: !futureDated && lockUnreadable } : {}),
+			...(futureDated ? { futureDated: true } : {}),
 		});
 	} catch (error) {
 		console.error("Error logging expense:", error.message);
@@ -47662,7 +47830,7 @@ function buildHaulTruckResolver() {
 // the day. Noon Central stands for the day.
 function buildHeldTruckIndex() {
 	const held = buildHaulTruckResolver();
-	const trucks = new Map(db.prepare("SELECT id, owner_id, driver_pay_daily FROM trucks").all().map((t) => [t.id, t]));
+	const trucks = new Map(db.prepare("SELECT id, unit_number, owner_id, driver_pay_daily FROM trucks").all().map((t) => [t.id, t]));
 	const truckAt = (driver, day) => {
 		if (!driver || !day) return null;
 		const h = held.forDriverAt(driver, Date.parse(`${day}T17:00:00Z`));
@@ -50359,7 +50527,11 @@ function truckBilledMonthCount(t, now) {
 // back, an unreadable Date included: an unreadable pickup is NOT a blank one
 // (the window must not fall back to the Assigned date for it), and an
 // unreadable drop-off yields no days, exactly as before.
-function ledgerLoadRows(jobTracking, { investorDriverSet, investorOwnerId }) {
+//
+// `ownerOfBlankRow(r)`, given (the datedAttribution payout rule), decides a row
+// with a blank Owner ID instead of the driver set: the owner of the truck the
+// row's driver held on the load's date.
+function ledgerLoadRows(jobTracking, { investorDriverSet, investorOwnerId, ownerOfBlankRow = null }) {
 	const data = excludeDroppedLoads(jobTracking.data, jobTracking.headers);
 	const headers = jobTracking.headers;
 	// Column resolution — same regexes as GET /api/investor.
@@ -50386,6 +50558,7 @@ function ledgerLoadRows(jobTracking, { investorDriverSet, investorOwnerId }) {
 				const hasOwnerIdValue = raw !== undefined && raw !== null && String(raw).trim() !== "";
 				if (hasOwnerIdValue) return (parseInt(raw) || 0) === investorOwnerId;
 			}
+			if (ownerOfBlankRow) return ownerOfBlankRow(r) === investorOwnerId;
 			const driver = driverCol ? (driverNameForTotals(r[driverCol]) || "").trim().toLowerCase() : "";
 			return driver && investorDriverSet.has(driver);
 		})
@@ -50422,10 +50595,26 @@ function ledgerLoadRows(jobTracking, { investorDriverSet, investorOwnerId }) {
 // Everything computeLedgerScope() needs for one scope, read the way the payout
 // ledger has always read it. investorDriverSet null = the fleet (Super Admin);
 // otherwise the investor `investorOwnerId` (whose trucks are `user.id`'s).
-async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, investorOwnerId, detailForMonth = null, jobTracking: snapshot = null }) {
+async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, investorOwnerId, detailForMonth = null, jobTracking: snapshot = null, rules = payoutRules() }) {
 	let jobTracking = snapshot;
 	if (!jobTracking) jobTracking = await getJobTrackingCached();
-	const { rows, headers } = ledgerLoadRows(jobTracking, { investorDriverSet, investorOwnerId });
+	// The truck each driver held on a day: the datedAttribution and datedRates
+	// payout rules read it (payoutRules(); both off unless switched on).
+	const heldTrucks = rules.datedAttribution || rules.datedRates ? buildHeldTruckIndex() : null;
+	const dayOf = (d) => (d && !isNaN(d) ? financialsCalc.fmtDate(d) : "");
+	const ownerOfBlankRow = rules.datedAttribution && investorDriverSet
+		? (() => {
+			const driverCol = findCol(jobTracking.headers, /^driver$/i);
+			const pickupCol = findCol(jobTracking.headers, /pickup.*appo|pickup.*date/i);
+			const dateCol = findCol(jobTracking.headers, /status.*update.*date|completion.*date|assigned.*date/i) || findCol(jobTracking.headers, /date/i);
+			return (r) => {
+				const driver = driverCol ? normalizeDriverName(driverNameForTotals(r[driverCol])) : "";
+				const day = dayOf(moneySheetDate(pickupCol ? r[pickupCol] : null)) || dayOf(moneySheetDate(dateCol ? r[dateCol] : null));
+				return heldTrucks.ownerAt(driver, day);
+			};
+		})()
+		: null;
+	const { rows, headers } = ledgerLoadRows(jobTracking, { investorDriverSet, investorOwnerId, ownerOfBlankRow });
 	// Reuse the dashboard's address-column picker (skips lat/lng/date/appt
 	// columns) so the drill-down route text never grabs a coordinate.
 	const jtPickupCol = pickAddressColumn(headers, /origin|pickup|shipper/i);
@@ -50468,18 +50657,21 @@ async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, i
 	// a second copy of this predicate is how they come to disagree. The totals
 	// stay SQL SUMs (the settlement figure is the SUM as SQLite adds it); the
 	// receipts beside them are the same rows, for the line items.
+	// The month each receipt counts in: EXPENSE_PERIOD_EXPR, or under the
+	// futureReceipts payout rule the submitted month for one dated in the future.
+	const periodExpr = rules.futureReceipts ? futureAwarePeriodExpr() : EXPENSE_PERIOD_EXPR;
 	const tripByMonth = {};
-	const receiptCols = `id, ${EXPENSE_PERIOD_EXPR} AS month, COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at)) AS day, amount, type, truck_unit AS truck, driver, load_id AS loadId, status`;
+	const receiptCols = `id, ${periodExpr} AS month, COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at)) AS day, amount, type, truck_unit AS truck, driver, load_id AS loadId, status`;
 	let receipts = [];
 	const investorExpenseWindows = investorOwnerId ? getInvestorDriverMonthWindows(investorOwnerId) : null;
 	if (investorOwnerId) {
-		const scope = investorExpenseScopeSql(investorOwnerId, investorExpenseWindows, EXPENSE_PERIOD_EXPR);
+		const scope = investorExpenseScopeSql(investorOwnerId, investorExpenseWindows, periodExpr);
 		db.prepare(
-			`SELECT ${EXPENSE_PERIOD_EXPR} AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} GROUP BY m`
+			`SELECT ${periodExpr} AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} GROUP BY m`
 		).all(...scope.params).forEach(r => { if (r.m) tripByMonth[r.m] = r.t; });
 		receipts = db.prepare(`SELECT ${receiptCols} FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} ORDER BY id`).all(...scope.params);
 	} else if (isSuperAdmin) {
-		db.prepare(`SELECT ${EXPENSE_PERIOD_EXPR} AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m`)
+		db.prepare(`SELECT ${periodExpr} AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m`)
 			.all().forEach(r => { if (r.m) tripByMonth[r.m] = r.t; });
 		receipts = db.prepare(`SELECT ${receiptCols} FROM expenses WHERE ${EXPENSE_PNL_FILTER} ORDER BY id`).all();
 	}
@@ -50493,7 +50685,7 @@ async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, i
 	let tripExpenseItems = [];
 	if (detailForMonth) {
 		const expCols = "COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at)) AS date, type, description, amount, driver, truck_unit AS truck, location_city AS city, location_state AS state, posted_period AS postedPeriod";
-		const monthExpr = EXPENSE_PERIOD_EXPR;
+		const monthExpr = periodExpr;
 		if (investorOwnerId) {
 			const scope = investorExpenseScopeSql(investorOwnerId, investorExpenseWindows, monthExpr);
 			tripExpenseItems = db.prepare(`SELECT ${expCols} FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} AND ${monthExpr} = ? ORDER BY 1`).all(...scope.params, detailForMonth);
@@ -50559,10 +50751,28 @@ async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, i
 		unitToVid,
 		eldByVid,
 		driverDayOverrides: getAllExcludedDriverDays(),
-		addDaysFor: (drv) => !investorDriverSet || investorDriverSet.has(drv),
+		// An admin-added day counts for the driver's investor: by the driver set,
+		// or under datedAttribution by the truck the driver held that day.
+		addDaysFor: rules.datedAttribution && investorDriverSet
+			? (drv, day) => heldTrucks.ownerAt(normalizeDriverName(drv), day) === investorOwnerId
+			: (drv) => !investorDriverSet || investorDriverSet.has(drv),
 		payStructures: getDriverPayStructures(),
-		expensesByDriverMonth: getDeductibleExpensesByDriverMonth(),
+		expensesByDriverMonth: getDeductibleExpensesByDriverMonth(periodExpr),
 		rateFor: (driver, struct) => resolveDailyRate(struct.payDaily, trucksByDriver[driver]),
+		// Under datedRates, each day's rate: the driver's own rate in effect that
+		// day, else the rate of the truck the driver held that day as it stood then
+		// (else the truck rate the ledger reads today, else $250).
+		rateForDay: rules.datedRates
+			? (() => {
+				const rates = loadPayRateIndex();
+				return (driver, struct, day) => {
+					const own = rates.at("driver", driver, day);
+					const truck = heldTrucks.truckAt(driver, day);
+					const truckRate = truck ? rates.at("truck", String(truck.id), day) ?? (Number(truck.driver_pay_daily) || 0) : trucksByDriver[driver];
+					return resolveDailyRate(own == null ? struct.payDaily : own, truckRate);
+				};
+			})()
+			: null,
 		tripByMonth, maintByMonth, complianceByMonth, receipts, maintRows, complianceRows, tripExpenseItems,
 		fixedTrucks, truckChargedInMonth, truckMonthlyFixed,
 		isZeroActivityMonth: investorPayoutBasis.isZeroActivityMonth,
@@ -50592,17 +50802,56 @@ async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, i
 // The math is lib/financials-calc.js computeLedgerScope(); this gathers its
 // facts and settles the months it returns. `items` are the dated line items
 // behind those months (see the module), for Financials and its groupings.
-async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriverSet, investorOwnerId, config, detailForMonth = null }) {
+async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriverSet, investorOwnerId, config, detailForMonth = null, rules = payoutRules() }) {
 	const investorSplit = resolveInvestorSplitPct(config) / 100;
-	const facts = await gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, investorOwnerId, detailForMonth });
+	const facts = await gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, investorOwnerId, detailForMonth, rules });
 	const { months, items, detail } = financialsCalc.computeLedgerScope(facts);
 	if (detail) detail.tripExpenseItems = facts.tripExpenseItems;
+
+	// frozenCarry (payoutRules()): a closed month enters the settlement at what it
+	// settled at, so a recompute of a closed month can never move the loss
+	// carried into an open one:
+	//   - its figures and its split share are its row's frozen breakdown (a
+	//     share settled under an earlier split stays that share);
+	//   - a closed month the investor has no payout row for settled nothing, so
+	//     it carries nothing;
+	//   - a closed month the recompute no longer reaches (its loads now belong
+	//     elsewhere) still carries what it settled.
+	// A closed month settled before breakdowns were recorded keeps its recompute.
+	let frozenShares = null;
+	if (rules.frozenCarry && investorOwnerId && periodLocksReadable()) {
+		const locked = new Set(db.prepare("SELECT period FROM period_locks WHERE period_locks.status = 'locked'").all().map((r) => r.period));
+		const breakdownOf = new Map();
+		for (const r of db.prepare("SELECT period, finalized_breakdown FROM investor_payouts WHERE owner_id = ?").all(investorOwnerId)) {
+			if (!locked.has(r.period)) continue;
+			let b = null;
+			try { b = JSON.parse(r.finalized_breakdown || "null"); } catch { b = null; }
+			breakdownOf.set(r.period, b && typeof b === "object" ? b : null);
+		}
+		const reached = new Set(months.map((m) => m.month));
+		for (const [period, b] of breakdownOf) {
+			if (b && !reached.has(period)) {
+				months.push({ month: period, zeroActivity: false, revenue: 0, driverPay: 0, fixedCosts: 0, tripExpenses: 0, maintFundCost: 0, complianceCost: 0, netProfit: 0 });
+			}
+		}
+		months.sort((x, y) => (x.month < y.month ? -1 : x.month > y.month ? 1 : 0));
+		frozenShares = new Map();
+		for (const m of months) {
+			if (!locked.has(m.month)) continue;
+			if (!breakdownOf.has(m.month)) { frozenShares.set(m.month, 0); continue; }
+			const b = breakdownOf.get(m.month);
+			if (!b) continue;
+			for (const k of financialsCalc.SETTLED_FIGURES) if (Number.isFinite(Number(b[k]))) m[k] = Number(b[k]);
+			if (Number.isFinite(Number(b.netProfit))) m.netProfit = Number(b.netProfit);
+			if (Number.isFinite(Number(b.monthShare))) frozenShares.set(m.month, Math.round(Number(b.monthShare)));
+		}
+	}
 
 	// THE payout function, shared with GET /api/investor: the split applied to the
 	// RAW netProfit (the rounded netProfit is only what gets surfaced for display),
 	// or the lease under a lease basis.
 	const payoutBasis = facts.payoutBasis;
-	const settled = investorPayoutBasis.settleInvestorMonths(months, { splitFraction: investorSplit, basis: payoutBasis });
+	const settled = investorPayoutBasis.settleInvestorMonths(months, { splitFraction: investorSplit, basis: payoutBasis, frozenShares });
 	const monthlyEarnings = months.map(({ month: mk, revenue, driverPay, fixedCosts, tripExpenses, maintFundCost, complianceCost, netProfit }) => ({
 		month: mk,
 		revenue: Math.round(revenue),
@@ -50667,7 +50916,7 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 // load whose driver is in two investors' driver sets, a receipt inside two
 // expense scopes). Each of those investors' ledgers counts it, so the fleet does
 // too; it is reported, not split.
-async function computeFleetLedger() {
+async function computeFleetLedger({ rules = payoutRules() } = {}) {
 	// One Job Tracking snapshot for every scope, so they all read the same sheet.
 	const jobTracking = await getJobTrackingCached();
 	const carrierDB = getCarrierDBFromSQLite();
@@ -50681,7 +50930,7 @@ async function computeFleetLedger() {
 	for (const inv of investors) {
 		const investorDriverSet = getInvestorDriverSet(inv.ownerId, carrierDB.data, carrierDriverCol, carrierCarrierCol);
 		for (const d of investorDriverSet) investorDrivers.add(d);
-		const facts = await gatherLedgerScopeFacts({ user: { id: inv.ownerId }, isSuperAdmin: false, investorDriverSet, investorOwnerId: inv.ownerId, jobTracking });
+		const facts = await gatherLedgerScopeFacts({ user: { id: inv.ownerId }, isSuperAdmin: false, investorDriverSet, investorOwnerId: inv.ownerId, jobTracking, rules });
 		for (const r of facts.rows) claim(claimed.load, r.source._rowIndex, inv.ownerId);
 		for (const x of facts.receipts) claim(claimed.receipt, x.id, inv.ownerId);
 		for (const x of facts.maintRows) claim(claimed.maintenance, x.id, inv.ownerId);
@@ -50689,8 +50938,13 @@ async function computeFleetLedger() {
 		const { months, items } = financialsCalc.computeLedgerScope(facts);
 		scopes.push({ ownerId: inv.ownerId, name: inv.name, months, items });
 	}
-	const fleet = await gatherLedgerScopeFacts({ user: { id: 0 }, isSuperAdmin: true, investorDriverSet: null, investorOwnerId: null, jobTracking });
+	const fleet = await gatherLedgerScopeFacts({ user: { id: 0 }, isSuperAdmin: true, investorDriverSet: null, investorOwnerId: null, jobTracking, rules });
 	const investorIds = new Set(investors.map((i) => i.ownerId));
+	// The company's added override days: a driver's day no investor scope took.
+	const heldTrucks = rules.datedAttribution ? buildHeldTruckIndex() : null;
+	const companyAddDay = heldTrucks
+		? (drv, day) => !investorIds.has(heldTrucks.ownerAt(normalizeDriverName(drv), day))
+		: (drv) => !investorDrivers.has(drv);
 	const byMonth = (list) => { const o = {}; for (const x of list) o[x.month] = (o[x.month] || 0) + Number(x.amount || 0); return o; };
 	const receipts = fleet.receipts.filter((x) => !claimed.receipt.has(x.id));
 	const maintRows = fleet.maintRows.filter((x) => !claimed.maintenance.has(x.id));
@@ -50698,7 +50952,7 @@ async function computeFleetLedger() {
 	const company = financialsCalc.computeLedgerScope({
 		...fleet,
 		rows: fleet.rows.filter((r) => !claimed.load.has(r.source._rowIndex)),
-		addDaysFor: (drv) => !investorDrivers.has(drv),
+		addDaysFor: companyAddDay,
 		receipts, maintRows, complianceRows,
 		tripByMonth: byMonth(receipts), maintByMonth: byMonth(maintRows), complianceByMonth: byMonth(complianceRows),
 		fixedTrucks: fleet.fixedTrucks.filter((t) => !investorIds.has(Number(t.owner_id) || 0)),
@@ -51224,7 +51478,7 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 	// truck/expense queries; synthesize an investor-scoped user from the session.
 	const user = { ...ctx.sessionUser, id: ownerId };
 	const { monthlyEarnings, currentMonthKey } = await computeInvestorMonthlyEarnings({
-		user, isSuperAdmin: false, investorDriverSet, investorOwnerId: ownerId, config,
+		user, isSuperAdmin: false, investorDriverSet, investorOwnerId: ownerId, config, rules: ctx.rules || payoutRules(),
 	});
 
 	// Per-period P&L lookup so the Payouts screen can show WHY each month paid
@@ -54705,6 +54959,108 @@ app.post("/api/periods/:period/finalize", requireRole("Super Admin"), refuseCros
 	}
 });
 
+// What the 2026-10 payout rules (payoutRules()) would change: every investor's
+// payable for each open month (not closed; the current month included) with
+// every rule off and with the rules on, the difference, and how much of it each
+// rule moves on its own; and each open-month load datedAttribution moves between
+// owners, with the reason. Nothing is written: the ledger is computed, never
+// reconciled. The rules interact, so the per-rule parts need not add up to the
+// whole.
+async function payoutRulesDryRun() {
+	await getJobTrackingCached();
+	const carrierDB = getCarrierDBFromSQLite();
+	const carrierDriverCol = findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
+	const carrierCarrierCol = findCol(carrierDB.headers, /carrier/i);
+	const globalConfig = {};
+	db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all().forEach((r) => (globalConfig[r.key] = r.value));
+	const off = Object.fromEntries(PAYOUT_RULE_KEYS.map((k) => [k, false]));
+	const on = Object.fromEntries(PAYOUT_RULE_KEYS.map((k) => [k, true]));
+	const variants = [["current", off], ["withRules", on], ...PAYOUT_RULE_KEYS.map((k) => [k, { ...off, [k]: true }])];
+	const rowStatus = new Map(db.prepare("SELECT owner_id, period, status FROM investor_payouts").all().map((r) => [`${r.owner_id}:${r.period}`, r.status]));
+	const changes = [];
+	const investors = listSettlableInvestors();
+	// Each open-month load's owner with every rule off and with datedAttribution
+	// alone (0: the company, which no investor's scope claims).
+	const loadOwner = { current: new Map(), datedAttribution: new Map() };
+	for (const inv of investors) {
+		const investorDriverSet = getInvestorDriverSet(inv.ownerId, carrierDB.data, carrierDriverCol, carrierCarrierCol);
+		const config = { ...globalConfig };
+		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?").all(inv.ownerId).forEach((r) => (config[r.key] = r.value));
+		const results = {};
+		for (const [name, rules] of variants) {
+			const { monthlyEarnings, items } = await computeInvestorMonthlyEarnings({
+				user: { id: inv.ownerId }, isSuperAdmin: false, investorDriverSet, investorOwnerId: inv.ownerId, config, rules,
+			});
+			const carry = computeLossCarryForward(monthlyEarnings);
+			results[name] = Object.fromEntries(monthlyEarnings.map((m) => [m.month, { payable: carry[m.month].payable, exact: m.exact }]));
+			if (loadOwner[name]) {
+				for (const it of items) {
+					if (it.kind === "revenue" && it.loadId && !isLocked(it.month)) loadOwner[name].set(String(it.loadId), { ownerId: inv.ownerId, item: it });
+				}
+			}
+		}
+		const months = new Set([...Object.keys(results.current), ...Object.keys(results.withRules)]);
+		for (const period of [...months].sort()) {
+			if (isLocked(period)) continue;
+			const cur = results.current[period] || { payable: 0, exact: {} };
+			const next = results.withRules[period] || { payable: 0, exact: {} };
+			const delta = Math.round((next.payable - cur.payable) * 100) / 100;
+			const figureChanges = {};
+			for (const k of financialsCalc.SETTLED_FIGURES) {
+				const d = Math.round(((next.exact[k] || 0) - (cur.exact[k] || 0)) * 100) / 100;
+				if (d) figureChanges[k] = d;
+			}
+			if (!delta && !Object.keys(figureChanges).length) continue;
+			const byRule = {};
+			for (const k of PAYOUT_RULE_KEYS) {
+				const v = results[k][period] ? results[k][period].payable : 0;
+				const d = Math.round((v - cur.payable) * 100) / 100;
+				if (d) byRule[k] = d;
+			}
+			changes.push({
+				ownerId: inv.ownerId, investor: inv.name, period,
+				payoutStatus: rowStatus.get(`${inv.ownerId}:${period}`) || (period === currentMonthKeyCT() ? "accruing" : "no row yet"),
+				current: cur.payable, withRules: next.payable, delta, byRule, figureChanges,
+			});
+		}
+	}
+	// The loads datedAttribution moves between owners, and why: the truck the
+	// driver held on the load's date, or none on record (the company's then).
+	const held = buildHeldTruckIndex();
+	const movedLoads = [];
+	for (const loadId of new Set([...loadOwner.current.keys(), ...loadOwner.datedAttribution.keys()])) {
+		const was = loadOwner.current.get(loadId);
+		const now = loadOwner.datedAttribution.get(loadId);
+		const from = was ? was.ownerId : 0;
+		const to = now ? now.ownerId : 0;
+		if (from === to) continue;
+		const it = (was || now).item;
+		const day = it.workDay || it.day;
+		const truck = held.truckAt(it.driver, day);
+		movedLoads.push({
+			loadId, period: it.month, day, driver: it.driver, amount: it.cents / 100, from, to,
+			reason: truck ? `the driver held ${truck.unit_number || `truck #${truck.id}`} that day` : "no truck assignment on record for the driver that day",
+		});
+	}
+	movedLoads.sort((x, y) => (x.period < y.period ? -1 : x.period > y.period ? 1 : String(x.loadId).localeCompare(String(y.loadId))));
+	return {
+		flagOn: PAYOUT_RULES_V2_ENABLED, baseline: "every rule off", rules: PAYOUT_RULE_KEYS, investors: investors.length, changes, movedLoads,
+		generatedAt: new Date().toISOString(),
+	};
+}
+
+// GET /api/admin/payout-rules/dry-run — the payout changes the 2026-10 payout
+// rules would make against every rule off, and the loads they would move between
+// owners (payoutRulesDryRun()). Read-only.
+app.get("/api/admin/payout-rules/dry-run", requireRole("Super Admin"), async (req, res) => {
+	try {
+		res.json(await payoutRulesDryRun());
+	} catch (err) {
+		console.error("GET /api/admin/payout-rules/dry-run error:", err.message);
+		res.status(500).json({ error: "Failed to compute the payout rules dry run" });
+	}
+});
+
 // The plan of the one-time freeze: every closed month with no frozen items yet,
 // and the items each would be frozen with (settledMonthItems(), exactly what
 // Financials shows for it now). `fingerprint` identifies the plan; apply takes
@@ -55497,8 +55853,9 @@ async function finalizePeriods(periods, actor) {
 			throw new CloseRetry();
 		}
 		if (freezeItems) for (const p of toClose) writeLedgerFreeze(p, freezeItems.get(p) || [], { source: "close", actor, frozenAt: nowIso, settings: closingSettings });
+		const bookedReceipts = payoutRules().futureReceipts ? stampFutureReceipts(toClose) : [];
 		for (const p of toClose) takeLock.run(p, nowIso, actor || "system");
-		return { retry: false, stamped, overAdjusted };
+		return { retry: false, stamped, overAdjusted, bookedReceipts };
 	});
 	let outcome;
 	try {
@@ -55517,6 +55874,13 @@ async function finalizePeriods(periods, actor) {
 				`${toClose.map(periodLabel).join(", ")} closed and their payouts are frozen, but their Financials line items could not be computed (${freezeError}). Freeze them with the one-time freeze (POST /api/admin/financials/freeze-closed-months).`,
 				JSON.stringify({ periods: toClose, stage: "financials-freeze" }));
 		} catch {}
+	}
+	for (const p of toClose) {
+		const ids = outcome.bookedReceipts.filter((r) => r.period === p).map((r) => r.id);
+		if (ids.length) {
+			logAudit({}, "receipt_period_booked", "period", p,
+				`${p} closed with ${ids.length} receipt(s) dated after the day they were submitted counted in it; each is now booked to ${p} (posted_period): ${ids.join(", ")}`);
+		}
 	}
 	for (const o of outcome.overAdjusted) {
 		const unapplied = -(o.amount + o.adjustment);
@@ -55680,6 +56044,9 @@ async function maybeCloseFinishedPeriods() {
 		periodCloseRunning = false;
 	}
 }
+
+// The pay-rate history starts when this code first runs (pay_rate_history).
+setTimeout(recordPayRateChanges, 20 * 1000);
 
 if (PERIOD_FINALIZE_ENABLED) {
 	// First-ever enable: lock every period whose window has ALREADY passed, in one

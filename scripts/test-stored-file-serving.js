@@ -662,6 +662,7 @@ function mountTrucks(db) {
 		logAudit: (req, action) => { calls.audit.push(action); },
 		fuelModel: { DEFAULT_TANK_GALLONS: 200 },
 		notifyChange: () => {},
+		recordPayRateChanges: () => {},
 	};
 	const put = mountRoute(ROUTES.truckPut, env);
 	const post = mountRoute(ROUTES.truckPost, env);

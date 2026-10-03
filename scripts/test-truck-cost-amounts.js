@@ -432,6 +432,7 @@ function mountAll(db, { activeLoad = null } = {}) {
 		},
 		fuelModel: { DEFAULT_TANK_GALLONS: 200 },
 		notifyChange: () => {},
+		recordPayRateChanges: () => {},
 	};
 	const put = mountRoute(VARIANT.routes.put, env);
 	const post = mountRoute(VARIANT.routes.post, env);
@@ -1074,6 +1075,7 @@ async function acceptanceSection() {
 		bcrypt: { hash: async () => "hashed" },
 		logAudit: () => {},
 		notifyChange: () => {},
+		recordPayRateChanges: () => {},
 		escapeHtml: (s) => String(s ?? ""),
 		sendEmail: (to) => { mail.push(to); },
 		// The payout basis the acceptance records is scripts/test-payout-basis-routes.js's

@@ -589,6 +589,7 @@ function mountPost(db, { jt = makeJt(), jtFails = false, duringRead = null } = {
 			return jt;
 		},
 		notifyChange: () => {},
+		recordPayRateChanges: () => {},
 		Date: FixedDate,
 	};
 	const names = Object.keys(env);

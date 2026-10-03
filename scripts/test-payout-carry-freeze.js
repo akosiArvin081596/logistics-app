@@ -117,7 +117,7 @@ console.log("\n§1 the rule has exactly one definition, and every reader shares 
 	// destructuring pattern, so the first `{` is not the body's.
 	const cimeAt = SRC.indexOf("\nasync function computeInvestorMonthlyEarnings(");
 	const cime = cimeAt >= 0 ? SRC.slice(cimeAt, SRC.indexOf("\n}\n", cimeAt)) : "";
-	ok(/investorPayoutBasis\.settleInvestorMonths\(months, \{ splitFraction: investorSplit, basis: payoutBasis \}\)/.test(cime),
+	ok(/investorPayoutBasis\.settleInvestorMonths\(months, \{ splitFraction: investorSplit, basis: payoutBasis, frozenShares \}\)/.test(cime),
 		"computeInvestorMonthlyEarnings() settles its months with the shared payout function");
 
 	// Both readers must be the real ones: the settlement reconcile and the
