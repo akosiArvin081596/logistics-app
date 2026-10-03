@@ -56135,6 +56135,47 @@ app.get("/api/financials/report.csv", requireRole("Super Admin"), async (req, re
 	}
 });
 
+// GET /api/financials/state-miles — miles driven in each state, from the ELD
+// (eld_state_miles_daily: each truck-day's odometer miles split by the state each
+// mile was driven in), for the same range and periods as the report, with each
+// state's miles per truck. ELD-linked trucks only, and only days the rollup has
+// recorded (it began 2026-10-02 with the telemetry still retained then).
+app.get("/api/financials/state-miles", requireRole("Super Admin"), (req, res) => {
+	try {
+		const q = financialsReportQuery({ ...(req.query || {}), groupBy: "fleet" });
+		if (q.error) return res.status(400).json({ error: q.error, code: "INVALID_REPORT_QUERY" });
+		const periods = financialsReport.periodsBetween(q.from, q.to, q.granularity);
+		const units = new Map(db.prepare("SELECT id, unit_number FROM trucks").all().map((t) => [t.id, t.unit_number]));
+		const rows = db.prepare(
+			"SELECT truck_id, local_day, state, miles FROM eld_state_miles_daily WHERE local_day >= ? AND local_day <= ? AND miles > 0"
+		).all(q.from, q.to);
+		const byState = new Map();
+		let total = 0;
+		for (const r of rows) {
+			const st = String(r.state || "").toUpperCase() || "Unknown";
+			if (!byState.has(st)) byState.set(st, { state: st, total: 0, byPeriod: {}, byTruck: {} });
+			const e = byState.get(st);
+			const pk = financialsReport.periodKey(r.local_day, q.granularity);
+			const unit = units.get(r.truck_id) || "Unlinked";
+			e.total += r.miles;
+			e.byPeriod[pk] = (e.byPeriod[pk] || 0) + r.miles;
+			e.byTruck[unit] = (e.byTruck[unit] || 0) + r.miles;
+			total += r.miles;
+		}
+		const round = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, Math.round(v)]));
+		const states = [...byState.values()]
+			.map((e) => ({ state: e.state, total: Math.round(e.total), share: total > 0 ? Math.round((e.total / total) * 1000) / 10 : 0, byPeriod: round(e.byPeriod), byTruck: round(e.byTruck) }))
+			.sort((a, b) => b.total - a.total);
+		const span = db.prepare("SELECT MIN(local_day) AS first, MAX(local_day) AS last FROM eld_state_miles_daily").get();
+		// The total is the sum of the rounded state rows, so the table adds up.
+		const shownTotal = states.reduce((sum, s) => sum + s.total, 0);
+		res.json({ from: q.from, to: q.to, granularity: q.granularity, periods, states, total: shownTotal, recordedFrom: span.first || null, recordedTo: span.last || null });
+	} catch (err) {
+		console.error("GET /api/financials/state-miles error:", err.message);
+		res.status(500).json({ error: "Failed to load miles by state" });
+	}
+});
+
 // GET / PUT /api/financials/settings — which cost lines count in Financials'
 // margin, the monthly overhead and the depreciation years. Financials only:
 // payouts never read these (owner decision D7). A closed month keeps the

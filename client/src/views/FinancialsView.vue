@@ -52,6 +52,13 @@
         <FleetPnlTable v-else-if="report.groupBy === 'fleet'" :report="report" @open-month="openMonth" />
         <GroupReportTable v-else :report="report" />
       </section>
+
+      <StateMilesPanel
+        v-if="report.groupBy === 'pickupState' || report.groupBy === 'deliveryState'"
+        :from="report.from"
+        :to="report.to"
+        :granularity="report.granularity"
+      />
     </div>
 
     <CostSettingsDialog v-model:open="settingsOpen" @saved="onSettingsSaved" />
@@ -79,6 +86,7 @@ import FleetPnlTable from '../components/financials/FleetPnlTable.vue'
 import GroupReportTable from '../components/financials/GroupReportTable.vue'
 import CostSettingsDialog from '../components/financials/CostSettingsDialog.vue'
 import MonthDetailModal from '../components/financials/MonthDetailModal.vue'
+import StateMilesPanel from '../components/financials/StateMilesPanel.vue'
 
 // Financials: GET /api/financials/report for the range, granularity and
 // grouping in the URL. The server is the source of every figure; this page and
