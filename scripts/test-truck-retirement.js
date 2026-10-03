@@ -203,12 +203,19 @@ section("1. TEXTUAL — every fixed-cost month gate routes through ONE predicate
 	// month total so they sum to it by construction, the lesson of the
 	// getMonthlyFixedCostParts() pair above. GET /api/financials' own monthly
 	// fixed-cost loop is gone: its months are the ledger's (buildFinancialsLedger()).
-	// SIX, counted across server.js and the lib.
+	// The seventh is Financials' own monthly lines (financialsExtraItems(): the
+	// maintenance reserve and depreciation), charged in exactly the months a
+	// truck's fixed costs are. SEVEN, counted across server.js and the lib.
 	const CALC_SRC = fs.readFileSync(path.join(__dirname, "..", "lib", "financials-calc.js"), "utf8");
 	const gateCalls = (SRC.match(/if \(!truckChargedInMonth\(/g) || []).length;
 	const calcGates = (CALC_SRC.match(/if \(!truckChargedInMonth\(/g) || []).length;
 	eq(calcGates, 3, "lib/financials-calc.js: the month total, its detail month and its line items gate with truckChargedInMonth()");
-	eq(gateCalls + calcGates, 6, "six money month-gates call truckChargedInMonth() directly");
+	eq(gateCalls + calcGates, 7, "seven money month-gates call truckChargedInMonth() directly");
+	{
+		const at = SRC.indexOf("\nfunction financialsExtraItems(");
+		ok(at > 0 && /if \(!truckChargedInMonth\(t, mk\)\) continue;/.test(SRC.slice(at, SRC.indexOf("\n}\n", at))),
+			"financialsExtraItems() (reserve, depreciation) gates its months with truckChargedInMonth()");
+	}
 	{
 		const rs = SRC.indexOf('app.get("/api/investor/report"');
 		const re = SRC.indexOf("\napp.", rs + 10);

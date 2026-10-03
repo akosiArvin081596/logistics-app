@@ -52,6 +52,7 @@ let Database, geolib;
 try { Database = require("better-sqlite3"); geolib = require("geolib"); } catch (e) { die(`a server dependency did not load (${e.message}); run npm ci under the .nvmrc Node`); }
 const investorPayoutBasis = require(path.join(ROOT, "lib", "investor-payout-basis.js"));
 const financialsCalc = require(path.join(ROOT, "lib", "financials-calc.js"));
+const financialsReport = require(path.join(ROOT, "lib", "financials-report.js"));
 const { normalizeLoadId } = require(path.join(ROOT, "lib", "ratecon-load.js"));
 
 let pass = 0;
@@ -115,7 +116,7 @@ const FNS = [
 	"payoutBasisContext", "isLocked", "periodLockStmt", "periodLocksReadable", "periodWriteLocked", "todayKeyCT",
 	"currentMonthKeyCT", "settlementGraceDays", "graceEndsAt", "periodPhase", "isPlausibleLockPeriod",
 	"getCarrierDBFromSQLite", "recordPayoutChange", "listSettlableInvestors",
-	"closingFingerprint", "closingLedgerItems", "computeFleetLedger", "settledMonthItems", "ambiguousBlankOwnerLoads", "buildHeldTruckIndex", "buildHaulTruckResolver", "frozenPeriodSet", "settledPayoutRows", "writeLedgerFreeze", "ledgerItemFromRow", "buildFinancialsLedger", "noteLateItemInClosedMonth", "logAudit", "installPeriodLockTriggers",
+	"closingFingerprint", "closingLedgerItems", "financialsSettings", "financialsExtraItems", "closedMonthSettings", "computeFleetLedger", "settledMonthItems", "ambiguousBlankOwnerLoads", "buildHeldTruckIndex", "buildHaulTruckResolver", "frozenPeriodSet", "settledPayoutRows", "writeLedgerFreeze", "ledgerItemFromRow", "buildFinancialsLedger", "noteLateItemInClosedMonth", "logAudit", "installPeriodLockTriggers",
 ];
 const BODY = [
 	...CONSTS.map((c) => liftDecl("const", c)),
@@ -139,7 +140,7 @@ const DDL = [
 	tableDdl("invoices"), ...alters("invoices"),
 	tableDdl("investor_payouts"), ...alters("investor_payouts"),
 	tableDdl("investor_payout_history"), tableDdl("investor_payout_basis"), tableDdl("period_locks"),
-	tableDdl("audit_trail"), tableDdl("financials_ledger_items"), tableDdl("financials_ledger_freezes"),
+	tableDdl("audit_trail"), tableDdl("financials_ledger_items"), tableDdl("financials_ledger_freezes"), tableDdl("app_settings"),
 	// The migrated shape (the CREATE is the pre-owner one; a migration rebuilds it).
 	"CREATE TABLE investor_config (owner_id INTEGER DEFAULT 0, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(owner_id, key))",
 ];
@@ -178,7 +179,7 @@ function buildWorld() {
 	const routes = {};
 	const errors = [];
 	const deps = {
-		db, geolib, investorPayoutBasis, normalizeLoadId, financialsCalc, loadHaul: require(path.join(__dirname, "..", "lib", "load-haul.js")), Date: Clock,
+		db, geolib, investorPayoutBasis, normalizeLoadId, financialsCalc, financialsReport, loadHaul: require(path.join(__dirname, "..", "lib", "load-haul.js")), Date: Clock,
 		app: { get: (p, ...h) => { routes[`GET ${p}`] = h[h.length - 1]; } },
 		requireRole: () => (req, res, next) => next && next(),
 		getJobTrackingCached: async () => ({ headers: [...HEADERS], data: SHEET.map((r, i) => ({ _rowIndex: i + 2, ...r })) }),
