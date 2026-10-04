@@ -133,7 +133,7 @@ const offRoute = ref(false)
 
 // Deviation-triggered rerouting.
 //
-// Client ask (Deshorn): "It should reroute depending on the current location
+// Client ask (Desoren): "It should reroute depending on the current location
 // that the driver is similar to if you [take] another turn on your regular GPS."
 //
 // WHAT THIS REPLACES, AND WHY THE OLD RULE WAS BACKWARDS. The previous gate was

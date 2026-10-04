@@ -88,7 +88,7 @@ noisy truck stop.
 
 ## Update — 5 Sep
 
-**Video 05 was re-recorded** after Deshorn reported the fuel panel offering
+**Video 05 was re-recorded** after Desoren reported the fuel panel offering
 regular gas stations. The app was ranking a cheap convenience store above a real
 truck stop, so the list came back as a grocery store and a row of Casey's with no
 Pilot or Love's in it. That is fixed: the panel now returns **truck stops only** —
@@ -113,7 +113,7 @@ drivers only. Do not post them publicly or send them outside the company.
 these were recorded on: the driver's street address, phone, cell, email, and two
 dispatch messages. Everything else — the load, the route, the fuel readings, the
 prices, the invoices, the truck paperwork — is real. If you want those six to be
-real, send Howard Reddie's actual contact details and videos 09 and 10 can be
+real, send Hollis Renner's actual contact details and videos 09 and 10 can be
 redone in a couple of minutes.
 
 ---

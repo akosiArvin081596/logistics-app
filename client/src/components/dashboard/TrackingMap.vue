@@ -1601,7 +1601,7 @@ function hasActiveLoad(loc) {
 // live position" — true whether or not the driver is carrying a load. These
 // trucks are always shown + locatable (owner request 2026-07-27: the ELD
 // pings whenever the truck is powered, so every powered truck must be visible
-// — "I can't see where Rodney's truck is").
+// — "I can't see where Roland's truck is").
 function hasFix(loc) {
   return !loc.noGps && loc.latitude != null && loc.longitude != null
 }

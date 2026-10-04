@@ -28,7 +28,7 @@
 //      fleet's history.
 //
 // Fixtures are the REAL production assignment rows for Logisx-#91, including the
-// genuine 2026-08-12 handover from Jayden Morrison to Shorn King.
+// genuine 2026-08-12 handover from Jensen Morrison to Soren King.
 //
 // No network, no sheet, no database, no server — pure input/output.
 //
@@ -77,18 +77,18 @@ const HOUR = 3600000;
 
 // The real Logisx-#91 assignment history.
 const ASSIGNMENTS = [
-	{ truck_id: 11, driver_name: "Jayden Morrison", start_date: "2026-08-04T13:08:00.316Z", end_date: "2026-08-11T16:53:15.262Z" },
-	{ truck_id: 11, driver_name: "Jayden Morrison", start_date: "2026-08-11T16:53:15.262Z", end_date: "2026-08-12T23:16:13.964Z" },
-	{ truck_id: 11, driver_name: "Shorn King",      start_date: "2026-08-12T23:17:51.574Z", end_date: "2026-08-14T11:34:03.958Z" },
-	{ truck_id: 11, driver_name: "Shorn King",      start_date: "2026-08-14T11:34:03.958Z", end_date: "" },
+	{ truck_id: 11, driver_name: "Jensen Morrison", start_date: "2026-08-04T13:08:00.316Z", end_date: "2026-08-11T16:53:15.262Z" },
+	{ truck_id: 11, driver_name: "Jensen Morrison", start_date: "2026-08-11T16:53:15.262Z", end_date: "2026-08-12T23:16:13.964Z" },
+	{ truck_id: 11, driver_name: "Soren King",      start_date: "2026-08-12T23:17:51.574Z", end_date: "2026-08-14T11:34:03.958Z" },
+	{ truck_id: 11, driver_name: "Soren King",      start_date: "2026-08-14T11:34:03.958Z", end_date: "" },
 ];
 const R = m.buildDriverAtResolver(ASSIGNMENTS);
 
 // --- 1. basic windows --------------------------------------------------------
 check("mid-window resolves to the driver in force",
-	R.atInstant(11, Date.parse("2026-08-06T12:00:00Z")), "Jayden Morrison");
+	R.atInstant(11, Date.parse("2026-08-06T12:00:00Z")), "Jensen Morrison");
 check("after the handover, the new driver",
-	R.atInstant(11, Date.parse("2026-08-13T12:00:00Z")), "Shorn King");
+	R.atInstant(11, Date.parse("2026-08-13T12:00:00Z")), "Soren King");
 check("before any assignment: nobody, and not a throw",
 	R.atInstant(11, Date.parse("2026-01-01T00:00:00Z")), "");
 check("an unknown truck resolves to nobody", R.atInstant(999, Date.now()), "");
@@ -96,9 +96,9 @@ check("all four fixture rows parsed", R.unresolvedRows, 0);
 
 // --- 2. end_date === '' IS UNBOUNDED ----------------------------------------
 check("open assignment still holds a year later",
-	R.atInstant(11, Date.parse("2027-06-01T00:00:00Z")), "Shorn King");
+	R.atInstant(11, Date.parse("2027-06-01T00:00:00Z")), "Soren King");
 check("open assignment holds far into the future",
-	R.atInstant(11, Date.parse("2030-01-01T00:00:00Z")), "Shorn King");
+	R.atInstant(11, Date.parse("2030-01-01T00:00:00Z")), "Soren King");
 // The inverse: an empty end_date must NOT be read as an end date near the epoch,
 // which would make the current driver vanish.
 check("empty end_date is NOT treated as the epoch",
@@ -109,11 +109,11 @@ check("empty end_date is NOT treated as the epoch",
 // date must still find it — comparing '2026-08-14' against the full instant
 // '2026-08-14T11:34:03.958Z' as strings would put the date FIRST and miss.
 check("atDay finds an assignment that starts later that same day",
-	R.atDay(11, "2026-08-14"), "Shorn King");
+	R.atDay(11, "2026-08-14"), "Soren King");
 check("atDay on the handover day resolves (both bounds inclusive)",
 	R.atDay(11, "2026-08-12") !== "", true);
 check("atDay accepts a full instant as input too",
-	R.atDay(11, "2026-08-14T23:59:59.999Z"), "Shorn King");
+	R.atDay(11, "2026-08-14T23:59:59.999Z"), "Soren King");
 check("atDay before any assignment is nobody", R.atDay(11, "2026-01-01"), "");
 
 // --- 4. OVERLAPPING ROWS: the latest start wins ------------------------------
@@ -168,8 +168,8 @@ const list = [...buckets.values()].map(b => ({ day: b.localDay, driver: b.driver
 	.sort((a, b) => (a.driver > b.driver ? 1 : -1));
 check("a mid-day handover splits into two driver rows on the SAME day",
 	list, [
-		{ day: "2026-08-12", driver: "Jayden Morrison", miles: 9 },
-		{ day: "2026-08-12", driver: "Shorn King", miles: 10 },
+		{ day: "2026-08-12", driver: "Jensen Morrison", miles: 9 },
+		{ day: "2026-08-12", driver: "Soren King", miles: 10 },
 	]);
 check("both halves land on the same truck-local day",
 	new Set(list.map(x => x.day)).size, 1);

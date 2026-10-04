@@ -198,20 +198,20 @@ function makeDb({ lockedMonths = [] } = {}) {
 		VALUES (?, ?, 'Houston', 'TX', ?, 'active', ?, ?, ?)`);
 	// A day rate of his own, and a share stored from when he drove as an
 	// owner-operator (the type not in use).
-	dir.run(1, "Shorn King", "555-0100", "fixed", 20, 300);
+	dir.run(1, "Soren King", "555-0100", "fixed", 20, 300);
 	// An owner-operator share, and a day rate stored for the type not in use.
-	dir.run(2, "Rodney Brown", "555-0200", "percentage", 20, 275);
+	dir.run(2, "Roland Brown", "555-0200", "percentage", 20, 275);
 	// A day rate of her own and no truck: the $250 fallback is under it.
 	dir.run(3, "Nora Solo", "555-0300", "fixed", 0, 300);
 	// A day rate equal to his truck's: clearing it prices him the same.
 	dir.run(4, "Even Steven", "555-0400", "fixed", 0, 250);
 	const truck = db.prepare("INSERT INTO trucks (id, unit_number, assigned_driver, driver_pay_daily) VALUES (?, ?, ?, ?)");
-	truck.run(1, "33", "Shorn King", 275);
-	truck.run(2, "302", "Rodney Brown", 260);
+	truck.run(1, "33", "Soren King", 275);
+	truck.run(2, "302", "Roland Brown", 260);
 	truck.run(3, "91", "Even Steven", 250);
 	const asg = db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (?, ?, '2026-05-01T12:00:00.000Z')");
-	asg.run(1, "Shorn King");
-	asg.run(2, "Rodney Brown");
+	asg.run(1, "Soren King");
+	asg.run(2, "Roland Brown");
 	asg.run(3, "Even Steven");
 	for (const p of lockedMonths) db.prepare("INSERT INTO period_locks (period, status) VALUES (?, 'locked')").run(p);
 	return db;
@@ -307,8 +307,8 @@ async function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 
 	// §1 "0" clears.
 	for (const [label, id, edit, want] of [
-		["Shorn King's $300 set to 0 (his truck's $275 applies)", 1, { payDaily: 0 }, 275],
-		["Shorn King's $300 blanked (the form: blank means the truck's rate)", 1, { payDaily: "" }, 275],
+		["Soren King's $300 set to 0 (his truck's $275 applies)", 1, { payDaily: 0 }, 275],
+		["Soren King's $300 blanked (the form: blank means the truck's rate)", 1, { payDaily: "" }, 275],
 		["Nora Solo's $300 set to 0 (no truck: the $250 fallback applies)", 3, { payDaily: 0 }, 250],
 	]) {
 		const db = makeDb();
@@ -335,7 +335,7 @@ async function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 		const before = row(db, 2);
 		const cells = dialogCells(before, { payPercentage: 0 });
 		const r = app.dirPut(SUPER, 2, formBody(before, cells));
-		t("s1", `§1 Rodney Brown's 20 % share set to 0: ["percentage", "0", ""] saved as 0 %, his stored $275 day rate kept (got ${r.status}, ${JSON.stringify(terms(row(db, 2)))})`,
+		t("s1", `§1 Roland Brown's 20 % share set to 0: ["percentage", "0", ""] saved as 0 %, his stored $275 day rate kept (got ${r.status}, ${JSON.stringify(terms(row(db, 2)))})`,
 			JSON.stringify(cells) === JSON.stringify(["percentage", "0", ""]) && r.status === 200 &&
 			JSON.stringify(terms(row(db, 2))) === JSON.stringify(["percentage", 0, 275]));
 	}
@@ -367,7 +367,7 @@ async function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 	for (const [label, value] of [["the number 0", 0], ["null", null], ["false", false]]) {
 		const db = makeDb();
 		const app = mountAll(db, routes);
-		const r = app.dirPut(SUPER, 1, { headers: ["Driver", "PayDaily", "PayPercentage"], values: ["Shorn King", value, value] });
+		const r = app.dirPut(SUPER, 1, { headers: ["Driver", "PayDaily", "PayPercentage"], values: ["Soren King", value, value] });
 		t("s2", `§2 ${label} sent for both amounts directly: saved, the stored terms kept (got ${r.status}, ${JSON.stringify(terms(row(db, 1)))})`,
 			r.status === 200 && JSON.stringify(terms(row(db, 1))) === JSON.stringify(["fixed", 20, 300]) && audits(db, "update_driver_pay").length === 0);
 	}
@@ -396,7 +396,7 @@ async function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 		const before = row(db, 1);
 		const cells = dialogCells(before, { payType: "percentage", payPercentage: 25 });
 		const r = app.dirPut(SUPER, 1, formBody(before, cells));
-		t("s3", `§3 Shorn King switched to a 25 % share: ["percentage", "25", ""], his $300 day rate kept (got ${r.status}, ${JSON.stringify(terms(row(db, 1)))})`,
+		t("s3", `§3 Soren King switched to a 25 % share: ["percentage", "25", ""], his $300 day rate kept (got ${r.status}, ${JSON.stringify(terms(row(db, 1)))})`,
 			JSON.stringify(cells) === JSON.stringify(["percentage", "25", ""]) && r.status === 200 &&
 			JSON.stringify(terms(row(db, 1))) === JSON.stringify(["percentage", 25, 300]));
 	}
@@ -409,7 +409,7 @@ async function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 		const snap = snapshot(db);
 		const r = app.dirPut(SUPER, 1, formBody(before, dialogCells(before, { payDaily: 0 })));
 		const refusal = app.lockRefusals[0] || {};
-		t("s4", `§4 August locked, Shorn King's $300 cleared (his truck's $275 would reprice August): 409 PERIOD_FINALIZED on pay_daily (got ${r.status} ${(r.body || {}).code || ""} ${JSON.stringify((r.body || {}).periods || null)})`,
+		t("s4", `§4 August locked, Soren King's $300 cleared (his truck's $275 would reprice August): 409 PERIOD_FINALIZED on pay_daily (got ${r.status} ${(r.body || {}).code || ""} ${JSON.stringify((r.body || {}).periods || null)})`,
 			r.status === 409 && r.body.code === "PERIOD_FINALIZED" && JSON.stringify(r.body.periods) === JSON.stringify(["2026-08"]) &&
 			(refusal.blockers || []).map((b) => b.field).join() === "pay_daily");
 		t("s4", "§4 ...nothing written, no update_driver_pay line", snapshot(db) === snap && audits(db, "update_driver_pay").length === 0);
@@ -417,9 +417,9 @@ async function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 			(refusal.audit || {}).action === "update_driver_pay_blocked" && /pay_daily 300 -> 0/.test((refusal.audit || {}).subject || ""));
 	}
 	for (const [label, id, cellsOf] of [
-		["the dialog saving Shorn King's terms as they are", 1, (r) => dialogCells(r)],
+		["the dialog saving Soren King's terms as they are", 1, (r) => dialogCells(r)],
 		["a page from before the fix \"setting 0\" (a numeric 0: not sent)", 1, (r) => oldPageCells({ ...dialogOpenRow(r), payDaily: 0 })],
-		["the dialog saving Rodney Brown (the day rate not in use, not sent)", 2, (r) => dialogCells(r)],
+		["the dialog saving Roland Brown (the day rate not in use, not sent)", 2, (r) => dialogCells(r)],
 	]) {
 		const db = makeDb({ lockedMonths: ["2026-08"] });
 		const app = mountAll(db, routes);
@@ -433,8 +433,8 @@ async function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 	// and now sends its amount as text; the money math reads the same terms after
 	// the save, so even with August locked there is nothing to judge.
 	for (const [label, id, legacy, want] of [
-		["Shorn King stored as \"Fixed\"", 1, "Fixed", ["fixed", "", "300"]],
-		["Rodney Brown stored as \"Percentage\"", 2, "Percentage", ["percentage", "20", ""]],
+		["Soren King stored as \"Fixed\"", 1, "Fixed", ["fixed", "", "300"]],
+		["Roland Brown stored as \"Percentage\"", 2, "Percentage", ["percentage", "20", ""]],
 	]) {
 		const db = makeDb({ lockedMonths: ["2026-08"] });
 		const app = mountAll(db, routes);

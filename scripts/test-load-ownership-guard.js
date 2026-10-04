@@ -163,9 +163,9 @@ function fakeRes() {
 // Real header names from production's Job Tracking tab.
 const HEADERS = ["Load ID", "Driver", "Job Status", "Pickup Address"];
 const ROWS = [
-	{ _rowIndex: 2, "Load ID": "564157463", Driver: "Deshorn King", "Job Status": "In Transit", "Pickup Address": "" },
-	{ _rowIndex: 3, "Load ID": "#30080873", Driver: "Shorn  King", "Job Status": "Dispatched", "Pickup Address": "" },
-	{ _rowIndex: 4, "Load ID": "209875716", Driver: "Deshorn King", "Job Status": "Cancelled", "Pickup Address": "" },
+	{ _rowIndex: 2, "Load ID": "564157463", Driver: "Desoren King", "Job Status": "In Transit", "Pickup Address": "" },
+	{ _rowIndex: 3, "Load ID": "#30080873", Driver: "Soren  King", "Job Status": "Dispatched", "Pickup Address": "" },
+	{ _rowIndex: 4, "Load ID": "209875716", Driver: "Desoren King", "Job Status": "Cancelled", "Pickup Address": "" },
 ];
 const SHEETS_DOWN = Object.assign(new Error("socket hang up"), { code: "ECONNRESET" });
 const DB_DOWN = Object.assign(new Error("SQLITE_IOERR: disk I/O error"), { code: "SQLITE_IOERR" });
@@ -175,40 +175,40 @@ const DB_DOWN = Object.assign(new Error("SQLITE_IOERR: disk I/O error"), { code:
 	console.log("\n§1  loadBelongsToDriver() — true / false / null");
 	// =========================================================================
 	const { fn: guard } = buildGuard();
-	ok("the owning driver is ADMITTED (true)", (await guard("564157463", "Deshorn King")) === true);
+	ok("the owning driver is ADMITTED (true)", (await guard("564157463", "Desoren King")) === true);
 	ok("case, whitespace and a leading # are folded on both sides",
-		(await guard("#564157463", "  deshorn   KING ")) === true &&
-		(await guard("30080873", "Shorn King")) === true);
+		(await guard("#564157463", "  desoren   KING ")) === true &&
+		(await guard("30080873", "Soren King")) === true);
 	ok("another driver is REFUSED with false — a real answer, not null",
-		(await guard("564157463", "Shorn King")) === false);
-	ok('whole-value compare: "Shorn King" does not own "Deshorn King"\'s load',
-		(await guard("564157463", "Shorn King")) === false);
-	ok("an unknown load is false", (await guard("999999999", "Deshorn King")) === false);
+		(await guard("564157463", "Soren King")) === false);
+	ok('whole-value compare: "Soren King" does not own "Desoren King"\'s load',
+		(await guard("564157463", "Soren King")) === false);
+	ok("an unknown load is false", (await guard("999999999", "Desoren King")) === false);
 	ok("a soft-deleted load is false even for the driver named on it",
-		(await guard("209875716", "Deshorn King")) === false);
+		(await guard("209875716", "Desoren King")) === false);
 	ok("no loadId / no driverName is false, not null (nothing failed to read)",
-		(await guard("", "Deshorn King")) === false && (await guard("564157463", "")) === false &&
+		(await guard("", "Desoren King")) === false && (await guard("564157463", "")) === false &&
 		(await guard(null, null)) === false);
 
 	const { fn: throwing, logs: throwLogs } = buildGuard({ sheetThrows: SHEETS_DOWN });
-	const onThrow = await throwing("564157463", "Deshorn King");
+	const onThrow = await throwing("564157463", "Desoren King");
 	ok("Job Tracking read THROWS → null (could not verify), even for the real owner", onThrow === null);
 	ok("...and it is logged with the reason", throwLogs.some((l) => /could not verify load "564157463".*Job Tracking read failed.*socket hang up/.test(l)));
 
 	const { fn: rejecting } = buildGuard({ sheetRejects: SHEETS_DOWN });
-	ok("Job Tracking read REJECTS → null", (await rejecting("564157463", "Deshorn King")) === null);
+	ok("Job Tracking read REJECTS → null", (await rejecting("564157463", "Desoren King")) === null);
 	ok("...and a stranger gets the same null — refused, never admitted",
-		(await rejecting("564157463", "Shorn King")) === null);
+		(await rejecting("564157463", "Soren King")) === null);
 
 	const { fn: dbDown } = buildGuard({ deletedThrows: DB_DOWN });
 	ok("deleted_loads read fails → null, even for the owner of a LIVE load",
-		(await dbDown("564157463", "Deshorn King")) === null);
+		(await dbDown("564157463", "Desoren King")) === null);
 	ok("deleted_loads read fails → null for the soft-deleted load's own driver " +
 		"(the default empty-Set fallback would have admitted them)",
-		(await dbDown("209875716", "Deshorn King")) === null);
+		(await dbDown("209875716", "Desoren King")) === null);
 	ok("NO ORACLE during a Sheets outage: a soft-deleted id answers null like every " +
 		"other id (a deleted-first check answered it false → 403, the rest 503)",
-		(await throwing("209875716", "Deshorn King")) === null && (await throwing("209875716", "x")) === null);
+		(await throwing("209875716", "Desoren King")) === null && (await throwing("209875716", "x")) === null);
 	ok("...because both reads happen before any answer",
 		GUARD_SRC.indexOf("getJobTrackingCached()") > -1 &&
 		GUARD_SRC.indexOf("getJobTrackingCached()") < GUARD_SRC.indexOf("if (deleted.has(targetLid)) return false;"));
@@ -217,25 +217,25 @@ const DB_DOWN = Object.assign(new Error("SQLITE_IOERR: disk I/O error"), { code:
 	const { fn: noLoadCol } = buildGuard({ sheet: { headers: ["Driver", "Job Status"], data: ROWS } });
 	const { fn: emptySheet } = buildGuard({ sheet: { headers: [], data: [] } });
 	ok("a sheet with no Driver column → null (the question cannot be answered)",
-		(await noDriverCol("564157463", "Deshorn King")) === null);
-	ok("a sheet with no Load ID column → null", (await noLoadCol("564157463", "Deshorn King")) === null);
-	ok("an empty read (no header row at all) → null", (await emptySheet("564157463", "Deshorn King")) === null);
+		(await noDriverCol("564157463", "Desoren King")) === null);
+	ok("a sheet with no Load ID column → null", (await noLoadCol("564157463", "Desoren King")) === null);
+	ok("an empty read (no header row at all) → null", (await emptySheet("564157463", "Desoren King")) === null);
 
 	ok("⚠️ the could-not-verify answer is FALSY, so a bare `if (!owned)` still refuses",
 		!onThrow === true);
 	const answers = new Set();
 	for (const g of [guard, throwing, rejecting, dbDown, noDriverCol]) {
-		for (const [l, d] of [["564157463", "Deshorn King"], ["564157463", "x"], ["", "y"], ["209875716", "Deshorn King"]]) {
+		for (const [l, d] of [["564157463", "Desoren King"], ["564157463", "x"], ["", "y"], ["209875716", "Desoren King"]]) {
 			answers.add(await g(l, d));
 		}
 	}
 	ok("the guard only ever answers true, false or null", [...answers].every((v) => v === true || v === false || v === null));
 
 	const { fn: longId, logs: longLogs } = buildGuard({ sheetThrows: SHEETS_DOWN });
-	await longId("9".repeat(5000), "Deshorn King");
+	await longId("9".repeat(5000), "Desoren King");
 	ok("the logged id is capped (caller-supplied, against a 50 MB body limit)",
 		longLogs.length === 1 && longLogs[0].length < 200);
-	await longId("12\n[load-ownership] forged line", "Deshorn King");
+	await longId("12\n[load-ownership] forged line", "Desoren King");
 	ok("...and JSON-quoted, so a newline in it cannot forge a second log line",
 		longLogs.length === 2 && !longLogs[1].includes("\n") && longLogs[1].includes('"12\\n'));
 
@@ -341,7 +341,7 @@ const DB_DOWN = Object.assign(new Error("SQLITE_IOERR: disk I/O error"), { code:
 		const asked = [];
 		const loadBelongsToDriver = async (id) => { asked.push(id); return answers[id]; };
 		const fn = new Function("loadBelongsToDriver", `"use strict";\n${foldSrc}\nreturn driverOwnsAnyLoad;`)(loadBelongsToDriver);
-		return { owned: await fn(Object.keys(answers), "Deshorn King"), asked };
+		return { owned: await fn(Object.keys(answers), "Desoren King"), asked };
 	}
 	const T = true, F = false, N = null;
 	for (const [label, answers, want] of [
@@ -412,19 +412,19 @@ const DB_DOWN = Object.assign(new Error("SQLITE_IOERR: disk I/O error"), { code:
 	// =========================================================================
 	console.log("\n§5  a cancelled row is not a driver's to move — sentIfDriverWriteOnCancelledRow()");
 	// =========================================================================
-	const CANCELLED_NAMED = { _rowIndex: 6, "Load ID": "555000111", Driver: "Deshorn King", "Job Status": "Cancelled", "Pickup Address": "" };
+	const CANCELLED_NAMED = { _rowIndex: 6, "Load ID": "555000111", Driver: "Desoren King", "Job Status": "Cancelled", "Pickup Address": "" };
 	const { fn: guardSeesCancelled } = buildGuard({ sheet: { headers: HEADERS, data: [...ROWS, CANCELLED_NAMED] } });
 	ok("OWNERSHIP IS NOT STATUS: the guard admits a driver still named on a cancelled row " +
 		"(a sheet-edit cancel keeps the Driver cell) — which is why the refusal below is load-bearing",
-		(await guardSeesCancelled("555000111", "Deshorn King")) === true);
+		(await guardSeesCancelled("555000111", "Desoren King")) === true);
 
 	// Both routes hand the helper RAW sheet values: a header array and a row array.
 	const RAW_HEADERS = ["Load ID", "Driver", "Job Status"];
-	const asRole = (role) => ({ session: { user: { role, driverName: role === "Driver" ? "Howard Reddie" : null } } });
+	const asRole = (role) => ({ session: { user: { role, driverName: role === "Driver" ? "Hollis Renner" : null } } });
 	{
 		const { fn, audits } = buildCancelledWrite();
 		const res = fakeRes();
-		const answered = fn(asRole("Driver"), res, RAW_HEADERS, ["555000111", "Howard Reddie", "Cancelled"], "status_update_blocked", "555000111");
+		const answered = fn(asRole("Driver"), res, RAW_HEADERS, ["555000111", "Hollis Renner", "Cancelled"], "status_update_blocked", "555000111");
 		ok("a Driver's write to a cancelled BOUND row → answered 409 LOAD_CANCELLED",
 			answered === true && res.statusCode === 409 && res.body.code === "LOAD_CANCELLED");
 		ok("...and audited under the route's own *_blocked action (coalesced helper)",
@@ -435,13 +435,13 @@ const DB_DOWN = Object.assign(new Error("SQLITE_IOERR: disk I/O error"), { code:
 		const { fn } = buildCancelledWrite();
 		const res = fakeRes();
 		ok(`"${spelling}" is refused — the excludeDroppedLoads() rule, not a new spelling list`,
-			fn(asRole("Driver"), res, RAW_HEADERS, ["1", "Howard Reddie", spelling], "a", "1") === true && res.statusCode === 409);
+			fn(asRole("Driver"), res, RAW_HEADERS, ["1", "Hollis Renner", spelling], "a", "1") === true && res.statusCode === 409);
 	}
 	{
 		const { fn, audits } = buildCancelledWrite();
 		const res = fakeRes();
 		ok("a live bound row passes untouched: nothing sent, nothing audited",
-			fn(asRole("Driver"), res, RAW_HEADERS, ["1", "Howard Reddie", "In Transit"], "a", "1") === false &&
+			fn(asRole("Driver"), res, RAW_HEADERS, ["1", "Hollis Renner", "In Transit"], "a", "1") === false &&
 			res.sends === 0 && audits.length === 0);
 	}
 	for (const role of ["Super Admin", "Dispatcher"]) {
@@ -453,19 +453,19 @@ const DB_DOWN = Object.assign(new Error("SQLITE_IOERR: disk I/O error"), { code:
 	{
 		const { fn } = buildCancelledWrite();
 		ok("a sheet with no status column has nothing to judge (and both routes refuse that shape elsewhere)",
-			fn(asRole("Driver"), fakeRes(), ["Load ID", "Driver"], ["1", "Howard Reddie"], "a", "1") === false);
+			fn(asRole("Driver"), fakeRes(), ["Load ID", "Driver"], ["1", "Hollis Renner"], "a", "1") === false);
 	}
 	{
 		// Load 7052901 in production: row 383 live, row 388 a cancelled "#7052901"
 		// copy. The deduplicated view keeps the LAST row — the cancelled one — so a
 		// rule judged there would strand the driver on his own live load.
-		const REDDIE_LIVE = ["7052901", "Howard Reddie", "In Transit"];
-		const REDDIE_COPY = ["#7052901", "Howard Reddie", "Cancelled"];
+		const RENNER_LIVE = ["7052901", "Hollis Renner", "In Transit"];
+		const RENNER_COPY = ["#7052901", "Hollis Renner", "Cancelled"];
 		const { fn } = buildCancelledWrite();
 		ok("7052901: bound to the LIVE row, the driver keeps advancing it",
-			fn(asRole("Driver"), fakeRes(), RAW_HEADERS, REDDIE_LIVE, "a", "7052901") === false);
+			fn(asRole("Driver"), fakeRes(), RAW_HEADERS, RENNER_LIVE, "a", "7052901") === false);
 		ok("7052901: bound to the cancelled copy, the write is refused",
-			fn(asRole("Driver"), fakeRes(), RAW_HEADERS, REDDIE_COPY, "a", "7052901") === true);
+			fn(asRole("Driver"), fakeRes(), RAW_HEADERS, RENNER_COPY, "a", "7052901") === true);
 	}
 	{
 		const { fn, audits } = buildCancelledWrite();
@@ -501,23 +501,23 @@ const DB_DOWN = Object.assign(new Error("SQLITE_IOERR: disk I/O error"), { code:
 		const { fn, audits } = buildOthersRow();
 		const res = fakeRes();
 		ok("a Driver writing a copy that names ANOTHER driver → 403 ROW_NOT_ASSIGNED",
-			fn(asRole("Driver"), res, RAW_HEADERS, ["7052901", "Deshorn King", "Delivered"], "Howard Reddie", "status_update_blocked", "7052901") === true &&
+			fn(asRole("Driver"), res, RAW_HEADERS, ["7052901", "Desoren King", "Delivered"], "Hollis Renner", "status_update_blocked", "7052901") === true &&
 			res.statusCode === 403 && res.body.code === "ROW_NOT_ASSIGNED");
 		ok("...and audited under status_update_blocked", audits.length === 1 && audits[0].code === "ROW_NOT_ASSIGNED");
 	}
 	{
 		const { fn } = buildOthersRow();
 		ok("a copy with a BLANK Driver cell is refused too (nobody's row is not yours)",
-			fn(asRole("Driver"), fakeRes(), RAW_HEADERS, ["1", "", "Dispatched"], "Howard Reddie", "a", "1") === true);
+			fn(asRole("Driver"), fakeRes(), RAW_HEADERS, ["1", "", "Dispatched"], "Hollis Renner", "a", "1") === true);
 		ok("7052901: the live copy names its own driver — allowed",
-			fn(asRole("Driver"), fakeRes(), RAW_HEADERS, ["7052901", "Howard Reddie", "In Transit"], "Howard Reddie", "a", "7052901") === false);
+			fn(asRole("Driver"), fakeRes(), RAW_HEADERS, ["7052901", "Hollis Renner", "In Transit"], "Hollis Renner", "a", "7052901") === false);
 		ok("case and whitespace are folded (normalizeDriverName), not a new comparison",
-			fn(asRole("Driver"), fakeRes(), RAW_HEADERS, ["1", "  howard   REDDIE ", "In Transit"], "Howard Reddie", "a", "1") === false);
-		ok('whole-name compare: "Shorn King" does not own a row naming "Deshorn King"',
-			fn(asRole("Driver"), fakeRes(), RAW_HEADERS, ["1", "Deshorn King", "In Transit"], "Shorn King", "a", "1") === true);
+			fn(asRole("Driver"), fakeRes(), RAW_HEADERS, ["1", "  hollis   RENNER ", "In Transit"], "Hollis Renner", "a", "1") === false);
+		ok('whole-name compare: "Soren King" does not own a row naming "Desoren King"',
+			fn(asRole("Driver"), fakeRes(), RAW_HEADERS, ["1", "Desoren King", "In Transit"], "Soren King", "a", "1") === true);
 		ok("Super Admin and Dispatcher are not refused by this rule",
-			fn(asRole("Super Admin"), fakeRes(), RAW_HEADERS, ["1", "Deshorn King", "x"], "", "a", "1") === false &&
-			fn(asRole("Dispatcher"), fakeRes(), RAW_HEADERS, ["1", "Deshorn King", "x"], "", "a", "1") === false);
+			fn(asRole("Super Admin"), fakeRes(), RAW_HEADERS, ["1", "Desoren King", "x"], "", "a", "1") === false &&
+			fn(asRole("Dispatcher"), fakeRes(), RAW_HEADERS, ["1", "Desoren King", "x"], "", "a", "1") === false);
 	}
 	const OTHERS_CALL = 'if (sentIfDriverWriteOnOthersRow(req, res, headers, dataRows[rowIndex - 2], driverName, "status_update_blocked", loadId)) return;';
 	ok("PUT /api/driver/status checks the bound copy's driver, after the cancelled check, before the POD gate and the write",
@@ -539,14 +539,14 @@ const DB_DOWN = Object.assign(new Error("SQLITE_IOERR: disk I/O error"), { code:
 	ok("(mutation anchor present)", GUARD_SRC.includes(JT_CATCH));
 
 	const failOpen = buildGuard({ guardSrc: GUARD_SRC.replace(JT_CATCH, "catch { return true; }"), sheetThrows: SHEETS_DOWN }).fn;
-	const foStranger = await failOpen("564157463", "Shorn King");
+	const foStranger = await failOpen("564157463", "Soren King");
 	ok("MUTANT fail-open (`catch { return true; }`): §1's null assertion flips — and a STRANGER is admitted",
 		foStranger === true && foStranger !== null);
 	ok("MUTANT fail-open: at a real call site the stranger PROCEEDS",
 		runSite(lines[callSites[0] + 1], lines[callSites[0] + 2], foStranger).proceeded === true);
 
 	const legacy = buildGuard({ guardSrc: GUARD_SRC.replace(JT_CATCH, "catch { return false; }"), sheetThrows: SHEETS_DOWN }).fn;
-	const legacyAnswer = await legacy("564157463", "Deshorn King");
+	const legacyAnswer = await legacy("564157463", "Desoren King");
 	const legacySite = runSite(lines[callSites[0] + 1], lines[callSites[0] + 2], legacyAnswer);
 	ok("MUTANT the original bug (`catch { return false; }`): §1 flips, and the owner is told " +
 		"\"not assigned to you\" with a 403 the upload client never retries",
@@ -557,13 +557,13 @@ const DB_DOWN = Object.assign(new Error("SQLITE_IOERR: disk I/O error"), { code:
 		deletedThrows: DB_DOWN,
 	}).fn;
 	ok("MUTANT lenient deleted_loads read: the soft-deleted load's driver is ADMITTED when that read fails",
-		(await lenientGuard("209875716", "Deshorn King")) === true);
+		(await lenientGuard("209875716", "Desoren King")) === true);
 
 	const truthySentinel = buildGuard({
 		unverifiedSrc: UNVERIFIED_SRC.replace("return null;", "return { unverified: true };"),
 		sheetThrows: SHEETS_DOWN,
 	}).fn;
-	const truthy = await truthySentinel("564157463", "Shorn King");
+	const truthy = await truthySentinel("564157463", "Soren King");
 	ok("MUTANT truthy sentinel: the falsy assertion flips — and at a call site the stranger PROCEEDS",
 		!truthy === false && runSite(lines[callSites[0] + 1], lines[callSites[0] + 2], truthy).proceeded === true);
 
@@ -577,7 +577,7 @@ const DB_DOWN = Object.assign(new Error("SQLITE_IOERR: disk I/O error"), { code:
 		sheet: { headers: ["Load ID"], data: ROWS },
 	}).fn;
 	ok("MUTANT missing-column → false: §1's null assertion flips",
-		(await noColumnsFalse("564157463", "Deshorn King")) === false);
+		(await noColumnsFalse("564157463", "Desoren King")) === false);
 
 	const ROLE_LINE = 'if (req.session?.user?.role !== "Driver") return false;';
 	const STATUS_LINE = /if \(!CANCELED_STATUS_RE\.test\([^\n]+\) return false;/;
@@ -597,11 +597,11 @@ const DB_DOWN = Object.assign(new Error("SQLITE_IOERR: disk I/O error"), { code:
 	ok("(driver-match mutation anchor present)", OTHERS_ROW_SRC.includes(MATCH_LINE));
 	const anyCopy = buildOthersRow(OTHERS_ROW_SRC.replace(MATCH_LINE, "return false;")).fn;
 	ok("MUTANT driver match removed: a Driver rewrites another driver's copy — §5 flips",
-		anyCopy(asRole("Driver"), fakeRes(), RAW_HEADERS, ["1", "Deshorn King", "Delivered"], "Howard Reddie", "a", "1") === false);
+		anyCopy(asRole("Driver"), fakeRes(), RAW_HEADERS, ["1", "Desoren King", "Delivered"], "Hollis Renner", "a", "1") === false);
 	const substring = buildOthersRow(OTHERS_ROW_SRC.replace(MATCH_LINE,
 		"if (onRow && onRow.includes(normalizeDriverName(driverName))) return false;")).fn;
-	ok('MUTANT substring compare: "Shorn King" passes on "Deshorn King"\'s row — §5 flips',
-		substring(asRole("Driver"), fakeRes(), RAW_HEADERS, ["1", "Deshorn King", "x"], "Shorn King", "a", "1") === false);
+	ok('MUTANT substring compare: "Soren King" passes on "Desoren King"\'s row — §5 flips',
+		substring(asRole("Driver"), fakeRes(), RAW_HEADERS, ["1", "Desoren King", "x"], "Soren King", "a", "1") === false);
 
 	const netLess = runSite("", lines[callSites[0] + 2], null);
 	ok("SAFETY NET (by design, not a mutant): a call site that LOST its 503 line still refuses a " +

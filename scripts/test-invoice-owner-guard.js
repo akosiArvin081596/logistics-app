@@ -105,10 +105,10 @@ function refuses(cond, user, invoice, owns = driverOwnsInvoice) {
 }
 
 // --- fixtures --------------------------------------------------------------
-const INV = { id: 7, driver: "Deshorn King", status: "Draft", deleted_at: null };
+const INV = { id: 7, driver: "Desoren King", status: "Draft", deleted_at: null };
 const SUPER = { role: "Super Admin", driverName: null };
-const OWNER = { role: "Driver", driverName: "Deshorn King" };
-const OTHER = { role: "Driver", driverName: "Shorn King" };
+const OWNER = { role: "Driver", driverName: "Desoren King" };
+const OTHER = { role: "Driver", driverName: "Soren King" };
 const DISPATCH = { role: "Dispatcher", driverName: null };
 const INVESTOR = { role: "Investor", driverName: null };
 
@@ -117,10 +117,10 @@ console.log("\n§1  driverOwnsInvoice()");
 // ===========================================================================
 ok("the owning driver matches", driverOwnsInvoice(OWNER, INV) === true);
 ok("case and whitespace are folded",
-	driverOwnsInvoice({ driverName: "  deshorn   KING " }, INV) === true);
+	driverOwnsInvoice({ driverName: "  desoren   KING " }, INV) === true);
 ok("a different driver is refused", driverOwnsInvoice(OTHER, INV) === false);
-ok('⚠️ whole-value ===, so "Shorn King" ⊄ "Deshorn King" (the substring trap)',
-	driverOwnsInvoice({ driverName: "Shorn King" }, INV) === false);
+ok('⚠️ whole-value ===, so "Soren King" ⊄ "Desoren King" (the substring trap)',
+	driverOwnsInvoice({ driverName: "Soren King" }, INV) === false);
 ok("a blank session name is refused — the load-bearing narrowing that denies " +
 	"Dispatcher/Investor without enumerating roles",
 	driverOwnsInvoice({ driverName: "" }, INV) === false &&
@@ -201,7 +201,7 @@ const ownsSubstring = buildOwns(
 	OWNS_SRC.replace(
 		"return normalizeDriverName(invoice && invoice.driver) === sessionName;",
 		"return normalizeDriverName(invoice && invoice.driver).includes(sessionName);"));
-ok('MUTANT: a substring compare lets "Shorn King" own "Deshorn King"\'s invoice',
+ok('MUTANT: a substring compare lets "Soren King" own "Desoren King"\'s invoice',
 	ownsSubstring(OTHER, INV) === true);
 
 console.log(failed ? `\n${failed} test(s) failed` : "\nall passed");

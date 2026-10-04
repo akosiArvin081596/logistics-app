@@ -1,7 +1,7 @@
 /**
  * voiceLadder.js — pure decision logic for spoken turn-by-turn callouts.
  *
- * Client ask (Deshorn): "on the driver's side let's enhance the navigation part
+ * Client ask (Desoren): "on the driver's side let's enhance the navigation part
  * so that they can hear the callouts and the directions."
  *
  * WHAT MAKES THIS HARD IS NOT THE SPEAKING. `speechSynthesis.speak()` is one

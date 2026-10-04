@@ -145,7 +145,7 @@ Business hours: minutes to a couple of hours. After hours: delayed.
 Yes. Operations has a phone number you can use. Get it from your onboarding contact.
 
 **Q. Who is my main contact at LogisX?**
-Typically the CEO (Deshorn King) or a designated investor relations manager. Your onboarding contact can confirm.
+Typically the CEO (Desoren King) or a designated investor relations manager. Your onboarding contact can confirm.
 
 **Q. Can I attend company meetings?**
 Depends on the company structure. Sometimes investors are invited to quarterly reviews.

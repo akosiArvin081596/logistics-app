@@ -211,7 +211,7 @@ const DAYS = [];
 for (let t = Date.UTC(2024, 0, 1); t <= Date.UTC(2028, 11, 31); t += 86400000) {
 	DAYS.push(new Date(t).toISOString().slice(0, 10));
 }
-const weekOf = (ymd) => generateInvoiceNumber("Shorn King", ymd).replace(/^INV-SK-/, "").replace(/-\d+$/, "");
+const weekOf = (ymd) => generateInvoiceNumber("Soren King", ymd).replace(/^INV-SK-/, "").replace(/-\d+$/, "");
 
 // ============================================================ CHILD MODE
 // Sections 3 and 4 re-run this file under other timezones. In child mode it
@@ -226,7 +226,7 @@ if (CHILD) {
 		// invisible in UTC and in every POSITIVE-offset zone, so a parent-frame
 		// comparison silently proves nothing on a Tokyo or a Manila laptop.
 		oldWeeks: DAYS.map(oldInvoiceWeek),
-		numbers: ["2026-08-08", "2026-01-03", "2025-12-27"].map((d) => generateInvoiceNumber("Shorn King", d)),
+		numbers: ["2026-08-08", "2026-01-03", "2025-12-27"].map((d) => generateInvoiceNumber("Soren King", d)),
 		// Friday 2026-08-07 18:30 CT is 2026-08-07T23:30Z. One minute either side.
 		deadline: [
 			afterDeadlineAt("2026-08-07", Date.parse("2026-08-07T23:29:00Z")),
@@ -315,7 +315,7 @@ for (const r of ["/api/db/tables", "/api/db/query/:table"]) {
 section("2. generateInvoiceNumber() still produces the shape everything keys on");
 
 check("full number, initials + week + sequence",
-	generateInvoiceNumber("Shorn King", "2026-08-08"), "INV-SK-2026W32-01");
+	generateInvoiceNumber("Soren King", "2026-08-08"), "INV-SK-2026W32-01");
 check("three initials max", generateInvoiceNumber("Mary Jane Watson Parker", "2026-08-08"), "INV-MJW-2026W32-01");
 check("punctuation is stripped from initials", generateInvoiceNumber("O'Brien", "2026-08-08"), "INV-O-2026W32-01");
 check("a slash in a name cannot reach the PDF path",
@@ -421,79 +421,79 @@ const AT_SHIPPER = "At Shipper";
 // one load id are present by construction. Row 2 is the caller's; row 3 is a
 // second copy of the SAME load, same driver, already In Transit.
 const dupRows = [
-	row("562620213", "Shorn King", "Dispatched"),
-	row("562620213", "Shorn King", "In Transit"),
+	row("562620213", "Soren King", "Dispatched"),
+	row("562620213", "Soren King", "In Transit"),
 ];
 check("a duplicate row for the caller's OWN load no longer conflicts",
 	activeJobGuard({
 		headers: PROD_HEADERS, dataRows: dupRows, rowIndex: 2, loadId: "562620213",
-		driverName: "Shorn King", statusIdx: STATUS, newStatus: AT_SHIPPER,
+		driverName: "Soren King", statusIdx: STATUS, newStatus: AT_SHIPPER,
 	}), null);
 // DISCRIMINATION: the pre-fix block 409s on that identical fixture.
 check("MUTANT: the pre-fix block 409s on the same fixture",
 	(oldActiveJobGuard({
 		headers: PROD_HEADERS, dataRows: dupRows, rowIndex: 2, loadId: "562620213",
-		driverName: "Shorn King", statusIdx: STATUS, newStatus: AT_SHIPPER,
+		driverName: "Soren King", statusIdx: STATUS, newStatus: AT_SHIPPER,
 	}) || {}).code, 409);
 
 // The '#' spelling is how a duplicate usually arises (Job Tracking stores both
 // "513987502" and "#513987502"), so a raw string compare would miss exactly the
 // common case. This is why the skip runs through normLoadKey().
 const hashRows = [
-	row("562620213", "Shorn King", "Dispatched"),
-	row("#562620213", "Shorn King", "In Transit"),
+	row("562620213", "Soren King", "Dispatched"),
+	row("#562620213", "Soren King", "In Transit"),
 ];
 check("...including when the duplicate is spelled with a leading '#'",
 	activeJobGuard({
 		headers: PROD_HEADERS, dataRows: hashRows, rowIndex: 2, loadId: "562620213",
-		driverName: "Shorn King", statusIdx: STATUS, newStatus: AT_SHIPPER,
+		driverName: "Soren King", statusIdx: STATUS, newStatus: AT_SHIPPER,
 	}), null);
 // ...and with the spellings the other way round, so the '#' is on the row being
 // SKIPPED rather than the row being written. The active copy has to be the OTHER
 // row for this to test anything, which is why it is its own fixture.
 const hashRowsRev = [
-	row("#562620213", "Shorn King", "In Transit"),
-	row("562620213", "Shorn King", "Dispatched"),
+	row("#562620213", "Soren King", "In Transit"),
+	row("562620213", "Soren King", "Dispatched"),
 ];
 check("...and the reverse spelling too",
 	activeJobGuard({
 		headers: PROD_HEADERS, dataRows: hashRowsRev, rowIndex: 3, loadId: "562620213",
-		driverName: "Shorn King", statusIdx: STATUS, newStatus: AT_SHIPPER,
+		driverName: "Soren King", statusIdx: STATUS, newStatus: AT_SHIPPER,
 	}), null);
 check("MUTANT: the pre-fix block 409s on the reverse spelling too",
 	(oldActiveJobGuard({
 		headers: PROD_HEADERS, dataRows: hashRowsRev, rowIndex: 3, loadId: "562620213",
-		driverName: "Shorn King", statusIdx: STATUS, newStatus: AT_SHIPPER,
+		driverName: "Soren King", statusIdx: STATUS, newStatus: AT_SHIPPER,
 	}) || {}).code, 409);
 
 // ⚠️ THE GUARD MUST STILL GUARD. A genuinely different load, same driver, active
 // -> 409. If this ever passes as null the fix has been widened into a removal.
 const realConflict = [
-	row("562620213", "Shorn King", "Dispatched"),
-	row("999888777", "Shorn King", "In Transit"),
+	row("562620213", "Soren King", "Dispatched"),
+	row("999888777", "Soren King", "In Transit"),
 ];
 check("a genuine SECOND load still 409s",
 	(activeJobGuard({
 		headers: PROD_HEADERS, dataRows: realConflict, rowIndex: 2, loadId: "562620213",
-		driverName: "Shorn King", statusIdx: STATUS, newStatus: AT_SHIPPER,
+		driverName: "Soren King", statusIdx: STATUS, newStatus: AT_SHIPPER,
 	}) || {}).code, 409);
 check("...with the code the driver app already handles",
 	(activeJobGuard({
 		headers: PROD_HEADERS, dataRows: realConflict, rowIndex: 2, loadId: "562620213",
-		driverName: "Shorn King", statusIdx: STATUS, newStatus: AT_SHIPPER,
+		driverName: "Soren King", statusIdx: STATUS, newStatus: AT_SHIPPER,
 	}) || {}).body.code, "ACTIVE_JOB_CONFLICT");
 check("a genuine second load conflicts under the pre-fix block too (no behaviour lost)",
 	(oldActiveJobGuard({
 		headers: PROD_HEADERS, dataRows: realConflict, rowIndex: 2, loadId: "562620213",
-		driverName: "Shorn King", statusIdx: STATUS, newStatus: AT_SHIPPER,
+		driverName: "Soren King", statusIdx: STATUS, newStatus: AT_SHIPPER,
 	}) || {}).code, 409);
 
 // Another DRIVER's active load is not this driver's conflict, duplicated or not.
 check("another driver's active load is irrelevant",
 	activeJobGuard({
 		headers: PROD_HEADERS,
-		dataRows: [row("562620213", "Shorn King", "Dispatched"), row("999888777", "Howard Reddie", "In Transit")],
-		rowIndex: 2, loadId: "562620213", driverName: "Shorn King",
+		dataRows: [row("562620213", "Soren King", "Dispatched"), row("999888777", "Hollis Renner", "In Transit")],
+		rowIndex: 2, loadId: "562620213", driverName: "Soren King",
 		statusIdx: STATUS, newStatus: AT_SHIPPER,
 	}), null);
 // Name normalisation is unchanged — a spacing/case variant of the SAME driver on
@@ -501,8 +501,8 @@ check("another driver's active load is irrelevant",
 check("a case/spacing variant of the same driver on another load still conflicts",
 	(activeJobGuard({
 		headers: PROD_HEADERS,
-		dataRows: [row("562620213", "Shorn King", "Dispatched"), row("999888777", "  shorn   KING ", "Loading")],
-		rowIndex: 2, loadId: "562620213", driverName: "Shorn King",
+		dataRows: [row("562620213", "Soren King", "Dispatched"), row("999888777", "  soren   KING ", "Loading")],
+		rowIndex: 2, loadId: "562620213", driverName: "Soren King",
 		statusIdx: STATUS, newStatus: AT_SHIPPER,
 	}) || {}).code, 409);
 
@@ -512,16 +512,16 @@ check("a case/spacing variant of the same driver on another load still conflicts
 check("a blank caller load id does not disable the guard",
 	(activeJobGuard({
 		headers: PROD_HEADERS,
-		dataRows: [row("", "Shorn King", "Dispatched"), row("", "Shorn King", "In Transit")],
-		rowIndex: 2, loadId: "", driverName: "Shorn King",
+		dataRows: [row("", "Soren King", "Dispatched"), row("", "Soren King", "In Transit")],
+		rowIndex: 2, loadId: "", driverName: "Soren King",
 		statusIdx: STATUS, newStatus: AT_SHIPPER,
 	}) || {}).code, 409);
 // A row carrying no load id is not "the caller's own load" and stays in the scan.
 check("an id-less active row still conflicts",
 	(activeJobGuard({
 		headers: PROD_HEADERS,
-		dataRows: [row("562620213", "Shorn King", "Dispatched"), row("", "Shorn King", "At Receiver")],
-		rowIndex: 2, loadId: "562620213", driverName: "Shorn King",
+		dataRows: [row("562620213", "Soren King", "Dispatched"), row("", "Soren King", "At Receiver")],
+		rowIndex: 2, loadId: "562620213", driverName: "Soren King",
 		statusIdx: STATUS, newStatus: AT_SHIPPER,
 	}) || {}).code, 409);
 
@@ -530,7 +530,7 @@ for (const st of ["In Transit", "Delivered", "Loading", "At Receiver"]) {
 	check(`"${st}" never reaches the one-active-job scan`,
 		activeJobGuard({
 			headers: PROD_HEADERS, dataRows: realConflict, rowIndex: 2, loadId: "562620213",
-			driverName: "Shorn King", statusIdx: STATUS, newStatus: st,
+			driverName: "Soren King", statusIdx: STATUS, newStatus: st,
 		}), null);
 }
 // A sheet with no Driver column cannot judge the rule; it is skipped, as before.
@@ -538,7 +538,7 @@ check("no Driver column — the scan is skipped, not guessed",
 	activeJobGuard({
 		headers: PROD_HEADERS.map((h) => (/driver/i.test(h) ? "Operator" : h)),
 		dataRows: realConflict, rowIndex: 2, loadId: "562620213",
-		driverName: "Shorn King", statusIdx: STATUS, newStatus: AT_SHIPPER,
+		driverName: "Soren King", statusIdx: STATUS, newStatus: AT_SHIPPER,
 	}), null);
 
 // The shipped block must resolve the id column the same way every other load

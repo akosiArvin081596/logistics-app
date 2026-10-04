@@ -341,13 +341,13 @@ function ctxOf(report, answered) {
 			id: 1436, at: "2026-08-13T04:21:25.603Z", account: "super_admin", role: "Super Admin",
 			action: "adjust_invoice_blocked", entity: "invoice", entityId: "368",
 			code: "PERIOD_FINALIZED", periods: ["2026-07"], unnamedPeriods: false,
-			attempted: "adjust INV-SK-2026W30-01 (shorn king, 2026-07-25 — 2026-07-31, status Submitted, adjustment 0.00 -> -$125.50)",
-			note: "late fuel receipt, per Danna", suppressed: null,
-			details: "adjust INV-SK-2026W30-01 … WITHHELD [PERIOD_FINALIZED] periods=2026-07 — nothing was written — reason: late fuel receipt, per Danna",
+			attempted: "adjust INV-SK-2026W30-01 (soren king, 2026-07-25 — 2026-07-31, status Submitted, adjustment 0.00 -> -$125.50)",
+			note: "late fuel receipt, per Della", suppressed: null,
+			details: "adjust INV-SK-2026W30-01 … WITHHELD [PERIOD_FINALIZED] periods=2026-07 — nothing was written — reason: late fuel receipt, per Della",
 		};
 		const r = normalizePeriodRefusal(raw);
 		check("periods survive and are labelled", [r.periods, r.periodLabels], [["2026-07"], ["July 2026"]]);
-		check("the stated reason survives", r.note, "late fuel receipt, per Danna");
+		check("the stated reason survives", r.note, "late fuel receipt, per Della");
 		check("the raw detail is kept verbatim", r.details, raw.details);
 		// ⚠️ ABSENT IS NOT ZERO. A row that never carried a suppressed tally must not
 		// render "+0 more suppressed" — a claim the server never made.
@@ -375,7 +375,7 @@ function ctxOf(report, answered) {
 	{
 		// Verbatim: invoice #368, Submitted, July 2026 closed.
 		const inv = normalizeFrozenInvoice({
-			id: 368, invoiceNumber: "INV-SK-2026W30-01", driver: "shorn king",
+			id: 368, invoiceNumber: "INV-SK-2026W30-01", driver: "soren king",
 			weekStart: "2026-07-25", weekEnd: "2026-07-31", status: "Submitted",
 			amount: 900, cause: "PERIOD_FINALIZED", periods: ["2026-07"],
 			adjustable: false, neverPayable: true, isManual: false,
@@ -474,10 +474,10 @@ function ctxOf(report, answered) {
 		// Four different writers, four different templates, all captured verbatim
 		// from a live run against a copy of the refreshed app.db. None of them is
 		// recognised by shape — only by the marker.
-		const A = parse('adjust INV-SK-2026W30-01 (shorn king, 2026-07-25 — 2026-07-31, status Submitted, adjustment 0.00 -> -$125.50) WITHHELD [PERIOD_FINALIZED] periods=2026-07 — nothing was written — reason: late fuel receipt, per Danna');
+		const A = parse('adjust INV-SK-2026W30-01 (soren king, 2026-07-25 — 2026-07-31, status Submitted, adjustment 0.00 -> -$125.50) WITHHELD [PERIOD_FINALIZED] periods=2026-07 — nothing was written — reason: late fuel receipt, per Della');
 		check("periodRefusalDetail(): code", A.code, "PERIOD_FINALIZED");
 		check("periodRefusalDetail(): periods", A.periods, ["2026-07"]);
-		check("periodRefusalDetail(): reason", A.note, "late fuel receipt, per Danna");
+		check("periodRefusalDetail(): reason", A.note, "late fuel receipt, per Della");
 		check("periodRefusalDetail(): the trailing 'WITHHELD' is stripped from the subject",
 			A.attempted.endsWith("-$125.50)"), true);
 

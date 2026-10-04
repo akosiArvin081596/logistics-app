@@ -180,7 +180,7 @@ let payeesReq = 0
 // someone billed manually in the past (an office admin in neither directory)
 // must not disappear from the suggestions just because the directory loaded.
 // Prior-invoice names are matched out by normalized key so the same person
-// doesn't appear twice under two spellings ("johnny rocks spirits llc").
+// doesn't appear twice under two spellings ("jasper ridge spirits llc").
 const payeeOptions = computed(() => {
   const onFile = remotePayees.value.map(p => String(p.name || '').trim()).filter(Boolean)
   const seen = new Set(onFile.map(normalizeName))
@@ -215,7 +215,7 @@ async function loadPayees() {
   }
 }
 
-// "JOHNNY ROCKS SPIRITS LLC" and "Johnny Rocks Spirits" are the same payee: fold
+// "JASPER RIDGE SPIRITS LLC" and "Jasper Ridge Spirits" are the same payee: fold
 // case, drop punctuation ("L.L.C." → "l l c" → "llc"), collapse whitespace, then
 // peel trailing entity suffixes. Never reduces a name to nothing — a lone "Co"
 // stays "co" because the loop keeps the last remaining token.
@@ -247,8 +247,8 @@ function findPayee(name) {
   const near = remotePayees.value.filter(p => normalizeName(p.name) === key)
   if (!near.length) return null
   if (near.length === 1) return near[0]
-  // AMBIGUOUS: two different records normalize alike — e.g. driver "Johnny Rocks"
-  // (home address) and investor "Johnny Rocks LLC" (business address). Guessing
+  // AMBIGUOUS: two different records normalize alike — e.g. driver "Jasper Ridge"
+  // (home address) and investor "Jasper Ridge LLC" (business address). Guessing
   // could stamp someone's HOME address on another party's invoice, so fill
   // nothing and let the admin pick the exact name from the list. Only proceed
   // when every candidate agrees on the details anyway.

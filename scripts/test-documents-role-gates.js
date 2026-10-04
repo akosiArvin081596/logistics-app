@@ -110,12 +110,12 @@ const buildUploadDocTypeFor = (src) => new Function(`${src}\nreturn uploadDocTyp
 const quiet = { log() {}, warn() {}, error() {} };
 
 // --- fixtures --------------------------------------------------------------
-// L-100 is Deshorn King's load, L-200 is Shorn King's.
+// L-100 is Desoren King's load, L-200 is Soren King's.
 const JT = {
 	headers: ["Load ID", "Driver", "Job Status"],
 	data: [
-		{ _rowIndex: 2, "Load ID": "L-100", Driver: "Deshorn King", "Job Status": "In Transit" },
-		{ _rowIndex: 3, "Load ID": "L-200", Driver: "Shorn King", "Job Status": "Delivered" },
+		{ _rowIndex: 2, "Load ID": "L-100", Driver: "Desoren King", "Job Status": "In Transit" },
+		{ _rowIndex: 3, "Load ID": "L-200", Driver: "Soren King", "Job Status": "Delivered" },
 	],
 };
 
@@ -156,10 +156,10 @@ docDb.exec(`
 		uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP, ocr_text TEXT DEFAULT '', deleted_at DATETIME DEFAULT NULL
 	);
 	INSERT INTO documents (load_id, driver, type, file_name, drive_url) VALUES
-		('L-100', 'Deshorn King', 'POD', 'L-100_POD_1.pdf', '/uploads/L-100_POD_1.pdf'),
-		('L-100', 'Deshorn King', 'BOL', 'L-100_BOL_2.pdf', '/uploads/L-100_BOL_2.pdf'),
+		('L-100', 'Desoren King', 'POD', 'L-100_POD_1.pdf', '/uploads/L-100_POD_1.pdf'),
+		('L-100', 'Desoren King', 'BOL', 'L-100_BOL_2.pdf', '/uploads/L-100_BOL_2.pdf'),
 		('L-100', '', 'RATECON', 'L-100.pdf', '/uploads/rate-cons/L-100.pdf'),
-		('L-200', 'Shorn King', 'POD', 'L-200_POD_3.pdf', '/uploads/L-200_POD_3.pdf');
+		('L-200', 'Soren King', 'POD', 'L-200_POD_3.pdf', '/uploads/L-200_POD_3.pdf');
 `);
 const docDbRecorded = {
 	prepare(sql) { counters.prepared.push(sql); return docDb.prepare(sql); },
@@ -241,8 +241,8 @@ async function call(route, { user, method = "GET", params = {}, body = {} }) {
 }
 
 const SUPER = { id: 1, role: "Super Admin", username: "super_admin", driverName: "" };
-const DK = { id: 2, role: "Driver", username: "LogisX-1001", driverName: "Deshorn King" };
-const SK = { id: 3, role: "Driver", username: "LogisX-1002", driverName: "Shorn King" };
+const DK = { id: 2, role: "Driver", username: "LogisX-1001", driverName: "Desoren King" };
+const SK = { id: 3, role: "Driver", username: "LogisX-1002", driverName: "Soren King" };
 const DISPATCH = { id: 4, role: "Dispatcher", username: "dispatch1", driverName: "" };
 const INVESTOR = { id: 5, role: "Investor", username: "investor1", driverName: "" };
 const NAMELESS = { id: 6, role: "Driver", username: "LogisX-1003", driverName: "" };
@@ -250,7 +250,7 @@ const NOLAN = { id: 7, role: "Driver", username: "LogisX-1004", driverName: "Nol
 // An Investor session that happens to carry a driver's name. The ownership check
 // would admit it by name, so only the mount can refuse it — which is what lets a
 // mutant of the mount show up at all.
-const INVESTOR_NAMED = { ...INVESTOR, driverName: "Deshorn King" };
+const INVESTOR_NAMED = { ...INVESTOR, driverName: "Desoren King" };
 
 const PDF = `data:application/pdf;base64,${Buffer.from("%PDF-1.4 test document").toString("base64")}`;
 const upload = (loadId, docType, extra = {}) => ({
@@ -308,7 +308,7 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 	r = await uploadAs(null, upload("L-100", "POD"));
 	ok("no session: 401, nothing read or written", r.status === 401 && readsOf() === 0 && refusedClean(r), brief(r));
 	for (const [label, user] of [["Investor", INVESTOR], ["Investor carrying a driver's name", INVESTOR_NAMED]]) {
-		r = await uploadAs(user, upload("L-100", "POD", { driverName: "Deshorn King" }));
+		r = await uploadAs(user, upload("L-100", "POD", { driverName: "Desoren King" }));
 		ok(`${label}: 403 Forbidden at the mount — no limiter budget, no read, no file, no row`,
 			r.status === 403 && r.body.error === "Forbidden" && counters.limiter === 0 && readsOf() === 0 && refusedClean(r),
 			brief(r));
@@ -317,7 +317,7 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 	r = await uploadAs(DK, upload("L-100", "POD"));
 	ok("Driver, own load, POD: 200, one file written and one row stored as POD",
 		r.status === 200 && r.body.success === true && r.inserted === 1 && counters.files.length === 1 &&
-		lastDoc().type === "POD" && lastDoc().driver === "Deshorn King", brief(r));
+		lastDoc().type === "POD" && lastDoc().driver === "Desoren King", brief(r));
 	const podUploaded = () => counters.emitted.filter((e) => e.event === "pod-uploaded");
 	ok("...and the pod-uploaded broadcast to the dispatch room carries the POD's link",
 		podUploaded().length === 1 && podUploaded()[0].room === "dispatch" && podUploaded()[0].payload.driveUrl === r.body.driveUrl,
@@ -325,7 +325,7 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 	r = await uploadAs(DK, upload("L-200", "POD"));
 	ok("Driver, another driver's load: 403, no file, no row",
 		r.status === 403 && r.body.error === "This load is not assigned to you" && refusedClean(r), brief(r));
-	r = await uploadAs(DK, upload("L-100", "POD", { driverName: "Shorn King" }));
+	r = await uploadAs(DK, upload("L-100", "POD", { driverName: "Soren King" }));
 	ok("Driver naming another driver in the body: 403, nothing read or written",
 		r.status === 403 && readsOf() === 0 && refusedClean(r), brief(r));
 
@@ -343,11 +343,11 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 			r.status === 200 && r.inserted === 1 && lastDoc().type === stored, brief(r));
 	}
 
-	r = await uploadAs(DISPATCH, upload("L-200", "BOL", { driverName: "Shorn King" }));
+	r = await uploadAs(DISPATCH, upload("L-200", "BOL", { driverName: "Soren King" }));
 	ok("Dispatcher, any load, BOL: 200 with no ownership read, attributed to the named driver",
 		r.status === 200 && r.inserted === 1 && counters.sheetReads === 0 &&
-		lastDoc().type === "BOL" && lastDoc().driver === "Shorn King", brief(r));
-	r = await uploadAs(DISPATCH, upload("L-200", "RATECON", { driverName: "Shorn King" }));
+		lastDoc().type === "BOL" && lastDoc().driver === "Soren King", brief(r));
+	r = await uploadAs(DISPATCH, upload("L-200", "RATECON", { driverName: "Soren King" }));
 	ok("Dispatcher, RATECON: 400 DOC_TYPE_NOT_ALLOWED, nothing written",
 		r.status === 400 && r.body.code === "DOC_TYPE_NOT_ALLOWED" && refusedClean(r), brief(r));
 	r = await uploadAs(SUPER, upload("L-200", "RATECON"));
@@ -370,16 +370,16 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 	flagDb.exec(`
 		CREATE TABLE messages (id INTEGER PRIMARY KEY, timestamp TEXT, "from" TEXT, "to" TEXT, message TEXT, load_id TEXT DEFAULT '', read INTEGER DEFAULT 0);
 		INSERT INTO messages (id, "from", "to", message) VALUES
-			(1, 'Deshorn King', 'Dispatch', 'm1'),
-			(2, 'Dispatch', 'Deshorn King', 'm2'),
-			(3, 'Dispatch', 'Shorn King', 'm3'),
+			(1, 'Desoren King', 'Dispatch', 'm1'),
+			(2, 'Dispatch', 'Desoren King', 'm2'),
+			(3, 'Dispatch', 'Soren King', 'm3'),
 			(4, 'Dispatch', 'investor1', 'm4'),
 			(5, 'Dispatch', 'investor2', 'm5'),
-			(6, 'Shorn King', 'dispatch1', 'm6');
+			(6, 'Soren King', 'dispatch1', 'm6');
 		CREATE TABLE notifications (id INTEGER PRIMARY KEY, driver_name TEXT NOT NULL, type TEXT, title TEXT, read INTEGER DEFAULT 0);
 		INSERT INTO notifications (id, driver_name, type, title) VALUES
-			(1, 'deshorn king', 'message', 'n1'),
-			(2, 'shorn king', 'message', 'n2'),
+			(1, 'desoren king', 'message', 'n1'),
+			(2, 'soren king', 'message', 'n2'),
 			(3, 'investor1', 'message', 'n3'),
 			(4, 'dispatch1', 'message', 'n4'),
 			(5, '', 'message', 'n5');
@@ -452,7 +452,7 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 	r = await call(driverRoute, { user: SUPER, params: { driverName: "Nolan Loadless" } });
 	ok("Super Admin, same driver: the diagnostic is still built",
 		r.status === 200 && r.body.diagnostic && r.body.diagnostic.warning === "no_loads_for_driver" &&
-		r.body.diagnostic.sampleDriverNamesInSheet.join() === "Deshorn King,Shorn King",
+		r.body.diagnostic.sampleDriverNamesInSheet.join() === "Desoren King,Soren King",
 		`status ${r.status}, diagnostic ${JSON.stringify(r.body && r.body.diagnostic)}`);
 
 	// =========================================================================

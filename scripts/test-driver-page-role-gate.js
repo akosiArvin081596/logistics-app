@@ -122,37 +122,37 @@ const heldByOtherLookup = (db) =>
 const JT = {
 	headers: ["Load ID", "Driver", "Job Status", "Rate", "  Payment  ", "Broker Contact Name", "Phone Number", "Pickup Address", "Drop-off Address"],
 	data: [
-		{ _rowIndex: 2, "Load ID": "L-100", Driver: "Deshorn King", "Job Status": "In Transit", Rate: "2000", "  Payment  ": "2000",
+		{ _rowIndex: 2, "Load ID": "L-100", Driver: "Desoren King", "Job Status": "In Transit", Rate: "2000", "  Payment  ": "2000",
 			"Broker Contact Name": "Pat Broker", "Phone Number": "555-0100", "Pickup Address": "1 A St", "Drop-off Address": "2 B St" },
-		{ _rowIndex: 3, "Load ID": "L-200", Driver: "Shorn King", "Job Status": "Assigned", Rate: "1500", "  Payment  ": "1500",
+		{ _rowIndex: 3, "Load ID": "L-200", Driver: "Soren King", "Job Status": "Assigned", Rate: "1500", "  Payment  ": "1500",
 			"Broker Contact Name": "Sam Broker", "Phone Number": "555-0200", "Pickup Address": "3 C St", "Drop-off Address": "4 D St" },
 	],
 };
 const CARRIER = {
 	headers: ["Driver", "PhoneNumber", "Email", "Address"],
 	data: [
-		{ Driver: "Deshorn King", PhoneNumber: "555-0111", Email: "dk@example.test", Address: "10 Home Rd" },
-		{ Driver: "Shorn King", PhoneNumber: "555-0222", Email: "sk@example.test", Address: "20 Home Rd" },
+		{ Driver: "Desoren King", PhoneNumber: "555-0111", Email: "dk@example.test", Address: "10 Home Rd" },
+		{ Driver: "Soren King", PhoneNumber: "555-0222", Email: "sk@example.test", Address: "20 Home Rd" },
 	],
 };
 const TABLES = {
 	messages: [
-		{ id: 1, from: "Deshorn King", to: "dispatch", message: "on my way" },
-		{ id: 2, from: "dispatch", to: "Shorn King", message: "call me" },
+		{ id: 1, from: "Desoren King", to: "dispatch", message: "on my way" },
+		{ id: 2, from: "dispatch", to: "Soren King", message: "call me" },
 	],
-	notifications: [{ id: 1, driver_name: "deshorn king", title: "Assigned" }],
+	notifications: [{ id: 1, driver_name: "desoren king", title: "Assigned" }],
 	expenses: [
-		{ id: 1, driver: "Deshorn King", amount: 120 },
-		{ id: 2, driver: "Shorn King", amount: 80 },
+		{ id: 1, driver: "Desoren King", amount: 120 },
+		{ id: 2, driver: "Soren King", amount: 80 },
 		{ id: 3, driver: "", amount: 55 },
 	],
 	invoices: [
-		{ id: 1, driver: "deshorn king", total_earnings: 1800 },
-		{ id: 2, driver: "shorn king", total_earnings: 1500 },
+		{ id: 1, driver: "desoren king", total_earnings: 1800 },
+		{ id: 2, driver: "soren king", total_earnings: 1500 },
 		{ id: 3, driver: "", total_earnings: 999 },
 	],
-	trucks: [{ id: 7, unit_number: "33", assigned_driver: "Deshorn King" }],
-	drivers_directory: [{ id: 11, driver_name: "Deshorn King" }, { id: 12, driver_name: "Shorn King" }],
+	trucks: [{ id: 7, unit_number: "33", assigned_driver: "Desoren King" }],
+	drivers_directory: [{ id: 11, driver_name: "Desoren King" }, { id: 12, driver_name: "Soren King" }],
 };
 
 // A recording db: every read is logged, and rows come back filtered by the
@@ -242,15 +242,15 @@ async function callHandler(route, user, name) {
 }
 
 const SUPER = { id: 1, role: "Super Admin", username: "super_admin", driverName: "" };
-const DK = { id: 2, role: "Driver", username: "LogisX-1001", driverName: "Deshorn King" };
-const SK = { id: 3, role: "Driver", username: "LogisX-1002", driverName: "Shorn King" };
+const DK = { id: 2, role: "Driver", username: "LogisX-1001", driverName: "Desoren King" };
+const SK = { id: 3, role: "Driver", username: "LogisX-1002", driverName: "Soren King" };
 const DISPATCH = { id: 4, role: "Dispatcher", username: "dispatch1", driverName: "" };
 const INVESTOR = { id: 5, role: "Investor", username: "investor1", driverName: "" };
 const NAMELESS = { id: 6, role: "Driver", username: "LogisX-1003", driverName: "" };
 // Sessions that carry a driver name on a role this page does not serve. The
 // mount is what refuses these; layer B alone would admit them by name.
-const DISPATCH_NAMED = { ...DISPATCH, driverName: "Deshorn King" };
-const INVESTOR_NAMED = { ...INVESTOR, driverName: "Deshorn King" };
+const DISPATCH_NAMED = { ...DISPATCH, driverName: "Desoren King" };
+const INVESTOR_NAMED = { ...INVESTOR, driverName: "Desoren King" };
 
 const forbidden = (r) => r.status === 403 && r.body && r.body.error === "Forbidden";
 const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `, ${JSON.stringify(r.body)}` : ""}`;
@@ -262,39 +262,39 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 	console.log("\n§1  every role, against its own name and another driver's name");
 	// =========================================================================
 	let r;
-	r = await call(route, null, "Deshorn King");
+	r = await call(route, null, "Desoren King");
 	ok("no session: 401 before any read", r.status === 401 && r.reads === 0, brief(r));
 
 	r = await call(route, SUPER, "super_admin");
 	ok("Super Admin, own name: 200", r.status === 200, brief(r));
-	r = await call(route, SUPER, "Deshorn King");
+	r = await call(route, SUPER, "Desoren King");
 	ok("Super Admin, another driver: 200", r.status === 200 && r.body.loads.length === 1, brief(r));
 
-	r = await call(route, DK, "Deshorn King");
+	r = await call(route, DK, "Desoren King");
 	ok("Driver, own name: 200 with only their own load", r.status === 200
 		&& r.body.loads.length === 1 && r.body.loads[0]["Load ID"] === "L-100", brief(r));
-	r = await call(route, DK, "  deshorn   KING ");
+	r = await call(route, DK, "  desoren   KING ");
 	ok("Driver, own name in another case and spacing: 200 (normalizeDriverName on both sides)",
 		r.status === 200 && r.body.loads.length === 1, brief(r));
-	r = await call(route, DK, "Shorn King");
+	r = await call(route, DK, "Soren King");
 	ok("Driver, another driver: 403 Forbidden before any read", forbidden(r) && r.reads === 0, brief(r));
-	r = await call(route, SK, "Deshorn King");
-	ok('Driver "Shorn King" reading "Deshorn King": 403 (whole-name match, no substring)', forbidden(r), brief(r));
+	r = await call(route, SK, "Desoren King");
+	ok('Driver "Soren King" reading "Desoren King": 403 (whole-name match, no substring)', forbidden(r), brief(r));
 
 	for (const [label, user] of [["Dispatcher", DISPATCH], ["Investor", INVESTOR]]) {
 		r = await call(route, user, user.username);
 		ok(`${label}, own name: 403 Forbidden before any read`, forbidden(r) && r.reads === 0, brief(r));
-		r = await call(route, user, "Deshorn King");
+		r = await call(route, user, "Desoren King");
 		ok(`${label}, a driver's name: 403 Forbidden before any read`, forbidden(r) && r.reads === 0, brief(r));
 	}
-	r = await call(route, DISPATCH_NAMED, "Deshorn King");
+	r = await call(route, DISPATCH_NAMED, "Desoren King");
 	ok("Dispatcher whose session carries the requested driver name: still 403 at the mount",
 		forbidden(r) && r.reads === 0, brief(r));
-	r = await call(route, INVESTOR_NAMED, "Deshorn King");
+	r = await call(route, INVESTOR_NAMED, "Desoren King");
 	ok("Investor whose session carries the requested driver name: still 403 at the mount",
 		forbidden(r) && r.reads === 0, brief(r));
 
-	r = await call(route, NAMELESS, "Deshorn King");
+	r = await call(route, NAMELESS, "Desoren King");
 	ok("Driver with a blank session name, any driver: 403", forbidden(r) && r.reads === 0, brief(r));
 	r = await call(route, NAMELESS, " ");
 	ok('Driver with a blank session name, a blank name: 403 ("" never matches "")',
@@ -303,7 +303,7 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 	// =========================================================================
 	console.log("\n§2  what an admitted caller receives");
 	// =========================================================================
-	const own = await call(route, DK, "Deshorn King");
+	const own = await call(route, DK, "Desoren King");
 	const ownHeaders = own.body.headers.jobTracking;
 	const ownLoad = own.body.loads[0];
 	ok("Driver: no rate or payment column in the headers or on the load",
@@ -317,21 +317,21 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 		&& own.body.expenses.map((e) => e.id).join() === "1"
 		&& own.body.messages.map((m) => m.id).join() === "1");
 
-	const admin = await call(route, SUPER, "Deshorn King");
+	const admin = await call(route, SUPER, "Desoren King");
 	const adminLoad = admin.body.loads[0];
 	ok("Super Admin: rate columns and broker contacts intact",
 		admin.body.headers.jobTracking.includes("Rate") && adminLoad.Rate === "2000"
 		&& adminLoad["Broker Contact Name"] === "Pat Broker");
 	ok("Super Admin: the roster and the driver's invoice totals",
-		admin.body.drivers.join() === "Deshorn King,Shorn King"
+		admin.body.drivers.join() === "Desoren King,Soren King"
 		&& admin.body.invoices.length === 1 && admin.body.invoices[0].total_earnings === 1800);
 
 	// Layer B alone: if the mount is ever widened, the handler still treats every
 	// non-Super-Admin caller as the driver.
-	r = await callHandler(route, DISPATCH_NAMED, "Deshorn King");
+	r = await callHandler(route, DISPATCH_NAMED, "Desoren King");
 	ok("handler alone, a non-Super-Admin caller it admits by name: rates stripped, no roster",
 		r.status === 200 && !r.body.headers.jobTracking.includes("Rate") && r.body.drivers.length === 0, brief(r));
-	r = await callHandler(route, INVESTOR, "Deshorn King");
+	r = await callHandler(route, INVESTOR, "Desoren King");
 	ok("handler alone, a nameless non-Super-Admin caller: 403 before any read", forbidden(r) && r.reads === 0, brief(r));
 
 	// =========================================================================
@@ -366,7 +366,7 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 	// Layer B refuses a NAMELESS Dispatcher or Investor on its own, so that case
 	// cannot show the mount matters. A session that carries a driver name can.
 	const m1 = buildRoute(mutate(ROUTE_SRC, 'requireRole("Super Admin", "Driver")', "requireAuth"));
-	r = await call(m1, INVESTOR_NAMED, "Deshorn King");
+	r = await call(m1, INVESTOR_NAMED, "Desoren King");
 	ok("MUTANT 1 (mount is requireAuth): the §1 named-Investor assertion flips",
 		r.status === 200 && r.body.invoices.length === 1, brief(r));
 
@@ -404,15 +404,15 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 	}
 	const SK_PIC = "/uploads/profile-pictures/sk.png";
 	const found = (res, id, pic) => res.status === 200 && res.body.driverDirectoryId === id && res.body.profilePictureUrl === pic;
-	for (const [label, stored] of [["a doubled space", "Shorn  King"], ["edge spaces", " Shorn King "]]) {
-		r = await call(routeWithDirectory([[11, "Deshorn King", ""], [12, stored, SK_PIC]]), SK, "Shorn King");
+	for (const [label, stored] of [["a doubled space", "Soren  King"], ["edge spaces", " Soren King "]]) {
+		r = await call(routeWithDirectory([[11, "Desoren King", ""], [12, stored, SK_PIC]]), SK, "Soren King");
 		ok(`Driver, own page, their directory row stored with ${label}: found (its id and profile picture)`,
 			found(r, 12, SK_PIC), brief(r));
 	}
-	r = await call(routeWithDirectory([[12, "Shorn  King", "/a.png"], [13, "SHORN KING", "/b.png"]]), SK, "Shorn King");
+	r = await call(routeWithDirectory([[12, "Soren  King", "/a.png"], [13, "SOREN KING", "/b.png"]]), SK, "Soren King");
 	ok("the row equal to the name case aside is still preferred to a spacing variant", found(r, 13, "/b.png"), brief(r));
-	r = await call(routeWithDirectory([[11, "Deshorn King", "/d.png"]]), SK, "Shorn King");
-	ok("no row of their own: no directory id and no picture (Deshorn King is another driver)", found(r, 0, ""), brief(r));
+	r = await call(routeWithDirectory([[11, "Desoren King", "/d.png"]]), SK, "Soren King");
+	ok("no row of their own: no directory id and no picture (Desoren King is another driver)", found(r, 0, ""), brief(r));
 	const routeCode = ROUTE_SRC.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
 	ok("the route resolves its directory row through findDirectoryRowForDriver(), with no LOWER() lookup of its own",
 		routeCode.includes("findDirectoryRowForDriver(driverName)") && !/FROM drivers_directory WHERE LOWER\(/.test(routeCode));
@@ -422,7 +422,7 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 	// catches the same mutant there.
 	const LOWER_ONLY = mutate(DIRECTORY_LOOKUP_SRC,
 		"const hit = findDriverNameClashes(trimmed, { users: false })[0];", "const hit = null;");
-	r = await call(routeWithDirectory([[11, "Deshorn King", ""], [12, "Shorn  King", SK_PIC]], LOWER_ONLY), SK, "Shorn King");
+	r = await call(routeWithDirectory([[11, "Desoren King", ""], [12, "Soren  King", SK_PIC]], LOWER_ONLY), SK, "Soren King");
 	ok("MUTANT 3 (the directory lookup back to LOWER() equality): the §5 doubled-space assertion flips",
 		found(r, 0, ""), brief(r));
 
@@ -446,18 +446,18 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 			uploaded_by TEXT DEFAULT '', uploaded_at TEXT DEFAULT '2026-09-01')`);
 		fdb.exec("CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT NOT NULL UNIQUE COLLATE NOCASE, profile_picture_url TEXT DEFAULT '')");
 		const truck = fdb.prepare("INSERT INTO trucks (id, unit_number, assigned_driver, photo) VALUES (?, ?, ?, ?)");
-		truck.run(7, "33", "Deshorn King", "");
-		truck.run(8, "101", "Shorn  King", "P101"); // Shorn King's truck, stored with a doubled space
-		fdb.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (8, 'Shorn  King', '2026-09-01')").run();
-		fdb.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (7, 'Deshorn King', '2026-09-01')").run();
+		truck.run(7, "33", "Desoren King", "");
+		truck.run(8, "101", "Soren  King", "P101"); // Soren King's truck, stored with a doubled space
+		fdb.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (8, 'Soren  King', '2026-09-01')").run();
+		fdb.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (7, 'Desoren King', '2026-09-01')").run();
 		// file_url "" keeps every admitted request off the disk: it answers 404
 		// "File missing" after the ownership check, a refusal 403 before it.
 		const doc = fdb.prepare("INSERT INTO legal_documents (id, truck_id, driver_id, visible_to_driver, file_name) VALUES (?, ?, ?, 1, 'x.pdf')");
 		doc.run(50, 8, 0); doc.run(51, 7, 0); doc.run(60, 0, 12); doc.run(61, 0, 11);
-		fdb.prepare("INSERT INTO drivers_directory (id, driver_name) VALUES (11, 'Deshorn King'), (12, 'Shorn  King')").run();
+		fdb.prepare("INSERT INTO drivers_directory (id, driver_name) VALUES (11, 'Desoren King'), (12, 'Soren  King')").run();
 		// The two drivers' accounts (DK, SK). Nothing else holds either name.
 		fdb.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, driver_name TEXT)");
-		fdb.prepare("INSERT INTO users (id, username, driver_name) VALUES (2, 'LogisX-1001', 'Deshorn King'), (3, 'LogisX-1002', 'Shorn King')").run();
+		fdb.prepare("INSERT INTO users (id, username, driver_name) VALUES (2, 'LogisX-1001', 'Desoren King'), (3, 'LogisX-1002', 'Soren King')").run();
 		return fdb;
 	}
 	const FILES_TABLES = /\b(trucks|truck_assignments|legal_documents|drivers_directory)\b/;
@@ -505,16 +505,16 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 	const said = (x) => `${x.status} ${JSON.stringify(x.body)}`.slice(0, 120);
 	{
 		const fdb = makeFilesDb();
-		r = await call(pageOverFiles(fdb), SK, "Shorn King");
+		r = await call(pageOverFiles(fdb), SK, "Soren King");
 		ok("GET /api/driver/:driverName: a driver whose truck is stored with a doubled space gets that truck",
 			r.status === 200 && r.body.truck && r.body.truck.id === 8 && r.body.truck.unit_number === "101", brief(r));
 		ok("...and the driver-visible documents of that truck listed",
 			r.status === 200 && r.body.truck && r.body.truckDocuments.map((d) => d.id).join() === "50",
 			`truck ${JSON.stringify(r.body && r.body.truck)}, docs ${JSON.stringify(r.body && r.body.truckDocuments)}`);
-		r = await call(pageOverFiles(fdb), DK, "Deshorn King");
-		ok("...and Deshorn King still gets his own truck", r.status === 200 && r.body.truck && r.body.truck.id === 7, brief(r));
-		fdb.prepare("UPDATE trucks SET assigned_driver = 'SHORN KING' WHERE id = 7").run();
-		r = await call(pageOverFiles(fdb), SK, "Shorn King");
+		r = await call(pageOverFiles(fdb), DK, "Desoren King");
+		ok("...and Desoren King still gets his own truck", r.status === 200 && r.body.truck && r.body.truck.id === 7, brief(r));
+		fdb.prepare("UPDATE trucks SET assigned_driver = 'SOREN KING' WHERE id = 7").run();
+		r = await call(pageOverFiles(fdb), SK, "Soren King");
 		ok("the truck naming the driver case aside is still preferred to a spacing variant", r.status === 200 && r.body.truck.id === 7, brief(r));
 	}
 	{
@@ -524,7 +524,7 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 		ok("GET /api/driver/me/truck-photo: the same driver gets that truck's photo",
 			x.status === 200 && Buffer.isBuffer(x.body) && x.body.toString() === "P101", said(x));
 		x = await photo(DK);
-		ok("...and Deshorn King, whose truck has none, gets 404", x.status === 404, said(x));
+		ok("...and Desoren King, whose truck has none, gets 404", x.status === 404, said(x));
 	}
 	{
 		const fdb = makeFilesDb();
@@ -568,13 +568,13 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 	}
 	{
 		// A legacy duplicate account whose driver name differs only in spacing.
-		// Row 12 ("Shorn  King") is then that account's row as much as SK's, so
+		// Row 12 ("Soren  King") is then that account's row as much as SK's, so
 		// SK's spacing-only match is refused (driverNameHeldByOtherAccount(), the
 		// rule the directory rename and delete apply), while the account whose name
 		// equals the row case aside still uploads to it.
 		const fdb = makeFilesDb();
-		fdb.prepare("INSERT INTO users (id, username, driver_name) VALUES (9, 'LogisX-0999', 'Shorn  King')").run();
-		const LEGACY = { id: 9, role: "Driver", username: "LogisX-0999", driverName: "Shorn  King" };
+		fdb.prepare("INSERT INTO users (id, username, driver_name) VALUES (9, 'LogisX-0999', 'Soren  King')").run();
+		const LEGACY = { id: 9, role: "Driver", username: "LogisX-0999", driverName: "Soren  King" };
 		const pic = sibling("post", "/api/drivers-directory/:id/profile-picture", fdb);
 		let x = await pic(SK, { id: "12" });
 		ok("POST /api/drivers-directory/:id/profile-picture: a spacing-only match is refused 403 while another account holds that driver name",
@@ -594,7 +594,7 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 		// the page and the photo route made before.
 		const TRUCK_LOWER_ONLY = mutate(TRUCK_LOOKUP_SRC,
 			'return hit ? { ...hit, matchedBy: "normalized" } : null;', "return null;");
-		r = await call(pageOverFiles(makeFilesDb(), TRUCK_LOWER_ONLY), SK, "Shorn King");
+		r = await call(pageOverFiles(makeFilesDb(), TRUCK_LOWER_ONLY), SK, "Soren King");
 		ok("MUTANT 4 (the truck lookup back to LOWER() equality): the §6 doubled-space truck assertion flips",
 			r.status === 200 && r.body.truck === null, brief(r));
 		// MUTANT 5: the truck-document check comparing trimmed, lowercased names

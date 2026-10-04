@@ -281,23 +281,23 @@ function makeDb() {
 	const user = db.prepare("INSERT INTO users (id, username, password_hash, role, driver_name, full_name) VALUES (?, ?, 'x', ?, ?, ?)");
 	user.run(1, "super_admin", "Super Admin", "", "");
 	user.run(2, "kevin", "Dispatcher", "", "Kevin Dispatch");
-	user.run(3, "sking", "Driver", "Shorn King", "Shorn King");
-	user.run(4, "rbrown", "Driver", "Rodney Brown", "Rodney Brown");
+	user.run(3, "sking", "Driver", "Soren King", "Soren King");
+	user.run(4, "rbrown", "Driver", "Roland Brown", "Roland Brown");
 	user.run(9, "acme", "Investor", "", "Acme Holdings");
 	const dir = db.prepare(`INSERT INTO drivers_directory (id, driver_name, city, state, phone, email, status, pay_type, pay_percentage, pay_daily)
 		VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`);
-	dir.run(1, "Shorn King", "Houston", "TX", "555-0100", "shorn@example.com", "fixed", 0, 300); // a day rate of his own
-	dir.run(2, "Rodney Brown", "Dallas", "TX", "555-0200", "rodney@example.com", "percentage", 20, 0); // an owner-operator share
+	dir.run(1, "Soren King", "Houston", "TX", "555-0100", "soren@example.com", "fixed", 0, 300); // a day rate of his own
+	dir.run(2, "Roland Brown", "Dallas", "TX", "555-0200", "roland@example.com", "percentage", 20, 0); // an owner-operator share
 	dir.run(3, "Legacy Lee", "Austin", "TX", "555-0300", "", "Fixed", 0, 280); // pay_type stored before the handler lowercased it
 	dir.run(4, "New Hire", "Waco", "TX", "555-0400", "", "fixed", 0, 0); // on the default terms: the truck's rate applies
 	dir.run(5, "Null Nell", "Tyler", "TX", "555-0500", "", null, null, null); // pay columns never written
 	dir.run(6, " Padded Pat", "Tyler", "TX", "555-0600", "", "fixed", 0, 275); // a name stored before names were trimmed
 	const truck = db.prepare("INSERT INTO trucks (id, unit_number, make, status, assigned_driver, notes, owner_id, driver_pay_daily) VALUES (?, ?, 'Freightliner', 'Active', ?, '', 5, ?)");
-	truck.run(1, "33", "Shorn King", 250);
-	truck.run(2, "302", "Rodney Brown", 20);
+	truck.run(1, "33", "Soren King", 250);
+	truck.run(2, "302", "Roland Brown", 20);
 	truck.run(3, "91", "", 0);
-	db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (1, 'Shorn King', '2026-09-01')").run();
-	db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (2, 'Rodney Brown', '2026-09-01')").run();
+	db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (1, 'Soren King', '2026-09-01')").run();
+	db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (2, 'Roland Brown', '2026-09-01')").run();
 	return db;
 }
 
@@ -492,7 +492,7 @@ async function battery(opts = {}) {
 		// A request that carries no pay column at all keeps the stored terms.
 		const db = makeDb();
 		const app = mountAll(db, opts);
-		const r = await app.dirPut(DISPATCHER, 1, { headers: ["Driver", "PhoneNumber"], values: ["Shorn King", "555-1234"] });
+		const r = await app.dirPut(DISPATCHER, 1, { headers: ["Driver", "PhoneNumber"], values: ["Soren King", "555-1234"] });
 		t(`§1 Dispatcher PUT directory with no pay columns: saved (got ${r.status})`, r.status === 200 && row(db, 1).phone === "555-1234" && row(db, 1).pay_daily === 300);
 	}
 	{
@@ -511,9 +511,9 @@ async function battery(opts = {}) {
 		const n = await app.dirPut(DISPATCHER, 4, dirFormBody(row(db, 4), { Driver: "New Hire Jr.", Status: "inactive" }));
 		t(`§1 Dispatcher PUT directory, renaming a driver on the default terms: saved as before (got ${n.status} ${(n.body || {}).code || ""})`,
 			n.status === 200 && row(db, 4).driver_name === "New Hire Jr." && row(db, 4).status === "inactive");
-		const c = await app.dirPut(DISPATCHER, 1, dirFormBody(row(db, 1), { Driver: " Shorn King  " }));
+		const c = await app.dirPut(DISPATCHER, 1, dirFormBody(row(db, 1), { Driver: " Soren King  " }));
 		t(`§1 Dispatcher PUT directory, a $300 driver's name resent with padding: saved, stored name unchanged (got ${c.status} ${(c.body || {}).code || ""})`,
-			c.status === 200 && row(db, 1).driver_name === "Shorn King" && row(db, 1).pay_daily === 300);
+			c.status === 200 && row(db, 1).driver_name === "Soren King" && row(db, 1).pay_daily === 300);
 		const p = await app.dirPut(DISPATCHER, 6, dirFormBody(row(db, 6), { PhoneNumber: "555-0666" }));
 		t(`§1 Dispatcher PUT directory, a $275 row whose stored name is padded, resent as loaded: saved, name kept byte for byte (got ${p.status} ${(p.body || {}).code || ""})`,
 			p.status === 200 && row(db, 6).driver_name === " Padded Pat" && row(db, 6).phone === "555-0666");
@@ -521,11 +521,11 @@ async function battery(opts = {}) {
 	}
 	// The stored name of a row with terms of its own is part of those terms.
 	for (const [label, id, to] of [
-		["a $300 driver renamed", 1, "Shorn A. King"],
-		["a 20% owner-operator renamed", 2, "Rodney B. Brown"],
+		["a $300 driver renamed", 1, "Soren A. King"],
+		["a 20% owner-operator renamed", 2, "Roland B. Brown"],
 		["a $280 legacy row renamed", 3, "Lee Legacy"],
-		["a $300 driver respelled in case", 1, "SHORN KING"],
-		["a $300 driver respelled in spacing", 1, "Shorn  King"],
+		["a $300 driver respelled in case", 1, "SOREN KING"],
+		["a $300 driver respelled in spacing", 1, "Soren  King"],
 		["a padded $275 row trimmed", 6, "Padded Pat"],
 	]) {
 		const db = makeDb();
@@ -547,14 +547,14 @@ async function battery(opts = {}) {
 		const second = await app.dirPut(DISPATCHER, 1, dirFormBody(row(db, 1), { Driver: "New Hire" }));
 		t(`§1 a default-terms row renamed out of the way, then a $300 row renamed onto its old name: the second is refused (got ${first.status}, ${second.status} ${(second.body || {}).code || ""})`,
 			first.status === 200 && second.status === 403 && second.body.code === "PAY_EDIT_ADMIN_ONLY" &&
-			row(db, 1).driver_name === "Shorn King" && row(db, 1).pay_daily === 300);
+			row(db, 1).driver_name === "Soren King" && row(db, 1).pay_daily === 300);
 	}
 	{
 		const db = makeDb();
 		const app = mountAll(db, opts);
-		const r = await app.dirPut(SUPER, 1, dirFormBody(row(db, 1), { Driver: "Shorn A. King" }));
+		const r = await app.dirPut(SUPER, 1, dirFormBody(row(db, 1), { Driver: "Soren A. King" }));
 		t(`§1 Super Admin PUT directory, renaming a $300 driver: saved (got ${r.status})`,
-			r.status === 200 && row(db, 1).driver_name === "Shorn A. King" && row(db, 1).pay_daily === 300);
+			r.status === 200 && row(db, 1).driver_name === "Soren A. King" && row(db, 1).pay_daily === 300);
 	}
 	// The daily rate is held to the truck routes' cap, for every role.
 	for (const [label, who, value, status] of [
@@ -620,8 +620,8 @@ async function battery(opts = {}) {
 			r.status === 200 && Object.entries(expect).every(([k, v]) => after[k] === v));
 	}
 	for (const [label, body] of [
-		["a PayDaily header sent twice", { headers: ["Driver", "PayDaily", "PayDaily"], values: ["Shorn King", 300, 500] }],
-		["a __proto__ header carrying a rate", { headers: ["Driver", "__proto__"], values: ["Shorn King", { PayDaily: 999, PayType: "percentage" }] }],
+		["a PayDaily header sent twice", { headers: ["Driver", "PayDaily", "PayDaily"], values: ["Soren King", 300, 500] }],
+		["a __proto__ header carrying a rate", { headers: ["Driver", "__proto__"], values: ["Soren King", { PayDaily: 999, PayType: "percentage" }] }],
 	]) {
 		const db = makeDb();
 		const app = mountAll(db, opts);
@@ -929,7 +929,7 @@ async function battery(opts = {}) {
 		const [a] = audits(db, "pay_edit_blocked");
 		t("§5 the refusal row names the account, its role, the driver and the attempted change",
 			!!a && a.username === "kevin" && a.role === "Dispatcher" && a.user_id === 2 && a.entity === "driver" && a.entity_id === "1" &&
-			a.details.startsWith("Shorn King: pay_daily 300 -> 350") && a.details.includes("[PAY_EDIT_ADMIN_ONLY]") &&
+			a.details.startsWith("Soren King: pay_daily 300 -> 350") && a.details.includes("[PAY_EDIT_ADMIN_ONLY]") &&
 			a.details.endsWith("nothing was written"));
 		// Coalesced through logAuditRefusal(): a repeat inside the window is
 		// counted, not written again.

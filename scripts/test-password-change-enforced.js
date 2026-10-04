@@ -154,7 +154,7 @@ else skipped.push("§3/§6 real-SQLite runs (better-sqlite3 not resolvable, or t
 const CP = "/api/auth/change-password";
 const XRW = { "x-requested-with": "XMLHttpRequest" };
 const FLAGGED = () => ({ id: 7, username: "LogisX-2609", role: "Driver", mustChangePassword: true });
-const CLEAR = () => ({ id: 8, username: "amir_serrano", role: "Dispatcher", mustChangePassword: false });
+const CLEAR = () => ({ id: 8, username: "abel_salcedo", role: "Dispatcher", mustChangePassword: false });
 
 // req.route is what Express assigns when it dispatches into a route layer.
 // `routePath` omitted models an app.use mount, where Express assigns none.
@@ -453,10 +453,10 @@ function socketProbe(handlerSrc) {
 	onConnection(stale);
 	stale.fromClient("register", "Old Copy");
 	p.staleCopyJoinsNothing = stale.rooms.size === 0;
-	const disp = fakeSocket({ id: 8, username: "amir_serrano", role: "Dispatcher", mustChangePassword: false });
+	const disp = fakeSocket({ id: 8, username: "abel_salcedo", role: "Dispatcher", mustChangePassword: false });
 	onConnection(disp);
 	disp.fromClient("register", "dispatch");
-	p.unflaggedJoins = disp.rooms.has("dispatch") && disp.rooms.has(ROOMS.userRoom("amir_serrano")) && !disp.disconnected;
+	p.unflaggedJoins = disp.rooms.has("dispatch") && disp.rooms.has(ROOMS.userRoom("abel_salcedo")) && !disp.disconnected;
 	const anon = fakeSocket(null);
 	onConnection(anon);
 	p.anonDisconnected = anon.disconnected;

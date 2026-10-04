@@ -234,7 +234,7 @@ guarded("sections 2-5 ran", () => {
 		["a data: URI with an empty body", "data:image/jpeg;base64,"],
 		["a non-string", 12345],
 	]) {
-		const r = run({ sourceHash: HEX_A, photoData, driver: "shorn king" });
+		const r = run({ sourceHash: HEX_A, photoData, driver: "soren king" });
 		check(`BURN: sourceHash with no payload (${label}) is IGNORED`,
 			[r.ok, r.sourceHash, r.receiptHash, r.hashCandidates], [true, "", "", []]);
 	}
@@ -244,7 +244,7 @@ guarded("sections 2-5 ran", () => {
 	// stored payload is not byte-stable.
 	const bulkPayload = dataUrl("scankit-enhanced-bytes");
 	{
-		const r = run({ sourceHash: HEX_A, photoData: bulkPayload, driver: "shorn king" });
+		const r = run({ sourceHash: HEX_A, photoData: bulkPayload, driver: "soren king" });
 		check("BULK: payload + hash -> the CLIENT's hash is what gets stored",
 			[r.ok, r.sourceHash, r.receiptHash], [true, HEX_A, HEX_A]);
 		// ⚠️ And it must genuinely differ from the payload hash, or this case proves
@@ -257,14 +257,14 @@ guarded("sections 2-5 ran", () => {
 	}
 	// A payload with no sourceHash keeps the original behaviour exactly.
 	{
-		const r = run({ sourceHash: "", photoData: bulkPayload, driver: "shorn king" });
+		const r = run({ sourceHash: "", photoData: bulkPayload, driver: "soren king" });
 		check("PAYLOAD ONLY: the server's own payload hash is stored, unchanged",
 			[r.ok, r.sourceHash, r.receiptHash], [true, "", payloadHash("scankit-enhanced-bytes")]);
 	}
 	// A malformed sourceHash is dropped even WITH a payload — the gate joins the
 	// format check, it does not replace it.
 	{
-		const r = run({ sourceHash: "not-a-hash", photoData: bulkPayload, driver: "shorn king" });
+		const r = run({ sourceHash: "not-a-hash", photoData: bulkPayload, driver: "soren king" });
 		check("a malformed sourceHash is still dropped when a payload IS present",
 			[r.sourceHash, r.receiptHash], ["", payloadHash("scankit-enhanced-bytes")]);
 	}
@@ -272,13 +272,13 @@ guarded("sections 2-5 ran", () => {
 	// ── the cross-driver oracle ─────────────────────────────────────────────
 	db.prepare("DELETE FROM expenses").run();
 	db.prepare("INSERT INTO expenses (id, driver, amount, date, receipt_hash) VALUES (?, ?, ?, ?, ?)")
-		.run(4242, "shorn king", 500, "2026-06-03", HEX_B);
+		.run(4242, "soren king", 500, "2026-06-03", HEX_B);
 
 	{
 		// A different driver probing the same hash: REFUSED, but told nothing about
 		// whose row it is. The scoped SELECT declines to name it and the fleet-wide
 		// boolean beside it decides the refusal.
-		const r = run({ sourceHash: HEX_B, photoData: bulkPayload, driver: "howard reddie" });
+		const r = run({ sourceHash: HEX_B, photoData: bulkPayload, driver: "hollis renner" });
 		check("ORACLE: another driver is still REFUSED", [r.ok, r.code, r.body.code],
 			[false, 409, "DUPLICATE_RECEIPT"]);
 		check("...but the response carries NO expense id", "existingId" in r.body, false);
@@ -291,7 +291,7 @@ guarded("sections 2-5 ran", () => {
 	{
 		// PAIRED — the owner still gets the helpful 409 with the id. Scoping must not
 		// have simply switched the check off.
-		const r = run({ sourceHash: HEX_B, photoData: bulkPayload, driver: "shorn king" });
+		const r = run({ sourceHash: HEX_B, photoData: bulkPayload, driver: "soren king" });
 		check("...while the SAME driver still gets DUPLICATE_RECEIPT", [r.ok, r.code, r.body.code],
 			[false, 409, "DUPLICATE_RECEIPT"]);
 		check("...naming the row so the admin can find it", r.body.existingId, 4242);
@@ -300,15 +300,15 @@ guarded("sections 2-5 ran", () => {
 		// The predicate folds case and trims, matching normalizeDriverName()'s
 		// behaviour on every other driver join — so the real filer is never refused
 		// an answer over a spelling the rest of the app treats as identical.
-		const r = run({ sourceHash: HEX_B, photoData: bulkPayload, driver: "  SHORN KING " });
+		const r = run({ sourceHash: HEX_B, photoData: bulkPayload, driver: "  SOREN KING " });
 		check("...and case/whitespace variants of the SAME driver still match", r.body && r.body.existingId, 4242);
 	}
 	{
 		// The other door: the constraint-path winner re-read, executed as extracted.
 		const stmt = db.prepare(WINNER_SQL);
 		check("ORACLE (constraint path): another driver gets no winner id",
-			stmt.get(HEX_B, "howard reddie"), undefined);
-		check("...while the owner does", (stmt.get(HEX_B, "shorn king") || {}).id, 4242);
+			stmt.get(HEX_B, "hollis renner"), undefined);
+		check("...while the owner does", (stmt.get(HEX_B, "soren king") || {}).id, 4242);
 		// A blank driver must not become a wildcard that matches the ''-driver rows.
 		check("...and a blank driver matches only a blank-driver row",
 			stmt.get(HEX_B, ""), undefined);
@@ -323,9 +323,9 @@ guarded("sections 2-5 ran", () => {
 	const idx = new Database(":memory:");
 	idx.exec(`CREATE TABLE expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT DEFAULT '', receipt_hash TEXT DEFAULT '')`);
 	idx.exec(`CREATE UNIQUE INDEX idx_expenses_receipt_hash ON ${IDX_COLS}`);
-	idx.prepare("INSERT INTO expenses (driver, receipt_hash) VALUES (?, ?)").run("shorn king", HEX_B);
+	idx.prepare("INSERT INTO expenses (driver, receipt_hash) VALUES (?, ?)").run("soren king", HEX_B);
 	let blocked = false;
-	try { idx.prepare("INSERT INTO expenses (driver, receipt_hash) VALUES (?, ?)").run("howard reddie", HEX_B); }
+	try { idx.prepare("INSERT INTO expenses (driver, receipt_hash) VALUES (?, ?)").run("hollis renner", HEX_B); }
 	catch (e) { blocked = e.code === "SQLITE_CONSTRAINT_UNIQUE"; }
 	check("a CROSS-DRIVER duplicate receipt is still refused, by the index",
 		blocked, true);
@@ -375,8 +375,8 @@ guarded("sections 2-5 ran", () => {
 			date TEXT DEFAULT '', receipt_hash TEXT DEFAULT '')`);
 		d.exec("CREATE INDEX idx_expenses_receipt_hash ON expenses(receipt_hash)");
 		const ins = d.prepare("INSERT INTO expenses (id, driver, amount, date, receipt_hash) VALUES (?,?,?,?,?)");
-		ins.run(11, "shorn king", 500, "2026-06-03", HEX_B);
-		ins.run(12, "howard reddie", 500, "2026-06-03", HEX_B);
+		ins.run(11, "soren king", 500, "2026-06-03", HEX_B);
+		ins.run(12, "hollis renner", 500, "2026-06-03", HEX_B);
 		return d;
 	};
 	const skipDb = makeSkipDb();
@@ -414,7 +414,7 @@ guarded("sections 2-5 ran", () => {
 		check("...still without naming a row", "existingId" in r.body, false);
 		// PAIRED — the owner still gets the named 409 on the same database, so the
 		// fleet-wide test did not simply swallow the helpful message.
-		const own = skipRun({ sourceHash: HEX_B, photoData: bulkPayload, driver: "shorn king" });
+		const own = skipRun({ sourceHash: HEX_B, photoData: bulkPayload, driver: "soren king" });
 		check("...while the owner still gets the id", own.body.existingId, 11);
 		// PAIRED — and an unrelated receipt is still ACCEPTED, or "refuses everything"
 		// would pass every assertion above.
@@ -446,20 +446,20 @@ guarded("sections 2-5 ran", () => {
 	mutantCaught("a sourceHash accepted with no payload (the burn primitive)",
 		(s) => s.replace("const sourceHash = receiptHash && /^[a-f0-9]{64}$/i.test(",
 			"const sourceHash = /^[a-f0-9]{64}$/i.test("),
-		(R) => run({ sourceHash: HEX_A, photoData: "", driver: "shorn king" }, R).receiptHash === "");
+		(R) => run({ sourceHash: HEX_A, photoData: "", driver: "soren king" }, R).receiptHash === "");
 
 	// M2 — the driver predicate dropped from the pre-check, i.e. the fleet-wide
 	// oracle restored.
 	mutantCaught("a fleet-wide DUPLICATE_RECEIPT pre-check",
 		(s) => s.replace(/\s*AND LOWER\(TRIM\(COALESCE\(driver, ''\)\)\) = LOWER\(TRIM\(\?\)\)/, ""),
-		(R) => run({ sourceHash: HEX_B, photoData: bulkPayload, driver: "howard reddie" }, R).ok === true);
+		(R) => run({ sourceHash: HEX_B, photoData: bulkPayload, driver: "hollis renner" }, R).ok === true);
 
 	// M3 — the gate widened to "any string", which accepts an empty photoData as a
 	// payload and is the subtlest way back to M1.
 	mutantCaught("a gate on the parameter's TYPE rather than on a hashed payload",
 		(s) => s.replace("const sourceHash = receiptHash && /^[a-f0-9]{64}$/i.test(",
 			"const sourceHash = typeof photoData === \"string\" && /^[a-f0-9]{64}$/i.test("),
-		(R) => run({ sourceHash: HEX_A, photoData: "", driver: "shorn king" }, R).receiptHash === "");
+		(R) => run({ sourceHash: HEX_A, photoData: "", driver: "soren king" }, R).receiptHash === "");
 
 	// ⚠️ M5 — THE FLEET-WIDE EXISTENCE TEST DELETED, i.e. the state this batch fixed:
 	// the refusal is handed back to the UNIQUE index, and on a database where the
@@ -482,7 +482,7 @@ guarded("sections 2-5 ran", () => {
 	// would still "pass" every burn test; this is the paired direction.
 	mutantCaught("a client hash that is checked but never stored",
 		(s) => s.replace("\t\tif (sourceHash) receiptHash = sourceHash;", "\t\t;"),
-		(R) => run({ sourceHash: HEX_A, photoData: bulkPayload, driver: "shorn king" }, R).receiptHash === HEX_A);
+		(R) => run({ sourceHash: HEX_A, photoData: bulkPayload, driver: "soren king" }, R).receiptHash === HEX_A);
 });
 
 db.close();

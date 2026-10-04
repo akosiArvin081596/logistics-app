@@ -2,7 +2,7 @@
 // Deterministic check on client/src/utils/voiceLadder.js — the decision logic
 // behind spoken turn-by-turn callouts in the driver app's Drive Mode.
 //
-// WHY THIS EXISTS. Client ask (Deshorn): "on the driver's side let's enhance the
+// WHY THIS EXISTS. Client ask (Desoren): "on the driver's side let's enhance the
 // navigation part so that they can hear the callouts and the directions."
 // Speaking is one line of speechSynthesis; the whole risk is in WHEN. The
 // position feed is bursty (ELD fixes ~30 s apart, which is ~700 m at highway

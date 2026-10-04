@@ -562,7 +562,7 @@ try { db.exec("CREATE INDEX IF NOT EXISTS idx_expenses_receipt_hash ON expenses(
 // ---------------------------------------------------------------------------
 // MIGRATION: idx_expenses_receipt_hash → UNIQUE, PARTIAL
 //
-// Client ask (Deshorn): "make sure that the receipt doesn't have any duplicate."
+// Client ask (Desoren): "make sure that the receipt doesn't have any duplicate."
 // POST /api/expenses already SELECTs on receipt_hash and 409s on a hit — but a
 // SELECT-then-INSERT is check-then-act, and the bulk receipt uploader saves three
 // rows CONCURRENTLY. Two copies of one receipt in one batch can both pass the
@@ -1571,7 +1571,7 @@ try { db.exec("ALTER TABLE investors ADD COLUMN profile_picture_url TEXT DEFAULT
 
 // Migration: add pay_type + pay_percentage for owner-operator driver pay model.
 // Existing rows stay 'fixed' (current $250/day behavior preserved); admins can flip individual
-// drivers (e.g. Rodney Brown) to 'percentage' and set their cut from the Drivers Directory UI.
+// drivers (e.g. Roland Brown) to 'percentage' and set their cut from the Drivers Directory UI.
 try { db.exec("ALTER TABLE drivers_directory ADD COLUMN pay_type TEXT DEFAULT 'fixed'"); } catch {}
 try { db.exec("ALTER TABLE drivers_directory ADD COLUMN pay_percentage REAL DEFAULT 0"); } catch {}
 
@@ -1584,7 +1584,7 @@ try { db.exec("ALTER TABLE drivers_directory ADD COLUMN pay_percentage REAL DEFA
 // normalizeDriverName()) and builds a plain
 // object, so two spellings collapse to ONE key — while `TEXT NOT NULL UNIQUE`
 // carries SQLite's default BINARY collation, so nothing stops the second
-// spelling being created. Insert "SHORN KING" beside "Shorn King" and you get a
+// spelling being created. Insert "SOREN KING" beside "Soren King" and you get a
 // second row whose pay_daily is the column DEFAULT of 0; it wins the key, and
 // resolveDailyRate() silently falls back to the truck's rate. The original row
 // still reads 300 in the UI. Nothing errors, nothing is logged, and the driver
@@ -1629,7 +1629,7 @@ try { db.exec("ALTER TABLE drivers_directory ADD COLUMN pay_percentage REAL DEFA
 // INSERT ... SELECT throws; caught, that reads as "migration failed, carry on"
 // and the collation quietly never lands, and an `INSERT OR IGNORE` would DROP a
 // row instead. Which of two spellings is the real driver is a business question
-// (see the Deshorn/Shorn trap beside PUT /api/admin/fix-driver-name — two
+// (see the Desoren/Soren trap beside PUT /api/admin/fix-driver-name — two
 // people, one a substring of the other), so it is left to a human. Production
 // carried zero duplicates when this was written, verified read-only.
 try {
@@ -2092,7 +2092,7 @@ function getInvestorDriverMonthWindows(userId) {
 //     its owner_id is authoritative; a blank one never was. Concretely, a driver who
 //     moves trucks MID-MONTH shares that month with both owners, so a month-only
 //     bound re-admits the receipts he filed on the old truck days before the move
-//     (measured: Shorn King's 2026-08-04 receipts, $1,118, on the fleet truck he did
+//     (measured: Soren King's 2026-08-04 receipts, $1,118, on the fleet truck he did
 //     not leave until 2026-08-12).
 //   • the month window — an unattributed row is only this investor's in the months
 //     the driver was actually theirs.
@@ -5064,7 +5064,7 @@ if (configCount === 0) {
 // INSERT OR IGNORE out here.
 //
 // settlement_grace_days: how long after a work month ends the books stay open for
-// straggler receipts before the period is finalized and frozen. Client (Deshorn)
+// straggler receipts before the period is finalized and frozen. Client (Desoren)
 // asked for 7 — receipts routinely land in the first days of the following month,
 // and re-settling by hand every time was the thing to kill. Global only
 // (owner_id = 0): one carrier, one month-end. A per-investor grace makes the
@@ -5661,8 +5661,8 @@ try { db.exec("ALTER TABLE invoices ADD COLUMN created_by TEXT DEFAULT ''"); } c
 //  2. NOCASE — `invoices.driver` is a money join key and every reader folds case
 //     (`driverOwnsInvoice()`, `normalizeDriverName()`, `LOWER(driver) = ?`).
 //     The index did not. That is the worst combination: the readers merge the
-//     spellings while the constraint permits them, so `"Shorn King"` and
-//     `"shorn king"` are two index entries and a SECOND live weekly invoice for
+//     spellings while the constraint permits them, so `"Soren King"` and
+//     `"soren king"` are two index entries and a SECOND live weekly invoice for
 //     one driver-week is structurally insertable. Production carries exactly one
 //     mixed-case row (invoice #40, PAID, inside two locked periods) beside 13
 //     lowercase rows for the same driver.
@@ -6134,15 +6134,15 @@ db.exec(`
 //      whitespace run.
 // An expense carries the spelling it was filed under (a driver's own session
 // files under the account's spelling), an assignment the spelling its truck was
-// assigned under. So an account stored as "Shorn  King" never met its
-// assignment to "Shorn King", and its receipts stayed unattributed, off the
+// assigned under. So an account stored as "Soren  King" never met its
+// assignment to "Soren King", and its receipts stayed unattributed, off the
 // investor's P&L. Both steps take the assignment covering the expense's day
 // with the latest start_date, through ONE window (coversExpenseDay() below),
 // so step 2 differs from step 1 only in how it compares the name. Step 2
 // counts a match only while no other account holds
 // the name under another spelling (driverNameHeldByOtherSpelling()), the rule
 // findTruckForDriverStamp() applies to the same stamp at insert: a legacy
-// account "Shorn  King" beside the real "Shorn King" must not have its receipts
+// account "Soren  King" beside the real "Soren King" must not have its receipts
 // stamped with the real driver's truck and owner. Running second, step 2 only
 // ever fills a row that would otherwise stay unattributed; it never outranks a
 // case-aside assignment.
@@ -8008,7 +8008,7 @@ function findActiveAssignmentTruckForDriver(name) {
 // fallback exists for, outrank the driver's own active assignment. A spacing
 // match counts only while no other account holds the name under another
 // spelling (driverNameHeldByOtherSpelling()); otherwise it is no match, as it
-// was before. A legacy account "Shorn  King" beside the real "Shorn King" must
+// was before. A legacy account "Soren  King" beside the real "Soren King" must
 // not be stamped with the real driver's truck and owner. The expense stamp takes
 // the same four steps: its owner decides whose P&L the expense lands on too.
 // The public tracker shows the unit it finds, so the customer sees the truck
@@ -8078,8 +8078,8 @@ function syncDriverToCarrierSheet(driverName, opts = {}) {
 		} else if (action === "delete") {
 			// Nothing is deleted while any remaining account still holds a driver
 			// name that normalizes to this one (normalizeDriverName()): the row is
-			// that account's too. A legacy account spelled "Shorn  King" beside the
-			// real "Shorn King" must not take the real driver's row, and pay terms,
+			// that account's too. A legacy account spelled "Soren  King" beside the
+			// real "Soren King" must not take the real driver's row, and pay terms,
 			// with it — whichever way the row matches below. DELETE /api/users/:id
 			// removes its own account before it calls this, so only the others
 			// are seen (driverNameHeldByOtherAccount(), the rule the rename and the
@@ -8212,7 +8212,7 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), asy
 		// column is a DELETE followed by an INSERT, so every column the body
 		// omitted reverted to this handler's default instead of being preserved.
 		// One call —
-		//     POST /api/drivers-directory {"headers":["Driver"],"values":["Shorn King"]}
+		//     POST /api/drivers-directory {"headers":["Driver"],"values":["Soren King"]}
 		// — rewrote pay_daily 300 → 0, which resolveDailyRate turns into the
 		// truck's 250, restating 50 invoiced active days. PR #216 put the PUT's
 		// month-end predicate on that path, which stopped the restatement of a
@@ -8235,8 +8235,8 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), asy
 		// Matched through findDriverNameClash(), i.e. normalizeDriverName() — the
 		// comparison every ownership check uses — which is wider than the
 		// constraint even now that it is COLLATE NOCASE, because NOCASE folds case
-		// but not whitespace: " Shorn King" would otherwise insert alongside
-		// "Shorn King" and shadow it in getDriverPayStructures(), and "Shorn  King"
+		// but not whitespace: " Soren King" would otherwise insert alongside
+		// "Soren King" and shadow it in getDriverPayStructures(), and "Soren  King"
 		// would be a second row for what every ownership check treats as the same
 		// driver. Names are stored trimmed for the same reason. Directory rows
 		// only: a directory row for a name an account already holds is that
@@ -10131,7 +10131,7 @@ app.use("/uploads", requireAuth, (req, res) => res.status(404).end());
 //
 // It was removed rather than repaired: nine months of audit_trail showed zero
 // activity, and no tooling depended on it (the screenshot scripts authenticate
-// as super_admin/dispatch1/lesline/kevin). The admin manual claimed it was used
+// as super_admin/dispatch1/leonora/kevin). The admin manual claimed it was used
 // for demos and said not to delete it; that claim had nothing behind it.
 //
 // If a demo account is ever wanted again, do NOT restore this shape. It needs a
@@ -15778,7 +15778,7 @@ function driverAccountsNamed(driverName) {
 }
 
 // === Shared driver-pay helpers (used by /api/financials and /api/investor) ===
-// Branching on each driver's pay_type so percentage-paid owner-ops (e.g. Rodney
+// Branching on each driver's pay_type so percentage-paid owner-ops (e.g. Roland
 // Brown at 30%) get the same math their invoice uses, instead of the legacy
 // activeDays × $250 estimate that overstated/understated their pay in the P&L.
 
@@ -16651,7 +16651,7 @@ async function appendInvoiceAdjustmentAddendum(invoiceRow) {
 //
 //  2. ONE LOAD, ONE LINE. A rate-con arrives as two emails, so 87 load ids carry
 //     a second sheet row, and 37 of those pairs are spelled both ways ("#X" beside
-//     "X"). Deduplicating on the raw text billed BOTH spellings — ten of Lesline
+//     "X"). Deduplicating on the raw text billed BOTH spellings — ten of Leonora
 //     Johnson's invoices (INV-LJ-2026W21 … W37) list the same 31 loads twice, and
 //     for a percentage-paid driver that is the load's revenue counted twice. The
 //     key is normalizeLoadId(), the one deduplicateLoads() and the delete route
@@ -16666,8 +16666,8 @@ async function appendInvoiceAdjustmentAddendum(invoiceRow) {
 //     and none has a Completion Date either, so every weekly invoice re-listed
 //     them. A day-rate driver is paid $0 for them — their
 //     pickup→drop-off windows clip to nothing — which is why this hid behind a
-//     weekly $0 Draft (Lesline Johnson) and a weekly WORKED-BUT-UNBILLED alarm
-//     (Kenrick Davis, 25 undated rows, not on the roster). A percentage driver is
+//     weekly $0 Draft (Leonora Johnson) and a weekly WORKED-BUT-UNBILLED alarm
+//     (Kendall Davis, 25 undated rows, not on the roster). A percentage driver is
 //     paid on the load's REVENUE, i.e. for every one of them, every week. Such a
 //     row is now billed in NO week and reported instead: `warnings` on the
 //     response, and `undatedInWeek` — which the batch escalates — for one whose
@@ -16939,7 +16939,7 @@ async function generateInvoiceHandler(req, res) {
 		// rows match on normalizeLoadId() (the sheet spells one load "#X" and "X"),
 		// and a completed row with no completion date is billed in NO week and
 		// reported — it used to be billed in every one. The driver match tolerates
-		// internal-whitespace variants ("Shorn  King"): exact equality silently
+		// internal-whitespace variants ("Soren  King"): exact equality silently
 		// dropped real deliveries when older rows had a typo'd double space. The
 		// invoice reads the sheet directly, not through excludeDroppedLoads(), so
 		// the soft-delete filter is applied here, from the same loadKeySet().
@@ -17379,7 +17379,7 @@ async function generateInvoiceHandler(req, res) {
 // ============================================================
 // Automatic weekly invoice generation — Fridays 4:00 PM Eastern
 // ============================================================
-// Client (Deshorn) request: drivers/staff forget to submit invoices, so the
+// Client (Desoren) request: drivers/staff forget to submit invoices, so the
 // system generates AND submits each driver's weekly invoice automatically. It
 // reuses generateInvoiceHandler in-process (no duplicated pay math), then flips
 // each fresh Draft -> Submitted so it lands in the admin approval queue.
@@ -17483,7 +17483,7 @@ const submitDraftInvoiceStmt = db.prepare(
 //
 // It now also agrees with the handler on the two rows it used to count and the
 // handler never billed: a completed row with no completion date (it counted in
-// EVERY week — the source of the weekly "WORKED-BUT-UNBILLED (kenrick davis)"
+// EVERY week — the source of the weekly "WORKED-BUT-UNBILLED (kendall davis)"
 // alarm and its three retries), and a soft-deleted "#X" row.
 //
 // A Driver cell that reads as a built-in property name is read through
@@ -19753,7 +19753,7 @@ function duplicateReceiptGroups() {
 // ═══════════════════════════════════════════════════════════════════════════
 // DUPLICATE-RECEIPT ALERTING
 //
-// Client ask (Deshorn), verbatim: "make sure that the receipt doesn't have any
+// Client ask (Desoren), verbatim: "make sure that the receipt doesn't have any
 // duplicate and if it has duplicate just let it automatically send me a ping."
 // POST /api/expenses answers the first half at WRITE time. This answers the
 // second: the pairs that got in BEFORE the guard existed, the ones a conscious
@@ -21306,7 +21306,7 @@ function sanitizeManualInvoiceRows(raw, label) {
 //
 // normalizePayeeName strips punctuation and trailing entity suffixes because
 // the two sides genuinely disagree in production: the invoice payee is
-// "johnny rocks spirits llc" while the investor record reads "Johnny Rocks
+// "jasper ridge spirits llc" while the investor record reads "Jasper Ridge
 // Spirits". Exact matching would miss the very record the client asked for.
 // ---------------------------------------------------------------------------
 const PAYEE_ENTITY_SUFFIXES = new Set([
@@ -21364,8 +21364,8 @@ function listInvoicePayees() {
 		}
 	} catch (e) { console.error("listInvoicePayees investors:", e.message); }
 	// De-dupe EXACT duplicates only (the same name present in both tables).
-	// Deliberately NOT on the normalized key: driver "Johnny Rocks" and investor
-	// "Johnny Rocks LLC" are different payees with different addresses, and
+	// Deliberately NOT on the normalized key: driver "Jasper Ridge" and investor
+	// "Jasper Ridge LLC" are different payees with different addresses, and
 	// collapsing them would both hide one from the picker and let a lookup hand
 	// back the other's HOME address for a business invoice.
 	const byName = new Map();
@@ -21788,7 +21788,7 @@ app.get("/api/invoices/report/pdf", requireRole("Super Admin"), async (req, res)
 // ⚠️ `invoices.driver` case is a WATERMARK, not rename drift. Both INSERT paths
 // write `driverName.toLowerCase()` / `payee.toLowerCase()`, but rows written
 // before that convention landed kept display case — production carries exactly
-// one (#40, "Shorn King", Paid) against 13 lowercase rows for the same driver.
+// one (#40, "Soren King", Paid) against 13 lowercase rows for the same driver.
 // The old check was `invoice.driver !== (user.driverName || "").toLowerCase()`,
 // a ONE-SIDED fold: the session name was lowercased and the stored value was
 // compared raw, so the only currently active driver got a 403 on his own paid
@@ -21807,7 +21807,7 @@ app.get("/api/invoices/report/pdf", requireRole("Super Admin"), async (req, res)
 // has zero such invoice rows, so this costs no real access — it just stops the
 // fold from being an authorization bypass if one is ever written.
 //
-// Whole-value `===`, so the "Shorn King" ⊂ "Deshorn King" substring trap that
+// Whole-value `===`, so the "Soren King" ⊂ "Desoren King" substring trap that
 // bites the dispatch_notifications rewrites cannot apply here.
 function driverOwnsInvoice(user, invoice) {
 	const sessionName = normalizeDriverName(user && user.driverName);
@@ -22319,12 +22319,12 @@ app.put("/api/invoices/:id/restore", requireRole("Super Admin"), (req, res) => {
 			// The driver in ANY stored spelling — liveWeeklyInvoicesForDriverWeek(),
 			// the same question generateInvoiceHandler() and its write ask.
 			// `invoices.driver` holds more than one spelling of the same driver (see
-			// driverOwnsInvoice()). Restoring a soft-deleted "shorn king" row for a
-			// week already covered by the live display-case "Shorn King" row found
+			// driverOwnsInvoice()). Restoring a soft-deleted "soren king" row for a
+			// week already covered by the live display-case "Soren King" row found
 			// no clash and produced TWO live weekly invoices for one driver-week —
 			// the exact double-billing idx_invoices_driver_week exists to prevent.
 			// That index now folds case but not spacing, so a spacing variant
-			// ("shorn  king") is caught here, not by the index.
+			// ("soren  king") is caught here, not by the index.
 			const clash = liveWeeklyInvoicesForDriverWeek(String(invoice.driver || ""), invoice.week_start)
 				.find((r) => r.id !== invoice.id);
 			if (clash) {
@@ -22967,7 +22967,7 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 		// with no check at all, so the guard was one route wide.
 		//
 		// It is also the front door on the pay-structure hijack. `driverName:
-		// "SHORN KING"` next to an existing "Shorn King" used to reach
+		// "SOREN KING"` next to an existing "Soren King" used to reach
 		// syncDriverToCarrierSheet(action:"add") — an `INSERT OR IGNORE` that
 		// ignored nothing, because the directory's UNIQUE was BINARY — minting a
 		// second drivers_directory row with pay_daily 0 that then WON
@@ -23061,7 +23061,7 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 // 1. `driverName: ""` STRANDS THE ROWS THE DELETE GUARD PROTECTS. The cascade
 //    below only fires `if (oldName && newName)`, so a blank writes
 //    `users.driver_name = ''` and touches nothing else — `expenses.driver` still
-//    reads "Howard Reddie". The delete then resolves its cascade name as
+//    reads "Hollis Renner". The delete then resolves its cascade name as
 //    `user.driver_name || user.username`, which with the name blanked falls back
 //    to the USERNAME ("LogisX-0621"). That matches zero expense rows, so
 //    userDeleteLockBlockers() finds nothing to block on and the delete succeeds.
@@ -23835,7 +23835,7 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			// ⚠️ ROWS UNDER ANOTHER SPELLING OF THE OLD NAME COUNT TOO whenever the
 			// cascade takes the driver's other spellings (`lock.widens`, the same
 			// answer the lock guard judged): it moves their directory row, truck and
-			// expenses to the new name, so a load left under "Shorn  King" would
+			// expenses to the new name, so a load left under "Soren  King" would
 			// resolve to the default rates. A cell already spelled the new way needs
 			// no rewrite and is not counted.
 			const sheetRowsToRename = sheetRowsUnderOldName + (lock.widens === true ? sheetRowsUnderOldVariant : 0);
@@ -23863,7 +23863,7 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			//
 			// ⚠️ TWO CARVE-OUTS, OR THIS REFUSES THE MOST ORDINARY RENAME.
 			// (1) caseOnly — the scan matches case-insensitively, so for
-			//     "shorn king" -> "Shorn King" the new-name query returns the very
+			//     "soren king" -> "Soren King" the new-name query returns the very
 			//     rows being renamed. That is a self-match, not a merge;
 			//     fix-driver-name skips the scan for exactly this reason.
 			// (2) the account's OWN rows. The `users_full_name` leg is
@@ -23880,7 +23880,7 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			//
 			// ⚠️ A SPACING-ONLY RE-SPELLING GETS THE SAME SELF-MATCH, row by row.
 			// When the cascade takes the driver's other spellings (`lock.widens`),
-			// every database row already under the new spelling — "Shorn  King",
+			// every database row already under the new spelling — "Soren  King",
 			// the spelling the driver's own directory row carries — is one of this
 			// rename's own rows, so the scan leaves them out (`oldLower`) and they
 			// are no merge. When it does not (another account still holds that
@@ -24452,7 +24452,7 @@ app.get("/api/load-ratings/averages", requireRole("Super Admin", "Dispatcher"), 
 // no audit line.
 //
 // Measured against production on 2026-08-08 (15 periods locked, 2025-05 through
-// 2026-07 — only 2026-08 open): deleting the driver "Howard Reddie" would have
+// 2026-07 — only 2026-08 open): deleting the driver "Hollis Renner" would have
 // hard-deleted 75 expense rows worth $18,381.23 across three finalized months,
 // two of which (2026-05, 2026-06) back payouts already marked PAID. `expenses`
 // has no deleted_at and no soft-delete table, so none of it is recoverable.
@@ -24852,7 +24852,7 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	// Admins there is no row for it to act on, and it needs a root shell on the VPS
 	// besides — so the only way back from the state these guards prevent is still
 	// hand-editing app.db. Production runs TWO Super Admin accounts (`super_admin`,
-	// `ford_seeman`), so this is two clicks away, not a theoretical.
+	// `finn_sexton`), so this is two clicks away, not a theoretical.
 	//
 	// They are ordered before the period guard on purpose: when both apply, "you
 	// cannot delete the last administrator" is the answer that helps, and the
@@ -25177,7 +25177,7 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	//                            payout covers.
 	//  • job_applications      — its own soft-delete and its own route
 	//                            (DELETE /api/applications/:id). Bulk-matching it
-	//                            on `full_name` is the Deshorn/Shorn trap: two
+	//                            on `full_name` is the Desoren/Soren trap: two
 	//                            real people, one a substring of the other. An
 	//                            admin removes it deliberately, by id.
 	//  • load_ratings          — per-load feedback. Left for the same reason as
@@ -26974,7 +26974,7 @@ function truckEditLockBlockers(truck, changed, opts = {}) {
 	// guard defeatable by sequencing, because assigned_driver is unguarded:
 	//     PUT {assignedDriver:""}      → 200 (unguarded by design)
 	//     PUT {driverPayDaily:900}     → driver is "" → months [] → 200  ← the hole
-	//     PUT {assignedDriver:"Howard"} → 200
+	//     PUT {assignedDriver:"Hollis"} → 200
 	// Three allowed calls, and the rate is repriced across every locked month.
 	// So the driverless case falls back to the TRUCK's own assignment history: a
 	// truck that has ever carried a driver can have its rate re-applied to one.
@@ -27099,7 +27099,7 @@ function truckDeleteLockBlockers(truck) {
 	// (1)-(4) above all measure DOLLARS ON THE TRUCK, so a truck carrying none
 	// produces no blocker at all — and measured on production (read-only,
 	// 2026-08-08) three of the six do exactly that: INV-24-A ($0/mo, driver
-	// Lesline Johnson, resolved rate unchanged by the delete), LogisX-TEST ($0/mo)
+	// Leonora Johnson, resolved rate unchanged by the delete), LogisX-TEST ($0/mo)
 	// and Logisx-#91 (which bills $3,105.83/mo but only from 2026-08, an open
 	// month). Every one of those deletes is currently refused ONLY by the
 	// TRUCK_REFERENCED foreign-key check further down, which exists for an
@@ -28798,13 +28798,13 @@ app.get("/api/admin/audit-trail", requireRole("Super Admin"), (req, res) => {
 // guard.
 //
 // ⚠️ BUT NOT EVERY NEAR-MATCH IS DRIFT, AND THE LIVE EXAMPLE IS A TRAP.
-// Job Tracking holds one 2026-04 row under "Deshorn King" ($4,600, load
-// 350176308) and 45 rows under "Shorn King". Only the latter has a
+// Job Tracking holds one 2026-04 row under "Desoren King" ($4,600, load
+// 350176308) and 45 rows under "Soren King". Only the latter has a
 // drivers_directory row, a users row and a truck, so every automated signal —
-// scan-driver-mismatches included — reads "Deshorn" as a typo of "Shorn".
-// IT IS NOT. Confirmed by the business owner 2026-08-08: Deshorn King and
-// Shorn King are TWO DIFFERENT PEOPLE. Shorn King is the only currently active
-// driver; Deshorn is a FORMER driver, which is exactly why he has no
+// scan-driver-mismatches included — reads "Desoren" as a typo of "Soren".
+// IT IS NOT. Confirmed by the business owner 2026-08-08: Desoren King and
+// Soren King are TWO DIFFERENT PEOPLE. Soren King is the only currently active
+// driver; Desoren is a FORMER driver, which is exactly why he has no
 // directory/user/truck row — not a data gap, just someone who left. That row is
 // correct history and must NOT be merged. Doing so would move one person's
 // $4,600 load, its revenue and its active day onto another person's pay record,
@@ -28821,9 +28821,9 @@ app.get("/api/admin/audit-trail", requireRole("Super Admin"), (req, res) => {
 //     0% — a percentage driver silently becomes a day-rate driver.
 //   • trucks.assigned_driver missed -> resolveDailyRate(undefined, undefined)
 //     -> the $250 legacy default.
-// On production both are live money: "Shorn King" is fixed at pay_daily 300
+// On production both are live money: "Soren King" is fixed at pay_daily 300
 // while his truck reads 250 (a $50/day swing across 42 sheet rows in locked
-// months), and "Rodney Brown" is a 20% percentage driver whose truck reads
+// months), and "Roland Brown" is a 20% percentage driver whose truck reads
 // driver_pay_daily 20 (net × 20% vs activeDays × $20 are unrelated numbers).
 // Fifteen periods are locked (2025-05..2026-07); owner 5's 2026-05 and 2026-06
 // payouts are marked PAID. So the partial rename is the harm, not the rename.
@@ -28903,7 +28903,7 @@ const DRIVER_RENAME_TARGETS = [
 	// ⚠️ `match: "directory_row"` — the ROW findDirectoryRowForDriver() finds for
 	// the old name, by id: the row equal to it case aside, else the first that
 	// names the same driver through normalizeDriverName(). Matched with LOWER()
-	// alone, a row stored under a spacing variant of the old name ("Shorn  King")
+	// alone, a row stored under a spacing variant of the old name ("Soren  King")
 	// was left behind, and the directory sync that follows a rename then found no
 	// row under the new name and ADDED one at the default terms — a second row
 	// for one driver, the shadow row that reprices pay (identity-collation.md).
@@ -28968,8 +28968,8 @@ const DRIVER_RENAME_TARGETS = [
 // it has always had. Every other target is name-matched for both callers.
 //
 // ⚠️ A "ci" LEG ALSO MATCHES THE DRIVER'S OTHER SPELLINGS. LOWER() folds case
-// (ASCII only), not spacing, so a row stored as "Shorn  King" or " Shorn King"
-// was left behind by a rename of "Shorn King" — on the money legs too (trucks,
+// (ASCII only), not spacing, so a row stored as "Soren  King" or " Soren King"
+// was left behind by a rename of "Soren King" — on the money legs too (trucks,
 // truck_assignments, carrier_driver_history, users, expenses, invoices), while
 // every ownership check and the P&L's pay lookups read it as the same driver.
 // So each "ci" and "ci_driver_role" leg is `LOWER(col) = ?` OR the column is one
@@ -29006,7 +29006,7 @@ function driverRenameWhereArgs(t, nameLower, opts = {}) {
 // found only that way (driverRenameDirectoryRowId())? Only when no account the
 // rename leaves alone still holds a driver name that normalizes the same
 // (driverNameHeldByOtherAccount()): otherwise those rows are that account's — a
-// legacy account "Shorn  King" beside the real "Shorn King" must not take the
+// legacy account "Soren  King" beside the real "Soren King" must not take the
 // real driver's truck, invoices or pay terms with it, and renaming the real one
 // must not take the legacy account's. Rows equal to the name case aside move
 // either way, as the case-insensitive match always moved them.
@@ -29064,7 +29064,7 @@ function driverRenameDirectoryRowId(nameLower, opts = {}) {
 //   • ⚠️ The "directory_row" leg compares LOWER(TRIM()), the key the directory's
 //     money reader uses: getInvestorDriverSet() leg 2 reads each row (through
 //     getCarrierDBFromSQLite()) trimmed and lowercased. Renaming a row stored as
-//     "Shorn  King" changes that key, so even a case-only rename can hand an
+//     "Soren  King" changes that key, so even a case-only rename can hand an
 //     investor the driver's loads in closed months. Counting the row is what
 //     stops fix-driver-name calling such a rename money-neutral. A row that
 //     differs only by edge spaces keeps its key.
@@ -29430,7 +29430,7 @@ function planDriverRenameSqlite(oldLower, opts = {}) {
 			// name) still gets the old-vs-old half.
 			// The old half is the rows the executor WRITES — `where`, the other
 			// spellings included — so two spellings of the driver sharing a week
-			// ("shorn king" and "shorn  king", which the NOCASE index lets in) are a
+			// ("soren king" and "soren  king", which the NOCASE index lets in) are a
 			// collision too: both would be written the same lowercase name.
 			try {
 				const collideSql = opts.newLower
@@ -29471,7 +29471,7 @@ function planDriverRenameSqlite(oldLower, opts = {}) {
 		//     precisely the database where this would throw.
 		//   • old-vs-NEW — a row already under the target name. fix-driver-name
 		//     PERMITS merges (isMerge only warns), so this is reachable on every
-		//     database, migrated or not. "Deshorn King" → "Shorn King" is exactly
+		//     database, migrated or not. "Desoren King" → "Soren King" is exactly
 		//     this shape: two real, different people, both holding a directory row.
 		// Bound as two parameters that may be equal — a case-only rename folds them
 		// to one predicate and correctly reports no collision, because the row it
@@ -29504,7 +29504,7 @@ function planDriverRenameSqlite(oldLower, opts = {}) {
 
 // Does the NEW name already own rows? Then this is a merge of two identities,
 // not a rename, and it cannot be undone by swapping the arguments. See the
-// merge note in the fix-driver-name handler — and the Deshorn/Shorn trap in the
+// merge note in the fix-driver-name handler — and the Desoren/Soren trap in the
 // header, which is precisely the case a similarity heuristic gets wrong.
 // ⚠️ The directory leg is asked case-insensitively here, as it always was, not
 // through findDirectoryRowForDriver() ("directory_row"): that would also find a
@@ -29518,7 +29518,7 @@ function planDriverRenameSqlite(oldLower, opts = {}) {
 // (`opts.oldLower`), a row the cascade moves for it — its other spellings and
 // its own directory row included (driverRenameWhereSql() with the rename's
 // driverRenameWidens() answer, `opts.widens` when the caller has it) — is not
-// counted. Without this, re-spelling "Shorn King" to "Shorn  King", the spelling
+// counted. Without this, re-spelling "Soren King" to "Soren  King", the spelling
 // the driver's own directory row already carries, read as a merge with that row.
 // A row is subtracted only when it is positively one of the rename's own: a NULL
 // comparison, or a directory row id of null, subtracts nothing.
@@ -29550,10 +29550,10 @@ function driverRenameMergeScan(newLower, opts = {}) {
 // Replace `oldName` with `newName` in free text, matching case-insensitively
 // but ONLY on a whole-word boundary.
 //
-// ⚠️ THIS IS THE DESHORN/SHORN GUARD, and it is not hypothetical: "Shorn King"
-// is a literal substring of "Deshorn King" — two DIFFERENT people, confirmed by
-// the business owner — so the plain SQL `REPLACE(title, 'Shorn King', X)` this
-// replaces would rewrite a notification about Deshorn to "DeX". Production
+// ⚠️ THIS IS THE DESOREN/SOREN GUARD, and it is not hypothetical: "Soren King"
+// is a literal substring of "Desoren King" — two DIFFERENT people, confirmed by
+// the business owner — so the plain SQL `REPLACE(title, 'Soren King', X)` this
+// replaces would rewrite a notification about Desoren to "DeX". Production
 // carries 0 such rows today, so the corruption is latent rather than live; it
 // becomes live the first time dispatch names the former driver in a
 // notification. SQLite's LIKE cannot express a word boundary and REPLACE() has
@@ -29572,7 +29572,7 @@ function replaceNameOnWordBoundary(text, oldName, newName) {
 	// replacement. Boundaries are read as whole CODE POINTS (codePointAt / the
 	// preceding pair) rather than s[i], because s[i] is a UTF-16 code unit and an
 	// astral letter next to the match would present as a lone surrogate, which no
-	// \p{...} class matches — so "𝐀Shorn King" would read as a boundary and be
+	// \p{...} class matches — so "𝐀Soren King" would read as a boundary and be
 	// rewritten. Neither is exploitable; both are display-text corruption.
 	const WORDY = /[\p{L}\p{N}\p{M}]/u;
 	const charBefore = (idx) => {
@@ -29595,7 +29595,7 @@ function replaceNameOnWordBoundary(text, oldName, newName) {
 		const before = charBefore(at);
 		const after = charAt(end);
 		if (isWordChar(before) || isWordChar(after)) {
-			// Part of a longer name ("Deshorn King"). Copy it through untouched.
+			// Part of a longer name ("Desoren King"). Copy it through untouched.
 			out += s.slice(i, end);
 		} else {
 			out += s.slice(i, at) + newName;
@@ -29732,7 +29732,7 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		// can move. Tested on trim().toLowerCase() rather than
 		// normalizeDriverName() on purpose — normalizeDriverName also collapses
 		// INTERNAL whitespace, but getInvestorDriverSet does not, so
-		// "Howard  Reddie" -> "Howard Reddie" would move an investor's driver
+		// "Hollis  Renner" -> "Hollis Renner" would move an investor's driver
 		// set and must be treated as substantive. (getDeductibleExpensesByDriverMonth
 		// now keys through normalizeDriverName() and does collapse it, so the
 		// deduction would not move; the driver set still would.)
@@ -29824,7 +29824,7 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		// SQLite. Any on the sheet or a money target and the rename is not
 		// money-neutral, even case-only: those rows change spelling, and the
 		// readers named beside `caseOnly` above do not fold spacing. That includes
-		// the driver's directory row stored as "Shorn  King", which
+		// the driver's directory row stored as "Soren  King", which
 		// getInvestorDriverSet() reads by a key the rename changes
 		// (driverRenameSameNameSql()). One on a cosmetic target (a notification, a
 		// message) moves no figure.
@@ -29852,9 +29852,9 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		// ⚠️ MERGE DETECTION — a rename INTO a name that already has rows is not a
 		// rename, it is a merge of two drivers, and it is NOT reversible by
 		// swapping the arguments. Verified end-to-end ON A SCRATCH COPY, using the
-		// real "Deshorn King" / "Shorn King" pair — who are TWO DIFFERENT PEOPLE
+		// real "Desoren King" / "Soren King" pair — who are TWO DIFFERENT PEOPLE
 		// (see the trap note above; that merge must never be run for real).
-		// Merging the one "Deshorn King" row into "Shorn King" and then re-issuing
+		// Merging the one "Desoren King" row into "Soren King" and then re-issuing
 		// the call with the names swapped moved 44 sheet rows and 702 database
 		// rows instead of the 1 and 1
 		// it had changed — i.e. the obvious undo silently renames the OTHER
@@ -29864,7 +29864,7 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		// decisions and used to look identical at the call site.
 		//
 		// Case-only is excluded because the match is case-insensitive: for
-		// "shorn king" -> "Shorn King" the new-name query returns the very rows
+		// "soren king" -> "Soren King" the new-name query returns the very rows
 		// being renamed, which is a self-match, not a merge. The same holds for a
 		// re-spelling onto another spelling of the old name that this rename
 		// moves: the scan leaves the rename's own rows out (`oldLower`), and the
@@ -29954,7 +29954,7 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		// disclosure could not be computed, and this route already holds that
 		// "consent to a disclosure that could not be computed is not consent" for
 		// PERIOD_LOCK_UNREADABLE. Note caseOnly is the MOST likely collision
-		// trigger, not the least: folding "Shorn King" and "shorn king" together is
+		// trigger, not the least: folding "Soren King" and "soren king" together is
 		// precisely what puts two rows on one index entry.
 		const hardBlockers = blockers.filter((b) => DRIVER_RENAME_HARD_BLOCK_CODES.has(b.code));
 		if (hardBlockers.length) {
@@ -33024,7 +33024,7 @@ async function readJobTrackingSnapshot(sheets, rowIndex) {
 //      load_status_history window 2026-06-15 .. 2026-08-06: of 199 real manual
 //      status changes, 195 (98.0%) bind cleanly, 0 hit LOAD_ID_REQUIRED, 0 hit
 //      LOAD_NOT_ON_SHEET — and 4 hit AMBIGUOUS_LOAD. Those 4 are not stray
-//      traffic: they are Howard Reddie advancing load 7052901 through Heading
+//      traffic: they are Hollis Renner advancing load 7052901 through Heading
 //      to Shipper → In Transit → At Receiver → Delivered on 2026-07-11..14. The
 //      id is duplicated because row 383 holds the live load and row 388 holds a
 //      "#7052901" copy that was CANCELLED. A blanket rung 4 would have refused
@@ -34760,7 +34760,7 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// mid-trip (heading-to-shipper..unloading); a driver whose only loads are
 		// Dispatched (queued, unaccepted) or Assigned (accepted, not started) is
 		// "Queued" — distinguish them in the fleet pill so dispatchers see the
-		// difference between "Howard is driving" and "Howard has work waiting."
+		// difference between "Hollis is driving" and "Hollis has work waiting."
 		const inProgressRe = /^(heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
 		// A Driver cell that reads as a built-in property name counts toward a
 		// directory driver exactly as a blank one does (driverNameForTotals()) —
@@ -34814,7 +34814,7 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 
 		// Pre-resolve origin/destination address columns so we can enrich every
 		// job row with plain "City, ST ZIP" strings that the new Pickup/Drop-off
-		// table columns render. Deshorn asked for this 2026-04-20 because the
+		// table columns render. Desoren asked for this 2026-04-20 because the
 		// raw "Pickup Info" sheet column carries broker-facing references like
 		// "Brothers WMS RDC - MPS REF/PU#: 29284990" that are useless for
 		// scanning the dispatch board.
@@ -35275,7 +35275,7 @@ function findDriverNameClash(name, opts = {}) {
 // directory sync does not delete it (syncDriverToCarrierSheet(), after its own
 // account is gone), and a driver's profile-picture upload does not replace its
 // picture (POST /api/drivers-directory/:id/profile-picture, excepting the
-// uploader). A legacy account "Shorn  King" beside the real "Shorn King" must not
+// uploader). A legacy account "Soren  King" beside the real "Soren King" must not
 // act on the real driver's row.
 function driverNameHeldByOtherAccount(name, exceptUserIds = []) {
 	return findDriverNameClashes(name, { directory: false, exceptUserIds })
@@ -35324,7 +35324,7 @@ function findTruckForDriverAccount(name, exceptUserIds = []) {
 // assignDriverToTruck()'s release fold it only while no other account holds the
 // name under another spelling, and other name-keyed truck reads still compare
 // case-insensitively, which does not fold spacing. Assigning
-// "Shorn  King" to a truck therefore resolves to "Shorn King", the driver it
+// "Soren  King" to a truck therefore resolves to "Soren King", the driver it
 // names, rather than starting a second spelling of one driver. The account's
 // spelling wins because it is the one a driver's own session looks the truck up
 // by; a directory spelling is used for a driver with no account. Usernames and
@@ -39882,7 +39882,7 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		const driverTruck = findTruckForDriverStamp(driver, { activeAssignment: true });
 		const expOwnerId = driverTruck ? driverTruck.owner_id : 0;
 		const expTruckUnit = driverTruck ? driverTruck.unit_number : '';
-		// DEDUP: Deshorn bulk-uploads receipts drivers text him, and the same
+		// DEDUP: Desoren bulk-uploads receipts drivers text him, and the same
 		// photo routinely arrives twice. Hash the receipt payload (sha256 of the
 		// base64) and reject a re-upload before it double-books the P&L. Only a
 		// data-URI payload carries a receipt to hash; an already-stored URL/path
@@ -46198,9 +46198,9 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 		// is linked to a Routemate/Linxup device AND we have its LAST KNOWN fix
 		// within the lookback window, fill in lat/lng/speed/timestamp from the ELD
 		// and tag the source. Owner request 2026-07-27: an ELD pings whenever the
-		// truck is powered, but a parked/idle truck pings intermittently (Rodney
+		// truck is powered, but a parked/idle truck pings intermittently (Roland
 		// last pinged 4 h ago), so a 5-minute freshness gate was throwing the
-		// position away and hiding the truck ("I can't see where Rodney's truck
+		// position away and hiding the truck ("I can't see where Roland's truck
 		// is"). We now surface the last known position for up to 14 days; ping
 		// RECENCY (not visibility) is what the client turns into
 		// Online / Dormant / Offline. Trucks with no fix in the window stay noGps.
@@ -51899,7 +51899,7 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 		// This block was the one place left re-deriving the split from an already
 		// ROUNDED netProfit, and it was a dollar off in production.
 		//
-		// The open month of a live investor (Johnny Rocks Spirits, 2026-08): revenue
+		// The open month of a live investor (Jasper Ridge Spirits, 2026-08): revenue
 		// 1800 − driverPay 150 − fixedCosts 6149.16 − tripExpenses 400 = −4899.16,
 		// halved = −2449.58, rounded ONCE = −2450. That −2450 is what
 		// `amountInProgress` publishes and what `lossDeferred` (2450) agrees with.
@@ -52396,8 +52396,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// "Driver Pay Explained" modal so an investor can see e.g. May 18 was
 		// covered by loads 553198052 AND 552854956 (one calendar day, two loads).
 		const driverMonthlyDayLoads = Object.create(null); // { driver: { "YYYY-MM": { "YYYY-MM-DD": Set<loadId> } } }
-		// Preserve original sheet casing for display ("Howard Reddie" vs the
-		// lowercased "howard reddie" key used internally).
+		// Preserve original sheet casing for display ("Hollis Renner" vs the
+		// lowercased "hollis renner" key used internally).
 		const driverDisplayName = Object.create(null);    // { normalizedDriver: "Original Casing" }
 		// Per-driver per-month REVENUE (completed loads only). Used by the
 		// percentage-pay branch so owner-op pay = (monthRevenue − monthDeductible) × pct.
@@ -52639,7 +52639,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 
 		// ---- Driver Pay (branches on each driver's pay_type) ----
 		// Fixed drivers: activeDays × per-truck dailyRate (legacy logic).
-		// Percentage drivers (e.g. Rodney): max(0, weekly load revenue − Fuel & Maintenance) × pct.
+		// Percentage drivers (e.g. Roland): max(0, weekly load revenue − Fuel & Maintenance) × pct.
 		// Same formula their invoice uses, so the P&L matches reality.
 		const payStructures = getDriverPayStructures();
 		const expensesByDriverMonth = getDeductibleExpensesByDriverMonth();
@@ -53960,7 +53960,7 @@ const STATEMENT_FILE_RE = /^payout-\d+-\d{4}-\d{2}-[0-9a-f]{10}\.pdf$/;
 // a routine investor request — left the cached PDF frozen on the OLD name
 // forever, with no TTL and no hook to fire. Worse, it was self-contradictory:
 // the download FILENAME is built from the live `who`, so the file arrived
-// called "ZZ_RENAMED_ENTITY_LLC" with "STATEMENT FOR Johnny Rocks Spirits"
+// called "ZZ_RENAMED_ENTITY_LLC" with "STATEMENT FOR Jasper Ridge Spirits"
 // printed on page 1 — a settlement document naming two different entities,
 // which an investor cannot use for tax.
 //
@@ -54632,7 +54632,7 @@ app.post("/api/investor/payouts/:id/status", requireRole("Super Admin"), refuseC
 		// the settlement STATE — so old and new are equal by design; the value is in
 		// the transition itself. Without this the timeline would show a month's
 		// figure changing and then go silent about it being paid, which is the half
-		// of the story Deshorn is most likely to be asking about.
+		// of the story Desoren is most likely to be asking about.
 		recordPayoutChange({
 			payoutId: id,
 			ownerId: payout.owner_id,

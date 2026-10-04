@@ -177,7 +177,7 @@ function row(overrides) {
   r[IDX["Assigned Date"]] = "2026-07-15";
   r[IDX["Job Status"]] = "Delivered";
   r[IDX["Payment"]] = "$1,800.00";
-  r[IDX["Driver"]] = "Amir Serrano";
+  r[IDX["Driver"]] = "Amir Salcedo";
   r[IDX["Truck"]] = "LogisX-#33";
   for (const [k, v] of Object.entries(overrides || {})) r[IDX[k]] = v;
   return r;

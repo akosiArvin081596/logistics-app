@@ -971,7 +971,7 @@ const allTimeEarnings = computed(() => Math.round(Number(props.production?.inves
 
 // Render the right formula label for the selected month's Driver Pay row.
 // Server returns payType / payPercentage per driver in driverDetails — branch
-// on those so percentage drivers (e.g. Rodney @ 30%) don't get mislabeled as a
+// on those so percentage drivers (e.g. Roland @ 30%) don't get mislabeled as a
 // daily rate.
 //
 // ⚠️ NEVER SUBSTITUTE A NUMBER THIS COMPONENT DOES NOT HAVE. This annotation sits

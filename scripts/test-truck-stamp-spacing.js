@@ -9,8 +9,8 @@
  * and Owner ID. Those decide whose P&L the money lands on, and a miss stamps
  * Owner ID 0, which moves a load's revenue to the company. They matched the
  * truck with LOWER(assigned_driver) = LOWER(?), which folds case but not
- * spacing, so a truck stored as "Shorn  King" was missed for the driver
- * "Shorn King". They now ask findTruckForDriverStamp(): the truck naming the
+ * spacing, so a truck stored as "Soren  King" was missed for the driver
+ * "Soren King". They now ask findTruckForDriverStamp(): the truck naming the
  * driver case aside, then, for the dispatch routes, the active
  * truck_assignments row naming them case aside, the two lookups the stamps
  * always used; only then either one through normalizeDriverName(), the truck
@@ -201,22 +201,22 @@ function makeDb({ accounts = [], trucks = [], assignments = [], investors = [], 
 	for (const [carrier, name, ended = null] of pairings) p.run(carrier, name, ended);
 	return db;
 }
-const SK = [2, "Shorn King"];
-const DK = [3, "Deshorn King"];
+const SK = [2, "Soren King"];
+const DK = [3, "Desoren King"];
 // A second account naming the same driver in another spelling (a legacy row).
-const SK_OTHER = [4, "Shorn   King"];
-// Shorn King's truck, stored with a doubled space, and Deshorn King's.
-const T101 = [1, "101", "Shorn  King", 5, "RM-101"];
-const T205 = [2, "205", "Deshorn King", 7, "RM-205"];
-const A101 = [1, "Shorn  King", "2026-09-01T12:00:00.000Z"];
-const A205 = [2, "Deshorn King", "2026-09-01T12:00:00.000Z"];
+const SK_OTHER = [4, "Soren   King"];
+// Soren King's truck, stored with a doubled space, and Desoren King's.
+const T101 = [1, "101", "Soren  King", 5, "RM-101"];
+const T205 = [2, "205", "Desoren King", 7, "RM-205"];
+const A101 = [1, "Soren  King", "2026-09-01T12:00:00.000Z"];
+const A205 = [2, "Desoren King", "2026-09-01T12:00:00.000Z"];
 const withTruck = (base, over) => { const r = base.slice(); for (const [i, v] of Object.entries(over)) r[i] = v; return r; };
 // The drift the dispatch stamps' assignment fallback exists for: the driver's
 // own active assignment, spelled exactly, is on truck 300, whose
 // assigned_driver has drifted to blank, while truck 101 is a stale truck still
 // naming them with a doubled space.
 const T300 = [3, "300", "", 9, "RM-300"];
-const DRIFTED = { accounts: [SK], trucks: [T101, T300], assignments: [[3, "Shorn King", "2026-09-01T12:00:00.000Z"]] };
+const DRIFTED = { accounts: [SK], trucks: [T101, T300], assignments: [[3, "Soren King", "2026-09-01T12:00:00.000Z"]] };
 
 // ─────────────────────────────────────────────────────────────── §1 helpers
 function helperSection(over = {}) {
@@ -226,72 +226,72 @@ function helperSection(over = {}) {
 		const db = makeDb({ accounts: [SK, DK], trucks: [T101, T205] });
 		const m = buildHelpers(db, over);
 		t("findTruckForDriver(), a spacing variant: the truck with its owner and ELD vehicle, stored spelling, matchedBy normalized",
-			[brief(m.findTruckForDriver("Shorn King")), (m.findTruckForDriver("Shorn King") || {}).assigned_driver], [[1, "101", 5, "RM-101", "normalized"], "Shorn  King"]);
+			[brief(m.findTruckForDriver("Soren King")), (m.findTruckForDriver("Soren King") || {}).assigned_driver], [[1, "101", 5, "RM-101", "normalized"], "Soren  King"]);
 		t("findTruckForDriver(), case aside: the same fields, matchedBy case",
-			brief(m.findTruckForDriver("DESHORN KING")), [2, "205", 7, "RM-205", "case"]);
+			brief(m.findTruckForDriver("DESOREN KING")), [2, "205", 7, "RM-205", "case"]);
 	}
 	{
 		// The active assignment, found the same two ways, the newest first.
 		const db = makeDb({ accounts: [SK], trucks: [withTruck(T101, { 2: "" }), [3, "300", "", 9, ""]],
-			assignments: [[3, "Shorn  King", "2026-08-01T00:00:00.000Z"], [1, " shorn king ", "2026-09-01T00:00:00.000Z"]] });
+			assignments: [[3, "Soren  King", "2026-08-01T00:00:00.000Z"], [1, " soren king ", "2026-09-01T00:00:00.000Z"]] });
 		const m = buildHelpers(db, over);
 		t("findActiveAssignmentTruckForDriver(), spacing variants only: the newest active row's truck, matchedBy normalized",
-			brief(m.findActiveAssignmentTruckForDriver("Shorn King")), [1, "101", 5, "RM-101", "normalized"]);
-		db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (3, 'SHORN KING', '2026-07-01T00:00:00.000Z')").run();
+			brief(m.findActiveAssignmentTruckForDriver("Soren King")), [1, "101", 5, "RM-101", "normalized"]);
+		db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (3, 'SOREN KING', '2026-07-01T00:00:00.000Z')").run();
 		t("findActiveAssignmentTruckForDriver(), a case-aside row is preferred to a newer spacing variant",
-			brief(m.findActiveAssignmentTruckForDriver("Shorn King")), [3, "300", 9, "", "case"]);
+			brief(m.findActiveAssignmentTruckForDriver("Soren King")), [3, "300", 9, "", "case"]);
 		db.prepare("UPDATE truck_assignments SET end_date = '2026-09-02' WHERE truck_id = 3").run();
 		db.prepare("UPDATE truck_assignments SET end_date = '2026-09-02' WHERE truck_id = 1").run();
 		t("findActiveAssignmentTruckForDriver(), a closed row is no match; a blank name matches nothing",
-			[m.findActiveAssignmentTruckForDriver("Shorn King"), m.findActiveAssignmentTruckForDriver(""), m.findActiveAssignmentTruckForDriver(null)], [null, null, null]);
+			[m.findActiveAssignmentTruckForDriver("Soren King"), m.findActiveAssignmentTruckForDriver(""), m.findActiveAssignmentTruckForDriver(null)], [null, null, null]);
 	}
 	{
-		const db = makeDb({ accounts: [SK, DK, [5, "shorn king"]] });
+		const db = makeDb({ accounts: [SK, DK, [5, "soren king"]] });
 		const m = buildHelpers(db, over);
 		t("driverNameHeldByOtherSpelling(): the name's own spelling, case aside, is not another spelling",
-			[m.driverNameHeldByOtherSpelling("Shorn King"), m.driverNameHeldByOtherSpelling(" SHORN KING ")], [false, false]);
+			[m.driverNameHeldByOtherSpelling("Soren King"), m.driverNameHeldByOtherSpelling(" SOREN KING ")], [false, false]);
 		t("driverNameHeldByOtherSpelling(): a spacing variant nobody holds, a stranger's name, a blank name: false",
 			[m.driverNameHeldByOtherSpelling("Pat Newhire"), m.driverNameHeldByOtherSpelling(""), m.driverNameHeldByOtherSpelling(null)], [false, false, false]);
 		t("driverNameHeldByOtherSpelling(): a spelling no account has, beside the account that has the name: true",
-			m.driverNameHeldByOtherSpelling("Shorn  King"), true);
-		db.prepare("INSERT INTO users (id, username, role, driver_name) VALUES (4, 'LogisX-1004', 'Driver', 'Shorn   King')").run();
+			m.driverNameHeldByOtherSpelling("Soren  King"), true);
+		db.prepare("INSERT INTO users (id, username, role, driver_name) VALUES (4, 'LogisX-1004', 'Driver', 'Soren   King')").run();
 		t("driverNameHeldByOtherSpelling(): another account holds the name in another spacing: true",
-			m.driverNameHeldByOtherSpelling("Shorn King"), true);
+			m.driverNameHeldByOtherSpelling("Soren King"), true);
 		db.prepare("INSERT INTO users (id, username, role, driver_name) VALUES (6, 'Pat  Newhire', 'Dispatcher', '')").run();
 		t("driverNameHeldByOtherSpelling(): a username is not a driver name", m.driverNameHeldByOtherSpelling("Pat Newhire"), false);
 	}
 	{
 		const stamp = (world, name, opts) => brief(buildHelpers(makeDb(world), over).findTruckForDriverStamp(name, opts));
 		t("findTruckForDriverStamp(), a spacing-variant truck, no other account: that truck",
-			stamp({ accounts: [SK, DK], trucks: [T101, T205] }, "Shorn King"), [1, "101", 5, "RM-101", "normalized"]);
+			stamp({ accounts: [SK, DK], trucks: [T101, T205] }, "Soren King"), [1, "101", 5, "RM-101", "normalized"]);
 		t("findTruckForDriverStamp(), a directory-only driver (no account at all): that truck",
-			stamp({ trucks: [T101] }, "shorn king"), [1, "101", 5, "RM-101", "normalized"]);
+			stamp({ trucks: [T101] }, "soren king"), [1, "101", 5, "RM-101", "normalized"]);
 		t("findTruckForDriverStamp(), another account holds the name in another spacing: no truck, as before",
-			stamp({ accounts: [SK, SK_OTHER], trucks: [T101] }, "Shorn King"), null);
+			stamp({ accounts: [SK, SK_OTHER], trucks: [T101] }, "Soren King"), null);
 		t("findTruckForDriverStamp(), ...a case-aside truck is still found",
-			stamp({ accounts: [SK, SK_OTHER], trucks: [withTruck(T101, { 2: "SHORN KING" })] }, "Shorn King"), [1, "101", 5, "RM-101", "case"]);
+			stamp({ accounts: [SK, SK_OTHER], trucks: [withTruck(T101, { 2: "SOREN KING" })] }, "Soren King"), [1, "101", 5, "RM-101", "case"]);
 		t("findTruckForDriverStamp(), ...and the other account's own spelling finds its truck case aside",
-			stamp({ accounts: [SK, SK_OTHER], trucks: [withTruck(T101, { 2: "Shorn   King" })] }, "Shorn   King"), [1, "101", 5, "RM-101", "case"]);
+			stamp({ accounts: [SK, SK_OTHER], trucks: [withTruck(T101, { 2: "Soren   King" })] }, "Soren   King"), [1, "101", 5, "RM-101", "case"]);
 		t("findTruckForDriverStamp(), no truck names the driver: the active assignment only when asked for",
-			[stamp({ accounts: [SK], trucks: [withTruck(T101, { 2: "" })], assignments: [A101] }, "Shorn King"),
-				stamp({ accounts: [SK], trucks: [withTruck(T101, { 2: "" })], assignments: [A101] }, "Shorn King", { activeAssignment: true })],
+			[stamp({ accounts: [SK], trucks: [withTruck(T101, { 2: "" })], assignments: [A101] }, "Soren King"),
+				stamp({ accounts: [SK], trucks: [withTruck(T101, { 2: "" })], assignments: [A101] }, "Soren King", { activeAssignment: true })],
 			[null, [1, "101", 5, "RM-101", "normalized"]]);
 		t("findTruckForDriverStamp(), the refused spacing step falls to a case-aside assignment",
-			stamp({ accounts: [SK, SK_OTHER], trucks: [T101, [3, "300", "", 9, ""]], assignments: [[3, "shorn king", "2026-09-01T00:00:00.000Z"]] }, "Shorn King", { activeAssignment: true }),
+			stamp({ accounts: [SK, SK_OTHER], trucks: [T101, [3, "300", "", 9, ""]], assignments: [[3, "soren king", "2026-09-01T00:00:00.000Z"]] }, "Soren King", { activeAssignment: true }),
 			[3, "300", 9, "", "case"]);
 		t("findTruckForDriverStamp(), ...and a spacing-variant assignment is refused the same way",
-			stamp({ accounts: [SK, SK_OTHER], trucks: [T101], assignments: [A101] }, "Shorn King", { activeAssignment: true }), null);
+			stamp({ accounts: [SK, SK_OTHER], trucks: [T101], assignments: [A101] }, "Soren King", { activeAssignment: true }), null);
 		t("findTruckForDriverStamp(), a blank name: no truck", stamp({ trucks: [withTruck(T101, { 2: "" })] }, "", { activeAssignment: true }), null);
 		// The order of the four steps: both case-aside steps before either spacing
 		// step, so a spacing match only fills what used to be Owner ID 0.
 		t("findTruckForDriverStamp(), a stale spacing-variant truck beside the driver's case-aside active assignment: the assignment, as before the spacing steps",
-			stamp(DRIFTED, "Shorn King", { activeAssignment: true }), [3, "300", 9, "RM-300", "case"]);
+			stamp(DRIFTED, "Soren King", { activeAssignment: true }), [3, "300", 9, "RM-300", "case"]);
 		t("findTruckForDriverStamp(), ...without the assignment step (the public tracker): the truck case aside, then across spacing",
-			stamp(DRIFTED, "Shorn King"), [1, "101", 5, "RM-101", "normalized"]);
+			stamp(DRIFTED, "Soren King"), [1, "101", 5, "RM-101", "normalized"]);
 		t("findTruckForDriverStamp(), a case-aside truck still comes before a case-aside assignment",
-			stamp({ ...DRIFTED, trucks: [withTruck(T101, { 2: "SHORN KING" }), T300] }, "Shorn King", { activeAssignment: true }), [1, "101", 5, "RM-101", "case"]);
+			stamp({ ...DRIFTED, trucks: [withTruck(T101, { 2: "SOREN KING" }), T300] }, "Soren King", { activeAssignment: true }), [1, "101", 5, "RM-101", "case"]);
 		t("findTruckForDriverStamp(), and a spacing-variant truck before a spacing-variant assignment",
-			stamp({ ...DRIFTED, assignments: [[3, "Shorn   King", "2026-09-01T12:00:00.000Z"]] }, "Shorn King", { activeAssignment: true }), [1, "101", 5, "RM-101", "normalized"]);
+			stamp({ ...DRIFTED, assignments: [[3, "Soren   King", "2026-09-01T12:00:00.000Z"]] }, "Soren King", { activeAssignment: true }), [1, "101", 5, "RM-101", "normalized"]);
 	}
 	return results;
 }
@@ -348,7 +348,7 @@ function mountExpense(db, routeSrc, helperOver) {
 }
 async function expenseSection(routeSrc = ROUTES.expense, helperOver = {}) {
 	const { results, t } = collector();
-	const DRIVER_SK = { id: 2, role: "Driver", username: "LogisX-1002", driverName: "Shorn King" };
+	const DRIVER_SK = { id: 2, role: "Driver", username: "LogisX-1002", driverName: "Soren King" };
 	const ADMIN = { id: 1, role: "Super Admin", username: "super_admin" };
 	const post = async (world, user, over = {}) => {
 		const db = makeDb(world);
@@ -364,27 +364,27 @@ async function expenseSection(routeSrc = ROUTES.expense, helperOver = {}) {
 	{
 		const { r, row } = await post({ accounts: [SK, DK], trucks: [T101, T205] }, DRIVER_SK);
 		t("POST /api/expenses, the driver whose truck is stored with a doubled space: 200, the truck's unit and owner stamped, its ELD vehicle placing the receipt",
-			[r.code, row], [200, ["Shorn King", "101", 5, "TX", "eld"]]);
+			[r.code, row], [200, ["Soren King", "101", 5, "TX", "eld"]]);
 	}
 	{
-		const { r, row } = await post({ accounts: [SK, DK], trucks: [T101, T205] }, ADMIN, { driver: "shorn king" });
+		const { r, row } = await post({ accounts: [SK, DK], trucks: [T101, T205] }, ADMIN, { driver: "soren king" });
 		t("POST /api/expenses, a Super Admin filing for the driver in another spelling: the same truck and owner",
-			[r.code, row], [200, ["shorn king", "101", 5, "TX", "eld"]]);
+			[r.code, row], [200, ["soren king", "101", 5, "TX", "eld"]]);
 	}
 	{
-		const { r, row } = await post({ accounts: [SK, DK], trucks: [T101, T205] }, ADMIN, { driver: "Deshorn King" });
+		const { r, row } = await post({ accounts: [SK, DK], trucks: [T101, T205] }, ADMIN, { driver: "Desoren King" });
 		t("POST /api/expenses, a case-aside match is stamped as before",
-			[r.code, row], [200, ["Deshorn King", "205", 7, "", ""]]);
+			[r.code, row], [200, ["Desoren King", "205", 7, "", ""]]);
 	}
 	{
 		const { r, row } = await post({ accounts: [SK, DK, SK_OTHER], trucks: [T101, T205] }, DRIVER_SK);
 		t("POST /api/expenses, another account holds the name in another spacing: no truck, owner 0, as before",
-			[r.code, row], [200, ["Shorn King", "", 0, "", ""]]);
+			[r.code, row], [200, ["Soren King", "", 0, "", ""]]);
 	}
 	{
-		const { r, row } = await post({ accounts: [SK, DK, SK_OTHER], trucks: [withTruck(T101, { 2: "SHORN KING" }), T205] }, DRIVER_SK);
+		const { r, row } = await post({ accounts: [SK, DK, SK_OTHER], trucks: [withTruck(T101, { 2: "SOREN KING" }), T205] }, DRIVER_SK);
 		t("POST /api/expenses, ...a truck naming the driver case aside is still stamped",
-			[r.code, row], [200, ["Shorn King", "101", 5, "TX", "eld"]]);
+			[r.code, row], [200, ["Soren King", "101", 5, "TX", "eld"]]);
 	}
 	{
 		// The expense stamp takes the dispatch stamps' four steps, so the driver's
@@ -393,7 +393,7 @@ async function expenseSection(routeSrc = ROUTES.expense, helperOver = {}) {
 		// ELD vehicle has no fix in this fixture, so no location is added.
 		const { r, row } = await post(DRIFTED, DRIVER_SK);
 		t("POST /api/expenses, a stale spacing-variant truck beside the driver's case-aside active assignment: the assignment's truck and owner, as the dispatch stamps order it",
-			[r.code, row], [200, ["Shorn King", "300", 9, "", ""]]);
+			[r.code, row], [200, ["Soren King", "300", 9, "", ""]]);
 	}
 	// A name sent for a driver that reads as a built-in property name: 400
 	// DRIVER_NAME_RESERVED naming the field, before anything is written.
@@ -495,24 +495,24 @@ async function dispatchSection(routes = { dispatch: ROUTES.dispatch, reassign: R
 		const run = (world, name) => mountDispatch(makeDb(world), routes[key], helperOver)({ rowIndex: 2, loadId: "111", [field]: name });
 		const brief = (r) => [r.code, r.driver, r.truck, r.owner];
 		t(`${label}, the driver whose truck is stored with a doubled space: Truck and Owner ID are that truck's`,
-			brief(await run({ accounts: [SK, DK], trucks: [T101, T205], assignments: [A101, A205] }, "Shorn King")), [200, "Shorn King", "101", "5"]);
+			brief(await run({ accounts: [SK, DK], trucks: [T101, T205], assignments: [A101, A205] }, "Soren King")), [200, "Soren King", "101", "5"]);
 		t(`${label}, the driver named in another case and spacing: the account's spelling, and the same truck`,
-			brief(await run({ accounts: [SK, DK], trucks: [T101, T205] }, "shorn king")), [200, "Shorn King", "101", "5"]);
+			brief(await run({ accounts: [SK, DK], trucks: [T101, T205] }, "soren king")), [200, "Soren King", "101", "5"]);
 		t(`${label}, a case-aside match is stamped as before`,
-			brief(await run({ accounts: [SK, DK], trucks: [T101, T205] }, "Deshorn King")), [200, "Deshorn King", "205", "7"]);
+			brief(await run({ accounts: [SK, DK], trucks: [T101, T205] }, "Desoren King")), [200, "Desoren King", "205", "7"]);
 		t(`${label}, no truck names the driver: the active assignment, stored with a doubled space, is the fallback`,
-			brief(await run({ accounts: [SK], trucks: [withTruck(T101, { 2: "" })], assignments: [A101] }, "Shorn King")), [200, "Shorn King", "101", "5"]);
+			brief(await run({ accounts: [SK], trucks: [withTruck(T101, { 2: "" })], assignments: [A101] }, "Soren King")), [200, "Soren King", "101", "5"]);
 		t(`${label}, another account holds the name in another spacing: no truck, Owner ID 0, as before`,
-			brief(await run({ accounts: [SK, SK_OTHER], trucks: [T101], assignments: [A101] }, "Shorn King")), [200, "Shorn King", "", "0"]);
+			brief(await run({ accounts: [SK, SK_OTHER], trucks: [T101], assignments: [A101] }, "Soren King")), [200, "Soren King", "", "0"]);
 		t(`${label}, ...a truck naming the driver case aside is still stamped`,
-			brief(await run({ accounts: [SK, SK_OTHER], trucks: [withTruck(T101, { 2: "SHORN KING" })] }, "Shorn King")), [200, "Shorn King", "101", "5"]);
+			brief(await run({ accounts: [SK, SK_OTHER], trucks: [withTruck(T101, { 2: "SOREN KING" })] }, "Soren King")), [200, "Soren King", "101", "5"]);
 		t(`${label}, ...and so is a case-aside active assignment`,
-			brief(await run({ accounts: [SK, SK_OTHER], trucks: [withTruck(T101, { 2: "" })], assignments: [[1, "SHORN KING", "2026-09-01T00:00:00.000Z"]] }, "Shorn King")),
-			[200, "Shorn King", "101", "5"]);
+			brief(await run({ accounts: [SK, SK_OTHER], trucks: [withTruck(T101, { 2: "" })], assignments: [[1, "SOREN KING", "2026-09-01T00:00:00.000Z"]] }, "Soren King")),
+			[200, "Soren King", "101", "5"]);
 		t(`${label}, a name no truck or assignment names: no truck, Owner ID 0`,
 			brief(await run({ accounts: [SK], trucks: [T101] }, "Pat Newhire")), [200, "Pat Newhire", "", "0"]);
 		t(`${label}, a stale truck naming the driver with a doubled space beside the driver's case-aside active assignment: the assignment's Truck and Owner ID, as before`,
-			brief(await run(DRIFTED, "Shorn King")), [200, "Shorn King", "300", "9"]);
+			brief(await run(DRIFTED, "Soren King")), [200, "Soren King", "300", "9"]);
 	}
 	return results;
 }
@@ -527,25 +527,25 @@ function assignSection(helperOver = {}) {
 	const assign = (world, truckId, name) => { const db = makeDb(world); buildHelpers(db, helperOver).assignDriverToTruck(truckId, name); return state(db); };
 	const T2 = [2, "205", "", 7, ""];
 	t("assignDriverToTruck(), the driver's old truck stored with a doubled space: released, with its assignment row; one truck, one active row",
-		assign({ accounts: [SK], trucks: [T101, T2], assignments: [A101] }, 2, "Shorn King"), ["1:,2:Shorn King", "2:Shorn King"]);
+		assign({ accounts: [SK], trucks: [T101, T2], assignments: [A101] }, 2, "Soren King"), ["1:,2:Soren King", "2:Soren King"]);
 	t("assignDriverToTruck(), an old truck and row stored with edge spaces: released too",
-		assign({ accounts: [SK], trucks: [withTruck(T101, { 2: " shorn king " }), T2], assignments: [[1, " shorn king ", "2026-09-01T00:00:00.000Z"]] }, 2, "Shorn King"),
-		["1:,2:Shorn King", "2:Shorn King"]);
+		assign({ accounts: [SK], trucks: [withTruck(T101, { 2: " soren king " }), T2], assignments: [[1, " soren king ", "2026-09-01T00:00:00.000Z"]] }, 2, "Soren King"),
+		["1:,2:Soren King", "2:Soren King"]);
 	t("assignDriverToTruck(), a directory-only driver (no account): released the same way",
-		assign({ trucks: [T101, T2], assignments: [A101] }, 2, "Shorn King"), ["1:,2:Shorn King", "2:Shorn King"]);
+		assign({ trucks: [T101, T2], assignments: [A101] }, 2, "Soren King"), ["1:,2:Soren King", "2:Soren King"]);
 	t("assignDriverToTruck(), another account holds the name in another spacing: its truck and row are left alone, as before",
-		assign({ accounts: [SK, SK_OTHER], trucks: [T101, T2], assignments: [A101] }, 2, "Shorn King"), ["1:Shorn  King,2:Shorn King", "1:Shorn  King,2:Shorn King"]);
+		assign({ accounts: [SK, SK_OTHER], trucks: [T101, T2], assignments: [A101] }, 2, "Soren King"), ["1:Soren  King,2:Soren King", "1:Soren  King,2:Soren King"]);
 	t("assignDriverToTruck(), ...a case-aside truck and row are still released",
-		assign({ accounts: [SK, SK_OTHER], trucks: [withTruck(T101, { 2: "SHORN KING" }), T2], assignments: [[1, "SHORN KING", "2026-09-01T00:00:00.000Z"]] }, 2, "Shorn King"),
-		["1:,2:Shorn King", "2:Shorn King"]);
-	t("assignDriverToTruck(), Deshorn King's truck is never Shorn King's to release",
-		assign({ accounts: [SK, DK], trucks: [T101, T205, [3, "300", "", 0, ""]], assignments: [A101, A205] }, 3, "Shorn King"),
-		["1:,2:Deshorn King,3:Shorn King", "2:Deshorn King,3:Shorn King"]);
+		assign({ accounts: [SK, SK_OTHER], trucks: [withTruck(T101, { 2: "SOREN KING" }), T2], assignments: [[1, "SOREN KING", "2026-09-01T00:00:00.000Z"]] }, 2, "Soren King"),
+		["1:,2:Soren King", "2:Soren King"]);
+	t("assignDriverToTruck(), Desoren King's truck is never Soren King's to release",
+		assign({ accounts: [SK, DK], trucks: [T101, T205, [3, "300", "", 0, ""]], assignments: [A101, A205] }, 3, "Soren King"),
+		["1:,2:Desoren King,3:Soren King", "2:Desoren King,3:Soren King"]);
 	t("assignDriverToTruck(), unassigning (a blank name) clears only that truck",
-		assign({ accounts: [SK], trucks: [T101, withTruck(T2, { 2: "Deshorn King" })], assignments: [A101, [2, "Deshorn King", "2026-09-01T00:00:00.000Z"]] }, 1, ""),
-		["1:,2:Deshorn King", "2:Deshorn King"]);
+		assign({ accounts: [SK], trucks: [T101, withTruck(T2, { 2: "Desoren King" })], assignments: [A101, [2, "Desoren King", "2026-09-01T00:00:00.000Z"]] }, 1, ""),
+		["1:,2:Desoren King", "2:Desoren King"]);
 	t("assignDriverToTruck(), re-assigning the driver's own truck in another spelling keeps one row",
-		assign({ accounts: [SK], trucks: [T101], assignments: [A101] }, 1, "Shorn King"), ["1:Shorn King", "1:Shorn King"]);
+		assign({ accounts: [SK], trucks: [T101], assignments: [A101] }, 1, "Soren King"), ["1:Soren King", "1:Soren King"]);
 	return results;
 }
 
@@ -571,50 +571,50 @@ function pairingSection(helperOver = {}) {
 		return pairingRows(db);
 	};
 	t("the driver's open pairing stored with a doubled space, a truck of another carrier: that pairing closed, one open under the new carrier",
-		after({ accounts: [SK], pairings: [["Carrier Five LLC", "Shorn  King"]] }, "Shorn King"),
-		["Carrier Five LLC|Shorn  King|closed", "Carrier Seven LLC|Shorn King|open"]);
+		after({ accounts: [SK], pairings: [["Carrier Five LLC", "Soren  King"]] }, "Soren King"),
+		["Carrier Five LLC|Soren  King|closed", "Carrier Seven LLC|Soren King|open"]);
 	t("...one stored with edge spaces: closed too",
-		after({ accounts: [SK], pairings: [["Carrier Five LLC", " shorn king "]] }, "Shorn King"),
-		["Carrier Five LLC| shorn king |closed", "Carrier Seven LLC|Shorn King|open"]);
+		after({ accounts: [SK], pairings: [["Carrier Five LLC", " soren king "]] }, "Soren King"),
+		["Carrier Five LLC| soren king |closed", "Carrier Seven LLC|Soren King|open"]);
 	t("...a directory-only driver (no account): the same",
-		after({ pairings: [["Carrier Five LLC", "Shorn  King"]] }, "Shorn King"),
-		["Carrier Five LLC|Shorn  King|closed", "Carrier Seven LLC|Shorn King|open"]);
+		after({ pairings: [["Carrier Five LLC", "Soren  King"]] }, "Soren King"),
+		["Carrier Five LLC|Soren  King|closed", "Carrier Seven LLC|Soren King|open"]);
 	t("the spacing-variant pairing already under this carrier: left open, and the driver's own spelling opened beside it, as the case-only lookup did",
-		after({ accounts: [SK], pairings: [["Carrier Seven LLC", "Shorn  King"]] }, "Shorn King"),
-		["Carrier Seven LLC|Shorn  King|open", "Carrier Seven LLC|Shorn King|open"]);
+		after({ accounts: [SK], pairings: [["Carrier Seven LLC", "Soren  King"]] }, "Soren King"),
+		["Carrier Seven LLC|Soren  King|open", "Carrier Seven LLC|Soren King|open"]);
 	t("...one under this carrier stored with edge spaces is the driver's own spelling once trimmed, as leg 3 reads it: left open, no second row",
-		after({ accounts: [SK], pairings: [["Carrier Seven LLC", " shorn king "]] }, "Shorn King"),
-		["Carrier Seven LLC| shorn king |open"]);
+		after({ accounts: [SK], pairings: [["Carrier Seven LLC", " soren king "]] }, "Soren King"),
+		["Carrier Seven LLC| soren king |open"]);
 	t("two open pairings the old lookup left (a variant under Carrier Five, the name under Carrier Seven): the variant closed, the other kept, no new row",
-		after({ accounts: [SK], pairings: [["Carrier Five LLC", "Shorn  King"], ["Carrier Seven LLC", "Shorn King"]] }, "Shorn King"),
-		["Carrier Five LLC|Shorn  King|closed", "Carrier Seven LLC|Shorn King|open"]);
+		after({ accounts: [SK], pairings: [["Carrier Five LLC", "Soren  King"], ["Carrier Seven LLC", "Soren King"]] }, "Soren King"),
+		["Carrier Five LLC|Soren  King|closed", "Carrier Seven LLC|Soren King|open"]);
 	t("a case-aside pairing under another carrier: closed and replaced, as before",
-		after({ accounts: [SK], pairings: [["Carrier Five LLC", "SHORN KING"]] }, "Shorn King"),
-		["Carrier Five LLC|SHORN KING|closed", "Carrier Seven LLC|Shorn King|open"]);
+		after({ accounts: [SK], pairings: [["Carrier Five LLC", "SOREN KING"]] }, "Soren King"),
+		["Carrier Five LLC|SOREN KING|closed", "Carrier Seven LLC|Soren King|open"]);
 	t("a pairing closed earlier is left as it was",
-		after({ accounts: [SK], pairings: [["Carrier Five LLC", "Shorn  King", EARLIER]] }, "Shorn King"),
-		["Carrier Five LLC|Shorn  King|closed earlier", "Carrier Seven LLC|Shorn King|open"]);
+		after({ accounts: [SK], pairings: [["Carrier Five LLC", "Soren  King", EARLIER]] }, "Soren King"),
+		["Carrier Five LLC|Soren  King|closed earlier", "Carrier Seven LLC|Soren King|open"]);
 	t("another account holds the name in another spacing: its pairing is left open, as before",
-		after({ accounts: [SK, SK_OTHER], pairings: [["Carrier Five LLC", "Shorn   King"]] }, "Shorn King"),
-		["Carrier Five LLC|Shorn   King|open", "Carrier Seven LLC|Shorn King|open"]);
+		after({ accounts: [SK, SK_OTHER], pairings: [["Carrier Five LLC", "Soren   King"]] }, "Soren King"),
+		["Carrier Five LLC|Soren   King|open", "Carrier Seven LLC|Soren King|open"]);
 	t("...while a case-aside pairing is still closed",
-		after({ accounts: [SK, SK_OTHER], pairings: [["Carrier Five LLC", "shorn king"]] }, "Shorn King"),
-		["Carrier Five LLC|shorn king|closed", "Carrier Seven LLC|Shorn King|open"]);
-	t("Deshorn King's pairing is never Shorn King's to close",
-		after({ accounts: [SK, DK], pairings: [["Carrier Five LLC", "Deshorn King"]] }, "Shorn King"),
-		["Carrier Five LLC|Deshorn King|open", "Carrier Seven LLC|Shorn King|open"]);
+		after({ accounts: [SK, SK_OTHER], pairings: [["Carrier Five LLC", "soren king"]] }, "Soren King"),
+		["Carrier Five LLC|soren king|closed", "Carrier Seven LLC|Soren King|open"]);
+	t("Desoren King's pairing is never Soren King's to close",
+		after({ accounts: [SK, DK], pairings: [["Carrier Five LLC", "Desoren King"]] }, "Soren King"),
+		["Carrier Five LLC|Desoren King|open", "Carrier Seven LLC|Soren King|open"]);
 	{
 		// What the pairing is for: getInvestorDriverSet() leg 3 reads every pairing
 		// under the investor's carrier, open or closed, trimmed and case aside but
 		// with internal spaces kept. Once the driver moves on to Carrier Five's
 		// truck 101, legs 1 and 1b no longer name them for Carrier Seven.
-		const db = makeDb({ investors: INVESTORS, trucks: [T101, T3], accounts: [SK], pairings: [["Carrier Seven LLC", "Shorn  King"]] });
+		const db = makeDb({ investors: INVESTORS, trucks: [T101, T3], accounts: [SK], pairings: [["Carrier Seven LLC", "Soren  King"]] });
 		const m = buildHelpers(db, helperOver);
-		m.assignDriverToTruck(3, "Shorn King");
-		m.assignDriverToTruck(1, "Shorn King");
+		m.assignDriverToTruck(3, "Soren King");
+		m.assignDriverToTruck(1, "Soren King");
 		t("the driver moved on from Carrier Seven's truck to Carrier Five's: Carrier Seven's driver set still names them in their own spelling, and in the variant",
 			[[...m.getInvestorDriverSet(7, null, null, null)].sort(), pairingRows(db)],
-			[["shorn  king", "shorn king"], ["Carrier Seven LLC|Shorn  King|closed", "Carrier Seven LLC|Shorn King|closed", "Carrier Five LLC|Shorn King|open"]]);
+			[["soren  king", "soren king"], ["Carrier Seven LLC|Soren  King|closed", "Carrier Seven LLC|Soren King|closed", "Carrier Five LLC|Soren King|open"]]);
 	}
 	return results;
 }
@@ -668,76 +668,76 @@ function directorySyncSection(helperOver = {}) {
 	const after = (world, rows, opts) => pairingRows(run(world, rows, opts));
 	const to = (driver, carrier = "Carrier Seven LLC") => [{ Driver: driver, "Carrier Name": carrier }];
 	t("the driver's open pairing stored with a doubled space, another carrier: that pairing closed, one open under the new carrier",
-		after({ accounts: [SK], pairings: [["Carrier Five LLC", "Shorn  King"]] }, to("Shorn King")),
-		["Carrier Five LLC|Shorn  King|closed", "Carrier Seven LLC|Shorn King|open"]);
+		after({ accounts: [SK], pairings: [["Carrier Five LLC", "Soren  King"]] }, to("Soren King")),
+		["Carrier Five LLC|Soren  King|closed", "Carrier Seven LLC|Soren King|open"]);
 	t("...one stored with edge spaces: closed too",
-		after({ accounts: [SK], pairings: [["Carrier Five LLC", " shorn king "]] }, to("Shorn King")),
-		["Carrier Five LLC| shorn king |closed", "Carrier Seven LLC|Shorn King|open"]);
+		after({ accounts: [SK], pairings: [["Carrier Five LLC", " soren king "]] }, to("Soren King")),
+		["Carrier Five LLC| soren king |closed", "Carrier Seven LLC|Soren King|open"]);
 	t("...a directory-only driver (no account): the same",
-		after({ pairings: [["Carrier Five LLC", "Shorn  King"]] }, to("Shorn King")),
-		["Carrier Five LLC|Shorn  King|closed", "Carrier Seven LLC|Shorn King|open"]);
+		after({ pairings: [["Carrier Five LLC", "Soren  King"]] }, to("Soren King")),
+		["Carrier Five LLC|Soren  King|closed", "Carrier Seven LLC|Soren King|open"]);
 	// A spacing variant open under this carrier is the same carrier, so it stays
 	// open; but it is not the driver's own spelling, which leg 3 needs, so that
 	// is opened beside it, as the case-only copy did.
 	t("the spacing-variant pairing already open under this carrier: left open, and the driver's own spelling opened beside it",
-		after({ accounts: [SK], pairings: [["Carrier Seven LLC", "Shorn  King"]] }, to("Shorn King")),
-		["Carrier Seven LLC|Shorn  King|open", "Carrier Seven LLC|Shorn King|open"]);
+		after({ accounts: [SK], pairings: [["Carrier Seven LLC", "Soren  King"]] }, to("Soren King")),
+		["Carrier Seven LLC|Soren  King|open", "Carrier Seven LLC|Soren King|open"]);
 	t("...under this carrier spelled in another case: the same",
-		after({ accounts: [SK], pairings: [["CARRIER SEVEN LLC", "Shorn  King"]] }, to("Shorn King")),
-		["CARRIER SEVEN LLC|Shorn  King|open", "Carrier Seven LLC|Shorn King|open"]);
+		after({ accounts: [SK], pairings: [["CARRIER SEVEN LLC", "Soren  King"]] }, to("Soren King")),
+		["CARRIER SEVEN LLC|Soren  King|open", "Carrier Seven LLC|Soren King|open"]);
 	{
-		const db = makeDb({ accounts: [SK], pairings: [["Carrier Seven LLC", "Shorn  King"]] });
+		const db = makeDb({ accounts: [SK], pairings: [["Carrier Seven LLC", "Soren  King"]] });
 		const { syncCarrierDriverHistory } = buildHelpers(db, helperOver);
-		syncCarrierDriverHistory(to("Shorn King"), "Driver", "Carrier Name");
-		syncCarrierDriverHistory(to("Shorn King"), "Driver", "Carrier Name");
+		syncCarrierDriverHistory(to("Soren King"), "Driver", "Carrier Name");
+		syncCarrierDriverHistory(to("Soren King"), "Driver", "Carrier Name");
 		t("...and the next save of the row opens nothing more", pairingRows(db),
-			["Carrier Seven LLC|Shorn  King|open", "Carrier Seven LLC|Shorn King|open"]);
+			["Carrier Seven LLC|Soren  King|open", "Carrier Seven LLC|Soren King|open"]);
 	}
 	t("a directory row spelled with a doubled space, no account holding either spelling, the other spelling open under this carrier: the row's own spelling opened beside it",
-		after({ pairings: [["Carrier Seven LLC", "Shorn King"]] }, to("Shorn  King")),
-		["Carrier Seven LLC|Shorn King|open", "Carrier Seven LLC|Shorn  King|open"]);
+		after({ pairings: [["Carrier Seven LLC", "Soren King"]] }, to("Soren  King")),
+		["Carrier Seven LLC|Soren King|open", "Carrier Seven LLC|Soren  King|open"]);
 	t("two open pairings the old lookup left (a variant under Carrier Five, the name under Carrier Seven): the variant closed, the other kept, no new row",
-		after({ accounts: [SK], pairings: [["Carrier Five LLC", "Shorn  King"], ["Carrier Seven LLC", "Shorn King"]] }, to("Shorn King")),
-		["Carrier Five LLC|Shorn  King|closed", "Carrier Seven LLC|Shorn King|open"]);
+		after({ accounts: [SK], pairings: [["Carrier Five LLC", "Soren  King"], ["Carrier Seven LLC", "Soren King"]] }, to("Soren King")),
+		["Carrier Five LLC|Soren  King|closed", "Carrier Seven LLC|Soren King|open"]);
 	// With the guard engaged too: the spacing pass would otherwise find the
 	// second row, since normalizeDriverName() folds case as well.
-	const TWO_CASE_ASIDE = [["Carrier Five LLC", "SHORN KING"], ["Carrier Six LLC", "Shorn King"]];
+	const TWO_CASE_ASIDE = [["Carrier Five LLC", "SOREN KING"], ["Carrier Six LLC", "Soren King"]];
 	t("two case-aside open pairings under other carriers, with and without the guard engaged: both closed (the old lookup closed one), one opened",
-		[after({ accounts: [SK], pairings: TWO_CASE_ASIDE }, to("Shorn King")), after({ accounts: [SK, SK_OTHER], pairings: TWO_CASE_ASIDE }, to("Shorn King"))],
-		Array(2).fill(["Carrier Five LLC|SHORN KING|closed", "Carrier Six LLC|Shorn King|closed", "Carrier Seven LLC|Shorn King|open"]));
+		[after({ accounts: [SK], pairings: TWO_CASE_ASIDE }, to("Soren King")), after({ accounts: [SK, SK_OTHER], pairings: TWO_CASE_ASIDE }, to("Soren King"))],
+		Array(2).fill(["Carrier Five LLC|SOREN KING|closed", "Carrier Six LLC|Soren King|closed", "Carrier Seven LLC|Soren King|open"]));
 	t("the guard: another account holds the name in another spacing: its pairing is left open, as before",
-		after({ accounts: [SK, SK_OTHER], pairings: [["Carrier Five LLC", "Shorn   King"]] }, to("Shorn King")),
-		["Carrier Five LLC|Shorn   King|open", "Carrier Seven LLC|Shorn King|open"]);
+		after({ accounts: [SK, SK_OTHER], pairings: [["Carrier Five LLC", "Soren   King"]] }, to("Soren King")),
+		["Carrier Five LLC|Soren   King|open", "Carrier Seven LLC|Soren King|open"]);
 	t("...while a case-aside pairing is still closed",
-		after({ accounts: [SK, SK_OTHER], pairings: [["Carrier Five LLC", "shorn king"]] }, to("Shorn King")),
-		["Carrier Five LLC|shorn king|closed", "Carrier Seven LLC|Shorn King|open"]);
+		after({ accounts: [SK, SK_OTHER], pairings: [["Carrier Five LLC", "soren king"]] }, to("Soren King")),
+		["Carrier Five LLC|soren king|closed", "Carrier Seven LLC|Soren King|open"]);
 	t("...and a directory row spelled the way no account is leaves the account's pairing open, as before",
-		after({ accounts: [SK], pairings: [["Carrier Five LLC", "Shorn King"]] }, to("Shorn  King")),
-		["Carrier Five LLC|Shorn King|open", "Carrier Seven LLC|Shorn  King|open"]);
-	t("Deshorn King's pairing is never Shorn King's to close",
-		after({ accounts: [SK, DK], pairings: [["Carrier Five LLC", "Deshorn King"]] }, to("Shorn King")),
-		["Carrier Five LLC|Deshorn King|open", "Carrier Seven LLC|Shorn King|open"]);
+		after({ accounts: [SK], pairings: [["Carrier Five LLC", "Soren King"]] }, to("Soren  King")),
+		["Carrier Five LLC|Soren King|open", "Carrier Seven LLC|Soren  King|open"]);
+	t("Desoren King's pairing is never Soren King's to close",
+		after({ accounts: [SK, DK], pairings: [["Carrier Five LLC", "Desoren King"]] }, to("Soren King")),
+		["Carrier Five LLC|Desoren King|open", "Carrier Seven LLC|Soren King|open"]);
 	t("the new row carries both names trimmed, as before",
-		after({ accounts: [SK] }, to("  Shorn King ", " Carrier Seven LLC  ")),
-		["Carrier Seven LLC|Shorn King|open"]);
+		after({ accounts: [SK] }, to("  Soren King ", " Carrier Seven LLC  ")),
+		["Carrier Seven LLC|Soren King|open"]);
 	t("a row without a driver or a carrier, or a call without the column names: nothing written",
-		[after({}, to("")), after({}, to("Shorn King", "")), after({}, to("Shorn King"), { cols: ["Driver", ""] })],
+		[after({}, to("")), after({}, to("Soren King", "")), after({}, to("Soren King"), { cols: ["Driver", ""] })],
 		[[], [], []]);
 	// One case-aside open row, or none, over every world and input below, with
 	// and without the guard engaged: the rows end exactly as under the case-only
 	// copy, every column.
 	const WORLDS = [
 		{},
-		{ pairings: [["Carrier Five LLC", "Shorn King"]] },
-		{ pairings: [["Carrier Five LLC", "SHORN KING"]] },
-		{ pairings: [["Carrier Seven LLC", "shorn king"]] },
-		{ pairings: [["CARRIER SEVEN LLC", "Shorn King"]] },
-		{ pairings: [["Carrier Five LLC", "Shorn King", EARLIER]] },
-		{ pairings: [["Carrier Five LLC", "Shorn  King", EARLIER], ["Carrier Seven LLC", "Shorn King"]] },
-		{ pairings: [["Carrier Five LLC", "Deshorn King"], ["Carrier Five LLC", "Shorn King"]] },
+		{ pairings: [["Carrier Five LLC", "Soren King"]] },
+		{ pairings: [["Carrier Five LLC", "SOREN KING"]] },
+		{ pairings: [["Carrier Seven LLC", "soren king"]] },
+		{ pairings: [["CARRIER SEVEN LLC", "Soren King"]] },
+		{ pairings: [["Carrier Five LLC", "Soren King", EARLIER]] },
+		{ pairings: [["Carrier Five LLC", "Soren  King", EARLIER], ["Carrier Seven LLC", "Soren King"]] },
+		{ pairings: [["Carrier Five LLC", "Desoren King"], ["Carrier Five LLC", "Soren King"]] },
 	];
-	const INPUTS = [to("Shorn King"), to("Shorn King", "Carrier Five LLC"), to("SHORN KING", "carrier seven llc"), [],
-		[...to("Shorn King"), ...to("Deshorn King")]];
+	const INPUTS = [to("Soren King"), to("Soren King", "Carrier Five LLC"), to("SOREN KING", "carrier seven llc"), [],
+		[...to("Soren King"), ...to("Desoren King")]];
 	const sweep = (worlds, inputs) => {
 		const drift = [];
 		let compared = 0;
@@ -763,15 +763,15 @@ function directorySyncSection(helperOver = {}) {
 	// it unless it is open already. (A variant with only edge spaces is the
 	// driver's own spelling once trimmed, so it is not one of these; see above.)
 	const SAME_CARRIER_WORLDS = [
-		{ pairings: [["Carrier Seven LLC", "Shorn  King"]] },
-		{ pairings: [["CARRIER SEVEN LLC", "shorn   king"]] },
-		{ pairings: [["Carrier Seven LLC", " Shorn  King "]] },
-		{ pairings: [["Carrier Seven LLC", "Shorn King", EARLIER], ["Carrier Seven LLC", "Shorn  King"]] },
-		{ pairings: [["Carrier Seven LLC", "Shorn  King"], ["carrier seven llc", "Shorn King"]] },
-		{ pairings: [["Carrier Seven LLC", "Shorn  King"], ["Carrier Five LLC", "Deshorn King"]] },
+		{ pairings: [["Carrier Seven LLC", "Soren  King"]] },
+		{ pairings: [["CARRIER SEVEN LLC", "soren   king"]] },
+		{ pairings: [["Carrier Seven LLC", " Soren  King "]] },
+		{ pairings: [["Carrier Seven LLC", "Soren King", EARLIER], ["Carrier Seven LLC", "Soren  King"]] },
+		{ pairings: [["Carrier Seven LLC", "Soren  King"], ["carrier seven llc", "Soren King"]] },
+		{ pairings: [["Carrier Seven LLC", "Soren  King"], ["Carrier Five LLC", "Desoren King"]] },
 	];
-	const SAME_CARRIER_INPUTS = [to("Shorn King"), to("SHORN KING", "carrier seven llc"), to(" shorn king ", "CARRIER SEVEN LLC"),
-		[...to("Shorn King"), ...to("Deshorn King")]];
+	const SAME_CARRIER_INPUTS = [to("Soren King"), to("SOREN KING", "carrier seven llc"), to(" soren king ", "CARRIER SEVEN LLC"),
+		[...to("Soren King"), ...to("Desoren King")]];
 	{
 		const { compared, drift } = sweep(SAME_CARRIER_WORLDS, SAME_CARRIER_INPUTS);
 		t(`a spacing variant open only under the carrier being written: all ${compared} world and input pairs end exactly as under the case-only copy`, drift, []);

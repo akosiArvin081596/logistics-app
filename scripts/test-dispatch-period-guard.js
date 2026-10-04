@@ -125,7 +125,7 @@ const PROD_HEADERS = ["Contract ID", "Load ID", "Details", "Trailer Number", "Dr
 function row(over) {
 	return Object.assign({
 		"Load ID": "553198052",
-		"Driver": "Howard Reddie",
+		"Driver": "Hollis Renner",
 		"Job Status": "Delivered",
 		"  Payment  ": "$4,800.00",
 		"Pickup Appointment": "2026-05-12",
@@ -159,10 +159,10 @@ section("1. The permissive half — a load that is not completed moves $0");
 for (const st of ["Unassigned", "", "Dispatched", "Assigned", "Heading to Shipper",
 	"At Shipper", "Loading", "In Transit", "At Receiver"]) {
 	check(`dispatch onto "${st || "(blank)"}" in LOCKED 2026-05 → allow`,
-		code(G.dispatchWriteBlocker(PROD_HEADERS, row({ "Job Status": st, "Driver": "" }), dispatchEdits("Shorn King"))), null);
+		code(G.dispatchWriteBlocker(PROD_HEADERS, row({ "Job Status": st, "Driver": "" }), dispatchEdits("Soren King"))), null);
 }
 check("reassign a mid-trip load in LOCKED 2026-05 → allow",
-	code(G.dispatchWriteBlocker(PROD_HEADERS, row({ "Job Status": "In Transit" }), reassignEdits("Shorn King"))), null);
+	code(G.dispatchWriteBlocker(PROD_HEADERS, row({ "Job Status": "In Transit" }), reassignEdits("Soren King"))), null);
 check("mid-trip status change At Shipper → In Transit in LOCKED 2026-05 → allow",
 	code(G.dispatchWriteBlocker(PROD_HEADERS, row({ "Job Status": "At Shipper" }), statusEdits("In Transit"))), null);
 check("driver ACCEPTS (→ Assigned) a dispatched load in LOCKED 2026-05 → allow",
@@ -175,16 +175,16 @@ check("driver DECLINES a dispatched load in LOCKED 2026-05 → allow",
 // earlier draft had one, and this is the case it broke. See the ⚠️ on
 // dispatchWriteBlocker() before adding it back.
 check("re-dispatch a CANCELLED load in LOCKED 2026-06 → allow (revive moves $0)",
-	code(G.dispatchWriteBlocker(PROD_HEADERS, row({ "Job Status": "Cancelled", "Assigned Date": "2026-06-03" }), dispatchEdits("Shorn King"))), null);
+	code(G.dispatchWriteBlocker(PROD_HEADERS, row({ "Job Status": "Cancelled", "Assigned Date": "2026-06-03" }), dispatchEdits("Soren King"))), null);
 
 // =====================================================================
 section("2. The strict half — either side completed, in a closed month");
 // =====================================================================
 for (const st of ["Delivered", "Completed", "POD Received", "delivered", "pod received"]) {
 	check(`dispatch onto "${st}" in LOCKED 2026-05 → PERIOD_FINALIZED`,
-		code(G.dispatchWriteBlocker(PROD_HEADERS, row({ "Job Status": st }), dispatchEdits("Shorn King"))), "PERIOD_FINALIZED");
+		code(G.dispatchWriteBlocker(PROD_HEADERS, row({ "Job Status": st }), dispatchEdits("Soren King"))), "PERIOD_FINALIZED");
 	check(`reassign "${st}" in LOCKED 2026-05 → PERIOD_FINALIZED`,
-		code(G.dispatchWriteBlocker(PROD_HEADERS, row({ "Job Status": st }), reassignEdits("Shorn King"))), "PERIOD_FINALIZED");
+		code(G.dispatchWriteBlocker(PROD_HEADERS, row({ "Job Status": st }), reassignEdits("Soren King"))), "PERIOD_FINALIZED");
 }
 check("un-completing Delivered → In Transit in LOCKED 2026-05 → PERIOD_FINALIZED",
 	code(G.dispatchWriteBlocker(PROD_HEADERS, row({}), statusEdits("In Transit"))), "PERIOD_FINALIZED");
@@ -194,9 +194,9 @@ check("the refusal names the month it would restate",
 	G.dispatchWriteBlocker(PROD_HEADERS, row({}), reassignEdits("X")).periods, ["2026-05"]);
 // The same writes in the one OPEN month must all succeed.
 check("dispatch onto Delivered in OPEN 2026-08 → allow",
-	code(G.dispatchWriteBlocker(PROD_HEADERS, row({ "Assigned Date": "2026-08-03", "Pickup Appointment": "2026-08-03", "Drop-off Appointment": "2026-08-04" }), dispatchEdits("Shorn King"))), null);
+	code(G.dispatchWriteBlocker(PROD_HEADERS, row({ "Assigned Date": "2026-08-03", "Pickup Appointment": "2026-08-03", "Drop-off Appointment": "2026-08-04" }), dispatchEdits("Soren King"))), null);
 check("reassign a Delivered load in OPEN 2026-08 → allow",
-	code(G.dispatchWriteBlocker(PROD_HEADERS, row({ "Assigned Date": "2026-08-03", "Pickup Appointment": "2026-08-03", "Drop-off Appointment": "2026-08-04" }), reassignEdits("Shorn King"))), null);
+	code(G.dispatchWriteBlocker(PROD_HEADERS, row({ "Assigned Date": "2026-08-03", "Pickup Appointment": "2026-08-03", "Drop-off Appointment": "2026-08-04" }), reassignEdits("Soren King"))), null);
 
 // =====================================================================
 section("3. The trap — 'does this row contribute TODAY?' is NOT the predicate");
@@ -215,7 +215,7 @@ check("...and refuses Cancelled → Completed the same way",
 // The mirror image: erasure is caught by the BEFORE state, since reassign
 // writes no status at all and so has no after-state signal whatsoever.
 check("erasure is caught by BEFORE — reassign is status-blind",
-	code(G.dispatchWriteBlocker(PROD_HEADERS, row({}), reassignEdits("Shorn King"))), "PERIOD_FINALIZED");
+	code(G.dispatchWriteBlocker(PROD_HEADERS, row({}), reassignEdits("Soren King"))), "PERIOD_FINALIZED");
 // Cancelling a completed load through a dispatch route is an erasure too.
 check("Delivered → Cancelled in LOCKED 2026-05 → PERIOD_FINALIZED",
 	code(G.dispatchWriteBlocker(PROD_HEADERS, row({}), { "Job Status": "Cancelled" })), "PERIOD_FINALIZED");

@@ -10,8 +10,8 @@
  * truck_unit from the truck_assignments row covering the expense's day, newest
  * start first, and pass 2 refreshes owner_id from the truck. Those decide whose
  * P&L a receipt lands on. Pass 1 matched the driver with LOWER(), which folds
- * case, not spacing, so a receipt filed as "Shorn  King" never met the
- * assignment to "Shorn King" and stayed off the investor's P&L. A second step
+ * case, not spacing, so a receipt filed as "Soren  King" never met the
+ * assignment to "Soren King" and stayed off the investor's P&L. A second step
  * now takes, for a row the case-aside SQL leaves blank, the covering assignment
  * naming the driver through normalizeDriverName(), in the same window and order,
  * and only while no other account holds the name under another spelling
@@ -243,7 +243,7 @@ function runWorld(world, over, prepare) {
 	};
 }
 
-const SK = "Shorn King";
+const SK = "Soren King";
 const T101 = [1, "101", 5];
 const T205 = [2, "205", 7];
 const T300 = [3, "300", 9];
@@ -285,7 +285,7 @@ function stepTwoSection(over) {
 		// A driver with no account (a directory-only driver): the receipt filed with
 		// a doubled space meets the assignment to the single-spaced name.
 		const w = runWorld({ trucks: [T101], assignments: [[1, SK, SEP1]],
-			expenses: [{ id: 1, driver: "Shorn  King", date: OPEN_DAY }] }, over);
+			expenses: [{ id: 1, driver: "Soren  King", date: OPEN_DAY }] }, over);
 		t("§1 a doubled-space variant of the assigned driver's name, open month, inside the window: the truck and its owner",
 			w.row(1), ["101", 5]);
 		t("§1 ...counted in pass1 and in pass1Spacing, with no error", [w.health.pass1, w.health.pass1Spacing, w.health.pass2, w.health.error], [1, 1, 0, null]);
@@ -294,24 +294,24 @@ function stepTwoSection(over) {
 	{
 		// The driver's own account holds the doubled-space spelling their session
 		// files receipts under; the truck was assigned under the single-spaced one.
-		const w = runWorld({ accounts: [[2, "Shorn  King"]], trucks: [T101], assignments: [[1, SK, SEP1]],
-			expenses: [{ id: 1, driver: "Shorn  King", date: OPEN_DAY }] }, over);
+		const w = runWorld({ accounts: [[2, "Soren  King"]], trucks: [T101], assignments: [[1, SK, SEP1]],
+			expenses: [{ id: 1, driver: "Soren  King", date: OPEN_DAY }] }, over);
 		t("§1 the driver's own account spelled as the receipt is: stamped", [w.row(1), w.health.error], [["101", 5], null]);
 	}
 	{
 		const w = runWorld({ trucks: [T101], assignments: [[1, SK, SEP1]],
-			expenses: [{ id: 1, driver: " shorn   KING ", date: OPEN_DAY }] }, over);
+			expenses: [{ id: 1, driver: " soren   KING ", date: OPEN_DAY }] }, over);
 		t("§1 edge spaces, a longer run and case together: stamped", w.row(1), ["101", 5]);
 	}
 	{
 		// The window is step 1's: each bound inclusive of its own day, nothing outside.
 		const w = runWorld({ trucks: [T101, T205],
-			assignments: [[1, SK, SEP1], [2, "Deshorn King", AUG1, "2026-09-05T23:10:00.000Z"]],
+			assignments: [[1, SK, SEP1], [2, "Desoren King", AUG1, "2026-09-05T23:10:00.000Z"]],
 			expenses: [
-				{ id: 1, driver: "Shorn  King", date: "2026-09-01" },
-				{ id: 2, driver: "Shorn  King", date: "2026-08-31" },
-				{ id: 3, driver: "Deshorn  King", date: "2026-09-05" },
-				{ id: 4, driver: "Deshorn  King", date: "2026-09-06" },
+				{ id: 1, driver: "Soren  King", date: "2026-09-01" },
+				{ id: 2, driver: "Soren  King", date: "2026-08-31" },
+				{ id: 3, driver: "Desoren  King", date: "2026-09-05" },
+				{ id: 4, driver: "Desoren  King", date: "2026-09-06" },
 			] }, over);
 		t("§1 the assignment's first day (a 22:30Z start): stamped", w.row(1), ["101", 5]);
 		t("§1 the day before it starts: untouched", w.row(2), ["", 0]);
@@ -321,8 +321,8 @@ function stepTwoSection(over) {
 	{
 		// Two covering assignments name the driver across spacing: the newest start
 		// wins, not the newest row (the newer start is written first here).
-		const w = runWorld({ trucks: [T101, T300], assignments: [[1, "Shorn   King", SEP1], [3, SK, AUG1]],
-			expenses: [{ id: 1, driver: "Shorn  King", date: OPEN_DAY }] }, over);
+		const w = runWorld({ trucks: [T101, T300], assignments: [[1, "Soren   King", SEP1], [3, SK, AUG1]],
+			expenses: [{ id: 1, driver: "Soren  King", date: OPEN_DAY }] }, over);
 		t("§1 two covering spacing variants: the one with the newest start_date", w.row(1), ["101", 5]);
 	}
 	return results;
@@ -334,8 +334,8 @@ function lockSection(over) {
 	{
 		const w = runWorld({ trucks: [T101], assignments: [[1, SK, JUN1]], locks: [["2026-07"]],
 			expenses: [
-				{ id: 1, driver: "Shorn  King", date: "2026-07-10" },
-				{ id: 2, driver: "Shorn  King", date: OPEN_DAY },
+				{ id: 1, driver: "Soren  King", date: "2026-07-10" },
+				{ id: 2, driver: "Soren  King", date: OPEN_DAY },
 			] }, over);
 		t("§2 the same spacing match in a finalized month: untouched", w.row(1), ["", 0]);
 		t("§2 ...while its open-month twin is stamped, so the lock is what held it", w.row(2), ["101", 5]);
@@ -351,12 +351,12 @@ function lockSection(over) {
 		// A prior-period adjustment: its date is in the finalized month and it is
 		// booked to an open one. Both months must be open for a write.
 		const w = runWorld({ trucks: [T101], assignments: [[1, SK, JUN1]], locks: [["2026-07"]],
-			expenses: [{ id: 1, driver: "Shorn  King", date: "2026-07-12", posted_period: "2026-09" }] }, over);
+			expenses: [{ id: 1, driver: "Soren  King", date: "2026-07-12", posted_period: "2026-09" }] }, over);
 		t("§2 a prior-period adjustment dated in the finalized month: untouched", [w.row(1), w.health.skippedLockedPeriod], [["", 0], 1]);
 	}
 	{
 		const w = runWorld({ trucks: [T101], assignments: [[1, SK, JUN1]], locks: [["2026-08", "reopened"]],
-			expenses: [{ id: 1, driver: "Shorn  King", date: "2026-08-15" }] }, over);
+			expenses: [{ id: 1, driver: "Soren  King", date: "2026-08-15" }] }, over);
 		t("§2 a reopened month is open: stamped", w.row(1), ["101", 5]);
 	}
 	{
@@ -364,8 +364,8 @@ function lockSection(over) {
 		// isLocked() on its own would answer "not locked" for every month.
 		const w = runWorld({ trucks: [T101, T410], assignments: [[1, SK, SEP1]],
 			expenses: [
-				{ id: 1, driver: "Shorn  King", date: OPEN_DAY },
-				{ id: 2, driver: "SHORN KING", date: OPEN_DAY },
+				{ id: 1, driver: "Soren  King", date: OPEN_DAY },
+				{ id: 2, driver: "SOREN KING", date: OPEN_DAY },
 				{ id: 3, driver: "Pat Newhire", date: OPEN_DAY, truck_unit: "410" },
 			] }, over, (db) => db.exec("DROP TABLE period_locks; CREATE TABLE period_locks (period TEXT PRIMARY KEY, finalized_at TEXT)"));
 		t("§2 period_locks unreadable: every row untouched, pass 2's included", snapshot(w.db), w.before);
@@ -382,19 +382,19 @@ function lockSection(over) {
 function guardSection(over) {
 	const { results, t } = collector();
 	const REAL = [2, SK];
-	const LEGACY = [4, "Shorn  King"];
+	const LEGACY = [4, "Soren  King"];
 	{
 		// A legacy account files under its own spelling; the truck was assigned to
 		// the real driver.
 		const w = runWorld({ accounts: [REAL, LEGACY], trucks: [T101], assignments: [[1, SK, SEP1]],
-			expenses: [{ id: 1, driver: "Shorn  King", date: OPEN_DAY }] }, over);
+			expenses: [{ id: 1, driver: "Soren  King", date: OPEN_DAY }] }, over);
 		t("§3 a legacy account's receipt, the truck assigned to the real driver: untouched", w.row(1), ["", 0]);
 		t("§3 ...nothing counted or logged, and no error", [w.health.pass1, w.health.pass1Spacing, w.logs, w.health.error], [0, 0, [], null]);
 	}
 	{
 		// The other way round: the real driver's receipt, a truck assigned under the
 		// legacy account's spelling.
-		const w = runWorld({ accounts: [REAL, LEGACY], trucks: [T101], assignments: [[1, "Shorn  King", SEP1]],
+		const w = runWorld({ accounts: [REAL, LEGACY], trucks: [T101], assignments: [[1, "Soren  King", SEP1]],
 			expenses: [{ id: 1, driver: SK, date: OPEN_DAY }] }, over);
 		t("§3 the real driver's receipt, the truck assigned under the legacy spelling: untouched", w.row(1), ["", 0]);
 	}
@@ -402,7 +402,7 @@ function guardSection(over) {
 		// A spelling no account has, beside the account that has the name: the stamp
 		// at insert refuses it too (findTruckForDriverStamp()).
 		const w = runWorld({ accounts: [REAL], trucks: [T101], assignments: [[1, SK, SEP1]],
-			expenses: [{ id: 1, driver: "Shorn  King", date: OPEN_DAY }] }, over);
+			expenses: [{ id: 1, driver: "Soren  King", date: OPEN_DAY }] }, over);
 		t("§3 a spelling no account has, beside the account that has the name: untouched", w.row(1), ["", 0]);
 	}
 	return results;
@@ -413,19 +413,19 @@ function unchangedSection(over) {
 	const { results, t } = collector();
 	{
 		const w = runWorld({ trucks: [T101], assignments: [[1, SK, SEP1]],
-			expenses: [{ id: 1, driver: "SHORN KING", date: OPEN_DAY }] }, over);
+			expenses: [{ id: 1, driver: "SOREN KING", date: OPEN_DAY }] }, over);
 		t("§4 a case-only variant of the assigned name: stamped by step 1", w.row(1), ["101", 5]);
 		t("§4 ...counted in pass1, not in pass1Spacing", [w.health.pass1, w.health.pass1Spacing], [1, 0]);
 	}
 	{
 		// Step 1 never asked the other-account guard, and still does not.
-		const w = runWorld({ accounts: [[2, SK], [4, "Shorn  King"]], trucks: [T101], assignments: [[1, "shorn king", SEP1]],
+		const w = runWorld({ accounts: [[2, SK], [4, "Soren  King"]], trucks: [T101], assignments: [[1, "soren king", SEP1]],
 			expenses: [{ id: 1, driver: SK, date: OPEN_DAY }] }, over);
 		t("§4 a case-aside match beside an account holding a spacing variant: still stamped", w.row(1), ["101", 5]);
 	}
 	{
 		// A case-aside assignment wins over a spacing variant that started later.
-		const w = runWorld({ trucks: [T101, T300], assignments: [[3, "shorn king", AUG1], [1, "Shorn  King", SEP1]],
+		const w = runWorld({ trucks: [T101, T300], assignments: [[3, "soren king", AUG1], [1, "Soren  King", SEP1]],
 			expenses: [{ id: 1, driver: SK, date: OPEN_DAY }] }, over);
 		t("§4 a case-aside assignment beats a later-starting spacing variant", w.row(1), ["300", 9]);
 	}
@@ -442,15 +442,15 @@ function unchangedSection(over) {
 // refused spacing match (3), a finalized month (4), no assignment (5), a pass-2
 // refresh (6), and a row the old pass 1 had already rewritten to NULLs (7).
 const EVERYTHING = {
-	accounts: [[2, SK], [4, "Shorn  King"], [6, "Deshorn  King"]],
+	accounts: [[2, SK], [4, "Soren  King"], [6, "Desoren  King"]],
 	trucks: [T101, T205, T410],
-	assignments: [[1, SK, SEP1], [2, "Deshorn King", JUN1]],
+	assignments: [[1, SK, SEP1], [2, "Desoren King", JUN1]],
 	locks: [["2026-07"]],
 	expenses: [
-		{ id: 1, driver: "Deshorn  King", date: OPEN_DAY },
-		{ id: 2, driver: "SHORN KING", date: OPEN_DAY },
-		{ id: 3, driver: "Shorn  King", date: OPEN_DAY },
-		{ id: 4, driver: "Deshorn  King", date: "2026-07-10" },
+		{ id: 1, driver: "Desoren  King", date: OPEN_DAY },
+		{ id: 2, driver: "SOREN KING", date: OPEN_DAY },
+		{ id: 3, driver: "Soren  King", date: OPEN_DAY },
+		{ id: 4, driver: "Desoren  King", date: "2026-07-10" },
 		{ id: 5, driver: "Pat Newhire", date: OPEN_DAY },
 		{ id: 6, driver: "Pat Newhire", date: OPEN_DAY, truck_unit: "410" },
 		{ id: 7, driver: "Pat Newhire", date: OPEN_DAY, truck_unit: null, owner_id: null },
@@ -540,7 +540,7 @@ section("§7 mutants");
 const FN = GRAPH_SRC.backfillLegacyExpenseTrucks;
 const NORMALIZE_RETURN = 'return (s || "").trim().toLowerCase().replace(/\\s+/g, " ");';
 // A world §1 stamps through step 2, which calls normalizeDriverName().
-const STEP_TWO_WORLD = { trucks: [T101], assignments: [[1, SK, SEP1]], expenses: [{ id: 1, driver: "Shorn  King", date: OPEN_DAY }] };
+const STEP_TWO_WORLD = { trucks: [T101], assignments: [[1, SK, SEP1]], expenses: [{ id: 1, driver: "Soren  King", date: OPEN_DAY }] };
 const MUTANTS = [
 	["M1 the other-account guard removed",
 		() => guardSection({ backfillLegacyExpenseTrucks: mutate(FN, "\t\t\tif (heldByOtherSpelling.get(r.driver)) continue;\n", "") })],

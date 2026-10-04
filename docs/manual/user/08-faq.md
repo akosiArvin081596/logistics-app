@@ -59,7 +59,7 @@ Per a 2026-04-19 client decision, cancellation is restricted to Super Admins. Yo
 Drivers come from approved applications. Send them to the public driver application form (`/apply`), then Super Admin approves the application, which auto-creates the driver record and user account.
 
 **Q. Why are some driver names case-different in the sheet vs. the dashboard?**
-Driver matching is case-insensitive. The system handles "LESLINE JOHNSON" and "Lesline Johnson" as the same driver. If you see a driver showing in two places under different spellings, that's a data-entry issue — escalate to a Super Admin to run **Fix Driver Name** to merge them.
+Driver matching is case-insensitive. The system handles "LEONORA JOHNSON" and "Leonora Johnson" as the same driver. If you see a driver showing in two places under different spellings, that's a data-entry issue — escalate to a Super Admin to run **Fix Driver Name** to merge them.
 
 **Q. Does the system warn me before I assign a driver who's already on a load?**
 A driver can't transition into an active status (At Shipper, Loading, In Transit, At Receiver) if they already have a load in one of those statuses — the system blocks the change with a 409 Conflict. Assignments themselves don't block; you assign and the driver decides whether to accept.

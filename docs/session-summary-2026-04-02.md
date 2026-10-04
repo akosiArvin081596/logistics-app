@@ -68,7 +68,7 @@ Compared codebase against `truck_data_task_checklist_.pdf`. Found 6 gaps, all re
 ## 3. Dispatcher Expenses Visibility Fix
 
 ### Problem
-Driver "Lesline Johnson" submitted an expense (Other, $39, "Golf world") but dispatcher couldn't see it. The `/expenses` page only called `GET /api/expenses/fuel-analytics` which filters `WHERE type = 'fuel'`.
+Driver "Leonora Johnson" submitted an expense (Other, $39, "Golf world") but dispatcher couldn't see it. The `/expenses` page only called `GET /api/expenses/fuel-analytics` which filters `WHERE type = 'fuel'`.
 
 ### Solution
 - Added `GET /api/expenses/all` endpoint — returns all expense types with optional driver/type/status filters

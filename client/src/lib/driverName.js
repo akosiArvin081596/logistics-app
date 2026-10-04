@@ -4,7 +4,7 @@
 // read every run of whitespace as one space. One driver reaches the screen under
 // several spellings — the drivers directory, the account, the truck assignment,
 // a Job Tracking Driver cell, an ELD ping — and they can differ in case and in
-// spacing ("Rodney  Brown" next to "Rodney Brown"). Compared any other way, one
+// spacing ("Roland  Brown" next to "Roland Brown"). Compared any other way, one
 // driver is listed twice, or a ping, a load or a clock is filed under nobody.
 //
 // Keep it identical to the server's rule rather than "smarter": the server

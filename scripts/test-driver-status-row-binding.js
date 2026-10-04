@@ -121,25 +121,25 @@ section("1. AMBIGUOUS_LOAD — the rung that had to be reshaped");
 // ⚠️ THE MEASUREMENT THAT FORCED THIS. Against the PRODUCTION sheet, read-only,
 // over the whole load_status_history window (2026-06-15..2026-08-06): of 199 real
 // manual status changes, 195 bind cleanly, 0 hit LOAD_ID_REQUIRED, 0 hit
-// LOAD_NOT_ON_SHEET, and 4 hit AMBIGUOUS_LOAD. Those 4 are Howard Reddie
+// LOAD_NOT_ON_SHEET, and 4 hit AMBIGUOUS_LOAD. Those 4 are Hollis Renner
 // advancing load 7052901 through Heading to Shipper -> In Transit -> At Receiver
 // -> Delivered on 2026-07-11..14. Row 383 holds the live load; row 388 holds a
 // "#7052901" copy that was CANCELLED. A blanket rung 4 would have refused a
 // driver in the cab, four times, on his own load.
-const REDDIE = [row("7052901", { status: "In Transit", driver: "Howard Reddie" }), row("#7052901", { status: "Cancelled" })];
+const RENNER = [row("7052901", { status: "In Transit", driver: "Hollis Renner" }), row("#7052901", { status: "Cancelled" })];
 check("the live production case: caller's row is one of the copies -> ALLOWED",
-	code(G.resolveLoadBinding(PROD_HEADERS, REDDIE, 2, "7052901", OPT)), null);
+	code(G.resolveLoadBinding(PROD_HEADERS, RENNER, 2, "7052901", OPT)), null);
 check("...and the '#'-prefixed copy binds too (normLoadKey, both directions)",
-	code(G.resolveLoadBinding(PROD_HEADERS, REDDIE, 3, "7052901", OPT)), null);
+	code(G.resolveLoadBinding(PROD_HEADERS, RENNER, 3, "7052901", OPT)), null);
 check("...caller may name the id in '#' form as well",
-	code(G.resolveLoadBinding(PROD_HEADERS, REDDIE, 2, "#7052901", OPT)), null);
+	code(G.resolveLoadBinding(PROD_HEADERS, RENNER, 2, "#7052901", OPT)), null);
 // ⚠️ The relaxation is EXACTLY "the caller's row is one of the copies". A row
 // that is NOT one of them is still refused, because the server would have to
 // guess which copy — and guessing is what produced the 2026-08-05 incident.
 check("a row that is NOT one of the copies is still AMBIGUOUS_LOAD",
-	code(G.resolveLoadBinding(PROD_HEADERS, REDDIE, 4, "7052901", OPT)), "AMBIGUOUS_LOAD");
+	code(G.resolveLoadBinding(PROD_HEADERS, RENNER, 4, "7052901", OPT)), "AMBIGUOUS_LOAD");
 check("...and the refusal still names every candidate row",
-	G.resolveLoadBinding(PROD_HEADERS, REDDIE, 4, "7052901", OPT).rowIndices, [2, 3]);
+	G.resolveLoadBinding(PROD_HEADERS, RENNER, 4, "7052901", OPT).rowIndices, [2, 3]);
 
 // ⚠️ DEFAULT OFF. The four routes PR #248 wired must keep byte-identical
 // behaviour; only PUT /api/driver/status opts in. Cancel in particular must
@@ -147,11 +147,11 @@ check("...and the refusal still names every candidate row",
 // coin flip on whether it takes effect, since the dashboard reads
 // deduplicateLoads() and the last row wins).
 check("WITHOUT the opt-in, the same call still refuses (cancel/dispatch/reassign/respond)",
-	code(G.resolveLoadBinding(PROD_HEADERS, REDDIE, 2, "7052901")), "AMBIGUOUS_LOAD");
+	code(G.resolveLoadBinding(PROD_HEADERS, RENNER, 2, "7052901")), "AMBIGUOUS_LOAD");
 check("...an explicitly false option is the same as absent",
-	code(G.resolveLoadBinding(PROD_HEADERS, REDDIE, 2, "7052901", { callerRowWinsAmongDuplicates: false })), "AMBIGUOUS_LOAD");
+	code(G.resolveLoadBinding(PROD_HEADERS, RENNER, 2, "7052901", { callerRowWinsAmongDuplicates: false })), "AMBIGUOUS_LOAD");
 check("...an unrelated option does not switch it on",
-	code(G.resolveLoadBinding(PROD_HEADERS, REDDIE, 2, "7052901", { somethingElse: true })), "AMBIGUOUS_LOAD");
+	code(G.resolveLoadBinding(PROD_HEADERS, RENNER, 2, "7052901", { somethingElse: true })), "AMBIGUOUS_LOAD");
 
 // ============================================ 2. the relaxation is NARROW
 section("2. the relaxation touches rung 4 ONLY — every other rung is unchanged");
@@ -198,21 +198,21 @@ for (let n = 2; n <= 4; n++) {
 // immediately, not admit) and this asserts it stays that way: a string row index
 // must never bind through the duplicate branch.
 check("a string rowIndex fails CLOSED through the relaxation, never open",
-	code(G.resolveLoadBinding(PROD_HEADERS, REDDIE, "2", "7052901", OPT)), "AMBIGUOUS_LOAD");
+	code(G.resolveLoadBinding(PROD_HEADERS, RENNER, "2", "7052901", OPT)), "AMBIGUOUS_LOAD");
 check("...and through the single-row branch too",
 	code(G.resolveLoadBinding(PROD_HEADERS, ONE, "2", "562620213", OPT)), "ROW_LOAD_MISMATCH");
 check("resolveSheetDataRow returns a Number, which is what makes that moot",
 	/function resolveSheetDataRow\(res, value\) \{\n\tconst rowIndex = Number\(value\);/.test(SRC), true);
 
 check("determinism: repeated calls agree", (() => {
-	const a = JSON.stringify(G.resolveLoadBinding(PROD_HEADERS, REDDIE, 4, "7052901", OPT));
-	const b = JSON.stringify(G.resolveLoadBinding(PROD_HEADERS, REDDIE, 4, "7052901", OPT));
+	const a = JSON.stringify(G.resolveLoadBinding(PROD_HEADERS, RENNER, 4, "7052901", OPT));
+	const b = JSON.stringify(G.resolveLoadBinding(PROD_HEADERS, RENNER, 4, "7052901", OPT));
 	return a === b;
 })(), true);
 check("non-mutation: the fixture is untouched", (() => {
-	const before = JSON.stringify(REDDIE);
-	G.resolveLoadBinding(PROD_HEADERS, REDDIE, 2, "7052901", OPT);
-	return JSON.stringify(REDDIE) === before;
+	const before = JSON.stringify(RENNER);
+	G.resolveLoadBinding(PROD_HEADERS, RENNER, 2, "7052901", OPT);
+	return JSON.stringify(RENNER) === before;
 })(), true);
 
 // ================================================== 3. wiring in the status route
@@ -493,8 +493,8 @@ check("the relaxation reads an OWN property, not an inherited one",
 {
 	const poisoned = {};
 	Object.defineProperty(Object.prototype, "callerRowWinsAmongDuplicates", { value: true, configurable: true });
-	const viaEmpty = code(G.resolveLoadBinding(PROD_HEADERS, REDDIE, 2, "7052901", poisoned));
-	const viaAbsent = code(G.resolveLoadBinding(PROD_HEADERS, REDDIE, 2, "7052901"));
+	const viaEmpty = code(G.resolveLoadBinding(PROD_HEADERS, RENNER, 2, "7052901", poisoned));
+	const viaAbsent = code(G.resolveLoadBinding(PROD_HEADERS, RENNER, 2, "7052901"));
 	delete Object.prototype.callerRowWinsAmongDuplicates;
 	check("a polluted prototype cannot enable it via {}", viaEmpty, "AMBIGUOUS_LOAD");
 	check("...nor via an omitted opts", viaAbsent, "AMBIGUOUS_LOAD");

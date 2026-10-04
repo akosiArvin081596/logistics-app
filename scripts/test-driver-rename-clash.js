@@ -78,7 +78,7 @@
  *      fix-driver-name agrees on the re-spelling, rewrites the sheet's matching
  *      cells, lists them in its audit (`spacingVariants`), and calls a case-only
  *      rename that moves another spelling not money-neutral — the directory row
- *      stored as "Shorn  King" included: with every month locked that rename is
+ *      stored as "Soren  King" included: with every month locked that rename is
  *      refused by the lock in both routes, and each route's audit names the row
  *      under its original spelling; a row differing only by edge spaces keeps
  *      its key and moves nothing. The users routes'
@@ -485,14 +485,14 @@ function mountTrucks(db, { putSrc = ROUTES.truckPut, postSrc = ROUTES.truckPost,
 function usersFixture() {
 	const db = makeDb();
 	addUser(db, 1, "super_admin", "", "Super Admin", "");
-	addUser(db, 2, "sking", "Shorn King");
+	addUser(db, 2, "sking", "Soren King");
 	addUser(db, 3, "bdriver", "Bob Driver");
 	addUser(db, 4, "kevin", "", "Dispatcher", "Kevin Dispatch");
 	addUser(db, 5, "Lee Park", "L. Park");
 	addUser(db, 7, "newdriver", "", "Driver", "New Driver");
-	addDirectory(db, "Shorn King"); // row 1 — sking's
+	addDirectory(db, "Soren King"); // row 1 — sking's
 	addDirectory(db, "Bob Driver"); // row 2 — bdriver's
-	addDirectory(db, "Deshorn King"); // row 3 — a driver in the directory with no account
+	addDirectory(db, "Desoren King"); // row 3 — a driver in the directory with no account
 	return db;
 }
 
@@ -502,8 +502,8 @@ async function usersBattery(opts = {}) {
 
 	// Guard (b): the account side.
 	for (const [label, name, expectWhy, tail] of [
-		["another account's driver name, exactly", "Shorn King", /already belongs to sking \(user 2\)/, /driver name already belongs to sking \(user 2\)/],
-		["another account's driver name, case and spacing changed", "  shorn   KING ", /already belongs to sking \(user 2\)/, /driver name already belongs to sking \(user 2\)/],
+		["another account's driver name, exactly", "Soren King", /already belongs to sking \(user 2\)/, /driver name already belongs to sking \(user 2\)/],
+		["another account's driver name, case and spacing changed", "  soren   KING ", /already belongs to sking \(user 2\)/, /driver name already belongs to sking \(user 2\)/],
 		["another account's username", "KEVIN", /username of kevin \(user 4\)/, /is the username of kevin \(user 4\)/],
 		["a reserved name", " Dispatch ", /that name is reserved\.$/, /that name is reserved/],
 		["a built-in property name", "__proto__", /that name is reserved\.$/, /that name is reserved/],
@@ -548,16 +548,16 @@ async function usersBattery(opts = {}) {
 		// Another account ALREADY shares this account's name (a state from before
 		// the check). Re-spelling this account's own name adds nothing to it.
 		const db = usersFixture();
-		addUser(db, 6, "sking2", "SHORN KING");
+		addUser(db, 6, "sking2", "SOREN KING");
 		const { put } = mountUsersPut(db, opts);
-		const r = await put(6, { driverName: "Shorn  King" });
+		const r = await put(6, { driverName: "Soren  King" });
 		t(`re-spelling a name another account already shares is saved (got ${r.status} ${(r.body || {}).code || ""})`,
-			r.status === 200 && driverNameOf(db, 6) === "Shorn  King");
+			r.status === 200 && driverNameOf(db, 6) === "Soren  King");
 	}
 	// ...except onto the exact spelling, case aside, that the other account has.
-	for (const name of ["shorn  king", " SHORN  KING "]) {
+	for (const name of ["soren  king", " SOREN  KING "]) {
 		const db = usersFixture();
-		addUser(db, 6, "sking2", "Shorn  King"); // a second spelling of sking's name, from before the check
+		addUser(db, 6, "sking2", "Soren  King"); // a second spelling of sking's name, from before the check
 		const before = snapshot(db);
 		const { put, log } = mountUsersPut(db, opts);
 		const r = await put(2, { driverName: name });
@@ -570,11 +570,11 @@ async function usersBattery(opts = {}) {
 	}
 	{
 		const db = usersFixture();
-		addUser(db, 6, "sking2", "Shorn  King");
+		addUser(db, 6, "sking2", "Soren  King");
 		const { put } = mountUsersPut(db, opts);
-		const r = await put(2, { driverName: "SHORN KING" });
+		const r = await put(2, { driverName: "SOREN KING" });
 		t(`...while a case-only re-spelling beside that account is saved (got ${r.status} ${(r.body || {}).code || ""})`,
-			r.status === 200 && driverNameOf(db, 2) === "SHORN KING");
+			r.status === 200 && driverNameOf(db, 2) === "SOREN KING");
 	}
 
 	// Guard (e): a directory-only driver in another spacing is a merge.
@@ -582,7 +582,7 @@ async function usersBattery(opts = {}) {
 		const db = usersFixture();
 		const before = snapshot(db);
 		const { put } = mountUsersPut(db, opts);
-		const r = await put(3, { driverName: "deshorn   KING" });
+		const r = await put(3, { driverName: "desoren   KING" });
 		const body = r.body || {};
 		t(`guard (e), a directory-only driver's name in another spacing: 409 DRIVER_RENAME_IS_MERGE naming drivers_directory (got ${r.status} ${body.code || ""})`,
 			r.status === 409 && body.code === "DRIVER_RENAME_IS_MERGE" && !!body.mergeTargets && body.mergeTargets.drivers_directory >= 1);
@@ -591,16 +591,16 @@ async function usersBattery(opts = {}) {
 	{
 		const db = usersFixture();
 		const { put } = mountUsersPut(db, opts);
-		const r = await put(3, { driverName: "Deshorn King" });
+		const r = await put(3, { driverName: "Desoren King" });
 		t(`guard (e), the same driver spelled exactly is still a merge (got ${r.status} ${(r.body || {}).code || ""})`,
 			r.status === 409 && (r.body || {}).code === "DRIVER_RENAME_IS_MERGE");
 	}
 	{
 		const db = usersFixture();
 		const { put } = mountUsersPut(db, opts);
-		const r = await put(2, { driverName: "Shorn Kingsley" });
+		const r = await put(2, { driverName: "Soren Kingsley" });
 		t(`guard (e), this account's own directory row is not a merge: a free name is saved and the row renamed (got ${r.status} ${(r.body || {}).code || ""})`,
-			r.status === 200 && driverNameOf(db, 2) === "Shorn Kingsley" && directoryNames(db)[0] === "Shorn Kingsley");
+			r.status === 200 && driverNameOf(db, 2) === "Soren Kingsley" && directoryNames(db)[0] === "Soren Kingsley");
 	}
 
 	// A FIRST driver name that matches a directory-only driver in another spacing
@@ -608,11 +608,11 @@ async function usersBattery(opts = {}) {
 	{
 		const db = usersFixture();
 		const { put } = mountUsersPut(db, opts);
-		const r = await put(7, { driverName: "Deshorn  King" });
+		const r = await put(7, { driverName: "Desoren  King" });
 		t(`a first driver name matching a directory-only driver in another spacing is saved (got ${r.status} ${(r.body || {}).code || ""})`,
-			r.status === 200 && driverNameOf(db, 7) === "Deshorn  King");
+			r.status === 200 && driverNameOf(db, 7) === "Desoren  King");
 		t(`...and no second directory row appears (directory: ${JSON.stringify(directoryNames(db))})`,
-			JSON.stringify(directoryNames(db)) === JSON.stringify(["Shorn King", "Bob Driver", "Deshorn King"]));
+			JSON.stringify(directoryNames(db)) === JSON.stringify(["Soren King", "Bob Driver", "Desoren King"]));
 	}
 	return results;
 }
@@ -648,7 +648,7 @@ async function fixBattery(opts = {}) {
 	{
 		const db = fixFixture();
 		const { fix } = mountFix(db, opts);
-		const r = await fix({ oldName: "Tim Driver", newName: "deshorn   king" });
+		const r = await fix({ oldName: "Tim Driver", newName: "desoren   king" });
 		t(`a directory-only driver in another spacing: a merge (got ${r.status} isMerge=${(r.body || {}).isMerge})`,
 			r.status === 200 && (r.body || {}).isMerge === true);
 	}
@@ -657,11 +657,11 @@ async function fixBattery(opts = {}) {
 		const db = fixFixture();
 		const before = snapshot(db);
 		const { fix, log } = mountFix(db, opts);
-		const dry = await fix({ oldName: "Bob Driver", newName: "Shorn  King" }, { dryRun: "true" });
+		const dry = await fix({ oldName: "Bob Driver", newName: "Soren  King" }, { dryRun: "true" });
 		const v = (dry.body || {}).verdict || {};
 		t(`directory rows on both sides, spacing only: the dry run blocks with DIRECTORY_NAME_VARIANT (got ${v.decision} ${v.code})`,
 			dry.status === 200 && v.decision === "block" && v.code === "DIRECTORY_NAME_VARIANT" && dry.body.wouldWrite === false);
-		const r = await fix({ oldName: "Bob Driver", newName: "Shorn  King", acknowledgeLockedPeriods: true, reason: "combining two records" });
+		const r = await fix({ oldName: "Bob Driver", newName: "Soren  King", acknowledgeLockedPeriods: true, reason: "combining two records" });
 		t(`...the rename answers 409 DIRECTORY_NAME_VARIANT, even acknowledged (got ${r.status} ${(r.body || {}).code})`,
 			r.status === 409 && (r.body || {}).code === "DIRECTORY_NAME_VARIANT" && /Merge or delete the redundant row first/.test((r.body || {}).error || ""));
 		t("...writes nothing, leaves the sheet untouched, and is audited",
@@ -671,7 +671,7 @@ async function fixBattery(opts = {}) {
 	{
 		const db = fixFixture();
 		const { fix } = mountFix(db, opts);
-		const dry = await fix({ oldName: "Bob Driver", newName: "SHORN KING" }, { dryRun: "true" });
+		const dry = await fix({ oldName: "Bob Driver", newName: "SOREN KING" }, { dryRun: "true" });
 		const v = (dry.body || {}).verdict || {};
 		t(`directory rows on both sides, case only: DIRECTORY_NAME_COLLISION, explained as the UNIQUE constraint (got ${v.code})`,
 			v.decision === "block" && v.code === "DIRECTORY_NAME_COLLISION" && /UNIQUE constraint/.test(v.rationale || "") &&
@@ -735,9 +735,9 @@ async function directoryBattery(opts = {}) {
 		return db;
 	};
 	for (const [label, name] of [
-		["another row's name, exactly", "Shorn King"],
-		["another row's name, case and spacing changed", "SHORN  KING"],
-		["another row's name, padded", "  Shorn King  "],
+		["another row's name, exactly", "Soren King"],
+		["another row's name, case and spacing changed", "SOREN  KING"],
+		["another row's name, padded", "  Soren King  "],
 	]) {
 		const db = fixture();
 		const before = snapshot(db);
@@ -751,8 +751,8 @@ async function directoryBattery(opts = {}) {
 	{
 		const db = fixture();
 		const { put } = mountDirectoryPut(db, opts);
-		const r = await put(3, ["Driver"], ["DESHORN  king"]);
-		t(`the row's own name re-spelled is saved (got ${r.status})`, r.status === 200 && directoryNames(db)[2] === "DESHORN  king");
+		const r = await put(3, ["Driver"], ["DESOREN  king"]);
+		t(`the row's own name re-spelled is saved (got ${r.status})`, r.status === 200 && directoryNames(db)[2] === "DESOREN  king");
 	}
 	{
 		// A second spelling of row 1's name is already stored, from before the
@@ -760,18 +760,18 @@ async function directoryBattery(opts = {}) {
 		// column's UNIQUE COLLATE NOCASE rejects: a 409 naming that row, not the
 		// constraint's error.
 		const db = fixture();
-		const variantId = addDirectory(db, "Shorn  King");
+		const variantId = addDirectory(db, "Soren  King");
 		const before = snapshot(db);
 		const { put } = mountDirectoryPut(db, opts);
-		const r = await put(1, ["Driver"], ["shorn  KING"]);
+		const r = await put(1, ["Driver"], ["soren  KING"]);
 		const body = r.body || {};
 		t(`the row's own name re-spelled onto another row's exact spelling: 409 DRIVER_EXISTS naming row ${variantId} (got ${r.status} ${body.code || ""} ${body.id || ""})`,
 			r.status === 409 && body.code === "DRIVER_EXISTS" && body.id === variantId && body.route === `PUT /api/drivers-directory/${variantId}`);
 		t("...nothing written", snapshot(db) === before);
-		const r2 = await put(1, ["Driver"], ["SHORN KING"]);
-		t(`...while a case-only re-spelling beside that row is saved (got ${r2.status})`, r2.status === 200 && directoryNames(db)[0] === "SHORN KING");
+		const r2 = await put(1, ["Driver"], ["SOREN KING"]);
+		t(`...while a case-only re-spelling beside that row is saved (got ${r2.status})`, r2.status === 200 && directoryNames(db)[0] === "SOREN KING");
 	}
-	for (const [label, value] of [["an object", { a: 1 }], ["a number", 42], ["a list", ["Shorn", "King"]]]) {
+	for (const [label, value] of [["an object", { a: 1 }], ["a number", 42], ["a list", ["Soren", "King"]]]) {
 		const db = fixture();
 		const before = snapshot(db);
 		const { put } = mountDirectoryPut(db, opts);
@@ -839,7 +839,7 @@ async function directoryBattery(opts = {}) {
 function trucksFixture() {
 	const db = usersFixture();
 	addUser(db, 9, "tdriver", "Tim Driver"); // an account whose name has no directory row
-	addTruck(db, 1, "101", "Shorn King");
+	addTruck(db, 1, "101", "Soren King");
 	addTruck(db, 2, "102", "");
 	return db;
 }
@@ -850,31 +850,31 @@ async function trucksBattery(opts = {}) {
 	const results = [];
 	const t = (name, cond) => results.push({ name, ok: !!cond });
 
-	for (const [label, name] of [["spacing and case changed", "shorn  KING"], ["case changed", "SHORN KING"]]) {
+	for (const [label, name] of [["spacing and case changed", "soren  KING"], ["case changed", "SOREN KING"]]) {
 		const db = trucksFixture();
 		const { put } = mountTrucks(db, opts);
 		const r = await put(2, { assignedDriver: name });
-		t(`PUT /api/trucks/:id, the driver named with ${label}: resolves to "Shorn King" (got ${r.status}, trucks ${truckDrivers(db)})`,
-			r.status === 200 && truckDrivers(db) === "1:,2:Shorn King");
+		t(`PUT /api/trucks/:id, the driver named with ${label}: resolves to "Soren King" (got ${r.status}, trucks ${truckDrivers(db)})`,
+			r.status === 200 && truckDrivers(db) === "1:,2:Soren King");
 		t(`...one active assignment, under the driver's spelling (got ${JSON.stringify(activeAssignments(db))})`,
-			JSON.stringify(activeAssignments(db)) === JSON.stringify([{ truck_id: 2, driver_name: "Shorn King" }]));
+			JSON.stringify(activeAssignments(db)) === JSON.stringify([{ truck_id: 2, driver_name: "Soren King" }]));
 		t(`...and no second directory row (directory ${JSON.stringify(directoryNames(db))})`,
-			JSON.stringify(directoryNames(db)) === JSON.stringify(["Shorn King", "Bob Driver", "Deshorn King"]));
+			JSON.stringify(directoryNames(db)) === JSON.stringify(["Soren King", "Bob Driver", "Desoren King"]));
 	}
 	{
 		const db = trucksFixture();
 		const { put } = mountTrucks(db, opts);
 		const r = await put(2, { assignedDriver: "tim  DRIVER" });
 		t(`a driver known only by an account resolves to that account's spelling (got ${r.status}, trucks ${truckDrivers(db)})`,
-			r.status === 200 && truckDrivers(db) === "1:Shorn King,2:Tim Driver");
+			r.status === 200 && truckDrivers(db) === "1:Soren King,2:Tim Driver");
 	}
 	{
 		const db = trucksFixture();
 		const { put } = mountTrucks(db, opts);
 		const r = await put(2, { assignedDriver: "Brand New" });
 		t(`a new name is stored as sent and still gets its pending directory row (got ${r.status}, directory ${JSON.stringify(directoryNames(db))})`,
-			r.status === 200 && truckDrivers(db) === "1:Shorn King,2:Brand New" &&
-			JSON.stringify(directoryNames(db)) === JSON.stringify(["Shorn King", "Bob Driver", "Deshorn King", "Brand New"]));
+			r.status === 200 && truckDrivers(db) === "1:Soren King,2:Brand New" &&
+			JSON.stringify(directoryNames(db)) === JSON.stringify(["Soren King", "Bob Driver", "Desoren King", "Brand New"]));
 	}
 	{
 		const db = trucksFixture();
@@ -885,16 +885,16 @@ async function trucksBattery(opts = {}) {
 	{
 		const db = trucksFixture();
 		const { post } = mountTrucks(db, opts);
-		const r = await post({ unitNumber: "103", assignedDriver: "  SHORN   king " });
-		t(`POST /api/trucks, the driver named in another spacing: resolves to "Shorn King" and releases the other truck (got ${r.status}, trucks ${truckDrivers(db)})`,
-			r.status === 200 && truckDrivers(db) === "1:,2:,3:Shorn King");
+		const r = await post({ unitNumber: "103", assignedDriver: "  SOREN   king " });
+		t(`POST /api/trucks, the driver named in another spacing: resolves to "Soren King" and releases the other truck (got ${r.status}, trucks ${truckDrivers(db)})`,
+			r.status === 200 && truckDrivers(db) === "1:,2:,3:Soren King");
 	}
 	{
 		const db = trucksFixture();
 		const { post } = mountTrucks(db, opts);
-		const r = await post({ unitNumber: "104", assignedDriver: "Shorn King" }, "Investor");
+		const r = await post({ unitNumber: "104", assignedDriver: "Soren King" }, "Investor");
 		t(`POST /api/trucks by an Investor still names no driver, and releases no one (got ${r.status}, trucks ${truckDrivers(db)})`,
-			r.status === 200 && truckDrivers(db) === "1:Shorn King,2:,3:");
+			r.status === 200 && truckDrivers(db) === "1:Soren King,2:,3:");
 	}
 	// A driver that reads as a built-in property name: 400 DRIVER_NAME_RESERVED
 	// naming assignedDriver, before anything is written.
@@ -916,7 +916,7 @@ async function trucksBattery(opts = {}) {
 		const rp = await post({ unitNumber: "105", assignedDriver: "Tostring Smith" });
 		const ru = await put(2, { assignedDriver: "Constructor Jones" });
 		t(`POST and PUT /api/trucks, names containing a built-in property name: saved (got ${rp.status}, ${ru.status}, trucks ${truckDrivers(db)})`,
-			rp.status === 200 && ru.status === 200 && truckDrivers(db) === "1:Shorn King,2:Constructor Jones,3:Tostring Smith");
+			rp.status === 200 && ru.status === 200 && truckDrivers(db) === "1:Soren King,2:Constructor Jones,3:Tostring Smith");
 	}
 	{
 		// A truck whose driver was stored under such a name before the rule: a save
@@ -939,7 +939,7 @@ async function trucksBattery(opts = {}) {
 			m.syncDriverToCarrierSheet("toString", { action: "update" });
 		});
 		t(`syncDriverToCarrierSheet adds no row under a built-in property name (directory ${JSON.stringify(directoryNames(db))})`,
-			JSON.stringify(directoryNames(db)) === JSON.stringify(["Shorn King", "Bob Driver", "Deshorn King"]));
+			JSON.stringify(directoryNames(db)) === JSON.stringify(["Soren King", "Bob Driver", "Desoren King"]));
 		m.syncDriverToCarrierSheet("Tostring Smith", { action: "add" });
 		t("...and still adds one for a name containing one",
 			directoryNames(db).includes("Tostring Smith"));
@@ -949,11 +949,11 @@ async function trucksBattery(opts = {}) {
 		// name the directory already holds apart from case or spacing.
 		const db = trucksFixture();
 		const { m } = mountTrucks(db, opts);
-		m.syncDriverToCarrierSheet("Shorn  King", { action: "add" });
-		m.syncDriverToCarrierSheet("deshorn king", { action: "add" });
+		m.syncDriverToCarrierSheet("Soren  King", { action: "add" });
+		m.syncDriverToCarrierSheet("desoren king", { action: "add" });
 		m.syncDriverToCarrierSheet("Bob Driver", { action: "update" });
 		t(`syncDriverToCarrierSheet adds no row for a spacing or case variant (directory ${JSON.stringify(directoryNames(db))})`,
-			JSON.stringify(directoryNames(db)) === JSON.stringify(["Shorn King", "Bob Driver", "Deshorn King"]));
+			JSON.stringify(directoryNames(db)) === JSON.stringify(["Soren King", "Bob Driver", "Desoren King"]));
 		m.syncDriverToCarrierSheet("Fresh Person", { action: "add" });
 		t("...and still adds a pending row for a new driver",
 			JSON.stringify(db.prepare("SELECT driver_name, status FROM drivers_directory WHERE driver_name = 'Fresh Person'").all()) ===
@@ -963,16 +963,16 @@ async function trucksBattery(opts = {}) {
 		const db = trucksFixture();
 		const { m } = mountTrucks(db, opts);
 		const c = m.canonicalDriverName;
-		t("canonicalDriverName: a driver in another spacing → the spelling the driver already has", c("  shorn  king ") === "Shorn King");
-		t("canonicalDriverName: a directory-only driver → the directory's spelling", c("DESHORN  king") === "Deshorn King");
+		t("canonicalDriverName: a driver in another spacing → the spelling the driver already has", c("  soren  king ") === "Soren King");
+		t("canonicalDriverName: a directory-only driver → the directory's spelling", c("DESOREN  king") === "Desoren King");
 		t("canonicalDriverName: a driver known only by an account → the account's spelling", c("TIM  driver") === "Tim Driver");
 		t("canonicalDriverName: a username is not a driver identity → returned as sent", c(" kevin ") === "kevin");
 		t("canonicalDriverName: a reserved name → returned as sent", c("Dispatch") === "Dispatch");
 		t("canonicalDriverName: a new name → trimmed", c("  Brand New ") === "Brand New");
 		t("canonicalDriverName: blank or non-string → \"\"", c("   ") === "" && c(null) === "" && c(42) === "");
-		db.prepare("UPDATE drivers_directory SET driver_name = 'Shorn  King' WHERE id = 1").run();
+		db.prepare("UPDATE drivers_directory SET driver_name = 'Soren  King' WHERE id = 1").run();
 		t("canonicalDriverName: an account and a directory row spelling one driver differently → the account's spelling",
-			c("SHORN KING") === "Shorn King" && c("shorn  king") === "Shorn King");
+			c("SOREN KING") === "Soren King" && c("soren  king") === "Soren King");
 	}
 
 	// The truck's own driver, stored in an older spelling and on an active load.
@@ -981,16 +981,16 @@ async function trucksBattery(opts = {}) {
 	// so an ordinary edit must not be read as moving that driver onto this truck.
 	{
 		const db = trucksFixture();
-		db.prepare("UPDATE trucks SET assigned_driver = 'Shorn  King' WHERE id = 1").run();
-		db.prepare("UPDATE truck_assignments SET driver_name = 'Shorn  King' WHERE truck_id = 1").run();
-		const { put } = mountTrucks(db, { ...opts, busy: ["Shorn King"] });
-		const r = await put(1, { assignedDriver: "Shorn  King", notes: "new tyres" });
+		db.prepare("UPDATE trucks SET assigned_driver = 'Soren  King' WHERE id = 1").run();
+		db.prepare("UPDATE truck_assignments SET driver_name = 'Soren  King' WHERE truck_id = 1").run();
+		const { put } = mountTrucks(db, { ...opts, busy: ["Soren King"] });
+		const r = await put(1, { assignedDriver: "Soren  King", notes: "new tyres" });
 		const notes = (db.prepare("SELECT notes FROM trucks WHERE id = 1").get() || {}).notes;
 		t(`PUT /api/trucks/:id, a save re-sending the truck's own driver in an older spelling while that driver is on a load: 200, saved under the driver's spelling (got ${r.status} ${JSON.stringify(r.body)}, trucks ${truckDrivers(db)})`,
-			r.status === 200 && notes === "new tyres" && truckDrivers(db) === "1:Shorn King,2:" &&
-			JSON.stringify(activeAssignments(db)) === JSON.stringify([{ truck_id: 1, driver_name: "Shorn King" }]));
+			r.status === 200 && notes === "new tyres" && truckDrivers(db) === "1:Soren King,2:" &&
+			JSON.stringify(activeAssignments(db)) === JSON.stringify([{ truck_id: 1, driver_name: "Soren King" }]));
 		const before = JSON.stringify([truckDrivers(db), activeAssignments(db)]);
-		const r2 = await put(2, { assignedDriver: "shorn king" });
+		const r2 = await put(2, { assignedDriver: "soren king" });
 		t(`...while moving that driver to another truck is still refused for the active load, nothing written (got ${r2.status})`,
 			r2.status === 409 && /already has an active load/.test((r2.body || {}).error || "") &&
 			JSON.stringify([truckDrivers(db), activeAssignments(db)]) === before);
@@ -1001,22 +1001,22 @@ async function trucksBattery(opts = {}) {
 	// name and its truck.
 	{
 		const db = trucksFixture();
-		db.prepare("UPDATE drivers_directory SET driver_name = 'Shorn  King', trucks = '101' WHERE id = 1").run();
-		db.prepare("UPDATE trucks SET assigned_driver = 'Shorn  King' WHERE id = 1").run();
-		db.prepare("UPDATE truck_assignments SET driver_name = 'Shorn  King' WHERE truck_id = 1").run();
+		db.prepare("UPDATE drivers_directory SET driver_name = 'Soren  King', trucks = '101' WHERE id = 1").run();
+		db.prepare("UPDATE trucks SET assigned_driver = 'Soren  King' WHERE id = 1").run();
+		db.prepare("UPDATE truck_assignments SET driver_name = 'Soren  King' WHERE truck_id = 1").run();
 		const { put, syncCalls } = mountTrucks(db, opts);
-		const r = await put(1, { assignedDriver: "Shorn  King", notes: "x" });
+		const r = await put(1, { assignedDriver: "Soren  King", notes: "x" });
 		const row = db.prepare("SELECT driver_name, trucks FROM drivers_directory WHERE id = 1").get();
 		t(`an account and a directory row spelling one driver differently: the truck takes the account's spelling (got ${r.status}, trucks ${truckDrivers(db)})`,
-			r.status === 200 && truckDrivers(db) === "1:Shorn King,2:");
+			r.status === 200 && truckDrivers(db) === "1:Soren King,2:");
 		t(`...and the directory row keeps its name and its truck (got ${JSON.stringify(row)})`,
-			!!row && row.driver_name === "Shorn  King" && row.trucks === "101" && directoryNames(db).length === 3);
+			!!row && row.driver_name === "Soren  King" && row.trucks === "101" && directoryNames(db).length === 3);
 		t(`...and the save syncs that driver once, under the spelling it kept — never the replaced spelling as a departing driver (got ${JSON.stringify(syncCalls)})`,
-			JSON.stringify(syncCalls) === JSON.stringify([["Shorn King", "update"]]));
+			JSON.stringify(syncCalls) === JSON.stringify([["Soren King", "update"]]));
 	}
 
 	// A driver name is text: anything else is refused before anything is resolved or written.
-	for (const [label, value] of [["an object", { a: 1 }], ["a list", ["Shorn King", "Bob Driver"]], ["a number", 7]]) {
+	for (const [label, value] of [["an object", { a: 1 }], ["a list", ["Soren King", "Bob Driver"]], ["a number", 7]]) {
 		const db = trucksFixture();
 		const state = () => JSON.stringify([truckDrivers(db), activeAssignments(db), directoryNames(db)]);
 		const before = state();
@@ -1063,17 +1063,17 @@ async function payBattery(opts = {}) {
 		const db = usersFixture();
 		db.prepare("UPDATE drivers_directory SET pay_daily = 300 WHERE id = 1").run();
 		const { put } = mountDirectoryPut(db, opts);
-		const r = await put(1, ["Driver"], ["SHORN  king"]);
-		t(`a directory row re-spelled in case and spacing by PUT /api/drivers-directory/:id keeps its pay structure under the driver's name (got ${r.status}, pay ${payDailyOf(db, "Shorn King", ms)})`,
-			r.status === 200 && payDailyOf(db, "Shorn King", ms) === 300 && payDailyOf(db, "shorn   KING", ms) === 300);
+		const r = await put(1, ["Driver"], ["SOREN  king"]);
+		t(`a directory row re-spelled in case and spacing by PUT /api/drivers-directory/:id keeps its pay structure under the driver's name (got ${r.status}, pay ${payDailyOf(db, "Soren King", ms)})`,
+			r.status === 200 && payDailyOf(db, "Soren King", ms) === 300 && payDailyOf(db, "soren   KING", ms) === 300);
 	}
 	{
 		const db = usersFixture();
 		db.prepare("UPDATE drivers_directory SET pay_daily = 300 WHERE id = 1").run();
 		const { put } = mountUsersPut(db, opts);
-		const r = await put(2, { driverName: "Shorn  King" });
-		t(`...so does one re-spelled by PUT /api/users/:id's cascade (got ${r.status}, directory ${JSON.stringify(directoryNames(db))}, pay ${payDailyOf(db, "Shorn King", ms)})`,
-			r.status === 200 && directoryNames(db)[0] === "Shorn  King" && payDailyOf(db, "Shorn King", ms) === 300);
+		const r = await put(2, { driverName: "Soren  King" });
+		t(`...so does one re-spelled by PUT /api/users/:id's cascade (got ${r.status}, directory ${JSON.stringify(directoryNames(db))}, pay ${payDailyOf(db, "Soren King", ms)})`,
+			r.status === 200 && directoryNames(db)[0] === "Soren  King" && payDailyOf(db, "Soren King", ms) === 300);
 	}
 	{
 		const db = fixFixture();
@@ -1086,9 +1086,9 @@ async function payBattery(opts = {}) {
 	{
 		const db = usersFixture();
 		db.prepare("UPDATE drivers_directory SET pay_daily = 300 WHERE id = 1").run();
-		addDirectory(db, "Shorn  King"); // a second row for the same name in another spacing, at the defaults
+		addDirectory(db, "Soren  King"); // a second row for the same name in another spacing, at the defaults
 		t("two rows for one name: the first by id wins, under either spelling",
-			payDailyOf(db, "Shorn King", ms) === 300 && payDailyOf(db, "Shorn  King", ms) === 300);
+			payDailyOf(db, "Soren King", ms) === 300 && payDailyOf(db, "Soren  King", ms) === 300);
 	}
 	return results;
 }
@@ -1105,7 +1105,7 @@ async function cascadeBattery(opts = {}) {
 	const spacedFixture = (base) => {
 		const db = base();
 		// sking's directory row, stored with a doubled space, carrying the $300 rate.
-		db.prepare("UPDATE drivers_directory SET driver_name = 'Shorn  King', pay_daily = 300 WHERE id = 1").run();
+		db.prepare("UPDATE drivers_directory SET driver_name = 'Soren  King', pay_daily = 300 WHERE id = 1").run();
 		return db;
 	};
 	const rows = (db) => db.prepare("SELECT id, driver_name, pay_daily FROM drivers_directory ORDER BY id").all()
@@ -1113,27 +1113,27 @@ async function cascadeBattery(opts = {}) {
 	{
 		const db = spacedFixture(usersFixture);
 		const { put } = mountUsersPut(db, opts);
-		const r = await put(2, { driverName: "Shaun King" });
-		t(`PUT /api/users/:id renaming "Shorn King" to "Shaun King": the directory row stored as "Shorn  King" is renamed, keeping its id and rate, and no second row appears (got ${r.status}, ${rows(db)})`,
-			r.status === 200 && rows(db) === "1:Shaun King:300 | 2:Bob Driver:0 | 3:Deshorn King:0");
-		t(`...so the renamed driver's pay structure is still the $300 row (got ${payDailyOf(db, "Shaun King", ms)})`,
-			payDailyOf(db, "Shaun King", ms) === 300);
+		const r = await put(2, { driverName: "Sorin King" });
+		t(`PUT /api/users/:id renaming "Soren King" to "Sorin King": the directory row stored as "Soren  King" is renamed, keeping its id and rate, and no second row appears (got ${r.status}, ${rows(db)})`,
+			r.status === 200 && rows(db) === "1:Sorin King:300 | 2:Bob Driver:0 | 3:Desoren King:0");
+		t(`...so the renamed driver's pay structure is still the $300 row (got ${payDailyOf(db, "Sorin King", ms)})`,
+			payDailyOf(db, "Sorin King", ms) === 300);
 	}
 	{
 		const db = spacedFixture(fixFixture);
 		const { fix, log } = mountFix(db, opts);
-		const dry = await fix({ oldName: "Shorn King", newName: "Shaun King" }, { dryRun: "true" });
+		const dry = await fix({ oldName: "Soren King", newName: "Sorin King" }, { dryRun: "true" });
 		const planned = dry.body && dry.body.plan && dry.body.plan.sqlite && dry.body.plan.sqlite.drivers_directory;
-		t(`fix-driver-name's dry run counts the directory row stored as "Shorn  King" (got ${dry.status}, ${JSON.stringify(planned || null)})`,
-			dry.status === 200 && planned && planned.rows === 1 && rows(db) === "1:Shorn  King:300 | 2:Bob Driver:0 | 3:Deshorn King:0");
-		const r = await fix({ oldName: "Shorn King", newName: "Shaun King" });
+		t(`fix-driver-name's dry run counts the directory row stored as "Soren  King" (got ${dry.status}, ${JSON.stringify(planned || null)})`,
+			dry.status === 200 && planned && planned.rows === 1 && rows(db) === "1:Soren  King:300 | 2:Bob Driver:0 | 3:Desoren King:0");
+		const r = await fix({ oldName: "Soren King", newName: "Sorin King" });
 		t(`fix-driver-name renames it, keeping its id and rate (got ${r.status}, ${rows(db)})`,
-			r.status === 200 && rows(db) === "1:Shaun King:300 | 2:Bob Driver:0 | 3:Deshorn King:0" && log.sheetWrites === 0);
+			r.status === 200 && rows(db) === "1:Sorin King:300 | 2:Bob Driver:0 | 3:Desoren King:0" && log.sheetWrites === 0);
 		// A later sync under the new name (a truck assignment, an email change)
 		// finds that row and adds nothing.
-		buildModule(db, ms).syncDriverToCarrierSheet("Shaun King", { action: "update" });
-		t(`...and a sync under the new name afterwards adds no second row (got ${rows(db)}, pay ${payDailyOf(db, "Shaun King", ms)})`,
-			rows(db) === "1:Shaun King:300 | 2:Bob Driver:0 | 3:Deshorn King:0" && payDailyOf(db, "Shaun King", ms) === 300);
+		buildModule(db, ms).syncDriverToCarrierSheet("Sorin King", { action: "update" });
+		t(`...and a sync under the new name afterwards adds no second row (got ${rows(db)}, pay ${payDailyOf(db, "Sorin King", ms)})`,
+			rows(db) === "1:Sorin King:300 | 2:Bob Driver:0 | 3:Desoren King:0" && payDailyOf(db, "Sorin King", ms) === 300);
 	}
 	{
 		// Two directory rows for one driver: the account's own spelling and a
@@ -1142,11 +1142,11 @@ async function cascadeBattery(opts = {}) {
 		// rather than writing both the same name (the column is UNIQUE NOCASE). The
 		// other legs' spacing match does not stand in for this.
 		const db = usersFixture();
-		addDirectory(db, "Shorn  King"); // row 4
+		addDirectory(db, "Soren  King"); // row 4
 		const { put } = mountUsersPut(db, opts);
-		const r = await put(2, { driverName: "Shaun King" });
+		const r = await put(2, { driverName: "Sorin King" });
 		t(`two directory rows for one driver: only the case-aside row is renamed, the doubled-space one is left, and the rename is not refused (got ${r.status}, ${rows(db)})`,
-			r.status === 200 && rows(db) === "1:Shaun King:0 | 2:Bob Driver:0 | 3:Deshorn King:0 | 4:Shorn  King:0");
+			r.status === 200 && rows(db) === "1:Sorin King:0 | 2:Bob Driver:0 | 3:Desoren King:0 | 4:Soren  King:0");
 	}
 	{
 		// Renamed onto another row's name, the row found by id would be written a
@@ -1155,7 +1155,7 @@ async function cascadeBattery(opts = {}) {
 		const db = spacedFixture(fixFixture);
 		const before = rows(db);
 		const { fix, log } = mountFix(db, opts);
-		const r = await fix({ oldName: "Shorn King", newName: "Bob Driver", acknowledgeLockedPeriods: true });
+		const r = await fix({ oldName: "Soren King", newName: "Bob Driver", acknowledgeLockedPeriods: true });
 		t(`fix-driver-name renaming it onto "Bob Driver", who has a directory row: 409 DIRECTORY_NAME_COLLISION, nothing written, the sheet untouched (got ${r.status} ${(r.body || {}).code || ""})`,
 			r.status === 409 && (r.body || {}).code === "DIRECTORY_NAME_COLLISION" && rows(db) === before && log.sheetWrites === 0);
 	}
@@ -1163,24 +1163,24 @@ async function cascadeBattery(opts = {}) {
 }
 
 // ─────────────────────────────── §4d every leg takes the driver's other spellings
-// sking ("Shorn King", account 2) has rows stored under his own spelling, a
-// doubled space and edge spaces, on the money legs; Deshorn King's rows are a
+// sking ("Soren King", account 2) has rows stored under his own spelling, a
+// doubled space and edge spaces, on the money legs; Desoren King's rows are a
 // different person's and never move.
 function variantFixture({ legacyAccount = null } = {}) {
 	const db = usersFixture();
 	if (legacyAccount) addUser(db, 6, "sking2", legacyAccount); // another account holding a spelling of the name
-	addTruck(db, 1, "101", "Shorn  King"); // trucks + truck_assignments, doubled space
-	addTruck(db, 2, "102", "Deshorn King");
+	addTruck(db, 1, "101", "Soren  King"); // trucks + truck_assignments, doubled space
+	addTruck(db, 2, "102", "Desoren King");
 	const e = db.prepare("INSERT INTO expenses (id, driver, date, amount) VALUES (?, ?, ?, ?)");
-	e.run(1, "Shorn King", "2026-09-02", 10);
-	e.run(2, "Shorn  King", "2026-09-03", 20);
-	e.run(3, " shorn king ", "2026-09-04", 30);
-	e.run(4, "Deshorn King", "2026-09-05", 40);
+	e.run(1, "Soren King", "2026-09-02", 10);
+	e.run(2, "Soren  King", "2026-09-03", 20);
+	e.run(3, " soren king ", "2026-09-04", 30);
+	e.run(4, "Desoren King", "2026-09-05", 40);
 	const inv = db.prepare("INSERT INTO invoices (id, driver, week_start, week_end, paid_at) VALUES (?, ?, ?, ?, ?)");
-	inv.run(1, "shorn king", "2026-08-29", "2026-09-04", "");
-	inv.run(2, "shorn  king", "2026-09-05", "2026-09-11", "");
-	inv.run(3, "deshorn king", "2026-08-29", "2026-09-04", "");
-	db.prepare("INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at) VALUES ('SK Freight', 'Shorn   King', '2026-01-01')").run();
+	inv.run(1, "soren king", "2026-08-29", "2026-09-04", "");
+	inv.run(2, "soren  king", "2026-09-05", "2026-09-11", "");
+	inv.run(3, "desoren king", "2026-08-29", "2026-09-04", "");
+	db.prepare("INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at) VALUES ('SK Freight', 'Soren   King', '2026-01-01')").run();
 	return db;
 }
 const moneyState = (db) => JSON.stringify({
@@ -1191,19 +1191,19 @@ const moneyState = (db) => JSON.stringify({
 	history: db.prepare("SELECT driver_name FROM carrier_driver_history ORDER BY id").all().map((r) => r.driver_name),
 });
 const MOVED = JSON.stringify({
-	expenses: ["1:Shaun King", "2:Shaun King", "3:Shaun King", "4:Deshorn King"],
-	invoices: ["1:shaun king", "2:shaun king", "3:deshorn king"],
-	trucks: "1:Shaun King,2:Deshorn King",
-	assignments: ["1:Shaun King", "2:Deshorn King"],
-	history: ["Shaun King"],
+	expenses: ["1:Sorin King", "2:Sorin King", "3:Sorin King", "4:Desoren King"],
+	invoices: ["1:sorin king", "2:sorin king", "3:desoren king"],
+	trucks: "1:Sorin King,2:Desoren King",
+	assignments: ["1:Sorin King", "2:Desoren King"],
+	history: ["Sorin King"],
 });
 // Only the rows under sking's own spelling moved.
 const LEFT = () => JSON.stringify({
-	expenses: ["1:Shaun King", "2:Shorn  King", "3: shorn king ", "4:Deshorn King"],
-	invoices: ["1:shaun king", "2:shorn  king", "3:deshorn king"],
-	trucks: "1:Shorn  King,2:Deshorn King",
-	assignments: ["1:Shorn  King", "2:Deshorn King"],
-	history: ["Shorn   King"],
+	expenses: ["1:Sorin King", "2:Soren  King", "3: soren king ", "4:Desoren King"],
+	invoices: ["1:sorin king", "2:soren  king", "3:desoren king"],
+	trucks: "1:Soren  King,2:Desoren King",
+	assignments: ["1:Soren  King", "2:Desoren King"],
+	history: ["Soren   King"],
 });
 
 // DELETE /api/users/:id, lifted, with its period guard, archive and sessions stubbed.
@@ -1243,32 +1243,32 @@ async function variantBattery(opts = {}) {
 	// The cascade itself, both routes' forms.
 	{
 		const db = variantFixture();
-		buildModule(db, ms).applyDriverRenameSqlite({ oldName: "Shorn King", newName: "Shaun King", userId: 2 });
-		t(`PUT /api/users/:id's cascade moves the rows under a doubled or edge space too — expenses, invoices (lowercase), trucks, truck_assignments, carrier history — and never Deshorn King's (got ${moneyState(db)})`,
+		buildModule(db, ms).applyDriverRenameSqlite({ oldName: "Soren King", newName: "Sorin King", userId: 2 });
+		t(`PUT /api/users/:id's cascade moves the rows under a doubled or edge space too — expenses, invoices (lowercase), trucks, truck_assignments, carrier history — and never Desoren King's (got ${moneyState(db)})`,
 			moneyState(db) === MOVED);
 	}
 	{
 		const db = variantFixture();
-		buildModule(db, ms).applyDriverRenameSqlite({ oldName: "Shorn King", newName: "Shaun King" });
+		buildModule(db, ms).applyDriverRenameSqlite({ oldName: "Soren King", newName: "Sorin King" });
 		t(`...and so does fix-driver-name's (got ${moneyState(db)})`, moneyState(db) === MOVED);
 	}
 	// Another account still holding a spelling of the name: nothing widens.
-	for (const [label, legacy] of [["a doubled space", "Shorn  King"], ["edge spaces", " Shorn King "]]) {
+	for (const [label, legacy] of [["a doubled space", "Soren  King"], ["edge spaces", " Soren King "]]) {
 		const db = variantFixture({ legacyAccount: legacy });
-		buildModule(db, ms).applyDriverRenameSqlite({ oldName: "Shorn King", newName: "Shaun King", userId: 2 });
+		buildModule(db, ms).applyDriverRenameSqlite({ oldName: "Soren King", newName: "Sorin King", userId: 2 });
 		t(`with another account spelled with ${label} (${JSON.stringify(legacy)}), PUT /api/users/:id's cascade moves only the rows under sking's own spelling (got ${moneyState(db)})`,
 			moneyState(db) === LEFT());
 		const db2 = variantFixture({ legacyAccount: legacy });
-		buildModule(db2, ms).applyDriverRenameSqlite({ oldName: "Shorn King", newName: "Shaun King" });
+		buildModule(db2, ms).applyDriverRenameSqlite({ oldName: "Soren King", newName: "Sorin King" });
 		t(`...and fix-driver-name's too, leaving that account alone (got ${moneyState(db2)}, account 6 ${JSON.stringify(driverNameOf(db2, 6))})`,
 			moneyState(db2) === LEFT() && driverNameOf(db2, 6) === legacy);
-		const plan = buildModule(variantFixture({ legacyAccount: legacy }), ms).planDriverRenameSqlite("shorn king", { userId: 2 });
+		const plan = buildModule(variantFixture({ legacyAccount: legacy }), ms).planDriverRenameSqlite("soren king", { userId: 2 });
 		t(`...and the plan says so: widens false, no variant rows (got widens ${plan.widens}, expenses ${JSON.stringify(plan.targets.expenses)})`,
 			plan.widens === false && plan.targets.expenses.rows === 1 && !plan.targets.expenses.variantRows);
 	}
 	// The plan counts what the cascade writes.
 	{
-		const plan = buildModule(variantFixture(), ms).planDriverRenameSqlite("shorn king", { userId: 2 });
+		const plan = buildModule(variantFixture(), ms).planDriverRenameSqlite("soren king", { userId: 2 });
 		const x = plan.targets;
 		t(`the plan counts the other spellings and says how many (got widens ${plan.widens}, expenses ${JSON.stringify(x.expenses)}, invoices ${JSON.stringify(x.invoices)}, trucks ${JSON.stringify(x.trucks_assigned_driver)})`,
 			plan.widens === true && x.expenses.rows === 3 && x.expenses.variantRows === 2 && x.invoices.rows === 2 && x.invoices.variantRows === 1 &&
@@ -1279,13 +1279,13 @@ async function variantBattery(opts = {}) {
 		const stubs = { expenseRowPeriodLocked: (r) => r.id === 2, invoiceRowPeriodLocked: (r) => !!String(r.paid_at || "").trim() };
 		const db = variantFixture();
 		db.prepare("UPDATE invoices SET paid_at = '2026-09-12' WHERE id = 2").run();
-		const plan = buildModule(db, ms, stubs).planDriverRenameSqlite("shorn king", { userId: 2 });
+		const plan = buildModule(db, ms, stubs).planDriverRenameSqlite("soren king", { userId: 2 });
 		const codes = plan.blockers.map((b) => `${b.table}:${b.code}:${b.rows}`).join(",");
 		t(`the lock judgement sees a finalized expense and a paid invoice stored under a doubled space (got ${codes})`,
 			codes.includes("expenses:PERIOD_FINALIZED:1") && codes.includes("invoices:INVOICE_ALREADY_PAID:1"));
 		const before = moneyState(db);
 		const { put } = users(db, { realLock: true, stubs });
-		const r = await put(2, { driverName: "Shaun King" });
+		const r = await put(2, { driverName: "Sorin King" });
 		t(`...so PUT /api/users/:id refuses the rename, nothing written (got ${r.status} ${(r.body || {}).code || ""})`,
 			r.status === 409 && (r.body || {}).code === "PERIOD_FINALIZED" && moneyState(db) === before);
 	}
@@ -1295,70 +1295,70 @@ async function variantBattery(opts = {}) {
 		const db = variantFixture();
 		db.prepare("UPDATE invoices SET week_start = '2026-08-29', week_end = '2026-09-04' WHERE id = 2").run();
 		const m = buildModule(db, ms);
-		const users = m.planDriverRenameSqlite("shorn king", { userId: 2 }).blockers.map((b) => b.code);
-		const fixForm = m.planDriverRenameSqlite("shorn king", { newLower: "shaun king" }).blockers.map((b) => b.code);
-		t(`the week-collision probe sees "shorn king" and "shorn  king" in one week, in both routes' forms (got ${users} / ${fixForm})`,
+		const users = m.planDriverRenameSqlite("soren king", { userId: 2 }).blockers.map((b) => b.code);
+		const fixForm = m.planDriverRenameSqlite("soren king", { newLower: "sorin king" }).blockers.map((b) => b.code);
+		t(`the week-collision probe sees "soren king" and "soren  king" in one week, in both routes' forms (got ${users} / ${fixForm})`,
 			users.includes("INVOICE_WEEK_COLLISION") && fixForm.includes("INVOICE_WEEK_COLLISION"));
 		const before = moneyState(db);
 		const { fix, log } = fixer(db);
-		const r = await fix({ oldName: "Shorn King", newName: "Shaun King", acknowledgeLockedPeriods: true, reason: "consolidating spellings" });
+		const r = await fix({ oldName: "Soren King", newName: "Sorin King", acknowledgeLockedPeriods: true, reason: "consolidating spellings" });
 		t(`...so fix-driver-name refuses it before the sheet is written (got ${r.status} ${(r.body || {}).code || ""})`,
 			r.status === 409 && (r.body || {}).code === "INVOICE_WEEK_COLLISION" && log.sheetWrites === 0 && moneyState(db) === before);
-		const db2 = variantFixture({ legacyAccount: "Shorn  King" });
+		const db2 = variantFixture({ legacyAccount: "Soren  King" });
 		db2.prepare("UPDATE invoices SET week_start = '2026-08-29', week_end = '2026-09-04' WHERE id = 2").run();
 		t("...but not when another account holds that spelling: the rename would not write that invoice",
-			!buildModule(db2, ms).planDriverRenameSqlite("shorn king", { userId: 2 }).blockers.some((b) => b.code === "INVOICE_WEEK_COLLISION"));
+			!buildModule(db2, ms).planDriverRenameSqlite("soren king", { userId: 2 }).blockers.some((b) => b.code === "INVOICE_WEEK_COLLISION"));
 	}
 
 	// PUT /api/users/:id end to end.
 	{
 		const db = variantFixture();
 		const { put } = users(db, { realLock: true });
-		const r = await put(2, { driverName: "Shaun King" });
+		const r = await put(2, { driverName: "Sorin King" });
 		t(`PUT /api/users/:id renames the rows under every spelling (got ${r.status} ${(r.body || {}).code || ""}, ${moneyState(db)})`,
-			r.status === 200 && moneyState(db) === MOVED && driverNameOf(db, 2) === "Shaun King");
+			r.status === 200 && moneyState(db) === MOVED && driverNameOf(db, 2) === "Sorin King");
 	}
 	{
 		// A Job Tracking load under another spacing of the old name would be left
 		// behind by a route that does not write the sheet.
 		const db = variantFixture();
 		const before = moneyState(db);
-		const sheet = [["Load ID", "Driver", "Assigned Date"], ["L-1", "Shorn  King", "2026-09-01"]];
+		const sheet = [["Load ID", "Driver", "Assigned Date"], ["L-1", "Soren  King", "2026-09-01"]];
 		const { put } = users(db, { realLock: true, sheet });
-		const r = await put(2, { driverName: "Shaun King" });
-		t(`PUT /api/users/:id with a Job Tracking load under "Shorn  King": 409 RENAME_REQUIRES_SHEET counting it, nothing written (got ${r.status} ${(r.body || {}).code || ""} ${(r.body || {}).sheetRows})`,
+		const r = await put(2, { driverName: "Sorin King" });
+		t(`PUT /api/users/:id with a Job Tracking load under "Soren  King": 409 RENAME_REQUIRES_SHEET counting it, nothing written (got ${r.status} ${(r.body || {}).code || ""} ${(r.body || {}).sheetRows})`,
 			r.status === 409 && (r.body || {}).code === "RENAME_REQUIRES_SHEET" && (r.body || {}).sheetRows === 1 && moneyState(db) === before);
-		const db2 = variantFixture({ legacyAccount: "Shorn  King" });
+		const db2 = variantFixture({ legacyAccount: "Soren  King" });
 		const { put: put2 } = users(db2, { realLock: true, sheet });
-		const r2 = await put2(2, { driverName: "Shaun King" });
-		t(`...but that load is not sking's to rename while another account holds "Shorn  King" (got ${r2.status} ${(r2.body || {}).code || ""})`,
+		const r2 = await put2(2, { driverName: "Sorin King" });
+		t(`...but that load is not sking's to rename while another account holds "Soren  King" (got ${r2.status} ${(r2.body || {}).code || ""})`,
 			r2.status === 200 && moneyState(db2) === LEFT());
 	}
 	// A re-spelling onto the account's own directory row's spelling.
 	{
 		const db = usersFixture();
-		db.prepare("UPDATE drivers_directory SET driver_name = 'Shorn  King', pay_daily = 300 WHERE id = 1").run();
+		db.prepare("UPDATE drivers_directory SET driver_name = 'Soren  King', pay_daily = 300 WHERE id = 1").run();
 		const { put } = users(db, { realLock: true });
-		const r = await put(2, { driverName: "Shorn  King" });
-		t(`PUT /api/users/:id re-spelling "Shorn King" onto its own directory row's spelling "Shorn  King": 200, not a merge (got ${r.status} ${(r.body || {}).code || ""} ${JSON.stringify((r.body || {}).mergeTargets || {})})`,
-			r.status === 200 && driverNameOf(db, 2) === "Shorn  King" && JSON.stringify(directoryNames(db)) === JSON.stringify(["Shorn  King", "Bob Driver", "Deshorn King"]));
+		const r = await put(2, { driverName: "Soren  King" });
+		t(`PUT /api/users/:id re-spelling "Soren King" onto its own directory row's spelling "Soren  King": 200, not a merge (got ${r.status} ${(r.body || {}).code || ""} ${JSON.stringify((r.body || {}).mergeTargets || {})})`,
+			r.status === 200 && driverNameOf(db, 2) === "Soren  King" && JSON.stringify(directoryNames(db)) === JSON.stringify(["Soren  King", "Bob Driver", "Desoren King"]));
 	}
 	{
 		const db = usersFixture();
-		db.prepare("UPDATE drivers_directory SET driver_name = 'Shorn  King' WHERE id = 1").run();
-		addUser(db, 6, "sking2", "Shorn   King");
+		db.prepare("UPDATE drivers_directory SET driver_name = 'Soren  King' WHERE id = 1").run();
+		addUser(db, 6, "sking2", "Soren   King");
 		const before = snapshot(db);
 		const { put } = users(db, { realLock: true });
-		const r = await put(2, { driverName: " shorn   KING" });
+		const r = await put(2, { driverName: " soren   KING" });
 		t(`...while re-spelling it onto another account's exact spelling is still 409 DRIVER_NAME_TAKEN, nothing written (got ${r.status} ${(r.body || {}).code || ""})`,
 			r.status === 409 && (r.body || {}).code === "DRIVER_NAME_TAKEN" && snapshot(db) === before);
 	}
 	{
 		// fix-driver-name, the same re-spelling: not a merge either.
 		const db = fixFixture();
-		db.prepare("UPDATE drivers_directory SET driver_name = 'Shorn  King' WHERE id = 1").run();
+		db.prepare("UPDATE drivers_directory SET driver_name = 'Soren  King' WHERE id = 1").run();
 		const { fix } = fixer(db);
-		const dry = await fix({ oldName: "Shorn King", newName: "Shorn  King" }, { dryRun: "true" });
+		const dry = await fix({ oldName: "Soren King", newName: "Soren  King" }, { dryRun: "true" });
 		const v = (dry.body || {}).verdict || {};
 		t(`fix-driver-name re-spelling onto the driver's own directory row's spelling: no merge (got ${dry.status} isMerge=${v.isMerge} ${JSON.stringify(v.mergeTargets || {})})`,
 			dry.status === 200 && v.isMerge === false && dry.body.wouldWrite === true);
@@ -1366,22 +1366,22 @@ async function variantBattery(opts = {}) {
 	// fix-driver-name: the sheet moves with the database, and the recipe says which rows had another spelling.
 	{
 		const db = variantFixture();
-		const sheet = [["Load ID", "Driver", "Assigned Date"], ["L-1", "Shorn King", "2026-09-01"], ["L-2", "Shorn  King", "2026-09-02"], ["L-3", "Deshorn King", "2026-09-03"]];
+		const sheet = [["Load ID", "Driver", "Assigned Date"], ["L-1", "Soren King", "2026-09-01"], ["L-2", "Soren  King", "2026-09-02"], ["L-3", "Desoren King", "2026-09-03"]];
 		const { fix, log } = fixer(db, { sheet });
-		const dry = await fix({ oldName: "Shorn King", newName: "Shaun King" }, { dryRun: "true" });
+		const dry = await fix({ oldName: "Soren King", newName: "Sorin King" }, { dryRun: "true" });
 		const p = (dry.body || {}).plan || {};
 		const v = (dry.body || {}).verdict || {};
 		t(`fix-driver-name's dry run counts the other spellings, sheet included (got sheet ${JSON.stringify(p.sheet || null)}, spacingVariants ${JSON.stringify(v.spacingVariants || null)})`,
 			p.sheet && p.sheet.rows === 2 && p.sheet.variantRows === 1 && v.spacingVariants && v.spacingVariants.widened === true && v.spacingVariants.rows === 7);
-		const r = await fix({ oldName: "Shorn King", newName: "Shaun King" });
+		const r = await fix({ oldName: "Soren King", newName: "Sorin King" });
 		const audit = log.audits.find((a) => a.action === "fix_driver_name");
 		const d = audit ? JSON.parse(audit.details) : {};
 		const ranges = log.sheetData.map((u) => `${u.range}=${u.values[0][0]}`).join(",");
-		t(`...renames the sheet cell under "Shorn  King" with the rest, and never Deshorn King's (got ${r.status}, ${ranges}, ${moneyState(db)})`,
-			r.status === 200 && ranges === "Job Tracking!B2=Shaun King,Job Tracking!B3=Shaun King" && moneyState(db) === MOVED);
+		t(`...renames the sheet cell under "Soren  King" with the rest, and never Desoren King's (got ${r.status}, ${ranges}, ${moneyState(db)})`,
+			r.status === 200 && ranges === "Job Tracking!B2=Sorin King,Job Tracking!B3=Sorin King" && moneyState(db) === MOVED);
 		t(`...and the audit lists every row that had another spelling, by id and range, with that spelling (got ${JSON.stringify(d.spacingVariants || null)})`,
-			d.spacingVariants && JSON.stringify(d.spacingVariants.sqlite.expenses) === JSON.stringify({ "Shorn  King": [2], " shorn king ": [3] }) &&
-			JSON.stringify(d.spacingVariants.sheet) === JSON.stringify([{ range: "Job Tracking!B3", was: "Shorn  King" }]) &&
+			d.spacingVariants && JSON.stringify(d.spacingVariants.sqlite.expenses) === JSON.stringify({ "Soren  King": [2], " soren king ": [3] }) &&
+			JSON.stringify(d.spacingVariants.sheet) === JSON.stringify([{ range: "Job Tracking!B3", was: "Soren  King" }]) &&
 			/restore each row in spacingVariants/.test(d.reversal || "") && !/an exact undo/.test(d.reversal || ""));
 	}
 	{
@@ -1389,74 +1389,74 @@ async function variantBattery(opts = {}) {
 		const stubs = { expenseRowPeriodLocked: (r) => r.id === 2 };
 		const db = variantFixture();
 		const { fix } = fixer(db, { stubs });
-		const dry = await fix({ oldName: "Shorn King", newName: "SHORN KING" }, { dryRun: "true" });
+		const dry = await fix({ oldName: "Soren King", newName: "SOREN KING" }, { dryRun: "true" });
 		const v = (dry.body || {}).verdict || {};
-		t(`fix-driver-name, case-only but moving a finalized row under "Shorn  King": not money-neutral, blocked (got moneyNeutral ${v.moneyNeutral} ${v.decision} ${v.code})`,
+		t(`fix-driver-name, case-only but moving a finalized row under "Soren  King": not money-neutral, blocked (got moneyNeutral ${v.moneyNeutral} ${v.decision} ${v.code})`,
 			v.caseOnly === true && v.moneyNeutral === false && v.decision === "block" && v.code === "PERIOD_FINALIZED");
 		const db2 = usersFixture();
-		db2.prepare("INSERT INTO expenses (id, driver, date, amount) VALUES (2, 'Shorn King', '2026-09-03', 20)").run();
-		const dry2 = await fixer(db2, { stubs }).fix({ oldName: "Shorn King", newName: "SHORN KING" }, { dryRun: "true" });
+		db2.prepare("INSERT INTO expenses (id, driver, date, amount) VALUES (2, 'Soren King', '2026-09-03', 20)").run();
+		const dry2 = await fixer(db2, { stubs }).fix({ oldName: "Soren King", newName: "SOREN KING" }, { dryRun: "true" });
 		const v2 = (dry2.body || {}).verdict || {};
 		t(`...while a case-only rename with no other spelling in play stays money-neutral, its finalized row no obstacle (got ${v2.moneyNeutral} ${v2.decision})`,
 			v2.moneyNeutral === true && v2.decision === "allow");
-		db2.prepare("INSERT INTO notifications (driver_name) VALUES ('shorn  king')").run();
-		const dry3 = await fixer(db2, { stubs }).fix({ oldName: "Shorn King", newName: "SHORN KING" }, { dryRun: "true" });
+		db2.prepare("INSERT INTO notifications (driver_name) VALUES ('soren  king')").run();
+		const dry3 = await fixer(db2, { stubs }).fix({ oldName: "Soren King", newName: "SOREN KING" }, { dryRun: "true" });
 		const v3 = (dry3.body || {}).verdict || {};
 		t(`...and so does one whose only other spelling is on a cosmetic leg, a notification (got ${v3.moneyNeutral} ${v3.decision}, spacingVariants ${JSON.stringify(v3.spacingVariants || null)})`,
 			v3.moneyNeutral === true && v3.decision === "allow" && v3.spacingVariants && v3.spacingVariants.rows === 1);
 	}
 	{
 		// The other spelling is the driver's DIRECTORY ROW. Every month is locked,
-		// with a load and a receipt in them, and "Shorn King" is renamed case-only.
-		// The rename moves the row stored as "Shorn  King" off the key
+		// with a load and a receipt in them, and "Soren King" is renamed case-only.
+		// The rename moves the row stored as "Soren  King" off the key
 		// getInvestorDriverSet() leg 2 reads it by (trimmed, lowercased), so it is
 		// not money-neutral and the lock is judged.
 		const allLocked = { isLocked: () => true, expenseRowPeriodLocked: () => true, invoiceRowPeriodLocked: () => true,
 			namedLockedPeriods: (lists) => [...new Set(lists.flat().filter(Boolean))].sort() };
-		const setUp = (directoryName = "Shorn  King") => {
+		const setUp = (directoryName = "Soren  King") => {
 			const db = usersFixture();
 			db.prepare("UPDATE drivers_directory SET driver_name = ?, pay_daily = 300 WHERE id = 1").run(directoryName);
-			db.prepare("INSERT INTO expenses (id, driver, date, amount) VALUES (1, 'Shorn King', '2026-06-03', 20)").run();
+			db.prepare("INSERT INTO expenses (id, driver, date, amount) VALUES (1, 'Soren King', '2026-06-03', 20)").run();
 			return db;
 		};
-		const sheet = [["Load ID", "Driver", "Assigned Date"], ["L-1", "Shorn King", "2026-06-01"]];
-		const body = { oldName: "Shorn King", newName: "SHORN KING" };
+		const sheet = [["Load ID", "Driver", "Assigned Date"], ["L-1", "Soren King", "2026-06-01"]];
+		const body = { oldName: "Soren King", newName: "SOREN KING" };
 		const db = setUp();
 		const { fix, log } = fixer(db, { sheet, stubs: allLocked });
 		const dry = await fix(body, { dryRun: "true" });
 		const v = (dry.body || {}).verdict || {};
 		const dirPlan = (((dry.body || {}).plan || {}).sqlite || {}).drivers_directory || {};
-		t(`fix-driver-name, case-only, every month locked, moving the directory row stored as "Shorn  King": the dry run counts it, not money-neutral, blocked (got moneyNeutral ${v.moneyNeutral} ${v.decision} ${v.code}, spacingVariants ${JSON.stringify(v.spacingVariants || null)}, directory ${JSON.stringify(dirPlan)})`,
+		t(`fix-driver-name, case-only, every month locked, moving the directory row stored as "Soren  King": the dry run counts it, not money-neutral, blocked (got moneyNeutral ${v.moneyNeutral} ${v.decision} ${v.code}, spacingVariants ${JSON.stringify(v.spacingVariants || null)}, directory ${JSON.stringify(dirPlan)})`,
 			v.caseOnly === true && v.moneyNeutral === false && v.decision === "block" && v.code === "PERIOD_FINALIZED" &&
 			v.spacingVariants && v.spacingVariants.rows === 1 && dirPlan.variantRows === 1);
 		const r = await fix(body);
 		t(`...so the real call is refused by the lock: 409 PERIOD_FINALIZED, nothing written, the sheet untouched (got ${r.status} ${(r.body || {}).code || ""}, ${JSON.stringify(directoryNames(db))})`,
 			r.status === 409 && (r.body || {}).code === "PERIOD_FINALIZED" && log.sheetWrites === 0 &&
-			directoryNames(db)[0] === "Shorn  King" && driverNameOf(db, 2) === "Shorn King");
+			directoryNames(db)[0] === "Soren  King" && driverNameOf(db, 2) === "Soren King");
 		const r2 = await fix({ ...body, acknowledgeLockedPeriods: true, reason: "consolidating the spellings" });
 		const audit = log.audits.find((a) => a.action === "fix_driver_name");
 		const d = audit ? JSON.parse(audit.details) : {};
 		t(`...acknowledged, it runs, and the audit names the directory row under its original spelling, with no "exact undo" (got ${r2.status}, ${JSON.stringify(d.spacingVariants || null)}, ${JSON.stringify(d.reversal || "")})`,
-			r2.status === 200 && directoryNames(db)[0] === "SHORN KING" && d.moneyNeutral === false &&
-			JSON.stringify(((d.spacingVariants || {}).sqlite || {}).drivers_directory) === JSON.stringify({ "Shorn  King": [1] }) &&
+			r2.status === 200 && directoryNames(db)[0] === "SOREN KING" && d.moneyNeutral === false &&
+			JSON.stringify(((d.spacingVariants || {}).sqlite || {}).drivers_directory) === JSON.stringify({ "Soren  King": [1] }) &&
 			/restore each row in spacingVariants/.test(d.reversal || "") && !/an exact undo/.test(d.reversal || ""));
 		// PUT /api/users/:id judges the lock on every rename, this one included,
 		const db2 = setUp();
 		const before = snapshot(db2);
-		const r3 = await users(db2, { realLock: true, stubs: allLocked }).put(2, { driverName: "SHORN KING" });
+		const r3 = await users(db2, { realLock: true, stubs: allLocked }).put(2, { driverName: "SOREN KING" });
 		t(`PUT /api/users/:id, the same case-only rename with every month locked: 409 PERIOD_FINALIZED, nothing written (got ${r3.status} ${(r3.body || {}).code || ""})`,
 			r3.status === 409 && (r3.body || {}).code === "PERIOD_FINALIZED" && snapshot(db2) === before);
 		// and with the months open its audit line names the directory row too.
 		const db3 = setUp();
 		const u3 = users(db3, { realLock: true });
-		const r4 = await u3.put(2, { driverName: "SHORN KING" });
+		const r4 = await u3.put(2, { driverName: "SOREN KING" });
 		const line = (u3.log.audits.find((a) => a.action === "update_user") || {}).details || "";
 		t(`...and with the months open it renames, its update_user line naming the directory row under its original spelling (got ${r4.status}, ${JSON.stringify(line)})`,
-			r4.status === 200 && directoryNames(db3)[0] === "SHORN KING" && line.includes('"drivers_directory":{"Shorn  King":[1]}'));
+			r4.status === 200 && directoryNames(db3)[0] === "SOREN KING" && line.includes('"drivers_directory":{"Soren  King":[1]}'));
 		// A row that differs from the name only by edge spaces keeps that key.
-		const dry5 = await fixer(setUp(" Shorn King "), { sheet, stubs: allLocked }).fix(body, { dryRun: "true" });
+		const dry5 = await fixer(setUp(" Soren King "), { sheet, stubs: allLocked }).fix(body, { dryRun: "true" });
 		const v5 = (dry5.body || {}).verdict || {};
-		t(`...while a directory row stored as " Shorn King " (edge spaces only) keeps its key: the case-only rename stays money-neutral (got ${v5.moneyNeutral} ${v5.decision})`,
+		t(`...while a directory row stored as " Soren King " (edge spaces only) keeps its key: the case-only rename stays money-neutral (got ${v5.moneyNeutral} ${v5.decision})`,
 			v5.moneyNeutral === true && v5.decision === "allow");
 	}
 
@@ -1690,7 +1690,7 @@ async function mutants() {
 	caught("R28 fix-driver-name leaving the sheet's other spellings behind (the partial rename)", await variantBattery({
 		fixSrc: swap("R28", ROUTES.fix, '(sqlPlan.widens === true && cell !== "" && normalizeDriverName(cell) === oldNorm)', "false"),
 	}));
-	// The directory row moved from "Shorn  King" counted as the old name itself
+	// The directory row moved from "Soren  King" counted as the old name itself
 	// again: the case-only rename called money-neutral, the audit silent.
 	caught("R29 the plan and the executor not counting a directory row moved from another spelling", await variantBattery({
 		moduleSrc: { cascade: swap("R29", CASCADE_SRC, '\tif (t.match === "directory_row") return `LOWER(TRIM("${t.column}")) = ?`;\n', "") },

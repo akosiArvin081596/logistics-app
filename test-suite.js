@@ -1105,10 +1105,10 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
       to80.name === "Bison Transport" && to80.email === "QPinvoicesUSA@bisontransport.com");
 
     // 81. The sheet has NO brokerage column — "Broker Contact Name" holds the
-    //     booking agent ("Danna Garcia"), which must never head an Invoice To
+    //     booking agent ("Della Garcia"), which must never head an Invoice To
     //     block. The company is derived from the email domain instead, and
     //     everyone who isn't Bison bills quickpay.
-    const to81 = BI.resolveInvoiceTo({ brokerEmail: "Danna.Garcia@chrobinson.com", brokerContactName: "Danna Garcia" });
+    const to81 = BI.resolveInvoiceTo({ brokerEmail: "Della.Garcia@chrobinson.com", brokerContactName: "Della Garcia" });
     test("81. resolveInvoiceTo maps a known domain and bills quickpay",
       to81.name === "C.H. Robinson" && to81.email === "quickpay@megacorplogistics.com");
 
@@ -1120,9 +1120,9 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
 
     // 83. Last resort with no usable email: the agent's name beats an empty
     //     "Invoice To".
-    const to83 = BI.resolveInvoiceTo({ brokerContactName: "Danna Garcia" });
+    const to83 = BI.resolveInvoiceTo({ brokerContactName: "Della Garcia" });
     test("83. resolveInvoiceTo falls back to the broker contact name",
-      to83.name === "Danna Garcia" && to83.email === "quickpay@megacorplogistics.com");
+      to83.name === "Della Garcia" && to83.email === "quickpay@megacorplogistics.com");
 
     // 84. The floor under the 422 guard. Each of these used to be a plausible
     //     route to a $0.00 invoice: an empty Payment cell, a Gemini "None", a
@@ -1927,7 +1927,7 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
     const guarded = danger.every(v => csvCell(v) === '"\'' + v.replace(/"/g, '""') + '"');
     // ...and a benign value must NOT be mangled. Over-escaping is its own bug:
     // a Payment cell that came back as "'$ 1,800.00" would break every sum.
-    const safe = ["$ 1,800.00", "Lesline Johnson", "AMES, IA 50010", "2026-08-03", ""];
+    const safe = ["$ 1,800.00", "Leonora Johnson", "AMES, IA 50010", "2026-08-03", ""];
     const untouched = safe.every(v => csvCell(v) === '"' + v + '"');
     const nullish = csvCell(null) === '""' && csvCell(undefined) === '""';
     test("135. csvCell prefixes = + - @ TAB with ' and leaves safe values alone",

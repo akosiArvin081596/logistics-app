@@ -49,7 +49,7 @@ A non-developer can update every piece of wizard copy by editing `client/src/wiz
 
 ### 1.3 User Personas
 
-#### Persona A — First-time investor (Deshorn's target)
+#### Persona A — First-time investor (Desoren's target)
 - Never owned a truck before, considering LogisX as a passive income vehicle
 - Intimidated by legal documents and banking fields
 - Needs: plain-language explanations, reassurance, estimated time to complete
@@ -1028,12 +1028,12 @@ Adds to Full:
 
 ## 10. Open Questions
 
-These need answers from the CEO (Deshorn King) or product owner before Phase 1 begins:
+These need answers from the CEO (Desoren King) or product owner before Phase 1 begins:
 
 1. **Entry default** — should the wizard auto-open for first-time visitors, or is it strictly opt-in via the help button? (Assumption: auto-open, dismissible)
 2. **Tone** — how conversational should the copy be? "Hey there!" friendly or "Please enter your legal name" formal? (Assumption: warm but professional)
 3. **Branding** — use the same navy `#0f2847` as the page sidebar or a contrasting accent color? (Assumption: navy to match)
-4. **Content ownership** — who writes and maintains `knowledge-base.json` after launch? Developer, marketing, Deshorn? (Assumption: Deshorn or a copywriter, developers only for structural changes)
+4. **Content ownership** — who writes and maintains `knowledge-base.json` after launch? Developer, marketing, Desoren? (Assumption: Desoren or a copywriter, developers only for structural changes)
 5. **Analytics** — which events matter most for measuring wizard success? Completion rate, abandonment point, FAQ searches? (Assumption: all of the above, defined in Phase 3)
 6. **Persona priority** — which persona is most important to serve well for MVP? (Assumption: Persona A, first-time investor)
 7. **Legal review** — does the wizard copy for the three signed documents need legal review before ship? (Assumption: yes for the `SIGN_MODAL_EXPLAINER` node, no for generic field tooltips)

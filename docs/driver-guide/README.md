@@ -105,7 +105,7 @@ reads as a rate a driver can expect, whereas a blur plainly says "redacted".
 Everything the beat teaches — invoice number, week, status, load count, receipts
 filed — stays legible.
 
-2. **The account on screen is a real driver.** These were shot as `Shorn King`
+2. **The account on screen is a real driver.** These were shot as `Soren King`
    (`LogisX-3867`), the account with enough history — 112 expenses, 17 invoices —
    for the Invoices and Expenses tabs to look real. The pay column in
    `21-invoices.png` is blurred (see Redaction above); the driver's NAME is still

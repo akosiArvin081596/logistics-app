@@ -50,7 +50,7 @@ All figures below were taken with `better-sqlite3` opened `{ readonly: true }` a
 | Files resolving to a row by `file_name` | **6 / 6** |
 | Rows soft-deleted (`deleted_at`) | **0** |
 | Rows carrying a `drive_file_id` | **0** (all local-only, as designed) |
-| Dispatcher accounts | **2** (`amir_serrano`, `danna_gonzalez`) |
+| Dispatcher accounts | **2** (`abel_salcedo`, `della_gonzalez`) |
 | Rows in `load_status_history` | **302** |
 | …of which carry a Dispatcher as `actor` | **0** |
 | Rows in `sheet_job_tracking` (local sheet mirror) | **0** — vestigial |
@@ -119,8 +119,8 @@ column or, better, a new SQLite table keyed on `load_id` — the `deleted_loads`
   human — nobody has claimed the load. Every email-ingested load would carry a null dispatcher and
   fail closed. That is the majority path: 151 of 163 Job Details rows came from n8n.
 - **There is nothing to backfill from.** Across **302** `load_status_history` rows the `actor`
-  vocabulary is `Howard Reddie` (108), `Shorn King` (100), `super_admin` (77), `Rodney Brown` (15),
-  `Lesline Johnson` (1), `""` (1). **Neither Dispatcher account appears once.** Dispatch actions
+  vocabulary is `Hollis Renner` (108), `Soren King` (100), `super_admin` (77), `Roland Brown` (15),
+  `Leonora Johnson` (1), `""` (1). **Neither Dispatcher account appears once.** Dispatch actions
   are recorded under the shared `super_admin` login, which by design cannot identify a person. So
   the column would start empty for all ~413 existing loads and could only be populated going
   forward.

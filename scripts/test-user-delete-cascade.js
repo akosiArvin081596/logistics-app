@@ -167,16 +167,16 @@ function scratch() {
 
 // An onboarded driver: an account plus a row in each of the three FK children.
 function seedOnboardedDriver(db) {
-	db.prepare("INSERT INTO users (id, username, driver_name, full_name, role) VALUES (7,'sking','Shorn King','Shorn King','Driver')").run();
-	db.prepare("INSERT INTO driver_onboarding (user_id, application_id, driver_name) VALUES (7, 3, 'Shorn King')").run();
+	db.prepare("INSERT INTO users (id, username, driver_name, full_name, role) VALUES (7,'sking','Soren King','Soren King','Driver')").run();
+	db.prepare("INSERT INTO driver_onboarding (user_id, application_id, driver_name) VALUES (7, 3, 'Soren King')").run();
 	db.prepare("INSERT INTO onboarding_documents (user_id, doc_key, doc_name, signed, signed_pdf_url) VALUES (7,'w9','W-9 Tax Form',1,'/uploads/onboarding-signed/w9-7-signed.pdf')").run();
 	db.prepare("INSERT INTO onboarding_documents (user_id, doc_key, doc_name, signed, signed_pdf_url) VALUES (7,'contractor_agreement','Contractor Agreement',1,'/uploads/onboarding-signed/contractor_agreement-7-signed.pdf')").run();
 	db.prepare("INSERT INTO driver_payment_info (user_id, bank_routing, bank_account) VALUES (7,'000000000','000000000')").run();
-	db.prepare("INSERT INTO expenses (driver, amount, date) VALUES ('shorn king', 120.50, '2026-08-02')").run();
-	db.prepare("INSERT INTO trucks (id, unit_number, assigned_driver) VALUES (1,'LogisX-#33','Shorn King')").run();
-	db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (1,'Shorn King','2026-01-02','')").run();
-	db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (1,'Shorn King','2025-06-01','2026-01-01')").run();
-	return { id: 7, username: "sking", driver_name: "Shorn King", role: "Driver" };
+	db.prepare("INSERT INTO expenses (driver, amount, date) VALUES ('soren king', 120.50, '2026-08-02')").run();
+	db.prepare("INSERT INTO trucks (id, unit_number, assigned_driver) VALUES (1,'LogisX-#33','Soren King')").run();
+	db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (1,'Soren King','2026-01-02','')").run();
+	db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (1,'Soren King','2025-06-01','2026-01-01')").run();
+	return { id: 7, username: "sking", driver_name: "Soren King", role: "Driver" };
 }
 
 // ---------------------------------------------------------------------------
@@ -195,7 +195,7 @@ function seedOnboardedDriver(db) {
 
 	const db = scratch();
 	const user = seedOnboardedDriver(db);
-	const pre = runCascade(db, user, "shorn king", 7, preFix);
+	const pre = runCascade(db, user, "soren king", 7, preFix);
 	check("PRE-FIX: the delete raises FOREIGN KEY constraint failed",
 		/FOREIGN KEY constraint failed/i.test(pre.threw || ""), true);
 	check("PRE-FIX: the account survives (rolled back, undeletable)",
@@ -207,7 +207,7 @@ function seedOnboardedDriver(db) {
 {
 	const db = scratch();
 	const user = seedOnboardedDriver(db);
-	const { removed, detached, threw } = runCascade(db, user, "shorn king", 7);
+	const { removed, detached, threw } = runCascade(db, user, "soren king", 7);
 	check("FIXED: the cascade completes", threw, null);
 	check("FIXED: the account is gone", db.prepare("SELECT COUNT(*) AS c FROM users WHERE id = 7").get().c, 0);
 	check("FIXED: driver_onboarding removed", removed.driver_onboarding, 1);
@@ -234,17 +234,17 @@ function seedOnboardedDriver(db) {
 	// driver name, whose username differs only in spacing from a driver who has
 	// no login of their own, must leave that driver's truck assigned.
 	const seed = (db) => {
-		db.prepare("INSERT INTO users (id, username, driver_name, role) VALUES (9,'shorn  king','','Dispatcher')").run();
-		db.prepare("INSERT INTO trucks (id, unit_number, assigned_driver) VALUES (1,'LogisX-#33','Shorn King')").run();
-		db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (1,'Shorn King','2026-01-02','')").run();
-		return { id: 9, username: "shorn  king", driver_name: "", role: "Dispatcher" };
+		db.prepare("INSERT INTO users (id, username, driver_name, role) VALUES (9,'soren  king','','Dispatcher')").run();
+		db.prepare("INSERT INTO trucks (id, unit_number, assigned_driver) VALUES (1,'LogisX-#33','Soren King')").run();
+		db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (1,'Soren King','2026-01-02','')").run();
+		return { id: 9, username: "soren  king", driver_name: "", role: "Dispatcher" };
 	};
 	const db = scratch();
-	const { removed, detached, threw } = runCascade(db, seed(db), "shorn  king", 9);
+	const { removed, detached, threw } = runCascade(db, seed(db), "soren  king", 9);
 	check("USERNAME: the delete completes", threw, null);
 	check("USERNAME: no truck is released for an account without a driver name", removed.trucks_unassigned, 0);
 	check("USERNAME: the driver's truck keeps its driver",
-		db.prepare("SELECT assigned_driver FROM trucks WHERE id = 1").get().assigned_driver, "Shorn King");
+		db.prepare("SELECT assigned_driver FROM trucks WHERE id = 1").get().assigned_driver, "Soren King");
 	check("USERNAME: the driver's open assignment stays open", detached.truck_assignments_closed, 0);
 	db.close();
 
@@ -253,16 +253,16 @@ function seedOnboardedDriver(db) {
 	const guard = 'if (!String(user.driver_name || "").trim()) return null;';
 	check("USERNAME mutant: the guard line exists exactly once", CASCADE.split(guard).length - 1, 1);
 	const db2 = scratch();
-	const mutant = runCascade(db2, seed(db2), "shorn  king", 9, CASCADE.replace(guard, ""));
+	const mutant = runCascade(db2, seed(db2), "soren  king", 9, CASCADE.replace(guard, ""));
 	check("USERNAME mutant is caught: without the condition the other driver's truck is released", mutant.removed.trucks_unassigned, 1);
 	db2.close();
 
 	// CONTROL: an account WITH a driver name still releases its truck stored under
 	// another spacing (no other account holds the name).
 	const db3 = scratch();
-	db3.prepare("INSERT INTO users (id, username, driver_name, role) VALUES (7,'sking','Shorn  King','Driver')").run();
-	db3.prepare("INSERT INTO trucks (id, unit_number, assigned_driver) VALUES (1,'LogisX-#33','Shorn King')").run();
-	const ctl = runCascade(db3, { id: 7, username: "sking", driver_name: "Shorn  King", role: "Driver" }, "shorn  king", 7);
+	db3.prepare("INSERT INTO users (id, username, driver_name, role) VALUES (7,'sking','Soren  King','Driver')").run();
+	db3.prepare("INSERT INTO trucks (id, unit_number, assigned_driver) VALUES (1,'LogisX-#33','Soren King')").run();
+	const ctl = runCascade(db3, { id: 7, username: "sking", driver_name: "Soren  King", role: "Driver" }, "soren  king", 7);
 	check("DRIVER control: an account with a driver name still releases the truck under another spacing", ctl.removed.trucks_unassigned, 1);
 	db3.close();
 }
@@ -270,7 +270,7 @@ function seedOnboardedDriver(db) {
 	// The investor branch: the record survives, the dangling pointer does not.
 	const db = scratch();
 	db.prepare("INSERT INTO users (id, username, driver_name, role) VALUES (5,'johnny','','Investor')").run();
-	db.prepare("INSERT INTO investors (user_id, full_name, carrier_name) VALUES (5,'Johnny Rocks','Johnny Rocks Spirits LLC')").run();
+	db.prepare("INSERT INTO investors (user_id, full_name, carrier_name) VALUES (5,'Jasper Ridge','Jasper Ridge Spirits LLC')").run();
 	db.prepare("INSERT INTO investor_config (owner_id) VALUES (5)").run();
 	db.prepare("INSERT INTO trucks (id, unit_number, owner_id) VALUES (2,'LogisX-#302',5)").run();
 	const { removed, detached, threw } = runCascade(db, { id: 5, username: "johnny", role: "Investor" }, "johnny", 5);
@@ -280,15 +280,15 @@ function seedOnboardedDriver(db) {
 	check("investor: the investors RECORD survives", db.prepare("SELECT COUNT(*) AS c FROM investors").get().c, 1);
 	check("investor: its dangling user_id is NULLed, not left pointing at a dead id", detached.investors_unlinked, 1);
 	check("investor: user_id really is NULL", db.prepare("SELECT user_id FROM investors").get().user_id, null);
-	check("investor: the carrier name is intact", db.prepare("SELECT carrier_name FROM investors").get().carrier_name, "Johnny Rocks Spirits LLC");
+	check("investor: the carrier name is intact", db.prepare("SELECT carrier_name FROM investors").get().carrier_name, "Jasper Ridge Spirits LLC");
 	db.close();
 }
 {
 	// A user who was never onboarded must behave exactly as before — the three
 	// new DELETEs are no-ops, not a behaviour change.
 	const db = scratch();
-	db.prepare("INSERT INTO users (id, username, driver_name, role) VALUES (9,'amir','Amir Serrano','Dispatcher')").run();
-	const { removed, threw } = runCascade(db, { id: 9, username: "amir", driver_name: "Amir Serrano", role: "Dispatcher" }, "amir serrano", 9);
+	db.prepare("INSERT INTO users (id, username, driver_name, role) VALUES (9,'amir','Amir Salcedo','Dispatcher')").run();
+	const { removed, threw } = runCascade(db, { id: 9, username: "amir", driver_name: "Amir Salcedo", role: "Dispatcher" }, "amir salcedo", 9);
 	check("never-onboarded: cascade completes", threw, null);
 	check("never-onboarded: the three child deletes are no-ops",
 		[removed.onboarding_documents, removed.driver_onboarding, removed.driver_payment_info], [0, 0, 0]);
@@ -449,12 +449,12 @@ function seedOnboardedDriver(db) {
 	const inv = (db, o) => db.prepare(
 		"INSERT INTO invoices (invoice_number, driver, week_start, week_end, paid_at, deleted_at) VALUES (?,?,?,?,?,?)"
 	).run(o.n, o.driver, o.ws, o.we, o.paid || "", o.del || "");
-	const blockersFor = (db) => build(db).userDeleteLockBlockers({ id: 7 }, "shorn king").blockers.filter((b) => b.table === "invoices");
+	const blockersFor = (db) => build(db).userDeleteLockBlockers({ id: 7 }, "soren king").blockers.filter((b) => b.table === "invoices");
 
 	{
 		LOCKED = new Set(["2026-05"]);
 		const db = mkdb();
-		inv(db, { n: "INV-SK-2026W19-01", driver: "shorn king", ws: "2026-05-09", we: "2026-05-15" });
+		inv(db, { n: "INV-SK-2026W19-01", driver: "soren king", ws: "2026-05-09", we: "2026-05-15" });
 		const b = blockersFor(db);
 		check("invoices: a locked-month invoice blocks the delete", b.length, 1);
 		check("invoices: it names the finalized month", b[0].periods, ["2026-05"]);
@@ -463,7 +463,7 @@ function seedOnboardedDriver(db) {
 	{
 		LOCKED = new Set();
 		const db = mkdb();
-		inv(db, { n: "INV-SK-2026W31-01", driver: "shorn king", ws: "2026-08-01", we: "2026-08-07", paid: "2026-08-09" });
+		inv(db, { n: "INV-SK-2026W31-01", driver: "soren king", ws: "2026-08-01", we: "2026-08-07", paid: "2026-08-09" });
 		const b = blockersFor(db);
 		// ⚠️ A PAID invoice in an OPEN month has no locked period to name. Folding
 		// it into the finalized list would send an admin to reopen a month that is
@@ -477,14 +477,14 @@ function seedOnboardedDriver(db) {
 	{
 		LOCKED = new Set(["2026-05"]);
 		const db = mkdb();
-		inv(db, { n: "INV-SK-2026W19-01", driver: "Shorn King", ws: "2026-05-09", we: "2026-05-15" });
+		inv(db, { n: "INV-SK-2026W19-01", driver: "Soren King", ws: "2026-05-09", we: "2026-05-15" });
 		check("invoices: the probe folds case, matching the cascade's LOWER(driver)", blockersFor(db).length, 1);
 		db.close();
 	}
 	{
 		LOCKED = new Set(["2026-05"]);
 		const db = mkdb();
-		inv(db, { n: "INV-SK-2026W19-01", driver: "shorn king", ws: "2026-05-09", we: "2026-05-15", del: "2026-06-01" });
+		inv(db, { n: "INV-SK-2026W19-01", driver: "soren king", ws: "2026-05-09", we: "2026-05-15", del: "2026-06-01" });
 		check("invoices: a SOFT-DELETED invoice does not block — it is already out of every list",
 			blockersFor(db).length, 0);
 		db.close();
@@ -492,7 +492,7 @@ function seedOnboardedDriver(db) {
 	{
 		LOCKED = new Set(["2026-05"]);
 		const db = mkdb();
-		inv(db, { n: "INV-HR-2026W19-01", driver: "howard reddie", ws: "2026-05-09", we: "2026-05-15" });
+		inv(db, { n: "INV-HR-2026W19-01", driver: "hollis renner", ws: "2026-05-09", we: "2026-05-15" });
 		check("invoices: another driver's locked invoice does not block this delete",
 			blockersFor(db).length, 0);
 		db.close();
@@ -500,14 +500,14 @@ function seedOnboardedDriver(db) {
 	{
 		LOCKED = new Set();
 		const db = mkdb();
-		inv(db, { n: "INV-SK-2026W31-01", driver: "shorn king", ws: "2026-08-01", we: "2026-08-07" });
+		inv(db, { n: "INV-SK-2026W31-01", driver: "soren king", ws: "2026-08-01", we: "2026-08-07" });
 		check("invoices: a live invoice in an OPEN month does not block", blockersFor(db).length, 0);
 		db.close();
 	}
 	{
 		LOCKED = new Set();
 		const db = mkdb();
-		inv(db, { n: "INV-SK-BAD", driver: "shorn king", ws: "not-a-date", we: "" });
+		inv(db, { n: "INV-SK-BAD", driver: "soren king", ws: "not-a-date", we: "" });
 		const b = blockersFor(db);
 		check("invoices: an unresolvable billing week blocks (fails closed)", b.length, 1);
 		check("invoices: and is labelled unresolvable, not finalized",
@@ -528,13 +528,13 @@ function seedOnboardedDriver(db) {
 	{
 		LOCKED = new Set(["2026-05"]);
 		const db = mkdb();
-		inv(db, { n: "INV-SK-2026W19-01", driver: "shorn king", ws: "2026-05-09", we: "2026-05-15", paid: "2026-05-20" });
+		inv(db, { n: "INV-SK-2026W19-01", driver: "soren king", ws: "2026-05-09", we: "2026-05-15", paid: "2026-05-20" });
 		const M = new Function(
 			"db", "isLocked", "periodLocksReadable", "expenseRowPeriodLocked", "blockedExpensePeriods", "truckFixedCostLockedMonths",
 			`${extract("invoiceRowPeriodLocked")}\n${extract("namedLockedPeriods")}\n${RENAME_LEG_SRC}\n${noInvoiceLeg}\nreturn { userDeleteLockBlockers };`
 		)(db, (p) => LOCKED.has(p), () => true, () => false, () => [], () => []);
 		check("mutant rejected — pre-fix guard lets a PAID locked-month invoice through",
-			M.userDeleteLockBlockers({ id: 7 }, "shorn king").blockers.length, 0);
+			M.userDeleteLockBlockers({ id: 7 }, "soren king").blockers.length, 0);
 		db.close();
 	}
 }
@@ -627,7 +627,7 @@ check("refusal extraction picked up the 409 and its code selection", [
 		const res = { status: (s) => { status = s; return { json: (b) => { captured = b; return b; } }; } };
 		new Function("lock", "user", "id", "res", "periodLabel", "req", "userDelAudit", "recordPeriodRefusal",
 			`${extract("periodLabel")}\n${src || REFUSAL}`
-		)(lock, { driver_name: "shorn king", username: "sking" }, 7, res, null,
+		)(lock, { driver_name: "soren king", username: "sking" }, 7, res, null,
 			{ session: { user: { id: 1, username: "super_admin" } } },
 			{ action: "delete_user_blocked", entity: "user", entityId: "7" },
 			(a, code, periods) => audited.push({ a, code, periods }));
@@ -649,7 +649,7 @@ check("refusal extraction picked up the 409 and its code selection", [
 	const inv = (db, o) => db.prepare(
 		"INSERT INTO invoices (invoice_number, driver, week_start, week_end, paid_at, deleted_at) VALUES (?,?,?,?,?,?)"
 	).run(o.n, o.driver, o.ws, o.we, o.paid || "", o.del || "");
-	const lockFor = (db, src) => guardFor(db, src).userDeleteLockBlockers({ id: 7 }, "shorn king");
+	const lockFor = (db, src) => guardFor(db, src).userDeleteLockBlockers({ id: 7 }, "soren king");
 
 	// A month is `YYYY-MM`. Anything else in `periods` is fabricated, whatever it
 	// says — this is the invariant both defects broke.
@@ -659,7 +659,7 @@ check("refusal extraction picked up the 409 and its code selection", [
 	{
 		LOCKED = new Set();
 		const db = mkdb();
-		inv(db, { n: "INV-SK-2026W31-01", driver: "shorn king", ws: "2026-08-01", we: "2026-08-07", paid: "2026-08-09" });
+		inv(db, { n: "INV-SK-2026W31-01", driver: "soren king", ws: "2026-08-01", we: "2026-08-07", paid: "2026-08-09" });
 		const body = refuse(lockFor(db));
 		check("409/paid-only: the code names the real reason, not a period",
 			body.code, "INVOICE_ALREADY_PAID");
@@ -688,7 +688,7 @@ check("refusal extraction picked up the 409 and its code selection", [
 	{
 		LOCKED = new Set();
 		const db = mkdb();
-		inv(db, { n: "INV-SK-BAD", driver: "shorn king", ws: "not-a-date", we: "" });
+		inv(db, { n: "INV-SK-BAD", driver: "soren king", ws: "not-a-date", we: "" });
 		const body = refuse(lockFor(db));
 		check("409/unresolvable: the sentinel never reaches `periods`",
 			body.periods.filter((p) => !MONTHISH.test(p)), []);
@@ -706,7 +706,7 @@ check("refusal extraction picked up the 409 and its code selection", [
 	{
 		LOCKED = new Set(["2026-05"]);
 		const db = mkdb();
-		inv(db, { n: "INV-SK-2026W19-01", driver: "shorn king", ws: "2026-05-09", we: "2026-05-15" });
+		inv(db, { n: "INV-SK-2026W19-01", driver: "soren king", ws: "2026-05-09", we: "2026-05-15" });
 		const body = refuse(lockFor(db));
 		check("409/locked: unchanged — still PERIOD_FINALIZED", body.code, "PERIOD_FINALIZED");
 		check("409/locked: names the finalized month", body.periods, ["2026-05"]);
@@ -721,8 +721,8 @@ check("refusal extraction picked up the 409 and its code selection", [
 	{
 		LOCKED = new Set(["2026-05"]);
 		const db = mkdb();
-		inv(db, { n: "INV-SK-2026W19-01", driver: "shorn king", ws: "2026-05-09", we: "2026-05-15" });
-		inv(db, { n: "INV-SK-2026W31-01", driver: "shorn king", ws: "2026-08-01", we: "2026-08-07", paid: "2026-08-09" });
+		inv(db, { n: "INV-SK-2026W19-01", driver: "soren king", ws: "2026-05-09", we: "2026-05-15" });
+		inv(db, { n: "INV-SK-2026W31-01", driver: "soren king", ws: "2026-08-01", we: "2026-08-07", paid: "2026-08-09" });
 		const lock = lockFor(db);
 		const body = refuse(lock);
 		check("409/both: PERIOD_FINALIZED wins the code", body.code, "PERIOD_FINALIZED");
@@ -761,7 +761,7 @@ check("refusal extraction picked up the 409 and its code selection", [
 			m1.includes("asUnknown(namedLockedPeriods("), false);
 		LOCKED = new Set();
 		const db = mkdb();
-		inv(db, { n: "INV-SK-BAD", driver: "shorn king", ws: "not-a-date", we: "" });
+		inv(db, { n: "INV-SK-BAD", driver: "soren king", ws: "not-a-date", we: "" });
 		const body = refuse(lockFor(db, m1));
 		check("M1 rejected — the un-normalised sentinel is printed as a month",
 			body.periods, ["(unrecognized date)"]);
@@ -775,7 +775,7 @@ check("refusal extraction picked up the 409 and its code selection", [
 		check("mutant M2 restored the hardcoded response code", m2 !== REFUSAL, true);
 		LOCKED = new Set();
 		const db = mkdb();
-		inv(db, { n: "INV-SK-2026W31-01", driver: "shorn king", ws: "2026-08-01", we: "2026-08-07", paid: "2026-08-09" });
+		inv(db, { n: "INV-SK-2026W31-01", driver: "soren king", ws: "2026-08-01", we: "2026-08-07", paid: "2026-08-09" });
 		const body = refuse(lockFor(db), m2);
 		check("M2 rejected — a paid invoice is reported as a period problem",
 			body.code, "PERIOD_FINALIZED");
@@ -805,16 +805,16 @@ check("refusal extraction picked up the 409 and its code selection", [
 			for (const u of rows) db.prepare("INSERT INTO users (id, username, driver_name, role) VALUES (?,?,?,?)").run(u.id, u.username, u.driver_name, u.role);
 			return db;
 		};
-		const SKING = { id: 7, username: "sking", driver_name: "Shorn King", role: "Driver" };
+		const SKING = { id: 7, username: "sking", driver_name: "Soren King", role: "Driver" };
 		const PAID = { n: "INV-SK-2026W31-01", ws: "2026-08-01", we: "2026-08-07", paid: "2026-08-09" };
 		const codes = (lock) => lock.blockers.map((b) => b.code);
 
-		// "Shorn King", with a PAID invoice stored as "shorn  king".
+		// "Soren King", with a PAID invoice stored as "soren  king".
 		{
 			LOCKED = new Set();
 			const db = accounts(mkdb(), SKING);
-			inv(db, { ...PAID, driver: "shorn  king" });
-			const lock = guardFor(db).userDeleteLockBlockers(SKING, "shorn king");
+			inv(db, { ...PAID, driver: "soren  king" });
+			const lock = guardFor(db).userDeleteLockBlockers(SKING, "soren king");
 			check("spellings: a PAID invoice under another spacing of the driver's name blocks the delete",
 				codes(lock), ["INVOICE_ALREADY_PAID"]);
 			check("spellings: ...counting that one row", lock.blockers.map((b) => b.rows), [1]);
@@ -822,16 +822,16 @@ check("refusal extraction picked up the 409 and its code selection", [
 			check("spellings: ...answered 409", status, 409);
 			check("spellings: ...with INVOICE_ALREADY_PAID", body && body.code, "INVOICE_ALREADY_PAID");
 			check("mutant W caught: with the widening removed that row is not judged",
-				guardFor(db, W).userDeleteLockBlockers(SKING, "shorn king").blockers, []);
+				guardFor(db, W).userDeleteLockBlockers(SKING, "soren king").blockers, []);
 			db.close();
 		}
 		// The stored spelling itself still blocks.
 		{
 			LOCKED = new Set();
 			const db = accounts(mkdb(), SKING);
-			inv(db, { ...PAID, driver: "shorn king" });
+			inv(db, { ...PAID, driver: "soren king" });
 			check("spellings: a PAID invoice under the exact spelling still blocks",
-				codes(guardFor(db).userDeleteLockBlockers(SKING, "shorn king")), ["INVOICE_ALREADY_PAID"]);
+				codes(guardFor(db).userDeleteLockBlockers(SKING, "soren king")), ["INVOICE_ALREADY_PAID"]);
 			db.close();
 		}
 		// A username is not a driver identity: an account with no driver name,
@@ -840,26 +840,26 @@ check("refusal extraction picked up the 409 and its code selection", [
 		// between this delete and the driver's invoice.
 		{
 			LOCKED = new Set();
-			const DISPATCHER = { id: 9, username: "shorn  king", driver_name: "", role: "Dispatcher" };
+			const DISPATCHER = { id: 9, username: "soren  king", driver_name: "", role: "Dispatcher" };
 			const db = accounts(mkdb(), DISPATCHER);
-			inv(db, { ...PAID, driver: "shorn king" });
-			const lock = guardFor(db).userDeleteLockBlockers(DISPATCHER, "shorn  king");
+			inv(db, { ...PAID, driver: "soren king" });
+			const lock = guardFor(db).userDeleteLockBlockers(DISPATCHER, "soren  king");
 			check("spellings: a username-only account is unaffected", lock.blockers, []);
 			check("spellings: ...the exact match's answer",
-				lock.blockers, guardFor(db, W).userDeleteLockBlockers(DISPATCHER, "shorn  king").blockers);
+				lock.blockers, guardFor(db, W).userDeleteLockBlockers(DISPATCHER, "soren  king").blockers);
 			db.close();
 		}
 		// Another account holds the name under that spelling, so the invoice is
 		// that account's, and this delete keeps today's answer.
 		{
 			LOCKED = new Set();
-			const LEGACY = { id: 8, username: "legacy", driver_name: "Shorn  King", role: "Driver" };
+			const LEGACY = { id: 8, username: "legacy", driver_name: "Soren  King", role: "Driver" };
 			const db = accounts(mkdb(), SKING, LEGACY);
-			inv(db, { ...PAID, driver: "shorn  king" });
-			const lock = guardFor(db).userDeleteLockBlockers(SKING, "shorn king");
+			inv(db, { ...PAID, driver: "soren  king" });
+			const lock = guardFor(db).userDeleteLockBlockers(SKING, "soren king");
 			check("spellings: another account holding that spelling keeps today's answer", lock.blockers, []);
 			check("spellings: ...the exact match's answer",
-				lock.blockers, guardFor(db, W).userDeleteLockBlockers(SKING, "shorn king").blockers);
+				lock.blockers, guardFor(db, W).userDeleteLockBlockers(SKING, "soren king").blockers);
 			db.close();
 		}
 	}

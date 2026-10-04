@@ -100,11 +100,11 @@ The user record has two link fields:
 
 **`driver_name`** for Driver users. This is the name LogisX uses to match the user account to their dispatch identity on Job Tracking loads. The match is case-insensitive. Examples:
 
-- User account `LogisX-4778` with `driver_name = "Lesline Johnson"` → sees all loads assigned to "Lesline Johnson" (or "LESLINE JOHNSON" or any case variant).
+- User account `LogisX-4778` with `driver_name = "Leonora Johnson"` → sees all loads assigned to "Leonora Johnson" (or "LEONORA JOHNSON" or any case variant).
 
 **`company_name`** for Investor users. Links to the Carrier Database carrier names. Examples:
 
-- Investor user `johnny.rocks.spirits.llc` with `company_name = "Johnny Rocks Spirits LLC"` → sees revenue and trucks where the carrier matches that name.
+- Investor user `jasper.ridge.spirits.llc` with `company_name = "Jasper Ridge Spirits LLC"` → sees revenue and trucks where the carrier matches that name.
 
 Mismatches between these link fields and the actual data cause dashboard issues (drivers see no loads; investors see no earnings). When troubleshooting, check the link first.
 
@@ -153,7 +153,7 @@ Why it went: it held the role literally "Super Admin", its password was publishe
 the public repo, and the only protection was a check on the HTTP method. That meant
 every Super-Admin page in the app was readable by anyone who found the account,
 including the full database download. Nothing automated used it (the screenshot
-scripts sign in as `super_admin`, `dispatch1`, `lesline` and `kevin`), and it had no
+scripts sign in as `super_admin`, `dispatch1`, `leonora` and `kevin`), and it had no
 recorded activity in nine months.
 
 If you want a demo account again, ask for one to be built properly: its own

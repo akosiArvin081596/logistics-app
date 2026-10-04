@@ -151,7 +151,7 @@ function call(route, verb, user, query = {}) {
 const USERS = {
 	"Super Admin": { id: 1, role: "Super Admin", username: "super_admin" },
 	Dispatcher: { id: 2, role: "Dispatcher", username: "dispatch1" },
-	Driver: { id: 3, role: "Driver", username: "LogisX-1001", driverName: "Deshorn King" },
+	Driver: { id: 3, role: "Driver", username: "LogisX-1001", driverName: "Desoren King" },
 	Investor: { id: 4, role: "Investor", username: "investor1" },
 };
 

@@ -1,6 +1,6 @@
 <template>
   <!-- Floating fuel + route-tools card, shown when a single driver is focused.
-       Holds three things Deshorn asked for:
+       Holds three things Desoren asked for:
         #3  a "miles left in tank" range readout (hidden when the truck has no
             fuel sensor / no data),
         #2  a toggle that plots diesel truck stops on the map (parent renders

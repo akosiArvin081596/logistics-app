@@ -44,12 +44,12 @@ const PASSWORD = "Password123!";
 // has, rather than hardcoding usernames — this DB is a production capture and the
 // cast differs between machines.
 const WANTED = [
-	{ role: "Super Admin", env: "TEST_ADMIN_USER", prefer: ["super_admin", "ford_seeman"] },
-	// johnny.rocks.spirits.llc is the data-rich investor: paid / finalized-unpaid /
+	{ role: "Super Admin", env: "TEST_ADMIN_USER", prefer: ["super_admin", "finn_sexton"] },
+	// jasper.ridge.spirits.llc is the data-rich investor: paid / finalized-unpaid /
 	// settled / pending payout rows, which between them cover most of the
 	// data-shape skips (tests 55-62, 105-106, 113-117).
-	{ role: "Investor", env: "TEST_INVESTOR_USER", prefer: ["johnny.rocks.spirits.llc"] },
-	{ role: "Dispatcher", env: "TEST_DISPATCHER_USER", prefer: ["amir_serrano"] },
+	{ role: "Investor", env: "TEST_INVESTOR_USER", prefer: ["jasper.ridge.spirits.llc"] },
+	{ role: "Dispatcher", env: "TEST_DISPATCHER_USER", prefer: ["abel_salcedo"] },
 ];
 
 const args = process.argv.slice(2);

@@ -8,7 +8,7 @@
 //
 // THE BUG. Its collation was BINARY while every reader folds case
 // (`driverOwnsInvoice()`, `LOWER(driver) = ?`). Readers merge the spellings; the
-// constraint permitted them — so `"Shorn King"` and `"shorn king"` were two
+// constraint permitted them — so `"Soren King"` and `"soren king"` were two
 // index entries and a SECOND live weekly invoice for one driver-week was
 // structurally insertable. Production carries exactly one mixed-case row
 // (invoice #40, PAID, in two locked periods) beside 13 lowercase ones.
@@ -163,25 +163,25 @@ function insertRefused(db, driver, week, opts = {}) {
 // THE BEHAVIOUR — case-variant double billing is refused after, permitted before.
 // ---------------------------------------------------------------------------
 {
-	const rows = [{ driver: "shorn king", week_start: "2026-05-09" }];
+	const rows = [{ driver: "soren king", week_start: "2026-05-09" }];
 	const pre = scratch({ index: "partial-binary", rows });
 	check("BEFORE: a case-variant second live invoice is INSERTABLE (the bug)",
-		insertRefused(pre, "Shorn King", "2026-05-09"), false);
+		insertRefused(pre, "Soren King", "2026-05-09"), false);
 	pre.close();
 
 	const post = scratch({ index: "partial-binary", rows });
 	runMigration(post);
 	check("AFTER: a case-variant second live invoice is REFUSED",
-		insertRefused(post, "Shorn King", "2026-05-09"), true);
+		insertRefused(post, "Soren King", "2026-05-09"), true);
 	check("AFTER: an exact-duplicate second live invoice is REFUSED",
-		insertRefused(post, "shorn king", "2026-05-09"), true);
+		insertRefused(post, "soren king", "2026-05-09"), true);
 	// The partial predicate must survive: these are legal rows, not duplicates.
 	check("AFTER: a SOFT-DELETED row for the same driver-week is still allowed",
-		insertRefused(post, "SHORN KING", "2026-05-09", { deleted_at: "2026-06-01" }), false);
+		insertRefused(post, "SOREN KING", "2026-05-09", { deleted_at: "2026-06-01" }), false);
 	check("AFTER: a MANUAL invoice for the same payee-week is still allowed",
-		insertRefused(post, "Shorn King", "2026-05-09", { is_manual: 1 }), false);
+		insertRefused(post, "Soren King", "2026-05-09", { is_manual: 1 }), false);
 	check("AFTER: a different week is still allowed",
-		insertRefused(post, "Shorn King", "2026-05-16"), false);
+		insertRefused(post, "Soren King", "2026-05-16"), false);
 	post.close();
 }
 
@@ -190,8 +190,8 @@ function insertRefused(db, driver, week, opts = {}) {
 // ---------------------------------------------------------------------------
 {
 	const db = scratch({ index: "partial-binary", rows: [
-		{ invoice_number: "INV-SK-2026W19-01", driver: "Shorn King", week_start: "2026-05-09" },
-		{ invoice_number: "INV-SK-2026W19-02", driver: "shorn king", week_start: "2026-05-09" },
+		{ invoice_number: "INV-SK-2026W19-01", driver: "Soren King", week_start: "2026-05-09" },
+		{ invoice_number: "INV-SK-2026W19-02", driver: "soren king", week_start: "2026-05-09" },
 	]});
 	const before = indexSql(db, "idx_invoices_driver_week");
 	const { logs, threw } = runMigration(db);
@@ -201,12 +201,12 @@ function insertRefused(db, driver, week, opts = {}) {
 	check("(a) collision: the OLD index is byte-identical afterwards", after, before);
 	check("(a) collision: no temp index is left behind", indexNames(db), ["idx_invoices_driver_week"]);
 	check("(a) collision: the table is still protected against exact duplicates",
-		insertRefused(db, "Shorn King", "2026-05-09"), true);
+		insertRefused(db, "Soren King", "2026-05-09"), true);
 
 	const errs = logs.filter(([lvl]) => lvl === "error").map(([, m]) => m);
 	check("(a) collision: exactly one error is logged", errs.length, 1);
 	check("(a) collision: it says SKIPPED", /SKIPPED/.test(errs[0] || ""), true);
-	check("(a) collision: it names the driver", /shorn king/i.test(errs[0] || ""), true);
+	check("(a) collision: it names the driver", /soren king/i.test(errs[0] || ""), true);
 	check("(a) collision: it names the week", /2026-05-09/.test(errs[0] || ""), true);
 	check("(a) collision: it says the existing index is intact", /intact/i.test(errs[0] || ""), true);
 	check("(a) collision: it refuses to auto-resolve", /business decision|Do NOT resolve/i.test(errs[0] || ""), true);
@@ -218,10 +218,10 @@ function insertRefused(db, driver, week, opts = {}) {
 // soft-deleted history — the commonest state there is.
 {
 	const db = scratch({ index: "partial-binary", rows: [
-		{ driver: "Shorn King", week_start: "2026-05-09", deleted_at: "2026-06-01" },
-		{ driver: "shorn king", week_start: "2026-05-09" },
-		{ driver: "HOWARD REDDIE", week_start: "2026-05-09", is_manual: 1 },
-		{ driver: "howard reddie", week_start: "2026-05-09" },
+		{ driver: "Soren King", week_start: "2026-05-09", deleted_at: "2026-06-01" },
+		{ driver: "soren king", week_start: "2026-05-09" },
+		{ driver: "HOLLIS RENNER", week_start: "2026-05-09", is_manual: 1 },
+		{ driver: "hollis renner", week_start: "2026-05-09" },
 	]});
 	runMigration(db);
 	check("(a) scope: a soft-deleted / manual duplicate does NOT block the upgrade",
@@ -243,7 +243,7 @@ function insertRefused(db, driver, week, opts = {}) {
 	check("(b) the crash mutant patched the real statement",
 		crashAfterDrop !== MIGRATION_SRC, true);
 
-	const db = scratch({ index: "partial-binary", rows: [{ driver: "shorn king", week_start: "2026-05-09" }] });
+	const db = scratch({ index: "partial-binary", rows: [{ driver: "soren king", week_start: "2026-05-09" }] });
 	const { threw } = runMigration(db, crashAfterDrop);
 	check("(b) the simulated crash is caught, boot continues", threw, null);
 	check("(b) the canonical index is gone (that is the crash)", indexSql(db, "idx_invoices_driver_week"), null);
@@ -251,7 +251,7 @@ function insertRefused(db, driver, week, opts = {}) {
 		/NOCASE/i.test(indexSql(db, "idx_invoices_driver_week_migrating") || ""), true);
 	// The whole point: even mid-crash, double billing is impossible.
 	check("(b) a duplicate is STILL refused with the canonical index missing",
-		insertRefused(db, "Shorn King", "2026-05-09"), true);
+		insertRefused(db, "Soren King", "2026-05-09"), true);
 
 	// And a later boot completes the job rather than compounding it.
 	runMigration(db);
@@ -294,7 +294,7 @@ function insertRefused(db, driver, week, opts = {}) {
 // ---------------------------------------------------------------------------
 const ORPHAN_COLS = `invoices(driver COLLATE NOCASE, week_start) WHERE deleted_at = '' AND is_manual = 0`;
 function orphanState() {
-	const db = scratch({ index: "none", rows: [{ driver: "shorn king", week_start: "2026-05-09" }] });
+	const db = scratch({ index: "none", rows: [{ driver: "soren king", week_start: "2026-05-09" }] });
 	// The exact end state of a run that did everything except its final DROP.
 	db.exec(`CREATE UNIQUE INDEX idx_invoices_driver_week ON ${ORPHAN_COLS}`);
 	db.exec(`CREATE UNIQUE INDEX idx_invoices_driver_week_migrating ON ${ORPHAN_COLS}`);
@@ -313,7 +313,7 @@ function orphanState() {
 		/NOCASE/i.test(indexSql(db, "idx_invoices_driver_week") || ""), true);
 	// The sweep must not weaken anything on its way past.
 	check("(d) the constraint still holds afterwards",
-		insertRefused(db, "Shorn King", "2026-05-09"), true);
+		insertRefused(db, "Soren King", "2026-05-09"), true);
 	check("(d) it is silent — a cleanup is not a migration", logs.length, 0);
 
 	const second = runMigration(db);
@@ -384,9 +384,9 @@ mutantRejected("M2 DROP before CREATE with no temp index (unprotected window)",
 		.replace(/if \(!invoiceWeekIndexIsCurrent\(INVOICE_WEEK_IDX_TMP\)\) \{[\s\S]*?\n\t\t\t\}/, "")
 		.replace(/db\.exec\(`CREATE UNIQUE INDEX \$\{INVOICE_WEEK_IDX\} ON \$\{INVOICE_WEEK_IDX_COLS\}`\);/, 'throw new Error("simulated crash between DROP and CREATE");'),
 	src => {
-		const db = scratch({ index: "partial-binary", rows: [{ driver: "shorn king", week_start: "2026-05-09" }] });
+		const db = scratch({ index: "partial-binary", rows: [{ driver: "soren king", week_start: "2026-05-09" }] });
 		runMigration(db, src);
-		const unprotected = !insertRefused(db, "shorn king", "2026-05-09");
+		const unprotected = !insertRefused(db, "soren king", "2026-05-09");
 		db.close();
 		return unprotected;   // rejected because an EXACT duplicate now inserts
 	});
@@ -397,8 +397,8 @@ mutantRejected("M3 pre-flight not scoped to the index predicate (false abort)",
 	s => s.replace(/WHERE deleted_at = '' AND is_manual = 0\n\t\t\tGROUP BY/, "GROUP BY"),
 	src => {
 		const db = scratch({ index: "partial-binary", rows: [
-			{ driver: "Shorn King", week_start: "2026-05-09", deleted_at: "2026-06-01" },
-			{ driver: "shorn king", week_start: "2026-05-09" },
+			{ driver: "Soren King", week_start: "2026-05-09", deleted_at: "2026-06-01" },
+			{ driver: "soren king", week_start: "2026-05-09" },
 		]});
 		runMigration(db, src);
 		const refused = !/NOCASE/i.test(indexSql(db, "idx_invoices_driver_week") || "");
@@ -415,8 +415,8 @@ mutantRejected("M4 collision path drops the old index anyway",
 	),
 	src => {
 		const db = scratch({ index: "partial-binary", rows: [
-			{ driver: "Shorn King", week_start: "2026-05-09" },
-			{ driver: "shorn king", week_start: "2026-05-09" },
+			{ driver: "Soren King", week_start: "2026-05-09" },
+			{ driver: "soren king", week_start: "2026-05-09" },
 		]});
 		runMigration(db, src);
 		const lost = indexSql(db, "idx_invoices_driver_week") === null;

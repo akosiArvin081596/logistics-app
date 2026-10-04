@@ -32,6 +32,6 @@ from a spreadsheet. It's your truck and your receipts.
 
 --- PRODUCTION NOTE ---
 
-⚠️ RESHOT after Deshorn's correction — the first version showed "this truck's
+⚠️ RESHOT after Desoren's correction — the first version showed "this truck's
 ELD isn't reporting a fuel level", an empty state. This is real: a live level
 against a configured tank, with MPG measured from that driver's own fill-ups.

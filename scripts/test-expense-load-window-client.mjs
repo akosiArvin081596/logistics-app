@@ -148,7 +148,7 @@ const brief = (w) => [w.eligible, w.state]
 
 // ══ 5 — the form's Load picker offers exactly what the server accepts ════════
 const HEADERS = ['Load ID', 'Job Status', 'Driver']
-const load = (id, status, win) => ({ 'Load ID': id, 'Job Status': status, Driver: 'Deshorn King', ...(win === undefined ? {} : { _expenseWindow: win }) })
+const load = (id, status, win) => ({ 'Load ID': id, 'Job Status': status, Driver: 'Desoren King', ...(win === undefined ? {} : { _expenseWindow: win }) })
 {
   const loads = [
     load('A-ACTIVE', 'In Transit', verdictAt('In Transit', null, T)),
@@ -219,7 +219,7 @@ async function compileSetup(rel, { source, stubs = {}, hooks = {} } = {}) {
   const REL = 'client/src/components/driver/LoadDetail.vue'
   const mountDetail = await compileSetup(REL)
   const props = (l) => Vue.shallowReactive({
-    load: l, headers: HEADERS, driverName: 'Deshorn King', hasActiveJob: false, driverPosition: null, truck: null,
+    load: l, headers: HEADERS, driverName: 'Desoren King', hasActiveJob: false, driverPosition: null, truck: null,
     loadExpenses: [], responding: false, expenseSubmitHandler: null, phoneGpsModeActive: false, phoneGpsStatus: '',
   })
   const shown = (b) => b.showExpenseForm.value
@@ -325,7 +325,7 @@ async function compileSetup(rel, { source, stubs = {}, hooks = {} } = {}) {
     'lib/imageUtils': { compressImage: async () => '', isDecodedImage: () => false },
   }
   const formProps = (loads, presetLoadId) => Vue.shallowReactive({
-    loads, driverName: 'Deshorn King', headers: HEADERS, presetLoadId, submitHandler: async () => ({}),
+    loads, driverName: 'Desoren King', headers: HEADERS, presetLoadId, submitHandler: async () => ({}),
   })
   const delivered = load('564157463', 'Delivered', verdictAt('Delivered', Date.now() - 2 * DAY, Date.now()))
 
@@ -413,7 +413,7 @@ async function compileSetup(rel, { source, stubs = {}, hooks = {} } = {}) {
   const LoadDetail = new Function('__deps', body)(deps)
   // Just the Expenses section, comments stripped.
   async function expensesHtml(l, loadExpenses = []) {
-    const html = await renderToString(Vue.createSSRApp(LoadDetail, { load: l, headers: HEADERS, driverName: 'Deshorn King', loadExpenses }))
+    const html = await renderToString(Vue.createSSRApp(LoadDetail, { load: l, headers: HEADERS, driverName: 'Desoren King', loadExpenses }))
     const from = html.indexOf('class="expenses-section"')
     const to = html.indexOf('data-stub="ZoomableImage"')
     return from < 0 || to < from ? '' : html.slice(from, to).replace(/<!--[\s\S]*?-->/g, '')
@@ -458,7 +458,7 @@ async function compileSetup(rel, { source, stubs = {}, hooks = {} } = {}) {
   const listeners = {}
   const live = () => timers.filter((t) => !t.cleared)
   const detailProps = (l) => Vue.shallowReactive({
-    load: l, headers: HEADERS, driverName: 'Deshorn King', hasActiveJob: false, driverPosition: null, truck: null,
+    load: l, headers: HEADERS, driverName: 'Desoren King', hasActiveJob: false, driverPosition: null, truck: null,
     loadExpenses: [], responding: false, expenseSubmitHandler: null, phoneGpsModeActive: false, phoneGpsStatus: '',
   })
   // Delivered so that its window closes 30 s after "now".

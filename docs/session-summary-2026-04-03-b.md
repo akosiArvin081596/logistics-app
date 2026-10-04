@@ -192,21 +192,21 @@ Updated investor API to include all expense sources in totalExpenses:
 |----|----------|----------|------|-----------|---------|
 | 1 | super_admin | *(set during setup)* | Super Admin | — | — |
 | 2 | kevin | investor123 | Investor | Kevin Canunayon | KC Trucking LLC |
-| 3 | deshorn | investor123 | Investor | Deshorn King | ABC Inc |
-| 4 | lesline | driver123 | Driver | Lesline Johnson | — |
-| 5 | kenrick | driver123 | Driver | Kenrick Davis | — |
-| 6 | andrew | driver123 | Driver | Andrew Raczkowski | — |
-| 7 | marcus | driver123 | Driver | Marcus Williams | — |
+| 3 | desoren | investor123 | Investor | Desoren King | ABC Inc |
+| 4 | leonora | driver123 | Driver | Leonora Johnson | — |
+| 5 | kendall | driver123 | Driver | Kendall Davis | — |
+| 6 | andrew | driver123 | Driver | Andrew Rutherford | — |
+| 7 | marcus | driver123 | Driver | Milton Williams | — |
 | 8 | dispatch1 | dispatcher123 | Dispatcher | Azure Estelle | — |
 
 **Trucks:**
 
 | Truck | Make/Model | Year | Driver | Owner | Purchase Price |
 |-------|-----------|------|--------|-------|---------------|
-| TRK-101 | Freightliner Cascadia | 2022 | Lesline Johnson | Kevin (KC Trucking) | $58,000 |
-| TRK-102 | Kenworth T680 | 2023 | Kenrick Davis | Kevin (KC Trucking) | $65,000 |
-| TRK-201 | Peterbilt 579 | 2021 | Andrew Raczkowski | Deshorn (ABC Inc) | $52,000 |
-| TRK-202 | Volvo VNL 760 | 2024 | Marcus Williams | Deshorn (ABC Inc) | $72,000 |
+| TRK-101 | Freightliner Cascadia | 2022 | Leonora Johnson | Kevin (KC Trucking) | $58,000 |
+| TRK-102 | Kenworth T680 | 2023 | Kendall Davis | Kevin (KC Trucking) | $65,000 |
+| TRK-201 | Peterbilt 579 | 2021 | Andrew Rutherford | Desoren (ABC Inc) | $52,000 |
+| TRK-202 | Volvo VNL 760 | 2024 | Milton Williams | Desoren (ABC Inc) | $72,000 |
 
 ---
 
@@ -286,7 +286,7 @@ New `syncDriverToCarrierSheet()` helper function in server.js with three actions
 
 **After:**
 - Driver: `"At Shipper — Load LD-MNINC1W5"` / `"You have arrived at the pickup location"`
-- Dispatch: `"Lesline Johnson has arrived at the pickup location (Load LD-MNINC1W5)"`
+- Dispatch: `"Leonora Johnson has arrived at the pickup location (Load LD-MNINC1W5)"`
 
 ---
 
@@ -397,10 +397,10 @@ Note: Staging has a local modification to server.js (different SPREADSHEET_ID). 
 ### Final Behavior
 The 1:1 auto-unassign is **preserved** (driver moves from old truck to new truck), but with a safety guard:
 
-1. Dispatcher wants to move Lesline from TRK-101 to TRK-201
-2. System checks: does Lesline have an active load? (dispatched, in transit, etc.)
-3. **If YES** → 409 error: "Lesline Johnson has an active load (LD-XXX, status: In Transit). Complete or cancel the load before reassigning."
-4. **If NO** → Lesline is removed from TRK-101, assigned to TRK-201. TRK-101 is now available for another driver.
+1. Dispatcher wants to move Leonora from TRK-101 to TRK-201
+2. System checks: does Leonora have an active load? (dispatched, in transit, etc.)
+3. **If YES** → 409 error: "Leonora Johnson has an active load (LD-XXX, status: In Transit). Complete or cancel the load before reassigning."
+4. **If NO** → Leonora is removed from TRK-101, assigned to TRK-201. TRK-101 is now available for another driver.
 
 ### Implementation
 - `checkDriverActiveLoad()` helper — queries Google Sheet "Job Tracking" for active statuses
