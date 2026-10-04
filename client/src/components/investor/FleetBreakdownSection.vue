@@ -5,7 +5,8 @@
       Per-Truck Breakdown
     </div>
 
-    <div v-if="trucks.length === 0" class="empty-state">No trucks in database yet.</div>
+    <div v-if="trucksError" class="empty-state load-error" role="alert">Couldn't load your trucks: {{ trucksError }} Refresh the page to try again.</div>
+    <div v-else-if="trucks.length === 0" class="empty-state">No trucks in database yet.</div>
 
     <table v-else class="fleet-table">
       <thead>
@@ -349,6 +350,9 @@ import { driverPayBasis } from '../../lib/driverPay'
 
 const props = defineProps({
   trucks: { type: Array, default: () => [] },
+  // Why the truck list failed to load ('' when it loaded); shown instead of the
+  // empty state.
+  trucksError: { type: String, default: '' },
   asset: { type: Object, default: () => ({}) },
   production: { type: Object, default: () => ({}) },
 })
@@ -547,6 +551,7 @@ const modalSubtitle = computed(() => MODAL_CONFIG[detailType.value]?.subtitle ||
   display: flex; align-items: center; justify-content: center; font-size: 0.9rem;
 }
 .empty-state { text-align: center; color: var(--text-dim); font-size: 0.85rem; padding: 2rem 0; }
+.empty-state.load-error { color: var(--danger); }
 
 .fleet-table {
   width: 100%; border-collapse: separate; border-spacing: 0;

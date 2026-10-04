@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { useApi } from '../composables/useApi'
+import { useAuthStore } from './auth'
 
 const api = useApi()
 
@@ -54,11 +55,13 @@ export const useInvestorStore = defineStore('investor', {
     currentMonth: null,
     payoutTotals: emptyPayoutTotals(),
     payoutsLoading: true,
-    // A Super Admin viewing /investor WITHOUT previewing anyone gets a 400 here
-    // (payouts are per-owner; there is no whole-fleet payout). Callers must
-    // degrade to earnings-only rather than rendering misleading zeros.
     payoutsFailed: false,
     payoutsNotFound: false,
+    // A Super Admin viewing /investor WITHOUT previewing anyone: payouts are
+    // per owner and there is no whole-fleet payout, so the route answers 400 and
+    // the ledger is not asked for at all. Callers degrade to earnings-only rather
+    // than rendering misleading zeros.
+    payoutsNoOwner: false,
     // In-flight loadPayouts() promise, so concurrent callers share one request.
     _payoutsInFlight: null,
     // Bumped on every reset. A response whose token is stale (the admin already
@@ -176,6 +179,17 @@ export const useInvestorStore = defineStore('investor', {
     // the cost is a redundant write to the payout ledger, not a wasted round trip.
     async loadPayouts(overrideUserId) {
       const scopeId = overrideUserId !== undefined ? overrideUserId : this.previewUserId
+      if (scopeId == null && useAuthStore().user?.role === 'Super Admin') {
+        this.payouts = []
+        this.currentMonth = null
+        this.payoutTotals = emptyPayoutTotals()
+        this.payoutsFailed = false
+        this.payoutsNotFound = false
+        this.payoutsNoOwner = true
+        this.payoutsLoading = false
+        return
+      }
+      this.payoutsNoOwner = false
       if (this._payoutsInFlight) return this._payoutsInFlight
       this.payoutsLoading = true
       const tracked = this._fetchPayouts(scopeId, this._payoutsToken).finally(() => {
@@ -327,6 +341,7 @@ export const useInvestorStore = defineStore('investor', {
       this.payoutsLoading = true
       this.payoutsFailed = false
       this.payoutsNotFound = false
+      this.payoutsNoOwner = false
       this._payoutsInFlight = null
       this._payoutsToken += 1
       this.payoutDetailCache = {}

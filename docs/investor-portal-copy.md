@@ -163,6 +163,7 @@ Nothing below renders on an ordinary month. A month with no carry looks exactly 
 | ⚪ | `Not yet in service a full 3 months` | Cell value |
 | 🔴 | `(N days x $R)` | A truck's breakdown, beside Driver Pay, when its driver is paid by the day |
 | 🔴 | `(P% of revenue after deductible trip expenses)` | Same place, when its driver is paid a percentage. **Changed 2026-10-03 (your request):** it read `(N days x $250)` for them, a day rate they are not paid; the Driver Pay figure itself was already their percentage pay. |
+| ⚪ | `Couldn't load your trucks: <reason> Refresh the page to try again.` | In place of the table when the truck list fails to load. **New 2026-10-04:** it used to read `No trucks in database yet.`, as if the fleet were empty. |
 
 ---
 
@@ -201,7 +202,9 @@ Nothing below renders on an ordinary month. A month with no carry looks exactly 
 | 🔴 | `A Super Admin opens the Fleet Health page, reviews the fault, takes whatever action is needed (often: replace a part, schedule maintenance), then marks the code acknowledged. Acknowledged faults stop counting here.` | Faults dialog |
 | 🔴 | `The Job Tracking sheet, filtered to rows whose assigned driver matches one of your truck's assignment history. Excludes loads soft-deleted or with a Cancelled status (per the standard load-exclusion filter).` | Loads dialog |
 
-> ⚠️ That last one names internal machinery ("the Job Tracking sheet", "soft-deleted", "load-exclusion filter"). It tells an investor how the sausage is made. Strong candidate for a reword.
+| ⚪ | `Couldn't load your trucks: <reason> Refresh the page to try again.` | In place of the table when the truck list fails to load. **New 2026-10-04:** it used to read `No trucks added yet.`, as if the investor had none. |
+
+> ⚠️ The Loads dialog line names internal machinery ("the Job Tracking sheet", "soft-deleted", "load-exclusion filter"). It tells an investor how the sausage is made. Strong candidate for a reword.
 
 ---
 
@@ -267,6 +270,7 @@ Nothing below renders on an ordinary month. A month with no carry looks exactly 
 | 🔴 | `Active days × daily rate — percentage drivers earn a share of revenue` | Drill-down |
 | 🔴 | `Fuel, tolls, repairs and other on-the-road costs` | Drill-down |
 | ⚪ | `Scroll to zoom, drag to pan. Download a copy with the button below.` | Statement viewer |
+| ⚪ | `Payouts are per investor. Open an investor's portal to see their payouts.` | **Super Admin only**, on `/investor` with no investor in view. **New 2026-10-04:** it read `Couldn't load payouts — try again.` there. An investor never sees it. |
 
 ### ✅ Removed in this change
 

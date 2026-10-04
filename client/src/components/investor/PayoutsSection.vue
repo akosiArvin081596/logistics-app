@@ -10,6 +10,10 @@
 
     <div v-if="loading" class="skeleton skeleton-card"></div>
 
+    <!-- A Super Admin on /investor with no investor in view: payouts are per
+         investor, so there is no ledger to show. -->
+    <div v-else-if="noOwner" class="empty-msg">Payouts are per investor. Open an investor's portal to see their payouts.</div>
+
     <template v-else-if="loadFailed">
       <div v-if="notFound" class="empty-msg">Payout settlements aren't available yet.</div>
       <div v-else class="empty-msg">Couldn't load payouts &mdash; try again.</div>
@@ -591,6 +595,7 @@ const { show: toast } = useToast()
 const loading = computed(() => investorStore.payoutsLoading)
 const loadFailed = computed(() => investorStore.payoutsFailed)
 const notFound = computed(() => investorStore.payoutsNotFound)
+const noOwner = computed(() => investorStore.payoutsNoOwner)
 const payouts = computed(() => investorStore.payouts)
 const currentMonth = computed(() => investorStore.currentMonth)
 const totals = computed(() => investorStore.payoutTotals)

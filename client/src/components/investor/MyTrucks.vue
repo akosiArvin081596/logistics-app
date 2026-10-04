@@ -24,7 +24,8 @@
     </details>
 
     <!-- Trucks Table -->
-    <div v-if="trucks.length === 0" class="empty-msg">No trucks added yet.</div>
+    <div v-if="trucksError" class="empty-msg load-error" role="alert">Couldn't load your trucks: {{ trucksError }} Refresh the page to try again.</div>
+    <div v-else-if="trucks.length === 0" class="empty-msg">No trucks added yet.</div>
     <table v-else class="trucks-table">
       <thead>
         <tr>
@@ -189,6 +190,9 @@ import ZoomableImage from '../shared/ZoomableImage.vue'
 
 const props = defineProps({
   trucks: { type: Array, default: () => [] },
+  // Why the truck list failed to load ('' when it loaded); shown instead of the
+  // empty state.
+  trucksError: { type: String, default: '' },
   production: { type: Object, default: () => ({}) },
   // When true the admin is previewing this investor's portal — hide
   // the Add Truck affordance so it can't be triggered by accident.
@@ -319,6 +323,7 @@ async function addTruck() {
 }
 .btn-add:disabled { opacity: 0.5; }
 .empty-msg { text-align: center; padding: 2rem; color: var(--text-dim); font-size: 0.88rem; }
+.empty-msg.load-error { color: var(--danger); }
 .trucks-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
 .trucks-table th {
   text-align: left; padding: 0.5rem 0.6rem; font-size: 0.68rem; font-weight: 700;
