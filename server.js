@@ -98,6 +98,8 @@ const { csvRows } = require("./lib/csv");
 const piiMask = require("./lib/pii-mask");
 // Boundary checks shared by every unauthenticated form route (email, vehicles).
 const publicFormInput = require("./lib/public-form-input");
+// POST /api/public/investor-rfi: the website's investor Request for Information.
+const investorRfi = require("./lib/investor-rfi");
 const w9Input = require("./lib/w9-input");
 
 // ---------------------------------------------------------------------------
@@ -356,6 +358,12 @@ app.use("/api/public/investor-w9-check", express.json({ limit: "16kb" }), (err, 
 	}
 	next(err);
 });
+// POST /api/public/investor-rfi parses its own body here, JSON or form-encoded
+// (the website's form works without JavaScript), at 32 KB, before the 50 MB
+// parser below. The form-encoded parser is mounted on that one path ONLY:
+// everywhere else express.json() stays the only body parser (see the
+// cross-site notes beside crossSiteGuard). lib/investor-rfi.js has the rest.
+app.use(investorRfi.INVESTOR_RFI_PATH, ...investorRfi.createBodyParsers());
 // 50 MB body limit — covers driver application payloads that bundle
 // 3 high-res iPhone photos (CDL front + back + medical card) as base64.
 // nginx client_max_body_size is set slightly above this so rejections
@@ -7433,13 +7441,16 @@ app.post("/api/n8n/load-distance", n8nDistanceLimiter, async (req, res) => {
 // on every path) — but a caller that RECORDS "we told them" must be able to tell
 // a real send from a swallowed failure or an unconfigured mailbox, otherwise it
 // files a silence as a notification. See alertUnusableRateConExtraction.
-async function sendEmail(to, subject, htmlBody, attachments = []) {
+// `replyTo` is optional and only POST /api/public/investor-rfi passes it (the
+// submitter's address, already checked by lib/public-form-input.js); every
+// other caller sends exactly what it sent before.
+async function sendEmail(to, subject, htmlBody, attachments = [], { replyTo } = {}) {
 	const gmailUser = process.env.GMAIL_USER;
 	const gmailPass = process.env.GMAIL_APP_PASSWORD;
 	if (!gmailUser || !gmailPass) return false;
 	try {
 		const transporter = nodemailer.createTransport({ service: "gmail", auth: { user: gmailUser, pass: gmailPass } });
-		await transporter.sendMail({ from: `"LogisX Inc." <${gmailUser}>`, to, subject, html: htmlBody, attachments });
+		await transporter.sendMail({ from: `"LogisX Inc." <${gmailUser}>`, to, subject, html: htmlBody, attachments, ...(replyTo ? { replyTo } : {}) });
 		return true;
 	} catch (err) {
 		console.error("Email send failed:", err.message);
@@ -10315,6 +10326,18 @@ app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 		res.status(500).json({ error: "Submission failed. Please try again." });
 	}
 });
+
+// ============================================================
+// PUBLIC: Investor Request for Information
+// ============================================================
+// The "Invest in LogisX" page on logisx.com posts here through a same-origin
+// path on its own nginx vhost. Origin allowlist (logisx.com and its staging
+// site), a rate limit with publicFormLimiter's numbers plus a daily cap on the
+// emails it sends, the public-form-input checks, a honeypot, and one email to
+// info@logisx.com with Reply-To the
+// submitter. No database write and no submitter data in logs. All of it lives
+// in lib/investor-rfi.js; scripts/test-investor-rfi.js drives this middleware.
+app.post(investorRfi.INVESTOR_RFI_PATH, ...investorRfi.createInvestorRfiMiddleware({ sendEmail }));
 
 // List endpoint is lightweight — excludes base64 image/signature/ssn/long-text columns
 // that the table UI doesn't render. Detail endpoint below serves the full record.
