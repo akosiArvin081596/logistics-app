@@ -292,7 +292,7 @@ guarded("section 4-5 (behaviour + mutants) ran", () => {
 	// whenever the schema changes so the cache can never mask a real answer.
 	const rebuild = () => { G = buildGuard(); };
 
-	const inv = (o) => ({ id: 7, invoice_number: "INV-SK-2026W19-01", driver: "shorn king",
+	const inv = (o) => ({ id: 7, invoice_number: "INV-SK-2026W19-01", driver: "soren king",
 		week_start: "2026-05-09", week_end: "2026-05-15", status: "Draft", paid_at: "", ...o });
 	const verdict = (i) => {
 		const r = G.invoiceMonthLockBlockers(i);

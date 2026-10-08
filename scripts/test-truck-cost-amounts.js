@@ -303,20 +303,20 @@ function makeDb() {
 	const user = db.prepare("INSERT INTO users (id, username, password_hash, role, driver_name, full_name, company_name) VALUES (?, ?, 'x', ?, ?, ?, ?)");
 	user.run(1, "super_admin", "Super Admin", "", "", "");
 	user.run(2, "kevin", "Dispatcher", "", "Kevin Dispatch", "");
-	user.run(3, "sking", "Driver", "Shorn King", "Shorn King", "");
+	user.run(3, "sking", "Driver", "Soren King", "Soren King", "");
 	user.run(4, "bdriver", "Driver", "Bob Driver", "Bob Driver", "");
 	user.run(5, "acme", "Investor", "", "Acme Holdings", "Acme Holdings");
 	user.run(9, "lx", "Investor", "", "LX Capital", "LX Capital");
-	db.prepare("INSERT INTO drivers_directory (id, driver_name, city, state, trucks) VALUES (1, 'Shorn King', 'Houston', 'TX', 'LogisX-#33')").run();
+	db.prepare("INSERT INTO drivers_directory (id, driver_name, city, state, trucks) VALUES (1, 'Soren King', 'Houston', 'TX', 'LogisX-#33')").run();
 	db.prepare(`INSERT INTO trucks (id, unit_number, make, model, year, status, assigned_driver, owner_id, driver_pay_daily,
 		purchase_price, maintenance_fund_monthly, fuel_tank_gallons, avg_mpg, insurance_monthly, eld_monthly, truck_payment_monthly,
 		hvut_annual, irp_annual, admin_fee_pct, created_at)
-		VALUES (1, 'LogisX-#33', 'Freightliner', 'Cascadia', 2021, 'Active', 'Shorn King', 5, 250,
+		VALUES (1, 'LogisX-#33', 'Freightliner', 'Cascadia', 2021, 'Active', 'Soren King', 5, 250,
 		85000, 800, 203, 6.5, 1630, 50, 1200, 580, 1380, 50, '2026-04-15 03:10:50')`).run();
 	db.prepare(`INSERT INTO trucks (id, unit_number, make, status, assigned_driver, owner_id, admin_fee_pct, created_at)
 		VALUES (2, 'Logisx-#91', 'Freightliner', 'Active', '', 5, NULL, '2026-05-21 12:07:08')`).run();
-	db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (1, 'Shorn King', '2026-09-01')").run();
-	db.prepare("INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at) VALUES ('Acme Holdings', 'Shorn King', '2026-09-01')").run();
+	db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (1, 'Soren King', '2026-09-01')").run();
+	db.prepare("INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at) VALUES ('Acme Holdings', 'Soren King', '2026-09-01')").run();
 	return db;
 }
 
@@ -774,7 +774,7 @@ async function putSuccessSection() {
 // ═══════════════════════════════════════════════════════════════ §3b
 // drivers_directory.trucks is the unit number shown beside a driver on the
 // dispatch Dashboard's fleet list and the Drivers Database page, and
-// syncDriverToCarrierSheet() re-reads it from `trucks`. In the fixture Shorn
+// syncDriverToCarrierSheet() re-reads it from `trucks`. In the fixture Soren
 // King drives LogisX-#33 and his directory row says so; Logisx-#91 has no
 // driver; Bob Driver has neither a truck nor a directory row.
 async function putRenameSyncSection() {
@@ -791,10 +791,10 @@ async function putRenameSyncSection() {
 		const app = mountAll(db);
 		const r = await app.put(DISPATCHER, 1, { unitNumber: unit });
 		const t = truckRow(db, 1);
-		ok(r.status === 200 && t.unit_number === unit && t.assigned_driver === "Shorn King",
+		ok(r.status === 200 && t.unit_number === unit && t.assigned_driver === "Soren King",
 			`§3b ${label} to ${unit}: 200, renamed, the driver kept (got ${r.status} ${JSON.stringify(r.body)}, ${t.unit_number} / ${t.assigned_driver})`);
-		ok(synced(app) === updates("Shorn King"), `§3b ${label}: exactly one directory sync, for the driver on the truck (got ${synced(app)})`);
-		ok(dirTrucks(db, "Shorn King") === unit, `§3b ${label}: his directory row shows ${unit} (got ${JSON.stringify(dirTrucks(db, "Shorn King"))})`);
+		ok(synced(app) === updates("Soren King"), `§3b ${label}: exactly one directory sync, for the driver on the truck (got ${synced(app)})`);
+		ok(dirTrucks(db, "Soren King") === unit, `§3b ${label}: his directory row shows ${unit} (got ${JSON.stringify(dirTrucks(db, "Soren King"))})`);
 	}
 	// The stored number resent, exactly or padded, is not a rename.
 	for (const [label, unit] of [["resent as stored", "LogisX-#33"], ["resent padded", "  LogisX-#33  "]]) {
@@ -828,11 +828,11 @@ async function putRenameSyncSection() {
 	// it leaves on the truck, then a different one it took off — and nobody twice.
 	for (const [label, body, calls, rows] of [
 		["a rename that also assigns Bob Driver", (t) => ({ unitNumber: "LogisX-#34", assignedDriver: "Bob Driver" }),
-			["Bob Driver", "Shorn King"], [["Bob Driver", "LogisX-#34"], ["Shorn King", ""]]],
+			["Bob Driver", "Soren King"], [["Bob Driver", "LogisX-#34"], ["Soren King", ""]]],
 		["a rename in a whole-row body, which resends the driver unchanged", (t) => truckFormBody(t, { unitNumber: "LogisX-#34" }),
-			["Shorn King"], [["Shorn King", "LogisX-#34"]]],
+			["Soren King"], [["Soren King", "LogisX-#34"]]],
 		["a rename that also clears the driver", (t) => ({ unitNumber: "LogisX-#34", assignedDriver: "" }),
-			["Shorn King"], [["Shorn King", ""]]],
+			["Soren King"], [["Soren King", ""]]],
 	]) {
 		const db = makeDb();
 		const app = mountAll(db);
@@ -852,7 +852,7 @@ async function putRenameSyncSection() {
 		const notes = await app.put(DISPATCHER, 1, { notes: "new tires" });
 		ok(notes.status === 200 && synced(app) === "[]", `§3b a notes-only save: 200, no directory sync (got ${notes.status}, ${synced(app)})`);
 		const resend = await app.put(DISPATCHER, 1, truckFormBody(truckRow(db, 1)));
-		ok(resend.status === 200 && synced(app) === updates("Shorn King") && dirTrucks(db, "Shorn King") === "LogisX-#33",
+		ok(resend.status === 200 && synced(app) === updates("Soren King") && dirTrucks(db, "Soren King") === "LogisX-#33",
 			`§3b a whole-row resend with no rename: 200, only the existing rule's one sync (got ${resend.status}, ${synced(app)})`);
 	}
 }
@@ -1453,7 +1453,7 @@ async function renameRaceSection() {
 		ok(db.prepare("SELECT COUNT(*) AS n FROM trucks WHERE LOWER(unit_number) = 'logisx-#50'").get().n === 1, `§8 ${label}: one truck holds the number`);
 		const t = truckRow(db, loser);
 		const driver = loser === 1 ? "Bob Driver" : "Dan Driver";
-		ok(t.unit_number === (loser === 1 ? "LogisX-#33" : "Logisx-#91") && t.assigned_driver === (loser === 1 ? "Shorn King" : "") &&
+		ok(t.unit_number === (loser === 1 ? "LogisX-#33" : "Logisx-#91") && t.assigned_driver === (loser === 1 ? "Soren King" : "") &&
 			db.prepare("SELECT COUNT(*) AS n FROM truck_assignments WHERE driver_name = ? AND end_date = ''").get(driver).n === 0,
 			`§8 ${label}: the refused save wrote nothing — truck ${loser} keeps its number and driver, and ${driver} has no assignment`);
 	}

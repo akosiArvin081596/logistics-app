@@ -330,7 +330,7 @@ function onRateConExtracted(fields, warnings, pdfBase64, fileName) {
   // Contract ID = Broker Name only on the *Payments Table* tab, never on Job
   // Tracking — verified against production, where Job Tracking's Contract ID is
   // blank for email-ingested loads and holds a numeric reference when set at
-  // all. Putting an agent's name ("Danna Garcia") here would make a dropped
+  // all. Putting an agent's name ("Della Garcia") here would make a dropped
   // load diverge from an email-ingested one, which is the opposite of the goal.
   set('rate', toAmount(txt(f['Rate']) || txt(f['Total Rate'])))
   set('trailerNumber', txt(f['Trailer Number']))

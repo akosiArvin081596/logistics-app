@@ -1,7 +1,7 @@
 /**
  * useVoiceGuidance — spoken turn-by-turn callouts for Drive Mode.
  *
- * Client ask (Deshorn): "on the driver's side let's enhance the navigation part
+ * Client ask (Desoren): "on the driver's side let's enhance the navigation part
  * so that they can hear the callouts and the directions."
  *
  * WHY THIS IS HAND-ROLLED RATHER THAN @vueuse/core's useSpeechSynthesis: that

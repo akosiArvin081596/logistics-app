@@ -138,7 +138,7 @@ console.log("Extracted the ELD-link guard, its row scanner and preflight from se
 // ---------------------------------------------------------------------------
 console.log("Part 1 — rows carrying the unit");
 const H = ["Load ID", "Driver", "Truck", "Assigned Date", "Pickup Appointment", "Drop-off Appointment", "Status"];
-const row = (truck, assigned, pu, doff) => ["L1", "Howard", truck, assigned, pu, doff, "Completed"];
+const row = (truck, assigned, pu, doff) => ["L1", "Hollis", truck, assigned, pu, doff, "Completed"];
 const ROWS = [
   row("LogisX-#33", "2026-08-03", "2026-08-03", "2026-08-05"),
   row("LogisX-#2372", "2025-07-10", "2025-07-10", "2025-07-12"),

@@ -169,7 +169,7 @@ function jtRow(loadId, over) {
 	const r = new Array(JT_HEADERS.length).fill("");
 	r[JT_IDX["Load ID"]] = loadId;
 	r[JT_IDX["Job Status"]] = "Unassigned";
-	r[JT_IDX["Broker Contact Name"]] = "Danna Garcia";
+	r[JT_IDX["Broker Contact Name"]] = "Della Garcia";
 	for (const [k, v] of Object.entries(over || {})) r[JT_IDX[k]] = v;
 	return r;
 }
@@ -179,8 +179,8 @@ const JOB_DETAILS_HEADERS = ["", "Distance", "Rate Per Mile", "Details", "Paymen
 
 // A clean rate-con, every key the extractor returns.
 const LEGIT = {
-	"Load Number": "RC-5001", "Broker Name": "Danna Garcia", "Broker Phone": "555-0142",
-	"Broker Email": "danna.garcia@example.invalid", "Driver Name": "Kevin",
+	"Load Number": "RC-5001", "Broker Name": "Della Garcia", "Broker Phone": "555-0142",
+	"Broker Email": "della.garcia@example.invalid", "Driver Name": "Kevin",
 	"Pickup Company Information": "Acme Cold Storage", "Pickup Address": "4528 W Royal Ln, Irving, TX 75063",
 	"Pickup Appointment Time": "2026-09-27 08:00", "P/U Reference Number": "PU-29284990",
 	"Pickup Notes/Instructions": "Call ahead", "Drop-off Company Information": "Border Foods",
@@ -492,7 +492,7 @@ async function rateconSection(routeSrc = RATECON_SRC) {
 // ---------------------------------------------------------------------------
 // §4b THE UPSERTS — an existing row is updated cell by cell, a new row is
 // written whole. A Dispatcher drops the clean rate-con (LEGIT, load RC-5001:
-// broker "Danna Garcia", rate "$1,500.00") on each fixture.
+// broker "Della Garcia", rate "$1,500.00") on each fixture.
 // ---------------------------------------------------------------------------
 // A Payments Table wider than the three columns the route maps, as production's
 // is, and a Job Details tab WITH a Load ID column, which production's lacks
@@ -549,13 +549,13 @@ async function upsertSection(routeSrc = RATECON_SRC) {
 		const { r, m } = await run(upsertTabs([["RC-5001"]]));
 		t("§4b a short existing row (the key alone): the two mapped cells past its end, in ONE values.batchUpdate, and no conflict",
 			[r.code, callsOn(m, "Payments Table"), callOn(m, "batchUpdate", "Payments Table").values, payWarnings(r), m.store["Payments Table"][2]],
-			[200, ["get FORMULA", "batchUpdate 'Payments Table'!B3 'Payments Table'!C3"], [[["Danna Garcia"]], [["$1,500.00"]]], [], ["RC-5001", "Danna Garcia", "$1,500.00"]]);
+			[200, ["get FORMULA", "batchUpdate 'Payments Table'!B3 'Payments Table'!C3"], [[["Della Garcia"]], [["$1,500.00"]]], [], ["RC-5001", "Della Garcia", "$1,500.00"]]);
 	}
 	// A row already holding every mapped value, its key and amount stored as
 	// numbers: a FORMULA read returns 5001 and 1500, and the route builds
 	// "5001" and "1500". Compared as text, they are the same cells.
 	{
-		const tabs = upsertTabs([[5001, "Danna Garcia", 1500, "'00123", "=1+1"]]);
+		const tabs = upsertTabs([[5001, "Della Garcia", 1500, "'00123", "=1+1"]]);
 		const { r, m } = await run(tabs, { "Load Number": "5001", Rate: "1500" });
 		t("§4b an existing row already holding every mapped value (key and amount stored as numbers): read, then no call at all, no warning, the tab as it was",
 			[r.code, callsOn(m, "Payments Table"), payWarnings(r), m.store["Payments Table"]],
@@ -593,14 +593,14 @@ async function upsertSection(routeSrc = RATECON_SRC) {
 			[200, ["get FORMULA", "update Payments Table!A2"], ["get FORMULA", "update Job Details!A2"], 0, ["USER_ENTERED", "USER_ENTERED"]]);
 		t("§4b no row for the load: each row written is one cell per header, as built",
 			[callOn(m, "update", "Payments Table").row, callOn(m, "update", "Job Details").row],
-			[["RC-5001", "Danna Garcia", "$1,500.00", "", ""], ["", `${rpm.distance_miles} Miles`, `$${rpm.rate_per_mile}`, rpm.details, String(rpm.payment), ""]]);
+			[["RC-5001", "Della Garcia", "$1,500.00", "", ""], ["", `${rpm.distance_miles} Miles`, `$${rpm.rate_per_mile}`, rpm.details, String(rpm.payment), ""]]);
 	}
 	{
 		const tabs = upsertTabs([PAY_ROW()]);
 		const { r, m } = await run(tabs, { "Load Number": "RC-7000" });
 		t("§4b no row for the load, rows for others: ONE whole-row values.update at A{lastRow+1} (A4), the rows above as they were",
 			[r.code, callsOn(m, "Payments Table"), callOn(m, "update", "Payments Table").row, m.store["Payments Table"].slice(0, 3)],
-			[200, ["get FORMULA", "update Payments Table!A4"], ["RC-7000", "Danna Garcia", "$1,500.00", "", "", "", "", ""], tabs["Payments Table"]]);
+			[200, ["get FORMULA", "update Payments Table!A4"], ["RC-7000", "Della Garcia", "$1,500.00", "", "", "", "", ""], tabs["Payments Table"]]);
 	}
 	return results;
 }

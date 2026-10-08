@@ -85,7 +85,7 @@ The system shows you how many rows were updated across each table.
 
 This is **destructive** in the sense that you can't easily undo a rename. Double-check the spelling before clicking Apply. Examples of when to use:
 
-- **Typo fix.** "Lesline Jonhson" → "Lesline Johnson" across 86 loads (real historical case).
+- **Typo fix.** "Leonora Jonhson" → "Leonora Johnson" across 86 loads (real historical case).
 - **Name change.** Driver got married and changed their last name.
 - **Standardization.** Driver was inconsistently entered as "Mike" sometimes and "Michael" others.
 

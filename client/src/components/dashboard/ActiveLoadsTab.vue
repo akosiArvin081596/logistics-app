@@ -677,7 +677,7 @@ function formatPingAge(ms) {
   return `${h}h`
 }
 function isBusy(d) { return props.busyDrivers.includes(normDriver(d)) }
-// Per Deshorn King (client request): a dispatcher can queue a load onto a driver
+// Per Desoren King (client request): a dispatcher can queue a load onto a driver
 // who's already busy — the new load sits behind their active work and starts
 // when they finish. Mirrors JobBoardTab's queue-confirm flow. We only have the
 // busyDrivers list here (no queue count), so the confirm omits an exact position.
@@ -971,7 +971,7 @@ const selectedJobDriverName = computed(() => { if (!selectedJob.value) return ''
 // them as local and a POD uploaded at 2am shows on the previous day in Houston.
 const fmtUploaded = (t) => fmtTimestamp(t)
 
-// POD management on an ACTIVE load. Deshorn asked for this on 2026-08-05 after
+// POD management on an ACTIVE load. Desoren asked for this on 2026-08-05 after
 // finding two PODs on one in-progress load and no way to remove either; it had
 // been scoped to Completed loads only, on the earlier read that completed was
 // what he meant.
@@ -996,7 +996,7 @@ const docErrorStyle = computed(() => ({
 
 // The confirm names the FILE. These are near-identical machine names
 // (2218094_POD_1785896106322.pdf), so a bare "are you sure?" does not tell you
-// which of two PODs is about to go — which is exactly the situation Deshorn is in.
+// which of two PODs is about to go — which is exactly the situation Desoren is in.
 async function confirmDeleteDoc(doc) {
   if (!doc || !doc.id || deletingDocId.value) return
   const label = doc.file_name || `this ${doc.type || 'document'}`

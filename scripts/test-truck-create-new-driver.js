@@ -230,34 +230,34 @@ function makeDb() {
 	const user = db.prepare("INSERT INTO users (id, username, password_hash, role, driver_name, full_name, company_name) VALUES (?, ?, 'x', ?, ?, ?, ?)");
 	user.run(1, "super_admin", "Super Admin", "", "", "");
 	user.run(2, "kevin", "Dispatcher", "", "Kevin Dispatch", "");
-	user.run(3, "sking", "Driver", "Shorn King", "Shorn King", "");
-	user.run(5, "johnny", "Investor", "", "Johnny", "Johnny Rocks Spirits");
+	user.run(3, "sking", "Driver", "Soren King", "Soren King", "");
+	user.run(5, "johnny", "Investor", "", "Johnny", "Jasper Ridge Spirits");
 	user.run(41, "owner41", "Investor", "", "Owner Forty-One", "Owner 41 Freight LLC");
 	user.run(42, "lx", "Investor", "", "LX", "Logistics Exchange");
 	user.run(60, "dnewhire", "Driver", NEW_HIRE, NEW_HIRE, ""); // the new hire's account, minted on acceptance
 	const dir = db.prepare("INSERT INTO drivers_directory (driver_name, status, pay_type, pay_percentage, pay_daily) VALUES (?, ?, 'fixed', 0, ?)");
 	for (const [name, status, daily] of [
-		["Howard Reddie", "active", 0], ["Jayden Morrison", "active", 0], ["Rodney Brown", "active", 0],
-		["Lesline Johnson", "active", 0], ["Shorn King", "active", 300], ["Fleet Test Driver", "active", 0],
+		["Hollis Renner", "active", 0], ["Jensen Morrison", "active", 0], ["Roland Brown", "active", 0],
+		["Leonora Johnson", "active", 0], ["Soren King", "active", 300], ["Fleet Test Driver", "active", 0],
 		[NEW_HIRE, "pending", 0],
 	]) dir.run(name, status, daily);
 	const truck = db.prepare(`INSERT INTO trucks (id, unit_number, status, owner_id, assigned_driver, driver_pay_daily, in_service_date, created_at,
 		insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual) VALUES (?, ?, 'Active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-	truck.run(2, "LogisX-#33", 5, "Howard Reddie", 150, "", "2026-04-15 03:10:50", 1630, 50, 1200, 580, 1380);
-	truck.run(3, "LogisX-#2372", 0, "Jayden Morrison", 250, "", "2026-04-17 14:28:15", 1630, 50, 0, 295, 2007);
-	truck.run(4, "LogisX-#302", 41, "Rodney Brown", 20, "", "2026-04-20 19:31:37", 1520, 0, 0, 0, 0);
-	truck.run(5, "INV-24-A", 42, "Lesline Johnson", 0, "", "2026-04-20 20:16:38", 0, 0, 0, 0, 0);
-	truck.run(11, "Logisx-#91", 5, "Shorn King", 300, "2026-08-04", "2026-05-21 12:07:08", 1680, 50, 1210, 580, 1410);
+	truck.run(2, "LogisX-#33", 5, "Hollis Renner", 150, "", "2026-04-15 03:10:50", 1630, 50, 1200, 580, 1380);
+	truck.run(3, "LogisX-#2372", 0, "Jensen Morrison", 250, "", "2026-04-17 14:28:15", 1630, 50, 0, 295, 2007);
+	truck.run(4, "LogisX-#302", 41, "Roland Brown", 20, "", "2026-04-20 19:31:37", 1520, 0, 0, 0, 0);
+	truck.run(5, "INV-24-A", 42, "Leonora Johnson", 0, "", "2026-04-20 20:16:38", 0, 0, 0, 0, 0);
+	truck.run(11, "Logisx-#91", 5, "Soren King", 300, "2026-08-04", "2026-05-21 12:07:08", 1680, 50, 1210, 580, 1410);
 	truck.run(12, "LogisX-TEST", 0, "Fleet Test Driver", 250, "", "2026-05-30 01:16:45", 0, 0, 0, 0, 0);
 	const assign = db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (?, ?, ?, '')");
-	assign.run(2, "Howard Reddie", "2026-05-13T10:47:01.338Z");
-	assign.run(11, "Shorn King", "2026-08-12T23:17:51.574Z");
-	assign.run(3, "Jayden Morrison", "2026-04-17T14:28:15.000Z");
-	assign.run(4, "Rodney Brown", "2026-04-20T19:31:37.000Z");
+	assign.run(2, "Hollis Renner", "2026-05-13T10:47:01.338Z");
+	assign.run(11, "Soren King", "2026-08-12T23:17:51.574Z");
+	assign.run(3, "Jensen Morrison", "2026-04-17T14:28:15.000Z");
+	assign.run(4, "Roland Brown", "2026-04-20T19:31:37.000Z");
 	const hist = db.prepare("INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at) VALUES (?, ?, ?)");
-	hist.run("Johnny Rocks Spirits", "Howard Reddie", "2026-05-13T10:47:01.338Z");
-	hist.run("Johnny Rocks Spirits", "Shorn King", "2026-08-12T23:17:51.574Z");
-	hist.run("Owner 41 Freight LLC", "Rodney Brown", "2026-04-20T19:31:37.000Z");
+	hist.run("Jasper Ridge Spirits", "Hollis Renner", "2026-05-13T10:47:01.338Z");
+	hist.run("Jasper Ridge Spirits", "Soren King", "2026-08-12T23:17:51.574Z");
+	hist.run("Owner 41 Freight LLC", "Roland Brown", "2026-04-20T19:31:37.000Z");
 	const lock = db.prepare("INSERT INTO period_locks (period, status, finalized_at) VALUES (?, 'locked', ?)");
 	for (const p of LOCKED_ASC) lock.run(p, `${p}-28T05:00:00.000Z`);
 	return db;
@@ -296,10 +296,10 @@ function load(driver, c = {}) {
 const MARCH = { id: "T-2303", assigned: "Date: Tue, 17 Mar 2026 09:12:44 -0500", pickup: "3/18/26 08:00 Appt.", drop: "3/19/26 14:00 Appt.", update: "3/19/2026, 6:02:00 PM", completion: "2026-03-19" };
 const SEPT = { id: "T-2309", assigned: "Date: Tue, 22 Sep 2026 10:05:00 -0500", pickup: "9/23/26 07:30 Appt.", drop: "9/24/26 12:00 Appt.", update: "9/24/2026, 4:23:00 PM", completion: "2026-09-24" };
 const BACKGROUND = [
-	load("Howard Reddie", { id: "T-2101", assigned: "Date: Tue, 20 Jan 2026 11:30:35 -0500", pickup: "1/20/26 11:00 Appt.", drop: "1/22/26 08:00 Appt.", update: "1/22/2026, 3:10:00 PM", completion: "2026-01-22", truck: "LogisX-#33", owner: "5" }),
-	load("Howard Reddie", { id: "T-2105", assigned: "Date: Wed, 13 May 2026 08:02:11 -0500", pickup: "5/14/26 07:00 Appt.", drop: "5/15/26 12:00 Appt.", update: "5/15/2026, 4:00:00 PM", completion: "2026-05-15", truck: "LogisX-#33", owner: "5" }),
-	load("Shorn King", { id: "T-2108", assigned: "Date: Tue, 04 Aug 2026 07:45:00 -0500", pickup: "8/5/26 06:00 Appt.", drop: "8/6/26 15:00 Appt.", update: "8/6/2026, 5:30:00 PM", completion: "2026-08-06", truck: "Logisx-#91", owner: "5" }),
-	load("Jayden Morrison", { id: "T-2006", assigned: "Date: Mon, 16 Jun 2025 09:00:00 -0500", pickup: "6/17/25 08:00 Appt.", drop: "6/18/25 10:00 Appt.", completion: "2025-06-18" }),
+	load("Hollis Renner", { id: "T-2101", assigned: "Date: Tue, 20 Jan 2026 11:30:35 -0500", pickup: "1/20/26 11:00 Appt.", drop: "1/22/26 08:00 Appt.", update: "1/22/2026, 3:10:00 PM", completion: "2026-01-22", truck: "LogisX-#33", owner: "5" }),
+	load("Hollis Renner", { id: "T-2105", assigned: "Date: Wed, 13 May 2026 08:02:11 -0500", pickup: "5/14/26 07:00 Appt.", drop: "5/15/26 12:00 Appt.", update: "5/15/2026, 4:00:00 PM", completion: "2026-05-15", truck: "LogisX-#33", owner: "5" }),
+	load("Soren King", { id: "T-2108", assigned: "Date: Tue, 04 Aug 2026 07:45:00 -0500", pickup: "8/5/26 06:00 Appt.", drop: "8/6/26 15:00 Appt.", update: "8/6/2026, 5:30:00 PM", completion: "2026-08-06", truck: "Logisx-#91", owner: "5" }),
+	load("Jensen Morrison", { id: "T-2006", assigned: "Date: Mon, 16 Jun 2025 09:00:00 -0500", pickup: "6/17/25 08:00 Appt.", drop: "6/18/25 10:00 Appt.", completion: "2025-06-18" }),
 	// A different person whose name merely starts the same way.
 	load("Dana Newhire Jr.", { id: "T-2007", assigned: "Date: Tue, 15 Jul 2025 13:20:00 -0500", pickup: "7/16/25 09:00 Appt.", completion: "2025-07-17" }),
 ];
@@ -381,9 +381,9 @@ function historySection() {
 	eq(history((db) => addExpense(db, NEW_HIRE, "", "2026-09", "")), { floor: "2026-09", unbounded: false },
 		"§1 a receipt readable only through its posted_period");
 	eq(history((db) => addExpense(db, NEW_HIRE, "not a date", "", "")), ALL, "§1 a receipt with no readable month: unbounded");
-	eq(history(null, "Howard Reddie"), { floor: "2026-01", unbounded: false },
-		"§1 Howard: January's load predates his 2026-05 assignment row, and the floor follows the load");
-	eq(history(null, "Shorn King"), { floor: "2026-08", unbounded: false }, "§1 Shorn: loads and assignment both in 2026-08");
+	eq(history(null, "Hollis Renner"), { floor: "2026-01", unbounded: false },
+		"§1 Hollis: January's load predates his 2026-05 assignment row, and the floor follows the load");
+	eq(history(null, "Soren King"), { floor: "2026-08", unbounded: false }, "§1 Soren: loads and assignment both in 2026-08");
 	eq(history((db) => db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (12, ?, '2025-10-02T14:00:00.000Z')").run(NEW_HIRE)),
 		{ floor: "2025-10", unbounded: false }, "§1 an assignment row alone (start_date sliced)");
 	eq(history((db) => db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (12, ?, '')").run(NEW_HIRE)), ALL,
@@ -410,11 +410,11 @@ function lockedMonthsSection() {
 
 	// History omitted: the function it was.
 	eq(m.driverPayLockedMonths(NEW_HIRE, L), L, "§2 omitted: a driver with no assignment row gets every locked month (unchanged)");
-	eq(m.driverPayLockedMonths("Howard Reddie", L), lockedFrom("2026-05"), "§2 omitted: Howard from his first assignment, 2026-05 (unchanged)");
-	eq(m.driverPayLockedMonths("Shorn King", L), ["2026-08"], "§2 omitted: Shorn from 2026-08 (unchanged)");
+	eq(m.driverPayLockedMonths("Hollis Renner", L), lockedFrom("2026-05"), "§2 omitted: Hollis from his first assignment, 2026-05 (unchanged)");
+	eq(m.driverPayLockedMonths("Soren King", L), ["2026-08"], "§2 omitted: Soren from 2026-08 (unchanged)");
 	eq(m.driverPayLockedMonths("", L), [], "§2 omitted: a blank name gets none (unchanged)");
 	eq(m.driverPayLockedMonths(NEW_HIRE, []), [], "§2 omitted: no locked months, none (unchanged)");
-	for (const name of [NEW_HIRE, "Howard Reddie", "Shorn King", "howard reddie", "Nobody At All"]) {
+	for (const name of [NEW_HIRE, "Hollis Renner", "Soren King", "hollis renner", "Nobody At All"]) {
 		eq(m.driverPayLockedMonths(name, L, undefined), m.driverPayLockedMonths(name, L), `§2 an explicit undefined is the omitted argument (${name})`);
 	}
 
@@ -429,8 +429,8 @@ function lockedMonthsSection() {
 	}
 	eq(m.driverPayLockedMonths("", L, { floor: "", unbounded: true }), [], "§2 given, a blank name still gets none");
 	eq(m.driverPayLockedMonths(NEW_HIRE, [], { floor: "", unbounded: true }), [], "§2 given, no locked months still gets none");
-	eq(m.driverPayLockedMonths("Howard Reddie", L, m.driverHistoryFloorMonth("Howard Reddie", makeJt())), lockedFrom("2026-01"),
-		"§2 Howard with his history: from January, where his loads start — wider than his assignment row");
+	eq(m.driverPayLockedMonths("Hollis Renner", L, m.driverHistoryFloorMonth("Hollis Renner", makeJt())), lockedFrom("2026-01"),
+		"§2 Hollis with his history: from January, where his loads start — wider than his assignment row");
 }
 
 // ═══════════════════════════════════════════════════════════════ §3
@@ -481,17 +481,17 @@ function guardSection() {
 		ok(!d.includes("their current truck sets"), "§3 (f) ...and not the current-truck wording");
 	}
 	{
-		const res = run(createTruck({ unit_number: "LogisX-#40", assigned_driver: "Howard Reddie" }));
+		const res = run(createTruck({ unit_number: "LogisX-#40", assigned_driver: "Hollis Renner" }));
 		eq(summary(res), [{ field: "driver_pay_daily", effect: null, periods: lockedFrom("2026-01") }],
-			"§3 (f) Howard ($150 on #33) onto a new $300 truck for the same owner: the rate, from his first load in 2026-01");
+			"§3 (f) Hollis ($150 on #33) onto a new $300 truck for the same owner: the rate, from his first load in 2026-01");
 		const d = (res.blockers[0] || {}).detail || "";
 		ok(d.includes("replaces the $150.00/day their current truck sets, repricing their active days across 8 finalized months"),
 			`§3 (f) a driver on a truck keeps the current-truck wording (got ${JSON.stringify(d)})`);
 	}
-	eq(summary(run(createTruck({ unit_number: "LogisX-#40", assigned_driver: "Howard Reddie", owner_id: 41, driver_pay_daily: 150 }))),
+	eq(summary(run(createTruck({ unit_number: "LogisX-#40", assigned_driver: "Hollis Renner", owner_id: 41, driver_pay_daily: 150 }))),
 		[{ field: "owner_id", effect: "driver_set", periods: lockedFrom("2026-01") }],
-		"§3 (f) Howard at his own $150 onto owner 41: only the driver set moves, from 2026-01");
-	eq(summary(run(createTruck({ unit_number: "LogisX-#40", assigned_driver: "Shorn King" }))), [],
+		"§3 (f) Hollis at his own $150 onto owner 41: only the driver set moves, from 2026-01");
+	eq(summary(run(createTruck({ unit_number: "LogisX-#40", assigned_driver: "Soren King" }))), [],
 		"§3 a driver whose own $300 pay_daily overrides the truck rate, onto the same owner: allowed, as before");
 
 	// (g) day overrides and receipts are history.

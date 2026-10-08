@@ -5,9 +5,9 @@
  * PDF belong to exactly one row.
  *
  * A driver's name reaches the invoice path in more than one spelling: the
- * driver's session carries the account's ("Shorn King"), the Friday batch passes
+ * driver's session carries the account's ("Soren King"), the Friday batch passes
  * the drivers_directory row's (which may have been re-spelled by spacing alone:
- * "Shorn  King"), and a Super Admin types one. idx_invoices_driver_week folds
+ * "Soren  King"), and a Super Admin types one. idx_invoices_driver_week folds
  * case, not spacing, so the application has to hold the rule.
  *
  * WHAT IS ASSERTED — the shipping code, lifted out of server.js (it cannot be
@@ -146,11 +146,12 @@ const DRIVER_APP_LIST_ANCHOR = "const driverInvoices = db.prepare(";
 // payout ledger's own calculation, so its map is gatherLedgerScopeFacts()'s,
 // read fleet-wide (no investor driver set).
 const PNL_TRUCKS_ANCHOR = 'const trucksByDriver = Object.create(null);\n\t{\n\t\tconst truckQuery = investorDriverSet';
-// GET /api/investor's per-truck expense map, read as expByDriver[normalizeDriverName(
-// truck.assigned_driver)] (one investor's receipts). GET /api/financials keeps no
-// such map: its per-truck receipts are the books' items.
-const INVESTOR_TRUCK_EXP_ANCHOR = "const expByDriver = foldExpenseTotalsByDriver(\n";
-const INVESTOR_TRUCK_EXP_END = "\n\t\t\t);";
+// GET /api/investor's per-truck expense map for receipts naming no truck, folded
+// by driver and counted on the truck whose assigned driver normalizes to that key
+// (one investor's receipts). GET /api/financials keeps no such map: its
+// per-truck receipts are the books' items.
+const INVESTOR_TRUCK_EXP_ANCHOR = "// Receipts by the truck they name, and those naming no truck by their";
+const INVESTOR_TRUCK_EXP_END = "const expByDriver = foldExpenseTotalsByDriver(expRows.filter((r) => !r.u));";
 
 // The one-per-driver-week index, exactly as the migration builds it.
 const INDEX_COLS = new Function(`${liftConst(SRC, "INVOICE_WEEK_IDX_COLS")}\nreturn INVOICE_WEEK_IDX_COLS;`)();
@@ -178,9 +179,9 @@ const delivered = (loadId, driver, pickup, dropoff, stamp, pay) => row({
 	"Drop-off Appointment": dropoff, "Status Update Date": stamp, "  Payment  ": pay,
 });
 const SHEET = [
-	delivered("8101", "Shorn King", "9/21/2026 8:00", "9/22/2026 10:00", "9/22/2026 14:00:00", " $ 1,000.00 "),
-	delivered("8102", "Shorn King", "9/28/2026 8:00", "9/29/2026 10:00", "9/29/2026 14:00:00", " $ 900.00 "),
-	delivered("8103", "Shorn King", "10/5/2026 8:00", "10/6/2026 10:00", "10/6/2026 14:00:00", " $ 800.00 "),
+	delivered("8101", "Soren King", "9/21/2026 8:00", "9/22/2026 10:00", "9/22/2026 14:00:00", " $ 1,000.00 "),
+	delivered("8102", "Soren King", "9/28/2026 8:00", "9/29/2026 10:00", "9/29/2026 14:00:00", " $ 900.00 "),
+	delivered("8103", "Soren King", "10/5/2026 8:00", "10/6/2026 10:00", "10/6/2026 14:00:00", " $ 800.00 "),
 	delivered("8201", "Sam Kelly", "9/23/2026 8:00", "9/23/2026 18:00", "9/23/2026 19:00:00", " $ 700.00 "),
 	delivered("8301", "Pat Percent", "9/21/2026 8:00", "9/22/2026 10:00", "9/22/2026 14:00:00", " $ 1,000.00 "),
 	delivered("8302", "Pat Percent", "9/23/2026 8:00", "9/24/2026 10:00", "9/24/2026 14:00:00", " $ 500.00 "),
@@ -193,7 +194,7 @@ const DDL = `
 	CREATE TABLE deleted_loads (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, row_index INTEGER DEFAULT 0, deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP, deleted_by TEXT DEFAULT '');
 	CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_number TEXT NOT NULL UNIQUE, driver TEXT NOT NULL, week_start TEXT NOT NULL, week_end TEXT NOT NULL, loads_count INTEGER NOT NULL DEFAULT 0, rate_per_load REAL NOT NULL DEFAULT 250, total_earnings REAL NOT NULL DEFAULT 0, expenses_total REAL NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'Draft', rejection_note TEXT DEFAULT '', pdf_file_name TEXT DEFAULT '', load_ids TEXT DEFAULT '[]', expense_ids TEXT DEFAULT '[]', submitted_at TEXT DEFAULT '', approved_at TEXT DEFAULT '', approved_by TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, processed_at TEXT DEFAULT '', processed_by TEXT DEFAULT '', paid_at TEXT DEFAULT '', paid_by TEXT DEFAULT '', adjustment REAL DEFAULT 0, adjustment_note TEXT DEFAULT '', adjusted_by TEXT DEFAULT '', adjusted_at TEXT DEFAULT '', render_data TEXT DEFAULT '{}', deleted_at TEXT DEFAULT '', deleted_by TEXT DEFAULT '', delete_reason TEXT DEFAULT '', is_manual INTEGER DEFAULT 0, created_by TEXT DEFAULT '');
 	CREATE UNIQUE INDEX idx_invoices_driver_week ON ${INDEX_COLS};
-	CREATE TABLE expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT, date TEXT, amount REAL, type TEXT, status TEXT DEFAULT '', description TEXT DEFAULT '', owner_id INTEGER DEFAULT 0, posted_period TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+	CREATE TABLE expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT, date TEXT, amount REAL, type TEXT, status TEXT DEFAULT '', description TEXT DEFAULT '', owner_id INTEGER DEFAULT 0, posted_period TEXT DEFAULT '', truck_unit TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 	CREATE TABLE trucks (id INTEGER PRIMARY KEY AUTOINCREMENT, unit_number TEXT, assigned_driver TEXT, driver_pay_daily REAL DEFAULT 0, routemate_vehicle_id TEXT DEFAULT '');
 	CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT, address TEXT DEFAULT '', city TEXT DEFAULT '', state TEXT DEFAULT '', zip TEXT DEFAULT '', phone TEXT DEFAULT '', cell TEXT DEFAULT '', pay_type TEXT DEFAULT 'fixed', pay_percentage REAL DEFAULT 0, pay_daily REAL DEFAULT 0);
 	CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT DEFAULT '', email TEXT DEFAULT '', role TEXT DEFAULT 'Driver', driver_name TEXT DEFAULT '');
@@ -215,35 +216,35 @@ function liftCreateTable(src, table) {
 }
 const LEDGER_DDL = `${liftCreateTable(SRC, "server_state")};\n${liftCreateTable(SRC, "invoice_undated_alerts")};`;
 
-// The account says "Shorn King"; the directory row was re-spelled by spacing
+// The account says "Soren King"; the directory row was re-spelled by spacing
 // alone. Pat's and Dee's directory rows are spaced differently from their names
 // on the sheet too; Tom is named on two trucks, one of them spaced differently.
 function seedBase(db) {
 	const u = db.prepare("INSERT INTO users (id, username, email, role, driver_name) VALUES (?, ?, ?, ?, ?)");
 	u.run(1, "super_admin", "admin@example.test", "Super Admin", "");
-	u.run(2, "sking", "sking@example.test", "Driver", "Shorn King");
+	u.run(2, "sking", "sking@example.test", "Driver", "Soren King");
 	u.run(3, "skelly", "skelly@example.test", "Driver", "Sam Kelly");
 	u.run(4, "ppercent", "pp@example.test", "Driver", "Pat Percent");
 	u.run(5, "ttruck", "tt@example.test", "Driver", "Tom Truck");
 	u.run(6, "dispatch1", "d@example.test", "Dispatcher", "");
 	const d = db.prepare("INSERT INTO drivers_directory (driver_name, pay_type, pay_percentage, pay_daily, address, city, state, zip, phone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-	d.run("Shorn  King", "fixed", 0, 300, "1 Main St", "Houston", "TX", "77002", "555-0101");
+	d.run("Soren  King", "fixed", 0, 300, "1 Main St", "Houston", "TX", "77002", "555-0101");
 	d.run("Sam Kelly", "fixed", 0, 0, "", "", "", "", "");
 	d.run("Pat  Percent", "percentage", 20, 0, "", "", "", "", "");
 	d.run("Tom Truck", "fixed", 0, 0, "", "", "", "", "");
 	d.run("Dee  Dayrate", "fixed", 0, 310, "", "", "", "", "");
 	const t = db.prepare("INSERT INTO trucks (unit_number, assigned_driver, driver_pay_daily) VALUES (?, ?, ?)");
-	t.run("101", "Shorn King", 275);
+	t.run("101", "Soren King", 275);
 	t.run("102", "Sam Kelly", 260);
 	t.run("103", "Tom Truck", 275);
 	t.run("104", "Tom  Truck", 325);
 	t.run("105", "Dee Dayrate", 0);
-	db.prepare("INSERT INTO driver_payment_info (user_id, bank_name, account_type) VALUES (2, 'Shorn Test Bank', 'Checking')").run();
+	db.prepare("INSERT INTO driver_payment_info (user_id, bank_name, account_type) VALUES (2, 'Soren Test Bank', 'Checking')").run();
 	const e = db.prepare("INSERT INTO expenses (driver, date, amount, type, status) VALUES (?, ?, ?, ?, ?)");
 	e.run("pat  percent", "2026-09-22", 100, "Fuel", "");
 	e.run("Pat Percent", "2026-09-23", 50, "Maintenance", "Approved");
 	e.run("pat percent", "2026-09-23", 999, "Fuel", "Rejected");
-	e.run("Shorn King", "2026-09-22", 40, "Fuel", "");
+	e.run("Soren King", "2026-09-22", 40, "Fuel", "");
 }
 
 // ───────────────────────────────────────────────────────────────── the world
@@ -360,7 +361,7 @@ function buildWorld(opts = {}) {
 
 // ───────────────────────────────────────────────────────────────── helpers
 const SUPER = { id: 1, role: "Super Admin", username: "super_admin", driverName: "" };
-const SHORN = { id: 2, role: "Driver", username: "sking", driverName: "Shorn King" };
+const SOREN = { id: 2, role: "Driver", username: "sking", driverName: "Soren King" };
 const DISPATCH = { id: 6, role: "Dispatcher", username: "dispatch1", driverName: "" };
 
 function mockRes() {
@@ -429,57 +430,57 @@ async function batteryIdentity(src) {
 	{
 		const w = buildWorld({ src });
 		let second = "inserted";
-		insertInvoice(w.db, { invoice_number: "INV-P-1", driver: "shorn king", week_start: W38.start });
-		try { insertInvoice(w.db, { invoice_number: "INV-P-2", driver: "shorn  king", week_start: W38.start }); }
+		insertInvoice(w.db, { invoice_number: "INV-P-1", driver: "soren king", week_start: W38.start });
+		try { insertInvoice(w.db, { invoice_number: "INV-P-2", driver: "soren  king", week_start: W38.start }); }
 		catch (e) { second = "refused"; }
 		t("premise: idx_invoices_driver_week lets a spacing variant in (the application has to hold the rule)", second, "inserted");
 		let caseVariant = "inserted";
-		try { insertInvoice(w.db, { invoice_number: "INV-P-3", driver: "SHORN KING", week_start: W38.start }); }
+		try { insertInvoice(w.db, { invoice_number: "INV-P-3", driver: "SOREN KING", week_start: W38.start }); }
 		catch (e) { caseVariant = "refused"; }
 		t("premise: …while it refuses a case variant", caseVariant, "refused");
 	}
 	const w = buildWorld({ src });
 	// The driver generates from the app, under the account's spelling.
-	const a = await generate(w, SHORN, "", W38);
+	const a = await generate(w, SOREN, "", W38);
 	const first = a.body && a.body.invoice;
 	t("§1 the driver's own generate succeeds", a.statusCode, 200);
 	t("§1 …numbered from the driver's initials and week", first && first.invoice_number, `INV-SK-${W38.tag}-01`);
-	t("§1 …stored under the account's spelling, lowercased", first && first.driver, "shorn king");
+	t("§1 …stored under the account's spelling, lowercased", first && first.driver, "soren king");
 	t("§1 …priced at the directory's $300/day, like the P&L (2 days)", first && first.total_earnings, 600);
 	// The Friday batch asks under the DIRECTORY's spelling.
-	const b = await generate(w, SUPER, "Shorn  King", W38);
+	const b = await generate(w, SUPER, "Soren  King", W38);
 	const regen = b.body && b.body.invoice;
 	t("§1 the batch's spelling finds the Draft and regenerates it", b.statusCode, 200);
-	t("§1 …still ONE live weekly invoice for the driver-week", liveRows(w, "Shorn King", W38).length, 1);
+	t("§1 …still ONE live weekly invoice for the driver-week", liveRows(w, "Soren King", W38).length, 1);
 	t("§1 …keeping its number", regen && regen.invoice_number, `INV-SK-${W38.tag}-01`);
 	t("§1 …as a new row replacing the old one", [!!regen && regen.id !== (first && first.id), rowById(w, first && first.id)], [true, null]);
 	// Once it is past Draft, every spelling is told it exists.
 	w.db.prepare("UPDATE invoices SET status = 'Submitted' WHERE id = ?").run(regen && regen.id);
-	for (const [user, spelling] of [[SUPER, "SHORN KING"], [SUPER, " shorn  king "], [SHORN, ""]]) {
+	for (const [user, spelling] of [[SUPER, "SOREN KING"], [SUPER, " soren  king "], [SOREN, ""]]) {
 		const r = await generate(w, user, spelling, W38);
 		t(`§1 a submitted invoice answers 409 INVOICE_EXISTS to ${JSON.stringify(spelling || "the driver's session")}`,
 			[r.statusCode, r.body && r.body.code, r.body && r.body.invoice && r.body.invoice.invoice_number],
 			[409, "INVOICE_EXISTS", `INV-SK-${W38.tag}-01`]);
 	}
-	t("§1 …and nothing new was written for that week", liveRows(w, "Shorn King", W38).length, 1);
+	t("§1 …and nothing new was written for that week", liveRows(w, "Soren King", W38).length, 1);
 	// A legacy row stored under the other spelling is seen by the check.
-	insertInvoice(w.db, { invoice_number: `INV-SK-${W39.tag}-01`, driver: "shorn  king", week_start: W39.start, week_end: "2026-10-02", status: "Submitted" });
-	const c = await generate(w, SHORN, "", W39);
+	insertInvoice(w.db, { invoice_number: `INV-SK-${W39.tag}-01`, driver: "soren  king", week_start: W39.start, week_end: "2026-10-02", status: "Submitted" });
+	const c = await generate(w, SOREN, "", W39);
 	t("§1 the existing-invoice check sees a row stored under another spelling",
 		[c.statusCode, c.body && c.body.code, c.body && c.body.invoice && c.body.invoice.invoice_number],
 		[409, "INVOICE_EXISTS", `INV-SK-${W39.tag}-01`]);
 	// Two live Drafts under two spellings: which to replace is a human's call.
-	const d1 = insertInvoice(w.db, { invoice_number: `INV-SK-${W40.tag}-01`, driver: "shorn king", week_start: W40.start, week_end: "2026-10-09" });
-	const d2 = insertInvoice(w.db, { invoice_number: `INV-SK-${W40.tag}-02`, driver: "shorn  king", week_start: W40.start, week_end: "2026-10-09" });
-	const d = await generate(w, SHORN, "", W40);
+	const d1 = insertInvoice(w.db, { invoice_number: `INV-SK-${W40.tag}-01`, driver: "soren king", week_start: W40.start, week_end: "2026-10-09" });
+	const d2 = insertInvoice(w.db, { invoice_number: `INV-SK-${W40.tag}-02`, driver: "soren  king", week_start: W40.start, week_end: "2026-10-09" });
+	const d = await generate(w, SOREN, "", W40);
 	t("§1 two live Drafts under two spellings answer 409 INVOICE_WEEK_DUPLICATE", [d.statusCode, d.body && d.body.code], [409, "INVOICE_WEEK_DUPLICATE"]);
-	t("§1 …and both are left exactly as they were", [rowById(w, d1) && rowById(w, d1).status, rowById(w, d2) && rowById(w, d2).status, liveRows(w, "Shorn King", W40).length], ["Draft", "Draft", 2]);
+	t("§1 …and both are left exactly as they were", [rowById(w, d1) && rowById(w, d1).status, rowById(w, d2) && rowById(w, d2).status, liveRows(w, "Soren King", W40).length], ["Draft", "Draft", 2]);
 	// What a new row stores.
 	{
 		const w2 = buildWorld({ src });
-		const r = await generate(w2, SUPER, "SHORN  KING", W38);
+		const r = await generate(w2, SUPER, "SOREN  KING", W38);
 		t("§1 a new row stores the spelling the driver's identity already has (the account's), whoever asked",
-			r.body && r.body.invoice && r.body.invoice.driver, "shorn king");
+			r.body && r.body.invoice && r.body.invoice.driver, "soren king");
 		const r2 = await generate(w2, SUPER, "Dee Dayrate", W38);
 		t("§1 …and a directory-only driver's the directory's",
 			r2.body && r2.body.invoice && r2.body.invoice.driver, "dee  dayrate");
@@ -512,12 +513,12 @@ async function batteryNumbering(src) {
 	{
 		// Same initials, same week, two drivers.
 		const w = buildWorld({ src });
-		const shorn = await generate(w, SUPER, "Shorn King", W38);
+		const soren = await generate(w, SUPER, "Soren King", W38);
 		const sam = await generate(w, SUPER, "Sam Kelly", W38);
-		const s1 = shorn.body && shorn.body.invoice, s2 = sam.body && sam.body.invoice;
-		t("§2 two drivers with the same initials in one week: both invoices are written", [shorn.statusCode, sam.statusCode], [200, 200]);
+		const s1 = soren.body && soren.body.invoice, s2 = sam.body && sam.body.invoice;
+		t("§2 two drivers with the same initials in one week: both invoices are written", [soren.statusCode, sam.statusCode], [200, 200]);
 		t("§2 …the second takes the next free number", [s1 && s1.invoice_number, s2 && s2.invoice_number], [`INV-SK-${W38.tag}-01`, `INV-SK-${W38.tag}-02`]);
-		t("§2 …each row's PDF is its own", [s1 && who(w, s1.pdf_file_name), s2 && who(w, s2.pdf_file_name)], ["Shorn King", "Sam Kelly"]);
+		t("§2 …each row's PDF is its own", [s1 && who(w, s1.pdf_file_name), s2 && who(w, s2.pdf_file_name)], ["Soren King", "Sam Kelly"]);
 		const nums = w.db.prepare("SELECT invoice_number, pdf_file_name FROM invoices").all();
 		t("§2 …no number or file name is held twice",
 			[new Set(nums.map((r) => r.invoice_number.toLowerCase())).size, new Set(nums.map((r) => r.pdf_file_name.toLowerCase())).size], [nums.length, nums.length]);
@@ -525,18 +526,18 @@ async function batteryNumbering(src) {
 	{
 		// A soft-deleted invoice keeps its number; the next one moves on.
 		const w = buildWorld({ src });
-		const a = await generate(w, SUPER, "Shorn King", W38);
+		const a = await generate(w, SUPER, "Soren King", W38);
 		const first = a.body && a.body.invoice;
 		w.db.prepare("UPDATE invoices SET deleted_at = '2026-09-26T00:00:00Z' WHERE id = ?").run(first && first.id);
-		const b = await generate(w, SUPER, "Shorn King", W38);
+		const b = await generate(w, SUPER, "Soren King", W38);
 		t("§2 after a soft delete the next invoice is -02", b.body && b.body.invoice && b.body.invoice.invoice_number, `INV-SK-${W38.tag}-02`);
 		t("§2 …and the deleted invoice's PDF is still its own", first && JSON.parse(pdfOf(w, first.pdf_file_name) || "{}").number, first && first.invoice_number);
 	}
 	{
 		// A row under another spelling of the same driver counts toward the sequence.
 		const w = buildWorld({ src });
-		insertInvoice(w.db, { invoice_number: `INV-M-SK-${W38.tag}-01`, driver: "shorn  king", week_start: W38.start, is_manual: 1 });
-		const r = await generate(w, SUPER, "Shorn King", W38);
+		insertInvoice(w.db, { invoice_number: `INV-M-SK-${W38.tag}-01`, driver: "soren  king", week_start: W38.start, is_manual: 1 });
+		const r = await generate(w, SUPER, "Soren King", W38);
 		t("§2 this driver's invoice for the week under another spelling counts: the next is -02",
 			r.body && r.body.invoice && r.body.invoice.invoice_number, `INV-SK-${W38.tag}-02`);
 	}
@@ -544,15 +545,15 @@ async function batteryNumbering(src) {
 		// A file name held in another case is held.
 		const w = buildWorld({ src });
 		insertInvoice(w.db, { invoice_number: "LEGACY-7", driver: "someone else", week_start: "2025-01-04", pdf_file_name: `inv-sk-${W38.tag.toLowerCase()}-01.pdf` });
-		const r = await generate(w, SUPER, "Shorn King", W38);
+		const r = await generate(w, SUPER, "Soren King", W38);
 		t("§2 a PDF name another row holds in another case is not reused",
 			r.body && r.body.invoice && r.body.invoice.invoice_number, `INV-SK-${W38.tag}-02`);
 	}
 	{
 		// A regenerated Draft keeps its number.
 		const w = buildWorld({ src });
-		const a = await generate(w, SUPER, "Shorn King", W38);
-		const b = await generate(w, SUPER, "Shorn King", W38);
+		const a = await generate(w, SUPER, "Soren King", W38);
+		const b = await generate(w, SUPER, "Soren King", W38);
 		t("§2 a regenerated Draft keeps its number",
 			[a.body && a.body.invoice && a.body.invoice.invoice_number, b.body && b.body.invoice && b.body.invoice.invoice_number],
 			[`INV-SK-${W38.tag}-01`, `INV-SK-${W38.tag}-01`]);
@@ -565,23 +566,23 @@ async function batteryNumbering(src) {
 			body: { payee, periodStart: W38.start, periodEnd: "2026-09-25", lineItems: [{ description: "Yard work", amount: 100 }], payeeAddress: "", payeePhone: "" },
 		});
 		const m1 = await manual("Sam Kelly");
-		const m2 = await manual("Shorn King");
+		const m2 = await manual("Soren King");
 		t("§2 two manual payees with the same initials in one period both get invoices", [m1.statusCode, m2.statusCode], [200, 200]);
 		t("§2 …numbered -01 and -02",
 			[m1.body && m1.body.invoice && m1.body.invoice.invoice_number, m2.body && m2.body.invoice && m2.body.invoice.invoice_number],
 			[`INV-M-SK-${W38.tag}-01`, `INV-M-SK-${W38.tag}-02`]);
 		t("§2 …each with its own PDF",
 			[m1.body && m1.body.invoice && who(w, m1.body.invoice.pdf_file_name), m2.body && m2.body.invoice && who(w, m2.body.invoice.pdf_file_name)],
-			["Sam Kelly", "Shorn King"]);
+			["Sam Kelly", "Soren King"]);
 	}
 	{
 		// Every number the old count would mint that nobody holds is minted unchanged.
 		const w = buildWorld({ src });
-		insertInvoice(w.db, { invoice_number: `INV-SK-${W38.tag}-01`, driver: "shorn king", week_start: W38.start, deleted_at: "x" });
+		insertInvoice(w.db, { invoice_number: `INV-SK-${W38.tag}-01`, driver: "soren king", week_start: W38.start, deleted_at: "x" });
 		insertInvoice(w.db, { invoice_number: `INV-O-${W39.tag}-01`, driver: "o'brien", week_start: W39.start });
 		insertInvoice(w.db, { invoice_number: `INV-O-${W39.tag}-02`, driver: "o'brien", week_start: W39.start, deleted_at: "x" });
-		insertInvoice(w.db, { invoice_number: `INV-SK-${W40.tag}-01`, driver: "Shorn King", week_start: W40.start });
-		const cases = [["Shorn King", W38], ["Mary Jane Watson", W38], ["O'Brien", W39], ["Shorn King", W40], ["Pat Percent", W39], ["a/b c/d", W40]];
+		insertInvoice(w.db, { invoice_number: `INV-SK-${W40.tag}-01`, driver: "Soren King", week_start: W40.start });
+		const cases = [["Soren King", W38], ["Mary Jane Watson", W38], ["O'Brien", W39], ["Soren King", W40], ["Pat Percent", W39], ["a/b c/d", W40]];
 		const newer = cases.map(([n, wk]) => w.generateInvoiceNumber(n, wk.start));
 		const older = cases.map(([n, wk]) => OLD_generateInvoiceNumber(w.db, n, wk.start));
 		t("§2 where the old count's number is free, the number is byte-identical to origin/main's", newer, older);
@@ -602,7 +603,7 @@ async function batteryPdfs(src) {
 		const w = buildWorld({ src });
 		insertInvoice(w.db, { invoice_number: `INV-SK-${W38.tag}-01`, driver: "sam kelly", week_start: W38.start, status: "Paid" });
 		putFile(w, `INV-SK-${W38.tag}-01.pdf`, "SAM'S PAID INVOICE");
-		const r = await generate(w, SUPER, "Shorn King", W38);
+		const r = await generate(w, SUPER, "Soren King", W38);
 		t("§3 another driver holding the number: this invoice takes the next one", [r.statusCode, r.body && r.body.invoice && r.body.invoice.invoice_number], [200, `INV-SK-${W38.tag}-02`]);
 		t("§3 …and that driver's PDF is untouched", pdfOf(w, `INV-SK-${W38.tag}-01.pdf`), "SAM'S PAID INVOICE");
 	}
@@ -612,10 +613,10 @@ async function batteryPdfs(src) {
 			insertInvoice(db, { invoice_number: num(data), driver: "sam kelly", week_start: W38.start });
 			putFile(w, `${num(data)}.pdf`, "OTHER");
 		} });
-		const r = await generate(w, SUPER, "Shorn King", W38);
+		const r = await generate(w, SUPER, "Soren King", W38);
 		t("§3 a number taken during the render: 409 INVOICE_NUMBER_TAKEN", [r.statusCode, r.body && r.body.code], [409, "INVOICE_NUMBER_TAKEN"]);
 		t("§3 …the other invoice's PDF is untouched", pdfOf(w, `INV-SK-${W38.tag}-01.pdf`), "OTHER");
-		t("§3 …no row for this driver-week, no temporary file left", [liveRows(w, "Shorn King", W38).length, tmpLeft(w)], [0, []]);
+		t("§3 …no row for this driver-week, no temporary file left", [liveRows(w, "Soren King", W38).length, tmpLeft(w)], [0, []]);
 	}
 	{
 		// During the render: another row takes the FILE NAME under a different number.
@@ -623,28 +624,28 @@ async function batteryPdfs(src) {
 			insertInvoice(db, { invoice_number: "LEGACY-99", driver: "sam kelly", week_start: "2025-01-04", pdf_file_name: `${num(data)}.pdf` });
 			putFile(w, `${num(data)}.pdf`, "LEGACY DOCUMENT");
 		} });
-		const r = await generate(w, SUPER, "Shorn King", W38);
+		const r = await generate(w, SUPER, "Soren King", W38);
 		t("§3 a PDF name taken during the render (different number): 409 INVOICE_NUMBER_TAKEN", [r.statusCode, r.body && r.body.code], [409, "INVOICE_NUMBER_TAKEN"]);
 		t("§3 …that row's document is untouched", pdfOf(w, `INV-SK-${W38.tag}-01.pdf`), "LEGACY DOCUMENT");
 	}
 	{
 		// During the render: the driver-week gains a live invoice under another spelling.
 		const w = buildWorld({ src, onRender: (data, { db }) => {
-			insertInvoice(db, { invoice_number: `INV-SK-${W38.tag}-77`, driver: "shorn  king", week_start: W38.start });
+			insertInvoice(db, { invoice_number: `INV-SK-${W38.tag}-77`, driver: "soren  king", week_start: W38.start });
 		} });
-		const r = await generate(w, SUPER, "Shorn King", W38);
+		const r = await generate(w, SUPER, "Soren King", W38);
 		t("§3 the driver-week taken during the render (other spelling): 409 INVOICE_WEEK_CHANGED", [r.statusCode, r.body && r.body.code], [409, "INVOICE_WEEK_CHANGED"]);
-		t("§3 …leaving one live invoice for the week, not two", liveRows(w, "Shorn King", W38).map((x) => x.invoice_number), [`INV-SK-${W38.tag}-77`]);
+		t("§3 …leaving one live invoice for the week, not two", liveRows(w, "Soren King", W38).map((x) => x.invoice_number), [`INV-SK-${W38.tag}-77`]);
 	}
 	{
 		// During a regenerate's render: the Draft is submitted.
 		let hook = null;
 		const w = buildWorld({ src, onRender: (data, ctx) => hook && hook(data, ctx) });
-		const a = await generate(w, SUPER, "Shorn King", W38);
+		const a = await generate(w, SUPER, "Soren King", W38);
 		const draft = a.body && a.body.invoice;
 		const before = pdfOf(w, draft && draft.pdf_file_name);
 		hook = (data, { db }) => { db.prepare("UPDATE invoices SET status = 'Submitted' WHERE id = ?").run(draft.id); };
-		const r = await generate(w, SUPER, "Shorn  King", W38);
+		const r = await generate(w, SUPER, "Soren  King", W38);
 		t("§3 the Draft submitted during a regenerate's render: 409 INVOICE_WEEK_CHANGED", [r.statusCode, r.body && r.body.code], [409, "INVOICE_WEEK_CHANGED"]);
 		t("§3 …the submitted invoice and its PDF are untouched", [rowById(w, draft && draft.id) && rowById(w, draft.id).status, pdfOf(w, draft && draft.pdf_file_name) === before], ["Submitted", true]);
 	}
@@ -652,10 +653,10 @@ async function batteryPdfs(src) {
 		// During a regenerate's render: an admin adjusts the Draft.
 		let hook = null;
 		const w = buildWorld({ src, onRender: (data, ctx) => hook && hook(data, ctx) });
-		const a = await generate(w, SUPER, "Shorn King", W38);
+		const a = await generate(w, SUPER, "Soren King", W38);
 		const draft = a.body && a.body.invoice;
 		hook = (data, { db }) => { db.prepare("UPDATE invoices SET adjustment = 200, adjustment_note = 'bonus', adjusted_at = 'now' WHERE id = ?").run(draft.id); };
-		const r = await generate(w, SHORN, "", W38);
+		const r = await generate(w, SOREN, "", W38);
 		t("§3 the Draft adjusted during a regenerate's render: 409 INVOICE_WEEK_CHANGED", [r.statusCode, r.body && r.body.code], [409, "INVOICE_WEEK_CHANGED"]);
 		t("§3 …the adjustment stands", rowById(w, draft && draft.id) && rowById(w, draft.id).adjustment, 200);
 	}
@@ -663,11 +664,11 @@ async function batteryPdfs(src) {
 		// A failed render leaves the Draft being regenerated exactly as it was.
 		let fail = false;
 		const w = buildWorld({ src, onRender: () => { if (fail) throw new Error("renderer down"); } });
-		const a = await generate(w, SUPER, "Shorn King", W38);
+		const a = await generate(w, SUPER, "Soren King", W38);
 		const draft = a.body && a.body.invoice;
 		const before = pdfOf(w, draft && draft.pdf_file_name);
 		fail = true;
-		const r = await generate(w, SUPER, "Shorn King", W38);
+		const r = await generate(w, SUPER, "Soren King", W38);
 		t("§3 a failed render is a 500", r.statusCode, 500);
 		t("§3 …and the Draft it was regenerating is still there, with its PDF",
 			[!!rowById(w, draft && draft.id), pdfOf(w, draft && draft.pdf_file_name) === before, tmpLeft(w)], [true, true, []]);
@@ -685,11 +686,11 @@ async function batteryPdfs(src) {
 			},
 		});
 		const w = buildWorld({ src, fs: diskFull });
-		const a = await generate(w, SUPER, "Shorn King", W38);
+		const a = await generate(w, SUPER, "Soren King", W38);
 		const draft = a.body && a.body.invoice;
 		const before = pdfOf(w, draft && draft.pdf_file_name);
 		full = true;
-		const r = await generate(w, SUPER, "Shorn King", W38);
+		const r = await generate(w, SUPER, "Soren King", W38);
 		t("§3 a disk-full temporary write is a 500", r.statusCode, 500);
 		t("§3 …leaving no partial temporary file, and the Draft and its PDF as they were",
 			[tmpLeft(w), !!rowById(w, draft && draft.id), pdfOf(w, draft && draft.pdf_file_name) === before], [[], true, true]);
@@ -697,14 +698,14 @@ async function batteryPdfs(src) {
 	{
 		// commitInvoiceWithPdf(): a failed INSERT leaves the final file and the Draft.
 		const w = buildWorld({ src });
-		const id = insertInvoice(w.db, { invoice_number: `INV-SK-${W38.tag}-01`, driver: "shorn king", week_start: W38.start });
+		const id = insertInvoice(w.db, { invoice_number: `INV-SK-${W38.tag}-01`, driver: "soren king", week_start: W38.start });
 		putFile(w, `INV-SK-${W38.tag}-01.pdf`, "THE DRAFT'S PDF");
-		const replacing = w.liveWeeklyInvoicesForDriverWeek("Shorn King", W38.start)[0];
+		const replacing = w.liveWeeklyInvoicesForDriverWeek("Soren King", W38.start)[0];
 		let thrown = "";
 		try {
 			w.commitInvoiceWithPdf({
 				invoiceNumber: `INV-SK-${W38.tag}-01`, pdfFileName: `INV-SK-${W38.tag}-01.pdf`, pdfBuffer: Buffer.from("NEW"),
-				replacing, slot: { driverName: "Shorn King", weekStart: W38.start },
+				replacing, slot: { driverName: "Soren King", weekStart: W38.start },
 				insert: () => { throw new Error("insert failed"); },
 			});
 		} catch (e) { thrown = e.message; }
@@ -719,13 +720,13 @@ async function batteryPdfs(src) {
 		let gate = null;
 		let armed = false;
 		const w = buildWorld({ src, onRender: async () => { if (armed) { armed = false; await gate; } } });
-		const a = await generate(w, SUPER, "Shorn King", W38);
+		const a = await generate(w, SUPER, "Soren King", W38);
 		const draft = a.body && a.body.invoice;
 		let release = null;
 		gate = new Promise((r) => { release = r; });
 		armed = true;
 		const pending = callRoute(w, "PUT /api/invoices/:id/adjust", { session: { user: SUPER }, params: { id: String(draft && draft.id) }, body: { adjustment: 50, adjustmentNote: "bonus" } });
-		const regen = await generate(w, SUPER, "Shorn  King", W38);
+		const regen = await generate(w, SUPER, "Soren  King", W38);
 		const regenSeq = w.rendered.length;
 		release();
 		const adj = await pending;
@@ -741,7 +742,7 @@ async function batteryPdfs(src) {
 		let gate = null;
 		let armed = false;
 		const w = buildWorld({ src, onRender: async () => { if (armed) { armed = false; await gate; } } });
-		const a = await generate(w, SUPER, "Shorn King", W38);
+		const a = await generate(w, SUPER, "Soren King", W38);
 		const draft = a.body && a.body.invoice;
 		let release = null;
 		gate = new Promise((r) => { release = r; });
@@ -758,8 +759,8 @@ async function batteryPdfs(src) {
 	{
 		// The adjust route's re-render rewrites a row's own file — never a shared one.
 		const w = buildWorld({ src });
-		const snapshot = JSON.stringify({ __templateName: "service_invoice", driverName: "Shorn King", invoiceNumberSuffix: "X" });
-		const a = insertInvoice(w.db, { invoice_number: "LEGACY-A", driver: "shorn king", week_start: "2025-01-04", pdf_file_name: "SHARED.pdf", render_data: snapshot, adjustment: 50 });
+		const snapshot = JSON.stringify({ __templateName: "service_invoice", driverName: "Soren King", invoiceNumberSuffix: "X" });
+		const a = insertInvoice(w.db, { invoice_number: "LEGACY-A", driver: "soren king", week_start: "2025-01-04", pdf_file_name: "SHARED.pdf", render_data: snapshot, adjustment: 50 });
 		insertInvoice(w.db, { invoice_number: "LEGACY-B", driver: "sam kelly", week_start: "2025-01-11", pdf_file_name: "SHARED.pdf", render_data: snapshot });
 		putFile(w, "SHARED.pdf", "B'S DOCUMENT");
 		let thrown = "";
@@ -851,7 +852,7 @@ async function batteryPay(src) {
 	const out = [];
 	const t = (label, actual, expected) => out.push([label, actual, expected]);
 	const cases = [
-		["Shorn King", "Shorn King"], ["Shorn King", "Shorn  King"], ["Shorn King", "SHORN KING"],
+		["Soren King", "Soren King"], ["Soren King", "Soren  King"], ["Soren King", "SOREN KING"],
 		["Tom Truck", "Tom Truck"], ["Tom Truck", "Tom  Truck"],
 		["Dee Dayrate", "Dee Dayrate"], ["Sam Kelly", "Sam Kelly"],
 		["Pat Percent", "Pat Percent"], ["Pat Percent", "pat  percent"],
@@ -874,7 +875,7 @@ async function batteryPay(src) {
 	}
 	{
 		// The absolute figures, so an agreement between two wrong answers cannot pass.
-		const expect = { "Shorn King": [300, 600], "Tom Truck": [325, 650], "Dee Dayrate": [310, 620], "Sam Kelly": [260, 260] };
+		const expect = { "Soren King": [300, 600], "Tom Truck": [325, 650], "Dee Dayrate": [310, 620], "Sam Kelly": [260, 260] };
 		for (const [driver, [rate, total]] of Object.entries(expect)) {
 			const w = buildWorld({ src });
 			const r = await generate(w, SUPER, driver, W38);
@@ -901,14 +902,14 @@ async function batteryPay(src) {
 	{
 		// The address, phone and bank on the invoice come from this driver's records.
 		const w = buildWorld({ src });
-		await generate(w, SUPER, "Shorn King", W38);
+		await generate(w, SUPER, "Soren King", W38);
 		const data = w.rendered[0] && w.rendered[0].data;
 		t("§4 the directory row found under another spelling supplies the address and phone",
 			data && [data.providerAddress, data.providerPhone], ["1 Main St, Houston, TX, 77002", "555-0101"]);
-		t("§4 the one account under the name supplies the bank on file", data && data.bankOnFile, "Shorn Test Bank");
+		t("§4 the one account under the name supplies the bank on file", data && data.bankOnFile, "Soren Test Bank");
 		const w2 = buildWorld({ src });
-		w2.db.prepare("INSERT INTO users (username, email, role, driver_name) VALUES ('sk2', 'sk2@example.test', 'Driver', 'SHORN  KING')").run();
-		await generate(w2, SUPER, "Shorn King", W38);
+		w2.db.prepare("INSERT INTO users (username, email, role, driver_name) VALUES ('sk2', 'sk2@example.test', 'Driver', 'SOREN  KING')").run();
+		await generate(w2, SUPER, "Soren King", W38);
 		t("§4 …but two accounts under one name print no bank", w2.rendered[0] && w2.rendered[0].data.bankOnFile, "");
 	}
 	{
@@ -941,9 +942,9 @@ async function batteryPay(src) {
 		t("§4 (f) …so '' holds only the row stored as '', none of the whitespace or NULL rows", pnl[""], { _total: 13, "2026-09": 13 });
 	}
 	{
-		// THE PER-TRUCK EXPENSE MAPS FOLD THE SAME WAY. Each handler reads its map
-		// as expByDriver[normalizeDriverName(truck.assigned_driver)] || 0 (§7 pins
-		// both reads), which `read` repeats.
+		// THE PER-TRUCK EXPENSE MAPS FOLD THE SAME WAY. GET /api/investor counts a
+		// driver's receipts naming no truck on the truck whose assigned driver
+		// normalizes to the same key (§7 pins it), which `read` repeats.
 		const w = buildWorld({ src, seed: seedDeductions });
 		const read = (map, assignedDriver) => map[w.normalizeDriverName(assignedDriver)] || 0;
 		const inv = w.investorTruckExp(INVESTOR);
@@ -970,19 +971,19 @@ async function batteryPay(src) {
 async function batteryBatch(src) {
 	const out = [];
 	const t = (label, actual, expected) => out.push([label, actual, expected]);
-	const sheetShorn = toValues(SHEET.filter((r) => r.Driver === "Shorn King" || r.Driver === "Sam Kelly"));
-	const sheetOnlyShorn = toValues(SHEET.filter((r) => r.Driver === "Shorn King"));
+	const sheetShorn = toValues(SHEET.filter((r) => r.Driver === "Soren King" || r.Driver === "Sam Kelly"));
+	const sheetOnlyShorn = toValues(SHEET.filter((r) => r.Driver === "Soren King"));
 	{
 		// Two directory rows for one driver (an older pair the naming check would refuse).
 		const w = buildWorld({ src, sheetValues: sheetShorn, seed: (db) => {
 			seedBase(db);
 			db.prepare("DELETE FROM drivers_directory").run();
-			db.prepare("INSERT INTO drivers_directory (driver_name, pay_type, pay_daily) VALUES ('Shorn  King', 'fixed', 300), ('Shorn King', 'fixed', 0), ('Sam Kelly', 'fixed', 0)").run();
+			db.prepare("INSERT INTO drivers_directory (driver_name, pay_type, pay_daily) VALUES ('Soren  King', 'fixed', 300), ('Soren King', 'fixed', 0), ('Sam Kelly', 'fixed', 0)").run();
 		} });
 		const result = await w.runWeeklyInvoiceBatch(W38.param, 1);
 		const marker = w.db.prepare("SELECT * FROM invoice_autogen_runs WHERE week_end = ?").get(W38.param) || {};
 		t("§5 one driver in two directory spellings is billed ONCE, and submitted",
-			liveRows(w, "Shorn King", W38).map((r) => [r.status, r.total_earnings]), [["Submitted", 600]]);
+			liveRows(w, "Soren King", W38).map((r) => [r.status, r.total_earnings]), [["Submitted", 600]]);
 		t("§5 …the run counts two created, none skipped, none failed, no problem",
 			[marker.created, marker.skipped, marker.failed, result && result.problem], [2, 0, 0, false]);
 	}
@@ -990,7 +991,7 @@ async function batteryBatch(src) {
 		// Two live Drafts for Sam: the handler refuses, and that is not "billed".
 		const w = buildWorld({ src, sheetValues: sheetShorn, seed: (db) => {
 			seedBase(db);
-			db.prepare("DELETE FROM drivers_directory WHERE driver_name NOT IN ('Sam Kelly', 'Shorn  King')").run();
+			db.prepare("DELETE FROM drivers_directory WHERE driver_name NOT IN ('Sam Kelly', 'Soren  King')").run();
 			insertInvoice(db, { invoice_number: `INV-SK-${W38.tag}-05`, driver: "sam kelly", week_start: W38.start });
 			insertInvoice(db, { invoice_number: `INV-SK-${W38.tag}-06`, driver: "sam  kelly", week_start: W38.start });
 		} });
@@ -1004,13 +1005,13 @@ async function batteryBatch(src) {
 		// A submitted invoice stored under another spelling: 409 INVOICE_EXISTS, billed.
 		const w = buildWorld({ src, sheetValues: sheetOnlyShorn, seed: (db) => {
 			seedBase(db);
-			db.prepare("DELETE FROM drivers_directory WHERE driver_name <> 'Shorn  King'").run();
-			insertInvoice(db, { invoice_number: `INV-SK-${W38.tag}-01`, driver: "shorn king", week_start: W38.start, status: "Submitted" });
+			db.prepare("DELETE FROM drivers_directory WHERE driver_name <> 'Soren  King'").run();
+			insertInvoice(db, { invoice_number: `INV-SK-${W38.tag}-01`, driver: "soren king", week_start: W38.start, status: "Submitted" });
 		} });
 		const result = await w.runWeeklyInvoiceBatch(W38.param, 1);
 		const marker = w.db.prepare("SELECT * FROM invoice_autogen_runs WHERE week_end = ?").get(W38.param) || {};
 		t("§5 an invoice already submitted under another spelling counts as billed — skipped, no retry",
-			[marker.created, marker.skipped, result && result.problem, liveRows(w, "Shorn King", W38).length], [0, 1, false, 1]);
+			[marker.created, marker.skipped, result && result.problem, liveRows(w, "Soren King", W38).length], [0, 1, false, 1]);
 	}
 	return out;
 }
@@ -1020,41 +1021,41 @@ async function batteryReaders(src) {
 	const out = [];
 	const t = (label, actual, expected) => out.push([label, actual, expected]);
 	const w = buildWorld({ src });
-	const a = insertInvoice(w.db, { invoice_number: `INV-SK-${W38.tag}-01`, driver: "shorn king", week_start: W38.start, week_end: "2026-09-25", status: "Submitted", total_earnings: 600 });
-	const b = insertInvoice(w.db, { invoice_number: `INV-SK-${W39.tag}-01`, driver: "shorn  king", week_start: W39.start, week_end: "2026-10-02", status: "Submitted", total_earnings: 450 });
+	const a = insertInvoice(w.db, { invoice_number: `INV-SK-${W38.tag}-01`, driver: "soren king", week_start: W38.start, week_end: "2026-09-25", status: "Submitted", total_earnings: 600 });
+	const b = insertInvoice(w.db, { invoice_number: `INV-SK-${W39.tag}-01`, driver: "soren  king", week_start: W39.start, week_end: "2026-10-02", status: "Submitted", total_earnings: 450 });
 	insertInvoice(w.db, { invoice_number: `INV-SK-${W38.tag}-02`, driver: "sam kelly", week_start: W38.start, status: "Submitted" });
-	insertInvoice(w.db, { invoice_number: "INV-SK-2026W37-01", driver: "shorn king", week_start: "2026-09-12", deleted_at: "x" });
+	insertInvoice(w.db, { invoice_number: "INV-SK-2026W37-01", driver: "soren king", week_start: "2026-09-12", deleted_at: "x" });
 	const ids = (res) => (res.body && res.body.invoices ? res.body.invoices.map((r) => r.invoice_number).sort() : null);
 	const mine = [`INV-SK-${W38.tag}-01`, `INV-SK-${W39.tag}-01`];
 	t("§6 GET /api/invoices: a Driver lists their invoices in every stored spelling, never another's or a deleted one",
-		ids(await callRoute(w, "GET /api/invoices", { session: { user: SHORN } })), mine);
+		ids(await callRoute(w, "GET /api/invoices", { session: { user: SOREN } })), mine);
 	t("§6 GET /api/invoices: a role with no driver name lists nothing",
 		ids(await callRoute(w, "GET /api/invoices", { session: { user: DISPATCH } })), []);
 	t("§6 GET /api/invoices: the Super Admin driver filter matches every spelling",
-		ids(await callRoute(w, "GET /api/invoices", { session: { user: SUPER }, query: { driver: "Shorn  King" } })), mine);
-	const app = w.driverAppList("Shorn King");
+		ids(await callRoute(w, "GET /api/invoices", { session: { user: SUPER }, query: { driver: "Soren  King" } })), mine);
+	const app = w.driverAppList("Soren King");
 	t("§6 the driver app's list: the driver's invoices in every spelling", app.map((r) => r.invoice_number).sort(), mine);
 	t("§6 …in the shape it always had (no driver field)", app.every((r) => !("driver" in r)), true);
-	for (let i = 0; i < 25; i++) insertInvoice(w.db, { invoice_number: `BULK-${i}`, driver: i % 2 ? "shorn king" : "SHORN  KING", week_start: `2024-01-${String(i + 1).padStart(2, "0")}`, is_manual: 1 });
-	t("§6 …still capped at 20", w.driverAppList("Shorn King").length, 20);
+	for (let i = 0; i < 25; i++) insertInvoice(w.db, { invoice_number: `BULK-${i}`, driver: i % 2 ? "soren king" : "SOREN  KING", week_start: `2024-01-${String(i + 1).padStart(2, "0")}`, is_manual: 1 });
+	t("§6 …still capped at 20", w.driverAppList("Soren King").length, 20);
 	// Restore: one live weekly invoice per driver-week, in any spelling.
-	const dead = insertInvoice(w.db, { invoice_number: `INV-SK-${W38.tag}-09`, driver: "shorn  king", week_start: W38.start, deleted_at: "x" });
+	const dead = insertInvoice(w.db, { invoice_number: `INV-SK-${W38.tag}-09`, driver: "soren  king", week_start: W38.start, deleted_at: "x" });
 	const r1 = await callRoute(w, "PUT /api/invoices/:id/restore", { session: { user: SUPER }, params: { id: String(dead) } });
 	t("§6 restore refuses a spacing variant of a driver-week that already has a live invoice",
 		[r1.statusCode, rowById(w, dead).deleted_at], [409, "x"]);
-	const alone = insertInvoice(w.db, { invoice_number: `INV-SK-${W40.tag}-01`, driver: "shorn  king", week_start: W40.start, week_end: "2026-10-09", deleted_at: "x" });
+	const alone = insertInvoice(w.db, { invoice_number: `INV-SK-${W40.tag}-01`, driver: "soren  king", week_start: W40.start, week_end: "2026-10-09", deleted_at: "x" });
 	const r2 = await callRoute(w, "PUT /api/invoices/:id/restore", { session: { user: SUPER }, params: { id: String(alone) } });
 	t("§6 …and restores one with no live twin", [r2.statusCode, rowById(w, alone).deleted_at], [200, ""]);
 	// Approve: the status email reaches the driver whose name is on the invoice.
 	w.emails.length = 0;
 	await callRoute(w, "PUT /api/invoices/:id/approve", { session: { user: SUPER }, params: { id: String(b) }, body: { action: "approve" } });
 	t("§6 approve emails the Driver account named on the invoice, in any spelling", w.emails.map((m) => m.to), ["sking@example.test"]);
-	w.db.prepare("INSERT INTO users (username, email, role, driver_name) VALUES ('sk2', 'sk2@example.test', 'Driver', 'shorn KING')").run();
+	w.db.prepare("INSERT INTO users (username, email, role, driver_name) VALUES ('sk2', 'sk2@example.test', 'Driver', 'soren KING')").run();
 	w.emails.length = 0;
 	await callRoute(w, "PUT /api/invoices/:id/approve", { session: { user: SUPER }, params: { id: String(a) }, body: { action: "approve" } });
 	t("§6 …and emails nobody when two Driver accounts carry the name", w.emails.map((m) => m.to), []);
 	// The payment report.
-	const rep = w.buildPaymentReport("Shorn King", "2026-09-01", "2026-10-31");
+	const rep = w.buildPaymentReport("Soren King", "2026-09-01", "2026-10-31");
 	t("§6 the payment report counts the payee's invoices in every spelling",
 		rep.invoices.map((r) => r.invoice_number).sort(), [`INV-SK-${W38.tag}-01`, `INV-SK-${W39.tag}-01`, `INV-SK-${W40.tag}-01`]);
 	return out;
@@ -1082,7 +1083,7 @@ async function batteryReserved(src) {
 	}
 	{
 		const w = buildWorld({ src });
-		const g = await generate(w, SUPER, "Shorn King", W38);
+		const g = await generate(w, SUPER, "Soren King", W38);
 		const m = await callRoute(w, "POST /api/invoices/manual", {
 			session: { user: SUPER },
 			body: { payee: "Tostring Smith", periodStart: W38.start, periodEnd: "2026-09-25", lineItems: [{ description: "Yard work", amount: 100 }], payeeAddress: "", payeePhone: "" },
@@ -1205,10 +1206,11 @@ function mutate(find, replace, label) {
 					(SRC.match(/const driver = jtDriverCol \? normalizeDriverName\(driverNameForTotals\(r\[jtDriverCol\]\)\) : "";/g) || []).length,
 					(SRC.match(/driver: jtDriverCol \? normalizeDriverName\(driverNameForTotals\(r\[jtDriverCol\]\)\) : "",/g) || []).length],
 				[1, 1, 1, 1]],
-			["§7 GET /api/investor's per-truck expense map is folded, and read by normalizeDriverName(truck.assigned_driver)",
+			["§7 GET /api/investor's per-truck expense map is folded, and each driver's receipts naming no truck land on the truck assigned to them by normalizeDriverName()",
 				[(SRC.match(/= foldExpenseTotalsByDriver\(/g) || []).length, SRC.includes(".map(r => [r.d, r.t])"),
-					(SRC.match(/const driverName = normalizeDriverName\(truck\.assigned_driver\);/g) || []).length,
-					SRC.includes("const varExp = expByDriver[driverName] || 0;")],
+					(SRC.match(/const d = normalizeDriverName\(t\.assigned_driver\);\n\t*if \(d && !Object\.prototype\.hasOwnProperty\.call\(homeUnit, d\)\) homeUnit\[d\] = t\.unit_number\.toLowerCase\(\);/g) || []).length,
+					SRC.includes("if (home) expOnUnit[home] = (expOnUnit[home] || 0) + expByDriver[driver];") &&
+						SRC.includes("const varExp = expOnUnit[unitLower] || 0;")],
 				[1, false, 1, true]],
 		];
 		report(pins);

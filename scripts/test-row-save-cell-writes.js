@@ -179,9 +179,9 @@ function storedRow(over = {}) {
 	const r = new Array(HEADERS.length).fill("");
 	Object.assign(r, {
 		[IDX["Contract ID"]]: "29284990", [IDX["Load ID"]]: "111", [IDX["Details"]]: "Frozen",
-		[IDX["Driver"]]: "Shorn King", [IDX["Pickup Address"]]: "1 Main St, Houston, TX 77002",
-		[IDX["Job Status"]]: "Delivered", [IDX["Broker Contact Name"]]: "Danna Garcia",
-		[IDX["Phone Number"]]: "555-0142", [IDX["Email"]]: "danna.garcia@example.invalid",
+		[IDX["Driver"]]: "Soren King", [IDX["Pickup Address"]]: "1 Main St, Houston, TX 77002",
+		[IDX["Job Status"]]: "Delivered", [IDX["Broker Contact Name"]]: "Della Garcia",
+		[IDX["Phone Number"]]: "555-0142", [IDX["Email"]]: "della.garcia@example.invalid",
 		[IDX["Assigned Date"]]: "9/1/2026", [IDX["Location Link"]]: TEXT_EQ, [IDX["Documents"]]: DOCS_F,
 		[IDX["Payment"]]: PAYMENT_F, [IDX["Truck"]]: "33", [IDX["Owner ID"]]: "5", [IDX["output"]]: OUTPUT_F,
 	});

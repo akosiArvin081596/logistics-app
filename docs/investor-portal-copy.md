@@ -161,8 +161,11 @@ Nothing below renders on an ordinary month. A month with no carry looks exactly 
 | 🟡 | `This is an estimate, not a guarantee. Freight market swings, maintenance, or a driver change can shift it quickly.` | Est. Your Revenue |
 | 🟡 | `Est. Your Revenue = that truck's own trailing 3-month take-home × 12. Each truck is projected from its own loads, so trucks in the same fleet will differ. ROI = Est. Your Revenue / Purchase Price × 100. A "—" means the truck hasn't been in service a full 3 months yet, so there's nothing to average from — it isn't a $0 forecast, and it's left out of the Fleet Total. Based on N months of data — projections become more accurate over time.` | Footnote under the table. **Changed 2026-09-30 (§18.3 (b)):** the first sentence no longer goes on `— your share of the net profit its loads produced, after driver pay, fixed costs and trip expenses.`, since no cost is taken per truck. A lease investor reads the same note with L3 after the first sentence (§17.5). |
 | ⚪ | `Not yet in service a full 3 months` | Cell value |
-| 🔴 | `(N days x $R)` | A truck's breakdown, beside Driver Pay, when its driver is paid by the day |
-| 🔴 | `(P% of revenue after deductible trip expenses)` | Same place, when its driver is paid a percentage. **Changed 2026-10-03 (your request):** it read `(N days x $250)` for them, a day rate they are not paid; the Driver Pay figure itself was already their percentage pay. |
+| 🔴 | `(N days x $R over M months)` | A truck's breakdown, beside Driver Pay, when a day-rate driver earned pay on that truck: their days on it, their rate, and the months the figure is averaged over (`over M months` is left off for a single month). **Changed 2026-10-04 (your request):** Driver Pay is now the pay earned on *that* truck, per month like every other line in the breakdown; it was the truck's current driver's whole pay, so a truck that had hauled nothing could show a driver's full pay, and the truck that hauled the loads showed none. Revenue, loads and receipts follow the truck named on each load or receipt the same way; one naming no truck counts on its driver's assigned truck. |
+| 🔴 | `(P% of revenue after deductible trip expenses)` | Same place, when a share-paid driver earned pay on that truck. **Changed 2026-10-03 (your request):** it read `(N days x $250)` for them, a day rate they are not paid. |
+| 🔴 | `(Name: …; Name: …)` | Same place, when two drivers earned pay on one truck: each driver's own wording, named. **New 2026-10-04.** |
+| ⚪ | `(No pay this period)` | Same place, when no pay was earned on that truck. **New 2026-10-04 (your request):** it read `(0 days x $250)`. |
+| ⚪ | `Couldn't load your trucks: <reason> Refresh the page to try again.` | In place of the table when the truck list fails to load. **New 2026-10-04:** it used to read `No trucks in database yet.`, as if the fleet were empty. |
 
 ---
 
@@ -201,7 +204,9 @@ Nothing below renders on an ordinary month. A month with no carry looks exactly 
 | 🔴 | `A Super Admin opens the Fleet Health page, reviews the fault, takes whatever action is needed (often: replace a part, schedule maintenance), then marks the code acknowledged. Acknowledged faults stop counting here.` | Faults dialog |
 | 🔴 | `The Job Tracking sheet, filtered to rows whose assigned driver matches one of your truck's assignment history. Excludes loads soft-deleted or with a Cancelled status (per the standard load-exclusion filter).` | Loads dialog |
 
-> ⚠️ That last one names internal machinery ("the Job Tracking sheet", "soft-deleted", "load-exclusion filter"). It tells an investor how the sausage is made. Strong candidate for a reword.
+| ⚪ | `Couldn't load your trucks: <reason> Refresh the page to try again.` | In place of the table when the truck list fails to load. **New 2026-10-04:** it used to read `No trucks added yet.`, as if the investor had none. |
+
+> ⚠️ The Loads dialog line names internal machinery ("the Job Tracking sheet", "soft-deleted", "load-exclusion filter"). It tells an investor how the sausage is made. Strong candidate for a reword.
 
 ---
 
@@ -267,6 +272,7 @@ Nothing below renders on an ordinary month. A month with no carry looks exactly 
 | 🔴 | `Active days × daily rate — percentage drivers earn a share of revenue` | Drill-down |
 | 🔴 | `Fuel, tolls, repairs and other on-the-road costs` | Drill-down |
 | ⚪ | `Scroll to zoom, drag to pan. Download a copy with the button below.` | Statement viewer |
+| ⚪ | `Payouts are per investor. Open an investor's portal to see their payouts.` | **Super Admin only**, on `/investor` with no investor in view. **New 2026-10-04:** it read `Couldn't load payouts — try again.` there. An investor never sees it. |
 
 ### ✅ Removed in this change
 

@@ -51,7 +51,7 @@ Accepts the exact fields n8n extracts:
 {
   "loadId": "514964283",
   "details": "Beverages, 44,430 lbs, 1,808 pallets",
-  "driver": "Kenrick Davis",
+  "driver": "Kendall Davis",
   "pickupInfo": "COCO COLA SOUTHWEST BEVERAGES",
   "pickupAppointment": "5/20/2025 16:00",
   "pickupAddress": "10220 ELLA BLVD, HOUSTON, TX 77038",
@@ -59,9 +59,9 @@ Accepts the exact fields n8n extracts:
   "dropoffAppointment": "5/21/2025 09:00",
   "dropoffAddress": "3400 FOSSIL CREEK BLVD., Fort Worth, TX 76137",
   "payment": "$610.00",
-  "brokerContactName": "Danna Garcia",
+  "brokerContactName": "Della Garcia",
   "phone": "",
-  "email": "Danna.Garcia@chrobinson.com",
+  "email": "Della.Garcia@chrobinson.com",
   "documents": "514964283",
   "assignedDate": "4/5/2026, 12:39:40 PM",
   "rate": "610.00"

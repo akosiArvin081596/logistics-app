@@ -74,7 +74,7 @@ const makeGuard = (body) => build(body)(db, (req, entity, id, label) => audits.p
 function decide(guard, role, url, userId = 1) {
 	let status = null, nexted = false;
 	const res = { status(c) { status = c; return this; }, end() { return this; } };
-	const req = { session: { user: { role, id: userId, driverName: "Howard Reddie" } } };
+	const req = { session: { user: { role, id: userId, driverName: "Hollis Renner" } } };
 	guard(req, res, () => { nexted = true; }, url, url.split("/").pop());
 	return { status, nexted };
 }

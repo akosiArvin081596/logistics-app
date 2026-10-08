@@ -16,7 +16,7 @@
  * receipt he had ever filed — on a different truck, stamped owner_id = 0 at insert —
  * became a deduction in that investor's already-finalized months.
  *
- * Production, 2026-08-13. Shorn King moved off LogisX-#2372 (owner_id 0) onto
+ * Production, 2026-08-13. Soren King moved off LogisX-#2372 (owner_id 0) onto
  * Logisx-#91 (owner_id 5, in service 2026-08-04) on 2026-08-12 23:17. Three closed
  * months restated at once, all downward, none of them his:
  *
@@ -27,7 +27,7 @@
  * It was ONE-SIDED. Revenue and driver pay scope off the sheet's Owner ID column and
  * truckChargedInMonth(), so nothing was added back — only costs moved.
  *
- * THE PROPERTY UNDER TEST is not "Shorn King's July expenses are excluded". It is
+ * THE PROPERTY UNDER TEST is not "Soren King's July expenses are excluded". It is
  * that THE DRIVER FALLBACK CAN ONLY EVER NARROW. `owner_id` is stamped at insert and
  * is the historically correct attribution; the driver leg exists only for legacy rows
  * that stamp could not classify, and it must never re-admit a row the stamp already
@@ -137,16 +137,16 @@ function loadShipped(db, mutate = (s) => s) {
 
 // ------------------------------------------------------------------ fixtures
 // The production shape as read read-only from app.db on 2026-08-13.
-const OWNER = 5;                       // johnny.rocks.spirits.llc / "Johnny Rocks Spirits"
+const OWNER = 5;                       // jasper.ridge.spirits.llc / "Jasper Ridge Spirits"
 const TRUCKS = [
 	// #33: no in_service_date, so truckChargeFromMonth falls back to created_at.
-	{ id: 2, unit_number: "LogisX-#33", owner_id: OWNER, assigned_driver: "Howard Reddie",
+	{ id: 2, unit_number: "LogisX-#33", owner_id: OWNER, assigned_driver: "Hollis Renner",
 	  created_at: "2026-04-15 03:10:50", in_service_date: "", retired_at: "" },
 	// #2372: the FLEET truck. owner_id 0 — never this investor's.
-	{ id: 3, unit_number: "LogisX-#2372", owner_id: 0, assigned_driver: "Jayden Morrison",
+	{ id: 3, unit_number: "LogisX-#2372", owner_id: 0, assigned_driver: "Jensen Morrison",
 	  created_at: "2026-04-17 14:28:15", in_service_date: "", retired_at: "" },
 	// #91: entered service 2026-08-04, three months after the row was created.
-	{ id: 11, unit_number: "Logisx-#91", owner_id: OWNER, assigned_driver: "Shorn King",
+	{ id: 11, unit_number: "Logisx-#91", owner_id: OWNER, assigned_driver: "Soren King",
 	  created_at: "2026-05-21 12:07:08", in_service_date: "2026-08-04", retired_at: "" },
 	// #77 is SYNTHETIC and exists to make the TRUCK bound the binding one: its driver
 	// is assigned from 2026-06 but it does not enter service until 2026-10. On the
@@ -157,22 +157,22 @@ const TRUCKS = [
 	  created_at: "2026-05-30 09:00:00", in_service_date: "2026-10-01", retired_at: "" },
 ];
 const ASSIGNMENTS = [
-	{ id: 8,  truck_id: 3,  driver_name: "Shorn King",    start_date: "2026-04-29T12:54:15.342Z", end_date: "2026-08-12T23:16:13.964Z" },
-	{ id: 11, truck_id: 2,  driver_name: "Howard Reddie", start_date: "2026-05-13T10:47:01.338Z", end_date: "2026-05-19T14:25:33.210Z" },
-	{ id: 14, truck_id: 2,  driver_name: "Howard Reddie", start_date: "2026-05-19T14:25:33.210Z", end_date: "" },
-	{ id: 24, truck_id: 3,  driver_name: "Jayden Morrison", start_date: "2026-08-12T23:16:13.964Z", end_date: "" },
-	{ id: 25, truck_id: 11, driver_name: "Shorn King",    start_date: "2026-08-12T23:17:51.574Z", end_date: "" },
+	{ id: 8,  truck_id: 3,  driver_name: "Soren King",    start_date: "2026-04-29T12:54:15.342Z", end_date: "2026-08-12T23:16:13.964Z" },
+	{ id: 11, truck_id: 2,  driver_name: "Hollis Renner", start_date: "2026-05-13T10:47:01.338Z", end_date: "2026-05-19T14:25:33.210Z" },
+	{ id: 14, truck_id: 2,  driver_name: "Hollis Renner", start_date: "2026-05-19T14:25:33.210Z", end_date: "" },
+	{ id: 24, truck_id: 3,  driver_name: "Jensen Morrison", start_date: "2026-08-12T23:16:13.964Z", end_date: "" },
+	{ id: 25, truck_id: 11, driver_name: "Soren King",    start_date: "2026-08-12T23:17:51.574Z", end_date: "" },
 	{ id: 77, truck_id: 77, driver_name: "Marcus Webb",  start_date: "2026-06-01T12:00:00.000Z", end_date: "" },
 ];
 const CARRIER_HISTORY = [
-	{ carrier_name: "Johnny Rocks Spirits", driver_name: "Howard Reddie", started_at: "2026-05-13T10:47:01.338Z", ended_at: "" },
-	{ carrier_name: "Johnny Rocks Spirits", driver_name: "Jayden Morrison", started_at: "2026-08-04T13:05:40.435Z", ended_at: "" },
-	{ carrier_name: "Johnny Rocks Spirits", driver_name: "Shorn King", started_at: "2026-08-12T23:17:51.574Z", ended_at: "" },
+	{ carrier_name: "Jasper Ridge Spirits", driver_name: "Hollis Renner", started_at: "2026-05-13T10:47:01.338Z", ended_at: "" },
+	{ carrier_name: "Jasper Ridge Spirits", driver_name: "Jensen Morrison", started_at: "2026-08-04T13:05:40.435Z", ended_at: "" },
+	{ carrier_name: "Jasper Ridge Spirits", driver_name: "Soren King", started_at: "2026-08-12T23:17:51.574Z", ended_at: "" },
 	// SYNTHETIC. Marcus is in the carrier history from 2026-06 while his only truck
 	// does not enter service until 2026-10. Without the fleet clamp on leg C this
 	// wider carrier window SUBSUMES his correct 2026-10 truck window in dedupe, and
 	// the truck bound silently stops applying to him at all.
-	{ carrier_name: "Johnny Rocks Spirits", driver_name: "Marcus Webb", started_at: "2026-06-01T12:00:00.000Z", ended_at: "" },
+	{ carrier_name: "Jasper Ridge Spirits", driver_name: "Marcus Webb", started_at: "2026-06-01T12:00:00.000Z", ended_at: "" },
 ];
 // Real production monthly totals, collapsed to one row per (driver, month).
 //
@@ -181,28 +181,28 @@ const CARRIER_HISTORY = [
 // to express a mis-bucketed as well as a mis-scoped total. Nothing else reads it, so
 // §0/§5 are byte-identical with or without the column.
 const EXPENSES = [
-	{ driver: "Howard Reddie", owner_id: OWNER, truck_unit: "LogisX-#33",   date: "2026-05-20", amount: 5296.00, type: "Fuel" },
-	{ driver: "Howard Reddie", owner_id: OWNER, truck_unit: "LogisX-#33",   date: "2026-06-20", amount: 6345.79, type: "Fuel" },
-	{ driver: "Howard Reddie", owner_id: OWNER, truck_unit: "LogisX-#33",   date: "2026-07-20", amount: 6739.44, type: "Fuel" },
-	{ driver: "Howard Reddie", owner_id: OWNER, truck_unit: "LogisX-#33",   date: "2026-08-06", amount: 1140.17, type: "Maintenance" },
-	{ driver: "Shorn King",    owner_id: 0,     truck_unit: "LogisX-#2372", date: "2026-05-20", amount: 4469.83, type: "Fuel" },
-	{ driver: "Shorn King",    owner_id: 0,     truck_unit: "LogisX-#2372", date: "2026-06-20", amount: 7366.68, type: "Fuel" },
-	{ driver: "Shorn King",    owner_id: 0,     truck_unit: "LogisX-#2372", date: "2026-07-20", amount: 4641.85, type: "Fuel" },
-	{ driver: "Shorn King",    owner_id: 0,     truck_unit: "LogisX-#2372", date: "2026-08-04", amount: 1118.00, type: "Fuel" },
+	{ driver: "Hollis Renner", owner_id: OWNER, truck_unit: "LogisX-#33",   date: "2026-05-20", amount: 5296.00, type: "Fuel" },
+	{ driver: "Hollis Renner", owner_id: OWNER, truck_unit: "LogisX-#33",   date: "2026-06-20", amount: 6345.79, type: "Fuel" },
+	{ driver: "Hollis Renner", owner_id: OWNER, truck_unit: "LogisX-#33",   date: "2026-07-20", amount: 6739.44, type: "Fuel" },
+	{ driver: "Hollis Renner", owner_id: OWNER, truck_unit: "LogisX-#33",   date: "2026-08-06", amount: 1140.17, type: "Maintenance" },
+	{ driver: "Soren King",    owner_id: 0,     truck_unit: "LogisX-#2372", date: "2026-05-20", amount: 4469.83, type: "Fuel" },
+	{ driver: "Soren King",    owner_id: 0,     truck_unit: "LogisX-#2372", date: "2026-06-20", amount: 7366.68, type: "Fuel" },
+	{ driver: "Soren King",    owner_id: 0,     truck_unit: "LogisX-#2372", date: "2026-07-20", amount: 4641.85, type: "Fuel" },
+	{ driver: "Soren King",    owner_id: 0,     truck_unit: "LogisX-#2372", date: "2026-08-04", amount: 1118.00, type: "Fuel" },
 	// Post-move: stamped to the investor at insert, so it needs no fallback at all.
-	{ driver: "Shorn King",    owner_id: OWNER, truck_unit: "Logisx-#91",   date: "2026-09-10", amount: 900.00, type: "Fuel" },
+	{ driver: "Soren King",    owner_id: OWNER, truck_unit: "Logisx-#91",   date: "2026-09-10", amount: 900.00, type: "Fuel" },
 
 	// --- UNATTRIBUTED legacy rows (truck_unit = ''), the only kind the driver
 	// fallback may admit. These are what the leg exists for: rows written before
 	// truck_unit/owner_id were stamped, sitting in a finalized month the boot
 	// backfill deliberately refuses to touch.
-	// Howard, inside his window -> ADMITTED.
-	{ driver: "Howard Reddie", owner_id: 0, truck_unit: "", date: "2026-06-10", amount: 200.00, type: "Toll" },
-	// Shorn, BEFORE he was ever this investor's -> REFUSED. Deleting the month
+	// Hollis, inside his window -> ADMITTED.
+	{ driver: "Hollis Renner", owner_id: 0, truck_unit: "", date: "2026-06-10", amount: 200.00, type: "Toll" },
+	// Soren, BEFORE he was ever this investor's -> REFUSED. Deleting the month
 	// window would silently pull this into a closed month.
-	{ driver: "Shorn King",    owner_id: 0, truck_unit: "", date: "2026-07-15", amount: 300.00, type: "Toll" },
-	// Shorn, after the move -> ADMITTED.
-	{ driver: "Shorn King",    owner_id: 0, truck_unit: "", date: "2026-09-20", amount: 150.00, type: "Toll" },
+	{ driver: "Soren King",    owner_id: 0, truck_unit: "", date: "2026-07-15", amount: 300.00, type: "Toll" },
+	// Soren, after the move -> ADMITTED.
+	{ driver: "Soren King",    owner_id: 0, truck_unit: "", date: "2026-09-20", amount: 150.00, type: "Toll" },
 
 	// SYNTHETIC, for §11 only: a driver who is in NO leg of getInvestorDriverSet(OWNER)
 	// and stamped to nobody. Without her the pre-fix hand-rolled shape and the Super
@@ -228,7 +228,7 @@ function makeDb() {
 			truck_unit TEXT DEFAULT '', date TEXT, amount REAL, type TEXT DEFAULT '', status TEXT DEFAULT '',
 			posted_period TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 	`);
-	db.prepare("INSERT INTO users (id, company_name) VALUES (?, ?)").run(OWNER, "Johnny Rocks Spirits");
+	db.prepare("INSERT INTO users (id, company_name) VALUES (?, ?)").run(OWNER, "Jasper Ridge Spirits");
 	const t = db.prepare("INSERT INTO trucks (id, unit_number, owner_id, assigned_driver, created_at, in_service_date, retired_at) VALUES (@id,@unit_number,@owner_id,@assigned_driver,@created_at,@in_service_date,@retired_at)");
 	TRUCKS.forEach(r => t.run(r));
 	const a = db.prepare("INSERT INTO truck_assignments (id, truck_id, driver_name, start_date, end_date) VALUES (@id,@truck_id,@driver_name,@start_date,@end_date)");
@@ -255,7 +255,7 @@ const S = loadShipped(db);
 	// The live driver set as getInvestorDriverSet() built it on 2026-08-13: trucks
 	// .assigned_driver + active truck_assignments + carrier_driver_history, unioned,
 	// with no clock anywhere.
-	const oldSet = ["howard reddie", "shorn king", "jayden morrison", "marcus webb"];
+	const oldSet = ["hollis renner", "soren king", "jensen morrison", "marcus webb"];
 	const ph = oldSet.map(() => "?").join(",");
 	const before = {};
 	// Restricted to the rows that mirror production (the ones carrying a truck_unit),
@@ -268,7 +268,7 @@ const S = loadShipped(db);
 	eq(before["2026-07"], 11381.29, "§0 the OLD predicate reproduces July's $11,381.29 — the figure in the screenshot");
 	const beforeShare = Math.round((32197 - 4200 - 3043.33 - before["2026-07"]) * 0.5);
 	eq(beforeShare, 6786, "§0 ...which yields the $6,786 the client reported, against a frozen ledger of $9,107");
-	eq(Math.round((before["2026-05"] - 5296.00) * 100) / 100, 4469.83, "§0 May was inflated by Shorn's expenses too (the 'cut in half' month)");
+	eq(Math.round((before["2026-05"] - 5296.00) * 100) / 100, 4469.83, "§0 May was inflated by Soren's expenses too (the 'cut in half' month)");
 	eq(Math.round((before["2026-08"] - 1140.17) * 100) / 100, 1118.00, "§0 and August, the one OPEN month, is genuinely mis-stated today");
 }
 
@@ -345,24 +345,24 @@ const S = loadShipped(db);
 {
 	const w = S.getInvestorDriverMonthWindows(OWNER);
 
-	// Shorn King is in the driver SET for this investor (truck #91 names him), but
+	// Soren King is in the driver SET for this investor (truck #91 names him), but
 	// his window must start at the LATER of the assignment (2026-08) and the truck
 	// entering service (2026-08) — never at his 2026-04 start on the FLEET truck,
 	// which belongs to a different owner entirely.
-	const shorn = w.get("shorn king") || [];
-	ok(shorn.length > 0, "§4 Shorn King has a window (he is genuinely on truck #91 now)");
-	ok(shorn.every(x => x.from >= "2026-08"), `§4 every Shorn King window starts 2026-08 or later; got ${JSON.stringify(shorn)}`);
+	const soren = w.get("soren king") || [];
+	ok(soren.length > 0, "§4 Soren King has a window (he is genuinely on truck #91 now)");
+	ok(soren.every(x => x.from >= "2026-08"), `§4 every Soren King window starts 2026-08 or later; got ${JSON.stringify(soren)}`);
 
-	// Howard Reddie: on #33 (owner 5, created 2026-04) from 2026-05.
-	const howard = w.get("howard reddie") || [];
-	ok(howard.length > 0, "§4 Howard Reddie has a window");
-	ok(howard.some(x => x.from === "2026-05" && x.until === ""), `§4 Howard's open window starts 2026-05; got ${JSON.stringify(howard)}`);
+	// Hollis Renner: on #33 (owner 5, created 2026-04) from 2026-05.
+	const hollis = w.get("hollis renner") || [];
+	ok(hollis.length > 0, "§4 Hollis Renner has a window");
+	ok(hollis.some(x => x.from === "2026-05" && x.until === ""), `§4 Hollis's open window starts 2026-05; got ${JSON.stringify(hollis)}`);
 
-	// Jayden Morrison drives the FLEET truck (owner 0), so legs A/B give him nothing
+	// Jensen Morrison drives the FLEET truck (owner 0), so legs A/B give him nothing
 	// under this investor and leg C is the ONLY thing that answers — the gap that leg
 	// exists to cover. It starts 2026-08-04, and he must not reach back past it.
-	const jayden = w.get("jayden morrison") || [];
-	eq(jayden, [{ from: "2026-08", until: "" }], "§4 a driver with no truck link is covered by carrier history alone");
+	const jensen = w.get("jensen morrison") || [];
+	eq(jensen, [{ from: "2026-08", until: "" }], "§4 a driver with no truck link is covered by carrier history alone");
 
 	// Marcus Webb: assigned 2026-06, truck not in service until 2026-10. The TRUCK
 	// bound is the binding one here — a driver sitting in a truck that is not yet
@@ -371,11 +371,11 @@ const S = loadShipped(db);
 	eq(marcus, [{ from: "2026-10", until: "" }], "§4 the truck's in-service date wins over an earlier assignment");
 
 	// Subsumed windows are dropped, because the clause count grows with assignment
-	// history and history only grows. Howard has three raw windows here — two
+	// history and history only grows. Hollis has three raw windows here — two
 	// assignment rows plus a carrier-history row — and his closed 2026-05..2026-05
 	// stint sits wholly inside his open one.
-	eq(howard, [{ from: "2026-05", until: "" }], "§4 subsumed windows collapse into the one that contains them");
-	ok(shorn.length === 1, `§4 Shorn's two identical windows (truck + carrier history) dedupe to one; got ${shorn.length}`);
+	eq(hollis, [{ from: "2026-05", until: "" }], "§4 subsumed windows collapse into the one that contains them");
+	ok(soren.length === 1, `§4 Soren's two identical windows (truck + carrier history) dedupe to one; got ${soren.length}`);
 	// ...but only when genuinely contained. Two disjoint stints must both survive.
 	eq(S.intersectMonthWindow({ from: "2026-01", until: "2026-02" }, { from: "", until: "" }),
 		{ from: "2026-01", until: "2026-02" }, "§4 (sanity) a bounded stint keeps both bounds");
@@ -402,22 +402,22 @@ function monthlyTripExp(ownerId, lib = S) {
 	const got = monthlyTripExp(OWNER);
 
 	// The frozen investor_payouts rows were computed BEFORE the contamination, so
-	// they are the ground-truth oracle. Howard alone, every closed month.
-	eq(got["2026-05"], 5296.00, "§5 2026-05 trip expenses = Howard only");
-	// Howard's stamped 6345.79 + his 200.00 unattributed legacy row: the fallback
+	// they are the ground-truth oracle. Hollis alone, every closed month.
+	eq(got["2026-05"], 5296.00, "§5 2026-05 trip expenses = Hollis only");
+	// Hollis's stamped 6345.79 + his 200.00 unattributed legacy row: the fallback
 	// still does the job it exists for.
-	eq(got["2026-06"], 6545.79, "§5 2026-06 = Howard stamped + Howard's unattributed legacy row");
-	// 6739.44, NOT 11381.29 (which added Shorn's 4641.85) and NOT 7039.44 (which
+	eq(got["2026-06"], 6545.79, "§5 2026-06 = Hollis stamped + Hollis's unattributed legacy row");
+	// 6739.44, NOT 11381.29 (which added Soren's 4641.85) and NOT 7039.44 (which
 	// would add his 300.00 unattributed row from a month he was not yet here).
-	eq(got["2026-07"], 6739.44, "§5 2026-07 trip expenses = Howard only (was 11381.29)");
+	eq(got["2026-07"], 6739.44, "§5 2026-07 trip expenses = Hollis only (was 11381.29)");
 
-	// August: Shorn's pre-move receipts (2026-08-04, on the fleet truck) are still
+	// August: Soren's pre-move receipts (2026-08-04, on the fleet truck) are still
 	// not this investor's — he did not move until 2026-08-12. The month window alone
 	// cannot see that; truck_unit is what does.
-	eq(got["2026-08"], 1140.17, "§5 2026-08 excludes Shorn's pre-move receipts (SAME month as the move)");
+	eq(got["2026-08"], 1140.17, "§5 2026-08 excludes Soren's pre-move receipts (SAME month as the move)");
 
 	// September: one stamped row + one unattributed row, both after the move.
-	eq(got["2026-09"], 1050.00, "§5 2026-09 includes Shorn's post-move rows (stamped and unattributed)");
+	eq(got["2026-09"], 1050.00, "§5 2026-09 includes Soren's post-move rows (stamped and unattributed)");
 
 	// Reconstruct the July investor share and check it against the frozen ledger.
 	// netProfit = 32197 - 4200 - 3043.33 - tripExpenses; share = netProfit * 50%.
@@ -599,7 +599,7 @@ function monthlyTripExp(ownerId, lib = S) {
 //
 //     owner 5, all-time, measured on production   BEFORE $40,761.24
 //                                                  AFTER $19,553.93
-//              Shorn King, 93 rows, owner_id 0, truck_unit 'LogisX-#2372'
+//              Soren King, 93 rows, owner_id 0, truck_unit 'LogisX-#2372'
 //                                                  DELTA $21,207.31
 //
 // It failed OPEN twice over: `investorDriverSet.size > 0` meant an investor whose set
@@ -690,11 +690,11 @@ let sectionMutants = 0;
 	// before §9/§10 ran, so the inability to run is recorded as the failure it is.
 	try {
 		const got = runBlock(block, OWNER, S);
-		// Howard's four stamped rows + Shorn's one POST-move stamped row + the two
+		// Hollis's four stamped rows + Soren's one POST-move stamped row + the two
 		// unattributed rows inside their drivers' windows. Nothing else.
-		eq(got.fuel, 19281.23, "§11 Fuel = Howard's stamped fuel + Shorn's post-move row only");
-		eq(got.maint, 1140.17, "§11 Maintenance = Howard's August row");
-		eq(got.other, 350.00, "§11 Other = the two admissible unattributed rows (200 + 150), NOT Shorn's pre-move 300");
+		eq(got.fuel, 19281.23, "§11 Fuel = Hollis's stamped fuel + Soren's post-move row only");
+		eq(got.maint, 1140.17, "§11 Maintenance = Hollis's August row");
+		eq(got.other, 350.00, "§11 Other = the two admissible unattributed rows (200 + 150), NOT Soren's pre-move 300");
 		eq(got.total, 20771.40, "§11 Total Expenses on the downloadable P&L");
 
 		// Super Admin: reportOwnerId is null, so no scope at all — every row, including
@@ -729,11 +729,11 @@ let sectionMutants = 0;
 			"§11 MUTANT not caught by the structural checks: the hand-rolled driver-set shape is restored");
 
 		const bad = runBlock(mutantBlock, OWNER, S);
-		// $17,896.36 of Shorn King's costs, on trucks this investor has never owned,
+		// $17,896.36 of Soren King's costs, on trucks this investor has never owned,
 		// land in his downloadable P&L. This is the production defect, to scale.
 		eq(bad.total, 38667.76, "§11 MUTANT reproduces the contaminated total the report was printing");
 		eq(Math.round((bad.total - got.total) * 100) / 100, 17896.36,
-			"§11 MUTANT: the delta is exactly Shorn King's rows, none of which are this investor's");
+			"§11 MUTANT: the delta is exactly Soren King's rows, none of which are this investor's");
 		ok(bad.total !== sa.total,
 			"§11 MUTANT is distinguishable from the Super Admin branch (Priya Raman is in no driver set)");
 	} catch (e) {
@@ -906,7 +906,7 @@ const MUTANTS = [
 	{
 		name: "M6 driver leg admits an ATTRIBUTED row (owner_id = 0 read as unstamped)",
 		mutate: (s) => s.replace("COALESCE(truck_unit,'') = '' AND LOWER(driver) = ?", "LOWER(driver) = ?"),
-		// Shorn's 2026-08-04 receipts sit on the fleet truck in the SAME month he
+		// Soren's 2026-08-04 receipts sit on the fleet truck in the SAME month he
 		// moved, so only the truck_unit bound refuses them.
 		expect: (lib) => monthlyTripExp(OWNER, lib)["2026-08"] !== 1140.17,
 	},

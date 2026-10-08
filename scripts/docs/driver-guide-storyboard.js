@@ -30,14 +30,15 @@
  */
 
 // The demo load created for this guide, and the real load that starts active.
-// ⚠️ Howard Reddie, not Shorn King. Deshorn's correction: the guide must show
-// real data, never an empty state. Shorn's truck reports fuel_pct = null (a
+// ⚠️ This driver, not the other one on the local sheet. The owner's correction:
+// the guide must show real data, never an empty state. The other driver's truck
+// reports fuel_pct = null (a
 // sensor dropout), so the Fuel beat rendered "this truck's ELD isn't reporting
 // a fuel level" — a blank screen that teaches nothing. LogisX-#33 reports a
 // real level against a configured 203-gallon tank, so the range is on screen.
 const DRIVER_NAME = "Howard Reddie";
 
-// ⚠️ REAL LOADS, not synthetic rows. Deshorn: "Use real data... show em the
+// ⚠️ REAL LOADS, not synthetic rows. The owner: "Use real data... show em the
 // actual thing." Since the LOCAL sheet is now an exact copy of production's
 // Job Tracking, this driver has two genuine loads — real shipper, real
 // reference numbers, real commodity and appointment times. The invented
@@ -173,7 +174,7 @@ module.exports = [
 		// ⚠️ SPLIT IN TWO. The fuel panel is far taller than the 896px viewport, so
 		// one beat could not hold the range AND the diesel stops — the third
 		// highlight fell off the bottom while the narration was still describing
-		// it. Deshorn's note was exactly this: the highlight must match the
+		// it. The owner's note was exactly this: the highlight must match the
 		// section being explained. One screen, one subject, one script.
 		id: "fuel-range",
 		highlight: [

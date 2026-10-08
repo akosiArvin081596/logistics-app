@@ -2,7 +2,7 @@
 // Locks the duplicate-receipt guard: the WRITE-time block/override decision and
 // the UNIQUE PARTIAL index that stands behind it.
 //
-// WHY THIS EXISTS. Deshorn's ask was "make sure that the receipt doesn't have
+// WHY THIS EXISTS. Desoren's ask was "make sure that the receipt doesn't have
 // any duplicate and if it has duplicate just let it automatically send me a
 // ping." Two of the three pieces that answer it are one-line predicates whose
 // WRONG version is indistinguishable from the right one at a glance, and whose
@@ -412,7 +412,7 @@ const KEY_RE = new Function(`return ${extractOne(/const key = (\/\^\[td\][^/\n]*
 
 const keyOk = (k) => KEY_RE.test(k);
 check("real truck-scoped key", keyOk("t:logisx-#33|2026-06-18|20000"), true);
-check("real driver-scoped key", keyOk("d:shorn king|2026-08-01|40000"), true);
+check("real driver-scoped key", keyOk("d:soren king|2026-08-01|40000"), true);
 check("scope letter must be t or d", keyOk("x:foo|2026-06-18|20000"), false);
 // ⚠️ The newline cases are the point: a truck unit typed with a line break
 // forges pm2 log lines and mail headers. nodemailer strips CR/LF from a Subject,
@@ -563,7 +563,7 @@ check("empty string rejected", keyOk(""), false);
 			.get(KEY);
 		if (guard(seen) !== null) return "already_alerted";
 		if (db.prepare(capSql).get().c >= MAX_PER_DAY) return "daily_cap";
-		db.prepare(upsertSql).run(KEY, "LogisX-#33", "Howard Reddie", "2026-09-18", 120, 60, "high", "1,2", KEY);
+		db.prepare(upsertSql).run(KEY, "LogisX-#33", "Hollis Renner", "2026-09-18", 120, 60, "high", "1,2", KEY);
 		if (delivered) db.prepare(stampSql).run(new Date().toISOString(), KEY);
 		return delivered ? "alerted" : "send_failed";
 	}

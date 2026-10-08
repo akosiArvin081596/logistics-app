@@ -147,7 +147,7 @@ Through the ELD integration, yes — they can see your drive time, on-duty time,
 HR questions, payroll questions, benefits questions — talk to your administrator (the person who handles onboarding and admin tasks). Their contact info was in your welcome email.
 
 **Q. Who is the CEO?**
-Deshorn King.
+Desoren King.
 
 **Q. What if I want to give feedback about the app itself?**
 Tell dispatch. They'll relay it. The app is actively developed and feedback from drivers shapes future improvements.

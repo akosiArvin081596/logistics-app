@@ -28,6 +28,6 @@ So arrive, do your job, and let the truck do the paperwork.
 
 --- PRODUCTION NOTE ---
 
-⚠️ REWRITTEN after Deshorn's correction. The earlier version told drivers to
+⚠️ REWRITTEN after Desoren's correction. The earlier version told drivers to
 tap the button at each stop, which is wrong: tryGeofenceAdvance() moves the
 status from the truck's own ELD position. The button is a manual fallback.

@@ -73,8 +73,8 @@ For `driver_renamed`:
 
 ```json
 {
-  "old_name": "Lesline Jonhson",
-  "new_name": "Lesline Johnson",
+  "old_name": "Leonora Jonhson",
+  "new_name": "Leonora Johnson",
   "rows_updated": {
     "job_tracking": 86,
     "carrier_database": 1,

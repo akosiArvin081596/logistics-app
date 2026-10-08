@@ -36,7 +36,7 @@ const OUT_DIR = path.join(__dirname, "..", "..", "docs", "manual", "assets", "sc
 const DEFAULT_CREDENTIALS = {
 	super_admin: { username: "super_admin", password: "Password123!" },
 	dispatcher: { username: "dispatch1", password: "investor123" },
-	driver: { username: "lesline", password: "investor123" },
+	driver: { username: "leonora", password: "investor123" },
 	investor: { username: "kevin", password: "investor123" },
 	public: null,
 };

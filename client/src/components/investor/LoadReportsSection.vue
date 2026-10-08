@@ -135,9 +135,9 @@
       </div>
     </div>
 
-    <!-- Ledger unavailable (e.g. Super Admin on /investor previewing nobody —
-         payouts are per-owner and 400 there). Show earnings only; never render
-         a $0 "owed" we can't stand behind. -->
+    <!-- Ledger unavailable (a failed fetch, or a Super Admin on /investor
+         previewing nobody — payouts are per-owner, so none is asked for). Show
+         earnings only; never render a $0 "owed" we can't stand behind. -->
     <div class="lr-owed" v-if="ledgerFailed">
       <div class="lr-owed-row">
         <span class="lr-owed-label">Earned to date</span>
@@ -299,7 +299,9 @@ const error = ref(false)
 // me?" ambiguity the removed "All months" line did.
 const earnedToDate = computed(() => props.production?.investorNetToDate || 0)
 const ledgerLoading = computed(() => investorStore.payoutsLoading)
-const ledgerFailed = computed(() => investorStore.payoutsFailed)
+// No ledger to read: the fetch failed, or a Super Admin has no investor in view
+// and the ledger was never asked for (payoutsNoOwner).
+const ledgerFailed = computed(() => investorStore.payoutsFailed || investorStore.payoutsNoOwner)
 
 const sel = computed(() => periods.value[selectedIdx.value] || null)
 

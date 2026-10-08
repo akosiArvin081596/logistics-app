@@ -6,7 +6,7 @@
 //
 //   super_admin / Password123!     (Super Admin)
 //   dispatch1   / investor123      (Dispatcher)
-//   lesline     / investor123      (Driver — Lesline Johnson)
+//   leonora     / investor123      (Driver — Leonora Johnson)
 //   kevin       / investor123      (Investor — owns 2 trucks)
 //
 // Each item has:

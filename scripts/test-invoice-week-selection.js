@@ -379,7 +379,7 @@ const IVY = [
 	row({ "Load ID": "6001", Driver: "Ivy Inweek", "Job Status": "Delivered", "Pickup Appointment": "9/22/2026 9:00", "Drop-off Appointment": "9/22/2026 17:00", "  Payment  ": " $ 900.00 " }),
 ];
 // Ken Former — NOT on the roster, only undated 2025 history. The production shape
-// behind the weekly "WORKED-BUT-UNBILLED (kenrick davis)" alarm and its retries.
+// behind the weekly "WORKED-BUT-UNBILLED (kendall davis)" alarm and its retries.
 const KEN = [
 	row({ "Load ID": "7001", Driver: "Ken Former", "Job Status": "Completed", "Pickup Appointment": "5/16/2025", "Drop-off Appointment": "5/16/2025", "  Payment  ": " $ 750.00 " }),
 ];

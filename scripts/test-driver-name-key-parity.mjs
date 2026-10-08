@@ -55,9 +55,9 @@ const EM_SPACE = String.fromCharCode(0x2003)
 const BOM = String.fromCharCode(0xfeff)
 const INPUTS = [
   undefined, null, '', ' ', '\t\n',
-  'Rodney Brown', 'rodney brown', 'RODNEY BROWN',
-  '  Rodney   Brown  ', 'Rodney\tBrown', 'Rodney\nBrown', 'Rodney \t \n Brown',
-  `Rodney${NBSP}Brown`, `${NBSP}Rodney${EM_SPACE}${EM_SPACE}Brown${NBSP}`, `${BOM}Rodney Brown`,
+  'Roland Brown', 'roland brown', 'ROLAND BROWN',
+  '  Roland   Brown  ', 'Roland\tBrown', 'Roland\nBrown', 'Roland \t \n Brown',
+  `Roland${NBSP}Brown`, `${NBSP}Roland${EM_SPACE}${EM_SPACE}Brown${NBSP}`, `${BOM}Roland Brown`,
   'Mary Ann  De La Cruz', 'O\'Neil', 'José  Núñez',
 ]
 
@@ -69,7 +69,7 @@ function differences(serverRule) {
 const serverRule = liftServerRule(SRC)
 const diffs = differences(serverRule)
 ok(`normDriver() matches normalizeDriverName() on every input (differs on ${JSON.stringify(diffs)})`, diffs.length === 0)
-ok('two spacings of one name share a key', normDriver(' Rodney  Brown') === normDriver('rodney brown'))
+ok('two spacings of one name share a key', normDriver(' Roland  Brown') === normDriver('roland brown'))
 ok('a blank name keys to the empty string', normDriver(null) === '' && normDriver('   ') === '')
 
 // The comparison can fail: a server copy without the whitespace collapse.

@@ -1026,10 +1026,12 @@ const PINNED = [
 	// in lib/financials-calc.js (pinned below).
 	["gatherLedgerScopeFacts()", "gatherLedgerScopeFacts", ["unitToVid", "trucksByDriver"]],
 	["GET /api/investor", ROUTES.investor,
-		["milesByLoadId", "grossByDriver", "milesByDriver", "milesByTruck", "loadsByDriver", "loadsByTruck", "revenueByTruckMonth",
+		["milesByLoadId", "milesByDriver", "milesByTruck", "loadsByTruck", "revenueByTruckMonth",
 			"driverDaySets", "driverMonthlyDays", "driverMonthlyDayLoads", "driverDisplayName", "driverMonthlyRevenue", "unitToVid",
 			"driverDaySource", "driverPayDetails", "trucksByDriver",
+			"loadsByDriverTruck", "revenueByDriverTruck", "dayTruckByDriver", "homeUnit",
 			// keyed by unit number
+			"revenueByTruck", "revenueOnUnit", "loadsOnUnit", "payOnUnit", "expOnUnit",
 			"perTruckData", "maintByTruck", "compByTruck", "windowRevenue", "modeByUnit", "insufficient", "basis", "alloc"]],
 	// Its per-truck and per-driver figures are the report's groups (Maps); the
 	// two name-keyed objects it still builds itself:

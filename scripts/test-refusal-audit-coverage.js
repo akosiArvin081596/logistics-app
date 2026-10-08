@@ -151,7 +151,7 @@ function callSites(name) {
 // the shape that passes. AUDITED_UPSTREAM is spelled out at the call site so a
 // deliberate skip is legible as one.
 const AUDITED = (args) => /\baction:\s*["'`a-zA-Z]/.test(args) || /AUDITED_UPSTREAM/.test(args)
-	|| /\b(dirAudit|dirDelAudit|createAudit|truckEditAudit|truckDelAudit|linkAudit|unlinkAudit|maintAudit|feeAudit|feePayAudit|loadDelAudit|invoiceAdjustAudit|invoicePaidAudit|invoiceRevertAudit|basisAudit)\b/.test(args);
+	|| /\b(dirAudit|dirDelAudit|createAudit|truckEditAudit|truckDelAudit|linkAudit|unlinkAudit|maintAudit|feeAudit|feePayAudit|loadDelAudit|invoiceAdjustAudit|invoicePaidAudit|invoiceRevertAudit|basisAudit|accountRowAudit)\b/.test(args);
 
 let totalSites = 0;
 for (const h of HELPERS) {

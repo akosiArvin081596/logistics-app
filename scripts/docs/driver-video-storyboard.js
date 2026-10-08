@@ -24,7 +24,7 @@
 
 "use strict";
 
-const DEMO = "566293352";   // Howard Reddie's demo load
+const DEMO = "566293352";   // Hollis Renner's demo load
 // ---------------------------------------------------------------------------
 // The closing card. Rendered by the runner via page.setContent(), at the same
 // 414x896 phone frame as every other clip, so it cuts together seamlessly.

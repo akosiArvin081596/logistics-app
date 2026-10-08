@@ -102,7 +102,7 @@ function mutate(src, from, to) {
 const HEADS = {
 	dirGet: 'app.get("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (req, res) => {',
 	dirPost: 'app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), async (req, res) => {',
-	dirPut: 'app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), (req, res) => {',
+	dirPut: 'app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), async (req, res) => {',
 };
 const ROUTES = Object.fromEntries(Object.entries(HEADS).map(([k, h]) => [k, liftRoute(h)]));
 // The eighteen columns the forms send, off the GET route, whose last three are
@@ -198,20 +198,20 @@ function makeDb({ lockedMonths = [] } = {}) {
 		VALUES (?, ?, 'Houston', 'TX', ?, 'active', ?, ?, ?)`);
 	// A day rate of his own, and a share stored from when he drove as an
 	// owner-operator (the type not in use).
-	dir.run(1, "Shorn King", "555-0100", "fixed", 20, 300);
+	dir.run(1, "Soren King", "555-0100", "fixed", 20, 300);
 	// An owner-operator share, and a day rate stored for the type not in use.
-	dir.run(2, "Rodney Brown", "555-0200", "percentage", 20, 275);
+	dir.run(2, "Roland Brown", "555-0200", "percentage", 20, 275);
 	// A day rate of her own and no truck: the $250 fallback is under it.
 	dir.run(3, "Nora Solo", "555-0300", "fixed", 0, 300);
 	// A day rate equal to his truck's: clearing it prices him the same.
 	dir.run(4, "Even Steven", "555-0400", "fixed", 0, 250);
 	const truck = db.prepare("INSERT INTO trucks (id, unit_number, assigned_driver, driver_pay_daily) VALUES (?, ?, ?, ?)");
-	truck.run(1, "33", "Shorn King", 275);
-	truck.run(2, "302", "Rodney Brown", 260);
+	truck.run(1, "33", "Soren King", 275);
+	truck.run(2, "302", "Roland Brown", 260);
 	truck.run(3, "91", "Even Steven", 250);
 	const asg = db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (?, ?, '2026-05-01T12:00:00.000Z')");
-	asg.run(1, "Shorn King");
-	asg.run(2, "Rodney Brown");
+	asg.run(1, "Soren King");
+	asg.run(2, "Roland Brown");
 	asg.run(3, "Even Steven");
 	for (const p of lockedMonths) db.prepare("INSERT INTO period_locks (period, status) VALUES (?, 'locked')").run(p);
 	return db;
@@ -261,7 +261,7 @@ function mountRoute(routeSrc, env) {
 	return (req) => {
 		const out = { status: 200, body: null };
 		const res = { status(c) { out.status = c; return this; }, json(b) { out.body = b; return this; } };
-		// The POST is async (it may read Job Tracking); the PUT answers at once.
+		// Both routes are async (each may read Job Tracking first).
 		const done = handler({ params: {}, query: {}, body: {}, ...req }, res);
 		return done && typeof done.then === "function" ? done.then(() => out) : out;
 	};
@@ -280,10 +280,17 @@ function mountAll(db, routes = {}) {
 		},
 		periodLockUnreadableResponse: (req, res) => res.status(409).json({ code: "PERIOD_LOCK_UNREADABLE" }),
 		syncCarrierDriverHistory: () => {},
-		// A new driver has no history anywhere; the floor itself is
-		// scripts/test-truck-create-new-driver.js's subject.
+		// The driver's history as driverHistoryFloorMonth() reads this fixture: an
+		// empty sheet, so their earliest truck_assignments row, and none for a new
+		// driver. The floor itself is scripts/test-truck-create-new-driver.js's
+		// subject.
 		getJobTrackingCached: async () => ({ headers: ["Load ID", "Driver", "Assigned Date"], data: [] }),
-		driverHistoryFloorMonth: () => ({ floor: "", unbounded: false }),
+		driverHistoryFloorMonth: (name) => ({
+			floor: db.prepare("SELECT MIN(substr(start_date, 1, 7)) AS m FROM truck_assignments WHERE LOWER(driver_name) = LOWER(?)")
+				.get(String(name || "").trim()).m || "",
+			unbounded: false,
+		}),
+		directoryEditMayMoveMoney: new Function(`"use strict";\n${liftFunction("directoryEditMayMoveMoney")}\nreturn directoryEditMayMoveMoney;`)(),
 		notifyChange: () => {},
 		recordPayRateChanges: () => {},
 		console: { error() {}, log() {}, warn() {} },
@@ -307,8 +314,8 @@ async function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 
 	// §1 "0" clears.
 	for (const [label, id, edit, want] of [
-		["Shorn King's $300 set to 0 (his truck's $275 applies)", 1, { payDaily: 0 }, 275],
-		["Shorn King's $300 blanked (the form: blank means the truck's rate)", 1, { payDaily: "" }, 275],
+		["Soren King's $300 set to 0 (his truck's $275 applies)", 1, { payDaily: 0 }, 275],
+		["Soren King's $300 blanked (the form: blank means the truck's rate)", 1, { payDaily: "" }, 275],
 		["Nora Solo's $300 set to 0 (no truck: the $250 fallback applies)", 3, { payDaily: 0 }, 250],
 	]) {
 		const db = makeDb();
@@ -316,7 +323,7 @@ async function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 		const before = row(db, id);
 		t("s1", `§1 ${label}: the dialog sends ["fixed", "", "0"]`, JSON.stringify(dialogCells(before, edit)) === JSON.stringify(["fixed", "", "0"]));
 		const rateBefore = effectiveDailyRate(db, app.m, before.driver_name);
-		const r = app.dirPut(SUPER, id, formBody(before, dialogCells(before, edit)));
+		const r = await app.dirPut(SUPER, id, formBody(before, dialogCells(before, edit)));
 		const after = row(db, id);
 		t("s1", `§1 ${label}: saved (got ${r.status} ${(r.body || {}).code || ""})`, r.status === 200);
 		t("s1", `§1 ${label}: pay_daily is 0, the type and the stored share as they were (${JSON.stringify(terms(after))})`,
@@ -334,8 +341,8 @@ async function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 		const app = mountAll(db, routes);
 		const before = row(db, 2);
 		const cells = dialogCells(before, { payPercentage: 0 });
-		const r = app.dirPut(SUPER, 2, formBody(before, cells));
-		t("s1", `§1 Rodney Brown's 20 % share set to 0: ["percentage", "0", ""] saved as 0 %, his stored $275 day rate kept (got ${r.status}, ${JSON.stringify(terms(row(db, 2)))})`,
+		const r = await app.dirPut(SUPER, 2, formBody(before, cells));
+		t("s1", `§1 Roland Brown's 20 % share set to 0: ["percentage", "0", ""] saved as 0 %, his stored $275 day rate kept (got ${r.status}, ${JSON.stringify(terms(row(db, 2)))})`,
 			JSON.stringify(cells) === JSON.stringify(["percentage", "0", ""]) && r.status === 200 &&
 			JSON.stringify(terms(row(db, 2))) === JSON.stringify(["percentage", 0, 275]));
 	}
@@ -345,7 +352,7 @@ async function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 		const db = makeDb();
 		const app = mountAll(db, routes);
 		const before = row(db, 1);
-		const r = app.dirPut(DISPATCHER, 1, formBody(before, ["fixed", "", "0"]));
+		const r = await app.dirPut(DISPATCHER, 1, formBody(before, ["fixed", "", "0"]));
 		t("s1", `§1 a Dispatcher's "0": 403 PAY_EDIT_ADMIN_ONLY, $300 kept (got ${r.status} ${(r.body || {}).code || ""})`,
 			r.status === 403 && r.body.code === "PAY_EDIT_ADMIN_ONLY" && row(db, 1).pay_daily === 300);
 		t("s1", "§1 ...and the Dispatcher's dialog sends no pay at all",
@@ -358,7 +365,7 @@ async function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 		const app = mountAll(db, routes);
 		const before = row(db, 1);
 		const cells = oldPageCells({ ...dialogOpenRow(before), payDaily: 0 });
-		const r = app.dirPut(SUPER, 1, formBody(before, cells, { PhoneNumber: "555-0199" }));
+		const r = await app.dirPut(SUPER, 1, formBody(before, cells, { PhoneNumber: "555-0199" }));
 		t("s2", `§2 a page from before the fix: "set to 0" arrives as ${JSON.stringify(cells)}, saved, the $300 kept, the phone edit written (got ${r.status}, ${JSON.stringify(terms(row(db, 1)))})`,
 			JSON.stringify(cells) === JSON.stringify(["fixed", 0, 0]) && r.status === 200 &&
 			JSON.stringify(terms(row(db, 1))) === JSON.stringify(terms(before)) && row(db, 1).phone === "555-0199");
@@ -367,7 +374,7 @@ async function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 	for (const [label, value] of [["the number 0", 0], ["null", null], ["false", false]]) {
 		const db = makeDb();
 		const app = mountAll(db, routes);
-		const r = app.dirPut(SUPER, 1, { headers: ["Driver", "PayDaily", "PayPercentage"], values: ["Shorn King", value, value] });
+		const r = await app.dirPut(SUPER, 1, { headers: ["Driver", "PayDaily", "PayPercentage"], values: ["Soren King", value, value] });
 		t("s2", `§2 ${label} sent for both amounts directly: saved, the stored terms kept (got ${r.status}, ${JSON.stringify(terms(row(db, 1)))})`,
 			r.status === 200 && JSON.stringify(terms(row(db, 1))) === JSON.stringify(["fixed", 20, 300]) && audits(db, "update_driver_pay").length === 0);
 	}
@@ -383,7 +390,7 @@ async function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 		const app = mountAll(db, routes);
 		const before = row(db, id);
 		const cells = cellsOf(before);
-		const r = app.dirPut(SUPER, id, formBody(before, cells, { City: "Katy" }));
+		const r = await app.dirPut(SUPER, id, formBody(before, cells, { City: "Katy" }));
 		t("s3", `§3 ${label}: ${JSON.stringify(cells)}, saved with the city edit, every stored term kept (got ${r.status}, ${JSON.stringify(terms(row(db, id)))})`,
 			r.status === 200 && row(db, id).city === "Katy" && JSON.stringify(terms(row(db, id))) === JSON.stringify(terms(before)));
 		t("s3", `§3 ${label}: no update_driver_pay line`, audits(db, "update_driver_pay").length === 0);
@@ -395,8 +402,8 @@ async function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 		const app = mountAll(db, routes);
 		const before = row(db, 1);
 		const cells = dialogCells(before, { payType: "percentage", payPercentage: 25 });
-		const r = app.dirPut(SUPER, 1, formBody(before, cells));
-		t("s3", `§3 Shorn King switched to a 25 % share: ["percentage", "25", ""], his $300 day rate kept (got ${r.status}, ${JSON.stringify(terms(row(db, 1)))})`,
+		const r = await app.dirPut(SUPER, 1, formBody(before, cells));
+		t("s3", `§3 Soren King switched to a 25 % share: ["percentage", "25", ""], his $300 day rate kept (got ${r.status}, ${JSON.stringify(terms(row(db, 1)))})`,
 			JSON.stringify(cells) === JSON.stringify(["percentage", "25", ""]) && r.status === 200 &&
 			JSON.stringify(terms(row(db, 1))) === JSON.stringify(["percentage", 25, 300]));
 	}
@@ -407,9 +414,9 @@ async function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 		const app = mountAll(db, routes);
 		const before = row(db, 1);
 		const snap = snapshot(db);
-		const r = app.dirPut(SUPER, 1, formBody(before, dialogCells(before, { payDaily: 0 })));
+		const r = await app.dirPut(SUPER, 1, formBody(before, dialogCells(before, { payDaily: 0 })));
 		const refusal = app.lockRefusals[0] || {};
-		t("s4", `§4 August locked, Shorn King's $300 cleared (his truck's $275 would reprice August): 409 PERIOD_FINALIZED on pay_daily (got ${r.status} ${(r.body || {}).code || ""} ${JSON.stringify((r.body || {}).periods || null)})`,
+		t("s4", `§4 August locked, Soren King's $300 cleared (his truck's $275 would reprice August): 409 PERIOD_FINALIZED on pay_daily (got ${r.status} ${(r.body || {}).code || ""} ${JSON.stringify((r.body || {}).periods || null)})`,
 			r.status === 409 && r.body.code === "PERIOD_FINALIZED" && JSON.stringify(r.body.periods) === JSON.stringify(["2026-08"]) &&
 			(refusal.blockers || []).map((b) => b.field).join() === "pay_daily");
 		t("s4", "§4 ...nothing written, no update_driver_pay line", snapshot(db) === snap && audits(db, "update_driver_pay").length === 0);
@@ -417,14 +424,14 @@ async function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 			(refusal.audit || {}).action === "update_driver_pay_blocked" && /pay_daily 300 -> 0/.test((refusal.audit || {}).subject || ""));
 	}
 	for (const [label, id, cellsOf] of [
-		["the dialog saving Shorn King's terms as they are", 1, (r) => dialogCells(r)],
+		["the dialog saving Soren King's terms as they are", 1, (r) => dialogCells(r)],
 		["a page from before the fix \"setting 0\" (a numeric 0: not sent)", 1, (r) => oldPageCells({ ...dialogOpenRow(r), payDaily: 0 })],
-		["the dialog saving Rodney Brown (the day rate not in use, not sent)", 2, (r) => dialogCells(r)],
+		["the dialog saving Roland Brown (the day rate not in use, not sent)", 2, (r) => dialogCells(r)],
 	]) {
 		const db = makeDb({ lockedMonths: ["2026-08"] });
 		const app = mountAll(db, routes);
 		const before = row(db, id);
-		const r = app.dirPut(SUPER, id, formBody(before, cellsOf(before), { PhoneNumber: "555-0777" }));
+		const r = await app.dirPut(SUPER, id, formBody(before, cellsOf(before), { PhoneNumber: "555-0777" }));
 		t("s4", `§4 August locked, ${label}: no change to judge, saved (got ${r.status} ${(r.body || {}).code || ""})`,
 			r.status === 200 && app.lockRefusals.length === 0 && row(db, id).phone === "555-0777" &&
 			JSON.stringify(terms(row(db, id))) === JSON.stringify(terms(before)));
@@ -433,8 +440,8 @@ async function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 	// and now sends its amount as text; the money math reads the same terms after
 	// the save, so even with August locked there is nothing to judge.
 	for (const [label, id, legacy, want] of [
-		["Shorn King stored as \"Fixed\"", 1, "Fixed", ["fixed", "", "300"]],
-		["Rodney Brown stored as \"Percentage\"", 2, "Percentage", ["percentage", "20", ""]],
+		["Soren King stored as \"Fixed\"", 1, "Fixed", ["fixed", "", "300"]],
+		["Roland Brown stored as \"Percentage\"", 2, "Percentage", ["percentage", "20", ""]],
 	]) {
 		const db = makeDb({ lockedMonths: ["2026-08"] });
 		const app = mountAll(db, routes);
@@ -442,7 +449,7 @@ async function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 		const before = row(db, id);
 		const cells = dialogCells(before);
 		const rate = effectiveDailyRate(db, app.m, before.driver_name);
-		const r = app.dirPut(SUPER, id, formBody(before, cells, { PhoneNumber: "555-0777" }));
+		const r = await app.dirPut(SUPER, id, formBody(before, cells, { PhoneNumber: "555-0777" }));
 		t("s4", `§4 August locked, ${label}: the dialog sends ${JSON.stringify(cells)}; saved with the phone edit, nothing to judge (got ${r.status} ${(r.body || {}).code || ""})`,
 			JSON.stringify(cells) === JSON.stringify(want) && r.status === 200 && app.lockRefusals.length === 0 && row(db, id).phone === "555-0777");
 		t("s4", `§4 ...${label}: the money math reads the same terms after the save, and prices the driver the same`,
@@ -453,7 +460,7 @@ async function sections({ directoryPayCells, directoryPayType }, routes = {}) {
 		const db = makeDb({ lockedMonths: ["2026-08"] });
 		const app = mountAll(db, routes);
 		const before = row(db, 4);
-		const r = app.dirPut(SUPER, 4, formBody(before, dialogCells(before, { payDaily: 0 })));
+		const r = await app.dirPut(SUPER, 4, formBody(before, dialogCells(before, { payDaily: 0 })));
 		t("s4", `§4 August locked, Even Steven's $250 cleared onto his truck's $250 (reprices nothing): saved (got ${r.status} ${(r.body || {}).code || ""})`,
 			r.status === 200 && row(db, 4).pay_daily === 0 && effectiveDailyRate(db, app.m, "Even Steven") === 250);
 	}

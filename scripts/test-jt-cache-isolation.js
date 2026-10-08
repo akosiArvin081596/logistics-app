@@ -120,10 +120,10 @@ function makeCache() {
 	return {
 		headers: [...HEADERS],
 		data: [
-			{ _rowIndex: 2, "Load ID": "564157463", Driver: "Deshorn King", "Job Status": "In Transit", "Pickup Address": "4528 W Royal Ln, Irving, TX 75063" },
+			{ _rowIndex: 2, "Load ID": "564157463", Driver: "Desoren King", "Job Status": "In Transit", "Pickup Address": "4528 W Royal Ln, Irving, TX 75063" },
 			{ _rowIndex: 3, "Load ID": CANCELLED_ID, Driver: "", "Job Status": "Cancelled", "Pickup Address": "" },
 			{ _rowIndex: 4, "Load ID": DELETED_ID, Driver: "", "Job Status": "Unassigned", "Pickup Address": "" },
-			{ _rowIndex: 5, "Load ID": "30080873", Driver: "Shorn King", "Job Status": "Delivered", "Pickup Address": "" },
+			{ _rowIndex: 5, "Load ID": "30080873", Driver: "Soren King", "Job Status": "Delivered", "Pickup Address": "" },
 		],
 	};
 }
@@ -352,7 +352,7 @@ function geofenceReads(geoSrc, loadId) {
 		() => new Set([DELETED_ID]),
 		async () => { reads++; throw new Error("sheet read"); },
 		{ error() {}, warn() {}, log() {} });
-	return geo({ latitude: 32.85, longitude: -96.95, driverName: "Deshorn King", loadId, speedMps: 20 })
+	return geo({ latitude: 32.85, longitude: -96.95, driverName: "Desoren King", loadId, speedMps: 20 })
 		.then((r) => ({ r, reads }));
 }
 pending.push(Promise.all([

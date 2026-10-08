@@ -252,7 +252,7 @@ let JPEG, PNG; // real, decodable images — encoded in main()
 
 const SUPER = { id: 1, username: "super_admin", role: "Super Admin" };
 const DISPATCHER = { id: 2, username: "kevin", role: "Dispatcher" };
-const DRIVER = { id: 3, username: "sking", role: "Driver", driverName: "Shorn King" };
+const DRIVER = { id: 3, username: "sking", role: "Driver", driverName: "Soren King" };
 const INVESTOR = { id: 9, username: "acme", role: "Investor" };
 
 const TRUCKS_DDL = `CREATE TABLE trucks (
@@ -271,7 +271,7 @@ function makeDb() {
 	db.exec("CREATE TABLE job_applications (id INTEGER PRIMARY KEY AUTOINCREMENT, cdl_front TEXT DEFAULT '', cdl_back TEXT DEFAULT '', medical_card TEXT DEFAULT '')");
 	db.exec("CREATE TABLE truck_assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER, driver_name TEXT, start_date TEXT, end_date TEXT DEFAULT '')");
 	const truck = db.prepare("INSERT INTO trucks (id, unit_number, make, status, assigned_driver, notes, owner_id, photo) VALUES (?, ?, 'Freightliner', 'Active', ?, '', 5, ?)");
-	truck.run(1, "LogisX-#33", "Shorn King", "");
+	truck.run(1, "LogisX-#33", "Soren King", "");
 	truck.run(2, "LogisX-#91", "", uri("image/heic", HEIC)); // stored before the write check existed
 	truck.run(3, "LogisX-#302", "", "");
 	db.prepare("INSERT INTO job_applications (id) VALUES (7)").run();
@@ -397,7 +397,7 @@ async function getSections() {
 			eq(shape(await photoAs(DRIVER, HTML_URI, { "if-none-match": header })), NOT_FOUND,
 				`§2 a stored value that is not an image, If-None-Match ${label}: 404, not 304`);
 		}
-		eq(shape(await getPhoto({ session: { user: { ...DRIVER, driverName: "Rodney Brown" } }, headers: { "if-none-match": "*" } })), NOT_FOUND,
+		eq(shape(await getPhoto({ session: { user: { ...DRIVER, driverName: "Roland Brown" } }, headers: { "if-none-match": "*" } })), NOT_FOUND,
 			'§2 a driver on no truck, If-None-Match "*": 404, not 304');
 	}
 	{
@@ -444,7 +444,7 @@ async function getSections() {
 	]) {
 		eq(shape(await photoAs(DRIVER, stored)), NOT_FOUND, `§2 ${label}: 404, no Content-Type of its own`);
 	}
-	eq(shape(await getPhoto({ session: { user: { ...DRIVER, driverName: "Rodney Brown" } } })), NOT_FOUND, "§2 a driver on no truck: 404");
+	eq(shape(await getPhoto({ session: { user: { ...DRIVER, driverName: "Roland Brown" } } })), NOT_FOUND, "§2 a driver on no truck: 404");
 	eq(shape(await getPhoto({ session: { user: SUPER } })), NOT_FOUND, "§2 a Super Admin (no driver name of their own): 404, not 403");
 	for (const user of [DISPATCHER, INVESTOR]) {
 		db.prepare("UPDATE trucks SET photo = ? WHERE id = 1").run(uri("image/jpeg", JPEG));
@@ -718,7 +718,7 @@ async function putSection() {
 		const db = makeDb();
 		const { put, calls } = mountTrucks(db);
 		const before = snapshot(db);
-		const out = await put(who, 2, { notes: "new tyres", photo, assignedDriver: "Shorn King" });
+		const out = await put(who, 2, { notes: "new tyres", photo, assignedDriver: "Soren King" });
 		eq([out.status, out.body], [expect.code === "IMAGE_TOO_LARGE" ? 413 : 415, expect], `§5 a change to ${label}: refused with field "photo"`);
 		ok(snapshot(db) === before && calls.editLock === 0 && calls.activeLoad === 0 && calls.assign === 0 && calls.audit.length === 0,
 			`§5 ...nothing written, and neither the month-end lock, the active-load check nor the assignment reached (${JSON.stringify(calls)})`);
@@ -776,7 +776,7 @@ async function postSection() {
 		const db = makeDb();
 		const { post, calls } = mountTrucks(db);
 		const before = snapshot(db);
-		const out = await post(who, add({ photo, assignedDriver: "Rodney Brown" }));
+		const out = await post(who, add({ photo, assignedDriver: "Roland Brown" }));
 		eq([out.status, out.body], [expect.code === "IMAGE_TOO_LARGE" ? 413 : 415, expect], `§6 ${label}: refused with field "photo"`);
 		ok(snapshot(db) === before && calls.jt === 0 && calls.activeLoad === 0 && calls.createLock === 0 && calls.audit.length === 0,
 			`§6 ...nothing inserted, and neither the sheet, the active-load check nor the month-end lock reached (${JSON.stringify(calls)})`);

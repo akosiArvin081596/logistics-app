@@ -253,12 +253,12 @@ function helperBattery(build) {
 	const db = makeDb();
 	addUser(db, 1, "super_admin", "", "Super Admin");
 	db.prepare("INSERT INTO users (id, username, password_hash, role, driver_name) VALUES (2, 'dispatch1', 'x', 'Dispatcher', NULL)").run();
-	addUser(db, 3, "sking", "Shorn King");
+	addUser(db, 3, "sking", "Soren King");
 	addUser(db, 4, "jsmith", "John Smith");
 	addUser(db, 5, "jnunez", "José Núñez");
 	addUser(db, 6, "blankish", "   ");
-	addDirectory(db, "Shorn King"); // row 1 — that account's own row
-	addDirectory(db, "Deshorn King"); // row 2 — in the directory, no account
+	addDirectory(db, "Soren King"); // row 1 — that account's own row
+	addDirectory(db, "Desoren King"); // row 2 — in the directory, no account
 	addDirectory(db, "Maria Lopez"); // row 3 — in the directory, no account
 	const find = build(db);
 	const tag = (r) => (!r ? "null" : r.source === "reserved" ? `reserved:${r.name}` : `${r.source}:${r.id}`);
@@ -268,20 +268,20 @@ function helperBattery(build) {
 		t(`${label}: ${show(name)}${opts ? ` ${JSON.stringify(opts)}` : ""} → ${want} (got ${got})`, got === want);
 	};
 
-	expect("exact name", "Shorn King", undefined, "users:3");
-	expect("case variant", "SHORN KING", undefined, "users:3");
-	expect("outer whitespace", "  Shorn King  ", undefined, "users:3");
-	expect("internal double space", "Shorn  King", undefined, "users:3");
-	expect("internal tab", "Shorn\tKing", undefined, "users:3");
-	expect("internal no-break space", "Shorn\u00a0King", undefined, "users:3");
-	expect("case and spacing together", "  sHORN   kING ", undefined, "users:3");
+	expect("exact name", "Soren King", undefined, "users:3");
+	expect("case variant", "SOREN KING", undefined, "users:3");
+	expect("outer whitespace", "  Soren King  ", undefined, "users:3");
+	expect("internal double space", "Soren  King", undefined, "users:3");
+	expect("internal tab", "Soren\tKing", undefined, "users:3");
+	expect("internal no-break space", "Soren\u00a0King", undefined, "users:3");
+	expect("case and spacing together", "  sOREN   kING ", undefined, "users:3");
 	expect("non-ASCII case", "JOSÉ NÚÑEZ", undefined, "users:5");
-	expect("a driver in the directory with no account", "Deshorn King", undefined, "drivers_directory:2");
-	expect("...spacing and case variant", "deshorn   KING", undefined, "drivers_directory:2");
-	expect("a different name", "Shorn Kingston", undefined, "null");
+	expect("a driver in the directory with no account", "Desoren King", undefined, "drivers_directory:2");
+	expect("...spacing and case variant", "desoren   KING", undefined, "drivers_directory:2");
+	expect("a different name", "Soren Kingston", undefined, "null");
 	expect("part of an existing name", "Horn King", undefined, "null");
-	expect("an existing name plus more", "Shorn King Jr", undefined, "null");
-	expect("whitespace removed is a different name", "ShornKing", undefined, "null");
+	expect("an existing name plus more", "Soren King Jr", undefined, "null");
+	expect("whitespace removed is a different name", "SorenKing", undefined, "null");
 
 	// The account side is wider than driver names: every username, and the
 	// reserved names.
@@ -304,24 +304,24 @@ function helperBattery(build) {
 	t("return shape for a built-in property name: { source, name }",
 		JSON.stringify(find("  TOSTRING ")) === JSON.stringify({ source: "reserved", name: "tostring" }));
 	t("a username match says so: field \"username\"", (find("dispatch1") || {}).field === "username");
-	t("a driver-name match says so: field \"driver_name\"", (find("shorn king") || {}).field === "driver_name");
+	t("a driver-name match says so: field \"driver_name\"", (find("soren king") || {}).field === "driver_name");
 
-	expect("users:false leaves accounts out", "Shorn King", { users: false }, "drivers_directory:1");
+	expect("users:false leaves accounts out", "Soren King", { users: false }, "drivers_directory:1");
 	expect("users:false leaves usernames out", "dispatch1", { users: false }, "null");
 	expect("users:false leaves the reserved names out", "Dispatch", { users: false }, "null");
 	expect("directory:false leaves the directory out", "Maria Lopez", { directory: false }, "null");
 	expect("users:false still finds a directory-only driver", "Maria Lopez", { users: false }, "drivers_directory:3");
-	expect("both sides off checks nothing", "Shorn King", { users: false, directory: false }, "null");
+	expect("both sides off checks nothing", "Soren King", { users: false, directory: false }, "null");
 
-	expect("exceptUserId skips that account; the directory is still checked", "Shorn King", { exceptUserId: 3 }, "drivers_directory:1");
-	expect("exceptUserId skips that account", "shorn  king", { exceptUserId: 3, directory: false }, "null");
+	expect("exceptUserId skips that account; the directory is still checked", "Soren King", { exceptUserId: 3 }, "drivers_directory:1");
+	expect("exceptUserId skips that account", "soren  king", { exceptUserId: 3, directory: false }, "null");
 	expect("exceptUserId skips that account's username too", "sking", { exceptUserId: 3, directory: false }, "null");
 	expect("exceptUserId never skips a reserved name", "Dispatch", { exceptUserId: 3 }, "reserved:dispatch");
-	expect("exceptUserId as a numeric string", "Shorn King", { exceptUserId: "3", directory: false }, "null");
-	expect("exceptUserId of another account still reports this one", "Shorn King", { exceptUserId: 4, directory: false }, "users:3");
+	expect("exceptUserId as a numeric string", "Soren King", { exceptUserId: "3", directory: false }, "null");
+	expect("exceptUserId of another account still reports this one", "Soren King", { exceptUserId: 4, directory: false }, "users:3");
 
 	for (const [label, v] of [["empty", ""], ["whitespace only", "  \t "], ["null", null], ["undefined", undefined],
-		["a number", 42], ["an array", ["Shorn King"]], ["an object", { driverName: "Shorn King" }]]) {
+		["a number", 42], ["an array", ["Soren King"]], ["an object", { driverName: "Soren King" }]]) {
 		expect(`a blank or non-string name (${label}) never clashes`, v, undefined, "null");
 	}
 	expect("blank and NULL stored names (non-driver accounts) never match", "Anyone At All", undefined, "null");
@@ -334,9 +334,9 @@ function helperBattery(build) {
 		JSON.stringify(find("dispatch")) === JSON.stringify({ source: "reserved", name: "dispatch" }));
 
 	const before = db.prepare("SELECT total_changes() AS n").get().n;
-	const ret = find("Shorn King");
+	const ret = find("Soren King");
 	t("synchronous: the answer is a value, not a promise", ret !== null && typeof ret === "object" && typeof ret.then !== "function");
-	find("Nobody Here"); find("Deshorn King", { exceptUserId: 3 });
+	find("Nobody Here"); find("Desoren King", { exceptUserId: 3 });
 	t("read-only: asking writes nothing", db.prepare("SELECT total_changes() AS n").get().n === before);
 
 	addUser(db, 9, "jsmith2", "JOHN SMITH");
@@ -356,8 +356,8 @@ const SPELLINGS = [
 	["John Smith", "John\u00a0Smith"],
 	["John  Smith", "john smith"],
 	["José Núñez", "JOSÉ NÚÑEZ"],
-	["Shorn King", "Deshorn King"],
-	["Deshorn King", "Shorn King"],
+	["Soren King", "Desoren King"],
+	["Desoren King", "Soren King"],
 	["John Smith", "Jon Smith"],
 	["John Smith", "JohnSmith"],
 	["John Smith", "John Smith Jr"],
@@ -422,10 +422,10 @@ function mountAccept(db, { routeSrc = ACCEPT_SRC, docs = ONBOARDING_DOCS, clashS
 function acceptFixture() {
 	const db = makeDb();
 	addUser(db, 1, "super_admin", "", "Super Admin");
-	addUser(db, 2, "sking", "Shorn King");
+	addUser(db, 2, "sking", "Soren King");
 	addUser(db, 3, "kevin", "", "Dispatcher");
-	addDirectory(db, "Shorn King"); // that account's own row
-	addDirectory(db, "Deshorn King"); // a driver in the directory with no account
+	addDirectory(db, "Soren King"); // that account's own row
+	addDirectory(db, "Desoren King"); // a driver in the directory with no account
 	return db;
 }
 
@@ -471,10 +471,10 @@ async function acceptBattery({ routeSrc = ACCEPT_SRC, clashSrc = CLASH_SRC } = {
 	// Names that are already in use: an account's driver name or username, a
 	// reserved name, or a directory-only row.
 	for (const [label, name, matched, forbidden] of [
-		["an account's name, exactly", "Shorn King", "the driver name of user 2", /sking|shorn|\d/i],
-		["an account's name, case and spacing changed", "  shorn   KING ", "the driver name of user 2", /sking|shorn|\d/i],
-		["a directory-only driver's name, case changed", "DESHORN KING", "drivers_directory row 2", /deshorn|\d/i],
-		["a directory-only driver's name, tab inside", "Deshorn\tKing", "drivers_directory row 2", /deshorn|\d/i],
+		["an account's name, exactly", "Soren King", "the driver name of user 2", /sking|soren|\d/i],
+		["an account's name, case and spacing changed", "  soren   KING ", "the driver name of user 2", /sking|soren|\d/i],
+		["a directory-only driver's name, case changed", "DESOREN KING", "drivers_directory row 2", /desoren|\d/i],
+		["a directory-only driver's name, tab inside", "Desoren\tKing", "drivers_directory row 2", /desoren|\d/i],
 		["an account's username", "Kevin", "the username of user 3", /kevin|\d/i],
 		["a reserved name", "dispatch", "a reserved name", /\d/],
 		["a reserved name, case and spacing", " Investor ", "a reserved name", /\d/],
@@ -567,7 +567,7 @@ async function acceptBattery({ routeSrc = ACCEPT_SRC, clashSrc = CLASH_SRC } = {
 	// Every other status is written as before, whatever the name.
 	for (const status of ["Reviewed", "Rejected", "New"]) {
 		const db = acceptFixture();
-		const appId = addApplication(db, "Shorn King", "713-555-0188");
+		const appId = addApplication(db, "Soren King", "713-555-0188");
 		if (status === "New") db.prepare("UPDATE job_applications SET status = 'Reviewed' WHERE id = ?").run(appId);
 		const before = counts(db);
 		const { call, log } = mountAccept(db, { routeSrc, clashSrc });
@@ -623,6 +623,12 @@ function mountPost(routeSrc, db, clashSrc = CLASH_SRC) {
 		recordPayRateChanges: () => {},
 		directoryChangedColumns,
 		directoryDefaultRow,
+		// POST /api/users holds the directory row a Driver account adds to the
+		// month-end lock. That lock is scripts/test-account-directory-row-lock.js's
+		// subject; here it judges nothing, so only the name check decides.
+		accountDirectoryRowJudged: () => false,
+		accountDirectoryRowLock: () => null,
+		getJobTrackingCached: async () => ({ headers: [], data: [] }),
 	};
 	const names = Object.keys(env);
 	new Function(...names, routeSrc)(...names.map((k) => env[k]));
@@ -646,11 +652,11 @@ async function otherCreatePaths({ clashSrc = CLASH_SRC, directorySrc = DIRECTORY
 	{
 		const db = makeDb();
 		addUser(db, 1, "super_admin", "", "Super Admin");
-		addUser(db, 2, "sking", "Shorn King");
+		addUser(db, 2, "sking", "Soren King");
 		addUser(db, 3, "kevin", "", "Dispatcher");
-		addDirectory(db, "Deshorn King"); // in the directory, no account
+		addDirectory(db, "Desoren King"); // in the directory, no account
 		const { call, log: usersLog } = mountPost(USERS_SRC, db, clashSrc);
-		const r1 = await call({ username: "sking2", password: "pw-123456", role: "Driver", driverName: "shorn  KING" });
+		const r1 = await call({ username: "sking2", password: "pw-123456", role: "Driver", driverName: "soren  KING" });
 		t("POST /api/users: a case/spacing variant of an account's driver name is 409 DRIVER_NAME_TAKEN",
 			r1.status === 409 && r1.body && r1.body.code === "DRIVER_NAME_TAKEN" && r1.body.conflictUserId === 2);
 		t("...and creates no account", !db.prepare("SELECT 1 FROM users WHERE username = 'sking2'").get());
@@ -663,9 +669,9 @@ async function otherCreatePaths({ clashSrc = CLASH_SRC, directorySrc = DIRECTORY
 			r6.status === 409 && r6.body && r6.body.code === "DRIVER_NAME_TAKEN" && /reserved/.test(r6.body.error || "") &&
 			r6.body.conflictUserId === undefined);
 		t("...neither creates an account", !db.prepare("SELECT 1 FROM users WHERE username IN ('kev2', 'desk')").get());
-		const r2 = await call({ username: "dking", password: "pw-123456", role: "Driver", driverName: "Deshorn King" });
+		const r2 = await call({ username: "dking", password: "pw-123456", role: "Driver", driverName: "Desoren King" });
 		t("POST /api/users: a driver already in the directory can be given a login (accounts only)",
-			r2.status === 200 && !!db.prepare("SELECT 1 FROM users WHERE username = 'dking' AND driver_name = 'Deshorn King'").get());
+			r2.status === 200 && !!db.prepare("SELECT 1 FROM users WHERE username = 'dking' AND driver_name = 'Desoren King'").get());
 		const r3 = await call({ username: "abrooks", password: "pw-123456", role: "Driver", driverName: "Ava Brooks" });
 		t("POST /api/users: a free driver name is created", r3.status === 200);
 		const r4 = await call({ username: "dispatch2", password: "pw-123456", role: "Dispatcher", driverName: "" });
@@ -692,13 +698,13 @@ async function otherCreatePaths({ clashSrc = CLASH_SRC, directorySrc = DIRECTORY
 		const db = makeDb();
 		addUser(db, 1, "super_admin", "", "Super Admin");
 		addUser(db, 2, "jhill", "Jonas Hill"); // an account whose directory row does not exist yet
-		const shornRow = addDirectory(db, "Shorn King");
+		const sorenRow = addDirectory(db, "Soren King");
 		const { call } = mountPost(directorySrc, db, clashSrc);
 		const post = (name) => call({ headers: ["Driver"], values: [name] });
-		const d1 = await post("SHORN  KING");
+		const d1 = await post("SOREN  KING");
 		t("POST /api/drivers-directory: a case/spacing variant is 409 DRIVER_EXISTS naming the existing row",
-			d1.status === 409 && d1.body && d1.body.code === "DRIVER_EXISTS" && d1.body.id === shornRow);
-		const d2 = await post("  Shorn King  ");
+			d1.status === 409 && d1.body && d1.body.code === "DRIVER_EXISTS" && d1.body.id === sorenRow);
+		const d2 = await post("  Soren King  ");
 		t("POST /api/drivers-directory: outer whitespace is refused too", d2.status === 409 && d2.body && d2.body.code === "DRIVER_EXISTS");
 		t("...and no second row was written", db.prepare("SELECT COUNT(*) AS n FROM drivers_directory").get().n === 1);
 		const d3 = await post("Jonas Hill");
@@ -853,27 +859,27 @@ function pluralBattery(build) {
 	const t = (name, cond) => results.push({ name, ok: !!cond });
 	const db = makeDb();
 	addUser(db, 1, "super_admin", "", "Super Admin");
-	addUser(db, 2, "shorn king", "", "Dispatcher"); // a username that folds onto the name
-	addUser(db, 3, "sking", "Shorn King");
-	addUser(db, 4, "sking2", "SHORN  KING");
-	addDirectory(db, "Shorn King"); // row 1
-	addDirectory(db, "Deshorn King"); // row 2
+	addUser(db, 2, "soren king", "", "Dispatcher"); // a username that folds onto the name
+	addUser(db, 3, "sking", "Soren King");
+	addUser(db, 4, "sking2", "SOREN  KING");
+	addDirectory(db, "Soren King"); // row 1
+	addDirectory(db, "Desoren King"); // row 2
 	const all = build(db);
 	const tags = (hits) => hits.map((h) => (h.source === "reserved" ? `reserved:${h.name}` : `${h.source}:${h.id}${h.field ? `:${h.field}` : ""}`)).join(",");
 	const run = (name, opts) => { try { return tags(all(name, opts)); } catch (e) { return `threw ${e.message}`; } };
 	const expect = (label, got, want) => t(`${label} → ${want} (got ${got})`, got === want);
-	expect("every match, in a fixed order: accounts by id, then directory rows", run("  shorn   KING"),
+	expect("every match, in a fixed order: accounts by id, then directory rows", run("  soren   KING"),
 		"users:2:username,users:3:driver_name,users:4:driver_name,drivers_directory:1");
 	expect("a reserved name comes first", run("Dispatch"), "reserved:dispatch");
-	expect("exceptUserIds skips several accounts", run("Shorn King", { exceptUserIds: [3, 4] }), "users:2:username,drivers_directory:1");
-	expect("exceptUserIds accepts numeric strings", run("Shorn King", { exceptUserIds: ["2", "3"] }), "users:4:driver_name,drivers_directory:1");
-	expect("exceptUserId and exceptUserIds together", run("Shorn King", { exceptUserId: 2, exceptUserIds: [3] }), "users:4:driver_name,drivers_directory:1");
-	expect("exceptDirectoryId skips that directory row", run("shorn king", { users: false, exceptDirectoryId: 1 }), "");
-	expect("exceptDirectoryId as a numeric string", run("shorn king", { users: false, exceptDirectoryId: "1" }), "");
-	expect("exceptDirectoryId of another row still reports this one", run("shorn king", { users: false, exceptDirectoryId: 2 }), "drivers_directory:1");
+	expect("exceptUserIds skips several accounts", run("Soren King", { exceptUserIds: [3, 4] }), "users:2:username,drivers_directory:1");
+	expect("exceptUserIds accepts numeric strings", run("Soren King", { exceptUserIds: ["2", "3"] }), "users:4:driver_name,drivers_directory:1");
+	expect("exceptUserId and exceptUserIds together", run("Soren King", { exceptUserId: 2, exceptUserIds: [3] }), "users:4:driver_name,drivers_directory:1");
+	expect("exceptDirectoryId skips that directory row", run("soren king", { users: false, exceptDirectoryId: 1 }), "");
+	expect("exceptDirectoryId as a numeric string", run("soren king", { users: false, exceptDirectoryId: "1" }), "");
+	expect("exceptDirectoryId of another row still reports this one", run("soren king", { users: false, exceptDirectoryId: 2 }), "drivers_directory:1");
 	expect("a blank name has no matches", run("   "), "");
 	const singular = buildClash(db);
-	t("the singular is the plural's first match", JSON.stringify(singular("shorn king")) === JSON.stringify(all("shorn king")[0]));
+	t("the singular is the plural's first match", JSON.stringify(singular("soren king")) === JSON.stringify(all("soren king")[0]));
 	t("...and null when there is none", singular("Nobody Here") === null);
 	return results;
 }

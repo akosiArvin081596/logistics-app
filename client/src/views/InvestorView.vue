@@ -93,8 +93,8 @@
       </div>
       <MyLoadsSection :my-loads="store.myLoads" />
       <AssetSection v-if="store.asset?.totalMiles > 0" :asset="store.asset" :config="store.config" :payout-basis="store.production?.payoutBasis || null" />
-      <MyTrucks :trucks="trucks" :production="store.production" :is-preview="store.isPreview" @reload="loadData" />
-      <FleetBreakdownSection :trucks="trucks" :asset="store.asset" :production="store.production" />
+      <MyTrucks :trucks="trucks" :trucks-error="trucksError" :production="store.production" :is-preview="store.isPreview" @reload="loadData" />
+      <FleetBreakdownSection :trucks="trucks" :trucks-error="trucksError" :asset="store.asset" :production="store.production" />
       <CashFlowSection :production="store.production" :asset="store.asset" :config="store.config" />
       <LoadReportsSection :production="store.production" :config="store.config" :preview-user-id="store.previewUserId" />
       <ExpensesSection :trucks="trucks" :preview-user-id="store.previewUserId" />
@@ -157,6 +157,9 @@ const { show: toast } = useToast()
 useSocketRefresh('investor:changed', () => loadData(), 'investor')
 
 const trucks = ref([])
+// Why GET /api/trucks failed, or '' when it answered. The truck tables show it in
+// place of their empty state: an empty list means "no trucks", a failure does not.
+const trucksError = ref('')
 const reportLoading = ref(false)
 const reportStart = ref('')
 const reportEnd = ref('')
@@ -291,7 +294,13 @@ async function loadData() {
         : '/api/trucks'
       const data = await api.get(trucksUrl)
       trucks.value = data.trucks || []
-    } catch { /* silent */ }
+      trucksError.value = ''
+    } catch (err) {
+      trucks.value = []
+      // A sentence, so the tables can follow it with "Refresh the page...".
+      const why = String(err.message || 'The server did not answer').trim()
+      trucksError.value = /[.!?]$/.test(why) ? why : `${why}.`
+    }
   } catch {
     toast('Failed to load investor data', 'error')
   }

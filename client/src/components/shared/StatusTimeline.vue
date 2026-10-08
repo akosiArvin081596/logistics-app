@@ -137,7 +137,7 @@ function fmt(iso) {
 // WHY it keys on the browser zone and not the role: the Houston owner and the
 // Manila developer share one super_admin login, so the account cannot tell them
 // apart — but they are not on the same machine, so the browser zone can.
-// Deshorn (America/Chicago) sees nothing new; Manila gets a PH-time echo.
+// Desoren (America/Chicago) sees nothing new; Manila gets a PH-time echo.
 //
 // Safe HERE specifically because these values are true ISO-Z instants from
 // load_status_history, so a real equivalent in another zone exists. Do NOT copy

@@ -193,7 +193,7 @@
     </ConfirmModal>
 
     <!-- Queue confirm — appears when dispatching to a driver who's already on
-         a load or has queued loads. Per Deshorn King 2026-05-20. -->
+         a load or has queued loads. Per Desoren King 2026-05-20. -->
     <ConfirmModal
       :open="!!pendingAssignment"
       title="Queue this load?"
@@ -336,7 +336,7 @@ const phoneSourceCol = computed(() => props.headers.find(h => /phone/i.test(h)) 
 // matched origin/pickup and destination/drop columns for synthetic
 // "Pickup" / "Drop-off" labels that render clean "City, ST ZIP" values
 // from the server-side _pickupLocation / _dropLocation enrichment.
-// Deshorn asked for this 2026-04-20 — the raw pickup-info / drop-off-info
+// Desoren asked for this 2026-04-20 — the raw pickup-info / drop-off-info
 // sheet columns carry broker references that were confusing.
 const ORIGIN_KW_RE = /origin|pickup|shipper/i
 const DEST_KW_RE = /dest|drop|receiver|delivery/i
@@ -413,7 +413,7 @@ function driverLabel(d) {
   return d.name + suffix
 }
 
-// Per Deshorn (2026-05-20): when dispatching to a driver who's already on a
+// Per Desoren (2026-05-20): when dispatching to a driver who's already on a
 // load or has queued loads, confirm the queue position before posting. Avoids
 // silently stacking 3+ loads on someone by accident.
 const pendingAssignment = ref(null)

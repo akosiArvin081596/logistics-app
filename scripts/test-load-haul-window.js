@@ -315,53 +315,53 @@ ok("...without touching the loaded leg", clamped.loadedMiles === wide.loadedMile
 //
 // Rows below are the real shapes out of truck_assignments (ISO instants, and
 // '' for "still open"). The mid-day handover is real too: on 2026-08-12 at
-// 23:16:13.964Z Jayden Morrison moved off Logisx-#91 onto LogisX-#2372 and
-// Shorn King took #91 ninety-eight seconds later.
+// 23:16:13.964Z Jensen Morrison moved off Logisx-#91 onto LogisX-#2372 and
+// Soren King took #91 ninety-eight seconds later.
 // ---------------------------------------------------------------------------
 const ASSIGNMENTS = [
-	{ driver_name: 'Howard Reddie', truck_id: 2, unit: 'LogisX-#33', vid: 'VID33',
+	{ driver_name: 'Hollis Renner', truck_id: 2, unit: 'LogisX-#33', vid: 'VID33',
 	  start_date: '2026-05-19T14:25:33.210Z', end_date: '' },
-	{ driver_name: 'Howard Reddie', truck_id: 2, unit: 'LogisX-#33', vid: 'VID33',
+	{ driver_name: 'Hollis Renner', truck_id: 2, unit: 'LogisX-#33', vid: 'VID33',
 	  start_date: '2026-05-13T10:47:01.338Z', end_date: '2026-05-19T14:25:33.210Z' },
-	{ driver_name: 'Jayden Morrison', truck_id: 11, unit: 'Logisx-#91', vid: 'VID91',
+	{ driver_name: 'Jensen Morrison', truck_id: 11, unit: 'Logisx-#91', vid: 'VID91',
 	  start_date: '2026-08-11T16:53:15.262Z', end_date: '2026-08-12T23:16:13.964Z' },
-	{ driver_name: 'Jayden  Morrison', truck_id: 3, unit: 'LogisX-#2372', vid: 'VID2372',
+	{ driver_name: 'Jensen  Morrison', truck_id: 3, unit: 'LogisX-#2372', vid: 'VID2372',
 	  start_date: '2026-08-12T23:16:13.964Z', end_date: '' },
-	{ driver_name: 'Shorn King', truck_id: 11, unit: 'Logisx-#91', vid: 'VID91',
+	{ driver_name: 'Soren King', truck_id: 11, unit: 'Logisx-#91', vid: 'VID91',
 	  start_date: '2026-08-12T23:17:51.574Z', end_date: '' },
 ];
 // The server injects normalizeDriverName(), which also collapses INTERNAL
-// whitespace — note the deliberate double space in 'Jayden  Morrison' above.
+// whitespace — note the deliberate double space in 'Jensen  Morrison' above.
 const normName = (v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
 const tr = m.buildTruckAtResolver(ASSIGNMENTS, normName);
 const at = (iso) => Date.parse(iso);
 
 check("a load inside an open assignment resolves",
-	tr.forDriverAt('Howard Reddie', at('2026-08-07T18:00:00Z'))?.unit, 'LogisX-#33');
+	tr.forDriverAt('Hollis Renner', at('2026-08-07T18:00:00Z'))?.unit, 'LogisX-#33');
 check("...and so does one inside the CLOSED earlier assignment",
-	tr.forDriverAt('Howard Reddie', at('2026-05-15T00:00:00Z'))?.unit, 'LogisX-#33');
+	tr.forDriverAt('Hollis Renner', at('2026-05-15T00:00:00Z'))?.unit, 'LogisX-#33');
 check("before any assignment there is no truck",
-	tr.forDriverAt('Howard Reddie', at('2026-01-01T00:00:00Z')), null);
+	tr.forDriverAt('Hollis Renner', at('2026-01-01T00:00:00Z')), null);
 check("an unknown driver has no truck",
 	tr.forDriverAt('Nobody At All', at('2026-08-07T18:00:00Z')), null);
 // ⚠️ The whole point of asking historically: the same driver, two dates, two trucks.
 check("before the handover the driver is on #91",
-	tr.forDriverAt('Jayden Morrison', at('2026-08-12T10:00:00Z'))?.unit, 'Logisx-#91');
+	tr.forDriverAt('Jensen Morrison', at('2026-08-12T10:00:00Z'))?.unit, 'Logisx-#91');
 check("after it they are on #2372",
-	tr.forDriverAt('Jayden Morrison', at('2026-08-13T10:00:00Z'))?.unit, 'LogisX-#2372');
+	tr.forDriverAt('Jensen Morrison', at('2026-08-13T10:00:00Z'))?.unit, 'LogisX-#2372');
 // A handover writes one instant into both rows; the truck moved TO must win.
 check("at the exact handover instant the NEW truck wins",
-	tr.forDriverAt('Jayden Morrison', at('2026-08-12T23:16:13.964Z'))?.unit, 'LogisX-#2372');
+	tr.forDriverAt('Jensen Morrison', at('2026-08-12T23:16:13.964Z'))?.unit, 'LogisX-#2372');
 // ⚠️ '' end_date is UNBOUNDED, not the epoch. Reading it the other way waves
 // through exactly the assignment that is still running.
 check("an open assignment covers the distant future",
-	tr.forDriverAt('Shorn King', at('2027-01-01T00:00:00Z'))?.unit, 'Logisx-#91');
+	tr.forDriverAt('Soren King', at('2027-01-01T00:00:00Z'))?.unit, 'Logisx-#91');
 check("a typo'd double space still matches one driver",
-	tr.forDriverAt('Jayden   Morrison', at('2026-08-13T10:00:00Z'))?.truck_id, 3);
+	tr.forDriverAt('Jensen   Morrison', at('2026-08-13T10:00:00Z'))?.truck_id, 3);
 check("a non-finite instant resolves nothing",
-	tr.forDriverAt('Howard Reddie', NaN), null);
+	tr.forDriverAt('Hollis Renner', NaN), null);
 check("no assignments at all is not a crash",
-	m.buildTruckAtResolver([], normName).forDriverAt('Howard Reddie', at('2026-08-07T18:00:00Z')), null);
+	m.buildTruckAtResolver([], normName).forDriverAt('Hollis Renner', at('2026-08-07T18:00:00Z')), null);
 check("a row with an unparseable start_date is ignored",
 	m.buildTruckAtResolver([{ driver_name: 'X', truck_id: 1, unit: 'U', vid: 'V',
 		start_date: 'not a date', end_date: '' }], normName).forDriverAt('X', at('2026-08-07T18:00:00Z')), null);

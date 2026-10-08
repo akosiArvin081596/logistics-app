@@ -156,25 +156,25 @@ const row = (id, driver, status) => ({ "Load ID": id, Driver: driver, "Job Statu
 const SHEET = {
 	headers: HEADERS,
 	data: [
-		row("100001", "Deshorn King", "In Transit"),            // active
-		row("100002", "Deshorn King", "Delivered"),             // delivered 2 d ago → open
-		row("100003", "Deshorn King", "Delivered"),             // delivered 8 d ago → closed
-		row("100004", "Deshorn King", "Delivered"),             // no history → unknown
-		row("100005", "Deshorn King", "Cancelled"),             // cancelled → never
+		row("100001", "Desoren King", "In Transit"),            // active
+		row("100002", "Desoren King", "Delivered"),             // delivered 2 d ago → open
+		row("100003", "Desoren King", "Delivered"),             // delivered 8 d ago → closed
+		row("100004", "Desoren King", "Delivered"),             // no history → unknown
+		row("100005", "Desoren King", "Cancelled"),             // cancelled → never
 		// ⚠️ The three shared-id pairs below (7052901, 100007, 100012) are what the
 		// SHEET can hold, not what the gate is handed: getJobTrackingCached() keeps
 		// only the bottom row of each (deduplicateLoads()). §4/§6 feed them raw to
 		// pin the defensive list handling; §9 runs them through the real dedup.
-		row("7052901", "Howard Reddie", "In Transit"),          // live row…
-		row("#7052901", "Howard Reddie", "Cancelled"),          // …above a cancelled copy (the bottom row wins)
-		row("100007", "Shorn King", "In Transit"),              // ANOTHER driver's active row…
-		row("100007", "Deshorn King", "Delivered"),             // …above ours, delivered 30 d ago
-		row("100008", "Deshorn King", "Unassigned"),            // neither active nor delivered
-		row("100009", "Deshorn King", "Completed"),             // delivered 9 d ago, "Completed" 1 d ago
-		row("100010", "Deshorn King", "Delivered"),             // reverted and re-delivered 1 d ago
-		row("100011", "Deshorn King", "Delivered"),             // exactly 7 d ago
-		row("100012", "Deshorn King", "Delivered"),             // one id on TWO of our rows:
-		row("#100012", "Deshorn King", "In Transit"),           // …a stale row above a live one
+		row("7052901", "Hollis Renner", "In Transit"),          // live row…
+		row("#7052901", "Hollis Renner", "Cancelled"),          // …above a cancelled copy (the bottom row wins)
+		row("100007", "Soren King", "In Transit"),              // ANOTHER driver's active row…
+		row("100007", "Desoren King", "Delivered"),             // …above ours, delivered 30 d ago
+		row("100008", "Desoren King", "Unassigned"),            // neither active nor delivered
+		row("100009", "Desoren King", "Completed"),             // delivered 9 d ago, "Completed" 1 d ago
+		row("100010", "Desoren King", "Delivered"),             // reverted and re-delivered 1 d ago
+		row("100011", "Desoren King", "Delivered"),             // exactly 7 d ago
+		row("100012", "Desoren King", "Delivered"),             // one id on TWO of our rows:
+		row("#100012", "Desoren King", "In Transit"),           // …a stale row above a live one
 	],
 };
 const hist = (load_id, old_status, new_status, changed_at) => ({ load_id, old_status, new_status, changed_at });
@@ -223,7 +223,7 @@ function fakeRes() {
 		json(b) { this.body = b; this.sends++; return this; },
 	};
 }
-const asRole = (role, driverName = role === "Driver" ? "Deshorn King" : null) =>
+const asRole = (role, driverName = role === "Driver" ? "Desoren King" : null) =>
 	({ session: { user: { role, driverName } } });
 
 // The gate, built from (possibly mutated) server.js source, with its reads and
@@ -396,7 +396,7 @@ const PHOTO_FAILURE_RE = new Function(`return ${PHOTO_RE_SRC}`)();
 	ok("delivered with NO recorded time → refused, reason 'unknown'", refused(r, "unknown"));
 	r = await runGate({}, "Driver", "100005");
 	ok("CANCELLED (even though delivered 1 day before) → refused, reason 'cancelled'", refused(r, "cancelled"));
-	r = await runGate({}, "Driver", "7052901", "Howard Reddie");
+	r = await runGate({}, "Driver", "7052901", "Hollis Renner");
 	ok("(defensive, un-deduplicated input) a live row in the list opens the id — §9 shows production never hands the gate this list", proceeds(r));
 	r = await runGate({}, "Driver", "100007");
 	ok("(defensive) another driver's ACTIVE row on the same id does not open OUR delivered-30-days-ago row", refused(r, "closed"));
@@ -410,7 +410,7 @@ const PHOTO_FAILURE_RE = new Function(`return ${PHOTO_RE_SRC}`)();
 		r = await runGate({}, "Driver", spelling);
 		ok(`load id spelling ${JSON.stringify(spelling)} is folded like the ownership check folds it`, proceeds(r));
 	}
-	r = await runGate({}, "Driver", "100003", "  deshorn   KING ");
+	r = await runGate({}, "Driver", "100003", "  desoren   KING ");
 	ok("the driver name is folded like the ownership check folds it (still refused on 100003)", refused(r, "closed"));
 
 	for (const role of ["Super Admin", "Dispatcher"]) {
@@ -443,7 +443,7 @@ const PHOTO_FAILURE_RE = new Function(`return ${PHOTO_RE_SRC}`)();
 	r = await runGate({}, "Driver", "9".repeat(5000));
 	ok("a caller-supplied id is capped in the log line", r.logs.every((l) => l.length < 200));
 	{
-		const flip = { headers: ["Load ID", "Driver", "Status Update Date", "Job Status"], data: [{ "Load ID": "100002", Driver: "Deshorn King", "Status Update Date": "09/21/2026 10:00:00", "Job Status": "Delivered" }] };
+		const flip = { headers: ["Load ID", "Driver", "Status Update Date", "Job Status"], data: [{ "Load ID": "100002", Driver: "Desoren King", "Status Update Date": "09/21/2026 10:00:00", "Job Status": "Delivered" }] };
 		r = await runGate({ sheet: flip }, "Driver", "100002");
 		ok("the status is read from 'Job Status' even when 'Status Update Date' sorts first (excludeDroppedLoads' pick)", proceeds(r));
 	}
@@ -503,8 +503,8 @@ const PHOTO_FAILURE_RE = new Function(`return ${PHOTO_RE_SRC}`)();
 		return { fn, logs, db };
 	}
 	const deepFreeze = (o) => { Object.freeze(o); for (const v of Object.values(o)) if (v && typeof v === "object" && !Object.isFrozen(v)) deepFreeze(v); return o; };
-	const deshorn = SHEET.data.filter((x) => x.Driver === "Deshorn King");
-	const input = deepFreeze(JSON.parse(JSON.stringify(deshorn)));
+	const desoren = SHEET.data.filter((x) => x.Driver === "Desoren King");
+	const input = deepFreeze(JSON.parse(JSON.stringify(desoren)));
 	const { fn: annotate, db: annDb } = buildAnnotate();
 	let out;
 	let threw = null;
@@ -525,7 +525,7 @@ const PHOTO_FAILURE_RE = new Function(`return ${PHOTO_RE_SRC}`)();
 	ok("(defensive, un-deduplicated input) two rows of one id get ONE answer, the gate's ranking",
 		both12.length === 2 && both12.every((s) => s === "active"));
 	{
-		const many = Array.from({ length: 1234 }, (_, i) => row(String(200000 + i), "Deshorn King", "Delivered"));
+		const many = Array.from({ length: 1234 }, (_, i) => row(String(200000 + i), "Desoren King", "Delivered"));
 		const { fn, db } = buildAnnotate();
 		fn(many, HEADERS, NOW);
 		ok("a long history is read in chunks under SQLite's parameter ceiling", db.reads.length === 3 && db.reads.every((q) => q.args.length <= 500));
@@ -588,7 +588,7 @@ const PHOTO_FAILURE_RE = new Function(`return ${PHOTO_RE_SRC}`)();
 	// M4 — a gate that forgets it is Driver-only.
 	{
 		const m = mutate(GATE_SRC, `if (req.session?.user?.role !== "Driver") return false;`, "");
-		const g = await runGate({ gateSrc: m }, "Dispatcher", "100003", "Deshorn King");
+		const g = await runGate({ gateSrc: m }, "Dispatcher", "100003", "Desoren King");
 		ok("M4  a gate applied to every role refuses the dispatcher (so §4's admin case would fail)", g.answered === true);
 	}
 	// M5 — an EXCLUSIVE boundary.
@@ -627,7 +627,7 @@ const PHOTO_FAILURE_RE = new Function(`return ${PHOTO_RE_SRC}`)();
 	// M11 — the annotation judging each row alone, as the gate does not.
 	{
 		const m = mutate(ANNOTATE_SRC, "_expenseWindow: (keyOf(row) && byId.get(keyOf(row))) || verdicts[i] }", "_expenseWindow: verdicts[i] }");
-		const rows = buildAnnotate({ annotateSrc: m }).fn(deshorn, HEADERS, NOW).filter((o) => o["Load ID"].replace("#", "") === "100012");
+		const rows = buildAnnotate({ annotateSrc: m }).fn(desoren, HEADERS, NOW).filter((o) => o["Load ID"].replace("#", "") === "100012");
 		const g = await runGate({}, "Driver", "100012");
 		ok("M11 per-row verdicts would show the stale row closed while the gate accepts the id (so §6 would fail)",
 			proceeds(g) && rows.some((o) => o._expenseWindow.eligible === false));
@@ -712,7 +712,7 @@ const PHOTO_FAILURE_RE = new Function(`return ${PHOTO_RE_SRC}`)();
 		const run = new Function("req", "res", "safeLoadId", "driver", "loadBelongsToDriver",
 			"sentIfLoadOwnershipUnverified", "sentIfDriverExpenseWindowClosed", "sentIfDriverExpenseLoadMissing",
 			`"use strict"; return (async () => {\n${driverChecksSlice(src)}\nreturn "PROCEEDED";\n})();`);
-		const out = await run(asRole(role), res, loadId, "Deshorn King", loadBelongsToDriver, ownership503, gate, loadMissing);
+		const out = await run(asRole(role), res, loadId, "Desoren King", loadBelongsToDriver, ownership503, gate, loadMissing);
 		return { proceeded: out === "PROCEEDED", res };
 	}
 	{
@@ -748,14 +748,14 @@ const PHOTO_FAILURE_RE = new Function(`return ${PHOTO_RE_SRC}`)();
 		const cached = { headers: HEADERS, data: deduplicateLoads(SHEET.data.map((x) => ({ ...x })), HEADERS) };
 		const ids = cached.data.map((x) => normalizeLoadId(x["Load ID"]));
 		ok("one row per load id reaches the gate (the bottom one)", new Set(ids).size === ids.length);
-		r = await runGate({ sheet: cached }, "Driver", "7052901", "Howard Reddie");
+		r = await runGate({ sheet: cached }, "Driver", "7052901", "Hollis Renner");
 		ok("7052901: only the cancelled BOTTOM copy survives, so the load reads cancelled and is refused — as the app, which does not list it",
 			refused(r, "cancelled"));
 		r = await runGate({ sheet: cached }, "Driver", "100012");
 		ok("100012: the bottom row is the live one → accepted", proceeds(r));
 		r = await runGate({ sheet: cached }, "Driver", "100007");
 		ok("100007: the bottom row is ours, delivered 30 days ago → closed", refused(r, "closed"));
-		const view = buildAnnotate().fn(cached.data.filter((x) => x.Driver === "Deshorn King"), HEADERS, NOW);
+		const view = buildAnnotate().fn(cached.data.filter((x) => x.Driver === "Desoren King"), HEADERS, NOW);
 		let agree = true;
 		for (const o of view) {
 			const g = await runGate({ sheet: cached }, "Driver", o["Load ID"]);

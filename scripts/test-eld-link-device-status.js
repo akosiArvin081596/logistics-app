@@ -437,15 +437,15 @@ function routeWorld(db, verb, route, deps = {}) {
 		const keysFor = (rows) => new Function("normalizeDriverName", "db",
 			`${prologue}\nreturn { locations, fileByDriver, readByDriver, spellingOf };`,
 		)(normalize, { prepare: () => ({ all: () => rows }) });
-		const two = keysFor([{ id: 1, driver_name: "Shorn King" }, { id: 2, driver_name: "Shorn  King" }]);
+		const two = keysFor([{ id: 1, driver_name: "Soren King" }, { id: 2, driver_name: "Soren  King" }]);
 		const fixes = Object.create(null);
-		two.fileByDriver(fixes, "Shorn  King")[two.spellingOf("Shorn  King")] = "fix-91";
-		eq(two.locations.map((l) => l.driver), ["Shorn King", "Shorn  King"], "§7.7 two directory spellings of one name keep a row each");
+		two.fileByDriver(fixes, "Soren  King")[two.spellingOf("Soren  King")] = "fix-91";
+		eq(two.locations.map((l) => l.driver), ["Soren King", "Soren  King"], "§7.7 two directory spellings of one name keep a row each");
 		eq(two.locations.map((l) => two.readByDriver(fixes, l.driver) || null), [null, "fix-91"],
 			"§7.8 ...and each reads only its own spelling, never the other's GPS");
-		const one = keysFor([{ id: 1, driver_name: "Dezarius  Jackson" }]);
+		const one = keysFor([{ id: 1, driver_name: "Dominick  Jackson" }]);
 		const oneFixes = Object.create(null);
-		one.fileByDriver(oneFixes, "Dezarius Jackson")[one.spellingOf("Dezarius Jackson")] = "fix-356";
+		one.fileByDriver(oneFixes, "Dominick Jackson")[one.spellingOf("Dominick Jackson")] = "fix-356";
 		eq(one.locations.map((l) => one.readByDriver(oneFixes, l.driver) || null), ["fix-356"],
 			"§7.9 one directory spelling still reads a fix filed under other spacing");
 	}

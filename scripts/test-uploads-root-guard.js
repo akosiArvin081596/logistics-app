@@ -143,8 +143,8 @@ ok("lifted both listing routes", !!LIFTED.loadDocsRoute && !!LIFTED.investorDocs
 // Fixtures
 // ---------------------------------------------------------------------------
 const F = {
-	A: "L100_POD_1788000000001.pdf",            // Deshorn King's load
-	B: "L200_POD_1788000000002.pdf",            // Shorn King's load
+	A: "L100_POD_1788000000001.pdf",            // Desoren King's load
+	B: "L200_POD_1788000000002.pdf",            // Soren King's load
 	A_DELETED: "L100_Receipt_1788000000003.pdf", // soft-deleted row
 	A_RATECON: "L100_RATECON_1788000000004.pdf", // rate con uploaded into the root
 	A_RATECON_GONE: "L100_Rate_Con_1788000000011.pdf", // a root rate con whose only row is soft-deleted
@@ -188,28 +188,28 @@ function makeDb() {
 	`);
 	const doc = db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_url, deleted_at) VALUES (?, ?, ?, ?, ?, ?)");
 	const add = (load, driver, type, name, deleted = null) => doc.run(load, driver, type, name, `/uploads/${name}`, deleted);
-	add("L100", "Deshorn King", "POD", F.A);
-	add("L200", "Shorn King", "POD", F.B);
-	add("L100", "Deshorn King", "Receipt", F.A_DELETED, "2026-09-01T00:00:00Z");
-	add("L100", "Deshorn King", "RATECON", F.A_RATECON);
-	add("L100", "Deshorn King", "Rate_Con", F.A_RATECON_GONE, "2026-09-02T00:00:00Z");
-	add("L100", "Deshorn King", "Rate-Con", F.A_RATECON_DASH);
-	add("L300", "Deshorn King", "POD", F.UNVERIFIED);
-	add("L100", "Deshorn King", "BOL", F.SHARED);
-	add("L200", "Shorn King", "BOL", F.SHARED);
-	add("L200", "SHORN KING", "Other", F.B_UPPER);
-	add("L400", "Howard Reddie", "POD", F.CARRIER);
+	add("L100", "Desoren King", "POD", F.A);
+	add("L200", "Soren King", "POD", F.B);
+	add("L100", "Desoren King", "Receipt", F.A_DELETED, "2026-09-01T00:00:00Z");
+	add("L100", "Desoren King", "RATECON", F.A_RATECON);
+	add("L100", "Desoren King", "Rate_Con", F.A_RATECON_GONE, "2026-09-02T00:00:00Z");
+	add("L100", "Desoren King", "Rate-Con", F.A_RATECON_DASH);
+	add("L300", "Desoren King", "POD", F.UNVERIFIED);
+	add("L100", "Desoren King", "BOL", F.SHARED);
+	add("L200", "Soren King", "BOL", F.SHARED);
+	add("L200", "SOREN KING", "Other", F.B_UPPER);
+	add("L400", "Hollis Renner", "POD", F.CARRIER);
 	db.exec(`
 		INSERT INTO users (id, username, role, company_name) VALUES
 			(50, 'inv_acme', 'Investor', 'Acme Haul'), (51, 'inv_bravo', 'Investor', ''), (52, 'inv_empty', 'Investor', '');
-		INSERT INTO trucks (id, owner_id, assigned_driver) VALUES (1, 50, 'Deshorn King'), (2, 51, 'Shorn King');
-		INSERT INTO drivers_directory (id, driver_name, carrier_name) VALUES (1, 'Howard Reddie', 'Acme Haul');
+		INSERT INTO trucks (id, owner_id, assigned_driver) VALUES (1, 50, 'Desoren King'), (2, 51, 'Soren King');
+		INSERT INTO drivers_directory (id, driver_name, carrier_name) VALUES (1, 'Hollis Renner', 'Acme Haul');
 	`);
 	return db;
 }
 
 // The same three answers as the real guard: true, false, or null (could not verify).
-const LOAD_OWNER = { L100: "deshorn king", L200: "shorn king", L400: "howard reddie" };
+const LOAD_OWNER = { L100: "desoren king", L200: "soren king", L400: "hollis renner" };
 const UNVERIFIABLE = new Set(["L300"]);
 async function loadBelongsToDriver(loadId, driverName) {
 	if (!loadId || !driverName) return false;
@@ -220,8 +220,8 @@ async function loadBelongsToDriver(loadId, driverName) {
 const U = {
 	sa: { id: 1, role: "Super Admin", username: "super_admin" },
 	disp: { id: 2, role: "Dispatcher", username: "dispatch1" },
-	drvA: { id: 10, role: "Driver", username: "deshorn", driverName: "Deshorn King" },
-	drvB: { id: 11, role: "Driver", username: "shorn", driverName: "Shorn King" },
+	drvA: { id: 10, role: "Driver", username: "desoren", driverName: "Desoren King" },
+	drvB: { id: 11, role: "Driver", username: "soren", driverName: "Soren King" },
 	drvBlank: { id: 12, role: "Driver", username: "blank", driverName: "" },
 	inv1: { id: 50, role: "Investor", username: "inv_acme" },
 	inv2: { id: 51, role: "Investor", username: "inv_bravo" },

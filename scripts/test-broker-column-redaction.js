@@ -233,9 +233,9 @@ function row(overrides) {
 	r[IDX["Payment"]] = "$1,800.00";
 	r[IDX["Owner ID"]] = "5";
 	r[IDX["Contract ID"]] = "29284990";
-	r[IDX["Broker Contact Name"]] = "Danna Garcia";
+	r[IDX["Broker Contact Name"]] = "Della Garcia";
 	r[IDX["Phone Number"]] = "555-0142";
-	r[IDX["Email"]] = "danna.garcia@example.invalid";
+	r[IDX["Email"]] = "della.garcia@example.invalid";
 	for (const [k, v] of Object.entries(overrides || {})) r[IDX[k]] = v;
 	return r;
 }
@@ -243,8 +243,8 @@ const served = (cells, M = G) => M.sanitizeBrokerColumns(HEADERS, [rowObject(HEA
 const servedCells = (before) => HEADERS.map((h) => served(before)[h]);
 
 // The contact blobs production carries in these cells (a JSON object per cell).
-const NAME_BLOB = JSON.stringify({ Name: "Danna Garcia", Phone: "555-0142", Email: "d@example.invalid" });
-const PHONE_BLOB = JSON.stringify({ Name: "Danna Garcia", Phone: "555-0142", Ext: "12" });
+const NAME_BLOB = JSON.stringify({ Name: "Della Garcia", Phone: "555-0142", Email: "d@example.invalid" });
+const PHONE_BLOB = JSON.stringify({ Name: "Della Garcia", Phone: "555-0142", Ext: "12" });
 
 // ---------------------------------------------------------------------------
 // THE ORACLES — the code as it stood at each earlier point, verbatim.
@@ -303,7 +303,7 @@ function nameDegradingSanitize(headers, rows) {
 {
 	const old = preFixSanitize(HEADERS, [rowObject(HEADERS, row())])[0];
 	check("PRE-FIX: Phone Number was served in full (the leak)", old["Phone Number"], "555-0142");
-	check("PRE-FIX: Email was served in full (the leak)", old["Email"], "danna.garcia@example.invalid");
+	check("PRE-FIX: Email was served in full (the leak)", old["Email"], "della.garcia@example.invalid");
 	check("PRE-FIX: the harmless name column was the one blanked", old["Broker Contact Name"], "");
 }
 
@@ -317,7 +317,7 @@ function nameDegradingSanitize(headers, rows) {
 	check("a JSON blob with surrounding whitespace is served blank",
 		served(row({ "Broker Contact Name": `  ${NAME_BLOB}\n` }))["Broker Contact Name"], "");
 	check("a lower-case name key is served blank",
-		served(row({ "Broker Contact Name": JSON.stringify({ name: "Danna Garcia" }) }))["Broker Contact Name"], "");
+		served(row({ "Broker Contact Name": JSON.stringify({ name: "Della Garcia" }) }))["Broker Contact Name"], "");
 	check("a blob that does not parse is served blank (it used to be served in full)",
 		served(row({ "Broker Contact Name": "{not json" }))["Broker Contact Name"], "");
 	check("a whitespace-only cell is served blank", served(row({ "Phone Number": "   " }))["Phone Number"], "");
@@ -444,7 +444,7 @@ function writerSection(M = G) {
 		// before 2026-09-26 still holds, and any other value all restore the blob.
 		const before = row({ "Broker Contact Name": NAME_BLOB, "Phone Number": PHONE_BLOB });
 		const legacy = HEADERS.map((h) => nameDegradingSanitize(HEADERS, [rowObject(HEADERS, before)])[0][h]);
-		t("ORACLE: a pre-change page holds the name-only copy", legacy[IDX["Broker Contact Name"]], JSON.stringify({ Name: "Danna Garcia" }));
+		t("ORACLE: a pre-change page holds the name-only copy", legacy[IDX["Broker Contact Name"]], JSON.stringify({ Name: "Della Garcia" }));
 		const other = servedCells(before);
 		other[IDX["Broker Contact Name"]] = JSON.stringify({ Name: "Someone Else" });
 		other[IDX["Phone Number"]] = "Pat Replacement";
@@ -476,7 +476,7 @@ function writerSection(M = G) {
 		// is not extended; the withheld cells inside it are restored.
 		const s = splice(row(), servedCells(row()).slice(0, IDX["Phone Number"]));
 		t("writer: a short values array is not extended", s.values.length, IDX["Phone Number"]);
-		t("writer: ...and a withheld cell inside it is restored", s.values[IDX["Broker Contact Name"]], "Danna Garcia");
+		t("writer: ...and a withheld cell inside it is restored", s.values[IDX["Broker Contact Name"]], "Della Garcia");
 		// No withheld column on the header row: nothing changes.
 		const vals = ["1", "x", "y"];
 		M.restoreWithheldBrokerCells(["Load ID", "Driver", "Truck"], ["1", "a", "b"], vals);
@@ -497,7 +497,7 @@ function writerSection(M = G) {
 			}
 		});
 		t("PRE-FIX writer: Email would have been blanked on save (data loss)", oldFilterValues[IDX["Email"]], "");
-		t("FIXED writer: Email survives the same save", splice(before, sent).values[IDX["Email"]], "danna.garcia@example.invalid");
+		t("FIXED writer: Email survives the same save", splice(before, sent).values[IDX["Email"]], "della.garcia@example.invalid");
 	}
 	return results;
 }
@@ -947,7 +947,7 @@ async function postDataSection(M = G, routeSrc = POST_DATA_SRC) {
 	asyncChecks.push(getDataGate(GET_DATA_SRC).then((out) => {
 		check("GET /api/data, the shipped gate: Dispatcher, Investor and Driver refused 403, no session 401, Super Admin through",
 			out.gate, { Dispatcher: 403, Investor: 403, Driver: 403, none: 401, "Super Admin": "next" });
-		check("GET /api/data, Super Admin: the stored contact in full", out.superAdminRow, ["Danna Garcia", "555-0142", "danna.garcia@example.invalid"]);
+		check("GET /api/data, Super Admin: the stored contact in full", out.superAdminRow, ["Della Garcia", "555-0142", "della.garcia@example.invalid"]);
 	}));
 }
 {
@@ -1027,7 +1027,7 @@ async function getDataGate(routeSrc) {
 		const admin = await run("Super Admin", "111");
 		check("GET /api/load/:loadId, Super Admin: the stored contact in full",
 			[admin.body.load["Broker Contact Name"], admin.body.load["Phone Number"], admin.body.load["Email"]],
-			[NAME_BLOB, "555-0142", "danna.garcia@example.invalid"]);
+			[NAME_BLOB, "555-0142", "della.garcia@example.invalid"]);
 		const miss = await run("Dispatcher", "999");
 		check("GET /api/load/:loadId, an unknown load: 404", miss.code, 404);
 	})());
@@ -1051,7 +1051,7 @@ const M6 = buildModule({
 });
 const m6Out = served(row({ "Broker Contact Name": NAME_BLOB, "Phone Number": PHONE_BLOB }), M6);
 check("M6 really is the old reader: it serves the JSON cell as its name",
-	m6Out["Broker Contact Name"], JSON.stringify({ Name: "Danna Garcia" }));
+	m6Out["Broker Contact Name"], JSON.stringify({ Name: "Della Garcia" }));
 // M7: the restore only for a blank round trip, as before 2026-09-26 — any
 // other value sent for a withheld column is written.
 const M7 = buildModule({

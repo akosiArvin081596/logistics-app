@@ -38,8 +38,8 @@ async function assertSafeTarget(base) {
  *
  * ⚠️ Returns the resolved USER, and callers must take the driver's display name
  * from it rather than from a constant. The screenshot runner's `--user` default
- * (LogisX-3867 / Shorn King) had drifted away from its storyboard's hardcoded
- * DRIVER_NAME ("Howard Reddie"), so running it with no flag logged in as one
+ * (LogisX-3867 / Soren King) had drifted away from its storyboard's hardcoded
+ * DRIVER_NAME ("Hollis Renner"), so running it with no flag logged in as one
  * driver and queried the other — every `before()` hook died on a load that was
  * not in the payload. Deriving the name from the session makes that
  * disagreement unrepresentable.

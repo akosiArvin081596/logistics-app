@@ -73,11 +73,11 @@ The percentage comes from each load's pay split (typically 70% to driver, but co
 
 ### Example
 
-TRK-101 has daily-rate driver Lesline:
+TRK-101 has daily-rate driver Leonora:
 - 4 loads spanning Apr 5-15. Unique active days: Apr 5, 6, 7, 8, 9, 10, 14, 15 = 8 days.
 - 8 × $250 = **$2,000**.
 
-TRK-102 has owner-op driver Kenrick at 70%:
+TRK-102 has owner-op driver Kendall at 70%:
 - 3 loads at $2,200, $2,500, $1,900.
 - Driver pay: $1,540 + $1,750 + $1,330 = **$4,620**.
 

@@ -277,7 +277,7 @@ const fromDate = ref('')     // 'YYYY-MM-DD' from <input type="date">
 const toDate = ref('')
 const driverCol = computed(() => props.headers.find(h => /driver/i.test(h)) || '')
 // Drivers are keyed through normDriver(), the server's own rule. Without its
-// whitespace collapse, sheet drift renders "Rodney Brown" and "Rodney  Brown"
+// whitespace collapse, sheet drift renders "Roland Brown" and "Roland  Brown"
 // as two separate drivers, each holding half the history.
 // Distinct drivers present in the completed loads, keyed on the normalised form
 // and labelled with the first spelling seen (original casing preserved).

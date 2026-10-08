@@ -130,7 +130,7 @@ A clear understanding upfront beats inconsistent expectations.
 Most issues resolve with operations directly. If they don't:
 
 1. **Talk to your operations contact directly by phone.** Email and chat can lose nuance.
-2. **Escalate to LogisX leadership.** Each investor has a relationship with a senior contact — typically the CEO (Deshorn King) or a designated manager.
+2. **Escalate to LogisX leadership.** Each investor has a relationship with a senior contact — typically the CEO (Desoren King) or a designated manager.
 3. **Refer to your contract.** The Master Agreement defines dispute resolution if direct conversation doesn't work.
 
 Escalation is rare. Most things resolve in conversation.

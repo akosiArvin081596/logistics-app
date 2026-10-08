@@ -191,7 +191,7 @@ function stripEscapes(src) {
 // ── the code under test ──────────────────────────────────────────────────────
 const ACCEPT_SRC = liftRoute(SRC, 'app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), async (req, res) => {');
 const APPLY_SRC = liftRoute(SRC, 'app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {');
-const ONBOARD_SRC = liftFunction(SRC, "async function checkAndCompleteOnboarding(userId) {");
+const ONBOARD_SRC = liftFunction(SRC, "async function checkAndCompleteOnboarding(userId, req = null) {");
 const ESCAPE_SRC = liftFunction(SRC, "function escapeHtml(s) {");
 const COL_LETTER_SRC = liftFunction(SRC, "function colLetter(idx) {");
 // The acceptance writes the vehicles through this helper (its own subject is

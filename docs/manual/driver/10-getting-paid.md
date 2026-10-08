@@ -148,6 +148,6 @@ If you've messaged dispatch about a pay issue and the response is "no, that's ho
 
 1. **Re-read your contract** carefully. The pay terms are spelled out and they're binding.
 2. **Talk to your administrator** by phone, not just message. Voice resolves things faster than text on financial questions.
-3. **If you're still not satisfied,** escalate to LogisX leadership. The CEO is Deshorn King; operations leadership has contact info on file.
+3. **If you're still not satisfied,** escalate to LogisX leadership. The CEO is Desoren King; operations leadership has contact info on file.
 
 In years of operation, the vast majority of pay disputes turn out to be either (a) a misunderstanding about the pay formula or (b) a data entry error that admin gladly fixes. The system is designed to be transparent — every load, every day, every adjustment is on the invoice. If you can point to a specific discrepancy, it gets resolved.

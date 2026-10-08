@@ -97,13 +97,13 @@ function mk(loadId, status, driver) {
 }
 // rows[0] is sheet row 2.
 const ROWS = [
-	/* row 2  */ mk("562620213", "Dispatched", "Howard Reddie"),
-	/* row 3  */ mk("#513987502", "In Transit", "Shorn King"),
-	/* row 4  */ mk("2216467", "Delivered", "Rodney Brown"),
-	/* row 5  */ mk("", "Completed", "Lesline Johnson"),      // one of the 8 blank-id rows
-	/* row 6  */ mk("514964283", "Completed", "Kenrick Davis"), // duplicate, copy 1
-	/* row 7  */ mk("7086762", "At Receiver", "Shorn King"),
-	/* row 8  */ mk("514964283", "Completed", "Kenrick Davis"), // duplicate, copy 2
+	/* row 2  */ mk("562620213", "Dispatched", "Hollis Renner"),
+	/* row 3  */ mk("#513987502", "In Transit", "Soren King"),
+	/* row 4  */ mk("2216467", "Delivered", "Roland Brown"),
+	/* row 5  */ mk("", "Completed", "Leonora Johnson"),      // one of the 8 blank-id rows
+	/* row 6  */ mk("514964283", "Completed", "Kendall Davis"), // duplicate, copy 1
+	/* row 7  */ mk("7086762", "At Receiver", "Soren King"),
+	/* row 8  */ mk("514964283", "Completed", "Kendall Davis"), // duplicate, copy 2
 ];
 const bind = (rowIndex, loadId, rows = ROWS, headers = H) =>
 	G.resolveLoadBinding(headers, rows, rowIndex, loadId);
