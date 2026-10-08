@@ -21,14 +21,16 @@
 //      loopback through
 //   §5 the file guard refuses .env files and Google keys, and nothing else
 //   §6 the banner is on every page, and nothing else is touched
-//   §7 server.js itself: refusals exit before listening (a LOCAL_REPLICA set
-//      only by a .env file included). On macOS, where a replica runs, a good
-//      boot serves the banner (login page included), starts no scheduled job,
-//      uses the local Sheets copy, never reads the .env or the key file beside
-//      it, and attempts no outbound connection; elsewhere the boot is refused
+//   §7 server.js itself: refusals exit before listening (LOCAL_REPLICA=1 set
+//      only by a .env file included), and a good boot serves the banner (login
+//      page included), starts no scheduled job, uses the local Sheets copy,
+//      never reads the .env or the key file beside it, and attempts no outbound
+//      connection. The test child is preloaded with a shim reporting macOS, so
+//      this runs in CI's Linux too; a child reporting Linux is refused
 //   §8 outside replica mode nothing changes: boot() returns null for any value
-//      but 1 (a stray one is reported, never an exit) and patches nothing, and
-//      DATA_DIR is the app directory
+//      but 1 (off values silently, a stray one with a warning) and patches
+//      nothing; after dotenv, a server-like run carries on for every value but
+//      LOCAL_REPLICA=1 from a .env file; DATA_DIR is the app directory
 //
 // Standalone: node scripts/test-replica-mode.js. Temporary folders only (HOME is
 // pointed at one for the boots), port 0, no network.
@@ -394,11 +396,21 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 		fs.writeFileSync(path.join(d, "service-account-key.json"), "{}");
 		return d;
 	};
-	const refused = (name, mutate, re) => {
+	// A replica runs on macOS only. The test child (never production code) is
+	// preloaded with a shim that reports the platform, so every case below runs
+	// as it would on a Mac, CI's Linux included, and the macOS rule itself is
+	// tested by reporting another platform.
+	const platformShim = (platform) => {
+		const file = path.join(tmp("replica-shim-"), `platform-${platform}.cjs`);
+		fs.writeFileSync(file, `Object.defineProperty(process, "platform", { value: ${JSON.stringify(platform)}, configurable: true, enumerable: true });\n`);
+		return file;
+	};
+	const asMac = platformShim("darwin");
+	const refused = (name, mutate, re, shim = asMac) => {
 		const h = replicaHome();
 		const env = baseEnv(h);
 		mutate(env, h);
-		const r = spawnSync(process.execPath, [SERVER], { cwd: decoy(), env, encoding: "utf8", timeout: 20000 });
+		const r = spawnSync(process.execPath, ["--require", shim, SERVER], { cwd: decoy(), env, encoding: "utf8", timeout: 20000 });
 		ok(name, r.status === 1 && re.test(r.stderr) && !/listening/.test(r.stdout), { status: r.status, err: r.stderr.slice(0, 300) });
 	};
 	refused("NODE_ENV=production: refused before listening", (e) => { e.NODE_ENV = "production"; }, /REFUSING TO START[\s\S]*NODE_ENV is production/);
@@ -420,9 +432,7 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 	refusedAfterSettings("a credential in the settings file: refused once the file is read", "GMAIL_APP_PASSWORD='x'\n", /outbound credentials are set: GMAIL_APP_PASSWORD/);
 	refusedAfterSettings("a settings value that looks like a key: refused once the file is read", "SOME_SETTING='AIzaSyD3x9EXAMPLEEXAMPLE12345'\n", /settings file holds SOME_SETTING, which a replica does not take \(secret: value looks like a key\)/);
 	refusedAfterSettings("a runtime setting in the settings file (NODE_OPTIONS): refused once the file is read", "NODE_OPTIONS='--max-old-space-size=64'\n", /settings file holds NODE_OPTIONS, which a replica does not take \(runtime: set by replica:start\)/);
-	if (process.platform !== "darwin") {
-		refused("off macOS (this machine): refused before listening", () => {}, /a replica runs on a developer Mac \(macOS\) only/);
-	}
+	refused("off macOS: refused before listening", () => {}, /this is linux: a replica runs on a developer Mac \(macOS\) only/, platformShim("linux"));
 	{
 		// Replica mode is decided before dotenv: a LOCAL_REPLICA that only a .env
 		// file sets must stop a normal run, which would otherwise hold that file's
@@ -430,12 +440,11 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 		const d = tmp("replica-dotenv-");
 		fs.writeFileSync(path.join(d, ".env"), "LOCAL_REPLICA=1\nGEMINI_API_KEY=from-the-repo-env\n");
 		const r = spawnSync(process.execPath, [SERVER], { cwd: d, env: { PATH: process.env.PATH, HOME: tmp("replica-home-"), PORT: "0" }, encoding: "utf8", timeout: 20000 });
-		ok("a LOCAL_REPLICA set only by a .env file stops a normal run before it listens", r.status === 1 && /LOCAL_REPLICA was set by a \.env file/.test(r.stderr) && !/Server running/.test(r.stdout), { status: r.status, err: r.stderr.slice(0, 300) });
+		ok("a LOCAL_REPLICA set only by a .env file stops a normal run before it listens", r.status === 1 && /LOCAL_REPLICA=1 was set by a \.env file/.test(r.stderr) && !/Server running/.test(r.stdout), { status: r.status, err: r.stderr.slice(0, 300) });
 	}
 
-	if (process.platform === "darwin") {
-		// A replica runs on macOS only, so the boot itself is exercised there; off
-		// macOS the refusal above is what this section asserts.
+	{
+		// The live boot, on every platform: the child reports macOS (the shim above).
 		const settings = [
 			"SPREADSHEET_ID='replica-test-main'",
 			"ARCHIVE_SPREADSHEET_ID='replica-test-archive'",
@@ -445,7 +454,7 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 		].join("\n") + "\n";
 		const h = replicaHome({ settings });
 		const cwd = decoy();
-		const child = spawn(process.execPath, [SERVER], { cwd, env: baseEnv(h, cwd), stdio: ["ignore", "pipe", "pipe"] });
+		const child = spawn(process.execPath, ["--require", asMac, SERVER], { cwd, env: baseEnv(h, cwd), stdio: ["ignore", "pipe", "pipe"] });
 		let out = "";
 		let err = "";
 		child.stdout.on("data", (c) => (out += c));
@@ -492,20 +501,44 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 			const dotenv = require(${JSON.stringify(path.join(ROOT, "node_modules", "dotenv"))});
 			const config = dotenv.config;
 			const replica = require(${JSON.stringify(MODE)});
-			const r = ["", "0", undefined, "true", "yes"].map((v) => replica.boot({ appDir: ${JSON.stringify(ROOT)}, env: v === undefined ? {} : { LOCAL_REPLICA: v } }));
+			const r = ["", "0", undefined, "false", "No", "OFF", " off ", "true", "yes"].map((v) => replica.boot({ appDir: ${JSON.stringify(ROOT)}, env: v === undefined ? {} : { LOCAL_REPLICA: v } }));
 			const after = [net.Socket.prototype.connect, dns.lookup, dns.resolve4, globalThis.fetch, fs.readFileSync, fs.promises.readFile];
 			replica.checkDotenvFlag({ LOCAL_REPLICA: "0" });
 			process.stdout.write(JSON.stringify({ nulls: r.every((x) => x === null), same: before.every((f, i) => f === after[i]), dotenv: dotenv.config === config, active: replica.active() }));`;
 		const r = spawnSync(process.execPath, ["-e", child], { encoding: "utf8", timeout: 20000 });
 		let res = {};
 		try { res = JSON.parse(r.stdout); } catch { ok("the child ran", false, r.stderr.slice(0, 300)); }
-		eq("boot() is null when LOCAL_REPLICA is unset, empty, 0, or any value but 1", res.nulls, true);
-		ok("...a stray value is reported, never a reason to stop the process", /LOCAL_REPLICA is "true", not 1: replica mode is OFF/.test(r.stderr) && r.status === 0, r.stderr.slice(0, 200));
+		eq("boot() is null when LOCAL_REPLICA is unset, empty, 0, false, no, off (any case), or any value but 1", res.nulls, true);
+		ok("...the off values pass silently; a stray value is reported, never a reason to stop the process",
+			(r.stderr.match(/replica mode is OFF/g) || []).length === 2 && /LOCAL_REPLICA is "true"/.test(r.stderr) && /LOCAL_REPLICA is "yes"/.test(r.stderr) && r.status === 0, r.stderr.slice(0, 300));
 		eq("...and patches no socket, DNS, fetch or file function", res.same, true);
 		eq("...and leaves dotenv alone", res.dotenv, true);
 		eq("...and the PDF browser is told replica mode is off", res.active, false);
 		const dataDirLine = SRC.match(/^const DATA_DIR = (.*);$/m)[1];
 		eq("DATA_DIR evaluates to the app directory when REPLICA is null", new Function("REPLICA", "__dirname", `return ${dataDirLine};`)(null, "/app"), "/app");
+		// The same sequence server.js runs (boot, dotenv, checkDotenvFlag), in an
+		// environment like production's under pm2, with each LOCAL_REPLICA a .env
+		// file could hold. Only LOCAL_REPLICA=1 from the .env stops the run.
+		const dotenvRun = (dotenvValue, preEnv = {}) => {
+			const d = tmp("replica-flag-");
+			if (dotenvValue !== undefined) fs.writeFileSync(path.join(d, ".env"), `LOCAL_REPLICA=${dotenvValue}\n`);
+			const code = `const r = require(${JSON.stringify(MODE)}); r.boot({ appDir: ${JSON.stringify(ROOT)} }); require(${JSON.stringify(path.join(ROOT, "node_modules", "dotenv"))}).config({ quiet: true }); r.checkDotenvFlag(process.env); console.log("CONTINUED");`;
+			return spawnSync(process.execPath, ["-e", code], { cwd: d, env: { PATH: process.env.PATH, HOME: d, NODE_ENV: "production", pm_id: "3", PM2_HOME: "/root/.pm2", ...preEnv }, encoding: "utf8", timeout: 20000 });
+		};
+		for (const v of [undefined, "", "0", "false", "FALSE", "no", "Off"]) {
+			const r = dotenvRun(v);
+			ok(`a server-like run with ${v === undefined ? "no LOCAL_REPLICA" : `LOCAL_REPLICA=${JSON.stringify(v)} in its .env`} carries on, silently`, r.status === 0 && /CONTINUED/.test(r.stdout) && !/LOCAL_REPLICA/.test(r.stderr), { status: r.status, err: r.stderr.slice(0, 200) });
+		}
+		for (const v of ["true", "yes", "2"]) {
+			const r = dotenvRun(v);
+			ok(`a server-like run with LOCAL_REPLICA=${v} in its .env carries on, with a warning`, r.status === 0 && /CONTINUED/.test(r.stdout) && /LOCAL_REPLICA is ".*" \(from a \.env file\), not 1: replica mode is OFF/.test(r.stderr), { status: r.status, err: r.stderr.slice(0, 200) });
+		}
+		{
+			const r = dotenvRun("1");
+			ok("LOCAL_REPLICA=1 from a .env file is the one value that stops the run", r.status === 1 && !/CONTINUED/.test(r.stdout) && /LOCAL_REPLICA=1 was set by a \.env file/.test(r.stderr), { status: r.status, err: r.stderr.slice(0, 200) });
+			const pre = dotenvRun("1", { LOCAL_REPLICA: "false" });
+			ok("...and only when the environment did not already set the flag (dotenv does not override it)", pre.status === 0 && /CONTINUED/.test(pre.stdout), { status: pre.status, err: pre.stderr.slice(0, 200) });
+		}
 		eq("startsJob() evaluates to true when REPLICA is null", new Function("REPLICA", `${SRC.match(/function startsJob\(name\) \{[\s\S]*?\n\}/)[0]}\nreturn startsJob("x");`)(null), true);
 	}
 

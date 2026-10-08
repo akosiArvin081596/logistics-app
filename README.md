@@ -182,9 +182,12 @@ npm run replica:clean -- [--task <name>]
   - `BIND_HOST` other than loopback;
   - a database or data folder outside the task's working copy (`~/LogisX-replica/work/<task>/`),
     or a settings file or guard log outside `~/LogisX-replica/`.
-- **`LOCAL_REPLICA` is read before dotenv.** A value other than 1 is reported and ignored (never a
-  reason to stop a normal run), and a `LOCAL_REPLICA` that only a `.env` file sets stops the
-  server, which would otherwise run normally with that file's credentials.
+- **`LOCAL_REPLICA` is read before dotenv, and judged the same way after it.**
+  - Unset, empty, `0`, `false`, `no` and `off` (any case) mean off.
+  - Any other value but `1` is reported and otherwise ignored.
+  - The flag stops a normal run in one case only: `LOCAL_REPLICA=1` set by a `.env` file. That
+    server would otherwise run normally with the file's credentials while seeming to be a
+    replica.
 - **Settings:** it never loads the repo's `.env` (dotenv is made a no-op, and a file guard refuses
   to read any `.env` or Google key). It reads `~/LogisX-replica/settings.env` instead.
 - **Outbound paths are off:**
