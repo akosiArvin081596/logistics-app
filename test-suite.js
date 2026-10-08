@@ -1096,7 +1096,7 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
   if (!BI) {
     for (const n of [
       "80. resolveInvoiceTo routes Bison to its own AP inbox",
-      "81. resolveInvoiceTo maps a known domain and bills quickpay",
+      "81. resolveInvoiceTo maps a known domain and bills the default AP inbox",
       "82. resolveInvoiceTo humanizes an unmapped domain",
       "83. resolveInvoiceTo falls back to the broker contact name",
       "84. parseMoney: blank/None/$0.00 are all 0, $550.00 is 550",
@@ -1107,31 +1107,46 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
       "89. Invoice email preserves an alphanumeric PO",
     ]) skip(n, "lib/broker-invoice.js not loadable from this checkout");
   } else {
+    // The AP inboxes are settings with no default in code (BISON_INVOICE_EMAIL,
+    // DEFAULT_INVOICE_EMAIL), read by resolveInvoiceTo() at each call. 80-83
+    // name example.test inboxes for themselves, and put back whatever the
+    // environment had afterwards.
+    const BISON_TO = "bison-ap@example.test";
+    const DEFAULT_TO = "ap@example.test";
+    const savedInvoiceTo = { BISON_INVOICE_EMAIL: process.env.BISON_INVOICE_EMAIL, DEFAULT_INVOICE_EMAIL: process.env.DEFAULT_INVOICE_EMAIL };
+    process.env.BISON_INVOICE_EMAIL = BISON_TO;
+    process.env.DEFAULT_INVOICE_EMAIL = DEFAULT_TO;
+
     // 80. Bison keeps the dedicated AP inbox it has always used — byte for
     //     byte. This is the regression check on the generalization.
     const to80 = BI.resolveInvoiceTo({ brokerEmail: "ops@bisontransport.com" });
     test("80. resolveInvoiceTo routes Bison to its own AP inbox",
-      to80.name === "Bison Transport" && to80.email === "QPinvoicesUSA@bisontransport.com");
+      to80.name === "Bison Transport" && to80.email === BISON_TO);
 
     // 81. The sheet has NO brokerage column — "Broker Contact Name" holds the
     //     booking agent ("Della Garcia"), which must never head an Invoice To
     //     block. The company is derived from the email domain instead, and
-    //     everyone who isn't Bison bills quickpay.
+    //     everyone who isn't Bison bills the default AP inbox.
     const to81 = BI.resolveInvoiceTo({ brokerEmail: "Della.Garcia@chrobinson.com", brokerContactName: "Della Garcia" });
-    test("81. resolveInvoiceTo maps a known domain and bills quickpay",
-      to81.name === "C.H. Robinson" && to81.email === "quickpay@megacorplogistics.com");
+    test("81. resolveInvoiceTo maps a known domain and bills the default AP inbox",
+      to81.name === "C.H. Robinson" && to81.email === DEFAULT_TO);
 
     // 82. An unmapped broker must still produce a presentable name rather than
     //     a blank invoice — a new broker should not need a code change.
     const to82 = BI.resolveInvoiceTo({ brokerEmail: "x@acme-freight.com" });
     test("82. resolveInvoiceTo humanizes an unmapped domain",
-      to82.name === "Acme Freight" && to82.email === "quickpay@megacorplogistics.com");
+      to82.name === "Acme Freight" && to82.email === DEFAULT_TO);
 
     // 83. Last resort with no usable email: the agent's name beats an empty
     //     "Invoice To".
     const to83 = BI.resolveInvoiceTo({ brokerContactName: "Della Garcia" });
     test("83. resolveInvoiceTo falls back to the broker contact name",
-      to83.name === "Della Garcia" && to83.email === "quickpay@megacorplogistics.com");
+      to83.name === "Della Garcia" && to83.email === DEFAULT_TO);
+
+    for (const [k, v] of Object.entries(savedInvoiceTo)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
 
     // 84. The floor under the 422 guard. Each of these used to be a plausible
     //     route to a $0.00 invoice: an empty Payment cell, a Gemini "None", a

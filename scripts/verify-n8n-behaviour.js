@@ -32,8 +32,11 @@
  *     "test" verb for a credential; do not go looking for one.
  *
  * Usage:
- *   N8N_API_KEY=... node scripts/verify-n8n-behaviour.js [--strict] [--verbose]
+ *   N8N_BASE_URL=... N8N_WORKFLOW_ID=... N8N_API_KEY=... node scripts/verify-n8n-behaviour.js [--strict] [--verbose]
  *   node scripts/verify-n8n-behaviour.js --fixture path/to/workflow.json
+ *
+ *   N8N_BASE_URL (the instance) and N8N_WORKFLOW_ID have no default: without
+ *   either, an API run exits 2 before any network call. --fixture needs neither.
  *
  *   Load the key into the env var; never paste it on a command line that lands in
  *   shell history, and never commit it:
@@ -51,8 +54,8 @@
 
 "use strict";
 
-const N8N_BASE = process.env.N8N_BASE_URL || "https://sandhub.app.n8n.cloud";
-const WORKFLOW_ID = process.env.N8N_WORKFLOW_ID || "ydFgTSFpKTyyZbXW";
+const { readN8nSettings, requireN8nSettings } = require("./lib/n8n-settings");
+
 const API_KEY = process.env.N8N_API_KEY;
 const STRICT = process.argv.includes("--strict");
 const VERBOSE = process.argv.includes("--verbose");
@@ -60,6 +63,10 @@ const FIXTURE = (() => {
 	const i = process.argv.indexOf("--fixture");
 	return i !== -1 && process.argv[i + 1] ? process.argv[i + 1] : null;
 })();
+// --fixture reads the workflow off disk and calls nothing, so it needs neither setting.
+const { base: N8N_BASE, workflowId: WORKFLOW_ID } = FIXTURE
+	? readN8nSettings(process.env)
+	: requireN8nSettings("verify-n8n-behaviour.js");
 
 if (!API_KEY && !FIXTURE) {
 	console.error("N8N_API_KEY env var required (or pass --fixture PATH). Load it (do not echo it):");
@@ -157,7 +164,7 @@ function classifyPairedItem(src) {
 	const nodes = wf.nodes || [];
 	const conn = wf.connections || {};
 
-	console.log(`n8n behavioural checks — "${wf.name}" (${WORKFLOW_ID})`);
+	console.log(`n8n behavioural checks — "${wf.name}" (${WORKFLOW_ID || wf.id || "fixture"})`);
 	console.log(`  ${nodes.length} nodes · active=${wf.active} · ${FIXTURE ? `fixture ${FIXTURE}` : N8N_BASE}`);
 
 	const find = (name) => nodes.find((n) => n.name === name);

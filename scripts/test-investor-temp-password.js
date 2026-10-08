@@ -171,9 +171,9 @@ async function accept(db, appId, { status = "Accepted", routeSrc = ACCEPT_SRC } 
 	// subject; this application signs the standard contract, so none is.
 	// The lock on the new account's company name is scripts/test-investor-accept-guards.js's
 	// subject (§10); here it judges nothing.
-	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", "recordSignedPayoutBasis", "unrecordedLeaseNote", "getJobTrackingCached", "investorCompanyLockBlockers", routeSrc)(
+	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", "recordSignedPayoutBasis", "unrecordedLeaseNote", "getJobTrackingCached", "investorCompanyLockBlockers", "ADMIN_NOTIFY_EMAIL", routeSrc)(
 		app, requireRole, db, fastBcrypt, crypto, () => {}, () => {}, colLetter, escapeHtml, sendEmail, parseTruckAmount, registerApplicationVehicles, findDriverNameClash,
-		() => null, () => "", async () => ({ headers: [], data: [] }), () => null);
+		() => null, () => "", async () => ({ headers: [], data: [] }), () => null, "admin@example.test");
 	if (typeof handler !== "function") die("the lifted route did not register a handler");
 	const out = { status: 200, body: null };
 	const res = {
@@ -236,7 +236,7 @@ async function sectionUnchanged() {
 	const trucks = db.prepare("SELECT unit_number, owner_id FROM trucks ORDER BY unit_number").all();
 	ok(trucks.length === 2 && trucks.every((t) => t.owner_id === creds.userId) && trucks[0].unit_number === `INV-${appId}-A`,
 		`§2 the application's vehicles must still become trucks owned by the new account: ${JSON.stringify(trucks)}`);
-	ok(r.mail.length === 2 && r.mail.some((m) => m.to === "info@logisx.com"), "§2 both emails must still be sent (applicant + admin)");
+	ok(r.mail.length === 2 && r.mail.some((m) => m.to === "admin@example.test"), "§2 both emails must still be sent (applicant + admin)");
 	ok(db.prepare("SELECT status FROM investor_applications WHERE id = ?").get(appId).status === "Accepted",
 		"§2 the application must be marked Accepted");
 

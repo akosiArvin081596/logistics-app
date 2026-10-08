@@ -21,22 +21,23 @@
  * appendOrUpdate mode keyed on Load ID, so the existing sheet row is
  * overwritten in place — no duplicate row.
  *
- * Run: N8N_API_KEY=... node scripts/rescue-load.js <loadId>
+ * Run: N8N_BASE_URL=... N8N_WORKFLOW_ID=... N8N_API_KEY=... node scripts/rescue-load.js <loadId>
+ *      (no defaults: without N8N_BASE_URL or N8N_WORKFLOW_ID it exits 2)
  *
- * Example: N8N_API_KEY=... node scripts/rescue-load.js 6962146
+ * Example: N8N_BASE_URL=... N8N_WORKFLOW_ID=... N8N_API_KEY=... node scripts/rescue-load.js 6962146
  */
 
 const { spawn } = require('child_process');
 const path = require('path');
+const { requireN8nSettings } = require('./lib/n8n-settings');
 
-const N8N_BASE = process.env.N8N_BASE_URL || 'https://sandhub.app.n8n.cloud';
-const WORKFLOW_ID = process.env.N8N_WORKFLOW_ID || 'ydFgTSFpKTyyZbXW';
+const { base: N8N_BASE, workflowId: WORKFLOW_ID } = requireN8nSettings('rescue-load.js');
 const API_KEY = process.env.N8N_API_KEY;
 if (!API_KEY) { console.error('N8N_API_KEY env var required'); process.exit(1); }
 
 const LOAD_ID = (process.argv[2] || '').trim();
 if (!LOAD_ID) {
-	console.error('Usage: N8N_API_KEY=... node scripts/rescue-load.js <loadId>');
+	console.error('Usage: N8N_BASE_URL=... N8N_WORKFLOW_ID=... N8N_API_KEY=... node scripts/rescue-load.js <loadId>');
 	process.exit(1);
 }
 

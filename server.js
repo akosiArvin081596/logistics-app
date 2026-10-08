@@ -7498,6 +7498,24 @@ app.post("/api/n8n/load-distance", n8nDistanceLimiter, async (req, res) => {
 	}
 });
 
+// The inbox the admin notifications go to: new driver and investor
+// applications, driver and investor acceptances, signed driver documents, and
+// the website's investor RFI form (lib/investor-rfi.js). No default: only the
+// environment names it (production's .env names production's inbox), so a
+// local or staging server never mails it by accident. Unset or blank, each of
+// those sends is skipped and nothing else in its request changes; the RFI form
+// answers its "couldn't send" message. scripts/test-no-production-defaults.js
+// pins it.
+const ADMIN_NOTIFY_EMAIL = String(process.env.ADMIN_NOTIFY_EMAIL ?? "").trim();
+// Module scope, so it is logged once per process start and never per request.
+if (!ADMIN_NOTIFY_EMAIL) {
+	console.warn(
+		"[admin-notify] ⚠️ ADMIN_NOTIFY_EMAIL is not set — no admin notification email is sent: " +
+		"new driver and investor applications, driver and investor acceptances and signed driver documents " +
+		"send none, and the investor RFI form answers that it couldn't send the request.",
+	);
+}
+
 // Shared email helper
 // Returns TRUE only when the message was actually handed to Gmail. Callers that
 // ignore the return value behave exactly as before (it used to return undefined
@@ -10457,7 +10475,7 @@ app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 				<div style="font-size:11px;color:#94a3b8;line-height:1.6">LogisX Inc. | 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381 | USDOT# 4302683</div>
 			</div>
 		</div>`;
-		sendEmail("info@logisx.com", `New Driver Application: ${full_name}`, adminDriverHtml);
+		if (ADMIN_NOTIFY_EMAIL) sendEmail(ADMIN_NOTIFY_EMAIL, `New Driver Application: ${full_name}`, adminDriverHtml);
 	} catch (err) {
 		console.error("apply submission failed:", err);
 		// The emails above are built after res.json(), inside this same try, so
@@ -10475,10 +10493,11 @@ app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 // path on its own nginx vhost. Origin allowlist (logisx.com and its staging
 // site), a rate limit with publicFormLimiter's numbers plus a daily cap on the
 // emails it sends, the public-form-input checks, a honeypot, and one email to
-// info@logisx.com with Reply-To the
-// submitter. No database write and no submitter data in logs. All of it lives
-// in lib/investor-rfi.js; scripts/test-investor-rfi.js drives this middleware.
-app.post(investorRfi.INVESTOR_RFI_PATH, ...investorRfi.createInvestorRfiMiddleware({ sendEmail }));
+// ADMIN_NOTIFY_EMAIL with Reply-To the submitter (without it, nothing is sent
+// and the visitor is told so). No database write and no submitter data in
+// logs. All of it lives in lib/investor-rfi.js; scripts/test-investor-rfi.js
+// drives this middleware.
+app.post(investorRfi.INVESTOR_RFI_PATH, ...investorRfi.createInvestorRfiMiddleware({ sendEmail, to: ADMIN_NOTIFY_EMAIL }));
 
 // List endpoint is lightweight — excludes base64 image/signature/ssn/long-text columns
 // that the table UI doesn't render. Detail endpoint below serves the full record.
@@ -10827,7 +10846,7 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 			</div>`;
 			// The name comes from the application, so the subject quotes it the way the
 			// success audit does: capped, on one line.
-			sendEmail("info@logisx.com", `Driver Accepted: ${auditText(fullName, 120)}`, adminDriverAcceptHtml);
+			if (ADMIN_NOTIFY_EMAIL) sendEmail(ADMIN_NOTIFY_EMAIL, `Driver Accepted: ${auditText(fullName, 120)}`, adminDriverAcceptHtml);
 			return;
 		}
 
@@ -11514,8 +11533,8 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 				</div>`
 			: "";
 
-		sendEmail(
-			"info@logisx.com",
+		if (ADMIN_NOTIFY_EMAIL) sendEmail(
+			ADMIN_NOTIFY_EMAIL,
 			`${failedDocs.length ? "ACTION NEEDED — " : ""}New Investor Application: ${legal_name}`,
 			docWarningHtml + paymentTermsHtml + adminHtml,
 			pdfAttachments,
@@ -14900,7 +14919,7 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 					<div style="font-size:11px;color:#94a3b8;line-height:1.6">LogisX Inc. | 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381 | USDOT# 4302683</div>
 				</div>
 			</div>`;
-			sendEmail("info@logisx.com", `Investor Accepted: ${fullName}`, adminAcceptHtml);
+			if (ADMIN_NOTIFY_EMAIL) sendEmail(ADMIN_NOTIFY_EMAIL, `Investor Accepted: ${fullName}`, adminAcceptHtml);
 			return;
 		}
 
@@ -15233,7 +15252,7 @@ async function checkAndCompleteOnboarding(userId, req = null) {
 				<div style="font-size:11px;color:#94a3b8;line-height:1.6">LogisX Inc. | 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381 | USDOT# 4302683</div>
 			</div>
 		</div>`;
-		sendEmail("info@logisx.com", `Driver Documents Signed: ${driverName}`, adminDocsHtml, pdfAttachments);
+		if (ADMIN_NOTIFY_EMAIL) sendEmail(ADMIN_NOTIFY_EMAIL, `Driver Documents Signed: ${driverName}`, adminDocsHtml, pdfAttachments);
 	}
 	// Fully onboarded if all signed AND drug test passed
 	if (allSigned && ob.drug_test_result === "pass") {
@@ -17737,7 +17756,7 @@ function abortAutogenRun(range, reason) {
 			insertDispatchNotification.run("invoices-autogen", title, body, JSON.stringify({ weekStart: range.weekStart, weekEnd: range.weekEnd, aborted: true }));
 			if (io) io.to("dispatch").emit("dispatch-notification", { type: "invoices-autogen", title, body });
 		} catch (e) { console.error("[invoice-autogen] abort alert notify failed:", e.message); }
-		const adminEmail = process.env.GMAIL_USER || "info@logisx.com";
+		const adminEmail = process.env.GMAIL_USER;
 		sendEmail(adminEmail, title, invoiceEmailHtml({ heading: "Weekly Invoices — Sheet Unreadable", bodyHtml: `<p style="margin:0;color:#b91c1c;line-height:1.6">${escHtml(body)}</p>`, ctaText: "Open Invoices", ctaHref: "https://app.logisx.com/invoices" }))
 			.catch((e) => console.error("[invoice-autogen] abort alert email failed:", e.message));
 	}
@@ -17904,7 +17923,7 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 			if (io) io.to("dispatch").emit("dispatch-notification", { type: "invoices-autogen", title, body: summary + detail });
 		} catch (e) { console.error("[invoice-autogen] notification failed:", e.message); }
 		try {
-			const adminEmail = process.env.GMAIL_USER || "info@logisx.com";
+			const adminEmail = process.env.GMAIL_USER;
 			const html = invoiceEmailHtml({
 				heading: needsAttention ? "Weekly Invoices — Action Needed" : "Weekly Invoices Generated",
 				bodyHtml: `
@@ -18258,7 +18277,7 @@ async function sendUndatedLoadDigest(loads, { range = null, held = 0 } = {}) {
 			ctaText: "Review Invoices",
 			ctaHref: "https://app.logisx.com/invoices",
 		});
-		emailed = (await sendEmail(process.env.GMAIL_USER || "info@logisx.com", `⚠️ ${title}`, html)) === true;
+		emailed = (await sendEmail(process.env.GMAIL_USER, `⚠️ ${title}`, html)) === true;
 	} catch (e) { console.error("[invoice-undated] email failed:", e && e.message); }
 	return { emailed, notified };
 }
@@ -22131,7 +22150,7 @@ app.put("/api/invoices/:id/submit", requireAuth, async (req, res) => {
 		// try/catch so any email failure never blocks the 200 response.
 		(async () => {
 			try {
-				const adminEmail = process.env.GMAIL_USER || "info@logisx.com";
+				const adminEmail = process.env.GMAIL_USER;
 				const pdfPath = path.join(DATA_DIR, "uploads", "invoices", invoice.pdf_file_name || "");
 				const attachments = invoice.pdf_file_name && fs.existsSync(pdfPath)
 					? [{ filename: invoice.pdf_file_name, path: pdfPath }]
@@ -43423,6 +43442,19 @@ function latestDraftNotes(loadId) {
 	}
 }
 
+// The broker AP inboxes an invoice draft is addressed to by default
+// (BISON_INVOICE_EMAIL, DEFAULT_INVOICE_EMAIL) have no default in code; see
+// INVOICE_TO_SETTINGS in lib/broker-invoice.js. Module scope, so a missing one
+// is logged once per process start and never per request.
+const MISSING_INVOICE_TO_SETTINGS = brokerInvoice.missingInvoiceToSettings();
+if (MISSING_INVOICE_TO_SETTINGS.length) {
+	console.warn(
+		`[invoice-draft] ⚠️ ${MISSING_INVOICE_TO_SETTINGS.join(" and ")} ${MISSING_INVOICE_TO_SETTINGS.length === 1 ? "is" : "are"} ` +
+		"not set to an email address — an invoice draft that would be addressed to that inbox is refused " +
+		"(503 INVOICE_RECIPIENT_UNCONFIGURED) unless its rate-con or the reviewer names the recipient.",
+	);
+}
+
 // ⚠️ THE GUARDS WERE ON THE WRONG ROUTE. This one had `requireRole` and nothing
 // else, while its own preview sibling below — which does, by its own header
 // comment, "zero Sheets, zero Drive, zero Gemini, zero DB writes" — carried a
@@ -43719,8 +43751,10 @@ app.post(
 			}
 
 			// Recipient: the rate-con's "email documents to" address wins over the
-			// hardcoded default (drives both the Gmail To: and the printed
-			// "Invoice To" block); falls back to Bison AP inbox / quickpay when absent.
+			// configured default (drives both the Gmail To: and the printed
+			// "Invoice To" block); falls back to BISON_INVOICE_EMAIL /
+			// DEFAULT_INVOICE_EMAIL when absent, and to "" when that setting is
+			// missing (refused below, step 6a-2, before anything is minted).
 			invoiceTo = brokerInvoice.resolveInvoiceTo({ ...brokerCtx, documentsEmail: rcFields.documentsEmail });
 
 			// The review-before-approve preview sends the recipient the dispatcher SAW
@@ -43879,6 +43913,24 @@ app.post(
 						(GEMINI_API_KEY ? "" : " (Rate-con AI extraction is not configured on this server.)"),
 					code: "INVOICE_REFS_REQUIRED",
 					details: { needsOrderNumber, needsPoNumber, rateconFound: !!(rateconBuffer && rateconBuffer.length) },
+				});
+			}
+
+			// 6a-2) A RECIPIENT. The default AP inboxes are settings with no default
+			//     in code (BISON_INVOICE_EMAIL, DEFAULT_INVOICE_EMAIL), so on a server
+			//     without the one this load needs, and with no rate-con address or
+			//     reviewer-typed recipient, To is empty. No draft is created with an
+			//     empty To: refused HERE, before nextInvoiceNumber() below, so nothing
+			//     is minted, rendered, drafted or recorded. The dryRun still answers
+			//     (with an empty recipient) so the review can collect one, exactly as
+			//     it collects a missing total.
+			if (!invoiceTo.email && !dryRun) {
+				const setting = isBison ? "BISON_INVOICE_EMAIL" : "DEFAULT_INVOICE_EMAIL";
+				return res.status(503).json({
+					error:
+						`No recipient for the invoice on load ${loadId}: this server has no ${isBison ? "Bison" : "default"} ` +
+						`invoice address configured (${setting}). Enter the recipient's email in the review, then approve.`,
+					code: "INVOICE_RECIPIENT_UNCONFIGURED",
 				});
 			}
 
