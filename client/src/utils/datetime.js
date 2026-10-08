@@ -283,10 +283,11 @@ export function sheetSortKey(v) {
  * the NEXT day in Manila, so a form there pre-filled a date the business has
  * not reached yet, onto a stored expense or load.
  */
-export function houstonToday() {
+export function houstonToday(now = Date.now()) {
+  // `now` (epoch ms or a Date) pins the moment, as appToday(now) does below.
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: HOUSTON, year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(new Date())
+  }).format(new Date(now))
 }
 
 /** True for a bare 'YYYY-MM-DD' (no time component). */
@@ -459,18 +460,22 @@ export function fmtArrivalClock(v, { weekday = false, fallback = null } = {}) {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_APP_TIME_ZONE = 'America/New_York'
+// An IANA region name or "UTC"; the same test as lib/app-time.js on the server.
+const APP_TIME_ZONE_RE = /^(?:UTC|[A-Za-z][A-Za-z_]*(?:\/[A-Za-z0-9_+-]+)+)$/
 let appZone = DEFAULT_APP_TIME_ZONE
 const DAY_MS = 24 * 60 * 60 * 1000
 const pad2 = (n) => String(n).padStart(2, '0')
 
 /**
- * Adopt the server's APP_TIMEZONE. Takes a non-empty IANA name this browser
- * accepts; anything else (missing, misspelled, or a zone this browser's Intl
- * data lacks) leaves the zone in use as it is. Never throws: it runs inside the
- * session check. Returns the zone in use afterwards.
+ * Adopt the server's APP_TIMEZONE. Takes an IANA region name ("America/New_York")
+ * or "UTC" that this browser accepts, the same shape lib/app-time.js accepts;
+ * anything else (missing, misspelled, an offset such as "-0400" or "EST" that
+ * never follows daylight time, or a zone this browser's Intl data lacks) leaves
+ * the zone in use as it is. Never throws: it runs inside the session check.
+ * Returns the zone in use afterwards.
  */
 export function setAppTimeZone(timeZone) {
-  if (typeof timeZone !== 'string' || timeZone === '') return appZone
+  if (typeof timeZone !== 'string' || !APP_TIME_ZONE_RE.test(timeZone)) return appZone
   try {
     new Intl.DateTimeFormat('en-US', { timeZone })
   } catch {
@@ -536,10 +541,11 @@ function utcYmd(ms) {
  *   appDayOf('2026-09-28')                 -> '2026-09-28'   (a calendar date is its own day, D1)
  *
  * Takes a Date, epoch ms, or a string carrying its zone. '' for anything else,
- * a bare wall clock ("2026-09-28 23:30:00") included: it has no instant to place.
+ * a bare wall clock ("2026-09-28 23:30:00") and a day that does not exist
+ * ('2026-02-30') included: neither has an instant to place.
  */
 export function appDayOf(v) {
-  if (typeof v === 'string' && isYmd(v)) return v.trim()
+  if (typeof v === 'string' && isYmd(v)) return Number.isNaN(ymdUtcMs(v)) ? '' : v.trim()
   const ms = instantMs(v)
   return Number.isNaN(ms) ? '' : dayIn(ms, appZone)
 }

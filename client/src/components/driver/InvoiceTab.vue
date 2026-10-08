@@ -84,7 +84,7 @@ import { ref, computed } from 'vue'
 import { Popup as VanPopup } from 'vant'
 import { useDriverStore } from '../../stores/driver'
 import { useToast } from '../../composables/useToast'
-import { appToday, satFriWeekOf, shiftYmd } from '../../utils/datetime'
+import { houstonToday, satFriWeekOf, shiftYmd } from '../../utils/datetime'
 import InvoiceCard from './InvoiceCard.vue'
 
 const driverStore = useDriverStore()
@@ -100,11 +100,13 @@ const selectedInvoice = ref(null)
 const weekOffset = ref(0)
 
 // The Saturday-to-Friday week `weekOffset` weeks back, as 'YYYY-MM-DD' keys,
-// counted from today in APP_TIMEZONE (utils/datetime.js), never the phone's
-// clock: weekEnd is the week POST /api/invoices/generate bills, so a phone in
-// another zone must not roll to next Saturday while the business is still on
-// Friday. Calendar arithmetic only; no Date ever holds these days.
-const weekRange = computed(() => satFriWeekOf(shiftYmd(appToday(), -7 * weekOffset.value)))
+// counted from today in HOUSTON, never the phone's clock: weekEnd is the week
+// POST /api/invoices/generate bills, so it must be the week the server's own
+// "now" (getWeekRange()), the Friday 6:30 PM cutoff below and the Friday batch
+// all count in, and those are Houston days. A phone in another zone must not
+// roll to next Saturday while the business is still on Friday. Calendar
+// arithmetic only; no Date ever holds these days.
+const weekRange = computed(() => satFriWeekOf(shiftYmd(houstonToday(), -7 * weekOffset.value)))
 
 const weekStart = computed(() => weekRange.value.start)
 const weekEnd = computed(() => weekRange.value.end)

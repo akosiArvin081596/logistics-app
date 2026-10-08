@@ -385,10 +385,10 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 	const requireAuth = new Function(`${REQUIRE_AUTH_SRC}\nreturn requireAuth;`)();
 	const passThrough = (req, res, next) => next();
 
-	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", sources.login)(
-		app, passThrough, db, bcryptImpl, stampLastLogin, helpers.disconnectSessionSockets);
-	new Function("app", "setupLimiter", "db", "bcrypt", "usersEverExisted", "SETUP_RECOVERY_TOKEN", "safeEqual", "logAudit", "stampLastLogin", "disconnectSessionSockets", sources.setup)(
-		app, passThrough, db, bcryptImpl, () => false, "", () => false, logAudit, stampLastLogin, helpers.disconnectSessionSockets);
+	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", sources.login)(
+		app, passThrough, db, bcryptImpl, stampLastLogin, helpers.disconnectSessionSockets, "America/New_York");
+	new Function("app", "setupLimiter", "db", "bcrypt", "usersEverExisted", "SETUP_RECOVERY_TOKEN", "safeEqual", "logAudit", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", sources.setup)(
+		app, passThrough, db, bcryptImpl, () => false, "", () => false, logAudit, stampLastLogin, helpers.disconnectSessionSockets, "America/New_York");
 	new Function("app", "disconnectSessionSockets", sources.logout)(app, helpers.disconnectSessionSockets);
 	// The route also hands the browser APP_TIMEZONE (lib/app-time.js).
 	new Function("app", "APP_TIMEZONE", SESSION_ROUTE_SRC)(app, "America/New_York");

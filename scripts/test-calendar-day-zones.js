@@ -134,6 +134,18 @@ eq(appTime.resolveAppTimeZone(""), "America/New_York", "APP_TIMEZONE unset -> Am
 eq(appTime.resolveAppTimeZone(" America/Chicago "), "America/Chicago", "APP_TIMEZONE names a zone -> that zone");
 eq(appTime.resolveAppTimeZone("Mars/Olympus", (m) => warnings.push(m)), "America/New_York", "APP_TIMEZONE names no zone -> the default");
 eq(warnings.length, 1, "...with one warning");
+// Intl also takes offsets and abbreviations, which never follow daylight time
+// and which a browser may refuse; only an IANA region name or "UTC" is a zone here.
+eq(["-0400", "+05:00", "EST", "utc", "GMT"].map((v) => appTime.resolveAppTimeZone(v, (m) => warnings.push(m))),
+	Array(5).fill("America/New_York"), "an offset or an abbreviation -> the default");
+eq(warnings.length, 6, "...each with one warning");
+eq([appTime.resolveAppTimeZone("UTC"), appTime.resolveAppTimeZone("America/Argentina/Buenos_Aires")],
+	["UTC", "America/Argentina/Buenos_Aires"], "UTC and a three-part IANA name are zones");
+// A sign-in from a fresh /login page has run no session check, so login and
+// setup hand the browser the same zone GET /api/auth/session does.
+const routeSrc = (marker) => { const a = SRC.indexOf(marker); return a < 0 ? "" : SRC.slice(a, SRC.indexOf("\n});", a)); };
+eq(["app.get(\"/api/auth/session\"", "app.post(\"/api/auth/login\"", "app.post(\"/api/auth/setup\""]
+	.map((m) => (routeSrc(m).match(/appTimeZone: APP_TIMEZONE/g) || []).length), [2, 1, 1], "session (both answers), login and setup return appTimeZone");
 const NY = appTime.resolveAppTimeZone(undefined);
 const inNY = (iso) => appTime.dayInZone(new Date(iso), NY);
 // The Friday batch that issued INV-SK-2026W39-01 ran at 00:00:48 UTC on Oct 3,

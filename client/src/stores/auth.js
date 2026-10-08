@@ -455,6 +455,8 @@ export const useAuthStore = defineStore('auth', {
 
     async login(username, password) {
       const data = await api.post('/api/auth/login', { username, password })
+      // A fresh /login page ran no session check, so the zone comes from here.
+      if (data && typeof data === 'object') setAppTimeZone(data.appTimeZone)
       // The server has replaced this browser's session and ended the live-update
       // socket opened on it. Drop this tab's socket and the room name it
       // registered too, so the next page opens a fresh one as the person who just
@@ -474,6 +476,7 @@ export const useAuthStore = defineStore('auth', {
 
     async setup(username, password, email) {
       const data = await api.post('/api/auth/setup', { username, password, email })
+      if (data && typeof data === 'object') setAppTimeZone(data.appTimeZone) // as in login()
       useSocket().disconnect() // as in login(): setup replaced this browser's session
       sessionGen++
       stampEpoch()

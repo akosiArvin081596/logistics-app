@@ -53,6 +53,21 @@ const NEEDED = [
   'appDayStartIso', 'appDayEndIso', 'shiftYmd', 'shiftYm', 'satFriWeekOf',
 ]
 
+// The server's getWeekRange(), lifted from server.js as it ships (it is
+// self-contained), so the driver tab's week can be compared with the week the
+// server itself counts in.
+function serverGetWeekRange() {
+  const src = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8')
+  const at = src.indexOf('function getWeekRange(referenceDate)')
+  if (at < 0 || src.indexOf('function getWeekRange(', at + 1) >= 0) throw new Error('server.js must define getWeekRange() exactly once')
+  let i = src.indexOf('{', at)
+  for (let depth = 0; i < src.length; i++) {
+    if (src[i] === '{') depth++
+    else if (src[i] === '}' && --depth === 0) break
+  }
+  return new Function(`${src.slice(at, i + 1)}\nreturn getWeekRange`)()
+}
+
 // ══ The corpus: runs inside each child ═══════════════════════════════════════
 async function corpus() {
   const dt = await import(DATETIME_URL)
@@ -101,7 +116,8 @@ async function corpus() {
     ['2026-10', '2027-01', '2025-12', '2026-03', '2027-02', '2026-02'])
   check('2.12 shiftYm refuses what it cannot step',
     [dt.shiftYm('2026-13', 1), dt.shiftYm('2026-00', 1), dt.shiftYm('2026-09-28', 1), dt.shiftYm('', 0), dt.shiftYm('2026-09', Infinity)], ['', '', '', '', ''])
-  check('2.13 a calendar date is its own day', [dt.appDayOf('2026-09-28'), dt.appDayOf(' 2026-09-28 ')], ['2026-09-28', '2026-09-28'])
+  check('2.13 a calendar date is its own day, and a day that does not exist is none',
+    [dt.appDayOf('2026-09-28'), dt.appDayOf(' 2026-09-28 '), dt.appDayOf('2026-02-30'), dt.appDayOf('2026-13-01')], ['2026-09-28', '2026-09-28', '', ''])
   check('2.14 a calendar date shows as itself, Monday Sep 28 everywhere',
     [dt.fmtAppDate('2026-09-28'), dt.fmtAppDate('2026-09-28', LONG), dt.fmtAppDate('2026-09-01', { month: 'short', year: 'numeric' })],
     ['Sep 28, 2026', 'Monday, September 28, 2026', 'Sep 2026'])
@@ -166,6 +182,12 @@ async function corpus() {
   check('6.5 anything the browser does not accept keeps the zone in use',
     ['Not/AZone', '', ' America/Denver ', null, undefined, 42, {}, ['America/Denver']].map((v) => [dt.setAppTimeZone(v), dt.appTimeZone()]),
     Array(8).fill(['America/Chicago', 'America/Chicago']))
+  check('6.5b an offset or an abbreviation (no daylight time) is not a zone name either',
+    ['-0400', '+05:00', 'EST', 'utc', 'GMT'].map((v) => dt.setAppTimeZone(v)), Array(5).fill('America/Chicago'))
+  check('6.5c "UTC" is', [dt.setAppTimeZone('UTC'), dt.appDayOf('2026-09-29T03:30:00Z'), dt.setAppTimeZone('America/Chicago')],
+    ['UTC', '2026-09-29', 'America/Chicago'])
+  check('6.5d houstonToday(now) is the Houston day of a pinned instant, whatever the setting',
+    [dt.houstonToday(at('2026-10-03T04:30:00Z')), dt.houstonToday(new Date('2026-10-03T05:30:00Z'))], ['2026-10-02', '2026-10-03'])
   check('6.6 the setting decides, whatever the zone (Manila)', [dt.setAppTimeZone('Asia/Manila'), dt.appDayOf('2026-09-28T23:30:00-04:00')], ['Asia/Manila', '2026-09-29'])
   check('6.7 ...and Houston pins stay Houston', [dt.fmtTimestamp('2026-08-04T13:05:07Z'), dt.fmtYmd('2026-09-28')], ['Aug 4, 2026, 8:05 AM CDT', 'Sep 28, 2026'])
   dt.setAppTimeZone('America/Havana') // its DST skips midnight itself: 00:00 -> 01:00
@@ -180,20 +202,42 @@ async function corpus() {
   check('6.10 back to the default', dt.setAppTimeZone('America/New_York'), 'America/New_York')
 
   // ── 7. The fixed screens, as each one now computes ───────────────────────────
-  // InvoiceTab.vue: weekRange = satFriWeekOf(shiftYmd(appToday(), -7 * weekOffset)).
-  const invoiceWeek = (now, back) => dt.satFriWeekOf(dt.shiftYmd(dt.appToday(at(now)), -7 * back))
+  // InvoiceTab.vue: weekRange = satFriWeekOf(shiftYmd(houstonToday(), -7 * weekOffset)).
+  // The week counts in Houston, like the server's own "now" week, the Friday
+  // 6:30 PM cutoff and the Friday batch it has to agree with.
+  const invoiceWeek = (now, back) => dt.satFriWeekOf(dt.shiftYmd(dt.houstonToday(at(now)), -7 * back))
   check('7.1 invoice week at Fri 23:30 EDT (Saturday in Manila and UTC): this week and last',
     [invoiceWeek('2026-10-03T03:30:00Z', 0), invoiceWeek('2026-10-03T03:30:00Z', 1)],
     [WEEK_0926, { start: '2026-09-19', end: '2026-09-25' }])
+  check('7.1b invoice week at Fri 23:30 CDT (already Saturday in New York): still this week',
+    invoiceWeek('2026-10-03T04:30:00Z', 0), WEEK_0926)
+  // The tab's week and the server's own "now" week (getWeekRange() with an
+  // instant, lifted from server.js) agree at every quarter hour across Friday
+  // night into Saturday, in summer time and on both sides of each switch.
+  const serverWeekAt = serverGetWeekRange()
+  const seams = ['2026-10-02', '2026-10-30', '2026-11-06', '2027-03-12', '2027-03-19']
+  const disagree = []
+  for (const friday of seams) {
+    const from = Date.parse(`${friday}T12:00:00Z`)
+    for (let t = from; t < from + 30 * 3600 * 1000; t += 15 * 60 * 1000) {
+      const tab = dt.satFriWeekOf(dt.houstonToday(t))
+      const srv = serverWeekAt(new Date(t))
+      if (tab.start !== srv.weekStart || tab.end !== srv.weekEnd) disagree.push(new Date(t).toISOString())
+    }
+  }
+  check('7.1c the tab\'s week is the server\'s week at every quarter hour of five Friday-to-Saturday seams', disagree, [])
   check('7.2 invoice week on Thu Oct 8: 0, 1 and 6 weeks back',
     [0, 1, 6].map((k) => invoiceWeek('2026-10-08T16:00:00Z', k)),
     [{ start: '2026-10-03', end: '2026-10-09' }, WEEK_0926, { start: '2026-08-22', end: '2026-08-28' }])
   check('7.3 invoice week at Fri 23:30 EST, after the clocks went back',
     [invoiceWeek('2026-11-07T04:30:00Z', 0), invoiceWeek('2026-11-07T04:30:00Z', 1)],
     [{ start: '2026-10-31', end: '2026-11-06' }, { start: '2026-10-24', end: '2026-10-30' }])
-  // EarningsSection.vue "+ Add day": today when it is in the selected month, else the 1st.
-  const addDay = (now, min, max) => { const t = dt.appToday(at(now)); return t >= min && t <= max ? t : min }
+  // EarningsSection.vue "+ Add day": today (Houston, a pay day) when it is in the
+  // selected month, else the 1st.
+  const addDay = (now, min, max) => { const t = dt.houstonToday(at(now)); return t >= min && t <= max ? t : min }
   check('7.4 "+ Add day" at 23:30 EDT on Sep 30 defaults to Sep 30', addDay('2026-10-01T03:30:00Z', '2026-09-01', '2026-09-30'), '2026-09-30')
+  check('7.4b "+ Add day" at 23:30 CDT on Sep 30 (Oct 1 in New York) still defaults to Sep 30',
+    addDay('2026-10-01T04:30:00Z', '2026-09-01', '2026-09-30'), '2026-09-30')
   // ExpensesTab.vue IFTA range: the From day's start to the To day's end.
   check('7.5 IFTA range for September', [dt.appDayStartIso('2026-09-01'), dt.appDayEndIso('2026-09-30')], ['2026-09-01T04:00:00.000Z', '2026-10-01T03:59:59.999Z'])
   // stores/driver.js date filter: the pickup cell read as a calendar date first.
@@ -364,11 +408,12 @@ if (done.length === ZONES.length) {
 // `has` must appear and `gone` must not; `imports` must be named in the file's
 // import from utils/datetime. pastDeadline stays a Houston rule on purpose.
 const SITES = [
-  ['client/src/components/driver/InvoiceTab.vue', ['appToday', 'satFriWeekOf', 'shiftYmd'],
-    ['satFriWeekOf(shiftYmd(appToday(), -7 * weekOffset.value))', "timeZone: 'America/Chicago'"],
-    ['now.getTime() - weekOffset.value * 7 * 86400000', 'fmtLocalYMD']],
-  ['client/src/components/investor/EarningsSection.vue', ['appToday'], ['const todayStr = appToday()'],
-    ['${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}']],
+  ['client/src/components/driver/InvoiceTab.vue', ['houstonToday', 'satFriWeekOf', 'shiftYmd'],
+    ['satFriWeekOf(shiftYmd(houstonToday(), -7 * weekOffset.value))', "timeZone: 'America/Chicago'"],
+    ['now.getTime() - weekOffset.value * 7 * 86400000', 'fmtLocalYMD', 'appToday()']],
+  ['client/src/components/investor/EarningsSection.vue', ['houstonToday'], ['const todayStr = houstonToday()'],
+    ['${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}', 'appToday()']],
+  ['client/src/components/invoices/PaymentReportDialog.vue', ['appDayOf', 'fmtYmd'], ['fmtYmd(appDayOf(inv.paid_at))'], ['fmtYmd(inv.paid_at)']],
   ['client/src/components/dashboard/ExpensesTab.vue', ['appDayStartIso', 'appDayEndIso'],
     ['appDayStartIso(iftaStart.value)', 'appDayEndIso(iftaEnd.value)'],
     ["new Date(iftaStart.value + 'T00:00:00')", "new Date(iftaEnd.value + 'T23:59:59')"]],
@@ -411,6 +456,13 @@ console.log(`\nFixed sites call the helpers: ${sitesOk}/${SITES.length} files`)
   const at = auth.indexOf('async function probeSession(')
   const body = at < 0 ? '' : auth.slice(at, auth.indexOf('\n}\n', at))
   if (!body.includes('setAppTimeZone(data.appTimeZone)')) fail('stores/auth.js probeSession() must pass the answer\'s appTimeZone to setAppTimeZone()')
+  // A fresh /login page runs no session check, so login() and setup() take the
+  // zone from their own answers (both routes return appTimeZone).
+  for (const fn of ['async login(', 'async setup(']) {
+    const from = auth.indexOf(fn)
+    const fnBody = from < 0 ? '' : auth.slice(from, auth.indexOf('\n    },', from))
+    if (!fnBody.includes('setAppTimeZone(data.appTimeZone)')) fail(`stores/auth.js ${fn}) must pass its answer's appTimeZone to setAppTimeZone()`)
+  }
 }
 
 if (failed) {

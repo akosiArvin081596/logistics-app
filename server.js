@@ -22838,7 +22838,9 @@ app.post("/api/auth/setup", setupLimiter, async (req, res) => {
 				return res.status(500).json({ error: "Administrator created, but the session could not be started. Please log in." });
 			}
 			req.session.user = userSnapshot;
-			req.session.save(() => res.json({ success: true, role: "Super Admin" }));
+			// appTimeZone: the same APP_TIMEZONE GET /api/auth/session hands over, for
+			// a browser that signed in on a fresh page without a session check.
+			req.session.save(() => res.json({ success: true, role: "Super Admin", appTimeZone: APP_TIMEZONE }));
 		});
 	} catch (error) {
 		console.error("Error during setup:", error.message);
@@ -22948,6 +22950,9 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 				fullName: current.full_name || "",
 				mustChangePassword: !!current.must_change_password,
 			},
+			// The same APP_TIMEZONE GET /api/auth/session hands over: a sign-in from
+			// a fresh /login page has not run a session check yet.
+			appTimeZone: APP_TIMEZONE,
 		});
 	} catch (error) {
 		// Through refuse(), so an unexpected throw after rotation (the re-read,
@@ -58553,9 +58558,10 @@ app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher")
 		// The client asked "what are we spending on an average week"; the answer
 		// existed only as month-spend / (elapsed days / 7) inside the Financials
 		// month modal, which is Super Admin only and is not a real week.
-		// ⚠️ getWeekRange() parses a bare 'YYYY-MM-DD' as UTC midnight and then
-		// shifts it into the previous Central day, so a Saturday resolves to the
-		// week BEFORE the one it starts. Anchor at midday first.
+		// getWeekRange() reads a bare 'YYYY-MM-DD' as its own calendar day (#442);
+		// before that it read UTC midnight, so a Saturday resolved to the week
+		// before. The midday anchor below takes its instant path and lands on the
+		// same Houston day either way.
 		const weekly = {};
 		for (const e of fuelExpenses) {
 			const day = String(e.date || "").slice(0, 10);
@@ -59486,15 +59492,12 @@ app.get("/api/analytics/mileage",
 		const truckById = new Map(trucks.map(t => [t.id, t]));
 		const truckOfRow = (r) => truckById.get(devices.truckForVehicleOnDay(r.vid, r.local_day)) || null;
 
-		// ⚠️ ANCHOR AT MIDDAY-UTC BEFORE HANDING A BARE DATE TO getWeekRange().
-		// It does `new Date(str)`, which parses 'YYYY-MM-DD' as UTC MIDNIGHT, then
-		// converts to America/Chicago — moving it to 19:00 the PREVIOUS day. A
-		// Saturday therefore reads as a Friday and resolves to the week BEFORE the
-		// one it starts. The existing invoice callers pass a Friday week-END, where
-		// the same shift lands on a Thursday inside the same Sat-Fri week and is
-		// harmless, which is why this has never bitten. Passing a week START, as
-		// this route does, is what exposes it. T12:00:00Z is far enough from both
-		// midnights that no US zone can cross a day boundary.
+		// getWeekRange() now reads a bare 'YYYY-MM-DD' as its own calendar day
+		// (#442). It used to parse one as UTC MIDNIGHT and convert to
+		// America/Chicago, 19:00 the PREVIOUS day, so a Saturday resolved to the
+		// week BEFORE the one it starts; this route passes week STARTS, which is
+		// why it anchors at T12:00:00Z. The anchor takes the instant path and lands
+		// on the same Houston day, far from both midnights in every US zone.
 		const weekRangeOf = (day) => getWeekRange(String(day).slice(0, 10) + "T12:00:00Z");
 		// week key = the Sat-Fri billing week this day falls in, so miles line up
 		// with the invoice that pays for them.
