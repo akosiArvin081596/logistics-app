@@ -4,6 +4,7 @@ import { defineStore } from 'pinia'
 // reason lib/payoutPeriod.js imports './monthLabel.js'.
 import { useApi } from '../composables/useApi.js'
 import { setSocketOwner, useSocket } from '../composables/useSocket.js'
+import { setAppTimeZone } from '../utils/datetime.js'
 import {
   ACTION,
   BACKGROUND,
@@ -201,9 +202,14 @@ function notifyResolved() {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 // One GET /api/auth/session. Never throws: the answer is data, and so is its absence.
+// Any answer, signed in or not, may carry APP_TIMEZONE (`appTimeZone`), the zone
+// for "today" and dates (utils/datetime.js). setAppTimeZone() never throws and
+// keeps the zone in use when the value is missing or one this browser doesn't know.
 async function probeSession(timeout) {
   try {
-    return { data: await api.get('/api/auth/session', { timeout }) }
+    const data = await api.get('/api/auth/session', { timeout })
+    if (data && typeof data === 'object') setAppTimeZone(data.appTimeZone)
+    return { data }
   } catch (error) {
     return { error }
   }
@@ -449,6 +455,8 @@ export const useAuthStore = defineStore('auth', {
 
     async login(username, password) {
       const data = await api.post('/api/auth/login', { username, password })
+      // A fresh /login page ran no session check, so the zone comes from here.
+      if (data && typeof data === 'object') setAppTimeZone(data.appTimeZone)
       // The server has replaced this browser's session and ended the live-update
       // socket opened on it. Drop this tab's socket and the room name it
       // registered too, so the next page opens a fresh one as the person who just
@@ -468,6 +476,7 @@ export const useAuthStore = defineStore('auth', {
 
     async setup(username, password, email) {
       const data = await api.post('/api/auth/setup', { username, password, email })
+      if (data && typeof data === 'object') setAppTimeZone(data.appTimeZone) // as in login()
       useSocket().disconnect() // as in login(): setup replaced this browser's session
       sessionGen++
       stampEpoch()

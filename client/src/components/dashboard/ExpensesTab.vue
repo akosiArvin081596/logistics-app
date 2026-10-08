@@ -1646,7 +1646,7 @@ import BulkReceiptScan from './expenses/BulkReceiptScan.vue'
 import GallonsRecoveryPanel from './expenses/GallonsRecoveryPanel.vue'
 import { US_STATES } from '../../utils/usStates'
 import { compressImage, readFileAsDataURL } from '../../lib/imageUtils'
-import { fmtTimestamp, fmtYmd, houstonToday, parseYmdLocal } from '../../utils/datetime'
+import { appDayEndIso, appDayStartIso, fmtTimestamp, fmtYmd, houstonToday, parseYmdLocal } from '../../utils/datetime'
 // ⚠️ Replaces this file's own `monthLabel`, which was `new Date(y, m - 1, 1)`
 // and SILENTLY ROLLED OVER: a period of '2026-13' told the filer their receipt
 // was booked to "January 2027" and '2026-00' to "December 2025" — a plausible
@@ -3746,6 +3746,18 @@ const iftaStart = ref('2026-01-01')
 // tomorrow, which defaulted this tax-report range end to a day that hasn't
 // happened yet.
 const iftaEnd = ref(houstonToday())
+// The From and To days as the instants the IFTA routes compare ELD pings with:
+// the start of the From day to the last millisecond of the To day, both in
+// APP_TIMEZONE (utils/datetime.js), so every viewer asks for the same range.
+// They were the VIEWER's midnights, which from Manila moved the whole range half
+// a day earlier. A cleared box throws, as the toISOString() this replaced did,
+// and the caller's catch leaves the figures as they were.
+function iftaRange() {
+  const start = appDayStartIso(iftaStart.value)
+  const end = appDayEndIso(iftaEnd.value)
+  if (!start || !end) throw new RangeError('IFTA range needs a From and a To date')
+  return { start, end }
+}
 const fees = ref({})
 const feeSubmitting = ref(false)
 const feeForm = reactive({
@@ -3799,8 +3811,7 @@ async function openStateDetail(truck, stateRow) {
     const params = new URLSearchParams({
       truck_id: truck.truckId,
       state: stateRow.state,
-      start: new Date(iftaStart.value + 'T00:00:00').toISOString(),
-      end: new Date(iftaEnd.value + 'T23:59:59').toISOString(),
+      ...iftaRange(),
     })
     const data = await api.get('/api/compliance/ifta/state-detail?' + params.toString())
     stateDetail.value = { ...stateDetail.value, ...data, loading: false }
@@ -3832,10 +3843,7 @@ async function loadMaintenance() {
 async function loadIfta() {
   iftaLoading.value = true
   try {
-    const params = new URLSearchParams({
-      start: new Date(iftaStart.value + 'T00:00:00').toISOString(),
-      end: new Date(iftaEnd.value + 'T23:59:59').toISOString(),
-    })
+    const params = new URLSearchParams(iftaRange())
     const [iftaData, feesData] = await Promise.all([
       api.get('/api/compliance/ifta?' + params.toString()),
       api.get('/api/compliance/fees'),

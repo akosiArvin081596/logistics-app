@@ -221,7 +221,11 @@ export const useDriverStore = defineStore('driver', {
             const raw = l[dateCol]
             if (!raw) return false
             const cleaned = raw.replace(/(\d{1,2}:\d{2})\s*-\s*\d{1,2}:\d{2}/, '$1').trim()
-            const d = new Date(cleaned)
+            // The cell side of the same trap: a bare '2026-09-28' pickup is UTC
+            // midnight to new Date(), the evening before in every US zone, so it
+            // fell outside a filter starting on Sep 28. Read it as the calendar
+            // day it is, like the bounds (and LoadCard.vue).
+            const d = parseYmdLocal(cleaned) || new Date(cleaned)
             if (isNaN(d)) return false
             if (from && d < from) return false
             if (to && d > to) return false

@@ -182,6 +182,8 @@ async function runReport(handlerSrc, { session, query = {}, rangeMode = "whole-m
 	const deps = {
 		db,
 		normalizeLoadId,
+		// The report prints "today" in APP_TIMEZONE (lib/app-time.js).
+		appTime: require("../lib/app-time"), APP_TIMEZONE: "America/New_York",
 		SPREADSHEET_ID: "fixture-sheet",
 		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: [HEADERS, ...LOADS] } }) } } }),
 		getCarrierDBFromSQLite: () => ({ headers: ["Driver", "Carrier"], data: [] }),

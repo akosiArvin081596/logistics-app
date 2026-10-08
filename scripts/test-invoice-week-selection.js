@@ -65,6 +65,7 @@ const path = require("path");
 const Database = require("better-sqlite3");
 const { normalizeLoadId } = require("../lib/ratecon-load");
 const eldMiles = require("../lib/eld-miles");
+const appTime = require("../lib/app-time");
 
 const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 
@@ -174,6 +175,8 @@ function buildWorld(db, opts = {}) {
 		normalizeLoadId,
 		localDayInTz: eldMiles.localDayInTz,
 		usTzForLongitude: eldMiles.usTzForLongitude,
+		// The invoice routes print "today" in APP_TIMEZONE (lib/app-time.js).
+		appTime, APP_TIMEZONE: appTime.resolveAppTimeZone(undefined),
 		SPREADSHEET_ID: "test-sheet",
 		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: sheet.values } }) } } }),
 		renderPolicy: async (templateName, data) => { rendered.push({ templateName, data }); return Buffer.from("%PDF-stub"); },

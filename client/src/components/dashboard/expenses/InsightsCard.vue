@@ -62,6 +62,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { useApi } from '../../../composables/useApi'
+import { appDayOf, appToday, fmtAppDate } from '../../../utils/datetime'
 // Shared dev fixture (shape mirrors the frozen GET /api/expenses/ai/insights 200
 // contract: { insights: [{ title<=80, detail<=240, severity }], generatedAt, cached }).
 import { INSIGHTS_FIXTURE } from './fixtures'
@@ -96,10 +97,10 @@ const insights = computed(() => ((data.value && data.value.insights) || []).slic
 const updatedLabel = computed(() => {
   if (!data.value) return ''
   if (!data.value.cached) return 'Updated just now'
-  const gen = data.value.generatedAt ? new Date(data.value.generatedAt) : null
-  if (gen && !Number.isNaN(gen.getTime()) && gen.toDateString() !== new Date().toDateString()) {
-    return `Updated ${gen.toLocaleDateString()}`
-  }
+  // "Today" is the app's day (APP_TIMEZONE, utils/datetime.js), so everyone
+  // looking at the same cached insights reads the same caption.
+  const genDay = appDayOf(data.value.generatedAt)
+  if (genDay && genDay !== appToday()) return `Updated ${fmtAppDate(genDay)}`
   return 'Updated earlier today'
 })
 
