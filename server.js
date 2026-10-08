@@ -122,7 +122,8 @@ const { csvRows } = require("./lib/csv");
 const piiMask = require("./lib/pii-mask");
 // Boundary checks shared by every unauthenticated form route (email, vehicles).
 const publicFormInput = require("./lib/public-form-input");
-// POST /api/public/investor-rfi: the website's investor Request for Information.
+// POST /api/public/investor-rfi: the website's investor Request for Information
+// and its "Schedule a call" form (kind: "call").
 const investorRfi = require("./lib/investor-rfi");
 const w9Input = require("./lib/w9-input");
 
@@ -10427,15 +10428,18 @@ app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 });
 
 // ============================================================
-// PUBLIC: Investor Request for Information
+// PUBLIC: Investor Request for Information and call requests
 // ============================================================
 // The "Invest in LogisX" page on logisx.com posts here through a same-origin
-// path on its own nginx vhost. Origin allowlist (logisx.com and its staging
-// site), a rate limit with publicFormLimiter's numbers plus a daily cap on the
-// emails it sends, the public-form-input checks, a honeypot, and one email to
-// info@logisx.com with Reply-To the
-// submitter. No database write and no submitter data in logs. All of it lives
-// in lib/investor-rfi.js; scripts/test-investor-rfi.js drives this middleware.
+// path on its own nginx vhost: its Request for Information form, and its
+// "Schedule a call" form with kind: "call" (a phone, a date, a time window, a
+// time zone and a topic; same checks otherwise, its own email). Origin
+// allowlist (logisx.com and its staging site), a rate limit with
+// publicFormLimiter's numbers plus a daily cap on the emails it sends, both
+// shared by the two forms, the public-form-input checks, a honeypot, and one
+// email to info@logisx.com with Reply-To the submitter. No database write and
+// no submitter data in logs. All of it lives in lib/investor-rfi.js;
+// scripts/test-investor-rfi.js drives this middleware.
 app.post(investorRfi.INVESTOR_RFI_PATH, ...investorRfi.createInvestorRfiMiddleware({ sendEmail }));
 
 // List endpoint is lightweight — excludes base64 image/signature/ssn/long-text columns
